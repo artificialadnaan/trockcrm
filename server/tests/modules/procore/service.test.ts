@@ -80,6 +80,42 @@ describe("Procore Sync Service", () => {
       const shouldSkip = deal.procoreProjectId != null;
       expect(shouldSkip).toBe(false);
     });
+
+    it("createProcoreProject returns before calling Procore when procore_project_id already exists", async () => {
+      process.env.PROCORE_COMPANY_ID = "company-1";
+      const { createProcoreProject } = await import("../../../src/modules/procore/sync-service.js");
+      const { procoreClient } = await import("../../../src/lib/procore-client.js");
+      const tenantDb = {
+        select() {
+          return {
+            from() {
+              return {
+                where() {
+                  return {
+                    limit() {
+                      return Promise.resolve([
+                        {
+                          id: "deal-1",
+                          name: "Linked Deal",
+                          procoreProjectId: 12345,
+                        },
+                      ]);
+                    },
+                  };
+                },
+              };
+            },
+          };
+        },
+        update() {
+          throw new Error("update should not be called when Procore project already exists");
+        },
+      };
+
+      await createProcoreProject(tenantDb as never, "deal-1", "office-1");
+
+      expect(procoreClient.post).not.toHaveBeenCalled();
+    });
   });
 
   describe("Stage Mapping Logic", () => {

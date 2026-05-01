@@ -214,6 +214,25 @@ export function registerAllJobs() {
   });
 
   // Domain event handlers for deal lifecycle
+  domainEventHandlers.set("deal.contract.signed", async (payload, officeId) => {
+    const { pool: procorePool } = await import("../db.js");
+    const resolvedOfficeId = payload.officeId ?? officeId;
+    if (!payload.dealId || !resolvedOfficeId) return;
+
+    await procorePool.query(
+      `INSERT INTO public.job_queue (job_type, payload, office_id, status, run_after)
+       VALUES ('procore_sync', $1::jsonb, $2, 'pending', NOW())`,
+      [
+        JSON.stringify({
+          action: "create_project",
+          dealId: payload.dealId,
+          officeId: resolvedOfficeId,
+        }),
+        resolvedOfficeId,
+      ]
+    );
+  });
+
   domainEventHandlers.set("deal.won", async (payload, officeId) => {
     console.log(`[Worker] Deal won: ${payload.dealNumber} (${payload.dealName}) - amount: ${payload.awardedAmount}`);
 

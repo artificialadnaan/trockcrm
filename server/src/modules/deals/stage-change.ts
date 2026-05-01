@@ -11,7 +11,10 @@ import {
 import type * as schema from "@trock-crm/shared/schema";
 import { AppError } from "../../middleware/error-handler.js";
 import { DOMAIN_EVENTS } from "../../events/types.js";
-import { isOpportunityRfpEventEnabled } from "../../config/feature-flags.js";
+import {
+  isContractStageSelectionEnabled,
+  isOpportunityRfpEventEnabled,
+} from "../../config/feature-flags.js";
 import { validateStageGate } from "./stage-gate.js";
 import type { DealOpportunityEnteredEventPayload, UserRole } from "@trock-crm/shared/types";
 import { createStageTimers } from "./timer-service.js";
@@ -36,7 +39,17 @@ function isEstimatingBoundaryStageSlug(stageSlug: string, workflowRoute: "normal
 function toCanonicalTerminalOutcomeSlug(
   stageSlug: string,
   workflowRoute: "normal" | "service"
-): "sent_to_production" | "service_sent_to_production" | "production_lost" | "service_lost" | null {
+):
+  | "sent_to_production"
+  | "service_sent_to_production"
+  | "production_lost"
+  | "service_lost"
+  | "won"
+  | "lost"
+  | null {
+  if (stageSlug === "won" || stageSlug === "lost") {
+    return stageSlug;
+  }
   if (stageSlug === "sent_to_production" || stageSlug === "service_sent_to_production") {
     return stageSlug;
   }
@@ -54,14 +67,19 @@ function toCanonicalTerminalOutcomeSlug(
 
 function isLostOutcomeStage(stageSlug: string, workflowRoute: "normal" | "service") {
   const canonicalOutcomeSlug = toCanonicalTerminalOutcomeSlug(stageSlug, workflowRoute);
-  return canonicalOutcomeSlug === "production_lost" || canonicalOutcomeSlug === "service_lost";
+  return (
+    canonicalOutcomeSlug === "production_lost" ||
+    canonicalOutcomeSlug === "service_lost" ||
+    canonicalOutcomeSlug === "lost"
+  );
 }
 
 function isWonOutcomeStage(stageSlug: string, workflowRoute: "normal" | "service") {
   const canonicalOutcomeSlug = toCanonicalTerminalOutcomeSlug(stageSlug, workflowRoute);
   return (
     canonicalOutcomeSlug === "sent_to_production" ||
-    canonicalOutcomeSlug === "service_sent_to_production"
+    canonicalOutcomeSlug === "service_sent_to_production" ||
+    canonicalOutcomeSlug === "won"
   );
 }
 
@@ -156,6 +174,14 @@ export async function changeDealStage(
 
   // Step 3: Terminal stage enforcement
   const targetStage = gateResult.targetStage;
+  if (targetStage.slug === "contract" && !isContractStageSelectionEnabled()) {
+    throw new AppError(
+      403,
+      "Contract stage selection is disabled.",
+      "CONTRACT_STAGE_SELECTION_DISABLED"
+    );
+  }
+
   const inferredOwnership = inferDealBidBoardOwnership({
     id: currentDeal[0].id,
     stageSlug: gateResult.currentStage.slug,

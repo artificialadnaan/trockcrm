@@ -1,5 +1,5 @@
 // server/src/modules/procore/sync-service.ts
-// Procore sync operations: create project from won deal, sync stage changes.
+// Procore sync operations: create project from signed Contract deal, sync stage changes.
 
 import { eq } from "drizzle-orm";
 import type { NodePgDatabase } from "drizzle-orm/node-postgres";
@@ -22,9 +22,9 @@ const COMPANY_ID = () => {
 };
 
 /**
- * Create a Procore project from a won deal.
+ * Create a Procore project from a signed Contract deal.
  * Idempotent: if deals.procore_project_id is already set, returns immediately.
- * Called by deal.won event handler.
+ * Called by deal.contract.signed event handler.
  */
 export async function createProcoreProject(
   tenantDb: TenantDb,

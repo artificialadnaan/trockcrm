@@ -524,7 +524,8 @@ router.patch(
         req.tenantDb!,
         req.params.id as string,
         date,
-        req.user!.id
+        req.user!.id,
+        req.user!.activeOfficeId ?? req.user!.officeId
       );
       if (!deal) throw new AppError(404, "Deal not found");
       await req.commitTransaction!();
