@@ -55,6 +55,14 @@ export interface DealFilters {
   limit?: number;
 }
 
+export interface PipelineTerminalDateFilters {
+  wonSince?: string;
+  wonUntil?: string;
+  lostSince?: string;
+  lostUntil?: string;
+  now?: Date;
+}
+
 export interface CreateDealInput {
   name: string;
   stageId: string;
@@ -131,6 +139,18 @@ export const VALID_ESTIMATING_SUBSTAGES = [
   "under_review",
   "sent_to_client",
 ] as const;
+const WON_TERMINAL_STAGE_SLUGS = [
+  "won",
+  "sent_to_production",
+  "service_sent_to_production",
+  "closed_won",
+] as const;
+const LOST_TERMINAL_STAGE_SLUGS = [
+  "lost",
+  "production_lost",
+  "service_lost",
+  "closed_lost",
+] as const;
 const VALID_PROPOSAL_STATUS_SET = new Set<string>(VALID_PROPOSAL_STATUSES);
 const VALID_ESTIMATING_SUBSTAGE_SET = new Set<string>(VALID_ESTIMATING_SUBSTAGES);
 export const BID_BOARD_CRM_EDITABLE_FIELDS = [
@@ -157,6 +177,38 @@ const BID_BOARD_OWNED_UPDATE_FIELD_LABELS: Partial<Record<keyof UpdateDealInput,
   estimatingSubstage: "Estimating progress",
   proposalStatus: "Proposal status",
 };
+
+function startOfUtcDay(value: Date) {
+  return new Date(Date.UTC(value.getUTCFullYear(), value.getUTCMonth(), value.getUTCDate()));
+}
+
+function addUtcDays(value: Date, days: number) {
+  const next = new Date(value);
+  next.setUTCDate(next.getUTCDate() + days);
+  return next;
+}
+
+function parseIsoDateParam(value: string | undefined): Date | null {
+  if (!value) return null;
+  const parsed = new Date(value);
+  return Number.isNaN(parsed.getTime()) ? null : parsed;
+}
+
+export function resolvePipelineTerminalDateFilters(input: PipelineTerminalDateFilters = {}) {
+  const now = input.now ?? new Date();
+  const defaultSince = addUtcDays(startOfUtcDay(now), -30);
+
+  return {
+    won: {
+      since: parseIsoDateParam(input.wonSince) ?? defaultSince,
+      until: parseIsoDateParam(input.wonUntil),
+    },
+    lost: {
+      since: parseIsoDateParam(input.lostSince) ?? defaultSince,
+      until: parseIsoDateParam(input.lostUntil),
+    },
+  };
+}
 
 async function assertValidProjectType(value: string | null | undefined): Promise<string> {
   const normalized = await resolveActiveProjectTypeValue(value);
@@ -1323,7 +1375,7 @@ export async function getDealsForPipeline(
   tenantDb: TenantDb,
   userRole: string,
   userId: string,
-  filters?: { assignedRepId?: string; includeDd?: boolean }
+  filters?: { assignedRepId?: string; includeDd?: boolean } & PipelineTerminalDateFilters
 ) {
   // Get all stages ordered
   const stages = await db
@@ -1332,8 +1384,67 @@ export async function getDealsForPipeline(
     .where(inArray(pipelineStageConfig.workflowFamily, ["standard_deal", "service_deal"]))
     .orderBy(asc(pipelineStageConfig.displayOrder));
 
+  const terminalFilters = resolvePipelineTerminalDateFilters(filters);
+  const wonStageIds = stages
+    .filter((stage) => WON_TERMINAL_STAGE_SLUGS.includes(stage.slug as (typeof WON_TERMINAL_STAGE_SLUGS)[number]))
+    .map((stage) => stage.id);
+  const lostStageIds = stages
+    .filter((stage) => LOST_TERMINAL_STAGE_SLUGS.includes(stage.slug as (typeof LOST_TERMINAL_STAGE_SLUGS)[number]))
+    .map((stage) => stage.id);
+  const canonicalWonStageId = stages.find((stage) => stage.slug === "won" && stage.isActivePipeline)?.id ?? null;
+  const canonicalLostStageId = stages.find((stage) => stage.slug === "lost" && stage.isActivePipeline)?.id ?? null;
+  const nonTerminalStageIds = stages.filter((stage) => !stage.isTerminal).map((stage) => stage.id);
+
+  const sqlList = (values: readonly string[]) => sql.join(values.map((value) => sql`${value}`), sql`, `);
+  const terminalEnteredAt = (stageSlugs: readonly string[], fallback: unknown) => sql`
+    COALESCE(
+      (
+        SELECT MAX(${dealStageHistory.createdAt})
+        FROM ${dealStageHistory}
+        JOIN ${pipelineStageConfig} terminal_history_stage
+          ON terminal_history_stage.id = ${dealStageHistory.toStageId}
+        WHERE ${dealStageHistory.dealId} = ${deals.id}
+          AND terminal_history_stage.slug IN (${sqlList(stageSlugs)})
+      ),
+      ${fallback},
+      ${deals.stageEnteredAt}
+    )
+  `;
+  // Prefer the explicit stage-history entry timestamp. Older migrated rows may
+  // only have terminal marker fields, so fall back to actual_close_date/lost_at
+  // before using the current stage_entered_at value.
+  const wonEnteredAt = terminalEnteredAt(WON_TERMINAL_STAGE_SLUGS, sql`${deals.actualCloseDate}::timestamptz`);
+  const lostEnteredAt = terminalEnteredAt(LOST_TERMINAL_STAGE_SLUGS, deals.lostAt);
+
+  // Non-terminal pipeline behavior remains active-only. Terminal stages are
+  // date-filtered separately and intentionally include inactive historical rows.
+  const visibilityConditions: any[] = [];
+  if (nonTerminalStageIds.length > 0) {
+    visibilityConditions.push(and(eq(deals.isActive, true), inArray(deals.stageId, nonTerminalStageIds)));
+  }
+  if (wonStageIds.length > 0) {
+    const wonConditions = [
+      inArray(deals.stageId, wonStageIds),
+      sql`${wonEnteredAt} >= ${terminalFilters.won.since}`,
+    ];
+    if (terminalFilters.won.until) {
+      wonConditions.push(sql`${wonEnteredAt} < ${addUtcDays(terminalFilters.won.until, 1)}`);
+    }
+    visibilityConditions.push(and(...wonConditions));
+  }
+  if (lostStageIds.length > 0) {
+    const lostConditions = [
+      inArray(deals.stageId, lostStageIds),
+      sql`${lostEnteredAt} >= ${terminalFilters.lost.since}`,
+    ];
+    if (terminalFilters.lost.until) {
+      lostConditions.push(sql`${lostEnteredAt} < ${addUtcDays(terminalFilters.lost.until, 1)}`);
+    }
+    visibilityConditions.push(and(...lostConditions));
+  }
+
   // Build deal conditions
-  const conditions: any[] = [eq(deals.isActive, true)];
+  const conditions: any[] = [or(...visibilityConditions)];
 
   // Reps see only their own deals
   if (userRole === "rep") {
@@ -1352,15 +1463,20 @@ export async function getDealsForPipeline(
   // Group deals by stageId
   const dealsByStage = new Map<string, typeof allDeals>();
   for (const deal of allDeals) {
-    const stageDeals = dealsByStage.get(deal.stageId) ?? [];
+    const displayStageId =
+      canonicalWonStageId && wonStageIds.includes(deal.stageId)
+        ? canonicalWonStageId
+        : canonicalLostStageId && lostStageIds.includes(deal.stageId)
+          ? canonicalLostStageId
+          : deal.stageId;
+    const stageDeals = dealsByStage.get(displayStageId) ?? [];
     stageDeals.push(deal);
-    dealsByStage.set(deal.stageId, stageDeals);
+    dealsByStage.set(displayStageId, stageDeals);
   }
 
-  // Build response: active pipeline stages + terminal stages separately
+  // Build response: active pipeline stages + date-filtered terminal stages.
   const pipelineColumns = stages
-    .filter((s) => !s.isTerminal)
-    .filter((s) => filters?.includeDd || s.isActivePipeline) // exclude DD unless toggled
+    .filter((s) => (s.isTerminal ? s.isActivePipeline : filters?.includeDd || s.isActivePipeline)) // exclude DD unless toggled
     .map((stage) => ({
       stage,
       deals: dealsByStage.get(stage.id) ?? [],
@@ -1373,10 +1489,15 @@ export async function getDealsForPipeline(
 
   const terminalStages = stages
     .filter((s) => s.isTerminal)
+    .filter((s) => s.isActivePipeline)
     .map((stage) => ({
       stage,
       deals: dealsByStage.get(stage.id) ?? [],
       count: (dealsByStage.get(stage.id) ?? []).length,
+      totalValue: (dealsByStage.get(stage.id) ?? []).reduce(
+        (sum, d) => sum + Number(d.awardedAmount ?? d.bidEstimate ?? d.ddEstimate ?? 0),
+        0
+      ),
     }));
 
   return { pipelineColumns, terminalStages };
