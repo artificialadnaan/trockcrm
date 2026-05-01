@@ -107,7 +107,9 @@ function stageSql(filters: CommissionReportFilters) {
 }
 
 function potentialStageSql() {
-  return sql`AND psc.slug IN ('opportunity', 'estimating', 'service_estimating', 'estimate_under_review', 'estimate_sent_to_client')`;
+  // Intentionally includes canonical stage-v2 slugs plus historical aliases so
+  // commission potential stays accurate while legacy rows still exist during rollout.
+  return sql`AND psc.slug IN ('opportunity', 'estimating', 'service_estimating', 'estimate_under_review', 'estimate_sent_to_client', 'estimate_in_progress', 'service_estimate_under_review', 'service_estimate_sent_to_client')`;
 }
 
 function unsignedDealSql() {
@@ -128,7 +130,7 @@ function earnedSignedDateSql() {
 
 export function describeCommissionFormula(): string {
   return [
-    "Potential commission includes unsigned active deals in Opportunity, Estimating, Estimate Under Review, or Estimate Sent to Client.",
+    "Potential commission includes unsigned active deals in Opportunity, Estimating, Estimate Under Review, or Estimate Sent to Client, including historical aliases during rollout.",
     "Earned commission is recognized when contract_signed_at is set, with contract_signed_date as the historical compatibility fallback.",
     "Won deals remain earned after handoff; Lost deals are excluded from potential and earned commission totals.",
     "The source value resolves in this order: awarded_amount, then bid_estimate, then dd_estimate.",
