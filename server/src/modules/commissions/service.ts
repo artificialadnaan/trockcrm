@@ -58,9 +58,9 @@ function multiplyDecimalStrings(value: string, rate: string): string {
 }
 
 /**
- * Calculate the booked commission row for a deal that just had contract
- * signing recorded. During the stage-v2 transition the caller passes the
- * date portion used for deal_signed_commissions.contract_signed_date_at_signing.
+ * Calculate the earned commission row for a deal that just had contract
+ * signing recorded. During the stage-v2 transition the caller passes the date
+ * portion used for deal_signed_commissions.contract_signed_date_at_signing.
  * Idempotent at the (deal_id, rep_user_id)
  * level — second call returns 'skipped_existing' without inserting.
  *

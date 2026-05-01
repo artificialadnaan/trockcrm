@@ -38,8 +38,8 @@ describe("commission reporting service", () => {
       [
         {
           stage_id: "stage-1",
-          stage_name: "Contract",
-          stage_slug: "contract",
+          stage_name: "Estimate Sent to Client",
+          stage_slug: "estimate_sent_to_client",
           display_order: 40,
           deal_count: "2",
           total_deal_value: "300000.00",
@@ -57,8 +57,8 @@ describe("commission reporting service", () => {
           deal_name: "North Tower",
           rep_id: "rep-1",
           rep_name: "Rep One",
-          stage_name: "Contract Signed",
-          stage_slug: "won",
+          stage_name: "Contract",
+          stage_slug: "contract",
           source_value_amount: "100000.00",
           applied_rate: "0.075000",
           earned_commission: "7500.00",
@@ -96,7 +96,7 @@ describe("commission reporting service", () => {
       repId: "rep-2",
       from: "2026-01-01",
       to: "2026-12-31",
-      stages: ["won"],
+      stages: [],
     };
 
     const potential = await getCommissionPotential(tenantDb, filters);
@@ -105,7 +105,7 @@ describe("commission reporting service", () => {
 
     expect(potential.stageGroups[0]).toMatchObject({
       stageId: "stage-1",
-      stageName: "Contract",
+      stageName: "Estimate Sent to Client",
       dealCount: 2,
       totalDealValue: 300000,
       potentialCommission: 22500,
@@ -140,7 +140,7 @@ describe("commission reporting service", () => {
     expect(queryText).toContain("d.assigned_rep_id =");
   });
 
-  it("recognizes earned commissions only for won and historical won stages", async () => {
+  it("uses pre-Contract unsigned deals for potential and signed non-lost deals for earned", async () => {
     const { getCommissionEarned, getCommissionSummary } = await import("../../../src/modules/commissions/reporting-service.js");
     const tenantDb = createMockTenantDb([[], [], [{ earned_mtd: "0", earned_ytd: "0", potential_pipeline: "0", paid_ytd: "0" }]]);
     const filters = {
@@ -155,8 +155,54 @@ describe("commission reporting service", () => {
     await getCommissionSummary(tenantDb, filters);
 
     const sqlText = tenantDb.execute.mock.calls.map((call: any[]) => extractSqlText(call[0]).toLowerCase()).join("\n");
-    expect(sqlText).toContain("psc.slug in ('won', 'sent_to_production', 'service_sent_to_production', 'closed_won')");
+    expect(sqlText).toContain("'opportunity'");
+    expect(sqlText).toContain("'estimating'");
+    expect(sqlText).toContain("'service_estimating'");
+    expect(sqlText).toContain("'estimate_under_review'");
+    expect(sqlText).toContain("'estimate_sent_to_client'");
+    expect(sqlText).toContain("contract_signed_at is null");
+    expect(sqlText).toContain("contract_signed_date is null");
+    expect(sqlText).toContain("coalesce(d.contract_signed_at::date, d.contract_signed_date, dsc.contract_signed_date_at_signing) is not null");
+    expect(sqlText).toContain("slug not in ('lost', 'production_lost', 'service_lost', 'closed_lost')");
+    expect(sqlText).not.toContain("slug in ('won', 'sent_to_production', 'service_sent_to_production', 'closed_won')");
     expect(sqlText).not.toContain("display_order >=");
     expect(sqlText).not.toContain("service_contract_signed");
+  });
+
+  it("counts historical contract_signed_date rows as earned without requiring won stage", async () => {
+    const { getCommissionEarned } = await import("../../../src/modules/commissions/reporting-service.js");
+    const tenantDb = createMockTenantDb([
+      [{ month: "2026-04", earned_commission: "7500.00", deal_count: "1" }],
+      [
+        {
+          deal_id: "deal-legacy",
+          deal_number: "D-LEGACY",
+          deal_name: "Legacy Signed Deal",
+          rep_id: "rep-1",
+          rep_name: "Rep One",
+          stage_name: "Contract",
+          stage_slug: "contract",
+          source_value_amount: "100000.00",
+          applied_rate: "0.075000",
+          earned_commission: "7500.00",
+          contract_signed_date: "2026-04-10",
+          paid_ytd: "0.00",
+        },
+      ],
+    ]);
+
+    const earned = await getCommissionEarned(tenantDb, {
+      role: "admin",
+      userId: "admin-1",
+      from: "2026-01-01",
+      to: "2026-12-31",
+      stages: [],
+    });
+
+    const sqlText = tenantDb.execute.mock.calls.map((call: any[]) => extractSqlText(call[0]).toLowerCase()).join("\n");
+    expect(earned.months[0]).toMatchObject({ earnedCommission: 7500, dealCount: 1 });
+    expect(earned.deals[0]).toMatchObject({ dealId: "deal-legacy", earnedCommission: 7500, contractSignedDate: "2026-04-10" });
+    expect(sqlText).toContain("coalesce(d.contract_signed_at::date, d.contract_signed_date, dsc.contract_signed_date_at_signing)");
+    expect(sqlText).not.toContain("slug in ('won', 'sent_to_production', 'service_sent_to_production', 'closed_won')");
   });
 });

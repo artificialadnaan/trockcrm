@@ -38,12 +38,17 @@ import { getMyCleanupQueue } from "../admin/cleanup-queue-service.js";
 import { getMigrationSummary } from "../migration/service.js";
 
 type TenantDb = NodePgDatabase<typeof schema>;
+// Intentionally includes canonical stage-v2 slugs plus historical aliases so
+// dashboard counts stay accurate while legacy rows still exist during rollout.
 const ESTIMATING_PROGRESS_STAGE_SLUGS = [
   "estimating",
   "service_estimating",
   "estimate_under_review",
   "estimate_sent_to_client",
   "contract",
+  "estimate_in_progress",
+  "service_estimate_under_review",
+  "service_estimate_sent_to_client",
 ] as const;
 const WON_STAGE_SLUGS = ["won"] as const;
 const LOST_STAGE_SLUGS = ["lost"] as const;
@@ -56,6 +61,9 @@ const MIRRORED_DOWNSTREAM_STAGE_LABELS: Record<(typeof MIRRORED_DOWNSTREAM_STAGE
   estimate_under_review: "Estimate Under Review",
   estimate_sent_to_client: "Estimate Sent to Client",
   contract: "Contract",
+  estimate_in_progress: "Estimate in Progress",
+  service_estimate_under_review: "Service Estimate Under Review",
+  service_estimate_sent_to_client: "Service Estimate Sent to Client",
 };
 
 function resolveMirroredStageLabel(

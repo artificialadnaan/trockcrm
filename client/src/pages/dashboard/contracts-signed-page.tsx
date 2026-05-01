@@ -32,13 +32,17 @@ function getChicagoDateParts(): { today: string; yearStart: string; monthStart: 
   };
 }
 
-function formatSignedDate(value: string | null | undefined): string {
+export function formatSignedDate(value: string | null | undefined): string {
   if (!value) return "—";
+  const isTimestamp = value.includes("T") || value.includes("Z");
+  const date = isTimestamp ? new Date(value) : new Date(`${value}T12:00:00`);
+
   return new Intl.DateTimeFormat("en-US", {
     month: "short",
     day: "numeric",
     year: "numeric",
-  }).format(new Date(`${value}T12:00:00`));
+    timeZone: isTimestamp ? "UTC" : undefined,
+  }).format(date);
 }
 
 function buildPropertyLine(deal: Deal): string {

@@ -45,12 +45,12 @@ describe("RepCommissionsPage", () => {
       if (path.startsWith("/commissions/potential")) {
         return Promise.resolve({
           data: {
-            formula: "Booked amount = source_value_amount * commission_rate.",
+            formula: "Potential commission includes unsigned active deals before Contract.",
             stageGroups: [
               {
                 stageId: "stage-1",
-                stageName: "Contract Signed",
-                stageSlug: "contract_signed",
+                stageName: "Estimate Sent to Client",
+                stageSlug: "estimate_sent_to_client",
                 displayOrder: 40,
                 dealCount: 2,
                 totalDealValue: 300000,
@@ -70,8 +70,8 @@ describe("RepCommissionsPage", () => {
               dealName: "North Tower Facade",
               repId: "rep-1",
               repName: "Rep One",
-              stageName: "Contract Signed",
-              stageSlug: "contract_signed",
+              stageName: "Contract",
+              stageSlug: "contract",
               sourceValueAmount: 100000,
               appliedRate: 0.075,
               earnedCommission: 7500,
@@ -106,6 +106,7 @@ describe("RepCommissionsPage", () => {
     );
 
     expect(html).toContain("Commissions");
+    expect(html).toContain("Potential commission before Contract");
     expect(html).toContain("Earned MTD");
     expect(html).toContain("Earned YTD");
     expect(html).toContain("Potential Pipeline");
@@ -114,5 +115,6 @@ describe("RepCommissionsPage", () => {
     expect(html).toContain("Earned per Month");
     expect(html).toContain("Contributing Deals");
     expect(html).toContain("Raw deal table sum");
+    expect(html).not.toContain("Booked");
   });
 });
