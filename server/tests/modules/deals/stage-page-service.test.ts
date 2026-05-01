@@ -120,4 +120,36 @@ describe("listDealStagePage", () => {
     expect(rowsQueryText).toContain("awarded_amount");
     expect(rowsQueryText).toContain("desc");
   });
+
+  it("relaxes active-only scope for date-filtered terminal stage drill-downs", async () => {
+    dbState.responses = [
+      [{ id: "stage-won", slug: "won", name: "Won", displayOrder: 7, isTerminal: true }],
+    ];
+
+    const tenantDb = {
+      execute: vi.fn()
+        .mockResolvedValueOnce({ rows: [{ total: "2", total_value: "400000" }] })
+        .mockResolvedValueOnce({ rows: [] }),
+    } as any;
+
+    const { listDealStagePage } = await import("../../../src/modules/deals/service.js");
+    await listDealStagePage(tenantDb, {
+      role: "admin",
+      userId: "admin-1",
+      activeOfficeId: "office-1",
+      scope: "all",
+      stageId: "stage-won",
+      page: 1,
+      pageSize: 25,
+      wonSince: "2026-04-01",
+      wonUntil: "2026-04-30",
+    } as any);
+
+    const countQueryText = extractSqlText(tenantDb.execute.mock.calls[0][0]).toLowerCase();
+    expect(countQueryText).not.toContain("d.is_active = true");
+    expect(countQueryText).toContain("deal_stage_history");
+    expect(countQueryText).toContain("actual_close_date");
+    expect(countQueryText).toContain(">=");
+    expect(countQueryText).toContain("<");
+  });
 });

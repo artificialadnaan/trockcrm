@@ -3,7 +3,7 @@ import { createRoot } from "react-dom/client";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { api } from "@/lib/api";
 import type { TerminalDateFilter, TerminalOutcome } from "@/lib/pipeline-terminal-filters";
-import { normalizeDealBoardResponse, useDealBoard } from "./use-deals";
+import { normalizeDealBoardResponse, useDealBoard, useDealStagePage } from "./use-deals";
 
 vi.mock("@/lib/api", () => ({
   api: vi.fn(),
@@ -141,6 +141,23 @@ function HookProbe() {
   return null;
 }
 
+function StageHookProbe() {
+  useDealStagePage({
+    stageId: "stage-won",
+    scope: "all",
+    page: 1,
+    pageSize: 25,
+    sort: "age_desc",
+    search: "",
+    filters: {
+      staleOnly: false,
+      wonSince: "2026-04-01",
+      wonUntil: "2026-04-30",
+    },
+  });
+  return null;
+}
+
 async function renderHook() {
   const { document } = installFakeDom();
   const container = document.createElement("div");
@@ -149,6 +166,20 @@ async function renderHook() {
 
   await act(async () => {
     root.render(createElement(HookProbe));
+    await flushEffects();
+  });
+
+  return root;
+}
+
+async function renderStageHook() {
+  const { document } = installFakeDom();
+  const container = document.createElement("div");
+  document.body.appendChild(container);
+  const root = createRoot(container as unknown as Element);
+
+  await act(async () => {
+    root.render(createElement(StageHookProbe));
     await flushEffects();
   });
 
@@ -377,6 +408,31 @@ describe("normalizeDealBoardResponse", () => {
     expect(requestPath).toMatch(/won_since=\d{4}-\d{2}-\d{2}/);
     expect(requestPath).toContain("lost_since=2026-04-01");
     expect(requestPath).toContain("lost_until=2026-04-30");
+
+    await act(async () => {
+      root.unmount();
+      await flushEffects();
+    });
+    vi.unstubAllGlobals();
+  });
+
+  it("passes terminal date filters through to deal stage drill-down requests", async () => {
+    const apiMock = vi.mocked(api);
+    apiMock.mockResolvedValueOnce({
+      stage: { id: "stage-won", name: "Won", slug: "won" },
+      summary: { count: 2, totalValue: 400000, averageDaysInStage: 3 },
+      pagination: { page: 1, pageSize: 25, total: 2, totalPages: 1 },
+      rows: [],
+    });
+
+    const root = await renderStageHook();
+
+    expect(apiMock).toHaveBeenCalledTimes(1);
+    const requestPath = String(apiMock.mock.calls[0]?.[0]);
+    expect(requestPath).toContain("/deals/stages/stage-won?");
+    expect(requestPath).toContain("scope=all");
+    expect(requestPath).toContain("won_since=2026-04-01");
+    expect(requestPath).toContain("won_until=2026-04-30");
 
     await act(async () => {
       root.unmount();

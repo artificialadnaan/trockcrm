@@ -166,6 +166,98 @@ describe("buildDealBoardSummary", () => {
       averageAgeDays: 3,
     });
   });
+
+  it("excludes date-filtered terminal history from active headline metrics", () => {
+    const activeCard = {
+      id: "deal-active",
+      dealNumber: "TR-1001",
+      name: "North Tower",
+      stageId: "stage-est",
+      pipelineDisposition: "deals",
+      workflowRoute: "normal",
+      isBidBoardOwned: false,
+      bidBoardStageSlug: null,
+      readOnlySyncedAt: null,
+      assignedRepId: "rep-1",
+      companyId: null,
+      propertyId: null,
+      sourceLeadId: null,
+      primaryContactId: null,
+      ddEstimate: null,
+      bidEstimate: "100000",
+      awardedAmount: null,
+      changeOrderTotal: null,
+      description: null,
+      propertyAddress: null,
+      propertyCity: "Dallas",
+      propertyState: "TX",
+      propertyZip: null,
+      projectTypeId: null,
+      regionId: null,
+      source: null,
+      winProbability: null,
+      decisionMakerName: null,
+      decisionProcess: null,
+      budgetStatus: null,
+      incumbentVendor: null,
+      unitCount: null,
+      buildYear: null,
+      forecastWindow: null,
+      forecastCategory: null,
+      forecastConfidencePercent: null,
+      forecastRevenue: null,
+      forecastGrossProfit: null,
+      forecastBlockers: null,
+      nextStep: null,
+      nextStepDueAt: null,
+      nextMilestoneAt: null,
+      supportNeededType: null,
+      supportNeededNotes: null,
+      forecastUpdatedAt: null,
+      forecastUpdatedBy: null,
+      procoreProjectId: null,
+      procoreBidId: null,
+      procoreLastSyncedAt: null,
+      lostReasonId: null,
+      lostNotes: null,
+      lostCompetitor: null,
+      lostAt: null,
+      expectedCloseDate: null,
+      actualCloseDate: null,
+      contractSignedDate: null,
+      lastActivityAt: null,
+      stageEnteredAt: "2026-04-20T12:00:00.000Z",
+      isActive: true,
+      hubspotDealId: null,
+      createdAt: "2026-04-20T12:00:00.000Z",
+      updatedAt: "2026-04-20T12:00:00.000Z",
+    } as DealBoardResponse["columns"][number]["cards"][number];
+
+    const board: DealBoardResponse = {
+      columns: [
+        {
+          stage: { id: "stage-est", name: "Estimating", slug: "estimating" },
+          count: 30,
+          totalValue: 300000,
+          cards: [activeCard],
+        },
+        {
+          stage: { id: "stage-won", name: "Won", slug: "won" },
+          count: 50,
+          totalValue: 500000,
+          cards: [{ ...activeCard, id: "deal-won", stageId: "stage-won", isActive: false }],
+        },
+      ],
+      terminalStages: [],
+    };
+
+    expect(buildDealBoardSummary(board, now)).toEqual({
+      totalCount: 30,
+      liveStageCount: 1,
+      totalValue: 300000,
+      averageAgeDays: 2,
+    });
+  });
 });
 
 describe("buildLeadBoardSummary", () => {

@@ -11,6 +11,7 @@ import { buildDealBoardSummary } from "@/lib/pipeline-board-summary";
 import { buildCanonicalDealBoardColumns } from "@/lib/canonical-deal-board";
 import { useNormalizedPipelineRoute } from "@/lib/pipeline-scope";
 import {
+  buildDealStageWorkspacePath,
   readTerminalDateFilter,
   writeTerminalDateFilter,
   type TerminalDateFilter,
@@ -85,7 +86,10 @@ export function DealListPage() {
         entity="deal"
         loading={loading}
         columns={columns}
-        onOpenStage={(stageId) => navigate(`/deals/stages/${stageId}?scope=${scope}`)}
+        onOpenStage={(stageId) => {
+          const stageSlug = columns.find((column) => column.stage.id === stageId)?.stage.slug;
+          navigate(buildDealStageWorkspacePath({ stageId, stageSlug, scope, filters: terminalDateFilters }));
+        }}
         onOpenRecord={(dealId) => navigate(`/deals/${dealId}`)}
         onMove={({ activeId, targetStageId }) => {
           setPendingMove({ dealId: activeId, targetStageId });

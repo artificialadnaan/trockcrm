@@ -1,5 +1,6 @@
 import type { DealBoardResponse } from "@/hooks/use-deals";
 import type { LeadBoardResponse } from "@/hooks/use-leads";
+import { getActivePipelineColumns } from "./pipeline-terminal-filters";
 
 const QUALIFIED_PRESSURE_SLUGS = new Set([
   "pre_qual_value_assigned",
@@ -34,7 +35,7 @@ function averageDays(values: string[], now: Date) {
 }
 
 export function buildDealBoardSummary(board: DealBoardResponse | null, now = new Date()): DealBoardSummary {
-  const columns = board?.columns ?? [];
+  const columns = getActivePipelineColumns(board?.columns ?? []);
   const enteredAt = columns.flatMap((column) => column.cards.map((card) => card.stageEnteredAt));
 
   return {

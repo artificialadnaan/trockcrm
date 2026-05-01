@@ -113,6 +113,10 @@ function readStageInput(req: Parameters<typeof router.get>[1] extends never ? ne
     updatedTo: (req.query.updatedBefore as string | undefined) ?? (req.query.updatedTo as string | undefined),
     minAgeDays: parseNumber(req.query.minAgeDays),
     maxAgeDays: parseNumber(req.query.maxAgeDays),
+    wonSince: req.query.won_since as string | undefined,
+    wonUntil: req.query.won_until as string | undefined,
+    lostSince: req.query.lost_since as string | undefined,
+    lostUntil: req.query.lost_until as string | undefined,
   };
 }
 

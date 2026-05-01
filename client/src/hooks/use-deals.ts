@@ -620,6 +620,10 @@ export function useDealStagePage(input: StagePageQuery & { stageId: string; scop
       ...(input.filters.updatedBefore ? { updatedBefore: input.filters.updatedBefore } : {}),
       ...(input.filters.minAgeDays ? { minAgeDays: input.filters.minAgeDays } : {}),
       ...(input.filters.maxAgeDays ? { maxAgeDays: input.filters.maxAgeDays } : {}),
+      ...(input.filters.wonSince ? { won_since: input.filters.wonSince } : {}),
+      ...(input.filters.wonUntil ? { won_until: input.filters.wonUntil } : {}),
+      ...(input.filters.lostSince ? { lost_since: input.filters.lostSince } : {}),
+      ...(input.filters.lostUntil ? { lost_until: input.filters.lostUntil } : {}),
     });
 
     setLoading(true);
