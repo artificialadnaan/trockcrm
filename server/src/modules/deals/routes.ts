@@ -230,6 +230,10 @@ router.get("/pipeline", async (req, res, next) => {
     const filters = {
       assignedRepId: req.query.assignedRepId as string | undefined,
       includeDd: req.query.includeDd === "true",
+      wonSince: req.query.won_since as string | undefined,
+      wonUntil: req.query.won_until as string | undefined,
+      lostSince: req.query.lost_since as string | undefined,
+      lostUntil: req.query.lost_until as string | undefined,
     };
     const result = await getDealsForPipeline(
       req.tenantDb!,

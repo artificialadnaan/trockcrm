@@ -52,7 +52,7 @@ vi.mock("../../../src/modules/pipeline/service.js", () => ({
 // We'll import after mocks are set up
 const { AppError } = await import("../../../src/middleware/error-handler.js");
 const pipelineService = await import("../../../src/modules/pipeline/service.js");
-const { createDeal, updateDeal } = await import("../../../src/modules/deals/service.js");
+const { createDeal, updateDeal, resolvePipelineTerminalDateFilters } = await import("../../../src/modules/deals/service.js");
 
 describe("Deal Service", () => {
   beforeEach(() => {
@@ -434,6 +434,32 @@ describe("Deal Service", () => {
   });
 
   describe("Pipeline View Grouping", () => {
+    it("defaults won/lost terminal filters to 30 days ago", () => {
+      const filters = resolvePipelineTerminalDateFilters({
+        now: new Date("2026-05-01T18:30:00Z"),
+      });
+
+      expect(filters.won.since.toISOString()).toBe("2026-04-01T00:00:00.000Z");
+      expect(filters.lost.since.toISOString()).toBe("2026-04-01T00:00:00.000Z");
+      expect(filters.won.until).toBeNull();
+      expect(filters.lost.until).toBeNull();
+    });
+
+    it("accepts explicit terminal since/until filters", () => {
+      const filters = resolvePipelineTerminalDateFilters({
+        wonSince: "2026-03-01",
+        wonUntil: "2026-03-31",
+        lostSince: "2026-04-01T12:00:00Z",
+        lostUntil: "2026-04-30T23:59:59Z",
+        now: new Date("2026-05-01T18:30:00Z"),
+      });
+
+      expect(filters.won.since.toISOString()).toBe("2026-03-01T00:00:00.000Z");
+      expect(filters.won.until?.toISOString()).toBe("2026-03-31T00:00:00.000Z");
+      expect(filters.lost.since.toISOString()).toBe("2026-04-01T12:00:00.000Z");
+      expect(filters.lost.until?.toISOString()).toBe("2026-04-30T23:59:59.000Z");
+    });
+
     it("should separate terminal from active stages", () => {
       const stages = [
         { id: "1", slug: "dd", isTerminal: false, isActivePipeline: true, displayOrder: 1 },

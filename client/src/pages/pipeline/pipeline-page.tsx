@@ -24,6 +24,7 @@ interface PipelineColumn {
     color: string | null;
     displayOrder: number;
     isActivePipeline: boolean;
+    isTerminal?: boolean;
   };
   deals: Deal[];
   totalValue: number;
@@ -34,6 +35,89 @@ interface TerminalStageInfo {
   stage: { id: string; name: string; slug: string };
   deals: Deal[];
   count: number;
+}
+
+type TerminalOutcome = "won" | "lost";
+type TerminalDateFilter =
+  | { preset: "30" | "60" | "90"; customStart?: undefined; customEnd?: undefined }
+  | { preset: "custom"; customStart: string; customEnd?: string };
+
+const TERMINAL_FILTER_STORAGE_KEYS: Record<TerminalOutcome, string> = {
+  won: "pipeline_terminal_filter_won",
+  lost: "pipeline_terminal_filter_lost",
+};
+const DEFAULT_TERMINAL_DATE_FILTER: TerminalDateFilter = { preset: "30" };
+
+function isTerminalOutcomeSlug(slug: string): slug is TerminalOutcome {
+  return slug === "won" || slug === "lost";
+}
+
+function formatDateParam(date: Date) {
+  return date.toISOString().split("T")[0];
+}
+
+function daysAgo(days: number, now = new Date()) {
+  const date = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()));
+  date.setUTCDate(date.getUTCDate() - days);
+  return formatDateParam(date);
+}
+
+export function readTerminalDateFilter(outcome: TerminalOutcome): TerminalDateFilter {
+  if (typeof window === "undefined") return DEFAULT_TERMINAL_DATE_FILTER;
+  const raw = window.localStorage.getItem(TERMINAL_FILTER_STORAGE_KEYS[outcome]);
+  if (!raw) return DEFAULT_TERMINAL_DATE_FILTER;
+
+  try {
+    const parsed = JSON.parse(raw) as Partial<TerminalDateFilter>;
+    if (parsed.preset === "30" || parsed.preset === "60" || parsed.preset === "90") {
+      return { preset: parsed.preset };
+    }
+    if (parsed.preset === "custom" && typeof parsed.customStart === "string" && parsed.customStart) {
+      return {
+        preset: "custom",
+        customStart: parsed.customStart,
+        customEnd: typeof parsed.customEnd === "string" ? parsed.customEnd : undefined,
+      };
+    }
+  } catch {
+    return DEFAULT_TERMINAL_DATE_FILTER;
+  }
+
+  return DEFAULT_TERMINAL_DATE_FILTER;
+}
+
+export function writeTerminalDateFilter(outcome: TerminalOutcome, filter: TerminalDateFilter) {
+  if (typeof window === "undefined") return;
+  window.localStorage.setItem(TERMINAL_FILTER_STORAGE_KEYS[outcome], JSON.stringify(filter));
+}
+
+export function getTerminalDateFilterLabel(filter: TerminalDateFilter) {
+  return filter.preset === "custom" ? "custom" : `${filter.preset}d`;
+}
+
+function appendTerminalDateParams(
+  params: URLSearchParams,
+  outcome: TerminalOutcome,
+  filter: TerminalDateFilter
+) {
+  const prefix = outcome;
+  if (filter.preset === "custom") {
+    params.set(`${prefix}_since`, filter.customStart);
+    if (filter.customEnd) params.set(`${prefix}_until`, filter.customEnd);
+    return;
+  }
+
+  params.set(`${prefix}_since`, daysAgo(Number(filter.preset)));
+}
+
+export function buildPipelineRequestPath(
+  showDd: boolean,
+  filters: Record<TerminalOutcome, TerminalDateFilter>
+) {
+  const params = new URLSearchParams({ includeDd: String(showDd) });
+  appendTerminalDateParams(params, "won", filters.won);
+  appendTerminalDateParams(params, "lost", filters.lost);
+  return `/deals/pipeline?${params.toString()}`;
 }
 
 export function summarizeTerminalStageCounts(terminalStages: TerminalStageInfo[]) {
@@ -118,10 +202,14 @@ function DroppableColumn({
   column,
   activeDealId,
   onOpenStage,
+  terminalFilter,
+  onTerminalFilterChange,
 }: {
   column: PipelineColumn;
   activeDealId: string | null;
   onOpenStage: (stageId: string) => void;
+  terminalFilter?: TerminalDateFilter;
+  onTerminalFilterChange?: (filter: TerminalDateFilter) => void;
 }) {
   const { isOver, setNodeRef } = useDroppable({ id: column.stage.id });
   const cardsRef = useRef<HTMLDivElement>(null);
@@ -159,6 +247,8 @@ function DroppableColumn({
     }
     return () => observer.disconnect();
   }, [column.deals.length, recomputeOverflow]);
+  const terminalOutcome = isTerminalOutcomeSlug(column.stage.slug) ? column.stage.slug : null;
+  const terminalLabel = terminalFilter ? getTerminalDateFilterLabel(terminalFilter) : null;
 
   return (
     <div
@@ -175,11 +265,59 @@ function DroppableColumn({
             onClick={() => onOpenStage(column.stage.id)}
           >
             {column.stage.name}
+            {terminalLabel ? <span className="ml-1 text-gray-400">· {terminalLabel}</span> : null}
           </button>
           <span className="text-xs font-medium text-gray-600 bg-gray-200/70 px-1.5 py-0.5 rounded-sm tabular-nums">
             {column.count}
           </span>
         </div>
+        {terminalOutcome && terminalFilter && onTerminalFilterChange ? (
+          <div className="mt-2 flex items-center gap-1">
+            <select
+              aria-label={`${column.stage.name} date filter`}
+              className="h-7 rounded-sm border border-gray-200 bg-white px-1.5 text-xs text-gray-600"
+              value={terminalFilter.preset}
+              onChange={(event) => {
+                const value = event.target.value as TerminalDateFilter["preset"];
+                onTerminalFilterChange(
+                  value === "custom"
+                    ? { preset: "custom", customStart: daysAgo(30) }
+                    : { preset: value }
+                );
+              }}
+            >
+              <option value="30">30d</option>
+              <option value="60">60d</option>
+              <option value="90">90d</option>
+              <option value="custom">Custom</option>
+            </select>
+            {terminalFilter.preset === "custom" ? (
+              <>
+                <input
+                  aria-label={`${column.stage.name} start date`}
+                  type="date"
+                  className="h-7 min-w-0 flex-1 rounded-sm border border-gray-200 bg-white px-1.5 text-xs text-gray-600"
+                  value={terminalFilter.customStart}
+                  onChange={(event) =>
+                    onTerminalFilterChange({ ...terminalFilter, customStart: event.target.value })
+                  }
+                />
+                <input
+                  aria-label={`${column.stage.name} end date`}
+                  type="date"
+                  className="h-7 min-w-0 flex-1 rounded-sm border border-gray-200 bg-white px-1.5 text-xs text-gray-600"
+                  value={terminalFilter.customEnd ?? ""}
+                  onChange={(event) =>
+                    onTerminalFilterChange({
+                      ...terminalFilter,
+                      customEnd: event.target.value || undefined,
+                    })
+                  }
+                />
+              </>
+            ) : null}
+          </div>
+        ) : null}
         <p className="mt-1 text-xl font-semibold text-gray-900 tabular-nums">
           {formatCurrencyCompact(column.totalValue)}
         </p>
@@ -236,6 +374,10 @@ export function PipelinePage() {
   const [pendingMove, setPendingMove] = useState<{ deal: Deal; targetStageId: string } | null>(null);
   const [lastRefreshed, setLastRefreshed] = useState<Date>(new Date());
   const [now, setNow] = useState<Date>(new Date());
+  const [terminalDateFilters, setTerminalDateFilters] = useState<Record<TerminalOutcome, TerminalDateFilter>>(() => ({
+    won: readTerminalDateFilter("won"),
+    lost: readTerminalDateFilter("lost"),
+  }));
 
   const sensors = useSensors(
     useSensor(PointerSensor, { activationConstraint: { distance: 8 } })
@@ -253,7 +395,7 @@ export function PipelinePage() {
       const data = await api<{
         pipelineColumns: PipelineColumn[];
         terminalStages: TerminalStageInfo[];
-      }>(`/deals/pipeline?includeDd=${showDd}`);
+      }>(buildPipelineRequestPath(showDd, terminalDateFilters));
       setColumns(data.pipelineColumns);
       setTerminalStages(data.terminalStages ?? []);
       setLastRefreshed(new Date());
@@ -263,7 +405,12 @@ export function PipelinePage() {
     } finally {
       setLoading(false);
     }
-  }, [showDd]);
+  }, [showDd, terminalDateFilters]);
+
+  const updateTerminalDateFilter = useCallback((outcome: TerminalOutcome, filter: TerminalDateFilter) => {
+    writeTerminalDateFilter(outcome, filter);
+    setTerminalDateFilters((current) => ({ ...current, [outcome]: filter }));
+  }, []);
 
   useEffect(() => {
     fetchPipeline();
@@ -482,6 +629,16 @@ export function PipelinePage() {
                   column={column}
                   activeDealId={activeDeal?.id ?? null}
                   onOpenStage={(stageId) => navigate(`/deals/stages/${stageId}`)}
+                  terminalFilter={
+                    isTerminalOutcomeSlug(column.stage.slug)
+                      ? terminalDateFilters[column.stage.slug]
+                      : undefined
+                  }
+                  onTerminalFilterChange={
+                    isTerminalOutcomeSlug(column.stage.slug)
+                      ? (filter) => updateTerminalDateFilter(column.stage.slug as TerminalOutcome, filter)
+                      : undefined
+                  }
                 />
               ))}
             </div>
