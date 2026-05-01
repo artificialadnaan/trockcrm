@@ -310,6 +310,69 @@ describe("setDealContractSignedDate", () => {
     });
   });
 
+  it("treats legacy date-only signed rows as no-op when re-saving the same date", async () => {
+    process.env.ENABLE_CONTRACT_SIGNED_HANDOFF = "true";
+    vi.mocked(pipelineService.getStageById).mockResolvedValueOnce({
+      id: "stage-estimating",
+      slug: "estimating",
+      workflowFamily: "standard_deal",
+      isTerminal: false,
+      displayOrder: 1,
+    } as never);
+    const tenantDb = makeTenantDb({
+      id: "deal-1",
+      stageId: "stage-estimating",
+      workflowRoute: "normal",
+      contractSignedDate: "2026-09-15",
+      contractSignedAt: null,
+    });
+
+    const updated = await setDealContractSignedDate(
+      tenantDb as never,
+      "deal-1",
+      "2026-09-15",
+      "director-1",
+      "office-1"
+    );
+
+    expect(updated?.contractSignedDate).toBe("2026-09-15");
+    expect(tenantDb._state.updateCalls).toHaveLength(0);
+    expect(tenantDb._state.jobInserts).toHaveLength(0);
+    expect(pipelineService.getStageById).not.toHaveBeenCalled();
+  });
+
+  it("allows legacy date-only corrections outside Contract without emitting handoff", async () => {
+    process.env.ENABLE_CONTRACT_SIGNED_HANDOFF = "true";
+    vi.mocked(pipelineService.getStageById).mockResolvedValueOnce({
+      id: "stage-estimating",
+      slug: "estimating",
+      workflowFamily: "standard_deal",
+      isTerminal: false,
+      displayOrder: 1,
+    } as never);
+    const tenantDb = makeTenantDb({
+      id: "deal-1",
+      stageId: "stage-estimating",
+      workflowRoute: "normal",
+      contractSignedDate: "2026-09-15",
+      contractSignedAt: null,
+    });
+
+    const updated = await setDealContractSignedDate(
+      tenantDb as never,
+      "deal-1",
+      "2026-12-01",
+      "director-1",
+      "office-1"
+    );
+
+    expect(updated?.contractSignedDate).toBe("2026-12-01");
+    expect(updated?.contractSignedAt).toEqual(new Date("2026-12-01T00:00:00.000Z"));
+    expect(tenantDb._state.updateCalls).toHaveLength(1);
+    expect(tenantDb._state.jobInserts).toHaveLength(0);
+    expect(pipelineService.getStageById).not.toHaveBeenCalled();
+  });
+
   it("rejects setting contract_signed_at when the deal is not in Contract", async () => {
     process.env.ENABLE_CONTRACT_SIGNED_HANDOFF = "true";
     vi.mocked(pipelineService.getStageById).mockResolvedValueOnce({

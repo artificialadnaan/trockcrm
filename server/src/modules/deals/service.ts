@@ -1530,12 +1530,13 @@ export async function setDealContractSignedDate(
     const newContractSignedAt = contractSignedAtFromDate(newValue);
     if (
       oldValue === newValue &&
-      timestampKey(oldContractSignedAt) === timestampKey(newContractSignedAt)
+      (oldValue !== null || timestampKey(oldContractSignedAt) === timestampKey(newContractSignedAt))
     ) {
       return existing;
     }
 
-    const isInitialContractSignedAt = oldContractSignedAt == null && newContractSignedAt != null;
+    const isInitialContractSignedAt =
+      oldValue == null && oldContractSignedAt == null && newContractSignedAt != null;
     let contractStageId: string | null = null;
     if (isInitialContractSignedAt) {
       const currentStage = await getStageByIdForWorkflowRoute(
