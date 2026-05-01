@@ -108,13 +108,13 @@ export function normalizeDealStageSlug(
 
   switch (stageSlug) {
     case "opportunity":
-    case "estimating":
     case "contract":
     case "won":
     case "lost":
       return stageSlug;
+    case "estimating":
     case "estimate_in_progress":
-      return "estimating";
+      return normalizeWorkflowRoute(workflowRoute) === "service" ? "service_estimating" : "estimating";
     case "service_estimating":
     case "estimate_under_review":
     case "estimate_sent_to_client":

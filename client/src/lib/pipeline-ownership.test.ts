@@ -111,7 +111,10 @@ describe("pipeline ownership helpers", () => {
   });
 
   it("normalizes legacy stage slugs into the canonical mirrored workflow", () => {
+    expect(normalizeDealStageSlug("estimating", "normal")).toBe("estimating");
+    expect(normalizeDealStageSlug("estimating", "service")).toBe("service_estimating");
     expect(normalizeDealStageSlug("estimate_in_progress", "normal")).toBe("estimating");
+    expect(normalizeDealStageSlug("estimate_in_progress", "service")).toBe("service_estimating");
     expect(normalizeDealStageSlug("bid_sent", "normal")).toBe("estimate_sent_to_client");
     expect(normalizeDealStageSlug("closed_lost", "normal")).toBe("lost");
     expect(normalizeDealStageSlug("service_complete", "service")).toBe("won");
@@ -120,6 +123,13 @@ describe("pipeline ownership helpers", () => {
       "estimate_under_review"
     );
     expect(normalizeDealStageSlug("closed_lost", "service")).toBe("lost");
+  });
+
+  it("keeps truly shared canonical stage slugs stable for both routes", () => {
+    for (const slug of ["estimate_under_review", "estimate_sent_to_client", "contract", "won", "lost"]) {
+      expect(normalizeDealStageSlug(slug, "normal")).toBe(slug);
+      expect(normalizeDealStageSlug(slug, "service")).toBe(slug);
+    }
   });
 
   it("exposes the canonical route-specific stage order and labels", () => {
