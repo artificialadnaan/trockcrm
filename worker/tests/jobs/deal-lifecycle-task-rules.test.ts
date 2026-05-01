@@ -129,6 +129,40 @@ describe("deal lifecycle task migration", () => {
     expect(
       queryMock.mock.calls.some(([sql]) => typeof sql === "string" && sql.includes("INSERT INTO office_beta.tasks"))
     ).toBe(false);
+    expect(
+      queryMock.mock.calls.some(([sql]) => typeof sql === "string" && sql.includes("public.job_queue"))
+    ).toBe(false);
+  });
+
+  it("routes deal.contract.signed to Procore project creation dispatch", async () => {
+    queryMock.mockResolvedValue({ rows: [] });
+    const handler = handlers.get("domain_event");
+    expect(handler).toBeDefined();
+
+    await handler!(
+      {
+        eventName: "deal.contract.signed",
+        dealId: "deal-1",
+        dealName: "Alpha Roof",
+        dealNumber: "D-1001",
+        officeId: "office-1",
+      },
+      "office-1"
+    );
+
+    const procoreJob = queryMock.mock.calls.find(
+      ([sql]) => typeof sql === "string" && sql.includes("INSERT INTO public.job_queue")
+    );
+    expect(procoreJob).toBeDefined();
+    expect(String(procoreJob?.[0])).toContain("procore_sync");
+    expect(procoreJob?.[1]).toEqual([
+      JSON.stringify({
+        action: "create_project",
+        dealId: "deal-1",
+        officeId: "office-1",
+      }),
+      "office-1",
+    ]);
   });
 
   it("routes deal.lost competitor-intelligence generation through the shared evaluator", async () => {

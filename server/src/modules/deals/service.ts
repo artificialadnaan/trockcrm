@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { eq, and, desc, asc, ilike, inArray, sql, or, isNull, not, gte, lte } from "drizzle-orm";
 import type { NodePgDatabase } from "drizzle-orm/node-postgres";
 import {
@@ -14,7 +15,11 @@ import {
   tasks,
   jobQueue,
 } from "@trock-crm/shared/schema";
-import type { WorkflowRoute } from "@trock-crm/shared/types";
+import {
+  DOMAIN_EVENTS,
+  type DealContractSignedEventPayload,
+  type WorkflowRoute,
+} from "@trock-crm/shared/types";
 import type * as schema from "@trock-crm/shared/schema";
 import { db } from "../../db.js";
 import { AppError } from "../../middleware/error-handler.js";
@@ -24,6 +29,7 @@ import { getActiveProjectTypes, getStageById, getStageBySlug, resolveActiveProje
 import { evaluatePostConversionEnrichment } from "./post-conversion-enrichment.js";
 import { createAssignmentTaskIfNeeded } from "../assignment-tasks/service.js";
 import { generateDealNumberForProject } from "../../services/projectNumber.js";
+import { isContractSignedHandoffEnabled } from "../../config/feature-flags.js";
 
 // Type alias for the tenant-scoped Drizzle instance
 type TenantDb = NodePgDatabase<typeof schema>;
@@ -1507,7 +1513,8 @@ export async function setDealContractSignedDate(
   tenantDb: TenantDb,
   dealId: string,
   contractSignedDate: string | null,
-  userId: string
+  userId: string,
+  officeId: string | null = null
 ): Promise<typeof deals.$inferSelect | null> {
   return tenantDb.transaction(async (tx) => {
     const [existing] = await tx
@@ -1519,14 +1526,40 @@ export async function setDealContractSignedDate(
 
     const oldValue = existing.contractSignedDate ?? null;
     const newValue = contractSignedDate ?? null;
-    if (oldValue === newValue) {
+    const oldContractSignedAt = normalizeContractSignedAt(existing.contractSignedAt);
+    const newContractSignedAt = contractSignedAtFromDate(newValue);
+    if (
+      oldValue === newValue &&
+      timestampKey(oldContractSignedAt) === timestampKey(newContractSignedAt)
+    ) {
       return existing;
+    }
+
+    const isInitialContractSignedAt = oldContractSignedAt == null && newContractSignedAt != null;
+    let contractStageId: string | null = null;
+    if (isInitialContractSignedAt) {
+      const currentStage = await getStageByIdForWorkflowRoute(
+        existing.stageId,
+        existing.workflowRoute ?? "normal"
+      );
+      if (currentStage?.slug !== "contract") {
+        throw new AppError(
+          400,
+          "contract_signed_at can only be set while the deal is in Contract.",
+          "CONTRACT_SIGNED_STAGE_REQUIRED"
+        );
+      }
+      contractStageId = currentStage.id;
     }
 
     const now = new Date();
     const [updated] = await tx
       .update(deals)
-      .set({ contractSignedDate: newValue, updatedAt: now })
+      .set({
+        contractSignedDate: newValue,
+        contractSignedAt: newContractSignedAt,
+        updatedAt: now,
+      })
       .where(eq(deals.id, dealId))
       .returning();
 
@@ -1537,7 +1570,13 @@ export async function setDealContractSignedDate(
       recordId: dealId,
       action: "update",
       changedBy: userId,
-      changes: { contractSignedDate: { from: oldValue, to: newValue } },
+      changes: {
+        contractSignedDate: { from: oldValue, to: newValue },
+        contractSignedAt: {
+          from: oldContractSignedAt ? oldContractSignedAt.toISOString() : null,
+          to: newContractSignedAt ? newContractSignedAt.toISOString() : null,
+        },
+      },
     });
 
     // Commission fires only on null → date. Edits and clears do not
@@ -1551,6 +1590,44 @@ export async function setDealContractSignedDate(
       });
     }
 
+    if (isInitialContractSignedAt && isContractSignedHandoffEnabled()) {
+      const payload = {
+        eventName: DOMAIN_EVENTS.DEAL_CONTRACT_SIGNED,
+        eventId: randomUUID(),
+        idempotencyKey: `deal:${dealId}:contract_signed:${newContractSignedAt.toISOString()}`,
+        dealId,
+        dealNumber: updated.dealNumber,
+        dealName: updated.name,
+        officeId,
+        workflowRoute: updated.workflowRoute,
+        contractSignedAt: newContractSignedAt,
+        contractStageId: contractStageId ?? updated.stageId,
+        signedBy: userId,
+        source: "crm_contract_signed_date",
+      } satisfies DealContractSignedEventPayload;
+
+      await tx.insert(jobQueue).values({
+        jobType: "domain_event",
+        payload,
+        officeId,
+        status: "pending",
+        runAfter: now,
+      });
+    }
+
     return updated;
   });
+}
+
+function contractSignedAtFromDate(value: string | null): Date | null {
+  return value ? new Date(`${value}T00:00:00.000Z`) : null;
+}
+
+function normalizeContractSignedAt(value: Date | string | null | undefined): Date | null {
+  if (value == null) return null;
+  return value instanceof Date ? value : new Date(value);
+}
+
+function timestampKey(value: Date | null): string | null {
+  return value ? value.toISOString() : null;
 }

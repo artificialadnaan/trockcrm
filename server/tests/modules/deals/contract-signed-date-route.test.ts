@@ -80,7 +80,8 @@ describe("PATCH /api/deals/:id/contract-signed-date — RBAC", () => {
       expect.anything(),
       "deal-1",
       "2026-09-15",
-      "admin-1"
+      "admin-1",
+      "office-1"
     );
   });
 
@@ -130,7 +131,8 @@ describe("PATCH /api/deals/:id/contract-signed-date — RBAC", () => {
       expect.anything(),
       "deal-1",
       null,
-      "admin-1"
+      "admin-1",
+      "office-1"
     );
   });
 });

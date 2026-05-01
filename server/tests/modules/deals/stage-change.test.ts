@@ -193,6 +193,7 @@ describe("changeDealStage", () => {
   beforeEach(() => {
     vi.resetAllMocks();
     delete process.env.ENABLE_OPPORTUNITY_RFP_EVENT;
+    delete process.env.ENABLE_CONTRACT_STAGE_SELECTION;
     vi.mocked(scopingService.activateDealScopingIntake).mockResolvedValue({
       readiness: { status: "ready" },
     } as never);
@@ -445,6 +446,82 @@ describe("changeDealStage", () => {
     });
 
     expect(result.eventsEmitted).not.toContain("deal.opportunity.entered");
+  });
+
+  it("rejects transitions into Contract while contract stage selection is disabled", async () => {
+    const tenantDb = createTenantDb({
+      stageId: "stage-opportunity",
+    });
+    vi.mocked(validateStageGate).mockResolvedValue({
+      allowed: true,
+      isBackwardMove: false,
+      requiresOverride: false,
+      targetStage: {
+        id: "stage-contract",
+        name: "Contract",
+        slug: "contract",
+        isTerminal: false,
+        displayOrder: 5,
+      },
+      currentStage: {
+        id: "stage-opportunity",
+        name: "Opportunity",
+        slug: "opportunity",
+        isTerminal: false,
+        displayOrder: 1,
+      },
+    } as never);
+
+    await expect(
+      changeDealStage(tenantDb as never, {
+        dealId: "deal-1",
+        targetStageId: "stage-contract",
+        userId: "user-1",
+        userRole: "director",
+        officeId: "office-1",
+      })
+    ).rejects.toMatchObject({
+      statusCode: 403,
+      code: "CONTRACT_STAGE_SELECTION_DISABLED",
+    });
+
+    expect(tenantDb.state.deals[0]?.stageId).toBe("stage-opportunity");
+  });
+
+  it("allows transitions into Contract when contract stage selection is enabled", async () => {
+    process.env.ENABLE_CONTRACT_STAGE_SELECTION = "true";
+    const tenantDb = createTenantDb({
+      stageId: "stage-opportunity",
+    });
+    vi.mocked(validateStageGate).mockResolvedValue({
+      allowed: true,
+      isBackwardMove: false,
+      requiresOverride: false,
+      targetStage: {
+        id: "stage-contract",
+        name: "Contract",
+        slug: "contract",
+        isTerminal: false,
+        displayOrder: 5,
+      },
+      currentStage: {
+        id: "stage-opportunity",
+        name: "Opportunity",
+        slug: "opportunity",
+        isTerminal: false,
+        displayOrder: 1,
+      },
+    } as never);
+
+    const result = await changeDealStage(tenantDb as never, {
+      dealId: "deal-1",
+      targetStageId: "stage-contract",
+      userId: "user-1",
+      userRole: "director",
+      officeId: "office-1",
+    });
+
+    expect(result.deal.stageId).toBe("stage-contract");
   });
 
   it("marks service deals as Bid Board-owned when CRM hands them into service estimating", async () => {

@@ -1,5 +1,5 @@
 // server/src/modules/procore/event-handlers.ts
-// Registers listeners on the event bus for deal.won and deal.stage.changed.
+// Registers listeners on the event bus for deal.contract.signed and deal.stage.changed.
 // Both write a procore_sync job to job_queue for async processing.
 
 import { eventBus } from "../../events/bus.js";
@@ -12,8 +12,8 @@ import type { DomainEvent } from "../../events/types.js";
  * Call once during server startup (in createApp).
  */
 export function registerProcoreEventHandlers(): void {
-  // deal.won → create Procore project
-  eventBus.onEvent("deal.won", async (event: DomainEvent) => {
+  // deal.contract.signed → create Procore project
+  eventBus.onEvent("deal.contract.signed", async (event: DomainEvent) => {
     const { dealId, officeId } = event.payload as { dealId: string; officeId: string };
     if (!dealId || !officeId) return;
 
