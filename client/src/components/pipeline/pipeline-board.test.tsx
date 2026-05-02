@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { renderToStaticMarkup } from "react-dom/server";
 import { MemoryRouter } from "react-router-dom";
 import { PipelineBoard, resolvePipelineBoardMove } from "./pipeline-board";
@@ -38,7 +38,14 @@ const terminalColumns = [
 ];
 
 describe("PipelineBoard", () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
   it("renders stage headers and cards", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-05-01T12:00:00.000Z"));
+
     const html = renderToStaticMarkup(
       <MemoryRouter>
         <PipelineBoard
@@ -82,10 +89,36 @@ describe("PipelineBoard", () => {
     expect(html).toContain("Lost");
     expect(html).toContain("· 30d");
     expect(html).toContain("· custom");
-    expect(html).toContain('aria-label="Won date filter"');
-    expect(html).toContain('aria-label="Lost date filter"');
+    expect(html).toContain('type="button"');
+    expect(html).toContain('aria-label="Show Won deals from the last 30 days"');
+    expect(html).toContain('aria-label="Show Lost deals from a custom date range"');
+    expect(html).not.toContain("<select");
     expect(html).toContain('aria-label="Lost start date"');
     expect(html).toContain("2026-04-01");
+  });
+
+  it("renders the deal stage age from stageEnteredAt", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-05-01T12:00:00.000Z"));
+
+    const html = renderToStaticMarkup(
+      <MemoryRouter>
+        <PipelineBoard
+          entity="deal"
+          columns={[
+            {
+              ...columns[0],
+              cards: [{ ...columns[0].cards[0], stageEnteredAt: "2026-04-26T12:00:00.000Z" }],
+            },
+          ]}
+          loading={false}
+          onOpenStage={() => undefined}
+          onOpenRecord={() => undefined}
+        />
+      </MemoryRouter>
+    );
+
+    expect(html).toContain("5d in stage");
   });
 
   it("uses fixed-height scroll regions and virtualizes oversized columns", () => {
