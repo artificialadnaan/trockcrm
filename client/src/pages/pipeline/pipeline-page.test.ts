@@ -1,11 +1,12 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
+  buildDealStageWorkspacePath,
   buildPipelineRequestPath,
   getTerminalDateFilterLabel,
   readTerminalDateFilter,
   writeTerminalDateFilter,
 } from "@/lib/pipeline-terminal-filters";
-import { summarizeTerminalStageCounts } from "./pipeline-page";
+import { summarizeActivePipelineColumns, summarizeTerminalStageCounts } from "./pipeline-page";
 
 afterEach(() => {
   vi.useRealTimers();
@@ -55,6 +56,32 @@ describe("summarizeTerminalStageCounts", () => {
   });
 });
 
+describe("summarizeActivePipelineColumns", () => {
+  it("keeps terminal history out of active headline totals", () => {
+    const summary = summarizeActivePipelineColumns([
+      {
+        stage: { id: "estimating", name: "Estimating", slug: "estimating" },
+        deals: [
+          { id: "deal-1", stageEnteredAt: "2026-04-20T12:00:00.000Z" },
+        ],
+        count: 30,
+        totalValue: 300000,
+      },
+      {
+        stage: { id: "won", name: "Won", slug: "won" },
+        deals: [
+          { id: "deal-won", stageEnteredAt: "2026-04-18T12:00:00.000Z" },
+        ],
+        count: 50,
+        totalValue: 500000,
+      },
+    ] as any);
+
+    expect(summary.totalDeals).toBe(30);
+    expect(summary.totalValue).toBe(300000);
+  });
+});
+
 describe("terminal pipeline date filters", () => {
   it("defaults terminal requests to a 30-day window", () => {
     vi.useFakeTimers();
@@ -81,6 +108,35 @@ describe("terminal pipeline date filters", () => {
       "/deals/pipeline?includeDd=true&won_since=2026-03-02&lost_since=2026-03-15&lost_until=2026-04-15"
     );
     expect(getTerminalDateFilterLabel({ preset: "custom", customStart: "2026-03-15" })).toBe("custom");
+  });
+
+  it("carries terminal date filters into stage drill-down links", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-05-01T16:00:00Z"));
+
+    expect(
+      buildDealStageWorkspacePath({
+        stageId: "stage-won",
+        stageSlug: "won",
+        scope: "all",
+        filters: {
+          won: { preset: "30" },
+          lost: { preset: "90" },
+        },
+      })
+    ).toBe("/deals/stages/stage-won?scope=all&won_since=2026-04-01");
+
+    expect(
+      buildDealStageWorkspacePath({
+        stageId: "stage-estimating",
+        stageSlug: "estimating",
+        scope: "all",
+        filters: {
+          won: { preset: "30" },
+          lost: { preset: "90" },
+        },
+      })
+    ).toBe("/deals/stages/stage-estimating?scope=all");
   });
 
   it("persists terminal filters in localStorage", () => {

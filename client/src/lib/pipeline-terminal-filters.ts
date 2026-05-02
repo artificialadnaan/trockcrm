@@ -13,6 +13,19 @@ export function isTerminalOutcomeSlug(slug: string): slug is TerminalOutcome {
   return slug === "won" || slug === "lost";
 }
 
+export function isTerminalPipelineStageSlug(slug: string) {
+  return (
+    slug === "won" ||
+    slug === "lost" ||
+    slug === "sent_to_production" ||
+    slug === "service_sent_to_production" ||
+    slug === "closed_won" ||
+    slug === "production_lost" ||
+    slug === "service_lost" ||
+    slug === "closed_lost"
+  );
+}
+
 function formatDateParam(date: Date) {
   return date.toISOString().split("T")[0];
 }
@@ -86,4 +99,24 @@ export function buildPipelineRequestPath(
   const params = new URLSearchParams({ includeDd: String(showDd) });
   appendPipelineTerminalDateParams(params, filters);
   return `/deals/pipeline?${params.toString()}`;
+}
+
+export function buildDealStageWorkspacePath(input: {
+  stageId: string;
+  stageSlug?: string | null;
+  scope?: string;
+  filters: Record<TerminalOutcome, TerminalDateFilter>;
+}) {
+  const params = new URLSearchParams();
+  if (input.scope) params.set("scope", input.scope);
+  if (input.stageSlug && isTerminalOutcomeSlug(input.stageSlug)) {
+    appendTerminalDateParams(params, input.stageSlug, input.filters[input.stageSlug]);
+  }
+
+  const query = params.toString();
+  return `/deals/stages/${input.stageId}${query ? `?${query}` : ""}`;
+}
+
+export function getActivePipelineColumns<T extends { stage: { slug: string } }>(columns: T[]) {
+  return columns.filter((column) => !isTerminalPipelineStageSlug(column.stage.slug));
 }

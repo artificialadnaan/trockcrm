@@ -22,7 +22,32 @@ describe("normalizeStagePageQuery", () => {
         status: undefined,
         workflowRoute: "service",
         source: undefined,
+        regionId: undefined,
+        updatedAfter: undefined,
+        updatedBefore: undefined,
+        minAgeDays: undefined,
+        maxAgeDays: undefined,
+        wonSince: undefined,
+        wonUntil: undefined,
+        lostSince: undefined,
+        lostUntil: undefined,
       },
+    });
+  });
+
+  it("preserves terminal stage date filters for deal drill-down pages", () => {
+    expect(
+      normalizeStagePageQuery({
+        won_since: "2026-04-01",
+        won_until: "2026-04-30",
+        lost_since: "2026-03-01",
+        lost_until: "2026-03-31",
+      }).filters
+    ).toMatchObject({
+      wonSince: "2026-04-01",
+      wonUntil: "2026-04-30",
+      lostSince: "2026-03-01",
+      lostUntil: "2026-03-31",
     });
   });
 });

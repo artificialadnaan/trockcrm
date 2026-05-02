@@ -11,6 +11,10 @@ export interface StagePageFilters {
   updatedBefore?: string;
   minAgeDays?: string;
   maxAgeDays?: string;
+  wonSince?: string;
+  wonUntil?: string;
+  lostSince?: string;
+  lostUntil?: string;
 }
 
 export interface StagePageQuery {
@@ -50,6 +54,10 @@ export function normalizeStagePageQuery(input: Record<string, string | undefined
       updatedBefore: input.updatedBefore,
       minAgeDays: input.minAgeDays,
       maxAgeDays: input.maxAgeDays,
+      wonSince: input.won_since,
+      wonUntil: input.won_until,
+      lostSince: input.lost_since,
+      lostUntil: input.lost_until,
     },
   };
 }

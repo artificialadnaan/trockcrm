@@ -373,6 +373,10 @@ export interface DealStagePageInput extends DealBoardInput {
   updatedTo?: string;
   minAgeDays?: number;
   maxAgeDays?: number;
+  wonSince?: string;
+  wonUntil?: string;
+  lostSince?: string;
+  lostUntil?: string;
 }
 
 type DealStageWorkspaceRow = {
@@ -460,11 +464,74 @@ async function listDealStages() {
     .orderBy(asc(pipelineStageConfig.displayOrder));
 }
 
-function buildDealWorkspaceScope(input: DealBoardInput | DealStagePageInput) {
+const sqlList = (values: readonly string[]) => sql.join(values.map((value) => sql`${value}`), sql`, `);
+
+function dealTerminalEnteredAtSql(stageSlugs: readonly string[], fallback: unknown) {
+  return sql`
+    COALESCE(
+      (
+        SELECT MAX(${dealStageHistory.createdAt})
+        FROM ${dealStageHistory}
+        JOIN ${pipelineStageConfig} terminal_history_stage
+          ON terminal_history_stage.id = ${dealStageHistory.toStageId}
+        WHERE ${dealStageHistory.dealId} = ${deals.id}
+          AND terminal_history_stage.slug IN (${sqlList(stageSlugs)})
+      ),
+      ${fallback},
+      ${deals.stageEnteredAt}
+    )
+  `;
+}
+
+function workspaceTerminalEnteredAtSql(stageSlugs: readonly string[], fallbackSql: unknown) {
+  return sql`
+    COALESCE(
+      (
+        SELECT MAX(dsh.created_at)
+        FROM deal_stage_history dsh
+        JOIN public.pipeline_stage_config terminal_history_stage
+          ON terminal_history_stage.id = dsh.to_stage_id
+        WHERE dsh.deal_id = d.id
+          AND terminal_history_stage.slug IN (${sqlList(stageSlugs)})
+      ),
+      ${fallbackSql},
+      d.stage_entered_at
+    )
+  `;
+}
+
+function terminalWorkspaceDateConditions(stage: PipelineStageRow, input: DealStagePageInput) {
+  const terminalFilters = resolvePipelineTerminalDateFilters(input);
+  if (WON_TERMINAL_STAGE_SLUGS.includes(stage.slug as (typeof WON_TERMINAL_STAGE_SLUGS)[number])) {
+    const enteredAt = workspaceTerminalEnteredAtSql(WON_TERMINAL_STAGE_SLUGS, sql`d.actual_close_date::timestamptz`);
+    const conditions = [sql`${enteredAt} >= ${terminalFilters.won.since}`];
+    if (terminalFilters.won.until) {
+      conditions.push(sql`${enteredAt} < ${addUtcDays(terminalFilters.won.until, 1)}`);
+    }
+    return conditions;
+  }
+  if (LOST_TERMINAL_STAGE_SLUGS.includes(stage.slug as (typeof LOST_TERMINAL_STAGE_SLUGS)[number])) {
+    const enteredAt = workspaceTerminalEnteredAtSql(LOST_TERMINAL_STAGE_SLUGS, sql`d.lost_at`);
+    const conditions = [sql`${enteredAt} >= ${terminalFilters.lost.since}`];
+    if (terminalFilters.lost.until) {
+      conditions.push(sql`${enteredAt} < ${addUtcDays(terminalFilters.lost.until, 1)}`);
+    }
+    return conditions;
+  }
+  return [];
+}
+
+function buildDealWorkspaceScope(input: DealBoardInput | DealStagePageInput, stage?: PipelineStageRow) {
+  const terminalDateConditions = stage && "stageId" in input ? terminalWorkspaceDateConditions(stage, input) : [];
   const filters = [
-    sql`d.is_active = true`,
     sql`u.office_id = ${input.activeOfficeId}`,
   ];
+
+  if (terminalDateConditions.length === 0) {
+    filters.unshift(sql`d.is_active = true`);
+  } else {
+    filters.push(...terminalDateConditions);
+  }
 
   if (input.scope === "mine") {
     filters.push(sql`d.assigned_rep_id = ${input.userId}`);
@@ -1395,26 +1462,11 @@ export async function getDealsForPipeline(
   const canonicalLostStageId = stages.find((stage) => stage.slug === "lost" && stage.isActivePipeline)?.id ?? null;
   const nonTerminalStageIds = stages.filter((stage) => !stage.isTerminal).map((stage) => stage.id);
 
-  const sqlList = (values: readonly string[]) => sql.join(values.map((value) => sql`${value}`), sql`, `);
-  const terminalEnteredAt = (stageSlugs: readonly string[], fallback: unknown) => sql`
-    COALESCE(
-      (
-        SELECT MAX(${dealStageHistory.createdAt})
-        FROM ${dealStageHistory}
-        JOIN ${pipelineStageConfig} terminal_history_stage
-          ON terminal_history_stage.id = ${dealStageHistory.toStageId}
-        WHERE ${dealStageHistory.dealId} = ${deals.id}
-          AND terminal_history_stage.slug IN (${sqlList(stageSlugs)})
-      ),
-      ${fallback},
-      ${deals.stageEnteredAt}
-    )
-  `;
   // Prefer the explicit stage-history entry timestamp. Older migrated rows may
   // only have terminal marker fields, so fall back to actual_close_date/lost_at
   // before using the current stage_entered_at value.
-  const wonEnteredAt = terminalEnteredAt(WON_TERMINAL_STAGE_SLUGS, sql`${deals.actualCloseDate}::timestamptz`);
-  const lostEnteredAt = terminalEnteredAt(LOST_TERMINAL_STAGE_SLUGS, deals.lostAt);
+  const wonEnteredAt = dealTerminalEnteredAtSql(WON_TERMINAL_STAGE_SLUGS, sql`${deals.actualCloseDate}::timestamptz`);
+  const lostEnteredAt = dealTerminalEnteredAtSql(LOST_TERMINAL_STAGE_SLUGS, deals.lostAt);
 
   // Non-terminal pipeline behavior remains active-only. Terminal stages are
   // date-filtered separately and intentionally include inactive historical rows.
@@ -1504,17 +1556,29 @@ export async function getDealsForPipeline(
 }
 
 export async function listDealStagePage(tenantDb: TenantDb, input: DealStagePageInput) {
-  const [stage] = await listDealStages().then((stages) => stages.filter((item) => item.id === input.stageId));
+  const stages = await listDealStages();
+  const [stage] = stages.filter((item) => item.id === input.stageId);
   if (!stage) throw new AppError(404, "Deal stage not found");
 
   const page = Math.max(1, input.page || 1);
   const pageSize = Math.max(1, Math.min(100, input.pageSize || 25));
   const offset = (page - 1) * pageSize;
-  const scope = buildDealWorkspaceScope(input);
+  const scope = buildDealWorkspaceScope(input, stage);
+  const stageSlugs = WON_TERMINAL_STAGE_SLUGS.includes(stage.slug as (typeof WON_TERMINAL_STAGE_SLUGS)[number])
+    ? WON_TERMINAL_STAGE_SLUGS
+    : LOST_TERMINAL_STAGE_SLUGS.includes(stage.slug as (typeof LOST_TERMINAL_STAGE_SLUGS)[number])
+      ? LOST_TERMINAL_STAGE_SLUGS
+      : null;
+  const stageIds =
+    stageSlugs == null
+      ? [input.stageId]
+      : stages
+          .filter((item) => (stageSlugs as readonly string[]).includes(item.slug))
+          .map((item) => item.id);
 
   const conditions = [
     scope,
-    sql`d.stage_id = ${input.stageId}`,
+    sql`d.stage_id IN (${sqlList(stageIds)})`,
   ];
 
   if (input.search?.trim()) {

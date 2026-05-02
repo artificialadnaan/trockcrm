@@ -15,8 +15,10 @@ import { StageChangeDialog } from "@/components/deals/stage-change-dialog";
 import { api } from "@/lib/api";
 import { formatCurrencyCompact, bestEstimate, daysInStage } from "@/lib/deal-utils";
 import {
+  buildDealStageWorkspacePath,
   buildPipelineRequestPath,
   daysAgo,
+  getActivePipelineColumns,
   getTerminalDateFilterLabel,
   isTerminalOutcomeSlug,
   readTerminalDateFilter,
@@ -58,6 +60,21 @@ export function summarizeTerminalStageCounts(terminalStages: TerminalStageInfo[]
     .reduce((sum, ts) => sum + ts.count, 0);
 
   return { won, lost };
+}
+
+export function summarizeActivePipelineColumns(columns: PipelineColumn[]) {
+  const activeColumns = getActivePipelineColumns(columns);
+  const totalDeals = activeColumns.reduce((sum, col) => sum + col.count, 0);
+  const totalValue = activeColumns.reduce((sum, col) => sum + col.totalValue, 0);
+  const allDeals = activeColumns.flatMap((col) => col.deals);
+  const averageVelocity =
+    allDeals.length === 0
+      ? 0
+      : Math.round(
+          allDeals.reduce((sum, deal) => sum + daysInStage(deal.stageEnteredAt), 0) / allDeals.length
+        );
+
+  return { totalDeals, totalValue, averageVelocity };
 }
 
 function formatRefreshedLabel(date: Date, now: Date): string {
@@ -428,15 +445,11 @@ export function PipelinePage() {
     fetchPipeline();
   };
 
-  const totalDeals = columns.reduce((sum, col) => sum + col.count, 0);
-  const totalValue = columns.reduce((sum, col) => sum + col.totalValue, 0);
-
-  const avgVelocity = (() => {
-    const allDeals = columns.flatMap((col) => col.deals);
-    if (allDeals.length === 0) return 0;
-    const totalDays = allDeals.reduce((sum, d) => sum + daysInStage(d.stageEnteredAt), 0);
-    return Math.round(totalDays / allDeals.length);
-  })();
+  const {
+    totalDeals,
+    totalValue,
+    averageVelocity: avgVelocity,
+  } = summarizeActivePipelineColumns(columns);
 
   const { won, lost } = summarizeTerminalStageCounts(terminalStages);
   const successRate = (() => {
@@ -555,7 +568,15 @@ export function PipelinePage() {
                   key={column.stage.id}
                   column={column}
                   activeDealId={activeDeal?.id ?? null}
-                  onOpenStage={(stageId) => navigate(`/deals/stages/${stageId}`)}
+                  onOpenStage={(stageId) =>
+                    navigate(
+                      buildDealStageWorkspacePath({
+                        stageId,
+                        stageSlug: column.stage.slug,
+                        filters: terminalDateFilters,
+                      })
+                    )
+                  }
                   terminalFilter={
                     isTerminalOutcomeSlug(column.stage.slug)
                       ? terminalDateFilters[column.stage.slug]
