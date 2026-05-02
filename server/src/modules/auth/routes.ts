@@ -30,6 +30,7 @@ import {
   changeLocalPassword,
   loginWithLocalPassword,
 } from "./local-auth-service.js";
+import { isAuthDemoBootstrapEnabled } from "../../config/feature-flags.js";
 
 const router = Router();
 
@@ -82,7 +83,9 @@ router.post("/dev/login", authLimiter, async (req, res, next) => {
       throw new AppError(404, "User not found");
     }
 
-    await ensureDevDemoWorkspace(resolvedUser.id, demoDefaultOfficeSlug);
+    if (isAuthDemoBootstrapEnabled()) {
+      await ensureDevDemoWorkspace(resolvedUser.id, demoDefaultOfficeSlug);
+    }
 
     const token = signJwt({
       userId: resolvedUser.id,
