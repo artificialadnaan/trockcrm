@@ -12,12 +12,12 @@ import {
 import { useDroppable, useDraggable } from "@dnd-kit/core";
 import { Plus, GripVertical } from "lucide-react";
 import { StageChangeDialog } from "@/components/deals/stage-change-dialog";
+import { TerminalDateFilterControl } from "@/components/pipeline/terminal-date-filter-control";
 import { api } from "@/lib/api";
 import { formatCurrencyCompact, bestEstimate, daysInStage } from "@/lib/deal-utils";
 import {
   buildDealStageWorkspacePath,
   buildPipelineRequestPath,
-  daysAgo,
   getActivePipelineColumns,
   getTerminalDateFilterLabel,
   isTerminalOutcomeSlug,
@@ -216,51 +216,14 @@ function DroppableColumn({
           </span>
         </div>
         {terminalOutcome && terminalFilter && onTerminalFilterChange ? (
-          <div className="mt-2 flex items-center gap-1">
-            <select
-              aria-label={`${column.stage.name} date filter`}
-              className="h-7 rounded-sm border border-gray-200 bg-white px-1.5 text-xs text-gray-600"
-              value={terminalFilter.preset}
-              onChange={(event) => {
-                const value = event.target.value as TerminalDateFilter["preset"];
-                onTerminalFilterChange(
-                  value === "custom"
-                    ? { preset: "custom", customStart: daysAgo(30) }
-                    : { preset: value }
-                );
-              }}
-            >
-              <option value="30">30d</option>
-              <option value="60">60d</option>
-              <option value="90">90d</option>
-              <option value="custom">Custom</option>
-            </select>
-            {terminalFilter.preset === "custom" ? (
-              <>
-                <input
-                  aria-label={`${column.stage.name} start date`}
-                  type="date"
-                  className="h-7 min-w-0 flex-1 rounded-sm border border-gray-200 bg-white px-1.5 text-xs text-gray-600"
-                  value={terminalFilter.customStart}
-                  onChange={(event) =>
-                    onTerminalFilterChange({ ...terminalFilter, customStart: event.target.value })
-                  }
-                />
-                <input
-                  aria-label={`${column.stage.name} end date`}
-                  type="date"
-                  className="h-7 min-w-0 flex-1 rounded-sm border border-gray-200 bg-white px-1.5 text-xs text-gray-600"
-                  value={terminalFilter.customEnd ?? ""}
-                  onChange={(event) =>
-                    onTerminalFilterChange({
-                      ...terminalFilter,
-                      customEnd: event.target.value || undefined,
-                    })
-                  }
-                />
-              </>
-            ) : null}
-          </div>
+          <TerminalDateFilterControl
+            stageName={column.stage.name}
+            filter={terminalFilter}
+            onFilterChange={onTerminalFilterChange}
+            className="mt-2"
+            buttonClassName="rounded-sm text-xs"
+            inputClassName="rounded-sm text-xs"
+          />
         ) : null}
         <p className="mt-1 text-xl font-semibold text-gray-900 tabular-nums">
           {formatCurrencyCompact(column.totalValue)}
