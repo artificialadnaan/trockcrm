@@ -30,6 +30,8 @@ export function TerminalDateFilterControl({
   ) => {
     event.preventDefault();
     event.stopPropagation();
+    if (filter.preset === value) return;
+
     onFilterChange(value === "custom" ? { preset: "custom", customStart: daysAgo(30) } : { preset: value });
   };
 

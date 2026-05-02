@@ -54,4 +54,94 @@ describe("TerminalDateFilterControl", () => {
     expect(onSubmit).not.toHaveBeenCalled();
     expect(onFilterChange).toHaveBeenCalledWith({ preset: "60" });
   });
+
+  it("seeds a default custom range only when entering custom", () => {
+    const onFilterChange = vi.fn();
+
+    act(() => {
+      root?.render(
+        <TerminalDateFilterControl
+          stageName="Won"
+          filter={{ preset: "30" }}
+          onFilterChange={onFilterChange}
+        />
+      );
+    });
+
+    act(() => {
+      container
+        .querySelector<HTMLButtonElement>('button[aria-label="Show Won deals from a custom date range"]')
+        ?.click();
+    });
+
+    expect(onFilterChange).toHaveBeenCalledTimes(1);
+    expect(onFilterChange.mock.calls[0][0]).toMatchObject({ preset: "custom" });
+    expect(onFilterChange.mock.calls[0][0].customStart).toMatch(/^\d{4}-\d{2}-\d{2}$/);
+  });
+
+  it("preserves an active custom range when custom is clicked again", () => {
+    const onFilterChange = vi.fn();
+
+    act(() => {
+      root?.render(
+        <TerminalDateFilterControl
+          stageName="Won"
+          filter={{ preset: "custom", customStart: "2026-04-01", customEnd: "2026-04-30" }}
+          onFilterChange={onFilterChange}
+        />
+      );
+    });
+
+    act(() => {
+      container
+        .querySelector<HTMLButtonElement>('button[aria-label="Show Won deals from a custom date range"]')
+        ?.click();
+    });
+
+    expect(onFilterChange).not.toHaveBeenCalled();
+  });
+
+  it("does not refetch when clicking the currently active preset", () => {
+    const onFilterChange = vi.fn();
+
+    act(() => {
+      root?.render(
+        <TerminalDateFilterControl
+          stageName="Won"
+          filter={{ preset: "30" }}
+          onFilterChange={onFilterChange}
+        />
+      );
+    });
+
+    act(() => {
+      container
+        .querySelector<HTMLButtonElement>('button[aria-label="Show Won deals from the last 30 days"]')
+        ?.click();
+    });
+
+    expect(onFilterChange).not.toHaveBeenCalled();
+  });
+
+  it("changes between non-active presets", () => {
+    const onFilterChange = vi.fn();
+
+    act(() => {
+      root?.render(
+        <TerminalDateFilterControl
+          stageName="Won"
+          filter={{ preset: "30" }}
+          onFilterChange={onFilterChange}
+        />
+      );
+    });
+
+    act(() => {
+      container
+        .querySelector<HTMLButtonElement>('button[aria-label="Show Won deals from the last 60 days"]')
+        ?.click();
+    });
+
+    expect(onFilterChange).toHaveBeenCalledWith({ preset: "60" });
+  });
 });

@@ -13,7 +13,25 @@
 DO $$
 DECLARE
   tenant_schema text;
+  migration_0065_executed_at timestamptz;
 BEGIN
+  -- Use the actual 0065 application timestamp instead of a literal cutover
+  -- timestamp so replayed databases, restored staging snapshots, and future
+  -- tenant runs repair rows stamped by their own migration execution time.
+  IF to_regclass('public._migrations') IS NOT NULL THEN
+    SELECT executed_at
+    INTO migration_0065_executed_at
+    FROM public._migrations
+    WHERE name = '0065_bidboard_stage_v2_active_deal_backfill.sql'
+    ORDER BY executed_at DESC
+    LIMIT 1;
+  END IF;
+
+  IF migration_0065_executed_at IS NULL THEN
+    RAISE NOTICE 'Skipping stage_entered_at repair because 0065 migration timestamp is not available';
+    RETURN;
+  END IF;
+
   FOR tenant_schema IN
     SELECT schemata.schema_name
     FROM information_schema.schemata AS schemata
@@ -74,7 +92,8 @@ BEGIN
               d.stage_entered_at IS NULL
               OR latest_history.latest_stage_history_at > d.stage_entered_at
               OR (
-                d.stage_entered_at >= TIMESTAMPTZ '2026-05-01T19:00:00Z'
+                d.stage_entered_at >= %L::timestamptz - INTERVAL '10 seconds'
+                AND d.stage_entered_at <= %L::timestamptz + INTERVAL '10 seconds'
                 AND d.created_at < d.stage_entered_at
               )
             )
@@ -87,6 +106,8 @@ BEGIN
         $sql$,
         tenant_schema,
         tenant_schema,
+        migration_0065_executed_at,
+        migration_0065_executed_at,
         tenant_schema
       );
     END IF;

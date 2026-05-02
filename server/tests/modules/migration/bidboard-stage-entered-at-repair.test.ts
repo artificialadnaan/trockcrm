@@ -12,7 +12,10 @@ describe("0074_repair_bidboard_stage_entered_at migration", () => {
     expect(migrationSql).toContain("deal_stage_history");
     expect(migrationSql).toContain("bid_board_stage_entered_at");
     expect(migrationSql).toContain("created_at");
-    expect(migrationSql).toContain("2026-05-01T19:00:00Z");
+    expect(migrationSql).toContain("public._migrations");
+    expect(migrationSql).toContain("0065_bidboard_stage_v2_active_deal_backfill.sql");
+    expect(migrationSql).toContain("INTERVAL '10 seconds'");
+    expect(migrationSql).not.toContain("2026-05-01T19:00:00Z");
     expect(migrationSql).toContain("stage_entered_at IS DISTINCT FROM");
   });
 });
