@@ -1,6 +1,49 @@
-import { expect, test, type Page } from "@playwright/test";
+import { expect, request as playwrightRequest, test, type Page } from "@playwright/test";
 
 const routes = ["/deals", "/leads", "/contacts", "/tasks", "/reports"];
+const smokeContactEmailPattern = /^track-b-\d+@example\.test$/;
+
+async function cleanupSmokeContacts() {
+  const baseURL = process.env.PLAYWRIGHT_BASE_URL?.trim() || "http://127.0.0.1:4173";
+  const origin = new URL(baseURL).origin;
+  const context = await playwrightRequest.newContext({ baseURL });
+
+  try {
+    await context.get("/api/health");
+    await context.post("/api/auth/dev/login", {
+      headers: { Origin: origin },
+      data: { email: "admin@trock.dev" },
+    });
+
+    const storage = await context.storageState();
+    const csrfToken = storage.cookies.find((cookie) => cookie.name === "csrf_token")?.value;
+    const response = await context.get("/api/contacts?search=track-b&limit=100");
+    const body = await response.json();
+    const contacts = Array.isArray(body.contacts) ? body.contacts : [];
+    const smokeContacts = contacts.filter((contact: { id?: string; email?: string | null }) =>
+      contact.id && contact.email && smokeContactEmailPattern.test(contact.email)
+    );
+
+    let deleted = 0;
+    for (const contact of smokeContacts) {
+      const deleteResponse = await context.delete(`/api/contacts/${contact.id}`, {
+        headers: {
+          Origin: origin,
+          ...(csrfToken ? { "X-CSRF-Token": csrfToken } : {}),
+        },
+      });
+      if (deleteResponse.ok()) deleted += 1;
+    }
+
+    console.log(`[track-b-smoke] cleanup deleted ${deleted} smoke contact(s)`);
+  } finally {
+    await context.dispose();
+  }
+}
+
+test.afterAll(async () => {
+  await cleanupSmokeContacts();
+});
 
 async function loginAsAdmin(page: Page) {
   await page.goto("/");
