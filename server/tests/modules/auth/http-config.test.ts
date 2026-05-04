@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  assertSafeDevAuthConfig,
   getAllowedCorsOrigins,
   getTokenCookieOptions,
   isDevAuthEnabled,
@@ -52,15 +53,28 @@ describe("auth http config", () => {
     ).toBe(true);
   });
 
-  it("allows dev auth remotely when explicit testing mode is enabled", () => {
+  it("requires explicit testing mode to stay on local development hosts", () => {
     expect(
       isDevAuthEnabled(
         {
-          NODE_ENV: "production",
+          NODE_ENV: "development",
           AZURE_CLIENT_ID: "",
           DEV_MODE: "true",
         },
         "crm.trockconstruction.com"
+      )
+    ).toBe(false);
+  });
+
+  it("allows explicit testing mode on localhost during development", () => {
+    expect(
+      isDevAuthEnabled(
+        {
+          NODE_ENV: "development",
+          AZURE_CLIENT_ID: "",
+          DEV_MODE: "true",
+        },
+        "localhost:3001"
       )
     ).toBe(true);
   });
@@ -75,5 +89,14 @@ describe("auth http config", () => {
         "crm.trockconstruction.com"
       )
     ).toBe(false);
+  });
+
+  it("fails startup when production enables DEV_MODE", () => {
+    expect(() =>
+      assertSafeDevAuthConfig({
+        NODE_ENV: "production",
+        DEV_MODE: "true",
+      })
+    ).toThrow("DEV_MODE=true is not allowed");
   });
 });

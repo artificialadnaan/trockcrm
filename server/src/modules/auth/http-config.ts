@@ -31,18 +31,36 @@ export function getAllowedCorsOrigins(env: EnvInput): string[] {
   return origins;
 }
 
-export function isDevAuthEnabled(env: EnvInput, host: string | undefined): boolean {
-  const normalizedHost = host?.trim().toLowerCase() ?? "";
-  const isLocalDevEnv = env.NODE_ENV === "development" || env.NODE_ENV === "test";
-  const hasAzureSso = Boolean(env.AZURE_CLIENT_ID?.trim());
-  const explicitDevMode = env.DEV_MODE === "true";
-  const isLocalhost =
+function normalizeHost(host: string | undefined): string {
+  const normalized = host?.trim().toLowerCase() ?? "";
+  if (normalized.startsWith("[::1]")) return "::1";
+  return normalized.split(":")[0] ?? "";
+}
+
+function isLocalOrTestHost(host: string | undefined): boolean {
+  const normalizedHost = normalizeHost(host);
+  return (
     normalizedHost === "localhost" ||
     normalizedHost === "127.0.0.1" ||
     normalizedHost === "::1" ||
-    normalizedHost.startsWith("localhost:");
+    normalizedHost === "test" ||
+    normalizedHost.endsWith(".test")
+  );
+}
 
-  if (explicitDevMode) return true;
+export function assertSafeDevAuthConfig(env: EnvInput): void {
+  if (env.NODE_ENV === "production" && env.DEV_MODE === "true") {
+    throw new Error("Unsafe auth configuration: DEV_MODE=true is not allowed when NODE_ENV=production");
+  }
+}
+
+export function isDevAuthEnabled(env: EnvInput, host: string | undefined): boolean {
+  const isLocalDevEnv = env.NODE_ENV === "development" || env.NODE_ENV === "test";
+  const hasAzureSso = Boolean(env.AZURE_CLIENT_ID?.trim());
+  const explicitDevMode = env.DEV_MODE === "true";
+  const isLocalhost = isLocalOrTestHost(host);
+
+  if (explicitDevMode) return isLocalDevEnv && isLocalhost;
   if (hasAzureSso) return false;
 
   return isLocalDevEnv && isLocalhost;

@@ -4,6 +4,9 @@ dotenv.config();
 import { createApp } from "./app.js";
 import { configureR2Cors, getAllowedR2CorsOrigins } from "./lib/r2-client.js";
 import { pool } from "./db.js";
+import { assertSafeDevAuthConfig } from "./modules/auth/http-config.js";
+
+assertSafeDevAuthConfig(process.env);
 
 const PORT = parseInt(process.env.PORT || "3001", 10);
 const app = createApp();
