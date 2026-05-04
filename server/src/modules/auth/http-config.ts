@@ -1,3 +1,5 @@
+import crypto from "crypto";
+
 type EnvInput = {
   CORS_ALLOWED_ORIGINS?: string | undefined;
   FRONTEND_URL?: string | undefined;
@@ -9,12 +11,21 @@ type EnvInput = {
   DEV_MODE?: string | undefined;
 };
 
+export const CSRF_COOKIE_NAME = "csrf_token";
+export const CSRF_HEADER_NAME = "x-csrf-token";
+
 function normalizeOrigin(value: string | undefined): string | null {
   if (!value) return null;
   const trimmed = value.trim();
   if (!trimmed) return null;
   if (/^https?:\/\//i.test(trimmed)) return trimmed.replace(/\/+$/, "");
   return `https://${trimmed.replace(/\/+$/, "")}`;
+}
+
+function safeEqual(a: string, b: string): boolean {
+  const left = Buffer.from(a);
+  const right = Buffer.from(b);
+  return left.length === right.length && crypto.timingSafeEqual(left, right);
 }
 
 export function getAllowedCorsOrigins(env: EnvInput): string[] {
@@ -77,4 +88,55 @@ export function getTokenCookieOptions(env: EnvInput) {
     sameSite: isProduction ? "none" : "strict",
     maxAge: 24 * 60 * 60 * 1000,
   } as const;
+}
+
+export function getCsrfCookieOptions(env: EnvInput) {
+  const isProduction = env.NODE_ENV === "production";
+
+  return {
+    httpOnly: false,
+    secure: isProduction,
+    sameSite: isProduction ? "none" : "strict",
+    maxAge: 24 * 60 * 60 * 1000,
+  } as const;
+}
+
+export function createCsrfToken(): string {
+  return crypto.randomBytes(32).toString("base64url");
+}
+
+export function isUnsafeHttpMethod(method: string): boolean {
+  return ["POST", "PUT", "PATCH", "DELETE"].includes(method.toUpperCase());
+}
+
+export function getRequestOrigin(headers: {
+  origin?: string | string[] | undefined;
+  referer?: string | string[] | undefined;
+  referrer?: string | string[] | undefined;
+}): string | null {
+  const origin = Array.isArray(headers.origin) ? headers.origin[0] : headers.origin;
+  const refererHeader = headers.referer ?? headers.referrer;
+  const referer = Array.isArray(refererHeader) ? refererHeader[0] : refererHeader;
+  const normalizedOrigin = normalizeOrigin(origin);
+  if (normalizedOrigin) return normalizedOrigin;
+  if (!referer) return null;
+
+  try {
+    const parsed = new URL(referer);
+    return `${parsed.protocol}//${parsed.host}`;
+  } catch {
+    return null;
+  }
+}
+
+export function isAllowedCookieAuthOrigin(env: EnvInput, origin: string | null): boolean {
+  if (!origin) return false;
+  const normalized = normalizeOrigin(origin);
+  if (!normalized) return false;
+  return getAllowedCorsOrigins(env).includes(normalized);
+}
+
+export function isValidCsrfPair(cookieToken: string | undefined, headerToken: string | undefined): boolean {
+  if (!cookieToken || !headerToken) return false;
+  return safeEqual(cookieToken, headerToken);
 }

@@ -1,8 +1,12 @@
 import { describe, expect, it } from "vitest";
 import {
   assertSafeDevAuthConfig,
+  createCsrfToken,
   getAllowedCorsOrigins,
+  getRequestOrigin,
   getTokenCookieOptions,
+  isAllowedCookieAuthOrigin,
+  isValidCsrfPair,
   isDevAuthEnabled,
 } from "../../../src/modules/auth/http-config.js";
 
@@ -98,5 +102,30 @@ describe("auth http config", () => {
         DEV_MODE: "true",
       })
     ).toThrow("DEV_MODE=true is not allowed");
+  });
+
+  it("allows only exact configured origins for cookie-authenticated unsafe requests", () => {
+    const env = {
+      CORS_ALLOWED_ORIGINS: "https://crm.trockconstruction.com, http://localhost:3001",
+    };
+
+    expect(isAllowedCookieAuthOrigin(env, "https://crm.trockconstruction.com")).toBe(true);
+    expect(isAllowedCookieAuthOrigin(env, "https://evil.example.com")).toBe(false);
+    expect(isAllowedCookieAuthOrigin(env, "https://crm.trockconstruction.com.evil.example.com")).toBe(false);
+    expect(isAllowedCookieAuthOrigin(env, null)).toBe(false);
+  });
+
+  it("normalizes Origin before falling back to Referer", () => {
+    expect(getRequestOrigin({ origin: "http://localhost:3001/" })).toBe("http://localhost:3001");
+    expect(getRequestOrigin({ referer: "http://localhost:3001/deals/123" })).toBe("http://localhost:3001");
+    expect(getRequestOrigin({ referer: "not-a-url" })).toBeNull();
+  });
+
+  it("validates matching CSRF cookie and header tokens", () => {
+    const token = createCsrfToken();
+    expect(isValidCsrfPair(token, token)).toBe(true);
+    expect(isValidCsrfPair(token, createCsrfToken())).toBe(false);
+    expect(isValidCsrfPair(undefined, token)).toBe(false);
+    expect(isValidCsrfPair(token, undefined)).toBe(false);
   });
 });
