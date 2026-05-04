@@ -5,7 +5,14 @@ Implements Track B cutover blockers:
 - B-11: upgraded `drizzle-orm` to `0.45.2` in `server`, `shared`, and `worker`.
 - B-12: upgraded `vite` to `7.3.2` and `@vitejs/plugin-react` to `5.2.0` in `client`.
 - B-09: hardened dev auth so `DEV_MODE=true` only works in local development/test hosts, and production startup fails when `DEV_MODE=true`.
+- B-09 amendment: added temporary `ALLOW_DEV_AUTH_IN_PROD=true` override for pre-cutover production E2E verification.
 - B-08: added exact-origin/referrer and double-submit CSRF protection for cookie-authenticated unsafe methods, while leaving raw Procore webhook routes outside the CSRF guard.
+
+# Pre-cutover override
+
+`ALLOW_DEV_AUTH_IN_PROD=true` allows `NODE_ENV=production && DEV_MODE=true` to start temporarily for CFO-requested E2E verification with dev accounts before the May 15 cutover. When active, startup logs a loud warning naming the override and stating it must be removed before cutover.
+
+Without `ALLOW_DEV_AUTH_IN_PROD=true`, production `DEV_MODE=true` still hard-fails startup. `NODE_ENV=production && DEV_MODE=false` remains unchanged and keeps dev auth disabled.
 
 # Files changed
 
@@ -37,6 +44,7 @@ Green:
 - Docker image builds for B-11/B-12/B-09/B-08
 - Local Docker health/read smoke
 - B-09 development, production-fail, and production-disabled Docker smoke
+- B-09 pre-cutover override Docker smoke: override starts + `/api/auth/dev/users` returns 200; missing override hard-fails; `DEV_MODE=false` starts with dev auth disabled
 - B-08 CSRF/origin curl smoke
 - Procore webhook valid and invalid signature smoke
 - `PLAYWRIGHT_BASE_URL=http://localhost:30011 ./node_modules/.bin/playwright test client/e2e/track-b-smoke.spec.ts` — 6 passed

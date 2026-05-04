@@ -9,6 +9,7 @@ type EnvInput = {
   NODE_ENV?: string | undefined;
   AZURE_CLIENT_ID?: string | undefined;
   DEV_MODE?: string | undefined;
+  ALLOW_DEV_AUTH_IN_PROD?: string | undefined;
 };
 
 export const CSRF_COOKIE_NAME = "csrf_token";
@@ -60,9 +61,21 @@ function isLocalOrTestHost(host: string | undefined): boolean {
 }
 
 export function assertSafeDevAuthConfig(env: EnvInput): void {
-  if (env.NODE_ENV === "production" && env.DEV_MODE === "true") {
+  if (
+    env.NODE_ENV === "production" &&
+    env.DEV_MODE === "true" &&
+    !isDevAuthProductionOverrideEnabled(env)
+  ) {
     throw new Error("Unsafe auth configuration: DEV_MODE=true is not allowed when NODE_ENV=production");
   }
+}
+
+export function isDevAuthProductionOverrideEnabled(env: EnvInput): boolean {
+  return (
+    env.NODE_ENV === "production" &&
+    env.DEV_MODE === "true" &&
+    env.ALLOW_DEV_AUTH_IN_PROD === "true"
+  );
 }
 
 export function isDevAuthEnabled(env: EnvInput, host: string | undefined): boolean {
@@ -71,6 +84,7 @@ export function isDevAuthEnabled(env: EnvInput, host: string | undefined): boole
   const explicitDevMode = env.DEV_MODE === "true";
   const isLocalhost = isLocalOrTestHost(host);
 
+  if (isDevAuthProductionOverrideEnabled(env)) return true;
   if (explicitDevMode) return isLocalDevEnv && isLocalhost;
   if (hasAzureSso) return false;
 

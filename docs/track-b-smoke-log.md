@@ -86,6 +86,41 @@ Raw SQL / tenant interpolation audit:
   - Response status: 404
   - Body snippet: `{"error":{"message":"Dev mode not available"}}`
 
+## B-09 Amendment — ALLOW_DEV_AUTH_IN_PROD Pre-Cutover Override
+
+Why it exists:
+- CFO needs temporary production E2E verification with `admin@trock.dev`, `director@trock.dev`, and `rep@trock.dev` before May 15 cutover.
+- This override is intentionally loud and temporary. `ALLOW_DEV_AUTH_IN_PROD=true` must be removed before the May 15 cutover.
+
+Validation:
+- Command: `npx vitest run tests/modules/auth/http-config.test.ts`
+  - Exit code: 0
+  - Result: 14 tests passed.
+- Command: `npm run typecheck --workspace=server`
+  - Exit code: 0
+- Command: `npm run build --workspace=server`
+  - Exit code: 0
+- Command: `docker build -t trock-track-b-api:allow-dev-auth .`
+  - Exit code: 0
+- Command: production stack with `NODE_ENV=production DEV_MODE=true ALLOW_DEV_AUTH_IN_PROD=true`, `curl -i http://localhost:30014/api/auth/dev/users`
+  - Exit code: 0
+  - Response status: 200
+  - Body snippet: `admin@trock.dev`, `director@trock.dev`, `rep@trock.dev`
+  - Startup log snippet: `[AUTH][PRE-CUTOVER OVERRIDE] ALLOW_DEV_AUTH_IN_PROD=true is enabling DEV_MODE in production for temporary E2E verification. Remove this override before the May 15 cutover.`
+- Command: production stack with `NODE_ENV=production DEV_MODE=true` and no override, `node server/dist/index.js`
+  - Exit code: 1
+  - stderr snippet: `Unsafe auth configuration: DEV_MODE=true is not allowed when NODE_ENV=production`
+- Command: production stack with `NODE_ENV=production DEV_MODE=false`, `curl -i http://localhost:30015/api/health`
+  - Exit code: 0
+  - Response status: 200
+- Command: production stack with `NODE_ENV=production DEV_MODE=false`, `curl -i http://localhost:30015/api/auth/dev/users`
+  - Exit code: 0
+  - Response status: 404
+  - Body snippet: `{"error":{"message":"Dev mode not available"}}`
+- Command: `PLAYWRIGHT_BASE_URL=http://localhost:30011 ./node_modules/.bin/playwright test client/e2e/track-b-smoke.spec.ts`
+  - Exit code: 0
+  - Result: 6 passed.
+
 ## B-08 — CSRF / Origin Guard
 
 - Command: `npm run typecheck --workspace=server`

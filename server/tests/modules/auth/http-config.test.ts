@@ -104,6 +104,39 @@ describe("auth http config", () => {
     ).toThrow("DEV_MODE=true is not allowed");
   });
 
+  it("allows startup when production dev auth has the explicit pre-cutover override", () => {
+    expect(() =>
+      assertSafeDevAuthConfig({
+        NODE_ENV: "production",
+        DEV_MODE: "true",
+        ALLOW_DEV_AUTH_IN_PROD: "true",
+      })
+    ).not.toThrow();
+  });
+
+  it("keeps hard-failing production DEV_MODE when the pre-cutover override is false", () => {
+    expect(() =>
+      assertSafeDevAuthConfig({
+        NODE_ENV: "production",
+        DEV_MODE: "true",
+        ALLOW_DEV_AUTH_IN_PROD: "false",
+      })
+    ).toThrow("DEV_MODE=true is not allowed");
+  });
+
+  it("enables dev auth endpoints in production only when the pre-cutover override is present", () => {
+    expect(
+      isDevAuthEnabled(
+        {
+          NODE_ENV: "production",
+          DEV_MODE: "true",
+          ALLOW_DEV_AUTH_IN_PROD: "true",
+        },
+        "crm.trockconstruction.com"
+      )
+    ).toBe(true);
+  });
+
   it("allows only exact configured origins for cookie-authenticated unsafe requests", () => {
     const env = {
       CORS_ALLOWED_ORIGINS: "https://crm.trockconstruction.com, http://localhost:3001",
