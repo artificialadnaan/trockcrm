@@ -49,7 +49,7 @@ vi.mock("../../../src/modules/contacts/service.js", () => ({
 
 const { callRecordingRoutes } = await import("../../../src/modules/call-recordings/routes.js");
 
-type TestRole = "admin" | "director" | "rep" | "construction";
+type TestRole = "admin" | "director" | "rep" | "construction" | "field_contractor";
 
 function testUser(role: TestRole, id = `${role}-1`) {
   return {
@@ -215,6 +215,16 @@ describe("call recording routes", () => {
     expect(list.res.body.recordings).toEqual([]);
   });
 
+  it("rejects field contractors before listing call recordings", async () => {
+    const { nextError } = await invokeRoute("get", "/", {
+      user: testUser("field_contractor"),
+      query: { entityType: "deal", entityId: "deal-1" },
+    });
+
+    expect((nextError as any).statusCode).toBe(403);
+    expect(serviceMocks.listForEntity).not.toHaveBeenCalled();
+  });
+
   it("allows non-admin users to play recordings", async () => {
     serviceMocks.getPlaybackUrl.mockResolvedValue({ playbackUrl: "https://example.test/play" });
 
@@ -224,6 +234,16 @@ describe("call recording routes", () => {
     });
 
     expect(playback.res.body.playbackUrl).toBe("https://example.test/play");
+  });
+
+  it("rejects field contractors before playback lookup", async () => {
+    const playback = await invokeRoute("get", "/:id/playback", {
+      user: testUser("field_contractor"),
+      params: { id: "rec-1" },
+    });
+
+    expect((playback.nextError as any).statusCode).toBe(403);
+    expect(serviceMocks.getPlaybackUrl).not.toHaveBeenCalled();
   });
 
   it("returns transcripts through the same recording visibility service", async () => {
@@ -251,6 +271,16 @@ describe("call recording routes", () => {
       "rec-1",
       { role: "rep", userId: "rep-1" }
     );
+  });
+
+  it("rejects field contractors before transcript lookup", async () => {
+    const transcript = await invokeRoute("get", "/:id/transcript", {
+      user: testUser("field_contractor"),
+      params: { id: "rec-1" },
+    });
+
+    expect((transcript.nextError as any).statusCode).toBe(403);
+    expect(serviceMocks.getTranscript).not.toHaveBeenCalled();
   });
 
   it("rejects non-admin deletes", async () => {

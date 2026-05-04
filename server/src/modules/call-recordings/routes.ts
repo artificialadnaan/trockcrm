@@ -11,14 +11,22 @@ import {
   getTranscript,
   listForEntity,
   softDelete,
+  type CallRecordingAllowedRole,
   type CallRecordingEntityType,
 } from "./service.js";
+import type { UserRole } from "@trock-crm/shared/types";
 
 const router = Router();
 
 function requireAdminRole(role: string) {
   if (role !== "admin") {
     throw new AppError(403, "Only admins can upload or delete call recordings.");
+  }
+}
+
+function requireCallRecordingRole(role: UserRole): asserts role is CallRecordingAllowedRole {
+  if (role === "field_contractor") {
+    throw new AppError(403, "Call recordings are not available for this role.");
   }
 }
 
@@ -92,6 +100,7 @@ router.get("/", async (req, res, next) => {
       throw new AppError(400, "entityType and entityId are required.");
     }
     await assertEntityReadable(req, entityType, entityId);
+    requireCallRecordingRole(req.user!.role);
     const recordings = await listForEntity(req.tenantDb!, entityType, entityId, {
       role: req.user!.role,
       userId: req.user!.id,
@@ -107,6 +116,7 @@ router.get("/", async (req, res, next) => {
 
 router.get("/:id/playback", async (req, res, next) => {
   try {
+    requireCallRecordingRole(req.user!.role);
     const result = await getPlaybackUrl(req.tenantDb!, req.params.id, {
       role: req.user!.role,
       userId: req.user!.id,
@@ -120,6 +130,7 @@ router.get("/:id/playback", async (req, res, next) => {
 
 router.get("/:id/transcript", async (req, res, next) => {
   try {
+    requireCallRecordingRole(req.user!.role);
     const result = await getTranscript(req.tenantDb!, req.params.id, {
       role: req.user!.role,
       userId: req.user!.id,

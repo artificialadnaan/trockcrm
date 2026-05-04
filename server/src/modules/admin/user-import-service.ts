@@ -15,8 +15,14 @@ import {
   listProcoreUsers,
   type ProcoreUser,
 } from "../../lib/procore-client.js";
+import type { UserRole } from "@trock-crm/shared/types";
 
 type ExternalUserSource = (typeof externalUserSourceEnum.enumValues)[number];
+type ImportableUserRole = Exclude<UserRole, "field_contractor">;
+
+function isImportableUserRole(role: UserRole): role is ImportableUserRole {
+  return role !== "field_contractor";
+}
 
 interface ExternalIdentityCandidate {
   sourceSystem: ExternalUserSource;
@@ -31,11 +37,20 @@ interface ExternalUserCandidate {
   identities: ExternalIdentityCandidate[];
 }
 
+interface ImportServiceExistingUser {
+  id: string;
+  email: string;
+  displayName: string;
+  role: UserRole;
+  officeId: string;
+  isActive: boolean;
+}
+
 interface ImportServiceUser {
   id: string;
   email: string;
   displayName: string;
-  role: "admin" | "director" | "rep" | "construction";
+  role: ImportableUserRole;
   officeId: string;
   isActive: boolean;
 }
@@ -48,7 +63,7 @@ interface ImportServiceOffice {
 
 interface ImportServiceDependencies {
   getOfficeBySlug: (slug: string) => Promise<ImportServiceOffice | null>;
-  getUserByEmail: (email: string) => Promise<ImportServiceUser | null>;
+  getUserByEmail: (email: string) => Promise<ImportServiceExistingUser | null>;
   createUser: (input: {
     email: string;
     displayName: string;
@@ -117,7 +132,7 @@ const defaultDependencies: ImportServiceDependencies = {
         isActive: users.isActive,
       });
 
-    return user;
+    return { ...user, role: input.role };
   },
   async upsertExternalIdentity(input) {
     await db
@@ -300,6 +315,12 @@ export async function importExternalUsers(
 
   for (const candidate of candidates) {
     const existing = await deps.getUserByEmail(candidate.email);
+    if (existing && !isImportableUserRole(existing.role)) {
+      summary.skippedCount += 1;
+      summary.warnings.push(`Skipped ${candidate.email}: existing user role is not importable`);
+      continue;
+    }
+
     const user =
       existing ??
       (await deps.createUser({

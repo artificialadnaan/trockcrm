@@ -1,4 +1,4 @@
-export const USER_ROLES = ["admin", "director", "rep", "construction"] as const;
+export const USER_ROLES = ["admin", "director", "rep", "construction", "field_contractor"] as const;
 export type UserRole = (typeof USER_ROLES)[number];
 
 export const DEAL_STAGES = [
@@ -170,6 +170,47 @@ export const FILE_CATEGORIES = [
   "other",
 ] as const;
 export type FileCategory = (typeof FILE_CATEGORIES)[number];
+
+export const PHOTO_CATEGORIES = [
+  "before",
+  "after",
+  "progress",
+  "site_visit",
+  "damage",
+  "safety",
+  "delivery",
+  "other",
+] as const;
+export type PhotoCategory = (typeof PHOTO_CATEGORIES)[number];
+
+export const PHOTO_ADDRESS_SOURCES = [
+  "exif",
+  "live_gps",
+  "deal_fallback",
+  "manual_override",
+] as const;
+export type PhotoAddressSource = (typeof PHOTO_ADDRESS_SOURCES)[number];
+
+export const PROCORE_PHOTO_SYNC_STATUSES = [
+  "pending",
+  "synced",
+  "failed",
+  "skipped",
+] as const;
+export type ProcorePhotoSyncStatus = (typeof PROCORE_PHOTO_SYNC_STATUSES)[number];
+
+export const PHOTO_AUDIT_EVENT_TYPES = [
+  "uploaded",
+  "category_changed",
+  "address_changed",
+  "caption_changed",
+  "downloaded",
+  "deleted",
+  "restored",
+  "procore_synced",
+  "procore_sync_failed",
+] as const;
+export type PhotoAuditEventType = (typeof PHOTO_AUDIT_EVENT_TYPES)[number];
 
 export const TASK_TYPES = [
   "follow_up",
