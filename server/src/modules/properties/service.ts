@@ -26,7 +26,77 @@ export interface CreatePropertyInput {
   city?: string | null;
   state?: string | null;
   zip?: string | null;
+  buildYear?: number | null;
+  unitCount?: number | null;
   notes?: string | null;
+}
+
+const US_STATE_PATTERN = /^[A-Z]{2}$/;
+const ZIP_PATTERN = /^\d{5}(-\d{4})?$/;
+
+export function validatePropertyAddressFields(input: {
+  address?: string | null;
+  city?: string | null;
+  state?: string | null;
+  zip?: string | null;
+}) {
+  const missing: string[] = [];
+  if (!input.address?.trim()) missing.push("address");
+  if (!input.city?.trim()) missing.push("city");
+  if (!input.state?.trim()) missing.push("state");
+  if (!input.zip?.trim()) missing.push("zip");
+
+  if (missing.length > 0) {
+    throw new AppError(400, `Property address is incomplete: ${missing.join(", ")}`);
+  }
+
+  const normalizedState = input.state!.trim().toUpperCase();
+  if (!US_STATE_PATTERN.test(normalizedState)) {
+    throw new AppError(400, "State must be a 2-letter US state code");
+  }
+
+  const normalizedZip = input.zip!.trim();
+  if (!ZIP_PATTERN.test(normalizedZip)) {
+    throw new AppError(400, "ZIP must be 5 digits or ZIP+4");
+  }
+
+  return {
+    address: input.address!.trim(),
+    city: input.city!.trim(),
+    state: normalizedState,
+    zip: normalizedZip,
+  };
+}
+
+export function validatePropertyBuildYear(value: unknown, now = new Date()) {
+  const year = typeof value === "string" ? Number(value) : value;
+  const maxYear = now.getFullYear() + 2;
+  if (!Number.isInteger(year) || (year as number) < 1800 || (year as number) > maxYear) {
+    throw new AppError(400, `Year built must be between 1800 and ${maxYear}`);
+  }
+  return year as number;
+}
+
+export function validatePropertyUnitCount(value: unknown) {
+  const count = typeof value === "string" ? Number(value) : value;
+  if (!Number.isInteger(count) || (count as number) <= 0) {
+    throw new AppError(400, "Number of units must be a positive integer");
+  }
+  return count as number;
+}
+
+function validateOptionalPropertyBuildYear(value: unknown) {
+  if (value === undefined || value === null || value === "") {
+    return null;
+  }
+  return validatePropertyBuildYear(value);
+}
+
+function validateOptionalPropertyUnitCount(value: unknown) {
+  if (value === undefined || value === null || value === "") {
+    return null;
+  }
+  return validatePropertyUnitCount(value);
 }
 
 function coerceCount(value: unknown) {
@@ -82,6 +152,8 @@ export async function listProperties(
         city: properties.city,
         state: properties.state,
         zip: properties.zip,
+        buildYear: properties.buildYear,
+        unitCount: properties.unitCount,
         notes: properties.notes,
         isActive: properties.isActive,
         createdAt: properties.createdAt,
@@ -165,6 +237,10 @@ export async function listProperties(
 }
 
 export async function createProperty(tenantDb: TenantDb, input: CreatePropertyInput) {
+  const address = validatePropertyAddressFields(input);
+  const buildYear = validateOptionalPropertyBuildYear(input.buildYear);
+  const unitCount = validateOptionalPropertyUnitCount(input.unitCount);
+
   const [company] = await tenantDb
     .select({ id: companies.id })
     .from(companies)
@@ -180,10 +256,12 @@ export async function createProperty(tenantDb: TenantDb, input: CreatePropertyIn
     .values({
       companyId: input.companyId,
       name: input.name,
-      address: input.address ?? null,
-      city: input.city ?? null,
-      state: input.state ?? null,
-      zip: input.zip ?? null,
+      address: address.address,
+      city: address.city,
+      state: address.state,
+      zip: address.zip,
+      buildYear,
+      unitCount,
       notes: input.notes ?? null,
       isActive: true,
     })
@@ -202,6 +280,8 @@ export async function getPropertyDetail(tenantDb: TenantDb, propertyId: string) 
       city: properties.city,
       state: properties.state,
       zip: properties.zip,
+      buildYear: properties.buildYear,
+      unitCount: properties.unitCount,
       notes: properties.notes,
       isActive: properties.isActive,
       createdAt: properties.createdAt,

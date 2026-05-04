@@ -11,6 +11,7 @@ interface PropertySelectorProps {
   value: string | null;
   onChange: (propertyId: string) => void;
   required?: boolean;
+  requireLeadCreateFields?: boolean;
 }
 
 export async function resolveSelectedPropertyLabel(
@@ -28,7 +29,13 @@ export async function resolveSelectedPropertyLabel(
   return formatPropertyLabel(data.property);
 }
 
-export function PropertySelector({ companyId, value, onChange, required }: PropertySelectorProps) {
+export function PropertySelector({
+  companyId,
+  value,
+  onChange,
+  required,
+  requireLeadCreateFields,
+}: PropertySelectorProps) {
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState("");
   const [selectedLabel, setSelectedLabel] = useState<string | null>(null);
@@ -111,6 +118,7 @@ export function PropertySelector({ companyId, value, onChange, required }: Prope
           <PropertyCreateDialog
             initialCompanyId={companyId}
             companyLocked
+            requireLeadCreateFields={requireLeadCreateFields}
             triggerLabel="Add New Property"
             onCreated={(property) => {
               setSelectedLabel(formatPropertyLabel(property));

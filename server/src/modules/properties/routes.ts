@@ -23,7 +23,7 @@ router.get("/", async (req, res, next) => {
 
 router.post("/", async (req, res, next) => {
   try {
-    const { companyId, name, address, city, state, zip, notes } = req.body;
+    const { companyId, name, address, city, state, zip, buildYear, unitCount, notes } = req.body;
     if (!companyId) {
       throw new AppError(400, "companyId is required");
     }
@@ -37,6 +37,8 @@ router.post("/", async (req, res, next) => {
       city,
       state,
       zip,
+      buildYear,
+      unitCount,
       notes,
     });
     await req.commitTransaction!();

@@ -70,6 +70,8 @@ export { contacts, contactCategoryEnum } from "./tenant/contacts.js";
 export { contactDealAssociations } from "./tenant/contact-deal-associations.js";
 export {
   leads,
+  leadBudgetStatusEnum,
+  leadPocRoleEnum,
   leadStatusEnum,
   leadPipelineTypeEnum,
   leadDisqualificationReasonEnum,

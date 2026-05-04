@@ -14,6 +14,7 @@ interface PropertyCreateDialogProps {
   onCreated?: (property: PropertySurface) => void;
   initialCompanyId?: string | null;
   companyLocked?: boolean;
+  requireLeadCreateFields?: boolean;
   triggerLabel?: string;
 }
 
@@ -21,6 +22,7 @@ export function PropertyCreateDialog({
   onCreated,
   initialCompanyId,
   companyLocked = false,
+  requireLeadCreateFields = false,
   triggerLabel = "New Property",
 }: PropertyCreateDialogProps) {
   const [open, setOpen] = useState(false);
@@ -33,6 +35,8 @@ export function PropertyCreateDialog({
     city: "",
     state: "",
     zip: "",
+    buildYear: "",
+    unitCount: "",
     notes: "",
   });
   const { company } = useCompanyDetail(formData.companyId || undefined);
@@ -46,6 +50,8 @@ export function PropertyCreateDialog({
         city: "",
         state: "",
         zip: "",
+        buildYear: "",
+        unitCount: "",
         notes: "",
       });
       setError(null);
@@ -68,6 +74,32 @@ export function PropertyCreateDialog({
       setError("Property name or address is required");
       return;
     }
+    if (!formData.address.trim() || !formData.city.trim() || !formData.state.trim() || !formData.zip.trim()) {
+      setError("Full property address is required");
+      return;
+    }
+    if (!/^[A-Z]{2}$/.test(formData.state.trim().toUpperCase())) {
+      setError("State must be a 2-letter US state code");
+      return;
+    }
+    if (!/^\d{5}(-\d{4})?$/.test(formData.zip.trim())) {
+      setError("ZIP must be 5 digits or ZIP+4");
+      return;
+    }
+    const buildYear = Number(formData.buildYear);
+    const maxYear = new Date().getFullYear() + 2;
+    if (
+      (requireLeadCreateFields || formData.buildYear.trim()) &&
+      (!Number.isInteger(buildYear) || buildYear < 1800 || buildYear > maxYear)
+    ) {
+      setError(`Year built must be between 1800 and ${maxYear}`);
+      return;
+    }
+    const unitCount = Number(formData.unitCount);
+    if ((requireLeadCreateFields || formData.unitCount.trim()) && (!Number.isInteger(unitCount) || unitCount <= 0)) {
+      setError("Number of units must be a positive integer");
+      return;
+    }
 
     setSubmitting(true);
     setError(null);
@@ -79,6 +111,8 @@ export function PropertyCreateDialog({
         city: formData.city.trim() || null,
         state: formData.state.trim() || null,
         zip: formData.zip.trim() || null,
+        buildYear: formData.buildYear.trim() ? buildYear : null,
+        unitCount: formData.unitCount.trim() ? unitCount : null,
         notes: formData.notes.trim() || null,
       });
       setOpen(false);
@@ -138,7 +172,7 @@ export function PropertyCreateDialog({
           </div>
           <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
             <div className="space-y-2">
-              <Label htmlFor="property-city">City</Label>
+              <Label htmlFor="property-city">City *</Label>
               <Input
                 id="property-city"
                 value={formData.city}
@@ -146,7 +180,7 @@ export function PropertyCreateDialog({
               />
             </div>
             <div className="space-y-2">
-              <Label htmlFor="property-state">State</Label>
+              <Label htmlFor="property-state">State *</Label>
               <Input
                 id="property-state"
                 maxLength={2}
@@ -157,11 +191,31 @@ export function PropertyCreateDialog({
               />
             </div>
             <div className="space-y-2">
-              <Label htmlFor="property-zip">ZIP</Label>
+              <Label htmlFor="property-zip">ZIP *</Label>
               <Input
                 id="property-zip"
                 value={formData.zip}
                 onChange={(event) => setFormData((prev) => ({ ...prev, zip: event.target.value }))}
+              />
+            </div>
+          </div>
+          <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+            <div className="space-y-2">
+              <Label htmlFor="property-build-year">Year Built{requireLeadCreateFields ? " *" : ""}</Label>
+              <Input
+                id="property-build-year"
+                type="number"
+                value={formData.buildYear}
+                onChange={(event) => setFormData((prev) => ({ ...prev, buildYear: event.target.value }))}
+              />
+            </div>
+            <div className="space-y-2">
+              <Label htmlFor="property-unit-count">Number of Units{requireLeadCreateFields ? " *" : ""}</Label>
+              <Input
+                id="property-unit-count"
+                type="number"
+                value={formData.unitCount}
+                onChange={(event) => setFormData((prev) => ({ ...prev, unitCount: event.target.value }))}
               />
             </div>
           </div>

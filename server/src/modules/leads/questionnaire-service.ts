@@ -154,10 +154,20 @@ export async function getQuestionnaireTemplateSnapshot(
     listAllQuestionnaireNodes(tenantDb),
   ]);
 
+  const normalizeCreateModeNode = (node: QuestionnaireNode): QuestionnaireNode | null => {
+    if (node.key === "poc") {
+      return null;
+    }
+    if (node.key === "number_of_bidders") {
+      return { ...node, isRequired: false };
+    }
+    return node;
+  };
+
   return {
     projectTypeId,
-    nodes,
-    allNodes,
+    nodes: nodes.map(normalizeCreateModeNode).filter((node): node is QuestionnaireNode => Boolean(node)),
+    allNodes: allNodes.map(normalizeCreateModeNode).filter((node): node is QuestionnaireNode => Boolean(node)),
     answers: {},
   };
 }

@@ -10,6 +10,8 @@ export interface PropertySurface {
   city: string | null;
   state: string | null;
   zip: string | null;
+  buildYear: number | null;
+  unitCount: number | null;
   notes: string | null;
   isActive: boolean;
   createdAt: string;
@@ -184,6 +186,8 @@ export async function createProperty(input: {
   city?: string | null;
   state?: string | null;
   zip?: string | null;
+  buildYear?: number | null;
+  unitCount?: number | null;
   notes?: string | null;
 }) {
   return api<{ property: PropertySurface }>("/properties", { method: "POST", json: input });

@@ -102,6 +102,23 @@ export const LEAD_VERIFICATION_STATUSES = [
 ] as const;
 export type LeadVerificationStatus = (typeof LEAD_VERIFICATION_STATUSES)[number];
 
+export const LEAD_POC_ROLES = [
+  "property_manager",
+  "construction_manager",
+  "director",
+  "other",
+] as const;
+export type LeadPocRole = (typeof LEAD_POC_ROLES)[number];
+
+export const LEAD_BUDGET_STATUSES = [
+  "budgeted_q1",
+  "budgeted_q2",
+  "budgeted_q3",
+  "budgeted_q4",
+  "not_budgeted",
+] as const;
+export type LeadBudgetStatus = (typeof LEAD_BUDGET_STATUSES)[number];
+
 export const LEAD_VERIFICATION_REQUIRED_REASONS = [
   "new_company",
   "dormant_company",
