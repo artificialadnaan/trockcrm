@@ -1,11 +1,13 @@
 import {
   companies,
+  contacts,
   deals,
   leadStageHistory,
   leadQuestionAnswerHistory,
   leadQuestionAnswers,
   leads,
   projectTypeConfig,
+  projectTypeQuestionNodes,
   properties,
   users,
 } from "@trock-crm/shared/schema";
@@ -64,19 +66,55 @@ function createFakeTenantDb(lead: FakeLeadRow) {
       {
         id: "company-1",
         name: "Palm Villas",
+        isActive: true,
       },
     ],
     properties: [
       {
         id: "property-1",
+        companyId: "company-1",
         name: "Palm Villas North",
         address: "123 Palm Way",
         city: "Miami",
         state: "FL",
         zip: "33101",
+        buildYear: 1998,
+        unitCount: 120,
+        isActive: true,
+      },
+    ],
+    contacts: [
+      {
+        id: "contact-1",
+        companyId: "company-1",
+        isActive: true,
+      },
+    ],
+    users: [
+      {
+        id: "rep-1",
+        isActive: true,
+        officeId: "office-1",
       },
     ],
     projectTypes: [],
+    projectTypeQuestionNodes: [
+      {
+        id: "node-bid-due-date",
+        projectTypeId: null,
+        parentNodeId: null,
+        parentOptionValue: null,
+        nodeType: "question",
+        key: "bid_due_date",
+        label: "Bid Due Date",
+        prompt: null,
+        inputType: "date",
+        options: [],
+        isRequired: true,
+        displayOrder: 10,
+        isActive: true,
+      },
+    ],
     leads: [lead],
     deals: [],
     leadStageHistory: [] as Array<Record<string, unknown>>,
@@ -87,6 +125,10 @@ function createFakeTenantDb(lead: FakeLeadRow) {
   const resolveTableName = (table: unknown) => (table as { _: { name?: string } })?._?.name;
 
   const filterRows = (rows: Array<Record<string, unknown>>, condition: unknown) => {
+    if (rows.length <= 1) {
+      return rows;
+    }
+
     const sqlCondition = condition as { queryChunks?: unknown[] } | undefined;
     const queryChunks = sqlCondition?.queryChunks ?? [];
     const column = queryChunks.find(
@@ -165,8 +207,17 @@ function createFakeTenantDb(lead: FakeLeadRow) {
           if (table === properties || tableName === "properties") {
             return createQueryBuilder(state.properties as Array<Record<string, unknown>>, fields);
           }
+          if (table === contacts || tableName === "contacts") {
+            return createQueryBuilder(state.contacts as Array<Record<string, unknown>>, fields);
+          }
+          if (table === users || tableName === "users") {
+            return createQueryBuilder(state.users as Array<Record<string, unknown>>, fields);
+          }
           if (table === projectTypeConfig || tableName === "project_type_config") {
             return createQueryBuilder(state.projectTypes as Array<Record<string, unknown>>, fields);
+          }
+          if (table === projectTypeQuestionNodes || tableName === "project_type_question_nodes") {
+            return createQueryBuilder(state.projectTypeQuestionNodes as Array<Record<string, unknown>>, fields);
           }
           if (table === deals || tableName === "deals") {
             return createQueryBuilder(state.deals as Array<Record<string, unknown>>, fields);
@@ -425,7 +476,13 @@ describe("lead service canonical progression", () => {
               table === companies
                 ? [{ id: "company-1", isActive: true }]
                 : table === properties
-                  ? [{ id: "property-1", companyId: "company-1", isActive: true }]
+                ? [{ id: "property-1", companyId: "company-1", isActive: true, address: "123 Main", city: "Dallas", state: "TX", zip: "75001", buildYear: 2001, unitCount: 80 }]
+                  : table === contacts
+                    ? [{ id: "contact-1", companyId: "company-1", isActive: true }]
+                  : table === projectTypeQuestionNodes
+                    ? [{ id: "node-bid-due-date", projectTypeId: null, parentNodeId: null, parentOptionValue: null, nodeType: "question", key: "bid_due_date", label: "Bid Due Date", prompt: null, inputType: "date", options: [], isRequired: true, displayOrder: 10, isActive: true }]
+                  : table === leadQuestionAnswers
+                    ? []
                   : table === users
                     ? [{ id: "rep-1", isActive: true, officeId: "office-1" }]
                     : [];
@@ -445,6 +502,17 @@ describe("lead service canonical progression", () => {
         };
       },
       insert(table: unknown) {
+        if (table === leadQuestionAnswerHistory || table === leadQuestionAnswers) {
+          return {
+            values(value: Record<string, unknown>) {
+              return {
+                returning() {
+                  return Promise.resolve([{ id: "question-row-1", ...value }]);
+                },
+              };
+            },
+          };
+        }
         if (table !== leads) {
           throw new Error(`Unexpected insert table: ${String((table as { _: { name?: string } })?._?.name)}`);
         }
@@ -480,11 +548,17 @@ describe("lead service canonical progression", () => {
         assignedRepId: "rep-1",
         salesRepId: "rep-1",
         officeId: "office-1",
+        primaryContactId: "contact-1",
+        primaryContactRole: "property_manager",
         name: "Created Lead",
         source: "Referral",
         officeCode: "dfw",
         projectType: "commercial",
         projectTypeId: "project-type-commercial",
+        budgetStatus: "budgeted_q3",
+        leadQuestionAnswers: {
+          bid_due_date: "2026-06-01",
+        },
         qualificationPayload: {
           existing_customer_status: "existing",
           estimated_value: 125000,
@@ -503,7 +577,9 @@ describe("lead service canonical progression", () => {
         timeline_status: "Q3 2026",
       });
       expect(lead.salesRepId).toBe("rep-1");
+      expect(lead.stageId).toBe(newLeadStage.id);
       expect(insertedLeads[0]?.salesRepId).toBe("rep-1");
+      expect(insertedLeads[0]?.stageId).toBe(newLeadStage.id);
     } finally {
       if (previousFlag === undefined) {
         delete process.env.ENABLE_LEAD_EDIT_V2;
@@ -522,7 +598,13 @@ describe("lead service canonical progression", () => {
               table === companies
                 ? [{ id: "company-1", isActive: true }]
                 : table === properties
-                  ? [{ id: "property-1", companyId: "company-1", isActive: true }]
+                  ? [{ id: "property-1", companyId: "company-1", isActive: true, address: "123 Main", city: "Dallas", state: "TX", zip: "75001", buildYear: 2001, unitCount: 80 }]
+                  : table === contacts
+                    ? [{ id: "contact-1", companyId: "company-1", isActive: true }]
+                  : table === projectTypeQuestionNodes
+                    ? [{ id: "node-bid-due-date", projectTypeId: null, parentNodeId: null, parentOptionValue: null, nodeType: "question", key: "bid_due_date", label: "Bid Due Date", prompt: null, inputType: "date", options: [], isRequired: true, displayOrder: 10, isActive: true }]
+                  : table === leadQuestionAnswers
+                    ? []
                   : table === users
                     ? [{ id: "rep-1", isActive: true, officeId: "office-1" }]
                     : [];
@@ -558,14 +640,21 @@ describe("lead service canonical progression", () => {
         stageId: newLeadStage.id,
         assignedRepId: "rep-1",
         officeId: "office-1",
+        primaryContactId: "contact-1",
+        primaryContactRole: "property_manager",
         name: "Created Lead",
         source: "Referral",
         officeCode: "dfw",
         projectType: "casino",
+        projectTypeId: "project-type-casino",
+        budgetStatus: "budgeted_q1",
+        leadQuestionAnswers: {
+          bid_due_date: "2026-06-01",
+        },
       })
     ).rejects.toMatchObject<AppError>({
       statusCode: 400,
-      message: "Invalid project type: casino",
+      message: "Project type not found",
     });
   });
 
@@ -578,7 +667,13 @@ describe("lead service canonical progression", () => {
               table === companies
                 ? [{ id: "company-1", isActive: true }]
                 : table === properties
-                  ? [{ id: "property-1", companyId: "company-1", isActive: true }]
+                  ? [{ id: "property-1", companyId: "company-1", isActive: true, address: "123 Main", city: "Dallas", state: "TX", zip: "75001", buildYear: 2001, unitCount: 80 }]
+                  : table === contacts
+                    ? [{ id: "contact-1", companyId: "company-1", isActive: true }]
+                  : table === projectTypeQuestionNodes
+                    ? [{ id: "node-bid-due-date", projectTypeId: null, parentNodeId: null, parentOptionValue: null, nodeType: "question", key: "bid_due_date", label: "Bid Due Date", prompt: null, inputType: "date", options: [], isRequired: true, displayOrder: 10, isActive: true }]
+                  : table === leadQuestionAnswers
+                    ? []
                   : table === users
                     ? [{ id: "rep-1", isActive: true, officeId: "office-1" }]
                     : [];
@@ -621,6 +716,91 @@ describe("lead service canonical progression", () => {
     ).rejects.toMatchObject<AppError>({
       statusCode: 400,
       message: "officeCode must be 'dfw' or 'atl'",
+    });
+  });
+
+  it.each([
+    ["property.address", (db: any, input: any) => { db.state.properties[0].address = ""; }],
+    ["property.city", (db: any, input: any) => { db.state.properties[0].city = ""; }],
+    ["property.state", (db: any, input: any) => { db.state.properties[0].state = "Texas"; }],
+    ["property.zip", (db: any, input: any) => { db.state.properties[0].zip = "7500"; }],
+    ["property.buildYear", (db: any, input: any) => { db.state.properties[0].buildYear = 1700; }],
+    ["property.unitCount", (db: any, input: any) => { db.state.properties[0].unitCount = 0; }],
+    ["primaryContactId", (_db: any, input: any) => { input.primaryContactId = null; }],
+    ["primaryContactRole", (_db: any, input: any) => { input.primaryContactRole = null; }],
+    ["budgetStatus", (_db: any, input: any) => { input.budgetStatus = null; }],
+    ["projectTypeId", (_db: any, input: any) => { input.projectTypeId = null; }],
+    ["leadQuestionAnswers.bid_due_date", (_db: any, input: any) => { input.leadQuestionAnswers = {}; }],
+  ])("rejects missing lead create prerequisite %s before insert", async (fieldKey, mutate) => {
+    const tenantDb = createFakeTenantDb({} as FakeLeadRow);
+    tenantDb.state.leads = [];
+    const service = createLeadService({
+      getStageById: pipelineMocks.getStageById as never,
+      getActiveProjectTypes: pipelineMocks.getActiveProjectTypes as never,
+      now: () => new Date("2026-04-15T15:00:00.000Z"),
+    });
+    const input = {
+      companyId: "company-1",
+      propertyId: "property-1",
+      stageId: newLeadStage.id,
+      assignedRepId: "rep-1",
+      officeId: "office-1",
+      primaryContactId: "contact-1",
+      primaryContactRole: "property_manager",
+      name: "Created Lead",
+      source: "Referral",
+      officeCode: "dfw",
+      projectTypeId: "project-type-commercial",
+      budgetStatus: "budgeted_q1",
+      leadQuestionAnswers: {
+        bid_due_date: "2026-06-01",
+      },
+    };
+    mutate(tenantDb, input);
+
+    await expect(service.createLead(tenantDb as never, input as never)).rejects.toMatchObject({
+      statusCode: 400,
+      code: "LEAD_CREATE_REQUIREMENTS_UNMET",
+      missingRequirements: {
+        fields: expect.arrayContaining([expect.objectContaining({ key: fieldKey })]),
+      },
+    });
+    expect(tenantDb.state.leads).toHaveLength(0);
+  });
+
+  it("requires an other_label when POC role is other", async () => {
+    const tenantDb = createFakeTenantDb({} as FakeLeadRow);
+    tenantDb.state.leads = [];
+    const service = createLeadService({
+      getStageById: pipelineMocks.getStageById as never,
+      getActiveProjectTypes: pipelineMocks.getActiveProjectTypes as never,
+      now: () => new Date("2026-04-15T15:00:00.000Z"),
+    });
+
+    await expect(
+      service.createLead(tenantDb as never, {
+        companyId: "company-1",
+        propertyId: "property-1",
+        stageId: newLeadStage.id,
+        assignedRepId: "rep-1",
+        officeId: "office-1",
+        primaryContactId: "contact-1",
+        primaryContactRole: "other",
+        primaryContactRoleOtherLabel: "",
+        name: "Created Lead",
+        source: "Referral",
+        officeCode: "dfw",
+        projectTypeId: "project-type-commercial",
+        budgetStatus: "budgeted_q1",
+        leadQuestionAnswers: {
+          bid_due_date: "2026-06-01",
+        },
+      } as never)
+    ).rejects.toMatchObject({
+      code: "LEAD_CREATE_REQUIREMENTS_UNMET",
+      missingRequirements: {
+        fields: expect.arrayContaining([expect.objectContaining({ key: "primaryContactRoleOtherLabel" })]),
+      },
     });
   });
 
@@ -734,7 +914,7 @@ describe("lead service canonical progression", () => {
     expect(lead.assignedRepId).toBe("rep-1");
   });
 
-  it("auto-promotes a new lead to qualified_lead when the company has recent activity", async () => {
+  it("keeps an existing-customer lead in new_lead while create-time auto-promotion is disabled", async () => {
     const previousFlag = process.env.ENABLE_LEAD_EDIT_V2;
     process.env.ENABLE_LEAD_EDIT_V2 = "true";
 
@@ -751,7 +931,13 @@ describe("lead service canonical progression", () => {
               table === companies
                 ? [{ id: "company-1", isActive: true }]
                 : table === properties
-                  ? [{ id: "property-1", companyId: "company-1", isActive: true }]
+                  ? [{ id: "property-1", companyId: "company-1", isActive: true, address: "123 Main", city: "Dallas", state: "TX", zip: "75001", buildYear: 2001, unitCount: 80 }]
+                  : table === contacts
+                    ? [{ id: "contact-1", companyId: "company-1", isActive: true }]
+                  : table === projectTypeQuestionNodes
+                    ? [{ id: "node-bid-due-date", projectTypeId: null, parentNodeId: null, parentOptionValue: null, nodeType: "question", key: "bid_due_date", label: "Bid Due Date", prompt: null, inputType: "date", options: [], isRequired: true, displayOrder: 10, isActive: true }]
+                  : table === leadQuestionAnswers
+                    ? []
                   : table === users
                     ? [{ id: "rep-1", isActive: true, officeId: "office-1" }]
                     : [];
@@ -776,6 +962,9 @@ describe("lead service canonical progression", () => {
             if (table === leadStageHistory) {
               insertedHistory.push(value);
               return { returning: () => Promise.resolve([{ id: "lsh-1", ...value }]) };
+            }
+            if (table === leadQuestionAnswerHistory || table === leadQuestionAnswers) {
+              return { returning: () => Promise.resolve([{ id: "question-row-1", ...value }]) };
             }
             throw new Error(`Unexpected insert table: ${String((table as { _: { name?: string } })?._?.name)}`);
           },
@@ -800,24 +989,25 @@ describe("lead service canonical progression", () => {
         stageId: newLeadStage.id,
         assignedRepId: "rep-1",
         officeId: "office-1",
+        primaryContactId: "contact-1",
+        primaryContactRole: "property_manager",
         name: "Active-customer Lead",
         source: "Referral",
         officeCode: "dfw",
         projectType: "commercial",
         projectTypeId: "project-type-commercial",
+        budgetStatus: "budgeted_q1",
+        leadQuestionAnswers: {
+          bid_due_date: "2026-06-01",
+        },
         qualificationPayload: {},
       });
 
-      expect(lead.stageId).toBe(qualifiedLeadStage.id);
+      expect(lead.stageId).toBe(newLeadStage.id);
       expect(lead.verificationStatus).toBe("not_required");
       expect(lead.verificationRequiredReason).toBeNull();
-      expect(insertedHistory).toHaveLength(1);
-      expect(insertedHistory[0]).toMatchObject({
-        leadId: "lead-created",
-        fromStageId: newLeadStage.id,
-        toStageId: qualifiedLeadStage.id,
-        isBackwardMove: false,
-      });
+      expect(insertedHistory).toHaveLength(0);
+      expect(getStageBySlugMock).not.toHaveBeenCalledWith("qualified_lead", "lead");
     } finally {
       if (previousFlag === undefined) delete process.env.ENABLE_LEAD_EDIT_V2;
       else process.env.ENABLE_LEAD_EDIT_V2 = previousFlag;
@@ -839,7 +1029,13 @@ describe("lead service canonical progression", () => {
               table === companies
                 ? [{ id: "company-1", isActive: true }]
                 : table === properties
-                  ? [{ id: "property-1", companyId: "company-1", isActive: true }]
+                  ? [{ id: "property-1", companyId: "company-1", isActive: true, address: "123 Main", city: "Dallas", state: "TX", zip: "75001", buildYear: 2001, unitCount: 80 }]
+                  : table === contacts
+                    ? [{ id: "contact-1", companyId: "company-1", isActive: true }]
+                  : table === projectTypeQuestionNodes
+                    ? [{ id: "node-bid-due-date", projectTypeId: null, parentNodeId: null, parentOptionValue: null, nodeType: "question", key: "bid_due_date", label: "Bid Due Date", prompt: null, inputType: "date", options: [], isRequired: true, displayOrder: 10, isActive: true }]
+                  : table === leadQuestionAnswers
+                    ? []
                   : table === users
                     ? [{ id: "rep-1", isActive: true, officeId: "office-1" }]
                     : [];
@@ -865,6 +1061,9 @@ describe("lead service canonical progression", () => {
               insertedHistory.push(value);
               return { returning: () => Promise.resolve([{ id: "lsh-1", ...value }]) };
             }
+            if (table === leadQuestionAnswerHistory || table === leadQuestionAnswers) {
+              return { returning: () => Promise.resolve([{ id: "question-row-1", ...value }]) };
+            }
             throw new Error(`Unexpected insert table: ${String((table as { _: { name?: string } })?._?.name)}`);
           },
         };
@@ -886,11 +1085,17 @@ describe("lead service canonical progression", () => {
         stageId: newLeadStage.id,
         assignedRepId: "rep-1",
         officeId: "office-1",
+        primaryContactId: "contact-1",
+        primaryContactRole: "property_manager",
         name: "Brand-new Company Lead",
         source: "Data Mine",
         officeCode: "dfw",
         projectType: "commercial",
         projectTypeId: "project-type-commercial",
+        budgetStatus: "not_budgeted",
+        leadQuestionAnswers: {
+          bid_due_date: "2026-06-01",
+        },
         qualificationPayload: {},
       });
 

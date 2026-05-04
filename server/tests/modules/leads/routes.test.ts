@@ -9,6 +9,17 @@ const serviceMocks = vi.hoisted(() => ({
   updateLead: vi.fn(),
 }));
 
+class TestLeadCreateRequirementsError extends Error {
+  statusCode = 400;
+  code = "LEAD_CREATE_REQUIREMENTS_UNMET";
+  missingRequirements: { fields: Array<{ key: string; label: string }> };
+
+  constructor(fields: Array<{ key: string; label: string }> = [{ key: "budgetStatus", label: "Budget status" }]) {
+    super("Complete required lead creation fields before creating a lead.");
+    this.missingRequirements = { fields };
+  }
+}
+
 const questionnaireMocks = vi.hoisted(() => ({
   getLeadQuestionnaireSnapshot: vi.fn(),
   getQuestionnaireTemplateSnapshot: vi.fn(),
@@ -22,6 +33,7 @@ vi.mock("../../../src/modules/leads/service.js", () => ({
   listLeads: serviceMocks.listLeads,
   transitionLeadStage: serviceMocks.transitionLeadStage,
   updateLead: serviceMocks.updateLead,
+  LeadCreateRequirementsError: TestLeadCreateRequirementsError,
 }));
 
 vi.mock("../../../src/modules/leads/conversion-service.js", () => ({
@@ -44,6 +56,7 @@ async function loadLeadRoutes() {
     listLeads: serviceMocks.listLeads,
     transitionLeadStage: serviceMocks.transitionLeadStage,
     updateLead: serviceMocks.updateLead,
+    LeadCreateRequirementsError: TestLeadCreateRequirementsError,
   }));
 
   vi.doMock("../../../src/modules/leads/conversion-service.js", () => ({
@@ -160,6 +173,39 @@ async function invokeLeadDetailRoute(leadRoutes?: unknown) {
   return { req, res, next };
 }
 
+async function invokeLeadCreateRoute(body: Record<string, unknown>, leadRoutes?: unknown) {
+  const routes = leadRoutes ?? (await loadLeadRoutes());
+  const handler = findRouteHandler(routes, "post", "/");
+  const req = {
+    body,
+    tenantDb: {},
+    user: {
+      id: "rep-1",
+      role: "rep",
+      activeOfficeId: "office-1",
+    },
+    commitTransaction: vi.fn(async () => {}),
+  } as any;
+  const res = {
+    statusCode: 200,
+    body: undefined as any,
+    status(code: number) {
+      this.statusCode = code;
+      return this;
+    },
+    json(payload: any) {
+      this.body = payload;
+      return this;
+    },
+  } as any;
+  const next = vi.fn((err?: unknown) => {
+    if (err) throw err;
+  });
+
+  await handler(req, res, next);
+  return { req, res, next };
+}
+
 async function invokeQuestionnaireTemplateRoute(projectTypeId = "project-type-1", leadRoutes?: unknown) {
   const routes = leadRoutes ?? (await loadLeadRoutes());
   const handler = findRouteHandler(routes, "get", "/questionnaire-template");
@@ -234,6 +280,70 @@ describe("lead stage transition route", () => {
         { key: "qualificationScope", label: "Project scope / category", resolution: "inline" },
       ],
     });
+  });
+
+  it("serializes lead create prerequisite failures as structured 400 responses", async () => {
+    const leadRoutes = await loadLeadRoutes();
+    serviceMocks.createLead.mockRejectedValueOnce(new TestLeadCreateRequirementsError());
+
+    const { req, res } = await invokeLeadCreateRoute(
+      {
+        companyId: "company-1",
+        propertyId: "property-1",
+        name: "Lead One",
+      },
+      leadRoutes
+    );
+
+    expect(serviceMocks.createLead).toHaveBeenCalledWith(
+      req.tenantDb,
+      expect.objectContaining({
+        companyId: "company-1",
+        propertyId: "property-1",
+        stageId: undefined,
+      })
+    );
+    expect(req.commitTransaction).not.toHaveBeenCalled();
+    expect(res.statusCode).toBe(400);
+    expect(res.body).toEqual({
+      error: {
+        message: "Complete required lead creation fields before creating a lead.",
+        code: "LEAD_CREATE_REQUIREMENTS_UNMET",
+        missingRequirements: {
+          fields: [{ key: "budgetStatus", label: "Budget status" }],
+        },
+      },
+    });
+  });
+
+  it("preserves every lead create prerequisite key in the structured 400 response", async () => {
+    const leadRoutes = await loadLeadRoutes();
+    const fields = [
+      { key: "property.address", label: "Project address" },
+      { key: "property.city", label: "Project city" },
+      { key: "property.state", label: "Project state" },
+      { key: "property.zip", label: "Project ZIP" },
+      { key: "property.buildYear", label: "Year built" },
+      { key: "property.unitCount", label: "Number of units" },
+      { key: "primaryContactId", label: "Point of contact" },
+      { key: "primaryContactRole", label: "POC role" },
+      { key: "budgetStatus", label: "Budget status" },
+      { key: "projectTypeId", label: "Project type" },
+      { key: "leadQuestionAnswers.bid_due_date", label: "Bid Due Date" },
+    ];
+    serviceMocks.createLead.mockRejectedValueOnce(new TestLeadCreateRequirementsError(fields));
+
+    const { res } = await invokeLeadCreateRoute(
+      {
+        companyId: "company-1",
+        propertyId: "property-1",
+        name: "Lead One",
+      },
+      leadRoutes
+    );
+
+    expect(res.statusCode).toBe(400);
+    expect(res.body.error.missingRequirements.fields).toEqual(fields);
   });
 
   it("serializes LeadStageTransitionError from POST /api/leads/:id/stage-transition as a 409", async () => {

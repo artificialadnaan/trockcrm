@@ -19,7 +19,11 @@ import {
   CONTACT_CATEGORIES,
   getLeadValidationQuestionSetForProjectType,
   isLegacyTimelineStatusValue,
+  LEAD_BUDGET_STATUSES,
+  LEAD_POC_ROLES,
   LEAD_SOURCE_CATEGORIES,
+  type LeadBudgetStatus,
+  type LeadPocRole,
   type LeadSourceCategory,
   LEAD_QUALIFICATION_FIELDS,
   normalizeTimelineStatusForSave,
@@ -80,11 +84,15 @@ export interface LeadFormLead {
   propertyCity: string | null;
   propertyState: string | null;
   propertyZip: string | null;
+  primaryContactId?: string | null;
+  primaryContactRole?: LeadPocRole | null;
+  primaryContactRoleOtherLabel?: string | null;
   source: string | null;
   sourceCategory?: LeadSourceCategory | null;
   sourceDetail?: string | null;
   existingCustomerStatus?: "Existing" | "New" | null;
   description: string | null;
+  budgetStatus?: LeadBudgetStatus | null;
   projectTypeId?: string | null;
   projectType?: {
     id: string;
@@ -155,6 +163,19 @@ const LEAD_QUALIFICATION_FIELD_LABELS = new Map(
 const EDITABLE_QUALIFICATION_FIELDS = LEAD_QUALIFICATION_FIELDS.filter(
   (field) => field.id !== "existing_customer_status"
 );
+const LEAD_POC_ROLE_LABELS: Record<LeadPocRole, string> = {
+  property_manager: "Property Manager",
+  construction_manager: "Construction Manager",
+  director: "Director",
+  other: "Other",
+};
+const LEAD_BUDGET_STATUS_LABELS: Record<LeadBudgetStatus, string> = {
+  budgeted_q1: "Budgeted Q1",
+  budgeted_q2: "Budgeted Q2",
+  budgeted_q3: "Budgeted Q3",
+  budgeted_q4: "Budgeted Q4",
+  not_budgeted: "Not Budgeted",
+};
 
 function normalizeLeadSourceForForm(lead?: LeadFormLead, initialSource?: string) {
   const category = lead?.sourceCategory ?? null;
@@ -192,7 +213,9 @@ function getEditableFormState(
   return {
     companyId: lead?.companyId ?? initialValues?.companyId ?? "",
     propertyId: lead?.propertyId ?? initialValues?.propertyId ?? "",
-    primaryContactId: initialValues?.primaryContactId ?? "",
+    primaryContactId: lead?.primaryContactId ?? initialValues?.primaryContactId ?? "",
+    primaryContactRole: lead?.primaryContactRole ?? "",
+    primaryContactRoleOtherLabel: lead?.primaryContactRoleOtherLabel ?? "",
     name: lead?.name ?? initialValues?.name ?? "",
     stageId: lead?.stageId ?? initialValues?.stageId ?? "",
     assignedRepId: lead?.assignedRepId ?? lead?.salesRepId ?? "",
@@ -201,6 +224,7 @@ function getEditableFormState(
     sourceDetail: sourceState.sourceDetail,
     description: lead?.description ?? initialValues?.description ?? "",
     projectTypeId: lead?.projectTypeId ?? initialValues?.projectTypeId ?? "",
+    budgetStatus: lead?.budgetStatus ?? "",
     qualificationPayload: {
       existing_customer_status:
         typeof lead?.qualificationPayload?.existing_customer_status === "string"
@@ -286,7 +310,7 @@ function QuestionLabel({
   children,
   required = false,
 }: {
-  htmlFor: string;
+  htmlFor?: string;
   children: ReactNode;
   required?: boolean;
 }) {
@@ -576,7 +600,7 @@ function EditableLeadForm({
   const navigate = useNavigate();
   const { user } = useAuth();
   const { assignees } = useTaskAssignees();
-  const { stages, loading: stagesLoading } = usePipelineStages();
+  const { stages } = usePipelineStages();
   const { projectTypes, hierarchy: projectTypeHierarchy } = useProjectTypes();
   const isCreate = mode === "create";
   const [companyId, setCompanyId] = useState<string | null>(lead?.companyId ?? initialValues?.companyId ?? null);
@@ -585,7 +609,7 @@ function EditableLeadForm({
   const leadStages = getLeadCreationStages(stages);
 
   const [formData, setFormData] = useState(() => getEditableFormState(lead, initialValues));
-  const { questionnaire: questionnaireTemplate } = useLeadQuestionnaireTemplate(
+  const { questionnaire: questionnaireTemplate, loading: questionnaireTemplateLoading } = useLeadQuestionnaireTemplate(
     isCreate ? (formData.projectTypeId || null) : null
   );
   const [submitting, setSubmitting] = useState(false);
@@ -602,6 +626,7 @@ function EditableLeadForm({
   });
   const [error, setError] = useState<string | null>(null);
   const [stageGateError, setStageGateError] = useState<LeadStageGateErrorState | null>(null);
+  const [createGateMissingKeys, setCreateGateMissingKeys] = useState<string[]>([]);
 
   useEffect(() => {
     setFormData(getEditableFormState(lead, initialValues));
@@ -655,6 +680,7 @@ function EditableLeadForm({
   }, [companyId, contacts, isCreate, properties]);
 
   const selectedProjectType = projectTypes.find((entry) => entry.id === formData.projectTypeId) ?? null;
+  const selectedProperty = properties.find((property) => property.id === formData.propertyId) ?? null;
   const primaryContactSelectItems = useMemo(
     () => [
       { value: "__none__", label: "Optional" },
@@ -665,9 +691,19 @@ function EditableLeadForm({
     ],
     [contacts]
   );
-  const stageSelectItems = useMemo(
-    () => leadStages.map((stage) => ({ value: stage.id, label: stage.name })),
-    [leadStages]
+  const pocRoleSelectItems = useMemo(
+    () => [
+      { value: "__none__", label: "Select POC role" },
+      ...LEAD_POC_ROLES.map((role) => ({ value: role, label: LEAD_POC_ROLE_LABELS[role] })),
+    ],
+    []
+  );
+  const budgetStatusSelectItems = useMemo(
+    () => [
+      { value: "__none__", label: "Select budget status" },
+      ...LEAD_BUDGET_STATUSES.map((status) => ({ value: status, label: LEAD_BUDGET_STATUS_LABELS[status] })),
+    ],
+    []
   );
   const repSelectItems = useMemo(
     () => assignees.map((assignee) => ({ value: assignee.id, label: assignee.displayName })),
@@ -707,6 +743,14 @@ function EditableLeadForm({
     () => questionnaireTemplateNodes.filter((node) => node.nodeType === "question"),
     [questionnaireTemplateNodes]
   );
+  const bidDueDateNode = useMemo(
+    () => v2QuestionNodes.find((node) => node.key === "bid_due_date") ?? null,
+    [v2QuestionNodes]
+  );
+  const numberOfBiddersNode = useMemo(
+    () => v2QuestionNodes.find((node) => node.key === "number_of_bidders") ?? null,
+    [v2QuestionNodes]
+  );
   const v2NodeById = useMemo(
     () => new Map(questionnaireTemplateNodes.map((node) => [node.id, node])),
     [questionnaireTemplateNodes]
@@ -715,18 +759,89 @@ function EditableLeadForm({
     const visibleCache = new Map<string, boolean>();
 
     return v2QuestionNodes
+      .filter((node) => !["bid_due_date", "number_of_bidders", "poc"].includes(node.key))
       .filter((node) =>
         isVisibleQuestionNode(node.id, v2NodeById, formData.projectTypeQuestionAnswers, visibleCache)
       )
       .sort((left, right) => left.displayOrder - right.displayOrder);
   }, [formData.projectTypeQuestionAnswers, v2NodeById, v2QuestionNodes]);
   const useV2Questionnaire = isCreate && questionnaireTemplateNodes.length > 0;
+  const createTemplateMisconfigured =
+    isCreate && !questionnaireTemplateLoading && !bidDueDateNode;
+  const createRequirementErrors = useMemo(() => {
+    if (!isCreate) return new Map<string, string>();
+    const errors = new Map<string, string>();
+    if (createTemplateMisconfigured) {
+      errors.set(
+        "questionnaireTemplate",
+        "Lead questionnaire template is misconfigured — contact admin."
+      );
+    }
+    if (!selectedProperty) {
+      errors.set("propertyId", "Select or create a property.");
+    } else {
+      if (!selectedProperty.address?.trim()) errors.set("property.address", "Address line 1 is required.");
+      if (!selectedProperty.city?.trim()) errors.set("property.city", "City is required.");
+      if (!selectedProperty.state?.trim() || !/^[A-Z]{2}$/.test(selectedProperty.state.trim().toUpperCase())) {
+        errors.set("property.state", "State must be a 2-letter US state code.");
+      }
+      if (!selectedProperty.zip?.trim() || !/^\d{5}(-\d{4})?$/.test(selectedProperty.zip.trim())) {
+        errors.set("property.zip", "ZIP must be 5 digits or ZIP+4.");
+      }
+      const maxYear = new Date().getFullYear() + 2;
+      if (
+        !Number.isInteger(selectedProperty.buildYear) ||
+        selectedProperty.buildYear == null ||
+        selectedProperty.buildYear < 1800 ||
+        selectedProperty.buildYear > maxYear
+      ) {
+        errors.set("property.buildYear", `Year built must be between 1800 and ${maxYear}.`);
+      }
+      if (
+        !Number.isInteger(selectedProperty.unitCount) ||
+        selectedProperty.unitCount == null ||
+        selectedProperty.unitCount <= 0
+      ) {
+        errors.set("property.unitCount", "Number of units must be a positive integer.");
+      }
+    }
+    if (!formData.primaryContactId) errors.set("primaryContactId", "Point of contact is required.");
+    if (!formData.primaryContactRole) errors.set("primaryContactRole", "POC role is required.");
+    if (formData.primaryContactRole === "other" && !formData.primaryContactRoleOtherLabel.trim()) {
+      errors.set("primaryContactRoleOtherLabel", "Describe the other POC role.");
+    }
+    if (!formData.budgetStatus) errors.set("budgetStatus", "Budget status is required.");
+    if (!formData.projectTypeId) errors.set("projectTypeId", "Project type is required.");
+    if (bidDueDateNode && !isAnsweredQuestionValue(formData.projectTypeQuestionAnswers.bid_due_date)) {
+      errors.set("leadQuestionAnswers.bid_due_date", "Bid Due Date is required.");
+    }
+    for (const key of createGateMissingKeys) {
+      if (!errors.has(key)) errors.set(key, "Required before creating a lead.");
+    }
+    return errors;
+  }, [
+    bidDueDateNode,
+    createGateMissingKeys,
+    createTemplateMisconfigured,
+    formData.budgetStatus,
+    formData.primaryContactId,
+    formData.primaryContactRole,
+    formData.primaryContactRoleOtherLabel,
+    formData.projectTypeId,
+    formData.projectTypeQuestionAnswers,
+    isCreate,
+    selectedProperty,
+  ]);
+  const createSubmitDisabled = isCreate && (questionnaireTemplateLoading || createRequirementErrors.size > 0);
   const selectedPrimaryContactLabel =
     primaryContactSelectItems.find((item) => item.value === (formData.primaryContactId || "__none__"))?.label ??
     "Optional";
-  const selectedStageLabel =
-    stageSelectItems.find((item) => item.value === formData.stageId)?.label ??
-    (stagesLoading ? "Loading stages..." : "Select stage");
+  const selectedPocRoleLabel =
+    pocRoleSelectItems.find((item) => item.value === (formData.primaryContactRole || "__none__"))?.label ??
+    "Select POC role";
+  const selectedBudgetStatusLabel =
+    budgetStatusSelectItems.find((item) => item.value === (formData.budgetStatus || "__none__"))?.label ??
+    "Select budget status";
   const selectedRepLabel =
     repSelectItems.find((item) => item.value === formData.assignedRepId)?.label ??
     (user?.role === "rep" ? user.displayName : "Select sales rep");
@@ -744,9 +859,42 @@ function EditableLeadForm({
     [gateQuestionSet.questions]
   );
 
+  const clearCreateGateMissingKeys = (keys: string[]) => {
+    setCreateGateMissingKeys((current) => current.filter((key) => !keys.includes(key)));
+  };
+
+  const clearCreateGateMissingKeysForField = (field: keyof typeof formData) => {
+    const fieldMap: Partial<Record<keyof typeof formData, string[]>> = {
+      propertyId: [
+        "propertyId",
+        "property.address",
+        "property.city",
+        "property.state",
+        "property.zip",
+        "property.buildYear",
+        "property.unitCount",
+      ],
+      primaryContactId: ["primaryContactId"],
+      primaryContactRole: ["primaryContactRole", "primaryContactRoleOtherLabel"],
+      primaryContactRoleOtherLabel: ["primaryContactRoleOtherLabel"],
+      budgetStatus: ["budgetStatus"],
+      projectTypeId: ["projectTypeId", "questionnaireTemplate"],
+    };
+    const keys = fieldMap[field];
+    if (keys) {
+      clearCreateGateMissingKeys(keys);
+    }
+  };
+
   const handleFieldChange = (field: keyof typeof formData, value: string) => {
     setFormData((current) => ({ ...current, [field]: value }));
+    clearCreateGateMissingKeysForField(field);
   };
+
+  const renderCreateFieldError = (fieldKey: string) =>
+    isCreate && createRequirementErrors.has(fieldKey) ? (
+      <p className="text-xs text-red-600">{createRequirementErrors.get(fieldKey)}</p>
+    ) : null;
 
   const resetNewContact = () => {
     setNewContact({
@@ -842,6 +990,7 @@ function EditableLeadForm({
         [questionId]: nextValue,
       },
     }));
+    clearCreateGateMissingKeys([`leadQuestionAnswers.${questionId}`]);
   };
 
   const handleSubmit = async (event: React.FormEvent) => {
@@ -851,13 +1000,13 @@ function EditableLeadForm({
       ? getNormalizedLeadCreationStageId(leadStages, formData.stageId)
       : formData.stageId;
 
-    if (isCreate && stagesLoading) {
-      setError("Initial stage is still loading. Try again in a moment.");
+    if (isCreate && createRequirementErrors.size > 0) {
+      setError("Complete the required lead creation fields before creating a lead.");
       return;
     }
 
-    if (!formData.companyId || !formData.propertyId || !formData.name.trim() || !effectiveStageId) {
-      setError("Company, property, lead name, and initial stage are required.");
+    if (!formData.companyId || !formData.propertyId || !formData.name.trim() || (!isCreate && !effectiveStageId)) {
+      setError(isCreate ? "Company, property, and lead name are required." : "Company, property, lead name, and stage are required.");
       return;
     }
 
@@ -937,14 +1086,16 @@ function EditableLeadForm({
           companyId: formData.companyId,
           propertyId: formData.propertyId,
           primaryContactId: formData.primaryContactId || null,
+          primaryContactRole: formData.primaryContactRole as LeadPocRole,
+          primaryContactRoleOtherLabel: formData.primaryContactRoleOtherLabel.trim() || null,
           name: formData.name.trim(),
-          stageId: effectiveStageId,
           assignedRepId: formData.assignedRepId,
           salesRepId: formData.assignedRepId,
           source: formData.source.trim() || null,
           sourceCategory: formData.sourceCategory as LeadSourceCategory,
           sourceDetail: formData.sourceDetail.trim() || null,
           description: formData.description.trim() || null,
+          budgetStatus: formData.budgetStatus as LeadBudgetStatus,
           // TODO: replace with Office picker (dfw/atl) — demo hotfix
           officeCode: "dfw",
           ...workflowPayload,
@@ -979,6 +1130,12 @@ function EditableLeadForm({
         setError(null);
         return;
       }
+      if (isApiError(err) && err.code === "LEAD_CREATE_REQUIREMENTS_UNMET") {
+        const fields = (err.missingRequirements as { fields?: Array<{ key?: string }> } | undefined)?.fields ?? [];
+        setCreateGateMissingKeys(fields.map((field) => field.key).filter((key): key is string => Boolean(key)));
+        setError(err.message);
+        return;
+      }
       setError(err instanceof Error ? err.message : "Failed to save lead");
     } finally {
       setSubmitting(false);
@@ -989,7 +1146,7 @@ function EditableLeadForm({
     <form onSubmit={handleSubmit} className="max-w-4xl space-y-6">
       <Card>
         <CardHeader>
-          <CardTitle>{isCreate ? "Lead Information" : "Lead Qualification"}</CardTitle>
+          <CardTitle>{isCreate ? "Lead Creation Requirements" : "Lead Qualification"}</CardTitle>
         </CardHeader>
         <CardContent className="space-y-4">
           {error ? (
@@ -1030,23 +1187,38 @@ function EditableLeadForm({
           {isCreate ? (
             <>
               <div className="space-y-2">
-                <Label>Company</Label>
+                <QuestionLabel required>Company</QuestionLabel>
                 <CompanySelector value={companyId} onChange={setCompanyId} required />
               </div>
 
               <div className="grid gap-4 sm:grid-cols-2">
                 <div className="space-y-2">
-                  <Label htmlFor="propertyId">Property</Label>
+                  <QuestionLabel htmlFor="propertyId" required>Project Address</QuestionLabel>
                   <PropertySelector
                     companyId={companyId}
                     value={formData.propertyId || null}
                     onChange={(propertyId) => handleFieldChange("propertyId", propertyId)}
                     required
+                    requireLeadCreateFields
                   />
+                  {selectedProperty ? (
+                    <p className="text-xs text-muted-foreground">
+                      {formatPropertyLabel(selectedProperty)}
+                      {selectedProperty.buildYear ? ` · Built ${selectedProperty.buildYear}` : ""}
+                      {selectedProperty.unitCount ? ` · ${selectedProperty.unitCount} units` : ""}
+                    </p>
+                  ) : null}
+                  {renderCreateFieldError("propertyId")}
+                  {renderCreateFieldError("property.address")}
+                  {renderCreateFieldError("property.city")}
+                  {renderCreateFieldError("property.state")}
+                  {renderCreateFieldError("property.zip")}
+                  {renderCreateFieldError("property.buildYear")}
+                  {renderCreateFieldError("property.unitCount")}
                 </div>
 
                 <div className="space-y-2">
-                  <Label htmlFor="primaryContactId">Primary Contact</Label>
+                  <QuestionLabel htmlFor="primaryContactId" required>Point of Contact</QuestionLabel>
                   <Select
                     items={primaryContactSelectItems}
                     value={formData.primaryContactId || "__none__"}
@@ -1078,7 +1250,45 @@ function EditableLeadForm({
                   >
                     + Add new contact
                   </Button>
+                  {renderCreateFieldError("primaryContactId")}
                 </div>
+              </div>
+
+              <div className="grid gap-4 sm:grid-cols-2">
+                <div className="space-y-2">
+                  <QuestionLabel htmlFor="primaryContactRole" required>POC Role</QuestionLabel>
+                  <Select
+                    items={pocRoleSelectItems}
+                    value={formData.primaryContactRole || "__none__"}
+                    onValueChange={(value) =>
+                      handleFieldChange("primaryContactRole", !value || value === "__none__" ? "" : value)
+                    }
+                  >
+                    <SelectTrigger id="primaryContactRole">
+                      <SelectValue>{selectedPocRoleLabel}</SelectValue>
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="__none__">Select POC role</SelectItem>
+                      {LEAD_POC_ROLES.map((role) => (
+                        <SelectItem key={role} value={role}>
+                          {LEAD_POC_ROLE_LABELS[role]}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                  {renderCreateFieldError("primaryContactRole")}
+                </div>
+                {formData.primaryContactRole === "other" ? (
+                  <div className="space-y-2">
+                    <QuestionLabel htmlFor="primaryContactRoleOtherLabel" required>Other POC Role</QuestionLabel>
+                    <Input
+                      id="primaryContactRoleOtherLabel"
+                      value={formData.primaryContactRoleOtherLabel}
+                      onChange={(event) => handleFieldChange("primaryContactRoleOtherLabel", event.target.value)}
+                    />
+                    {renderCreateFieldError("primaryContactRoleOtherLabel")}
+                  </div>
+                ) : null}
               </div>
 
               <Dialog open={contactDialogOpen} onOpenChange={setContactDialogOpen}>
@@ -1203,24 +1413,27 @@ function EditableLeadForm({
                 </div>
 
                 <div className="space-y-2">
-                  <Label htmlFor="stageId">Initial Stage</Label>
+                  <QuestionLabel htmlFor="budgetStatus" required>Budget Status</QuestionLabel>
                   <Select
-                    items={stageSelectItems}
-                    value={formData.stageId}
-                    onValueChange={(value) => handleFieldChange("stageId", value ?? "")}
-                    disabled={stagesLoading}
+                    items={budgetStatusSelectItems}
+                    value={formData.budgetStatus || "__none__"}
+                    onValueChange={(value) =>
+                      handleFieldChange("budgetStatus", !value || value === "__none__" ? "" : value)
+                    }
                   >
-                    <SelectTrigger id="stageId">
-                      <SelectValue>{selectedStageLabel}</SelectValue>
+                    <SelectTrigger id="budgetStatus">
+                      <SelectValue>{selectedBudgetStatusLabel}</SelectValue>
                     </SelectTrigger>
                     <SelectContent>
-                      {leadStages.map((stage) => (
-                        <SelectItem key={stage.id} value={stage.id}>
-                          {stage.name}
+                      <SelectItem value="__none__">Select budget status</SelectItem>
+                      {LEAD_BUDGET_STATUSES.map((status) => (
+                        <SelectItem key={status} value={status}>
+                          {LEAD_BUDGET_STATUS_LABELS[status]}
                         </SelectItem>
                       ))}
                     </SelectContent>
                   </Select>
+                  {renderCreateFieldError("budgetStatus")}
                 </div>
               </div>
 
@@ -1271,7 +1484,7 @@ function EditableLeadForm({
                 </div>
 
                 <div className="space-y-2">
-                  <Label htmlFor="projectTypeId">Project Type</Label>
+                  <QuestionLabel htmlFor="projectTypeId" required>Project Type</QuestionLabel>
                   <Select
                     items={projectTypeSelectItems}
                     value={formData.projectTypeId || "__none__"}
@@ -1296,7 +1509,42 @@ function EditableLeadForm({
                       ])}
                     </SelectContent>
                   </Select>
+                  {renderCreateFieldError("projectTypeId")}
                 </div>
+              </div>
+              <div className="grid gap-4 sm:grid-cols-2">
+                {renderCreateFieldError("questionnaireTemplate")}
+                {bidDueDateNode ? (
+                  <div className="space-y-2">
+                    <QuestionLabel htmlFor="bid_due_date" required>Bid Due Date</QuestionLabel>
+                    <Input
+                      id="bid_due_date"
+                      type="date"
+                      value={
+                        typeof formData.projectTypeQuestionAnswers.bid_due_date === "string"
+                          ? formData.projectTypeQuestionAnswers.bid_due_date
+                          : ""
+                      }
+                      onChange={(event) => handleQuestionAnswerChange("bid_due_date", "text", event.target.value)}
+                    />
+                    {renderCreateFieldError("leadQuestionAnswers.bid_due_date")}
+                  </div>
+                ) : null}
+                {numberOfBiddersNode ? (
+                  <div className="space-y-2">
+                    <Label htmlFor="number_of_bidders">Number of Bidders</Label>
+                    <Input
+                      id="number_of_bidders"
+                      type="number"
+                      value={
+                        typeof formData.projectTypeQuestionAnswers.number_of_bidders === "number"
+                          ? String(formData.projectTypeQuestionAnswers.number_of_bidders)
+                          : ""
+                      }
+                      onChange={(event) => handleQuestionAnswerChange("number_of_bidders", "number", event.target.value)}
+                    />
+                  </div>
+                ) : null}
               </div>
               {formData.sourceCategory === "Other" ? (
                 <div className="space-y-2">
@@ -1345,6 +1593,28 @@ function EditableLeadForm({
                         state: lead.propertyState,
                         zip: lead.propertyZip,
                       })
+                    : "--"}
+                </p>
+              </div>
+              <div>
+                <p className="text-muted-foreground">POC Role</p>
+                <p className="font-medium">
+                  {formData.primaryContactRole
+                    ? LEAD_POC_ROLE_LABELS[formData.primaryContactRole as LeadPocRole]
+                    : "--"}
+                </p>
+              </div>
+              {formData.primaryContactRole === "other" ? (
+                <div>
+                  <p className="text-muted-foreground">Other POC Role</p>
+                  <p className="font-medium">{formData.primaryContactRoleOtherLabel || "--"}</p>
+                </div>
+              ) : null}
+              <div>
+                <p className="text-muted-foreground">Budget Status</p>
+                <p className="font-medium">
+                  {formData.budgetStatus
+                    ? LEAD_BUDGET_STATUS_LABELS[formData.budgetStatus as LeadBudgetStatus]
                     : "--"}
                 </p>
               </div>
@@ -1612,12 +1882,10 @@ function EditableLeadForm({
       </Card>
 
       <div className="flex gap-2">
-        <Button type="submit" disabled={submitting || (isCreate && stagesLoading)}>
+        <Button type="submit" disabled={submitting || createSubmitDisabled}>
           {submitting
             ? "Saving..."
-            : isCreate && stagesLoading
-              ? "Loading stages..."
-              : isCreate
+            : isCreate
                 ? "Create Lead"
                 : "Save Qualification"}
         </Button>

@@ -7,7 +7,7 @@ export {
 } from "@/lib/pipeline-ownership";
 import type { StagePageQuery } from "@/lib/pipeline-stage-page";
 import type { LeadScopingReadiness, LeadScopingSectionData } from "../../../shared/src/types/lead-scoping.js";
-import type { LeadSourceCategory } from "../../../shared/src/types/enums.js";
+import type { LeadBudgetStatus, LeadPocRole, LeadSourceCategory } from "../../../shared/src/types/enums.js";
 
 export interface LeadQualificationRecord {
   id: string;
@@ -63,6 +63,8 @@ export interface LeadRecord {
   companyId: string;
   propertyId: string;
   primaryContactId: string | null;
+  primaryContactRole: LeadPocRole | null;
+  primaryContactRoleOtherLabel: string | null;
   name: string;
   stageId: string;
   assignedRepId: string;
@@ -93,7 +95,7 @@ export interface LeadRecord {
   directorReviewReason: string | null;
   decisionMakerName: string | null;
   decisionProcess: string | null;
-  budgetStatus: string | null;
+  budgetStatus: LeadBudgetStatus | null;
   incumbentVendor: string | null;
   unitCount: number | null;
   buildYear: number | null;
@@ -126,6 +128,8 @@ export interface LeadRecord {
     city: string | null;
     state: string | null;
     zip: string | null;
+    buildYear: number | null;
+    unitCount: number | null;
   } | null;
   convertedDealId: string | null;
   convertedDealNumber: string | null;
@@ -439,10 +443,12 @@ export function useLeadScoping(leadId: string | undefined) {
 export async function createLead(input: {
   companyId: string;
   propertyId: string;
-  stageId: string;
+  stageId?: string;
   assignedRepId?: string;
   salesRepId?: string | null;
   primaryContactId?: string | null;
+  primaryContactRole?: LeadPocRole | null;
+  primaryContactRoleOtherLabel?: string | null;
   name: string;
   source?: string | null;
   sourceCategory?: LeadSourceCategory | null;
@@ -451,6 +457,7 @@ export async function createLead(input: {
   officeCode?: string;
   projectType?: string;
   projectTypeId?: string | null;
+  budgetStatus?: LeadBudgetStatus | null;
   qualificationPayload?: Record<string, string | boolean | number | null>;
   projectTypeQuestionPayload?: {
     projectTypeId: string | null;

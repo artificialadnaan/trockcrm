@@ -26,7 +26,9 @@ import { assertLeadStageTransitionAllowed, LeadStageTransitionError } from "./st
 import { preflightLeadStageCheck } from "./stage-gate.js";
 import {
   evaluateLeadQuestionGate,
+  isAnsweredQuestionValue,
   isLeadEditV2Enabled,
+  listQuestionnaireNodes,
   upsertLeadQuestionAnswerSet,
 } from "./questionnaire-service.js";
 import {
@@ -37,7 +39,7 @@ import {
 import { sendSystemEmail } from "../../lib/resend-client.js";
 import { companyNeedsVerification } from "./verification-service.js";
 import { resolveLeadSourceForWrite } from "./source-control.js";
-import type { LeadSourceCategory } from "@trock-crm/shared/types";
+import type { LeadBudgetStatus, LeadPocRole, LeadSourceCategory } from "@trock-crm/shared/types";
 
 type TenantDb = NodePgDatabase<typeof schema>;
 
@@ -53,19 +55,22 @@ export interface LeadFilters {
 export interface CreateLeadInput {
   companyId: string;
   propertyId: string;
-  stageId: string;
+  stageId?: string;
   assignedRepId: string;
   salesRepId?: string | null;
   officeId?: string;
-  primaryContactId?: string;
+  primaryContactId?: string | null;
+  primaryContactRole?: LeadPocRole | null;
+  primaryContactRoleOtherLabel?: string | null;
   name: string;
   source?: string;
   sourceCategory?: LeadSourceCategory | null;
   sourceDetail?: string | null;
   description?: string;
   officeCode: string;
-  projectType: string;
+  projectType?: string | null;
   projectTypeId?: string | null;
+  budgetStatus?: LeadBudgetStatus | null;
   qualificationPayload?: Record<string, string | boolean | number | null>;
   projectTypeQuestionPayload?: {
     projectTypeId: string | null;
@@ -162,6 +167,55 @@ type TransitionSuccessResult = {
 };
 
 type WorkspaceScope = "mine" | "team" | "all";
+
+const LEAD_BUDGET_STATUS_VALUES = new Set<LeadBudgetStatus>([
+  "budgeted_q1",
+  "budgeted_q2",
+  "budgeted_q3",
+  "budgeted_q4",
+  "not_budgeted",
+]);
+
+const LEAD_POC_ROLE_VALUES = new Set<LeadPocRole>([
+  "property_manager",
+  "construction_manager",
+  "director",
+  "other",
+]);
+
+const CREATE_GATE_FIELD_LABELS = new Map<string, string>([
+  ["property.address", "Project address"],
+  ["property.city", "Project city"],
+  ["property.state", "Project state"],
+  ["property.zip", "Project ZIP"],
+  ["property.buildYear", "Year built"],
+  ["property.unitCount", "Number of units"],
+  ["primaryContactId", "Point of contact"],
+  ["primaryContactRole", "POC role"],
+  ["primaryContactRoleOtherLabel", "POC role other label"],
+  ["budgetStatus", "Budget status"],
+  ["projectTypeId", "Project type"],
+  ["leadQuestionAnswers.bid_due_date", "Bid Due Date"],
+]);
+
+export class LeadCreateRequirementsError extends Error {
+  statusCode = 400;
+  code = "LEAD_CREATE_REQUIREMENTS_UNMET";
+  missingRequirements: {
+    fields: Array<{ key: string; label: string }>;
+  };
+
+  constructor(fields: string[]) {
+    super("Complete required lead creation fields before creating a lead.");
+    this.name = "LeadCreateRequirementsError";
+    this.missingRequirements = {
+      fields: fields.map((key) => ({
+        key,
+        label: CREATE_GATE_FIELD_LABELS.get(key) ?? key,
+      })),
+    };
+  }
+}
 
 export interface LeadBoardInput {
   role: string;
@@ -393,6 +447,8 @@ async function decorateLeads(
             city: properties.city,
             state: properties.state,
             zip: properties.zip,
+            buildYear: properties.buildYear,
+            unitCount: properties.unitCount,
           })
           .from(properties)
           .where(inArray(properties.id, propertyIds)),
@@ -606,6 +662,92 @@ async function validateLeadHierarchy(
   }
 
   await validatePrimaryContact(tenantDb, input.companyId, input.primaryContactId);
+  return property;
+}
+
+function isValidUsState(value: unknown) {
+  return typeof value === "string" && /^[A-Z]{2}$/.test(value.trim().toUpperCase());
+}
+
+function isValidZip(value: unknown) {
+  return typeof value === "string" && /^\d{5}(-\d{4})?$/.test(value.trim());
+}
+
+function isBlank(value: unknown) {
+  return typeof value !== "string" || value.trim().length === 0;
+}
+
+function isValidBuildYear(value: unknown, now: Date) {
+  const maxYear = now.getFullYear() + 2;
+  return Number.isInteger(value) && (value as number) >= 1800 && (value as number) <= maxYear;
+}
+
+function isPositiveInteger(value: unknown) {
+  return Number.isInteger(value) && (value as number) > 0;
+}
+
+async function resolveCreateStage(
+  inputStageId: string | undefined,
+  deps: LeadServiceDependencies
+) {
+  const stage = inputStageId
+    ? await deps.getStageById(inputStageId, "lead")
+    : await deps.getStageBySlug("new_lead", "lead");
+
+  if (!stage) {
+    throw new AppError(400, inputStageId ? "Invalid lead stage ID" : "Canonical 'new_lead' stage is not configured");
+  }
+
+  if (stage.isTerminal) {
+    throw new AppError(400, "Cannot create a lead in a terminal stage");
+  }
+
+  if (!stage.slug) {
+    throw new AppError(500, "Target lead stage config is incomplete");
+  }
+
+  assertLeadStartsInEntryStage(stage.slug);
+  return stage;
+}
+
+async function assertLeadCreateRequirements(
+  tenantDb: TenantDb,
+  input: CreateLeadInput,
+  property: typeof properties.$inferSelect,
+  now: Date
+) {
+  const missing: string[] = [];
+
+  if (isBlank(property.address)) missing.push("property.address");
+  if (isBlank(property.city)) missing.push("property.city");
+  if (isBlank(property.state) || !isValidUsState(property.state)) missing.push("property.state");
+  if (isBlank(property.zip) || !isValidZip(property.zip)) missing.push("property.zip");
+  if (!isValidBuildYear(property.buildYear, now)) missing.push("property.buildYear");
+  if (!isPositiveInteger(property.unitCount)) missing.push("property.unitCount");
+
+  if (!input.primaryContactId?.trim()) missing.push("primaryContactId");
+  if (!input.primaryContactRole || !LEAD_POC_ROLE_VALUES.has(input.primaryContactRole)) {
+    missing.push("primaryContactRole");
+  }
+  if (input.primaryContactRole === "other" && !input.primaryContactRoleOtherLabel?.trim()) {
+    missing.push("primaryContactRoleOtherLabel");
+  }
+  if (!input.budgetStatus || !LEAD_BUDGET_STATUS_VALUES.has(input.budgetStatus)) {
+    missing.push("budgetStatus");
+  }
+  if (!input.projectTypeId?.trim()) {
+    missing.push("projectTypeId");
+  }
+
+  const questionnaireNodes = await listQuestionnaireNodes(tenantDb, input.projectTypeId ?? null);
+  const bidDueDateNode = questionnaireNodes.find((node) => node.key === "bid_due_date");
+  if (bidDueDateNode && !isAnsweredQuestionValue(input.leadQuestionAnswers?.bid_due_date)) {
+    missing.push("leadQuestionAnswers.bid_due_date");
+  }
+
+  if (missing.length > 0) {
+    throw new LeadCreateRequirementsError([...new Set(missing)]);
+  }
 }
 
 async function validatePrimaryContact(
@@ -963,29 +1105,21 @@ export function createLeadService(
   }
 
   async function createLead(tenantDb: TenantDb, input: CreateLeadInput) {
-    const stage = await deps.getStageById(input.stageId, "lead");
-    if (!stage) {
-      throw new AppError(400, "Invalid lead stage ID");
-    }
-
-    if (stage.isTerminal) {
-      throw new AppError(400, "Cannot create a lead in a terminal stage");
-    }
-
-    if (!stage.slug) {
-      throw new AppError(500, "Target lead stage config is incomplete");
-    }
-
-    assertLeadStartsInEntryStage(stage.slug);
-
-    await validateLeadHierarchy(tenantDb, input);
+    const stage = await resolveCreateStage(input.stageId, deps);
+    const now = deps.now();
+    const property = await validateLeadHierarchy(tenantDb, input);
     await validateAssignee(tenantDb, input.assignedRepId, input.officeId);
     await validateOptionalUserId(tenantDb, input.salesRepId, "salesRepId", input.officeId);
-    await resolveProjectType(input.projectTypeId ?? null, deps.getActiveProjectTypes);
+    const resolvedProjectType = await resolveProjectType(input.projectTypeId ?? null, deps.getActiveProjectTypes);
     const officeCode = assertValidOfficeCode(input.officeCode);
-    const projectType = await assertValidProjectType(input.projectType, deps.getActiveProjectTypes);
+    await assertLeadCreateRequirements(tenantDb, input, property, now);
+    if (!resolvedProjectType) {
+      throw new AppError(400, "Project type is required");
+    }
+    // leads.project_type stores the legacy normalized display value; project_type_id
+    // is the canonical config FK used by the new create gate.
+    const projectType = resolvedProjectType.name.trim().toLowerCase().replace(/[-_]+/g, " ").replace(/\s+/g, " ");
 
-    const now = deps.now();
     const v2Enabled = isLeadEditV2Enabled();
     const sourceWrite = resolveLeadSourceForWrite({
       source: input.source,
@@ -1002,20 +1136,11 @@ export function createLeadService(
       normalizedProjectTypeQuestionPayload.answers ??
       {};
 
-    // Verification + auto-promotion (v2 only — gate retained because
-    // ENABLE_LEAD_EDIT_V2 still controls broader V2 questionnaire semantics).
-    // Decision is made BEFORE insert so the lead row carries its final stage
-    // and verification_status without a follow-up update round-trip.
-    //
-    // TODO(PR2): When the email + tokenized approval flow lands, the recipient
-    // lookup in customer-status-service.ts:getCompanyVerificationRecipient()
-    // (currently a hardcoded fallback to adnaan.iqbal@gmail.com) is replaced
-    // with companies.assignedApproverUserId → users.email, and the email-send
-    // call site reattaches at the "needsVerification" branch below.
-    let resolvedStageId = input.stageId;
+    // TODO(change 2 of 3): re-enable existing-customer auto-routing with DD email
+    // gate. See feat/lead-due-diligence-routing branch.
+    let resolvedStageId = stage.id;
     let verificationStatus: "not_required" | "pending" = "not_required";
     let verificationRequiredReason: string | null = null;
-    let qualifiedStageForHistory: { id: string } | null = null;
 
     if (v2Enabled) {
       const decision = await companyNeedsVerification(tenantDb, input.companyId, { now });
@@ -1023,13 +1148,6 @@ export function createLeadService(
       if (decision.needsVerification) {
         verificationStatus = "pending";
         verificationRequiredReason = decision.reason;
-      } else {
-        const qualifiedStage = await deps.getStageBySlug("qualified_lead", "lead");
-        if (!qualifiedStage) {
-          throw new AppError(500, "Canonical 'qualified_lead' stage is not configured");
-        }
-        resolvedStageId = qualifiedStage.id;
-        qualifiedStageForHistory = qualifiedStage;
       }
     }
 
@@ -1039,6 +1157,9 @@ export function createLeadService(
         companyId: input.companyId,
         propertyId: input.propertyId,
         primaryContactId: input.primaryContactId ?? null,
+        primaryContactRole: input.primaryContactRole ?? null,
+        primaryContactRoleOtherLabel:
+          input.primaryContactRole === "other" ? input.primaryContactRoleOtherLabel?.trim() ?? null : null,
         name: input.name,
         stageId: resolvedStageId,
         assignedRepId: input.assignedRepId,
@@ -1051,6 +1172,7 @@ export function createLeadService(
         officeCode,
         projectType,
         projectTypeId: input.projectTypeId ?? null,
+        budgetStatus: input.budgetStatus ?? null,
         qualificationPayload: normalizedQualificationPayload,
         projectTypeQuestionPayload: v2Enabled
           ? { projectTypeId: input.projectTypeId ?? null, answers: {} }
@@ -1125,21 +1247,6 @@ export function createLeadService(
           );
         }
       }
-    }
-
-    // Auto-promotion: lead was inserted directly into qualified_lead, but
-    // the request-asserted entry stage was new_lead (assertLeadStartsInEntryStage).
-    // Record the synthetic stage transition so the timeline shows the move.
-    if (qualifiedStageForHistory && qualifiedStageForHistory.id !== input.stageId) {
-      await tenantDb.insert(leadStageHistory).values({
-        leadId: lead.id,
-        fromStageId: input.stageId,
-        toStageId: qualifiedStageForHistory.id,
-        changedBy: input.assignedRepId,
-        isBackwardMove: false,
-        durationInPreviousStage: null,
-        createdAt: now,
-      });
     }
 
     return lead;

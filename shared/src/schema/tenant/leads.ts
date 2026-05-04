@@ -14,6 +14,8 @@ import {
 import {
   FORECAST_CATEGORIES,
   FORECAST_WINDOWS,
+  LEAD_BUDGET_STATUSES,
+  LEAD_POC_ROLES,
   LEAD_SOURCE_CATEGORIES,
   LEAD_STATUSES,
   LEAD_VERIFICATION_STATUSES,
@@ -31,6 +33,8 @@ import { properties } from "./properties.js";
 
 export const leadStatusEnum = pgEnum("lead_status", LEAD_STATUSES);
 export const leadSourceCategoryEnum = pgEnum("lead_source_category", LEAD_SOURCE_CATEGORIES);
+export const leadBudgetStatusEnum = pgEnum("lead_budget_status", LEAD_BUDGET_STATUSES);
+export const leadPocRoleEnum = pgEnum("lead_poc_role", LEAD_POC_ROLES);
 export const leadPipelineTypeEnum = pgEnum("lead_pipeline_type", SALES_WORKFLOW_PIPELINE_TYPES);
 export const leadDisqualificationReasonEnum = pgEnum(
   "lead_disqualification_reason",
@@ -51,6 +55,8 @@ export const leads = pgTable(
     companyId: uuid("company_id").references(() => companies.id).notNull(),
     propertyId: uuid("property_id").references(() => properties.id).notNull(),
     primaryContactId: uuid("primary_contact_id").references(() => contacts.id),
+    primaryContactRole: leadPocRoleEnum("primary_contact_role"),
+    primaryContactRoleOtherLabel: text("primary_contact_role_other_label"),
     name: varchar("name", { length: 500 }).notNull(),
     stageId: uuid("stage_id").notNull(),
     assignedRepId: uuid("assigned_rep_id").references(() => users.id).notNull(),
@@ -87,7 +93,7 @@ export const leads = pgTable(
     disqualifiedBy: uuid("disqualified_by").references(() => users.id),
     decisionMakerName: varchar("decision_maker_name", { length: 255 }),
     decisionProcess: text("decision_process"),
-    budgetStatus: varchar("budget_status", { length: 100 }),
+    budgetStatus: leadBudgetStatusEnum("budget_status"),
     incumbentVendor: varchar("incumbent_vendor", { length: 255 }),
     unitCount: integer("unit_count"),
     buildYear: integer("build_year"),

@@ -5,6 +5,7 @@ import {
   createLead,
   deleteLead,
   getLeadById,
+  LeadCreateRequirementsError,
   listLeadBoard,
   listLeadStagePage,
   listLeads,
@@ -212,9 +213,9 @@ router.patch("/:id/scoping", async (req, res, next) => {
 // POST /api/leads
 router.post("/", async (req, res, next) => {
   try {
-    const { companyId, propertyId, stageId, assignedRepId, salesRepId, name, ...rest } = req.body;
-    if (!companyId || !propertyId || !stageId || !name) {
-      throw new AppError(400, "companyId, propertyId, stageId, and name are required");
+    const { companyId, propertyId, assignedRepId, salesRepId, name, ...rest } = req.body;
+    if (!companyId || !propertyId || !name) {
+      throw new AppError(400, "companyId, propertyId, and name are required");
     }
 
     const repId = req.user!.role === "rep" ? req.user!.id : (assignedRepId || salesRepId || req.user!.id);
@@ -223,7 +224,9 @@ router.post("/", async (req, res, next) => {
     const lead = await createLead(req.tenantDb!, {
       companyId,
       propertyId,
-      stageId,
+      // TODO(change 2 of 3): re-enable existing-customer auto-routing with DD email
+      // gate. See feat/lead-due-diligence-routing branch.
+      stageId: undefined,
       assignedRepId: repId,
       salesRepId: leadSalesRepId,
       officeId: req.user!.activeOfficeId,
@@ -234,6 +237,16 @@ router.post("/", async (req, res, next) => {
     await req.commitTransaction!();
     res.status(201).json({ lead });
   } catch (err) {
+    if (err instanceof LeadCreateRequirementsError) {
+      res.status(400).json({
+        error: {
+          message: err.message,
+          code: err.code,
+          missingRequirements: err.missingRequirements,
+        },
+      });
+      return;
+    }
     next(err);
   }
 });
