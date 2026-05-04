@@ -43,7 +43,17 @@ import { companycamRoutes } from "./modules/companycam/routes.js";
 import { aiCopilotRoutes } from "./modules/ai-copilot/routes.js";
 import { salesReviewRoutes } from "./modules/sales-review/routes.js";
 import { userRoutes } from "./modules/users/routes.js";
-import { getAllowedCorsOrigins } from "./modules/auth/http-config.js";
+import {
+  createCsrfToken,
+  CSRF_COOKIE_NAME,
+  CSRF_HEADER_NAME,
+  getAllowedCorsOrigins,
+  getCsrfCookieOptions,
+  getRequestOrigin,
+  isAllowedCookieAuthOrigin,
+  isUnsafeHttpMethod,
+  isValidCsrfPair,
+} from "./modules/auth/http-config.js";
 import { getSecurityOptions } from "./middleware/security.js";
 
 export function createApp() {
@@ -76,12 +86,49 @@ export function createApp() {
   // Mounted before express.json() so HMAC verification uses the raw body.
   app.use("/api/bid-board-sync", bidBoardSyncRoutes);
 
+  app.use(cookieParser());
+  app.use((req, res, next) => {
+    const csrfCookieOptions = getCsrfCookieOptions(process.env);
+    const existingCsrfToken =
+      typeof req.cookies?.[CSRF_COOKIE_NAME] === "string"
+        ? req.cookies[CSRF_COOKIE_NAME]
+        : undefined;
+    const csrfToken = existingCsrfToken ?? createCsrfToken();
+
+    if (!existingCsrfToken) {
+      res.cookie(CSRF_COOKIE_NAME, csrfToken, csrfCookieOptions);
+    }
+
+    const hasAuthCookie = typeof req.cookies?.token === "string";
+    if (!hasAuthCookie || !isUnsafeHttpMethod(req.method)) {
+      return next();
+    }
+
+    const requestOrigin = getRequestOrigin({
+      origin: req.headers.origin,
+      referer: req.headers.referer,
+      referrer: req.headers.referrer,
+    });
+
+    if (!isAllowedCookieAuthOrigin(process.env, requestOrigin)) {
+      res.status(403).json({ error: { message: "Forbidden origin" } });
+      return;
+    }
+
+    const headerToken = req.get(CSRF_HEADER_NAME);
+    if (!isValidCsrfPair(csrfToken, headerToken)) {
+      res.status(403).json({ error: { message: "Invalid CSRF token" } });
+      return;
+    }
+
+    next();
+  });
+
   app.use((req, res, next) => {
     // Skip JSON parsing for direct file uploads (handled by express.raw on the route)
     if (req.path === "/api/files/upload-direct") return next();
     express.json({ limit: "10mb" })(req, res, next);
   });
-  app.use(cookieParser());
 
   // API Documentation
   app.use("/api/docs", swaggerUi.serve, swaggerUi.setup(apiSpec, {

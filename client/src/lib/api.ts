@@ -30,6 +30,8 @@ export function resolveApiBase(
 }
 
 const API_BASE = resolveApiBase((import.meta as any).env ?? {}, typeof window !== "undefined" ? window.location : undefined);
+const CSRF_COOKIE_NAME = "csrf_token";
+const CSRF_HEADER_NAME = "X-CSRF-Token";
 
 interface ApiOptions extends RequestInit {
   json?: Record<string, any>;
@@ -41,6 +43,18 @@ interface ApiErrorPayload {
   missingRequirements?: unknown;
   currentStage?: unknown;
   targetStage?: unknown;
+}
+
+function readCookie(name: string): string | undefined {
+  if (typeof document === "undefined") return undefined;
+  const cookie = document.cookie
+    .split("; ")
+    .find((entry) => entry.startsWith(`${name}=`));
+  return cookie ? decodeURIComponent(cookie.slice(name.length + 1)) : undefined;
+}
+
+function isUnsafeMethod(method: string | undefined): boolean {
+  return ["POST", "PUT", "PATCH", "DELETE"].includes((method ?? "GET").toUpperCase());
 }
 
 export class ApiError extends Error {
@@ -75,6 +89,13 @@ export async function api<T = any>(path: string, options: ApiOptions = {}): Prom
   if (json) {
     headers["Content-Type"] = "application/json";
     fetchOptions.body = JSON.stringify(json);
+  }
+
+  if (isUnsafeMethod(fetchOptions.method)) {
+    const csrfToken = readCookie(CSRF_COOKIE_NAME);
+    if (csrfToken) {
+      headers[CSRF_HEADER_NAME] = csrfToken;
+    }
   }
 
   const res = await fetch(`${API_BASE}${path}`, {

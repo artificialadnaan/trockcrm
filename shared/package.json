@@ -24,11 +24,11 @@
     "dev": "tsc --watch"
   },
   "dependencies": {
-    "drizzle-orm": "^0.39.3",
+    "drizzle-orm": "^0.45.2",
     "pg": "^8.13.1"
   },
   "devDependencies": {
-    "drizzle-kit": "^0.30.4",
-    "@types/pg": "^8.11.10"
+    "@types/pg": "^8.11.10",
+    "drizzle-kit": "^0.30.4"
   }
 }

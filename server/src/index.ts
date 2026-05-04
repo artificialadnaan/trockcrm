@@ -4,6 +4,17 @@ dotenv.config();
 import { createApp } from "./app.js";
 import { configureR2Cors, getAllowedR2CorsOrigins } from "./lib/r2-client.js";
 import { pool } from "./db.js";
+import {
+  assertSafeDevAuthConfig,
+  isDevAuthProductionOverrideEnabled,
+} from "./modules/auth/http-config.js";
+
+assertSafeDevAuthConfig(process.env);
+if (isDevAuthProductionOverrideEnabled(process.env)) {
+  console.warn(
+    "[AUTH][PRE-CUTOVER OVERRIDE] ALLOW_DEV_AUTH_IN_PROD=true is enabling DEV_MODE in production for temporary E2E verification. Remove this override before the May 15 cutover."
+  );
+}
 
 const PORT = parseInt(process.env.PORT || "3001", 10);
 const app = createApp();

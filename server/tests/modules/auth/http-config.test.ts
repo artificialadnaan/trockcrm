@@ -1,7 +1,12 @@
 import { describe, expect, it } from "vitest";
 import {
+  assertSafeDevAuthConfig,
+  createCsrfToken,
   getAllowedCorsOrigins,
+  getRequestOrigin,
   getTokenCookieOptions,
+  isAllowedCookieAuthOrigin,
+  isValidCsrfPair,
   isDevAuthEnabled,
 } from "../../../src/modules/auth/http-config.js";
 
@@ -52,15 +57,28 @@ describe("auth http config", () => {
     ).toBe(true);
   });
 
-  it("allows dev auth remotely when explicit testing mode is enabled", () => {
+  it("requires explicit testing mode to stay on local development hosts", () => {
     expect(
       isDevAuthEnabled(
         {
-          NODE_ENV: "production",
+          NODE_ENV: "development",
           AZURE_CLIENT_ID: "",
           DEV_MODE: "true",
         },
         "crm.trockconstruction.com"
+      )
+    ).toBe(false);
+  });
+
+  it("allows explicit testing mode on localhost during development", () => {
+    expect(
+      isDevAuthEnabled(
+        {
+          NODE_ENV: "development",
+          AZURE_CLIENT_ID: "",
+          DEV_MODE: "true",
+        },
+        "localhost:3001"
       )
     ).toBe(true);
   });
@@ -75,5 +93,72 @@ describe("auth http config", () => {
         "crm.trockconstruction.com"
       )
     ).toBe(false);
+  });
+
+  it("fails startup when production enables DEV_MODE", () => {
+    expect(() =>
+      assertSafeDevAuthConfig({
+        NODE_ENV: "production",
+        DEV_MODE: "true",
+      })
+    ).toThrow("DEV_MODE=true is not allowed");
+  });
+
+  it("allows startup when production dev auth has the explicit pre-cutover override", () => {
+    expect(() =>
+      assertSafeDevAuthConfig({
+        NODE_ENV: "production",
+        DEV_MODE: "true",
+        ALLOW_DEV_AUTH_IN_PROD: "true",
+      })
+    ).not.toThrow();
+  });
+
+  it("keeps hard-failing production DEV_MODE when the pre-cutover override is false", () => {
+    expect(() =>
+      assertSafeDevAuthConfig({
+        NODE_ENV: "production",
+        DEV_MODE: "true",
+        ALLOW_DEV_AUTH_IN_PROD: "false",
+      })
+    ).toThrow("DEV_MODE=true is not allowed");
+  });
+
+  it("enables dev auth endpoints in production only when the pre-cutover override is present", () => {
+    expect(
+      isDevAuthEnabled(
+        {
+          NODE_ENV: "production",
+          DEV_MODE: "true",
+          ALLOW_DEV_AUTH_IN_PROD: "true",
+        },
+        "crm.trockconstruction.com"
+      )
+    ).toBe(true);
+  });
+
+  it("allows only exact configured origins for cookie-authenticated unsafe requests", () => {
+    const env = {
+      CORS_ALLOWED_ORIGINS: "https://crm.trockconstruction.com, http://localhost:3001",
+    };
+
+    expect(isAllowedCookieAuthOrigin(env, "https://crm.trockconstruction.com")).toBe(true);
+    expect(isAllowedCookieAuthOrigin(env, "https://evil.example.com")).toBe(false);
+    expect(isAllowedCookieAuthOrigin(env, "https://crm.trockconstruction.com.evil.example.com")).toBe(false);
+    expect(isAllowedCookieAuthOrigin(env, null)).toBe(false);
+  });
+
+  it("normalizes Origin before falling back to Referer", () => {
+    expect(getRequestOrigin({ origin: "http://localhost:3001/" })).toBe("http://localhost:3001");
+    expect(getRequestOrigin({ referer: "http://localhost:3001/deals/123" })).toBe("http://localhost:3001");
+    expect(getRequestOrigin({ referer: "not-a-url" })).toBeNull();
+  });
+
+  it("validates matching CSRF cookie and header tokens", () => {
+    const token = createCsrfToken();
+    expect(isValidCsrfPair(token, token)).toBe(true);
+    expect(isValidCsrfPair(token, createCsrfToken())).toBe(false);
+    expect(isValidCsrfPair(undefined, token)).toBe(false);
+    expect(isValidCsrfPair(token, undefined)).toBe(false);
   });
 });
