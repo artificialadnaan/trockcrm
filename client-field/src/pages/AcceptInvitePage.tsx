@@ -43,7 +43,7 @@ export function AcceptInvitePage() {
     };
   }, [previewInvite, token]);
 
-  if (user) return <Navigate to="/home" replace />;
+  if (user) return <Navigate to="/projects" replace />;
 
   async function onSubmit(event: FormEvent) {
     event.preventDefault();
@@ -63,7 +63,7 @@ export function AcceptInvitePage() {
     setSubmitting(true);
     try {
       await acceptInvite(token, password);
-      navigate("/home", { replace: true });
+      navigate("/projects", { replace: true });
     } catch (err) {
       setError(err instanceof Error ? err.message : "Unable to accept invite.");
     } finally {

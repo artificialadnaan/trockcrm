@@ -25,8 +25,30 @@ vi.mock("../src/middleware/tenant.js", () => ({
 const { createApp } = await import("../src/app.js");
 
 describe("field contractor app-level route access", () => {
+  it("keeps the public health check available", async () => {
+    const response = await request(createApp()).get("/api/health");
+
+    expect(response.status).toBe(200);
+    expect(response.body.status).toBe("ok");
+  });
+
   it("denies field contractors from CRM tenant routes before route handlers run", async () => {
     const response = await request(createApp()).get("/api/deals");
+
+    expect(response.status).toBe(403);
+    expect(response.body).toEqual({ error: { message: "CRM access required" } });
+  });
+
+  it.each([
+    ["GET", "/api/files/deal/deal-1/photos"],
+    ["GET", "/api/files/photo-targets/search"],
+    ["GET", "/api/files/file-1"],
+    ["POST", "/api/files/confirm-upload"],
+    ["PATCH", "/api/files/file-1"],
+    ["DELETE", "/api/files/file-1"],
+  ])("denies field contractors from %s %s", async (method, path) => {
+    const agent = request(createApp()) as any;
+    const response = await agent[method.toLowerCase()](path);
 
     expect(response.status).toBe(403);
     expect(response.body).toEqual({ error: { message: "CRM access required" } });

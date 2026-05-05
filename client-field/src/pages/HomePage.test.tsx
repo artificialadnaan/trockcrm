@@ -32,6 +32,6 @@ describe("HomePage", () => {
     root.render(<HomePage />);
 
     await vi.waitFor(() => expect(container!.textContent).toContain("Welcome, Field."));
-    expect(container.textContent).toContain("Project list and capture coming soon.");
+    expect(container.textContent).toContain("Project list is live.");
   });
 });

@@ -4,9 +4,9 @@ import { useAuth } from "@/lib/auth";
 import { Button } from "./ui";
 
 const navItems = [
-  { label: "Projects", icon: FolderKanban },
-  { label: "Capture", icon: Camera },
-  { label: "Profile", icon: UserCircle },
+  { label: "Projects", icon: FolderKanban, to: "/projects" },
+  { label: "Capture", icon: Camera, to: "/projects" },
+  { label: "Profile", icon: UserCircle, to: "/profile" },
 ] as const;
 
 export function FieldLayout() {
@@ -32,8 +32,8 @@ export function FieldLayout() {
           {navItems.map((item) => (
             <NavLink
               key={item.label}
-              to="/home"
-              className="flex min-h-14 flex-col items-center justify-center rounded-md text-sm font-semibold text-muted-foreground hover:bg-muted hover:text-foreground"
+              to={item.to}
+              className={({ isActive }) => `flex min-h-14 flex-col items-center justify-center rounded-md text-sm font-semibold ${isActive ? "bg-muted text-primary" : "text-muted-foreground hover:bg-muted hover:text-foreground"}`}
             >
               <item.icon className="h-5 w-5" aria-hidden="true" />
               {item.label}

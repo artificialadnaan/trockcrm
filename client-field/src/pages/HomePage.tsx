@@ -7,7 +7,7 @@ export function HomePage() {
   return (
     <section className="rounded-lg border border-border bg-white p-5 shadow-sm">
       <h1 className="text-2xl font-bold">Welcome, {name}.</h1>
-      <p className="mt-2 text-muted-foreground">Project list and capture coming soon.</p>
+      <p className="mt-2 text-muted-foreground">Project list is live. Capture and profile tools are coming soon.</p>
     </section>
   );
 }

@@ -6,7 +6,7 @@ import {
 } from "../src/route-access-policy.js";
 
 describe("field contractor route policy", () => {
-  it("keeps every current CRM tenant route behind the CRM-only policy except the explicit files deferment", () => {
+  it("keeps every current CRM tenant route behind the CRM-only policy with field routes explicitly allowlisted", () => {
     expect(CRM_ONLY_TENANT_ROUTE_MOUNTS).toEqual([
       "/deals",
       "/pipeline",
@@ -29,8 +29,7 @@ describe("field contractor route policy", () => {
       "/companycam",
       "/ai",
     ]);
-    expect(FIELD_ACCESSIBLE_ROUTE_MOUNTS).toContain("/api/field");
-    expect(FIELD_ACCESSIBLE_ROUTE_MOUNTS).toContain("/api/files");
+    expect(FIELD_ACCESSIBLE_ROUTE_MOUNTS).toEqual(["/api/field"]);
     expect(PUBLIC_ROUTE_MOUNTS).toContain("/api/auth");
   });
 });

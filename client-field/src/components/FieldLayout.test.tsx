@@ -33,10 +33,10 @@ describe("FieldLayout", () => {
     document.body.appendChild(container);
     root = createRoot(container);
     root.render(
-      <MemoryRouter initialEntries={["/home"]}>
+      <MemoryRouter initialEntries={["/projects"]}>
         <Routes>
           <Route element={<FieldLayout />}>
-            <Route path="/home" element={<div>Home content</div>} />
+            <Route path="/projects" element={<div>Projects content</div>} />
           </Route>
         </Routes>
       </MemoryRouter>
@@ -46,7 +46,7 @@ describe("FieldLayout", () => {
     expect(container.textContent).toContain("Projects");
     expect(container.textContent).toContain("Capture");
     expect(container.textContent).toContain("Profile");
-    expect(container.textContent).toContain("Home content");
+    expect(container.textContent).toContain("Projects content");
 
     container.querySelector<HTMLButtonElement>('[aria-label="Log out"]')?.click();
     expect(authMock.logout).toHaveBeenCalled();

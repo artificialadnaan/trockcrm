@@ -222,9 +222,7 @@ export function createApp() {
     tenantRouter.use(mount, requireCrmUser, routes);
   }
 
-  // Files routes are intentionally left unchanged for PR 6a. PR 6b adds the
-  // field-specific photo allow-list and locks down the broader files surface.
-  tenantRouter.use("/files", fileRoutes);
+  tenantRouter.use("/files", requireCrmUser, fileRoutes);
 
   // Foundation test route — proves tenant middleware works end-to-end
   tenantRouter.get("/tenant-check", requireCrmUser, async (req, res) => {

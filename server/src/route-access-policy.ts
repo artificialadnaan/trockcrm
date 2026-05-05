@@ -23,9 +23,6 @@ export const CRM_ONLY_TENANT_ROUTE_MOUNTS = [
 
 export const FIELD_ACCESSIBLE_ROUTE_MOUNTS = [
   "/api/field",
-  // Existing files routes stay unchanged in PR 6a; PR 6b introduces field-specific
-  // photo endpoints and tightens the files surface around that allow-list.
-  "/api/files",
 ] as const;
 
 export const PUBLIC_ROUTE_MOUNTS = [
