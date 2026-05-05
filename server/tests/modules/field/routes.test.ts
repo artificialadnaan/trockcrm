@@ -31,7 +31,13 @@ const projectMocks = vi.hoisted(() => ({
   unstarFieldProject: vi.fn(),
 }));
 
+const photoMocks = vi.hoisted(() => ({
+  requestFieldPhotoUploadUrl: vi.fn(),
+  confirmFieldPhotoUpload: vi.fn(),
+}));
+
 vi.mock("../../../src/modules/field/projects-service.js", () => projectMocks);
+vi.mock("../../../src/modules/field/photos-service.js", () => photoMocks);
 
 const { fieldRoutes } = await import("../../../src/modules/field/routes.js");
 
@@ -49,6 +55,8 @@ describe("field routes", () => {
     projectMocks.starFieldProject.mockResolvedValue({ starred: true });
     projectMocks.unstarFieldProject.mockResolvedValue({ starred: false });
     projectMocks.listFieldProjectPhotos.mockResolvedValue({ photos: [], pagination: { page: 1, limit: 200, total: 0, totalPages: 0 } });
+    photoMocks.requestFieldPhotoUploadUrl.mockResolvedValue({ uploadUrl: "https://r2.example/upload", objectKey: "key", uploadToken: "token" });
+    photoMocks.confirmFieldPhotoUpload.mockResolvedValue({ photo: { id: "photo-1", category: "photo" } });
   });
 
   it("returns the authenticated field contractor profile", async () => {
@@ -97,13 +105,56 @@ describe("field routes", () => {
       includeDeleted: false,
     });
   });
+
+  it("routes field photo upload URL and confirm requests through field-safe services", async () => {
+    await invokeRoute("post", "/photos/upload-url", {
+      body: { dealId: "deal-1", contentType: "image/jpeg", sizeBytes: 1000, category: "damage", caption: "North slope" },
+    });
+    expect(photoMocks.requestFieldPhotoUploadUrl).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({
+      officeSlug: "trock",
+      userId: "field-1",
+      dealId: "deal-1",
+      contentType: "image/jpeg",
+      sizeBytes: 1000,
+      photoCategory: "damage",
+      caption: "North slope",
+    }));
+
+    await invokeRoute("post", "/photos/confirm-upload", {
+      body: {
+        dealId: "deal-1",
+        objectKey: "key",
+        uploadToken: "token",
+        latitude: 35,
+        longitude: -97,
+        addressSource: "live_gps",
+        takenAt: "2026-05-05T12:00:00.000Z",
+      },
+      ip: "127.0.0.1",
+      headers: { "user-agent": "vitest" },
+    });
+    expect(photoMocks.confirmFieldPhotoUpload).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({
+      userId: "field-1",
+      officeId: "office-1",
+      dealId: "deal-1",
+      objectKey: "key",
+      uploadToken: "token",
+      addressSource: "live_gps",
+      auditContext: { ipAddress: "127.0.0.1", userAgent: "vitest" },
+    }));
+  });
 });
 
 async function invokeRoute(method: string, path: string, reqPatch: Record<string, unknown>) {
   const handlers = findRoute(fieldRoutes, method, path);
-  const req: Record<string, unknown> = { query: {}, params: {}, ...reqPatch };
+  const req: Record<string, unknown> = { query: {}, params: {}, body: {}, officeSlug: "trock", ip: undefined, headers: {}, ...reqPatch };
   const res: Record<string, unknown> = {
     body: undefined,
+    statusCode: 200,
+    status(code: number) {
+      res.statusCode = code;
+      return res;
+    },
     json(payload: unknown) {
       res.body = payload;
       return res;

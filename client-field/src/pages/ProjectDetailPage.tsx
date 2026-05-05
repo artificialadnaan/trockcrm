@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
-import { ArrowLeft, ChevronLeft, ChevronRight, Filter, Star, X } from "lucide-react";
+import { ArrowLeft, Camera, ChevronLeft, ChevronRight, Filter, Star, X } from "lucide-react";
 import { api } from "@/lib/api";
 import { Button, TextInput } from "@/components/ui";
 import {
@@ -125,7 +125,13 @@ export function ProjectDetailPage() {
       </div>
 
       {filteredPhotos.length === 0 ? (
-        <p className="rounded-md bg-muted p-5 text-center font-semibold text-muted-foreground">No photos in this project yet.</p>
+        <div className="rounded-md bg-muted p-5 text-center">
+          <p className="font-semibold text-muted-foreground">No photos in this project yet.</p>
+          <Button className="mt-4" onClick={() => navigate(`/capture?dealId=${id}`)}>
+            <Camera className="mr-2 h-5 w-5" aria-hidden="true" />
+            Add photos
+          </Button>
+        </div>
       ) : (
         <div className="space-y-5">
           {groupedPhotos.map((group) => (
@@ -146,6 +152,15 @@ export function ProjectDetailPage() {
           ))}
         </div>
       )}
+
+      <Button
+        aria-label="Add photos"
+        className="fixed bottom-24 right-4 z-20 h-14 rounded-full px-5 shadow-lg"
+        onClick={() => navigate(`/capture?dealId=${id}`)}
+      >
+        <Camera className="mr-2 h-5 w-5" aria-hidden="true" />
+        Add photos
+      </Button>
 
       {drawerOpen ? (
         <FilterDrawer
@@ -226,7 +241,18 @@ function FilterDrawer({
             </div>
           </div>
           <div className="grid grid-cols-2 gap-2">
-            <Button variant="ghost" onClick={onClear}>Clear all</Button>
+            <Button
+              variant="ghost"
+              onClick={() => {
+                setDraftFrom("");
+                setDraftTo("");
+                setDraftUploaders([]);
+                onClear();
+                onApply({ from: "", to: "", uploaderIds: [] });
+              }}
+            >
+              Clear all
+            </Button>
             <Button onClick={() => onApply({ from: draftFrom, to: draftTo, uploaderIds: draftUploaders })}>Apply</Button>
           </div>
         </div>

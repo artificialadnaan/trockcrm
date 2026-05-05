@@ -3,6 +3,10 @@ import { requireFieldContractor } from "../../middleware/field-auth.js";
 import { tenantMiddleware } from "../../middleware/tenant.js";
 import { toFieldUserResponse } from "../field-users/service.js";
 import {
+  confirmFieldPhotoUpload,
+  requestFieldPhotoUploadUrl,
+} from "./photos-service.js";
+import {
   listFieldProjects,
   listFieldProjectPhotos,
   listStarredFieldProjects,
@@ -11,6 +15,14 @@ import {
 } from "./projects-service.js";
 
 export const fieldRoutes = Router();
+
+function requestAuditContext(req: any) {
+  const userAgentHeader = req.headers?.["user-agent"];
+  return {
+    ipAddress: req.ip ?? null,
+    userAgent: Array.isArray(userAgentHeader) ? userAgentHeader.join(", ") : userAgentHeader ?? null,
+  };
+}
 
 fieldRoutes.get("/me", requireFieldContractor, (req, res) => {
   res.json({
@@ -60,6 +72,45 @@ fieldRoutes.delete("/projects/:dealId/star", ...fieldProjectMiddleware, async (r
     const result = await unstarFieldProject(req.tenantDb!, req.fieldUser!.id, String(req.params.dealId));
     await req.commitTransaction();
     res.json(result);
+  } catch (err) {
+    next(err);
+  }
+});
+
+fieldRoutes.post("/photos/upload-url", ...fieldProjectMiddleware, async (req, res, next) => {
+  try {
+    const result = await requestFieldPhotoUploadUrl(req.tenantDb!, {
+      officeSlug: req.officeSlug!,
+      userId: req.fieldUser!.id,
+      dealId: String(req.body.dealId),
+      contentType: String(req.body.contentType),
+      sizeBytes: Number(req.body.sizeBytes),
+      photoCategory: req.body.category ?? req.body.photoCategory ?? null,
+      caption: req.body.caption ?? null,
+    });
+    await req.commitTransaction();
+    res.json(result);
+  } catch (err) {
+    next(err);
+  }
+});
+
+fieldRoutes.post("/photos/confirm-upload", ...fieldProjectMiddleware, async (req, res, next) => {
+  try {
+    const result = await confirmFieldPhotoUpload(req.tenantDb!, {
+      userId: req.fieldUser!.id,
+      officeId: req.fieldUser!.tenantId,
+      dealId: String(req.body.dealId),
+      uploadToken: String(req.body.uploadToken),
+      objectKey: String(req.body.objectKey),
+      latitude: req.body.latitude !== undefined ? Number(req.body.latitude) : undefined,
+      longitude: req.body.longitude !== undefined ? Number(req.body.longitude) : undefined,
+      addressSource: req.body.addressSource,
+      takenAt: req.body.takenAt,
+      auditContext: requestAuditContext(req),
+    });
+    await req.commitTransaction();
+    res.status(201).json(result);
   } catch (err) {
     next(err);
   }

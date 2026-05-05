@@ -46,6 +46,10 @@ const projectMocks = vi.hoisted(() => ({
   starFieldProject: vi.fn(),
 }));
 
+const photoMocks = vi.hoisted(() => ({
+  requestFieldPhotoUploadUrl: vi.fn(),
+}));
+
 const fieldUserServiceMocks = vi.hoisted(() => ({
   acceptFieldInvite: vi.fn(),
 }));
@@ -59,6 +63,11 @@ vi.mock("../src/modules/field/projects-service.js", async () => {
     starFieldProject: projectMocks.starFieldProject,
   };
 });
+
+vi.mock("../src/modules/field/photos-service.js", () => ({
+  requestFieldPhotoUploadUrl: photoMocks.requestFieldPhotoUploadUrl,
+  confirmFieldPhotoUpload: vi.fn(),
+}));
 
 vi.mock("../src/modules/files/routes.js", () => {
   const fileRoutes = Router();
@@ -90,6 +99,16 @@ describe("app CSRF cross-origin field support", () => {
     process.env.NODE_ENV = "test";
     process.env.FIELD_APP_URL = origin;
     projectMocks.starFieldProject.mockResolvedValue({ starred: true });
+    photoMocks.requestFieldPhotoUploadUrl.mockResolvedValue({
+      uploadUrl: "https://r2.example.com/upload",
+      objectKey: "field-photos/deal-1/photo.jpg",
+      r2Key: "field-photos/deal-1/photo.jpg",
+      expiresIn: 900,
+      uploadToken: "upload-token",
+      systemFilename: "photo.jpg",
+      displayName: "photo.jpg",
+      folderPath: "Field Photos",
+    });
     fieldUserServiceMocks.acceptFieldInvite.mockResolvedValue({
       user: {
         id: "field-1",
@@ -140,6 +159,36 @@ describe("app CSRF cross-origin field support", () => {
     expect(response.status).toBe(403);
     expect(response.body).toEqual({ error: { message: "Missing required header for cross-origin request." } });
     expect(projectMocks.starFieldProject).not.toHaveBeenCalled();
+  });
+
+  it("allows field photo upload URL requests with the cross-origin requested-with header", async () => {
+    const response = await request(createApp())
+      .post("/api/field/photos/upload-url")
+      .set("Origin", origin)
+      .set("Cookie", authCookies)
+      .set("X-Requested-With", "XMLHttpRequest")
+      .send({ dealId: "deal-1", contentType: "image/jpeg", sizeBytes: 1024 });
+
+    expect(response.status).toBe(200);
+    expect(response.body).toMatchObject({ uploadToken: "upload-token", objectKey: "field-photos/deal-1/photo.jpg" });
+    expect(photoMocks.requestFieldPhotoUploadUrl).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({
+      dealId: "deal-1",
+      contentType: "image/jpeg",
+      sizeBytes: 1024,
+      userId: "field-1",
+    }));
+  });
+
+  it("rejects field photo upload URL requests without the cross-origin requested-with header", async () => {
+    const response = await request(createApp())
+      .post("/api/field/photos/upload-url")
+      .set("Origin", origin)
+      .set("Cookie", authCookies)
+      .send({ dealId: "deal-1", contentType: "image/jpeg", sizeBytes: 1024 });
+
+    expect(response.status).toBe(403);
+    expect(response.body).toEqual({ error: { message: "Missing required header for cross-origin request." } });
+    expect(photoMocks.requestFieldPhotoUploadUrl).not.toHaveBeenCalled();
   });
 
   it("preserves cookie-pair CSRF behavior for CRM files endpoints", async () => {
