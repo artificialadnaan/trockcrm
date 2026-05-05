@@ -24,6 +24,9 @@ const mocks = vi.hoisted(() => ({
   poolQuery: vi.fn(),
   poolConnect: vi.fn(),
   drizzle: vi.fn(),
+  tenantDb: {
+    execute: vi.fn(),
+  },
   tenantClient: {
     query: vi.fn(),
     release: vi.fn(),
@@ -96,7 +99,7 @@ describe("admin ownership sync routes", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     mocks.poolConnect.mockResolvedValue(mocks.tenantClient);
-    mocks.drizzle.mockReturnValue({ execute: vi.fn() });
+    mocks.drizzle.mockReturnValue(mocks.tenantDb);
     mocks.tenantClient.query.mockResolvedValue({ rows: [] });
   });
 
@@ -105,6 +108,18 @@ describe("admin ownership sync routes", () => {
     app.use(express.json());
     app.use("/api", adminRoutes);
     return app;
+  }
+
+  function mockTenantContext() {
+    mocks.tenantClient.query.mockImplementation(async (query: string) => {
+      if (query.includes("SELECT slug FROM public.offices")) {
+        return { rows: [{ slug: "dallas" }] };
+      }
+      if (query.includes("information_schema.schemata")) {
+        return { rows: [{ schema_name: "office_dallas" }] };
+      }
+      return { rows: [] };
+    });
   }
 
   it("wires /admin/ownership-sync/dry-run through the router and passes dryRun=true", async () => {
@@ -141,6 +156,153 @@ describe("admin ownership sync routes", () => {
     expect(mocks.authMiddleware).toHaveBeenCalledOnce();
     expect(mocks.requireAdmin).toHaveBeenCalledOnce();
     expect(mocks.runOwnershipSync).toHaveBeenCalledWith({ dryRun: false });
+  });
+
+  it("requires admin for /admin/lead-dd-debug", async () => {
+    mocks.requireAdmin.mockImplementationOnce((_req: any, res: any) =>
+      res.status(403).json({ error: "Forbidden" })
+    );
+
+    const response = await request(buildApp()).get(
+      "/api/admin/lead-dd-debug?leadId=11111111-1111-4111-8111-111111111111"
+    );
+
+    expect(response.status).toBe(403);
+    expect(mocks.poolConnect).not.toHaveBeenCalled();
+  });
+
+  it("returns 400 when leadId is missing for /admin/lead-dd-debug", async () => {
+    const response = await request(buildApp()).get("/api/admin/lead-dd-debug");
+
+    expect(response.status).toBe(400);
+    expect(response.body).toEqual({ error: "leadId required" });
+  });
+
+  it("returns 400 when leadId is malformed for /admin/lead-dd-debug", async () => {
+    const response = await request(buildApp()).get("/api/admin/lead-dd-debug?leadId=not-a-uuid");
+
+    expect(response.status).toBe(400);
+    expect(response.body).toEqual({ error: "invalid leadId format" });
+  });
+
+  it("returns 404 when leadId is valid but no tenant lead exists", async () => {
+    mockTenantContext();
+    mocks.tenantDb.execute.mockResolvedValueOnce({ rows: [] });
+
+    const response = await request(buildApp()).get(
+      "/api/admin/lead-dd-debug?leadId=11111111-1111-4111-8111-111111111111"
+    );
+
+    expect(response.status).toBe(404);
+    expect(response.body).toEqual({ error: "Lead not found" });
+  });
+
+  it("returns lead DD diagnostic data for a tenant-scoped admin request", async () => {
+    mockTenantContext();
+    mocks.tenantDb.execute
+      .mockResolvedValueOnce({
+        rows: [
+          {
+            id: "11111111-1111-4111-8111-111111111111",
+            name: "Bluewater Lead",
+            stage_slug: "new_lead",
+            company_id: "22222222-2222-4222-8222-222222222222",
+            primary_contact_id: "33333333-3333-4333-8333-333333333333",
+            property_id: "44444444-4444-4444-8444-444444444444",
+            verification_status: "pending",
+            verification_required_reason: "new_company",
+            created_at: "2026-05-05T12:00:00.000Z",
+            last_activity_at: null,
+          },
+        ],
+      })
+      .mockResolvedValueOnce({
+        rows: [
+          {
+            id: "55555555-5555-4555-8555-555555555555",
+            status: "pending",
+            requested_at: "2026-05-05T12:01:00.000Z",
+            email_sent_at: null,
+            email_message_id: null,
+            detection_signal: { detail: "No recent activity" },
+            decided_at: null,
+            decided_by: null,
+          },
+        ],
+      })
+      .mockResolvedValueOnce({
+        rows: [
+          { email: "tyamashita@trockgc.com", is_active: true },
+          { email: "adnaan.iqbal@gmail.com", is_active: true },
+        ],
+      })
+      .mockResolvedValueOnce({
+        rows: [
+          {
+            source: "company-lead",
+            type: "lead",
+            occurred_at: "2026-04-20T12:00:00.000Z",
+            detail: "Recent lead activity on company",
+            record_id: "66666666-6666-4666-8666-666666666666",
+          },
+        ],
+      })
+      .mockResolvedValueOnce({
+        rows: [{ id: "lead-2", name: "Older Lead", created_at: "2026-04-20T12:00:00.000Z", stage_slug: "qualified_lead" }],
+      })
+      .mockResolvedValueOnce({
+        rows: [{ id: "deal-1", name: "Recent Deal", created_at: "2026-04-21T12:00:00.000Z" }],
+      })
+      .mockResolvedValueOnce({
+        rows: [{ id: "lead-3", name: "Contact Lead", created_at: "2026-04-22T12:00:00.000Z", stage_slug: "new_lead" }],
+      })
+      .mockResolvedValueOnce({
+        rows: [{ id: "activity-1", occurred_at: "2026-04-23T12:00:00.000Z", subject: "Call" }],
+      })
+      .mockResolvedValueOnce({
+        rows: [{ id: "email-1", sent_at: "2026-04-24T12:00:00.000Z", subject: "Follow up", direction: "outbound" }],
+      });
+
+    const response = await request(buildApp()).get(
+      "/api/admin/lead-dd-debug?leadId=11111111-1111-4111-8111-111111111111"
+    );
+
+    expect(response.status).toBe(200);
+    expect(response.body).toMatchObject({
+      lead: {
+        id: "11111111-1111-4111-8111-111111111111",
+        stage_slug: "new_lead",
+        verification_status: "pending",
+      },
+      duediligence: {
+        approval_row: {
+          id: "55555555-5555-4555-8555-555555555555",
+          status: "pending",
+        },
+        recipients: [
+          { email: "tyamashita@trockgc.com", is_active: true },
+          { email: "adnaan.iqbal@gmail.com", is_active: true },
+        ],
+      },
+      detection_signals_found: [
+        {
+          source: "company-lead",
+          type: "lead",
+          detail: "Recent lead activity on company",
+          record_id: "66666666-6666-4666-8666-666666666666",
+        },
+      ],
+      detection_signals_within_12mo: 1,
+      recent_activity: {
+        leads_on_company: [{ id: "lead-2", stage_slug: "qualified_lead" }],
+        deals_on_company: [{ id: "deal-1", name: "Recent Deal" }],
+        leads_on_contact: [{ id: "lead-3", stage_slug: "new_lead" }],
+        activities_on_company: [{ id: "activity-1", subject: "Call" }],
+        emails_on_contact: [{ id: "email-1", direction: "outbound" }],
+      },
+    });
+    expect(mocks.tenantDb.execute).toHaveBeenCalledTimes(9);
+    expect(mocks.tenantClient.query).toHaveBeenCalledWith("COMMIT");
   });
 
   it("routes /admin/cleanup/office through a cross-office selection without a role override", async () => {

@@ -1,5 +1,5 @@
 import { Router, type Request, type Response, type NextFunction } from "express";
-import { inArray } from "drizzle-orm";
+import { inArray, sql } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/node-postgres";
 import * as schema from "@trock-crm/shared/schema";
 import { authMiddleware } from "../../middleware/auth.js";
@@ -50,6 +50,18 @@ import {
 const router = Router();
 router.use(authMiddleware);
 router.use(requireCrmUser);
+
+const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+function rowsFrom<T>(result: unknown): T[] {
+  if (Array.isArray(result)) {
+    return result as T[];
+  }
+  if (result && typeof result === "object" && Array.isArray((result as { rows?: unknown }).rows)) {
+    return (result as { rows: T[] }).rows;
+  }
+  return [];
+}
 
 async function withOfficeTenantContext<T>(
   user: NonNullable<Request["user"]>,
@@ -340,6 +352,261 @@ router.post("/admin/lead-due-diligence-approvals/:id/reject", tenantMiddleware, 
     });
     await req.commitTransaction!();
     return res.json({ approval });
+  } catch (err) {
+    return next(err);
+  }
+});
+
+router.get("/admin/lead-dd-debug", requireAdmin, (req: Request, res: Response, next: NextFunction) => {
+  const leadId = req.query.leadId;
+
+  if (!leadId || typeof leadId !== "string") {
+    return res.status(400).json({ error: "leadId required" });
+  }
+
+  if (!UUID_PATTERN.test(leadId)) {
+    return res.status(400).json({ error: "invalid leadId format" });
+  }
+
+  return next();
+}, tenantMiddleware, async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const leadId = req.query.leadId as string;
+
+    const leadRows = rowsFrom<{
+      id: string;
+      name: string;
+      stage_slug: string;
+      company_id: string;
+      primary_contact_id: string | null;
+      property_id: string | null;
+      verification_status: string | null;
+      verification_required_reason: string | null;
+      created_at: string | Date;
+      last_activity_at: string | Date | null;
+    }>(await req.tenantDb!.execute(sql`
+      SELECT l.id,
+             l.name,
+             psc.slug AS stage_slug,
+             l.company_id,
+             l.primary_contact_id,
+             l.property_id,
+             l.verification_status,
+             l.verification_required_reason,
+             l.created_at,
+             l.last_activity_at
+        FROM leads l
+        LEFT JOIN public.pipeline_stage_config psc ON psc.id = l.stage_id
+       WHERE l.id = ${leadId}::uuid
+       LIMIT 1
+    `));
+    const lead = leadRows[0];
+
+    if (!lead) {
+      await req.commitTransaction!();
+      return res.status(404).json({ error: "Lead not found" });
+    }
+
+    const approvalRows = rowsFrom<{
+      id: string;
+      status: string;
+      requested_at: string | Date;
+      email_sent_at: string | Date | null;
+      email_message_id: string | null;
+      detection_signal: Record<string, unknown> | null;
+      decided_at: string | Date | null;
+      decided_by: string | null;
+    }>(await req.tenantDb!.execute(sql`
+      SELECT id,
+             status,
+             requested_at,
+             email_sent_at,
+             email_message_id,
+             detection_signal,
+             decided_at,
+             decided_by
+        FROM lead_due_diligence_approvals
+       WHERE lead_id = ${leadId}::uuid
+       ORDER BY requested_at DESC
+       LIMIT 1
+    `));
+
+    const recipientRows = rowsFrom<{ email: string; is_active: boolean }>(await req.tenantDb!.execute(sql`
+      SELECT u.email,
+             u.is_active
+        FROM public.notification_recipient_groups g
+        JOIN public.notification_recipient_assignments a ON a.group_id = g.id
+        JOIN public.users u ON u.id = a.user_id
+       WHERE g.key = 'lead_due_diligence'
+       ORDER BY u.email ASC
+    `));
+
+    const detectionRows = rowsFrom<{
+      source: string;
+      type: string;
+      occurred_at: string | Date;
+      detail: string;
+      record_id: string;
+    }>(await req.tenantDb!.execute(sql`
+      WITH cutoff AS (
+        SELECT (${lead.created_at}::timestamptz - INTERVAL '12 months') AS cutoff_at
+      ),
+      signal_candidates AS (
+        SELECT 'company-lead'::text AS source,
+               'lead'::text AS type,
+               GREATEST(l.created_at, COALESCE(l.last_activity_at, l.created_at)) AS occurred_at,
+               'Recent lead activity on company'::text AS detail,
+               l.id AS record_id
+          FROM leads l
+         WHERE l.company_id = ${lead.company_id}::uuid
+           AND l.id <> ${leadId}::uuid
+        UNION ALL
+        SELECT 'company-deal', 'deal',
+               GREATEST(d.created_at, COALESCE(d.last_activity_at, d.created_at)),
+               'Recent deal activity on company',
+               d.id
+          FROM deals d
+         WHERE d.company_id = ${lead.company_id}::uuid
+        UNION ALL
+        SELECT 'company-activity', 'activity', a.occurred_at, COALESCE(a.subject, 'Recent activity on company'), a.id
+          FROM activities a
+         WHERE a.company_id = ${lead.company_id}::uuid
+        UNION ALL
+        SELECT 'company-email', 'email', e.sent_at, COALESCE(e.subject, 'Recent email on company'), e.id
+          FROM emails e
+          LEFT JOIN contacts c ON c.id = e.contact_id
+          LEFT JOIN deals d ON d.id = e.deal_id
+         WHERE e.direction IN ('inbound','outbound')
+           AND (
+             c.company_id = ${lead.company_id}::uuid
+             OR d.company_id = ${lead.company_id}::uuid
+             OR (e.assigned_entity_type = 'company' AND e.assigned_entity_id = ${lead.company_id}::uuid)
+           )
+        UNION ALL
+        SELECT 'contact-lead', 'lead',
+               GREATEST(l.created_at, COALESCE(l.last_activity_at, l.created_at)),
+               'Recent lead activity on primary contact',
+               l.id
+          FROM leads l
+         WHERE ${lead.primary_contact_id}::uuid IS NOT NULL
+           AND l.primary_contact_id = ${lead.primary_contact_id}::uuid
+           AND l.id <> ${leadId}::uuid
+        UNION ALL
+        SELECT 'contact-deal', 'deal',
+               GREATEST(d.created_at, COALESCE(d.last_activity_at, d.created_at)),
+               'Recent deal activity on primary contact',
+               d.id
+          FROM deals d
+         WHERE ${lead.primary_contact_id}::uuid IS NOT NULL
+           AND d.primary_contact_id = ${lead.primary_contact_id}::uuid
+        UNION ALL
+        SELECT 'contact-activity', 'activity', a.occurred_at, COALESCE(a.subject, 'Recent activity on primary contact'), a.id
+          FROM activities a
+         WHERE ${lead.primary_contact_id}::uuid IS NOT NULL
+           AND a.contact_id = ${lead.primary_contact_id}::uuid
+        UNION ALL
+        SELECT 'contact-email', 'email', e.sent_at, COALESCE(e.subject, 'Recent email on primary contact'), e.id
+          FROM emails e
+         WHERE ${lead.primary_contact_id}::uuid IS NOT NULL
+           AND e.direction IN ('inbound','outbound')
+           AND (e.contact_id = ${lead.primary_contact_id}::uuid OR (e.assigned_entity_type = 'contact' AND e.assigned_entity_id = ${lead.primary_contact_id}::uuid))
+        UNION ALL
+        SELECT 'property-lead', 'lead',
+               GREATEST(l.created_at, COALESCE(l.last_activity_at, l.created_at)),
+               'Recent lead activity on property',
+               l.id
+          FROM leads l
+         WHERE ${lead.property_id}::uuid IS NOT NULL
+           AND l.property_id = ${lead.property_id}::uuid
+           AND l.id <> ${leadId}::uuid
+        UNION ALL
+        SELECT 'property-deal', 'deal',
+               GREATEST(d.created_at, COALESCE(d.last_activity_at, d.created_at)),
+               'Recent deal activity on property',
+               d.id
+          FROM deals d
+         WHERE ${lead.property_id}::uuid IS NOT NULL
+           AND d.property_id = ${lead.property_id}::uuid
+        UNION ALL
+        SELECT 'property-activity', 'activity', a.occurred_at, COALESCE(a.subject, 'Recent activity on property'), a.id
+          FROM activities a
+         WHERE ${lead.property_id}::uuid IS NOT NULL
+           AND a.property_id = ${lead.property_id}::uuid
+      )
+      SELECT source, type, occurred_at, detail, record_id
+        FROM signal_candidates, cutoff
+       WHERE occurred_at >= cutoff.cutoff_at
+       ORDER BY occurred_at DESC, source ASC, type ASC
+    `));
+
+    const [
+      leadsOnCompany,
+      dealsOnCompany,
+      leadsOnContact,
+      activitiesOnCompany,
+      emailsOnContact,
+    ] = await Promise.all([
+      req.tenantDb!.execute(sql`
+        SELECT l.id, l.name, l.created_at, psc.slug AS stage_slug
+          FROM leads l
+          LEFT JOIN public.pipeline_stage_config psc ON psc.id = l.stage_id
+         WHERE l.company_id = ${lead.company_id}::uuid
+           AND l.id <> ${leadId}::uuid
+         ORDER BY l.created_at DESC
+         LIMIT 5
+      `),
+      req.tenantDb!.execute(sql`
+        SELECT id, name, created_at
+          FROM deals
+         WHERE company_id = ${lead.company_id}::uuid
+         ORDER BY created_at DESC
+         LIMIT 5
+      `),
+      req.tenantDb!.execute(sql`
+        SELECT l.id, l.name, l.created_at, psc.slug AS stage_slug
+          FROM leads l
+          LEFT JOIN public.pipeline_stage_config psc ON psc.id = l.stage_id
+         WHERE ${lead.primary_contact_id}::uuid IS NOT NULL
+           AND l.primary_contact_id = ${lead.primary_contact_id}::uuid
+           AND l.id <> ${leadId}::uuid
+         ORDER BY l.created_at DESC
+         LIMIT 5
+      `),
+      req.tenantDb!.execute(sql`
+        SELECT id, occurred_at, subject
+          FROM activities
+         WHERE company_id = ${lead.company_id}::uuid
+         ORDER BY occurred_at DESC
+         LIMIT 5
+      `),
+      req.tenantDb!.execute(sql`
+        SELECT id, sent_at, subject, direction
+          FROM emails
+         WHERE ${lead.primary_contact_id}::uuid IS NOT NULL
+           AND (contact_id = ${lead.primary_contact_id}::uuid OR (assigned_entity_type = 'contact' AND assigned_entity_id = ${lead.primary_contact_id}::uuid))
+         ORDER BY sent_at DESC
+         LIMIT 5
+      `),
+    ]);
+
+    await req.commitTransaction!();
+
+    return res.json({
+      lead,
+      duediligence: {
+        approval_row: approvalRows[0] ?? null,
+        recipients: recipientRows,
+      },
+      detection_signals_found: detectionRows,
+      detection_signals_within_12mo: detectionRows.length,
+      recent_activity: {
+        leads_on_company: rowsFrom(leadsOnCompany),
+        deals_on_company: rowsFrom(dealsOnCompany),
+        leads_on_contact: rowsFrom(leadsOnContact),
+        activities_on_company: rowsFrom(activitiesOnCompany),
+        emails_on_contact: rowsFrom(emailsOnContact),
+      },
+    });
   } catch (err) {
     return next(err);
   }
