@@ -3,6 +3,7 @@ import { inArray } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/node-postgres";
 import * as schema from "@trock-crm/shared/schema";
 import { authMiddleware } from "../../middleware/auth.js";
+import { requireCrmUser } from "../../middleware/field-auth.js";
 import { AppError } from "../../middleware/error-handler.js";
 import { requireAdmin, requireDirector } from "../../middleware/rbac.js";
 import { tenantMiddleware } from "../../middleware/tenant.js";
@@ -42,6 +43,7 @@ import {
 
 const router = Router();
 router.use(authMiddleware);
+router.use(requireCrmUser);
 
 async function withOfficeTenantContext<T>(
   user: NonNullable<Request["user"]>,

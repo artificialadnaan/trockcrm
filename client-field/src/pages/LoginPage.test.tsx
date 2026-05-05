@@ -1,0 +1,69 @@
+/**
+ * @vitest-environment jsdom
+ */
+import React from "react";
+import { createRoot, type Root } from "react-dom/client";
+import { MemoryRouter } from "react-router-dom";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { LoginPage } from "./LoginPage";
+
+const authMock = vi.hoisted(() => ({
+  user: null as unknown,
+  login: vi.fn(),
+}));
+
+vi.mock("@/lib/auth", () => ({
+  useAuth: () => authMock,
+}));
+
+let root: Root | null = null;
+let container: HTMLDivElement | null = null;
+
+afterEach(() => {
+  root?.unmount();
+  root = null;
+  container?.remove();
+  container = null;
+  authMock.user = null;
+  authMock.login.mockReset();
+});
+
+function renderPage() {
+  container = document.createElement("div");
+  document.body.appendChild(container);
+  root = createRoot(container);
+  root.render(<MemoryRouter><LoginPage /></MemoryRouter>);
+  return container;
+}
+
+function changeInput(input: HTMLInputElement, value: string) {
+  Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, "value")?.set?.call(input, value);
+  input.dispatchEvent(new Event("input", { bubbles: true }));
+}
+
+describe("LoginPage", () => {
+  it("validates and submits field login credentials", async () => {
+    authMock.login.mockResolvedValue(undefined);
+    const node = renderPage();
+    await vi.waitFor(() => expect(node.textContent).toContain("Field App"));
+    node.querySelector("form")?.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+    await vi.waitFor(() => expect(node.textContent).toContain("Email and password are required."));
+
+    changeInput(node.querySelector<HTMLInputElement>('[name="email"]')!, "field@example.com");
+    changeInput(node.querySelector<HTMLInputElement>('[name="password"]')!, "password-123");
+    node.querySelector("form")?.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+
+    await vi.waitFor(() => expect(authMock.login).toHaveBeenCalledWith("field@example.com", "password-123"));
+  });
+
+  it("renders inline login errors", async () => {
+    authMock.login.mockRejectedValue(new Error("Invalid email or password"));
+    const node = renderPage();
+    await vi.waitFor(() => expect(node.textContent).toContain("Field App"));
+    changeInput(node.querySelector<HTMLInputElement>('[name="email"]')!, "field@example.com");
+    changeInput(node.querySelector<HTMLInputElement>('[name="password"]')!, "bad-password");
+    node.querySelector("form")?.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+
+    await vi.waitFor(() => expect(node.textContent).toContain("Invalid email or password"));
+  });
+});

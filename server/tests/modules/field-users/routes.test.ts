@@ -5,6 +5,7 @@ const fieldUserMocks = vi.hoisted(() => ({
   inviteFieldUser: vi.fn(),
   listFieldUsers: vi.fn(),
   loginFieldUser: vi.fn(),
+  previewFieldInvite: vi.fn(),
   resendFieldUserInvite: vi.fn(),
   revokeFieldUserInvite: vi.fn(),
   setFieldUserActive: vi.fn(),
@@ -67,6 +68,11 @@ describe("field user routes", () => {
     fieldUserMocks.setFieldUserActive.mockResolvedValue({ user: { id: "field-1", active: false } });
     fieldUserMocks.acceptFieldInvite.mockResolvedValue({ user: { id: "field-1" }, token: "jwt" });
     fieldUserMocks.loginFieldUser.mockResolvedValue({ user: { id: "field-1" }, token: "jwt" });
+    fieldUserMocks.previewFieldInvite.mockResolvedValue({
+      firstName: "Field",
+      lastName: "User",
+      email: "field@example.com",
+    });
   });
 
   it("requires admin and passes tenant context when inviting field users", async () => {
@@ -136,5 +142,18 @@ describe("field user routes", () => {
 
     expect(fieldUserMocks.loginFieldUser).toHaveBeenCalledWith({ email: "field@example.com", password: "correct-password-12" });
     expect(res.cookies.token).toBe("jwt");
+  });
+
+  it("previews valid field invites without consuming them", async () => {
+    const { res } = await invokeHandlers(findRoute(fieldUserAuthRouter, "get", "/invite-preview"), {
+      query: { token: "raw" },
+    });
+
+    expect(fieldUserMocks.previewFieldInvite).toHaveBeenCalledWith({ token: "raw" });
+    expect(res.body).toEqual({
+      firstName: "Field",
+      lastName: "User",
+      email: "field@example.com",
+    });
   });
 });

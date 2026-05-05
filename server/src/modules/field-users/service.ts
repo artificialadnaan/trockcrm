@@ -83,7 +83,7 @@ export function buildInviteEmail(input: {
 }
 
 function fieldInviteUrl(rawToken: string): string {
-  const base = process.env.FRONTEND_URL ?? "http://localhost:5173";
+  const base = process.env.FIELD_FRONTEND_URL ?? process.env.FRONTEND_URL ?? "http://localhost:5174";
   return `${base.replace(/\/+$/, "")}/accept-invite?token=${encodeURIComponent(rawToken)}`;
 }
 
@@ -381,6 +381,31 @@ export async function setFieldUserActive(input: { userId: string; tenantId: stri
       phone: user.phone,
       active: user.is_active,
     },
+  };
+}
+
+export async function previewFieldInvite(input: { token: string }) {
+  const tokenHash = hashInviteToken(input.token);
+  const result = await db.execute(sql`
+    SELECT email, first_name, last_name, expires_at, accepted_at, revoked_at
+    FROM field_user_invites
+    WHERE token_hash = ${tokenHash}
+    LIMIT 1
+  `);
+  const invite = ((result as any).rows ?? result)[0];
+  if (
+    !invite ||
+    invite.revoked_at ||
+    invite.accepted_at ||
+    new Date(invite.expires_at).getTime() <= Date.now()
+  ) {
+    throw new AppError(404, "Invite not found");
+  }
+
+  return {
+    firstName: invite.first_name,
+    lastName: invite.last_name,
+    email: invite.email,
   };
 }
 

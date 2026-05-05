@@ -8,6 +8,7 @@ import {
   inviteFieldUser,
   listFieldUsers,
   loginFieldUser,
+  previewFieldInvite,
   resendFieldUserInvite,
   revokeFieldUserInvite,
   setFieldUserActive,
@@ -114,6 +115,20 @@ fieldUserAuthRouter.post("/accept-invite", authLimiter, async (req, res, next) =
 
     const result = await acceptFieldInvite({ token, password });
     res.cookie("token", result.token, tokenCookieOptions);
+    res.json(result);
+  } catch (err) {
+    next(err);
+  }
+});
+
+fieldUserAuthRouter.get("/invite-preview", authLimiter, async (req, res, next) => {
+  try {
+    const token = typeof req.query?.token === "string" ? req.query.token : "";
+    if (!token) {
+      throw new AppError(400, "Token is required");
+    }
+
+    const result = await previewFieldInvite({ token });
     res.json(result);
   } catch (err) {
     next(err);

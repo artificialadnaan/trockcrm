@@ -35,6 +35,7 @@ const {
   listFieldUsers,
   loginFieldUser,
   normalizeEmail,
+  previewFieldInvite,
   resendFieldUserInvite,
   revokeFieldUserInvite,
   setFieldUserActive,
@@ -72,6 +73,42 @@ describe("field user service helpers", () => {
     expect(deriveInviteStatus({ acceptedAt: null, revokedAt: null, expiresAt: new Date("2026-05-01T12:00:00.000Z") }, now)).toBe("expired");
     expect(deriveInviteStatus({ acceptedAt: null, revokedAt: null, expiresAt: new Date("2026-05-06T12:00:00.000Z") }, now)).toBe("pending");
     expect(inviteExpiry(now).toISOString()).toBe("2026-05-12T12:00:00.000Z");
+  });
+
+  it("previews a valid invite without accepting or consuming it", async () => {
+    dbMocks.execute.mockResolvedValueOnce({
+      rows: [{
+        email: "field@example.com",
+        first_name: "Field",
+        last_name: "User",
+        expires_at: new Date(Date.now() + 60_000),
+        accepted_at: null,
+        revoked_at: null,
+      }],
+    });
+
+    const preview = await previewFieldInvite({ token: "raw-token" });
+
+    expect(preview).toEqual({
+      email: "field@example.com",
+      firstName: "Field",
+      lastName: "User",
+    });
+    expect(dbMocks.execute).toHaveBeenCalledTimes(1);
+  });
+
+  it("rejects missing, expired, accepted, and revoked invite previews", async () => {
+    dbMocks.execute.mockResolvedValueOnce({ rows: [] });
+    await expect(previewFieldInvite({ token: "missing" })).rejects.toMatchObject({ statusCode: 404 });
+
+    dbMocks.execute.mockResolvedValueOnce({ rows: [{ expires_at: new Date(Date.now() - 60_000), accepted_at: null, revoked_at: null }] });
+    await expect(previewFieldInvite({ token: "expired" })).rejects.toMatchObject({ statusCode: 404 });
+
+    dbMocks.execute.mockResolvedValueOnce({ rows: [{ expires_at: new Date(Date.now() + 60_000), accepted_at: new Date(), revoked_at: null }] });
+    await expect(previewFieldInvite({ token: "accepted" })).rejects.toMatchObject({ statusCode: 404 });
+
+    dbMocks.execute.mockResolvedValueOnce({ rows: [{ expires_at: new Date(Date.now() + 60_000), accepted_at: null, revoked_at: new Date() }] });
+    await expect(previewFieldInvite({ token: "revoked" })).rejects.toMatchObject({ statusCode: 404 });
   });
 
   it("builds an invite email with inviter name, CTA link, and plain text fallback", () => {
