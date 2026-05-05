@@ -140,6 +140,25 @@ export function isUnsafeHttpMethod(method: string): boolean {
   return ["POST", "PUT", "PATCH", "DELETE"].includes(method.toUpperCase());
 }
 
+export function isPublicAuthCsrfExempt(input: {
+  method: string;
+  path: string;
+  host?: string | undefined;
+  env: EnvInput;
+}): boolean {
+  if (input.method.toUpperCase() !== "POST") return false;
+
+  if (
+    input.path === "/api/auth/accept-invite" ||
+    input.path === "/api/auth/field-login" ||
+    input.path === "/api/auth/local/login"
+  ) {
+    return true;
+  }
+
+  return input.path === "/api/auth/dev/login" && isDevAuthEnabled(input.env, input.host);
+}
+
 export function getRequestOrigin(headers: {
   origin?: string | string[] | undefined;
   referer?: string | string[] | undefined;
