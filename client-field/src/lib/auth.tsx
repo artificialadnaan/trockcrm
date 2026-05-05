@@ -25,8 +25,15 @@ type AuthState = {
 const AuthContext = createContext<AuthState | null>(null);
 
 function assertFieldUser(user: FieldUser | null | undefined): FieldUser {
-  if (!user || user.role !== "field_contractor" || !user.active) {
-    throw new ApiError("Field contractor access required", 403);
+  if (
+    !user ||
+    typeof user.id !== "string" ||
+    typeof user.email !== "string" ||
+    user.role !== "field_contractor" ||
+    typeof user.tenantId !== "string" ||
+    typeof user.active !== "boolean"
+  ) {
+    throw new ApiError("Server returned malformed user data", 500);
   }
   return user;
 }

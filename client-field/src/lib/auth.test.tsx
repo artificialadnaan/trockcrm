@@ -94,4 +94,23 @@ describe("field AuthProvider", () => {
     const node = renderProbe();
     await vi.waitFor(() => expect(node.textContent).toContain("signed out"));
   });
+
+  it("reports malformed server user payloads separately from authorization failures", async () => {
+    apiMock.mockResolvedValueOnce({
+      user: {
+        id: "field-1",
+        email: "field@example.com",
+        displayName: "Field User",
+        role: "field_contractor",
+        officeId: "office-1",
+      },
+    });
+    let latest: ReturnType<typeof useAuth> | undefined;
+    const node = renderProbe((auth) => {
+      latest = auth;
+    });
+
+    await vi.waitFor(() => expect(node.textContent).toContain("signed out"));
+    expect(latest?.error).toBe("Server returned malformed user data");
+  });
 });

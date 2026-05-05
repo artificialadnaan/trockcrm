@@ -54,6 +54,40 @@ export function deriveInviteStatus(
   return expiresAt.getTime() <= now.getTime() ? "expired" : "pending";
 }
 
+export type FieldUserResponse = {
+  id: string;
+  email: string;
+  firstName: string | null;
+  lastName: string | null;
+  role: "field_contractor";
+  tenantId: string;
+  active: boolean;
+};
+
+export function toFieldUserResponse(row: {
+  id: string;
+  email: string;
+  first_name?: string | null;
+  firstName?: string | null;
+  last_name?: string | null;
+  lastName?: string | null;
+  role: string;
+  office_id?: string | null;
+  tenantId?: string | null;
+  is_active?: boolean | null;
+  active?: boolean | null;
+}): FieldUserResponse {
+  return {
+    id: row.id,
+    email: row.email,
+    firstName: row.firstName ?? row.first_name ?? null,
+    lastName: row.lastName ?? row.last_name ?? null,
+    role: "field_contractor",
+    tenantId: row.tenantId ?? row.office_id ?? "",
+    active: Boolean(row.active ?? row.is_active),
+  };
+}
+
 export function buildInviteEmail(input: {
   inviteeName: string;
   inviterName: string;
@@ -457,7 +491,7 @@ export async function acceptFieldInvite(input: { token: string; password: string
         ${invite.invited_by_user_id}::uuid,
         now()
       )
-      RETURNING id, email, display_name, role, office_id
+      RETURNING id, email, first_name, last_name, role, office_id, is_active
     ),
     auth_row AS (
       INSERT INTO user_local_auth (
@@ -492,9 +526,11 @@ export async function acceptFieldInvite(input: { token: string; password: string
     RETURNING
       (SELECT id FROM created_user) AS id,
       (SELECT email FROM created_user) AS email,
-      (SELECT display_name FROM created_user) AS display_name,
+      (SELECT first_name FROM created_user) AS first_name,
+      (SELECT last_name FROM created_user) AS last_name,
       (SELECT role FROM created_user) AS role,
-      (SELECT office_id FROM created_user) AS office_id
+      (SELECT office_id FROM created_user) AS office_id,
+      (SELECT is_active FROM created_user) AS is_active
   `);
   const user = ((result as any).rows ?? result)[0];
   const jwtToken = signJwt({
@@ -506,15 +542,7 @@ export async function acceptFieldInvite(input: { token: string; password: string
   });
 
   return {
-    user: {
-      id: user.id,
-      email: user.email,
-      displayName: user.display_name,
-      role: "field_contractor" as const,
-      officeId: user.office_id,
-      activeOfficeId: user.office_id,
-      mustChangePassword: false,
-    },
+    user: toFieldUserResponse(user),
     token: jwtToken,
   };
 }
@@ -525,7 +553,8 @@ export async function loginFieldUser(input: { email: string; password: string })
     SELECT
       u.id,
       u.email,
-      u.display_name,
+      u.first_name,
+      u.last_name,
       u.role,
       u.office_id,
       u.is_active,
@@ -605,15 +634,7 @@ export async function loginFieldUser(input: { email: string; password: string })
     authMethod: "local",
   });
   return {
-    user: {
-      id: user.id,
-      email: user.email,
-      displayName: user.display_name,
-      role: "field_contractor" as const,
-      officeId: user.office_id,
-      activeOfficeId: user.office_id,
-      mustChangePassword: false,
-    },
+    user: toFieldUserResponse(user),
     token: jwtToken,
   };
 }
