@@ -1,4 +1,4 @@
-export type QuestionAnswerValue = string | boolean | number | null | undefined;
+export type QuestionAnswerValue = string | boolean | number | string[] | null | undefined;
 
 export function formatQuestionAnswerValue(value: QuestionAnswerValue) {
   if (value == null) {
@@ -9,6 +9,9 @@ export function formatQuestionAnswerValue(value: QuestionAnswerValue) {
   }
   if (typeof value === "string") {
     return value.trim().length > 0 ? value : "Unanswered";
+  }
+  if (Array.isArray(value)) {
+    return value.length > 0 ? value.join(", ") : "Unanswered";
   }
   return String(value);
 }
@@ -28,7 +31,14 @@ export function questionnaireRevealMatches(parentAnswer: unknown, parentOptionVa
     if (typeof parentAnswer === "string") {
       return parentAnswer.trim().length > 0;
     }
+    if (Array.isArray(parentAnswer)) {
+      return parentAnswer.length > 0;
+    }
     return Boolean(parentAnswer);
+  }
+
+  if (Array.isArray(parentAnswer)) {
+    return parentAnswer.map(String).includes(parentOptionValue);
   }
 
   return normalizeRevealValue(parentAnswer) === parentOptionValue;

@@ -209,6 +209,9 @@ function questionnaireFieldLabel(key: string): string {
   if (key === "leadDueDiligence.rejected") {
     return "Due Diligence rejected. This lead cannot be qualified. Contact a director or move the lead to disqualified.";
   }
+  if (key === "leadQuestionnaire.scopeRequired") {
+    return "Select at least one applicable scope accordion and complete its required questions.";
+  }
   if (key.startsWith("question.")) {
     return key
       .slice("question.".length)
@@ -256,6 +259,10 @@ export function evaluateLeadStageGate(input: {
         ...input.questionnaireGate.projectTypeQuestionIds.map(questionnaireFieldKey),
       ]
     : [];
+  const scopeSelectionKeys =
+    input.questionnaireGate?.missingScopeSelection === true
+      ? ["leadQuestionnaire.scopeRequired"]
+      : [];
 
   const companyVerificationKeys = input.companyVerificationPending
     ? ["company.verification_pending"]
@@ -271,6 +278,7 @@ export function evaluateLeadStageGate(input: {
     ...missingFields,
     ...(blockedByApprovalRole ? ["approval.directorAdmin"] : []),
     ...questionnaireMissingKeys,
+    ...scopeSelectionKeys,
     ...companyVerificationKeys,
     ...dueDiligenceKeys,
   ];
@@ -281,6 +289,7 @@ export function evaluateLeadStageGate(input: {
     ...requiredFields,
     ...(blockedByApprovalRole ? ["approval.directorAdmin"] : []),
     ...questionnaireMissingKeys,
+    ...scopeSelectionKeys,
     ...companyVerificationKeys,
     ...dueDiligenceKeys,
   ];
@@ -311,11 +320,13 @@ export function evaluateLeadStageGate(input: {
         ? "LEAD_DD_PENDING"
         : dueDiligenceKeys[0] === "leadDueDiligence.rejected"
           ? "LEAD_DD_REJECTED"
-          : blockedByApprovalRole
-            ? "Lead stage change requires director/admin approval"
-            : effectiveMissingFields.length > 0
-              ? "Lead stage change not allowed until required intake is complete"
-              : undefined,
+          : scopeSelectionKeys.length > 0
+            ? "LEAD_NO_SCOPE_SELECTED"
+            : blockedByApprovalRole
+              ? "Lead stage change requires director/admin approval"
+              : effectiveMissingFields.length > 0
+                ? "Lead stage change not allowed until required intake is complete"
+                : undefined,
   };
 }
 
@@ -368,11 +379,8 @@ export async function validateLeadStageGate(
   // runtime red" contradiction in the modal.
   const v2GateApplies =
     isLeadEditV2Enabled() &&
-    (
-      (targetStage.slug === "sales_validation_stage" && currentStage.slug !== "sales_validation_stage") ||
-      (currentStage.slug === "sales_validation_stage" &&
-        (targetStage.displayOrder ?? 0) > (currentStage.displayOrder ?? 0))
-    );
+    targetStage.slug === "qualified_lead" &&
+    currentStage.slug !== "qualified_lead";
 
   let questionnaireGate: LeadQuestionGateMissing | null = null;
   if (v2GateApplies && lead.companyId) {

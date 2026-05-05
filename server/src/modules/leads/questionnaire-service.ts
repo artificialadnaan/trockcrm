@@ -2,7 +2,6 @@ import type { NodePgDatabase } from "drizzle-orm/node-postgres";
 import {
   leadQuestionAnswerHistory,
   leadQuestionAnswers,
-  projectTypeConfig,
   projectTypeQuestionNodes,
 } from "@trock-crm/shared/schema";
 import type * as schema from "@trock-crm/shared/schema";
@@ -11,7 +10,7 @@ import { AppError } from "../../middleware/error-handler.js";
 
 type TenantDb = NodePgDatabase<typeof schema>;
 
-export type LeadQuestionAnswerValue = string | boolean | number | null;
+export type LeadQuestionAnswerValue = string | boolean | number | string[] | null;
 
 export interface QuestionnaireNode {
   id: string;
@@ -26,7 +25,26 @@ export interface QuestionnaireNode {
   options: unknown;
   isRequired: boolean;
   displayOrder: number;
+  sectionKey: string | null;
+  groupKey: string | null;
+  groupLabel: string | null;
+  groupOrder: number | null;
   isActive: boolean;
+}
+
+export interface LegacyQuestionnaireAnswer {
+  questionId: string;
+  key: string;
+  label: string;
+  inputType: string | null;
+  options: unknown;
+  value: LeadQuestionAnswerValue;
+  displayOrder: number;
+  projectTypeId: string | null;
+  sectionKey: string | null;
+  groupKey: string | null;
+  groupLabel: string | null;
+  groupOrder: number | null;
 }
 
 export function isLeadEditV2Enabled() {
@@ -41,6 +59,9 @@ export function isAnsweredQuestionValue(value: LeadQuestionAnswerValue | undefin
   if (typeof value === "string") {
     return value.trim().length > 0;
   }
+  if (Array.isArray(value)) {
+    return value.length > 0;
+  }
 
   return true;
 }
@@ -53,50 +74,69 @@ function isTruthyRevealValue(value: LeadQuestionAnswerValue | undefined) {
   return Boolean(value);
 }
 
+function revealValueMatches(parentAnswer: LeadQuestionAnswerValue | undefined, parentOptionValue: string | null) {
+  if (parentOptionValue == null) {
+    return isTruthyRevealValue(parentAnswer);
+  }
+
+  if (Array.isArray(parentAnswer)) {
+    return parentAnswer.map(String).includes(parentOptionValue);
+  }
+
+  return String(parentAnswer ?? "") === parentOptionValue;
+}
+
 function valuesEqual(left: unknown, right: unknown) {
   return JSON.stringify(left ?? null) === JSON.stringify(right ?? null);
 }
 
-async function resolveProjectTypeLineageIds(tenantDb: TenantDb, projectTypeId: string | null) {
-  if (!projectTypeId) {
+function normalizeAnswerValueForNode(
+  node: QuestionnaireNode,
+  value: LeadQuestionAnswerValue | undefined
+): LeadQuestionAnswerValue {
+  if (node.inputType !== "multiselect") {
+    return value ?? null;
+  }
+
+  if (value == null) {
     return [];
   }
 
-  const rows = await tenantDb.select().from(projectTypeConfig);
-  const parentById = new Map(rows.map((row) => [row.id, row.parentId]));
-  const lineageIds: string[] = [];
-  const visited = new Set<string>();
-
-  let currentId: string | null = projectTypeId;
-  while (currentId && !visited.has(currentId)) {
-    lineageIds.push(currentId);
-    visited.add(currentId);
-    currentId = parentById.get(currentId) ?? null;
+  if (!Array.isArray(value) || value.some((entry) => typeof entry !== "string")) {
+    throw new AppError(400, `Multi-select answer ${node.key} must be an array of strings.`);
   }
 
-  return lineageIds;
+  return value;
 }
 
-export async function listQuestionnaireNodes(
-  tenantDb: TenantDb,
-  projectTypeId: string | null
-): Promise<QuestionnaireNode[]> {
-  const [allNodes, projectTypeLineageIds] = await Promise.all([
-    listAllQuestionnaireNodes(tenantDb),
-    resolveProjectTypeLineageIds(tenantDb, projectTypeId),
-  ]);
+const SECTION_ORDER: Record<string, number> = {
+  baseline: 0,
+  property: 1,
+  scope: 2,
+};
 
-  return allNodes.filter(
-    (row) => row.projectTypeId == null || projectTypeLineageIds.includes(row.projectTypeId)
-  );
+function sortQuestionnaireNodes(left: QuestionnaireNode, right: QuestionnaireNode) {
+  const leftSection = SECTION_ORDER[left.sectionKey ?? ""] ?? 99;
+  const rightSection = SECTION_ORDER[right.sectionKey ?? ""] ?? 99;
+  if (leftSection !== rightSection) return leftSection - rightSection;
+
+  const leftGroup = left.groupOrder ?? 0;
+  const rightGroup = right.groupOrder ?? 0;
+  if (leftGroup !== rightGroup) return leftGroup - rightGroup;
+
+  return left.displayOrder - right.displayOrder;
+}
+
+export async function listQuestionnaireNodes(tenantDb: TenantDb): Promise<QuestionnaireNode[]> {
+  return listAllQuestionnaireNodes(tenantDb);
 }
 
 export async function listAllQuestionnaireNodes(tenantDb: TenantDb): Promise<QuestionnaireNode[]> {
   const rows = await tenantDb.select().from(projectTypeQuestionNodes);
 
   return rows
-    .filter((row) => row.isActive)
-    .sort((left, right) => left.displayOrder - right.displayOrder);
+    .filter((row) => row.isActive && row.projectTypeId == null)
+    .sort(sortQuestionnaireNodes);
 }
 
 export async function listLeadQuestionAnswers(
@@ -112,7 +152,7 @@ export async function listLeadQuestionAnswers(
     return {};
   }
 
-  const nodes = await tenantDb.select().from(projectTypeQuestionNodes);
+  const nodes = await listQuestionnaireNodes(tenantDb);
   const keyByQuestionId = new Map(nodes.map((node) => [node.id, node.key]));
 
   return rows.reduce<Record<string, LeadQuestionAnswerValue>>((accumulator, row) => {
@@ -124,6 +164,54 @@ export async function listLeadQuestionAnswers(
   }, {});
 }
 
+export async function listLegacyLeadQuestionAnswers(
+  tenantDb: TenantDb,
+  leadId: string
+): Promise<LegacyQuestionnaireAnswer[]> {
+  const rows = await tenantDb
+    .select()
+    .from(leadQuestionAnswers)
+    .where(eq(leadQuestionAnswers.leadId, leadId));
+
+  if (rows.length === 0) {
+    return [];
+  }
+
+  const nodes = await tenantDb.select().from(projectTypeQuestionNodes);
+  const nodeById = new Map(nodes.map((node) => [node.id, node]));
+  const activeUniversalIds = new Set(
+    nodes
+      .filter((node) => node.isActive && node.projectTypeId == null)
+      .map((node) => node.id)
+  );
+
+  return rows
+    .flatMap((row) => {
+      const node = nodeById.get(row.questionId);
+      if (!node || activeUniversalIds.has(node.id)) {
+        return [];
+      }
+
+      return [
+        {
+          questionId: node.id,
+          key: node.key,
+          label: node.label,
+          inputType: node.inputType,
+          options: node.options,
+          value: (row.valueJson as LeadQuestionAnswerValue | undefined) ?? null,
+          displayOrder: node.displayOrder,
+          projectTypeId: node.projectTypeId,
+          sectionKey: node.sectionKey,
+          groupKey: node.groupKey,
+          groupLabel: node.groupLabel,
+          groupOrder: node.groupOrder,
+        },
+      ];
+    })
+    .sort((left, right) => left.displayOrder - right.displayOrder);
+}
+
 export async function getLeadQuestionnaireSnapshot(
   tenantDb: TenantDb,
   input: {
@@ -131,10 +219,11 @@ export async function getLeadQuestionnaireSnapshot(
     projectTypeId: string | null;
   }
 ) {
-  const [nodes, allNodes, answers] = await Promise.all([
-    listQuestionnaireNodes(tenantDb, input.projectTypeId),
+  const [nodes, allNodes, answers, legacyAnswers] = await Promise.all([
+    listQuestionnaireNodes(tenantDb),
     listAllQuestionnaireNodes(tenantDb),
     listLeadQuestionAnswers(tenantDb, input.leadId),
+    listLegacyLeadQuestionAnswers(tenantDb, input.leadId),
   ]);
 
   return {
@@ -142,6 +231,7 @@ export async function getLeadQuestionnaireSnapshot(
     nodes,
     allNodes,
     answers,
+    legacyAnswers,
   };
 }
 
@@ -150,7 +240,7 @@ export async function getQuestionnaireTemplateSnapshot(
   projectTypeId: string | null
 ) {
   const [nodes, allNodes] = await Promise.all([
-    listQuestionnaireNodes(tenantDb, projectTypeId),
+    listQuestionnaireNodes(tenantDb),
     listAllQuestionnaireNodes(tenantDb),
   ]);
 
@@ -160,10 +250,7 @@ export async function getQuestionnaireTemplateSnapshot(
     if (node.key === "poc" || node.key === "bid_due_date") {
       return null;
     }
-    if (node.key === "number_of_bidders") {
-      return { ...node, isRequired: false };
-    }
-    return node;
+    return { ...node, isRequired: false };
   };
 
   return {
@@ -202,10 +289,7 @@ function isNodeVisible(
   }
 
   const parentAnswer = answers[parent.key];
-  const visible =
-    node.parentOptionValue != null
-      ? String(parentAnswer ?? "") === node.parentOptionValue
-      : isTruthyRevealValue(parentAnswer);
+  const visible = revealValueMatches(parentAnswer, node.parentOptionValue);
 
   visibleCache.set(node.id, visible);
   return visible;
@@ -228,6 +312,39 @@ export function listMissingRequiredQuestionKeys(
 export interface LeadQuestionGateMissing {
   qualificationFields: string[];
   projectTypeQuestionIds: string[];
+  missingScopeSelection: boolean;
+}
+
+function hasSatisfiedScopeGroup(
+  nodes: QuestionnaireNode[],
+  answers: Record<string, LeadQuestionAnswerValue>,
+  missingRequiredKeys: string[]
+) {
+  const missingRequiredKeySet = new Set(missingRequiredKeys);
+  const scopeGroups = new Map<string, QuestionnaireNode[]>();
+
+  for (const node of nodes) {
+    if (node.sectionKey !== "scope" || !node.groupKey) continue;
+    const group = scopeGroups.get(node.groupKey) ?? [];
+    group.push(node);
+    scopeGroups.set(node.groupKey, group);
+  }
+
+  for (const group of scopeGroups.values()) {
+    const appliesNode =
+      group.find((node) => node.key.endsWith("_applies") && !node.parentNodeId) ??
+      group.find((node) => node.displayOrder === 0 && !node.parentNodeId);
+    if (!appliesNode || answers[appliesNode.key] !== true) {
+      continue;
+    }
+
+    const missingInGroup = group.some((node) => missingRequiredKeySet.has(node.key));
+    if (!missingInGroup) {
+      return true;
+    }
+  }
+
+  return false;
 }
 
 /**
@@ -246,7 +363,7 @@ export async function evaluateLeadQuestionGate(
 ): Promise<LeadQuestionGateMissing> {
   const [storedAnswers, nodes] = await Promise.all([
     listLeadQuestionAnswers(tenantDb, input.leadId),
-    listQuestionnaireNodes(tenantDb, input.projectTypeId),
+    listQuestionnaireNodes(tenantDb),
   ]);
   const mergedAnswers = {
     ...storedAnswers,
@@ -258,9 +375,13 @@ export async function evaluateLeadQuestionGate(
   if (!isAnsweredQuestionValue(input.existingCustomerStatus)) {
     qualificationFields.unshift("existing_customer_status");
   }
+  const projectTypeQuestionIds = listMissingRequiredQuestionKeys(nodes, mergedAnswers);
+  const missingScopeSelection = !hasSatisfiedScopeGroup(nodes, mergedAnswers, projectTypeQuestionIds);
+
   return {
     qualificationFields,
-    projectTypeQuestionIds: listMissingRequiredQuestionKeys(nodes, mergedAnswers),
+    projectTypeQuestionIds,
+    missingScopeSelection,
   };
 }
 
@@ -274,7 +395,7 @@ export async function upsertLeadQuestionAnswerSet(
     changedAt: Date;
   }
 ) {
-  const { leadId, projectTypeId, changedBy, answers, changedAt } = input;
+  const { leadId, changedBy, answers, changedAt } = input;
   const answerEntries = Object.entries(answers);
 
   if (answerEntries.length === 0) {
@@ -282,7 +403,7 @@ export async function upsertLeadQuestionAnswerSet(
   }
 
   const [nodes, existingRows] = await Promise.all([
-    listQuestionnaireNodes(tenantDb, projectTypeId),
+    listQuestionnaireNodes(tenantDb),
     tenantDb.select().from(leadQuestionAnswers).where(eq(leadQuestionAnswers.leadId, leadId)),
   ]);
 
@@ -297,7 +418,7 @@ export async function upsertLeadQuestionAnswerSet(
       throw new AppError(400, `Unknown lead questionnaire key: ${key}`);
     }
 
-    const nextValue = rawValue ?? null;
+    const nextValue = normalizeAnswerValueForNode(node, rawValue);
     const existing = existingByQuestionId.get(node.id) ?? null;
     const previousValue = (existing?.valueJson as LeadQuestionAnswerValue | undefined) ?? null;
 

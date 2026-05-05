@@ -1361,7 +1361,7 @@ describe("Lead Service", () => {
     });
   });
 
-  it("blocks entering Sales Validation Stage when v2 questionnaire answers are incomplete", async () => {
+  it("blocks entering Qualified Lead when universal questionnaire answers are incomplete", async () => {
     process.env.ENABLE_LEAD_EDIT_V2 = "true";
 
     const tenantDb = createFakeTenantDb({
@@ -1372,7 +1372,7 @@ describe("Lead Service", () => {
           propertyId: "property-1",
           primaryContactId: "contact-1",
           name: "Palm Villas repaint",
-          stageId: "lead-stage-qualified",
+          stageId: "lead-stage-1",
           assignedRepId: "rep-1",
           status: "open",
           source: "Referral",
@@ -1443,7 +1443,7 @@ describe("Lead Service", () => {
         tenantDb as never,
         "lead-1",
         {
-          stageId: "lead-stage-sales-validation",
+          stageId: "lead-stage-qualified",
           projectTypeId: "project-type-multifamily",
           leadQuestionAnswers: {
             bid_due_date: "2026-05-01",
@@ -1455,7 +1455,7 @@ describe("Lead Service", () => {
     ).rejects.toMatchObject({
       code: "LEAD_STAGE_REQUIREMENTS_UNMET",
       result: expect.objectContaining({
-        targetStage: expect.objectContaining({ slug: "sales_validation_stage" }),
+        targetStage: expect.objectContaining({ slug: "qualified_lead" }),
         missingRequirements: expect.objectContaining({
           projectTypeQuestionIds: expect.arrayContaining(["budget"]),
         }),
@@ -1463,7 +1463,7 @@ describe("Lead Service", () => {
     });
   });
 
-  it("ignores parent-gated child questions when the parent is unanswered or false during Sales Validation gating", async () => {
+  it("ignores parent-gated child questions when the parent is unanswered or false during Qualified Lead gating", async () => {
     process.env.ENABLE_LEAD_EDIT_V2 = "true";
 
     const buildTenantDb = (insuranceClaimValue?: boolean) =>
@@ -1475,7 +1475,7 @@ describe("Lead Service", () => {
             propertyId: "property-1",
             primaryContactId: "contact-1",
             name: "Palm Villas restoration",
-            stageId: "lead-stage-qualified",
+          stageId: "lead-stage-1",
             assignedRepId: "rep-1",
             status: "open",
             source: "Referral",
@@ -1508,12 +1508,35 @@ describe("Lead Service", () => {
             isRequired: true,
             displayOrder: 1,
             isActive: true,
+            sectionKey: "baseline",
+            groupKey: "baseline",
+            groupLabel: "Universal Baseline",
+            groupOrder: 0,
+          },
+          {
+            id: "question-roofing-applies",
+            projectTypeId: null,
+            parentNodeId: null,
+            parentOptionValue: null,
+            nodeType: "question",
+            key: "roofing_applies",
+            label: "Does roofing scope apply?",
+            prompt: null,
+            inputType: "boolean",
+            options: ["true", "false"],
+            isRequired: false,
+            displayOrder: 0,
+            isActive: true,
+            sectionKey: "scope",
+            groupKey: "roofing",
+            groupLabel: "Roofing",
+            groupOrder: 1,
           },
           {
             id: "question-insurance-claim",
-            projectTypeId: "project-type-restoration",
-            parentNodeId: null,
-            parentOptionValue: null,
+            projectTypeId: null,
+            parentNodeId: "question-roofing-applies",
+            parentOptionValue: "true",
             nodeType: "question",
             key: "insurance_claim",
             label: "Insurance Claim",
@@ -1523,10 +1546,14 @@ describe("Lead Service", () => {
             isRequired: true,
             displayOrder: 2,
             isActive: true,
+            sectionKey: "scope",
+            groupKey: "roofing",
+            groupLabel: "Roofing",
+            groupOrder: 1,
           },
           {
             id: "question-xactimate",
-            projectTypeId: "project-type-restoration",
+            projectTypeId: null,
             parentNodeId: "question-insurance-claim",
             parentOptionValue: "true",
             nodeType: "question",
@@ -1538,6 +1565,10 @@ describe("Lead Service", () => {
             isRequired: true,
             displayOrder: 3,
             isActive: true,
+            sectionKey: "scope",
+            groupKey: "roofing",
+            groupLabel: "Roofing",
+            groupOrder: 1,
           },
         ],
       });
@@ -1562,9 +1593,12 @@ describe("Lead Service", () => {
         buildTenantDb(undefined) as never,
         "lead-1",
         {
-          stageId: "lead-stage-sales-validation",
+          stageId: "lead-stage-qualified",
           projectTypeId: "project-type-restoration",
-          leadQuestionAnswers: {},
+          leadQuestionAnswers: {
+            budget: 100000,
+            roofing_applies: true,
+          },
         } as any,
         "rep",
         "rep-1"
@@ -1572,7 +1606,7 @@ describe("Lead Service", () => {
     ).rejects.toMatchObject({
       code: "LEAD_STAGE_REQUIREMENTS_UNMET",
       result: expect.objectContaining({
-        targetStage: expect.objectContaining({ slug: "sales_validation_stage" }),
+        targetStage: expect.objectContaining({ slug: "qualified_lead" }),
         missingRequirements: expect.objectContaining({
           projectTypeQuestionIds: expect.arrayContaining(["insurance_claim"]),
         }),
@@ -1584,46 +1618,23 @@ describe("Lead Service", () => {
         buildTenantDb(false) as never,
         "lead-1",
         {
-          stageId: "lead-stage-sales-validation",
+          stageId: "lead-stage-qualified",
           projectTypeId: "project-type-restoration",
           leadQuestionAnswers: {
+            budget: 100000,
+            roofing_applies: true,
             insurance_claim: false,
           },
         } as any,
         "rep",
         "rep-1"
       )
-    ).rejects.toMatchObject({
-      code: "LEAD_STAGE_REQUIREMENTS_UNMET",
-      result: expect.objectContaining({
-        targetStage: expect.objectContaining({ slug: "sales_validation_stage" }),
-        missingRequirements: expect.objectContaining({
-          projectTypeQuestionIds: expect.arrayContaining(["budget"]),
-        }),
-      }),
+    ).resolves.toMatchObject({
+      stageId: "lead-stage-qualified",
     });
 
-    await expect(
-      service.updateLead(
-        buildTenantDb(false) as never,
-        "lead-1",
-        {
-          stageId: "lead-stage-sales-validation",
-          projectTypeId: "project-type-restoration",
-          leadQuestionAnswers: {
-            insurance_claim: false,
-          },
-        } as any,
-        "rep",
-        "rep-1"
-      )
-    ).rejects.not.toMatchObject({
-      result: expect.objectContaining({
-        missingRequirements: expect.objectContaining({
-          projectTypeQuestionIds: expect.arrayContaining(["xactimate"]),
-        }),
-      }),
-    });
+    // The xactimate child is hidden when insurance_claim is false, so the
+    // transition above proves it is not included as a missing requirement.
   });
 
   it("records questionnaire answer history for converted leads without ticking lead.updatedAt", async () => {
