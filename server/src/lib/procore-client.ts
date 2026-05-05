@@ -224,7 +224,7 @@ async function procoreFetch<T = any>(
         : {
             mode: "client_credentials" as const,
             accessToken: await getAccessToken(fetchImpl),
-            companyHeader: null,
+            companyHeader: process.env.PROCORE_COMPANY_ID ?? "",
           };
 
   if (auth.mode === "dev") {
@@ -241,7 +241,7 @@ async function procoreFetch<T = any>(
           Authorization: `Bearer ${auth.accessToken}`,
           "Content-Type": "application/json",
           Accept: "application/json",
-          ...(method === "GET" && auth.mode === "oauth" && auth.companyHeader
+          ...(auth.companyHeader
             ? { "Procore-Company-Id": auth.companyHeader }
             : {}),
         },
@@ -301,6 +301,34 @@ export const procoreClient = {
   post: <T = any>(path: string, body: unknown) => procoreFetch<T>("POST", path, body),
   patch: <T = any>(path: string, body: unknown) => procoreFetch<T>("PATCH", path, body),
   delete: <T = any>(path: string) => procoreFetch<T>("DELETE", path),
+  request: async <T = any>(path: string, init: {
+    method: "GET" | "POST" | "PATCH" | "DELETE";
+    body?: BodyInit | null;
+    headers?: Record<string, string>;
+    parseJson?: boolean;
+    fetchImpl?: typeof fetch;
+  }): Promise<T> => {
+    const fetchImpl = init.fetchImpl ?? fetch;
+    const companyId = process.env.PROCORE_COMPANY_ID ?? "";
+    if (isDevMode()) return getMockResponse(init.method, path) as T;
+    const token = await getAccessToken(fetchImpl);
+    const res = await fetchImpl(`${PROCORE_BASE_URL}${path}`, {
+      method: init.method,
+      headers: {
+        Authorization: `Bearer ${token}`,
+        Accept: "application/json",
+        ...(companyId ? { "Procore-Company-Id": companyId } : {}),
+        ...(init.headers ?? {}),
+      },
+      body: init.body ?? undefined,
+    });
+    if (!res.ok) {
+      const errBody = await res.text().catch(() => "");
+      throw new Error(`[Procore] ${init.method} ${path} failed: ${res.status} ${errBody}`);
+    }
+    if (res.status === 204 || init.parseJson === false) return {} as T;
+    return res.json() as Promise<T>;
+  },
   /** Expose circuit breaker state for admin status endpoint */
   getCircuitState: () => ({ ...breaker }),
   /** Check if running in dev/mock mode */

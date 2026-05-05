@@ -49,6 +49,13 @@ const PHOTO_AUDIT_EVENTS: Array<{ value: PhotoAuditEventType; label: string; ico
   { value: "procore_sync_failed", label: "Procore sync failed", icon: AlertCircle },
 ];
 
+const PROCORE_SYNC_STATUS_OPTIONS = [
+  { value: "pending", label: "Pending" },
+  { value: "synced", label: "Synced" },
+  { value: "failed", label: "Failed" },
+  { value: "skipped", label: "Skipped" },
+];
+
 interface AdminPhotoAuditEvent extends PhotoAuditEvent {
   photo: {
     id: string;
@@ -90,7 +97,7 @@ function eventIcon(eventType: PhotoAuditEventType) {
 
 function buildAdminAuditQuery(searchParams: URLSearchParams) {
   const params = new URLSearchParams();
-  for (const key of ["userId", "eventType", "from", "to", "dealId", "photoId", "page", "perPage"]) {
+  for (const key of ["userId", "eventType", "procoreSyncStatus", "from", "to", "dealId", "photoId", "page", "perPage"]) {
     const value = searchParams.get(key);
     if (value) params.set(key, value);
   }
@@ -165,6 +172,7 @@ export function PhotoAuditPage() {
 
   const selectedUsers = useMemo(() => parseList(searchParams, "userId"), [searchParams]);
   const selectedEventTypes = useMemo(() => parseList(searchParams, "eventType"), [searchParams]);
+  const selectedProcoreSyncStatuses = useMemo(() => parseList(searchParams, "procoreSyncStatus"), [searchParams]);
   const totalPages = Math.max(1, Math.ceil(total / perPage));
 
   const updateParams = useCallback((updater: (params: URLSearchParams) => void) => {
@@ -260,6 +268,16 @@ export function PhotoAuditPage() {
           options={PHOTO_AUDIT_EVENTS.map((event) => ({ value: event.value, label: event.label, icon: event.icon }))}
           onChange={(values) => updateParams((params) => {
             setListParam(params, "eventType", values);
+            params.set("page", "1");
+          })}
+        />
+        <MultiSelectFilter
+          label="Procore"
+          ariaLabel="Procore sync status filter"
+          selected={selectedProcoreSyncStatuses}
+          options={PROCORE_SYNC_STATUS_OPTIONS}
+          onChange={(values) => updateParams((params) => {
+            setListParam(params, "procoreSyncStatus", values);
             params.set("page", "1");
           })}
         />

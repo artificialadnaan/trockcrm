@@ -851,12 +851,69 @@ router.get(
         to: typeof req.query.to === "string" ? req.query.to : undefined,
         dealId: typeof req.query.dealId === "string" && req.query.dealId ? req.query.dealId : undefined,
         photoId: typeof req.query.photoId === "string" && req.query.photoId ? req.query.photoId : undefined,
+        procoreSyncStatuses: parseCsvQueryParam(req.query.procoreSyncStatus),
         page: typeof req.query.page === "string" ? parseInt(req.query.page, 10) : 1,
         perPage: typeof req.query.perPage === "string" ? parseInt(req.query.perPage, 10) : 50,
       });
 
       await req.commitTransaction!();
       return res.json(result);
+    } catch (err) {
+      return next(err);
+    }
+  }
+);
+
+router.post(
+  "/admin/photos/:photoId/procore-retry",
+  requireAdmin,
+  tenantMiddleware,
+  async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const photoId = req.params.photoId as string;
+      if (!UUID_PATTERN.test(photoId)) {
+        throw new AppError(400, "Invalid photo id");
+      }
+
+      const photoResult = await req.tenantClient!.query(
+        `SELECT f.id, f.deal_id, d.procore_project_id, d.procore_photo_link_id, d.procore_photo_link_status
+         FROM files f
+         JOIN deals d ON d.id = f.deal_id
+         WHERE f.id = $1
+           AND f.category = 'photo'
+           AND f.deleted_at IS NULL
+           AND f.is_active = true
+         LIMIT 1`,
+        [photoId]
+      );
+      const photo = photoResult.rows[0];
+      if (!photo) throw new AppError(404, "Photo not found");
+      if (!photo.procore_project_id) throw new AppError(400, "Deal is not linked to a Procore project");
+
+      await req.tenantClient!.query(
+        `UPDATE files
+         SET procore_sync_status = 'pending',
+             updated_at = NOW()
+         WHERE id = $1`,
+        [photoId]
+      );
+      await req.tenantClient!.query(
+        `INSERT INTO public.job_queue (job_type, payload, office_id, status, run_after, max_attempts)
+         VALUES ('procore_photo_sync', $1::jsonb, $2::uuid, 'pending', NOW(), 3)`,
+        [
+          JSON.stringify({
+            action: "single",
+            dealId: photo.deal_id,
+            photoId,
+            officeId: req.user!.activeOfficeId,
+            requestedByUserId: req.user!.id,
+          }),
+          req.user!.activeOfficeId,
+        ]
+      );
+
+      await req.commitTransaction!();
+      return res.json({ queued: true });
     } catch (err) {
       return next(err);
     }
