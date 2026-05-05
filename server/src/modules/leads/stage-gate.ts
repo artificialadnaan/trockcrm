@@ -16,6 +16,7 @@ import {
   type LeadQuestionGateMissing,
   type LeadQuestionAnswerValue,
 } from "./questionnaire-service.js";
+import { getLeadDueDiligenceApprovalForLead } from "./due-diligence-service.js";
 
 type TenantDb = NodePgDatabase<any>;
 
@@ -202,6 +203,12 @@ function questionnaireFieldLabel(key: string): string {
   if (key === "company.verification_pending") {
     return "Company verification (pending approver review)";
   }
+  if (key === "leadDueDiligence.pending") {
+    return "Awaiting Due Diligence approval. The lead will be eligible for qualification once the DD review is complete.";
+  }
+  if (key === "leadDueDiligence.rejected") {
+    return "Due Diligence rejected. This lead cannot be qualified. Contact a director or move the lead to disqualified.";
+  }
   if (key.startsWith("question.")) {
     return key
       .slice("question.".length)
@@ -225,6 +232,7 @@ export function evaluateLeadStageGate(input: {
   userRole?: string;
   questionnaireGate?: LeadQuestionGateMissing | null;
   companyVerificationPending?: boolean;
+  dueDiligenceStatus?: "pending" | "approved" | "rejected" | "superseded" | null;
 }): LeadStageGateResult {
   const requiredFields = LEAD_STAGE_REQUIREMENTS[input.targetStage.slug] ?? [];
   const missingFields = requiredFields.filter(
@@ -252,12 +260,19 @@ export function evaluateLeadStageGate(input: {
   const companyVerificationKeys = input.companyVerificationPending
     ? ["company.verification_pending"]
     : [];
+  const dueDiligenceKeys =
+    input.targetStage.slug === "qualified_lead" && input.dueDiligenceStatus === "pending"
+      ? ["leadDueDiligence.pending"]
+      : input.targetStage.slug === "qualified_lead" && input.dueDiligenceStatus === "rejected"
+        ? ["leadDueDiligence.rejected"]
+        : [];
 
   const effectiveMissingFields = [
     ...missingFields,
     ...(blockedByApprovalRole ? ["approval.directorAdmin"] : []),
     ...questionnaireMissingKeys,
     ...companyVerificationKeys,
+    ...dueDiligenceKeys,
   ];
 
   // Render every checked item — missing AND satisfied — so the checklist UI
@@ -267,6 +282,7 @@ export function evaluateLeadStageGate(input: {
     ...(blockedByApprovalRole ? ["approval.directorAdmin"] : []),
     ...questionnaireMissingKeys,
     ...companyVerificationKeys,
+    ...dueDiligenceKeys,
   ];
   const seen = new Set<string>();
   const dedupedChecklistKeys = checklistKeys.filter((key) => {
@@ -291,11 +307,15 @@ export function evaluateLeadStageGate(input: {
       },
     },
     blockReason:
-      blockedByApprovalRole
-        ? "Lead stage change requires director/admin approval"
-        : effectiveMissingFields.length > 0
-          ? "Lead stage change not allowed until required intake is complete"
-          : undefined,
+      dueDiligenceKeys[0] === "leadDueDiligence.pending"
+        ? "LEAD_DD_PENDING"
+        : dueDiligenceKeys[0] === "leadDueDiligence.rejected"
+          ? "LEAD_DD_REJECTED"
+          : blockedByApprovalRole
+            ? "Lead stage change requires director/admin approval"
+            : effectiveMissingFields.length > 0
+              ? "Lead stage change not allowed until required intake is complete"
+              : undefined,
   };
 }
 
@@ -383,6 +403,12 @@ export async function validateLeadStageGate(
     companyVerificationPending = companyRow?.status === "pending";
   }
 
+  let dueDiligenceStatus: "pending" | "approved" | "rejected" | "superseded" | null = null;
+  if (targetStage.slug === "qualified_lead") {
+    const approval = await getLeadDueDiligenceApprovalForLead(tenantDb, lead.id);
+    dueDiligenceStatus = approval?.status ?? null;
+  }
+
   return evaluateLeadStageGate({
     lead: {
       ...lead,
@@ -396,6 +422,7 @@ export async function validateLeadStageGate(
     userRole,
     questionnaireGate,
     companyVerificationPending,
+    dueDiligenceStatus,
   });
 }
 

@@ -21,6 +21,11 @@ export interface SendEmailOptions {
   text?: string;
 }
 
+export interface SendEmailResult {
+  success: boolean;
+  messageId: string | null;
+}
+
 interface OverrideResult {
   to: string[];
   cc: string[];
@@ -95,6 +100,16 @@ export async function sendSystemEmail(
   htmlBody: string,
   options: SendEmailOptions = {}
 ): Promise<boolean> {
+  const result = await sendSystemEmailWithMetadata(to, subject, htmlBody, options);
+  return result.success;
+}
+
+export async function sendSystemEmailWithMetadata(
+  to: string | string[],
+  subject: string,
+  htmlBody: string,
+  options: SendEmailOptions = {}
+): Promise<SendEmailResult> {
   const overridden = applyOverride(to, subject, htmlBody, options);
   const client = getClient();
 
@@ -109,12 +124,12 @@ export async function sendSystemEmail(
     console.log(`  From: ${FROM_ADDRESS}`);
     console.log(`  Subject: ${overridden.subject}`);
     console.log(`  Body: ${overridden.htmlBody.substring(0, 200)}...`);
-    return true;
+    return { success: true, messageId: null };
   }
 
   if (overridden.to.length === 0) {
     console.warn("[Email] No recipients after override — skipping");
-    return false;
+    return { success: false, messageId: null };
   }
 
   try {
@@ -130,14 +145,14 @@ export async function sendSystemEmail(
 
     if (result.error) {
       console.error("[Email] Resend error:", result.error);
-      return false;
+      return { success: false, messageId: null };
     }
 
     const tag = overridden.active ? " [override]" : "";
     console.log(`[Email] Sent${tag}: "${overridden.subject}" to ${overridden.to.join(", ")} (id: ${result.data?.id})`);
-    return true;
+    return { success: true, messageId: result.data?.id ?? null };
   } catch (err) {
     console.error("[Email] Failed to send:", err);
-    return false;
+    return { success: false, messageId: null };
   }
 }

@@ -95,6 +95,7 @@ export function LeadListPage() {
     leadName: string;
     targetStageName: string;
     missingLabels: string[];
+    code?: string;
   } | null>(null);
 
   const bucket = searchParams.get("bucket");
@@ -188,6 +189,7 @@ export function LeadListPage() {
                   leadName: activeLead.name,
                   targetStageName: targetColumn.stage.name,
                   missingLabels: result.missing.map((field) => field.label),
+                  code: result.code,
                 });
                 return;
               }
@@ -205,7 +207,11 @@ export function LeadListPage() {
           <DialogHeader>
             <DialogTitle>Complete Required Fields</DialogTitle>
             <DialogDescription>
-              This lead cannot move to {blockedMove?.targetStageName ?? "the selected stage"} yet.
+              {blockedMove?.code === "LEAD_DD_PENDING"
+                ? "Awaiting Due Diligence approval."
+                : blockedMove?.code === "LEAD_DD_REJECTED"
+                  ? "Due Diligence rejected."
+                  : `This lead cannot move to ${blockedMove?.targetStageName ?? "the selected stage"} yet.`}
             </DialogDescription>
           </DialogHeader>
           {blockedMove ? (

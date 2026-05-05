@@ -27,6 +27,7 @@ import {
   ShieldAlert,
   Radar,
   ClipboardCheck,
+  BellRing,
   ChevronDown,
   DollarSign,
   type LucideIcon,
@@ -81,8 +82,10 @@ const adminGroups: AdminGroup[] = [
       { to: "/admin/sales-process-disconnects", icon: Radar, label: "Process Disconnects", roles: ["admin", "director"] },
       { to: "/admin/interventions", icon: ClipboardCheck, label: "Interventions", roles: ["admin", "director"] },
       { to: "/admin/intervention-analytics", icon: BarChart3, label: "Intervention Analytics", roles: ["admin", "director"] },
+      { to: "/admin/lead-due-diligence-queue", icon: Shield, label: "Lead DD Queue", roles: ["admin", "director"] },
       { to: "/admin/merge-queue", icon: GitMerge, label: "Merge Queue", roles: ["admin", "director"] },
       { to: "/admin/directory-merge-queue", icon: Building2, label: "Directory Merge Queue", roles: ["admin", "director"] },
+      { to: "/admin/notification-recipients", icon: BellRing, label: "Notification Recipients", roles: ["admin"] },
     ],
   },
   {

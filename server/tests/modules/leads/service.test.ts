@@ -2,10 +2,13 @@ import {
   companies,
   contacts,
   deals,
+  leadDueDiligenceApprovals,
   leadStageHistory,
   leadQuestionAnswerHistory,
   leadQuestionAnswers,
   leads,
+  notificationRecipientAssignments,
+  notificationRecipientGroups,
   projectTypeConfig,
   projectTypeQuestionNodes,
   properties,
@@ -127,6 +130,9 @@ function createFakeTenantDb(lead: FakeLeadRow) {
     leadStageHistory: [] as Array<Record<string, unknown>>,
     leadQuestionAnswers: [] as Array<Record<string, unknown>>,
     leadQuestionAnswerHistory: [] as Array<Record<string, unknown>>,
+    leadDueDiligenceApprovals: [] as Array<Record<string, unknown>>,
+    notificationRecipientGroups: [] as Array<Record<string, unknown>>,
+    notificationRecipientAssignments: [] as Array<Record<string, unknown>>,
   };
 
   const resolveTableName = (table: unknown) => (table as { _: { name?: string } })?._?.name;
@@ -181,6 +187,9 @@ function createFakeTenantDb(lead: FakeLeadRow) {
     };
 
     return {
+      innerJoin() {
+        return this;
+      },
       where(condition: unknown) {
         filteredRows = filterRows(rows, condition);
         return this;
@@ -201,7 +210,7 @@ function createFakeTenantDb(lead: FakeLeadRow) {
   return {
     state,
     execute: vi.fn(async () => ({
-      rows: [{ last_activity_at: new Date("2026-04-01T00:00:00.000Z") }],
+      rows: [],
     })),
     select(fields?: Record<string, unknown>) {
       return {
@@ -223,6 +232,12 @@ function createFakeTenantDb(lead: FakeLeadRow) {
           if (table === users || tableName === "users") {
             return createQueryBuilder(state.users as Array<Record<string, unknown>>, fields);
           }
+          if (table === notificationRecipientGroups || tableName === "notification_recipient_groups") {
+            return createQueryBuilder(state.notificationRecipientGroups, fields);
+          }
+          if (table === notificationRecipientAssignments || tableName === "notification_recipient_assignments") {
+            return createQueryBuilder(state.notificationRecipientAssignments, fields);
+          }
           if (table === projectTypeConfig || tableName === "project_type_config") {
             return createQueryBuilder(state.projectTypes as Array<Record<string, unknown>>, fields);
           }
@@ -240,6 +255,9 @@ function createFakeTenantDb(lead: FakeLeadRow) {
           }
           if (table === leadQuestionAnswerHistory || tableName === "lead_question_answer_history") {
             return createQueryBuilder(state.leadQuestionAnswerHistory, fields);
+          }
+          if (table === leadDueDiligenceApprovals || tableName === "lead_due_diligence_approvals") {
+            return createQueryBuilder(state.leadDueDiligenceApprovals, fields);
           }
 
           throw new Error(`Unexpected table: ${String(tableName)}`);
@@ -306,6 +324,24 @@ function createFakeTenantDb(lead: FakeLeadRow) {
               ...value,
             };
             state.leadQuestionAnswerHistory.push(insertedRow);
+            return {
+              returning() {
+                return Promise.resolve([{ ...insertedRow }]);
+              },
+              then(onfulfilled: (value: unknown) => unknown) {
+                return Promise.resolve(insertedRow).then(onfulfilled);
+              },
+            };
+          }
+
+          if (table === leadDueDiligenceApprovals || tableName === "lead_due_diligence_approvals") {
+            const insertedRow = {
+              id: value.id ?? `lead-due-diligence-approval-${state.leadDueDiligenceApprovals.length + 1}`,
+              emailSentAt: null,
+              emailMessageId: null,
+              ...value,
+            };
+            state.leadDueDiligenceApprovals.push(insertedRow);
             return {
               returning() {
                 return Promise.resolve([{ ...insertedRow }]);
@@ -496,9 +532,14 @@ describe("lead service canonical progression", () => {
                     ? []
                   : table === users
                     ? [{ id: "rep-1", isActive: true, officeId: "office-1" }]
+                  : table === notificationRecipientGroups || table === notificationRecipientAssignments
+                    ? []
                     : [];
 
             return {
+              innerJoin() {
+                return this;
+              },
               where() {
                 return this;
               },
@@ -513,6 +554,17 @@ describe("lead service canonical progression", () => {
         };
       },
       insert(table: unknown) {
+        if (table === leadDueDiligenceApprovals) {
+          return {
+            values(value: Record<string, unknown>) {
+              return {
+                returning() {
+                  return Promise.resolve([{ id: "lead-dd-approval-1", ...value }]);
+                },
+              };
+            },
+          };
+        }
         if (table === leadQuestionAnswerHistory || table === leadQuestionAnswers) {
           return {
             values(value: Record<string, unknown>) {
@@ -656,6 +708,316 @@ describe("lead service canonical progression", () => {
           officeId: "office-1",
         })
       );
+    } finally {
+      if (previousFlag === undefined) delete process.env.ENABLE_LEAD_EDIT_V2;
+      else process.env.ENABLE_LEAD_EDIT_V2 = previousFlag;
+    }
+  });
+
+  it("creates a new-customer lead in new_lead with pending DD approval and post-commit email pending", async () => {
+    const previousFlag = process.env.ENABLE_LEAD_EDIT_V2;
+    process.env.ENABLE_LEAD_EDIT_V2 = "true";
+    const tenantDb = createFakeTenantDb({
+      id: "lead-existing",
+      companyId: "company-1",
+      propertyId: "property-1",
+      primaryContactId: "contact-1",
+      name: "Existing",
+      stageId: newLeadStage.id,
+      assignedRepId: "rep-1",
+      status: "open",
+      source: "Referral",
+      description: null,
+      stageEnteredAt: new Date("2026-04-12T15:00:00.000Z"),
+      convertedAt: null,
+      isActive: true,
+      createdAt: new Date("2026-04-12T15:00:00.000Z"),
+      updatedAt: new Date("2026-04-12T15:00:00.000Z"),
+    });
+    tenantDb.state.projectTypes = [{ id: "project-type-commercial", name: "Commercial", slug: "commercial", parentId: null }];
+    tenantDb.state.projectTypeQuestionNodes = [{
+      id: "node-roof-scope",
+      projectTypeId: null,
+      parentNodeId: null,
+      parentOptionValue: null,
+      nodeType: "question",
+      key: "roof_scope",
+      label: "Roof Scope",
+      prompt: null,
+      inputType: "text",
+      options: [],
+      isRequired: false,
+      displayOrder: 10,
+      isActive: true,
+    }];
+    tenantDb.execute.mockResolvedValue({ rows: [] });
+    const service = createLeadService({
+      getStageById: pipelineMocks.getStageById as never,
+      getActiveProjectTypes: pipelineMocks.getActiveProjectTypes as never,
+      now: () => new Date("2026-04-15T15:00:00.000Z"),
+    });
+
+    try {
+      const lead = await service.createLead(tenantDb as never, {
+        companyId: "company-1",
+        propertyId: "property-1",
+        stageId: newLeadStage.id,
+        assignedRepId: "rep-1",
+        actorUserId: "director-1",
+        officeId: "office-1",
+        primaryContactId: "contact-1",
+        primaryContactRole: "property_manager",
+        name: "Created Lead",
+        source: "Referral",
+        officeCode: "dfw",
+        projectType: "commercial",
+        projectTypeId: "project-type-commercial",
+        budgetStatus: "budgeted_q3",
+        bidDueDate: "2026-06-01",
+        leadQuestionAnswers: { roof_scope: "Full replacement" },
+      });
+
+      expect(lead.stageId).toBe(newLeadStage.id);
+      expect(lead.verificationStatus).toBe("pending");
+      expect(lead.verificationRequiredReason).toBe("new_company");
+      expect(tenantDb.state.leadDueDiligenceApprovals).toEqual([
+        expect.objectContaining({
+          status: "pending",
+          leadId: lead.id,
+          detectionSignal: {
+            source: "none",
+            type: "no_recent_activity",
+            occurredAt: null,
+            detail: "No activity found on company, contact, or property in the last 12 months.",
+          },
+          emailSentAt: null,
+          emailMessageId: null,
+        }),
+      ]);
+      expect(assignmentTaskMocks.createAssignmentTaskIfNeeded).toHaveBeenCalledWith(
+        tenantDb,
+        expect.objectContaining({ entityId: lead.id, actorUserId: "director-1" })
+      );
+      expect(tenantDb.state.leadQuestionAnswers).toEqual([
+        expect.objectContaining({
+          leadId: lead.id,
+          questionId: "node-roof-scope",
+          valueJson: "Full replacement",
+        }),
+      ]);
+      expect(tenantDb.state.leadQuestionAnswers).not.toEqual([
+        expect.objectContaining({ questionId: "node-bid-due-date" }),
+      ]);
+    } finally {
+      if (previousFlag === undefined) delete process.env.ENABLE_LEAD_EDIT_V2;
+      else process.env.ENABLE_LEAD_EDIT_V2 = previousFlag;
+    }
+  });
+
+  it("creates an existing-customer lead in qualified_lead without DD approval while preserving side effects", async () => {
+    const previousFlag = process.env.ENABLE_LEAD_EDIT_V2;
+    process.env.ENABLE_LEAD_EDIT_V2 = "true";
+    const tenantDb = createFakeTenantDb({
+      id: "lead-existing",
+      companyId: "company-1",
+      propertyId: "property-1",
+      primaryContactId: "contact-1",
+      name: "Existing",
+      stageId: newLeadStage.id,
+      assignedRepId: "rep-1",
+      status: "open",
+      source: "Referral",
+      description: null,
+      stageEnteredAt: new Date("2026-04-12T15:00:00.000Z"),
+      convertedAt: null,
+      isActive: true,
+      createdAt: new Date("2026-04-12T15:00:00.000Z"),
+      updatedAt: new Date("2026-04-12T15:00:00.000Z"),
+    });
+    tenantDb.state.projectTypes = [{ id: "project-type-commercial", name: "Commercial", slug: "commercial", parentId: null }];
+    tenantDb.execute.mockResolvedValue({
+      rows: [{
+        source: "company",
+        type: "deal",
+        occurred_at: new Date("2026-04-01T00:00:00.000Z"),
+        detail: "Recent deal activity on company",
+      }],
+    });
+    const getStageBySlugMock = vi.fn(async (slug: string) =>
+      slug === "qualified_lead" ? qualifiedLeadStage : null
+    );
+    const service = createLeadService({
+      getStageById: pipelineMocks.getStageById as never,
+      getStageBySlug: getStageBySlugMock as never,
+      getActiveProjectTypes: pipelineMocks.getActiveProjectTypes as never,
+      now: () => new Date("2026-04-15T15:00:00.000Z"),
+    });
+
+    try {
+      const lead = await service.createLead(tenantDb as never, {
+        companyId: "company-1",
+        propertyId: "property-1",
+        stageId: newLeadStage.id,
+        assignedRepId: "rep-1",
+        actorUserId: "director-1",
+        officeId: "office-1",
+        primaryContactId: "contact-1",
+        primaryContactRole: "property_manager",
+        name: "Existing Customer Lead",
+        source: "Referral",
+        officeCode: "dfw",
+        projectType: "commercial",
+        projectTypeId: "project-type-commercial",
+        budgetStatus: "budgeted_q3",
+        bidDueDate: "2026-06-01",
+      });
+
+      expect(lead.stageId).toBe(qualifiedLeadStage.id);
+      expect(lead.verificationStatus).toBe("not_required");
+      expect(lead.verificationRequiredReason).toBeNull();
+      expect(tenantDb.state.leadDueDiligenceApprovals).toEqual([]);
+      expect(assignmentTaskMocks.createAssignmentTaskIfNeeded).toHaveBeenCalledWith(
+        tenantDb,
+        expect.objectContaining({ entityId: lead.id, actorUserId: "director-1" })
+      );
+      expect(tenantDb.state.leadQuestionAnswers).toEqual([
+        expect.objectContaining({
+          leadId: lead.id,
+          questionId: "node-bid-due-date",
+          valueJson: "2026-06-01",
+        }),
+      ]);
+    } finally {
+      if (previousFlag === undefined) delete process.env.ENABLE_LEAD_EDIT_V2;
+      else process.env.ENABLE_LEAD_EDIT_V2 = previousFlag;
+    }
+  });
+
+  it("creates a new-customer DD approval without V2 mirror writes when V2 is disabled", async () => {
+    const previousFlag = process.env.ENABLE_LEAD_EDIT_V2;
+    process.env.ENABLE_LEAD_EDIT_V2 = "false";
+    const tenantDb = createFakeTenantDb({
+      id: "lead-existing",
+      companyId: "company-1",
+      propertyId: "property-1",
+      primaryContactId: "contact-1",
+      name: "Existing",
+      stageId: newLeadStage.id,
+      assignedRepId: "rep-1",
+      status: "open",
+      source: "Referral",
+      description: null,
+      stageEnteredAt: new Date("2026-04-12T15:00:00.000Z"),
+      convertedAt: null,
+      isActive: true,
+      createdAt: new Date("2026-04-12T15:00:00.000Z"),
+      updatedAt: new Date("2026-04-12T15:00:00.000Z"),
+    });
+    tenantDb.state.projectTypes = [{ id: "project-type-commercial", name: "Commercial", slug: "commercial", parentId: null }];
+    tenantDb.execute.mockResolvedValue({ rows: [] });
+    const service = createLeadService({
+      getStageById: pipelineMocks.getStageById as never,
+      getActiveProjectTypes: pipelineMocks.getActiveProjectTypes as never,
+      now: () => new Date("2026-04-15T15:00:00.000Z"),
+    });
+
+    try {
+      const lead = await service.createLead(tenantDb as never, {
+        companyId: "company-1",
+        propertyId: "property-1",
+        stageId: newLeadStage.id,
+        assignedRepId: "rep-1",
+        actorUserId: "director-1",
+        officeId: "office-1",
+        primaryContactId: "contact-1",
+        primaryContactRole: "property_manager",
+        name: "New Customer Lead",
+        source: "Referral",
+        officeCode: "dfw",
+        projectType: "commercial",
+        projectTypeId: "project-type-commercial",
+        budgetStatus: "budgeted_q3",
+        bidDueDate: "2026-06-01",
+        leadQuestionAnswers: { bid_due_date: "2026-06-01" },
+      });
+
+      expect(lead.stageId).toBe(newLeadStage.id);
+      expect(lead.verificationStatus).toBe("pending");
+      expect(tenantDb.state.leadDueDiligenceApprovals).toHaveLength(1);
+      expect(assignmentTaskMocks.createAssignmentTaskIfNeeded).toHaveBeenCalled();
+      expect(tenantDb.state.leadQuestionAnswers).toEqual([]);
+      expect(tenantDb.state.leadQuestionAnswerHistory).toEqual([]);
+    } finally {
+      if (previousFlag === undefined) delete process.env.ENABLE_LEAD_EDIT_V2;
+      else process.env.ENABLE_LEAD_EDIT_V2 = previousFlag;
+    }
+  });
+
+  it("routes an existing customer to qualified_lead without DD approval or V2 writes when V2 is disabled", async () => {
+    const previousFlag = process.env.ENABLE_LEAD_EDIT_V2;
+    process.env.ENABLE_LEAD_EDIT_V2 = "false";
+    const tenantDb = createFakeTenantDb({
+      id: "lead-existing",
+      companyId: "company-1",
+      propertyId: "property-1",
+      primaryContactId: "contact-1",
+      name: "Existing",
+      stageId: newLeadStage.id,
+      assignedRepId: "rep-1",
+      status: "open",
+      source: "Referral",
+      description: null,
+      stageEnteredAt: new Date("2026-04-12T15:00:00.000Z"),
+      convertedAt: null,
+      isActive: true,
+      createdAt: new Date("2026-04-12T15:00:00.000Z"),
+      updatedAt: new Date("2026-04-12T15:00:00.000Z"),
+    });
+    tenantDb.state.projectTypes = [{ id: "project-type-commercial", name: "Commercial", slug: "commercial", parentId: null }];
+    tenantDb.execute.mockResolvedValue({
+      rows: [{
+        source: "company",
+        type: "deal",
+        occurred_at: new Date("2026-04-01T00:00:00.000Z"),
+        detail: "Recent deal activity on company",
+      }],
+    });
+    const getStageBySlugMock = vi.fn(async (slug: string) =>
+      slug === "qualified_lead" ? qualifiedLeadStage : null
+    );
+    const service = createLeadService({
+      getStageById: pipelineMocks.getStageById as never,
+      getStageBySlug: getStageBySlugMock as never,
+      getActiveProjectTypes: pipelineMocks.getActiveProjectTypes as never,
+      now: () => new Date("2026-04-15T15:00:00.000Z"),
+    });
+
+    try {
+      const lead = await service.createLead(tenantDb as never, {
+        companyId: "company-1",
+        propertyId: "property-1",
+        stageId: newLeadStage.id,
+        assignedRepId: "rep-1",
+        actorUserId: "director-1",
+        officeId: "office-1",
+        primaryContactId: "contact-1",
+        primaryContactRole: "property_manager",
+        name: "Existing Customer Lead",
+        source: "Referral",
+        officeCode: "dfw",
+        projectType: "commercial",
+        projectTypeId: "project-type-commercial",
+        budgetStatus: "budgeted_q3",
+        bidDueDate: "2026-06-01",
+        leadQuestionAnswers: { bid_due_date: "2026-06-01" },
+      });
+
+      expect(lead.stageId).toBe(qualifiedLeadStage.id);
+      expect(lead.verificationStatus).toBe("not_required");
+      expect(tenantDb.state.leadDueDiligenceApprovals).toEqual([]);
+      expect(assignmentTaskMocks.createAssignmentTaskIfNeeded).toHaveBeenCalled();
+      expect(tenantDb.state.leadQuestionAnswers).toEqual([]);
+      expect(tenantDb.state.leadQuestionAnswerHistory).toEqual([]);
     } finally {
       if (previousFlag === undefined) delete process.env.ENABLE_LEAD_EDIT_V2;
       else process.env.ENABLE_LEAD_EDIT_V2 = previousFlag;
@@ -1342,7 +1704,7 @@ describe("lead service canonical progression", () => {
     }
   });
 
-  it("keeps an existing-customer lead in new_lead while create-time auto-promotion is disabled", async () => {
+  it("routes an existing-customer lead to qualified_lead during creation", async () => {
     const previousFlag = process.env.ENABLE_LEAD_EDIT_V2;
     process.env.ENABLE_LEAD_EDIT_V2 = "true";
 
@@ -1350,7 +1712,12 @@ describe("lead service canonical progression", () => {
     const insertedHistory: Array<Record<string, unknown>> = [];
     const tenantDb = {
       execute: vi.fn(async () => ({
-        rows: [{ last_activity_at: new Date("2026-04-01T00:00:00.000Z") }], // 26 days ago
+        rows: [{
+          source: "company",
+          type: "deal",
+          occurred_at: new Date("2026-04-01T00:00:00.000Z"),
+          detail: "Recent deal activity on company",
+        }],
       })),
       select() {
         return {
@@ -1368,8 +1735,11 @@ describe("lead service canonical progression", () => {
                     ? []
                   : table === users
                     ? [{ id: "rep-1", isActive: true, officeId: "office-1" }]
+                  : table === notificationRecipientGroups || table === notificationRecipientAssignments
+                    ? []
                     : [];
             return {
+              innerJoin() { return this; },
               where() { return this; },
               limit() { return this; },
               then(onfulfilled: (value: unknown[]) => unknown) {
@@ -1382,6 +1752,9 @@ describe("lead service canonical progression", () => {
       insert(table: unknown) {
         return {
           values(value: Record<string, unknown>) {
+            if (table === leadDueDiligenceApprovals) {
+              return { returning: () => Promise.resolve([{ id: "lead-dd-approval-1", ...value }]) };
+            }
             if (table === leads) {
               const insertedRow = { id: "lead-created", convertedAt: null, ...value };
               insertedLeads.push(insertedRow);
@@ -1429,11 +1802,11 @@ describe("lead service canonical progression", () => {
         qualificationPayload: {},
       });
 
-      expect(lead.stageId).toBe(newLeadStage.id);
+      expect(lead.stageId).toBe(qualifiedLeadStage.id);
       expect(lead.verificationStatus).toBe("not_required");
       expect(lead.verificationRequiredReason).toBeNull();
       expect(insertedHistory).toHaveLength(0);
-      expect(getStageBySlugMock).not.toHaveBeenCalledWith("qualified_lead", "lead");
+      expect(getStageBySlugMock).toHaveBeenCalledWith("qualified_lead", "lead");
     } finally {
       if (previousFlag === undefined) delete process.env.ENABLE_LEAD_EDIT_V2;
       else process.env.ENABLE_LEAD_EDIT_V2 = previousFlag;
@@ -1447,7 +1820,7 @@ describe("lead service canonical progression", () => {
     const insertedLeads: Array<Record<string, unknown>> = [];
     const insertedHistory: Array<Record<string, unknown>> = [];
     const tenantDb = {
-      execute: vi.fn(async () => ({ rows: [{ last_activity_at: null }] })),
+      execute: vi.fn(async () => ({ rows: [] })),
       select() {
         return {
           from(table: unknown) {
@@ -1464,8 +1837,11 @@ describe("lead service canonical progression", () => {
                     ? []
                   : table === users
                     ? [{ id: "rep-1", isActive: true, officeId: "office-1" }]
+                  : table === notificationRecipientGroups || table === notificationRecipientAssignments
+                    ? []
                     : [];
             return {
+              innerJoin() { return this; },
               where() { return this; },
               limit() { return this; },
               then(onfulfilled: (value: unknown[]) => unknown) {
@@ -1478,6 +1854,9 @@ describe("lead service canonical progression", () => {
       insert(table: unknown) {
         return {
           values(value: Record<string, unknown>) {
+            if (table === leadDueDiligenceApprovals) {
+              return { returning: () => Promise.resolve([{ id: "lead-dd-approval-1", ...value }]) };
+            }
             if (table === leads) {
               const insertedRow = { id: "lead-created", convertedAt: null, ...value };
               insertedLeads.push(insertedRow);

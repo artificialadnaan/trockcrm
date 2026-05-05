@@ -33,12 +33,12 @@ import {
   upsertLeadQuestionAnswerSet,
 } from "./questionnaire-service.js";
 import {
-  buildCompanyVerificationEmail,
   computeExistingCustomerStatus,
-  getActiveAdminDirectorEmails,
 } from "../companies/customer-status-service.js";
-import { sendSystemEmail } from "../../lib/resend-client.js";
-import { companyNeedsVerification } from "./verification-service.js";
+import {
+  createLeadDueDiligenceApproval,
+} from "./due-diligence-service.js";
+import { isExistingCustomer } from "./verification-service.js";
 import { resolveLeadSourceForWrite } from "./source-control.js";
 import type { LeadBudgetStatus, LeadPocRole, LeadSourceCategory } from "@trock-crm/shared/types";
 
@@ -156,6 +156,7 @@ interface TransitionLeadStageInput {
 type TransitionBlockedResult = {
   ok: false;
   reason: "missing_requirements";
+  code?: string;
   targetStageId: string;
   resolution: "inline" | "detail";
   missing: Array<{
@@ -1168,19 +1169,26 @@ export function createLeadService(
       {};
     const normalizedBidDueDate = normalizeOptionalIsoDate(input.bidDueDate, "bidDueDate");
 
-    // TODO(change 2 of 3): re-enable existing-customer auto-routing with DD email
-    // gate. See feat/lead-due-diligence-routing branch.
     let resolvedStageId = stage.id;
     let verificationStatus: "not_required" | "pending" = "not_required";
     let verificationRequiredReason: string | null = null;
+    const existingCustomerDecision = await isExistingCustomer(
+      tenantDb,
+      input.companyId,
+      input.primaryContactId ?? null,
+      input.propertyId,
+      now
+    );
 
-    if (v2Enabled) {
-      const decision = await companyNeedsVerification(tenantDb, input.companyId, { now });
-
-      if (decision.needsVerification) {
-        verificationStatus = "pending";
-        verificationRequiredReason = decision.reason;
+    if (existingCustomerDecision.isExisting) {
+      const qualifiedStage = await deps.getStageBySlug("qualified_lead", "lead");
+      if (!qualifiedStage) {
+        throw new AppError(500, "Canonical 'qualified_lead' stage is not configured");
       }
+      resolvedStageId = qualifiedStage.id;
+    } else {
+      verificationStatus = "pending";
+      verificationRequiredReason = "new_company";
     }
 
     const [lead] = await tenantDb
@@ -1241,57 +1249,15 @@ export function createLeadService(
       }
     }
 
-    // Verification email + company-side state. Fires only when this lead's
-    // creation determined the company needs verification (PR1's existing
-    // gate). Idempotent at the company level: if a prior lead already
-    // requested verification for this company, the company row already has
-    // companyVerificationStatus='pending' and we skip the email so we don't
-    // spam approvers across multiple new leads against the same company.
+    // verification_status is a compat mirror; lead_due_diligence_approvals is
+    // the source of truth for the qualified_lead stage gate.
     if (verificationStatus === "pending") {
-      const [companyRow] = await tenantDb
-        .select({
-          id: companies.id,
-          name: companies.name,
-          verificationStatus: companies.companyVerificationStatus,
-          emailSentAt: companies.companyVerificationEmailSentAt,
-          assignedApproverUserId: companies.assignedApproverUserId,
-        })
-        .from(companies)
-        .where(eq(companies.id, input.companyId))
-        .limit(1);
-
-      const alreadyRequested =
-        companyRow?.verificationStatus != null && companyRow?.emailSentAt != null;
-
-      if (companyRow && !alreadyRequested) {
-        const recipients = await getActiveAdminDirectorEmails(tenantDb, {
-          assignedApproverUserId: companyRow.assignedApproverUserId,
-        });
-
-        if (recipients.length > 0) {
-          const { subject, html } = buildCompanyVerificationEmail({
-            companyId: companyRow.id,
-            companyName: companyRow.name,
-            leadId: lead.id,
-            leadName: input.name,
-          });
-          const sent = await sendSystemEmail(recipients, subject, html);
-          await tenantDb
-            .update(companies)
-            .set({
-              companyVerificationStatus: companyRow.verificationStatus ?? "pending",
-              companyVerificationRequestedAt:
-                companyRow.verificationStatus == null ? now : undefined,
-              companyVerificationEmailSentAt: sent ? now : undefined,
-              updatedAt: now,
-            })
-            .where(eq(companies.id, companyRow.id));
-        } else {
-          console.warn(
-            `[leads.createLead] company ${companyRow.id} needs verification but no recipients resolved (no assigned approver, no active admin/director, no env fallback)`
-          );
-        }
-      }
+      await createLeadDueDiligenceApproval(tenantDb, {
+        leadId: lead.id,
+        requestedBy: input.assignedRepId,
+        detectionSignal: existingCustomerDecision.signal,
+        now,
+      });
     }
 
     if (input.actorUserId) {
@@ -1617,6 +1583,7 @@ export function createLeadService(
       return {
         ok: false,
         reason: "missing_requirements",
+        code: preflight.blockReason,
         targetStageId: input.targetStageId,
         resolution: "detail",
         missing: preflight.missingRequirements.effectiveChecklist.fields

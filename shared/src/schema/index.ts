@@ -19,6 +19,10 @@ export { userExternalIdentities, externalUserSourceEnum } from "./public/user-ex
 export { userLocalAuth } from "./public/user-local-auth.js";
 export { userLocalAuthEvents, localAuthEventTypeEnum } from "./public/user-local-auth-events.js";
 export { userCommissionSettings } from "./public/user-commission-settings.js";
+export {
+  notificationRecipientGroups,
+  notificationRecipientAssignments,
+} from "./public/notification-recipient-groups.js";
 export { jobQueue, jobStatusEnum } from "./public/job-queue.js";
 export { geocodingCache } from "./public/geocoding-cache.js";
 export * from "../types/sales-workflow.js";
@@ -78,6 +82,10 @@ export {
   leadDisqualificationReasonEnum,
 } from "./tenant/leads.js";
 export { leadStageHistory } from "./tenant/lead-stage-history.js";
+export {
+  leadDueDiligenceApprovals,
+  leadDueDiligenceApprovalStatusEnum,
+} from "./tenant/lead-due-diligence-approvals.js";
 export { leadQuestionAnswers } from "./tenant/lead-question-answers.js";
 export { leadQuestionAnswerHistory } from "./tenant/lead-question-answer-history.js";
 export { duplicateQueue, duplicateMatchTypeEnum, duplicateStatusEnum } from "./tenant/duplicate-queue.js";

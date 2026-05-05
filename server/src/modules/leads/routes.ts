@@ -1,4 +1,7 @@
 import { Router } from "express";
+import { drizzle } from "drizzle-orm/node-postgres";
+import * as schema from "@trock-crm/shared/schema";
+import { pool } from "../../db.js";
 import { AppError } from "../../middleware/error-handler.js";
 import { LeadStageTransitionError } from "./stage-transition-service.js";
 import {
@@ -21,9 +24,41 @@ import {
   getQuestionnaireTemplateSnapshot,
   isLeadEditV2Enabled,
 } from "./questionnaire-service.js";
-import { markLeadVerified } from "./verification-service.js";
+import {
+  assertSafeOfficeSlug,
+  dispatchPendingDueDiligenceEmail,
+  getLeadDueDiligenceApprovalForLead,
+} from "./due-diligence-service.js";
 
 const router = Router();
+
+async function dispatchDueDiligenceEmailAfterCommit(input: {
+  officeSlug: string;
+  approvalId: string;
+}) {
+  const client = await pool.connect();
+  let committed = false;
+  try {
+    assertSafeOfficeSlug(input.officeSlug);
+    const schemaName = `office_${input.officeSlug}`;
+    await client.query("BEGIN");
+    await client.query("SELECT set_config('search_path', $1, true)", [`${schemaName},public`]);
+    const tenantDb = drizzle(client, { schema });
+    await dispatchPendingDueDiligenceEmail(tenantDb, input.approvalId, { now: new Date() });
+    await client.query("COMMIT");
+    committed = true;
+  } catch (err) {
+    if (!committed) {
+      await client.query("ROLLBACK").catch(() => {});
+    }
+    console.error("[lead-dd] post-commit email dispatch failed", {
+      approvalId: input.approvalId,
+      err,
+    });
+  } finally {
+    client.release();
+  }
+}
 
 function readBoardInput(req: Parameters<typeof router.get>[1] extends never ? never : any) {
   return {
@@ -224,8 +259,6 @@ router.post("/", async (req, res, next) => {
     const lead = await createLead(req.tenantDb!, {
       companyId,
       propertyId,
-      // TODO(change 2 of 3): re-enable existing-customer auto-routing with DD email
-      // gate. See feat/lead-due-diligence-routing branch.
       stageId: undefined,
       assignedRepId: repId,
       actorUserId: req.user!.id,
@@ -235,9 +268,22 @@ router.post("/", async (req, res, next) => {
       bidDueDate,
       ...rest,
     });
+    const dueDiligenceApproval =
+      lead.verificationStatus === "pending"
+        ? await getLeadDueDiligenceApprovalForLead(req.tenantDb!, lead.id)
+        : null;
 
     await req.commitTransaction!();
     res.status(201).json({ lead });
+
+    if (dueDiligenceApproval && req.officeSlug) {
+      setImmediate(() => {
+        void dispatchDueDiligenceEmailAfterCommit({
+          officeSlug: req.officeSlug!,
+          approvalId: dueDiligenceApproval.id,
+        });
+      });
+    }
   } catch (err) {
     if (err instanceof LeadCreateRequirementsError) {
       res.status(400).json({
@@ -249,32 +295,6 @@ router.post("/", async (req, res, next) => {
       });
       return;
     }
-    next(err);
-  }
-});
-
-// POST /api/leads/:id/verify-manual
-// TODO(PR2): Replace with email + tokenized approval flow.
-// Temporary admin scaffolding: marks a pending lead as verified and auto-promotes
-// to Qualified Lead. The PR2 public-approval endpoint will supersede this.
-router.post("/:id/verify-manual", async (req, res, next) => {
-  try {
-    if (req.user!.role !== "admin") {
-      throw new AppError(403, "Only admins can manually verify leads");
-    }
-
-    const updated = await markLeadVerified(req.tenantDb!, {
-      leadId: req.params.id,
-      userId: req.user!.id,
-    });
-
-    if (!updated) {
-      throw new AppError(409, "Lead is not pending verification");
-    }
-
-    await req.commitTransaction!();
-    res.json({ lead: updated });
-  } catch (err) {
     next(err);
   }
 });
@@ -332,6 +352,21 @@ router.post("/:id/stage-transition", async (req, res, next) => {
 router.patch("/:id", async (req, res, next) => {
   try {
     const body = { ...req.body };
+    if (body.stageId !== undefined) {
+      const existing = await getLeadById(req.tenantDb!, req.params.id, req.user!.role, req.user!.id);
+      if (!existing) {
+        throw new AppError(404, "Lead not found");
+      }
+      if (body.stageId !== existing.stageId) {
+        res.status(400).json({
+          error: "Stage changes must use POST /api/leads/:id/stage-transition. Direct stage updates via PATCH are not supported.",
+          code: "STAGE_CHANGE_NOT_ALLOWED_VIA_PATCH",
+        });
+        return;
+      }
+      delete body.stageId;
+    }
+
     if (body.salesRepId !== undefined && body.salesRepId !== null && body.assignedRepId === undefined) {
       body.assignedRepId = body.salesRepId;
     }

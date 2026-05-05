@@ -40,6 +40,12 @@ import {
   listDirectoryMergeQueue,
   resolveDirectoryMergeQueueEntry,
 } from "../../services/directoryDedup.js";
+import {
+  decideLeadDueDiligenceApproval,
+  getNotificationRecipientGroup,
+  listLeadDueDiligenceApprovals,
+  updateNotificationRecipientAssignments,
+} from "../leads/due-diligence-service.js";
 
 const router = Router();
 router.use(authMiddleware);
@@ -292,6 +298,73 @@ router.post("/admin/directory-merge-queue/:id/dismiss", tenantMiddleware, requir
     );
     await req.commitTransaction!();
     return res.json({ result });
+  } catch (err) {
+    return next(err);
+  }
+});
+
+router.get("/admin/lead-due-diligence-approvals", tenantMiddleware, requireDirector, async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const status = req.query.status === "approved" || req.query.status === "rejected"
+      ? req.query.status
+      : "pending";
+    const approvals = await listLeadDueDiligenceApprovals(req.tenantDb!, status);
+    await req.commitTransaction!();
+    return res.json({ approvals });
+  } catch (err) {
+    return next(err);
+  }
+});
+
+router.post("/admin/lead-due-diligence-approvals/:id/approve", tenantMiddleware, requireDirector, async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const approval = await decideLeadDueDiligenceApproval(req.tenantDb!, {
+      approvalId: req.params.id as string,
+      decision: "approve",
+      userId: req.user!.id,
+    });
+    await req.commitTransaction!();
+    return res.json({ approval });
+  } catch (err) {
+    return next(err);
+  }
+});
+
+router.post("/admin/lead-due-diligence-approvals/:id/reject", tenantMiddleware, requireDirector, async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const approval = await decideLeadDueDiligenceApproval(req.tenantDb!, {
+      approvalId: req.params.id as string,
+      decision: "reject",
+      reason: typeof req.body?.reason === "string" ? req.body.reason : null,
+      userId: req.user!.id,
+    });
+    await req.commitTransaction!();
+    return res.json({ approval });
+  } catch (err) {
+    return next(err);
+  }
+});
+
+router.get("/admin/notification-recipient-groups/:key", requireDirector, async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const result = await getNotificationRecipientGroup(req.tenantDb ?? (drizzle(pool) as any), req.params.key as string);
+    return res.json(result);
+  } catch (err) {
+    return next(err);
+  }
+});
+
+router.put("/admin/notification-recipient-groups/:key/assignments", requireAdmin, async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const userIds = Array.isArray(req.body?.userIds)
+      ? req.body.userIds.filter((value: unknown): value is string => typeof value === "string")
+      : [];
+    const result = await updateNotificationRecipientAssignments(
+      req.tenantDb ?? (drizzle(pool) as any),
+      req.params.key as string,
+      userIds
+    );
+    return res.json(result);
   } catch (err) {
     return next(err);
   }

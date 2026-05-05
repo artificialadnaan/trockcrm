@@ -25,6 +25,8 @@ import { PropertyListPage } from "@/pages/properties/property-list-page";
 import { PropertyDetailPage } from "@/pages/properties/property-detail-page";
 import { MergeQueuePage } from "@/pages/admin/merge-queue-page";
 import { DirectoryMergeQueuePage } from "@/pages/admin/directory-merge-queue-page";
+import { LeadDueDiligenceQueuePage } from "@/pages/admin/lead-due-diligence-queue-page";
+import { NotificationRecipientsPage } from "@/pages/admin/notification-recipients-page";
 import { EmailInboxPage } from "@/pages/email/email-inbox-page";
 import { TaskListPage } from "@/pages/tasks/task-list-page";
 import { FilesPage } from "@/pages/files/files-page";
@@ -300,6 +302,22 @@ export function App() {
                 element={(
                   <RequireRole allowedRoles={["admin", "director"]}>
                     <DirectoryMergeQueuePage />
+                  </RequireRole>
+                )}
+              />
+              <Route
+                path="/admin/lead-due-diligence-queue"
+                element={(
+                  <RequireRole allowedRoles={["admin", "director"]}>
+                    <LeadDueDiligenceQueuePage />
+                  </RequireRole>
+                )}
+              />
+              <Route
+                path="/admin/notification-recipients"
+                element={(
+                  <RequireRole allowedRoles={["admin"]}>
+                    <NotificationRecipientsPage />
                   </RequireRole>
                 )}
               />

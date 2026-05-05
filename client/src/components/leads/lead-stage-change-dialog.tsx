@@ -17,6 +17,16 @@ import {
   type LeadStageGateResult,
 } from "@/hooks/use-leads";
 
+function formatLeadStageBlockReason(reason: string) {
+  if (reason === "LEAD_DD_PENDING") {
+    return "Awaiting Due Diligence approval. The lead will be eligible for qualification once the DD review is complete.";
+  }
+  if (reason === "LEAD_DD_REJECTED") {
+    return "Due Diligence rejected. This lead cannot be qualified. Contact a director or move the lead to disqualified.";
+  }
+  return reason;
+}
+
 export function LeadStageChangeDialog({
   lead,
   targetStageId,
@@ -104,7 +114,7 @@ export function LeadStageChangeDialog({
               <div className="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-700">
                 <div className="flex items-center gap-2 font-medium">
                   <AlertTriangle className="h-4 w-4" />
-                  {preflight.blockReason}
+                  {formatLeadStageBlockReason(preflight.blockReason)}
                 </div>
               </div>
             ) : null}

@@ -3,6 +3,7 @@ export * from "./auth.js";
 export * from "./enums.js";
 export * from "./events.js";
 export * from "./lead-validation.js";
+export * from "./lead-due-diligence.js";
 export * from "./sales-workflow.js";
 export * from "./lead-scoping.js";
 export * from "./project-types.js";
