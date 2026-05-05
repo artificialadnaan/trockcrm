@@ -31,6 +31,7 @@ import {
   parseCsvQueryParam,
   parsePhotoAuditEventTypes,
 } from "../files/audit-log-service.js";
+import { fieldUserAdminRouter } from "../field-users/routes.js";
 import { getAdminDataScrubOverview } from "./admin-reporting-service.js";
 import { getDirectorCommissionWorkspace } from "../dashboard/service.js";
 import { startCatalogSync } from "../procore/sync-service.js";
@@ -205,6 +206,8 @@ router.get("/admin/users/:id/local-auth-events", requireAdmin, async (req: Reque
     return next(err);
   }
 });
+
+router.use("/admin/field-users", fieldUserAdminRouter);
 
 router.post("/admin/users/:id/office-access", requireAdmin, async (req: Request, res: Response, next: NextFunction) => {
   try {

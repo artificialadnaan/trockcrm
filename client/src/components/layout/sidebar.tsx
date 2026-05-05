@@ -101,6 +101,7 @@ const adminGroups: AdminGroup[] = [
     items: [
       { to: "/admin/offices", icon: Building2, label: "Offices", roles: ["admin"] },
       { to: "/admin/users", icon: Users, label: "Users", roles: ["admin"] },
+      { to: "/admin/field-users", icon: Users, label: "Field Users", roles: ["admin"] },
       { to: "/admin/pipeline", icon: Settings, label: "Pipeline Config", roles: ["admin"] },
       { to: "/admin/commissions", icon: DollarSign, label: "Global Commissions", roles: ["admin"] },
       { to: "/admin/procore", icon: Zap, label: "Procore Sync", roles: ["admin"] },

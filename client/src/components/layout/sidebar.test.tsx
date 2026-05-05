@@ -30,6 +30,10 @@ describe("Sidebar navigation metadata", () => {
     expect(source).toContain('{ to: "/admin/commissions", icon: DollarSign, label: "Global Commissions", roles: ["admin"] }');
   });
 
+  it("includes the admin field users page in system navigation", () => {
+    expect(source).toContain('{ to: "/admin/field-users", icon: Users, label: "Field Users", roles: ["admin"] }');
+  });
+
   it("does not key navigation entries by route alone when duplicate routes exist", () => {
     expect(source).toContain('{ to: "/deals", icon: Handshake, label: "Deals", roles: ["admin", "director", "rep"] }');
     expect(source).toContain('{ to: "/deals", icon: Kanban, label: "Pipeline", roles: ["admin", "director", "rep"] }');

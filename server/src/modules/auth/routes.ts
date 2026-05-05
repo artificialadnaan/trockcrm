@@ -30,6 +30,7 @@ import {
   changeLocalPassword,
   loginWithLocalPassword,
 } from "./local-auth-service.js";
+import { fieldUserAuthRouter } from "../field-users/routes.js";
 import { isAuthDemoBootstrapEnabled } from "../../config/feature-flags.js";
 
 const router = Router();
@@ -139,6 +140,8 @@ router.post("/local/login", authLimiter, async (req, res, next) => {
     next(err);
   }
 });
+
+router.use(fieldUserAuthRouter);
 
 // MS Entra SSO routes — will be added when Azure credentials are provided.
 // For MVP, the dev-mode user picker handles authentication.

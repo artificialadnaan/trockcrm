@@ -18,6 +18,7 @@ function getClient(): Resend | null {
 export interface SendEmailOptions {
   cc?: string | string[];
   bcc?: string | string[];
+  text?: string;
 }
 
 interface OverrideResult {
@@ -122,6 +123,7 @@ export async function sendSystemEmail(
       to: overridden.to,
       subject: overridden.subject,
       html: overridden.htmlBody,
+      ...(options.text ? { text: options.text } : {}),
       ...(overridden.cc.length ? { cc: overridden.cc } : {}),
       ...(overridden.bcc.length ? { bcc: overridden.bcc } : {}),
     });

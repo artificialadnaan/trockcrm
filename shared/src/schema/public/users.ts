@@ -17,6 +17,9 @@ export const users = pgTable("users", {
   id: uuid("id").primaryKey().defaultRandom(),
   email: varchar("email", { length: 255 }).unique().notNull(),
   displayName: varchar("display_name", { length: 255 }).notNull(),
+  firstName: varchar("first_name", { length: 255 }),
+  lastName: varchar("last_name", { length: 255 }),
+  phone: varchar("phone", { length: 30 }),
   azureAdId: varchar("azure_ad_id", { length: 255 }).unique(),
   avatarUrl: text("avatar_url"),
   role: userRoleEnum("role").notNull(),
@@ -26,6 +29,7 @@ export const users = pgTable("users", {
   isActive: boolean("is_active").default(true).notNull(),
   notificationPrefs: jsonb("notification_prefs").default({}).notNull(),
   reportsTo: uuid("reports_to"),
+  createdByUserId: uuid("created_by_user_id"),
   createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
   updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
 });
