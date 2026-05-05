@@ -379,8 +379,8 @@ export async function validateLeadStageGate(
   // runtime red" contradiction in the modal.
   const v2GateApplies =
     isLeadEditV2Enabled() &&
-    targetStage.slug === "qualified_lead" &&
-    currentStage.slug !== "qualified_lead";
+    targetStage.slug === "sales_validation_stage" &&
+    currentStage.slug !== "sales_validation_stage";
 
   let questionnaireGate: LeadQuestionGateMissing | null = null;
   if (v2GateApplies && lead.companyId) {
@@ -395,8 +395,7 @@ export async function validateLeadStageGate(
   // Block advancement past sales_validation while the linked company's
   // verification is still pending. Belt-and-suspenders for legacy leads
   // that got into sales_validation before PR1's verificationStatus gate
-  // existed; new leads are already blocked at the qualified_lead boundary
-  // by lead-level verificationStatus.
+  // existed.
   const advancingPastSalesValidation =
     currentStage.slug === "sales_validation_stage" &&
     (targetStage.displayOrder ?? 0) > (currentStage.displayOrder ?? 0);

@@ -1380,10 +1380,10 @@ export function createLeadService(
       };
 
       if (v2Enabled) {
-        const enteringQualifiedLead =
-          stage.slug === "qualified_lead" && currentStage.slug !== "qualified_lead";
+        const enteringSalesValidation =
+          stage.slug === "sales_validation_stage" && currentStage.slug !== "sales_validation_stage";
 
-        if (enteringQualifiedLead) {
+        if (enteringSalesValidation) {
           await assertLeadQuestionGateAllowed(tenantDb, {
             leadId: existing.id,
             companyId: existing.companyId,

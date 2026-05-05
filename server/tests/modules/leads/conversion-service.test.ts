@@ -1361,7 +1361,7 @@ describe("Lead Service", () => {
     });
   });
 
-  it("blocks entering Qualified Lead when universal questionnaire answers are incomplete", async () => {
+  it("blocks entering Sales Validation when universal questionnaire answers are incomplete", async () => {
     process.env.ENABLE_LEAD_EDIT_V2 = "true";
 
     const tenantDb = createFakeTenantDb({
@@ -1372,7 +1372,7 @@ describe("Lead Service", () => {
           propertyId: "property-1",
           primaryContactId: "contact-1",
           name: "Palm Villas repaint",
-          stageId: "lead-stage-1",
+          stageId: "lead-stage-qualified",
           assignedRepId: "rep-1",
           status: "open",
           source: "Referral",
@@ -1443,7 +1443,7 @@ describe("Lead Service", () => {
         tenantDb as never,
         "lead-1",
         {
-          stageId: "lead-stage-qualified",
+          stageId: "lead-stage-sales-validation",
           projectTypeId: "project-type-multifamily",
           leadQuestionAnswers: {
             bid_due_date: "2026-05-01",
@@ -1455,7 +1455,7 @@ describe("Lead Service", () => {
     ).rejects.toMatchObject({
       code: "LEAD_STAGE_REQUIREMENTS_UNMET",
       result: expect.objectContaining({
-        targetStage: expect.objectContaining({ slug: "qualified_lead" }),
+        targetStage: expect.objectContaining({ slug: "sales_validation_stage" }),
         missingRequirements: expect.objectContaining({
           projectTypeQuestionIds: expect.arrayContaining(["budget"]),
         }),
@@ -1463,7 +1463,7 @@ describe("Lead Service", () => {
     });
   });
 
-  it("ignores parent-gated child questions when the parent is unanswered or false during Qualified Lead gating", async () => {
+  it("ignores parent-gated child questions when the parent is unanswered or false during Sales Validation gating", async () => {
     process.env.ENABLE_LEAD_EDIT_V2 = "true";
 
     const buildTenantDb = (insuranceClaimValue?: boolean) =>
@@ -1475,7 +1475,7 @@ describe("Lead Service", () => {
             propertyId: "property-1",
             primaryContactId: "contact-1",
             name: "Palm Villas restoration",
-          stageId: "lead-stage-1",
+            stageId: "lead-stage-qualified",
             assignedRepId: "rep-1",
             status: "open",
             source: "Referral",
@@ -1593,7 +1593,7 @@ describe("Lead Service", () => {
         buildTenantDb(undefined) as never,
         "lead-1",
         {
-          stageId: "lead-stage-qualified",
+          stageId: "lead-stage-sales-validation",
           projectTypeId: "project-type-restoration",
           leadQuestionAnswers: {
             budget: 100000,
@@ -1606,7 +1606,7 @@ describe("Lead Service", () => {
     ).rejects.toMatchObject({
       code: "LEAD_STAGE_REQUIREMENTS_UNMET",
       result: expect.objectContaining({
-        targetStage: expect.objectContaining({ slug: "qualified_lead" }),
+        targetStage: expect.objectContaining({ slug: "sales_validation_stage" }),
         missingRequirements: expect.objectContaining({
           projectTypeQuestionIds: expect.arrayContaining(["insurance_claim"]),
         }),
@@ -1618,7 +1618,7 @@ describe("Lead Service", () => {
         buildTenantDb(false) as never,
         "lead-1",
         {
-          stageId: "lead-stage-qualified",
+          stageId: "lead-stage-sales-validation",
           projectTypeId: "project-type-restoration",
           leadQuestionAnswers: {
             budget: 100000,
@@ -1630,7 +1630,7 @@ describe("Lead Service", () => {
         "rep-1"
       )
     ).resolves.toMatchObject({
-      stageId: "lead-stage-qualified",
+      stageId: "lead-stage-sales-validation",
     });
 
     // The xactimate child is hidden when insurance_claim is false, so the

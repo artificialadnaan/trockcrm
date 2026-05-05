@@ -19,6 +19,15 @@ const qualifiedLeadStage = {
   isActivePipeline: true,
 };
 
+const salesValidationStage = {
+  id: "stage-sales-validation",
+  name: "Sales Validation",
+  slug: "sales_validation_stage",
+  displayOrder: 3,
+  isTerminal: false,
+  isActivePipeline: true,
+};
+
 const satisfiedQualifiedLead = {
   id: "lead-1",
   companyId: "company-1",
@@ -589,19 +598,12 @@ describe("DD approval gate", () => {
 });
 
 describe("Universal questionnaire gate", () => {
-  it("blocks qualified_lead when no scope accordion is satisfied", () => {
+  it("blocks sales_validation_stage when no scope accordion is satisfied", () => {
     const result = evaluateLeadStageGate({
       lead: satisfiedQualifiedLead,
       qualification: { qualificationData: {}, scopingSubsetData: {} },
-      currentStage: {
-        id: "stage-new",
-        name: "New Lead",
-        slug: "new_lead",
-        displayOrder: 1,
-        isTerminal: false,
-        isActivePipeline: true,
-      },
-      targetStage: qualifiedLeadStage,
+      currentStage: qualifiedLeadStage,
+      targetStage: salesValidationStage,
       questionnaireGate: {
         qualificationFields: [],
         projectTypeQuestionIds: [],
@@ -614,19 +616,12 @@ describe("Universal questionnaire gate", () => {
     expect(result.missingRequirements.fields).toContain("leadQuestionnaire.scopeRequired");
   });
 
-  it("blocks qualified_lead with missing baseline or property questions", () => {
+  it("blocks sales_validation_stage with missing baseline or property questions", () => {
     const result = evaluateLeadStageGate({
       lead: satisfiedQualifiedLead,
       qualification: { qualificationData: {}, scopingSubsetData: {} },
-      currentStage: {
-        id: "stage-new",
-        name: "New Lead",
-        slug: "new_lead",
-        displayOrder: 1,
-        isTerminal: false,
-        isActivePipeline: true,
-      },
-      targetStage: qualifiedLeadStage,
+      currentStage: qualifiedLeadStage,
+      targetStage: salesValidationStage,
       questionnaireGate: {
         qualificationFields: [],
         projectTypeQuestionIds: ["budget", "building_type"],
@@ -639,7 +634,24 @@ describe("Universal questionnaire gate", () => {
     expect(result.missingRequirements.fields).toEqual(["question.budget", "question.building_type"]);
   });
 
-  it("allows qualified_lead when required questions and one scope group are satisfied", () => {
+  it("allows sales_validation_stage when required questions and one scope group are satisfied", () => {
+    const result = evaluateLeadStageGate({
+      lead: satisfiedQualifiedLead,
+      qualification: { qualificationData: {}, scopingSubsetData: {} },
+      currentStage: qualifiedLeadStage,
+      targetStage: salesValidationStage,
+      questionnaireGate: {
+        qualificationFields: [],
+        projectTypeQuestionIds: [],
+        missingScopeSelection: false,
+      },
+    });
+
+    expect(result.allowed).toBe(true);
+    expect(result.blockReason).toBeUndefined();
+  });
+
+  it("does not apply questionnaire failures to qualified_lead transitions", () => {
     const result = evaluateLeadStageGate({
       lead: satisfiedQualifiedLead,
       qualification: { qualificationData: {}, scopingSubsetData: {} },
@@ -652,15 +664,11 @@ describe("Universal questionnaire gate", () => {
         isActivePipeline: true,
       },
       targetStage: qualifiedLeadStage,
-      questionnaireGate: {
-        qualificationFields: [],
-        projectTypeQuestionIds: [],
-        missingScopeSelection: false,
-      },
+      dueDiligenceStatus: "approved",
     });
 
     expect(result.allowed).toBe(true);
-    expect(result.blockReason).toBeUndefined();
+    expect(result.missingRequirements.fields).not.toContain("leadQuestionnaire.scopeRequired");
   });
 
   it("keeps DD pending precedence over scope selection failures", () => {

@@ -2,6 +2,8 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { AppError } from "../../../src/middleware/error-handler.js";
 import { pool } from "../../../src/db.js";
 import { sendSystemEmailWithMetadata } from "../../../src/lib/resend-client.js";
+import { getStageBySlug } from "../../../src/modules/pipeline/service.js";
+import { transitionLeadStage } from "../../../src/modules/leads/service.js";
 import {
   notificationRecipientAssignments,
   notificationRecipientGroups,
@@ -30,6 +32,14 @@ vi.mock("../../../src/db.js", () => ({
 
 vi.mock("../../../src/lib/resend-client.js", () => ({
   sendSystemEmailWithMetadata: vi.fn(),
+}));
+
+vi.mock("../../../src/modules/pipeline/service.js", () => ({
+  getStageBySlug: vi.fn(),
+}));
+
+vi.mock("../../../src/modules/leads/service.js", () => ({
+  transitionLeadStage: vi.fn(),
 }));
 
 const NOW = new Date("2026-05-05T15:30:00.000Z");
@@ -125,6 +135,7 @@ function createTenantDb(options: {
   approvals?: Array<Record<string, unknown>>;
   recipients?: Array<Record<string, unknown>>;
   summary?: Record<string, unknown>;
+  lead?: Record<string, unknown>;
   insertError?: unknown;
   listRows?: Array<Record<string, unknown>>;
 } = {}) {
@@ -132,6 +143,7 @@ function createTenantDb(options: {
     approvals: options.approvals ? [...options.approvals] : [],
     recipients: options.recipients ? [...options.recipients] : [],
     summary: options.summary ?? makeLeadSummary(),
+    lead: options.lead ?? { id: "lead-1", stageId: "stage-new-lead", stage_id: "stage-new-lead" },
     leadUpdates: [] as Array<Record<string, unknown>>,
     approvalUpdates: [] as Array<Record<string, unknown>>,
   };
@@ -204,6 +216,7 @@ function createTenantDb(options: {
       const selection =
         fields && "email" in fields ? "recipients" :
         fields && "leadName" in fields ? "summary" :
+        fields && "stageId" in fields ? "leadStage" :
         "approval";
       let orderedByRequestedAtDesc = false;
       const chain: Record<string, unknown> = {};
@@ -213,6 +226,9 @@ function createTenantDb(options: {
       chain.where = vi.fn(() => {
         if (selection === "recipients") return Promise.resolve(state.recipients);
         chain.limit = vi.fn(async () => {
+          if (selection === "leadStage") {
+            return [state.lead];
+          }
           if (selection === "approval") {
             const approvals = orderedByRequestedAtDesc
               ? [...state.approvals].sort((a, b) => {
@@ -326,6 +342,7 @@ function makePoolClient(options: {
   schemas?: string[];
   approval?: Record<string, unknown> | null;
   summary?: Record<string, unknown> | null;
+  leadStageId?: string | null;
   updateRow?: Record<string, unknown>;
 } = {}) {
   const calls: Array<{ text: string; params?: unknown[] }> = [];
@@ -338,6 +355,9 @@ function makePoolClient(options: {
       }
       if (text.includes("SELECT a.*")) {
         return { rows: options.approval === null ? [] : [options.approval ?? makeApproval({ tenant_schema: "office_atlanta" })] };
+      }
+      if (text.includes('SELECT stage_id') && text.includes('FROM "office_atlanta".leads')) {
+        return { rows: options.leadStageId === null ? [] : [{ stage_id: options.leadStageId ?? "stage-new-lead" }] };
       }
       if (text.includes('FROM "office_atlanta".leads')) {
         return { rows: options.summary === null ? [] : [options.summary ?? makePublicSummary()] };
@@ -357,6 +377,19 @@ function makePoolClient(options: {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  vi.mocked(getStageBySlug).mockImplementation(async (slug: string) => {
+    if (slug === "new_lead") {
+      return { id: "stage-new-lead", slug: "new_lead", name: "New Lead", displayOrder: 1, isTerminal: false };
+    }
+    if (slug === "qualified_lead") {
+      return { id: "stage-qualified-lead", slug: "qualified_lead", name: "Qualified Lead", displayOrder: 2, isTerminal: false };
+    }
+    return null;
+  });
+  vi.mocked(transitionLeadStage).mockResolvedValue({
+    ok: true,
+    lead: { id: "lead-1", stageId: "stage-qualified-lead" },
+  } as never);
 });
 
 describe("buildLeadDueDiligenceEmail", () => {
@@ -678,6 +711,70 @@ describe("decideLeadDueDiligenceApproval", () => {
     });
   });
 
+  it("auto-transitions a new_lead approval to qualified_lead after admin approval", async () => {
+    const tenantDb = createTenantDb({
+      approvals: [makeApproval()],
+      lead: { id: "lead-1", stageId: "stage-new-lead" },
+    });
+
+    await decideLeadDueDiligenceApproval(tenantDb as never, {
+      approvalId: "approval-1",
+      decision: "approve",
+      userId: "director-1",
+      now: NOW,
+    });
+
+    expect(transitionLeadStage).toHaveBeenCalledWith(tenantDb, {
+      leadId: "lead-1",
+      targetStageId: "stage-qualified-lead",
+      userId: "director-1",
+      userRole: "admin",
+    });
+  });
+
+  it("does not auto-transition admin approvals when the lead has already moved out of new_lead", async () => {
+    const tenantDb = createTenantDb({
+      approvals: [makeApproval()],
+      lead: { id: "lead-1", stageId: "stage-sales-validation" },
+    });
+
+    await decideLeadDueDiligenceApproval(tenantDb as never, {
+      approvalId: "approval-1",
+      decision: "approve",
+      userId: "director-1",
+      now: NOW,
+    });
+
+    expect(transitionLeadStage).not.toHaveBeenCalled();
+  });
+
+  it("keeps admin approval successful when auto-transition is blocked", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    vi.mocked(transitionLeadStage).mockResolvedValueOnce({
+      ok: false,
+      code: "LEAD_DD_PENDING",
+      reason: "missing_requirements",
+      targetStageId: "stage-qualified-lead",
+      resolution: "detail",
+      missing: [],
+    } as never);
+    const tenantDb = createTenantDb({ approvals: [makeApproval()] });
+
+    const approval = await decideLeadDueDiligenceApproval(tenantDb as never, {
+      approvalId: "approval-1",
+      decision: "approve",
+      userId: "director-1",
+      now: NOW,
+    });
+
+    expect(approval.status).toBe("approved");
+    expect(warn).toHaveBeenCalledWith(
+      "[lead-dd] auto-transition failed for lead lead-1 after approval",
+      expect.objectContaining({ blockReason: "LEAD_DD_PENDING" })
+    );
+    warn.mockRestore();
+  });
+
   it("rejects a pending approval with a trimmed reason and updates the compat mirror", async () => {
     const tenantDb = createTenantDb({ approvals: [makeApproval()] });
 
@@ -734,6 +831,29 @@ describe("decideDueDiligenceByToken", () => {
     expect(client.calls.some((call) => call.text.includes("FOR UPDATE"))).toBe(true);
     expect(client.calls.some((call) => call.text.includes("decided_by = NULL"))).toBe(true);
     expect(client.calls.some((call) => call.text.includes("verification_status"))).toBe(true);
+  });
+
+  it("auto-transitions a new_lead approval to qualified_lead after token approval", async () => {
+    makePoolClient({
+      approval: makeApproval({
+        tenant_schema: "office_atlanta",
+        requested_by: "requester-1",
+        lead_id: "lead-1",
+      }),
+      leadStageId: "stage-new-lead",
+    });
+
+    await decideDueDiligenceByToken({
+      token: "a".repeat(64),
+      decision: "approve",
+    });
+
+    expect(transitionLeadStage).toHaveBeenCalledWith(expect.anything(), {
+      leadId: "lead-1",
+      targetStageId: "stage-qualified-lead",
+      userId: "requester-1",
+      userRole: "admin",
+    });
   });
 
   it("rejects a valid pending token with reason validation", async () => {
