@@ -3,6 +3,7 @@ import crypto from "crypto";
 type EnvInput = {
   CORS_ALLOWED_ORIGINS?: string | undefined;
   FRONTEND_URL?: string | undefined;
+  FIELD_APP_URL?: string | undefined;
   FIELD_FRONTEND_URL?: string | undefined;
   RAILWAY_SERVICE_FIELD_FRONTEND_URL?: string | undefined;
   RAILWAY_PUBLIC_DOMAIN?: string | undefined;
@@ -35,6 +36,7 @@ export function getAllowedCorsOrigins(env: EnvInput): string[] {
   const origins = [
     ...((env.CORS_ALLOWED_ORIGINS ?? "").split(",").map(normalizeOrigin)),
     normalizeOrigin(env.FRONTEND_URL),
+    normalizeOrigin(env.FIELD_APP_URL),
     normalizeOrigin(env.FIELD_FRONTEND_URL),
     normalizeOrigin(env.RAILWAY_PUBLIC_DOMAIN),
     normalizeOrigin(env.RAILWAY_STATIC_URL),
@@ -46,6 +48,15 @@ export function getAllowedCorsOrigins(env: EnvInput): string[] {
   ].filter((value, index, values): value is string => Boolean(value) && values.indexOf(value) === index);
 
   return origins;
+}
+
+export function getFieldAppUrl(env: EnvInput): string {
+  const configured = normalizeOrigin(env.FIELD_APP_URL);
+  if (configured) return configured;
+  if (env.NODE_ENV === "production") {
+    throw new Error("FIELD_APP_URL is required when NODE_ENV=production");
+  }
+  return "http://localhost:5174";
 }
 
 function normalizeHost(host: string | undefined): string {
@@ -73,6 +84,7 @@ export function assertSafeDevAuthConfig(env: EnvInput): void {
   ) {
     throw new Error("Unsafe auth configuration: DEV_MODE=true is not allowed when NODE_ENV=production");
   }
+  getFieldAppUrl(env);
 }
 
 export function isDevAuthProductionOverrideEnabled(env: EnvInput): boolean {

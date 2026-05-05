@@ -5,6 +5,7 @@ import { AppError } from "../../middleware/error-handler.js";
 import { sendSystemEmail } from "../../lib/resend-client.js";
 import { hashPassword, verifyPassword } from "../auth/local-auth-service.js";
 import { signJwt } from "../auth/service.js";
+import { getFieldAppUrl } from "../auth/http-config.js";
 
 const INVITE_TOKEN_BYTES = 32;
 const INVITE_TTL_DAYS = 7;
@@ -83,7 +84,7 @@ export function buildInviteEmail(input: {
 }
 
 function fieldInviteUrl(rawToken: string): string {
-  const base = process.env.FIELD_FRONTEND_URL ?? process.env.FRONTEND_URL ?? "http://localhost:5174";
+  const base = getFieldAppUrl(process.env);
   return `${base.replace(/\/+$/, "")}/accept-invite?token=${encodeURIComponent(rawToken)}`;
 }
 
