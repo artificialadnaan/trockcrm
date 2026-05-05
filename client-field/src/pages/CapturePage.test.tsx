@@ -5,7 +5,7 @@ import React from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { CapturePage } from "./CapturePage";
+import { CapturePage, selectPhotosForUpload, type UploadState } from "./CapturePage";
 
 const apiMock = vi.hoisted(() => vi.fn());
 const captureMocks = vi.hoisted(() => ({
@@ -81,6 +81,31 @@ function renderPage(path = "/capture") {
 }
 
 describe("CapturePage", () => {
+  it("selects upload candidates without re-uploading completed photos", () => {
+    const photos = [{ id: "pending-a" }, { id: "pending-b" }, { id: "complete-a" }, { id: "failed-a" }];
+    const uploadState: UploadState = {
+      "complete-a": { status: "complete" },
+      "failed-a": { status: "failed", error: "network" },
+    };
+
+    expect(selectPhotosForUpload(photos.slice(0, 3), {}, false).map((photo) => photo.id)).toEqual([
+      "pending-a",
+      "pending-b",
+      "complete-a",
+    ]);
+    expect(selectPhotosForUpload(photos, uploadState, false).map((photo) => photo.id)).toEqual([
+      "pending-a",
+      "pending-b",
+      "failed-a",
+    ]);
+    expect(selectPhotosForUpload(photos, uploadState, true).map((photo) => photo.id)).toEqual(["failed-a"]);
+    expect(selectPhotosForUpload(photos.slice(0, 3), {
+      "pending-a": { status: "complete" },
+      "pending-b": { status: "complete" },
+      "complete-a": { status: "complete" },
+    }, false)).toEqual([]);
+  });
+
   it("opens the project picker, searches, selects a project, and single-selects category", async () => {
     const node = renderPage();
 
@@ -174,4 +199,32 @@ describe("CapturePage", () => {
     Array.from(node.querySelectorAll("button")).find((button) => button.textContent === "Retry failed")?.click();
     await vi.waitFor(() => expect(captureMocks.uploadSessionPhoto).toHaveBeenCalledTimes(2));
   });
+
+  it("skips already-complete photos when the main Upload button is tapped again", async () => {
+    captureMocks.uploadSessionPhoto
+      .mockResolvedValueOnce({ photo: { id: "photo-a" } })
+      .mockRejectedValueOnce(new Error("network"))
+      .mockResolvedValueOnce({ photo: { id: "photo-c" } });
+    const node = renderPage("/capture?dealId=deal-1");
+    await vi.waitFor(() => expect(node.textContent).toContain("Roof Repair"));
+
+    const input = node.querySelector<HTMLInputElement>('input[type="file"]')!;
+    const fileA = new File(["a"], "a.jpg", { type: "image/jpeg" });
+    const fileB = new File(["b"], "b.jpg", { type: "image/jpeg" });
+    Object.defineProperty(input, "files", { value: [fileA, fileB], configurable: true });
+    input.dispatchEvent(new Event("change", { bubbles: true }));
+    await vi.waitFor(() => expect(node.textContent).toContain("2 photos in this session"));
+
+    Array.from(node.querySelectorAll("button")).find((button) => button.textContent === "Upload")?.click();
+    await vi.waitFor(() => expect(node.textContent).toContain("network"));
+
+    captureMocks.uploadSessionPhoto.mockResolvedValueOnce({ photo: { id: "photo-b" } });
+    Array.from(node.querySelectorAll("button")).find((button) => button.textContent === "Upload")?.click();
+
+    await vi.waitFor(() => expect(captureMocks.uploadSessionPhoto).toHaveBeenCalledTimes(3));
+    expect(captureMocks.uploadSessionPhoto).toHaveBeenNthCalledWith(1, expect.objectContaining({ file: fileA }));
+    expect(captureMocks.uploadSessionPhoto).toHaveBeenNthCalledWith(2, expect.objectContaining({ file: fileB }));
+    expect(captureMocks.uploadSessionPhoto).toHaveBeenNthCalledWith(3, expect.objectContaining({ file: fileB }));
+  });
+
 });

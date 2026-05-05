@@ -13,7 +13,17 @@ import {
 } from "@/lib/capture-upload";
 import { Button, TextInput } from "@/components/ui";
 
-type UploadState = Record<string, { status: "queued" | "uploading" | "complete" | "failed"; error?: string }>;
+export type UploadState = Record<string, { status: "queued" | "uploading" | "complete" | "failed"; error?: string }>;
+
+export function selectPhotosForUpload<T extends { id: string }>(
+  sessionPhotos: T[],
+  uploadState: UploadState,
+  onlyFailed = false
+): T[] {
+  return onlyFailed
+    ? sessionPhotos.filter((photo) => uploadState[photo.id]?.status === "failed")
+    : sessionPhotos.filter((photo) => uploadState[photo.id]?.status !== "complete");
+}
 
 export function CapturePage() {
   const navigate = useNavigate();
@@ -133,10 +143,11 @@ export function CapturePage() {
       setError("Choose a project before uploading.");
       return;
     }
-    const photos = onlyFailed
-      ? sessionPhotos.filter((photo) => uploadState[photo.id]?.status === "failed")
-      : sessionPhotos;
-    if (photos.length === 0) return;
+    const photos = selectPhotosForUpload(sessionPhotos, uploadState, onlyFailed);
+    if (photos.length === 0) {
+      if (!onlyFailed && sessionPhotos.length > 0) navigate(`/projects/${selectedDealId}`);
+      return;
+    }
     setUploading(true);
     setError(null);
     setUploadState((current) => ({
