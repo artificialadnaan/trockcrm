@@ -63,9 +63,9 @@ import {
 } from "@/pages/leads/lead-new-page.helpers";
 import {
   formatQuestionAnswerValue,
-  normalizeQuestionOptions,
   questionnaireRevealMatches,
 } from "./questionnaire-display";
+import { LeadQuestionnaireSections } from "./lead-questionnaire-sections";
 
 export interface LeadFormLead {
   id: string;
@@ -280,16 +280,6 @@ function isVisibleQuestionNode(
 
   visibleCache.set(nodeId, visible);
   return visible;
-}
-
-function getQuestionInputType(node: LeadQuestionnaireSnapshot["allNodes"][number]) {
-  if (node.inputType === "textarea") return "textarea";
-  if (node.inputType === "boolean") return "boolean";
-  if (node.inputType === "date") return "date";
-  if (node.inputType === "multiselect") return "multiselect";
-  if (node.inputType === "currency" || node.inputType === "number") return "number";
-  if (Array.isArray(node.options) && node.options.length > 0) return "select";
-  return "text";
 }
 
 function isAnsweredQuestionValue(value: LeadAnswerValue | undefined) {
@@ -750,6 +740,10 @@ function EditableLeadForm({
     () => questionnaireTemplateNodes.filter((node) => node.nodeType === "question"),
     [questionnaireTemplateNodes]
   );
+  const v2RenderedQuestionNodes = useMemo(
+    () => v2QuestionNodes.filter((node) => !["bid_due_date", "number_of_bidders", "poc"].includes(node.key)),
+    [v2QuestionNodes]
+  );
   const numberOfBiddersNode = useMemo(
     () => v2QuestionNodes.find((node) => node.key === "number_of_bidders") ?? null,
     [v2QuestionNodes]
@@ -761,13 +755,12 @@ function EditableLeadForm({
   const v2VisibleQuestionNodes = useMemo(() => {
     const visibleCache = new Map<string, boolean>();
 
-    return v2QuestionNodes
-      .filter((node) => !["bid_due_date", "number_of_bidders", "poc"].includes(node.key))
+    return v2RenderedQuestionNodes
       .filter((node) =>
         isVisibleQuestionNode(node.id, v2NodeById, formData.projectTypeQuestionAnswers, visibleCache)
       )
       .sort((left, right) => left.displayOrder - right.displayOrder);
-  }, [formData.projectTypeQuestionAnswers, v2NodeById, v2QuestionNodes]);
+  }, [formData.projectTypeQuestionAnswers, v2NodeById, v2RenderedQuestionNodes]);
   const useV2Questionnaire = isCreate && questionnaireTemplateNodes.length > 0;
   const createRequirementErrors = useMemo(() => {
     if (!isCreate) return new Map<string, string>();
@@ -991,13 +984,15 @@ function EditableLeadForm({
     clearCreateGateMissingKeys([`leadQuestionAnswers.${questionId}`]);
   };
 
-  const handleMultiselectQuestionChange = (questionId: string, optionValue: string, checked: boolean) => {
-    const currentValue = formData.projectTypeQuestionAnswers[questionId];
-    const currentValues = Array.isArray(currentValue) ? currentValue : [];
-    const nextValues = checked
-      ? Array.from(new Set([...currentValues, optionValue]))
-      : currentValues.filter((value) => value !== optionValue);
-    handleQuestionAnswerChange(questionId, "multiselect", nextValues);
+  const handleV2QuestionAnswerChange = (questionKey: string, value: LeadAnswerValue) => {
+    setFormData((current) => ({
+      ...current,
+      projectTypeQuestionAnswers: {
+        ...current.projectTypeQuestionAnswers,
+        [questionKey]: value,
+      },
+    }));
+    clearCreateGateMissingKeys([`leadQuestionAnswers.${questionKey}`]);
   };
 
   const handleSubmit = async (event: React.FormEvent) => {
@@ -1806,113 +1801,13 @@ function EditableLeadForm({
         </CardHeader>
         <CardContent className="space-y-4">
           {useV2Questionnaire
-            ? v2VisibleQuestionNodes.map((node) => {
-                const currentValue = formData.projectTypeQuestionAnswers[node.key];
-                const inputType = getQuestionInputType(node);
-                const options = normalizeQuestionOptions(node.options);
-
-                return (
-                  <div key={node.id} className="space-y-2">
-                    <QuestionLabel htmlFor={node.key} required={node.isRequired}>
-                      {node.label}
-                    </QuestionLabel>
-                    {node.prompt ? <p className="text-sm text-muted-foreground">{node.prompt}</p> : null}
-                    {inputType === "textarea" ? (
-                      <textarea
-                        id={node.key}
-                        className="flex min-h-[80px] w-full rounded-md border border-input bg-background px-3 py-2 text-sm ring-offset-background focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-                        value={typeof currentValue === "string" ? currentValue : ""}
-                        onChange={(event) => handleQuestionAnswerChange(node.key, inputType, event.target.value)}
-                      />
-                    ) : inputType === "boolean" ? (
-                      <Select
-                        value={typeof currentValue === "boolean" ? String(currentValue) : "__unanswered__"}
-                        onValueChange={(value) =>
-                          handleQuestionAnswerChange(
-                            node.key,
-                            inputType,
-                            !value || value === "__unanswered__" ? "" : value
-                          )
-                        }
-                      >
-                        <SelectTrigger id={node.key}>
-                          <SelectValue placeholder="Select" />
-                        </SelectTrigger>
-                        <SelectContent>
-                          <SelectItem value="__unanswered__">Unanswered</SelectItem>
-                          <SelectItem value="true">Yes</SelectItem>
-                          <SelectItem value="false">No</SelectItem>
-                        </SelectContent>
-                      </Select>
-                    ) : inputType === "select" ? (
-                      <Select
-                        items={[
-                          { value: "__unanswered__", label: "Select" },
-                          ...options.map((option) => ({ value: option.value, label: option.label })),
-                        ]}
-                        value={typeof currentValue === "string" && currentValue ? currentValue : "__unanswered__"}
-                        onValueChange={(value) =>
-                          handleQuestionAnswerChange(
-                            node.key,
-                            "text",
-                            !value || value === "__unanswered__" ? "" : value
-                          )
-                        }
-                      >
-                        <SelectTrigger id={node.key}>
-                          <SelectValue placeholder="Select" />
-                        </SelectTrigger>
-                        <SelectContent>
-                          <SelectItem value="__unanswered__">Select</SelectItem>
-                          {options.map((option) => (
-                            <SelectItem key={option.value} value={option.value}>
-                              {option.label}
-                            </SelectItem>
-                          ))}
-                        </SelectContent>
-                      </Select>
-                    ) : inputType === "multiselect" ? (
-                      <div className="grid gap-2 rounded-md border bg-background p-3 sm:grid-cols-2">
-                        {options.map((option) => {
-                          const selected = Array.isArray(currentValue) && currentValue.includes(option.value);
-                          return (
-                            <label key={option.value} className="flex items-center gap-2 text-sm">
-                              <input
-                                type="checkbox"
-                                className="h-4 w-4 rounded border-input"
-                                checked={selected}
-                                onChange={(event) =>
-                                  handleMultiselectQuestionChange(node.key, option.value, event.target.checked)
-                                }
-                              />
-                              <span>{option.label}</span>
-                            </label>
-                          );
-                        })}
-                      </div>
-                    ) : (
-                      <Input
-                        id={node.key}
-                        type={inputType === "number" ? "number" : inputType === "date" ? "date" : "text"}
-                        value={
-                          typeof currentValue === "number"
-                            ? String(currentValue)
-                            : typeof currentValue === "string"
-                              ? currentValue
-                              : ""
-                        }
-                        onChange={(event) =>
-                          handleQuestionAnswerChange(
-                            node.key,
-                            inputType === "date" ? "text" : inputType,
-                            event.target.value
-                          )
-                        }
-                      />
-                    )}
-                  </div>
-                );
-              })
+            ? (
+                <LeadQuestionnaireSections
+                  nodes={v2RenderedQuestionNodes}
+                  answers={formData.projectTypeQuestionAnswers}
+                  onAnswerChange={handleV2QuestionAnswerChange}
+                />
+              )
             : questionSet.questions.map((question) => {
             const currentValue = formData.projectTypeQuestionAnswers[question.id];
             return (
