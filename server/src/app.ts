@@ -50,14 +50,17 @@ import { CRM_ONLY_TENANT_ROUTE_MOUNTS } from "./route-access-policy.js";
 import {
   createCsrfToken,
   CSRF_COOKIE_NAME,
+  FIELD_CSRF_HEADER_NAME,
   CSRF_HEADER_NAME,
   getAllowedCorsOrigins,
   getCsrfCookieOptions,
   getRequestOrigin,
   isAllowedCookieAuthOrigin,
+  isFieldApiPath,
   isPublicAuthCsrfExempt,
   isUnsafeHttpMethod,
   isValidCsrfPair,
+  isValidFieldCsrfHeader,
 } from "./modules/auth/http-config.js";
 import { getSecurityOptions } from "./middleware/security.js";
 
@@ -126,6 +129,15 @@ export function createApp() {
       env: process.env,
     })) {
       console.info(`[CSRF] Exempted public auth endpoint ${req.method} ${req.path}`);
+      return next();
+    }
+
+    if (isFieldApiPath(req.path)) {
+      if (!isValidFieldCsrfHeader(req.get(FIELD_CSRF_HEADER_NAME))) {
+        res.status(403).json({ error: { message: "Missing required header for cross-origin request." } });
+        return;
+      }
+      console.info(`[CSRF] Accepted field cross-origin header ${req.method} ${req.path}`);
       return next();
     }
 

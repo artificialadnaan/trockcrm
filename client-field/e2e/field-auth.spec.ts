@@ -83,6 +83,10 @@ test("field invite acceptance, logout, login, and CRM route denial", async ({ pa
     await route.fulfill({ json: { projects: starred ? [{ ...projects[0], starred: true }] : [] } });
   });
   await page.route("**/api/field/projects/deal-1/star", async (route) => {
+    if (route.request().headers()["x-requested-with"] !== "XMLHttpRequest") {
+      await route.fulfill({ status: 403, json: { error: { message: "Missing required header for cross-origin request." } } });
+      return;
+    }
     starred = route.request().method() === "POST";
     await route.fulfill({ json: { starred } });
   });
@@ -149,5 +153,17 @@ test("field invite acceptance, logout, login, and CRM route denial", async ({ pa
   expect(filesDenied).toEqual({
     status: 403,
     body: { error: { message: "CRM access required" } },
+  });
+
+  const fieldPostWithoutHeader = await page.evaluate(async () => {
+    const response = await fetch("http://mock-api.test/api/field/projects/deal-1/star", {
+      method: "POST",
+      credentials: "include",
+    });
+    return { status: response.status, body: await response.json() };
+  });
+  expect(fieldPostWithoutHeader).toEqual({
+    status: 403,
+    body: { error: { message: "Missing required header for cross-origin request." } },
   });
 });
