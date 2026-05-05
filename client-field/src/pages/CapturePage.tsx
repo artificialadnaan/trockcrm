@@ -32,7 +32,7 @@ export function CapturePage() {
   const [uploading, setUploading] = useState(false);
   const [uploadState, setUploadState] = useState<UploadState>({});
   const [error, setError] = useState<string | null>(null);
-  const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const galleryInputRef = useRef<HTMLInputElement | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -170,13 +170,14 @@ export function CapturePage() {
         <button type="button" aria-label={selectedProject ? "Change project" : "Choose project"} className="min-h-11 min-w-0 flex-1 rounded-full bg-white/15 px-4 text-left font-bold backdrop-blur" onClick={() => setPickerOpen(true)}>
           {selectedProject ? selectedProject.name : "Choose project"}
         </button>
-        <button type="button" aria-label="Pick from gallery" className="flex min-h-11 min-w-11 items-center justify-center rounded-full bg-white/15" onClick={() => fileInputRef.current?.click()}>
+        <button type="button" aria-label="Pick from gallery" className="flex min-h-11 items-center justify-center gap-2 rounded-full bg-white/15 px-3 font-bold" onClick={() => galleryInputRef.current?.click()}>
           <ImagePlus className="h-5 w-5" />
+          <span className="text-sm">Gallery</span>
         </button>
         <button type="button" aria-label="Close capture" className="flex min-h-11 min-w-11 items-center justify-center rounded-full bg-white/15" onClick={() => navigate(selectedDealId ? `/projects/${selectedDealId}` : "/projects")}>
           <X className="h-5 w-5" />
         </button>
-        <input ref={fileInputRef} type="file" accept="image/*" multiple capture="environment" className="hidden" onChange={(event) => event.target.files && void addFiles(event.target.files)} />
+        <input ref={galleryInputRef} aria-label="Gallery photo picker" type="file" accept="image/*" multiple className="hidden" onChange={(event) => event.target.files && void addFiles(event.target.files)} />
       </div>
 
       <div className="flex min-h-[calc(100vh-96px)] items-center justify-center">
@@ -184,7 +185,7 @@ export function CapturePage() {
           <div className="mx-5 rounded-md bg-white p-5 text-slate-950">
             <h1 className="text-xl font-black">Camera access is blocked</h1>
             <p className="mt-2 text-sm font-semibold text-slate-600">{cameraError}</p>
-            <Button className="mt-4 w-full" onClick={() => fileInputRef.current?.click()}>Use gallery instead</Button>
+            <Button className="mt-4 w-full" onClick={() => galleryInputRef.current?.click()}>Use gallery instead</Button>
           </div>
         ) : (
           <video ref={videoRef} className="h-full min-h-[calc(100vh-96px)] w-full object-cover" playsInline muted aria-label="Camera preview" />
