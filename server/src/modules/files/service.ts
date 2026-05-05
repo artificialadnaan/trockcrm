@@ -1,6 +1,6 @@
 import { eq, and, desc, asc, ilike, sql, or, arrayContains, type SQL } from "drizzle-orm";
 import type { NodePgDatabase } from "drizzle-orm/node-postgres";
-import { companies, deals, files, leads, pipelineStageConfig } from "@trock-crm/shared/schema";
+import { companies, deals, files, leads, pipelineStageConfig, users } from "@trock-crm/shared/schema";
 import type * as schema from "@trock-crm/shared/schema";
 import type { FileCategory } from "@trock-crm/shared/types";
 import { AppError } from "../../middleware/error-handler.js";
@@ -22,6 +22,7 @@ import {
   DEAL_FOLDER_TEMPLATE,
 } from "./file-constants.js";
 import { resolvePhotoAddressMetadata } from "./photo-geocoding.js";
+import { buildDealPhotoTimelineConditions, type DealPhotoTimelineFilters } from "./photo-timeline-filters.js";
 import crypto from "node:crypto";
 
 type TenantDb = NodePgDatabase<typeof schema>;
@@ -129,6 +130,9 @@ export interface UpdateFileInput {
   category?: FileCategory;
   subcategory?: string | null;
   folderPath?: string | null;
+  photoCategory?: string | null;
+  deletedAt?: Date | null;
+  deletedByUserId?: string | null;
 }
 
 export interface UpdateFileAddressInput {
@@ -840,6 +844,19 @@ export async function getFileById(
   return file ?? null;
 }
 
+export async function getFileByIdIncludingDeleted(
+  tenantDb: TenantDb,
+  fileId: string
+): Promise<typeof files.$inferSelect | null> {
+  const [file] = await tenantDb
+    .select()
+    .from(files)
+    .where(eq(files.id, fileId))
+    .limit(1);
+
+  return file ?? null;
+}
+
 /**
  * Get a presigned download URL for a file.
  */
@@ -868,7 +885,9 @@ export async function updateFile(
   fileId: string,
   input: UpdateFileInput
 ): Promise<typeof files.$inferSelect> {
-  const existing = await getFileById(tenantDb, fileId);
+  const existing = input.deletedAt === null
+    ? await getFileByIdIncludingDeleted(tenantDb, fileId)
+    : await getFileById(tenantDb, fileId);
   if (!existing) throw new AppError(404, "File not found");
 
   const updates: Record<string, unknown> = {};
@@ -879,6 +898,12 @@ export async function updateFile(
   if (input.category !== undefined) updates.category = input.category;
   if (input.subcategory !== undefined) updates.subcategory = input.subcategory;
   if (input.folderPath !== undefined) updates.folderPath = input.folderPath;
+  if (input.photoCategory !== undefined) updates.photoCategory = input.photoCategory;
+  if (input.deletedAt !== undefined) {
+    updates.deletedAt = input.deletedAt;
+    updates.isActive = input.deletedAt == null;
+  }
+  if (input.deletedByUserId !== undefined) updates.deletedByUserId = input.deletedByUserId;
 
   if (Object.keys(updates).length === 0) return existing;
 
@@ -927,11 +952,12 @@ export async function updateFileAddress(
 export async function deleteFile(
   tenantDb: TenantDb,
   fileId: string,
-  _userRole: string
+  _userRole: string,
+  userId?: string
 ): Promise<typeof files.$inferSelect> {
   const result = await tenantDb
     .update(files)
-    .set({ isActive: false })
+    .set({ isActive: false, deletedAt: new Date(), deletedByUserId: userId ?? null })
     .where(eq(files.id, fileId))
     .returning();
 
@@ -1077,26 +1103,69 @@ export async function getDealPhotoTimeline(
   tenantDb: TenantDb,
   dealId: string,
   page: number = 1,
-  limit: number = 50
+  limit: number = 50,
+  filters: DealPhotoTimelineFilters = {}
 ): Promise<{
-  photos: Array<typeof files.$inferSelect>;
+  photos: Array<typeof files.$inferSelect & { uploaderName: string; uploaderAvatarUrl: string | null }>;
   pagination: { page: number; limit: number; total: number; totalPages: number };
 }> {
   const offset = (page - 1) * limit;
-
-  // Fix 6: Only show latest versions — exclude photos that have a newer version
-  const conditions = and(
-    await buildDealFileScopeCondition(tenantDb, dealId),
-    eq(files.category, "photo"),
-    eq(files.isActive, true),
-    sql`NOT EXISTS (SELECT 1 FROM files f2 WHERE f2.parent_file_id = files.id AND f2.is_active = true)`
-  );
+  const conditions = await buildDealPhotoTimelineConditions(tenantDb, dealId, filters);
 
   const [countResult, photoRows] = await Promise.all([
     tenantDb.select({ count: sql<number>`count(*)` }).from(files).where(conditions),
     tenantDb
-      .select()
+      .select({
+        id: files.id,
+        category: files.category,
+        subcategory: files.subcategory,
+        folderPath: files.folderPath,
+        tags: files.tags,
+        displayName: files.displayName,
+        systemFilename: files.systemFilename,
+        originalFilename: files.originalFilename,
+        mimeType: files.mimeType,
+        fileSizeBytes: files.fileSizeBytes,
+        fileExtension: files.fileExtension,
+        r2Key: files.r2Key,
+        r2Bucket: files.r2Bucket,
+        dealId: files.dealId,
+        leadId: files.leadId,
+        intakeSection: files.intakeSection,
+        intakeRequirementKey: files.intakeRequirementKey,
+        intakeSource: files.intakeSource,
+        contactId: files.contactId,
+        procoreProjectId: files.procoreProjectId,
+        changeOrderId: files.changeOrderId,
+        externalUrl: files.externalUrl,
+        externalThumbnailUrl: files.externalThumbnailUrl,
+        companycamPhotoId: files.companycamPhotoId,
+        description: files.description,
+        notes: files.notes,
+        version: files.version,
+        parentFileId: files.parentFileId,
+        takenAt: files.takenAt,
+        geoLat: files.geoLat,
+        geoLng: files.geoLng,
+        latitude: files.latitude,
+        longitude: files.longitude,
+        address: files.address,
+        addressSource: files.addressSource,
+        geocodedAt: files.geocodedAt,
+        photoCategory: files.photoCategory,
+        deletedAt: files.deletedAt,
+        deletedByUserId: files.deletedByUserId,
+        procoreSyncStatus: files.procoreSyncStatus,
+        procorePhotoId: files.procorePhotoId,
+        uploadedBy: files.uploadedBy,
+        isActive: files.isActive,
+        createdAt: files.createdAt,
+        updatedAt: files.updatedAt,
+        uploaderName: sql<string>`COALESCE(${users.displayName}, 'Unknown')`.as("uploader_name"),
+        uploaderAvatarUrl: users.avatarUrl,
+      })
       .from(files)
+      .leftJoin(users, eq(users.id, files.uploadedBy))
       .where(conditions)
       .orderBy(desc(sql`COALESCE(${files.takenAt}, ${files.createdAt})`))
       .limit(limit)

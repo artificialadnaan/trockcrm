@@ -1,5 +1,5 @@
 import { useState, useCallback, useEffect } from "react";
-import { useParams, useNavigate, useSearchParams } from "react-router-dom";
+import { useParams, useNavigate, useSearchParams, useLocation } from "react-router-dom";
 import {
   ArrowLeft,
   Edit,
@@ -25,6 +25,7 @@ import { DealHistoryTab } from "@/components/deals/deal-history-tab";
 import { DealTimelineTab } from "@/components/deals/deal-timeline-tab";
 import { DealScopingWorkspace } from "@/components/deals/deal-scoping-workspace";
 import { DealFileTab } from "@/components/files/deal-file-tab";
+import { DealPhotosTab } from "./deal-photos-tab";
 import { DealTeamTab } from "./deal-team-tab";
 import { DealEstimatesTab } from "./deal-estimates-tab";
 import { DealPunchListTab } from "./deal-punch-list-tab";
@@ -43,6 +44,7 @@ import { useDealDetail, deleteDeal as apiDeleteDeal, type DealDetail } from "@/h
 import { useLeadDetail } from "@/hooks/use-leads";
 import { usePipelineStages } from "@/hooks/use-pipeline-config";
 import { useAuth } from "@/lib/auth";
+import { api } from "@/lib/api";
 import { formatCurrency, bestEstimate } from "@/lib/deal-utils";
 import {
   getCanonicalDealStageSlugs,
@@ -70,7 +72,7 @@ function bidBoardSyncTimeAgo(date: string | null | undefined) {
   return days === 1 ? "1 day ago" : `${days} days ago`;
 }
 
-type Tab = "overview" | "lead" | "scoping" | "files" | "email" | "activity" | "timeline" | "history" | "team" | "estimates" | "punch_list" | "closeout";
+type Tab = "overview" | "lead" | "scoping" | "files" | "photos" | "email" | "activity" | "timeline" | "history" | "team" | "estimates" | "punch_list" | "closeout";
 
 function isBidBoardManagedStage(
   stage: { slug: string; displayOrder: number },
@@ -97,6 +99,7 @@ function isBidBoardManagedStage(
 export function DealDetailPage() {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
+  const location = useLocation();
   const [searchParams, setSearchParams] = useSearchParams();
   const { user } = useAuth();
   const { deal, loading, error, refetch } = useDealDetail(id);
@@ -105,6 +108,7 @@ export function DealDetailPage() {
   const [stageChangeOpen, setStageChangeOpen] = useState(false);
   const [targetStageId, setTargetStageId] = useState<string | null>(null);
   const [teamCount, setTeamCount] = useState<number | null>(null);
+  const [photoCount, setPhotoCount] = useState<number | null>(null);
   const currentStage = stages.find((s) => s.id === deal?.stageId);
   const isDirectorOrAdmin = user?.role === "director" || user?.role === "admin";
   const bidBoardOwnership = deal?.bidBoardOwnership;
@@ -222,6 +226,7 @@ export function DealDetailPage() {
     { key: "lead", label: "Lead" },
     { key: "scoping", label: isOpportunityStage ? "Opportunity Scope" : "Scoping" },
     { key: "files", label: "Files" },
+    { key: "photos", label: photoCount != null ? `Photos (${photoCount})` : "Photos" },
     { key: "email", label: "Email" },
     { key: "activity", label: "Activity" },
     { key: "timeline", label: "Timeline" },
@@ -232,7 +237,7 @@ export function DealDetailPage() {
     ...(showCloseout ? [{ key: "closeout" as Tab, label: "Close-Out" }] : []),
   ];
   const availableTabs = tabs.map((tab) => tab.key);
-  const requestedTab = searchParams.get("tab");
+  const requestedTab = location.pathname.endsWith("/photos") ? "photos" : searchParams.get("tab");
   const requestedFocus = searchParams.get("focus");
 
   useEffect(() => {
@@ -260,6 +265,21 @@ export function DealDetailPage() {
     return () => window.cancelAnimationFrame(frame);
   }, [activeTab, requestedFocus]);
 
+  useEffect(() => {
+    if (!deal?.id) return;
+    let cancelled = false;
+    api<{ pagination: { total: number } }>(`/files/deal/${deal.id}/photos?page=1&limit=1`)
+      .then((result) => {
+        if (!cancelled) setPhotoCount(result.pagination.total);
+      })
+      .catch(() => {
+        if (!cancelled) setPhotoCount(null);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [deal?.id]);
+
   if (loading) {
     return (
       <div className="space-y-4">
@@ -281,6 +301,14 @@ export function DealDetailPage() {
   }
   const handleTabSelect = (tab: Tab) => {
     setActiveTab(tab);
+    if (tab === "photos") {
+      navigate(`/deals/${deal.id}/photos`);
+      return;
+    }
+    if (location.pathname.endsWith("/photos")) {
+      navigate(`/deals/${deal.id}?tab=${tab}`);
+      return;
+    }
     const nextParams = new URLSearchParams(searchParams);
     nextParams.set("tab", tab);
     nextParams.delete("focus");
@@ -518,6 +546,7 @@ export function DealDetailPage() {
           <DealScopingWorkspace deal={deal} onDealUpdated={refetch} />
         ))}
       {activeTab === "files" && <DealFileTab dealId={deal.id} />}
+      {activeTab === "photos" && <DealPhotosTab dealId={deal.id} onCountChange={setPhotoCount} />}
       {activeTab === "email" && <DealEmailTab dealId={deal.id} />}
       {activeTab === "activity" && <DealActivityPanel dealId={deal.id} />}
       {activeTab === "timeline" && (

@@ -12,6 +12,7 @@ import {
   uploadNewVersion,
   getFiles,
   getFileById,
+  getFileByIdIncludingDeleted,
   getFileDownloadUrl,
   updateFile,
   updateFileAddress,
@@ -423,8 +424,20 @@ router.get("/deal/:dealId/photos", async (req, res, next) => {
 
     const page = req.query.page ? parseInt(req.query.page as string, 10) : 1;
     const limit = req.query.limit ? parseInt(req.query.limit as string, 10) : 50;
+    const categories = typeof req.query.category === "string" && req.query.category.length > 0
+      ? req.query.category.split(",")
+      : undefined;
+    const uploaderIds = typeof req.query.uploader === "string" && req.query.uploader.length > 0
+      ? req.query.uploader.split(",")
+      : undefined;
 
-    const result = await getDealPhotoTimeline(req.tenantDb!, req.params.dealId, page, limit);
+    const result = await getDealPhotoTimeline(req.tenantDb!, req.params.dealId, page, limit, {
+      categories,
+      uploaderIds,
+      from: req.query.from as string | undefined,
+      to: req.query.to as string | undefined,
+      includeDeleted: req.query.deleted === "1" || req.query.deleted === "true",
+    });
     await req.commitTransaction!();
     res.json(result);
   } catch (err) {
@@ -575,7 +588,10 @@ router.get("/:id/versions", async (req, res, next) => {
 // PATCH /api/files/:id — update file metadata
 router.patch("/:id", async (req, res, next) => {
   try {
-    const existing = await getFileById(req.tenantDb!, req.params.id);
+    const isRestore = req.body.deletedAt === null || req.body.deleted_at === null;
+    const existing = isRestore
+      ? await getFileByIdIncludingDeleted(req.tenantDb!, req.params.id)
+      : await getFileById(req.tenantDb!, req.params.id);
     if (!existing) throw new AppError(404, "File not found");
 
     // RBAC: deal-scoped files require deal access check
@@ -590,16 +606,28 @@ router.patch("/:id", async (req, res, next) => {
       throw new AppError(403, "You can only modify files you uploaded");
     }
 
-    const { displayName, description, notes, tags, category, subcategory, folderPath } = req.body;
+    const { displayName, description, notes, tags, category, subcategory, folderPath, photoCategory } = req.body;
+    const photoCategoryValues = ["before", "after", "progress", "site_visit", "damage", "safety", "delivery", "other"];
+    const categoryTargetsPhotoCategory =
+      existing.category === "photo" && (category === null || (typeof category === "string" && photoCategoryValues.includes(category)));
+    const resolvedPhotoCategory =
+      photoCategory !== undefined
+        ? photoCategory
+        : categoryTargetsPhotoCategory
+          ? category
+          : undefined;
 
     const file = await updateFile(req.tenantDb!, req.params.id, {
       displayName,
       description,
       notes,
       tags,
-      category,
+      category: resolvedPhotoCategory === undefined ? category : undefined,
       subcategory,
       folderPath,
+      photoCategory: resolvedPhotoCategory,
+      deletedAt: isRestore ? null : undefined,
+      deletedByUserId: isRestore ? null : undefined,
     });
     await req.commitTransaction!();
     res.json({ file });
@@ -637,7 +665,7 @@ router.delete("/:id", async (req, res, next) => {
       throw new AppError(403, "You can only delete files you uploaded");
     }
 
-    await deleteFile(req.tenantDb!, req.params.id, req.user!.role);
+    await deleteFile(req.tenantDb!, req.params.id, req.user!.role, req.user!.id);
     await req.commitTransaction!();
     res.json({ success: true });
   } catch (err) {
