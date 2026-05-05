@@ -476,7 +476,6 @@ export async function createLead(input: {
 type LeadUpdatePayload = Partial<
   Pick<
     LeadRecord,
-    | "stageId"
     | "assignedRepId"
     | "salesRepId"
     | "primaryContactId"
@@ -558,6 +557,7 @@ export type LeadTransitionResult =
   | {
       ok: false;
       reason: "missing_requirements";
+      code?: string;
       targetStageId: string;
       resolution: "inline";
       missing: LeadTransitionMissingRequirement[];
@@ -789,10 +789,6 @@ export function useLeadStagePage(
   ]);
 
   return { data, loading, error };
-}
-
-export async function updateLeadStage(leadId: string, stageId: string) {
-  return api(`/leads/${leadId}`, { method: "PATCH", json: { stageId } });
 }
 
 export async function preflightLeadStageCheck(leadId: string, targetStageId: string) {

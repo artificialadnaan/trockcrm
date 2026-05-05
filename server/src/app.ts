@@ -19,6 +19,7 @@ import { dealRoutes } from "./modules/deals/routes.js";
 import { pipelineRoutes } from "./modules/pipeline/routes.js";
 import { contactRoutes } from "./modules/contacts/routes.js";
 import { leadRoutes } from "./modules/leads/routes.js";
+import { leadDueDiligencePublicRoutes } from "./modules/leads/public-due-diligence-routes.js";
 import { emailRoutes } from "./modules/email/routes.js";
 import { fileRoutes } from "./modules/files/routes.js";
 import { callRecordingRoutes } from "./modules/call-recordings/routes.js";
@@ -87,6 +88,16 @@ export function createApp() {
   app.use("/api/bid-board-sync", bidBoardSyncRoutes);
 
   app.use(cookieParser());
+
+  // Public tokenized DD decision page. Mounted before cookie-auth CSRF checks:
+  // the route has no auth boundary, uses per-IP rate limits, and POST decisions
+  // are protected by high-entropy tokens plus row-level locking.
+  app.use(
+    "/api/public/lead-due-diligence",
+    express.urlencoded({ extended: false }),
+    leadDueDiligencePublicRoutes
+  );
+
   app.use((req, res, next) => {
     const csrfCookieOptions = getCsrfCookieOptions(process.env);
     const existingCsrfToken =

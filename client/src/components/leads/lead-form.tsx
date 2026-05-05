@@ -52,8 +52,9 @@ import {
 import { usePipelineStages, useProjectTypes } from "@/hooks/use-pipeline-config";
 import { formatPropertyLabel, useProperties } from "@/hooks/use-properties";
 import { CATEGORY_LABELS } from "@/lib/contact-utils";
-import { api, isApiError } from "@/lib/api";
+import { isApiError } from "@/lib/api";
 import { useAuth } from "@/lib/auth";
+import { LEAD_BUDGET_STATUS_LABELS, LEAD_POC_ROLE_LABELS } from "@/lib/lead-display-labels";
 import { getValidationQuestionSetForProjectType } from "@/lib/validation-question-sets";
 import {
   getLeadCreationStages,
@@ -167,19 +168,6 @@ const LEAD_QUALIFICATION_FIELD_LABELS = new Map(
 const EDITABLE_QUALIFICATION_FIELDS = LEAD_QUALIFICATION_FIELDS.filter(
   (field) => field.id !== "existing_customer_status"
 );
-const LEAD_POC_ROLE_LABELS: Record<LeadPocRole, string> = {
-  property_manager: "Property Manager",
-  construction_manager: "Construction Manager",
-  director: "Director",
-  other: "Other",
-};
-const LEAD_BUDGET_STATUS_LABELS: Record<LeadBudgetStatus, string> = {
-  budgeted_q1: "Budgeted Q1",
-  budgeted_q2: "Budgeted Q2",
-  budgeted_q3: "Budgeted Q3",
-  budgeted_q4: "Budgeted Q4",
-  not_budgeted: "Not Budgeted",
-};
 
 function normalizeLeadSourceForForm(lead?: LeadFormLead, initialSource?: string) {
   const category = lead?.sourceCategory ?? null;
@@ -350,8 +338,6 @@ function SummaryLeadForm({
   const { user } = useAuth();
   const { assignees } = useTaskAssignees();
   const { salesReps } = useSalesReps();
-  const [isVerifying, setIsVerifying] = useState(false);
-  const [verifyError, setVerifyError] = useState<string | null>(null);
   const [assignmentSaving, setAssignmentSaving] = useState(false);
   const [assignmentError, setAssignmentError] = useState<string | null>(null);
   const propertyLabel =
@@ -366,8 +352,6 @@ function SummaryLeadForm({
       : lead.sourceCategory ?? lead.source ?? "--";
   const verificationStatus = lead.verificationStatus ?? "not_required";
   const verificationLabel = VERIFICATION_LABELS[verificationStatus];
-  const showAdminVerifyButton =
-    !converted && verificationStatus === "pending" && user?.role === "admin";
   const assignedRepId = lead.assignedRepId ?? lead.salesRepId ?? "";
   const assignedRepName =
     lead.assignedRepName ??
@@ -394,20 +378,6 @@ function SummaryLeadForm({
       setAssignmentError(err instanceof Error ? err.message : "Could not update sales rep.");
     } finally {
       setAssignmentSaving(false);
-    }
-  }
-
-  // TODO(PR2): Replace with email + tokenized approval flow.
-  async function handleManualVerify() {
-    setIsVerifying(true);
-    setVerifyError(null);
-    try {
-      await api(`/leads/${lead.id}/verify-manual`, { method: "POST" });
-      onSaved?.();
-    } catch (err) {
-      setVerifyError(isApiError(err) ? err.message : "Could not mark lead as verified.");
-    } finally {
-      setIsVerifying(false);
     }
   }
 
@@ -491,17 +461,7 @@ function SummaryLeadForm({
               View Company
             </Button>
           ) : null}
-          {showAdminVerifyButton ? (
-            // TODO(PR2): Replace with email + tokenized approval flow.
-            <Button variant="secondary" disabled={isVerifying} onClick={handleManualVerify}>
-              {isVerifying ? "Marking…" : "Mark as Verified"}
-            </Button>
-          ) : null}
         </div>
-
-        {verifyError ? (
-          <p className="text-xs text-red-600" role="alert">{verifyError}</p>
-        ) : null}
 
         <p className="text-xs text-muted-foreground">
           This lead surface is backed by the pre-RFP lead record and preserves its activity history through conversion.

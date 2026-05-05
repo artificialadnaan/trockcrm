@@ -8,8 +8,11 @@ import {
   contacts,
   deals,
   dealHistory,
+  leadDueDiligenceApprovals,
   leadStageHistory,
   leads,
+  notificationRecipientAssignments,
+  notificationRecipientGroups,
   properties,
   userOfficeAccess,
   users,
@@ -598,6 +601,9 @@ interface FakeTenantState {
   leadStageHistory: FakeLeadStageHistoryRow[];
   leadQuestionAnswers: FakeLeadQuestionAnswerRow[];
   leadQuestionAnswerHistory: FakeLeadQuestionAnswerHistoryRow[];
+  leadDueDiligenceApprovals: Array<Record<string, unknown>>;
+  notificationRecipientGroups: Array<Record<string, unknown>>;
+  notificationRecipientAssignments: Array<Record<string, unknown>>;
   leadQuestionNodes: FakeLeadQuestionNodeRow[];
   projectTypes: FakeProjectTypeRow[];
 }
@@ -658,6 +664,9 @@ function createFakeTenantDb(initialState?: Partial<FakeTenantState>) {
     leadStageHistory: [],
     leadQuestionAnswers: [],
     leadQuestionAnswerHistory: [],
+    leadDueDiligenceApprovals: [],
+    notificationRecipientGroups: [],
+    notificationRecipientAssignments: [],
     leadQuestionNodes: [],
     projectTypes: [
       {
@@ -687,6 +696,9 @@ function createFakeTenantDb(initialState?: Partial<FakeTenantState>) {
     if (tableName === "project_type_config") return state.projectTypes;
     if (tableName === "lead_question_answers") return state.leadQuestionAnswers;
     if (tableName === "lead_question_answer_history") return state.leadQuestionAnswerHistory;
+    if (tableName === "lead_due_diligence_approvals") return state.leadDueDiligenceApprovals;
+    if (tableName === "notification_recipient_groups") return state.notificationRecipientGroups;
+    if (tableName === "notification_recipient_assignments") return state.notificationRecipientAssignments;
     if (tableName === "lead_question_nodes" || tableName === "project_type_question_nodes") {
       return state.leadQuestionNodes;
     }
@@ -700,6 +712,11 @@ function createFakeTenantDb(initialState?: Partial<FakeTenantState>) {
     if ("leadId" in candidate && "changedBy" in candidate && "toStageId" in candidate) return state.leadStageHistory;
     if ("leadId" in candidate && "questionId" in candidate && "valueJson" in candidate) return state.leadQuestionAnswers;
     if ("leadId" in candidate && "questionId" in candidate && "oldValueJson" in candidate) return state.leadQuestionAnswerHistory;
+    if (table === leadDueDiligenceApprovals || ("approvalToken" in candidate && "requestedBy" in candidate)) {
+      return state.leadDueDiligenceApprovals;
+    }
+    if (table === notificationRecipientGroups) return state.notificationRecipientGroups;
+    if (table === notificationRecipientAssignments) return state.notificationRecipientAssignments;
     if ("key" in candidate && "nodeType" in candidate) return state.leadQuestionNodes;
     if ("parentId" in candidate && "displayOrder" in candidate && "isActive" in candidate) return state.projectTypes;
     throw new Error("Unexpected table in fake tenant db");
@@ -827,7 +844,7 @@ function createFakeTenantDb(initialState?: Partial<FakeTenantState>) {
   return {
     state,
     execute() {
-      return Promise.resolve();
+      return Promise.resolve({ rows: [] });
     },
     select(selectedFields?: Record<string, unknown>) {
       return {
@@ -904,6 +921,9 @@ function createFakeTenantDb(initialState?: Partial<FakeTenantState>) {
     }
 
     const queryBuilder = {
+      innerJoin() {
+        return queryBuilder;
+      },
       where(condition: unknown) {
         rows = applyWhere(sourceRows, condition);
         return queryBuilder;

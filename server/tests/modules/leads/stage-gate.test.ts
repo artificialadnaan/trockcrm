@@ -10,6 +10,26 @@ const currentStage = {
   isActivePipeline: true,
 };
 
+const qualifiedLeadStage = {
+  id: "stage-qualified",
+  name: "Qualified Lead",
+  slug: "qualified_lead",
+  displayOrder: 2,
+  isTerminal: false,
+  isActivePipeline: true,
+};
+
+const satisfiedQualifiedLead = {
+  id: "lead-1",
+  companyId: "company-1",
+  propertyId: "property-1",
+  source: "Referral",
+  projectTypeId: "type-1",
+  qualificationPayload: {
+    existing_customer_status: "Existing",
+  },
+};
+
 describe("Lead Stage Gate Evaluation", () => {
   it("blocks advancement into Qualified Lead until the canonical intake fields are present", () => {
     const result = evaluateLeadStageGate({
@@ -420,6 +440,148 @@ describe("Lead Stage Gate Evaluation", () => {
 
     expect(result.allowed).toBe(true);
     expect(result.missingRequirements.fields).toEqual([]);
+    expect(result.blockReason).toBeUndefined();
+  });
+});
+
+describe("DD approval gate", () => {
+  it("blocks pending DD transitions to qualified_lead", () => {
+    const result = evaluateLeadStageGate({
+      lead: satisfiedQualifiedLead,
+      qualification: { qualificationData: {}, scopingSubsetData: {} },
+      currentStage: {
+        id: "stage-new",
+        name: "New Lead",
+        slug: "new_lead",
+        displayOrder: 1,
+        isTerminal: false,
+        isActivePipeline: true,
+      },
+      targetStage: qualifiedLeadStage,
+      dueDiligenceStatus: "pending",
+    });
+
+    expect(result.allowed).toBe(false);
+    expect(result.blockReason).toBe("LEAD_DD_PENDING");
+  });
+
+  it("blocks rejected DD transitions to qualified_lead", () => {
+    const result = evaluateLeadStageGate({
+      lead: satisfiedQualifiedLead,
+      qualification: { qualificationData: {}, scopingSubsetData: {} },
+      currentStage: {
+        id: "stage-new",
+        name: "New Lead",
+        slug: "new_lead",
+        displayOrder: 1,
+        isTerminal: false,
+        isActivePipeline: true,
+      },
+      targetStage: qualifiedLeadStage,
+      dueDiligenceStatus: "rejected",
+    });
+
+    expect(result.allowed).toBe(false);
+    expect(result.blockReason).toBe("LEAD_DD_REJECTED");
+  });
+
+  it("allows approved DD transitions to qualified_lead", () => {
+    const result = evaluateLeadStageGate({
+      lead: satisfiedQualifiedLead,
+      qualification: { qualificationData: {}, scopingSubsetData: {} },
+      currentStage: {
+        id: "stage-new",
+        name: "New Lead",
+        slug: "new_lead",
+        displayOrder: 1,
+        isTerminal: false,
+        isActivePipeline: true,
+      },
+      targetStage: qualifiedLeadStage,
+      dueDiligenceStatus: "approved",
+    });
+
+    expect(result.allowed).toBe(true);
+    expect(result.blockReason).toBeUndefined();
+  });
+
+  it("allows qualified_lead transitions when no DD row exists", () => {
+    const result = evaluateLeadStageGate({
+      lead: satisfiedQualifiedLead,
+      qualification: { qualificationData: {}, scopingSubsetData: {} },
+      currentStage: {
+        id: "stage-new",
+        name: "New Lead",
+        slug: "new_lead",
+        displayOrder: 1,
+        isTerminal: false,
+        isActivePipeline: true,
+      },
+      targetStage: qualifiedLeadStage,
+      dueDiligenceStatus: null,
+    });
+
+    expect(result.allowed).toBe(true);
+    expect(result.blockReason).toBeUndefined();
+  });
+
+  it("does not apply DD gate to non-qualified_lead targets", () => {
+    const result = evaluateLeadStageGate({
+      lead: satisfiedQualifiedLead,
+      qualification: { qualificationData: {}, scopingSubsetData: {} },
+      currentStage: qualifiedLeadStage,
+      targetStage: {
+        id: "stage-sales-validation",
+        name: "Sales Validation",
+        slug: "sales_validation_stage",
+        displayOrder: 3,
+        isTerminal: false,
+        isActivePipeline: true,
+      },
+      dueDiligenceStatus: "pending",
+    });
+
+    expect(result.blockReason).not.toBe("LEAD_DD_PENDING");
+    expect(result.blockReason).not.toBe("LEAD_DD_REJECTED");
+  });
+
+  it("allows rejected DD leads to move to disqualified", () => {
+    const result = evaluateLeadStageGate({
+      lead: satisfiedQualifiedLead,
+      qualification: { qualificationData: {}, scopingSubsetData: {} },
+      currentStage: qualifiedLeadStage,
+      targetStage: {
+        id: "stage-disqualified",
+        name: "Disqualified",
+        slug: "disqualified",
+        displayOrder: 99,
+        isTerminal: true,
+        isActivePipeline: false,
+      },
+      dueDiligenceStatus: "rejected",
+    });
+
+    expect(result.allowed).toBe(true);
+    expect(result.blockReason).toBeUndefined();
+  });
+
+  it("allows superseded DD transitions to qualified_lead", () => {
+    const result = evaluateLeadStageGate({
+      lead: satisfiedQualifiedLead,
+      qualification: { qualificationData: {}, scopingSubsetData: {} },
+      currentStage: {
+        id: "stage-new",
+        name: "New Lead",
+        slug: "new_lead",
+        displayOrder: 1,
+        isTerminal: false,
+        isActivePipeline: true,
+      },
+      targetStage: qualifiedLeadStage,
+      dueDiligenceStatus: "superseded",
+    });
+
+    expect(result.allowed).toBe(true);
     expect(result.blockReason).toBeUndefined();
   });
 });

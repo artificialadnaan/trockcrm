@@ -1,25 +1,44 @@
 import express from "express";
 import request from "supertest";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { AppError } from "../../../src/middleware/error-handler.js";
 
 const mocks = vi.hoisted(() => ({
+  userRole: "admin",
   authMiddleware: vi.fn((req: any, _res: any, next: any) => {
     req.user = {
       id: "user-1",
       email: "admin@trock.dev",
       displayName: "Admin User",
-      role: "admin",
+      role: mocks.userRole,
       officeId: "office-1",
       activeOfficeId: "office-1",
     };
     next();
   }),
-  requireDirector: vi.fn((_req: any, _res: any, next: any) => next()),
+  requireDirector: vi.fn((req: any, res: any, next: any) => {
+    if (req.user?.role === "admin" || req.user?.role === "director") {
+      next();
+      return;
+    }
+    res.status(403).json({ error: { message: "Director access required" } });
+  }),
+  requireAdmin: vi.fn((req: any, res: any, next: any) => {
+    if (req.user?.role === "admin") {
+      next();
+      return;
+    }
+    res.status(403).json({ error: { message: "Admin access required" } });
+  }),
   tenantMiddleware: vi.fn((req: any, _res: any, next: any) => {
     req.tenantDb = {};
     req.commitTransaction = vi.fn().mockResolvedValue(undefined);
     next();
   }),
+  decideLeadDueDiligenceApproval: vi.fn(),
+  getNotificationRecipientGroup: vi.fn(),
+  listLeadDueDiligenceApprovals: vi.fn(),
+  updateNotificationRecipientAssignments: vi.fn(),
   previewUserInvite: vi.fn().mockResolvedValue({
     recipientEmail: "rep@example.com",
     loginUrl: "https://frontend-production-bcab.up.railway.app/login",
@@ -46,7 +65,7 @@ vi.mock("../../../src/middleware/auth.js", () => ({
 }));
 
 vi.mock("../../../src/middleware/rbac.js", () => ({
-  requireAdmin: vi.fn((_req: any, _res: any, next: any) => next()),
+  requireAdmin: mocks.requireAdmin,
   requireDirector: mocks.requireDirector,
 }));
 
@@ -92,16 +111,87 @@ vi.mock("../../../src/modules/auth/local-auth-service.js", () => ({
   sendUserInvite: mocks.sendUserInvite,
 }));
 
+vi.mock("../../../src/modules/leads/due-diligence-service.js", () => ({
+  decideLeadDueDiligenceApproval: mocks.decideLeadDueDiligenceApproval,
+  getNotificationRecipientGroup: mocks.getNotificationRecipientGroup,
+  listLeadDueDiligenceApprovals: mocks.listLeadDueDiligenceApprovals,
+  updateNotificationRecipientAssignments: mocks.updateNotificationRecipientAssignments,
+}));
+
 import { adminRoutes } from "../../../src/modules/admin/routes.js";
+
+function createAdminApp() {
+  const app = express();
+  app.use(express.json());
+  app.use("/api", adminRoutes);
+  app.use((err: unknown, _req: express.Request, res: express.Response, _next: express.NextFunction) => {
+    if (err instanceof AppError) {
+      res.status(err.statusCode).json({ error: { message: err.message, code: err.code } });
+      return;
+    }
+    res.status(500).json({ error: { message: "Internal server error" } });
+  });
+  return app;
+}
+
+const pendingApproval = {
+  id: "approval-1",
+  lead_id: "lead-1",
+  status: "pending",
+  requested_at: "2026-05-01T12:00:00.000Z",
+  decided_at: null,
+  decision_reason: null,
+  detection_signal: { source: "company", type: "lead", detail: "No recent activity found", occurred_at: null },
+  email_sent_at: null,
+  email_message_id: null,
+  lead_name: "New Lead",
+  company_name: "Acme HOA",
+  company_verification_status: "pending",
+  primary_contact_name: "Taylor Contact",
+  primary_contact_email: "taylor@example.com",
+  primary_contact_role: "property_manager",
+  primary_contact_role_other_label: null,
+  property_address: "123 Main St",
+  property_city: "Dallas",
+  property_state: "TX",
+  property_zip: "75201",
+  unit_count: 120,
+  build_year: 1998,
+  project_type_name: "Exterior Renovation",
+  budget_status: "budgeted_q1",
+  bid_due_date: "2026-06-01",
+  requested_by_name: "Admin User",
+  decided_by_name: null,
+};
+
+const recipientGroupResult = {
+  group: {
+    id: "group-1",
+    key: "lead_due_diligence",
+    name: "Lead Due Diligence",
+    description: "Recipients who receive new-customer lead due diligence approval requests.",
+  },
+  recipients: [
+    { userId: "director-1", displayName: "Director User", email: "director@trock.dev" },
+  ],
+};
 
 describe("admin data scrub routes", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    mocks.userRole = "admin";
+    mocks.listLeadDueDiligenceApprovals.mockResolvedValue([pendingApproval]);
+    mocks.decideLeadDueDiligenceApproval.mockResolvedValue({
+      id: "approval-1",
+      status: "approved",
+      decidedBy: "user-1",
+    });
+    mocks.getNotificationRecipientGroup.mockResolvedValue(recipientGroupResult);
+    mocks.updateNotificationRecipientAssignments.mockResolvedValue(recipientGroupResult);
   });
 
   it("returns the admin data scrub overview on the admin route family", async () => {
-    const app = express();
-    app.use("/api", adminRoutes);
+    const app = createAdminApp();
 
     const response = await request(app).get("/api/admin/data-scrub/overview");
 
@@ -118,9 +208,7 @@ describe("admin data scrub routes", () => {
   });
 
   it("returns an invite preview without sending email", async () => {
-    const app = express();
-    app.use(express.json());
-    app.use("/api", adminRoutes);
+    const app = createAdminApp();
 
     const response = await request(app).post("/api/admin/users/user-22/preview-invite");
 
@@ -134,9 +222,7 @@ describe("admin data scrub routes", () => {
   });
 
   it("revokes local-auth access for a user", async () => {
-    const app = express();
-    app.use(express.json());
-    app.use("/api", adminRoutes);
+    const app = createAdminApp();
 
     const response = await request(app).post("/api/admin/users/user-22/revoke-invite");
 
@@ -149,8 +235,7 @@ describe("admin data scrub routes", () => {
   });
 
   it("returns local-auth history for the admin users page", async () => {
-    const app = express();
-    app.use("/api", adminRoutes);
+    const app = createAdminApp();
 
     const response = await request(app).get("/api/admin/users/user-22/local-auth-events");
 
@@ -158,5 +243,238 @@ describe("admin data scrub routes", () => {
     expect(response.body.events).toHaveLength(1);
     expect(response.body.events[0]?.eventType).toBe("invite_sent");
     expect(mocks.getUserLocalAuthEvents).toHaveBeenCalledWith("user-22");
+  });
+
+  it("returns pending Due Diligence approvals with full lead summary", async () => {
+    const app = createAdminApp();
+
+    const response = await request(app).get("/api/admin/lead-due-diligence-approvals?status=pending");
+
+    expect(response.status).toBe(200);
+    expect(mocks.listLeadDueDiligenceApprovals).toHaveBeenCalledWith(expect.anything(), "pending");
+    expect(response.body.approvals[0]).toMatchObject({
+      id: "approval-1",
+      status: "pending",
+      lead_name: "New Lead",
+      company_name: "Acme HOA",
+      primary_contact_name: "Taylor Contact",
+      property_address: "123 Main St",
+      requested_by_name: "Admin User",
+    });
+  });
+
+  it("filters Due Diligence approvals by approved status", async () => {
+    mocks.listLeadDueDiligenceApprovals.mockResolvedValueOnce([{ ...pendingApproval, status: "approved" }]);
+    const app = createAdminApp();
+
+    const response = await request(app).get("/api/admin/lead-due-diligence-approvals?status=approved");
+
+    expect(response.status).toBe(200);
+    expect(mocks.listLeadDueDiligenceApprovals).toHaveBeenCalledWith(expect.anything(), "approved");
+    expect(response.body.approvals).toEqual([expect.objectContaining({ status: "approved" })]);
+  });
+
+  it("filters Due Diligence approvals by rejected status", async () => {
+    mocks.listLeadDueDiligenceApprovals.mockResolvedValueOnce([{ ...pendingApproval, status: "rejected" }]);
+    const app = createAdminApp();
+
+    const response = await request(app).get("/api/admin/lead-due-diligence-approvals?status=rejected");
+
+    expect(response.status).toBe(200);
+    expect(mocks.listLeadDueDiligenceApprovals).toHaveBeenCalledWith(expect.anything(), "rejected");
+    expect(response.body.approvals).toEqual([expect.objectContaining({ status: "rejected" })]);
+  });
+
+  it("defaults Due Diligence approval list to pending", async () => {
+    const app = createAdminApp();
+
+    const response = await request(app).get("/api/admin/lead-due-diligence-approvals");
+
+    expect(response.status).toBe(200);
+    expect(mocks.listLeadDueDiligenceApprovals).toHaveBeenCalledWith(expect.anything(), "pending");
+  });
+
+  it("requires director access to list Due Diligence approvals", async () => {
+    mocks.userRole = "rep";
+    const app = createAdminApp();
+
+    const response = await request(app).get("/api/admin/lead-due-diligence-approvals");
+
+    expect(response.status).toBe(403);
+    expect(mocks.listLeadDueDiligenceApprovals).not.toHaveBeenCalled();
+  });
+
+  it("approves a pending Due Diligence approval through the decision service", async () => {
+    const app = createAdminApp();
+
+    const response = await request(app).post("/api/admin/lead-due-diligence-approvals/approval-1/approve");
+
+    expect(response.status).toBe(200);
+    expect(mocks.decideLeadDueDiligenceApproval).toHaveBeenCalledWith(expect.anything(), {
+      approvalId: "approval-1",
+      decision: "approve",
+      userId: "user-1",
+    });
+    expect(response.body.approval).toMatchObject({ status: "approved" });
+  });
+
+  it("rejects a pending Due Diligence approval with a valid reason", async () => {
+    mocks.decideLeadDueDiligenceApproval.mockResolvedValueOnce({
+      id: "approval-1",
+      status: "rejected",
+      decisionReason: "The company is not eligible.",
+    });
+    const app = createAdminApp();
+
+    const response = await request(app)
+      .post("/api/admin/lead-due-diligence-approvals/approval-1/reject")
+      .send({ reason: "The company is not eligible." });
+
+    expect(response.status).toBe(200);
+    expect(mocks.decideLeadDueDiligenceApproval).toHaveBeenCalledWith(expect.anything(), {
+      approvalId: "approval-1",
+      decision: "reject",
+      reason: "The company is not eligible.",
+      userId: "user-1",
+    });
+    expect(response.body.approval).toMatchObject({ status: "rejected" });
+  });
+
+  it("returns 400 when rejecting with a short reason", async () => {
+    mocks.decideLeadDueDiligenceApproval.mockRejectedValueOnce(
+      new AppError(400, "Rejection reason must be at least 10 characters")
+    );
+    const app = createAdminApp();
+
+    const response = await request(app)
+      .post("/api/admin/lead-due-diligence-approvals/approval-1/reject")
+      .send({ reason: "short" });
+
+    expect(response.status).toBe(400);
+    expect(response.body.error.message).toContain("at least 10 characters");
+  });
+
+  it("returns 409 when approving an already-decided approval", async () => {
+    mocks.decideLeadDueDiligenceApproval.mockRejectedValueOnce(
+      new AppError(409, "Due Diligence approval has already been decided")
+    );
+    const app = createAdminApp();
+
+    const response = await request(app).post("/api/admin/lead-due-diligence-approvals/approval-1/approve");
+
+    expect(response.status).toBe(409);
+    expect(response.body.error.message).toContain("already been decided");
+  });
+
+  it("requires director access for Due Diligence decisions", async () => {
+    mocks.userRole = "rep";
+    const app = createAdminApp();
+
+    const approveResponse = await request(app).post("/api/admin/lead-due-diligence-approvals/approval-1/approve");
+    const rejectResponse = await request(app)
+      .post("/api/admin/lead-due-diligence-approvals/approval-1/reject")
+      .send({ reason: "Not enough information." });
+
+    expect(approveResponse.status).toBe(403);
+    expect(rejectResponse.status).toBe(403);
+    expect(mocks.decideLeadDueDiligenceApproval).not.toHaveBeenCalled();
+  });
+
+  it("allows directors to read notification recipient groups", async () => {
+    mocks.userRole = "director";
+    const app = createAdminApp();
+
+    const response = await request(app).get("/api/admin/notification-recipient-groups/lead_due_diligence");
+
+    expect(response.status).toBe(200);
+    expect(mocks.getNotificationRecipientGroup).toHaveBeenCalledWith(expect.anything(), "lead_due_diligence");
+    expect(response.body).toMatchObject(recipientGroupResult);
+  });
+
+  it("allows admins to read notification recipient groups", async () => {
+    const app = createAdminApp();
+
+    const response = await request(app).get("/api/admin/notification-recipient-groups/lead_due_diligence");
+
+    expect(response.status).toBe(200);
+    expect(mocks.getNotificationRecipientGroup).toHaveBeenCalledWith(expect.anything(), "lead_due_diligence");
+  });
+
+  it("blocks reps from reading notification recipient groups", async () => {
+    mocks.userRole = "rep";
+    const app = createAdminApp();
+
+    const response = await request(app).get("/api/admin/notification-recipient-groups/lead_due_diligence");
+
+    expect(response.status).toBe(403);
+    expect(mocks.getNotificationRecipientGroup).not.toHaveBeenCalled();
+  });
+
+  it("returns 404 for an unknown notification recipient group", async () => {
+    mocks.getNotificationRecipientGroup.mockRejectedValueOnce(
+      new AppError(404, "Notification recipient group not found")
+    );
+    const app = createAdminApp();
+
+    const response = await request(app).get("/api/admin/notification-recipient-groups/unknown");
+
+    expect(response.status).toBe(404);
+    expect(response.body.error.message).toContain("not found");
+  });
+
+  it("allows admins to replace notification recipient assignments", async () => {
+    const app = createAdminApp();
+
+    const response = await request(app)
+      .put("/api/admin/notification-recipient-groups/lead_due_diligence/assignments")
+      .send({ userIds: ["director-1", "admin-1"] });
+
+    expect(response.status).toBe(200);
+    expect(mocks.updateNotificationRecipientAssignments).toHaveBeenCalledWith(
+      expect.anything(),
+      "lead_due_diligence",
+      ["director-1", "admin-1"]
+    );
+  });
+
+  it("blocks directors from updating notification recipient assignments", async () => {
+    mocks.userRole = "director";
+    const app = createAdminApp();
+
+    const response = await request(app)
+      .put("/api/admin/notification-recipient-groups/lead_due_diligence/assignments")
+      .send({ userIds: ["director-1"] });
+
+    expect(response.status).toBe(403);
+    expect(mocks.updateNotificationRecipientAssignments).not.toHaveBeenCalled();
+  });
+
+  it("returns 400 when updating notification recipients with an invalid user id", async () => {
+    mocks.updateNotificationRecipientAssignments.mockRejectedValueOnce(
+      new AppError(400, "Invalid user ID(s): missing-user. These users do not exist in the system.")
+    );
+    const app = createAdminApp();
+
+    const response = await request(app)
+      .put("/api/admin/notification-recipient-groups/lead_due_diligence/assignments")
+      .send({ userIds: ["missing-user"] });
+
+    expect(response.status).toBe(400);
+    expect(response.body.error.message).toContain("Invalid user ID");
+  });
+
+  it("allows admins to clear notification recipient assignments", async () => {
+    const app = createAdminApp();
+
+    const response = await request(app)
+      .put("/api/admin/notification-recipient-groups/lead_due_diligence/assignments")
+      .send({ userIds: [] });
+
+    expect(response.status).toBe(200);
+    expect(mocks.updateNotificationRecipientAssignments).toHaveBeenCalledWith(
+      expect.anything(),
+      "lead_due_diligence",
+      []
+    );
   });
 });

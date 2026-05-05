@@ -1,180 +1,192 @@
-import { eq, sql } from "drizzle-orm";
+import { sql } from "drizzle-orm";
 import type { NodePgDatabase } from "drizzle-orm/node-postgres";
-import { leadStageHistory, leads } from "@trock-crm/shared/schema";
 import type * as schema from "@trock-crm/shared/schema";
-import type { LeadVerificationRequiredReason } from "@trock-crm/shared/types";
-import { getStageBySlug } from "../pipeline/service.js";
+import type {
+  ExistingCustomerDecision,
+  ExistingCustomerSignal,
+} from "@trock-crm/shared/types";
 
 type TenantDb = NodePgDatabase<typeof schema>;
 
-export interface CompanyVerificationDecision {
-  needsVerification: boolean;
-  reason: LeadVerificationRequiredReason;
-  lastActivityAt: Date | null;
-}
-
-/**
- * Returns whether a company needs lead-creation verification, based on whether
- * the company has had any meaningful activity in the last 365 days.
- *
- * Single round-trip: one query takes MAX over a UNION ALL of every activity
- * source. Returns NULL when the company has never had any activity.
- *
- * Column choice — real human activity, not automated touches:
- *   - leads/deals: created_at and last_activity_at (skipping updated_at; sync
- *     jobs touch updated_at on every Procore/HubSpot poll, which would mask
- *     genuinely dormant companies as "active").
- *   - contacts: created_at only (updates can be sync-driven).
- *   - activities: occurred_at — the dedicated event-time column. Captures
- *     notes, calls, meetings, manually-logged emails.
- *   - emails: sent_at, filtered to direction IN ('inbound','outbound'). The
- *     emails table has no company_id; an email reaches a company two ways:
- *       (a) via emails.contact_id → contacts.company_id, or
- *       (b) via emails.assigned_entity_type='company' + assigned_entity_id.
- *     Both paths must be UNION'd or generic info@ / system mail tied to the
- *     company without a contact would be silently dropped.
- *
- * Boundary: 365 days inclusive. A row with last_activity_at exactly equal to
- * (now - 365 days) is treated as "still active" — falls through to
- * active_company. We use strict less-than against the cutoff so the edge
- * stays on the active side.
- *
- * "No activity ever" vs "older than 365 days":
- *   - lastActivityAt === null  → 'new_company'
- *   - lastActivityAt < cutoff  → 'dormant_company'
- *   - else                     → 'active_company'
- *
- * Brand-new companies (created during this lead's request) also surface as
- * 'new_company': nothing in the activity sources references the freshly
- * inserted company yet, so MAX returns NULL.
- */
-export async function companyNeedsVerification(
+export async function isExistingCustomer(
   tenantDb: Partial<Pick<TenantDb, "execute">>,
   companyId: string,
+  primaryContactId: string | null | undefined,
+  propertyId: string | null | undefined,
+  asOf: Date,
   options: {
     excludeLeadId?: string | null;
-    now?: Date;
   } = {}
-): Promise<CompanyVerificationDecision> {
-  const now = options.now ?? new Date();
-  const cutoff = new Date(now);
-  cutoff.setFullYear(cutoff.getFullYear() - 1);
-
+): Promise<ExistingCustomerDecision> {
   if (typeof tenantDb.execute !== "function") {
-    // Defensive parity with computeExistingCustomerStatus: in mocks/test stubs
-    // that omit raw-SQL execution, treat as no activity.
-    return { needsVerification: true, reason: "new_company", lastActivityAt: null };
+    return { isExisting: false, signal: null };
   }
 
   const excludeLeadId = options.excludeLeadId ?? null;
+  const contactId = primaryContactId ?? null;
+  const resolvedPropertyId = propertyId ?? null;
 
-  const result = await tenantDb.execute(sql`
-    SELECT GREATEST(
-      (SELECT MAX(GREATEST(created_at, COALESCE(last_activity_at, created_at)))
-         FROM leads
-        WHERE company_id = ${companyId}
-          AND (${excludeLeadId}::uuid IS NULL OR id <> ${excludeLeadId}::uuid)),
-      (SELECT MAX(GREATEST(created_at, COALESCE(last_activity_at, created_at)))
-         FROM deals
-        WHERE company_id = ${companyId}),
-      (SELECT MAX(created_at)
-         FROM contacts
-        WHERE company_id = ${companyId}),
-      (SELECT MAX(occurred_at)
-         FROM activities
-        WHERE company_id = ${companyId}),
-      (SELECT MAX(sent_at) FROM (
-         SELECT e.sent_at
-           FROM emails e
-           JOIN contacts c ON c.id = e.contact_id
-          WHERE c.company_id = ${companyId}
-            AND e.direction IN ('inbound','outbound')
-         UNION ALL
-         SELECT e.sent_at
-           FROM emails e
-          WHERE e.assigned_entity_type = 'company'
-            AND e.assigned_entity_id = ${companyId}
-            AND e.direction IN ('inbound','outbound')
-       ) AS company_emails)
-    ) AS last_activity_at
+  type ExistingCustomerSignalRow = {
+    source: ExistingCustomerSignal["source"];
+    type: string;
+    occurred_at: Date | string;
+    detail: string;
+  };
+
+  const result = await tenantDb.execute<ExistingCustomerSignalRow>(sql`
+    WITH cutoff AS (
+      SELECT (${asOf}::timestamptz - INTERVAL '12 months') AS cutoff_at
+    ),
+    signal_candidates AS (
+      SELECT 'company'::text AS source,
+             'lead'::text AS type,
+             GREATEST(l.created_at, COALESCE(l.last_activity_at, l.created_at)) AS occurred_at,
+             'Recent lead activity on company'::text AS detail
+        FROM leads l
+       WHERE l.company_id = ${companyId}
+         AND (${excludeLeadId}::uuid IS NULL OR l.id <> ${excludeLeadId}::uuid)
+      UNION ALL
+      SELECT 'company', 'deal',
+             GREATEST(d.created_at, COALESCE(d.last_activity_at, d.created_at)),
+             'Recent deal activity on company'
+        FROM deals d
+       WHERE d.company_id = ${companyId}
+      UNION ALL
+      SELECT 'company', 'activity', a.occurred_at, COALESCE(a.subject, 'Recent activity on company')
+        FROM activities a
+       WHERE a.company_id = ${companyId}
+      UNION ALL
+      SELECT 'company', 'email', e.sent_at, COALESCE(e.subject, 'Recent email on company')
+        FROM emails e
+        LEFT JOIN contacts c ON c.id = e.contact_id
+        LEFT JOIN deals d ON d.id = e.deal_id
+       WHERE e.direction IN ('inbound','outbound')
+         AND (
+           c.company_id = ${companyId}
+           OR d.company_id = ${companyId}
+           OR (e.assigned_entity_type = 'company' AND e.assigned_entity_id = ${companyId})
+         )
+      UNION ALL
+      SELECT 'company', 'task',
+             GREATEST(t.created_at, t.updated_at, COALESCE(t.completed_at, t.created_at)),
+             COALESCE(t.title, 'Recent task on company')
+        FROM tasks t
+        LEFT JOIN contacts c ON c.id = t.contact_id
+        LEFT JOIN deals d ON d.id = t.deal_id
+       WHERE c.company_id = ${companyId}
+          OR d.company_id = ${companyId}
+      UNION ALL
+      SELECT 'company', 'lead_stage_history', h.created_at, 'Recent lead stage change on company'
+        FROM lead_stage_history h
+        JOIN leads l ON l.id = h.lead_id
+       WHERE l.company_id = ${companyId}
+         AND (${excludeLeadId}::uuid IS NULL OR l.id <> ${excludeLeadId}::uuid)
+      UNION ALL
+      SELECT 'company', 'deal_stage_history', h.created_at, 'Recent deal stage change on company'
+       FROM deal_stage_history h
+        JOIN deals d ON d.id = h.deal_id
+       WHERE d.company_id = ${companyId}
+
+      UNION ALL
+      SELECT 'contact', 'lead',
+             GREATEST(l.created_at, COALESCE(l.last_activity_at, l.created_at)),
+             'Recent lead activity on primary contact'
+        FROM leads l
+       WHERE ${contactId}::uuid IS NOT NULL
+         AND l.primary_contact_id = ${contactId}::uuid
+         AND (${excludeLeadId}::uuid IS NULL OR l.id <> ${excludeLeadId}::uuid)
+      UNION ALL
+      SELECT 'contact', 'deal',
+             GREATEST(d.created_at, COALESCE(d.last_activity_at, d.created_at)),
+             'Recent deal activity on primary contact'
+        FROM deals d
+       WHERE ${contactId}::uuid IS NOT NULL
+         AND d.primary_contact_id = ${contactId}::uuid
+      UNION ALL
+      SELECT 'contact', 'activity', a.occurred_at, COALESCE(a.subject, 'Recent activity on primary contact')
+        FROM activities a
+       WHERE ${contactId}::uuid IS NOT NULL
+         AND a.contact_id = ${contactId}::uuid
+      UNION ALL
+      SELECT 'contact', 'email', e.sent_at, COALESCE(e.subject, 'Recent email on primary contact')
+        FROM emails e
+       WHERE ${contactId}::uuid IS NOT NULL
+         AND e.direction IN ('inbound','outbound')
+         AND (e.contact_id = ${contactId}::uuid OR (e.assigned_entity_type = 'contact' AND e.assigned_entity_id = ${contactId}::uuid))
+      UNION ALL
+      SELECT 'contact', 'task',
+             GREATEST(t.created_at, t.updated_at, COALESCE(t.completed_at, t.created_at)),
+             COALESCE(t.title, 'Recent task on primary contact')
+        FROM tasks t
+       WHERE ${contactId}::uuid IS NOT NULL
+         AND t.contact_id = ${contactId}::uuid
+
+      -- Property signals: broader than the original spec (which only required
+      -- deal/lead created in 12 months) to include activities, tasks, and
+      -- stage history on the property. Intentional: any of these represents
+      -- real engagement with the property and should mark it as existing.
+      UNION ALL
+      SELECT 'property', 'lead',
+             GREATEST(l.created_at, COALESCE(l.last_activity_at, l.created_at)),
+             'Recent lead activity on property'
+        FROM leads l
+       WHERE ${resolvedPropertyId}::uuid IS NOT NULL
+         AND l.property_id = ${resolvedPropertyId}::uuid
+         AND (${excludeLeadId}::uuid IS NULL OR l.id <> ${excludeLeadId}::uuid)
+      UNION ALL
+      SELECT 'property', 'deal',
+             GREATEST(d.created_at, COALESCE(d.last_activity_at, d.created_at)),
+             'Recent deal activity on property'
+        FROM deals d
+       WHERE ${resolvedPropertyId}::uuid IS NOT NULL
+         AND d.property_id = ${resolvedPropertyId}::uuid
+      UNION ALL
+      SELECT 'property', 'activity', a.occurred_at, COALESCE(a.subject, 'Recent activity on property')
+        FROM activities a
+       WHERE ${resolvedPropertyId}::uuid IS NOT NULL
+         AND a.property_id = ${resolvedPropertyId}::uuid
+      UNION ALL
+      SELECT 'property', 'task',
+             GREATEST(t.created_at, t.updated_at, COALESCE(t.completed_at, t.created_at)),
+             COALESCE(t.title, 'Recent task on property')
+        FROM tasks t
+        JOIN deals d ON d.id = t.deal_id
+       WHERE ${resolvedPropertyId}::uuid IS NOT NULL
+         AND d.property_id = ${resolvedPropertyId}::uuid
+      UNION ALL
+      SELECT 'property', 'lead_stage_history', h.created_at, 'Recent lead stage change on property'
+        FROM lead_stage_history h
+        JOIN leads l ON l.id = h.lead_id
+       WHERE ${resolvedPropertyId}::uuid IS NOT NULL
+         AND l.property_id = ${resolvedPropertyId}::uuid
+         AND (${excludeLeadId}::uuid IS NULL OR l.id <> ${excludeLeadId}::uuid)
+      UNION ALL
+      SELECT 'property', 'deal_stage_history', h.created_at, 'Recent deal stage change on property'
+        FROM deal_stage_history h
+        JOIN deals d ON d.id = h.deal_id
+       WHERE ${resolvedPropertyId}::uuid IS NOT NULL
+         AND d.property_id = ${resolvedPropertyId}::uuid
+    )
+    SELECT source, type, occurred_at, detail
+      FROM signal_candidates, cutoff
+     WHERE occurred_at >= cutoff.cutoff_at
+     ORDER BY occurred_at DESC, source ASC, type ASC
+     LIMIT 1
   `);
 
-  const rows =
-    (result as { rows?: Array<{ last_activity_at?: Date | string | null }> }).rows ??
-    (result as unknown as Array<{ last_activity_at?: Date | string | null }>);
-  const raw = rows?.[0]?.last_activity_at ?? null;
-  const lastActivityAt = raw == null ? null : raw instanceof Date ? raw : new Date(raw);
-
-  if (lastActivityAt == null) {
-    return { needsVerification: true, reason: "new_company", lastActivityAt: null };
+  const rows = result.rows;
+  const row = rows?.[0];
+  if (!row) {
+    return { isExisting: false, signal: null };
   }
 
-  if (lastActivityAt < cutoff) {
-    return { needsVerification: true, reason: "dormant_company", lastActivityAt };
-  }
-
-  return { needsVerification: false, reason: "active_company", lastActivityAt };
-}
-
-/**
- * Manually mark a pending lead as verified and auto-promote it to the
- * Qualified Lead stage. Mirrors the structure of the createLead auto-promote
- * branch: writes verification_status='approved' and inserts a lead_stage_history
- * row capturing the synthetic stage transition.
- *
- * Returns null if the lead does not exist or is not currently pending verification.
- */
-export async function markLeadVerified(
-  tenantDb: TenantDb,
-  input: {
-    leadId: string;
-    userId: string;
-    now?: Date;
-  }
-): Promise<typeof leads.$inferSelect | null> {
-  const now = input.now ?? new Date();
-
-  const [existing] = await tenantDb
-    .select()
-    .from(leads)
-    .where(eq(leads.id, input.leadId))
-    .limit(1);
-
-  if (!existing) {
-    return null;
-  }
-
-  if (existing.verificationStatus !== "pending") {
-    return null;
-  }
-
-  const qualifiedStage = await getStageBySlug("qualified_lead", "lead");
-  if (!qualifiedStage) {
-    throw new Error("Canonical 'qualified_lead' stage is not configured");
-  }
-
-  const [updated] = await tenantDb
-    .update(leads)
-    .set({
-      verificationStatus: "approved",
-      stageId: qualifiedStage.id,
-      stageEnteredAt: now,
-      updatedAt: now,
-    })
-    .where(eq(leads.id, input.leadId))
-    .returning();
-
-  if (existing.stageId !== qualifiedStage.id) {
-    await tenantDb.insert(leadStageHistory).values({
-      leadId: input.leadId,
-      fromStageId: existing.stageId,
-      toStageId: qualifiedStage.id,
-      changedBy: input.userId,
-      isBackwardMove: false,
-      durationInPreviousStage: null,
-      createdAt: now,
-    });
-  }
-
-  return updated ?? null;
+  return {
+    isExisting: true,
+    signal: {
+      source: row.source as ExistingCustomerSignal["source"],
+      type: row.type,
+      occurredAt: row.occurred_at instanceof Date ? row.occurred_at : new Date(row.occurred_at),
+      detail: row.detail,
+    },
+  };
 }

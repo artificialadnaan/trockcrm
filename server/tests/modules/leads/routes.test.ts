@@ -206,6 +206,40 @@ async function invokeLeadCreateRoute(body: Record<string, unknown>, leadRoutes?:
   return { req, res, next };
 }
 
+async function invokeLeadPatchRoute(body: Record<string, unknown>, leadRoutes?: unknown) {
+  const routes = leadRoutes ?? (await loadLeadRoutes());
+  const handler = findRouteHandler(routes, "patch", "/:id");
+  const req = {
+    params: { id: "lead-1" },
+    body,
+    tenantDb: {},
+    user: {
+      id: "rep-1",
+      role: "rep",
+      activeOfficeId: "office-1",
+    },
+    commitTransaction: vi.fn(async () => {}),
+  } as any;
+  const res = {
+    statusCode: 200,
+    body: undefined as any,
+    status(code: number) {
+      this.statusCode = code;
+      return this;
+    },
+    json(payload: any) {
+      this.body = payload;
+      return this;
+    },
+  } as any;
+  const next = vi.fn((err?: unknown) => {
+    if (err) throw err;
+  });
+
+  await handler(req, res, next);
+  return { req, res, next };
+}
+
 async function invokeQuestionnaireTemplateRoute(projectTypeId = "project-type-1", leadRoutes?: unknown) {
   const routes = leadRoutes ?? (await loadLeadRoutes());
   const handler = findRouteHandler(routes, "get", "/questionnaire-template");
@@ -488,6 +522,92 @@ describe("lead stage transition route", () => {
         ],
         allNodes: [],
         answers: {},
+      },
+    });
+  });
+
+  it("rejects PATCH stage changes with a structured 400", async () => {
+    const leadRoutes = await loadLeadRoutes();
+    serviceMocks.getLeadById.mockResolvedValueOnce({
+      id: "lead-1",
+      stageId: "stage-current",
+    });
+
+    const { req, res } = await invokeLeadPatchRoute({ stageId: "stage-next" }, leadRoutes);
+
+    expect(serviceMocks.getLeadById).toHaveBeenCalledWith(req.tenantDb, "lead-1", "rep", "rep-1");
+    expect(serviceMocks.updateLead).not.toHaveBeenCalled();
+    expect(req.commitTransaction).not.toHaveBeenCalled();
+    expect(res.statusCode).toBe(400);
+    expect(res.body).toEqual({
+      error: "Stage changes must use POST /api/leads/:id/stage-transition. Direct stage updates via PATCH are not supported.",
+      code: "STAGE_CHANGE_NOT_ALLOWED_VIA_PATCH",
+    });
+  });
+
+  it("allows PATCH with unchanged stageId and updates other fields", async () => {
+    const leadRoutes = await loadLeadRoutes();
+    serviceMocks.getLeadById.mockResolvedValueOnce({
+      id: "lead-1",
+      stageId: "stage-current",
+    });
+    serviceMocks.updateLead.mockResolvedValueOnce({
+      id: "lead-1",
+      stageId: "stage-current",
+      name: "Updated Lead",
+    });
+
+    const { req, res } = await invokeLeadPatchRoute(
+      { stageId: "stage-current", name: "Updated Lead" },
+      leadRoutes
+    );
+
+    expect(serviceMocks.updateLead).toHaveBeenCalledWith(
+      req.tenantDb,
+      "lead-1",
+      expect.not.objectContaining({ stageId: expect.anything() }),
+      "rep",
+      "rep-1"
+    );
+    expect(serviceMocks.updateLead).toHaveBeenCalledWith(
+      req.tenantDb,
+      "lead-1",
+      expect.objectContaining({ name: "Updated Lead", officeId: "office-1" }),
+      "rep",
+      "rep-1"
+    );
+    expect(req.commitTransaction).toHaveBeenCalledTimes(1);
+    expect(res.body).toEqual({
+      lead: {
+        id: "lead-1",
+        stageId: "stage-current",
+        name: "Updated Lead",
+      },
+    });
+  });
+
+  it("allows PATCH without stageId normally", async () => {
+    const leadRoutes = await loadLeadRoutes();
+    serviceMocks.updateLead.mockResolvedValueOnce({
+      id: "lead-1",
+      name: "Updated Lead",
+    });
+
+    const { req, res } = await invokeLeadPatchRoute({ name: "Updated Lead" }, leadRoutes);
+
+    expect(serviceMocks.getLeadById).not.toHaveBeenCalled();
+    expect(serviceMocks.updateLead).toHaveBeenCalledWith(
+      req.tenantDb,
+      "lead-1",
+      expect.objectContaining({ name: "Updated Lead", officeId: "office-1" }),
+      "rep",
+      "rep-1"
+    );
+    expect(req.commitTransaction).toHaveBeenCalledTimes(1);
+    expect(res.body).toEqual({
+      lead: {
+        id: "lead-1",
+        name: "Updated Lead",
       },
     });
   });

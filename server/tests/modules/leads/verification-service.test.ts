@@ -1,131 +1,173 @@
 import { describe, expect, it, vi } from "vitest";
-import { companyNeedsVerification } from "../../../src/modules/leads/verification-service.js";
+import { isExistingCustomer } from "../../../src/modules/leads/verification-service.js";
 
 const NOW = new Date("2026-04-27T12:00:00.000Z");
-const SECONDS_PER_DAY = 86_400_000;
 
-function daysAgo(days: number): Date {
-  return new Date(NOW.getTime() - days * SECONDS_PER_DAY);
+function queryTextFromExecuteMock(execute: ReturnType<typeof vi.fn>) {
+  const queryArg = execute.mock.calls[0][0] as unknown;
+  return JSON.stringify((queryArg as { queryChunks?: unknown[] })?.queryChunks ?? queryArg);
 }
 
-function execMock(maxTimestamp: Date | null) {
-  return vi.fn(async () => ({
-    rows: [{ last_activity_at: maxTimestamp }],
-  }));
-}
+describe("isExistingCustomer", () => {
+  it("returns isExisting=false when no signals match", async () => {
+    const tenantDb = { execute: vi.fn(async () => ({ rows: [] })) };
 
-describe("companyNeedsVerification", () => {
-  it("returns new_company when the company has zero historical activity", async () => {
-    const tenantDb = { execute: execMock(null) };
-
-    const decision = await companyNeedsVerification(tenantDb as never, "company-1", { now: NOW });
-
-    expect(decision).toEqual({
-      needsVerification: true,
-      reason: "new_company",
-      lastActivityAt: null,
-    });
-    expect(tenantDb.execute).toHaveBeenCalledTimes(1);
-  });
-
-  it("returns active_company when last activity was 30 days ago", async () => {
-    const last = daysAgo(30);
-    const tenantDb = { execute: execMock(last) };
-
-    const decision = await companyNeedsVerification(tenantDb as never, "company-1", { now: NOW });
-
-    expect(decision).toEqual({
-      needsVerification: false,
-      reason: "active_company",
-      lastActivityAt: last,
-    });
-  });
-
-  it("returns dormant_company when last activity was 400 days ago", async () => {
-    const last = daysAgo(400);
-    const tenantDb = { execute: execMock(last) };
-
-    const decision = await companyNeedsVerification(tenantDb as never, "company-1", { now: NOW });
-
-    expect(decision).toEqual({
-      needsVerification: true,
-      reason: "dormant_company",
-      lastActivityAt: last,
-    });
-  });
-
-  it("treats exactly 365 days ago as still active (boundary inclusive)", async () => {
-    const last = daysAgo(365);
-    const tenantDb = { execute: execMock(last) };
-
-    const decision = await companyNeedsVerification(tenantDb as never, "company-1", { now: NOW });
-
-    expect(decision.reason).toBe("active_company");
-    expect(decision.needsVerification).toBe(false);
-  });
-
-  it("issues a single round-trip query that unions every activity source", async () => {
-    const tenantDb = { execute: execMock(null) };
-
-    await companyNeedsVerification(tenantDb as never, "company-1", { now: NOW });
-
-    expect(tenantDb.execute).toHaveBeenCalledTimes(1);
-    const queryArg = tenantDb.execute.mock.calls[0][0] as unknown;
-    const queryText = JSON.stringify(
-      (queryArg as { queryChunks?: unknown[] })?.queryChunks ?? queryArg
+    const decision = await isExistingCustomer(
+      tenantDb as never,
+      "company-1",
+      "contact-1",
+      "property-1",
+      NOW
     );
-    expect(queryText).toContain("FROM leads");
-    expect(queryText).toContain("FROM deals");
-    expect(queryText).toContain("FROM contacts");
-    expect(queryText).toContain("FROM activities");
-    expect(queryText).toContain("FROM emails");
-    // Must read created_at + last_activity_at, NOT updated_at, on leads/deals.
-    // updated_at is touched by Procore/HubSpot sync and would falsely keep
-    // dormant companies looking active.
-    expect(queryText).toContain("last_activity_at");
-    expect(queryText).not.toMatch(/updated_at/);
+
+    expect(decision).toEqual({ isExisting: false, signal: null });
+    expect(tenantDb.execute).toHaveBeenCalledTimes(1);
   });
 
-  it("excludes the lead being created from the activity scan", async () => {
-    const tenantDb = { execute: execMock(null) };
+  it("returns a company lead signal", async () => {
+    const occurredAt = new Date("2026-04-01T00:00:00.000Z");
+    const tenantDb = {
+      execute: vi.fn(async () => ({
+        rows: [{
+          source: "company",
+          type: "lead",
+          occurred_at: occurredAt,
+          detail: "Recent lead activity on company",
+        }],
+      })),
+    };
 
-    await companyNeedsVerification(tenantDb as never, "company-1", {
-      now: NOW,
+    const decision = await isExistingCustomer(
+      tenantDb as never,
+      "company-1",
+      "contact-1",
+      "property-1",
+      NOW
+    );
+
+    expect(decision.isExisting).toBe(true);
+    expect(decision.signal).toEqual({
+      source: "company",
+      type: "lead",
+      occurredAt,
+      detail: "Recent lead activity on company",
+    });
+  });
+
+  it("returns a contact lead signal without treating contact creation as activity", async () => {
+    const tenantDb = {
+      execute: vi.fn(async () => ({
+        rows: [{
+          source: "contact",
+          type: "lead",
+          occurred_at: "2026-04-02T00:00:00.000Z",
+          detail: "Recent lead activity on primary contact",
+        }],
+      })),
+    };
+
+    const decision = await isExistingCustomer(
+      tenantDb as never,
+      "company-1",
+      "contact-1",
+      "property-1",
+      NOW
+    );
+
+    expect(decision.isExisting).toBe(true);
+    expect(decision.signal?.source).toBe("contact");
+    expect(decision.signal?.type).toBe("lead");
+    const queryText = queryTextFromExecuteMock(tenantDb.execute);
+    expect(queryText).not.toContain("Primary contact was created recently");
+    expect(queryText).not.toContain("SELECT 'contact', 'contact'");
+  });
+
+  it("returns a property deal signal", async () => {
+    const occurredAt = new Date("2026-04-03T00:00:00.000Z");
+    const tenantDb = {
+      execute: vi.fn(async () => ({
+        rows: [{
+          source: "property",
+          type: "deal",
+          occurred_at: occurredAt,
+          detail: "Recent deal activity on property",
+        }],
+      })),
+    };
+
+    const decision = await isExistingCustomer(
+      tenantDb as never,
+      "company-1",
+      "contact-1",
+      "property-1",
+      NOW
+    );
+
+    expect(decision.isExisting).toBe(true);
+    expect(decision.signal?.source).toBe("property");
+    expect(decision.signal?.type).toBe("deal");
+  });
+
+  it("uses SQL INTERVAL '12 months' for the activity window", async () => {
+    const tenantDb = { execute: vi.fn(async () => ({ rows: [] })) };
+
+    await isExistingCustomer(tenantDb as never, "company-1", "contact-1", "property-1", NOW);
+
+    const queryText = queryTextFromExecuteMock(tenantDb.execute);
+    // This mocked-query assertion is a stand-in until the project has a
+    // lightweight real-DB tenant fixture for boundary-date verification.
+    expect(queryText).toContain("INTERVAL '12 months'");
+    expect(queryText).toContain("cutoff_at");
+    expect(queryText).toContain("occurred_at >= cutoff.cutoff_at");
+  });
+
+  it("includes the excludeLeadId predicate for lead-sourced signals", async () => {
+    const tenantDb = { execute: vi.fn(async () => ({ rows: [] })) };
+
+    await isExistingCustomer(tenantDb as never, "company-1", "contact-1", "property-1", NOW, {
       excludeLeadId: "lead-just-created",
     });
 
-    const queryArg = tenantDb.execute.mock.calls[0][0] as unknown;
-    const queryText = JSON.stringify(
-      (queryArg as { queryChunks?: unknown[] })?.queryChunks ?? queryArg
-    );
-    expect(queryText).toContain("id <>");
+    const queryText = queryTextFromExecuteMock(tenantDb.execute);
+    expect(queryText).toContain("l.id <>");
   });
 
-  it("captures emails routed to a company without a contact via assigned_entity_type='company'", async () => {
-    // Regression guard: the emails subquery must UNION two paths — the
-    // contact-joined path AND the assigned_entity_type='company' path.
-    // Without the latter, generic info@ / system mail tied directly to the
-    // company would silently drop, falsely marking the company as no-activity.
-    const tenantDb = { execute: execMock(null) };
+  it("guards contact and property predicates when ids are null", async () => {
+    const tenantDb = { execute: vi.fn(async () => ({ rows: [] })) };
 
-    await companyNeedsVerification(tenantDb as never, "company-1", { now: NOW });
+    await expect(
+      isExistingCustomer(tenantDb as never, "company-1", null, null, NOW)
+    ).resolves.toEqual({ isExisting: false, signal: null });
 
-    const queryArg = tenantDb.execute.mock.calls[0][0] as unknown;
-    const queryText = JSON.stringify(
-      (queryArg as { queryChunks?: unknown[] })?.queryChunks ?? queryArg
-    );
-    expect(queryText).toContain("assigned_entity_type");
-    expect(queryText).toContain("'company'");
-    expect(queryText).toContain("UNION ALL");
+    const queryText = queryTextFromExecuteMock(tenantDb.execute);
+    expect(queryText).toContain("::uuid IS NOT NULL");
+    expect(queryText).toContain("primary contact");
+    expect(queryText).toContain("property");
   });
 
-  it("returns new_company defensively when tenantDb has no execute (mocked stubs)", async () => {
-    const decision = await companyNeedsVerification({} as never, "company-1", { now: NOW });
+  it("orders same-timestamp ties deterministically in SQL", async () => {
+    const tenantDb = {
+      execute: vi.fn(async () => ({
+        rows: [{
+          source: "company",
+          type: "activity",
+          occurred_at: "2026-04-01T00:00:00.000Z",
+          detail: "Recent activity on company",
+        }],
+      })),
+    };
 
-    expect(decision).toEqual({
-      needsVerification: true,
-      reason: "new_company",
-      lastActivityAt: null,
-    });
+    await isExistingCustomer(tenantDb as never, "company-1", "contact-1", "property-1", NOW);
+
+    const queryText = queryTextFromExecuteMock(tenantDb.execute);
+    // The mocked execute returns the database's first row; this assertion
+    // guards the SQL ordering until real-DB tie fixtures are available.
+    expect(queryText).toContain("ORDER BY occurred_at DESC, source ASC, type ASC");
+  });
+
+  it("returns isExisting=false defensively when tenantDb has no execute", async () => {
+    const decision = await isExistingCustomer({} as never, "company-1", "contact-1", "property-1", NOW);
+
+    expect(decision).toEqual({ isExisting: false, signal: null });
   });
 });

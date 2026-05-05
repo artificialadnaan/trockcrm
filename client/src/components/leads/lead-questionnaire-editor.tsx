@@ -2,7 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import type { ReactNode } from "react";
 import { LEAD_SOURCE_CATEGORIES, type LeadSourceCategory } from "@trock-crm/shared/types";
 import type { LeadRecord } from "@/hooks/use-leads";
-import { updateLead, useLeadQuestionnaireTemplate } from "@/hooks/use-leads";
+import { transitionLeadStage, updateLead, useLeadQuestionnaireTemplate } from "@/hooks/use-leads";
 import { usePipelineStages, useProjectTypes } from "@/hooks/use-pipeline-config";
 import { isApiError } from "@/lib/api";
 import { CRM_OWNED_LEAD_STAGE_SLUGS } from "@/lib/sales-workflow";
@@ -32,6 +32,7 @@ interface LeadQuestionnaireEditorProps {
 
 interface StageGateErrorState {
   message: string;
+  missingLabels?: string[];
   missingRequirements?: {
     qualificationFields?: string[];
     projectTypeQuestionIds?: string[];
@@ -42,6 +43,16 @@ interface StageGateErrorState {
   targetStage?: {
     name?: string;
   };
+}
+
+function formatLeadStageBlockReason(reason?: string) {
+  if (reason === "LEAD_DD_PENDING") {
+    return "Awaiting Due Diligence approval. The lead will be eligible for qualification once the DD review is complete.";
+  }
+  if (reason === "LEAD_DD_REJECTED") {
+    return "Due Diligence rejected. This lead cannot be qualified. Contact a director or move the lead to disqualified.";
+  }
+  return "This lead cannot move to the selected stage yet.";
 }
 
 function isVisibleQuestion(
@@ -319,6 +330,17 @@ export function LeadQuestionnaireEditor({ lead, onCancel, onSaved }: LeadQuestio
         scopedNodes.map((node) => [node.key, formData.leadQuestionAnswers[node.key] ?? null])
       );
 
+      if (!isConverted && formData.stageId !== lead.stageId) {
+        const transitionResult = await transitionLeadStage(lead.id, { targetStageId: formData.stageId });
+        if (!transitionResult.ok) {
+          setStageGateError({
+            message: formatLeadStageBlockReason(transitionResult.code),
+            missingLabels: transitionResult.missing.map((field) => field.label),
+          });
+          return;
+        }
+      }
+
       const payload = isConverted
         ? { leadQuestionAnswers }
         : {
@@ -326,7 +348,6 @@ export function LeadQuestionnaireEditor({ lead, onCancel, onSaved }: LeadQuestio
             sourceCategory: formData.sourceCategory as LeadSourceCategory,
             sourceDetail: formData.sourceDetail.trim() || null,
             description: formData.description.trim() || null,
-            stageId: formData.stageId,
             projectTypeId: formData.projectTypeId || null,
             qualificationPayload: {
               existing_customer_status: null,
@@ -386,6 +407,11 @@ export function LeadQuestionnaireEditor({ lead, onCancel, onSaved }: LeadQuestio
                   {stageGateError.missingRequirements.projectTypeQuestionIds
                     .map((questionId) => gateQuestionLabels.get(questionId) ?? questionId)
                     .join(", ")}
+                </p>
+              ) : null}
+              {stageGateError.missingLabels?.length ? (
+                <p className="mt-2 text-xs text-amber-800">
+                  Missing requirements: {stageGateError.missingLabels.join(", ")}
                 </p>
               ) : null}
             </div>
