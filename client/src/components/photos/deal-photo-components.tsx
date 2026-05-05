@@ -7,7 +7,6 @@ import {
   ChevronRight,
   Download,
   Filter,
-  History,
   MapPin,
   Pencil,
   RotateCcw,
@@ -31,6 +30,7 @@ import {
 import { Input } from "@/components/ui/input";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { api } from "@/lib/api";
+import { PhotoHistoryTimeline } from "./photo-history-timeline";
 
 export type PhotoGrouping = "date" | "category" | "uploader" | "none";
 export type PhotoCategory =
@@ -585,11 +585,7 @@ export function PhotoViewerModal({
                   </section>
                 )}
 
-                <details className="rounded-md border p-3 text-sm">
-                  <summary className="flex cursor-pointer items-center gap-2 font-medium"><History className="h-4 w-4" />History</summary>
-                  {/* TODO(PR 4): Replace placeholder with photo_audit_log timeline. */}
-                  <p className="mt-2 text-muted-foreground">Audit history will be available soon.</p>
-                </details>
+                <PhotoHistoryTimeline photoId={selectedPhoto.id} />
 
                 <DialogFooter>
                   <Button variant="outline" onClick={() => downloadPhoto(selectedPhoto.id)}>

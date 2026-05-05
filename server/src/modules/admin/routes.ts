@@ -26,6 +26,11 @@ import {
   listPipelineStages, updatePipelineStage, reorderPipelineStages,
 } from "./pipeline-service.js";
 import { getAuditLog, getAuditLogTables } from "./audit-service.js";
+import {
+  getAdminPhotoAuditEvents,
+  parseCsvQueryParam,
+  parsePhotoAuditEventTypes,
+} from "../files/audit-log-service.js";
 import { getAdminDataScrubOverview } from "./admin-reporting-service.js";
 import { getDirectorCommissionWorkspace } from "../dashboard/service.js";
 import { startCatalogSync } from "../procore/sync-service.js";
@@ -482,6 +487,31 @@ router.get(
       const tables = await getAuditLogTables(req.tenantDb!);
       await req.commitTransaction!();
       return res.json({ tables });
+    } catch (err) {
+      return next(err);
+    }
+  }
+);
+
+router.get(
+  "/admin/photo-audit",
+  requireAdmin,
+  tenantMiddleware,
+  async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const result = await getAdminPhotoAuditEvents(req.tenantDb!, {
+        userIds: parseCsvQueryParam(req.query.userId),
+        eventTypes: parsePhotoAuditEventTypes(req.query.eventType),
+        from: typeof req.query.from === "string" ? req.query.from : undefined,
+        to: typeof req.query.to === "string" ? req.query.to : undefined,
+        dealId: typeof req.query.dealId === "string" && req.query.dealId ? req.query.dealId : undefined,
+        photoId: typeof req.query.photoId === "string" && req.query.photoId ? req.query.photoId : undefined,
+        page: typeof req.query.page === "string" ? parseInt(req.query.page, 10) : 1,
+        perPage: typeof req.query.perPage === "string" ? parseInt(req.query.perPage, 10) : 50,
+      });
+
+      await req.commitTransaction!();
+      return res.json(result);
     } catch (err) {
       return next(err);
     }
