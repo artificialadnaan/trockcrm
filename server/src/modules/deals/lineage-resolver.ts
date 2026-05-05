@@ -12,16 +12,11 @@ import type * as schema from "@trock-crm/shared/schema";
 import type { WorkflowRoute } from "@trock-crm/shared/types";
 import { AppError } from "../../middleware/error-handler.js";
 import { applyProjectTypeChange } from "./service.js";
-import {
-  upsertLeadQuestionAnswerSet,
-  type LeadQuestionAnswerValue,
-} from "../leads/questionnaire-service.js";
 
 type TenantDb = NodePgDatabase<typeof schema>;
 
 export type DealFieldOwnership =
   | "lead"
-  | "lead_questionnaire"
   | "deal"
   | "deal_scoping";
 
@@ -61,7 +56,7 @@ export const DEAL_FIELD_OWNERSHIP: Record<ResolvedDealField, DealFieldOwnership>
   assignedRepId: "lead",
   workflowRoute: "lead",
   description: "lead",
-  bidDueDate: "lead_questionnaire",
+  bidDueDate: "lead",
   preBidMeetingCompleted: "deal_scoping",
   siteVisitDecision: "deal_scoping",
   siteVisitCompleted: "deal_scoping",
@@ -70,7 +65,6 @@ export const DEAL_FIELD_OWNERSHIP: Record<ResolvedDealField, DealFieldOwnership>
 
 export type DealWriteTarget =
   | "source_lead"
-  | "source_lead_questionnaire"
   | "deal"
   | "deal_scoping";
 
@@ -133,10 +127,6 @@ function workflowRouteFromLeadPipeline(pipelineType: string | null | undefined):
   return null;
 }
 
-function getAnswerValue(answersByKey: Record<string, unknown>, key: string) {
-  return Object.prototype.hasOwnProperty.call(answersByKey, key) ? answersByKey[key] : null;
-}
-
 export function planDealFieldWrite(input: {
   field: ResolvedDealField;
   hasSourceLead: boolean;
@@ -160,15 +150,6 @@ export function planDealFieldWrite(input: {
       field: input.field,
       ownership,
       target: "deal",
-      compatibilityWriteThrough: false,
-    };
-  }
-
-  if (ownership === "lead_questionnaire") {
-    return {
-      field: input.field,
-      ownership,
-      target: "source_lead_questionnaire",
       compatibilityWriteThrough: false,
     };
   }
@@ -240,7 +221,7 @@ export async function getResolvedDeal(
       assignedRepId: sourceLead?.assignedRepId ?? deal.assignedRepId,
       workflowRoute,
       description: sourceLead?.description ?? deal.description ?? null,
-      bidDueDate: getAnswerValue(answersByKey, "bid_due_date"),
+      bidDueDate: sourceLead?.bidDueDate ?? null,
     },
     ownership: DEAL_FIELD_OWNERSHIP,
   };
@@ -376,7 +357,6 @@ export async function writeResolvedDealFields(
   const leadUpdates: Record<string, unknown> = {};
   const dealUpdates: Record<string, unknown> = {};
   const scopingValues: Array<[ResolvedDealField, unknown]> = [];
-  const questionAnswers: Record<string, LeadQuestionAnswerValue> = {};
 
   for (const [rawField, value] of Object.entries(patch)) {
     const field = rawField as ResolvedDealField;
@@ -384,13 +364,6 @@ export async function writeResolvedDealFields(
 
     if (writePlan.target === "deal_scoping") {
       scopingValues.push([field, value]);
-      continue;
-    }
-
-    if (writePlan.target === "source_lead_questionnaire") {
-      if (field === "bidDueDate") {
-        questionAnswers.bid_due_date = normalizeOptionalText(value);
-      }
       continue;
     }
 
@@ -427,6 +400,7 @@ export async function writeResolvedDealFields(
       if (field === "assignedRepId") leadUpdates.assignedRepId = normalizeOptionalText(value);
       if (field === "workflowRoute") leadUpdates.pipelineType = value === "service" ? "service" : "normal";
       if (field === "description") leadUpdates.description = normalizeOptionalText(value);
+      if (field === "bidDueDate") leadUpdates.bidDueDate = normalizeOptionalText(value);
 
       if (writePlan.compatibilityWriteThrough) {
         if (field === "primaryContactId") dealUpdates.primaryContactId = normalizeOptionalText(value);
@@ -462,16 +436,6 @@ export async function writeResolvedDealFields(
         updatedAt: now,
       })
       .where(eq(leads.id, sourceLead.id));
-  }
-
-  if (sourceLead && Object.keys(questionAnswers).length > 0) {
-    await upsertLeadQuestionAnswerSet(tenantDb, {
-      leadId: sourceLead.id,
-      projectTypeId: sourceLead.projectTypeId ?? null,
-      changedBy: input.userId,
-      answers: questionAnswers,
-      changedAt: now,
-    });
   }
 
   if (Object.keys(dealUpdates).length > 0) {
