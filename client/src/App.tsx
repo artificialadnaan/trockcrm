@@ -54,6 +54,7 @@ import { UserGuidePage } from "@/pages/admin/help/user-guide-page";
 import { AdminGuidePage } from "@/pages/admin/help/admin-guide-page";
 import { CompanyCamPage } from "@/pages/admin/companycam-page";
 import { PhotoAuditPage } from "@/pages/admin/photo-audit/photo-audit-page";
+import { FieldUsersPage } from "@/pages/admin/field-users/field-users-page";
 import { PhotoCapturePage } from "@/pages/photos/photo-capture-page";
 import { PhotoFeedPage } from "@/pages/photos/photo-feed-page";
 import { PipelineHygienePage } from "@/pages/pipeline/pipeline-hygiene-page";
@@ -339,6 +340,14 @@ export function App() {
                 element={(
                   <RequireRole allowedRoles={["admin"]}>
                     <PhotoAuditPage />
+                  </RequireRole>
+                )}
+              />
+              <Route
+                path="/admin/field-users"
+                element={(
+                  <RequireRole allowedRoles={["admin"]}>
+                    <FieldUsersPage />
                   </RequireRole>
                 )}
               />
