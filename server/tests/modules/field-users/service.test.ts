@@ -40,6 +40,7 @@ const {
   revokeFieldUserInvite,
   setFieldUserActive,
   splitName,
+  toFieldUserResponse,
 } = await import("../../../src/modules/field-users/service.js");
 
 describe("field user service helpers", () => {
@@ -77,6 +78,26 @@ describe("field user service helpers", () => {
   it("splits display names into first and last name parts", () => {
     expect(splitName("Kaleb Martin")).toEqual({ firstName: "Kaleb", lastName: "Martin" });
     expect(splitName("Adnaan")).toEqual({ firstName: "Adnaan", lastName: "" });
+  });
+
+  it("maps database user rows to the field client identity response shape", () => {
+    expect(toFieldUserResponse({
+      id: "field-1",
+      email: "field@example.com",
+      first_name: "Field",
+      last_name: "User",
+      role: "field_contractor",
+      office_id: "office-1",
+      is_active: true,
+    })).toEqual({
+      id: "field-1",
+      email: "field@example.com",
+      firstName: "Field",
+      lastName: "User",
+      role: "field_contractor",
+      tenantId: "office-1",
+      active: true,
+    });
   });
 
   it("derives invite status from accepted, revoked, and expiry timestamps", () => {
@@ -351,8 +372,11 @@ describe("field user service helpers", () => {
         id: "user-1",
         email: "field@example.com",
         display_name: "Field User",
+        first_name: "Field",
+        last_name: "User",
         role: "field_contractor",
         office_id: "11111111-1111-1111-1111-111111111111",
+        is_active: true,
       }] });
 
     const result = await acceptFieldInvite({ token: "raw-token", password: "correct-password-12" });
@@ -363,7 +387,15 @@ describe("field user service helpers", () => {
       authMethod: "local",
     }));
     expect(result.token).toBe("jwt-token");
-    expect(result.user.role).toBe("field_contractor");
+    expect(result.user).toEqual({
+      id: "user-1",
+      email: "field@example.com",
+      firstName: "Field",
+      lastName: "User",
+      role: "field_contractor",
+      tenantId: "11111111-1111-1111-1111-111111111111",
+      active: true,
+    });
   });
 
   it("rejects expired, revoked, and already accepted invites", async () => {
@@ -412,6 +444,8 @@ describe("field user service helpers", () => {
         id: "user-1",
         email: "field@example.com",
         display_name: "Field User",
+        first_name: "Field",
+        last_name: "User",
         role: "field_contractor",
         office_id: "11111111-1111-1111-1111-111111111111",
         is_active: true,
@@ -424,6 +458,15 @@ describe("field user service helpers", () => {
 
     expect(authMocks.verifyPassword).toHaveBeenCalledWith("correct-password-12", "hash");
     expect(result.token).toBe("jwt-token");
+    expect(result.user).toEqual({
+      id: "user-1",
+      email: "field@example.com",
+      firstName: "Field",
+      lastName: "User",
+      role: "field_contractor",
+      tenantId: "11111111-1111-1111-1111-111111111111",
+      active: true,
+    });
   });
 
   it("tracks failed field-login attempts and locks after the existing local-auth threshold", async () => {
