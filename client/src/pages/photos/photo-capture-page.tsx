@@ -1,5 +1,5 @@
 import { useState, useRef, useEffect, useMemo } from "react";
-import { Link } from "react-router-dom";
+import { Link, useSearchParams } from "react-router-dom";
 import {
   Camera,
   CheckCircle,
@@ -45,6 +45,7 @@ export function groupPhotoUploadTargets(targets: PhotoUploadTarget[]) {
 }
 
 export function PhotoCapturePage() {
+  const [searchParams] = useSearchParams();
   const [targetSearch, setTargetSearch] = useState("");
   const [targetResults, setTargetResults] = useState<PhotoUploadTarget[]>([]);
   const [targetLoading, setTargetLoading] = useState(false);
@@ -57,6 +58,21 @@ export function PhotoCapturePage() {
 
   const fileInputRef = useRef<HTMLInputElement>(null);
   const blobUrlsRef = useRef<string[]>([]);
+
+  useEffect(() => {
+    const dealId = searchParams.get("dealId");
+    if (!dealId || selectedTarget) return;
+    setSelectedTarget({
+      id: dealId,
+      type: "deal",
+      name: searchParams.get("dealName") ?? "Selected deal",
+      recordNumber: null,
+      stageName: null,
+      companyName: null,
+      lastUpdatedAt: new Date().toISOString(),
+    });
+    setTargetSearch(searchParams.get("dealName") ?? "Selected deal");
+  }, [searchParams, selectedTarget]);
 
   useEffect(() => {
     let cancelled = false;

@@ -135,6 +135,7 @@ export function App() {
               <Route path="/deals/board" element={<BoardAliasRedirect entity="deals" />} />
               <Route path="/deals/stages/:stageId" element={<DealStagePage />} />
               <Route path="/deals/new" element={<DealNewPage />} />
+              <Route path="/deals/:id/photos" element={<DealDetailPage />} />
               <Route path="/deals/:id" element={<DealDetailPage />} />
               <Route path="/deals/:id/edit" element={<DealEditPage />} />
               <Route path="/leads" element={<LeadListPage />} />
