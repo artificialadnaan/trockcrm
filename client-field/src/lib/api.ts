@@ -7,11 +7,21 @@ export class ApiError extends Error {
   }
 }
 
+type ApiEnv = {
+  VITE_API_BASE_URL?: string | undefined;
+  VITE_API_URL?: string | undefined;
+};
+
+export function resolveApiBase(env: ApiEnv): string {
+  const configured = env.VITE_API_BASE_URL?.trim() || env.VITE_API_URL?.trim();
+  if (!configured) {
+    throw new Error("VITE_API_BASE_URL is required for the field app API client.");
+  }
+  return configured.replace(/\/+$/, "").replace(/\/api$/, "");
+}
+
 function configuredApiBase(): string {
-  const env = import.meta.env as Record<string, string | undefined>;
-  const configured = env.VITE_API_BASE_URL ?? env.VITE_API_URL;
-  if (configured) return configured.replace(/\/+$/, "").replace(/\/api$/, "");
-  return "";
+  return resolveApiBase(import.meta.env as ApiEnv);
 }
 
 function csrfToken(): string | undefined {
@@ -42,17 +52,31 @@ export async function api<T>(path: string, options: {
     body: options.json === undefined ? undefined : JSON.stringify(options.json),
   });
 
+  async function parseJsonResponse() {
+    if (response.status === 204) return undefined as T;
+    const contentType = response.headers.get("content-type")?.toLowerCase() ?? "";
+    if (!contentType.includes("application/json")) {
+      const body = await response.text().catch(() => "");
+      const preview = body.slice(0, 120).replace(/\s+/g, " ").trim();
+      throw new Error(
+        `API returned non-JSON response. Check VITE_API_BASE_URL and CORS configuration.${
+          preview ? ` Response started with: ${preview}` : ""
+        }`
+      );
+    }
+    return response.json() as Promise<T>;
+  }
+
   if (!response.ok) {
     let message = "Request failed";
     try {
-      const payload = await response.json();
+      const payload = await parseJsonResponse() as any;
       message = payload?.error?.message ?? payload?.error ?? message;
-    } catch {
-      // Keep the generic message when the API does not return JSON.
+    } catch (err) {
+      message = err instanceof Error ? err.message : message;
     }
     throw new ApiError(message, response.status);
   }
 
-  if (response.status === 204) return undefined as T;
-  return response.json() as Promise<T>;
+  return parseJsonResponse();
 }

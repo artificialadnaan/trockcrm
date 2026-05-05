@@ -13,6 +13,12 @@ const fieldUser = {
 test("field invite acceptance, logout, login, and CRM route denial", async ({ page }) => {
   let signedIn = false;
   let acceptedPassword = "";
+  const apiRequestUrls: string[] = [];
+
+  page.on("request", (request) => {
+    const url = request.url();
+    if (url.includes("/api/")) apiRequestUrls.push(url);
+  });
 
   await page.route("**/api/field/me", async (route) => {
     if (!signedIn) {
@@ -56,6 +62,8 @@ test("field invite acceptance, logout, login, and CRM route denial", async ({ pa
 
   await page.goto("/accept-invite?token=raw-token");
   await expect(page.getByText("field@example.com")).toBeVisible();
+  expect(apiRequestUrls).toContain("http://mock-api.test/api/auth/invite-preview?token=raw-token");
+  expect(apiRequestUrls.some((url) => url.startsWith(`${new URL(page.url()).origin}/api/`))).toBe(false);
   await page.getByLabel("Password", { exact: true }).fill("password-123");
   await page.getByLabel("Confirm password").fill("password-123");
   await page.getByRole("button", { name: "Create Account" }).click();
@@ -71,9 +79,10 @@ test("field invite acceptance, logout, login, and CRM route denial", async ({ pa
   await page.getByLabel("Password", { exact: true }).fill("password-123");
   await page.getByRole("button", { name: "Sign In" }).click();
   await expect(page).toHaveURL(/\/home$/);
+  expect(apiRequestUrls).toContain("http://mock-api.test/api/auth/field-login");
 
   const denied = await page.evaluate(async () => {
-    const response = await fetch("/api/deals", { credentials: "include" });
+    const response = await fetch("http://mock-api.test/api/deals", { credentials: "include" });
     return { status: response.status, body: await response.json() };
   });
   expect(denied).toEqual({

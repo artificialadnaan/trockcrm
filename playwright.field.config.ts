@@ -20,7 +20,7 @@ export default defineConfig({
   webServer: process.env.FIELD_PLAYWRIGHT_BASE_URL
     ? undefined
     : {
-        command: "npm run dev --workspace=client-field -- --host 127.0.0.1 --port 4174",
+        command: "VITE_API_BASE_URL=http://mock-api.test npm run dev --workspace=client-field -- --host 127.0.0.1 --port 4174",
         url: baseURL,
         reuseExistingServer: !process.env.CI,
         timeout: 120_000,
