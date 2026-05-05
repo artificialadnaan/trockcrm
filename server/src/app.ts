@@ -46,6 +46,10 @@ import { aiCopilotRoutes } from "./modules/ai-copilot/routes.js";
 import { salesReviewRoutes } from "./modules/sales-review/routes.js";
 import { userRoutes } from "./modules/users/routes.js";
 import { fieldRoutes } from "./modules/field/routes.js";
+import {
+  adminPhotoTokenRoutes,
+  publicPhotoViewerRoutes,
+} from "./modules/public-photo-tokens/routes.js";
 import { CRM_ONLY_TENANT_ROUTE_MOUNTS } from "./route-access-policy.js";
 import {
   createCsrfToken,
@@ -104,6 +108,7 @@ export function createApp() {
     express.urlencoded({ extended: false }),
     leadDueDiligencePublicRoutes
   );
+  app.use("/api/public/photo-viewer", publicPhotoViewerRoutes);
 
   app.use((req, res, next) => {
     const csrfCookieOptions = getCsrfCookieOptions(process.env);
@@ -197,6 +202,7 @@ export function createApp() {
   app.use("/api", migrationRouter);
 
   // Admin routes (offices, users, pipeline config, audit log)
+  app.use("/api", adminPhotoTokenRoutes);
   app.use("/api", adminRoutes);
 
   // Tenant-scoped routes — auth + tenant middleware applied

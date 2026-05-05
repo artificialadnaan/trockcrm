@@ -1,4 +1,4 @@
-import { Routes, Route, Navigate, useSearchParams } from "react-router-dom";
+import { Routes, Route, Navigate, useLocation, useSearchParams } from "react-router-dom";
 import { Suspense, lazy, type ReactNode } from "react";
 import { AuthProvider, useAuth } from "@/lib/auth";
 import { AuthEntryScreen } from "@/components/auth/auth-entry-screen";
@@ -61,6 +61,7 @@ import { PhotoCapturePage } from "@/pages/photos/photo-capture-page";
 import { PhotoFeedPage } from "@/pages/photos/photo-feed-page";
 import { PipelineHygienePage } from "@/pages/pipeline/pipeline-hygiene-page";
 import { ProjectDetailPage } from "@/pages/projects/project-detail-page";
+import { PublicPhotoViewerPage } from "@/pages/public/photo-viewer-page";
 import { Toaster } from "@/components/ui/sonner";
 
 const HomeDashboardPage = lazy(() =>
@@ -102,6 +103,9 @@ function BoardAliasRedirect({ entity }: { entity: "leads" | "deals" }) {
 
 function AuthGate({ children }: { children: ReactNode }) {
   const { user, loading } = useAuth();
+  const location = useLocation();
+
+  if (location.pathname.startsWith("/p/")) return <>{children}</>;
 
   if (loading) {
     return (
@@ -131,6 +135,7 @@ export function App() {
         <Suspense fallback={<RouteFallback />}>
           <>
             <Routes>
+            <Route path="/p/:token" element={<PublicPhotoViewerPage />} />
             <Route path="/photos/capture" element={<PhotoCapturePage />} />
             <Route element={<AppShell />}>
               <Route path="/" element={<HomeDashboardPage />} />

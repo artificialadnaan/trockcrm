@@ -115,6 +115,11 @@ describe("PhotoAuditPage", () => {
     Array.from(document.body.querySelectorAll<HTMLButtonElement>("button")).find((button) => button.textContent?.includes("Kaleb Martin"))?.click();
     await vi.waitFor(() => expect(apiMock).toHaveBeenCalledWith(expect.stringContaining("userId=user-1")));
 
+    node.querySelector<HTMLButtonElement>('[aria-label="Procore sync status filter"]')?.click();
+    await vi.waitFor(() => expect(document.body.textContent).toContain("Failed"));
+    Array.from(document.body.querySelectorAll<HTMLButtonElement>("button")).find((button) => button.textContent?.includes("Failed"))?.click();
+    await vi.waitFor(() => expect(apiMock).toHaveBeenCalledWith(expect.stringContaining("procoreSyncStatus=failed")));
+
     await vi.waitFor(() => expect(node.querySelector<HTMLButtonElement>('[aria-label="Open photo Roof damage"]')).toBeTruthy());
     node.querySelector<HTMLButtonElement>('[aria-label="Open photo Roof damage"]')?.click();
     await vi.waitFor(() => expect(apiMock).toHaveBeenCalledWith("/files/photo-1"));

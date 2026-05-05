@@ -2,6 +2,7 @@ import React, { useMemo, useState } from "react";
 import { Link, useSearchParams } from "react-router-dom";
 import { Upload } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import { PublicPhotoTokenPanel } from "@/components/photos/public-photo-token-panel";
 import {
   buildPhotoFilterSearchParams,
   filtersFromSearchParams,
@@ -68,10 +69,13 @@ export function DealPhotosTab({ dealId, onCountChange }: { dealId: string; onCou
           <h3 className="text-lg font-semibold">Photos</h3>
           <p className="text-sm text-muted-foreground">Project photo history, location context, and field documentation.</p>
         </div>
-        <Button nativeButton={false} render={<Link to={`/photos/capture?dealId=${encodeURIComponent(dealId)}`} />} size="sm">
-          <Upload className="mr-1.5 h-4 w-4" />
-          Upload
-        </Button>
+        <div className="flex items-center gap-2">
+          <PublicPhotoTokenPanel dealId={dealId} />
+          <Button nativeButton={false} render={<Link to={`/photos/capture?dealId=${encodeURIComponent(dealId)}`} />} size="sm">
+            <Upload className="mr-1.5 h-4 w-4" />
+            Upload
+          </Button>
+        </div>
       </div>
 
       <PhotoFilterBar filters={filters} uploaders={uploaders} onChange={updateFilters} />

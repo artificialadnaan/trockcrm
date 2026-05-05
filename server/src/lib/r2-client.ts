@@ -186,6 +186,27 @@ export async function headObject(
   }
 }
 
+export async function getObjectBuffer(
+  r2Key: string
+): Promise<{ buffer: Buffer; contentType?: string; contentLength?: number }> {
+  const client = getClient();
+  const bucket = getBucket();
+  const resp = await client.send(
+    new GetObjectCommand({ Bucket: bucket, Key: r2Key })
+  );
+  const chunks: Uint8Array[] = [];
+  const stream = resp.Body as AsyncIterable<Uint8Array> | undefined;
+  if (!stream) throw new Error(`R2 object ${r2Key} has no body`);
+  for await (const chunk of stream) {
+    chunks.push(chunk);
+  }
+  return {
+    buffer: Buffer.concat(chunks),
+    contentType: resp.ContentType,
+    contentLength: resp.ContentLength,
+  };
+}
+
 /**
  * Delete an object from R2 (soft-delete in DB, hard-delete in R2).
  * Used for cleanup of orphaned uploads or permanent deletions.

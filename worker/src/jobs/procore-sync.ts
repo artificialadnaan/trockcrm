@@ -3,6 +3,11 @@
 // Also exports runProcoreSync() for 15-minute periodic poll.
 
 import { pool } from "../db.js";
+import {
+  ensurePublicPhotoLinkForDeal,
+  ensureTRockPhotosAlbumForDeal,
+  enqueueProcorePhotoBatch,
+} from "./procore-photos.js";
 
 const SERVER_PROCORE_SYNC_MODULES = [
   "../../../server/dist/modules/procore/sync-service.js",
@@ -158,6 +163,9 @@ async function handleCreateProject(
       );
       await client.query("COMMIT");
       transactionOpen = false;
+      await ensureTRockPhotosAlbumForDeal({ officeId, schemaName, dealId });
+      await ensurePublicPhotoLinkForDeal({ officeId, schemaName, dealId });
+      await enqueueProcorePhotoBatch({ officeId, dealId });
       return;
     }
 
@@ -217,6 +225,9 @@ async function handleCreateProject(
     console.log(
       `[Procore:worker] Created project ${procoreProjectId} for deal ${dealId}`
     );
+    await ensureTRockPhotosAlbumForDeal({ officeId, schemaName, dealId });
+    await ensurePublicPhotoLinkForDeal({ officeId, schemaName, dealId });
+    await enqueueProcorePhotoBatch({ officeId, dealId });
   } catch (error) {
     if (transactionOpen) {
       await client.query("ROLLBACK").catch(() => {});

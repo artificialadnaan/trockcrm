@@ -46,6 +46,7 @@ export interface AdminPhotoAuditFilter {
   to?: string;
   dealId?: string;
   photoId?: string;
+  procoreSyncStatuses?: string[];
   page?: number;
   perPage?: number;
 }
@@ -157,6 +158,9 @@ function buildAdminConditions(filter: AdminPhotoAuditFilter): SQL[] {
   if (filter.to) conditions.push(sql`pal.created_at <= (${filter.to}::date + INTERVAL '1 day')::timestamptz`);
   if (filter.dealId) conditions.push(sql`f.deal_id = ${filter.dealId}::uuid`);
   if (filter.photoId) conditions.push(sql`pal.photo_id = ${filter.photoId}::uuid`);
+  if (filter.procoreSyncStatuses?.length) {
+    conditions.push(sql`f.procore_sync_status IN (${sql.join(filter.procoreSyncStatuses.map((status) => sql`${status}`), sql`, `)})`);
+  }
   return conditions;
 }
 

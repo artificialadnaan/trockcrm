@@ -9,6 +9,7 @@ import { runWeeklyDigest } from "./weekly-digest.js";
 import { runColdLeadWarming } from "./cold-lead-warming.js";
 import { runBidDeadlineCountdown } from "./bid-deadline.js";
 import { handleProcoreSyncJob, handleProcoreWebhookJob, runProcoreSync } from "./procore-sync.js";
+import { enqueueProcorePhotoSingle, handleProcorePhotoSyncJob } from "./procore-photos.js";
 import { handleTaskCompletedEvent } from "./task-completed.js";
 import { runAiIndexDocument } from "./ai-index-document.js";
 import { runAiBackfillDocuments } from "./ai-backfill-documents.js";
@@ -201,6 +202,10 @@ export function registerAllJobs() {
   // Procore sync job (dispatched by event handlers in the API server)
   registerJobHandler("procore_sync", async (payload) => {
     await handleProcoreSyncJob(payload);
+  });
+
+  registerJobHandler("procore_photo_sync", async (payload, officeId) => {
+    await handleProcorePhotoSyncJob(payload, officeId);
   });
 
   // Procore webhook processing (dispatched by webhook receiver)
@@ -990,10 +995,33 @@ export function registerAllJobs() {
         mimeType: payload.mimeType,
         category: payload.category,
       });
+      const resolved = await resolveOfficeSchema(
+        (await import("../db.js")).pool,
+        payload.officeId ?? officeId,
+        payload.userId ?? payload.uploadedBy
+      );
+      if (resolved && payload.dealId && payload.fileId) {
+        const { pool: workerPool } = await import("../db.js");
+        const dealResult = await workerPool.query(
+          `SELECT procore_project_id, procore_photo_link_id, procore_photo_link_status
+           FROM ${resolved.schemaName}.deals
+           WHERE id = $1
+           LIMIT 1`,
+          [payload.dealId]
+        );
+        const deal = dealResult.rows[0];
+        if (deal?.procore_project_id && (deal.procore_photo_link_id || deal.procore_photo_link_status === "created")) {
+          await enqueueProcorePhotoSingle({
+            officeId: resolved.officeId,
+            dealId: payload.dealId,
+            photoId: payload.fileId,
+          });
+        }
+      }
     }
   });
 
-  console.log("[Worker] Job handlers registered:", ["test_echo", "domain_event", "stale_deal_scan", "dedup_scan", "email_sync", "daily_task_generation", "activity_drop_detection", "weekly_digest", "cold_lead_warming", "bid_deadline_countdown", "procore_sync", "procore_webhook", "procore_poll"].join(", "));
+  console.log("[Worker] Job handlers registered:", ["test_echo", "domain_event", "stale_deal_scan", "dedup_scan", "email_sync", "daily_task_generation", "activity_drop_detection", "weekly_digest", "cold_lead_warming", "bid_deadline_countdown", "procore_sync", "procore_photo_sync", "procore_webhook", "procore_poll"].join(", "));
 }
 
 export { domainEventHandlers };
