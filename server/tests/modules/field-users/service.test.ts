@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const dbMocks = vi.hoisted(() => ({
   execute: vi.fn(),
+  transaction: vi.fn(),
 }));
 const emailMocks = vi.hoisted(() => ({
   sendSystemEmail: vi.fn(),
@@ -51,6 +52,10 @@ describe("field user service helpers", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     emailMocks.sendSystemEmail.mockResolvedValue(true);
+    authMocks.signJwt.mockReturnValue("jwt-token");
+    dbMocks.transaction.mockImplementation(async (callback: (tx: { execute: typeof dbMocks.execute }) => Promise<unknown>) => (
+      callback({ execute: dbMocks.execute })
+    ));
   });
 
   afterEach(() => {
@@ -383,12 +388,12 @@ describe("field user service helpers", () => {
 
     expect(authMocks.hashPassword).toHaveBeenCalledWith("correct-password-12");
     expect(authMocks.signJwt).toHaveBeenCalledWith(expect.objectContaining({
+      userId: result.user.id,
       role: "field_contractor",
       authMethod: "local",
     }));
     expect(result.token).toBe("jwt-token");
-    expect(result.user).toEqual({
-      id: "user-1",
+    expect(result.user).toMatchObject({
       email: "field@example.com",
       firstName: "Field",
       lastName: "User",
@@ -396,6 +401,88 @@ describe("field user service helpers", () => {
       tenantId: "11111111-1111-1111-1111-111111111111",
       active: true,
     });
+    expect(result.user.id).toMatch(/^[0-9a-f-]{36}$/);
+    expect(dbMocks.transaction).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not create a user or accept an invite when JWT signing fails", async () => {
+    dbMocks.execute
+      .mockResolvedValueOnce({ rows: [{
+        id: "invite-1",
+        email: "field@example.com",
+        first_name: "Field",
+        last_name: "User",
+        phone: null,
+        tenant_id: "11111111-1111-1111-1111-111111111111",
+        invited_by_user_id: "22222222-2222-2222-2222-222222222222",
+        expires_at: new Date(Date.now() + 60_000),
+        accepted_at: null,
+        revoked_at: null,
+      }] })
+      .mockResolvedValueOnce({ rows: [] });
+    authMocks.signJwt.mockImplementationOnce(() => {
+      throw new Error("JWT signing unavailable");
+    });
+
+    await expect(acceptFieldInvite({ token: "raw-token", password: "correct-password-12" }))
+      .rejects.toThrow("JWT signing unavailable");
+
+    expect(authMocks.hashPassword).toHaveBeenCalledWith("correct-password-12");
+    expect(dbMocks.transaction).not.toHaveBeenCalled();
+    expect(dbMocks.execute).toHaveBeenCalledTimes(2);
+  });
+
+  it("does not create a user or accept an invite when response preparation fails", async () => {
+    dbMocks.execute
+      .mockResolvedValueOnce({ rows: [{
+        id: "invite-1",
+        email: "field@example.com",
+        first_name: "Field",
+        last_name: "User",
+        phone: null,
+        tenant_id: null,
+        invited_by_user_id: "22222222-2222-2222-2222-222222222222",
+        expires_at: new Date(Date.now() + 60_000),
+        accepted_at: null,
+        revoked_at: null,
+      }] })
+      .mockResolvedValueOnce({ rows: [] });
+
+    await expect(acceptFieldInvite({ token: "raw-token", password: "correct-password-12" }))
+      .rejects.toThrow("Invite is missing tenant context");
+
+    expect(authMocks.hashPassword).toHaveBeenCalledWith("correct-password-12");
+    expect(authMocks.signJwt).not.toHaveBeenCalled();
+    expect(dbMocks.transaction).not.toHaveBeenCalled();
+    expect(dbMocks.execute).toHaveBeenCalledTimes(2);
+  });
+
+  it("keeps invite acceptance inside the transaction so database failures roll back", async () => {
+    dbMocks.execute
+      .mockResolvedValueOnce({ rows: [{
+        id: "invite-1",
+        email: "field@example.com",
+        first_name: "Field",
+        last_name: "User",
+        phone: null,
+        tenant_id: "11111111-1111-1111-1111-111111111111",
+        invited_by_user_id: "22222222-2222-2222-2222-222222222222",
+        expires_at: new Date(Date.now() + 60_000),
+        accepted_at: null,
+        revoked_at: null,
+      }] })
+      .mockResolvedValueOnce({ rows: [] });
+    dbMocks.transaction.mockRejectedValueOnce(new Error("duplicate key value violates unique constraint"));
+
+    await expect(acceptFieldInvite({ token: "raw-token", password: "correct-password-12" }))
+      .rejects.toThrow("duplicate key value violates unique constraint");
+
+    expect(authMocks.signJwt).toHaveBeenCalledWith(expect.objectContaining({
+      role: "field_contractor",
+      authMethod: "local",
+    }));
+    expect(dbMocks.transaction).toHaveBeenCalledTimes(1);
+    expect(dbMocks.execute).toHaveBeenCalledTimes(2);
   });
 
   it("rejects expired, revoked, and already accepted invites", async () => {
