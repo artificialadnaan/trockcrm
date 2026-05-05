@@ -6,6 +6,7 @@ import { FileFolderTree } from "./file-folder-tree";
 import { FileList } from "./file-list";
 import { FileSearchBar } from "./file-search-bar";
 import { FileVersionHistory } from "./file-version-history";
+import { DealFilePhotosSubview } from "./deal-file-photos-subview";
 import {
   useFiles,
   useDealFolders,
@@ -19,6 +20,7 @@ interface DealFileTabProps {
 }
 
 export function DealFileTab({ dealId }: DealFileTabProps) {
+  const [activeSubview, setActiveSubview] = useState<"all" | "photos">("all");
   const [selectedFolder, setSelectedFolder] = useState<string | null>(null);
   const [search, setSearch] = useState("");
   const [page, setPage] = useState(1);
@@ -105,7 +107,7 @@ export function DealFileTab({ dealId }: DealFileTabProps) {
       </div>
 
       {/* Upload Zone (collapsible) */}
-      {showUpload && (
+      {showUpload && activeSubview === "all" && (
         <FileUploadZone
           category={uploadCategory}
           subcategory={uploadSubcategory}
@@ -114,50 +116,75 @@ export function DealFileTab({ dealId }: DealFileTabProps) {
         />
       )}
 
-      {/* Main Content: Sidebar + File List */}
-      <div className="flex gap-4">
-        {/* Folder Tree Sidebar */}
-        <div className="w-52 flex-shrink-0 border-r pr-3 hidden md:block">
-          <FileFolderTree
-            folders={folders}
-            selectedPath={selectedFolder}
-            onSelectPath={(path) => {
-              setSelectedFolder(path);
-              setPage(1);
-            }}
-            loading={foldersLoading}
-          />
-        </div>
-
-        {/* File List Area */}
-        <div className="flex-1 min-w-0 space-y-3">
-          <FileSearchBar
-            value={search}
-            onChange={(v) => {
-              setSearch(v);
-              setPage(1);
-            }}
-          />
-
-          <FileList
-            files={files}
-            pagination={pagination}
-            loading={filesLoading}
-            error={error}
-            onPageChange={setPage}
-            onDownload={handleDownload}
-            onDelete={handleDelete}
-            onViewVersions={setVersionFileId}
-            emptyMessage={
-              search
-                ? "No files match your search."
-                : selectedFolder
-                  ? "No files in this folder."
-                  : "No files uploaded yet. Click Upload to add files."
-            }
-          />
-        </div>
+      <div className="inline-flex rounded-md border bg-background p-0.5">
+        <button
+          type="button"
+          aria-pressed={activeSubview === "all"}
+          aria-label="Show All Files sub-view"
+          className={`rounded px-3 py-1.5 text-sm font-medium ${activeSubview === "all" ? "bg-foreground text-background" : "text-muted-foreground hover:text-foreground"}`}
+          onClick={() => setActiveSubview("all")}
+        >
+          All Files
+        </button>
+        <button
+          type="button"
+          aria-pressed={activeSubview === "photos"}
+          aria-label="Show Photos files sub-view"
+          className={`rounded px-3 py-1.5 text-sm font-medium ${activeSubview === "photos" ? "bg-foreground text-background" : "text-muted-foreground hover:text-foreground"}`}
+          onClick={() => setActiveSubview("photos")}
+        >
+          Photos
+        </button>
       </div>
+
+      {/* Main Content: Sidebar + File List */}
+      {activeSubview === "photos" ? (
+        <DealFilePhotosSubview dealId={dealId} />
+      ) : (
+        <div className="flex gap-4">
+          {/* Folder Tree Sidebar */}
+          <div className="w-52 flex-shrink-0 border-r pr-3 hidden md:block">
+            <FileFolderTree
+              folders={folders}
+              selectedPath={selectedFolder}
+              onSelectPath={(path) => {
+                setSelectedFolder(path);
+                setPage(1);
+              }}
+              loading={foldersLoading}
+            />
+          </div>
+
+          {/* File List Area */}
+          <div className="flex-1 min-w-0 space-y-3">
+            <FileSearchBar
+              value={search}
+              onChange={(v) => {
+                setSearch(v);
+                setPage(1);
+              }}
+            />
+
+            <FileList
+              files={files}
+              pagination={pagination}
+              loading={filesLoading}
+              error={error}
+              onPageChange={setPage}
+              onDownload={handleDownload}
+              onDelete={handleDelete}
+              onViewVersions={setVersionFileId}
+              emptyMessage={
+                search
+                  ? "No files match your search."
+                  : selectedFolder
+                    ? "No files in this folder."
+                    : "No files uploaded yet. Click Upload to add files."
+              }
+            />
+          </div>
+        </div>
+      )}
     </div>
   );
 }
