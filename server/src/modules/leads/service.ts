@@ -21,6 +21,7 @@ import {
 } from "@trock-crm/shared/types";
 import { db } from "../../db.js";
 import { AppError } from "../../middleware/error-handler.js";
+import { createAssignmentTaskIfNeeded } from "../assignment-tasks/service.js";
 import { getActiveProjectTypes, getAllStages, getStageById, getStageBySlug } from "../pipeline/service.js";
 import { assertLeadStageTransitionAllowed, LeadStageTransitionError } from "./stage-transition-service.js";
 import { preflightLeadStageCheck } from "./stage-gate.js";
@@ -57,6 +58,7 @@ export interface CreateLeadInput {
   propertyId: string;
   stageId?: string;
   assignedRepId: string;
+  actorUserId?: string;
   salesRepId?: string | null;
   officeId?: string;
   primaryContactId?: string | null;
@@ -1292,6 +1294,18 @@ export function createLeadService(
       }
     }
 
+    if (input.actorUserId) {
+      await createAssignmentTaskIfNeeded(tenantDb, {
+        entityType: "lead",
+        entityId: lead.id,
+        entityName: lead.name,
+        previousAssignedRepId: null,
+        nextAssignedRepId: lead.assignedRepId,
+        actorUserId: input.actorUserId,
+        officeId: input.officeId ?? null,
+      });
+    }
+
     return lead;
   }
 
@@ -1343,6 +1357,8 @@ export function createLeadService(
     const updates: Record<string, unknown> = {};
     const effectiveProjectTypeId =
       input.projectTypeId !== undefined ? input.projectTypeId : existing.projectTypeId;
+    const nextAssignedRepId =
+      input.assignedRepId !== undefined ? input.assignedRepId : existing.assignedRepId;
     let stageChangeAuditRecord:
       | {
           leadId: string;
@@ -1565,6 +1581,21 @@ export function createLeadService(
           changedAt: updateTime,
         });
       }
+    }
+
+    if (
+      input.assignedRepId !== undefined &&
+      input.assignedRepId !== existing.assignedRepId
+    ) {
+      await createAssignmentTaskIfNeeded(tenantDb, {
+        entityType: "lead",
+        entityId: lead.id,
+        entityName: lead.name,
+        previousAssignedRepId: existing.assignedRepId,
+        nextAssignedRepId,
+        actorUserId: userId,
+        officeId: input.officeId ?? null,
+      });
     }
 
     return lead;

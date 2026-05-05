@@ -623,6 +623,8 @@ function createFakeTenantDb(initialState?: Partial<FakeTenantState>) {
         city: "Miami",
         state: "FL",
         zip: "33101",
+        buildYear: 1998,
+        unitCount: 120,
         isActive: true,
       },
     ],
@@ -1212,6 +1214,7 @@ describe("Lead Service", () => {
     const tenantDb = createFakeTenantDb();
     const service = createLeadService({
       getStageById: async () => newLeadStage,
+      getActiveProjectTypes: async () => tenantDb.state.projectTypes,
       now: () => new Date("2026-04-15T15:00:00.000Z"),
     });
 
@@ -1220,10 +1223,15 @@ describe("Lead Service", () => {
       propertyId: "property-1",
       stageId: "lead-stage-1",
       assignedRepId: "rep-1",
+      primaryContactId: "contact-1",
+      primaryContactRole: "property_manager",
       name: "Palm Villas repaint",
       source: "Referral",
       officeCode: "dfw",
       projectType: "commercial",
+      projectTypeId: "project-type-multifamily",
+      budgetStatus: "budgeted_q1",
+      bidDueDate: "2026-12-01",
       description: "Property manager requested pre-bid walk",
     });
 
