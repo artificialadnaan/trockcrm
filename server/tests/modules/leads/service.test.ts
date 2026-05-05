@@ -22,12 +22,18 @@ const pipelineMocks = vi.hoisted(() => ({
   getStageBySlug: vi.fn(),
   getActiveProjectTypes: vi.fn(),
 }));
+const assignmentTaskMocks = vi.hoisted(() => ({
+  createAssignmentTaskIfNeeded: vi.fn(),
+}));
 
 vi.mock("../../../src/modules/pipeline/service.js", () => ({
   getAllStages: pipelineMocks.getAllStages,
   getStageById: pipelineMocks.getStageById,
   getStageBySlug: pipelineMocks.getStageBySlug,
   getActiveProjectTypes: pipelineMocks.getActiveProjectTypes,
+}));
+vi.mock("../../../src/modules/assignment-tasks/service.js", () => ({
+  createAssignmentTaskIfNeeded: assignmentTaskMocks.createAssignmentTaskIfNeeded,
 }));
 
 vi.mock("@trock-crm/shared/schema", async () => import("../../../../shared/src/schema/index.js"));
@@ -389,6 +395,7 @@ const customTargetStage = {
 beforeEach(() => {
   pipelineMocks.getStageById.mockReset();
   pipelineMocks.getActiveProjectTypes.mockReset();
+  assignmentTaskMocks.createAssignmentTaskIfNeeded.mockReset();
 
   pipelineMocks.getActiveProjectTypes.mockResolvedValue([
     {
@@ -588,6 +595,70 @@ describe("lead service canonical progression", () => {
       } else {
         process.env.ENABLE_LEAD_EDIT_V2 = previousFlag;
       }
+    }
+  });
+
+  it("creates a lead assignment task when actorUserId is provided on create", async () => {
+    const previousFlag = process.env.ENABLE_LEAD_EDIT_V2;
+    process.env.ENABLE_LEAD_EDIT_V2 = "false";
+    const tenantDb = createFakeTenantDb({
+      id: "lead-existing",
+      companyId: "company-1",
+      propertyId: "property-1",
+      primaryContactId: "contact-1",
+      name: "Existing",
+      stageId: newLeadStage.id,
+      assignedRepId: "rep-1",
+      status: "open",
+      source: "Referral",
+      description: null,
+      stageEnteredAt: new Date("2026-04-12T15:00:00.000Z"),
+      convertedAt: null,
+      isActive: true,
+      createdAt: new Date("2026-04-12T15:00:00.000Z"),
+      updatedAt: new Date("2026-04-12T15:00:00.000Z"),
+    });
+    tenantDb.state.projectTypes = [{ id: "project-type-commercial", name: "Commercial", slug: "commercial", parentId: null }];
+    const service = createLeadService({
+      getStageById: pipelineMocks.getStageById as never,
+      getActiveProjectTypes: pipelineMocks.getActiveProjectTypes as never,
+      now: () => new Date("2026-04-15T15:00:00.000Z"),
+    });
+
+    try {
+      const lead = await service.createLead(tenantDb as never, {
+        companyId: "company-1",
+        propertyId: "property-1",
+        stageId: newLeadStage.id,
+        assignedRepId: "rep-1",
+        actorUserId: "director-1",
+        officeId: "office-1",
+        primaryContactId: "contact-1",
+        primaryContactRole: "property_manager",
+        name: "Created Lead",
+        source: "Referral",
+        officeCode: "dfw",
+        projectType: "commercial",
+        projectTypeId: "project-type-commercial",
+        budgetStatus: "budgeted_q3",
+        bidDueDate: "2026-06-01",
+      });
+
+      expect(assignmentTaskMocks.createAssignmentTaskIfNeeded).toHaveBeenCalledWith(
+        tenantDb,
+        expect.objectContaining({
+          entityType: "lead",
+          entityId: lead.id,
+          entityName: "Created Lead",
+          previousAssignedRepId: null,
+          nextAssignedRepId: "rep-1",
+          actorUserId: "director-1",
+          officeId: "office-1",
+        })
+      );
+    } finally {
+      if (previousFlag === undefined) delete process.env.ENABLE_LEAD_EDIT_V2;
+      else process.env.ENABLE_LEAD_EDIT_V2 = previousFlag;
     }
   });
 

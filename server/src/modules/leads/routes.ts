@@ -228,6 +228,7 @@ router.post("/", async (req, res, next) => {
       // gate. See feat/lead-due-diligence-routing branch.
       stageId: undefined,
       assignedRepId: repId,
+      actorUserId: req.user!.id,
       salesRepId: leadSalesRepId,
       officeId: req.user!.activeOfficeId,
       name,
