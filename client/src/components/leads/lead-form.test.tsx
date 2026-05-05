@@ -1,31 +1,42 @@
+/**
+ * @vitest-environment jsdom
+ */
 import * as React from "react";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { act } from "react";
+import { createRoot, type Root } from "react-dom/client";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { renderToStaticMarkup } from "react-dom/server";
 import { MemoryRouter } from "react-router-dom";
 import { LeadForm } from "./lead-form";
+import type { PropertySurface } from "@/hooks/use-properties";
+
+(globalThis as unknown as { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
 const projectTypes = [{ id: "type-1", name: "Multifamily", slug: "multifamily" }];
 const projectTypeHierarchy = [{ id: "type-1", name: "Multifamily", children: [] as Array<{ id: string; name: string }> }];
-const properties = [
+const completeProperty: PropertySurface = {
+  id: "property-1",
+  companyId: "company-1",
+  companyName: "Acme",
+  name: "Palm Villas",
+  address: "123 Main",
+  city: "Dallas",
+  state: "TX",
+  zip: "75001",
+  buildYear: 2001,
+  unitCount: 120,
+  notes: null,
+  isActive: true,
+  createdAt: "2026-04-22T00:00:00.000Z",
+  updatedAt: "2026-04-22T00:00:00.000Z",
+  leadCount: 0,
+  dealCount: 0,
+  convertedDealCount: 0,
+  lastActivityAt: null,
+};
+let properties = [
   {
-    id: "property-1",
-    companyId: "company-1",
-    companyName: "Acme",
-    name: "Palm Villas",
-    address: "123 Main",
-    city: "Dallas",
-    state: "TX",
-    zip: "75001",
-    buildYear: 2001,
-    unitCount: 120,
-    notes: null,
-    isActive: true,
-    createdAt: "2026-04-22T00:00:00.000Z",
-    updatedAt: "2026-04-22T00:00:00.000Z",
-    leadCount: 0,
-    dealCount: 0,
-    convertedDealCount: 0,
-    lastActivityAt: null,
+    ...completeProperty,
   },
 ];
 const contacts = [{ id: "contact-1", firstName: "Ada", lastName: "Lovelace" }];
@@ -36,6 +47,9 @@ const leadHookMocks = vi.hoisted(() => ({
     questionnaire: null,
     loading: false,
   })),
+}));
+const propertyHookMocks = vi.hoisted(() => ({
+  updateProperty: vi.fn(),
 }));
 const authMocks = vi.hoisted(() => ({
   user: {
@@ -71,6 +85,7 @@ vi.mock("@/hooks/use-properties", () => ({
     properties,
   }),
   formatPropertyLabel: () => "Palm Villas",
+  updateProperty: propertyHookMocks.updateProperty,
 }));
 
 vi.mock("@/hooks/use-companies", () => ({
@@ -207,16 +222,76 @@ vi.mock("./lead-stage-badge", () => ({
 }));
 
 describe("LeadForm", () => {
+  let container: HTMLDivElement;
+  let root: Root;
+
   beforeEach(() => {
     vi.clearAllMocks();
+    properties = [{ ...completeProperty }];
     authMocks.user.role = "rep";
     authMocks.user.id = "rep-1";
     authMocks.user.displayName = "Rep One";
+    leadHookMocks.createLead.mockResolvedValue({ lead: { id: "lead-created" } });
+    propertyHookMocks.updateProperty.mockResolvedValue({ property: { ...completeProperty } });
     leadHookMocks.useLeadQuestionnaireTemplate.mockReturnValue({
       questionnaire: null,
       loading: false,
     });
+    container = document.createElement("div");
+    document.body.appendChild(container);
   });
+
+  afterEach(async () => {
+    if (root) {
+      await act(async () => {
+        root.unmount();
+      });
+    }
+    container.remove();
+  });
+
+  function renderCreateForm(initialValues: Record<string, unknown> = {}) {
+    act(() => {
+      root = createRoot(container);
+      root.render(
+        <MemoryRouter>
+          <LeadForm
+            mode="create"
+            initialValues={{
+              companyId: "company-1",
+              propertyId: "property-1",
+              primaryContactId: "contact-1",
+              primaryContactRole: "property_manager",
+              name: "Lead One",
+              source: "Referral",
+              description: "",
+              projectTypeId: "type-1",
+              bidDueDate: "2026-06-01",
+              budgetStatus: "budgeted_q1",
+              ...initialValues,
+            }}
+          />
+        </MemoryRouter>
+      );
+    });
+  }
+
+  async function setInputValue(input: HTMLInputElement, value: string) {
+    await act(async () => {
+      const valueSetter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, "value")?.set;
+      valueSetter?.call(input, value);
+      input.dispatchEvent(new Event("input", { bubbles: true }));
+      input.dispatchEvent(new Event("change", { bubbles: true }));
+    });
+  }
+
+  async function submitForm() {
+    const form = container.querySelector("form");
+    expect(form).toBeTruthy();
+    await act(async () => {
+      form?.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+    });
+  }
 
   it("renders source as an editable field in edit mode so New Lead gate requirements can be satisfied", () => {
     const html = renderToStaticMarkup(
@@ -585,6 +660,155 @@ describe("LeadForm", () => {
     expect(html).not.toContain("Lead questionnaire template is misconfigured");
     expect(html).toContain('id="bidDueDate" type="date" value="2026-06-01"');
     expect(html).toContain("<button type=\"submit\">Create Lead</button>");
+  });
+
+  it("renders a Year Built repair input when the selected property is missing buildYear", () => {
+    properties = [{ ...completeProperty, buildYear: null }];
+
+    const html = renderToStaticMarkup(
+      <MemoryRouter>
+        <LeadForm
+          mode="create"
+          initialValues={{
+            companyId: "company-1",
+            propertyId: "property-1",
+            primaryContactId: "contact-1",
+            primaryContactRole: "property_manager",
+            name: "Lead One",
+            source: "Referral",
+            description: "",
+            bidDueDate: "2026-06-01",
+            budgetStatus: "budgeted_q1",
+            projectTypeId: "type-1",
+          }}
+        />
+      </MemoryRouter>
+    );
+
+    expect(html).toContain("This property is missing required information");
+    expect(html).toContain("Year Built");
+    expect(html).not.toContain("Number of Units");
+    expect(html).toContain("Year built must be between");
+  });
+
+  it("renders a Number of Units repair input when the selected property is missing unitCount", () => {
+    properties = [{ ...completeProperty, unitCount: null }];
+
+    const html = renderToStaticMarkup(
+      <MemoryRouter>
+        <LeadForm
+          mode="create"
+          initialValues={{
+            companyId: "company-1",
+            propertyId: "property-1",
+            primaryContactId: "contact-1",
+            primaryContactRole: "property_manager",
+            name: "Lead One",
+            source: "Referral",
+            description: "",
+            bidDueDate: "2026-06-01",
+            budgetStatus: "budgeted_q1",
+            projectTypeId: "type-1",
+          }}
+        />
+      </MemoryRouter>
+    );
+
+    expect(html).toContain("This property is missing required information");
+    expect(html).toContain("Number of Units");
+    expect(html).not.toContain("Year Built");
+    expect(html).toContain("Number of units must be a positive integer.");
+  });
+
+  it("renders both property repair inputs when buildYear and unitCount are missing", () => {
+    properties = [{ ...completeProperty, buildYear: null, unitCount: null }];
+
+    const html = renderToStaticMarkup(
+      <MemoryRouter>
+        <LeadForm
+          mode="create"
+          initialValues={{
+            companyId: "company-1",
+            propertyId: "property-1",
+            primaryContactId: "contact-1",
+            primaryContactRole: "property_manager",
+            name: "Lead One",
+            source: "Referral",
+            description: "",
+            bidDueDate: "2026-06-01",
+            budgetStatus: "budgeted_q1",
+            projectTypeId: "type-1",
+          }}
+        />
+      </MemoryRouter>
+    );
+
+    expect(html).toContain("Year Built");
+    expect(html).toContain("Number of Units");
+  });
+
+  it("does not render property repair inputs when buildYear and unitCount are populated", () => {
+    const html = renderToStaticMarkup(
+      <MemoryRouter>
+        <LeadForm
+          mode="create"
+          initialValues={{
+            companyId: "company-1",
+            propertyId: "property-1",
+            primaryContactId: "contact-1",
+            primaryContactRole: "property_manager",
+            name: "Lead One",
+            source: "Referral",
+            description: "",
+            bidDueDate: "2026-06-01",
+            budgetStatus: "budgeted_q1",
+            projectTypeId: "type-1",
+          }}
+        />
+      </MemoryRouter>
+    );
+
+    expect(html).not.toContain("This property is missing required information");
+    expect(html).not.toContain("property-repair-build-year");
+    expect(html).not.toContain("property-repair-unit-count");
+  });
+
+  it("updates repaired property values before creating the lead", async () => {
+    const calls: string[] = [];
+    properties = [{ ...completeProperty, buildYear: null, unitCount: null }];
+    propertyHookMocks.updateProperty.mockImplementation(async () => {
+      calls.push("updateProperty");
+      return { property: { ...completeProperty } };
+    });
+    leadHookMocks.createLead.mockImplementation(async () => {
+      calls.push("createLead");
+      return { lead: { id: "lead-created" } };
+    });
+
+    renderCreateForm();
+    await setInputValue(container.querySelector<HTMLInputElement>("#property-repair-build-year")!, "2010");
+    await setInputValue(container.querySelector<HTMLInputElement>("#property-repair-unit-count")!, "42");
+    await submitForm();
+
+    expect(propertyHookMocks.updateProperty).toHaveBeenCalledWith("property-1", {
+      buildYear: 2010,
+      unitCount: 42,
+    });
+    expect(leadHookMocks.createLead).toHaveBeenCalledTimes(1);
+    expect(calls).toEqual(["updateProperty", "createLead"]);
+  });
+
+  it("skips lead creation and shows an error if property repair fails", async () => {
+    properties = [{ ...completeProperty, buildYear: null }];
+    propertyHookMocks.updateProperty.mockRejectedValue(new Error("Property update failed"));
+
+    renderCreateForm();
+    await setInputValue(container.querySelector<HTMLInputElement>("#property-repair-build-year")!, "2010");
+    await submitForm();
+
+    expect(propertyHookMocks.updateProperty).toHaveBeenCalledWith("property-1", { buildYear: 2010 });
+    expect(leadHookMocks.createLead).not.toHaveBeenCalled();
+    expect(container.textContent).toContain("Failed to update property: Property update failed");
   });
 
   it("keeps table-backed questionnaire answers out of the summary rail when the v2 snapshot is present", () => {
