@@ -66,11 +66,33 @@ function normalizeOptionalPhone(phone: string | null | undefined): string | null
   return trimmed;
 }
 
-function isEmailUniqueViolation(err: any): boolean {
-  return err?.code === "23505" && (
-    typeof err.constraint === "string" && err.constraint.includes("email") ||
-    typeof err.detail === "string" && err.detail.includes("(email)")
-  );
+function isEmailUniqueViolation(err: unknown): boolean {
+  const candidates: unknown[] = [];
+  let current: unknown = err;
+
+  while (current && typeof current === "object" && !candidates.includes(current)) {
+    candidates.push(current);
+    current = (current as { cause?: unknown }).cause;
+  }
+
+  for (const candidate of [...candidates, ...candidates.map((candidate) => (candidate as { original?: unknown }).original)]) {
+    if (!candidate || typeof candidate !== "object") continue;
+
+    const errorLike = candidate as { code?: unknown; constraint?: unknown; detail?: unknown; message?: unknown };
+    const constraint = typeof errorLike.constraint === "string" ? errorLike.constraint.toLowerCase() : "";
+    const detail = typeof errorLike.detail === "string" ? errorLike.detail.toLowerCase() : "";
+    const message = typeof errorLike.message === "string" ? errorLike.message.toLowerCase() : "";
+
+    if (errorLike.code === "23505") {
+      return constraint.includes("email") || detail.includes("(email)") || message.includes("email");
+    }
+
+    if (message.includes("unique constraint") && message.includes("email")) {
+      return true;
+    }
+  }
+
+  return false;
 }
 
 export interface UpdateContactInput {
