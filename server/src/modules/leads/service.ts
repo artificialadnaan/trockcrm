@@ -28,6 +28,7 @@ import {
   evaluateLeadQuestionGate,
   isAnsweredQuestionValue,
   isLeadEditV2Enabled,
+  listQuestionnaireNodes,
   upsertLeadQuestionAnswerSet,
 } from "./questionnaire-service.js";
 import {
@@ -1217,19 +1218,25 @@ export function createLeadService(
       .returning();
 
     if (v2Enabled) {
+      const activeNodes = await listQuestionnaireNodes(tenantDb, input.projectTypeId ?? null);
+      const bidDueDateNodeAvailable = activeNodes.some((node) => node.key === "bid_due_date");
       // V2 mirror: lead_question_answers is kept in sync for edit-mode questionnaire UI.
-      // Source of truth is leads.bid_due_date.
+      // Source of truth is leads.bid_due_date. The mirror is best-effort and
+      // skipped when bid_due_date is not an active questionnaire node because
+      // upsertLeadQuestionAnswerSet rejects unknown keys.
       const v2MirrorAnswers = {
         ...leadQuestionAnswerInput,
-        bid_due_date: normalizedBidDueDate,
+        ...(bidDueDateNodeAvailable ? { bid_due_date: normalizedBidDueDate } : {}),
       };
-      await upsertLeadQuestionAnswerSet(tenantDb, {
-        leadId: lead.id,
-        projectTypeId: input.projectTypeId ?? null,
-        changedBy: input.assignedRepId,
-        answers: v2MirrorAnswers,
-        changedAt: now,
-      });
+      if (Object.keys(v2MirrorAnswers).length > 0) {
+        await upsertLeadQuestionAnswerSet(tenantDb, {
+          leadId: lead.id,
+          projectTypeId: input.projectTypeId ?? null,
+          changedBy: input.assignedRepId,
+          answers: v2MirrorAnswers,
+          changedAt: now,
+        });
+      }
     }
 
     // Verification email + company-side state. Fires only when this lead's
@@ -1539,18 +1546,25 @@ export function createLeadService(
       v2Enabled &&
       ((input.leadQuestionAnswers && Object.keys(input.leadQuestionAnswers).length > 0) || bidDueDateWasProvided)
     ) {
+      const activeNodes = await listQuestionnaireNodes(tenantDb, effectiveProjectTypeId ?? null);
+      const bidDueDateNodeAvailable = activeNodes.some((node) => node.key === "bid_due_date");
       // V2 mirror: lead_question_answers is kept in sync for edit-mode questionnaire UI.
-      // Source of truth is leads.bid_due_date.
-      await upsertLeadQuestionAnswerSet(tenantDb, {
-        leadId,
-        projectTypeId: effectiveProjectTypeId ?? null,
-        changedBy: userId,
-        answers: {
-          ...(input.leadQuestionAnswers ?? {}),
-          ...(bidDueDateWasProvided ? { bid_due_date: normalizedBidDueDate } : {}),
-        },
-        changedAt: updateTime,
-      });
+      // Source of truth is leads.bid_due_date. The mirror is best-effort and
+      // skipped when bid_due_date is not an active questionnaire node because
+      // upsertLeadQuestionAnswerSet rejects unknown keys.
+      const v2MirrorAnswers = {
+        ...(input.leadQuestionAnswers ?? {}),
+        ...(bidDueDateWasProvided && bidDueDateNodeAvailable ? { bid_due_date: normalizedBidDueDate } : {}),
+      };
+      if (Object.keys(v2MirrorAnswers).length > 0) {
+        await upsertLeadQuestionAnswerSet(tenantDb, {
+          leadId,
+          projectTypeId: effectiveProjectTypeId ?? null,
+          changedBy: userId,
+          answers: v2MirrorAnswers,
+          changedAt: updateTime,
+        });
+      }
     }
 
     return lead;

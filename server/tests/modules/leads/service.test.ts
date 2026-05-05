@@ -591,6 +591,195 @@ describe("lead service canonical progression", () => {
     }
   });
 
+  it("writes bid_due_date to the V2 mirror when the active questionnaire still has that node", async () => {
+    const previousFlag = process.env.ENABLE_LEAD_EDIT_V2;
+    process.env.ENABLE_LEAD_EDIT_V2 = "true";
+    const tenantDb = createFakeTenantDb({
+      id: "lead-existing",
+      companyId: "company-1",
+      propertyId: "property-1",
+      primaryContactId: "contact-1",
+      name: "Existing",
+      stageId: newLeadStage.id,
+      assignedRepId: "rep-1",
+      status: "open",
+      source: "Referral",
+      description: null,
+      stageEnteredAt: new Date("2026-04-12T15:00:00.000Z"),
+      convertedAt: null,
+      isActive: true,
+      createdAt: new Date("2026-04-12T15:00:00.000Z"),
+      updatedAt: new Date("2026-04-12T15:00:00.000Z"),
+    });
+    tenantDb.state.projectTypes = [{ id: "project-type-commercial", name: "Commercial", slug: "commercial", parentId: null }];
+    const service = createLeadService({
+      getStageById: pipelineMocks.getStageById as never,
+      getActiveProjectTypes: pipelineMocks.getActiveProjectTypes as never,
+      now: () => new Date("2026-04-15T15:00:00.000Z"),
+    });
+
+    try {
+      await service.createLead(tenantDb as never, {
+        companyId: "company-1",
+        propertyId: "property-1",
+        stageId: newLeadStage.id,
+        assignedRepId: "rep-1",
+        officeId: "office-1",
+        primaryContactId: "contact-1",
+        primaryContactRole: "property_manager",
+        name: "Created Lead",
+        source: "Referral",
+        officeCode: "dfw",
+        projectType: "commercial",
+        projectTypeId: "project-type-commercial",
+        budgetStatus: "budgeted_q3",
+        bidDueDate: "2026-06-01",
+      });
+
+      expect(tenantDb.state.leadQuestionAnswers).toEqual([
+        expect.objectContaining({
+          leadId: "lead-2",
+          questionId: "node-bid-due-date",
+          valueJson: "2026-06-01",
+        }),
+      ]);
+    } finally {
+      if (previousFlag === undefined) delete process.env.ENABLE_LEAD_EDIT_V2;
+      else process.env.ENABLE_LEAD_EDIT_V2 = previousFlag;
+    }
+  });
+
+  it("skips the bid_due_date V2 mirror when that node is not active during create", async () => {
+    const previousFlag = process.env.ENABLE_LEAD_EDIT_V2;
+    process.env.ENABLE_LEAD_EDIT_V2 = "true";
+    const tenantDb = createFakeTenantDb({
+      id: "lead-existing",
+      companyId: "company-1",
+      propertyId: "property-1",
+      primaryContactId: "contact-1",
+      name: "Existing",
+      stageId: newLeadStage.id,
+      assignedRepId: "rep-1",
+      status: "open",
+      source: "Referral",
+      description: null,
+      stageEnteredAt: new Date("2026-04-12T15:00:00.000Z"),
+      convertedAt: null,
+      isActive: true,
+      createdAt: new Date("2026-04-12T15:00:00.000Z"),
+      updatedAt: new Date("2026-04-12T15:00:00.000Z"),
+    });
+    tenantDb.state.projectTypes = [{ id: "project-type-commercial", name: "Commercial", slug: "commercial", parentId: null }];
+    tenantDb.state.projectTypeQuestionNodes = [];
+    const service = createLeadService({
+      getStageById: pipelineMocks.getStageById as never,
+      getActiveProjectTypes: pipelineMocks.getActiveProjectTypes as never,
+      now: () => new Date("2026-04-15T15:00:00.000Z"),
+    });
+
+    try {
+      const lead = await service.createLead(tenantDb as never, {
+        companyId: "company-1",
+        propertyId: "property-1",
+        stageId: newLeadStage.id,
+        assignedRepId: "rep-1",
+        officeId: "office-1",
+        primaryContactId: "contact-1",
+        primaryContactRole: "property_manager",
+        name: "Created Lead",
+        source: "Referral",
+        officeCode: "dfw",
+        projectType: "commercial",
+        projectTypeId: "project-type-commercial",
+        budgetStatus: "budgeted_q3",
+        bidDueDate: "2026-06-01",
+      });
+
+      expect(lead.bidDueDate).toBe("2026-06-01");
+      expect(tenantDb.state.leadQuestionAnswers).toHaveLength(0);
+      expect(tenantDb.state.leadQuestionAnswerHistory).toHaveLength(0);
+    } finally {
+      if (previousFlag === undefined) delete process.env.ENABLE_LEAD_EDIT_V2;
+      else process.env.ENABLE_LEAD_EDIT_V2 = previousFlag;
+    }
+  });
+
+  it("keeps other V2 answers when bid_due_date is not an active node during create", async () => {
+    const previousFlag = process.env.ENABLE_LEAD_EDIT_V2;
+    process.env.ENABLE_LEAD_EDIT_V2 = "true";
+    const tenantDb = createFakeTenantDb({
+      id: "lead-existing",
+      companyId: "company-1",
+      propertyId: "property-1",
+      primaryContactId: "contact-1",
+      name: "Existing",
+      stageId: newLeadStage.id,
+      assignedRepId: "rep-1",
+      status: "open",
+      source: "Referral",
+      description: null,
+      stageEnteredAt: new Date("2026-04-12T15:00:00.000Z"),
+      convertedAt: null,
+      isActive: true,
+      createdAt: new Date("2026-04-12T15:00:00.000Z"),
+      updatedAt: new Date("2026-04-12T15:00:00.000Z"),
+    });
+    tenantDb.state.projectTypes = [{ id: "project-type-commercial", name: "Commercial", slug: "commercial", parentId: null }];
+    tenantDb.state.projectTypeQuestionNodes = [{
+      id: "node-market-type",
+      projectTypeId: null,
+      parentNodeId: null,
+      parentOptionValue: null,
+      nodeType: "question",
+      key: "market_type",
+      label: "Market Type",
+      prompt: null,
+      inputType: "select",
+      options: [],
+      isRequired: false,
+      displayOrder: 20,
+      isActive: true,
+    }];
+    const service = createLeadService({
+      getStageById: pipelineMocks.getStageById as never,
+      getActiveProjectTypes: pipelineMocks.getActiveProjectTypes as never,
+      now: () => new Date("2026-04-15T15:00:00.000Z"),
+    });
+
+    try {
+      await service.createLead(tenantDb as never, {
+        companyId: "company-1",
+        propertyId: "property-1",
+        stageId: newLeadStage.id,
+        assignedRepId: "rep-1",
+        officeId: "office-1",
+        primaryContactId: "contact-1",
+        primaryContactRole: "property_manager",
+        name: "Created Lead",
+        source: "Referral",
+        officeCode: "dfw",
+        projectType: "commercial",
+        projectTypeId: "project-type-commercial",
+        budgetStatus: "budgeted_q3",
+        bidDueDate: "2026-06-01",
+        leadQuestionAnswers: { market_type: "multifamily" },
+      });
+
+      expect(tenantDb.state.leadQuestionAnswers).toEqual([
+        expect.objectContaining({
+          questionId: "node-market-type",
+          valueJson: "multifamily",
+        }),
+      ]);
+      expect(tenantDb.state.leadQuestionAnswers).not.toEqual(
+        expect.arrayContaining([expect.objectContaining({ questionId: "node-bid-due-date" })])
+      );
+    } finally {
+      if (previousFlag === undefined) delete process.env.ENABLE_LEAD_EDIT_V2;
+      else process.env.ENABLE_LEAD_EDIT_V2 = previousFlag;
+    }
+  });
+
   it("rejects unknown project type when creating a lead", async () => {
     const tenantDb = {
       select() {
@@ -1030,6 +1219,56 @@ describe("lead service canonical progression", () => {
 
     expect(lead.salesRepId).toBeNull();
     expect(lead.assignedRepId).toBe("rep-1");
+  });
+
+  it("skips the bid_due_date V2 mirror when that node is not active during update", async () => {
+    const previousFlag = process.env.ENABLE_LEAD_EDIT_V2;
+    process.env.ENABLE_LEAD_EDIT_V2 = "true";
+    const tenantDb = createFakeTenantDb({
+      id: "lead-1",
+      companyId: "company-1",
+      propertyId: "property-1",
+      primaryContactId: "contact-1",
+      name: "Palm Villas repaint",
+      stageId: newLeadStage.id,
+      assignedRepId: "rep-1",
+      salesRepId: "rep-1",
+      status: "open",
+      source: "Referral",
+      projectTypeId: "project-type-commercial",
+      bidDueDate: "2026-06-01",
+      qualificationPayload: {},
+      description: null,
+      stageEnteredAt: new Date("2026-04-12T15:00:00.000Z"),
+      convertedAt: null,
+      isActive: true,
+      createdAt: new Date("2026-04-12T15:00:00.000Z"),
+      updatedAt: new Date("2026-04-12T15:00:00.000Z"),
+    });
+    tenantDb.state.projectTypes = [{ id: "project-type-commercial", name: "Commercial", slug: "commercial", parentId: null }];
+    tenantDb.state.projectTypeQuestionNodes = [];
+    const service = createLeadService({
+      getStageById: pipelineMocks.getStageById as never,
+      getActiveProjectTypes: pipelineMocks.getActiveProjectTypes as never,
+      now: () => new Date("2026-04-15T15:00:00.000Z"),
+    });
+
+    try {
+      const lead = await service.updateLead(
+        tenantDb as never,
+        "lead-1",
+        { bidDueDate: "2026-07-15" },
+        "director",
+        "director-1"
+      );
+
+      expect(lead.bidDueDate).toBe("2026-07-15");
+      expect(tenantDb.state.leadQuestionAnswers).toHaveLength(0);
+      expect(tenantDb.state.leadQuestionAnswerHistory).toHaveLength(0);
+    } finally {
+      if (previousFlag === undefined) delete process.env.ENABLE_LEAD_EDIT_V2;
+      else process.env.ENABLE_LEAD_EDIT_V2 = previousFlag;
+    }
   });
 
   it("keeps an existing-customer lead in new_lead while create-time auto-promotion is disabled", async () => {
