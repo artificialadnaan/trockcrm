@@ -81,6 +81,18 @@ function renderPage(path = "/capture") {
 }
 
 describe("CapturePage", () => {
+  it("renders the gallery picker as a multi-image input without camera capture", async () => {
+    const node = renderPage("/capture?dealId=deal-1");
+    await vi.waitFor(() => expect(node.textContent).toContain("Roof Repair"));
+
+    const input = node.querySelector<HTMLInputElement>('input[aria-label="Gallery photo picker"]')!;
+    expect(input).toBeTruthy();
+    expect(input.type).toBe("file");
+    expect(input.accept).toBe("image/*");
+    expect(input.multiple).toBe(true);
+    expect(input.hasAttribute("capture")).toBe(false);
+  });
+
   it("opens the project picker, searches, selects a project, and single-selects category", async () => {
     const node = renderPage();
 

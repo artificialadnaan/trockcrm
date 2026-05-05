@@ -25,6 +25,32 @@ test("field invite acceptance, logout, login, and CRM route denial", async ({ pa
   ];
   let uploadedToR2 = false;
 
+  await page.addInitScript(() => {
+    Object.defineProperty(navigator, "mediaDevices", {
+      value: {
+        getUserMedia: async () => new MediaStream(),
+      },
+      configurable: true,
+    });
+    Object.defineProperty(navigator, "geolocation", {
+      value: {
+        getCurrentPosition: (success: PositionCallback) => success({
+          coords: {
+            latitude: 35.123456,
+            longitude: -97.123456,
+            accuracy: 10,
+            altitude: null,
+            altitudeAccuracy: null,
+            heading: null,
+            speed: null,
+          },
+          timestamp: Date.now(),
+        }),
+      },
+      configurable: true,
+    });
+  });
+
   page.on("request", (request) => {
     const url = request.url();
     if (url.includes("/api/")) apiRequestUrls.push(url);
@@ -202,15 +228,17 @@ test("field invite acceptance, logout, login, and CRM route denial", async ({ pa
   await page.getByRole("button", { name: "Choose project" }).click();
   await page.getByRole("button", { name: /Roof Repair/ }).click();
   await page.getByRole("button", { name: "Progress" }).click();
+  await page.getByRole("button", { name: "Capture photo" }).click();
+  await expect(page.getByText("1 photo in this session")).toBeVisible();
   await page.locator('input[type="file"]').setInputFiles({
     name: "gallery-photo.png",
     mimeType: "image/png",
     buffer: Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/p9sAAAAASUVORK5CYII=", "base64"),
   });
-  await expect(page.getByText("1 photo in this session")).toBeVisible();
+  await expect(page.getByText("2 photos in this session")).toBeVisible();
   await page.getByRole("button", { name: "Upload" }).click();
   await expect(page).toHaveURL(/\/projects\/deal-1$/);
-  await expect(page.getByText("Gallery upload")).toBeVisible();
+  await expect(page.getByText("Gallery upload")).toHaveCount(2);
   expect(uploadedToR2).toBe(true);
 
   await page.getByRole("button", { name: "Log out" }).click();
