@@ -192,3 +192,13 @@ export async function createProperty(input: {
 }) {
   return api<{ property: PropertySurface }>("/properties", { method: "POST", json: input });
 }
+
+export async function updateProperty(
+  propertyId: string,
+  input: {
+    buildYear?: number | null;
+    unitCount?: number | null;
+  }
+) {
+  return api<{ property: PropertySurface }>(`/properties/${propertyId}`, { method: "PATCH", json: input });
+}

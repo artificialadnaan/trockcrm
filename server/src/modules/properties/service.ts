@@ -31,6 +31,11 @@ export interface CreatePropertyInput {
   notes?: string | null;
 }
 
+export interface UpdatePropertyInput {
+  buildYear?: number | string | null;
+  unitCount?: number | string | null;
+}
+
 const US_STATE_PATTERN = /^[A-Z]{2}$/;
 const ZIP_PATTERN = /^\d{5}(-\d{4})?$/;
 
@@ -268,6 +273,33 @@ export async function createProperty(tenantDb: TenantDb, input: CreatePropertyIn
     .returning();
 
   return property;
+}
+
+export async function updateProperty(tenantDb: TenantDb, propertyId: string, input: UpdatePropertyInput) {
+  const patch: Partial<typeof properties.$inferInsert> = {};
+
+  if (Object.prototype.hasOwnProperty.call(input, "buildYear")) {
+    patch.buildYear = validateOptionalPropertyBuildYear(input.buildYear);
+  }
+  if (Object.prototype.hasOwnProperty.call(input, "unitCount")) {
+    patch.unitCount = validateOptionalPropertyUnitCount(input.unitCount);
+  }
+
+  if (Object.keys(patch).length === 0) {
+    const [existing] = await tenantDb.select().from(properties).where(eq(properties.id, propertyId)).limit(1);
+    return existing ?? null;
+  }
+
+  const [property] = await tenantDb
+    .update(properties)
+    .set({
+      ...patch,
+      updatedAt: new Date(),
+    })
+    .where(eq(properties.id, propertyId))
+    .returning();
+
+  return property ?? null;
 }
 
 export async function getPropertyDetail(tenantDb: TenantDb, propertyId: string) {

@@ -1,6 +1,6 @@
 import { Router } from "express";
 import { AppError } from "../../middleware/error-handler.js";
-import { createProperty, getPropertyDetail, listProperties } from "./service.js";
+import { createProperty, getPropertyDetail, listProperties, updateProperty } from "./service.js";
 
 const router = Router();
 
@@ -43,6 +43,22 @@ router.post("/", async (req, res, next) => {
     });
     await req.commitTransaction!();
     res.status(201).json({ property });
+  } catch (err) {
+    next(err);
+  }
+});
+
+router.patch("/:id", async (req, res, next) => {
+  try {
+    const property = await updateProperty(req.tenantDb!, req.params.id, {
+      buildYear: req.body.buildYear,
+      unitCount: req.body.unitCount,
+    });
+    if (!property) {
+      throw new AppError(404, "Property not found");
+    }
+    await req.commitTransaction!();
+    res.json({ property });
   } catch (err) {
     next(err);
   }

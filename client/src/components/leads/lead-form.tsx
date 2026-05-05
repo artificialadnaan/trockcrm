@@ -50,7 +50,7 @@ import {
   type LeadQuestionnaireSnapshot,
 } from "@/hooks/use-leads";
 import { usePipelineStages, useProjectTypes } from "@/hooks/use-pipeline-config";
-import { formatPropertyLabel, useProperties } from "@/hooks/use-properties";
+import { formatPropertyLabel, updateProperty, useProperties } from "@/hooks/use-properties";
 import { CATEGORY_LABELS } from "@/lib/contact-utils";
 import { isApiError } from "@/lib/api";
 import { useAuth } from "@/lib/auth";
@@ -296,6 +296,21 @@ function isAnsweredQuestionValue(value: LeadAnswerValue | undefined) {
   if (value == null) return false;
   if (typeof value === "string") return value.trim().length > 0;
   return true;
+}
+
+function parseIntegerInput(value: string) {
+  const trimmed = value.trim();
+  if (!trimmed) return null;
+  const parsed = Number.parseInt(trimmed, 10);
+  return Number.isNaN(parsed) ? null : parsed;
+}
+
+function isValidBuildYear(value: unknown, maxYear: number) {
+  return typeof value === "number" && Number.isInteger(value) && value >= 1800 && value <= maxYear;
+}
+
+function isPositiveInteger(value: unknown) {
+  return typeof value === "number" && Number.isInteger(value) && value > 0;
 }
 
 function QuestionLabel({
@@ -592,6 +607,13 @@ function EditableLeadForm({
   const [error, setError] = useState<string | null>(null);
   const [stageGateError, setStageGateError] = useState<LeadStageGateErrorState | null>(null);
   const [createGateMissingKeys, setCreateGateMissingKeys] = useState<string[]>([]);
+  const [propertyRepair, setPropertyRepair] = useState<{
+    buildYear: number | null;
+    unitCount: number | null;
+  }>({
+    buildYear: null,
+    unitCount: null,
+  });
 
   useEffect(() => {
     setFormData(getEditableFormState(lead, initialValues));
@@ -644,8 +666,27 @@ function EditableLeadForm({
     }));
   }, [companyId, contacts, isCreate, properties]);
 
+  useEffect(() => {
+    if (!isCreate) {
+      return;
+    }
+
+    setPropertyRepair({ buildYear: null, unitCount: null });
+  }, [formData.propertyId, isCreate]);
+
   const selectedProjectType = projectTypes.find((entry) => entry.id === formData.projectTypeId) ?? null;
   const selectedProperty = properties.find((property) => property.id === formData.propertyId) ?? null;
+  const maxPropertyBuildYear = new Date().getFullYear() + 2;
+  const propertyBuildYearNeedsRepair =
+    isCreate && Boolean(selectedProperty) && !isValidBuildYear(selectedProperty?.buildYear, maxPropertyBuildYear);
+  const propertyUnitCountNeedsRepair =
+    isCreate && Boolean(selectedProperty) && !isPositiveInteger(selectedProperty?.unitCount);
+  const effectivePropertyBuildYear = propertyBuildYearNeedsRepair
+    ? propertyRepair.buildYear
+    : selectedProperty?.buildYear ?? null;
+  const effectivePropertyUnitCount = propertyUnitCountNeedsRepair
+    ? propertyRepair.unitCount
+    : selectedProperty?.unitCount ?? null;
   const primaryContactSelectItems = useMemo(
     () => [
       { value: "__none__", label: "Optional" },
@@ -741,20 +782,10 @@ function EditableLeadForm({
       if (!selectedProperty.zip?.trim() || !/^\d{5}(-\d{4})?$/.test(selectedProperty.zip.trim())) {
         errors.set("property.zip", "ZIP must be 5 digits or ZIP+4.");
       }
-      const maxYear = new Date().getFullYear() + 2;
-      if (
-        !Number.isInteger(selectedProperty.buildYear) ||
-        selectedProperty.buildYear == null ||
-        selectedProperty.buildYear < 1800 ||
-        selectedProperty.buildYear > maxYear
-      ) {
-        errors.set("property.buildYear", `Year built must be between 1800 and ${maxYear}.`);
+      if (!isValidBuildYear(effectivePropertyBuildYear, maxPropertyBuildYear)) {
+        errors.set("property.buildYear", `Year built must be between 1800 and ${maxPropertyBuildYear}.`);
       }
-      if (
-        !Number.isInteger(selectedProperty.unitCount) ||
-        selectedProperty.unitCount == null ||
-        selectedProperty.unitCount <= 0
-      ) {
+      if (!isPositiveInteger(effectivePropertyUnitCount)) {
         errors.set("property.unitCount", "Number of units must be a positive integer.");
       }
     }
@@ -774,6 +805,8 @@ function EditableLeadForm({
     return errors;
   }, [
     createGateMissingKeys,
+    effectivePropertyBuildYear,
+    effectivePropertyUnitCount,
     formData.bidDueDate,
     formData.budgetStatus,
     formData.primaryContactId,
@@ -782,6 +815,7 @@ function EditableLeadForm({
     formData.projectTypeId,
     formData.projectTypeQuestionAnswers,
     isCreate,
+    maxPropertyBuildYear,
     selectedProperty,
   ]);
   const createSubmitDisabled = isCreate && (questionnaireTemplateLoading || createRequirementErrors.size > 0);
@@ -842,6 +876,13 @@ function EditableLeadForm({
   const handleFieldChange = (field: keyof typeof formData, value: string) => {
     setFormData((current) => ({ ...current, [field]: value }));
     clearCreateGateMissingKeysForField(field);
+  };
+
+  const handlePropertyRepairChange = (field: keyof typeof propertyRepair, value: string) => {
+    setPropertyRepair((current) => ({ ...current, [field]: parseIntegerInput(value) }));
+    clearCreateGateMissingKeys([
+      field === "buildYear" ? "property.buildYear" : "property.unitCount",
+    ]);
   };
 
   const renderCreateFieldError = (fieldKey: string) =>
@@ -1035,6 +1076,23 @@ function EditableLeadForm({
       };
 
       if (isCreate) {
+        if (selectedProperty && (propertyBuildYearNeedsRepair || propertyUnitCountNeedsRepair)) {
+          const propertyPatch: { buildYear?: number; unitCount?: number } = {};
+          if (propertyBuildYearNeedsRepair && propertyRepair.buildYear != null) {
+            propertyPatch.buildYear = propertyRepair.buildYear;
+          }
+          if (propertyUnitCountNeedsRepair && propertyRepair.unitCount != null) {
+            propertyPatch.unitCount = propertyRepair.unitCount;
+          }
+
+          try {
+            await updateProperty(selectedProperty.id, propertyPatch);
+          } catch (err) {
+            setError(`Failed to update property: ${err instanceof Error ? err.message : "Unknown error"}`);
+            return;
+          }
+        }
+
         const result = await createLead({
           companyId: formData.companyId,
           propertyId: formData.propertyId,
@@ -1163,13 +1221,55 @@ function EditableLeadForm({
                       {selectedProperty.unitCount ? ` · ${selectedProperty.unitCount} units` : ""}
                     </p>
                   ) : null}
+                  {propertyBuildYearNeedsRepair || propertyUnitCountNeedsRepair ? (
+                    <div className="rounded-md border border-amber-200 bg-amber-50 px-3 py-3">
+                      <p className="text-sm font-medium text-amber-900">
+                        This property is missing required information. Please provide:
+                      </p>
+                      <div className="mt-3 grid gap-3 sm:grid-cols-2">
+                        {propertyBuildYearNeedsRepair ? (
+                          <div className="space-y-1">
+                            <QuestionLabel htmlFor="property-repair-build-year" required>
+                              Year Built
+                            </QuestionLabel>
+                            <Input
+                              id="property-repair-build-year"
+                              type="number"
+                              min={1800}
+                              max={maxPropertyBuildYear}
+                              value={propertyRepair.buildYear ?? ""}
+                              onChange={(event) => handlePropertyRepairChange("buildYear", event.target.value)}
+                              required
+                            />
+                            {renderCreateFieldError("property.buildYear")}
+                          </div>
+                        ) : null}
+                        {propertyUnitCountNeedsRepair ? (
+                          <div className="space-y-1">
+                            <QuestionLabel htmlFor="property-repair-unit-count" required>
+                              Number of Units
+                            </QuestionLabel>
+                            <Input
+                              id="property-repair-unit-count"
+                              type="number"
+                              min={1}
+                              value={propertyRepair.unitCount ?? ""}
+                              onChange={(event) => handlePropertyRepairChange("unitCount", event.target.value)}
+                              required
+                            />
+                            {renderCreateFieldError("property.unitCount")}
+                          </div>
+                        ) : null}
+                      </div>
+                    </div>
+                  ) : null}
                   {renderCreateFieldError("propertyId")}
                   {renderCreateFieldError("property.address")}
                   {renderCreateFieldError("property.city")}
                   {renderCreateFieldError("property.state")}
                   {renderCreateFieldError("property.zip")}
-                  {renderCreateFieldError("property.buildYear")}
-                  {renderCreateFieldError("property.unitCount")}
+                  {!propertyBuildYearNeedsRepair ? renderCreateFieldError("property.buildYear") : null}
+                  {!propertyUnitCountNeedsRepair ? renderCreateFieldError("property.unitCount") : null}
                 </div>
 
                 <div className="space-y-2">
