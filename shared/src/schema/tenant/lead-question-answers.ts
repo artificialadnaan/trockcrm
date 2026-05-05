@@ -10,6 +10,8 @@ import { users } from "../public/users.js";
 import { projectTypeQuestionNodes } from "../public/project-type-question-nodes.js";
 import { leads } from "./leads.js";
 
+export type LeadAnswerValue = string | boolean | number | string[] | null;
+
 export const leadQuestionAnswers = pgTable(
   "lead_question_answers",
   {

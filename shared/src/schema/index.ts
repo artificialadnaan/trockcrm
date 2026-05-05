@@ -86,7 +86,7 @@ export {
   leadDueDiligenceApprovals,
   leadDueDiligenceApprovalStatusEnum,
 } from "./tenant/lead-due-diligence-approvals.js";
-export { leadQuestionAnswers } from "./tenant/lead-question-answers.js";
+export { leadQuestionAnswers, type LeadAnswerValue } from "./tenant/lead-question-answers.js";
 export { leadQuestionAnswerHistory } from "./tenant/lead-question-answer-history.js";
 export { duplicateQueue, duplicateMatchTypeEnum, duplicateStatusEnum } from "./tenant/duplicate-queue.js";
 export {

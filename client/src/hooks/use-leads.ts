@@ -9,6 +9,43 @@ import type { StagePageQuery } from "@/lib/pipeline-stage-page";
 import type { LeadScopingReadiness, LeadScopingSectionData } from "../../../shared/src/types/lead-scoping.js";
 import type { LeadBudgetStatus, LeadPocRole, LeadSourceCategory } from "../../../shared/src/types/enums.js";
 
+export type LeadAnswerValue = string | boolean | number | string[] | null;
+
+export interface LeadQuestionnaireNode {
+  id: string;
+  projectTypeId: string | null;
+  parentNodeId: string | null;
+  parentOptionValue: string | null;
+  nodeType: string;
+  key: string;
+  label: string;
+  prompt: string | null;
+  inputType: string | null;
+  options: unknown;
+  isRequired: boolean;
+  displayOrder: number;
+  sectionKey: string | null;
+  groupKey: string | null;
+  groupLabel: string | null;
+  groupOrder: number | null;
+  isActive: boolean;
+}
+
+export interface LegacyLeadQuestionnaireAnswer {
+  questionId: string;
+  key: string;
+  label: string;
+  inputType: string | null;
+  options: unknown;
+  value: LeadAnswerValue;
+  displayOrder: number;
+  projectTypeId: string | null;
+  sectionKey: string | null;
+  groupKey: string | null;
+  groupLabel: string | null;
+  groupOrder: number | null;
+}
+
 export interface LeadQualificationRecord {
   id: string;
   leadId: string;
@@ -87,7 +124,7 @@ export interface LeadRecord {
   qualificationPayload: Record<string, string | boolean | number | null>;
   projectTypeQuestionPayload: {
     projectTypeId: string | null;
-    answers: Record<string, string | boolean | number | null>;
+    answers: Record<string, LeadAnswerValue>;
   };
   qualificationScope: string | null;
   qualificationBudgetAmount: string | null;
@@ -136,73 +173,19 @@ export interface LeadRecord {
   convertedDealNumber: string | null;
   leadQuestionnaire?: {
     projectTypeId: string | null;
-    nodes: Array<{
-      id: string;
-      projectTypeId: string | null;
-      parentNodeId: string | null;
-      parentOptionValue: string | null;
-      nodeType: string;
-      key: string;
-      label: string;
-      prompt: string | null;
-      inputType: string | null;
-      options: unknown;
-      isRequired: boolean;
-      displayOrder: number;
-      isActive: boolean;
-    }>;
-    allNodes: Array<{
-      id: string;
-      projectTypeId: string | null;
-      parentNodeId: string | null;
-      parentOptionValue: string | null;
-      nodeType: string;
-      key: string;
-      label: string;
-      prompt: string | null;
-      inputType: string | null;
-      options: unknown;
-      isRequired: boolean;
-      displayOrder: number;
-      isActive: boolean;
-    }>;
-    answers: Record<string, string | boolean | number | null>;
+    nodes: LeadQuestionnaireNode[];
+    allNodes: LeadQuestionnaireNode[];
+    answers: Record<string, LeadAnswerValue>;
+    legacyAnswers?: LegacyLeadQuestionnaireAnswer[];
   };
 }
 
 export interface LeadQuestionnaireSnapshot {
   projectTypeId: string | null;
-  nodes: Array<{
-    id: string;
-    projectTypeId: string | null;
-    parentNodeId: string | null;
-    parentOptionValue: string | null;
-    nodeType: string;
-    key: string;
-    label: string;
-    prompt: string | null;
-    inputType: string | null;
-    options: unknown;
-    isRequired: boolean;
-    displayOrder: number;
-    isActive: boolean;
-  }>;
-  allNodes: Array<{
-    id: string;
-    projectTypeId: string | null;
-    parentNodeId: string | null;
-    parentOptionValue: string | null;
-    nodeType: string;
-    key: string;
-    label: string;
-    prompt: string | null;
-    inputType: string | null;
-    options: unknown;
-    isRequired: boolean;
-    displayOrder: number;
-    isActive: boolean;
-  }>;
-  answers: Record<string, string | boolean | number | null>;
+  nodes: LeadQuestionnaireNode[];
+  allNodes: LeadQuestionnaireNode[];
+  answers: Record<string, LeadAnswerValue>;
+  legacyAnswers?: LegacyLeadQuestionnaireAnswer[];
 }
 
 export interface LeadFilters {
@@ -463,9 +446,9 @@ export async function createLead(input: {
   qualificationPayload?: Record<string, string | boolean | number | null>;
   projectTypeQuestionPayload?: {
     projectTypeId: string | null;
-    answers: Record<string, string | boolean | number | null>;
+    answers: Record<string, LeadAnswerValue>;
   };
-  leadQuestionAnswers?: Record<string, string | boolean | number | null>;
+  leadQuestionAnswers?: Record<string, LeadAnswerValue>;
 }) {
   return api<{ lead: LeadRecord }>("/leads", {
     method: "POST",
@@ -513,7 +496,7 @@ type LeadUpdatePayload = Partial<
     qualificationPayload: Record<string, string | boolean | number | null>;
     projectTypeQuestionPayload: {
       projectTypeId: string | null;
-      answers: Record<string, string | boolean | number | null>;
+      answers: Record<string, LeadAnswerValue>;
     };
     estimatedOpportunityValue: string | null;
     goDecision: "go" | "no_go" | null;
@@ -522,7 +505,7 @@ type LeadUpdatePayload = Partial<
     scopingSubsetData: Record<string, unknown>;
     disqualificationReason: string | null;
     disqualificationNotes: string | null;
-    leadQuestionAnswers: Record<string, string | boolean | number | null>;
+    leadQuestionAnswers: Record<string, LeadAnswerValue>;
   }
 >;
 

@@ -95,7 +95,7 @@ export function createLeadConversionService(
       qualificationFields.unshift("existing_customer_status");
     }
     const questionAnswers = await listLeadQuestionAnswers(tenantDb, lead.id);
-    const nodes = await listQuestionnaireNodes(tenantDb, lead.projectTypeId ?? null);
+    const nodes = await listQuestionnaireNodes(tenantDb);
     const projectTypeQuestionIds = listMissingRequiredQuestionKeys(nodes, questionAnswers);
 
     if (qualificationFields.length === 0 && projectTypeQuestionIds.length === 0) {

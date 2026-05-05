@@ -320,6 +320,7 @@ describe("Lead Stage Gate Evaluation", () => {
       questionnaireGate: {
         qualificationFields: ["estimated_value", "timeline_status"],
         projectTypeQuestionIds: ["roof_age_years"],
+        missingScopeSelection: false,
       },
     });
 
@@ -435,6 +436,7 @@ describe("Lead Stage Gate Evaluation", () => {
       questionnaireGate: {
         qualificationFields: [],
         projectTypeQuestionIds: [],
+        missingScopeSelection: false,
       },
     });
 
@@ -583,5 +585,106 @@ describe("DD approval gate", () => {
 
     expect(result.allowed).toBe(true);
     expect(result.blockReason).toBeUndefined();
+  });
+});
+
+describe("Universal questionnaire gate", () => {
+  it("blocks qualified_lead when no scope accordion is satisfied", () => {
+    const result = evaluateLeadStageGate({
+      lead: satisfiedQualifiedLead,
+      qualification: { qualificationData: {}, scopingSubsetData: {} },
+      currentStage: {
+        id: "stage-new",
+        name: "New Lead",
+        slug: "new_lead",
+        displayOrder: 1,
+        isTerminal: false,
+        isActivePipeline: true,
+      },
+      targetStage: qualifiedLeadStage,
+      questionnaireGate: {
+        qualificationFields: [],
+        projectTypeQuestionIds: [],
+        missingScopeSelection: true,
+      },
+    });
+
+    expect(result.allowed).toBe(false);
+    expect(result.blockReason).toBe("LEAD_NO_SCOPE_SELECTED");
+    expect(result.missingRequirements.fields).toContain("leadQuestionnaire.scopeRequired");
+  });
+
+  it("blocks qualified_lead with missing baseline or property questions", () => {
+    const result = evaluateLeadStageGate({
+      lead: satisfiedQualifiedLead,
+      qualification: { qualificationData: {}, scopingSubsetData: {} },
+      currentStage: {
+        id: "stage-new",
+        name: "New Lead",
+        slug: "new_lead",
+        displayOrder: 1,
+        isTerminal: false,
+        isActivePipeline: true,
+      },
+      targetStage: qualifiedLeadStage,
+      questionnaireGate: {
+        qualificationFields: [],
+        projectTypeQuestionIds: ["budget", "building_type"],
+        missingScopeSelection: false,
+      },
+    });
+
+    expect(result.allowed).toBe(false);
+    expect(result.blockReason).toBe("Lead stage change not allowed until required intake is complete");
+    expect(result.missingRequirements.fields).toEqual(["question.budget", "question.building_type"]);
+  });
+
+  it("allows qualified_lead when required questions and one scope group are satisfied", () => {
+    const result = evaluateLeadStageGate({
+      lead: satisfiedQualifiedLead,
+      qualification: { qualificationData: {}, scopingSubsetData: {} },
+      currentStage: {
+        id: "stage-new",
+        name: "New Lead",
+        slug: "new_lead",
+        displayOrder: 1,
+        isTerminal: false,
+        isActivePipeline: true,
+      },
+      targetStage: qualifiedLeadStage,
+      questionnaireGate: {
+        qualificationFields: [],
+        projectTypeQuestionIds: [],
+        missingScopeSelection: false,
+      },
+    });
+
+    expect(result.allowed).toBe(true);
+    expect(result.blockReason).toBeUndefined();
+  });
+
+  it("keeps DD pending precedence over scope selection failures", () => {
+    const result = evaluateLeadStageGate({
+      lead: satisfiedQualifiedLead,
+      qualification: { qualificationData: {}, scopingSubsetData: {} },
+      currentStage: {
+        id: "stage-new",
+        name: "New Lead",
+        slug: "new_lead",
+        displayOrder: 1,
+        isTerminal: false,
+        isActivePipeline: true,
+      },
+      targetStage: qualifiedLeadStage,
+      dueDiligenceStatus: "pending",
+      questionnaireGate: {
+        qualificationFields: [],
+        projectTypeQuestionIds: [],
+        missingScopeSelection: true,
+      },
+    });
+
+    expect(result.allowed).toBe(false);
+    expect(result.blockReason).toBe("LEAD_DD_PENDING");
   });
 });

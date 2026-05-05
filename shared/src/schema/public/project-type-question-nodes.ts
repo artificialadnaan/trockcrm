@@ -26,6 +26,10 @@ export const projectTypeQuestionNodes = pgTable(
     options: jsonb("options").default([]).notNull(),
     isRequired: boolean("is_required").default(false).notNull(),
     displayOrder: integer("display_order").default(0).notNull(),
+    sectionKey: text("section_key"),
+    groupKey: text("group_key"),
+    groupLabel: text("group_label"),
+    groupOrder: integer("group_order"),
     isActive: boolean("is_active").default(true).notNull(),
     createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
@@ -34,5 +38,6 @@ export const projectTypeQuestionNodes = pgTable(
     index("project_type_question_nodes_project_type_idx").on(table.projectTypeId, table.displayOrder),
     index("project_type_question_nodes_parent_idx").on(table.parentNodeId, table.displayOrder),
     index("project_type_question_nodes_active_idx").on(table.isActive, table.displayOrder),
+    index("idx_pt_question_nodes_section_group").on(table.sectionKey, table.groupKey, table.groupOrder),
   ]
 );

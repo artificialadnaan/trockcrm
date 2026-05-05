@@ -30,6 +30,7 @@ import {
   isAnsweredQuestionValue,
   isLeadEditV2Enabled,
   listQuestionnaireNodes,
+  type LeadQuestionAnswerValue,
   upsertLeadQuestionAnswerSet,
 } from "./questionnaire-service.js";
 import {
@@ -559,7 +560,7 @@ async function assertLeadQuestionGateAllowed(
     companyId: string;
     projectTypeId: string | null;
     qualificationPayload: Record<string, string | boolean | number | null>;
-    leadQuestionAnswers: Record<string, string | boolean | number | null>;
+    leadQuestionAnswers: Record<string, LeadQuestionAnswerValue>;
     currentStage: {
       id: string;
       slug: string;
@@ -579,7 +580,7 @@ async function assertLeadQuestionGateAllowed(
   const existingCustomerStatus = await computeExistingCustomerStatus(tenantDb, input.companyId, new Date(), {
     excludeLeadId: input.leadId,
   });
-  const { qualificationFields, projectTypeQuestionIds } = await evaluateLeadQuestionGate(tenantDb, {
+  const { qualificationFields, projectTypeQuestionIds, missingScopeSelection } = await evaluateLeadQuestionGate(tenantDb, {
     leadId: input.leadId,
     projectTypeId: input.projectTypeId,
     qualificationPayload: input.qualificationPayload,
@@ -587,7 +588,7 @@ async function assertLeadQuestionGateAllowed(
     existingCustomerStatus: existingCustomerStatus.status,
   });
 
-  if (qualificationFields.length === 0 && projectTypeQuestionIds.length === 0) {
+  if (qualificationFields.length === 0 && projectTypeQuestionIds.length === 0 && !missingScopeSelection) {
     return;
   }
 
@@ -595,7 +596,9 @@ async function assertLeadQuestionGateAllowed(
     currentStage: input.currentStage,
     targetStage: input.targetStage,
     qualificationFields,
-    projectTypeQuestionIds,
+    projectTypeQuestionIds: missingScopeSelection
+      ? ["leadQuestionnaire.scopeRequired", ...projectTypeQuestionIds]
+      : projectTypeQuestionIds,
   });
 }
 
@@ -1228,7 +1231,7 @@ export function createLeadService(
       .returning();
 
     if (v2Enabled) {
-      const activeNodes = await listQuestionnaireNodes(tenantDb, input.projectTypeId ?? null);
+      const activeNodes = await listQuestionnaireNodes(tenantDb);
       const bidDueDateNodeAvailable = activeNodes.some((node) => node.key === "bid_due_date");
       // V2 mirror: lead_question_answers is kept in sync for edit-mode questionnaire UI.
       // Source of truth is leads.bid_due_date. The mirror is best-effort and
@@ -1377,12 +1380,10 @@ export function createLeadService(
       };
 
       if (v2Enabled) {
-        const enteringSalesValidation =
-          stage.slug === "sales_validation_stage" && currentStage.slug !== "sales_validation_stage";
-        const advancingBeyondSalesValidation =
-          currentStage.slug === "sales_validation_stage" && stage.displayOrder > currentStage.displayOrder;
+        const enteringQualifiedLead =
+          stage.slug === "qualified_lead" && currentStage.slug !== "qualified_lead";
 
-        if (enteringSalesValidation || advancingBeyondSalesValidation) {
+        if (enteringQualifiedLead) {
           await assertLeadQuestionGateAllowed(tenantDb, {
             leadId: existing.id,
             companyId: existing.companyId,
@@ -1528,7 +1529,7 @@ export function createLeadService(
       v2Enabled &&
       ((input.leadQuestionAnswers && Object.keys(input.leadQuestionAnswers).length > 0) || bidDueDateWasProvided)
     ) {
-      const activeNodes = await listQuestionnaireNodes(tenantDb, effectiveProjectTypeId ?? null);
+      const activeNodes = await listQuestionnaireNodes(tenantDb);
       const bidDueDateNodeAvailable = activeNodes.some((node) => node.key === "bid_due_date");
       // V2 mirror: lead_question_answers is kept in sync for edit-mode questionnaire UI.
       // Source of truth is leads.bid_due_date. The mirror is best-effort and

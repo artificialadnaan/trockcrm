@@ -47,6 +47,7 @@ import {
   createLead,
   updateLead,
   useLeadQuestionnaireTemplate,
+  type LeadAnswerValue,
   type LeadQuestionnaireSnapshot,
 } from "@/hooks/use-leads";
 import { usePipelineStages, useProjectTypes } from "@/hooks/use-pipeline-config";
@@ -65,8 +66,6 @@ import {
   normalizeQuestionOptions,
   questionnaireRevealMatches,
 } from "./questionnaire-display";
-
-type LeadAnswerValue = string | boolean | number | null;
 
 export interface LeadFormLead {
   id: string;
@@ -287,6 +286,7 @@ function getQuestionInputType(node: LeadQuestionnaireSnapshot["allNodes"][number
   if (node.inputType === "textarea") return "textarea";
   if (node.inputType === "boolean") return "boolean";
   if (node.inputType === "date") return "date";
+  if (node.inputType === "multiselect") return "multiselect";
   if (node.inputType === "currency" || node.inputType === "number") return "number";
   if (Array.isArray(node.options) && node.options.length > 0) return "select";
   return "text";
@@ -295,6 +295,7 @@ function getQuestionInputType(node: LeadQuestionnaireSnapshot["allNodes"][number
 function isAnsweredQuestionValue(value: LeadAnswerValue | undefined) {
   if (value == null) return false;
   if (typeof value === "string") return value.trim().length > 0;
+  if (Array.isArray(value)) return value.length > 0;
   return true;
 }
 
@@ -965,16 +966,19 @@ function EditableLeadForm({
 
   const handleQuestionAnswerChange = (
     questionId: string,
-    input: "text" | "textarea" | "number" | "boolean",
-    value: string
+    input: "text" | "textarea" | "number" | "boolean" | "multiselect",
+    value: string | string[]
   ) => {
     let nextValue: LeadAnswerValue = value;
 
     if (input === "number") {
-      nextValue = value.trim() === "" ? null : Number(value);
+      nextValue = typeof value === "string" && value.trim() === "" ? null : Number(value);
     }
     if (input === "boolean") {
       nextValue = value === "true";
+    }
+    if (input === "multiselect") {
+      nextValue = Array.isArray(value) ? value : [];
     }
 
     setFormData((current) => ({
@@ -985,6 +989,15 @@ function EditableLeadForm({
       },
     }));
     clearCreateGateMissingKeys([`leadQuestionAnswers.${questionId}`]);
+  };
+
+  const handleMultiselectQuestionChange = (questionId: string, optionValue: string, checked: boolean) => {
+    const currentValue = formData.projectTypeQuestionAnswers[questionId];
+    const currentValues = Array.isArray(currentValue) ? currentValue : [];
+    const nextValues = checked
+      ? Array.from(new Set([...currentValues, optionValue]))
+      : currentValues.filter((value) => value !== optionValue);
+    handleQuestionAnswerChange(questionId, "multiselect", nextValues);
   };
 
   const handleSubmit = async (event: React.FormEvent) => {
@@ -1858,6 +1871,25 @@ function EditableLeadForm({
                           ))}
                         </SelectContent>
                       </Select>
+                    ) : inputType === "multiselect" ? (
+                      <div className="grid gap-2 rounded-md border bg-background p-3 sm:grid-cols-2">
+                        {options.map((option) => {
+                          const selected = Array.isArray(currentValue) && currentValue.includes(option.value);
+                          return (
+                            <label key={option.value} className="flex items-center gap-2 text-sm">
+                              <input
+                                type="checkbox"
+                                className="h-4 w-4 rounded border-input"
+                                checked={selected}
+                                onChange={(event) =>
+                                  handleMultiselectQuestionChange(node.key, option.value, event.target.checked)
+                                }
+                              />
+                              <span>{option.label}</span>
+                            </label>
+                          );
+                        })}
+                      </div>
                     ) : (
                       <Input
                         id={node.key}
