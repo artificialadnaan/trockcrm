@@ -1,3 +1,12 @@
+-- This migration was rewritten on 2026-05-05 after the original version
+-- crashed in production with PG error 21000 ("ON CONFLICT DO UPDATE
+-- command cannot affect row a second time"). The original transaction
+-- rolled back cleanly, so no DB has the previous version applied. See
+-- the hotfix PR for the full incident notes.
+--
+-- This rewritten version is idempotent: safe to run on a fresh DB and
+-- safe to re-run on any partial state.
+
 UPDATE public.project_type_question_nodes
 SET is_active = false, updated_at = now()
 WHERE project_type_id IS NOT NULL
@@ -6,10 +15,26 @@ WHERE project_type_id IS NOT NULL
 UPDATE public.project_type_question_nodes
 SET is_active = false, updated_at = now()
 WHERE project_type_id IS NULL
-  AND key IN ('poc')
+  AND key = 'poc'
   AND is_active = true;
 
-WITH seed_rows (
+CREATE TEMP TABLE tmp_universal_lead_questionnaire_seed (
+  id UUID NOT NULL,
+  key TEXT NOT NULL,
+  label TEXT NOT NULL,
+  input_type TEXT NOT NULL,
+  options JSONB NOT NULL,
+  is_required BOOLEAN NOT NULL,
+  display_order INTEGER NOT NULL,
+  section_key TEXT NOT NULL,
+  group_key TEXT NOT NULL,
+  group_label TEXT NOT NULL,
+  group_order INTEGER NOT NULL,
+  parent_key TEXT,
+  parent_option_value TEXT
+) ON COMMIT DROP;
+
+INSERT INTO tmp_universal_lead_questionnaire_seed (
   id,
   key,
   label,
@@ -23,7 +48,7 @@ WITH seed_rows (
   group_order,
   parent_key,
   parent_option_value
-) AS (
+)
   VALUES
     ('40000000-0000-4000-8000-000000000001'::uuid, 'bid_due_date', 'Bid Due Date', 'date', '[]'::jsonb, true, 100, 'baseline', 'baseline', 'Universal Baseline', 0, NULL, NULL),
     ('40000000-0000-4000-8000-000000000002'::uuid, 'budget', 'Budget', 'currency', '[]'::jsonb, true, 200, 'baseline', 'baseline', 'Universal Baseline', 0, NULL, NULL),
@@ -143,77 +168,120 @@ WITH seed_rows (
     ('60000000-0000-4000-8000-000000001013'::uuid, 'interior_amenity_common_baths', '[Review with estimators] Common Area Restrooms', 'boolean', '[]'::jsonb, true, 13, 'scope', 'interior_amenities', 'Interior Amenities', 10, 'interior_amenities_applies', 'true'),
     ('60000000-0000-4000-8000-000000001014'::uuid, 'interior_amenity_common_baths_scope', '[Review with estimators] Common Area Restrooms Scope / Specs', 'textarea', '[]'::jsonb, true, 14, 'scope', 'interior_amenities', 'Interior Amenities', 10, 'interior_amenity_common_baths', 'true'),
     ('60000000-0000-4000-8000-000000001015'::uuid, 'interior_amenity_kitchen_catering', '[Review with estimators] Kitchen / Catering Area', 'boolean', '[]'::jsonb, true, 15, 'scope', 'interior_amenities', 'Interior Amenities', 10, 'interior_amenities_applies', 'true'),
-    ('60000000-0000-4000-8000-000000001016'::uuid, 'interior_amenity_kitchen_catering_scope', '[Review with estimators] Kitchen / Catering Scope / Specs', 'textarea', '[]'::jsonb, true, 16, 'scope', 'interior_amenities', 'Interior Amenities', 10, 'interior_amenity_kitchen_catering', 'true')
-),
-upserted AS (
-  INSERT INTO public.project_type_question_nodes (
-    id,
-    project_type_id,
-    parent_node_id,
-    parent_option_value,
-    node_type,
-    key,
-    label,
-    prompt,
-    input_type,
-    options,
-    is_required,
-    display_order,
-    is_active,
-    section_key,
-    group_key,
-    group_label,
-    group_order,
-    created_at,
-    updated_at
-  )
-  SELECT
-    seed_rows.id,
-    NULL,
-    NULL,
-    seed_rows.parent_option_value,
-    'question',
-    seed_rows.key,
-    seed_rows.label,
-    NULL,
-    seed_rows.input_type,
-    seed_rows.options,
-    seed_rows.is_required,
-    seed_rows.display_order,
-    true,
-    seed_rows.section_key,
-    seed_rows.group_key,
-    seed_rows.group_label,
-    seed_rows.group_order,
-    now(),
-    now()
-  FROM seed_rows
-  ON CONFLICT (key) WHERE project_type_id IS NULL
-  DO UPDATE SET
-    parent_option_value = EXCLUDED.parent_option_value,
-    node_type = EXCLUDED.node_type,
-    label = EXCLUDED.label,
-    prompt = EXCLUDED.prompt,
-    input_type = EXCLUDED.input_type,
-    options = EXCLUDED.options,
-    is_required = EXCLUDED.is_required,
-    display_order = EXCLUDED.display_order,
-    is_active = true,
-    section_key = EXCLUDED.section_key,
-    group_key = EXCLUDED.group_key,
-    group_label = EXCLUDED.group_label,
-    group_order = EXCLUDED.group_order,
-    updated_at = now()
-  RETURNING id
+    ('60000000-0000-4000-8000-000000001016'::uuid, 'interior_amenity_kitchen_catering_scope', '[Review with estimators] Kitchen / Catering Scope / Specs', 'textarea', '[]'::jsonb, true, 16, 'scope', 'interior_amenities', 'Interior Amenities', 10, 'interior_amenity_kitchen_catering', 'true');
+
+WITH seed AS (
+  SELECT DISTINCT ON (key) *
+  FROM tmp_universal_lead_questionnaire_seed
+  ORDER BY key, display_order, id
+)
+INSERT INTO public.project_type_question_nodes (
+  id,
+  project_type_id,
+  parent_node_id,
+  parent_option_value,
+  node_type,
+  key,
+  label,
+  prompt,
+  input_type,
+  options,
+  is_required,
+  display_order,
+  is_active,
+  section_key,
+  group_key,
+  group_label,
+  group_order,
+  created_at,
+  updated_at
+)
+SELECT
+  seed.id,
+  NULL,
+  NULL,
+  seed.parent_option_value,
+  'question',
+  seed.key,
+  seed.label,
+  NULL,
+  seed.input_type,
+  seed.options,
+  seed.is_required,
+  seed.display_order,
+  true,
+  seed.section_key,
+  seed.group_key,
+  seed.group_label,
+  seed.group_order,
+  now(),
+  now()
+FROM seed
+WHERE NOT EXISTS (
+  SELECT 1
+  FROM public.project_type_question_nodes existing
+  WHERE existing.project_type_id IS NULL
+    AND existing.key = seed.key
+);
+
+WITH seed AS (
+  SELECT DISTINCT ON (key) *
+  FROM tmp_universal_lead_questionnaire_seed
+  ORDER BY key, display_order, id
+)
+UPDATE public.project_type_question_nodes AS target
+SET
+  label = seed.label,
+  prompt = NULL,
+  input_type = seed.input_type,
+  options = seed.options,
+  is_required = seed.is_required,
+  display_order = seed.display_order,
+  is_active = true,
+  section_key = seed.section_key,
+  group_key = seed.group_key,
+  group_label = seed.group_label,
+  group_order = seed.group_order,
+  parent_option_value = seed.parent_option_value,
+  updated_at = now()
+FROM seed
+WHERE target.project_type_id IS NULL
+  AND target.key = seed.key;
+
+WITH seed AS (
+  SELECT DISTINCT ON (key) *
+  FROM tmp_universal_lead_questionnaire_seed
+  ORDER BY key, display_order, id
+)
+UPDATE public.project_type_question_nodes AS child
+SET
+  parent_node_id = NULL,
+  parent_option_value = NULL,
+  updated_at = now()
+FROM seed
+WHERE child.project_type_id IS NULL
+  AND child.key = seed.key
+  AND seed.parent_key IS NULL
+  AND (child.parent_node_id IS NOT NULL OR child.parent_option_value IS NOT NULL);
+
+WITH seed AS (
+  SELECT DISTINCT ON (key) *
+  FROM tmp_universal_lead_questionnaire_seed
+  ORDER BY key, display_order, id
 )
 UPDATE public.project_type_question_nodes AS child
 SET
   parent_node_id = parent.id,
-  parent_option_value = seed_rows.parent_option_value,
+  parent_option_value = seed.parent_option_value,
   updated_at = now()
-FROM seed_rows
-LEFT JOIN public.project_type_question_nodes AS parent
+FROM seed
+JOIN public.project_type_question_nodes AS parent
   ON parent.project_type_id IS NULL
-  AND parent.key = seed_rows.parent_key
+  AND parent.key = seed.parent_key
 WHERE child.project_type_id IS NULL
-  AND child.key = seed_rows.key;
+  AND child.key = seed.key
+  AND seed.parent_key IS NOT NULL
+  AND (child.parent_node_id IS DISTINCT FROM parent.id
+       OR child.parent_option_value IS DISTINCT FROM seed.parent_option_value);
+
+DROP TABLE IF EXISTS tmp_universal_lead_questionnaire_seed;
