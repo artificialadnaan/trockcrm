@@ -53,6 +53,10 @@ function readCookie(name: string): string | undefined {
   return cookie ? decodeURIComponent(cookie.slice(name.length + 1)) : undefined;
 }
 
+export function getCsrfToken(): string | undefined {
+  return readCookie(CSRF_COOKIE_NAME);
+}
+
 function isUnsafeMethod(method: string | undefined): boolean {
   return ["POST", "PUT", "PATCH", "DELETE"].includes((method ?? "GET").toUpperCase());
 }
@@ -92,7 +96,7 @@ export async function api<T = any>(path: string, options: ApiOptions = {}): Prom
   }
 
   if (isUnsafeMethod(fetchOptions.method)) {
-    const csrfToken = readCookie(CSRF_COOKIE_NAME);
+    const csrfToken = getCsrfToken();
     if (csrfToken) {
       headers[CSRF_HEADER_NAME] = csrfToken;
     }

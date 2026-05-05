@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
-import { api, resolveApiBase } from "@/lib/api";
+import { api, getCsrfToken, resolveApiBase } from "@/lib/api";
 export {
   getLeadBoardStageLabel,
   getLeadStageMetadata,
@@ -617,11 +617,17 @@ export async function transitionLeadStage(
     inlinePatch?: LeadTransitionInlinePatch;
   }
 ) {
+  const headers: Record<string, string> = {
+    "Content-Type": "application/json",
+  };
+  const csrfToken = getCsrfToken();
+  if (csrfToken) {
+    headers["X-CSRF-Token"] = csrfToken;
+  }
+
   const response = await fetch(`${LEADS_API_BASE}/leads/${leadId}/stage-transition`, {
     method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-    },
+    headers,
     credentials: "include",
     body: JSON.stringify(input),
   });
