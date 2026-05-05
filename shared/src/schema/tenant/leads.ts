@@ -8,6 +8,7 @@ import {
   jsonb,
   integer,
   numeric,
+  date,
   timestamp,
   index,
 } from "drizzle-orm/pg-core";
@@ -80,6 +81,7 @@ export const leads = pgTable(
     projectTypeId: uuid("project_type_id").references(() => projectTypeConfig.id),
     qualificationPayload: jsonb("qualification_payload").default({}).notNull(),
     projectTypeQuestionPayload: jsonb("project_type_question_payload").default({}).notNull(),
+    bidDueDate: date("bid_due_date"),
     preQualValue: numeric("pre_qual_value", { precision: 14, scale: 2 }),
     submissionStartedAt: timestamp("submission_started_at", { withTimezone: true }),
     submissionCompletedAt: timestamp("submission_completed_at", { withTimezone: true }),

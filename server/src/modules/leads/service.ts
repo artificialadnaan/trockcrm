@@ -28,7 +28,6 @@ import {
   evaluateLeadQuestionGate,
   isAnsweredQuestionValue,
   isLeadEditV2Enabled,
-  listQuestionnaireNodes,
   upsertLeadQuestionAnswerSet,
 } from "./questionnaire-service.js";
 import {
@@ -70,6 +69,7 @@ export interface CreateLeadInput {
   officeCode: string;
   projectType?: string | null;
   projectTypeId?: string | null;
+  bidDueDate?: string | null;
   budgetStatus?: LeadBudgetStatus | null;
   qualificationPayload?: Record<string, string | boolean | number | null>;
   projectTypeQuestionPayload?: {
@@ -93,6 +93,7 @@ export interface UpdateLeadInput {
   officeCode?: string | null;
   projectType?: string | null;
   projectTypeId?: string | null;
+  bidDueDate?: string | null;
   qualificationPayload?: Record<string, string | boolean | number | null>;
   projectTypeQuestionPayload?: {
     projectTypeId: string | null;
@@ -195,7 +196,7 @@ const CREATE_GATE_FIELD_LABELS = new Map<string, string>([
   ["primaryContactRoleOtherLabel", "POC role other label"],
   ["budgetStatus", "Budget status"],
   ["projectTypeId", "Project type"],
-  ["leadQuestionAnswers.bid_due_date", "Bid Due Date"],
+  ["bidDueDate", "Bid Due Date"],
 ]);
 
 export class LeadCreateRequirementsError extends Error {
@@ -686,6 +687,37 @@ function isPositiveInteger(value: unknown) {
   return Number.isInteger(value) && (value as number) > 0;
 }
 
+function normalizeIsoDateString(value: string) {
+  const trimmed = value.trim();
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(trimmed)) {
+    return null;
+  }
+
+  const [year, month, day] = trimmed.split("-").map(Number);
+  const parsed = new Date(Date.UTC(year, month - 1, day));
+  if (
+    parsed.getUTCFullYear() !== year ||
+    parsed.getUTCMonth() !== month - 1 ||
+    parsed.getUTCDate() !== day
+  ) {
+    return null;
+  }
+
+  return trimmed;
+}
+
+function normalizeOptionalIsoDate(value: string | null | undefined, fieldName: string) {
+  if (value == null || value.trim() === "") {
+    return null;
+  }
+
+  const normalized = normalizeIsoDateString(value);
+  if (!normalized) {
+    throw new AppError(400, `${fieldName} must be an ISO date in YYYY-MM-DD format`);
+  }
+  return normalized;
+}
+
 async function resolveCreateStage(
   inputStageId: string | undefined,
   deps: LeadServiceDependencies
@@ -710,8 +742,7 @@ async function resolveCreateStage(
   return stage;
 }
 
-async function assertLeadCreateRequirements(
-  tenantDb: TenantDb,
+function assertLeadCreateRequirements(
   input: CreateLeadInput,
   property: typeof properties.$inferSelect,
   now: Date
@@ -738,11 +769,8 @@ async function assertLeadCreateRequirements(
   if (!input.projectTypeId?.trim()) {
     missing.push("projectTypeId");
   }
-
-  const questionnaireNodes = await listQuestionnaireNodes(tenantDb, input.projectTypeId ?? null);
-  const bidDueDateNode = questionnaireNodes.find((node) => node.key === "bid_due_date");
-  if (bidDueDateNode && !isAnsweredQuestionValue(input.leadQuestionAnswers?.bid_due_date)) {
-    missing.push("leadQuestionAnswers.bid_due_date");
+  if (!input.bidDueDate || !normalizeIsoDateString(input.bidDueDate)) {
+    missing.push("bidDueDate");
   }
 
   if (missing.length > 0) {
@@ -1112,7 +1140,7 @@ export function createLeadService(
     await validateOptionalUserId(tenantDb, input.salesRepId, "salesRepId", input.officeId);
     const resolvedProjectType = await resolveProjectType(input.projectTypeId ?? null, deps.getActiveProjectTypes);
     const officeCode = assertValidOfficeCode(input.officeCode);
-    await assertLeadCreateRequirements(tenantDb, input, property, now);
+    assertLeadCreateRequirements(input, property, now);
     if (!resolvedProjectType) {
       throw new AppError(400, "Project type is required");
     }
@@ -1135,6 +1163,7 @@ export function createLeadService(
       input.leadQuestionAnswers ??
       normalizedProjectTypeQuestionPayload.answers ??
       {};
+    const normalizedBidDueDate = normalizeOptionalIsoDate(input.bidDueDate, "bidDueDate");
 
     // TODO(change 2 of 3): re-enable existing-customer auto-routing with DD email
     // gate. See feat/lead-due-diligence-routing branch.
@@ -1172,6 +1201,7 @@ export function createLeadService(
         officeCode,
         projectType,
         projectTypeId: input.projectTypeId ?? null,
+        bidDueDate: normalizedBidDueDate,
         budgetStatus: input.budgetStatus ?? null,
         qualificationPayload: normalizedQualificationPayload,
         projectTypeQuestionPayload: v2Enabled
@@ -1186,12 +1216,18 @@ export function createLeadService(
       })
       .returning();
 
-    if (v2Enabled && Object.keys(leadQuestionAnswerInput).length > 0) {
+    if (v2Enabled) {
+      // V2 mirror: lead_question_answers is kept in sync for edit-mode questionnaire UI.
+      // Source of truth is leads.bid_due_date.
+      const v2MirrorAnswers = {
+        ...leadQuestionAnswerInput,
+        bid_due_date: normalizedBidDueDate,
+      };
       await upsertLeadQuestionAnswerSet(tenantDb, {
         leadId: lead.id,
         projectTypeId: input.projectTypeId ?? null,
         changedBy: input.assignedRepId,
-        answers: leadQuestionAnswerInput,
+        answers: v2MirrorAnswers,
         changedAt: now,
       });
     }
@@ -1465,6 +1501,14 @@ export function createLeadService(
       );
     }
 
+    const bidDueDateWasProvided = input.bidDueDate !== undefined;
+    const normalizedBidDueDate = bidDueDateWasProvided
+      ? normalizeOptionalIsoDate(input.bidDueDate, "bidDueDate")
+      : null;
+    if (bidDueDateWasProvided) {
+      updates.bidDueDate = normalizedBidDueDate;
+    }
+
     if (input.status !== undefined) {
       if (input.status === "open" || input.status === "disqualified") {
         updates.status = input.status;
@@ -1491,12 +1535,20 @@ export function createLeadService(
       await tenantDb.insert(leadStageHistory).values(stageChangeAuditRecord);
     }
 
-    if (v2Enabled && input.leadQuestionAnswers && Object.keys(input.leadQuestionAnswers).length > 0) {
+    if (
+      v2Enabled &&
+      ((input.leadQuestionAnswers && Object.keys(input.leadQuestionAnswers).length > 0) || bidDueDateWasProvided)
+    ) {
+      // V2 mirror: lead_question_answers is kept in sync for edit-mode questionnaire UI.
+      // Source of truth is leads.bid_due_date.
       await upsertLeadQuestionAnswerSet(tenantDb, {
         leadId,
         projectTypeId: effectiveProjectTypeId ?? null,
         changedBy: userId,
-        answers: input.leadQuestionAnswers,
+        answers: {
+          ...(input.leadQuestionAnswers ?? {}),
+          ...(bidDueDateWasProvided ? { bid_due_date: normalizedBidDueDate } : {}),
+        },
         changedAt: updateTime,
       });
     }

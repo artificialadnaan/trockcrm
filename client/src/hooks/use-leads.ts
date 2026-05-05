@@ -78,6 +78,7 @@ export interface LeadRecord {
   description: string | null;
   officeCode?: string | null;
   projectTypeId: string | null;
+  bidDueDate: string | null;
   projectType: {
     id: string;
     name: string;
@@ -457,6 +458,7 @@ export async function createLead(input: {
   officeCode?: string;
   projectType?: string;
   projectTypeId?: string | null;
+  bidDueDate?: string | null;
   budgetStatus?: LeadBudgetStatus | null;
   qualificationPayload?: Record<string, string | boolean | number | null>;
   projectTypeQuestionPayload?: {
@@ -502,6 +504,7 @@ type LeadUpdatePayload = Partial<
     | "supportNeededType"
     | "supportNeededNotes"
     | "projectTypeId"
+    | "bidDueDate"
     | "qualificationScope"
     | "qualificationBudgetAmount"
     | "qualificationCompanyFit"

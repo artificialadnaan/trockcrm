@@ -414,6 +414,7 @@ describe("LeadForm", () => {
             primaryContactRole: "other",
             primaryContactRoleOtherLabel: "Owner representative",
             budgetStatus: "budgeted_q2",
+            bidDueDate: "2026-06-01",
             source: "Referral",
             description: "",
             projectTypeId: "type-1",
@@ -432,32 +433,13 @@ describe("LeadForm", () => {
     expect(html).toContain("Owner representative");
     expect(html).toContain("Budget Status");
     expect(html).toContain("Budgeted Q2");
+    expect(html).toContain("Bid Due Date");
+    expect(html).toContain('value="2026-06-01"');
   });
 
-  it("renders table-backed questionnaire nodes in create mode when the v2 template is available", () => {
+  it("renders first-class bid due date in create mode when the v2 template is unavailable", () => {
     leadHookMocks.useLeadQuestionnaireTemplate.mockReturnValue({
-      questionnaire: {
-        projectTypeId: "type-1",
-        nodes: [
-          {
-            id: "node-1",
-            projectTypeId: null,
-            parentNodeId: null,
-            parentOptionValue: null,
-            nodeType: "question",
-            key: "bid_due_date",
-            label: "Bid Due Date",
-            prompt: null,
-            inputType: "date",
-            options: [],
-            isRequired: true,
-            displayOrder: 10,
-            isActive: true,
-          },
-        ],
-        allNodes: [],
-        answers: {},
-      } as any,
+      questionnaire: null,
       loading: false,
     });
 
@@ -480,7 +462,7 @@ describe("LeadForm", () => {
     );
 
     expect(html).toContain("Bid Due Date");
-    expect(html).not.toContain("Project Scope");
+    expect(html).not.toContain("Lead questionnaire template is misconfigured");
   });
 
   it("renders the new create gate fields and keeps submit disabled when required fields are missing", () => {
@@ -488,21 +470,6 @@ describe("LeadForm", () => {
       questionnaire: {
         projectTypeId: "type-1",
         nodes: [
-          {
-            id: "node-1",
-            projectTypeId: null,
-            parentNodeId: null,
-            parentOptionValue: null,
-            nodeType: "question",
-            key: "bid_due_date",
-            label: "Bid Due Date",
-            prompt: null,
-            inputType: "date",
-            options: [],
-            isRequired: true,
-            displayOrder: 10,
-            isActive: true,
-          },
           {
             id: "node-2",
             projectTypeId: null,
@@ -550,27 +517,11 @@ describe("LeadForm", () => {
     expect(html).toContain("<button type=\"submit\" disabled=\"\">Create Lead</button>");
   });
 
-  it("surfaces a create-mode questionnaire misconfiguration when bid due date is missing", () => {
+  it("does not surface a create-mode questionnaire misconfiguration when the v2 template is empty", () => {
     leadHookMocks.useLeadQuestionnaireTemplate.mockReturnValue({
       questionnaire: {
         projectTypeId: "type-1",
-        nodes: [
-          {
-            id: "node-2",
-            projectTypeId: null,
-            parentNodeId: null,
-            parentOptionValue: null,
-            nodeType: "question",
-            key: "number_of_bidders",
-            label: "Number of Bidders",
-            prompt: null,
-            inputType: "number",
-            options: [],
-            isRequired: false,
-            displayOrder: 20,
-            isActive: true,
-          },
-        ],
+        nodes: [],
         allNodes: [],
         answers: {},
       } as any,
@@ -594,8 +545,46 @@ describe("LeadForm", () => {
       </MemoryRouter>
     );
 
-    expect(html).toContain("Lead questionnaire template is misconfigured");
+    expect(html).not.toContain("Lead questionnaire template is misconfigured");
+    expect(html).toContain("Bid Due Date");
+    expect(html).toContain("Bid Due Date is required.");
     expect(html).toContain("<button type=\"submit\" disabled=\"\">Create Lead</button>");
+  });
+
+  it("does not disable create solely because the questionnaire template is empty", () => {
+    leadHookMocks.useLeadQuestionnaireTemplate.mockReturnValue({
+      questionnaire: {
+        projectTypeId: "type-1",
+        nodes: [],
+        allNodes: [],
+        answers: {},
+      } as any,
+      loading: false,
+    });
+
+    const html = renderToStaticMarkup(
+      <MemoryRouter>
+        <LeadForm
+          mode="create"
+          initialValues={{
+            companyId: "company-1",
+            propertyId: "property-1",
+            primaryContactId: "contact-1",
+            primaryContactRole: "property_manager",
+            name: "Lead One",
+            source: "Referral",
+            description: "",
+            bidDueDate: "2026-06-01",
+            budgetStatus: "budgeted_q1",
+            projectTypeId: "type-1",
+          }}
+        />
+      </MemoryRouter>
+    );
+
+    expect(html).not.toContain("Lead questionnaire template is misconfigured");
+    expect(html).toContain('id="bidDueDate" type="date" value="2026-06-01"');
+    expect(html).toContain("<button type=\"submit\">Create Lead</button>");
   });
 
   it("keeps table-backed questionnaire answers out of the summary rail when the v2 snapshot is present", () => {
