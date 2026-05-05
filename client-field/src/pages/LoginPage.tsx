@@ -12,7 +12,7 @@ export function LoginPage() {
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>((location.state as { authError?: string } | null)?.authError ?? null);
 
-  if (user) return <Navigate to="/home" replace />;
+  if (user) return <Navigate to="/projects" replace />;
 
   async function onSubmit(event: FormEvent) {
     event.preventDefault();
@@ -24,7 +24,7 @@ export function LoginPage() {
     setSubmitting(true);
     try {
       await login(email.trim(), password);
-      navigate("/home", { replace: true });
+      navigate("/projects", { replace: true });
     } catch (err) {
       setError(err instanceof Error ? err.message : "Unable to sign in.");
     } finally {
