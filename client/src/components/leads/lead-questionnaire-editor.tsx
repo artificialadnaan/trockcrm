@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import type { ReactNode } from "react";
 import { LEAD_SOURCE_CATEGORIES, type LeadSourceCategory } from "@trock-crm/shared/types";
-import type { LeadAnswerValue, LeadQuestionnaireNode, LeadRecord } from "@/hooks/use-leads";
+import type { LeadAnswerValue, LeadRecord } from "@/hooks/use-leads";
 import { transitionLeadStage, updateLead } from "@/hooks/use-leads";
 import { usePipelineStages, useProjectTypes } from "@/hooks/use-pipeline-config";
 import { isApiError } from "@/lib/api";
@@ -17,10 +17,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import {
-  normalizeQuestionOptions,
-  questionnaireRevealMatches,
-} from "./questionnaire-display";
+import { LeadQuestionnaireSections } from "./lead-questionnaire-sections";
 
 interface LeadQuestionnaireEditorProps {
   lead: LeadRecord;
@@ -54,56 +51,6 @@ function formatLeadStageBlockReason(reason?: string) {
     return "Select at least one applicable scope accordion and complete its required questions.";
   }
   return "This lead cannot move to the selected stage yet.";
-}
-
-function isVisibleQuestion(
-  nodeId: string,
-  nodeById: Map<string, LeadQuestionnaireNode>,
-  answers: Record<string, LeadAnswerValue>,
-  visibleCache: Map<string, boolean>
-): boolean {
-  const cached = visibleCache.get(nodeId);
-  if (cached !== undefined) {
-    return cached;
-  }
-
-  const node = nodeById.get(nodeId);
-  if (!node) {
-    visibleCache.set(nodeId, false);
-    return false;
-  }
-
-  if (!node.parentNodeId) {
-    visibleCache.set(nodeId, true);
-    return true;
-  }
-
-  if (!isVisibleQuestion(node.parentNodeId, nodeById, answers, visibleCache)) {
-    visibleCache.set(nodeId, false);
-    return false;
-  }
-
-  const parent = nodeById.get(node.parentNodeId);
-  if (!parent) {
-    visibleCache.set(nodeId, false);
-    return false;
-  }
-
-  const parentAnswer = answers[parent.key];
-  const visible = questionnaireRevealMatches(parentAnswer, node.parentOptionValue);
-
-  visibleCache.set(nodeId, visible);
-  return visible;
-}
-
-function getQuestionInputType(node: LeadQuestionnaireNode) {
-  if (node.inputType === "textarea") return "textarea";
-  if (node.inputType === "boolean") return "boolean";
-  if (node.inputType === "date") return "date";
-  if (node.inputType === "multiselect") return "multiselect";
-  if (node.inputType === "currency" || node.inputType === "number") return "number";
-  if (Array.isArray(node.options) && node.options.length > 0) return "select";
-  return "text";
 }
 
 function QuestionLabel({
@@ -154,7 +101,6 @@ export function LeadQuestionnaireEditor({ lead, onCancel, onSaved }: LeadQuestio
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [stageGateError, setStageGateError] = useState<StageGateErrorState | null>(null);
-  const [openScopeGroups, setOpenScopeGroups] = useState<Record<string, boolean>>({});
   const initialSourceState = getInitialSourceState(lead);
   const [formData, setFormData] = useState(() => ({
     name: lead.name,
@@ -223,7 +169,6 @@ export function LeadQuestionnaireEditor({ lead, onCancel, onSaved }: LeadQuestio
     () => availableNodes.filter((node) => node.nodeType === "question"),
     [availableNodes]
   );
-  const nodeById = useMemo(() => new Map(availableNodes.map((node) => [node.id, node])), [availableNodes]);
   const gateQuestionLabels = useMemo(
     () =>
       new Map(
@@ -236,57 +181,6 @@ export function LeadQuestionnaireEditor({ lead, onCancel, onSaved }: LeadQuestio
       ),
     [availableNodes]
   );
-  const visibleNodes = useMemo(() => {
-    const visibleCache = new Map<string, boolean>();
-
-    return scopedNodes
-      .filter((node) => isVisibleQuestion(node.id, nodeById, formData.leadQuestionAnswers, visibleCache))
-      .sort((left, right) => left.displayOrder - right.displayOrder);
-  }, [formData.leadQuestionAnswers, nodeById, scopedNodes]);
-  const baselineNodes = useMemo(
-    () => visibleNodes.filter((node) => (node.sectionKey ?? "baseline") === "baseline"),
-    [visibleNodes]
-  );
-  const propertyNodes = useMemo(
-    () => visibleNodes.filter((node) => node.sectionKey === "property"),
-    [visibleNodes]
-  );
-  const scopeGroups = useMemo(() => {
-    const groups = new Map<
-      string,
-      {
-        key: string;
-        label: string;
-        order: number;
-        nodes: LeadQuestionnaireNode[];
-        appliesNode: LeadQuestionnaireNode | null;
-      }
-    >();
-
-    for (const node of scopedNodes.filter((entry) => entry.sectionKey === "scope" && entry.groupKey)) {
-      const groupKey = node.groupKey!;
-      const current = groups.get(groupKey) ?? {
-        key: groupKey,
-        label: node.groupLabel ?? groupKey,
-        order: node.groupOrder ?? 0,
-        nodes: [],
-        appliesNode: null,
-      };
-      current.nodes.push(node);
-      if (!node.parentNodeId && (node.key.endsWith("_applies") || node.displayOrder === 0)) {
-        current.appliesNode = node;
-      }
-      groups.set(groupKey, current);
-    }
-
-    return Array.from(groups.values())
-      .map((group) => ({
-        ...group,
-        nodes: group.nodes.sort((left, right) => left.displayOrder - right.displayOrder),
-      }))
-      .sort((left, right) => left.order - right.order);
-  }, [scopedNodes]);
-  const visibleNodeIds = useMemo(() => new Set(visibleNodes.map((node) => node.id)), [visibleNodes]);
   const editableLeadStages = useMemo(
     () =>
       stages.filter(
@@ -306,29 +200,6 @@ export function LeadQuestionnaireEditor({ lead, onCancel, onSaved }: LeadQuestio
     lead.projectType?.name ??
     "Select project type";
 
-  useEffect(() => {
-    setOpenScopeGroups((current) => {
-      let changed = false;
-      const next = { ...current };
-
-      for (const group of scopeGroups) {
-        const appliesAnswered = group.appliesNode
-          ? formData.leadQuestionAnswers[group.appliesNode.key] === true
-          : false;
-        const childAnswered = group.nodes
-          .filter((node) => node.id !== group.appliesNode?.id)
-          .some((node) => formData.leadQuestionAnswers[node.key] != null);
-
-        if ((appliesAnswered || childAnswered) && !next[group.key]) {
-          next[group.key] = true;
-          changed = true;
-        }
-      }
-
-      return changed ? next : current;
-    });
-  }, [formData.leadQuestionAnswers, scopeGroups]);
-
   if (!questionnaire) {
     return null;
   }
@@ -341,15 +212,6 @@ export function LeadQuestionnaireEditor({ lead, onCancel, onSaved }: LeadQuestio
         [key]: value,
       },
     }));
-  };
-
-  const toggleMultiselectAnswer = (key: string, optionValue: string, checked: boolean) => {
-    const currentValue = formData.leadQuestionAnswers[key];
-    const currentValues = Array.isArray(currentValue) ? currentValue : [];
-    const nextValues = checked
-      ? Array.from(new Set([...currentValues, optionValue]))
-      : currentValues.filter((value) => value !== optionValue);
-    handleAnswerChange(key, nextValues);
   };
 
   const handleSourceCategoryChange = (value: string | null) => {
@@ -431,106 +293,6 @@ export function LeadQuestionnaireEditor({ lead, onCancel, onSaved }: LeadQuestio
     } finally {
       setSubmitting(false);
     }
-  };
-
-  const renderQuestion = (node: LeadQuestionnaireNode, options?: { nested?: boolean }) => {
-    const inputType = getQuestionInputType(node);
-    const currentValue = formData.leadQuestionAnswers[node.key];
-    const questionOptions = normalizeQuestionOptions(node.options);
-
-    return (
-      <div key={node.id} className={`space-y-2 rounded-md border p-3 ${options?.nested ? "bg-muted/20" : ""}`}>
-        <QuestionLabel htmlFor={node.key} required={node.isRequired}>
-          {node.label}
-        </QuestionLabel>
-        {node.prompt && <p className="text-sm text-muted-foreground">{node.prompt}</p>}
-        {inputType === "textarea" ? (
-          <textarea
-            id={node.key}
-            className="flex min-h-[80px] w-full rounded-md border border-input bg-background px-3 py-2 text-sm ring-offset-background focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-            value={typeof currentValue === "string" ? currentValue : ""}
-            onChange={(event) => handleAnswerChange(node.key, event.target.value)}
-          />
-        ) : inputType === "boolean" ? (
-          <Select
-            value={typeof currentValue === "boolean" ? String(currentValue) : "__unanswered__"}
-            onValueChange={(value) =>
-              handleAnswerChange(
-                node.key,
-                !value || value === "__unanswered__" ? null : value === "true"
-              )
-            }
-          >
-            <SelectTrigger id={node.key}>
-              <SelectValue placeholder="Select" />
-            </SelectTrigger>
-            <SelectContent>
-              <SelectItem value="__unanswered__">Unanswered</SelectItem>
-              <SelectItem value="true">Yes</SelectItem>
-              <SelectItem value="false">No</SelectItem>
-            </SelectContent>
-          </Select>
-        ) : inputType === "select" ? (
-          <Select
-            value={typeof currentValue === "string" ? currentValue : "__unanswered__"}
-            onValueChange={(value) =>
-              handleAnswerChange(node.key, !value || value === "__unanswered__" ? null : value)
-            }
-          >
-            <SelectTrigger id={node.key}>
-              <SelectValue placeholder="Select" />
-            </SelectTrigger>
-            <SelectContent>
-              <SelectItem value="__unanswered__">Unanswered</SelectItem>
-              {questionOptions.map((option) => (
-                <SelectItem key={option.value} value={option.value}>
-                  {option.label}
-                </SelectItem>
-              ))}
-            </SelectContent>
-          </Select>
-        ) : inputType === "multiselect" ? (
-          <div className="grid gap-2 rounded-md border bg-background p-3 sm:grid-cols-2">
-            {questionOptions.map((option) => {
-              const selected = Array.isArray(currentValue) && currentValue.includes(option.value);
-              return (
-                <label key={option.value} className="flex items-center gap-2 text-sm">
-                  <input
-                    type="checkbox"
-                    className="h-4 w-4 rounded border-input"
-                    checked={selected}
-                    onChange={(event) => toggleMultiselectAnswer(node.key, option.value, event.target.checked)}
-                  />
-                  <span>{option.label}</span>
-                </label>
-              );
-            })}
-          </div>
-        ) : (
-          <Input
-            id={node.key}
-            type={inputType === "date" ? "date" : inputType === "number" ? "number" : "text"}
-            value={
-              typeof currentValue === "number"
-                ? String(currentValue)
-                : typeof currentValue === "string"
-                  ? currentValue
-                  : ""
-            }
-            onChange={(event) =>
-              handleAnswerChange(
-                node.key,
-                inputType === "number"
-                  ? event.target.value.trim() === ""
-                    ? null
-                    : Number(event.target.value)
-                  : event.target.value
-              )
-            }
-          />
-        )}
-      </div>
-    );
   };
 
   return (
@@ -733,73 +495,13 @@ export function LeadQuestionnaireEditor({ lead, onCancel, onSaved }: LeadQuestio
           <CardTitle>Project Questions</CardTitle>
         </CardHeader>
         <CardContent className="space-y-4">
-          {baselineNodes.map((node) => renderQuestion(node))}
-
-          {propertyNodes.length > 0 ? (
-            <section className="space-y-3">
-              <h3 className="text-sm font-semibold">Property/Building Info</h3>
-              {propertyNodes.map((node) => renderQuestion(node))}
-            </section>
-          ) : null}
-
-          {scopeGroups.length > 0 ? (
-            <section className="space-y-3">
-              <h3 className="text-sm font-semibold">Scope</h3>
-              {scopeGroups.map((group) => {
-                const isOpen = openScopeGroups[group.key] ?? false;
-                const applies = group.appliesNode
-                  ? formData.leadQuestionAnswers[group.appliesNode.key] === true
-                  : false;
-                const visibleGroupNodes = group.nodes.filter((node) => visibleNodeIds.has(node.id));
-
-                return (
-                  <div key={group.key} className="rounded-md border">
-                    <button
-                      type="button"
-                      className="flex w-full items-center justify-between gap-3 px-4 py-3 text-left"
-                      onClick={() =>
-                        setOpenScopeGroups((current) => ({ ...current, [group.key]: !isOpen }))
-                      }
-                    >
-                      <span className="font-medium">{group.label}</span>
-                      <span
-                        className={`rounded-full border px-2 py-0.5 text-xs ${
-                          applies
-                            ? "border-green-200 bg-green-50 text-green-700"
-                            : "border-muted bg-muted/50 text-muted-foreground"
-                        }`}
-                      >
-                        {applies ? "Applies" : "Not selected"}
-                      </span>
-                    </button>
-                    {isOpen ? (
-                      <div className="space-y-3 border-t p-4">
-                        {visibleGroupNodes.map((node) =>
-                          renderQuestion(node, { nested: node.id !== group.appliesNode?.id })
-                        )}
-                      </div>
-                    ) : null}
-                  </div>
-                );
-              })}
-            </section>
-          ) : null}
-
-          {questionnaire.legacyAnswers?.length ? (
-            <details className="rounded-md border p-3">
-              <summary className="cursor-pointer text-sm font-medium">Legacy / Archived Answers</summary>
-              <div className="mt-3 space-y-2">
-                {questionnaire.legacyAnswers.map((answer) => (
-                  <div key={answer.questionId} className="rounded-md border bg-muted/20 p-3 text-sm">
-                    <p className="font-medium">{answer.label}</p>
-                    <p className="text-muted-foreground">
-                      {Array.isArray(answer.value) ? answer.value.join(", ") : String(answer.value ?? "Unanswered")}
-                    </p>
-                  </div>
-                ))}
-              </div>
-            </details>
-          ) : null}
+          <LeadQuestionnaireSections
+            nodes={availableNodes}
+            answers={formData.leadQuestionAnswers}
+            onAnswerChange={handleAnswerChange}
+            legacyAnswers={questionnaire.legacyAnswers}
+            showLegacyAnswers
+          />
         </CardContent>
       </Card>
 

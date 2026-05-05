@@ -8,6 +8,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { renderToStaticMarkup } from "react-dom/server";
 import { MemoryRouter } from "react-router-dom";
 import { LeadForm } from "./lead-form";
+import type { LeadQuestionnaireNode } from "@/hooks/use-leads";
 import type { PropertySurface } from "@/hooks/use-properties";
 
 (globalThis as unknown as { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
@@ -150,6 +151,7 @@ vi.mock("@/components/ui/label", () => ({
 const SelectContext = React.createContext<{
   items?: Array<{ value: string | null; label?: React.ReactNode }>;
   value?: string;
+  onValueChange?: (value: string) => void;
 }>({});
 
 function collectSelectItems(
@@ -182,12 +184,14 @@ vi.mock("@/components/ui/select", () => ({
     children,
     items,
     value,
+    onValueChange,
   }: {
     children: React.ReactNode;
     items?: Array<{ value: string | null; label?: React.ReactNode }>;
     value?: string;
+    onValueChange?: (value: string) => void;
   }) => (
-    <SelectContext.Provider value={{ items: items ?? collectSelectItems(children), value }}>
+    <SelectContext.Provider value={{ items: items ?? collectSelectItems(children), value, onValueChange }}>
       <div data-select-value={value ?? "__undefined__"}>{children}</div>
     </SelectContext.Provider>
   ),
@@ -199,9 +203,14 @@ vi.mock("@/components/ui/select", () => ({
     return <span data-select-label="true">{label}</span>;
   },
   SelectContent: ({ children }: { children: React.ReactNode }) => <div>{children}</div>,
-  SelectItem: ({ children, value }: { children: React.ReactNode; value: string }) => (
-    <div data-value={value}>{children}</div>
-  ),
+  SelectItem: ({ children, value }: { children: React.ReactNode; value: string }) => {
+    const { onValueChange } = React.useContext(SelectContext);
+    return (
+      <button type="button" data-value={value} onClick={() => onValueChange?.(value)}>
+        {children}
+      </button>
+    );
+  },
 }));
 
 vi.mock("@/components/companies/company-selector", () => ({
@@ -220,6 +229,158 @@ vi.mock("@/components/properties/property-selector", () => ({
 vi.mock("./lead-stage-badge", () => ({
   LeadStageBadge: () => <span>Stage Badge</span>,
 }));
+
+function makeQuestionNode(overrides: Partial<LeadQuestionnaireNode> & Pick<LeadQuestionnaireNode, "id" | "key" | "label">): LeadQuestionnaireNode {
+  return {
+    projectTypeId: null,
+    parentNodeId: null,
+    parentOptionValue: null,
+    nodeType: "question",
+    prompt: null,
+    inputType: "text",
+    options: [],
+    isRequired: false,
+    displayOrder: 100,
+    sectionKey: "baseline",
+    groupKey: "baseline",
+    groupLabel: "Universal Baseline",
+    groupOrder: 0,
+    isActive: true,
+    ...overrides,
+  };
+}
+
+function universalCreateQuestionnaireNodes(): LeadQuestionnaireNode[] {
+  const scopeGroups = [
+    ["roofing", "Roofing"],
+    ["exterior_paint", "Exterior Paint"],
+    ["parking_lot", "Parking Lot"],
+    ["balconies", "Balconies"],
+    ["water_intrusion", "Water Intrusion"],
+    ["windows_doors", "Windows and Doors"],
+    ["unit_upgrades", "Unit Upgrades"],
+    ["corridors", "Corridors"],
+    ["exterior_amenities", "Exterior Amenities"],
+    ["interior_amenities", "Interior Amenities"],
+  ] as const;
+
+  const nodes: LeadQuestionnaireNode[] = [
+    makeQuestionNode({
+      id: "baseline-budget",
+      key: "budget",
+      label: "Budget",
+      inputType: "currency",
+      isRequired: false,
+      displayOrder: 200,
+    }),
+    makeQuestionNode({
+      id: "property-building-type",
+      key: "building_type",
+      label: "Building Type",
+      inputType: "select",
+      options: [{ value: "garden_style", label: "Garden Style" }],
+      isRequired: false,
+      displayOrder: 1000,
+      sectionKey: "property",
+      groupKey: "property",
+      groupLabel: "Property/Building Info",
+      groupOrder: 0,
+    }),
+  ];
+
+  for (const [index, [groupKey, groupLabel]] of scopeGroups.entries()) {
+    nodes.push(
+      makeQuestionNode({
+        id: `${groupKey}-applies`,
+        key: `${groupKey}_applies`,
+        label: `Does ${groupLabel.toLowerCase()} scope apply?`,
+        inputType: "boolean",
+        displayOrder: 0,
+        sectionKey: "scope",
+        groupKey,
+        groupLabel,
+        groupOrder: index + 1,
+      })
+    );
+  }
+
+  nodes.push(
+    makeQuestionNode({
+      id: "roof-type",
+      key: "roof_type",
+      label: "Roof Type",
+      inputType: "text",
+      isRequired: false,
+      displayOrder: 1,
+      sectionKey: "scope",
+      groupKey: "roofing",
+      groupLabel: "Roofing",
+      groupOrder: 1,
+      parentNodeId: "roofing-applies",
+      parentOptionValue: "true",
+    }),
+    makeQuestionNode({
+      id: "roofing-insurance-claim",
+      key: "roofing_insurance_claim",
+      label: "Insurance Claim",
+      inputType: "boolean",
+      isRequired: false,
+      displayOrder: 4,
+      sectionKey: "scope",
+      groupKey: "roofing",
+      groupLabel: "Roofing",
+      groupOrder: 1,
+      parentNodeId: "roofing-applies",
+      parentOptionValue: "true",
+    }),
+    makeQuestionNode({
+      id: "roofing-xactimate",
+      key: "roofing_xactimate",
+      label: "Xactimate",
+      inputType: "boolean",
+      isRequired: false,
+      displayOrder: 5,
+      sectionKey: "scope",
+      groupKey: "roofing",
+      groupLabel: "Roofing",
+      groupOrder: 1,
+      parentNodeId: "roofing-insurance-claim",
+      parentOptionValue: "true",
+    }),
+    makeQuestionNode({
+      id: "parking-surface-type",
+      key: "parking_surface_type",
+      label: "Concrete or Asphalt",
+      inputType: "multiselect",
+      options: [
+        { value: "concrete", label: "Concrete" },
+        { value: "asphalt", label: "Asphalt" },
+      ],
+      isRequired: true,
+      displayOrder: 1,
+      sectionKey: "scope",
+      groupKey: "parking_lot",
+      groupLabel: "Parking Lot",
+      groupOrder: 3,
+      parentNodeId: "parking_lot-applies",
+      parentOptionValue: "true",
+    })
+  );
+
+  return nodes;
+}
+
+function mockUniversalCreateQuestionnaire(nodes = universalCreateQuestionnaireNodes()) {
+  leadHookMocks.useLeadQuestionnaireTemplate.mockReturnValue({
+    questionnaire: {
+      projectTypeId: "type-1",
+      nodes,
+      allNodes: nodes,
+      answers: {},
+    } as any,
+    loading: false,
+  });
+}
 
 describe("LeadForm", () => {
   let container: HTMLDivElement;
@@ -291,6 +452,20 @@ describe("LeadForm", () => {
     await act(async () => {
       form?.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
     });
+  }
+
+  async function clickButton(button: HTMLButtonElement) {
+    await act(async () => {
+      button.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+  }
+
+  async function chooseQuestionSelectValue(questionKey: string, value: string) {
+    const question = container.querySelector(`[data-question-key="${questionKey}"]`);
+    expect(question).toBeTruthy();
+    const option = question?.querySelector<HTMLButtonElement>(`button[data-value="${value}"]`);
+    expect(option).toBeTruthy();
+    await clickButton(option!);
   }
 
   it("renders source as an editable field in edit mode so New Lead gate requirements can be satisfied", () => {
@@ -660,6 +835,92 @@ describe("LeadForm", () => {
     expect(html).not.toContain("Lead questionnaire template is misconfigured");
     expect(html).toContain('id="bidDueDate" type="date" value="2026-06-01"');
     expect(html).toContain("<button type=\"submit\">Create Lead</button>");
+  });
+
+  it("renders universal questionnaire baseline, property, and scope sections in create mode", () => {
+    mockUniversalCreateQuestionnaire();
+
+    const html = renderToStaticMarkup(
+      <MemoryRouter>
+        <LeadForm
+          mode="create"
+          initialValues={{
+            companyId: "company-1",
+            propertyId: "property-1",
+            primaryContactId: "contact-1",
+            primaryContactRole: "property_manager",
+            name: "Lead One",
+            source: "Referral",
+            description: "",
+            bidDueDate: "2026-06-01",
+            budgetStatus: "budgeted_q1",
+            projectTypeId: "type-1",
+          }}
+        />
+      </MemoryRouter>
+    );
+
+    expect(html).toContain("Budget");
+    expect(html).toContain("Property/Building Info");
+    expect(html).toContain("Building Type");
+    expect(html).toContain("Scope");
+    expect(html.indexOf("Budget")).toBeLessThan(html.indexOf("Property/Building Info"));
+    expect(html.indexOf("Property/Building Info")).toBeLessThan(html.indexOf("Scope"));
+  });
+
+  it("renders scope groups as ten accordions with children hidden until applies is yes", async () => {
+    mockUniversalCreateQuestionnaire();
+
+    renderCreateForm();
+
+    const scopeGroups = container.querySelectorAll("[data-scope-group]");
+    expect(scopeGroups).toHaveLength(10);
+    expect(container.textContent).toContain("Roofing");
+    expect(container.textContent).not.toContain("Roof Type");
+
+    const roofingHeader = container.querySelector<HTMLButtonElement>('[data-scope-group="roofing"] button');
+    expect(roofingHeader).toBeTruthy();
+    await clickButton(roofingHeader!);
+    expect(container.textContent).toContain("Does roofing scope apply?");
+    expect(container.textContent).not.toContain("Roof Type");
+
+    await chooseQuestionSelectValue("roofing_applies", "true");
+    expect(container.textContent).toContain("Roof Type");
+    expect(container.textContent).toContain("Insurance Claim");
+  });
+
+  it("reveals nested cascade questions inside scope accordions", async () => {
+    mockUniversalCreateQuestionnaire();
+
+    renderCreateForm();
+    await clickButton(container.querySelector<HTMLButtonElement>('[data-scope-group="roofing"] button')!);
+    await chooseQuestionSelectValue("roofing_applies", "true");
+
+    expect(container.textContent).not.toContain("Xactimate");
+    await chooseQuestionSelectValue("roofing_insurance_claim", "true");
+    expect(container.textContent).toContain("Xactimate");
+  });
+
+  it("saves universal multi-select answers from scope accordions", async () => {
+    mockUniversalCreateQuestionnaire();
+
+    renderCreateForm();
+    await clickButton(container.querySelector<HTMLButtonElement>('[data-scope-group="parking_lot"] button')!);
+    await chooseQuestionSelectValue("parking_lot_applies", "true");
+
+    const concreteOption = container.querySelector<HTMLInputElement>(
+      '[data-question-key="parking_surface_type"] input[value="concrete"]'
+    );
+    expect(concreteOption).toBeTruthy();
+    await act(async () => {
+      concreteOption!.click();
+    });
+    await submitForm();
+
+    expect(leadHookMocks.createLead).toHaveBeenCalledTimes(1);
+    expect(leadHookMocks.createLead.mock.calls[0][0].leadQuestionAnswers.parking_surface_type).toEqual([
+      "concrete",
+    ]);
   });
 
   it("renders a Year Built repair input when the selected property is missing buildYear", () => {
