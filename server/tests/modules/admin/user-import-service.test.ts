@@ -141,4 +141,35 @@ describe("importExternalUsers", () => {
     expect(result.createdCount).toBe(1);
     expect(state.identities).toHaveLength(2);
   });
+
+  it("skips existing field contractors instead of importing over that role", async () => {
+    const state = createDependencies();
+    state.users.set("field@example.com", {
+      id: "field-1",
+      email: "field@example.com",
+      displayName: "Field Contractor",
+      role: "field_contractor",
+      officeId: "office-dallas",
+      isActive: true,
+    });
+
+    const result = await importExternalUsers({
+      dependencies: state.dependencies,
+      fetchHubspotOwners: async () => [
+        {
+          id: "hs-field",
+          email: "field@example.com",
+          firstName: "Field",
+          lastName: "Contractor",
+        },
+      ],
+      fetchProcoreUsers: async () => [],
+    });
+
+    expect(result.createdCount).toBe(0);
+    expect(result.matchedExistingCount).toBe(0);
+    expect(result.skippedCount).toBe(1);
+    expect(result.warnings).toContain("Skipped field@example.com: existing user role is not importable");
+    expect(state.identities).toHaveLength(0);
+  });
 });

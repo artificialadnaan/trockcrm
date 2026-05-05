@@ -5,6 +5,7 @@ import { userLocalAuth, userLocalAuthEvents, users } from "@trock-crm/shared/sch
 import { db } from "../../db.js";
 import { AppError } from "../../middleware/error-handler.js";
 import { sendSystemEmail } from "../../lib/resend-client.js";
+import type { UserRole } from "@trock-crm/shared/types";
 
 const scryptAsync = promisify(crypto.scrypt);
 const PASSWORD_MIN_LENGTH = 12;
@@ -19,6 +20,13 @@ export type LocalAuthStatus =
   | "password_change_required"
   | "active"
   | "disabled";
+type LocalAuthUserRole = Exclude<UserRole, "field_contractor">;
+
+function assertLocalAuthUserRole(role: UserRole): asserts role is LocalAuthUserRole {
+  if (role === "field_contractor") {
+    throw new AppError(403, "Local login is not available for this role");
+  }
+}
 
 function normalizeEmail(email: string): string {
   return email.trim().toLowerCase();
@@ -57,7 +65,7 @@ function buildUserPayload(user: {
   id: string;
   email: string;
   displayName: string;
-  role: "admin" | "director" | "rep" | "construction";
+  role: LocalAuthUserRole;
   officeId: string;
 }) {
   return {
@@ -415,6 +423,7 @@ export async function loginWithLocalPassword(input: {
   if (!row || !row.isActive) {
     throw new AppError(401, "Invalid email or password");
   }
+  assertLocalAuthUserRole(row.role);
 
   const currentTime = now();
   if (row.lockedUntil && row.lockedUntil.getTime() > currentTime.getTime()) {
@@ -479,9 +488,10 @@ export async function loginWithLocalPassword(input: {
     eventType: "login_succeeded",
   });
 
+  const localAuthUserRole = row.role;
   return {
     user: {
-      ...buildUserPayload(row),
+      ...buildUserPayload({ ...row, role: localAuthUserRole }),
       mustChangePassword: row.mustChangePassword,
     },
   };
