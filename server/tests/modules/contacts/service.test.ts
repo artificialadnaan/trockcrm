@@ -321,6 +321,140 @@ describe("Contact Service", () => {
       });
     });
 
+    it("converts wrapped duplicate email unique violations to a readable 409", async () => {
+      const tenantDb = {
+        insert() {
+          return {
+            values() {
+              return {
+                returning: async () => {
+                  const pgErr = new Error("duplicate key value violates unique constraint \"contacts_email_unique\"");
+                  (pgErr as any).code = "23505";
+                  (pgErr as any).constraint = "contacts_email_unique";
+                  throw new Error("Failed query: insert into contacts", { cause: pgErr });
+                },
+              };
+            },
+          };
+        },
+      };
+
+      await expect(
+        createContact(
+          tenantDb as never,
+          {
+            firstName: "Grace",
+            lastName: "Hopper",
+            email: "grace@example.com",
+            companyId: "company-1",
+            category: "client",
+          },
+          true
+        )
+      ).rejects.toMatchObject({
+        statusCode: 409,
+        message: "A contact with this email already exists. Please use a different email or select the existing contact.",
+      });
+    });
+
+    it("converts duplicate email unique violations detected by message fallback to a readable 409", async () => {
+      const tenantDb = {
+        insert() {
+          return {
+            values() {
+              return {
+                returning: async () => {
+                  throw new Error("duplicate key value violates unique constraint \"contacts_email_unique\"");
+                },
+              };
+            },
+          };
+        },
+      };
+
+      await expect(
+        createContact(
+          tenantDb as never,
+          {
+            firstName: "Grace",
+            lastName: "Hopper",
+            email: "grace@example.com",
+            companyId: "company-1",
+            category: "client",
+          },
+          true
+        )
+      ).rejects.toMatchObject({
+        statusCode: 409,
+        message: "A contact with this email already exists. Please use a different email or select the existing contact.",
+      });
+    });
+
+    it("rethrows unique violations on non-email constraints", async () => {
+      const tenantDb = {
+        insert() {
+          return {
+            values() {
+              return {
+                returning: async () => {
+                  const err = new Error("duplicate key value violates unique constraint");
+                  (err as any).code = "23505";
+                  (err as any).constraint = "contacts_external_id_unique";
+                  throw err;
+                },
+              };
+            },
+          };
+        },
+      };
+
+      await expect(
+        createContact(
+          tenantDb as never,
+          {
+            firstName: "Grace",
+            lastName: "Hopper",
+            email: "grace@example.com",
+            companyId: "company-1",
+            category: "client",
+          },
+          true
+        )
+      ).rejects.toMatchObject({
+        message: "duplicate key value violates unique constraint",
+      });
+    });
+
+    it("rethrows generic database errors as-is", async () => {
+      const tenantDb = {
+        insert() {
+          return {
+            values() {
+              return {
+                returning: async () => {
+                  throw new Error("database connection lost");
+                },
+              };
+            },
+          };
+        },
+      };
+
+      await expect(
+        createContact(
+          tenantDb as never,
+          {
+            firstName: "Grace",
+            lastName: "Hopper",
+            email: "grace@example.com",
+            companyId: "company-1",
+            category: "client",
+          },
+          true
+        )
+      ).rejects.toThrow("database connection lost");
+    });
+
     it("treats an empty phone string as null", async () => {
       const insertedRows: Array<Record<string, unknown>> = [];
       const tenantDb = {
