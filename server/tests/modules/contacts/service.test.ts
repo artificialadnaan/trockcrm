@@ -185,7 +185,7 @@ describe("Contact Service", () => {
           firstName: "Ada",
           lastName: "Lovelace",
           email: "Ada@Example.com",
-          phone: "555-0101",
+          phone: "(555) 010-0101",
           companyId: "company-1",
           category: "client",
         },
@@ -200,6 +200,155 @@ describe("Contact Service", () => {
         category: "client",
       });
       expect(result.contact.companyId).toBe("company-1");
+    });
+
+    it("creates a contact with a valid email and phone", async () => {
+      const insertedRows: Array<Record<string, unknown>> = [];
+      const tenantDb = {
+        insert() {
+          return {
+            values(row: Record<string, unknown>) {
+              insertedRows.push(row);
+              return {
+                returning: async () => [{ id: "contact-1", ...row }],
+              };
+            },
+          };
+        },
+      };
+
+      const result = await createContact(
+        tenantDb as never,
+        {
+          firstName: "Grace",
+          lastName: "Hopper",
+          email: "Grace@Example.com",
+          phone: "(214) 555-1212",
+          companyId: "company-1",
+          category: "client",
+        },
+        true
+      );
+
+      expect(insertedRows[0]).toMatchObject({
+        email: "grace@example.com",
+        phone: "(214) 555-1212",
+      });
+      expect(result.contact.id).toBe("contact-1");
+    });
+
+    it("rejects a too-long phone before insert with a readable error", async () => {
+      const tenantDb = {
+        insert: vi.fn(),
+      };
+
+      await expect(
+        createContact(
+          tenantDb as never,
+          {
+            firstName: "Grace",
+            lastName: "Hopper",
+            phone: "+1 (214) 555-1212 ext 999999",
+            companyId: "company-1",
+            category: "client",
+          },
+          true
+        )
+      ).rejects.toMatchObject({
+        statusCode: 400,
+        message: "Phone number is too long. Please use a 10-15 digit number.",
+      });
+      expect(tenantDb.insert).not.toHaveBeenCalled();
+    });
+
+    it("rejects invalid email format before insert with a readable error", async () => {
+      const tenantDb = {
+        insert: vi.fn(),
+      };
+
+      await expect(
+        createContact(
+          tenantDb as never,
+          {
+            firstName: "Grace",
+            lastName: "Hopper",
+            email: "not-an-email",
+            companyId: "company-1",
+            category: "client",
+          },
+          true
+        )
+      ).rejects.toMatchObject({
+        statusCode: 400,
+        message: "Please enter a valid email address.",
+      });
+      expect(tenantDb.insert).not.toHaveBeenCalled();
+    });
+
+    it("converts duplicate email unique violations to a readable 409", async () => {
+      const tenantDb = {
+        insert() {
+          return {
+            values() {
+              return {
+                returning: async () => {
+                  const err = new Error("duplicate key value violates unique constraint");
+                  (err as any).code = "23505";
+                  (err as any).constraint = "contacts_email_unique";
+                  throw err;
+                },
+              };
+            },
+          };
+        },
+      };
+
+      await expect(
+        createContact(
+          tenantDb as never,
+          {
+            firstName: "Grace",
+            lastName: "Hopper",
+            email: "grace@example.com",
+            companyId: "company-1",
+            category: "client",
+          },
+          true
+        )
+      ).rejects.toMatchObject({
+        statusCode: 409,
+        message: "A contact with this email already exists. Please use a different email or select the existing contact.",
+      });
+    });
+
+    it("treats an empty phone string as null", async () => {
+      const insertedRows: Array<Record<string, unknown>> = [];
+      const tenantDb = {
+        insert() {
+          return {
+            values(row: Record<string, unknown>) {
+              insertedRows.push(row);
+              return {
+                returning: async () => [{ id: "contact-1", ...row }],
+              };
+            },
+          };
+        },
+      };
+
+      await createContact(
+        tenantDb as never,
+        {
+          firstName: "Grace",
+          lastName: "Hopper",
+          phone: "",
+          companyId: "company-1",
+          category: "client",
+        },
+        true
+      );
+
+      expect(insertedRows[0]).toMatchObject({ phone: null });
     });
   });
 });

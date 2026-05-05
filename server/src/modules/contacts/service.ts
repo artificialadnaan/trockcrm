@@ -5,6 +5,10 @@ import type * as schema from "@trock-crm/shared/schema";
 import { AppError } from "../../middleware/error-handler.js";
 
 type TenantDb = NodePgDatabase<typeof schema>;
+const INVALID_EMAIL_MESSAGE = "Please enter a valid email address.";
+const INVALID_PHONE_MESSAGE = "Phone number is too long. Please use a 10-15 digit number.";
+const DUPLICATE_EMAIL_MESSAGE =
+  "A contact with this email already exists. Please use a different email or select the existing contact.";
 
 export interface ContactFilters {
   search?: string;
@@ -41,6 +45,32 @@ export interface CreateContactInput {
   notes?: string | null;
   procoreContactId?: number | null;
   hubspotContactId?: string | null;
+}
+
+function validateEmailInput(email: string | null | undefined): void {
+  const trimmed = email?.trim();
+  if (trimmed && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(trimmed)) {
+    throw new AppError(400, INVALID_EMAIL_MESSAGE);
+  }
+}
+
+function normalizeOptionalPhone(phone: string | null | undefined): string | null {
+  const trimmed = phone?.trim();
+  if (!trimmed) return null;
+
+  const digits = trimmed.replace(/\D/g, "");
+  if (digits.length < 10 || digits.length > 15 || trimmed.length > 20) {
+    throw new AppError(400, INVALID_PHONE_MESSAGE);
+  }
+
+  return trimmed;
+}
+
+function isEmailUniqueViolation(err: any): boolean {
+  return err?.code === "23505" && (
+    typeof err.constraint === "string" && err.constraint.includes("email") ||
+    typeof err.detail === "string" && err.detail.includes("(email)")
+  );
 }
 
 export interface UpdateContactInput {
@@ -353,6 +383,10 @@ export async function createContact(
   input: CreateContactInput,
   skipDedupCheck = false
 ): Promise<{ contact: any; dedupResult?: DedupCheckResult }> {
+  validateEmailInput(input.email);
+  const normalizedPhone = normalizeOptionalPhone(input.phone);
+  const normalizedMobile = normalizeOptionalPhone(input.mobile);
+
   // Run dedup check unless explicitly skipped
   if (!skipDedupCheck) {
     const dedupResult = await checkForDuplicates(tenantDb, {
@@ -386,8 +420,8 @@ export async function createContact(
         firstName: input.firstName,
         lastName: input.lastName,
         email: normalizedEmail,
-        phone: input.phone?.trim() || null,
-        mobile: input.mobile?.trim() || null,
+        phone: normalizedPhone,
+        mobile: normalizedMobile,
         companyName: input.companyName?.trim() || null,
         companyId: input.companyId ?? null,
         jobTitle: input.jobTitle?.trim() || null,
@@ -404,12 +438,8 @@ export async function createContact(
   } catch (err: any) {
     // Fallback: catch unique violation on email (23505) as a safety net
     // in case the dedup check was skipped or a race condition occurred.
-    if (err.code === "23505" && err.constraint?.includes("email")) {
-      throw new AppError(
-        409,
-        `A contact with email "${normalizedEmail}" already exists`,
-        "DUPLICATE_EMAIL"
-      );
+    if (isEmailUniqueViolation(err)) {
+      throw new AppError(409, DUPLICATE_EMAIL_MESSAGE, "DUPLICATE_EMAIL");
     }
     throw err;
   }
@@ -460,8 +490,8 @@ export async function updateContact(
   if (input.firstName !== undefined) updates.firstName = input.firstName;
   if (input.lastName !== undefined) updates.lastName = input.lastName;
   if (input.email !== undefined) updates.email = input.email || null;
-  if (input.phone !== undefined) updates.phone = input.phone?.trim() || null;
-  if (input.mobile !== undefined) updates.mobile = input.mobile?.trim() || null;
+  if (input.phone !== undefined) updates.phone = normalizeOptionalPhone(input.phone);
+  if (input.mobile !== undefined) updates.mobile = normalizeOptionalPhone(input.mobile);
   if (input.companyName !== undefined) updates.companyName = input.companyName?.trim() || null;
   if (input.jobTitle !== undefined) updates.jobTitle = input.jobTitle?.trim() || null;
   if (input.category !== undefined) updates.category = input.category;
