@@ -64,6 +64,7 @@ Provenance: deals + leads cluster pre-existed since merge commit `e7259ee`, befo
 ## Environmental quirks
 
 - **Claude Code `Edit` tool returns "Edit operation failed" reminders for successful edits in some cases.** Verified during Commit 7 that edits land correctly despite the reminder; recommended verification = grep + typecheck after every Edit call. Surfaced 2026-04-27.
+- **Production DNS mismatch for `crm.trockconstruction.com`.** README lists `crm.trockconstruction.com` as a production entry point, but `curl -i https://crm.trockconstruction.com/api/health` failed with `Could not resolve host` during the 2026-05-04 PR #107 production restore. `https://trockcrm.com/api/health` resolved and returned 200 after the deploy. Investigate DNS / Cloudflare config and decide whether to restore the hostname or remove it from docs.
 
 ## Naming debt
 
