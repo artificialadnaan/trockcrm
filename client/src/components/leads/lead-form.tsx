@@ -93,6 +93,7 @@ export interface LeadFormLead {
   existingCustomerStatus?: "Existing" | "New" | null;
   description: string | null;
   budgetStatus?: LeadBudgetStatus | null;
+  bidDueDate?: string | null;
   projectTypeId?: string | null;
   projectType?: {
     id: string;
@@ -124,9 +125,12 @@ type LeadCreateFormProps = {
     companyId: string;
     propertyId: string;
     primaryContactId: string;
+    primaryContactRole: LeadPocRole;
     name: string;
     source: string;
     description: string;
+    bidDueDate: string;
+    budgetStatus: LeadBudgetStatus;
     projectTypeId: string;
     stageId: string;
   }>;
@@ -214,7 +218,7 @@ function getEditableFormState(
     companyId: lead?.companyId ?? initialValues?.companyId ?? "",
     propertyId: lead?.propertyId ?? initialValues?.propertyId ?? "",
     primaryContactId: lead?.primaryContactId ?? initialValues?.primaryContactId ?? "",
-    primaryContactRole: lead?.primaryContactRole ?? "",
+    primaryContactRole: lead?.primaryContactRole ?? initialValues?.primaryContactRole ?? "",
     primaryContactRoleOtherLabel: lead?.primaryContactRoleOtherLabel ?? "",
     name: lead?.name ?? initialValues?.name ?? "",
     stageId: lead?.stageId ?? initialValues?.stageId ?? "",
@@ -223,8 +227,9 @@ function getEditableFormState(
     sourceCategory: sourceState.sourceCategory,
     sourceDetail: sourceState.sourceDetail,
     description: lead?.description ?? initialValues?.description ?? "",
+    bidDueDate: lead?.bidDueDate ?? initialValues?.bidDueDate ?? "",
     projectTypeId: lead?.projectTypeId ?? initialValues?.projectTypeId ?? "",
-    budgetStatus: lead?.budgetStatus ?? "",
+    budgetStatus: lead?.budgetStatus ?? initialValues?.budgetStatus ?? "",
     qualificationPayload: {
       existing_customer_status:
         typeof lead?.qualificationPayload?.existing_customer_status === "string"
@@ -743,10 +748,6 @@ function EditableLeadForm({
     () => questionnaireTemplateNodes.filter((node) => node.nodeType === "question"),
     [questionnaireTemplateNodes]
   );
-  const bidDueDateNode = useMemo(
-    () => v2QuestionNodes.find((node) => node.key === "bid_due_date") ?? null,
-    [v2QuestionNodes]
-  );
   const numberOfBiddersNode = useMemo(
     () => v2QuestionNodes.find((node) => node.key === "number_of_bidders") ?? null,
     [v2QuestionNodes]
@@ -766,17 +767,9 @@ function EditableLeadForm({
       .sort((left, right) => left.displayOrder - right.displayOrder);
   }, [formData.projectTypeQuestionAnswers, v2NodeById, v2QuestionNodes]);
   const useV2Questionnaire = isCreate && questionnaireTemplateNodes.length > 0;
-  const createTemplateMisconfigured =
-    isCreate && !questionnaireTemplateLoading && !bidDueDateNode;
   const createRequirementErrors = useMemo(() => {
     if (!isCreate) return new Map<string, string>();
     const errors = new Map<string, string>();
-    if (createTemplateMisconfigured) {
-      errors.set(
-        "questionnaireTemplate",
-        "Lead questionnaire template is misconfigured — contact admin."
-      );
-    }
     if (!selectedProperty) {
       errors.set("propertyId", "Select or create a property.");
     } else {
@@ -812,17 +805,16 @@ function EditableLeadForm({
     }
     if (!formData.budgetStatus) errors.set("budgetStatus", "Budget status is required.");
     if (!formData.projectTypeId) errors.set("projectTypeId", "Project type is required.");
-    if (bidDueDateNode && !isAnsweredQuestionValue(formData.projectTypeQuestionAnswers.bid_due_date)) {
-      errors.set("leadQuestionAnswers.bid_due_date", "Bid Due Date is required.");
+    if (!formData.bidDueDate) {
+      errors.set("bidDueDate", "Bid Due Date is required.");
     }
     for (const key of createGateMissingKeys) {
       if (!errors.has(key)) errors.set(key, "Required before creating a lead.");
     }
     return errors;
   }, [
-    bidDueDateNode,
     createGateMissingKeys,
-    createTemplateMisconfigured,
+    formData.bidDueDate,
     formData.budgetStatus,
     formData.primaryContactId,
     formData.primaryContactRole,
@@ -878,7 +870,8 @@ function EditableLeadForm({
       primaryContactRole: ["primaryContactRole", "primaryContactRoleOtherLabel"],
       primaryContactRoleOtherLabel: ["primaryContactRoleOtherLabel"],
       budgetStatus: ["budgetStatus"],
-      projectTypeId: ["projectTypeId", "questionnaireTemplate"],
+      projectTypeId: ["projectTypeId"],
+      bidDueDate: ["bidDueDate"],
     };
     const keys = fieldMap[field];
     if (keys) {
@@ -1095,6 +1088,7 @@ function EditableLeadForm({
           sourceCategory: formData.sourceCategory as LeadSourceCategory,
           sourceDetail: formData.sourceDetail.trim() || null,
           description: formData.description.trim() || null,
+          bidDueDate: formData.bidDueDate || null,
           budgetStatus: formData.budgetStatus as LeadBudgetStatus,
           // TODO: replace with Office picker (dfw/atl) — demo hotfix
           officeCode: "dfw",
@@ -1110,6 +1104,7 @@ function EditableLeadForm({
           sourceCategory: formData.sourceCategory as LeadSourceCategory,
           sourceDetail: formData.sourceDetail.trim() || null,
           description: formData.description.trim() || null,
+          bidDueDate: formData.bidDueDate || null,
           ...workflowPayload,
         });
         if (onSaved) {
@@ -1513,23 +1508,16 @@ function EditableLeadForm({
                 </div>
               </div>
               <div className="grid gap-4 sm:grid-cols-2">
-                {renderCreateFieldError("questionnaireTemplate")}
-                {bidDueDateNode ? (
-                  <div className="space-y-2">
-                    <QuestionLabel htmlFor="bid_due_date" required>Bid Due Date</QuestionLabel>
-                    <Input
-                      id="bid_due_date"
-                      type="date"
-                      value={
-                        typeof formData.projectTypeQuestionAnswers.bid_due_date === "string"
-                          ? formData.projectTypeQuestionAnswers.bid_due_date
-                          : ""
-                      }
-                      onChange={(event) => handleQuestionAnswerChange("bid_due_date", "text", event.target.value)}
-                    />
-                    {renderCreateFieldError("leadQuestionAnswers.bid_due_date")}
-                  </div>
-                ) : null}
+                <div className="space-y-2">
+                  <QuestionLabel htmlFor="bidDueDate" required>Bid Due Date</QuestionLabel>
+                  <Input
+                    id="bidDueDate"
+                    type="date"
+                    value={formData.bidDueDate}
+                    onChange={(event) => handleFieldChange("bidDueDate", event.target.value)}
+                  />
+                  {renderCreateFieldError("bidDueDate")}
+                </div>
                 {numberOfBiddersNode ? (
                   <div className="space-y-2">
                     <Label htmlFor="number_of_bidders">Number of Bidders</Label>
@@ -1617,6 +1605,15 @@ function EditableLeadForm({
                     ? LEAD_BUDGET_STATUS_LABELS[formData.budgetStatus as LeadBudgetStatus]
                     : "--"}
                 </p>
+              </div>
+              <div className="space-y-2">
+                <Label htmlFor="bidDueDate">Bid Due Date</Label>
+                <Input
+                  id="bidDueDate"
+                  type="date"
+                  value={formData.bidDueDate}
+                  onChange={(event) => handleFieldChange("bidDueDate", event.target.value)}
+                />
               </div>
               <div className="space-y-2">
                 <Label htmlFor="projectTypeId">Project Type</Label>

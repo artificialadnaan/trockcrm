@@ -155,7 +155,9 @@ export async function getQuestionnaireTemplateSnapshot(
   ]);
 
   const normalizeCreateModeNode = (node: QuestionnaireNode): QuestionnaireNode | null => {
-    if (node.key === "poc") {
+    // First-class create-gate fields are collected above the V2 questionnaire.
+    // Keep V2 nodes available for edit-mode snapshots and answer mirroring.
+    if (node.key === "poc" || node.key === "bid_due_date") {
       return null;
     }
     if (node.key === "number_of_bidders") {

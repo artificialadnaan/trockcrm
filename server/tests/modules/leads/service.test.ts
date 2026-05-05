@@ -51,6 +51,7 @@ type FakeLeadRow = {
     projectTypeId: string | null;
     answers: Record<string, string | boolean | number | null>;
   };
+  bidDueDate?: string | null;
   source: string | null;
   description: string | null;
   stageEnteredAt: Date;
@@ -193,6 +194,9 @@ function createFakeTenantDb(lead: FakeLeadRow) {
 
   return {
     state,
+    execute: vi.fn(async () => ({
+      rows: [{ last_activity_at: new Date("2026-04-01T00:00:00.000Z") }],
+    })),
     select(fields?: Record<string, unknown>) {
       return {
         from(table: unknown) {
@@ -556,9 +560,7 @@ describe("lead service canonical progression", () => {
         projectType: "commercial",
         projectTypeId: "project-type-commercial",
         budgetStatus: "budgeted_q3",
-        leadQuestionAnswers: {
-          bid_due_date: "2026-06-01",
-        },
+        bidDueDate: "2026-06-01",
         qualificationPayload: {
           existing_customer_status: "existing",
           estimated_value: 125000,
@@ -648,9 +650,7 @@ describe("lead service canonical progression", () => {
         projectType: "casino",
         projectTypeId: "project-type-casino",
         budgetStatus: "budgeted_q1",
-        leadQuestionAnswers: {
-          bid_due_date: "2026-06-01",
-        },
+        bidDueDate: "2026-06-01",
       })
     ).rejects.toMatchObject<AppError>({
       statusCode: 400,
@@ -730,7 +730,7 @@ describe("lead service canonical progression", () => {
     ["primaryContactRole", (_db: any, input: any) => { input.primaryContactRole = null; }],
     ["budgetStatus", (_db: any, input: any) => { input.budgetStatus = null; }],
     ["projectTypeId", (_db: any, input: any) => { input.projectTypeId = null; }],
-    ["leadQuestionAnswers.bid_due_date", (_db: any, input: any) => { input.leadQuestionAnswers = {}; }],
+    ["bidDueDate", (_db: any, input: any) => { input.bidDueDate = ""; }],
   ])("rejects missing lead create prerequisite %s before insert", async (fieldKey, mutate) => {
     const tenantDb = createFakeTenantDb({} as FakeLeadRow);
     tenantDb.state.leads = [];
@@ -752,9 +752,7 @@ describe("lead service canonical progression", () => {
       officeCode: "dfw",
       projectTypeId: "project-type-commercial",
       budgetStatus: "budgeted_q1",
-      leadQuestionAnswers: {
-        bid_due_date: "2026-06-01",
-      },
+      bidDueDate: "2026-06-01",
     };
     mutate(tenantDb, input);
 
@@ -792,9 +790,7 @@ describe("lead service canonical progression", () => {
         officeCode: "dfw",
         projectTypeId: "project-type-commercial",
         budgetStatus: "budgeted_q1",
-        leadQuestionAnswers: {
-          bid_due_date: "2026-06-01",
-        },
+        bidDueDate: "2026-06-01",
       } as never)
     ).rejects.toMatchObject({
       code: "LEAD_CREATE_REQUIREMENTS_UNMET",
@@ -802,6 +798,128 @@ describe("lead service canonical progression", () => {
         fields: expect.arrayContaining([expect.objectContaining({ key: "primaryContactRoleOtherLabel" })]),
       },
     });
+  });
+
+  it("rejects invalid bidDueDate before insert", async () => {
+    const tenantDb = createFakeTenantDb({} as FakeLeadRow);
+    tenantDb.state.leads = [];
+    const service = createLeadService({
+      getStageById: pipelineMocks.getStageById as never,
+      getActiveProjectTypes: pipelineMocks.getActiveProjectTypes as never,
+      now: () => new Date("2026-04-15T15:00:00.000Z"),
+    });
+
+    await expect(
+      service.createLead(tenantDb as never, {
+        companyId: "company-1",
+        propertyId: "property-1",
+        stageId: newLeadStage.id,
+        assignedRepId: "rep-1",
+        officeId: "office-1",
+        primaryContactId: "contact-1",
+        primaryContactRole: "property_manager",
+        name: "Created Lead",
+        source: "Referral",
+        officeCode: "dfw",
+        projectTypeId: "project-type-commercial",
+        budgetStatus: "budgeted_q1",
+        bidDueDate: "2026-02-31",
+      } as never)
+    ).rejects.toMatchObject({
+      code: "LEAD_CREATE_REQUIREMENTS_UNMET",
+      missingRequirements: {
+        fields: expect.arrayContaining([expect.objectContaining({ key: "bidDueDate" })]),
+      },
+    });
+    expect(tenantDb.state.leads).toHaveLength(0);
+  });
+
+  it("creates a lead with bidDueDate when lead edit v2 is disabled without writing V2 answers", async () => {
+    const previousFlag = process.env.ENABLE_LEAD_EDIT_V2;
+    process.env.ENABLE_LEAD_EDIT_V2 = "false";
+    const tenantDb = createFakeTenantDb({} as FakeLeadRow);
+    tenantDb.state.leads = [];
+    const service = createLeadService({
+      getStageById: pipelineMocks.getStageById as never,
+      getActiveProjectTypes: pipelineMocks.getActiveProjectTypes as never,
+      now: () => new Date("2026-04-15T15:00:00.000Z"),
+    });
+
+    try {
+      const lead = await service.createLead(tenantDb as never, {
+        companyId: "company-1",
+        propertyId: "property-1",
+        stageId: newLeadStage.id,
+        assignedRepId: "rep-1",
+        officeId: "office-1",
+        primaryContactId: "contact-1",
+        primaryContactRole: "property_manager",
+        name: "Created Lead",
+        source: "Referral",
+        officeCode: "dfw",
+        projectTypeId: "project-type-commercial",
+        budgetStatus: "budgeted_q1",
+        bidDueDate: "2026-06-01",
+      } as never);
+
+      expect(lead.bidDueDate).toBe("2026-06-01");
+      expect(tenantDb.state.leads[0]?.bidDueDate).toBe("2026-06-01");
+      expect(tenantDb.state.leadQuestionAnswers).toHaveLength(0);
+      expect(tenantDb.state.leadQuestionAnswerHistory).toHaveLength(0);
+    } finally {
+      if (previousFlag === undefined) delete process.env.ENABLE_LEAD_EDIT_V2;
+      else process.env.ENABLE_LEAD_EDIT_V2 = previousFlag;
+    }
+  });
+
+  it("mirrors bidDueDate to V2 lead_question_answers when lead edit v2 is enabled", async () => {
+    const previousFlag = process.env.ENABLE_LEAD_EDIT_V2;
+    process.env.ENABLE_LEAD_EDIT_V2 = "true";
+    const tenantDb = createFakeTenantDb({} as FakeLeadRow);
+    tenantDb.state.leads = [];
+    const service = createLeadService({
+      getStageById: pipelineMocks.getStageById as never,
+      getActiveProjectTypes: pipelineMocks.getActiveProjectTypes as never,
+      now: () => new Date("2026-04-15T15:00:00.000Z"),
+    });
+
+    try {
+      const lead = await service.createLead(tenantDb as never, {
+        companyId: "company-1",
+        propertyId: "property-1",
+        stageId: newLeadStage.id,
+        assignedRepId: "rep-1",
+        officeId: "office-1",
+        primaryContactId: "contact-1",
+        primaryContactRole: "property_manager",
+        name: "Created Lead",
+        source: "Referral",
+        officeCode: "dfw",
+        projectTypeId: "project-type-commercial",
+        budgetStatus: "budgeted_q1",
+        bidDueDate: "2026-06-01",
+      } as never);
+
+      expect(lead.bidDueDate).toBe("2026-06-01");
+      expect(tenantDb.state.leadQuestionAnswers).toEqual([
+        expect.objectContaining({
+          leadId: lead.id,
+          questionId: "node-bid-due-date",
+          valueJson: "2026-06-01",
+        }),
+      ]);
+      expect(tenantDb.state.leadQuestionAnswerHistory).toEqual([
+        expect.objectContaining({
+          leadId: lead.id,
+          questionId: "node-bid-due-date",
+          oldValueJson: null,
+          newValueJson: "2026-06-01",
+        }),
+      ]);
+    } finally {
+      if (previousFlag === undefined) delete process.env.ENABLE_LEAD_EDIT_V2;
+      else process.env.ENABLE_LEAD_EDIT_V2 = previousFlag;
+    }
   });
 
   it("persists qualification payload updates when lead edit v2 is enabled", async () => {
@@ -997,9 +1115,7 @@ describe("lead service canonical progression", () => {
         projectType: "commercial",
         projectTypeId: "project-type-commercial",
         budgetStatus: "budgeted_q1",
-        leadQuestionAnswers: {
-          bid_due_date: "2026-06-01",
-        },
+        bidDueDate: "2026-06-01",
         qualificationPayload: {},
       });
 
@@ -1093,9 +1209,7 @@ describe("lead service canonical progression", () => {
         projectType: "commercial",
         projectTypeId: "project-type-commercial",
         budgetStatus: "not_budgeted",
-        leadQuestionAnswers: {
-          bid_due_date: "2026-06-01",
-        },
+        bidDueDate: "2026-06-01",
         qualificationPayload: {},
       });
 

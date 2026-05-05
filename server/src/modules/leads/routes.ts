@@ -213,7 +213,7 @@ router.patch("/:id/scoping", async (req, res, next) => {
 // POST /api/leads
 router.post("/", async (req, res, next) => {
   try {
-    const { companyId, propertyId, assignedRepId, salesRepId, name, ...rest } = req.body;
+    const { companyId, propertyId, assignedRepId, salesRepId, name, bidDueDate, ...rest } = req.body;
     if (!companyId || !propertyId || !name) {
       throw new AppError(400, "companyId, propertyId, and name are required");
     }
@@ -231,6 +231,7 @@ router.post("/", async (req, res, next) => {
       salesRepId: leadSalesRepId,
       officeId: req.user!.activeOfficeId,
       name,
+      bidDueDate,
       ...rest,
     });
 

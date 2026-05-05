@@ -138,7 +138,7 @@ test("lead creation gate blocks missing prerequisites and submits a complete cre
   await page.getByText("Property Manager").click();
   await page.locator("#budgetStatus").click();
   await page.getByText("Budgeted Q1").click();
-  await page.locator("#bid_due_date").fill("2026-06-01");
+  await page.locator("#bidDueDate").fill("2026-06-01");
 
   await expect(page.getByRole("button", { name: "Create Lead" })).toBeEnabled();
   await page.getByRole("button", { name: "Create Lead" }).click();
@@ -152,8 +152,6 @@ test("lead creation gate blocks missing prerequisites and submits a complete cre
       primaryContactRole: "property_manager",
       budgetStatus: "budgeted_q1",
       projectTypeId: "type-5",
-      leadQuestionAnswers: {
-        bid_due_date: "2026-06-01",
-      },
+      bidDueDate: "2026-06-01",
     });
 });

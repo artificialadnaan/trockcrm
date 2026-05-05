@@ -329,7 +329,7 @@ describe("lead stage transition route", () => {
       { key: "primaryContactRole", label: "POC role" },
       { key: "budgetStatus", label: "Budget status" },
       { key: "projectTypeId", label: "Project type" },
-      { key: "leadQuestionAnswers.bid_due_date", label: "Bid Due Date" },
+      { key: "bidDueDate", label: "Bid Due Date" },
     ];
     serviceMocks.createLead.mockRejectedValueOnce(new TestLeadCreateRequirementsError(fields));
 

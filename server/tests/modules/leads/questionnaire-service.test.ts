@@ -5,7 +5,7 @@ import { getQuestionnaireTemplateSnapshot } from "../../../src/modules/leads/que
 vi.mock("@trock-crm/shared/schema", async () => import("../../../../shared/src/schema/index.js"));
 
 describe("questionnaire-service create template", () => {
-  it("suppresses superseded free-text POC and makes number of bidders optional", async () => {
+  it("suppresses superseded create-gate nodes and makes number of bidders optional", async () => {
     const tenantDb = {
       select() {
         return {
@@ -70,9 +70,10 @@ describe("questionnaire-service create template", () => {
 
     const template = await getQuestionnaireTemplateSnapshot(tenantDb as never, null);
 
-    expect(template.nodes.map((node) => node.key)).toEqual(["number_of_bidders", "bid_due_date"]);
+    expect(template.nodes.map((node) => node.key)).toEqual(["number_of_bidders"]);
     expect(template.nodes.find((node) => node.key === "number_of_bidders")).toMatchObject({
       isRequired: false,
     });
+    expect(template.allNodes.map((node) => node.key)).toEqual(["number_of_bidders"]);
   });
 });
