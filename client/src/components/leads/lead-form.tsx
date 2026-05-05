@@ -51,7 +51,7 @@ import {
   type LeadQuestionnaireSnapshot,
 } from "@/hooks/use-leads";
 import { usePipelineStages, useProjectTypes } from "@/hooks/use-pipeline-config";
-import { formatPropertyLabel, updateProperty, useProperties } from "@/hooks/use-properties";
+import { formatPropertyLabel, updateProperty, useProperties, usePropertyDetail } from "@/hooks/use-properties";
 import { CATEGORY_LABELS } from "@/lib/contact-utils";
 import { isApiError } from "@/lib/api";
 import { useAuth } from "@/lib/auth";
@@ -302,6 +302,16 @@ function isValidBuildYear(value: unknown, maxYear: number) {
 
 function isPositiveInteger(value: unknown) {
   return typeof value === "number" && Number.isInteger(value) && value > 0;
+}
+
+function getPhoneValidationError(phone: string) {
+  const raw = phone.trim();
+  if (!raw) return null;
+  const digits = raw.replace(/\D/g, "");
+  if (digits.length < 10 || digits.length > 15) {
+    return "Phone must be 10-15 digits.";
+  }
+  return null;
 }
 
 function QuestionLabel({
@@ -580,6 +590,9 @@ function EditableLeadForm({
   const leadStages = getLeadCreationStages(stages);
 
   const [formData, setFormData] = useState(() => getEditableFormState(lead, initialValues));
+  const { property: resolvedSelectedProperty } = usePropertyDetail(
+    isCreate && formData.propertyId ? formData.propertyId : undefined
+  );
   const { questionnaire: questionnaireTemplate, loading: questionnaireTemplateLoading } = useLeadQuestionnaireTemplate(
     isCreate ? (formData.projectTypeId || null) : null
   );
@@ -642,14 +655,7 @@ function EditableLeadForm({
     setFormData((current) => ({
       ...current,
       companyId: companyId ?? "",
-      propertyId:
-        current.propertyId && properties.some((property) => property.id === current.propertyId)
-          ? current.propertyId
-          : current.propertyId
-            ? ""
-            : properties.length === 1
-              ? properties[0]?.id ?? ""
-              : "",
+      propertyId: current.propertyId || (properties.length === 1 ? properties[0]?.id ?? "" : ""),
       primaryContactId:
         current.primaryContactId && contacts.some((contact) => contact.id === current.primaryContactId)
           ? current.primaryContactId
@@ -666,7 +672,9 @@ function EditableLeadForm({
   }, [formData.propertyId, isCreate]);
 
   const selectedProjectType = projectTypes.find((entry) => entry.id === formData.projectTypeId) ?? null;
-  const selectedProperty = properties.find((property) => property.id === formData.propertyId) ?? null;
+  const selectedProperty =
+    properties.find((property) => property.id === formData.propertyId) ??
+    (resolvedSelectedProperty?.id === formData.propertyId ? resolvedSelectedProperty : null);
   const maxPropertyBuildYear = new Date().getFullYear() + 2;
   const propertyBuildYearNeedsRepair =
     isCreate && Boolean(selectedProperty) && !isValidBuildYear(selectedProperty?.buildYear, maxPropertyBuildYear);
@@ -907,6 +915,11 @@ function EditableLeadForm({
     }
     if (newContact.email.trim() && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(newContact.email.trim())) {
       setContactError("Enter a valid email address.");
+      return;
+    }
+    const phoneValidationError = getPhoneValidationError(newContact.phone);
+    if (phoneValidationError) {
+      setContactError(phoneValidationError);
       return;
     }
 

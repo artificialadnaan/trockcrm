@@ -34,7 +34,7 @@ const router = Router();
 function validateEmailIfPresent(email: unknown): void {
   if (email != null && email !== "") {
     if (typeof email !== "string" || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email.trim())) {
-      throw new AppError(400, "Invalid email address format");
+      throw new AppError(400, "Please enter a valid email address.");
     }
   }
 }

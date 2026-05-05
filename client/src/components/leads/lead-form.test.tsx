@@ -41,6 +41,8 @@ let properties = [
   },
 ];
 const contacts = [{ id: "contact-1", firstName: "Ada", lastName: "Lovelace" }];
+let propertyDetail: PropertySurface | null = null;
+const companyContactsRefetch = vi.fn();
 const leadHookMocks = vi.hoisted(() => ({
   createLead: vi.fn(),
   updateLead: vi.fn(),
@@ -51,6 +53,9 @@ const leadHookMocks = vi.hoisted(() => ({
 }));
 const propertyHookMocks = vi.hoisted(() => ({
   updateProperty: vi.fn(),
+}));
+const contactHookMocks = vi.hoisted(() => ({
+  createContact: vi.fn(),
 }));
 const authMocks = vi.hoisted(() => ({
   user: {
@@ -85,6 +90,11 @@ vi.mock("@/hooks/use-properties", () => ({
   useProperties: () => ({
     properties,
   }),
+  usePropertyDetail: () => ({
+    property: propertyDetail,
+    loading: false,
+    error: null,
+  }),
   formatPropertyLabel: () => "Palm Villas",
   updateProperty: propertyHookMocks.updateProperty,
 }));
@@ -92,7 +102,12 @@ vi.mock("@/hooks/use-properties", () => ({
 vi.mock("@/hooks/use-companies", () => ({
   useCompanyContacts: () => ({
     contacts,
+    refetch: companyContactsRefetch,
   }),
+}));
+
+vi.mock("@/hooks/use-contacts", () => ({
+  createContact: contactHookMocks.createContact,
 }));
 
 vi.mock("@/hooks/use-leads", () => ({
@@ -126,8 +141,13 @@ vi.mock("@/lib/auth", () => ({
 }));
 
 vi.mock("@/components/ui/button", () => ({
-  Button: ({ children, disabled, type }: { children: React.ReactNode; disabled?: boolean; type?: "button" | "submit" }) => (
-    <button type={type} disabled={disabled}>{children}</button>
+  Button: ({
+    children,
+    disabled,
+    type,
+    ...props
+  }: React.ButtonHTMLAttributes<HTMLButtonElement> & { children: React.ReactNode }) => (
+    <button type={type} disabled={disabled} {...props}>{children}</button>
   ),
 }));
 
@@ -146,6 +166,17 @@ vi.mock("@/components/ui/label", () => ({
   Label: ({ children, htmlFor }: { children: React.ReactNode; htmlFor?: string }) => (
     <label htmlFor={htmlFor}>{children}</label>
   ),
+}));
+
+vi.mock("@/components/ui/dialog", () => ({
+  Dialog: ({ children, open }: { children: React.ReactNode; open?: boolean }) => (
+    open ? <div data-dialog-open="true">{children}</div> : null
+  ),
+  DialogContent: ({ children }: { children: React.ReactNode }) => <div>{children}</div>,
+  DialogDescription: ({ children }: { children: React.ReactNode }) => <p>{children}</p>,
+  DialogFooter: ({ children }: { children: React.ReactNode }) => <div>{children}</div>,
+  DialogHeader: ({ children }: { children: React.ReactNode }) => <div>{children}</div>,
+  DialogTitle: ({ children }: { children: React.ReactNode }) => <h2>{children}</h2>,
 }));
 
 const SelectContext = React.createContext<{
@@ -218,10 +249,11 @@ vi.mock("@/components/companies/company-selector", () => ({
 }));
 
 vi.mock("@/components/properties/property-selector", () => ({
-  PropertySelector: () => (
+  PropertySelector: ({ onChange }: { onChange: (propertyId: string) => void }) => (
     <div>
       <span>Property Selector</span>
       <span>Add New Property</span>
+      <button type="button" onClick={() => onChange("property-1")}>Select Palm Villas</button>
     </div>
   ),
 }));
@@ -389,11 +421,16 @@ describe("LeadForm", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     properties = [{ ...completeProperty }];
+    propertyDetail = null;
     authMocks.user.role = "rep";
     authMocks.user.id = "rep-1";
     authMocks.user.displayName = "Rep One";
     leadHookMocks.createLead.mockResolvedValue({ lead: { id: "lead-created" } });
     propertyHookMocks.updateProperty.mockResolvedValue({ property: { ...completeProperty } });
+    contactHookMocks.createContact.mockResolvedValue({
+      contact: { id: "contact-created", firstName: "Grace", lastName: "Hopper" },
+    });
+    companyContactsRefetch.mockResolvedValue(undefined);
     leadHookMocks.useLeadQuestionnaireTemplate.mockReturnValue({
       questionnaire: null,
       loading: false,
@@ -458,6 +495,12 @@ describe("LeadForm", () => {
     await act(async () => {
       button.dispatchEvent(new MouseEvent("click", { bubbles: true }));
     });
+  }
+
+  function findButton(label: string) {
+    return Array.from(container.querySelectorAll<HTMLButtonElement>("button")).find(
+      (button) => button.textContent === label
+    );
   }
 
   async function chooseQuestionSelectValue(questionKey: string, value: string) {
@@ -837,6 +880,91 @@ describe("LeadForm", () => {
     expect(html).toContain("<button type=\"submit\">Create Lead</button>");
   });
 
+  it("keeps the property requirement satisfied when a property id is selected", () => {
+    const html = renderToStaticMarkup(
+      <MemoryRouter>
+        <LeadForm
+          mode="create"
+          initialValues={{
+            companyId: "company-1",
+            propertyId: "property-1",
+            primaryContactId: "contact-1",
+            primaryContactRole: "property_manager",
+            name: "Lead One",
+            source: "Referral",
+            description: "",
+            bidDueDate: "2026-06-01",
+            budgetStatus: "budgeted_q1",
+            projectTypeId: "type-1",
+          }}
+        />
+      </MemoryRouter>
+    );
+
+    expect(html).not.toContain("Select or create a property.");
+  });
+
+  it("keeps submit enabled when the selected property is resolved outside the stale parent list", () => {
+    properties = [];
+    propertyDetail = { ...completeProperty };
+
+    const html = renderToStaticMarkup(
+      <MemoryRouter>
+        <LeadForm
+          mode="create"
+          initialValues={{
+            companyId: "company-1",
+            propertyId: "property-1",
+            primaryContactId: "contact-1",
+            primaryContactRole: "property_manager",
+            name: "Lead One",
+            source: "Referral",
+            description: "",
+            bidDueDate: "2026-06-01",
+            budgetStatus: "budgeted_q1",
+            projectTypeId: "type-1",
+          }}
+        />
+      </MemoryRouter>
+    );
+
+    expect(html).not.toContain("Select or create a property.");
+    expect(html).toContain("<button type=\"submit\">Create Lead</button>");
+  });
+
+  it("keeps submit disabled when no property is selected", () => {
+    const html = renderToStaticMarkup(
+      <MemoryRouter>
+        <LeadForm
+          mode="create"
+          initialValues={{
+            companyId: "company-1",
+            propertyId: "",
+            primaryContactId: "contact-1",
+            primaryContactRole: "property_manager",
+            name: "Lead One",
+            source: "Referral",
+            description: "",
+            bidDueDate: "2026-06-01",
+            budgetStatus: "budgeted_q1",
+            projectTypeId: "type-1",
+          }}
+        />
+      </MemoryRouter>
+    );
+
+    expect(html).toContain("Select or create a property.");
+    expect(html).toContain("<button type=\"submit\" disabled=\"\">Create Lead</button>");
+  });
+
+  it("sets the form property id from the property selector", async () => {
+    renderCreateForm({ propertyId: "" });
+
+    await clickButton(findButton("Select Palm Villas")!);
+
+    expect(container.textContent).not.toContain("Select or create a property.");
+  });
+
   it("renders universal questionnaire baseline, property, and scope sections in create mode", () => {
     mockUniversalCreateQuestionnaire();
 
@@ -1070,6 +1198,78 @@ describe("LeadForm", () => {
     expect(propertyHookMocks.updateProperty).toHaveBeenCalledWith("property-1", { buildYear: 2010 });
     expect(leadHookMocks.createLead).not.toHaveBeenCalled();
     expect(container.textContent).toContain("Failed to update property: Property update failed");
+  });
+
+  it("shows inline error when inline contact phone is too short", async () => {
+    renderCreateForm();
+
+    await clickButton(findButton("+ Add new contact")!);
+    await setInputValue(container.querySelector<HTMLInputElement>("#newContactFirstName")!, "Grace");
+    await setInputValue(container.querySelector<HTMLInputElement>("#newContactLastName")!, "Hopper");
+    await setInputValue(container.querySelector<HTMLInputElement>("#newContactPhone")!, "5551234");
+    await clickButton(findButton("Save Contact")!);
+
+    expect(container.textContent).toContain("Phone must be 10-15 digits.");
+    expect(contactHookMocks.createContact).not.toHaveBeenCalled();
+  });
+
+  it("shows inline error when inline contact phone is too long", async () => {
+    renderCreateForm();
+
+    await clickButton(findButton("+ Add new contact")!);
+    await setInputValue(container.querySelector<HTMLInputElement>("#newContactFirstName")!, "Grace");
+    await setInputValue(container.querySelector<HTMLInputElement>("#newContactLastName")!, "Hopper");
+    await setInputValue(container.querySelector<HTMLInputElement>("#newContactPhone")!, "555-123-4567 ext 999999");
+    await clickButton(findButton("Save Contact")!);
+
+    expect(container.textContent).toContain("Phone must be 10-15 digits.");
+    expect(contactHookMocks.createContact).not.toHaveBeenCalled();
+  });
+
+  it("shows readable duplicate email errors from inline contact creation", async () => {
+    contactHookMocks.createContact.mockRejectedValue(new Error("A contact with this email already exists. Please use a different email or select the existing contact."));
+    renderCreateForm();
+
+    await clickButton(findButton("+ Add new contact")!);
+    await setInputValue(container.querySelector<HTMLInputElement>("#newContactFirstName")!, "Grace");
+    await setInputValue(container.querySelector<HTMLInputElement>("#newContactLastName")!, "Hopper");
+    await setInputValue(container.querySelector<HTMLInputElement>("#newContactEmail")!, "grace@example.com");
+    await clickButton(findButton("Save Contact")!);
+
+    expect(container.textContent).toContain("A contact with this email already exists. Please use a different email or select the existing contact.");
+  });
+
+  it("shows readable validation errors from inline contact creation", async () => {
+    contactHookMocks.createContact.mockRejectedValue(new Error("Please enter a valid email address."));
+    renderCreateForm();
+
+    await clickButton(findButton("+ Add new contact")!);
+    await setInputValue(container.querySelector<HTMLInputElement>("#newContactFirstName")!, "Grace");
+    await setInputValue(container.querySelector<HTMLInputElement>("#newContactLastName")!, "Hopper");
+    await setInputValue(container.querySelector<HTMLInputElement>("#newContactEmail")!, "grace@example.com");
+    await clickButton(findButton("Save Contact")!);
+
+    expect(container.textContent).toContain("Please enter a valid email address.");
+  });
+
+  it("selects the newly created inline contact after successful create", async () => {
+    renderCreateForm({ primaryContactId: "" });
+
+    await clickButton(findButton("+ Add new contact")!);
+    await setInputValue(container.querySelector<HTMLInputElement>("#newContactFirstName")!, "Grace");
+    await setInputValue(container.querySelector<HTMLInputElement>("#newContactLastName")!, "Hopper");
+    await setInputValue(container.querySelector<HTMLInputElement>("#newContactEmail")!, "grace@example.com");
+    await setInputValue(container.querySelector<HTMLInputElement>("#newContactPhone")!, "(214) 555-1212");
+    await clickButton(findButton("Save Contact")!);
+
+    expect(contactHookMocks.createContact).toHaveBeenCalledWith(expect.objectContaining({
+      email: "grace@example.com",
+      phone: "(214) 555-1212",
+      skipDedupCheck: true,
+    }));
+    expect(companyContactsRefetch).toHaveBeenCalled();
+    expect(container.querySelector("[data-dialog-open]")).toBeNull();
+    expect(container.innerHTML).toContain('data-select-value="contact-created"');
   });
 
   it("keeps table-backed questionnaire answers out of the summary rail when the v2 snapshot is present", () => {
