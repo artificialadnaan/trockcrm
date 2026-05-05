@@ -1,0 +1,114 @@
+/**
+ * @vitest-environment jsdom
+ */
+import React from "react";
+import { createRoot, type Root } from "react-dom/client";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { PhotoViewerModal, type DealPhotoRecord } from "./deal-photo-components";
+
+const apiMock = vi.hoisted(() => vi.fn());
+
+vi.mock("@/lib/api", () => ({
+  api: apiMock,
+}));
+
+const photo: DealPhotoRecord = {
+  id: "photo-1",
+  category: "photo",
+  photoCategory: "damage",
+  subcategory: null,
+  displayName: "Roof damage",
+  mimeType: "image/jpeg",
+  fileSizeBytes: 2048,
+  fileExtension: ".jpg",
+  r2Key: "photo.jpg",
+  externalUrl: "https://example.test/photo.jpg",
+  externalThumbnailUrl: "https://example.test/photo-thumb.jpg",
+  description: "Roof corner damage",
+  takenAt: "2026-05-04T17:43:00.000Z",
+  createdAt: "2026-05-04T18:00:00.000Z",
+  uploadedBy: "user-1",
+  uploaderName: "Kaleb Martin",
+  uploaderAvatarUrl: null,
+  latitude: "35.1234567",
+  longitude: "-97.6543210",
+  address: "100 Main St",
+  addressSource: "exif",
+  geocodedAt: "2026-05-04T18:00:00.000Z",
+  procoreSyncStatus: null,
+  deletedAt: null,
+  deletedByUserId: null,
+};
+
+let root: Root | null = null;
+let container: HTMLDivElement | null = null;
+
+afterEach(() => {
+  root?.unmount();
+  root = null;
+  container?.remove();
+  container = null;
+  apiMock.mockReset();
+});
+
+function renderViewer() {
+  container = document.createElement("div");
+  document.body.appendChild(container);
+  root = createRoot(container);
+  root.render(
+    <PhotoViewerModal
+      photos={[photo]}
+      selectedId="photo-1"
+      onSelectedIdChange={vi.fn()}
+      getPhotoImageUrl={() => "https://example.test/photo.jpg"}
+      patchPhoto={vi.fn()}
+      savePhotoAddress={vi.fn()}
+      deletePhoto={vi.fn()}
+      downloadPhoto={vi.fn()}
+    />
+  );
+}
+
+describe("PhotoViewerModal history", () => {
+  it("fetches audit history on expand and renders event descriptions with details", async () => {
+    apiMock.mockResolvedValueOnce({
+      events: [
+        {
+          id: "audit-2",
+          eventType: "category_changed",
+          userId: "user-2",
+          userName: "Adnaan Iqbal",
+          userAvatarUrl: null,
+          createdAt: "2026-05-04T20:00:00.000Z",
+          ipAddress: "127.0.0.1",
+          userAgent: "vitest",
+          metadata: { oldCategory: "Damage", newCategory: "Safety" },
+        },
+        {
+          id: "audit-1",
+          eventType: "uploaded",
+          userId: "user-1",
+          userName: "Kaleb Martin",
+          userAvatarUrl: null,
+          createdAt: "2026-05-04T18:00:00.000Z",
+          ipAddress: null,
+          userAgent: null,
+          metadata: {},
+        },
+      ],
+    });
+
+    renderViewer();
+    await vi.waitFor(() => expect(document.body.textContent).toContain("History"));
+    document.body.querySelector<HTMLDetailsElement>('[data-testid="photo-history"]')?.setAttribute("open", "");
+    document.body.querySelector<HTMLDetailsElement>('[data-testid="photo-history"]')?.dispatchEvent(new Event("toggle", { bubbles: true }));
+
+    await vi.waitFor(() => expect(apiMock).toHaveBeenCalledWith("/files/photo-1/audit-log"));
+    await vi.waitFor(() => expect(document.body.textContent).toContain("Adnaan Iqbal changed category from Damage to Safety"));
+    expect(document.body.textContent).toContain("Kaleb Martin uploaded this photo");
+
+    document.body.querySelector<HTMLButtonElement>('[aria-label="Toggle details for category changed"]')?.click();
+    await vi.waitFor(() => expect(document.body.textContent).toContain("oldCategory"));
+    expect(document.body.textContent).toContain("127.0.0.1");
+  });
+});

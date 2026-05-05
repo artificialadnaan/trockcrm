@@ -26,8 +26,21 @@ import {
 import { getDealById } from "../deals/service.js";
 import { getLeadById } from "../leads/service.js";
 import { getPhotoFeed, getNewPhotoCount, getProjectPhotoStats } from "./feed-service.js";
+import { getPhotoAuditEvents, logPhotoEvent } from "./audit-log-service.js";
 
 const router = Router();
+
+function requestAuditContext(req: express.Request) {
+  const userAgentHeader = req.headers["user-agent"];
+  return {
+    ipAddress: req.ip ?? null,
+    userAgent: Array.isArray(userAgentHeader) ? userAgentHeader.join(", ") : userAgentHeader ?? null,
+  };
+}
+
+function isPhotoRecord(file: { category?: string | null }) {
+  return file.category === "photo";
+}
 
 // POST /api/files/upload-url — Step 1: request presigned URL
 router.post("/upload-url", async (req, res, next) => {
@@ -160,6 +173,21 @@ router.post("/upload-direct", express.raw({ type: "*/*", limit: "50mb" }), async
       uploadToken: result.uploadToken,
     });
 
+    if (isPhotoRecord(file)) {
+      await logPhotoEvent(req.tenantDb!, {
+        photoId: file.id,
+        eventType: "uploaded",
+        userId: req.user!.id,
+        ...requestAuditContext(req),
+        metadata: {
+          addressSource: file.addressSource ?? null,
+          hasGpsCoordinates: Boolean(file.latitude && file.longitude),
+          category: file.photoCategory ?? null,
+          sizeBytes: file.fileSizeBytes,
+        },
+      });
+    }
+
     // Queue EXIF extraction job
     const officeId = req.user!.activeOfficeId ?? req.user!.officeId;
     const jobPayload = JSON.stringify({
@@ -208,6 +236,21 @@ router.post("/confirm-upload", async (req, res, next) => {
       longitude: longitude !== undefined ? Number(longitude) : undefined,
       addressSource,
     });
+
+    if (isPhotoRecord(file)) {
+      await logPhotoEvent(req.tenantDb!, {
+        photoId: file.id,
+        eventType: "uploaded",
+        userId: req.user!.id,
+        ...requestAuditContext(req),
+        metadata: {
+          addressSource: file.addressSource ?? addressSource ?? null,
+          hasGpsCoordinates: Boolean(file.latitude && file.longitude),
+          category: file.photoCategory ?? null,
+          sizeBytes: file.fileSizeBytes,
+        },
+      });
+    }
 
     // Fix 1: Insert job into job_queue before commit so the worker picks it up.
     // The worker processes domain_event jobs -- emitLocal alone never reached it.
@@ -282,12 +325,29 @@ router.patch("/:id/address", async (req, res, next) => {
       throw new AppError(400, "address is required.");
     }
 
-    // TODO(PR 4): Write photo_audit_log address_changed event here.
     const file = await updateFileAddress(req.tenantDb!, req.params.id, {
       address,
       latitude: latitude !== undefined ? Number(latitude) : undefined,
       longitude: longitude !== undefined ? Number(longitude) : undefined,
     });
+    if (isPhotoRecord(existing)) {
+      await logPhotoEvent(req.tenantDb!, {
+        photoId: existing.id,
+        eventType: "address_changed",
+        userId: req.user.id,
+        ...requestAuditContext(req),
+        metadata: {
+          oldAddress: existing.address ?? null,
+          newAddress: file.address ?? null,
+          oldAddressSource: existing.addressSource ?? null,
+          newAddressSource: "manual_override",
+          oldLatitude: existing.latitude ?? null,
+          oldLongitude: existing.longitude ?? null,
+          newLatitude: file.latitude ?? null,
+          newLongitude: file.longitude ?? null,
+        },
+      });
+    }
     await req.commitTransaction!();
     res.json({ file });
   } catch (err) {
@@ -550,14 +610,57 @@ router.get("/:id/download", async (req, res, next) => {
 
     // External files (CompanyCam etc.) — return the CDN URL directly
     if (file.externalUrl) {
+      if (isPhotoRecord(file)) {
+        await logPhotoEvent(req.tenantDb!, {
+          photoId: file.id,
+          eventType: "downloaded",
+          userId: req.user!.id,
+          ...requestAuditContext(req),
+          metadata: {},
+        });
+      }
       await req.commitTransaction!();
       res.json({ url: file.externalUrl, filename: file.displayName + file.fileExtension });
       return;
     }
 
     const result = await getFileDownloadUrl(req.tenantDb!, req.params.id);
+    if (isPhotoRecord(file)) {
+      await logPhotoEvent(req.tenantDb!, {
+        photoId: file.id,
+        eventType: "downloaded",
+        userId: req.user!.id,
+        ...requestAuditContext(req),
+        metadata: {},
+      });
+    }
     await req.commitTransaction!();
     res.json(result);
+  } catch (err) {
+    next(err);
+  }
+});
+
+// GET /api/files/:id/audit-log — photo-specific audit history
+router.get("/:id/audit-log", async (req, res, next) => {
+  try {
+    const file = await getFileByIdIncludingDeleted(req.tenantDb!, req.params.id);
+    if (!file) throw new AppError(404, "File not found");
+    if (!isPhotoRecord(file)) throw new AppError(400, "Audit history is only available for photos.");
+
+    if (file.dealId) {
+      const deal = await getDealById(req.tenantDb!, file.dealId, req.user!.role, req.user!.id);
+      if (!deal) throw new AppError(403, "Access denied: you do not have access to this deal's files.");
+    } else if (file.leadId) {
+      const lead = await getLeadById(req.tenantDb!, file.leadId, req.user!.role, req.user!.id);
+      if (!lead) throw new AppError(403, "Access denied: you do not have access to this lead's files.");
+    } else if (req.user!.role === "rep" && file.uploadedBy !== req.user!.id) {
+      throw new AppError(403, "You can only view files you uploaded");
+    }
+
+    const events = await getPhotoAuditEvents(req.tenantDb!, file.id);
+    await req.commitTransaction!();
+    res.json({ events });
   } catch (err) {
     next(err);
   }
@@ -629,6 +732,44 @@ router.patch("/:id", async (req, res, next) => {
       deletedAt: isRestore ? null : undefined,
       deletedByUserId: isRestore ? null : undefined,
     });
+    if (isPhotoRecord(existing)) {
+      const auditContext = requestAuditContext(req);
+      if (resolvedPhotoCategory !== undefined && existing.photoCategory !== file.photoCategory) {
+        await logPhotoEvent(req.tenantDb!, {
+          photoId: existing.id,
+          eventType: "category_changed",
+          userId: req.user!.id,
+          ...auditContext,
+          metadata: {
+            oldCategory: existing.photoCategory ?? null,
+            newCategory: file.photoCategory ?? null,
+          },
+        });
+      }
+      if (description !== undefined && existing.description !== file.description) {
+        await logPhotoEvent(req.tenantDb!, {
+          photoId: existing.id,
+          eventType: "caption_changed",
+          userId: req.user!.id,
+          ...auditContext,
+          metadata: {
+            oldCaption: existing.description ?? null,
+            newCaption: file.description ?? null,
+          },
+        });
+      }
+      if (isRestore && existing.deletedAt) {
+        await logPhotoEvent(req.tenantDb!, {
+          photoId: existing.id,
+          eventType: "restored",
+          userId: req.user!.id,
+          ...auditContext,
+          metadata: {
+            previouslyDeletedAt: existing.deletedAt,
+          },
+        });
+      }
+    }
     await req.commitTransaction!();
     res.json({ file });
   } catch (err) {
@@ -666,6 +807,15 @@ router.delete("/:id", async (req, res, next) => {
     }
 
     await deleteFile(req.tenantDb!, req.params.id, req.user!.role, req.user!.id);
+    if (isPhotoRecord(existing)) {
+      await logPhotoEvent(req.tenantDb!, {
+        photoId: existing.id,
+        eventType: "deleted",
+        userId: req.user!.id,
+        ...requestAuditContext(req),
+        metadata: {},
+      });
+    }
     await req.commitTransaction!();
     res.json({ success: true });
   } catch (err) {

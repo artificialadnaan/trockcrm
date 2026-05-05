@@ -53,6 +53,7 @@ import { AdminDataScrubPage } from "@/pages/admin/admin-data-scrub-page";
 import { UserGuidePage } from "@/pages/admin/help/user-guide-page";
 import { AdminGuidePage } from "@/pages/admin/help/admin-guide-page";
 import { CompanyCamPage } from "@/pages/admin/companycam-page";
+import { PhotoAuditPage } from "@/pages/admin/photo-audit/photo-audit-page";
 import { PhotoCapturePage } from "@/pages/photos/photo-capture-page";
 import { PhotoFeedPage } from "@/pages/photos/photo-feed-page";
 import { PipelineHygienePage } from "@/pages/pipeline/pipeline-hygiene-page";
@@ -330,6 +331,14 @@ export function App() {
                 element={(
                   <RequireRole allowedRoles={["admin"]}>
                     <CompanyCamPage />
+                  </RequireRole>
+                )}
+              />
+              <Route
+                path="/admin/photo-audit"
+                element={(
+                  <RequireRole allowedRoles={["admin"]}>
+                    <PhotoAuditPage />
                   </RequireRole>
                 )}
               />
