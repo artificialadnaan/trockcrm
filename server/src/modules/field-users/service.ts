@@ -465,74 +465,21 @@ export async function acceptFieldInvite(input: { token: string; password: string
   }
 
   const passwordHash = await hashPassword(input.password);
-  const result = await db.execute(sql`
-    WITH created_user AS (
-      INSERT INTO users (
-        email,
-        display_name,
-        first_name,
-        last_name,
-        phone,
-        role,
-        office_id,
-        is_active,
-        created_by_user_id,
-        updated_at
-      )
-      VALUES (
-        ${invite.email},
-        ${`${invite.first_name} ${invite.last_name}`.trim()},
-        ${invite.first_name},
-        ${invite.last_name},
-        ${invite.phone},
-        'field_contractor',
-        ${invite.tenant_id}::uuid,
-        true,
-        ${invite.invited_by_user_id}::uuid,
-        now()
-      )
-      RETURNING id, email, first_name, last_name, role, office_id, is_active
-    ),
-    auth_row AS (
-      INSERT INTO user_local_auth (
-        user_id,
-        password_hash,
-        must_change_password,
-        is_enabled,
-        invite_sent_at,
-        invite_sent_by_user_id,
-        invite_expires_at,
-        password_changed_at,
-        updated_at
-      )
-      SELECT
-        id,
-        ${passwordHash},
-        false,
-        true,
-        now(),
-        ${invite.invited_by_user_id}::uuid,
-        NULL,
-        now(),
-        now()
-      FROM created_user
-      RETURNING user_id
-    )
-    UPDATE field_user_invites
-    SET accepted_at = now(),
-        accepted_user_id = (SELECT id FROM created_user),
-        updated_at = now()
-    WHERE id = ${invite.id}::uuid
-    RETURNING
-      (SELECT id FROM created_user) AS id,
-      (SELECT email FROM created_user) AS email,
-      (SELECT first_name FROM created_user) AS first_name,
-      (SELECT last_name FROM created_user) AS last_name,
-      (SELECT role FROM created_user) AS role,
-      (SELECT office_id FROM created_user) AS office_id,
-      (SELECT is_active FROM created_user) AS is_active
-  `);
-  const user = ((result as any).rows ?? result)[0];
+  if (!invite.tenant_id) {
+    throw new Error("Invite is missing tenant context");
+  }
+
+  // Build the field response and JWT before any write transaction. If signing
+  // or response shaping ever fails, the invite remains pending and retryable.
+  const user = {
+    id: crypto.randomUUID(),
+    email: invite.email,
+    first_name: invite.first_name,
+    last_name: invite.last_name,
+    role: "field_contractor",
+    office_id: invite.tenant_id,
+    is_active: true,
+  };
   const jwtToken = signJwt({
     userId: user.id,
     email: user.email,
@@ -540,9 +487,79 @@ export async function acceptFieldInvite(input: { token: string; password: string
     role: "field_contractor",
     authMethod: "local",
   });
+  const responseUser = toFieldUserResponse(user);
+
+  await db.transaction(async (tx) => {
+    const result = await tx.execute(sql`
+      WITH created_user AS (
+        INSERT INTO users (
+          id,
+          email,
+          display_name,
+          first_name,
+          last_name,
+          phone,
+          role,
+          office_id,
+          is_active,
+          created_by_user_id,
+          updated_at
+        )
+        VALUES (
+          ${user.id}::uuid,
+          ${invite.email},
+          ${`${invite.first_name} ${invite.last_name}`.trim()},
+          ${invite.first_name},
+          ${invite.last_name},
+          ${invite.phone},
+          'field_contractor',
+          ${invite.tenant_id}::uuid,
+          true,
+          ${invite.invited_by_user_id}::uuid,
+          now()
+        )
+        RETURNING id
+      ),
+      auth_row AS (
+        INSERT INTO user_local_auth (
+          user_id,
+          password_hash,
+          must_change_password,
+          is_enabled,
+          invite_sent_at,
+          invite_sent_by_user_id,
+          invite_expires_at,
+          password_changed_at,
+          updated_at
+        )
+        SELECT
+          id,
+          ${passwordHash},
+          false,
+          true,
+          now(),
+          ${invite.invited_by_user_id}::uuid,
+          NULL,
+          now(),
+          now()
+        FROM created_user
+        RETURNING user_id
+      )
+      UPDATE field_user_invites
+      SET accepted_at = now(),
+          accepted_user_id = (SELECT id FROM created_user),
+          updated_at = now()
+      WHERE id = ${invite.id}::uuid
+      RETURNING accepted_user_id
+    `);
+    const accepted = ((result as any).rows ?? result)[0];
+    if (!accepted) {
+      throw new Error("Failed to accept field invite");
+    }
+  });
 
   return {
-    user: toFieldUserResponse(user),
+    user: responseUser,
     token: jwtToken,
   };
 }
@@ -616,6 +633,13 @@ export async function loginFieldUser(input: { email: string; password: string })
     throw new AppError(401, "Invalid email or password");
   }
 
+  const jwtToken = signJwt({
+    userId: user.id,
+    email: user.email,
+    officeId: user.office_id,
+    role: "field_contractor",
+    authMethod: "local",
+  });
   await db.execute(sql`
     UPDATE user_local_auth
     SET last_login_at = now(),
@@ -625,14 +649,6 @@ export async function loginFieldUser(input: { email: string; password: string })
         updated_at = now()
     WHERE user_id = ${user.id}::uuid
   `);
-
-  const jwtToken = signJwt({
-    userId: user.id,
-    email: user.email,
-    officeId: user.office_id,
-    role: "field_contractor",
-    authMethod: "local",
-  });
   return {
     user: toFieldUserResponse(user),
     token: jwtToken,
