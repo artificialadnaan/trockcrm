@@ -1,0 +1,22 @@
+FROM node:20-alpine AS builder
+WORKDIR /app
+
+COPY package*.json ./
+COPY shared/package*.json ./shared/
+COPY client-field/package*.json ./client-field/
+RUN npm ci --workspaces --include-workspace-root
+
+COPY shared ./shared
+COPY client-field ./client-field
+
+RUN npm run build --workspace=shared
+RUN npm run build --workspace=client-field
+
+FROM node:20-alpine AS runner
+WORKDIR /app
+RUN npm install -g serve@14.2.4
+
+COPY --from=builder /app/client-field/dist ./dist
+
+EXPOSE 3000
+CMD ["serve", "dist", "-s", "-l", "3000"]

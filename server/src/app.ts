@@ -14,6 +14,7 @@ import { authRoutes } from "./modules/auth/routes.js";
 import { officeRoutes } from "./modules/office/routes.js";
 import { notificationRoutes } from "./modules/notifications/routes.js";
 import { authMiddleware } from "./middleware/auth.js";
+import { requireCrmUser } from "./middleware/field-auth.js";
 import { tenantMiddleware } from "./middleware/tenant.js";
 import { dealRoutes } from "./modules/deals/routes.js";
 import { pipelineRoutes } from "./modules/pipeline/routes.js";
@@ -43,6 +44,8 @@ import { companycamRoutes } from "./modules/companycam/routes.js";
 import { aiCopilotRoutes } from "./modules/ai-copilot/routes.js";
 import { salesReviewRoutes } from "./modules/sales-review/routes.js";
 import { userRoutes } from "./modules/users/routes.js";
+import { fieldRoutes } from "./modules/field/routes.js";
+import { CRM_ONLY_TENANT_ROUTE_MOUNTS } from "./route-access-policy.js";
 import {
   createCsrfToken,
   CSRF_COOKIE_NAME,
@@ -147,11 +150,14 @@ export function createApp() {
   // Public routes (no auth required for login endpoints)
   app.use("/api/auth", authRoutes);
 
+  // Field app routes use field-contractor-only middleware and no tenant workspace transaction.
+  app.use("/api/field", fieldRoutes);
+
   // Admin routes (auth required, no tenant context)
-  app.use("/api/offices", officeRoutes);
+  app.use("/api/offices", authMiddleware, requireCrmUser, officeRoutes);
 
   // SSE notification endpoint (auth required, no tenant context needed for keepalive)
-  app.use("/api/notifications", notificationRoutes);
+  app.use("/api/notifications", authMiddleware, requireCrmUser, notificationRoutes);
 
   // Migration routes (auth + admin required, no tenant scope — accesses migration schema directly)
   app.use("/api", migrationRouter);
@@ -167,30 +173,39 @@ export function createApp() {
   tenantRouter.use(apiLimiter);
 
   // Feature routes
-  tenantRouter.use("/deals", dealRoutes);
-  tenantRouter.use("/pipeline", pipelineRoutes);
-  tenantRouter.use("/contacts", contactRoutes);
-  tenantRouter.use("/leads", leadRoutes);
-  tenantRouter.use("/email", emailRoutes);
+  const crmOnlyTenantRoutes = [
+    [CRM_ONLY_TENANT_ROUTE_MOUNTS[0], dealRoutes],
+    [CRM_ONLY_TENANT_ROUTE_MOUNTS[1], pipelineRoutes],
+    [CRM_ONLY_TENANT_ROUTE_MOUNTS[2], contactRoutes],
+    [CRM_ONLY_TENANT_ROUTE_MOUNTS[3], leadRoutes],
+    [CRM_ONLY_TENANT_ROUTE_MOUNTS[4], emailRoutes],
+    [CRM_ONLY_TENANT_ROUTE_MOUNTS[5], callRecordingRoutes],
+    [CRM_ONLY_TENANT_ROUTE_MOUNTS[6], taskRoutes],
+    [CRM_ONLY_TENANT_ROUTE_MOUNTS[7], userRoutes],
+    [CRM_ONLY_TENANT_ROUTE_MOUNTS[8], activityRoutes],
+    [CRM_ONLY_TENANT_ROUTE_MOUNTS[9], notificationCrudRoutes],
+    [CRM_ONLY_TENANT_ROUTE_MOUNTS[10], reportRoutes],
+    [CRM_ONLY_TENANT_ROUTE_MOUNTS[11], commissionRoutes],
+    [CRM_ONLY_TENANT_ROUTE_MOUNTS[12], salesReviewRoutes],
+    [CRM_ONLY_TENANT_ROUTE_MOUNTS[13], dashboardRoutes],
+    [CRM_ONLY_TENANT_ROUTE_MOUNTS[14], procoreRoutes],
+    [CRM_ONLY_TENANT_ROUTE_MOUNTS[15], searchRoutes],
+    [CRM_ONLY_TENANT_ROUTE_MOUNTS[16], companyRoutes],
+    [CRM_ONLY_TENANT_ROUTE_MOUNTS[17], propertyRoutes],
+    [CRM_ONLY_TENANT_ROUTE_MOUNTS[18], companycamRoutes],
+    [CRM_ONLY_TENANT_ROUTE_MOUNTS[19], aiCopilotRoutes],
+  ] as const;
+
+  for (const [mount, routes] of crmOnlyTenantRoutes) {
+    tenantRouter.use(mount, requireCrmUser, routes);
+  }
+
+  // Files routes are intentionally left unchanged for PR 6a. PR 6b adds the
+  // field-specific photo allow-list and locks down the broader files surface.
   tenantRouter.use("/files", fileRoutes);
-  tenantRouter.use("/call-recordings", callRecordingRoutes);
-  tenantRouter.use("/tasks", taskRoutes);
-  tenantRouter.use("/users", userRoutes);
-  tenantRouter.use("/activities", activityRoutes);
-  tenantRouter.use("/notifications", notificationCrudRoutes);
-  tenantRouter.use("/reports", reportRoutes);
-  tenantRouter.use("/commissions", commissionRoutes);
-  tenantRouter.use("/sales-review", salesReviewRoutes);
-  tenantRouter.use("/dashboard", dashboardRoutes);
-  tenantRouter.use("/procore", procoreRoutes);
-  tenantRouter.use("/search", searchRoutes);
-  tenantRouter.use("/companies", companyRoutes);
-  tenantRouter.use("/properties", propertyRoutes);
-  tenantRouter.use("/companycam", companycamRoutes);
-  tenantRouter.use("/ai", aiCopilotRoutes);
 
   // Foundation test route — proves tenant middleware works end-to-end
-  tenantRouter.get("/tenant-check", async (req, res) => {
+  tenantRouter.get("/tenant-check", requireCrmUser, async (req, res) => {
     const result = await req.tenantClient!.query("SELECT current_setting('search_path') as path, current_setting('app.current_user_id', true) as uid");
     await req.commitTransaction!();
     res.json({

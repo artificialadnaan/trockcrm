@@ -5,18 +5,21 @@
     "shared",
     "server",
     "worker",
-    "client"
+    "client",
+    "client-field"
   ],
   "scripts": {
     "dev:shared": "npm run build --workspace=shared",
     "dev:server": "npm run dev --workspace=server",
     "dev:worker": "npm run dev --workspace=worker",
     "dev:client": "npm run dev --workspace=client",
+    "dev:field": "npm run dev --workspace=client-field",
     "dev": "npm run dev:shared && concurrently \"npm:dev:shared -- --watch\" \"npm:dev:server\" \"npm:dev:worker\" \"npm:dev:client\"",
     "build": "npm run build --workspaces",
     "start:api": "node server/dist/index.js",
     "start:worker": "node worker/dist/index.js",
     "start:client": "npx serve client/dist -s -l 3000",
+    "start:field": "npm run start --workspace=client-field",
     "typecheck": "npm run build --workspace=shared && npm run typecheck --workspaces",
     "test": "npm run test --workspace=server",
     "validate:admin-users-volume": "node scripts/playwright-admin-users-volume-validation.mjs",

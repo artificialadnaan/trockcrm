@@ -25,6 +25,7 @@ describe("auth http config", () => {
       "https://trockcrm.com",
       "https://frontend-production-bcab.up.railway.app",
       "http://localhost:5173",
+      "http://localhost:5174",
       "http://localhost:3000",
     ]);
   });
