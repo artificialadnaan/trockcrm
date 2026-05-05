@@ -2,11 +2,14 @@ import { describe, expect, it } from "vitest";
 import {
   assertSafeDevAuthConfig,
   createCsrfToken,
+  FIELD_CSRF_HEADER_VALUE,
   getAllowedCorsOrigins,
   getRequestOrigin,
   getTokenCookieOptions,
   isAllowedCookieAuthOrigin,
+  isFieldApiPath,
   isPublicAuthCsrfExempt,
+  isValidFieldCsrfHeader,
   isValidCsrfPair,
   isDevAuthEnabled,
 } from "../../../src/modules/auth/http-config.js";
@@ -163,6 +166,17 @@ describe("auth http config", () => {
     expect(isValidCsrfPair(token, createCsrfToken())).toBe(false);
     expect(isValidCsrfPair(undefined, token)).toBe(false);
     expect(isValidCsrfPair(token, undefined)).toBe(false);
+  });
+
+  it("identifies field API paths and validates the field requested-with header", () => {
+    expect(isFieldApiPath("/api/field")).toBe(true);
+    expect(isFieldApiPath("/api/field/projects/deal-1/star")).toBe(true);
+    expect(isFieldApiPath("/api/fielding/projects")).toBe(false);
+    expect(isFieldApiPath("/api/files/deal-1/photos")).toBe(false);
+
+    expect(isValidFieldCsrfHeader(FIELD_CSRF_HEADER_VALUE)).toBe(true);
+    expect(isValidFieldCsrfHeader("fetch")).toBe(false);
+    expect(isValidFieldCsrfHeader(undefined)).toBe(false);
   });
 
   it("exempts only exact public auth POST endpoints from CSRF", () => {

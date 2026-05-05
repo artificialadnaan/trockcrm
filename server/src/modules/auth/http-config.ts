@@ -17,6 +17,8 @@ type EnvInput = {
 
 export const CSRF_COOKIE_NAME = "csrf_token";
 export const CSRF_HEADER_NAME = "x-csrf-token";
+export const FIELD_CSRF_HEADER_NAME = "x-requested-with";
+export const FIELD_CSRF_HEADER_VALUE = "XMLHttpRequest";
 
 function normalizeOrigin(value: string | undefined): string | null {
   if (!value) return null;
@@ -138,6 +140,14 @@ export function createCsrfToken(): string {
 
 export function isUnsafeHttpMethod(method: string): boolean {
   return ["POST", "PUT", "PATCH", "DELETE"].includes(method.toUpperCase());
+}
+
+export function isFieldApiPath(path: string): boolean {
+  return path === "/api/field" || path.startsWith("/api/field/");
+}
+
+export function isValidFieldCsrfHeader(value: string | undefined): boolean {
+  return value === FIELD_CSRF_HEADER_VALUE;
 }
 
 export function isPublicAuthCsrfExempt(input: {

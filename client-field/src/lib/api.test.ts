@@ -24,7 +24,7 @@ describe("field api client", () => {
     expect(() => resolveApiBase({})).toThrow("VITE_API_BASE_URL is required");
   });
 
-  it("sends credentialed JSON requests with CSRF headers for unsafe methods", async () => {
+  it("sends credentialed JSON requests with requested-with and CSRF headers for unsafe methods", async () => {
     vi.stubEnv("VITE_API_BASE_URL", "https://api.example.com/");
     Object.defineProperty(document, "cookie", { value: "csrf_token=csrf-123", writable: true });
     const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue({
@@ -46,7 +46,26 @@ describe("field api client", () => {
       body: JSON.stringify({ email: "field@example.com" }),
     }));
     const headers = fetchMock.mock.calls[0]?.[1]?.headers as Headers;
+    expect(headers.get("X-Requested-With")).toBe("XMLHttpRequest");
     expect(headers.get("x-csrf-token")).toBe("csrf-123");
+  });
+
+  it("attaches requested-with to safe requests and preserves caller headers", async () => {
+    vi.stubEnv("VITE_API_BASE_URL", "https://api.example.com/");
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue({
+      ok: true,
+      status: 200,
+      headers: new Headers({ "content-type": "application/json" }),
+      json: async () => ({ ok: true }),
+    } as Response);
+
+    await api<{ ok: boolean }>("/field/me", {
+      headers: { "X-Correlation-Id": "trace-1" },
+    });
+
+    const headers = fetchMock.mock.calls[0]?.[1]?.headers as Headers;
+    expect(headers.get("X-Requested-With")).toBe("XMLHttpRequest");
+    expect(headers.get("X-Correlation-Id")).toBe("trace-1");
   });
 
   it("routes all current field app endpoints through the configured API service", async () => {

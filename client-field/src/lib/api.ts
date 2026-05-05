@@ -36,9 +36,11 @@ export async function api<T>(path: string, options: {
   method?: string;
   json?: unknown;
   signal?: AbortSignal;
+  headers?: HeadersInit;
 } = {}): Promise<T> {
   const method = options.method ?? (options.json === undefined ? "GET" : "POST");
-  const headers = new Headers();
+  const headers = new Headers(options.headers);
+  headers.set("X-Requested-With", "XMLHttpRequest");
   if (options.json !== undefined) headers.set("Content-Type", "application/json");
   const unsafe = ["POST", "PUT", "PATCH", "DELETE"].includes(method.toUpperCase());
   const csrf = unsafe ? csrfToken() : undefined;
