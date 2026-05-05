@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const dbMocks = vi.hoisted(() => ({
   execute: vi.fn(),
@@ -43,9 +43,22 @@ const {
 } = await import("../../../src/modules/field-users/service.js");
 
 describe("field user service helpers", () => {
+  const originalFieldAppUrl = process.env.FIELD_APP_URL;
+  const originalFrontendUrl = process.env.FRONTEND_URL;
+  const originalFieldFrontendUrl = process.env.FIELD_FRONTEND_URL;
+
   beforeEach(() => {
     vi.clearAllMocks();
     emailMocks.sendSystemEmail.mockResolvedValue(true);
+  });
+
+  afterEach(() => {
+    if (originalFieldAppUrl === undefined) delete process.env.FIELD_APP_URL;
+    else process.env.FIELD_APP_URL = originalFieldAppUrl;
+    if (originalFrontendUrl === undefined) delete process.env.FRONTEND_URL;
+    else process.env.FRONTEND_URL = originalFrontendUrl;
+    if (originalFieldFrontendUrl === undefined) delete process.env.FIELD_FRONTEND_URL;
+    else process.env.FIELD_FRONTEND_URL = originalFieldFrontendUrl;
   });
 
   it("normalizes and validates email addresses", () => {
@@ -125,6 +138,10 @@ describe("field user service helpers", () => {
   });
 
   it("creates an invite, hashes the raw token, and sends email without storing the raw token", async () => {
+    process.env.FIELD_APP_URL = "https://field.example.com/";
+    process.env.FRONTEND_URL = "https://crm.example.com";
+    process.env.FIELD_FRONTEND_URL = "https://legacy-field.example.com";
+
     dbMocks.execute
       .mockResolvedValueOnce({ rows: [] })
       .mockResolvedValueOnce({ rows: [] })
@@ -147,9 +164,11 @@ describe("field user service helpers", () => {
     expect(emailMocks.sendSystemEmail).toHaveBeenCalledWith(
       "field@example.com",
       expect.stringContaining("T Rock Field"),
-      expect.stringContaining("/accept-invite?token="),
-      expect.objectContaining({ text: expect.stringContaining("/accept-invite?token=") })
+      expect.stringContaining("https://field.example.com/accept-invite?token="),
+      expect.objectContaining({ text: expect.stringContaining("https://field.example.com/accept-invite?token=") })
     );
+    expect(emailMocks.sendSystemEmail.mock.calls[0][2]).not.toContain("crm.example.com");
+    expect(emailMocks.sendSystemEmail.mock.calls[0][2]).not.toContain("legacy-field.example.com");
   });
 
   it("rejects duplicate field invite emails", async () => {
@@ -208,6 +227,9 @@ describe("field user service helpers", () => {
   });
 
   it("regenerates resend tokens and updates invite expiry", async () => {
+    process.env.FIELD_APP_URL = "https://field.example.com";
+    process.env.FRONTEND_URL = "https://crm.example.com";
+
     dbMocks.execute
       .mockResolvedValueOnce({ rows: [{
         id: "invite-1",
@@ -226,6 +248,8 @@ describe("field user service helpers", () => {
     expect(result.invite.id).toBe("invite-1");
     expect(result.rawToken).toMatch(/^[A-Za-z0-9_-]{40,}$/);
     expect(emailMocks.sendSystemEmail).toHaveBeenCalledOnce();
+    expect(emailMocks.sendSystemEmail.mock.calls[0][2]).toContain("https://field.example.com/accept-invite?token=");
+    expect(emailMocks.sendSystemEmail.mock.calls[0][2]).not.toContain("crm.example.com");
   });
 
   it("rejects missing resend invites, resend email failures, and revokes pending invites", async () => {

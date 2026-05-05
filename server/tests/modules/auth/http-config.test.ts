@@ -111,6 +111,7 @@ describe("auth http config", () => {
         NODE_ENV: "production",
         DEV_MODE: "true",
         ALLOW_DEV_AUTH_IN_PROD: "true",
+        FIELD_APP_URL: "https://trockcrm-field-production.up.railway.app",
       })
     ).not.toThrow();
   });
