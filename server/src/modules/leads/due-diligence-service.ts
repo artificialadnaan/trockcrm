@@ -14,10 +14,12 @@ import {
   properties,
   users,
 } from "@trock-crm/shared/schema";
-import type * as schema from "@trock-crm/shared/schema";
+import * as schema from "@trock-crm/shared/schema";
 import { pool } from "../../db.js";
 import { AppError } from "../../middleware/error-handler.js";
 import { sendSystemEmailWithMetadata } from "../../lib/resend-client.js";
+import { getStageBySlug } from "../pipeline/service.js";
+import { transitionLeadStage } from "./service.js";
 import type {
   ExistingCustomerSignal,
   LeadDueDiligenceDetectionSignal,
@@ -423,7 +425,74 @@ export async function decideLeadDueDiligenceApproval(tenantDb: TenantDb, input: 
     .set({ verificationStatus, updatedAt: now })
     .where(eq(leads.id, approval.leadId));
 
+  if (status === "approved") {
+    await maybeAutoTransitionAfterDdApproval(tenantDb, {
+      leadId: approval.leadId,
+      actorUserId: input.userId,
+    });
+  }
+
   return approval;
+}
+
+async function fetchLeadStageId(tenantDb: TenantDb, leadId: string) {
+  const [lead] = await tenantDb
+    .select({ stageId: leads.stageId })
+    .from(leads)
+    .where(eq(leads.id, leadId))
+    .limit(1);
+
+  return lead?.stageId ?? null;
+}
+
+async function maybeAutoTransitionAfterDdApproval(
+  tenantDb: TenantDb,
+  input: {
+    leadId: string;
+    actorUserId: string | null | undefined;
+    currentStageId?: string | null;
+  }
+) {
+  try {
+    if (!input.actorUserId) {
+      console.warn(
+        `[lead-dd] auto-transition skipped for lead ${input.leadId} after approval`,
+        { reason: "missing_actor_user_id" }
+      );
+      return;
+    }
+
+    const currentStageId = input.currentStageId ?? await fetchLeadStageId(tenantDb, input.leadId);
+    if (!currentStageId) return;
+
+    const [newLeadStage, qualifiedLeadStage] = await Promise.all([
+      getStageBySlug("new_lead", "lead"),
+      getStageBySlug("qualified_lead", "lead"),
+    ]);
+
+    if (!newLeadStage || !qualifiedLeadStage || currentStageId !== newLeadStage.id) {
+      return;
+    }
+
+    const result = await transitionLeadStage(tenantDb, {
+      leadId: input.leadId,
+      targetStageId: qualifiedLeadStage.id,
+      userId: input.actorUserId,
+      userRole: "admin",
+    });
+
+    if (!result.ok) {
+      console.warn(
+        `[lead-dd] auto-transition failed for lead ${input.leadId} after approval`,
+        { blockReason: result.code }
+      );
+    }
+  } catch (err) {
+    console.warn(
+      `[lead-dd] auto-transition errored for lead ${input.leadId}`,
+      { err }
+    );
+  }
 }
 
 async function listTenantSchemas(client: PoolClient) {
@@ -691,6 +760,22 @@ export async function decideDueDiligenceByToken(input: {
       `UPDATE ${schemaIdentifier}.leads SET verification_status = $1, updated_at = $2 WHERE id = $3`,
       [verificationStatus, now, approval.lead_id]
     );
+
+    if (status === "approved") {
+      const leadStageResult = await client.query(
+        `SELECT stage_id FROM ${schemaIdentifier}.leads WHERE id = $1`,
+        [approval.lead_id]
+      );
+      await client.query("SELECT set_config('search_path', $1, true)", [`${tenantSchema},public`]);
+      if (approval.requested_by) {
+        await client.query("SELECT set_config('app.current_user_id', $1, true)", [approval.requested_by]);
+      }
+      await maybeAutoTransitionAfterDdApproval(drizzle(client, { schema }), {
+        leadId: approval.lead_id,
+        actorUserId: approval.requested_by,
+        currentStageId: leadStageResult.rows[0]?.stage_id ?? null,
+      });
+    }
 
     await client.query("COMMIT");
     return { ...update.rows[0], tenant_schema: tenantSchema };
