@@ -21,6 +21,7 @@ import {
   CATEGORY_TO_FOLDER,
   DEAL_FOLDER_TEMPLATE,
 } from "./file-constants.js";
+import { resolvePhotoAddressMetadata } from "./photo-geocoding.js";
 import crypto from "node:crypto";
 
 type TenantDb = NodePgDatabase<typeof schema>;
@@ -99,6 +100,9 @@ export interface ConfirmUploadInput {
   takenAt?: string;
   geoLat?: number;
   geoLng?: number;
+  latitude?: number;
+  longitude?: number;
+  addressSource?: "exif" | "live_gps";
 }
 
 export interface FileFilters {
@@ -127,6 +131,12 @@ export interface UpdateFileInput {
   folderPath?: string | null;
 }
 
+export interface UpdateFileAddressInput {
+  address: string;
+  latitude?: number;
+  longitude?: number;
+}
+
 export interface PhotoUploadTarget {
   id: string;
   type: "lead" | "opportunity" | "deal";
@@ -135,6 +145,12 @@ export interface PhotoUploadTarget {
   stageName: string | null;
   companyName: string | null;
   lastUpdatedAt: Date;
+}
+
+function validateOptionalCoordinate(value: number | undefined, min: number, max: number, name: string): void {
+  if (value !== undefined && (!Number.isFinite(value) || value < min || value > max)) {
+    throw new AppError(400, `${name} must be between ${min} and ${max}.`);
+  }
 }
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
@@ -499,6 +515,23 @@ export async function confirmUpload(
     : "";
 
   const bucketName = process.env.R2_BUCKET_NAME || "trock-crm-files";
+  const latitude = input.latitude ?? input.geoLat;
+  const longitude = input.longitude ?? input.geoLng;
+  const photoAddress = pending.category === "photo"
+    ? await resolvePhotoAddressMetadata(tenantDb, pending, {
+      latitude,
+      longitude,
+      addressSource: input.addressSource ?? (input.geoLat !== undefined || input.geoLng !== undefined ? "exif" : undefined),
+    })
+    : {
+      latitude: null,
+      longitude: null,
+      geoLat: input.geoLat?.toString() ?? null,
+      geoLng: input.geoLng?.toString() ?? null,
+      address: null,
+      addressSource: null,
+      geocodedAt: null,
+    };
 
   const result = await tenantDb
     .insert(files)
@@ -525,8 +558,13 @@ export async function confirmUpload(
       version: pending.version ?? 1,
       parentFileId: pending.parentFileId ?? null,
       takenAt: input.takenAt ? new Date(input.takenAt) : null,
-      geoLat: input.geoLat?.toString() ?? null,
-      geoLng: input.geoLng?.toString() ?? null,
+      geoLat: photoAddress.geoLat,
+      geoLng: photoAddress.geoLng,
+      latitude: photoAddress.latitude,
+      longitude: photoAddress.longitude,
+      address: photoAddress.address,
+      addressSource: photoAddress.addressSource,
+      geocodedAt: photoAddress.geocodedAt,
       uploadedBy: userId,
     })
     .returning();
@@ -843,6 +881,36 @@ export async function updateFile(
   if (input.folderPath !== undefined) updates.folderPath = input.folderPath;
 
   if (Object.keys(updates).length === 0) return existing;
+
+  const result = await tenantDb
+    .update(files)
+    .set(updates)
+    .where(eq(files.id, fileId))
+    .returning();
+
+  return result[0];
+}
+
+/**
+ * Manually override a photo address. Audit log writes are added in PR 4.
+ */
+export async function updateFileAddress(
+  tenantDb: TenantDb,
+  fileId: string,
+  input: UpdateFileAddressInput
+): Promise<typeof files.$inferSelect> {
+  const existing = await getFileById(tenantDb, fileId);
+  if (!existing) throw new AppError(404, "File not found");
+  if (!input.address?.trim()) throw new AppError(400, "address is required.");
+  validateOptionalCoordinate(input.latitude, -90, 90, "latitude");
+  validateOptionalCoordinate(input.longitude, -180, 180, "longitude");
+
+  const updates: Record<string, unknown> = {
+    address: input.address.trim(),
+    addressSource: "manual_override",
+  };
+  if (input.latitude !== undefined) updates.latitude = input.latitude.toFixed(7);
+  if (input.longitude !== undefined) updates.longitude = input.longitude.toFixed(7);
 
   const result = await tenantDb
     .update(files)

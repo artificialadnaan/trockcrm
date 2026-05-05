@@ -14,6 +14,7 @@ import {
   getFileById,
   getFileDownloadUrl,
   updateFile,
+  updateFileAddress,
   deleteFile,
   getFileVersions,
   getTagSuggestions,
@@ -186,18 +187,25 @@ router.post("/upload-direct", express.raw({ type: "*/*", limit: "50mb" }), async
 // POST /api/files/confirm-upload — Step 2: record file metadata after upload
 router.post("/confirm-upload", async (req, res, next) => {
   try {
-    const { uploadToken, takenAt, geoLat, geoLng } = req.body;
+    const { uploadToken, takenAt, geoLat, geoLng, latitude, longitude, addressSource } = req.body;
 
     // Fix 2: Require upload token — all other metadata is server-trusted
     if (!uploadToken) {
       throw new AppError(400, "uploadToken is required.");
     }
 
+    if (addressSource !== undefined && addressSource !== "exif" && addressSource !== "live_gps") {
+      throw new AppError(400, "addressSource must be either exif or live_gps.");
+    }
+
     const file = await confirmUpload(req.tenantDb!, req.user!.id, {
       uploadToken,
       takenAt,
-      geoLat: geoLat ? Number(geoLat) : undefined,
-      geoLng: geoLng ? Number(geoLng) : undefined,
+      geoLat: geoLat !== undefined ? Number(geoLat) : undefined,
+      geoLng: geoLng !== undefined ? Number(geoLng) : undefined,
+      latitude: latitude !== undefined ? Number(latitude) : undefined,
+      longitude: longitude !== undefined ? Number(longitude) : undefined,
+      addressSource,
     });
 
     // Fix 1: Insert job into job_queue before commit so the worker picks it up.
@@ -245,6 +253,42 @@ router.post("/confirm-upload", async (req, res, next) => {
     }
 
     res.status(201).json({ file });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// PATCH /api/files/:id/address — manual address correction for photos
+router.patch("/:id/address", async (req, res, next) => {
+  try {
+    if (!req.user) throw new AppError(401, "Authentication required.");
+
+    const existing = await getFileById(req.tenantDb!, req.params.id);
+    if (!existing) throw new AppError(404, "File not found");
+
+    if (existing.dealId) {
+      const deal = await getDealById(req.tenantDb!, existing.dealId, req.user.role, req.user.id);
+      if (!deal) throw new AppError(403, "Access denied: you do not have access to this deal's files.");
+    } else if (existing.leadId) {
+      const lead = await getLeadById(req.tenantDb!, existing.leadId, req.user.role, req.user.id);
+      if (!lead) throw new AppError(403, "Access denied: you do not have access to this lead's files.");
+    } else if (req.user.role === "rep" && existing.uploadedBy !== req.user.id) {
+      throw new AppError(403, "You can only modify files you uploaded");
+    }
+
+    const { address, latitude, longitude } = req.body;
+    if (!address || typeof address !== "string") {
+      throw new AppError(400, "address is required.");
+    }
+
+    // TODO(PR 4): Write photo_audit_log address_changed event here.
+    const file = await updateFileAddress(req.tenantDb!, req.params.id, {
+      address,
+      latitude: latitude !== undefined ? Number(latitude) : undefined,
+      longitude: longitude !== undefined ? Number(longitude) : undefined,
+    });
+    await req.commitTransaction!();
+    res.json({ file });
   } catch (err) {
     next(err);
   }

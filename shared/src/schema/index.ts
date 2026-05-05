@@ -20,6 +20,7 @@ export { userLocalAuth } from "./public/user-local-auth.js";
 export { userLocalAuthEvents, localAuthEventTypeEnum } from "./public/user-local-auth-events.js";
 export { userCommissionSettings } from "./public/user-commission-settings.js";
 export { jobQueue, jobStatusEnum } from "./public/job-queue.js";
+export { geocodingCache } from "./public/geocoding-cache.js";
 export * from "../types/sales-workflow.js";
 export * from "../types/workflow.js";
 export {
