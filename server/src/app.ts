@@ -55,6 +55,7 @@ import {
   getCsrfCookieOptions,
   getRequestOrigin,
   isAllowedCookieAuthOrigin,
+  isPublicAuthCsrfExempt,
   isUnsafeHttpMethod,
   isValidCsrfPair,
 } from "./modules/auth/http-config.js";
@@ -115,6 +116,16 @@ export function createApp() {
 
     const hasAuthCookie = typeof req.cookies?.token === "string";
     if (!hasAuthCookie || !isUnsafeHttpMethod(req.method)) {
+      return next();
+    }
+
+    if (isPublicAuthCsrfExempt({
+      method: req.method,
+      path: req.path,
+      host: req.hostname || req.get("host"),
+      env: process.env,
+    })) {
+      console.info(`[CSRF] Exempted public auth endpoint ${req.method} ${req.path}`);
       return next();
     }
 

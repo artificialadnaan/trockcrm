@@ -6,6 +6,7 @@ import {
   getRequestOrigin,
   getTokenCookieOptions,
   isAllowedCookieAuthOrigin,
+  isPublicAuthCsrfExempt,
   isValidCsrfPair,
   isDevAuthEnabled,
 } from "../../../src/modules/auth/http-config.js";
@@ -162,5 +163,34 @@ describe("auth http config", () => {
     expect(isValidCsrfPair(token, createCsrfToken())).toBe(false);
     expect(isValidCsrfPair(undefined, token)).toBe(false);
     expect(isValidCsrfPair(token, undefined)).toBe(false);
+  });
+
+  it("exempts only exact public auth POST endpoints from CSRF", () => {
+    const env = { NODE_ENV: "test", DEV_MODE: "true" };
+
+    expect(isPublicAuthCsrfExempt({ method: "POST", path: "/api/auth/accept-invite", env })).toBe(true);
+    expect(isPublicAuthCsrfExempt({ method: "POST", path: "/api/auth/field-login", env })).toBe(true);
+    expect(isPublicAuthCsrfExempt({ method: "POST", path: "/api/auth/local/login", env })).toBe(true);
+    expect(
+      isPublicAuthCsrfExempt({
+        method: "POST",
+        path: "/api/auth/dev/login",
+        host: "localhost:5174",
+        env,
+      })
+    ).toBe(true);
+
+    expect(isPublicAuthCsrfExempt({ method: "GET", path: "/api/auth/accept-invite", env })).toBe(false);
+    expect(isPublicAuthCsrfExempt({ method: "POST", path: "/api/auth/accept-invite/extra", env })).toBe(false);
+    expect(isPublicAuthCsrfExempt({ method: "POST", path: "/api/auth/logout", env })).toBe(false);
+    expect(isPublicAuthCsrfExempt({ method: "POST", path: "/api/auth/local/change-password", env })).toBe(false);
+    expect(
+      isPublicAuthCsrfExempt({
+        method: "POST",
+        path: "/api/auth/dev/login",
+        host: "crm.trockconstruction.com",
+        env: { NODE_ENV: "production", DEV_MODE: "false" },
+      })
+    ).toBe(false);
   });
 });
