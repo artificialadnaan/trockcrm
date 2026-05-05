@@ -6,6 +6,7 @@ import { ProtectedRoute } from "@/components/ProtectedRoute";
 import { AcceptInvitePage } from "@/pages/AcceptInvitePage";
 import { HomePage } from "@/pages/HomePage";
 import { LoginPage } from "@/pages/LoginPage";
+import { CapturePage } from "@/pages/CapturePage";
 import { ProjectDetailPage } from "@/pages/ProjectDetailPage";
 import { ProjectsPage } from "@/pages/ProjectsPage";
 
@@ -18,6 +19,7 @@ export function App() {
         <Route element={<ProtectedRoute />}>
           <Route element={<FieldLayout />}>
             <Route path="/home" element={<Navigate to="/projects" replace />} />
+            <Route path="/capture" element={<CapturePage />} />
             <Route path="/projects" element={<ProjectsPage />} />
             <Route path="/projects/:id" element={<ProjectDetailPage />} />
             <Route path="/profile" element={<HomePage />} />

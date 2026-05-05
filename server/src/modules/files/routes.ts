@@ -1,9 +1,6 @@
 import express, { Router } from "express";
-import { eq, sql } from "drizzle-orm";
 import { files } from "@trock-crm/shared/schema";
 import { AppError } from "../../middleware/error-handler.js";
-import { eventBus } from "../../events/bus.js";
-import { DOMAIN_EVENTS } from "@trock-crm/shared/types";
 import type { FileCategory } from "@trock-crm/shared/types";
 import { FILE_CATEGORIES } from "@trock-crm/shared/types";
 import {
@@ -27,6 +24,7 @@ import { getDealById } from "../deals/service.js";
 import { getLeadById } from "../leads/service.js";
 import { getPhotoFeed, getNewPhotoCount, getProjectPhotoStats } from "./feed-service.js";
 import { getPhotoAuditEvents, logPhotoEvent } from "./audit-log-service.js";
+import { emitUploadedFileEvent, recordUploadedFileSideEffects } from "./upload-workflow.js";
 
 const router = Router();
 
@@ -173,38 +171,13 @@ router.post("/upload-direct", express.raw({ type: "*/*", limit: "50mb" }), async
       uploadToken: result.uploadToken,
     });
 
-    if (isPhotoRecord(file)) {
-      await logPhotoEvent(req.tenantDb!, {
-        photoId: file.id,
-        eventType: "uploaded",
-        userId: req.user!.id,
-        ...requestAuditContext(req),
-        metadata: {
-          addressSource: file.addressSource ?? null,
-          hasGpsCoordinates: Boolean(file.latitude && file.longitude),
-          category: file.photoCategory ?? null,
-          sizeBytes: file.fileSizeBytes,
-        },
-      });
-    }
-
-    // Queue EXIF extraction job
     const officeId = req.user!.activeOfficeId ?? req.user!.officeId;
-    const jobPayload = JSON.stringify({
-      eventName: "file.uploaded",
-      fileId: file.id,
-      r2Key: file.r2Key,
-      mimeType: file.mimeType,
-      dealId: file.dealId,
-      leadId: file.leadId,
-      contactId: file.contactId,
-      category: file.category,
-      uploadedBy: req.user!.id,
+    await recordUploadedFileSideEffects(req.tenantDb!, {
+      file,
+      userId: req.user!.id,
+      officeId,
+      auditContext: requestAuditContext(req),
     });
-    await req.tenantDb!.execute(
-      sql`INSERT INTO public.job_queue (job_type, payload, office_id, status, run_after)
-          VALUES ('domain_event', ${jobPayload}::jsonb, ${officeId}::uuid, 'pending', NOW())`
-    );
 
     await req.commitTransaction!();
     res.status(201).json({ file });
@@ -237,64 +210,18 @@ router.post("/confirm-upload", async (req, res, next) => {
       addressSource,
     });
 
-    if (isPhotoRecord(file)) {
-      await logPhotoEvent(req.tenantDb!, {
-        photoId: file.id,
-        eventType: "uploaded",
-        userId: req.user!.id,
-        ...requestAuditContext(req),
-        metadata: {
-          addressSource: file.addressSource ?? addressSource ?? null,
-          hasGpsCoordinates: Boolean(file.latitude && file.longitude),
-          category: file.photoCategory ?? null,
-          sizeBytes: file.fileSizeBytes,
-        },
-      });
-    }
-
-    // Fix 1: Insert job into job_queue before commit so the worker picks it up.
-    // The worker processes domain_event jobs -- emitLocal alone never reached it.
     const officeId = req.user!.activeOfficeId ?? req.user!.officeId;
-    const jobPayload = JSON.stringify({
-      eventName: "file.uploaded",
-      fileId: file.id,
-      r2Key: file.r2Key,
-      mimeType: file.mimeType,
-      dealId: file.dealId,
-      leadId: file.leadId,
-      contactId: file.contactId,
-      category: file.category,
-      uploadedBy: req.user!.id,
+    await recordUploadedFileSideEffects(req.tenantDb!, {
+      file,
+      userId: req.user!.id,
+      officeId,
+      addressSource,
+      auditContext: requestAuditContext(req),
     });
-    // jobQueue is in the public schema — use raw SQL since tenantDb targets tenant schema.
-    await req.tenantDb!.execute(
-      sql`INSERT INTO public.job_queue (job_type, payload, office_id, status, run_after)
-          VALUES ('domain_event', ${jobPayload}::jsonb, ${officeId}::uuid, 'pending', NOW())`
-    );
 
     await req.commitTransaction!();
 
-    // Best-effort local emit after commit (for any in-process listeners)
-    try {
-      eventBus.emitLocal({
-        name: DOMAIN_EVENTS.FILE_UPLOADED,
-        payload: {
-          fileId: file.id,
-          r2Key: file.r2Key,
-          mimeType: file.mimeType,
-          dealId: file.dealId,
-          leadId: file.leadId,
-          contactId: file.contactId,
-          category: file.category,
-          uploadedBy: req.user!.id,
-        },
-        officeId,
-        userId: req.user!.id,
-        timestamp: new Date(),
-      });
-    } catch (_) {
-      // Best effort — worker will handle it via job_queue
-    }
+    emitUploadedFileEvent({ file, userId: req.user!.id, officeId });
 
     res.status(201).json({ file });
   } catch (err) {

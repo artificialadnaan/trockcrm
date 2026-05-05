@@ -58,6 +58,7 @@ function renderPage() {
     <MemoryRouter initialEntries={["/projects/deal-1"]}>
       <Routes>
         <Route path="/projects/:id" element={<ProjectDetailPage />} />
+        <Route path="/capture" element={<div>Capture route</div>} />
       </Routes>
     </MemoryRouter>
   );
@@ -108,5 +109,64 @@ describe("ProjectDetailPage", () => {
 
     Array.from(node.querySelectorAll("button")).find((button) => button.textContent === "Date")?.click();
     await vi.waitFor(() => expect(node.textContent).toContain("Damage"));
+  });
+
+  it("routes to capture with the current project from the Add photos action", async () => {
+    apiMock
+      .mockResolvedValueOnce({ projects: [
+        { id: "deal-1", name: "Roof Repair", dealNumber: "TR-1", propertyName: "Roof Repair", propertyAddress: "123 Main", stage: "Contract", lastActivityAt: null, photoCount: 0, starred: false },
+      ] })
+      .mockResolvedValueOnce({ photos: [] });
+
+    const node = renderPage();
+    await vi.waitFor(() => expect(node.textContent).toContain("No photos in this project yet."));
+
+    node.querySelector<HTMLButtonElement>('[aria-label="Add photos"]')?.click();
+
+    await vi.waitFor(() => expect(node.textContent).toContain("Capture route"));
+  });
+
+  it("toggles star optimistically and rolls back when the API fails", async () => {
+    apiMock
+      .mockResolvedValueOnce({ projects: [
+        { id: "deal-1", name: "Roof Repair", dealNumber: "TR-1", propertyName: "Roof Repair", propertyAddress: "123 Main", stage: "Contract", lastActivityAt: null, photoCount: 1, starred: false },
+      ] })
+      .mockResolvedValueOnce({ photos: [photo("photo-1", "damage")] })
+      .mockRejectedValueOnce(new Error("star failed"));
+
+    const node = renderPage();
+    await vi.waitFor(() => expect(node.textContent).toContain("Roof Repair"));
+
+    node.querySelector<HTMLButtonElement>('[aria-label="Star project"]')?.click();
+
+    await vi.waitFor(() => expect(node.textContent).toContain("star failed"));
+    expect(apiMock).toHaveBeenLastCalledWith("/field/projects/deal-1/star", { method: "POST" });
+  });
+
+  it("applies advanced uploader filters and clears them from the drawer", async () => {
+    apiMock
+      .mockResolvedValueOnce({ projects: [
+        { id: "deal-1", name: "Roof Repair", dealNumber: "TR-1", propertyName: "Roof Repair", propertyAddress: "123 Main", stage: "Contract", lastActivityAt: null, photoCount: 2, starred: false },
+      ] })
+      .mockResolvedValueOnce({ photos: [photo("photo-1", "damage"), photo("photo-2", "safety", "uploader-2")] });
+
+    const node = renderPage();
+    await vi.waitFor(() => expect(node.textContent).toContain("safety caption"));
+
+    node.querySelector<HTMLButtonElement>('[aria-label="Open filters"]')?.click();
+    await vi.waitFor(() => expect(node.textContent).toContain("Other User"));
+    const otherUserCheckbox = Array.from(node.querySelectorAll<HTMLInputElement>('input[type="checkbox"]')).find((input) => input.parentElement?.textContent?.includes("Other User"))!;
+    otherUserCheckbox.click();
+    Array.from(node.querySelectorAll("button")).find((button) => button.textContent === "Apply")?.click();
+
+    await vi.waitFor(() => expect(node.textContent).toContain("safety caption"));
+    expect(node.textContent).not.toContain("damage caption");
+
+    node.querySelector<HTMLButtonElement>('[aria-label="Open filters"]')?.click();
+    await vi.waitFor(() => expect(node.textContent).toContain("Clear all"));
+    Array.from(node.querySelectorAll("button")).find((button) => button.textContent === "Clear all")?.click();
+
+    await vi.waitFor(() => expect(node.textContent).toContain("damage caption"));
+    expect(node.textContent).toContain("safety caption");
   });
 });

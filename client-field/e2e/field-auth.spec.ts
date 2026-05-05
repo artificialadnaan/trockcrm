@@ -23,6 +23,7 @@ test("field invite acceptance, logout, login, and CRM route denial", async ({ pa
     { id: "photo-1", category: "photo", photoCategory: "damage", subcategory: null, displayName: "Damage photo", mimeType: "image/jpeg", fileSizeBytes: 1000, fileExtension: ".jpg", dealId: "deal-1", description: "Damage area", takenAt: "2026-05-05T12:00:00.000Z", createdAt: "2026-05-05T12:00:00.000Z", uploadedBy: "field-1", uploaderName: "Field User", uploaderAvatarUrl: null, latitude: "35.1234567", longitude: "-97.1234567", address: "123 Main St", addressSource: "exif", geocodedAt: null, procoreSyncStatus: null, deletedAt: null, imageUrl: "data:image/gif;base64,R0lGODlhAQABAAAAACw=" },
     { id: "photo-2", category: "photo", photoCategory: "safety", subcategory: null, displayName: "Safety photo", mimeType: "image/jpeg", fileSizeBytes: 1000, fileExtension: ".jpg", dealId: "deal-1", description: "Safety rail", takenAt: "2026-05-04T12:00:00.000Z", createdAt: "2026-05-04T12:00:00.000Z", uploadedBy: "field-2", uploaderName: "Other User", uploaderAvatarUrl: null, latitude: "35.1234567", longitude: "-97.1234567", address: "123 Main St", addressSource: "live_gps", geocodedAt: null, procoreSyncStatus: null, deletedAt: null, imageUrl: "data:image/gif;base64,R0lGODlhAQABAAAAACw=" },
   ];
+  let uploadedToR2 = false;
 
   page.on("request", (request) => {
     const url = request.url();
@@ -93,6 +94,73 @@ test("field invite acceptance, logout, login, and CRM route denial", async ({ pa
   await page.route("**/api/field/projects/deal-1/photos", async (route) => {
     await route.fulfill({ json: { photos, pagination: { page: 1, limit: 200, total: photos.length, totalPages: 1 } } });
   });
+  await page.route("**/api/field/photos/upload-url", async (route) => {
+    expect(route.request().headers()["x-requested-with"]).toBe("XMLHttpRequest");
+    const body = route.request().postDataJSON() as { dealId: string; category: string | null };
+    expect(body.dealId).toBe("deal-1");
+    expect(body.category).toBe("progress");
+    await route.fulfill({
+      json: {
+        uploadUrl: "http://mock-r2.test/field-photo-upload",
+        objectKey: "field/deal-1/uploaded.jpg",
+        r2Key: "field/deal-1/uploaded.jpg",
+        expiresIn: 900,
+        uploadToken: "field-upload-token",
+        systemFilename: "uploaded.jpg",
+        displayName: "uploaded.jpg",
+        folderPath: "Field Photos",
+      },
+    });
+  });
+  await page.route("http://mock-r2.test/field-photo-upload", async (route) => {
+    uploadedToR2 = route.request().method() === "PUT";
+    await route.fulfill({ status: 200, body: "" });
+  });
+  await page.route("**/api/field/photos/confirm-upload", async (route) => {
+    expect(route.request().headers()["x-requested-with"]).toBe("XMLHttpRequest");
+    const body = route.request().postDataJSON() as {
+      dealId: string;
+      objectKey: string;
+      uploadToken: string;
+      category: string | null;
+      takenAt?: string;
+      latitude?: number;
+      longitude?: number;
+      addressSource?: "exif" | "live_gps";
+    };
+    expect(body).toMatchObject({
+      dealId: "deal-1",
+      objectKey: "field/deal-1/uploaded.jpg",
+      uploadToken: "field-upload-token",
+      category: "progress",
+    });
+    photos.unshift({
+      id: "photo-uploaded",
+      category: "photo",
+      photoCategory: "progress",
+      subcategory: null,
+      displayName: "uploaded.jpg",
+      mimeType: "image/jpeg",
+      fileSizeBytes: 900,
+      fileExtension: ".jpg",
+      dealId: "deal-1",
+      description: "Gallery upload",
+      takenAt: body.takenAt ?? "2026-05-05T13:00:00.000Z",
+      createdAt: "2026-05-05T13:00:00.000Z",
+      uploadedBy: "field-1",
+      uploaderName: "Field User",
+      uploaderAvatarUrl: null,
+      latitude: body.latitude ? String(body.latitude) : "35.123456",
+      longitude: body.longitude ? String(body.longitude) : "-97.123456",
+      address: "123 Main St",
+      addressSource: body.addressSource ?? "live_gps",
+      geocodedAt: null,
+      procoreSyncStatus: null,
+      deletedAt: null,
+      imageUrl: "data:image/gif;base64,R0lGODlhAQABAAAAACw=",
+    });
+    await route.fulfill({ status: 201, json: { photo: photos[0] } });
+  });
 
   await page.goto("/accept-invite?token=raw-token");
   await expect(page.getByText("field@example.com")).toBeVisible();
@@ -128,6 +196,22 @@ test("field invite acceptance, logout, login, and CRM route denial", async ({ pa
   await page.getByRole("button", { name: "Close photo viewer" }).click();
   await page.getByRole("button", { name: "Back to projects" }).click();
   await expect(page).toHaveURL(/\/projects$/);
+
+  await page.getByRole("link", { name: "Capture" }).click();
+  await expect(page).toHaveURL(/\/capture$/);
+  await page.getByRole("button", { name: "Choose project" }).click();
+  await page.getByRole("button", { name: /Roof Repair/ }).click();
+  await page.getByRole("button", { name: "Progress" }).click();
+  await page.locator('input[type="file"]').setInputFiles({
+    name: "gallery-photo.png",
+    mimeType: "image/png",
+    buffer: Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/p9sAAAAASUVORK5CYII=", "base64"),
+  });
+  await expect(page.getByText("1 photo in this session")).toBeVisible();
+  await page.getByRole("button", { name: "Upload" }).click();
+  await expect(page).toHaveURL(/\/projects\/deal-1$/);
+  await expect(page.getByText("Gallery upload")).toBeVisible();
+  expect(uploadedToR2).toBe(true);
 
   await page.getByRole("button", { name: "Log out" }).click();
   await expect(page).toHaveURL(/\/$/);

@@ -2,7 +2,7 @@ import { eq, and, desc, asc, ilike, sql, or, arrayContains, type SQL } from "dri
 import type { NodePgDatabase } from "drizzle-orm/node-postgres";
 import { companies, deals, files, leads, pipelineStageConfig, users } from "@trock-crm/shared/schema";
 import type * as schema from "@trock-crm/shared/schema";
-import type { FileCategory } from "@trock-crm/shared/types";
+import type { FileCategory, PhotoCategory } from "@trock-crm/shared/types";
 import { AppError } from "../../middleware/error-handler.js";
 import {
   generateUploadUrl,
@@ -45,6 +45,7 @@ interface PendingUpload {
   procoreProjectId?: number;
   changeOrderId?: string;
   description?: string;
+  photoCategory?: PhotoCategory | null;
   tags?: string[];
   expiresAt: Date;
   /** Set when this upload is a new version of an existing file */
@@ -90,6 +91,8 @@ export interface RequestUploadInput {
   changeOrderId?: string;
   /** Optional description */
   description?: string;
+  /** Optional photo-only category label */
+  photoCategory?: PhotoCategory | null;
   /** Optional tags */
   tags?: string[];
 }
@@ -465,6 +468,7 @@ export async function requestUploadUrl(
     procoreProjectId: input.procoreProjectId,
     changeOrderId: input.changeOrderId,
     description: input.description,
+    photoCategory: input.photoCategory,
     tags: input.tags,
     expiresAt: new Date(Date.now() + 15 * 60 * 1000),
   });
@@ -558,6 +562,7 @@ export async function confirmUpload(
       procoreProjectId: pending.procoreProjectId ?? null,
       changeOrderId: pending.changeOrderId ?? null,
       description: pending.description ?? null,
+      photoCategory: pending.photoCategory ?? null,
       notes: null,
       version: pending.version ?? 1,
       parentFileId: pending.parentFileId ?? null,
@@ -577,6 +582,12 @@ export async function confirmUpload(
   pendingUploads.delete(input.uploadToken);
 
   return result[0];
+}
+
+export function getPendingUploadMetadata(uploadToken: string): Readonly<PendingUpload> | null {
+  const pending = pendingUploads.get(uploadToken);
+  if (!pending || pending.expiresAt < new Date()) return null;
+  return pending;
 }
 
 /**

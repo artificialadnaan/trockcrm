@@ -5,7 +5,7 @@ import { Button } from "./ui";
 
 const navItems = [
   { label: "Projects", icon: FolderKanban, to: "/projects" },
-  { label: "Capture", icon: Camera, to: "/projects" },
+  { label: "Capture", icon: Camera, to: "/capture" },
   { label: "Profile", icon: UserCircle, to: "/profile" },
 ] as const;
 
