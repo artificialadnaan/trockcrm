@@ -65,6 +65,7 @@ async function findDeal(sourceDealId: string) {
               d.primary_contact_id,
               d.procore_bid_id,
               d.rfp_approval_request_id,
+              d.workflow_route,
               s.slug AS stage_slug
          FROM ${quoteIdent(schemaName)}.deals d
          LEFT JOIN public.pipeline_stage_config s ON s.id = d.stage_id
@@ -113,6 +114,10 @@ function asDateOrNull(value: unknown) {
 
 function isWorkflowRoute(value: string | null): value is (typeof WORKFLOW_ROUTES)[number] {
   return value != null && (WORKFLOW_ROUTES as readonly string[]).includes(value);
+}
+
+function bidBoardCreatedTargetStageSlug(workflowRoute: unknown) {
+  return workflowRoute === "service" ? "service_estimating" : "estimate_in_progress";
 }
 
 function isDealNumberUniqueViolation(error: unknown): boolean {
@@ -403,6 +408,18 @@ internalRfpRoutes.post(
         );
       }
 
+      const targetStageSlug = bidBoardCreatedTargetStageSlug(found.deal.workflow_route);
+      const targetStageResult = await pool.query(
+        `SELECT id FROM public.pipeline_stage_config WHERE slug = $1 LIMIT 1`,
+        [targetStageSlug]
+      );
+      const targetStageId = targetStageResult.rows[0]?.id ?? null;
+      if (!targetStageId) {
+        console.warn(
+          `[RFP callback] Could not find target stage '${targetStageSlug}' for deal ${sourceDealId}; linkage will be applied without a stage transition`
+        );
+      }
+
       await pool.query(
         `UPDATE ${quoteIdent(found.schemaName)}.deals
             SET procore_bid_id = $1::bigint,
@@ -410,16 +427,22 @@ internalRfpRoutes.post(
                 is_bid_board_owned = true,
                 rfp_approval_status = 'approved',
                 bid_board_linked_at = NOW(),
+                stage_id = COALESCE($3::uuid, stage_id),
+                stage_entered_at = CASE
+                  WHEN $3::uuid IS NOT NULL AND stage_id IS DISTINCT FROM $3::uuid THEN NOW()
+                  ELSE stage_entered_at
+                END,
                 updated_at = NOW()
-          WHERE id = $3
+          WHERE id = $4
             AND (
               procore_bid_id IS DISTINCT FROM $1::bigint OR
               procore_company_id IS DISTINCT FROM $2 OR
               is_bid_board_owned IS DISTINCT FROM true OR
               rfp_approval_status IS DISTINCT FROM 'approved' OR
-              bid_board_linked_at IS NULL
+              bid_board_linked_at IS NULL OR
+              ($3::uuid IS NOT NULL AND stage_id IS DISTINCT FROM $3::uuid)
             )`,
-        [bidboardProjectId, procoreCompanyId, sourceDealId]
+        [bidboardProjectId, procoreCompanyId, targetStageId, sourceDealId]
       );
 
       res.json({ success: true, dealId: sourceDealId, bidboardProjectId });

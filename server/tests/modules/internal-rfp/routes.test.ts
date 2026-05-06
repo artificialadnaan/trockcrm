@@ -175,8 +175,8 @@ describe("internal RFP routes", () => {
     expect(res.status).toBe(200);
     expect(res.body.applied).not.toContain("workflowRoute");
     expect(res.body.rejected).toContain("workflowRoute");
-    const sqlText = queryMock.mock.calls.map((call) => String(call[0])).join("\n");
-    expect(sqlText).not.toContain("workflow_route");
+    const updateCall = queryMock.mock.calls.find((call) => String(call[0]).includes("UPDATE \"office_dallas\".deals"));
+    expect(String(updateCall?.[0] ?? "")).not.toContain("\"workflow_route\"");
     expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining("frobnicate"));
     warnSpy.mockRestore();
   });
