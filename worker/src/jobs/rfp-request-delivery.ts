@@ -1,12 +1,7 @@
 import crypto from "node:crypto";
 import { pool } from "../db.js";
-
-export interface RfpRequestDeliveryPayload {
-  dealId: string;
-  syncHubUrl: string;
-  body: Record<string, unknown>;
-  dealHandled?: boolean;
-}
+import type { RfpRequestDeliveryPayload } from "@trock-crm/shared/types";
+export type { RfpRequestDeliveryPayload } from "@trock-crm/shared/types";
 
 type Queryable = {
   query: (sql: string, params?: unknown[]) => Promise<{ rows: any[] }>;
