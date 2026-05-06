@@ -8,6 +8,7 @@ import {
   contacts,
   deals,
   dealHistory,
+  jobQueue,
   leadDueDiligenceApprovals,
   leadStageHistory,
   leads,
@@ -606,6 +607,7 @@ interface FakeTenantState {
   notificationRecipientAssignments: Array<Record<string, unknown>>;
   leadQuestionNodes: FakeLeadQuestionNodeRow[];
   projectTypes: FakeProjectTypeRow[];
+  jobs: Array<Record<string, unknown>>;
 }
 
 function createFakeTenantDb(initialState?: Partial<FakeTenantState>) {
@@ -668,6 +670,7 @@ function createFakeTenantDb(initialState?: Partial<FakeTenantState>) {
     notificationRecipientGroups: [],
     notificationRecipientAssignments: [],
     leadQuestionNodes: [],
+    jobs: [],
     projectTypes: [
       {
         id: "project-type-multifamily",
@@ -693,6 +696,7 @@ function createFakeTenantDb(initialState?: Partial<FakeTenantState>) {
     if (table === leads || tableName === "leads") return state.leads;
     if (table === deals || tableName === "deals") return state.deals;
     if (table === leadStageHistory || tableName === "lead_stage_history") return state.leadStageHistory;
+    if (table === jobQueue || tableName === "job_queue") return state.jobs;
     if (tableName === "project_type_config") return state.projectTypes;
     if (tableName === "lead_question_answers") return state.leadQuestionAnswers;
     if (tableName === "lead_question_answer_history") return state.leadQuestionAnswerHistory;
@@ -710,6 +714,7 @@ function createFakeTenantDb(initialState?: Partial<FakeTenantState>) {
     if ("convertedAt" in candidate && "stageEnteredAt" in candidate && "assignedRepId" in candidate) return state.leads;
     if ("dealNumber" in candidate && "workflowRoute" in candidate && "sourceLeadId" in candidate) return state.deals;
     if ("leadId" in candidate && "changedBy" in candidate && "toStageId" in candidate) return state.leadStageHistory;
+    if ("jobType" in candidate && "payload" in candidate) return state.jobs;
     if ("leadId" in candidate && "questionId" in candidate && "valueJson" in candidate) return state.leadQuestionAnswers;
     if ("leadId" in candidate && "questionId" in candidate && "oldValueJson" in candidate) return state.leadQuestionAnswerHistory;
     if (table === leadDueDiligenceApprovals || ("approvalToken" in candidate && "requestedBy" in candidate)) {
@@ -1042,6 +1047,8 @@ beforeEach(() => {
 
 afterEach(() => {
   delete process.env.ENABLE_LEAD_EDIT_V2;
+  delete process.env.ENABLE_OPPORTUNITY_RFP_EVENT;
+  delete process.env.SYNCHUB_BASE_URL;
 });
 
 describe("Lead Conversion Shared Contract", () => {
@@ -1776,6 +1783,101 @@ describe("Lead Conversion Service", () => {
     expect(result.lead.stageId).toBe("lead-stage-sales-validation");
     expect(result.lead.stageEnteredAt).toEqual(new Date("2026-04-15T15:00:00.000Z"));
     expect(tenantDb.state.deals).toHaveLength(1);
+  });
+
+  it("enqueues an RFP request when lead conversion creates an Opportunity deal", async () => {
+    process.env.ENABLE_OPPORTUNITY_RFP_EVENT = "true";
+    process.env.SYNCHUB_BASE_URL = "https://synchub.example.com";
+    const tenantDb = createFakeTenantDb({
+      leads: [
+        {
+          id: "lead-1",
+          companyId: "company-1",
+          propertyId: "property-1",
+          primaryContactId: null,
+          name: "Palm Villas repaint",
+          stageId: "lead-stage-sales-validation",
+          assignedRepId: "rep-1",
+          status: "open",
+          pipelineType: "normal",
+          officeCode: "dfw",
+          projectType: "roofing",
+          preQualValue: "85000",
+          source: "Referral",
+          description: "Property manager requested pre-bid walk",
+          stageEnteredAt: new Date("2026-04-12T15:00:00.000Z"),
+          convertedAt: null,
+          isActive: true,
+          createdAt: new Date("2026-04-12T15:00:00.000Z"),
+          updatedAt: new Date("2026-04-12T15:00:00.000Z"),
+        },
+      ],
+    });
+    const service = createLeadConversionService({
+      getStageById: pipelineMocks.getStageById as never,
+      getStageBySlug: pipelineMocks.getStageBySlug as never,
+      now: () => new Date("2026-04-15T15:00:00.000Z"),
+      createDeal: async (_tenantDb, input) => {
+        const deal = {
+          id: "deal-1",
+          dealNumber: "dfw-3-10526-aa",
+          workflowRoute: input.workflowRoute ?? "normal",
+          officeCode: input.officeCode,
+          primaryContactId: input.primaryContactId ?? null,
+          companyId: input.companyId ?? null,
+          propertyId: input.propertyId ?? null,
+          sourceLeadId: input.sourceLeadId ?? null,
+          source: input.source ?? null,
+          assignedRepId: input.assignedRepId,
+          stageId: input.stageId,
+          stageEnteredAt: new Date("2026-04-15T15:00:00.000Z"),
+          name: input.name,
+          rfpApprovalRequestedAt: null,
+          rfpApprovalRequestEventId: null,
+          rfpApprovalRequestedBy: null,
+          rfpApprovalStatus: null,
+        };
+        tenantDb.state.deals.push(deal);
+        return deal as never;
+      },
+    });
+
+    const result = await service.convertLead(tenantDb as never, {
+      leadId: "lead-1",
+      dealStageId: "deal-stage-1",
+      userRole: "rep",
+      userId: "rep-1",
+      officeId: "office-1",
+    });
+
+    expect(result.deal.id).toBe("deal-1");
+    expect(tenantDb.state.deals[0]?.rfpApprovalStatus).toBe("pending_outbox");
+    expect(tenantDb.state.deals[0]?.rfpApprovalRequestedAt).toEqual(new Date("2026-04-15T15:00:00.000Z"));
+    expect(tenantDb.state.deals[0]?.rfpApprovalRequestEventId).toMatch(
+      /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
+    );
+    expect(tenantDb.state.deals[0]?.rfpApprovalRequestedBy).toBe("rep-1");
+
+    const rfpJobs = tenantDb.state.jobs.filter((job) => job.jobType === "rfp_request_delivery");
+    expect(rfpJobs).toHaveLength(1);
+    expect(rfpJobs[0]).toMatchObject({
+      jobType: "rfp_request_delivery",
+      officeId: "office-1",
+      status: "pending",
+      maxAttempts: 8,
+    });
+    expect(rfpJobs[0]?.payload).toMatchObject({
+      dealId: "deal-1",
+      syncHubUrl: "https://synchub.example.com/api/rfp-requests",
+      body: {
+        sourceSystem: "trock_crm",
+        sourceDealId: "deal-1",
+        deal: {
+          name: "Palm Villas repaint",
+          projectNumber: "dfw-3-10526-aa",
+        },
+      },
+    });
   });
 
   it("copies lead salesRepId to the successor deal when no override is provided", async () => {
