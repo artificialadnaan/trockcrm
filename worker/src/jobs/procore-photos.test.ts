@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const poolQueryMock = vi.hoisted(() => vi.fn());
 const clientQueryMock = vi.hoisted(() => vi.fn());
@@ -13,13 +13,20 @@ vi.mock("../db.js", () => ({
 }));
 
 describe("procore photo worker", () => {
+  let fetchMock: ReturnType<typeof vi.spyOn>;
+
   beforeEach(() => {
     poolQueryMock.mockReset();
     clientQueryMock.mockReset();
     releaseMock.mockReset();
     connectMock.mockClear();
+    fetchMock = vi.spyOn(globalThis, "fetch").mockRejectedValue(new Error("unexpected Procore API call"));
     delete process.env.PROCORE_PHOTOS_PUSH_ENABLED;
     delete process.env.PROCORE_LINK_CREATION_ENABLED;
+  });
+
+  afterEach(() => {
+    fetchMock.mockRestore();
   });
 
   it("leaves photo rows untouched when Procore photo push is feature-flagged off", async () => {
@@ -32,6 +39,7 @@ describe("procore photo worker", () => {
     const sqlText = clientQueryMock.mock.calls.map((call) => String(call[0])).join("\n");
     expect(sqlText).not.toContain("UPDATE office_main.files");
     expect(sqlText).not.toContain("procore_sync_status = 'pending'");
+    expect(fetchMock).not.toHaveBeenCalled();
   });
 
   it("does not create public viewer links when link creation is feature-flagged off", async () => {
@@ -45,6 +53,7 @@ describe("procore photo worker", () => {
 
     expect(result).toBe(false);
     expect(connectMock).not.toHaveBeenCalled();
+    expect(fetchMock).not.toHaveBeenCalled();
   });
 
   it("does not create the Procore image category while photo push is feature-flagged off", async () => {
@@ -58,5 +67,6 @@ describe("procore photo worker", () => {
 
     expect(result).toBe(false);
     expect(connectMock).not.toHaveBeenCalled();
+    expect(fetchMock).not.toHaveBeenCalled();
   });
 });
