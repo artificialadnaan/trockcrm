@@ -42,6 +42,12 @@ function createClient(responder: (sql: string, params: unknown[] | undefined) =>
   };
 }
 
+function expectDealQueriesUseActiveFilter(query: ReturnType<typeof vi.fn>) {
+  const sqlText = query.mock.calls.map((call) => String(call[0])).join("\n");
+  expect(sqlText).not.toContain("deleted_at");
+  expect(sqlText).toContain("is_active = true");
+}
+
 describe("SyncHub Procore project relay service", () => {
   beforeEach(() => {
     vi.clearAllMocks();
@@ -75,6 +81,7 @@ describe("SyncHub Procore project relay service", () => {
     expect(query.mock.calls.some((call) => String(call[1]?.[0]).includes("\"projectAlreadyExists\":true"))).toBe(true);
     expect(sqlText).toContain("INSERT INTO public.job_queue");
     expect(sqlText).not.toContain("rest/v1.0/companies");
+    expectDealQueriesUseActiveFilter(query);
   });
 
   it("treats duplicate relays for an already-linked Procore project as idempotent", async () => {
@@ -90,6 +97,7 @@ describe("SyncHub Procore project relay service", () => {
 
     expect(result).toEqual({ status: "already_linked", dealId: "deal-1", officeId: "office-1" });
     expect(query.mock.calls.map((call) => String(call[0])).join("\n")).not.toContain("INSERT INTO public.job_queue");
+    expectDealQueriesUseActiveFilter(query);
   });
 
   it("persists an orphan when no CRM deal matches the project number", async () => {
@@ -108,10 +116,11 @@ describe("SyncHub Procore project relay service", () => {
     const sqlText = query.mock.calls.map((call) => String(call[0])).join("\n");
     expect(sqlText).toContain("INSERT INTO public.synchub_webhook_orphans");
     expect(sqlText).not.toContain("UPDATE office_main.deals");
+    expectDealQueriesUseActiveFilter(query);
   });
 
   it("persists an ambiguous orphan when the project number matches multiple tenant deals", async () => {
-    const { client } = createClient((sql) => {
+    const { client, query } = createClient((sql) => {
       if (sql.includes("procore_project_id = $1") && sql.includes("UNION ALL")) return { rows: [] };
       if (sql.includes("FROM public.synchub_webhook_orphans")) return { rows: [] };
       if (sql.includes("FROM public.offices")) return { rows: [{ id: "office-1", slug: "main" }, { id: "office-2", slug: "atlanta" }] };
@@ -124,6 +133,7 @@ describe("SyncHub Procore project relay service", () => {
     const result = await processSyncHubProcoreProjectCreated(validPayload(), { client: client as any });
 
     expect(result).toEqual({ status: "ambiguous", orphanId: "orphan-2", reason: "multiple_matches" });
+    expectDealQueriesUseActiveFilter(query);
   });
 
   it("does not overwrite a matched deal linked to a different Procore project", async () => {
@@ -141,5 +151,6 @@ describe("SyncHub Procore project relay service", () => {
 
     expect(result).toEqual({ status: "ambiguous", orphanId: "orphan-3", reason: "matched_deal_has_different_procore_project" });
     expect(query.mock.calls.map((call) => String(call[0])).join("\n")).not.toContain("SET procore_project_id = $1");
+    expectDealQueriesUseActiveFilter(query);
   });
 });
