@@ -2340,6 +2340,96 @@ describe("Lead Conversion Service", () => {
     expect(result.deal.workflowRoute).toBe("service");
   });
 
+  it.each([
+    {
+      name: "Service project type with high pre-qual value",
+      projectType: "service",
+      preQualValue: "75000",
+      expectedRoute: "service" as const,
+      expectedStageId: "deal-stage-service-opportunity",
+    },
+    {
+      name: "Service project type with no pre-qual value",
+      projectType: "service",
+      preQualValue: null,
+      expectedRoute: "service" as const,
+      expectedStageId: "deal-stage-service-opportunity",
+    },
+    {
+      name: "non-Service project type with high pre-qual value",
+      projectType: "roofing",
+      preQualValue: "75000",
+      expectedRoute: "normal" as const,
+      expectedStageId: "deal-stage-1",
+    },
+    {
+      name: "non-Service project type with low pre-qual value",
+      projectType: "roofing",
+      preQualValue: "30000",
+      expectedRoute: "service" as const,
+      expectedStageId: "deal-stage-service-opportunity",
+    },
+  ])(
+    "routes $name to $expectedRoute workflow during conversion",
+    async ({ projectType, preQualValue, expectedRoute, expectedStageId }) => {
+      const tenantDb = createFakeTenantDb({
+        leads: [
+          {
+            id: "lead-1",
+            companyId: "company-1",
+            propertyId: "property-1",
+            primaryContactId: null,
+            name: "Palm Villas repaint",
+            stageId: "lead-stage-sales-validation",
+            assignedRepId: "rep-1",
+            status: "open",
+            pipelineType: "normal",
+            projectType,
+            preQualValue,
+            source: "Referral",
+            description: "Property manager requested pre-bid walk",
+            stageEnteredAt: new Date("2026-04-12T15:00:00.000Z"),
+            convertedAt: null,
+            isActive: true,
+            createdAt: new Date("2026-04-12T15:00:00.000Z"),
+            updatedAt: new Date("2026-04-12T15:00:00.000Z"),
+          } as any,
+        ],
+      });
+      const service = createLeadConversionService({
+        getStageById: pipelineMocks.getStageById as never,
+        getStageBySlug: pipelineMocks.getStageBySlug as never,
+        now: () => new Date("2026-04-15T15:00:00.000Z"),
+        createDeal: async (_tenantDb, input) => {
+          const deal = {
+            id: "deal-1",
+            dealNumber: "TR-2026-0001",
+            workflowRoute: input.workflowRoute ?? "normal",
+            primaryContactId: input.primaryContactId ?? null,
+            companyId: input.companyId ?? null,
+            propertyId: input.propertyId ?? null,
+            sourceLeadId: input.sourceLeadId ?? null,
+            source: input.source ?? null,
+            assignedRepId: input.assignedRepId,
+            stageId: input.stageId,
+            name: input.name,
+          };
+          tenantDb.state.deals.push(deal);
+          return deal as never;
+        },
+      });
+
+      const result = await service.convertLead(tenantDb as never, {
+        leadId: "lead-1",
+        userRole: "rep",
+        userId: "rep-1",
+      });
+
+      expect(result.deal.workflowRoute).toBe(expectedRoute);
+      expect(result.deal.stageId).toBe(expectedStageId);
+    }
+  );
+
   it("only promotes a lead into Opportunity from Sales Validation Stage", async () => {
     const tenantDb = createFakeTenantDb({
       leads: [
