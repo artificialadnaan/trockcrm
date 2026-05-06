@@ -34,6 +34,7 @@ import { initSsePush } from "./modules/notifications/sse-manager.js";
 import { procoreRoutes } from "./modules/procore/routes.js";
 import { procoreWebhookRoutes } from "./modules/procore/webhook-routes.js";
 import { syncHubRoutes } from "./modules/procore/synchub-routes.js";
+import { syncHubProcoreRelayRoutes } from "./modules/synchub/procore-project-relay-routes.js";
 import { bidBoardSyncRoutes } from "./modules/bid-board-sync/routes.js";
 import { registerProcoreEventHandlers } from "./modules/procore/event-handlers.js";
 import { migrationRouter } from "./modules/migration/routes.js";
@@ -93,6 +94,10 @@ export function createApp() {
   // MUST be mounted BEFORE express.json() so the raw body is available for
   // HMAC signature verification. The route uses express.raw() internally.
   app.use("/api/webhooks/procore", procoreWebhookRoutes);
+
+  // SyncHub enriched Procore relay route — public integration route signed by
+  // SyncHub. Mounted before express.json() so HMAC verification uses raw body.
+  app.use("/api/webhooks/synchub", syncHubProcoreRelayRoutes);
 
   // Bid Board ingestion route — public integration route signed by SyncHub.
   // Mounted before express.json() so HMAC verification uses the raw body.
