@@ -206,7 +206,14 @@ function createTenantDb(overrides?: Partial<FakeDeal>) {
 
           if (name === tableName(jobQueue)) {
             state.jobs.push(row);
-            return Promise.resolve([row]);
+            return {
+              returning() {
+                return Promise.resolve([row]);
+              },
+              then(onfulfilled: (value: unknown) => unknown) {
+                return Promise.resolve([row]).then(onfulfilled);
+              },
+            };
           }
 
           throw new Error(`Unexpected insert on ${name}`);
@@ -437,6 +444,7 @@ describe("changeDealStage", () => {
         (job) => (job.payload as { eventName?: string }).eventName === "deal.opportunity.entered"
       )
     ).toHaveLength(0);
+    expect(tenantDb.state.jobs.filter((job) => job.jobType === "rfp_request_delivery")).toHaveLength(0);
   });
 
   it("does not emit deal.opportunity.entered when the feature flag is disabled", async () => {

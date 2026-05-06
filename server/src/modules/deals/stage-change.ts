@@ -1,5 +1,4 @@
-import { randomUUID } from "node:crypto";
-import { eq, and, desc, sql, inArray } from "drizzle-orm";
+import { eq, and, inArray } from "drizzle-orm";
 import type { NodePgDatabase } from "drizzle-orm/node-postgres";
 import {
   deals,
@@ -13,7 +12,6 @@ import { AppError } from "../../middleware/error-handler.js";
 import { DOMAIN_EVENTS } from "../../events/types.js";
 import {
   isContractStageSelectionEnabled,
-  isOpportunityRfpEventEnabled,
 } from "../../config/feature-flags.js";
 import { validateStageGate } from "./stage-gate.js";
 import type { DealOpportunityEnteredEventPayload, UserRole } from "@trock-crm/shared/types";
@@ -26,38 +24,9 @@ import {
   isBidBoardOwnedDownstreamStage,
 } from "./service.js";
 import { inferDealBidBoardOwnership } from "./workflow-backfill.js";
-import { buildRfpRequestDeliveryPayload, resolveSyncHubRfpRequestUrl } from "./rfp-payload.js";
+import { enqueueOpportunityRfpIfNeeded } from "./rfp-enqueue.js";
 
 type TenantDb = NodePgDatabase<typeof schema>;
-
-async function loadRfpPayloadDeal(tenantDb: TenantDb, fallbackDeal: typeof deals.$inferSelect) {
-  const result = await tenantDb.execute(sql`
-    SELECT d.*,
-           c.name AS "companyName",
-           concat_ws(' ', pc.first_name, pc.last_name) AS "contactName",
-           pc.email AS "clientEmail",
-           pc.phone AS "clientPhone",
-           l.bid_due_date AS "sourceLeadBidDueDate"
-      FROM deals d
-      LEFT JOIN companies c ON c.id = d.company_id
-      LEFT JOIN contacts pc ON pc.id = d.primary_contact_id
-      LEFT JOIN leads l ON l.id = d.source_lead_id
-     WHERE d.id = ${fallbackDeal.id}
-     LIMIT 1
-  `);
-  const rows = Array.isArray(result) ? result : result.rows ?? [];
-  const row = rows[0] as Record<string, any> | undefined;
-  if (!row) return fallbackDeal;
-
-  return {
-    ...fallbackDeal,
-    companyName: row.companyName ?? null,
-    contactName: row.contactName ?? null,
-    clientEmail: row.clientEmail ?? null,
-    clientPhone: row.clientPhone ?? null,
-    bidDueDate: fallbackDeal.bidDueDate ?? row.sourceLeadBidDueDate ?? null,
-  };
-}
 
 function isEstimatingBoundaryStageSlug(stageSlug: string, workflowRoute: "normal" | "service") {
   return (
@@ -288,18 +257,20 @@ export async function changeDealStage(
     stageId: targetStageId,
     stageEnteredAt: new Date(),
   };
-  const shouldEmitOpportunityEntered =
-    isOpportunityRfpEventEnabled() &&
-    targetStage.slug === "opportunity" &&
-    currentStage.slug !== "opportunity" &&
-    currentDeal[0].rfpApprovalRequestedAt == null;
-  const opportunityEventId = shouldEmitOpportunityEntered ? randomUUID() : null;
+  const rfpResult =
+    targetStage.slug === "opportunity" && currentStage.slug !== "opportunity"
+      ? await enqueueOpportunityRfpIfNeeded({
+          tenantDb,
+          deal: currentDeal[0],
+          userId,
+          officeId: officeId ?? null,
+          transitioningFrom: currentStage.slug,
+          enteredAt: dealUpdates.stageEnteredAt,
+        })
+      : null;
 
-  if (shouldEmitOpportunityEntered) {
-    dealUpdates.rfpApprovalRequestedAt = dealUpdates.stageEnteredAt;
-    dealUpdates.rfpApprovalRequestEventId = opportunityEventId;
-    dealUpdates.rfpApprovalRequestedBy = userId;
-    dealUpdates.rfpApprovalStatus = "pending_outbox";
+  if (rfpResult?.enqueued && rfpResult.dealUpdates) {
+    Object.assign(dealUpdates, rfpResult.dealUpdates);
   }
   const shouldResetBidBoardOwnership =
     inferredOwnership.isBidBoardOwned &&
@@ -441,11 +412,10 @@ export async function changeDealStage(
     status: "pending",
   });
 
-  if (shouldEmitOpportunityEntered && opportunityEventId) {
-    const rfpPayloadDeal = await loadRfpPayloadDeal(tenantDb, updatedDeal);
+  if (rfpResult?.enqueued && rfpResult.eventId) {
     const opportunityPayload = {
       eventName: DOMAIN_EVENTS.DEAL_OPPORTUNITY_ENTERED,
-      eventId: opportunityEventId,
+      eventId: rfpResult.eventId,
       idempotencyKey: `deal:${dealId}:rfp_approval:lifetime`,
       dealId,
       dealNumber: updatedDeal.dealNumber,
@@ -469,19 +439,6 @@ export async function changeDealStage(
       payload: opportunityPayload,
       officeId: officeId ?? null,
       status: "pending",
-    });
-    await tenantDb.insert(jobQueue).values({
-      jobType: "rfp_request_delivery",
-      payload: buildRfpRequestDeliveryPayload({
-        deal: rfpPayloadDeal,
-        sourceEventId: `crm:deal-stage:opportunity:${opportunityEventId}`,
-        syncHubUrl: resolveSyncHubRfpRequestUrl(),
-      }),
-      officeId: officeId ?? null,
-      status: "pending",
-      runAfter: new Date(),
-      // max_attempts=8 gives roughly 2.7 hours of retries with the existing 3^n backoff.
-      maxAttempts: 8,
     });
   }
 
