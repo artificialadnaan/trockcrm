@@ -23,7 +23,8 @@ export type PhotoAuditEventType =
   | "deleted"
   | "restored"
   | "procore_synced"
-  | "procore_sync_failed";
+  | "procore_sync_failed"
+  | "procore_sync_retry_requested";
 
 export interface PhotoAuditEvent {
   id: string;
@@ -47,6 +48,7 @@ const AUDIT_EVENT_ICONS: Record<PhotoAuditEventType, React.ComponentType<{ class
   restored: RotateCcw,
   procore_synced: Cloud,
   procore_sync_failed: AlertCircle,
+  procore_sync_retry_requested: RotateCcw,
 };
 
 function auditEventLabel(eventType: PhotoAuditEventType) {
@@ -86,6 +88,7 @@ export function describePhotoAuditEvent(event: PhotoAuditEvent) {
   if (event.eventType === "deleted") return `${actor} deleted this photo`;
   if (event.eventType === "restored") return `${actor} restored this photo`;
   if (event.eventType === "procore_synced") return `${actor} synced this photo to Procore`;
+  if (event.eventType === "procore_sync_retry_requested") return `${actor} requested manual Procore sync retry`;
   return `${actor} hit a Procore sync failure`;
 }
 

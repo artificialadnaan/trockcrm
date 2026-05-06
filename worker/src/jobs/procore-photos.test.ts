@@ -13,7 +13,7 @@ vi.mock("../db.js", () => ({
 }));
 
 describe("procore photo worker", () => {
-  let fetchMock: ReturnType<typeof vi.spyOn>;
+  let fetchMock: any;
 
   beforeEach(() => {
     poolQueryMock.mockReset();

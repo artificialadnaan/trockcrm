@@ -154,7 +154,7 @@ describe("public photo token service", () => {
 
     expect(JSON.stringify(executeMock.mock.calls[0][0])).toContain("ppt.deal_id");
     expect(JSON.stringify(executeMock.mock.calls[0][0])).toContain("tenant-1");
-    expect(tokens.map((token) => token.status)).toEqual(["active", "expired", "revoked"]);
+    expect(tokens.map((token: { status: string }) => token.status)).toEqual(["active", "expired", "revoked"]);
     expect(tokens[0]).not.toHaveProperty("token");
     expect(tokens[0]).not.toHaveProperty("rawToken");
     expect(tokens[1].createdBy.name).toBe("Unknown");
