@@ -74,6 +74,7 @@ import {
 } from "./scoping-service.js";
 import { writeResolvedDealFields } from "./lineage-resolver.js";
 import { inferDealBidBoardOwnership } from "./workflow-backfill.js";
+import { resolveSyncHubRfpRequestUrl } from "./rfp-payload.js";
 
 const router = Router();
 
@@ -355,7 +356,10 @@ router.post("/:id/rfp-retry", async (req, res, next) => {
       throw new AppError(404, "No failed RFP delivery job found for this deal");
     }
 
-    const payload = { ...deadJob.payload };
+    const payload = {
+      ...deadJob.payload,
+      syncHubUrl: resolveSyncHubRfpRequestUrl(),
+    };
     delete payload.dealHandled;
     await req.tenantDb!.insert(jobQueue).values({
       jobType: "rfp_request_delivery",

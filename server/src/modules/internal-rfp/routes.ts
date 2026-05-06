@@ -63,6 +63,7 @@ async function findDeal(sourceDealId: string) {
               d.company_id,
               d.primary_contact_id,
               d.procore_bid_id,
+              d.rfp_approval_request_id,
               s.slug AS stage_slug
          FROM ${quoteIdent(schemaName)}.deals d
          LEFT JOIN public.pipeline_stage_config s ON s.id = d.stage_id
@@ -317,6 +318,15 @@ internalRfpRoutes.post(
       }
 
       const existingBidId = found.deal.procore_bid_id == null ? null : String(found.deal.procore_bid_id);
+      const currentRequestId = Number(found.deal.rfp_approval_request_id);
+      if (!Number.isFinite(currentRequestId) || payload.rfpApprovalRequestId !== currentRequestId) {
+        console.warn(
+          `[RFP callback] stale callback ignored for sourceDealId=${sourceDealId}; incoming rfpApprovalRequestId=${payload.rfpApprovalRequestId}; current rfpApprovalRequestId=${found.deal.rfp_approval_request_id ?? "null"}`
+        );
+        res.json({ success: true, idempotent: true, reason: "stale_callback_ignored" });
+        return;
+      }
+
       if (existingBidId && existingBidId !== bidboardProjectId) {
         console.warn(
           `[RFP callback] Deal ${sourceDealId} already had procore_bid_id=${existingBidId}; updating to ${bidboardProjectId}`

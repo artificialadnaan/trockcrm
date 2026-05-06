@@ -37,7 +37,7 @@ function body(overrides: Partial<any> = {}) {
   };
 }
 
-function mockDeal(existingBidId: string | null = null) {
+function mockDeal(existingBidId: string | null = null, rfpApprovalRequestId = 77) {
   queryMock.mockImplementation(async (sql: string) => {
     if (sql.includes("FROM pg_namespace")) return { rows: [{ nspname: "office_dallas" }] };
     if (sql.includes("FROM \"office_dallas\".deals") && sql.includes("LEFT JOIN")) {
@@ -48,6 +48,7 @@ function mockDeal(existingBidId: string | null = null) {
           company_id: null,
           primary_contact_id: null,
           procore_bid_id: existingBidId,
+          rfp_approval_request_id: rfpApprovalRequestId,
           stage_slug: "opportunity",
         }],
       };
@@ -113,6 +114,29 @@ describe("POST /api/internal/bid-board-created", () => {
     expect(res.status).toBe(200);
     expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining("already had procore_bid_id=999999"));
     expect(queryMock.mock.calls.at(-1)?.[1]?.[0]).toBe("123456");
+    warnSpy.mockRestore();
+  });
+
+  it("acknowledges and ignores a stale callback for an older approval request", async () => {
+    mockDeal("999999", 200);
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    const { raw, signature } = sign(body({ rfpApprovalRequestId: 100, bidboardProjectId: "123456" }));
+
+    const res = await request(app())
+      .post("/api/internal/bid-board-created")
+      .set("content-type", "application/json")
+      .set("x-rfp-request-signature", signature)
+      .send(raw);
+
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({
+      success: true,
+      idempotent: true,
+      reason: "stale_callback_ignored",
+    });
+    expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining("stale callback"));
+    const sqlText = queryMock.mock.calls.map((call) => String(call[0])).join("\n");
+    expect(sqlText).not.toContain("SET procore_bid_id");
     warnSpy.mockRestore();
   });
 
