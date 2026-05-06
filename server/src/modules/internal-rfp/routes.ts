@@ -1,5 +1,6 @@
 import crypto from "node:crypto";
 import express, { Router } from "express";
+import { WORKFLOW_ROUTES } from "@trock-crm/shared/types";
 import { pool } from "../../db.js";
 
 export const internalRfpRoutes = Router();
@@ -110,6 +111,24 @@ function asDateOrNull(value: unknown) {
   return Number.isFinite(parsed.getTime()) ? parsed.toISOString() : null;
 }
 
+function isWorkflowRoute(value: string | null): value is (typeof WORKFLOW_ROUTES)[number] {
+  return value != null && (WORKFLOW_ROUTES as readonly string[]).includes(value);
+}
+
+function isDealNumberUniqueViolation(error: unknown): boolean {
+  const pgError = error as { code?: string; constraint?: string; detail?: string };
+  if (pgError?.code !== "23505") return false;
+  const constraint = String(pgError.constraint ?? "").toLowerCase();
+  const detail = String(pgError.detail ?? "").toLowerCase();
+  return constraint.includes("deal_number") || detail.includes("(deal_number)=");
+}
+
+function rejectField(applied: string[], rejected: string[], field: string) {
+  const index = applied.indexOf(field);
+  if (index >= 0) applied.splice(index, 1);
+  if (!rejected.includes(field)) rejected.push(field);
+}
+
 function splitName(value: unknown) {
   const text = asStringOrNull(value);
   if (!text) return { firstName: "", lastName: "" };
@@ -156,6 +175,19 @@ internalRfpRoutes.post(
 
       for (const [field, value] of flattened.entries()) {
         if (EDITABLE_DEAL_FIELDS.has(field)) {
+          if (field === "workflowRoute") {
+            const workflowRoute = asStringOrNull(value);
+            if (!isWorkflowRoute(workflowRoute)) {
+              rejected.push(field);
+              console.warn(
+                `[RFP edits] Rejected invalid workflowRoute '${workflowRoute ?? ""}' for deal ${sourceDealId} request ${payload.rfpApprovalRequestId ?? "unknown"}`
+              );
+              continue;
+            }
+            applied.push(field);
+            dealUpdates.workflow_route = workflowRoute;
+            continue;
+          }
           applied.push(field);
           if (field === "name") dealUpdates.name = asStringOrNull(value);
           if (field === "projectNumber") dealUpdates.deal_number = asStringOrNull(value);
@@ -164,7 +196,6 @@ internalRfpRoutes.post(
           if (field === "estimator") dealUpdates.estimator = asStringOrNull(value);
           if (field === "description") dealUpdates.description = asStringOrNull(value);
           if (field === "dueDate") dealUpdates.bid_due_date = asDateOrNull(value);
-          if (field === "workflowRoute") dealUpdates.workflow_route = asStringOrNull(value);
           if (field === "address.street") dealUpdates.property_address = asStringOrNull(value);
           if (field === "address.city") dealUpdates.property_city = asStringOrNull(value);
           if (field === "address.state") dealUpdates.property_state = asStringOrNull(value);
@@ -181,14 +212,33 @@ internalRfpRoutes.post(
       }
 
       if (Object.keys(dealUpdates).length > 0) {
-        const assignments = Object.keys(dealUpdates).map((column, index) => `${quoteIdent(column)} = $${index + 1}`);
-        await pool.query(
-          `UPDATE ${quoteIdent(found.schemaName)}.deals
-              SET ${assignments.join(", ")},
-                  updated_at = NOW()
-            WHERE id = $${assignments.length + 1}`,
-          [...Object.values(dealUpdates), sourceDealId]
-        );
+        const runDealUpdate = async () => {
+          const assignments = Object.keys(dealUpdates).map((column, index) => `${quoteIdent(column)} = $${index + 1}`);
+          await pool.query(
+            `UPDATE ${quoteIdent(found.schemaName)}.deals
+                SET ${assignments.join(", ")},
+                    updated_at = NOW()
+              WHERE id = $${assignments.length + 1}`,
+            [...Object.values(dealUpdates), sourceDealId]
+          );
+        };
+
+        try {
+          await runDealUpdate();
+        } catch (err) {
+          if (!isDealNumberUniqueViolation(err) || !Object.prototype.hasOwnProperty.call(dealUpdates, "deal_number")) {
+            throw err;
+          }
+
+          console.warn(
+            `[RFP edits] Rejected projectNumber deal_number collision '${dealUpdates.deal_number ?? ""}' for deal ${sourceDealId} request ${payload.rfpApprovalRequestId ?? "unknown"}`
+          );
+          delete dealUpdates.deal_number;
+          rejectField(applied, rejected, "projectNumber");
+          if (Object.keys(dealUpdates).length > 0) {
+            await runDealUpdate();
+          }
+        }
       }
 
       if (flattened.has("companyName") && found.deal.company_id) {

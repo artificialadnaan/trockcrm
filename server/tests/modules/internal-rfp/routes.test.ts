@@ -119,6 +119,145 @@ describe("internal RFP routes", () => {
     expect(sqlText).toContain("\"bid_due_date\"");
   });
 
+  it("rejects invalid workflowRoute values without updating the deal", async () => {
+    mockTenantDeal("opportunity");
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    const body = {
+      rfpApprovalRequestId: 11,
+      sourceDealId: "deal-1",
+      editedFields: {
+        workflowRoute: "frobnicate",
+      },
+    };
+    const { raw, signature } = sign(body);
+
+    const res = await request(app())
+      .post("/api/internal/rfp-edits")
+      .set("content-type", "application/json")
+      .set("x-rfp-request-signature", signature)
+      .send(raw);
+
+    expect(res.status).toBe(200);
+    expect(res.body.applied).not.toContain("workflowRoute");
+    expect(res.body.rejected).toContain("workflowRoute");
+    const sqlText = queryMock.mock.calls.map((call) => String(call[0])).join("\n");
+    expect(sqlText).not.toContain("workflow_route");
+    expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining("frobnicate"));
+    warnSpy.mockRestore();
+  });
+
+  it("applies valid workflowRoute values", async () => {
+    mockTenantDeal("opportunity");
+    const body = {
+      rfpApprovalRequestId: 11,
+      sourceDealId: "deal-1",
+      editedFields: {
+        workflowRoute: "service",
+      },
+    };
+    const { raw, signature } = sign(body);
+
+    const res = await request(app())
+      .post("/api/internal/rfp-edits")
+      .set("content-type", "application/json")
+      .set("x-rfp-request-signature", signature)
+      .send(raw);
+
+    expect(res.status).toBe(200);
+    expect(res.body.applied).toContain("workflowRoute");
+    expect(res.body.rejected).not.toContain("workflowRoute");
+    const updateCall = queryMock.mock.calls.find((call) => String(call[0]).includes("UPDATE \"office_dallas\".deals"));
+    expect(String(updateCall?.[0])).toContain("\"workflow_route\"");
+    expect(updateCall?.[1]).toContain("service");
+  });
+
+  it("rejects projectNumber when deal_number unique constraint collides", async () => {
+    mockTenantDeal("opportunity");
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    queryMock.mockImplementation(async (sql: string) => {
+      if (sql.includes("FROM pg_namespace")) return { rows: [{ nspname: "office_dallas" }] };
+      if (sql.includes("FROM \"office_dallas\".deals") && !sql.includes("UPDATE")) {
+        return {
+          rows: [{
+            id: "deal-1",
+            stage_id: "stage-1",
+            company_id: "company-1",
+            primary_contact_id: "contact-1",
+            stage_slug: "opportunity",
+          }],
+        };
+      }
+      if (sql.includes("UPDATE \"office_dallas\".deals")) {
+        const error = new Error("duplicate key value violates unique constraint") as any;
+        error.code = "23505";
+        error.constraint = "deals_deal_number_unique";
+        error.detail = "Key (deal_number)=(100) already exists.";
+        throw error;
+      }
+      return { rows: [] };
+    });
+    const body = {
+      rfpApprovalRequestId: 11,
+      sourceDealId: "deal-1",
+      editedFields: {
+        projectNumber: "100",
+      },
+    };
+    const { raw, signature } = sign(body);
+
+    const res = await request(app())
+      .post("/api/internal/rfp-edits")
+      .set("content-type", "application/json")
+      .set("x-rfp-request-signature", signature)
+      .send(raw);
+
+    expect(res.status).toBe(200);
+    expect(res.body.applied).not.toContain("projectNumber");
+    expect(res.body.rejected).toContain("projectNumber");
+    expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining("deal_number collision"));
+    warnSpy.mockRestore();
+  });
+
+  it("propagates non-deal_number Postgres errors from deal updates", async () => {
+    mockTenantDeal("opportunity");
+    queryMock.mockImplementation(async (sql: string) => {
+      if (sql.includes("FROM pg_namespace")) return { rows: [{ nspname: "office_dallas" }] };
+      if (sql.includes("FROM \"office_dallas\".deals") && !sql.includes("UPDATE")) {
+        return {
+          rows: [{
+            id: "deal-1",
+            stage_id: "stage-1",
+            company_id: "company-1",
+            primary_contact_id: "contact-1",
+            stage_slug: "opportunity",
+          }],
+        };
+      }
+      if (sql.includes("UPDATE \"office_dallas\".deals")) {
+        const error = new Error("database unavailable") as any;
+        error.code = "57P01";
+        throw error;
+      }
+      return { rows: [] };
+    });
+    const body = {
+      rfpApprovalRequestId: 11,
+      sourceDealId: "deal-1",
+      editedFields: {
+        name: "Updated Deal",
+      },
+    };
+    const { raw, signature } = sign(body);
+
+    const res = await request(app())
+      .post("/api/internal/rfp-edits")
+      .set("content-type", "application/json")
+      .set("x-rfp-request-signature", signature)
+      .send(raw);
+
+    expect(res.status).toBe(500);
+  });
+
   it("rejects edit requests with a bad HMAC", async () => {
     const res = await request(app())
       .post("/api/internal/rfp-edits")
