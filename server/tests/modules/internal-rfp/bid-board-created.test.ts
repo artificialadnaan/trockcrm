@@ -37,7 +37,11 @@ function body(overrides: Partial<any> = {}) {
   };
 }
 
-function mockDeal(existingBidId: string | null = null, rfpApprovalRequestId = 77) {
+function mockDeal(
+  existingBidId: string | null = null,
+  rfpApprovalRequestId = 77,
+  workflowRoute: "normal" | "service" = "normal"
+) {
   queryMock.mockImplementation(async (sql: string) => {
     if (sql.includes("FROM pg_namespace")) return { rows: [{ nspname: "office_dallas" }] };
     if (sql.includes("FROM \"office_dallas\".deals") && sql.includes("LEFT JOIN")) {
@@ -49,9 +53,14 @@ function mockDeal(existingBidId: string | null = null, rfpApprovalRequestId = 77
           primary_contact_id: null,
           procore_bid_id: existingBidId,
           rfp_approval_request_id: rfpApprovalRequestId,
+          workflow_route: workflowRoute,
           stage_slug: "opportunity",
         }],
       };
+    }
+    if (sql.includes("FROM public.pipeline_stage_config") && sql.includes("slug = $1")) {
+      const slug = queryMock.mock.calls.at(-1)?.[1]?.[0];
+      return { rows: [{ id: `${slug}-stage` }] };
     }
     return { rows: [] };
   });
@@ -78,7 +87,49 @@ describe("POST /api/internal/bid-board-created", () => {
     const sqlText = queryMock.mock.calls.map((call) => String(call[0])).join("\n");
     expect(sqlText).toContain("procore_bid_id = $1::bigint");
     expect(sqlText).toContain("is_bid_board_owned = true");
-    expect(queryMock.mock.calls.at(-1)?.[1]).toEqual(["123456", "598134325683880", "deal-1"]);
+    expect(queryMock.mock.calls.at(-1)?.[1]).toContain("123456");
+    expect(queryMock.mock.calls.at(-1)?.[1]).toContain("598134325683880");
+    expect(queryMock.mock.calls.at(-1)?.[1]).toContain("deal-1");
+  });
+
+  it("moves normal-route deals to estimate_in_progress when linked", async () => {
+    mockDeal(null, 77, "normal");
+    const { raw, signature } = sign(body());
+
+    const res = await request(app())
+      .post("/api/internal/bid-board-created")
+      .set("content-type", "application/json")
+      .set("x-rfp-request-signature", signature)
+      .send(raw);
+
+    expect(res.status).toBe(200);
+    const stageLookup = queryMock.mock.calls.find((call) => String(call[0]).includes("slug = $1"));
+    expect(stageLookup?.[1]).toEqual(["estimate_in_progress"]);
+    const updateSql = String(queryMock.mock.calls.at(-1)?.[0]);
+    const updateValues = queryMock.mock.calls.at(-1)?.[1];
+    expect(updateSql).toContain("stage_id");
+    expect(updateSql).toContain("stage_entered_at");
+    expect(updateValues).toContain("estimate_in_progress-stage");
+  });
+
+  it("moves service-route deals to service_estimating when linked", async () => {
+    mockDeal(null, 77, "service");
+    const { raw, signature } = sign(body());
+
+    const res = await request(app())
+      .post("/api/internal/bid-board-created")
+      .set("content-type", "application/json")
+      .set("x-rfp-request-signature", signature)
+      .send(raw);
+
+    expect(res.status).toBe(200);
+    const stageLookup = queryMock.mock.calls.find((call) => String(call[0]).includes("slug = $1"));
+    expect(stageLookup?.[1]).toEqual(["service_estimating"]);
+    const updateSql = String(queryMock.mock.calls.at(-1)?.[0]);
+    const updateValues = queryMock.mock.calls.at(-1)?.[1];
+    expect(updateSql).toContain("stage_id");
+    expect(updateSql).toContain("stage_entered_at");
+    expect(updateValues).toContain("service_estimating-stage");
   });
 
   it("treats an identical replay as a 200 idempotent success", async () => {
