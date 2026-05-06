@@ -47,6 +47,7 @@ const PHOTO_AUDIT_EVENTS: Array<{ value: PhotoAuditEventType; label: string; ico
   { value: "restored", label: "Restored", icon: RotateCcw },
   { value: "procore_synced", label: "Procore synced", icon: Cloud },
   { value: "procore_sync_failed", label: "Procore sync failed", icon: AlertCircle },
+  { value: "procore_sync_retry_requested", label: "Procore retry requested", icon: RotateCcw },
 ];
 
 const PROCORE_SYNC_STATUS_OPTIONS = [

@@ -85,6 +85,17 @@ describe("PhotoViewerModal history", () => {
           metadata: { oldCategory: "Damage", newCategory: "Safety" },
         },
         {
+          id: "audit-3",
+          eventType: "procore_sync_retry_requested",
+          userId: "user-3",
+          userName: "Taylor Admin",
+          userAvatarUrl: null,
+          createdAt: "2026-05-04T21:00:00.000Z",
+          ipAddress: "127.0.0.2",
+          userAgent: "vitest-retry",
+          metadata: { previousStatus: "failed", jobId: 77 },
+        },
+        {
           id: "audit-1",
           eventType: "uploaded",
           userId: "user-1",
@@ -105,7 +116,12 @@ describe("PhotoViewerModal history", () => {
 
     await vi.waitFor(() => expect(apiMock).toHaveBeenCalledWith("/files/photo-1/audit-log"));
     await vi.waitFor(() => expect(document.body.textContent).toContain("Adnaan Iqbal changed category from Damage to Safety"));
+    expect(document.body.textContent).toContain("Taylor Admin requested manual Procore sync retry");
     expect(document.body.textContent).toContain("Kaleb Martin uploaded this photo");
+
+    document.body.querySelector<HTMLButtonElement>('[aria-label="Toggle details for procore sync retry requested"]')?.click();
+    await vi.waitFor(() => expect(document.body.textContent).toContain("previousStatus"));
+    expect(document.body.textContent).toContain("jobId");
 
     document.body.querySelector<HTMLButtonElement>('[aria-label="Toggle details for category changed"]')?.click();
     await vi.waitFor(() => expect(document.body.textContent).toContain("oldCategory"));

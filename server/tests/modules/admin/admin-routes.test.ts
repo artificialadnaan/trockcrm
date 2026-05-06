@@ -5,7 +5,12 @@ import { AppError } from "../../../src/middleware/error-handler.js";
 
 const mocks = vi.hoisted(() => ({
   userRole: "admin",
+  authDisabled: false,
   authMiddleware: vi.fn((req: any, _res: any, next: any) => {
+    if (mocks.authDisabled) {
+      next();
+      return;
+    }
     req.user = {
       id: "user-1",
       email: "admin@trock.dev",
@@ -50,6 +55,8 @@ const mocks = vi.hoisted(() => ({
   revokeUserInvite: vi.fn().mockResolvedValue(undefined),
   sendUserInvite: vi.fn().mockResolvedValue({ success: true }),
   tenantClient: { query: vi.fn() },
+  getAdminPhotoAuditEvents: vi.fn(),
+  logPhotoEvent: vi.fn().mockResolvedValue(undefined),
   commitTransaction: vi.fn().mockResolvedValue(undefined),
   getUserLocalAuthEvents: vi.fn().mockResolvedValue([
     {
@@ -112,6 +119,38 @@ vi.mock("../../../src/modules/auth/local-auth-service.js", () => ({
   previewUserInvite: mocks.previewUserInvite,
   revokeUserInvite: mocks.revokeUserInvite,
   sendUserInvite: mocks.sendUserInvite,
+}));
+
+
+vi.mock("../../../src/modules/files/audit-log-service.js", () => ({
+  getAdminPhotoAuditEvents: mocks.getAdminPhotoAuditEvents,
+  logPhotoEvent: mocks.logPhotoEvent,
+  parseCsvQueryParam: (value: unknown) => {
+    const values = Array.isArray(value) ? value : value === undefined ? [] : [value];
+    return values
+      .flatMap((entry) => String(entry).split(","))
+      .map((entry) => entry.trim())
+      .filter(Boolean);
+  },
+  parsePhotoAuditEventTypes: (value: unknown) => {
+    const allowed = new Set([
+      "uploaded",
+      "category_changed",
+      "address_changed",
+      "caption_changed",
+      "downloaded",
+      "deleted",
+      "restored",
+      "procore_synced",
+      "procore_sync_failed",
+      "procore_sync_retry_requested",
+    ]);
+    const values = Array.isArray(value) ? value : value === undefined ? [] : [value];
+    return values
+      .flatMap((entry) => String(entry).split(","))
+      .map((entry) => entry.trim())
+      .filter((entry) => allowed.has(entry));
+  },
 }));
 
 vi.mock("../../../src/modules/leads/due-diligence-service.js", () => ({
@@ -183,6 +222,11 @@ describe("admin data scrub routes", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     mocks.userRole = "admin";
+    mocks.authDisabled = false;
+    mocks.tenantClient.query.mockReset();
+    mocks.commitTransaction.mockResolvedValue(undefined);
+    mocks.getAdminPhotoAuditEvents.mockResolvedValue({ events: [], total: 0, page: 1, perPage: 50 });
+    mocks.logPhotoEvent.mockResolvedValue(undefined);
     mocks.listLeadDueDiligenceApprovals.mockResolvedValue([pendingApproval]);
     mocks.decideLeadDueDiligenceApproval.mockResolvedValue({
       id: "approval-1",
@@ -480,4 +524,148 @@ describe("admin data scrub routes", () => {
       []
     );
   });
+
+  it("passes comma-separated Procore sync status filters to the photo audit service with other filters", async () => {
+    mocks.getAdminPhotoAuditEvents.mockResolvedValueOnce({
+      events: [
+        {
+          id: "audit-1",
+          eventType: "procore_sync_failed",
+          userId: "user-1",
+          userName: "Admin User",
+          userAvatarUrl: null,
+          createdAt: "2026-05-01T00:00:00.000Z",
+          ipAddress: null,
+          userAgent: null,
+          metadata: {},
+          photo: { id: "photo-1" },
+          deal: { id: "deal-1" },
+        },
+      ],
+      total: 1,
+      page: 2,
+      perPage: 25,
+    });
+    const app = createAdminApp();
+
+    const response = await request(app).get(
+      "/api/admin/photo-audit?procoreSyncStatus=failed,pending&userId=user-1&eventType=uploaded,not-real&from=2026-05-01&to=2026-05-02&dealId=deal-1&photoId=photo-1&page=2&perPage=25"
+    );
+
+    expect(response.status).toBe(200);
+    expect(response.body.total).toBe(1);
+    expect(mocks.getAdminPhotoAuditEvents).toHaveBeenCalledWith(expect.anything(), {
+      userIds: ["user-1"],
+      eventTypes: ["uploaded"],
+      from: "2026-05-01",
+      to: "2026-05-02",
+      dealId: "deal-1",
+      photoId: "photo-1",
+      procoreSyncStatuses: ["failed", "pending"],
+      page: 2,
+      perPage: 25,
+    });
+  });
+
+  it("leaves photo audit Procore status filters empty when omitted and passes invalid values through", async () => {
+    const app = createAdminApp();
+
+    const unfiltered = await request(app).get("/api/admin/photo-audit");
+    const invalid = await request(app).get("/api/admin/photo-audit?procoreSyncStatus=bogus,synced");
+
+    expect(unfiltered.status).toBe(200);
+    expect(invalid.status).toBe(200);
+    expect(mocks.getAdminPhotoAuditEvents).toHaveBeenNthCalledWith(1, expect.anything(), expect.objectContaining({ procoreSyncStatuses: [] }));
+    expect(mocks.getAdminPhotoAuditEvents).toHaveBeenNthCalledWith(2, expect.anything(), expect.objectContaining({ procoreSyncStatuses: ["bogus", "synced"] }));
+  });
+
+  it("requires CRM auth for manual Procore photo retry", async () => {
+    mocks.authDisabled = true;
+    const app = createAdminApp();
+
+    const response = await request(app).post("/api/admin/photos/00000000-0000-4000-8000-000000000001/procore-retry");
+
+    expect(response.status).toBe(401);
+    expect(mocks.tenantClient.query).not.toHaveBeenCalled();
+  });
+
+  it("blocks field contractors from manual Procore photo retry", async () => {
+    mocks.userRole = "field_contractor";
+    const app = createAdminApp();
+
+    const response = await request(app).post("/api/admin/photos/00000000-0000-4000-8000-000000000001/procore-retry");
+
+    expect(response.status).toBe(403);
+    expect(response.body.error.message).toContain("CRM access required");
+    expect(mocks.tenantClient.query).not.toHaveBeenCalled();
+  });
+
+  it("returns 404 when manual Procore retry cannot find the photo in the scoped tenant", async () => {
+    mocks.tenantClient.query.mockResolvedValueOnce({ rows: [] });
+    const app = createAdminApp();
+
+    const response = await request(app).post("/api/admin/photos/00000000-0000-4000-8000-000000000001/procore-retry");
+
+    expect(response.status).toBe(404);
+    expect(response.body.error.message).toContain("Photo not found");
+    expect(mocks.logPhotoEvent).not.toHaveBeenCalled();
+  });
+
+  it("returns 400 when manual Procore retry targets a deal without a Procore project", async () => {
+    mocks.tenantClient.query.mockResolvedValueOnce({ rows: [{ id: "photo-1", deal_id: "deal-1", procore_sync_status: "failed", procore_project_id: null }] });
+    const app = createAdminApp();
+
+    const response = await request(app).post("/api/admin/photos/00000000-0000-4000-8000-000000000001/procore-retry");
+
+    expect(response.status).toBe(400);
+    expect(response.body.error.message).toContain("Deal is not linked");
+    expect(mocks.logPhotoEvent).not.toHaveBeenCalled();
+  });
+
+  it.each(["failed", "pending", "synced"])("forces manual Procore retry for a %s photo and writes an audit event", async (previousStatus) => {
+    const photoId = "00000000-0000-4000-8000-000000000001";
+    mocks.tenantClient.query
+      .mockResolvedValueOnce({ rows: [{ id: photoId, deal_id: "deal-1", procore_sync_status: previousStatus, procore_project_id: 12345 }] })
+      .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({ rows: [{ id: 77 }] });
+    const app = createAdminApp();
+
+    const response = await request(app)
+      .post(`/api/admin/photos/${photoId}/procore-retry`)
+      .set("User-Agent", "vitest-agent");
+
+    expect(response.status).toBe(200);
+    expect(response.body).toEqual({ queued: true, photoId, status: "pending" });
+    expect(mocks.tenantClient.query).toHaveBeenNthCalledWith(2, expect.stringContaining("procore_sync_status = 'pending'"), [photoId]);
+    expect(mocks.tenantClient.query).toHaveBeenNthCalledWith(
+      3,
+      expect.stringContaining("procore_photo_sync"),
+      [expect.stringContaining(`"photoId":"${photoId}"`), "office-1"]
+    );
+    expect(mocks.logPhotoEvent).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({
+      photoId,
+      eventType: "procore_sync_retry_requested",
+      userId: "user-1",
+      userAgent: "vitest-agent",
+      metadata: { previousStatus, jobId: 77 },
+    }));
+    expect(mocks.commitTransaction).toHaveBeenCalled();
+  });
+
+  it("does not fail manual Procore retry when audit logging fails", async () => {
+    const photoId = "00000000-0000-4000-8000-000000000001";
+    mocks.tenantClient.query
+      .mockResolvedValueOnce({ rows: [{ id: photoId, deal_id: "deal-1", procore_sync_status: "failed", procore_project_id: 12345 }] })
+      .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({ rows: [{ id: 88 }] });
+    mocks.logPhotoEvent.mockRejectedValueOnce(new Error("audit down"));
+    const app = createAdminApp();
+
+    const response = await request(app).post(`/api/admin/photos/${photoId}/procore-retry`);
+
+    expect(response.status).toBe(200);
+    expect(response.body).toEqual({ queued: true, photoId, status: "pending" });
+    expect(mocks.commitTransaction).toHaveBeenCalled();
+  });
+
 });

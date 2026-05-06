@@ -115,6 +115,11 @@ describe("PhotoAuditPage", () => {
     Array.from(document.body.querySelectorAll<HTMLButtonElement>("button")).find((button) => button.textContent?.includes("Kaleb Martin"))?.click();
     await vi.waitFor(() => expect(apiMock).toHaveBeenCalledWith(expect.stringContaining("userId=user-1")));
 
+    node.querySelector<HTMLButtonElement>('[aria-label="Event type filter"]')?.click();
+    await vi.waitFor(() => expect(document.body.textContent).toContain("Procore retry requested"));
+    Array.from(document.body.querySelectorAll<HTMLButtonElement>("button")).find((button) => button.textContent?.includes("Procore retry requested"))?.click();
+    await vi.waitFor(() => expect(apiMock).toHaveBeenCalledWith(expect.stringContaining("eventType=uploaded%2Cprocore_sync_retry_requested")));
+
     node.querySelector<HTMLButtonElement>('[aria-label="Procore sync status filter"]')?.click();
     await vi.waitFor(() => expect(document.body.textContent).toContain("Failed"));
     Array.from(document.body.querySelectorAll<HTMLButtonElement>("button")).find((button) => button.textContent?.includes("Failed"))?.click();
