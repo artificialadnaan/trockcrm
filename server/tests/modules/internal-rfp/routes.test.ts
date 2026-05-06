@@ -25,7 +25,7 @@ function sign(body: object, secret = "secret") {
   };
 }
 
-function mockTenantDeal(stage = "opportunity") {
+function mockTenantDeal(stage = "opportunity", rfpApprovalRequestId = 11) {
   queryMock.mockImplementation(async (sql: string) => {
     if (sql.includes("FROM pg_namespace")) return { rows: [{ nspname: "office_dallas" }] };
     if (sql.includes("FROM \"office_dallas\".deals")) {
@@ -35,6 +35,7 @@ function mockTenantDeal(stage = "opportunity") {
           stage_id: "stage-1",
           company_id: "company-1",
           primary_contact_id: "contact-1",
+          rfp_approval_request_id: rfpApprovalRequestId,
           stage_slug: stage,
         }],
       };
@@ -119,6 +120,40 @@ describe("internal RFP routes", () => {
     expect(sqlText).toContain("\"bid_due_date\"");
   });
 
+  it("ignores stale RFP edits when the request id no longer matches the deal", async () => {
+    mockTenantDeal("opportunity", 300);
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    const body = {
+      rfpApprovalRequestId: 200,
+      sourceDealId: "deal-1",
+      editedFields: {
+        name: "Stale Deal Name",
+      },
+    };
+    const { raw, signature } = sign(body);
+
+    const res = await request(app())
+      .post("/api/internal/rfp-edits")
+      .set("content-type", "application/json")
+      .set("x-rfp-request-signature", signature)
+      .send(raw);
+
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({
+      success: true,
+      idempotent: true,
+      applied: [],
+      rejected: [],
+      reason: "stale_callback_ignored",
+    });
+    const sqlText = queryMock.mock.calls.map((call) => String(call[0])).join("\n");
+    expect(sqlText).not.toContain("UPDATE \"office_dallas\".deals");
+    expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining("stale callback ignored"));
+    expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining("incoming rfpApprovalRequestId=200"));
+    expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining("current rfpApprovalRequestId=300"));
+    warnSpy.mockRestore();
+  });
+
   it("rejects invalid workflowRoute values without updating the deal", async () => {
     mockTenantDeal("opportunity");
     const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => undefined);
@@ -183,6 +218,7 @@ describe("internal RFP routes", () => {
             stage_id: "stage-1",
             company_id: "company-1",
             primary_contact_id: "contact-1",
+            rfp_approval_request_id: 11,
             stage_slug: "opportunity",
           }],
         };
@@ -229,6 +265,7 @@ describe("internal RFP routes", () => {
             stage_id: "stage-1",
             company_id: "company-1",
             primary_contact_id: "contact-1",
+            rfp_approval_request_id: 11,
             stage_slug: "opportunity",
           }],
         };

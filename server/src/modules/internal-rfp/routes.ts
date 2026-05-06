@@ -157,7 +157,12 @@ internalRfpRoutes.post(
       }
 
       const sourceDealId = asStringOrNull(payload.sourceDealId);
-      if (!sourceDealId || !payload.editedFields || typeof payload.editedFields !== "object") {
+      if (
+        !sourceDealId ||
+        typeof payload.rfpApprovalRequestId !== "number" ||
+        !payload.editedFields ||
+        typeof payload.editedFields !== "object"
+      ) {
         res.status(422).json({ success: false, error: "invalid_payload" });
         return;
       }
@@ -165,6 +170,21 @@ internalRfpRoutes.post(
       const found = await findDeal(sourceDealId);
       if (!found) {
         res.status(404).json({ success: false, error: "deal_not_found" });
+        return;
+      }
+
+      const currentRequestId = Number(found.deal.rfp_approval_request_id);
+      if (!Number.isFinite(currentRequestId) || payload.rfpApprovalRequestId !== currentRequestId) {
+        console.warn(
+          `[RFP edits] stale callback ignored for sourceDealId=${sourceDealId}; incoming rfpApprovalRequestId=${payload.rfpApprovalRequestId}; current rfpApprovalRequestId=${found.deal.rfp_approval_request_id ?? "null"}`
+        );
+        res.json({
+          success: true,
+          idempotent: true,
+          applied: [],
+          rejected: [],
+          reason: "stale_callback_ignored",
+        });
         return;
       }
 

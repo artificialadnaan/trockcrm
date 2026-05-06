@@ -174,19 +174,27 @@ export async function runRfpRequestDeadLetterSweep(
   let handled = 0;
 
   try {
-    await client.query("BEGIN");
     const result = await client.query(
-      `SELECT id, payload, office_id, last_error
-         FROM public.job_queue
-        WHERE status = 'dead'
-          AND job_type = 'rfp_request_delivery'
-          AND payload->>'dealHandled' IS NULL
-        ORDER BY created_at ASC
-        LIMIT $1
-        FOR UPDATE SKIP LOCKED`,
+      `WITH claimed AS (
+         SELECT id
+           FROM public.job_queue
+          WHERE status = 'dead'
+            AND job_type = 'rfp_request_delivery'
+            AND (payload->>'dealHandled' IS NULL OR payload->>'dealHandled' = 'false')
+          ORDER BY id ASC
+          LIMIT $1
+          FOR UPDATE SKIP LOCKED
+       )
+       UPDATE public.job_queue
+          SET payload = jsonb_set(payload, '{dealHandled}', '"claimed"'::jsonb, true)
+         FROM claimed
+        WHERE public.job_queue.id = claimed.id
+        RETURNING public.job_queue.id,
+                  public.job_queue.payload,
+                  public.job_queue.office_id,
+                  public.job_queue.last_error`,
       [limit]
     );
-    await client.query("COMMIT");
 
     for (const job of result.rows) {
       try {
@@ -224,7 +232,6 @@ export async function runRfpRequestDeadLetterSweep(
 
     return handled;
   } catch (err) {
-    await client.query("ROLLBACK").catch(() => {});
     throw err;
   } finally {
     if ("release" in client && typeof client.release === "function") {
