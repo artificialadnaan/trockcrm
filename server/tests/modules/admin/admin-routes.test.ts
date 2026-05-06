@@ -32,7 +32,8 @@ const mocks = vi.hoisted(() => ({
   }),
   tenantMiddleware: vi.fn((req: any, _res: any, next: any) => {
     req.tenantDb = {};
-    req.commitTransaction = vi.fn().mockResolvedValue(undefined);
+    req.tenantClient = mocks.tenantClient;
+    req.commitTransaction = mocks.commitTransaction;
     next();
   }),
   decideLeadDueDiligenceApproval: vi.fn(),
@@ -48,6 +49,8 @@ const mocks = vi.hoisted(() => ({
   }),
   revokeUserInvite: vi.fn().mockResolvedValue(undefined),
   sendUserInvite: vi.fn().mockResolvedValue({ success: true }),
+  tenantClient: { query: vi.fn() },
+  commitTransaction: vi.fn().mockResolvedValue(undefined),
   getUserLocalAuthEvents: vi.fn().mockResolvedValue([
     {
       id: "event-1",
