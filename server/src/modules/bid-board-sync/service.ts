@@ -20,6 +20,7 @@ export interface BidBoardSyncPayload {
 
 export interface NormalizedBidBoardRow {
   name: string;
+  bidBoardProjectId: string | null;
   bidBoardEstimator: string | null;
   bidBoardOffice: string | null;
   bidBoardStatus: string | null;
@@ -60,6 +61,11 @@ function numericText(value: unknown): string | null {
   if (!cleaned) return null;
   const parsed = Number(cleaned);
   return Number.isFinite(parsed) ? String(parsed) : null;
+}
+
+function integerIdText(value: unknown): string | null {
+  const text = textValue(value);
+  return text && /^\d+$/.test(text) ? text : null;
 }
 
 function parseExcelSerialDate(value: number): Date {
@@ -121,6 +127,13 @@ export function normalizeBidBoardRow(row: RawBidBoardRow): NormalizedBidBoardRow
 
   return {
     name,
+    bidBoardProjectId:
+      integerIdText(row["BidBoard Project ID"]) ??
+      integerIdText(row["Bid Board Project ID"]) ??
+      integerIdText(row["Project ID"]) ??
+      integerIdText(row["Procore Project ID"]) ??
+      integerIdText(row.bidboardProjectId) ??
+      integerIdText(row.bidBoardProjectId),
     bidBoardEstimator: textValue(row.Estimator),
     bidBoardOffice: textValue(row.Office),
     bidBoardStatus: textValue(row.Status),
@@ -168,6 +181,8 @@ export function buildBidBoardDealUpdateSql(schemaName: string): string {
            bid_board_customer_name = $12,
            bid_board_customer_contact_raw = $13,
            bid_board_project_number = $14,
+           -- Bid Board exports do not include a per-row updated-at, so this stores the sync cycle timestamp.
+           bid_board_last_updated_at = $15::timestamptz,
            updated_at = NOW()
      WHERE id = $1
        AND (
@@ -183,12 +198,13 @@ export function buildBidBoardDealUpdateSql(schemaName: string): string {
             bid_board_due_date IS DISTINCT FROM $11 OR
             bid_board_customer_name IS DISTINCT FROM $12 OR
             bid_board_customer_contact_raw IS DISTINCT FROM $13 OR
-            bid_board_project_number IS DISTINCT FROM $14
+            bid_board_project_number IS DISTINCT FROM $14 OR
+            bid_board_last_updated_at IS DISTINCT FROM $15::timestamptz
        )
   `;
 }
 
-function updateParams(dealId: string, row: NormalizedBidBoardRow) {
+export function updateParams(dealId: string, row: NormalizedBidBoardRow, bidBoardLastUpdatedAt: string) {
   return [
     dealId,
     row.name,
@@ -204,10 +220,19 @@ function updateParams(dealId: string, row: NormalizedBidBoardRow) {
     row.bidBoardCustomerName,
     row.bidBoardCustomerContactRaw,
     row.bidBoardProjectNumber,
+    bidBoardLastUpdatedAt,
   ];
 }
 
-async function findDealIds(client: { query: Function }, schemaName: string, row: NormalizedBidBoardRow) {
+export async function findDealIds(client: { query: Function }, schemaName: string, row: NormalizedBidBoardRow) {
+  if (row.bidBoardProjectId) {
+    const byBidBoardId = await client.query(
+      `SELECT id FROM ${schemaName}.deals WHERE procore_bid_id = $1::bigint`,
+      [row.bidBoardProjectId]
+    );
+    if (byBidBoardId.rows.length > 0) return byBidBoardId.rows.map((r: { id: string }) => r.id);
+  }
+
   if (row.bidBoardProjectNumber) {
     const byProject = await client.query(
       `SELECT id FROM ${schemaName}.deals WHERE bid_board_project_number = $1`,
@@ -238,6 +263,7 @@ export async function ingestBidBoardRows(payload: BidBoardSyncPayload) {
     textValue(payload.provenance?.sourceFilename) ?? textValue(payload.provenance?.source_filename);
   const extractedAt =
     textValue(payload.provenance?.extractedAt) ?? textValue(payload.provenance?.extracted_at);
+  const bidBoardLastUpdatedAt = extractedAt ?? new Date().toISOString();
   const payloadHash = hashRows(rows);
   const warnings: string[] = [];
   const errors: string[] = [];
@@ -321,7 +347,7 @@ export async function ingestBidBoardRows(payload: BidBoardSyncPayload) {
         continue;
       }
 
-      const updateResult = await client.query(updateSql, updateParams(matches[0], normalized));
+      const updateResult = await client.query(updateSql, updateParams(matches[0], normalized, bidBoardLastUpdatedAt));
       if ((updateResult.rowCount ?? 0) > 0) metrics.updated++;
     }
 

@@ -26,8 +26,38 @@ import {
   isBidBoardOwnedDownstreamStage,
 } from "./service.js";
 import { inferDealBidBoardOwnership } from "./workflow-backfill.js";
+import { buildRfpRequestDeliveryPayload, resolveSyncHubRfpRequestUrl } from "./rfp-payload.js";
 
 type TenantDb = NodePgDatabase<typeof schema>;
+
+async function loadRfpPayloadDeal(tenantDb: TenantDb, fallbackDeal: typeof deals.$inferSelect) {
+  const result = await tenantDb.execute(sql`
+    SELECT d.*,
+           c.name AS "companyName",
+           concat_ws(' ', pc.first_name, pc.last_name) AS "contactName",
+           pc.email AS "clientEmail",
+           pc.phone AS "clientPhone",
+           l.bid_due_date AS "sourceLeadBidDueDate"
+      FROM deals d
+      LEFT JOIN companies c ON c.id = d.company_id
+      LEFT JOIN contacts pc ON pc.id = d.primary_contact_id
+      LEFT JOIN leads l ON l.id = d.source_lead_id
+     WHERE d.id = ${fallbackDeal.id}
+     LIMIT 1
+  `);
+  const rows = Array.isArray(result) ? result : result.rows ?? [];
+  const row = rows[0] as Record<string, any> | undefined;
+  if (!row) return fallbackDeal;
+
+  return {
+    ...fallbackDeal,
+    companyName: row.companyName ?? null,
+    contactName: row.contactName ?? null,
+    clientEmail: row.clientEmail ?? null,
+    clientPhone: row.clientPhone ?? null,
+    bidDueDate: fallbackDeal.bidDueDate ?? row.sourceLeadBidDueDate ?? null,
+  };
+}
 
 function isEstimatingBoundaryStageSlug(stageSlug: string, workflowRoute: "normal" | "service") {
   return (
@@ -269,6 +299,7 @@ export async function changeDealStage(
     dealUpdates.rfpApprovalRequestedAt = dealUpdates.stageEnteredAt;
     dealUpdates.rfpApprovalRequestEventId = opportunityEventId;
     dealUpdates.rfpApprovalRequestedBy = userId;
+    dealUpdates.rfpApprovalStatus = "pending_outbox";
   }
   const shouldResetBidBoardOwnership =
     inferredOwnership.isBidBoardOwned &&
@@ -411,6 +442,7 @@ export async function changeDealStage(
   });
 
   if (shouldEmitOpportunityEntered && opportunityEventId) {
+    const rfpPayloadDeal = await loadRfpPayloadDeal(tenantDb, updatedDeal);
     const opportunityPayload = {
       eventName: DOMAIN_EVENTS.DEAL_OPPORTUNITY_ENTERED,
       eventId: opportunityEventId,
@@ -437,6 +469,19 @@ export async function changeDealStage(
       payload: opportunityPayload,
       officeId: officeId ?? null,
       status: "pending",
+    });
+    await tenantDb.insert(jobQueue).values({
+      jobType: "rfp_request_delivery",
+      payload: buildRfpRequestDeliveryPayload({
+        deal: rfpPayloadDeal,
+        sourceEventId: `crm:deal-stage:opportunity:${opportunityEventId}`,
+        syncHubUrl: resolveSyncHubRfpRequestUrl(),
+      }),
+      officeId: officeId ?? null,
+      status: "pending",
+      runAfter: new Date(),
+      // max_attempts=8 gives roughly 2.7 hours of retries with the existing 3^n backoff.
+      maxAttempts: 8,
     });
   }
 

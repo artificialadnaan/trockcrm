@@ -35,6 +35,7 @@ import { procoreRoutes } from "./modules/procore/routes.js";
 import { procoreWebhookRoutes } from "./modules/procore/webhook-routes.js";
 import { syncHubRoutes } from "./modules/procore/synchub-routes.js";
 import { bidBoardSyncRoutes } from "./modules/bid-board-sync/routes.js";
+import { internalRfpRoutes } from "./modules/internal-rfp/routes.js";
 import { registerProcoreEventHandlers } from "./modules/procore/event-handlers.js";
 import { migrationRouter } from "./modules/migration/routes.js";
 import { searchRoutes } from "./modules/search/routes.js";
@@ -97,6 +98,10 @@ export function createApp() {
   // Bid Board ingestion route — public integration route signed by SyncHub.
   // Mounted before express.json() so HMAC verification uses the raw body.
   app.use("/api/bid-board-sync", bidBoardSyncRoutes);
+
+  // Internal SyncHub RFP callbacks — signed integration routes. Mounted before
+  // express.json() so HMAC verification uses the original raw body bytes.
+  app.use("/api/internal", internalRfpRoutes);
 
   app.use(cookieParser());
 

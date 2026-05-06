@@ -115,10 +115,12 @@ export interface Deal {
   awardedAmount: string | null;
   changeOrderTotal: string | null;
   description: string | null;
+  estimator?: string | null;
   propertyAddress: string | null;
   propertyCity: string | null;
   propertyState: string | null;
   propertyZip: string | null;
+  propertyCountry?: string | null;
   officeCode?: string | null;
   projectType?: string | null;
   projectTypeId: string | null;
@@ -147,10 +149,15 @@ export interface Deal {
   forecastUpdatedAt: string | null;
   forecastUpdatedBy: string | null;
   procoreProjectId: number | null;
+  procoreCompanyId?: string | null;
   procoreBidId: number | null;
   procoreLastSyncedAt: string | null;
   isBidBoardOwned: boolean;
   bidBoardStageSlug: string | null;
+  bidBoardStatus?: string | null;
+  bidBoardTotalSales?: string | null;
+  bidBoardLastUpdatedAt?: string | null;
+  bidBoardAssignedPm?: string | null;
   readOnlySyncedAt: string | null;
   lostReasonId: string | null;
   lostNotes: string | null;
@@ -159,6 +166,20 @@ export interface Deal {
   expectedCloseDate: string | null;
   actualCloseDate: string | null;
   contractSignedDate: string | null;
+  rfpApprovalRequestId?: number | null;
+  rfpApprovalToken?: string | null;
+  rfpApprovalStatus?:
+    | "pending_outbox"
+    | "pending"
+    | "approved"
+    | "declined"
+    | "conflict"
+    | "cancelled_source_ineligible"
+    | "send_failed"
+    | null;
+  rfpConflictReason?: string | null;
+  rfpConflictWith?: Record<string, unknown> | null;
+  rfpLastAttemptError?: string | null;
   lastActivityAt: string | null;
   stageEnteredAt: string;
   isActive: boolean;

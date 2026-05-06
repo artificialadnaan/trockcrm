@@ -21,8 +21,10 @@ import { runAiDisconnectAdminTaskGeneration } from "./jobs/ai-disconnect-admin-t
 import { runAiInterventionManagerAlerts } from "./jobs/ai-intervention-manager-alerts.js";
 import { runCallRecordingCleanup } from "./jobs/call-recording-cleanup.js";
 import { runCallRecordingTranscription } from "./jobs/call-recording-transcribe.js";
+import { runRfpRequestDeadLetterSweep } from "./jobs/rfp-request-delivery.js";
 
 const POLL_INTERVAL_MS = 2000; // Poll job queue every 2 seconds
+const RFP_DEAD_LETTER_SWEEP_INTERVAL_MS = 60000;
 const CALL_RECORDING_TRANSCRIPTION_INTERVAL_MS = parseInt(
   process.env.CALL_RECORDING_TRANSCRIPTION_INTERVAL_MS || "60000",
   10
@@ -49,6 +51,18 @@ async function main() {
   // Start job queue polling
   setInterval(pollJobs, POLL_INTERVAL_MS);
   console.log(`[Worker] Polling job queue every ${POLL_INTERVAL_MS}ms`);
+
+  setInterval(async () => {
+    try {
+      const handled = await runRfpRequestDeadLetterSweep();
+      if (handled > 0) {
+        console.log(`[Worker:rfp_request_delivery] Marked ${handled} dead delivery job(s) as send_failed`);
+      }
+    } catch (err) {
+      console.error("[Worker:rfp_request_delivery] Dead-letter sweep failed:", err);
+    }
+  }, RFP_DEAD_LETTER_SWEEP_INTERVAL_MS);
+  console.log(`[Worker] RFP request dead-letter sweep every ${RFP_DEAD_LETTER_SWEEP_INTERVAL_MS}ms`);
 
   setInterval(async () => {
     try {

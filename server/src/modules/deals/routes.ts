@@ -334,6 +334,53 @@ router.get("/:id/detail", async (req, res, next) => {
   }
 });
 
+// POST /api/deals/:id/rfp-retry — enqueue a fresh RFP delivery job from the latest dead row.
+router.post("/:id/rfp-retry", async (req, res, next) => {
+  try {
+    const deal = await getDealById(req.tenantDb!, req.params.id, req.user!.role, req.user!.id);
+    if (!deal) throw new AppError(404, "Deal not found");
+
+    const deadJobResult = await req.tenantDb!.execute(sql`
+      SELECT id, payload
+        FROM public.job_queue
+       WHERE job_type = 'rfp_request_delivery'
+         AND status = 'dead'
+         AND payload->>'dealId' = ${deal.id}
+       ORDER BY created_at DESC
+       LIMIT 1
+    `);
+    const rows = Array.isArray(deadJobResult) ? deadJobResult : deadJobResult.rows ?? [];
+    const deadJob = rows[0] as { id: number; payload: Record<string, unknown> } | undefined;
+    if (!deadJob) {
+      throw new AppError(404, "No failed RFP delivery job found for this deal");
+    }
+
+    const payload = { ...deadJob.payload };
+    delete payload.dealHandled;
+    await req.tenantDb!.insert(jobQueue).values({
+      jobType: "rfp_request_delivery",
+      payload,
+      officeId: req.user!.activeOfficeId ?? req.user!.officeId,
+      status: "pending",
+      attempts: 0,
+      runAfter: new Date(),
+      maxAttempts: 8,
+    });
+    await req.tenantDb!
+      .update(deals)
+      .set({
+        rfpApprovalStatus: "pending_outbox",
+        rfpLastAttemptError: null,
+      })
+      .where(eq(deals.id, deal.id));
+
+    await req.commitTransaction!();
+    res.status(202).json({ success: true, status: "pending_outbox" });
+  } catch (err) {
+    next(err);
+  }
+});
+
 // GET /api/deals/:id/scoping-intake — load or initialize scoping intake
 router.get("/:id/scoping-intake", async (req, res, next) => {
   try {
