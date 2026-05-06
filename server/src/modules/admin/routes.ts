@@ -31,6 +31,7 @@ import {
   getAdminPhotoAuditEvents,
   parseCsvQueryParam,
   parsePhotoAuditEventTypes,
+  logPhotoEvent,
 } from "../files/audit-log-service.js";
 import { fieldUserAdminRouter } from "../field-users/routes.js";
 import { getAdminDataScrubOverview } from "./admin-reporting-service.js";
@@ -876,7 +877,7 @@ router.post(
       }
 
       const photoResult = await req.tenantClient!.query(
-        `SELECT f.id, f.deal_id, d.procore_project_id, d.procore_photo_link_id, d.procore_photo_link_status
+        `SELECT f.id, f.deal_id, f.procore_sync_status, d.procore_project_id, d.procore_photo_link_id, d.procore_photo_link_status
          FROM files f
          JOIN deals d ON d.id = f.deal_id
          WHERE f.id = $1
@@ -897,9 +898,10 @@ router.post(
          WHERE id = $1`,
         [photoId]
       );
-      await req.tenantClient!.query(
+      const jobResult = await req.tenantClient!.query(
         `INSERT INTO public.job_queue (job_type, payload, office_id, status, run_after, max_attempts)
-         VALUES ('procore_photo_sync', $1::jsonb, $2::uuid, 'pending', NOW(), 3)`,
+         VALUES ('procore_photo_sync', $1::jsonb, $2::uuid, 'pending', NOW(), 3)
+         RETURNING id`,
         [
           JSON.stringify({
             action: "single",
@@ -911,9 +913,26 @@ router.post(
           req.user!.activeOfficeId,
         ]
       );
+      const jobId = rowsFrom<{ id: number | string }>(jobResult)[0]?.id ?? null;
+
+      try {
+        await logPhotoEvent(req.tenantDb!, {
+          photoId,
+          eventType: "procore_sync_retry_requested",
+          userId: req.user!.id,
+          ipAddress: req.ip,
+          userAgent: req.get("user-agent") ?? null,
+          metadata: {
+            previousStatus: photo.procore_sync_status ?? null,
+            jobId,
+          },
+        });
+      } catch (auditError) {
+        console.error("[admin] Failed to write Procore retry audit event", auditError);
+      }
 
       await req.commitTransaction!();
-      return res.json({ queued: true });
+      return res.json({ queued: true, photoId, status: "pending" });
     } catch (err) {
       return next(err);
     }

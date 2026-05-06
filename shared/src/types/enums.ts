@@ -226,6 +226,7 @@ export const PHOTO_AUDIT_EVENT_TYPES = [
   "restored",
   "procore_synced",
   "procore_sync_failed",
+  "procore_sync_retry_requested",
 ] as const;
 export type PhotoAuditEventType = (typeof PHOTO_AUDIT_EVENT_TYPES)[number];
 
