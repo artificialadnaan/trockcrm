@@ -64,6 +64,7 @@ import {
   DEAL_TEAM_ROLES,
   PUNCH_LIST_TYPES,
   WORKFLOW_TIMER_TYPES,
+  type RfpRequestDeliveryPayload,
 } from "@trock-crm/shared/types";
 import {
   evaluateDealScopingReadiness,
@@ -351,12 +352,12 @@ router.post("/:id/rfp-retry", async (req, res, next) => {
        LIMIT 1
     `);
     const rows = Array.isArray(deadJobResult) ? deadJobResult : deadJobResult.rows ?? [];
-    const deadJob = rows[0] as { id: number; payload: Record<string, unknown> } | undefined;
+    const deadJob = rows[0] as { id: number; payload: RfpRequestDeliveryPayload } | undefined;
     if (!deadJob) {
       throw new AppError(404, "No failed RFP delivery job found for this deal");
     }
 
-    const payload = {
+    const payload: RfpRequestDeliveryPayload = {
       ...deadJob.payload,
       syncHubUrl: resolveSyncHubRfpRequestUrl(),
     };
