@@ -52,9 +52,24 @@ type FakeDeal = {
   lostCompetitor: string | null;
   lostAt: Date | null;
   awardedAmount: string | null;
+  bidEstimate: string | null;
+  ddEstimate: string | null;
+  forecastRevenue: string | null;
+  estimator: string | null;
+  bidBoardEstimator: string | null;
+  projectType: string | null;
+  propertyAddress: string | null;
+  propertyCity: string | null;
+  propertyState: string | null;
+  propertyZip: string | null;
+  propertyCountry: string | null;
+  description: string | null;
+  bidDueDate: Date | null;
+  bidBoardDueDate: Date | null;
   rfpApprovalRequestedAt: Date | null;
   rfpApprovalRequestEventId: string | null;
   rfpApprovalRequestedBy: string | null;
+  rfpApprovalStatus: string | null;
 };
 
 type FakeTenantDb = ReturnType<typeof createTenantDb>;
@@ -80,9 +95,24 @@ function createTenantDb(overrides?: Partial<FakeDeal>) {
         lostCompetitor: null,
         lostAt: null,
         awardedAmount: null,
+        bidEstimate: "125000",
+        ddEstimate: null,
+        forecastRevenue: null,
+        estimator: "Estimator One",
+        bidBoardEstimator: null,
+        projectType: "reroof",
+        propertyAddress: "100 Main",
+        propertyCity: "Dallas",
+        propertyState: "TX",
+        propertyZip: "75201",
+        propertyCountry: "US",
+        description: "Roof scope",
+        bidDueDate: new Date("2026-06-01T00:00:00.000Z"),
+        bidBoardDueDate: null,
         rfpApprovalRequestedAt: null,
         rfpApprovalRequestEventId: null,
         rfpApprovalRequestedBy: null,
+        rfpApprovalStatus: null,
         ...overrides,
       },
     ] as FakeDeal[],
@@ -193,7 +223,7 @@ describe("changeDealStage", () => {
   beforeEach(() => {
     vi.resetAllMocks();
     delete process.env.ENABLE_OPPORTUNITY_RFP_EVENT;
-    delete process.env.ENABLE_CONTRACT_STAGE_SELECTION;
+    process.env.ENABLE_CONTRACT_STAGE_SELECTION = "false";
     vi.mocked(scopingService.activateDealScopingIntake).mockResolvedValue({
       readiness: { status: "ready" },
     } as never);
@@ -309,6 +339,7 @@ describe("changeDealStage", () => {
       /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
     );
     expect(result.deal.rfpApprovalRequestedBy).toBe("user-1");
+    expect(result.deal.rfpApprovalStatus).toBe("pending_outbox");
 
     const opportunityJobs = tenantDb.state.jobs.filter(
       (job) => (job.payload as { eventName?: string }).eventName === "deal.opportunity.entered"
@@ -329,6 +360,36 @@ describe("changeDealStage", () => {
       source: "crm_stage_change",
     });
     expect(opportunityJobs[0]?.officeId).toBe("office-1");
+
+    const rfpJobs = tenantDb.state.jobs.filter((job) => job.jobType === "rfp_request_delivery");
+    expect(rfpJobs).toHaveLength(1);
+    expect(rfpJobs[0]).toMatchObject({
+      jobType: "rfp_request_delivery",
+      officeId: "office-1",
+      status: "pending",
+      maxAttempts: 8,
+    });
+    expect(rfpJobs[0]?.payload).toMatchObject({
+      dealId: "deal-1",
+      syncHubUrl: "http://localhost:5000/api/rfp-requests",
+      body: {
+        sourceSystem: "trock_crm",
+        sourceDealId: "deal-1",
+        deal: {
+          name: "Palm Villas",
+          projectNumber: "TR-2026-0001",
+          amount: 125000,
+          estimator: "Estimator One",
+          address: {
+            street: "100 Main",
+            city: "Dallas",
+            state: "TX",
+            zip: "75201",
+            country: "US",
+          },
+        },
+      },
+    });
     vi.useRealTimers();
   });
 

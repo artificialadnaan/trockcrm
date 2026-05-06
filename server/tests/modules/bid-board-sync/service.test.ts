@@ -1,9 +1,11 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 const {
   buildBidBoardDealUpdateSql,
+  findDealIds,
   normalizeBidBoardRow,
   parseBidBoardDueDate,
+  updateParams,
 } = await import("../../../src/modules/bid-board-sync/service.js");
 
 describe("Bid Board sync service", () => {
@@ -21,9 +23,10 @@ describe("Bid Board sync service", () => {
     expect(parsed.warning).toBeNull();
   });
 
-  it("normalizes the 13 Bid Board fields without touching CRM-managed fields", () => {
+  it("normalizes the Bid Board fields without touching CRM-managed fields", () => {
     const normalized = normalizeBidBoardRow({
       Name: "Palm Villas",
+      "Project ID": "123456",
       Estimator: "Brett Bell",
       Office: "T-Rock Construction LLC",
       Status: "Estimate in Progress",
@@ -43,6 +46,7 @@ describe("Bid Board sync service", () => {
 
     expect(normalized).toMatchObject({
       name: "Palm Villas",
+      bidBoardProjectId: "123456",
       bidBoardEstimator: "Brett Bell",
       bidBoardOffice: "T-Rock Construction LLC",
       bidBoardStatus: "Estimate in Progress",
@@ -61,7 +65,7 @@ describe("Bid Board sync service", () => {
     expect(Object.keys(normalized)).not.toContain("stage_id");
   });
 
-  it("builds guarded update SQL that only touches the 13 Bid Board fields", () => {
+  it("builds guarded update SQL that only touches the mirrored Bid Board fields", () => {
     const query = buildBidBoardDealUpdateSql("office_dallas");
     const lower = query.toLowerCase();
 
@@ -72,5 +76,62 @@ describe("Bid Board sync service", () => {
     expect(lower).not.toContain("stage_id =");
     expect(lower).not.toContain("assigned_rep_id");
     expect(lower).not.toContain("awarded_amount");
+  });
+
+  it("sets Bid Board last-updated from the ingestion cycle timestamp", () => {
+    const query = buildBidBoardDealUpdateSql("office_dallas");
+    const lower = query.toLowerCase();
+
+    expect(lower).toContain("bid_board_last_updated_at = $15::timestamptz");
+    expect(lower).toContain("bid_board_last_updated_at is distinct from $15::timestamptz");
+  });
+
+  it("matches by stored Procore Bid Board id before project number", async () => {
+    const query = vi.fn().mockResolvedValueOnce({ rows: [{ id: "deal-123" }] });
+    const normalized = normalizeBidBoardRow({
+      Name: "Palm Villas",
+      "Project ID": "987654",
+      "Project #": "DFW-4-11826-ab",
+      Status: "Estimate in Progress",
+    });
+
+    const ids = await findDealIds({ query }, "office_dallas", normalized);
+
+    expect(ids).toEqual(["deal-123"]);
+    expect(query).toHaveBeenCalledTimes(1);
+    expect(query.mock.calls[0][0]).toContain("procore_bid_id = $1::bigint");
+    expect(query.mock.calls[0][1]).toEqual(["987654"]);
+  });
+
+  it("falls back to project number when the Bid Board id is not numeric", async () => {
+    const query = vi.fn().mockResolvedValueOnce({ rows: [{ id: "deal-by-project-number" }] });
+    const normalized = normalizeBidBoardRow({
+      Name: "Palm Villas",
+      "Project ID": "not-a-number",
+      "Project #": "DFW-4-11826-ab",
+      Status: "Estimate in Progress",
+    });
+
+    const ids = await findDealIds({ query }, "office_dallas", normalized);
+
+    expect(ids).toEqual(["deal-by-project-number"]);
+    expect(query).toHaveBeenCalledTimes(1);
+    expect(query.mock.calls[0][0]).toContain("bid_board_project_number = $1");
+    expect(query.mock.calls[0][1]).toEqual(["DFW-4-11826-ab"]);
+  });
+
+  it("passes the latest ingestion cycle timestamp into the deal update", async () => {
+    const query = vi.fn().mockResolvedValueOnce({ rows: [{ id: "deal-123" }] });
+    const normalized = normalizeBidBoardRow({
+      Name: "Palm Villas",
+      "Project ID": "987654",
+      Status: "Estimate in Progress",
+    });
+    const params = updateParams("deal-123", normalized, "2026-05-06T16:30:00.000Z");
+
+    expect(params.at(-1)).toBe("2026-05-06T16:30:00.000Z");
+    await findDealIds({ query }, "office_dallas", normalized);
+    const newerParams = updateParams("deal-123", normalized, "2026-05-06T16:45:00.000Z");
+    expect(newerParams.at(-1)).toBe("2026-05-06T16:45:00.000Z");
   });
 });

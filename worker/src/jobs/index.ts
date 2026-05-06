@@ -22,6 +22,7 @@ import { runAiDisconnectAdminTaskGeneration } from "./ai-disconnect-admin-tasks.
 import { runEstimateDocumentOcr } from "./estimate-document-ocr.js";
 import { runEstimateGeneration } from "./estimate-generation.js";
 import { runAiInterventionManagerAlerts } from "./ai-intervention-manager-alerts.js";
+import { handleRfpRequestDelivery } from "./rfp-request-delivery.js";
 
 const SERVER_MODULE_ROOT =
   process.env.NODE_ENV === "production" ? "../../../server/dist/modules" : "../../../server/src/modules";
@@ -108,6 +109,9 @@ function countTaskRuleCreations(outcomes: Array<{ action: string }>) {
 export function registerAllJobs() {
   registerJobHandler("test_echo", handleTestEcho);
   registerJobHandler("domain_event", handleDomainEvent);
+  registerJobHandler("rfp_request_delivery", async (payload, officeId) => {
+    await handleRfpRequestDelivery(payload, officeId);
+  });
 
   // Stale deal scanner (triggered via job_queue or cron)
   registerJobHandler("stale_deal_scan", async () => {

@@ -169,6 +169,7 @@ function makeDealDetail(overrides: Record<string, unknown> = {}) {
     source: "referral",
     winProbability: 50,
     procoreProjectId: null,
+    procoreCompanyId: null,
     procoreBidId: null,
     procoreLastSyncedAt: null,
     lostReasonId: null,
@@ -191,6 +192,10 @@ function makeDealDetail(overrides: Record<string, unknown> = {}) {
     estimatingSubstage: "building_estimate",
     isBidBoardOwned: true,
     bidBoardStageSlug: "estimate_in_progress",
+    bidBoardStatus: "Estimate in Progress",
+    bidBoardTotalSales: "9876.54",
+    bidBoardLastUpdatedAt: "2026-04-21T10:00:00.000Z",
+    bidBoardAssignedPm: null,
     readOnlySyncedAt: "2026-04-21T10:00:00.000Z",
     bidBoardOwnership: {
       isOwned: true,
@@ -268,6 +273,81 @@ describe("DealDetailPage", () => {
     expect(html).toContain("Bid Board managed");
   });
 
+  it("renders the Bid Board summary panel only for BidBoard-owned deals", () => {
+    const ownedHtml = renderPage();
+
+    expect(ownedHtml).toContain("Bid Board summary");
+    expect(ownedHtml).toContain("Estimate in Progress");
+
+    mocks.useDealDetailMock.mockReturnValueOnce({
+      loading: false,
+      error: null,
+      refetch: vi.fn(),
+      deal: makeDealDetail({
+        isBidBoardOwned: false,
+        bidBoardOwnership: null,
+      }),
+    });
+    const crmOwnedHtml = renderPage();
+
+    expect(crmOwnedHtml).not.toContain("Bid Board summary");
+  });
+
+  it("does not render the Bid Board summary panel for HubSpot-sourced deals", () => {
+    mocks.useDealDetailMock.mockReturnValueOnce({
+      loading: false,
+      error: null,
+      refetch: vi.fn(),
+      deal: makeDealDetail({
+        hubspotDealId: "hubspot-123",
+        isBidBoardOwned: true,
+      }),
+    });
+
+    const html = renderPage();
+
+    expect(html).not.toContain("Bid Board summary");
+  });
+
+  it("formats Bid Board estimate and falls back when assigned PM is missing", () => {
+    const html = renderPage();
+
+    expect(html).toContain("$9,877");
+    expect(html).toContain("Not yet assigned");
+  });
+
+  it("renders an Open in Bid Board link only when both Procore ids exist", () => {
+    mocks.useDealDetailMock.mockReturnValueOnce({
+      loading: false,
+      error: null,
+      refetch: vi.fn(),
+      deal: makeDealDetail({
+        procoreCompanyId: "598134325683880",
+        procoreBidId: 123456,
+      }),
+    });
+
+    const linkedHtml = renderPage();
+
+    expect(linkedHtml).toContain("Open in Bid Board");
+    expect(linkedHtml).toContain(
+      "https://us02.procore.com/webclients/host/companies/598134325683880/tools/bid-board/project/123456/details"
+    );
+
+    mocks.useDealDetailMock.mockReturnValueOnce({
+      loading: false,
+      error: null,
+      refetch: vi.fn(),
+      deal: makeDealDetail({
+        procoreCompanyId: null,
+        procoreBidId: 123456,
+      }),
+    });
+    const missingCompanyHtml = renderPage();
+
+    expect(missingCompanyHtml).not.toContain("Open in Bid Board");
+  });
+
   it("explains which fields remain editable in CRM versus mirrored from Bid Board", () => {
     const html = renderPage();
 
@@ -277,6 +357,26 @@ describe("DealDetailPage", () => {
     expect(html).toContain("Mirrored from Bid Board");
     expect(html).toContain("stage progression");
     expect(html).toContain("proposal status");
+  });
+
+  it("renders an unknown RFP status with a safe fallback label", () => {
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    mocks.useDealDetailMock.mockReturnValueOnce({
+      loading: false,
+      error: null,
+      refetch: vi.fn(),
+      deal: makeDealDetail({
+        rfpApprovalStatus: "frobnicate",
+      }),
+    });
+
+    const html = renderPage();
+
+    expect(html).toContain("Unknown RFP status");
+    expect(warnSpy).toHaveBeenCalledWith(
+      expect.stringContaining("Unknown RFP status"),
+      expect.objectContaining({ rfpApprovalStatus: "frobnicate", dealId: "deal-1" })
+    );
   });
 
   it("keeps estimating manually reachable for owned deals that are still before the boundary", () => {

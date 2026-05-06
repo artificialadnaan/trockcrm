@@ -8,6 +8,7 @@ import {
   Info,
   MoreHorizontal,
   Lock,
+  ExternalLink,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -72,6 +73,41 @@ function bidBoardSyncTimeAgo(date: string | null | undefined) {
   return days === 1 ? "1 day ago" : `${days} days ago`;
 }
 
+function titleCase(value: string) {
+  const minorWords = new Set(["and", "or", "in", "of", "to", "from", "by"]);
+  return value
+    .replace(/[_-]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim()
+    .split(" ")
+    .map((word, index) => {
+      const lower = word.toLowerCase();
+      if (index > 0 && minorWords.has(lower)) return lower;
+      return lower.charAt(0).toUpperCase() + lower.slice(1);
+    })
+    .join(" ");
+}
+
+function bidBoardStageLabel(deal: DealDetail) {
+  return titleCase(deal.bidBoardStageSlug || deal.bidBoardStatus || "Unknown stage");
+}
+
+function formatBidBoardEstimate(value: string | number | null | undefined) {
+  if (value == null || value === "") return "Not available";
+  const amount = typeof value === "number" ? value : Number(String(value).replace(/[$,\s]/g, ""));
+  if (!Number.isFinite(amount)) return "Not available";
+  return new Intl.NumberFormat("en-US", {
+    style: "currency",
+    currency: "USD",
+    maximumFractionDigits: 0,
+  }).format(amount);
+}
+
+export function buildBidBoardProjectUrl(deal: Pick<DealDetail, "procoreCompanyId" | "procoreBidId">) {
+  if (!deal.procoreCompanyId || !deal.procoreBidId) return null;
+  return `https://us02.procore.com/webclients/host/companies/${deal.procoreCompanyId}/tools/bid-board/project/${deal.procoreBidId}/details`;
+}
+
 type Tab = "overview" | "lead" | "scoping" | "files" | "photos" | "email" | "activity" | "timeline" | "history" | "team" | "estimates" | "punch_list" | "closeout";
 
 function isBidBoardManagedStage(
@@ -109,6 +145,7 @@ export function DealDetailPage() {
   const [targetStageId, setTargetStageId] = useState<string | null>(null);
   const [teamCount, setTeamCount] = useState<number | null>(null);
   const [photoCount, setPhotoCount] = useState<number | null>(null);
+  const [rfpRetrying, setRfpRetrying] = useState(false);
   const currentStage = stages.find((s) => s.id === deal?.stageId);
   const isDirectorOrAdmin = user?.role === "director" || user?.role === "admin";
   const bidBoardOwnership = deal?.bidBoardOwnership;
@@ -210,6 +247,19 @@ export function DealDetailPage() {
       navigate("/deals");
     } catch (err: unknown) {
       alert(err instanceof Error ? err.message : "Failed to delete deal");
+    }
+  };
+
+  const handleRfpRetry = async () => {
+    if (!deal) return;
+    setRfpRetrying(true);
+    try {
+      await api(`/deals/${deal.id}/rfp-retry`, { method: "POST" });
+      await refetch();
+    } catch (err: unknown) {
+      alert(err instanceof Error ? err.message : "Failed to retry RFP delivery");
+    } finally {
+      setRfpRetrying(false);
     }
   };
 
@@ -358,7 +408,14 @@ export function DealDetailPage() {
             </div>
           ) : null}
           <div className="flex items-center gap-3 mt-1">
-            <DealStageBadge stageId={deal.stageId} />
+            {isBidBoardOwned ? (
+              <span className="inline-flex items-center gap-1.5 rounded-md border border-slate-300 bg-slate-50 px-2 py-1 text-sm font-medium text-slate-700">
+                <Lock className="h-3.5 w-3.5" />
+                {bidBoardStageLabel(deal)}
+              </span>
+            ) : (
+              <DealStageBadge stageId={deal.stageId} />
+            )}
             <span className="text-lg font-semibold">
               {formatCurrency(bestEstimate(deal))}
             </span>
@@ -483,6 +540,10 @@ export function DealDetailPage() {
         />
       )}
 
+      <RfpApprovalStatusBlock deal={deal} onRetry={handleRfpRetry} retrying={rfpRetrying} />
+
+      {isBidBoardOwned && !deal.hubspotDealId && <BidBoardProjectSummaryPanel deal={deal} />}
+
       {/* Estimating Sub-Stage Indicator */}
       {isEstimatingBoundaryStageSlug(currentStageSlug, workflowRoute) && !isBidBoardOwned && (
         <DealEstimatingSubstage deal={deal} onUpdate={refetch} />
@@ -582,6 +643,150 @@ export function DealDetailPage() {
         />
       )}
     </div>
+  );
+}
+
+function RfpApprovalStatusBlock({
+  deal,
+  onRetry,
+  retrying,
+}: {
+  deal: DealDetail;
+  onRetry: () => void;
+  retrying: boolean;
+}) {
+  if (!deal.rfpApprovalStatus) return null;
+
+  const conflictSummary =
+    deal.rfpConflictWith && typeof deal.rfpConflictWith === "object"
+      ? Object.entries(deal.rfpConflictWith)
+          .slice(0, 3)
+          .map(([key, value]) => `${key}: ${String(value)}`)
+          .join(", ")
+      : null;
+
+  const states = {
+    pending_outbox: {
+      tone: "border-sky-200 bg-sky-50 text-sky-950",
+      label: "RFP being sent to approvers",
+    },
+    pending: {
+      tone: "border-blue-200 bg-blue-50 text-blue-950",
+      label: "RFP under review",
+    },
+    approved: {
+      tone: "border-emerald-200 bg-emerald-50 text-emerald-950",
+      label: "RFP approved",
+    },
+    declined: {
+      tone: "border-slate-200 bg-slate-50 text-slate-950",
+      label: "RFP declined",
+    },
+    conflict: {
+      tone: "border-yellow-300 bg-yellow-50 text-yellow-950",
+      label: "RFP request conflict",
+    },
+    cancelled_source_ineligible: {
+      tone: "border-orange-300 bg-orange-50 text-orange-950",
+      label: "RFP cancelled - eligibility check failed",
+    },
+    send_failed: {
+      tone: "border-red-300 bg-red-50 text-red-950",
+      label: "RFP delivery failed",
+    },
+  } as const;
+  const fallbackState = {
+    tone: "border-slate-200 bg-slate-50 text-slate-950",
+    label: "Unknown RFP status",
+  } as const;
+  const state = states[deal.rfpApprovalStatus as keyof typeof states] ?? fallbackState;
+
+  if (!(deal.rfpApprovalStatus in states)) {
+    console.warn("Unknown RFP status on deal detail page", {
+      dealId: deal.id,
+      rfpApprovalStatus: deal.rfpApprovalStatus,
+    });
+  }
+
+  return (
+    <section className={`rounded-lg border p-3 ${state.tone}`}>
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <div>
+          <p className="text-sm font-semibold">{state.label}</p>
+          {deal.rfpApprovalStatus === "conflict" && (
+            <p className="mt-1 text-sm">
+              {[deal.rfpConflictReason, conflictSummary].filter(Boolean).join(" - ")}
+            </p>
+          )}
+          {deal.rfpApprovalStatus === "send_failed" && deal.rfpLastAttemptError && (
+            <p className="mt-1 text-sm">{deal.rfpLastAttemptError}</p>
+          )}
+          {deal.rfpApprovalStatus === "pending" && deal.rfpApprovalRequestId && (
+            <p className="mt-1 text-sm">Request #{deal.rfpApprovalRequestId}</p>
+          )}
+        </div>
+        {deal.rfpApprovalStatus === "send_failed" && (
+          <Button type="button" size="sm" variant="outline" onClick={onRetry} disabled={retrying}>
+            {retrying ? "Retrying..." : "Retry"}
+          </Button>
+        )}
+      </div>
+    </section>
+  );
+}
+
+function BidBoardProjectSummaryPanel({ deal }: { deal: DealDetail }) {
+  const bidBoardUrl = buildBidBoardProjectUrl(deal);
+  // Assigned PM is populated later by Procore role polling; Bid Board exports do not carry this field.
+  const assignedPm = deal.bidBoardAssignedPm || "Not yet assigned";
+
+  return (
+    <section className="rounded-lg border border-slate-200 bg-white p-4 shadow-sm">
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div>
+          <h3 className="text-sm font-semibold text-slate-900">Bid Board summary</h3>
+          <p className="mt-1 text-xs text-slate-500">Read-only project status mirrored from Bid Board.</p>
+        </div>
+        <span className="rounded-md bg-slate-100 px-2 py-1 text-xs font-medium text-slate-700">
+          Managed by Bid Board
+        </span>
+      </div>
+
+      <div className="mt-4 grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+        <div>
+          <p className="text-xs font-medium uppercase text-slate-500">Stage</p>
+          <p className="mt-1 text-sm font-semibold text-slate-900">{bidBoardStageLabel(deal)}</p>
+        </div>
+        <div>
+          <p className="text-xs font-medium uppercase text-slate-500">Estimate</p>
+          <p className="mt-1 text-sm font-semibold text-slate-900">
+            {formatBidBoardEstimate(deal.bidBoardTotalSales)}
+          </p>
+        </div>
+        <div>
+          <p className="text-xs font-medium uppercase text-slate-500">Last synced</p>
+          <p className="mt-1 text-sm font-semibold text-slate-900">
+            synced {bidBoardSyncTimeAgo(deal.bidBoardLastUpdatedAt)}
+          </p>
+        </div>
+        <div>
+          <p className="text-xs font-medium uppercase text-slate-500">Assigned PM</p>
+          <p className="mt-1 text-sm font-semibold text-slate-900">{assignedPm}</p>
+        </div>
+      </div>
+
+      {bidBoardUrl && (
+        <a
+          href={bidBoardUrl}
+          target="_blank"
+          rel="noreferrer"
+          className="mt-4 inline-flex items-center justify-center gap-2 rounded-md bg-brand-red px-3 py-2 text-sm font-medium text-white hover:bg-brand-red/90"
+        >
+          Open in Bid Board
+          <ExternalLink className="h-4 w-4" />
+        </a>
+      )}
+    </section>
   );
 }
 
