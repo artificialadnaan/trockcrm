@@ -16,6 +16,10 @@ type PoolLike = Queryable & {
   connect?: () => Promise<Queryable & { release: () => void }>;
 };
 
+type OfficeSchemaOptions = {
+  requireActive?: boolean;
+};
+
 function assertPayload(payload: any): asserts payload is RfpRequestDeliveryPayload {
   if (!payload || typeof payload !== "object") {
     throw new Error("Invalid RFP delivery payload");
@@ -32,14 +36,22 @@ function quoteIdent(value: string): string {
   return `"${value.replace(/"/g, '""')}"`;
 }
 
-async function resolveOfficeSchema(db: Queryable, officeId: string | null): Promise<string> {
+async function resolveOfficeSchema(
+  db: Queryable,
+  officeId: string | null,
+  options: OfficeSchemaOptions = {}
+): Promise<string> {
   if (!officeId) {
     throw new Error("RFP delivery job is missing officeId");
   }
-  const result = await db.query("SELECT slug FROM public.offices WHERE id = $1 AND is_active = true", [officeId]);
+  const requireActive = options.requireActive ?? true;
+  const result = await db.query(
+    `SELECT slug FROM public.offices WHERE id = $1${requireActive ? " AND is_active = true" : ""}`,
+    [officeId]
+  );
   const slug = result.rows[0]?.slug;
   if (typeof slug !== "string" || !/^[a-z][a-z0-9_]*$/.test(slug)) {
-    throw new Error(`Unable to resolve active office schema for officeId=${officeId}`);
+    throw new Error(`Unable to resolve ${requireActive ? "active " : ""}office schema for officeId=${officeId}`);
   }
   return `office_${slug}`;
 }
@@ -174,34 +186,42 @@ export async function runRfpRequestDeadLetterSweep(
         FOR UPDATE SKIP LOCKED`,
       [limit]
     );
+    await client.query("COMMIT");
 
     for (const job of result.rows) {
-      const payload = job.payload as RfpRequestDeliveryPayload;
-      if (!payload?.dealId) {
+      try {
+        await client.query("BEGIN");
+        const payload = job.payload as RfpRequestDeliveryPayload;
+        if (!payload?.dealId) {
+          await client.query(
+            "UPDATE public.job_queue SET payload = jsonb_set(payload, '{dealHandled}', 'true'::jsonb, true) WHERE id = $1",
+            [job.id]
+          );
+          await client.query("COMMIT");
+          continue;
+        }
+
+        const schemaName = await resolveOfficeSchema(client, job.office_id, { requireActive: false });
+        await client.query(
+          `UPDATE ${quoteIdent(schemaName)}.deals
+              SET rfp_approval_status = 'send_failed',
+                  rfp_last_attempt_error = $1,
+                  updated_at = NOW()
+            WHERE id = $2`,
+          [job.last_error ?? "RFP delivery exhausted retries", payload.dealId]
+        );
         await client.query(
           "UPDATE public.job_queue SET payload = jsonb_set(payload, '{dealHandled}', 'true'::jsonb, true) WHERE id = $1",
           [job.id]
         );
-        continue;
+        await client.query("COMMIT");
+        handled += 1;
+      } catch (err) {
+        await client.query("ROLLBACK").catch(() => {});
+        console.error(`[Worker:rfp_request_delivery] Failed to handle dead RFP delivery job ${job.id}`, err);
       }
-
-      const schemaName = await resolveOfficeSchema(client, job.office_id);
-      await client.query(
-        `UPDATE ${quoteIdent(schemaName)}.deals
-            SET rfp_approval_status = 'send_failed',
-                rfp_last_attempt_error = $1,
-                updated_at = NOW()
-          WHERE id = $2`,
-        [job.last_error ?? "RFP delivery exhausted retries", payload.dealId]
-      );
-      await client.query(
-        "UPDATE public.job_queue SET payload = jsonb_set(payload, '{dealHandled}', 'true'::jsonb, true) WHERE id = $1",
-        [job.id]
-      );
-      handled += 1;
     }
 
-    await client.query("COMMIT");
     return handled;
   } catch (err) {
     await client.query("ROLLBACK").catch(() => {});

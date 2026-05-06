@@ -90,6 +90,10 @@ describe("handleRfpRequestDelivery", () => {
 });
 
 describe("runRfpRequestDeadLetterSweep", () => {
+  beforeEach(() => {
+    vi.restoreAllMocks();
+  });
+
   it("marks dead delivery jobs handled and updates the deal as send_failed", async () => {
     const clientQuery = vi.fn(async (sql: string, params?: unknown[]) => {
       if (sql === "BEGIN" || sql === "COMMIT") return { rows: [] };
@@ -116,5 +120,116 @@ describe("runRfpRequestDeadLetterSweep", () => {
     expect(sqlText).toContain("rfp_approval_status = 'send_failed'");
     expect(sqlText).toContain("jsonb_set(payload, '{dealHandled}'");
     expect(release).toHaveBeenCalled();
+  });
+
+  it("handles dead jobs for inactive offices during cleanup", async () => {
+    const clientQuery = vi.fn(async (sql: string, params?: unknown[]) => {
+      if (sql === "BEGIN" || sql === "COMMIT") return { rows: [] };
+      if (sql.includes("FROM public.job_queue") && sql.includes("FOR UPDATE SKIP LOCKED")) {
+        return {
+          rows: [{
+            id: 56,
+            office_id: "office-inactive",
+            last_error: "bad secret",
+            payload: { dealId: "deal-inactive", syncHubUrl: "https://synchub.example.com", body: {} },
+          }],
+        };
+      }
+      if (sql.includes("SELECT slug FROM public.offices")) {
+        expect(sql).not.toContain("is_active = true");
+        return { rows: [{ slug: "inactive_office" }] };
+      }
+      return { rows: [] };
+    });
+    const release = vi.fn();
+    const db = { query: vi.fn(), connect: vi.fn(async () => ({ query: clientQuery, release })) };
+
+    const handled = await runRfpRequestDeadLetterSweep({ db });
+
+    expect(handled).toBe(1);
+    const sqlText = clientQuery.mock.calls.map((call) => String(call[0])).join("\n");
+    expect(sqlText).toContain('"office_inactive_office".deals');
+    expect(sqlText).toContain("rfp_approval_status = 'send_failed'");
+  });
+
+  it("processes active and inactive office dead jobs in the same sweep", async () => {
+    const clientQuery = vi.fn(async (sql: string, params?: unknown[]) => {
+      if (sql === "BEGIN" || sql === "COMMIT") return { rows: [] };
+      if (sql.includes("FROM public.job_queue") && sql.includes("FOR UPDATE SKIP LOCKED")) {
+        return {
+          rows: [
+            {
+              id: 57,
+              office_id: "office-active",
+              last_error: "active failure",
+              payload: { dealId: "deal-active", syncHubUrl: "https://synchub.example.com", body: {} },
+            },
+            {
+              id: 58,
+              office_id: "office-inactive",
+              last_error: "inactive failure",
+              payload: { dealId: "deal-inactive", syncHubUrl: "https://synchub.example.com", body: {} },
+            },
+          ],
+        };
+      }
+      if (sql.includes("SELECT slug FROM public.offices")) {
+        return { rows: [{ slug: params?.[0] === "office-active" ? "active" : "inactive" }] };
+      }
+      return { rows: [] };
+    });
+    const release = vi.fn();
+    const db = { query: vi.fn(), connect: vi.fn(async () => ({ query: clientQuery, release })) };
+
+    const handled = await runRfpRequestDeadLetterSweep({ db });
+
+    expect(handled).toBe(2);
+    const sqlText = clientQuery.mock.calls.map((call) => String(call[0])).join("\n");
+    expect(sqlText).toContain('"office_active".deals');
+    expect(sqlText).toContain('"office_inactive".deals');
+  });
+
+  it("continues processing the batch when one dead row fails", async () => {
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const clientQuery = vi.fn(async (sql: string, params?: unknown[]) => {
+      if (sql === "BEGIN" || sql === "COMMIT" || sql === "ROLLBACK") return { rows: [] };
+      if (sql.includes("FROM public.job_queue") && sql.includes("FOR UPDATE SKIP LOCKED")) {
+        return {
+          rows: [
+            {
+              id: 59,
+              office_id: "office-bad",
+              last_error: "bad failure",
+              payload: { dealId: "deal-bad", syncHubUrl: "https://synchub.example.com", body: {} },
+            },
+            {
+              id: 60,
+              office_id: "office-good",
+              last_error: "good failure",
+              payload: { dealId: "deal-good", syncHubUrl: "https://synchub.example.com", body: {} },
+            },
+          ],
+        };
+      }
+      if (sql.includes("SELECT slug FROM public.offices")) {
+        if (params?.[0] === "office-bad") {
+          throw new Error("office lookup failed");
+        }
+        return { rows: [{ slug: "good" }] };
+      }
+      return { rows: [] };
+    });
+    const release = vi.fn();
+    const db = { query: vi.fn(), connect: vi.fn(async () => ({ query: clientQuery, release })) };
+
+    const handled = await runRfpRequestDeadLetterSweep({ db });
+
+    expect(handled).toBe(1);
+    expect(errorSpy).toHaveBeenCalledWith(
+      expect.stringContaining("Failed to handle dead RFP delivery job 59"),
+      expect.any(Error)
+    );
+    const sqlText = clientQuery.mock.calls.map((call) => String(call[0])).join("\n");
+    expect(sqlText).toContain('"office_good".deals');
   });
 });

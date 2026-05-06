@@ -359,6 +359,26 @@ describe("DealDetailPage", () => {
     expect(html).toContain("proposal status");
   });
 
+  it("renders an unknown RFP status with a safe fallback label", () => {
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    mocks.useDealDetailMock.mockReturnValueOnce({
+      loading: false,
+      error: null,
+      refetch: vi.fn(),
+      deal: makeDealDetail({
+        rfpApprovalStatus: "frobnicate",
+      }),
+    });
+
+    const html = renderPage();
+
+    expect(html).toContain("Unknown RFP status");
+    expect(warnSpy).toHaveBeenCalledWith(
+      expect.stringContaining("Unknown RFP status"),
+      expect.objectContaining({ rfpApprovalStatus: "frobnicate", dealId: "deal-1" })
+    );
+  });
+
   it("keeps estimating manually reachable for owned deals that are still before the boundary", () => {
     mocks.useDealDetailMock.mockReturnValueOnce({
       loading: false,

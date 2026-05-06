@@ -665,7 +665,7 @@ function RfpApprovalStatusBlock({
           .join(", ")
       : null;
 
-  const state = {
+  const states = {
     pending_outbox: {
       tone: "border-sky-200 bg-sky-50 text-sky-950",
       label: "RFP being sent to approvers",
@@ -694,7 +694,19 @@ function RfpApprovalStatusBlock({
       tone: "border-red-300 bg-red-50 text-red-950",
       label: "RFP delivery failed",
     },
-  }[deal.rfpApprovalStatus];
+  } as const;
+  const fallbackState = {
+    tone: "border-slate-200 bg-slate-50 text-slate-950",
+    label: "Unknown RFP status",
+  } as const;
+  const state = states[deal.rfpApprovalStatus as keyof typeof states] ?? fallbackState;
+
+  if (!(deal.rfpApprovalStatus in states)) {
+    console.warn("Unknown RFP status on deal detail page", {
+      dealId: deal.id,
+      rfpApprovalStatus: deal.rfpApprovalStatus,
+    });
+  }
 
   return (
     <section className={`rounded-lg border p-3 ${state.tone}`}>
