@@ -30,6 +30,7 @@ export const PUBLIC_ROUTE_MOUNTS = [
   "/api/health",
   "/api/docs",
   "/api/webhooks/procore",
+  "/api/webhooks/synchub",
   "/api/bid-board-sync",
   "/api/public/photo-viewer",
   "/api/integrations/synchub",

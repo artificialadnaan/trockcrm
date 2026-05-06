@@ -13,6 +13,7 @@ export { procoreReconciliationState, procoreReconciliationStatusEnum } from "./p
 export { procoreSyncState, procoreEntityTypeEnum, syncDirectionEnum, syncStatusEnum } from "./public/procore-sync-state.js";
 export { procoreOauthTokens } from "./public/procore-oauth-tokens.js";
 export { procoreWebhookLog } from "./public/procore-webhook-log.js";
+export { syncHubWebhookOrphans } from "./public/synchub-webhook-orphans.js";
 export { publicPhotoTokens } from "./public/public-photo-tokens.js";
 export { hubspotOwnerMappings } from "./public/hubspot-owner-mappings.js";
 export { userGraphTokens, graphTokenStatusEnum } from "./public/user-graph-tokens.js";
