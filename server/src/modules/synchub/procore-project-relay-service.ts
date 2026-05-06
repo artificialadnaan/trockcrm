@@ -140,7 +140,7 @@ async function findDealLinkedToProcoreProject(
               deal_number,
               procore_project_id
        FROM ${quoteIdent(schemaName)}.deals
-       WHERE procore_project_id = $1 AND deleted_at IS NULL
+       WHERE procore_project_id = $1 AND is_active = true
        LIMIT 1`,
       [procoreProjectId, office.id, office.slug, schemaName]
     );
@@ -166,7 +166,7 @@ async function findDealsByProjectNumber(
               deal_number,
               procore_project_id
        FROM ${quoteIdent(schemaName)}.deals
-       WHERE deal_number = $1 AND deleted_at IS NULL
+       WHERE deal_number = $1 AND is_active = true
        LIMIT 2`,
       [projectNumber, office.id, office.slug, schemaName]
     );
@@ -249,7 +249,7 @@ async function linkMatchedDeal(
     const lockedResult = await client.query(
       `SELECT id, procore_project_id
        FROM ${quoteIdent(match.schemaName)}.deals
-       WHERE id = $1 AND deleted_at IS NULL
+       WHERE id = $1 AND is_active = true
        LIMIT 1
        FOR UPDATE`,
       [match.dealId]
