@@ -13,6 +13,7 @@ import {
   leadStageHistory,
   leads,
   notificationRecipientAssignments,
+  pipelineStageConfig,
   notificationRecipientGroups,
   properties,
   userOfficeAccess,
@@ -591,6 +592,16 @@ interface FakeProjectTypeRow {
   isActive: boolean;
 }
 
+interface FakePipelineStageRow {
+  id: string;
+  name: string;
+  slug: string;
+  displayOrder: number;
+  workflowFamily: "lead" | "standard_deal" | "service_deal";
+  isActivePipeline: boolean;
+  isTerminal: boolean;
+}
+
 interface FakeTenantState {
   companies: FakeCompanyRow[];
   properties: FakePropertyRow[];
@@ -607,6 +618,7 @@ interface FakeTenantState {
   notificationRecipientAssignments: Array<Record<string, unknown>>;
   leadQuestionNodes: FakeLeadQuestionNodeRow[];
   projectTypes: FakeProjectTypeRow[];
+  pipelineStages: FakePipelineStageRow[];
   jobs: Array<Record<string, unknown>>;
 }
 
@@ -670,6 +682,26 @@ function createFakeTenantDb(initialState?: Partial<FakeTenantState>) {
     notificationRecipientGroups: [],
     notificationRecipientAssignments: [],
     leadQuestionNodes: [],
+    pipelineStages: [
+      {
+        id: "deal-stage-1",
+        name: "Opportunity",
+        slug: "opportunity",
+        displayOrder: 1,
+        workflowFamily: "standard_deal",
+        isActivePipeline: true,
+        isTerminal: false,
+      },
+      {
+        id: "deal-stage-service-opportunity",
+        name: "Opportunity",
+        slug: "opportunity",
+        displayOrder: 1,
+        workflowFamily: "service_deal",
+        isActivePipeline: true,
+        isTerminal: false,
+      },
+    ],
     jobs: [],
     projectTypes: [
       {
@@ -698,6 +730,7 @@ function createFakeTenantDb(initialState?: Partial<FakeTenantState>) {
     if (table === leadStageHistory || tableName === "lead_stage_history") return state.leadStageHistory;
     if (table === jobQueue || tableName === "job_queue") return state.jobs;
     if (tableName === "project_type_config") return state.projectTypes;
+    if (table === pipelineStageConfig || tableName === "pipeline_stage_config") return state.pipelineStages;
     if (tableName === "lead_question_answers") return state.leadQuestionAnswers;
     if (tableName === "lead_question_answer_history") return state.leadQuestionAnswerHistory;
     if (tableName === "lead_due_diligence_approvals") return state.leadDueDiligenceApprovals;
@@ -723,6 +756,7 @@ function createFakeTenantDb(initialState?: Partial<FakeTenantState>) {
     if (table === notificationRecipientGroups) return state.notificationRecipientGroups;
     if (table === notificationRecipientAssignments) return state.notificationRecipientAssignments;
     if ("key" in candidate && "nodeType" in candidate) return state.leadQuestionNodes;
+    if ("workflowFamily" in candidate && "isActivePipeline" in candidate && "slug" in candidate) return state.pipelineStages;
     if ("parentId" in candidate && "displayOrder" in candidate && "isActive" in candidate) return state.projectTypes;
     throw new Error("Unexpected table in fake tenant db");
   }
@@ -1878,6 +1912,105 @@ describe("Lead Conversion Service", () => {
         },
       },
     });
+  });
+
+  it("enqueues an RFP request for service-route conversions that fall back to the standard Opportunity stage", async () => {
+    process.env.ENABLE_OPPORTUNITY_RFP_EVENT = "true";
+    process.env.SYNCHUB_BASE_URL = "https://synchub.example.com";
+    pipelineMocks.getStageBySlug.mockImplementation(async (slug: string, workflowFamily?: string) => {
+      if (slug === "opportunity" && workflowFamily === "service_deal") {
+        return null;
+      }
+
+      if (slug === "opportunity" && workflowFamily === "standard_deal") {
+        return dealStage;
+      }
+
+      return null;
+    });
+    pipelineMocks.getStageById.mockImplementation(async (id: string, workflowFamily?: string) => {
+      if (workflowFamily === "lead" && id === salesValidationLeadStage.id) {
+        return salesValidationLeadStage;
+      }
+
+      // Regression setup: the created service-route deal uses the fallback
+      // standard_deal Opportunity stage, so family-filtered service lookup misses it.
+      if (id === dealStage.id && workflowFamily === "service_deal") {
+        return null;
+      }
+
+      if (id === dealStage.id && workflowFamily === "standard_deal") {
+        return dealStage;
+      }
+
+      return null;
+    });
+    const tenantDb = createFakeTenantDb({
+      pipelineStages: [dealStage],
+      leads: [
+        {
+          id: "lead-1",
+          companyId: "company-1",
+          propertyId: "property-1",
+          primaryContactId: null,
+          name: "Service fallback RFP",
+          stageId: "lead-stage-sales-validation",
+          assignedRepId: "rep-1",
+          status: "open",
+          pipelineType: "service",
+          officeCode: "dfw",
+          projectType: "repair",
+          preQualValue: "25000",
+          source: "Referral",
+          description: "Service-route fallback test",
+          stageEnteredAt: new Date("2026-04-12T15:00:00.000Z"),
+          convertedAt: null,
+          isActive: true,
+          createdAt: new Date("2026-04-12T15:00:00.000Z"),
+          updatedAt: new Date("2026-04-12T15:00:00.000Z"),
+        },
+      ],
+    });
+    const service = createLeadConversionService({
+      getStageById: pipelineMocks.getStageById as never,
+      getStageBySlug: pipelineMocks.getStageBySlug as never,
+      now: () => new Date("2026-04-15T15:00:00.000Z"),
+      createDeal: async (_tenantDb, input) => {
+        const deal = {
+          id: "deal-1",
+          dealNumber: "dfw-3-10526-aa",
+          workflowRoute: input.workflowRoute ?? "normal",
+          officeCode: input.officeCode,
+          primaryContactId: input.primaryContactId ?? null,
+          companyId: input.companyId ?? null,
+          propertyId: input.propertyId ?? null,
+          sourceLeadId: input.sourceLeadId ?? null,
+          source: input.source ?? null,
+          assignedRepId: input.assignedRepId,
+          stageId: input.stageId,
+          stageEnteredAt: new Date("2026-04-15T15:00:00.000Z"),
+          name: input.name,
+          rfpApprovalRequestedAt: null,
+          rfpApprovalRequestEventId: null,
+          rfpApprovalRequestedBy: null,
+          rfpApprovalStatus: null,
+        };
+        tenantDb.state.deals.push(deal);
+        return deal as never;
+      },
+    });
+
+    const result = await service.convertLead(tenantDb as never, {
+      leadId: "lead-1",
+      userRole: "rep",
+      userId: "rep-1",
+      officeId: "office-1",
+    });
+
+    expect(result.deal.stageId).toBe("deal-stage-1");
+    expect(result.deal.workflowRoute).toBe("service");
+    expect(tenantDb.state.deals[0]?.rfpApprovalStatus).toBe("pending_outbox");
+    expect(tenantDb.state.jobs.filter((job) => job.jobType === "rfp_request_delivery")).toHaveLength(1);
   });
 
   it("copies lead salesRepId to the successor deal when no override is provided", async () => {

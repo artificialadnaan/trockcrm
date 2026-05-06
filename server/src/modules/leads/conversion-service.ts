@@ -1,6 +1,6 @@
 import { eq } from "drizzle-orm";
 import type { NodePgDatabase } from "drizzle-orm/node-postgres";
-import { deals, leads } from "@trock-crm/shared/schema";
+import { deals, leads, pipelineStageConfig } from "@trock-crm/shared/schema";
 import type * as schema from "@trock-crm/shared/schema";
 import { toCanonicalLeadStageSlug, type WorkflowRoute } from "@trock-crm/shared/types";
 import { AppError } from "../../middleware/error-handler.js";
@@ -249,8 +249,12 @@ export function createLeadConversionService(
       expectedCloseDate: input.expectedCloseDate,
     });
 
-    const targetDealStage = await deps.getStageById(resolvedDealStageId, workflowFamilyForRoute(workflowRoute));
-    if (targetDealStage?.slug === "opportunity") {
+    const targetDealStage = await tenantDb
+      .select({ slug: pipelineStageConfig.slug })
+      .from(pipelineStageConfig)
+      .where(eq(pipelineStageConfig.id, deal.stageId))
+      .limit(1);
+    if (targetDealStage[0]?.slug === "opportunity") {
       const rfpResult = await enqueueOpportunityRfpIfNeeded({
         tenantDb,
         deal,
