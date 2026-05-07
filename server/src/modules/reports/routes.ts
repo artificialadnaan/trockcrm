@@ -352,7 +352,7 @@ router.get("/regional-ownership", requireDirector, async (req, res, next) => {
 // -------------------------------------------------------------------------
 
 // POST /api/reports/execute -- run a custom report config
-router.post("/execute", async (req, res, next) => {
+router.post("/execute", requireDirector, async (req, res, next) => {
   try {
     const config = req.body.config as ReportConfig;
     if (!config || !config.entity) {
@@ -370,7 +370,7 @@ router.post("/execute", async (req, res, next) => {
 });
 
 // POST /api/reports/run -- aggregate report-builder query
-router.post("/run", async (req, res, next) => {
+router.post("/run", requireDirector, async (req, res, next) => {
   try {
     const data = await runReportBuilder(req.tenantDb!, {
       dimensions: Array.isArray(req.body.dimensions) ? req.body.dimensions : [],
