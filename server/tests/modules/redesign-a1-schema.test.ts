@@ -11,13 +11,15 @@ import {
 describe("redesign A1 schema contract", () => {
   it("adds company tier-1 fields and industry enum values", () => {
     expect(companyIndustryEnum.enumValues).toEqual([
-      "school_district",
-      "healthcare",
-      "industrial",
-      "office_mixed",
-      "retail",
-      "government",
-      "hospitality",
+      "general_contractor",
+      "construction_manager",
+      "property_owner",
+      "property_management",
+      "reit",
+      "architecture_engineering",
+      "consultant",
+      "insurance_restoration",
+      "other",
     ]);
 
     expect(companies).toHaveProperty("industry");
@@ -30,12 +32,14 @@ describe("redesign A1 schema contract", () => {
 
   it("adds contact tier-1 fields while reusing existing HubSpot contact id", () => {
     expect(contactRoleEnum.enumValues).toEqual([
-      "decision_maker",
-      "influencer",
-      "gatekeeper",
+      "owner_principal",
+      "project_manager",
+      "facilities_director",
+      "maintenance",
       "procurement",
-      "engineer",
-      "owner",
+      "insurance_adjuster",
+      "admin_ap",
+      "other",
     ]);
 
     expect(contacts).toHaveProperty("role");

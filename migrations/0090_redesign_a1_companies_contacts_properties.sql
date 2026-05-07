@@ -22,15 +22,17 @@ BEGIN
          AND t.typname = 'company_industry'
     ) THEN
       EXECUTE format(
-        'CREATE TYPE %I.company_industry AS ENUM (%L, %L, %L, %L, %L, %L, %L)',
+        'CREATE TYPE %I.company_industry AS ENUM (%L, %L, %L, %L, %L, %L, %L, %L, %L)',
         tenant_schema,
-        'school_district',
-        'healthcare',
-        'industrial',
-        'office_mixed',
-        'retail',
-        'government',
-        'hospitality'
+        'general_contractor',
+        'construction_manager',
+        'property_owner',
+        'property_management',
+        'reit',
+        'architecture_engineering',
+        'consultant',
+        'insurance_restoration',
+        'other'
       );
     END IF;
 
@@ -42,14 +44,16 @@ BEGIN
          AND t.typname = 'contact_role'
     ) THEN
       EXECUTE format(
-        'CREATE TYPE %I.contact_role AS ENUM (%L, %L, %L, %L, %L, %L)',
+        'CREATE TYPE %I.contact_role AS ENUM (%L, %L, %L, %L, %L, %L, %L, %L)',
         tenant_schema,
-        'decision_maker',
-        'influencer',
-        'gatekeeper',
+        'owner_principal',
+        'project_manager',
+        'facilities_director',
+        'maintenance',
         'procurement',
-        'engineer',
-        'owner'
+        'insurance_adjuster',
+        'admin_ap',
+        'other'
       );
     END IF;
 
@@ -196,13 +200,15 @@ BEGIN
        AND typnamespace = current_schema()::regnamespace
   ) THEN
     CREATE TYPE company_industry AS ENUM (
-      'school_district',
-      'healthcare',
-      'industrial',
-      'office_mixed',
-      'retail',
-      'government',
-      'hospitality'
+      'general_contractor',
+      'construction_manager',
+      'property_owner',
+      'property_management',
+      'reit',
+      'architecture_engineering',
+      'consultant',
+      'insurance_restoration',
+      'other'
     );
   END IF;
 
@@ -213,12 +219,14 @@ BEGIN
        AND typnamespace = current_schema()::regnamespace
   ) THEN
     CREATE TYPE contact_role AS ENUM (
-      'decision_maker',
-      'influencer',
-      'gatekeeper',
+      'owner_principal',
+      'project_manager',
+      'facilities_director',
+      'maintenance',
       'procurement',
-      'engineer',
-      'owner'
+      'insurance_adjuster',
+      'admin_ap',
+      'other'
     );
   END IF;
 

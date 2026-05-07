@@ -260,10 +260,10 @@ Types in `@trock-crm/shared/types`: `ActivityRange`, `RepDashboardData`, `Funnel
 ## 5. Schema map
 
 ### `companies` (`shared/src/schema/tenant/companies.ts`)
-Existing: `id`, `name`, `category` (contact category — different from industry), `created_at`, `updated_at`, verification workflow fields, owner FK. **Tier 1 add**: `industry` enum, `region`, `domain`, `last_activity_at`, `hubspot_id`, `procore_id`.
+Existing: `id`, `name`, `category` (contact category — different from industry), `created_at`, `updated_at`, verification workflow fields, owner FK. **Tier 1 add**: `industry` enum (`general_contractor | construction_manager | property_owner | property_management | reit | architecture_engineering | consultant | insurance_restoration | other`), `region`, `domain`, `last_activity_at`, `hubspot_id`, `procore_id`.
 
 ### `contacts` (`contacts.ts`)
-Existing: `id`, `first_name`, `last_name`, `email`, `phone`, `mobile_phone`, `job_title`, `company_id` FK, `last_contacted_at`, source/category enums. **Tier 1 add**: `role` enum (`decision_maker | influencer | gatekeeper | procurement | engineer | owner`), `is_primary` bool, `linkedin_url`, `hubspot_id`.
+Existing: `id`, `first_name`, `last_name`, `email`, `phone`, `mobile_phone`, `job_title`, `company_id` FK, `last_contacted_at`, source/category enums. **Tier 1 add**: `role` enum (`owner_principal | project_manager | facilities_director | maintenance | procurement | insurance_adjuster | admin_ap | other`), `is_primary` bool, `linkedin_url`, `hubspot_id`.
 
 ### `properties` (`properties.ts`)
 Existing: `id`, `name`, `address`, `city`, `state`, `zip`, `sqft`, `build_year`, `company_id` FK, lat/lng. **Tier 1 add**: `type` enum (`office | industrial | retail | school | healthcare | government | mixed_use`), `floors`, `roof_area`, `last_activity_at`, `procore_id`, `companycam_id`.

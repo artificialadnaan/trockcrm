@@ -95,23 +95,27 @@ export const COMPANY_VERIFICATION_STATUSES = ["pending", "verified", "rejected",
 export type CompanyVerificationStatus = (typeof COMPANY_VERIFICATION_STATUSES)[number];
 
 export const COMPANY_INDUSTRIES = [
-  "school_district",
-  "healthcare",
-  "industrial",
-  "office_mixed",
-  "retail",
-  "government",
-  "hospitality",
+  "general_contractor",
+  "construction_manager",
+  "property_owner",
+  "property_management",
+  "reit",
+  "architecture_engineering",
+  "consultant",
+  "insurance_restoration",
+  "other",
 ] as const;
 export type CompanyIndustry = (typeof COMPANY_INDUSTRIES)[number];
 
 export const CONTACT_ROLES = [
-  "decision_maker",
-  "influencer",
-  "gatekeeper",
+  "owner_principal",
+  "project_manager",
+  "facilities_director",
+  "maintenance",
   "procurement",
-  "engineer",
-  "owner",
+  "insurance_adjuster",
+  "admin_ap",
+  "other",
 ] as const;
 export type ContactRole = (typeof CONTACT_ROLES)[number];
 
