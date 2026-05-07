@@ -82,10 +82,10 @@ Tracks 0 / A-core / A-isolated / B run first in parallel. C/D/E/F run after thei
 **Work order:** `.agents/redesign-gap-audit.md` (the SCHEMA GAP and HOOK GAP entries scoped to A-core below).
 
 **Owns (writes):**
-- `shared/src/schema/{companies,contacts,properties,deals,emails,files,call-recordings,leads}.ts` plus new schemas: `estimate_line_items`, `email_links`, `file_links`, `user_starred_files`
+- `shared/src/schema/tenant/{companies,contacts,properties,deals,emails,files,call-recordings,leads}.ts` plus new schemas in `shared/src/schema/tenant/` (kebab-case file names per existing convention): `estimate-line-items.ts`, `email-links.ts`, `file-links.ts`, `user-starred-files.ts`
 - Migrations for those entities only (under `migrations/`)
 - `shared/src/types/**` updates that follow these schema changes
-- `server/src/modules/{companies,contacts,properties,deals,leads,emails,files,call-recordings,activities}/**`
+- `server/src/modules/{companies,contacts,properties,deals,leads,email,files,call-recordings,activities}/**` — note `email` is **singular** (matches actual module name `server/src/modules/email/`)
 - `client/src/hooks/use-{companies,contacts,properties,deals,leads,emails,files,activities}.ts` (extensions only — no UI consumers touched)
 - `client/src/hooks/use-call-recordings.ts` — **NEW in A3** (extracted from `client/src/components/call-recordings/recording-list.tsx` internal fetch — see gap audit §2). Refactor of `recording-list.tsx` to consume the hook is included in A3.
 - `client/src/lib/api.ts` (only if a new endpoint or shape is needed)
@@ -119,7 +119,7 @@ PRs A1 → A2 → A3 merge in numeric order.
 **Owns (writes):**
 - New schemas: `reports`, `report_schedules`, `report_runs`, `rep_performance_snapshots`
 - Migrations for those four tables (under `migrations/`, separate file numbers from A-core)
-- `server/src/modules/{reports,dashboard,director}/**` (new files only — A-core doesn't touch these)
+- `server/src/modules/{reports,dashboard}/**` — `reports/` already exists (extend); `dashboard/` already exists and **already houses director-facing routes** (`/director/commissions`, `/director/rep/:repId` are defined in `server/src/modules/dashboard/routes.ts`). A-isolated extends both modules. **No separate `server/src/modules/director/` module is needed or created.**
 - `client/src/hooks/use-{reports,dashboard,director-dashboard,rep-performance}.ts` (rebuild/extend)
 - `worker/src/**` for the new `rep-performance-rollup` cron job and `reports-execution` worker stub
 
@@ -148,14 +148,14 @@ A4 and A5a can land in any order or be bundled. A5b is gated on A1.
 **Branch:** `redesign/shared-primitives` off `chore/impeccable-design-baseline`.
 
 **Owns (writes):**
-- `client/src/components/shared/**` — production version of `preview-shared.tsx` exports:
+- `client/src/components/shared/**` (existing dir — used for shared UI primitives) — production version of `preview-shared.tsx` exports:
   - `metric-card.tsx` (with tones green/blue/white, drenched red mode, accent variants)
   - `scope-toggle.tsx` (generic `ScopeToggle<T>`)
   - `detail-tabs.tsx` (icon-only with active label strip — final iteration)
   - `activity-timeline.tsx`
   - `eyebrow.tsx` (constant + `<Eyebrow>` wrapper)
   - `formatters.ts` (USD, USD_COMPACT, NUMBER_COMPACT)
-- `client/src/components/comms/**` — production version of `comms-preview.tsx`:
+- `client/src/components/comms/**` (**NEW** dir — does not exist in repo today) — production version of `comms-preview.tsx`:
   - `email-list.tsx`, `recordings-list.tsx`, plus shared types
 - `client/src/components/files/` **(root only — shared primitives)**: `files-view.tsx` is the production version of `files-preview.tsx`'s `FilesView` (All/Photos/Documents subtabs), consumed by detail-page Files tabs and the standalone /files page. Any other shared file primitive (e.g. file-icon mapping, shared file-card layout) lives at this dir's root. **The `client/src/components/files/page/` subdirectory is Track D's** — see Track D's Owns section.
 - `client/src/components/layout/{sidebar,topbar,app-shell}.tsx` — lighten sidebar to white, add ⌘K chip on topbar (the shell change)
@@ -273,7 +273,7 @@ A4 and A5a can land in any order or be bundled. A5b is gated on A1.
 - `client/src/pages/reports/reports-page.tsx` (Library/My/Scheduled/Recent, 16 fixture reports → real data)
 - `client/src/pages/commissions/rep-commissions-page.tsx` (My + Team views)
 - New admin commission route if needed (per spec — currently TBD)
-- Sub-components under `client/src/components/{director,email,reports,commissions}/`
+- Sub-components under `client/src/components/{email,reports}/` (existing dirs) and `client/src/components/{director,commissions}/` (**NEW** dirs created by Track F — neither exists in repo today)
 - Test siblings
 
 **Must NOT touch:**
