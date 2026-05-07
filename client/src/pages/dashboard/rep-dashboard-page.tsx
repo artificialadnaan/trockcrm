@@ -3,7 +3,6 @@ import { useRepDashboard } from "@/hooks/use-dashboard";
 import { useAuth } from "@/lib/auth";
 import { useNavigate } from "react-router-dom";
 import { PageHeader } from "@/components/layout/page-header";
-import { StatCard } from "@/components/dashboard/stat-card";
 import { PipelineBarChart } from "@/components/charts/pipeline-bar-chart";
 import { formatCurrency } from "@/components/charts/chart-colors";
 import { useTasks } from "@/hooks/use-tasks";
@@ -16,28 +15,15 @@ import { getWorkflowRouteLabel } from "@/lib/pipeline-ownership";
 import { usePipelineStages } from "@/hooks/use-pipeline-config";
 import { buildCanonicalDealBoardColumns } from "@/lib/canonical-deal-board";
 import { toast } from "sonner";
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { ActivityRangeSelect } from "@/components/dashboard/activity-range-select";
-import {
-  ACTIVITY_RANGE_LABELS,
-  DEFAULT_ACTIVITY_RANGE,
-  type ActivityRange,
-} from "@trock-crm/shared/types";
-import {
-  ArrowUpRight,
-  Briefcase,
-  CheckSquare,
-  ClipboardList,
-  Activity,
-  Target,
-  TrendingUp,
-  DollarSign,
-  FileSignature,
-  FilePen,
-} from "lucide-react";
+import { DEFAULT_ACTIVITY_RANGE, type ActivityRange } from "@trock-crm/shared/types";
+import { ArrowUpRight, FileSignature, FilePen, RefreshCw } from "lucide-react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+
+const EYEBROW = "text-[11px] font-bold uppercase tracking-[0.16em] text-muted-foreground";
 
 function formatShortDate(value: string) {
   return new Intl.DateTimeFormat("en-US", {
@@ -46,9 +32,69 @@ function formatShortDate(value: string) {
   }).format(new Date(value));
 }
 
+function formatRelativeTime(date: Date, now: Date): string {
+  const seconds = Math.max(0, Math.round((now.getTime() - date.getTime()) / 1000));
+  if (seconds < 45) return "just now";
+  const minutes = Math.round(seconds / 60);
+  if (minutes < 60) return `${minutes} min ago`;
+  const hours = Math.round(minutes / 60);
+  if (hours < 24) return `${hours} hr ago`;
+  return formatShortDate(date.toISOString());
+}
+
+function useFreshness(fetchedAt: Date | null): string | null {
+  const [now, setNow] = useState(() => new Date());
+  useEffect(() => {
+    const id = window.setInterval(() => setNow(new Date()), 30_000);
+    return () => window.clearInterval(id);
+  }, []);
+  if (!fetchedAt) return null;
+  return formatRelativeTime(fetchedAt, now);
+}
+
+function KpiCell({
+  label,
+  value,
+  subtitle,
+  emphasis = "neutral",
+  onClick,
+}: {
+  label: string;
+  value: string | number;
+  subtitle?: string;
+  emphasis?: "neutral" | "danger" | "warning";
+  onClick?: () => void;
+}) {
+  const valueClass =
+    emphasis === "danger"
+      ? "text-brand-red"
+      : emphasis === "warning"
+        ? "text-amber-700"
+        : "text-slate-950";
+  const baseClass = "flex flex-col items-start gap-1 text-left";
+  const body = (
+    <>
+      <p className={EYEBROW}>{label}</p>
+      <p className={`text-2xl font-bold leading-none ${valueClass}`}>{value}</p>
+      {subtitle ? <p className="text-xs text-muted-foreground">{subtitle}</p> : null}
+    </>
+  );
+  if (onClick) {
+    return (
+      <button
+        type="button"
+        onClick={onClick}
+        className={`${baseClass} cursor-pointer transition-opacity hover:opacity-70`}
+      >
+        {body}
+      </button>
+    );
+  }
+  return <div className={baseClass}>{body}</div>;
+}
+
 function SnapshotCard({
   title,
-  eyebrow,
   emptyLabel,
   actionLabel,
   onAction,
@@ -56,7 +102,6 @@ function SnapshotCard({
   rows,
 }: {
   title: string;
-  eyebrow: string;
   emptyLabel: string;
   actionLabel: string;
   onAction: () => void;
@@ -72,15 +117,10 @@ function SnapshotCard({
   }>;
 }) {
   return (
-    <Card className="overflow-hidden border-slate-200">
-      <CardHeader className="border-b border-slate-100 bg-slate-50/70 pb-3">
+    <Card className="overflow-hidden">
+      <CardHeader className="border-b pb-3">
         <div className="flex items-start justify-between gap-4">
-          <div>
-            <p className="text-[11px] font-semibold uppercase tracking-[0.24em] text-slate-500">
-              {eyebrow}
-            </p>
-            <CardTitle className="mt-2 text-lg text-slate-950">{title}</CardTitle>
-          </div>
+          <CardTitle className="text-lg text-slate-950">{title}</CardTitle>
           <Button variant="outline" size="sm" onClick={onAction}>
             {actionLabel}
             <ArrowUpRight className="ml-1 h-4 w-4" />
@@ -91,7 +131,7 @@ function SnapshotCard({
         {rows.length === 0 ? (
           <div className="px-6 py-8 text-sm text-muted-foreground">{emptyLabel}</div>
         ) : (
-          <div className="divide-y divide-slate-100">
+          <div className="divide-y">
             {rows.map((row) => (
               <button
                 key={row.id}
@@ -102,16 +142,14 @@ function SnapshotCard({
                 <div className="min-w-0">
                   <div className="flex items-center gap-2">
                     <p className="truncate text-sm font-semibold text-slate-950">{row.name}</p>
-                    <Badge variant="outline" className="border-slate-200 text-slate-600">
-                      {row.badge}
-                    </Badge>
+                    <Badge variant="outline">{row.badge}</Badge>
                   </div>
                   <p className="mt-1 truncate text-sm text-slate-600">{row.metaPrimary}</p>
-                  <p className="mt-1 text-xs text-slate-500">{row.metaSecondary}</p>
+                  <p className="mt-1 text-xs text-muted-foreground">{row.metaSecondary}</p>
                 </div>
                 <div className="shrink-0 text-right">
                   <p className="text-sm font-medium text-slate-900">{row.rightLabel}</p>
-                  <p className="mt-1 text-xs text-slate-500">Open record</p>
+                  <p className="mt-1 text-xs text-muted-foreground">Open record</p>
                 </div>
               </button>
             ))}
@@ -127,7 +165,8 @@ export function RepDashboardPage() {
   const navigate = useNavigate();
   const boardState = usePipelineBoardState("deals");
   const [activityRange, setActivityRange] = useState<ActivityRange>(DEFAULT_ACTIVITY_RANGE);
-  const { data, loading, error } = useRepDashboard({ range: activityRange });
+  const { data, loading, error, fetchedAt, refetch } = useRepDashboard({ range: activityRange });
+  const freshness = useFreshness(fetchedAt);
   const {
     board: dealBoard,
     loading: dealBoardLoading,
@@ -144,11 +183,24 @@ export function RepDashboardPage() {
   const { tasks: overdueTasks, refetch: refetchOverdue } = useTasks({ section: "overdue", limit: 50 });
   const { tasks: todayTasks, refetch: refetchToday } = useTasks({ section: "today", limit: 50 });
   const firstName = user?.displayName?.split(" ")[0] ?? "there";
-  const currentYear = new Date().getFullYear();
 
   const refetchTasks = () => {
     refetchOverdue();
     refetchToday();
+  };
+  const refreshAll = async () => {
+    const results = await Promise.allSettled([
+      refetch(),
+      refetchDealBoard(),
+      refetchLeadBoard(),
+      refetchOverdue(),
+      refetchToday(),
+    ]);
+    results.forEach((r) => {
+      if (r.status === "rejected") {
+        console.error("Dashboard refresh: section failed", r.reason);
+      }
+    });
   };
   const visibleLeadColumns = leadBoard?.columns ?? [];
   const canonicalDealBoard = useMemo(
@@ -212,23 +264,23 @@ export function RepDashboardPage() {
   if (loading) {
     return (
       <div className="space-y-6">
-        <PageHeader
-          title={`Welcome back, ${firstName}`}
-          description={`Here is your sales activity overview for ${currentYear}.`}
-        />
+        <PageHeader title={`Welcome back, ${firstName}`} description="Loading today's signal..." />
         <section aria-label="My Board">
           <RepDashboardBoardShell
             activeEntity={boardState.activeEntity}
             onEntityChange={boardState.setActiveEntity}
-          dealBoard={canonicalDealBoard}
-          leadBoard={leadBoard}
-          loading={boardState.activeEntity === "deals" ? dealBoardLoading : leadBoardLoading}
-          error={boardState.activeEntity === "deals" ? dealBoardError : leadBoardError}
-          onMove={handleBoardMove}
-        />
+            dealBoard={canonicalDealBoard}
+            leadBoard={leadBoard}
+            loading={boardState.activeEntity === "deals" ? dealBoardLoading : leadBoardLoading}
+            error={boardState.activeEntity === "deals" ? dealBoardError : leadBoardError}
+            onMove={handleBoardMove}
+          />
         </section>
-        <div className="grid grid-cols-1 gap-4 xl:grid-cols-4">
-          {Array.from({ length: 4 }).map((_, i) => (
+        <Card className="animate-pulse">
+          <CardContent className="h-24 p-4" />
+        </Card>
+        <div className="grid grid-cols-1 gap-4 xl:grid-cols-2">
+          {Array.from({ length: 2 }).map((_, i) => (
             <Card key={i} className="animate-pulse">
               <CardContent className="h-32 p-4" />
             </Card>
@@ -241,12 +293,14 @@ export function RepDashboardPage() {
   if (error) {
     return (
       <div className="space-y-6">
-        <PageHeader
-          title={`Welcome back, ${firstName}`}
-          description={`Here is your sales activity overview for ${currentYear}.`}
-        />
+        <PageHeader title={`Welcome back, ${firstName}`} />
         <Card>
-          <CardContent className="p-6 text-center text-red-600">{error}</CardContent>
+          <CardContent className="space-y-3 p-6 text-center">
+            <p className="text-sm text-muted-foreground">{error}</p>
+            <Button variant="outline" onClick={refreshAll}>
+              Retry
+            </Button>
+          </CardContent>
         </Card>
       </div>
     );
@@ -254,11 +308,17 @@ export function RepDashboardPage() {
 
   if (!data) return null;
 
-  const taskTotal = data.tasksToday.overdue + data.tasksToday.today;
   const cleanupCount = data.myCleanup.total;
   const ownershipCount = data.myCleanup.byReason
     .filter((reason) => reason.reasonCode.includes("owner"))
     .reduce((sum, reason) => sum + reason.count, 0);
+  const headerSummary = [
+    data.tasksToday.overdue > 0 ? `${data.tasksToday.overdue} overdue` : null,
+    cleanupCount > 0 ? `${cleanupCount} to fix` : null,
+    `${data.activeDeals.count} open deals`,
+  ]
+    .filter(Boolean)
+    .join(" • ");
   const leadsSnapshot = data.leadSnapshot.map((lead) => ({
     id: lead.leadId,
     name: lead.leadName,
@@ -282,26 +342,49 @@ export function RepDashboardPage() {
     <div className="space-y-6">
       <PageHeader
         title={`Welcome back, ${firstName}`}
-        description={`Here is your live sales cockpit for ${currentYear}.`}
+        description={headerSummary || "All clear."}
+        meta={freshness ? `Synced ${freshness}` : undefined}
+        actions={{
+          secondaryAction: (
+            <Button variant="outline" size="sm" onClick={refreshAll} disabled={loading}>
+              <RefreshCw className="mr-1 h-4 w-4" />
+              Refresh
+            </Button>
+          ),
+        }}
       />
 
       <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
-        <StatCard
-          title="Contracts Signed YTD"
-          value={data.contractsSignedYtd.count}
-          subtitle={formatCurrency(data.contractsSignedYtd.totalValue)}
-          icon={<FileSignature className="h-5 w-5" />}
-          className="border-indigo-200 bg-indigo-50/70"
+        <Card
+          className="cursor-pointer transition-colors hover:bg-slate-50"
           onClick={() => navigate("/dashboard/contracts-signed?period=ytd")}
-        />
-        <StatCard
-          title="Contracts Signed MTD"
-          value={data.contractsSignedMtd.count}
-          subtitle={formatCurrency(data.contractsSignedMtd.totalValue)}
-          icon={<FilePen className="h-5 w-5" />}
-          className="border-indigo-200 bg-indigo-50/70"
+        >
+          <CardContent className="flex items-start justify-between gap-3 p-4">
+            <div>
+              <p className={EYEBROW}>Contracts signed YTD</p>
+              <p className="mt-2 text-2xl font-bold text-slate-950">{data.contractsSignedYtd.count}</p>
+              <p className="mt-1 text-xs text-muted-foreground">
+                {formatCurrency(data.contractsSignedYtd.totalValue)}
+              </p>
+            </div>
+            <FileSignature className="h-5 w-5 text-muted-foreground" />
+          </CardContent>
+        </Card>
+        <Card
+          className="cursor-pointer transition-colors hover:bg-slate-50"
           onClick={() => navigate("/dashboard/contracts-signed?period=mtd")}
-        />
+        >
+          <CardContent className="flex items-start justify-between gap-3 p-4">
+            <div>
+              <p className={EYEBROW}>Contracts signed MTD</p>
+              <p className="mt-2 text-2xl font-bold text-slate-950">{data.contractsSignedMtd.count}</p>
+              <p className="mt-1 text-xs text-muted-foreground">
+                {formatCurrency(data.contractsSignedMtd.totalValue)}
+              </p>
+            </div>
+            <FilePen className="h-5 w-5 text-muted-foreground" />
+          </CardContent>
+        </Card>
       </div>
 
       <RepDashboardBoardShell
@@ -314,216 +397,130 @@ export function RepDashboardPage() {
         onMove={handleBoardMove}
       />
 
-      <div className="grid gap-4 xl:grid-cols-[minmax(0,1.4fr)_minmax(320px,0.9fr)]">
-        <Card className="overflow-hidden border-slate-200 bg-[linear-gradient(135deg,#0f172a_0%,#1e293b_55%,#334155_100%)] text-white">
-          <CardContent className="p-6">
-            <div className="flex flex-col gap-6 lg:flex-row lg:items-end lg:justify-between">
-              <div className="max-w-2xl space-y-3">
-                <p className="text-[11px] font-semibold uppercase tracking-[0.28em] text-slate-300">
-                  Today At A Glance
-                </p>
-                <h2 className="text-3xl font-semibold tracking-tight">
-                  Your book is live. Work the queue, protect follow-ups, and keep forecast fields current.
-                </h2>
-                <p className="max-w-xl text-sm leading-relaxed text-slate-300">
-                  This view blends board movement, task pressure, cleanup pressure, and current pipeline movement into one place so you can move from triage into selling without hunting through pages.
-                </p>
-              </div>
-              <div className="grid min-w-[260px] gap-3 sm:grid-cols-2">
-                <div className="rounded-2xl border border-white/10 bg-white/8 p-4 backdrop-blur-sm">
-                  <p className="text-xs uppercase tracking-wide text-slate-300">Open Tasks</p>
-                  <p className="mt-2 text-3xl font-semibold">{taskTotal}</p>
-                  <p className="mt-1 text-sm text-slate-300">
-                    {data.tasksToday.overdue > 0 ? `${data.tasksToday.overdue} overdue` : "Nothing overdue"}
-                  </p>
-                </div>
-                <div className="rounded-2xl border border-white/10 bg-white/8 p-4 backdrop-blur-sm">
-                  <p className="text-xs uppercase tracking-wide text-slate-300">Cleanup Pressure</p>
-                  <p className="mt-2 text-3xl font-semibold">{cleanupCount}</p>
-                  <p className="mt-1 text-sm text-slate-300">
-                    {ownershipCount > 0 ? `${ownershipCount} owner gaps` : "No ownership gaps flagged"}
-                  </p>
-                </div>
-              </div>
+      <Card>
+        <CardHeader className="flex flex-row items-start justify-between gap-4 pb-3">
+          <CardTitle className="text-lg text-slate-950">My cleanup</CardTitle>
+          <Button size="sm" onClick={() => navigate("/pipeline/my-cleanup")}>
+            Open cleanup
+            <ArrowUpRight className="ml-1 h-4 w-4" />
+          </Button>
+        </CardHeader>
+        <CardContent>
+          <div className="grid gap-4 sm:grid-cols-3">
+            <div>
+              <p className="text-xs uppercase tracking-wide text-muted-foreground">Records to fix</p>
+              <p className="mt-1 text-3xl font-bold text-slate-950">{cleanupCount}</p>
             </div>
-          </CardContent>
-        </Card>
-
-        <Card className="border-amber-200 bg-[linear-gradient(180deg,rgba(251,191,36,0.13),rgba(255,255,255,1))]">
-          <CardHeader className="pb-3">
-            <div className="flex items-start justify-between gap-3">
+            {ownershipCount > 0 ? (
               <div>
-                <p className="text-[11px] font-semibold uppercase tracking-[0.24em] text-amber-700">
-                  Cleanup Queue
-                </p>
-                <CardTitle className="mt-2 text-xl text-slate-950">My Cleanup</CardTitle>
+                <p className="text-xs uppercase tracking-wide text-muted-foreground">Ownership gaps</p>
+                <p className="mt-1 text-3xl font-bold text-slate-950">{ownershipCount}</p>
               </div>
-              <ClipboardList className="h-5 w-5 text-amber-700" />
-            </div>
-          </CardHeader>
-          <CardContent className="space-y-4">
-            <div className="grid gap-3 sm:grid-cols-2">
-              <div className="rounded-xl border border-amber-200 bg-white p-4">
-                <p className="text-xs uppercase tracking-wide text-amber-700">Records To Fix</p>
-                <p className="mt-2 text-3xl font-semibold text-slate-950">{cleanupCount}</p>
-              </div>
-              <div className="rounded-xl border border-amber-200 bg-white p-4">
-                <p className="text-xs uppercase tracking-wide text-amber-700">Ownership Issues</p>
-                <p className="mt-2 text-3xl font-semibold text-slate-950">{ownershipCount}</p>
-              </div>
-            </div>
-            <p className="text-sm leading-relaxed text-slate-700">
-              Keep forecast, next step, decision maker, and budget details current so leadership can trust what is in your book.
+            ) : (
+              <div className="hidden sm:block" />
+            )}
+            <p className="text-sm text-muted-foreground">
+              Forecast, next step, decision maker, budget. Keep them current.
             </p>
-            <Button onClick={() => navigate("/pipeline/my-cleanup")} className="w-full">
-              Open My Cleanup
-              <ArrowUpRight className="ml-1 h-4 w-4" />
-            </Button>
-          </CardContent>
-        </Card>
-      </div>
+          </div>
+        </CardContent>
+      </Card>
 
       <FunnelBucketRow buckets={data.funnelBuckets} />
 
-      <div className="grid gap-4 xl:grid-cols-2">
-        <Card className="border-slate-200">
-          <CardHeader className="pb-2">
-            <CardTitle className="text-lg text-slate-950">CRM-Owned Progression</CardTitle>
-          </CardHeader>
-          <CardContent className="space-y-3">
-            {data.crmOwnedProgression && data.crmOwnedProgression.length > 0 ? (
-              data.crmOwnedProgression.map((entry) => (
-                <div key={`${entry.workflowBucket}-${entry.workflowRoute}-${entry.stageName}`} className="rounded-xl border border-slate-200 p-4">
-                  <div className="flex items-center justify-between gap-3">
-                    <div>
-                      <p className="text-sm font-semibold text-slate-950">{entry.stageName}</p>
-                      <p className="mt-1 text-xs uppercase tracking-wide text-slate-500">
-                        {entry.workflowBucket === "lead" ? "Lead" : "Opportunity"} • {getWorkflowRouteLabel(entry.workflowRoute)}
-                      </p>
-                    </div>
-                    <div className="text-right">
-                      <p className="text-lg font-semibold text-slate-950">{entry.itemCount}</p>
-                      <p className="text-xs text-slate-500">{formatCurrency(entry.totalValue)}</p>
-                    </div>
-                  </div>
-                </div>
-              ))
-            ) : (
-              <p className="text-sm text-muted-foreground">No CRM-owned progression pressure right now.</p>
-            )}
-          </CardContent>
-        </Card>
-
-        <Card className="border-slate-200">
-          <CardHeader className="pb-2">
-            <CardTitle className="text-lg text-slate-950">Bid Board Pressure</CardTitle>
-          </CardHeader>
-          <CardContent className="space-y-3">
-            {data.downstreamBottlenecks && data.downstreamBottlenecks.length > 0 ? (
-              data.downstreamBottlenecks.slice(0, 6).map((deal) => (
+      <Card>
+        <CardHeader className="pb-2">
+          <CardTitle className="text-lg text-slate-950">Bid Board (synced)</CardTitle>
+        </CardHeader>
+        <CardContent className="p-0">
+          {data.downstreamBottlenecks && data.downstreamBottlenecks.length > 0 ? (
+            <div className="divide-y border-t">
+              {data.downstreamBottlenecks.slice(0, 6).map((deal) => (
                 <button
                   key={deal.dealId}
                   type="button"
                   onClick={() => navigate(`/deals/${deal.dealId}`)}
-                  className="flex w-full items-start justify-between gap-3 rounded-xl border border-slate-200 p-4 text-left transition-colors hover:bg-slate-50"
+                  className="flex w-full items-start justify-between gap-3 px-6 py-3 text-left transition-colors hover:bg-slate-50"
                 >
-                  <div>
-                    <p className="text-sm font-semibold text-slate-950">{deal.dealName}</p>
-                    <p className="mt-1 text-sm text-slate-600">{deal.stageName}</p>
-                    <p className="mt-1 text-xs text-slate-500">
-                      {getWorkflowRouteLabel(deal.workflowRoute)} • {deal.regionClassification} • {deal.mirroredStageStatus ?? "Synced"}
+                  <div className="min-w-0">
+                    <p className="truncate text-sm font-semibold text-slate-950">{deal.dealName}</p>
+                    <p className="mt-1 truncate text-sm text-slate-600">{deal.stageName}</p>
+                    <p className="mt-1 truncate text-xs text-muted-foreground">
+                      {getWorkflowRouteLabel(deal.workflowRoute)} • {deal.regionClassification} •{" "}
+                      {deal.mirroredStageStatus ?? "Synced"}
                     </p>
                   </div>
-                  <div className="text-right">
+                  <div className="shrink-0 text-right tabular-nums">
                     <p className="text-sm font-semibold text-slate-950">{deal.daysInStage}d</p>
-                    <p className="mt-1 text-xs text-slate-500">
+                    <p className="mt-1 text-xs text-muted-foreground">
                       {formatCurrency(deal.dealValue)} • SLA {deal.staleThresholdDays}d
                     </p>
                   </div>
                 </button>
-              ))
-            ) : (
-              <p className="text-sm text-muted-foreground">No synced Bid Board pressure right now.</p>
-            )}
-          </CardContent>
-        </Card>
-      </div>
+              ))}
+            </div>
+          ) : (
+            <p className="px-6 py-8 text-sm text-muted-foreground">Nothing in Bid Board today.</p>
+          )}
+        </CardContent>
+      </Card>
 
-      <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-6">
-        <StatCard
-          title="Active Leads"
-          value={data.activeLeads.count}
-          subtitle={`${data.staleLeads.count} stale lead${data.staleLeads.count === 1 ? "" : "s"}`}
-          icon={<ClipboardList className="h-5 w-5" />}
-          className="border-sky-200 bg-sky-50/70"
-          onClick={() => navigate("/leads")}
-        />
-        <StatCard
-          title="Active Deals"
-          value={data.activeDeals.count}
-          subtitle={formatCurrency(data.activeDeals.totalValue)}
-          icon={<Briefcase className="h-5 w-5" />}
-          className="border-emerald-200 bg-emerald-50/70"
-          onClick={() => navigate("/deals")}
-        />
-        <StatCard
-          title="Tasks Today"
-          value={taskTotal}
-          subtitle={
-            data.tasksToday.overdue > 0
-              ? `${data.tasksToday.overdue} overdue`
-              : "All caught up"
-          }
-          icon={<CheckSquare className="h-5 w-5" />}
-          className={data.tasksToday.overdue > 0 ? "border-red-200 bg-red-50/60" : "border-slate-200 bg-white"}
-          onClick={() => navigate("/tasks")}
-        />
-        <StatCard
-          title="Activity"
-          value={data.activityThisWeek.total}
-          subtitle={`${data.activityThisWeek.calls} calls, ${data.activityThisWeek.emails} emails`}
-          icon={<Activity className="h-5 w-5" />}
-          className="border-violet-200 bg-violet-50/60"
-        />
-        <StatCard
-          title="Follow-up Compliance"
-          value={`${data.followUpCompliance.complianceRate}%`}
-          subtitle={`${data.followUpCompliance.onTime} of ${data.followUpCompliance.total} on time`}
-          icon={<Target className="h-5 w-5" />}
-          className={
-            data.followUpCompliance.complianceRate < 80
-              ? "border-amber-200 bg-amber-50/60"
-              : "border-slate-200 bg-white"
-          }
-        />
-        <StatCard
-          title="Commission Earned"
-          value={formatCurrency(data.commissionSummary.totalEarnedCommission)}
-          subtitle={`${formatCurrency(data.commissionSummary.directEarnedCommission)} direct`}
-          icon={<DollarSign className="h-5 w-5" />}
-          className="border-amber-200 bg-amber-50/70"
-          onClick={() => navigate("/commissions")}
-        />
-      </div>
+      <Card>
+        <CardHeader className="flex flex-row items-start justify-between gap-3 pb-3">
+          <CardTitle className="text-lg text-slate-950">My numbers</CardTitle>
+          <ActivityRangeSelect
+            value={activityRange}
+            onChange={setActivityRange}
+            className="h-8 w-[140px] text-xs"
+          />
+        </CardHeader>
+        <CardContent className="space-y-5">
+          <div className="grid grid-cols-2 gap-x-6 gap-y-4 border-t pt-4 sm:grid-cols-4">
+            <KpiCell
+              label="Active leads"
+              value={data.activeLeads.count}
+              subtitle={`${data.staleLeads.count} stale`}
+              onClick={() => navigate("/leads")}
+            />
+            <KpiCell
+              label="Active deals"
+              value={data.activeDeals.count}
+              subtitle={formatCurrency(data.activeDeals.totalValue)}
+              onClick={() => navigate("/deals")}
+            />
+            <KpiCell
+              label="Follow-up"
+              value={`${data.followUpCompliance.complianceRate}%`}
+              subtitle={`${data.followUpCompliance.onTime}/${data.followUpCompliance.total} on time`}
+              emphasis={data.followUpCompliance.complianceRate < 80 ? "warning" : "neutral"}
+            />
+            <KpiCell
+              label="Commission"
+              value={formatCurrency(data.commissionSummary.totalEarnedCommission)}
+              subtitle={`${formatCurrency(data.commissionSummary.directEarnedCommission)} direct`}
+              onClick={() => navigate("/commissions")}
+            />
+          </div>
+          <div className="grid grid-cols-2 gap-x-6 gap-y-4 border-t pt-4 sm:grid-cols-4">
+            <KpiCell label="Calls" value={data.activityThisWeek.calls} />
+            <KpiCell label="Emails" value={data.activityThisWeek.emails} />
+            <KpiCell label="Meetings" value={data.activityThisWeek.meetings} />
+            <KpiCell label="Notes" value={data.activityThisWeek.notes} />
+          </div>
+        </CardContent>
+      </Card>
 
       <div className="grid gap-4 xl:grid-cols-[minmax(0,1.3fr)_minmax(320px,0.9fr)]">
-        <Card className="overflow-hidden border-slate-200">
-          <CardHeader className="border-b border-slate-100 bg-slate-50/70">
+        <Card className="overflow-hidden">
+          <CardHeader className="border-b pb-3">
             <div className="flex items-start justify-between gap-3">
-              <div>
-                <p className="text-[11px] font-semibold uppercase tracking-[0.24em] text-slate-500">
-                  Execution Queue
-                </p>
-                <CardTitle className="mt-2 text-lg">Today&apos;s Tasks</CardTitle>
-              </div>
-              <Badge variant="outline" className="border-slate-200 text-slate-600">
-                10 at a time
-              </Badge>
+              <CardTitle className="text-lg">Today&apos;s tasks</CardTitle>
+              <Badge variant="outline">Top 10</Badge>
             </div>
           </CardHeader>
           <CardContent className="space-y-3 p-4">
             {overdueTasks.length === 0 && todayTasks.length === 0 ? (
-              <p className="py-4 text-sm text-muted-foreground">No tasks today. Your queue is clear.</p>
+              <p className="py-4 text-sm text-muted-foreground">Queue clear.</p>
             ) : (
               <>
                 {overdueTasks.length > 0 ? (
@@ -553,84 +550,38 @@ export function RepDashboardPage() {
           </CardContent>
         </Card>
 
-        <div className="space-y-4">
-          <Card className="border-slate-200">
-            <CardHeader className="pb-2">
-              <div className="flex items-start justify-between gap-3">
-                <div>
-                  <p className="text-[11px] font-semibold uppercase tracking-[0.24em] text-slate-500">
-                    Pipeline Pulse
-                  </p>
-                  <CardTitle className="mt-2 text-lg">My Pipeline</CardTitle>
-                </div>
-                <TrendingUp className="h-5 w-5 text-slate-400" />
-              </div>
-            </CardHeader>
-            <CardContent>
-              {data.pipelineByStage.length > 0 ? (
-                <div className="cursor-pointer" onClick={() => navigate("/pipeline")}>
-                  <PipelineBarChart data={data.pipelineByStage} />
-                </div>
-              ) : (
-                <p className="py-8 text-center text-muted-foreground">No active deals in pipeline.</p>
-              )}
-            </CardContent>
-          </Card>
-
-          <Card className="border-slate-200">
-            <CardHeader className="pb-2">
-              <div className="flex items-start justify-between gap-3">
-                <div>
-                  <p className="text-[11px] font-semibold uppercase tracking-[0.24em] text-slate-500">
-                    Activity Mix
-                  </p>
-                  <CardTitle className="mt-2 text-lg">{ACTIVITY_RANGE_LABELS[activityRange]}</CardTitle>
-                </div>
-                <ActivityRangeSelect
-                  value={activityRange}
-                  onChange={setActivityRange}
-                  className="h-8 w-[140px] text-xs"
-                />
-              </div>
-            </CardHeader>
-            <CardContent>
-              <div className="grid grid-cols-2 gap-3">
-                <div className="rounded-xl bg-red-50 p-4 text-center">
-                  <p className="text-2xl font-semibold text-red-700">{data.activityThisWeek.calls}</p>
-                  <p className="mt-1 text-xs uppercase tracking-wide text-red-600">Calls</p>
-                </div>
-                <div className="rounded-xl bg-cyan-50 p-4 text-center">
-                  <p className="text-2xl font-semibold text-cyan-700">{data.activityThisWeek.emails}</p>
-                  <p className="mt-1 text-xs uppercase tracking-wide text-cyan-600">Emails</p>
-                </div>
-                <div className="rounded-xl bg-blue-50 p-4 text-center">
-                  <p className="text-2xl font-semibold text-blue-700">{data.activityThisWeek.meetings}</p>
-                  <p className="mt-1 text-xs uppercase tracking-wide text-blue-600">Meetings</p>
-                </div>
-                <div className="rounded-xl bg-emerald-50 p-4 text-center">
-                  <p className="text-2xl font-semibold text-emerald-700">{data.activityThisWeek.notes}</p>
-                  <p className="mt-1 text-xs uppercase tracking-wide text-emerald-600">Notes</p>
-                </div>
-              </div>
-            </CardContent>
-          </Card>
-        </div>
+        <Card>
+          <CardHeader className="pb-2">
+            <CardTitle className="text-lg">My pipeline</CardTitle>
+          </CardHeader>
+          <CardContent>
+            {data.pipelineByStage.length > 0 ? (
+              <button
+                type="button"
+                onClick={() => navigate("/pipeline")}
+                className="block w-full cursor-pointer text-left transition-opacity hover:opacity-80"
+              >
+                <PipelineBarChart data={data.pipelineByStage} />
+              </button>
+            ) : (
+              <p className="py-8 text-center text-sm text-muted-foreground">No active deals.</p>
+            )}
+          </CardContent>
+        </Card>
       </div>
 
       <div className="grid gap-4 xl:grid-cols-2">
         <SnapshotCard
-          eyebrow="Leads Snapshot"
-          title="Active Leads"
-          emptyLabel="No active leads yet."
+          title="Active leads"
+          emptyLabel="No active leads."
           actionLabel="Open leads"
           onAction={() => navigate("/leads")}
           onOpen={(href) => navigate(href)}
           rows={leadsSnapshot}
         />
         <SnapshotCard
-          eyebrow="Deals Snapshot"
-          title="Active Deals"
-          emptyLabel="No active deals yet."
+          title="Active deals"
+          emptyLabel="No active deals."
           actionLabel="Open deals"
           onAction={() => navigate("/deals")}
           onOpen={(href) => navigate(href)}
