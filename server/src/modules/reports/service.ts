@@ -17,6 +17,11 @@ import type { DealScopingIntakeStatus, WorkflowRoute } from "@trock-crm/shared/t
 import { db } from "../../db.js";
 
 type TenantDb = NodePgDatabase<typeof schema>;
+type ExecuteRows<T> = { rows: T[] } | T[];
+
+function rowsFromExecute<T>(result: ExecuteRows<T>): T[] {
+  return Array.isArray(result) ? result : result.rows;
+}
 
 /** Default to Jan 1 of current year through today */
 function defaultDateRange(from?: string, to?: string): { from: string; to: string } {
@@ -201,6 +206,34 @@ export interface ForecastVarianceOverview {
   deals: ForecastVarianceDealRow[];
 }
 
+interface ForecastVarianceSummarySqlRow extends Record<string, unknown> {
+  comparable_deals: number | string | null;
+  avg_initial_variance: number | string | null;
+  avg_qualified_variance: number | string | null;
+  avg_estimating_variance: number | string | null;
+  avg_close_drift_days: number | string | null;
+}
+
+interface ForecastVarianceRepRollupSqlRow extends ForecastVarianceSummarySqlRow {
+  rep_id: string;
+  rep_name: string;
+}
+
+interface ForecastVarianceDealSqlRow extends Record<string, unknown> {
+  deal_id: string;
+  deal_name: string;
+  rep_name: string;
+  workflow_route: WorkflowRoute;
+  initial_forecast: number | string | null;
+  qualified_forecast: number | string | null;
+  estimating_forecast: number | string | null;
+  awarded_amount: number | string | null;
+  initial_variance: number | string | null;
+  qualified_variance: number | string | null;
+  estimating_variance: number | string | null;
+  close_drift_days: number | string | null;
+}
+
 function buildForecastVarianceFilterSql(filters: NormalizedAnalyticsFilters) {
   const clauses = [
     sql`COALESCE(d.is_test_data, false) = false`,
@@ -224,7 +257,7 @@ function buildForecastVarianceFilterSql(filters: NormalizedAnalyticsFilters) {
   return sql.join(clauses, sql` AND `);
 }
 
-function mapForecastVarianceSummaryRow(row?: Record<string, any>): ForecastVarianceSummary {
+function mapForecastVarianceSummaryRow(row?: ForecastVarianceSummarySqlRow): ForecastVarianceSummary {
   return {
     comparableDeals: Number(row?.comparable_deals ?? 0),
     avgInitialVariance: Number(row?.avg_initial_variance ?? 0),
@@ -241,7 +274,7 @@ export async function getForecastVarianceOverview(
   const filters = normalizeAnalyticsFilters(input);
   const whereSql = buildForecastVarianceFilterSql(filters);
 
-  const summaryResult = await tenantDb.execute(sql`
+  const summaryResult = await tenantDb.execute<ForecastVarianceSummarySqlRow>(sql`
     WITH forecast_base AS (
       SELECT
         d.id AS deal_id,
@@ -282,7 +315,7 @@ export async function getForecastVarianceOverview(
     FROM forecast_base
   `);
 
-  const repRollupsResult = await tenantDb.execute(sql`
+  const repRollupsResult = await tenantDb.execute<ForecastVarianceRepRollupSqlRow>(sql`
     WITH forecast_base AS (
       SELECT
         d.id AS deal_id,
@@ -327,7 +360,7 @@ export async function getForecastVarianceOverview(
     ORDER BY avg_initial_variance DESC, rep_name ASC
   `);
 
-  const dealsResult = await tenantDb.execute(sql`
+  const dealsResult = await tenantDb.execute<ForecastVarianceDealSqlRow>(sql`
     WITH forecast_base AS (
       SELECT
         d.id AS deal_id,
@@ -387,13 +420,13 @@ export async function getForecastVarianceOverview(
     LIMIT 50
   `);
 
-  const summaryRows = (summaryResult as any).rows ?? summaryResult;
-  const repRows = (repRollupsResult as any).rows ?? repRollupsResult;
-  const dealRows = (dealsResult as any).rows ?? dealsResult;
+  const summaryRows = rowsFromExecute(summaryResult);
+  const repRows = rowsFromExecute(repRollupsResult);
+  const dealRows = rowsFromExecute(dealsResult);
 
   return {
     summary: mapForecastVarianceSummaryRow(summaryRows[0]),
-    repRollups: repRows.map((row: any) => ({
+    repRollups: repRows.map((row) => ({
       repId: row.rep_id,
       repName: row.rep_name,
       comparableDeals: Number(row.comparable_deals ?? 0),
@@ -402,7 +435,7 @@ export async function getForecastVarianceOverview(
       avgEstimatingVariance: Number(row.avg_estimating_variance ?? 0),
       avgCloseDriftDays: Number(row.avg_close_drift_days ?? 0),
     })),
-    deals: dealRows.map((row: any) => ({
+    deals: dealRows.map((row) => ({
       dealId: row.deal_id,
       dealName: row.deal_name,
       repName: row.rep_name,

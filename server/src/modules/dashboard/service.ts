@@ -37,6 +37,11 @@ import { getMyCleanupQueue } from "../admin/cleanup-queue-service.js";
 import { getMigrationSummary } from "../migration/service.js";
 
 type TenantDb = NodePgDatabase<typeof schema>;
+type ExecuteRows<T> = { rows: T[] } | T[];
+
+function rowsFromExecute<T>(result: ExecuteRows<T>): T[] {
+  return Array.isArray(result) ? result : result.rows;
+}
 // Intentionally includes canonical stage-v2 slugs plus historical aliases so
 // dashboard counts stay accurate while legacy rows still exist during rollout.
 const ESTIMATING_PROGRESS_STAGE_SLUGS = [
@@ -269,10 +274,25 @@ export interface StaleLeadDashboardRow {
   repName: string;
   daysInStage: number;
   pipelineType?: "normal" | "service";
-  locationLabel?: string;
+  locationLabel?: string | null;
   estimatedValue?: number;
   staleThresholdDays?: number;
   daysPastDue?: number;
+}
+
+interface StaleLeadWatchlistSqlRow extends Record<string, unknown> {
+  lead_id: string;
+  lead_name: string;
+  company_name: string;
+  property_name: string;
+  stage_name: string;
+  rep_name: string;
+  days_in_stage: number | string | null;
+  pipeline_type: "normal" | "service" | null;
+  location_label: string | null;
+  estimated_value: number | string | null;
+  stale_threshold_days: number | string | null;
+  days_past_due: number | string | null;
 }
 
 export interface DashboardCrmOwnedProgressionRow {
@@ -308,7 +328,7 @@ async function getStaleLeadWatchlist(
     ? sql`AND l.assigned_rep_id = ${options.repId}`
     : sql``;
 
-  const result = await tenantDb.execute(sql`
+  const result = await tenantDb.execute<StaleLeadWatchlistSqlRow>(sql`
     SELECT
       l.id AS lead_id,
       l.name AS lead_name,
@@ -340,8 +360,8 @@ async function getStaleLeadWatchlist(
     ORDER BY days_in_stage DESC, l.updated_at ASC
   `);
 
-  const rows = (result as any).rows ?? result;
-  return rows.map((row: any) => ({
+  const rows = rowsFromExecute(result);
+  return rows.map((row) => ({
     leadId: row.lead_id,
     leadName: row.lead_name,
     companyName: row.company_name,
