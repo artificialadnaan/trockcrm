@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback } from "react";
 import { api } from "@/lib/api";
 import type { FunnelBucketSummary } from "./use-dashboard";
+import type { ForecastVsGoal } from "./use-rep-performance";
 
 export interface RepPerformanceCard {
   repId: string;
@@ -92,6 +93,51 @@ export interface DirectorDashboardData {
     dealValue: number;
     daysInStage: number;
     staleThresholdDays: number;
+  }>;
+  atRiskDeals?: Array<{
+    dealId: string;
+    dealName: string;
+    stageName: string;
+    mirroredStageStatus: string | null;
+    workflowRoute: "normal" | "service";
+    regionClassification: string;
+    dealValue: number;
+    daysInStage: number;
+    staleThresholdDays: number;
+  }>;
+  forecastVsGoal?: ForecastVsGoal;
+  activityPulse?: Array<{
+    repId: string;
+    repName: string;
+    calls: number;
+    emails: number;
+    meetings: number;
+    notes: number;
+    total: number;
+  }>;
+  strategicAlerts?: Array<{
+    id: string;
+    severity: "info" | "warning" | "critical";
+    title: string;
+    detail: string;
+    repId?: string;
+  }>;
+  aiCoachingPrompts?: Array<{
+    id: string;
+    repId: string;
+    repName: string;
+    prompt: string;
+    reason: string;
+  }>;
+  recentCloses?: Array<{
+    dealId: string;
+    dealNumber: string | null;
+    dealName: string;
+    repId: string | null;
+    repName: string;
+    outcome: "won" | "lost";
+    dealValue: number;
+    closedAt: string;
   }>;
   opportunityVsPipeline?: {
     opportunityValue: number;

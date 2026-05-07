@@ -8,6 +8,9 @@ import {
   getDirectorDashboard,
   getDirectorCommissionWorkspace,
   getRepDetail,
+  getRepPerformanceSnapshots,
+  REP_PERFORMANCE_PERIOD_KINDS,
+  type RepPerformancePeriodKind,
 } from "./service.js";
 
 const router = Router();
@@ -71,6 +74,25 @@ router.get(
         from: req.query.from as string | undefined,
         to: req.query.to as string | undefined,
       });
+      await req.commitTransaction!();
+      res.json({ data });
+    } catch (err) {
+      next(err);
+    }
+  }
+);
+
+router.get(
+  "/director/rep-performance",
+  requireRole("admin", "director"),
+  async (req, res, next) => {
+    try {
+      const periodKind = (req.query.periodKind ?? "mtd") as string;
+      if (!REP_PERFORMANCE_PERIOD_KINDS.includes(periodKind as RepPerformancePeriodKind)) {
+        throw new AppError(400, "Invalid rep performance period kind");
+      }
+
+      const data = await getRepPerformanceSnapshots(req.tenantDb!, periodKind as RepPerformancePeriodKind);
       await req.commitTransaction!();
       res.json({ data });
     } catch (err) {

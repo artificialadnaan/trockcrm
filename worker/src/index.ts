@@ -23,6 +23,7 @@ import { runCallRecordingCleanup } from "./jobs/call-recording-cleanup.js";
 import { runCallRecordingTranscription } from "./jobs/call-recording-transcribe.js";
 import { runRfpRequestDeadLetterSweep } from "./jobs/rfp-request-delivery.js";
 import { runReportsExecutionTick } from "./jobs/reports-execution.js";
+import { runRepPerformanceRollup } from "./jobs/rep-performance-rollup.js";
 
 const POLL_INTERVAL_MS = 2000; // Poll job queue every 2 seconds
 const RFP_DEAD_LETTER_SWEEP_INTERVAL_MS = 60000;
@@ -238,6 +239,17 @@ async function main() {
     }
   }, { timezone: "America/Chicago" });
   console.log("[Worker] Cron scheduled: disconnect escalation scan at 7:45 AM CT weekdays");
+
+  // Rep performance snapshots: daily at 4:00 AM CT
+  cron.schedule("0 4 * * *", async () => {
+    console.log("[Worker:cron] Running rep performance rollup...");
+    try {
+      await runRepPerformanceRollup();
+    } catch (err) {
+      console.error("[Worker:cron] Rep performance rollup failed:", err);
+    }
+  }, { timezone: "America/Chicago" });
+  console.log("[Worker] Cron scheduled: rep performance rollup at 4:00 AM CT daily");
 
   // Manager alerts: evaluate every 5 minutes and let office-local due gating decide when to send.
   cron.schedule("*/5 * * * *", async () => {

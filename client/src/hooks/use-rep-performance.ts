@@ -1,6 +1,52 @@
 import { useState, useEffect, useCallback } from "react";
 import { api } from "@/lib/api";
 
+export type RepPerformancePeriodKind =
+  | "mtd"
+  | "qtd"
+  | "ytd"
+  | "last_month"
+  | "last_quarter"
+  | "last_year"
+  | "week_8back";
+
+export type LegacyRepPerformancePeriod = "month" | "quarter" | "year";
+
+export interface ForecastVsGoal {
+  forecast: number;
+  goal: number | null;
+  goalSource: "none" | "manual" | "calculated";
+  percentToGoal: number | null;
+}
+
+export interface RepPerformanceSnapshotRow {
+  repId: string;
+  repName: string;
+  periodKind: RepPerformancePeriodKind;
+  periodStart: string;
+  periodEnd: string;
+  pipelineValue: number;
+  closedValue: number;
+  dealsCount: number;
+  winsCount: number;
+  lossesCount: number;
+  winRate: number;
+  atRiskCount: number;
+  activityTotal: number;
+  calls: number;
+  emails: number;
+  meetings: number;
+  notes: number;
+  sparkline8w: number[];
+  region: string | null;
+  computedAt: string;
+  forecast: number;
+  goal: number | null;
+  goalSource: "none" | "manual" | "calculated";
+  percentToGoal: number | null;
+  forecastVsGoal: ForecastVsGoal;
+}
+
 export interface PeriodMetrics {
   dealsWon: number;
   dealsLost: number;
@@ -20,6 +66,8 @@ export interface PeriodChange {
 }
 
 export interface RepPerformanceData {
+  rows: RepPerformanceSnapshotRow[];
+  forecastVsGoal: ForecastVsGoal;
   reps: Array<{
     repId: string;
     repName: string;
@@ -30,7 +78,93 @@ export interface RepPerformanceData {
   periodLabel: { current: string; previous: string };
 }
 
-export function useRepPerformance(period: "month" | "quarter" | "year") {
+export function normalizeRepPerformancePeriod(
+  period: RepPerformancePeriodKind | LegacyRepPerformancePeriod
+): RepPerformancePeriodKind {
+  if (period === "month") return "mtd";
+  if (period === "quarter") return "qtd";
+  if (period === "year") return "ytd";
+  return period;
+}
+
+function labelForPeriod(periodKind: RepPerformancePeriodKind) {
+  const labels: Record<RepPerformancePeriodKind, string> = {
+    mtd: "Month to date",
+    qtd: "Quarter to date",
+    ytd: "Year to date",
+    last_month: "Last month",
+    last_quarter: "Last quarter",
+    last_year: "Last year",
+    week_8back: "Last 8 weeks",
+  };
+  return labels[periodKind];
+}
+
+function toPeriodMetrics(row: RepPerformanceSnapshotRow): PeriodMetrics {
+  return {
+    dealsWon: row.winsCount,
+    dealsLost: row.lossesCount,
+    totalWonValue: row.closedValue,
+    activitiesLogged: row.activityTotal,
+    winRate: row.winRate,
+    avgDaysToClose: 0,
+  };
+}
+
+function zeroPeriodMetrics(): PeriodMetrics {
+  return {
+    dealsWon: 0,
+    dealsLost: 0,
+    totalWonValue: 0,
+    activitiesLogged: 0,
+    winRate: 0,
+    avgDaysToClose: 0,
+  };
+}
+
+function toChange(current: PeriodMetrics, previous: PeriodMetrics): PeriodChange {
+  return {
+    dealsWon: current.dealsWon - previous.dealsWon,
+    dealsLost: current.dealsLost - previous.dealsLost,
+    totalWonValue: current.totalWonValue - previous.totalWonValue,
+    activitiesLogged: current.activitiesLogged - previous.activitiesLogged,
+    winRate: current.winRate - previous.winRate,
+    avgDaysToClose: current.avgDaysToClose - previous.avgDaysToClose,
+  };
+}
+
+export async function fetchRepPerformance(
+  period: RepPerformancePeriodKind | LegacyRepPerformancePeriod
+): Promise<RepPerformanceData> {
+  const periodKind = normalizeRepPerformancePeriod(period);
+  const response = await api<{ data: { rows: RepPerformanceSnapshotRow[]; forecastVsGoal: ForecastVsGoal } }>(
+    `/dashboard/director/rep-performance?periodKind=${periodKind}`
+  );
+  const rows = response.data.rows;
+
+  return {
+    rows,
+    forecastVsGoal: response.data.forecastVsGoal,
+    reps: rows.map((row) => {
+      const current = toPeriodMetrics(row);
+      const previous = zeroPeriodMetrics();
+
+      return {
+        repId: row.repId,
+        repName: row.repName,
+        current,
+        previous,
+        change: toChange(current, previous),
+      };
+    }),
+    periodLabel: {
+      current: labelForPeriod(periodKind),
+      previous: "Baseline pending",
+    },
+  };
+}
+
+export function useRepPerformance(period: RepPerformancePeriodKind | LegacyRepPerformancePeriod = "mtd") {
   const [data, setData] = useState<RepPerformanceData | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -39,9 +173,7 @@ export function useRepPerformance(period: "month" | "quarter" | "year") {
     setLoading(true);
     setError(null);
     try {
-      const res = await api<RepPerformanceData>(
-        `/reports/rep-performance?period=${period}`
-      );
+      const res = await fetchRepPerformance(period);
       setData(res);
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : "Failed to load performance data");

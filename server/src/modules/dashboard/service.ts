@@ -1371,6 +1371,85 @@ export interface RepPerformanceCard {
   staleLeads: number;
 }
 
+export const REP_PERFORMANCE_PERIOD_KINDS = [
+  "mtd",
+  "qtd",
+  "ytd",
+  "last_month",
+  "last_quarter",
+  "last_year",
+  "week_8back",
+] as const;
+
+export type RepPerformancePeriodKind = (typeof REP_PERFORMANCE_PERIOD_KINDS)[number];
+
+export interface ForecastVsGoal {
+  forecast: number;
+  goal: number | null;
+  goalSource: "none" | "manual" | "calculated";
+  percentToGoal: number | null;
+}
+
+export interface RepPerformanceSnapshotRow {
+  repId: string;
+  repName: string;
+  periodKind: RepPerformancePeriodKind;
+  periodStart: string;
+  periodEnd: string;
+  pipelineValue: number;
+  closedValue: number;
+  dealsCount: number;
+  winsCount: number;
+  lossesCount: number;
+  winRate: number;
+  atRiskCount: number;
+  activityTotal: number;
+  calls: number;
+  emails: number;
+  meetings: number;
+  notes: number;
+  sparkline8w: number[];
+  region: string | null;
+  computedAt: string;
+  forecast: number;
+  goal: number | null;
+  goalSource: "none" | "manual" | "calculated";
+  percentToGoal: number | null;
+  forecastVsGoal: ForecastVsGoal;
+}
+
+export interface RepPerformanceSnapshotsData {
+  rows: RepPerformanceSnapshotRow[];
+  forecastVsGoal: ForecastVsGoal;
+}
+
+export interface StrategicAlert {
+  id: string;
+  severity: "info" | "warning" | "critical";
+  title: string;
+  detail: string;
+  repId?: string;
+}
+
+export interface AiCoachingPrompt {
+  id: string;
+  repId: string;
+  repName: string;
+  prompt: string;
+  reason: string;
+}
+
+export interface RecentClose {
+  dealId: string;
+  dealNumber: string | null;
+  dealName: string;
+  repId: string | null;
+  repName: string;
+  outcome: "won" | "lost";
+  dealValue: number;
+  closedAt: string;
+}
+
 export interface DirectorDashboardData {
   officeFunnelBuckets: FunnelBucketSummary[];
   repFunnelRows: DirectorRepFunnelRow[];
@@ -1409,6 +1488,20 @@ export interface DirectorDashboardData {
   staleLeads: StaleLeadDashboardRow[];
   crmOwnedProgression: DashboardCrmOwnedProgressionRow[];
   downstreamBottlenecks: DashboardDownstreamBottleneckRow[];
+  atRiskDeals: DashboardDownstreamBottleneckRow[];
+  forecastVsGoal: ForecastVsGoal;
+  activityPulse: Array<{
+    repId: string;
+    repName: string;
+    calls: number;
+    emails: number;
+    meetings: number;
+    notes: number;
+    total: number;
+  }>;
+  strategicAlerts: StrategicAlert[];
+  aiCoachingPrompts: AiCoachingPrompt[];
+  recentCloses: RecentClose[];
   ddVsPipeline: {
     ddValue: number;
     ddCount: number;
@@ -1466,6 +1559,194 @@ async function getRepDealPipelineSummary(
     repId: String(row.rep_id),
     activeDeals: Number(row.active_deals ?? 0),
     pipelineValue: Number(row.pipeline_value ?? 0),
+  }));
+}
+
+function dateOnly(value: unknown): string {
+  if (!value) return "";
+  return String(value).slice(0, 10);
+}
+
+function normalizeSparkline(value: unknown): number[] {
+  if (!Array.isArray(value)) return [];
+  return value.map((entry) => Number(entry ?? 0));
+}
+
+function buildGoalNullForecast(forecast: number): ForecastVsGoal {
+  return {
+    forecast,
+    goal: null,
+    goalSource: "none",
+    percentToGoal: null,
+  };
+}
+
+export async function getRepPerformanceSnapshots(
+  tenantDb: TenantDb,
+  periodKind: RepPerformancePeriodKind = "mtd"
+): Promise<RepPerformanceSnapshotsData> {
+  const result = await tenantDb.execute(sql`
+    SELECT DISTINCT ON (rps.rep_id, rps.period_kind)
+      rps.rep_id,
+      COALESCE(u.display_name, 'Rep') AS rep_name,
+      rps.period_kind,
+      rps.period_start,
+      rps.period_end,
+      rps.pipeline_value::numeric AS pipeline_value,
+      rps.closed_value::numeric AS closed_value,
+      rps.deals_count::int AS deals_count,
+      rps.wins_count::int AS wins_count,
+      rps.losses_count::int AS losses_count,
+      rps.win_rate::numeric AS win_rate,
+      rps.at_risk_count::int AS at_risk_count,
+      rps.activity_total::int AS activity_total,
+      rps.calls::int AS calls,
+      rps.emails::int AS emails,
+      rps.meetings::int AS meetings,
+      rps.notes::int AS notes,
+      rps.sparkline_8w,
+      rps.region,
+      rps.computed_at
+    FROM public.rep_performance_snapshots rps
+    LEFT JOIN public.users u ON u.id = rps.rep_id
+    WHERE rps.period_kind = ${periodKind}
+    ORDER BY rps.rep_id, rps.period_kind, rps.computed_at DESC NULLS LAST, rps.period_start DESC
+  `);
+
+  const rows = rowsFromExecute<any>(result).map((row) => {
+    const forecast = Number(row.pipeline_value ?? 0);
+    const forecastVsGoal = buildGoalNullForecast(forecast);
+
+    return {
+      repId: String(row.rep_id),
+      repName: String(row.rep_name ?? "Rep"),
+      periodKind: row.period_kind as RepPerformancePeriodKind,
+      periodStart: dateOnly(row.period_start),
+      periodEnd: dateOnly(row.period_end),
+      pipelineValue: forecast,
+      closedValue: Number(row.closed_value ?? 0),
+      dealsCount: Number(row.deals_count ?? 0),
+      winsCount: Number(row.wins_count ?? 0),
+      lossesCount: Number(row.losses_count ?? 0),
+      winRate: Number(row.win_rate ?? 0),
+      atRiskCount: Number(row.at_risk_count ?? 0),
+      activityTotal: Number(row.activity_total ?? 0),
+      calls: Number(row.calls ?? 0),
+      emails: Number(row.emails ?? 0),
+      meetings: Number(row.meetings ?? 0),
+      notes: Number(row.notes ?? 0),
+      sparkline8w: normalizeSparkline(row.sparkline_8w),
+      region: row.region ? String(row.region) : null,
+      computedAt: toIsoOrNow(row.computed_at),
+      forecast,
+      goal: forecastVsGoal.goal,
+      goalSource: forecastVsGoal.goalSource,
+      percentToGoal: forecastVsGoal.percentToGoal,
+      forecastVsGoal,
+    };
+  });
+
+  return {
+    rows,
+    forecastVsGoal: buildGoalNullForecast(rows.reduce((sum, row) => sum + row.forecast, 0)),
+  };
+}
+
+function buildStrategicAlerts(
+  snapshots: RepPerformanceSnapshotRow[],
+  bottlenecks: DashboardDownstreamBottleneckRow[]
+): StrategicAlert[] {
+  const alerts: StrategicAlert[] = [];
+
+  for (const row of snapshots) {
+    if (row.atRiskCount > 0) {
+      alerts.push({
+        id: `at-risk-${row.repId}`,
+        severity: row.atRiskCount >= 3 ? "critical" : "warning",
+        title: "At-risk pipeline",
+        detail: `${row.repName} has ${row.atRiskCount} at-risk deal${row.atRiskCount === 1 ? "" : "s"}.`,
+        repId: row.repId,
+      });
+    }
+
+    if (row.dealsCount > 0 && row.winRate < 25) {
+      alerts.push({
+        id: `win-rate-${row.repId}`,
+        severity: "warning",
+        title: "Low win rate",
+        detail: `${row.repName} is tracking a ${row.winRate}% win rate for this period.`,
+        repId: row.repId,
+      });
+    }
+  }
+
+  if (bottlenecks.length > 0) {
+    alerts.push({
+      id: "downstream-bottlenecks",
+      severity: "info",
+      title: "Downstream bottlenecks",
+      detail: `${bottlenecks.length} downstream item${bottlenecks.length === 1 ? "" : "s"} need director review.`,
+    });
+  }
+
+  return alerts.slice(0, 8);
+}
+
+function buildAiCoachingPrompts(snapshots: RepPerformanceSnapshotRow[]): AiCoachingPrompt[] {
+  return snapshots
+    .filter((row) => row.pipelineValue > 0 && (row.winRate < 30 || row.activityTotal < 5 || row.atRiskCount > 0))
+    .slice(0, 8)
+    .map((row) => ({
+      id: `coaching-${row.repId}`,
+      repId: row.repId,
+      repName: row.repName,
+      prompt: `Review ${row.repName}'s current pipeline and next-step coverage.`,
+      reason:
+        row.atRiskCount > 0
+          ? "At-risk deals are present in the snapshot."
+          : row.winRate < 30
+            ? "Win rate is below the director review threshold."
+            : "Activity volume is below the expected review threshold.",
+    }));
+}
+
+async function getRecentCloses(
+  tenantDb: TenantDb,
+  options: { from: string; to: string }
+): Promise<RecentClose[]> {
+  const result = await tenantDb.execute(sql`
+    SELECT
+      d.id AS deal_id,
+      d.deal_number,
+      d.name AS deal_name,
+      d.assigned_rep_id AS rep_id,
+      COALESCE(u.display_name, 'Unassigned') AS rep_name,
+      CASE
+        WHEN psc.slug IN (${sql.join([...WON_STAGE_SLUGS, ...LEGACY_WON_STAGE_SLUGS].map((slug) => sql`${slug}`), sql`, `)}) THEN 'won'
+        ELSE 'lost'
+      END AS outcome,
+      COALESCE(d.awarded_amount, d.bid_estimate, d.dd_estimate, 0)::numeric AS deal_value,
+      COALESCE(d.actual_close_date, d.contract_signed_date, d.contract_signed_at::date, d.updated_at::date) AS closed_at
+    FROM ${deals} d
+    JOIN ${pipelineStageConfig} psc ON psc.id = d.stage_id
+    LEFT JOIN ${users} u ON u.id = d.assigned_rep_id
+    WHERE d.is_active = true
+      AND psc.slug IN (${sql.join([...WON_STAGE_SLUGS, ...LEGACY_WON_STAGE_SLUGS, ...LOST_STAGE_SLUGS, ...LEGACY_LOST_STAGE_SLUGS].map((slug) => sql`${slug}`), sql`, `)})
+      AND COALESCE(d.actual_close_date, d.contract_signed_date, d.contract_signed_at::date, d.updated_at::date) >= ${options.from}::date
+      AND COALESCE(d.actual_close_date, d.contract_signed_date, d.contract_signed_at::date, d.updated_at::date) <= ${options.to}::date
+    ORDER BY closed_at DESC NULLS LAST, d.name ASC
+    LIMIT 12
+  `);
+
+  return rowsFromExecute<any>(result).map((row) => ({
+    dealId: String(row.deal_id),
+    dealNumber: row.deal_number ? String(row.deal_number) : null,
+    dealName: String(row.deal_name ?? "Deal"),
+    repId: row.rep_id ? String(row.rep_id) : null,
+    repName: String(row.rep_name ?? "Unassigned"),
+    outcome: row.outcome === "won" ? "won" : "lost",
+    dealValue: Number(row.deal_value ?? 0),
+    closedAt: dateOnly(row.closed_at),
   }));
 }
 
@@ -1542,6 +1823,8 @@ export async function getDirectorDashboard(
     downstreamBottlenecks,
     funnelSummary,
     repCommissionRows,
+    repPerformanceSnapshots,
+    recentCloses,
   ] = await Promise.all([
     // 1. Per-rep performance cards
     buildRepPerformanceCards(tenantDb, { from, to }),
@@ -1567,6 +1850,8 @@ export async function getDirectorDashboard(
     getDownstreamBottlenecks(tenantDb),
     getDirectorFunnelSummary(tenantDb),
     getDirectorRepCommissionRows(tenantDb, { from, to }),
+    getRepPerformanceSnapshots(tenantDb, "mtd"),
+    getRecentCloses(tenantDb, { from, to }),
   ]);
 
   return {
@@ -1607,6 +1892,20 @@ export async function getDirectorDashboard(
     staleLeads: staleLeadResult,
     crmOwnedProgression,
     downstreamBottlenecks,
+    atRiskDeals: downstreamBottlenecks,
+    forecastVsGoal: repPerformanceSnapshots.forecastVsGoal,
+    activityPulse: repPerformanceSnapshots.rows.map((row) => ({
+      repId: row.repId,
+      repName: row.repName,
+      calls: row.calls,
+      emails: row.emails,
+      meetings: row.meetings,
+      notes: row.notes,
+      total: row.activityTotal,
+    })),
+    strategicAlerts: buildStrategicAlerts(repPerformanceSnapshots.rows, downstreamBottlenecks),
+    aiCoachingPrompts: buildAiCoachingPrompts(repPerformanceSnapshots.rows),
+    recentCloses,
     ddVsPipeline: ddResult,
   };
 }
