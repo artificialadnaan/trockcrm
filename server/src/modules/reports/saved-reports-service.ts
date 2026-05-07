@@ -235,8 +235,21 @@ export async function getReportRuns(userId: string, officeId: string) {
     .orderBy(desc(reportRuns.startedAt));
 }
 
+async function getSavedReportForOfficeWrite(reportId: string, userId: string, officeId: string) {
+  const rows = await db
+    .select()
+    .from(savedReports)
+    .where(and(eq(savedReports.id, reportId), eq(savedReports.officeId, officeId)))
+    .limit(1);
+
+  const report = rows[0] ?? null;
+  if (!report) return null;
+  if (report.visibility === "private" && report.createdBy !== userId) return null;
+  return report;
+}
+
 export async function createReportSchedule(input: CreateReportScheduleInput) {
-  const report = await getSavedReportById(input.reportId, input.userId, input.officeId);
+  const report = await getSavedReportForOfficeWrite(input.reportId, input.userId, input.officeId);
   if (!report) throw new AppError(404, "Report not found");
 
   const result = await db
@@ -255,7 +268,7 @@ export async function createReportSchedule(input: CreateReportScheduleInput) {
 }
 
 export async function createReportRun(input: CreateReportRunInput) {
-  const report = await getSavedReportById(input.reportId, input.userId, input.officeId);
+  const report = await getSavedReportForOfficeWrite(input.reportId, input.userId, input.officeId);
   if (!report) throw new AppError(404, "Report not found");
 
   if (input.scheduleId) {
