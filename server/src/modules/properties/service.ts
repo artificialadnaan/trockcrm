@@ -136,6 +136,17 @@ export function classifyPropertyEngagementStatus(input: {
   return "no_engagement";
 }
 
+export function buildPropertyEngagementStatus(input: {
+  leads: Array<{ isActive: boolean }>;
+  deals: Array<{ isActive: boolean; sourceLeadId?: string | null }>;
+}): PropertyEngagementStatus {
+  return classifyPropertyEngagementStatus({
+    dealCount: input.deals.filter((deal) => deal.isActive).length,
+    leadCount: input.leads.filter((lead) => lead.isActive).length,
+    convertedDealCount: input.deals.filter((deal) => Boolean(deal.sourceLeadId)).length,
+  });
+}
+
 export async function listProperties(
   tenantDb: TenantDb,
   filters: PropertyFilters = {}
@@ -215,12 +226,12 @@ export async function listProperties(
     tenantDb
       .select({ propertyId: leads.propertyId, count: count() })
       .from(leads)
-      .where(inArray(leads.propertyId, propertyIds))
+      .where(and(inArray(leads.propertyId, propertyIds), eq(leads.isActive, true)))
       .groupBy(leads.propertyId),
     tenantDb
       .select({ propertyId: deals.propertyId, count: count() })
       .from(deals)
-      .where(inArray(deals.propertyId, propertyIds))
+      .where(and(inArray(deals.propertyId, propertyIds), eq(deals.isActive, true)))
       .groupBy(deals.propertyId),
     tenantDb
       .select({ propertyId: deals.propertyId, count: count() })
