@@ -60,4 +60,44 @@ describe("use-reports helpers", () => {
     expect(result.data.mirroredDownstreamSummary[0].mirroredStageName).toBe("Estimating");
     expect(result.data.reasonCodedDisqualifications[0].disqualificationReason).toBe("other");
   });
+
+  it("adds schedule and run helpers without replacing saved reports helpers", async () => {
+    const {
+      createReportRun,
+      createReportSchedule,
+      listReportRuns,
+      listReportSchedules,
+    } = await import("./use-reports");
+
+    mocks.apiMock
+      .mockResolvedValueOnce({ run: { id: "run-1" } })
+      .mockResolvedValueOnce({ schedule: { id: "schedule-1" } })
+      .mockResolvedValueOnce({ runs: [] })
+      .mockResolvedValueOnce({ schedules: [] });
+
+    await createReportRun("report-1");
+    await createReportSchedule("report-1", {
+      frequency: "weekly",
+      cronExpr: "0 7 * * 1",
+      recipients: [{ email: "director@example.com" }],
+      nextRunAt: "2026-05-11T12:00:00.000Z",
+    });
+    await listReportRuns();
+    await listReportSchedules();
+
+    expect(mocks.apiMock).toHaveBeenNthCalledWith(1, "/reports/saved/report-1/runs", {
+      method: "POST",
+    });
+    expect(mocks.apiMock).toHaveBeenNthCalledWith(2, "/reports/saved/report-1/schedules", {
+      method: "POST",
+      json: {
+        frequency: "weekly",
+        cronExpr: "0 7 * * 1",
+        recipients: [{ email: "director@example.com" }],
+        nextRunAt: "2026-05-11T12:00:00.000Z",
+      },
+    });
+    expect(mocks.apiMock).toHaveBeenNthCalledWith(3, "/reports/runs");
+    expect(mocks.apiMock).toHaveBeenNthCalledWith(4, "/reports/schedules");
+  });
 });

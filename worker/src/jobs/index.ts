@@ -23,6 +23,7 @@ import { runEstimateDocumentOcr } from "./estimate-document-ocr.js";
 import { runEstimateGeneration } from "./estimate-generation.js";
 import { runAiInterventionManagerAlerts } from "./ai-intervention-manager-alerts.js";
 import { handleRfpRequestDelivery } from "./rfp-request-delivery.js";
+import { runReportsExecutionTick } from "./reports-execution.js";
 
 const SERVER_MODULE_ROOT =
   process.env.NODE_ENV === "production" ? "../../../server/dist/modules" : "../../../server/src/modules";
@@ -111,6 +112,10 @@ export function registerAllJobs() {
   registerJobHandler("domain_event", handleDomainEvent);
   registerJobHandler("rfp_request_delivery", async (payload, officeId) => {
     await handleRfpRequestDelivery(payload, officeId);
+  });
+
+  registerJobHandler("reports_execution", async () => {
+    await runReportsExecutionTick();
   });
 
   // Stale deal scanner (triggered via job_queue or cron)

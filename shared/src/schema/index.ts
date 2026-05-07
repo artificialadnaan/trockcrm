@@ -8,6 +8,8 @@ export { projectTypeConfig } from "./public/project-type-config.js";
 export { projectTypeQuestionNodes } from "./public/project-type-question-nodes.js";
 export { regionConfig } from "./public/region-config.js";
 export { savedReports, reportVisibilityEnum, reportEntityEnum } from "./public/saved-reports.js";
+export { reportSchedules, reportFrequencyEnum } from "./public/report-schedules.js";
+export { reportRuns, reportRunStatusEnum } from "./public/report-runs.js";
 export { procoreSyncControls, procoreSyncModeEnum } from "./public/procore-sync-controls.js";
 export { procoreReconciliationState, procoreReconciliationStatusEnum } from "./public/procore-reconciliation-state.js";
 export { procoreSyncState, procoreEntityTypeEnum, syncDirectionEnum, syncStatusEnum } from "./public/procore-sync-state.js";

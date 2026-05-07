@@ -21,7 +21,8 @@
 - 2026-05-07T19:00Z [track-a-core-agent] PR-OPEN — A1 (PR #155)
 
 ## Track A-isolated — Reports + Snapshots (A4 + A5a parallel; A5b after A1)
-- _no claims yet_
+- 2026-05-07T19:16Z [track-a-isolated-agent] CLAIM — A4 in flight (branch: redesign/schema-hooks-isolated/a4)
+- 2026-05-07T19:29Z [track-a-isolated-agent] PR-OPEN — A4 (PR #156)
 
 ## Track B — Shared Primitives + Shell + Harness
 - _no claims yet_
