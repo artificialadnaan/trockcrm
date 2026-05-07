@@ -7,6 +7,7 @@ import {
   boolean,
   timestamp,
   index,
+  integer,
 } from "drizzle-orm/pg-core";
 import { savedReports } from "./saved-reports.js";
 import { users } from "./users.js";
@@ -27,6 +28,7 @@ export const reportSchedules = pgTable(
     frequency: reportFrequencyEnum("frequency").notNull(),
     cronExpr: text("cron_expr").notNull(),
     recipients: jsonb("recipients").default([]).notNull(),
+    anchorDay: integer("anchor_day"),
     nextRunAt: timestamp("next_run_at", { withTimezone: true }).notNull(),
     lastRunAt: timestamp("last_run_at", { withTimezone: true }),
     ownerId: uuid("owner_id").notNull().references(() => users.id),

@@ -197,6 +197,7 @@ export async function getReportSchedules(userId: string, officeId: string) {
       frequency: reportSchedules.frequency,
       cronExpr: reportSchedules.cronExpr,
       recipients: reportSchedules.recipients,
+      anchorDay: reportSchedules.anchorDay,
       nextRunAt: reportSchedules.nextRunAt,
       lastRunAt: reportSchedules.lastRunAt,
       ownerId: reportSchedules.ownerId,
@@ -255,6 +256,7 @@ export async function createReportSchedule(input: CreateReportScheduleInput) {
       frequency: input.frequency,
       cronExpr: input.cronExpr,
       recipients: input.recipients ?? [],
+      anchorDay: new Date(input.nextRunAt).getUTCDate(),
       nextRunAt: new Date(input.nextRunAt),
       ownerId: input.userId,
     })

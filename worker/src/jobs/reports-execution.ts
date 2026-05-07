@@ -2,12 +2,19 @@ import { pool } from "../db.js";
 
 type ReportFrequency = "daily" | "weekly" | "biweekly" | "monthly" | "quarterly";
 
-function addMonths(date: Date, months: number) {
+function normalizeAnchorDay(anchorDay: number | string | null | undefined, fallbackDate: Date) {
+  const numericAnchorDay = Number(anchorDay);
+  if (Number.isInteger(numericAnchorDay) && numericAnchorDay >= 1 && numericAnchorDay <= 31) {
+    return numericAnchorDay;
+  }
+  return fallbackDate.getUTCDate();
+}
+
+function addMonths(date: Date, months: number, anchorDay = date.getUTCDate()) {
   const year = date.getUTCFullYear();
   const month = date.getUTCMonth() + months;
-  const day = date.getUTCDate();
   const lastDayOfTargetMonth = new Date(Date.UTC(year, month + 1, 0)).getUTCDate();
-  const clampedDay = Math.min(day, lastDayOfTargetMonth);
+  const clampedDay = Math.min(anchorDay, lastDayOfTargetMonth);
 
   return new Date(Date.UTC(
     year,
@@ -20,7 +27,7 @@ function addMonths(date: Date, months: number) {
   ));
 }
 
-export function nextRunAt(from: Date, frequency: ReportFrequency) {
+export function nextRunAt(from: Date, frequency: ReportFrequency, anchorDay?: number | null) {
   const next = new Date(from);
   switch (frequency) {
     case "daily":
@@ -33,17 +40,23 @@ export function nextRunAt(from: Date, frequency: ReportFrequency) {
       next.setUTCDate(next.getUTCDate() + 14);
       break;
     case "monthly":
-      return addMonths(next, 1);
+      return addMonths(next, 1, normalizeAnchorDay(anchorDay, from));
     case "quarterly":
-      return addMonths(next, 3);
+      return addMonths(next, 3, normalizeAnchorDay(anchorDay, from));
   }
   return next;
 }
 
-export function advanceNextRunAt(previousNextRunAt: Date, frequency: ReportFrequency, now: Date) {
-  let next = nextRunAt(previousNextRunAt, frequency);
+export function advanceNextRunAt(
+  previousNextRunAt: Date,
+  frequency: ReportFrequency,
+  now: Date,
+  anchorDay?: number | string | null
+) {
+  const normalizedAnchorDay = normalizeAnchorDay(anchorDay, previousNextRunAt);
+  let next = nextRunAt(previousNextRunAt, frequency, normalizedAnchorDay);
   while (next <= now) {
-    next = nextRunAt(next, frequency);
+    next = nextRunAt(next, frequency, normalizedAnchorDay);
   }
   return next;
 }
@@ -57,8 +70,9 @@ export async function enqueueDueReportSchedules(now = new Date()) {
       report_id: string;
       frequency: ReportFrequency;
       next_run_at: Date | string;
+      anchor_day: number | string | null;
     }>(
-      `SELECT id, report_id, frequency, next_run_at
+      `SELECT id, report_id, frequency, next_run_at, anchor_day
        FROM public.report_schedules
        WHERE is_active = true
          AND next_run_at <= $1
@@ -82,7 +96,12 @@ export async function enqueueDueReportSchedules(now = new Date()) {
          WHERE id = $3`,
         [
           now,
-          advanceNextRunAt(new Date(schedule.next_run_at), schedule.frequency, now),
+          advanceNextRunAt(
+            new Date(schedule.next_run_at),
+            schedule.frequency,
+            now,
+            schedule.anchor_day
+          ),
           schedule.id,
         ]
       );
