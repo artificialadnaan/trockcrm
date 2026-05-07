@@ -3,12 +3,24 @@ import request from "supertest";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const getRepDashboardMock = vi.hoisted(() => vi.fn());
+const getRepPerformanceSnapshotsMock = vi.hoisted(() => vi.fn());
 const commitTransactionMock = vi.hoisted(() => vi.fn().mockResolvedValue(undefined));
 
 vi.mock("../../../../server/src/modules/dashboard/service.js", () => ({
   getRepDashboard: getRepDashboardMock,
   getDirectorDashboard: vi.fn(),
+  getDirectorCommissionWorkspace: vi.fn(),
   getRepDetail: vi.fn(),
+  getRepPerformanceSnapshots: getRepPerformanceSnapshotsMock,
+  REP_PERFORMANCE_PERIOD_KINDS: [
+    "mtd",
+    "qtd",
+    "ytd",
+    "last_month",
+    "last_quarter",
+    "last_year",
+    "week_8back",
+  ],
 }));
 
 import { dashboardRoutes } from "../../../../server/src/modules/dashboard/routes.js";
@@ -22,6 +34,28 @@ function buildApp() {
       email: "rep@trock.dev",
       displayName: "Rep One",
       role: "rep",
+      officeId: "office-1",
+      activeOfficeId: "office-1",
+    };
+    req.tenantDb = {
+      execute: vi.fn(),
+    };
+    req.commitTransaction = commitTransactionMock;
+    next();
+  });
+  app.use("/api/dashboard", dashboardRoutes);
+  return app;
+}
+
+function buildDirectorApp() {
+  const app = express();
+  app.use(express.json());
+  app.use((req, _res, next) => {
+    req.user = {
+      id: "director-1",
+      email: "director@trock.dev",
+      displayName: "Director One",
+      role: "director",
       officeId: "office-1",
       activeOfficeId: "office-1",
     };
@@ -80,6 +114,55 @@ describe("dashboard routes", () => {
           ],
         },
       },
+    });
+  });
+
+  it("serves GET /api/dashboard/director/rep-performance from snapshot rows", async () => {
+    getRepPerformanceSnapshotsMock.mockResolvedValue({
+      rows: [
+        {
+          repId: "rep-1",
+          repName: "Rep One",
+          periodKind: "mtd",
+          pipelineValue: 125000,
+          closedValue: 50000,
+          dealsCount: 3,
+          winsCount: 1,
+          lossesCount: 0,
+          winRate: 100,
+          atRiskCount: 2,
+          activityTotal: 9,
+          calls: 3,
+          emails: 4,
+          meetings: 1,
+          notes: 1,
+          sparkline8w: [0, 0, 0, 0, 0, 0, 25000, 50000],
+          region: "North",
+          computedAt: "2026-05-07T12:00:00.000Z",
+          forecast: 125000,
+          goal: null,
+          goalSource: "none",
+          percentToGoal: null,
+        },
+      ],
+      forecastVsGoal: {
+        forecast: 125000,
+        goal: null,
+        goalSource: "none",
+        percentToGoal: null,
+      },
+    });
+
+    const response = await request(buildDirectorApp())
+      .get("/api/dashboard/director/rep-performance?periodKind=mtd");
+
+    expect(response.status).toBe(200);
+    expect(getRepPerformanceSnapshotsMock).toHaveBeenCalledWith(expect.anything(), "office-1", "mtd");
+    expect(response.body.data.rows[0]).toMatchObject({
+      repId: "rep-1",
+      goalSource: "none",
+      goal: null,
+      percentToGoal: null,
     });
   });
 });
