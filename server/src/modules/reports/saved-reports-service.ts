@@ -258,6 +258,19 @@ export async function createReportRun(input: CreateReportRunInput) {
   const report = await getSavedReportById(input.reportId, input.userId, input.officeId);
   if (!report) throw new AppError(404, "Report not found");
 
+  if (input.scheduleId) {
+    const scheduleRows = await db
+      .select({ reportId: reportSchedules.reportId })
+      .from(reportSchedules)
+      .where(eq(reportSchedules.id, input.scheduleId))
+      .limit(1);
+    const schedule = scheduleRows[0] ?? null;
+    if (!schedule) throw new AppError(404, "Schedule not found");
+    if (schedule.reportId !== input.reportId) {
+      throw new AppError(400, "scheduleId does not belong to reportId");
+    }
+  }
+
   const result = await db
     .insert(reportRuns)
     .values({
