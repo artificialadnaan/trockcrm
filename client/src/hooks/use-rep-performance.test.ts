@@ -35,6 +35,7 @@ describe("use-rep-performance helpers", () => {
             winsCount: 1,
             lossesCount: 0,
             winRate: 100,
+            avgDaysToClose: 14,
             atRiskCount: 2,
             activityTotal: 9,
             calls: 3,
@@ -80,6 +81,7 @@ describe("use-rep-performance helpers", () => {
       totalWonValue: 50000,
       activitiesLogged: 9,
       winRate: 100,
+      avgDaysToClose: 14,
     });
   });
 });

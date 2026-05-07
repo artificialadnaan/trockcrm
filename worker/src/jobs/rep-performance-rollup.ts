@@ -100,6 +100,23 @@ async function refreshOfficePeriod(
                AND COALESCE(d.actual_close_date, d.contract_signed_date, d.contract_signed_at::date, d.updated_at::date) >= $2::date
                AND COALESCE(d.actual_close_date, d.contract_signed_date, d.contract_signed_at::date, d.updated_at::date) <= $3::date
            ), 0)::numeric AS closed_value,
+         COALESCE(ROUND(AVG(
+           COALESCE(d.actual_close_date, d.contract_signed_date, d.contract_signed_at::date, d.lost_at::date)
+             - d.created_at::date
+         ) FILTER (
+           WHERE psc.slug IN (
+               'won',
+               'sent_to_production',
+               'service_sent_to_production',
+               'closed_won',
+               'lost',
+               'production_lost',
+               'service_lost',
+               'closed_lost'
+             )
+             AND COALESCE(d.actual_close_date, d.contract_signed_date, d.contract_signed_at::date, d.lost_at::date) >= $2::date
+             AND COALESCE(d.actual_close_date, d.contract_signed_date, d.contract_signed_at::date, d.lost_at::date) <= $3::date
+         ), 2), 0)::numeric AS avg_days_to_close,
          COUNT(*) FILTER (
            WHERE d.is_active = true
              AND NOT psc.is_terminal
@@ -134,6 +151,7 @@ async function refreshOfficePeriod(
        wins_count,
        losses_count,
        win_rate,
+       avg_days_to_close,
        at_risk_count,
        activity_total,
        calls,
@@ -158,6 +176,7 @@ async function refreshOfficePeriod(
          WHEN COALESCE(rd.wins_count, 0) + COALESCE(rd.losses_count, 0) = 0 THEN 0
          ELSE ROUND((COALESCE(rd.wins_count, 0)::numeric / (COALESCE(rd.wins_count, 0) + COALESCE(rd.losses_count, 0))::numeric) * 100, 2)
        END,
+       COALESCE(rd.avg_days_to_close, 0),
        COALESCE(rd.at_risk_count, 0),
        COALESCE(a.activity_total, 0),
        COALESCE(a.calls, 0),

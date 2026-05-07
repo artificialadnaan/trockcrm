@@ -31,6 +31,7 @@ export interface RepPerformanceSnapshotRow {
   winsCount: number;
   lossesCount: number;
   winRate: number;
+  avgDaysToClose: number;
   atRiskCount: number;
   activityTotal: number;
   calls: number;
@@ -52,6 +53,7 @@ export interface RepPerformanceSnapshotRow {
     winsCount: number;
     lossesCount: number;
     winRate: number;
+    avgDaysToClose: number;
     atRiskCount: number;
     activityTotal: number;
     calls: number;
@@ -131,7 +133,7 @@ function toPeriodMetrics(row: RepPerformanceSnapshotRow): PeriodMetrics {
     totalWonValue: row.closedValue,
     activitiesLogged: row.activityTotal,
     winRate: row.winRate,
-    avgDaysToClose: 0,
+    avgDaysToClose: row.avgDaysToClose,
   };
 }
 
@@ -143,7 +145,7 @@ function toPreviousPeriodMetrics(row: RepPerformanceSnapshotRow): PeriodMetrics 
     totalWonValue: row.previous.closedValue,
     activitiesLogged: row.previous.activityTotal,
     winRate: row.previous.winRate,
-    avgDaysToClose: 0,
+    avgDaysToClose: row.previous.avgDaysToClose,
   };
 }
 

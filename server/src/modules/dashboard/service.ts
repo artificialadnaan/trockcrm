@@ -1402,6 +1402,7 @@ export interface RepPerformanceSnapshotRow {
   winsCount: number;
   lossesCount: number;
   winRate: number;
+  avgDaysToClose: number;
   atRiskCount: number;
   activityTotal: number;
   calls: number;
@@ -1426,6 +1427,7 @@ export interface RepPerformancePeriodMetrics {
   winsCount: number;
   lossesCount: number;
   winRate: number;
+  avgDaysToClose: number;
   atRiskCount: number;
   activityTotal: number;
   calls: number;
@@ -1625,6 +1627,7 @@ export async function getRepPerformanceSnapshots(
       current.wins_count::int AS wins_count,
       current.losses_count::int AS losses_count,
       current.win_rate::numeric AS win_rate,
+      current.avg_days_to_close::numeric AS avg_days_to_close,
       current.at_risk_count::int AS at_risk_count,
       current.activity_total::int AS activity_total,
       current.calls::int AS calls,
@@ -1640,6 +1643,7 @@ export async function getRepPerformanceSnapshots(
       previous.wins_count::int AS previous_wins_count,
       previous.losses_count::int AS previous_losses_count,
       previous.win_rate::numeric AS previous_win_rate,
+      previous.avg_days_to_close::numeric AS previous_avg_days_to_close,
       previous.at_risk_count::int AS previous_at_risk_count,
       previous.activity_total::int AS previous_activity_total,
       previous.calls::int AS previous_calls,
@@ -1686,6 +1690,7 @@ export async function getRepPerformanceSnapshots(
           winsCount: Number(row.previous_wins_count ?? 0),
           lossesCount: Number(row.previous_losses_count ?? 0),
           winRate: Number(row.previous_win_rate ?? 0),
+          avgDaysToClose: Number(row.previous_avg_days_to_close ?? 0),
           atRiskCount: Number(row.previous_at_risk_count ?? 0),
           activityTotal: Number(row.previous_activity_total ?? 0),
           calls: Number(row.previous_calls ?? 0),
@@ -1706,6 +1711,7 @@ export async function getRepPerformanceSnapshots(
       winsCount: Number(row.wins_count ?? 0),
       lossesCount: Number(row.losses_count ?? 0),
       winRate: Number(row.win_rate ?? 0),
+      avgDaysToClose: Number(row.avg_days_to_close ?? 0),
       atRiskCount: Number(row.at_risk_count ?? 0),
       activityTotal: Number(row.activity_total ?? 0),
       calls: Number(row.calls ?? 0),

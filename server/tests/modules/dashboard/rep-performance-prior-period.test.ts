@@ -48,6 +48,7 @@ function currentSnapshotRow(overrides: Record<string, unknown>) {
     wins_count: "2",
     losses_count: "1",
     win_rate: "66.67",
+    avg_days_to_close: "12",
     at_risk_count: "0",
     activity_total: "10",
     calls: "4",
@@ -63,6 +64,7 @@ function currentSnapshotRow(overrides: Record<string, unknown>) {
     previous_wins_count: null,
     previous_losses_count: null,
     previous_win_rate: null,
+    previous_avg_days_to_close: null,
     previous_at_risk_count: null,
     previous_activity_total: null,
     previous_calls: null,
@@ -85,6 +87,7 @@ describe("rep performance prior-period snapshots", () => {
             previous_wins_count: "1",
             previous_losses_count: "1",
             previous_win_rate: "50",
+            previous_avg_days_to_close: "10",
             previous_activity_total: "8",
           }),
         ],
@@ -98,5 +101,7 @@ describe("rep performance prior-period snapshots", () => {
     expect(queryText).toContain("current.period_end - interval '1 month'");
     expect(queryText).not.toContain("order by prior.computed_at");
     expect(result.rows[0]?.previous?.closedValue).toBe(80);
+    expect(result.rows[0]?.avgDaysToClose).toBe(12);
+    expect(result.rows[0]?.previous?.avgDaysToClose).toBe(10);
   });
 });

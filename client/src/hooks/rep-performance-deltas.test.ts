@@ -20,6 +20,7 @@ function snapshotRow(overrides: Record<string, unknown>) {
     winsCount: 2,
     lossesCount: 1,
     winRate: 66.67,
+    avgDaysToClose: 12,
     atRiskCount: 0,
     activityTotal: 10,
     calls: 4,
@@ -62,6 +63,7 @@ describe("rep performance deltas", () => {
               winsCount: 1,
               lossesCount: 1,
               winRate: 50,
+              avgDaysToClose: 10,
               atRiskCount: 0,
               activityTotal: 8,
               calls: 3,
@@ -85,6 +87,9 @@ describe("rep performance deltas", () => {
     expect(data.reps[0]?.previous?.totalWonValue).toBe(80);
     expect(data.reps[0]?.change.totalWonValue).toBe(20);
     expect(data.reps[0]?.percentChange.totalWonValue).toBe(25);
+    expect(data.reps[0]?.current.avgDaysToClose).toBe(12);
+    expect(data.reps[0]?.previous?.avgDaysToClose).toBe(10);
+    expect(data.reps[0]?.change.avgDaysToClose).toBe(2);
   });
 
   it("returns null comparison fields when no prior-period snapshot exists", async () => {
