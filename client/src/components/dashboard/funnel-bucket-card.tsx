@@ -8,7 +8,7 @@ export function FunnelBucketCard({ bucket }: { bucket: FunnelBucketSummary }) {
   return (
     <Link
       to={href}
-      className="group rounded-xl border border-gray-200 bg-white p-4 shadow-sm transition-all hover:-translate-y-0.5 hover:shadow-md"
+      className="group rounded-xl border bg-card p-4 transition-colors hover:bg-slate-50"
     >
       <p className="text-[10px] font-bold uppercase tracking-widest text-gray-400">
         {bucket.label}
