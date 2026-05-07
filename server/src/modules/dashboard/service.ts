@@ -1604,14 +1604,18 @@ export async function getRepPerformanceSnapshots(
   const result = await tenantDb.execute(sql`
     WITH current_snapshots AS (
       SELECT DISTINCT ON (rps.rep_id, rps.period_kind)
-        rps.*
+        rps.*,
+        u.display_name AS rep_name
       FROM public.rep_performance_snapshots rps
+      JOIN public.users u
+        ON u.id = rps.rep_id
+       AND u.is_active = true
       WHERE rps.period_kind = ${periodKind}
       ORDER BY rps.rep_id, rps.period_kind, rps.computed_at DESC NULLS LAST, rps.period_start DESC
     )
     SELECT
       current.rep_id,
-      COALESCE(u.display_name, 'Rep') AS rep_name,
+      COALESCE(current.rep_name, 'Rep') AS rep_name,
       current.period_kind,
       current.period_start,
       current.period_end,
@@ -1643,7 +1647,6 @@ export async function getRepPerformanceSnapshots(
       previous.meetings::int AS previous_meetings,
       previous.notes::int AS previous_notes
     FROM current_snapshots current
-    LEFT JOIN public.users u ON u.id = current.rep_id
     LEFT JOIN LATERAL (
       SELECT prior.*
       FROM public.rep_performance_snapshots prior
