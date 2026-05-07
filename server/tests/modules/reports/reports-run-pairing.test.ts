@@ -63,16 +63,21 @@ vi.mock("@trock-crm/shared/schema", () => ({
 
 import { createReportRun } from "../../../src/modules/reports/saved-reports-service.js";
 
+const REPORT_A_ID = "11111111-1111-4111-8111-111111111111";
+const REPORT_B_ID = "22222222-2222-4222-8222-222222222222";
+const SCHEDULE_A_ID = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+const SCHEDULE_B_ID = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+
 const reportA = {
-  id: "report-a",
+  id: REPORT_A_ID,
   isLocked: false,
   visibility: "private",
   createdBy: "user-1",
   officeId: "office-1",
 };
 
-const scheduleA = { id: "schedule-a", reportId: "report-a" };
-const scheduleB = { id: "schedule-b", reportId: "report-b" };
+const scheduleA = { id: SCHEDULE_A_ID, reportId: REPORT_A_ID };
+const scheduleB = { id: SCHEDULE_B_ID, reportId: REPORT_B_ID };
 
 describe("createReportRun schedule/report pairing", () => {
   beforeEach(() => {
@@ -82,12 +87,42 @@ describe("createReportRun schedule/report pairing", () => {
     vi.clearAllMocks();
   });
 
+  it("rejects malformed report ids before querying", async () => {
+    await expect(createReportRun({
+      reportId: "not-a-uuid",
+      scheduleId: null,
+      userId: "user-1",
+      officeId: "office-1",
+    })).rejects.toMatchObject<AppError>({
+      statusCode: 400,
+      message: "reportId must be a valid UUID",
+    });
+
+    expect(state.insertedValues).toHaveLength(0);
+    expect(state.selectResults).toHaveLength(0);
+  });
+
+  it("rejects malformed schedule ids before schedule lookup", async () => {
+    await expect(createReportRun({
+      reportId: REPORT_A_ID,
+      scheduleId: "not-a-uuid",
+      userId: "user-1",
+      officeId: "office-1",
+    })).rejects.toMatchObject<AppError>({
+      statusCode: 400,
+      message: "scheduleId must be a valid UUID",
+    });
+
+    expect(state.insertedValues).toHaveLength(0);
+    expect(state.selectResults).toHaveLength(0);
+  });
+
   it("rejects schedule ids that belong to another report", async () => {
     state.selectResults = [[reportA], [scheduleB]];
 
     await expect(createReportRun({
-      reportId: "report-a",
-      scheduleId: "schedule-b",
+      reportId: REPORT_A_ID,
+      scheduleId: SCHEDULE_B_ID,
       userId: "user-1",
       officeId: "office-1",
     })).rejects.toMatchObject<AppError>({
@@ -102,16 +137,16 @@ describe("createReportRun schedule/report pairing", () => {
     state.selectResults = [[reportA], [scheduleA]];
 
     const run = await createReportRun({
-      reportId: "report-a",
-      scheduleId: "schedule-a",
+      reportId: REPORT_A_ID,
+      scheduleId: SCHEDULE_A_ID,
       userId: "user-1",
       officeId: "office-1",
     });
 
     expect(run).toEqual({ id: "run-1", status: "queued" });
     expect(state.insertedValues[0]).toMatchObject({
-      reportId: "report-a",
-      scheduleId: "schedule-a",
+      reportId: REPORT_A_ID,
+      scheduleId: SCHEDULE_A_ID,
       status: "queued",
     });
   });
@@ -120,7 +155,7 @@ describe("createReportRun schedule/report pairing", () => {
     state.selectResults = [[reportA]];
 
     const run = await createReportRun({
-      reportId: "report-a",
+      reportId: REPORT_A_ID,
       scheduleId: null,
       userId: "user-1",
       officeId: "office-1",
@@ -128,7 +163,7 @@ describe("createReportRun schedule/report pairing", () => {
 
     expect(run).toEqual({ id: "run-1", status: "queued" });
     expect(state.insertedValues[0]).toMatchObject({
-      reportId: "report-a",
+      reportId: REPORT_A_ID,
       scheduleId: null,
       status: "queued",
     });

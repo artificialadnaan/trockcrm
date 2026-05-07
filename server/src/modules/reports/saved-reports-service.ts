@@ -41,6 +41,14 @@ export interface CreateReportRunInput {
   scheduleId?: string | null;
 }
 
+const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+function assertUuid(value: string, label: string) {
+  if (!UUID_PATTERN.test(value)) {
+    throw new AppError(400, `${label} must be a valid UUID`);
+  }
+}
+
 function visibleSavedReportWhere(userId: string, officeId: string) {
   return or(
     and(
@@ -226,6 +234,8 @@ export async function getReportRuns(userId: string, officeId: string) {
 }
 
 async function getSavedReportForOfficeWrite(reportId: string, userId: string, officeId: string) {
+  assertUuid(reportId, "reportId");
+
   const rows = await db
     .select()
     .from(savedReports)
@@ -236,6 +246,8 @@ async function getSavedReportForOfficeWrite(reportId: string, userId: string, of
 }
 
 export async function createReportSchedule(input: CreateReportScheduleInput) {
+  assertUuid(input.reportId, "reportId");
+
   const report = await getSavedReportForOfficeWrite(input.reportId, input.userId, input.officeId);
   if (!report) throw new AppError(404, "Report not found");
 
@@ -255,6 +267,11 @@ export async function createReportSchedule(input: CreateReportScheduleInput) {
 }
 
 export async function createReportRun(input: CreateReportRunInput) {
+  assertUuid(input.reportId, "reportId");
+  if (input.scheduleId) {
+    assertUuid(input.scheduleId, "scheduleId");
+  }
+
   const report = await getSavedReportForOfficeWrite(input.reportId, input.userId, input.officeId);
   if (!report) throw new AppError(404, "Report not found");
 

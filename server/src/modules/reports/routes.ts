@@ -40,9 +40,22 @@ import { runReportBuilder } from "./report-builder-service.js";
 
 const router = Router();
 const VALID_REPORT_FREQUENCIES = ["daily", "weekly", "biweekly", "monthly", "quarterly"] as const;
+const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 function readQueryString(value: unknown): string | undefined {
   return typeof value === "string" && value.trim() ? value.trim() : undefined;
+}
+
+function requireUuid(value: unknown, label: string) {
+  if (typeof value !== "string" || !UUID_PATTERN.test(value)) {
+    throw new AppError(400, `${label} must be a valid UUID`);
+  }
+  return value;
+}
+
+function readOptionalUuid(value: unknown, label: string) {
+  if (value === undefined || value === null || value === "") return null;
+  return requireUuid(value, label);
 }
 
 export function parseAnalyticsFilters(query: Record<string, unknown>): AnalyticsFilterInput {
@@ -457,11 +470,12 @@ router.get("/saved/:id", async (req, res, next) => {
 // POST /api/reports/saved/:id/runs -- enqueue a report execution stub
 router.post("/saved/:id/runs", async (req, res, next) => {
   try {
+    const reportId = requireUuid(req.params.id, "reportId");
     const run = await createReportRun({
-      reportId: req.params.id,
+      reportId,
       userId: req.user!.id,
       officeId: req.user!.activeOfficeId ?? req.user!.officeId,
-      scheduleId: typeof req.body?.scheduleId === "string" ? req.body.scheduleId : null,
+      scheduleId: readOptionalUuid(req.body?.scheduleId, "scheduleId"),
     });
     await req.commitTransaction!();
     res.status(201).json({ run });
@@ -473,6 +487,7 @@ router.post("/saved/:id/runs", async (req, res, next) => {
 // POST /api/reports/saved/:id/schedules -- schedule a visible saved report
 router.post("/saved/:id/schedules", async (req, res, next) => {
   try {
+    const reportId = requireUuid(req.params.id, "reportId");
     const { frequency, cronExpr, recipients, nextRunAt } = req.body ?? {};
     if (!frequency || !cronExpr || !nextRunAt) {
       throw new AppError(400, "frequency, cronExpr, and nextRunAt are required");
@@ -489,7 +504,7 @@ router.post("/saved/:id/schedules", async (req, res, next) => {
     }
 
     const schedule = await createReportSchedule({
-      reportId: req.params.id,
+      reportId,
       userId: req.user!.id,
       officeId: req.user!.activeOfficeId ?? req.user!.officeId,
       frequency,

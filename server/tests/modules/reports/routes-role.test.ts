@@ -48,6 +48,9 @@ import { runReportBuilder } from "../../../src/modules/reports/report-builder-se
 import * as savedReportsService from "../../../src/modules/reports/saved-reports-service.js";
 import { reportRoutes } from "../../../src/modules/reports/routes.js";
 
+const REPORT_ID = "66666666-6666-4666-8666-666666666666";
+const SCHEDULE_ID = "77777777-7777-4777-8777-777777777777";
+
 function buildApp(role: "rep" | "director" | "admin") {
   const app = express();
   app.use(express.json());
@@ -125,16 +128,60 @@ describe("report route role guards", () => {
     vi.mocked(savedReportsService.createReportRun).mockResolvedValueOnce({ id: "run-1", status: "queued" } as any);
 
     const response = await request(buildApp("director"))
-      .post("/api/reports/saved/report-1/runs")
+      .post(`/api/reports/saved/${REPORT_ID}/runs`)
       .send();
 
     expect(response.status).toBe(201);
     expect(response.body).toEqual({ run: { id: "run-1", status: "queued" } });
     expect(savedReportsService.createReportRun).toHaveBeenCalledWith({
-      reportId: "report-1",
+      reportId: REPORT_ID,
       userId: "user-1",
       officeId: "office-1",
       scheduleId: null,
+    });
+  });
+
+  it("rejects malformed report ids on report run creation before service execution", async () => {
+    const response = await request(buildApp("director"))
+      .post("/api/reports/saved/not-a-uuid/runs")
+      .send();
+
+    expect(response.status).toBe(400);
+    expect(response.body).toEqual({
+      error: {
+        message: "reportId must be a valid UUID",
+      },
+    });
+    expect(savedReportsService.createReportRun).not.toHaveBeenCalled();
+  });
+
+  it("rejects malformed schedule ids on report run creation before service execution", async () => {
+    const response = await request(buildApp("director"))
+      .post(`/api/reports/saved/${REPORT_ID}/runs`)
+      .send({ scheduleId: "not-a-uuid" });
+
+    expect(response.status).toBe(400);
+    expect(response.body).toEqual({
+      error: {
+        message: "scheduleId must be a valid UUID",
+      },
+    });
+    expect(savedReportsService.createReportRun).not.toHaveBeenCalled();
+  });
+
+  it("passes valid schedule ids through report run creation", async () => {
+    vi.mocked(savedReportsService.createReportRun).mockResolvedValueOnce({ id: "run-1", status: "queued" } as any);
+
+    const response = await request(buildApp("director"))
+      .post(`/api/reports/saved/${REPORT_ID}/runs`)
+      .send({ scheduleId: SCHEDULE_ID });
+
+    expect(response.status).toBe(201);
+    expect(savedReportsService.createReportRun).toHaveBeenCalledWith({
+      reportId: REPORT_ID,
+      userId: "user-1",
+      officeId: "office-1",
+      scheduleId: SCHEDULE_ID,
     });
   });
 
@@ -149,22 +196,40 @@ describe("report route role guards", () => {
     };
 
     const response = await request(buildApp("director"))
-      .post("/api/reports/saved/report-1/schedules")
+      .post(`/api/reports/saved/${REPORT_ID}/schedules`)
       .send(payload);
 
     expect(response.status).toBe(201);
     expect(response.body).toEqual({ schedule: { id: "schedule-1" } });
     expect(savedReportsService.createReportSchedule).toHaveBeenCalledWith({
-      reportId: "report-1",
+      reportId: REPORT_ID,
       userId: "user-1",
       officeId: "office-1",
       ...payload,
     });
   });
 
+  it("rejects malformed report ids on report schedule creation before service execution", async () => {
+    const response = await request(buildApp("director"))
+      .post("/api/reports/saved/not-a-uuid/schedules")
+      .send({
+        frequency: "weekly",
+        cronExpr: "0 7 * * 1",
+        nextRunAt: new Date(Date.now() + 86_400_000).toISOString(),
+      });
+
+    expect(response.status).toBe(400);
+    expect(response.body).toEqual({
+      error: {
+        message: "reportId must be a valid UUID",
+      },
+    });
+    expect(savedReportsService.createReportSchedule).not.toHaveBeenCalled();
+  });
+
   it("rejects invalid report schedule frequencies before service execution", async () => {
     const response = await request(buildApp("director"))
-      .post("/api/reports/saved/report-1/schedules")
+      .post(`/api/reports/saved/${REPORT_ID}/schedules`)
       .send({
         frequency: "hourly",
         cronExpr: "0 7 * * 1",
@@ -182,7 +247,7 @@ describe("report route role guards", () => {
 
   it("rejects invalid nextRunAt timestamps before service execution", async () => {
     const response = await request(buildApp("director"))
-      .post("/api/reports/saved/report-1/schedules")
+      .post(`/api/reports/saved/${REPORT_ID}/schedules`)
       .send({
         frequency: "weekly",
         cronExpr: "0 7 * * 1",
@@ -200,7 +265,7 @@ describe("report route role guards", () => {
 
   it("rejects past nextRunAt timestamps before service execution", async () => {
     const response = await request(buildApp("director"))
-      .post("/api/reports/saved/report-1/schedules")
+      .post(`/api/reports/saved/${REPORT_ID}/schedules`)
       .send({
         frequency: "weekly",
         cronExpr: "0 7 * * 1",
