@@ -58,10 +58,7 @@ function visibleSavedReportWhere(userId: string, officeId: string) {
         isNull(savedReports.officeId)
       )
     ),
-    and(
-      eq(savedReports.createdBy, userId),
-      eq(savedReports.officeId, officeId)
-    ),
+    eq(savedReports.createdBy, userId),
     and(
       eq(savedReports.officeId, officeId),
       eq(savedReports.visibility, "office")
