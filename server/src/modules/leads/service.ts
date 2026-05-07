@@ -1213,6 +1213,7 @@ export function createLeadService(
         sourceDetail: sourceWrite.sourceDetail,
         description: input.description ?? null,
         officeCode,
+        office: officeCode,
         projectType,
         projectTypeId: input.projectTypeId ?? null,
         bidDueDate: normalizedBidDueDate,

@@ -132,6 +132,7 @@ export const deals = pgTable("deals", {
   bidBoardCustomerName: text("bid_board_customer_name"),
   bidBoardCustomerContactRaw: text("bid_board_customer_contact_raw"),
   bidBoardProjectNumber: text("bid_board_project_number"),
+  projectNumber: text("project_number"),
   bidBoardLinkedAt: timestamp("bid_board_linked_at", { withTimezone: true }),
   bidBoardLastUpdatedAt: timestamp("bid_board_last_updated_at", { withTimezone: true }),
   // Assigned PM is not present in the Bid Board export; role polling can populate this after portfolio handoff.

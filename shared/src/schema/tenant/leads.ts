@@ -48,6 +48,7 @@ export const leadVerificationStatusEnum = pgEnum(
   "lead_verification_status",
   LEAD_VERIFICATION_STATUSES
 );
+export const leadOfficeEnum = pgEnum("lead_office", ["dfw", "atl"]);
 
 export const leads = pgTable(
   "leads",
@@ -74,6 +75,7 @@ export const leads = pgTable(
     unassignedReasonCode: varchar("unassigned_reason_code", { length: 64 }),
     description: text("description"),
     officeCode: text("office_code").notNull(),
+    office: leadOfficeEnum("office").notNull(),
     existingCustomerResolution: varchar("existing_customer_resolution", { length: 50 }),
     existingCustomerResolvedAt: timestamp("existing_customer_resolved_at", { withTimezone: true }),
     existingCustomerResolvedBy: uuid("existing_customer_resolved_by").references(() => users.id),

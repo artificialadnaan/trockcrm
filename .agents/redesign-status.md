@@ -47,6 +47,7 @@
 
 ## Cross-track risks (live)
 - _no risks logged_
+- A2 WIP 2026-05-07T22:37Z: migration number is `0104_redesign_a2_tier2_schema.sql` because A-isolated already consumed `0101`-`0103`; `file_links` shape is `(id, file_id, entity_type, entity_id, created_at, created_by)` with `UNIQUE(file_id, entity_type, entity_id)` and `INDEX(entity_type, entity_id)`.
 
 ## Track B — Shared Primitives + Shell + Harness
 - 2026-05-07T18:34Z [track-b-agent] CLAIM — single PR in flight (branch: redesign/shared-primitives)
