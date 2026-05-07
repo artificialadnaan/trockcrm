@@ -45,6 +45,20 @@ export interface RepPerformanceSnapshotRow {
   goalSource: "none" | "manual" | "calculated";
   percentToGoal: number | null;
   forecastVsGoal: ForecastVsGoal;
+  previous: {
+    pipelineValue: number;
+    closedValue: number;
+    dealsCount: number;
+    winsCount: number;
+    lossesCount: number;
+    winRate: number;
+    atRiskCount: number;
+    activityTotal: number;
+    calls: number;
+    emails: number;
+    meetings: number;
+    notes: number;
+  } | null;
 }
 
 export interface PeriodMetrics {
@@ -57,12 +71,21 @@ export interface PeriodMetrics {
 }
 
 export interface PeriodChange {
-  dealsWon: number;
-  dealsLost: number;
-  totalWonValue: number;
-  activitiesLogged: number;
-  winRate: number;
-  avgDaysToClose: number;
+  dealsWon: number | null;
+  dealsLost: number | null;
+  totalWonValue: number | null;
+  activitiesLogged: number | null;
+  winRate: number | null;
+  avgDaysToClose: number | null;
+}
+
+export interface PeriodPercentChange {
+  dealsWon: number | null;
+  dealsLost: number | null;
+  totalWonValue: number | null;
+  activitiesLogged: number | null;
+  winRate: number | null;
+  avgDaysToClose: number | null;
 }
 
 export interface RepPerformanceData {
@@ -72,8 +95,9 @@ export interface RepPerformanceData {
     repId: string;
     repName: string;
     current: PeriodMetrics;
-    previous: PeriodMetrics;
+    previous: PeriodMetrics | null;
     change: PeriodChange;
+    percentChange: PeriodPercentChange;
   }>;
   periodLabel: { current: string; previous: string };
 }
@@ -111,18 +135,30 @@ function toPeriodMetrics(row: RepPerformanceSnapshotRow): PeriodMetrics {
   };
 }
 
-function zeroPeriodMetrics(): PeriodMetrics {
+function toPreviousPeriodMetrics(row: RepPerformanceSnapshotRow): PeriodMetrics | null {
+  if (!row.previous) return null;
   return {
-    dealsWon: 0,
-    dealsLost: 0,
-    totalWonValue: 0,
-    activitiesLogged: 0,
-    winRate: 0,
+    dealsWon: row.previous.winsCount,
+    dealsLost: row.previous.lossesCount,
+    totalWonValue: row.previous.closedValue,
+    activitiesLogged: row.previous.activityTotal,
+    winRate: row.previous.winRate,
     avgDaysToClose: 0,
   };
 }
 
-function toChange(current: PeriodMetrics, previous: PeriodMetrics): PeriodChange {
+function toChange(current: PeriodMetrics, previous: PeriodMetrics | null): PeriodChange {
+  if (!previous) {
+    return {
+      dealsWon: null,
+      dealsLost: null,
+      totalWonValue: null,
+      activitiesLogged: null,
+      winRate: null,
+      avgDaysToClose: null,
+    };
+  }
+
   return {
     dealsWon: current.dealsWon - previous.dealsWon,
     dealsLost: current.dealsLost - previous.dealsLost,
@@ -130,6 +166,33 @@ function toChange(current: PeriodMetrics, previous: PeriodMetrics): PeriodChange
     activitiesLogged: current.activitiesLogged - previous.activitiesLogged,
     winRate: current.winRate - previous.winRate,
     avgDaysToClose: current.avgDaysToClose - previous.avgDaysToClose,
+  };
+}
+
+function percentDelta(current: number, previous: number): number | null {
+  if (previous === 0) return null;
+  return Number((((current - previous) / previous) * 100).toFixed(2));
+}
+
+function toPercentChange(current: PeriodMetrics, previous: PeriodMetrics | null): PeriodPercentChange {
+  if (!previous) {
+    return {
+      dealsWon: null,
+      dealsLost: null,
+      totalWonValue: null,
+      activitiesLogged: null,
+      winRate: null,
+      avgDaysToClose: null,
+    };
+  }
+
+  return {
+    dealsWon: percentDelta(current.dealsWon, previous.dealsWon),
+    dealsLost: percentDelta(current.dealsLost, previous.dealsLost),
+    totalWonValue: percentDelta(current.totalWonValue, previous.totalWonValue),
+    activitiesLogged: percentDelta(current.activitiesLogged, previous.activitiesLogged),
+    winRate: percentDelta(current.winRate, previous.winRate),
+    avgDaysToClose: percentDelta(current.avgDaysToClose, previous.avgDaysToClose),
   };
 }
 
@@ -147,7 +210,7 @@ export async function fetchRepPerformance(
     forecastVsGoal: response.data.forecastVsGoal,
     reps: rows.map((row) => {
       const current = toPeriodMetrics(row);
-      const previous = zeroPeriodMetrics();
+      const previous = toPreviousPeriodMetrics(row);
 
       return {
         repId: row.repId,
@@ -155,6 +218,7 @@ export async function fetchRepPerformance(
         current,
         previous,
         change: toChange(current, previous),
+        percentChange: toPercentChange(current, previous),
       };
     }),
     periodLabel: {

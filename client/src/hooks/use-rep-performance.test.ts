@@ -54,6 +54,7 @@ describe("use-rep-performance helpers", () => {
               goalSource: "none",
               percentToGoal: null,
             },
+            previous: null,
           },
         ],
         forecastVsGoal: {

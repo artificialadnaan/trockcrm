@@ -1416,6 +1416,22 @@ export interface RepPerformanceSnapshotRow {
   goalSource: "none" | "manual" | "calculated";
   percentToGoal: number | null;
   forecastVsGoal: ForecastVsGoal;
+  previous: RepPerformancePeriodMetrics | null;
+}
+
+export interface RepPerformancePeriodMetrics {
+  pipelineValue: number;
+  closedValue: number;
+  dealsCount: number;
+  winsCount: number;
+  lossesCount: number;
+  winRate: number;
+  atRiskCount: number;
+  activityTotal: number;
+  calls: number;
+  emails: number;
+  meetings: number;
+  notes: number;
 }
 
 export interface RepPerformanceSnapshotsData {
@@ -1586,36 +1602,87 @@ export async function getRepPerformanceSnapshots(
   periodKind: RepPerformancePeriodKind = "mtd"
 ): Promise<RepPerformanceSnapshotsData> {
   const result = await tenantDb.execute(sql`
-    SELECT DISTINCT ON (rps.rep_id, rps.period_kind)
-      rps.rep_id,
+    WITH current_snapshots AS (
+      SELECT DISTINCT ON (rps.rep_id, rps.period_kind)
+        rps.*
+      FROM public.rep_performance_snapshots rps
+      WHERE rps.period_kind = ${periodKind}
+      ORDER BY rps.rep_id, rps.period_kind, rps.computed_at DESC NULLS LAST, rps.period_start DESC
+    )
+    SELECT
+      current.rep_id,
       COALESCE(u.display_name, 'Rep') AS rep_name,
-      rps.period_kind,
-      rps.period_start,
-      rps.period_end,
-      rps.pipeline_value::numeric AS pipeline_value,
-      rps.closed_value::numeric AS closed_value,
-      rps.deals_count::int AS deals_count,
-      rps.wins_count::int AS wins_count,
-      rps.losses_count::int AS losses_count,
-      rps.win_rate::numeric AS win_rate,
-      rps.at_risk_count::int AS at_risk_count,
-      rps.activity_total::int AS activity_total,
-      rps.calls::int AS calls,
-      rps.emails::int AS emails,
-      rps.meetings::int AS meetings,
-      rps.notes::int AS notes,
-      rps.sparkline_8w,
-      rps.region,
-      rps.computed_at
-    FROM public.rep_performance_snapshots rps
-    LEFT JOIN public.users u ON u.id = rps.rep_id
-    WHERE rps.period_kind = ${periodKind}
-    ORDER BY rps.rep_id, rps.period_kind, rps.computed_at DESC NULLS LAST, rps.period_start DESC
+      current.period_kind,
+      current.period_start,
+      current.period_end,
+      current.pipeline_value::numeric AS pipeline_value,
+      current.closed_value::numeric AS closed_value,
+      current.deals_count::int AS deals_count,
+      current.wins_count::int AS wins_count,
+      current.losses_count::int AS losses_count,
+      current.win_rate::numeric AS win_rate,
+      current.at_risk_count::int AS at_risk_count,
+      current.activity_total::int AS activity_total,
+      current.calls::int AS calls,
+      current.emails::int AS emails,
+      current.meetings::int AS meetings,
+      current.notes::int AS notes,
+      current.sparkline_8w,
+      current.region,
+      current.computed_at,
+      previous.pipeline_value::numeric AS previous_pipeline_value,
+      previous.closed_value::numeric AS previous_closed_value,
+      previous.deals_count::int AS previous_deals_count,
+      previous.wins_count::int AS previous_wins_count,
+      previous.losses_count::int AS previous_losses_count,
+      previous.win_rate::numeric AS previous_win_rate,
+      previous.at_risk_count::int AS previous_at_risk_count,
+      previous.activity_total::int AS previous_activity_total,
+      previous.calls::int AS previous_calls,
+      previous.emails::int AS previous_emails,
+      previous.meetings::int AS previous_meetings,
+      previous.notes::int AS previous_notes
+    FROM current_snapshots current
+    LEFT JOIN public.users u ON u.id = current.rep_id
+    LEFT JOIN LATERAL (
+      SELECT prior.*
+      FROM public.rep_performance_snapshots prior
+      WHERE prior.rep_id = current.rep_id
+        AND prior.period_kind = current.period_kind
+        AND prior.period_start = (
+          CASE
+            WHEN current.period_kind IN ('mtd', 'last_month') THEN current.period_start - INTERVAL '1 month'
+            WHEN current.period_kind IN ('qtd', 'last_quarter') THEN current.period_start - INTERVAL '3 months'
+            WHEN current.period_kind IN ('ytd', 'last_year') THEN current.period_start - INTERVAL '1 year'
+            WHEN current.period_kind = 'week_8back' THEN current.period_start - INTERVAL '56 days'
+            ELSE NULL
+          END
+        )::date
+      ORDER BY prior.computed_at DESC NULLS LAST
+      LIMIT 1
+    ) previous ON true
+    ORDER BY current.rep_id, current.period_kind
   `);
 
   const rows = rowsFromExecute<any>(result).map((row) => {
     const forecast = Number(row.pipeline_value ?? 0);
     const forecastVsGoal = buildGoalNullForecast(forecast);
+    const previous = row.previous_closed_value === null || row.previous_closed_value === undefined
+      ? null
+      : {
+          pipelineValue: Number(row.previous_pipeline_value ?? 0),
+          closedValue: Number(row.previous_closed_value ?? 0),
+          dealsCount: Number(row.previous_deals_count ?? 0),
+          winsCount: Number(row.previous_wins_count ?? 0),
+          lossesCount: Number(row.previous_losses_count ?? 0),
+          winRate: Number(row.previous_win_rate ?? 0),
+          atRiskCount: Number(row.previous_at_risk_count ?? 0),
+          activityTotal: Number(row.previous_activity_total ?? 0),
+          calls: Number(row.previous_calls ?? 0),
+          emails: Number(row.previous_emails ?? 0),
+          meetings: Number(row.previous_meetings ?? 0),
+          notes: Number(row.previous_notes ?? 0),
+        };
 
     return {
       repId: String(row.rep_id),
@@ -1643,6 +1710,7 @@ export async function getRepPerformanceSnapshots(
       goalSource: forecastVsGoal.goalSource,
       percentToGoal: forecastVsGoal.percentToGoal,
       forecastVsGoal,
+      previous,
     };
   });
 

@@ -60,7 +60,11 @@ const PERF_PERIODS = [
   { value: "year" as const, label: "Year" },
 ];
 
-function DeltaCell({ value, format = "number" }: { value: number; format?: "number" | "currency" | "percent" | "days" }) {
+function DeltaCell({ value, format = "number" }: { value: number | null; format?: "number" | "currency" | "percent" | "days" }) {
+  if (value === null) {
+    return <span className="inline-flex items-center gap-0.5 text-xs text-gray-400">--</span>;
+  }
+
   if (value === 0) {
     return (
       <span className="inline-flex items-center gap-0.5 text-xs text-gray-400">
