@@ -253,7 +253,7 @@ export async function runRepPerformanceRollup(now = new Date()): Promise<number>
         await client.query("COMMIT");
       } catch (err) {
         await client.query("ROLLBACK");
-        throw err;
+        console.error(`[Worker:rep-performance-rollup] Office ${office.id} failed:`, err);
       }
     }
 
