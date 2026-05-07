@@ -33,5 +33,8 @@ describe("rep performance rollup period scoping", () => {
     expect(insertSql).toContain(
       "OR COALESCE(d.actual_close_date, d.contract_signed_date, d.contract_signed_at::date, d.lost_at::date) >= $2::date"
     );
+    expect(insertSql).toMatch(
+      /OR COALESCE\(d\.actual_close_date, d\.contract_signed_date, d\.contract_signed_at::date, d\.lost_at::date\) >= \$2::date\s+\)\s+AND NOT psc\.is_terminal\s+AND psc\.is_active_pipeline/
+    );
   });
 });

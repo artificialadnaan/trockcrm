@@ -1,5 +1,7 @@
 import { pool } from "../db.js";
 
+export const STALE_ACCOUNT_THRESHOLD_DAYS = 30;
+
 const PERIOD_KINDS = [
   "mtd",
   "qtd",
@@ -86,9 +88,11 @@ async function refreshOfficePeriod(
              WHEN $1::text IN ('last_month', 'last_quarter', 'last_year') THEN
                d.created_at::date <= $3::date
                AND (
-                 COALESCE(d.actual_close_date, d.contract_signed_date, d.contract_signed_at::date, d.lost_at::date) IS NULL
-                 OR COALESCE(d.actual_close_date, d.contract_signed_date, d.contract_signed_at::date, d.lost_at::date) >= $2::date
+                  COALESCE(d.actual_close_date, d.contract_signed_date, d.contract_signed_at::date, d.lost_at::date) IS NULL
+                  OR COALESCE(d.actual_close_date, d.contract_signed_date, d.contract_signed_at::date, d.lost_at::date) >= $2::date
                )
+               AND NOT psc.is_terminal
+               AND psc.is_active_pipeline
              ELSE d.is_active = true AND NOT psc.is_terminal
            END
          )::int AS deals_count,
@@ -101,6 +105,8 @@ async function refreshOfficePeriod(
                    COALESCE(d.actual_close_date, d.contract_signed_date, d.contract_signed_at::date, d.lost_at::date) IS NULL
                    OR COALESCE(d.actual_close_date, d.contract_signed_date, d.contract_signed_at::date, d.lost_at::date) >= $2::date
                  )
+                 AND NOT psc.is_terminal
+                 AND psc.is_active_pipeline
                ELSE d.is_active = true AND NOT psc.is_terminal AND psc.is_active_pipeline
              END
            ), 0)::numeric AS pipeline_value,
@@ -147,6 +153,43 @@ async function refreshOfficePeriod(
        JOIN public.pipeline_stage_config psc ON psc.id = d.stage_id
        GROUP BY d.assigned_rep_id
      ),
+     stale_accounts AS (
+       SELECT
+         accounts.rep_id,
+         COUNT(*)::int AS stale_account_count
+       FROM (
+         SELECT DISTINCT
+           d.assigned_rep_id AS rep_id,
+           'company' AS account_type,
+           c.id AS account_id
+         FROM ${schemaName}.deals d
+         JOIN public.users account_rep
+           ON account_rep.id = d.assigned_rep_id
+          AND account_rep.office_id = $4
+         JOIN ${schemaName}.companies c
+           ON c.id = d.company_id
+          AND c.is_active = true
+         WHERE d.assigned_rep_id IS NOT NULL
+           AND c.last_activity_at IS NOT NULL
+           AND c.last_activity_at < $3::timestamptz - ($6::int || ' days')::interval
+         UNION
+         SELECT DISTINCT
+           d.assigned_rep_id AS rep_id,
+           'property' AS account_type,
+           p.id AS account_id
+         FROM ${schemaName}.deals d
+         JOIN public.users account_rep
+           ON account_rep.id = d.assigned_rep_id
+          AND account_rep.office_id = $4
+         JOIN ${schemaName}.properties p
+           ON p.id = d.property_id
+          AND p.is_active = true
+         WHERE d.assigned_rep_id IS NOT NULL
+           AND p.last_activity_at IS NOT NULL
+           AND p.last_activity_at < $3::timestamptz - ($6::int || ' days')::interval
+       ) accounts
+       GROUP BY accounts.rep_id
+     ),
      activity AS (
        SELECT
          responsible_user_id AS rep_id,
@@ -173,6 +216,7 @@ async function refreshOfficePeriod(
        win_rate,
        avg_days_to_close,
        at_risk_count,
+       stale_account_count,
        activity_total,
        calls,
        emails,
@@ -198,6 +242,7 @@ async function refreshOfficePeriod(
        END,
        COALESCE(rd.avg_days_to_close, 0),
        COALESCE(rd.at_risk_count, 0),
+       COALESCE(sa.stale_account_count, 0),
        COALESCE(a.activity_total, 0),
        COALESCE(a.calls, 0),
        COALESCE(a.emails, 0),
@@ -209,11 +254,12 @@ async function refreshOfficePeriod(
        NOW()
      FROM public.users u
      LEFT JOIN rep_deals rd ON rd.rep_id = u.id
+     LEFT JOIN stale_accounts sa ON sa.rep_id = u.id
      LEFT JOIN activity a ON a.rep_id = u.id
      WHERE u.office_id = $4
        AND u.is_active = true
        AND u.role = 'rep'`,
-    [period.kind, period.start, period.end, officeId, officeName]
+    [period.kind, period.start, period.end, officeId, officeName, STALE_ACCOUNT_THRESHOLD_DAYS]
   );
 
   return insertResult.rowCount ?? 0;
@@ -238,11 +284,12 @@ export async function runRepPerformanceRollup(now = new Date()): Promise<number>
       }
 
       const schemaName = `office_${slug}`;
+      let officeInserted = 0;
       await client.query("BEGIN");
       try {
         await client.query("SELECT pg_advisory_xact_lock(hashtext($1))", [`rep-performance-rollup:${office.id}`]);
         for (const period of periods) {
-          inserted += await refreshOfficePeriod(
+          officeInserted += await refreshOfficePeriod(
             client,
             schemaName,
             String(office.id),
@@ -251,6 +298,7 @@ export async function runRepPerformanceRollup(now = new Date()): Promise<number>
           );
         }
         await client.query("COMMIT");
+        inserted += officeInserted;
       } catch (err) {
         await client.query("ROLLBACK");
         console.error(`[Worker:rep-performance-rollup] Office ${office.id} failed:`, err);
