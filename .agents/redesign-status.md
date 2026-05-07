@@ -19,6 +19,7 @@
 ## Track A-core — Schema + Hooks (sequential A1 → A2 → A3)
 - 2026-05-07T18:34Z [track-a-core-agent] CLAIM — A1 in flight (branch: redesign/schema-hooks-core/a1)
 - 2026-05-07T19:00Z [track-a-core-agent] PR-OPEN — A1 (PR #155)
+- A2 CLAIM 2026-05-07T22:21Z: redesign/schema-hooks-core/a2, Tier 2 deals/leads/emails/files schema + junctions + secondary contact on deal + office on leads. ETA TBD. Worktree: trockcrm-redesign-data.
 
 ## Track A-isolated — Reports + Snapshots (A4 + A5a parallel; A5b after A1)
 - 2026-05-07T19:16Z [track-a-isolated-agent] CLAIM — A4 in flight (branch: redesign/schema-hooks-isolated/a4)
