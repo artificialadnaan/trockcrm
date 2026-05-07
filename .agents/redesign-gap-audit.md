@@ -97,25 +97,19 @@ Columns:
 
 Used by `/files` page Starred toggle, file cards' starred badge, sort-by-starred. **SCHEMA GAP**.
 
-### `reports` — Tier A4 (Track A-isolated / PR A4, NEW table)
-Columns:
-- `id` uuid PK
-- `slug` text UNIQUE NOT NULL — stable identifier for built-ins ("team_lead_weekly", "win_rate_trend", etc.)
-- `title` text NOT NULL
-- `category` enum `report_category` `[sales | performance | operations | analytics]`
-- `kind` enum `report_kind` `[snapshot | trend | leaderboard | export | custom]`
-- `description` text
-- `owner_id` uuid FK → users(id) nullable (null = system/built-in)
-- `default_filters` jsonb default '{}'
-- `is_built_in` bool default false
-- `created_at` / `updated_at`
+### Reports model — Tier A4 (Track A-isolated / PR A4, existing table)
+The canonical reports model already exists as `public.saved_reports`.
+Do **not** create a new `reports` table. The redesign extends the current model:
+- Library tab = existing locked/built-in `saved_reports` rows (`is_locked=true`)
+- My tab = existing user-created `saved_reports` rows with current visibility fields intact
+- Shared semantics are a Track F rendering decision; Track A-isolated must preserve and expose `is_locked`, `created_by`, `office_id`, and `visibility`
 
-Used by `/reports` Library tab cards. **SCHEMA GAP**. Seed the 16 fixture reports from `.agents/redesign-context.md` §1 `/reports` section as built-ins in the migration.
+Used by `/reports` Library/My tab cards. **READY** for the base report model; A4 adds schedules and run history around it.
 
 ### `report_schedules` — Tier A4 (Track A-isolated / PR A4, NEW table)
 Columns:
 - `id` uuid PK
-- `report_id` uuid FK → reports(id) ON DELETE CASCADE
+- `report_id` uuid FK → public.saved_reports(id) ON DELETE CASCADE
 - `frequency` enum `report_frequency` `[daily | weekly | biweekly | monthly | quarterly]`
 - `cron_expr` text — derived from frequency or custom
 - `recipients` jsonb — array of `{ user_id?, email? }` for delivery
@@ -130,7 +124,7 @@ Used by `/reports` Scheduled tab. **SCHEMA GAP**.
 ### `report_runs` — Tier A4 (Track A-isolated / PR A4, NEW table)
 Columns:
 - `id` uuid PK
-- `report_id` uuid FK → reports(id) ON DELETE CASCADE
+- `report_id` uuid FK → public.saved_reports(id) ON DELETE CASCADE
 - `schedule_id` uuid FK → report_schedules(id) nullable
 - `started_at` timestamptz NOT NULL default now()
 - `finished_at` timestamptz nullable
@@ -243,14 +237,13 @@ A3 creates `useCallRecordings(entityType: "lead"|"contact"|"company"|"deal", ent
 ### `useTasks` — Track A-core (verify only)
 `type`, `priority`, `due_date`, `status`, linked entity all present — **READY**.
 
-### `useReports` — rebuild after A4 (Track A-isolated)
-Currently a placeholder. Rebuild to return:
-- `reports[]` from `reports` table joined with user pin state
+### `useReports` — extend after A4 (Track A-isolated)
+Existing `useSavedReports` and locked-report execution helpers stay as-is. Extend the current hook surface without renaming fields or narrowing visibility logic:
+- existing saved reports from `public.saved_reports` with `isLocked`, `createdBy`, `officeId`, and `visibility` intact
 - `schedules[]` from `report_schedules`
 - `recent_runs[]` from `report_runs` with runtime stats
-- `pinned[]` and `my_reports[]` per current user
-- mutations: `runReport(id)` (creates a `report_runs` row, returns id), `scheduleReport(...)`, `pinReport(id)` / `unpinReport(id)` (uses user prefs jsonb or new `user_pinned_reports` pivot — choice deferred to A4 implementation; recommend pivot)
-**HOOK GAP** + likely small SCHEMA GAP for `user_pinned_reports` (decide in A4).
+- mutations: `runReport(id)` (creates a `report_runs` row, returns id) and `scheduleReport(...)`
+**HOOK GAP** for schedules/runs only. No new pinned-report persistence in A4; Library/My/Shared tab splitting is Track F render logic over the existing visibility fields.
 
 ### `useDirectorDashboard` — extend after A5a / A5b (Track A-isolated)
 Add:
@@ -372,10 +365,10 @@ All from `useRepDashboard`. Data payload is **READY** (server returns every fiel
 - Starred toggle — `user_starred_files` pivot — SCHEMA GAP (A3).
 
 ### `/reports`
-- Library cards — `useReports` rebuild — HOOK GAP (A4).
+- Library cards — existing `useSavedReports` locked rows — READY.
+- My/Shared cards — existing `useSavedReports` visibility fields — READY for Track F tab rendering.
 - Scheduled tab — `useReports.schedules` — HOOK GAP (A4).
 - Recent tab — `useReports.recent_runs` — HOOK GAP (A4).
-- Pinned section — pivot or user-prefs JSONB — SCHEMA GAP (A4, decide in implementation).
 
 ### `/commissions`
 - My view — `useRepDashboard.commissionSummary` returns floor/payments — READY.
@@ -391,7 +384,7 @@ These are explicitly punted to Track A's PR review rather than pre-decided here:
 
 1. **`last_activity_at` column-vs-view**. Trigger-maintained column on `companies` / `properties` has best read perf but adds write paths. Aggregating view from `activities` is simpler but slower at scale. Recommend column-with-trigger for both. Track A confirms in A1 PR.
 2. **Multi-entity linking style**. Junction tables (`email_links`, `file_links`) vs JSONB array on the parent. Recommend junctions — better indexing, cleaner referential integrity. Plan assumes junctions.
-3. **`user_pinned_reports`**. Pivot table vs JSONB on a `user_preferences` table. Recommend pivot for query speed.
+3. **Reports tab semantics**. Library/My/Shared grouping is Track F render logic over existing `saved_reports.is_locked`, `created_by`, `office_id`, and `visibility`; A4 does not add pinned-report persistence.
 4. **`commission_snapshots` for delta indicators**. Snapshot table on schedule vs computing on the fly from a deal-value change-log. Defer to A-core's commissions follow-up; either is OK if the UI consumes a stable shape.
 5. **Real reports execution**. A4 ships a stub. Real query execution worker is post-rollout. Track Z3 or a separate sprint owns this.
 6. **`goals` table for forecast-vs-goal**. May need a small goals config table (per-rep, per-period). If it doesn't exist, A5a creates it or Z1.5 reveals the gap.
