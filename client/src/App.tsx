@@ -94,6 +94,13 @@ const TeamCommissionsPage = lazy(() =>
 const GlobalCommissionsPage = lazy(() =>
   import("@/pages/admin/global-commissions-page").then((module) => ({ default: module.GlobalCommissionsPage }))
 );
+const SharedPrimitivesHarness = lazy(() =>
+  import("@/components/__harness__/shared-primitives-harness").then((module) => ({
+    default: module.SharedPrimitivesHarness,
+  }))
+);
+
+const enableSharedPrimitivesHarness = import.meta.env.DEV;
 
 function BoardAliasRedirect({ entity }: { entity: "leads" | "deals" }) {
   const [searchParams] = useSearchParams();
@@ -139,6 +146,7 @@ export function App() {
             <Route path="/photos/capture" element={<PhotoCapturePage />} />
             <Route element={<AppShell />}>
               <Route path="/" element={<HomeDashboardPage />} />
+              <Route path="/dashboard" element={<HomeDashboardPage />} />
               <Route path="/dashboard/contracts-signed" element={<ContractsSignedPage />} />
               <Route path="/deals" element={<DealListPage />} />
               <Route path="/deals/board" element={<BoardAliasRedirect entity="deals" />} />
@@ -169,6 +177,9 @@ export function App() {
               <Route path="/tasks" element={<TaskListPage />} />
               <Route path="/files" element={<FilesPage />} />
               <Route path="/reports" element={<ReportsPage />} />
+              {enableSharedPrimitivesHarness ? (
+                <Route path="/__harness__/shared-primitives" element={<SharedPrimitivesHarness />} />
+              ) : null}
               <Route
                 path="/commissions"
                 element={(
