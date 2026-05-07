@@ -29,6 +29,7 @@ const accessMocks = vi.hoisted(() => ({
 const auditMocks = vi.hoisted(() => ({
   logPhotoEvent: vi.fn(),
   getPhotoAuditEvents: vi.fn(),
+  writeSoftDeleteAuditLog: vi.fn(),
 }));
 
 vi.mock("../../../src/modules/files/service.js", () => serviceMocks);
@@ -40,6 +41,9 @@ vi.mock("../../../src/modules/files/feed-service.js", () => ({
   getProjectPhotoStats: accessMocks.getProjectPhotoStats,
 }));
 vi.mock("../../../src/modules/files/audit-log-service.js", () => auditMocks);
+vi.mock("../../../src/lib/soft-delete-audit.js", () => ({
+  writeSoftDeleteAuditLog: auditMocks.writeSoftDeleteAuditLog,
+}));
 vi.mock("../../../src/events/bus.js", () => ({ eventBus: { emitLocal: vi.fn() } }));
 
 const { fileRoutes } = await import("../../../src/modules/files/routes.js");
@@ -184,6 +188,11 @@ describe("photo audit route wiring", () => {
     expect(auditMocks.logPhotoEvent).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ eventType: "address_changed" }));
     expect(auditMocks.logPhotoEvent).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ eventType: "downloaded" }));
     expect(auditMocks.logPhotoEvent).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ eventType: "deleted" }));
+    expect(auditMocks.writeSoftDeleteAuditLog).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({
+      actorUserId: "user-1",
+      entityType: "file",
+      entityId: "photo-1",
+    }));
     expect(auditMocks.logPhotoEvent).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({
       eventType: "restored",
       metadata: expect.objectContaining({ previouslyDeletedAt: expect.any(Date) }),

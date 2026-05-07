@@ -965,7 +965,11 @@ export async function deleteFile(
   fileId: string,
   _userRole: string,
   userId?: string
-): Promise<typeof files.$inferSelect> {
+): Promise<typeof files.$inferSelect | null> {
+  const [existing] = await tenantDb.select().from(files).where(eq(files.id, fileId)).limit(1);
+  if (!existing) throw new AppError(404, "File not found");
+  if (!existing.isActive) return null;
+
   const result = await tenantDb
     .update(files)
     .set({ isActive: false, deletedAt: new Date(), deletedByUserId: userId ?? null })

@@ -2,6 +2,7 @@ import express, { Router } from "express";
 import { files } from "@trock-crm/shared/schema";
 import { AppError } from "../../middleware/error-handler.js";
 import { requireAdmin } from "../../middleware/rbac.js";
+import { writeSoftDeleteAuditLog } from "../../lib/soft-delete-audit.js";
 import type { FileCategory } from "@trock-crm/shared/types";
 import { FILE_CATEGORIES } from "@trock-crm/shared/types";
 import {
@@ -713,7 +714,15 @@ router.delete("/:id", requireAdmin, async (req, res, next) => {
     const existing = await getFileById(req.tenantDb!, fileId);
     if (!existing) throw new AppError(404, "File not found");
 
-    await deleteFile(req.tenantDb!, fileId, req.user!.role, req.user!.id);
+    const deletedFile = await deleteFile(req.tenantDb!, fileId, req.user!.role, req.user!.id);
+    if (deletedFile) {
+      await writeSoftDeleteAuditLog(req.tenantDb!, {
+        actorUserId: req.user!.id,
+        entityType: "file",
+        entityId: fileId,
+        ...requestAuditContext(req),
+      });
+    }
     if (isPhotoRecord(existing)) {
       await logPhotoEvent(req.tenantDb!, {
         photoId: existing.id,

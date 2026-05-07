@@ -12,6 +12,7 @@ import {
 } from "./service.js";
 import { AppError } from "../../middleware/error-handler.js";
 import { requireAdmin } from "../../middleware/rbac.js";
+import { requestAuditContext, writeSoftDeleteAuditLog } from "../../lib/soft-delete-audit.js";
 import { markCompanyRejected, markCompanyVerified } from "./customer-status-service.js";
 
 const router = Router();
@@ -78,7 +79,16 @@ router.patch("/:id", async (req, res, next) => {
 // DELETE /companies/:id — admin-only soft-delete
 router.delete("/:id", requireAdmin, async (req, res, next) => {
   try {
-    await deleteCompany(req.tenantDb!, req.params.id as string);
+    const companyId = req.params.id as string;
+    const company = await deleteCompany(req.tenantDb!, companyId);
+    if (company) {
+      await writeSoftDeleteAuditLog(req.tenantDb!, {
+        actorUserId: req.user!.id,
+        entityType: "company",
+        entityId: companyId,
+        ...requestAuditContext(req),
+      });
+    }
     await req.commitTransaction!();
     res.status(204).send();
   } catch (err) { next(err); }

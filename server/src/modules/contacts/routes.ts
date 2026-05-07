@@ -3,6 +3,7 @@ import { eq } from "drizzle-orm";
 import { contactDealAssociations, jobQueue } from "@trock-crm/shared/schema";
 import { requireRole } from "../../middleware/rbac.js";
 import { AppError } from "../../middleware/error-handler.js";
+import { requestAuditContext, writeSoftDeleteAuditLog } from "../../lib/soft-delete-audit.js";
 import { eventBus } from "../../events/bus.js";
 import { DOMAIN_EVENTS } from "@trock-crm/shared/types";
 import {
@@ -295,9 +296,18 @@ router.patch("/:id", async (req, res, next) => {
 // DELETE /api/contacts/:id — soft-delete (director/admin only)
 router.delete("/:id", requireRole("admin", "director"), async (req, res, next) => {
   try {
-    await deleteContact(req.tenantDb!, req.params.id as string, req.user!.role);
+    const contactId = req.params.id as string;
+    const contact = await deleteContact(req.tenantDb!, contactId, req.user!.role);
+    if (contact) {
+      await writeSoftDeleteAuditLog(req.tenantDb!, {
+        actorUserId: req.user!.id,
+        entityType: "contact",
+        entityId: contactId,
+        ...requestAuditContext(req),
+      });
+    }
     await req.commitTransaction!();
-    res.json({ success: true });
+    res.status(204).send();
   } catch (err) {
     next(err);
   }

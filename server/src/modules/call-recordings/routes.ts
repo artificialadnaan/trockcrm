@@ -1,5 +1,6 @@
 import { Router } from "express";
 import { AppError } from "../../middleware/error-handler.js";
+import { requestAuditContext, writeSoftDeleteAuditLog } from "../../lib/soft-delete-audit.js";
 import { getDealById } from "../deals/service.js";
 import { getLeadById } from "../leads/service.js";
 import { getCompanyById } from "../companies/service.js";
@@ -145,7 +146,16 @@ router.get("/:id/transcript", async (req, res, next) => {
 router.delete("/:id", async (req, res, next) => {
   try {
     requireAdminRole(req.user!.role);
-    await softDelete(req.tenantDb!, req.params.id, req.user!.id, req.user!.role);
+    const recordingId = req.params.id as string;
+    const recording = await softDelete(req.tenantDb!, recordingId, req.user!.id, req.user!.role);
+    if (recording) {
+      await writeSoftDeleteAuditLog(req.tenantDb!, {
+        actorUserId: req.user!.id,
+        entityType: "call_recording",
+        entityId: recordingId,
+        ...requestAuditContext(req),
+      });
+    }
     await req.commitTransaction!();
     res.status(204).send();
   } catch (err) {

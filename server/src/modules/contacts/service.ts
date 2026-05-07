@@ -545,6 +545,15 @@ export async function deleteContact(tenantDb: TenantDb, contactId: string, userR
     throw new AppError(403, "Only directors and admins can delete contacts");
   }
 
+  const [existing] = await tenantDb.select().from(contacts).where(eq(contacts.id, contactId)).limit(1);
+  if (!existing) {
+    throw new AppError(404, "Contact not found");
+  }
+
+  if (!existing.isActive) {
+    return null;
+  }
+
   const result = await tenantDb
     .update(contacts)
     .set({ isActive: false })
