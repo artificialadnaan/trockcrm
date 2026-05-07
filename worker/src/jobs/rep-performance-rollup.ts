@@ -205,6 +205,7 @@ async function refreshOfficePeriod(
        COALESCE(a.notes, 0),
        '[]'::jsonb,
        $5,
+       -- Snapshot write timestamp: intentionally wall-clock, not period-bounded.
        NOW()
      FROM public.users u
      LEFT JOIN rep_deals rd ON rd.rep_id = u.id

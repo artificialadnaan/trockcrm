@@ -324,6 +324,8 @@ async function getStaleLeadWatchlist(
   tenantDb: TenantDb,
   options: { repId?: string } = {}
 ): Promise<StaleLeadDashboardRow[]> {
+  // Current-state operational watchlist: intentionally anchored to wall-clock NOW(),
+  // not the A5a rep-performance snapshot period boundary.
   const repFilter = options.repId
     ? sql`AND l.assigned_rep_id = ${options.repId}`
     : sql``;
@@ -446,6 +448,8 @@ async function getDownstreamBottlenecks(
   tenantDb: TenantDb,
   options: { repId?: string } = {}
 ): Promise<DashboardDownstreamBottleneckRow[]> {
+  // Current-state operational bottlenecks: intentionally anchored to wall-clock NOW(),
+  // not the A5a rep-performance snapshot period boundary.
   const repFilter = options.repId
     ? sql`AND d.assigned_rep_id = ${options.repId}`
     : sql``;
