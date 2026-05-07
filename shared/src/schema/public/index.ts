@@ -6,6 +6,8 @@ export { lostDealReasons } from "./lost-deal-reasons.js";
 export { projectTypeConfig } from "./project-type-config.js";
 export { regionConfig } from "./region-config.js";
 export { savedReports, reportVisibilityEnum, reportEntityEnum } from "./saved-reports.js";
+export { reportSchedules, reportFrequencyEnum } from "./report-schedules.js";
+export { reportRuns, reportRunStatusEnum } from "./report-runs.js";
 export { procoreSyncControls, procoreSyncModeEnum } from "./procore-sync-controls.js";
 export { procoreReconciliationState, procoreReconciliationStatusEnum } from "./procore-reconciliation-state.js";
 export { procoreSyncState, procoreEntityTypeEnum, syncDirectionEnum, syncStatusEnum } from "./procore-sync-state.js";

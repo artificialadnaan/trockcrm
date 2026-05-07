@@ -31,6 +31,10 @@ import {
   updateSavedReport,
   deleteSavedReport,
   seedLockedReports,
+  getReportSchedules,
+  createReportSchedule,
+  getReportRuns,
+  createReportRun,
 } from "./saved-reports-service.js";
 import { runReportBuilder } from "./report-builder-service.js";
 
@@ -391,6 +395,34 @@ router.post("/run", requireDirector, async (req, res, next) => {
 // Saved reports CRUD
 // -------------------------------------------------------------------------
 
+// GET /api/reports/schedules -- schedules for reports visible to the user
+router.get("/schedules", async (req, res, next) => {
+  try {
+    const schedules = await getReportSchedules(
+      req.user!.id,
+      req.user!.activeOfficeId ?? req.user!.officeId
+    );
+    await req.commitTransaction!();
+    res.json({ schedules });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// GET /api/reports/runs -- run history for reports visible to the user
+router.get("/runs", async (req, res, next) => {
+  try {
+    const runs = await getReportRuns(
+      req.user!.id,
+      req.user!.activeOfficeId ?? req.user!.officeId
+    );
+    await req.commitTransaction!();
+    res.json({ runs });
+  } catch (err) {
+    next(err);
+  }
+});
+
 // GET /api/reports/saved -- list saved reports visible to the user
 router.get("/saved", async (req, res, next) => {
   try {
@@ -416,6 +448,46 @@ router.get("/saved/:id", async (req, res, next) => {
     if (!report) throw new AppError(404, "Report not found");
     await req.commitTransaction!();
     res.json({ report });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// POST /api/reports/saved/:id/runs -- enqueue a report execution stub
+router.post("/saved/:id/runs", async (req, res, next) => {
+  try {
+    const run = await createReportRun({
+      reportId: req.params.id,
+      userId: req.user!.id,
+      officeId: req.user!.activeOfficeId ?? req.user!.officeId,
+      scheduleId: typeof req.body?.scheduleId === "string" ? req.body.scheduleId : null,
+    });
+    await req.commitTransaction!();
+    res.status(201).json({ run });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// POST /api/reports/saved/:id/schedules -- schedule a visible saved report
+router.post("/saved/:id/schedules", async (req, res, next) => {
+  try {
+    const { frequency, cronExpr, recipients, nextRunAt } = req.body ?? {};
+    if (!frequency || !cronExpr || !nextRunAt) {
+      throw new AppError(400, "frequency, cronExpr, and nextRunAt are required");
+    }
+
+    const schedule = await createReportSchedule({
+      reportId: req.params.id,
+      userId: req.user!.id,
+      officeId: req.user!.activeOfficeId ?? req.user!.officeId,
+      frequency,
+      cronExpr,
+      recipients: Array.isArray(recipients) ? recipients : [],
+      nextRunAt,
+    });
+    await req.commitTransaction!();
+    res.status(201).json({ schedule });
   } catch (err) {
     next(err);
   }

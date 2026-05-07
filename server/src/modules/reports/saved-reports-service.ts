@@ -1,5 +1,5 @@
 import { eq, and, or, desc, sql, isNull } from "drizzle-orm";
-import { savedReports } from "@trock-crm/shared/schema";
+import { reportRuns, reportSchedules, savedReports } from "@trock-crm/shared/schema";
 import { db } from "../../db.js";
 import { AppError } from "../../middleware/error-handler.js";
 import type { ReportConfig } from "./service.js";
@@ -19,6 +19,46 @@ export interface UpdateSavedReportInput {
   visibility?: string;
 }
 
+export type ReportRecipient = {
+  user_id?: string;
+  email?: string;
+};
+
+export interface CreateReportScheduleInput {
+  reportId: string;
+  userId: string;
+  officeId: string;
+  frequency: "daily" | "weekly" | "biweekly" | "monthly" | "quarterly";
+  cronExpr: string;
+  recipients?: ReportRecipient[];
+  nextRunAt: string;
+}
+
+export interface CreateReportRunInput {
+  reportId: string;
+  userId: string;
+  officeId: string;
+  scheduleId?: string | null;
+}
+
+function visibleSavedReportWhere(userId: string, officeId: string) {
+  return or(
+    and(
+      eq(savedReports.isLocked, true),
+      or(
+        eq(savedReports.officeId, officeId),
+        isNull(savedReports.officeId)
+      )
+    ),
+    eq(savedReports.createdBy, userId),
+    and(
+      eq(savedReports.officeId, officeId),
+      eq(savedReports.visibility, "office")
+    ),
+    eq(savedReports.visibility, "company")
+  );
+}
+
 /**
  * Get all reports visible to a user:
  * - locked reports scoped to the caller's office (or global locked reports with no office)
@@ -33,27 +73,7 @@ export async function getSavedReports(
   const reports = await db
     .select()
     .from(savedReports)
-    .where(
-      or(
-        // Locked reports: scoped to caller's office or global (officeId IS NULL)
-        and(
-          eq(savedReports.isLocked, true),
-          or(
-            eq(savedReports.officeId, officeId),
-            isNull(savedReports.officeId)
-          )
-        ),
-        // Own reports (private)
-        eq(savedReports.createdBy, userId),
-        // Office-shared reports in the same office
-        and(
-          eq(savedReports.officeId, officeId),
-          eq(savedReports.visibility, "office")
-        ),
-        // Company-wide reports
-        eq(savedReports.visibility, "company")
-      )
-    )
+    .where(visibleSavedReportWhere(userId, officeId))
     .orderBy(desc(savedReports.isLocked), desc(savedReports.isDefault), desc(savedReports.updatedAt));
 
   return reports;
@@ -171,6 +191,83 @@ export async function deleteSavedReport(reportId: string, userId: string) {
 
   await db.delete(savedReports).where(eq(savedReports.id, reportId));
   return { success: true };
+}
+
+export async function getReportSchedules(userId: string, officeId: string) {
+  return db
+    .select({
+      id: reportSchedules.id,
+      reportId: reportSchedules.reportId,
+      reportName: savedReports.name,
+      frequency: reportSchedules.frequency,
+      cronExpr: reportSchedules.cronExpr,
+      recipients: reportSchedules.recipients,
+      nextRunAt: reportSchedules.nextRunAt,
+      lastRunAt: reportSchedules.lastRunAt,
+      ownerId: reportSchedules.ownerId,
+      isActive: reportSchedules.isActive,
+      createdAt: reportSchedules.createdAt,
+      updatedAt: reportSchedules.updatedAt,
+    })
+    .from(reportSchedules)
+    .innerJoin(savedReports, eq(reportSchedules.reportId, savedReports.id))
+    .where(visibleSavedReportWhere(userId, officeId))
+    .orderBy(reportSchedules.nextRunAt);
+}
+
+export async function getReportRuns(userId: string, officeId: string) {
+  return db
+    .select({
+      id: reportRuns.id,
+      reportId: reportRuns.reportId,
+      reportName: savedReports.name,
+      scheduleId: reportRuns.scheduleId,
+      startedAt: reportRuns.startedAt,
+      finishedAt: reportRuns.finishedAt,
+      status: reportRuns.status,
+      resultUri: reportRuns.resultUri,
+      error: reportRuns.error,
+      runtimeMs: reportRuns.runtimeMs,
+    })
+    .from(reportRuns)
+    .innerJoin(savedReports, eq(reportRuns.reportId, savedReports.id))
+    .where(visibleSavedReportWhere(userId, officeId))
+    .orderBy(desc(reportRuns.startedAt));
+}
+
+export async function createReportSchedule(input: CreateReportScheduleInput) {
+  const report = await getSavedReportById(input.reportId, input.userId, input.officeId);
+  if (!report) throw new AppError(404, "Report not found");
+
+  const result = await db
+    .insert(reportSchedules)
+    .values({
+      reportId: input.reportId,
+      frequency: input.frequency,
+      cronExpr: input.cronExpr,
+      recipients: input.recipients ?? [],
+      nextRunAt: new Date(input.nextRunAt),
+      ownerId: input.userId,
+    })
+    .returning();
+
+  return result[0];
+}
+
+export async function createReportRun(input: CreateReportRunInput) {
+  const report = await getSavedReportById(input.reportId, input.userId, input.officeId);
+  if (!report) throw new AppError(404, "Report not found");
+
+  const result = await db
+    .insert(reportRuns)
+    .values({
+      reportId: input.reportId,
+      scheduleId: input.scheduleId ?? null,
+      status: "queued",
+    })
+    .returning();
+
+  return result[0];
 }
 
 /**

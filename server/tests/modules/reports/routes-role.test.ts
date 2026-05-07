@@ -32,6 +32,10 @@ vi.mock("../../../src/modules/reports/saved-reports-service.js", () => ({
   updateSavedReport: vi.fn(),
   deleteSavedReport: vi.fn(),
   seedLockedReports: vi.fn(),
+  getReportSchedules: vi.fn(),
+  createReportSchedule: vi.fn(),
+  getReportRuns: vi.fn(),
+  createReportRun: vi.fn(),
 }));
 
 vi.mock("../../../src/modules/reports/report-builder-service.js", () => ({
@@ -41,6 +45,7 @@ vi.mock("../../../src/modules/reports/report-builder-service.js", () => ({
 import { errorHandler } from "../../../src/middleware/error-handler.js";
 import * as reportService from "../../../src/modules/reports/service.js";
 import { runReportBuilder } from "../../../src/modules/reports/report-builder-service.js";
+import * as savedReportsService from "../../../src/modules/reports/saved-reports-service.js";
 import { reportRoutes } from "../../../src/modules/reports/routes.js";
 
 function buildApp(role: "rep" | "director" | "admin") {
@@ -96,5 +101,64 @@ describe("report route role guards", () => {
 
     expect(response.status).toBe(200);
     expect(reportService.executeCustomReport).toHaveBeenCalledOnce();
+  });
+
+  it("lists report schedules and runs using existing saved report visibility context", async () => {
+    vi.mocked(savedReportsService.getReportSchedules).mockResolvedValueOnce([{ id: "schedule-1" }] as any);
+    vi.mocked(savedReportsService.getReportRuns).mockResolvedValueOnce([{ id: "run-1" }] as any);
+
+    const app = buildApp("director");
+
+    const schedulesResponse = await request(app).get("/api/reports/schedules");
+    const runsResponse = await request(app).get("/api/reports/runs");
+
+    expect(schedulesResponse.status).toBe(200);
+    expect(schedulesResponse.body).toEqual({ schedules: [{ id: "schedule-1" }] });
+    expect(savedReportsService.getReportSchedules).toHaveBeenCalledWith("user-1", "office-1");
+
+    expect(runsResponse.status).toBe(200);
+    expect(runsResponse.body).toEqual({ runs: [{ id: "run-1" }] });
+    expect(savedReportsService.getReportRuns).toHaveBeenCalledWith("user-1", "office-1");
+  });
+
+  it("creates report run rows with queued status through the saved report route", async () => {
+    vi.mocked(savedReportsService.createReportRun).mockResolvedValueOnce({ id: "run-1", status: "queued" } as any);
+
+    const response = await request(buildApp("director"))
+      .post("/api/reports/saved/report-1/runs")
+      .send();
+
+    expect(response.status).toBe(201);
+    expect(response.body).toEqual({ run: { id: "run-1", status: "queued" } });
+    expect(savedReportsService.createReportRun).toHaveBeenCalledWith({
+      reportId: "report-1",
+      userId: "user-1",
+      officeId: "office-1",
+      scheduleId: null,
+    });
+  });
+
+  it("creates report schedules through the saved report route", async () => {
+    vi.mocked(savedReportsService.createReportSchedule).mockResolvedValueOnce({ id: "schedule-1" } as any);
+
+    const payload = {
+      frequency: "weekly",
+      cronExpr: "0 7 * * 1",
+      recipients: [{ email: "director@example.com" }],
+      nextRunAt: "2026-05-11T12:00:00.000Z",
+    };
+
+    const response = await request(buildApp("director"))
+      .post("/api/reports/saved/report-1/schedules")
+      .send(payload);
+
+    expect(response.status).toBe(201);
+    expect(response.body).toEqual({ schedule: { id: "schedule-1" } });
+    expect(savedReportsService.createReportSchedule).toHaveBeenCalledWith({
+      reportId: "report-1",
+      userId: "user-1",
+      officeId: "office-1",
+      ...payload,
+    });
   });
 });
