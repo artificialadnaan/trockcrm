@@ -27,7 +27,7 @@
 - `role` — postgres enum `contact_role` `[decision_maker | influencer | gatekeeper | procurement | engineer | owner]`. `/contacts` filter chips + table role pill, `/contacts/:id` hero eyebrow + sidebar. **SCHEMA GAP**.
 - `is_primary` — boolean default false. `/contacts` table star icon on row, `/contacts/:id` amber "Primary" pill in hero. **SCHEMA GAP**.
 - `linkedin_url` — text. `/contacts/:id` sidebar external link. **SCHEMA GAP**.
-- `hubspot_id` — text. `/contacts/:id` sidebar System IDs. **SCHEMA GAP**.
+- `hubspot_id` — already exists as DB column `hubspot_contact_id` (TS field `hubspotContactId`) and serves `/contacts/:id` sidebar System IDs. **READY** — no schema change needed.
 
 ### `properties` — Tier A1 (Track A-core / PR A1)
 - `type` — postgres enum `property_type` `[office | industrial | retail | school | healthcare | government | mixed_use]`. `/properties` filter chips + table type pill, `/properties/:id` hero eyebrow + sidebar. **SCHEMA GAP**.
