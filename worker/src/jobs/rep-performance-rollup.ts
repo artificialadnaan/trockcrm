@@ -81,9 +81,29 @@ async function refreshOfficePeriod(
     `WITH rep_deals AS (
        SELECT
          d.assigned_rep_id AS rep_id,
-         COUNT(*) FILTER (WHERE d.is_active = true AND NOT psc.is_terminal)::int AS deals_count,
+         COUNT(*) FILTER (
+           WHERE CASE
+             WHEN $1::text IN ('last_month', 'last_quarter', 'last_year') THEN
+               d.created_at::date <= $3::date
+               AND (
+                 COALESCE(d.actual_close_date, d.contract_signed_date, d.contract_signed_at::date, d.lost_at::date) IS NULL
+                 OR COALESCE(d.actual_close_date, d.contract_signed_date, d.contract_signed_at::date, d.lost_at::date) >= $2::date
+               )
+             ELSE d.is_active = true AND NOT psc.is_terminal
+           END
+         )::int AS deals_count,
          COALESCE(SUM(COALESCE(d.awarded_amount, d.bid_estimate, d.dd_estimate, 0))
-           FILTER (WHERE d.is_active = true AND NOT psc.is_terminal AND psc.is_active_pipeline), 0)::numeric AS pipeline_value,
+           FILTER (
+             WHERE CASE
+               WHEN $1::text IN ('last_month', 'last_quarter', 'last_year') THEN
+                 d.created_at::date <= $3::date
+                 AND (
+                   COALESCE(d.actual_close_date, d.contract_signed_date, d.contract_signed_at::date, d.lost_at::date) IS NULL
+                   OR COALESCE(d.actual_close_date, d.contract_signed_date, d.contract_signed_at::date, d.lost_at::date) >= $2::date
+                 )
+               ELSE d.is_active = true AND NOT psc.is_terminal AND psc.is_active_pipeline
+             END
+           ), 0)::numeric AS pipeline_value,
          COUNT(*) FILTER (
            WHERE psc.slug IN ('won', 'sent_to_production', 'service_sent_to_production', 'closed_won')
              AND COALESCE(d.actual_close_date, d.contract_signed_date, d.contract_signed_at::date, d.updated_at::date) >= $2::date
