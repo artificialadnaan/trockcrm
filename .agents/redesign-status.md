@@ -28,6 +28,7 @@
 - A5b CLAIM 2026-05-07T22:21:35Z: redesign/schema-hooks-isolated/a5b, stale_account_count on rep_performance_snapshots. ETA TBD. Worktree: trockcrm-redesign-data-isolated.
 - A5b SCOPE-EXPAND 2026-05-07T22:25:33Z: folded PR #158 Codex catches (historical pipeline filter + inserted counter scoping) into A5b PR.
 - A5b PR-OPEN 2026-05-07T22:36:17Z: PR #160 opened for stale_account_count and folded PR #158 Codex catches.
+- A5b CODEX-FIX 2026-05-07T23:10:43Z: PR #160 force-pushed with stale-account period-scoping fix on both branches + regression test.
 
 ## Track B — Shared Primitives + Shell + Harness
 - _no claims yet_
