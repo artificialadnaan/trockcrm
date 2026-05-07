@@ -175,8 +175,18 @@ No new columns. The `rep-performance-rollup` query gains joins onto `companies.l
 
 ## §2 Hook gaps by hook (Track A's hook extension list)
 
-### `useRepDashboard` — Track A-core (already complete enough; verify only)
-Already returns: `activeLeads`, `activeDeals`, `contractsSignedYtd/Mtd`, `tasksToday`, `activityThisWeek`, `followUpCompliance`, `pipelineByStage`, `staleLeads`, `leadSnapshot`, `dealSnapshot`, `myCleanup`, `crmOwnedProgression`, `downstreamBottlenecks`, `commissionSummary`, `funnelBuckets`, `fetchedAt`. Preview adds nothing — **READY**.
+### `useRepDashboard` — partial gap (owned by PR-B, NOT Track A-core)
+
+**Verified against `client/src/hooks/use-dashboard.ts` at HEAD** (committed state on `redesign/coordination` and `chore/impeccable-design-baseline`):
+
+- **Hook return shape (current):** `{ data: RepDashboardData | null, loading, error, refetch }`. **No `fetchedAt` field.**
+- **`RepDashboardData` payload:** verified against `server/src/modules/dashboard/service.ts` — the server already populates every field the redesigned rep dashboard reads: `activeLeads`, `activeDeals`, `contractsSignedYtd`, `contractsSignedMtd`, `tasksToday`, `activityThisWeek`, `followUpCompliance`, `pipelineByStage`, `staleLeads`, `leadSnapshot`, `dealSnapshot`, `myCleanup`, `crmOwnedProgression`, `downstreamBottlenecks`, `commissionSummary`, `commissionDeals`, `funnelBuckets`. **Data shape is READY** — no server-side or hook-payload gap.
+
+**Hook-shape gap:** the redesigned rep dashboard renders a freshness stamp ("Today's work · synced X ago") that requires `fetchedAt: Date | null` on the hook return. The hook does not currently expose this.
+
+- **HOOK GAP — owned by PR-B (`redesign/dashboard-prework`), not Track A-core.** PR-B is the prework PR described in plan §7 — it lands the rep-dashboard partial port and the matching `fetchedAt` hook extension that came out of session 1. Track A-core sees `fetchedAt` as a fait accompli once PR-B merges.
+
+Once PR-B merges, this entry collapses to **READY** and `/` Rep Dashboard has no remaining hook gaps.
 
 ### `useCompanies` — extend after A1 (Track A-core)
 Add to row shape: `industry`, `region`, `domain`, `last_activity_at`, `hubspot_id`, `procore_id`. Add **DERIVED** aggregates: `properties_count`, `contacts_count`, `active_deals_count`, `pipeline_value`. **HOOK GAP** for the new columns + DERIVED aggregates.
@@ -287,7 +297,7 @@ Track A writes the query/aggregate; the server returns these computed values:
 For each page, the field set that lights up the gap above. Track A uses §1 + §2 as the work order; §4 is for verification that each page's needs are covered.
 
 ### `/` Rep Dashboard
-All from `useRepDashboard` — **READY** (after the `fetchedAt` extension that already landed).
+All from `useRepDashboard`. Data payload is **READY** (server returns every field — verified). Hook return shape needs `fetchedAt: Date | null` for the freshness stamp — **HOOK GAP**, owned by PR-B (`redesign/dashboard-prework`). See §2 `useRepDashboard` for full state. Collapses to fully READY once PR-B merges.
 
 ### `/director` Director Dashboard
 - Forecast vs Goal block — `useDirectorDashboard.forecast_vs_goal` — HOOK GAP (A5a).
