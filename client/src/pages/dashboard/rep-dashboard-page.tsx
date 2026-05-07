@@ -188,11 +188,19 @@ export function RepDashboardPage() {
     refetchOverdue();
     refetchToday();
   };
-  const refreshAll = () => {
-    refetch();
-    refetchDealBoard();
-    refetchLeadBoard();
-    refetchTasks();
+  const refreshAll = async () => {
+    const results = await Promise.allSettled([
+      refetch(),
+      refetchDealBoard(),
+      refetchLeadBoard(),
+      refetchOverdue(),
+      refetchToday(),
+    ]);
+    results.forEach((r) => {
+      if (r.status === "rejected") {
+        console.error("Dashboard refresh: section failed", r.reason);
+      }
+    });
   };
   const visibleLeadColumns = leadBoard?.columns ?? [];
   const canonicalDealBoard = useMemo(
