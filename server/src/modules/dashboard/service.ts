@@ -4,9 +4,8 @@ import {
   auditLog,
   aiDisconnectCases,
   deals,
-  dealPaymentEvents,
+  dealSignedCommissions,
   leads,
-  activities,
   duplicateQueue,
   jobQueue,
   procoreSyncState,
@@ -712,9 +711,14 @@ type CommissionDealRollup = {
   propertyName: string | null;
   paidRevenue: number;
   commissionableMargin: number;
+  earnedCommission: number;
   paymentCount: number;
   lastPaidAt: string | null;
 };
+
+function dashboardEarnedSignedDateSql() {
+  return sql`COALESCE(d.contract_signed_at::date, d.contract_signed_date, dsc.contract_signed_date_at_signing)`;
+}
 
 async function getCommissionConfig(tenantDb: TenantDb, userId: string): Promise<CommissionConfig> {
   const result = await tenantDb.execute(sql`
@@ -749,96 +753,40 @@ async function getCommissionConfig(tenantDb: TenantDb, userId: string): Promise<
 async function getDirectCommissionMetrics(
   tenantDb: TenantDb,
   repId: string,
-  config: CommissionConfig
+  _config: CommissionConfig,
+  fromDate: string,
+  toDate: string
 ): Promise<DirectCommissionMetrics> {
-  const windowMonths = Math.max(1, config.newCustomerWindowMonths);
-
   const result = await tenantDb.execute(sql`
-    WITH payment_events AS (
-      SELECT
-        pe.id,
-        pe.paid_at,
-        d.company_id,
-        CASE
-          WHEN pe.is_credit_memo THEN -ABS(pe.gross_revenue_amount::numeric)
-          ELSE ABS(pe.gross_revenue_amount::numeric)
-        END AS gross_revenue_amount,
-        CASE
-          WHEN pe.is_credit_memo THEN -ABS(COALESCE(pe.gross_margin_amount, pe.gross_revenue_amount * ${String(config.estimatedMarginRate)}::numeric)::numeric)
-          ELSE ABS(COALESCE(pe.gross_margin_amount, pe.gross_revenue_amount * ${String(config.estimatedMarginRate)}::numeric)::numeric)
-        END AS gross_margin_amount,
-        (pe.gross_margin_amount IS NULL) AS used_estimated_margin
-      FROM ${dealPaymentEvents} pe
-      JOIN ${deals} d ON d.id = pe.deal_id
-      WHERE d.assigned_rep_id = ${repId}
-        AND pe.paid_at >= NOW() - INTERVAL '12 months'
-    ),
-    scored_events AS (
-      SELECT
-        ev.*,
-        CASE
-          WHEN ev.gross_revenue_amount = 0 THEN NULL
-          ELSE (ABS(ev.gross_margin_amount) / NULLIF(ABS(ev.gross_revenue_amount), 0))
-        END AS margin_percent,
-        NOT EXISTS (
-          SELECT 1
-          FROM ${activities} a
-          WHERE a.company_id = ev.company_id
-            AND a.occurred_at >= ev.paid_at - (${windowMonths}::text || ' months')::interval
-            AND a.occurred_at < ev.paid_at
-        ) AS is_new_customer
-      FROM payment_events ev
-    ),
-    eligible_events AS (
-      SELECT *
-      FROM scored_events
-      WHERE gross_revenue_amount < 0
-        OR margin_percent IS NULL
-        OR margin_percent >= ${String(config.minMarginPercent)}::numeric
-    ),
-    low_margin_events AS (
-      SELECT *
-      FROM scored_events
-      WHERE gross_revenue_amount >= 0
-        AND margin_percent IS NOT NULL
-        AND margin_percent < ${String(config.minMarginPercent)}::numeric
-    )
     SELECT
-      COALESCE((SELECT SUM(gross_revenue_amount) FROM eligible_events), 0)::numeric AS rolling_paid_revenue,
-      COALESCE((SELECT SUM(gross_margin_amount) FROM eligible_events), 0)::numeric AS rolling_commissionable_margin,
-      COALESCE((SELECT SUM(gross_revenue_amount) FROM eligible_events WHERE is_new_customer), 0)::numeric AS new_customer_revenue,
-      COALESCE((SELECT COUNT(*) FROM eligible_events WHERE used_estimated_margin), 0)::int AS estimated_payment_count,
-      COALESCE((SELECT SUM(gross_revenue_amount) FROM low_margin_events), 0)::numeric AS excluded_low_margin_revenue
+      COALESCE(SUM(dsc.source_value_amount), 0)::numeric AS source_value_amount,
+      COALESCE(SUM(dsc.amount), 0)::numeric AS earned_commission
+    FROM ${dealSignedCommissions} dsc
+    JOIN ${deals} d ON d.id = dsc.deal_id
+    JOIN ${pipelineStageConfig} psc ON psc.id = d.stage_id
+    WHERE dsc.rep_user_id = ${repId}
+      AND COALESCE(d.is_test_data, false) = false
+      AND ${dashboardEarnedSignedDateSql()} IS NOT NULL
+      AND psc.slug NOT IN ('lost', 'production_lost', 'service_lost', 'closed_lost')
+      AND ${dashboardEarnedSignedDateSql()} >= ${fromDate}
+      AND ${dashboardEarnedSignedDateSql()} <= ${toDate}
   `);
 
   const rows = (result as any).rows ?? result;
   const row = rows[0] ?? {};
-  const rollingPaidRevenue = Number(row.rolling_paid_revenue ?? 0);
-  const rollingCommissionableMargin = Number(row.rolling_commissionable_margin ?? 0);
-  const newCustomerRevenue = Number(row.new_customer_revenue ?? 0);
-  const estimatedPaymentCount = Number(row.estimated_payment_count ?? 0);
-  const excludedLowMarginRevenue = Number(row.excluded_low_margin_revenue ?? 0);
-  const newCustomerShare = rollingPaidRevenue > 0 ? newCustomerRevenue / rollingPaidRevenue : 0;
-  const meetsNewCustomerShare = rollingPaidRevenue === 0 ? true : newCustomerShare >= config.newCustomerShareFloor;
-  const floorRemaining = Math.max(config.rollingFloor - rollingPaidRevenue, 0);
-  const eligibleRevenueAfterFloor = Math.max(rollingPaidRevenue - config.rollingFloor, 0);
-  const realizedMarginRate =
-    rollingPaidRevenue > 0 ? rollingCommissionableMargin / rollingPaidRevenue : 0;
-  const eligibleMarginAfterFloor = Math.max(eligibleRevenueAfterFloor * realizedMarginRate, 0);
-  const directEarnedCommission = Number(
-    (eligibleMarginAfterFloor * config.commissionRate).toFixed(2)
-  );
+  const sourceValueAmount = Number(row.source_value_amount ?? 0);
+  const directEarnedCommission = Number(Number(row.earned_commission ?? 0).toFixed(2));
 
   return {
-    rollingPaidRevenue,
-    rollingCommissionableMargin,
-    newCustomerRevenue,
-    newCustomerShare,
-    meetsNewCustomerShare,
-    estimatedPaymentCount,
-    excludedLowMarginRevenue,
-    floorRemaining,
-    eligibleMarginAfterFloor,
+    rollingPaidRevenue: sourceValueAmount,
+    rollingCommissionableMargin: sourceValueAmount,
+    newCustomerRevenue: 0,
+    newCustomerShare: 0,
+    meetsNewCustomerShare: true,
+    estimatedPaymentCount: 0,
+    excludedLowMarginRevenue: 0,
+    floorRemaining: 0,
+    eligibleMarginAfterFloor: sourceValueAmount,
     directEarnedCommission,
   };
 }
@@ -846,69 +794,34 @@ async function getDirectCommissionMetrics(
 async function getCommissionDealRollups(
   tenantDb: TenantDb,
   repId: string,
-  config: CommissionConfig
+  _config: CommissionConfig,
+  fromDate: string,
+  toDate: string
 ): Promise<CommissionDealRollup[]> {
-  const windowMonths = Math.max(1, config.newCustomerWindowMonths);
-
   const result = await tenantDb.execute(sql`
-    WITH payment_events AS (
-      SELECT
-        pe.id,
-        pe.deal_id,
-        pe.paid_at,
-        d.company_id,
-        CASE
-          WHEN pe.is_credit_memo THEN -ABS(pe.gross_revenue_amount::numeric)
-          ELSE ABS(pe.gross_revenue_amount::numeric)
-        END AS gross_revenue_amount,
-        CASE
-          WHEN pe.is_credit_memo THEN -ABS(COALESCE(pe.gross_margin_amount, pe.gross_revenue_amount * ${String(config.estimatedMarginRate)}::numeric)::numeric)
-          ELSE ABS(COALESCE(pe.gross_margin_amount, pe.gross_revenue_amount * ${String(config.estimatedMarginRate)}::numeric)::numeric)
-        END AS gross_margin_amount
-      FROM ${dealPaymentEvents} pe
-      JOIN ${deals} d ON d.id = pe.deal_id
-      WHERE d.assigned_rep_id = ${repId}
-        AND pe.paid_at >= NOW() - INTERVAL '12 months'
-    ),
-    scored_events AS (
-      SELECT
-        ev.*,
-        CASE
-          WHEN ev.gross_revenue_amount = 0 THEN NULL
-          ELSE (ABS(ev.gross_margin_amount) / NULLIF(ABS(ev.gross_revenue_amount), 0))
-        END AS margin_percent,
-        NOT EXISTS (
-          SELECT 1
-          FROM ${activities} a
-          WHERE a.company_id = ev.company_id
-            AND a.occurred_at >= ev.paid_at - (${windowMonths}::text || ' months')::interval
-            AND a.occurred_at < ev.paid_at
-        ) AS is_new_customer
-      FROM payment_events ev
-    ),
-    eligible_events AS (
-      SELECT *
-      FROM scored_events
-      WHERE gross_revenue_amount < 0
-        OR margin_percent IS NULL
-        OR margin_percent >= ${String(config.minMarginPercent)}::numeric
-    )
     SELECT
       d.id AS deal_id,
       d.deal_number AS deal_number,
       d.name AS deal_name,
       c.name AS company_name,
       p.name AS property_name,
-      COALESCE(SUM(ev.gross_revenue_amount), 0)::numeric AS paid_revenue,
-      COALESCE(SUM(ev.gross_margin_amount), 0)::numeric AS commissionable_margin,
-      COUNT(*)::int AS payment_count,
-      MAX(ev.paid_at) AS last_paid_at
-    FROM eligible_events ev
-    JOIN ${deals} d ON d.id = ev.deal_id
+      dsc.source_value_amount::numeric AS paid_revenue,
+      dsc.source_value_amount::numeric AS commissionable_margin,
+      dsc.amount::numeric AS earned_commission,
+      0::int AS payment_count,
+      ${dashboardEarnedSignedDateSql()} AS last_paid_at
+    FROM ${dealSignedCommissions} dsc
+    JOIN ${deals} d ON d.id = dsc.deal_id
+    JOIN ${pipelineStageConfig} psc ON psc.id = d.stage_id
     LEFT JOIN ${companies} c ON c.id = d.company_id
     LEFT JOIN ${properties} p ON p.id = d.property_id
-    GROUP BY d.id, d.deal_number, d.name, c.name, p.name
-    ORDER BY MAX(ev.paid_at) DESC, d.name ASC
+    WHERE dsc.rep_user_id = ${repId}
+      AND COALESCE(d.is_test_data, false) = false
+      AND ${dashboardEarnedSignedDateSql()} IS NOT NULL
+      AND psc.slug NOT IN ('lost', 'production_lost', 'service_lost', 'closed_lost')
+      AND ${dashboardEarnedSignedDateSql()} >= ${fromDate}
+      AND ${dashboardEarnedSignedDateSql()} <= ${toDate}
+    ORDER BY ${dashboardEarnedSignedDateSql()} DESC, d.name ASC
   `);
 
   const rows = (result as any).rows ?? result;
@@ -920,8 +833,9 @@ async function getCommissionDealRollups(
     propertyName: row.property_name ? String(row.property_name) : null,
     paidRevenue: Number(row.paid_revenue ?? 0),
     commissionableMargin: Number(row.commissionable_margin ?? 0),
+    earnedCommission: Number(row.earned_commission ?? 0),
     paymentCount: Number(row.payment_count ?? 0),
-    lastPaidAt: row.last_paid_at ? new Date(String(row.last_paid_at)).toISOString() : null,
+    lastPaidAt: row.last_paid_at ? new Date(`${String(row.last_paid_at).slice(0, 10)}T00:00:00.000Z`).toISOString() : null,
   }));
 }
 
@@ -929,37 +843,8 @@ function allocateDealCommissions(
   rollups: CommissionDealRollup[],
   direct: DirectCommissionMetrics
 ): RepCommissionDealEarning[] {
-  if (rollups.length === 0) return [];
-  if (direct.directEarnedCommission <= 0 || direct.rollingCommissionableMargin <= 0) {
-    return [];
-  }
-
-  const distributable = direct.directEarnedCommission;
-  const totalMargin = direct.rollingCommissionableMargin;
-
-  const weighted = rollups.map((rollup) => {
-    const proportionalShare = (rollup.commissionableMargin / totalMargin) * distributable;
-    return {
-      rollup,
-      earnedCommission: Number(proportionalShare.toFixed(2)),
-    };
-  });
-
-  // Keep rounded deal earnings aligned to total direct earned commission.
-  const roundedTotal = Number(
-    weighted.reduce((sum, row) => sum + row.earnedCommission, 0).toFixed(2)
-  );
-  const remainder = Number((distributable - roundedTotal).toFixed(2));
-  if (Math.abs(remainder) > 0 && weighted.length > 0) {
-    weighted[0].earnedCommission = Number((weighted[0].earnedCommission + remainder).toFixed(2));
-  }
-
-  return weighted
-    .filter((row) => row.earnedCommission > 0)
-    .map((row) => ({
-      ...row.rollup,
-      earnedCommission: row.earnedCommission,
-    }));
+  if (direct.directEarnedCommission <= 0) return [];
+  return rollups.filter((rollup) => rollup.earnedCommission > 0);
 }
 
 async function getRepPotentialRevenue(tenantDb: TenantDb, repId: string): Promise<number> {
@@ -984,37 +869,36 @@ async function getRepPotentialRevenue(tenantDb: TenantDb, repId: string): Promis
 async function getOverrideEarnedCommission(
   tenantDb: TenantDb,
   managerId: string,
-  managerOverrideRate: number
+  managerOverrideRate: number,
+  fromDate: string,
+  toDate: string
 ): Promise<number> {
   if (managerOverrideRate <= 0) return 0;
 
-  const subordinateResult = await tenantDb.execute(sql`
-    SELECT u.id AS rep_id
+  const result = await tenantDb.execute(sql`
+    SELECT COALESCE(SUM(dsc.source_value_amount * ${String(managerOverrideRate)}::numeric), 0)::numeric AS override_earned
     FROM ${users} u
+    JOIN ${dealSignedCommissions} dsc ON dsc.rep_user_id = u.id
+    JOIN ${deals} d ON d.id = dsc.deal_id
+    JOIN ${pipelineStageConfig} psc ON psc.id = d.stage_id
     WHERE u.is_active = true
       AND u.role = 'rep'
       AND u.reports_to = ${managerId}
+      AND COALESCE(d.is_test_data, false) = false
+      AND ${dashboardEarnedSignedDateSql()} IS NOT NULL
+      AND psc.slug NOT IN ('lost', 'production_lost', 'service_lost', 'closed_lost')
+      AND ${dashboardEarnedSignedDateSql()} >= ${fromDate}
+      AND ${dashboardEarnedSignedDateSql()} <= ${toDate}
   `);
-  const subordinateRows = (subordinateResult as any).rows ?? subordinateResult;
-  if (subordinateRows.length === 0) return 0;
-
-  const earned = await Promise.all(
-    subordinateRows.map(async (row: any) => {
-      const subordinateId = String(row.rep_id);
-      const subordinateConfig = await getCommissionConfig(tenantDb, subordinateId);
-      if (!subordinateConfig.isActive) return 0;
-      const subordinateMetrics = await getDirectCommissionMetrics(tenantDb, subordinateId, subordinateConfig);
-      if (!subordinateMetrics.meetsNewCustomerShare) return 0;
-      return subordinateMetrics.eligibleMarginAfterFloor * managerOverrideRate;
-    })
-  );
-
-  return Number(earned.reduce((sum, value) => sum + value, 0).toFixed(2));
+  const rows = (result as any).rows ?? result;
+  return Number(Number(rows[0]?.override_earned ?? 0).toFixed(2));
 }
 
 async function getRepCommissionSummary(
   tenantDb: TenantDb,
-  repId: string
+  repId: string,
+  fromDate: string,
+  toDate: string
 ): Promise<{ summary: RepCommissionSummary; deals: RepCommissionDealEarning[] }> {
   const rawConfig = await getCommissionConfig(tenantDb, repId);
   const config = rawConfig.isActive
@@ -1023,16 +907,16 @@ async function getRepCommissionSummary(
         ...rawConfig,
         commissionRate: 0,
         rollingFloor: 0,
-      overrideRate: 0,
-    };
-  const direct = await getDirectCommissionMetrics(tenantDb, repId, config);
-  const commissionRollups = await getCommissionDealRollups(tenantDb, repId, config);
+        overrideRate: 0,
+      };
+  const direct = await getDirectCommissionMetrics(tenantDb, repId, config, fromDate, toDate);
+  const commissionRollups = await getCommissionDealRollups(tenantDb, repId, config, fromDate, toDate);
   const potentialRevenue = await getRepPotentialRevenue(tenantDb, repId);
   const potentialMargin = potentialRevenue * config.estimatedMarginRate;
   const potentialEligibleRevenue = Math.max(potentialRevenue - direct.floorRemaining, 0);
   const potentialCommissionBase = potentialEligibleRevenue * config.estimatedMarginRate;
   const potentialCommission = Number((potentialCommissionBase * config.commissionRate).toFixed(2));
-  const overrideEarnedCommission = await getOverrideEarnedCommission(tenantDb, repId, config.overrideRate);
+  const overrideEarnedCommission = await getOverrideEarnedCommission(tenantDb, repId, config.overrideRate, fromDate, toDate);
   const totalEarnedCommission = Number((direct.directEarnedCommission + overrideEarnedCommission).toFixed(2));
   const deals = allocateDealCommissions(commissionRollups, direct);
 
@@ -1062,7 +946,8 @@ async function getRepCommissionSummary(
 }
 
 async function getDirectorRepCommissionRows(
-  tenantDb: TenantDb
+  tenantDb: TenantDb,
+  options: { from: string; to: string }
 ): Promise<DirectorRepCommissionRow[]> {
   const repsResult = await tenantDb.execute(sql`
     SELECT id, display_name
@@ -1076,7 +961,7 @@ async function getDirectorRepCommissionRows(
 
   const rows = await Promise.all(
     reps.map(async (rep: any) => {
-      const { summary } = await getRepCommissionSummary(tenantDb, String(rep.id));
+      const { summary } = await getRepCommissionSummary(tenantDb, String(rep.id), options.from, options.to);
       return {
         repId: String(rep.id),
         repName: String(rep.display_name ?? "Rep"),
@@ -1340,7 +1225,7 @@ export async function getRepDashboard(
     `),
     getRepFunnelBuckets(tenantDb, userId),
     getMyCleanupQueue(tenantDb, userId),
-    getRepCommissionSummary(tenantDb, userId),
+    getRepCommissionSummary(tenantDb, userId, activityRangeStartDate, today),
 
     // Contracts signed YTD + MTD for this rep. Strict semantics: we count
     // signed contracts (contract_signed_at, falling back to contract_signed_date)
@@ -1573,7 +1458,7 @@ export async function getDirectorCommissionWorkspace(
   const to = options.to ?? `${year}-12-31`;
 
   const [commissionRows, activityRows, funnelSummary, dealSummaryRows] = await Promise.all([
-    getDirectorRepCommissionRows(tenantDb),
+    getDirectorRepCommissionRows(tenantDb, { from, to }),
     getActivitySummaryByRep(tenantDb, { from, to }),
     getDirectorFunnelSummary(tenantDb),
     getRepDealPipelineSummary(tenantDb),
@@ -1661,7 +1546,7 @@ export async function getDirectorDashboard(
     getCrmOwnedProgression(tenantDb),
     getDownstreamBottlenecks(tenantDb),
     getDirectorFunnelSummary(tenantDb),
-    getDirectorRepCommissionRows(tenantDb),
+    getDirectorRepCommissionRows(tenantDb, { from, to }),
   ]);
 
   return {
