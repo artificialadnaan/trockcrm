@@ -72,6 +72,7 @@ Tracks 0 / A-core / A-isolated / B run first in parallel. C/D/E/F run after thei
 - `shared/src/types/**` updates that follow these schema changes
 - `server/src/modules/{companies,contacts,properties,deals,leads,emails,files,call-recordings,activities}/**`
 - `client/src/hooks/use-{companies,contacts,properties,deals,leads,emails,files,activities}.ts` (extensions only — no UI consumers touched)
+- `client/src/hooks/use-call-recordings.ts` — **NEW in A3** (extracted from `client/src/components/call-recordings/recording-list.tsx` internal fetch — see gap audit §2). Refactor of `recording-list.tsx` to consume the hook is included in A3.
 - `client/src/lib/api.ts` (only if a new endpoint or shape is needed)
 
 **Must NOT touch:**
@@ -86,7 +87,7 @@ Tracks 0 / A-core / A-isolated / B run first in parallel. C/D/E/F run after thei
 **Sub-deliverables (each its own PR — sequential):**
 1. **A1** — Tier 1 schema (companies/contacts/properties field additions per gap audit §1) + hook extensions for those three list hooks. Unblocks Track C.
 2. **A2** — Tier 3 schema (`estimate_line_items` table + `useEstimateLineItems` hook). Unblocks Track E's deal detail Estimate tab.
-3. **A3** — Tier 4 schema (`email_links` junction, `file_links` junction, `ai_suggestions` JSONB on emails, `topics` array on call_recordings, `user_starred_files` pivot) + hook extensions for `useEmails` / `useFiles`. Unblocks Track F's email page and Track E's cross-link chips.
+3. **A3** — Tier 4 schema (`email_links` junction, `file_links` junction, `ai_suggestions` JSONB on emails, `topics` array on call_recordings, `user_starred_files` pivot) + hook extensions for `useEmails` / `useFiles` + new `useCallRecordings` hook (extracted from existing `RecordingList` component internal fetch — see gap audit §2; recordings hook is one explicit exception to "Track A only extends existing hooks"). Unblocks Track F's email page, Track E's cross-link chips, and Track E's redesigned Recordings tabs on every detail page.
 
 PRs A1 → A2 → A3 merge in numeric order.
 

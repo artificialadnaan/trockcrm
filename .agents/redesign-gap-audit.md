@@ -213,6 +213,23 @@ Add: `linked_records[]` from `email_links` junction (replaces single-FK consumpt
 ### `useFiles` — extend after A3 (Track A-core)
 Add: `linked_records[]` from `file_links` junction; `is_starred` for current user (from `user_starred_files`); `kind` from existing `category` enum (already present, ensure mapping). **HOOK GAP**.
 
+### `useCallRecordings` — NEW after A3 (Track A-core, Option A)
+
+**Currently does not exist.** Production fetching lives inline inside `client/src/components/call-recordings/recording-list.tsx` — the component manages its own `useState<CallRecording[]>` + `useEffect` + `api()` call. It's consumed directly by `lead-detail-page.tsx`, `contact-detail-page.tsx`, `company-detail-page.tsx`, and `deal-detail-page.tsx` with `entityType` + `entityId` props.
+
+A3 creates `useCallRecordings(entityType: "lead"|"contact"|"company"|"deal", entityId: string)` returning `{ recordings[], loading, error, refetch }` so:
+- The redesigned presentational `RecordingsList` (Track B) consumes the hook shape, matching every other list pattern.
+- The `topics` text[] field added in A3 propagates cleanly — Track A returns it on the row shape; page tracks render topic chips.
+- Per-row playback URL (`/call-recordings/:id/playback`), transcript fetch (`/call-recordings/:id/transcript`), and per-row delete stay component-internal — they're per-row interactions, not list-level data, and don't fit a list-shaped hook.
+
+**Migration path** (executed by Track A-core in A3):
+1. Extract the existing `useState<CallRecording[]>` + load `useEffect` + `api<{ recordings }>('/call-recordings?entityType=...&entityId=...')` from `recording-list.tsx` into `client/src/hooks/use-call-recordings.ts`.
+2. Extend the row shape to include `topics: string[]` (returned from server after A3 schema lands).
+3. Refactor `recording-list.tsx` to consume the hook instead of fetching internally. Playback URL / transcript / delete stay internal (they remain `api()` calls or move to per-action hooks later).
+4. Track E (detail page redesigns) replaces the current `<RecordingList entityType=... entityId=... />` with the redesigned presentational `<RecordingsList recordings={recordings} />` consuming `useCallRecordings(...)`.
+
+**HOOK GAP** (NEW hook). Adds `client/src/hooks/use-call-recordings.ts` to Track A-core ownership.
+
 ### `useTasks` — Track A-core (verify only)
 `type`, `priority`, `due_date`, `status`, linked entity all present — **READY**.
 
@@ -307,7 +324,7 @@ All from `useRepDashboard` — **READY** (after the `fetchedAt` extension that a
 
 ### `/companies/:id`
 - Hero industry/region/domain/HubSpot ID — SCHEMA GAP (A1).
-- 9 tabs — Email tab needs `useEmails` (after A3); Recordings tab needs existing `useCallRecordings` + `topics` (after A3); Files tab needs `useFiles` (after A3).
+- 9 tabs — Email tab needs `useEmails` (after A3); Recordings tab needs new `useCallRecordings` (created in A3 — see §2; extracted from current component-internal fetch) returning `topics`; Files tab needs `useFiles` (after A3).
 
 ### `/contacts/:id`
 - Hero role / Primary pill — SCHEMA GAP (A1).
