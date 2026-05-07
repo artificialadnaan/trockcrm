@@ -11,6 +11,12 @@ export interface Company {
   zip: string | null;
   phone: string | null;
   website: string | null;
+  industry?: string | null;
+  region?: string | null;
+  domain?: string | null;
+  lastActivityAt?: string | null;
+  hubspotId?: string | null;
+  procoreId?: string | null;
   notes: string | null;
   companyVerificationStatus: "pending" | "verified" | "not_required" | null;
   companyVerificationRequestedAt: string | null;
@@ -19,6 +25,10 @@ export interface Company {
   companyVerifiedBy: string | null;
   contactCount: number;
   dealCount: number;
+  propertiesCount?: number;
+  contactsCount?: number;
+  activeDealsCount?: number;
+  pipelineValue?: string;
   createdAt: string;
   updatedAt: string;
 }
@@ -26,6 +36,7 @@ export interface Company {
 export interface CompanyFilters {
   search?: string;
   category?: string;
+  industry?: string;
   page?: number;
   limit?: number;
 }
@@ -55,6 +66,7 @@ export function useCompanies(filters: CompanyFilters = {}) {
       const params = new URLSearchParams();
       if (filters.search) params.set("search", filters.search);
       if (filters.category) params.set("category", filters.category);
+      if (filters.industry) params.set("industry", filters.industry);
       if (filters.page) params.set("page", String(filters.page));
       if (filters.limit) params.set("limit", String(filters.limit));
 
@@ -77,7 +89,7 @@ export function useCompanies(filters: CompanyFilters = {}) {
     } finally {
       setLoading(false);
     }
-  }, [filters.search, filters.category, filters.page, filters.limit]);
+  }, [filters.search, filters.category, filters.industry, filters.page, filters.limit]);
 
   useEffect(() => {
     fetchCompanies();

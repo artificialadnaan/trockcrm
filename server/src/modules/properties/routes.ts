@@ -8,10 +8,11 @@ const router = Router();
 
 router.get("/", async (req, res, next) => {
   try {
-    const { search, companyId, page, limit, isActive } = req.query as Record<string, string>;
+    const { search, companyId, type, page, limit, isActive } = req.query as Record<string, string>;
     const result = await listProperties(req.tenantDb!, {
       search,
       companyId,
+      type,
       page: page ? parseInt(page, 10) : 1,
       limit: limit ? parseInt(limit, 10) : 100,
       isActive: isActive === "false" ? false : true,

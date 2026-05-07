@@ -16,7 +16,7 @@
 ## §1 Schema gaps by entity (Track A's migration list)
 
 ### `companies` — Tier A1 (Track A-core / PR A1)
-- `industry` — postgres enum `company_industry` `[school_district | healthcare | industrial | office_mixed | retail | government | hospitality]`. Used by `/companies` filter chips, `/companies` table column, `/companies/:id` hero eyebrow + sidebar. **SCHEMA GAP**.
+- `industry` — postgres enum `company_industry` `[general_contractor | construction_manager | property_owner | property_management | reit | architecture_engineering | consultant | insurance_restoration | other]`. Used by `/companies` filter chips, `/companies` table column, `/companies/:id` hero eyebrow + sidebar. **SCHEMA GAP**.
 - `region` — text. `/companies/:id` sidebar, `/companies` optional column. **SCHEMA GAP**.
 - `domain` — text. `/companies/:id` sidebar (mono font), `/companies` derived for "Open in HubSpot" hint. **SCHEMA GAP**.
 - `last_activity_at` — timestamptz. `/companies` table column with red-tint when stale 30d+, `/companies/:id` activity timeline empty-state. **SCHEMA GAP** (alternative: a view that aggregates from `activities` — Track A picks a column with a trigger for query speed).
@@ -24,10 +24,10 @@
 - `procore_id` — text. `/companies/:id` sidebar System IDs (mono). **SCHEMA GAP**.
 
 ### `contacts` — Tier A1 (Track A-core / PR A1)
-- `role` — postgres enum `contact_role` `[decision_maker | influencer | gatekeeper | procurement | engineer | owner]`. `/contacts` filter chips + table role pill, `/contacts/:id` hero eyebrow + sidebar. **SCHEMA GAP**.
+- `role` — postgres enum `contact_role` `[owner_principal | project_manager | facilities_director | maintenance | procurement | insurance_adjuster | admin_ap | other]`. `/contacts` filter chips + table role pill, `/contacts/:id` hero eyebrow + sidebar. **SCHEMA GAP**.
 - `is_primary` — boolean default false. `/contacts` table star icon on row, `/contacts/:id` amber "Primary" pill in hero. **SCHEMA GAP**.
 - `linkedin_url` — text. `/contacts/:id` sidebar external link. **SCHEMA GAP**.
-- `hubspot_id` — text. `/contacts/:id` sidebar System IDs. **SCHEMA GAP**.
+- `hubspot_id` — already exists as DB column `hubspot_contact_id` (TS field `hubspotContactId`) and serves `/contacts/:id` sidebar System IDs. **READY** — no schema change needed.
 
 ### `properties` — Tier A1 (Track A-core / PR A1)
 - `type` — postgres enum `property_type` `[office | industrial | retail | school | healthcare | government | mixed_use]`. `/properties` filter chips + table type pill, `/properties/:id` hero eyebrow + sidebar. **SCHEMA GAP**.

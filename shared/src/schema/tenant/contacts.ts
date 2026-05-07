@@ -11,9 +11,10 @@ import {
   timestamp,
   index,
 } from "drizzle-orm/pg-core";
-import { CONTACT_CATEGORIES } from "../../types/enums.js";
+import { CONTACT_CATEGORIES, CONTACT_ROLES } from "../../types/enums.js";
 
 export const contactCategoryEnum = pgEnum("contact_category", CONTACT_CATEGORIES);
+export const contactRoleEnum = pgEnum("contact_role", CONTACT_ROLES);
 
 export const contacts = pgTable(
   "contacts",
@@ -28,6 +29,7 @@ export const contacts = pgTable(
     companyId: uuid("company_id"),
     jobTitle: varchar("job_title", { length: 255 }),
     category: contactCategoryEnum("category").notNull(),
+    role: contactRoleEnum("role"),
     address: text("address"),
     city: varchar("city", { length: 255 }),
     state: varchar("state", { length: 2 }),
@@ -36,6 +38,7 @@ export const contacts = pgTable(
     touchpointCount: integer("touchpoint_count").default(0).notNull(),
     lastContactedAt: timestamp("last_contacted_at", { withTimezone: true }),
     firstOutreachCompleted: boolean("first_outreach_completed").default(false).notNull(),
+    linkedinUrl: text("linkedin_url"),
     procoreContactId: bigint("procore_contact_id", { mode: "number" }),
     hubspotContactId: varchar("hubspot_contact_id", { length: 50 }),
     sourceRefs: jsonb("source_refs").$type<Record<string, unknown>>().default({}).notNull(),
@@ -47,5 +50,6 @@ export const contacts = pgTable(
   },
   (table) => [
     index("contacts_name_company_idx").on(table.companyName),
+    index("contacts_role_idx").on(table.role),
   ]
 );

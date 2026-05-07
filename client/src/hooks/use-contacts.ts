@@ -12,6 +12,9 @@ export interface Contact {
   companyId: string | null;
   jobTitle: string | null;
   category: string;
+  role?: string | null;
+  isPrimary?: boolean;
+  linkedinUrl?: string | null;
   address: string | null;
   city: string | null;
   state: string | null;
@@ -22,6 +25,8 @@ export interface Contact {
   firstOutreachCompleted: boolean;
   procoreContactId: number | null;
   hubspotContactId: string | null;
+  linkedDealsCount?: number;
+  lastTouchAt?: string | null;
   normalizedPhone: string | null;
   isActive: boolean;
   createdAt: string;
@@ -34,6 +39,7 @@ export interface ContactFilters {
   companyName?: string;
   companyId?: string;
   jobTitle?: string;
+  role?: string;
   city?: string;
   state?: string;
   regionId?: string;
@@ -69,6 +75,7 @@ export function useContacts(filters: ContactFilters = {}) {
       if (filters.companyName) params.set("companyName", filters.companyName);
       if (filters.companyId) params.set("companyId", filters.companyId);
       if (filters.jobTitle) params.set("jobTitle", filters.jobTitle);
+      if (filters.role) params.set("role", filters.role);
       if (filters.city) params.set("city", filters.city);
       if (filters.state) params.set("state", filters.state);
       if (filters.regionId) params.set("regionId", filters.regionId);
@@ -98,6 +105,7 @@ export function useContacts(filters: ContactFilters = {}) {
     filters.companyName,
     filters.companyId,
     filters.jobTitle,
+    filters.role,
     filters.city,
     filters.state,
     filters.regionId,

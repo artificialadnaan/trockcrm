@@ -14,6 +14,7 @@ type TenantDb = NodePgDatabase<typeof schema>;
 export interface PropertyFilters {
   search?: string;
   companyId?: string;
+  type?: string;
   isActive?: boolean;
   page?: number;
   limit?: number;
@@ -118,6 +119,53 @@ function combineLatestTimestamp(...values: Array<string | null>) {
     .sort((left, right) => new Date(right).getTime() - new Date(left).getTime())[0] ?? null;
 }
 
+export function buildPropertyLastActivityAt(input: {
+  persistedLastActivityAt: string | null;
+  leadActivityAt: string | null;
+  dealActivityAt: string | null;
+}) {
+  return combineLatestTimestamp(
+    input.persistedLastActivityAt,
+    input.leadActivityAt,
+    input.dealActivityAt
+  );
+}
+
+function toNumericString(value: unknown) {
+  return String(value ?? "0");
+}
+
+export type PropertyEngagementStatus = "active_deal" | "active_lead" | "won" | "no_engagement";
+
+export function classifyPropertyEngagementStatus(input: {
+  dealCount: number;
+  leadCount: number;
+  convertedDealCount: number;
+}): PropertyEngagementStatus {
+  if (input.convertedDealCount > 0) return "won";
+  if (input.dealCount > 0) return "active_deal";
+  if (input.leadCount > 0) return "active_lead";
+  return "no_engagement";
+}
+
+export function buildPropertyEngagementStatus(input: {
+  leads: Array<{ isActive: boolean }>;
+  deals: Array<{ isActive: boolean; sourceLeadId?: string | null }>;
+}): PropertyEngagementStatus {
+  return classifyPropertyEngagementStatus(buildPropertyRelationshipCounts(input));
+}
+
+export function buildPropertyRelationshipCounts(input: {
+  leads: Array<{ isActive: boolean }>;
+  deals: Array<{ isActive: boolean; sourceLeadId?: string | null }>;
+}) {
+  return {
+    leadCount: input.leads.filter((lead) => lead.isActive).length,
+    dealCount: input.deals.filter((deal) => deal.isActive).length,
+    convertedDealCount: input.deals.filter((deal) => Boolean(deal.sourceLeadId)).length,
+  };
+}
+
 export async function listProperties(
   tenantDb: TenantDb,
   filters: PropertyFilters = {}
@@ -130,6 +178,9 @@ export async function listProperties(
 
   if (filters.companyId) {
     conditions.push(eq(properties.companyId, filters.companyId));
+  }
+  if (filters.type) {
+    conditions.push(eq(properties.type, filters.type as any));
   }
 
   if (filters.search?.trim()) {
@@ -157,9 +208,15 @@ export async function listProperties(
         city: properties.city,
         state: properties.state,
         zip: properties.zip,
+        type: properties.type,
         buildYear: properties.buildYear,
         unitCount: properties.unitCount,
+        floors: properties.floors,
+        roofArea: properties.roofArea,
         notes: properties.notes,
+        lastActivityAt: properties.lastActivityAt,
+        procoreId: properties.procoreId,
+        companycamId: properties.companycamId,
         isActive: properties.isActive,
         createdAt: properties.createdAt,
         updatedAt: properties.updatedAt,
@@ -184,16 +241,16 @@ export async function listProperties(
     };
   }
 
-  const [leadCounts, dealCounts, convertedCounts, leadActivity, dealActivity] = await Promise.all([
+  const [leadCounts, dealCounts, convertedCounts, leadActivity, dealActivity, activeDealValues, photoCounts] = await Promise.all([
     tenantDb
       .select({ propertyId: leads.propertyId, count: count() })
       .from(leads)
-      .where(inArray(leads.propertyId, propertyIds))
+      .where(and(inArray(leads.propertyId, propertyIds), eq(leads.isActive, true)))
       .groupBy(leads.propertyId),
     tenantDb
       .select({ propertyId: deals.propertyId, count: count() })
       .from(deals)
-      .where(inArray(deals.propertyId, propertyIds))
+      .where(and(inArray(deals.propertyId, propertyIds), eq(deals.isActive, true)))
       .groupBy(deals.propertyId),
     tenantDb
       .select({ propertyId: deals.propertyId, count: count() })
@@ -216,6 +273,33 @@ export async function listProperties(
       .from(deals)
       .where(inArray(deals.propertyId, propertyIds))
       .groupBy(deals.propertyId),
+    tenantDb
+      .select({
+        propertyId: deals.propertyId,
+        linkedValue: sql<string>`COALESCE(SUM(COALESCE(${deals.awardedAmount}, ${deals.bidEstimate}, ${deals.ddEstimate}, ${deals.forecastRevenue}, 0)), 0)::text`,
+      })
+      .from(deals)
+      .where(and(inArray(deals.propertyId, propertyIds), eq(deals.isActive, true)))
+      .groupBy(deals.propertyId),
+    tenantDb.execute(sql`
+      SELECT linked.property_id, COUNT(DISTINCT linked.file_id)::int AS photos_count
+      FROM (
+        SELECT d.property_id, f.id AS file_id
+        FROM files f
+        INNER JOIN deals d ON d.id = f.deal_id
+        WHERE d.property_id IN (${sql.join(propertyIds.map(id => sql`${id}`), sql`, `)})
+          AND f.category = 'photo'
+          AND f.is_active = true
+        UNION
+        SELECT l.property_id, f.id AS file_id
+        FROM files f
+        INNER JOIN leads l ON l.id = f.lead_id
+        WHERE l.property_id IN (${sql.join(propertyIds.map(id => sql`${id}`), sql`, `)})
+          AND f.category = 'photo'
+          AND f.is_active = true
+      ) linked
+      GROUP BY linked.property_id
+    `),
   ]);
 
   const leadCountMap = new Map(leadCounts.map((row) => [row.propertyId, coerceCount(row.count)]));
@@ -223,6 +307,9 @@ export async function listProperties(
   const convertedCountMap = new Map(convertedCounts.map((row) => [row.propertyId, coerceCount(row.count)]));
   const leadActivityMap = new Map(leadActivity.map((row) => [row.propertyId, coerceTimestamp(row.lastActivityAt)]));
   const dealActivityMap = new Map(dealActivity.map((row) => [row.propertyId, coerceTimestamp(row.lastActivityAt)]));
+  const linkedValueMap = new Map(activeDealValues.map((row) => [row.propertyId, toNumericString(row.linkedValue)]));
+  const photoCountRows = (photoCounts as any).rows ?? photoCounts;
+  const photosCountMap = new Map(photoCountRows.map((row: any) => [row.property_id, Number(row.photos_count ?? 0)]));
 
   return {
     properties: rows.map((row) => ({
@@ -230,10 +317,19 @@ export async function listProperties(
       leadCount: leadCountMap.get(row.id) ?? 0,
       dealCount: dealCountMap.get(row.id) ?? 0,
       convertedDealCount: convertedCountMap.get(row.id) ?? 0,
-      lastActivityAt: combineLatestTimestamp(
-        leadActivityMap.get(row.id) ?? null,
-        dealActivityMap.get(row.id) ?? null
-      ),
+      lastActivityAt: buildPropertyLastActivityAt({
+        persistedLastActivityAt: coerceTimestamp(row.lastActivityAt),
+        leadActivityAt: leadActivityMap.get(row.id) ?? null,
+        dealActivityAt: dealActivityMap.get(row.id) ?? null,
+      }),
+      engagementStatus: classifyPropertyEngagementStatus({
+        dealCount: dealCountMap.get(row.id) ?? 0,
+        leadCount: leadCountMap.get(row.id) ?? 0,
+        convertedDealCount: convertedCountMap.get(row.id) ?? 0,
+      }),
+      linkedValue: linkedValueMap.get(row.id) ?? "0",
+      activePipelineValue: linkedValueMap.get(row.id) ?? "0",
+      photosCount: photosCountMap.get(row.id) ?? 0,
     })),
     page,
     limit,
@@ -339,9 +435,15 @@ export async function getPropertyDetail(tenantDb: TenantDb, propertyId: string) 
       city: properties.city,
       state: properties.state,
       zip: properties.zip,
+      type: properties.type,
       buildYear: properties.buildYear,
       unitCount: properties.unitCount,
+      floors: properties.floors,
+      roofArea: properties.roofArea,
       notes: properties.notes,
+      lastActivityAt: properties.lastActivityAt,
+      procoreId: properties.procoreId,
+      companycamId: properties.companycamId,
       isActive: properties.isActive,
       createdAt: properties.createdAt,
       updatedAt: properties.updatedAt,
@@ -356,7 +458,7 @@ export async function getPropertyDetail(tenantDb: TenantDb, propertyId: string) 
     return null;
   }
 
-  const [relatedLeads, relatedDeals] = await Promise.all([
+  const [relatedLeads, relatedDeals, linkedValueRows, photoCounts] = await Promise.all([
     tenantDb
       .select()
       .from(leads)
@@ -367,18 +469,51 @@ export async function getPropertyDetail(tenantDb: TenantDb, propertyId: string) 
       .from(deals)
       .where(eq(deals.propertyId, propertyId))
       .orderBy(desc(deals.updatedAt), desc(deals.createdAt)),
+    tenantDb
+      .select({
+        linkedValue: sql<string>`COALESCE(SUM(COALESCE(${deals.awardedAmount}, ${deals.bidEstimate}, ${deals.ddEstimate}, ${deals.forecastRevenue}, 0)), 0)::text`,
+      })
+      .from(deals)
+      .where(and(eq(deals.propertyId, propertyId), eq(deals.isActive, true))),
+    tenantDb.execute(sql`
+      SELECT COUNT(DISTINCT linked.file_id)::int AS photos_count
+      FROM (
+        SELECT f.id AS file_id
+        FROM files f
+        INNER JOIN deals d ON d.id = f.deal_id
+        WHERE d.property_id = ${propertyId}
+          AND f.category = 'photo'
+          AND f.is_active = true
+        UNION
+        SELECT f.id AS file_id
+        FROM files f
+        INNER JOIN leads l ON l.id = f.lead_id
+        WHERE l.property_id = ${propertyId}
+          AND f.category = 'photo'
+          AND f.is_active = true
+      ) linked
+    `),
   ]);
+  const photoCountRows = (photoCounts as any).rows ?? photoCounts;
+  const relationshipCounts = buildPropertyRelationshipCounts({
+    leads: relatedLeads,
+    deals: relatedDeals,
+  });
+  const linkedValue = linkedValueRows[0]?.linkedValue ?? "0";
 
   return {
     property: {
       ...property,
-      leadCount: relatedLeads.length,
-      dealCount: relatedDeals.length,
-      convertedDealCount: relatedDeals.filter((deal) => Boolean(deal.sourceLeadId)).length,
-      lastActivityAt: combineLatestTimestamp(
-        ...relatedLeads.map((lead) => coerceTimestamp(lead.lastActivityAt)),
-        ...relatedDeals.map((deal) => coerceTimestamp(deal.lastActivityAt))
-      ),
+      ...relationshipCounts,
+      lastActivityAt: buildPropertyLastActivityAt({
+        persistedLastActivityAt: coerceTimestamp(property.lastActivityAt),
+        leadActivityAt: combineLatestTimestamp(...relatedLeads.map((lead) => coerceTimestamp(lead.lastActivityAt))),
+        dealActivityAt: combineLatestTimestamp(...relatedDeals.map((deal) => coerceTimestamp(deal.lastActivityAt))),
+      }),
+      engagementStatus: classifyPropertyEngagementStatus(relationshipCounts),
+      linkedValue,
+      activePipelineValue: linkedValue,
+      photosCount: Number(photoCountRows[0]?.photos_count ?? 0),
     },
     leads: relatedLeads,
     deals: relatedDeals,

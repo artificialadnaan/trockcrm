@@ -30,10 +30,11 @@ router.get("/search", async (req, res, next) => {
 // GET /companies — list with search, filter, pagination
 router.get("/", async (req, res, next) => {
   try {
-    const { search, category, page, limit } = req.query as Record<string, string>;
+    const { search, category, industry, page, limit } = req.query as Record<string, string>;
     const result = await listCompanies(req.tenantDb!, {
       search,
       category,
+      industry,
       page: page ? parseInt(page, 10) : 1,
       limit: limit ? parseInt(limit, 10) : 50,
     });

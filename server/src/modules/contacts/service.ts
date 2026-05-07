@@ -1,6 +1,7 @@
 import { eq, and, desc, asc, ilike, sql, or, not, isNull, inArray } from "drizzle-orm";
+import type { SQL } from "drizzle-orm";
 import type { NodePgDatabase } from "drizzle-orm/node-postgres";
-import { contacts, contactDealAssociations, deals } from "@trock-crm/shared/schema";
+import { activities, contacts, contactDealAssociations, deals, emails, tasks } from "@trock-crm/shared/schema";
 import type * as schema from "@trock-crm/shared/schema";
 import { AppError } from "../../middleware/error-handler.js";
 
@@ -16,13 +17,14 @@ export interface ContactFilters {
   companyName?: string;
   companyId?: string;
   jobTitle?: string;
+  role?: string;
   city?: string;
   state?: string;
   regionId?: string;
   dealStageId?: string;
   isActive?: boolean;
   hasOutreach?: boolean; // filter by first_outreach_completed
-  sortBy?: "name" | "company_name" | "created_at" | "updated_at" | "last_contacted_at" | "touchpoint_count";
+  sortBy?: "name" | "company_name" | "created_at" | "updated_at" | "last_contacted_at" | "touchpoint_count" | "last_touch_at";
   sortDir?: "asc" | "desc";
   page?: number;
   limit?: number;
@@ -45,6 +47,8 @@ export interface CreateContactInput {
   notes?: string | null;
   procoreContactId?: number | null;
   hubspotContactId?: string | null;
+  role?: string | null;
+  linkedinUrl?: string | null;
 }
 
 function validateEmailInput(email: string | null | undefined): void {
@@ -103,7 +107,9 @@ export interface UpdateContactInput {
   mobile?: string | null;
   companyName?: string | null;
   jobTitle?: string | null;
+  role?: string | null;
   category?: string;
+  linkedinUrl?: string | null;
   address?: string | null;
   city?: string | null;
   state?: string | null;
@@ -128,6 +134,34 @@ export interface DedupCheckResult {
     companyName: string | null;
     matchReason: string;
   }>;
+}
+
+export function buildContactLastTouchAtSql(): SQL<Date | null> {
+  return sql<Date | null>`NULLIF(GREATEST(
+    COALESCE(${contacts.lastContactedAt}, '-infinity'::timestamptz),
+    COALESCE((SELECT MAX(a.occurred_at) FROM activities a WHERE a.contact_id = ${contacts.id}), '-infinity'::timestamptz),
+    COALESCE((SELECT MAX(e.sent_at) FROM emails e WHERE e.contact_id = ${contacts.id}), '-infinity'::timestamptz),
+    COALESCE((SELECT MAX(t.updated_at) FROM tasks t WHERE t.contact_id = ${contacts.id}), '-infinity'::timestamptz)
+  ), '-infinity'::timestamptz)`;
+}
+
+export function buildContactSortOrder(sortBy: ContactFilters["sortBy"], sortDir: ContactFilters["sortDir"] = "desc") {
+  if (sortBy === "last_touch_at") {
+    const lastTouchAt = buildContactLastTouchAtSql();
+    return sortDir === "asc" ? asc(lastTouchAt) : sql`${lastTouchAt} DESC NULLS LAST`;
+  }
+
+  const sortColumn = (() => {
+    switch (sortBy) {
+      case "name": return contacts.lastName;
+      case "company_name": return contacts.companyName;
+      case "created_at": return contacts.createdAt;
+      case "last_contacted_at": return contacts.lastContactedAt;
+      case "touchpoint_count": return contacts.touchpointCount;
+      default: return contacts.updatedAt;
+    }
+  })();
+  return sortDir === "asc" ? asc(sortColumn) : desc(sortColumn);
 }
 
 /**
@@ -289,6 +323,9 @@ export async function getContacts(tenantDb: TenantDb, filters: ContactFilters) {
   if (filters.jobTitle) {
     conditions.push(ilike(contacts.jobTitle, `%${filters.jobTitle}%`));
   }
+  if (filters.role) {
+    conditions.push(eq(contacts.role, filters.role as any));
+  }
 
   // City filter
   if (filters.city) {
@@ -347,22 +384,55 @@ export async function getContacts(tenantDb: TenantDb, filters: ContactFilters) {
   const where = conditions.length > 0 ? and(...conditions) : undefined;
 
   // Sort
-  const sortColumn = (() => {
-    switch (filters.sortBy) {
-      case "name": return contacts.lastName;
-      case "company_name": return contacts.companyName;
-      case "created_at": return contacts.createdAt;
-      case "last_contacted_at": return contacts.lastContactedAt;
-      case "touchpoint_count": return contacts.touchpointCount;
-      default: return contacts.updatedAt;
-    }
-  })();
-  const sortOrder = filters.sortDir === "asc" ? asc(sortColumn) : desc(sortColumn);
+  const sortOrder = buildContactSortOrder(filters.sortBy, filters.sortDir);
 
   const [countResult, contactRows] = await Promise.all([
     tenantDb.select({ count: sql<number>`count(*)` }).from(contacts).where(where),
     tenantDb
-      .select()
+      .select({
+        id: contacts.id,
+        firstName: contacts.firstName,
+        lastName: contacts.lastName,
+        email: contacts.email,
+        phone: contacts.phone,
+        mobile: contacts.mobile,
+        companyName: contacts.companyName,
+        companyId: contacts.companyId,
+        jobTitle: contacts.jobTitle,
+        category: contacts.category,
+        role: contacts.role,
+        linkedinUrl: contacts.linkedinUrl,
+        address: contacts.address,
+        city: contacts.city,
+        state: contacts.state,
+        zip: contacts.zip,
+        notes: contacts.notes,
+        touchpointCount: contacts.touchpointCount,
+        lastContactedAt: contacts.lastContactedAt,
+        firstOutreachCompleted: contacts.firstOutreachCompleted,
+        procoreContactId: contacts.procoreContactId,
+        hubspotContactId: contacts.hubspotContactId,
+        sourceRefs: contacts.sourceRefs,
+        normalizedPhone: contacts.normalizedPhone,
+        isTestData: contacts.isTestData,
+        isActive: contacts.isActive,
+        createdAt: contacts.createdAt,
+        updatedAt: contacts.updatedAt,
+        isPrimary: sql<boolean>`EXISTS (
+          SELECT 1
+          FROM contact_deal_associations cda
+          WHERE cda.contact_id = ${contacts.id}
+            AND cda.is_primary = true
+        )`,
+        linkedDealsCount: sql<number>`(
+          SELECT COUNT(*)::int
+          FROM contact_deal_associations cda
+          INNER JOIN deals d ON d.id = cda.deal_id
+          WHERE cda.contact_id = ${contacts.id}
+            AND d.is_active = true
+        )`,
+        lastTouchAt: buildContactLastTouchAtSql(),
+      })
       .from(contacts)
       .where(where)
       .orderBy(sortOrder)
@@ -388,7 +458,50 @@ export async function getContacts(tenantDb: TenantDb, filters: ContactFilters) {
  */
 export async function getContactById(tenantDb: TenantDb, contactId: string) {
   const result = await tenantDb
-    .select()
+    .select({
+      id: contacts.id,
+      firstName: contacts.firstName,
+      lastName: contacts.lastName,
+      email: contacts.email,
+      phone: contacts.phone,
+      mobile: contacts.mobile,
+      companyName: contacts.companyName,
+      companyId: contacts.companyId,
+      jobTitle: contacts.jobTitle,
+      category: contacts.category,
+      role: contacts.role,
+      linkedinUrl: contacts.linkedinUrl,
+      address: contacts.address,
+      city: contacts.city,
+      state: contacts.state,
+      zip: contacts.zip,
+      notes: contacts.notes,
+      touchpointCount: contacts.touchpointCount,
+      lastContactedAt: contacts.lastContactedAt,
+      firstOutreachCompleted: contacts.firstOutreachCompleted,
+      procoreContactId: contacts.procoreContactId,
+      hubspotContactId: contacts.hubspotContactId,
+      sourceRefs: contacts.sourceRefs,
+      normalizedPhone: contacts.normalizedPhone,
+      isTestData: contacts.isTestData,
+      isActive: contacts.isActive,
+      createdAt: contacts.createdAt,
+      updatedAt: contacts.updatedAt,
+      isPrimary: sql<boolean>`EXISTS (
+        SELECT 1
+        FROM contact_deal_associations cda
+        WHERE cda.contact_id = ${contacts.id}
+          AND cda.is_primary = true
+      )`,
+      linkedDealsCount: sql<number>`(
+        SELECT COUNT(*)::int
+        FROM contact_deal_associations cda
+        INNER JOIN deals d ON d.id = cda.deal_id
+        WHERE cda.contact_id = ${contacts.id}
+          AND d.is_active = true
+      )`,
+      lastTouchAt: buildContactLastTouchAtSql(),
+    })
     .from(contacts)
     .where(eq(contacts.id, contactId))
     .limit(1);
@@ -448,6 +561,8 @@ export async function createContact(
         companyId: input.companyId ?? null,
         jobTitle: input.jobTitle?.trim() || null,
         category: input.category as any,
+        role: input.role as any ?? null,
+        linkedinUrl: input.linkedinUrl?.trim() || null,
         address: input.address?.trim() || null,
         city: input.city?.trim() || null,
         state: input.state?.trim() || null,
@@ -516,7 +631,9 @@ export async function updateContact(
   if (input.mobile !== undefined) updates.mobile = normalizeOptionalPhone(input.mobile);
   if (input.companyName !== undefined) updates.companyName = input.companyName?.trim() || null;
   if (input.jobTitle !== undefined) updates.jobTitle = input.jobTitle?.trim() || null;
+  if (input.role !== undefined) updates.role = input.role || null;
   if (input.category !== undefined) updates.category = input.category;
+  if (input.linkedinUrl !== undefined) updates.linkedinUrl = input.linkedinUrl?.trim() || null;
   if (input.address !== undefined) updates.address = input.address?.trim() || null;
   if (input.city !== undefined) updates.city = input.city?.trim() || null;
   if (input.state !== undefined) updates.state = input.state?.trim() || null;
