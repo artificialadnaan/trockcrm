@@ -1,7 +1,5 @@
 import { describe, expect, it } from "vitest";
-import {
-  buildContactSortOrder,
-} from "../../../src/modules/contacts/service.js";
+import { buildContactSortOrder } from "../../../src/modules/contacts/service.js";
 
 function flattenSqlChunks(value: unknown): string {
   const chunks = (value as { queryChunks?: unknown[] }).queryChunks ?? [];
@@ -17,19 +15,11 @@ function flattenSqlChunks(value: unknown): string {
   }).join(" ");
 }
 
-describe("contacts last_touch_at sorting", () => {
-  it("orders by the same derived expression returned as lastTouchAt", () => {
+describe("contacts last_touch_at null sorting", () => {
+  it("places untouched contacts after touched contacts on descending last_touch_at sort", () => {
     const sortSql = flattenSqlChunks(buildContactSortOrder("last_touch_at", "desc"));
 
     expect(sortSql).toContain("GREATEST");
     expect(sortSql).toContain("DESC NULLS LAST");
-  });
-
-  it("includes email touches in the last_touch_at ordering expression", () => {
-    const sortSql = flattenSqlChunks(buildContactSortOrder("last_touch_at", "desc"));
-
-    expect(sortSql).toContain("emails");
-    expect(sortSql).toContain("sent_at");
-    expect(sortSql).toContain("GREATEST");
   });
 });

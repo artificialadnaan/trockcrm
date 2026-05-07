@@ -146,6 +146,11 @@ export function buildContactLastTouchAtSql(): SQL<Date | null> {
 }
 
 export function buildContactSortOrder(sortBy: ContactFilters["sortBy"], sortDir: ContactFilters["sortDir"] = "desc") {
+  if (sortBy === "last_touch_at") {
+    const lastTouchAt = buildContactLastTouchAtSql();
+    return sortDir === "asc" ? asc(lastTouchAt) : sql`${lastTouchAt} DESC NULLS LAST`;
+  }
+
   const sortColumn = (() => {
     switch (sortBy) {
       case "name": return contacts.lastName;
@@ -153,7 +158,6 @@ export function buildContactSortOrder(sortBy: ContactFilters["sortBy"], sortDir:
       case "created_at": return contacts.createdAt;
       case "last_contacted_at": return contacts.lastContactedAt;
       case "touchpoint_count": return contacts.touchpointCount;
-      case "last_touch_at": return buildContactLastTouchAtSql();
       default: return contacts.updatedAt;
     }
   })();
