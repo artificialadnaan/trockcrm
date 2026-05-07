@@ -1,6 +1,7 @@
 // server/src/modules/procore/routes.ts
 // Procore-specific API routes under /api/procore (tenant-scoped, auth required).
 
+import { randomUUID } from "crypto";
 import { Router } from "express";
 import { eq, and, sql } from "drizzle-orm";
 import { procoreSyncState } from "@trock-crm/shared/schema";
@@ -29,6 +30,25 @@ const UUID_PATTERN =
 
 function isUuid(value: string) {
   return UUID_PATTERN.test(value);
+}
+
+function createResolutionId() {
+  return `res_${randomUUID().replace(/-/g, "").slice(0, 12)}`;
+}
+
+function createErrorCorrelationId() {
+  return `err_${randomUUID().replace(/-/g, "").slice(0, 12)}`;
+}
+
+function sanitizedProcoreSyncErrorMessage(correlationId: string) {
+  return `Procore sync failed at ${new Date().toISOString()} (correlation: ${correlationId})`;
+}
+
+function extractProcoreProjectStage(project: unknown): string | null {
+  if (!project || typeof project !== "object") return null;
+  const record = project as Record<string, unknown>;
+  const stage = record.stage ?? record.stage_name ?? record.stageName;
+  return typeof stage === "string" ? stage : null;
 }
 
 router.use((_req, res, next) => {
@@ -110,14 +130,17 @@ router.post(
   "/sync-conflicts/:id/resolve",
   requireRole("admin"),
   async (req, res, next) => {
+    const officeId = req.user!.activeOfficeId ?? req.user!.officeId;
+    let phaseAStarted = false;
+    let resolutionForLog: string | undefined;
     try {
       const { resolution } = req.body;
+      resolutionForLog = resolution;
       if (!resolution || !["accept_crm", "accept_procore"].includes(resolution)) {
         throw new AppError(400, "resolution must be 'accept_crm' or 'accept_procore'");
       }
 
       // Fetch the conflict record — must belong to the current user's office
-      const officeId = req.user!.activeOfficeId ?? req.user!.officeId;
       const [syncRecord] = await db
         .select()
         .from(procoreSyncState)
@@ -137,8 +160,37 @@ router.post(
         throw new AppError(400, "Record is not in conflict state");
       }
 
-      const officeSlug = req.officeSlug!;
-      const schemaName = `office_${officeSlug}`;
+      const resolutionId = createResolutionId();
+      const originalConflictData = syncRecord.conflictData as Record<string, unknown> | null;
+      const requestedAt = new Date();
+
+      await db
+        .update(procoreSyncState)
+        .set({
+          syncStatus: "pending",
+          conflictData: {
+            resolutionIntent: {
+              resolutionId,
+              resolution,
+              requestedBy: req.user!.id,
+              requestedAt: requestedAt.toISOString(),
+              crmEntityType: syncRecord.crmEntityType,
+              crmEntityId: syncRecord.crmEntityId,
+              procoreId: syncRecord.procoreId,
+            },
+            originalConflictData,
+          },
+          errorMessage: null,
+          updatedAt: requestedAt,
+        })
+        .where(
+          and(
+            eq(procoreSyncState.id, req.params.id as string),
+            eq(procoreSyncState.officeId, officeId),
+            eq(procoreSyncState.syncStatus, "conflict")
+          )
+        );
+      phaseAStarted = true;
 
       if (resolution === "accept_crm") {
         // Write CRM value to Procore via API
@@ -154,15 +206,21 @@ router.post(
           [syncRecord.crmEntityId]
         );
 
-        if (dealResult.rows[0]?.procore_stage_mapping) {
-          await procoreClient.patch(
-            `/rest/v1.0/companies/${companyId}/projects/${syncRecord.procoreId}`,
-            { project: { stage: dealResult.rows[0].procore_stage_mapping } }
-          );
+        const targetStage = dealResult.rows[0]?.procore_stage_mapping;
+        await req.commitTransaction!();
+
+        if (targetStage) {
+          const projectPath = `/rest/v1.0/companies/${companyId}/projects/${syncRecord.procoreId}`;
+          // On retry, GET current state and skip PATCH if already at target. This
+          // handles the Phase B-succeeded-Phase C-failed case.
+          const currentProject = await procoreClient.get(projectPath);
+          if (extractProcoreProjectStage(currentProject) !== targetStage) {
+            await procoreClient.patch(projectPath, { project: { stage: targetStage } });
+          }
         }
       } else {
         // accept_procore: update CRM record from Procore data stored in conflict_data
-        const conflictData = syncRecord.conflictData as any;
+        const conflictData = originalConflictData as any;
         if (conflictData?.procore_status) {
           // Look up stage config that maps to this Procore status
           const stageResult = await req.tenantClient!.query(
@@ -180,26 +238,69 @@ router.post(
       }
 
       // Only clear conflict after the authoritative update succeeds
-      const result = await db
-        .update(procoreSyncState)
-        .set({
-          syncStatus: "synced",
-          conflictData: null,
-          errorMessage: null,
-          lastSyncedAt: new Date(),
-          updatedAt: new Date(),
-        })
-        .where(
-          and(
-            eq(procoreSyncState.id, req.params.id as string),
-            eq(procoreSyncState.officeId, officeId)
-          )
-        )
-        .returning();
+      const syncedAt = new Date();
+      const result =
+        resolution === "accept_procore"
+          ? await req.tenantClient!.query(
+              `UPDATE public.procore_sync_state
+               SET sync_status = 'synced',
+                   conflict_data = NULL,
+                   error_message = NULL,
+                   last_synced_at = $1,
+                   updated_at = $1
+               WHERE id = $2 AND office_id = $3
+               RETURNING *`,
+              [syncedAt, req.params.id, officeId]
+            )
+          : await db
+              .update(procoreSyncState)
+              .set({
+                syncStatus: "synced",
+                conflictData: null,
+                errorMessage: null,
+                lastSyncedAt: syncedAt,
+                updatedAt: syncedAt,
+              })
+              .where(
+                and(
+                  eq(procoreSyncState.id, req.params.id as string),
+                  eq(procoreSyncState.officeId, officeId)
+                )
+              )
+              .returning();
 
       await req.commitTransaction!();
-      res.json({ success: true, record: result[0] });
+      const record = Array.isArray(result) ? result[0] : result.rows[0];
+      res.json({ success: true, status: "synced", resolutionId, record });
     } catch (err) {
+      const correlationId = createErrorCorrelationId();
+      const sanitizedMessage = sanitizedProcoreSyncErrorMessage(correlationId);
+      console.error(`[Procore conflict resolution ${correlationId}]`, {
+        syncConflictId: req.params.id,
+        officeId,
+        resolution: resolutionForLog,
+        errorMessage: err instanceof Error ? err.message : String(err),
+        errorStack: err instanceof Error ? err.stack : undefined,
+        error: err,
+      });
+      if (phaseAStarted) {
+        await db
+          .update(procoreSyncState)
+          .set({
+            syncStatus: "error",
+            errorMessage: sanitizedMessage,
+            updatedAt: new Date(),
+          })
+          .where(
+            and(
+              eq(procoreSyncState.id, req.params.id as string),
+              eq(procoreSyncState.officeId, officeId)
+            )
+          )
+          .catch((updateErr) => {
+            console.error(`[Procore conflict resolution ${correlationId}] failed to store error state`, updateErr);
+          });
+      }
       next(err);
     }
   }
