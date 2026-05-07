@@ -91,10 +91,10 @@ Tracks 0 / A-core / A-isolated / B run first in parallel. C/D/E/F run after thei
 - `client/src/lib/api.ts` (only if a new endpoint or shape is needed)
 
 **Must NOT touch:**
-- `client/src/components/**`
+- `client/src/components/**` **EXCEPT** `client/src/components/call-recordings/recording-list.tsx` (refactored in A3 to consume the new `useCallRecordings` hook — see A3 sub-deliverable below). No other component files may be modified by Track A-core.
 - `client/src/pages/**`
 - `client/src/preview/**`, `client/preview.html`, `client/src/preview-main.tsx`
-- `.agents/redesign-context.md` (canonical spec, frozen)
+- `.agents/redesign-context.md` — design changes only; factual corrections allowed per the "Document discipline" section above.
 - Anything owned by A-isolated (`reports`, `report_schedules`, `report_runs`, `rep_performance_snapshots`, related modules, related hooks)
 
 **Dependencies:** None. Starts immediately.
@@ -102,7 +102,7 @@ Tracks 0 / A-core / A-isolated / B run first in parallel. C/D/E/F run after thei
 **Sub-deliverables (each its own PR — sequential):**
 1. **A1** — Tier 1 schema (companies/contacts/properties field additions per gap audit §1) + hook extensions for those three list hooks. Unblocks Track C.
 2. **A2** — Tier 3 schema (`estimate_line_items` table + `useEstimateLineItems` hook). Unblocks Track E's deal detail Estimate tab.
-3. **A3** — Tier 4 schema (`email_links` junction, `file_links` junction, `ai_suggestions` JSONB on emails, `topics` array on call_recordings, `user_starred_files` pivot) + hook extensions for `useEmails` / `useFiles` + new `useCallRecordings` hook (extracted from existing `RecordingList` component internal fetch — see gap audit §2; recordings hook is one explicit exception to "Track A only extends existing hooks"). Unblocks Track F's email page, Track E's cross-link chips, and Track E's redesigned Recordings tabs on every detail page.
+3. **A3** — Tier 4 schema (`email_links` junction, `file_links` junction, `ai_suggestions` JSONB on emails, `topics` array on call_recordings, `user_starred_files` pivot) + hook extensions for `useEmails` / `useFiles` + new `useCallRecordings` hook (extracted from existing `RecordingList` component internal fetch — see gap audit §2). **Component-touch carve-out:** A3 is the only A-core sub-PR that modifies a component file — specifically `client/src/components/call-recordings/recording-list.tsx`, which is refactored to consume the new hook. This is the documented exception to Track A-core's "Must NOT touch components" rule. No other component files are touched. Unblocks Track F's email page, Track E's cross-link chips, and Track E's redesigned Recordings tabs on every detail page.
 
 PRs A1 → A2 → A3 merge in numeric order.
 
@@ -157,7 +157,7 @@ A4 and A5a can land in any order or be bundled. A5b is gated on A1.
   - `formatters.ts` (USD, USD_COMPACT, NUMBER_COMPACT)
 - `client/src/components/comms/**` — production version of `comms-preview.tsx`:
   - `email-list.tsx`, `recordings-list.tsx`, plus shared types
-- `client/src/components/files/files-view.tsx` — production version of `files-preview.tsx`'s `FilesView` (All/Photos/Documents subtabs)
+- `client/src/components/files/` **(root only — shared primitives)**: `files-view.tsx` is the production version of `files-preview.tsx`'s `FilesView` (All/Photos/Documents subtabs), consumed by detail-page Files tabs and the standalone /files page. Any other shared file primitive (e.g. file-icon mapping, shared file-card layout) lives at this dir's root. **The `client/src/components/files/page/` subdirectory is Track D's** — see Track D's Owns section.
 - `client/src/components/layout/{sidebar,topbar,app-shell}.tsx` — lighten sidebar to white, add ⌘K chip on topbar (the shell change)
 - **`client/src/components/__harness__/shared-primitives-harness.tsx`** — throwaway test harness. Renders every primitive (`MetricCard` in every tone/accent variant, `ScopeToggle` with multiple option counts, `DetailTabs` with the icon set used by company/contact/property/deal detail, `ActivityTimeline`, `EmailList` with linked + unassigned + sent rows, `RecordingsList`, `FilesView` with photos+docs combos) against mock data **shaped exactly like the hook return shapes documented in `.agents/redesign-context.md` §4**. Mounted as a route in the existing AppShell, gated by an env check or dev-only flag so it never ships to prod. Track Z2 deletes it.
 
@@ -211,12 +211,14 @@ A4 and A5a can land in any order or be bundled. A5b is gated on A1.
 - `client/src/pages/leads/lead-list-page.tsx`
 - `client/src/pages/tasks/task-list-page.tsx`
 - `client/src/pages/files/files-page.tsx`
-- Sub-components exclusively under `client/src/components/{deals,leads,tasks,files}/` that aren't already shared
+- Sub-components exclusively under `client/src/components/{deals,leads,tasks}/` that aren't already shared
+- `client/src/components/files/page/**` — page-specific sub-components for `/files` (filter chips, bulk action bars, view-toggle, anything not reused outside `/files`). **NEW subdirectory introduced by Track D.** Root-level `client/src/components/files/` is Track B's (shared primitives — `files-view.tsx` etc.).
 - Test siblings
 
 **Must NOT touch:**
 - Deal detail / lead detail (Track E)
-- Anything in shared/comms/files components dirs (Track B)
+- `client/src/components/shared/`, `client/src/components/comms/` (Track B)
+- `client/src/components/files/` **root files** — Track B owns `files-view.tsx` and any other shared file primitives at the root. **Only the `files/page/` subdirectory is Track D's.**
 - Anything outside `client/`
 
 **Dependencies:**
