@@ -53,3 +53,4 @@
 - D CLAIM 2026-05-07T22:21Z: redesign/workflow-pages, deals board + leads board + tasks page (PR 1), files page deferred to PR 2 post-A2. ETA TBD. Worktree: trockcrm-redesign-flow.
 - D PR-OPEN-DRAFT 2026-05-07T23:01Z: PR https://github.com/artificialadnaan/trockcrm/pull/163, /deals + /leads + /tasks. DRAFT until deals-pipeline office filter hotfix merges. /files deferred to PR 2.
 - D PR-READY 2026-05-07T23:06Z: PR #163 marked ready for review. Original "blocker" was a misread of intentional cross-office visibility on deals-pipeline; director-scoping bug is a separate main-targeting hotfix and does not gate Track D.
+- D CODEX-FIX 2026-05-07T23:15Z: PR #163 force-pushed with two SPA-state regression fixes (leads bucket filter, terminal date filter staleness). Two regression tests added.
