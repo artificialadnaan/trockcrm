@@ -207,21 +207,21 @@ export function Sidebar() {
   };
 
   const navLinkClass = ({ isActive }: { isActive: boolean }) =>
-    `flex items-center gap-3 px-3 py-2 rounded-md text-sm transition-colors ${
+    `flex items-center gap-3 px-3 py-2 rounded-md text-sm font-semibold transition-colors ${
       isActive
-        ? "bg-sidebar-active border-l-2 border-brand-red text-white"
-        : "text-slate-400 hover:bg-sidebar-hover hover:text-white"
+        ? "bg-brand-red/10 text-brand-red ring-1 ring-brand-red/15"
+        : "text-slate-600 hover:bg-slate-100 hover:text-slate-950"
     }`;
 
   return (
-    <aside className="hidden min-h-screen w-60 flex-col bg-sidebar-bg text-white md:flex">
+    <aside className="hidden min-h-screen w-60 flex-col border-r border-slate-200 bg-white text-slate-950 md:flex">
       <div className="flex min-h-14 items-center gap-3 px-4 py-4">
-        <div className="flex h-10 w-10 items-center justify-center rounded-md bg-slate-800/80">
+        <div className="flex h-10 w-10 items-center justify-center rounded-md bg-slate-900">
           <img src="/logo.png" alt="T Rock" className="h-8 w-8 object-contain" />
         </div>
         <div className="flex flex-col justify-center leading-tight">
-          <span className="text-sm font-bold tracking-[0.18em] text-white">T ROCK</span>
-          <span className="text-[10px] font-semibold tracking-[0.28em] text-slate-400">
+          <span className="text-sm font-bold tracking-[0.18em] text-slate-950">T ROCK</span>
+          <span className="text-[10px] font-semibold tracking-[0.28em] text-slate-500">
             CRM
           </span>
         </div>
@@ -241,8 +241,8 @@ export function Sidebar() {
         ))}
 
         {visibleDirectorItems.length > 0 && (
-          <div className="mt-4 pt-3 border-t border-slate-700/70 space-y-1">
-            <p className="px-3 mb-1 text-[10px] font-semibold text-slate-500 uppercase tracking-[0.18em]">
+          <div className="mt-4 space-y-1 border-t border-slate-200 pt-3">
+            <p className="mb-1 px-3 text-[10px] font-bold uppercase tracking-[0.18em] text-slate-500">
               Director
             </p>
             {visibleDirectorItems.map((item) => (
@@ -259,15 +259,15 @@ export function Sidebar() {
         )}
 
         {visibleAdminGroups.length > 0 && (
-          <div className="mt-4 pt-3 border-t border-slate-700/70 space-y-1">
-            <p className="px-3 mb-1 text-[10px] font-semibold text-slate-500 uppercase tracking-[0.18em]">
+          <div className="mt-4 space-y-1 border-t border-slate-200 pt-3">
+            <p className="mb-1 px-3 text-[10px] font-bold uppercase tracking-[0.18em] text-slate-500">
               Admin
             </p>
             {visibleAdminGroups.map((group) => (
               <div key={group.id} className="space-y-1">
                 <button
                   type="button"
-                  className="flex w-full items-center justify-between px-3 py-2 text-xs uppercase tracking-wider text-slate-400 hover:text-white"
+                  className="flex w-full items-center justify-between px-3 py-2 text-xs font-bold uppercase tracking-wider text-slate-500 hover:text-slate-950"
                   aria-expanded={isExpanded(group)}
                   onClick={() => toggleGroup(group)}
                 >
@@ -292,8 +292,8 @@ export function Sidebar() {
         )}
 
         {visibleHelpItems.length > 0 && (
-          <div className="mt-4 pt-3 border-t border-slate-700/70 space-y-1">
-            <p className="px-3 mb-1 text-[10px] font-semibold text-slate-500 uppercase tracking-[0.18em]">
+          <div className="mt-4 space-y-1 border-t border-slate-200 pt-3">
+            <p className="mb-1 px-3 text-[10px] font-bold uppercase tracking-[0.18em] text-slate-500">
               Help
             </p>
             {visibleHelpItems.map((item) => (
@@ -310,16 +310,16 @@ export function Sidebar() {
         )}
       </nav>
 
-      <div className="p-4 border-t border-slate-700">
+      <div className="border-t border-slate-200 p-4">
         <div className="flex items-center justify-between">
           <div className="text-sm">
-            <p className="text-white font-medium truncate">{user?.displayName}</p>
-            <p className="text-slate-400 text-xs capitalize">{user?.role}</p>
+            <p className="truncate font-medium text-slate-950">{user?.displayName}</p>
+            <p className="text-xs capitalize text-slate-500">{user?.role}</p>
           </div>
           <Button
             variant="ghost"
             size="icon"
-            className="text-slate-400 hover:text-white"
+            className="text-slate-500 hover:bg-slate-100 hover:text-slate-950"
             onClick={logout}
           >
             <LogOut className="h-4 w-4" />

@@ -31,11 +31,11 @@ export function Topbar() {
         <button
           onClick={() => setSearchOpen(true)}
           aria-label="Search"
-          className="flex h-9 w-9 items-center justify-center rounded-md bg-slate-100 text-slate-500 md:w-auto md:min-w-[11rem] md:justify-start md:gap-2 md:px-3"
+          className="flex h-9 w-9 items-center justify-center rounded-md border border-slate-200 bg-white text-slate-500 shadow-sm md:w-auto md:min-w-[13rem] md:justify-start md:gap-2 md:px-3"
         >
           <Search className="h-4 w-4" />
           <span className="hidden md:inline">Search</span>
-          <kbd className="hidden md:inline-flex h-5 items-center gap-0.5 rounded border border-gray-300 bg-white px-1 font-mono text-xs text-gray-500">
+          <kbd className="ml-auto hidden h-5 items-center gap-0.5 rounded border border-slate-300 bg-slate-50 px-1.5 font-mono text-xs font-semibold text-slate-500 md:inline-flex">
             {"\u2318"}K
           </kbd>
         </button>
@@ -44,7 +44,7 @@ export function Topbar() {
       <div className="flex items-center gap-3">
         <NotificationCenter />
         <Avatar className="h-9 w-9">
-          <AvatarFallback className="bg-brand-red text-white text-xs">
+          <AvatarFallback className="bg-brand-red text-xs text-white">
             {initials}
           </AvatarFallback>
         </Avatar>
