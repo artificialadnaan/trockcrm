@@ -1756,7 +1756,7 @@ function buildStrategicAlerts(
       });
     }
 
-    if (row.dealsCount > 0 && row.winRate < 25) {
+    if ((row.winsCount + row.lossesCount) > 0 && row.winRate < 25) {
       alerts.push({
         id: `win-rate-${row.repId}`,
         severity: "warning",
