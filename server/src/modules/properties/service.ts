@@ -119,6 +119,18 @@ function combineLatestTimestamp(...values: Array<string | null>) {
     .sort((left, right) => new Date(right).getTime() - new Date(left).getTime())[0] ?? null;
 }
 
+export function buildPropertyLastActivityAt(input: {
+  persistedLastActivityAt: string | null;
+  leadActivityAt: string | null;
+  dealActivityAt: string | null;
+}) {
+  return combineLatestTimestamp(
+    input.persistedLastActivityAt,
+    input.leadActivityAt,
+    input.dealActivityAt
+  );
+}
+
 function toNumericString(value: unknown) {
   return String(value ?? "0");
 }
@@ -298,10 +310,11 @@ export async function listProperties(
       leadCount: leadCountMap.get(row.id) ?? 0,
       dealCount: dealCountMap.get(row.id) ?? 0,
       convertedDealCount: convertedCountMap.get(row.id) ?? 0,
-      lastActivityAt: coerceTimestamp(row.lastActivityAt) ?? combineLatestTimestamp(
-        leadActivityMap.get(row.id) ?? null,
-        dealActivityMap.get(row.id) ?? null
-      ),
+      lastActivityAt: buildPropertyLastActivityAt({
+        persistedLastActivityAt: coerceTimestamp(row.lastActivityAt),
+        leadActivityAt: leadActivityMap.get(row.id) ?? null,
+        dealActivityAt: dealActivityMap.get(row.id) ?? null,
+      }),
       engagementStatus: classifyPropertyEngagementStatus({
         dealCount: dealCountMap.get(row.id) ?? 0,
         leadCount: leadCountMap.get(row.id) ?? 0,
@@ -481,10 +494,11 @@ export async function getPropertyDetail(tenantDb: TenantDb, propertyId: string) 
       leadCount: relatedLeads.length,
       dealCount: relatedDeals.length,
       convertedDealCount: relatedDeals.filter((deal) => Boolean(deal.sourceLeadId)).length,
-      lastActivityAt: coerceTimestamp(property.lastActivityAt) ?? combineLatestTimestamp(
-        ...relatedLeads.map((lead) => coerceTimestamp(lead.lastActivityAt)),
-        ...relatedDeals.map((deal) => coerceTimestamp(deal.lastActivityAt))
-      ),
+      lastActivityAt: buildPropertyLastActivityAt({
+        persistedLastActivityAt: coerceTimestamp(property.lastActivityAt),
+        leadActivityAt: combineLatestTimestamp(...relatedLeads.map((lead) => coerceTimestamp(lead.lastActivityAt))),
+        dealActivityAt: combineLatestTimestamp(...relatedDeals.map((deal) => coerceTimestamp(deal.lastActivityAt))),
+      }),
       engagementStatus: classifyPropertyEngagementStatus({
         dealCount: activeDeals.length,
         leadCount: relatedLeads.filter((lead) => lead.isActive).length,
