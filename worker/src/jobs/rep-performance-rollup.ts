@@ -141,7 +141,7 @@ async function refreshOfficePeriod(
            WHERE d.is_active = true
              AND NOT psc.is_terminal
              AND psc.stale_threshold_days IS NOT NULL
-             AND d.stage_entered_at < NOW() - (psc.stale_threshold_days || ' days')::interval
+             AND d.stage_entered_at < $3::timestamptz - (psc.stale_threshold_days || ' days')::interval
          )::int AS at_risk_count
        FROM ${schemaName}.deals d
        JOIN public.pipeline_stage_config psc ON psc.id = d.stage_id
