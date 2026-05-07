@@ -1,0 +1,16 @@
+# A4 Validation Audit
+
+| Endpoint | Input | Validation today | Risk | Fix |
+| --- | --- | --- | --- | --- |
+| `POST /reports/saved/:id/schedules` | `:id` / `reportId` | Route and service now require a UUID before querying `saved_reports`. | Malformed IDs previously reached Drizzle/Postgres and could surface as 500s. | Added `reportId must be a valid UUID` 400 handling in route and service. |
+| `POST /reports/saved/:id/schedules` | `frequency` | Route validates against `daily`, `weekly`, `biweekly`, `monthly`, `quarterly`. | Invalid enum values previously reached the database enum cast. | Fixed in prior commit `5b88a4a`; no additional gap found. |
+| `POST /reports/saved/:id/schedules` | `cronExpr` | Required as truthy input; no cron syntax validation. | Bad cron strings can be stored and fail later in worker execution. | Deferred intentionally; worker/report execution is a stub and cron validation needs product-level cadence rules. |
+| `POST /reports/saved/:id/schedules` | `nextRunAt` | Route requires parseable timestamp and future time. Service converts after route validation. | Invalid dates previously reached insert as `Invalid Date`. | Fixed in prior commit `9c4fe77`; no additional gap found. |
+| `POST /reports/saved/:id/schedules` | `recipients` | Optional; non-arrays are normalized to `[]`. | Recipient object shape is not validated; execution is stubbed. | Deferred until report delivery implementation defines recipient contract. |
+| `POST /reports/saved/:id/schedules` | visibility/office scope | Service write lookup uses the same saved-report visibility predicate as reads. | Prior versions either leaked office-scoped locked reports or over-restricted company/global reports. | Fixed in prior commit `ae1fcc0`; no additional gap found. |
+| `POST /reports/saved/:id/runs` | `:id` / `reportId` | Route and service now require a UUID before querying `saved_reports`. | Malformed IDs previously reached Drizzle/Postgres and could surface as 500s. | Added `reportId must be a valid UUID` 400 handling in route and service. |
+| `POST /reports/saved/:id/runs` | `scheduleId` | Optional; route treats `undefined`, `null`, and empty string as manual runs. Non-empty values must be UUIDs. Service also validates before schedule lookup. | Malformed non-empty strings previously reached `eq(reportSchedules.id, value)` and could surface as 500s. | Added `scheduleId must be a valid UUID` 400 handling in route and service. |
+| `POST /reports/saved/:id/runs` | schedule/report pairing | Service verifies `schedule.reportId === input.reportId` when `scheduleId` is present. | Mismatched report/schedule IDs could create invalid run attribution. | Fixed in prior commit `a5b3da6`; no additional gap found. |
+| `POST /reports/saved/:id/runs` | visibility/office scope | Service write lookup uses the same saved-report visibility predicate as reads. | Prior versions either leaked office-scoped locked reports or over-restricted company/global reports. | Fixed in prior commit `ae1fcc0`; no additional gap found. |
+| Schedule update endpoint | N/A | No schedule update endpoint exists in PR #156. | No route to validate. | No action. |
+| Schedule delete endpoint | N/A | No schedule delete endpoint exists in PR #156. | No route to validate. | No action. |
