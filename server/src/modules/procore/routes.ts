@@ -23,6 +23,11 @@ import {
   getProjectTasks,
   queueTaskCreateSideEffects,
 } from "../tasks/service.js";
+import type {
+  ProcoreConflictData,
+  ProcoreConflictResolution,
+  ProcoreSyncSummaryRow,
+} from "./types.js";
 
 const router = Router();
 const UUID_PATTERN =
@@ -80,7 +85,7 @@ router.get(
   async (req, res, next) => {
     try {
       const [summary, conflicts, recentActivity] = await Promise.all([
-        db.execute<{ sync_status: string; count: string }>(sql`
+        db.execute<ProcoreSyncSummaryRow>(sql`
           SELECT sync_status, COUNT(*) as count
           FROM public.procore_sync_state
           GROUP BY sync_status
@@ -103,7 +108,7 @@ router.get(
         conflict: 0,
         error: 0,
       };
-      for (const row of summary.rows as any[]) {
+      for (const row of summary.rows) {
         summaryMap[row.sync_status] = parseInt(row.count, 10);
       }
 
@@ -134,7 +139,7 @@ router.post(
     let phaseAStarted = false;
     let resolutionForLog: string | undefined;
     try {
-      const { resolution } = req.body;
+      const resolution = req.body.resolution as ProcoreConflictResolution | undefined;
       resolutionForLog = resolution;
       if (!resolution || !["accept_crm", "accept_procore"].includes(resolution)) {
         throw new AppError(400, "resolution must be 'accept_crm' or 'accept_procore'");
@@ -161,7 +166,7 @@ router.post(
       }
 
       const resolutionId = createResolutionId();
-      const originalConflictData = syncRecord.conflictData as Record<string, unknown> | null;
+      const originalConflictData = syncRecord.conflictData as ProcoreConflictData | null;
       const requestedAt = new Date();
 
       await db
@@ -220,8 +225,8 @@ router.post(
         }
       } else {
         // accept_procore: update CRM record from Procore data stored in conflict_data
-        const conflictData = originalConflictData as any;
-        if (conflictData?.procore_status) {
+        const conflictData = originalConflictData;
+        if (typeof conflictData?.procore_status === "string") {
           // Look up stage config that maps to this Procore status
           const stageResult = await req.tenantClient!.query(
             `SELECT id FROM public.pipeline_stage_config
