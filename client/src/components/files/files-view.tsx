@@ -123,6 +123,13 @@ export function FilesView({
         </section>
       ) : null}
 
+      {subtab === "Photos" && photos.length === 0 && total > 0 ? (
+        <div className="mt-12 text-center">
+          <Camera className="mx-auto h-6 w-6 text-slate-400" />
+          <p className="mt-2 text-sm text-slate-500">No photos uploaded yet. Upload images to see them here.</p>
+        </div>
+      ) : null}
+
       {showDocuments && documents.length > 0 ? (
         <section className="mt-5">
           {subtab === "All" ? (
@@ -183,6 +190,15 @@ export function FilesView({
             </table>
           </div>
         </section>
+      ) : null}
+
+      {subtab === "Documents" && documents.length === 0 && total > 0 ? (
+        <div className="mt-12 text-center">
+          <FileText className="mx-auto h-6 w-6 text-slate-400" />
+          <p className="mt-2 text-sm text-slate-500">
+            No documents uploaded yet. Upload PDFs, Word docs, or spreadsheets to see them here.
+          </p>
+        </div>
       ) : null}
 
       {total === 0 ? (
