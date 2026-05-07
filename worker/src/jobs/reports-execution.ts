@@ -2,7 +2,25 @@ import { pool } from "../db.js";
 
 type ReportFrequency = "daily" | "weekly" | "biweekly" | "monthly" | "quarterly";
 
-function nextRunAt(from: Date, frequency: ReportFrequency) {
+function addMonths(date: Date, months: number) {
+  const year = date.getUTCFullYear();
+  const month = date.getUTCMonth() + months;
+  const day = date.getUTCDate();
+  const lastDayOfTargetMonth = new Date(Date.UTC(year, month + 1, 0)).getUTCDate();
+  const clampedDay = Math.min(day, lastDayOfTargetMonth);
+
+  return new Date(Date.UTC(
+    year,
+    month,
+    clampedDay,
+    date.getUTCHours(),
+    date.getUTCMinutes(),
+    date.getUTCSeconds(),
+    date.getUTCMilliseconds()
+  ));
+}
+
+export function nextRunAt(from: Date, frequency: ReportFrequency) {
   const next = new Date(from);
   switch (frequency) {
     case "daily":
@@ -15,11 +33,9 @@ function nextRunAt(from: Date, frequency: ReportFrequency) {
       next.setUTCDate(next.getUTCDate() + 14);
       break;
     case "monthly":
-      next.setUTCMonth(next.getUTCMonth() + 1);
-      break;
+      return addMonths(next, 1);
     case "quarterly":
-      next.setUTCMonth(next.getUTCMonth() + 3);
-      break;
+      return addMonths(next, 3);
   }
   return next;
 }
