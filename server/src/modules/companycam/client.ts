@@ -3,7 +3,12 @@
  * Read-only integration — fetches projects and photos.
  */
 
+import { fetchWithTimeout } from "../../lib/fetch-timeout.js";
+
 const BASE_URL = "https://api.companycam.com/v2";
+// CompanyCam read calls are not retried here, so allow a 30s per-request
+// timeout before surfacing a clean integration timeout error.
+const COMPANYCAM_REQUEST_TIMEOUT_MS = 30_000;
 
 function getApiKey(): string {
   const key = process.env.COMPANYCAM_API_KEY;
@@ -19,11 +24,13 @@ async function ccFetch<T>(path: string, params?: Record<string, string>): Promis
     }
   }
 
-  const res = await fetch(url.toString(), {
+  const res = await fetchWithTimeout(fetch, url.toString(), {
     headers: {
       Authorization: `Bearer ${getApiKey()}`,
       Accept: "application/json",
     },
+    timeoutMs: COMPANYCAM_REQUEST_TIMEOUT_MS,
+    timeoutLabel: `CompanyCam ${path}`,
   });
 
   if (!res.ok) {

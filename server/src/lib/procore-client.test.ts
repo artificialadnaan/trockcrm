@@ -16,6 +16,16 @@ function jsonResponse(body: unknown, init: { status?: number; ok?: boolean; head
   } as unknown as Response;
 }
 
+function hangingFetch() {
+  return vi.fn((_input: RequestInfo | URL, init?: RequestInit) =>
+    new Promise<Response>((_resolve, reject) => {
+      init?.signal?.addEventListener("abort", () => {
+        reject(Object.assign(new Error("aborted"), { name: "AbortError" }));
+      });
+    })
+  );
+}
+
 async function importClient() {
   vi.resetModules();
   process.env.PROCORE_CLIENT_ID = "client-id";
@@ -324,6 +334,20 @@ describe("procore client PR 140 API surface", () => {
     await expect(procoreClient.request("/rest/v1.0/projects/1", { method: "GET", fetchImpl: fetchMock as typeof fetch })).rejects.toThrow("Token fetch failed: 401 bad credentials");
   });
 
+  it("aborts hung token fetches with a clean timeout error", async () => {
+    const { procoreClient } = await importClient();
+    const fetchMock = hangingFetch();
+
+    const resultPromise = procoreClient.request("/rest/v1.0/projects/1", {
+      method: "GET",
+      fetchImpl: fetchMock as unknown as typeof fetch,
+    });
+    const expectation = expect(resultPromise).rejects.toThrow("[Procore] Token fetch timed out after 10000ms");
+
+    await vi.advanceTimersByTimeAsync(10_000);
+    await expectation;
+  });
+
   it("retries transient JSON request failures and records a closed circuit after success", async () => {
     const { procoreClient } = await importClient();
     const fetchMock = vi.fn()
@@ -337,6 +361,27 @@ describe("procore client PR 140 API surface", () => {
     await expect(resultPromise).resolves.toEqual({ id: 1 });
     expect(fetchMock).toHaveBeenCalledTimes(3);
     expect(procoreClient.getCircuitState()).toMatchObject({ state: "closed", failures: 0, openedAt: null });
+  });
+
+  it("aborts hung Procore API attempts before retrying", async () => {
+    const { procoreClient } = await importClient();
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(jsonResponse({ access_token: "token-1", expires_in: 3600 }))
+      .mockImplementation(hangingFetch());
+    vi.stubGlobal("fetch", fetchMock);
+
+    const resultPromise = procoreClient.post("/rest/v1.0/projects", { project: { name: "P" } });
+    const expectation = expect(resultPromise).rejects.toThrow("[Procore] POST /rest/v1.0/projects timed out after 10000ms");
+    await vi.advanceTimersByTimeAsync(10_000);
+    await vi.advanceTimersByTimeAsync(1_000);
+    await vi.advanceTimersByTimeAsync(10_000);
+    await vi.advanceTimersByTimeAsync(3_000);
+    await vi.advanceTimersByTimeAsync(10_000);
+    await vi.advanceTimersByTimeAsync(9_000);
+    await vi.advanceTimersByTimeAsync(10_000);
+
+    await expectation;
+    expect(fetchMock).toHaveBeenCalledTimes(5);
   });
 
   it("honors Retry-After for 429 responses before succeeding", async () => {

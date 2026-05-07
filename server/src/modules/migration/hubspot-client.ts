@@ -1,7 +1,12 @@
 // server/src/modules/migration/hubspot-client.ts
 
+import { fetchWithTimeout } from "../../lib/fetch-timeout.js";
+
 const HS_BASE = "https://api.hubapi.com";
 const PAGE_SIZE = 100;
+// HubSpot migration reads are batch operations; 30s bounds hung requests while
+// allowing large CRM pages enough time to respond.
+const HUBSPOT_REQUEST_TIMEOUT_MS = 30_000;
 
 function hsHeaders(): HeadersInit {
   const token = process.env.HUBSPOT_PRIVATE_APP_TOKEN;
@@ -13,7 +18,11 @@ function hsHeaders(): HeadersInit {
 }
 
 async function hsFetch<T>(path: string): Promise<T> {
-  const res = await fetch(`${HS_BASE}${path}`, { headers: hsHeaders() });
+  const res = await fetchWithTimeout(fetch, `${HS_BASE}${path}`, {
+    headers: hsHeaders(),
+    timeoutMs: HUBSPOT_REQUEST_TIMEOUT_MS,
+    timeoutLabel: `HubSpot ${path}`,
+  });
   if (!res.ok) {
     const text = await res.text().catch(() => "");
     throw new Error(`HubSpot API error: ${res.status} ${path} — ${text}`);
