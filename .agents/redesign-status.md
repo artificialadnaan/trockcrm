@@ -51,3 +51,4 @@
 - 2026-05-07T18:34Z [track-b-agent] CLAIM — single PR in flight (branch: redesign/shared-primitives)
 - 2026-05-07T18:49Z [track-b-agent] PR-OPEN — shared primitives + shell + harness ready for review (PR #154)
 - D CLAIM 2026-05-07T22:21Z: redesign/workflow-pages, deals board + leads board + tasks page (PR 1), files page deferred to PR 2 post-A2. ETA TBD. Worktree: trockcrm-redesign-flow.
+- D PR-OPEN-DRAFT 2026-05-07T23:01Z: PR https://github.com/artificialadnaan/trockcrm/pull/163, /deals + /leads + /tasks. DRAFT until deals-pipeline office filter hotfix merges. /files deferred to PR 2.
