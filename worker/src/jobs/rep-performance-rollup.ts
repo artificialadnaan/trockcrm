@@ -170,6 +170,7 @@ async function refreshOfficePeriod(
            ON c.id = d.company_id
           AND c.is_active = true
          WHERE d.assigned_rep_id IS NOT NULL
+           AND d.created_at::date <= $3::date
            AND c.last_activity_at IS NOT NULL
            AND c.last_activity_at < $3::timestamptz - ($6::int || ' days')::interval
          UNION
@@ -185,6 +186,7 @@ async function refreshOfficePeriod(
            ON p.id = d.property_id
           AND p.is_active = true
          WHERE d.assigned_rep_id IS NOT NULL
+           AND d.created_at::date <= $3::date
            AND p.last_activity_at IS NOT NULL
            AND p.last_activity_at < $3::timestamptz - ($6::int || ' days')::interval
        ) accounts
