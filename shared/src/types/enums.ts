@@ -94,6 +94,38 @@ export type LeadSourceCategory = (typeof LEAD_SOURCE_CATEGORIES)[number];
 export const COMPANY_VERIFICATION_STATUSES = ["pending", "verified", "rejected", "not_required"] as const;
 export type CompanyVerificationStatus = (typeof COMPANY_VERIFICATION_STATUSES)[number];
 
+export const COMPANY_INDUSTRIES = [
+  "school_district",
+  "healthcare",
+  "industrial",
+  "office_mixed",
+  "retail",
+  "government",
+  "hospitality",
+] as const;
+export type CompanyIndustry = (typeof COMPANY_INDUSTRIES)[number];
+
+export const CONTACT_ROLES = [
+  "decision_maker",
+  "influencer",
+  "gatekeeper",
+  "procurement",
+  "engineer",
+  "owner",
+] as const;
+export type ContactRole = (typeof CONTACT_ROLES)[number];
+
+export const PROPERTY_TYPES = [
+  "office",
+  "industrial",
+  "retail",
+  "school",
+  "healthcare",
+  "government",
+  "mixed_use",
+] as const;
+export type PropertyType = (typeof PROPERTY_TYPES)[number];
+
 export const LEAD_VERIFICATION_STATUSES = [
   "not_required",
   "pending",

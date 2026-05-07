@@ -71,9 +71,9 @@ export {
   estimateMarketAdjustmentRules,
   estimateDealMarketOverrides,
 } from "./tenant/estimate-markets.js";
-export { companies } from "./tenant/companies.js";
-export { properties } from "./tenant/properties.js";
-export { contacts, contactCategoryEnum } from "./tenant/contacts.js";
+export { companies, companyIndustryEnum, companyVerificationStatusEnum } from "./tenant/companies.js";
+export { properties, propertyTypeEnum } from "./tenant/properties.js";
+export { contacts, contactCategoryEnum, contactRoleEnum } from "./tenant/contacts.js";
 export { contactDealAssociations } from "./tenant/contact-deal-associations.js";
 export {
   leads,
