@@ -15,7 +15,8 @@ describe("TaskListPage project context", () => {
     expect(source).toContain("if (task.dealNumber) return task.dealNumber;");
     expect(source).toContain("return \"Project linked\";");
     expect(source).toContain("const projectContext = getTaskProjectContext(task);");
-    expect(source).toContain("projectContext && (");
-    expect(source).toContain("text-[10px] font-mono uppercase tracking-wide text-gray-500 mt-1 truncate");
+    expect(source).toContain("{projectContext ? <span className=\"truncate\">{projectContext}</span> : null}");
+    expect(source).toContain("type GroupKey = \"overdue\" | \"today\" | \"this_week\" | \"later\" | \"completed\";");
+    expect(source).toContain("getTaskStatusLabel(task.status)");
   });
 });
