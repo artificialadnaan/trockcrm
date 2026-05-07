@@ -145,7 +145,7 @@ describe("report route role guards", () => {
       frequency: "weekly",
       cronExpr: "0 7 * * 1",
       recipients: [{ email: "director@example.com" }],
-      nextRunAt: "2026-05-11T12:00:00.000Z",
+      nextRunAt: new Date(Date.now() + 86_400_000).toISOString(),
     };
 
     const response = await request(buildApp("director"))
@@ -175,6 +175,42 @@ describe("report route role guards", () => {
     expect(response.body).toEqual({
       error: {
         message: "frequency must be one of: daily, weekly, biweekly, monthly, quarterly",
+      },
+    });
+    expect(savedReportsService.createReportSchedule).not.toHaveBeenCalled();
+  });
+
+  it("rejects invalid nextRunAt timestamps before service execution", async () => {
+    const response = await request(buildApp("director"))
+      .post("/api/reports/saved/report-1/schedules")
+      .send({
+        frequency: "weekly",
+        cronExpr: "0 7 * * 1",
+        nextRunAt: "not-a-date",
+      });
+
+    expect(response.status).toBe(400);
+    expect(response.body).toEqual({
+      error: {
+        message: "nextRunAt must be a valid ISO timestamp",
+      },
+    });
+    expect(savedReportsService.createReportSchedule).not.toHaveBeenCalled();
+  });
+
+  it("rejects past nextRunAt timestamps before service execution", async () => {
+    const response = await request(buildApp("director"))
+      .post("/api/reports/saved/report-1/schedules")
+      .send({
+        frequency: "weekly",
+        cronExpr: "0 7 * * 1",
+        nextRunAt: "2020-01-01T12:00:00.000Z",
+      });
+
+    expect(response.status).toBe(400);
+    expect(response.body).toEqual({
+      error: {
+        message: "nextRunAt must be in the future",
       },
     });
     expect(savedReportsService.createReportSchedule).not.toHaveBeenCalled();

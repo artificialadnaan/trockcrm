@@ -480,6 +480,13 @@ router.post("/saved/:id/schedules", async (req, res, next) => {
     if (!VALID_REPORT_FREQUENCIES.includes(frequency)) {
       throw new AppError(400, `frequency must be one of: ${VALID_REPORT_FREQUENCIES.join(", ")}`);
     }
+    const parsedNextRunAt = new Date(nextRunAt);
+    if (Number.isNaN(parsedNextRunAt.getTime())) {
+      throw new AppError(400, "nextRunAt must be a valid ISO timestamp");
+    }
+    if (parsedNextRunAt.getTime() <= Date.now()) {
+      throw new AppError(400, "nextRunAt must be in the future");
+    }
 
     const schedule = await createReportSchedule({
       reportId: req.params.id,
