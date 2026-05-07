@@ -1658,8 +1658,15 @@ export async function getRepPerformanceSnapshots(
             ELSE NULL
           END
         )::date
-      ORDER BY prior.computed_at DESC NULLS LAST
-      LIMIT 1
+        AND prior.period_end = (
+          CASE
+            WHEN current.period_kind IN ('mtd', 'last_month') THEN current.period_end - INTERVAL '1 month'
+            WHEN current.period_kind IN ('qtd', 'last_quarter') THEN current.period_end - INTERVAL '3 months'
+            WHEN current.period_kind IN ('ytd', 'last_year') THEN current.period_end - INTERVAL '1 year'
+            WHEN current.period_kind = 'week_8back' THEN current.period_end - INTERVAL '56 days'
+            ELSE NULL
+          END
+        )::date
     ) previous ON true
     ORDER BY current.rep_id, current.period_kind
   `);
