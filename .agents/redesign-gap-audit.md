@@ -208,7 +208,7 @@ Canonical stages match. Drop legacy `opportunity` lead stage from view layer (Tr
 `estimated_value`, `source`, `source_category` already present. **READY**.
 
 ### `useEmails` — extend after A3 (Track A-core)
-Add: `linked_records[]` from `email_links` junction (replaces single-FK consumption); `ai_suggestions` array; thread grouping via existing `graph_thread_id`; per-row `status` (linked / low_confidence / unassigned / sent — **DERIVED** from confidence + assignments). **HOOK GAP**.
+Add: `linked_records[]` from `email_links` junction (replaces single-FK consumption); `ai_suggestions` array; thread grouping via existing `graphConversationId` (column name `graph_conversation_id`, exposed by `useEmails` / `useEmailThread` today); per-row `status` (linked / low_confidence / unassigned / sent — **DERIVED** from confidence + assignments). **HOOK GAP**.
 
 ### `useFiles` — extend after A3 (Track A-core)
 Add: `linked_records[]` from `file_links` junction; `is_starred` for current user (from `user_starred_files`); `kind` from existing `category` enum (already present, ensure mapping). **HOOK GAP**.
