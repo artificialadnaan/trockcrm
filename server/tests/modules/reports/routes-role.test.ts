@@ -161,4 +161,22 @@ describe("report route role guards", () => {
       ...payload,
     });
   });
+
+  it("rejects invalid report schedule frequencies before service execution", async () => {
+    const response = await request(buildApp("director"))
+      .post("/api/reports/saved/report-1/schedules")
+      .send({
+        frequency: "hourly",
+        cronExpr: "0 7 * * 1",
+        nextRunAt: "2026-05-11T12:00:00.000Z",
+      });
+
+    expect(response.status).toBe(400);
+    expect(response.body).toEqual({
+      error: {
+        message: "frequency must be one of: daily, weekly, biweekly, monthly, quarterly",
+      },
+    });
+    expect(savedReportsService.createReportSchedule).not.toHaveBeenCalled();
+  });
 });

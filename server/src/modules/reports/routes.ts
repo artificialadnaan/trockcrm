@@ -39,6 +39,7 @@ import {
 import { runReportBuilder } from "./report-builder-service.js";
 
 const router = Router();
+const VALID_REPORT_FREQUENCIES = ["daily", "weekly", "biweekly", "monthly", "quarterly"] as const;
 
 function readQueryString(value: unknown): string | undefined {
   return typeof value === "string" && value.trim() ? value.trim() : undefined;
@@ -475,6 +476,9 @@ router.post("/saved/:id/schedules", async (req, res, next) => {
     const { frequency, cronExpr, recipients, nextRunAt } = req.body ?? {};
     if (!frequency || !cronExpr || !nextRunAt) {
       throw new AppError(400, "frequency, cronExpr, and nextRunAt are required");
+    }
+    if (!VALID_REPORT_FREQUENCIES.includes(frequency)) {
+      throw new AppError(400, `frequency must be one of: ${VALID_REPORT_FREQUENCIES.join(", ")}`);
     }
 
     const schedule = await createReportSchedule({
