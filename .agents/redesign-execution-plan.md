@@ -8,6 +8,21 @@
 
 ---
 
+## Document discipline
+
+`redesign-context.md` is **frozen against design changes**. It is **not frozen against factual corrections.**
+
+The distinction:
+
+- **Design change (frozen).** Adding a new section, removing a feature, restructuring a layout, changing component props, redefining what a page does. These require a plan revision PR before the spec changes — open a PR that updates this plan first, get sign-off, then update the spec in a follow-up.
+- **Factual correction (allowed).** Fixing a wrong field name, correcting a hook name that doesn't exist, fixing a typo, updating a path. These ship as small PRs to the spec doc directly with a clear `docs(redesign): fix X in context doc` commit message and a reference to the source of truth (file path + line number) that justifies the correction.
+
+When in doubt, prefer to land the correction. A wrong fact in the spec costs more than a meta-discussion about whether to correct it.
+
+The same rule applies to `redesign-gap-audit.md` and this plan itself.
+
+---
+
 ## 1. Workstream decomposition
 
 The redesign decomposes into **7 tracks** plus a setup track. Confirmed against actual preview imports:
