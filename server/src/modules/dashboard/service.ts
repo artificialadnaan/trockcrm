@@ -1794,14 +1794,14 @@ async function getRecentCloses(
         ELSE 'lost'
       END AS outcome,
       COALESCE(d.awarded_amount, d.bid_estimate, d.dd_estimate, 0)::numeric AS deal_value,
-      COALESCE(d.actual_close_date, d.contract_signed_date, d.contract_signed_at::date, d.updated_at::date) AS closed_at
+      COALESCE(d.actual_close_date, d.contract_signed_date, d.contract_signed_at::date, d.lost_at::date, d.updated_at::date) AS closed_at
     FROM ${deals} d
     JOIN ${pipelineStageConfig} psc ON psc.id = d.stage_id
     LEFT JOIN ${users} u ON u.id = d.assigned_rep_id
     WHERE d.is_active = true
       AND psc.slug IN (${sql.join([...WON_STAGE_SLUGS, ...LEGACY_WON_STAGE_SLUGS, ...LOST_STAGE_SLUGS, ...LEGACY_LOST_STAGE_SLUGS].map((slug) => sql`${slug}`), sql`, `)})
-      AND COALESCE(d.actual_close_date, d.contract_signed_date, d.contract_signed_at::date, d.updated_at::date) >= ${options.from}::date
-      AND COALESCE(d.actual_close_date, d.contract_signed_date, d.contract_signed_at::date, d.updated_at::date) <= ${options.to}::date
+      AND COALESCE(d.actual_close_date, d.contract_signed_date, d.contract_signed_at::date, d.lost_at::date, d.updated_at::date) >= ${options.from}::date
+      AND COALESCE(d.actual_close_date, d.contract_signed_date, d.contract_signed_at::date, d.lost_at::date, d.updated_at::date) <= ${options.to}::date
     ORDER BY closed_at DESC NULLS LAST, d.name ASC
     LIMIT 12
   `);
