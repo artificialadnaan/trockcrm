@@ -3,6 +3,7 @@ import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import {
   buildPropertyEngagementStatus,
+  buildPropertyRelationshipCounts,
   classifyPropertyEngagementStatus,
 } from "../../../src/modules/properties/service.js";
 
@@ -39,5 +40,23 @@ describe("properties engagement list/detail consistency", () => {
     expect(serviceSource).toContain(
       ".where(and(inArray(deals.propertyId, propertyIds), eq(deals.isActive, true)))"
     );
+  });
+
+  it("uses active-only lead and deal counts for list/detail response fields", () => {
+    const fixture = {
+      leads: [{ isActive: true }, { isActive: false }],
+      deals: [
+        { isActive: true, sourceLeadId: "converted-lead-id" },
+        { isActive: false, sourceLeadId: null },
+      ],
+    };
+
+    const listCounts = {
+      leadCount: fixture.leads.filter((lead) => lead.isActive).length,
+      dealCount: fixture.deals.filter((deal) => deal.isActive).length,
+      convertedDealCount: fixture.deals.filter((deal) => Boolean(deal.sourceLeadId)).length,
+    };
+
+    expect(buildPropertyRelationshipCounts(fixture)).toEqual(listCounts);
   });
 });

@@ -152,11 +152,18 @@ export function buildPropertyEngagementStatus(input: {
   leads: Array<{ isActive: boolean }>;
   deals: Array<{ isActive: boolean; sourceLeadId?: string | null }>;
 }): PropertyEngagementStatus {
-  return classifyPropertyEngagementStatus({
-    dealCount: input.deals.filter((deal) => deal.isActive).length,
+  return classifyPropertyEngagementStatus(buildPropertyRelationshipCounts(input));
+}
+
+export function buildPropertyRelationshipCounts(input: {
+  leads: Array<{ isActive: boolean }>;
+  deals: Array<{ isActive: boolean; sourceLeadId?: string | null }>;
+}) {
+  return {
     leadCount: input.leads.filter((lead) => lead.isActive).length,
+    dealCount: input.deals.filter((deal) => deal.isActive).length,
     convertedDealCount: input.deals.filter((deal) => Boolean(deal.sourceLeadId)).length,
-  });
+  };
 }
 
 export async function listProperties(
@@ -488,25 +495,22 @@ export async function getPropertyDetail(tenantDb: TenantDb, propertyId: string) 
     `),
   ]);
   const photoCountRows = (photoCounts as any).rows ?? photoCounts;
-  const activeDeals = relatedDeals.filter((deal) => deal.isActive);
+  const relationshipCounts = buildPropertyRelationshipCounts({
+    leads: relatedLeads,
+    deals: relatedDeals,
+  });
   const linkedValue = linkedValueRows[0]?.linkedValue ?? "0";
 
   return {
     property: {
       ...property,
-      leadCount: relatedLeads.length,
-      dealCount: relatedDeals.length,
-      convertedDealCount: relatedDeals.filter((deal) => Boolean(deal.sourceLeadId)).length,
+      ...relationshipCounts,
       lastActivityAt: buildPropertyLastActivityAt({
         persistedLastActivityAt: coerceTimestamp(property.lastActivityAt),
         leadActivityAt: combineLatestTimestamp(...relatedLeads.map((lead) => coerceTimestamp(lead.lastActivityAt))),
         dealActivityAt: combineLatestTimestamp(...relatedDeals.map((deal) => coerceTimestamp(deal.lastActivityAt))),
       }),
-      engagementStatus: classifyPropertyEngagementStatus({
-        dealCount: activeDeals.length,
-        leadCount: relatedLeads.filter((lead) => lead.isActive).length,
-        convertedDealCount: relatedDeals.filter((deal) => Boolean(deal.sourceLeadId)).length,
-      }),
+      engagementStatus: classifyPropertyEngagementStatus(relationshipCounts),
       linkedValue,
       activePipelineValue: linkedValue,
       photosCount: Number(photoCountRows[0]?.photos_count ?? 0),
