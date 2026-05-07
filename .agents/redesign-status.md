@@ -14,7 +14,7 @@
 > - Human is the final referee.
 
 ## Track 0 — Coordination
-- 2026-05-07T17:30Z [main-agent] PR-OPEN — initial plan revision + status doc + gap audit (PR #__ — fill in after creation)
+- 2026-05-07T17:30Z [main-agent] PR-OPEN — initial plan revision + status doc + gap audit (PR #150)
 
 ## Track A-core — Schema + Hooks (sequential A1 → A2 → A3)
 - _no claims yet_

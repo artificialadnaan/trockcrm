@@ -353,7 +353,7 @@ Single file. Every agent reads it before claiming work and writes one line when 
 > Living coordination doc. Each agent: read before claiming, write a line when claiming or releasing. Use 24h-clock UTC timestamps.
 
 ## Track 0 — Coordination
-- 2026-05-07T17:30Z [main-agent] PR-OPEN — initial plan revision + status + gap audit (PR #__)
+- 2026-05-07T17:30Z [main-agent] PR-OPEN — initial plan revision + status + gap audit (PR #150)
 
 ## Track A-core — Schema + Hooks
 - _no claims yet_
