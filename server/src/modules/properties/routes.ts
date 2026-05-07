@@ -1,6 +1,7 @@
 import { Router } from "express";
 import { AppError } from "../../middleware/error-handler.js";
-import { createProperty, getPropertyDetail, listProperties, updateProperty } from "./service.js";
+import { requireAdmin } from "../../middleware/rbac.js";
+import { createProperty, deleteProperty, getPropertyDetail, listProperties, updateProperty } from "./service.js";
 
 const router = Router();
 
@@ -59,6 +60,16 @@ router.patch("/:id", async (req, res, next) => {
     }
     await req.commitTransaction!();
     res.json({ property });
+  } catch (err) {
+    next(err);
+  }
+});
+
+router.delete("/:id", requireAdmin, async (req, res, next) => {
+  try {
+    await deleteProperty(req.tenantDb!, req.params.id as string);
+    await req.commitTransaction!();
+    res.status(204).send();
   } catch (err) {
     next(err);
   }

@@ -1402,11 +1402,20 @@ export async function startProposalDraft(
 
 /**
  * Soft-delete a deal.
- * Only directors/admins can delete. Reps cannot.
+ * Only admins can delete primary deal rows.
  */
 export async function deleteDeal(tenantDb: TenantDb, dealId: string, userRole: string) {
-  if (userRole === "rep") {
-    throw new AppError(403, "Only directors and admins can delete deals");
+  if (userRole !== "admin") {
+    throw new AppError(403, "Only admins can delete deals");
+  }
+
+  const [existing] = await tenantDb.select().from(deals).where(eq(deals.id, dealId)).limit(1);
+  if (!existing) {
+    throw new AppError(404, "Deal not found");
+  }
+
+  if (!existing.isActive) {
+    return null;
   }
 
   const result = await tenantDb

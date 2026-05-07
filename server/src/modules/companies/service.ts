@@ -1,6 +1,7 @@
 import { eq, and, ilike, asc, desc, count, sql } from "drizzle-orm";
 import { companies, contacts, deals } from "@trock-crm/shared/schema";
 import type { NodePgDatabase } from "drizzle-orm/node-postgres";
+import { AppError } from "../../middleware/error-handler.js";
 
 type TenantDb = NodePgDatabase<any>;
 
@@ -154,6 +155,25 @@ export async function updateCompany(
     .set(updates)
     .where(eq(companies.id, id))
     .returning();
+  return rows[0] ?? null;
+}
+
+export async function deleteCompany(tenantDb: TenantDb, companyId: string) {
+  const existing = await getCompanyById(tenantDb, companyId);
+  if (!existing) {
+    throw new AppError(404, "Company not found");
+  }
+
+  if (!existing.isActive) {
+    return null;
+  }
+
+  const rows = await tenantDb
+    .update(companies)
+    .set({ isActive: false })
+    .where(eq(companies.id, companyId))
+    .returning();
+
   return rows[0] ?? null;
 }
 

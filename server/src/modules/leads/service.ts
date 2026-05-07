@@ -1618,9 +1618,17 @@ export function createLeadService(
     userRole: string,
     userId: string
   ) {
+    if (userRole !== "admin") {
+      throw new AppError(403, "Only admins can delete leads");
+    }
+
     const existing = await getLeadById(tenantDb, leadId, userRole, userId);
     if (!existing) {
       throw new AppError(404, "Lead not found");
+    }
+
+    if (!existing.isActive) {
+      return null;
     }
 
     const [lead] = await tenantDb

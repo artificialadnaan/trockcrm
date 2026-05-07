@@ -4,12 +4,14 @@ import {
   getCompanyById,
   createCompany,
   updateCompany,
+  deleteCompany,
   getCompanyContacts,
   getCompanyDeals,
   getCompanyStats,
   searchCompanies,
 } from "./service.js";
 import { AppError } from "../../middleware/error-handler.js";
+import { requireAdmin } from "../../middleware/rbac.js";
 import { markCompanyRejected, markCompanyVerified } from "./customer-status-service.js";
 
 const router = Router();
@@ -70,6 +72,15 @@ router.patch("/:id", async (req, res, next) => {
     if (!company) throw new AppError(404, "Company not found");
     await req.commitTransaction!();
     res.json({ company });
+  } catch (err) { next(err); }
+});
+
+// DELETE /companies/:id — admin-only soft-delete
+router.delete("/:id", requireAdmin, async (req, res, next) => {
+  try {
+    await deleteCompany(req.tenantDb!, req.params.id as string);
+    await req.commitTransaction!();
+    res.status(204).send();
   } catch (err) { next(err); }
 });
 

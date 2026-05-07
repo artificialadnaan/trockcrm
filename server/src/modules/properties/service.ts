@@ -302,6 +302,33 @@ export async function updateProperty(tenantDb: TenantDb, propertyId: string, inp
   return property ?? null;
 }
 
+export async function deleteProperty(tenantDb: TenantDb, propertyId: string) {
+  const [existing] = await tenantDb
+    .select()
+    .from(properties)
+    .where(eq(properties.id, propertyId))
+    .limit(1);
+
+  if (!existing) {
+    throw new AppError(404, "Property not found");
+  }
+
+  if (!existing.isActive) {
+    return null;
+  }
+
+  const [property] = await tenantDb
+    .update(properties)
+    .set({
+      isActive: false,
+      updatedAt: new Date(),
+    })
+    .where(eq(properties.id, propertyId))
+    .returning();
+
+  return property ?? null;
+}
+
 export async function getPropertyDetail(tenantDb: TenantDb, propertyId: string) {
   const [property] = await tenantDb
     .select({

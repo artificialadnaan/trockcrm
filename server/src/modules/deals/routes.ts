@@ -995,12 +995,12 @@ router.get("/:id/contacts", async (req, res, next) => {
   }
 });
 
-// DELETE /api/deals/:id — soft-delete (director/admin only)
-router.delete("/:id", requireRole("admin", "director"), async (req, res, next) => {
+// DELETE /api/deals/:id — admin-only soft-delete
+router.delete("/:id", requireRole("admin"), async (req, res, next) => {
   try {
     await deleteDeal(req.tenantDb!, req.params.id as string, req.user!.role);
     await req.commitTransaction!();
-    res.json({ success: true });
+    res.status(204).send();
   } catch (err) {
     next(err);
   }

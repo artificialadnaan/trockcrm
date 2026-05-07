@@ -3,6 +3,7 @@ import { drizzle } from "drizzle-orm/node-postgres";
 import * as schema from "@trock-crm/shared/schema";
 import { pool } from "../../db.js";
 import { AppError } from "../../middleware/error-handler.js";
+import { requireAdmin } from "../../middleware/rbac.js";
 import { LeadStageTransitionError } from "./stage-transition-service.js";
 import {
   createLead,
@@ -451,12 +452,12 @@ router.post("/:id/convert", async (req, res, next) => {
   }
 });
 
-// DELETE /api/leads/:id
-router.delete("/:id", async (req, res, next) => {
+// DELETE /api/leads/:id — admin-only soft-delete
+router.delete("/:id", requireAdmin, async (req, res, next) => {
   try {
-    await deleteLead(req.tenantDb!, req.params.id, req.user!.role, req.user!.id);
+    await deleteLead(req.tenantDb!, req.params.id as string, req.user!.role, req.user!.id);
     await req.commitTransaction!();
-    res.json({ success: true });
+    res.status(204).send();
   } catch (err) {
     next(err);
   }
