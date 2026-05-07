@@ -123,6 +123,19 @@ function toNumericString(value: unknown) {
   return String(value ?? "0");
 }
 
+export type PropertyEngagementStatus = "active_deal" | "active_lead" | "won" | "no_engagement";
+
+export function classifyPropertyEngagementStatus(input: {
+  dealCount: number;
+  leadCount: number;
+  convertedDealCount: number;
+}): PropertyEngagementStatus {
+  if (input.convertedDealCount > 0) return "won";
+  if (input.dealCount > 0) return "active_deal";
+  if (input.leadCount > 0) return "active_lead";
+  return "no_engagement";
+}
+
 export async function listProperties(
   tenantDb: TenantDb,
   filters: PropertyFilters = {}
@@ -278,13 +291,11 @@ export async function listProperties(
         leadActivityMap.get(row.id) ?? null,
         dealActivityMap.get(row.id) ?? null
       ),
-      engagementStatus: (dealCountMap.get(row.id) ?? 0) > 0
-        ? "active_deal"
-        : (leadCountMap.get(row.id) ?? 0) > 0
-          ? "active_lead"
-          : (convertedCountMap.get(row.id) ?? 0) > 0
-            ? "won"
-            : "no_engagement",
+      engagementStatus: classifyPropertyEngagementStatus({
+        dealCount: dealCountMap.get(row.id) ?? 0,
+        leadCount: leadCountMap.get(row.id) ?? 0,
+        convertedDealCount: convertedCountMap.get(row.id) ?? 0,
+      }),
       linkedValue: linkedValueMap.get(row.id) ?? "0",
       activePipelineValue: linkedValueMap.get(row.id) ?? "0",
       photosCount: photosCountMap.get(row.id) ?? 0,
@@ -463,13 +474,11 @@ export async function getPropertyDetail(tenantDb: TenantDb, propertyId: string) 
         ...relatedLeads.map((lead) => coerceTimestamp(lead.lastActivityAt)),
         ...relatedDeals.map((deal) => coerceTimestamp(deal.lastActivityAt))
       ),
-      engagementStatus: activeDeals.length > 0
-        ? "active_deal"
-        : relatedLeads.some((lead) => lead.isActive)
-          ? "active_lead"
-          : relatedDeals.some((deal) => Boolean(deal.sourceLeadId))
-            ? "won"
-            : "no_engagement",
+      engagementStatus: classifyPropertyEngagementStatus({
+        dealCount: activeDeals.length,
+        leadCount: relatedLeads.filter((lead) => lead.isActive).length,
+        convertedDealCount: relatedDeals.filter((deal) => Boolean(deal.sourceLeadId)).length,
+      }),
       linkedValue: String(linkedValue),
       activePipelineValue: String(linkedValue),
       photosCount: Number(photoCountRows[0]?.photos_count ?? 0),
