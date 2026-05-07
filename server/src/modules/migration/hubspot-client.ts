@@ -7,6 +7,9 @@ const PAGE_SIZE = 100;
 // HubSpot migration reads are batch operations; 30s bounds hung requests while
 // allowing large CRM pages enough time to respond.
 const HUBSPOT_REQUEST_TIMEOUT_MS = 30_000;
+const HUBSPOT_MAX_ATTEMPTS = 3;
+const HUBSPOT_BACKOFF_MS = [1_000, 3_000];
+const HUBSPOT_RETRY_WAIT_BUDGET_MS = 10_000;
 
 function hsHeaders(): HeadersInit {
   const token = process.env.HUBSPOT_PRIVATE_APP_TOKEN;
@@ -17,17 +20,53 @@ function hsHeaders(): HeadersInit {
   };
 }
 
+function isRetryableHubSpotStatus(status: number) {
+  return status === 429 || status >= 500;
+}
+
+function parseRetryAfterMs(value: string | null): number | null {
+  if (!value) return null;
+  const seconds = Number(value);
+  if (Number.isFinite(seconds) && seconds >= 0) return seconds * 1000;
+
+  const retryAt = Date.parse(value);
+  if (Number.isFinite(retryAt)) return Math.max(retryAt - Date.now(), 0);
+
+  return null;
+}
+
+async function wait(ms: number) {
+  await new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 async function hsFetch<T>(path: string): Promise<T> {
-  const res = await fetchWithTimeout(fetch, `${HS_BASE}${path}`, {
-    headers: hsHeaders(),
-    timeoutMs: HUBSPOT_REQUEST_TIMEOUT_MS,
-    timeoutLabel: `HubSpot ${path}`,
-  });
-  if (!res.ok) {
+  let remainingRetryWaitMs = HUBSPOT_RETRY_WAIT_BUDGET_MS;
+
+  for (let attempt = 0; attempt < HUBSPOT_MAX_ATTEMPTS; attempt++) {
+    const res = await fetchWithTimeout(fetch, `${HS_BASE}${path}`, {
+      headers: hsHeaders(),
+      timeoutMs: HUBSPOT_REQUEST_TIMEOUT_MS,
+      timeoutLabel: `HubSpot ${path}`,
+    });
+
+    if (res.ok) {
+      return res.json() as Promise<T>;
+    }
+
     const text = await res.text().catch(() => "");
-    throw new Error(`HubSpot API error: ${res.status} ${path} — ${text}`);
+    const shouldRetry = isRetryableHubSpotStatus(res.status) && attempt < HUBSPOT_MAX_ATTEMPTS - 1;
+    if (!shouldRetry) {
+      throw new Error(`HubSpot API error: ${res.status} ${path} — ${text}`);
+    }
+
+    const retryAfterMs = parseRetryAfterMs(res.headers.get("Retry-After"));
+    const requestedDelayMs = retryAfterMs ?? HUBSPOT_BACKOFF_MS[attempt] ?? HUBSPOT_BACKOFF_MS.at(-1)!;
+    const delayMs = Math.min(requestedDelayMs, remainingRetryWaitMs);
+    remainingRetryWaitMs -= delayMs;
+    await wait(delayMs);
   }
-  return res.json() as Promise<T>;
+
+  throw new Error(`HubSpot API error: exhausted retry attempts for ${path}`);
 }
 
 // ---------------------------------------------------------------------------
