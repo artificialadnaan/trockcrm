@@ -63,7 +63,10 @@ function visibleSavedReportWhere(userId: string, officeId: string) {
       eq(savedReports.officeId, officeId),
       eq(savedReports.visibility, "office")
     ),
-    eq(savedReports.visibility, "company")
+    and(
+      eq(savedReports.isLocked, false),
+      eq(savedReports.visibility, "company")
+    )
   );
 }
 
