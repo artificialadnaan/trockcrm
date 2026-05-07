@@ -35,14 +35,25 @@ const STAGE_SLA_DAYS: Record<string, number> = {
   lost: 0,
 };
 
-const TERMINAL_DATE_FILTERS: Record<TerminalOutcome, TerminalDateFilter> = {
-  won: readTerminalDateFilter("won"),
-  lost: readTerminalDateFilter("lost"),
-};
-
 function getScope(searchParams: URLSearchParams): PipelineScope {
   const scope = searchParams.get("scope");
   return scope === "mine" || scope === "team" || scope === "all" ? scope : "mine";
+}
+
+function readCurrentTerminalDateFilters(): Record<TerminalOutcome, TerminalDateFilter> {
+  return {
+    won: readTerminalDateFilter("won"),
+    lost: readTerminalDateFilter("lost"),
+  };
+}
+
+export function buildDealStageNavigationPath(column: DealBoardColumn, scope: PipelineScope) {
+  return buildDealStageWorkspacePath({
+    stageId: column.stage.id,
+    stageSlug: column.stage.slug,
+    scope,
+    filters: readCurrentTerminalDateFilters(),
+  });
 }
 
 function moneyValue(deal: Deal) {
@@ -218,14 +229,7 @@ export function DealListPage() {
   };
 
   const openStage = (column: DealBoardColumn) => {
-    navigate(
-      buildDealStageWorkspacePath({
-        stageId: column.stage.id,
-        stageSlug: column.stage.slug,
-        scope,
-        filters: TERMINAL_DATE_FILTERS,
-      })
-    );
+    navigate(buildDealStageNavigationPath(column, scope));
   };
 
   return (

@@ -201,6 +201,20 @@ describe("LeadListPage", () => {
     expect(html).not.toContain("Legacy Opportunity Lead");
   });
 
+  it("filters columns by the dashboard bucket query param", () => {
+    const bucketedHtml = renderPage("/leads?scope=mine&bucket=qualified_lead");
+
+    expect(bucketedHtml).not.toContain('aria-label="New Lead leads"');
+    expect(bucketedHtml).toContain('aria-label="Qualified Lead leads"');
+    expect(bucketedHtml).not.toContain('aria-label="Sales Validation Stage leads"');
+
+    const fullHtml = renderPage("/leads?scope=mine");
+
+    expect(fullHtml).toContain('aria-label="New Lead leads"');
+    expect(fullHtml).toContain('aria-label="Qualified Lead leads"');
+    expect(fullHtml).toContain('aria-label="Sales Validation Stage leads"');
+  });
+
   it("uses byte-for-byte stage labels from the workflow source", () => {
     const html = renderPage();
 

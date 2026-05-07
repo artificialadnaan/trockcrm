@@ -42,6 +42,20 @@ function getScope(searchParams: URLSearchParams): PipelineScope {
   return scope === "mine" || scope === "team" || scope === "all" ? scope : "mine";
 }
 
+function matchesLeadBucket(bucket: string | null, slug: string) {
+  if (!bucket) return true;
+  if (bucket === "lead") {
+    return ["lead_new", "company_pre_qualified", "scoping_in_progress", "new_lead"].includes(slug);
+  }
+  if (bucket === "qualified_lead") {
+    return ["pre_qual_value_assigned", "lead_go_no_go", "qualified_lead"].includes(slug);
+  }
+  if (bucket === "opportunity") {
+    return ["qualified_for_opportunity", "sales_validation_stage"].includes(slug);
+  }
+  return true;
+}
+
 function getInitials(name: string | null | undefined) {
   if (!name) return "TR";
   return name
@@ -162,15 +176,18 @@ export function LeadListPage() {
   const navigate = useNavigate();
   const [searchParams, setSearchParams] = useSearchParams();
   const scope = getScope(searchParams);
+  const bucket = searchParams.get("bucket");
   const { board, loading, error } = useLeadBoard(scope);
   const { leads } = useLeads({ status: "open", isActive: "all" });
 
   const columns = useMemo(
     () =>
-      (board?.columns ?? []).filter((column) =>
-        LEAD_BOARD_STAGE_SLUGS.includes(column.stage.slug as (typeof LEAD_BOARD_STAGE_SLUGS)[number])
-      ),
-    [board?.columns]
+      (board?.columns ?? [])
+        .filter((column) =>
+          LEAD_BOARD_STAGE_SLUGS.includes(column.stage.slug as (typeof LEAD_BOARD_STAGE_SLUGS)[number])
+        )
+        .filter((column) => matchesLeadBucket(bucket, column.stage.slug)),
+    [board?.columns, bucket]
   );
   const activeLeadCount = columns.reduce((sum, column) => sum + column.count, 0);
   const estimatedValue = leads.reduce((sum, lead) => sum + leadValue(lead), 0);

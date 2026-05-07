@@ -2,12 +2,14 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { renderToStaticMarkup } from "react-dom/server";
 import { MemoryRouter } from "react-router-dom";
 import type { ReactNode } from "react";
-import { DealListPage } from "./deal-list-page";
+import { DealListPage, buildDealStageNavigationPath } from "./deal-list-page";
 
 const mocks = vi.hoisted(() => ({
   useDealBoardMock: vi.fn(),
   useDealsMock: vi.fn(),
   usePipelineStagesMock: vi.fn(),
+  readTerminalDateFilterMock: vi.fn(),
+  buildDealStageWorkspacePathMock: vi.fn(),
 }));
 
 vi.mock("@/hooks/use-deals", () => ({
@@ -24,6 +26,15 @@ vi.mock("@/components/ui/button", () => ({
     <button className={className}>{children}</button>
   ),
 }));
+
+vi.mock("@/lib/pipeline-terminal-filters", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@/lib/pipeline-terminal-filters")>();
+  return {
+    ...actual,
+    readTerminalDateFilter: mocks.readTerminalDateFilterMock,
+    buildDealStageWorkspacePath: mocks.buildDealStageWorkspacePathMock,
+  };
+});
 
 function normalize(html: string) {
   return html.replace(/\s+/g, " ").trim();
@@ -92,6 +103,14 @@ describe("DealListPage", () => {
     mocks.useDealBoardMock.mockReset();
     mocks.useDealsMock.mockReset();
     mocks.usePipelineStagesMock.mockReset();
+    mocks.readTerminalDateFilterMock.mockReset();
+    mocks.buildDealStageWorkspacePathMock.mockReset();
+
+    mocks.readTerminalDateFilterMock.mockImplementation((outcome: string) => ({
+      mode: "preset",
+      preset: outcome === "won" ? "ytd" : "last_90_days",
+    }));
+    mocks.buildDealStageWorkspacePathMock.mockReturnValue("/deals/stages/stage-won?scope=all");
 
     mocks.usePipelineStagesMock.mockReturnValue({
       stages: [
@@ -192,5 +211,48 @@ describe("DealListPage", () => {
     expect(html).toContain("Opportunity");
     expect(html).toContain("Estimating");
     expect(html).toContain("No deals in this stage.");
+  });
+
+  it("reads terminal date filters at interaction time when opening terminal stages", () => {
+    const column = {
+      stage: { id: "stage-won", name: "Won", slug: "won" },
+      count: 0,
+      totalValue: 0,
+      cards: [],
+    };
+
+    mocks.readTerminalDateFilterMock.mockImplementation((outcome: string) => ({
+      mode: "preset",
+      preset: outcome === "won" ? "last_30_days" : "last_90_days",
+    }));
+
+    buildDealStageNavigationPath(column, "all");
+
+    expect(mocks.buildDealStageWorkspacePathMock).toHaveBeenLastCalledWith({
+      stageId: "stage-won",
+      stageSlug: "won",
+      scope: "all",
+      filters: {
+        won: { mode: "preset", preset: "last_30_days" },
+        lost: { mode: "preset", preset: "last_90_days" },
+      },
+    });
+
+    mocks.readTerminalDateFilterMock.mockImplementation((outcome: string) => ({
+      mode: "preset",
+      preset: outcome === "won" ? "last_7_days" : "last_30_days",
+    }));
+
+    buildDealStageNavigationPath(column, "all");
+
+    expect(mocks.buildDealStageWorkspacePathMock).toHaveBeenLastCalledWith({
+      stageId: "stage-won",
+      stageSlug: "won",
+      scope: "all",
+      filters: {
+        won: { mode: "preset", preset: "last_7_days" },
+        lost: { mode: "preset", preset: "last_30_days" },
+      },
+    });
   });
 });
