@@ -1,4 +1,5 @@
 import { eq, and, desc, asc, ilike, sql, or, not, isNull, inArray } from "drizzle-orm";
+import type { SQL } from "drizzle-orm";
 import type { NodePgDatabase } from "drizzle-orm/node-postgres";
 import { activities, contacts, contactDealAssociations, deals, emails, tasks } from "@trock-crm/shared/schema";
 import type * as schema from "@trock-crm/shared/schema";
@@ -133,6 +134,30 @@ export interface DedupCheckResult {
     companyName: string | null;
     matchReason: string;
   }>;
+}
+
+export function buildContactLastTouchAtSql(): SQL<Date | null> {
+  return sql<Date | null>`NULLIF(GREATEST(
+    COALESCE(${contacts.lastContactedAt}, '-infinity'::timestamptz),
+    COALESCE((SELECT MAX(a.occurred_at) FROM activities a WHERE a.contact_id = ${contacts.id}), '-infinity'::timestamptz),
+    COALESCE((SELECT MAX(e.sent_at) FROM emails e WHERE e.contact_id = ${contacts.id}), '-infinity'::timestamptz),
+    COALESCE((SELECT MAX(t.updated_at) FROM tasks t WHERE t.contact_id = ${contacts.id}), '-infinity'::timestamptz)
+  ), '-infinity'::timestamptz)`;
+}
+
+export function buildContactSortOrder(sortBy: ContactFilters["sortBy"], sortDir: ContactFilters["sortDir"] = "desc") {
+  const sortColumn = (() => {
+    switch (sortBy) {
+      case "name": return contacts.lastName;
+      case "company_name": return contacts.companyName;
+      case "created_at": return contacts.createdAt;
+      case "last_contacted_at": return contacts.lastContactedAt;
+      case "touchpoint_count": return contacts.touchpointCount;
+      case "last_touch_at": return buildContactLastTouchAtSql();
+      default: return contacts.updatedAt;
+    }
+  })();
+  return sortDir === "asc" ? asc(sortColumn) : desc(sortColumn);
 }
 
 /**
@@ -355,18 +380,7 @@ export async function getContacts(tenantDb: TenantDb, filters: ContactFilters) {
   const where = conditions.length > 0 ? and(...conditions) : undefined;
 
   // Sort
-  const sortColumn = (() => {
-    switch (filters.sortBy) {
-      case "name": return contacts.lastName;
-      case "company_name": return contacts.companyName;
-      case "created_at": return contacts.createdAt;
-      case "last_contacted_at": return contacts.lastContactedAt;
-      case "touchpoint_count": return contacts.touchpointCount;
-      case "last_touch_at": return contacts.lastContactedAt;
-      default: return contacts.updatedAt;
-    }
-  })();
-  const sortOrder = filters.sortDir === "asc" ? asc(sortColumn) : desc(sortColumn);
+  const sortOrder = buildContactSortOrder(filters.sortBy, filters.sortDir);
 
   const [countResult, contactRows] = await Promise.all([
     tenantDb.select({ count: sql<number>`count(*)` }).from(contacts).where(where),
@@ -413,12 +427,7 @@ export async function getContacts(tenantDb: TenantDb, filters: ContactFilters) {
           WHERE cda.contact_id = ${contacts.id}
             AND d.is_active = true
         )`,
-        lastTouchAt: sql<Date | null>`NULLIF(GREATEST(
-          COALESCE(${contacts.lastContactedAt}, '-infinity'::timestamptz),
-          COALESCE((SELECT MAX(a.occurred_at) FROM activities a WHERE a.contact_id = ${contacts.id}), '-infinity'::timestamptz),
-          COALESCE((SELECT MAX(e.sent_at) FROM emails e WHERE e.contact_id = ${contacts.id}), '-infinity'::timestamptz),
-          COALESCE((SELECT MAX(t.updated_at) FROM tasks t WHERE t.contact_id = ${contacts.id}), '-infinity'::timestamptz)
-        ), '-infinity'::timestamptz)`,
+        lastTouchAt: buildContactLastTouchAtSql(),
       })
       .from(contacts)
       .where(where)
@@ -487,12 +496,7 @@ export async function getContactById(tenantDb: TenantDb, contactId: string) {
         WHERE cda.contact_id = ${contacts.id}
           AND d.is_active = true
       )`,
-      lastTouchAt: sql<Date | null>`NULLIF(GREATEST(
-        COALESCE(${contacts.lastContactedAt}, '-infinity'::timestamptz),
-        COALESCE((SELECT MAX(a.occurred_at) FROM activities a WHERE a.contact_id = ${contacts.id}), '-infinity'::timestamptz),
-        COALESCE((SELECT MAX(e.sent_at) FROM emails e WHERE e.contact_id = ${contacts.id}), '-infinity'::timestamptz),
-        COALESCE((SELECT MAX(t.updated_at) FROM tasks t WHERE t.contact_id = ${contacts.id}), '-infinity'::timestamptz)
-      ), '-infinity'::timestamptz)`,
+      lastTouchAt: buildContactLastTouchAtSql(),
     })
     .from(contacts)
     .where(eq(contacts.id, contactId))
