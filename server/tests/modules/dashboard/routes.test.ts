@@ -157,7 +157,7 @@ describe("dashboard routes", () => {
       .get("/api/dashboard/director/rep-performance?periodKind=mtd");
 
     expect(response.status).toBe(200);
-    expect(getRepPerformanceSnapshotsMock).toHaveBeenCalledWith(expect.anything(), "mtd");
+    expect(getRepPerformanceSnapshotsMock).toHaveBeenCalledWith(expect.anything(), "office-1", "mtd");
     expect(response.body.data.rows[0]).toMatchObject({
       repId: "rep-1",
       goalSource: "none",

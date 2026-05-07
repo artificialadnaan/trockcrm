@@ -1605,6 +1605,7 @@ function buildGoalNullForecast(forecast: number): ForecastVsGoal {
 
 export async function getRepPerformanceSnapshots(
   tenantDb: TenantDb,
+  officeId: string,
   periodKind: RepPerformancePeriodKind = "mtd"
 ): Promise<RepPerformanceSnapshotsData> {
   const result = await tenantDb.execute(sql`
@@ -1616,6 +1617,7 @@ export async function getRepPerformanceSnapshots(
       JOIN public.users u
         ON u.id = rps.rep_id
        AND u.is_active = true
+       AND u.office_id = ${officeId}
       WHERE rps.period_kind = ${periodKind}
       ORDER BY rps.rep_id, rps.period_kind, rps.computed_at DESC NULLS LAST, rps.period_start DESC
     )
@@ -1896,7 +1898,7 @@ export async function getDirectorCommissionWorkspace(
  */
 export async function getDirectorDashboard(
   tenantDb: TenantDb,
-  options: { from?: string; to?: string } = {}
+  options: { from?: string; to?: string; officeId: string }
 ): Promise<DirectorDashboardData> {
   const year = new Date().getFullYear();
   const from = options.from ?? `${year}-01-01`;
@@ -1941,7 +1943,7 @@ export async function getDirectorDashboard(
     getDownstreamBottlenecks(tenantDb),
     getDirectorFunnelSummary(tenantDb),
     getDirectorRepCommissionRows(tenantDb, { from, to }),
-    getRepPerformanceSnapshots(tenantDb, "mtd"),
+    getRepPerformanceSnapshots(tenantDb, options.officeId, "mtd"),
     getRecentCloses(tenantDb, { from, to }),
   ]);
 

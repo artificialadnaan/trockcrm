@@ -279,7 +279,7 @@ describe("Dashboard Service", () => {
         [{ dd_value: "0", dd_count: "0", pipeline_value: "0", pipeline_count: "0" }],
       ]);
 
-      await getDirectorDashboard(tenantDb, { from: "2026-01-01", to: "2026-12-31" });
+      await getDirectorDashboard(tenantDb, { from: "2026-01-01", to: "2026-12-31", officeId: "office-1" });
 
       const repCardsQueryText = extractSqlText(tenantDb.execute.mock.calls[0][0]).toLowerCase();
       expect(repCardsQueryText).toContain("a.responsible_user_id as rep_id");
@@ -338,7 +338,7 @@ describe("Dashboard Service", () => {
         }),
       } as any;
 
-      const result = await getDirectorDashboard(tenantDb, { from: "2026-01-01", to: "2026-12-31" });
+      const result = await getDirectorDashboard(tenantDb, { from: "2026-01-01", to: "2026-12-31", officeId: "office-1" });
 
       expect(result.officeFunnelBuckets).toEqual([
         { key: "lead", label: "Leads", count: 5, totalValue: null, route: "/leads", bucket: "lead" },

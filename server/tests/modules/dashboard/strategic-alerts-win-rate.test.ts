@@ -144,7 +144,7 @@ describe("director strategic win-rate alerts", () => {
       }),
     } as any;
 
-    const result = await getDirectorDashboard(tenantDb, { from: "2026-05-01", to: "2026-05-07" });
+    const result = await getDirectorDashboard(tenantDb, { from: "2026-05-01", to: "2026-05-07", officeId: "office-1" });
 
     const winRateAlerts = result.strategicAlerts.filter((alert) => alert.id.startsWith("win-rate-"));
     expect(winRateAlerts.map((alert) => alert.repId)).toEqual(["rep-c"]);

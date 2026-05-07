@@ -101,6 +101,7 @@ describe("director recent closes stale losses", () => {
     const result = await getDirectorDashboard(tenantDb, {
       from: "2026-04-07",
       to: "2026-05-07",
+      officeId: "office-1",
     });
 
     const recentCloseSql = executedSql.find((text) => text.includes("closed_at"));

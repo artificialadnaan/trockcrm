@@ -56,6 +56,7 @@ router.get(
       const data = await getDirectorDashboard(req.tenantDb!, {
         from: req.query.from as string | undefined,
         to: req.query.to as string | undefined,
+        officeId: req.user!.activeOfficeId ?? req.user!.officeId,
       });
       await req.commitTransaction!();
       res.json({ data });
@@ -92,7 +93,11 @@ router.get(
         throw new AppError(400, "Invalid rep performance period kind");
       }
 
-      const data = await getRepPerformanceSnapshots(req.tenantDb!, periodKind as RepPerformancePeriodKind);
+      const data = await getRepPerformanceSnapshots(
+        req.tenantDb!,
+        req.user!.activeOfficeId ?? req.user!.officeId,
+        periodKind as RepPerformancePeriodKind
+      );
       await req.commitTransaction!();
       res.json({ data });
     } catch (err) {

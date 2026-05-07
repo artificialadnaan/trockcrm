@@ -42,12 +42,13 @@ describe("rep performance active rep filtering", () => {
       execute: vi.fn().mockResolvedValue({ rows: [] }),
     } as any;
 
-    await getRepPerformanceSnapshots(tenantDb, "mtd");
+    await getRepPerformanceSnapshots(tenantDb, "office-1", "mtd");
 
     const queryText = extractSqlText(tenantDb.execute.mock.calls[0][0]).toLowerCase();
     expect(queryText).toContain("join public.users u");
     expect(queryText).toContain("u.id = rps.rep_id");
     expect(queryText).toContain("u.is_active = true");
+    expect(queryText).toContain("u.office_id =");
     expect(queryText).not.toContain("left join public.users u on u.id = current.rep_id");
   });
 });

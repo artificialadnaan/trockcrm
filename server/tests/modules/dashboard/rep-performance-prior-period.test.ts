@@ -94,7 +94,7 @@ describe("rep performance prior-period snapshots", () => {
       }),
     } as any;
 
-    const result = await getRepPerformanceSnapshots(tenantDb, "mtd");
+    const result = await getRepPerformanceSnapshots(tenantDb, "office-1", "mtd");
     const queryText = extractSqlText(tenantDb.execute.mock.calls[0][0]).toLowerCase();
 
     expect(queryText).toContain("prior.period_end =");
@@ -120,7 +120,7 @@ describe("rep performance prior-period snapshots", () => {
       }),
     } as any;
 
-    await getRepPerformanceSnapshots(tenantDb, "last_month");
+    await getRepPerformanceSnapshots(tenantDb, "office-1", "last_month");
     const queryText = extractSqlText(tenantDb.execute.mock.calls[0][0]).toLowerCase();
 
     expect(queryText).toContain("current.period_kind = 'last_month'");
