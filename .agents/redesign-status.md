@@ -20,7 +20,7 @@
 - _no claims yet_
 
 ## Track A-isolated — Reports + Snapshots (A4 + A5a parallel; A5b after A1)
-- _no claims yet_
+- 2026-05-07T19:16Z [track-a-isolated-agent] CLAIM — A4 in flight (branch: redesign/schema-hooks-isolated/a4)
 
 ## Track B — Shared Primitives + Shell + Harness
 - _no claims yet_
