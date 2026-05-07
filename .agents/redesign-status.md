@@ -31,6 +31,8 @@
 
 ## Track C — List Pages
 - _no claims yet_
+- C CLAIM 2026-05-07T22:21Z: redesign/list-pages, rep dashboard polish + companies/contacts/properties list. ETA TBD. Worktree: trockcrm-redesign-lists.
+- 2026-05-07T22:43Z [track-c-agent] PR-OPEN — list pages: rep dashboard polish + companies/contacts/properties (PR #162)
 
 ## Track D — Workflow Pages
 - _no claims yet_

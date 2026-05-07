@@ -41,6 +41,12 @@ describe("PropertyListPage", () => {
           state: "TX",
           zip: "75201",
           notes: null,
+          type: "industrial",
+          roofArea: 125000,
+          linkedValue: "300000",
+          activePipelineValue: "300000",
+          engagementStatus: "won",
+          photosCount: 2,
           isActive: true,
           createdAt: "2026-04-10T10:00:00.000Z",
           updatedAt: "2026-04-11T10:00:00.000Z",
@@ -58,11 +64,12 @@ describe("PropertyListPage", () => {
   it("renders first-class properties instead of grouped deals", () => {
     const html = normalize(renderPage());
 
-    expect(mocks.usePropertiesMock).toHaveBeenCalledWith({ search: "" });
-    expect(html).toContain("1 property across 3 deals");
+    expect(mocks.usePropertiesMock).toHaveBeenCalledWith({ search: undefined, type: undefined, limit: 250 });
+    expect(html).toContain("1 property");
     expect(html).toContain("New Property");
     expect(html).toContain("Alpha Roofing");
     expect(html).toContain("123 Main St");
-    expect(html).toContain("2 leads");
+    expect(html).toContain("Industrial");
+    expect(html).toContain("Won project");
   });
 });

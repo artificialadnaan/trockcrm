@@ -184,9 +184,16 @@ export function RepDashboardPage() {
   const { tasks: todayTasks, refetch: refetchToday } = useTasks({ section: "today", limit: 50 });
   const firstName = user?.displayName?.split(" ")[0] ?? "there";
 
-  const refetchTasks = () => {
-    refetchOverdue();
-    refetchToday();
+  const refetchTasks = async () => {
+    const results = await Promise.allSettled([
+      refetchOverdue(),
+      refetchToday(),
+    ]);
+    results.forEach((r) => {
+      if (r.status === "rejected") {
+        console.error("refetchTasks: section failed", r.reason);
+      }
+    });
   };
   const refreshAll = async () => {
     const results = await Promise.allSettled([
