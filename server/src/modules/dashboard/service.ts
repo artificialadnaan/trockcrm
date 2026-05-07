@@ -1667,9 +1667,12 @@ export async function getRepPerformanceSnapshots(
         )::date
         AND prior.period_end = (
           CASE
-            WHEN current.period_kind IN ('mtd', 'last_month') THEN current.period_end - INTERVAL '1 month'
-            WHEN current.period_kind IN ('qtd', 'last_quarter') THEN current.period_end - INTERVAL '3 months'
-            WHEN current.period_kind IN ('ytd', 'last_year') THEN current.period_end - INTERVAL '1 year'
+            WHEN current.period_kind = 'mtd' THEN current.period_end - INTERVAL '1 month'
+            WHEN current.period_kind = 'qtd' THEN current.period_end - INTERVAL '3 months'
+            WHEN current.period_kind = 'ytd' THEN current.period_end - INTERVAL '1 year'
+            WHEN current.period_kind = 'last_month' THEN date_trunc('month', current.period_end)::date - INTERVAL '1 day'
+            WHEN current.period_kind = 'last_quarter' THEN date_trunc('quarter', current.period_end)::date - INTERVAL '1 day'
+            WHEN current.period_kind = 'last_year' THEN date_trunc('year', current.period_end)::date - INTERVAL '1 day'
             WHEN current.period_kind = 'week_8back' THEN current.period_end - INTERVAL '56 days'
             ELSE NULL
           END

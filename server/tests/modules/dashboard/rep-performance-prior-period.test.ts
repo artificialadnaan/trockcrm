@@ -76,7 +76,7 @@ function currentSnapshotRow(overrides: Record<string, unknown>) {
 }
 
 describe("rep performance prior-period snapshots", () => {
-  it("matches prior snapshots by aligned period_end instead of full prior period", async () => {
+  it("matches partial prior snapshots by aligned period_end instead of full prior period", async () => {
     const { getRepPerformanceSnapshots } = await import("../../../src/modules/dashboard/service.js");
     const tenantDb = {
       execute: vi.fn().mockResolvedValue({
@@ -99,9 +99,34 @@ describe("rep performance prior-period snapshots", () => {
 
     expect(queryText).toContain("prior.period_end =");
     expect(queryText).toContain("current.period_end - interval '1 month'");
+    expect(queryText).toContain("current.period_kind = 'mtd'");
     expect(queryText).not.toContain("order by prior.computed_at");
     expect(result.rows[0]?.previous?.closedValue).toBe(80);
     expect(result.rows[0]?.avgDaysToClose).toBe(12);
     expect(result.rows[0]?.previous?.avgDaysToClose).toBe(10);
+  });
+
+  it("matches complete prior periods to the actual last day of the prior month/quarter/year", async () => {
+    const { getRepPerformanceSnapshots } = await import("../../../src/modules/dashboard/service.js");
+    const tenantDb = {
+      execute: vi.fn().mockResolvedValue({
+        rows: [
+          currentSnapshotRow({
+            period_kind: "last_month",
+            period_start: "2026-04-01",
+            period_end: "2026-04-30",
+          }),
+        ],
+      }),
+    } as any;
+
+    await getRepPerformanceSnapshots(tenantDb, "last_month");
+    const queryText = extractSqlText(tenantDb.execute.mock.calls[0][0]).toLowerCase();
+
+    expect(queryText).toContain("current.period_kind = 'last_month'");
+    expect(queryText).toContain("date_trunc('month', current.period_end)::date - interval '1 day'");
+    expect(queryText).toContain("date_trunc('quarter', current.period_end)::date - interval '1 day'");
+    expect(queryText).toContain("date_trunc('year', current.period_end)::date - interval '1 day'");
+    expect(queryText).not.toContain("when current.period_kind in ('mtd', 'last_month') then current.period_end - interval '1 month'");
   });
 });
