@@ -117,7 +117,7 @@ BEGIN
            role_on_deal %I.deal_contact_role NOT NULL,
            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
            updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-           UNIQUE (deal_id, contact_id, role_on_deal)
+           UNIQUE (deal_id, contact_id)
          )',
         tenant_schema,
         tenant_schema,
@@ -127,18 +127,11 @@ BEGIN
       EXECUTE format('CREATE INDEX IF NOT EXISTS deal_contacts_deal_idx ON %I.deal_contacts (deal_id, role_on_deal)', tenant_schema);
       EXECUTE format('CREATE INDEX IF NOT EXISTS deal_contacts_contact_idx ON %I.deal_contacts (contact_id)', tenant_schema);
       EXECUTE format(
-        'CREATE UNIQUE INDEX IF NOT EXISTS deal_contacts_one_primary_per_deal_uidx
-           ON %I.deal_contacts (deal_id)
-         WHERE role_on_deal = ''primary''',
-        tenant_schema
-      );
-
-      EXECUTE format(
         'INSERT INTO %I.deal_contacts (deal_id, contact_id, role_on_deal)
          SELECT id, primary_contact_id, ''primary''::%I.deal_contact_role
            FROM %I.deals
           WHERE primary_contact_id IS NOT NULL
-         ON CONFLICT (deal_id, contact_id, role_on_deal) DO NOTHING',
+         ON CONFLICT (deal_id, contact_id) DO NOTHING',
         tenant_schema,
         tenant_schema,
         tenant_schema
@@ -170,7 +163,7 @@ BEGIN
              LEFT JOIN %I.deal_contacts existing_primary
                ON existing_primary.deal_id = ranked.deal_id
               AND existing_primary.role_on_deal = ''primary''
-           ON CONFLICT (deal_id, contact_id, role_on_deal) DO NOTHING',
+           ON CONFLICT (deal_id, contact_id) DO NOTHING',
           tenant_schema,
           tenant_schema,
           tenant_schema,
@@ -183,10 +176,10 @@ BEGIN
           'ALTER TABLE %I.estimate_line_items
              ADD COLUMN IF NOT EXISTS deal_id UUID,
              ADD COLUMN IF NOT EXISTS label text,
-             ADD COLUMN IF NOT EXISTS qty numeric(12, 2) DEFAULT 1,
-             ADD COLUMN IF NOT EXISTS rate numeric(12, 2) DEFAULT 0,
-             ADD COLUMN IF NOT EXISTS total numeric(14, 2) DEFAULT 0,
-             ADD COLUMN IF NOT EXISTS sort_order integer DEFAULT 0',
+             ADD COLUMN IF NOT EXISTS qty numeric(12, 2),
+             ADD COLUMN IF NOT EXISTS rate numeric(12, 2),
+             ADD COLUMN IF NOT EXISTS total numeric(14, 2),
+             ADD COLUMN IF NOT EXISTS sort_order integer',
           tenant_schema
         );
 
@@ -210,16 +203,26 @@ BEGIN
             'UPDATE %I.estimate_line_items eli
                 SET deal_id = COALESCE(eli.deal_id, es.deal_id),
                     label = COALESCE(eli.label, eli.description),
-                    qty = COALESCE(eli.qty, round(eli.quantity, 2)),
-                    rate = COALESCE(eli.rate, eli.unit_price),
-                    total = COALESCE(eli.total, eli.total_price),
-                    sort_order = COALESCE(eli.sort_order, eli.display_order)
+                    qty = round(eli.quantity, 2),
+                    rate = eli.unit_price,
+                    total = eli.total_price,
+                    sort_order = eli.display_order
                FROM %I.estimate_sections es
-              WHERE eli.section_id = es.id',
+              WHERE eli.section_id = es.id
+                AND eli.qty IS NULL',
             tenant_schema,
             tenant_schema
           );
         END IF;
+
+        EXECUTE format(
+          'ALTER TABLE %I.estimate_line_items
+             ALTER COLUMN qty SET DEFAULT 1,
+             ALTER COLUMN rate SET DEFAULT 0,
+             ALTER COLUMN total SET DEFAULT 0,
+             ALTER COLUMN sort_order SET DEFAULT 0',
+          tenant_schema
+        );
 
         EXECUTE format('CREATE INDEX IF NOT EXISTS estimate_line_items_deal_sort_idx ON %I.estimate_line_items (deal_id, sort_order, created_at)', tenant_schema);
       END IF;
@@ -403,19 +406,16 @@ BEGIN
       role_on_deal deal_contact_role NOT NULL,
       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
       updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-      UNIQUE (deal_id, contact_id, role_on_deal)
+      UNIQUE (deal_id, contact_id)
     );
     CREATE INDEX IF NOT EXISTS deal_contacts_deal_idx ON deal_contacts (deal_id, role_on_deal);
     CREATE INDEX IF NOT EXISTS deal_contacts_contact_idx ON deal_contacts (contact_id);
-    CREATE UNIQUE INDEX IF NOT EXISTS deal_contacts_one_primary_per_deal_uidx
-      ON deal_contacts (deal_id)
-      WHERE role_on_deal = 'primary';
 
     INSERT INTO deal_contacts (deal_id, contact_id, role_on_deal)
     SELECT id, primary_contact_id, 'primary'::deal_contact_role
       FROM deals
      WHERE primary_contact_id IS NOT NULL
-    ON CONFLICT (deal_id, contact_id, role_on_deal) DO NOTHING;
+    ON CONFLICT (deal_id, contact_id) DO NOTHING;
 
     IF to_regclass('contact_deal_associations') IS NOT NULL THEN
       WITH ranked AS (
@@ -442,17 +442,17 @@ BEGIN
         LEFT JOIN deal_contacts existing_primary
           ON existing_primary.deal_id = ranked.deal_id
          AND existing_primary.role_on_deal = 'primary'
-      ON CONFLICT (deal_id, contact_id, role_on_deal) DO NOTHING;
+      ON CONFLICT (deal_id, contact_id) DO NOTHING;
     END IF;
 
     IF to_regclass('estimate_line_items') IS NOT NULL THEN
       ALTER TABLE estimate_line_items
         ADD COLUMN IF NOT EXISTS deal_id UUID,
         ADD COLUMN IF NOT EXISTS label text,
-        ADD COLUMN IF NOT EXISTS qty numeric(12, 2) DEFAULT 1,
-        ADD COLUMN IF NOT EXISTS rate numeric(12, 2) DEFAULT 0,
-        ADD COLUMN IF NOT EXISTS total numeric(14, 2) DEFAULT 0,
-        ADD COLUMN IF NOT EXISTS sort_order integer DEFAULT 0;
+        ADD COLUMN IF NOT EXISTS qty numeric(12, 2),
+        ADD COLUMN IF NOT EXISTS rate numeric(12, 2),
+        ADD COLUMN IF NOT EXISTS total numeric(14, 2),
+        ADD COLUMN IF NOT EXISTS sort_order integer;
 
       IF NOT EXISTS (
         SELECT 1
@@ -469,13 +469,20 @@ BEGIN
         UPDATE estimate_line_items eli
            SET deal_id = COALESCE(eli.deal_id, es.deal_id),
                label = COALESCE(eli.label, eli.description),
-               qty = COALESCE(eli.qty, round(eli.quantity, 2)),
-               rate = COALESCE(eli.rate, eli.unit_price),
-               total = COALESCE(eli.total, eli.total_price),
-               sort_order = COALESCE(eli.sort_order, eli.display_order)
+               qty = round(eli.quantity, 2),
+               rate = eli.unit_price,
+               total = eli.total_price,
+               sort_order = eli.display_order
           FROM estimate_sections es
-         WHERE eli.section_id = es.id;
+         WHERE eli.section_id = es.id
+           AND eli.qty IS NULL;
       END IF;
+
+      ALTER TABLE estimate_line_items
+        ALTER COLUMN qty SET DEFAULT 1,
+        ALTER COLUMN rate SET DEFAULT 0,
+        ALTER COLUMN total SET DEFAULT 0,
+        ALTER COLUMN sort_order SET DEFAULT 0;
 
       CREATE INDEX IF NOT EXISTS estimate_line_items_deal_sort_idx
         ON estimate_line_items (deal_id, sort_order, created_at);

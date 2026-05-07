@@ -35,8 +35,9 @@ describe("redesign A2 tier 2 schema migration", () => {
     expect(migrationSql).toContain("CREATE TABLE IF NOT EXISTS %I.deal_contacts");
     expect(migrationSql).toContain("role_on_deal %I.deal_contact_role NOT NULL");
     expect(migrationSql).toContain("ON DELETE CASCADE");
-    expect(migrationSql).toContain("CREATE UNIQUE INDEX IF NOT EXISTS deal_contacts_one_primary_per_deal_uidx");
-    expect(migrationSql).toContain("WHERE role_on_deal = 'primary'");
+    expect(migrationSql).toContain("UNIQUE (deal_id, contact_id)");
+    expect(migrationSql).not.toContain("UNIQUE (deal_id, contact_id, role_on_deal)");
+    expect(migrationSql).not.toContain("deal_contacts_one_primary_per_deal_uidx");
   });
 
   it("creates email and file junctions plus current-user starred files with cascade deletes", () => {
@@ -53,5 +54,36 @@ describe("redesign A2 tier 2 schema migration", () => {
     expect(migrationSql).toContain("ADD COLUMN IF NOT EXISTS deal_id UUID");
     expect(migrationSql).toContain("estimate_line_items_deal_id_fkey");
     expect(migrationSql).toContain("estimate_line_items_deal_sort_idx");
+  });
+
+  it("estimate alias backfill preserves legacy values before adding defaults", () => {
+    const tenantStart = migrationSql.indexOf("ALTER TABLE %I.estimate_line_items");
+    const tenantEnd = migrationSql.indexOf("CREATE INDEX IF NOT EXISTS estimate_line_items_deal_sort_idx", tenantStart);
+    const tenantSql = migrationSql.slice(tenantStart, tenantEnd);
+
+    expect(tenantSql).toContain("ADD COLUMN IF NOT EXISTS qty numeric(12, 2)");
+    expect(tenantSql).toContain("ADD COLUMN IF NOT EXISTS rate numeric(12, 2)");
+    expect(tenantSql).toContain("ADD COLUMN IF NOT EXISTS total numeric(14, 2)");
+    expect(tenantSql).toContain("ADD COLUMN IF NOT EXISTS sort_order integer");
+    expect(tenantSql).not.toContain("ADD COLUMN IF NOT EXISTS qty numeric(12, 2) DEFAULT 1");
+    expect(tenantSql).not.toContain("qty = COALESCE(eli.qty");
+    expect(tenantSql).toContain("qty = round(eli.quantity, 2)");
+    expect(tenantSql).toContain("rate = eli.unit_price");
+    expect(tenantSql).toContain("total = eli.total_price");
+    expect(tenantSql).toContain("sort_order = eli.display_order");
+    expect(tenantSql).toContain("WHERE eli.section_id = es.id");
+    expect(tenantSql).toContain("AND eli.qty IS NULL");
+    expect(tenantSql).toContain("ALTER COLUMN qty SET DEFAULT 1");
+    expect(tenantSql).toContain("ALTER COLUMN rate SET DEFAULT 0");
+    expect(tenantSql).toContain("ALTER COLUMN total SET DEFAULT 0");
+    expect(tenantSql).toContain("ALTER COLUMN sort_order SET DEFAULT 0");
+  });
+
+  it("deal_contacts dedupes across primary and association backfill passes", () => {
+    expect(migrationSql).toContain("UNIQUE (deal_id, contact_id)");
+    expect(migrationSql).not.toContain("UNIQUE (deal_id, contact_id, role_on_deal)");
+    expect(migrationSql).toContain("ON CONFLICT (deal_id, contact_id) DO NOTHING");
+    expect(migrationSql).not.toContain("ON CONFLICT (deal_id, contact_id, role_on_deal) DO NOTHING");
+    expect(migrationSql).not.toContain("deal_contacts_one_primary_per_deal_uidx");
   });
 });
