@@ -1,22 +1,70 @@
+import { useMemo } from "react";
 import { useNavigate } from "react-router-dom";
-import { Plus, ChevronLeft, ChevronRight, Users } from "lucide-react";
+import { ArrowUpRight, Briefcase, ChevronLeft, ChevronRight, Mail, Phone, Plus, Search, Star, Users } from "lucide-react";
 import { PageHeader } from "@/components/layout/page-header";
+import { MetricCard } from "@/components/shared/metric-card";
+import { ScopeToggle } from "@/components/shared/scope-toggle";
 import { Button } from "@/components/ui/button";
-import { ContactCard } from "@/components/contacts/contact-card";
-import { ContactFilters } from "@/components/contacts/contact-filters";
-import { useContacts } from "@/hooks/use-contacts";
+import { Card, CardContent } from "@/components/ui/card";
+import { Input } from "@/components/ui/input";
+import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
+import { useContacts, type Contact } from "@/hooks/use-contacts";
 import { useContactFilters } from "@/hooks/use-contact-filters";
+import { contactLocation, formatPhone, fullName } from "@/lib/contact-utils";
+import { cn } from "@/lib/utils";
+
+const ROLE_LABELS: Record<string, string> = {
+  owner_principal: "Owner / principal",
+  project_manager: "Project manager",
+  facilities_director: "Facilities director",
+  maintenance: "Maintenance",
+  procurement: "Procurement",
+  insurance_adjuster: "Insurance adjuster",
+  admin_ap: "Admin / AP",
+  other: "Other",
+};
+
+const ROLE_OPTIONS = [
+  { value: "all", label: "All" },
+  { value: "owner_principal", label: "Owner" },
+  { value: "project_manager", label: "PM" },
+  { value: "facilities_director", label: "Facilities" },
+  { value: "procurement", label: "Procurement" },
+] as const;
+
+function initials(contact: Contact) {
+  return [contact.firstName?.[0], contact.lastName?.[0]].filter(Boolean).join("").toUpperCase() || "?";
+}
+
+function formatLastTouch(value: string | null | undefined) {
+  if (!value) return "Untouched";
+  return new Intl.DateTimeFormat("en-US", { month: "short", day: "numeric", year: "numeric" }).format(new Date(value));
+}
+
+function isUntouched(value: string | null | undefined) {
+  if (!value) return true;
+  return Date.now() - new Date(value).getTime() > 30 * 24 * 60 * 60 * 1000;
+}
 
 export function ContactListPage() {
   const navigate = useNavigate();
   const { filters, setFilters, resetFilters } = useContactFilters();
   const { contacts, pagination, loading, error } = useContacts(filters);
 
+  const activeRole = (filters.role ?? "all") as (typeof ROLE_OPTIONS)[number]["value"];
+  const totals = useMemo(() => {
+    const primary = contacts.filter((contact) => contact.isPrimary).length;
+    const untouched = contacts.filter((contact) => isUntouched(contact.lastTouchAt)).length;
+    const linkedDeals = contacts.reduce((sum, contact) => sum + (contact.linkedDealsCount ?? 0), 0);
+    return { primary, untouched, linkedDeals };
+  }, [contacts]);
+
   return (
-    <div className="space-y-6">
+    <div className="space-y-5">
       <PageHeader
         title="Contacts"
-        meta={`${pagination.total} contact${pagination.total !== 1 ? "s" : ""}`}
+        description="Decision makers, field contacts, facilities owners, and AP contacts across active accounts."
+        meta={`${pagination.total} contact${pagination.total === 1 ? "" : "s"}`}
         actions={{
           primary: (
             <Button onClick={() => navigate("/contacts/new")}>
@@ -27,76 +75,170 @@ export function ContactListPage() {
         }}
       />
 
-      {/* Filters */}
-      <ContactFilters
-        filters={filters}
-        onFilterChange={setFilters}
-        onReset={resetFilters}
-      />
+      <div className="grid gap-4 md:grid-cols-3">
+        <MetricCard eyebrow="Total contacts" value={String(pagination.total)} badge={`${contacts.length} shown`} caption="Directory" tone="green" accent="red" />
+        <MetricCard eyebrow="Primary contacts" value={String(totals.primary)} badge={`${totals.linkedDeals} links`} caption="Deal coverage" tone="blue" accent="blue" />
+        <MetricCard eyebrow="Untouched 30d+" value={String(totals.untouched)} badge="Review" caption="Needs touch" tone="red" accent="red" />
+      </div>
 
-      {/* Error State */}
-      {error && (
-        <div className="p-4 bg-red-50 text-red-700 rounded-lg text-sm">
-          {error}
-        </div>
-      )}
+      <Card className="border-slate-200 bg-white shadow-none">
+        <CardContent className="space-y-4 p-4">
+          <div className="flex flex-col gap-3 xl:flex-row xl:items-center xl:justify-between">
+            <div className="flex flex-1 flex-col gap-3 lg:flex-row lg:items-center">
+              <div className="relative min-w-[240px] flex-1">
+                <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" />
+                <Input
+                  value={filters.search ?? ""}
+                  onChange={(event) => setFilters({ search: event.target.value || undefined })}
+                  placeholder="Search contacts, companies, email..."
+                  className="h-9 border-slate-200 pl-9"
+                />
+              </div>
+              <ScopeToggle
+                options={ROLE_OPTIONS}
+                value={activeRole}
+                onChange={(value) => setFilters({ role: value === "all" ? undefined : value })}
+                ariaLabel="Contact role filter"
+              />
+            </div>
+            <div className="flex items-center gap-2">
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => setFilters({ sortBy: "last_touch_at", sortDir: "desc" })}
+              >
+                Last touch
+              </Button>
+              <Button variant="ghost" size="sm" onClick={resetFilters}>
+                Clear
+              </Button>
+            </div>
+          </div>
 
-      {/* Loading State */}
-      {loading && (
-        <div className="space-y-3">
-          {Array.from({ length: 5 }).map((_, i) => (
-            <div key={i} className="h-20 bg-muted animate-pulse rounded-lg" />
-          ))}
-        </div>
-      )}
+          {error ? (
+            <div className="rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm font-medium text-red-700">{error}</div>
+          ) : null}
 
-      {/* Contact List */}
-      {!loading && contacts.length === 0 && (
-        <div className="text-center py-12 text-muted-foreground">
-          <Users className="h-12 w-12 mx-auto mb-3 opacity-30" />
-          <p className="text-lg font-medium">No contacts found</p>
-          <p className="text-sm">Try adjusting your filters or create a new contact.</p>
-        </div>
-      )}
+          {loading ? (
+            <div className="space-y-2">
+              {Array.from({ length: 6 }).map((_, index) => (
+                <div key={index} className="h-16 animate-pulse rounded-lg bg-slate-100" />
+              ))}
+            </div>
+          ) : contacts.length === 0 ? (
+            <div className="rounded-xl border border-dashed border-slate-300 px-6 py-14 text-center">
+              <Users className="mx-auto h-10 w-10 text-slate-300" />
+              <p className="mt-3 text-base font-black uppercase text-slate-950">No contacts match this view</p>
+              <p className="mt-1 text-sm text-slate-500">Clear the search or switch the role filter.</p>
+            </div>
+          ) : (
+            <Table>
+              <TableHeader>
+                <TableRow className="hover:bg-transparent">
+                  <TableHead className="text-[11px] font-black uppercase tracking-[0.16em] text-slate-500">Contact</TableHead>
+                  <TableHead className="text-[11px] font-black uppercase tracking-[0.16em] text-slate-500">Company</TableHead>
+                  <TableHead className="text-[11px] font-black uppercase tracking-[0.16em] text-slate-500">Role</TableHead>
+                  <TableHead className="text-[11px] font-black uppercase tracking-[0.16em] text-slate-500">Quick actions</TableHead>
+                  <TableHead className="text-right text-[11px] font-black uppercase tracking-[0.16em] text-slate-500">Linked deals</TableHead>
+                  <TableHead className="text-[11px] font-black uppercase tracking-[0.16em] text-slate-500">Last touch</TableHead>
+                  <TableHead className="w-10" />
+                </TableRow>
+              </TableHeader>
+              <TableBody>
+                {contacts.map((contact) => {
+                  const untouched = isUntouched(contact.lastTouchAt);
+                  return (
+                    <TableRow
+                      key={contact.id}
+                      className="cursor-pointer border-slate-100"
+                      onClick={() => navigate(`/contacts/${contact.id}`)}
+                    >
+                      <TableCell className="min-w-[280px] py-3">
+                        <div className="flex items-center gap-3">
+                          <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-brand-red text-xs font-black text-white">
+                            {initials(contact)}
+                          </span>
+                          <div className="min-w-0">
+                            <div className="flex items-center gap-2">
+                              {contact.isPrimary ? <Star className="h-4 w-4 fill-amber-400 text-amber-500" aria-label="Primary contact" /> : null}
+                              <p className="truncate text-sm font-black uppercase text-slate-950">{fullName(contact)}</p>
+                            </div>
+                            <p className="mt-1 truncate text-xs text-slate-500">
+                              {[contact.jobTitle, contactLocation(contact)].filter(Boolean).join(" • ") || "No title recorded"}
+                            </p>
+                          </div>
+                        </div>
+                      </TableCell>
+                      <TableCell>
+                        <p className="max-w-[220px] truncate text-sm font-semibold text-slate-700">{contact.companyName ?? "Unassigned"}</p>
+                      </TableCell>
+                      <TableCell>
+                        <span className="rounded-full bg-slate-100 px-2.5 py-1 text-xs font-bold text-slate-700">
+                          {contact.role ? ROLE_LABELS[contact.role] ?? contact.role : "Unclassified"}
+                        </span>
+                      </TableCell>
+                      <TableCell>
+                        <div className="flex items-center gap-1">
+                          {contact.phone || contact.mobile ? (
+                            <a
+                              href={`tel:${contact.phone ?? contact.mobile}`}
+                              onClick={(event) => event.stopPropagation()}
+                              className="inline-flex h-8 w-8 items-center justify-center rounded-md border border-slate-200 text-slate-500 hover:border-red-200 hover:text-brand-red"
+                              aria-label={`Call ${fullName(contact)}${formatPhone(contact.phone ?? contact.mobile) ? ` at ${formatPhone(contact.phone ?? contact.mobile)}` : ""}`}
+                            >
+                              <Phone className="h-4 w-4" />
+                            </a>
+                          ) : null}
+                          {contact.email ? (
+                            <a
+                              href={`mailto:${contact.email}`}
+                              onClick={(event) => event.stopPropagation()}
+                              className="inline-flex h-8 w-8 items-center justify-center rounded-md border border-slate-200 text-slate-500 hover:border-red-200 hover:text-brand-red"
+                              aria-label={`Email ${fullName(contact)}`}
+                            >
+                              <Mail className="h-4 w-4" />
+                            </a>
+                          ) : null}
+                          {contact.linkedDealsCount ? (
+                            <span className="inline-flex h-8 w-8 items-center justify-center rounded-md border border-slate-200 text-slate-500" title="Linked deals">
+                              <Briefcase className="h-4 w-4" />
+                            </span>
+                          ) : null}
+                        </div>
+                      </TableCell>
+                      <TableCell className="text-right font-black tabular-nums">{contact.linkedDealsCount ?? 0}</TableCell>
+                      <TableCell>
+                        <span className={cn("text-xs font-bold", untouched ? "text-brand-red" : "text-slate-600")}>
+                          {formatLastTouch(contact.lastTouchAt)}
+                        </span>
+                      </TableCell>
+                      <TableCell>
+                        <ArrowUpRight className="h-4 w-4 text-slate-400" />
+                      </TableCell>
+                    </TableRow>
+                  );
+                })}
+              </TableBody>
+            </Table>
+          )}
+        </CardContent>
+      </Card>
 
-      {!loading && contacts.length > 0 && (
-        <div className="space-y-2">
-          {contacts.map((contact) => (
-            <ContactCard
-              key={contact.id}
-              contact={contact}
-              onClick={() => navigate(`/contacts/${contact.id}`)}
-            />
-          ))}
-        </div>
-      )}
-
-      {/* Pagination */}
-      {pagination.totalPages > 1 && (
-        <div className="flex items-center justify-between pt-2">
-          <p className="text-sm text-muted-foreground">
+      {pagination.totalPages > 1 ? (
+        <div className="flex items-center justify-between">
+          <p className="text-sm font-medium text-slate-500">
             Page {pagination.page} of {pagination.totalPages}
           </p>
           <div className="flex gap-2">
-            <Button
-              variant="outline"
-              size="sm"
-              disabled={pagination.page <= 1}
-              onClick={() => setFilters({ page: pagination.page - 1 })}
-            >
+            <Button variant="outline" size="icon" disabled={pagination.page <= 1} onClick={() => setFilters({ page: pagination.page - 1 })} aria-label="Previous contacts page">
               <ChevronLeft className="h-4 w-4" />
             </Button>
-            <Button
-              variant="outline"
-              size="sm"
-              disabled={pagination.page >= pagination.totalPages}
-              onClick={() => setFilters({ page: pagination.page + 1 })}
-            >
+            <Button variant="outline" size="icon" disabled={pagination.page >= pagination.totalPages} onClick={() => setFilters({ page: pagination.page + 1 })} aria-label="Next contacts page">
               <ChevronRight className="h-4 w-4" />
             </Button>
           </div>
         </div>
-      )}
+      ) : null}
     </div>
   );
 }
