@@ -79,16 +79,48 @@ const officeBLockedReport = {
   officeId: "office-b",
 };
 
-const scheduleInput = {
-  reportId: "locked-report-office-b",
-  userId: "user-1",
-  frequency: "weekly" as const,
-  cronExpr: "0 7 * * 1",
-  recipients: [],
-  nextRunAt: "2026-05-11T12:00:00.000Z",
+const companySharedReport = {
+  id: "company-report",
+  isLocked: false,
+  visibility: "company",
+  createdBy: "admin-1",
+  officeId: "office-b",
 };
 
-describe("report write paths enforce office scope", () => {
+const globalLockedReport = {
+  id: "global-locked-report",
+  isLocked: true,
+  visibility: "company",
+  createdBy: null,
+  officeId: null,
+};
+
+function scheduleInput(reportId: string) {
+  return {
+    reportId,
+    userId: "user-1",
+    frequency: "weekly" as const,
+    cronExpr: "0 7 * * 1",
+    recipients: [],
+    nextRunAt: "2026-05-11T12:00:00.000Z",
+  };
+}
+
+function runInput(reportId: string, officeId: string) {
+  return {
+    reportId,
+    scheduleId: null,
+    userId: "user-1",
+    officeId,
+  };
+}
+
+const officeBReportScheduleInput = {
+  ...scheduleInput("locked-report-office-b"),
+  userId: "user-1",
+};
+
+describe("report write paths follow saved report visibility", () => {
   beforeEach(() => {
     state.selectResults = [];
     state.insertedValues = [];
@@ -100,7 +132,7 @@ describe("report write paths enforce office scope", () => {
     state.selectResults = [[]];
 
     await expect(createReportSchedule({
-      ...scheduleInput,
+      ...officeBReportScheduleInput,
       officeId: "office-a",
     })).rejects.toMatchObject<AppError>({
       statusCode: 404,
@@ -114,7 +146,7 @@ describe("report write paths enforce office scope", () => {
     state.selectResults = [[officeBLockedReport]];
 
     const schedule = await createReportSchedule({
-      ...scheduleInput,
+      ...officeBReportScheduleInput,
       officeId: "office-b",
     });
 
@@ -145,16 +177,69 @@ describe("report write paths enforce office scope", () => {
   it("allows run creation for locked reports scoped to the user's office", async () => {
     state.selectResults = [[officeBLockedReport]];
 
-    const run = await createReportRun({
-      reportId: "locked-report-office-b",
-      scheduleId: null,
-      userId: "user-1",
-      officeId: "office-b",
-    });
+    const run = await createReportRun(runInput("locked-report-office-b", "office-b"));
 
     expect(run).toEqual({ id: "created-row" });
     expect(state.insertedValues[0]).toMatchObject({
       reportId: "locked-report-office-b",
+      scheduleId: null,
+      status: "queued",
+    });
+  });
+
+  it("allows schedule creation for company-shared reports visible across offices", async () => {
+    state.selectResults = [[companySharedReport]];
+
+    const schedule = await createReportSchedule({
+      ...scheduleInput("company-report"),
+      officeId: "office-a",
+    });
+
+    expect(schedule).toEqual({ id: "created-row" });
+    expect(state.insertedValues[0]).toMatchObject({
+      reportId: "company-report",
+      frequency: "weekly",
+      ownerId: "user-1",
+    });
+  });
+
+  it("allows run creation for company-shared reports visible across offices", async () => {
+    state.selectResults = [[companySharedReport]];
+
+    const run = await createReportRun(runInput("company-report", "office-a"));
+
+    expect(run).toEqual({ id: "created-row" });
+    expect(state.insertedValues[0]).toMatchObject({
+      reportId: "company-report",
+      scheduleId: null,
+      status: "queued",
+    });
+  });
+
+  it("allows schedule creation for globally locked reports", async () => {
+    state.selectResults = [[globalLockedReport]];
+
+    const schedule = await createReportSchedule({
+      ...scheduleInput("global-locked-report"),
+      officeId: "office-a",
+    });
+
+    expect(schedule).toEqual({ id: "created-row" });
+    expect(state.insertedValues[0]).toMatchObject({
+      reportId: "global-locked-report",
+      frequency: "weekly",
+      ownerId: "user-1",
+    });
+  });
+
+  it("allows run creation for globally locked reports", async () => {
+    state.selectResults = [[globalLockedReport]];
+
+    const run = await createReportRun(runInput("global-locked-report", "office-a"));
+
+    expect(run).toEqual({ id: "created-row" });
+    expect(state.insertedValues[0]).toMatchObject({
+      reportId: "global-locked-report",
       scheduleId: null,
       status: "queued",
     });

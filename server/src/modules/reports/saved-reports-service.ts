@@ -50,7 +50,10 @@ function visibleSavedReportWhere(userId: string, officeId: string) {
         isNull(savedReports.officeId)
       )
     ),
-    eq(savedReports.createdBy, userId),
+    and(
+      eq(savedReports.createdBy, userId),
+      eq(savedReports.officeId, officeId)
+    ),
     and(
       eq(savedReports.officeId, officeId),
       eq(savedReports.visibility, "office")
@@ -91,28 +94,15 @@ export async function getSavedReportById(
   userId?: string,
   officeId?: string
 ) {
+  if (!userId || !officeId) return null;
+
   const result = await db
     .select()
     .from(savedReports)
-    .where(eq(savedReports.id, reportId))
+    .where(and(eq(savedReports.id, reportId), visibleSavedReportWhere(userId, officeId)))
     .limit(1);
 
-  const report = result[0] ?? null;
-  if (!report) return null;
-
-  // Locked and company-wide reports are visible to everyone
-  if (report.isLocked || report.visibility === "company") return report;
-
-  // If no user context provided, deny access to restricted reports
-  if (!userId || !officeId) return null;
-
-  // Private reports: only visible to creator
-  if (report.visibility === "private" && report.createdBy !== userId) return null;
-
-  // Office reports: visible to users in the same office
-  if (report.visibility === "office" && report.officeId !== officeId) return null;
-
-  return report;
+  return result[0] ?? null;
 }
 
 /**
@@ -239,13 +229,10 @@ async function getSavedReportForOfficeWrite(reportId: string, userId: string, of
   const rows = await db
     .select()
     .from(savedReports)
-    .where(and(eq(savedReports.id, reportId), eq(savedReports.officeId, officeId)))
+    .where(and(eq(savedReports.id, reportId), visibleSavedReportWhere(userId, officeId)))
     .limit(1);
 
-  const report = rows[0] ?? null;
-  if (!report) return null;
-  if (report.visibility === "private" && report.createdBy !== userId) return null;
-  return report;
+  return rows[0] ?? null;
 }
 
 export async function createReportSchedule(input: CreateReportScheduleInput) {
