@@ -451,7 +451,7 @@ export async function getPropertyDetail(tenantDb: TenantDb, propertyId: string) 
     return null;
   }
 
-  const [relatedLeads, relatedDeals, photoCounts] = await Promise.all([
+  const [relatedLeads, relatedDeals, linkedValueRows, photoCounts] = await Promise.all([
     tenantDb
       .select()
       .from(leads)
@@ -462,6 +462,12 @@ export async function getPropertyDetail(tenantDb: TenantDb, propertyId: string) 
       .from(deals)
       .where(eq(deals.propertyId, propertyId))
       .orderBy(desc(deals.updatedAt), desc(deals.createdAt)),
+    tenantDb
+      .select({
+        linkedValue: sql<string>`COALESCE(SUM(COALESCE(${deals.awardedAmount}, ${deals.bidEstimate}, ${deals.ddEstimate}, ${deals.forecastRevenue}, 0)), 0)::text`,
+      })
+      .from(deals)
+      .where(and(eq(deals.propertyId, propertyId), eq(deals.isActive, true))),
     tenantDb.execute(sql`
       SELECT COUNT(DISTINCT linked.file_id)::int AS photos_count
       FROM (
@@ -483,10 +489,7 @@ export async function getPropertyDetail(tenantDb: TenantDb, propertyId: string) 
   ]);
   const photoCountRows = (photoCounts as any).rows ?? photoCounts;
   const activeDeals = relatedDeals.filter((deal) => deal.isActive);
-  const linkedValue = activeDeals.reduce((sum, deal) => {
-    const value = deal.awardedAmount ?? deal.bidEstimate ?? deal.ddEstimate ?? deal.forecastRevenue ?? "0";
-    return sum + Number(value);
-  }, 0);
+  const linkedValue = linkedValueRows[0]?.linkedValue ?? "0";
 
   return {
     property: {
@@ -504,8 +507,8 @@ export async function getPropertyDetail(tenantDb: TenantDb, propertyId: string) 
         leadCount: relatedLeads.filter((lead) => lead.isActive).length,
         convertedDealCount: relatedDeals.filter((deal) => Boolean(deal.sourceLeadId)).length,
       }),
-      linkedValue: String(linkedValue),
-      activePipelineValue: String(linkedValue),
+      linkedValue,
+      activePipelineValue: linkedValue,
       photosCount: Number(photoCountRows[0]?.photos_count ?? 0),
     },
     leads: relatedLeads,
