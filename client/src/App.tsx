@@ -146,7 +146,6 @@ export function App() {
             <Route path="/photos/capture" element={<PhotoCapturePage />} />
             <Route element={<AppShell />}>
               <Route path="/" element={<HomeDashboardPage />} />
-              <Route path="/dashboard" element={<HomeDashboardPage />} />
               <Route path="/dashboard/contracts-signed" element={<ContractsSignedPage />} />
               <Route path="/deals" element={<DealListPage />} />
               <Route path="/deals/board" element={<BoardAliasRedirect entity="deals" />} />
