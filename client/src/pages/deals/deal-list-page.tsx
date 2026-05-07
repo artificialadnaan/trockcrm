@@ -9,6 +9,7 @@ import { useDealBoard, useDeals, type Deal, type DealBoardColumn } from "@/hooks
 import { usePipelineStages } from "@/hooks/use-pipeline-config";
 import { buildCanonicalDealBoardColumns } from "@/lib/canonical-deal-board";
 import { daysInStage } from "@/lib/deal-utils";
+import { presetToDateRange } from "@/hooks/use-director-dashboard";
 import {
   buildDealStageWorkspacePath,
   readTerminalDateFilter,
@@ -44,6 +45,14 @@ function readCurrentTerminalDateFilters(): Record<TerminalOutcome, TerminalDateF
   return {
     won: readTerminalDateFilter("won"),
     lost: readTerminalDateFilter("lost"),
+  };
+}
+
+function getYearToDateTerminalFilters(): Record<TerminalOutcome, TerminalDateFilter> {
+  const { from } = presetToDateRange("ytd");
+  return {
+    won: { preset: "custom", customStart: from },
+    lost: { preset: "custom", customStart: from },
   };
 }
 
@@ -198,7 +207,8 @@ export function DealListPage() {
   const navigate = useNavigate();
   const [searchParams, setSearchParams] = useSearchParams();
   const scope = getScope(searchParams);
-  const { board, loading, error } = useDealBoard(scope, true);
+  const ytdTerminalFilters = useMemo(() => getYearToDateTerminalFilters(), []);
+  const { board, loading, error } = useDealBoard(scope, true, ytdTerminalFilters);
   const { deals } = useDeals({ limit: 200, isActive: true, sortBy: "updated_at", sortDir: "desc" });
   const { stages } = usePipelineStages();
 

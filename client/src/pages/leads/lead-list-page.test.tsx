@@ -193,12 +193,24 @@ describe("LeadListPage", () => {
     const html = renderPage();
 
     expect(mocks.useLeadBoardMock).toHaveBeenCalledWith("mine");
+    expect(mocks.useLeadsMock).toHaveBeenCalledWith({ status: "open", isActive: "all", scope: "mine" });
     expect(html).toContain("Read-only lead board");
     expect(html).toContain("New Lead");
     expect(html).toContain("Qualified Lead");
     expect(html).toContain("Sales Validation Stage");
     expect(html).toContain("Fresh Prospect");
     expect(html).not.toContain("Legacy Opportunity Lead");
+  });
+
+  it("loads summary leads with the active scope", () => {
+    renderPage("/leads?scope=mine");
+    expect(mocks.useLeadsMock).toHaveBeenLastCalledWith({ status: "open", isActive: "all", scope: "mine" });
+
+    renderPage("/leads?scope=team");
+    expect(mocks.useLeadsMock).toHaveBeenLastCalledWith({ status: "open", isActive: "all", scope: "team" });
+
+    renderPage("/leads?scope=all");
+    expect(mocks.useLeadsMock).toHaveBeenLastCalledWith({ status: "open", isActive: "all", scope: "all" });
   });
 
   it("filters columns by the dashboard bucket query param", () => {

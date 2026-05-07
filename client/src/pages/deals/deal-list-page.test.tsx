@@ -178,7 +178,10 @@ describe("DealListPage", () => {
   it("renders a readonly deal board with canonical stage labels", () => {
     const html = renderPage();
 
-    expect(mocks.useDealBoardMock).toHaveBeenCalledWith("all", true);
+    expect(mocks.useDealBoardMock).toHaveBeenCalledWith("all", true, {
+      won: { preset: "custom", customStart: "2026-01-01" },
+      lost: { preset: "custom", customStart: "2026-01-01" },
+    });
     expect(html).toContain("Read-only pipeline board");
     expect(html).toContain("Opportunity");
     expect(html).toContain("Estimating");
@@ -253,6 +256,15 @@ describe("DealListPage", () => {
         won: { mode: "preset", preset: "last_7_days" },
         lost: { mode: "preset", preset: "last_30_days" },
       },
+    });
+  });
+
+  it("requests year-to-date terminal totals for the Won YTD metric", () => {
+    renderPage();
+
+    expect(mocks.useDealBoardMock).toHaveBeenCalledWith("all", true, {
+      won: { preset: "custom", customStart: "2026-01-01" },
+      lost: { preset: "custom", customStart: "2026-01-01" },
     });
   });
 });

@@ -195,6 +195,7 @@ export interface LeadFilters {
   assignedRepId?: string;
   status?: "open" | "converted" | "disqualified";
   isActive?: boolean | "all";
+  scope?: "mine" | "team" | "all";
 }
 
 export interface LeadBoardStage {
@@ -269,6 +270,7 @@ export function useLeads(filters: LeadFilters = {}) {
       if (filters.propertyId) params.set("propertyId", filters.propertyId);
       if (filters.assignedRepId) params.set("assignedRepId", filters.assignedRepId);
       if (filters.status) params.set("status", filters.status);
+      if (filters.scope) params.set("scope", filters.scope);
       if (filters.isActive === "all") params.set("isActive", "all");
       else if (filters.isActive === false) params.set("isActive", "false");
 
@@ -286,6 +288,7 @@ export function useLeads(filters: LeadFilters = {}) {
     filters.isActive,
     filters.propertyId,
     filters.search,
+    filters.scope,
     filters.status,
   ]);
 

@@ -52,6 +52,8 @@ export interface LeadFilters {
   assignedRepId?: string;
   status?: "open" | "converted" | "disqualified";
   isActive?: boolean | "all";
+  scope?: WorkspaceScope;
+  activeOfficeId?: string;
 }
 
 export interface CreateLeadInput {
@@ -1104,14 +1106,28 @@ export function createLeadService(
     userId: string
   ) {
     const conditions: any[] = [];
+    const scope = userRole === "rep" ? "mine" : filters.scope ?? "all";
 
     if (filters.isActive !== "all") {
       conditions.push(eq(leads.isActive, filters.isActive ?? true));
     }
 
-    if (userRole === "rep") {
+    if (scope === "mine") {
       conditions.push(eq(leads.assignedRepId, userId));
-    } else if (filters.assignedRepId) {
+    } else if (scope === "team") {
+      const teamConditions = [eq(users.reportsTo, userId), eq(users.isActive, true)];
+      if (filters.activeOfficeId) {
+        teamConditions.push(eq(users.officeId, filters.activeOfficeId));
+      }
+      const teamRows = await tenantDb
+        .select({ id: users.id })
+        .from(users)
+        .where(and(...teamConditions));
+      const teamUserIds = teamRows.map((user) => user.id);
+      conditions.push(teamUserIds.length > 0 ? inArray(leads.assignedRepId, teamUserIds) : sql`false`);
+    }
+
+    if (filters.assignedRepId) {
       conditions.push(eq(leads.assignedRepId, filters.assignedRepId));
     }
 

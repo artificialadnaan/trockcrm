@@ -97,6 +97,12 @@ function typeLabel(value: string) {
   return value.replace(/_/g, " ");
 }
 
+function stopRowKeyDownPropagation(event: React.KeyboardEvent) {
+  if (event.key === "Enter" || event.key === " ") {
+    event.stopPropagation();
+  }
+}
+
 function TaskRow({ task, onUpdate }: { task: Task; onUpdate: () => void }) {
   const navigate = useNavigate();
   const [editOpen, setEditOpen] = useState(false);
@@ -153,6 +159,7 @@ function TaskRow({ task, onUpdate }: { task: Task; onUpdate: () => void }) {
           type="button"
           disabled={busy || isDone}
           onClick={complete}
+          onKeyDown={stopRowKeyDownPropagation}
           aria-label={`Complete ${task.title}`}
           className={cn(
             "mt-1 flex h-6 w-6 items-center justify-center rounded border-2 transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-brand-red",
@@ -202,6 +209,7 @@ function TaskRow({ task, onUpdate }: { task: Task; onUpdate: () => void }) {
               type="button"
               disabled={busy}
               onClick={snooze}
+              onKeyDown={stopRowKeyDownPropagation}
               className="flex h-8 w-8 items-center justify-center rounded-md text-slate-400 hover:bg-amber-50 hover:text-amber-600"
               aria-label={`Snooze ${task.title}`}
             >
@@ -212,6 +220,7 @@ function TaskRow({ task, onUpdate }: { task: Task; onUpdate: () => void }) {
             <button
               type="button"
               onClick={openLinkedRecord}
+              onKeyDown={stopRowKeyDownPropagation}
               className="flex h-8 w-8 items-center justify-center rounded-md text-slate-400 hover:bg-blue-50 hover:text-blue-600"
               aria-label={`Open linked record for ${task.title}`}
             >
