@@ -149,23 +149,31 @@ BEGIN
          END IF;
 
          IF array_length(company_ids, 1) IS NOT NULL THEN
-           UPDATE companies c
-              SET last_activity_at = (
-                SELECT max(a.occurred_at)
-                  FROM activities a
-                 WHERE a.company_id = c.id
-              )
-            WHERE c.id = ANY(company_ids);
+           EXECUTE format(
+             ''UPDATE %%1$I.companies c
+                  SET last_activity_at = (
+                    SELECT max(a.occurred_at)
+                      FROM %%1$I.activities a
+                     WHERE a.company_id = c.id
+                  )
+                WHERE c.id = ANY($1)'',
+             TG_TABLE_SCHEMA
+           )
+           USING company_ids;
          END IF;
 
          IF array_length(property_ids, 1) IS NOT NULL THEN
-           UPDATE properties p
-              SET last_activity_at = (
-                SELECT max(a.occurred_at)
-                  FROM activities a
-                 WHERE a.property_id = p.id
-              )
-            WHERE p.id = ANY(property_ids);
+           EXECUTE format(
+             ''UPDATE %%1$I.properties p
+                  SET last_activity_at = (
+                    SELECT max(a.occurred_at)
+                      FROM %%1$I.activities a
+                     WHERE a.property_id = p.id
+                  )
+                WHERE p.id = ANY($1)'',
+             TG_TABLE_SCHEMA
+           )
+           USING property_ids;
          END IF;
 
          RETURN COALESCE(NEW, OLD);
@@ -310,23 +318,31 @@ BEGIN
     END IF;
 
     IF array_length(company_ids, 1) IS NOT NULL THEN
-      UPDATE companies c
-         SET last_activity_at = (
-           SELECT max(a.occurred_at)
-             FROM activities a
-            WHERE a.company_id = c.id
-         )
-       WHERE c.id = ANY(company_ids);
+      EXECUTE format(
+        'UPDATE %1$I.companies c
+            SET last_activity_at = (
+              SELECT max(a.occurred_at)
+                FROM %1$I.activities a
+               WHERE a.company_id = c.id
+            )
+          WHERE c.id = ANY($1)',
+        TG_TABLE_SCHEMA
+      )
+      USING company_ids;
     END IF;
 
     IF array_length(property_ids, 1) IS NOT NULL THEN
-      UPDATE properties p
-         SET last_activity_at = (
-           SELECT max(a.occurred_at)
-             FROM activities a
-            WHERE a.property_id = p.id
-         )
-       WHERE p.id = ANY(property_ids);
+      EXECUTE format(
+        'UPDATE %1$I.properties p
+            SET last_activity_at = (
+              SELECT max(a.occurred_at)
+                FROM %1$I.activities a
+               WHERE a.property_id = p.id
+            )
+          WHERE p.id = ANY($1)',
+        TG_TABLE_SCHEMA
+      )
+      USING property_ids;
     END IF;
 
     RETURN COALESCE(NEW, OLD);
