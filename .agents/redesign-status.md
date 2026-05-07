@@ -25,6 +25,7 @@
 - 2026-05-07T19:29Z [track-a-isolated-agent] PR-OPEN — A4 (PR #156)
 - 2026-05-07T19:31Z [track-a-isolated-agent] CLAIM — A5a in flight (branch: redesign/schema-hooks-isolated/a5a)
 - 2026-05-07T20:27Z [track-a-isolated-agent] PR-OPEN — A5a (PR #158)
+- A5b CLAIM 2026-05-07T22:21:35Z: redesign/schema-hooks-isolated/a5b, stale_account_count on rep_performance_snapshots. ETA TBD. Worktree: trockcrm-redesign-data-isolated.
 
 ## Track B — Shared Primitives + Shell + Harness
 - _no claims yet_
