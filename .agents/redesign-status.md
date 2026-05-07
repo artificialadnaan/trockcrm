@@ -42,3 +42,6 @@
 
 ## Cross-track risks (live)
 - _no risks logged_
+
+## Track B — Shared Primitives + Shell + Harness
+- 2026-05-07T18:34Z [track-b-agent] CLAIM — single PR in flight (branch: redesign/shared-primitives)
