@@ -40,6 +40,14 @@ export function nextRunAt(from: Date, frequency: ReportFrequency) {
   return next;
 }
 
+export function advanceNextRunAt(previousNextRunAt: Date, frequency: ReportFrequency, now: Date) {
+  let next = nextRunAt(previousNextRunAt, frequency);
+  while (next <= now) {
+    next = nextRunAt(next, frequency);
+  }
+  return next;
+}
+
 export async function enqueueDueReportSchedules(now = new Date()) {
   const client = await pool.connect();
   try {
@@ -48,8 +56,9 @@ export async function enqueueDueReportSchedules(now = new Date()) {
       id: string;
       report_id: string;
       frequency: ReportFrequency;
+      next_run_at: Date | string;
     }>(
-      `SELECT id, report_id, frequency
+      `SELECT id, report_id, frequency, next_run_at
        FROM public.report_schedules
        WHERE is_active = true
          AND next_run_at <= $1
@@ -71,7 +80,11 @@ export async function enqueueDueReportSchedules(now = new Date()) {
              next_run_at = $2,
              updated_at = NOW()
          WHERE id = $3`,
-        [now, nextRunAt(now, schedule.frequency), schedule.id]
+        [
+          now,
+          advanceNextRunAt(new Date(schedule.next_run_at), schedule.frequency, now),
+          schedule.id,
+        ]
       );
     }
 
