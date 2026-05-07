@@ -49,6 +49,7 @@ router.get("/", async (req, res, next) => {
       companyName: req.query.companyName as string | undefined,
       companyId: req.query.companyId as string | undefined,
       jobTitle: req.query.jobTitle as string | undefined,
+      role: req.query.role as string | undefined,
       city: req.query.city as string | undefined,
       state: req.query.state as string | undefined,
       regionId: req.query.regionId as string | undefined,

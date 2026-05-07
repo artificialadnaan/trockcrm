@@ -14,6 +14,7 @@ type TenantDb = NodePgDatabase<typeof schema>;
 export interface PropertyFilters {
   search?: string;
   companyId?: string;
+  type?: string;
   isActive?: boolean;
   page?: number;
   limit?: number;
@@ -118,6 +119,10 @@ function combineLatestTimestamp(...values: Array<string | null>) {
     .sort((left, right) => new Date(right).getTime() - new Date(left).getTime())[0] ?? null;
 }
 
+function toNumericString(value: unknown) {
+  return String(value ?? "0");
+}
+
 export async function listProperties(
   tenantDb: TenantDb,
   filters: PropertyFilters = {}
@@ -130,6 +135,9 @@ export async function listProperties(
 
   if (filters.companyId) {
     conditions.push(eq(properties.companyId, filters.companyId));
+  }
+  if (filters.type) {
+    conditions.push(eq(properties.type, filters.type as any));
   }
 
   if (filters.search?.trim()) {
@@ -157,9 +165,15 @@ export async function listProperties(
         city: properties.city,
         state: properties.state,
         zip: properties.zip,
+        type: properties.type,
         buildYear: properties.buildYear,
         unitCount: properties.unitCount,
+        floors: properties.floors,
+        roofArea: properties.roofArea,
         notes: properties.notes,
+        lastActivityAt: properties.lastActivityAt,
+        procoreId: properties.procoreId,
+        companycamId: properties.companycamId,
         isActive: properties.isActive,
         createdAt: properties.createdAt,
         updatedAt: properties.updatedAt,
@@ -184,7 +198,7 @@ export async function listProperties(
     };
   }
 
-  const [leadCounts, dealCounts, convertedCounts, leadActivity, dealActivity] = await Promise.all([
+  const [leadCounts, dealCounts, convertedCounts, leadActivity, dealActivity, activeDealValues, photoCounts] = await Promise.all([
     tenantDb
       .select({ propertyId: leads.propertyId, count: count() })
       .from(leads)
@@ -216,6 +230,33 @@ export async function listProperties(
       .from(deals)
       .where(inArray(deals.propertyId, propertyIds))
       .groupBy(deals.propertyId),
+    tenantDb
+      .select({
+        propertyId: deals.propertyId,
+        linkedValue: sql<string>`COALESCE(SUM(COALESCE(${deals.awardedAmount}, ${deals.bidEstimate}, ${deals.ddEstimate}, ${deals.forecastRevenue}, 0)), 0)::text`,
+      })
+      .from(deals)
+      .where(and(inArray(deals.propertyId, propertyIds), eq(deals.isActive, true)))
+      .groupBy(deals.propertyId),
+    tenantDb.execute(sql`
+      SELECT linked.property_id, COUNT(DISTINCT linked.file_id)::int AS photos_count
+      FROM (
+        SELECT d.property_id, f.id AS file_id
+        FROM files f
+        INNER JOIN deals d ON d.id = f.deal_id
+        WHERE d.property_id IN (${sql.join(propertyIds.map(id => sql`${id}`), sql`, `)})
+          AND f.category = 'photo'
+          AND f.is_active = true
+        UNION
+        SELECT l.property_id, f.id AS file_id
+        FROM files f
+        INNER JOIN leads l ON l.id = f.lead_id
+        WHERE l.property_id IN (${sql.join(propertyIds.map(id => sql`${id}`), sql`, `)})
+          AND f.category = 'photo'
+          AND f.is_active = true
+      ) linked
+      GROUP BY linked.property_id
+    `),
   ]);
 
   const leadCountMap = new Map(leadCounts.map((row) => [row.propertyId, coerceCount(row.count)]));
@@ -223,6 +264,9 @@ export async function listProperties(
   const convertedCountMap = new Map(convertedCounts.map((row) => [row.propertyId, coerceCount(row.count)]));
   const leadActivityMap = new Map(leadActivity.map((row) => [row.propertyId, coerceTimestamp(row.lastActivityAt)]));
   const dealActivityMap = new Map(dealActivity.map((row) => [row.propertyId, coerceTimestamp(row.lastActivityAt)]));
+  const linkedValueMap = new Map(activeDealValues.map((row) => [row.propertyId, toNumericString(row.linkedValue)]));
+  const photoCountRows = (photoCounts as any).rows ?? photoCounts;
+  const photosCountMap = new Map(photoCountRows.map((row: any) => [row.property_id, Number(row.photos_count ?? 0)]));
 
   return {
     properties: rows.map((row) => ({
@@ -230,10 +274,20 @@ export async function listProperties(
       leadCount: leadCountMap.get(row.id) ?? 0,
       dealCount: dealCountMap.get(row.id) ?? 0,
       convertedDealCount: convertedCountMap.get(row.id) ?? 0,
-      lastActivityAt: combineLatestTimestamp(
+      lastActivityAt: coerceTimestamp(row.lastActivityAt) ?? combineLatestTimestamp(
         leadActivityMap.get(row.id) ?? null,
         dealActivityMap.get(row.id) ?? null
       ),
+      engagementStatus: (dealCountMap.get(row.id) ?? 0) > 0
+        ? "active_deal"
+        : (leadCountMap.get(row.id) ?? 0) > 0
+          ? "active_lead"
+          : (convertedCountMap.get(row.id) ?? 0) > 0
+            ? "won"
+            : "no_engagement",
+      linkedValue: linkedValueMap.get(row.id) ?? "0",
+      activePipelineValue: linkedValueMap.get(row.id) ?? "0",
+      photosCount: photosCountMap.get(row.id) ?? 0,
     })),
     page,
     limit,
@@ -339,9 +393,15 @@ export async function getPropertyDetail(tenantDb: TenantDb, propertyId: string) 
       city: properties.city,
       state: properties.state,
       zip: properties.zip,
+      type: properties.type,
       buildYear: properties.buildYear,
       unitCount: properties.unitCount,
+      floors: properties.floors,
+      roofArea: properties.roofArea,
       notes: properties.notes,
+      lastActivityAt: properties.lastActivityAt,
+      procoreId: properties.procoreId,
+      companycamId: properties.companycamId,
       isActive: properties.isActive,
       createdAt: properties.createdAt,
       updatedAt: properties.updatedAt,
@@ -356,7 +416,7 @@ export async function getPropertyDetail(tenantDb: TenantDb, propertyId: string) 
     return null;
   }
 
-  const [relatedLeads, relatedDeals] = await Promise.all([
+  const [relatedLeads, relatedDeals, photoCounts] = await Promise.all([
     tenantDb
       .select()
       .from(leads)
@@ -367,7 +427,31 @@ export async function getPropertyDetail(tenantDb: TenantDb, propertyId: string) 
       .from(deals)
       .where(eq(deals.propertyId, propertyId))
       .orderBy(desc(deals.updatedAt), desc(deals.createdAt)),
+    tenantDb.execute(sql`
+      SELECT COUNT(DISTINCT linked.file_id)::int AS photos_count
+      FROM (
+        SELECT f.id AS file_id
+        FROM files f
+        INNER JOIN deals d ON d.id = f.deal_id
+        WHERE d.property_id = ${propertyId}
+          AND f.category = 'photo'
+          AND f.is_active = true
+        UNION
+        SELECT f.id AS file_id
+        FROM files f
+        INNER JOIN leads l ON l.id = f.lead_id
+        WHERE l.property_id = ${propertyId}
+          AND f.category = 'photo'
+          AND f.is_active = true
+      ) linked
+    `),
   ]);
+  const photoCountRows = (photoCounts as any).rows ?? photoCounts;
+  const activeDeals = relatedDeals.filter((deal) => deal.isActive);
+  const linkedValue = activeDeals.reduce((sum, deal) => {
+    const value = deal.awardedAmount ?? deal.bidEstimate ?? deal.ddEstimate ?? deal.forecastRevenue ?? "0";
+    return sum + Number(value);
+  }, 0);
 
   return {
     property: {
@@ -375,10 +459,20 @@ export async function getPropertyDetail(tenantDb: TenantDb, propertyId: string) 
       leadCount: relatedLeads.length,
       dealCount: relatedDeals.length,
       convertedDealCount: relatedDeals.filter((deal) => Boolean(deal.sourceLeadId)).length,
-      lastActivityAt: combineLatestTimestamp(
+      lastActivityAt: coerceTimestamp(property.lastActivityAt) ?? combineLatestTimestamp(
         ...relatedLeads.map((lead) => coerceTimestamp(lead.lastActivityAt)),
         ...relatedDeals.map((deal) => coerceTimestamp(deal.lastActivityAt))
       ),
+      engagementStatus: activeDeals.length > 0
+        ? "active_deal"
+        : relatedLeads.some((lead) => lead.isActive)
+          ? "active_lead"
+          : relatedDeals.some((deal) => Boolean(deal.sourceLeadId))
+            ? "won"
+            : "no_engagement",
+      linkedValue: String(linkedValue),
+      activePipelineValue: String(linkedValue),
+      photosCount: Number(photoCountRows[0]?.photos_count ?? 0),
     },
     leads: relatedLeads,
     deals: relatedDeals,
