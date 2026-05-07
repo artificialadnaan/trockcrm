@@ -1,9 +1,10 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
   classifyDirectoryMatch,
   normalizeDirectoryName,
   normalizeEmailDomain,
   normalizeZip,
+  scanDirectoryDuplicates,
 } from "../../src/services/directoryDedup.js";
 
 describe("directory dedup matching", () => {
@@ -59,4 +60,47 @@ describe("directory dedup matching", () => {
 
     expect(match.band).toBe("none");
   });
+
+  it("skips a pair when another scan already holds its advisory lock", async () => {
+    const companyRows = [
+      { id: "company-a", name: "Acme Apartments LLC", state: "TX", zip: "75201", isActive: true },
+      { id: "company-b", name: "ACME Apartments", state: "TX", zip: "75201-4421", isActive: true },
+    ];
+    const tenantDb = createTenantDbForScan(companyRows, [{ rows: [{ locked: true }] }, { rows: [{ locked: false }] }]);
+
+    const first = await scanDirectoryDuplicates(tenantDb as any, { autoMerge: true });
+    const second = await scanDirectoryDuplicates(tenantDb as any, { autoMerge: true });
+
+    expect(first.autoMerged).toBe(1);
+    expect(second.autoMerged).toBe(0);
+    expect(tenantDb.update).toHaveBeenCalledTimes(3);
+    expect(tenantDb.execute).toHaveBeenCalledTimes(2);
+  });
 });
+
+function createTenantDbForScan(companyRows: any[], lockResults: Array<{ rows: Array<{ locked: boolean }> }>) {
+  const selectQueue = [companyRows, [], companyRows, []];
+  const update = vi.fn(() => ({
+    set: vi.fn(() => ({
+      where: vi.fn().mockResolvedValue(undefined),
+    })),
+  }));
+  const insert = vi.fn(() => ({
+    values: vi.fn(() => ({
+      onConflictDoUpdate: vi.fn().mockResolvedValue(undefined),
+    })),
+  }));
+
+  return {
+    execute: vi.fn().mockImplementation(async () => lockResults.shift() ?? { rows: [{ locked: true }] }),
+    select: vi.fn(() => ({
+      from: vi.fn(() => ({
+        where: vi.fn(() => ({
+          limit: vi.fn().mockResolvedValue(selectQueue.shift() ?? []),
+        })),
+      })),
+    })),
+    update,
+    insert,
+  };
+}

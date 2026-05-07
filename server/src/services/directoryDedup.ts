@@ -145,6 +145,25 @@ function orderedPair(a: string, b: string): [string, string] {
   return a < b ? [a, b] : [b, a];
 }
 
+function directoryPairLockKey(entityType: DirectoryEntityKind, a: string, b: string): string {
+  const [entityAId, entityBId] = orderedPair(a, b);
+  return `directory-dedup:${entityType}:${entityAId}:${entityBId}`;
+}
+
+async function tryAcquireDirectoryPairLock(
+  tenantDb: TenantDb,
+  entityType: DirectoryEntityKind,
+  a: string,
+  b: string
+): Promise<boolean> {
+  const lockKey = directoryPairLockKey(entityType, a, b);
+  const result = await tenantDb.execute(sql`
+    SELECT pg_try_advisory_xact_lock(hashtext(${lockKey})) AS locked
+  `);
+  const rows = (result as any).rows ?? result;
+  return Boolean(rows[0]?.locked);
+}
+
 async function upsertQueueEntry(
   tenantDb: TenantDb,
   entityType: DirectoryEntityKind,
@@ -189,6 +208,9 @@ export async function scanDirectoryDuplicates(
     for (let j = i + 1; j < companyRows.length; j++) {
       const match = classifyDirectoryMatch({ kind: "company", left: companyRows[i], right: companyRows[j] });
       if (match.band === "none") continue;
+      if (!(await tryAcquireDirectoryPairLock(tenantDb, "company", companyRows[i].id, companyRows[j].id))) {
+        continue;
+      }
       if (match.band === "auto_merge" && autoMerge) {
         await mergeDirectoryEntities(tenantDb, "company", companyRows[i].id, companyRows[j].id, {
           mode: "auto",
@@ -208,6 +230,9 @@ export async function scanDirectoryDuplicates(
     for (let j = i + 1; j < contactRows.length; j++) {
       const match = classifyDirectoryMatch({ kind: "contact", left: contactRows[i], right: contactRows[j] });
       if (match.band === "none") continue;
+      if (!(await tryAcquireDirectoryPairLock(tenantDb, "contact", contactRows[i].id, contactRows[j].id))) {
+        continue;
+      }
       if (match.band === "auto_merge" && autoMerge) {
         await mergeDirectoryEntities(tenantDb, "contact", contactRows[i].id, contactRows[j].id, {
           mode: "auto",
