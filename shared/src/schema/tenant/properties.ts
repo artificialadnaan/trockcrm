@@ -1,3 +1,4 @@
+import { sql } from "drizzle-orm";
 import {
   pgTable,
   uuid,
@@ -9,6 +10,7 @@ import {
   timestamp,
   index,
   pgEnum,
+  check,
 } from "drizzle-orm/pg-core";
 import { PROPERTY_TYPES } from "../../types/enums.js";
 import { companies } from "./companies.js";
@@ -26,6 +28,7 @@ export const properties = pgTable(
     state: varchar("state", { length: 2 }),
     zip: varchar("zip", { length: 10 }),
     type: propertyTypeEnum("type"),
+    propertyType: text("property_type"),
     buildYear: integer("build_year"),
     unitCount: integer("unit_count"),
     floors: integer("floors"),
@@ -34,7 +37,10 @@ export const properties = pgTable(
     lng: numeric("lng", { precision: 10, scale: 7 }),
     lastActivityAt: timestamp("last_activity_at", { withTimezone: true }),
     procoreId: text("procore_id"),
+    procorePropertyId: text("procore_property_id"),
     companycamId: text("companycam_id"),
+    companycamProjectId: text("companycam_project_id"),
+    hubspotPropertyId: text("hubspot_property_id"),
     notes: text("notes"),
     isTestData: boolean("is_test_data").default(false).notNull(),
     isActive: boolean("is_active").default(true).notNull(),
@@ -46,5 +52,9 @@ export const properties = pgTable(
     index("properties_company_name_idx").on(table.companyId, table.name),
     index("properties_type_idx").on(table.type),
     index("properties_last_activity_idx").on(table.lastActivityAt),
+    check(
+      "properties_property_type_check",
+      sql`${table.propertyType} IS NULL OR ${table.propertyType} IN ('school', 'office', 'industrial', 'retail', 'healthcare', 'government', 'mixed-use')`
+    ),
   ]
 );

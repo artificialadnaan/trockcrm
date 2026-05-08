@@ -11,13 +11,17 @@ export interface PropertySurface {
   state: string | null;
   zip: string | null;
   type?: string | null;
+  propertyType?: string | null;
   buildYear: number | null;
   unitCount: number | null;
   floors?: number | null;
   roofArea?: number | null;
   notes: string | null;
   procoreId?: string | null;
+  procorePropertyId?: string | null;
   companycamId?: string | null;
+  companycamProjectId?: string | null;
+  hubspotPropertyId?: string | null;
   isActive: boolean;
   createdAt: string;
   updatedAt: string;

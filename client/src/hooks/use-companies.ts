@@ -11,11 +11,14 @@ export interface Company {
   zip: string | null;
   phone: string | null;
   website: string | null;
+  ownerUserId?: string | null;
+  ownerUserName?: string | null;
   industry?: string | null;
   region?: string | null;
   domain?: string | null;
   lastActivityAt?: string | null;
   hubspotId?: string | null;
+  hubspotCompanyId?: string | null;
   procoreId?: string | null;
   notes: string | null;
   companyVerificationStatus: "pending" | "verified" | "not_required" | null;
