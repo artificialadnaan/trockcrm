@@ -227,7 +227,7 @@ export function PropertyDetailPage() {
     icon: tab.icon,
     count:
       tab.id === "deals"
-        ? property.dealCount
+        ? relatedDeals.length
         : tab.id === "leads"
           ? relatedLeads.length
           : tab.id === "photos" && property.photosCount != null
@@ -364,10 +364,13 @@ function PropertyRightRail({
   companyCamUrl: string | null;
   procorePropertyUrl: string | null;
 }) {
-  const coordinates =
-    property.lat != null && property.lng != null
-      ? `${property.lat.toFixed(5)}, ${property.lng.toFixed(5)}`
-      : null;
+  const coordinates = (() => {
+    if (property.lat == null || property.lng == null) return null;
+    const lat = typeof property.lat === "number" ? property.lat : Number(property.lat);
+    const lng = typeof property.lng === "number" ? property.lng : Number(property.lng);
+    if (!Number.isFinite(lat) || !Number.isFinite(lng)) return null;
+    return `${lat.toFixed(5)}, ${lng.toFixed(5)}`;
+  })();
 
   return (
     <Card>

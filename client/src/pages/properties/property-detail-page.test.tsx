@@ -225,6 +225,38 @@ describe("PropertyDetailPage", () => {
     expect(html).toContain("32.88010, -96.76890");
   });
 
+  it("renders coordinates when lat/lng arrive as strings from API", () => {
+    mocks.usePropertyDetailMock.mockReturnValueOnce({
+      property: makeProperty({ lat: "32.7767", lng: "-96.7970" }),
+      leads: [],
+      deals: [],
+      loading: false,
+      error: null,
+      refetch: vi.fn(),
+    });
+
+    const html = normalize(renderPage());
+
+    expect(html).toContain("Coordinates");
+    expect(html).toContain("32.77670, -96.79700");
+  });
+
+  it("omits coordinates when lat/lng are non-finite", () => {
+    mocks.usePropertyDetailMock.mockReturnValueOnce({
+      property: makeProperty({ lat: "not-a-number", lng: "-96.7970" }),
+      leads: [],
+      deals: [],
+      loading: false,
+      error: null,
+      refetch: vi.fn(),
+    });
+
+    const html = normalize(renderPage());
+
+    expect(html).not.toContain("Coordinates");
+    expect(html).not.toContain("not-a-number");
+  });
+
   it("keeps company navigation when company name is missing", () => {
     mocks.usePropertyDetailMock.mockReturnValueOnce({
       property: makeProperty({ companyName: null }),
@@ -282,6 +314,32 @@ describe("PropertyDetailPage", () => {
 
     expect(mounted.container.textContent).toContain("Dallas ISD Roof Replacement");
     expect(mounted.container.textContent).toContain("TR-0001");
+  });
+
+  it("Deals tab badge matches rendered deals count", () => {
+    mocks.usePropertyDetailMock.mockReturnValue({
+      property: makeProperty({ dealCount: 1 }),
+      leads: [],
+      deals: [
+        makeDeal({ id: "active-deal", name: "Active Property Deal", isActive: true }),
+        makeDeal({ id: "inactive-deal", name: "Inactive Property Deal", isActive: false }),
+      ],
+      loading: false,
+      error: null,
+      refetch: vi.fn(),
+    });
+
+    mounted = mountPage();
+
+    const dealsTab = mounted.container.querySelector('button[aria-label="Deals"]');
+    expect(dealsTab?.textContent).toContain("2");
+
+    act(() => {
+      dealsTab?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+
+    expect(mounted.container.textContent).toContain("Active Property Deal");
+    expect(mounted.container.textContent).toContain("Inactive Property Deal");
   });
 
   it("leads tab shows related leads", () => {
