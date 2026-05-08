@@ -14,6 +14,8 @@ export interface PropertySurface {
   propertyType?: string | null;
   buildYear: number | null;
   unitCount: number | null;
+  lat?: number | null;
+  lng?: number | null;
   floors?: number | null;
   roofArea?: number | null;
   notes: string | null;
