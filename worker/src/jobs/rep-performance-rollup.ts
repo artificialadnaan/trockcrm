@@ -110,14 +110,14 @@ async function refreshOfficePeriod(
          COALESCE(SUM(COALESCE(d.awarded_amount, d.bid_estimate, d.dd_estimate, 0))
            FILTER (
              WHERE CASE
+               -- Historical pipeline_value follows the same deterministic
+               -- lifecycle-only rule as historical deals_count above.
                WHEN $1::text IN ('last_month', 'last_quarter', 'last_year') THEN
                  d.created_at::date <= $3::date
                  AND (
                    COALESCE(d.actual_close_date, d.contract_signed_date, d.contract_signed_at::date, d.lost_at::date) IS NULL
                    OR COALESCE(d.actual_close_date, d.contract_signed_date, d.contract_signed_at::date, d.lost_at::date) >= $2::date
                  )
-                 AND NOT psc.is_terminal
-                 AND psc.is_active_pipeline
                ELSE d.is_active = true AND NOT psc.is_terminal AND psc.is_active_pipeline
              END
            ), 0)::numeric AS pipeline_value,
@@ -189,7 +189,10 @@ async function refreshOfficePeriod(
          WHERE d.assigned_rep_id IS NOT NULL
            AND d.created_at::date <= $3::date
            AND c.last_activity_at IS NOT NULL
-           AND c.last_activity_at < $3::timestamptz - ($6::int || ' days')::interval
+           -- Treat period_end as inclusive end-of-day before subtracting the
+           -- staleness threshold, so cutoff-date evening activity is stale by
+           -- the period boundary instead of being excluded by midnight casting.
+           AND c.last_activity_at < ($3::date + interval '1 day')::timestamptz - ($6::int || ' days')::interval
          UNION
          SELECT DISTINCT
            d.assigned_rep_id AS rep_id,
@@ -204,7 +207,10 @@ async function refreshOfficePeriod(
          WHERE d.assigned_rep_id IS NOT NULL
            AND d.created_at::date <= $3::date
            AND p.last_activity_at IS NOT NULL
-           AND p.last_activity_at < $3::timestamptz - ($6::int || ' days')::interval
+           -- Treat period_end as inclusive end-of-day before subtracting the
+           -- staleness threshold, so cutoff-date evening activity is stale by
+           -- the period boundary instead of being excluded by midnight casting.
+           AND p.last_activity_at < ($3::date + interval '1 day')::timestamptz - ($6::int || ' days')::interval
        ) accounts
        GROUP BY accounts.rep_id
      ),

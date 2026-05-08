@@ -51,4 +51,43 @@ describe("rep performance rollup period scoping", () => {
     expect(historicalDealCountPredicates).not.toContain("psc.is_terminal");
     expect(historicalDealCountPredicates).not.toContain("psc.is_active_pipeline");
   });
+
+  it("historical pipeline_value includes deals that were open during the period but are now terminal", async () => {
+    const queries: string[] = [];
+    const client = {
+      query: vi.fn(async (sql: string, params?: unknown[]) => {
+        queries.push(`${sql}\n-- params: ${JSON.stringify(params ?? [])}`);
+        if (sql.includes("SELECT id, slug, name FROM public.offices")) {
+          return { rows: [{ id: "office-1", slug: "north", name: "North" }], rowCount: 1 };
+        }
+        return { rows: [], rowCount: sql.includes("INSERT INTO public.rep_performance_snapshots") ? 1 : 0 };
+      }),
+      release: vi.fn(),
+    };
+    connectMock.mockResolvedValue(client);
+
+    await runRepPerformanceRollup(new Date("2026-05-07T12:00:00.000Z"));
+
+    const insertSql = queries.find((query) => query.includes("INSERT INTO public.rep_performance_snapshots"));
+    const pipelineValueSql =
+      /COALESCE\(SUM\(COALESCE\(d\.awarded_amount, d\.bid_estimate, d\.dd_estimate, 0\)\)([\s\S]*?)\), 0\)::numeric AS pipeline_value/.exec(
+        insertSql ?? ""
+      )?.[1];
+    const historicalPipelineValueBranch =
+      /WHEN \$1::text IN \('last_month', 'last_quarter', 'last_year'\) THEN([\s\S]*?)ELSE d\.is_active = true AND NOT psc\.is_terminal AND psc\.is_active_pipeline/.exec(
+        pipelineValueSql ?? ""
+      )?.[1];
+
+    expect(historicalPipelineValueBranch).toBeDefined();
+    expect(historicalPipelineValueBranch).toContain("d.created_at::date <= $3::date");
+    expect(historicalPipelineValueBranch).toContain(
+      "OR COALESCE(d.actual_close_date, d.contract_signed_date, d.contract_signed_at::date, d.lost_at::date) >= $2::date"
+    );
+    const historicalPipelineValuePredicates = historicalPipelineValueBranch
+      ?.split("\n")
+      .filter((line) => !line.trim().startsWith("--"))
+      .join("\n");
+    expect(historicalPipelineValuePredicates).not.toContain("psc.is_terminal");
+    expect(historicalPipelineValuePredicates).not.toContain("psc.is_active_pipeline");
+  });
 });
