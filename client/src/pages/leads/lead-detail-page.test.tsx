@@ -172,6 +172,15 @@ function makeLead(overrides: Record<string, unknown> = {}) {
   };
 }
 
+function makeQuestionnaire() {
+  return {
+    projectTypeId: "project-type-1",
+    nodes: [],
+    allNodes: [],
+    answers: {},
+  };
+}
+
 function normalize(html: string) {
   return html.replace(/\s+/g, " ").trim();
 }
@@ -302,6 +311,61 @@ describe("LeadDetailPage", () => {
     });
 
     expect(mounted.container.textContent).toContain("Lead Convert Dialog");
+  });
+
+  it("edit action switches to questionnaire editor", () => {
+    mocks.useLeadDetailMock.mockReturnValue({
+      lead: makeLead({ leadQuestionnaire: makeQuestionnaire() }),
+      loading: false,
+      error: null,
+      refetch: vi.fn(),
+    });
+    mounted = mountLeadDetail();
+
+    expect(mounted.container.textContent).toContain("Lead Timeline");
+
+    const editButton = Array.from(mounted.container.querySelectorAll("button")).find((button) =>
+      button.textContent?.includes("Edit Sales Validation")
+    );
+    expect(editButton).not.toBeNull();
+
+    act(() => {
+      editButton?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+
+    expect(mounted.container.textContent).toContain("Lead Questionnaire Editor");
+    expect(mounted.container.textContent).not.toContain("Lead Timeline");
+  });
+
+  it("confirms before leaving questionnaire edit mode through a tab change", () => {
+    const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(false);
+    mocks.useLeadDetailMock.mockReturnValue({
+      lead: makeLead({ leadQuestionnaire: makeQuestionnaire() }),
+      loading: false,
+      error: null,
+      refetch: vi.fn(),
+    });
+    mounted = mountLeadDetail();
+
+    const editButton = Array.from(mounted.container.querySelectorAll("button")).find((button) =>
+      button.textContent?.includes("Edit Sales Validation")
+    );
+    act(() => {
+      editButton?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+
+    const recordingsTab = mounted.container.querySelector('button[aria-label="Recordings"]');
+    act(() => {
+      recordingsTab?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+
+    expect(confirmSpy).toHaveBeenCalledWith(
+      "Leave the questionnaire editor? Unsaved lead changes will be lost."
+    );
+    expect(mounted.container.textContent).toContain("Lead Questionnaire Editor");
+    expect(mounted.container.textContent).not.toContain("Recording List");
+
+    confirmSpy.mockRestore();
   });
 
   it("stage change action opens stage dialog", () => {

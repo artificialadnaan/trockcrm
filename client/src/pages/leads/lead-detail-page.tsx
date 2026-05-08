@@ -150,18 +150,32 @@ export function LeadDetailPage() {
 
   const isLeadEditV2 = Boolean(lead.leadQuestionnaire);
   const isHiddenReadOnly = !lead.isActive && lead.status !== "converted";
+  const startQuestionnaireEdit = () => {
+    setActiveTab("questionnaire");
+    setIsEditing(true);
+  };
+  const handleTabChange = (tab: LeadDetailTab) => {
+    if (tab !== "questionnaire" && isEditing) {
+      const confirmed = window.confirm(
+        "Leave the questionnaire editor? Unsaved lead changes will be lost."
+      );
+      if (!confirmed) return;
+      setIsEditing(false);
+    }
+    setActiveTab(tab);
+  };
 
   const secondaryAction = isHiddenReadOnly
     ? null
     : !isConverted
       ? {
           label: currentStageSlug === "sales_validation_stage" ? "Edit Sales Validation" : "Edit Lead",
-          onClick: () => (isLeadEditV2 ? setIsEditing(true) : navigate(`/leads/${lead.id}/edit`)),
+          onClick: () => (isLeadEditV2 ? startQuestionnaireEdit() : navigate(`/leads/${lead.id}/edit`)),
         }
     : isLeadEditV2
       ? {
           label: "Edit Lead Questionnaire",
-          onClick: () => setIsEditing(true),
+          onClick: () => startQuestionnaireEdit(),
         }
     : lead.convertedDealId && isOpportunityStage
       ? {
@@ -278,7 +292,7 @@ export function LeadDetailPage() {
         kpis={buildLeadKpis(lead)}
         tabs={buildLeadTabs()}
         activeTabId={activeTab}
-        onTabChange={(tab) => setActiveTab(tab as LeadDetailTab)}
+        onTabChange={(tab) => handleTabChange(tab as LeadDetailTab)}
         rightRail={
           <LeadRightRail
             lead={lead}
@@ -335,7 +349,7 @@ export function LeadDetailPage() {
           targetStageName={nextLeadStage.name}
           open={isStageDialogOpen}
           onOpenChange={setIsStageDialogOpen}
-          onEditLead={() => (isLeadEditV2 ? setIsEditing(true) : navigate(`/leads/${lead.id}/edit`))}
+          onEditLead={() => (isLeadEditV2 ? startQuestionnaireEdit() : navigate(`/leads/${lead.id}/edit`))}
           onSuccess={() => {
             setIsStageDialogOpen(false);
             void refetch();
