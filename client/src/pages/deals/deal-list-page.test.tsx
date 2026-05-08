@@ -300,6 +300,22 @@ describe("DealListPage", () => {
     expect(mocks.useDealBoardMock).toHaveBeenLastCalledWith("mine", true, expect.any(Object));
   });
 
+  it("forces reps to mine scope even when ?scope=team is set", () => {
+    const html = renderPage("/deals?scope=team", "rep");
+
+    expect(mocks.useDealBoardMock).toHaveBeenLastCalledWith("mine", true, expect.any(Object));
+    expect(html).toContain('aria-pressed="true">Mine');
+    expect(html).toContain('aria-pressed="false">Team');
+  });
+
+  it("forces reps to mine scope even when ?scope=all is set", () => {
+    const html = renderPage("/deals?scope=all", "rep");
+
+    expect(mocks.useDealBoardMock).toHaveBeenLastCalledWith("mine", true, expect.any(Object));
+    expect(html).toContain('aria-pressed="true">Mine');
+    expect(html).toContain('aria-pressed="false">All');
+  });
+
   it("loads recent deal movement with the active scope", () => {
     renderPage("/deals?scope=team", "director");
     expect(mocks.useDealsMock).toHaveBeenLastCalledWith({

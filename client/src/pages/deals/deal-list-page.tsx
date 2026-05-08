@@ -38,9 +38,9 @@ const STAGE_SLA_DAYS: Record<string, number> = {
 };
 
 function getScope(searchParams: URLSearchParams, role: string | undefined): PipelineScope {
+  if (role === "rep") return "mine";
   const scope = searchParams.get("scope");
   if (scope === "mine" || scope === "team" || scope === "all") return scope;
-  if (role === "rep") return "mine";
   if (role === "director") return "team";
   if (role === "admin") return "all";
   return "mine";

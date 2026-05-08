@@ -220,15 +220,16 @@ describe("LeadListPage", () => {
     expect(html).not.toContain("Legacy Opportunity Lead");
   });
 
-  it("loads summary leads with the active scope", () => {
-    renderPage("/leads?scope=mine");
-    expect(mocks.useLeadsMock).toHaveBeenLastCalledWith({ status: "open", isActive: "all", scope: "mine" });
-
-    renderPage("/leads?scope=team");
+  it("loads summary leads with the active scope when role is director", () => {
+    renderPage("/leads?scope=team", "director");
     expect(mocks.useLeadsMock).toHaveBeenLastCalledWith({ status: "open", isActive: "all", scope: "team" });
+  });
 
-    renderPage("/leads?scope=all");
-    expect(mocks.useLeadsMock).toHaveBeenLastCalledWith({ status: "open", isActive: "all", scope: "all" });
+  it("forces summary leads to mine scope for reps regardless of ?scope= param", () => {
+    renderPage("/leads?scope=team", "rep");
+
+    expect(mocks.useLeadBoardMock).toHaveBeenLastCalledWith("mine");
+    expect(mocks.useLeadsMock).toHaveBeenLastCalledWith({ status: "open", isActive: "all", scope: "mine" });
   });
 
   it("defaults the board scope by role when the query param is absent", () => {
@@ -243,6 +244,22 @@ describe("LeadListPage", () => {
 
     renderPage("/leads?scope=mine", "director");
     expect(mocks.useLeadBoardMock).toHaveBeenLastCalledWith("mine");
+  });
+
+  it("forces reps to mine scope even when ?scope=team is set", () => {
+    const html = renderPage("/leads?scope=team", "rep");
+
+    expect(mocks.useLeadBoardMock).toHaveBeenLastCalledWith("mine");
+    expect(html).toContain('aria-pressed="true">Mine');
+    expect(html).toContain('aria-pressed="false">Team');
+  });
+
+  it("forces reps to mine scope even when ?scope=all is set", () => {
+    const html = renderPage("/leads?scope=all", "rep");
+
+    expect(mocks.useLeadBoardMock).toHaveBeenLastCalledWith("mine");
+    expect(html).toContain('aria-pressed="true">Mine');
+    expect(html).toContain('aria-pressed="false">All');
   });
 
   it("filters columns by the dashboard bucket query param", () => {
