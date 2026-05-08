@@ -10,6 +10,7 @@ const mocks = vi.hoisted(() => ({
   usePipelineStagesMock: vi.fn(),
   readTerminalDateFilterMock: vi.fn(),
   buildDealStageWorkspacePathMock: vi.fn(),
+  useAuthMock: vi.fn(),
 }));
 
 vi.mock("@/hooks/use-deals", () => ({
@@ -19,6 +20,10 @@ vi.mock("@/hooks/use-deals", () => ({
 
 vi.mock("@/hooks/use-pipeline-config", () => ({
   usePipelineStages: mocks.usePipelineStagesMock,
+}));
+
+vi.mock("@/lib/auth", () => ({
+  useAuth: mocks.useAuthMock,
 }));
 
 vi.mock("@/components/ui/button", () => ({
@@ -88,7 +93,19 @@ function makeDeal(overrides: Record<string, unknown> = {}) {
   };
 }
 
-function renderPage(path = "/deals?scope=all") {
+function renderPage(path = "/deals?scope=all", role = "admin") {
+  mocks.useAuthMock.mockReturnValue({
+    user: {
+      id: "user-1",
+      email: `${role}@example.test`,
+      displayName: "Test User",
+      role,
+      officeId: "office-1",
+      activeOfficeId: "office-1",
+    },
+    loading: false,
+  });
+
   return normalize(
     renderToStaticMarkup(
       <MemoryRouter initialEntries={[path]}>
@@ -105,6 +122,7 @@ describe("DealListPage", () => {
     mocks.usePipelineStagesMock.mockReset();
     mocks.readTerminalDateFilterMock.mockReset();
     mocks.buildDealStageWorkspacePathMock.mockReset();
+    mocks.useAuthMock.mockReset();
 
     mocks.readTerminalDateFilterMock.mockImplementation((outcome: string) => ({
       mode: "preset",
@@ -265,6 +283,40 @@ describe("DealListPage", () => {
     expect(mocks.useDealBoardMock).toHaveBeenCalledWith("all", true, {
       won: { preset: "custom", customStart: "2026-01-01" },
       lost: { preset: "custom", customStart: "2026-01-01" },
+    });
+  });
+
+  it("defaults the board scope by role when the query param is absent", () => {
+    renderPage("/deals", "rep");
+    expect(mocks.useDealBoardMock).toHaveBeenLastCalledWith("mine", true, expect.any(Object));
+
+    renderPage("/deals", "director");
+    expect(mocks.useDealBoardMock).toHaveBeenLastCalledWith("team", true, expect.any(Object));
+
+    renderPage("/deals", "admin");
+    expect(mocks.useDealBoardMock).toHaveBeenLastCalledWith("all", true, expect.any(Object));
+
+    renderPage("/deals?scope=mine", "director");
+    expect(mocks.useDealBoardMock).toHaveBeenLastCalledWith("mine", true, expect.any(Object));
+  });
+
+  it("loads recent deal movement with the active scope", () => {
+    renderPage("/deals?scope=team", "director");
+    expect(mocks.useDealsMock).toHaveBeenLastCalledWith({
+      limit: 200,
+      isActive: true,
+      sortBy: "updated_at",
+      sortDir: "desc",
+      scope: "team",
+    });
+
+    renderPage("/deals?scope=all", "admin");
+    expect(mocks.useDealsMock).toHaveBeenLastCalledWith({
+      limit: 200,
+      isActive: true,
+      sortBy: "updated_at",
+      sortDir: "desc",
+      scope: "all",
     });
   });
 });

@@ -5,6 +5,7 @@ import { Button } from "@/components/ui/button";
 import { MetricCard } from "@/components/shared/metric-card";
 import { ScopeToggle, type ScopeToggleOption } from "@/components/shared/scope-toggle";
 import { USD_COMPACT } from "@/components/shared/formatters";
+import { useAuth } from "@/lib/auth";
 import {
   LEAD_BOARD_STAGE_SLUGS,
   getLeadBoardStageLabel,
@@ -37,9 +38,13 @@ export function isImmediateNextStageMove(
   return nextStageById.get(currentStageId) === targetStageId;
 }
 
-function getScope(searchParams: URLSearchParams): PipelineScope {
+function getScope(searchParams: URLSearchParams, role: string | undefined): PipelineScope {
   const scope = searchParams.get("scope");
-  return scope === "mine" || scope === "team" || scope === "all" ? scope : "mine";
+  if (scope === "mine" || scope === "team" || scope === "all") return scope;
+  if (role === "rep") return "mine";
+  if (role === "director") return "team";
+  if (role === "admin") return "all";
+  return "mine";
 }
 
 function matchesLeadBucket(bucket: string | null, slug: string) {
@@ -174,8 +179,9 @@ function LeadColumn({
 
 export function LeadListPage() {
   const navigate = useNavigate();
+  const { user } = useAuth();
   const [searchParams, setSearchParams] = useSearchParams();
-  const scope = getScope(searchParams);
+  const scope = getScope(searchParams, user?.role);
   const bucket = searchParams.get("bucket");
   const { board, loading, error } = useLeadBoard(scope);
   const { leads } = useLeads({ status: "open", isActive: "all", scope });

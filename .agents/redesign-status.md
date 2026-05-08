@@ -55,3 +55,4 @@
 - D PR-READY 2026-05-07T23:06Z: PR #163 marked ready for review. Original "blocker" was a misread of intentional cross-office visibility on deals-pipeline; director-scoping bug is a separate main-targeting hotfix and does not gate Track D.
 - D CODEX-FIX 2026-05-07T23:15Z: PR #163 force-pushed with two SPA-state regression fixes (leads bucket filter, terminal date filter staleness). Two regression tests added.
 - D CODEX-FIX-2 2026-05-07T23:39Z: PR #163 force-pushed with three additional Codex fixes (Won YTD window, lead listLeads scope full-stack, task row keyDown propagation). Track D scope expanded to include backend listLeads change. Three regression tests added (backend listLeads scope + two frontend).
+- D CODEX-FIX-3 2026-05-08T03:21Z: PR #163 force-pushed with two more Codex fixes (role-based default scope on both pages, recent-deal-movement scope-awareness). Five regression tests added.

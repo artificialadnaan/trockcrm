@@ -7,12 +7,17 @@ import { LeadListPage, buildLeadIntakePath, isImmediateNextStageMove } from "./l
 const mocks = vi.hoisted(() => ({
   useLeadBoardMock: vi.fn(),
   useLeadsMock: vi.fn(),
+  useAuthMock: vi.fn(),
 }));
 
 vi.mock("@/components/ui/button", () => ({
   Button: ({ children, className }: { children: ReactNode; className?: string }) => (
     <button className={className}>{children}</button>
   ),
+}));
+
+vi.mock("@/lib/auth", () => ({
+  useAuth: mocks.useAuthMock,
 }));
 
 vi.mock("@/hooks/use-leads", () => ({
@@ -145,7 +150,19 @@ function normalize(html: string) {
   return html.replace(/\s+/g, " ").trim();
 }
 
-function renderPage(path = "/leads?scope=mine") {
+function renderPage(path = "/leads?scope=mine", role = "rep") {
+  mocks.useAuthMock.mockReturnValue({
+    user: {
+      id: "user-1",
+      email: `${role}@example.test`,
+      displayName: "Test User",
+      role,
+      officeId: "office-1",
+      activeOfficeId: "office-1",
+    },
+    loading: false,
+  });
+
   return normalize(
     renderToStaticMarkup(
       <MemoryRouter initialEntries={[path]}>
@@ -157,6 +174,7 @@ function renderPage(path = "/leads?scope=mine") {
 
 describe("LeadListPage", () => {
   beforeEach(() => {
+    mocks.useAuthMock.mockReset();
     boardColumns.splice(0, boardColumns.length, ...structuredClone(defaultBoardColumns));
     mocks.useLeadBoardMock.mockReturnValue({
       board: {
@@ -211,6 +229,20 @@ describe("LeadListPage", () => {
 
     renderPage("/leads?scope=all");
     expect(mocks.useLeadsMock).toHaveBeenLastCalledWith({ status: "open", isActive: "all", scope: "all" });
+  });
+
+  it("defaults the board scope by role when the query param is absent", () => {
+    renderPage("/leads", "rep");
+    expect(mocks.useLeadBoardMock).toHaveBeenLastCalledWith("mine");
+
+    renderPage("/leads", "director");
+    expect(mocks.useLeadBoardMock).toHaveBeenLastCalledWith("team");
+
+    renderPage("/leads", "admin");
+    expect(mocks.useLeadBoardMock).toHaveBeenLastCalledWith("all");
+
+    renderPage("/leads?scope=mine", "director");
+    expect(mocks.useLeadBoardMock).toHaveBeenLastCalledWith("mine");
   });
 
   it("filters columns by the dashboard bucket query param", () => {

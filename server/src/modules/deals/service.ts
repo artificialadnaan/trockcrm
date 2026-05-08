@@ -53,6 +53,8 @@ export interface DealFilters {
   sortDir?: "asc" | "desc";
   page?: number;
   limit?: number;
+  scope?: WorkspaceScope;
+  activeOfficeId?: string;
 }
 
 export interface PipelineTerminalDateFilters {
@@ -719,6 +721,7 @@ export async function getDeals(tenantDb: TenantDb, filters: DealFilters, userRol
   const page = filters.page ?? 1;
   const limit = filters.limit ?? 50;
   const offset = (page - 1) * limit;
+  const scope = userRole === "rep" ? "mine" : filters.scope ?? "all";
 
   // Build conditions array
   const conditions: any[] = [];
@@ -727,9 +730,19 @@ export async function getDeals(tenantDb: TenantDb, filters: DealFilters, userRol
   const showActive = filters.isActive ?? true;
   conditions.push(eq(deals.isActive, showActive));
 
-  // Reps only see their own deals
-  if (userRole === "rep") {
+  if (scope === "mine") {
     conditions.push(eq(deals.assignedRepId, userId));
+  } else if (scope === "team") {
+    const teamConditions = [eq(users.reportsTo, userId), eq(users.isActive, true)];
+    if (filters.activeOfficeId) {
+      teamConditions.push(eq(users.officeId, filters.activeOfficeId));
+    }
+    const teamRows = await tenantDb
+      .select({ id: users.id })
+      .from(users)
+      .where(and(...teamConditions));
+    const teamUserIds = teamRows.map((user) => user.id);
+    conditions.push(teamUserIds.length > 0 ? inArray(deals.assignedRepId, teamUserIds) : sql`false`);
   }
 
   // Filter by assigned rep (directors/admins filtering by rep)

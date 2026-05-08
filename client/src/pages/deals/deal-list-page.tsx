@@ -10,6 +10,7 @@ import { usePipelineStages } from "@/hooks/use-pipeline-config";
 import { buildCanonicalDealBoardColumns } from "@/lib/canonical-deal-board";
 import { daysInStage } from "@/lib/deal-utils";
 import { presetToDateRange } from "@/hooks/use-director-dashboard";
+import { useAuth } from "@/lib/auth";
 import {
   buildDealStageWorkspacePath,
   readTerminalDateFilter,
@@ -36,9 +37,13 @@ const STAGE_SLA_DAYS: Record<string, number> = {
   lost: 0,
 };
 
-function getScope(searchParams: URLSearchParams): PipelineScope {
+function getScope(searchParams: URLSearchParams, role: string | undefined): PipelineScope {
   const scope = searchParams.get("scope");
-  return scope === "mine" || scope === "team" || scope === "all" ? scope : "mine";
+  if (scope === "mine" || scope === "team" || scope === "all") return scope;
+  if (role === "rep") return "mine";
+  if (role === "director") return "team";
+  if (role === "admin") return "all";
+  return "mine";
 }
 
 function readCurrentTerminalDateFilters(): Record<TerminalOutcome, TerminalDateFilter> {
@@ -205,11 +210,12 @@ function BoardColumn({
 
 export function DealListPage() {
   const navigate = useNavigate();
+  const { user } = useAuth();
   const [searchParams, setSearchParams] = useSearchParams();
-  const scope = getScope(searchParams);
+  const scope = getScope(searchParams, user?.role);
   const ytdTerminalFilters = useMemo(() => getYearToDateTerminalFilters(), []);
   const { board, loading, error } = useDealBoard(scope, true, ytdTerminalFilters);
-  const { deals } = useDeals({ limit: 200, isActive: true, sortBy: "updated_at", sortDir: "desc" });
+  const { deals } = useDeals({ limit: 200, isActive: true, sortBy: "updated_at", sortDir: "desc", scope });
   const { stages } = usePipelineStages();
 
   const columns = useMemo(() => buildCanonicalDealBoardColumns(board?.columns, stages), [board?.columns, stages]);

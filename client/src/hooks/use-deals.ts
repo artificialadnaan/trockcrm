@@ -262,6 +262,7 @@ export interface DealFilters {
   sortDir?: "asc" | "desc";
   page?: number;
   limit?: number;
+  scope?: "mine" | "team" | "all";
 }
 
 export interface Pagination {
@@ -368,6 +369,7 @@ export function useDeals(filters: DealFilters = {}) {
       if (filters.sortDir) params.set("sortDir", filters.sortDir);
       if (filters.page) params.set("page", String(filters.page));
       if (filters.limit) params.set("limit", String(filters.limit));
+      if (filters.scope) params.set("scope", filters.scope);
 
       const qs = params.toString();
       const data = await api<{ deals: Deal[]; pagination: Pagination }>(
@@ -394,6 +396,7 @@ export function useDeals(filters: DealFilters = {}) {
     filters.sortDir,
     filters.page,
     filters.limit,
+    filters.scope,
   ]);
 
   useEffect(() => {
