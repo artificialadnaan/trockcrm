@@ -19,8 +19,8 @@ interface User {
 interface AuthContextValue {
   user: User | null;
   loading: boolean;
-  login: (email: string) => Promise<void>;
-  localLogin: (email: string, password: string) => Promise<void>;
+  login: (email: string, returnTo?: string | null) => Promise<{ returnTo?: string | null }>;
+  localLogin: (email: string, password: string, returnTo?: string | null) => Promise<{ returnTo?: string | null }>;
   changePassword: (currentPassword: string, newPassword: string) => Promise<void>;
   logout: () => Promise<void>;
   refreshUser: () => Promise<void>;
@@ -47,20 +47,22 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     fetchUser();
   }, [fetchUser]);
 
-  const login = async (email: string) => {
-    const data = await api<{ user: User }>("/auth/dev/login", {
+  const login = async (email: string, returnTo?: string | null) => {
+    const data = await api<{ user: User; returnTo?: string | null }>("/auth/dev/login", {
       method: "POST",
-      json: { email },
+      json: { email, returnTo },
     });
     setUser(data.user);
+    return { returnTo: data.returnTo };
   };
 
-  const localLogin = async (email: string, password: string) => {
-    const data = await api<{ user: User }>("/auth/local/login", {
+  const localLogin = async (email: string, password: string, returnTo?: string | null) => {
+    const data = await api<{ user: User; returnTo?: string | null }>("/auth/local/login", {
       method: "POST",
-      json: { email, password },
+      json: { email, password, returnTo },
     });
     setUser(data.user);
+    return { returnTo: data.returnTo };
   };
 
   const changePassword = async (currentPassword: string, newPassword: string) => {

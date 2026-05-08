@@ -3,13 +3,19 @@ import { HardHat, LogOut, Shuffle } from "lucide-react";
 import { useLogout, useMe } from "../hooks/use-cleanup";
 import { Button } from "./ui";
 
+function mainCrmLoginUrlForCurrentRoute() {
+  const url = new URL(mainCrmUrl("/login"));
+  url.searchParams.set("returnTo", window.location.href);
+  return url.toString();
+}
+
 export function AppLayout() {
   const { data: user, isLoading, isError } = useMe();
   const logout = useLogout();
   const navigate = useNavigate();
 
   if (!isLoading && (isError || !user)) {
-    window.location.assign("/login");
+    window.location.assign(mainCrmLoginUrlForCurrentRoute());
     return null;
   }
 

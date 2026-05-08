@@ -22,6 +22,7 @@ export function AuthEntryScreen() {
   const [error, setError] = useState<string | null>(null);
   const [devUsers, setDevUsers] = useState<DevUser[]>([]);
   const [devReady, setDevReady] = useState(false);
+  const returnTo = new URLSearchParams(window.location.search).get("returnTo");
 
   useEffect(() => {
     api<{ users: DevUser[] }>("/auth/dev/users")
@@ -40,7 +41,8 @@ export function AuthEntryScreen() {
     setError(null);
 
     try {
-      await localLogin(email, password);
+      const result = await localLogin(email, password, returnTo);
+      if (result.returnTo) window.location.assign(result.returnTo);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Login failed");
     } finally {
@@ -117,7 +119,10 @@ export function AuthEntryScreen() {
                   key={user.id}
                   variant="outline"
                   className="flex h-auto w-full items-center justify-between py-3"
-                  onClick={() => login(user.email)}
+                  onClick={async () => {
+                    const result = await login(user.email, returnTo);
+                    if (result.returnTo) window.location.assign(result.returnTo);
+                  }}
                 >
                   <div className="text-left">
                     <div className="text-sm font-medium">{user.displayName}</div>

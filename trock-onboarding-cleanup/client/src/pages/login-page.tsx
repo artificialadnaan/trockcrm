@@ -8,6 +8,16 @@ export function LoginPage() {
   const { data: user, isLoading, isError } = useMe();
   const params = new URLSearchParams(window.location.search);
   const loggedOut = params.get("loggedOut") === "1" || window.localStorage.getItem("cleanup_logged_out") === "true";
+  const requestedReturnTo = params.get("returnTo");
+  const currentReturnTo = requestedReturnTo && /^https?:\/\//i.test(requestedReturnTo)
+    ? requestedReturnTo
+    : `${window.location.origin}/cleanup`;
+
+  function mainCrmLoginUrl() {
+    const url = new URL(mainCrmUrl("/login"));
+    url.searchParams.set("returnTo", currentReturnTo);
+    return url.toString();
+  }
 
   if (isLoading) {
     return (
@@ -32,7 +42,7 @@ export function LoginPage() {
               className="mt-5 w-full"
               onClick={() => {
                 window.localStorage.removeItem("cleanup_logged_out");
-                window.location.assign(mainCrmUrl("/login"));
+                window.location.assign(mainCrmLoginUrl());
               }}
             >
               Sign in
@@ -41,7 +51,7 @@ export function LoginPage() {
         </main>
       );
     }
-    window.location.assign(mainCrmUrl("/login"));
+    window.location.assign(mainCrmLoginUrl());
     return null;
   }
 
