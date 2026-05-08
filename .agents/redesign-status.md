@@ -85,3 +85,4 @@
 - HOTFIX-POSTMERGE CLAIM 2026-05-08T16:47:17Z: hotfix/postmerge-track-d, four production bugs from PR #163. Worktree: trockcrm-hotfix-postmerge.
 - HOTFIX-POSTMERGE PR-OPEN 2026-05-08T16:48:15Z: PR https://github.com/artificialadnaan/trockcrm/pull/175.
 - HOTFIX-POSTMERGE LIVE 2026-05-08T17:05:27Z: PR #175 merged to main at d9e482d; Railway API production deployment 2c3a042d-7e5b-40e2-9283-e319a8473418 succeeded.
+- HOTFIX-POSTMERGE REVIEW2 2026-05-08T17:19:51Z: hotfix/postmerge-track-d-review2, Codex iteration-2 revisions for reports role allowlist and empty-office unassigned deal fallback. Worktree: trockcrm-hotfix-postmerge-r2.

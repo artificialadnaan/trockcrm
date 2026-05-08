@@ -187,10 +187,10 @@ function createTenantDb() {
   };
 }
 
-async function listIds(input: { role: string; userId: string; scope?: "mine" | "team" | "all" }) {
+async function listIds(input: { role: string; userId: string; scope?: "mine" | "team" | "all"; activeOfficeId?: string }) {
   const result = await getDeals(
     createTenantDb() as never,
-    { isActive: true, scope: input.scope, activeOfficeId: "office-1", limit: 100 } as never,
+    { isActive: true, scope: input.scope, activeOfficeId: input.activeOfficeId ?? "office-1", limit: 100 } as never,
     input.role,
     input.userId
   );
@@ -228,6 +228,12 @@ describe("getDeals scope filtering", () => {
     await expect(listIds({ role: "director", userId: "director-1", scope: "all" })).resolves.toContain(
       "deal-unassigned"
     );
+  });
+
+  it("getDeals returns no deals when active office has no users", async () => {
+    await expect(
+      listIds({ role: "director", userId: "director-1", scope: "all", activeOfficeId: "office-empty" })
+    ).resolves.toEqual([]);
   });
 
   it("forces reps to their own deals regardless of requested scope", async () => {

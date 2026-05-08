@@ -744,7 +744,7 @@ export async function getDeals(tenantDb: TenantDb, filters: DealFilters, userRol
     conditions.push(
       officeUserIds.length > 0
         ? or(inArray(deals.assignedRepId, officeUserIds), isNull(deals.assignedRepId))
-        : isNull(deals.assignedRepId)
+        : sql`false`
     );
   }
 
