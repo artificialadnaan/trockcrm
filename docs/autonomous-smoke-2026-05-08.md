@@ -56,6 +56,7 @@ Raw route/API capture: `docs/autonomous-smoke-results-2026-05-08.json`.
   - `buildContactLinkedDealsCountSql()`
 - Reused those helpers from both `getContacts` and `getContactById`.
 - Added regression coverage that renders the helpers through Drizzle's Postgres dialect and asserts the primary-contact expression contains `EXISTS` with `SELECT 1`, preventing the malformed `EXISTS ( FROM ...)` shape.
+- Cycle 2: first deploy still returned 500. Railway logs showed Drizzle rendered correlated subquery references as unqualified `"id"` inside `contact_deal_associations` subqueries. The fix now uses explicit `"contacts"."id"` references for association counts and last-touch subqueries.
 - Fixed the local contacts sort test harness aliases so the focused contacts suite runs reliably.
 
 ## Verification
@@ -65,10 +66,13 @@ Raw route/API capture: `docs/autonomous-smoke-results-2026-05-08.json`.
   - Result: 2 passed; route report showed `/contacts` and `/files` broken by `/api/contacts` 500.
 - Focused contacts tests:
   - `npx vitest run server/tests/modules/contacts/contact-association-sql.test.ts server/tests/modules/contacts/contacts-sort-last-touch-at.test.ts server/tests/modules/contacts/contacts-sort-last-touch-nulls-last.test.ts server/tests/modules/contacts/service.test.ts`
-  - Result: 4 files passed, 34 tests passed.
+  - Result after cycle 2: 4 files passed, 35 tests passed.
 - Typecheck:
   - `npm run typecheck`
   - Result: exit 0.
+- First deployment:
+  - PR #190 merged and Railway deployment `663ef89c-3808-444f-91c4-bd970f9d496d` reached `SUCCESS`.
+  - Post-deploy `/api/contacts` still returned 500, triggering cycle 2.
 
 ## Deferred / Follow-Up
 
