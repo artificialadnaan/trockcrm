@@ -32,8 +32,8 @@ export function SkipModal({
   return (
     <div className="fixed inset-0 z-50 grid place-items-end bg-stone-950/50 p-0 sm:place-items-center sm:p-6">
       <div className="w-full max-w-lg rounded-t-lg border border-stone-300 bg-stone-50 p-5 shadow-2xl sm:rounded-lg">
-        <h2 className="text-xl font-bold text-stone-950">Skip this record</h2>
-        <p className="mt-1 text-sm text-stone-600">Skipped records count toward onboarding and stay flagged for leadership review.</p>
+        <h2 className="text-xl font-bold text-stone-950">Skip for leadership review</h2>
+        <p className="mt-1 text-sm text-stone-600">Use this when the information is not available. The record will count toward onboarding, but Takashi can still review it.</p>
         <div className="mt-5 space-y-4">
           <div className="space-y-2">
             <FieldLabel>Reason</FieldLabel>
@@ -46,7 +46,7 @@ export function SkipModal({
             </Select>
           </div>
           <div className="space-y-2">
-            <FieldLabel>{needsNotes ? "Notes required" : "Notes"}</FieldLabel>
+            <FieldLabel>{needsNotes ? "Notes required" : "Notes for reviewer"}</FieldLabel>
             <TextArea value={notes} onChange={(event) => setNotes(event.target.value)} placeholder="Add context for Takashi or admin review." />
           </div>
         </div>
@@ -55,7 +55,7 @@ export function SkipModal({
             Cancel
           </Button>
           <Button variant="danger" onClick={() => onConfirm(reason, notes.trim() || undefined)} disabled={disabled}>
-            Confirm skip
+            Skip for review
           </Button>
         </div>
       </div>

@@ -125,7 +125,7 @@ export function RecordEditPage() {
       <section className="mt-6 grid gap-6 lg:grid-cols-[minmax(0,1fr)_420px]">
         <Panel className="p-5">
           <h2 className="text-xl font-black">Clean this record</h2>
-          <p className="mt-1 text-sm text-stone-600">Only fields tied to cleanup are shown here. Save a draft or mark complete when required fields are resolved.</p>
+          <p className="mt-1 text-sm text-stone-600">Update the fields Takashi needs reviewed. Save anytime, or mark complete when the record is ready.</p>
           <div className="mt-5 grid gap-4 sm:grid-cols-2">
             {fields.length === 0 ? (
               <div className="rounded-md border border-emerald-200 bg-emerald-50 p-4 text-sm text-emerald-900 sm:col-span-2">
@@ -214,16 +214,19 @@ export function RecordEditPage() {
       </section>
 
       <div className="fixed inset-x-0 bottom-0 z-30 border-t border-stone-300 bg-stone-100/95 p-3 backdrop-blur lg:static lg:mt-6 lg:border-0 lg:bg-transparent lg:p-0">
-        <div className="mx-auto flex max-w-7xl gap-2 lg:justify-end">
-          <Button variant="secondary" className="flex-1 lg:flex-none" disabled={patch.isPending} onClick={() => applyDraft()}>
+        <div className="mx-auto flex max-w-7xl flex-col gap-2 sm:flex-row lg:justify-end">
+          <p className="text-xs leading-5 text-stone-600 sm:mr-auto sm:max-w-md">
+            Skip only when the information is not available. Skipped records stay visible for leadership review.
+          </p>
+          <Button variant="secondary" className="w-full sm:w-auto" disabled={patch.isPending} onClick={() => applyDraft()}>
             <Save className="h-4 w-4" />
             Save draft
           </Button>
-          <Button className="flex-1 lg:flex-none" disabled={patch.isPending} onClick={() => applyDraft("completed")}>
+          <Button className="w-full sm:w-auto" disabled={patch.isPending} onClick={() => applyDraft("completed")}>
             Save and mark complete
           </Button>
-          <Button variant="danger" className="flex-1 lg:flex-none" onClick={() => setSkipOpen(true)}>
-            Skip
+          <Button variant="danger" className="w-full sm:w-auto" onClick={() => setSkipOpen(true)}>
+            Skip for review
           </Button>
         </div>
       </div>

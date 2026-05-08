@@ -30,6 +30,25 @@ function statusOf(record: QueueRecord): CleanupStatus {
   return record.cleanupStatus ?? "pending";
 }
 
+function statusLabel(status: CleanupStatus) {
+  if (status === "completed") return "Complete";
+  if (status === "skipped") return "Skipped for review";
+  return "Needs cleanup";
+}
+
+function primaryActionLabel(status: CleanupStatus) {
+  return status === "pending" ? "Clean" : "Review";
+}
+
+function skipActionLabel(status: CleanupStatus) {
+  return status === "skipped" ? "Update skip" : status === "completed" ? "Skip instead" : "Skip";
+}
+
+function missingFieldSummary(record: QueueRecord) {
+  if (record.missingFields.length === 0) return "No required fields";
+  return `${record.missingFields.length} field${record.missingFields.length === 1 ? "" : "s"} to check`;
+}
+
 export function RecordListPage() {
   const type = validType(useParams().type);
   const singular = TYPE_TO_SINGULAR[type];
@@ -101,7 +120,7 @@ export function RecordListPage() {
       <Panel className="mt-3 overflow-hidden">
         <div className="hidden grid-cols-[1fr_220px_160px_220px] gap-4 border-b border-stone-300 bg-stone-200 px-4 py-3 text-xs font-bold uppercase tracking-wide text-stone-600 md:grid">
           <span>Record</span>
-          <span>Missing fields</span>
+          <span>Cleanup need</span>
           <span>Status</span>
           <span>Actions</span>
         </div>
@@ -120,7 +139,7 @@ export function RecordListPage() {
               </div>
               <div className="flex flex-wrap gap-1">
                 {record.missingFields.length === 0 ? (
-                  <Badge tone="green">Ready</Badge>
+                  <Badge tone="green">{missingFieldSummary(record)}</Badge>
                 ) : (
                   record.missingFields.slice(0, 3).map((field) => (
                     <Badge key={field.field + field.label} tone={field.severity === "required" ? "red" : "amber"}>
@@ -131,14 +150,14 @@ export function RecordListPage() {
                 {record.missingFields.length > 3 ? <Badge>+{record.missingFields.length - 3}</Badge> : null}
               </div>
               <div>
-                <Badge tone={statusOf(record) === "pending" ? "neutral" : statusOf(record) === "completed" ? "green" : "amber"}>{statusOf(record)}</Badge>
+                <Badge tone={statusOf(record) === "pending" ? "neutral" : statusOf(record) === "completed" ? "green" : "amber"}>{statusLabel(statusOf(record))}</Badge>
               </div>
               <div className="flex gap-2">
-                <Button className="flex-1" onClick={() => navigate(`/cleanup/${type}/${record.id}`)}>
-                  Clean
+                <Button variant={statusOf(record) === "pending" ? "primary" : "secondary"} className="flex-1" onClick={() => navigate(`/cleanup/${type}/${record.id}`)}>
+                  {primaryActionLabel(statusOf(record))}
                 </Button>
                 <Button variant="secondary" className="flex-1" onClick={() => setSkipTarget(record)}>
-                  Skip
+                  {skipActionLabel(statusOf(record))}
                 </Button>
               </div>
             </div>

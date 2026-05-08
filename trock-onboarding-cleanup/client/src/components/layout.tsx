@@ -54,6 +54,11 @@ export function AppLayout() {
               <span className="block text-xs text-stone-300">Data cleanup before CRM access</span>
             </span>
           </button>
+          <div className="flex items-center gap-2 sm:hidden">
+            <Button variant="ghost" className="min-h-10 px-3 text-stone-50 hover:bg-stone-800" disabled={logout.isPending} onClick={() => logout.mutate()} aria-label="Logout">
+              <LogOut className="h-4 w-4" />
+            </Button>
+          </div>
           <div className="hidden items-center gap-3 sm:flex">
             <span className="text-sm text-stone-300">{user?.displayName ?? user?.email}</span>
             {user?.role === "admin" || user?.role === "director" ? (
