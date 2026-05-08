@@ -8,6 +8,7 @@ import {
   getDevUsers,
   getUserByEmail,
   getUserById,
+  getUserOnboardingGateStatus,
   signJwt,
 } from "./service.js";
 import { authMiddleware } from "../../middleware/auth.js";
@@ -40,6 +41,49 @@ function isDevMode(req: import("express").Request): boolean {
   return isDevAuthEnabled(process.env, host);
 }
 const tokenCookieOptions = getTokenCookieOptions(process.env);
+
+function normalizeOrigin(value: string | undefined): string | null {
+  if (!value) return null;
+  const trimmed = value.trim();
+  if (!trimmed) return null;
+  if (/^https?:\/\//i.test(trimmed)) return trimmed.replace(/\/+$/, "");
+  return `https://${trimmed.replace(/\/+$/, "")}`;
+}
+
+function safeReturnTo(value: unknown) {
+  if (typeof value !== "string" || !value.trim()) return null;
+  let parsed: URL;
+  try {
+    parsed = new URL(value);
+  } catch {
+    return null;
+  }
+  if (parsed.protocol !== "https:" && parsed.protocol !== "http:") return null;
+  const allowedOrigins = [
+    normalizeOrigin(process.env.FRONTEND_URL),
+    normalizeOrigin(process.env.ONBOARDING_CLEANUP_URL),
+    "https://trock-onboarding-cleanup-production.up.railway.app",
+    "https://onboarding.trockcrm.com",
+    "http://localhost:5173",
+    "http://localhost:5175",
+  ].filter((origin): origin is string => Boolean(origin));
+  return allowedOrigins.includes(parsed.origin) ? parsed.toString() : null;
+}
+
+async function withOnboardingGate<T extends { id: string; officeId: string; activeOfficeId?: string; role: string }>(user: T) {
+  const gate = await getUserOnboardingGateStatus({
+    userId: user.id,
+    officeId: user.activeOfficeId ?? user.officeId,
+    role: user.role,
+  });
+  return {
+    ...user,
+    onboardingCompletedAt: gate.onboardingCompletedAt,
+    onboardingPendingCount: gate.onboardingPendingCount,
+    requiresOnboarding: gate.requiresOnboarding,
+    cleanupUrl: gate.cleanupUrl,
+  };
+}
 
 // Dev-mode: list available users for picker
 router.get("/dev/users", authLimiter, async (req, res, next) => {
@@ -98,8 +142,7 @@ router.post("/dev/login", authLimiter, async (req, res, next) => {
 
     res.cookie("token", token, tokenCookieOptions);
 
-    res.json({
-      user: {
+    const responseUser = await withOnboardingGate({
         id: resolvedUser.id,
         email: resolvedUser.email,
         displayName: resolvedUser.displayName,
@@ -107,8 +150,9 @@ router.post("/dev/login", authLimiter, async (req, res, next) => {
         officeId: resolvedUser.officeId,
         activeOfficeId: resolvedUser.officeId,
         mustChangePassword: false,
-      },
-    });
+      });
+
+    res.json({ user: responseUser, returnTo: safeReturnTo(req.body?.returnTo) });
   } catch (err) {
     next(err);
   }
@@ -135,7 +179,7 @@ router.post("/local/login", authLimiter, async (req, res, next) => {
     });
 
     res.cookie("token", token, tokenCookieOptions);
-    res.json({ user });
+    res.json({ user: await withOnboardingGate({ ...user, activeOfficeId: user.officeId }), returnTo: safeReturnTo(req.body?.returnTo) });
   } catch (err) {
     next(err);
   }
@@ -149,8 +193,12 @@ router.use(fieldUserAuthRouter);
 // TODO: GET /api/auth/sso/login — redirect to Microsoft authorization endpoint
 
 // Get current user
-router.get("/me", authMiddleware, (req, res) => {
-  res.json({ user: req.user });
+router.get("/me", authMiddleware, async (req, res, next) => {
+  try {
+    res.json({ user: await withOnboardingGate(req.user!) });
+  } catch (err) {
+    next(err);
+  }
 });
 
 router.get("/accessible-offices", authMiddleware, async (req, res, next) => {

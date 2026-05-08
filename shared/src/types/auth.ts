@@ -17,4 +17,8 @@ export interface AuthenticatedUser {
   activeOfficeId: string; // May differ from officeId if user switched offices
   mustChangePassword?: boolean;
   authMethod?: "local" | "dev";
+  onboardingCompletedAt?: string | null;
+  onboardingPendingCount?: number;
+  requiresOnboarding?: boolean;
+  cleanupUrl?: string;
 }

@@ -58,6 +58,10 @@ function workflowFamilyForRoute(workflowRoute: WorkflowRoute) {
 }
 
 function resolveWorkflowRoute(lead: typeof leads.$inferSelect): WorkflowRoute {
+  if (lead.projectType?.trim().toLowerCase() === "service") {
+    return "service";
+  }
+
   const preQualValue =
     typeof lead.preQualValue === "number"
       ? lead.preQualValue

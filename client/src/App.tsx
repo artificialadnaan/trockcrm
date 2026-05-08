@@ -1,5 +1,5 @@
 import { Routes, Route, Navigate, useLocation, useSearchParams } from "react-router-dom";
-import { Suspense, lazy, type ReactNode } from "react";
+import { Suspense, lazy, useEffect, type ReactNode } from "react";
 import { AuthProvider, useAuth } from "@/lib/auth";
 import { AuthEntryScreen } from "@/components/auth/auth-entry-screen";
 import { ForcePasswordChangeScreen } from "@/components/auth/force-password-change-screen";
@@ -124,7 +124,47 @@ function AuthGate({ children }: { children: ReactNode }) {
 
   if (!user) return <AuthEntryScreen />;
   if (user.mustChangePassword) return <ForcePasswordChangeScreen />;
+  if (user.requiresOnboarding && location.pathname !== "/onboarding-required") {
+    return <Navigate to="/onboarding-required" replace />;
+  }
   return <>{children}</>;
+}
+
+function OnboardingRequiredPage() {
+  const { user } = useAuth();
+  const cleanupUrl = user?.cleanupUrl || "http://localhost:5175";
+  const cleanupDestination = (() => {
+    const url = new URL(cleanupUrl, window.location.origin);
+    if (!url.pathname || url.pathname === "/") url.pathname = "/cleanup";
+    return url.toString();
+  })();
+
+  useEffect(() => {
+    if (user?.requiresOnboarding) {
+      window.location.assign(cleanupDestination);
+    }
+  }, [cleanupDestination, user?.requiresOnboarding]);
+
+  if (!user?.requiresOnboarding) return <Navigate to="/" replace />;
+
+  return (
+    <main className="grid min-h-screen place-items-center bg-slate-950 px-4 text-slate-100">
+      <section className="w-full max-w-lg rounded-lg border border-slate-700 bg-slate-900 p-6 shadow-2xl">
+        <p className="text-sm font-bold uppercase tracking-wide text-red-400">Onboarding required</p>
+        <h1 className="mt-3 text-3xl font-black">Finish cleanup before entering the CRM</h1>
+        <p className="mt-3 text-sm leading-6 text-slate-300">
+          Your migration cleanup queue has {user.onboardingPendingCount ?? 0} pending item{user.onboardingPendingCount === 1 ? "" : "s"}.
+          You will be redirected to the cleanup workspace.
+        </p>
+        <a
+          className="mt-6 inline-flex min-h-11 items-center justify-center rounded-md bg-red-700 px-4 text-sm font-bold text-white hover:bg-red-800"
+          href={cleanupDestination}
+        >
+          Open cleanup workspace
+        </a>
+      </section>
+    </main>
+  );
 }
 
 function RouteFallback() {
@@ -144,8 +184,10 @@ export function App() {
             <Routes>
             <Route path="/p/:token" element={<PublicPhotoViewerPage />} />
             <Route path="/photos/capture" element={<PhotoCapturePage />} />
+            <Route path="/onboarding-required" element={<OnboardingRequiredPage />} />
             <Route element={<AppShell />}>
               <Route path="/" element={<HomeDashboardPage />} />
+              <Route path="/dashboard" element={<HomeDashboardPage />} />
               <Route path="/dashboard/contracts-signed" element={<ContractsSignedPage />} />
               <Route path="/deals" element={<DealListPage />} />
               <Route path="/deals/board" element={<BoardAliasRedirect entity="deals" />} />

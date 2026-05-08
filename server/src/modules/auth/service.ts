@@ -45,6 +45,96 @@ export async function getUserByEmail(email: string) {
   return result[0] ?? null;
 }
 
+function tenantSchemaForOfficeSlug(slug: string | null | undefined) {
+  const normalized = slug?.trim().toLowerCase();
+  if (!normalized || !/^[a-z][a-z0-9_]*$/.test(normalized)) return null;
+  return `office_${normalized}`;
+}
+
+function cleanupAppUrl() {
+  return (
+    process.env.ONBOARDING_CLEANUP_URL ??
+    process.env.CLEANUP_APP_URL ??
+    "http://localhost:5175"
+  );
+}
+
+export async function getUserOnboardingGateStatus({
+  userId,
+  officeId,
+  role,
+}: {
+  userId: string;
+  officeId: string;
+  role: string;
+}) {
+  const roleBypassesGate = role === "admin" || role === "director";
+  if (roleBypassesGate) {
+    return {
+      onboardingCompletedAt: null,
+      onboardingPendingCount: 0,
+      requiresOnboarding: false,
+      cleanupUrl: cleanupAppUrl(),
+    };
+  }
+
+  try {
+    const userResult = await pool.query<{
+      onboarding_completed_at: Date | string | null;
+      office_slug: string | null;
+    }>(
+      `
+        SELECT u.onboarding_completed_at, o.slug AS office_slug
+        FROM public.users u
+        LEFT JOIN public.offices o ON o.id = $2
+        WHERE u.id = $1
+        LIMIT 1
+      `,
+      [userId, officeId],
+    );
+    const userRow = userResult.rows[0];
+    const onboardingCompletedAt = userRow?.onboarding_completed_at
+      ? new Date(userRow.onboarding_completed_at).toISOString()
+      : null;
+    const schemaName = tenantSchemaForOfficeSlug(userRow?.office_slug);
+
+    let pendingCleanupCount = 0;
+    if (schemaName) {
+      const assignmentTable = await pool.query<{ exists: string | null }>(
+        "SELECT to_regclass($1) AS exists",
+        [`${schemaName}.cleanup_assignments`],
+      );
+      if (assignmentTable.rows[0]?.exists) {
+        const pendingResult = await pool.query<{ count: string }>(
+          `
+            SELECT count(*)::text AS count
+            FROM "${schemaName}".cleanup_assignments
+            WHERE assigned_to = $1
+              AND status = 'pending'
+          `,
+          [userId],
+        );
+        pendingCleanupCount = Number(pendingResult.rows[0]?.count ?? 0);
+      }
+    }
+
+    return {
+      onboardingCompletedAt,
+      onboardingPendingCount: pendingCleanupCount,
+      requiresOnboarding: !onboardingCompletedAt && pendingCleanupCount > 0,
+      cleanupUrl: cleanupAppUrl(),
+    };
+  } catch (error) {
+    console.error("[auth] onboarding gate status unavailable — failing closed", error);
+    return {
+      onboardingCompletedAt: null,
+      onboardingPendingCount: -1,
+      requiresOnboarding: true,
+      cleanupUrl: cleanupAppUrl(),
+    };
+  }
+}
+
 export async function buildAuthenticatedUser(userId: string) {
   const user = await getUserById(userId);
   if (!user || !user.isActive) return null;
