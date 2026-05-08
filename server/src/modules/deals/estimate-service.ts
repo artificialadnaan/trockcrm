@@ -30,6 +30,10 @@ function calcTotal(quantity: string | number, unitPrice: string | number): strin
   return (q * up).toFixed(2);
 }
 
+function roundToTwoDecimals(value: string | number): string {
+  return (Math.round((Number(value ?? 0) + Number.EPSILON) * 100) / 100).toFixed(2);
+}
+
 export async function getEstimate(tenantDb: TenantDb, dealId: string) {
   const sections = await tenantDb
     .select()
@@ -161,18 +165,26 @@ export async function createLineItem(
   const quantity = String(input.quantity ?? "1");
   const unitPrice = String(input.unitPrice ?? "0");
   const totalPrice = calcTotal(quantity, unitPrice);
+  const description = input.description.trim();
+  const displayOrder = input.displayOrder ?? 0;
 
   const result = await tenantDb
     .insert(estimateLineItems)
     .values({
+      dealId,
       sectionId,
-      description: input.description.trim(),
+      description,
+      label: description,
       quantity,
+      qty: roundToTwoDecimals(quantity),
       unit: input.unit ?? null,
       unitPrice,
+      rate: unitPrice,
       totalPrice,
+      total: totalPrice,
       notes: input.notes ?? null,
-      displayOrder: input.displayOrder ?? 0,
+      displayOrder,
+      sortOrder: displayOrder,
     })
     .returning();
 
@@ -197,10 +209,17 @@ export async function updateLineItem(
   const existingItem = existing.item;
 
   const updates: Record<string, any> = {};
-  if (input.description !== undefined) updates.description = input.description.trim();
+  updates.dealId = existing.dealId;
+  if (input.description !== undefined) {
+    updates.description = input.description.trim();
+    updates.label = updates.description;
+  }
   if (input.unit !== undefined) updates.unit = input.unit;
   if (input.notes !== undefined) updates.notes = input.notes;
-  if (input.displayOrder !== undefined) updates.displayOrder = input.displayOrder;
+  if (input.displayOrder !== undefined) {
+    updates.displayOrder = input.displayOrder;
+    updates.sortOrder = input.displayOrder;
+  }
 
   // Recalculate totalPrice if quantity or unitPrice changed
   const newQuantity =
@@ -208,14 +227,21 @@ export async function updateLineItem(
   const newUnitPrice =
     input.unitPrice !== undefined ? String(input.unitPrice) : existingItem.unitPrice;
 
-  if (input.quantity !== undefined) updates.quantity = newQuantity;
-  if (input.unitPrice !== undefined) updates.unitPrice = newUnitPrice;
+  if (input.quantity !== undefined) {
+    updates.quantity = newQuantity;
+    updates.qty = roundToTwoDecimals(newQuantity);
+  }
+  if (input.unitPrice !== undefined) {
+    updates.unitPrice = newUnitPrice;
+    updates.rate = newUnitPrice;
+  }
 
   if (input.quantity !== undefined || input.unitPrice !== undefined) {
     updates.totalPrice = calcTotal(newQuantity, newUnitPrice);
+    updates.total = updates.totalPrice;
   }
 
-  if (Object.keys(updates).length === 0) return existingItem;
+  if (Object.keys(updates).length === 1) return existingItem;
 
   updates.updatedAt = new Date();
 

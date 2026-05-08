@@ -69,6 +69,9 @@ BEGIN
          IF OLD.office IS NOT NULL AND NEW.office IS DISTINCT FROM OLD.office THEN
            RAISE EXCEPTION ''office cannot be changed once set'';
          END IF;
+         IF OLD.office_code IS NOT NULL AND NEW.office_code IS DISTINCT FROM OLD.office_code THEN
+           RAISE EXCEPTION ''office_code cannot be changed once set'';
+         END IF;
 
          RETURN NEW;
        END
@@ -78,7 +81,7 @@ BEGIN
     EXECUTE format('DROP TRIGGER IF EXISTS leads_office_immutable ON %I.leads', tenant_schema);
     EXECUTE format(
       'CREATE TRIGGER leads_office_immutable
-       BEFORE UPDATE OF office ON %I.leads
+       BEFORE UPDATE OF office, office_code ON %I.leads
        FOR EACH ROW
        EXECUTE FUNCTION %I.prevent_leads_office_update()',
       tenant_schema,
@@ -371,6 +374,9 @@ BEGIN
     IF OLD.office IS NOT NULL AND NEW.office IS DISTINCT FROM OLD.office THEN
       RAISE EXCEPTION 'office cannot be changed once set';
     END IF;
+    IF OLD.office_code IS NOT NULL AND NEW.office_code IS DISTINCT FROM OLD.office_code THEN
+      RAISE EXCEPTION 'office_code cannot be changed once set';
+    END IF;
 
     RETURN NEW;
   END
@@ -378,7 +384,7 @@ BEGIN
 
   DROP TRIGGER IF EXISTS leads_office_immutable ON leads;
   CREATE TRIGGER leads_office_immutable
-    BEFORE UPDATE OF office ON leads
+    BEFORE UPDATE OF office, office_code ON leads
     FOR EACH ROW
     EXECUTE FUNCTION prevent_leads_office_update();
 

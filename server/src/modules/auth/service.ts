@@ -361,7 +361,6 @@ export async function ensureDevDemoWorkspace(
             assigned_rep_id = EXCLUDED.assigned_rep_id,
             status = EXCLUDED.status,
             source = EXCLUDED.source,
-            office = EXCLUDED.office,
             description = EXCLUDED.description,
             last_activity_at = EXCLUDED.last_activity_at,
             stage_entered_at = EXCLUDED.stage_entered_at,
@@ -396,7 +395,6 @@ export async function ensureDevDemoWorkspace(
         VALUES ($1, $2, $3, $4, $5, $6, $7, 'converted', $8, $13, $9, $10, $11, false, $12)
         ON CONFLICT (id) DO UPDATE
         SET status = 'converted',
-            office = EXCLUDED.office,
             converted_at = EXCLUDED.converted_at,
             is_active = false,
             updated_at = NOW()

@@ -8,6 +8,8 @@ const migrationPath = resolve(__dirname, "../../../../migrations/0104_redesign_a
 const migrationSql = existsSync(migrationPath) ? readFileSync(migrationPath, "utf8") : "";
 const dealContactsSchemaPath = resolve(__dirname, "../../../../shared/src/schema/tenant/deal-contacts.ts");
 const dealContactsSchema = existsSync(dealContactsSchemaPath) ? readFileSync(dealContactsSchemaPath, "utf8") : "";
+const dealsSchemaPath = resolve(__dirname, "../../../../shared/src/schema/tenant/deals.ts");
+const dealsSchema = existsSync(dealsSchemaPath) ? readFileSync(dealsSchemaPath, "utf8") : "";
 
 describe("redesign A2 tier 2 schema migration", () => {
   it("replays against current and future tenant schemas", () => {
@@ -22,6 +24,11 @@ describe("redesign A2 tier 2 schema migration", () => {
     expect(migrationSql).toContain("CREATE OR REPLACE FUNCTION %I.prevent_leads_office_update()");
     expect(migrationSql).toContain("SET search_path = pg_catalog, public");
     expect(migrationSql).toContain("office cannot be changed once set");
+  });
+
+  it("locks office_code with the lead office immutability trigger", () => {
+    expect(migrationSql).toContain("office_code cannot be changed once set");
+    expect(migrationSql).toContain("BEFORE UPDATE OF office, office_code");
   });
 
   it("adds project number support without inventing the product-owner format", () => {
@@ -95,5 +102,11 @@ describe("redesign A2 tier 2 schema migration", () => {
     );
     expect(dealContactsSchema).not.toContain("unique().on(table.dealId, table.contactId, table.roleOnDeal)");
     expect(dealContactsSchema).not.toContain("deal_contacts_one_primary_per_deal_uidx");
+  });
+
+  it("keeps the Drizzle deals schema aligned with the project_number partial unique index", () => {
+    expect(dealsSchema).toContain(
+      'uniqueIndex("deals_project_number_uidx").on(table.projectNumber).where(sql`${table.projectNumber} IS NOT NULL`)'
+    );
   });
 });

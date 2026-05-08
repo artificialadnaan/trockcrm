@@ -156,6 +156,18 @@ describe("ensureDevUserPrimaryOffice", () => {
     expect(authServiceSource).toContain(
       "source, office, description, last_activity_at, stage_entered_at, is_active, converted_at"
     );
-    expect(authServiceSource).toContain("office = EXCLUDED.office");
+    expect(authServiceSource).toContain("leadOffice,");
+  });
+
+  it("does not update demo lead office on bootstrap reruns", () => {
+    const conflictUpdates = authServiceSource.match(/ON CONFLICT \(id\) DO UPDATE[\s\S]*?updated_at = NOW\(\)/g) ?? [];
+    const leadConflictUpdates = conflictUpdates.filter((block) =>
+      block.includes("converted_at") || block.includes("stage_entered_at")
+    );
+
+    expect(leadConflictUpdates.length).toBeGreaterThanOrEqual(2);
+    for (const block of leadConflictUpdates) {
+      expect(block).not.toContain("office = EXCLUDED.office");
+    }
   });
 });

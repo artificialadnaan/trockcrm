@@ -55,3 +55,4 @@
 - 2026-05-07T18:49Z [track-b-agent] PR-OPEN — shared primitives + shell + harness ready for review (PR #154)
 - A2 CODEX-FIX 2026-05-07T23:35Z: PR #161 force-pushed with two data-integrity fixes (estimate alias backfill rewrite, deal_contacts unique key + dedupe). Two regression tests added. Fresh DB apply against post-fix SHA verifies the new constraint shape.
 - A2 CODEX-FIX-2 2026-05-08T03:17Z: PR #161 force-pushed with two more Codex fixes (Drizzle schema parity, bootstrap lead office). Two regression tests added. db:generate produced no migration artifact but is blocked by existing Drizzle config/meta setup before diffing.
+- A2 CODEX-FIX-3 2026-05-08T04:00Z: PR #161 force-pushed with four more Codex fixes (estimate alias write-path, bootstrap upsert, office_code immutability, project_number Drizzle parity). Four regression tests added.
