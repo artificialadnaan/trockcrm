@@ -2,6 +2,21 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api } from "../api/client";
 import type { RecordTypeSingular, SkipReason } from "../types/cleanup";
 
+function mainCrmApiUrl(path: string) {
+  const base = import.meta.env.VITE_MAIN_CRM_BASE_URL ?? "https://trockcrm.com";
+  return `${base.replace(/\/$/, "")}/api${path}`;
+}
+
+async function logoutEverywhere() {
+  await Promise.allSettled([
+    api.logout(),
+    fetch(mainCrmApiUrl("/auth/logout"), {
+      method: "POST",
+      credentials: "include",
+    }),
+  ]);
+}
+
 export function useMe() {
   return useQuery({ queryKey: ["me"], queryFn: api.me, retry: false });
 }
@@ -9,7 +24,7 @@ export function useMe() {
 export function useLogout() {
   const queryClient = useQueryClient();
   return useMutation({
-    mutationFn: api.logout,
+    mutationFn: logoutEverywhere,
     onSettled: () => {
       queryClient.clear();
       window.localStorage.clear();

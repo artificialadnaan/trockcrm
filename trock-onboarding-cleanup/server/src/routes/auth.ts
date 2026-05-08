@@ -4,13 +4,31 @@ import { requireAuth } from "../lib/auth.js";
 
 export const authRouter = Router();
 
-const isProduction = process.env.NODE_ENV === "production";
-const tokenCookieOptions = {
-  httpOnly: true,
-  secure: isProduction,
-  sameSite: isProduction ? "none" : "strict",
-  path: "/",
-} as const;
+export function logoutCookieClears() {
+  const isProduction = process.env.NODE_ENV === "production";
+  const sharedCookieDomain = process.env.AUTH_COOKIE_DOMAIN?.trim() || (isProduction ? ".trockcrm.com" : undefined);
+  const tokenOptions = {
+    httpOnly: true,
+    secure: isProduction,
+    sameSite: isProduction ? "lax" : "strict",
+    path: "/",
+    maxAge: 0,
+  } as const;
+  const csrfOptions = {
+    httpOnly: false,
+    secure: isProduction,
+    sameSite: isProduction ? "none" : "strict",
+    path: "/",
+    maxAge: 0,
+  } as const;
+
+  return [
+    { name: "token", options: sharedCookieDomain ? { ...tokenOptions, domain: sharedCookieDomain } : tokenOptions },
+    { name: "token", options: tokenOptions },
+    { name: "csrf_token", options: sharedCookieDomain ? { ...csrfOptions, domain: sharedCookieDomain } : csrfOptions },
+    { name: "csrf_token", options: csrfOptions },
+  ] as const;
+}
 
 authRouter.get("/me", requireAuth, async (req, res, next) => {
   try {
@@ -48,12 +66,8 @@ authRouter.get("/me", requireAuth, async (req, res, next) => {
 });
 
 authRouter.post("/logout", (_req, res) => {
-  res.clearCookie("token", tokenCookieOptions);
-  res.clearCookie("csrf_token", {
-    httpOnly: false,
-    secure: isProduction,
-    sameSite: isProduction ? "none" : "strict",
-    path: "/",
-  });
+  for (const clear of logoutCookieClears()) {
+    res.cookie(clear.name, "", clear.options);
+  }
   res.json({ success: true });
 });
