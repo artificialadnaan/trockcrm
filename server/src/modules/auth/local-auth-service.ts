@@ -13,6 +13,7 @@ const TEMP_PASSWORD_LENGTH = 18;
 const INVITE_TTL_HOURS = 72;
 const MAX_FAILED_LOGIN_ATTEMPTS = 5;
 const LOCKOUT_WINDOW_MINUTES = 15;
+const DEFAULT_CLEANUP_LOGIN_URL = "https://onboarding.trockcrm.com";
 
 export type LocalAuthStatus =
   | "not_invited"
@@ -84,34 +85,62 @@ function buildInviteEmailContent(input: {
   loginUrl: string;
   temporaryPassword: string | null;
 }): InviteEmailContent {
+  const firstName = input.displayName.trim().split(/\s+/)[0] || input.displayName;
   const passwordLine = input.temporaryPassword
-    ? `<p><strong>Temporary password:</strong> ${input.temporaryPassword}</p>`
-    : `<p><strong>Temporary password:</strong> Generated when the invite is sent.</p>`;
-
-  const passwordText = input.temporaryPassword
     ? `Temporary password: ${input.temporaryPassword}`
     : "Temporary password: Generated when the invite is sent.";
+
+  const steps = [
+    `Go to ${input.loginUrl}`,
+    "Log in with the credentials above",
+    "Review and clean up each record assigned to you — fill in missing fields, verify existing data",
+    "For records you can't fix (customer left, deal is dead, etc.), click Skip and select a reason",
+    'Use the "Mark historical" button to bulk-pass any old closed deals',
+    'When all records are complete, click "Complete onboarding" to get full CRM access',
+  ];
 
   return {
     recipientEmail: input.recipientEmail,
     loginUrl: input.loginUrl,
-    subject: "Your T Rock CRM login",
+    subject: "T Rock CRM — Data Cleanup Login",
     html: `
-      <p>Hi ${input.displayName},</p>
-      <p>Your temporary T Rock CRM login is ready.</p>
-      <p><strong>Email:</strong> ${input.recipientEmail}</p>
-      ${passwordLine}
-      <p>Log in at <a href="${input.loginUrl}">${input.loginUrl}</a>. Use this temporary password to complete your CRM onboarding cleanup.</p>
+      <p>Hi ${firstName},</p>
+      <p>Your T Rock CRM account is ready. Before you get full access to the CRM, you need to complete a data cleanup of the records assigned to you.</p>
+      <p><strong>Your login credentials:</strong></p>
+      <p>Email: ${input.recipientEmail}<br />${passwordLine}</p>
+      <p><strong>How to get started:</strong></p>
+      <ol>
+        ${steps.map((step) => `<li>${step.replace(input.loginUrl, `<a href="${input.loginUrl}">${input.loginUrl}</a>`)}</li>`).join("\n        ")}
+      </ol>
+      <p>If you have any issues logging in, try <a href="https://trockcrm.com">https://trockcrm.com</a> as an alternative entry point.</p>
+      <p>Questions? Reach out to Addy at 469-690-2240.</p>
+      <p>— T Rock CRM Team</p>
     `,
     text: [
-      `Hi ${input.displayName},`,
+      `Hi ${firstName},`,
       "",
-      "Your temporary T Rock CRM login is ready.",
+      "Your T Rock CRM account is ready. Before you get full access to the CRM, you need to complete a data cleanup of the records assigned to you.",
+      "",
+      "Your login credentials:",
+      "",
       `Email: ${input.recipientEmail}`,
-      passwordText,
-      `Log in at ${input.loginUrl}. Use this temporary password to complete your CRM onboarding cleanup.`,
+      passwordLine,
+      "",
+      "How to get started:",
+      "",
+      ...steps.map((step, index) => `${index + 1}. ${step}`),
+      "",
+      "If you have any issues logging in, try https://trockcrm.com as an alternative entry point.",
+      "",
+      "Questions? Reach out to Addy at 469-690-2240.",
+      "",
+      "— T Rock CRM Team",
     ].join("\n"),
   };
+}
+
+function inviteLoginUrl(inputUrl?: string): string {
+  return inputUrl ?? process.env.ONBOARDING_CLEANUP_URL ?? DEFAULT_CLEANUP_LOGIN_URL;
 }
 
 async function recordLocalAuthEvent(input: {
@@ -233,7 +262,7 @@ export async function previewUserInvite(input: {
 
   if (!user) throw new AppError(404, "User not found");
   if (!user.isActive) throw new AppError(400, "Cannot preview an invite for an inactive user");
-  const loginUrl = input.loginUrl ?? process.env.FRONTEND_URL ?? "http://localhost:5173";
+  const loginUrl = inviteLoginUrl(input.loginUrl);
   const preview = buildInviteEmailContent({
     displayName: user.displayName,
     recipientEmail: user.email,
@@ -314,7 +343,7 @@ export async function sendUserInvite(input: {
       },
     });
 
-  const loginUrl = input.loginUrl ?? process.env.FRONTEND_URL ?? "http://localhost:5173";
+  const loginUrl = inviteLoginUrl(input.loginUrl);
   const emailContent = buildInviteEmailContent({
     displayName: user.displayName,
     recipientEmail: user.email,
@@ -325,6 +354,7 @@ export async function sendUserInvite(input: {
     user.email,
     emailContent.subject,
     emailContent.html,
+    { text: emailContent.text },
   );
 
   if (!emailSent) {
