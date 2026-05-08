@@ -1,3 +1,4 @@
+import { sql } from "drizzle-orm";
 import {
   pgTable,
   uuid,
@@ -10,6 +11,7 @@ import {
   pgEnum,
 } from "drizzle-orm/pg-core";
 import { contactCategoryEnum } from "./contacts.js";
+import { users } from "../public/users.js";
 import { COMPANY_INDUSTRIES, COMPANY_VERIFICATION_STATUSES } from "../../types/enums.js";
 
 export const companyVerificationStatusEnum = pgEnum(
@@ -31,11 +33,13 @@ export const companies = pgTable(
     zip: varchar("zip", { length: 10 }),
     phone: varchar("phone", { length: 20 }),
     website: varchar("website", { length: 500 }),
+    ownerUserId: uuid("owner_user_id").references(() => users.id, { onDelete: "set null" }),
     industry: companyIndustryEnum("industry"),
     region: text("region"),
     domain: text("domain"),
     lastActivityAt: timestamp("last_activity_at", { withTimezone: true }),
     hubspotId: text("hubspot_id"),
+    hubspotCompanyId: text("hubspot_company_id"),
     procoreId: text("procore_id"),
     sourceRefs: jsonb("source_refs").$type<Record<string, unknown>>().default({}).notNull(),
     notes: text("notes"),
@@ -56,6 +60,8 @@ export const companies = pgTable(
     index("companies_name_idx").on(table.name),
     index("companies_category_idx").on(table.category),
     index("companies_industry_idx").on(table.industry),
+    index("companies_owner_user_idx").on(table.ownerUserId).where(sql`${table.ownerUserId} IS NOT NULL`),
+    index("companies_region_idx").on(table.region).where(sql`${table.region} IS NOT NULL`),
     index("companies_last_activity_idx").on(table.lastActivityAt),
     index("companies_verification_status_idx").on(table.companyVerificationStatus),
   ]
