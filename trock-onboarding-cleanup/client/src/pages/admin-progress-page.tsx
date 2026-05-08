@@ -12,6 +12,11 @@ function formatDate(value?: string | null) {
   return new Intl.DateTimeFormat(undefined, { dateStyle: "medium", timeStyle: "short" }).format(new Date(value));
 }
 
+function formatShortDate(value?: string | null) {
+  if (!value) return "No activity";
+  return new Intl.DateTimeFormat(undefined, { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" }).format(new Date(value));
+}
+
 function Metric({ label, value, detail }: { label: string; value: string | number; detail?: string }) {
   return (
     <div className="rounded-md border border-stone-300 bg-stone-50 p-4">
@@ -102,35 +107,80 @@ export function AdminProgressPage() {
               <div className="border-b border-stone-300 bg-stone-200 px-4 py-3">
                 <h2 className="font-black text-stone-950">Per-rep breakdown</h2>
               </div>
-              <div className="hidden grid-cols-[1fr_80px_100px_80px_100px_80px_170px_56px] gap-3 border-b border-stone-300 px-4 py-3 text-xs font-bold uppercase tracking-wide text-stone-600 lg:grid">
-                <span>Rep</span>
-                <span>Total</span>
-                <span>Completed</span>
-                <span>Skipped</span>
-                <span>Remaining</span>
-                <span>% Done</span>
-                <span>Last Activity</span>
-                <span />
+              <div className="hidden overflow-x-auto lg:block">
+                <table className="w-full min-w-[920px] table-fixed border-collapse">
+                  <colgroup>
+                    <col className="w-[28%]" />
+                    <col className="w-[9%]" />
+                    <col className="w-[11%]" />
+                    <col className="w-[10%]" />
+                    <col className="w-[11%]" />
+                    <col className="w-[10%]" />
+                    <col className="w-[17%]" />
+                    <col className="w-[4%]" />
+                  </colgroup>
+                  <thead>
+                    <tr className="border-b border-stone-300 text-left text-xs font-bold uppercase tracking-wide text-stone-600">
+                      <th className="px-4 py-3">Rep</th>
+                      <th className="px-3 py-3 text-right">Total</th>
+                      <th className="px-3 py-3 text-right">Completed</th>
+                      <th className="px-3 py-3 text-right">Skipped</th>
+                      <th className="px-3 py-3 text-right">Remaining</th>
+                      <th className="px-3 py-3 text-right">% Done</th>
+                      <th className="px-3 py-3 text-right">Last Activity</th>
+                      <th className="px-3 py-3" />
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {byUser.data?.map((row) => (
+                      <tr
+                        key={row.user.id}
+                        className="cursor-pointer border-b border-stone-200 last:border-0 hover:bg-stone-100"
+                        onClick={() => navigate(`/admin/progress/${row.user.id}`)}
+                      >
+                        <td className="px-4 py-4 align-middle">
+                          <p className="truncate font-bold text-stone-950" title={row.user.displayName}>{row.user.displayName}</p>
+                          <p className="mt-1 truncate text-sm text-stone-600" title={row.user.email}>{row.user.email}</p>
+                        </td>
+                        <td className="px-3 py-4 text-right align-middle text-sm tabular-nums text-stone-700">{row.total}</td>
+                        <td className="px-3 py-4 text-right align-middle text-sm tabular-nums text-stone-700">{row.completed}</td>
+                        <td className="px-3 py-4 text-right align-middle text-sm tabular-nums text-stone-700">{row.skipped}</td>
+                        <td className="px-3 py-4 text-right align-middle text-sm tabular-nums text-stone-700">{row.remaining}</td>
+                        <td className="px-3 py-4 text-right align-middle font-black tabular-nums text-stone-950">{row.percentDone}%</td>
+                        <td className="px-3 py-4 text-right align-middle text-sm text-stone-600" title={formatDate(row.lastActivityAt)}>{formatShortDate(row.lastActivityAt)}</td>
+                        <td className="px-3 py-4 align-middle">
+                          <ArrowRight className="h-4 w-4 text-stone-500" />
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
               </div>
-              {byUser.data?.map((row) => (
-                <button
-                  key={row.user.id}
-                  className="grid w-full gap-2 border-b border-stone-200 px-4 py-4 text-left last:border-0 hover:bg-stone-100 lg:grid-cols-[1fr_80px_100px_80px_100px_80px_170px_56px] lg:items-center"
-                  onClick={() => navigate(`/admin/progress/${row.user.id}`)}
-                >
-                  <span>
-                    <span className="block font-bold text-stone-950">{row.user.displayName}</span>
-                    <span className="block text-sm text-stone-600">{row.user.email}</span>
-                  </span>
-                  <span className="text-sm tabular-nums text-stone-700">{row.total}</span>
-                  <span className="text-sm tabular-nums text-stone-700">{row.completed}</span>
-                  <span className="text-sm tabular-nums text-stone-700">{row.skipped}</span>
-                  <span className="text-sm tabular-nums text-stone-700">{row.remaining}</span>
-                  <span className="font-black tabular-nums text-stone-950">{row.percentDone}%</span>
-                  <span className="text-sm text-stone-600">{formatDate(row.lastActivityAt)}</span>
-                  <ArrowRight className="h-4 w-4 text-stone-500" />
-                </button>
-              ))}
+
+              <div className="divide-y divide-stone-200 lg:hidden">
+                {byUser.data?.map((row) => (
+                  <button
+                    key={row.user.id}
+                    className="w-full px-4 py-4 text-left hover:bg-stone-100"
+                    onClick={() => navigate(`/admin/progress/${row.user.id}`)}
+                  >
+                    <div className="flex items-start justify-between gap-3">
+                      <span className="min-w-0">
+                        <span className="block truncate font-bold text-stone-950">{row.user.displayName}</span>
+                        <span className="block truncate text-sm text-stone-600">{row.user.email}</span>
+                      </span>
+                      <span className="shrink-0 font-black tabular-nums text-stone-950">{row.percentDone}%</span>
+                    </div>
+                    <div className="mt-3 grid grid-cols-4 gap-2 text-sm">
+                      <span><span className="block font-bold tabular-nums text-stone-950">{row.total}</span><span className="text-xs text-stone-500">Total</span></span>
+                      <span><span className="block font-bold tabular-nums text-stone-950">{row.completed}</span><span className="text-xs text-stone-500">Done</span></span>
+                      <span><span className="block font-bold tabular-nums text-stone-950">{row.skipped}</span><span className="text-xs text-stone-500">Skipped</span></span>
+                      <span><span className="block font-bold tabular-nums text-stone-950">{row.remaining}</span><span className="text-xs text-stone-500">Left</span></span>
+                    </div>
+                    <p className="mt-3 text-xs text-stone-600">Last activity: {formatShortDate(row.lastActivityAt)}</p>
+                  </button>
+                ))}
+              </div>
             </Panel>
 
             <Panel className="p-5">
