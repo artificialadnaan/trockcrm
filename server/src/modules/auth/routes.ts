@@ -21,7 +21,7 @@ import {
   isGraphAuthConfigured,
 } from "../email/graph-auth.js";
 import { getGraphTokenStatus, revokeGraphTokens } from "../email/graph-token-service.js";
-import { getTokenCookieOptions, isDevAuthEnabled } from "./http-config.js";
+import { getLogoutCookieClears, getTokenCookieOptions, isDevAuthEnabled } from "./http-config.js";
 import {
   clearStoredProcoreOauthTokens,
   getStoredProcoreOauthTokens,
@@ -241,12 +241,9 @@ router.post("/local/change-password", authMiddleware, async (req, res, next) => 
 
 // Logout
 router.post("/logout", (_req, res) => {
-  res.clearCookie("token", {
-    httpOnly: tokenCookieOptions.httpOnly,
-    secure: tokenCookieOptions.secure,
-    sameSite: tokenCookieOptions.sameSite,
-    domain: tokenCookieOptions.domain,
-  });
+  for (const clear of getLogoutCookieClears(process.env)) {
+    res.cookie(clear.name, "", clear.options);
+  }
   res.json({ success: true });
 });
 
