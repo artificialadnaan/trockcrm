@@ -62,7 +62,6 @@ function safeReturnTo(value: unknown) {
   const allowedOrigins = [
     normalizeOrigin(process.env.FRONTEND_URL),
     normalizeOrigin(process.env.ONBOARDING_CLEANUP_URL),
-    "https://trock-onboarding-cleanup-production.up.railway.app",
     "https://onboarding.trockcrm.com",
     "http://localhost:5173",
     "http://localhost:5175",
