@@ -68,6 +68,16 @@ export async function getUserOnboardingGateStatus({
   officeId: string;
   role: string;
 }) {
+  const roleBypassesGate = role === "admin" || role === "director";
+  if (roleBypassesGate) {
+    return {
+      onboardingCompletedAt: null,
+      onboardingPendingCount: 0,
+      requiresOnboarding: false,
+      cleanupUrl: cleanupAppUrl(),
+    };
+  }
+
   try {
     const userResult = await pool.query<{
       onboarding_completed_at: Date | string | null;
@@ -108,20 +118,18 @@ export async function getUserOnboardingGateStatus({
       }
     }
 
-    const roleBypassesGate = role === "admin" || role === "director";
     return {
       onboardingCompletedAt,
       onboardingPendingCount: pendingCleanupCount,
-      requiresOnboarding: !roleBypassesGate && !onboardingCompletedAt && pendingCleanupCount > 0,
+      requiresOnboarding: !onboardingCompletedAt && pendingCleanupCount > 0,
       cleanupUrl: cleanupAppUrl(),
     };
   } catch (error) {
-    // Keep the CRM login path available if the cleanup migration has not landed yet.
-    console.warn("[auth] onboarding gate status unavailable", error);
+    console.error("[auth] onboarding gate status unavailable — failing closed", error);
     return {
       onboardingCompletedAt: null,
-      onboardingPendingCount: 0,
-      requiresOnboarding: false,
+      onboardingPendingCount: -1,
+      requiresOnboarding: true,
       cleanupUrl: cleanupAppUrl(),
     };
   }
