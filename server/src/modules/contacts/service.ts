@@ -145,6 +145,25 @@ export function buildContactLastTouchAtSql(): SQL<Date | null> {
   ), '-infinity'::timestamptz)`;
 }
 
+export function buildContactIsPrimarySql(): SQL<boolean> {
+  return sql<boolean>`EXISTS (
+    SELECT 1
+    FROM contact_deal_associations cda
+    WHERE cda.contact_id = ${contacts.id}
+      AND cda.is_primary = true
+  )`;
+}
+
+export function buildContactLinkedDealsCountSql(): SQL<number> {
+  return sql<number>`(
+    SELECT COUNT(*)::int
+    FROM contact_deal_associations cda
+    INNER JOIN deals d ON d.id = cda.deal_id
+    WHERE cda.contact_id = ${contacts.id}
+      AND d.is_active = true
+  )`;
+}
+
 export function buildContactSortOrder(sortBy: ContactFilters["sortBy"], sortDir: ContactFilters["sortDir"] = "desc") {
   if (sortBy === "last_touch_at") {
     const lastTouchAt = buildContactLastTouchAtSql();
@@ -418,19 +437,8 @@ export async function getContacts(tenantDb: TenantDb, filters: ContactFilters) {
         isActive: contacts.isActive,
         createdAt: contacts.createdAt,
         updatedAt: contacts.updatedAt,
-        isPrimary: sql<boolean>`EXISTS (
-          SELECT 1
-          FROM contact_deal_associations cda
-          WHERE cda.contact_id = ${contacts.id}
-            AND cda.is_primary = true
-        )`,
-        linkedDealsCount: sql<number>`(
-          SELECT COUNT(*)::int
-          FROM contact_deal_associations cda
-          INNER JOIN deals d ON d.id = cda.deal_id
-          WHERE cda.contact_id = ${contacts.id}
-            AND d.is_active = true
-        )`,
+        isPrimary: buildContactIsPrimarySql(),
+        linkedDealsCount: buildContactLinkedDealsCountSql(),
         lastTouchAt: buildContactLastTouchAtSql(),
       })
       .from(contacts)
@@ -487,19 +495,8 @@ export async function getContactById(tenantDb: TenantDb, contactId: string) {
       isActive: contacts.isActive,
       createdAt: contacts.createdAt,
       updatedAt: contacts.updatedAt,
-      isPrimary: sql<boolean>`EXISTS (
-        SELECT 1
-        FROM contact_deal_associations cda
-        WHERE cda.contact_id = ${contacts.id}
-          AND cda.is_primary = true
-      )`,
-      linkedDealsCount: sql<number>`(
-        SELECT COUNT(*)::int
-        FROM contact_deal_associations cda
-        INNER JOIN deals d ON d.id = cda.deal_id
-        WHERE cda.contact_id = ${contacts.id}
-          AND d.is_active = true
-      )`,
+      isPrimary: buildContactIsPrimarySql(),
+      linkedDealsCount: buildContactLinkedDealsCountSql(),
       lastTouchAt: buildContactLastTouchAtSql(),
     })
     .from(contacts)
