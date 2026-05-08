@@ -47,18 +47,18 @@ export function useReassignmentUsers(enabled: boolean) {
   return useQuery({ queryKey: ["cleanup", "admin", "reassignment-users"], queryFn: api.reassignmentUsers, enabled });
 }
 
-export function useAdminProgressSummary(enabled: boolean) {
-  return useQuery({ queryKey: ["cleanup", "admin", "progress", "summary"], queryFn: api.adminProgressSummary, enabled });
+export function useAdminProgressSummary(enabled: boolean, refetchInterval?: number) {
+  return useQuery({ queryKey: ["cleanup", "admin", "progress", "summary"], queryFn: api.adminProgressSummary, enabled, refetchInterval });
 }
 
-export function useAdminProgressByUser(enabled: boolean) {
-  return useQuery({ queryKey: ["cleanup", "admin", "progress", "by-user"], queryFn: api.adminProgressByUser, enabled });
+export function useAdminProgressByUser(enabled: boolean, refetchInterval?: number) {
+  return useQuery({ queryKey: ["cleanup", "admin", "progress", "by-user"], queryFn: api.adminProgressByUser, enabled, refetchInterval });
 }
 
-export function useAdminProgressUser(userId: string | undefined, page: number, enabled: boolean) {
+export function useAdminProgressUser(userId: string | undefined, page: number, enabled: boolean, filters?: { status?: string; q?: string }) {
   return useQuery({
-    queryKey: ["cleanup", "admin", "progress", "user", userId, page],
-    queryFn: () => api.adminProgressUser(userId!, page),
+    queryKey: ["cleanup", "admin", "progress", "user", userId, page, filters?.status ?? "all", filters?.q ?? ""],
+    queryFn: () => api.adminProgressUser(userId!, page, filters),
     enabled: enabled && Boolean(userId),
   });
 }
@@ -114,6 +114,10 @@ export function useCleanupMutations(type?: RecordTypeSingular, id?: string) {
   return {
     patch: useMutation({
       mutationFn: (body: Record<string, unknown>) => api.patchRecord(type!, id!, body),
+      onSuccess: invalidate,
+    }),
+    note: useMutation({
+      mutationFn: (body: { note: string }) => api.createRecordNote(type!, id!, body),
       onSuccess: invalidate,
     }),
     skip: useMutation({

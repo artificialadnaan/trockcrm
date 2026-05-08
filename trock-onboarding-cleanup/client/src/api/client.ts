@@ -42,6 +42,11 @@ export const api = {
       method: "PATCH",
       body: JSON.stringify(body),
     }),
+  createRecordNote: (type: RecordTypeSingular, id: string, body: { note: string }) =>
+    request<{ status: string; id: string; type: RecordTypeSingular }>(`/api/cleanup/record/${type}/${id}/note`, {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
   skipRecord: (type: RecordTypeSingular, id: string, body: { skip_reason: SkipReason; skip_notes?: string }) =>
     request<{ status: string; id: string; type: RecordTypeSingular }>(`/api/cleanup/record/${type}/${id}/skip`, {
       method: "POST",
@@ -68,7 +73,12 @@ export const api = {
   reassignmentUsers: () => request<ReassignmentUser[]>("/api/cleanup/admin/reassignment-users"),
   adminProgressSummary: () => request<AdminProgressSummary>("/api/cleanup/admin/progress/summary"),
   adminProgressByUser: () => request<AdminProgressUserRow[]>("/api/cleanup/admin/progress/by-user"),
-  adminProgressUser: (userId: string, page: number) => request<AdminProgressUserDetail>(`/api/cleanup/admin/progress/user/${userId}?page=${page}`),
+  adminProgressUser: (userId: string, page: number, params?: { status?: string; q?: string }) => {
+    const search = new URLSearchParams({ page: String(page) });
+    if (params?.status && params.status !== "all") search.set("status", params.status);
+    if (params?.q) search.set("q", params.q);
+    return request<AdminProgressUserDetail>(`/api/cleanup/admin/progress/user/${userId}?${search}`);
+  },
   cleanupSummaryReport: () => request<CleanupSummaryReport>("/api/cleanup/admin/reports/cleanup-summary"),
   reassignmentRecords: (params: { type: string; q: string; owner: string; page: number }) =>
     request<ReassignmentRecordsResponse>(

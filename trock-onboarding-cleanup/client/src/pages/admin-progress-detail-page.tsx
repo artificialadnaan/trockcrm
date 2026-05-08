@@ -1,6 +1,6 @@
 import { Download, Loader2 } from "lucide-react";
 import { Navigate, useParams, useSearchParams } from "react-router-dom";
-import { Button, Panel } from "../components/ui";
+import { Button, Panel, Select, TextInput } from "../components/ui";
 import { useAdminProgressUser, useMe } from "../hooks/use-cleanup";
 
 function canUseAdminTools(role?: string) {
@@ -23,13 +23,25 @@ function actionLabel(action: string, metadata: unknown) {
   return action.split("_").join(" ");
 }
 
+function skipDetails(metadata: unknown) {
+  if (!metadata || typeof metadata !== "object") return null;
+  const value = metadata as { reason?: unknown; notes?: unknown };
+  if (!value.reason && !value.notes) return null;
+  return {
+    reason: value.reason ? String(value.reason).replace(/_/g, " ") : "unspecified",
+    notes: value.notes ? String(value.notes) : "",
+  };
+}
+
 export function AdminProgressDetailPage() {
   const { userId } = useParams();
   const [params, setParams] = useSearchParams();
   const page = Math.max(1, Number(params.get("page") ?? "1"));
+  const status = params.get("status") ?? "all";
+  const q = params.get("q") ?? "";
   const { data: user, isLoading: userLoading } = useMe();
   const adminEnabled = canUseAdminTools(user?.role);
-  const detail = useAdminProgressUser(userId, page, adminEnabled);
+  const detail = useAdminProgressUser(userId, page, adminEnabled, { status, q });
 
   if (userLoading) {
     return (
@@ -42,6 +54,21 @@ export function AdminProgressDetailPage() {
 
   const data = detail.data;
   const exportBase = `/api/cleanup/admin/progress/user/${userId}/export`;
+  const groupedEntries = data?.activity.entries.reduce<Record<string, typeof data.activity.entries>>((acc, entry) => {
+    const key = entry.recordType;
+    acc[key] = acc[key] ?? [];
+    acc[key].push(entry);
+    return acc;
+  }, {}) ?? {};
+  const updateParams = (next: Record<string, string>) => {
+    const merged = new URLSearchParams(params);
+    Object.entries(next).forEach(([key, value]) => {
+      if (!value || value === "all") merged.delete(key);
+      else merged.set(key, value);
+    });
+    merged.set("page", "1");
+    setParams(merged);
+  };
 
   return (
     <main className="mx-auto max-w-7xl px-4 py-6 sm:px-6 lg:py-8">
@@ -97,49 +124,90 @@ export function AdminProgressDetailPage() {
             <div className="border-b border-stone-300 bg-stone-200 px-4 py-3">
               <h2 className="font-black text-stone-950">Activity feed</h2>
             </div>
+            <div className="grid gap-3 border-b border-stone-200 p-4 md:grid-cols-[180px_1fr]">
+              <div>
+                <label className="text-xs font-bold uppercase tracking-wide text-stone-500">Filter</label>
+                <Select value={status} onChange={(event) => updateParams({ status: event.target.value })}>
+                  <option value="all">All</option>
+                  <option value="completed">Completed</option>
+                  <option value="skipped">Skipped</option>
+                  <option value="remaining">Remaining</option>
+                </Select>
+              </div>
+              <div>
+                <label className="text-xs font-bold uppercase tracking-wide text-stone-500">Search record</label>
+                <TextInput
+                  value={q}
+                  placeholder="Record name"
+                  onChange={(event) => updateParams({ q: event.target.value })}
+                />
+              </div>
+            </div>
             {data.activity.entries.length === 0 ? (
               <div className="p-6 text-sm text-stone-600">No cleanup activity has been recorded for this user.</div>
             ) : (
-              data.activity.entries.map((entry) => (
-                <div key={`${entry.timestamp}-${entry.recordId}-${entry.action}`} className="border-b border-stone-200 px-4 py-4 last:border-0">
-                  <div className="flex flex-col gap-1 md:flex-row md:items-start md:justify-between">
-                    <div>
-                      <p className="font-bold text-stone-950">{entry.recordName}</p>
-                      <p className="text-sm text-stone-600">{entry.recordType} · {actionLabel(entry.action, entry.metadata)} · {entry.source}</p>
-                    </div>
-                    <p className="text-sm text-stone-600">{formatDate(entry.timestamp)}</p>
-                  </div>
-                  {fieldChanges(entry.fieldChanges).length > 0 ? (
-                    <div className="mt-3 overflow-x-auto">
-                      <table className="min-w-full text-left text-xs">
-                        <thead className="text-stone-500">
-                          <tr>
-                            <th className="py-1 pr-4">Field</th>
-                            <th className="py-1 pr-4">Before</th>
-                            <th className="py-1 pr-4">After</th>
-                          </tr>
-                        </thead>
-                        <tbody>
-                          {fieldChanges(entry.fieldChanges).map((change, index) => (
-                            <tr key={`${change.field}-${index}`} className="border-t border-stone-200">
-                              <td className="py-1 pr-4 font-semibold text-stone-800">{change.field}</td>
-                              <td className="py-1 pr-4 text-stone-600">{String(change.before ?? "")}</td>
-                              <td className="py-1 pr-4 text-stone-950">{String(change.after ?? "")}</td>
-                            </tr>
-                          ))}
-                        </tbody>
-                      </table>
-                    </div>
-                  ) : null}
-                </div>
+              Object.entries(groupedEntries).map(([recordType, entries]) => (
+                <section key={recordType} className="border-b border-stone-300 last:border-0">
+                  <div className="bg-stone-100 px-4 py-2 text-xs font-black uppercase tracking-wide text-stone-600">{recordType}s</div>
+                  {entries.map((entry) => {
+                    const skip = skipDetails(entry.metadata);
+                    return (
+                      <div key={`${entry.timestamp}-${entry.recordId}-${entry.action}`} className="border-t border-stone-200 px-4 py-4 first:border-t-0">
+                        <div className="flex flex-col gap-1 md:flex-row md:items-start md:justify-between">
+                          <div>
+                            <p className="font-bold text-stone-950">{entry.recordName}</p>
+                            <p className="text-sm text-stone-600">{actionLabel(entry.action, entry.metadata)} · {entry.source}</p>
+                          </div>
+                          <p className="text-sm text-stone-600">{formatDate(entry.timestamp)}</p>
+                        </div>
+                        {skip ? (
+                          <div className="mt-3 rounded-md border border-amber-200 bg-amber-50 p-3 text-sm text-amber-950">
+                            <p className="font-bold">Skip reason: {skip.reason}</p>
+                            {skip.notes ? <p className="mt-1">{skip.notes}</p> : null}
+                          </div>
+                        ) : null}
+                        {fieldChanges(entry.fieldChanges).length > 0 ? (
+                          <div className="mt-3 overflow-x-auto">
+                            <table className="min-w-full text-left text-xs">
+                              <thead className="text-stone-500">
+                                <tr>
+                                  <th className="py-1 pr-4">Field</th>
+                                  <th className="py-1 pr-4">Before</th>
+                                  <th className="py-1 pr-4">After</th>
+                                </tr>
+                              </thead>
+                              <tbody>
+                                {fieldChanges(entry.fieldChanges).map((change, index) => (
+                                  <tr key={`${change.field}-${index}`} className="border-t border-stone-200">
+                                    <td className="py-1 pr-4 font-semibold text-stone-800">{change.field}</td>
+                                    <td className="py-1 pr-4 text-stone-600">{String(change.before ?? "")}</td>
+                                    <td className="py-1 pr-4 text-stone-950">{String(change.after ?? "")}</td>
+                                  </tr>
+                                ))}
+                              </tbody>
+                            </table>
+                          </div>
+                        ) : null}
+                      </div>
+                    );
+                  })}
+                </section>
               ))
             )}
           </Panel>
 
           <div className="mt-4 flex items-center justify-between">
-            <Button variant="secondary" disabled={page === 1} onClick={() => setParams({ page: String(Math.max(1, page - 1)) })}>Previous</Button>
+            <Button variant="secondary" disabled={page === 1} onClick={() => {
+              const next = new URLSearchParams(params);
+              next.set("page", String(Math.max(1, page - 1)));
+              setParams(next);
+            }}>Previous</Button>
             <span className="text-sm text-stone-600">Page {page}</span>
-            <Button variant="secondary" disabled={data.activity.entries.length < data.activity.pageSize} onClick={() => setParams({ page: String(page + 1) })}>Next</Button>
+            <Button variant="secondary" disabled={data.activity.entries.length < data.activity.pageSize} onClick={() => {
+              const next = new URLSearchParams(params);
+              next.set("page", String(page + 1));
+              setParams(next);
+            }}>Next</Button>
           </div>
         </>
       ) : null}

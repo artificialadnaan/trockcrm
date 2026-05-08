@@ -91,6 +91,16 @@ export type AdminProgressUserRow = {
   remaining: number;
   percentDone: number;
   lastActivityAt?: string | null;
+  completedLastHour: number;
+  typeBreakdown: Array<{ type: string; total: number; completed: number; skipped: number; remaining: number }>;
+  recentActions: Array<{
+    timestamp: string;
+    recordType: string;
+    recordId: string;
+    recordName: string;
+    action: string;
+    metadata: Record<string, unknown> | unknown;
+  }>;
 };
 
 export type AdminProgressUserDetail = {
@@ -134,7 +144,23 @@ export type CleanupSummaryReport = {
   dataQuality: {
     populatedEmptyFields: number;
     note: string;
+    metrics: Array<{
+      key: string;
+      label: string;
+      before: number;
+      after: number;
+      baselineMissing: number;
+      delta: number;
+      percentLift: number;
+    }>;
   };
+  leaderboard: {
+    mostCompleted: AdminProgressUserRow[];
+    mostSkipped: AdminProgressUserRow[];
+    notStarted: AdminProgressUserRow[];
+  };
+  timeline: Array<{ hour: string; actions: number; completed: number; skipped: number }>;
+  currentVelocity: { completedLastHour: number; skippedLastHour: number };
   adminQueue: Array<{ type: string; count: number }>;
   reassignments: Array<{ from: string; to: string; count: number }>;
   flaggedItems: Array<{ type: string; count: number }>;

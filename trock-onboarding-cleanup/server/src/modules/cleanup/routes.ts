@@ -10,6 +10,7 @@ import {
   bulkReassignRecords,
   cleanupSummaryReport,
   completeOnboarding,
+  createCleanupActivityNote,
   createProperty,
   flagDuplicate,
   historicalPass,
@@ -95,6 +96,16 @@ cleanupRouter.post("/record/:type/:id/skip", async (req, res) => {
   }
 });
 
+cleanupRouter.post("/record/:type/:id/note", async (req, res) => {
+  try {
+    const note = typeof req.body?.note === "string" ? req.body.note : "";
+    const result = await createCleanupActivityNote(req.params.type, req.params.id, req.user!, note);
+    return res.status(201).json(result);
+  } catch (error) {
+    return sendError(res, error);
+  }
+});
+
 cleanupRouter.post("/record/:type/:id/flag-duplicate", async (req, res) => {
   try {
     const result = await flagDuplicate(req.params.type, req.params.id, req.user!);
@@ -166,7 +177,10 @@ cleanupRouter.get("/admin/progress/by-user", requireRole("admin", "director"), a
 cleanupRouter.get("/admin/progress/user/:userId", requireRole("admin", "director"), async (req, res) => {
   try {
     const page = typeof req.query.page === "string" ? Number.parseInt(req.query.page, 10) : 1;
-    return res.json(await adminProgressUser(String(req.params.userId), Number.isFinite(page) ? page : 1));
+    return res.json(await adminProgressUser(String(req.params.userId), Number.isFinite(page) ? page : 1, {
+      status: typeof req.query.status === "string" ? req.query.status : undefined,
+      q: typeof req.query.q === "string" ? req.query.q : undefined,
+    }));
   } catch (error) {
     return sendError(res, error);
   }

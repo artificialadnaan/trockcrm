@@ -67,8 +67,9 @@ export function RecordEditPage() {
   const type = TYPE_TO_SINGULAR[typeParam];
   const id = useParams().id ?? "";
   const { data: record, isLoading } = useRecord(type, id);
-  const { patch, skip, flagDuplicate } = useCleanupMutations(type, id);
+  const { patch, skip, flagDuplicate, note } = useCleanupMutations(type, id);
   const [draft, setDraft] = useState<Record<string, string>>({});
+  const [cleanupNote, setCleanupNote] = useState("");
   const [skipOpen, setSkipOpen] = useState(false);
   const [propertyCreateOpen, setPropertyCreateOpen] = useState(false);
   const navigate = useNavigate();
@@ -90,12 +91,26 @@ export function RecordEditPage() {
       if (field in draft) body[field] = draft[field];
     }
     if (cleanupStatus) body.cleanup_status = cleanupStatus;
+    const noteText = cleanupNote.trim();
+    const finishSuccess = () => {
+      if (noteText) setCleanupNote("");
+      if (cleanupStatus) navigate(`/cleanup/${typeParam}`);
+    };
+    if (Object.keys(body).length === 0 && noteText) {
+      note.mutate({ note: noteText }, { onSuccess: finishSuccess });
+      return;
+    }
     patch.mutate(body, {
       onSuccess: () => {
-        if (cleanupStatus) navigate(`/cleanup/${typeParam}`);
+        if (noteText) {
+          note.mutate({ note: noteText }, { onSuccess: finishSuccess });
+          return;
+        }
+        finishSuccess();
       },
     });
   };
+  const savePending = patch.isPending || note.isPending;
 
   return (
     <main className="mx-auto max-w-7xl px-4 pb-28 pt-6 sm:px-6 lg:pb-8 lg:pt-8">
@@ -195,6 +210,15 @@ export function RecordEditPage() {
               Flag possible duplicate
             </Button>
           ) : null}
+          <div className="mt-5 space-y-2 border-t border-stone-200 pt-5">
+            <FieldLabel>Cleanup notes (visible in CRM after cleanup)</FieldLabel>
+            <TextArea
+              value={cleanupNote}
+              onChange={(event) => setCleanupNote(event.target.value)}
+              placeholder="Add context leadership should keep, like disconnected numbers, duplicate details, or who to follow up with."
+            />
+            <p className="text-xs text-stone-600">Saved notes become CRM activity notes on this record.</p>
+          </div>
         </Panel>
 
         <Panel className="p-5">
@@ -218,11 +242,11 @@ export function RecordEditPage() {
           <p className="text-xs leading-5 text-stone-600 sm:mr-auto sm:max-w-md">
             Skip only when the information is not available. Skipped records stay visible for leadership review.
           </p>
-          <Button variant="secondary" className="w-full sm:w-auto" disabled={patch.isPending} onClick={() => applyDraft()}>
+          <Button variant="secondary" className="w-full sm:w-auto" disabled={savePending} onClick={() => applyDraft()}>
             <Save className="h-4 w-4" />
             Save draft
           </Button>
-          <Button className="w-full sm:w-auto" disabled={patch.isPending} onClick={() => applyDraft("completed")}>
+          <Button className="w-full sm:w-auto" disabled={savePending} onClick={() => applyDraft("completed")}>
             Save and mark complete
           </Button>
           <Button variant="danger" className="w-full sm:w-auto" onClick={() => setSkipOpen(true)}>

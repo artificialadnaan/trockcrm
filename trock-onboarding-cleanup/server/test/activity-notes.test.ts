@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { pool } from "../src/lib/db.js";
-import { patchRecord, reassignRecord, skipRecord } from "../src/modules/cleanup/service.js";
+import { createCleanupActivityNote, patchRecord, reassignRecord, skipRecord } from "../src/modules/cleanup/service.js";
 
 type QueryCall = { sql: string; values?: unknown[] };
 
@@ -101,7 +101,7 @@ test("skipRecord writes a durable CRM activity note with reason, notes, and miss
   assert.equal(insert.values?.[1], actor.id);
   assert.equal(insert.values?.[2], "deal");
   assert.equal(insert.values?.[3], recordId);
-  assert.equal(insert.values?.[8], "Cleanup skip: Contact left company");
+  assert.equal(insert.values?.[8], "Cleanup: Skipped - Contact left company");
   assert.match(String(insert.values?.[9]), /Contact left in 2025/);
   assert.match(String(insert.values?.[9]), /Missing fields at time of skip: none/);
   assert.equal(client.calls.at(-1)?.sql, "COMMIT");
@@ -125,8 +125,9 @@ test("patchRecord writes a completion activity note only when completion changed
 
   const insert = activityInsert(client.calls);
   assert.ok(insert, "expected cleanup completion to insert a CRM activity note");
-  assert.equal(insert.values?.[8], "Cleanup completed");
+  assert.equal(insert.values?.[8], "Cleanup: Record updated");
   assert.match(String(insert.values?.[9]), /Fields updated: primary_contact_id \(added\)/);
+  assert.match(String(insert.values?.[9]), /primary_contact_id: empty -> 77777777-7777-4777-8777-777777777777/);
 });
 
 test("reassignRecord writes a durable CRM activity note with previous and new owner context", async () => {
@@ -142,7 +143,25 @@ test("reassignRecord writes a durable CRM activity note with previous and new ow
 
   const insert = activityInsert(client.calls);
   assert.ok(insert, "expected reassignment to insert a CRM activity note");
-  assert.equal(insert.values?.[8], "Cleanup reassignment");
+  assert.equal(insert.values?.[8], "Cleanup: Reassigned");
   assert.match(String(insert.values?.[9]), /Reassigned from Rep to New Rep during data cleanup/);
   assert.match(String(insert.values?.[9]), /Reason: relationship owner/);
+});
+
+test("createCleanupActivityNote writes a user-authored CRM activity note", async () => {
+  const originalConnect = pool.connect;
+  const client = fakeClient({ detailRows: [detailRow()] });
+  // @ts-expect-error test stub
+  pool.connect = async () => client;
+  try {
+    await createCleanupActivityNote("deal", recordId, actor, "Called customer. Number disconnected.");
+  } finally {
+    pool.connect = originalConnect;
+  }
+
+  const insert = activityInsert(client.calls);
+  assert.ok(insert, "expected manual cleanup note to insert a CRM activity note");
+  assert.equal(insert.values?.[8], "Cleanup: Note");
+  assert.match(String(insert.values?.[9]), /Called customer. Number disconnected./);
+  assert.equal(client.calls.at(-1)?.sql, "COMMIT");
 });

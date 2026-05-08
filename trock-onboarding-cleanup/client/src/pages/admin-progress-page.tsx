@@ -1,4 +1,4 @@
-import { ArrowRight, BarChart3, ClipboardList, Loader2, RefreshCw } from "lucide-react";
+import { AlertTriangle, ArrowRight, BarChart3, CheckCircle2, ClipboardList, Loader2, RefreshCw } from "lucide-react";
 import { Navigate, useNavigate } from "react-router-dom";
 import { Button, Panel } from "../components/ui";
 import { useAdminProgressByUser, useAdminProgressSummary, useMe } from "../hooks/use-cleanup";
@@ -40,8 +40,8 @@ function ProgressStack({ completed, skipped, remaining }: { completed: number; s
 export function AdminProgressPage() {
   const { data: user, isLoading: userLoading } = useMe();
   const adminEnabled = canUseAdminTools(user?.role);
-  const summary = useAdminProgressSummary(adminEnabled);
-  const byUser = useAdminProgressByUser(adminEnabled);
+  const summary = useAdminProgressSummary(adminEnabled, 30_000);
+  const byUser = useAdminProgressByUser(adminEnabled, 30_000);
   const navigate = useNavigate();
 
   if (userLoading) {
@@ -63,6 +63,7 @@ export function AdminProgressPage() {
           <p className="text-sm font-bold uppercase tracking-wide text-red-800">Admin</p>
           <h1 className="mt-2 text-3xl font-black text-stone-950">Cleanup progress</h1>
           <p className="mt-2 max-w-2xl text-sm leading-6 text-stone-600">Live cleanup status by rep and record type. Lowest completion rates are listed first.</p>
+          <p className="mt-1 text-xs font-semibold uppercase tracking-wide text-stone-500">Auto-refreshes every 30 seconds</p>
         </div>
         <Button variant="secondary" onClick={() => { summary.refetch(); byUser.refetch(); }}>
           <RefreshCw className="h-4 w-4" />
@@ -139,11 +140,34 @@ export function AdminProgressPage() {
                         onClick={() => navigate(`/admin/progress/${row.user.id}`)}
                       >
                         <td className="px-4 py-4 align-middle">
-                          <p className="truncate font-bold text-stone-950" title={row.user.displayName}>{row.user.displayName}</p>
+                          <div className="flex items-center gap-2">
+                            {row.total > 0 && row.completed === 0 && row.skipped === 0 ? <AlertTriangle className="h-4 w-4 text-amber-700" /> : null}
+                            {row.total > 0 && row.remaining === 0 ? <CheckCircle2 className="h-4 w-4 text-emerald-700" /> : null}
+                            <p className="truncate font-bold text-stone-950" title={row.user.displayName}>{row.user.displayName}</p>
+                          </div>
                           <p className="mt-1 truncate text-sm text-stone-600" title={row.user.email}>{row.user.email}</p>
+                          <div className="mt-3 flex flex-wrap gap-1">
+                            {row.typeBreakdown.map((type) => (
+                              <span key={type.type} className="rounded border border-stone-300 bg-stone-100 px-1.5 py-0.5 text-[11px] font-semibold text-stone-700">
+                                {type.type}: {type.completed}/{type.total}
+                              </span>
+                            ))}
+                          </div>
+                          {row.recentActions.length > 0 ? (
+                            <div className="mt-3 space-y-1">
+                              {row.recentActions.slice(0, 5).map((action) => (
+                                <p key={`${action.timestamp}-${action.recordId}-${action.action}`} className="truncate text-xs text-stone-600">
+                                  {action.action.replace(/_/g, " ")}: {action.recordName}
+                                </p>
+                              ))}
+                            </div>
+                          ) : null}
                         </td>
                         <td className="px-3 py-4 text-right align-middle text-sm tabular-nums text-stone-700">{row.total}</td>
-                        <td className="px-3 py-4 text-right align-middle text-sm tabular-nums text-stone-700">{row.completed}</td>
+                        <td className="px-3 py-4 text-right align-middle text-sm tabular-nums text-stone-700">
+                          {row.completed}
+                          <span className="mt-1 block text-[11px] text-stone-500">+{row.completedLastHour}/hr</span>
+                        </td>
                         <td className="px-3 py-4 text-right align-middle text-sm tabular-nums text-stone-700">{row.skipped}</td>
                         <td className="px-3 py-4 text-right align-middle text-sm tabular-nums text-stone-700">{row.remaining}</td>
                         <td className="px-3 py-4 text-right align-middle font-black tabular-nums text-stone-950">{row.percentDone}%</td>
@@ -166,7 +190,11 @@ export function AdminProgressPage() {
                   >
                     <div className="flex items-start justify-between gap-3">
                       <span className="min-w-0">
-                        <span className="block truncate font-bold text-stone-950">{row.user.displayName}</span>
+                        <span className="flex items-center gap-2 truncate font-bold text-stone-950">
+                          {row.total > 0 && row.completed === 0 && row.skipped === 0 ? <AlertTriangle className="h-4 w-4 text-amber-700" /> : null}
+                          {row.total > 0 && row.remaining === 0 ? <CheckCircle2 className="h-4 w-4 text-emerald-700" /> : null}
+                          {row.user.displayName}
+                        </span>
                         <span className="block truncate text-sm text-stone-600">{row.user.email}</span>
                       </span>
                       <span className="shrink-0 font-black tabular-nums text-stone-950">{row.percentDone}%</span>
@@ -177,6 +205,22 @@ export function AdminProgressPage() {
                       <span><span className="block font-bold tabular-nums text-stone-950">{row.skipped}</span><span className="text-xs text-stone-500">Skipped</span></span>
                       <span><span className="block font-bold tabular-nums text-stone-950">{row.remaining}</span><span className="text-xs text-stone-500">Left</span></span>
                     </div>
+                    <div className="mt-3 flex flex-wrap gap-1">
+                      {row.typeBreakdown.map((type) => (
+                        <span key={type.type} className="rounded border border-stone-300 bg-stone-100 px-1.5 py-0.5 text-[11px] font-semibold text-stone-700">
+                          {type.type}: {type.completed}/{type.total}
+                        </span>
+                      ))}
+                    </div>
+                    {row.recentActions.length > 0 ? (
+                      <div className="mt-3 space-y-1">
+                        {row.recentActions.slice(0, 5).map((action) => (
+                          <p key={`${action.timestamp}-${action.recordId}-${action.action}`} className="truncate text-xs text-stone-600">
+                            {action.action.replace(/_/g, " ")}: {action.recordName}
+                          </p>
+                        ))}
+                      </div>
+                    ) : null}
                     <p className="mt-3 text-xs text-stone-600">Last activity: {formatShortDate(row.lastActivityAt)}</p>
                   </button>
                 ))}
