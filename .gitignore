@@ -12,3 +12,7 @@ tests/audit/.env
 test-results/
 .playwright-cli/
 tmp/staging-dumps/*.env
+migration-snapshot/
+.agents/
+PRODUCT.md
+tmp/
