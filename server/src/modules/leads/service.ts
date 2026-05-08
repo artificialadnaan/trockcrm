@@ -98,6 +98,7 @@ export interface UpdateLeadInput {
   sourceDetail?: string | null;
   description?: string | null;
   officeCode?: string | null;
+  office?: "dfw" | "atl" | null;
   projectType?: string | null;
   projectTypeId?: string | null;
   bidDueDate?: string | null;
@@ -337,7 +338,7 @@ async function assertValidProjectType(
 function assertValidOfficeCode(value: string | null | undefined): "dfw" | "atl" {
   const normalized = String(value ?? "").trim().toLowerCase();
   if (normalized !== "dfw" && normalized !== "atl") {
-    throw new AppError(400, "officeCode must be 'dfw' or 'atl'");
+    throw new AppError(400, "officeCode must be 'dfw' or 'atl'", "INVALID_OFFICE_CODE");
   }
 
   return normalized;
@@ -1242,6 +1243,7 @@ export function createLeadService(
         sourceDetail: sourceWrite.sourceDetail,
         description: input.description ?? null,
         officeCode,
+        office: officeCode,
         projectType,
         projectTypeId: input.projectTypeId ?? null,
         bidDueDate: normalizedBidDueDate,
@@ -1328,6 +1330,29 @@ export function createLeadService(
 
     if (!existing.isActive && !isConvertedLead) {
       throw new AppError(409, "Hidden lead records are read-only");
+    }
+
+    const normalizedOfficeCode = input.officeCode !== undefined
+      ? assertValidOfficeCode(input.officeCode)
+      : undefined;
+    const normalizedOffice = input.office !== undefined
+      ? assertValidOfficeCode(input.office)
+      : undefined;
+
+    if (
+      normalizedOfficeCode !== undefined &&
+      existing.officeCode != null &&
+      normalizedOfficeCode !== existing.officeCode
+    ) {
+      throw new AppError(422, "office_code cannot be changed once set", "LEAD_OFFICE_IMMUTABLE");
+    }
+
+    if (
+      normalizedOffice !== undefined &&
+      existing.office != null &&
+      normalizedOffice !== existing.office
+    ) {
+      throw new AppError(422, "office cannot be changed once set", "LEAD_OFFICE_IMMUTABLE");
     }
 
     if (isConvertedLead) {
@@ -1495,7 +1520,7 @@ export function createLeadService(
     }
 
     if (input.officeCode !== undefined) {
-      updates.officeCode = assertValidOfficeCode(input.officeCode);
+      updates.officeCode = normalizedOfficeCode;
     }
 
     if (input.name !== undefined) updates.name = input.name;

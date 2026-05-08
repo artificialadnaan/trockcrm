@@ -1408,6 +1408,7 @@ export interface RepPerformanceSnapshotRow {
   winRate: number;
   avgDaysToClose: number;
   atRiskCount: number;
+  staleAccountCount: number;
   activityTotal: number;
   calls: number;
   emails: number;
@@ -1433,6 +1434,7 @@ export interface RepPerformancePeriodMetrics {
   winRate: number;
   avgDaysToClose: number;
   atRiskCount: number;
+  staleAccountCount: number;
   activityTotal: number;
   calls: number;
   emails: number;
@@ -1638,6 +1640,7 @@ export async function getRepPerformanceSnapshots(
       current.win_rate::numeric AS win_rate,
       current.avg_days_to_close::numeric AS avg_days_to_close,
       current.at_risk_count::int AS at_risk_count,
+      current.stale_account_count::int AS stale_account_count,
       current.activity_total::int AS activity_total,
       current.calls::int AS calls,
       current.emails::int AS emails,
@@ -1654,6 +1657,7 @@ export async function getRepPerformanceSnapshots(
       previous.win_rate::numeric AS previous_win_rate,
       previous.avg_days_to_close::numeric AS previous_avg_days_to_close,
       previous.at_risk_count::int AS previous_at_risk_count,
+      previous.stale_account_count::int AS previous_stale_account_count,
       previous.activity_total::int AS previous_activity_total,
       previous.calls::int AS previous_calls,
       previous.emails::int AS previous_emails,
@@ -1704,6 +1708,7 @@ export async function getRepPerformanceSnapshots(
           winRate: Number(row.previous_win_rate ?? 0),
           avgDaysToClose: Number(row.previous_avg_days_to_close ?? 0),
           atRiskCount: Number(row.previous_at_risk_count ?? 0),
+          staleAccountCount: Number(row.previous_stale_account_count ?? 0),
           activityTotal: Number(row.previous_activity_total ?? 0),
           calls: Number(row.previous_calls ?? 0),
           emails: Number(row.previous_emails ?? 0),
@@ -1725,6 +1730,7 @@ export async function getRepPerformanceSnapshots(
       winRate: Number(row.win_rate ?? 0),
       avgDaysToClose: Number(row.avg_days_to_close ?? 0),
       atRiskCount: Number(row.at_risk_count ?? 0),
+      staleAccountCount: Number(row.stale_account_count ?? 0),
       activityTotal: Number(row.activity_total ?? 0),
       calls: Number(row.calls ?? 0),
       emails: Number(row.emails ?? 0),

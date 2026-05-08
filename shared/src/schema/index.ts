@@ -81,6 +81,7 @@ export { companies, companyIndustryEnum, companyVerificationStatusEnum } from ".
 export { properties, propertyTypeEnum } from "./tenant/properties.js";
 export { contacts, contactCategoryEnum, contactRoleEnum } from "./tenant/contacts.js";
 export { contactDealAssociations } from "./tenant/contact-deal-associations.js";
+export { dealContacts, dealContactRoleEnum } from "./tenant/deal-contacts.js";
 export {
   leads,
   leadBudgetStatusEnum,
@@ -88,6 +89,7 @@ export {
   leadStatusEnum,
   leadPipelineTypeEnum,
   leadDisqualificationReasonEnum,
+  leadOfficeEnum,
 } from "./tenant/leads.js";
 export { leadStageHistory } from "./tenant/lead-stage-history.js";
 export {
@@ -104,6 +106,7 @@ export {
   directoryMergeStatusEnum,
 } from "./tenant/directory-merge-queue.js";
 export { emails, emailDirectionEnum } from "./tenant/emails.js";
+export { emailLinks } from "./tenant/email-links.js";
 export { emailThreadBindings } from "./tenant/email-thread-bindings.js";
 export { activities, activityTypeEnum, activitySourceEntityEnum } from "./tenant/activities.js";
 export {
@@ -116,6 +119,8 @@ export {
   photoCategoryEnum,
   procorePhotoSyncStatusEnum,
 } from "./tenant/files.js";
+export { fileLinks } from "./tenant/file-links.js";
+export { userStarredFiles } from "./tenant/user-starred-files.js";
 export { callRecordings } from "./tenant/call-recordings.js";
 export {
   estimateSourceDocuments,

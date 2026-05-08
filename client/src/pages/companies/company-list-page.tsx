@@ -1,315 +1,240 @@
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { Building2, ChevronRight, ChevronLeft, MapPin, Wrench } from "lucide-react";
+import { ArrowUpRight, Building2, ChevronLeft, ChevronRight, Globe2, Plus, Search } from "lucide-react";
+import { PageHeader } from "@/components/layout/page-header";
+import { MetricCard } from "@/components/shared/metric-card";
+import { ScopeToggle } from "@/components/shared/scope-toggle";
+import { USD, USD_COMPACT } from "@/components/shared/formatters";
+import { Button } from "@/components/ui/button";
+import { Card, CardContent } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from "@/components/ui/select";
-import { useCompanies } from "@/hooks/use-companies";
+import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
+import { useCompanies, type Company } from "@/hooks/use-companies";
+import { cn } from "@/lib/utils";
 
-const COMPANY_CATEGORY_LABELS: Record<string, string> = {
-  client: "Client",
-  subcontractor: "Subcontractor",
-  architect: "Architect",
-  property_manager: "Property Manager",
-  vendor: "Vendor",
+const INDUSTRY_LABELS: Record<string, string> = {
+  general_contractor: "General contractor",
+  construction_manager: "Construction manager",
+  property_owner: "Property owner",
+  property_management: "Property management",
+  reit: "REIT",
+  architecture_engineering: "Architecture / engineering",
   consultant: "Consultant",
+  insurance_restoration: "Insurance restoration",
   other: "Other",
 };
+
+const INDUSTRY_OPTIONS = [
+  { value: "all", label: "All" },
+  { value: "general_contractor", label: "GC" },
+  { value: "property_owner", label: "Owner" },
+  { value: "property_management", label: "Mgmt" },
+  { value: "insurance_restoration", label: "Restoration" },
+] as const;
+
+function numeric(value: string | number | null | undefined) {
+  return Number(value ?? 0);
+}
+
+function initials(name: string) {
+  return name
+    .split(/\s+/)
+    .filter(Boolean)
+    .slice(0, 2)
+    .map((part) => part[0]?.toUpperCase())
+    .join("") || "TR";
+}
+
+function formatLastActivity(value: string | null | undefined) {
+  if (!value) return "No activity";
+  return new Intl.DateTimeFormat("en-US", { month: "short", day: "numeric", year: "numeric" }).format(new Date(value));
+}
+
+function isStale(value: string | null | undefined) {
+  if (!value) return true;
+  return Date.now() - new Date(value).getTime() > 30 * 24 * 60 * 60 * 1000;
+}
+
+function companyLocation(company: Company) {
+  return [company.city, company.state].filter(Boolean).join(", ");
+}
 
 export function CompanyListPage() {
   const navigate = useNavigate();
   const [search, setSearch] = useState("");
-  const [category, setCategory] = useState("");
+  const [industry, setIndustry] = useState<(typeof INDUSTRY_OPTIONS)[number]["value"]>("all");
   const [page, setPage] = useState(1);
 
   const { companies, pagination, loading, error } = useCompanies({
     search: search || undefined,
-    category: category || undefined,
+    industry: industry === "all" ? undefined : industry,
     page,
     limit: 50,
   });
 
-  const handleSearch = (value: string) => {
-    setSearch(value);
-    setPage(1);
-  };
-
-  const handleCategory = (value: string) => {
-    setCategory(value === "all" ? "" : value);
-    setPage(1);
-  };
-
-  // Footer stats computed from current data
-  const tierOneCount = companies.filter((c) => c.category === "client").length;
-  const thirtyDaysAgo = Date.now() - 30 * 24 * 60 * 60 * 1000;
-  const newVendorCount = companies.filter(
-    (c) => new Date(c.createdAt).getTime() >= thirtyDaysAgo
-  ).length;
-  const totalDeals = companies.reduce((sum, c) => sum + c.dealCount, 0);
+  const totals = useMemo(() => {
+    const pipeline = companies.reduce((sum, company) => sum + numeric(company.pipelineValue), 0);
+    const stale = companies.filter((company) => isStale(company.lastActivityAt)).length;
+    const activeDeals = companies.reduce((sum, company) => sum + (company.activeDealsCount ?? company.dealCount ?? 0), 0);
+    return { pipeline, stale, activeDeals };
+  }, [companies]);
 
   return (
-    <div className="min-h-screen bg-white">
-      {/* Header */}
-      <div className="border-b border-gray-200 bg-white px-6 py-8">
-        <div className="flex items-start justify-between">
-          <div>
-            <div className="flex items-center gap-2 mb-2">
-              <Building2 className="h-3.5 w-3.5 text-brand-red" />
-              <span className="text-[10px] font-bold tracking-widest uppercase text-brand-red">
-                Directory
-              </span>
+    <div className="space-y-5">
+      <PageHeader
+        title="Companies"
+        description="Accounts, owners, contractors, and partner firms tied to active roofing work."
+        meta={`${pagination.total} account${pagination.total === 1 ? "" : "s"}`}
+        actions={{
+          primary: (
+            <Button onClick={() => navigate("/companies/new")}>
+              <Plus className="mr-2 h-4 w-4" />
+              New Company
+            </Button>
+          ),
+        }}
+      />
+
+      <div className="grid gap-4 md:grid-cols-3">
+        <MetricCard eyebrow="Total accounts" value={String(pagination.total)} badge={`${companies.length} shown`} caption="Directory" tone="green" accent="red" />
+        <MetricCard eyebrow="Active pipeline" value={USD_COMPACT(totals.pipeline)} badge={`${totals.activeDeals} deals`} caption="Open value" tone="blue" accent="blue" />
+        <MetricCard eyebrow="Untouched 30d+" value={String(totals.stale)} badge="Review" caption="Needs touch" tone="red" accent="red" />
+      </div>
+
+      <Card className="border-slate-200 bg-white shadow-none">
+        <CardContent className="space-y-4 p-4">
+          <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
+            <div className="flex flex-1 flex-col gap-3 sm:flex-row sm:items-center">
+              <div className="relative min-w-[240px] flex-1">
+                <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" />
+                <Input
+                  value={search}
+                  onChange={(event) => {
+                    setSearch(event.target.value);
+                    setPage(1);
+                  }}
+                  placeholder="Search accounts, cities, domains..."
+                  className="h-9 border-slate-200 pl-9"
+                />
+              </div>
+              <ScopeToggle
+                options={INDUSTRY_OPTIONS}
+                value={industry}
+                onChange={(value) => {
+                  setIndustry(value);
+                  setPage(1);
+                }}
+                ariaLabel="Industry filter"
+              />
             </div>
-            <h1 className="text-5xl font-black tracking-tighter uppercase text-gray-900 leading-none">
-              Companies
-            </h1>
-            <p className="mt-3 text-sm text-gray-500 max-w-md">
-              Manage your network of partner firms, trusted subcontractors, and material vendors.
+            <p className="text-[11px] font-bold uppercase tracking-[0.16em] text-slate-500">
+              {loading ? "Loading accounts" : `${pagination.total} results`}
             </p>
           </div>
-          <button
-            onClick={() => navigate("/companies/new")}
-            className="flex items-center gap-2 px-4 py-2.5 text-sm font-semibold text-white rounded-md"
-            style={{ background: "linear-gradient(135deg, #CC0000 0%, #990000 100%)" }}
-          >
-            <Building2 className="h-4 w-4" />
-            Add Company
-          </button>
-        </div>
-      </div>
 
-      {/* Filters Row */}
-      <div className="border-b border-gray-200 bg-gray-50 px-6 py-3">
-        <div className="flex items-center justify-between gap-4 flex-wrap">
-          <div className="flex items-center gap-2 flex-wrap">
-            <Input
-              placeholder="Search companies..."
-              value={search}
-              onChange={(e) => handleSearch(e.target.value)}
-              className="h-7 text-xs w-48 border-gray-300 bg-white"
-            />
-            <Select value={category || "all"} onValueChange={(v) => handleCategory(v ?? "all")}>
-              <SelectTrigger className="h-7 text-xs w-40 border-gray-300 bg-white">
-                <SelectValue placeholder="Industry: All" />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value="all">Industry: All</SelectItem>
-                {Object.entries(COMPANY_CATEGORY_LABELS).map(([key, label]) => (
-                  <SelectItem key={key} value={key}>
-                    {label}
-                  </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
-          </div>
-          {!loading && (
-            <span className="text-[11px] font-medium text-gray-500 uppercase tracking-wider">
-              Showing {pagination.total} result{pagination.total !== 1 ? "s" : ""}
-            </span>
-          )}
-        </div>
-      </div>
+          {error ? (
+            <div className="rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm font-medium text-red-700">{error}</div>
+          ) : null}
 
-      {/* Error State */}
-      {error && (
-        <div className="mx-6 mt-4 p-4 bg-red-50 text-red-700 rounded-lg text-sm border border-red-200">
-          {error}
-        </div>
-      )}
-
-      {/* Loading State */}
-      {loading && (
-        <div className="divide-y divide-gray-100">
-          {Array.from({ length: 8 }).map((_, i) => (
-            <div key={i} className={`flex items-center gap-4 px-6 py-5 ${i % 2 === 1 ? "bg-gray-50" : "bg-white"}`}>
-              <div className="w-1 self-stretch bg-gray-200 rounded" />
-              <div className="h-10 w-10 bg-gray-200 animate-pulse rounded" />
-              <div className="flex-1 space-y-2">
-                <div className="h-4 bg-gray-200 animate-pulse rounded w-48" />
-                <div className="h-3 bg-gray-100 animate-pulse rounded w-32" />
-              </div>
-              <div className="flex gap-8">
-                <div className="h-8 w-16 bg-gray-100 animate-pulse rounded" />
-                <div className="h-8 w-16 bg-gray-100 animate-pulse rounded" />
-                <div className="h-8 w-20 bg-gray-100 animate-pulse rounded" />
-              </div>
+          {loading ? (
+            <div className="space-y-2">
+              {Array.from({ length: 6 }).map((_, index) => (
+                <div key={index} className="h-16 animate-pulse rounded-lg bg-slate-100" />
+              ))}
             </div>
-          ))}
-        </div>
-      )}
+          ) : companies.length === 0 ? (
+            <div className="rounded-xl border border-dashed border-slate-300 px-6 py-14 text-center">
+              <Building2 className="mx-auto h-10 w-10 text-slate-300" />
+              <p className="mt-3 text-base font-black uppercase text-slate-950">No companies match this view</p>
+              <p className="mt-1 text-sm text-slate-500">Clear the search or switch the industry filter.</p>
+            </div>
+          ) : (
+            <Table>
+              <TableHeader>
+                <TableRow className="hover:bg-transparent">
+                  <TableHead className="text-[11px] font-black uppercase tracking-[0.16em] text-slate-500">Company</TableHead>
+                  <TableHead className="text-[11px] font-black uppercase tracking-[0.16em] text-slate-500">Industry</TableHead>
+                  <TableHead className="text-right text-[11px] font-black uppercase tracking-[0.16em] text-slate-500">Properties</TableHead>
+                  <TableHead className="text-right text-[11px] font-black uppercase tracking-[0.16em] text-slate-500">Contacts</TableHead>
+                  <TableHead className="text-right text-[11px] font-black uppercase tracking-[0.16em] text-slate-500">Active deals</TableHead>
+                  <TableHead className="text-right text-[11px] font-black uppercase tracking-[0.16em] text-slate-500">Pipeline</TableHead>
+                  <TableHead className="text-[11px] font-black uppercase tracking-[0.16em] text-slate-500">Last activity</TableHead>
+                  <TableHead className="w-10" />
+                </TableRow>
+              </TableHeader>
+              <TableBody>
+                {companies.map((company) => {
+                  const stale = isStale(company.lastActivityAt);
+                  return (
+                    <TableRow
+                      key={company.id}
+                      className="cursor-pointer border-slate-100"
+                      onClick={() => navigate(`/companies/${company.id}`)}
+                    >
+                      <TableCell className="min-w-[260px] py-3">
+                        <div className="flex items-center gap-3">
+                          <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg bg-slate-900 text-xs font-black text-white">
+                            {initials(company.name)}
+                          </span>
+                          <div className="min-w-0">
+                            <p className="truncate text-sm font-black uppercase text-slate-950">{company.name}</p>
+                            <div className="mt-1 flex flex-wrap items-center gap-2 text-xs text-slate-500">
+                              {companyLocation(company) ? <span>{companyLocation(company)}</span> : null}
+                              {company.domain ? (
+                                <span className="inline-flex items-center gap-1 font-mono">
+                                  <Globe2 className="h-3 w-3" />
+                                  {company.domain}
+                                </span>
+                              ) : null}
+                            </div>
+                          </div>
+                        </div>
+                      </TableCell>
+                      <TableCell>
+                        <span className="rounded-full bg-slate-100 px-2.5 py-1 text-xs font-bold text-slate-700">
+                          {company.industry ? INDUSTRY_LABELS[company.industry] ?? company.industry : "Unclassified"}
+                        </span>
+                      </TableCell>
+                      <TableCell className="text-right font-black tabular-nums">{company.propertiesCount ?? 0}</TableCell>
+                      <TableCell className="text-right font-black tabular-nums">{company.contactsCount ?? company.contactCount}</TableCell>
+                      <TableCell className="text-right">
+                        <span className="rounded-full bg-red-50 px-2.5 py-1 text-xs font-black text-brand-red ring-1 ring-red-100">
+                          {company.activeDealsCount ?? company.dealCount}
+                        </span>
+                      </TableCell>
+                      <TableCell className="text-right font-black tabular-nums text-slate-950">{USD(numeric(company.pipelineValue))}</TableCell>
+                      <TableCell>
+                        <span className={cn("text-xs font-bold", stale ? "text-brand-red" : "text-slate-600")}>
+                          {formatLastActivity(company.lastActivityAt)}
+                        </span>
+                      </TableCell>
+                      <TableCell>
+                        <ArrowUpRight className="h-4 w-4 text-slate-400" />
+                      </TableCell>
+                    </TableRow>
+                  );
+                })}
+              </TableBody>
+            </Table>
+          )}
+        </CardContent>
+      </Card>
 
-      {/* Empty State */}
-      {!loading && companies.length === 0 && (
-        <div className="text-center py-24">
-          <div className="inline-flex items-center justify-center h-16 w-16 bg-gray-100 rounded mb-4">
-            <Building2 className="h-8 w-8 text-gray-400" />
-          </div>
-          <p className="text-lg font-bold uppercase tracking-tight text-gray-900">No companies found</p>
-          <p className="text-sm text-gray-500 mt-1">Try adjusting your filters or create a new company.</p>
-        </div>
-      )}
-
-      {/* Company List */}
-      {!loading && companies.length > 0 && (
-        <div className="divide-y divide-gray-100">
-          {companies.map((company, idx) => {
-            const isClient = company.category === "client";
-            const categoryLabel = company.category
-              ? COMPANY_CATEGORY_LABELS[company.category] ?? company.category
-              : null;
-            const location = [company.city, company.state].filter(Boolean).join(", ");
-
-            return (
-              <div
-                key={company.id}
-                onClick={() => navigate(`/companies/${company.id}`)}
-                className={`flex items-center gap-4 px-6 py-5 cursor-pointer transition-colors group ${
-                  idx % 2 === 1 ? "bg-gray-50 hover:bg-gray-100" : "bg-white hover:bg-gray-50"
-                }`}
-              >
-                {/* Left border accent */}
-                <div
-                  className={`w-1 self-stretch rounded ${
-                    isClient ? "bg-brand-red" : "bg-gray-300"
-                  }`}
-                />
-
-                {/* Icon box */}
-                <div className="h-10 w-10 flex-shrink-0 bg-gray-100 flex items-center justify-center">
-                  <Building2 className="h-5 w-5 text-gray-500" />
-                </div>
-
-                {/* Name + meta */}
-                <div className="flex-1 min-w-0">
-                  <div className="flex items-center gap-2">
-                    <h3 className="text-xl font-bold tracking-tight uppercase text-gray-900 truncate">
-                      {company.name}
-                    </h3>
-                    {/* Active dot — show for clients */}
-                    {isClient && (
-                      <span className="flex-shrink-0 h-2 w-2 rounded-full bg-brand-red" />
-                    )}
-                  </div>
-                  <div className="flex items-center gap-3 mt-0.5">
-                    {categoryLabel && (
-                      <span className="flex items-center gap-1 text-[11px] text-gray-500">
-                        <Wrench className="h-3 w-3" />
-                        {categoryLabel}
-                      </span>
-                    )}
-                    {location && (
-                      <span className="flex items-center gap-1 text-[11px] text-gray-500">
-                        <MapPin className="h-3 w-3" />
-                        {location}
-                      </span>
-                    )}
-                  </div>
-                </div>
-
-                {/* Stats grid */}
-                <div className="hidden sm:flex items-center gap-8 flex-shrink-0">
-                  <div className="text-center">
-                    <div className="text-xl font-black tracking-tighter text-gray-900">
-                      {company.contactCount}
-                    </div>
-                    <div className="text-[9px] uppercase tracking-widest text-gray-400 font-medium">
-                      Contacts
-                    </div>
-                  </div>
-                  <div className="text-center">
-                    <div className="text-xl font-black tracking-tighter text-gray-900">
-                      {company.dealCount}
-                    </div>
-                    <div className="text-[9px] uppercase tracking-widest text-gray-400 font-medium">
-                      Active Deals
-                    </div>
-                  </div>
-                  <div className="text-center">
-                    <div className="text-xl font-black tracking-tighter text-brand-red">
-                      —
-                    </div>
-                    <div className="text-[9px] uppercase tracking-widest text-gray-400 font-medium">
-                      Revenue
-                    </div>
-                  </div>
-                </div>
-
-                {/* Chevron */}
-                <ChevronRight className="h-4 w-4 text-gray-400 flex-shrink-0 group-hover:text-brand-red transition-colors" />
-              </div>
-            );
-          })}
-        </div>
-      )}
-
-      {/* Pagination */}
-      {pagination.totalPages > 1 && (
-        <div className="flex items-center justify-between px-6 py-4 border-t border-gray-200 bg-white">
-          <p className="text-xs text-gray-500 uppercase tracking-wider">
+      {pagination.totalPages > 1 ? (
+        <div className="flex items-center justify-between">
+          <p className="text-sm font-medium text-slate-500">
             Page {pagination.page} of {pagination.totalPages}
           </p>
           <div className="flex gap-2">
-            <button
-              disabled={pagination.page <= 1}
-              onClick={() => setPage(pagination.page - 1)}
-              className="h-7 w-7 flex items-center justify-center border border-gray-200 rounded text-gray-500 hover:border-gray-400 disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
-            >
-              <ChevronLeft className="h-3.5 w-3.5" />
-            </button>
-            <button
-              disabled={pagination.page >= pagination.totalPages}
-              onClick={() => setPage(pagination.page + 1)}
-              className="h-7 w-7 flex items-center justify-center border border-gray-200 rounded text-gray-500 hover:border-gray-400 disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
-            >
-              <ChevronRight className="h-3.5 w-3.5" />
-            </button>
+            <Button variant="outline" size="icon" disabled={pagination.page <= 1} onClick={() => setPage((value) => Math.max(1, value - 1))} aria-label="Previous companies page">
+              <ChevronLeft className="h-4 w-4" />
+            </Button>
+            <Button variant="outline" size="icon" disabled={pagination.page >= pagination.totalPages} onClick={() => setPage((value) => Math.min(pagination.totalPages, value + 1))} aria-label="Next companies page">
+              <ChevronRight className="h-4 w-4" />
+            </Button>
           </div>
         </div>
-      )}
-
-      {/* Statistics Footer */}
-      {!loading && (
-        <div className="border-t-2 border-gray-900 bg-white">
-          <div className="grid grid-cols-2 sm:grid-cols-4 divide-x divide-gray-200">
-            <div className="px-6 py-6">
-              <div className="text-3xl font-black tracking-tighter text-gray-900">
-                {pagination.total}
-              </div>
-              <div className="text-[10px] uppercase tracking-widest text-gray-400 font-medium mt-1">
-                Total Network Entities
-              </div>
-            </div>
-            <div className="px-6 py-6">
-              <div className="text-3xl font-black tracking-tighter text-brand-red">
-                {tierOneCount}
-              </div>
-              <div className="text-[10px] uppercase tracking-widest text-gray-400 font-medium mt-1">
-                Tier 1 Subcontractors
-              </div>
-            </div>
-            <div className="px-6 py-6">
-              <div className="text-3xl font-black tracking-tighter text-gray-900">
-                {newVendorCount}
-              </div>
-              <div className="text-[10px] uppercase tracking-widest text-gray-400 font-medium mt-1">
-                New Vendors (Last 30d)
-              </div>
-            </div>
-            <div className="px-6 py-6">
-              <div className="text-3xl font-black tracking-tighter text-brand-red">
-                {totalDeals}
-              </div>
-              <div className="text-[10px] uppercase tracking-widest text-gray-400 font-medium mt-1">
-                Active Contract Value
-              </div>
-            </div>
-          </div>
-        </div>
-      )}
+      ) : null}
     </div>
   );
 }

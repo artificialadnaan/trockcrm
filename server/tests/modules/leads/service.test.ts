@@ -53,6 +53,7 @@ type FakeLeadRow = {
   salesRepId?: string | null;
   status: "open" | "converted" | "disqualified";
   officeCode?: string | null;
+  office?: string | null;
   projectTypeId?: string | null;
   projectType?: string | null;
   qualificationPayload?: Record<string, string | boolean | number | null>;
@@ -462,6 +463,263 @@ beforeEach(() => {
 });
 
 describe("lead service canonical progression", () => {
+  it("accepts officeCode update with same value in different casing", async () => {
+    const tenantDb = createFakeTenantDb({
+      id: "lead-1",
+      companyId: "company-1",
+      propertyId: "property-1",
+      primaryContactId: null,
+      name: "Palm Villas repaint",
+      stageId: newLeadStage.id,
+      assignedRepId: "rep-1",
+      status: "open",
+      source: "Referral",
+      officeCode: "dfw",
+      office: "dfw",
+      projectTypeId: "project-type-commercial",
+      qualificationPayload: {},
+      description: null,
+      stageEnteredAt: new Date("2026-04-12T15:00:00.000Z"),
+      convertedAt: null,
+      isActive: true,
+      createdAt: new Date("2026-04-12T15:00:00.000Z"),
+      updatedAt: new Date("2026-04-12T15:00:00.000Z"),
+    });
+    const service = createLeadService({
+      getStageById: pipelineMocks.getStageById as never,
+      getActiveProjectTypes: pipelineMocks.getActiveProjectTypes as never,
+      now: () => new Date("2026-04-15T15:00:00.000Z"),
+    });
+
+    const lead = await service.updateLead(
+      tenantDb as never,
+      "lead-1",
+      { officeCode: "DFW" },
+      "director",
+      "director-1"
+    );
+
+    expect(lead.officeCode).toBe("dfw");
+    expect(tenantDb.state.leads[0]?.officeCode).toBe("dfw");
+  });
+
+  it("accepts officeCode update with same value in different whitespace", async () => {
+    const tenantDb = createFakeTenantDb({
+      id: "lead-1",
+      companyId: "company-1",
+      propertyId: "property-1",
+      primaryContactId: null,
+      name: "Palm Villas repaint",
+      stageId: newLeadStage.id,
+      assignedRepId: "rep-1",
+      status: "open",
+      source: "Referral",
+      officeCode: "dfw",
+      office: "dfw",
+      projectTypeId: "project-type-commercial",
+      qualificationPayload: {},
+      description: null,
+      stageEnteredAt: new Date("2026-04-12T15:00:00.000Z"),
+      convertedAt: null,
+      isActive: true,
+      createdAt: new Date("2026-04-12T15:00:00.000Z"),
+      updatedAt: new Date("2026-04-12T15:00:00.000Z"),
+    });
+    const service = createLeadService({
+      getStageById: pipelineMocks.getStageById as never,
+      getActiveProjectTypes: pipelineMocks.getActiveProjectTypes as never,
+      now: () => new Date("2026-04-15T15:00:00.000Z"),
+    });
+
+    const lead = await service.updateLead(
+      tenantDb as never,
+      "lead-1",
+      { officeCode: "dfw " },
+      "director",
+      "director-1"
+    );
+
+    expect(lead.officeCode).toBe("dfw");
+    expect(tenantDb.state.leads[0]?.officeCode).toBe("dfw");
+  });
+
+  it("rejects invalid officeCode value with 400 not 422", async () => {
+    const tenantDb = createFakeTenantDb({
+      id: "lead-1",
+      companyId: "company-1",
+      propertyId: "property-1",
+      primaryContactId: null,
+      name: "Palm Villas repaint",
+      stageId: newLeadStage.id,
+      assignedRepId: "rep-1",
+      status: "open",
+      source: "Referral",
+      officeCode: "dfw",
+      office: "dfw",
+      projectTypeId: "project-type-commercial",
+      qualificationPayload: {},
+      description: null,
+      stageEnteredAt: new Date("2026-04-12T15:00:00.000Z"),
+      convertedAt: null,
+      isActive: true,
+      createdAt: new Date("2026-04-12T15:00:00.000Z"),
+      updatedAt: new Date("2026-04-12T15:00:00.000Z"),
+    });
+    const service = createLeadService({
+      getStageById: pipelineMocks.getStageById as never,
+      getActiveProjectTypes: pipelineMocks.getActiveProjectTypes as never,
+      now: () => new Date("2026-04-15T15:00:00.000Z"),
+    });
+
+    await expect(
+      service.updateLead(
+        tenantDb as never,
+        "lead-1",
+        { officeCode: "atlanta" },
+        "director",
+        "director-1"
+      )
+    ).rejects.toMatchObject({
+      statusCode: 400,
+      code: "INVALID_OFFICE_CODE",
+    });
+
+    expect(tenantDb.state.leads[0]?.officeCode).toBe("dfw");
+  });
+
+  it("still rejects valid-but-different officeCode with 422", async () => {
+    const tenantDb = createFakeTenantDb({
+      id: "lead-1",
+      companyId: "company-1",
+      propertyId: "property-1",
+      primaryContactId: null,
+      name: "Palm Villas repaint",
+      stageId: newLeadStage.id,
+      assignedRepId: "rep-1",
+      status: "open",
+      source: "Referral",
+      officeCode: "dfw",
+      office: "dfw",
+      projectTypeId: "project-type-commercial",
+      qualificationPayload: {},
+      description: null,
+      stageEnteredAt: new Date("2026-04-12T15:00:00.000Z"),
+      convertedAt: null,
+      isActive: true,
+      createdAt: new Date("2026-04-12T15:00:00.000Z"),
+      updatedAt: new Date("2026-04-12T15:00:00.000Z"),
+    });
+    const service = createLeadService({
+      getStageById: pipelineMocks.getStageById as never,
+      getActiveProjectTypes: pipelineMocks.getActiveProjectTypes as never,
+      now: () => new Date("2026-04-15T15:00:00.000Z"),
+    });
+
+    await expect(
+      service.updateLead(
+        tenantDb as never,
+        "lead-1",
+        { officeCode: "atl" },
+        "director",
+        "director-1"
+      )
+    ).rejects.toMatchObject({
+      statusCode: 422,
+      code: "LEAD_OFFICE_IMMUTABLE",
+      message: "office_code cannot be changed once set",
+    });
+
+    expect(tenantDb.state.leads[0]?.officeCode).toBe("dfw");
+  });
+
+  it("rejects office_code update with 422 not 500", async () => {
+    const tenantDb = createFakeTenantDb({
+      id: "lead-1",
+      companyId: "company-1",
+      propertyId: "property-1",
+      primaryContactId: null,
+      name: "Palm Villas repaint",
+      stageId: newLeadStage.id,
+      assignedRepId: "rep-1",
+      status: "open",
+      source: "Referral",
+      officeCode: "dfw",
+      office: "dfw",
+      projectTypeId: "project-type-commercial",
+      qualificationPayload: {},
+      description: null,
+      stageEnteredAt: new Date("2026-04-12T15:00:00.000Z"),
+      convertedAt: null,
+      isActive: true,
+      createdAt: new Date("2026-04-12T15:00:00.000Z"),
+      updatedAt: new Date("2026-04-12T15:00:00.000Z"),
+    });
+    const service = createLeadService({
+      getStageById: pipelineMocks.getStageById as never,
+      getActiveProjectTypes: pipelineMocks.getActiveProjectTypes as never,
+      now: () => new Date("2026-04-15T15:00:00.000Z"),
+    });
+
+    await expect(
+      service.updateLead(
+        tenantDb as never,
+        "lead-1",
+        { officeCode: "atl" },
+        "director",
+        "director-1"
+      )
+    ).rejects.toMatchObject({
+      statusCode: 422,
+      message: "office_code cannot be changed once set",
+    });
+
+    expect(tenantDb.state.leads[0]?.officeCode).toBe("dfw");
+  });
+
+  it("rejects office update with 422 not 500", async () => {
+    const tenantDb = createFakeTenantDb({
+      id: "lead-1",
+      companyId: "company-1",
+      propertyId: "property-1",
+      primaryContactId: null,
+      name: "Palm Villas repaint",
+      stageId: newLeadStage.id,
+      assignedRepId: "rep-1",
+      status: "open",
+      source: "Referral",
+      officeCode: "dfw",
+      office: "dfw",
+      projectTypeId: "project-type-commercial",
+      qualificationPayload: {},
+      description: null,
+      stageEnteredAt: new Date("2026-04-12T15:00:00.000Z"),
+      convertedAt: null,
+      isActive: true,
+      createdAt: new Date("2026-04-12T15:00:00.000Z"),
+      updatedAt: new Date("2026-04-12T15:00:00.000Z"),
+    });
+    const service = createLeadService({
+      getStageById: pipelineMocks.getStageById as never,
+      getActiveProjectTypes: pipelineMocks.getActiveProjectTypes as never,
+      now: () => new Date("2026-04-15T15:00:00.000Z"),
+    });
+
+    await expect(
+      service.updateLead(
+        tenantDb as never,
+        "lead-1",
+        { office: "atl" } as never,
+        "director",
+        "director-1"
+      )
+    ).rejects.toMatchObject({
+      statusCode: 422,
+      message: "office cannot be changed once set",
+    });
+
+    expect(tenantDb.state.leads[0]?.office).toBe("dfw");
+  });
+
   it("allows moving from new_lead to qualified_lead when intake prerequisites are complete", async () => {
     const tenantDb = createFakeTenantDb({
       id: "lead-1",
