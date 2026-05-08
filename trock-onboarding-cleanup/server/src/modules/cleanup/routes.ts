@@ -2,8 +2,13 @@ import { Router } from "express";
 import { requireAuth, requireRole } from "../../lib/auth.js";
 import {
   adminProgress,
+  adminProgressByUser,
+  adminProgressSummary,
+  adminProgressUser,
+  adminProgressUserExport,
   adminSkips,
   bulkReassignRecords,
+  cleanupSummaryReport,
   completeOnboarding,
   createProperty,
   flagDuplicate,
@@ -137,6 +142,52 @@ cleanupRouter.post("/properties", async (req, res) => {
 cleanupRouter.get("/admin/progress", requireRole("admin", "director"), async (_req, res) => {
   try {
     return res.json(await adminProgress());
+  } catch (error) {
+    return sendError(res, error);
+  }
+});
+
+cleanupRouter.get("/admin/progress/summary", requireRole("admin", "director"), async (_req, res) => {
+  try {
+    return res.json(await adminProgressSummary());
+  } catch (error) {
+    return sendError(res, error);
+  }
+});
+
+cleanupRouter.get("/admin/progress/by-user", requireRole("admin", "director"), async (_req, res) => {
+  try {
+    return res.json(await adminProgressByUser());
+  } catch (error) {
+    return sendError(res, error);
+  }
+});
+
+cleanupRouter.get("/admin/progress/user/:userId", requireRole("admin", "director"), async (req, res) => {
+  try {
+    const page = typeof req.query.page === "string" ? Number.parseInt(req.query.page, 10) : 1;
+    return res.json(await adminProgressUser(String(req.params.userId), Number.isFinite(page) ? page : 1));
+  } catch (error) {
+    return sendError(res, error);
+  }
+});
+
+cleanupRouter.get("/admin/progress/user/:userId/export", requireRole("admin", "director"), async (req, res) => {
+  try {
+    const format = typeof req.query.format === "string" ? req.query.format : "csv";
+    const userId = String(req.params.userId);
+    const exportResult = await adminProgressUserExport(userId, format);
+    res.setHeader("content-type", exportResult.contentType);
+    res.setHeader("content-disposition", `attachment; filename=\"cleanup-activity-${userId}.${format === "json" ? "json" : "csv"}\"`);
+    return res.send(exportResult.body);
+  } catch (error) {
+    return sendError(res, error);
+  }
+});
+
+cleanupRouter.get("/admin/reports/cleanup-summary", requireRole("admin", "director"), async (_req, res) => {
+  try {
+    return res.json(await cleanupSummaryReport());
   } catch (error) {
     return sendError(res, error);
   }

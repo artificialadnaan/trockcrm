@@ -63,6 +63,87 @@ export type ProgressResponse = {
   canClearGate: boolean;
 };
 
+export type AdminProgressSummary = {
+  total: number;
+  completed: number;
+  skipped: number;
+  remaining: number;
+  percentCompleted: number;
+  percentSkipped: number;
+  percentRemaining: number;
+  percentDone: number;
+  byType: Array<{
+    type: string;
+    total: number;
+    completed: number;
+    skipped: number;
+    remaining: number;
+    percentDone: number;
+  }>;
+};
+
+export type AdminProgressUserRow = {
+  user: ReassignmentUser;
+  total: number;
+  completed: number;
+  skipped: number;
+  remaining: number;
+  percentDone: number;
+  lastActivityAt?: string | null;
+};
+
+export type AdminProgressUserDetail = {
+  user: ReassignmentUser;
+  stats: {
+    total: number;
+    completed: number;
+    skipped: number;
+    remaining: number;
+    percentDone: number;
+    firstActionAt?: string | null;
+    lastActionAt?: string | null;
+  };
+  activity: {
+    page: number;
+    pageSize: number;
+    entries: Array<{
+      timestamp: string;
+      recordType: string;
+      recordId: string;
+      recordName: string;
+      action: string;
+      fieldChanges: Array<{ field: string; before: unknown; after: unknown }> | unknown;
+      metadata: Record<string, unknown> | unknown;
+      source: string;
+    }>;
+  };
+};
+
+export type CleanupSummaryReport = {
+  generatedAt: string;
+  overall: AdminProgressSummary & {
+    firstActionAt?: string | null;
+    lastActionAt?: string | null;
+  };
+  perRep: AdminProgressUserRow[];
+  skipAnalysis: {
+    byReason: Array<{ reason: string; count: number }>;
+    byType: Array<{ type: string; count: number }>;
+  };
+  dataQuality: {
+    populatedEmptyFields: number;
+    note: string;
+  };
+  adminQueue: Array<{ type: string; count: number }>;
+  reassignments: Array<{ from: string; to: string; count: number }>;
+  flaggedItems: Array<{ type: string; count: number }>;
+  auditCoverage: {
+    crmAuditLog: string;
+    cleanupAuditLog: string;
+    knownGap: string;
+  };
+};
+
 export type RecordDetail = {
   type: RecordTypeSingular;
   id: string;

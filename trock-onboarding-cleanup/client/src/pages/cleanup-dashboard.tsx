@@ -1,4 +1,4 @@
-import { ArrowRight, CheckCircle2, ClipboardList, Loader2, Shuffle } from "lucide-react";
+import { ArrowRight, BarChart3, CheckCircle2, ClipboardList, FileText, Loader2, Shuffle } from "lucide-react";
 import { useNavigate } from "react-router-dom";
 import { Button, Panel } from "../components/ui";
 import { useCleanupMutations, useMe, useProgress, useQueue } from "../hooks/use-cleanup";
@@ -57,6 +57,24 @@ export function CleanupDashboard() {
             <p className="mt-1 text-sm text-stone-600">Move admin-queue records or stale assignments to the correct rep.</p>
             <Button className="mt-5 w-full" onClick={() => navigate("/admin/reassign")}>
               Open reassignment
+              <ArrowRight className="h-4 w-4" />
+            </Button>
+          </Panel>
+          <Panel className="p-5">
+            <BarChart3 className="h-5 w-5 text-red-800" />
+            <h2 className="mt-3 text-xl font-black">Cleanup progress</h2>
+            <p className="mt-1 text-sm text-stone-600">Track rep completion, skips, remaining work, and last activity.</p>
+            <Button className="mt-5 w-full" onClick={() => navigate("/admin/progress")}>
+              Open progress
+              <ArrowRight className="h-4 w-4" />
+            </Button>
+          </Panel>
+          <Panel className="p-5">
+            <FileText className="h-5 w-5 text-red-800" />
+            <h2 className="mt-3 text-xl font-black">Cleanup report</h2>
+            <p className="mt-1 text-sm text-stone-600">Generate a printable leadership summary of cleanup outcomes.</p>
+            <Button className="mt-5 w-full" onClick={() => navigate("/admin/reports/cleanup-summary")}>
+              Open report
               <ArrowRight className="h-4 w-4" />
             </Button>
           </Panel>

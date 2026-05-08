@@ -47,6 +47,26 @@ export function useReassignmentUsers(enabled: boolean) {
   return useQuery({ queryKey: ["cleanup", "admin", "reassignment-users"], queryFn: api.reassignmentUsers, enabled });
 }
 
+export function useAdminProgressSummary(enabled: boolean) {
+  return useQuery({ queryKey: ["cleanup", "admin", "progress", "summary"], queryFn: api.adminProgressSummary, enabled });
+}
+
+export function useAdminProgressByUser(enabled: boolean) {
+  return useQuery({ queryKey: ["cleanup", "admin", "progress", "by-user"], queryFn: api.adminProgressByUser, enabled });
+}
+
+export function useAdminProgressUser(userId: string | undefined, page: number, enabled: boolean) {
+  return useQuery({
+    queryKey: ["cleanup", "admin", "progress", "user", userId, page],
+    queryFn: () => api.adminProgressUser(userId!, page),
+    enabled: enabled && Boolean(userId),
+  });
+}
+
+export function useCleanupSummaryReport(enabled: boolean) {
+  return useQuery({ queryKey: ["cleanup", "admin", "reports", "cleanup-summary"], queryFn: api.cleanupSummaryReport, enabled });
+}
+
 export function useReassignmentRecords(params: { type: string; q: string; owner: string; page: number }, enabled: boolean) {
   return useQuery({
     queryKey: ["cleanup", "admin", "reassignment-records", params],

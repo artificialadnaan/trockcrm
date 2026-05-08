@@ -1,4 +1,17 @@
-import type { CurrentUser, ProgressResponse, QueueResponse, ReassignmentRecordsResponse, ReassignmentUser, RecordDetail, RecordTypeSingular, SkipReason } from "../types/cleanup";
+import type {
+  AdminProgressSummary,
+  AdminProgressUserDetail,
+  AdminProgressUserRow,
+  CleanupSummaryReport,
+  CurrentUser,
+  ProgressResponse,
+  QueueResponse,
+  ReassignmentRecordsResponse,
+  ReassignmentUser,
+  RecordDetail,
+  RecordTypeSingular,
+  SkipReason,
+} from "../types/cleanup";
 
 const API_BASE = import.meta.env.VITE_API_BASE_URL ?? "";
 
@@ -53,6 +66,10 @@ export const api = {
       body: JSON.stringify(body),
     }),
   reassignmentUsers: () => request<ReassignmentUser[]>("/api/cleanup/admin/reassignment-users"),
+  adminProgressSummary: () => request<AdminProgressSummary>("/api/cleanup/admin/progress/summary"),
+  adminProgressByUser: () => request<AdminProgressUserRow[]>("/api/cleanup/admin/progress/by-user"),
+  adminProgressUser: (userId: string, page: number) => request<AdminProgressUserDetail>(`/api/cleanup/admin/progress/user/${userId}?page=${page}`),
+  cleanupSummaryReport: () => request<CleanupSummaryReport>("/api/cleanup/admin/reports/cleanup-summary"),
   reassignmentRecords: (params: { type: string; q: string; owner: string; page: number }) =>
     request<ReassignmentRecordsResponse>(
       `/api/cleanup/admin/reassignment-records?type=${encodeURIComponent(params.type)}&q=${encodeURIComponent(params.q)}&owner=${encodeURIComponent(params.owner)}&page=${params.page}`,

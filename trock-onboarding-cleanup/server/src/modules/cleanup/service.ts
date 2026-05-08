@@ -34,6 +34,26 @@ const OWNER_COLUMN_BY_TYPE = {
   company: "owner_id",
 } satisfies Record<RecordType, string>;
 const MAX_BULK_REASSIGN = 500;
+const ADMIN_PROGRESS_PAGE_SIZE = 50;
+
+export function buildProgressPercent(total: number, completed: number, skipped: number) {
+  if (total <= 0) return 100;
+  return Math.round(((completed + skipped) / total) * 100);
+}
+
+function normalizeAuditValue(value: unknown) {
+  return value === "" ? null : value;
+}
+
+export function normalizeFieldChanges(before: Record<string, unknown>, after: Record<string, unknown>, fields: string[]) {
+  return fields
+    .map((field) => ({
+      field,
+      before: normalizeAuditValue(before[field]),
+      after: normalizeAuditValue(after[field]),
+    }))
+    .filter((change) => change.before !== change.after);
+}
 
 const UPDATE_COLUMNS: Record<RecordType, Set<string>> = {
   deal: new Set([
@@ -219,6 +239,43 @@ function rowToDetail(type: RecordType, row: Record<string, unknown>): RecordDeta
     missingFields: missingFields(type, enriched, stage?.slug),
     hubspotExtraPropertyKeys: extraKeys(row.hubspot_extra_properties),
   };
+}
+
+async function writeCleanupAudit(
+  client: QueryClient,
+  input: {
+    type: RecordType;
+    recordId: string;
+    userId: string;
+    action: string;
+    fieldChanges?: Array<{ field: string; before: unknown; after: unknown }>;
+    metadata?: Record<string, unknown>;
+  },
+) {
+  const schema = tenant();
+  await client.query(
+    `
+      INSERT INTO ${quoteIdent(schema)}.cleanup_audit_log (
+        record_type, record_id, user_id, action, field_changes, metadata
+      )
+      VALUES ($1, $2, $3, $4, $5::jsonb, $6::jsonb)
+    `,
+    [
+      input.type,
+      input.recordId,
+      input.userId,
+      input.action,
+      JSON.stringify(input.fieldChanges ?? []),
+      JSON.stringify({ source: "cleanup app", ...(input.metadata ?? {}) }),
+    ],
+  );
+}
+
+function recordDisplayNameExpression(type: RecordType, alias = "record") {
+  if (type === "contact") {
+    return `COALESCE(NULLIF(trim(${alias}.first_name || ' ' || ${alias}.last_name), ''), ${alias}.email, ${alias}.id::text)`;
+  }
+  return `COALESCE(NULLIF(${alias}.name, ''), ${alias}.id::text)`;
 }
 
 async function getRecordDetailWithClient(client: QueryClient, type: RecordType, id: string, user: AuthContext) {
@@ -420,6 +477,136 @@ export async function adminProgress() {
   });
 }
 
+export async function adminProgressSummary() {
+  const schema = tenant();
+  const result = await pool.query<{
+    record_type: string;
+    total: string;
+    completed: string;
+    skipped: string;
+    remaining: string;
+  }>(
+    `
+      WITH assignment_records AS (
+        SELECT assignment.record_type, assignment.status
+        FROM ${quoteIdent(schema)}.cleanup_assignments assignment
+      )
+      SELECT
+        record_type,
+        count(*)::int AS total,
+        count(*) FILTER (WHERE status = 'completed')::int AS completed,
+        count(*) FILTER (WHERE status = 'skipped')::int AS skipped,
+        count(*) FILTER (WHERE COALESCE(status, 'pending') NOT IN ('completed', 'skipped'))::int AS remaining
+      FROM assignment_records
+      GROUP BY record_type
+      ORDER BY record_type
+    `,
+  );
+  const byType = result.rows.map((row) => {
+    const total = Number(row.total);
+    const completed = Number(row.completed);
+    const skipped = Number(row.skipped);
+    const remaining = Number(row.remaining);
+    return {
+      type: row.record_type,
+      total,
+      completed,
+      skipped,
+      remaining,
+      percentDone: buildProgressPercent(total, completed, skipped),
+    };
+  });
+  const totals = byType.reduce(
+    (acc, row) => ({
+      total: acc.total + row.total,
+      completed: acc.completed + row.completed,
+      skipped: acc.skipped + row.skipped,
+      remaining: acc.remaining + row.remaining,
+    }),
+    { total: 0, completed: 0, skipped: 0, remaining: 0 },
+  );
+  return {
+    ...totals,
+    percentCompleted: totals.total === 0 ? 0 : Math.round((totals.completed / totals.total) * 100),
+    percentSkipped: totals.total === 0 ? 0 : Math.round((totals.skipped / totals.total) * 100),
+    percentRemaining: totals.total === 0 ? 0 : Math.round((totals.remaining / totals.total) * 100),
+    percentDone: buildProgressPercent(totals.total, totals.completed, totals.skipped),
+    byType,
+  };
+}
+
+export async function adminProgressByUser() {
+  const schema = tenant();
+  const result = await pool.query<{
+    id: string;
+    email: string;
+    display_name: string;
+    role: string;
+    total: string;
+    completed: string;
+    skipped: string;
+    remaining: string;
+    last_activity_at: string | null;
+  }>(
+    `
+      SELECT
+        users.id,
+        users.email,
+        users.display_name,
+        users.role::text,
+        count(assignment.id)::int AS total,
+        count(assignment.id) FILTER (WHERE assignment.status = 'completed')::int AS completed,
+        count(assignment.id) FILTER (WHERE assignment.status = 'skipped')::int AS skipped,
+        count(assignment.id) FILTER (WHERE COALESCE(assignment.status, 'pending') NOT IN ('completed', 'skipped'))::int AS remaining,
+        max(activity.last_activity_at) AS last_activity_at
+      FROM public.users users
+      LEFT JOIN ${quoteIdent(schema)}.cleanup_assignments assignment ON assignment.assigned_to = users.id
+      LEFT JOIN LATERAL (
+        SELECT max(value) AS last_activity_at
+        FROM (
+          VALUES (assignment.updated_at)
+          UNION ALL
+          SELECT skip.created_at
+          FROM ${quoteIdent(schema)}.cleanup_skips skip
+          WHERE skip.skipped_by = users.id
+          UNION ALL
+          SELECT audit.created_at
+          FROM ${quoteIdent(schema)}.cleanup_audit_log audit
+          WHERE audit.user_id = users.id
+        ) AS timestamps(value)
+      ) activity ON true
+      WHERE users.is_active = true
+        AND users.role::text IN ('admin', 'director', 'rep')
+      GROUP BY users.id, users.email, users.display_name, users.role
+      ORDER BY
+        CASE WHEN count(assignment.id) = 0 THEN 100 ELSE round(((count(assignment.id) FILTER (WHERE assignment.status IN ('completed', 'skipped')))::numeric / count(assignment.id)) * 100) END ASC,
+        remaining DESC,
+        users.display_name
+    `,
+  );
+
+  return result.rows.map((row) => {
+    const total = Number(row.total);
+    const completed = Number(row.completed);
+    const skipped = Number(row.skipped);
+    const remaining = Number(row.remaining);
+    return {
+      user: {
+        id: row.id,
+        email: row.email,
+        displayName: row.display_name,
+        role: row.role,
+      },
+      total,
+      completed,
+      skipped,
+      remaining,
+      percentDone: buildProgressPercent(total, completed, skipped),
+      lastActivityAt: row.last_activity_at,
+    };
+  });
+}
+
 async function activeAssignableUser(client: QueryClient, userId: string) {
   assertUuid(userId, "newAssignedToUserId");
   const result = await client.query<{ id: string; email: string; display_name: string; role: string }>(
@@ -483,6 +670,21 @@ async function reassignRecordsInTransaction(type: RecordType, recordIds: string[
       throw error;
     }
     await assertRecordsExist(client, type, recordIds);
+    const beforeOwners = await client.query<{ id: string; owner_id: string | null; cleanup_assigned_to: string | null }>(
+      `
+        SELECT
+          record.id::text AS id,
+          record.${quoteIdent(ownerColumn)}::text AS owner_id,
+          assignment.assigned_to::text AS cleanup_assigned_to
+        FROM ${quoteIdent(schema)}.${quoteIdent(table)} record
+        LEFT JOIN ${quoteIdent(schema)}.cleanup_assignments assignment
+          ON assignment.record_type = $1
+         AND assignment.record_id = record.id
+        WHERE record.id = ANY($2::uuid[])
+      `,
+      [type, recordIds],
+    );
+    const beforeOwnerById = new Map(beforeOwners.rows.map((row) => [row.id, row]));
 
     const recordUpdate = await client.query(
       `
@@ -522,6 +724,24 @@ async function reassignRecordsInTransaction(type: RecordType, recordIds: string[
         newAssignedToUserId,
         actorUserId: actor.id,
         reason: reason.trim(),
+      });
+    }
+
+    for (const recordId of recordIds) {
+      const before = beforeOwnerById.get(recordId);
+      await writeCleanupAudit(client, {
+        type,
+        recordId,
+        userId: actor.id,
+        action: "record_reassigned",
+        fieldChanges: [
+          { field: ownerColumn, before: before?.owner_id ?? null, after: newAssignedToUserId },
+          { field: "cleanup_assignments.assigned_to", before: before?.cleanup_assigned_to ?? null, after: newAssignedToUserId },
+        ],
+        metadata: {
+          reason: reason?.trim() || null,
+          targetUserEmail: targetUser.email,
+        },
       });
     }
 
@@ -581,6 +801,239 @@ export async function reassignmentUsers() {
     displayName: row.display_name,
     role: row.role,
   }));
+}
+
+async function userForProgress(userId: string) {
+  assertUuid(userId, "userId");
+  const result = await pool.query<{ id: string; email: string; display_name: string; role: string }>(
+    `
+      SELECT id, email, display_name, role::text
+      FROM public.users
+      WHERE id = $1
+        AND is_active = true
+      LIMIT 1
+    `,
+    [userId],
+  );
+  return result.rows[0] ?? null;
+}
+
+export async function adminProgressUser(userId: string, page = 1) {
+  const schema = tenant();
+  const user = await userForProgress(userId);
+  if (!user) {
+    const error = new Error("User not found");
+    (error as Error & { status?: number }).status = 404;
+    throw error;
+  }
+  const offset = (Math.max(1, page) - 1) * ADMIN_PROGRESS_PAGE_SIZE;
+  const statsResult = await pool.query<{
+    total: string;
+    completed: string;
+    skipped: string;
+    remaining: string;
+    first_action_at: string | null;
+    last_action_at: string | null;
+  }>(
+    `
+      WITH assigned AS (
+        SELECT *
+        FROM ${quoteIdent(schema)}.cleanup_assignments
+        WHERE assigned_to = $1
+      ),
+      action_times AS (
+        SELECT updated_at AS occurred_at FROM assigned WHERE status IN ('completed', 'skipped')
+        UNION ALL
+        SELECT created_at AS occurred_at FROM ${quoteIdent(schema)}.cleanup_skips WHERE skipped_by = $1
+        UNION ALL
+        SELECT created_at AS occurred_at FROM ${quoteIdent(schema)}.cleanup_audit_log WHERE user_id = $1
+      )
+      SELECT
+        (SELECT count(*)::int FROM assigned) AS total,
+        (SELECT count(*)::int FROM assigned WHERE status = 'completed') AS completed,
+        (SELECT count(*)::int FROM assigned WHERE status = 'skipped') AS skipped,
+        (SELECT count(*)::int FROM assigned WHERE COALESCE(status, 'pending') NOT IN ('completed', 'skipped')) AS remaining,
+        min(action_times.occurred_at) AS first_action_at,
+        max(action_times.occurred_at) AS last_action_at
+      FROM action_times
+    `,
+    [userId],
+  );
+  const statsRow = statsResult.rows[0] ?? {
+    total: "0",
+    completed: "0",
+    skipped: "0",
+    remaining: "0",
+    first_action_at: null,
+    last_action_at: null,
+  };
+  const activityResult = await pool.query<{
+    occurred_at: string;
+    record_type: string;
+    record_id: string;
+    record_name: string | null;
+    action: string;
+    field_changes: unknown;
+    metadata: unknown;
+    source: string;
+  }>(
+    `
+      WITH records AS (
+        SELECT 'deal'::text AS record_type, id, ${recordDisplayNameExpression("deal")} AS name FROM ${quoteIdent(schema)}.deals record
+        UNION ALL
+        SELECT 'lead'::text AS record_type, id, ${recordDisplayNameExpression("lead")} AS name FROM ${quoteIdent(schema)}.leads record
+        UNION ALL
+        SELECT 'contact'::text AS record_type, id, ${recordDisplayNameExpression("contact")} AS name FROM ${quoteIdent(schema)}.contacts record
+        UNION ALL
+        SELECT 'company'::text AS record_type, id, ${recordDisplayNameExpression("company")} AS name FROM ${quoteIdent(schema)}.companies record
+      ),
+      feed AS (
+        SELECT
+          assignment.updated_at AS occurred_at,
+          assignment.record_type,
+          assignment.record_id,
+          assignment.status AS action,
+          '[]'::jsonb AS field_changes,
+          jsonb_build_object('assignmentReason', assignment.assignment_reason) AS metadata,
+          'cleanup app'::text AS source
+        FROM ${quoteIdent(schema)}.cleanup_assignments assignment
+        WHERE assignment.assigned_to = $1
+          AND assignment.status IN ('completed', 'skipped')
+        UNION ALL
+        SELECT
+          skip.created_at AS occurred_at,
+          skip.record_type,
+          skip.record_id,
+          'skipped' AS action,
+          '[]'::jsonb AS field_changes,
+          jsonb_build_object('reason', skip.skip_reason, 'notes', skip.skip_notes, 'missingFields', skip.missing_fields) AS metadata,
+          'cleanup app'::text AS source
+        FROM ${quoteIdent(schema)}.cleanup_skips skip
+        WHERE skip.skipped_by = $1
+        UNION ALL
+        SELECT
+          audit.created_at AS occurred_at,
+          audit.record_type,
+          audit.record_id,
+          audit.action,
+          audit.field_changes,
+          audit.metadata,
+          COALESCE(audit.metadata->>'source', 'cleanup app') AS source
+        FROM ${quoteIdent(schema)}.cleanup_audit_log audit
+        WHERE audit.user_id = $1
+        UNION ALL
+        SELECT
+          crm_audit.created_at AS occurred_at,
+          CASE crm_audit.table_name
+            WHEN 'deals' THEN 'deal'
+            WHEN 'leads' THEN 'lead'
+            WHEN 'contacts' THEN 'contact'
+            WHEN 'companies' THEN 'company'
+            ELSE crm_audit.table_name
+          END AS record_type,
+          crm_audit.record_id,
+          'field_updated' AS action,
+          (
+            SELECT COALESCE(jsonb_agg(jsonb_build_object('field', key, 'before', value->'old', 'after', value->'new')), '[]'::jsonb)
+            FROM jsonb_each(crm_audit.changes)
+          ) AS field_changes,
+          jsonb_build_object('sourceTable', 'audit_log') AS metadata,
+          'cleanup app'::text AS source
+        FROM ${quoteIdent(schema)}.audit_log crm_audit
+        WHERE crm_audit.table_name IN ('deals', 'contacts')
+          AND (
+            crm_audit.changed_by = $1
+            OR crm_audit.changes->'cleanup_completed_by'->>'new' = $1::text
+          )
+      )
+      SELECT
+        feed.occurred_at,
+        feed.record_type,
+        feed.record_id::text,
+        records.name AS record_name,
+        feed.action,
+        feed.field_changes,
+        feed.metadata,
+        feed.source
+      FROM feed
+      LEFT JOIN records ON records.record_type = feed.record_type AND records.id = feed.record_id
+      WHERE feed.occurred_at IS NOT NULL
+      ORDER BY feed.occurred_at DESC
+      LIMIT $2 OFFSET $3
+    `,
+    [userId, ADMIN_PROGRESS_PAGE_SIZE, offset],
+  );
+  const total = Number(statsRow.total);
+  const completed = Number(statsRow.completed);
+  const skipped = Number(statsRow.skipped);
+  const remaining = Number(statsRow.remaining);
+  return {
+    user: {
+      id: user.id,
+      email: user.email,
+      displayName: user.display_name,
+      role: user.role,
+    },
+    stats: {
+      total,
+      completed,
+      skipped,
+      remaining,
+      percentDone: buildProgressPercent(total, completed, skipped),
+      firstActionAt: statsRow.first_action_at,
+      lastActionAt: statsRow.last_action_at,
+    },
+    activity: {
+      page: Math.max(1, page),
+      pageSize: ADMIN_PROGRESS_PAGE_SIZE,
+      entries: activityResult.rows.map((row) => ({
+        timestamp: row.occurred_at,
+        recordType: row.record_type,
+        recordId: row.record_id,
+        recordName: row.record_name ?? row.record_id,
+        action: row.action,
+        fieldChanges: row.field_changes,
+        metadata: row.metadata,
+        source: row.source,
+      })),
+    },
+  };
+}
+
+function csvEscape(value: unknown) {
+  const text = value === null || value === undefined ? "" : String(value);
+  return `"${text.replace(/"/g, '""')}"`;
+}
+
+export async function adminProgressUserExport(userId: string, format = "csv") {
+  const detail = await adminProgressUser(userId, 1);
+  const entries = [...detail.activity.entries];
+  let page = 2;
+  while (entries.length > 0 && entries.length % ADMIN_PROGRESS_PAGE_SIZE === 0 && page <= 200) {
+    const next = await adminProgressUser(userId, page);
+    entries.push(...next.activity.entries);
+    if (next.activity.entries.length < ADMIN_PROGRESS_PAGE_SIZE) break;
+    page += 1;
+  }
+  if (format === "json") return { contentType: "application/json", body: JSON.stringify({ ...detail, activity: { ...detail.activity, entries } }, null, 2) };
+  const lines = [
+    ["timestamp", "record_type", "record_id", "record_name", "action", "field_changes", "metadata", "source"].join(","),
+    ...entries.map((entry) =>
+      [
+        entry.timestamp,
+        entry.recordType,
+        entry.recordId,
+        entry.recordName,
+        entry.action,
+        JSON.stringify(entry.fieldChanges ?? []),
+        JSON.stringify(entry.metadata ?? {}),
+        entry.source,
+      ]
+        .map(csvEscape)
+        .join(","),
+    ),
+  ];
+  return { contentType: "text/csv; charset=utf-8", body: `${lines.join("\n")}\n` };
 }
 
 export async function reassignmentRecords(filters: { type?: string; q?: string; owner?: string; page?: number }) {
@@ -685,6 +1138,131 @@ export async function reassignmentRecords(filters: { type?: string; q?: string; 
   };
 }
 
+export async function cleanupSummaryReport() {
+  const schema = tenant();
+  const [summary, byUser, skipReasons, skipTypes, dataQuality, adminQueue, reassignments, flagged] = await Promise.all([
+    adminProgressSummary(),
+    adminProgressByUser(),
+    pool.query<{ skip_reason: string | null; count: string }>(
+      `
+        SELECT skip_reason, count(*)::int AS count
+        FROM ${quoteIdent(schema)}.cleanup_skips
+        GROUP BY skip_reason
+        ORDER BY count DESC
+      `,
+    ),
+    pool.query<{ record_type: string; count: string }>(
+      `
+        SELECT record_type, count(*)::int AS count
+        FROM ${quoteIdent(schema)}.cleanup_skips
+        GROUP BY record_type
+        ORDER BY count DESC
+      `,
+    ),
+    pool.query<{ populated_fields: string }>(
+      `
+        SELECT count(*)::int AS populated_fields
+        FROM ${quoteIdent(schema)}.cleanup_audit_log audit
+        CROSS JOIN LATERAL jsonb_array_elements(audit.field_changes) AS change
+        WHERE COALESCE(change->>'before', '') = ''
+          AND COALESCE(change->>'after', '') <> ''
+      `,
+    ),
+    pool.query<{ record_type: string; count: string }>(
+      `
+        SELECT assignment.record_type, count(*)::int AS count
+        FROM ${quoteIdent(schema)}.cleanup_assignments assignment
+        JOIN public.users users ON users.id = assignment.assigned_to
+        WHERE users.role::text = 'admin'
+        GROUP BY assignment.record_type
+        ORDER BY assignment.record_type
+      `,
+    ),
+    pool.query<{ count: string; from_email: string | null; to_email: string | null }>(
+      `
+        SELECT
+          count(*)::int AS count,
+          from_user.email AS from_email,
+          to_user.email AS to_email
+        FROM ${quoteIdent(schema)}.cleanup_audit_log audit
+        LEFT JOIN LATERAL (
+          SELECT field_change->>'before' AS user_id
+          FROM jsonb_array_elements(audit.field_changes) field_change
+          WHERE field_change->>'field' = 'cleanup_assignments.assigned_to'
+          LIMIT 1
+        ) before_assignment ON true
+        LEFT JOIN LATERAL (
+          SELECT field_change->>'after' AS user_id
+          FROM jsonb_array_elements(audit.field_changes) field_change
+          WHERE field_change->>'field' = 'cleanup_assignments.assigned_to'
+          LIMIT 1
+        ) after_assignment ON true
+        LEFT JOIN public.users from_user ON from_user.id::text = before_assignment.user_id
+        LEFT JOIN public.users to_user ON to_user.id::text = after_assignment.user_id
+        WHERE audit.action = 'record_reassigned'
+        GROUP BY from_user.email, to_user.email
+        ORDER BY count DESC
+      `,
+    ),
+    pool.query<{ record_type: string; count: string }>(
+      `
+        SELECT record_type, count(*)::int AS count
+        FROM (
+          SELECT 'deal' AS record_type FROM ${quoteIdent(schema)}.deals WHERE needs_leadership_review = true AND COALESCE(cleanup_status, 'pending') <> 'completed'
+          UNION ALL
+          SELECT 'lead' AS record_type FROM ${quoteIdent(schema)}.leads WHERE needs_leadership_review = true AND COALESCE(cleanup_status, 'pending') <> 'completed'
+          UNION ALL
+          SELECT 'contact' AS record_type FROM ${quoteIdent(schema)}.contacts WHERE needs_leadership_review = true AND COALESCE(cleanup_status, 'pending') <> 'completed'
+          UNION ALL
+          SELECT 'company' AS record_type FROM ${quoteIdent(schema)}.companies WHERE needs_leadership_review = true AND COALESCE(cleanup_status, 'pending') <> 'completed'
+        ) flagged_records
+        GROUP BY record_type
+        ORDER BY record_type
+      `,
+    ),
+  ]);
+
+  const actionTimes = await pool.query<{ first_action_at: string | null; last_action_at: string | null }>(
+    `
+      WITH action_times AS (
+        SELECT updated_at AS occurred_at FROM ${quoteIdent(schema)}.cleanup_assignments WHERE status IN ('completed', 'skipped')
+        UNION ALL
+        SELECT created_at FROM ${quoteIdent(schema)}.cleanup_skips
+        UNION ALL
+        SELECT created_at FROM ${quoteIdent(schema)}.cleanup_audit_log
+      )
+      SELECT min(occurred_at) AS first_action_at, max(occurred_at) AS last_action_at
+      FROM action_times
+    `,
+  );
+
+  return {
+    generatedAt: new Date().toISOString(),
+    overall: {
+      ...summary,
+      firstActionAt: actionTimes.rows[0]?.first_action_at ?? null,
+      lastActionAt: actionTimes.rows[0]?.last_action_at ?? null,
+    },
+    perRep: byUser,
+    skipAnalysis: {
+      byReason: skipReasons.rows.map((row) => ({ reason: row.skip_reason ?? "unspecified", count: Number(row.count) })),
+      byType: skipTypes.rows.map((row) => ({ type: row.record_type, count: Number(row.count) })),
+    },
+    dataQuality: {
+      populatedEmptyFields: Number(dataQuality.rows[0]?.populated_fields ?? 0),
+      note: "Counts field changes logged by cleanup_audit_log where the previous value was empty and the new value is populated.",
+    },
+    adminQueue: adminQueue.rows.map((row) => ({ type: row.record_type, count: Number(row.count) })),
+    reassignments: reassignments.rows.map((row) => ({ from: row.from_email ?? "unassigned", to: row.to_email ?? "unknown", count: Number(row.count) })),
+    flaggedItems: flagged.rows.map((row) => ({ type: row.record_type, count: Number(row.count) })),
+    auditCoverage: {
+      crmAuditLog: "Existing CRM audit triggers capture field-level changes for deals, contacts, and activities.",
+      cleanupAuditLog: "Cleanup service writes field-level cleanup_audit_log entries for PATCH, skip, and reassignment actions.",
+      knownGap: "Legacy changes before cleanup_audit_log deployment rely on cleanup_assignments, cleanup_skips, and CRM audit_log where available.",
+    },
+  };
+}
+
 export async function recordDetail(typeValue: string, id: string, user: AuthContext) {
   return getRecordDetailWithClient(pool, assertRecordType(typeValue), id, user);
 }
@@ -762,6 +1340,21 @@ export async function patchRecord(typeValue: string, id: string, user: AuthConte
     }
 
     const updated = await getRecordDetailWithClient(client, type, id, user);
+    const changedFields = normalizeFieldChanges(
+      current.data,
+      updated?.data ?? {},
+      entries.map(([column]) => column),
+    );
+    await writeCleanupAudit(client, {
+      type,
+      recordId: id,
+      userId: user.id,
+      action: requestedComplete ? "completed" : "field_updated",
+      fieldChanges: changedFields,
+      metadata: {
+        completed: requestedComplete,
+      },
+    });
     await client.query("COMMIT");
     return updated;
   } catch (error) {
@@ -828,6 +1421,21 @@ export async function skipRecord(typeValue: string, id: string, user: AuthContex
       `,
       [type, id, user.id, reason, notes ?? null, JSON.stringify(detail.missingFields), JSON.stringify(detail.data)],
     );
+    await writeCleanupAudit(client, {
+      type,
+      recordId: id,
+      userId: user.id,
+      action: "skipped",
+      fieldChanges: [
+        { field: "cleanup_status", before: detail.data.cleanup_status ?? null, after: "skipped" },
+        { field: "skip_reason", before: detail.data.skip_reason ?? null, after: reason },
+      ],
+      metadata: {
+        reason,
+        notes: notes ?? null,
+        missingFields: detail.missingFields,
+      },
+    });
     await client.query("COMMIT");
     return { status: "skipped", id, type };
   } catch (error) {
