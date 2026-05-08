@@ -35,16 +35,18 @@ authRouter.get("/me", requireAuth, async (req, res, next) => {
     const result = await pool.query(
       `
         SELECT
-          id,
-          email,
-          display_name,
-          first_name,
-          last_name,
-          role::text,
-          onboarding_completed_at
+          users.id,
+          users.email,
+          users.display_name,
+          users.first_name,
+          users.last_name,
+          users.role::text,
+          users.onboarding_completed_at,
+          COALESCE(ula.is_enabled AND ula.must_change_password, false) AS must_change_password
         FROM public.users
-        WHERE id = $1
-          AND is_active = true
+        LEFT JOIN public.user_local_auth ula ON ula.user_id = users.id
+        WHERE users.id = $1
+          AND users.is_active = true
         LIMIT 1
       `,
       [req.user!.id],
@@ -59,6 +61,7 @@ authRouter.get("/me", requireAuth, async (req, res, next) => {
       lastName: user.last_name,
       role: user.role,
       onboardingCompletedAt: user.onboarding_completed_at,
+      mustChangePassword: user.must_change_password,
     });
   } catch (error) {
     return next(error);

@@ -10,6 +10,7 @@ export type CurrentUser = {
   lastName?: string | null;
   role: string;
   onboardingCompletedAt?: string | null;
+  mustChangePassword?: boolean;
 };
 
 export type MissingField = {

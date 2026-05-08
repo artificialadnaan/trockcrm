@@ -16,6 +16,10 @@ export function cleanupReturnTo(value: string | null | undefined = window.locati
   }
 }
 
+export function mainCrmPasswordChangeUrl() {
+  return mainCrmUrl();
+}
+
 function mainCrmLoginUrlForCurrentRoute() {
   const url = new URL(mainCrmUrl("/login"));
   url.searchParams.set("returnTo", cleanupReturnTo());
@@ -29,6 +33,11 @@ export function AppLayout() {
 
   if (!isLoading && (isError || !user)) {
     window.location.assign(mainCrmLoginUrlForCurrentRoute());
+    return null;
+  }
+
+  if (!isLoading && user?.mustChangePassword) {
+    window.location.replace(mainCrmPasswordChangeUrl());
     return null;
   }
 
