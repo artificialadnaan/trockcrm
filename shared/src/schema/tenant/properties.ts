@@ -54,7 +54,7 @@ export const properties = pgTable(
     index("properties_last_activity_idx").on(table.lastActivityAt),
     check(
       "properties_property_type_check",
-      sql`${table.propertyType} IS NULL OR ${table.propertyType} IN ('school', 'office', 'industrial', 'retail', 'healthcare', 'government', 'mixed-use')`
+      sql`${table.propertyType} IS NULL OR ${table.propertyType} IN ('school', 'office', 'industrial', 'retail', 'healthcare', 'government', 'mixed_use')`
     ),
   ]
 );
