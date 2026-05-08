@@ -52,6 +52,7 @@
 - E PHASE-1 MERGED-DEPLOYED 2026-05-08T16:57:36Z: PR #174 merged to main, Railway deploy verified. Phase 2 sub-tracks (E2-E5) cleared to spawn.
 - E2 CLAIM 2026-05-08T17:21:52Z: redesign/detail-page-deal, deal detail page polish using DetailPageShell. Worktree: trockcrm-redesign-detail-deal.
 - E2 PR-OPEN 2026-05-08T17:23:37Z: PR https://github.com/artificialadnaan/trockcrm/pull/177.
+- E2 MERGED-DEPLOYED 2026-05-08T17:55:35Z: PR #177 merged to main at 813ab9d; Railway API production deployment 851b5677-195d-411d-8759-e64e547deefe succeeded. Latest main deployment 839dcd5d-966b-49a9-8032-65fc7c0aebcc also succeeded after Hotfix 2 and includes E2. Production deal detail smoke passed for deal 2301faca-2ad1-5e21-a853-178c3da0c797.
 
 ## Track F — Specialty Pages
 - _no claims yet_
