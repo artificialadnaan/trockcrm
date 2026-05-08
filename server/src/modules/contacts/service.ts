@@ -136,12 +136,15 @@ export interface DedupCheckResult {
   }>;
 }
 
+const contactIdSql = sql.raw('"contacts"."id"');
+const contactLastContactedAtSql = sql.raw('"contacts"."last_contacted_at"');
+
 export function buildContactLastTouchAtSql(): SQL<Date | null> {
   return sql<Date | null>`NULLIF(GREATEST(
-    COALESCE(${contacts.lastContactedAt}, '-infinity'::timestamptz),
-    COALESCE((SELECT MAX(a.occurred_at) FROM activities a WHERE a.contact_id = ${contacts.id}), '-infinity'::timestamptz),
-    COALESCE((SELECT MAX(e.sent_at) FROM emails e WHERE e.contact_id = ${contacts.id}), '-infinity'::timestamptz),
-    COALESCE((SELECT MAX(t.updated_at) FROM tasks t WHERE t.contact_id = ${contacts.id}), '-infinity'::timestamptz)
+    COALESCE(${contactLastContactedAtSql}, '-infinity'::timestamptz),
+    COALESCE((SELECT MAX(a.occurred_at) FROM activities a WHERE a.contact_id = ${contactIdSql}), '-infinity'::timestamptz),
+    COALESCE((SELECT MAX(e.sent_at) FROM emails e WHERE e.contact_id = ${contactIdSql}), '-infinity'::timestamptz),
+    COALESCE((SELECT MAX(t.updated_at) FROM tasks t WHERE t.contact_id = ${contactIdSql}), '-infinity'::timestamptz)
   ), '-infinity'::timestamptz)`;
 }
 
@@ -149,7 +152,7 @@ export function buildContactIsPrimarySql(): SQL<boolean> {
   return sql<boolean>`EXISTS (
     SELECT 1
     FROM contact_deal_associations cda
-    WHERE cda.contact_id = ${contacts.id}
+    WHERE cda.contact_id = ${contactIdSql}
       AND cda.is_primary = true
   )`;
 }
@@ -159,7 +162,7 @@ export function buildContactLinkedDealsCountSql(): SQL<number> {
     SELECT COUNT(*)::int
     FROM contact_deal_associations cda
     INNER JOIN deals d ON d.id = cda.deal_id
-    WHERE cda.contact_id = ${contacts.id}
+    WHERE cda.contact_id = ${contactIdSql}
       AND d.is_active = true
   )`;
 }
