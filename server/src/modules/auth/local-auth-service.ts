@@ -101,7 +101,7 @@ function buildInviteEmailContent(input: {
       <p>Your temporary T Rock CRM login is ready.</p>
       <p><strong>Email:</strong> ${input.recipientEmail}</p>
       ${passwordLine}
-      <p>Log in at <a href="${input.loginUrl}">${input.loginUrl}</a>. You will be prompted to change your password immediately.</p>
+      <p>Log in at <a href="${input.loginUrl}">${input.loginUrl}</a>. Use this temporary password to complete your CRM onboarding cleanup.</p>
     `,
     text: [
       `Hi ${input.displayName},`,
@@ -109,7 +109,7 @@ function buildInviteEmailContent(input: {
       "Your temporary T Rock CRM login is ready.",
       `Email: ${input.recipientEmail}`,
       passwordText,
-      `Log in at ${input.loginUrl}. You will be prompted to change your password immediately.`,
+      `Log in at ${input.loginUrl}. Use this temporary password to complete your CRM onboarding cleanup.`,
     ].join("\n"),
   };
 }
@@ -149,7 +149,7 @@ export function getLocalAuthStatus(input: {
   if (!input.isEnabled) return "disabled";
   if (input.revokedAt) return "disabled";
   if (input.lockedUntil && input.lockedUntil.getTime() > Date.now()) return "disabled";
-  if (input.mustChangePassword && !input.lastLoginAt && input.inviteSentAt) {
+  if (!input.lastLoginAt && input.inviteSentAt) {
     return "invite_sent";
   }
   if (input.mustChangePassword) return "password_change_required";
@@ -280,7 +280,7 @@ export async function sendUserInvite(input: {
     .values({
       userId: user.id,
       passwordHash,
-      mustChangePassword: true,
+      mustChangePassword: false,
       isEnabled: true,
       inviteSentAt: currentTime,
       inviteSentByUserId: input.sentByUserId,
@@ -298,7 +298,7 @@ export async function sendUserInvite(input: {
       target: userLocalAuth.userId,
       set: {
         passwordHash,
-        mustChangePassword: true,
+        mustChangePassword: false,
         isEnabled: true,
         inviteSentAt: currentTime,
         inviteSentByUserId: input.sentByUserId,
@@ -412,6 +412,7 @@ export async function loginWithLocalPassword(input: {
       mustChangePassword: userLocalAuth.mustChangePassword,
       isEnabled: userLocalAuth.isEnabled,
       inviteExpiresAt: userLocalAuth.inviteExpiresAt,
+      lastLoginAt: userLocalAuth.lastLoginAt,
       failedLoginAttempts: userLocalAuth.failedLoginAttempts,
       lockedUntil: userLocalAuth.lockedUntil,
     })
@@ -465,7 +466,7 @@ export async function loginWithLocalPassword(input: {
   }
 
   if (
-    row.mustChangePassword
+    !row.lastLoginAt
     && row.inviteExpiresAt
     && row.inviteExpiresAt.getTime() <= currentTime.getTime()
   ) {

@@ -2,12 +2,30 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const dbMocks = vi.hoisted(() => ({
   limit: vi.fn(),
+  insert: vi.fn(() => ({
+    values: dbMocks.insertValues,
+  })),
+  insertValues: vi.fn(() => ({
+    onConflictDoUpdate: dbMocks.onConflictDoUpdate,
+  })),
+  onConflictDoUpdate: vi.fn(),
+  update: vi.fn(() => ({
+    set: dbMocks.updateSet,
+  })),
+  updateSet: vi.fn(() => ({
+    where: dbMocks.updateWhere,
+  })),
+  updateWhere: vi.fn(),
+  sendSystemEmail: vi.fn(),
 }));
 
 vi.mock("../../../src/db.js", () => ({
   db: {
     select: vi.fn(() => ({
       from: vi.fn(() => ({
+        where: vi.fn(() => ({
+          limit: dbMocks.limit,
+        })),
         innerJoin: vi.fn(() => ({
           where: vi.fn(() => ({
             limit: dbMocks.limit,
@@ -15,18 +33,30 @@ vi.mock("../../../src/db.js", () => ({
         })),
       })),
     })),
+    insert: dbMocks.insert,
+    update: dbMocks.update,
   },
 }));
 
 vi.mock("../../../src/lib/resend-client.js", () => ({
-  sendSystemEmail: vi.fn(),
+  sendSystemEmail: dbMocks.sendSystemEmail,
 }));
 
-const { loginWithLocalPassword } = await import("../../../src/modules/auth/local-auth-service.js");
+const { getLocalAuthStatus, hashPassword, loginWithLocalPassword, sendUserInvite } = await import("../../../src/modules/auth/local-auth-service.js");
 
-describe("local auth service role narrowing", () => {
+describe("local auth service", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    dbMocks.insertValues.mockImplementation(() => ({
+      onConflictDoUpdate: dbMocks.onConflictDoUpdate,
+    }));
+    dbMocks.update.mockImplementation(() => ({
+      set: dbMocks.updateSet,
+    }));
+    dbMocks.updateSet.mockImplementation(() => ({
+      where: dbMocks.updateWhere,
+    }));
+    dbMocks.sendSystemEmail.mockResolvedValue(true);
   });
 
   it("rejects field contractors before local password verification", async () => {
@@ -55,6 +85,87 @@ describe("local auth service role narrowing", () => {
     ).rejects.toMatchObject({
       statusCode: 403,
       message: "Local login is not available for this role",
+    });
+  });
+
+  it("sends temporary-password invites without forcing an immediate password change", async () => {
+    dbMocks.limit
+      .mockResolvedValueOnce([
+        {
+          id: "user-1",
+          email: "rep@example.com",
+          displayName: "Rep User",
+          isActive: true,
+        },
+      ])
+      .mockResolvedValueOnce([]);
+
+    await sendUserInvite({
+      userId: "user-1",
+      sentByUserId: "admin-1",
+      loginUrl: "https://trockcrm.com/login",
+    });
+
+    expect(dbMocks.insertValues).toHaveBeenNthCalledWith(
+      1,
+      expect.objectContaining({
+        userId: "user-1",
+        mustChangePassword: false,
+        isEnabled: true,
+      })
+    );
+    expect(dbMocks.onConflictDoUpdate).toHaveBeenCalledWith(
+      expect.objectContaining({
+        set: expect.objectContaining({
+          mustChangePassword: false,
+        }),
+      })
+    );
+    expect(dbMocks.sendSystemEmail).toHaveBeenCalledWith(
+      "rep@example.com",
+      expect.any(String),
+      expect.not.stringContaining("change your password immediately")
+    );
+  });
+
+  it("keeps no-force temporary-password invites in invite_sent status before first login", () => {
+    expect(
+      getLocalAuthStatus({
+        isEnabled: true,
+        mustChangePassword: false,
+        inviteSentAt: new Date("2026-05-08T12:00:00.000Z"),
+        lastLoginAt: null,
+      })
+    ).toBe("invite_sent");
+  });
+
+  it("expires no-force temporary-password invites before first login", async () => {
+    dbMocks.limit.mockResolvedValueOnce([
+      {
+        id: "rep-1",
+        email: "rep@example.com",
+        displayName: "Rep User",
+        role: "rep",
+        officeId: "office-1",
+        isActive: true,
+        passwordHash: await hashPassword("Temporary123!"),
+        mustChangePassword: false,
+        isEnabled: true,
+        inviteExpiresAt: new Date("2020-01-01T00:00:00.000Z"),
+        failedLoginAttempts: 0,
+        lockedUntil: null,
+        lastLoginAt: null,
+      },
+    ]);
+
+    await expect(
+      loginWithLocalPassword({
+        email: "rep@example.com",
+        password: "Temporary123!",
+      })
+    ).rejects.toMatchObject({
+      statusCode: 403,
+      message: "Temporary invite has expired",
     });
   });
 });
