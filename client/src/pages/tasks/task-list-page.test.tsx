@@ -392,4 +392,45 @@ describe("TaskListPage project context", () => {
     expect(mocks.useTasksMock).toHaveBeenCalledWith(expect.objectContaining({ section: "completed", assignedTo: "rep-2" }));
     expect(mocks.useTasksMock).toHaveBeenCalledWith(expect.objectContaining({ status: "scheduled", assignedTo: "rep-2" }));
   });
+
+  it("does not fire task fetches before auth resolves", () => {
+    mocks.useAuthMock.mockReturnValue({
+      user: null,
+      loading: true,
+    });
+    mocks.useTaskCountsMock.mockClear();
+    mocks.useTasksMock.mockClear();
+
+    renderPage();
+
+    expect(container.textContent).toContain("Loading tasks...");
+    expect(mocks.useTaskCountsMock).not.toHaveBeenCalled();
+    expect(mocks.useTasksMock).not.toHaveBeenCalled();
+
+    act(() => {
+      mocks.useAuthMock.mockReturnValue({
+        user: {
+          id: "director-1",
+          email: "director@example.test",
+          displayName: "Director User",
+          role: "director",
+          officeId: "office-1",
+          activeOfficeId: "office-1",
+        },
+        loading: false,
+      });
+      root?.render(
+        <MemoryRouter initialEntries={["/tasks"]}>
+          <TaskListPage />
+        </MemoryRouter>
+      );
+    });
+
+    expect(mocks.useTaskCountsMock).toHaveBeenCalled();
+    expect(mocks.useTasksMock).toHaveBeenCalledWith(expect.objectContaining({ section: "overdue" }));
+    expect(mocks.useTasksMock).toHaveBeenCalledWith(expect.objectContaining({ section: "today" }));
+    expect(mocks.useTasksMock).toHaveBeenCalledWith(expect.objectContaining({ section: "upcoming" }));
+    expect(mocks.useTasksMock).toHaveBeenCalledWith(expect.objectContaining({ section: "completed" }));
+    expect(mocks.useTasksMock).toHaveBeenCalledWith(expect.objectContaining({ status: "scheduled" }));
+  });
 });

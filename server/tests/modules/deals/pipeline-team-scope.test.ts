@@ -93,4 +93,44 @@ describe("getDealsForPipeline team scope", () => {
     expect(containsValue(dealQuery.where.mock.calls[0][0], "rep-team-1")).toBe(true);
     expect(containsValue(dealQuery.where.mock.calls[0][0], "rep-team-2")).toBe(true);
   });
+
+  it("getDealsForPipeline returns assignedRepName for cards", async () => {
+    let selectedDealFields: Record<string, unknown> | undefined;
+    const dealQuery = {
+      leftJoin: vi.fn().mockReturnThis(),
+      where: vi.fn().mockReturnThis(),
+      orderBy: vi.fn().mockReturnThis(),
+      limit: vi.fn().mockImplementation(async () => [
+        {
+          id: "deal-1",
+          stageId: "stage-estimating",
+          assignedRepId: "rep-1",
+          assignedRepName: selectedDealFields?.assignedRepName ? "Brett Jones" : null,
+          awardedAmount: null,
+          bidEstimate: "5000",
+          ddEstimate: null,
+        },
+      ]),
+    };
+    const tenantDb = {
+      select: vi.fn((fields?: Record<string, unknown>) => {
+        selectedDealFields = fields;
+        return {
+          from: vi.fn((table: unknown) => {
+            if (table === deals) return dealQuery;
+            return dealQuery;
+          }),
+        };
+      }),
+    } as any;
+
+    const { getDealsForPipeline } = await import("../../../src/modules/deals/service.js");
+    const result = await getDealsForPipeline(tenantDb, "admin", "admin-1", {
+      scope: "all",
+      activeOfficeId: "office-1",
+      includeDd: true,
+    });
+
+    expect(result.pipelineColumns[0].deals[0]?.assignedRepName).toBe("Brett Jones");
+  });
 });

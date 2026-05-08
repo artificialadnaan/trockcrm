@@ -348,9 +348,22 @@ function AssigneeFilter({
 
 export function TaskListPage() {
   const { user, loading: authLoading } = useAuth();
+
+  if (authLoading || !user) {
+    return (
+      <div className="rounded-lg border border-slate-200 bg-white p-8 text-sm font-semibold text-slate-500">
+        Loading tasks...
+      </div>
+    );
+  }
+
+  return <TaskListPageContent role={user.role} />;
+}
+
+function TaskListPageContent({ role }: { role: string }) {
   const [searchParams, setSearchParams] = useSearchParams();
   const [query, setQuery] = useState("");
-  const canAssign = user?.role === "admin" || user?.role === "director";
+  const canAssign = role === "admin" || role === "director";
   const selectedAssignee = canAssign ? searchParams.get("assignee") ?? "" : "";
   const assigneeFilter = selectedAssignee || undefined;
   const { counts, loading: countsLoading, refetch: refetchCounts } = useTaskCounts(assigneeFilter);
@@ -360,7 +373,7 @@ export function TaskListPage() {
   const { tasks: completedTasks, loading: completedLoading, error: completedError, refetch: refetchCompleted } = useTasks({ section: "completed", limit: 20, assignedTo: assigneeFilter });
   const { tasks: scheduledTasks, loading: scheduledLoading, error: scheduledError, refetch: refetchScheduled } = useTasks({ status: "scheduled", limit: 100, assignedTo: assigneeFilter });
 
-  const loading = authLoading || countsLoading || overdueLoading || todayLoading || upcomingLoading || completedLoading || scheduledLoading;
+  const loading = countsLoading || overdueLoading || todayLoading || upcomingLoading || completedLoading || scheduledLoading;
   const error = overdueError ?? todayError ?? upcomingError ?? completedError ?? scheduledError;
 
   const updateAssignee = (assigneeId: string) => {

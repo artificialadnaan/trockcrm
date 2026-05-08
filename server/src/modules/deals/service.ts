@@ -1545,9 +1545,11 @@ export async function getDealsForPipeline(
     .select({
       ...getTableColumns(deals),
       companyName: companies.name,
+      assignedRepName: users.displayName,
     })
     .from(deals)
     .leftJoin(companies, eq(companies.id, deals.companyId))
+    .leftJoin(users, eq(users.id, deals.assignedRepId))
     .where(and(...conditions))
     .orderBy(desc(deals.updatedAt))
     .limit(500);

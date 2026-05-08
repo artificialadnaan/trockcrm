@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
 import { api } from "@/lib/api";
 import {
   appendPipelineTerminalDateParams,
@@ -351,8 +351,11 @@ export function useDeals(filters: DealFilters = {}) {
   const [pagination, setPagination] = useState<Pagination>({ page: 1, limit: 50, total: 0, totalPages: 0 });
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const requestIdRef = useRef(0);
 
   const fetchDeals = useCallback(async () => {
+    const requestId = requestIdRef.current + 1;
+    requestIdRef.current = requestId;
     setLoading(true);
     setError(null);
     try {
@@ -376,12 +379,16 @@ export function useDeals(filters: DealFilters = {}) {
       const data = await api<{ deals: Deal[]; pagination: Pagination }>(
         `/deals${qs ? `?${qs}` : ""}`
       );
+      if (requestId !== requestIdRef.current) return;
       setDeals(data.deals);
       setPagination(data.pagination);
     } catch (err: unknown) {
+      if (requestId !== requestIdRef.current) return;
       setError(err instanceof Error ? err.message : "Failed to load deals");
     } finally {
-      setLoading(false);
+      if (requestId === requestIdRef.current) {
+        setLoading(false);
+      }
     }
   }, [
     filters.search,

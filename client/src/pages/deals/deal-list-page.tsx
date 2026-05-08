@@ -1,4 +1,4 @@
-import { useMemo } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { Link, useNavigate, useSearchParams } from "react-router-dom";
 import { ArrowRight, Briefcase, CalendarClock, Clock, MapPin, Plus, Search } from "lucide-react";
 import { Button } from "@/components/ui/button";
@@ -59,6 +59,25 @@ function getYearToDateTerminalFilters(): Record<TerminalOutcome, TerminalDateFil
     won: { preset: "custom", customStart: from },
     lost: { preset: "custom", customStart: from },
   };
+}
+
+function useCurrentCalendarYear() {
+  const [currentYear, setCurrentYear] = useState(() => new Date().getFullYear());
+
+  useEffect(() => {
+    const checkYear = () => {
+      const nextYear = new Date().getFullYear();
+      setCurrentYear((year) => (year === nextYear ? year : nextYear));
+    };
+    const interval = window.setInterval(checkYear, 60 * 60 * 1000);
+    window.addEventListener("focus", checkYear);
+    return () => {
+      window.clearInterval(interval);
+      window.removeEventListener("focus", checkYear);
+    };
+  }, []);
+
+  return currentYear;
 }
 
 export function buildDealStageNavigationPath(
@@ -230,7 +249,8 @@ function DealListPageContent({ role }: { role: string }) {
   const navigate = useNavigate();
   const [searchParams, setSearchParams] = useSearchParams();
   const scope = getScope(searchParams, role);
-  const ytdTerminalFilters = useMemo(() => getYearToDateTerminalFilters(), []);
+  const currentYear = useCurrentCalendarYear();
+  const ytdTerminalFilters = useMemo(() => getYearToDateTerminalFilters(), [currentYear]);
   const { board, loading, error } = useDealBoard(scope, true, ytdTerminalFilters);
   const { deals } = useDeals({ limit: 200, isActive: true, sortBy: "updated_at", sortDir: "desc", scope });
   const { stages } = usePipelineStages();

@@ -1,4 +1,8 @@
+// @vitest-environment jsdom
+
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { act } from "react";
+import { createRoot, type Root } from "react-dom/client";
 import { renderToStaticMarkup } from "react-dom/server";
 import { MemoryRouter } from "react-router-dom";
 import type { ReactNode } from "react";
@@ -142,7 +146,6 @@ describe("DealListPage", () => {
         { id: "stage-lost", name: "Lost", slug: "lost", displayOrder: 7 },
       ],
     });
-
     mocks.useDealBoardMock.mockReturnValue({
       board: {
         columns: [
@@ -332,6 +335,72 @@ describe("DealListPage", () => {
       won: { preset: "custom", customStart: "2026-01-01" },
       lost: { preset: "custom", customStart: "2026-01-01" },
     });
+  });
+
+  it("recomputes YTD filters when calendar year changes", () => {
+    (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-12-31T18:00:00.000Z"));
+    mocks.useDealBoardMock.mockClear();
+    mocks.useAuthMock.mockReturnValue({
+      user: {
+        id: "user-1",
+        email: "admin@example.test",
+        displayName: "Test User",
+        role: "admin",
+        officeId: "office-1",
+        activeOfficeId: "office-1",
+      },
+      loading: false,
+    });
+    mocks.usePipelineStagesMock.mockReturnValue({
+      stages: [
+        { id: "stage-opportunity", name: "Opportunity", slug: "opportunity", displayOrder: 1 },
+      ],
+    });
+    mocks.useDealBoardMock.mockReturnValue({
+      board: {
+        columns: [],
+        terminalStages: [],
+      },
+      loading: false,
+      error: null,
+      refetch: vi.fn(),
+    });
+
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    let root: Root | null = null;
+
+    try {
+      act(() => {
+        root = createRoot(container);
+        root.render(
+          <MemoryRouter initialEntries={["/deals?scope=all"]}>
+            <DealListPage />
+          </MemoryRouter>
+        );
+      });
+
+      expect(mocks.useDealBoardMock).toHaveBeenLastCalledWith("all", true, {
+        won: { preset: "custom", customStart: "2026-01-01" },
+        lost: { preset: "custom", customStart: "2026-01-01" },
+      });
+
+      vi.setSystemTime(new Date("2027-01-02T18:00:00.000Z"));
+      act(() => {
+        window.dispatchEvent(new Event("focus"));
+      });
+
+      expect(mocks.useDealBoardMock).toHaveBeenLastCalledWith("all", true, {
+        won: { preset: "custom", customStart: "2027-01-01" },
+        lost: { preset: "custom", customStart: "2027-01-01" },
+      });
+    } finally {
+      act(() => root?.unmount());
+      container.remove();
+      vi.useRealTimers();
+    }
   });
 
   it("does not fire board fetch before auth resolves", () => {
