@@ -98,3 +98,4 @@
 - E4 PR-OPEN 2026-05-08T18:28:55Z: PR https://github.com/artificialadnaan/trockcrm/pull/181.
 - E5 CLAIM 2026-05-08T18:25Z: redesign/detail-page-property, property detail page polish using DetailPageShell + new tab system. Worktree: trockcrm-redesign-detail-property.
 - E5 PR-OPEN 2026-05-08T18:27Z: PR https://github.com/artificialadnaan/trockcrm/pull/180.
+- HOTFIX-3 CLAIM 2026-05-08T19:15:18Z: hotfix/detail-page-bugs, four P2 company detail bugs from E4 post-merge Codex review. E5/property fixes remain in PR #180. Worktree: trockcrm-hotfix-detail-bugs.

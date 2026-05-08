@@ -65,6 +65,7 @@ const COMPANY_CATEGORY_LABELS: Record<string, string> = {
   consultant: "Consultant",
   other: "Other",
 };
+const HUBSPOT_PORTAL_ID: string | null = null;
 
 // --- Utility Functions ---
 
@@ -148,8 +149,8 @@ function buildCompanyWebsiteUrl(value: string | null | undefined) {
 }
 
 function buildHubSpotCompanyUrl(hubspotCompanyId: string | null | undefined) {
-  if (!hubspotCompanyId) return null;
-  return `https://app.hubspot.com/contacts/0/company/${encodeURIComponent(hubspotCompanyId)}`;
+  if (!hubspotCompanyId || !HUBSPOT_PORTAL_ID) return null;
+  return `https://app.hubspot.com/contacts/${HUBSPOT_PORTAL_ID}/company/${encodeURIComponent(hubspotCompanyId)}`;
 }
 
 function exportCompanyCSV(
@@ -232,10 +233,11 @@ export function CompanyDetailPage() {
   const categoryLabel = company.category ? COMPANY_CATEGORY_LABELS[company.category] ?? company.category : null;
   const industryLabel = formatIndustryLabel(company.industry) ?? categoryLabel ?? "Company";
   const location = companyLocation(company);
-  const domain = company.domain ?? extractDomain(company.website);
+  const websiteRaw = company.website?.trim() || company.domain?.trim() || null;
+  const domain = company.domain?.trim() || extractDomain(websiteRaw);
   const hubspotCompanyId = company.hubspotCompanyId ?? company.hubspotId ?? null;
   const hubspotUrl = buildHubSpotCompanyUrl(hubspotCompanyId);
-  const websiteUrl = buildCompanyWebsiteUrl(company.website ?? company.domain);
+  const websiteUrl = buildCompanyWebsiteUrl(websiteRaw);
   const propertyCount = company.propertiesCount;
   const contactCount = company.contactsCount ?? company.contactCount;
   const dealCount = company.activeDealsCount ?? company.dealCount;
@@ -304,7 +306,7 @@ export function CompanyDetailPage() {
     </span>
   );
 
-  const statusBadge = company.companyVerifiedAt ? (
+  const statusBadge = company.companyVerificationStatus === "verified" ? (
     <span className="inline-flex items-center gap-1 rounded-full bg-emerald-50 px-2 py-1 text-[10px] font-black uppercase tracking-[0.16em] text-emerald-700">
       <CheckCircle2 className="h-3 w-3" />
       Verified
@@ -336,8 +338,8 @@ export function CompanyDetailPage() {
         </span>
       ) : null}
       <span>
-        {company.companyVerifiedAt
-          ? `Verified ${formatDate(company.companyVerifiedAt)}`
+        {company.companyVerificationStatus === "verified"
+          ? `Verified${company.companyVerifiedAt ? ` ${formatDate(company.companyVerifiedAt)}` : ""}`
           : company.companyVerificationStatus === "pending"
             ? "Verification pending"
             : "Verification not set"}
@@ -382,7 +384,7 @@ export function CompanyDetailPage() {
             Export Data
           </DropdownMenuItem>
           {company.companyVerificationStatus === "pending" ? (
-            <DropdownMenuItem onClick={handleVerifyCompany}>
+            <DropdownMenuItem onClick={handleVerifyCompany} disabled={verifyingCompany}>
               <CheckCircle2 className="h-4 w-4 mr-2" />
               {verifyingCompany ? "Verifying..." : "Verify Company"}
             </DropdownMenuItem>
@@ -509,8 +511,8 @@ function CompanyRightRail({
     company.ownerUserName ??
     (company.ownerUserId ? `Owner ID: ${company.ownerUserId}` : "Unassigned");
   const ownerInitials = getInitials(ownerValue === "Unassigned" ? "Unassigned" : ownerValue);
-  const verificationValue = company.companyVerifiedAt
-    ? `${formatDate(company.companyVerifiedAt)}${company.companyVerifiedBy ? ` by ${company.companyVerifiedBy}` : ""}`
+  const verificationValue = company.companyVerificationStatus === "verified"
+    ? `${company.companyVerifiedAt ? formatDate(company.companyVerifiedAt) : "Verified"}${company.companyVerifiedBy ? ` by ${company.companyVerifiedBy}` : ""}`
     : company.companyVerificationStatus === "pending"
       ? "Pending"
       : "Not verified";

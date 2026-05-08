@@ -74,8 +74,8 @@ vi.mock("@/components/ui/dropdown-menu", () => ({
   DropdownMenu: ({ children }: { children: ReactNode }) => <div>{children}</div>,
   DropdownMenuTrigger: ({ render }: { render: ReactNode }) => <>{render}</>,
   DropdownMenuContent: ({ children }: { children: ReactNode }) => <div>{children}</div>,
-  DropdownMenuItem: ({ children, onClick }: { children: ReactNode; onClick?: () => void }) => (
-    <button type="button" onClick={onClick}>
+  DropdownMenuItem: ({ children, disabled, onClick }: { children: ReactNode; disabled?: boolean; onClick?: () => void }) => (
+    <button type="button" disabled={disabled} onClick={onClick}>
       {children}
     </button>
   ),
@@ -150,6 +150,16 @@ function mountPage() {
       container.remove();
     },
   };
+}
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((res, rej) => {
+    resolve = res;
+    reject = rej;
+  });
+  return { promise, resolve, reject };
 }
 
 describe("CompanyDetailPage", () => {
@@ -285,6 +295,77 @@ describe("CompanyDetailPage", () => {
 
     expect(mocks.verifyCompanyMock).toHaveBeenCalledWith("company-1");
     expect(refetch).toHaveBeenCalled();
+  });
+
+  it("disables Verify Company while verification is in flight", async () => {
+    const pending = deferred<{ company: ReturnType<typeof makeCompany> }>();
+    mocks.verifyCompanyMock.mockReturnValueOnce(pending.promise);
+
+    mounted = mountPage();
+    const verifyButton = Array.from(mounted.container.querySelectorAll("button")).find((button) =>
+      button.textContent?.includes("Verify Company")
+    );
+    expect(verifyButton).not.toBeNull();
+
+    await act(async () => {
+      verifyButton?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+
+    const verifyingButton = Array.from(mounted.container.querySelectorAll("button")).find((button) =>
+      button.textContent?.includes("Verifying...")
+    );
+    expect(verifyingButton).not.toBeNull();
+    expect(verifyingButton).toHaveProperty("disabled", true);
+
+    await act(async () => {
+      verifyingButton?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+
+    expect(mocks.verifyCompanyMock).toHaveBeenCalledTimes(1);
+
+    await act(async () => {
+      pending.resolve({ company: makeCompany({ companyVerificationStatus: "verified" }) });
+      await pending.promise;
+    });
+  });
+
+  it("omits HubSpot deep link when portal ID is unavailable", () => {
+    const html = renderPage();
+
+    expect(html).toContain("hs_dallas_isd_2841");
+    expect(html).not.toContain("app.hubspot.com/contacts/0/company");
+  });
+
+  it("uses domain when website is an empty string", () => {
+    mocks.useCompanyDetailMock.mockReturnValueOnce({
+      company: makeCompany({ website: "", domain: "example.com" }),
+      loading: false,
+      error: null,
+      refetch: vi.fn(),
+    });
+
+    const html = renderPage();
+
+    expect(html).toContain('href="https://example.com"');
+    expect(html).toContain("example.com");
+  });
+
+  it("shows verified status from companyVerificationStatus without requiring timestamp", () => {
+    mocks.useCompanyDetailMock.mockReturnValueOnce({
+      company: makeCompany({
+        companyVerificationStatus: "verified",
+        companyVerifiedAt: null,
+      }),
+      loading: false,
+      error: null,
+      refetch: vi.fn(),
+    });
+
+    const html = renderPage();
+
+    expect(html).toContain("Verified");
+    expect(html).not.toContain("Verification not set");
+    expect(html).not.toContain("Not verified");
   });
 
   it("edit button navigates to edit page (link semantics)", () => {
