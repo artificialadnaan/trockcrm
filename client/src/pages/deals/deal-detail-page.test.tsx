@@ -1,3 +1,8 @@
+// @vitest-environment jsdom
+
+import { act } from "react";
+import { cloneElement, isValidElement } from "react";
+import { createRoot, type Root } from "react-dom/client";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { renderToStaticMarkup } from "react-dom/server";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
@@ -36,12 +41,36 @@ vi.mock("@/hooks/use-activities", () => ({
 }));
 
 vi.mock("@/lib/deal-utils", () => ({
-  formatCurrency: vi.fn(() => "$0"),
-  bestEstimate: vi.fn(() => 0),
+  formatCurrency: vi.fn((value: number | string | null | undefined) => {
+    const amount = Number(value ?? 0);
+    return new Intl.NumberFormat("en-US", { style: "currency", currency: "USD", maximumFractionDigits: 0 }).format(amount);
+  }),
+  bestEstimate: vi.fn((deal: { awardedAmount?: string | null; bidEstimate?: string | null; ddEstimate?: string | null }) =>
+    Number(deal.awardedAmount ?? deal.bidEstimate ?? deal.ddEstimate ?? 0)
+  ),
 }));
 
 vi.mock("@/components/ui/button", () => ({
-  Button: ({ children }: { children: ReactNode }) => <button>{children}</button>,
+  Button: ({
+    children,
+    render,
+    onClick,
+    disabled,
+    type,
+  }: {
+    children: ReactNode;
+    render?: ReactNode;
+    onClick?: () => void;
+    disabled?: boolean;
+    type?: "button" | "submit" | "reset";
+  }) =>
+    isValidElement(render) ? (
+      cloneElement(render, { onClick, children } as Record<string, unknown>)
+    ) : (
+      <button type={type ?? "button"} disabled={disabled} onClick={onClick}>
+        {children}
+      </button>
+    ),
 }));
 
 vi.mock("@/components/ui/badge", () => ({
@@ -52,8 +81,10 @@ vi.mock("@/components/ui/dropdown-menu", () => ({
   DropdownMenu: ({ children }: { children: ReactNode }) => <div>{children}</div>,
   DropdownMenuTrigger: ({ render }: { render: ReactNode }) => <>{render}</>,
   DropdownMenuContent: ({ children }: { children: ReactNode }) => <div>{children}</div>,
-  DropdownMenuItem: ({ children, disabled }: { children: ReactNode; disabled?: boolean }) => (
-    <div data-disabled={disabled ? "true" : "false"}>{children}</div>
+  DropdownMenuItem: ({ children, disabled, onClick }: { children: ReactNode; disabled?: boolean; onClick?: () => void }) => (
+    <button type="button" data-disabled={disabled ? "true" : "false"} disabled={disabled} onClick={onClick}>
+      {children}
+    </button>
   ),
 }));
 
@@ -85,6 +116,10 @@ vi.mock("@/components/files/deal-file-tab", () => ({
   DealFileTab: () => <div>Files Tab</div>,
 }));
 
+vi.mock("./deal-photos-tab", () => ({
+  DealPhotosTab: () => <div>Photos Tab</div>,
+}));
+
 vi.mock("./deal-team-tab", () => ({
   DealTeamTab: () => <div>Team Tab</div>,
 }));
@@ -107,6 +142,10 @@ vi.mock("./deal-timers-banner", () => ({
 
 vi.mock("./deal-proposal-card", () => ({
   DealProposalCard: () => <div>Proposal Card</div>,
+}));
+
+vi.mock("./deal-contract-signed-card", () => ({
+  DealContractSignedCard: () => <div>Contract Signed Card</div>,
 }));
 
 vi.mock("./deal-estimating-substage", () => ({
@@ -133,6 +172,10 @@ vi.mock("@/components/tasks/task-create-dialog", () => ({
   TaskCreateDialog: () => <div>Task Create</div>,
 }));
 
+vi.mock("@/components/call-recordings/recording-list", () => ({
+  RecordingList: () => <div>Recording List</div>,
+}));
+
 function renderPage() {
   return renderToStaticMarkup(
     <MemoryRouter initialEntries={["/deals/deal-1"]}>
@@ -143,6 +186,32 @@ function renderPage() {
   );
 }
 
+function mountPage(path = "/deals/deal-1") {
+  const container = document.createElement("div");
+  document.body.appendChild(container);
+  let root: Root | null = null;
+
+  act(() => {
+    root = createRoot(container);
+    root.render(
+      <MemoryRouter initialEntries={[path]}>
+        <Routes>
+          <Route path="/deals/:id" element={<DealDetailPage />} />
+          <Route path="/deals/:id/photos" element={<DealDetailPage />} />
+        </Routes>
+      </MemoryRouter>
+    );
+  });
+
+  return {
+    container,
+    unmount() {
+      act(() => root?.unmount());
+      container.remove();
+    },
+  };
+}
+
 function makeDealDetail(overrides: Record<string, unknown> = {}) {
   return {
     id: "deal-1",
@@ -151,12 +220,14 @@ function makeDealDetail(overrides: Record<string, unknown> = {}) {
     stageId: "stage-estimating",
     workflowRoute: "normal",
     assignedRepId: "rep-1",
+    assignedRepName: "Brett Rios",
     companyId: "company-1",
+    companyName: "Dallas Independent SD",
     propertyId: "property-1",
     sourceLeadId: "lead-1",
     primaryContactId: null,
     ddEstimate: null,
-    bidEstimate: null,
+    bidEstimate: "875000",
     awardedAmount: null,
     changeOrderTotal: "0",
     description: "Exterior refresh",
@@ -164,13 +235,14 @@ function makeDealDetail(overrides: Record<string, unknown> = {}) {
     propertyCity: "Dallas",
     propertyState: "TX",
     propertyZip: "75201",
-    projectTypeId: null,
+    projectType: "Roofing",
+    projectTypeId: "project-type-1",
     regionId: null,
     source: "referral",
     winProbability: 50,
-    procoreProjectId: null,
-    procoreCompanyId: null,
-    procoreBidId: null,
+    procoreProjectId: 123456,
+    procoreCompanyId: "598134325683880",
+    procoreBidId: 78910,
     procoreLastSyncedAt: null,
     lostReasonId: null,
     lostNotes: null,
@@ -182,6 +254,7 @@ function makeDealDetail(overrides: Record<string, unknown> = {}) {
     stageEnteredAt: "2026-04-21T10:00:00.000Z",
     isActive: true,
     hubspotDealId: null,
+    bidBoardProjectNumber: "DFW-3-12826-aa",
     createdAt: "2026-04-20T10:00:00.000Z",
     updatedAt: "2026-04-21T10:00:00.000Z",
     proposalStatus: "drafting",
@@ -215,7 +288,13 @@ function makeDealDetail(overrides: Record<string, unknown> = {}) {
 }
 
 describe("DealDetailPage", () => {
+  let mounted: ReturnType<typeof mountPage> | null = null;
+
   beforeEach(() => {
+    (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
+    mounted?.unmount();
+    mounted = null;
+    document.body.innerHTML = "";
     mocks.useCompanyDetailMock.mockReset();
     mocks.useDealDetailMock.mockReset();
     mocks.usePipelineStagesMock.mockReset();
@@ -262,6 +341,100 @@ describe("DealDetailPage", () => {
       refetch: vi.fn(),
       deal: makeDealDetail(),
     });
+  });
+
+  it("renders deal hero with name and stage badge", () => {
+    const html = renderPage();
+
+    expect(html).toContain("Palm Villas");
+    expect(html).toContain("Estimate in Progress");
+    expect(html).toContain("TR-2026-0001");
+    expect(html).toContain("Dallas Independent SD");
+  });
+
+  it("renders all expected tabs", () => {
+    const html = renderPage();
+
+    expect(html).toContain("Overview");
+    expect(html).toContain("Lead");
+    expect(html).toContain("Scoping");
+    expect(html).toContain("Files");
+    expect(html).toContain("Photos");
+    expect(html).toContain("Email");
+    expect(html).toContain("Activity");
+    expect(html).toContain("Timeline");
+    expect(html).toContain("History");
+    expect(html).toContain("Team");
+    expect(html).toContain("Estimates");
+  });
+
+  it("renders right-rail with company, owner, and system IDs", () => {
+    mocks.useDealDetailMock.mockReturnValueOnce({
+      loading: false,
+      error: null,
+      refetch: vi.fn(),
+      deal: makeDealDetail({ hubspotDealId: "hs_deal_82211" }),
+    });
+
+    const html = renderPage();
+
+    expect(html).toContain("Company");
+    expect(html).toContain("Dallas Independent SD");
+    expect(html).toContain("Owner");
+    expect(html).toContain("Brett Rios");
+    expect(html).toContain("System IDs");
+    expect(html).toContain("hs_deal_82211");
+    expect(html).toContain("123456");
+    expect(html).toContain("DFW-3-12826-aa");
+  });
+
+  it("tab change updates active tab", () => {
+    mounted = mountPage();
+
+    const emailTab = mounted.container.querySelector('button[aria-label="Email"]');
+    expect(emailTab).not.toBeNull();
+
+    act(() => {
+      emailTab?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+
+    expect(mounted.container.textContent).toContain("Email Tab");
+    expect(mounted.container.textContent).not.toContain("Overview Tab");
+  });
+
+  it("stage change action triggers handler", () => {
+    mocks.useDealDetailMock.mockReturnValueOnce({
+      loading: false,
+      error: null,
+      refetch: vi.fn(),
+      deal: makeDealDetail({
+        isBidBoardOwned: false,
+        bidBoardOwnership: null,
+        bidBoardStageSlug: null,
+        bidBoardStatus: null,
+        readOnlySyncedAt: null,
+      }),
+    });
+
+    mounted = mountPage();
+
+    const contractButton = Array.from(mounted.container.querySelectorAll("button")).find((button) =>
+      button.textContent?.includes("Contract")
+    );
+    expect(contractButton).not.toBeNull();
+
+    act(() => {
+      contractButton?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+
+    expect(mounted.container.textContent).toContain("Stage Dialog");
+  });
+
+  it("edit button navigates to edit page", () => {
+    const html = renderPage();
+
+    expect(html).toContain('href="/deals/deal-1/edit"');
+    expect(html).toContain("Edit");
   });
 
   it("shows Bid Board ownership messaging while preserving valid CRM stage controls", () => {

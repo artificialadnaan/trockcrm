@@ -50,6 +50,7 @@
 - E PHASE-1 CLAIM 2026-05-08T16:25:49Z: redesign/detail-shell-phase1, shared shell + contact polish + reports placeholder + backend additions for E2-E5. ETA EOD 2026-05-08. Worktree: trockcrm-redesign-detail-shell.
 - E PHASE-1 PR-OPEN 2026-05-08T16:28:51Z: PR https://github.com/artificialadnaan/trockcrm/pull/174. Foundation for parallel sub-tracks E2-E5.
 - E PHASE-1 MERGED-DEPLOYED 2026-05-08T16:57:36Z: PR #174 merged to main, Railway deploy verified. Phase 2 sub-tracks (E2-E5) cleared to spawn.
+- E2 CLAIM 2026-05-08T17:21:52Z: redesign/detail-page-deal, deal detail page polish using DetailPageShell. Worktree: trockcrm-redesign-detail-deal.
 
 ## Track F — Specialty Pages
 - _no claims yet_
