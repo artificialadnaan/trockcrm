@@ -52,7 +52,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       method: "POST",
       json: { email, returnTo },
     });
-    setUser(data.user);
+    if (!data.returnTo) setUser(data.user);
     return { returnTo: data.returnTo };
   };
 
@@ -61,7 +61,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       method: "POST",
       json: { email, password, returnTo },
     });
-    setUser(data.user);
+    if (!data.returnTo) setUser(data.user);
     return { returnTo: data.returnTo };
   };
 
