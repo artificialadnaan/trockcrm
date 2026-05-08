@@ -1,8 +1,6 @@
 import type { ReactNode } from "react";
 import { describe, expect, it, vi } from "vitest";
 import { renderToStaticMarkup } from "react-dom/server";
-import dealsPageSource from "../../pages/deals/deal-list-page.tsx?raw";
-import contactsPageSource from "../../pages/contacts/contact-list-page.tsx?raw";
 import repDashboardSource from "../../pages/dashboard/rep-dashboard-page.tsx?raw";
 import usersPageSource from "../../pages/admin/users-page.tsx?raw";
 
@@ -11,7 +9,13 @@ const dashboardState = vi.hoisted(() => ({
   error: null as string | null,
   data: {
     activeLeads: { count: 4 },
-    staleLeads: { count: 1 },
+    funnelBuckets: [
+      { key: "lead", label: "Leads", count: 4, totalValue: null, route: "/leads", bucket: "lead" },
+      { key: "qualified_lead", label: "Qualified Leads", count: 2, totalValue: null, route: "/leads", bucket: "qualified_lead" },
+      { key: "opportunity", label: "Opportunities", count: 2, totalValue: 75000, route: "/leads", bucket: "opportunity" },
+      { key: "estimating", label: "Bid Board", count: 1, totalValue: 250000, route: "/deals", bucket: "estimating" },
+    ],
+    staleLeads: { count: 1, averageDaysInStage: 16, leads: [] },
     activeDeals: { count: 3, totalValue: 123456 },
     contractsSignedYtd: { count: 0, totalValue: 0 },
     contractsSignedMtd: { count: 0, totalValue: 0 },
@@ -41,11 +45,20 @@ const dashboardState = vi.hoisted(() => ({
         updatedAt: "2026-04-20T00:00:00.000Z",
       },
     ],
+    myCleanup: { total: 1, byReason: [{ reasonCode: "missing_owner", count: 1 }] },
+    commissionSummary: {
+      directEarnedCommission: 1000,
+      totalEarnedCommission: 1200,
+    },
+    downstreamBottlenecks: [],
   },
 }));
 
 vi.mock("react-router-dom", () => ({
   useNavigate: () => vi.fn(),
+  Link: ({ to, children, className }: { to: string; children?: ReactNode; className?: string }) => (
+    <a href={to} className={className}>{children}</a>
+  ),
   Outlet: () => <span data-slot="outlet">Route content</span>,
 }));
 
@@ -128,6 +141,8 @@ vi.mock("@/components/ui/badge", () => ({
 }));
 
 vi.mock("@/components/ui/button", () => ({
+  buttonVariants: ({ variant, size, className }: { variant?: string; size?: string; className?: string } = {}) =>
+    ["mock-button", variant, size, className].filter(Boolean).join(" "),
   Button: ({
     children,
     onClick,
@@ -225,76 +240,40 @@ describe("AppShell layout", () => {
     );
   });
 
-  it("migrates the rep dashboard, deals, and contacts to PageHeader", () => {
-    expect(repDashboardSource).toContain(
+  it("keeps the rep dashboard on the preview surface inside the shared shell", () => {
+    expect(repDashboardSource).not.toContain(
       'import { PageHeader } from "@/components/layout/page-header";',
     );
-    expect(repDashboardSource).toContain("<PageHeader");
-    expect(repDashboardSource).toContain(
-      "title={`Welcome back, ${firstName}`}",
-    );
-    expect(repDashboardSource).toContain(
-      "description={`Here is your live sales cockpit for ${currentYear}.`}",
-    );
-    expect(repDashboardSource).toContain("Today At A Glance");
-    expect(repDashboardSource).toContain("Leads Snapshot");
-    expect(repDashboardSource).toContain("Deals Snapshot");
+    expect(repDashboardSource).toContain("WELCOME, {firstName}");
+    expect(repDashboardSource).toContain("TOP DEALS");
+    expect(repDashboardSource).toContain("STRATEGIC ALERTS");
+    expect(repDashboardSource).toContain("AI BLIND SPOTS");
+    expect(repDashboardSource).toContain("MY NUMBERS");
 
     dashboardState.loading = true;
     dashboardState.error = null;
     let loadingMarkup = normalize(renderToStaticMarkup(<RepDashboardPage />));
-    expect(loadingMarkup).toContain('data-slot="page-header"');
-    expect(loadingMarkup).toContain("Welcome back, Test");
-    expect(loadingMarkup).toContain("Here is your sales activity overview for");
+    expect(loadingMarkup).toContain("WELCOME, TEST");
+    expect(loadingMarkup).toContain("TODAY&#x27;S WORK");
     expect(loadingMarkup).toContain("animate-pulse");
 
     dashboardState.loading = false;
     dashboardState.error = "boom";
     let errorMarkup = normalize(renderToStaticMarkup(<RepDashboardPage />));
-    expect(errorMarkup).toContain('data-slot="page-header"');
-    expect(errorMarkup).toContain("Welcome back, Test");
-    expect(errorMarkup).toContain("Here is your sales activity overview for");
+    expect(errorMarkup).toContain("WELCOME, TEST");
+    expect(errorMarkup).toContain("DASHBOARD UNAVAILABLE");
     expect(errorMarkup).toContain("boom");
 
     dashboardState.error = null;
     let successMarkup = normalize(renderToStaticMarkup(<RepDashboardPage />));
-    expect(successMarkup).toContain('data-slot="page-header"');
-    expect(successMarkup).toContain("Welcome back, Test");
-    expect(successMarkup).toContain("Here is your live sales cockpit for");
-    expect(successMarkup).toContain("Today&#x27;s Tasks");
-    expect(successMarkup).toContain("My Pipeline");
-    expect(successMarkup).toContain("Active Leads");
-    expect(successMarkup).toContain("Active Deals");
-    expect(successMarkup).toContain("My Cleanup");
-    expect(successMarkup).toContain("Today At A Glance");
-    expect(successMarkup).toContain("Leads Snapshot");
-    expect(successMarkup).toContain("Deals Snapshot");
+    expect(successMarkup).toContain("WELCOME, TEST");
+    expect(successMarkup).toContain("ACTIVE DEALS");
+    expect(successMarkup).toContain("TOP DEALS");
+    expect(successMarkup).toContain("STRATEGIC ALERTS");
+    expect(successMarkup).toContain("AI BLIND SPOTS");
+    expect(successMarkup).toContain("MY NUMBERS");
+    expect(successMarkup).toContain("Open my pipeline");
 
-    expect(dealsPageSource).toContain(
-      'import { PageHeader } from "@/components/layout/page-header";',
-    );
-    expect(dealsPageSource).toContain("<PageHeader");
-    expect(dealsPageSource).toContain("<DealFilters");
-    expect(dealsPageSource.indexOf("<PageHeader")).toBeLessThan(
-      dealsPageSource.indexOf("<DealFilters"),
-    );
-    expect(dealsPageSource).not.toContain('<h2 className="text-2xl font-bold">Deals</h2>');
-    expect(dealsPageSource).not.toContain('className="flex items-center justify-between"');
-    expect(dealsPageSource).not.toContain('className="space-y-4"');
-
-    expect(contactsPageSource).toContain(
-      'import { PageHeader } from "@/components/layout/page-header";',
-    );
-    expect(contactsPageSource).toContain("<PageHeader");
-    expect(contactsPageSource).toContain("<ContactFilters");
-    expect(contactsPageSource.indexOf("<PageHeader")).toBeLessThan(
-      contactsPageSource.indexOf("<ContactFilters"),
-    );
-    expect(contactsPageSource).not.toContain('<h2 className="text-2xl font-bold">Contacts</h2>');
-    expect(contactsPageSource).not.toContain(
-      'className="flex items-center justify-between"',
-    );
-    expect(contactsPageSource).not.toContain('className="space-y-4"');
   });
 
   it("migrates the admin users page to PageHeader and the shared management wrapper", () => {
