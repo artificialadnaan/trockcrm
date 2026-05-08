@@ -1,4 +1,4 @@
-import { deals, users } from "@trock-crm/shared/schema";
+import { deals, userOfficeAccess, users } from "@trock-crm/shared/schema";
 import { describe, expect, it, vi } from "vitest";
 import { getDeals } from "../../../src/modules/deals/service.js";
 
@@ -58,9 +58,40 @@ function applyWhere(rows: Row[], condition: unknown) {
   }
 
   let filtered = rows;
+  const hasAssignedRepNullPredicate = chunks.some(
+    (chunk) =>
+      Boolean(chunk) &&
+      typeof chunk === "object" &&
+      Array.isArray((chunk as { value?: unknown }).value) &&
+      (chunk as { value: unknown[] }).value.includes(" is null")
+  );
+  const assignedRepOrValues = new Set<unknown>();
+  if (hasAssignedRepNullPredicate) {
+    for (let index = 0; index < chunks.length; index += 1) {
+      const chunk = chunks[index];
+      if (!chunk || typeof chunk !== "object" || (chunk as { name?: unknown }).name !== "assigned_rep_id") {
+        continue;
+      }
+      for (const value of extractValuesUntilNextColumn(chunks, index + 1)) {
+        assignedRepOrValues.add(value);
+      }
+      break;
+    }
+    filtered = filtered.filter((row) => assignedRepOrValues.has(row.assignedRepId) || row.assignedRepId == null);
+  }
+
+  let assignedRepColumnCount = 0;
   for (let index = 0; index < chunks.length; index += 1) {
     const chunk = chunks[index];
     if (!chunk || typeof chunk !== "object" || typeof (chunk as { name?: unknown }).name !== "string") {
+      continue;
+    }
+
+    if ((chunk as { name: string }).name === "assigned_rep_id") {
+      assignedRepColumnCount += 1;
+    }
+
+    if (hasAssignedRepNullPredicate && (chunk as { name: string }).name === "assigned_rep_id" && assignedRepColumnCount <= 2) {
       continue;
     }
 
@@ -133,8 +164,12 @@ function createTenantDb() {
       { id: "deal-team-1", assignedRepId: "rep-team-1", isActive: true, updatedAt: new Date("2026-05-07T12:00:00Z") },
       { id: "deal-team-2", assignedRepId: "rep-team-2", isActive: true, updatedAt: new Date("2026-05-07T12:00:00Z") },
       { id: "deal-other-office", assignedRepId: "rep-other-office", isActive: true, updatedAt: new Date("2026-05-07T12:00:00Z") },
+      { id: "deal-unassigned", assignedRepId: null, isActive: true, updatedAt: new Date("2026-05-07T12:00:00Z") },
       { id: "deal-inactive-rep", assignedRepId: "rep-inactive", isActive: true, updatedAt: new Date("2026-05-07T12:00:00Z") },
       { id: "deal-rep-self", assignedRepId: "rep-self", isActive: true, updatedAt: new Date("2026-05-07T12:00:00Z") },
+    ],
+    userOfficeAccess: [
+      { userId: "rep-other-office", officeId: "office-1" },
     ],
   };
 
@@ -144,6 +179,7 @@ function createTenantDb() {
         from(table: unknown) {
           if (table === deals) return queryBuilder(state.deals, fields);
           if (table === users) return queryBuilder(state.users, fields);
+          if (table === userOfficeAccess) return queryBuilder(state.userOfficeAccess, fields);
           return queryBuilder([], fields);
         },
       };
@@ -172,6 +208,7 @@ describe("getDeals scope filtering", () => {
     await expect(listIds({ role: "director", userId: "director-1", scope: "team" })).resolves.toEqual([
       "deal-team-1",
       "deal-team-2",
+      "deal-other-office",
     ]);
   });
 
@@ -180,9 +217,17 @@ describe("getDeals scope filtering", () => {
       "deal-self",
       "deal-team-1",
       "deal-team-2",
+      "deal-other-office",
+      "deal-unassigned",
       "deal-inactive-rep",
       "deal-rep-self",
     ]);
+  });
+
+  it("getDeals includes unassigned deals when scope filter is active", async () => {
+    await expect(listIds({ role: "director", userId: "director-1", scope: "all" })).resolves.toContain(
+      "deal-unassigned"
+    );
   });
 
   it("forces reps to their own deals regardless of requested scope", async () => {

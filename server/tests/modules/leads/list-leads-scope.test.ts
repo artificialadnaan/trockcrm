@@ -1,4 +1,4 @@
-import { leads, users } from "@trock-crm/shared/schema";
+import { leads, userOfficeAccess, users } from "@trock-crm/shared/schema";
 import { describe, expect, it, vi } from "vitest";
 import { createLeadService } from "../../../src/modules/leads/service.js";
 
@@ -120,6 +120,9 @@ function createTenantDb() {
       { id: "lead-inactive-rep", assignedRepId: "rep-inactive", isActive: true, status: "open", companyId: null, propertyId: null, projectTypeId: null },
       { id: "lead-rep-self", assignedRepId: "rep-self", isActive: true, status: "open", companyId: null, propertyId: null, projectTypeId: null },
     ],
+    userOfficeAccess: [
+      { userId: "rep-other-office", officeId: "office-1" },
+    ],
     deals: [],
   };
 
@@ -129,6 +132,7 @@ function createTenantDb() {
         from(table: unknown) {
           if (table === leads) return queryBuilder(state.leads, fields);
           if (table === users) return queryBuilder(state.users, fields);
+          if (table === userOfficeAccess) return queryBuilder(state.userOfficeAccess, fields);
           return queryBuilder([], fields);
         },
       };
@@ -158,6 +162,7 @@ describe("listLeads scope filtering", () => {
     await expect(listIds({ role: "director", userId: "director-1", scope: "team" })).resolves.toEqual([
       "lead-team-1",
       "lead-team-2",
+      "lead-other-office",
     ]);
   });
 
@@ -166,6 +171,7 @@ describe("listLeads scope filtering", () => {
       "lead-self",
       "lead-team-1",
       "lead-team-2",
+      "lead-other-office",
       "lead-inactive-rep",
       "lead-rep-self",
     ]);

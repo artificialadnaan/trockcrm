@@ -900,7 +900,7 @@ async function getOverrideEarnedCommission(
   if (managerOverrideRate <= 0) return 0;
 
   const result = await tenantDb.execute(sql`
-    SELECT COALESCE(SUM(dsc.source_value_amount * ${String(managerOverrideRate)}::numeric), 0)::numeric AS override_earned
+    SELECT COALESCE(SUM(dsc.amount * ${String(managerOverrideRate)}::numeric), 0)::numeric AS override_earned
     FROM ${users} u
     JOIN ${dealSignedCommissions} dsc ON dsc.rep_user_id = u.id
     JOIN ${deals} d ON d.id = dsc.deal_id

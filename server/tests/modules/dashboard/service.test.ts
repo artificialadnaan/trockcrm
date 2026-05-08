@@ -348,6 +348,65 @@ describe("Dashboard Service", () => {
       ]);
       expect(result.repFunnelRows.map((row) => row.repName)).toEqual(["Blair Rep", "Alex Rep"]);
     });
+
+    it("manager override applies to commission amount, not full contract value", async () => {
+      const { getDirectorDashboard } = await import("../../../src/modules/dashboard/service.js");
+      const tenantDb = {
+        execute: vi.fn().mockImplementation((query: unknown) => {
+          const text = extractSqlText(query).toLowerCase();
+
+          if (text.includes("select id, display_name") && text.includes("role = 'rep'")) {
+            return Promise.resolve({ rows: [{ id: "manager-1", display_name: "Manager Rep" }] });
+          }
+
+          if (text.includes("left join public.user_commission_settings")) {
+            return Promise.resolve({
+              rows: [
+                {
+                  is_active: true,
+                  commission_rate: "0.05",
+                  rolling_floor: "0",
+                  override_rate: "0.10",
+                  estimated_margin_rate: "0.30",
+                  min_margin_percent: "0.20",
+                  new_customer_share_floor: "0.10",
+                  new_customer_window_months: "6",
+                },
+              ],
+            });
+          }
+
+          if (text.includes("as override_earned")) {
+            return Promise.resolve({ rows: [{ override_earned: "500" }] });
+          }
+
+          if (text.includes("sum(dsc.source_value_amount)") && text.includes("earned_commission")) {
+            return Promise.resolve({ rows: [{ source_value_amount: "100000", earned_commission: "5000" }] });
+          }
+
+          if (text.includes("potential_revenue")) {
+            return Promise.resolve({ rows: [{ potential_revenue: "0" }] });
+          }
+
+          if (text.includes("dd_value") && text.includes("pipeline_value")) {
+            return Promise.resolve({
+              rows: [{ dd_value: "0", dd_count: "0", pipeline_value: "0", pipeline_count: "0", total_value: "0", total_count: "0" }],
+            });
+          }
+
+          return Promise.resolve({ rows: [] });
+        }),
+      } as any;
+
+      await getDirectorDashboard(tenantDb, { from: "2026-01-01", to: "2026-12-31", officeId: "office-1" });
+
+      const overrideQuery = tenantDb.execute.mock.calls
+        .map(([query]: [unknown]) => extractSqlText(query).toLowerCase())
+        .find((text: string) => text.includes("as override_earned"));
+
+      expect(overrideQuery).toContain("sum(dsc.amount *");
+      expect(overrideQuery).not.toContain("sum(dsc.source_value_amount *");
+    });
   });
 
   describe("getRepDetail", () => {

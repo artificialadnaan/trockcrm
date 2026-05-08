@@ -31,7 +31,7 @@ import { evaluatePostConversionEnrichment } from "./post-conversion-enrichment.j
 import { createAssignmentTaskIfNeeded } from "../assignment-tasks/service.js";
 import { generateDealNumberForProject } from "../../services/projectNumber.js";
 import { isContractSignedHandoffEnabled } from "../../config/feature-flags.js";
-import { resolveTeamRepIds } from "../shared/team-scope.js";
+import { resolveActiveOfficeUserIds, resolveTeamRepIds } from "../shared/team-scope.js";
 
 // Type alias for the tenant-scoped Drizzle instance
 type TenantDb = NodePgDatabase<typeof schema>;
@@ -740,26 +740,18 @@ export async function getDeals(tenantDb: TenantDb, filters: DealFilters, userRol
   conditions.push(eq(deals.isActive, showActive));
 
   if (filters.activeOfficeId) {
-    const officeRows = await tenantDb
-      .select({ id: users.id })
-      .from(users)
-      .where(eq(users.officeId, filters.activeOfficeId));
-    const officeUserIds = officeRows.map((user) => user.id);
-    conditions.push(officeUserIds.length > 0 ? inArray(deals.assignedRepId, officeUserIds) : sql`false`);
+    const officeUserIds = await resolveActiveOfficeUserIds(tenantDb, filters.activeOfficeId);
+    conditions.push(
+      officeUserIds.length > 0
+        ? or(inArray(deals.assignedRepId, officeUserIds), isNull(deals.assignedRepId))
+        : isNull(deals.assignedRepId)
+    );
   }
 
   if (scope === "mine") {
     conditions.push(eq(deals.assignedRepId, userId));
   } else if (scope === "team") {
-    const teamConditions = [eq(users.reportsTo, userId), eq(users.isActive, true)];
-    if (filters.activeOfficeId) {
-      teamConditions.push(eq(users.officeId, filters.activeOfficeId));
-    }
-    const teamRows = await tenantDb
-      .select({ id: users.id })
-      .from(users)
-      .where(and(...teamConditions));
-    const teamUserIds = teamRows.map((user) => user.id);
+    const teamUserIds = await resolveTeamRepIds(tenantDb, userId, filters.activeOfficeId ?? null);
     conditions.push(teamUserIds.length > 0 ? inArray(deals.assignedRepId, teamUserIds) : sql`false`);
   }
 
