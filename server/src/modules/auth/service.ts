@@ -121,7 +121,7 @@ export async function getUserOnboardingGateStatus({
     return {
       onboardingCompletedAt,
       onboardingPendingCount: pendingCleanupCount,
-      requiresOnboarding: !onboardingCompletedAt && pendingCleanupCount > 0,
+      requiresOnboarding: pendingCleanupCount > 0,
       cleanupUrl: cleanupAppUrl(),
     };
   } catch (error) {
