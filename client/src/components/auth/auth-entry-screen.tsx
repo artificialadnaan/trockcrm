@@ -42,7 +42,7 @@ export function AuthEntryScreen() {
 
     try {
       const result = await localLogin(email, password, returnTo);
-      if (result.returnTo) {
+      if (!result.mustChangePassword && result.returnTo) {
         window.location.replace(result.returnTo);
         return;
       }
@@ -124,7 +124,7 @@ export function AuthEntryScreen() {
                   className="flex h-auto w-full items-center justify-between py-3"
                   onClick={async () => {
                     const result = await login(user.email, returnTo);
-                    if (result.returnTo) {
+                    if (!result.mustChangePassword && result.returnTo) {
                       window.location.replace(result.returnTo);
                       return;
                     }
