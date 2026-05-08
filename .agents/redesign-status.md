@@ -80,3 +80,4 @@
 - D CODEX-FIX-8 2026-05-08T14:21Z: PR #163 force-pushed with four fixes (P2 tasks auth race, P2 useDeals stale-response, P2 pipeline board assigneeRepName, P2 YTD year rollover). Four regression tests added. Previously-deferred YTD issue resolved in-PR.
 - A2 CODEX-FIX-6 2026-05-08T15:17:32Z: PR #161 force-pushed with one fix (P2 office_code normalization). Three P3 catches deferred to follow-up issues (#169, #170). Four regression tests added.
 - D CODEX-FIX-9 2026-05-08T15:23Z: PR #163 force-pushed with five fixes (P1 listLeads office scoping cross-tenant leak, P2 scope+assignedRepId combine, P2 useLeads stale-response, P2 completedThisWeek window, P3 visibility badge total). Five regression tests added.
+- HOTFIX-POSTMERGE CLAIM 2026-05-08T16:47:17Z: hotfix/postmerge-track-d, four production bugs from PR #163. Worktree: trockcrm-hotfix-postmerge.

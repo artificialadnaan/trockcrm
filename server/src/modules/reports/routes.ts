@@ -388,7 +388,7 @@ router.post("/execute", requireDirector, async (req, res, next) => {
 });
 
 // POST /api/reports/run -- aggregate report-builder query
-router.post("/run", requireDirector, async (req, res, next) => {
+router.post("/run", async (req, res, next) => {
   try {
     const data = await runReportBuilder(req.tenantDb!, {
       dimensions: Array.isArray(req.body.dimensions) ? req.body.dimensions : [],

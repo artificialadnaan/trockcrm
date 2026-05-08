@@ -41,7 +41,7 @@ import {
 } from "./due-diligence-service.js";
 import { isExistingCustomer } from "./verification-service.js";
 import { resolveLeadSourceForWrite } from "./source-control.js";
-import { resolveTeamRepIds } from "../shared/team-scope.js";
+import { resolveActiveOfficeUserIds, resolveTeamRepIds } from "../shared/team-scope.js";
 import type { LeadBudgetStatus, LeadPocRole, LeadSourceCategory } from "@trock-crm/shared/types";
 
 type TenantDb = NodePgDatabase<typeof schema>;
@@ -1118,26 +1118,14 @@ export function createLeadService(
     }
 
     if (filters.activeOfficeId) {
-      const officeRows = await tenantDb
-        .select({ id: users.id })
-        .from(users)
-        .where(eq(users.officeId, filters.activeOfficeId));
-      const officeUserIds = officeRows.map((user) => user.id);
+      const officeUserIds = await resolveActiveOfficeUserIds(tenantDb, filters.activeOfficeId);
       conditions.push(officeUserIds.length > 0 ? inArray(leads.assignedRepId, officeUserIds) : sql`false`);
     }
 
     if (scope === "mine") {
       conditions.push(eq(leads.assignedRepId, userId));
     } else if (scope === "team") {
-      const teamConditions = [eq(users.reportsTo, userId), eq(users.isActive, true)];
-      if (filters.activeOfficeId) {
-        teamConditions.push(eq(users.officeId, filters.activeOfficeId));
-      }
-      const teamRows = await tenantDb
-        .select({ id: users.id })
-        .from(users)
-        .where(and(...teamConditions));
-      const teamUserIds = teamRows.map((user) => user.id);
+      const teamUserIds = await resolveTeamRepIds(tenantDb, userId, filters.activeOfficeId ?? null);
       conditions.push(teamUserIds.length > 0 ? inArray(leads.assignedRepId, teamUserIds) : sql`false`);
     }
 

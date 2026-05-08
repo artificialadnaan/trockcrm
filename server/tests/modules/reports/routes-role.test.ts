@@ -85,14 +85,16 @@ describe("report route role guards", () => {
     expect(reportService.executeCustomReport).not.toHaveBeenCalled();
   });
 
-  it("blocks reps from running ad-hoc report-builder queries", async () => {
+  it("POST /api/reports/run does not require director role", async () => {
+    vi.mocked(runReportBuilder).mockResolvedValueOnce({ rows: [], totals: {} } as any);
+
     const response = await request(buildApp("rep"))
       .post("/api/reports/run")
       .send({ dimensions: [], measures: [] });
 
-    expect(response.status).toBe(403);
-    expect(response.body).toEqual({ error: { message: "Requires one of: admin, director" } });
-    expect(runReportBuilder).not.toHaveBeenCalled();
+    expect(response.status).not.toBe(403);
+    expect(response.status).toBe(200);
+    expect(runReportBuilder).toHaveBeenCalledOnce();
   });
 
   it("allows directors to execute ad-hoc custom reports", async () => {
