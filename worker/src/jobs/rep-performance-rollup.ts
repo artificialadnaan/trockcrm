@@ -85,14 +85,25 @@ async function refreshOfficePeriod(
          d.assigned_rep_id AS rep_id,
          COUNT(*) FILTER (
            WHERE CASE
+             -- Note: current-period metrics use the deal's current stage state
+             -- (psc.is_terminal, psc.is_active_pipeline) because "as of now" is
+             -- a meaningful frame for live dashboards. Historical periods use
+             -- lifecycle-only filters to preserve determinism. This means
+             -- deals_count for "this month" vs "last month" answer slightly
+             -- different product questions, by design.
              WHEN $1::text IN ('last_month', 'last_quarter', 'last_year') THEN
+               -- Historical periods use lifecycle-only filters (created/closed
+               -- window) to preserve period determinism. We deliberately do NOT
+               -- filter on current stage flags (psc.is_terminal,
+               -- psc.is_active_pipeline) because those reflect the deal's stage
+               -- as of NOW, not as of period_end. A deal open during the period
+               -- but now terminal would otherwise be retroactively excluded from
+               -- historical snapshots. See: PR #160, Codex review on 3dab1ef212.
                d.created_at::date <= $3::date
                AND (
                   COALESCE(d.actual_close_date, d.contract_signed_date, d.contract_signed_at::date, d.lost_at::date) IS NULL
                   OR COALESCE(d.actual_close_date, d.contract_signed_date, d.contract_signed_at::date, d.lost_at::date) >= $2::date
                )
-               AND NOT psc.is_terminal
-               AND psc.is_active_pipeline
              ELSE d.is_active = true AND NOT psc.is_terminal
            END
          )::int AS deals_count,
@@ -153,6 +164,13 @@ async function refreshOfficePeriod(
        JOIN public.pipeline_stage_config psc ON psc.id = d.stage_id
        GROUP BY d.assigned_rep_id
      ),
+     -- stale_accounts deliberately does NOT filter on companies.is_active or
+     -- properties.is_active. There is no deactivated_at timestamp on those tables,
+     -- so applying the current-state is_active flag to historical periods would
+     -- retroactively change historical stale counts when accounts are deactivated.
+     -- The metric becomes "accounts with stale activity timestamps as of period_end"
+     -- rather than "currently-active accounts with stale activity," which is less
+     -- semantically rich but deterministic. See: PR #160, Codex review on 3dab1ef212.
      stale_accounts AS (
        SELECT
          accounts.rep_id,
@@ -168,7 +186,6 @@ async function refreshOfficePeriod(
           AND account_rep.office_id = $4
          JOIN ${schemaName}.companies c
            ON c.id = d.company_id
-          AND c.is_active = true
          WHERE d.assigned_rep_id IS NOT NULL
            AND d.created_at::date <= $3::date
            AND c.last_activity_at IS NOT NULL
@@ -184,7 +201,6 @@ async function refreshOfficePeriod(
           AND account_rep.office_id = $4
          JOIN ${schemaName}.properties p
            ON p.id = d.property_id
-          AND p.is_active = true
          WHERE d.assigned_rep_id IS NOT NULL
            AND d.created_at::date <= $3::date
            AND p.last_activity_at IS NOT NULL

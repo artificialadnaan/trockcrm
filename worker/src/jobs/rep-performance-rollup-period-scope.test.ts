@@ -11,7 +11,7 @@ vi.mock("../db.js", () => ({
 import { runRepPerformanceRollup } from "./rep-performance-rollup.js";
 
 describe("rep performance rollup period scoping", () => {
-  it("scopes historical deal count and pipeline value to deals active during the requested period", async () => {
+  it("historical deals_count includes deals that were open during the period but are now terminal", async () => {
     const queries: string[] = [];
     const client = {
       query: vi.fn(async (sql: string, params?: unknown[]) => {
@@ -33,8 +33,22 @@ describe("rep performance rollup period scoping", () => {
     expect(insertSql).toContain(
       "OR COALESCE(d.actual_close_date, d.contract_signed_date, d.contract_signed_at::date, d.lost_at::date) >= $2::date"
     );
-    expect(insertSql).toMatch(
-      /OR COALESCE\(d\.actual_close_date, d\.contract_signed_date, d\.contract_signed_at::date, d\.lost_at::date\) >= \$2::date\s+\)\s+AND NOT psc\.is_terminal\s+AND psc\.is_active_pipeline/
+    const dealsCountSql = /COUNT\(\*\) FILTER \(([\s\S]*?)\)::int AS deals_count/.exec(insertSql ?? "")?.[1];
+    const historicalDealCountBranch =
+      /WHEN \$1::text IN \('last_month', 'last_quarter', 'last_year'\) THEN([\s\S]*?)ELSE d\.is_active = true AND NOT psc\.is_terminal/.exec(
+        dealsCountSql ?? ""
+      )?.[1];
+
+    expect(historicalDealCountBranch).toBeDefined();
+    expect(historicalDealCountBranch).toContain("d.created_at::date <= $3::date");
+    expect(historicalDealCountBranch).toContain(
+      "OR COALESCE(d.actual_close_date, d.contract_signed_date, d.contract_signed_at::date, d.lost_at::date) >= $2::date"
     );
+    const historicalDealCountPredicates = historicalDealCountBranch
+      ?.split("\n")
+      .filter((line) => !line.trim().startsWith("--"))
+      .join("\n");
+    expect(historicalDealCountPredicates).not.toContain("psc.is_terminal");
+    expect(historicalDealCountPredicates).not.toContain("psc.is_active_pipeline");
   });
 });

@@ -71,4 +71,36 @@ describe("rep performance rollup stale account count", () => {
     expect(staleCompanyBranch).toContain("AND d.created_at::date <= $3::date");
     expect(stalePropertyBranch).toContain("AND d.created_at::date <= $3::date");
   });
+
+  it("stale_account_count includes accounts that were stale during the period regardless of current is_active", async () => {
+    const queries: string[] = [];
+    const client = {
+      query: vi.fn(async (sql: string) => {
+        queries.push(sql);
+        if (sql.includes("SELECT id, slug, name FROM public.offices")) {
+          return { rows: [{ id: "office-1", slug: "north", name: "North" }], rowCount: 1 };
+        }
+        return { rows: [], rowCount: sql.includes("INSERT INTO public.rep_performance_snapshots") ? 1 : 0 };
+      }),
+      release: vi.fn(),
+    };
+    connectMock.mockResolvedValue(client);
+
+    await runRepPerformanceRollup(new Date("2026-05-07T12:00:00.000Z"));
+
+    const insertSql = queries.find((query) => query.includes("INSERT INTO public.rep_performance_snapshots"));
+    const staleCompanyBranch = /JOIN office_north\.companies c[\s\S]*?WHERE d\.assigned_rep_id IS NOT NULL[\s\S]*?UNION/.exec(
+      insertSql ?? ""
+    )?.[0];
+    const stalePropertyBranch = /JOIN office_north\.properties p[\s\S]*?WHERE d\.assigned_rep_id IS NOT NULL[\s\S]*?\) accounts/.exec(
+      insertSql ?? ""
+    )?.[0];
+
+    expect(staleCompanyBranch).toContain("c.last_activity_at IS NOT NULL");
+    expect(staleCompanyBranch).toContain("c.last_activity_at < $3::timestamptz - ($6::int || ' days')::interval");
+    expect(staleCompanyBranch).not.toContain("c.is_active = true");
+    expect(stalePropertyBranch).toContain("p.last_activity_at IS NOT NULL");
+    expect(stalePropertyBranch).toContain("p.last_activity_at < $3::timestamptz - ($6::int || ' days')::interval");
+    expect(stalePropertyBranch).not.toContain("p.is_active = true");
+  });
 });

@@ -29,6 +29,7 @@
 - A5b SCOPE-EXPAND 2026-05-07T22:25:33Z: folded PR #158 Codex catches (historical pipeline filter + inserted counter scoping) into A5b PR.
 - A5b PR-OPEN 2026-05-07T22:36:17Z: PR #160 opened for stale_account_count and folded PR #158 Codex catches.
 - A5b CODEX-FIX 2026-05-07T23:10:43Z: PR #160 force-pushed with stale-account period-scoping fix on both branches + regression test.
+- A5b CODEX-FIX-4 2026-05-08T05:51:46Z: PR #160 force-pushed with three fixes (P1 historical deals_count determinism, P2 cross-period semantics docs, P2 stale_accounts is_active removal). Two regression tests added. PRODUCT.md updated with metric determinism design doc.
 
 ## Track B — Shared Primitives + Shell + Harness
 - _no claims yet_

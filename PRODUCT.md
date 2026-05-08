@@ -41,3 +41,33 @@ T Rock is a commercial general contractor — they build things. The CRM should 
 3. **Red means action** — Primary buttons, important badges, and CTAs use brand red. Reserve it for things that need attention.
 4. **Speed over beauty** — Interactions should feel instant. Optimize for the rep who has 30 seconds between meetings.
 5. **Respect the data** — Numbers, names, and dates are the product. Typography and spacing should make them scannable, not pretty.
+
+## Rep Performance Snapshot — Metric Determinism
+
+Rep performance metrics computed by worker/src/jobs/rep-performance-rollup.ts use
+two different filter regimes based on period kind:
+
+**Current-period metrics** (mtd, qtd, ytd, week_8back):
+- Use the deal's current stage state (`psc.is_terminal`, `psc.is_active_pipeline`)
+- Reflect "as of now" — live dashboard semantics
+- Recomputing produces a slightly different answer if the deal's stage has changed
+
+**Historical metrics** (last_month, last_quarter, last_year):
+- Use only lifecycle attributes (created_at, close dates)
+- Defined as "deals that existed during this period"
+- Deterministic — recomputing last_month today and next week produces the same answer
+- Does NOT filter on current stage state because that would retroactively
+  change historical snapshots
+
+**stale_account_count** (all period kinds):
+- Counts accounts with stale activity timestamps as of period_end
+- Does NOT filter on companies.is_active / properties.is_active because those
+  flags lack deactivation timestamps and would retroactively change historical
+  counts when accounts are deactivated
+- This is a deliberate trade-off; without `deactivated_at` columns, exact
+  active-state determinism is not possible
+
+**Why the asymmetry**: the current-period branches answer "what's happening now,"
+the historical branches answer "what existed during this period." These are
+slightly different product questions by design. Future work could unify them by
+adding stage history coverage backfill and deactivation timestamps.
