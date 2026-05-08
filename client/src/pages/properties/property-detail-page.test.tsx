@@ -222,6 +222,24 @@ describe("PropertyDetailPage", () => {
     expect(html).toContain("hs_property_9400");
     expect(html).toContain("pc_property_dallas_1");
     expect(html).toContain("ccam_8821");
+    expect(html).toContain("32.88010, -96.76890");
+  });
+
+  it("keeps company navigation when company name is missing", () => {
+    mocks.usePropertyDetailMock.mockReturnValueOnce({
+      property: makeProperty({ companyName: null }),
+      leads: [],
+      deals: [],
+      loading: false,
+      error: null,
+      refetch: vi.fn(),
+    });
+
+    const html = normalize(renderPage());
+
+    expect(html).toContain('href="/companies/company-1"');
+    expect(html).toContain("View company");
+    expect(html).not.toContain("No owner company");
   });
 
   it("shows Not categorized when propertyType is null", () => {
@@ -283,5 +301,12 @@ describe("PropertyDetailPage", () => {
 
     expect(html).toContain('href="/properties/property-1/edit"');
     expect(html).toContain("Edit");
+  });
+
+  it("new deal button passes property and company context", () => {
+    const html = normalize(renderPage());
+
+    expect(html).toContain('href="/deals/new?propertyId=property-1&amp;companyId=company-1"');
+    expect(html).toContain("New deal");
   });
 });

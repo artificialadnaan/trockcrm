@@ -263,10 +263,10 @@ export function PropertyDetailPage() {
               {addressLine}
             </span>
           ) : null}
-          {property.companyId && property.companyName ? (
+          {property.companyId ? (
             <Link to={`/companies/${property.companyId}`} className="inline-flex items-center gap-1 font-semibold text-slate-700 hover:text-brand-red">
               <Building2 className="h-4 w-4" />
-              {property.companyName}
+              {property.companyName ?? "View company"}
             </Link>
           ) : (
             <span>Unassigned company</span>
@@ -295,7 +295,7 @@ export function PropertyDetailPage() {
             </a>
           ) : null}
           <Link
-            to={`/deals/new?propertyId=${property.id}`}
+            to={`/deals/new?propertyId=${property.id}${property.companyId ? `&companyId=${property.companyId}` : ""}`}
             className={cn(buttonVariants({ size: "sm" }), "bg-brand-red text-white hover:bg-brand-red/90")}
           >
             <Plus className="h-4 w-4" />
@@ -376,12 +376,12 @@ function PropertyRightRail({
           <DetailRailItem
             label="Company"
             value={
-              property.companyId && property.companyName ? (
+              property.companyId ? (
                 <Link to={`/companies/${property.companyId}`} className="inline-flex items-center gap-2 text-brand-red hover:underline">
                   <span className="grid h-7 w-7 place-items-center rounded-full bg-slate-900 text-[10px] font-black uppercase text-white">
-                    {getInitials(property.companyName)}
+                    {getInitials(property.companyName ?? "?")}
                   </span>
-                  {property.companyName}
+                  {property.companyName ?? "View company"}
                 </Link>
               ) : (
                 "No owner company"

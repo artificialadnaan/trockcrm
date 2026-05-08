@@ -439,6 +439,8 @@ export async function getPropertyDetail(tenantDb: TenantDb, propertyId: string) 
       propertyType: properties.propertyType,
       buildYear: properties.buildYear,
       unitCount: properties.unitCount,
+      lat: properties.lat,
+      lng: properties.lng,
       floors: properties.floors,
       roofArea: properties.roofArea,
       notes: properties.notes,

@@ -7,6 +7,8 @@ const serviceSource = readFileSync(resolve(__dirname, "../../../src/modules/prop
 describe("property detail metadata contract", () => {
   it("selects redesign property metadata in detail responses", () => {
     expect(serviceSource).toContain("propertyType: properties.propertyType");
+    expect(serviceSource).toContain("lat: properties.lat");
+    expect(serviceSource).toContain("lng: properties.lng");
     expect(serviceSource).toContain("procorePropertyId: properties.procorePropertyId");
     expect(serviceSource).toContain("companycamProjectId: properties.companycamProjectId");
     expect(serviceSource).toContain("hubspotPropertyId: properties.hubspotPropertyId");
