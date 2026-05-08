@@ -21,7 +21,7 @@ import {
   ExternalLink,
   Users,
 } from "lucide-react";
-import { Button } from "@/components/ui/button";
+import { Button, buttonVariants } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent } from "@/components/ui/card";
 import {
@@ -65,6 +65,7 @@ import { useLeadDetail } from "@/hooks/use-leads";
 import { usePipelineStages } from "@/hooks/use-pipeline-config";
 import { useAuth } from "@/lib/auth";
 import { api } from "@/lib/api";
+import { cn } from "@/lib/utils";
 import { formatCurrency, bestEstimate } from "@/lib/deal-utils";
 import {
   getCanonicalDealStageSlugs,
@@ -491,14 +492,14 @@ export function DealDetailPage() {
     {
       eyebrow: "Days in stage",
       value: stageAgeDays == null ? "N/A" : `${stageAgeDays}`,
-      captionLabel: isSlaBreached ? "Over SLA" : "On track",
+      captionLabel: stageAgeDays == null ? "No data" : isSlaBreached ? "Over SLA" : "On track",
       captionContext: `SLA ${stageSlaDays} days`,
     },
     {
       eyebrow: "SLA status",
-      value: isSlaBreached ? "Overdue" : "Current",
-      captionLabel: currentStage?.name ?? "Stage",
-      captionContext: stageAgeDays == null ? "stage age unavailable" : `${stageAgeDays} days elapsed`,
+      value: stageAgeDays == null ? "Unknown" : isSlaBreached ? "Overdue" : "Current",
+      captionLabel: stageAgeDays == null ? "No data" : isSlaBreached ? "Over SLA" : "On track",
+      captionContext: `SLA ${stageSlaDays} days`,
       accent: isSlaBreached ? "red" : "default",
     },
   ];
@@ -543,15 +544,23 @@ export function DealDetailPage() {
   );
   const actionsSlot = (
     <>
-      <Button variant="outline" size="sm" render={<Link to={`/deals/${deal.id}/edit`} />}>
+      <Link
+        to={`/deals/${deal.id}/edit`}
+        className={cn(buttonVariants({ variant: "outline", size: "sm" }))}
+      >
         <Edit className="h-4 w-4" />
         Edit
-      </Button>
+      </Link>
       {procoreProjectUrl ? (
-        <Button variant="outline" size="sm" render={<a href={procoreProjectUrl} target="_blank" rel="noreferrer" />}>
+        <a
+          href={procoreProjectUrl}
+          target="_blank"
+          rel="noreferrer"
+          className={cn(buttonVariants({ variant: "outline", size: "sm" }))}
+        >
           <ExternalLink className="h-4 w-4" />
           Procore
-        </Button>
+        </a>
       ) : null}
       {!currentStage?.isTerminal && (
         <DropdownMenu>

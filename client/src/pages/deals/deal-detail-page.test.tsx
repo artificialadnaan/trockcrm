@@ -51,6 +51,9 @@ vi.mock("@/lib/deal-utils", () => ({
 }));
 
 vi.mock("@/components/ui/button", () => ({
+  buttonVariants: vi.fn(({ variant, size }: { variant?: string; size?: string } = {}) =>
+    ["mock-button", variant, size].filter(Boolean).join(" ")
+  ),
   Button: ({
     children,
     render,
@@ -435,6 +438,24 @@ describe("DealDetailPage", () => {
 
     expect(html).toContain('href="/deals/deal-1/edit"');
     expect(html).toContain("Edit");
+  });
+
+  it("shows unknown SLA state when stage age is unavailable", () => {
+    mocks.useDealDetailMock.mockReturnValueOnce({
+      loading: false,
+      error: null,
+      refetch: vi.fn(),
+      deal: makeDealDetail({ stageEnteredAt: null }),
+    });
+
+    const html = renderPage();
+
+    expect(html).toContain("Days in stage");
+    expect(html).toContain("SLA status");
+    expect(html).toContain("Unknown");
+    expect(html).toContain("No data");
+    expect(html).not.toContain("On track");
+    expect(html).not.toContain("Current");
   });
 
   it("shows Bid Board ownership messaging while preserving valid CRM stage controls", () => {
