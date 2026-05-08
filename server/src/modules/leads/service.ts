@@ -335,7 +335,7 @@ async function assertValidProjectType(
 function assertValidOfficeCode(value: string | null | undefined): "dfw" | "atl" {
   const normalized = String(value ?? "").trim().toLowerCase();
   if (normalized !== "dfw" && normalized !== "atl") {
-    throw new AppError(400, "officeCode must be 'dfw' or 'atl'");
+    throw new AppError(400, "officeCode must be 'dfw' or 'atl'", "INVALID_OFFICE_CODE");
   }
 
   return normalized;
@@ -1303,18 +1303,25 @@ export function createLeadService(
       throw new AppError(409, "Hidden lead records are read-only");
     }
 
+    const normalizedOfficeCode = input.officeCode !== undefined
+      ? assertValidOfficeCode(input.officeCode)
+      : undefined;
+    const normalizedOffice = input.office !== undefined
+      ? assertValidOfficeCode(input.office)
+      : undefined;
+
     if (
-      input.officeCode !== undefined &&
+      normalizedOfficeCode !== undefined &&
       existing.officeCode != null &&
-      input.officeCode !== existing.officeCode
+      normalizedOfficeCode !== existing.officeCode
     ) {
       throw new AppError(422, "office_code cannot be changed once set", "LEAD_OFFICE_IMMUTABLE");
     }
 
     if (
-      input.office !== undefined &&
+      normalizedOffice !== undefined &&
       existing.office != null &&
-      input.office !== existing.office
+      normalizedOffice !== existing.office
     ) {
       throw new AppError(422, "office cannot be changed once set", "LEAD_OFFICE_IMMUTABLE");
     }
@@ -1484,7 +1491,7 @@ export function createLeadService(
     }
 
     if (input.officeCode !== undefined) {
-      updates.officeCode = assertValidOfficeCode(input.officeCode);
+      updates.officeCode = normalizedOfficeCode;
     }
 
     if (input.name !== undefined) updates.name = input.name;
