@@ -6,6 +6,7 @@ import cors from "cors";
 import express from "express";
 import helmet from "helmet";
 import path from "node:path";
+import { canonicalCleanupHostRedirect } from "./middleware/canonical-host.js";
 import { authRouter } from "./routes/auth.js";
 import { cleanupRouter } from "./routes/cleanup.js";
 
@@ -25,6 +26,8 @@ function healthResponse(_req: express.Request, res: express.Response) {
 
 app.get("/health", healthResponse);
 app.get("/api/health", healthResponse);
+
+app.use(canonicalCleanupHostRedirect);
 
 app.use("/api/auth", authRouter);
 app.use("/api/cleanup", cleanupRouter);
