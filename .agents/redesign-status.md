@@ -58,3 +58,4 @@
 - A2 CODEX-FIX-3 2026-05-08T04:00Z: PR #161 force-pushed with four more Codex fixes (estimate alias write-path, bootstrap upsert, office_code immutability, project_number Drizzle parity). Four regression tests added.
 - A2 CODEX-FIX-4 2026-05-08T05:59:58Z: PR #161 force-pushed with four fixes (P2 office_code seed parity, P2 deal_id Drizzle FK, P3 negative rounding, P3 deal_contacts indexes). Four regression tests added. Fresh DB apply verified.
 - A2 CODEX-FIX-5 2026-05-08T14:18:28Z: PR #161 force-pushed with five fixes (P1 orphan FK guard, P2 office_code 422, P2 rate precision, P1 negative rounding). Four regression tests added. Fresh DB apply verified.
+- A2 CODEX-FIX-6 2026-05-08T15:17:32Z: PR #161 force-pushed with one fix (P2 office_code normalization). Three P3 catches deferred to follow-up issues (#169, #170). Four regression tests added.
