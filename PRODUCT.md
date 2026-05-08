@@ -60,12 +60,40 @@ two different filter regimes based on period kind:
   change historical snapshots
 
 **stale_account_count** (all period kinds):
-- Counts accounts with stale activity timestamps as of period_end
-- Does NOT filter on companies.is_active / properties.is_active because those
-  flags lack deactivation timestamps and would retroactively change historical
-  counts when accounts are deactivated
-- This is a deliberate trade-off; without `deactivated_at` columns, exact
-  active-state determinism is not possible
+- Counts accounts (companies and properties) with stale activity timestamps as of period_end
+- The stale threshold is configurable per stage; default is 30 days
+
+**Known limitations — NOT period-deterministic:**
+
+stale_account_count is computed from currently-mutable data. Recomputing the
+same historical period at a later date may produce a different result. Three
+distinct sources of drift:
+
+1. **Activity timestamps are mutable.** companies.last_activity_at and
+   properties.last_activity_at advance whenever new activity is logged. If new
+   activity happens after period_end on an account that was stale during the
+   period, the next recomputation will exclude that account from the historical
+   count.
+
+2. **Account ownership is mutable.** stale_account_count attribution uses the
+   deal's CURRENT assigned_rep_id. If a deal is reassigned after period_end,
+   the stale count for that account moves to the new rep on next recomputation.
+
+3. **Stale cutoff uses session timezone.** The boundary expression
+   `($3::date + interval '1 day')::timestamptz` interprets the date in the
+   session's TimeZone setting. Environments running in different timezones
+   may classify accounts near the threshold differently.
+
+True determinism for this metric would require:
+- An activity_history table that snapshots last_activity_at at period boundaries
+- A deal_assignment_history table that records ownership changes over time
+- An explicit UTC anchor on the cutoff expression
+
+These are tracked in follow-up issue #168:
+https://github.com/artificialadnaan/trockcrm/issues/168
+
+For now, the metric is **a current-state snapshot recomputed for historical
+periods** — useful as a ballpark indicator but not for audit-grade reporting.
 
 **Why the asymmetry**: the current-period branches answer "what's happening now,"
 the historical branches answer "what existed during this period." These are

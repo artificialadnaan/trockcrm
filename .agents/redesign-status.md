@@ -31,6 +31,7 @@
 - A5b CODEX-FIX 2026-05-07T23:10:43Z: PR #160 force-pushed with stale-account period-scoping fix on both branches + regression test.
 - A5b CODEX-FIX-4 2026-05-08T05:51:46Z: PR #160 force-pushed with three fixes (P1 historical deals_count determinism, P2 cross-period semantics docs, P2 stale_accounts is_active removal). Two regression tests added. PRODUCT.md updated with metric determinism design doc.
 - A5b CODEX-FIX-5 2026-05-08T14:09:45Z: PR #160 force-pushed with three fixes (P1 historical pipeline_value determinism, P2 stale cutoff end-of-day, P3 doc alignment). Two regression tests added.
+- A5b CODEX-FIX-6 2026-05-08T15:11:13Z: PR #160 force-pushed with PRODUCT.md doc update acknowledging stale_account_count structural limits. No code changes. Follow-up issue #168 filed tracking activity-history, ownership-history, and UTC anchor work.
 
 ## Track B — Shared Primitives + Shell + Harness
 - _no claims yet_
