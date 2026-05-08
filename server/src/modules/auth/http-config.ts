@@ -146,7 +146,7 @@ export function getLogoutCookieClears(env: EnvInput) {
   const csrfOptions = {
     httpOnly: false,
     secure: isProduction,
-    sameSite: isProduction ? "none" : "strict",
+    sameSite: isProduction ? "lax" : "strict",
     path: "/",
     maxAge: 0,
   } as const;
@@ -161,11 +161,14 @@ export function getLogoutCookieClears(env: EnvInput) {
 
 export function getCsrfCookieOptions(env: EnvInput) {
   const isProduction = env.NODE_ENV === "production";
+  const domain = sharedAuthCookieDomain(env);
 
   return {
     httpOnly: false,
     secure: isProduction,
-    sameSite: isProduction ? "none" : "strict",
+    sameSite: isProduction ? "lax" : "strict",
+    domain,
+    path: "/",
     maxAge: 24 * 60 * 60 * 1000,
   } as const;
 }
