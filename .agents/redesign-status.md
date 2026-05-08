@@ -47,7 +47,7 @@
 - _no claims yet_
 
 ## Track E — Detail Pages
-- _no claims yet_
+- E PHASE-1 CLAIM 2026-05-08T16:25:49Z: redesign/detail-shell-phase1, shared shell + contact polish + reports placeholder + backend additions for E2-E5. ETA EOD 2026-05-08. Worktree: trockcrm-redesign-detail-shell.
 
 ## Track F — Specialty Pages
 - _no claims yet_
