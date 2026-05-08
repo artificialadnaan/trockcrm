@@ -93,3 +93,4 @@
 - HOTFIX-2 PR-OPEN 2026-05-08T17:43:24Z: PR https://github.com/artificialadnaan/trockcrm/pull/178.
 - HOTFIX-2 LIVE 2026-05-08T17:54:24Z: PR #178 merged to main at 56a10d9; Railway API production deployment 839dcd5d-966b-49a9-8032-65fc7c0aebcc succeeded and ran 0106_redesign_e_property_type_constraint_fix.sql.
 - E5 CLAIM 2026-05-08T18:25Z: redesign/detail-page-property, property detail page polish using DetailPageShell + new tab system. Worktree: trockcrm-redesign-detail-property.
+- E5 PR-OPEN 2026-05-08T18:27Z: PR https://github.com/artificialadnaan/trockcrm/pull/180.
