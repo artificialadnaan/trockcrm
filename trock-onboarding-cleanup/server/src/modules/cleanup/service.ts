@@ -18,6 +18,17 @@ const SKIP_REASONS = new Set([
   "other",
 ]);
 
+const SKIP_REASON_LABELS: Record<string, string> = {
+  contact_left_company: "Contact left company",
+  deal_stalled: "Deal stalled",
+  customer_unreachable: "Customer unreachable",
+  record_is_duplicate: "Record is duplicate",
+  record_is_junk: "Record is junk",
+  historical_no_enrichment_needed: "Historical no enrichment needed",
+  missing_information_not_available: "Missing information not available",
+  other: "Other",
+};
+
 const TABLE_BY_TYPE = {
   deal: "deals",
   lead: "leads",
@@ -45,6 +56,10 @@ function normalizeAuditValue(value: unknown) {
   return value === "" ? null : value;
 }
 
+function present(value: unknown) {
+  return value !== null && value !== undefined && String(value).trim() !== "";
+}
+
 export function normalizeFieldChanges(before: Record<string, unknown>, after: Record<string, unknown>, fields: string[]) {
   return fields
     .map((field) => ({
@@ -53,6 +68,84 @@ export function normalizeFieldChanges(before: Record<string, unknown>, after: Re
       after: normalizeAuditValue(after[field]),
     }))
     .filter((change) => change.before !== change.after);
+}
+
+function activityLinkColumns(type: RecordType, id: string) {
+  return {
+    dealId: type === "deal" ? id : null,
+    leadId: type === "lead" ? id : null,
+    contactId: type === "contact" ? id : null,
+    companyId: type === "company" ? id : null,
+  };
+}
+
+async function writeCrmActivityNote(
+  client: QueryClient,
+  input: {
+    type: RecordType;
+    recordId: string;
+    userId: string;
+    subject: string;
+    body: string;
+    action: string;
+  },
+) {
+  const schema = tenant();
+  const links = activityLinkColumns(input.type, input.recordId);
+  await client.query(
+    `
+      INSERT INTO ${quoteIdent(schema)}.activities (
+        type,
+        responsible_user_id,
+        performed_by_user_id,
+        source_entity_type,
+        source_entity_id,
+        deal_id,
+        lead_id,
+        contact_id,
+        company_id,
+        subject,
+        body,
+        hubspot_extra_properties
+      )
+      VALUES ('note', $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11::jsonb)
+    `,
+    [
+      input.userId,
+      input.userId,
+      input.type,
+      input.recordId,
+      links.dealId,
+      links.leadId,
+      links.contactId,
+      links.companyId,
+      input.subject,
+      input.body,
+      JSON.stringify({
+        source: "cleanup_migration",
+        cleanupAction: input.action,
+      }),
+    ],
+  );
+}
+
+const CLEANUP_META_FIELDS = new Set([
+  "cleanup_status",
+  "cleanup_completed_at",
+  "cleanup_completed_by",
+  "skip_reason",
+  "skip_notes",
+  "needs_leadership_review",
+]);
+
+function fieldChangeSummary(change: { field: string; before: unknown; after: unknown }) {
+  if (!present(change.before) && present(change.after)) return `${change.field} (added)`;
+  if (present(change.before) && !present(change.after)) return `${change.field} (cleared)`;
+  return `${change.field} (updated)`;
+}
+
+function completionBusinessChanges(changes: Array<{ field: string; before: unknown; after: unknown }>) {
+  return changes.filter((change) => !CLEANUP_META_FIELDS.has(change.field));
 }
 
 const UPDATE_COLUMNS: Record<RecordType, Set<string>> = {
@@ -670,16 +763,25 @@ async function reassignRecordsInTransaction(type: RecordType, recordIds: string[
       throw error;
     }
     await assertRecordsExist(client, type, recordIds);
-    const beforeOwners = await client.query<{ id: string; owner_id: string | null; cleanup_assigned_to: string | null }>(
+    const beforeOwners = await client.query<{
+      id: string;
+      owner_id: string | null;
+      cleanup_assigned_to: string | null;
+      owner_email: string | null;
+      owner_display_name: string | null;
+    }>(
       `
         SELECT
           record.id::text AS id,
           record.${quoteIdent(ownerColumn)}::text AS owner_id,
-          assignment.assigned_to::text AS cleanup_assigned_to
+          assignment.assigned_to::text AS cleanup_assigned_to,
+          owner_user.email AS owner_email,
+          owner_user.display_name AS owner_display_name
         FROM ${quoteIdent(schema)}.${quoteIdent(table)} record
         LEFT JOIN ${quoteIdent(schema)}.cleanup_assignments assignment
           ON assignment.record_type = $1
          AND assignment.record_id = record.id
+        LEFT JOIN public.users owner_user ON owner_user.id = record.${quoteIdent(ownerColumn)}
         WHERE record.id = ANY($2::uuid[])
       `,
       [type, recordIds],
@@ -742,6 +844,19 @@ async function reassignRecordsInTransaction(type: RecordType, recordIds: string[
           reason: reason?.trim() || null,
           targetUserEmail: targetUser.email,
         },
+      });
+      const oldOwnerName = before?.owner_display_name ?? before?.owner_email ?? "unassigned";
+      const newOwnerName = targetUser.display_name ?? targetUser.email;
+      await writeCrmActivityNote(client, {
+        type,
+        recordId,
+        userId: actor.id,
+        subject: "Cleanup reassignment",
+        body: [
+          `Reassigned from ${oldOwnerName} to ${newOwnerName} during data cleanup.`,
+          reason?.trim() ? `Reason: ${reason.trim()}` : null,
+        ].filter(Boolean).join(" "),
+        action: "record_reassigned",
       });
     }
 
@@ -1355,6 +1470,17 @@ export async function patchRecord(typeValue: string, id: string, user: AuthConte
         completed: requestedComplete,
       },
     });
+    const businessChanges = requestedComplete ? completionBusinessChanges(changedFields) : [];
+    if (businessChanges.length > 0) {
+      await writeCrmActivityNote(client, {
+        type,
+        recordId: id,
+        userId: user.id,
+        subject: "Cleanup completed",
+        body: `Record cleaned during data migration. Fields updated: ${businessChanges.map(fieldChangeSummary).join(", ")}.`,
+        action: "completed",
+      });
+    }
     await client.query("COMMIT");
     return updated;
   } catch (error) {
@@ -1435,6 +1561,20 @@ export async function skipRecord(typeValue: string, id: string, user: AuthContex
         notes: notes ?? null,
         missingFields: detail.missingFields,
       },
+    });
+    const reasonLabel = SKIP_REASON_LABELS[reason] ?? reason.replace(/_/g, " ");
+    const missingFieldList = detail.missingFields.map((field) => field.field).join(", ") || "none";
+    await writeCrmActivityNote(client, {
+      type,
+      recordId: id,
+      userId: user.id,
+      subject: `Cleanup skip: ${reasonLabel}`,
+      body: [
+        `Skipped during data cleanup. Reason: ${reasonLabel}.`,
+        notes?.trim() ? `Notes: ${notes.trim()}.` : null,
+        `Missing fields at time of skip: ${missingFieldList}.`,
+      ].filter(Boolean).join(" "),
+      action: "skipped",
     });
     await client.query("COMMIT");
     return { status: "skipped", id, type };
