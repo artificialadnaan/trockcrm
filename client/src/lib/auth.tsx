@@ -10,6 +10,10 @@ interface User {
   officeId: string;
   activeOfficeId?: string;
   mustChangePassword?: boolean;
+  onboardingCompletedAt?: string | null;
+  onboardingPendingCount?: number;
+  requiresOnboarding?: boolean;
+  cleanupUrl?: string;
 }
 
 interface AuthContextValue {
