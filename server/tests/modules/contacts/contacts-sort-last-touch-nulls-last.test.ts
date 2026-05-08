@@ -1,5 +1,7 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { buildContactSortOrder } from "../../../src/modules/contacts/service.js";
+
+vi.mock("@trock-crm/shared/schema", async () => import("../../../../shared/src/schema/index.js"));
 
 function flattenSqlChunks(value: unknown): string {
   const chunks = (value as { queryChunks?: unknown[] }).queryChunks ?? [];
