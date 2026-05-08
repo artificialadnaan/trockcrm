@@ -76,6 +76,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const logout = async () => {
     await api("/auth/logout", { method: "POST" });
     setUser(null);
+    window.localStorage.clear();
+    window.sessionStorage.clear();
+    window.location.assign("/login?loggedOut=1");
   };
 
   return (

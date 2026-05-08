@@ -34,6 +34,10 @@ function normalizeCookieDomain(value: string | undefined): string | undefined {
   return trimmed || undefined;
 }
 
+function sharedAuthCookieDomain(env: EnvInput): string | undefined {
+  return normalizeCookieDomain(env.AUTH_COOKIE_DOMAIN) ?? (env.NODE_ENV === "production" ? ".trockcrm.com" : undefined);
+}
+
 function safeEqual(a: string, b: string): boolean {
   const left = Buffer.from(a);
   const right = Buffer.from(b);
@@ -118,7 +122,7 @@ export function isDevAuthEnabled(env: EnvInput, host: string | undefined): boole
 
 export function getTokenCookieOptions(env: EnvInput) {
   const isProduction = env.NODE_ENV === "production";
-  const domain = normalizeCookieDomain(env.AUTH_COOKIE_DOMAIN);
+  const domain = sharedAuthCookieDomain(env);
 
   return {
     httpOnly: true,
@@ -127,6 +131,32 @@ export function getTokenCookieOptions(env: EnvInput) {
     domain,
     maxAge: 24 * 60 * 60 * 1000,
   } as const;
+}
+
+export function getLogoutCookieClears(env: EnvInput) {
+  const isProduction = env.NODE_ENV === "production";
+  const domain = sharedAuthCookieDomain(env);
+  const tokenOptions = {
+    httpOnly: true,
+    secure: isProduction,
+    sameSite: isProduction ? "lax" : "strict",
+    path: "/",
+    maxAge: 0,
+  } as const;
+  const csrfOptions = {
+    httpOnly: false,
+    secure: isProduction,
+    sameSite: isProduction ? "none" : "strict",
+    path: "/",
+    maxAge: 0,
+  } as const;
+
+  return [
+    { name: "token", options: domain ? { ...tokenOptions, domain } : tokenOptions },
+    { name: "token", options: tokenOptions },
+    { name: CSRF_COOKIE_NAME, options: domain ? { ...csrfOptions, domain } : csrfOptions },
+    { name: CSRF_COOKIE_NAME, options: csrfOptions },
+  ] as const;
 }
 
 export function getCsrfCookieOptions(env: EnvInput) {
@@ -167,7 +197,8 @@ export function isPublicAuthCsrfExempt(input: {
   if (
     input.path === "/api/auth/accept-invite" ||
     input.path === "/api/auth/field-login" ||
-    input.path === "/api/auth/local/login"
+    input.path === "/api/auth/local/login" ||
+    input.path === "/api/auth/logout"
   ) {
     return true;
   }

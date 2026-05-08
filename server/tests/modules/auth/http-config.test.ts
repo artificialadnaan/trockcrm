@@ -4,6 +4,7 @@ import {
   createCsrfToken,
   FIELD_CSRF_HEADER_VALUE,
   getAllowedCorsOrigins,
+  getLogoutCookieClears,
   getRequestOrigin,
   getTokenCookieOptions,
   isAllowedCookieAuthOrigin,
@@ -38,8 +39,25 @@ describe("auth http config", () => {
     expect(getTokenCookieOptions({ NODE_ENV: "production" })).toMatchObject({
       httpOnly: true,
       secure: true,
-      sameSite: "none",
+      sameSite: "lax",
+      domain: ".trockcrm.com",
     });
+  });
+
+  it("clears shared and host-only auth cookies on logout", () => {
+    expect(
+      getLogoutCookieClears({ NODE_ENV: "production", AUTH_COOKIE_DOMAIN: ".trockcrm.com" }).map((clear) => [
+        clear.name,
+        "domain" in clear.options ? clear.options.domain : null,
+        clear.options.path,
+        clear.options.maxAge,
+      ])
+    ).toEqual([
+      ["token", ".trockcrm.com", "/", 0],
+      ["token", null, "/", 0],
+      ["csrf_token", ".trockcrm.com", "/", 0],
+      ["csrf_token", null, "/", 0],
+    ]);
   });
 
   it("uses strict non-secure cookies in development", () => {
@@ -196,7 +214,7 @@ describe("auth http config", () => {
 
     expect(isPublicAuthCsrfExempt({ method: "GET", path: "/api/auth/accept-invite", env })).toBe(false);
     expect(isPublicAuthCsrfExempt({ method: "POST", path: "/api/auth/accept-invite/extra", env })).toBe(false);
-    expect(isPublicAuthCsrfExempt({ method: "POST", path: "/api/auth/logout", env })).toBe(false);
+    expect(isPublicAuthCsrfExempt({ method: "POST", path: "/api/auth/logout", env })).toBe(true);
     expect(isPublicAuthCsrfExempt({ method: "POST", path: "/api/auth/local/change-password", env })).toBe(false);
     expect(
       isPublicAuthCsrfExempt({
