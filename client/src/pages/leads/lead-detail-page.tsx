@@ -1,8 +1,26 @@
 import { useMemo, useState } from "react";
-import { useNavigate, useParams } from "react-router-dom";
-import { ArrowLeft, Building2, MapPin, Clock3, User, Phone } from "lucide-react";
-import { Button } from "@/components/ui/button";
+import { Link, useNavigate, useParams } from "react-router-dom";
+import {
+  Building2,
+  ClipboardList,
+  Clock,
+  Clock3,
+  Edit,
+  ExternalLink,
+  MapPin,
+  Mic,
+  Phone,
+  User,
+} from "lucide-react";
+import { Button, buttonVariants } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
+import {
+  DetailPageShell,
+  DetailRailItem,
+  DetailRailSection,
+  type DetailPageShellKpi,
+  type DetailPageShellTab,
+} from "@/components/layout/detail-page-shell";
 import { LeadForm, LeadQuestionnaireSummary } from "@/components/leads/lead-form";
 import { LeadConvertDialog } from "@/components/leads/lead-convert-dialog";
 import { LeadStageChangeDialog } from "@/components/leads/lead-stage-change-dialog";
@@ -11,14 +29,71 @@ import { LeadTimelineTab } from "@/components/leads/lead-timeline-tab";
 import { LeadQuestionnaireEditor } from "@/components/leads/lead-questionnaire-editor";
 import { RecordingList } from "@/components/call-recordings/recording-list";
 import { formatLeadPropertyLine, getLeadStageMetadata, useLeadDetail } from "@/hooks/use-leads";
+import type { LeadRecord } from "@/hooks/use-leads";
 import { usePipelineStages } from "@/hooks/use-pipeline-config";
 import { LEAD_BOARD_STAGE_SLUGS, isBidBoardMirroredStageSlug } from "@/lib/pipeline-ownership";
+import { cn } from "@/lib/utils";
+
+type LeadDetailTab = "timeline" | "questionnaire" | "recordings";
+
+function formatNullable(value: string | number | null | undefined) {
+  if (value == null || value === "") return "Not set";
+  return String(value);
+}
+
+function titleCase(value: string | null | undefined) {
+  if (!value) return "Not set";
+  return value
+    .replace(/[_-]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim()
+    .split(" ")
+    .map((word) => word.charAt(0).toUpperCase() + word.slice(1).toLowerCase())
+    .join(" ");
+}
+
+function formatCurrency(value: string | number | null | undefined) {
+  if (value == null || value === "") return "Unknown";
+  const amount = typeof value === "number" ? value : Number(String(value).replace(/[$,\s]/g, ""));
+  if (!Number.isFinite(amount)) return "Unknown";
+  return new Intl.NumberFormat("en-US", {
+    style: "currency",
+    currency: "USD",
+    maximumFractionDigits: 0,
+  }).format(amount);
+}
+
+function daysSince(value: string | null | undefined) {
+  if (!value) return null;
+  const time = new Date(value).getTime();
+  if (!Number.isFinite(time)) return null;
+  return Math.max(0, Math.floor((Date.now() - time) / 86_400_000));
+}
+
+function leadEstimatedValue(lead: LeadRecord) {
+  return lead.forecastRevenue ?? lead.qualificationBudgetAmount ?? null;
+}
+
+function sourceLabel(lead: LeadRecord) {
+  return lead.sourceCategory ?? lead.source ?? lead.sourceDetail ?? null;
+}
+
+function ownerInitials(lead: LeadRecord) {
+  return (lead.assignedRepName ?? lead.assignedRepId ?? "NA")
+    .split(/\s+/)
+    .filter(Boolean)
+    .slice(0, 2)
+    .map((part) => part[0])
+    .join("")
+    .toUpperCase();
+}
 
 export function LeadDetailPage() {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
   const { lead, loading, error, refetch } = useLeadDetail(id);
   const { stages } = usePipelineStages();
+  const [activeTab, setActiveTab] = useState<LeadDetailTab>("timeline");
   const [isConvertDialogOpen, setIsConvertDialogOpen] = useState(false);
   const [isStageDialogOpen, setIsStageDialogOpen] = useState(false);
   const [isEditing, setIsEditing] = useState(false);
@@ -75,18 +150,32 @@ export function LeadDetailPage() {
 
   const isLeadEditV2 = Boolean(lead.leadQuestionnaire);
   const isHiddenReadOnly = !lead.isActive && lead.status !== "converted";
+  const startQuestionnaireEdit = () => {
+    setActiveTab("questionnaire");
+    setIsEditing(true);
+  };
+  const handleTabChange = (tab: LeadDetailTab) => {
+    if (tab !== "questionnaire" && isEditing) {
+      const confirmed = window.confirm(
+        "Leave the questionnaire editor? Unsaved lead changes will be lost."
+      );
+      if (!confirmed) return;
+      setIsEditing(false);
+    }
+    setActiveTab(tab);
+  };
 
   const secondaryAction = isHiddenReadOnly
     ? null
     : !isConverted
       ? {
           label: currentStageSlug === "sales_validation_stage" ? "Edit Sales Validation" : "Edit Lead",
-          onClick: () => (isLeadEditV2 ? setIsEditing(true) : navigate(`/leads/${lead.id}/edit`)),
+          onClick: () => (isLeadEditV2 ? startQuestionnaireEdit() : navigate(`/leads/${lead.id}/edit`)),
         }
     : isLeadEditV2
       ? {
           label: "Edit Lead Questionnaire",
-          onClick: () => setIsEditing(true),
+          onClick: () => startQuestionnaireEdit(),
         }
     : lead.convertedDealId && isOpportunityStage
       ? {
@@ -119,69 +208,116 @@ export function LeadDetailPage() {
       : null;
 
   return (
-    <div className="space-y-6">
-      <Button
-        variant="ghost"
-        size="sm"
-        className="-ml-2 text-muted-foreground hover:text-foreground"
-        onClick={() => navigate("/leads")}
-      >
-        <ArrowLeft className="mr-1 h-4 w-4" />
-        Leads
-      </Button>
-
-      <div className="grid gap-6 lg:grid-cols-[minmax(0,1.35fr)_minmax(320px,0.9fr)]">
-        <div className="space-y-4">
-          <div className="space-y-3">
-            <div className="flex flex-wrap items-center gap-2">
-              <span className="text-xs font-mono uppercase tracking-[0.18em] text-muted-foreground">
-                {lead.convertedDealNumber ?? lead.id.slice(0, 8)}
+    <div>
+      <DetailPageShell
+        parentLabel="Leads"
+        parentHref="/leads"
+        currentLabel={lead.name}
+        iconSlot={<ClipboardList className="h-9 w-9" />}
+        typeBadge={
+          <span className="rounded-full bg-slate-100 px-2 py-1 text-[10px] font-black uppercase tracking-[0.16em] text-slate-700">
+            {sourceLabel(lead) ? titleCase(sourceLabel(lead)) : "Lead"}
+          </span>
+        }
+        statusBadge={
+          <>
+            <LeadStageBadge stageId={lead.stageId} converted={isConverted} />
+            {isConverted ? (
+              <span className="rounded-full bg-emerald-50 px-2 py-1 text-[10px] font-black uppercase tracking-[0.16em] text-emerald-700">
+                Converted to deal
               </span>
-              <LeadStageBadge stageId={lead.stageId} converted={isConverted} />
-            </div>
-            <h1 className="text-4xl font-black tracking-tight text-foreground">{lead.name}</h1>
-            <div className="flex flex-wrap items-center gap-4 text-sm text-muted-foreground">
-              <span className="flex items-center gap-1">
+            ) : null}
+          </>
+        }
+        title={lead.name}
+        subtitleSlot={
+          <>
+            <span className="font-mono text-xs font-bold uppercase tracking-[0.14em] text-slate-500">
+              {lead.convertedDealNumber ?? lead.id.slice(0, 8)}
+            </span>
+            {lead.companyId && leadCompanyName ? (
+              <Link to={`/companies/${lead.companyId}`} className="inline-flex items-center gap-1 font-semibold text-slate-700 hover:text-brand-red">
                 <Building2 className="h-4 w-4" />
-                {leadCompanyName ?? "Unassigned company"}
+                {leadCompanyName}
+              </Link>
+            ) : (
+              <span className="inline-flex items-center gap-1">
+                <Building2 className="h-4 w-4" />
+                Unassigned company
               </span>
-              {propertyLine && (
-                <span className="flex items-center gap-1">
-                  <MapPin className="h-4 w-4" />
-                  {propertyLine}
-                </span>
-              )}
-            </div>
-          </div>
-
-          <div className="grid gap-4 sm:grid-cols-3">
-            <Card>
-              <CardContent className="pt-4">
-                <p className="text-xs uppercase tracking-wide text-muted-foreground">Stage</p>
-                <p className="mt-2 text-sm font-semibold">{currentStage?.name ?? "Lead"}</p>
-              </CardContent>
-            </Card>
-            <Card>
-              <CardContent className="pt-4">
-                <p className="text-xs uppercase tracking-wide text-muted-foreground">Activity</p>
-                <p className="mt-2 text-sm font-semibold">Inherited into deal timeline</p>
-              </CardContent>
-            </Card>
-            <Card>
-              <CardContent className="pt-4">
-                <p className="text-xs uppercase tracking-wide text-muted-foreground">Updated</p>
-                <p className="mt-2 text-sm font-semibold">
-                  {new Date(lead.updatedAt).toLocaleDateString("en-US", {
-                    month: "short",
-                    day: "numeric",
-                    year: "numeric",
-                  })}
-                </p>
-              </CardContent>
-            </Card>
-          </div>
-
-          {isEditing && isLeadEditV2 ? (
+            )}
+            {propertyLine ? (
+              <span className="inline-flex items-center gap-1">
+                <MapPin className="h-4 w-4" />
+                {propertyLine}
+              </span>
+            ) : null}
+            <span>{daysSince(lead.stageEnteredAt) == null ? "Stage age unavailable" : `${daysSince(lead.stageEnteredAt)}d in stage`}</span>
+          </>
+        }
+        actionsSlot={
+          <>
+            {!isEditing && secondaryAction ? (
+              secondaryAction.label.startsWith("Open") && lead.convertedDealId ? (
+                <Link
+                  to={
+                    secondaryAction.label === "Open Opportunity Scope"
+                      ? `/deals/${lead.convertedDealId}?tab=scoping`
+                      : `/deals/${lead.convertedDealId}`
+                  }
+                  className={cn(buttonVariants({ variant: "outline", size: "sm" }))}
+                >
+                  <ExternalLink className="h-4 w-4" />
+                  {secondaryAction.label}
+                </Link>
+              ) : (
+                <Button variant="outline" size="sm" onClick={secondaryAction.onClick}>
+                  <Edit className="h-4 w-4" />
+                  {secondaryAction.label}
+                </Button>
+              )
+            ) : null}
+            {!isEditing && canAdvanceLeadStage ? (
+              <Button variant="secondary" size="sm" onClick={() => setIsStageDialogOpen(true)}>
+                Move to {nextLeadStage.name}
+              </Button>
+            ) : null}
+            {!isEditing && canConvertToOpportunity ? (
+              <Button size="sm" className="bg-brand-red text-white hover:bg-brand-red/90" onClick={() => setIsConvertDialogOpen(true)}>
+                Convert to Opportunity
+              </Button>
+            ) : null}
+          </>
+        }
+        kpis={buildLeadKpis(lead)}
+        tabs={buildLeadTabs()}
+        activeTabId={activeTab}
+        onTabChange={(tab) => handleTabChange(tab as LeadDetailTab)}
+        rightRail={
+          <LeadRightRail
+            lead={lead}
+            leadCompanyName={leadCompanyName}
+            propertyLine={propertyLine}
+            contextTitle={contextTitle}
+            contextMessage={contextMessage}
+            contextFootnote={contextFootnote}
+            converted={isConverted}
+            hiddenReadOnly={isHiddenReadOnly}
+            onSaved={() => {
+              void refetch();
+            }}
+          />
+        }
+      >
+        {activeTab === "timeline" ? (
+          <LeadTimelineTab
+            leadId={lead.id}
+            convertedDealId={lead.convertedDealId}
+            convertedAt={convertedAt}
+          />
+        ) : null}
+        {activeTab === "questionnaire" ? (
+          isEditing && isLeadEditV2 ? (
             <LeadQuestionnaireEditor
               lead={lead}
               onCancel={() => setIsEditing(false)}
@@ -191,151 +327,257 @@ export function LeadDetailPage() {
               }}
             />
           ) : (
-            <>
-              <LeadTimelineTab
-                leadId={lead.id}
-                convertedDealId={lead.convertedDealId}
-                convertedAt={convertedAt}
-              />
-              <RecordingList entityType="lead" entityId={lead.id} />
-              <LeadQuestionnaireSummary
-                lead={{
-                  id: lead.id,
-                  name: lead.name,
-                  convertedDealId: lead.convertedDealId,
-                  convertedDealNumber: lead.convertedDealNumber,
-                  companyId: lead.companyId ?? null,
-                  companyName: leadCompanyName,
-                  stageId: lead.stageId,
-                  propertyId: lead.propertyId,
-                  propertyName: lead.property?.name ?? null,
-                  propertyAddress: lead.property?.address ?? null,
-                  propertyCity: lead.property?.city ?? null,
-                  propertyState: lead.property?.state ?? null,
-                  propertyZip: lead.property?.zip ?? null,
-                  source: lead.source,
-                  sourceCategory: lead.sourceCategory,
-                  sourceDetail: lead.sourceDetail,
-                  existingCustomerStatus: lead.existingCustomerStatus,
-                  description: lead.description,
-                  projectTypeId: lead.projectTypeId,
-                  projectType: lead.projectType,
-                  qualificationPayload: lead.qualificationPayload,
-                  projectTypeQuestionPayload: lead.projectTypeQuestionPayload,
-                  leadQuestionnaire: lead.leadQuestionnaire ?? null,
-                  stageEnteredAt: lead.stageEnteredAt,
-                }}
-              />
-            </>
-          )}
+            <LeadQuestionnaireSummary
+              lead={toLeadFormShape(lead, leadCompanyName)}
+            />
+          )
+        ) : null}
+        {activeTab === "recordings" ? <RecordingList entityType="lead" entityId={lead.id} /> : null}
+      </DetailPageShell>
+
+      <LeadConvertDialog
+        lead={lead}
+        open={isConvertDialogOpen}
+        onOpenChange={setIsConvertDialogOpen}
+        onSuccess={(dealId) => navigate(`/deals/${dealId}?tab=scoping`)}
+      />
+
+      {nextLeadStage ? (
+        <LeadStageChangeDialog
+          lead={lead}
+          targetStageId={nextLeadStage.id}
+          targetStageName={nextLeadStage.name}
+          open={isStageDialogOpen}
+          onOpenChange={setIsStageDialogOpen}
+          onEditLead={() => (isLeadEditV2 ? startQuestionnaireEdit() : navigate(`/leads/${lead.id}/edit`))}
+          onSuccess={() => {
+            setIsStageDialogOpen(false);
+            void refetch();
+          }}
+        />
+      ) : null}
+    </div>
+  );
+}
+
+function buildLeadTabs(): DetailPageShellTab[] {
+  const iconClassName = "h-4 w-4";
+  return [
+    { id: "timeline", label: "Timeline", icon: <Clock className={iconClassName} /> },
+    { id: "questionnaire", label: "Questionnaire", icon: <ClipboardList className={iconClassName} /> },
+    { id: "recordings", label: "Recordings", icon: <Mic className={iconClassName} /> },
+  ];
+}
+
+function buildLeadKpis(lead: LeadRecord): DetailPageShellKpi[] {
+  const stageAgeDays = daysSince(lead.stageEnteredAt);
+  const source = sourceLabel(lead);
+  return [
+    {
+      eyebrow: "Estimated value",
+      value: formatCurrency(leadEstimatedValue(lead)),
+      captionLabel: lead.forecastRevenue ? "Forecast" : lead.qualificationBudgetAmount ? "Qualified" : "No data",
+      captionContext: lead.forecastGrossProfit ? `${formatCurrency(lead.forecastGrossProfit)} gross profit` : "lead estimate",
+    },
+    {
+      eyebrow: "Days in stage",
+      value: stageAgeDays == null ? "Unknown" : `${stageAgeDays}`,
+      captionLabel: stageAgeDays == null ? "No data" : "Tracked",
+      captionContext: "from stage entry",
+    },
+    {
+      eyebrow: "Source",
+      value: source ? titleCase(source) : "Unknown",
+      captionLabel: lead.sourceCategory ?? "Source",
+      captionContext: lead.sourceDetail ?? lead.source ?? "No detail",
+    },
+  ];
+}
+
+function toLeadFormShape(lead: LeadRecord, leadCompanyName: string | null) {
+  return {
+    id: lead.id,
+    name: lead.name,
+    convertedDealId: lead.convertedDealId,
+    convertedDealNumber: lead.convertedDealNumber,
+    companyId: lead.companyId ?? null,
+    companyName: leadCompanyName,
+    stageId: lead.stageId,
+    assignedRepId: lead.assignedRepId,
+    salesRepId: lead.salesRepId,
+    assignedRepName: lead.assignedRepName,
+    propertyId: lead.propertyId,
+    propertyName: lead.property?.name ?? null,
+    propertyAddress: lead.property?.address ?? null,
+    propertyCity: lead.property?.city ?? null,
+    propertyState: lead.property?.state ?? null,
+    propertyZip: lead.property?.zip ?? null,
+    source: lead.source,
+    sourceCategory: lead.sourceCategory,
+    sourceDetail: lead.sourceDetail,
+    existingCustomerStatus: lead.existingCustomerStatus,
+    description: lead.description,
+    projectTypeId: lead.projectTypeId,
+    projectType: lead.projectType,
+    qualificationPayload: lead.qualificationPayload,
+    projectTypeQuestionPayload: lead.projectTypeQuestionPayload,
+    leadQuestionnaire: lead.leadQuestionnaire ?? null,
+    stageEnteredAt: lead.stageEnteredAt,
+    verificationStatus: lead.verificationStatus,
+    verificationRequiredReason: lead.verificationRequiredReason,
+  };
+}
+
+function LeadRightRail({
+  lead,
+  leadCompanyName,
+  propertyLine,
+  contextTitle,
+  contextMessage,
+  contextFootnote,
+  converted,
+  hiddenReadOnly,
+  onSaved,
+}: {
+  lead: LeadRecord;
+  leadCompanyName: string | null;
+  propertyLine: string;
+  contextTitle: string;
+  contextMessage: string;
+  contextFootnote: string | null;
+  converted: boolean;
+  hiddenReadOnly: boolean;
+  onSaved: () => void;
+}) {
+  return (
+    <div className="space-y-4">
+      {hiddenReadOnly ? (
+        <div className="rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-900">
+          Hidden lead records are read-only.
         </div>
+      ) : null}
 
-        <div className="space-y-4">
-          {isHiddenReadOnly && (
-            <div className="rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-900">
-              Hidden lead records are read-only.
-            </div>
-          )}
+      <Card>
+        <CardContent className="space-y-5 p-5">
+          <DetailRailSection title="Company">
+            <DetailRailItem
+              label="Account"
+              value={
+                lead.companyId && leadCompanyName ? (
+                  <Link to={`/companies/${lead.companyId}`} className="text-brand-red hover:underline">
+                    {leadCompanyName}
+                  </Link>
+                ) : (
+                  "Unassigned"
+                )
+              }
+            />
+          </DetailRailSection>
 
-          <LeadForm
-            lead={{
-              id: lead.id,
-              name: lead.name,
-              convertedDealId: lead.convertedDealId,
-              convertedDealNumber: lead.convertedDealNumber,
-              companyId: lead.companyId ?? null,
-              companyName: leadCompanyName,
-              stageId: lead.stageId,
-              assignedRepId: lead.assignedRepId,
-              salesRepId: lead.salesRepId,
-              assignedRepName: lead.assignedRepName,
-              propertyId: lead.propertyId,
-              propertyName: lead.property?.name ?? null,
-              propertyAddress: lead.property?.address ?? null,
-              propertyCity: lead.property?.city ?? null,
-              propertyState: lead.property?.state ?? null,
-              propertyZip: lead.property?.zip ?? null,
-              source: lead.source,
-              sourceCategory: lead.sourceCategory,
-              sourceDetail: lead.sourceDetail,
-              existingCustomerStatus: lead.existingCustomerStatus,
-              description: lead.description,
-              projectTypeId: lead.projectTypeId,
-              projectType: lead.projectType,
-              qualificationPayload: lead.qualificationPayload,
-              projectTypeQuestionPayload: lead.projectTypeQuestionPayload,
-              leadQuestionnaire: lead.leadQuestionnaire ?? null,
-              stageEnteredAt: lead.stageEnteredAt,
-              verificationStatus: lead.verificationStatus,
-              verificationRequiredReason: lead.verificationRequiredReason,
-            }}
-            showPrimaryAction={false}
-            converted={isConverted}
-            onSaved={() => {
-              void refetch();
-            }}
-          />
+          <DetailRailSection title="Owner">
+            <DetailRailItem
+              label="Assigned rep"
+              value={
+                <span className="inline-flex items-center gap-2">
+                  <span className="grid h-7 w-7 place-items-center rounded-full bg-slate-900 text-[10px] font-black uppercase text-white">
+                    {ownerInitials(lead)}
+                  </span>
+                  {formatNullable(lead.assignedRepName ?? lead.assignedRepId)}
+                </span>
+              }
+            />
+          </DetailRailSection>
 
-          {!isEditing && canConvertToOpportunity ? (
-            <>
-              <Button onClick={() => setIsConvertDialogOpen(true)}>Convert to Opportunity</Button>
-              <LeadConvertDialog
-                lead={lead}
-                open={isConvertDialogOpen}
-                onOpenChange={setIsConvertDialogOpen}
-                onSuccess={(dealId) => navigate(`/deals/${dealId}?tab=scoping`)}
-              />
-            </>
-          ) : null}
+          <DetailRailSection title="Property">
+            <DetailRailItem
+              label="Linked property"
+              value={
+                lead.propertyId ? (
+                  <Link to={`/properties/${lead.propertyId}`} className="text-brand-red hover:underline">
+                    {lead.property?.name ?? propertyLine ?? "Open property"}
+                  </Link>
+                ) : (
+                  "No property linked"
+                )
+              }
+            />
+            {propertyLine ? <DetailRailItem label="Address" value={propertyLine} /> : null}
+          </DetailRailSection>
 
-          {!isEditing && canAdvanceLeadStage ? (
-            <>
-              <Button variant="secondary" onClick={() => setIsStageDialogOpen(true)}>
-                Move to {nextLeadStage.name}
-              </Button>
-              <LeadStageChangeDialog
-                lead={lead}
-                targetStageId={nextLeadStage.id}
-                targetStageName={nextLeadStage.name}
-                open={isStageDialogOpen}
-                onOpenChange={setIsStageDialogOpen}
-                onEditLead={() =>
-                  isLeadEditV2 ? setIsEditing(true) : navigate(`/leads/${lead.id}/edit`)
+          <DetailRailSection title="Project type">
+            <DetailRailItem label="Type" value={lead.projectType?.name ?? "Not set"} />
+          </DetailRailSection>
+
+          <DetailRailSection title="Source">
+            <DetailRailItem label="Source" value={formatNullable(lead.source)} />
+            <DetailRailItem label="Category" value={formatNullable(lead.sourceCategory)} />
+            <DetailRailItem label="Detail" value={formatNullable(lead.sourceDetail)} />
+          </DetailRailSection>
+
+          <DetailRailSection title="Verification">
+            <DetailRailItem label="Status" value={titleCase(lead.verificationStatus)} />
+            {lead.verificationRequiredReason ? (
+              <DetailRailItem label="Reason" value={titleCase(lead.verificationRequiredReason)} />
+            ) : null}
+          </DetailRailSection>
+
+          <DetailRailSection title="Status">
+            <DetailRailItem label="Lead status" value={titleCase(lead.status)} />
+            <DetailRailItem label="Primary contact" value={lead.primaryContactId ? "Primary contact linked" : "No primary contact yet"} />
+            <DetailRailItem label="Activity" value={lead.lastActivityAt ? "Activity recorded" : "No activity yet"} />
+          </DetailRailSection>
+
+          {converted ? (
+            <DetailRailSection title="Conversion">
+              <DetailRailItem
+                label="Converted to deal"
+                value={
+                  lead.convertedDealId ? (
+                    <Link to={`/deals/${lead.convertedDealId}`} className="text-brand-red hover:underline">
+                      {lead.convertedDealNumber ?? lead.convertedDealId}
+                    </Link>
+                  ) : (
+                    formatNullable(lead.convertedDealNumber)
+                  )
                 }
-                onSuccess={() => {
-                  setIsStageDialogOpen(false);
-                  void refetch();
-                }}
               />
-            </>
+            </DetailRailSection>
           ) : null}
 
-          {!isEditing && secondaryAction && (
-            <Button variant="outline" onClick={secondaryAction.onClick}>
-              {secondaryAction.label}
-            </Button>
-          )}
+          <DetailRailSection title="System IDs">
+            <DetailRailItem label="Lead" value={<span className="font-mono text-xs">{lead.id}</span>} />
+            <DetailRailItem label="Company" value={<span className="font-mono text-xs">{formatNullable(lead.companyId)}</span>} />
+            <DetailRailItem label="Property" value={<span className="font-mono text-xs">{formatNullable(lead.propertyId)}</span>} />
+            <DetailRailItem label="Converted deal" value={<span className="font-mono text-xs">{formatNullable(lead.convertedDealId)}</span>} />
+          </DetailRailSection>
+        </CardContent>
+      </Card>
 
-          <Card>
-            <CardContent className="space-y-3 pt-4">
-              <div className="flex items-center gap-2">
-                <Clock3 className="h-4 w-4 text-muted-foreground" />
-                <p className="text-sm font-medium">{contextTitle}</p>
-              </div>
-              <p className="text-sm text-muted-foreground">{contextMessage}</p>
-              {contextFootnote && <p className="text-xs text-muted-foreground">{contextFootnote}</p>}
-              <div className="flex items-center gap-2 text-sm text-muted-foreground">
-                <User className="h-4 w-4" />
-                <span>{lead.primaryContactId ? "Primary contact linked" : "No primary contact yet"}</span>
-              </div>
-              <div className="flex items-center gap-2 text-sm text-muted-foreground">
-                <Phone className="h-4 w-4" />
-                <span>{lead.lastActivityAt ? "Activity recorded" : "No activity yet"}</span>
-              </div>
-            </CardContent>
-          </Card>
-        </div>
-      </div>
+      <Card>
+        <CardContent className="space-y-3 p-5">
+          <div className="flex items-center gap-2">
+            <Clock3 className="h-4 w-4 text-muted-foreground" />
+            <p className="text-sm font-medium">{contextTitle}</p>
+          </div>
+          <p className="text-sm text-muted-foreground">{contextMessage}</p>
+          {contextFootnote ? <p className="text-xs text-muted-foreground">{contextFootnote}</p> : null}
+          <div className="flex items-center gap-2 text-sm text-muted-foreground">
+            <User className="h-4 w-4" />
+            <span>{lead.primaryContactId ? "Primary contact linked" : "No primary contact yet"}</span>
+          </div>
+          <div className="flex items-center gap-2 text-sm text-muted-foreground">
+            <Phone className="h-4 w-4" />
+            <span>{lead.lastActivityAt ? "Activity recorded" : "No activity yet"}</span>
+          </div>
+        </CardContent>
+      </Card>
+
+      <LeadForm
+        lead={toLeadFormShape(lead, leadCompanyName)}
+        showPrimaryAction={false}
+        converted={converted}
+        onSaved={onSaved}
+      />
     </div>
   );
 }

@@ -30,6 +30,13 @@ let capturedOnMove:
   | null = null;
 
 vi.mock("@/hooks/use-leads", () => ({
+  LEAD_BOARD_STAGE_SLUGS: ["new_lead", "qualified_lead", "sales_validation_stage"],
+  getLeadBoardStageLabel: (slug: string) =>
+    ({
+      new_lead: "New Lead",
+      qualified_lead: "Qualified Lead",
+      sales_validation_stage: "Sales Validation Stage",
+    })[slug] ?? slug,
   useLeadBoard: () => ({
     board: {
       columns: boardColumns,
@@ -37,6 +44,12 @@ vi.mock("@/hooks/use-leads", () => ({
     },
     loading: false,
     refetch: refetchMock,
+  }),
+  useLeads: () => ({
+    leads: [],
+    loading: false,
+    error: null,
+    refetch: vi.fn(),
   }),
   preflightLeadStageCheck: vi.fn(),
   transitionLeadStage: vi.fn(),
@@ -65,6 +78,18 @@ vi.mock("@/lib/pipeline-scope", () => ({
     allowedScope: "mine",
     needsRedirect: false,
     redirectTo: "/leads?scope=mine",
+  }),
+}));
+
+vi.mock("@/lib/auth", () => ({
+  useAuth: () => ({
+    user: {
+      id: "rep-1",
+      role: "rep",
+      activeOfficeId: "office-1",
+      officeId: "office-1",
+    },
+    loading: false,
   }),
 }));
 
@@ -374,7 +399,7 @@ describe("LeadListPage move handling", () => {
     vi.mocked(updateLead).mockReset();
   });
 
-  it("shows the blocked-move modal from the structured stage-transition response", async () => {
+  it("renders the current read-only lead board without wiring drag-move handlers", async () => {
     vi.mocked(preflightLeadStageCheck).mockResolvedValue({
       allowed: true,
       currentStage: { id: "stage-new", name: "New Lead", slug: "new_lead" },
@@ -401,24 +426,11 @@ describe("LeadListPage move handling", () => {
 
     const { root, container } = await renderPage();
 
-    expect(capturedOnMove).toBeTypeOf("function");
-
-    await act(async () => {
-      capturedOnMove?.({
-        activeId: "lead-1",
-        targetStageId: "stage-prequal",
-        targetStageSlug: "qualified_lead",
-      });
-      await flushEffects();
-    });
-
-    expect(transitionLeadStage).toHaveBeenCalledWith("lead-1", {
-      targetStageId: "stage-prequal",
-    });
+    expect(capturedOnMove).toBeNull();
+    expect(collectText(container)).toContain("Read-only lead board using canonical CRM-owned stages");
+    expect(collectText(container)).toContain("Fresh Prospect");
+    expect(transitionLeadStage).not.toHaveBeenCalled();
     expect(updateLead).not.toHaveBeenCalled();
-    expect(collectText(container)).toContain("Complete Required Fields");
-    expect(collectText(container)).toContain("Project Location");
-    expect(collectText(container)).toContain("Open Lead Intake");
 
     await act(async () => {
       root.unmount();
