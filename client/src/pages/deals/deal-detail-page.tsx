@@ -1,23 +1,42 @@
 import { useState, useCallback, useEffect } from "react";
-import { useParams, useNavigate, useSearchParams, useLocation } from "react-router-dom";
+import { Link, useParams, useNavigate, useSearchParams, useLocation } from "react-router-dom";
 import {
-  ArrowLeft,
+  Activity,
+  Briefcase,
+  Building2,
+  CalendarDays,
   Edit,
+  FileText,
+  History,
+  Images,
+  ListChecks,
+  Mail,
+  MapPin,
+  ReceiptText,
   Trash2,
   ChevronRight,
   Info,
   MoreHorizontal,
   Lock,
   ExternalLink,
+  Users,
 } from "lucide-react";
-import { Button } from "@/components/ui/button";
+import { Button, buttonVariants } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
+import { Card, CardContent } from "@/components/ui/card";
 import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
+import {
+  DetailPageShell,
+  DetailRailItem,
+  DetailRailSection,
+  type DetailPageShellKpi,
+  type DetailPageShellTab,
+} from "@/components/layout/detail-page-shell";
 import { DealStageBadge } from "@/components/deals/deal-stage-badge";
 import { DealEmailTab } from "@/components/email/deal-email-tab";
 import { RecordingList } from "@/components/call-recordings/recording-list";
@@ -46,6 +65,7 @@ import { useLeadDetail } from "@/hooks/use-leads";
 import { usePipelineStages } from "@/hooks/use-pipeline-config";
 import { useAuth } from "@/lib/auth";
 import { api } from "@/lib/api";
+import { cn } from "@/lib/utils";
 import { formatCurrency, bestEstimate } from "@/lib/deal-utils";
 import {
   getCanonicalDealStageSlugs,
@@ -109,6 +129,74 @@ export function buildBidBoardProjectUrl(deal: Pick<DealDetail, "procoreCompanyId
 }
 
 type Tab = "overview" | "lead" | "scoping" | "files" | "photos" | "email" | "activity" | "timeline" | "history" | "team" | "estimates" | "punch_list" | "closeout";
+
+function formatNullable(value: string | number | null | undefined) {
+  if (value == null || value === "") return "Not set";
+  return String(value);
+}
+
+function formatDate(value: string | null | undefined) {
+  if (!value) return "Unscheduled";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "Unscheduled";
+  return date.toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" });
+}
+
+function daysSince(value: string | null | undefined) {
+  if (!value) return null;
+  const time = new Date(value).getTime();
+  if (!Number.isFinite(time)) return null;
+  return Math.max(0, Math.floor((Date.now() - time) / 86_400_000));
+}
+
+function formatDealAddress(deal: DealDetail) {
+  return [deal.propertyAddress, deal.propertyCity, deal.propertyState, deal.propertyZip]
+    .filter(Boolean)
+    .join(", ");
+}
+
+function formatDealType(deal: DealDetail) {
+  return deal.projectType || titleCase(deal.workflowRoute === "service" ? "service" : deal.source || "deal");
+}
+
+function buildProcoreProjectUrl(procoreProjectId: number | null | undefined) {
+  if (!procoreProjectId) return null;
+  return `https://app.procore.com/projects/${procoreProjectId}`;
+}
+
+function getTabIcon(tab: Tab) {
+  const iconClassName = "h-4 w-4";
+  switch (tab) {
+    case "overview":
+      return <ReceiptText className={iconClassName} />;
+    case "lead":
+      return <Briefcase className={iconClassName} />;
+    case "scoping":
+      return <ListChecks className={iconClassName} />;
+    case "files":
+      return <FileText className={iconClassName} />;
+    case "photos":
+      return <Images className={iconClassName} />;
+    case "email":
+      return <Mail className={iconClassName} />;
+    case "activity":
+      return <Activity className={iconClassName} />;
+    case "timeline":
+      return <CalendarDays className={iconClassName} />;
+    case "history":
+      return <History className={iconClassName} />;
+    case "team":
+      return <Users className={iconClassName} />;
+    case "estimates":
+      return <ReceiptText className={iconClassName} />;
+    case "punch_list":
+      return <ListChecks className={iconClassName} />;
+    case "closeout":
+      return <FileText className={iconClassName} />;
+    default:
+      return <FileText className={iconClassName} />;
+  }
+}
 
 function isBidBoardManagedStage(
   stage: { slug: string; displayOrder: number },
@@ -374,164 +462,215 @@ export function DealDetailPage() {
     setSearchParams(nextParams, { replace: true });
   };
 
-  return (
-    <div className="space-y-4">
-      {/* Header */}
-      <div className="flex items-start justify-between gap-4">
-        <div>
-          <Button
-            variant="ghost"
-            size="sm"
-            className="mb-1 -ml-2"
-            onClick={() => navigate("/deals")}
-          >
-            <ArrowLeft className="h-4 w-4 mr-1" />
-            Deals
-          </Button>
-          <div className="flex items-center gap-3">
-            <h2 className="text-2xl font-bold">{deal.name}</h2>
-            <span className="text-sm text-muted-foreground font-mono">
-              {deal.dealNumber}
-            </span>
-          </div>
-          {deal.intendedProjectNumber ? (
-            <div className="mt-1 flex items-center gap-1.5 text-sm text-muted-foreground">
-              <span className="font-mono">Intended: {deal.intendedProjectNumber}</span>
-              <Info
-                className="h-3.5 w-3.5"
-                aria-label="The deal number stays fixed because downstream systems (SyncHub, Procore, Bid Board) reference it. The intended number reflects the current project type."
+  const stageAgeDays = daysSince(deal.stageEnteredAt);
+  const stageSlaDays = 14;
+  const isSlaBreached = stageAgeDays != null && stageAgeDays > stageSlaDays;
+  const dealValue = bestEstimate(deal);
+  const address = formatDealAddress(deal);
+  const procoreProjectUrl = buildProcoreProjectUrl(deal.procoreProjectId);
+  const shellTabs: DetailPageShellTab[] = tabs.map((tab) => ({
+    id: tab.key,
+    label: tab.label.replace(/\s+\(\d+\)$/, ""),
+    icon: getTabIcon(tab.key),
+    count:
+      tab.key === "photos" && photoCount != null
+        ? photoCount
+        : tab.key === "team" && teamCount != null
+          ? teamCount
+          : undefined,
+  }));
+  const kpis: DetailPageShellKpi[] = [
+    {
+      eyebrow: "Deal value",
+      value: formatCurrency(dealValue),
+      captionLabel: deal.awardedAmount ? "Awarded" : deal.bidEstimate ? "Bid" : "Estimate",
+      captionContext:
+        deal.changeOrderTotal && Number(deal.changeOrderTotal) > 0
+          ? `${formatCurrency(Number(deal.changeOrderTotal))} in change orders`
+          : "latest tracked value",
+    },
+    {
+      eyebrow: "Days in stage",
+      value: stageAgeDays == null ? "N/A" : `${stageAgeDays}`,
+      captionLabel: stageAgeDays == null ? "No data" : isSlaBreached ? "Over SLA" : "On track",
+      captionContext: `SLA ${stageSlaDays} days`,
+    },
+    {
+      eyebrow: "SLA status",
+      value: stageAgeDays == null ? "Unknown" : isSlaBreached ? "Overdue" : "Current",
+      captionLabel: stageAgeDays == null ? "No data" : isSlaBreached ? "Over SLA" : "On track",
+      captionContext: `SLA ${stageSlaDays} days`,
+      accent: isSlaBreached ? "red" : "default",
+    },
+  ];
+  const typeBadge = (
+    <span className="rounded-full bg-slate-100 px-2 py-1 text-[10px] font-black uppercase tracking-[0.16em] text-slate-700">
+      {formatDealType(deal)}
+    </span>
+  );
+  const statusBadge = isBidBoardOwned ? (
+    <span className="inline-flex items-center gap-1 rounded-full bg-amber-50 px-2 py-1 text-[10px] font-black uppercase tracking-[0.16em] text-amber-700">
+      <Lock className="h-3 w-3" />
+      {bidBoardStageLabel(deal)}
+    </span>
+  ) : (
+    <DealStageBadge stageId={deal.stageId} />
+  );
+  const subtitleSlot = (
+    <>
+      <span className="font-mono text-xs font-bold uppercase tracking-[0.14em] text-slate-500">
+        {deal.dealNumber}
+      </span>
+      {deal.intendedProjectNumber ? (
+        <span className="inline-flex items-center gap-1 font-mono text-xs text-slate-500">
+          Intended {deal.intendedProjectNumber}
+          <Info className="h-3.5 w-3.5" />
+        </span>
+      ) : null}
+      {deal.companyId && deal.companyName ? (
+        <Link to={`/companies/${deal.companyId}`} className="inline-flex items-center gap-1 font-semibold text-slate-700 hover:text-brand-red">
+          <Building2 className="h-4 w-4" />
+          {deal.companyName}
+        </Link>
+      ) : null}
+      {address ? (
+        <span className="inline-flex items-center gap-1">
+          <MapPin className="h-4 w-4" />
+          {address}
+        </span>
+      ) : null}
+      <span>{stageAgeDays == null ? "Stage age unavailable" : `${stageAgeDays}d in stage`}</span>
+    </>
+  );
+  const actionsSlot = (
+    <>
+      <Link
+        to={`/deals/${deal.id}/edit`}
+        className={cn(buttonVariants({ variant: "outline", size: "sm" }))}
+      >
+        <Edit className="h-4 w-4" />
+        Edit
+      </Link>
+      {procoreProjectUrl ? (
+        <a
+          href={procoreProjectUrl}
+          target="_blank"
+          rel="noreferrer"
+          className={cn(buttonVariants({ variant: "outline", size: "sm" }))}
+        >
+          <ExternalLink className="h-4 w-4" />
+          Procore
+        </a>
+      ) : null}
+      {!currentStage?.isTerminal && (
+        <DropdownMenu>
+          <DropdownMenuTrigger
+            render={<Button>
+              Move Stage
+              <ChevronRight className="h-4 w-4 ml-1" />
+            </Button>}
+          />
+          <DropdownMenuContent align="end">
+            {manualForwardStages.map((s) => (
+              <DropdownMenuItem
+                key={s.id}
+                onClick={() => handleStageChange(s.id)}
               >
-                <title>
-                  The deal number stays fixed because downstream systems (SyncHub, Procore, Bid Board) reference it. The intended number reflects the current project type.
-                </title>
-              </Info>
-            </div>
-          ) : null}
-          <div className="flex items-center gap-3 mt-1">
-            {isBidBoardOwned ? (
-              <span className="inline-flex items-center gap-1.5 rounded-md border border-slate-300 bg-slate-50 px-2 py-1 text-sm font-medium text-slate-700">
-                <Lock className="h-3.5 w-3.5" />
-                {bidBoardStageLabel(deal)}
-              </span>
-            ) : (
-              <DealStageBadge stageId={deal.stageId} />
-            )}
-            <span className="text-lg font-semibold">
-              {formatCurrency(bestEstimate(deal))}
-            </span>
-          </div>
-        </div>
-
-        <div className="flex items-center gap-2">
-          {/* Stage Advancement Dropdown */}
-          {!currentStage?.isTerminal && (
-            <DropdownMenu>
-              <DropdownMenuTrigger
-                render={<Button>
-                  Move Stage
-                  <ChevronRight className="h-4 w-4 ml-1" />
-                </Button>}
-              />
-              <DropdownMenuContent align="end">
-                {manualForwardStages.map((s) => (
+                {s.name}
+                {s.isTerminal && (
+                  <Badge variant="outline" className="ml-2 text-xs">
+                    Terminal
+                  </Badge>
+                )}
+              </DropdownMenuItem>
+            ))}
+            {readonlyForwardStages.map((s) => (
+              <DropdownMenuItem
+                key={s.id}
+                disabled
+              >
+                <div className="flex w-full items-center justify-between gap-2">
+                  <span>{s.name}</span>
+                  <Badge variant="outline" className="text-xs">
+                    Bid Board managed
+                  </Badge>
+                </div>
+              </DropdownMenuItem>
+            ))}
+            {isDirectorOrAdmin && backwardStages.length > 0 && (
+              <>
+                <div className="px-2 py-1.5 text-xs text-muted-foreground border-t mt-1 pt-1">
+                  Move Backward (Director)
+                </div>
+                {backwardStages.map((s) => (
                   <DropdownMenuItem
                     key={s.id}
                     onClick={() => handleStageChange(s.id)}
+                    className="text-orange-600"
                   >
                     {s.name}
-                    {s.isTerminal && (
-                      <Badge variant="outline" className="ml-2 text-xs">
-                        Terminal
-                      </Badge>
-                    )}
                   </DropdownMenuItem>
                 ))}
-                {readonlyForwardStages.map((s) => (
-                  <DropdownMenuItem
-                    key={s.id}
-                    disabled
-                  >
-                    <div className="flex w-full items-center justify-between gap-2">
-                      <span>{s.name}</span>
-                      <Badge variant="outline" className="text-xs">
-                        Bid Board managed
-                      </Badge>
-                    </div>
-                  </DropdownMenuItem>
-                ))}
-                {isDirectorOrAdmin && backwardStages.length > 0 && (
-                  <>
-                    <div className="px-2 py-1.5 text-xs text-muted-foreground border-t mt-1 pt-1">
-                      Move Backward (Director)
-                    </div>
-                    {backwardStages.map((s) => (
-                      <DropdownMenuItem
-                        key={s.id}
-                        onClick={() => handleStageChange(s.id)}
-                        className="text-orange-600"
-                      >
-                        {s.name}
-                      </DropdownMenuItem>
-                    ))}
-                  </>
-                )}
-              </DropdownMenuContent>
-            </DropdownMenu>
-          )}
-
-          {/* Reopen button for terminal stages (directors only) */}
-          {currentStage?.isTerminal && isDirectorOrAdmin && !isBidBoardOwned && (
-            <DropdownMenu>
-              <DropdownMenuTrigger
-                render={<Button variant="outline">Reopen Deal</Button>}
-              />
-              <DropdownMenuContent align="end">
-                {dealStages
-                  .filter((s) => !s.isTerminal)
-                  .map((s) => (
-                    <DropdownMenuItem
-                      key={s.id}
-                      onClick={() => handleStageChange(s.id)}
-                    >
-                      {s.name}
-                    </DropdownMenuItem>
-                  ))}
-              </DropdownMenuContent>
-            </DropdownMenu>
-          )}
-
-          {/* Create Task */}
-          <TaskCreateDialog defaultDealId={deal.id} onCreated={refetch} />
-
-          {/* More Actions */}
-          <DropdownMenu>
-            <DropdownMenuTrigger
-              render={<Button variant="outline" size="icon">
-                <MoreHorizontal className="h-4 w-4" />
-              </Button>}
-            />
-            <DropdownMenuContent align="end">
-              <DropdownMenuItem onClick={() => navigate(`/deals/${deal.id}/edit`)}>
-                <Edit className="h-4 w-4 mr-2" />
-                Edit Deal
-              </DropdownMenuItem>
-              {isDirectorOrAdmin && (
+              </>
+            )}
+          </DropdownMenuContent>
+        </DropdownMenu>
+      )}
+      {currentStage?.isTerminal && isDirectorOrAdmin && !isBidBoardOwned && (
+        <DropdownMenu>
+          <DropdownMenuTrigger
+            render={<Button variant="outline">Reopen Deal</Button>}
+          />
+          <DropdownMenuContent align="end">
+            {dealStages
+              .filter((s) => !s.isTerminal)
+              .map((s) => (
                 <DropdownMenuItem
-                  onClick={handleDelete}
-                  className="text-red-600"
+                  key={s.id}
+                  onClick={() => handleStageChange(s.id)}
                 >
-                  <Trash2 className="h-4 w-4 mr-2" />
-                  Delete Deal
+                  {s.name}
                 </DropdownMenuItem>
-              )}
-            </DropdownMenuContent>
-          </DropdownMenu>
-        </div>
-      </div>
-
-      {/* Active Timers Banner */}
+              ))}
+          </DropdownMenuContent>
+        </DropdownMenu>
+      )}
+      <TaskCreateDialog defaultDealId={deal.id} onCreated={refetch} />
+      <DropdownMenu>
+        <DropdownMenuTrigger
+          render={<Button variant="outline" size="icon">
+            <MoreHorizontal className="h-4 w-4" />
+          </Button>}
+        />
+        <DropdownMenuContent align="end">
+          <DropdownMenuItem onClick={() => navigate(`/deals/${deal.id}/edit`)}>
+            <Edit className="h-4 w-4 mr-2" />
+            Edit Deal
+          </DropdownMenuItem>
+          {isDirectorOrAdmin && (
+            <DropdownMenuItem
+              onClick={handleDelete}
+              className="text-red-600"
+            >
+              <Trash2 className="h-4 w-4 mr-2" />
+              Delete Deal
+            </DropdownMenuItem>
+          )}
+        </DropdownMenuContent>
+      </DropdownMenu>
+    </>
+  );
+  const rail = (
+    <DealRightRail
+      deal={deal}
+      address={address}
+      procoreProjectUrl={procoreProjectUrl}
+      bidBoardUrl={buildBidBoardProjectUrl(deal)}
+    />
+  );
+  const tabContent = (
+    <div className="space-y-4">
       <DealTimersBanner dealId={deal.id} />
-
       {isBidBoardOwned && bidBoardOwnership && (
         <BidBoardOwnershipBanner
           ownership={bidBoardOwnership}
@@ -539,36 +678,11 @@ export function DealDetailPage() {
           onRefresh={refetch}
         />
       )}
-
       <RfpApprovalStatusBlock deal={deal} onRetry={handleRfpRetry} retrying={rfpRetrying} />
-
       {isBidBoardOwned && !deal.hubspotDealId && <BidBoardProjectSummaryPanel deal={deal} />}
-
-      {/* Estimating Sub-Stage Indicator */}
       {isEstimatingBoundaryStageSlug(currentStageSlug, workflowRoute) && !isBidBoardOwned && (
         <DealEstimatingSubstage deal={deal} onUpdate={refetch} />
       )}
-
-      {/* Tabs */}
-      <div className="border-b">
-        <div className="flex gap-6">
-          {tabs.map((tab) => (
-            <button
-              key={tab.key}
-              className={`pb-2 text-sm font-medium border-b-2 transition-colors ${
-                activeTab === tab.key
-                  ? "border-brand-red text-foreground"
-                  : "border-transparent text-muted-foreground hover:text-foreground"
-              }`}
-              onClick={() => handleTabSelect(tab.key)}
-            >
-              {tab.label}
-            </button>
-          ))}
-        </div>
-      </div>
-
-      {/* Tab Content */}
       {activeTab === "overview" && (
         <div className="space-y-4">
           {isEstimatingBoundaryStageSlug(currentStageSlug, workflowRoute) && !isBidBoardOwned && (
@@ -628,6 +742,29 @@ export function DealDetailPage() {
       )}
       {activeTab === "punch_list" && <DealPunchListTab dealId={deal.id} />}
       {activeTab === "closeout" && <DealCloseoutTab dealId={deal.id} />}
+    </div>
+  );
+
+  return (
+    <div>
+      <DetailPageShell
+        parentLabel="Deals"
+        parentHref="/deals"
+        currentLabel={deal.name}
+        iconSlot={<Briefcase className="h-9 w-9" />}
+        typeBadge={typeBadge}
+        statusBadge={statusBadge}
+        title={deal.name}
+        subtitleSlot={subtitleSlot}
+        actionsSlot={actionsSlot}
+        kpis={kpis}
+        tabs={shellTabs}
+        activeTabId={activeTab}
+        onTabChange={(tab) => handleTabSelect(tab as Tab)}
+        rightRail={rail}
+      >
+        {tabContent}
+      </DetailPageShell>
 
       {/* Stage Change Dialog */}
       {stageChangeOpen && targetStageId && (
@@ -643,6 +780,140 @@ export function DealDetailPage() {
         />
       )}
     </div>
+  );
+}
+
+function DealRightRail({
+  deal,
+  address,
+  procoreProjectUrl,
+  bidBoardUrl,
+}: {
+  deal: DealDetail;
+  address: string;
+  procoreProjectUrl: string | null;
+  bidBoardUrl: string | null;
+}) {
+  return (
+    <Card>
+      <CardContent className="space-y-5 p-5">
+        <DetailRailSection title="Company">
+          <DetailRailItem
+            label="Account"
+            value={
+              deal.companyId && deal.companyName ? (
+                <Link to={`/companies/${deal.companyId}`} className="text-brand-red hover:underline">
+                  {deal.companyName}
+                </Link>
+              ) : (
+                "Unassigned"
+              )
+            }
+          />
+        </DetailRailSection>
+
+        <DetailRailSection title="Owner">
+          <DetailRailItem
+            label="Assigned rep"
+            value={
+              <span className="inline-flex items-center gap-2">
+                <span className="grid h-7 w-7 place-items-center rounded-full bg-slate-900 text-[10px] font-black uppercase text-white">
+                  {(deal.assignedRepName ?? deal.assignedRepId ?? "NA")
+                    .split(/\s+/)
+                    .filter(Boolean)
+                    .slice(0, 2)
+                    .map((part) => part[0])
+                    .join("")}
+                </span>
+                {formatNullable(deal.assignedRepName ?? deal.assignedRepId)}
+              </span>
+            }
+          />
+        </DetailRailSection>
+
+        <DetailRailSection title="Project type">
+          <DetailRailItem label="Type" value={formatDealType(deal)} />
+          <DetailRailItem label="Source" value={formatNullable(deal.source ? titleCase(deal.source) : null)} />
+          <DetailRailItem label="Workflow" value={titleCase(deal.workflowRoute ?? "normal")} />
+        </DetailRailSection>
+
+        <DetailRailSection title="Address">
+          <DetailRailItem
+            label="Property"
+            value={
+              deal.propertyId ? (
+                <Link to={`/properties/${deal.propertyId}`} className="text-brand-red hover:underline">
+                  {address || "Open property"}
+                </Link>
+              ) : (
+                address || "No property linked"
+              )
+            }
+          />
+        </DetailRailSection>
+
+        <DetailRailSection title="Deal number">
+          <DetailRailItem label="Deal" value={<span className="font-mono">{deal.dealNumber}</span>} />
+          {deal.intendedProjectNumber ? (
+            <DetailRailItem label="Intended" value={<span className="font-mono">{deal.intendedProjectNumber}</span>} />
+          ) : null}
+          <DetailRailItem label="Close target" value={formatDate(deal.expectedCloseDate)} />
+        </DetailRailSection>
+
+        <DetailRailSection title="System IDs">
+          <DetailRailItem
+            label="HubSpot"
+            value={<span className="font-mono text-xs">{formatNullable(deal.hubspotDealId)}</span>}
+          />
+          <DetailRailItem
+            label="Procore project"
+            value={
+              <span className="space-y-1">
+                <span className="block font-mono text-xs">{formatNullable(deal.procoreProjectId)}</span>
+                {procoreProjectUrl ? (
+                  <a
+                    href={procoreProjectUrl}
+                    target="_blank"
+                    rel="noreferrer"
+                    className="inline-flex items-center gap-1 text-xs font-black uppercase tracking-[0.12em] text-brand-red hover:underline"
+                  >
+                    Open in Procore
+                    <ExternalLink className="h-3 w-3" />
+                  </a>
+                ) : null}
+              </span>
+            }
+          />
+          <DetailRailItem
+            label="Procore company"
+            value={<span className="font-mono text-xs">{formatNullable(deal.procoreCompanyId)}</span>}
+          />
+          <DetailRailItem
+            label="Procore bid"
+            value={
+              <span className="space-y-1">
+                <span className="block font-mono text-xs">{formatNullable(deal.procoreBidId)}</span>
+                {bidBoardUrl ? (
+                  <a
+                    href={bidBoardUrl}
+                    target="_blank"
+                    rel="noreferrer"
+                    className="inline-flex items-center gap-1 text-xs font-black uppercase tracking-[0.12em] text-brand-red hover:underline"
+                  >
+                    Open in Bid Board
+                    <ExternalLink className="h-3 w-3" />
+                  </a>
+                ) : null}
+              </span>
+            }
+          />
+          <DetailRailItem
+            label="Bid Board #"
+            value={<span className="font-mono text-xs">{formatNullable(deal.bidBoardProjectNumber)}</span>}
+          />
+        </DetailRailSection>
+      </CardContent>
+    </Card>
   );
 }
 
