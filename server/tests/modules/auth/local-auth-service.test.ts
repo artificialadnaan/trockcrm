@@ -103,7 +103,6 @@ describe("local auth service", () => {
     await sendUserInvite({
       userId: "user-1",
       sentByUserId: "admin-1",
-      loginUrl: "https://trockcrm.com/login",
     });
 
     expect(dbMocks.insertValues).toHaveBeenNthCalledWith(
@@ -123,9 +122,20 @@ describe("local auth service", () => {
     );
     expect(dbMocks.sendSystemEmail).toHaveBeenCalledWith(
       "rep@example.com",
-      expect.any(String),
-      expect.not.stringContaining("change your password immediately")
+      "T Rock CRM — Data Cleanup Login",
+      expect.stringContaining("Before you get full access to the CRM"),
+      expect.objectContaining({
+        text: expect.stringContaining("Go to https://onboarding.trockcrm.com"),
+      })
     );
+    const [, , html, options] = dbMocks.sendSystemEmail.mock.calls[0]!;
+    expect(html).toContain("Hi Rep,");
+    expect(html).toContain("https://onboarding.trockcrm.com");
+    expect(html).toContain("Mark historical");
+    expect(html).toContain("469-690-2240");
+    expect(html).not.toContain("change your password immediately");
+    expect(options.text).toContain("1. Go to https://onboarding.trockcrm.com");
+    expect(options.text).toContain("6. When all records are complete, click \"Complete onboarding\" to get full CRM access");
   });
 
   it("keeps no-force temporary-password invites in invite_sent status before first login", () => {
