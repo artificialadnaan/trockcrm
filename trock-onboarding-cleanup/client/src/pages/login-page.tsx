@@ -1,6 +1,6 @@
 import { Loader2 } from "lucide-react";
 import { Navigate } from "react-router-dom";
-import { mainCrmUrl } from "../components/layout";
+import { cleanupReturnTo, mainCrmUrl } from "../components/layout";
 import { Button, Panel } from "../components/ui";
 import { useMe } from "../hooks/use-cleanup";
 
@@ -8,10 +8,7 @@ export function LoginPage() {
   const { data: user, isLoading, isError } = useMe();
   const params = new URLSearchParams(window.location.search);
   const loggedOut = params.get("loggedOut") === "1" || window.localStorage.getItem("cleanup_logged_out") === "true";
-  const requestedReturnTo = params.get("returnTo");
-  const currentReturnTo = requestedReturnTo && /^https?:\/\//i.test(requestedReturnTo)
-    ? requestedReturnTo
-    : `${window.location.origin}/cleanup`;
+  const currentReturnTo = cleanupReturnTo(params.get("returnTo"));
 
   function mainCrmLoginUrl() {
     const url = new URL(mainCrmUrl("/login"));

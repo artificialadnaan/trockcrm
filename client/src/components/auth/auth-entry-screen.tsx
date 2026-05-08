@@ -42,7 +42,10 @@ export function AuthEntryScreen() {
 
     try {
       const result = await localLogin(email, password, returnTo);
-      if (result.returnTo) window.location.assign(result.returnTo);
+      if (result.returnTo) {
+        window.location.replace(result.returnTo);
+        return;
+      }
     } catch (err) {
       setError(err instanceof Error ? err.message : "Login failed");
     } finally {
@@ -121,7 +124,10 @@ export function AuthEntryScreen() {
                   className="flex h-auto w-full items-center justify-between py-3"
                   onClick={async () => {
                     const result = await login(user.email, returnTo);
-                    if (result.returnTo) window.location.assign(result.returnTo);
+                    if (result.returnTo) {
+                      window.location.replace(result.returnTo);
+                      return;
+                    }
                   }}
                 >
                   <div className="text-left">

@@ -126,14 +126,17 @@ function AuthGate({ children }: { children: ReactNode }) {
 function OnboardingRequiredPage() {
   const { user } = useAuth();
   const cleanupUrl = user?.cleanupUrl || "http://localhost:5175";
+  const cleanupDestination = (() => {
+    const url = new URL(cleanupUrl, window.location.origin);
+    if (!url.pathname || url.pathname === "/") url.pathname = "/cleanup";
+    return url.toString();
+  })();
 
   useEffect(() => {
     if (user?.requiresOnboarding) {
-      const url = new URL(cleanupUrl, window.location.origin);
-      url.searchParams.set("returnTo", window.location.origin);
-      window.location.assign(url.toString());
+      window.location.assign(cleanupDestination);
     }
-  }, [cleanupUrl, user?.requiresOnboarding]);
+  }, [cleanupDestination, user?.requiresOnboarding]);
 
   if (!user?.requiresOnboarding) return <Navigate to="/" replace />;
 
@@ -148,7 +151,7 @@ function OnboardingRequiredPage() {
         </p>
         <a
           className="mt-6 inline-flex min-h-11 items-center justify-center rounded-md bg-red-700 px-4 text-sm font-bold text-white hover:bg-red-800"
-          href={cleanupUrl}
+          href={cleanupDestination}
         >
           Open cleanup workspace
         </a>

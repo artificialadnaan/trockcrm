@@ -3,9 +3,22 @@ import { HardHat, LogOut, Shuffle } from "lucide-react";
 import { useLogout, useMe } from "../hooks/use-cleanup";
 import { Button } from "./ui";
 
+export function cleanupReturnTo(value: string | null | undefined = window.location.href) {
+  const fallback = `${window.location.origin}/cleanup`;
+  if (!value) return fallback;
+  try {
+    const url = new URL(value, window.location.origin);
+    if (url.origin !== window.location.origin) return fallback;
+    if (!url.pathname || url.pathname === "/" || url.pathname === "/login") url.pathname = "/cleanup";
+    return url.toString();
+  } catch {
+    return fallback;
+  }
+}
+
 function mainCrmLoginUrlForCurrentRoute() {
   const url = new URL(mainCrmUrl("/login"));
-  url.searchParams.set("returnTo", window.location.href);
+  url.searchParams.set("returnTo", cleanupReturnTo());
   return url.toString();
 }
 
