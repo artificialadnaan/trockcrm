@@ -86,7 +86,7 @@ describe("redesign A2 tier 2 schema migration", () => {
     const tenantSql = migrationSql.slice(tenantStart, tenantEnd);
 
     expect(tenantSql).toContain("ADD COLUMN IF NOT EXISTS qty numeric(12, 2)");
-    expect(tenantSql).toContain("ADD COLUMN IF NOT EXISTS rate numeric(12, 2)");
+    expect(tenantSql).toContain("ADD COLUMN IF NOT EXISTS rate numeric(14, 2)");
     expect(tenantSql).toContain("ADD COLUMN IF NOT EXISTS total numeric(14, 2)");
     expect(tenantSql).toContain("ADD COLUMN IF NOT EXISTS sort_order integer");
     expect(tenantSql).not.toContain("ADD COLUMN IF NOT EXISTS qty numeric(12, 2) DEFAULT 1");
@@ -101,6 +101,24 @@ describe("redesign A2 tier 2 schema migration", () => {
     expect(tenantSql).toContain("ALTER COLUMN rate SET DEFAULT 0");
     expect(tenantSql).toContain("ALTER COLUMN total SET DEFAULT 0");
     expect(tenantSql).toContain("ALTER COLUMN sort_order SET DEFAULT 0");
+  });
+
+  it("estimate alias backfill skips orphan sections without violating FK", () => {
+    expect(migrationSql).toContain("LEFT JOIN %I.deals d ON d.id = es.deal_id");
+    expect(migrationSql).toContain("LEFT JOIN deals d ON d.id = es.deal_id");
+    expect(migrationSql).toContain("AND (es.deal_id IS NULL OR d.id IS NOT NULL)");
+    expect(migrationSql).toContain("label = COALESCE(eli.label, eli.description)");
+    expect(migrationSql).toContain("qty = round(eli.quantity, 2)");
+    expect(migrationSql).toContain("rate = eli.unit_price");
+    expect(migrationSql).toContain("total = eli.total_price");
+    expect(migrationSql).toContain("sort_order = eli.display_order");
+  });
+
+  it("rate column matches unit_price precision", () => {
+    expect(migrationSql).toContain("ADD COLUMN IF NOT EXISTS rate numeric(14, 2)");
+    expect(migrationSql).not.toContain("ADD COLUMN IF NOT EXISTS rate numeric(12, 2)");
+    expect(estimateLineItemsSchema).toContain('rate: numeric("rate", { precision: 14, scale: 2 })');
+    expect(estimateLineItemsSchema).toContain('unitPrice: numeric("unit_price", { precision: 14, scale: 2 })');
   });
 
   it("deal_contacts dedupes across primary and association backfill passes", () => {

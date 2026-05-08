@@ -31,12 +31,30 @@ function calcTotal(quantity: string | number, unitPrice: string | number): strin
 }
 
 function roundToTwoDecimals(value: string | number): string {
-  const n = Number(value ?? 0);
-  const factor = 100;
-  const rounded = n >= 0
-    ? Math.round(n * factor + Number.EPSILON * factor) / factor
-    : -Math.round(-n * factor + Number.EPSILON * factor) / factor;
-  return rounded.toFixed(2);
+  const raw = String(value ?? "0").trim();
+  const numeric = Number(raw);
+  if (!Number.isFinite(numeric)) return "0.00";
+
+  const isNegative = raw.startsWith("-");
+  const unsigned = raw.replace(/^[+-]/, "");
+  const normalized = unsigned.includes("e") || unsigned.includes("E")
+    ? Math.abs(numeric).toFixed(20).replace(/0+$/, "").replace(/\.$/, "")
+    : unsigned;
+  const [integerPartRaw, fractionalPartRaw = ""] = normalized.split(".");
+  const integerPart = integerPartRaw.replace(/\D/g, "") || "0";
+  const fractionalPart = fractionalPartRaw.replace(/\D/g, "");
+  const centsDigits = `${fractionalPart.slice(0, 2)}00`.slice(0, 2);
+  const roundDigit = Number(fractionalPart[2] ?? "0");
+  let cents = BigInt(integerPart) * 100n + BigInt(centsDigits);
+
+  if (roundDigit >= 5) {
+    cents += 1n;
+  }
+
+  const whole = cents / 100n;
+  const remainder = (cents % 100n).toString().padStart(2, "0");
+  const sign = isNegative && cents !== 0n ? "-" : "";
+  return `${sign}${whole.toString()}.${remainder}`;
 }
 
 export async function getEstimate(tenantDb: TenantDb, dealId: string) {

@@ -135,4 +135,27 @@ describe("estimate line item alias columns", () => {
       expect(state.insertedValues).toMatchObject({ qty: expectedQty });
     }
   });
+
+  it("rounds negative half-values away from zero matching Postgres for known-failing cases", async () => {
+    const cases = [
+      ["-9.995", "-10.00"],
+      ["-1.005", "-1.01"],
+      ["-2.665", "-2.67"],
+      ["-0.005", "-0.01"],
+      ["1.005", "1.01"],
+      ["9.995", "10.00"],
+    ] as const;
+
+    for (const [quantity, expectedQty] of cases) {
+      const { tenantDb, state } = createTenantDbMock();
+
+      await createLineItem(tenantDb, "deal-1", "section-1", {
+        description: `Quantity ${quantity}`,
+        quantity,
+        unitPrice: "1",
+      });
+
+      expect(state.insertedValues).toMatchObject({ qty: expectedQty });
+    }
+  });
 });

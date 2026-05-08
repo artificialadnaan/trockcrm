@@ -180,7 +180,7 @@ BEGIN
              ADD COLUMN IF NOT EXISTS deal_id UUID,
              ADD COLUMN IF NOT EXISTS label text,
              ADD COLUMN IF NOT EXISTS qty numeric(12, 2),
-             ADD COLUMN IF NOT EXISTS rate numeric(12, 2),
+             ADD COLUMN IF NOT EXISTS rate numeric(14, 2),
              ADD COLUMN IF NOT EXISTS total numeric(14, 2),
              ADD COLUMN IF NOT EXISTS sort_order integer',
           tenant_schema
@@ -211,8 +211,11 @@ BEGIN
                     total = eli.total_price,
                     sort_order = eli.display_order
                FROM %I.estimate_sections es
+               LEFT JOIN %I.deals d ON d.id = es.deal_id
               WHERE eli.section_id = es.id
-                AND eli.qty IS NULL',
+                AND eli.qty IS NULL
+                AND (es.deal_id IS NULL OR d.id IS NOT NULL)',
+            tenant_schema,
             tenant_schema,
             tenant_schema
           );
@@ -456,7 +459,7 @@ BEGIN
         ADD COLUMN IF NOT EXISTS deal_id UUID,
         ADD COLUMN IF NOT EXISTS label text,
         ADD COLUMN IF NOT EXISTS qty numeric(12, 2),
-        ADD COLUMN IF NOT EXISTS rate numeric(12, 2),
+        ADD COLUMN IF NOT EXISTS rate numeric(14, 2),
         ADD COLUMN IF NOT EXISTS total numeric(14, 2),
         ADD COLUMN IF NOT EXISTS sort_order integer;
 
@@ -480,8 +483,10 @@ BEGIN
                total = eli.total_price,
                sort_order = eli.display_order
           FROM estimate_sections es
+          LEFT JOIN deals d ON d.id = es.deal_id
          WHERE eli.section_id = es.id
-           AND eli.qty IS NULL;
+           AND eli.qty IS NULL
+           AND (es.deal_id IS NULL OR d.id IS NOT NULL);
       END IF;
 
       ALTER TABLE estimate_line_items

@@ -95,6 +95,7 @@ export interface UpdateLeadInput {
   sourceDetail?: string | null;
   description?: string | null;
   officeCode?: string | null;
+  office?: "dfw" | "atl" | null;
   projectType?: string | null;
   projectTypeId?: string | null;
   bidDueDate?: string | null;
@@ -1300,6 +1301,22 @@ export function createLeadService(
 
     if (!existing.isActive && !isConvertedLead) {
       throw new AppError(409, "Hidden lead records are read-only");
+    }
+
+    if (
+      input.officeCode !== undefined &&
+      existing.officeCode != null &&
+      input.officeCode !== existing.officeCode
+    ) {
+      throw new AppError(422, "office_code cannot be changed once set", "LEAD_OFFICE_IMMUTABLE");
+    }
+
+    if (
+      input.office !== undefined &&
+      existing.office != null &&
+      input.office !== existing.office
+    ) {
+      throw new AppError(422, "office cannot be changed once set", "LEAD_OFFICE_IMMUTABLE");
     }
 
     if (isConvertedLead) {
