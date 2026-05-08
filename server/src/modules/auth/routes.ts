@@ -246,6 +246,7 @@ router.post("/logout", (_req, res) => {
     httpOnly: tokenCookieOptions.httpOnly,
     secure: tokenCookieOptions.secure,
     sameSite: tokenCookieOptions.sameSite,
+    domain: tokenCookieOptions.domain,
   });
   res.json({ success: true });
 });

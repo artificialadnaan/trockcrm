@@ -1,6 +1,7 @@
 import crypto from "crypto";
 
 type EnvInput = {
+  AUTH_COOKIE_DOMAIN?: string | undefined;
   CORS_ALLOWED_ORIGINS?: string | undefined;
   FRONTEND_URL?: string | undefined;
   FIELD_APP_URL?: string | undefined;
@@ -26,6 +27,11 @@ function normalizeOrigin(value: string | undefined): string | null {
   if (!trimmed) return null;
   if (/^https?:\/\//i.test(trimmed)) return trimmed.replace(/\/+$/, "");
   return `https://${trimmed.replace(/\/+$/, "")}`;
+}
+
+function normalizeCookieDomain(value: string | undefined): string | undefined {
+  const trimmed = value?.trim();
+  return trimmed || undefined;
 }
 
 function safeEqual(a: string, b: string): boolean {
@@ -112,13 +118,13 @@ export function isDevAuthEnabled(env: EnvInput, host: string | undefined): boole
 
 export function getTokenCookieOptions(env: EnvInput) {
   const isProduction = env.NODE_ENV === "production";
+  const domain = normalizeCookieDomain(env.AUTH_COOKIE_DOMAIN);
 
   return {
     httpOnly: true,
     secure: isProduction,
-    // Production runs the frontend and API on separate origins, so auth cookies must be
-    // sent on cross-site fetch requests from the frontend app to the API service.
-    sameSite: isProduction ? "none" : "strict",
+    sameSite: isProduction ? "lax" : "strict",
+    domain,
     maxAge: 24 * 60 * 60 * 1000,
   } as const;
 }
