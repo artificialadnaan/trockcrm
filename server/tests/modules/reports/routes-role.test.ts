@@ -51,7 +51,7 @@ import { reportRoutes } from "../../../src/modules/reports/routes.js";
 const REPORT_ID = "66666666-6666-4666-8666-666666666666";
 const SCHEDULE_ID = "77777777-7777-4777-8777-777777777777";
 
-function buildApp(role: "rep" | "director" | "admin") {
+function buildApp(role: "rep" | "director" | "admin" | "construction" | "field_contractor") {
   const app = express();
   app.use(express.json());
   app.use((req: any, _res, next) => {
@@ -95,6 +95,16 @@ describe("report route role guards", () => {
     expect(response.status).not.toBe(403);
     expect(response.status).toBe(200);
     expect(runReportBuilder).toHaveBeenCalledOnce();
+  });
+
+  it("blocks non-CRM roles from report-builder runs", async () => {
+    const response = await request(buildApp("construction"))
+      .post("/api/reports/run")
+      .send({ dimensions: [], measures: [] });
+
+    expect(response.status).toBe(403);
+    expect(response.body).toEqual({ error: { message: "Requires one of: admin, director, rep" } });
+    expect(runReportBuilder).not.toHaveBeenCalled();
   });
 
   it("allows directors to execute ad-hoc custom reports", async () => {

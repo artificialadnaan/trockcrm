@@ -1,5 +1,5 @@
 import { Router } from "express";
-import { requireRole, requireDirector } from "../../middleware/rbac.js";
+import { requireRole, requireDirector, requireAnyRole } from "../../middleware/rbac.js";
 import { AppError } from "../../middleware/error-handler.js";
 import {
   getPipelineSummary,
@@ -388,7 +388,7 @@ router.post("/execute", requireDirector, async (req, res, next) => {
 });
 
 // POST /api/reports/run -- aggregate report-builder query
-router.post("/run", async (req, res, next) => {
+router.post("/run", requireAnyRole, async (req, res, next) => {
   try {
     const data = await runReportBuilder(req.tenantDb!, {
       dimensions: Array.isArray(req.body.dimensions) ? req.body.dimensions : [],
