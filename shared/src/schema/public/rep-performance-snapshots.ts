@@ -38,6 +38,7 @@ export const repPerformanceSnapshots = pgTable(
     winRate: numeric("win_rate", { precision: 5, scale: 2 }).default("0").notNull(),
     avgDaysToClose: numeric("avg_days_to_close", { precision: 7, scale: 2 }).default("0").notNull(),
     atRiskCount: integer("at_risk_count").default(0).notNull(),
+    staleAccountCount: integer("stale_account_count").default(0).notNull(),
     activityTotal: integer("activity_total").default(0).notNull(),
     calls: integer("calls").default(0).notNull(),
     emails: integer("emails").default(0).notNull(),

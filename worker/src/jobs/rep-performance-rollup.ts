@@ -1,5 +1,7 @@
 import { pool } from "../db.js";
 
+export const STALE_ACCOUNT_THRESHOLD_DAYS = 30;
+
 const PERIOD_KINDS = [
   "mtd",
   "qtd",
@@ -83,11 +85,24 @@ async function refreshOfficePeriod(
          d.assigned_rep_id AS rep_id,
          COUNT(*) FILTER (
            WHERE CASE
+             -- Note: current-period metrics use the deal's current stage state
+             -- (psc.is_terminal, psc.is_active_pipeline) because "as of now" is
+             -- a meaningful frame for live dashboards. Historical periods use
+             -- lifecycle-only filters to preserve determinism. This means
+             -- deals_count for "this month" vs "last month" answer slightly
+             -- different product questions, by design.
              WHEN $1::text IN ('last_month', 'last_quarter', 'last_year') THEN
+               -- Historical periods use lifecycle-only filters (created/closed
+               -- window) to preserve period determinism. We deliberately do NOT
+               -- filter on current stage flags (psc.is_terminal,
+               -- psc.is_active_pipeline) because those reflect the deal's stage
+               -- as of NOW, not as of period_end. A deal open during the period
+               -- but now terminal would otherwise be retroactively excluded from
+               -- historical snapshots. See: PR #160, Codex review on 3dab1ef212.
                d.created_at::date <= $3::date
                AND (
-                 COALESCE(d.actual_close_date, d.contract_signed_date, d.contract_signed_at::date, d.lost_at::date) IS NULL
-                 OR COALESCE(d.actual_close_date, d.contract_signed_date, d.contract_signed_at::date, d.lost_at::date) >= $2::date
+                  COALESCE(d.actual_close_date, d.contract_signed_date, d.contract_signed_at::date, d.lost_at::date) IS NULL
+                  OR COALESCE(d.actual_close_date, d.contract_signed_date, d.contract_signed_at::date, d.lost_at::date) >= $2::date
                )
              ELSE d.is_active = true AND NOT psc.is_terminal
            END
@@ -95,6 +110,8 @@ async function refreshOfficePeriod(
          COALESCE(SUM(COALESCE(d.awarded_amount, d.bid_estimate, d.dd_estimate, 0))
            FILTER (
              WHERE CASE
+               -- Historical pipeline_value follows the same deterministic
+               -- lifecycle-only rule as historical deals_count above.
                WHEN $1::text IN ('last_month', 'last_quarter', 'last_year') THEN
                  d.created_at::date <= $3::date
                  AND (
@@ -147,6 +164,56 @@ async function refreshOfficePeriod(
        JOIN public.pipeline_stage_config psc ON psc.id = d.stage_id
        GROUP BY d.assigned_rep_id
      ),
+     -- stale_accounts deliberately does NOT filter on companies.is_active or
+     -- properties.is_active. There is no deactivated_at timestamp on those tables,
+     -- so applying the current-state is_active flag to historical periods would
+     -- retroactively change historical stale counts when accounts are deactivated.
+     -- The metric becomes "accounts with stale activity timestamps as of period_end"
+     -- rather than "currently-active accounts with stale activity," which is less
+     -- semantically rich but deterministic. See: PR #160, Codex review on 3dab1ef212.
+     stale_accounts AS (
+       SELECT
+         accounts.rep_id,
+         COUNT(*)::int AS stale_account_count
+       FROM (
+         SELECT DISTINCT
+           d.assigned_rep_id AS rep_id,
+           'company' AS account_type,
+           c.id AS account_id
+         FROM ${schemaName}.deals d
+         JOIN public.users account_rep
+           ON account_rep.id = d.assigned_rep_id
+          AND account_rep.office_id = $4
+         JOIN ${schemaName}.companies c
+           ON c.id = d.company_id
+         WHERE d.assigned_rep_id IS NOT NULL
+           AND d.created_at::date <= $3::date
+           AND c.last_activity_at IS NOT NULL
+           -- Treat period_end as inclusive end-of-day before subtracting the
+           -- staleness threshold, so cutoff-date evening activity is stale by
+           -- the period boundary instead of being excluded by midnight casting.
+           AND c.last_activity_at < ($3::date + interval '1 day')::timestamptz - ($6::int || ' days')::interval
+         UNION
+         SELECT DISTINCT
+           d.assigned_rep_id AS rep_id,
+           'property' AS account_type,
+           p.id AS account_id
+         FROM ${schemaName}.deals d
+         JOIN public.users account_rep
+           ON account_rep.id = d.assigned_rep_id
+          AND account_rep.office_id = $4
+         JOIN ${schemaName}.properties p
+           ON p.id = d.property_id
+         WHERE d.assigned_rep_id IS NOT NULL
+           AND d.created_at::date <= $3::date
+           AND p.last_activity_at IS NOT NULL
+           -- Treat period_end as inclusive end-of-day before subtracting the
+           -- staleness threshold, so cutoff-date evening activity is stale by
+           -- the period boundary instead of being excluded by midnight casting.
+           AND p.last_activity_at < ($3::date + interval '1 day')::timestamptz - ($6::int || ' days')::interval
+       ) accounts
+       GROUP BY accounts.rep_id
+     ),
      activity AS (
        SELECT
          responsible_user_id AS rep_id,
@@ -173,6 +240,7 @@ async function refreshOfficePeriod(
        win_rate,
        avg_days_to_close,
        at_risk_count,
+       stale_account_count,
        activity_total,
        calls,
        emails,
@@ -198,6 +266,7 @@ async function refreshOfficePeriod(
        END,
        COALESCE(rd.avg_days_to_close, 0),
        COALESCE(rd.at_risk_count, 0),
+       COALESCE(sa.stale_account_count, 0),
        COALESCE(a.activity_total, 0),
        COALESCE(a.calls, 0),
        COALESCE(a.emails, 0),
@@ -209,11 +278,12 @@ async function refreshOfficePeriod(
        NOW()
      FROM public.users u
      LEFT JOIN rep_deals rd ON rd.rep_id = u.id
+     LEFT JOIN stale_accounts sa ON sa.rep_id = u.id
      LEFT JOIN activity a ON a.rep_id = u.id
      WHERE u.office_id = $4
        AND u.is_active = true
        AND u.role = 'rep'`,
-    [period.kind, period.start, period.end, officeId, officeName]
+    [period.kind, period.start, period.end, officeId, officeName, STALE_ACCOUNT_THRESHOLD_DAYS]
   );
 
   return insertResult.rowCount ?? 0;
@@ -238,11 +308,12 @@ export async function runRepPerformanceRollup(now = new Date()): Promise<number>
       }
 
       const schemaName = `office_${slug}`;
+      let officeInserted = 0;
       await client.query("BEGIN");
       try {
         await client.query("SELECT pg_advisory_xact_lock(hashtext($1))", [`rep-performance-rollup:${office.id}`]);
         for (const period of periods) {
-          inserted += await refreshOfficePeriod(
+          officeInserted += await refreshOfficePeriod(
             client,
             schemaName,
             String(office.id),
@@ -251,6 +322,7 @@ export async function runRepPerformanceRollup(now = new Date()): Promise<number>
           );
         }
         await client.query("COMMIT");
+        inserted += officeInserted;
       } catch (err) {
         await client.query("ROLLBACK");
         console.error(`[Worker:rep-performance-rollup] Office ${office.id} failed:`, err);

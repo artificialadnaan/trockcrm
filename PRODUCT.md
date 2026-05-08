@@ -41,3 +41,61 @@ T Rock is a commercial general contractor — they build things. The CRM should 
 3. **Red means action** — Primary buttons, important badges, and CTAs use brand red. Reserve it for things that need attention.
 4. **Speed over beauty** — Interactions should feel instant. Optimize for the rep who has 30 seconds between meetings.
 5. **Respect the data** — Numbers, names, and dates are the product. Typography and spacing should make them scannable, not pretty.
+
+## Rep Performance Snapshot — Metric Determinism
+
+Rep performance metrics computed by worker/src/jobs/rep-performance-rollup.ts use
+two different filter regimes based on period kind:
+
+**Current-period metrics** (mtd, qtd, ytd, week_8back):
+- Use the deal's current stage state (`psc.is_terminal`, `psc.is_active_pipeline`)
+- Reflect "as of now" — live dashboard semantics
+- Recomputing produces a slightly different answer if the deal's stage has changed
+
+**Historical metrics** (last_month, last_quarter, last_year):
+- Use only lifecycle attributes (created_at, close dates)
+- Defined as "deals that existed during this period"
+- Deterministic — recomputing last_month today and next week produces the same answer
+- Does NOT filter on current stage state because that would retroactively
+  change historical snapshots
+
+**stale_account_count** (all period kinds):
+- Counts accounts (companies and properties) with stale activity timestamps as of period_end
+- The stale threshold is configurable per stage; default is 30 days
+
+**Known limitations — NOT period-deterministic:**
+
+stale_account_count is computed from currently-mutable data. Recomputing the
+same historical period at a later date may produce a different result. Three
+distinct sources of drift:
+
+1. **Activity timestamps are mutable.** companies.last_activity_at and
+   properties.last_activity_at advance whenever new activity is logged. If new
+   activity happens after period_end on an account that was stale during the
+   period, the next recomputation will exclude that account from the historical
+   count.
+
+2. **Account ownership is mutable.** stale_account_count attribution uses the
+   deal's CURRENT assigned_rep_id. If a deal is reassigned after period_end,
+   the stale count for that account moves to the new rep on next recomputation.
+
+3. **Stale cutoff uses session timezone.** The boundary expression
+   `($3::date + interval '1 day')::timestamptz` interprets the date in the
+   session's TimeZone setting. Environments running in different timezones
+   may classify accounts near the threshold differently.
+
+True determinism for this metric would require:
+- An activity_history table that snapshots last_activity_at at period boundaries
+- A deal_assignment_history table that records ownership changes over time
+- An explicit UTC anchor on the cutoff expression
+
+These are tracked in follow-up issue #168:
+https://github.com/artificialadnaan/trockcrm/issues/168
+
+For now, the metric is **a current-state snapshot recomputed for historical
+periods** — useful as a ballpark indicator but not for audit-grade reporting.
+
+**Why the asymmetry**: the current-period branches answer "what's happening now,"
+the historical branches answer "what existed during this period." These are
+slightly different product questions by design. Future work could unify them by
+adding stage history coverage backfill and deactivation timestamps.

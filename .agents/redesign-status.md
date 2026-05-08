@@ -25,6 +25,13 @@
 - 2026-05-07T19:29Z [track-a-isolated-agent] PR-OPEN — A4 (PR #156)
 - 2026-05-07T19:31Z [track-a-isolated-agent] CLAIM — A5a in flight (branch: redesign/schema-hooks-isolated/a5a)
 - 2026-05-07T20:27Z [track-a-isolated-agent] PR-OPEN — A5a (PR #158)
+- A5b CLAIM 2026-05-07T22:21:35Z: redesign/schema-hooks-isolated/a5b, stale_account_count on rep_performance_snapshots. ETA TBD. Worktree: trockcrm-redesign-data-isolated.
+- A5b SCOPE-EXPAND 2026-05-07T22:25:33Z: folded PR #158 Codex catches (historical pipeline filter + inserted counter scoping) into A5b PR.
+- A5b PR-OPEN 2026-05-07T22:36:17Z: PR #160 opened for stale_account_count and folded PR #158 Codex catches.
+- A5b CODEX-FIX 2026-05-07T23:10:43Z: PR #160 force-pushed with stale-account period-scoping fix on both branches + regression test.
+- A5b CODEX-FIX-4 2026-05-08T05:51:46Z: PR #160 force-pushed with three fixes (P1 historical deals_count determinism, P2 cross-period semantics docs, P2 stale_accounts is_active removal). Two regression tests added. PRODUCT.md updated with metric determinism design doc.
+- A5b CODEX-FIX-5 2026-05-08T14:09:45Z: PR #160 force-pushed with three fixes (P1 historical pipeline_value determinism, P2 stale cutoff end-of-day, P3 doc alignment). Two regression tests added.
+- A5b CODEX-FIX-6 2026-05-08T15:11:13Z: PR #160 force-pushed with PRODUCT.md doc update acknowledging stale_account_count structural limits. No code changes. Follow-up issue #168 filed tracking activity-history, ownership-history, and UTC anchor work.
 
 ## Track B — Shared Primitives + Shell + Harness
 - _no claims yet_

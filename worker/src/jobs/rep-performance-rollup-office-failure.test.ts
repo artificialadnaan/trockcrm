@@ -63,4 +63,41 @@ describe("rep performance rollup office failure isolation", () => {
       expect.any(Error)
     );
   });
+
+  it("does not count rows from an office transaction that rolls back after a later period fails", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    let insertAttempts = 0;
+    const transactionCommands: string[] = [];
+    const client = {
+      query: vi.fn(async (sql: string) => {
+        if (["BEGIN", "COMMIT", "ROLLBACK"].includes(sql)) {
+          transactionCommands.push(sql);
+        }
+
+        if (sql.includes("SELECT id, slug, name FROM public.offices")) {
+          return {
+            rows: [{ id: "office-a", slug: "a", name: "Office A" }],
+            rowCount: 1,
+          };
+        }
+
+        if (sql.includes("INSERT INTO public.rep_performance_snapshots")) {
+          insertAttempts += 1;
+          if (insertAttempts === 2) {
+            throw new Error("second period failed");
+          }
+          return { rows: [], rowCount: 1 };
+        }
+
+        return { rows: [], rowCount: 0 };
+      }),
+      release: vi.fn(),
+    };
+    connectMock.mockResolvedValue(client);
+
+    await expect(runRepPerformanceRollup(new Date("2026-05-07T12:00:00.000Z"))).resolves.toBe(0);
+
+    expect(insertAttempts).toBe(2);
+    expect(transactionCommands).toEqual(["BEGIN", "ROLLBACK"]);
+  });
 });
