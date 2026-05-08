@@ -252,7 +252,7 @@ function DealListPageContent({ role }: { role: string }) {
   const currentYear = useCurrentCalendarYear();
   const ytdTerminalFilters = useMemo(() => getYearToDateTerminalFilters(), [currentYear]);
   const { board, loading, error } = useDealBoard(scope, true, ytdTerminalFilters);
-  const { deals } = useDeals({ limit: 200, isActive: true, sortBy: "updated_at", sortDir: "desc", scope });
+  const { deals, pagination } = useDeals({ limit: 200, isActive: true, sortBy: "updated_at", sortDir: "desc", scope });
   const { stages } = usePipelineStages();
 
   const columns = useMemo(() => buildCanonicalDealBoardColumns(board?.columns, stages), [board?.columns, stages]);
@@ -348,7 +348,7 @@ function DealListPageContent({ role }: { role: string }) {
         <div className="flex items-center justify-between border-b border-slate-200 px-4 py-3">
           <p className="text-[11px] font-black uppercase tracking-[0.18em] text-slate-500">Recent deal movement</p>
           <Link to={`/deals?scope=${scope}`} className="text-xs font-bold text-brand-red">
-            {deals.length} visible
+            {pagination.total ?? deals.length} visible
           </Link>
         </div>
         <div className="divide-y divide-slate-100">

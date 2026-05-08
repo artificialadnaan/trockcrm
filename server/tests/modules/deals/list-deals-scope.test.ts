@@ -175,12 +175,11 @@ describe("getDeals scope filtering", () => {
     ]);
   });
 
-  it("returns all active deals for scope=all", async () => {
+  it("scope=all returns only deals from the active office", async () => {
     await expect(listIds({ role: "director", userId: "director-1", scope: "all" })).resolves.toEqual([
       "deal-self",
       "deal-team-1",
       "deal-team-2",
-      "deal-other-office",
       "deal-inactive-rep",
       "deal-rep-self",
     ]);

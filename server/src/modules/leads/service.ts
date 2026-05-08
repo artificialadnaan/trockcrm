@@ -1116,6 +1116,15 @@ export function createLeadService(
       conditions.push(eq(leads.isActive, filters.isActive ?? true));
     }
 
+    if (filters.activeOfficeId) {
+      const officeRows = await tenantDb
+        .select({ id: users.id })
+        .from(users)
+        .where(eq(users.officeId, filters.activeOfficeId));
+      const officeUserIds = officeRows.map((user) => user.id);
+      conditions.push(officeUserIds.length > 0 ? inArray(leads.assignedRepId, officeUserIds) : sql`false`);
+    }
+
     if (scope === "mine") {
       conditions.push(eq(leads.assignedRepId, userId));
     } else if (scope === "team") {

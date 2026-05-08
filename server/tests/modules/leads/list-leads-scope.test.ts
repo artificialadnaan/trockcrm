@@ -161,15 +161,26 @@ describe("listLeads scope filtering", () => {
     ]);
   });
 
-  it("returns all active-office tenant leads for scope=all", async () => {
+  it("scope=all returns only leads from the active office", async () => {
     await expect(listIds({ role: "director", userId: "director-1", scope: "all" })).resolves.toEqual([
       "lead-self",
       "lead-team-1",
       "lead-team-2",
-      "lead-other-office",
       "lead-inactive-rep",
       "lead-rep-self",
     ]);
+  });
+
+  it("narrows team scope to a specific assigned rep when both filters are set", async () => {
+    const service = createLeadService();
+    const rows = await service.listLeads(
+      createTenantDb() as never,
+      { isActive: "all", scope: "team", activeOfficeId: "office-1", assignedRepId: "rep-team-1" },
+      "director",
+      "director-1"
+    );
+
+    expect(rows.map((row) => row.id)).toEqual(["lead-team-1"]);
   });
 
   it("forces reps to their own leads regardless of requested scope", async () => {

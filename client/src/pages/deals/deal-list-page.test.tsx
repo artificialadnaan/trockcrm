@@ -498,4 +498,21 @@ describe("DealListPage", () => {
       scope: "all",
     });
   });
+
+  it("renders visibility badge using pagination total when available", () => {
+    mocks.useDealsMock.mockReturnValue({
+      deals: Array.from({ length: 200 }, (_, index) =>
+        makeDeal({ id: `deal-${index}`, name: `Deal ${index}` })
+      ),
+      pagination: { page: 1, limit: 200, total: 472, totalPages: 3 },
+      loading: false,
+      error: null,
+      refetch: vi.fn(),
+    });
+
+    const html = renderPage("/deals?scope=all", "admin");
+
+    expect(html).toContain("472 visible");
+    expect(html).not.toContain("200 visible");
+  });
 });

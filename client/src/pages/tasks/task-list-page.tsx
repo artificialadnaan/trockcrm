@@ -417,7 +417,12 @@ function TaskListPageContent({ role }: { role: string }) {
     } satisfies Record<GroupKey, Task[]>;
   }, [completedTasks, overdueTasks, query, scheduledTasks, todayTasks, upcomingTasks]);
 
-  const completedThisWeek = counts.completed;
+  const sevenDaysAgo = Date.now() - 7 * 24 * 60 * 60 * 1000;
+  const completedThisWeek = completedTasks.filter((task) => {
+    if (!task.completedAt) return false;
+    const completedAt = new Date(task.completedAt).getTime();
+    return !Number.isNaN(completedAt) && completedAt >= sevenDaysAgo;
+  }).length;
 
   return (
     <div className="space-y-6">

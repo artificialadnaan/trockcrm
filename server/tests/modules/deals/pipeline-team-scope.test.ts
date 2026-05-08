@@ -133,4 +133,37 @@ describe("getDealsForPipeline team scope", () => {
 
     expect(result.pipelineColumns[0].deals[0]?.assignedRepName).toBe("Brett Jones");
   });
+
+  it("getDealsForPipeline narrows to specific rep when scope=team and assignedRepId both set", async () => {
+    const teamQuery = {
+      from: vi.fn().mockReturnThis(),
+      where: vi.fn().mockResolvedValue([{ id: "rep-team-1" }, { id: "rep-team-2" }]),
+    };
+    const dealQuery = {
+      leftJoin: vi.fn().mockReturnThis(),
+      where: vi.fn().mockReturnThis(),
+      orderBy: vi.fn().mockReturnThis(),
+      limit: vi.fn().mockResolvedValue([]),
+    };
+    const tenantDb = {
+      select: vi.fn((fields?: Record<string, unknown>) => ({
+        from: vi.fn((table: unknown) => {
+          if (table === users && fields && "id" in fields) return teamQuery;
+          if (table === deals) return dealQuery;
+          return dealQuery;
+        }),
+      })),
+    } as any;
+
+    const { getDealsForPipeline } = await import("../../../src/modules/deals/service.js");
+    await getDealsForPipeline(tenantDb, "director", "director-1", {
+      scope: "team",
+      assignedRepId: "rep-team-1",
+      activeOfficeId: "office-1",
+      includeDd: true,
+    });
+
+    expect(containsValue(dealQuery.where.mock.calls[0][0], "rep-team-1")).toBe(true);
+    expect(containsValue(dealQuery.where.mock.calls[0][0], "rep-team-2")).toBe(false);
+  });
 });

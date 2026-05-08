@@ -433,4 +433,37 @@ describe("TaskListPage project context", () => {
     expect(mocks.useTasksMock).toHaveBeenCalledWith(expect.objectContaining({ section: "completed" }));
     expect(mocks.useTasksMock).toHaveBeenCalledWith(expect.objectContaining({ status: "scheduled" }));
   });
+
+  it("completedThisWeek excludes tasks completed more than 7 days ago", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-05-08T12:00:00.000Z"));
+    mocks.useTaskCountsMock.mockReturnValue({
+      counts: { overdue: 0, today: 0, upcoming: 0, completed: 99 },
+      loading: false,
+      error: null,
+      refetch: vi.fn(),
+    });
+    mocks.useTasksMock.mockImplementation((filters: { section?: string; status?: string }) => ({
+      tasks:
+        filters.section === "completed"
+          ? [
+              { ...makeTask(), id: "recent-completed", status: "completed", completedAt: "2026-05-06T12:00:00.000Z" },
+              { ...makeTask(), id: "old-completed", status: "completed", completedAt: "2026-04-20T12:00:00.000Z" },
+              { ...makeTask(), id: "missing-completed", status: "completed", completedAt: null },
+            ]
+          : [],
+      loading: false,
+      error: null,
+      refetch: vi.fn(),
+    }));
+
+    renderPage();
+
+    const completedCardText = Array.from(container.querySelectorAll("div"))
+      .map((element) => element.textContent ?? "")
+      .find((text) => text.includes("Completed this week") && text.includes("Last 7 days"));
+    expect(completedCardText).toContain("1");
+    expect(completedCardText).not.toContain("99");
+    vi.useRealTimers();
+  });
 });

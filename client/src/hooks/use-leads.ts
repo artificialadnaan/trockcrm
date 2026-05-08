@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { api, getCsrfToken, resolveApiBase } from "@/lib/api";
 export {
   getLeadBoardStageLabel,
@@ -259,8 +259,11 @@ export function useLeads(filters: LeadFilters = {}) {
   const [leads, setLeads] = useState<LeadRecord[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const requestIdRef = useRef(0);
 
   const fetchLeads = useCallback(async () => {
+    const requestId = requestIdRef.current + 1;
+    requestIdRef.current = requestId;
     setLoading(true);
     setError(null);
     try {
@@ -276,11 +279,15 @@ export function useLeads(filters: LeadFilters = {}) {
 
       const qs = params.toString();
       const data = await api<{ leads: LeadRecord[] }>(`/leads${qs ? `?${qs}` : ""}`);
+      if (requestId !== requestIdRef.current) return;
       setLeads(data.leads);
     } catch (err: unknown) {
+      if (requestId !== requestIdRef.current) return;
       setError(err instanceof Error ? err.message : "Failed to load leads");
     } finally {
-      setLoading(false);
+      if (requestId === requestIdRef.current) {
+        setLoading(false);
+      }
     }
   }, [
     filters.assignedRepId,

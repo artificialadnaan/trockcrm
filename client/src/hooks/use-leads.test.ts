@@ -1,6 +1,7 @@
 import { act, createElement } from "react";
 import { createRoot } from "react-dom/client";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { api } from "@/lib/api";
 
 vi.mock("@/lib/api", () => ({
   api: vi.fn(),
@@ -8,7 +9,7 @@ vi.mock("@/lib/api", () => ({
   resolveApiBase: () => "/api",
 }));
 
-const { transitionLeadStage, useLeadBoard } = await import("./use-leads");
+const { transitionLeadStage, useLeadBoard, useLeads } = await import("./use-leads");
 
 class FakeNode {
   nodeType = 0;
@@ -135,9 +136,16 @@ function flushEffects() {
 }
 
 let latestBoardResult: ReturnType<typeof useLeadBoard> | null = null;
+let latestLeadsResult: ReturnType<typeof useLeads> | null = null;
+let hookLeadFilters: Parameters<typeof useLeads>[0] = {};
 
 function BoardHookProbe() {
   latestBoardResult = useLeadBoard("mine");
+  return null;
+}
+
+function LeadsHookProbe() {
+  latestLeadsResult = useLeads(hookLeadFilters);
   return null;
 }
 
@@ -149,6 +157,20 @@ async function renderBoardHook() {
 
   await act(async () => {
     root.render(createElement(BoardHookProbe));
+    await flushEffects();
+  });
+
+  return root;
+}
+
+async function renderLeadsHook() {
+  const { document } = installFakeDom();
+  const container = document.createElement("div");
+  document.body.appendChild(container);
+  const root = createRoot(container as unknown as Element);
+
+  await act(async () => {
+    root.render(createElement(LeadsHookProbe));
     await flushEffects();
   });
 
@@ -168,6 +190,8 @@ describe("transitionLeadStage", () => {
   beforeEach(() => {
     vi.restoreAllMocks();
     latestBoardResult = null;
+    latestLeadsResult = null;
+    hookLeadFilters = {};
   });
 
   it("returns missing requirement payloads on 409 responses", async () => {
@@ -260,6 +284,60 @@ describe("transitionLeadStage", () => {
     expect((manualRefetchError as Error).message).toBe("Lead board failed");
     await waitForBoardIdle();
     expect(latestBoardResult?.error).toBe("Lead board failed");
+
+    await act(async () => {
+      root.unmount();
+      await flushEffects();
+    });
+    vi.unstubAllGlobals();
+  });
+});
+
+describe("useLeads", () => {
+  beforeEach(() => {
+    vi.restoreAllMocks();
+    latestLeadsResult = null;
+    hookLeadFilters = {};
+  });
+
+  it("ignores stale responses when scope changes rapidly", async () => {
+    const pending = new Map<string, (value: unknown) => void>();
+    vi.mocked(api).mockImplementation((path: string) => {
+      const scope = new URLSearchParams(path.split("?")[1] ?? "").get("scope") ?? "none";
+      return new Promise((resolve) => {
+        pending.set(scope, resolve);
+      }) as Promise<unknown>;
+    });
+
+    hookLeadFilters = { scope: "mine" };
+    const root = await renderLeadsHook();
+
+    hookLeadFilters = { scope: "team" };
+    await act(async () => {
+      root.render(createElement(LeadsHookProbe));
+      await flushEffects();
+    });
+
+    hookLeadFilters = { scope: "all" };
+    await act(async () => {
+      root.render(createElement(LeadsHookProbe));
+      await flushEffects();
+    });
+
+    await act(async () => {
+      pending.get("all")?.({ leads: [{ id: "lead-all", name: "All scoped lead" }] });
+      await flushEffects();
+    });
+
+    expect(latestLeadsResult?.leads.map((lead) => lead.id)).toEqual(["lead-all"]);
+
+    await act(async () => {
+      pending.get("team")?.({ leads: [{ id: "lead-team", name: "Team scoped lead" }] });
+      pending.get("mine")?.({ leads: [{ id: "lead-mine", name: "Mine scoped lead" }] });
+      await flushEffects();
+    });
+
+    expect(latestLeadsResult?.leads.map((lead) => lead.id)).toEqual(["lead-all"]);
 
     await act(async () => {
       root.unmount();

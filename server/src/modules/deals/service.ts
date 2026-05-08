@@ -739,6 +739,15 @@ export async function getDeals(tenantDb: TenantDb, filters: DealFilters, userRol
   const showActive = filters.isActive ?? true;
   conditions.push(eq(deals.isActive, showActive));
 
+  if (filters.activeOfficeId) {
+    const officeRows = await tenantDb
+      .select({ id: users.id })
+      .from(users)
+      .where(eq(users.officeId, filters.activeOfficeId));
+    const officeUserIds = officeRows.map((user) => user.id);
+    conditions.push(officeUserIds.length > 0 ? inArray(deals.assignedRepId, officeUserIds) : sql`false`);
+  }
+
   if (scope === "mine") {
     conditions.push(eq(deals.assignedRepId, userId));
   } else if (scope === "team") {
@@ -1536,7 +1545,15 @@ export async function getDealsForPipeline(
     conditions.push(eq(deals.assignedRepId, userId));
   } else if (filters?.scope === "team") {
     const teamRepIds = await resolveTeamRepIds(tenantDb, userId, filters.activeOfficeId ?? null);
-    conditions.push(teamRepIds.length > 0 ? inArray(deals.assignedRepId, teamRepIds) : sql`false`);
+    if (filters.assignedRepId) {
+      conditions.push(
+        teamRepIds.includes(filters.assignedRepId)
+          ? eq(deals.assignedRepId, filters.assignedRepId)
+          : sql`false`
+      );
+    } else {
+      conditions.push(teamRepIds.length > 0 ? inArray(deals.assignedRepId, teamRepIds) : sql`false`);
+    }
   } else if (filters?.assignedRepId) {
     conditions.push(eq(deals.assignedRepId, filters.assignedRepId));
   }
