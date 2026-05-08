@@ -6,6 +6,8 @@ import { describe, expect, it } from "vitest";
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const migrationPath = resolve(__dirname, "../../../../migrations/0104_redesign_a2_tier2_schema.sql");
 const migrationSql = existsSync(migrationPath) ? readFileSync(migrationPath, "utf8") : "";
+const dealContactsSchemaPath = resolve(__dirname, "../../../../shared/src/schema/tenant/deal-contacts.ts");
+const dealContactsSchema = existsSync(dealContactsSchemaPath) ? readFileSync(dealContactsSchemaPath, "utf8") : "";
 
 describe("redesign A2 tier 2 schema migration", () => {
   it("replays against current and future tenant schemas", () => {
@@ -85,5 +87,13 @@ describe("redesign A2 tier 2 schema migration", () => {
     expect(migrationSql).toContain("ON CONFLICT (deal_id, contact_id) DO NOTHING");
     expect(migrationSql).not.toContain("ON CONFLICT (deal_id, contact_id, role_on_deal) DO NOTHING");
     expect(migrationSql).not.toContain("deal_contacts_one_primary_per_deal_uidx");
+  });
+
+  it("keeps the Drizzle deal_contacts schema aligned with the migrated unique key", () => {
+    expect(dealContactsSchema).toContain(
+      'unique("deal_contacts_deal_id_contact_id_key").on(table.dealId, table.contactId)'
+    );
+    expect(dealContactsSchema).not.toContain("unique().on(table.dealId, table.contactId, table.roleOnDeal)");
+    expect(dealContactsSchema).not.toContain("deal_contacts_one_primary_per_deal_uidx");
   });
 });

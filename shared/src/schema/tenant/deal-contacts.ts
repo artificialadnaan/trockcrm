@@ -1,5 +1,4 @@
-import { sql } from "drizzle-orm";
-import { pgEnum, pgTable, timestamp, unique, uniqueIndex, uuid } from "drizzle-orm/pg-core";
+import { pgEnum, pgTable, timestamp, unique, uuid } from "drizzle-orm/pg-core";
 import { contacts } from "./contacts.js";
 import { deals } from "./deals.js";
 
@@ -16,9 +15,6 @@ export const dealContacts = pgTable(
     updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
   },
   (table) => [
-    unique().on(table.dealId, table.contactId, table.roleOnDeal),
-    uniqueIndex("deal_contacts_one_primary_per_deal_uidx")
-      .on(table.dealId)
-      .where(sql`${table.roleOnDeal} = 'primary'`),
+    unique("deal_contacts_deal_id_contact_id_key").on(table.dealId, table.contactId),
   ]
 );

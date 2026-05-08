@@ -146,4 +146,16 @@ describe("ensureDevUserPrimaryOffice", () => {
     expect(authServiceSource).not.toContain("'estimating', $25");
     expect(authServiceSource).not.toContain("'estimating', $32");
   });
+
+  it("seeds demo leads with an office value for the bootstrap tenant", () => {
+    expect(authServiceSource).toContain('function leadOfficeForDemoOfficeSlug(officeSlug: string): "dfw" | "atl"');
+    expect(authServiceSource).toContain('const leadOffice = leadOfficeForDemoOfficeSlug(office.slug);');
+    expect(authServiceSource).toContain(
+      "source, office, description, last_activity_at, stage_entered_at, is_active"
+    );
+    expect(authServiceSource).toContain(
+      "source, office, description, last_activity_at, stage_entered_at, is_active, converted_at"
+    );
+    expect(authServiceSource).toContain("office = EXCLUDED.office");
+  });
 });
