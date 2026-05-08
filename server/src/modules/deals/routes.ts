@@ -3,6 +3,7 @@ import { and, eq, desc, isNotNull, sql } from "drizzle-orm";
 import { dealApprovals, deals, jobQueue } from "@trock-crm/shared/schema";
 import { requireRole } from "../../middleware/rbac.js";
 import { AppError } from "../../middleware/error-handler.js";
+import { requestAuditContext, writeSoftDeleteAuditLog } from "../../lib/soft-delete-audit.js";
 import { eventBus } from "../../events/bus.js";
 import {
   BID_BOARD_STAGE_READ_ONLY_MESSAGE,
@@ -94,6 +95,10 @@ function readBoardInput(req: Parameters<typeof router.get>[1] extends never ? ne
     scope: (req.query.scope as "mine" | "team" | "all" | undefined) ?? "mine",
     includeDd: req.query.includeDd === "true",
   };
+}
+
+function readListScope(value: unknown): "mine" | "team" | "all" {
+  return value === "mine" || value === "team" || value === "all" ? value : "all";
 }
 
 function readStageInput(req: Parameters<typeof router.get>[1] extends never ? never : any) {
@@ -209,6 +214,8 @@ router.get("/", async (req, res, next) => {
       sortDir: req.query.sortDir as "asc" | "desc" | undefined,
       page: req.query.page ? parseInt(req.query.page as string, 10) : undefined,
       limit: req.query.limit ? parseInt(req.query.limit as string, 10) : undefined,
+      scope: readListScope(req.query.scope),
+      activeOfficeId: req.user!.activeOfficeId ?? req.user!.officeId,
     };
 
     const result = await getDeals(req.tenantDb!, filters, req.user!.role, req.user!.id);
@@ -235,6 +242,8 @@ router.get("/pipeline", async (req, res, next) => {
   try {
     const filters = {
       assignedRepId: req.query.assignedRepId as string | undefined,
+      scope: req.query.scope as "mine" | "team" | "all" | undefined,
+      activeOfficeId: req.user!.activeOfficeId ?? req.user!.officeId,
       includeDd: req.query.includeDd === "true",
       wonSince: req.query.won_since as string | undefined,
       wonUntil: req.query.won_until as string | undefined,
@@ -995,12 +1004,21 @@ router.get("/:id/contacts", async (req, res, next) => {
   }
 });
 
-// DELETE /api/deals/:id — soft-delete (director/admin only)
-router.delete("/:id", requireRole("admin", "director"), async (req, res, next) => {
+// DELETE /api/deals/:id — admin-only soft-delete
+router.delete("/:id", requireRole("admin"), async (req, res, next) => {
   try {
-    await deleteDeal(req.tenantDb!, req.params.id as string, req.user!.role);
+    const dealId = req.params.id as string;
+    const deal = await deleteDeal(req.tenantDb!, dealId, req.user!.role);
+    if (deal) {
+      await writeSoftDeleteAuditLog(req.tenantDb!, {
+        actorUserId: req.user!.id,
+        entityType: "deal",
+        entityId: dealId,
+        ...requestAuditContext(req),
+      });
+    }
     await req.commitTransaction!();
-    res.json({ success: true });
+    res.status(204).send();
   } catch (err) {
     next(err);
   }

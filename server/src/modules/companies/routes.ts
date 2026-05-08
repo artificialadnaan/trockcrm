@@ -4,12 +4,15 @@ import {
   getCompanyById,
   createCompany,
   updateCompany,
+  deleteCompany,
   getCompanyContacts,
   getCompanyDeals,
   getCompanyStats,
   searchCompanies,
 } from "./service.js";
 import { AppError } from "../../middleware/error-handler.js";
+import { requireAdmin } from "../../middleware/rbac.js";
+import { requestAuditContext, writeSoftDeleteAuditLog } from "../../lib/soft-delete-audit.js";
 import { markCompanyRejected, markCompanyVerified } from "./customer-status-service.js";
 
 const router = Router();
@@ -27,10 +30,11 @@ router.get("/search", async (req, res, next) => {
 // GET /companies — list with search, filter, pagination
 router.get("/", async (req, res, next) => {
   try {
-    const { search, category, page, limit } = req.query as Record<string, string>;
+    const { search, category, industry, page, limit } = req.query as Record<string, string>;
     const result = await listCompanies(req.tenantDb!, {
       search,
       category,
+      industry,
       page: page ? parseInt(page, 10) : 1,
       limit: limit ? parseInt(limit, 10) : 50,
     });
@@ -70,6 +74,24 @@ router.patch("/:id", async (req, res, next) => {
     if (!company) throw new AppError(404, "Company not found");
     await req.commitTransaction!();
     res.json({ company });
+  } catch (err) { next(err); }
+});
+
+// DELETE /companies/:id — admin-only soft-delete
+router.delete("/:id", requireAdmin, async (req, res, next) => {
+  try {
+    const companyId = req.params.id as string;
+    const company = await deleteCompany(req.tenantDb!, companyId);
+    if (company) {
+      await writeSoftDeleteAuditLog(req.tenantDb!, {
+        actorUserId: req.user!.id,
+        entityType: "company",
+        entityId: companyId,
+        ...requestAuditContext(req),
+      });
+    }
+    await req.commitTransaction!();
+    res.status(204).send();
   } catch (err) { next(err); }
 });
 

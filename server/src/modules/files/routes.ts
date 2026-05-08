@@ -1,6 +1,8 @@
 import express, { Router } from "express";
 import { files } from "@trock-crm/shared/schema";
 import { AppError } from "../../middleware/error-handler.js";
+import { requireAdmin } from "../../middleware/rbac.js";
+import { writeSoftDeleteAuditLog } from "../../lib/soft-delete-audit.js";
 import type { FileCategory } from "@trock-crm/shared/types";
 import { FILE_CATEGORIES } from "@trock-crm/shared/types";
 import {
@@ -234,7 +236,8 @@ router.patch("/:id/address", async (req, res, next) => {
   try {
     if (!req.user) throw new AppError(401, "Authentication required.");
 
-    const existing = await getFileById(req.tenantDb!, req.params.id);
+    const fileId = req.params.id as string;
+    const existing = await getFileById(req.tenantDb!, fileId);
     if (!existing) throw new AppError(404, "File not found");
 
     if (existing.dealId) {
@@ -704,36 +707,22 @@ router.patch("/:id", async (req, res, next) => {
   }
 });
 
-// DELETE /api/files/:id — soft-delete a file
-router.delete("/:id", async (req, res, next) => {
+// DELETE /api/files/:id — admin-only soft-delete a file
+router.delete("/:id", requireAdmin, async (req, res, next) => {
   try {
-    const existing = await getFileById(req.tenantDb!, req.params.id);
+    const fileId = req.params.id as string;
+    const existing = await getFileById(req.tenantDb!, fileId);
     if (!existing) throw new AppError(404, "File not found");
 
-    const isAdminOrDirector = req.user!.role === "admin" || req.user!.role === "director";
-    const isUploader = existing.uploadedBy === req.user!.id;
-
-    if (existing.dealId) {
-      // RBAC: deal-scoped files require deal access + role check
-      const deal = await getDealById(req.tenantDb!, existing.dealId, req.user!.role, req.user!.id);
-      if (!deal) throw new AppError(403, "Access denied: you do not have access to this deal's files.");
-
-      if (!isAdminOrDirector && !isUploader) {
-        throw new AppError(403, "Only admins, directors, or the original uploader can delete deal files.");
-      }
-    } else if (existing.leadId) {
-      const lead = await getLeadById(req.tenantDb!, existing.leadId, req.user!.role, req.user!.id);
-      if (!lead) throw new AppError(403, "Access denied: you do not have access to this lead's files.");
-
-      if (!isAdminOrDirector && !isUploader) {
-        throw new AppError(403, "Only admins, directors, or the original uploader can delete lead files.");
-      }
-    } else if (req.user!.role === "rep" && !isUploader) {
-      // Fix 8: Non-deal files — reps can only delete files they uploaded
-      throw new AppError(403, "You can only delete files you uploaded");
+    const deletedFile = await deleteFile(req.tenantDb!, fileId, req.user!.role, req.user!.id);
+    if (deletedFile) {
+      await writeSoftDeleteAuditLog(req.tenantDb!, {
+        actorUserId: req.user!.id,
+        entityType: "file",
+        entityId: fileId,
+        ...requestAuditContext(req),
+      });
     }
-
-    await deleteFile(req.tenantDb!, req.params.id, req.user!.role, req.user!.id);
     if (isPhotoRecord(existing)) {
       await logPhotoEvent(req.tenantDb!, {
         photoId: existing.id,
@@ -744,7 +733,7 @@ router.delete("/:id", async (req, res, next) => {
       });
     }
     await req.commitTransaction!();
-    res.json({ success: true });
+    res.status(204).send();
   } catch (err) {
     next(err);
   }

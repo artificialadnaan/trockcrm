@@ -10,12 +10,13 @@ import {
   pgEnum,
 } from "drizzle-orm/pg-core";
 import { contactCategoryEnum } from "./contacts.js";
-import { COMPANY_VERIFICATION_STATUSES } from "../../types/enums.js";
+import { COMPANY_INDUSTRIES, COMPANY_VERIFICATION_STATUSES } from "../../types/enums.js";
 
 export const companyVerificationStatusEnum = pgEnum(
   "company_verification_status",
   COMPANY_VERIFICATION_STATUSES
 );
+export const companyIndustryEnum = pgEnum("company_industry", COMPANY_INDUSTRIES);
 
 export const companies = pgTable(
   "companies",
@@ -30,6 +31,12 @@ export const companies = pgTable(
     zip: varchar("zip", { length: 10 }),
     phone: varchar("phone", { length: 20 }),
     website: varchar("website", { length: 500 }),
+    industry: companyIndustryEnum("industry"),
+    region: text("region"),
+    domain: text("domain"),
+    lastActivityAt: timestamp("last_activity_at", { withTimezone: true }),
+    hubspotId: text("hubspot_id"),
+    procoreId: text("procore_id"),
     sourceRefs: jsonb("source_refs").$type<Record<string, unknown>>().default({}).notNull(),
     notes: text("notes"),
     companyVerificationStatus: companyVerificationStatusEnum("company_verification_status"),
@@ -48,6 +55,8 @@ export const companies = pgTable(
   (table) => [
     index("companies_name_idx").on(table.name),
     index("companies_category_idx").on(table.category),
+    index("companies_industry_idx").on(table.industry),
+    index("companies_last_activity_idx").on(table.lastActivityAt),
     index("companies_verification_status_idx").on(table.companyVerificationStatus),
   ]
 );

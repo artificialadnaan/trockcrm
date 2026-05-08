@@ -41,6 +41,7 @@ import {
 } from "./due-diligence-service.js";
 import { isExistingCustomer } from "./verification-service.js";
 import { resolveLeadSourceForWrite } from "./source-control.js";
+import { resolveTeamRepIds } from "../shared/team-scope.js";
 import type { LeadBudgetStatus, LeadPocRole, LeadSourceCategory } from "@trock-crm/shared/types";
 
 type TenantDb = NodePgDatabase<typeof schema>;
@@ -52,6 +53,8 @@ export interface LeadFilters {
   assignedRepId?: string;
   status?: "open" | "converted" | "disqualified";
   isActive?: boolean | "all";
+  scope?: WorkspaceScope;
+  activeOfficeId?: string;
 }
 
 export interface CreateLeadInput {
@@ -95,6 +98,7 @@ export interface UpdateLeadInput {
   sourceDetail?: string | null;
   description?: string | null;
   officeCode?: string | null;
+  office?: "dfw" | "atl" | null;
   projectType?: string | null;
   projectTypeId?: string | null;
   bidDueDate?: string | null;
@@ -334,7 +338,7 @@ async function assertValidProjectType(
 function assertValidOfficeCode(value: string | null | undefined): "dfw" | "atl" {
   const normalized = String(value ?? "").trim().toLowerCase();
   if (normalized !== "dfw" && normalized !== "atl") {
-    throw new AppError(400, "officeCode must be 'dfw' or 'atl'");
+    throw new AppError(400, "officeCode must be 'dfw' or 'atl'", "INVALID_OFFICE_CODE");
   }
 
   return normalized;
@@ -839,7 +843,7 @@ async function getDefaultConversionDealStageId() {
   return stage?.id ?? null;
 }
 
-function buildLeadWorkspaceScope(input: LeadBoardInput | LeadStagePageInput) {
+async function buildLeadWorkspaceScope(tenantDb: TenantDb, input: LeadBoardInput | LeadStagePageInput) {
   const filters = [
     sql`l.is_active = true`,
     sql`u.office_id = ${input.activeOfficeId}`,
@@ -847,6 +851,9 @@ function buildLeadWorkspaceScope(input: LeadBoardInput | LeadStagePageInput) {
 
   if (input.role === "rep" || input.scope === "mine") {
     filters.push(sql`l.assigned_rep_id = ${input.userId}`);
+  } else if (input.scope === "team") {
+    const teamRepIds = await resolveTeamRepIds(tenantDb, input.userId, input.activeOfficeId);
+    filters.push(teamRepIds.length > 0 ? sql`l.assigned_rep_id IN (${sql.join(teamRepIds.map((id) => sql`${id}`), sql`, `)})` : sql`false`);
   }
 
   if ("assignedRepId" in input && input.assignedRepId) {
@@ -986,7 +993,7 @@ async function listLeadBoardWorkspace(tenantDb: TenantDb, input: LeadBoardInput)
       join public.pipeline_stage_config psc on psc.id = l.stage_id
       left join companies c on c.id = l.company_id
       left join properties p on p.id = l.property_id
-      where ${buildLeadWorkspaceScope(input)}
+      where ${await buildLeadWorkspaceScope(tenantDb, input)}
       order by l.stage_entered_at asc, l.updated_at desc
     `),
   ]);
@@ -1010,7 +1017,7 @@ async function listLeadStageWorkspacePage(tenantDb: TenantDb, input: LeadStagePa
   const page = Math.max(1, input.page || 1);
   const pageSize = Math.max(1, Math.min(100, input.pageSize || 25));
   const offset = (page - 1) * pageSize;
-  const scope = buildLeadWorkspaceScope(input);
+  const scope = await buildLeadWorkspaceScope(tenantDb, input);
   const countResult = await tenantDb.execute(sql`
     select count(*)::int as total
     from leads l
@@ -1104,14 +1111,37 @@ export function createLeadService(
     userId: string
   ) {
     const conditions: any[] = [];
+    const scope = userRole === "rep" ? "mine" : filters.scope ?? "all";
 
     if (filters.isActive !== "all") {
       conditions.push(eq(leads.isActive, filters.isActive ?? true));
     }
 
-    if (userRole === "rep") {
+    if (filters.activeOfficeId) {
+      const officeRows = await tenantDb
+        .select({ id: users.id })
+        .from(users)
+        .where(eq(users.officeId, filters.activeOfficeId));
+      const officeUserIds = officeRows.map((user) => user.id);
+      conditions.push(officeUserIds.length > 0 ? inArray(leads.assignedRepId, officeUserIds) : sql`false`);
+    }
+
+    if (scope === "mine") {
       conditions.push(eq(leads.assignedRepId, userId));
-    } else if (filters.assignedRepId) {
+    } else if (scope === "team") {
+      const teamConditions = [eq(users.reportsTo, userId), eq(users.isActive, true)];
+      if (filters.activeOfficeId) {
+        teamConditions.push(eq(users.officeId, filters.activeOfficeId));
+      }
+      const teamRows = await tenantDb
+        .select({ id: users.id })
+        .from(users)
+        .where(and(...teamConditions));
+      const teamUserIds = teamRows.map((user) => user.id);
+      conditions.push(teamUserIds.length > 0 ? inArray(leads.assignedRepId, teamUserIds) : sql`false`);
+    }
+
+    if (filters.assignedRepId) {
       conditions.push(eq(leads.assignedRepId, filters.assignedRepId));
     }
 
@@ -1213,6 +1243,7 @@ export function createLeadService(
         sourceDetail: sourceWrite.sourceDetail,
         description: input.description ?? null,
         officeCode,
+        office: officeCode,
         projectType,
         projectTypeId: input.projectTypeId ?? null,
         bidDueDate: normalizedBidDueDate,
@@ -1299,6 +1330,29 @@ export function createLeadService(
 
     if (!existing.isActive && !isConvertedLead) {
       throw new AppError(409, "Hidden lead records are read-only");
+    }
+
+    const normalizedOfficeCode = input.officeCode !== undefined
+      ? assertValidOfficeCode(input.officeCode)
+      : undefined;
+    const normalizedOffice = input.office !== undefined
+      ? assertValidOfficeCode(input.office)
+      : undefined;
+
+    if (
+      normalizedOfficeCode !== undefined &&
+      existing.officeCode != null &&
+      normalizedOfficeCode !== existing.officeCode
+    ) {
+      throw new AppError(422, "office_code cannot be changed once set", "LEAD_OFFICE_IMMUTABLE");
+    }
+
+    if (
+      normalizedOffice !== undefined &&
+      existing.office != null &&
+      normalizedOffice !== existing.office
+    ) {
+      throw new AppError(422, "office cannot be changed once set", "LEAD_OFFICE_IMMUTABLE");
     }
 
     if (isConvertedLead) {
@@ -1466,7 +1520,7 @@ export function createLeadService(
     }
 
     if (input.officeCode !== undefined) {
-      updates.officeCode = assertValidOfficeCode(input.officeCode);
+      updates.officeCode = normalizedOfficeCode;
     }
 
     if (input.name !== undefined) updates.name = input.name;
@@ -1618,9 +1672,17 @@ export function createLeadService(
     userRole: string,
     userId: string
   ) {
+    if (userRole !== "admin") {
+      throw new AppError(403, "Only admins can delete leads");
+    }
+
     const existing = await getLeadById(tenantDb, leadId, userRole, userId);
     if (!existing) {
       throw new AppError(404, "Lead not found");
+    }
+
+    if (!existing.isActive) {
+      return null;
     }
 
     const [lead] = await tenantDb

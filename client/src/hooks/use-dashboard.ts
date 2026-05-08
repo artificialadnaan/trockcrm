@@ -239,6 +239,7 @@ export function useRepDashboard(options: { range?: ActivityRange } = {}) {
   const [data, setData] = useState<RepDashboardData | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [fetchedAt, setFetchedAt] = useState<Date | null>(null);
 
   const fetch = useCallback(async () => {
     setLoading(true);
@@ -247,6 +248,7 @@ export function useRepDashboard(options: { range?: ActivityRange } = {}) {
       const qs = range ? `?range=${encodeURIComponent(range)}` : "";
       const res = await api<{ data: RepDashboardData }>(`/dashboard/rep${qs}`);
       setData(normalizeRepDashboardData(res.data));
+      setFetchedAt(new Date());
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : "Failed to load dashboard");
     } finally {
@@ -258,5 +260,5 @@ export function useRepDashboard(options: { range?: ActivityRange } = {}) {
     fetch();
   }, [fetch]);
 
-  return { data, loading, error, refetch: fetch };
+  return { data, loading, error, fetchedAt, refetch: fetch };
 }

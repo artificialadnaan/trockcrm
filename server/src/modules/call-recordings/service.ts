@@ -329,10 +329,19 @@ export async function softDelete(
   recordingId: string,
   userId: string,
   role = "admin"
-) {
+): Promise<typeof callRecordings.$inferSelect | null> {
   if (role !== "admin") {
     throw new AppError(403, "Only admins can delete call recordings.");
   }
+
+  const [existing] = await tenantDb
+    .select()
+    .from(callRecordings)
+    .where(eq(callRecordings.id, recordingId))
+    .limit(1);
+
+  if (!existing) throw new AppError(404, "Call recording not found.");
+  if (existing.deletedAt) return null;
 
   const [recording] = await tenantDb
     .update(callRecordings)

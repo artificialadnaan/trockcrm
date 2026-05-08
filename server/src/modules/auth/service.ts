@@ -213,6 +213,11 @@ function deterministicUuid(seed: string): string {
   return `${digest.slice(0, 8)}-${digest.slice(8, 12)}-${digest.slice(12, 16)}-${digest.slice(16, 20)}-${digest.slice(20, 32)}`;
 }
 
+function leadOfficeForDemoOfficeSlug(officeSlug: string): "dfw" | "atl" {
+  const normalized = officeSlug.trim().toLowerCase();
+  return normalized === "atl" || normalized === "atlanta" ? "atl" : "dfw";
+}
+
 export async function ensureDevDemoWorkspace(
   userId: string,
   preferredOfficeSlug = "dallas"
@@ -236,6 +241,7 @@ export async function ensureDevDemoWorkspace(
   }
 
   const schemaName = `office_${office.slug}`;
+  const leadOffice = leadOfficeForDemoOfficeSlug(office.slug);
   const client = await pool.connect();
 
   const companyId = deterministicUuid(`${schemaName}:demo-company`);
@@ -431,11 +437,11 @@ export async function ensureDevDemoWorkspace(
       `
         INSERT INTO leads (
           id, company_id, property_id, primary_contact_id, name, stage_id, assigned_rep_id, status,
-          source, description, last_activity_at, stage_entered_at, is_active
+          source, office, office_code, description, last_activity_at, stage_entered_at, is_active
         )
         VALUES
-          ($1, $2, $3, $4, $5, $6, $7, 'open', $8, $9, $10, $11, true),
-          ($12, $2, $3, $4, $13, $6, $7, 'open', $14, $15, $16, $17, true)
+          ($1, $2, $3, $4, $5, $6, $7, 'open', $8, $18, $18, $9, $10, $11, true),
+          ($12, $2, $3, $4, $13, $6, $7, 'open', $14, $18, $18, $15, $16, $17, true)
         ON CONFLICT (id) DO UPDATE
         SET company_id = EXCLUDED.company_id,
             property_id = EXCLUDED.property_id,
@@ -469,13 +475,14 @@ export async function ensureDevDemoWorkspace(
         "Fresh lead seeded to show active lead-stage pipeline.",
         todayIso,
         freshLeadEnteredIso,
+        leadOffice,
       ]
     );
 
     await client.query(
       `
-        INSERT INTO leads (id, company_id, property_id, primary_contact_id, name, stage_id, assigned_rep_id, status, source, description, last_activity_at, stage_entered_at, is_active, converted_at)
-        VALUES ($1, $2, $3, $4, $5, $6, $7, 'converted', $8, $9, $10, $11, false, $12)
+        INSERT INTO leads (id, company_id, property_id, primary_contact_id, name, stage_id, assigned_rep_id, status, source, office, office_code, description, last_activity_at, stage_entered_at, is_active, converted_at)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, 'converted', $8, $13, $13, $9, $10, $11, false, $12)
         ON CONFLICT (id) DO UPDATE
         SET status = 'converted',
             converted_at = EXCLUDED.converted_at,
@@ -495,6 +502,7 @@ export async function ensureDevDemoWorkspace(
         lastMonthIso,
         lastMonthIso,
         lastMonthIso,
+        leadOffice,
       ]
     );
 

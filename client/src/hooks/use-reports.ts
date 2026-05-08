@@ -15,6 +15,49 @@ export interface SavedReport {
   updatedAt: string;
 }
 
+export type ReportFrequency = "daily" | "weekly" | "biweekly" | "monthly" | "quarterly";
+export type ReportRunStatus = "queued" | "running" | "succeeded" | "failed" | "not_implemented";
+
+export interface ReportRecipient {
+  user_id?: string;
+  email?: string;
+}
+
+export interface ReportSchedule {
+  id: string;
+  reportId: string;
+  reportName: string;
+  frequency: ReportFrequency;
+  cronExpr: string;
+  recipients: ReportRecipient[];
+  nextRunAt: string;
+  lastRunAt: string | null;
+  ownerId: string;
+  isActive: boolean;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface ReportRun {
+  id: string;
+  reportId: string;
+  reportName: string;
+  scheduleId: string | null;
+  startedAt: string;
+  finishedAt: string | null;
+  status: ReportRunStatus;
+  resultUri: string | null;
+  error: string | null;
+  runtimeMs: number | null;
+}
+
+export interface CreateReportScheduleInput {
+  frequency: ReportFrequency;
+  cronExpr: string;
+  recipients?: ReportRecipient[];
+  nextRunAt: string;
+}
+
 export interface ReportConfig {
   entity: "deals" | "contacts" | "activities" | "tasks";
   filters: Array<{
@@ -323,6 +366,77 @@ export async function deleteSavedReport(reportId: string) {
   return api<{ success: boolean }>(`/reports/saved/${reportId}`, {
     method: "DELETE",
   });
+}
+
+export async function listReportSchedules() {
+  return api<{ schedules: ReportSchedule[] }>("/reports/schedules");
+}
+
+export async function listReportRuns() {
+  return api<{ runs: ReportRun[] }>("/reports/runs");
+}
+
+export async function createReportRun(reportId: string) {
+  return api<{ run: ReportRun }>(`/reports/saved/${reportId}/runs`, {
+    method: "POST",
+  });
+}
+
+export async function createReportSchedule(reportId: string, input: CreateReportScheduleInput) {
+  return api<{ schedule: ReportSchedule }>(`/reports/saved/${reportId}/schedules`, {
+    method: "POST",
+    json: input,
+  });
+}
+
+export function useReportSchedules() {
+  const [schedules, setSchedules] = useState<ReportSchedule[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+
+  const fetchSchedules = useCallback(async () => {
+    setLoading(true);
+    setError(null);
+    try {
+      const data = await listReportSchedules();
+      setSchedules(data.schedules);
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : "Failed to load report schedules");
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    fetchSchedules();
+  }, [fetchSchedules]);
+
+  return { schedules, loading, error, refetch: fetchSchedules };
+}
+
+export function useReportRuns() {
+  const [runs, setRuns] = useState<ReportRun[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+
+  const fetchRuns = useCallback(async () => {
+    setLoading(true);
+    setError(null);
+    try {
+      const data = await listReportRuns();
+      setRuns(data.runs);
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : "Failed to load report runs");
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    fetchRuns();
+  }, [fetchRuns]);
+
+  return { runs, loading, error, refetch: fetchRuns };
 }
 
 /** Execute a locked report by its reportType */

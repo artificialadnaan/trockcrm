@@ -3,6 +3,8 @@ import { drizzle } from "drizzle-orm/node-postgres";
 import * as schema from "@trock-crm/shared/schema";
 import { pool } from "../../db.js";
 import { AppError } from "../../middleware/error-handler.js";
+import { requireAdmin } from "../../middleware/rbac.js";
+import { requestAuditContext, writeSoftDeleteAuditLog } from "../../lib/soft-delete-audit.js";
 import { LeadStageTransitionError } from "./stage-transition-service.js";
 import {
   createLead,
@@ -86,6 +88,10 @@ function readStageInput(req: Parameters<typeof router.get>[1] extends never ? ne
   };
 }
 
+function readListScope(value: unknown): "mine" | "team" | "all" {
+  return value === "mine" || value === "team" || value === "all" ? value : "all";
+}
+
 // GET /api/leads
 router.get("/", async (req, res, next) => {
   try {
@@ -96,6 +102,8 @@ router.get("/", async (req, res, next) => {
         companyId: req.query.companyId as string | undefined,
         propertyId: req.query.propertyId as string | undefined,
         assignedRepId: req.query.assignedRepId as string | undefined,
+        scope: readListScope(req.query.scope),
+        activeOfficeId: req.user!.activeOfficeId ?? req.user!.officeId,
         status: req.query.status as "open" | "converted" | "disqualified" | undefined,
         isActive:
           req.query.isActive === "all"
@@ -451,12 +459,21 @@ router.post("/:id/convert", async (req, res, next) => {
   }
 });
 
-// DELETE /api/leads/:id
-router.delete("/:id", async (req, res, next) => {
+// DELETE /api/leads/:id — admin-only soft-delete
+router.delete("/:id", requireAdmin, async (req, res, next) => {
   try {
-    await deleteLead(req.tenantDb!, req.params.id, req.user!.role, req.user!.id);
+    const leadId = req.params.id as string;
+    const lead = await deleteLead(req.tenantDb!, leadId, req.user!.role, req.user!.id);
+    if (lead) {
+      await writeSoftDeleteAuditLog(req.tenantDb!, {
+        actorUserId: req.user!.id,
+        entityType: "lead",
+        entityId: leadId,
+        ...requestAuditContext(req),
+      });
+    }
     await req.commitTransaction!();
-    res.json({ success: true });
+    res.status(204).send();
   } catch (err) {
     next(err);
   }

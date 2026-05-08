@@ -8,8 +8,12 @@ import {
   numeric,
   timestamp,
   index,
+  pgEnum,
 } from "drizzle-orm/pg-core";
+import { PROPERTY_TYPES } from "../../types/enums.js";
 import { companies } from "./companies.js";
+
+export const propertyTypeEnum = pgEnum("property_type", PROPERTY_TYPES);
 
 export const properties = pgTable(
   "properties",
@@ -21,10 +25,16 @@ export const properties = pgTable(
     city: varchar("city", { length: 255 }),
     state: varchar("state", { length: 2 }),
     zip: varchar("zip", { length: 10 }),
+    type: propertyTypeEnum("type"),
     buildYear: integer("build_year"),
     unitCount: integer("unit_count"),
+    floors: integer("floors"),
+    roofArea: integer("roof_area"),
     lat: numeric("lat", { precision: 10, scale: 7 }),
     lng: numeric("lng", { precision: 10, scale: 7 }),
+    lastActivityAt: timestamp("last_activity_at", { withTimezone: true }),
+    procoreId: text("procore_id"),
+    companycamId: text("companycam_id"),
     notes: text("notes"),
     isTestData: boolean("is_test_data").default(false).notNull(),
     isActive: boolean("is_active").default(true).notNull(),
@@ -34,5 +44,7 @@ export const properties = pgTable(
   (table) => [
     index("properties_company_id_idx").on(table.companyId),
     index("properties_company_name_idx").on(table.companyId, table.name),
+    index("properties_type_idx").on(table.type),
+    index("properties_last_activity_idx").on(table.lastActivityAt),
   ]
 );

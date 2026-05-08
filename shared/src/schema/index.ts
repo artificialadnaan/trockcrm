@@ -8,6 +8,12 @@ export { projectTypeConfig } from "./public/project-type-config.js";
 export { projectTypeQuestionNodes } from "./public/project-type-question-nodes.js";
 export { regionConfig } from "./public/region-config.js";
 export { savedReports, reportVisibilityEnum, reportEntityEnum } from "./public/saved-reports.js";
+export { reportSchedules, reportFrequencyEnum } from "./public/report-schedules.js";
+export { reportRuns, reportRunStatusEnum } from "./public/report-runs.js";
+export {
+  repPerformanceSnapshots,
+  perfPeriodKindEnum,
+} from "./public/rep-performance-snapshots.js";
 export { procoreSyncControls, procoreSyncModeEnum } from "./public/procore-sync-controls.js";
 export { procoreReconciliationState, procoreReconciliationStatusEnum } from "./public/procore-reconciliation-state.js";
 export { procoreSyncState, procoreEntityTypeEnum, syncDirectionEnum, syncStatusEnum } from "./public/procore-sync-state.js";
@@ -71,10 +77,11 @@ export {
   estimateMarketAdjustmentRules,
   estimateDealMarketOverrides,
 } from "./tenant/estimate-markets.js";
-export { companies } from "./tenant/companies.js";
-export { properties } from "./tenant/properties.js";
-export { contacts, contactCategoryEnum } from "./tenant/contacts.js";
+export { companies, companyIndustryEnum, companyVerificationStatusEnum } from "./tenant/companies.js";
+export { properties, propertyTypeEnum } from "./tenant/properties.js";
+export { contacts, contactCategoryEnum, contactRoleEnum } from "./tenant/contacts.js";
 export { contactDealAssociations } from "./tenant/contact-deal-associations.js";
+export { dealContacts, dealContactRoleEnum } from "./tenant/deal-contacts.js";
 export {
   leads,
   leadBudgetStatusEnum,
@@ -82,6 +89,7 @@ export {
   leadStatusEnum,
   leadPipelineTypeEnum,
   leadDisqualificationReasonEnum,
+  leadOfficeEnum,
 } from "./tenant/leads.js";
 export { leadStageHistory } from "./tenant/lead-stage-history.js";
 export {
@@ -98,6 +106,7 @@ export {
   directoryMergeStatusEnum,
 } from "./tenant/directory-merge-queue.js";
 export { emails, emailDirectionEnum } from "./tenant/emails.js";
+export { emailLinks } from "./tenant/email-links.js";
 export { emailThreadBindings } from "./tenant/email-thread-bindings.js";
 export { activities, activityTypeEnum, activitySourceEntityEnum } from "./tenant/activities.js";
 export {
@@ -110,6 +119,8 @@ export {
   photoCategoryEnum,
   procorePhotoSyncStatusEnum,
 } from "./tenant/files.js";
+export { fileLinks } from "./tenant/file-links.js";
+export { userStarredFiles } from "./tenant/user-starred-files.js";
 export { callRecordings } from "./tenant/call-recordings.js";
 export {
   estimateSourceDocuments,

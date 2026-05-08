@@ -1,15 +1,18 @@
 import { Router } from "express";
 import { AppError } from "../../middleware/error-handler.js";
-import { createProperty, getPropertyDetail, listProperties, updateProperty } from "./service.js";
+import { requireAdmin } from "../../middleware/rbac.js";
+import { requestAuditContext, writeSoftDeleteAuditLog } from "../../lib/soft-delete-audit.js";
+import { createProperty, deleteProperty, getPropertyDetail, listProperties, updateProperty } from "./service.js";
 
 const router = Router();
 
 router.get("/", async (req, res, next) => {
   try {
-    const { search, companyId, page, limit, isActive } = req.query as Record<string, string>;
+    const { search, companyId, type, page, limit, isActive } = req.query as Record<string, string>;
     const result = await listProperties(req.tenantDb!, {
       search,
       companyId,
+      type,
       page: page ? parseInt(page, 10) : 1,
       limit: limit ? parseInt(limit, 10) : 100,
       isActive: isActive === "false" ? false : true,
@@ -59,6 +62,25 @@ router.patch("/:id", async (req, res, next) => {
     }
     await req.commitTransaction!();
     res.json({ property });
+  } catch (err) {
+    next(err);
+  }
+});
+
+router.delete("/:id", requireAdmin, async (req, res, next) => {
+  try {
+    const propertyId = req.params.id as string;
+    const property = await deleteProperty(req.tenantDb!, propertyId);
+    if (property) {
+      await writeSoftDeleteAuditLog(req.tenantDb!, {
+        actorUserId: req.user!.id,
+        entityType: "property",
+        entityId: propertyId,
+        ...requestAuditContext(req),
+      });
+    }
+    await req.commitTransaction!();
+    res.status(204).send();
   } catch (err) {
     next(err);
   }

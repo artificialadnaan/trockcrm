@@ -4,9 +4,8 @@ import {
   auditLog,
   aiDisconnectCases,
   deals,
-  dealPaymentEvents,
+  dealSignedCommissions,
   leads,
-  activities,
   duplicateQueue,
   jobQueue,
   procoreSyncState,
@@ -38,6 +37,11 @@ import { getMyCleanupQueue } from "../admin/cleanup-queue-service.js";
 import { getMigrationSummary } from "../migration/service.js";
 
 type TenantDb = NodePgDatabase<typeof schema>;
+type ExecuteRows<T> = { rows: T[] } | T[];
+
+function rowsFromExecute<T>(result: ExecuteRows<T>): T[] {
+  return Array.isArray(result) ? result : result.rows;
+}
 // Intentionally includes canonical stage-v2 slugs plus historical aliases so
 // dashboard counts stay accurate while legacy rows still exist during rollout.
 const ESTIMATING_PROGRESS_STAGE_SLUGS = [
@@ -270,10 +274,25 @@ export interface StaleLeadDashboardRow {
   repName: string;
   daysInStage: number;
   pipelineType?: "normal" | "service";
-  locationLabel?: string;
+  locationLabel?: string | null;
   estimatedValue?: number;
   staleThresholdDays?: number;
   daysPastDue?: number;
+}
+
+interface StaleLeadWatchlistSqlRow extends Record<string, unknown> {
+  lead_id: string;
+  lead_name: string;
+  company_name: string;
+  property_name: string;
+  stage_name: string;
+  rep_name: string;
+  days_in_stage: number | string | null;
+  pipeline_type: "normal" | "service" | null;
+  location_label: string | null;
+  estimated_value: number | string | null;
+  stale_threshold_days: number | string | null;
+  days_past_due: number | string | null;
 }
 
 export interface DashboardCrmOwnedProgressionRow {
@@ -305,11 +324,13 @@ async function getStaleLeadWatchlist(
   tenantDb: TenantDb,
   options: { repId?: string } = {}
 ): Promise<StaleLeadDashboardRow[]> {
+  // Current-state operational watchlist: intentionally anchored to wall-clock NOW(),
+  // not the A5a rep-performance snapshot period boundary.
   const repFilter = options.repId
     ? sql`AND l.assigned_rep_id = ${options.repId}`
     : sql``;
 
-  const result = await tenantDb.execute(sql`
+  const result = await tenantDb.execute<StaleLeadWatchlistSqlRow>(sql`
     SELECT
       l.id AS lead_id,
       l.name AS lead_name,
@@ -341,8 +362,8 @@ async function getStaleLeadWatchlist(
     ORDER BY days_in_stage DESC, l.updated_at ASC
   `);
 
-  const rows = (result as any).rows ?? result;
-  return rows.map((row: any) => ({
+  const rows = rowsFromExecute(result);
+  return rows.map((row) => ({
     leadId: row.lead_id,
     leadName: row.lead_name,
     companyName: row.company_name,
@@ -427,6 +448,8 @@ async function getDownstreamBottlenecks(
   tenantDb: TenantDb,
   options: { repId?: string } = {}
 ): Promise<DashboardDownstreamBottleneckRow[]> {
+  // Current-state operational bottlenecks: intentionally anchored to wall-clock NOW(),
+  // not the A5a rep-performance snapshot period boundary.
   const repFilter = options.repId
     ? sql`AND d.assigned_rep_id = ${options.repId}`
     : sql``;
@@ -712,9 +735,14 @@ type CommissionDealRollup = {
   propertyName: string | null;
   paidRevenue: number;
   commissionableMargin: number;
+  earnedCommission: number;
   paymentCount: number;
   lastPaidAt: string | null;
 };
+
+function dashboardEarnedSignedDateSql() {
+  return sql`COALESCE(d.contract_signed_at::date, d.contract_signed_date, dsc.contract_signed_date_at_signing)`;
+}
 
 async function getCommissionConfig(tenantDb: TenantDb, userId: string): Promise<CommissionConfig> {
   const result = await tenantDb.execute(sql`
@@ -749,96 +777,40 @@ async function getCommissionConfig(tenantDb: TenantDb, userId: string): Promise<
 async function getDirectCommissionMetrics(
   tenantDb: TenantDb,
   repId: string,
-  config: CommissionConfig
+  _config: CommissionConfig,
+  fromDate: string,
+  toDate: string
 ): Promise<DirectCommissionMetrics> {
-  const windowMonths = Math.max(1, config.newCustomerWindowMonths);
-
   const result = await tenantDb.execute(sql`
-    WITH payment_events AS (
-      SELECT
-        pe.id,
-        pe.paid_at,
-        d.company_id,
-        CASE
-          WHEN pe.is_credit_memo THEN -ABS(pe.gross_revenue_amount::numeric)
-          ELSE ABS(pe.gross_revenue_amount::numeric)
-        END AS gross_revenue_amount,
-        CASE
-          WHEN pe.is_credit_memo THEN -ABS(COALESCE(pe.gross_margin_amount, pe.gross_revenue_amount * ${String(config.estimatedMarginRate)}::numeric)::numeric)
-          ELSE ABS(COALESCE(pe.gross_margin_amount, pe.gross_revenue_amount * ${String(config.estimatedMarginRate)}::numeric)::numeric)
-        END AS gross_margin_amount,
-        (pe.gross_margin_amount IS NULL) AS used_estimated_margin
-      FROM ${dealPaymentEvents} pe
-      JOIN ${deals} d ON d.id = pe.deal_id
-      WHERE d.assigned_rep_id = ${repId}
-        AND pe.paid_at >= NOW() - INTERVAL '12 months'
-    ),
-    scored_events AS (
-      SELECT
-        ev.*,
-        CASE
-          WHEN ev.gross_revenue_amount = 0 THEN NULL
-          ELSE (ABS(ev.gross_margin_amount) / NULLIF(ABS(ev.gross_revenue_amount), 0))
-        END AS margin_percent,
-        NOT EXISTS (
-          SELECT 1
-          FROM ${activities} a
-          WHERE a.company_id = ev.company_id
-            AND a.occurred_at >= ev.paid_at - (${windowMonths}::text || ' months')::interval
-            AND a.occurred_at < ev.paid_at
-        ) AS is_new_customer
-      FROM payment_events ev
-    ),
-    eligible_events AS (
-      SELECT *
-      FROM scored_events
-      WHERE gross_revenue_amount < 0
-        OR margin_percent IS NULL
-        OR margin_percent >= ${String(config.minMarginPercent)}::numeric
-    ),
-    low_margin_events AS (
-      SELECT *
-      FROM scored_events
-      WHERE gross_revenue_amount >= 0
-        AND margin_percent IS NOT NULL
-        AND margin_percent < ${String(config.minMarginPercent)}::numeric
-    )
     SELECT
-      COALESCE((SELECT SUM(gross_revenue_amount) FROM eligible_events), 0)::numeric AS rolling_paid_revenue,
-      COALESCE((SELECT SUM(gross_margin_amount) FROM eligible_events), 0)::numeric AS rolling_commissionable_margin,
-      COALESCE((SELECT SUM(gross_revenue_amount) FROM eligible_events WHERE is_new_customer), 0)::numeric AS new_customer_revenue,
-      COALESCE((SELECT COUNT(*) FROM eligible_events WHERE used_estimated_margin), 0)::int AS estimated_payment_count,
-      COALESCE((SELECT SUM(gross_revenue_amount) FROM low_margin_events), 0)::numeric AS excluded_low_margin_revenue
+      COALESCE(SUM(dsc.source_value_amount), 0)::numeric AS source_value_amount,
+      COALESCE(SUM(dsc.amount), 0)::numeric AS earned_commission
+    FROM ${dealSignedCommissions} dsc
+    JOIN ${deals} d ON d.id = dsc.deal_id
+    JOIN ${pipelineStageConfig} psc ON psc.id = d.stage_id
+    WHERE dsc.rep_user_id = ${repId}
+      AND COALESCE(d.is_test_data, false) = false
+      AND ${dashboardEarnedSignedDateSql()} IS NOT NULL
+      AND psc.slug NOT IN ('lost', 'production_lost', 'service_lost', 'closed_lost')
+      AND ${dashboardEarnedSignedDateSql()} >= ${fromDate}
+      AND ${dashboardEarnedSignedDateSql()} <= ${toDate}
   `);
 
   const rows = (result as any).rows ?? result;
   const row = rows[0] ?? {};
-  const rollingPaidRevenue = Number(row.rolling_paid_revenue ?? 0);
-  const rollingCommissionableMargin = Number(row.rolling_commissionable_margin ?? 0);
-  const newCustomerRevenue = Number(row.new_customer_revenue ?? 0);
-  const estimatedPaymentCount = Number(row.estimated_payment_count ?? 0);
-  const excludedLowMarginRevenue = Number(row.excluded_low_margin_revenue ?? 0);
-  const newCustomerShare = rollingPaidRevenue > 0 ? newCustomerRevenue / rollingPaidRevenue : 0;
-  const meetsNewCustomerShare = rollingPaidRevenue === 0 ? true : newCustomerShare >= config.newCustomerShareFloor;
-  const floorRemaining = Math.max(config.rollingFloor - rollingPaidRevenue, 0);
-  const eligibleRevenueAfterFloor = Math.max(rollingPaidRevenue - config.rollingFloor, 0);
-  const realizedMarginRate =
-    rollingPaidRevenue > 0 ? rollingCommissionableMargin / rollingPaidRevenue : 0;
-  const eligibleMarginAfterFloor = Math.max(eligibleRevenueAfterFloor * realizedMarginRate, 0);
-  const directEarnedCommission = Number(
-    (eligibleMarginAfterFloor * config.commissionRate).toFixed(2)
-  );
+  const sourceValueAmount = Number(row.source_value_amount ?? 0);
+  const directEarnedCommission = Number(Number(row.earned_commission ?? 0).toFixed(2));
 
   return {
-    rollingPaidRevenue,
-    rollingCommissionableMargin,
-    newCustomerRevenue,
-    newCustomerShare,
-    meetsNewCustomerShare,
-    estimatedPaymentCount,
-    excludedLowMarginRevenue,
-    floorRemaining,
-    eligibleMarginAfterFloor,
+    rollingPaidRevenue: sourceValueAmount,
+    rollingCommissionableMargin: sourceValueAmount,
+    newCustomerRevenue: 0,
+    newCustomerShare: 0,
+    meetsNewCustomerShare: true,
+    estimatedPaymentCount: 0,
+    excludedLowMarginRevenue: 0,
+    floorRemaining: 0,
+    eligibleMarginAfterFloor: sourceValueAmount,
     directEarnedCommission,
   };
 }
@@ -846,69 +818,34 @@ async function getDirectCommissionMetrics(
 async function getCommissionDealRollups(
   tenantDb: TenantDb,
   repId: string,
-  config: CommissionConfig
+  _config: CommissionConfig,
+  fromDate: string,
+  toDate: string
 ): Promise<CommissionDealRollup[]> {
-  const windowMonths = Math.max(1, config.newCustomerWindowMonths);
-
   const result = await tenantDb.execute(sql`
-    WITH payment_events AS (
-      SELECT
-        pe.id,
-        pe.deal_id,
-        pe.paid_at,
-        d.company_id,
-        CASE
-          WHEN pe.is_credit_memo THEN -ABS(pe.gross_revenue_amount::numeric)
-          ELSE ABS(pe.gross_revenue_amount::numeric)
-        END AS gross_revenue_amount,
-        CASE
-          WHEN pe.is_credit_memo THEN -ABS(COALESCE(pe.gross_margin_amount, pe.gross_revenue_amount * ${String(config.estimatedMarginRate)}::numeric)::numeric)
-          ELSE ABS(COALESCE(pe.gross_margin_amount, pe.gross_revenue_amount * ${String(config.estimatedMarginRate)}::numeric)::numeric)
-        END AS gross_margin_amount
-      FROM ${dealPaymentEvents} pe
-      JOIN ${deals} d ON d.id = pe.deal_id
-      WHERE d.assigned_rep_id = ${repId}
-        AND pe.paid_at >= NOW() - INTERVAL '12 months'
-    ),
-    scored_events AS (
-      SELECT
-        ev.*,
-        CASE
-          WHEN ev.gross_revenue_amount = 0 THEN NULL
-          ELSE (ABS(ev.gross_margin_amount) / NULLIF(ABS(ev.gross_revenue_amount), 0))
-        END AS margin_percent,
-        NOT EXISTS (
-          SELECT 1
-          FROM ${activities} a
-          WHERE a.company_id = ev.company_id
-            AND a.occurred_at >= ev.paid_at - (${windowMonths}::text || ' months')::interval
-            AND a.occurred_at < ev.paid_at
-        ) AS is_new_customer
-      FROM payment_events ev
-    ),
-    eligible_events AS (
-      SELECT *
-      FROM scored_events
-      WHERE gross_revenue_amount < 0
-        OR margin_percent IS NULL
-        OR margin_percent >= ${String(config.minMarginPercent)}::numeric
-    )
     SELECT
       d.id AS deal_id,
       d.deal_number AS deal_number,
       d.name AS deal_name,
       c.name AS company_name,
       p.name AS property_name,
-      COALESCE(SUM(ev.gross_revenue_amount), 0)::numeric AS paid_revenue,
-      COALESCE(SUM(ev.gross_margin_amount), 0)::numeric AS commissionable_margin,
-      COUNT(*)::int AS payment_count,
-      MAX(ev.paid_at) AS last_paid_at
-    FROM eligible_events ev
-    JOIN ${deals} d ON d.id = ev.deal_id
+      dsc.source_value_amount::numeric AS paid_revenue,
+      dsc.source_value_amount::numeric AS commissionable_margin,
+      dsc.amount::numeric AS earned_commission,
+      0::int AS payment_count,
+      ${dashboardEarnedSignedDateSql()} AS last_paid_at
+    FROM ${dealSignedCommissions} dsc
+    JOIN ${deals} d ON d.id = dsc.deal_id
+    JOIN ${pipelineStageConfig} psc ON psc.id = d.stage_id
     LEFT JOIN ${companies} c ON c.id = d.company_id
     LEFT JOIN ${properties} p ON p.id = d.property_id
-    GROUP BY d.id, d.deal_number, d.name, c.name, p.name
-    ORDER BY MAX(ev.paid_at) DESC, d.name ASC
+    WHERE dsc.rep_user_id = ${repId}
+      AND COALESCE(d.is_test_data, false) = false
+      AND ${dashboardEarnedSignedDateSql()} IS NOT NULL
+      AND psc.slug NOT IN ('lost', 'production_lost', 'service_lost', 'closed_lost')
+      AND ${dashboardEarnedSignedDateSql()} >= ${fromDate}
+      AND ${dashboardEarnedSignedDateSql()} <= ${toDate}
+    ORDER BY ${dashboardEarnedSignedDateSql()} DESC, d.name ASC
   `);
 
   const rows = (result as any).rows ?? result;
@@ -920,8 +857,9 @@ async function getCommissionDealRollups(
     propertyName: row.property_name ? String(row.property_name) : null,
     paidRevenue: Number(row.paid_revenue ?? 0),
     commissionableMargin: Number(row.commissionable_margin ?? 0),
+    earnedCommission: Number(row.earned_commission ?? 0),
     paymentCount: Number(row.payment_count ?? 0),
-    lastPaidAt: row.last_paid_at ? new Date(String(row.last_paid_at)).toISOString() : null,
+    lastPaidAt: row.last_paid_at ? new Date(`${String(row.last_paid_at).slice(0, 10)}T00:00:00.000Z`).toISOString() : null,
   }));
 }
 
@@ -929,37 +867,8 @@ function allocateDealCommissions(
   rollups: CommissionDealRollup[],
   direct: DirectCommissionMetrics
 ): RepCommissionDealEarning[] {
-  if (rollups.length === 0) return [];
-  if (direct.directEarnedCommission <= 0 || direct.rollingCommissionableMargin <= 0) {
-    return [];
-  }
-
-  const distributable = direct.directEarnedCommission;
-  const totalMargin = direct.rollingCommissionableMargin;
-
-  const weighted = rollups.map((rollup) => {
-    const proportionalShare = (rollup.commissionableMargin / totalMargin) * distributable;
-    return {
-      rollup,
-      earnedCommission: Number(proportionalShare.toFixed(2)),
-    };
-  });
-
-  // Keep rounded deal earnings aligned to total direct earned commission.
-  const roundedTotal = Number(
-    weighted.reduce((sum, row) => sum + row.earnedCommission, 0).toFixed(2)
-  );
-  const remainder = Number((distributable - roundedTotal).toFixed(2));
-  if (Math.abs(remainder) > 0 && weighted.length > 0) {
-    weighted[0].earnedCommission = Number((weighted[0].earnedCommission + remainder).toFixed(2));
-  }
-
-  return weighted
-    .filter((row) => row.earnedCommission > 0)
-    .map((row) => ({
-      ...row.rollup,
-      earnedCommission: row.earnedCommission,
-    }));
+  if (direct.directEarnedCommission <= 0) return [];
+  return rollups.filter((rollup) => rollup.earnedCommission > 0);
 }
 
 async function getRepPotentialRevenue(tenantDb: TenantDb, repId: string): Promise<number> {
@@ -984,37 +893,36 @@ async function getRepPotentialRevenue(tenantDb: TenantDb, repId: string): Promis
 async function getOverrideEarnedCommission(
   tenantDb: TenantDb,
   managerId: string,
-  managerOverrideRate: number
+  managerOverrideRate: number,
+  fromDate: string,
+  toDate: string
 ): Promise<number> {
   if (managerOverrideRate <= 0) return 0;
 
-  const subordinateResult = await tenantDb.execute(sql`
-    SELECT u.id AS rep_id
+  const result = await tenantDb.execute(sql`
+    SELECT COALESCE(SUM(dsc.source_value_amount * ${String(managerOverrideRate)}::numeric), 0)::numeric AS override_earned
     FROM ${users} u
+    JOIN ${dealSignedCommissions} dsc ON dsc.rep_user_id = u.id
+    JOIN ${deals} d ON d.id = dsc.deal_id
+    JOIN ${pipelineStageConfig} psc ON psc.id = d.stage_id
     WHERE u.is_active = true
       AND u.role = 'rep'
       AND u.reports_to = ${managerId}
+      AND COALESCE(d.is_test_data, false) = false
+      AND ${dashboardEarnedSignedDateSql()} IS NOT NULL
+      AND psc.slug NOT IN ('lost', 'production_lost', 'service_lost', 'closed_lost')
+      AND ${dashboardEarnedSignedDateSql()} >= ${fromDate}
+      AND ${dashboardEarnedSignedDateSql()} <= ${toDate}
   `);
-  const subordinateRows = (subordinateResult as any).rows ?? subordinateResult;
-  if (subordinateRows.length === 0) return 0;
-
-  const earned = await Promise.all(
-    subordinateRows.map(async (row: any) => {
-      const subordinateId = String(row.rep_id);
-      const subordinateConfig = await getCommissionConfig(tenantDb, subordinateId);
-      if (!subordinateConfig.isActive) return 0;
-      const subordinateMetrics = await getDirectCommissionMetrics(tenantDb, subordinateId, subordinateConfig);
-      if (!subordinateMetrics.meetsNewCustomerShare) return 0;
-      return subordinateMetrics.eligibleMarginAfterFloor * managerOverrideRate;
-    })
-  );
-
-  return Number(earned.reduce((sum, value) => sum + value, 0).toFixed(2));
+  const rows = (result as any).rows ?? result;
+  return Number(Number(rows[0]?.override_earned ?? 0).toFixed(2));
 }
 
 async function getRepCommissionSummary(
   tenantDb: TenantDb,
-  repId: string
+  repId: string,
+  fromDate: string,
+  toDate: string
 ): Promise<{ summary: RepCommissionSummary; deals: RepCommissionDealEarning[] }> {
   const rawConfig = await getCommissionConfig(tenantDb, repId);
   const config = rawConfig.isActive
@@ -1023,16 +931,16 @@ async function getRepCommissionSummary(
         ...rawConfig,
         commissionRate: 0,
         rollingFloor: 0,
-      overrideRate: 0,
-    };
-  const direct = await getDirectCommissionMetrics(tenantDb, repId, config);
-  const commissionRollups = await getCommissionDealRollups(tenantDb, repId, config);
+        overrideRate: 0,
+      };
+  const direct = await getDirectCommissionMetrics(tenantDb, repId, config, fromDate, toDate);
+  const commissionRollups = await getCommissionDealRollups(tenantDb, repId, config, fromDate, toDate);
   const potentialRevenue = await getRepPotentialRevenue(tenantDb, repId);
   const potentialMargin = potentialRevenue * config.estimatedMarginRate;
   const potentialEligibleRevenue = Math.max(potentialRevenue - direct.floorRemaining, 0);
   const potentialCommissionBase = potentialEligibleRevenue * config.estimatedMarginRate;
   const potentialCommission = Number((potentialCommissionBase * config.commissionRate).toFixed(2));
-  const overrideEarnedCommission = await getOverrideEarnedCommission(tenantDb, repId, config.overrideRate);
+  const overrideEarnedCommission = await getOverrideEarnedCommission(tenantDb, repId, config.overrideRate, fromDate, toDate);
   const totalEarnedCommission = Number((direct.directEarnedCommission + overrideEarnedCommission).toFixed(2));
   const deals = allocateDealCommissions(commissionRollups, direct);
 
@@ -1062,7 +970,8 @@ async function getRepCommissionSummary(
 }
 
 async function getDirectorRepCommissionRows(
-  tenantDb: TenantDb
+  tenantDb: TenantDb,
+  options: { from: string; to: string }
 ): Promise<DirectorRepCommissionRow[]> {
   const repsResult = await tenantDb.execute(sql`
     SELECT id, display_name
@@ -1076,7 +985,7 @@ async function getDirectorRepCommissionRows(
 
   const rows = await Promise.all(
     reps.map(async (rep: any) => {
-      const { summary } = await getRepCommissionSummary(tenantDb, String(rep.id));
+      const { summary } = await getRepCommissionSummary(tenantDb, String(rep.id), options.from, options.to);
       return {
         repId: String(rep.id),
         repName: String(rep.display_name ?? "Rep"),
@@ -1340,7 +1249,7 @@ export async function getRepDashboard(
     `),
     getRepFunnelBuckets(tenantDb, userId),
     getMyCleanupQueue(tenantDb, userId),
-    getRepCommissionSummary(tenantDb, userId),
+    getRepCommissionSummary(tenantDb, userId, activityRangeStartDate, today),
 
     // Contracts signed YTD + MTD for this rep. Strict semantics: we count
     // signed contracts (contract_signed_at, falling back to contract_signed_date)
@@ -1466,6 +1375,105 @@ export interface RepPerformanceCard {
   staleLeads: number;
 }
 
+export const REP_PERFORMANCE_PERIOD_KINDS = [
+  "mtd",
+  "qtd",
+  "ytd",
+  "last_month",
+  "last_quarter",
+  "last_year",
+  "week_8back",
+] as const;
+
+export type RepPerformancePeriodKind = (typeof REP_PERFORMANCE_PERIOD_KINDS)[number];
+
+export interface ForecastVsGoal {
+  forecast: number;
+  goal: number | null;
+  goalSource: "none" | "manual" | "calculated";
+  percentToGoal: number | null;
+}
+
+export interface RepPerformanceSnapshotRow {
+  repId: string;
+  repName: string;
+  periodKind: RepPerformancePeriodKind;
+  periodStart: string;
+  periodEnd: string;
+  pipelineValue: number;
+  closedValue: number;
+  dealsCount: number;
+  winsCount: number;
+  lossesCount: number;
+  winRate: number;
+  avgDaysToClose: number;
+  atRiskCount: number;
+  staleAccountCount: number;
+  activityTotal: number;
+  calls: number;
+  emails: number;
+  meetings: number;
+  notes: number;
+  sparkline8w: number[];
+  region: string | null;
+  computedAt: string;
+  forecast: number;
+  goal: number | null;
+  goalSource: "none" | "manual" | "calculated";
+  percentToGoal: number | null;
+  forecastVsGoal: ForecastVsGoal;
+  previous: RepPerformancePeriodMetrics | null;
+}
+
+export interface RepPerformancePeriodMetrics {
+  pipelineValue: number;
+  closedValue: number;
+  dealsCount: number;
+  winsCount: number;
+  lossesCount: number;
+  winRate: number;
+  avgDaysToClose: number;
+  atRiskCount: number;
+  staleAccountCount: number;
+  activityTotal: number;
+  calls: number;
+  emails: number;
+  meetings: number;
+  notes: number;
+}
+
+export interface RepPerformanceSnapshotsData {
+  rows: RepPerformanceSnapshotRow[];
+  forecastVsGoal: ForecastVsGoal;
+}
+
+export interface StrategicAlert {
+  id: string;
+  severity: "info" | "warning" | "critical";
+  title: string;
+  detail: string;
+  repId?: string;
+}
+
+export interface AiCoachingPrompt {
+  id: string;
+  repId: string;
+  repName: string;
+  prompt: string;
+  reason: string;
+}
+
+export interface RecentClose {
+  dealId: string;
+  dealNumber: string | null;
+  dealName: string;
+  repId: string | null;
+  repName: string;
+  outcome: "won" | "lost";
+  dealValue: number;
+  closedAt: string;
+}
+
 export interface DirectorDashboardData {
   officeFunnelBuckets: FunnelBucketSummary[];
   repFunnelRows: DirectorRepFunnelRow[];
@@ -1504,6 +1512,20 @@ export interface DirectorDashboardData {
   staleLeads: StaleLeadDashboardRow[];
   crmOwnedProgression: DashboardCrmOwnedProgressionRow[];
   downstreamBottlenecks: DashboardDownstreamBottleneckRow[];
+  atRiskDeals: DashboardDownstreamBottleneckRow[];
+  forecastVsGoal: ForecastVsGoal;
+  activityPulse: Array<{
+    repId: string;
+    repName: string;
+    calls: number;
+    emails: number;
+    meetings: number;
+    notes: number;
+    total: number;
+  }>;
+  strategicAlerts: StrategicAlert[];
+  aiCoachingPrompts: AiCoachingPrompt[];
+  recentCloses: RecentClose[];
   ddVsPipeline: {
     ddValue: number;
     ddCount: number;
@@ -1564,6 +1586,272 @@ async function getRepDealPipelineSummary(
   }));
 }
 
+export function dateOnly(value: unknown): string {
+  if (!value) return "";
+  if (value instanceof Date) {
+    return value.toISOString().slice(0, 10);
+  }
+  return String(value).slice(0, 10);
+}
+
+function normalizeSparkline(value: unknown): number[] {
+  if (!Array.isArray(value)) return [];
+  return value.map((entry) => Number(entry ?? 0));
+}
+
+function buildGoalNullForecast(forecast: number): ForecastVsGoal {
+  return {
+    forecast,
+    goal: null,
+    goalSource: "none",
+    percentToGoal: null,
+  };
+}
+
+export async function getRepPerformanceSnapshots(
+  tenantDb: TenantDb,
+  officeId: string,
+  periodKind: RepPerformancePeriodKind = "mtd"
+): Promise<RepPerformanceSnapshotsData> {
+  const result = await tenantDb.execute(sql`
+    WITH current_snapshots AS (
+      SELECT DISTINCT ON (rps.rep_id, rps.period_kind)
+        rps.*,
+        u.display_name AS rep_name
+      FROM public.rep_performance_snapshots rps
+      JOIN public.users u
+        ON u.id = rps.rep_id
+       AND u.is_active = true
+       AND u.office_id = ${officeId}
+      WHERE rps.period_kind = ${periodKind}
+      ORDER BY rps.rep_id, rps.period_kind, rps.computed_at DESC NULLS LAST, rps.period_start DESC
+    )
+    SELECT
+      current.rep_id,
+      COALESCE(current.rep_name, 'Rep') AS rep_name,
+      current.period_kind,
+      current.period_start,
+      current.period_end,
+      current.pipeline_value::numeric AS pipeline_value,
+      current.closed_value::numeric AS closed_value,
+      current.deals_count::int AS deals_count,
+      current.wins_count::int AS wins_count,
+      current.losses_count::int AS losses_count,
+      current.win_rate::numeric AS win_rate,
+      current.avg_days_to_close::numeric AS avg_days_to_close,
+      current.at_risk_count::int AS at_risk_count,
+      current.stale_account_count::int AS stale_account_count,
+      current.activity_total::int AS activity_total,
+      current.calls::int AS calls,
+      current.emails::int AS emails,
+      current.meetings::int AS meetings,
+      current.notes::int AS notes,
+      current.sparkline_8w,
+      current.region,
+      current.computed_at,
+      previous.pipeline_value::numeric AS previous_pipeline_value,
+      previous.closed_value::numeric AS previous_closed_value,
+      previous.deals_count::int AS previous_deals_count,
+      previous.wins_count::int AS previous_wins_count,
+      previous.losses_count::int AS previous_losses_count,
+      previous.win_rate::numeric AS previous_win_rate,
+      previous.avg_days_to_close::numeric AS previous_avg_days_to_close,
+      previous.at_risk_count::int AS previous_at_risk_count,
+      previous.stale_account_count::int AS previous_stale_account_count,
+      previous.activity_total::int AS previous_activity_total,
+      previous.calls::int AS previous_calls,
+      previous.emails::int AS previous_emails,
+      previous.meetings::int AS previous_meetings,
+      previous.notes::int AS previous_notes
+    FROM current_snapshots current
+    LEFT JOIN LATERAL (
+      SELECT prior.*
+      FROM public.rep_performance_snapshots prior
+      WHERE prior.rep_id = current.rep_id
+        AND prior.period_kind = current.period_kind
+        AND prior.period_start = (
+          CASE
+            WHEN current.period_kind IN ('mtd', 'last_month') THEN current.period_start - INTERVAL '1 month'
+            WHEN current.period_kind IN ('qtd', 'last_quarter') THEN current.period_start - INTERVAL '3 months'
+            WHEN current.period_kind IN ('ytd', 'last_year') THEN current.period_start - INTERVAL '1 year'
+            WHEN current.period_kind = 'week_8back' THEN current.period_start - INTERVAL '56 days'
+            ELSE NULL
+          END
+        )::date
+        AND prior.period_end = (
+          CASE
+            WHEN current.period_kind = 'mtd' THEN current.period_end - INTERVAL '1 month'
+            WHEN current.period_kind = 'qtd' THEN current.period_end - INTERVAL '3 months'
+            WHEN current.period_kind = 'ytd' THEN current.period_end - INTERVAL '1 year'
+            WHEN current.period_kind = 'last_month' THEN date_trunc('month', current.period_end)::date - INTERVAL '1 day'
+            WHEN current.period_kind = 'last_quarter' THEN date_trunc('quarter', current.period_end)::date - INTERVAL '1 day'
+            WHEN current.period_kind = 'last_year' THEN date_trunc('year', current.period_end)::date - INTERVAL '1 day'
+            WHEN current.period_kind = 'week_8back' THEN current.period_end - INTERVAL '56 days'
+            ELSE NULL
+          END
+        )::date
+    ) previous ON true
+    ORDER BY current.rep_id, current.period_kind
+  `);
+
+  const rows = rowsFromExecute<any>(result).map((row) => {
+    const forecast = Number(row.pipeline_value ?? 0);
+    const forecastVsGoal = buildGoalNullForecast(forecast);
+    const previous = row.previous_closed_value === null || row.previous_closed_value === undefined
+      ? null
+      : {
+          pipelineValue: Number(row.previous_pipeline_value ?? 0),
+          closedValue: Number(row.previous_closed_value ?? 0),
+          dealsCount: Number(row.previous_deals_count ?? 0),
+          winsCount: Number(row.previous_wins_count ?? 0),
+          lossesCount: Number(row.previous_losses_count ?? 0),
+          winRate: Number(row.previous_win_rate ?? 0),
+          avgDaysToClose: Number(row.previous_avg_days_to_close ?? 0),
+          atRiskCount: Number(row.previous_at_risk_count ?? 0),
+          staleAccountCount: Number(row.previous_stale_account_count ?? 0),
+          activityTotal: Number(row.previous_activity_total ?? 0),
+          calls: Number(row.previous_calls ?? 0),
+          emails: Number(row.previous_emails ?? 0),
+          meetings: Number(row.previous_meetings ?? 0),
+          notes: Number(row.previous_notes ?? 0),
+        };
+
+    return {
+      repId: String(row.rep_id),
+      repName: String(row.rep_name ?? "Rep"),
+      periodKind: row.period_kind as RepPerformancePeriodKind,
+      periodStart: dateOnly(row.period_start),
+      periodEnd: dateOnly(row.period_end),
+      pipelineValue: forecast,
+      closedValue: Number(row.closed_value ?? 0),
+      dealsCount: Number(row.deals_count ?? 0),
+      winsCount: Number(row.wins_count ?? 0),
+      lossesCount: Number(row.losses_count ?? 0),
+      winRate: Number(row.win_rate ?? 0),
+      avgDaysToClose: Number(row.avg_days_to_close ?? 0),
+      atRiskCount: Number(row.at_risk_count ?? 0),
+      staleAccountCount: Number(row.stale_account_count ?? 0),
+      activityTotal: Number(row.activity_total ?? 0),
+      calls: Number(row.calls ?? 0),
+      emails: Number(row.emails ?? 0),
+      meetings: Number(row.meetings ?? 0),
+      notes: Number(row.notes ?? 0),
+      sparkline8w: normalizeSparkline(row.sparkline_8w),
+      region: row.region ? String(row.region) : null,
+      computedAt: toIsoOrNow(row.computed_at),
+      forecast,
+      goal: forecastVsGoal.goal,
+      goalSource: forecastVsGoal.goalSource,
+      percentToGoal: forecastVsGoal.percentToGoal,
+      forecastVsGoal,
+      previous,
+    };
+  });
+
+  return {
+    rows,
+    forecastVsGoal: buildGoalNullForecast(rows.reduce((sum, row) => sum + row.forecast, 0)),
+  };
+}
+
+function buildStrategicAlerts(
+  snapshots: RepPerformanceSnapshotRow[],
+  bottlenecks: DashboardDownstreamBottleneckRow[]
+): StrategicAlert[] {
+  const alerts: StrategicAlert[] = [];
+
+  for (const row of snapshots) {
+    if (row.atRiskCount > 0) {
+      alerts.push({
+        id: `at-risk-${row.repId}`,
+        severity: row.atRiskCount >= 3 ? "critical" : "warning",
+        title: "At-risk pipeline",
+        detail: `${row.repName} has ${row.atRiskCount} at-risk deal${row.atRiskCount === 1 ? "" : "s"}.`,
+        repId: row.repId,
+      });
+    }
+
+    if ((row.winsCount + row.lossesCount) > 0 && row.winRate < 25) {
+      alerts.push({
+        id: `win-rate-${row.repId}`,
+        severity: "warning",
+        title: "Low win rate",
+        detail: `${row.repName} is tracking a ${row.winRate}% win rate for this period.`,
+        repId: row.repId,
+      });
+    }
+  }
+
+  if (bottlenecks.length > 0) {
+    alerts.push({
+      id: "downstream-bottlenecks",
+      severity: "info",
+      title: "Downstream bottlenecks",
+      detail: `${bottlenecks.length} downstream item${bottlenecks.length === 1 ? "" : "s"} need director review.`,
+    });
+  }
+
+  return alerts.slice(0, 8);
+}
+
+function buildAiCoachingPrompts(snapshots: RepPerformanceSnapshotRow[]): AiCoachingPrompt[] {
+  return snapshots
+    .filter((row) => row.pipelineValue > 0 && (row.winRate < 30 || row.activityTotal < 5 || row.atRiskCount > 0))
+    .slice(0, 8)
+    .map((row) => ({
+      id: `coaching-${row.repId}`,
+      repId: row.repId,
+      repName: row.repName,
+      prompt: `Review ${row.repName}'s current pipeline and next-step coverage.`,
+      reason:
+        row.atRiskCount > 0
+          ? "At-risk deals are present in the snapshot."
+          : row.winRate < 30
+            ? "Win rate is below the director review threshold."
+            : "Activity volume is below the expected review threshold.",
+    }));
+}
+
+async function getRecentCloses(
+  tenantDb: TenantDb,
+  options: { from: string; to: string }
+): Promise<RecentClose[]> {
+  const result = await tenantDb.execute(sql`
+    SELECT
+      d.id AS deal_id,
+      d.deal_number,
+      d.name AS deal_name,
+      d.assigned_rep_id AS rep_id,
+      COALESCE(u.display_name, 'Unassigned') AS rep_name,
+      CASE
+        WHEN psc.slug IN (${sql.join([...WON_STAGE_SLUGS, ...LEGACY_WON_STAGE_SLUGS].map((slug) => sql`${slug}`), sql`, `)}) THEN 'won'
+        ELSE 'lost'
+      END AS outcome,
+      COALESCE(d.awarded_amount, d.bid_estimate, d.dd_estimate, 0)::numeric AS deal_value,
+      COALESCE(d.actual_close_date, d.contract_signed_date, d.contract_signed_at::date, d.lost_at::date, d.updated_at::date) AS closed_at
+    FROM ${deals} d
+    JOIN ${pipelineStageConfig} psc ON psc.id = d.stage_id
+    LEFT JOIN ${users} u ON u.id = d.assigned_rep_id
+    WHERE d.is_active = true
+      AND psc.slug IN (${sql.join([...WON_STAGE_SLUGS, ...LEGACY_WON_STAGE_SLUGS, ...LOST_STAGE_SLUGS, ...LEGACY_LOST_STAGE_SLUGS].map((slug) => sql`${slug}`), sql`, `)})
+      AND COALESCE(d.actual_close_date, d.contract_signed_date, d.contract_signed_at::date, d.lost_at::date, d.updated_at::date) >= ${options.from}::date
+      AND COALESCE(d.actual_close_date, d.contract_signed_date, d.contract_signed_at::date, d.lost_at::date, d.updated_at::date) <= ${options.to}::date
+    ORDER BY closed_at DESC NULLS LAST, d.name ASC
+    LIMIT 12
+  `);
+
+  return rowsFromExecute<any>(result).map((row) => ({
+    dealId: String(row.deal_id),
+    dealNumber: row.deal_number ? String(row.deal_number) : null,
+    dealName: String(row.deal_name ?? "Deal"),
+    repId: row.rep_id ? String(row.rep_id) : null,
+    repName: String(row.rep_name ?? "Unassigned"),
+    outcome: row.outcome === "won" ? "won" : "lost",
+    dealValue: Number(row.deal_value ?? 0),
+    closedAt: dateOnly(row.closed_at),
+  }));
+}
+
 export async function getDirectorCommissionWorkspace(
   tenantDb: TenantDb,
   options: { from?: string; to?: string } = {}
@@ -1573,7 +1861,7 @@ export async function getDirectorCommissionWorkspace(
   const to = options.to ?? `${year}-12-31`;
 
   const [commissionRows, activityRows, funnelSummary, dealSummaryRows] = await Promise.all([
-    getDirectorRepCommissionRows(tenantDb),
+    getDirectorRepCommissionRows(tenantDb, { from, to }),
     getActivitySummaryByRep(tenantDb, { from, to }),
     getDirectorFunnelSummary(tenantDb),
     getRepDealPipelineSummary(tenantDb),
@@ -1619,7 +1907,7 @@ export async function getDirectorCommissionWorkspace(
  */
 export async function getDirectorDashboard(
   tenantDb: TenantDb,
-  options: { from?: string; to?: string } = {}
+  options: { from?: string; to?: string; officeId: string }
 ): Promise<DirectorDashboardData> {
   const year = new Date().getFullYear();
   const from = options.from ?? `${year}-01-01`;
@@ -1637,6 +1925,8 @@ export async function getDirectorDashboard(
     downstreamBottlenecks,
     funnelSummary,
     repCommissionRows,
+    repPerformanceSnapshots,
+    recentCloses,
   ] = await Promise.all([
     // 1. Per-rep performance cards
     buildRepPerformanceCards(tenantDb, { from, to }),
@@ -1661,7 +1951,9 @@ export async function getDirectorDashboard(
     getCrmOwnedProgression(tenantDb),
     getDownstreamBottlenecks(tenantDb),
     getDirectorFunnelSummary(tenantDb),
-    getDirectorRepCommissionRows(tenantDb),
+    getDirectorRepCommissionRows(tenantDb, { from, to }),
+    getRepPerformanceSnapshots(tenantDb, options.officeId, "mtd"),
+    getRecentCloses(tenantDb, { from, to }),
   ]);
 
   return {
@@ -1702,6 +1994,20 @@ export async function getDirectorDashboard(
     staleLeads: staleLeadResult,
     crmOwnedProgression,
     downstreamBottlenecks,
+    atRiskDeals: downstreamBottlenecks,
+    forecastVsGoal: repPerformanceSnapshots.forecastVsGoal,
+    activityPulse: repPerformanceSnapshots.rows.map((row) => ({
+      repId: row.repId,
+      repName: row.repName,
+      calls: row.calls,
+      emails: row.emails,
+      meetings: row.meetings,
+      notes: row.notes,
+      total: row.activityTotal,
+    })),
+    strategicAlerts: buildStrategicAlerts(repPerformanceSnapshots.rows, downstreamBottlenecks),
+    aiCoachingPrompts: buildAiCoachingPrompts(repPerformanceSnapshots.rows),
+    recentCloses,
     ddVsPipeline: ddResult,
   };
 }

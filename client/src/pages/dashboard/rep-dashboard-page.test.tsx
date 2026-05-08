@@ -207,12 +207,12 @@ describe("RepDashboardPage", () => {
     );
 
     expect(html).toContain("My Board");
-    expect(html).toContain("Open My Cleanup");
+    expect(html).toContain("Open cleanup");
     expect(html).not.toContain("4 records need enrichment");
-    expect(html).toContain("Today&#x27;s Tasks");
+    expect(html).toContain("Today&#x27;s tasks");
     expect(html).toContain("Qualified Leads");
-    expect(html).toContain("Leads Snapshot");
-    expect(html).toContain("Deals Snapshot");
+    expect(html).toContain("Open leads");
+    expect(html).toContain("Open deals");
   });
 
   it("keeps the board shell visible while the summary hook is still loading", () => {

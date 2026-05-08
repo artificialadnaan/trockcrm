@@ -29,6 +29,7 @@ const accessMocks = vi.hoisted(() => ({
 const auditMocks = vi.hoisted(() => ({
   logPhotoEvent: vi.fn(),
   getPhotoAuditEvents: vi.fn(),
+  writeSoftDeleteAuditLog: vi.fn(),
 }));
 
 vi.mock("../../../src/modules/files/service.js", () => serviceMocks);
@@ -40,6 +41,9 @@ vi.mock("../../../src/modules/files/feed-service.js", () => ({
   getProjectPhotoStats: accessMocks.getProjectPhotoStats,
 }));
 vi.mock("../../../src/modules/files/audit-log-service.js", () => auditMocks);
+vi.mock("../../../src/lib/soft-delete-audit.js", () => ({
+  writeSoftDeleteAuditLog: auditMocks.writeSoftDeleteAuditLog,
+}));
 vi.mock("../../../src/events/bus.js", () => ({ eventBus: { emitLocal: vi.fn() } }));
 
 const { fileRoutes } = await import("../../../src/modules/files/routes.js");
@@ -49,11 +53,13 @@ function findRouteHandler(method: "get" | "post" | "patch" | "delete", routePath
     (entry: any) => entry.route?.path === routePath && entry.route?.methods?.[method]
   );
   if (!layer) throw new Error(`Route not found: ${method.toUpperCase()} ${routePath}`);
-  return layer.route.stack[0].handle as (req: any, res: any, next: (err?: unknown) => void) => unknown;
+  return layer.route.stack.map((entry: any) => entry.handle) as Array<
+    (req: any, res: any, next: (err?: unknown) => void) => unknown
+  >;
 }
 
 async function invoke(method: "get" | "post" | "patch" | "delete", routePath: string, overrides: Record<string, any> = {}) {
-  const handler = findRouteHandler(method, routePath);
+  const handlers = findRouteHandler(method, routePath);
   const req = {
     body: {},
     params: { id: "photo-1" },
@@ -82,11 +88,23 @@ async function invoke(method: "get" | "post" | "patch" | "delete", routePath: st
       res.body = payload;
       return res;
     },
+    send(payload?: any) {
+      res.body = payload;
+      return res;
+    },
   };
   let nextError: unknown;
-  await handler(req, res, (err?: unknown) => {
-    nextError = err;
-  });
+  let index = 0;
+  const next = async (err?: unknown): Promise<void> => {
+    if (err) {
+      nextError = err;
+      return;
+    }
+    const handler = handlers[index++];
+    if (!handler) return;
+    await handler(req, res, next);
+  };
+  await next();
   return { req, res, nextError };
 }
 
@@ -170,10 +188,30 @@ describe("photo audit route wiring", () => {
     expect(auditMocks.logPhotoEvent).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ eventType: "address_changed" }));
     expect(auditMocks.logPhotoEvent).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ eventType: "downloaded" }));
     expect(auditMocks.logPhotoEvent).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ eventType: "deleted" }));
+    expect(auditMocks.writeSoftDeleteAuditLog).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({
+      actorUserId: "user-1",
+      entityType: "file",
+      entityId: "photo-1",
+    }));
     expect(auditMocks.logPhotoEvent).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({
       eventType: "restored",
       metadata: expect.objectContaining({ previouslyDeletedAt: expect.any(Date) }),
     }));
+  });
+
+  it("rejects non-admin file deletes before soft-delete", async () => {
+    const { nextError } = await invoke("delete", "/:id", {
+      user: {
+        id: "director-1",
+        role: "director",
+        officeId: "office-1",
+        activeOfficeId: "office-1",
+      },
+    });
+
+    expect((nextError as any).statusCode).toBe(403);
+    expect(serviceMocks.deleteFile).not.toHaveBeenCalled();
+    expect(auditMocks.logPhotoEvent).not.toHaveBeenCalled();
   });
 
   it("returns tenant-scoped audit events for a single photo including deleted photos", async () => {

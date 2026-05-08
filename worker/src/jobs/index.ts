@@ -23,6 +23,8 @@ import { runEstimateDocumentOcr } from "./estimate-document-ocr.js";
 import { runEstimateGeneration } from "./estimate-generation.js";
 import { runAiInterventionManagerAlerts } from "./ai-intervention-manager-alerts.js";
 import { handleRfpRequestDelivery } from "./rfp-request-delivery.js";
+import { runReportsExecutionTick } from "./reports-execution.js";
+import { runRepPerformanceRollup } from "./rep-performance-rollup.js";
 
 const SERVER_MODULE_ROOT =
   process.env.NODE_ENV === "production" ? "../../../server/dist/modules" : "../../../server/src/modules";
@@ -113,6 +115,10 @@ export function registerAllJobs() {
     await handleRfpRequestDelivery(payload, officeId);
   });
 
+  registerJobHandler("reports_execution", async () => {
+    await runReportsExecutionTick();
+  });
+
   // Stale deal scanner (triggered via job_queue or cron)
   registerJobHandler("stale_deal_scan", async () => {
     await runStaleDealScan();
@@ -176,6 +182,10 @@ export function registerAllJobs() {
 
   registerJobHandler("ai_intervention_manager_alerts", async (payload) => {
     await runAiInterventionManagerAlerts(payload);
+  });
+
+  registerJobHandler("rep_performance_rollup", async () => {
+    await runRepPerformanceRollup();
   });
 
   // Daily task generation (triggered via job_queue or cron)

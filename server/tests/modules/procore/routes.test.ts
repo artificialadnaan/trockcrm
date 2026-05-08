@@ -1,12 +1,50 @@
 import express from "express";
 import request from "supertest";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const queryMock = vi.fn();
+const dbExecuteMock = vi.fn();
+const dbSelectRows: any[][] = [];
+const dbUpdateRows: any[][] = [];
+const procoreGetMock = vi.fn();
+const procorePatchMock = vi.fn();
 
 vi.mock("../../../src/middleware/rbac.js", () => ({
   requireRole: () => (_req: express.Request, _res: express.Response, next: express.NextFunction) =>
     next(),
+}));
+
+vi.mock("../../../src/db.js", () => ({
+  db: {
+    execute: dbExecuteMock,
+    select: vi.fn(() => {
+      const chain: any = {
+        from: vi.fn(() => chain),
+        where: vi.fn(() => chain),
+        orderBy: vi.fn(() => chain),
+        limit: vi.fn(() => Promise.resolve(dbSelectRows.shift() ?? [])),
+      };
+      return chain;
+    }),
+    update: vi.fn(() => {
+      const chain: any = {
+        set: vi.fn(() => chain),
+        where: vi.fn(() => chain),
+        returning: vi.fn(() => Promise.resolve(dbUpdateRows.shift() ?? [])),
+      };
+      return chain;
+    }),
+  },
+}));
+
+vi.mock("../../../src/lib/procore-client.js", () => ({
+  isProcoreOauthRefreshError: vi.fn(() => false),
+  isProcoreOauthRequiredError: vi.fn(() => false),
+  procoreClient: {
+    get: procoreGetMock,
+    patch: procorePatchMock,
+    getCircuitState: vi.fn(() => ({ state: "closed", failures: 0, openedAt: null })),
+  },
 }));
 
 const { procoreRoutes } = await import("../../../src/modules/procore/routes.js");
@@ -64,6 +102,13 @@ describe("procore routes", () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
+    dbSelectRows.length = 0;
+    dbUpdateRows.length = 0;
+    process.env.PROCORE_COMPANY_ID = "company-123";
+  });
+
+  afterEach(() => {
+    delete process.env.PROCORE_COMPANY_ID;
   });
 
   it("returns a single project for the project detail route", async () => {
@@ -153,5 +198,104 @@ describe("procore routes", () => {
       expect.stringContaining("AND d.assigned_rep_id = $2"),
       [otherDealId, "rep-1"],
     );
+  });
+
+  it("resolves accept_crm conflicts by recording intent, checking Procore idempotently, patching, then marking synced", async () => {
+    dbSelectRows.push([
+      {
+        id: "sync-1",
+        officeId: "office-1",
+        syncStatus: "conflict",
+        crmEntityType: "deal",
+        crmEntityId: dealId,
+        procoreId: 999,
+        conflictData: { procore_status: "Bidding" },
+      },
+    ]);
+    dbUpdateRows.push(
+      [{ id: "sync-1", syncStatus: "pending" }],
+      [{ id: "sync-1", syncStatus: "synced" }],
+    );
+    queryMock.mockResolvedValueOnce({
+      rows: [{ id: dealId, name: "Deal", procore_stage_mapping: "Awarded" }],
+    });
+    procoreGetMock.mockResolvedValueOnce({ stage: "Bidding" });
+    procorePatchMock.mockResolvedValueOnce({ id: 999, stage: "Awarded" });
+
+    const response = await request(createTestApp())
+      .post("/api/procore/sync-conflicts/sync-1/resolve")
+      .send({ resolution: "accept_crm" });
+
+    expect(response.status).toBe(200);
+    expect(response.body).toMatchObject({ success: true, status: "synced" });
+    expect(response.body.resolutionId).toMatch(/^res_/);
+    expect(procoreGetMock).toHaveBeenCalledWith("/rest/v1.0/companies/company-123/projects/999");
+    expect(procorePatchMock).toHaveBeenCalledWith(
+      "/rest/v1.0/companies/company-123/projects/999",
+      { project: { stage: "Awarded" } },
+    );
+  });
+
+  it("skips accept_crm PATCH when Procore is already at the target stage", async () => {
+    dbSelectRows.push([
+      {
+        id: "sync-1",
+        officeId: "office-1",
+        syncStatus: "conflict",
+        crmEntityType: "deal",
+        crmEntityId: dealId,
+        procoreId: 999,
+        conflictData: { procore_status: "Awarded" },
+      },
+    ]);
+    dbUpdateRows.push(
+      [{ id: "sync-1", syncStatus: "pending" }],
+      [{ id: "sync-1", syncStatus: "synced" }],
+    );
+    queryMock.mockResolvedValueOnce({
+      rows: [{ id: dealId, name: "Deal", procore_stage_mapping: "Awarded" }],
+    });
+    procoreGetMock.mockResolvedValueOnce({ stage: "Awarded" });
+
+    const response = await request(createTestApp())
+      .post("/api/procore/sync-conflicts/sync-1/resolve")
+      .send({ resolution: "accept_crm" });
+
+    expect(response.status).toBe(200);
+    expect(response.body.status).toBe("synced");
+    expect(procorePatchMock).not.toHaveBeenCalled();
+  });
+
+  it("stores a sanitized correlation message when Phase B fails", async () => {
+    const consoleErrorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    dbSelectRows.push([
+      {
+        id: "sync-1",
+        officeId: "office-1",
+        syncStatus: "conflict",
+        crmEntityType: "deal",
+        crmEntityId: dealId,
+        procoreId: 999,
+        conflictData: { procore_status: "Bidding" },
+      },
+    ]);
+    dbUpdateRows.push([{ id: "sync-1", syncStatus: "pending" }]);
+    queryMock.mockResolvedValueOnce({
+      rows: [{ id: dealId, name: "Deal", procore_stage_mapping: "Awarded" }],
+    });
+    procoreGetMock.mockRejectedValueOnce(new Error("Procore response body: SELECT secret stack"));
+
+    const response = await request(createTestApp())
+      .post("/api/procore/sync-conflicts/sync-1/resolve")
+      .send({ resolution: "accept_crm" });
+
+    expect(response.status).toBe(500);
+    const updateCalls = (await import("../../../src/db.js")).db.update as any;
+    expect(updateCalls).toHaveBeenCalled();
+    expect(consoleErrorSpy).toHaveBeenCalledWith(
+      expect.stringMatching(/\[Procore conflict resolution err_/),
+      expect.objectContaining({ errorStack: expect.any(String) }),
+    );
+    consoleErrorSpy.mockRestore();
   });
 });

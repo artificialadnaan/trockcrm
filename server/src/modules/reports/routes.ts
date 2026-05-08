@@ -31,13 +31,31 @@ import {
   updateSavedReport,
   deleteSavedReport,
   seedLockedReports,
+  getReportSchedules,
+  createReportSchedule,
+  getReportRuns,
+  createReportRun,
 } from "./saved-reports-service.js";
 import { runReportBuilder } from "./report-builder-service.js";
 
 const router = Router();
+const VALID_REPORT_FREQUENCIES = ["daily", "weekly", "biweekly", "monthly", "quarterly"] as const;
+const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 function readQueryString(value: unknown): string | undefined {
   return typeof value === "string" && value.trim() ? value.trim() : undefined;
+}
+
+function requireUuid(value: unknown, label: string) {
+  if (typeof value !== "string" || !UUID_PATTERN.test(value)) {
+    throw new AppError(400, `${label} must be a valid UUID`);
+  }
+  return value;
+}
+
+function readOptionalUuid(value: unknown, label: string) {
+  if (value === undefined || value === null || value === "") return null;
+  return requireUuid(value, label);
 }
 
 export function parseAnalyticsFilters(query: Record<string, unknown>): AnalyticsFilterInput {
@@ -352,7 +370,7 @@ router.get("/regional-ownership", requireDirector, async (req, res, next) => {
 // -------------------------------------------------------------------------
 
 // POST /api/reports/execute -- run a custom report config
-router.post("/execute", async (req, res, next) => {
+router.post("/execute", requireDirector, async (req, res, next) => {
   try {
     const config = req.body.config as ReportConfig;
     if (!config || !config.entity) {
@@ -370,7 +388,7 @@ router.post("/execute", async (req, res, next) => {
 });
 
 // POST /api/reports/run -- aggregate report-builder query
-router.post("/run", async (req, res, next) => {
+router.post("/run", requireDirector, async (req, res, next) => {
   try {
     const data = await runReportBuilder(req.tenantDb!, {
       dimensions: Array.isArray(req.body.dimensions) ? req.body.dimensions : [],
@@ -390,6 +408,34 @@ router.post("/run", async (req, res, next) => {
 // -------------------------------------------------------------------------
 // Saved reports CRUD
 // -------------------------------------------------------------------------
+
+// GET /api/reports/schedules -- schedules for reports visible to the user
+router.get("/schedules", async (req, res, next) => {
+  try {
+    const schedules = await getReportSchedules(
+      req.user!.id,
+      req.user!.activeOfficeId ?? req.user!.officeId
+    );
+    await req.commitTransaction!();
+    res.json({ schedules });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// GET /api/reports/runs -- run history for reports visible to the user
+router.get("/runs", async (req, res, next) => {
+  try {
+    const runs = await getReportRuns(
+      req.user!.id,
+      req.user!.activeOfficeId ?? req.user!.officeId
+    );
+    await req.commitTransaction!();
+    res.json({ runs });
+  } catch (err) {
+    next(err);
+  }
+});
 
 // GET /api/reports/saved -- list saved reports visible to the user
 router.get("/saved", async (req, res, next) => {
@@ -416,6 +462,58 @@ router.get("/saved/:id", async (req, res, next) => {
     if (!report) throw new AppError(404, "Report not found");
     await req.commitTransaction!();
     res.json({ report });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// POST /api/reports/saved/:id/runs -- enqueue a report execution stub
+router.post("/saved/:id/runs", async (req, res, next) => {
+  try {
+    const reportId = requireUuid(req.params.id, "reportId");
+    const run = await createReportRun({
+      reportId,
+      userId: req.user!.id,
+      officeId: req.user!.activeOfficeId ?? req.user!.officeId,
+      scheduleId: readOptionalUuid(req.body?.scheduleId, "scheduleId"),
+    });
+    await req.commitTransaction!();
+    res.status(201).json({ run });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// POST /api/reports/saved/:id/schedules -- schedule a visible saved report
+router.post("/saved/:id/schedules", async (req, res, next) => {
+  try {
+    const reportId = requireUuid(req.params.id, "reportId");
+    const { frequency, cronExpr, recipients, nextRunAt } = req.body ?? {};
+    if (!frequency || !cronExpr || !nextRunAt) {
+      throw new AppError(400, "frequency, cronExpr, and nextRunAt are required");
+    }
+    if (!VALID_REPORT_FREQUENCIES.includes(frequency)) {
+      throw new AppError(400, `frequency must be one of: ${VALID_REPORT_FREQUENCIES.join(", ")}`);
+    }
+    const parsedNextRunAt = new Date(nextRunAt);
+    if (Number.isNaN(parsedNextRunAt.getTime())) {
+      throw new AppError(400, "nextRunAt must be a valid ISO timestamp");
+    }
+    if (parsedNextRunAt.getTime() <= Date.now()) {
+      throw new AppError(400, "nextRunAt must be in the future");
+    }
+
+    const schedule = await createReportSchedule({
+      reportId,
+      userId: req.user!.id,
+      officeId: req.user!.activeOfficeId ?? req.user!.officeId,
+      frequency,
+      cronExpr,
+      recipients: Array.isArray(recipients) ? recipients : [],
+      nextRunAt,
+    });
+    await req.commitTransaction!();
+    res.status(201).json({ schedule });
   } catch (err) {
     next(err);
   }

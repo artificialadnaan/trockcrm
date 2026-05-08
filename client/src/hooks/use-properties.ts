@@ -10,9 +10,14 @@ export interface PropertySurface {
   city: string | null;
   state: string | null;
   zip: string | null;
+  type?: string | null;
   buildYear: number | null;
   unitCount: number | null;
+  floors?: number | null;
+  roofArea?: number | null;
   notes: string | null;
+  procoreId?: string | null;
+  companycamId?: string | null;
   isActive: boolean;
   createdAt: string;
   updatedAt: string;
@@ -20,11 +25,16 @@ export interface PropertySurface {
   dealCount: number;
   convertedDealCount: number;
   lastActivityAt: string | null;
+  engagementStatus?: "active_deal" | "active_lead" | "won" | "no_engagement";
+  linkedValue?: string;
+  activePipelineValue?: string;
+  photosCount?: number;
 }
 
 export interface PropertyListFilters {
   search?: string;
   companyId?: string;
+  type?: string;
   page?: number;
   limit?: number;
   isActive?: boolean;
@@ -124,6 +134,7 @@ export function useProperties(filters: PropertyListFilters = {}) {
       const params = new URLSearchParams();
       if (filters.search) params.set("search", filters.search);
       if (filters.companyId) params.set("companyId", filters.companyId);
+      if (filters.type) params.set("type", filters.type);
       if (filters.page) params.set("page", String(filters.page));
       if (filters.limit) params.set("limit", String(filters.limit));
       if (filters.isActive === false) params.set("isActive", "false");
@@ -136,7 +147,7 @@ export function useProperties(filters: PropertyListFilters = {}) {
     } finally {
       setLoading(false);
     }
-  }, [filters.companyId, filters.isActive, filters.limit, filters.page, filters.search, isDisabled]);
+  }, [filters.companyId, filters.isActive, filters.limit, filters.page, filters.search, filters.type, isDisabled]);
 
   useEffect(() => {
     fetchProperties();

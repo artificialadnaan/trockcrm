@@ -83,7 +83,7 @@ export function isApiError(error: unknown): error is ApiError {
   return error instanceof ApiError;
 }
 
-export async function api<T = any>(path: string, options: ApiOptions = {}): Promise<T> {
+export async function api<T = unknown>(path: string, options: ApiOptions = {}): Promise<T> {
   const { json, ...fetchOptions } = options;
 
   const headers: Record<string, string> = {

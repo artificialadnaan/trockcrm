@@ -94,6 +94,42 @@ export type LeadSourceCategory = (typeof LEAD_SOURCE_CATEGORIES)[number];
 export const COMPANY_VERIFICATION_STATUSES = ["pending", "verified", "rejected", "not_required"] as const;
 export type CompanyVerificationStatus = (typeof COMPANY_VERIFICATION_STATUSES)[number];
 
+export const COMPANY_INDUSTRIES = [
+  "general_contractor",
+  "construction_manager",
+  "property_owner",
+  "property_management",
+  "reit",
+  "architecture_engineering",
+  "consultant",
+  "insurance_restoration",
+  "other",
+] as const;
+export type CompanyIndustry = (typeof COMPANY_INDUSTRIES)[number];
+
+export const CONTACT_ROLES = [
+  "owner_principal",
+  "project_manager",
+  "facilities_director",
+  "maintenance",
+  "procurement",
+  "insurance_adjuster",
+  "admin_ap",
+  "other",
+] as const;
+export type ContactRole = (typeof CONTACT_ROLES)[number];
+
+export const PROPERTY_TYPES = [
+  "office",
+  "industrial",
+  "retail",
+  "school",
+  "healthcare",
+  "government",
+  "mixed_use",
+] as const;
+export type PropertyType = (typeof PROPERTY_TYPES)[number];
+
 export const LEAD_VERIFICATION_STATUSES = [
   "not_required",
   "pending",
@@ -331,7 +367,7 @@ export type DuplicateStatus = (typeof DUPLICATE_STATUSES)[number];
 export const EMAIL_DIRECTIONS = ["inbound", "outbound"] as const;
 export type EmailDirection = (typeof EMAIL_DIRECTIONS)[number];
 
-export const AUDIT_ACTIONS = ["insert", "update", "delete"] as const;
+export const AUDIT_ACTIONS = ["insert", "update", "delete", "soft_delete"] as const;
 export type AuditAction = (typeof AUDIT_ACTIONS)[number];
 
 export const DEAL_TEAM_ROLES = [

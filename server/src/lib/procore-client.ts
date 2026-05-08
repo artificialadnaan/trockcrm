@@ -6,10 +6,14 @@ import {
   markProcoreOauthReauthNeeded,
   refreshStoredProcoreOauthTokens,
 } from "../modules/procore/oauth-token-service.js";
+import { fetchWithTimeout } from "./fetch-timeout.js";
 
 const PROCORE_BASE_URL = "https://api.procore.com";
 const MAX_RETRIES = 3;
 const BACKOFF_MS = [1000, 3000, 9000];
+// Procore requests have retries/circuit breaker protection, so each attempt is
+// bounded to 10s and transient timeouts can still be retried.
+const PROCORE_REQUEST_TIMEOUT_MS = 10_000;
 const CIRCUIT_BREAKER_THRESHOLD = 5;
 const CIRCUIT_BREAKER_RESET_MS = 60_000;
 const OAUTH_REFRESH_BUFFER_MS = 60_000;
@@ -81,7 +85,7 @@ async function getAccessToken(fetchImpl: typeof fetch = fetch): Promise<string> 
   const clientId = process.env.PROCORE_CLIENT_ID!;
   const clientSecret = process.env.PROCORE_CLIENT_SECRET!;
 
-  const res = await fetchImpl(`${PROCORE_BASE_URL}/oauth/token`, {
+  const res = await fetchWithTimeout(fetchImpl, `${PROCORE_BASE_URL}/oauth/token`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
@@ -89,6 +93,8 @@ async function getAccessToken(fetchImpl: typeof fetch = fetch): Promise<string> 
       client_id: clientId,
       client_secret: clientSecret,
     }),
+    timeoutMs: PROCORE_REQUEST_TIMEOUT_MS,
+    timeoutLabel: "[Procore] Token fetch",
   });
 
   if (!res.ok) {
@@ -235,7 +241,7 @@ async function procoreFetch<T = any>(
 
   for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
     try {
-      const res = await fetchImpl(url, {
+      const res = await fetchWithTimeout(fetchImpl, url, {
         method,
         headers: {
           Authorization: `Bearer ${auth.accessToken}`,
@@ -246,6 +252,8 @@ async function procoreFetch<T = any>(
             : {}),
         },
         body: body != null ? JSON.stringify(body) : undefined,
+        timeoutMs: PROCORE_REQUEST_TIMEOUT_MS,
+        timeoutLabel: `[Procore] ${method} ${path}`,
       });
 
       if (res.status === 429) {
@@ -312,7 +320,7 @@ export const procoreClient = {
     const companyId = process.env.PROCORE_COMPANY_ID ?? "";
     if (isDevMode()) return getMockResponse(init.method, path) as T;
     const token = await getAccessToken(fetchImpl);
-    const res = await fetchImpl(`${PROCORE_BASE_URL}${path}`, {
+    const res = await fetchWithTimeout(fetchImpl, `${PROCORE_BASE_URL}${path}`, {
       method: init.method,
       headers: {
         Authorization: `Bearer ${token}`,
@@ -321,6 +329,8 @@ export const procoreClient = {
         ...(init.headers ?? {}),
       },
       body: init.body ?? undefined,
+      timeoutMs: PROCORE_REQUEST_TIMEOUT_MS,
+      timeoutLabel: `[Procore] ${init.method} ${path}`,
     });
     if (!res.ok) {
       const errBody = await res.text().catch(() => "");

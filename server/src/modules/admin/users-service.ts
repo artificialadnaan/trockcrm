@@ -15,6 +15,29 @@ import {
   type LocalAuthStatus,
 } from "../auth/local-auth-service.js";
 
+type ExecuteRows<T> = { rows: T[] } | T[];
+
+function rowsFromExecute<T>(result: ExecuteRows<T>): T[] {
+  return Array.isArray(result) ? result : result.rows;
+}
+
+interface UserLocalAuthEventSqlRow extends Record<string, unknown> {
+  id: string;
+  event_type: string;
+  actor_user_id: string | null;
+  metadata: unknown;
+  created_at: Date | string;
+  actor_display_name: string | null;
+}
+
+interface ActiveUserOfficeAccessSqlRow extends Record<string, unknown> {
+  id: string;
+  email: string;
+  display_name: string;
+  office_id: string | null;
+  is_active: boolean;
+}
+
 function assertRate(name: string, value: number) {
   if (!Number.isFinite(value) || value < 0 || value > 1) {
     throw new AppError(400, `${name} must be between 0 and 1`);
@@ -254,7 +277,7 @@ export async function revokeOfficeAccess(userId: string, officeId: string) {
 }
 
 export async function listActiveUsersWithOfficeAccess() {
-  const result = await db.execute(sql`
+  const result = await db.execute<ActiveUserOfficeAccessSqlRow>(sql`
     SELECT
       u.id,
       u.email,
@@ -266,8 +289,8 @@ export async function listActiveUsersWithOfficeAccess() {
     ORDER BY u.display_name ASC
   `);
 
-  const rows = (result as any).rows ?? result;
-  return rows.map((r: any) => ({
+  const rows = rowsFromExecute(result);
+  return rows.map((r) => ({
     id: r.id,
     email: r.email,
     displayName: r.display_name,
@@ -431,7 +454,7 @@ export async function getUsersWithStats() {
 }
 
 export async function getUserLocalAuthEvents(userId: string) {
-  const result = await db.execute(sql`
+  const result = await db.execute<UserLocalAuthEventSqlRow>(sql`
     SELECT
       e.id,
       e.event_type,
@@ -446,8 +469,8 @@ export async function getUserLocalAuthEvents(userId: string) {
     LIMIT 20
   `);
 
-  const rows = (result as any).rows ?? result;
-  return rows.map((row: any) => ({
+  const rows = rowsFromExecute(result);
+  return rows.map((row) => ({
     id: row.id,
     eventType: row.event_type,
     actorUserId: row.actor_user_id,

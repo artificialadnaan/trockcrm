@@ -152,4 +152,39 @@ describe("listDealStagePage", () => {
     expect(countQueryText).toContain(">=");
     expect(countQueryText).toContain("<");
   });
+
+  it("uses direct active reports in the active office for team-scoped stage drill-downs", async () => {
+    dbState.responses = [
+      [{ id: "stage-estimating", slug: "estimating", name: "Estimating", displayOrder: 4, isTerminal: false }],
+    ];
+
+    const teamRows = [{ id: "rep-team-1" }, { id: "rep-team-2" }];
+    const teamQuery = {
+      from: vi.fn().mockReturnThis(),
+      where: vi.fn().mockResolvedValue(teamRows),
+    };
+    const tenantDb = {
+      select: vi.fn().mockReturnValue(teamQuery),
+      execute: vi.fn()
+        .mockResolvedValueOnce({ rows: [{ total: "0", total_value: "0" }] })
+        .mockResolvedValueOnce({ rows: [] }),
+    } as any;
+
+    const { listDealStagePage } = await import("../../../src/modules/deals/service.js");
+    await listDealStagePage(tenantDb, {
+      role: "director",
+      userId: "director-1",
+      activeOfficeId: "office-1",
+      scope: "team",
+      stageId: "stage-estimating",
+      page: 1,
+      pageSize: 25,
+    } as any);
+
+    expect(tenantDb.select).toHaveBeenCalledWith(expect.objectContaining({ id: expect.anything() }));
+    const countQueryText = extractSqlText(tenantDb.execute.mock.calls[0][0]);
+    expect(countQueryText).toContain("assigned_rep_id");
+    expect(countQueryText).toContain("rep-team-1");
+    expect(countQueryText).toContain("rep-team-2");
+  });
 });
