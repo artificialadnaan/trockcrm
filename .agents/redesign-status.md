@@ -90,3 +90,4 @@
 - HOTFIX-POSTMERGE REVIEW2 2026-05-08T17:19:51Z: hotfix/postmerge-track-d-review2, Codex iteration-2 revisions for reports role allowlist and empty-office unassigned deal fallback. Worktree: trockcrm-hotfix-postmerge-r2.
 - HOTFIX-2 CLAIM 2026-05-08T17:40:19Z: hotfix/phase1-property-constraints, two production bugs from PR #174 (mixed_use constraint, missing TENANT_SCHEMA block). Worktree: trockcrm-hotfix-phase1.
 - HOTFIX-2 PR-OPEN 2026-05-08T17:43:24Z: PR https://github.com/artificialadnaan/trockcrm/pull/178.
+- HOTFIX-2 LIVE 2026-05-08T17:54:24Z: PR #178 merged to main at 56a10d9; Railway API production deployment 839dcd5d-966b-49a9-8032-65fc7c0aebcc succeeded and ran 0106_redesign_e_property_type_constraint_fix.sql.
