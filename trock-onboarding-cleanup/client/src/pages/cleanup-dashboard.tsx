@@ -1,5 +1,5 @@
-import { ArrowRight, CheckCircle2, ClipboardList, Loader2 } from "lucide-react";
-import { Link, useNavigate } from "react-router-dom";
+import { ArrowRight, CheckCircle2, ClipboardList, Loader2, Shuffle } from "lucide-react";
+import { useNavigate } from "react-router-dom";
 import { Button, Panel } from "../components/ui";
 import { useCleanupMutations, useMe, useProgress, useQueue } from "../hooks/use-cleanup";
 import type { QueueRecord, RecordType, RecordTypeSingular } from "../types/cleanup";
@@ -25,6 +25,7 @@ export function CleanupDashboard() {
   const allRecords = flatten(queue);
   const closedEligible = queue?.deal.filter((record) => record.cleanupStatus === "pending" && (record.stage?.slug === "won" || record.stage?.slug === "lost")).length ?? 0;
   const completeDisabled = !progress?.canClearGate || completeOnboarding.isPending;
+  const isAdmin = user?.role === "admin" || user?.role === "director";
 
   if (queueLoading || progressLoading) {
     return (
@@ -35,6 +36,34 @@ export function CleanupDashboard() {
   }
 
   const percent = progress && progress.totalAssigned > 0 ? Math.round(((progress.completed + progress.skipped) / progress.totalAssigned) * 100) : 0;
+
+  if (isAdmin) {
+    return (
+      <main className="mx-auto max-w-7xl px-4 py-6 sm:px-6 lg:py-8">
+        <section className="border-b border-stone-300 pb-6">
+          <p className="text-sm font-bold uppercase tracking-wide text-red-800">Admin tools</p>
+          <h1 className="mt-2 max-w-3xl text-3xl font-black tracking-tight text-stone-950 sm:text-4xl">
+            Welcome {user?.firstName ?? user?.displayName ?? "there"}
+          </h1>
+          <p className="mt-2 max-w-2xl text-sm leading-6 text-stone-600">
+            Admin and director accounts are not gated by personal cleanup assignments. Use these tools to route records and monitor cleanup.
+          </p>
+        </section>
+
+        <section className="mt-6 grid gap-4 md:grid-cols-2 xl:grid-cols-3">
+          <Panel className="p-5">
+            <Shuffle className="h-5 w-5 text-red-800" />
+            <h2 className="mt-3 text-xl font-black">Reassign records</h2>
+            <p className="mt-1 text-sm text-stone-600">Move admin-queue records or stale assignments to the correct rep.</p>
+            <Button className="mt-5 w-full" onClick={() => navigate("/admin/reassign")}>
+              Open reassignment
+              <ArrowRight className="h-4 w-4" />
+            </Button>
+          </Panel>
+        </section>
+      </main>
+    );
+  }
 
   return (
     <main className="mx-auto max-w-7xl px-4 py-6 sm:px-6 lg:py-8">

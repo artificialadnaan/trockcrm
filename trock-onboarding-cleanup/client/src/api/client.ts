@@ -20,6 +20,7 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 
 export const api = {
   me: () => request<CurrentUser>("/api/auth/me"),
+  logout: () => request<{ success: boolean }>("/api/auth/logout", { method: "POST", body: JSON.stringify({}) }),
   queue: () => request<QueueResponse>("/api/cleanup/queue"),
   progress: () => request<ProgressResponse>("/api/cleanup/progress"),
   record: (type: RecordTypeSingular, id: string) => request<RecordDetail>(`/api/cleanup/record/${type}/${id}`),

@@ -1,11 +1,18 @@
 import { Outlet, useNavigate } from "react-router-dom";
 import { HardHat, LogOut, Shuffle } from "lucide-react";
-import { useMe } from "../hooks/use-cleanup";
+import { useLogout, useMe } from "../hooks/use-cleanup";
 import { Button } from "./ui";
 
 export function AppLayout() {
-  const { data: user } = useMe();
+  const { data: user, isLoading, isError } = useMe();
+  const logout = useLogout();
   const navigate = useNavigate();
+
+  if (!isLoading && (isError || !user)) {
+    window.location.assign("/login");
+    return null;
+  }
+
   return (
     <div className="min-h-screen bg-stone-100 text-stone-950">
       <header className="sticky top-0 z-20 border-b border-stone-300 bg-stone-950 text-stone-50">
@@ -27,9 +34,9 @@ export function AppLayout() {
                 Reassign
               </Button>
             ) : null}
-            <Button variant="ghost" className="text-stone-50 hover:bg-stone-800" onClick={() => window.location.assign(mainCrmUrl())}>
+            <Button variant="ghost" className="text-stone-50 hover:bg-stone-800" disabled={logout.isPending} onClick={() => logout.mutate()}>
               <LogOut className="h-4 w-4" />
-              CRM
+              Logout
             </Button>
           </div>
         </div>

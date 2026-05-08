@@ -4,6 +4,14 @@ import { requireAuth } from "../lib/auth.js";
 
 export const authRouter = Router();
 
+const isProduction = process.env.NODE_ENV === "production";
+const tokenCookieOptions = {
+  httpOnly: true,
+  secure: isProduction,
+  sameSite: isProduction ? "none" : "strict",
+  path: "/",
+} as const;
+
 authRouter.get("/me", requireAuth, async (req, res, next) => {
   try {
     const result = await pool.query(
@@ -37,4 +45,15 @@ authRouter.get("/me", requireAuth, async (req, res, next) => {
   } catch (error) {
     return next(error);
   }
+});
+
+authRouter.post("/logout", (_req, res) => {
+  res.clearCookie("token", tokenCookieOptions);
+  res.clearCookie("csrf_token", {
+    httpOnly: false,
+    secure: isProduction,
+    sameSite: isProduction ? "none" : "strict",
+    path: "/",
+  });
+  res.json({ success: true });
 });

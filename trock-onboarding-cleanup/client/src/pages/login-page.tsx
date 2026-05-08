@@ -1,10 +1,13 @@
 import { Loader2 } from "lucide-react";
 import { Navigate } from "react-router-dom";
 import { mainCrmUrl } from "../components/layout";
+import { Button, Panel } from "../components/ui";
 import { useMe } from "../hooks/use-cleanup";
 
 export function LoginPage() {
   const { data: user, isLoading, isError } = useMe();
+  const params = new URLSearchParams(window.location.search);
+  const loggedOut = params.get("loggedOut") === "1" || window.localStorage.getItem("cleanup_logged_out") === "true";
 
   if (isLoading) {
     return (
@@ -18,9 +21,31 @@ export function LoginPage() {
   }
 
   if (isError || !user) {
+    if (loggedOut) {
+      return (
+        <main className="grid min-h-screen place-items-center bg-stone-100 px-6 text-stone-950">
+          <Panel className="w-full max-w-md p-6">
+            <p className="text-sm font-bold uppercase tracking-wide text-red-800">Signed out</p>
+            <h1 className="mt-2 text-2xl font-black text-stone-950">Cleanup session ended</h1>
+            <p className="mt-2 text-sm leading-6 text-stone-600">Sign in through the CRM when you are ready to return to cleanup.</p>
+            <Button
+              className="mt-5 w-full"
+              onClick={() => {
+                window.localStorage.removeItem("cleanup_logged_out");
+                window.location.assign(mainCrmUrl("/login"));
+              }}
+            >
+              Sign in
+            </Button>
+          </Panel>
+        </main>
+      );
+    }
     window.location.assign(mainCrmUrl("/login"));
     return null;
   }
+
+  if (loggedOut) window.localStorage.removeItem("cleanup_logged_out");
 
   if (user.onboardingCompletedAt) {
     window.location.assign(mainCrmUrl("/dashboard"));

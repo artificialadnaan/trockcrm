@@ -6,6 +6,20 @@ export function useMe() {
   return useQuery({ queryKey: ["me"], queryFn: api.me, retry: false });
 }
 
+export function useLogout() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: api.logout,
+    onSettled: () => {
+      queryClient.clear();
+      window.localStorage.clear();
+      window.sessionStorage.clear();
+      window.localStorage.setItem("cleanup_logged_out", "true");
+      window.location.assign("/login?loggedOut=1");
+    },
+  });
+}
+
 export function useQueue() {
   return useQuery({ queryKey: ["cleanup", "queue"], queryFn: api.queue });
 }
