@@ -156,18 +156,9 @@ function TaskRow({ task, onUpdate }: { task: Task; onUpdate: () => void }) {
   return (
     <>
       <div
-        role="button"
-        tabIndex={0}
-        onClick={openEdit}
-        onKeyDown={(event) => {
-          if (event.key === "Enter" || event.key === " ") {
-            event.preventDefault();
-            openEdit();
-          }
-        }}
         className={cn(
           "group grid gap-3 border-b border-slate-100 bg-white px-4 py-3 transition-colors md:grid-cols-[32px_minmax(0,1fr)_120px_130px_150px_96px]",
-          isDone ? "cursor-default opacity-65" : "cursor-pointer hover:bg-slate-50"
+          isDone ? "opacity-65" : "hover:bg-slate-50"
         )}
       >
         <button
@@ -184,39 +175,56 @@ function TaskRow({ task, onUpdate }: { task: Task; onUpdate: () => void }) {
           <Check className="h-3.5 w-3.5" />
         </button>
 
-        <div className="min-w-0">
-          <div className="flex min-w-0 items-center gap-2">
-            <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-slate-100 text-slate-600">
-              <Icon className="h-3.5 w-3.5" />
+        <button
+          type="button"
+          data-testid="task-row-content"
+          disabled={isDone}
+          onClick={openEdit}
+          onKeyDown={(event) => {
+            if (event.key === "Enter" || event.key === " ") {
+              event.preventDefault();
+              openEdit();
+            }
+          }}
+          className={cn(
+            "grid min-w-0 gap-3 text-left focus:outline-none focus-visible:ring-2 focus-visible:ring-brand-red md:col-span-4 md:grid-cols-[minmax(0,1fr)_120px_130px_150px]",
+            isDone ? "cursor-default" : "cursor-pointer"
+          )}
+        >
+          <div className="min-w-0">
+            <div className="flex min-w-0 items-center gap-2">
+              <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-slate-100 text-slate-600">
+                <Icon className="h-3.5 w-3.5" />
+              </span>
+              <p className={cn("truncate text-sm font-black text-slate-950", isDone ? "line-through text-slate-500" : "")}>
+                {task.title}
+              </p>
+            </div>
+            <div className="mt-1 flex flex-wrap gap-x-3 gap-y-1 pl-9 text-xs font-semibold text-slate-500">
+              <span className="capitalize">{typeLabel(task.type)}</span>
+              <span>{getTaskStatusLabel(task.status)}</span>
+              {projectContext ? <span className="truncate">{projectContext}</span> : null}
+            </div>
+          </div>
+
+          <div className="flex items-center">
+            <span className={cn("inline-flex items-center gap-1 rounded-full px-2.5 py-1 text-[10px] font-black uppercase tracking-wide", PRIORITY_CLASSES[task.priority] ?? PRIORITY_CLASSES.low)}>
+              <Flag className="h-3 w-3" />
+              {task.priority === "normal" ? "Medium" : task.priority}
             </span>
-            <p className={cn("truncate text-sm font-black text-slate-950", isDone ? "line-through text-slate-500" : "")}>
-              {task.title}
-            </p>
           </div>
-          <div className="mt-1 flex flex-wrap gap-x-3 gap-y-1 pl-9 text-xs font-semibold text-slate-500">
-            <span className="capitalize">{typeLabel(task.type)}</span>
-            <span>{getTaskStatusLabel(task.status)}</span>
-            {projectContext ? <span className="truncate">{projectContext}</span> : null}
+
+          <div className={cn("flex items-center text-xs font-black", task.isOverdue ? "text-brand-red" : "text-slate-600")}>
+            {formatDueDate(task.dueDate)}
           </div>
-        </div>
 
-        <div className="flex items-center">
-          <span className={cn("inline-flex items-center gap-1 rounded-full px-2.5 py-1 text-[10px] font-black uppercase tracking-wide", PRIORITY_CLASSES[task.priority] ?? PRIORITY_CLASSES.low)}>
-            <Flag className="h-3 w-3" />
-            {task.priority === "normal" ? "Medium" : task.priority}
-          </span>
-        </div>
-
-        <div className={cn("flex items-center text-xs font-black", task.isOverdue ? "text-brand-red" : "text-slate-600")}>
-          {formatDueDate(task.dueDate)}
-        </div>
-
-        <div className="flex min-w-0 items-center gap-2">
-          <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-brand-red text-[10px] font-black text-white">
-            {getInitials(task.assignedToName)}
-          </span>
-          <span className="truncate text-xs font-semibold text-slate-600">{task.assignedToName ?? "Unassigned"}</span>
-        </div>
+          <div className="flex min-w-0 items-center gap-2">
+            <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-brand-red text-[10px] font-black text-white">
+              {getInitials(task.assignedToName)}
+            </span>
+            <span className="truncate text-xs font-semibold text-slate-600">{task.assignedToName ?? "Unassigned"}</span>
+          </div>
+        </button>
 
         <div className="flex items-center justify-end gap-1 opacity-100 md:opacity-0 md:transition-opacity md:group-hover:opacity-100">
           {!isDone ? (

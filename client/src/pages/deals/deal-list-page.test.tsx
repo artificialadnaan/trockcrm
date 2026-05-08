@@ -209,6 +209,54 @@ describe("DealListPage", () => {
     expect(html).toContain("Service Hospital Roof");
   });
 
+  it("renders company name on deal cards instead of UUID", () => {
+    const companyId = "a3f8c2d1-1111-4444-9999-abcdefabcdef";
+    mocks.useDealBoardMock.mockReturnValue({
+      board: {
+        columns: [
+          {
+            stage: { id: "stage-opportunity", name: "Opportunity", slug: "opportunity" },
+            count: 1,
+            totalValue: 180000,
+            cards: [makeDeal({ companyId, companyName: "Acme Construction" })],
+          },
+        ],
+        terminalStages: [],
+      },
+      loading: false,
+      error: null,
+      refetch: vi.fn(),
+    });
+
+    const html = renderPage();
+
+    expect(html).toContain("Acme Construction");
+    expect(html).not.toContain(companyId);
+  });
+
+  it("shows Account pending when company name is missing", () => {
+    mocks.useDealBoardMock.mockReturnValue({
+      board: {
+        columns: [
+          {
+            stage: { id: "stage-opportunity", name: "Opportunity", slug: "opportunity" },
+            count: 1,
+            totalValue: 180000,
+            cards: [makeDeal({ companyId: "company-1", companyName: null })],
+          },
+        ],
+        terminalStages: [],
+      },
+      loading: false,
+      error: null,
+      refetch: vi.fn(),
+    });
+
+    const html = renderPage();
+
+    expect(html).toContain("Account pending");
+  });
+
   it("preserves empty canonical columns so stage parity remains visible", () => {
     mocks.useDealBoardMock.mockReturnValue({
       board: {

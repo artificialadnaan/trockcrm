@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { eq, and, desc, asc, ilike, inArray, sql, or, isNull, not } from "drizzle-orm";
+import { eq, and, desc, asc, ilike, inArray, sql, or, isNull, not, getTableColumns } from "drizzle-orm";
 import type { NodePgDatabase } from "drizzle-orm/node-postgres";
 import {
   deals,
@@ -9,6 +9,7 @@ import {
   changeOrders,
   pipelineStageConfig,
   contacts,
+  companies,
   leads,
   users,
   userOfficeAccess,
@@ -1541,8 +1542,12 @@ export async function getDealsForPipeline(
   }
 
   const allDeals = await tenantDb
-    .select()
+    .select({
+      ...getTableColumns(deals),
+      companyName: companies.name,
+    })
     .from(deals)
+    .leftJoin(companies, eq(companies.id, deals.companyId))
     .where(and(...conditions))
     .orderBy(desc(deals.updatedAt))
     .limit(500);

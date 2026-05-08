@@ -154,7 +154,7 @@ describe("TaskListPage project context", () => {
     renderPage();
 
     const completeButton = container.querySelector<HTMLButtonElement>('button[aria-label="Complete Call Palm Villas"]');
-    const row = container.querySelector<HTMLElement>('div[role="button"]');
+    const row = container.querySelector<HTMLElement>('[data-testid="task-row-content"]');
 
     expect(completeButton).not.toBeNull();
     expect(row).not.toBeNull();
@@ -213,7 +213,7 @@ describe("TaskListPage project context", () => {
     }));
     renderPage();
 
-    const row = container.querySelector<HTMLElement>('div[role="button"]');
+    const row = container.querySelector<HTMLElement>('[data-testid="task-row-content"]');
     expect(row).not.toBeNull();
 
     act(() => {
@@ -230,7 +230,7 @@ describe("TaskListPage project context", () => {
   it("prevents default Space scrolling when keyboard-activating task rows", () => {
     renderPage();
 
-    const row = container.querySelector<HTMLElement>('div[role="button"]');
+    const row = container.querySelector<HTMLElement>('[data-testid="task-row-content"]');
     expect(row).not.toBeNull();
     const event = new KeyboardEvent("keydown", { key: " ", bubbles: true, cancelable: true });
     const preventDefault = vi.spyOn(event, "preventDefault");
@@ -240,5 +240,32 @@ describe("TaskListPage project context", () => {
     });
 
     expect(preventDefault).toHaveBeenCalled();
+  });
+
+  it("renders task row content as a single button without nested action buttons", () => {
+    renderPage();
+
+    expect(container.querySelector('div[role="button"]')).toBeNull();
+    const contentButton = container.querySelector<HTMLButtonElement>('[data-testid="task-row-content"]');
+    expect(contentButton).not.toBeNull();
+    expect(contentButton?.tagName).toBe("BUTTON");
+    expect(contentButton?.querySelector("button")).toBeNull();
+    for (const button of Array.from(container.querySelectorAll("button"))) {
+      expect(button.querySelector("button")).toBeNull();
+    }
+  });
+
+  it("completed task rows are not keyboard-focusable", () => {
+    mocks.useTasksMock.mockImplementation((filters: { section?: string }) => ({
+      tasks: filters.section === "overdue" ? [{ ...makeTask(), status: "completed" }] : [],
+      loading: false,
+      error: null,
+      refetch: vi.fn(),
+    }));
+    renderPage();
+
+    const contentButton = container.querySelector<HTMLButtonElement>('[data-testid="task-row-content"]');
+    expect(contentButton).not.toBeNull();
+    expect(contentButton?.disabled).toBe(true);
   });
 });

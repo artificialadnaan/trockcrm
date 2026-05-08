@@ -94,6 +94,7 @@ export interface Deal {
   assignedRepId: string;
   assignedRepName?: string | null;
   companyId: string | null;
+  companyName?: string | null;
   propertyId: string | null;
   sourceLeadId: string | null;
   primaryContactId: string | null;

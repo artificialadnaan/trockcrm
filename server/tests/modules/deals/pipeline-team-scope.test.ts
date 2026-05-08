@@ -65,6 +65,7 @@ describe("getDealsForPipeline team scope", () => {
       where: vi.fn().mockResolvedValue([{ id: "rep-team-1" }, { id: "rep-team-2" }]),
     };
     const dealQuery = {
+      leftJoin: vi.fn().mockReturnThis(),
       where: vi.fn().mockReturnThis(),
       orderBy: vi.fn().mockReturnThis(),
       limit: vi.fn().mockResolvedValue([]),

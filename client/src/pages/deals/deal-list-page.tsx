@@ -139,7 +139,7 @@ function DealCard({
         <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-brand-red text-[10px] font-black text-white">
           {getInitials(deal.assignedRepName)}
         </span>
-        <span className="min-w-0 flex-1 truncate">{deal.companyId ? deal.companyId : "Account pending"}</span>
+        <span className="min-w-0 flex-1 truncate">{deal.companyName ? deal.companyName : "Account pending"}</span>
       </div>
 
       <div className="mt-3 flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] font-semibold text-slate-500">
