@@ -1,4 +1,4 @@
-import type { CurrentUser, ProgressResponse, QueueResponse, RecordDetail, RecordTypeSingular, SkipReason } from "../types/cleanup";
+import type { CurrentUser, ProgressResponse, QueueResponse, ReassignmentRecordsResponse, ReassignmentUser, RecordDetail, RecordTypeSingular, SkipReason } from "../types/cleanup";
 
 const API_BASE = import.meta.env.VITE_API_BASE_URL ?? "";
 
@@ -48,6 +48,21 @@ export const api = {
     request<Array<{ id: string; display_name: string; subtitle?: string | null; meta?: string | null }>>(`/api/cleanup/search/${entity}?q=${encodeURIComponent(q)}`),
   createProperty: (body: { company_id: string; name?: string; address?: string; city?: string; state?: string; zip?: string }) =>
     request<{ id: string; display_name: string; subtitle?: string | null; meta?: string | null }>("/api/cleanup/properties", {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
+  reassignmentUsers: () => request<ReassignmentUser[]>("/api/cleanup/admin/reassignment-users"),
+  reassignmentRecords: (params: { type: string; q: string; owner: string; page: number }) =>
+    request<ReassignmentRecordsResponse>(
+      `/api/cleanup/admin/reassignment-records?type=${encodeURIComponent(params.type)}&q=${encodeURIComponent(params.q)}&owner=${encodeURIComponent(params.owner)}&page=${params.page}`,
+    ),
+  reassignRecord: (type: RecordTypeSingular, id: string, body: { newAssignedToUserId: string; reason?: string }) =>
+    request(`/api/cleanup/admin/records/${type}/${id}/reassign`, {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
+  bulkReassignRecords: (body: { type: string; recordIds: string[]; newAssignedToUserId: string; reason?: string }) =>
+    request("/api/cleanup/admin/records/bulk-reassign", {
       method: "POST",
       body: JSON.stringify(body),
     }),

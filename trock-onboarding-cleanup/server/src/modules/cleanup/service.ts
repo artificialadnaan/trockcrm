@@ -27,6 +27,13 @@ const TABLE_BY_TYPE = {
 
 const TYPE_BY_TABLE = Object.fromEntries(Object.entries(TABLE_BY_TYPE).map(([type, table]) => [table, type])) as Record<string, RecordType>;
 type QueryClient = Pick<pg.Pool | pg.PoolClient | pg.Client, "query">;
+const OWNER_COLUMN_BY_TYPE = {
+  deal: "assigned_rep_id",
+  lead: "assigned_rep_id",
+  contact: "owner_id",
+  company: "owner_id",
+} satisfies Record<RecordType, string>;
+const MAX_BULK_REASSIGN = 500;
 
 const UPDATE_COLUMNS: Record<RecordType, Set<string>> = {
   deal: new Set([
@@ -121,6 +128,14 @@ function assertRecordType(value: string): RecordType {
     throw error;
   }
   return value as RecordType;
+}
+
+function assertUuid(value: string, label: string) {
+  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value)) {
+    const error = new Error(`${label} must be a valid UUID`);
+    (error as Error & { status?: number }).status = 400;
+    throw error;
+  }
 }
 
 function isAdmin(user: AuthContext) {
@@ -403,6 +418,271 @@ export async function adminProgress() {
       percentDone: total === 0 ? 100 : Math.round(((completed + skipped) / total) * 100),
     };
   });
+}
+
+async function activeAssignableUser(client: QueryClient, userId: string) {
+  assertUuid(userId, "newAssignedToUserId");
+  const result = await client.query<{ id: string; email: string; display_name: string; role: string }>(
+    `
+      SELECT id, email, display_name, role::text
+      FROM public.users
+      WHERE id = $1
+        AND is_active = true
+        AND role::text IN ('admin', 'director', 'rep')
+      LIMIT 1
+    `,
+    [userId],
+  );
+  return result.rows[0] ?? null;
+}
+
+async function assertRecordsExist(client: QueryClient, type: RecordType, recordIds: string[]) {
+  for (const recordId of recordIds) assertUuid(recordId, "record id");
+  const schema = tenant();
+  const table = TABLE_BY_TYPE[type];
+  const result = await client.query<{ id: string }>(
+    `
+      SELECT id::text AS id
+      FROM ${quoteIdent(schema)}.${quoteIdent(table)}
+      WHERE id = ANY($1::uuid[])
+    `,
+    [recordIds],
+  );
+  const found = new Set(result.rows.map((row) => row.id));
+  const missing = recordIds.filter((recordId) => !found.has(recordId));
+  if (missing.length > 0) {
+    const error = new Error("Record not found");
+    (error as Error & { status?: number; details?: unknown }).status = 404;
+    (error as Error & { status?: number; details?: unknown }).details = { missingRecordIds: missing };
+    throw error;
+  }
+}
+
+async function reassignRecordsInTransaction(type: RecordType, recordIds: string[], newAssignedToUserId: string, actor: AuthContext, reason?: string) {
+  if (recordIds.length === 0) {
+    const error = new Error("recordIds must contain at least one record");
+    (error as Error & { status?: number }).status = 400;
+    throw error;
+  }
+  if (recordIds.length > MAX_BULK_REASSIGN) {
+    const error = new Error(`Bulk reassignment is limited to ${MAX_BULK_REASSIGN} records`);
+    (error as Error & { status?: number }).status = 400;
+    throw error;
+  }
+
+  const schema = tenant();
+  const table = TABLE_BY_TYPE[type];
+  const ownerColumn = OWNER_COLUMN_BY_TYPE[type];
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+    const targetUser = await activeAssignableUser(client, newAssignedToUserId);
+    if (!targetUser) {
+      const error = new Error("Target user not found or inactive");
+      (error as Error & { status?: number }).status = 400;
+      throw error;
+    }
+    await assertRecordsExist(client, type, recordIds);
+
+    const recordUpdate = await client.query(
+      `
+        UPDATE ${quoteIdent(schema)}.${quoteIdent(table)}
+        SET ${quoteIdent(ownerColumn)} = $1,
+            updated_at = now()
+        WHERE id = ANY($2::uuid[])
+      `,
+      [newAssignedToUserId, recordIds],
+    );
+    if (recordUpdate.rowCount !== recordIds.length) {
+      const error = new Error("Record reassignment failed");
+      (error as Error & { status?: number }).status = 409;
+      throw error;
+    }
+
+    const assignmentUpdate = await client.query(
+      `
+        UPDATE ${quoteIdent(schema)}.cleanup_assignments
+        SET assigned_to = $1,
+            updated_at = now()
+        WHERE record_type = $2
+          AND record_id = ANY($3::uuid[])
+      `,
+      [newAssignedToUserId, type, recordIds],
+    );
+    if (assignmentUpdate.rowCount !== recordIds.length) {
+      const error = new Error("Cleanup assignment reassignment failed");
+      (error as Error & { status?: number }).status = 409;
+      throw error;
+    }
+
+    if (reason?.trim()) {
+      console.info("[cleanup] admin reassignment", {
+        type,
+        recordIds,
+        newAssignedToUserId,
+        actorUserId: actor.id,
+        reason: reason.trim(),
+      });
+    }
+
+    const records = [];
+    for (const recordId of recordIds) {
+      records.push(await getRecordDetailWithClient(client, type, recordId, actor));
+    }
+    await client.query("COMMIT");
+    return {
+      type,
+      reassignedTo: targetUser,
+      count: recordIds.length,
+      records,
+    };
+  } catch (error) {
+    await client.query("ROLLBACK");
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+
+export async function reassignRecord(typeValue: string, id: string, newAssignedToUserId: string, actor: AuthContext, reason?: string) {
+  const type = assertRecordType(typeValue);
+  const result = await reassignRecordsInTransaction(type, [id], newAssignedToUserId, actor, reason);
+  return {
+    type,
+    id,
+    reassignedTo: result.reassignedTo,
+    record: result.records[0],
+  };
+}
+
+export async function bulkReassignRecords(typeValue: string, recordIds: string[], newAssignedToUserId: string, actor: AuthContext, reason?: string) {
+  const type = assertRecordType(typeValue);
+  if (!Array.isArray(recordIds)) {
+    const error = new Error("recordIds must be an array");
+    (error as Error & { status?: number }).status = 400;
+    throw error;
+  }
+  return reassignRecordsInTransaction(type, recordIds, newAssignedToUserId, actor, reason);
+}
+
+export async function reassignmentUsers() {
+  const result = await pool.query<{ id: string; email: string; display_name: string; role: string }>(
+    `
+      SELECT id, email, display_name, role::text
+      FROM public.users
+      WHERE is_active = true
+        AND role::text IN ('admin', 'director', 'rep')
+      ORDER BY role::text, display_name, email
+    `,
+  );
+  return result.rows.map((row) => ({
+    id: row.id,
+    email: row.email,
+    displayName: row.display_name,
+    role: row.role,
+  }));
+}
+
+export async function reassignmentRecords(filters: { type?: string; q?: string; owner?: string; page?: number }) {
+  const schema = tenant();
+  const requestedTypes = filters.type && filters.type !== "all" ? [assertRecordType(filters.type)] : RECORD_TYPES;
+  const query = filters.q?.trim() ?? "";
+  const owner = filters.owner?.trim() ?? "all";
+  const page = Math.max(1, filters.page ?? 1);
+  const limit = 50;
+  const offset = (page - 1) * limit;
+  const rows: Array<Record<string, unknown>> = [];
+
+  for (const type of requestedTypes) {
+    const table = TABLE_BY_TYPE[type];
+    const ownerColumn = OWNER_COLUMN_BY_TYPE[type];
+    const params: unknown[] = [];
+    const clauses = ["true"];
+    if (query.length > 0) {
+      params.push(`%${query}%`);
+      if (type === "contact") {
+        clauses.push(`(trim(record.first_name || ' ' || record.last_name) ILIKE $${params.length} OR record.email ILIKE $${params.length})`);
+      } else {
+        clauses.push(`record.name ILIKE $${params.length}`);
+      }
+    }
+    if (owner === "unassigned") {
+      clauses.push(`record.${quoteIdent(ownerColumn)} IS NULL`);
+    } else if (owner !== "all") {
+      assertUuid(owner, "owner");
+      params.push(owner);
+      clauses.push(`record.${quoteIdent(ownerColumn)} = $${params.length}`);
+    }
+
+    const amountSelect =
+      type === "deal"
+        ? `CASE WHEN record.hubspot_extra_properties->>'amount_in_home_currency' ~ '^-?[0-9]+(\\.[0-9]+)?$' THEN (record.hubspot_extra_properties->>'amount_in_home_currency')::numeric ELSE COALESCE(record.awarded_amount, record.bid_estimate, record.dd_estimate) END`
+        : type === "lead"
+          ? "record.pre_qual_value"
+          : "NULL::numeric";
+    const nameSelect = type === "contact" ? "COALESCE(NULLIF(trim(record.first_name || ' ' || record.last_name), ''), record.email, record.id::text)" : "record.name";
+
+    const result = await pool.query<Record<string, unknown>>(
+      `
+        SELECT
+          $${params.length + 1}::text AS type,
+          record.id::text,
+          ${nameSelect} AS name,
+          ${amountSelect} AS amount,
+          record.${quoteIdent(ownerColumn)}::text AS owner_id,
+          owner.email AS owner_email,
+          assignment.assigned_to::text AS cleanup_assigned_to,
+          cleanup_user.email AS cleanup_assignee_email,
+          ${stageSelect(type)}
+          record.updated_at,
+          record.created_at
+        FROM ${quoteIdent(schema)}.${quoteIdent(table)} record
+        JOIN ${quoteIdent(schema)}.cleanup_assignments assignment
+          ON assignment.record_type = $${params.length + 1}
+         AND assignment.record_id = record.id
+        LEFT JOIN public.users owner ON owner.id = record.${quoteIdent(ownerColumn)}
+        LEFT JOIN public.users cleanup_user ON cleanup_user.id = assignment.assigned_to
+        ${stageJoin(type)}
+        WHERE ${clauses.join(" AND ")}
+        ORDER BY record.updated_at DESC NULLS LAST, record.created_at DESC NULLS LAST
+        LIMIT 1000
+      `,
+      [...params, type],
+    );
+    rows.push(...result.rows);
+  }
+
+  rows.sort((a, b) => String(b.updated_at ?? b.created_at ?? "").localeCompare(String(a.updated_at ?? a.created_at ?? "")));
+  return {
+    page,
+    pageSize: limit,
+    total: rows.length,
+    records: rows.slice(offset, offset + limit).map((row) => ({
+      id: row.id,
+      type: row.type,
+      name: row.name,
+      amount: row.amount,
+      owner: row.owner_id
+        ? {
+            id: row.owner_id,
+            email: row.owner_email,
+          }
+        : null,
+      cleanupAssignee: row.cleanup_assigned_to
+        ? {
+            id: row.cleanup_assigned_to,
+            email: row.cleanup_assignee_email,
+          }
+        : null,
+      stage: row.stage_id_resolved
+        ? {
+            id: row.stage_id_resolved,
+            slug: row.stage_slug,
+            label: row.stage_label,
+          }
+        : null,
+    })),
+  };
 }
 
 export async function recordDetail(typeValue: string, id: string, user: AuthContext) {

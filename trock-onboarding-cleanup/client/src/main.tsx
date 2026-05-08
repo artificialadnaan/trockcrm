@@ -3,6 +3,7 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { createRoot } from "react-dom/client";
 import { BrowserRouter, Navigate, Route, Routes } from "react-router-dom";
 import { AppLayout } from "./components/layout";
+import { AdminReassignPage } from "./pages/admin-reassign-page";
 import { CleanupDashboard } from "./pages/cleanup-dashboard";
 import { LoginPage } from "./pages/login-page";
 import { RecordEditPage } from "./pages/record-edit-page";
@@ -29,6 +30,7 @@ createRoot(document.getElementById("root")!).render(
             <Route path="/cleanup" element={<CleanupDashboard />} />
             <Route path="/cleanup/:type" element={<RecordListPage />} />
             <Route path="/cleanup/:type/:id" element={<RecordEditPage />} />
+            <Route path="/admin/reassign" element={<AdminReassignPage />} />
           </Route>
           <Route path="*" element={<Navigate to="/" replace />} />
         </Routes>

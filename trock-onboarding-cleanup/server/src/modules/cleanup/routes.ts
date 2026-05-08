@@ -3,6 +3,7 @@ import { requireAuth, requireRole } from "../../lib/auth.js";
 import {
   adminProgress,
   adminSkips,
+  bulkReassignRecords,
   completeOnboarding,
   createProperty,
   flagDuplicate,
@@ -11,6 +12,9 @@ import {
   progressForUser,
   queueForUser,
   recordDetail,
+  reassignRecord,
+  reassignmentRecords,
+  reassignmentUsers,
   searchEntities,
   skipRecord,
 } from "./service.js";
@@ -138,6 +142,28 @@ cleanupRouter.get("/admin/progress", requireRole("admin", "director"), async (_r
   }
 });
 
+cleanupRouter.get("/admin/reassignment-users", requireRole("admin", "director"), async (_req, res) => {
+  try {
+    return res.json(await reassignmentUsers());
+  } catch (error) {
+    return sendError(res, error);
+  }
+});
+
+cleanupRouter.get("/admin/reassignment-records", requireRole("admin", "director"), async (req, res) => {
+  try {
+    const page = typeof req.query.page === "string" ? Number.parseInt(req.query.page, 10) : 1;
+    return res.json(await reassignmentRecords({
+      type: typeof req.query.type === "string" ? req.query.type : "all",
+      q: typeof req.query.q === "string" ? req.query.q : "",
+      owner: typeof req.query.owner === "string" ? req.query.owner : "all",
+      page: Number.isFinite(page) ? page : 1,
+    }));
+  } catch (error) {
+    return sendError(res, error);
+  }
+});
+
 cleanupRouter.get("/admin/skips", requireRole("admin", "director"), async (req, res) => {
   try {
     const reason = typeof req.query.reason === "string" ? req.query.reason : undefined;
@@ -158,6 +184,28 @@ cleanupRouter.post("/admin/users/:userId/complete-onboarding", requireRole("admi
 cleanupRouter.post("/admin/bulk-historical-pass-global", requireRole("admin", "director"), async (req, res) => {
   try {
     return res.json(await historicalPass(req.user!, true));
+  } catch (error) {
+    return sendError(res, error);
+  }
+});
+
+cleanupRouter.post("/admin/records/:type/:id/reassign", requireRole("admin", "director"), async (req, res) => {
+  try {
+    const newAssignedToUserId = typeof req.body?.newAssignedToUserId === "string" ? req.body.newAssignedToUserId : "";
+    const reason = typeof req.body?.reason === "string" ? req.body.reason : undefined;
+    return res.json(await reassignRecord(String(req.params.type), String(req.params.id), newAssignedToUserId, req.user!, reason));
+  } catch (error) {
+    return sendError(res, error);
+  }
+});
+
+cleanupRouter.post("/admin/records/bulk-reassign", requireRole("admin", "director"), async (req, res) => {
+  try {
+    const type = typeof req.body?.type === "string" ? req.body.type : "";
+    const recordIds = Array.isArray(req.body?.recordIds) ? req.body.recordIds.map(String) : [];
+    const newAssignedToUserId = typeof req.body?.newAssignedToUserId === "string" ? req.body.newAssignedToUserId : "";
+    const reason = typeof req.body?.reason === "string" ? req.body.reason : undefined;
+    return res.json(await bulkReassignRecords(type, recordIds, newAssignedToUserId, req.user!, reason));
   } catch (error) {
     return sendError(res, error);
   }

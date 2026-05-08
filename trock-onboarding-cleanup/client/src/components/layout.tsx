@@ -1,5 +1,5 @@
 import { Outlet, useNavigate } from "react-router-dom";
-import { HardHat, LogOut } from "lucide-react";
+import { HardHat, LogOut, Shuffle } from "lucide-react";
 import { useMe } from "../hooks/use-cleanup";
 import { Button } from "./ui";
 
@@ -21,6 +21,12 @@ export function AppLayout() {
           </button>
           <div className="hidden items-center gap-3 sm:flex">
             <span className="text-sm text-stone-300">{user?.displayName ?? user?.email}</span>
+            {user?.role === "admin" || user?.role === "director" ? (
+              <Button variant="ghost" className="text-stone-50 hover:bg-stone-800" onClick={() => navigate("/admin/reassign")}>
+                <Shuffle className="h-4 w-4" />
+                Reassign
+              </Button>
+            ) : null}
             <Button variant="ghost" className="text-stone-50 hover:bg-stone-800" onClick={() => window.location.assign(mainCrmUrl())}>
               <LogOut className="h-4 w-4" />
               CRM

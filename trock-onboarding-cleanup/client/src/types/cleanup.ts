@@ -31,6 +31,30 @@ export type QueueRecord = {
 
 export type QueueResponse = Record<RecordTypeSingular, QueueRecord[]>;
 
+export type ReassignmentUser = {
+  id: string;
+  email: string;
+  displayName: string;
+  role: string;
+};
+
+export type ReassignmentRecord = {
+  id: string;
+  type: RecordTypeSingular;
+  name: string;
+  amount?: string | number | null;
+  owner?: { id: string; email: string } | null;
+  cleanupAssignee?: { id: string; email: string } | null;
+  stage?: { id: string; slug: string; label: string } | null;
+};
+
+export type ReassignmentRecordsResponse = {
+  page: number;
+  pageSize: number;
+  total: number;
+  records: ReassignmentRecord[];
+};
+
 export type ProgressResponse = {
   totalAssigned: number;
   completed: number;
