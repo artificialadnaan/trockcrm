@@ -84,3 +84,4 @@
 - D CODEX-FIX-9 2026-05-08T15:23Z: PR #163 force-pushed with five fixes (P1 listLeads office scoping cross-tenant leak, P2 scope+assignedRepId combine, P2 useLeads stale-response, P2 completedThisWeek window, P3 visibility badge total). Five regression tests added.
 - HOTFIX-POSTMERGE CLAIM 2026-05-08T16:47:17Z: hotfix/postmerge-track-d, four production bugs from PR #163. Worktree: trockcrm-hotfix-postmerge.
 - HOTFIX-POSTMERGE PR-OPEN 2026-05-08T16:48:15Z: PR https://github.com/artificialadnaan/trockcrm/pull/175.
+- HOTFIX-POSTMERGE LIVE 2026-05-08T17:05:27Z: PR #175 merged to main at d9e482d; Railway API production deployment 2c3a042d-7e5b-40e2-9283-e319a8473418 succeeded.
