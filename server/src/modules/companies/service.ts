@@ -1,5 +1,5 @@
-import { eq, and, ilike, asc, desc, count, sql } from "drizzle-orm";
-import { companies, contacts, deals } from "@trock-crm/shared/schema";
+import { eq, and, ilike, asc, desc, count, sql, getTableColumns } from "drizzle-orm";
+import { companies, contacts, deals, users } from "@trock-crm/shared/schema";
 import type { NodePgDatabase } from "drizzle-orm/node-postgres";
 import { AppError } from "../../middleware/error-handler.js";
 
@@ -114,8 +114,12 @@ export async function listCompanies(
 
 export async function getCompanyById(tenantDb: TenantDb, id: string) {
   const rows = await tenantDb
-    .select()
+    .select({
+      ...getTableColumns(companies),
+      ownerUserName: users.displayName,
+    })
     .from(companies)
+    .leftJoin(users, eq(users.id, companies.ownerUserId))
     .where(eq(companies.id, id))
     .limit(1);
   return rows[0] ?? null;

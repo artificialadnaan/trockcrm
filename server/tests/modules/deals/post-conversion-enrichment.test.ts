@@ -13,13 +13,15 @@ vi.mock("../../../src/modules/pipeline/service.js", () => ({
 }));
 
 vi.mock("@trock-crm/shared/schema", async () => {
-  const [dealsModule, approvalsModule, changeOrdersModule, historyModule, pipelineStageModule] =
+  const [dealsModule, approvalsModule, changeOrdersModule, historyModule, pipelineStageModule, usersModule, companiesModule] =
     await Promise.all([
       import("../../../../shared/src/schema/tenant/deals.js"),
       import("../../../../shared/src/schema/tenant/deal-approvals.js"),
       import("../../../../shared/src/schema/tenant/change-orders.js"),
       import("../../../../shared/src/schema/tenant/deal-stage-history.js"),
       import("../../../../shared/src/schema/public/pipeline-stage-config.js"),
+      import("../../../../shared/src/schema/public/users.js"),
+      import("../../../../shared/src/schema/tenant/companies.js"),
     ]);
 
   return {
@@ -28,6 +30,8 @@ vi.mock("@trock-crm/shared/schema", async () => {
     ...changeOrdersModule,
     ...historyModule,
     ...pipelineStageModule,
+    ...usersModule,
+    ...companiesModule,
   };
 });
 
@@ -49,23 +53,29 @@ function createFakeTenantDb(state: {
 
   return {
     select() {
+      const queryFor = (table: unknown) => {
+        const rows = tableRows.get(table) ?? [];
+        return {
+          leftJoin() {
+            return this;
+          },
+          where() {
+            return this;
+          },
+          orderBy() {
+            return this;
+          },
+          limit() {
+            return this;
+          },
+          then(onfulfilled: (value: unknown[]) => unknown) {
+            return Promise.resolve(rows.map((row) => ({ ...row }))).then(onfulfilled);
+          },
+        };
+      };
       return {
         from(table: unknown) {
-          const rows = tableRows.get(table) ?? [];
-          return {
-            where() {
-              return this;
-            },
-            orderBy() {
-              return this;
-            },
-            limit() {
-              return this;
-            },
-            then(onfulfilled: (value: unknown[]) => unknown) {
-              return Promise.resolve(rows.map((row) => ({ ...row }))).then(onfulfilled);
-            },
-          };
+          return queryFor(table);
         },
       };
     },
@@ -249,5 +259,31 @@ describe("getDealDetail", () => {
         "nextStep",
       ],
     });
+  });
+
+  it("returns assigned rep and company names for the detail header", async () => {
+    const tenantDb = createFakeTenantDb({
+      deals: [
+        {
+          id: "deal-1",
+          dealNumber: "TR-2026-0001",
+          name: "Palm Villas repaint",
+          stageId: "stage-opportunity",
+          assignedRepId: "rep-1",
+          assignedRepName: "Brett Jones",
+          companyId: "company-1",
+          companyName: "Palm Villas",
+          propertyId: "property-1",
+          sourceLeadId: "lead-1",
+          workflowRoute: "normal",
+          isActive: true,
+        },
+      ],
+    });
+
+    const detail = await getDealDetail(tenantDb as never, "deal-1", "director", "director-1");
+
+    expect(detail?.assignedRepName).toBe("Brett Jones");
+    expect(detail?.companyName).toBe("Palm Villas");
   });
 });

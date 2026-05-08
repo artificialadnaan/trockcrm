@@ -880,7 +880,20 @@ export async function getDealDetail(tenantDb: TenantDb, dealId: string, userRole
   const deal = await getDealById(tenantDb, dealId, userRole, userId);
   if (!deal) return null;
 
-  const currentStage = await getStageByIdForWorkflowRoute(deal.stageId, deal.workflowRoute);
+  const [detailDeal] = await tenantDb
+    .select({
+      ...getTableColumns(deals),
+      assignedRepName: users.displayName,
+      companyName: companies.name,
+    })
+    .from(deals)
+    .leftJoin(users, eq(users.id, deals.assignedRepId))
+    .leftJoin(companies, eq(companies.id, deals.companyId))
+    .where(eq(deals.id, dealId))
+    .limit(1);
+
+  const dealWithMetadata = detailDeal ?? deal;
+  const currentStage = await getStageByIdForWorkflowRoute(dealWithMetadata.stageId, dealWithMetadata.workflowRoute);
 
   const [stageHistory, approvals, cos] = await Promise.all([
     tenantDb
@@ -901,9 +914,9 @@ export async function getDealDetail(tenantDb: TenantDb, dealId: string, userRole
   ]);
 
   return {
-    ...deal,
-    postConversionEnrichment: evaluatePostConversionEnrichment(deal as any, currentStage ?? { isTerminal: true }),
-    bidBoardOwnership: buildBidBoardOwnershipState(deal),
+    ...dealWithMetadata,
+    postConversionEnrichment: evaluatePostConversionEnrichment(dealWithMetadata as any, currentStage ?? { isTerminal: true }),
+    bidBoardOwnership: buildBidBoardOwnershipState(dealWithMetadata),
     stageHistory,
     approvals,
     changeOrders: cos,
