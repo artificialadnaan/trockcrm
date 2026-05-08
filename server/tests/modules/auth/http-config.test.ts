@@ -4,6 +4,7 @@ import {
   createCsrfToken,
   FIELD_CSRF_HEADER_VALUE,
   getAllowedCorsOrigins,
+  getCsrfCookieOptions,
   getLogoutCookieClears,
   getRequestOrigin,
   getTokenCookieOptions,
@@ -41,6 +42,16 @@ describe("auth http config", () => {
       secure: true,
       sameSite: "lax",
       domain: ".trockcrm.com",
+    });
+  });
+
+  it("sets readable CSRF cookies on the shared production auth domain", () => {
+    expect(getCsrfCookieOptions({ NODE_ENV: "production" })).toMatchObject({
+      httpOnly: false,
+      secure: true,
+      sameSite: "lax",
+      domain: ".trockcrm.com",
+      path: "/",
     });
   });
 
