@@ -19,8 +19,8 @@ interface User {
 interface AuthContextValue {
   user: User | null;
   loading: boolean;
-  login: (email: string, returnTo?: string | null) => Promise<{ returnTo?: string | null }>;
-  localLogin: (email: string, password: string, returnTo?: string | null) => Promise<{ returnTo?: string | null }>;
+  login: (email: string, returnTo?: string | null) => Promise<{ returnTo?: string | null; mustChangePassword?: boolean }>;
+  localLogin: (email: string, password: string, returnTo?: string | null) => Promise<{ returnTo?: string | null; mustChangePassword?: boolean }>;
   changePassword: (currentPassword: string, newPassword: string) => Promise<void>;
   logout: () => Promise<void>;
   refreshUser: () => Promise<void>;
@@ -61,8 +61,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       method: "POST",
       json: { email, password, returnTo },
     });
-    if (!data.returnTo) setUser(data.user);
-    return { returnTo: data.returnTo };
+    setUser(data.user);
+    return { returnTo: data.returnTo, mustChangePassword: Boolean(data.user.mustChangePassword) };
   };
 
   const changePassword = async (currentPassword: string, newPassword: string) => {

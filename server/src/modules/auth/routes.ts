@@ -229,10 +229,10 @@ router.post("/local/change-password", authMiddleware, async (req, res, next) => 
     });
 
     res.json({
-      user: {
+      user: await withOnboardingGate({
         ...req.user!,
         mustChangePassword: false,
-      },
+      }),
     });
   } catch (err) {
     next(err);
