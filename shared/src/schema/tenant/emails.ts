@@ -5,6 +5,7 @@ import {
   varchar,
   text,
   boolean,
+  jsonb,
   timestamp,
 } from "drizzle-orm/pg-core";
 import { EMAIL_DIRECTIONS } from "../../types/enums.js";
@@ -29,6 +30,7 @@ export const emails = pgTable("emails", {
   assignedEntityId: uuid("assigned_entity_id"),
   assignmentConfidence: varchar("assignment_confidence", { length: 20 }),
   assignmentAmbiguityReason: varchar("assignment_ambiguity_reason", { length: 255 }),
+  aiSuggestions: jsonb("ai_suggestions").default([]).notNull(),
   threadBindingId: uuid("thread_binding_id"),
   userId: uuid("user_id").notNull(),
   sentAt: timestamp("sent_at", { withTimezone: true }).notNull(),
