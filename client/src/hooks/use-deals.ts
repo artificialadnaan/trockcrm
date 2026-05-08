@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
 import { api } from "@/lib/api";
 import {
   appendPipelineTerminalDateParams,
@@ -94,6 +94,7 @@ export interface Deal {
   assignedRepId: string;
   assignedRepName?: string | null;
   companyId: string | null;
+  companyName?: string | null;
   propertyId: string | null;
   sourceLeadId: string | null;
   primaryContactId: string | null;
@@ -262,6 +263,7 @@ export interface DealFilters {
   sortDir?: "asc" | "desc";
   page?: number;
   limit?: number;
+  scope?: "mine" | "team" | "all";
 }
 
 export interface Pagination {
@@ -349,8 +351,11 @@ export function useDeals(filters: DealFilters = {}) {
   const [pagination, setPagination] = useState<Pagination>({ page: 1, limit: 50, total: 0, totalPages: 0 });
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const requestIdRef = useRef(0);
 
   const fetchDeals = useCallback(async () => {
+    const requestId = requestIdRef.current + 1;
+    requestIdRef.current = requestId;
     setLoading(true);
     setError(null);
     try {
@@ -368,17 +373,22 @@ export function useDeals(filters: DealFilters = {}) {
       if (filters.sortDir) params.set("sortDir", filters.sortDir);
       if (filters.page) params.set("page", String(filters.page));
       if (filters.limit) params.set("limit", String(filters.limit));
+      if (filters.scope) params.set("scope", filters.scope);
 
       const qs = params.toString();
       const data = await api<{ deals: Deal[]; pagination: Pagination }>(
         `/deals${qs ? `?${qs}` : ""}`
       );
+      if (requestId !== requestIdRef.current) return;
       setDeals(data.deals);
       setPagination(data.pagination);
     } catch (err: unknown) {
+      if (requestId !== requestIdRef.current) return;
       setError(err instanceof Error ? err.message : "Failed to load deals");
     } finally {
-      setLoading(false);
+      if (requestId === requestIdRef.current) {
+        setLoading(false);
+      }
     }
   }, [
     filters.search,
@@ -394,6 +404,7 @@ export function useDeals(filters: DealFilters = {}) {
     filters.sortDir,
     filters.page,
     filters.limit,
+    filters.scope,
   ]);
 
   useEffect(() => {

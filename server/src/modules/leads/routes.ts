@@ -88,6 +88,10 @@ function readStageInput(req: Parameters<typeof router.get>[1] extends never ? ne
   };
 }
 
+function readListScope(value: unknown): "mine" | "team" | "all" {
+  return value === "mine" || value === "team" || value === "all" ? value : "all";
+}
+
 // GET /api/leads
 router.get("/", async (req, res, next) => {
   try {
@@ -98,6 +102,8 @@ router.get("/", async (req, res, next) => {
         companyId: req.query.companyId as string | undefined,
         propertyId: req.query.propertyId as string | undefined,
         assignedRepId: req.query.assignedRepId as string | undefined,
+        scope: readListScope(req.query.scope),
+        activeOfficeId: req.user!.activeOfficeId ?? req.user!.officeId,
         status: req.query.status as "open" | "converted" | "disqualified" | undefined,
         isActive:
           req.query.isActive === "all"

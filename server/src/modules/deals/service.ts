@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { eq, and, desc, asc, ilike, inArray, sql, or, isNull, not } from "drizzle-orm";
+import { eq, and, desc, asc, ilike, inArray, sql, or, isNull, not, getTableColumns } from "drizzle-orm";
 import type { NodePgDatabase } from "drizzle-orm/node-postgres";
 import {
   deals,
@@ -9,6 +9,7 @@ import {
   changeOrders,
   pipelineStageConfig,
   contacts,
+  companies,
   leads,
   users,
   userOfficeAccess,
@@ -30,6 +31,7 @@ import { evaluatePostConversionEnrichment } from "./post-conversion-enrichment.j
 import { createAssignmentTaskIfNeeded } from "../assignment-tasks/service.js";
 import { generateDealNumberForProject } from "../../services/projectNumber.js";
 import { isContractSignedHandoffEnabled } from "../../config/feature-flags.js";
+import { resolveTeamRepIds } from "../shared/team-scope.js";
 
 // Type alias for the tenant-scoped Drizzle instance
 type TenantDb = NodePgDatabase<typeof schema>;
@@ -53,6 +55,8 @@ export interface DealFilters {
   sortDir?: "asc" | "desc";
   page?: number;
   limit?: number;
+  scope?: WorkspaceScope;
+  activeOfficeId?: string;
 }
 
 export interface PipelineTerminalDateFilters {
@@ -521,7 +525,11 @@ function terminalWorkspaceDateConditions(stage: PipelineStageRow, input: DealSta
   return [];
 }
 
-function buildDealWorkspaceScope(input: DealBoardInput | DealStagePageInput, stage?: PipelineStageRow) {
+async function buildDealWorkspaceScope(
+  tenantDb: TenantDb,
+  input: DealBoardInput | DealStagePageInput,
+  stage?: PipelineStageRow
+) {
   const terminalDateConditions = stage && "stageId" in input ? terminalWorkspaceDateConditions(stage, input) : [];
   const filters = [
     sql`u.office_id = ${input.activeOfficeId}`,
@@ -533,8 +541,11 @@ function buildDealWorkspaceScope(input: DealBoardInput | DealStagePageInput, sta
     filters.push(...terminalDateConditions);
   }
 
-  if (input.scope === "mine") {
+  if (input.role === "rep" || input.scope === "mine") {
     filters.push(sql`d.assigned_rep_id = ${input.userId}`);
+  } else if (input.scope === "team") {
+    const teamRepIds = await resolveTeamRepIds(tenantDb, input.userId, input.activeOfficeId);
+    filters.push(teamRepIds.length > 0 ? sql`d.assigned_rep_id IN (${sqlList(teamRepIds)})` : sql`false`);
   }
 
   return sql.join(filters, sql` and `);
@@ -719,6 +730,7 @@ export async function getDeals(tenantDb: TenantDb, filters: DealFilters, userRol
   const page = filters.page ?? 1;
   const limit = filters.limit ?? 50;
   const offset = (page - 1) * limit;
+  const scope = userRole === "rep" ? "mine" : filters.scope ?? "all";
 
   // Build conditions array
   const conditions: any[] = [];
@@ -727,9 +739,28 @@ export async function getDeals(tenantDb: TenantDb, filters: DealFilters, userRol
   const showActive = filters.isActive ?? true;
   conditions.push(eq(deals.isActive, showActive));
 
-  // Reps only see their own deals
-  if (userRole === "rep") {
+  if (filters.activeOfficeId) {
+    const officeRows = await tenantDb
+      .select({ id: users.id })
+      .from(users)
+      .where(eq(users.officeId, filters.activeOfficeId));
+    const officeUserIds = officeRows.map((user) => user.id);
+    conditions.push(officeUserIds.length > 0 ? inArray(deals.assignedRepId, officeUserIds) : sql`false`);
+  }
+
+  if (scope === "mine") {
     conditions.push(eq(deals.assignedRepId, userId));
+  } else if (scope === "team") {
+    const teamConditions = [eq(users.reportsTo, userId), eq(users.isActive, true)];
+    if (filters.activeOfficeId) {
+      teamConditions.push(eq(users.officeId, filters.activeOfficeId));
+    }
+    const teamRows = await tenantDb
+      .select({ id: users.id })
+      .from(users)
+      .where(and(...teamConditions));
+    const teamUserIds = teamRows.map((user) => user.id);
+    conditions.push(teamUserIds.length > 0 ? inArray(deals.assignedRepId, teamUserIds) : sql`false`);
   }
 
   // Filter by assigned rep (directors/admins filtering by rep)
@@ -1451,7 +1482,7 @@ export async function getDealsForPipeline(
   tenantDb: TenantDb,
   userRole: string,
   userId: string,
-  filters?: { assignedRepId?: string; includeDd?: boolean } & PipelineTerminalDateFilters
+  filters?: { assignedRepId?: string; includeDd?: boolean; scope?: WorkspaceScope; activeOfficeId?: string | null } & PipelineTerminalDateFilters
 ) {
   // Get all stages ordered
   const stages = await db
@@ -1510,13 +1541,32 @@ export async function getDealsForPipeline(
   // Reps see only their own deals
   if (userRole === "rep") {
     conditions.push(eq(deals.assignedRepId, userId));
+  } else if (filters?.scope === "mine") {
+    conditions.push(eq(deals.assignedRepId, userId));
+  } else if (filters?.scope === "team") {
+    const teamRepIds = await resolveTeamRepIds(tenantDb, userId, filters.activeOfficeId ?? null);
+    if (filters.assignedRepId) {
+      conditions.push(
+        teamRepIds.includes(filters.assignedRepId)
+          ? eq(deals.assignedRepId, filters.assignedRepId)
+          : sql`false`
+      );
+    } else {
+      conditions.push(teamRepIds.length > 0 ? inArray(deals.assignedRepId, teamRepIds) : sql`false`);
+    }
   } else if (filters?.assignedRepId) {
     conditions.push(eq(deals.assignedRepId, filters.assignedRepId));
   }
 
   const allDeals = await tenantDb
-    .select()
+    .select({
+      ...getTableColumns(deals),
+      companyName: companies.name,
+      assignedRepName: users.displayName,
+    })
     .from(deals)
+    .leftJoin(companies, eq(companies.id, deals.companyId))
+    .leftJoin(users, eq(users.id, deals.assignedRepId))
     .where(and(...conditions))
     .orderBy(desc(deals.updatedAt))
     .limit(500);
@@ -1572,7 +1622,7 @@ export async function listDealStagePage(tenantDb: TenantDb, input: DealStagePage
   const page = Math.max(1, input.page || 1);
   const pageSize = Math.max(1, Math.min(100, input.pageSize || 25));
   const offset = (page - 1) * pageSize;
-  const scope = buildDealWorkspaceScope(input, stage);
+  const scope = await buildDealWorkspaceScope(tenantDb, input, stage);
   const stageSlugs = WON_TERMINAL_STAGE_SLUGS.includes(stage.slug as (typeof WON_TERMINAL_STAGE_SLUGS)[number])
     ? WON_TERMINAL_STAGE_SLUGS
     : LOST_TERMINAL_STAGE_SLUGS.includes(stage.slug as (typeof LOST_TERMINAL_STAGE_SLUGS)[number])

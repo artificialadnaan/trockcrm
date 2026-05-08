@@ -97,6 +97,10 @@ function readBoardInput(req: Parameters<typeof router.get>[1] extends never ? ne
   };
 }
 
+function readListScope(value: unknown): "mine" | "team" | "all" {
+  return value === "mine" || value === "team" || value === "all" ? value : "all";
+}
+
 function readStageInput(req: Parameters<typeof router.get>[1] extends never ? never : any) {
   const parseNumber = (value: unknown) => {
     const parsed = Number(value);
@@ -210,6 +214,8 @@ router.get("/", async (req, res, next) => {
       sortDir: req.query.sortDir as "asc" | "desc" | undefined,
       page: req.query.page ? parseInt(req.query.page as string, 10) : undefined,
       limit: req.query.limit ? parseInt(req.query.limit as string, 10) : undefined,
+      scope: readListScope(req.query.scope),
+      activeOfficeId: req.user!.activeOfficeId ?? req.user!.officeId,
     };
 
     const result = await getDeals(req.tenantDb!, filters, req.user!.role, req.user!.id);
@@ -236,6 +242,8 @@ router.get("/pipeline", async (req, res, next) => {
   try {
     const filters = {
       assignedRepId: req.query.assignedRepId as string | undefined,
+      scope: req.query.scope as "mine" | "team" | "all" | undefined,
+      activeOfficeId: req.user!.activeOfficeId ?? req.user!.officeId,
       includeDd: req.query.includeDd === "true",
       wonSince: req.query.won_since as string | undefined,
       wonUntil: req.query.won_until as string | undefined,

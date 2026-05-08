@@ -3,7 +3,7 @@ import { createRoot } from "react-dom/client";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { api } from "@/lib/api";
 import type { TerminalDateFilter, TerminalOutcome } from "@/lib/pipeline-terminal-filters";
-import { normalizeDealBoardResponse, useDealBoard, useDealStagePage } from "./use-deals";
+import { normalizeDealBoardResponse, useDealBoard, useDealStagePage, useDeals, type DealFilters } from "./use-deals";
 
 vi.mock("@/lib/api", () => ({
   api: vi.fn(),
@@ -134,7 +134,9 @@ function flushEffects() {
 }
 
 let latestResult: ReturnType<typeof useDealBoard> | null = null;
+let latestDealsResult: ReturnType<typeof useDeals> | null = null;
 let hookTerminalDateFilters: Record<TerminalOutcome, TerminalDateFilter> | undefined;
+let hookDealFilters: DealFilters = {};
 
 function HookProbe() {
   latestResult = useDealBoard("mine", false, hookTerminalDateFilters);
@@ -155,6 +157,11 @@ function StageHookProbe() {
       wonUntil: "2026-04-30",
     },
   });
+  return null;
+}
+
+function DealsHookProbe() {
+  latestDealsResult = useDeals(hookDealFilters);
   return null;
 }
 
@@ -186,6 +193,20 @@ async function renderStageHook() {
   return root;
 }
 
+async function renderDealsHook() {
+  const { document } = installFakeDom();
+  const container = document.createElement("div");
+  document.body.appendChild(container);
+  const root = createRoot(container as unknown as Element);
+
+  await act(async () => {
+    root.render(createElement(DealsHookProbe));
+    await flushEffects();
+  });
+
+  return root;
+}
+
 async function waitForIdle() {
   for (let attempt = 0; attempt < 10; attempt += 1) {
     if (latestResult && !latestResult.loading) return;
@@ -198,7 +219,9 @@ async function waitForIdle() {
 describe("normalizeDealBoardResponse", () => {
   beforeEach(() => {
     latestResult = null;
+    latestDealsResult = null;
     hookTerminalDateFilters = undefined;
+    hookDealFilters = {};
     vi.clearAllMocks();
   });
 
@@ -439,5 +462,65 @@ describe("normalizeDealBoardResponse", () => {
       await flushEffects();
     });
     vi.unstubAllGlobals();
+  });
+});
+
+describe("useDeals", () => {
+  beforeEach(() => {
+    latestDealsResult = null;
+    hookDealFilters = {};
+    vi.clearAllMocks();
+  });
+
+  it("ignores stale responses when scope changes rapidly", async () => {
+    const pending = new Map<string, (value: unknown) => void>();
+    vi.mocked(api).mockImplementation((path: string) => {
+      const scope = new URLSearchParams(path.split("?")[1] ?? "").get("scope") ?? "none";
+      return new Promise((resolve) => {
+        pending.set(scope, resolve);
+      }) as Promise<unknown>;
+    });
+
+    hookDealFilters = { scope: "mine" };
+    const root = await renderDealsHook();
+
+    hookDealFilters = { scope: "team" };
+    await act(async () => {
+      root.render(createElement(DealsHookProbe));
+      await flushEffects();
+    });
+
+    hookDealFilters = { scope: "all" };
+    await act(async () => {
+      root.render(createElement(DealsHookProbe));
+      await flushEffects();
+    });
+
+    await act(async () => {
+      pending.get("all")?.({
+        deals: [{ id: "deal-all", name: "All scoped deal" }],
+        pagination: { page: 1, limit: 50, total: 1, totalPages: 1 },
+      });
+      await flushEffects();
+    });
+
+    expect(latestDealsResult?.deals.map((deal) => deal.id)).toEqual(["deal-all"]);
+
+    await act(async () => {
+      pending.get("team")?.({
+        deals: [{ id: "deal-team", name: "Team scoped deal" }],
+        pagination: { page: 1, limit: 50, total: 1, totalPages: 1 },
+      });
+      pending.get("mine")?.({
+        deals: [{ id: "deal-mine", name: "Mine scoped deal" }],
+        pagination: { page: 1, limit: 50, total: 1, totalPages: 1 },
+      });
+      await flushEffects();
+    });
+
+    expect(latestDealsResult?.deals.map((deal) => deal.id)).toEqual(["deal-all"]);
+    await act(async () => {
+      root.unmount();
+    });
   });
 });

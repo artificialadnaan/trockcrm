@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { api, getCsrfToken, resolveApiBase } from "@/lib/api";
 export {
   getLeadBoardStageLabel,
@@ -195,6 +195,7 @@ export interface LeadFilters {
   assignedRepId?: string;
   status?: "open" | "converted" | "disqualified";
   isActive?: boolean | "all";
+  scope?: "mine" | "team" | "all";
 }
 
 export interface LeadBoardStage {
@@ -258,8 +259,11 @@ export function useLeads(filters: LeadFilters = {}) {
   const [leads, setLeads] = useState<LeadRecord[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const requestIdRef = useRef(0);
 
   const fetchLeads = useCallback(async () => {
+    const requestId = requestIdRef.current + 1;
+    requestIdRef.current = requestId;
     setLoading(true);
     setError(null);
     try {
@@ -269,16 +273,21 @@ export function useLeads(filters: LeadFilters = {}) {
       if (filters.propertyId) params.set("propertyId", filters.propertyId);
       if (filters.assignedRepId) params.set("assignedRepId", filters.assignedRepId);
       if (filters.status) params.set("status", filters.status);
+      if (filters.scope) params.set("scope", filters.scope);
       if (filters.isActive === "all") params.set("isActive", "all");
       else if (filters.isActive === false) params.set("isActive", "false");
 
       const qs = params.toString();
       const data = await api<{ leads: LeadRecord[] }>(`/leads${qs ? `?${qs}` : ""}`);
+      if (requestId !== requestIdRef.current) return;
       setLeads(data.leads);
     } catch (err: unknown) {
+      if (requestId !== requestIdRef.current) return;
       setError(err instanceof Error ? err.message : "Failed to load leads");
     } finally {
-      setLoading(false);
+      if (requestId === requestIdRef.current) {
+        setLoading(false);
+      }
     }
   }, [
     filters.assignedRepId,
@@ -286,6 +295,7 @@ export function useLeads(filters: LeadFilters = {}) {
     filters.isActive,
     filters.propertyId,
     filters.search,
+    filters.scope,
     filters.status,
   ]);
 
