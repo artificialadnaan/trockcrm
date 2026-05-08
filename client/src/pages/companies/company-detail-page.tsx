@@ -1,40 +1,55 @@
 import { useState, useEffect, useCallback, useMemo } from "react";
-import { useParams, useNavigate } from "react-router-dom";
+import { Link, useParams, useNavigate } from "react-router-dom";
 import {
-  ArrowLeft,
+  CheckCircle2,
   Edit,
   Download,
+  ExternalLink,
+  Hash,
   MapPin,
-  Phone,
   Globe,
   Users,
   Handshake,
   UserPlus,
   Mail,
   FileText,
-  Calendar,
   Building2,
   Plus,
+  MoreHorizontal,
+  Mic,
 } from "lucide-react";
-import { Link } from "react-router-dom";
-import { Button } from "@/components/ui/button";
+import { Button, buttonVariants } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
+import { Card, CardContent } from "@/components/ui/card";
 import {
   Dialog,
   DialogContent,
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
+import {
+  DetailPageShell,
+  DetailRailItem,
+  DetailRailSection,
+  type DetailPageShellKpi,
+  type DetailPageShellTab,
+} from "@/components/layout/detail-page-shell";
 import { DealStageBadge } from "@/components/deals/deal-stage-badge";
 import { LeadStageBadge } from "@/components/leads/lead-stage-badge";
-import { useCompanyDetail, useCompanyContacts, useCompanyDeals, verifyCompany } from "@/hooks/use-companies";
+import { useCompanyDetail, useCompanyContacts, useCompanyDeals, verifyCompany, type Company } from "@/hooks/use-companies";
 import { useLeads } from "@/hooks/use-leads";
 import { usePipelineStages } from "@/hooks/use-pipeline-config";
-import { formatPhone } from "@/lib/contact-utils";
 import { ContactForm } from "@/components/contacts/contact-form";
 import { CompanyCopilotPanel } from "@/components/ai/company-copilot-panel";
 import { RecordingList } from "@/components/call-recordings/recording-list";
 import { api } from "@/lib/api";
+import { cn } from "@/lib/utils";
 import { formatPropertyLabel, useProperties } from "@/hooks/use-properties";
 import type { Activity } from "@/hooks/use-activities";
 import { CRM_OWNED_LEAD_STAGE_SLUGS } from "@trock-crm/shared/types";
@@ -49,16 +64,6 @@ const COMPANY_CATEGORY_LABELS: Record<string, string> = {
   vendor: "Vendor",
   consultant: "Consultant",
   other: "Other",
-};
-
-const COMPANY_CATEGORY_COLORS: Record<string, string> = {
-  client: "bg-blue-100 text-blue-800",
-  subcontractor: "bg-orange-100 text-orange-800",
-  architect: "bg-red-100 text-red-800",
-  property_manager: "bg-green-100 text-green-800",
-  vendor: "bg-yellow-100 text-yellow-800",
-  consultant: "bg-indigo-100 text-indigo-800",
-  other: "bg-gray-100 text-gray-800",
 };
 
 // --- Utility Functions ---
@@ -89,6 +94,62 @@ function formatDate(dateStr: string): string {
     day: "numeric",
     year: "numeric",
   });
+}
+
+function formatNullable(value: string | number | null | undefined, fallback = "Not set") {
+  if (value == null || value === "") return fallback;
+  return String(value);
+}
+
+function formatIndustryLabel(value: string | null | undefined) {
+  if (!value) return null;
+  return value
+    .replace(/[_-]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim()
+    .replace(/\b\w/g, (letter) => letter.toUpperCase());
+}
+
+function formatCurrencyCompact(value: string | number | null | undefined) {
+  if (value == null || value === "") return "Unknown";
+  const amount = typeof value === "number" ? value : Number(String(value).replace(/[$,\s]/g, ""));
+  if (!Number.isFinite(amount)) return "Unknown";
+  return new Intl.NumberFormat("en-US", {
+    style: "currency",
+    currency: "USD",
+    notation: "compact",
+    maximumFractionDigits: amount >= 1_000_000 ? 1 : 0,
+  }).format(amount);
+}
+
+function formatCount(value: number | null | undefined) {
+  if (value == null) return "Unknown";
+  return String(value);
+}
+
+function companyLocation(company: { city: string | null; state: string | null; address: string | null; zip: string | null }) {
+  const cityState = [company.city, company.state].filter(Boolean).join(", ");
+  return [company.address, cityState, company.zip].filter(Boolean).join(" ");
+}
+
+function extractDomain(value: string | null | undefined) {
+  if (!value) return null;
+  try {
+    const url = value.startsWith("http") ? new URL(value) : new URL(`https://${value}`);
+    return url.hostname.replace(/^www\./, "");
+  } catch {
+    return value.replace(/^https?:\/\//, "").replace(/^www\./, "").split("/")[0] || null;
+  }
+}
+
+function buildCompanyWebsiteUrl(value: string | null | undefined) {
+  if (!value) return null;
+  return value.startsWith("http") ? value : `https://${value}`;
+}
+
+function buildHubSpotCompanyUrl(hubspotCompanyId: string | null | undefined) {
+  if (!hubspotCompanyId) return null;
+  return `https://app.hubspot.com/contacts/0/company/${encodeURIComponent(hubspotCompanyId)}`;
 }
 
 function exportCompanyCSV(
@@ -130,7 +191,7 @@ function exportCompanyCSV(
 
 // --- Types ---
 
-type Tab = "contacts" | "portfolio" | "deals" | "files" | "emails" | "recordings";
+type Tab = "overview" | "contacts" | "portfolio" | "deals" | "files" | "emails" | "recordings";
 
 // --- Main Component ---
 
@@ -139,7 +200,7 @@ export function CompanyDetailPage() {
   const navigate = useNavigate();
   const { company, loading, error, refetch: refetchCompany } = useCompanyDetail(id);
   const { contacts: allContacts } = useCompanyContacts(id);
-  const [activeTab, setActiveTab] = useState<Tab>("contacts");
+  const [activeTab, setActiveTab] = useState<Tab>("overview");
   const [addContactOpen, setAddContactOpen] = useState(false);
   const [contactsKey, setContactsKey] = useState(0);
   const [verifyingCompany, setVerifyingCompany] = useState(false);
@@ -168,277 +229,238 @@ export function CompanyDetailPage() {
     );
   }
 
-  const categoryLabel =
-    company.category
-      ? COMPANY_CATEGORY_LABELS[company.category] ?? company.category
-      : null;
-  const categoryColor =
-    company.category
-      ? COMPANY_CATEGORY_COLORS[company.category] ?? "bg-gray-100 text-gray-800"
-      : null;
+  const categoryLabel = company.category ? COMPANY_CATEGORY_LABELS[company.category] ?? company.category : null;
+  const industryLabel = formatIndustryLabel(company.industry) ?? categoryLabel ?? "Company";
+  const location = companyLocation(company);
+  const domain = company.domain ?? extractDomain(company.website);
+  const hubspotCompanyId = company.hubspotCompanyId ?? company.hubspotId ?? null;
+  const hubspotUrl = buildHubSpotCompanyUrl(hubspotCompanyId);
+  const websiteUrl = buildCompanyWebsiteUrl(company.website ?? company.domain);
+  const propertyCount = company.propertiesCount;
+  const contactCount = company.contactsCount ?? company.contactCount;
+  const dealCount = company.activeDealsCount ?? company.dealCount;
+  const pipelineKpiValue =
+    company.pipelineValue == null || company.pipelineValue === ""
+      ? dealCount == null
+        ? "Unknown"
+        : String(dealCount)
+      : formatCurrencyCompact(company.pipelineValue);
 
-  const tabs: { key: Tab; label: string; icon: React.ReactNode }[] = [
-    { key: "contacts", label: "Contacts", icon: <Users className="h-4 w-4" /> },
-    { key: "portfolio", label: "Portfolio", icon: <Building2 className="h-4 w-4" /> },
-    { key: "deals", label: "Deals", icon: <Handshake className="h-4 w-4" /> },
-    { key: "files", label: "Files", icon: <FileText className="h-4 w-4" /> },
-    { key: "emails", label: "Emails", icon: <Mail className="h-4 w-4" /> },
-    { key: "recordings", label: "Recordings", icon: <Phone className="h-4 w-4" /> },
+  const handleVerifyCompany = async () => {
+    setVerifyingCompany(true);
+    try {
+      await verifyCompany(company.id);
+      await refetchCompany();
+    } finally {
+      setVerifyingCompany(false);
+    }
+  };
+
+  const handleDeleteCompany = async () => {
+    if (!window.confirm("Are you sure you want to delete this company? This action can be undone by an admin.")) return;
+    try {
+      await api(`/companies/${company.id}`, { method: "DELETE" });
+      navigate("/companies");
+    } catch (err: unknown) {
+      alert(err instanceof Error ? err.message : "Failed to delete company");
+    }
+  };
+
+  const tabs: DetailPageShellTab[] = [
+    { id: "overview", label: "Overview", icon: <FileText className="h-4 w-4" /> },
+    { id: "contacts", label: "Contacts", icon: <Users className="h-4 w-4" />, count: contactCount },
+    { id: "portfolio", label: "Portfolio", icon: <Building2 className="h-4 w-4" />, count: propertyCount },
+    { id: "deals", label: "Deals", icon: <Handshake className="h-4 w-4" />, count: dealCount },
+    { id: "files", label: "Files", icon: <FileText className="h-4 w-4" /> },
+    { id: "emails", label: "Emails", icon: <Mail className="h-4 w-4" /> },
+    { id: "recordings", label: "Recordings", icon: <Mic className="h-4 w-4" /> },
   ];
 
-  return (
-    <div className="space-y-6">
-      {/* Back button */}
-      <Button
-        variant="ghost"
-        size="sm"
-        className="-ml-2 text-muted-foreground hover:text-foreground"
-        onClick={() => navigate("/companies")}
+  const kpis: DetailPageShellKpi[] = [
+    {
+      eyebrow: "Active pipeline",
+      value: pipelineKpiValue,
+      captionLabel: dealCount == null ? "No data" : `${dealCount} deals`,
+      captionContext: company.pipelineValue == null || company.pipelineValue === "" ? "No tracked value" : "open value",
+    },
+    {
+      eyebrow: "Properties",
+      value: formatCount(propertyCount),
+      captionLabel: propertyCount == null ? "No data" : "In portfolio",
+      captionContext: "linked properties",
+    },
+    {
+      eyebrow: "Contacts",
+      value: formatCount(contactCount),
+      captionLabel: contactCount == null ? "No data" : "Decision makers",
+      captionContext: "across roles",
+      accent: "red",
+    },
+  ];
+
+  const typeBadge = (
+    <span className="rounded-full bg-slate-100 px-2 py-1 text-[10px] font-black uppercase tracking-[0.16em] text-slate-700">
+      {industryLabel}
+    </span>
+  );
+
+  const statusBadge = company.companyVerifiedAt ? (
+    <span className="inline-flex items-center gap-1 rounded-full bg-emerald-50 px-2 py-1 text-[10px] font-black uppercase tracking-[0.16em] text-emerald-700">
+      <CheckCircle2 className="h-3 w-3" />
+      Verified
+    </span>
+  ) : company.companyVerificationStatus === "pending" ? (
+    <span className="rounded-full bg-amber-50 px-2 py-1 text-[10px] font-black uppercase tracking-[0.16em] text-amber-700">
+      Pending verification
+    </span>
+  ) : null;
+
+  const subtitleSlot = (
+    <>
+      {location ? (
+        <span className="inline-flex items-center gap-1">
+          <MapPin className="h-4 w-4" />
+          {location}
+        </span>
+      ) : null}
+      {domain ? (
+        <span className="inline-flex items-center gap-1">
+          <Globe className="h-4 w-4" />
+          {domain}
+        </span>
+      ) : null}
+      {hubspotCompanyId ? (
+        <span className="inline-flex items-center gap-1 font-mono text-xs text-slate-500">
+          <Hash className="h-3.5 w-3.5" />
+          {hubspotCompanyId}
+        </span>
+      ) : null}
+      <span>
+        {company.companyVerifiedAt
+          ? `Verified ${formatDate(company.companyVerifiedAt)}`
+          : company.companyVerificationStatus === "pending"
+            ? "Verification pending"
+            : "Verification not set"}
+      </span>
+    </>
+  );
+
+  const actionsSlot = (
+    <>
+      <Link to={`/companies/${company.id}/edit`} className={cn(buttonVariants({ variant: "outline", size: "sm" }))}>
+        <Edit className="h-4 w-4" />
+        Edit
+      </Link>
+      {hubspotUrl ? (
+        <a href={hubspotUrl} target="_blank" rel="noreferrer" className={cn(buttonVariants({ variant: "outline", size: "sm" }))}>
+          <ExternalLink className="h-4 w-4" />
+          HubSpot
+        </a>
+      ) : null}
+      <Link
+        to={`/deals/new?companyId=${encodeURIComponent(company.id)}`}
+        className={cn(buttonVariants({ size: "sm" }), "bg-brand-red text-white hover:bg-brand-red/90")}
       >
-        <ArrowLeft className="h-4 w-4 mr-1" />
-        Companies
-      </Button>
+        <Plus className="h-4 w-4" />
+        New deal
+      </Link>
+      <DropdownMenu>
+        <DropdownMenuTrigger
+          render={
+            <Button variant="outline" size="icon">
+              <MoreHorizontal className="h-4 w-4" />
+            </Button>
+          }
+        />
+        <DropdownMenuContent align="end">
+          <DropdownMenuItem onClick={() => setAddContactOpen(true)}>
+            <UserPlus className="h-4 w-4 mr-2" />
+            Add Contact
+          </DropdownMenuItem>
+          <DropdownMenuItem onClick={() => exportCompanyCSV(company, allContacts)}>
+            <Download className="h-4 w-4 mr-2" />
+            Export Data
+          </DropdownMenuItem>
+          {company.companyVerificationStatus === "pending" ? (
+            <DropdownMenuItem onClick={handleVerifyCompany}>
+              <CheckCircle2 className="h-4 w-4 mr-2" />
+              {verifyingCompany ? "Verifying..." : "Verify Company"}
+            </DropdownMenuItem>
+          ) : null}
+          <DropdownMenuItem onClick={handleDeleteCompany} className="text-red-600">
+            Delete Company
+          </DropdownMenuItem>
+        </DropdownMenuContent>
+      </DropdownMenu>
+    </>
+  );
 
-      {/* Hero Header */}
-      <div className="flex flex-col lg:flex-row gap-6 items-start">
-        {/* Left side: company identity */}
-        <div className="flex-1 min-w-0">
-          {/* Active Portfolio label */}
-          <div className="flex items-center gap-2 mb-3">
-            <span className="relative flex h-2.5 w-2.5">
-              <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-[#CC0000] opacity-75" />
-              <span className="relative inline-flex rounded-full h-2.5 w-2.5 bg-[#CC0000]" />
-            </span>
-            <span className="text-[11px] font-bold uppercase tracking-[0.15em] text-[#CC0000]">
-              Active Portfolio
-            </span>
-          </div>
-
-          {/* Company name */}
-          <h1 className="text-4xl lg:text-5xl font-black tracking-tighter text-foreground leading-none mb-2">
-            {company.name}
-          </h1>
-
-          {/* Description / notes */}
-          {company.notes && (
-            <p className="text-lg font-light text-muted-foreground max-w-xl mb-4 line-clamp-2">
-              {company.notes}
+  const tabContent = (
+    <div className="space-y-4">
+      {activeTab === "overview" && (
+        <div className="space-y-4">
+          <CompanyCopilotPanel companyId={company.id} />
+          <div className="rounded-lg border bg-slate-50/50 p-4">
+            <p className="text-[11px] font-bold uppercase tracking-[0.2em] text-slate-500">About</p>
+            <p className="mt-2 text-sm leading-relaxed text-slate-700">
+              {company.notes ?? "No company notes recorded yet."}
             </p>
-          )}
-
-          {/* Category badge */}
-          {categoryLabel && categoryColor && (
-            <Badge variant="outline" className={`${categoryColor} border-0 text-xs font-semibold mb-5`}>
-              {categoryLabel}
-            </Badge>
-          )}
-
-          {/* Action buttons */}
-          <div className="flex items-center gap-3 mt-2">
-            <Button
-              size="sm"
-              className="bg-gradient-to-r from-[#CC0000] to-[#991B1B] hover:from-[#B91C1C] hover:to-[#7F1D1D] text-white shadow-md"
-              onClick={() => navigate(`/companies/${company.id}/edit`)}
-            >
-              <Edit className="h-4 w-4 mr-2" />
-              Edit Profile
-            </Button>
-            <Button
-              variant="outline"
-              size="sm"
-              className="border-zinc-300 text-zinc-600 hover:bg-zinc-100"
-              onClick={() => exportCompanyCSV(company, allContacts)}
-            >
-              <Download className="h-4 w-4 mr-2" />
-              Export Data
-            </Button>
-            <Button
-              variant="outline"
-              size="sm"
-              className="border-zinc-300 text-zinc-600 hover:bg-zinc-100"
-              onClick={() => setAddContactOpen(true)}
-            >
-              <UserPlus className="h-4 w-4 mr-2" />
-              Add Contact
-            </Button>
-            {company.companyVerificationStatus === "pending" ? (
-              <Button
-                variant="outline"
-                size="sm"
-                disabled={verifyingCompany}
-                className="border-amber-300 text-amber-700 hover:bg-amber-50"
-                onClick={async () => {
-                  setVerifyingCompany(true);
-                  try {
-                    await verifyCompany(company.id);
-                    await refetchCompany();
-                  } finally {
-                    setVerifyingCompany(false);
-                  }
-                }}
-              >
-                {verifyingCompany ? "Verifying..." : "Verify Company"}
-              </Button>
-            ) : null}
           </div>
-        </div>
-
-        {/* Right side: Bento stats grid */}
-        <div className="grid grid-cols-2 gap-4 w-full lg:w-auto lg:min-w-[360px]">
-          {/* Card 1: Contacts */}
-          <div className="bg-white rounded-xl border border-zinc-200 p-5 shadow-sm relative overflow-hidden">
-            <div className="absolute bottom-0 left-0 right-0 h-1 bg-[#CC0000]" />
-            <div className="flex items-center gap-2 mb-2">
-              <Users className="h-4 w-4 text-zinc-400" />
-              <span className="text-xs font-medium text-zinc-500 uppercase tracking-wider">
-                Associated Contacts
-              </span>
+          <div className="grid gap-3 sm:grid-cols-2">
+            <div className="rounded-lg border bg-white p-4">
+              <p className="text-[11px] font-bold uppercase tracking-[0.2em] text-slate-500">Location</p>
+              <p className="mt-2 text-sm font-semibold text-slate-950">{location || "Not set"}</p>
             </div>
-            <p className="text-4xl font-black text-foreground">{company.contactCount}</p>
-          </div>
-
-          {/* Card 2: Deals */}
-          <div className="bg-white rounded-xl border border-zinc-200 p-5 shadow-sm relative overflow-hidden">
-            <div className="absolute bottom-0 left-0 right-0 h-1 bg-zinc-400" />
-            <div className="flex items-center gap-2 mb-2">
-              <Handshake className="h-4 w-4 text-zinc-400" />
-              <span className="text-xs font-medium text-zinc-500 uppercase tracking-wider">
-                Active Pipeline
-              </span>
-            </div>
-            <p className="text-4xl font-black text-foreground">{company.dealCount}</p>
-          </div>
-        </div>
-      </div>
-
-      {/* Main Content: 12-column grid */}
-      <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
-        {/* Left column: Organization Architecture */}
-        <div className="lg:col-span-4">
-          <div className="bg-zinc-50 rounded-xl border border-zinc-200 p-6">
-            <div className="flex items-center gap-2 mb-5">
-              <Building2 className="h-4 w-4 text-zinc-500" />
-              <h3 className="text-sm font-bold uppercase tracking-wider text-zinc-500">
-                Organization Architecture
-              </h3>
-            </div>
-
-            <div className="space-y-4">
-              {/* Category */}
-              {categoryLabel && (
-                <div>
-                  <p className="text-[11px] font-semibold uppercase tracking-wider text-zinc-400 mb-1">Category</p>
-                  <p className="text-sm font-medium text-foreground">{categoryLabel}</p>
-                </div>
-              )}
-
-              {/* Location */}
-              {(company.address || company.city || company.state || company.zip) && (
-                <div>
-                  <p className="text-[11px] font-semibold uppercase tracking-wider text-zinc-400 mb-1">Location</p>
-                  <div className="flex items-start gap-1.5">
-                    <MapPin className="h-3.5 w-3.5 text-zinc-400 mt-0.5 shrink-0" />
-                    <div className="text-sm font-medium text-foreground">
-                      {company.address && (
-                        <p>{company.address}</p>
-                      )}
-                      <p>
-                        {[
-                          [company.city, company.state].filter(Boolean).join(", "),
-                          company.zip,
-                        ].filter(Boolean).join(" ")}
-                      </p>
-                    </div>
-                  </div>
-                </div>
-              )}
-
-              {/* Phone */}
-              {company.phone && (
-                <div>
-                  <p className="text-[11px] font-semibold uppercase tracking-wider text-zinc-400 mb-1">Phone</p>
-                  <div className="flex items-center gap-1.5">
-                    <Phone className="h-3.5 w-3.5 text-zinc-400" />
-                    <p className="text-sm font-medium text-foreground">{formatPhone(company.phone)}</p>
-                  </div>
-                </div>
-              )}
-
-              {/* Website */}
-              {company.website && (
-                <div>
-                  <p className="text-[11px] font-semibold uppercase tracking-wider text-zinc-400 mb-1">Website</p>
-                  <div className="flex items-center gap-1.5">
-                    <Globe className="h-3.5 w-3.5 text-zinc-400" />
-                    <a
-                      href={
-                        company.website.startsWith("http")
-                          ? company.website
-                          : `https://${company.website}`
-                      }
-                      target="_blank"
-                      rel="noopener noreferrer"
-                      className="text-sm font-medium text-[#CC0000] hover:underline truncate"
-                    >
-                      {company.website}
-                    </a>
-                  </div>
-                </div>
-              )}
-
-              {/* Created */}
-              <div>
-                <p className="text-[11px] font-semibold uppercase tracking-wider text-zinc-400 mb-1">Created</p>
-                <div className="flex items-center gap-1.5">
-                  <Calendar className="h-3.5 w-3.5 text-zinc-400" />
-                  <p className="text-sm font-medium text-foreground">{formatDate(company.createdAt)}</p>
-                </div>
-              </div>
+            <div className="rounded-lg border bg-white p-4">
+              <p className="text-[11px] font-bold uppercase tracking-[0.2em] text-slate-500">Created</p>
+              <p className="mt-2 text-sm font-semibold text-slate-950">{formatDate(company.createdAt)}</p>
             </div>
           </div>
         </div>
+      )}
+      {activeTab === "contacts" && (
+        <CompanyContactsTab key={contactsKey} companyId={company.id} onAddContact={() => setAddContactOpen(true)} />
+      )}
+      {activeTab === "portfolio" && <CompanyPortfolioTab companyId={company.id} companyName={company.name} />}
+      {activeTab === "deals" && <CompanyDealsTab companyId={company.id} />}
+      {activeTab === "files" && <CompanyFilesTab companyId={company.id} />}
+      {activeTab === "emails" && <CompanyEmailsTab />}
+      {activeTab === "recordings" && <RecordingList entityType="company" entityId={company.id} />}
+    </div>
+  );
 
-        {/* Right column: Tabbed content */}
-        <div className="lg:col-span-8">
-          <div className="mb-4">
-            <CompanyCopilotPanel companyId={company.id} />
-          </div>
+  const rightRail = (
+    <CompanyRightRail
+      company={company}
+      categoryLabel={categoryLabel}
+      industryLabel={industryLabel}
+      domain={domain}
+      websiteUrl={websiteUrl}
+      hubspotCompanyId={hubspotCompanyId}
+      hubspotUrl={hubspotUrl}
+    />
+  );
 
-          {/* Tab bar */}
-          <div className="border-b border-zinc-200 mb-4">
-            <div className="flex gap-1">
-              {tabs.map((tab) => (
-                <button
-                  key={tab.key}
-                  className={`flex items-center gap-2 px-4 py-2.5 text-sm font-medium border-b-2 transition-colors ${
-                    activeTab === tab.key
-                      ? "border-[#CC0000] text-foreground"
-                      : "border-transparent text-muted-foreground hover:text-foreground hover:border-zinc-300"
-                  }`}
-                  onClick={() => setActiveTab(tab.key)}
-                >
-                  {tab.icon}
-                  {tab.label}
-                </button>
-              ))}
-            </div>
-          </div>
-
-          {/* Tab Content */}
-          {activeTab === "contacts" && (
-            <CompanyContactsTab
-              key={contactsKey}
-              companyId={company.id}
-              onAddContact={() => setAddContactOpen(true)}
-            />
-          )}
-          {activeTab === "portfolio" && <CompanyPortfolioTab companyId={company.id} companyName={company.name} />}
-          {activeTab === "deals" && <CompanyDealsTab companyId={company.id} />}
-          {activeTab === "files" && <CompanyFilesTab companyId={company.id} />}
-          {activeTab === "emails" && <CompanyEmailsTab />}
-          {activeTab === "recordings" && <RecordingList entityType="company" entityId={company.id} />}
-        </div>
-      </div>
+  return (
+    <div>
+      <DetailPageShell
+        parentLabel="Companies"
+        parentHref="/companies"
+        currentLabel={company.name}
+        iconSlot={<Building2 className="h-9 w-9" />}
+        typeBadge={typeBadge}
+        statusBadge={statusBadge}
+        title={company.name}
+        subtitleSlot={subtitleSlot}
+        actionsSlot={actionsSlot}
+        kpis={kpis}
+        tabs={tabs}
+        activeTabId={activeTab}
+        onTabChange={(tab) => setActiveTab(tab as Tab)}
+        rightRail={rightRail}
+      >
+        {tabContent}
+      </DetailPageShell>
 
       {/* Add Contact Dialog */}
       <Dialog open={addContactOpen} onOpenChange={setAddContactOpen}>
@@ -462,6 +484,111 @@ export function CompanyDetailPage() {
           />
         </DialogContent>
       </Dialog>
+    </div>
+  );
+}
+
+function CompanyRightRail({
+  company,
+  categoryLabel,
+  industryLabel,
+  domain,
+  websiteUrl,
+  hubspotCompanyId,
+  hubspotUrl,
+}: {
+  company: Company;
+  categoryLabel: string | null;
+  industryLabel: string;
+  domain: string | null;
+  websiteUrl: string | null;
+  hubspotCompanyId: string | null;
+  hubspotUrl: string | null;
+}) {
+  const ownerValue =
+    company.ownerUserName ??
+    (company.ownerUserId ? `Owner ID: ${company.ownerUserId}` : "Unassigned");
+  const ownerInitials = getInitials(ownerValue === "Unassigned" ? "Unassigned" : ownerValue);
+  const verificationValue = company.companyVerifiedAt
+    ? `${formatDate(company.companyVerifiedAt)}${company.companyVerifiedBy ? ` by ${company.companyVerifiedBy}` : ""}`
+    : company.companyVerificationStatus === "pending"
+      ? "Pending"
+      : "Not verified";
+
+  return (
+    <div className="space-y-4">
+      <Card>
+        <CardContent className="space-y-4 p-5">
+          <DetailRailSection title="Owner">
+            <DetailRailItem
+              label="Account owner"
+              value={
+                <span className="inline-flex items-center gap-2">
+                  <span className="grid h-7 w-7 place-items-center rounded-full bg-slate-900 text-[10px] font-black uppercase text-white">
+                    {ownerInitials}
+                  </span>
+                  {ownerValue}
+                </span>
+              }
+            />
+          </DetailRailSection>
+
+          <DetailRailSection title="Industry">
+            <DetailRailItem label={company.industry ? "Industry" : "Category"} value={industryLabel} />
+            {categoryLabel && company.industry ? <DetailRailItem label="Category" value={categoryLabel} /> : null}
+          </DetailRailSection>
+
+          <DetailRailSection title="Region">
+            <DetailRailItem label="Market" value={formatNullable(company.region)} />
+          </DetailRailSection>
+
+          <DetailRailSection title="Domain">
+            <DetailRailItem
+              label={company.domain ? "Domain" : "Website domain"}
+              value={
+                domain && websiteUrl ? (
+                  <a href={websiteUrl} target="_blank" rel="noreferrer" className="text-brand-red hover:underline">
+                    {domain}
+                  </a>
+                ) : (
+                  "Not set"
+                )
+              }
+            />
+          </DetailRailSection>
+
+          <DetailRailSection title="Verification">
+            <DetailRailItem label="Status" value={verificationValue} />
+          </DetailRailSection>
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardContent className="space-y-3 p-5">
+          <DetailRailSection title="System IDs">
+            <DetailRailItem
+              label="HubSpot"
+              value={
+                <span className="space-y-1">
+                  <span className="block font-mono text-xs">{formatNullable(hubspotCompanyId, "Not linked")}</span>
+                  {hubspotUrl ? (
+                    <a
+                      href={hubspotUrl}
+                      target="_blank"
+                      rel="noreferrer"
+                      className="inline-flex items-center gap-1 text-xs font-black uppercase tracking-[0.12em] text-brand-red hover:underline"
+                    >
+                      Open in HubSpot
+                      <ExternalLink className="h-3 w-3" />
+                    </a>
+                  ) : null}
+                </span>
+              }
+            />
+            <DetailRailItem label="Procore" value={<span className="font-mono text-xs">{formatNullable(company.procoreId, "Not linked")}</span>} />
+          </DetailRailSection>
+        </CardContent>
+      </Card>
     </div>
   );
 }
