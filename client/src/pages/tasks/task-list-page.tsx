@@ -1,5 +1,5 @@
 import { useMemo, useState } from "react";
-import { useNavigate } from "react-router-dom";
+import { useNavigate, useSearchParams } from "react-router-dom";
 import {
   AlertTriangle,
   Check,
@@ -25,12 +25,16 @@ import {
   useTasks,
   type Task,
 } from "@/hooks/use-tasks";
+import { useTaskAssignees } from "@/hooks/use-task-assignees";
 import { TaskCreateDialog } from "@/components/tasks/task-create-dialog";
 import { TaskEditDialog } from "@/components/tasks/task-edit-dialog";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { useAuth } from "@/lib/auth";
 import { cn } from "@/lib/utils";
 import { toast } from "sonner";
 
 type GroupKey = "overdue" | "today" | "this_week" | "later" | "completed";
+const ALL_ASSIGNEES_VALUE = "__all__";
 
 const GROUP_META: Record<GroupKey, { label: string; eyebrow: string; dotClass: string; defaultOpen: boolean }> = {
   overdue: { label: "Overdue", eyebrow: "Red path", dotClass: "bg-brand-red", defaultOpen: true },
@@ -304,17 +308,67 @@ function TaskGroup({
   );
 }
 
-export function TaskListPage() {
-  const { counts, loading: countsLoading, refetch: refetchCounts } = useTaskCounts();
-  const { tasks: overdueTasks, loading: overdueLoading, error: overdueError, refetch: refetchOverdue } = useTasks({ section: "overdue" });
-  const { tasks: todayTasks, loading: todayLoading, error: todayError, refetch: refetchToday } = useTasks({ section: "today" });
-  const { tasks: upcomingTasks, loading: upcomingLoading, error: upcomingError, refetch: refetchUpcoming } = useTasks({ section: "upcoming" });
-  const { tasks: completedTasks, loading: completedLoading, error: completedError, refetch: refetchCompleted } = useTasks({ section: "completed", limit: 20 });
-  const { tasks: scheduledTasks, loading: scheduledLoading, error: scheduledError, refetch: refetchScheduled } = useTasks({ status: "scheduled", limit: 100 });
-  const [query, setQuery] = useState("");
+function AssigneeFilter({
+  selectedAssignee,
+  onChange,
+}: {
+  selectedAssignee: string;
+  onChange: (assigneeId: string) => void;
+}) {
+  const { assignees, loading } = useTaskAssignees();
+  const selectedAssigneeLabel = selectedAssignee
+    ? assignees.find((assignee) => assignee.id === selectedAssignee)?.displayName ?? "Selected assignee"
+    : "All assignees";
 
-  const loading = countsLoading || overdueLoading || todayLoading || upcomingLoading || completedLoading || scheduledLoading;
+  return (
+    <div className="flex items-center gap-2">
+      <label htmlFor="task-assignee-filter" className="text-[11px] font-black uppercase tracking-[0.16em] text-slate-500">
+        Assignee
+      </label>
+      <Select
+        value={selectedAssignee || ALL_ASSIGNEES_VALUE}
+        onValueChange={(value) => onChange(!value || value === ALL_ASSIGNEES_VALUE ? "" : value)}
+        disabled={loading}
+      >
+        <SelectTrigger id="task-assignee-filter" className="h-9 w-56 border-slate-200 bg-slate-50">
+          <SelectValue>{loading ? "Loading assignees..." : selectedAssigneeLabel}</SelectValue>
+        </SelectTrigger>
+        <SelectContent>
+          <SelectItem value={ALL_ASSIGNEES_VALUE}>All assignees</SelectItem>
+          {assignees.map((assignee) => (
+            <SelectItem key={assignee.id} value={assignee.id}>
+              {assignee.displayName}
+            </SelectItem>
+          ))}
+        </SelectContent>
+      </Select>
+    </div>
+  );
+}
+
+export function TaskListPage() {
+  const { user, loading: authLoading } = useAuth();
+  const [searchParams, setSearchParams] = useSearchParams();
+  const [query, setQuery] = useState("");
+  const canAssign = user?.role === "admin" || user?.role === "director";
+  const selectedAssignee = canAssign ? searchParams.get("assignee") ?? "" : "";
+  const assigneeFilter = selectedAssignee || undefined;
+  const { counts, loading: countsLoading, refetch: refetchCounts } = useTaskCounts(assigneeFilter);
+  const { tasks: overdueTasks, loading: overdueLoading, error: overdueError, refetch: refetchOverdue } = useTasks({ section: "overdue", assignedTo: assigneeFilter });
+  const { tasks: todayTasks, loading: todayLoading, error: todayError, refetch: refetchToday } = useTasks({ section: "today", assignedTo: assigneeFilter });
+  const { tasks: upcomingTasks, loading: upcomingLoading, error: upcomingError, refetch: refetchUpcoming } = useTasks({ section: "upcoming", assignedTo: assigneeFilter });
+  const { tasks: completedTasks, loading: completedLoading, error: completedError, refetch: refetchCompleted } = useTasks({ section: "completed", limit: 20, assignedTo: assigneeFilter });
+  const { tasks: scheduledTasks, loading: scheduledLoading, error: scheduledError, refetch: refetchScheduled } = useTasks({ status: "scheduled", limit: 100, assignedTo: assigneeFilter });
+
+  const loading = authLoading || countsLoading || overdueLoading || todayLoading || upcomingLoading || completedLoading || scheduledLoading;
   const error = overdueError ?? todayError ?? upcomingError ?? completedError ?? scheduledError;
+
+  const updateAssignee = (assigneeId: string) => {
+    const next = new URLSearchParams(searchParams);
+    if (assigneeId) next.set("assignee", assigneeId);
+    else next.delete("assignee");
+    setSearchParams(next);
+  };
 
   const refetchAll = () => {
     refetchCounts();
@@ -387,6 +441,9 @@ export function TaskListPage() {
             />
           </div>
           <div className="flex flex-wrap gap-2">
+            {canAssign ? (
+              <AssigneeFilter selectedAssignee={selectedAssignee} onChange={updateAssignee} />
+            ) : null}
             <Button type="button" variant="outline" size="sm" onClick={refetchAll}>
               <RefreshCw className="mr-2 h-4 w-4" />
               Refresh

@@ -213,10 +213,23 @@ function BoardColumn({
 }
 
 export function DealListPage() {
+  const { user, loading: authLoading } = useAuth();
+
+  if (authLoading || !user) {
+    return (
+      <div className="rounded-lg border border-slate-200 bg-white p-6 text-sm font-semibold text-slate-500">
+        Loading deal board...
+      </div>
+    );
+  }
+
+  return <DealListPageContent role={user.role} />;
+}
+
+function DealListPageContent({ role }: { role: string }) {
   const navigate = useNavigate();
-  const { user } = useAuth();
   const [searchParams, setSearchParams] = useSearchParams();
-  const scope = getScope(searchParams, user?.role);
+  const scope = getScope(searchParams, role);
   const ytdTerminalFilters = useMemo(() => getYearToDateTerminalFilters(), []);
   const { board, loading, error } = useDealBoard(scope, true, ytdTerminalFilters);
   const { deals } = useDeals({ limit: 200, isActive: true, sortBy: "updated_at", sortDir: "desc", scope });

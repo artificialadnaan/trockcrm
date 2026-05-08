@@ -225,6 +225,29 @@ describe("LeadListPage", () => {
     expect(mocks.useLeadsMock).toHaveBeenLastCalledWith({ status: "open", isActive: true, scope: "team" });
   });
 
+  it("does not fire board fetch before auth resolves", () => {
+    mocks.useAuthMock.mockReturnValue({
+      user: null,
+      loading: true,
+    });
+    mocks.useLeadBoardMock.mockClear();
+
+    const loadingHtml = normalize(
+      renderToStaticMarkup(
+        <MemoryRouter initialEntries={["/leads"]}>
+          <LeadListPage />
+        </MemoryRouter>
+      )
+    );
+
+    expect(loadingHtml).toContain("Loading lead board...");
+    expect(mocks.useLeadBoardMock).not.toHaveBeenCalled();
+
+    renderPage("/leads", "director");
+
+    expect(mocks.useLeadBoardMock).toHaveBeenCalledWith("team");
+  });
+
   it("forces summary leads to mine scope for reps regardless of ?scope= param", () => {
     renderPage("/leads?scope=team", "rep");
 

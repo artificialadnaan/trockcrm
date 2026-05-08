@@ -15,6 +15,8 @@ const mocks = vi.hoisted(() => ({
   isTerminalTaskStatusMock: vi.fn((status: string) => status === "completed" || status === "dismissed"),
   snoozeTaskMock: vi.fn(),
   toastErrorMock: vi.fn(),
+  useAuthMock: vi.fn(),
+  useTaskAssigneesMock: vi.fn(),
   useTaskCountsMock: vi.fn(),
   useTasksMock: vi.fn(),
 }));
@@ -26,6 +28,14 @@ vi.mock("@/hooks/use-tasks", () => ({
   snoozeTask: mocks.snoozeTaskMock,
   useTaskCounts: mocks.useTaskCountsMock,
   useTasks: mocks.useTasksMock,
+}));
+
+vi.mock("@/hooks/use-task-assignees", () => ({
+  useTaskAssignees: mocks.useTaskAssigneesMock,
+}));
+
+vi.mock("@/lib/auth", () => ({
+  useAuth: mocks.useAuthMock,
 }));
 
 vi.mock("sonner", () => ({
@@ -46,6 +56,35 @@ vi.mock("@/components/ui/button", () => ({
   Button: ({ children, ...props }: { children: ReactNode } & Record<string, unknown>) => (
     <button {...props}>{children}</button>
   ),
+}));
+
+vi.mock("@/components/ui/select", () => ({
+  Select: ({
+    children,
+    value,
+    onValueChange,
+    disabled,
+  }: {
+    children: ReactNode;
+    value?: string;
+    onValueChange?: (value: string) => void;
+    disabled?: boolean;
+  }) => (
+    <select
+      aria-label="Assignee"
+      value={value}
+      disabled={disabled}
+      onChange={(event) => onValueChange?.(event.currentTarget.value)}
+    >
+      {children}
+    </select>
+  ),
+  SelectContent: ({ children }: { children: ReactNode }) => <>{children}</>,
+  SelectItem: ({ children, value }: { children: ReactNode; value: string }) => (
+    <option value={value}>{children}</option>
+  ),
+  SelectTrigger: ({ children }: { children: ReactNode }) => <>{children}</>,
+  SelectValue: ({ children }: { children?: ReactNode }) => <>{children}</>,
 }));
 
 function normalize(source: string) {
@@ -100,6 +139,28 @@ describe("TaskListPage project context", () => {
     mocks.snoozeTaskMock.mockReset();
     mocks.snoozeTaskMock.mockResolvedValue(undefined);
     mocks.toastErrorMock.mockReset();
+    mocks.useAuthMock.mockReset();
+    mocks.useAuthMock.mockReturnValue({
+      user: {
+        id: "director-1",
+        email: "director@example.test",
+        displayName: "Director User",
+        role: "director",
+        officeId: "office-1",
+        activeOfficeId: "office-1",
+      },
+      loading: false,
+    });
+    mocks.useTaskAssigneesMock.mockReset();
+    mocks.useTaskAssigneesMock.mockReturnValue({
+      assignees: [
+        { id: "rep-1", displayName: "Brett Jones" },
+        { id: "rep-2", displayName: "Casey Smith" },
+      ],
+      loading: false,
+      error: null,
+      refetch: vi.fn(),
+    });
     mocks.useTaskCountsMock.mockReset();
     mocks.useTaskCountsMock.mockReturnValue({
       counts: { overdue: 1, today: 0, upcoming: 0, completed: 0 },
@@ -267,5 +328,68 @@ describe("TaskListPage project context", () => {
     const contentButton = container.querySelector<HTMLButtonElement>('[data-testid="task-row-content"]');
     expect(contentButton).not.toBeNull();
     expect(contentButton?.disabled).toBe(true);
+  });
+
+  it("renders assignee picker for director role", () => {
+    renderPage();
+
+    const picker = container.querySelector<HTMLSelectElement>('select[aria-label="Assignee"]');
+    expect(picker).not.toBeNull();
+    expect(picker?.textContent).toContain("All assignees");
+    expect(picker?.textContent).toContain("Brett Jones");
+  });
+
+  it("does not render assignee picker for rep role", () => {
+    mocks.useAuthMock.mockReturnValue({
+      user: {
+        id: "rep-1",
+        email: "rep@example.test",
+        displayName: "Rep User",
+        role: "rep",
+        officeId: "office-1",
+        activeOfficeId: "office-1",
+      },
+      loading: false,
+    });
+
+    renderPage();
+
+    expect(container.querySelector('select[aria-label="Assignee"]')).toBeNull();
+  });
+
+  it("applies assignee filter to task fetches when picker selection changes", () => {
+    mocks.useAuthMock.mockReturnValue({
+      user: {
+        id: "admin-1",
+        email: "admin@example.test",
+        displayName: "Admin User",
+        role: "admin",
+        officeId: "office-1",
+        activeOfficeId: "office-1",
+      },
+      loading: false,
+    });
+    renderPage();
+
+    const picker = container.querySelector<HTMLSelectElement>('select[aria-label="Assignee"]');
+    expect(picker).not.toBeNull();
+
+    act(() => {
+      picker?.dispatchEvent(new Event("change", { bubbles: true }));
+    });
+
+    act(() => {
+      if (picker) {
+        picker.value = "rep-2";
+        picker.dispatchEvent(new Event("change", { bubbles: true }));
+      }
+    });
+
+    expect(mocks.useTaskCountsMock).toHaveBeenLastCalledWith("rep-2");
+    expect(mocks.useTasksMock).toHaveBeenCalledWith(expect.objectContaining({ section: "overdue", assignedTo: "rep-2" }));
+    expect(mocks.useTasksMock).toHaveBeenCalledWith(expect.objectContaining({ section: "today", assignedTo: "rep-2" }));
+    expect(mocks.useTasksMock).toHaveBeenCalledWith(expect.objectContaining({ section: "upcoming", assignedTo: "rep-2" }));
+    expect(mocks.useTasksMock).toHaveBeenCalledWith(expect.objectContaining({ section: "completed", assignedTo: "rep-2" }));
+    expect(mocks.useTasksMock).toHaveBeenCalledWith(expect.objectContaining({ status: "scheduled", assignedTo: "rep-2" }));
   });
 });

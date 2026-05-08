@@ -334,6 +334,29 @@ describe("DealListPage", () => {
     });
   });
 
+  it("does not fire board fetch before auth resolves", () => {
+    mocks.useAuthMock.mockReturnValue({
+      user: null,
+      loading: true,
+    });
+    mocks.useDealBoardMock.mockClear();
+
+    const loadingHtml = normalize(
+      renderToStaticMarkup(
+        <MemoryRouter initialEntries={["/deals"]}>
+          <DealListPage />
+        </MemoryRouter>
+      )
+    );
+
+    expect(loadingHtml).toContain("Loading deal board...");
+    expect(mocks.useDealBoardMock).not.toHaveBeenCalled();
+
+    renderPage("/deals", "director");
+
+    expect(mocks.useDealBoardMock).toHaveBeenCalledWith("team", true, expect.any(Object));
+  });
+
   it("uses the board's YTD terminal filters when building terminal stage navigation", () => {
     const column = {
       stage: { id: "stage-won", name: "Won", slug: "won" },

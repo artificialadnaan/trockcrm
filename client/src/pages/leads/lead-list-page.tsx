@@ -178,10 +178,23 @@ function LeadColumn({
 }
 
 export function LeadListPage() {
+  const { user, loading: authLoading } = useAuth();
+
+  if (authLoading || !user) {
+    return (
+      <div className="rounded-lg border border-slate-200 bg-white p-6 text-sm font-semibold text-slate-500">
+        Loading lead board...
+      </div>
+    );
+  }
+
+  return <LeadListPageContent role={user.role} />;
+}
+
+function LeadListPageContent({ role }: { role: string }) {
   const navigate = useNavigate();
-  const { user } = useAuth();
   const [searchParams, setSearchParams] = useSearchParams();
-  const scope = getScope(searchParams, user?.role);
+  const scope = getScope(searchParams, role);
   const bucket = searchParams.get("bucket");
   const { board, loading, error } = useLeadBoard(scope);
   const { leads } = useLeads({ status: "open", isActive: true, scope });
