@@ -14,6 +14,7 @@ const mocks = vi.hoisted(() => ({
   getTaskStatusLabelMock: vi.fn((status: string) => status),
   isTerminalTaskStatusMock: vi.fn((status: string) => status === "completed" || status === "dismissed"),
   snoozeTaskMock: vi.fn(),
+  toastErrorMock: vi.fn(),
   useTaskCountsMock: vi.fn(),
   useTasksMock: vi.fn(),
 }));
@@ -25,6 +26,12 @@ vi.mock("@/hooks/use-tasks", () => ({
   snoozeTask: mocks.snoozeTaskMock,
   useTaskCounts: mocks.useTaskCountsMock,
   useTasks: mocks.useTasksMock,
+}));
+
+vi.mock("sonner", () => ({
+  toast: {
+    error: mocks.toastErrorMock,
+  },
 }));
 
 vi.mock("@/components/tasks/task-create-dialog", () => ({
@@ -78,6 +85,7 @@ function makeTask() {
 describe("TaskListPage project context", () => {
   let container: HTMLDivElement;
   let root: Root | null;
+  let consoleErrorSpy: ReturnType<typeof vi.spyOn>;
 
   beforeEach(() => {
     (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
@@ -85,11 +93,13 @@ describe("TaskListPage project context", () => {
     container = document.createElement("div");
     document.body.appendChild(container);
     root = null;
+    consoleErrorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
 
     mocks.completeTaskMock.mockReset();
     mocks.completeTaskMock.mockResolvedValue(undefined);
     mocks.snoozeTaskMock.mockReset();
     mocks.snoozeTaskMock.mockResolvedValue(undefined);
+    mocks.toastErrorMock.mockReset();
     mocks.useTaskCountsMock.mockReset();
     mocks.useTaskCountsMock.mockReturnValue({
       counts: { overdue: 1, today: 0, upcoming: 0, completed: 0 },
@@ -111,6 +121,7 @@ describe("TaskListPage project context", () => {
       act(() => root?.unmount());
     }
     root = null;
+    consoleErrorSpy.mockRestore();
     container.remove();
   });
 
@@ -159,5 +170,75 @@ describe("TaskListPage project context", () => {
     });
 
     expect(container.textContent).toContain("Edit task dialog");
+  });
+
+  it("surfaces complete task failures without leaving the action busy", async () => {
+    mocks.completeTaskMock.mockRejectedValueOnce(new Error("Task API failed"));
+    renderPage();
+
+    const completeButton = container.querySelector<HTMLButtonElement>('button[aria-label="Complete Call Palm Villas"]');
+    expect(completeButton).not.toBeNull();
+
+    await act(async () => {
+      completeButton?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+
+    expect(completeButton?.disabled).toBe(false);
+    expect(consoleErrorSpy).toHaveBeenCalledWith("[tasks] complete failed", expect.any(Error));
+    expect(mocks.toastErrorMock).toHaveBeenCalledWith("Task API failed");
+  });
+
+  it("surfaces snooze task failures without leaving the action busy", async () => {
+    mocks.snoozeTaskMock.mockRejectedValueOnce(new Error("Snooze failed"));
+    renderPage();
+
+    const snoozeButton = container.querySelector<HTMLButtonElement>('button[aria-label="Snooze Call Palm Villas"]');
+    expect(snoozeButton).not.toBeNull();
+
+    await act(async () => {
+      snoozeButton?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+
+    expect(snoozeButton?.disabled).toBe(false);
+    expect(consoleErrorSpy).toHaveBeenCalledWith("[tasks] snooze failed", expect.any(Error));
+    expect(mocks.toastErrorMock).toHaveBeenCalledWith("Snooze failed");
+  });
+
+  it("does not open the edit dialog when terminal rows are activated", () => {
+    mocks.useTasksMock.mockImplementation((filters: { section?: string }) => ({
+      tasks: filters.section === "overdue" ? [{ ...makeTask(), status: "completed" }] : [],
+      loading: false,
+      error: null,
+      refetch: vi.fn(),
+    }));
+    renderPage();
+
+    const row = container.querySelector<HTMLElement>('div[role="button"]');
+    expect(row).not.toBeNull();
+
+    act(() => {
+      row?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+    expect(container.textContent).not.toContain("Edit task dialog");
+
+    act(() => {
+      row?.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
+    });
+    expect(container.textContent).not.toContain("Edit task dialog");
+  });
+
+  it("prevents default Space scrolling when keyboard-activating task rows", () => {
+    renderPage();
+
+    const row = container.querySelector<HTMLElement>('div[role="button"]');
+    expect(row).not.toBeNull();
+    const event = new KeyboardEvent("keydown", { key: " ", bubbles: true, cancelable: true });
+    const preventDefault = vi.spyOn(event, "preventDefault");
+
+    act(() => {
+      row?.dispatchEvent(event);
+    });
+
+    expect(preventDefault).toHaveBeenCalled();
   });
 });

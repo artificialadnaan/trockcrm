@@ -242,6 +242,8 @@ router.get("/pipeline", async (req, res, next) => {
   try {
     const filters = {
       assignedRepId: req.query.assignedRepId as string | undefined,
+      scope: req.query.scope as "mine" | "team" | "all" | undefined,
+      activeOfficeId: req.user!.activeOfficeId ?? req.user!.officeId,
       includeDd: req.query.includeDd === "true",
       wonSince: req.query.won_since as string | undefined,
       wonUntil: req.query.won_until as string | undefined,

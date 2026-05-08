@@ -103,11 +103,12 @@ function findRouteHandler(method: "get" | "patch" | "post", path: string) {
 async function invokeRoute(
   method: "get" | "patch" | "post",
   path: string,
-  options?: { params?: Record<string, string>; body?: any }
+  options?: { params?: Record<string, string>; query?: Record<string, string>; body?: any }
 ) {
   const handler = findRouteHandler(method, path);
   const req = {
     params: options?.params ?? {},
+    query: options?.query ?? {},
     body: options?.body ?? {},
     tenantDb: {
       insert: vi.fn(() => ({
@@ -162,6 +163,28 @@ describe("Deal Scoping Routes", () => {
     expect(req.commitTransaction).toHaveBeenCalled();
     expect(res.statusCode).toBe(200);
     expect(res.body.intake.status).toBe("draft");
+  });
+
+  it("threads scope through the pipeline board route", async () => {
+    vi.mocked(dealService.getDealsForPipeline).mockResolvedValueOnce({
+      pipelineColumns: [],
+      terminalStages: [],
+    } as never);
+
+    const { req } = await invokeRoute("get", "/pipeline", {
+      query: { scope: "team", includeDd: "true", won_since: "2026-01-01" },
+    });
+
+    expect(dealService.getDealsForPipeline).toHaveBeenCalledWith(
+      req.tenantDb,
+      "director",
+      "user-1",
+      expect.objectContaining({
+        scope: "team",
+        includeDd: true,
+        wonSince: "2026-01-01",
+      })
+    );
   });
 
   it("patches the scoping intake for a deal", async () => {

@@ -63,6 +63,10 @@ describe("listLeadBoard", () => {
     ];
 
     const tenantDb = {
+      select: vi.fn().mockReturnValue({
+        from: vi.fn().mockReturnThis(),
+        where: vi.fn().mockResolvedValue([{ id: "rep-1" }]),
+      }),
       execute: vi.fn().mockResolvedValue({
         rows: [
           {
@@ -115,6 +119,10 @@ describe("listLeadBoard", () => {
     ];
 
     const tenantDb = {
+      select: vi.fn().mockReturnValue({
+        from: vi.fn().mockReturnThis(),
+        where: vi.fn().mockResolvedValue([{ id: "rep-1" }]),
+      }),
       execute: vi.fn().mockResolvedValue({ rows: [] }),
     } as any;
 
@@ -139,6 +147,10 @@ describe("listLeadBoard", () => {
     ];
 
     const tenantDb = {
+      select: vi.fn().mockReturnValue({
+        from: vi.fn().mockReturnThis(),
+        where: vi.fn().mockResolvedValue([{ id: "rep-1" }]),
+      }),
       execute: vi.fn().mockResolvedValue({
         rows: Array.from({ length: 10 }).map((_, index) => ({
           id: `lead-${index + 1}`,
@@ -189,5 +201,36 @@ describe("listLeadBoard", () => {
     const queryText = extractSqlText(tenantDb.execute.mock.calls[0][0]).toLowerCase();
     expect(queryText).toContain("join users u on u.id = l.assigned_rep_id");
     expect(queryText).toContain("u.office_id =");
+  });
+
+  it("uses direct active reports in the active office for team-scoped board queries", async () => {
+    dbState.responses = [
+      [{ id: "stage-new", slug: "new_lead", name: "New Lead", displayOrder: 1, isTerminal: false, isActivePipeline: true }],
+      [{ id: "deal-stage-1" }],
+    ];
+
+    const teamRows = [{ id: "rep-team-1" }, { id: "rep-team-2" }];
+    const teamQuery = {
+      from: vi.fn().mockReturnThis(),
+      where: vi.fn().mockResolvedValue(teamRows),
+    };
+    const tenantDb = {
+      select: vi.fn().mockReturnValue(teamQuery),
+      execute: vi.fn().mockResolvedValue({ rows: [] }),
+    } as any;
+
+    const { listLeadBoard } = await import("../../../src/modules/leads/service.js");
+    await listLeadBoard(tenantDb, {
+      role: "director",
+      userId: "director-1",
+      activeOfficeId: "office-1",
+      scope: "team",
+    });
+
+    expect(tenantDb.select).toHaveBeenCalledWith(expect.objectContaining({ id: expect.anything() }));
+    const queryText = extractSqlText(tenantDb.execute.mock.calls[0][0]);
+    expect(queryText).toContain("assigned_rep_id");
+    expect(queryText).toContain("rep-team-1");
+    expect(queryText).toContain("rep-team-2");
   });
 });

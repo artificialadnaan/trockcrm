@@ -184,7 +184,7 @@ export function LeadListPage() {
   const scope = getScope(searchParams, user?.role);
   const bucket = searchParams.get("bucket");
   const { board, loading, error } = useLeadBoard(scope);
-  const { leads } = useLeads({ status: "open", isActive: "all", scope });
+  const { leads } = useLeads({ status: "open", isActive: true, scope });
 
   const columns = useMemo(
     () =>

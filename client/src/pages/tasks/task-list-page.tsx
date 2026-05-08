@@ -28,6 +28,7 @@ import {
 import { TaskCreateDialog } from "@/components/tasks/task-create-dialog";
 import { TaskEditDialog } from "@/components/tasks/task-edit-dialog";
 import { cn } from "@/lib/utils";
+import { toast } from "sonner";
 
 type GroupKey = "overdue" | "today" | "this_week" | "later" | "completed";
 
@@ -117,6 +118,9 @@ function TaskRow({ task, onUpdate }: { task: Task; onUpdate: () => void }) {
     try {
       await completeTask(task.id);
       onUpdate();
+    } catch (error) {
+      console.error("[tasks] complete failed", error);
+      toast.error(error instanceof Error ? error.message : "Failed to complete task");
     } finally {
       setBusy(false);
     }
@@ -129,6 +133,9 @@ function TaskRow({ task, onUpdate }: { task: Task; onUpdate: () => void }) {
     try {
       await snoozeTask(task.id, tomorrow);
       onUpdate();
+    } catch (error) {
+      console.error("[tasks] snooze failed", error);
+      toast.error(error instanceof Error ? error.message : "Failed to snooze task");
     } finally {
       setBusy(false);
     }
@@ -141,18 +148,26 @@ function TaskRow({ task, onUpdate }: { task: Task; onUpdate: () => void }) {
     else if (task.emailId) navigate("/email");
   };
 
+  const openEdit = () => {
+    if (isDone) return;
+    setEditOpen(true);
+  };
+
   return (
     <>
       <div
         role="button"
         tabIndex={0}
-        onClick={() => setEditOpen(true)}
+        onClick={openEdit}
         onKeyDown={(event) => {
-          if (event.key === "Enter" || event.key === " ") setEditOpen(true);
+          if (event.key === "Enter" || event.key === " ") {
+            event.preventDefault();
+            openEdit();
+          }
         }}
         className={cn(
-          "group grid gap-3 border-b border-slate-100 bg-white px-4 py-3 transition-colors hover:bg-slate-50 md:grid-cols-[32px_minmax(0,1fr)_120px_130px_150px_96px]",
-          isDone ? "opacity-65" : ""
+          "group grid gap-3 border-b border-slate-100 bg-white px-4 py-3 transition-colors md:grid-cols-[32px_minmax(0,1fr)_120px_130px_150px_96px]",
+          isDone ? "cursor-default opacity-65" : "cursor-pointer hover:bg-slate-50"
         )}
       >
         <button

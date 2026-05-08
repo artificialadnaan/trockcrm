@@ -286,6 +286,29 @@ describe("DealListPage", () => {
     });
   });
 
+  it("uses the board's YTD terminal filters when building terminal stage navigation", () => {
+    const column = {
+      stage: { id: "stage-won", name: "Won", slug: "won" },
+      count: 0,
+      totalValue: 0,
+      cards: [],
+    };
+    const boardFilters = {
+      won: { preset: "custom" as const, customStart: "2026-01-01" },
+      lost: { preset: "custom" as const, customStart: "2026-01-01" },
+    };
+
+    buildDealStageNavigationPath(column, "team", boardFilters);
+
+    expect(mocks.readTerminalDateFilterMock).not.toHaveBeenCalled();
+    expect(mocks.buildDealStageWorkspacePathMock).toHaveBeenLastCalledWith({
+      stageId: "stage-won",
+      stageSlug: "won",
+      scope: "team",
+      filters: boardFilters,
+    });
+  });
+
   it("defaults the board scope by role when the query param is absent", () => {
     renderPage("/deals", "rep");
     expect(mocks.useDealBoardMock).toHaveBeenLastCalledWith("mine", true, expect.any(Object));

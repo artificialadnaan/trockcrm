@@ -61,12 +61,16 @@ function getYearToDateTerminalFilters(): Record<TerminalOutcome, TerminalDateFil
   };
 }
 
-export function buildDealStageNavigationPath(column: DealBoardColumn, scope: PipelineScope) {
+export function buildDealStageNavigationPath(
+  column: DealBoardColumn,
+  scope: PipelineScope,
+  filters: Record<TerminalOutcome, TerminalDateFilter> = readCurrentTerminalDateFilters()
+) {
   return buildDealStageWorkspacePath({
     stageId: column.stage.id,
     stageSlug: column.stage.slug,
     scope,
-    filters: readCurrentTerminalDateFilters(),
+    filters,
   });
 }
 
@@ -245,7 +249,7 @@ export function DealListPage() {
   };
 
   const openStage = (column: DealBoardColumn) => {
-    navigate(buildDealStageNavigationPath(column, scope));
+    navigate(buildDealStageNavigationPath(column, scope, ytdTerminalFilters));
   };
 
   return (

@@ -30,6 +30,7 @@ import { evaluatePostConversionEnrichment } from "./post-conversion-enrichment.j
 import { createAssignmentTaskIfNeeded } from "../assignment-tasks/service.js";
 import { generateDealNumberForProject } from "../../services/projectNumber.js";
 import { isContractSignedHandoffEnabled } from "../../config/feature-flags.js";
+import { resolveTeamRepIds } from "../shared/team-scope.js";
 
 // Type alias for the tenant-scoped Drizzle instance
 type TenantDb = NodePgDatabase<typeof schema>;
@@ -523,7 +524,11 @@ function terminalWorkspaceDateConditions(stage: PipelineStageRow, input: DealSta
   return [];
 }
 
-function buildDealWorkspaceScope(input: DealBoardInput | DealStagePageInput, stage?: PipelineStageRow) {
+async function buildDealWorkspaceScope(
+  tenantDb: TenantDb,
+  input: DealBoardInput | DealStagePageInput,
+  stage?: PipelineStageRow
+) {
   const terminalDateConditions = stage && "stageId" in input ? terminalWorkspaceDateConditions(stage, input) : [];
   const filters = [
     sql`u.office_id = ${input.activeOfficeId}`,
@@ -535,8 +540,11 @@ function buildDealWorkspaceScope(input: DealBoardInput | DealStagePageInput, sta
     filters.push(...terminalDateConditions);
   }
 
-  if (input.scope === "mine") {
+  if (input.role === "rep" || input.scope === "mine") {
     filters.push(sql`d.assigned_rep_id = ${input.userId}`);
+  } else if (input.scope === "team") {
+    const teamRepIds = await resolveTeamRepIds(tenantDb, input.userId, input.activeOfficeId);
+    filters.push(teamRepIds.length > 0 ? sql`d.assigned_rep_id IN (${sqlList(teamRepIds)})` : sql`false`);
   }
 
   return sql.join(filters, sql` and `);
@@ -1464,7 +1472,7 @@ export async function getDealsForPipeline(
   tenantDb: TenantDb,
   userRole: string,
   userId: string,
-  filters?: { assignedRepId?: string; includeDd?: boolean } & PipelineTerminalDateFilters
+  filters?: { assignedRepId?: string; includeDd?: boolean; scope?: WorkspaceScope; activeOfficeId?: string | null } & PipelineTerminalDateFilters
 ) {
   // Get all stages ordered
   const stages = await db
@@ -1523,6 +1531,11 @@ export async function getDealsForPipeline(
   // Reps see only their own deals
   if (userRole === "rep") {
     conditions.push(eq(deals.assignedRepId, userId));
+  } else if (filters?.scope === "mine") {
+    conditions.push(eq(deals.assignedRepId, userId));
+  } else if (filters?.scope === "team") {
+    const teamRepIds = await resolveTeamRepIds(tenantDb, userId, filters.activeOfficeId ?? null);
+    conditions.push(teamRepIds.length > 0 ? inArray(deals.assignedRepId, teamRepIds) : sql`false`);
   } else if (filters?.assignedRepId) {
     conditions.push(eq(deals.assignedRepId, filters.assignedRepId));
   }
@@ -1585,7 +1598,7 @@ export async function listDealStagePage(tenantDb: TenantDb, input: DealStagePage
   const page = Math.max(1, input.page || 1);
   const pageSize = Math.max(1, Math.min(100, input.pageSize || 25));
   const offset = (page - 1) * pageSize;
-  const scope = buildDealWorkspaceScope(input, stage);
+  const scope = await buildDealWorkspaceScope(tenantDb, input, stage);
   const stageSlugs = WON_TERMINAL_STAGE_SLUGS.includes(stage.slug as (typeof WON_TERMINAL_STAGE_SLUGS)[number])
     ? WON_TERMINAL_STAGE_SLUGS
     : LOST_TERMINAL_STAGE_SLUGS.includes(stage.slug as (typeof LOST_TERMINAL_STAGE_SLUGS)[number])

@@ -211,7 +211,7 @@ describe("LeadListPage", () => {
     const html = renderPage();
 
     expect(mocks.useLeadBoardMock).toHaveBeenCalledWith("mine");
-    expect(mocks.useLeadsMock).toHaveBeenCalledWith({ status: "open", isActive: "all", scope: "mine" });
+    expect(mocks.useLeadsMock).toHaveBeenCalledWith({ status: "open", isActive: true, scope: "mine" });
     expect(html).toContain("Read-only lead board");
     expect(html).toContain("New Lead");
     expect(html).toContain("Qualified Lead");
@@ -222,14 +222,14 @@ describe("LeadListPage", () => {
 
   it("loads summary leads with the active scope when role is director", () => {
     renderPage("/leads?scope=team", "director");
-    expect(mocks.useLeadsMock).toHaveBeenLastCalledWith({ status: "open", isActive: "all", scope: "team" });
+    expect(mocks.useLeadsMock).toHaveBeenLastCalledWith({ status: "open", isActive: true, scope: "team" });
   });
 
   it("forces summary leads to mine scope for reps regardless of ?scope= param", () => {
     renderPage("/leads?scope=team", "rep");
 
     expect(mocks.useLeadBoardMock).toHaveBeenLastCalledWith("mine");
-    expect(mocks.useLeadsMock).toHaveBeenLastCalledWith({ status: "open", isActive: "all", scope: "mine" });
+    expect(mocks.useLeadsMock).toHaveBeenLastCalledWith({ status: "open", isActive: true, scope: "mine" });
   });
 
   it("defaults the board scope by role when the query param is absent", () => {
