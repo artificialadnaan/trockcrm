@@ -151,12 +151,24 @@ describe("ensureDevUserPrimaryOffice", () => {
     expect(authServiceSource).toContain('function leadOfficeForDemoOfficeSlug(officeSlug: string): "dfw" | "atl"');
     expect(authServiceSource).toContain('const leadOffice = leadOfficeForDemoOfficeSlug(office.slug);');
     expect(authServiceSource).toContain(
-      "source, office, description, last_activity_at, stage_entered_at, is_active"
+      "source, office, office_code, description, last_activity_at, stage_entered_at, is_active"
     );
     expect(authServiceSource).toContain(
-      "source, office, description, last_activity_at, stage_entered_at, is_active, converted_at"
+      "source, office, office_code, description, last_activity_at, stage_entered_at, is_active, converted_at"
     );
     expect(authServiceSource).toContain("leadOffice,");
+  });
+
+  it("seeds bootstrap demo leads with matching office and office_code", () => {
+    expect(authServiceSource).toContain('const leadOffice = leadOfficeForDemoOfficeSlug(office.slug);');
+    expect(authServiceSource).toContain(
+      "source, office, office_code, description, last_activity_at, stage_entered_at, is_active"
+    );
+    expect(authServiceSource).toContain(
+      "source, office, office_code, description, last_activity_at, stage_entered_at, is_active, converted_at"
+    );
+    expect(authServiceSource).toContain("($1, $2, $3, $4, $5, $6, $7, 'open', $8, $18, $18, $9, $10, $11, true)");
+    expect(authServiceSource).toContain("VALUES ($1, $2, $3, $4, $5, $6, $7, 'converted', $8, $13, $13, $9, $10, $11, false, $12)");
   });
 
   it("does not update demo lead office on bootstrap reruns", () => {
@@ -168,6 +180,7 @@ describe("ensureDevUserPrimaryOffice", () => {
     expect(leadConflictUpdates.length).toBeGreaterThanOrEqual(2);
     for (const block of leadConflictUpdates) {
       expect(block).not.toContain("office = EXCLUDED.office");
+      expect(block).not.toContain("office_code = EXCLUDED.office_code");
     }
   });
 });

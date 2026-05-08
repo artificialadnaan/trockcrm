@@ -8,6 +8,8 @@ const migrationPath = resolve(__dirname, "../../../../migrations/0104_redesign_a
 const migrationSql = existsSync(migrationPath) ? readFileSync(migrationPath, "utf8") : "";
 const dealContactsSchemaPath = resolve(__dirname, "../../../../shared/src/schema/tenant/deal-contacts.ts");
 const dealContactsSchema = existsSync(dealContactsSchemaPath) ? readFileSync(dealContactsSchemaPath, "utf8") : "";
+const estimateLineItemsSchemaPath = resolve(__dirname, "../../../../shared/src/schema/tenant/estimate-line-items.ts");
+const estimateLineItemsSchema = existsSync(estimateLineItemsSchemaPath) ? readFileSync(estimateLineItemsSchemaPath, "utf8") : "";
 const dealsSchemaPath = resolve(__dirname, "../../../../shared/src/schema/tenant/deals.ts");
 const dealsSchema = existsSync(dealsSchemaPath) ? readFileSync(dealsSchemaPath, "utf8") : "";
 
@@ -65,6 +67,19 @@ describe("redesign A2 tier 2 schema migration", () => {
     expect(migrationSql).toContain("estimate_line_items_deal_sort_idx");
   });
 
+  it("estimate_line_items.deal_id has FK to deals.id with ON DELETE CASCADE", () => {
+    expect(migrationSql).toContain("ADD CONSTRAINT estimate_line_items_deal_id_fkey");
+    expect(migrationSql).toContain(
+      "FOREIGN KEY (deal_id) REFERENCES %I.deals(id) ON DELETE CASCADE"
+    );
+    expect(migrationSql).toContain(
+      "FOREIGN KEY (deal_id) REFERENCES deals(id) ON DELETE CASCADE"
+    );
+    expect(estimateLineItemsSchema).toContain(
+      'dealId: uuid("deal_id").references(() => deals.id, { onDelete: "cascade" })'
+    );
+  });
+
   it("estimate alias backfill preserves legacy values before adding defaults", () => {
     const tenantStart = migrationSql.indexOf("ALTER TABLE %I.estimate_line_items");
     const tenantEnd = migrationSql.indexOf("CREATE INDEX IF NOT EXISTS estimate_line_items_deal_sort_idx", tenantStart);
@@ -102,6 +117,17 @@ describe("redesign A2 tier 2 schema migration", () => {
     );
     expect(dealContactsSchema).not.toContain("unique().on(table.dealId, table.contactId, table.roleOnDeal)");
     expect(dealContactsSchema).not.toContain("deal_contacts_one_primary_per_deal_uidx");
+  });
+
+  it("deal_contacts has expected btree indexes from migration", () => {
+    expect(migrationSql).toContain("CREATE INDEX IF NOT EXISTS deal_contacts_deal_idx ON %I.deal_contacts (deal_id, role_on_deal)");
+    expect(migrationSql).toContain("CREATE INDEX IF NOT EXISTS deal_contacts_contact_idx ON %I.deal_contacts (contact_id)");
+    expect(dealContactsSchema).toContain(
+      'index("deal_contacts_deal_idx").on(table.dealId, table.roleOnDeal)'
+    );
+    expect(dealContactsSchema).toContain(
+      'index("deal_contacts_contact_idx").on(table.contactId)'
+    );
   });
 
   it("keeps the Drizzle deals schema aligned with the project_number partial unique index", () => {

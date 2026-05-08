@@ -7,10 +7,11 @@ import {
   integer,
   timestamp,
 } from "drizzle-orm/pg-core";
+import { deals } from "./deals.js";
 
 export const estimateLineItems = pgTable("estimate_line_items", {
   id: uuid("id").primaryKey().defaultRandom(),
-  dealId: uuid("deal_id"),
+  dealId: uuid("deal_id").references(() => deals.id, { onDelete: "cascade" }),
   sectionId: uuid("section_id").notNull(),
   label: text("label"),
   qty: numeric("qty", { precision: 12, scale: 2 }).default("1"),

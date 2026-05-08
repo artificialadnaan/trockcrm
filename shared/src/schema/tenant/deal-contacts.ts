@@ -1,4 +1,4 @@
-import { pgEnum, pgTable, timestamp, unique, uuid } from "drizzle-orm/pg-core";
+import { index, pgEnum, pgTable, timestamp, unique, uuid } from "drizzle-orm/pg-core";
 import { contacts } from "./contacts.js";
 import { deals } from "./deals.js";
 
@@ -16,5 +16,7 @@ export const dealContacts = pgTable(
   },
   (table) => [
     unique("deal_contacts_deal_id_contact_id_key").on(table.dealId, table.contactId),
+    index("deal_contacts_deal_idx").on(table.dealId, table.roleOnDeal),
+    index("deal_contacts_contact_idx").on(table.contactId),
   ]
 );

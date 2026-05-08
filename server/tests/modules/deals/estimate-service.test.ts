@@ -113,4 +113,26 @@ describe("estimate line item alias columns", () => {
       total: "55.55",
     });
   });
+
+  it("rounds negative half-values away from zero matching Postgres semantics", async () => {
+    const cases = [
+      ["-1.005", "-1.01"],
+      ["-1.004", "-1.00"],
+      ["1.005", "1.01"],
+      ["1.004", "1.00"],
+      ["0", "0.00"],
+    ] as const;
+
+    for (const [quantity, expectedQty] of cases) {
+      const { tenantDb, state } = createTenantDbMock();
+
+      await createLineItem(tenantDb, "deal-1", "section-1", {
+        description: `Quantity ${quantity}`,
+        quantity,
+        unitPrice: "1",
+      });
+
+      expect(state.insertedValues).toMatchObject({ qty: expectedQty });
+    }
+  });
 });

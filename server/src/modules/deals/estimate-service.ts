@@ -31,7 +31,12 @@ function calcTotal(quantity: string | number, unitPrice: string | number): strin
 }
 
 function roundToTwoDecimals(value: string | number): string {
-  return (Math.round((Number(value ?? 0) + Number.EPSILON) * 100) / 100).toFixed(2);
+  const n = Number(value ?? 0);
+  const factor = 100;
+  const rounded = n >= 0
+    ? Math.round(n * factor + Number.EPSILON * factor) / factor
+    : -Math.round(-n * factor + Number.EPSILON * factor) / factor;
+  return rounded.toFixed(2);
 }
 
 export async function getEstimate(tenantDb: TenantDb, dealId: string) {
