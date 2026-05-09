@@ -27,7 +27,27 @@ vi.mock("@/components/email/graph-auth-banner", () => ({
 }));
 
 vi.mock("@/components/email/email-assignment-queue", () => ({
-  EmailAssignmentQueue: () => <section>Parking Lot Intake</section>,
+  useEmailAssignmentQueue: () => ({
+    items: [],
+    loading: false,
+    error: null,
+    page: 1,
+    pagination: {
+      page: 1,
+      limit: 10,
+      total: 2,
+      totalPages: 1,
+    },
+    setPage: vi.fn(),
+    refresh: vi.fn(),
+    assign: vi.fn(),
+  }),
+  EmailAssignmentQueuePanel: () => (
+    <section data-testid="parking-lot-intake">
+      Parking Lot Intake
+      <article>Vendor invoice needs review</article>
+    </section>
+  ),
 }));
 
 vi.mock("@/components/email/email-thread-view", () => ({
@@ -268,6 +288,46 @@ describe("EmailInboxPage", () => {
     clickByText(page.container, "Microsoft 365");
 
     expect(startConsent).toHaveBeenCalledTimes(1);
+
+    page.unmount();
+  });
+
+  it("renders Parking Lot Intake as a tab in the inbox tab row", () => {
+    const page = mountPage();
+    const tabLabels = Array.from(page.container.querySelectorAll("[data-email-filter-tabs] button")).map((button) =>
+      button.textContent?.replace(/\s+/g, " ").trim()
+    );
+
+    expect(tabLabels.some((label) => label?.includes("Parking Lot Intake"))).toBe(true);
+
+    page.unmount();
+  });
+
+  it("Parking Lot Intake tab shows count badge", () => {
+    const page = mountPage();
+    const tab = Array.from(page.container.querySelectorAll("[data-email-filter-tabs] button")).find((button) =>
+      button.textContent?.includes("Parking Lot Intake")
+    );
+
+    expect(tab?.textContent).toContain("2");
+
+    page.unmount();
+  });
+
+  it("selecting Parking Lot Intake tab shows the intake list", () => {
+    const page = mountPage();
+
+    clickByText(page.container, "Parking Lot Intake");
+
+    expect(page.container.textContent).toContain("Vendor invoice needs review");
+
+    page.unmount();
+  });
+
+  it("Parking Lot Intake list is no longer rendered as a separate bottom section", () => {
+    const page = mountPage();
+
+    expect(page.container.querySelector("[data-parking-lot-bottom-section]")).toBeNull();
 
     page.unmount();
   });

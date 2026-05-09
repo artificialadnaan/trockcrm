@@ -22,14 +22,14 @@ import {
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { GraphAuthBanner } from "@/components/email/graph-auth-banner";
-import { EmailAssignmentQueue } from "@/components/email/email-assignment-queue";
+import { EmailAssignmentQueuePanel, useEmailAssignmentQueue } from "@/components/email/email-assignment-queue";
 import { EmailComposeDialog } from "@/components/email/email-compose-dialog";
 import { EmailThreadView } from "@/components/email/email-thread-view";
 import { useGraphAuth } from "@/hooks/use-graph-auth";
 import { useUserEmails, type Email } from "@/hooks/use-emails";
 import { cn } from "@/lib/utils";
 
-type EmailFilter = "all" | "unread" | "unassigned" | "sent";
+type EmailFilter = "all" | "unread" | "unassigned" | "sent" | "parking-lot";
 
 const FILTERS: Array<{
   key: EmailFilter;
@@ -40,6 +40,7 @@ const FILTERS: Array<{
   { key: "unread", label: "Unread", icon: Mail },
   { key: "unassigned", label: "Unassigned", icon: AlertTriangle },
   { key: "sent", label: "Sent", icon: Send },
+  { key: "parking-lot", label: "Parking Lot Intake", icon: AlertTriangle },
 ];
 
 function getDisplayName(email: Email) {
@@ -85,6 +86,7 @@ function needsAttention(email: Email) {
 }
 
 function matchesFilter(email: Email, filter: EmailFilter) {
+  if (filter === "parking-lot") return false;
   if (filter === "sent") return email.direction === "outbound";
   if (filter === "unassigned") return needsAttention(email);
   if (filter === "unread") return needsAttention(email);
@@ -401,6 +403,7 @@ export function EmailInboxPage() {
   const [replyTo, setReplyTo] = useState<string | undefined>(undefined);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const { connected, loading: graphLoading, startConsent } = useGraphAuth();
+  const parkingLotQueue = useEmailAssignmentQueue();
   const oauthConnected = searchParams.get("connected");
   const oauthError = searchParams.get("error");
 
@@ -421,13 +424,14 @@ export function EmailInboxPage() {
       unread: countForFilter(emails, "unread"),
       unassigned: countForFilter(emails, "unassigned"),
       sent: countForFilter(emails, "sent"),
+      parkingLot: parkingLotQueue.pagination.total,
       linked: emails.filter(isLinked).length,
       today: emails.filter((email) => {
         const date = new Date(email.sentAt);
         return !Number.isNaN(date.getTime()) && Date.now() - date.getTime() < 24 * 60 * 60 * 1000;
       }).length,
     }),
-    [emails]
+    [emails, parkingLotQueue.pagination.total]
   );
 
   useEffect(() => {
@@ -510,10 +514,14 @@ export function EmailInboxPage() {
 
       <Card className="overflow-hidden">
         <div className="flex flex-col gap-3 border-b border-slate-100 px-5 py-4 lg:flex-row lg:items-center lg:justify-between">
-          <div className="flex flex-wrap items-center gap-1 rounded-md border border-slate-200 bg-white p-0.5">
+          <div
+            data-email-filter-tabs
+            className="flex flex-wrap items-center gap-1 rounded-md border border-slate-200 bg-white p-0.5"
+          >
             {FILTERS.map((item) => {
               const Icon = item.icon;
               const isActive = filter === item.key;
+              const count = item.key === "parking-lot" ? counts.parkingLot : counts[item.key];
               return (
                 <button
                   key={item.key}
@@ -532,7 +540,7 @@ export function EmailInboxPage() {
                       isActive ? "bg-brand-red/10 text-brand-red" : "bg-slate-100 text-slate-600"
                     )}
                   >
-                    {counts[item.key]}
+                    {count}
                   </span>
                 </button>
               );
@@ -567,63 +575,80 @@ export function EmailInboxPage() {
           <div className="border-b border-red-100 bg-red-50 px-5 py-3 text-sm font-semibold text-red-700">{error}</div>
         ) : null}
 
-        <div className="grid lg:grid-cols-[minmax(0,360px)_minmax(0,1fr)]">
-          <div className="max-h-[640px] overflow-y-auto border-b border-slate-100 lg:border-b-0 lg:border-r">
-            {loading ? (
-              <div className="space-y-2 p-4">
-                {Array.from({ length: 6 }).map((_, index) => (
-                  <div key={index} className="h-20 animate-pulse rounded-md bg-slate-100" />
-                ))}
+        {filter === "parking-lot" ? (
+          <div className="grid lg:grid-cols-[minmax(0,360px)_minmax(0,1fr)]">
+            <div className="border-b border-slate-100 p-5 lg:border-b-0 lg:border-r">
+              <div className="rounded-md bg-slate-50 p-4">
+                <p className="text-[11px] font-black uppercase tracking-[0.18em] text-slate-500">Parking Lot Intake</p>
+                <p className="mt-2 text-3xl font-black tracking-tight text-slate-950">
+                  {parkingLotQueue.pagination.total}
+                </p>
+                <p className="mt-1 text-sm font-semibold text-slate-600">
+                  unresolved email{parkingLotQueue.pagination.total === 1 ? "" : "s"} awaiting assignment
+                </p>
               </div>
-            ) : visibleEmails.length === 0 ? (
-              <p className="px-5 py-12 text-center text-sm text-slate-500">
-                No emails match these filters.
-              </p>
-            ) : (
-              <ul className="divide-y divide-slate-100" aria-label="Email threads">
-                {visibleEmails.map((email) => (
-                  <ThreadListItem
-                    key={email.id}
-                    email={email}
-                    selected={selectedEmail?.id === email.id}
-                    onSelect={() => setSelectedId(email.id)}
-                  />
-                ))}
-              </ul>
-            )}
-
-            {pagination.totalPages > 1 ? (
-              <div className="flex items-center justify-between border-t border-slate-100 px-4 py-3">
-                <span className="text-xs font-semibold text-slate-500">
-                  Page {pagination.page} of {pagination.totalPages}
-                </span>
-                <div className="flex gap-2">
-                  <Button
-                    variant="outline"
-                    size="sm"
-                    disabled={pagination.page <= 1}
-                    onClick={() => setPage(pagination.page - 1)}
-                  >
-                    Previous
-                  </Button>
-                  <Button
-                    variant="outline"
-                    size="sm"
-                    disabled={pagination.page >= pagination.totalPages}
-                    onClick={() => setPage(pagination.page + 1)}
-                  >
-                    Next
-                  </Button>
-                </div>
-              </div>
-            ) : null}
+            </div>
+            <div className="min-h-[640px]">
+              <EmailAssignmentQueuePanel queue={parkingLotQueue} embedded />
+            </div>
           </div>
+        ) : (
+          <div className="grid lg:grid-cols-[minmax(0,360px)_minmax(0,1fr)]">
+            <div className="max-h-[640px] overflow-y-auto border-b border-slate-100 lg:border-b-0 lg:border-r">
+              {loading ? (
+                <div className="space-y-2 p-4">
+                  {Array.from({ length: 6 }).map((_, index) => (
+                    <div key={index} className="h-20 animate-pulse rounded-md bg-slate-100" />
+                  ))}
+                </div>
+              ) : visibleEmails.length === 0 ? (
+                <p className="px-5 py-12 text-center text-sm text-slate-500">
+                  No emails match these filters.
+                </p>
+              ) : (
+                <ul className="divide-y divide-slate-100" aria-label="Email threads">
+                  {visibleEmails.map((email) => (
+                    <ThreadListItem
+                      key={email.id}
+                      email={email}
+                      selected={selectedEmail?.id === email.id}
+                      onSelect={() => setSelectedId(email.id)}
+                    />
+                  ))}
+                </ul>
+              )}
 
-          <EmailReaderPane email={selectedEmail} onReply={handleReply} />
-        </div>
+              {pagination.totalPages > 1 ? (
+                <div className="flex items-center justify-between border-t border-slate-100 px-4 py-3">
+                  <span className="text-xs font-semibold text-slate-500">
+                    Page {pagination.page} of {pagination.totalPages}
+                  </span>
+                  <div className="flex gap-2">
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      disabled={pagination.page <= 1}
+                      onClick={() => setPage(pagination.page - 1)}
+                    >
+                      Previous
+                    </Button>
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      disabled={pagination.page >= pagination.totalPages}
+                      onClick={() => setPage(pagination.page + 1)}
+                    >
+                      Next
+                    </Button>
+                  </div>
+                </div>
+              ) : null}
+            </div>
+
+            <EmailReaderPane email={selectedEmail} onReply={handleReply} />
+          </div>
+        )}
       </Card>
-
-      <EmailAssignmentQueue />
 
       <EmailComposeDialog
         open={composeOpen}
