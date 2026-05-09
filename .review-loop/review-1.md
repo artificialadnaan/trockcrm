@@ -1,31 +1,17 @@
-# Track G1 Internal Review - Iteration 1
-
-## Result
-
-Changes requested, then applied in the same iteration.
+# Track F1 Internal Review - Review 1
 
 ## Findings
 
-1. **Period mapping bug:** `useRepPerformance` originally mapped every non-MTD/QTD preset to `"year"`, so Last month and Last quarter would show the wrong closed-performance support data. Fixed by mapping `last_month -> month`, `last_quarter -> quarter`, and `last_year -> year`.
+1. **P2 - OAuth callback messages were dropped.**
+   The previous page read `connected=true` and `error` from the URL and displayed success/failure messages after the Microsoft OAuth redirect. The new page removed `useSearchParams`, so users lose immediate feedback after connecting or failing to connect email.
 
-2. **Activity pulse bar math:** stacked activity segment widths were being scaled twice by the row width, making the distribution visually under-represented. Fixed by letting the outer row bar carry the total-width scaling and each inner segment use its share of the row total.
+2. **P2 - Header Microsoft 365 button is decorative.**
+   The preview-style header includes a Microsoft 365 button, but the implementation does not call the existing Graph consent flow. A visible command must either do the real action or be removed.
 
-## Spec Check
+3. **P3 - Thread assignment remains available but lower-discoverability.**
+   The existing `EmailThreadView` is still reachable via `Thread tools`, which preserves functionality. This is acceptable for the polish pass, but production smoke should click it once if a threaded message is available.
 
-- Header: matches requested title, freshness line, period tabs, refresh, bell/action icons, avatar.
-- KPI strip: exactly three cards.
-- Forecast vs goal: present with actual/target, gap caption, mini metrics, and two progress bars.
-- Sales force table: requested columns and semantic rep drilldown links are present.
-- Strategic alerts: dark right panel using real `strategicAlerts`.
-- At-risk deals: left table with deal detail links and SLA badge. Company name is not shown because the current hook payload does not include it.
-- AI coaching: right panel using real `aiCoachingPrompts`.
-- Activity pulse: left panel sorted by total activity.
-- Recent closes: right panel using real `recentCloses`.
+## Required Fixes
 
-## Data Integrity Check
-
-No fake numeric director data introduced. All values come from existing hook fields or are deterministic calculations from those fields.
-
-## Accessibility Check
-
-Navigation uses native `Link`; no `Button render={<Link>}` pattern is present. Refresh and action icon buttons have labels/titles.
+- Restore OAuth callback success/error messages.
+- Wire the Microsoft 365 header action to the existing `useGraphAuth().startConsent` flow, with disabled/connected state.

@@ -1,43 +1,33 @@
-# Track G1 Internal Review Request - Iteration 1
+# Track F1 Internal Review - Iteration 1
 
-## Scope
+## Diff
 
-Frontend-only director dashboard polish in `client/src/pages/director/director-dashboard-page.tsx`, updated to the user-provided screenshot spec.
+Changed files:
 
-## Section-by-Section Spec Mapping
+- `client/src/pages/email/email-inbox-page.tsx`
+- `client/src/pages/email/email-inbox-page.test.tsx`
 
-1. Header: implemented title, freshness eyebrow, MTD/QTD/YTD/last-period tabs, real `refetch()` refresh button, shell action icons, and avatar.
-2. KPI strip: implemented exactly three cards for Active pipeline, Closed period, and At risk.
-3. Forecast vs goal: implemented actual/target headline, gap caption, Pace/Closing/Activity mini cards, and WON/PIPE progress bars.
-4. Sales force performance: implemented table with rep, closed, pipeline, distribution, win rate, at risk, activity, trend, export button, and semantic rep links.
-5. Strategic alerts: implemented dark right panel using `data.strategicAlerts`.
-6. At-risk deals: implemented left table using `data.staleDeals` first because those rows include rep attribution. Falls back to `data.atRiskDeals` if stale deals are absent.
-7. AI coaching: implemented right panel using `data.aiCoachingPrompts`.
-8. Activity pulse: implemented left panel using `data.activityPulse` with stacked activity bars.
-9. Recent closes: implemented right panel using `data.recentCloses`.
+Summary:
 
-## Data Sources
+- Replaced the old single-column Email page wrapper with a preview-style hero, 3 metric cards, folder tabs, search, two-pane thread list/reader, and bottom assignment queue.
+- Preserved the real `useUserEmails` data flow with the existing `direction`, `search`, `page`, and `limit` filters.
+- Preserved `GraphAuthBanner`, `EmailAssignmentQueue`, `EmailComposeDialog`, and `EmailThreadView` access for existing email connection, assignment, compose, and thread-assignment workflows.
+- Added page-level regression tests for list/reader rendering, selection, folder tabs, search, unread/attention indicator, and reply compose.
 
-- Existing hook only: `useDirectorDashboard(dateRange)` and `useRepPerformance(...)`.
-- No backend changes and no aggregation changes.
-- Existing director dashboard payload already includes strategic alerts, AI coaching prompts, activity pulse, recent closes, at-risk deals, stale deals, rep funnel rows, and forecast-vs-goal.
+## Test Results
 
-## Known Compromises
+- `npx vitest run client/src/pages/email/email-inbox-page.test.tsx`: 6 passed.
+- `npm run typecheck`: passed.
+- `ls client/src/pages/email/*.test.tsx client/src/components/email/*.test.tsx 2>/dev/null | xargs -r npx vitest run`: 11 passed across 3 files.
 
-- At-risk deal rows do not include company name in the current hook shape. The UI renders rep and region context instead of fabricating a company.
-- Rep region comes from rep performance snapshots. If region is null, the UI renders "Region unavailable".
-- Distribution bars use existing `repFunnelRows` counts by lead/qualified/opportunity/estimating, not stage-by-stage deal distribution.
-- Recent close sub-context such as repeat customer or lost reason is not available in the current hook shape, so the row shows rep context only.
+## Structural Decisions
 
-## Verification
+- Kept the redesign inside `EmailInboxPage` rather than modifying reusable email components used by detail tabs.
+- The reader uses sanitized `bodyHtml`/`bodyPreview` and keeps thread assignment behind a `Thread tools` action when `graphConversationId` exists.
+- The preview's unread concept is approximated with the currently exposed CRM attention signal because the email API does not expose read/unread state.
 
-- `npm run typecheck`: passed after screenshot-spec rewrite.
-- `npx vitest run client/src/pages/director/director-dashboard-page.test.tsx`: 9 tests passed.
-- `find client/src/pages/director client/src/components/director -name '*.test.tsx' -print 2>/dev/null | xargs -r npx vitest run`: 1 file, 9 tests passed.
+## Concerns For Review
 
-## Review Focus
-
-- Check visual and structural fidelity against the screenshot order.
-- Confirm no fake director metrics were introduced.
-- Confirm no backend, aggregation, or shared component files changed.
-- Confirm refresh uses the real hook refetch instead of a decorative button.
+- Confirm no old callback/status behavior was accidentally removed.
+- Confirm the top Microsoft action is not decorative-only.
+- Confirm the hidden thread tools affordance is enough to preserve existing thread assignment functionality.
