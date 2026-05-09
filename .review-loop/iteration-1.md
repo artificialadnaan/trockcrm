@@ -1,23 +1,33 @@
-# Track G2 Internal Review - Iteration 1
+# Track F1 Internal Review - Iteration 1
 
-## Diff Summary
-- Added `GET /api/commissions/dashboard?period=...` for the sales-rep commissions page.
-- Added tenant migration `0107_commission_deal_snapshots.sql` for persisted per-deal commission snapshot deltas.
-- Rebuilt `client/src/pages/commissions/rep-commissions-page.tsx` to match the screenshot structure: header, period tabs, KPI strip, stage bar, goal progress, grouped project table, CSV export, and deal links.
-- Added client behavior tests, backend reporting tests, and a migration test.
+## Diff
+
+Changed files:
+
+- `client/src/pages/email/email-inbox-page.tsx`
+- `client/src/pages/email/email-inbox-page.test.tsx`
+
+Summary:
+
+- Replaced the old single-column Email page wrapper with a preview-style hero, 3 metric cards, folder tabs, search, two-pane thread list/reader, and bottom assignment queue.
+- Preserved the real `useUserEmails` data flow with the existing `direction`, `search`, `page`, and `limit` filters.
+- Preserved `GraphAuthBanner`, `EmailAssignmentQueue`, `EmailComposeDialog`, and `EmailThreadView` access for existing email connection, assignment, compose, and thread-assignment workflows.
+- Added page-level regression tests for list/reader rendering, selection, folder tabs, search, unread/attention indicator, and reply compose.
 
 ## Test Results
-- `npm run typecheck`: pass
-- `npx vitest run client/src/pages/commissions/rep-commissions-page.test.tsx server/tests/modules/commissions/reporting.test.ts server/tests/modules/migration/commission-deal-snapshots-migration.test.ts`: 16 tests pass
+
+- `npx vitest run client/src/pages/email/email-inbox-page.test.tsx`: 6 passed.
+- `npm run typecheck`: passed.
+- `ls client/src/pages/email/*.test.tsx client/src/components/email/*.test.tsx 2>/dev/null | xargs -r npx vitest run`: 11 passed across 3 files.
 
 ## Structural Decisions
-- `/commissions` consumes one richer endpoint instead of stitching together the old summary/potential/earned endpoints.
-- Rep scoping is enforced server-side. Rep users ignore any supplied `repId` and use `req.user.id`.
-- Pipeline commission now follows the requested rule: deal value times rep commission rate. It no longer uses estimated margin on the new dashboard endpoint.
-- Delta tracking uses persisted tenant `commission_deal_snapshots`: current computed amount is compared to the last snapshot, then the snapshot is refreshed.
-- No director/team aggregate commission dollars were added to `/commissions`. The team toggle is present only as disabled/hidden UI, with My commissions functional.
 
-## Concerns To Review
-- Goal storage does not appear to exist. The endpoint currently returns no goal and the UI renders `No goal set`.
-- The dashboard endpoint refreshes snapshots during a GET so deltas persist across sessions without another write path.
-- Existing legacy `/commissions/summary`, `/potential`, `/earned` endpoints are preserved for compatibility.
+- Kept the redesign inside `EmailInboxPage` rather than modifying reusable email components used by detail tabs.
+- The reader uses sanitized `bodyHtml`/`bodyPreview` and keeps thread assignment behind a `Thread tools` action when `graphConversationId` exists.
+- The preview's unread concept is approximated with the currently exposed CRM attention signal because the email API does not expose read/unread state.
+
+## Concerns For Review
+
+- Confirm no old callback/status behavior was accidentally removed.
+- Confirm the top Microsoft action is not decorative-only.
+- Confirm the hidden thread tools affordance is enough to preserve existing thread assignment functionality.

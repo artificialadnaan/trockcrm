@@ -1,33 +1,17 @@
-# Track G2 Review - Iteration 1
+# Track F1 Internal Review - Review 1
 
-## Spec Walkthrough
-- Header: implemented with `COMMISSIONS`, `YOUR EARNINGS · PER PROJECT`, My commissions active, Team disabled/hidden.
-- Period tabs: implemented for MTD/QTD/YTD/All and refetches.
-- KPI strip: implemented with earned red, pipeline blue accent, total potential green accent.
-- Pipeline by stage: implemented in fixed order and proportional to commission dollars.
-- Goal progress: implemented, but no goal source exists in schema; renders no-goal state.
-- Projects table: implemented grouped by stage with the required context strings, deal value, rate, commission, delta, link semantics, and total row.
-- Export: implemented client-side CSV.
+## Findings
 
-## Calculation Review
-- Earned uses `deal_signed_commissions.amount`, which is the locked amount from contract signing.
-- Pipeline uses `(awarded_amount -> bid_estimate -> dd_estimate + change_order_total) * commission_rate`, matching the prompt.
-- Total potential = earned + unsigned active pipeline.
-- Stages are normalized to the five screenshot buckets.
+1. **P2 - OAuth callback messages were dropped.**
+   The previous page read `connected=true` and `error` from the URL and displayed success/failure messages after the Microsoft OAuth redirect. The new page removed `useSearchParams`, so users lose immediate feedback after connecting or failing to connect email.
 
-## Three-State Model Review
-- Earned and potential are represented. Removed/lost deals are excluded via lost-stage filtering and signed non-lost filtering.
-- The screenshot build did not request a visible Removed bucket for the sales-rep page, so no removed group was added.
+2. **P2 - Header Microsoft 365 button is decorative.**
+   The preview-style header includes a Microsoft 365 button, but the implementation does not call the existing Graph consent flow. A visible command must either do the real action or be removed.
 
-## Security Review
-- Rep users are forced to `req.user.id` in the dashboard endpoint.
-- The UI does not expose rep selection.
-- Existing admin/director route guard for `/commissions` remains outside this page; this endpoint still cannot show another rep to a rep.
+3. **P3 - Thread assignment remains available but lower-discoverability.**
+   The existing `EmailThreadView` is still reachable via `Thread tools`, which preserves functionality. This is acceptable for the polish pass, but production smoke should click it once if a threaded message is available.
 
-## Issues Found
-1. `getCommissionPeriodDateRange` should have a deterministic unit test for MTD/QTD/YTD/All.
-2. The final report and PR body must explicitly call out that goal storage is missing and no synthetic goal was invented.
-3. The snapshot table write-on-read should be documented as intentional because no central recalculation job currently exists.
+## Required Fixes
 
-## Verdict
-Proceed after adding period range test coverage and documenting the goal/snapshot decisions.
+- Restore OAuth callback success/error messages.
+- Wire the Microsoft 365 header action to the existing `useGraphAuth().startConsent` flow, with disabled/connected state.

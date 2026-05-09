@@ -1,22 +1,27 @@
 import { useCallback, useMemo, useState } from "react";
+import { useNavigate } from "react-router-dom";
 import {
+  ArrowDownToLine,
+  ArrowUpDown,
+  Briefcase,
+  Camera,
   ChevronDown,
-  ChevronRight,
-  Download,
   FileIcon,
   FileSpreadsheet,
   FileText,
   FolderOpen,
-  ImageIcon,
+  LayoutGrid,
+  Layers,
+  List,
   Plus,
   Search,
   Trash2,
+  Upload,
+  Users,
   X,
 } from "lucide-react";
-import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import { Input } from "@/components/ui/input";
 import {
   Select,
   SelectContent,
@@ -39,304 +44,421 @@ import {
   formatFileSize,
 } from "@/lib/file-utils";
 
-// ─── File Icon Helper ────────────────────────────────────────────────────────
+type FileTab = "all" | "photos" | "documents";
+type FileView = "grid" | "list";
+type LinkedFilter = "any" | "deal" | "lead" | "contact" | "unassigned";
+
+const EYEBROW = "text-[11px] font-black uppercase tracking-[0.18em] text-slate-500";
+
+const TYPE_FILTERS: Array<{ value: FileCategory | "all"; label: string }> = [
+  { value: "all", label: "All Types" },
+  { value: "photo", label: "Photos" },
+  { value: "contract", label: "Contracts" },
+  { value: "rfp", label: "RFP" },
+  { value: "estimate", label: "Estimates" },
+  { value: "proposal", label: "Proposals" },
+  { value: "closeout", label: "Closeout" },
+];
 
 function getFileIcon(mimeType: string) {
-  if (mimeType.startsWith("image/")) return ImageIcon;
+  if (mimeType.startsWith("image/")) return Camera;
   if (mimeType === "application/pdf" || mimeType.includes("word")) return FileText;
-  if (
-    mimeType.includes("sheet") ||
-    mimeType.includes("excel") ||
-    mimeType === "text/csv"
-  )
+  if (mimeType.includes("sheet") || mimeType.includes("excel") || mimeType === "text/csv") {
     return FileSpreadsheet;
+  }
   return FileIcon;
 }
 
-// ─── File Card ───────────────────────────────────────────────────────────────
-
-interface FileCardProps {
-  file: FileRecord;
-  onDownload: (id: string) => void;
-  onDelete: (id: string) => void;
+function formatDate(value: string | null | undefined) {
+  if (!value) return "Unknown";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "Unknown";
+  return date.toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" });
 }
 
-function FileCard({ file, onDownload, onDelete }: FileCardProps) {
-  const Icon = getFileIcon(file.mimeType);
-  const dateStr = new Date(file.createdAt).toLocaleDateString("en-US", {
-    month: "short",
-    day: "numeric",
-    year: "numeric",
-  });
+function initials(name: string | null | undefined) {
+  const parts = (name ?? "Unknown")
+    .trim()
+    .split(/\s+/)
+    .filter(Boolean);
+  if (parts.length === 0) return "U";
+  return parts
+    .slice(0, 2)
+    .map((part) => part[0]?.toUpperCase())
+    .join("");
+}
+
+function fileTitle(file: FileRecord) {
+  const extension = file.fileExtension && !file.displayName.endsWith(file.fileExtension) ? file.fileExtension : "";
+  return `${file.displayName}${extension}`;
+}
+
+function linkedType(file: FileRecord): LinkedFilter {
+  if (file.dealId) return "deal";
+  if (file.leadId) return "lead";
+  if (file.contactId) return "contact";
+  return "unassigned";
+}
+
+function linkedLabel(file: FileRecord, dealMap: Map<string, Deal>) {
+  if (file.dealId) {
+    const deal = dealMap.get(file.dealId);
+    return {
+      type: "deal" as const,
+      label: deal ? `${deal.dealNumber ?? "Deal"} · ${deal.name}` : "Linked deal",
+      href: `/deals/${file.dealId}`,
+    };
+  }
+  if (file.leadId) return { type: "lead" as const, label: "Linked lead", href: `/leads/${file.leadId}` };
+  if (file.contactId) return { type: "contact" as const, label: "Linked contact", href: `/contacts/${file.contactId}` };
+  return null;
+}
+
+function isDocument(file: FileRecord) {
+  return file.category !== "photo" && !file.mimeType.startsWith("image/");
+}
+
+function nextSortBy(value: "created_at" | "display_name" | "file_size_bytes") {
+  if (value === "created_at") return "display_name";
+  if (value === "display_name") return "file_size_bytes";
+  return "created_at";
+}
+
+function MetricCard({
+  eyebrow,
+  value,
+  badge,
+  caption,
+  accent = "default",
+}: {
+  eyebrow: string;
+  value: string;
+  badge: string;
+  caption: string;
+  accent?: "default" | "red";
+}) {
+  if (accent === "red") {
+    return (
+      <div className="rounded-md border border-brand-red bg-brand-red p-5 text-white">
+        <p className="text-[11px] font-black uppercase tracking-[0.18em] text-white/75">{eyebrow}</p>
+        <p className="mt-3 text-4xl font-black tracking-tight md:text-5xl">{value}</p>
+        <p className="mt-3 text-xs font-semibold uppercase tracking-wide text-white/80">
+          <span className="rounded-full bg-white/15 px-2 py-1 text-white">{badge}</span> {caption}
+        </p>
+      </div>
+    );
+  }
 
   return (
-    <div className="flex items-start gap-3 p-3 rounded-lg border border-border/60 bg-card hover:bg-accent/30 transition-colors group">
-      <div className="mt-0.5 flex-shrink-0">
-        <Icon className="h-5 w-5 text-muted-foreground" />
-      </div>
-
-      <div className="flex-1 min-w-0">
-        <p className="text-sm font-medium truncate leading-snug">
-          {file.displayName}
-          {file.fileExtension}
-          {file.version > 1 && (
-            <span className="ml-1.5 text-[10px] font-mono text-muted-foreground border border-border px-1 py-0.5 rounded">
-              v{file.version}
-            </span>
-          )}
-        </p>
-
-        <div className="flex flex-wrap items-center gap-x-3 gap-y-1 mt-1">
-          <span
-            className={`inline-flex items-center text-[10px] font-semibold uppercase tracking-wider px-1.5 py-0.5 rounded ${getCategoryColor(
-              file.category
-            )}`}
-          >
-            {getCategoryLabel(file.category)}
-          </span>
-          <span className="text-[11px] text-muted-foreground font-mono">
-            {formatFileSize(file.fileSizeBytes)}
-          </span>
-          <span className="text-[11px] text-muted-foreground">{dateStr}</span>
-          {file.uploadedBy && (
-            <span className="text-[11px] text-muted-foreground truncate max-w-[120px]">
-              {file.uploadedBy}
-            </span>
-          )}
-        </div>
-
-        {file.tags.length > 0 && (
-          <div className="flex flex-wrap gap-1 mt-1.5">
-            {file.tags.slice(0, 4).map((tag) => (
-              <Badge key={tag} variant="secondary" className="text-[9px] px-1.5 py-0">
-                {tag}
-              </Badge>
-            ))}
-            {file.tags.length > 4 && (
-              <span className="text-[10px] text-muted-foreground">
-                +{file.tags.length - 4}
-              </span>
-            )}
-          </div>
-        )}
-      </div>
-
-      <div className="flex items-center gap-1 flex-shrink-0 opacity-0 group-hover:opacity-100 transition-opacity">
-        <Button
-          variant="ghost"
-          size="icon"
-          className="h-7 w-7"
-          onClick={() => onDownload(file.id)}
-          title="Download"
-        >
-          <Download className="h-3.5 w-3.5" />
-        </Button>
-        <Button
-          variant="ghost"
-          size="icon"
-          className="h-7 w-7 text-red-500 hover:text-red-600 hover:bg-red-50"
-          onClick={() => onDelete(file.id)}
-          title="Delete"
-        >
-          <Trash2 className="h-3.5 w-3.5" />
-        </Button>
-      </div>
+    <div className="relative overflow-hidden rounded-md border border-slate-200 bg-white p-5">
+      <p className={EYEBROW}>{eyebrow}</p>
+      <p className="mt-3 text-4xl font-black tracking-tight text-slate-950 md:text-5xl">{value}</p>
+      <p className="mt-3 text-xs font-semibold uppercase tracking-wide text-slate-500">
+        <span className="rounded-full bg-slate-100 px-2 py-1 font-black text-slate-700">{badge}</span> {caption}
+      </p>
+      <div className="absolute inset-x-0 bottom-0 h-1 bg-brand-red" />
     </div>
   );
 }
 
-// ─── Deal Section ─────────────────────────────────────────────────────────────
-
-interface DealSectionProps {
-  deal: Deal | null; // null = unassigned
-  files: FileRecord[];
-  onDownload: (id: string) => void;
-  onDelete: (id: string) => void;
-  defaultOpen?: boolean;
+function FilterChip({
+  active,
+  children,
+  onClick,
+  dataAttribute,
+}: {
+  active: boolean;
+  children: React.ReactNode;
+  onClick: () => void;
+  dataAttribute?: Record<string, string>;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      className={`rounded-full px-2.5 py-1 text-[11px] font-bold uppercase tracking-wide transition-colors ${
+        active ? "bg-brand-red text-white" : "bg-slate-100 text-slate-600 hover:bg-slate-200"
+      }`}
+      {...dataAttribute}
+    >
+      {children}
+    </button>
+  );
 }
 
-function DealSection({
-  deal,
-  files,
+function FileLinkChip({
+  file,
+  dealMap,
+}: {
+  file: FileRecord;
+  dealMap: Map<string, Deal>;
+}) {
+  const navigate = useNavigate();
+  const link = linkedLabel(file, dealMap);
+  if (!link) return <span className="text-xs font-semibold text-slate-400">Unassigned</span>;
+
+  const Icon = link.type === "deal" ? Briefcase : link.type === "contact" ? Users : Layers;
+  return (
+    <button
+      type="button"
+      onClick={() => navigate(link.href)}
+      className="inline-flex max-w-full items-center gap-1 rounded-full bg-brand-red/10 px-2 py-0.5 text-[11px] font-bold text-brand-red ring-1 ring-brand-red/20 transition-opacity hover:opacity-80"
+    >
+      <Icon className="h-2.5 w-2.5 shrink-0" />
+      <span className="truncate">{link.label}</span>
+    </button>
+  );
+}
+
+function FileGridCard({
+  file,
+  dealMap,
   onDownload,
   onDelete,
-  defaultOpen = true,
-}: DealSectionProps) {
-  const [open, setOpen] = useState(defaultOpen);
+}: {
+  file: FileRecord;
+  dealMap: Map<string, Deal>;
+  onDownload: (id: string) => void;
+  onDelete: (id: string) => void;
+}) {
+  const Icon = getFileIcon(file.mimeType);
+  const isPhoto = file.category === "photo" || file.mimeType.startsWith("image/");
 
-  const totalBytes = files.reduce((sum, f) => sum + f.fileSizeBytes, 0);
-
-  // Count per category
-  const categoryCounts = useMemo(() => {
-    const counts: Partial<Record<FileCategory, number>> = {};
-    for (const f of files) {
-      counts[f.category] = (counts[f.category] ?? 0) + 1;
-    }
-    return counts;
-  }, [files]);
-
-  const topCategories = Object.entries(categoryCounts)
-    .sort((a, b) => (b[1] as number) - (a[1] as number))
-    .slice(0, 3) as [FileCategory, number][];
+  if (isPhoto) {
+    return (
+      <article className="group overflow-hidden rounded-md border border-slate-200 bg-white" data-file-card>
+        <div className="relative aspect-[4/3] bg-gradient-to-br from-slate-200 to-slate-300">
+          <div className="flex h-full w-full items-center justify-center">
+            <Camera className="h-8 w-8 text-white/75" />
+          </div>
+          <div className="absolute bottom-2 right-2 flex gap-1 opacity-0 transition-opacity group-hover:opacity-100 group-focus-within:opacity-100">
+            <button
+              type="button"
+              onClick={() => onDownload(file.id)}
+              className="flex h-7 w-7 items-center justify-center rounded-full bg-white/90 text-slate-700 shadow-sm hover:bg-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-red"
+              aria-label={`Download ${fileTitle(file)}`}
+            >
+              <ArrowDownToLine className="h-3.5 w-3.5" />
+            </button>
+            <button
+              type="button"
+              onClick={() => onDelete(file.id)}
+              className="flex h-7 w-7 items-center justify-center rounded-full bg-white/90 text-red-600 shadow-sm hover:bg-red-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-red"
+              aria-label={`Delete ${fileTitle(file)}`}
+            >
+              <Trash2 className="h-3.5 w-3.5" />
+            </button>
+          </div>
+        </div>
+        <div className="space-y-1 border-t border-slate-100 px-3 py-2">
+          <p className="truncate text-xs font-bold text-slate-950">{fileTitle(file)}</p>
+          <p className="text-[10px] text-slate-500">
+            <span className="font-bold text-slate-700">{initials(file.uploadedBy)}</span> · {file.uploadedBy || "Unknown"} ·{" "}
+            {formatDate(file.createdAt)} · {formatFileSize(file.fileSizeBytes)}
+          </p>
+          <div className="flex flex-wrap items-center gap-1.5">
+            <span className={`rounded-full px-2 py-0.5 text-[10px] font-bold uppercase tracking-wide ring-1 ring-slate-200 ${getCategoryColor(file.category)}`}>
+              {getCategoryLabel(file.category)}
+            </span>
+            <FileLinkChip file={file} dealMap={dealMap} />
+          </div>
+        </div>
+      </article>
+    );
+  }
 
   return (
-    <div className="border border-border rounded-lg overflow-hidden">
-      {/* Section Header */}
-      <button
-        type="button"
-        onClick={() => setOpen((v) => !v)}
-        className="w-full flex items-center gap-3 px-4 py-3 bg-muted/40 hover:bg-muted/60 transition-colors border-l-4 border-l-red-600 text-left"
-      >
-        <span className="flex-shrink-0 text-muted-foreground">
-          {open ? (
-            <ChevronDown className="h-4 w-4" />
-          ) : (
-            <ChevronRight className="h-4 w-4" />
-          )}
+    <article className="group flex min-h-[170px] flex-col gap-2 rounded-md border border-slate-200 bg-white p-4 transition-colors hover:border-slate-300" data-file-card>
+      <div className="flex items-start justify-between gap-2">
+        <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-md bg-slate-100">
+          <Icon className="h-4 w-4 text-slate-600" />
         </span>
-
-        <div className="flex-1 min-w-0">
-          <div className="flex items-center gap-3 flex-wrap">
-            {deal ? (
-              <>
-                <span className="font-mono text-xs font-bold uppercase tracking-widest text-red-600">
-                  {deal.dealNumber}
-                </span>
-                <span className="font-semibold text-sm truncate">{deal.name}</span>
-                {deal.projectTypeId && (
-                  <span className="text-[10px] uppercase tracking-widest text-muted-foreground font-mono border border-border px-1.5 py-0.5 rounded">
-                    {deal.projectTypeId}
-                  </span>
-                )}
-              </>
-            ) : (
-              <span className="font-semibold text-sm text-muted-foreground">
-                Unassigned Files
-              </span>
-            )}
-          </div>
-
-          {deal?.propertyAddress && (
-            <p className="text-[11px] text-muted-foreground mt-0.5 truncate">
-              {deal.propertyAddress}
-              {deal.propertyCity ? `, ${deal.propertyCity}` : ""}
-              {deal.propertyState ? `, ${deal.propertyState}` : ""}
-            </p>
-          )}
+        <div className="flex items-center gap-1 opacity-0 transition-opacity group-hover:opacity-100 group-focus-within:opacity-100">
+          <button
+            type="button"
+            onClick={() => onDownload(file.id)}
+            className="flex h-7 w-7 items-center justify-center rounded-md text-slate-400 hover:bg-slate-100 hover:text-slate-900 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-red"
+            aria-label={`Download ${fileTitle(file)}`}
+          >
+            <ArrowDownToLine className="h-3.5 w-3.5" />
+          </button>
+          <button
+            type="button"
+            onClick={() => onDelete(file.id)}
+            className="flex h-7 w-7 items-center justify-center rounded-md text-slate-400 hover:bg-red-50 hover:text-red-600 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-red"
+            aria-label={`Delete ${fileTitle(file)}`}
+          >
+            <Trash2 className="h-3.5 w-3.5" />
+          </button>
         </div>
-
-        <div className="flex items-center gap-3 flex-shrink-0 text-right">
-          <div className="hidden sm:flex items-center gap-1.5">
-            {topCategories.map(([cat, count]) => (
-              <span
-                key={cat}
-                className={`text-[9px] font-bold uppercase tracking-widest px-1.5 py-0.5 rounded ${getCategoryColor(
-                  cat
-                )}`}
-              >
-                {count} {getCategoryLabel(cat)}
-              </span>
-            ))}
-          </div>
-          <div className="text-right">
-            <p className="text-xs font-mono font-bold text-foreground">
-              {files.length} FILE{files.length !== 1 ? "S" : ""}
-            </p>
-            <p className="text-[10px] font-mono text-muted-foreground">
-              {formatFileSize(totalBytes)}
-            </p>
-          </div>
-        </div>
-      </button>
-
-      {/* Files Grid */}
-      {open && (
-        <div className="p-3 grid grid-cols-1 lg:grid-cols-2 gap-2 bg-background">
-          {files.map((file) => (
-            <FileCard
-              key={file.id}
-              file={file}
-              onDownload={onDownload}
-              onDelete={onDelete}
-            />
+      </div>
+      <p className="line-clamp-2 text-sm font-bold text-slate-950">{fileTitle(file)}</p>
+      <div className="flex flex-wrap items-center gap-1.5">
+        <span className={`inline-flex items-center rounded-full px-2 py-0.5 text-[10px] font-bold uppercase tracking-wide ring-1 ring-slate-200 ${getCategoryColor(file.category)}`}>
+          {getCategoryLabel(file.category)}
+        </span>
+        <FileLinkChip file={file} dealMap={dealMap} />
+      </div>
+      {file.tags.length > 0 ? (
+        <div className="flex flex-wrap gap-1">
+          {file.tags.slice(0, 3).map((tag) => (
+            <span key={tag} className="rounded bg-slate-100 px-1.5 py-0.5 text-[10px] font-semibold text-slate-600">
+              {tag}
+            </span>
           ))}
         </div>
-      )}
-    </div>
+      ) : null}
+      <div className="mt-auto flex items-center justify-between border-t border-slate-100 pt-2 text-[10px] text-slate-500">
+        <p>
+          <span className="font-bold text-slate-700">{file.uploadedBy || "Unknown"}</span> · {formatDate(file.createdAt)}
+        </p>
+        <p className="font-semibold tabular-nums">{formatFileSize(file.fileSizeBytes)}</p>
+      </div>
+    </article>
   );
 }
 
-// ─── Main Page ────────────────────────────────────────────────────────────────
+function FilesTable({
+  rows,
+  dealMap,
+  onDownload,
+  onDelete,
+}: {
+  rows: FileRecord[];
+  dealMap: Map<string, Deal>;
+  onDownload: (id: string) => void;
+  onDelete: (id: string) => void;
+}) {
+  return (
+    <div className="overflow-x-auto" data-view="list">
+      <table className="w-full min-w-[860px]">
+        <thead>
+          <tr className="border-b border-slate-100 text-[10px] font-bold uppercase tracking-[0.16em] text-slate-500">
+            <th className="px-5 py-3 text-left">File</th>
+            <th className="px-5 py-3 text-left">Type</th>
+            <th className="px-5 py-3 text-left">Linked To</th>
+            <th className="px-5 py-3 text-right">Size</th>
+            <th className="px-5 py-3 text-left">Uploaded</th>
+            <th className="w-20 px-5 py-3" aria-hidden />
+          </tr>
+        </thead>
+        <tbody className="divide-y divide-slate-100">
+          {rows.map((file) => {
+            const Icon = getFileIcon(file.mimeType);
+            return (
+              <tr key={file.id} className="transition-colors hover:bg-slate-50">
+                <td className="px-5 py-3">
+                  <div className="flex items-center gap-3">
+                    <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-md bg-slate-100">
+                      <Icon className="h-4 w-4 text-slate-600" />
+                    </span>
+                    <p className="max-w-xs truncate text-sm font-bold text-slate-950">{fileTitle(file)}</p>
+                  </div>
+                </td>
+                <td className="px-5 py-3">
+                  <span className={`inline-flex items-center rounded-full px-2 py-0.5 text-[10px] font-bold uppercase tracking-wide ring-1 ring-slate-200 ${getCategoryColor(file.category)}`}>
+                    {getCategoryLabel(file.category)}
+                  </span>
+                </td>
+                <td className="px-5 py-3">
+                  <FileLinkChip file={file} dealMap={dealMap} />
+                </td>
+                <td className="px-5 py-3 text-right text-xs font-semibold tabular-nums text-slate-700">
+                  {formatFileSize(file.fileSizeBytes)}
+                </td>
+                <td className="px-5 py-3 text-xs text-slate-500">
+                  <span className="font-bold text-slate-700">{file.uploadedBy || "Unknown"}</span> · {formatDate(file.createdAt)}
+                </td>
+                <td className="px-5 py-3 text-right">
+                  <div className="flex justify-end gap-1">
+                    <button
+                      type="button"
+                      onClick={() => onDownload(file.id)}
+                      className="inline-flex h-7 w-7 items-center justify-center rounded-md text-slate-400 hover:bg-slate-100 hover:text-slate-900"
+                      aria-label={`Download ${fileTitle(file)}`}
+                    >
+                      <ArrowDownToLine className="h-3.5 w-3.5" />
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => onDelete(file.id)}
+                      className="inline-flex h-7 w-7 items-center justify-center rounded-md text-slate-400 hover:bg-red-50 hover:text-red-600"
+                      aria-label={`Delete ${fileTitle(file)}`}
+                    >
+                      <Trash2 className="h-3.5 w-3.5" />
+                    </button>
+                  </div>
+                </td>
+              </tr>
+            );
+          })}
+        </tbody>
+      </table>
+    </div>
+  );
+}
 
 export function FilesPage() {
   const { user } = useAuth();
   const [search, setSearch] = useState("");
-  const [categoryFilter, setCategoryFilter] = useState<FileCategory | "all">("all");
-  const [sortBy, setSortBy] = useState<
-    "created_at" | "display_name" | "file_size_bytes"
-  >("created_at");
+  const [tab, setTab] = useState<FileTab>("all");
+  const [view, setView] = useState<FileView>("grid");
+  const [typeFilter, setTypeFilter] = useState<FileCategory | "all">("all");
+  const [linkedFilter, setLinkedFilter] = useState<LinkedFilter>("any");
+  const [sortBy, setSortBy] = useState<"created_at" | "display_name" | "file_size_bytes">("created_at");
   const [sortDir, setSortDir] = useState<"asc" | "desc">("desc");
   const [showUpload, setShowUpload] = useState(false);
   const [uploadCategory, setUploadCategory] = useState<FileCategory>("other");
   const [uploadDealId, setUploadDealId] = useState("");
 
-  const { deals } = useDeals({
-    limit: 200,
-    sortBy: "updated_at",
-    sortDir: "desc",
-  });
+  const { deals } = useDeals({ limit: 200, sortBy: "updated_at", sortDir: "desc" });
   const { contacts } = useContacts({ limit: 100, sortBy: "updated_at", sortDir: "desc" });
-
-  // Reps must have scope; admins/directors load all
   const filesEnabled = user?.role !== "rep";
+
+  const effectiveCategory = typeFilter !== "all" ? typeFilter : tab === "photos" ? "photo" : undefined;
 
   const { files, loading, error, refetch } = useFiles(
     {
-      search: search || undefined,
+      search: search.trim() || undefined,
       sortBy,
       sortDir,
       limit: 200,
-      category: categoryFilter !== "all" ? categoryFilter : undefined,
+      category: effectiveCategory,
     },
     { enabled: filesEnabled }
   );
 
-  // Build a dealId → Deal lookup map
   const dealMap = useMemo(() => {
     const map = new Map<string, Deal>();
-    for (const d of deals) map.set(d.id, d);
+    for (const deal of deals) map.set(deal.id, deal);
     return map;
   }, [deals]);
 
-  // Group files by dealId
-  const grouped = useMemo(() => {
-    const groups = new Map<string | null, FileRecord[]>();
-    for (const file of files) {
-      const key = file.dealId ?? null;
-      const bucket = groups.get(key) ?? [];
-      bucket.push(file);
-      groups.set(key, bucket);
-    }
-    return groups;
-  }, [files]);
-
-  // Sort the deal keys: deals with most-recent file first, unassigned last
-  const sortedDealKeys = useMemo(() => {
-    const keys = Array.from(grouped.keys());
-    const assigned = keys.filter((k) => k !== null) as string[];
-    const hasUnassigned = grouped.has(null);
-
-    // Sort assigned deals by first file's createdAt desc
-    assigned.sort((a, b) => {
-      const aFiles = grouped.get(a) ?? [];
-      const bFiles = grouped.get(b) ?? [];
-      const aLatest = aFiles[0]?.createdAt ?? "";
-      const bLatest = bFiles[0]?.createdAt ?? "";
-      return bLatest.localeCompare(aLatest);
+  const visibleFiles = useMemo(() => {
+    return files.filter((file) => {
+      if (tab === "photos" && file.category !== "photo" && !file.mimeType.startsWith("image/")) return false;
+      if (tab === "documents" && !isDocument(file)) return false;
+      if (typeFilter !== "all" && file.category !== typeFilter) return false;
+      if (linkedFilter !== "any" && linkedType(file) !== linkedFilter) return false;
+      return true;
     });
+  }, [files, linkedFilter, tab, typeFilter]);
 
-    return hasUnassigned ? [...assigned, null] : assigned;
-  }, [grouped]);
+  const photos = visibleFiles.filter((file) => file.category === "photo" || file.mimeType.startsWith("image/"));
+  const documents = visibleFiles.filter(isDocument);
+  const totalBytes = files.reduce((sum, file) => sum + file.fileSizeBytes, 0);
+  const visibleBytes = visibleFiles.reduce((sum, file) => sum + file.fileSizeBytes, 0);
+  const recentUploads = files.filter((file) => {
+    const created = new Date(file.createdAt).getTime();
+    return Number.isFinite(created) && Date.now() - created <= 3 * 24 * 60 * 60 * 1000;
+  }).length;
+  const totalCounts = {
+    all: files.length,
+    photos: files.filter((file) => file.category === "photo" || file.mimeType.startsWith("image/")).length,
+    documents: files.filter(isDocument).length,
+  };
+
+  const uploadDeal = useMemo(() => deals.find((deal) => deal.id === uploadDealId) ?? null, [deals, uploadDealId]);
 
   const handleDownload = useCallback(async (fileId: string) => {
     try {
@@ -359,93 +481,62 @@ export function FilesPage() {
     [refetch]
   );
 
-  const uploadDeal = useMemo(
-    () => deals.find((d) => d.id === uploadDealId) ?? null,
-    [deals, uploadDealId]
-  );
-
-  const totalFiles = files.length;
-  const totalBytes = useMemo(
-    () => files.reduce((s, f) => s + f.fileSizeBytes, 0),
-    [files]
-  );
+  const resetFilters = () => {
+    setSearch("");
+    setTypeFilter("all");
+    setLinkedFilter("any");
+    setTab("all");
+  };
 
   return (
     <div className="space-y-6">
-      {/* ── Header ── */}
-      <div className="flex items-start justify-between gap-4">
+      <section className="flex flex-col gap-4 lg:flex-row lg:items-end lg:justify-between">
         <div>
-          <h1 className="text-4xl font-black tracking-tighter uppercase leading-none">
-            Project Files
-          </h1>
-          <p className="text-sm text-muted-foreground mt-1.5 tracking-wide uppercase text-[11px] font-semibold">
-            Organized by property and project
+          <h1 className="text-4xl font-black uppercase tracking-tight text-slate-950 md:text-5xl">Files</h1>
+          <p className="mt-2 text-[11px] font-bold uppercase tracking-[0.24em] text-slate-500">
+            {totalCounts.all} files · {totalCounts.photos} photos · {totalCounts.documents} documents
           </p>
         </div>
-        <Button
-          onClick={() => setShowUpload((v) => !v)}
-          className="bg-gradient-to-br from-red-600 to-red-700 hover:from-red-700 hover:to-red-800 text-white shadow-md flex-shrink-0"
-        >
-          <Plus className="h-4 w-4 mr-1.5" />
-          Upload File
-        </Button>
+        <div className="flex flex-wrap items-center gap-3">
+          <div className="rounded-md border border-slate-200 bg-white px-3 py-2 text-xs font-black uppercase tracking-[0.18em] text-slate-600">
+            Team Library
+          </div>
+          <Button size="lg" onClick={() => setShowUpload((value) => !value)}>
+            <Plus className="mr-1.5 h-4 w-4" />
+            Upload
+          </Button>
+        </div>
+      </section>
+
+      <div className="grid grid-cols-1 gap-4 lg:grid-cols-3">
+        <MetricCard eyebrow="Storage used" value={formatFileSize(totalBytes)} badge={`${totalCounts.all} files`} caption="across CRM" />
+        <MetricCard eyebrow="Photos" value={String(totalCounts.photos)} badge="site walks" caption="audits · progress" />
+        <MetricCard eyebrow="Recent uploads" value={String(recentUploads)} badge="last 3 days" caption="fresh on the books" accent="red" />
       </div>
 
-      {/* ── Stats strip ── */}
-      {!loading && totalFiles > 0 && (
-        <div className="flex items-center gap-6 text-[11px] uppercase tracking-widest font-mono text-muted-foreground border-b border-border pb-3">
-          <span>
-            <span className="text-foreground font-bold text-sm">{totalFiles}</span>{" "}
-            FILES
-          </span>
-          <span>
-            <span className="text-foreground font-bold text-sm">
-              {formatFileSize(totalBytes)}
-            </span>{" "}
-            TOTAL
-          </span>
-          <span>
-            <span className="text-foreground font-bold text-sm">
-              {sortedDealKeys.filter((k) => k !== null).length}
-            </span>{" "}
-            DEALS
-          </span>
-        </div>
-      )}
-
-      {/* ── Upload Panel ── */}
-      {showUpload && (
-        <Card>
-          <CardHeader className="pb-3 flex flex-row items-center justify-between">
-            <CardTitle className="text-sm uppercase tracking-widest font-black">
-              Upload Files
-            </CardTitle>
-            <Button
-              variant="ghost"
-              size="icon"
-              className="h-7 w-7"
-              onClick={() => setShowUpload(false)}
-            >
+      {showUpload ? (
+        <Card className="overflow-hidden border-slate-200">
+          <CardHeader className="flex flex-row items-center justify-between border-b border-slate-100 px-5 py-4">
+            <div>
+              <CardTitle className="text-sm font-black uppercase tracking-[0.18em] text-slate-950">Upload Files</CardTitle>
+              <p className="mt-1 text-xs text-slate-500">Drag files into the dropzone or browse from your device.</p>
+            </div>
+            <Button variant="ghost" size="icon" className="h-8 w-8" onClick={() => setShowUpload(false)} aria-label="Close upload panel">
               <X className="h-4 w-4" />
             </Button>
           </CardHeader>
-          <CardContent className="space-y-3">
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+          <CardContent className="space-y-4 p-5">
+            <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
               <div className="space-y-1.5">
-                <label className="text-[10px] font-bold uppercase tracking-widest text-muted-foreground">
-                  Category
-                </label>
-                <Select
-                  value={uploadCategory}
-                  onValueChange={(v) => setUploadCategory(v as FileCategory)}
-                >
-                  <SelectTrigger>
+                <label className={EYEBROW}>Category</label>
+                <Select value={uploadCategory} onValueChange={(value) => setUploadCategory(value as FileCategory)}>
+                  <SelectTrigger className="h-9 w-full">
                     <SelectValue />
                   </SelectTrigger>
                   <SelectContent>
-                    {FILE_CATEGORIES.map((cat) => (
-                      <SelectItem key={cat} value={cat}>
-                        {getCategoryLabel(cat)}
+                    {FILE_CATEGORIES.map((category) => (
+                      <SelectItem key={category} value={category}>
+                        {getCategoryLabel(category)}
                       </SelectItem>
                     ))}
                   </SelectContent>
@@ -453,21 +544,16 @@ export function FilesPage() {
               </div>
 
               <div className="space-y-1.5">
-                <label className="text-[10px] font-bold uppercase tracking-widest text-muted-foreground">
-                  Assign to Deal
-                </label>
-                <Select
-                  value={uploadDealId || "none"}
-                  onValueChange={(v) => setUploadDealId(!v || v === "none" ? "" : v)}
-                >
-                  <SelectTrigger>
+                <label className={EYEBROW}>Assign to Deal</label>
+                <Select value={uploadDealId || "none"} onValueChange={(value) => setUploadDealId(!value || value === "none" ? "" : value)}>
+                  <SelectTrigger className="h-9 w-full">
                     <SelectValue />
                   </SelectTrigger>
                   <SelectContent>
                     <SelectItem value="none">No deal</SelectItem>
                     {deals.map((deal) => (
                       <SelectItem key={deal.id} value={deal.id}>
-                        {deal.dealNumber} — {deal.name}
+                        {deal.dealNumber} · {deal.name}
                       </SelectItem>
                     ))}
                   </SelectContent>
@@ -475,167 +561,251 @@ export function FilesPage() {
               </div>
             </div>
 
-            <FileUploadZone
-              category={uploadCategory}
-              dealId={uploadDealId || undefined}
-              dealNumber={uploadDeal?.dealNumber}
-              onUploadComplete={refetch}
-            />
+            <FileUploadZone category={uploadCategory} dealId={uploadDealId || undefined} dealNumber={uploadDeal?.dealNumber} onUploadComplete={refetch} />
           </CardContent>
         </Card>
-      )}
+      ) : null}
 
-      {/* ── Filter / Sort Bar ── */}
-      <div className="flex flex-wrap items-end gap-3">
-        {/* Search */}
-        <div className="flex-1 min-w-[200px] space-y-1">
-          <label className="text-[10px] font-bold uppercase tracking-widest text-muted-foreground">
-            Search
-          </label>
-          <div className="relative">
-            <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-muted-foreground" />
-            <Input
-              value={search}
-              onChange={(e) => setSearch(e.target.value)}
-              placeholder="Filename…"
-              className="pl-8 h-9 text-sm"
-            />
-            {search && (
+      <div className="grid grid-cols-1 gap-4 xl:grid-cols-[minmax(0,1fr)_280px]">
+        <Card className="overflow-hidden border-slate-200">
+          <div className="flex flex-col gap-3 border-b border-slate-100 px-5 py-4 lg:flex-row lg:items-center lg:justify-between">
+            <div className="flex items-center gap-1 rounded-md border border-slate-200 bg-white p-0.5">
+              {([
+                { key: "all", label: "All", icon: Layers, count: totalCounts.all },
+                { key: "photos", label: "Photos", icon: Camera, count: totalCounts.photos },
+                { key: "documents", label: "Documents", icon: FileText, count: totalCounts.documents },
+              ] as const).map((item) => {
+                const Icon = item.icon;
+                const active = tab === item.key;
+                return (
+                  <button
+                    key={item.key}
+                    type="button"
+                    data-filter-tab={item.key}
+                    onClick={() => {
+                      setTab(item.key);
+                      setTypeFilter("all");
+                      setView(item.key === "documents" ? "list" : "grid");
+                    }}
+                    className={`flex items-center gap-1.5 rounded-sm px-3 py-1.5 text-xs font-bold transition-colors ${
+                      active ? "bg-slate-100 text-slate-950" : "text-slate-500 hover:text-slate-900"
+                    }`}
+                  >
+                    <Icon className="h-3.5 w-3.5" />
+                    {item.label}
+                    <span className={`rounded-full px-1.5 py-0.5 text-[10px] font-black tabular-nums ${active ? "bg-brand-red/10 text-brand-red" : "bg-slate-100 text-slate-600"}`}>
+                      {item.count}
+                    </span>
+                  </button>
+                );
+              })}
+            </div>
+
+            <div className="flex flex-wrap items-center gap-2">
+              <div className="flex items-center gap-2 rounded-md bg-slate-100 px-3 py-2 lg:min-w-72">
+                <Search className="h-4 w-4 text-slate-400" />
+                <input
+                  type="text"
+                  value={search}
+                  onChange={(event) => setSearch(event.target.value)}
+                  onInput={(event) => setSearch(event.currentTarget.value)}
+                  placeholder="Search files"
+                  className="min-w-0 flex-1 bg-transparent text-sm placeholder:text-slate-500 focus:outline-none"
+                />
+                {search ? (
+                  <button type="button" onClick={() => setSearch("")} aria-label="Clear search">
+                    <X className="h-3.5 w-3.5 text-slate-400" />
+                  </button>
+                ) : null}
+              </div>
               <button
                 type="button"
-                onClick={() => setSearch("")}
-                className="absolute right-2.5 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground"
+                onClick={() => setSortBy((value) => nextSortBy(value))}
+                data-sort-button
+                className="flex items-center gap-1.5 rounded-md border border-slate-200 bg-white px-3 py-2 text-sm font-semibold text-slate-700 hover:bg-slate-50"
               >
-                <X className="h-3.5 w-3.5" />
+                <ArrowUpDown className="h-3.5 w-3.5" />
+                Sort: {sortBy === "created_at" ? "Recent" : sortBy === "display_name" ? "Name" : "Size"}
+                <ChevronDown className="h-3.5 w-3.5 text-slate-400" />
               </button>
-            )}
+              <button
+                type="button"
+                onClick={() => setSortDir((value) => (value === "desc" ? "asc" : "desc"))}
+                className="rounded-md border border-slate-200 bg-white px-3 py-2 text-sm font-semibold text-slate-700 hover:bg-slate-50"
+                aria-label="Toggle sort direction"
+              >
+                {sortDir === "desc" ? "Newest" : "Oldest"}
+              </button>
+              <div className="flex items-center gap-1 rounded-md border border-slate-200 bg-white p-0.5">
+                <button
+                  type="button"
+                  onClick={() => setView("grid")}
+                  className={`flex h-7 w-7 items-center justify-center rounded-sm transition-colors ${view === "grid" ? "bg-slate-100 text-slate-950" : "text-slate-500 hover:text-slate-900"}`}
+                  aria-label="Grid view"
+                >
+                  <LayoutGrid className="h-3.5 w-3.5" />
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setView("list")}
+                  className={`flex h-7 w-7 items-center justify-center rounded-sm transition-colors ${view === "list" ? "bg-slate-100 text-slate-950" : "text-slate-500 hover:text-slate-900"}`}
+                  aria-label="List view"
+                >
+                  <List className="h-3.5 w-3.5" />
+                </button>
+              </div>
+            </div>
           </div>
-        </div>
 
-        {/* Category */}
-        <div className="space-y-1 min-w-[150px]">
-          <label className="text-[10px] font-bold uppercase tracking-widest text-muted-foreground">
-            Category
-          </label>
-          <Select
-            value={categoryFilter}
-            onValueChange={(v) => setCategoryFilter(v as FileCategory | "all")}
-          >
-            <SelectTrigger className="h-9">
-              <SelectValue />
-            </SelectTrigger>
-            <SelectContent>
-              <SelectItem value="all">All Categories</SelectItem>
-              {FILE_CATEGORIES.map((cat) => (
-                <SelectItem key={cat} value={cat}>
-                  {getCategoryLabel(cat)}
-                </SelectItem>
+          <div className="flex flex-wrap items-center gap-2 border-b border-slate-100 px-5 py-3">
+            <p className={`${EYEBROW} self-center`}>File type:</p>
+            {TYPE_FILTERS.map((filter) => (
+              <FilterChip
+                key={filter.value}
+                active={typeFilter === filter.value}
+                onClick={() => {
+                  setTypeFilter(filter.value);
+                  if (filter.value === "photo") setTab("photos");
+                  if (filter.value !== "photo" && filter.value !== "all") setTab("documents");
+                }}
+                dataAttribute={{ "data-type-filter": filter.value }}
+              >
+                {filter.label}
+              </FilterChip>
+            ))}
+            {(linkedFilter !== "any" || typeFilter !== "all" || search || tab !== "all") ? (
+              <button
+                type="button"
+                onClick={resetFilters}
+                className="ml-auto inline-flex items-center gap-1 text-[11px] font-bold uppercase tracking-wide text-slate-500 hover:text-slate-900"
+              >
+                <X className="h-3 w-3" />
+                Clear filters
+              </button>
+            ) : null}
+          </div>
+
+          {!filesEnabled ? (
+            <div className="px-5 py-16 text-center">
+              <FolderOpen className="mx-auto h-10 w-10 text-slate-300" />
+              <p className="mt-3 text-sm font-semibold text-slate-700">Access restricted</p>
+              <p className="mt-1 text-sm text-slate-500">Contact your director to access the file browser.</p>
+            </div>
+          ) : loading ? (
+            <div className="space-y-3 p-5">
+              {Array.from({ length: 4 }).map((_, index) => (
+                <div key={index} className="h-24 animate-pulse rounded-md bg-slate-100" />
               ))}
-            </SelectContent>
-          </Select>
-        </div>
+            </div>
+          ) : error ? (
+            <div className="px-5 py-12 text-center">
+              <p className="text-sm font-semibold text-red-600">{error}</p>
+            </div>
+          ) : visibleFiles.length === 0 ? (
+            <div className="px-5 py-16 text-center">
+              <Layers className="mx-auto h-8 w-8 text-slate-300" />
+              <p className="mt-2 text-sm font-semibold text-slate-700">No files match these filters.</p>
+              <Button variant="outline" size="sm" className="mt-3" onClick={() => setShowUpload(true)}>
+                <Plus className="mr-1 h-4 w-4" />
+                Upload first file
+              </Button>
+            </div>
+          ) : view === "grid" ? (
+            <div className="space-y-6 p-5" data-view="grid">
+              {tab === "all" && photos.length > 0 ? (
+                <section>
+                  <p className="mb-3 text-[11px] font-bold uppercase tracking-[0.2em] text-slate-500">Photos · {photos.length}</p>
+                  <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5">
+                    {photos.map((file) => (
+                      <FileGridCard key={file.id} file={file} dealMap={dealMap} onDownload={handleDownload} onDelete={handleDelete} />
+                    ))}
+                  </div>
+                </section>
+              ) : tab === "photos" ? (
+                <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5">
+                  {photos.map((file) => (
+                    <FileGridCard key={file.id} file={file} dealMap={dealMap} onDownload={handleDownload} onDelete={handleDelete} />
+                  ))}
+                </div>
+              ) : null}
 
-        {/* Sort */}
-        <div className="space-y-1 min-w-[140px]">
-          <label className="text-[10px] font-bold uppercase tracking-widest text-muted-foreground">
-            Sort By
-          </label>
-          <Select value={sortBy} onValueChange={(v) => setSortBy(v as typeof sortBy)}>
-            <SelectTrigger className="h-9">
-              <SelectValue />
-            </SelectTrigger>
-            <SelectContent>
-              <SelectItem value="created_at">Date</SelectItem>
-              <SelectItem value="display_name">Name</SelectItem>
-              <SelectItem value="file_size_bytes">Size</SelectItem>
-            </SelectContent>
-          </Select>
-        </div>
+              {tab === "all" && documents.length > 0 ? (
+                <section>
+                  <p className="mb-3 text-[11px] font-bold uppercase tracking-[0.2em] text-slate-500">Documents · {documents.length}</p>
+                  <div className="grid grid-cols-1 gap-3 md:grid-cols-2 lg:grid-cols-3">
+                    {documents.map((file) => (
+                      <FileGridCard key={file.id} file={file} dealMap={dealMap} onDownload={handleDownload} onDelete={handleDelete} />
+                    ))}
+                  </div>
+                </section>
+              ) : tab === "documents" ? (
+                <div className="grid grid-cols-1 gap-3 md:grid-cols-2 lg:grid-cols-3">
+                  {documents.map((file) => (
+                    <FileGridCard key={file.id} file={file} dealMap={dealMap} onDownload={handleDownload} onDelete={handleDelete} />
+                  ))}
+                </div>
+              ) : null}
+            </div>
+          ) : (
+            <FilesTable rows={visibleFiles} dealMap={dealMap} onDownload={handleDownload} onDelete={handleDelete} />
+          )}
 
-        {/* Direction */}
-        <div className="space-y-1 min-w-[130px]">
-          <label className="text-[10px] font-bold uppercase tracking-widest text-muted-foreground">
-            Order
-          </label>
-          <Select
-            value={sortDir}
-            onValueChange={(v) => setSortDir(v as "asc" | "desc")}
-          >
-            <SelectTrigger className="h-9">
-              <SelectValue />
-            </SelectTrigger>
-            <SelectContent>
-              <SelectItem value="desc">Newest First</SelectItem>
-              <SelectItem value="asc">Oldest First</SelectItem>
-            </SelectContent>
-          </Select>
-        </div>
+          <div className="flex items-center justify-between border-t border-slate-100 px-5 py-3 text-xs text-slate-600">
+            <p>
+              <span className="font-bold tabular-nums text-slate-950">{visibleFiles.length}</span> of{" "}
+              <span className="tabular-nums">{files.length}</span> files
+            </p>
+            <p className="font-semibold tabular-nums">{formatFileSize(visibleBytes)}</p>
+          </div>
+        </Card>
+
+        <aside className="space-y-4">
+          <Card className="border-slate-200 p-4">
+            <p className={EYEBROW}>Linked to</p>
+            <div className="mt-3 flex flex-wrap gap-2">
+              {([
+                ["any", "Any"],
+                ["deal", "Deals"],
+                ["lead", "Leads"],
+                ["contact", "Contacts"],
+                ["unassigned", "Unassigned"],
+              ] as const).map(([value, label]) => (
+                <FilterChip key={value} active={linkedFilter === value} onClick={() => setLinkedFilter(value)}>
+                  {label}
+                </FilterChip>
+              ))}
+            </div>
+          </Card>
+
+          <Card className="border-slate-200 p-4">
+            <p className={EYEBROW}>Library Summary</p>
+            <dl className="mt-4 space-y-3 text-sm">
+              <div className="flex items-center justify-between gap-3">
+                <dt className="text-slate-500">Deals with files</dt>
+                <dd className="font-black tabular-nums text-slate-950">{new Set(files.map((file) => file.dealId).filter(Boolean)).size}</dd>
+              </div>
+              <div className="flex items-center justify-between gap-3">
+                <dt className="text-slate-500">Contacts loaded</dt>
+                <dd className="font-black tabular-nums text-slate-950">{contacts.length}</dd>
+              </div>
+              <div className="flex items-center justify-between gap-3">
+                <dt className="text-slate-500">Sort order</dt>
+                <dd className="font-bold uppercase text-slate-700">{sortDir === "desc" ? "Newest" : "Oldest"}</dd>
+              </div>
+            </dl>
+          </Card>
+
+          <Card className="border-slate-200 p-4">
+            <p className={EYEBROW}>Upload Flow</p>
+            <div className="mt-4 flex items-start gap-3 rounded-md bg-slate-50 p-3">
+              <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-md bg-brand-red text-white">
+                <Upload className="h-4 w-4" />
+              </span>
+              <p className="text-sm text-slate-600">Existing drag-drop and picker upload logic is preserved through FileUploadZone.</p>
+            </div>
+          </Card>
+        </aside>
       </div>
-
-      {/* ── Rep gate ── */}
-      {!filesEnabled && (
-        <div className="rounded-lg border border-dashed border-border p-10 text-center text-muted-foreground">
-          <FolderOpen className="h-10 w-10 mx-auto mb-3 opacity-40" />
-          <p className="font-semibold">Access Restricted</p>
-          <p className="text-sm mt-1">
-            Contact your director to access the file browser.
-          </p>
-        </div>
-      )}
-
-      {/* ── Loading ── */}
-      {filesEnabled && loading && (
-        <div className="space-y-3">
-          {Array.from({ length: 3 }).map((_, i) => (
-            <div key={i} className="h-16 rounded-lg bg-muted animate-pulse" />
-          ))}
-        </div>
-      )}
-
-      {/* ── Error ── */}
-      {filesEnabled && !loading && error && (
-        <p className="text-red-600 text-sm">{error}</p>
-      )}
-
-      {/* ── Empty state ── */}
-      {filesEnabled && !loading && !error && totalFiles === 0 && (
-        <div className="rounded-lg border border-dashed border-border p-12 text-center text-muted-foreground">
-          <FolderOpen className="h-12 w-12 mx-auto mb-3 opacity-30" />
-          <p className="font-semibold text-base">No project files yet.</p>
-          <p className="text-sm mt-1">
-            Upload documents, photos, and contracts to organize them by property.
-          </p>
-          <Button
-            variant="outline"
-            size="sm"
-            className="mt-4"
-            onClick={() => setShowUpload(true)}
-          >
-            <Plus className="h-4 w-4 mr-1.5" />
-            Upload First File
-          </Button>
-        </div>
-      )}
-
-      {/* ── Deal Sections ── */}
-      {filesEnabled && !loading && !error && totalFiles > 0 && (
-        <div className="space-y-3">
-          {sortedDealKeys.map((dealId) => {
-            const sectionFiles = grouped.get(dealId) ?? [];
-            const deal = dealId ? (dealMap.get(dealId) ?? null) : null;
-            return (
-              <DealSection
-                key={dealId ?? "__unassigned__"}
-                deal={deal}
-                files={sectionFiles}
-                onDownload={handleDownload}
-                onDelete={handleDelete}
-                defaultOpen={sortedDealKeys.indexOf(dealId) === 0}
-              />
-            );
-          })}
-        </div>
-      )}
     </div>
   );
 }

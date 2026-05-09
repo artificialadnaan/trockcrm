@@ -1,28 +1,19 @@
-# Track G2 Internal Review - Iteration 2
+# Track F1 Internal Review - Iteration 2
 
-## Changes Since Iteration 1
-- Added deterministic coverage for MTD/QTD/YTD/All period boundaries.
+## Diff Since Iteration 1
 
-## Calculation Stress Scenarios
-1. Rep has 2 signed deals worth `$100,000` and `$32,000` at `1.5%`, plus 1 contract deal worth `$305,000` at `1.5%`.
-   - Expected earned: `$1,980.00`
-   - Expected pipeline: `$4,575.00`
-   - Expected total potential: `$6,555.00`
-   - Code path: signed rows use `deal_signed_commissions.amount`; contract row uses deal value times `commission_rate`.
+- Restored OAuth callback feedback for `?connected=true` and `?error=...`.
+- Wired the preview-style Microsoft 365 header button to the existing `useGraphAuth().startConsent` flow.
+- Added test coverage for callback feedback and the Microsoft connect action.
+- Removed React act warnings from the new page tests.
 
-2. Rep has unsigned deals in estimate sent, estimating, and opportunity. None has `contract_signed_at` or `contract_signed_date`.
-   - Expected earned: unchanged
-   - Expected pipeline: sum of each current deal value times current rep rate
-   - Expected grouping: estimate sent -> `estimate_sent`, estimating aliases -> `estimating`, opportunity -> `opportunity`.
+## Test Results
 
-3. Rep has a lost deal with a signed commission row.
-   - Expected excluded from earned and pipeline.
-   - Code path: earned side filters lost slugs; pipeline side includes only active unsigned canonical pre-signed stages.
+- `npx vitest run client/src/pages/email/email-inbox-page.test.tsx`: 7 passed.
+- `npm run typecheck`: passed after iteration 1 fixes.
+- `ls client/src/pages/email/*.test.tsx client/src/components/email/*.test.tsx 2>/dev/null | xargs -r npx vitest run`: 12 passed after iteration 1 fixes.
 
-## Test Results Carried Forward
-- `npm run typecheck`: pass before period-test addition
-- Focused vitest: 16 pass before period-test addition
+## Remaining Concerns
 
-## Open Concerns
-- No commission goal table/field was found. UI intentionally shows no-goal state instead of inventing a target.
-- Snapshot refresh is write-on-read. It is the smallest scoped way to make deltas persist between sessions without adding a separate recalculation worker.
+- The email API does not expose true read/unread state, so the preview's unread indicator is backed by the available attention/unassigned signal instead of a persisted read flag.
+- Thread assignment tools are preserved behind a reader action rather than being the default reader view.
