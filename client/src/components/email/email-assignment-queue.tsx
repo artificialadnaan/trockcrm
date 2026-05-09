@@ -19,7 +19,7 @@ interface AssignmentQueueResponse {
   };
 }
 
-export function EmailAssignmentQueue() {
+export function useEmailAssignmentQueue() {
   const [items, setItems] = useState<EmailAssignmentQueueItem[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -65,16 +65,39 @@ export function EmailAssignmentQueue() {
     }
   };
 
+  return {
+    items,
+    loading,
+    error,
+    page,
+    pagination,
+    setPage,
+    refresh: fetchQueue,
+    assign: handleAssign,
+  };
+}
+
+export type EmailAssignmentQueueState = ReturnType<typeof useEmailAssignmentQueue>;
+
+export function EmailAssignmentQueuePanel({
+  queue,
+  embedded = false,
+}: {
+  queue: EmailAssignmentQueueState;
+  embedded?: boolean;
+}) {
+  const { items, loading, error, page, pagination, setPage, refresh, assign } = queue;
+
   return (
-    <section className="rounded-lg border bg-card p-4">
+    <section className={embedded ? "p-5" : "rounded-lg border bg-card p-4"}>
       <div className="mb-3 flex items-center justify-between gap-3">
         <div>
-          <h3 className="text-sm font-semibold">Parking Lot Intake</h3>
-          <p className="text-xs text-muted-foreground">
+          <h3 className="text-sm font-black uppercase tracking-[0.16em] text-slate-950">Parking Lot Intake</h3>
+          <p className="mt-1 text-xs text-muted-foreground">
             Review unresolved CRM email intake and attach it to the right company, property, lead, or deal.
           </p>
         </div>
-        <Button variant="outline" size="sm" onClick={() => void fetchQueue()} disabled={loading}>
+        <Button variant="outline" size="sm" onClick={() => void refresh()} disabled={loading}>
           <RefreshCw className="mr-2 h-4 w-4" />
           Refresh
         </Button>
@@ -95,7 +118,7 @@ export function EmailAssignmentQueue() {
         </div>
       ) : (
         <>
-          <EmailAssignmentQueueView items={items} onAssign={handleAssign} />
+          <EmailAssignmentQueueView items={items} onAssign={assign} />
           {pagination.totalPages > 1 && (
             <div className="mt-3 flex items-center justify-between text-sm text-muted-foreground">
               <span>
@@ -120,6 +143,11 @@ export function EmailAssignmentQueue() {
       )}
     </section>
   );
+}
+
+export function EmailAssignmentQueue() {
+  const queue = useEmailAssignmentQueue();
+  return <EmailAssignmentQueuePanel queue={queue} />;
 }
 
 export type { EmailAssignmentQueueItem } from "./email-assignment-queue-view";
