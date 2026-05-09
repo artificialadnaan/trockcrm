@@ -14,6 +14,7 @@ import {
   getUserEmails,
   getEmailAssignmentQueue,
   associateEmailToEntity,
+  updateEmailInboxAction,
   bindThreadToDeal,
   detachThreadByConversation,
   previewThreadReassignmentImpact,
@@ -106,6 +107,7 @@ router.get("/", async (req, res, next) => {
   try {
     const filters = {
       direction: req.query.direction as "inbound" | "outbound" | undefined,
+      filter: req.query.filter as "all" | "unread" | "unassigned" | "sent" | undefined,
       search: req.query.search as string | undefined,
       page: req.query.page ? parseInt(req.query.page as string, 10) : undefined,
       limit: req.query.limit ? parseInt(req.query.limit as string, 10) : undefined,
@@ -262,6 +264,41 @@ router.get("/assignment-queue", async (req, res, next) => {
     );
     await req.commitTransaction!();
     res.json(result);
+  } catch (err) {
+    next(err);
+  }
+});
+
+// PATCH /api/email/:id/actions — inbox reader actions (star, archive, soft-delete)
+router.patch("/:id/actions", async (req, res, next) => {
+  try {
+    const body = req.body as {
+      isStarred?: boolean;
+      archived?: boolean;
+      deleted?: boolean;
+    };
+
+    const hasValidAction =
+      typeof body.isStarred === "boolean" ||
+      typeof body.archived === "boolean" ||
+      typeof body.deleted === "boolean";
+    if (!hasValidAction) {
+      throw new AppError(400, "At least one email action is required");
+    }
+
+    const email = await updateEmailInboxAction(
+      req.tenantDb!,
+      req.params.id,
+      req.user!.id,
+      req.user!.role,
+      {
+        isStarred: typeof body.isStarred === "boolean" ? body.isStarred : undefined,
+        archived: typeof body.archived === "boolean" ? body.archived : undefined,
+        deleted: typeof body.deleted === "boolean" ? body.deleted : undefined,
+      }
+    );
+    await req.commitTransaction!();
+    res.json({ email });
   } catch (err) {
     next(err);
   }

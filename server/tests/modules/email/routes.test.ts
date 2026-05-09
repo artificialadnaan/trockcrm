@@ -9,6 +9,7 @@ const emailServiceMocks = vi.hoisted(() => ({
   getUserEmails: vi.fn(),
   sendEmail: vi.fn(),
   associateEmailToEntity: vi.fn(),
+  updateEmailInboxAction: vi.fn(),
   bindThreadToDeal: vi.fn(),
   detachThreadByConversation: vi.fn(),
   previewThreadReassignmentImpact: vi.fn(),
@@ -50,6 +51,7 @@ vi.mock("../../../src/modules/email/service.js", async () => {
     getUserEmails: emailServiceMocks.getUserEmails,
     sendEmail: emailServiceMocks.sendEmail,
     associateEmailToEntity: emailServiceMocks.associateEmailToEntity,
+    updateEmailInboxAction: emailServiceMocks.updateEmailInboxAction,
     bindThreadToDeal: emailServiceMocks.bindThreadToDeal,
     detachThreadByConversation: emailServiceMocks.detachThreadByConversation,
     previewThreadReassignmentImpact: emailServiceMocks.previewThreadReassignmentImpact,
@@ -141,7 +143,7 @@ function makeResponse() {
   return res;
 }
 
-function findRouteHandler(method: "get" | "post", routePath: string) {
+function findRouteHandler(method: "get" | "post" | "patch", routePath: string) {
   const layer = (emailRoutes as any).stack.find(
     (entry: any) => entry.route?.path === routePath && entry.route?.methods?.[method]
   );
@@ -161,7 +163,7 @@ async function invokeRoute({
   body = {},
   tenantDb = {},
 }: {
-  method: "get" | "post";
+  method: "get" | "post" | "patch";
   url: string;
   user: TestUser;
   query?: Record<string, any>;
@@ -169,8 +171,12 @@ async function invokeRoute({
   tenantDb?: Record<string, any>;
 }) {
   const routePath =
-    url === "/assignment-queue"
+    url === "/"
+      ? "/"
+      : url === "/assignment-queue"
       ? "/assignment-queue"
+      : url.startsWith("/") && url.endsWith("/actions")
+        ? "/:id/actions"
       : url.startsWith("/thread/") && url.endsWith("/assign")
         ? "/thread/:conversationId/assign"
         : url.startsWith("/thread/") && url.endsWith("/reassign")
@@ -190,7 +196,7 @@ async function invokeRoute({
     query,
     body,
     params:
-      routePath === "/:id/associate"
+      routePath === "/:id/associate" || routePath === "/:id/actions"
         ? { id: url.split("/")[1] }
         : routePath.startsWith("/thread/:conversationId")
           ? { conversationId: url.split("/")[2] }
@@ -266,6 +272,59 @@ describe("email routes", () => {
     );
     expect(req.commitTransaction).toHaveBeenCalled();
     expect(res.body).toEqual({ items: [], pagination: { page: 1, limit: 25, total: 0, totalPages: 0 } });
+  });
+
+  it("forwards inbox filters to getUserEmails for server-side filtering before pagination", async () => {
+    emailServiceMocks.getUserEmails.mockResolvedValue({
+      emails: [],
+      pagination: { page: 2, limit: 25, total: 0, totalPages: 0 },
+      counts: { all: 10, unread: 2, unassigned: 2, sent: 3, linked: 8, today: 1 },
+    });
+
+    const { req, res } = await invokeRoute({
+      method: "get",
+      url: "/",
+      user: makeRepUser(),
+      query: { filter: "unassigned", search: "school", page: "2", limit: "25" },
+    });
+
+    expect(emailServiceMocks.getUserEmails).toHaveBeenCalledWith(
+      expect.any(Object),
+      "rep-1",
+      {
+        direction: undefined,
+        filter: "unassigned",
+        search: "school",
+        page: 2,
+        limit: 25,
+      }
+    );
+    expect(req.commitTransaction).toHaveBeenCalled();
+    expect(res.body.counts.unassigned).toBe(2);
+  });
+
+  it("routes reader actions through the inbox action service", async () => {
+    emailServiceMocks.updateEmailInboxAction.mockResolvedValue({
+      id: "email-1",
+      isStarred: true,
+    });
+
+    const { req, res } = await invokeRoute({
+      method: "patch",
+      url: "/email-1/actions",
+      user: makeRepUser(),
+      body: { isStarred: true },
+    });
+
+    expect(emailServiceMocks.updateEmailInboxAction).toHaveBeenCalledWith(
+      expect.any(Object),
+      "email-1",
+      "rep-1",
+      "rep",
+      { isStarred: true, archived: undefined, deleted: undefined }
+    );
+    expect(req.commitTransaction).toHaveBeenCalled();
+    expect(res.body.email).toEqual({ id: "email-1", isStarred: true });
   });
 
   it("routes manual deal association through the generic entity resolver", async () => {

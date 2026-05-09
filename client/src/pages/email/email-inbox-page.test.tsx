@@ -12,10 +12,19 @@ import type { Email, EmailFilters, Pagination } from "@/hooks/use-emails";
 const mocks = vi.hoisted(() => ({
   useUserEmailsMock: vi.fn(),
   useGraphAuthMock: vi.fn(),
+  updateEmailActionMock: vi.fn(),
+  associateEmailToEntityMock: vi.fn(),
+  assignTarget: {
+    assignedEntityType: "deal",
+    assignedEntityId: "deal-2",
+    assignedDealId: "deal-2",
+  },
 }));
 
 vi.mock("@/hooks/use-emails", () => ({
   useUserEmails: mocks.useUserEmailsMock,
+  updateEmailAction: mocks.updateEmailActionMock,
+  associateEmailToEntity: mocks.associateEmailToEntityMock,
 }));
 
 vi.mock("@/hooks/use-graph-auth", () => ({
@@ -23,7 +32,9 @@ vi.mock("@/hooks/use-graph-auth", () => ({
 }));
 
 vi.mock("@/components/email/graph-auth-banner", () => ({
-  GraphAuthBanner: () => <div data-testid="graph-auth-banner" />,
+  GraphAuthBanner: ({ auth }: { auth?: { connected: boolean } }) => (
+    <div data-testid="graph-auth-banner" data-connected={String(auth?.connected)} />
+  ),
 }));
 
 vi.mock("@/components/email/email-assignment-queue", () => ({
@@ -60,12 +71,42 @@ vi.mock("@/components/email/email-compose-dialog", () => ({
   EmailComposeDialog: ({
     open,
     defaultTo,
+    defaultSubject,
+    defaultBody,
   }: {
     open: boolean;
     onOpenChange: (open: boolean) => void;
     onSent?: () => void;
     defaultTo?: string;
-  }) => (open ? <div role="dialog">Compose open to: {defaultTo ?? "new message"}</div> : null),
+    defaultSubject?: string;
+    defaultBody?: string;
+  }) => (
+    open ? (
+      <div role="dialog">
+        Compose open to: {defaultTo ?? "new message"}
+        {defaultSubject ? <p>Subject: {defaultSubject}</p> : null}
+        {defaultBody ? <p>Body: {defaultBody}</p> : null}
+      </div>
+    ) : null
+  ),
+}));
+
+vi.mock("@/components/email/email-manual-assignment-dialog", () => ({
+  EmailManualAssignmentDialog: ({
+    open,
+    onAssign,
+  }: {
+    open: boolean;
+    onAssign: (target: typeof mocks.assignTarget) => Promise<void>;
+  }) =>
+    open ? (
+      <div role="dialog">
+        Manual assignment
+        <button type="button" onClick={() => void onAssign(mocks.assignTarget)}>
+          Assign to Dallas ISD
+        </button>
+      </div>
+    ) : null,
 }));
 
 const pagination: Pagination = {
@@ -88,8 +129,14 @@ const fixtureEmails: Email[] = [
     bodyPreview: "Need bid pricing locked by May 28.",
     bodyHtml: "<p>Confirmed the phasing window and bid pricing deadline.</p>",
     hasAttachments: true,
+    isStarred: false,
+    archivedAt: null,
+    deletedAt: null,
     contactId: "contact-1",
     dealId: "deal-1",
+    assignedEntityType: "deal",
+    assignedEntityId: "deal-1",
+    assignmentAmbiguityReason: null,
     userId: "user-1",
     sentAt: new Date().toISOString(),
     syncedAt: new Date().toISOString(),
@@ -106,8 +153,14 @@ const fixtureEmails: Email[] = [
     bodyPreview: "Will the timeline you sent last week still hold?",
     bodyHtml: "<p>Our board meets next Tuesday and I want to bring your bid.</p>",
     hasAttachments: false,
+    isStarred: false,
+    archivedAt: null,
+    deletedAt: null,
     contactId: null,
     dealId: null,
+    assignedEntityType: null,
+    assignedEntityId: null,
+    assignmentAmbiguityReason: null,
     userId: "user-1",
     sentAt: new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString(),
     syncedAt: new Date().toISOString(),
@@ -124,8 +177,14 @@ const fixtureEmails: Email[] = [
     bodyPreview: "Attached the revised SOV with drain line items.",
     bodyHtml: "<p>Attached the revised SOV.</p>",
     hasAttachments: false,
+    isStarred: false,
+    archivedAt: null,
+    deletedAt: null,
     contactId: "contact-1",
     dealId: "deal-1",
+    assignedEntityType: "deal",
+    assignedEntityId: "deal-1",
+    assignmentAmbiguityReason: null,
     userId: "user-1",
     sentAt: new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString(),
     syncedAt: new Date().toISOString(),
@@ -135,6 +194,13 @@ const fixtureEmails: Email[] = [
 function emailsForFilters(filters: EmailFilters = {}) {
   return fixtureEmails.filter((email) => {
     if (filters.direction && email.direction !== filters.direction) return false;
+    if (filters.filter === "sent" && email.direction !== "outbound") return false;
+    if (
+      (filters.filter === "unread" || filters.filter === "unassigned") &&
+      (email.direction !== "inbound" || email.assignedEntityId || email.dealId || email.contactId)
+    ) {
+      return false;
+    }
     if (filters.search) {
       const q = filters.search.toLowerCase();
       return [email.subject, email.bodyPreview, email.fromAddress]
@@ -144,6 +210,15 @@ function emailsForFilters(filters: EmailFilters = {}) {
     return true;
   });
 }
+
+const backendCounts = {
+  all: 37,
+  unread: 11,
+  unassigned: 9,
+  sent: 14,
+  linked: 28,
+  today: 6,
+};
 
 function mountPage(path = "/email") {
   const container = document.createElement("div");
@@ -184,8 +259,30 @@ function clickByText(container: HTMLElement, text: string) {
   });
 }
 
+async function clickByTextAsync(container: HTMLElement, text: string) {
+  const target = Array.from(container.querySelectorAll("button")).find((button) =>
+    button.textContent?.includes(text)
+  );
+  expect(target, `button containing ${text}`).toBeTruthy();
+  await act(async () => {
+    target!.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    await Promise.resolve();
+  });
+}
+
+async function clickByLabelAsync(container: HTMLElement, label: string) {
+  const target = container.querySelector(`button[aria-label="${label}"]`) as HTMLButtonElement | null;
+  expect(target, `button aria-label ${label}`).toBeTruthy();
+  await act(async () => {
+    target!.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    await Promise.resolve();
+  });
+}
+
 describe("EmailInboxPage", () => {
   beforeEach(() => {
+    vi.clearAllMocks();
+    vi.spyOn(window, "confirm").mockReturnValue(true);
     mocks.useGraphAuthMock.mockReturnValue({
       connected: false,
       status: "not_connected",
@@ -196,10 +293,13 @@ describe("EmailInboxPage", () => {
     mocks.useUserEmailsMock.mockImplementation((filters: EmailFilters = {}) => ({
       emails: emailsForFilters(filters),
       pagination,
+      counts: backendCounts,
       loading: false,
       error: null,
       refetch: vi.fn(),
     }));
+    mocks.updateEmailActionMock.mockResolvedValue({ email: fixtureEmails[0] });
+    mocks.associateEmailToEntityMock.mockResolvedValue({ success: true });
   });
 
   it("renders inbox with thread list and reader pane", () => {
@@ -231,7 +331,7 @@ describe("EmailInboxPage", () => {
 
     expect(page.container.textContent).toContain("Updated SOV - Dallas ISD Bldg A");
     expect(mocks.useUserEmailsMock).toHaveBeenLastCalledWith({
-      direction: "outbound",
+      filter: "sent",
       search: undefined,
       page: 1,
       limit: 25,
@@ -288,6 +388,101 @@ describe("EmailInboxPage", () => {
     clickByText(page.container, "Microsoft 365");
 
     expect(startConsent).toHaveBeenCalledTimes(1);
+
+    page.unmount();
+  });
+
+  it("passes the page Graph auth state into the banner", () => {
+    const page = mountPage();
+
+    expect(mocks.useGraphAuthMock).toHaveBeenCalled();
+    expect(page.container.querySelector('[data-testid="graph-auth-banner"]')?.getAttribute("data-connected")).toBe("false");
+
+    page.unmount();
+  });
+
+  it("passes active filters to useUserEmails instead of filtering a paginated page slice", () => {
+    const page = mountPage();
+
+    clickByText(page.container, "Unassigned");
+
+    expect(mocks.useUserEmailsMock).toHaveBeenLastCalledWith({
+      filter: "unassigned",
+      search: undefined,
+      page: 1,
+      limit: 25,
+    });
+    expect(page.container.textContent).toContain("Frisco DC re-roof checking timing");
+    expect(page.container.textContent).not.toContain("Building A roof phase 2 timeline");
+
+    page.unmount();
+  });
+
+  it("uses backend inbox counts rather than the current page slice", () => {
+    const page = mountPage();
+
+    expect(page.container.textContent).toContain("Inbox · 11 unread · 9 need attention");
+    expect(page.container.textContent).toContain("37");
+    expect(page.container.textContent).toContain("14");
+    expect(page.container.textContent).toContain("6");
+
+    page.unmount();
+  });
+
+  it("shows manual reassignment for standalone emails without conversation IDs", async () => {
+    const page = mountPage();
+
+    clickByText(page.container, "Frisco DC re-roof checking timing");
+    await clickByTextAsync(page.container, "Reassign email");
+    await clickByTextAsync(page.container, "Assign to Dallas ISD");
+
+    expect(mocks.associateEmailToEntityMock).toHaveBeenCalledWith("email-2", mocks.assignTarget);
+
+    page.unmount();
+  });
+
+  it("keeps thread tools for emails with conversation IDs", () => {
+    const page = mountPage();
+
+    expect(page.container.textContent).toContain("Thread tools");
+    expect(page.container.textContent).not.toContain("Reassign email");
+
+    page.unmount();
+  });
+
+  it("forward opens compose with forwarded subject and quoted body", () => {
+    const page = mountPage();
+
+    clickByText(page.container, "Forward");
+
+    expect(page.container.textContent).toContain("Subject: Fwd: Building A roof phase 2 timeline");
+    expect(page.container.textContent).toContain("Forwarded message");
+    expect(page.container.textContent).toContain("Confirmed the phasing window");
+
+    page.unmount();
+  });
+
+  it("wires reader star archive and delete actions", async () => {
+    const page = mountPage();
+
+    await clickByLabelAsync(page.container, "Star");
+    await clickByLabelAsync(page.container, "Archive");
+    await clickByLabelAsync(page.container, "Delete");
+
+    expect(mocks.updateEmailActionMock).toHaveBeenNthCalledWith(1, "email-1", { isStarred: true });
+    expect(mocks.updateEmailActionMock).toHaveBeenNthCalledWith(2, "email-1", { archived: true });
+    expect(mocks.updateEmailActionMock).toHaveBeenNthCalledWith(3, "email-1", { deleted: true });
+
+    page.unmount();
+  });
+
+  it("selects the reader email from the visible filtered list", () => {
+    const page = mountPage();
+
+    clickByText(page.container, "Sent");
+
+    expect(page.container.textContent).toContain("Attached the revised SOV.");
+    expect(page.container.textContent).not.toContain("Confirmed the phasing window and bid pricing deadline.");
 
     page.unmount();
   });

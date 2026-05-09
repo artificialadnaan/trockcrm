@@ -1,4 +1,4 @@
-import { eq, and, desc, sql, or, inArray } from "drizzle-orm";
+import { eq, and, desc, sql, or, inArray, isNull } from "drizzle-orm";
 import type { NodePgDatabase } from "drizzle-orm/node-postgres";
 import {
   pipelineStageConfig,
@@ -54,9 +54,16 @@ export interface EmailFilters {
   dealId?: string;
   contactId?: string;
   direction?: "inbound" | "outbound";
+  filter?: "all" | "unread" | "unassigned" | "sent";
   search?: string;
   page?: number;
   limit?: number;
+}
+
+export interface EmailInboxActionInput {
+  isStarred?: boolean;
+  archived?: boolean;
+  deleted?: boolean;
 }
 
 export interface EmailAssignmentQueueFilters {
@@ -81,6 +88,30 @@ export function isEmailAssignmentQueueCandidate(emailRow: {
   assignmentAmbiguityReason: string | null;
 }) {
   return emailRow.direction === "inbound" && emailRow.assignmentAmbiguityReason != null;
+}
+
+function emailIsUnassignedCondition() {
+  return and(
+    eq(emails.direction, "inbound"),
+    isNull(emails.assignedEntityId),
+    isNull(emails.dealId),
+    isNull(emails.contactId)
+  );
+}
+
+function applyInboxFilter(conditions: any[], filter: EmailFilters["filter"]) {
+  if (!filter || filter === "all") return;
+  if (filter === "sent") {
+    conditions.push(eq(emails.direction, "outbound"));
+    return;
+  }
+  if (filter === "unread" || filter === "unassigned") {
+    conditions.push(emailIsUnassignedCondition());
+  }
+}
+
+function activeEmailConditions() {
+  return [isNull(emails.archivedAt), isNull(emails.deletedAt)];
 }
 
 type ThreadBindingRecord = typeof emailThreadBindings.$inferSelect;
@@ -1032,6 +1063,7 @@ export async function getEmails(
   if (filters.direction) {
     conditions.push(eq(emails.direction, filters.direction));
   }
+  applyInboxFilter(conditions, filters.filter);
   if (filters.search && filters.search.trim().length >= 2) {
     const term = `%${filters.search.trim()}%`;
     conditions.push(
@@ -1160,14 +1192,14 @@ export async function getUserEmails(tenantDb: TenantDb, userId: string, filters:
   const limit = filters.limit ?? 25;
   const offset = (page - 1) * limit;
 
-  const conditions: any[] = [eq(emails.userId, userId)];
+  const baseConditions: any[] = [eq(emails.userId, userId), ...activeEmailConditions()];
 
   if (filters.direction) {
-    conditions.push(eq(emails.direction, filters.direction));
+    baseConditions.push(eq(emails.direction, filters.direction));
   }
   if (filters.search && filters.search.trim().length >= 2) {
     const term = `%${filters.search.trim()}%`;
-    conditions.push(
+    baseConditions.push(
       or(
         sql`${emails.subject} ILIKE ${term}`,
         sql`${emails.bodyPreview} ILIKE ${term}`,
@@ -1176,10 +1208,25 @@ export async function getUserEmails(tenantDb: TenantDb, userId: string, filters:
     );
   }
 
-  const where = and(...conditions);
+  const filteredConditions: any[] = [...baseConditions];
+  applyInboxFilter(filteredConditions, filters.filter);
 
-  const [countResult, emailRows] = await Promise.all([
+  const countWhere = and(...baseConditions);
+  const where = and(...filteredConditions);
+
+  const [countResult, countsResult, emailRows] = await Promise.all([
     tenantDb.select({ count: sql<number>`count(*)` }).from(emails).where(where),
+    tenantDb
+      .select({
+        all: sql<number>`count(*)`,
+        unread: sql<number>`count(*) FILTER (WHERE ${emailIsUnassignedCondition()})`,
+        unassigned: sql<number>`count(*) FILTER (WHERE ${emailIsUnassignedCondition()})`,
+        sent: sql<number>`count(*) FILTER (WHERE ${emails.direction} = 'outbound')`,
+        linked: sql<number>`count(*) FILTER (WHERE ${emails.assignedEntityId} IS NOT NULL OR ${emails.dealId} IS NOT NULL OR ${emails.contactId} IS NOT NULL)`,
+        today: sql<number>`count(*) FILTER (WHERE ${emails.sentAt} >= now() - interval '24 hours')`,
+      })
+      .from(emails)
+      .where(countWhere),
     tenantDb
       .select()
       .from(emails)
@@ -1197,7 +1244,46 @@ export async function getUserEmails(tenantDb: TenantDb, userId: string, filters:
   return {
     emails: emailRows,
     pagination: { page, limit, total, totalPages: Math.ceil(total / limit) },
+    counts: {
+      all: Number(countsResult[0]?.all ?? 0),
+      unread: Number(countsResult[0]?.unread ?? 0),
+      unassigned: Number(countsResult[0]?.unassigned ?? 0),
+      sent: Number(countsResult[0]?.sent ?? 0),
+      linked: Number(countsResult[0]?.linked ?? 0),
+      today: Number(countsResult[0]?.today ?? 0),
+    },
   };
+}
+
+export async function updateEmailInboxAction(
+  tenantDb: TenantDb,
+  emailId: string,
+  userId: string,
+  userRole: string,
+  input: EmailInboxActionInput
+) {
+  const email = await getEmailById(tenantDb, emailId);
+  if (!email) throw new AppError(404, "Email not found");
+  if (userRole === "rep" && email.userId !== userId) {
+    throw new AppError(403, "You can only modify your own emails");
+  }
+
+  const updateValues: Partial<typeof emails.$inferInsert> = {};
+  if (input.isStarred !== undefined) updateValues.isStarred = input.isStarred;
+  if (input.archived !== undefined) updateValues.archivedAt = input.archived ? new Date() : null;
+  if (input.deleted !== undefined) updateValues.deletedAt = input.deleted ? new Date() : null;
+
+  if (Object.keys(updateValues).length === 0) {
+    return email;
+  }
+
+  const [updated] = await tenantDb
+    .update(emails)
+    .set(updateValues)
+    .where(eq(emails.id, emailId))
+    .returning();
+
+  return updated ?? email;
 }
 
 /**

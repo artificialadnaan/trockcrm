@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { useSearchParams } from "react-router-dom";
 import DOMPurify from "dompurify";
+import { toast } from "sonner";
 import {
   AlertTriangle,
   Archive,
@@ -24,9 +25,15 @@ import { Card } from "@/components/ui/card";
 import { GraphAuthBanner } from "@/components/email/graph-auth-banner";
 import { EmailAssignmentQueuePanel, useEmailAssignmentQueue } from "@/components/email/email-assignment-queue";
 import { EmailComposeDialog } from "@/components/email/email-compose-dialog";
+import { EmailManualAssignmentDialog } from "@/components/email/email-manual-assignment-dialog";
 import { EmailThreadView } from "@/components/email/email-thread-view";
 import { useGraphAuth } from "@/hooks/use-graph-auth";
-import { useUserEmails, type Email } from "@/hooks/use-emails";
+import {
+  associateEmailToEntity,
+  updateEmailAction,
+  useUserEmails,
+  type Email,
+} from "@/hooks/use-emails";
 import { cn } from "@/lib/utils";
 
 type EmailFilter = "all" | "unread" | "unassigned" | "sent" | "parking-lot";
@@ -78,23 +85,39 @@ function getRelativeDate(value: string) {
 }
 
 function isLinked(email: Email) {
-  return Boolean(email.dealId || email.contactId);
+  return Boolean(email.assignedEntityId || email.dealId || email.contactId);
 }
 
 function needsAttention(email: Email) {
   return email.direction === "inbound" && !isLinked(email);
 }
 
-function matchesFilter(email: Email, filter: EmailFilter) {
-  if (filter === "parking-lot") return false;
-  if (filter === "sent") return email.direction === "outbound";
-  if (filter === "unassigned") return needsAttention(email);
-  if (filter === "unread") return needsAttention(email);
-  return true;
+function buildForwardSubject(subject: string | null) {
+  const trimmed = subject?.trim() || "(No Subject)";
+  return /^fwd?:/i.test(trimmed) ? trimmed : `Fwd: ${trimmed}`;
 }
 
-function countForFilter(emails: Email[], filter: EmailFilter) {
-  return emails.filter((email) => matchesFilter(email, filter)).length;
+function htmlToPlainText(html: string | null | undefined) {
+  if (!html) return "";
+  const container = document.createElement("div");
+  container.innerHTML = DOMPurify.sanitize(html);
+  return container.textContent?.trim() ?? "";
+}
+
+function buildForwardBody(email: Email) {
+  const originalBody = htmlToPlainText(email.bodyHtml) || email.bodyPreview || "";
+  const recipients = email.toAddresses.join(", ") || "recipient";
+  return [
+    "",
+    "",
+    "---------- Forwarded message ---------",
+    `From: ${email.fromAddress}`,
+    `Date: ${new Date(email.sentAt).toLocaleString()}`,
+    `Subject: ${email.subject ?? "(No Subject)"}`,
+    `To: ${recipients}`,
+    "",
+    originalBody,
+  ].join("\n");
 }
 
 function EmailMetricCard({
@@ -245,14 +268,22 @@ function ThreadListItem({
 function EmailReaderPane({
   email,
   onReply,
+  onForward,
+  onRefresh,
 }: {
   email: Email | null;
   onReply: (email: Email) => void;
+  onForward: (email: Email) => void;
+  onRefresh: () => void;
 }) {
   const [showThreadTools, setShowThreadTools] = useState(false);
+  const [manualDialogOpen, setManualDialogOpen] = useState(false);
+  const [actionPending, setActionPending] = useState<"star" | "archive" | "delete" | null>(null);
 
   useEffect(() => {
     setShowThreadTools(false);
+    setManualDialogOpen(false);
+    setActionPending(null);
   }, [email?.id]);
 
   if (!email) {
@@ -266,8 +297,32 @@ function EmailReaderPane({
     );
   }
 
+  const currentEmail = email;
   const fromMe = email.direction === "outbound";
   const recipientLine = fromMe ? `to ${email.toAddresses.join(", ") || "recipient"}` : `from ${email.fromAddress}`;
+
+  async function handleReaderAction(action: "star" | "archive" | "delete") {
+    if (action === "delete" && !window.confirm("Delete this email from your inbox?")) return;
+
+    setActionPending(action);
+    try {
+      if (action === "star") {
+        await updateEmailAction(currentEmail.id, { isStarred: !currentEmail.isStarred });
+        toast.success(currentEmail.isStarred ? "Email unstarred" : "Email starred");
+      } else if (action === "archive") {
+        await updateEmailAction(currentEmail.id, { archived: true });
+        toast.success("Email archived");
+      } else {
+        await updateEmailAction(currentEmail.id, { deleted: true });
+        toast.success("Email deleted");
+      }
+      onRefresh();
+    } catch (error: unknown) {
+      toast.error(error instanceof Error ? error.message : "Email action failed");
+    } finally {
+      setActionPending(null);
+    }
+  }
 
   return (
     <div className="flex h-full min-h-[640px] flex-col">
@@ -297,13 +352,35 @@ function EmailReaderPane({
             </div>
           </div>
           <div className="flex shrink-0 items-center gap-1">
-            <button type="button" className="flex h-8 w-8 items-center justify-center rounded-md text-slate-500 hover:bg-slate-100 hover:text-slate-900" aria-label="Star">
-              <Star className="h-4 w-4" />
+            <button
+              type="button"
+              disabled={actionPending === "star"}
+              onClick={() => void handleReaderAction("star")}
+              className={cn(
+                "flex h-8 w-8 items-center justify-center rounded-md text-slate-500 hover:bg-slate-100 hover:text-slate-900 disabled:opacity-50",
+                email.isStarred ? "text-amber-500" : null
+              )}
+              aria-label={email.isStarred ? "Unstar" : "Star"}
+              aria-pressed={email.isStarred}
+            >
+              <Star className={cn("h-4 w-4", email.isStarred ? "fill-current" : null)} />
             </button>
-            <button type="button" className="flex h-8 w-8 items-center justify-center rounded-md text-slate-500 hover:bg-slate-100 hover:text-slate-900" aria-label="Archive">
+            <button
+              type="button"
+              disabled={actionPending === "archive"}
+              onClick={() => void handleReaderAction("archive")}
+              className="flex h-8 w-8 items-center justify-center rounded-md text-slate-500 hover:bg-slate-100 hover:text-slate-900 disabled:opacity-50"
+              aria-label="Archive"
+            >
               <Archive className="h-4 w-4" />
             </button>
-            <button type="button" className="flex h-8 w-8 items-center justify-center rounded-md text-slate-500 hover:bg-slate-100 hover:text-slate-900" aria-label="Delete">
+            <button
+              type="button"
+              disabled={actionPending === "delete"}
+              onClick={() => void handleReaderAction("delete")}
+              className="flex h-8 w-8 items-center justify-center rounded-md text-slate-500 hover:bg-slate-100 hover:text-slate-900 disabled:opacity-50"
+              aria-label="Delete"
+            >
               <Trash2 className="h-4 w-4" />
             </button>
           </div>
@@ -379,7 +456,7 @@ function EmailReaderPane({
           <Reply className="mr-1 h-4 w-4" />
           Reply
         </Button>
-        <Button variant="outline" size="sm">
+        <Button variant="outline" size="sm" onClick={() => onForward(email)}>
           <Forward className="mr-1 h-4 w-4" />
           Forward
         </Button>
@@ -388,8 +465,25 @@ function EmailReaderPane({
             <Link2 className="mr-1 h-4 w-4" />
             Thread tools
           </Button>
-        ) : null}
+        ) : (
+          <Button variant="outline" size="sm" onClick={() => setManualDialogOpen(true)}>
+            <Link2 className="mr-1 h-4 w-4" />
+            Reassign email
+          </Button>
+        )}
       </div>
+      <EmailManualAssignmentDialog
+        open={manualDialogOpen}
+        onOpenChange={setManualDialogOpen}
+        title="Reassign email"
+        description="Search the CRM and attach this standalone email to any deal, lead, contact, company, or property."
+        onAssign={async (target) => {
+          await associateEmailToEntity(email.id, target);
+          toast.success("Email reassigned");
+          setManualDialogOpen(false);
+          onRefresh();
+        }}
+      />
     </div>
   );
 }
@@ -400,38 +494,39 @@ export function EmailInboxPage() {
   const [filter, setFilter] = useState<EmailFilter>("all");
   const [page, setPage] = useState(1);
   const [composeOpen, setComposeOpen] = useState(false);
-  const [replyTo, setReplyTo] = useState<string | undefined>(undefined);
+  const [composeDefaults, setComposeDefaults] = useState<{
+    to?: string;
+    subject?: string;
+    body?: string;
+  }>({});
   const [selectedId, setSelectedId] = useState<string | null>(null);
-  const { connected, loading: graphLoading, startConsent } = useGraphAuth();
+  const graphAuth = useGraphAuth();
   const parkingLotQueue = useEmailAssignmentQueue();
   const oauthConnected = searchParams.get("connected");
   const oauthError = searchParams.get("error");
 
-  const direction = filter === "sent" ? "outbound" : undefined;
-  const { emails, pagination, loading, error, refetch } = useUserEmails({
-    direction,
+  const inboxFilter = filter === "parking-lot" ? "all" : filter;
+  const { emails, pagination, counts: inboxCounts, loading, error, refetch } = useUserEmails({
+    filter: inboxFilter,
     search: search.length >= 2 ? search : undefined,
     page,
     limit: 25,
   });
 
-  const visibleEmails = useMemo(() => emails.filter((email) => matchesFilter(email, filter)), [emails, filter]);
-  const selectedEmail = emails.find((email) => email.id === selectedId) ?? visibleEmails[0] ?? null;
+  const visibleEmails = useMemo(() => (filter === "parking-lot" ? [] : emails), [emails, filter]);
+  const selectedEmail = visibleEmails.find((email) => email.id === selectedId) ?? visibleEmails[0] ?? null;
 
   const counts = useMemo(
     () => ({
-      all: emails.length,
-      unread: countForFilter(emails, "unread"),
-      unassigned: countForFilter(emails, "unassigned"),
-      sent: countForFilter(emails, "sent"),
+      all: inboxCounts.all,
+      unread: inboxCounts.unread,
+      unassigned: inboxCounts.unassigned,
+      sent: inboxCounts.sent,
       parkingLot: parkingLotQueue.pagination.total,
-      linked: emails.filter(isLinked).length,
-      today: emails.filter((email) => {
-        const date = new Date(email.sentAt);
-        return !Number.isNaN(date.getTime()) && Date.now() - date.getTime() < 24 * 60 * 60 * 1000;
-      }).length,
+      linked: inboxCounts.linked,
+      today: inboxCounts.today,
     }),
-    [emails, parkingLotQueue.pagination.total]
+    [inboxCounts, parkingLotQueue.pagination.total]
   );
 
   useEffect(() => {
@@ -445,7 +540,17 @@ export function EmailInboxPage() {
   }
 
   function handleReply(email: Email) {
-    setReplyTo(email.direction === "inbound" ? email.fromAddress : email.toAddresses[0]);
+    setComposeDefaults({
+      to: email.direction === "inbound" ? email.fromAddress : email.toAddresses[0],
+    });
+    setComposeOpen(true);
+  }
+
+  function handleForward(email: Email) {
+    setComposeDefaults({
+      subject: buildForwardSubject(email.subject),
+      body: buildForwardBody(email),
+    });
     setComposeOpen(true);
   }
 
@@ -459,14 +564,14 @@ export function EmailInboxPage() {
           </p>
         </div>
         <div className="flex items-center gap-2">
-          <Button variant="outline" size="lg" onClick={startConsent} disabled={connected || graphLoading}>
+          <Button variant="outline" size="lg" onClick={graphAuth.startConsent} disabled={graphAuth.connected || graphAuth.loading}>
             <Mail className="mr-1.5 h-4 w-4" />
-            {connected ? "Connected" : "Microsoft 365"}
+            {graphAuth.connected ? "Connected" : "Microsoft 365"}
           </Button>
           <Button
             size="lg"
             onClick={() => {
-              setReplyTo(undefined);
+              setComposeDefaults({});
               setComposeOpen(true);
             }}
           >
@@ -487,7 +592,7 @@ export function EmailInboxPage() {
         </div>
       ) : null}
 
-      <GraphAuthBanner />
+      <GraphAuthBanner auth={graphAuth} />
 
       <div className="grid grid-cols-1 gap-4 lg:grid-cols-3">
         <EmailMetricCard
@@ -645,7 +750,7 @@ export function EmailInboxPage() {
               ) : null}
             </div>
 
-            <EmailReaderPane email={selectedEmail} onReply={handleReply} />
+            <EmailReaderPane email={selectedEmail} onReply={handleReply} onForward={handleForward} onRefresh={refetch} />
           </div>
         )}
       </Card>
@@ -654,7 +759,9 @@ export function EmailInboxPage() {
         open={composeOpen}
         onOpenChange={setComposeOpen}
         onSent={refetch}
-        defaultTo={replyTo}
+        defaultTo={composeDefaults.to}
+        defaultSubject={composeDefaults.subject}
+        defaultBody={composeDefaults.body}
       />
     </div>
   );

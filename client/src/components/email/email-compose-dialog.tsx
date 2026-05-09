@@ -16,6 +16,8 @@ interface EmailComposeDialogProps {
   onOpenChange: (open: boolean) => void;
   onSent?: () => void;
   defaultTo?: string;
+  defaultSubject?: string;
+  defaultBody?: string;
   dealId?: string;
   contactId?: string;
 }
@@ -25,6 +27,8 @@ export function EmailComposeDialog({
   onOpenChange,
   onSent,
   defaultTo,
+  defaultSubject,
+  defaultBody,
   dealId,
   contactId,
 }: EmailComposeDialogProps) {
@@ -39,10 +43,10 @@ export function EmailComposeDialog({
     if (!open) return;
     setTo(defaultTo ?? "");
     setCc("");
-    setSubject("");
-    setBody("");
+    setSubject(defaultSubject ?? "");
+    setBody(defaultBody ?? "");
     setError(null);
-  }, [defaultTo, open]);
+  }, [defaultBody, defaultSubject, defaultTo, open]);
 
   const handleSend = async () => {
     if (!to.trim()) {
