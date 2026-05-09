@@ -10,6 +10,7 @@ import type { FileRecord } from "@/hooks/use-files";
 
 const mocks = vi.hoisted(() => ({
   useFilesMock: vi.fn(),
+  useFileStatsMock: vi.fn(),
   downloadFileMock: vi.fn(),
   deleteFileRecordMock: vi.fn(),
   useDealsMock: vi.fn(),
@@ -20,6 +21,7 @@ const mocks = vi.hoisted(() => ({
 
 vi.mock("@/hooks/use-files", () => ({
   useFiles: mocks.useFilesMock,
+  useFileStats: mocks.useFileStatsMock,
   downloadFile: mocks.downloadFileMock,
   deleteFileRecord: mocks.deleteFileRecordMock,
 }));
@@ -139,6 +141,19 @@ function setupFiles(files: FileRecord[]) {
     error: null,
     refetch: vi.fn(),
   });
+  mocks.useFileStatsMock.mockReturnValue({
+    stats: {
+      totalFiles: 27,
+      totalPhotos: 9,
+      totalDocuments: 18,
+      totalBytes: 10 * 1024 * 1024,
+      recentUploads: 4,
+      dealsWithFiles: 6,
+    },
+    loading: false,
+    error: null,
+    refetch: vi.fn(),
+  });
 }
 
 function mountPage() {
@@ -220,7 +235,7 @@ describe("FilesPage", () => {
     });
 
     expect(mocks.useFilesMock).toHaveBeenLastCalledWith(
-      expect.objectContaining({ category: "photo" }),
+      expect.objectContaining({ fileKind: "photos", category: undefined }),
       expect.objectContaining({ enabled: true })
     );
   });
@@ -275,6 +290,136 @@ describe("FilesPage", () => {
     );
   });
 
+  it("renders every canonical file category as a type filter", () => {
+    mounted = mountPage();
+
+    for (const category of [
+      "photo",
+      "contract",
+      "rfp",
+      "estimate",
+      "change_order",
+      "proposal",
+      "permit",
+      "inspection",
+      "correspondence",
+      "insurance",
+      "warranty",
+      "closeout",
+      "other",
+    ]) {
+      expect(mounted.container.querySelector(`[data-type-filter="${category}"]`)).not.toBeNull();
+    }
+  });
+
+  it("all types chip resets the tab state to all", () => {
+    mounted = mountPage();
+
+    act(() => {
+      mounted?.container.querySelector<HTMLButtonElement>('[data-filter-tab="photos"]')?.click();
+    });
+    act(() => {
+      mounted?.container.querySelector<HTMLButtonElement>('[data-type-filter="all"]')?.click();
+    });
+
+    expect(mocks.useFilesMock).toHaveBeenLastCalledWith(
+      expect.objectContaining({ fileKind: undefined, category: undefined }),
+      expect.objectContaining({ enabled: true })
+    );
+  });
+
+  it("server-filters documents instead of slicing documents client-side", () => {
+    mounted = mountPage();
+
+    act(() => {
+      mounted?.container.querySelector<HTMLButtonElement>('[data-filter-tab="documents"]')?.click();
+    });
+
+    expect(mocks.useFilesMock).toHaveBeenLastCalledWith(
+      expect.objectContaining({ fileKind: "documents", category: undefined }),
+      expect.objectContaining({ enabled: true })
+    );
+  });
+
+  it("server-filters linked type including procore and change order files", () => {
+    setupFiles([
+      makeFile({
+        id: "procore-file",
+        category: "other",
+        displayName: "Procore synced spec",
+        mimeType: "application/pdf",
+        fileExtension: ".pdf",
+        dealId: null,
+        procoreProjectId: 12345,
+      }),
+    ]);
+    mounted = mountPage();
+
+    expect(mounted.container.textContent).toContain("Procore project");
+    act(() => {
+      mounted?.container.querySelector<HTMLButtonElement>('[data-linked-filter="procore"]')?.click();
+    });
+
+    expect(mocks.useFilesMock).toHaveBeenLastCalledWith(
+      expect.objectContaining({ linkedType: "procore" }),
+      expect.objectContaining({ enabled: true })
+    );
+
+    act(() => {
+      mounted?.container.querySelector<HTMLButtonElement>('[data-linked-filter="change_order"]')?.click();
+    });
+
+    expect(mocks.useFilesMock).toHaveBeenLastCalledWith(
+      expect.objectContaining({ linkedType: "change_order" }),
+      expect.objectContaining({ enabled: true })
+    );
+  });
+
+  it("keeps mixed-association Procore and change-order files visible after linked filters", () => {
+    setupFiles([
+      makeFile({
+        id: "mixed-procore-file",
+        category: "other",
+        displayName: "Mixed procore spec",
+        mimeType: "application/pdf",
+        fileExtension: ".pdf",
+        dealId: "deal-1",
+        procoreProjectId: 12345,
+      }),
+      makeFile({
+        id: "mixed-change-order-file",
+        category: "change_order",
+        displayName: "Mixed change order",
+        mimeType: "application/pdf",
+        fileExtension: ".pdf",
+        dealId: "deal-1",
+        changeOrderId: "co-77",
+      }),
+    ]);
+    mounted = mountPage();
+
+    act(() => {
+      mounted?.container.querySelector<HTMLButtonElement>('[data-linked-filter="procore"]')?.click();
+    });
+    expect(mounted.container.textContent).toContain("Mixed procore spec");
+
+    act(() => {
+      mounted?.container.querySelector<HTMLButtonElement>('[data-linked-filter="change_order"]')?.click();
+    });
+    expect(mounted.container.textContent).toContain("Mixed change order");
+  });
+
+  it("uses stats hook for KPI totals independent of filtered files", () => {
+    setupFiles([makeFile()]);
+
+    mounted = mountPage();
+
+    expect(mounted.container.textContent).toContain("27 files");
+    expect(mounted.container.textContent).toContain("10.0 MB");
+    expect(mounted.container.textContent).toContain("9");
+    expect(mocks.useFileStatsMock).toHaveBeenCalledWith(expect.objectContaining({ enabled: true }));
+  });
+
   it("sort button cycles the API sort field", () => {
     mounted = mountPage();
 
@@ -292,12 +437,26 @@ describe("FilesPage", () => {
     const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(true);
     mocks.deleteFileRecordMock.mockResolvedValueOnce(undefined);
     const refetch = vi.fn();
+    const refetchStats = vi.fn();
     mocks.useFilesMock.mockReturnValue({
       files: [makeFile()],
       pagination: { page: 1, limit: 200, total: 1, totalPages: 1 },
       loading: false,
       error: null,
       refetch,
+    });
+    mocks.useFileStatsMock.mockReturnValue({
+      stats: {
+        totalFiles: 1,
+        totalPhotos: 1,
+        totalDocuments: 0,
+        totalBytes: 2400 * 1024,
+        recentUploads: 1,
+        dealsWithFiles: 1,
+      },
+      loading: false,
+      error: null,
+      refetch: refetchStats,
     });
     mounted = mountPage();
 
@@ -308,6 +467,57 @@ describe("FilesPage", () => {
     expect(confirmSpy).toHaveBeenCalledWith("Delete this file?");
     expect(mocks.deleteFileRecordMock).toHaveBeenCalledWith("file-1");
     expect(refetch).toHaveBeenCalled();
+    expect(refetchStats).toHaveBeenCalled();
     confirmSpy.mockRestore();
+  });
+
+  it("upload completion refreshes both files and office-wide stats", () => {
+    const refetch = vi.fn();
+    const refetchStats = vi.fn();
+    mocks.useFilesMock.mockReturnValue({
+      files: [makeFile()],
+      pagination: { page: 1, limit: 200, total: 1, totalPages: 1 },
+      loading: false,
+      error: null,
+      refetch,
+    });
+    mocks.useFileStatsMock.mockReturnValue({
+      stats: {
+        totalFiles: 1,
+        totalPhotos: 1,
+        totalDocuments: 0,
+        totalBytes: 2400 * 1024,
+        recentUploads: 1,
+        dealsWithFiles: 1,
+      },
+      loading: false,
+      error: null,
+      refetch: refetchStats,
+    });
+    mounted = mountPage();
+
+    act(() => {
+      Array.from(mounted!.container.querySelectorAll("button"))
+        .find((button) => button.textContent?.includes("Upload"))!
+        .click();
+    });
+    act(() => {
+      const calls = mocks.fileUploadZoneMock.mock.calls;
+      const props = calls[calls.length - 1]?.[0] as { onUploadComplete: () => void };
+      props.onUploadComplete();
+    });
+
+    expect(refetch).toHaveBeenCalled();
+    expect(refetchStats).toHaveBeenCalled();
+  });
+
+  it("view toggle buttons expose pressed state", () => {
+    mounted = mountPage();
+
+    const gridButton = mounted.container.querySelector<HTMLButtonElement>('button[aria-label="Grid view"]');
+    const listButton = mounted.container.querySelector<HTMLButtonElement>('button[aria-label="List view"]');
+
+    expect(gridButton?.getAttribute("aria-pressed")).toBe("true");
+    expect(listButton?.getAttribute("aria-pressed")).toBe("false");
   });
 });

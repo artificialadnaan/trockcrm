@@ -5,6 +5,7 @@ const serviceMocks = vi.hoisted(() => ({
   confirmUpload: vi.fn(),
   uploadNewVersion: vi.fn(),
   getFiles: vi.fn(),
+  getFileStats: vi.fn(),
   getFileById: vi.fn(),
   getFileByIdIncludingDeleted: vi.fn(),
   getFileDownloadUrl: vi.fn(),
@@ -221,5 +222,42 @@ describe("photo audit route wiring", () => {
     expect(auditMocks.getPhotoAuditEvents).toHaveBeenCalledWith(req.tenantDb, "photo-1");
     expect(req.commitTransaction).toHaveBeenCalled();
     expect(res.body.events).toEqual([{ id: "audit-1", eventType: "uploaded" }]);
+  });
+
+  it("passes server-side file kind and linked type filters to the list service", async () => {
+    serviceMocks.getFiles.mockResolvedValue({ files: [], pagination: { page: 1, limit: 200, total: 0, totalPages: 0 } });
+
+    const { req, nextError } = await invoke("get", "/", {
+      query: {
+        fileKind: "documents",
+        linkedType: "change_order",
+        limit: "200",
+      },
+    });
+
+    expect(nextError).toBeUndefined();
+    expect(serviceMocks.getFiles).toHaveBeenCalledWith(req.tenantDb, expect.objectContaining({
+      fileKind: "documents",
+      linkedType: "change_order",
+      limit: 200,
+    }));
+  });
+
+  it("returns office-wide file stats through a separate stats endpoint", async () => {
+    serviceMocks.getFileStats.mockResolvedValue({
+      totalFiles: 10,
+      totalPhotos: 4,
+      totalDocuments: 6,
+      totalBytes: 12345,
+      recentUploads: 2,
+      dealsWithFiles: 3,
+    });
+
+    const { req, res, nextError } = await invoke("get", "/stats");
+
+    expect(nextError).toBeUndefined();
+    expect(serviceMocks.getFileStats).toHaveBeenCalledWith(req.tenantDb, {});
+    expect(req.commitTransaction).toHaveBeenCalled();
+    expect(res.body.stats.totalFiles).toBe(10);
   });
 });
