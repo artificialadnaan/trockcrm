@@ -1,10 +1,19 @@
 import { Mail, AlertTriangle, CheckCircle, ExternalLink } from "lucide-react";
 import { Button } from "@/components/ui/button";
-import { useGraphAuth } from "@/hooks/use-graph-auth";
+import { useGraphAuth, type GraphAuthState } from "@/hooks/use-graph-auth";
 
-export function GraphAuthBanner() {
-  const { connected, status, errorMessage, loading, startConsent } =
-    useGraphAuth();
+export function GraphAuthBanner({ auth }: { auth?: GraphAuthState }) {
+  if (auth) return <GraphAuthBannerContent auth={auth} />;
+  return <GraphAuthBannerWithHook />;
+}
+
+function GraphAuthBannerWithHook() {
+  const auth = useGraphAuth();
+  return <GraphAuthBannerContent auth={auth} />;
+}
+
+function GraphAuthBannerContent({ auth }: { auth: GraphAuthState }) {
+  const { connected, status, errorMessage, loading, startConsent } = auth;
 
   if (loading) return null;
 

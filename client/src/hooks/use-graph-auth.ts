@@ -7,7 +7,14 @@ interface GraphAuthStatus {
   errorMessage: string | null;
 }
 
-export function useGraphAuth() {
+export type GraphAuthState = GraphAuthStatus & {
+  loading: boolean;
+  startConsent: () => Promise<void>;
+  disconnect: () => Promise<void>;
+  refetch: () => Promise<void>;
+};
+
+export function useGraphAuth(): GraphAuthState {
   const [authStatus, setAuthStatus] = useState<GraphAuthStatus>({
     connected: false,
     status: null,
