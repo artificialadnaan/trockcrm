@@ -30,7 +30,7 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { FileUploadZone } from "@/components/files/file-upload-zone";
-import { useFiles, downloadFile, deleteFileRecord } from "@/hooks/use-files";
+import { useFiles, useFileStats, downloadFile, deleteFileRecord } from "@/hooks/use-files";
 import type { FileRecord } from "@/hooks/use-files";
 import { useDeals } from "@/hooks/use-deals";
 import type { Deal } from "@/hooks/use-deals";
@@ -46,18 +46,13 @@ import {
 
 type FileTab = "all" | "photos" | "documents";
 type FileView = "grid" | "list";
-type LinkedFilter = "any" | "deal" | "lead" | "contact" | "unassigned";
+type LinkedFilter = "any" | "deal" | "lead" | "contact" | "procore" | "change_order" | "unassigned";
 
 const EYEBROW = "text-[11px] font-black uppercase tracking-[0.18em] text-slate-500";
 
 const TYPE_FILTERS: Array<{ value: FileCategory | "all"; label: string }> = [
   { value: "all", label: "All Types" },
-  { value: "photo", label: "Photos" },
-  { value: "contract", label: "Contracts" },
-  { value: "rfp", label: "RFP" },
-  { value: "estimate", label: "Estimates" },
-  { value: "proposal", label: "Proposals" },
-  { value: "closeout", label: "Closeout" },
+  ...FILE_CATEGORIES.map((category) => ({ value: category, label: getCategoryLabel(category) })),
 ];
 
 function getFileIcon(mimeType: string) {
@@ -97,7 +92,19 @@ function linkedType(file: FileRecord): LinkedFilter {
   if (file.dealId) return "deal";
   if (file.leadId) return "lead";
   if (file.contactId) return "contact";
+  if (file.procoreProjectId) return "procore";
+  if (file.changeOrderId) return "change_order";
   return "unassigned";
+}
+
+function matchesLinkedFilter(file: FileRecord, filter: LinkedFilter) {
+  if (filter === "any") return true;
+  if (filter === "deal") return Boolean(file.dealId);
+  if (filter === "lead") return Boolean(file.leadId);
+  if (filter === "contact") return Boolean(file.contactId);
+  if (filter === "procore") return Boolean(file.procoreProjectId);
+  if (filter === "change_order") return Boolean(file.changeOrderId);
+  return !file.dealId && !file.leadId && !file.contactId && !file.procoreProjectId && !file.changeOrderId;
 }
 
 function linkedLabel(file: FileRecord, dealMap: Map<string, Deal>) {
@@ -111,6 +118,12 @@ function linkedLabel(file: FileRecord, dealMap: Map<string, Deal>) {
   }
   if (file.leadId) return { type: "lead" as const, label: "Linked lead", href: `/leads/${file.leadId}` };
   if (file.contactId) return { type: "contact" as const, label: "Linked contact", href: `/contacts/${file.contactId}` };
+  if (file.procoreProjectId) {
+    return { type: "procore" as const, label: `Procore project ${file.procoreProjectId}`, href: null };
+  }
+  if (file.changeOrderId) {
+    return { type: "change_order" as const, label: `Change order ${file.changeOrderId}`, href: null };
+  }
   return null;
 }
 
@@ -198,6 +211,15 @@ function FileLinkChip({
   if (!link) return <span className="text-xs font-semibold text-slate-400">Unassigned</span>;
 
   const Icon = link.type === "deal" ? Briefcase : link.type === "contact" ? Users : Layers;
+  if (!link.href) {
+    return (
+      <span className="inline-flex max-w-full items-center gap-1 rounded-full bg-brand-red/10 px-2 py-0.5 text-[11px] font-bold text-brand-red ring-1 ring-brand-red/20">
+        <Icon className="h-2.5 w-2.5 shrink-0" />
+        <span className="truncate">{link.label}</span>
+      </span>
+    );
+  }
+
   return (
     <button
       type="button"
@@ -414,8 +436,9 @@ export function FilesPage() {
   const { deals } = useDeals({ limit: 200, sortBy: "updated_at", sortDir: "desc" });
   const { contacts } = useContacts({ limit: 100, sortBy: "updated_at", sortDir: "desc" });
   const filesEnabled = user?.role !== "rep";
-
-  const effectiveCategory = typeFilter !== "all" ? typeFilter : tab === "photos" ? "photo" : undefined;
+  const fileKind = tab === "photos" ? "photos" : tab === "documents" ? "documents" : undefined;
+  const effectiveCategory = typeFilter !== "all" ? typeFilter : undefined;
+  const effectiveLinkedType = linkedFilter !== "any" ? linkedFilter : undefined;
 
   const { files, loading, error, refetch } = useFiles(
     {
@@ -424,9 +447,12 @@ export function FilesPage() {
       sortDir,
       limit: 200,
       category: effectiveCategory,
+      fileKind,
+      linkedType: effectiveLinkedType,
     },
     { enabled: filesEnabled }
   );
+  const { stats: fileStats, refetch: refetchFileStats } = useFileStats({ enabled: filesEnabled });
 
   const dealMap = useMemo(() => {
     const map = new Map<string, Deal>();
@@ -439,24 +465,24 @@ export function FilesPage() {
       if (tab === "photos" && file.category !== "photo" && !file.mimeType.startsWith("image/")) return false;
       if (tab === "documents" && !isDocument(file)) return false;
       if (typeFilter !== "all" && file.category !== typeFilter) return false;
-      if (linkedFilter !== "any" && linkedType(file) !== linkedFilter) return false;
+      if (!matchesLinkedFilter(file, linkedFilter)) return false;
       return true;
     });
   }, [files, linkedFilter, tab, typeFilter]);
 
   const photos = visibleFiles.filter((file) => file.category === "photo" || file.mimeType.startsWith("image/"));
   const documents = visibleFiles.filter(isDocument);
-  const totalBytes = files.reduce((sum, file) => sum + file.fileSizeBytes, 0);
   const visibleBytes = visibleFiles.reduce((sum, file) => sum + file.fileSizeBytes, 0);
-  const recentUploads = files.filter((file) => {
+  const totalCounts = {
+    all: fileStats?.totalFiles ?? files.length,
+    photos: fileStats?.totalPhotos ?? files.filter((file) => file.category === "photo" || file.mimeType.startsWith("image/")).length,
+    documents: fileStats?.totalDocuments ?? files.filter(isDocument).length,
+  };
+  const totalBytes = fileStats?.totalBytes ?? files.reduce((sum, file) => sum + file.fileSizeBytes, 0);
+  const recentUploads = fileStats?.recentUploads ?? files.filter((file) => {
     const created = new Date(file.createdAt).getTime();
     return Number.isFinite(created) && Date.now() - created <= 3 * 24 * 60 * 60 * 1000;
   }).length;
-  const totalCounts = {
-    all: files.length,
-    photos: files.filter((file) => file.category === "photo" || file.mimeType.startsWith("image/")).length,
-    documents: files.filter(isDocument).length,
-  };
 
   const uploadDeal = useMemo(() => deals.find((deal) => deal.id === uploadDealId) ?? null, [deals, uploadDealId]);
 
@@ -474,12 +500,18 @@ export function FilesPage() {
       try {
         await deleteFileRecord(fileId);
         refetch();
+        refetchFileStats();
       } catch (err: unknown) {
         alert(err instanceof Error ? err.message : "Delete failed");
       }
     },
-    [refetch]
+    [refetch, refetchFileStats]
   );
+
+  const handleUploadComplete = useCallback(() => {
+    refetch();
+    refetchFileStats();
+  }, [refetch, refetchFileStats]);
 
   const resetFilters = () => {
     setSearch("");
@@ -561,7 +593,7 @@ export function FilesPage() {
               </div>
             </div>
 
-            <FileUploadZone category={uploadCategory} dealId={uploadDealId || undefined} dealNumber={uploadDeal?.dealNumber} onUploadComplete={refetch} />
+            <FileUploadZone category={uploadCategory} dealId={uploadDealId || undefined} dealNumber={uploadDeal?.dealNumber} onUploadComplete={handleUploadComplete} />
           </CardContent>
         </Card>
       ) : null}
@@ -640,6 +672,7 @@ export function FilesPage() {
                 <button
                   type="button"
                   onClick={() => setView("grid")}
+                  aria-pressed={view === "grid"}
                   className={`flex h-7 w-7 items-center justify-center rounded-sm transition-colors ${view === "grid" ? "bg-slate-100 text-slate-950" : "text-slate-500 hover:text-slate-900"}`}
                   aria-label="Grid view"
                 >
@@ -648,6 +681,7 @@ export function FilesPage() {
                 <button
                   type="button"
                   onClick={() => setView("list")}
+                  aria-pressed={view === "list"}
                   className={`flex h-7 w-7 items-center justify-center rounded-sm transition-colors ${view === "list" ? "bg-slate-100 text-slate-950" : "text-slate-500 hover:text-slate-900"}`}
                   aria-label="List view"
                 >
@@ -665,8 +699,12 @@ export function FilesPage() {
                 active={typeFilter === filter.value}
                 onClick={() => {
                   setTypeFilter(filter.value);
+                  if (filter.value === "all") {
+                    setTab("all");
+                    return;
+                  }
                   if (filter.value === "photo") setTab("photos");
-                  if (filter.value !== "photo" && filter.value !== "all") setTab("documents");
+                  if (filter.value !== "photo") setTab("documents");
                 }}
                 dataAttribute={{ "data-type-filter": filter.value }}
               >
@@ -768,9 +806,16 @@ export function FilesPage() {
                 ["deal", "Deals"],
                 ["lead", "Leads"],
                 ["contact", "Contacts"],
+                ["procore", "Procore"],
+                ["change_order", "Change Orders"],
                 ["unassigned", "Unassigned"],
               ] as const).map(([value, label]) => (
-                <FilterChip key={value} active={linkedFilter === value} onClick={() => setLinkedFilter(value)}>
+                <FilterChip
+                  key={value}
+                  active={linkedFilter === value}
+                  onClick={() => setLinkedFilter(value)}
+                  dataAttribute={{ "data-linked-filter": value }}
+                >
                   {label}
                 </FilterChip>
               ))}
@@ -782,7 +827,9 @@ export function FilesPage() {
             <dl className="mt-4 space-y-3 text-sm">
               <div className="flex items-center justify-between gap-3">
                 <dt className="text-slate-500">Deals with files</dt>
-                <dd className="font-black tabular-nums text-slate-950">{new Set(files.map((file) => file.dealId).filter(Boolean)).size}</dd>
+                <dd className="font-black tabular-nums text-slate-950">
+                  {fileStats?.dealsWithFiles ?? new Set(files.map((file) => file.dealId).filter(Boolean)).size}
+                </dd>
               </div>
               <div className="flex items-center justify-between gap-3">
                 <dt className="text-slate-500">Contacts loaded</dt>

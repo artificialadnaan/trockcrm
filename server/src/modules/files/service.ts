@@ -1,4 +1,4 @@
-import { eq, and, desc, asc, ilike, sql, or, arrayContains, type SQL } from "drizzle-orm";
+import { eq, and, desc, asc, ilike, sql, or, arrayContains, isNull, isNotNull, type SQL } from "drizzle-orm";
 import type { NodePgDatabase } from "drizzle-orm/node-postgres";
 import { companies, deals, files, leads, pipelineStageConfig, users } from "@trock-crm/shared/schema";
 import type * as schema from "@trock-crm/shared/schema";
@@ -116,6 +116,8 @@ export interface FileFilters {
   procoreProjectId?: number;
   changeOrderId?: string;
   category?: FileCategory;
+  fileKind?: "photos" | "documents";
+  linkedType?: "deal" | "lead" | "contact" | "procore" | "change_order" | "unassigned";
   folderPath?: string;
   search?: string;
   tags?: string[];
@@ -123,6 +125,15 @@ export interface FileFilters {
   limit?: number;
   sortBy?: "display_name" | "created_at" | "file_size_bytes" | "taken_at";
   sortDir?: "asc" | "desc";
+}
+
+export interface FileStats {
+  totalFiles: number;
+  totalPhotos: number;
+  totalDocuments: number;
+  totalBytes: number;
+  recentUploads: number;
+  dealsWithFiles: number;
 }
 
 export interface UpdateFileInput {
@@ -228,6 +239,44 @@ async function buildDealFileScopeCondition(tenantDb: TenantDb, dealId: string): 
   }
 
   return or(eq(files.dealId, dealId), eq(files.leadId, sourceLeadId))!;
+}
+
+function activeLatestFileConditions(): SQL[] {
+  return [
+    eq(files.isActive, true),
+    sql`NOT EXISTS (SELECT 1 FROM files f2 WHERE f2.parent_file_id = files.id AND f2.is_active = true)`,
+  ];
+}
+
+function photoFileCondition(): SQL {
+  return sql`(${files.category} = 'photo' OR ${files.mimeType} ILIKE 'image/%')`;
+}
+
+function documentFileCondition(): SQL {
+  return sql`NOT (${photoFileCondition()})`;
+}
+
+function linkedFileCondition(linkedType: NonNullable<FileFilters["linkedType"]>): SQL {
+  switch (linkedType) {
+    case "deal":
+      return isNotNull(files.dealId);
+    case "lead":
+      return isNotNull(files.leadId);
+    case "contact":
+      return isNotNull(files.contactId);
+    case "procore":
+      return isNotNull(files.procoreProjectId);
+    case "change_order":
+      return isNotNull(files.changeOrderId);
+    case "unassigned":
+      return and(
+        isNull(files.dealId),
+        isNull(files.leadId),
+        isNull(files.contactId),
+        isNull(files.procoreProjectId),
+        isNull(files.changeOrderId)
+      )!;
+  }
 }
 
 /**
@@ -682,12 +731,7 @@ export async function getFiles(tenantDb: TenantDb, filters: FileFilters) {
   const limit = filters.limit ?? 50;
   const offset = (page - 1) * limit;
 
-  const conditions: SQL[] = [eq(files.isActive, true)];
-
-  // Fix 11: Only show latest versions — exclude files that have a newer version
-  conditions.push(
-    sql`NOT EXISTS (SELECT 1 FROM files f2 WHERE f2.parent_file_id = files.id AND f2.is_active = true)` as any
-  );
+  const conditions: SQL[] = activeLatestFileConditions();
 
   if (filters.dealId) conditions.push(await buildDealFileScopeCondition(tenantDb, filters.dealId));
   if (filters.leadId) conditions.push(eq(files.leadId, filters.leadId));
@@ -695,6 +739,9 @@ export async function getFiles(tenantDb: TenantDb, filters: FileFilters) {
   if (filters.procoreProjectId) conditions.push(eq(files.procoreProjectId, filters.procoreProjectId));
   if (filters.changeOrderId) conditions.push(eq(files.changeOrderId, filters.changeOrderId));
   if (filters.category) conditions.push(eq(files.category, filters.category));
+  if (filters.fileKind === "photos") conditions.push(photoFileCondition());
+  if (filters.fileKind === "documents") conditions.push(documentFileCondition());
+  if (filters.linkedType) conditions.push(linkedFileCondition(filters.linkedType));
 
   // Folder path filtering: exact match or prefix match for nested folders
   if (filters.folderPath) {
@@ -750,6 +797,32 @@ export async function getFiles(tenantDb: TenantDb, filters: FileFilters) {
   return {
     files: fileRows,
     pagination: { page, limit, total, totalPages: Math.ceil(total / limit) },
+  };
+}
+
+export async function getFileStats(tenantDb: TenantDb, _filters: Record<string, never> = {}): Promise<FileStats> {
+  const where = and(...activeLatestFileConditions());
+  const photoCondition = photoFileCondition();
+
+  const [row] = await tenantDb
+    .select({
+      totalFiles: sql<number>`count(*)`,
+      totalPhotos: sql<number>`count(*) FILTER (WHERE ${photoCondition})`,
+      totalDocuments: sql<number>`count(*) FILTER (WHERE NOT (${photoCondition}))`,
+      totalBytes: sql<number>`coalesce(sum(${files.fileSizeBytes}), 0)`,
+      recentUploads: sql<number>`count(*) FILTER (WHERE ${files.createdAt} >= now() - interval '3 days')`,
+      dealsWithFiles: sql<number>`count(DISTINCT ${files.dealId}) FILTER (WHERE ${files.dealId} IS NOT NULL)`,
+    })
+    .from(files)
+    .where(where);
+
+  return {
+    totalFiles: Number(row?.totalFiles ?? 0),
+    totalPhotos: Number(row?.totalPhotos ?? 0),
+    totalDocuments: Number(row?.totalDocuments ?? 0),
+    totalBytes: Number(row?.totalBytes ?? 0),
+    recentUploads: Number(row?.recentUploads ?? 0),
+    dealsWithFiles: Number(row?.dealsWithFiles ?? 0),
   };
 }
 

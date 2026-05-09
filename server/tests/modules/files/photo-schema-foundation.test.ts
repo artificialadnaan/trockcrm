@@ -78,6 +78,7 @@ describe("photo schema foundation", () => {
       "restored",
       "procore_synced",
       "procore_sync_failed",
+      "procore_sync_retry_requested",
     ]);
     expect(config.indexes.map((idx) => idx.config.name)).toEqual(
       expect.arrayContaining([
