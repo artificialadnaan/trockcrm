@@ -349,6 +349,8 @@ describe("commission reporting service", () => {
     expect(queryText).toContain("dsc.rep_user_id =");
     expect(queryText).toContain("d.assigned_rep_id =");
     expect(queryText).toContain("coalesce(cs.commission_rate, 0)");
+    expect(queryText).toContain("current_date - coalesce");
+    expect(queryText).not.toContain("extract(day from (current_date -");
     expect(queryText).not.toContain("estimated_margin_rate");
   });
 });
