@@ -101,3 +101,4 @@
 - HOTFIX-3 CLAIM 2026-05-08T19:15:18Z: hotfix/detail-page-bugs, four P2 company detail bugs from E4 post-merge Codex review. E5/property fixes remain in PR #180. Worktree: trockcrm-hotfix-detail-bugs.
 - HOTFIX-3 PR-OPEN 2026-05-08T19:19:21Z: PR https://github.com/artificialadnaan/trockcrm/pull/185.
 - HOTFIX-3 LIVE 2026-05-08T19:29:15Z: PR #185 merged to main at 5dfe10e; Railway API production deployment db35bb6c-7969-4c15-8966-43774aa7ac7f succeeded. Production company detail smoke passed for company 40833bf3-24a1-5c6d-9abc-17b50b9a9ea2.
+- G1 LIVE 2026-05-09T04:15:32Z: PR #194 merged to main at 43d492b; director dashboard polished to screenshot spec. Railway API production deployment 1a60d441-74c8-4e6c-8bee-802b06e4da2e succeeded. Authenticated production smoke skipped because /api/auth/dev/users returned no test users.
