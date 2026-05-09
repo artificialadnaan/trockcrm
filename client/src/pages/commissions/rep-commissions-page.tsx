@@ -159,6 +159,7 @@ function csvRows(deals: CommissionDeal[]) {
     company: deal.companyName ?? "",
     property: deal.propertyName ?? deal.propertyAddress ?? "",
     stage: STAGE_META[deal.stageKey].label,
+    status: deal.isEarned ? "Earned" : "Pipeline",
     dealValue: deal.dealValue.toFixed(2),
     rate: (deal.commissionRate * 100).toFixed(2),
     commission: deal.commission.toFixed(2),

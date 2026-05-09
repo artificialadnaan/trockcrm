@@ -21,8 +21,8 @@ describe("Sidebar navigation metadata", () => {
     expect(source).toContain('{ to: "/admin/merge-queue", icon: GitMerge, label: "Merge Queue", roles: ["admin", "director"] }');
   });
 
-  it("adds a commissions navigation item for all sales roles", () => {
-    expect(source).toContain('{ to: "/commissions", icon: DollarSign, label: "Commissions", roles: ["admin", "director", "rep"] }');
+  it("keeps the personal commissions navigation item rep-only", () => {
+    expect(source).toContain('{ to: "/commissions", icon: DollarSign, label: "Commissions", roles: ["rep"] }');
   });
 
   it("includes director team commissions and admin global commissions entries", () => {

@@ -268,9 +268,9 @@ export type DateRangePreset = "mtd" | "qtd" | "ytd" | "last_month" | "last_quart
 /** Convert a preset to from/to date strings */
 export function presetToDateRange(preset: DateRangePreset): { from: string; to: string } {
   const now = new Date();
-  const year = now.getFullYear();
-  const month = now.getMonth(); // 0-indexed
-  const today = now.toLocaleDateString("en-CA"); // YYYY-MM-DD
+  const year = now.getUTCFullYear();
+  const month = now.getUTCMonth(); // 0-indexed
+  const today = now.toISOString().slice(0, 10);
 
   switch (preset) {
     case "mtd":
@@ -284,7 +284,7 @@ export function presetToDateRange(preset: DateRangePreset): { from: string; to: 
     case "last_month": {
       const lm = month === 0 ? 11 : month - 1;
       const lmYear = month === 0 ? year - 1 : year;
-      const lastDay = new Date(lmYear, lm + 1, 0).getDate();
+      const lastDay = new Date(Date.UTC(lmYear, lm + 1, 0)).getUTCDate();
       return {
         from: `${lmYear}-${String(lm + 1).padStart(2, "0")}-01`,
         to: `${lmYear}-${String(lm + 1).padStart(2, "0")}-${lastDay}`,
@@ -296,7 +296,7 @@ export function presetToDateRange(preset: DateRangePreset): { from: string; to: 
       const lqYear = cq === 0 ? year - 1 : year;
       const lqStart = lq * 3;
       const lqEndMonth = lqStart + 2;
-      const lqLastDay = new Date(lqYear, lqEndMonth + 1, 0).getDate();
+      const lqLastDay = new Date(Date.UTC(lqYear, lqEndMonth + 1, 0)).getUTCDate();
       return {
         from: `${lqYear}-${String(lqStart + 1).padStart(2, "0")}-01`,
         to: `${lqYear}-${String(lqEndMonth + 1).padStart(2, "0")}-${lqLastDay}`,
