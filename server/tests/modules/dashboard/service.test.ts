@@ -407,6 +407,83 @@ describe("Dashboard Service", () => {
       expect(overrideQuery).toContain("sum(dsc.amount *");
       expect(overrideQuery).not.toContain("sum(dsc.source_value_amount *");
     });
+
+    it("uses the selected rep-performance period for director forecast data", async () => {
+      const { getDirectorDashboard } = await import("../../../src/modules/dashboard/service.js");
+      const tenantDb = createMockTenantDb([
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [{ dd_value: "0", dd_count: "0", pipeline_value: "0", pipeline_count: "0", total_value: "0", total_count: "0" }],
+      ]);
+
+      await getDirectorDashboard(tenantDb, {
+        from: "2026-01-01",
+        to: "2026-03-31",
+        officeId: "office-1",
+        periodKind: "last_quarter",
+      });
+
+      const snapshotQuery = tenantDb.execute.mock.calls
+        .map(([query]: [unknown]) => extractSqlText(query).toLowerCase())
+        .find((text: string) => text.includes("from public.rep_performance_snapshots"));
+
+      expect(snapshotQuery).toContain("where rps.period_kind = ");
+      expect(snapshotQuery).toContain("last_quarter");
+      expect(snapshotQuery).not.toContain("where rps.period_kind = mtd");
+    });
+
+    it("includes rep attribution in downstream at-risk deals", async () => {
+      const { getDirectorDashboard } = await import("../../../src/modules/dashboard/service.js");
+      const tenantDb = {
+        execute: vi.fn().mockImplementation((query: unknown) => {
+          const text = extractSqlText(query).toLowerCase();
+
+          if (text.includes("downstream") || text.includes("mirrored_stage_status")) {
+            return Promise.resolve({
+              rows: [{
+                deal_id: "deal-1",
+                rep_id: "rep-1",
+                rep_name: "Avery Rep",
+                deal_name: "Blocked Deal",
+                stage_name: "Contract",
+                mirrored_stage_slug: "contract",
+                mirrored_stage_status: "blocked",
+                workflow_route: "service",
+                region_classification: "Dallas, TX",
+                deal_value: "1000",
+                days_in_stage: "22",
+                stale_threshold_days: "14",
+              }],
+            });
+          }
+
+          if (text.includes("dd_value") && text.includes("pipeline_value")) {
+            return Promise.resolve({
+              rows: [{ dd_value: "0", dd_count: "0", pipeline_value: "0", pipeline_count: "0", total_value: "0", total_count: "0" }],
+            });
+          }
+
+          return Promise.resolve({ rows: [] });
+        }),
+      } as any;
+
+      const result = await getDirectorDashboard(tenantDb, {
+        from: "2026-01-01",
+        to: "2026-03-31",
+        officeId: "office-1",
+        periodKind: "qtd",
+      });
+
+      expect(result.atRiskDeals[0]).toMatchObject({
+        dealId: "deal-1",
+        repId: "rep-1",
+        repName: "Avery Rep",
+      });
+    });
   });
 
   describe("getRepDetail", () => {

@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback } from "react";
 import { api } from "@/lib/api";
 import type { FunnelBucketSummary } from "./use-dashboard";
-import type { ForecastVsGoal } from "./use-rep-performance";
+import type { ForecastVsGoal, RepPerformancePeriodKind } from "./use-rep-performance";
 
 export interface RepPerformanceCard {
   repId: string;
@@ -96,6 +96,8 @@ export interface DirectorDashboardData {
   }>;
   atRiskDeals?: Array<{
     dealId: string;
+    repId: string | null;
+    repName: string;
     dealName: string;
     stageName: string;
     mirroredStageStatus: string | null;
@@ -307,10 +309,11 @@ export function presetToDateRange(preset: DateRangePreset): { from: string; to: 
   }
 }
 
-export function useDirectorDashboard(dateRange?: { from: string; to: string }) {
+export function useDirectorDashboard(dateRange?: { from: string; to: string }, periodKind?: RepPerformancePeriodKind) {
   const [data, setData] = useState<DirectorDashboardData | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [lastFetchedAt, setLastFetchedAt] = useState<string | null>(null);
 
   const fetchData = useCallback(async () => {
     setLoading(true);
@@ -319,23 +322,25 @@ export function useDirectorDashboard(dateRange?: { from: string; to: string }) {
       const params = new URLSearchParams();
       if (dateRange?.from) params.set("from", dateRange.from);
       if (dateRange?.to) params.set("to", dateRange.to);
+      if (periodKind) params.set("periodKind", periodKind);
       const qs = params.toString();
       const res = await api<{ data: DirectorDashboardData }>(
         `/dashboard/director${qs ? `?${qs}` : ""}`
       );
       setData(res.data);
+      setLastFetchedAt(new Date().toISOString());
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : "Failed to load director dashboard");
     } finally {
       setLoading(false);
     }
-  }, [dateRange?.from, dateRange?.to]);
+  }, [dateRange?.from, dateRange?.to, periodKind]);
 
   useEffect(() => {
     fetchData();
   }, [fetchData]);
 
-  return { data, loading, error, refetch: fetchData };
+  return { data, loading, error, refetch: fetchData, lastFetchedAt };
 }
 
 export function useDirectorCommissionWorkspace(dateRange?: { from: string; to: string }) {
