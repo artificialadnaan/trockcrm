@@ -165,4 +165,39 @@ describe("dashboard routes", () => {
       percentToGoal: null,
     });
   });
+
+  it("passes director dashboard periodKind through to the service", async () => {
+    const getDirectorDashboardMock = (await import("../../../src/modules/dashboard/service.js")).getDirectorDashboard as any;
+    getDirectorDashboardMock.mockResolvedValue({
+      officeFunnelBuckets: [],
+      repFunnelRows: [],
+      repCommissionRows: [],
+      repCards: [],
+      pipelineByStage: [],
+      winRateTrend: [],
+      activityByRep: [],
+      staleDeals: [],
+      staleLeads: [],
+      crmOwnedProgression: [],
+      downstreamBottlenecks: [],
+      atRiskDeals: [],
+      forecastVsGoal: { forecast: 0, goal: null, goalSource: "none", percentToGoal: null },
+      activityPulse: [],
+      strategicAlerts: [],
+      aiCoachingPrompts: [],
+      recentCloses: [],
+      ddVsPipeline: { ddValue: 0, ddCount: 0, pipelineValue: 0, pipelineCount: 0, totalValue: 0, totalCount: 0 },
+    });
+
+    const response = await request(buildDirectorApp())
+      .get("/api/dashboard/director?periodKind=last_quarter&from=2026-01-01&to=2026-03-31");
+
+    expect(response.status).toBe(200);
+    expect(getDirectorDashboardMock).toHaveBeenCalledWith(expect.anything(), {
+      from: "2026-01-01",
+      to: "2026-03-31",
+      officeId: "office-1",
+      periodKind: "last_quarter",
+    });
+  });
 });

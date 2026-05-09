@@ -334,7 +334,7 @@ export async function getRepCommissionDashboard(
         dsc.amount::numeric AS commission,
         COALESCE(d.contract_signed_at::date, d.contract_signed_date, dsc.contract_signed_date_at_signing) AS contract_signed_date,
         d.expected_close_date,
-        GREATEST(0, EXTRACT(DAY FROM (CURRENT_DATE - COALESCE(d.stage_entered_at::date, d.updated_at::date, d.created_at::date))))::int AS days_in_stage,
+        GREATEST(0, CURRENT_DATE - COALESCE(d.stage_entered_at::date, d.updated_at::date, d.created_at::date))::int AS days_in_stage,
         true AS is_earned,
         cds.last_commission_amount AS snapshot_commission_amount
       FROM ${dealSignedCommissions} dsc
@@ -369,7 +369,7 @@ export async function getRepCommissionDashboard(
         )::numeric AS commission,
         NULL::date AS contract_signed_date,
         d.expected_close_date,
-        GREATEST(0, EXTRACT(DAY FROM (CURRENT_DATE - COALESCE(d.stage_entered_at::date, d.updated_at::date, d.created_at::date))))::int AS days_in_stage,
+        GREATEST(0, CURRENT_DATE - COALESCE(d.stage_entered_at::date, d.updated_at::date, d.created_at::date))::int AS days_in_stage,
         false AS is_earned,
         cds.last_commission_amount AS snapshot_commission_amount
       FROM ${deals} d

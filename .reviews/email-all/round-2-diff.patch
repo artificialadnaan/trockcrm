@@ -1,0 +1,1274 @@
+diff --git a/client/src/components/email/email-compose-dialog.tsx b/client/src/components/email/email-compose-dialog.tsx
+index ee8da53..a3c58fd 100644
+--- a/client/src/components/email/email-compose-dialog.tsx
++++ b/client/src/components/email/email-compose-dialog.tsx
+@@ -16,6 +16,8 @@ interface EmailComposeDialogProps {
+   onOpenChange: (open: boolean) => void;
+   onSent?: () => void;
+   defaultTo?: string;
++  defaultSubject?: string;
++  defaultBody?: string;
+   dealId?: string;
+   contactId?: string;
+ }
+@@ -25,6 +27,8 @@ export function EmailComposeDialog({
+   onOpenChange,
+   onSent,
+   defaultTo,
++  defaultSubject,
++  defaultBody,
+   dealId,
+   contactId,
+ }: EmailComposeDialogProps) {
+@@ -39,10 +43,10 @@ export function EmailComposeDialog({
+     if (!open) return;
+     setTo(defaultTo ?? "");
+     setCc("");
+-    setSubject("");
+-    setBody("");
++    setSubject(defaultSubject ?? "");
++    setBody(defaultBody ?? "");
+     setError(null);
+-  }, [defaultTo, open]);
++  }, [defaultBody, defaultSubject, defaultTo, open]);
+ 
+   const handleSend = async () => {
+     if (!to.trim()) {
+diff --git a/client/src/components/email/graph-auth-banner.tsx b/client/src/components/email/graph-auth-banner.tsx
+index 65da73e..aaf2fe0 100644
+--- a/client/src/components/email/graph-auth-banner.tsx
++++ b/client/src/components/email/graph-auth-banner.tsx
+@@ -1,10 +1,19 @@
+ import { Mail, AlertTriangle, CheckCircle, ExternalLink } from "lucide-react";
+ import { Button } from "@/components/ui/button";
+-import { useGraphAuth } from "@/hooks/use-graph-auth";
++import { useGraphAuth, type GraphAuthState } from "@/hooks/use-graph-auth";
+ 
+-export function GraphAuthBanner() {
+-  const { connected, status, errorMessage, loading, startConsent } =
+-    useGraphAuth();
++export function GraphAuthBanner({ auth }: { auth?: GraphAuthState }) {
++  if (auth) return <GraphAuthBannerContent auth={auth} />;
++  return <GraphAuthBannerWithHook />;
++}
++
++function GraphAuthBannerWithHook() {
++  const auth = useGraphAuth();
++  return <GraphAuthBannerContent auth={auth} />;
++}
++
++function GraphAuthBannerContent({ auth }: { auth: GraphAuthState }) {
++  const { connected, status, errorMessage, loading, startConsent } = auth;
+ 
+   if (loading) return null;
+ 
+diff --git a/client/src/hooks/use-emails.ts b/client/src/hooks/use-emails.ts
+index ecdc8fb..1eff29d 100644
+--- a/client/src/hooks/use-emails.ts
++++ b/client/src/hooks/use-emails.ts
+@@ -13,8 +13,14 @@ export interface Email {
+   bodyPreview: string | null;
+   bodyHtml: string | null;
+   hasAttachments: boolean;
++  isStarred?: boolean;
++  archivedAt?: string | null;
++  deletedAt?: string | null;
+   contactId: string | null;
+   dealId: string | null;
++  assignedEntityType?: EmailAssociationTarget["assignedEntityType"] | null;
++  assignedEntityId?: string | null;
++  assignmentAmbiguityReason?: string | null;
+   userId: string;
+   sentAt: string;
+   syncedAt: string;
+@@ -59,11 +65,21 @@ export interface EmailAssociationTarget {
+ 
+ export interface EmailFilters {
+   direction?: "inbound" | "outbound";
++  filter?: "all" | "unread" | "unassigned" | "sent";
+   search?: string;
+   page?: number;
+   limit?: number;
+ }
+ 
++export interface EmailCounts {
++  all: number;
++  unread: number;
++  unassigned: number;
++  sent: number;
++  linked: number;
++  today: number;
++}
++
+ export interface Pagination {
+   page: number;
+   limit: number;
+@@ -79,6 +95,14 @@ export function useUserEmails(filters: EmailFilters = {}) {
+     total: 0,
+     totalPages: 0,
+   });
++  const [counts, setCounts] = useState<EmailCounts>({
++    all: 0,
++    unread: 0,
++    unassigned: 0,
++    sent: 0,
++    linked: 0,
++    today: 0,
++  });
+   const [loading, setLoading] = useState(true);
+   const [error, setError] = useState<string | null>(null);
+ 
+@@ -88,28 +112,37 @@ export function useUserEmails(filters: EmailFilters = {}) {
+     try {
+       const params = new URLSearchParams();
+       if (filters.direction) params.set("direction", filters.direction);
++      if (filters.filter) params.set("filter", filters.filter);
+       if (filters.search) params.set("search", filters.search);
+       if (filters.page) params.set("page", String(filters.page));
+       if (filters.limit) params.set("limit", String(filters.limit));
+ 
+       const qs = params.toString();
+-      const data = await api<{ emails: Email[]; pagination: Pagination }>(
++      const data = await api<{ emails: Email[]; pagination: Pagination; counts?: EmailCounts }>(
+         `/email${qs ? `?${qs}` : ""}`
+       );
+       setEmails(data.emails);
+       setPagination(data.pagination);
++      setCounts(data.counts ?? {
++        all: data.pagination.total,
++        unread: 0,
++        unassigned: 0,
++        sent: 0,
++        linked: 0,
++        today: 0,
++      });
+     } catch (err: unknown) {
+       setError(err instanceof Error ? err.message : "Failed to load emails");
+     } finally {
+       setLoading(false);
+     }
+-  }, [filters.direction, filters.search, filters.page, filters.limit]);
++  }, [filters.direction, filters.filter, filters.search, filters.page, filters.limit]);
+ 
+   useEffect(() => {
+     fetchEmails();
+   }, [fetchEmails]);
+ 
+-  return { emails, pagination, loading, error, refetch: fetchEmails };
++  return { emails, pagination, counts, loading, error, refetch: fetchEmails };
+ }
+ 
+ export function useDealEmails(dealId: string | undefined, filters: EmailFilters = {}) {
+@@ -264,6 +297,16 @@ export async function associateEmailToEntity(emailId: string, target: EmailAssoc
+   });
+ }
+ 
++export async function updateEmailAction(
++  emailId: string,
++  input: { isStarred?: boolean; archived?: boolean; deleted?: boolean }
++) {
++  return api<{ email: Email }>(`/email/${emailId}/actions`, {
++    method: "PATCH",
++    json: input,
++  });
++}
++
+ export async function assignEmailThread(conversationId: string, dealId: string) {
+   return api<{ success: boolean; bindingId: string; thread: EmailThread }>(
+     `/email/thread/${encodeURIComponent(conversationId)}/assign`,
+diff --git a/client/src/hooks/use-graph-auth.ts b/client/src/hooks/use-graph-auth.ts
+index 52c9f38..25f0042 100644
+--- a/client/src/hooks/use-graph-auth.ts
++++ b/client/src/hooks/use-graph-auth.ts
+@@ -7,7 +7,14 @@ interface GraphAuthStatus {
+   errorMessage: string | null;
+ }
+ 
+-export function useGraphAuth() {
++export type GraphAuthState = GraphAuthStatus & {
++  loading: boolean;
++  startConsent: () => Promise<void>;
++  disconnect: () => Promise<void>;
++  refetch: () => Promise<void>;
++};
++
++export function useGraphAuth(): GraphAuthState {
+   const [authStatus, setAuthStatus] = useState<GraphAuthStatus>({
+     connected: false,
+     status: null,
+diff --git a/client/src/pages/email/email-inbox-page.test.tsx b/client/src/pages/email/email-inbox-page.test.tsx
+index 31ae03b..c3ecb97 100644
+--- a/client/src/pages/email/email-inbox-page.test.tsx
++++ b/client/src/pages/email/email-inbox-page.test.tsx
+@@ -12,10 +12,19 @@ import type { Email, EmailFilters, Pagination } from "@/hooks/use-emails";
+ const mocks = vi.hoisted(() => ({
+   useUserEmailsMock: vi.fn(),
+   useGraphAuthMock: vi.fn(),
++  updateEmailActionMock: vi.fn(),
++  associateEmailToEntityMock: vi.fn(),
++  assignTarget: {
++    assignedEntityType: "deal",
++    assignedEntityId: "deal-2",
++    assignedDealId: "deal-2",
++  },
+ }));
+ 
+ vi.mock("@/hooks/use-emails", () => ({
+   useUserEmails: mocks.useUserEmailsMock,
++  updateEmailAction: mocks.updateEmailActionMock,
++  associateEmailToEntity: mocks.associateEmailToEntityMock,
+ }));
+ 
+ vi.mock("@/hooks/use-graph-auth", () => ({
+@@ -23,7 +32,9 @@ vi.mock("@/hooks/use-graph-auth", () => ({
+ }));
+ 
+ vi.mock("@/components/email/graph-auth-banner", () => ({
+-  GraphAuthBanner: () => <div data-testid="graph-auth-banner" />,
++  GraphAuthBanner: ({ auth }: { auth?: { connected: boolean } }) => (
++    <div data-testid="graph-auth-banner" data-connected={String(auth?.connected)} />
++  ),
+ }));
+ 
+ vi.mock("@/components/email/email-assignment-queue", () => ({
+@@ -60,12 +71,42 @@ vi.mock("@/components/email/email-compose-dialog", () => ({
+   EmailComposeDialog: ({
+     open,
+     defaultTo,
++    defaultSubject,
++    defaultBody,
+   }: {
+     open: boolean;
+     onOpenChange: (open: boolean) => void;
+     onSent?: () => void;
+     defaultTo?: string;
+-  }) => (open ? <div role="dialog">Compose open to: {defaultTo ?? "new message"}</div> : null),
++    defaultSubject?: string;
++    defaultBody?: string;
++  }) => (
++    open ? (
++      <div role="dialog">
++        Compose open to: {defaultTo ?? "new message"}
++        {defaultSubject ? <p>Subject: {defaultSubject}</p> : null}
++        {defaultBody ? <p>Body: {defaultBody}</p> : null}
++      </div>
++    ) : null
++  ),
++}));
++
++vi.mock("@/components/email/email-manual-assignment-dialog", () => ({
++  EmailManualAssignmentDialog: ({
++    open,
++    onAssign,
++  }: {
++    open: boolean;
++    onAssign: (target: typeof mocks.assignTarget) => Promise<void>;
++  }) =>
++    open ? (
++      <div role="dialog">
++        Manual assignment
++        <button type="button" onClick={() => void onAssign(mocks.assignTarget)}>
++          Assign to Dallas ISD
++        </button>
++      </div>
++    ) : null,
+ }));
+ 
+ const pagination: Pagination = {
+@@ -88,8 +129,14 @@ const fixtureEmails: Email[] = [
+     bodyPreview: "Need bid pricing locked by May 28.",
+     bodyHtml: "<p>Confirmed the phasing window and bid pricing deadline.</p>",
+     hasAttachments: true,
++    isStarred: false,
++    archivedAt: null,
++    deletedAt: null,
+     contactId: "contact-1",
+     dealId: "deal-1",
++    assignedEntityType: "deal",
++    assignedEntityId: "deal-1",
++    assignmentAmbiguityReason: null,
+     userId: "user-1",
+     sentAt: new Date().toISOString(),
+     syncedAt: new Date().toISOString(),
+@@ -106,8 +153,14 @@ const fixtureEmails: Email[] = [
+     bodyPreview: "Will the timeline you sent last week still hold?",
+     bodyHtml: "<p>Our board meets next Tuesday and I want to bring your bid.</p>",
+     hasAttachments: false,
++    isStarred: false,
++    archivedAt: null,
++    deletedAt: null,
+     contactId: null,
+     dealId: null,
++    assignedEntityType: null,
++    assignedEntityId: null,
++    assignmentAmbiguityReason: null,
+     userId: "user-1",
+     sentAt: new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString(),
+     syncedAt: new Date().toISOString(),
+@@ -124,8 +177,14 @@ const fixtureEmails: Email[] = [
+     bodyPreview: "Attached the revised SOV with drain line items.",
+     bodyHtml: "<p>Attached the revised SOV.</p>",
+     hasAttachments: false,
++    isStarred: false,
++    archivedAt: null,
++    deletedAt: null,
+     contactId: "contact-1",
+     dealId: "deal-1",
++    assignedEntityType: "deal",
++    assignedEntityId: "deal-1",
++    assignmentAmbiguityReason: null,
+     userId: "user-1",
+     sentAt: new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString(),
+     syncedAt: new Date().toISOString(),
+@@ -135,6 +194,13 @@ const fixtureEmails: Email[] = [
+ function emailsForFilters(filters: EmailFilters = {}) {
+   return fixtureEmails.filter((email) => {
+     if (filters.direction && email.direction !== filters.direction) return false;
++    if (filters.filter === "sent" && email.direction !== "outbound") return false;
++    if (
++      (filters.filter === "unread" || filters.filter === "unassigned") &&
++      (email.direction !== "inbound" || email.assignedEntityId || email.dealId || email.contactId)
++    ) {
++      return false;
++    }
+     if (filters.search) {
+       const q = filters.search.toLowerCase();
+       return [email.subject, email.bodyPreview, email.fromAddress]
+@@ -145,6 +211,15 @@ function emailsForFilters(filters: EmailFilters = {}) {
+   });
+ }
+ 
++const backendCounts = {
++  all: 37,
++  unread: 11,
++  unassigned: 9,
++  sent: 14,
++  linked: 28,
++  today: 6,
++};
++
+ function mountPage(path = "/email") {
+   const container = document.createElement("div");
+   document.body.appendChild(container);
+@@ -184,8 +259,30 @@ function clickByText(container: HTMLElement, text: string) {
+   });
+ }
+ 
++async function clickByTextAsync(container: HTMLElement, text: string) {
++  const target = Array.from(container.querySelectorAll("button")).find((button) =>
++    button.textContent?.includes(text)
++  );
++  expect(target, `button containing ${text}`).toBeTruthy();
++  await act(async () => {
++    target!.dispatchEvent(new MouseEvent("click", { bubbles: true }));
++    await Promise.resolve();
++  });
++}
++
++async function clickByLabelAsync(container: HTMLElement, label: string) {
++  const target = container.querySelector(`button[aria-label="${label}"]`) as HTMLButtonElement | null;
++  expect(target, `button aria-label ${label}`).toBeTruthy();
++  await act(async () => {
++    target!.dispatchEvent(new MouseEvent("click", { bubbles: true }));
++    await Promise.resolve();
++  });
++}
++
+ describe("EmailInboxPage", () => {
+   beforeEach(() => {
++    vi.clearAllMocks();
++    vi.spyOn(window, "confirm").mockReturnValue(true);
+     mocks.useGraphAuthMock.mockReturnValue({
+       connected: false,
+       status: "not_connected",
+@@ -196,10 +293,13 @@ describe("EmailInboxPage", () => {
+     mocks.useUserEmailsMock.mockImplementation((filters: EmailFilters = {}) => ({
+       emails: emailsForFilters(filters),
+       pagination,
++      counts: backendCounts,
+       loading: false,
+       error: null,
+       refetch: vi.fn(),
+     }));
++    mocks.updateEmailActionMock.mockResolvedValue({ email: fixtureEmails[0] });
++    mocks.associateEmailToEntityMock.mockResolvedValue({ success: true });
+   });
+ 
+   it("renders inbox with thread list and reader pane", () => {
+@@ -231,7 +331,7 @@ describe("EmailInboxPage", () => {
+ 
+     expect(page.container.textContent).toContain("Updated SOV - Dallas ISD Bldg A");
+     expect(mocks.useUserEmailsMock).toHaveBeenLastCalledWith({
+-      direction: "outbound",
++      filter: "sent",
+       search: undefined,
+       page: 1,
+       limit: 25,
+@@ -292,6 +392,101 @@ describe("EmailInboxPage", () => {
+     page.unmount();
+   });
+ 
++  it("passes the page Graph auth state into the banner", () => {
++    const page = mountPage();
++
++    expect(mocks.useGraphAuthMock).toHaveBeenCalled();
++    expect(page.container.querySelector('[data-testid="graph-auth-banner"]')?.getAttribute("data-connected")).toBe("false");
++
++    page.unmount();
++  });
++
++  it("passes active filters to useUserEmails instead of filtering a paginated page slice", () => {
++    const page = mountPage();
++
++    clickByText(page.container, "Unassigned");
++
++    expect(mocks.useUserEmailsMock).toHaveBeenLastCalledWith({
++      filter: "unassigned",
++      search: undefined,
++      page: 1,
++      limit: 25,
++    });
++    expect(page.container.textContent).toContain("Frisco DC re-roof checking timing");
++    expect(page.container.textContent).not.toContain("Building A roof phase 2 timeline");
++
++    page.unmount();
++  });
++
++  it("uses backend inbox counts rather than the current page slice", () => {
++    const page = mountPage();
++
++    expect(page.container.textContent).toContain("Inbox · 11 unread · 9 need attention");
++    expect(page.container.textContent).toContain("37");
++    expect(page.container.textContent).toContain("14");
++    expect(page.container.textContent).toContain("6");
++
++    page.unmount();
++  });
++
++  it("shows manual reassignment for standalone emails without conversation IDs", async () => {
++    const page = mountPage();
++
++    clickByText(page.container, "Frisco DC re-roof checking timing");
++    await clickByTextAsync(page.container, "Reassign email");
++    await clickByTextAsync(page.container, "Assign to Dallas ISD");
++
++    expect(mocks.associateEmailToEntityMock).toHaveBeenCalledWith("email-2", mocks.assignTarget);
++
++    page.unmount();
++  });
++
++  it("keeps thread tools for emails with conversation IDs", () => {
++    const page = mountPage();
++
++    expect(page.container.textContent).toContain("Thread tools");
++    expect(page.container.textContent).not.toContain("Reassign email");
++
++    page.unmount();
++  });
++
++  it("forward opens compose with forwarded subject and quoted body", () => {
++    const page = mountPage();
++
++    clickByText(page.container, "Forward");
++
++    expect(page.container.textContent).toContain("Subject: Fwd: Building A roof phase 2 timeline");
++    expect(page.container.textContent).toContain("Forwarded message");
++    expect(page.container.textContent).toContain("Confirmed the phasing window");
++
++    page.unmount();
++  });
++
++  it("wires reader star archive and delete actions", async () => {
++    const page = mountPage();
++
++    await clickByLabelAsync(page.container, "Star");
++    await clickByLabelAsync(page.container, "Archive");
++    await clickByLabelAsync(page.container, "Delete");
++
++    expect(mocks.updateEmailActionMock).toHaveBeenNthCalledWith(1, "email-1", { isStarred: true });
++    expect(mocks.updateEmailActionMock).toHaveBeenNthCalledWith(2, "email-1", { archived: true });
++    expect(mocks.updateEmailActionMock).toHaveBeenNthCalledWith(3, "email-1", { deleted: true });
++
++    page.unmount();
++  });
++
++  it("selects the reader email from the visible filtered list", () => {
++    const page = mountPage();
++
++    clickByText(page.container, "Sent");
++
++    expect(page.container.textContent).toContain("Attached the revised SOV.");
++    expect(page.container.textContent).not.toContain("Confirmed the phasing window and bid pricing deadline.");
++
++    page.unmount();
++  });
++
+   it("renders Parking Lot Intake as a tab in the inbox tab row", () => {
+     const page = mountPage();
+     const tabLabels = Array.from(page.container.querySelectorAll("[data-email-filter-tabs] button")).map((button) =>
+diff --git a/client/src/pages/email/email-inbox-page.tsx b/client/src/pages/email/email-inbox-page.tsx
+index 160739c..bc5bb0d 100644
+--- a/client/src/pages/email/email-inbox-page.tsx
++++ b/client/src/pages/email/email-inbox-page.tsx
+@@ -1,6 +1,7 @@
+ import { useEffect, useMemo, useState } from "react";
+ import { useSearchParams } from "react-router-dom";
+ import DOMPurify from "dompurify";
++import { toast } from "sonner";
+ import {
+   AlertTriangle,
+   Archive,
+@@ -24,9 +25,15 @@ import { Card } from "@/components/ui/card";
+ import { GraphAuthBanner } from "@/components/email/graph-auth-banner";
+ import { EmailAssignmentQueuePanel, useEmailAssignmentQueue } from "@/components/email/email-assignment-queue";
+ import { EmailComposeDialog } from "@/components/email/email-compose-dialog";
++import { EmailManualAssignmentDialog } from "@/components/email/email-manual-assignment-dialog";
+ import { EmailThreadView } from "@/components/email/email-thread-view";
+ import { useGraphAuth } from "@/hooks/use-graph-auth";
+-import { useUserEmails, type Email } from "@/hooks/use-emails";
++import {
++  associateEmailToEntity,
++  updateEmailAction,
++  useUserEmails,
++  type Email,
++} from "@/hooks/use-emails";
+ import { cn } from "@/lib/utils";
+ 
+ type EmailFilter = "all" | "unread" | "unassigned" | "sent" | "parking-lot";
+@@ -78,23 +85,39 @@ function getRelativeDate(value: string) {
+ }
+ 
+ function isLinked(email: Email) {
+-  return Boolean(email.dealId || email.contactId);
++  return Boolean(email.assignedEntityId || email.dealId || email.contactId);
+ }
+ 
+ function needsAttention(email: Email) {
+   return email.direction === "inbound" && !isLinked(email);
+ }
+ 
+-function matchesFilter(email: Email, filter: EmailFilter) {
+-  if (filter === "parking-lot") return false;
+-  if (filter === "sent") return email.direction === "outbound";
+-  if (filter === "unassigned") return needsAttention(email);
+-  if (filter === "unread") return needsAttention(email);
+-  return true;
++function buildForwardSubject(subject: string | null) {
++  const trimmed = subject?.trim() || "(No Subject)";
++  return /^fwd?:/i.test(trimmed) ? trimmed : `Fwd: ${trimmed}`;
++}
++
++function htmlToPlainText(html: string | null | undefined) {
++  if (!html) return "";
++  const container = document.createElement("div");
++  container.innerHTML = DOMPurify.sanitize(html);
++  return container.textContent?.trim() ?? "";
+ }
+ 
+-function countForFilter(emails: Email[], filter: EmailFilter) {
+-  return emails.filter((email) => matchesFilter(email, filter)).length;
++function buildForwardBody(email: Email) {
++  const originalBody = htmlToPlainText(email.bodyHtml) || email.bodyPreview || "";
++  const recipients = email.toAddresses.join(", ") || "recipient";
++  return [
++    "",
++    "",
++    "---------- Forwarded message ---------",
++    `From: ${email.fromAddress}`,
++    `Date: ${new Date(email.sentAt).toLocaleString()}`,
++    `Subject: ${email.subject ?? "(No Subject)"}`,
++    `To: ${recipients}`,
++    "",
++    originalBody,
++  ].join("\n");
+ }
+ 
+ function EmailMetricCard({
+@@ -245,14 +268,22 @@ function ThreadListItem({
+ function EmailReaderPane({
+   email,
+   onReply,
++  onForward,
++  onRefresh,
+ }: {
+   email: Email | null;
+   onReply: (email: Email) => void;
++  onForward: (email: Email) => void;
++  onRefresh: () => void;
+ }) {
+   const [showThreadTools, setShowThreadTools] = useState(false);
++  const [manualDialogOpen, setManualDialogOpen] = useState(false);
++  const [actionPending, setActionPending] = useState<"star" | "archive" | "delete" | null>(null);
+ 
+   useEffect(() => {
+     setShowThreadTools(false);
++    setManualDialogOpen(false);
++    setActionPending(null);
+   }, [email?.id]);
+ 
+   if (!email) {
+@@ -266,9 +297,33 @@ function EmailReaderPane({
+     );
+   }
+ 
++  const currentEmail = email;
+   const fromMe = email.direction === "outbound";
+   const recipientLine = fromMe ? `to ${email.toAddresses.join(", ") || "recipient"}` : `from ${email.fromAddress}`;
+ 
++  async function handleReaderAction(action: "star" | "archive" | "delete") {
++    if (action === "delete" && !window.confirm("Delete this email from your inbox?")) return;
++
++    setActionPending(action);
++    try {
++      if (action === "star") {
++        await updateEmailAction(currentEmail.id, { isStarred: !currentEmail.isStarred });
++        toast.success(currentEmail.isStarred ? "Email unstarred" : "Email starred");
++      } else if (action === "archive") {
++        await updateEmailAction(currentEmail.id, { archived: true });
++        toast.success("Email archived");
++      } else {
++        await updateEmailAction(currentEmail.id, { deleted: true });
++        toast.success("Email deleted");
++      }
++      onRefresh();
++    } catch (error: unknown) {
++      toast.error(error instanceof Error ? error.message : "Email action failed");
++    } finally {
++      setActionPending(null);
++    }
++  }
++
+   return (
+     <div className="flex h-full min-h-[640px] flex-col">
+       <div className="border-b border-slate-100 px-6 py-4">
+@@ -297,13 +352,35 @@ function EmailReaderPane({
+             </div>
+           </div>
+           <div className="flex shrink-0 items-center gap-1">
+-            <button type="button" className="flex h-8 w-8 items-center justify-center rounded-md text-slate-500 hover:bg-slate-100 hover:text-slate-900" aria-label="Star">
+-              <Star className="h-4 w-4" />
++            <button
++              type="button"
++              disabled={actionPending === "star"}
++              onClick={() => void handleReaderAction("star")}
++              className={cn(
++                "flex h-8 w-8 items-center justify-center rounded-md text-slate-500 hover:bg-slate-100 hover:text-slate-900 disabled:opacity-50",
++                email.isStarred ? "text-amber-500" : null
++              )}
++              aria-label={email.isStarred ? "Unstar" : "Star"}
++              aria-pressed={email.isStarred}
++            >
++              <Star className={cn("h-4 w-4", email.isStarred ? "fill-current" : null)} />
+             </button>
+-            <button type="button" className="flex h-8 w-8 items-center justify-center rounded-md text-slate-500 hover:bg-slate-100 hover:text-slate-900" aria-label="Archive">
++            <button
++              type="button"
++              disabled={actionPending === "archive"}
++              onClick={() => void handleReaderAction("archive")}
++              className="flex h-8 w-8 items-center justify-center rounded-md text-slate-500 hover:bg-slate-100 hover:text-slate-900 disabled:opacity-50"
++              aria-label="Archive"
++            >
+               <Archive className="h-4 w-4" />
+             </button>
+-            <button type="button" className="flex h-8 w-8 items-center justify-center rounded-md text-slate-500 hover:bg-slate-100 hover:text-slate-900" aria-label="Delete">
++            <button
++              type="button"
++              disabled={actionPending === "delete"}
++              onClick={() => void handleReaderAction("delete")}
++              className="flex h-8 w-8 items-center justify-center rounded-md text-slate-500 hover:bg-slate-100 hover:text-slate-900 disabled:opacity-50"
++              aria-label="Delete"
++            >
+               <Trash2 className="h-4 w-4" />
+             </button>
+           </div>
+@@ -379,7 +456,7 @@ function EmailReaderPane({
+           <Reply className="mr-1 h-4 w-4" />
+           Reply
+         </Button>
+-        <Button variant="outline" size="sm">
++        <Button variant="outline" size="sm" onClick={() => onForward(email)}>
+           <Forward className="mr-1 h-4 w-4" />
+           Forward
+         </Button>
+@@ -388,8 +465,25 @@ function EmailReaderPane({
+             <Link2 className="mr-1 h-4 w-4" />
+             Thread tools
+           </Button>
+-        ) : null}
++        ) : (
++          <Button variant="outline" size="sm" onClick={() => setManualDialogOpen(true)}>
++            <Link2 className="mr-1 h-4 w-4" />
++            Reassign email
++          </Button>
++        )}
+       </div>
++      <EmailManualAssignmentDialog
++        open={manualDialogOpen}
++        onOpenChange={setManualDialogOpen}
++        title="Reassign email"
++        description="Search the CRM and attach this standalone email to any deal, lead, contact, company, or property."
++        onAssign={async (target) => {
++          await associateEmailToEntity(email.id, target);
++          toast.success("Email reassigned");
++          setManualDialogOpen(false);
++          onRefresh();
++        }}
++      />
+     </div>
+   );
+ }
+@@ -400,38 +494,39 @@ export function EmailInboxPage() {
+   const [filter, setFilter] = useState<EmailFilter>("all");
+   const [page, setPage] = useState(1);
+   const [composeOpen, setComposeOpen] = useState(false);
+-  const [replyTo, setReplyTo] = useState<string | undefined>(undefined);
++  const [composeDefaults, setComposeDefaults] = useState<{
++    to?: string;
++    subject?: string;
++    body?: string;
++  }>({});
+   const [selectedId, setSelectedId] = useState<string | null>(null);
+-  const { connected, loading: graphLoading, startConsent } = useGraphAuth();
++  const graphAuth = useGraphAuth();
+   const parkingLotQueue = useEmailAssignmentQueue();
+   const oauthConnected = searchParams.get("connected");
+   const oauthError = searchParams.get("error");
+ 
+-  const direction = filter === "sent" ? "outbound" : undefined;
+-  const { emails, pagination, loading, error, refetch } = useUserEmails({
+-    direction,
++  const inboxFilter = filter === "parking-lot" ? "all" : filter;
++  const { emails, pagination, counts: inboxCounts, loading, error, refetch } = useUserEmails({
++    filter: inboxFilter,
+     search: search.length >= 2 ? search : undefined,
+     page,
+     limit: 25,
+   });
+ 
+-  const visibleEmails = useMemo(() => emails.filter((email) => matchesFilter(email, filter)), [emails, filter]);
+-  const selectedEmail = emails.find((email) => email.id === selectedId) ?? visibleEmails[0] ?? null;
++  const visibleEmails = useMemo(() => (filter === "parking-lot" ? [] : emails), [emails, filter]);
++  const selectedEmail = visibleEmails.find((email) => email.id === selectedId) ?? visibleEmails[0] ?? null;
+ 
+   const counts = useMemo(
+     () => ({
+-      all: emails.length,
+-      unread: countForFilter(emails, "unread"),
+-      unassigned: countForFilter(emails, "unassigned"),
+-      sent: countForFilter(emails, "sent"),
++      all: inboxCounts.all,
++      unread: inboxCounts.unread,
++      unassigned: inboxCounts.unassigned,
++      sent: inboxCounts.sent,
+       parkingLot: parkingLotQueue.pagination.total,
+-      linked: emails.filter(isLinked).length,
+-      today: emails.filter((email) => {
+-        const date = new Date(email.sentAt);
+-        return !Number.isNaN(date.getTime()) && Date.now() - date.getTime() < 24 * 60 * 60 * 1000;
+-      }).length,
++      linked: inboxCounts.linked,
++      today: inboxCounts.today,
+     }),
+-    [emails, parkingLotQueue.pagination.total]
++    [inboxCounts, parkingLotQueue.pagination.total]
+   );
+ 
+   useEffect(() => {
+@@ -445,7 +540,17 @@ export function EmailInboxPage() {
+   }
+ 
+   function handleReply(email: Email) {
+-    setReplyTo(email.direction === "inbound" ? email.fromAddress : email.toAddresses[0]);
++    setComposeDefaults({
++      to: email.direction === "inbound" ? email.fromAddress : email.toAddresses[0],
++    });
++    setComposeOpen(true);
++  }
++
++  function handleForward(email: Email) {
++    setComposeDefaults({
++      subject: buildForwardSubject(email.subject),
++      body: buildForwardBody(email),
++    });
+     setComposeOpen(true);
+   }
+ 
+@@ -459,14 +564,14 @@ export function EmailInboxPage() {
+           </p>
+         </div>
+         <div className="flex items-center gap-2">
+-          <Button variant="outline" size="lg" onClick={startConsent} disabled={connected || graphLoading}>
++          <Button variant="outline" size="lg" onClick={graphAuth.startConsent} disabled={graphAuth.connected || graphAuth.loading}>
+             <Mail className="mr-1.5 h-4 w-4" />
+-            {connected ? "Connected" : "Microsoft 365"}
++            {graphAuth.connected ? "Connected" : "Microsoft 365"}
+           </Button>
+           <Button
+             size="lg"
+             onClick={() => {
+-              setReplyTo(undefined);
++              setComposeDefaults({});
+               setComposeOpen(true);
+             }}
+           >
+@@ -487,7 +592,7 @@ export function EmailInboxPage() {
+         </div>
+       ) : null}
+ 
+-      <GraphAuthBanner />
++      <GraphAuthBanner auth={graphAuth} />
+ 
+       <div className="grid grid-cols-1 gap-4 lg:grid-cols-3">
+         <EmailMetricCard
+@@ -645,7 +750,7 @@ export function EmailInboxPage() {
+               ) : null}
+             </div>
+ 
+-            <EmailReaderPane email={selectedEmail} onReply={handleReply} />
++            <EmailReaderPane email={selectedEmail} onReply={handleReply} onForward={handleForward} onRefresh={refetch} />
+           </div>
+         )}
+       </Card>
+@@ -654,7 +759,9 @@ export function EmailInboxPage() {
+         open={composeOpen}
+         onOpenChange={setComposeOpen}
+         onSent={refetch}
+-        defaultTo={replyTo}
++        defaultTo={composeDefaults.to}
++        defaultSubject={composeDefaults.subject}
++        defaultBody={composeDefaults.body}
+       />
+     </div>
+   );
+diff --git a/server/src/modules/email/routes.ts b/server/src/modules/email/routes.ts
+index 03a2a5d..861bc25 100644
+--- a/server/src/modules/email/routes.ts
++++ b/server/src/modules/email/routes.ts
+@@ -14,6 +14,7 @@ import {
+   getUserEmails,
+   getEmailAssignmentQueue,
+   associateEmailToEntity,
++  updateEmailInboxAction,
+   bindThreadToDeal,
+   detachThreadByConversation,
+   previewThreadReassignmentImpact,
+@@ -106,6 +107,7 @@ router.get("/", async (req, res, next) => {
+   try {
+     const filters = {
+       direction: req.query.direction as "inbound" | "outbound" | undefined,
++      filter: req.query.filter as "all" | "unread" | "unassigned" | "sent" | undefined,
+       search: req.query.search as string | undefined,
+       page: req.query.page ? parseInt(req.query.page as string, 10) : undefined,
+       limit: req.query.limit ? parseInt(req.query.limit as string, 10) : undefined,
+@@ -267,6 +269,41 @@ router.get("/assignment-queue", async (req, res, next) => {
+   }
+ });
+ 
++// PATCH /api/email/:id/actions — inbox reader actions (star, archive, soft-delete)
++router.patch("/:id/actions", async (req, res, next) => {
++  try {
++    const body = req.body as {
++      isStarred?: boolean;
++      archived?: boolean;
++      deleted?: boolean;
++    };
++
++    const hasValidAction =
++      typeof body.isStarred === "boolean" ||
++      typeof body.archived === "boolean" ||
++      typeof body.deleted === "boolean";
++    if (!hasValidAction) {
++      throw new AppError(400, "At least one email action is required");
++    }
++
++    const email = await updateEmailInboxAction(
++      req.tenantDb!,
++      req.params.id,
++      req.user!.id,
++      req.user!.role,
++      {
++        isStarred: typeof body.isStarred === "boolean" ? body.isStarred : undefined,
++        archived: typeof body.archived === "boolean" ? body.archived : undefined,
++        deleted: typeof body.deleted === "boolean" ? body.deleted : undefined,
++      }
++    );
++    await req.commitTransaction!();
++    res.json({ email });
++  } catch (err) {
++    next(err);
++  }
++});
++
+ // GET /api/email/:id — single email with full body
+ // RBAC: only the email owner or a director/admin can view
+ router.get("/:id", async (req, res, next) => {
+diff --git a/server/src/modules/email/service.ts b/server/src/modules/email/service.ts
+index cf3e3bc..0389ac3 100644
+--- a/server/src/modules/email/service.ts
++++ b/server/src/modules/email/service.ts
+@@ -1,4 +1,4 @@
+-import { eq, and, desc, sql, or, inArray } from "drizzle-orm";
++import { eq, and, desc, sql, or, inArray, isNull } from "drizzle-orm";
+ import type { NodePgDatabase } from "drizzle-orm/node-postgres";
+ import {
+   pipelineStageConfig,
+@@ -54,11 +54,18 @@ export interface EmailFilters {
+   dealId?: string;
+   contactId?: string;
+   direction?: "inbound" | "outbound";
++  filter?: "all" | "unread" | "unassigned" | "sent";
+   search?: string;
+   page?: number;
+   limit?: number;
+ }
+ 
++export interface EmailInboxActionInput {
++  isStarred?: boolean;
++  archived?: boolean;
++  deleted?: boolean;
++}
++
+ export interface EmailAssignmentQueueFilters {
+   search?: string;
+   page?: number;
+@@ -83,6 +90,30 @@ export function isEmailAssignmentQueueCandidate(emailRow: {
+   return emailRow.direction === "inbound" && emailRow.assignmentAmbiguityReason != null;
+ }
+ 
++function emailIsUnassignedCondition() {
++  return and(
++    eq(emails.direction, "inbound"),
++    isNull(emails.assignedEntityId),
++    isNull(emails.dealId),
++    isNull(emails.contactId)
++  );
++}
++
++function applyInboxFilter(conditions: any[], filter: EmailFilters["filter"]) {
++  if (!filter || filter === "all") return;
++  if (filter === "sent") {
++    conditions.push(eq(emails.direction, "outbound"));
++    return;
++  }
++  if (filter === "unread" || filter === "unassigned") {
++    conditions.push(emailIsUnassignedCondition());
++  }
++}
++
++function activeEmailConditions() {
++  return [isNull(emails.archivedAt), isNull(emails.deletedAt)];
++}
++
+ type ThreadBindingRecord = typeof emailThreadBindings.$inferSelect;
+ 
+ export interface EmailThreadResponse {
+@@ -1032,6 +1063,7 @@ export async function getEmails(
+   if (filters.direction) {
+     conditions.push(eq(emails.direction, filters.direction));
+   }
++  applyInboxFilter(conditions, filters.filter);
+   if (filters.search && filters.search.trim().length >= 2) {
+     const term = `%${filters.search.trim()}%`;
+     conditions.push(
+@@ -1160,14 +1192,14 @@ export async function getUserEmails(tenantDb: TenantDb, userId: string, filters:
+   const limit = filters.limit ?? 25;
+   const offset = (page - 1) * limit;
+ 
+-  const conditions: any[] = [eq(emails.userId, userId)];
++  const baseConditions: any[] = [eq(emails.userId, userId), ...activeEmailConditions()];
+ 
+   if (filters.direction) {
+-    conditions.push(eq(emails.direction, filters.direction));
++    baseConditions.push(eq(emails.direction, filters.direction));
+   }
+   if (filters.search && filters.search.trim().length >= 2) {
+     const term = `%${filters.search.trim()}%`;
+-    conditions.push(
++    baseConditions.push(
+       or(
+         sql`${emails.subject} ILIKE ${term}`,
+         sql`${emails.bodyPreview} ILIKE ${term}`,
+@@ -1176,10 +1208,25 @@ export async function getUserEmails(tenantDb: TenantDb, userId: string, filters:
+     );
+   }
+ 
+-  const where = and(...conditions);
++  const filteredConditions: any[] = [...baseConditions];
++  applyInboxFilter(filteredConditions, filters.filter);
+ 
+-  const [countResult, emailRows] = await Promise.all([
++  const countWhere = and(...baseConditions);
++  const where = and(...filteredConditions);
++
++  const [countResult, countsResult, emailRows] = await Promise.all([
+     tenantDb.select({ count: sql<number>`count(*)` }).from(emails).where(where),
++    tenantDb
++      .select({
++        all: sql<number>`count(*)`,
++        unread: sql<number>`count(*) FILTER (WHERE ${emailIsUnassignedCondition()})`,
++        unassigned: sql<number>`count(*) FILTER (WHERE ${emailIsUnassignedCondition()})`,
++        sent: sql<number>`count(*) FILTER (WHERE ${emails.direction} = 'outbound')`,
++        linked: sql<number>`count(*) FILTER (WHERE ${emails.assignedEntityId} IS NOT NULL OR ${emails.dealId} IS NOT NULL OR ${emails.contactId} IS NOT NULL)`,
++        today: sql<number>`count(*) FILTER (WHERE ${emails.sentAt} >= now() - interval '24 hours')`,
++      })
++      .from(emails)
++      .where(countWhere),
+     tenantDb
+       .select()
+       .from(emails)
+@@ -1197,9 +1244,48 @@ export async function getUserEmails(tenantDb: TenantDb, userId: string, filters:
+   return {
+     emails: emailRows,
+     pagination: { page, limit, total, totalPages: Math.ceil(total / limit) },
++    counts: {
++      all: Number(countsResult[0]?.all ?? 0),
++      unread: Number(countsResult[0]?.unread ?? 0),
++      unassigned: Number(countsResult[0]?.unassigned ?? 0),
++      sent: Number(countsResult[0]?.sent ?? 0),
++      linked: Number(countsResult[0]?.linked ?? 0),
++      today: Number(countsResult[0]?.today ?? 0),
++    },
+   };
+ }
+ 
++export async function updateEmailInboxAction(
++  tenantDb: TenantDb,
++  emailId: string,
++  userId: string,
++  userRole: string,
++  input: EmailInboxActionInput
++) {
++  const email = await getEmailById(tenantDb, emailId);
++  if (!email) throw new AppError(404, "Email not found");
++  if (userRole === "rep" && email.userId !== userId) {
++    throw new AppError(403, "You can only modify your own emails");
++  }
++
++  const updateValues: Partial<typeof emails.$inferInsert> = {};
++  if (input.isStarred !== undefined) updateValues.isStarred = input.isStarred;
++  if (input.archived !== undefined) updateValues.archivedAt = input.archived ? new Date() : null;
++  if (input.deleted !== undefined) updateValues.deletedAt = input.deleted ? new Date() : null;
++
++  if (Object.keys(updateValues).length === 0) {
++    return email;
++  }
++
++  const [updated] = await tenantDb
++    .update(emails)
++    .set(updateValues)
++    .where(eq(emails.id, emailId))
++    .returning();
++
++  return updated ?? email;
++}
++
+ /**
+  * Auto-associate an email to a deal based on the contact's active deals.
+  *
+diff --git a/server/tests/modules/email/routes.test.ts b/server/tests/modules/email/routes.test.ts
+index d100f0b..904dbbe 100644
+--- a/server/tests/modules/email/routes.test.ts
++++ b/server/tests/modules/email/routes.test.ts
+@@ -9,6 +9,7 @@ const emailServiceMocks = vi.hoisted(() => ({
+   getUserEmails: vi.fn(),
+   sendEmail: vi.fn(),
+   associateEmailToEntity: vi.fn(),
++  updateEmailInboxAction: vi.fn(),
+   bindThreadToDeal: vi.fn(),
+   detachThreadByConversation: vi.fn(),
+   previewThreadReassignmentImpact: vi.fn(),
+@@ -50,6 +51,7 @@ vi.mock("../../../src/modules/email/service.js", async () => {
+     getUserEmails: emailServiceMocks.getUserEmails,
+     sendEmail: emailServiceMocks.sendEmail,
+     associateEmailToEntity: emailServiceMocks.associateEmailToEntity,
++    updateEmailInboxAction: emailServiceMocks.updateEmailInboxAction,
+     bindThreadToDeal: emailServiceMocks.bindThreadToDeal,
+     detachThreadByConversation: emailServiceMocks.detachThreadByConversation,
+     previewThreadReassignmentImpact: emailServiceMocks.previewThreadReassignmentImpact,
+@@ -141,7 +143,7 @@ function makeResponse() {
+   return res;
+ }
+ 
+-function findRouteHandler(method: "get" | "post", routePath: string) {
++function findRouteHandler(method: "get" | "post" | "patch", routePath: string) {
+   const layer = (emailRoutes as any).stack.find(
+     (entry: any) => entry.route?.path === routePath && entry.route?.methods?.[method]
+   );
+@@ -161,7 +163,7 @@ async function invokeRoute({
+   body = {},
+   tenantDb = {},
+ }: {
+-  method: "get" | "post";
++  method: "get" | "post" | "patch";
+   url: string;
+   user: TestUser;
+   query?: Record<string, any>;
+@@ -169,8 +171,12 @@ async function invokeRoute({
+   tenantDb?: Record<string, any>;
+ }) {
+   const routePath =
+-    url === "/assignment-queue"
++    url === "/"
++      ? "/"
++      : url === "/assignment-queue"
+       ? "/assignment-queue"
++      : url.startsWith("/") && url.endsWith("/actions")
++        ? "/:id/actions"
+       : url.startsWith("/thread/") && url.endsWith("/assign")
+         ? "/thread/:conversationId/assign"
+         : url.startsWith("/thread/") && url.endsWith("/reassign")
+@@ -190,7 +196,7 @@ async function invokeRoute({
+     query,
+     body,
+     params:
+-      routePath === "/:id/associate"
++      routePath === "/:id/associate" || routePath === "/:id/actions"
+         ? { id: url.split("/")[1] }
+         : routePath.startsWith("/thread/:conversationId")
+           ? { conversationId: url.split("/")[2] }
+@@ -268,6 +274,59 @@ describe("email routes", () => {
+     expect(res.body).toEqual({ items: [], pagination: { page: 1, limit: 25, total: 0, totalPages: 0 } });
+   });
+ 
++  it("forwards inbox filters to getUserEmails for server-side filtering before pagination", async () => {
++    emailServiceMocks.getUserEmails.mockResolvedValue({
++      emails: [],
++      pagination: { page: 2, limit: 25, total: 0, totalPages: 0 },
++      counts: { all: 10, unread: 2, unassigned: 2, sent: 3, linked: 8, today: 1 },
++    });
++
++    const { req, res } = await invokeRoute({
++      method: "get",
++      url: "/",
++      user: makeRepUser(),
++      query: { filter: "unassigned", search: "school", page: "2", limit: "25" },
++    });
++
++    expect(emailServiceMocks.getUserEmails).toHaveBeenCalledWith(
++      expect.any(Object),
++      "rep-1",
++      {
++        direction: undefined,
++        filter: "unassigned",
++        search: "school",
++        page: 2,
++        limit: 25,
++      }
++    );
++    expect(req.commitTransaction).toHaveBeenCalled();
++    expect(res.body.counts.unassigned).toBe(2);
++  });
++
++  it("routes reader actions through the inbox action service", async () => {
++    emailServiceMocks.updateEmailInboxAction.mockResolvedValue({
++      id: "email-1",
++      isStarred: true,
++    });
++
++    const { req, res } = await invokeRoute({
++      method: "patch",
++      url: "/email-1/actions",
++      user: makeRepUser(),
++      body: { isStarred: true },
++    });
++
++    expect(emailServiceMocks.updateEmailInboxAction).toHaveBeenCalledWith(
++      expect.any(Object),
++      "email-1",
++      "rep-1",
++      "rep",
++      { isStarred: true, archived: undefined, deleted: undefined }
++    );
++    expect(req.commitTransaction).toHaveBeenCalled();
++    expect(res.body.email).toEqual({ id: "email-1", isStarred: true });
++  });
++
+   it("routes manual deal association through the generic entity resolver", async () => {
+     emailServiceMocks.getEmailById.mockResolvedValue({ id: "email-1", userId: "director-1" });
+     dealServiceMocks.getDealById.mockResolvedValue({ id: "deal-1" });
+diff --git a/server/tests/modules/email/service.test.ts b/server/tests/modules/email/service.test.ts
+index 530569d..c4d57af 100644
+--- a/server/tests/modules/email/service.test.ts
++++ b/server/tests/modules/email/service.test.ts
+@@ -43,6 +43,27 @@ function hasColumnName(node: any, columnName: string, seen = new Set<unknown>())
+   return Object.values(node).some((entry) => hasColumnName(entry, columnName, seen));
+ }
+ 
++function sqlConditionReferencesColumn(node: any, columnName: string, seen = new Set<unknown>()): boolean {
++  if (!node || typeof node !== "object") return false;
++  if (seen.has(node)) return false;
++  seen.add(node);
++
++  if (node.name === columnName && node.table) return true;
++  if (Array.isArray(node)) return node.some((entry) => sqlConditionReferencesColumn(entry, columnName, seen));
++  if ("queryChunks" in node) return sqlConditionReferencesColumn((node as any).queryChunks, columnName, seen);
++  if ("value" in node && Array.isArray((node as any).value)) {
++    return sqlConditionReferencesColumn((node as any).value, columnName, seen);
++  }
++  if ("left" in node || "right" in node) {
++    return (
++      sqlConditionReferencesColumn((node as any).left, columnName, seen) ||
++      sqlConditionReferencesColumn((node as any).right, columnName, seen)
++    );
++  }
++
++  return false;
++}
++
+ function createSelectChain(result: any[]) {
+   const chain: any = {
+     from: vi.fn(() => chain),
+@@ -251,6 +272,39 @@ describe("email service inbound association", () => {
+     ).toBe(true);
+   });
+ 
++  it("does not hide archived emails from deal or contact email history", async () => {
++    const whereClauses: unknown[] = [];
++    const tenantDb = {
++      select: vi.fn(() => {
++        const callIndex = (tenantDb.select as any).mock.calls.length;
++        const chain: any = {
++          from: vi.fn(() => chain),
++          where: vi.fn((whereArg: unknown) => {
++            whereClauses.push(whereArg);
++            return chain;
++          }),
++          orderBy: vi.fn(() => chain),
++          limit: vi.fn(() => chain),
++          offset: vi.fn(() => chain),
++          then(resolve: (value: any) => void) {
++            if (callIndex === 1) {
++              resolve([{ count: 1 }]);
++            } else {
++              resolve([]);
++            }
++          },
++        };
++        return chain;
++      }),
++    };
++
++    await getEmails(tenantDb as any, { dealId: "deal-1" }, "director-1", "director");
++
++    expect(whereClauses.length).toBe(2);
++    expect(sqlConditionReferencesColumn(whereClauses[0], "archived_at")).toBe(false);
++    expect(sqlConditionReferencesColumn(whereClauses[0], "deleted_at")).toBe(false);
++  });
++
+   it("uses recency ordering based on sentAt or syncedAt for user inbox", async () => {
+     const orderByClauses: unknown[] = [];
+     const tenantDb = {
+diff --git a/shared/src/schema/tenant/emails.ts b/shared/src/schema/tenant/emails.ts
+index a58b388..b4ca108 100644
+--- a/shared/src/schema/tenant/emails.ts
++++ b/shared/src/schema/tenant/emails.ts
+@@ -24,6 +24,9 @@ export const emails = pgTable("emails", {
+   bodyPreview: varchar("body_preview", { length: 500 }),
+   bodyHtml: text("body_html"),
+   hasAttachments: boolean("has_attachments").default(false).notNull(),
++  isStarred: boolean("is_starred").default(false).notNull(),
++  archivedAt: timestamp("archived_at", { withTimezone: true }),
++  deletedAt: timestamp("deleted_at", { withTimezone: true }),
+   contactId: uuid("contact_id"),
+   dealId: uuid("deal_id"),
+   assignedEntityType: varchar("assigned_entity_type", { length: 20 }),

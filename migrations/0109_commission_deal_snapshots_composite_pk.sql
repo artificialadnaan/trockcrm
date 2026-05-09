@@ -29,7 +29,7 @@ BEGIN
 
       IF has_duplicate_rows THEN
         RAISE EXCEPTION
-          'Migration 0108 cannot replace commission_deal_snapshots primary key for schema % because duplicate deal_id/rep_user_id rows exist. Review the data before rerunning.',
+          'Migration 0109 cannot replace commission_deal_snapshots primary key for schema % because duplicate deal_id/rep_user_id rows exist. Review the data before rerunning.',
           tenant_schema;
       END IF;
 
@@ -70,7 +70,7 @@ BEGIN
 
   IF has_duplicate_rows THEN
     RAISE EXCEPTION
-      'Migration 0108 cannot replace commission_deal_snapshots primary key because duplicate deal_id/rep_user_id rows exist. Review the data before rerunning.';
+      'Migration 0109 cannot replace commission_deal_snapshots primary key because duplicate deal_id/rep_user_id rows exist. Review the data before rerunning.';
   END IF;
 
   ALTER TABLE commission_deal_snapshots

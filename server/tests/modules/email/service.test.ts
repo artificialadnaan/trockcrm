@@ -43,6 +43,27 @@ function hasColumnName(node: any, columnName: string, seen = new Set<unknown>())
   return Object.values(node).some((entry) => hasColumnName(entry, columnName, seen));
 }
 
+function sqlConditionReferencesColumn(node: any, columnName: string, seen = new Set<unknown>()): boolean {
+  if (!node || typeof node !== "object") return false;
+  if (seen.has(node)) return false;
+  seen.add(node);
+
+  if (node.name === columnName && node.table) return true;
+  if (Array.isArray(node)) return node.some((entry) => sqlConditionReferencesColumn(entry, columnName, seen));
+  if ("queryChunks" in node) return sqlConditionReferencesColumn((node as any).queryChunks, columnName, seen);
+  if ("value" in node && Array.isArray((node as any).value)) {
+    return sqlConditionReferencesColumn((node as any).value, columnName, seen);
+  }
+  if ("left" in node || "right" in node) {
+    return (
+      sqlConditionReferencesColumn((node as any).left, columnName, seen) ||
+      sqlConditionReferencesColumn((node as any).right, columnName, seen)
+    );
+  }
+
+  return false;
+}
+
 function createSelectChain(result: any[]) {
   const chain: any = {
     from: vi.fn(() => chain),
@@ -249,6 +270,39 @@ describe("email service inbound association", () => {
       hasColumnName(whereClauses[0], "assigned_entity_id") ||
         hasColumnName(whereClauses[0], "assignedEntityId")
     ).toBe(true);
+  });
+
+  it("does not hide archived emails from deal or contact email history", async () => {
+    const whereClauses: unknown[] = [];
+    const tenantDb = {
+      select: vi.fn(() => {
+        const callIndex = (tenantDb.select as any).mock.calls.length;
+        const chain: any = {
+          from: vi.fn(() => chain),
+          where: vi.fn((whereArg: unknown) => {
+            whereClauses.push(whereArg);
+            return chain;
+          }),
+          orderBy: vi.fn(() => chain),
+          limit: vi.fn(() => chain),
+          offset: vi.fn(() => chain),
+          then(resolve: (value: any) => void) {
+            if (callIndex === 1) {
+              resolve([{ count: 1 }]);
+            } else {
+              resolve([]);
+            }
+          },
+        };
+        return chain;
+      }),
+    };
+
+    await getEmails(tenantDb as any, { dealId: "deal-1" }, "director-1", "director");
+
+    expect(whereClauses.length).toBe(2);
+    expect(sqlConditionReferencesColumn(whereClauses[0], "archived_at")).toBe(false);
+    expect(sqlConditionReferencesColumn(whereClauses[0], "deleted_at")).toBe(false);
   });
 
   it("uses recency ordering based on sentAt or syncedAt for user inbox", async () => {

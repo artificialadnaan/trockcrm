@@ -10,6 +10,7 @@ import {
   confirmUpload,
   uploadNewVersion,
   getFiles,
+  getFileStats,
   getFileById,
   getFileByIdIncludingDeleted,
   getFileDownloadUrl,
@@ -40,6 +41,27 @@ function requestAuditContext(req: express.Request) {
 
 function isPhotoRecord(file: { category?: string | null }) {
   return file.category === "photo";
+}
+
+function parseFileKind(value: unknown): "photos" | "documents" | undefined {
+  if (value == null || value === "") return undefined;
+  if (value === "photos" || value === "documents") return value;
+  throw new AppError(400, "fileKind must be photos or documents.");
+}
+
+function parseLinkedType(value: unknown): "deal" | "lead" | "contact" | "procore" | "change_order" | "unassigned" | undefined {
+  if (value == null || value === "") return undefined;
+  if (
+    value === "deal" ||
+    value === "lead" ||
+    value === "contact" ||
+    value === "procore" ||
+    value === "change_order" ||
+    value === "unassigned"
+  ) {
+    return value;
+  }
+  throw new AppError(400, "linkedType must be deal, lead, contact, procore, change_order, or unassigned.");
 }
 
 // POST /api/files/upload-url — Step 1: request presigned URL
@@ -359,6 +381,8 @@ router.get("/", async (req, res, next) => {
         : undefined,
       changeOrderId: req.query.changeOrderId as string | undefined,
       category: req.query.category as FileCategory | undefined,
+      fileKind: parseFileKind(req.query.fileKind),
+      linkedType: parseLinkedType(req.query.linkedType),
       folderPath: req.query.folderPath as string | undefined,
       search: req.query.search as string | undefined,
       tags: req.query.tags
@@ -373,6 +397,21 @@ router.get("/", async (req, res, next) => {
     const result = await getFiles(req.tenantDb!, filters);
     await req.commitTransaction!();
     res.json(result);
+  } catch (err) {
+    next(err);
+  }
+});
+
+// GET /api/files/stats — office-wide library metrics independent of page filters.
+router.get("/stats", async (req, res, next) => {
+  try {
+    if (req.user!.role === "rep") {
+      throw new AppError(400, "File library stats are restricted to directors and admins.");
+    }
+
+    const stats = await getFileStats(req.tenantDb!, {});
+    await req.commitTransaction!();
+    res.json({ stats });
   } catch (err) {
     next(err);
   }

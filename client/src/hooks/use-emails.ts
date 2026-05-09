@@ -13,8 +13,14 @@ export interface Email {
   bodyPreview: string | null;
   bodyHtml: string | null;
   hasAttachments: boolean;
+  isStarred?: boolean;
+  archivedAt?: string | null;
+  deletedAt?: string | null;
   contactId: string | null;
   dealId: string | null;
+  assignedEntityType?: EmailAssociationTarget["assignedEntityType"] | null;
+  assignedEntityId?: string | null;
+  assignmentAmbiguityReason?: string | null;
   userId: string;
   sentAt: string;
   syncedAt: string;
@@ -59,9 +65,19 @@ export interface EmailAssociationTarget {
 
 export interface EmailFilters {
   direction?: "inbound" | "outbound";
+  filter?: "all" | "unread" | "unassigned" | "sent";
   search?: string;
   page?: number;
   limit?: number;
+}
+
+export interface EmailCounts {
+  all: number;
+  unread: number;
+  unassigned: number;
+  sent: number;
+  linked: number;
+  today: number;
 }
 
 export interface Pagination {
@@ -79,6 +95,14 @@ export function useUserEmails(filters: EmailFilters = {}) {
     total: 0,
     totalPages: 0,
   });
+  const [counts, setCounts] = useState<EmailCounts>({
+    all: 0,
+    unread: 0,
+    unassigned: 0,
+    sent: 0,
+    linked: 0,
+    today: 0,
+  });
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
@@ -88,28 +112,37 @@ export function useUserEmails(filters: EmailFilters = {}) {
     try {
       const params = new URLSearchParams();
       if (filters.direction) params.set("direction", filters.direction);
+      if (filters.filter) params.set("filter", filters.filter);
       if (filters.search) params.set("search", filters.search);
       if (filters.page) params.set("page", String(filters.page));
       if (filters.limit) params.set("limit", String(filters.limit));
 
       const qs = params.toString();
-      const data = await api<{ emails: Email[]; pagination: Pagination }>(
+      const data = await api<{ emails: Email[]; pagination: Pagination; counts?: EmailCounts }>(
         `/email${qs ? `?${qs}` : ""}`
       );
       setEmails(data.emails);
       setPagination(data.pagination);
+      setCounts(data.counts ?? {
+        all: data.pagination.total,
+        unread: 0,
+        unassigned: 0,
+        sent: 0,
+        linked: 0,
+        today: 0,
+      });
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : "Failed to load emails");
     } finally {
       setLoading(false);
     }
-  }, [filters.direction, filters.search, filters.page, filters.limit]);
+  }, [filters.direction, filters.filter, filters.search, filters.page, filters.limit]);
 
   useEffect(() => {
     fetchEmails();
   }, [fetchEmails]);
 
-  return { emails, pagination, loading, error, refetch: fetchEmails };
+  return { emails, pagination, counts, loading, error, refetch: fetchEmails };
 }
 
 export function useDealEmails(dealId: string | undefined, filters: EmailFilters = {}) {
@@ -261,6 +294,16 @@ export async function associateEmailToEntity(emailId: string, target: EmailAssoc
   return api<{ success: boolean }>(`/email/${emailId}/associate`, {
     method: "POST",
     json: target,
+  });
+}
+
+export async function updateEmailAction(
+  emailId: string,
+  input: { isStarred?: boolean; archived?: boolean; deleted?: boolean }
+) {
+  return api<{ email: Email }>(`/email/${emailId}/actions`, {
+    method: "PATCH",
+    json: input,
   });
 }
 

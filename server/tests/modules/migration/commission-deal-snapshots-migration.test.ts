@@ -8,7 +8,7 @@ describe("commission deal snapshots migration", () => {
     "utf8"
   );
   const compositePkMigrationSql = readFileSync(
-    join(process.cwd(), "migrations/0108_commission_deal_snapshots_composite_pk.sql"),
+    join(process.cwd(), "migrations/0109_commission_deal_snapshots_composite_pk.sql"),
     "utf8"
   );
 
