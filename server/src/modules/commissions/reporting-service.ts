@@ -160,7 +160,7 @@ function stageSql(filters: CommissionReportFilters) {
 function potentialStageSql() {
   // Intentionally includes canonical stage-v2 slugs plus historical aliases so
   // commission potential stays accurate while legacy rows still exist during rollout.
-  return sql`AND psc.slug IN ('opportunity', 'estimating', 'service_estimating', 'estimate_under_review', 'estimate_sent_to_client', 'estimate_in_progress', 'service_estimate_under_review', 'service_estimate_sent_to_client')`;
+  return sql`AND psc.slug IN ('contract', 'opportunity', 'estimating', 'service_estimating', 'estimate_under_review', 'estimate_sent_to_client', 'estimate_in_progress', 'service_estimate_under_review', 'service_estimate_sent_to_client')`;
 }
 
 function unsignedDealSql() {
@@ -179,14 +179,23 @@ function earnedSignedDateSql() {
   return sql`COALESCE(d.contract_signed_at::date, d.contract_signed_date, dsc.contract_signed_date_at_signing)`;
 }
 
+function currentUtcSummaryBounds(now = new Date()) {
+  const year = now.getUTCFullYear();
+  const month = now.getUTCMonth();
+  return {
+    monthStart: new Date(Date.UTC(year, month, 1)).toISOString().slice(0, 10),
+    yearStart: new Date(Date.UTC(year, 0, 1)).toISOString().slice(0, 10),
+  };
+}
+
 export function describeCommissionFormula(): string {
   return [
-    "Potential commission includes unsigned active deals in Opportunity, Estimating, Estimate Under Review, or Estimate Sent to Client, including historical aliases during rollout.",
+    "Potential commission includes unsigned active deals in Contract, Opportunity, Estimating, Estimate Under Review, or Estimate Sent to Client, including historical aliases during rollout.",
     "Earned commission is recognized when contract_signed_at is set, with contract_signed_date as the historical compatibility fallback.",
     "Won deals remain earned after handoff; Lost deals are excluded from potential and earned commission totals.",
     "The source value resolves in this order: awarded_amount, then bid_estimate, then dd_estimate.",
     "Commission amount = source_value_amount * user_commission_settings.commission_rate, rounded to cents.",
-    "Potential pipeline uses active pre-Contract deal value plus change orders, multiplied by the rep estimated margin rate and commission rate.",
+    "Potential pipeline uses active unsigned deal value plus change orders, multiplied by the rep commission rate.",
   ].join(" ");
 }
 
@@ -195,8 +204,8 @@ export function getCommissionPeriodDateRange(
   now = new Date()
 ): { from: string | null; to: string | null } {
   if (period === "all") return { from: null, to: null };
-  const year = now.getFullYear();
-  const month = now.getMonth();
+  const year = now.getUTCFullYear();
+  const month = now.getUTCMonth();
   const to = now.toISOString().slice(0, 10);
   const fromDate =
     period === "mtd"
@@ -292,9 +301,8 @@ async function refreshCommissionSnapshots(tenantDb: TenantDb, dealsForSnapshot: 
       )`),
       sql`, `
     )}
-    ON CONFLICT (deal_id) DO UPDATE
+    ON CONFLICT (deal_id, rep_user_id) DO UPDATE
       SET last_commission_amount = EXCLUDED.last_commission_amount,
-          rep_user_id = EXCLUDED.rep_user_id,
           last_computed_at = EXCLUDED.last_computed_at
   `);
 }
@@ -304,9 +312,10 @@ export async function getRepCommissionDashboard(
   filters: CommissionReportFilters & { period?: CommissionPeriod }
 ): Promise<RepCommissionDashboard> {
   const period = filters.period ?? "ytd";
+  const periodRange = getCommissionPeriodDateRange(period);
   const dateRange = {
-    from: filters.from ?? getCommissionPeriodDateRange(period).from,
-    to: filters.to ?? getCommissionPeriodDateRange(period).to,
+    from: filters.from ?? periodRange.from,
+    to: filters.to ?? periodRange.to,
   };
   const repId = effectiveRepForRepDashboard(filters);
   const result = await tenantDb.execute(sql`
@@ -333,7 +342,7 @@ export async function getRepCommissionDashboard(
       JOIN ${pipelineStageConfig} psc ON psc.id = d.stage_id
       LEFT JOIN ${companies} c ON c.id = d.company_id
       LEFT JOIN ${properties} p ON p.id = d.property_id
-      LEFT JOIN commission_deal_snapshots cds ON cds.deal_id = d.id
+      LEFT JOIN commission_deal_snapshots cds ON cds.deal_id = d.id AND cds.rep_user_id = dsc.rep_user_id
       WHERE dsc.rep_user_id = ${repId}
         AND COALESCE(d.is_test_data, false) = false
         AND COALESCE(d.contract_signed_at::date, d.contract_signed_date, dsc.contract_signed_date_at_signing) IS NOT NULL
@@ -368,7 +377,7 @@ export async function getRepCommissionDashboard(
       LEFT JOIN ${userCommissionSettings} cs ON cs.user_id = d.assigned_rep_id AND cs.is_active = true
       LEFT JOIN ${companies} c ON c.id = d.company_id
       LEFT JOIN ${properties} p ON p.id = d.property_id
-      LEFT JOIN commission_deal_snapshots cds ON cds.deal_id = d.id
+      LEFT JOIN commission_deal_snapshots cds ON cds.deal_id = d.id AND cds.rep_user_id = d.assigned_rep_id
       WHERE d.assigned_rep_id = ${repId}
         AND d.is_active = true
         AND COALESCE(d.is_test_data, false) = false
@@ -456,7 +465,6 @@ export async function getCommissionPotential(
       COALESCE(
         SUM(
           (COALESCE(d.awarded_amount, d.bid_estimate, d.dd_estimate, 0) + COALESCE(d.change_order_total, 0))
-          * COALESCE(cs.estimated_margin_rate, 0.30)
           * COALESCE(cs.commission_rate, 0)
         ),
         0
@@ -493,6 +501,7 @@ export async function getCommissionEarned(
   tenantDb: TenantDb,
   filters: CommissionReportFilters
 ): Promise<{ months: CommissionEarnedMonth[]; deals: CommissionDealRow[] }> {
+  const utcBounds = currentUtcSummaryBounds();
   const monthResult = await tenantDb.execute(sql`
     SELECT
       TO_CHAR(DATE_TRUNC('month', ${earnedSignedDateSql()}), 'YYYY-MM') AS month,
@@ -526,7 +535,7 @@ export async function getCommissionEarned(
       dsc.contract_signed_date_at_signing AS contract_signed_date,
       COALESCE(SUM(
         CASE
-          WHEN pe.paid_at >= DATE_TRUNC('year', CURRENT_DATE)
+          WHEN pe.paid_at::date >= ${utcBounds.yearStart}::date
             THEN CASE WHEN pe.is_credit_memo THEN -ABS(pe.gross_revenue_amount::numeric) ELSE ABS(pe.gross_revenue_amount::numeric) END
           ELSE 0
         END
@@ -575,14 +584,15 @@ export async function getCommissionSummary(
   tenantDb: TenantDb,
   filters: CommissionReportFilters
 ): Promise<CommissionSummary> {
+  const utcBounds = currentUtcSummaryBounds();
   const result = await tenantDb.execute(sql`
     WITH earned AS (
       SELECT
         COALESCE(SUM(dsc.amount) FILTER (
-          WHERE ${earnedSignedDateSql()} >= DATE_TRUNC('month', CURRENT_DATE)
+          WHERE ${earnedSignedDateSql()} >= ${utcBounds.monthStart}::date
         ), 0)::numeric AS earned_mtd,
         COALESCE(SUM(dsc.amount) FILTER (
-          WHERE ${earnedSignedDateSql()} >= DATE_TRUNC('year', CURRENT_DATE)
+          WHERE ${earnedSignedDateSql()} >= ${utcBounds.yearStart}::date
         ), 0)::numeric AS earned_ytd
       FROM ${dealSignedCommissions} dsc
       JOIN ${deals} d ON d.id = dsc.deal_id
@@ -599,7 +609,6 @@ export async function getCommissionSummary(
         COALESCE(
           SUM(
             (COALESCE(d.awarded_amount, d.bid_estimate, d.dd_estimate, 0) + COALESCE(d.change_order_total, 0))
-            * COALESCE(cs.estimated_margin_rate, 0.30)
             * COALESCE(cs.commission_rate, 0)
           ),
           0
@@ -622,7 +631,7 @@ export async function getCommissionSummary(
       FROM ${dealPaymentEvents} pe
       JOIN ${deals} d ON d.id = pe.deal_id
       JOIN ${pipelineStageConfig} psc ON psc.id = d.stage_id
-      WHERE pe.paid_at >= DATE_TRUNC('year', CURRENT_DATE)
+      WHERE pe.paid_at::date >= ${utcBounds.yearStart}::date
         AND COALESCE(d.is_test_data, false) = false
         ${repSql(filters)}
         ${stageSql(filters)}

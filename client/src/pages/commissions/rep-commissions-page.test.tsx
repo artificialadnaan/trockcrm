@@ -208,6 +208,10 @@ describe("RepCommissionsPage", () => {
       expect.stringMatching(/commissions-\d{4}-\d{2}-\d{2}\.csv/),
       "text/csv;charset=utf-8;"
     );
+    const csv = String(mocks.downloadTextFile.mock.calls[0][0]);
+    expect(csv).toContain("deal,company,property,stage,status,dealValue,rate,commission");
+    expect(csv).toContain("Allen Sports Complex,Allen ISD,Stadium,Earned,Earned,100000.00,1.50,1500.00");
+    expect(csv).toContain("Garland Warehouse 14,Garland Industrial,14 Warehouse Rd,Contract,Pipeline,305000.00,1.50,4575.00");
     await unmount(root);
   });
 

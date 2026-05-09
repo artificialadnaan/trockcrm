@@ -54,6 +54,7 @@ const ESTIMATING_PROGRESS_STAGE_SLUGS = [
   "service_estimate_under_review",
   "service_estimate_sent_to_client",
 ] as const;
+const COMMISSION_PIPELINE_STAGE_SLUGS = ["opportunity", ...ESTIMATING_PROGRESS_STAGE_SLUGS] as const;
 const WON_STAGE_SLUGS = ["won"] as const;
 const LOST_STAGE_SLUGS = ["lost"] as const;
 const LEGACY_WON_STAGE_SLUGS = ["sent_to_production", "service_sent_to_production", "closed_won"] as const;
@@ -884,7 +885,10 @@ async function getRepPotentialRevenue(tenantDb: TenantDb, repId: string): Promis
     JOIN ${pipelineStageConfig} psc ON psc.id = d.stage_id
     WHERE d.assigned_rep_id = ${repId}
       AND d.is_active = true
-      AND psc.is_terminal = false
+      AND COALESCE(d.is_test_data, false) = false
+      AND d.contract_signed_at IS NULL
+      AND d.contract_signed_date IS NULL
+      AND psc.slug IN (${sql.join(COMMISSION_PIPELINE_STAGE_SLUGS.map((slug) => sql`${slug}`), sql`, `)})
   `);
   const rows = (result as any).rows ?? result;
   return Number(rows[0]?.potential_revenue ?? 0);
@@ -936,10 +940,9 @@ async function getRepCommissionSummary(
   const direct = await getDirectCommissionMetrics(tenantDb, repId, config, fromDate, toDate);
   const commissionRollups = await getCommissionDealRollups(tenantDb, repId, config, fromDate, toDate);
   const potentialRevenue = await getRepPotentialRevenue(tenantDb, repId);
-  const potentialMargin = potentialRevenue * config.estimatedMarginRate;
+  const potentialMargin = potentialRevenue;
   const potentialEligibleRevenue = Math.max(potentialRevenue - direct.floorRemaining, 0);
-  const potentialCommissionBase = potentialEligibleRevenue * config.estimatedMarginRate;
-  const potentialCommission = Number((potentialCommissionBase * config.commissionRate).toFixed(2));
+  const potentialCommission = Number((potentialEligibleRevenue * config.commissionRate).toFixed(2));
   const overrideEarnedCommission = await getOverrideEarnedCommission(tenantDb, repId, config.overrideRate, fromDate, toDate);
   const totalEarnedCommission = Number((direct.directEarnedCommission + overrideEarnedCommission).toFixed(2));
   const deals = allocateDealCommissions(commissionRollups, direct);
@@ -1567,10 +1570,22 @@ async function getRepDealPipelineSummary(
   const result = await tenantDb.execute(sql`
     SELECT
       d.assigned_rep_id AS rep_id,
-      COUNT(*) FILTER (WHERE d.is_active = true AND NOT psc.is_terminal)::int AS active_deals,
+      COUNT(*) FILTER (
+        WHERE d.is_active = true
+          AND COALESCE(d.is_test_data, false) = false
+          AND d.contract_signed_at IS NULL
+          AND d.contract_signed_date IS NULL
+          AND psc.slug IN (${sql.join(COMMISSION_PIPELINE_STAGE_SLUGS.map((slug) => sql`${slug}`), sql`, `)})
+      )::int AS active_deals,
       COALESCE(
-        SUM(COALESCE(d.awarded_amount, d.bid_estimate, d.dd_estimate, 0))
-          FILTER (WHERE d.is_active = true AND NOT psc.is_terminal AND psc.is_active_pipeline),
+        SUM(COALESCE(d.awarded_amount, d.bid_estimate, d.dd_estimate, 0) + COALESCE(d.change_order_total, 0))
+          FILTER (
+            WHERE d.is_active = true
+              AND COALESCE(d.is_test_data, false) = false
+              AND d.contract_signed_at IS NULL
+              AND d.contract_signed_date IS NULL
+              AND psc.slug IN (${sql.join(COMMISSION_PIPELINE_STAGE_SLUGS.map((slug) => sql`${slug}`), sql`, `)})
+          ),
         0
       )::numeric AS pipeline_value
     FROM ${deals} d
@@ -1856,7 +1871,7 @@ export async function getDirectorCommissionWorkspace(
   tenantDb: TenantDb,
   options: { from?: string; to?: string } = {}
 ): Promise<DirectorCommissionWorkspaceData> {
-  const year = new Date().getFullYear();
+  const year = new Date().getUTCFullYear();
   const from = options.from ?? `${year}-01-01`;
   const to = options.to ?? `${year}-12-31`;
 

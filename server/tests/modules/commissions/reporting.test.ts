@@ -38,6 +38,22 @@ describe("commission reporting service", () => {
     expect(getCommissionPeriodDateRange("all", now)).toEqual({ from: null, to: null });
   });
 
+  it("uses UTC consistently when deriving period date ranges", async () => {
+    const { getCommissionPeriodDateRange } = await import("../../../src/modules/commissions/reporting-service.js");
+    const nearUtcMonthBoundary = {
+      getFullYear: () => 2026,
+      getMonth: () => 1,
+      getUTCFullYear: () => 2026,
+      getUTCMonth: () => 2,
+      toISOString: () => "2026-03-01T01:00:00.000Z",
+    } as unknown as Date;
+
+    expect(getCommissionPeriodDateRange("mtd", nearUtcMonthBoundary)).toEqual({
+      from: "2026-03-01",
+      to: "2026-03-01",
+    });
+  });
+
   it("maps summary, stage potential, earned months, and deal table with matching totals", async () => {
     const {
       getCommissionPotential,
@@ -192,7 +208,7 @@ describe("commission reporting service", () => {
     expect(potential.stageGroups.reduce((sum, row) => sum + row.potentialCommission, 0)).toBe(22500);
   });
 
-  it("uses pre-Contract unsigned deals for potential and signed non-lost deals for earned", async () => {
+  it("uses unsigned active deals for potential and signed non-lost deals for earned", async () => {
     const { getCommissionEarned, getCommissionSummary } = await import("../../../src/modules/commissions/reporting-service.js");
     const tenantDb = createMockTenantDb([[], [], [{ earned_mtd: "0", earned_ytd: "0", potential_pipeline: "0", paid_ytd: "0" }]]);
     const filters = {
@@ -207,6 +223,7 @@ describe("commission reporting service", () => {
     await getCommissionSummary(tenantDb, filters);
 
     const sqlText = tenantDb.execute.mock.calls.map((call: any[]) => extractSqlText(call[0]).toLowerCase()).join("\n");
+    expect(sqlText).toContain("'contract'");
     expect(sqlText).toContain("'opportunity'");
     expect(sqlText).toContain("'estimating'");
     expect(sqlText).toContain("'service_estimating'");
@@ -222,6 +239,10 @@ describe("commission reporting service", () => {
     expect(sqlText).not.toContain("slug in ('won', 'sent_to_production', 'service_sent_to_production', 'closed_won')");
     expect(sqlText).not.toContain("display_order >=");
     expect(sqlText).not.toContain("service_contract_signed");
+    expect(sqlText).not.toContain("estimated_margin_rate");
+    expect(sqlText).not.toContain("current_date");
+    expect(sqlText).not.toContain("date_trunc('month', current_date)");
+    expect(sqlText).not.toContain("date_trunc('year', current_date)");
   });
 
   it("counts historical contract_signed_date rows as earned without requiring won stage", async () => {
@@ -331,6 +352,47 @@ describe("commission reporting service", () => {
       "opportunity",
     ]);
     expect(tenantDb.execute).toHaveBeenCalledTimes(2);
+  });
+
+  it("scopes snapshot reads and writes by both deal and rep", async () => {
+    const { getRepCommissionDashboard } = await import("../../../src/modules/commissions/reporting-service.js");
+    const tenantDb = createMockTenantDb([
+      [
+        {
+          deal_id: "deal-earned",
+          deal_number: "D-1",
+          deal_name: "Signed Deal",
+          rep_id: "rep-1",
+          company_name: "Client Co",
+          property_name: null,
+          property_address: null,
+          stage_slug: "sent_to_production",
+          deal_value: "100000.00",
+          commission_rate: "0.015000",
+          commission: "1500.00",
+          contract_signed_date: "2026-05-02",
+          expected_close_date: null,
+          days_in_stage: "5",
+          is_earned: true,
+          snapshot_commission_amount: "1200.00",
+        },
+      ],
+      [],
+    ]);
+
+    await getRepCommissionDashboard(tenantDb, {
+      role: "rep",
+      userId: "rep-1",
+      period: "ytd",
+      stages: [],
+    });
+
+    const querySql = extractSqlText(tenantDb.execute.mock.calls[0][0]).toLowerCase();
+    const snapshotSql = extractSqlText(tenantDb.execute.mock.calls[1][0]).toLowerCase();
+    expect(querySql).toContain("left join commission_deal_snapshots cds on cds.deal_id = d.id");
+    expect(querySql).toContain("cds.rep_user_id = dsc.rep_user_id");
+    expect(querySql).toContain("cds.rep_user_id = d.assigned_rep_id");
+    expect(snapshotSql).toContain("on conflict (deal_id, rep_user_id) do update");
   });
 
   it("forces the rep dashboard query to the current rep and uses deal value times rate for pipeline", async () => {
