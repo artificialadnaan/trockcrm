@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { renderToStaticMarkup } from "react-dom/server";
 import { createRoot, type Root } from "react-dom/client";
 import { act } from "react";
@@ -14,6 +14,8 @@ const mocks = vi.hoisted(() => ({
   useDirectorDashboardMock: vi.fn(),
   useRepPerformanceMock: vi.fn(),
   presetToDateRangeMock: vi.fn(),
+  dashboardRefetchMock: vi.fn(),
+  performanceRefetchMock: vi.fn(),
 }));
 
 vi.mock("@/hooks/use-director-dashboard", () => ({
@@ -108,10 +110,13 @@ async function renderPageDom() {
 
 describe("DirectorDashboardPage", () => {
   beforeEach(() => {
+    vi.useFakeTimers();
     document.body.innerHTML = "";
+    vi.clearAllMocks();
+    vi.setSystemTime(new Date("2026-05-08T12:00:00Z"));
     mocks.presetToDateRangeMock.mockImplementation((preset: string) => ({
-      from: `2026-${preset}-from`,
-      to: `2026-${preset}-to`,
+      from: preset === "qtd" ? "2026-04-01" : `2026-${preset}-from`,
+      to: preset === "qtd" ? "2026-05-08" : `2026-${preset}-to`,
     }));
     mocks.useRepPerformanceMock.mockReturnValue({
       data: {
@@ -282,11 +287,14 @@ describe("DirectorDashboardPage", () => {
         },
       },
       loading: false,
+      error: null,
+      refetch: mocks.performanceRefetchMock,
     });
     mocks.useDirectorDashboardMock.mockReturnValue({
       loading: false,
       error: null,
-      refetch: vi.fn(),
+      refetch: mocks.dashboardRefetchMock,
+      lastFetchedAt: "2026-05-08T11:57:00Z",
       data: {
         officeFunnelBuckets: [
           { key: "lead", label: "Lead intake", count: 6, totalValue: 610000, route: "/leads", bucket: "lead" },
@@ -381,6 +389,8 @@ describe("DirectorDashboardPage", () => {
         }],
         atRiskDeals: [{
           dealId: "deal-1",
+          repId: "rep-1",
+          repName: "Avery Rep",
           dealName: "Dallas ISD Roof",
           stageName: "Estimating",
           mirroredStageStatus: "blocked",
@@ -440,11 +450,16 @@ describe("DirectorDashboardPage", () => {
     });
   });
 
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
   it("renders director hero with shell actions and QTD time-range active", () => {
     const html = renderPageHtml();
 
     expect(html).toContain("Director Dashboard");
     expect(html).toContain("Strategic performance overview");
+    expect(html).toContain("synced 3m ago");
     expect(html).toContain("MTD");
     expect(html).toContain("QTD");
     expect(html).toContain("Last quarter");
@@ -474,9 +489,11 @@ describe("DirectorDashboardPage", () => {
 
     expect(html).toContain("Forecast vs goal");
     expect(html).toContain("$360,000 / $500,000");
+    expect(html).toContain("8 weeks remaining");
     expect(html).toContain("Pace");
     expect(html).toContain("Closing");
-    expect(html).toContain("Activity");
+    expect(html).toContain("1 this quarter");
+    expect(html).toContain("121 this quarter");
     expect(html).toContain("Won");
     expect(html).toContain("Pipe");
   });
@@ -519,9 +536,9 @@ describe("DirectorDashboardPage", () => {
 
     try {
       expect(mocks.useDirectorDashboardMock).toHaveBeenLastCalledWith({
-        from: "2026-qtd-from",
-        to: "2026-qtd-to",
-      });
+        from: "2026-04-01",
+        to: "2026-05-08",
+      }, "qtd");
 
       await act(async () => {
         container.querySelector<HTMLButtonElement>("[data-testid='preset-mtd']")?.click();
@@ -530,7 +547,8 @@ describe("DirectorDashboardPage", () => {
       expect(mocks.useDirectorDashboardMock).toHaveBeenLastCalledWith({
         from: "2026-mtd-from",
         to: "2026-mtd-to",
-      });
+      }, "mtd");
+      expect(mocks.useRepPerformanceMock).toHaveBeenLastCalledWith("mtd");
     } finally {
       await cleanup();
     }
@@ -539,11 +557,369 @@ describe("DirectorDashboardPage", () => {
   it("renders activity pulse and recent closes panels", () => {
     const html = renderPageHtml();
 
-    expect(html).toContain("Activity pulse · this week");
+    expect(html).toContain("Activity pulse · QTD");
     expect(html).toContain("121 total");
     expect(html).toContain("Blake Rep");
     expect(html).toContain("Recent closes");
     expect(html).toContain("1 won · 0 lost");
     expect(html).toContain("Plano Center");
+  });
+
+  it("uses historical period kinds instead of legacy current-period mappings", async () => {
+    const { container, cleanup } = await renderPageDom();
+
+    try {
+      await act(async () => {
+        container.querySelector<HTMLButtonElement>("[data-testid='preset-last_month']")?.click();
+      });
+
+      expect(mocks.useDirectorDashboardMock).toHaveBeenLastCalledWith({
+        from: "2026-last_month-from",
+        to: "2026-last_month-to",
+      }, "last_month");
+      expect(mocks.useRepPerformanceMock).toHaveBeenLastCalledWith("last_month");
+    } finally {
+      await cleanup();
+    }
+  });
+
+  it("uses period-aware rep forecast instead of fixed dashboard forecast", () => {
+    const html = renderPageHtml();
+
+    expect(html).toContain("$360,000 / $500,000");
+    expect(html).not.toContain("$910,000 / $500,000");
+  });
+
+  it("counts fallback at-risk reps from backend rep attribution and routes open-all to deals", () => {
+    mocks.useDirectorDashboardMock.mockReturnValue({
+      ...mocks.useDirectorDashboardMock(),
+      data: {
+        ...mocks.useDirectorDashboardMock().data,
+        staleDeals: [],
+        atRiskDeals: [
+          {
+            dealId: "risk-1",
+            repId: "rep-1",
+            repName: "Avery Rep",
+            dealName: "Risk One",
+            stageName: "Contract",
+            mirroredStageStatus: "blocked",
+            workflowRoute: "service",
+            regionClassification: "Dallas, TX",
+            dealValue: 100,
+            daysInStage: 15,
+            staleThresholdDays: 10,
+          },
+          {
+            dealId: "risk-2",
+            repId: "rep-2",
+            repName: "Blake Rep",
+            dealName: "Risk Two",
+            stageName: "Production",
+            mirroredStageStatus: "blocked",
+            workflowRoute: "normal",
+            regionClassification: "Austin, TX",
+            dealValue: 200,
+            daysInStage: 20,
+            staleThresholdDays: 10,
+          },
+        ],
+      },
+    });
+
+    const html = renderPageHtml();
+
+    expect(html).toContain("2 flagged deals across 2 reps");
+    expect(html).toContain('href="/deals?filter=at-risk"');
+    expect(html).not.toContain('href="/reports#stale-deals"');
+  });
+
+  it("refreshes both dashboard and rep performance data", async () => {
+    const { container, cleanup } = await renderPageDom();
+
+    try {
+      await act(async () => {
+        container.querySelector<HTMLButtonElement>("[aria-label='Refresh dashboard']")?.click();
+      });
+
+      expect(mocks.dashboardRefetchMock).toHaveBeenCalledOnce();
+      expect(mocks.performanceRefetchMock).toHaveBeenCalledOnce();
+    } finally {
+      await cleanup();
+    }
+  });
+
+  it("does not render positive-width distribution segments for zero buckets", () => {
+    mocks.useDirectorDashboardMock.mockReturnValue({
+      ...mocks.useDirectorDashboardMock(),
+      data: {
+        ...mocks.useDirectorDashboardMock().data,
+        repFunnelRows: [
+          { repId: "rep-1", repName: "Avery Rep", leads: 1, qualifiedLeads: 0, opportunities: 99, estimating: 0 },
+          { repId: "rep-2", repName: "Blake Rep", leads: 0, qualifiedLeads: 0, opportunities: 0, estimating: 0 },
+        ],
+      },
+    });
+
+    const html = renderPageHtml();
+
+    expect(html).toContain("Leads: 1");
+    expect(html).toContain("Opportunity: 99");
+    expect(html).toContain("width:1%");
+    expect(html).not.toContain("Leads: 0");
+    expect(html).not.toContain("width:4%");
+  });
+
+  it("shows rep performance loading and error states instead of zeroed metrics", () => {
+    const stalePerformanceData = {
+      rows: [
+        {
+          repId: "rep-1",
+          repName: "Avery Rep",
+          periodKind: "mtd",
+          periodStart: "2026-05-01",
+          periodEnd: "2026-05-08",
+          pipelineValue: 900000,
+          closedValue: 777777,
+          dealsCount: 9,
+          winsCount: 8,
+          lossesCount: 1,
+          winRate: 99,
+          avgDaysToClose: 12,
+          atRiskCount: 12,
+          activityTotal: 88,
+          calls: 44,
+          emails: 33,
+          meetings: 11,
+          notes: 0,
+          sparkline8w: [99, 88, 77],
+          region: "Stale Region",
+          computedAt: "2026-05-07T10:00:00.000Z",
+          forecast: 900000,
+          goal: 1000000,
+          goalSource: "manual",
+          percentToGoal: 90,
+          forecastVsGoal: {
+            forecast: 900000,
+            goal: 1000000,
+            goalSource: "manual",
+            percentToGoal: 90,
+          },
+          previous: null,
+        },
+      ],
+      forecastVsGoal: {
+        forecast: 900000,
+        goal: 1000000,
+        goalSource: "manual",
+        percentToGoal: 90,
+      },
+      reps: [
+        {
+          repId: "rep-1",
+          repName: "Avery Rep",
+          current: {
+            dealsWon: 8,
+            dealsLost: 1,
+            totalWonValue: 777777,
+            activitiesLogged: 88,
+            winRate: 99,
+            avgDaysToClose: 12,
+          },
+          previous: null,
+          change: {
+            dealsWon: null,
+            dealsLost: null,
+            totalWonValue: null,
+            activitiesLogged: null,
+            winRate: null,
+            avgDaysToClose: null,
+          },
+          percentChange: {
+            dealsWon: null,
+            dealsLost: null,
+            totalWonValue: null,
+            activitiesLogged: null,
+            winRate: null,
+            avgDaysToClose: null,
+          },
+        },
+      ],
+      periodLabel: {
+        current: "Month to date",
+        previous: "Baseline pending",
+      },
+    };
+
+    mocks.useRepPerformanceMock.mockReturnValue({
+      data: stalePerformanceData,
+      loading: true,
+      error: null,
+      refetch: mocks.performanceRefetchMock,
+    });
+
+    const loadingHtml = renderPageHtml();
+    expect(loadingHtml).toContain("Loading performance metrics");
+    expect(loadingHtml).toContain("Performance metrics pending");
+    expect(loadingHtml).toContain("Performance pending");
+    expect(loadingHtml).not.toContain("$500,000 behind goal");
+    expect(loadingHtml).not.toContain("$0 / $500,000");
+    expect(loadingHtml).not.toContain("0% to goal");
+    expect(loadingHtml).not.toContain("$777,777");
+    expect(loadingHtml).not.toContain("Stale Region");
+    expect(loadingHtml).not.toContain("99%");
+    expect(loadingHtml).not.toContain(">12<");
+
+    mocks.useRepPerformanceMock.mockReturnValue({
+      data: stalePerformanceData,
+      loading: false,
+      error: "Snapshot unavailable",
+      refetch: mocks.performanceRefetchMock,
+    });
+
+    const errorHtml = renderPageHtml();
+    expect(errorHtml).toContain("Snapshot unavailable");
+    expect(errorHtml).toContain("Performance metrics pending");
+    expect(errorHtml).toContain("Performance pending");
+    expect(errorHtml).not.toContain("$500,000 behind goal");
+    expect(errorHtml).not.toContain("$0 / $500,000");
+    expect(errorHtml).not.toContain("0% to goal");
+    expect(errorHtml).not.toContain("$777,777");
+    expect(errorHtml).not.toContain("Stale Region");
+    expect(errorHtml).not.toContain("99%");
+    expect(errorHtml).not.toContain(">12<");
+  });
+
+  it("does not export stale rep performance values while performance data is unavailable", async () => {
+    mocks.useRepPerformanceMock.mockReturnValue({
+      data: {
+        rows: [
+          {
+            repId: "rep-1",
+            repName: "Avery Rep",
+            periodKind: "mtd",
+            periodStart: "2026-05-01",
+            periodEnd: "2026-05-08",
+            pipelineValue: 900000,
+            closedValue: 777777,
+            dealsCount: 9,
+            winsCount: 8,
+            lossesCount: 1,
+            winRate: 99,
+            avgDaysToClose: 12,
+            atRiskCount: 12,
+            activityTotal: 88,
+            calls: 44,
+            emails: 33,
+            meetings: 11,
+            notes: 0,
+            sparkline8w: [99, 88, 77],
+            region: "Stale Region",
+            computedAt: "2026-05-07T10:00:00.000Z",
+            forecast: 900000,
+            goal: 1000000,
+            goalSource: "manual",
+            percentToGoal: 90,
+            forecastVsGoal: {
+              forecast: 900000,
+              goal: 1000000,
+              goalSource: "manual",
+              percentToGoal: 90,
+            },
+            previous: null,
+          },
+        ],
+        forecastVsGoal: {
+          forecast: 900000,
+          goal: 1000000,
+          goalSource: "manual",
+          percentToGoal: 90,
+        },
+        reps: [],
+        periodLabel: {
+          current: "Month to date",
+          previous: "Baseline pending",
+        },
+      },
+      loading: true,
+      error: null,
+      refetch: mocks.performanceRefetchMock,
+    });
+
+    const originalCreateObjectUrl = URL.createObjectURL;
+    const originalRevokeObjectUrl = URL.revokeObjectURL;
+    const createObjectURLMock = vi.fn((value: Blob | MediaSource) => {
+      void value;
+      return "blob:director-csv";
+    });
+    Object.defineProperty(URL, "createObjectURL", { value: createObjectURLMock, configurable: true });
+    Object.defineProperty(URL, "revokeObjectURL", { value: vi.fn(), configurable: true });
+    const originalCreateElement = document.createElement.bind(document);
+    vi.spyOn(document, "createElement").mockImplementation((tagName: string) => {
+      const element = originalCreateElement(tagName);
+      if (tagName.toLowerCase() === "a") {
+        vi.spyOn(element, "click").mockImplementation(vi.fn());
+      }
+      return element;
+    });
+
+    const { container, cleanup } = await renderPageDom();
+
+    try {
+      await act(async () => {
+        container.querySelector<HTMLButtonElement>("[data-testid='export-sales-force-csv']")?.click();
+      });
+
+      const csvBlob = createObjectURLMock.mock.calls[0]?.[0] as Blob;
+      const csv = await csvBlob.text();
+      expect(csv).not.toContain("777777");
+      expect(csv).not.toContain("Stale Region");
+      expect(csv).not.toContain(",12,");
+      expect(csv).toContain("Avery Rep,,0,0,910000,6,67,3,Moderate");
+    } finally {
+      await cleanup();
+      Object.defineProperty(URL, "createObjectURL", { value: originalCreateObjectUrl, configurable: true });
+      Object.defineProperty(URL, "revokeObjectURL", { value: originalRevokeObjectUrl, configurable: true });
+    }
+  });
+
+  it("exports the sales force table as CSV", async () => {
+    const originalCreateObjectUrl = URL.createObjectURL;
+    const originalRevokeObjectUrl = URL.revokeObjectURL;
+    const createObjectURLMock = vi.fn((value: Blob | MediaSource) => {
+      void value;
+      return "blob:director-csv";
+    });
+    const revokeObjectURLMock = vi.fn();
+    Object.defineProperty(URL, "createObjectURL", { value: createObjectURLMock, configurable: true });
+    Object.defineProperty(URL, "revokeObjectURL", { value: revokeObjectURLMock, configurable: true });
+    const clickMock = vi.fn();
+    const originalCreateElement = document.createElement.bind(document);
+    vi.spyOn(document, "createElement").mockImplementation((tagName: string) => {
+      const element = originalCreateElement(tagName);
+      if (tagName.toLowerCase() === "a") {
+        vi.spyOn(element, "click").mockImplementation(clickMock);
+      }
+      return element;
+    });
+
+    const { container, cleanup } = await renderPageDom();
+
+    try {
+      await act(async () => {
+        container.querySelector<HTMLButtonElement>("[data-testid='export-sales-force-csv']")?.click();
+      });
+
+      expect(createObjectURLMock).toHaveBeenCalledOnce();
+      const csvBlob = createObjectURLMock.mock.calls[0]?.[0] as Blob;
+      await expect(csvBlob.text()).resolves.toContain("Rep,Region,Closed Value,Closed Deals,Pipeline Value,Active Deals,Win Rate,At Risk,Activity");
+      await expect(csvBlob.text()).resolves.toContain("Avery Rep,North DFW,240000,4,910000,6,67,3,Moderate");
+      expect(clickMock).toHaveBeenCalledOnce();
+      expect(revokeObjectURLMock).toHaveBeenCalledWith("blob:director-csv");
+    } finally {
+      await cleanup();
+      Object.defineProperty(URL, "createObjectURL", { value: originalCreateObjectUrl, configurable: true });
+      Object.defineProperty(URL, "revokeObjectURL", { value: originalRevokeObjectUrl, configurable: true });
+    }
   });
 });

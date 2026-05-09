@@ -17,6 +17,30 @@ describe("use-rep-performance helpers", () => {
     expect(normalizeRepPerformancePeriod("quarter")).toBe("qtd");
     expect(normalizeRepPerformancePeriod("year")).toBe("ytd");
     expect(normalizeRepPerformancePeriod("last_month")).toBe("last_month");
+    expect(normalizeRepPerformancePeriod("last_quarter")).toBe("last_quarter");
+    expect(normalizeRepPerformancePeriod("last_year")).toBe("last_year");
+  });
+
+  it("fetches historical snapshot period kinds without remapping them to current periods", async () => {
+    apiMock.mockResolvedValue({
+      data: {
+        rows: [],
+        forecastVsGoal: {
+          forecast: 0,
+          goal: null,
+          goalSource: "none",
+          percentToGoal: null,
+        },
+      },
+    });
+
+    await fetchRepPerformance("last_month");
+    await fetchRepPerformance("last_quarter");
+    await fetchRepPerformance("last_year");
+
+    expect(apiMock).toHaveBeenNthCalledWith(1, "/dashboard/director/rep-performance?periodKind=last_month");
+    expect(apiMock).toHaveBeenNthCalledWith(2, "/dashboard/director/rep-performance?periodKind=last_quarter");
+    expect(apiMock).toHaveBeenNthCalledWith(3, "/dashboard/director/rep-performance?periodKind=last_year");
   });
 
   it("fetches director rep-performance snapshots and preserves no-goal state", async () => {

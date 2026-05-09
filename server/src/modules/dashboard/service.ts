@@ -305,6 +305,8 @@ export interface DashboardCrmOwnedProgressionRow {
 
 export interface DashboardDownstreamBottleneckRow {
   dealId: string;
+  repId: string | null;
+  repName: string;
   dealName: string;
   stageName: string;
   mirroredStageStatus: string | null;
@@ -457,6 +459,8 @@ async function getDownstreamBottlenecks(
   const result = await tenantDb.execute(sql`
     SELECT
       d.id AS deal_id,
+      d.assigned_rep_id AS rep_id,
+      COALESCE(u.display_name, 'Unassigned') AS rep_name,
       d.name AS deal_name,
       psc.name AS stage_name,
       COALESCE(d.bid_board_stage_slug, psc.slug) AS mirrored_stage_slug,
@@ -468,6 +472,7 @@ async function getDownstreamBottlenecks(
       COALESCE(mirror_psc.stale_threshold_days, psc.stale_threshold_days, 14)::int AS stale_threshold_days
     FROM deals d
     JOIN pipeline_stage_config psc ON psc.id = d.stage_id
+    LEFT JOIN users u ON u.id = d.assigned_rep_id
     LEFT JOIN pipeline_stage_config mirror_psc
       ON mirror_psc.slug = COALESCE(d.bid_board_stage_slug, psc.slug)
     WHERE d.is_active = true
@@ -487,6 +492,8 @@ async function getDownstreamBottlenecks(
   const rows = (result as any).rows ?? result;
   return rows.map((row: any) => ({
     dealId: row.deal_id,
+    repId: row.rep_id ? String(row.rep_id) : null,
+    repName: String(row.rep_name ?? "Unassigned"),
     dealName: row.deal_name,
     stageName: resolveMirroredStageLabel(row.mirrored_stage_slug, row.stage_name),
     mirroredStageStatus: row.mirrored_stage_status ?? null,
@@ -1907,7 +1914,7 @@ export async function getDirectorCommissionWorkspace(
  */
 export async function getDirectorDashboard(
   tenantDb: TenantDb,
-  options: { from?: string; to?: string; officeId: string }
+  options: { from?: string; to?: string; officeId: string; periodKind?: RepPerformancePeriodKind }
 ): Promise<DirectorDashboardData> {
   const year = new Date().getFullYear();
   const from = options.from ?? `${year}-01-01`;
@@ -1952,7 +1959,7 @@ export async function getDirectorDashboard(
     getDownstreamBottlenecks(tenantDb),
     getDirectorFunnelSummary(tenantDb),
     getDirectorRepCommissionRows(tenantDb, { from, to }),
-    getRepPerformanceSnapshots(tenantDb, options.officeId, "mtd"),
+    getRepPerformanceSnapshots(tenantDb, options.officeId, options.periodKind ?? "mtd"),
     getRecentCloses(tenantDb, { from, to }),
   ]);
 

@@ -6,7 +6,7 @@ import {
   type DateRangePreset,
   type RepPerformanceCard,
 } from "@/hooks/use-director-dashboard";
-import { useRepPerformance, type RepPerformanceSnapshotRow } from "@/hooks/use-rep-performance";
+import { useRepPerformance, type RepPerformancePeriodKind, type RepPerformanceSnapshotRow } from "@/hooks/use-rep-performance";
 import { formatCurrency } from "@/components/charts/chart-colors";
 import {
   Activity,
@@ -40,6 +40,26 @@ const PRESETS: Array<{ value: DateRangePreset; label: string }> = [
   { value: "last_quarter", label: "Last quarter" },
   { value: "last_year", label: "Last year" },
 ];
+
+const PERIOD_LABELS: Record<DateRangePreset, string> = {
+  mtd: "MTD",
+  qtd: "QTD",
+  ytd: "YTD",
+  last_month: "last month",
+  last_quarter: "last quarter",
+  last_year: "last year",
+  custom: "selected period",
+};
+
+const PERIOD_ACTIVITY_LABELS: Record<DateRangePreset, string> = {
+  mtd: "this month",
+  qtd: "this quarter",
+  ytd: "this year",
+  last_month: "last month",
+  last_quarter: "last quarter",
+  last_year: "last year",
+  custom: "selected period",
+};
 
 type ActivityLevel = { dot: string; label: "High" | "Moderate" | "Low" };
 
@@ -113,10 +133,44 @@ function relativeDate(value: string): string {
 }
 
 function weeksRemaining(to: string): number | null {
-  const end = new Date(`${to}T23:59:59`);
-  if (Number.isNaN(end.getTime())) return null;
-  const diff = end.getTime() - Date.now();
+  const [year, month, day] = to.split("-").map(Number);
+  if (!year || !month || !day) return null;
+  const endUtc = Date.UTC(year, month - 1, day, 23, 59, 59, 999);
+  const now = new Date();
+  const nowUtc = Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate(), now.getUTCHours(), now.getUTCMinutes(), now.getUTCSeconds(), now.getUTCMilliseconds());
+  const diff = endUtc - nowUtc;
   return Math.max(0, Math.ceil(diff / (7 * 86_400_000)));
+}
+
+function periodEndForPreset(preset: DateRangePreset, dateRange: { from: string; to: string }): string {
+  if (preset === "last_month" || preset === "last_quarter" || preset === "last_year" || preset === "custom") {
+    return dateRange.to;
+  }
+
+  const now = new Date();
+  const year = now.getFullYear();
+  const month = now.getMonth();
+  if (preset === "mtd") {
+    return `${year}-${String(month + 1).padStart(2, "0")}-${String(new Date(year, month + 1, 0).getDate()).padStart(2, "0")}`;
+  }
+  if (preset === "qtd") {
+    const quarterEndMonth = Math.floor(month / 3) * 3 + 2;
+    return `${year}-${String(quarterEndMonth + 1).padStart(2, "0")}-${String(new Date(year, quarterEndMonth + 1, 0).getDate()).padStart(2, "0")}`;
+  }
+  return `${year}-12-31`;
+}
+
+function formatFreshness(value: string | null | undefined): string {
+  if (!value) return "sync pending";
+  const fetchedAt = new Date(value).getTime();
+  if (Number.isNaN(fetchedAt)) return "sync pending";
+  const diffSeconds = Math.max(0, Math.floor((Date.now() - fetchedAt) / 1000));
+  if (diffSeconds < 60) return "synced just now";
+  const diffMinutes = Math.floor(diffSeconds / 60);
+  if (diffMinutes < 60) return `synced ${diffMinutes}m ago`;
+  const diffHours = Math.floor(diffMinutes / 60);
+  if (diffHours < 24) return `synced ${diffHours}h ago`;
+  return `synced ${Math.floor(diffHours / 24)}d ago`;
 }
 
 function MiniSparkline({ values }: { values: number[] }) {
@@ -168,12 +222,12 @@ function DistributionBar({ row }: { row?: { leads: number; qualifiedLeads: numbe
   return (
     <div className="w-28">
       <div className="flex h-2 overflow-hidden rounded-full bg-gray-100" aria-label="Stage distribution">
-        {parts.map((part) => (
+        {parts.filter((part) => part.value > 0).map((part) => (
           <div
             key={part.label}
             title={`${part.label}: ${part.value}`}
             className={part.color}
-            style={{ width: `${Math.max((part.value / total) * 100, 4)}%` }}
+            style={{ width: `${(part.value / total) * 100}%` }}
           />
         ))}
       </div>
@@ -222,18 +276,23 @@ function formatPathLabel(route: "normal" | "service") {
   return `${getWorkflowRouteLabel(route)} path`;
 }
 
+function csvCell(value: string | number | null | undefined): string {
+  const raw = value === null || value === undefined ? "" : String(value);
+  return /[",\n]/.test(raw) ? `"${raw.replace(/"/g, '""')}"` : raw;
+}
+
 export function DirectorDashboardPage() {
   const navigate = useNavigate();
   const [preset, setPreset] = useState<DateRangePreset>("qtd");
   const dateRange = presetToDateRange(preset);
-  const { data, loading, error, refetch } = useDirectorDashboard(dateRange);
-  const perfPeriod =
-    preset === "mtd" || preset === "last_month"
-      ? "month"
-      : preset === "qtd" || preset === "last_quarter"
-        ? "quarter"
-        : "year";
-  const { data: perfData } = useRepPerformance(perfPeriod);
+  const repPerformancePeriod = preset as RepPerformancePeriodKind;
+  const { data, loading, error, refetch, lastFetchedAt } = useDirectorDashboard(dateRange, repPerformancePeriod);
+  const {
+    data: perfData,
+    loading: perfLoading,
+    error: perfError,
+    refetch: refetchPerformance,
+  } = useRepPerformance(repPerformancePeriod);
 
   const selectedPreset = PRESETS.find((p) => p.value === preset) ?? PRESETS[1];
 
@@ -271,25 +330,29 @@ export function DirectorDashboardPage() {
     totalCount: data.ddVsPipeline.totalCount,
   };
 
+  const hasPerformanceData = Boolean(perfData) && !perfLoading && !perfError;
+  const usablePerfData = hasPerformanceData ? perfData : null;
   const perfRowsByRep = new Map<string, RepPerformanceSnapshotRow>(
-    (perfData?.rows ?? []).map((row) => [row.repId, row])
+    (usablePerfData?.rows ?? []).map((row) => [row.repId, row])
   );
-  const perfRepsByRep = new Map((perfData?.reps ?? []).map((row) => [row.repId, row]));
+  const perfRepsByRep = new Map((usablePerfData?.reps ?? []).map((row) => [row.repId, row]));
   const funnelByRep = new Map(data.repFunnelRows.map((row) => [row.repId, row]));
   const activityPulse = (data.activityPulse ?? data.activityByRep).slice().sort((a, b) => b.total - a.total);
-  const atRiskDeals = data.staleDeals.length > 0 ? data.staleDeals : data.atRiskDeals ?? [];
+  const isUsingStaleDeals = data.staleDeals.length > 0;
+  const atRiskDeals = isUsingStaleDeals ? data.staleDeals : data.atRiskDeals ?? [];
+  const atRiskDestination = isUsingStaleDeals ? "/reports#stale-deals" : "/deals?filter=at-risk";
   const totalAtRiskValue = atRiskDeals.reduce((sum, deal) => sum + deal.dealValue, 0);
-  const atRiskRepCount = new Set(atRiskDeals.map((deal) => ("repName" in deal ? deal.repName : "Unassigned"))).size;
-  const closedValue = perfData?.reps.reduce((sum, row) => sum + row.current.totalWonValue, 0) ?? 0;
-  const closedCount = perfData?.reps.reduce((sum, row) => sum + row.current.dealsWon, 0) ?? 0;
-  const forecastVsGoal = data.forecastVsGoal ?? perfData?.forecastVsGoal ?? null;
+  const atRiskRepCount = new Set(atRiskDeals.map((deal) => deal.repName).filter(Boolean)).size;
+  const closedValue = usablePerfData ? usablePerfData.reps.reduce((sum, row) => sum + row.current.totalWonValue, 0) : null;
+  const closedCount = usablePerfData ? usablePerfData.reps.reduce((sum, row) => sum + row.current.dealsWon, 0) : null;
+  const forecastVsGoal = usablePerfData ? usablePerfData.forecastVsGoal : null;
   const goal = forecastVsGoal?.goal ?? 0;
-  const forecast = forecastVsGoal?.forecast ?? opportunityVsPipeline.pipelineValue;
-  const wonPercent = goal > 0 ? clampPercent((closedValue / goal) * 100) : 0;
-  const pipePercent = goal > 0 ? clampPercent((forecast / goal) * 100) : 0;
-  const goalGap = goal > closedValue ? goal - closedValue : 0;
-  const remainingWeeks = weeksRemaining(dateRange.to);
-  const paceLabel = goal > 0 && closedValue >= goal ? "Ahead" : pipePercent >= 75 ? "On pace" : "Behind";
+  const forecast = forecastVsGoal?.forecast ?? 0;
+  const wonPercent = goal > 0 && closedValue !== null ? clampPercent((closedValue / goal) * 100) : null;
+  const pipePercent = hasPerformanceData && goal > 0 ? clampPercent((forecast / goal) * 100) : null;
+  const goalGap = goal > 0 && closedValue !== null && goal > closedValue ? goal - closedValue : 0;
+  const remainingWeeks = weeksRemaining(periodEndForPreset(preset, dateRange));
+  const paceLabel = !hasPerformanceData ? "--" : goal > 0 && closedValue !== null && closedValue >= goal ? "Ahead" : (pipePercent ?? 0) >= 75 ? "On pace" : "Behind";
   const totalActivity = activityPulse.reduce((sum, row) => sum + row.total, 0);
   const strategicAlerts = data.strategicAlerts ?? [];
   const aiPrompts = data.aiCoachingPrompts ?? [];
@@ -297,6 +360,40 @@ export function DirectorDashboardPage() {
   const wonCloses = recentCloses.filter((close) => close.outcome === "won").length;
   const lostCloses = recentCloses.filter((close) => close.outcome === "lost").length;
   const repRows = [...data.repCards].sort((a, b) => b.pipelineValue - a.pipelineValue);
+  const periodLabel = PERIOD_LABELS[preset];
+  const activityPeriodLabel = PERIOD_ACTIVITY_LABELS[preset];
+  const performanceUnavailable = perfLoading || Boolean(perfError);
+
+  function exportSalesForceCsv() {
+    const header = ["Rep", "Region", "Closed Value", "Closed Deals", "Pipeline Value", "Active Deals", "Win Rate", "At Risk", "Activity"];
+    const rows = repRows.map((rep) => {
+      const snapshot = perfRowsByRep.get(rep.repId);
+      const perfRep = perfRepsByRep.get(rep.repId);
+      const closed = snapshot?.closedValue ?? perfRep?.current.totalWonValue ?? 0;
+      const closedDeals = snapshot?.winsCount ?? perfRep?.current.dealsWon ?? 0;
+      const atRisk = snapshot?.atRiskCount ?? rep.staleDeals + rep.staleLeads;
+      const activity = getActivityLevel(rep.activityScore);
+      return [
+        rep.repName,
+        snapshot?.region ?? "",
+        closed,
+        closedDeals,
+        rep.pipelineValue,
+        rep.activeDeals,
+        snapshot?.winRate ?? rep.winRate,
+        atRisk,
+        activity.label,
+      ];
+    });
+    const csv = [header, ...rows].map((row) => row.map(csvCell).join(",")).join("\n");
+    const blob = new Blob([csv], { type: "text/csv;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = `director-sales-force-${preset}.csv`;
+    link.click();
+    URL.revokeObjectURL(url);
+  }
 
   return (
     <div className="min-h-screen bg-[#F5F4F2] p-4 sm:p-6">
@@ -306,7 +403,7 @@ export function DirectorDashboardPage() {
             Director Dashboard
           </h1>
           <p className="mt-1 text-[11px] font-bold uppercase tracking-widest text-gray-500">
-            Strategic performance overview · synced just now
+            Strategic performance overview · {formatFreshness(lastFetchedAt)}
           </p>
         </div>
 
@@ -330,7 +427,10 @@ export function DirectorDashboardPage() {
             type="button"
             aria-label="Refresh dashboard"
             title="Refresh dashboard"
-            onClick={() => void refetch()}
+            onClick={() => {
+              void refetch();
+              void refetchPerformance();
+            }}
             className="inline-flex h-9 w-9 items-center justify-center rounded-full border border-gray-200 bg-white text-gray-500 shadow-sm hover:text-gray-950"
           >
             <RefreshCw className="h-4 w-4" />
@@ -366,9 +466,9 @@ export function DirectorDashboardPage() {
         />
         <KpiCard
           label={`Closed ${selectedPreset.label}`}
-          value={formatCurrency(closedValue)}
-          badge={goal > 0 ? `${wonPercent}% to goal` : `${closedCount} won`}
-          caption={goal > 0 ? `Goal ${formatCurrency(goal)} ${selectedPreset.label}` : "Goal not configured"}
+          value={hasPerformanceData && closedValue !== null ? formatCurrency(closedValue) : "--"}
+          badge={!hasPerformanceData ? "loading" : goal > 0 && wonPercent !== null ? `${wonPercent}% to goal` : `${closedCount ?? 0} won`}
+          caption={perfError ? "Performance unavailable" : goal > 0 ? `Goal ${formatCurrency(goal)} ${selectedPreset.label}` : "Goal not configured"}
           accent="blue"
         />
         <KpiCard
@@ -385,11 +485,18 @@ export function DirectorDashboardPage() {
         <div className="grid gap-5 xl:grid-cols-[1fr_430px] xl:items-start">
           <div>
             <p className="text-[10px] font-black uppercase tracking-widest text-gray-400">Forecast vs goal</p>
+            {performanceUnavailable && (
+              <p className={`mt-2 rounded-lg border px-3 py-2 text-sm font-semibold ${perfError ? "border-red-200 bg-red-50 text-red-700" : "border-gray-200 bg-gray-50 text-gray-500"}`}>
+                {perfError ?? "Loading performance metrics"}
+              </p>
+            )}
             <p className="mt-2 text-4xl font-black tracking-tight text-gray-950">
-              {formatCurrency(closedValue)} / {goal > 0 ? formatCurrency(goal) : "--"}
+              {hasPerformanceData && closedValue !== null ? formatCurrency(closedValue) : "--"} / {goal > 0 ? formatCurrency(goal) : "--"}
             </p>
             <p className={`mt-1 text-sm font-semibold ${goalGap > 0 ? "text-[#CC0000]" : "text-emerald-600"}`}>
-              {goalGap > 0
+              {!hasPerformanceData
+                ? "Performance metrics pending"
+                : goalGap > 0
                 ? `${formatCurrency(goalGap)} behind goal · ${remainingWeeks ?? "--"} weeks remaining`
                 : "Goal met or ahead · current period"}
             </p>
@@ -404,12 +511,12 @@ export function DirectorDashboardPage() {
             <div className="rounded-lg border border-gray-200 bg-gray-50 p-3">
               <Trophy className="h-4 w-4 text-emerald-600" />
               <p className="mt-2 text-[10px] font-black uppercase tracking-widest text-gray-400">Closing</p>
-              <p className="mt-1 font-black text-gray-950">{wonCloses} this week</p>
+              <p className="mt-1 font-black text-gray-950">{wonCloses} {activityPeriodLabel}</p>
             </div>
             <div className="rounded-lg border border-gray-200 bg-gray-50 p-3">
               <Zap className="h-4 w-4 text-blue-600" />
               <p className="mt-2 text-[10px] font-black uppercase tracking-widest text-gray-400">Activity</p>
-              <p className="mt-1 font-black text-gray-950">{totalActivity} this week</p>
+              <p className="mt-1 font-black text-gray-950">{totalActivity} {activityPeriodLabel}</p>
             </div>
           </div>
         </div>
@@ -418,16 +525,16 @@ export function DirectorDashboardPage() {
           <div className="grid grid-cols-[52px_1fr_48px] items-center gap-3">
             <span className="text-[10px] font-black uppercase tracking-widest text-gray-500">Won</span>
             <div className="h-3 overflow-hidden rounded-full bg-gray-100">
-              <div className="h-full rounded-full bg-[#CC0000]" style={{ width: `${wonPercent}%` }} />
+              <div className="h-full rounded-full bg-[#CC0000]" style={{ width: `${wonPercent ?? 0}%` }} />
             </div>
-            <span className="text-right text-[11px] font-black text-gray-700">{wonPercent}%</span>
+            <span className="text-right text-[11px] font-black text-gray-700">{wonPercent === null ? "--" : `${wonPercent}%`}</span>
           </div>
           <div className="grid grid-cols-[52px_1fr_48px] items-center gap-3">
             <span className="text-[10px] font-black uppercase tracking-widest text-gray-500">Pipe</span>
             <div className="h-3 overflow-hidden rounded-full bg-gray-100">
-              <div className="h-full rounded-full bg-blue-500" style={{ width: `${pipePercent}%` }} />
+              <div className="h-full rounded-full bg-blue-500" style={{ width: `${pipePercent ?? 0}%` }} />
             </div>
-            <span className="text-right text-[11px] font-black text-gray-700">{pipePercent}%</span>
+            <span className="text-right text-[11px] font-black text-gray-700">{pipePercent === null ? "--" : `${pipePercent}%`}</span>
           </div>
         </div>
       </section>
@@ -441,6 +548,8 @@ export function DirectorDashboardPage() {
             </div>
             <button
               type="button"
+              data-testid="export-sales-force-csv"
+              onClick={exportSalesForceCsv}
               className="inline-flex items-center gap-2 rounded-full border border-gray-200 px-3 py-1.5 text-xs font-bold uppercase tracking-wide text-gray-600 hover:text-gray-950"
             >
               <Download className="h-3.5 w-3.5" />
@@ -473,10 +582,12 @@ export function DirectorDashboardPage() {
                 {repRows.map((rep) => {
                   const snapshot = perfRowsByRep.get(rep.repId);
                   const perfRep = perfRepsByRep.get(rep.repId);
-                  const closed = snapshot?.closedValue ?? perfRep?.current.totalWonValue ?? 0;
-                  const closedDeals = snapshot?.winsCount ?? perfRep?.current.dealsWon ?? 0;
-                  const winRate = snapshot?.winRate ?? rep.winRate;
-                  const winDelta = snapshot?.previous ? winRate - snapshot.previous.winRate : perfRep?.change.winRate ?? null;
+                  const closed = hasPerformanceData ? snapshot?.closedValue ?? perfRep?.current.totalWonValue ?? null : null;
+                  const closedDeals = hasPerformanceData ? snapshot?.winsCount ?? perfRep?.current.dealsWon ?? null : null;
+                  const winRate = hasPerformanceData ? snapshot?.winRate ?? rep.winRate : null;
+                  const winDelta = hasPerformanceData && winRate !== null
+                    ? snapshot?.previous ? winRate - snapshot.previous.winRate : perfRep?.change.winRate ?? null
+                    : null;
                   const atRisk = snapshot?.atRiskCount ?? rep.staleDeals + rep.staleLeads;
                   const activity = getActivityLevel(rep.activityScore);
                   const needsHelp = atRisk > 0 || activity.label === "Low";
@@ -499,13 +610,13 @@ export function DirectorDashboardPage() {
                                 </span>
                               )}
                             </div>
-                            <p className="text-xs text-gray-500">{snapshot?.region ?? "Region unavailable"}</p>
+                            <p className="text-xs text-gray-500">{hasPerformanceData ? snapshot?.region ?? "Region unavailable" : "Performance pending"}</p>
                           </div>
                         </div>
                       </td>
                       <td className="px-4 py-4 text-right">
-                        <p className="font-black text-gray-950">{formatCurrency(closed)}</p>
-                        <p className="text-xs text-gray-500">{closedDeals} won</p>
+                        <p className="font-black text-gray-950">{closed === null ? "--" : formatCurrency(closed)}</p>
+                        <p className="text-xs text-gray-500">{closedDeals === null ? "pending" : `${closedDeals} won`}</p>
                       </td>
                       <td className="px-4 py-4 text-right">
                         <p className="font-black text-gray-950">{formatCurrency(rep.pipelineValue)}</p>
@@ -515,7 +626,7 @@ export function DirectorDashboardPage() {
                         <DistributionBar row={funnelByRep.get(rep.repId)} />
                       </td>
                       <td className="px-4 py-4 text-right">
-                        <p className="font-black text-gray-950">{formatPercent(winRate)}</p>
+                        <p className="font-black text-gray-950">{winRate === null ? "--" : formatPercent(winRate)}</p>
                         {formatDelta(winDelta, "pp")}
                       </td>
                       <td className="px-4 py-4 text-center">
@@ -588,7 +699,7 @@ export function DirectorDashboardPage() {
               <h2 className="text-sm font-black uppercase tracking-wide text-gray-950">At-risk deals</h2>
               <span className="rounded-full bg-red-100 px-2 py-0.5 text-[10px] font-black text-red-700">{atRiskDeals.length}</span>
             </div>
-            <Link to="/reports#stale-deals" className="text-xs font-bold uppercase tracking-wide text-[#CC0000] hover:text-red-700">
+            <Link to={atRiskDestination} className="text-xs font-bold uppercase tracking-wide text-[#CC0000] hover:text-red-700">
               Open all
             </Link>
           </div>
@@ -597,7 +708,7 @@ export function DirectorDashboardPage() {
             {atRiskDeals.length > 0 ? (
               atRiskDeals.slice(0, 6).map((deal) => {
                 const overSla = Math.max(0, deal.daysInStage - (deal.staleThresholdDays ?? deal.daysInStage));
-                const repName = "repName" in deal ? deal.repName : "Unassigned";
+                const repName = deal.repName;
                 const workflowRoute = deal.workflowRoute ?? "normal";
                 return (
                   <Link key={deal.dealId} to={`/deals/${deal.dealId}`} className="grid gap-3 px-5 py-4 transition-colors hover:bg-gray-50 md:grid-cols-[1fr_auto_auto_auto] md:items-center">
@@ -676,7 +787,7 @@ export function DirectorDashboardPage() {
       <section className="mt-4 grid grid-cols-1 gap-4 xl:grid-cols-[minmax(0,1fr)_390px]">
         <div className="rounded-xl border border-gray-200 bg-white p-5 shadow-sm">
           <div className="mb-5 flex items-center justify-between">
-            <h2 className="text-sm font-black uppercase tracking-wide text-gray-950">Activity pulse · this week</h2>
+            <h2 className="text-sm font-black uppercase tracking-wide text-gray-950">Activity pulse · {periodLabel}</h2>
             <span className="rounded-full bg-gray-100 px-2.5 py-1 text-xs font-black text-gray-700">{totalActivity} total</span>
           </div>
           <div className="space-y-4">
@@ -714,7 +825,7 @@ export function DirectorDashboardPage() {
                 );
               })
             ) : (
-              <p className="text-sm text-gray-400">No activity pulse data for this week.</p>
+              <p className="text-sm text-gray-400">No activity pulse data for {periodLabel.toLowerCase()}.</p>
             )}
           </div>
         </div>
