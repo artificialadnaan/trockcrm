@@ -28,6 +28,16 @@ function extractSqlText(value: unknown): string {
 }
 
 describe("commission reporting service", () => {
+  it("calculates MTD, QTD, YTD, and All date ranges deterministically", async () => {
+    const { getCommissionPeriodDateRange } = await import("../../../src/modules/commissions/reporting-service.js");
+    const now = new Date("2026-05-09T12:00:00.000Z");
+
+    expect(getCommissionPeriodDateRange("mtd", now)).toEqual({ from: "2026-05-01", to: "2026-05-09" });
+    expect(getCommissionPeriodDateRange("qtd", now)).toEqual({ from: "2026-04-01", to: "2026-05-09" });
+    expect(getCommissionPeriodDateRange("ytd", now)).toEqual({ from: "2026-01-01", to: "2026-05-09" });
+    expect(getCommissionPeriodDateRange("all", now)).toEqual({ from: null, to: null });
+  });
+
   it("maps summary, stage potential, earned months, and deal table with matching totals", async () => {
     const {
       getCommissionPotential,
@@ -249,5 +259,96 @@ describe("commission reporting service", () => {
     expect(earned.deals[0]).toMatchObject({ dealId: "deal-legacy", earnedCommission: 7500, contractSignedDate: "2026-04-10" });
     expect(sqlText).toContain("coalesce(d.contract_signed_at::date, d.contract_signed_date, dsc.contract_signed_date_at_signing)");
     expect(sqlText).not.toContain("slug in ('won', 'sent_to_production', 'service_sent_to_production', 'closed_won')");
+  });
+
+  it("builds the sales-rep dashboard with earned, pipeline, stage totals, and deltas", async () => {
+    const { getRepCommissionDashboard } = await import("../../../src/modules/commissions/reporting-service.js");
+    const tenantDb = createMockTenantDb([
+      [
+        {
+          deal_id: "deal-earned",
+          deal_number: "D-1",
+          deal_name: "Signed Deal",
+          rep_id: "rep-1",
+          company_name: "Client Co",
+          property_name: "Main Campus",
+          property_address: "1 Main",
+          stage_slug: "sent_to_production",
+          deal_value: "100000.00",
+          commission_rate: "0.015000",
+          commission: "1500.00",
+          contract_signed_date: "2026-05-02",
+          expected_close_date: null,
+          days_in_stage: "5",
+          is_earned: true,
+          snapshot_commission_amount: "1500.00",
+        },
+        {
+          deal_id: "deal-contract",
+          deal_number: "D-2",
+          deal_name: "Contract Deal",
+          rep_id: "rep-1",
+          company_name: "Industrial Co",
+          property_name: null,
+          property_address: "2 Main",
+          stage_slug: "contract",
+          deal_value: "305000.00",
+          commission_rate: "0.015000",
+          commission: "4575.00",
+          contract_signed_date: null,
+          expected_close_date: "2026-05-22",
+          days_in_stage: "7",
+          is_earned: false,
+          snapshot_commission_amount: "4500.00",
+        },
+      ],
+      [],
+    ]);
+
+    const data = await getRepCommissionDashboard(tenantDb, {
+      role: "rep",
+      userId: "rep-1",
+      repId: "rep-other",
+      period: "ytd",
+      stages: [],
+    });
+
+    expect(data.summary).toMatchObject({
+      earned: 1500,
+      inPipeline: 4575,
+      totalPotential: 6075,
+      openDealCount: 1,
+    });
+    expect(data.deals.find((deal) => deal.dealId === "deal-contract")).toMatchObject({
+      stageKey: "contract",
+      deltaCommission: 75,
+    });
+    expect(data.stageTotals.map((stage) => stage.stageKey)).toEqual([
+      "won",
+      "contract",
+      "estimate_sent",
+      "estimating",
+      "opportunity",
+    ]);
+    expect(tenantDb.execute).toHaveBeenCalledTimes(2);
+  });
+
+  it("forces the rep dashboard query to the current rep and uses deal value times rate for pipeline", async () => {
+    const { getRepCommissionDashboard } = await import("../../../src/modules/commissions/reporting-service.js");
+    const tenantDb = createMockTenantDb([[], []]);
+
+    await getRepCommissionDashboard(tenantDb, {
+      role: "rep",
+      userId: "rep-self",
+      repId: "rep-other",
+      period: "mtd",
+      stages: [],
+    });
+
+    const queryText = extractSqlText(tenantDb.execute.mock.calls[0][0]).toLowerCase();
+    expect(queryText).toContain("dsc.rep_user_id =");
+    expect(queryText).toContain("d.assigned_rep_id =");
+    expect(queryText).toContain("coalesce(cs.commission_rate, 0)");
+    expect(queryText).not.toContain("estimated_margin_rate");
   });
 });

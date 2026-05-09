@@ -2,7 +2,9 @@ import { Router, type Request } from "express";
 import {
   getCommissionEarned,
   getCommissionPotential,
+  getRepCommissionDashboard,
   getCommissionSummary,
+  normalizeCommissionPeriod,
   type CommissionReportFilters,
 } from "./reporting-service.js";
 
@@ -30,6 +32,19 @@ function filtersFromQuery(req: Request): CommissionReportFilters {
 router.get("/potential", async (req, res, next) => {
   try {
     const data = await getCommissionPotential(req.tenantDb!, filtersFromQuery(req));
+    await req.commitTransaction!();
+    res.json({ data });
+  } catch (err) {
+    next(err);
+  }
+});
+
+router.get("/dashboard", async (req, res, next) => {
+  try {
+    const data = await getRepCommissionDashboard(req.tenantDb!, {
+      ...filtersFromQuery(req),
+      period: normalizeCommissionPeriod(req.query.period),
+    });
     await req.commitTransaction!();
     res.json({ data });
   } catch (err) {
