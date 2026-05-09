@@ -44,6 +44,8 @@ export interface FileFilters {
   leadId?: string;
   contactId?: string;
   category?: FileCategory;
+  fileKind?: "photos" | "documents";
+  linkedType?: "deal" | "lead" | "contact" | "procore" | "change_order" | "unassigned";
   folderPath?: string;
   search?: string;
   tags?: string[];
@@ -58,6 +60,15 @@ export interface Pagination {
   limit: number;
   total: number;
   totalPages: number;
+}
+
+export interface FileStats {
+  totalFiles: number;
+  totalPhotos: number;
+  totalDocuments: number;
+  totalBytes: number;
+  recentUploads: number;
+  dealsWithFiles: number;
 }
 
 export interface FolderNode {
@@ -114,6 +125,8 @@ export function useFiles(filters: FileFilters = {}, options?: { enabled?: boolea
       if (filters.leadId) params.set("leadId", filters.leadId);
       if (filters.contactId) params.set("contactId", filters.contactId);
       if (filters.category) params.set("category", filters.category);
+      if (filters.fileKind) params.set("fileKind", filters.fileKind);
+      if (filters.linkedType) params.set("linkedType", filters.linkedType);
       if (filters.folderPath) params.set("folderPath", filters.folderPath);
       if (filters.search) params.set("search", filters.search);
       if (filters.tags && filters.tags.length > 0) params.set("tags", filters.tags.join(","));
@@ -139,6 +152,8 @@ export function useFiles(filters: FileFilters = {}, options?: { enabled?: boolea
     filters.leadId,
     filters.contactId,
     filters.category,
+    filters.fileKind,
+    filters.linkedType,
     filters.folderPath,
     filters.search,
     filters.tags?.join(","),
@@ -153,6 +168,39 @@ export function useFiles(filters: FileFilters = {}, options?: { enabled?: boolea
   }, [fetchFiles]);
 
   return { files, pagination, loading, error, refetch: fetchFiles };
+}
+
+export function useFileStats(options?: { enabled?: boolean }) {
+  const [stats, setStats] = useState<FileStats | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const enabled = options?.enabled ?? true;
+
+  const fetchStats = useCallback(async () => {
+    if (!enabled) {
+      setStats(null);
+      setError(null);
+      setLoading(false);
+      return;
+    }
+
+    setLoading(true);
+    setError(null);
+    try {
+      const data = await api<{ stats: FileStats }>("/files/stats");
+      setStats(data.stats);
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : "Failed to load file stats");
+    } finally {
+      setLoading(false);
+    }
+  }, [enabled]);
+
+  useEffect(() => {
+    fetchStats();
+  }, [fetchStats]);
+
+  return { stats, loading, error, refetch: fetchStats };
 }
 
 export function useDealFolders(dealId: string | undefined) {

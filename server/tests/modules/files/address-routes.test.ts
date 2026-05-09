@@ -5,6 +5,7 @@ const serviceMocks = vi.hoisted(() => ({
   confirmUpload: vi.fn(),
   uploadNewVersion: vi.fn(),
   getFiles: vi.fn(),
+  getFileStats: vi.fn(),
   getFileById: vi.fn(),
   getFileDownloadUrl: vi.fn(),
   updateFile: vi.fn(),
