@@ -1,144 +1,292 @@
 import { useEffect, useMemo, useState } from "react";
 import { Link } from "react-router-dom";
-import {
-  Bar,
-  BarChart,
-  CartesianGrid,
-  Legend,
-  Line,
-  LineChart,
-  ResponsiveContainer,
-  Tooltip,
-  XAxis,
-  YAxis,
-} from "recharts";
+import { CheckCircle2, ChevronRight, Download, Target, User as UserIcon, Users } from "lucide-react";
 import { api } from "@/lib/api";
-import { useAuth } from "@/lib/auth";
-import { PageHeader } from "@/components/layout/page-header";
-import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
-import { getChartColor } from "@/components/charts/chart-colors";
+import { Card, CardContent } from "@/components/ui/card";
+import { buildReportExportFilename, downloadTextFile, serializeRowsToCsv } from "@/lib/report-export";
+
+type Period = "mtd" | "qtd" | "ytd" | "all";
+type CommissionStage = "won" | "contract" | "estimate_sent" | "estimating" | "opportunity";
+
+interface CommissionDeal {
+  dealId: string;
+  dealNumber: string | null;
+  dealName: string;
+  companyName: string | null;
+  propertyName: string | null;
+  propertyAddress: string | null;
+  stageKey: CommissionStage;
+  stageName: string;
+  stageSlug: string;
+  dealValue: number;
+  commissionRate: number;
+  commission: number;
+  deltaCommission: number | null;
+  contractSignedDate: string | null;
+  expectedCloseDate: string | null;
+  daysInStage: number;
+  isEarned: boolean;
+}
+
+interface StageTotal {
+  stageKey: CommissionStage;
+  stageName: string;
+  commission: number;
+  dealValue: number;
+  dealCount: number;
+  percentOfTotal: number;
+}
+
+interface CommissionDashboard {
+  period: Period;
+  dateRange: { from: string | null; to: string | null };
+  formula: string;
+  goal: { amount: number; percentToGoal: number | null; source: "none" };
+  summary: {
+    earned: number;
+    inPipeline: number;
+    totalPotential: number;
+    openDealCount: number;
+  };
+  stageTotals: StageTotal[];
+  deals: CommissionDeal[];
+}
+
+const PERIODS: Array<{ key: Period; label: string }> = [
+  { key: "mtd", label: "MTD" },
+  { key: "qtd", label: "QTD" },
+  { key: "ytd", label: "YTD" },
+  { key: "all", label: "All" },
+];
+
+const STAGE_ORDER: CommissionStage[] = ["won", "contract", "estimate_sent", "estimating", "opportunity"];
+
+const STAGE_META: Record<CommissionStage, { label: string; description: string; dot: string; bar: string; pill: string }> = {
+  won: {
+    label: "Earned",
+    description: "Contract signed · locked in",
+    dot: "bg-emerald-500",
+    bar: "bg-emerald-500",
+    pill: "bg-emerald-50 text-emerald-700 ring-emerald-200",
+  },
+  contract: {
+    label: "Contract",
+    description: "One signature away",
+    dot: "bg-brand-red/70",
+    bar: "bg-brand-red/70",
+    pill: "bg-brand-red/10 text-brand-red ring-brand-red/20",
+  },
+  estimate_sent: {
+    label: "Estimate Sent",
+    description: "Awaiting client review",
+    dot: "bg-blue-400",
+    bar: "bg-blue-400",
+    pill: "bg-blue-50 text-blue-700 ring-blue-200",
+  },
+  estimating: {
+    label: "Estimating",
+    description: "Pricing in progress",
+    dot: "bg-amber-300",
+    bar: "bg-amber-300",
+    pill: "bg-amber-50 text-amber-700 ring-amber-200",
+  },
+  opportunity: {
+    label: "Opportunity",
+    description: "Earliest stage · uncertain",
+    dot: "bg-slate-300",
+    bar: "bg-slate-300",
+    pill: "bg-slate-100 text-slate-700 ring-slate-200",
+  },
+};
+
+const EMPTY_DASHBOARD: CommissionDashboard = {
+  period: "ytd",
+  dateRange: { from: null, to: null },
+  formula: "",
+  goal: { amount: 0, percentToGoal: null, source: "none" },
+  summary: { earned: 0, inPipeline: 0, totalPotential: 0, openDealCount: 0 },
+  stageTotals: STAGE_ORDER.map((stageKey) => ({
+    stageKey,
+    stageName: STAGE_META[stageKey].label,
+    commission: 0,
+    dealValue: 0,
+    dealCount: 0,
+    percentOfTotal: 0,
+  })),
+  deals: [],
+};
 
 const USD = new Intl.NumberFormat("en-US", {
   style: "currency",
   currency: "USD",
+  minimumFractionDigits: 2,
   maximumFractionDigits: 2,
 });
 
-const SHORT_USD = new Intl.NumberFormat("en-US", {
+const USD_WHOLE = new Intl.NumberFormat("en-US", {
+  style: "currency",
+  currency: "USD",
+  maximumFractionDigits: 0,
+});
+
+const USD_COMPACT = new Intl.NumberFormat("en-US", {
   style: "currency",
   currency: "USD",
   notation: "compact",
   maximumFractionDigits: 1,
 });
 
-interface CommissionSummary {
-  earnedMtd: number;
-  earnedYtd: number;
-  potentialPipeline: number;
-  paidYtd: number;
+function money(value: number, mode: "full" | "whole" | "compact" = "full") {
+  const safe = Number.isFinite(value) ? value : 0;
+  if (mode === "compact") return USD_COMPACT.format(safe);
+  if (mode === "whole") return USD_WHOLE.format(safe);
+  return USD.format(safe);
 }
 
-interface StagePotential {
-  stageId: string;
-  stageName: string;
-  stageSlug: string;
-  displayOrder: number;
-  dealCount: number;
-  totalDealValue: number;
-  potentialCommission: number;
+function percent(value: number | null) {
+  return value == null || !Number.isFinite(value) ? "No goal set" : `${value.toFixed(0)}%`;
 }
 
-interface EarnedMonth {
-  month: string;
-  earnedCommission: number;
-  dealCount: number;
+function formatDate(value: string | null) {
+  if (!value) return "";
+  return new Date(`${value}T00:00:00`).toLocaleDateString("en-US", { month: "short", day: "numeric" });
 }
 
-interface CommissionDeal {
-  dealId: string;
-  dealNumber: string | null;
-  dealName: string;
-  repId: string;
-  repName: string;
-  stageName: string;
-  stageSlug: string;
-  sourceValueAmount: number;
-  appliedRate: number;
-  earnedCommission: number;
-  contractSignedDate: string | null;
-  paidYtd: number;
+function csvRows(deals: CommissionDeal[]) {
+  return deals.map((deal) => ({
+    deal: deal.dealName,
+    company: deal.companyName ?? "",
+    property: deal.propertyName ?? deal.propertyAddress ?? "",
+    stage: STAGE_META[deal.stageKey].label,
+    dealValue: deal.dealValue.toFixed(2),
+    rate: (deal.commissionRate * 100).toFixed(2),
+    commission: deal.commission.toFixed(2),
+    delta: deal.deltaCommission == null ? "" : deal.deltaCommission.toFixed(2),
+    signedDate: deal.contractSignedDate ?? "",
+    expectedCloseDate: deal.expectedCloseDate ?? "",
+  }));
 }
 
-const EMPTY_SUMMARY: CommissionSummary = {
-  earnedMtd: 0,
-  earnedYtd: 0,
-  potentialPipeline: 0,
-  paidYtd: 0,
-};
-
-function formatCurrency(value: number, compact = false) {
-  return (compact ? SHORT_USD : USD).format(Number.isFinite(value) ? value : 0);
-}
-
-function currentYearRange() {
-  const year = new Date().getFullYear();
-  return { from: `${year}-01-01`, to: `${year}-12-31` };
-}
-
-function buildQuery(params: {
-  from: string;
-  to: string;
-  repId: string;
-  stages: string[];
+function MetricCard({
+  eyebrow,
+  value,
+  badge,
+  caption,
+  tone = "neutral",
+}: {
+  eyebrow: string;
+  value: string;
+  badge: string;
+  caption: string;
+  tone?: "red" | "blue" | "green" | "neutral";
 }) {
-  const query = new URLSearchParams();
-  if (params.from) query.set("from", params.from);
-  if (params.to) query.set("to", params.to);
-  if (params.repId) query.set("repId", params.repId);
-  if (params.stages.length > 0) query.set("stages", params.stages.join(","));
-  const qs = query.toString();
-  return qs ? `?${qs}` : "";
+  const drenched = tone === "red";
+  const accent =
+    tone === "blue" ? "border-b-blue-400" : tone === "green" ? "border-b-emerald-500" : "border-b-slate-200";
+  return (
+    <div
+      className={
+        drenched
+          ? "rounded-lg bg-brand-red p-5 text-white shadow-sm"
+          : `rounded-lg border border-slate-200 border-b-4 ${accent} bg-white p-5 shadow-sm`
+      }
+    >
+      <p className={`text-[11px] font-bold uppercase tracking-[0.18em] ${drenched ? "text-white/75" : "text-slate-500"}`}>
+        {eyebrow}
+      </p>
+      <p className={`mt-2 text-3xl font-black tabular-nums ${drenched ? "text-white" : "text-slate-950"}`}>{value}</p>
+      <div className="mt-3 flex flex-wrap items-center gap-2">
+        <span
+          className={
+            drenched
+              ? "rounded-full bg-white/15 px-2.5 py-1 text-[10px] font-black uppercase tracking-wide text-white ring-1 ring-white/25"
+              : "rounded-full bg-slate-100 px-2.5 py-1 text-[10px] font-black uppercase tracking-wide text-slate-700 ring-1 ring-slate-200"
+          }
+        >
+          {badge}
+        </span>
+        <span className={`text-[10px] font-bold uppercase tracking-wide ${drenched ? "text-white/70" : "text-slate-500"}`}>
+          {caption}
+        </span>
+      </div>
+    </div>
+  );
+}
+
+function StageBadge({ stage }: { stage: CommissionStage }) {
+  const meta = STAGE_META[stage];
+  return (
+    <span className={`inline-flex items-center gap-2 rounded-full px-2.5 py-0.5 text-[11px] font-bold uppercase tracking-wide ring-1 ${meta.pill}`}>
+      <span className={`h-2 w-2 rounded-sm ${meta.dot}`} />
+      {meta.label}
+    </span>
+  );
+}
+
+function PipelineBar({ stageTotals }: { stageTotals: StageTotal[] }) {
+  const total = stageTotals.reduce((sum, stage) => sum + stage.commission, 0);
+  if (total <= 0) {
+    return <div className="flex h-14 items-center justify-center rounded-md bg-slate-100 text-xs text-slate-500">No commission activity yet</div>;
+  }
+
+  return (
+    <div className="space-y-4">
+      <div className="flex h-14 w-full overflow-hidden rounded-md ring-1 ring-slate-200">
+        {STAGE_ORDER.map((stageKey, index) => {
+          const stage = stageTotals.find((item) => item.stageKey === stageKey) ?? EMPTY_DASHBOARD.stageTotals[index]!;
+          if (stage.commission <= 0) return null;
+          const widthPct = (stage.commission / total) * 100;
+          return (
+            <div
+              key={stageKey}
+              style={{ width: `${widthPct}%` }}
+              className={`flex min-w-0 flex-col items-center justify-center ${STAGE_META[stageKey].bar} ${index > 0 ? "border-l border-white/40" : ""}`}
+              title={`${STAGE_META[stageKey].label}: ${money(stage.commission)}`}
+            >
+              {widthPct > 8 ? (
+                <>
+                  <p className="text-xs font-black text-white drop-shadow-sm">{money(stage.commission, "compact")}</p>
+                  <p className="text-[9px] font-bold uppercase tracking-wide text-white/90">{widthPct.toFixed(0)}%</p>
+                </>
+              ) : null}
+            </div>
+          );
+        })}
+      </div>
+      <div className="grid grid-cols-2 gap-x-6 gap-y-3 sm:grid-cols-3 lg:grid-cols-5">
+        {STAGE_ORDER.map((stageKey, index) => {
+          const stage = stageTotals.find((item) => item.stageKey === stageKey) ?? EMPTY_DASHBOARD.stageTotals[index]!;
+          return (
+            <div key={stageKey} className="space-y-1">
+              <div className="flex items-center gap-2">
+                <span className={`h-2.5 w-2.5 rounded-sm ${STAGE_META[stageKey].dot}`} />
+                <p className="text-[10px] font-bold uppercase tracking-[0.16em] text-slate-500">{STAGE_META[stageKey].label}</p>
+              </div>
+              <p className="text-lg font-black tabular-nums text-slate-950">{money(stage.commission)}</p>
+              <p className="text-[10px] font-semibold tabular-nums text-slate-500">{stage.percentOfTotal.toFixed(0)}% of total</p>
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
 }
 
 export function RepCommissionsPage() {
-  const { user } = useAuth();
-  const defaults = useMemo(() => currentYearRange(), []);
-  const [from, setFrom] = useState(defaults.from);
-  const [to, setTo] = useState(defaults.to);
-  const [repId, setRepId] = useState("");
-  const [selectedStages, setSelectedStages] = useState<string[]>([]);
-  const [summary, setSummary] = useState<CommissionSummary>(EMPTY_SUMMARY);
-  const [stageGroups, setStageGroups] = useState<StagePotential[]>([]);
-  const [formula, setFormula] = useState("");
-  const [months, setMonths] = useState<EarnedMonth[]>([]);
-  const [deals, setDeals] = useState<CommissionDeal[]>([]);
+  const [period, setPeriod] = useState<Period>("ytd");
+  const [dashboard, setDashboard] = useState<CommissionDashboard>(EMPTY_DASHBOARD);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-
-  const isRep = user?.role === "rep";
-  const query = useMemo(
-    () => buildQuery({ from, to, repId: isRep ? "" : repId, stages: selectedStages }),
-    [from, isRep, repId, selectedStages, to]
-  );
 
   useEffect(() => {
     let alive = true;
     setLoading(true);
     setError(null);
-
-    Promise.all([
-      api<{ data: CommissionSummary }>(`/commissions/summary${query}`),
-      api<{ data: { formula: string; stageGroups: StagePotential[] } }>(`/commissions/potential${query}`),
-      api<{ data: { months: EarnedMonth[]; deals: CommissionDeal[] } }>(`/commissions/earned${query}`),
-    ])
-      .then(([summaryResponse, potentialResponse, earnedResponse]) => {
+    api<{ data: CommissionDashboard }>(`/commissions/dashboard?period=${period}`)
+      .then((response) => {
         if (!alive) return;
-        setSummary(summaryResponse.data);
-        setStageGroups(potentialResponse.data.stageGroups);
-        setFormula(potentialResponse.data.formula);
-        setMonths(earnedResponse.data.months);
-        setDeals(earnedResponse.data.deals);
+        setDashboard(response.data);
       })
       .catch((err) => {
         if (!alive) return;
@@ -147,216 +295,232 @@ export function RepCommissionsPage() {
       .finally(() => {
         if (alive) setLoading(false);
       });
-
     return () => {
       alive = false;
     };
-  }, [query]);
+  }, [period]);
 
-  const reps = useMemo(() => {
-    const byId = new Map<string, string>();
-    for (const deal of deals) byId.set(deal.repId, deal.repName);
-    return [...byId.entries()].map(([id, name]) => ({ id, name })).sort((a, b) => a.name.localeCompare(b.name));
-  }, [deals]);
-
-  const visibleStages = stageGroups.length > 0 ? stageGroups : selectedStages.map((stage) => ({
-    stageId: stage,
-    stageName: stage,
-    stageSlug: stage,
-    displayOrder: 0,
-    dealCount: 0,
-    totalDealValue: 0,
-    potentialCommission: 0,
-  }));
-
-  const rawDealSum = useMemo(
-    () => Number(deals.reduce((sum, deal) => sum + deal.earnedCommission, 0).toFixed(2)),
-    [deals]
+  const groupedDeals = useMemo(
+    () =>
+      STAGE_ORDER.map((stage) => ({
+        stage,
+        deals: dashboard.deals.filter((deal) => deal.stageKey === stage),
+      })),
+    [dashboard.deals]
   );
-  const reconciliationMatches = Math.abs(rawDealSum - summary.earnedYtd) < 0.01;
 
-  function toggleStage(stageSlug: string) {
-    setSelectedStages((current) =>
-      current.includes(stageSlug)
-        ? current.filter((stage) => stage !== stageSlug)
-        : [...current, stageSlug]
-    );
+  const visibleTotal = useMemo(
+    () => Number(dashboard.deals.reduce((sum, deal) => sum + deal.commission, 0).toFixed(2)),
+    [dashboard.deals]
+  );
+  const goalPct = dashboard.goal.percentToGoal;
+  const goalLabel = dashboard.goal.amount > 0 ? `Goal ${money(dashboard.goal.amount, "compact")} ${period.toUpperCase()}` : "No rep goal configured";
+
+  function exportCsv() {
+    const csv = serializeRowsToCsv(csvRows(dashboard.deals));
+    downloadTextFile(csv, buildReportExportFilename("Commissions", "csv"), "text/csv;charset=utf-8;");
   }
-
-  const kpis = [
-    { label: "Earned MTD", value: summary.earnedMtd },
-    { label: "Earned YTD", value: summary.earnedYtd },
-    { label: "Potential Pipeline", value: summary.potentialPipeline },
-    { label: "Paid YTD", value: summary.paidYtd },
-  ];
 
   return (
     <div className="space-y-6">
-      <PageHeader
-        eyebrow="Sales"
-        title="Commissions"
-        description="Potential commission before Contract, earned commission at contract signing, and contributing deals."
-      />
-
-      {error ? (
-        <div className="rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">
-          {error}
+      <section className="flex flex-col gap-4 lg:flex-row lg:items-end lg:justify-between">
+        <div>
+          <h1 className="text-4xl font-black uppercase tracking-tight text-slate-950 md:text-5xl">Commissions</h1>
+          <p className="mt-2 text-[11px] font-bold uppercase tracking-[0.24em] text-slate-500">Your earnings · per project</p>
         </div>
-      ) : null}
-
-      <section className="grid gap-3 rounded-lg border border-slate-200 bg-white p-4 lg:grid-cols-[1fr_1fr_1.4fr_auto]">
-        <label className="grid gap-1 text-xs font-medium uppercase tracking-[0.12em] text-slate-500">
-          From
-          <Input type="date" value={from} onChange={(event) => setFrom(event.target.value)} />
-        </label>
-        <label className="grid gap-1 text-xs font-medium uppercase tracking-[0.12em] text-slate-500">
-          To
-          <Input type="date" value={to} onChange={(event) => setTo(event.target.value)} />
-        </label>
-        <label className="grid gap-1 text-xs font-medium uppercase tracking-[0.12em] text-slate-500">
-          Rep
-          <select
-            value={isRep ? user?.id ?? "" : repId}
-            onChange={(event) => setRepId(event.target.value)}
-            disabled={isRep}
-            className="h-10 rounded-md border border-input bg-background px-3 text-sm normal-case tracking-normal text-slate-900"
+        <div className="flex items-center gap-1 rounded-md border border-slate-200 bg-white p-0.5" aria-label="Commission view">
+          <button type="button" className="flex items-center gap-1.5 rounded-sm bg-slate-100 px-3 py-2 text-sm font-bold text-slate-950">
+            <UserIcon className="h-4 w-4" />
+            My commissions
+          </button>
+          <button
+            type="button"
+            disabled
+            title="Team commissions are not available on the sales-rep commissions page."
+            className="hidden items-center gap-1.5 rounded-sm px-3 py-2 text-sm font-bold text-slate-400 disabled:cursor-not-allowed md:flex"
           >
-            <option value="">{isRep ? user?.displayName ?? "My commissions" : "All reps"}</option>
-            {reps.map((rep) => (
-              <option key={rep.id} value={rep.id}>{rep.name}</option>
-            ))}
-          </select>
-        </label>
-        <Button
-          type="button"
-          variant="outline"
-          className="self-end"
-          onClick={() => {
-            setFrom(defaults.from);
-            setTo(defaults.to);
-            setRepId("");
-            setSelectedStages([]);
-          }}
-        >
-          Reset
-        </Button>
+            <Users className="h-4 w-4" />
+            Team commissions
+          </button>
+        </div>
       </section>
 
-      <section className="grid gap-4 md:grid-cols-2 xl:grid-cols-4" aria-label="Commission KPI cards">
-        {kpis.map((kpi) => (
-          <div key={kpi.label} className="rounded-lg border border-slate-200 bg-white p-4">
-            <p className="text-xs uppercase tracking-[0.16em] text-slate-500">{kpi.label}</p>
-            <p className="mt-2 text-2xl font-semibold text-slate-950">
-              {loading ? "..." : formatCurrency(kpi.value)}
-            </p>
-          </div>
+      <div className="flex items-center gap-1 self-start rounded-full bg-slate-100 p-1">
+        {PERIODS.map((item) => (
+          <button
+            key={item.key}
+            type="button"
+            onClick={() => setPeriod(item.key)}
+            className={`rounded-full px-3.5 py-1.5 text-xs font-bold transition-colors ${
+              period === item.key ? "bg-brand-red text-white shadow-sm" : "text-slate-600 hover:text-slate-900"
+            }`}
+          >
+            {item.label}
+          </button>
         ))}
-      </section>
+      </div>
 
-      <section className="grid gap-4 xl:grid-cols-2">
-        <div className="rounded-lg border border-slate-200 bg-white p-5">
-          <div className="flex items-start justify-between gap-3">
+      {error ? <div className="rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">{error}</div> : null}
+
+      <div className="grid grid-cols-1 gap-4 lg:grid-cols-3" aria-label="Commission KPI cards">
+        <MetricCard
+          eyebrow="Earned"
+          value={loading ? "$0.00" : money(dashboard.summary.earned)}
+          badge="Contract signed"
+          caption="Locked in this period"
+          tone="red"
+        />
+        <MetricCard
+          eyebrow="In pipeline"
+          value={loading ? "$0.00" : money(dashboard.summary.inPipeline)}
+          badge={`${dashboard.summary.openDealCount} open deals`}
+          caption="Potential, in flight"
+          tone="blue"
+        />
+        <MetricCard
+          eyebrow="Total potential"
+          value={loading ? "$0.00" : money(dashboard.summary.totalPotential)}
+          badge={percent(goalPct)}
+          caption={goalLabel}
+          tone="green"
+        />
+      </div>
+
+      <Card className="rounded-lg border-slate-200 bg-white shadow-sm">
+        <CardContent className="space-y-5 p-6">
+          <div className="flex flex-wrap items-end justify-between gap-3">
             <div>
-              <h2 className="text-base font-semibold text-slate-900">Potential by Stage</h2>
-              <p className="mt-1 text-xs text-slate-500">{formula || "Potential uses active non-terminal deal value and rep commission settings."}</p>
+              <p className="text-[11px] font-bold uppercase tracking-[0.16em] text-slate-500">Pipeline by stage</p>
+              <p className="mt-1 text-3xl font-black tracking-tight text-slate-950">{money(dashboard.summary.totalPotential)}</p>
+              <p className="mt-1 text-xs text-slate-500">
+                {money(dashboard.summary.earned)} earned · {money(dashboard.summary.inPipeline)} still in flight
+              </p>
+            </div>
+            <div className="flex items-center gap-3 text-sm">
+              <div className="flex items-center gap-1.5">
+                <CheckCircle2 className="h-4 w-4 text-emerald-500" />
+                <p className="font-bold tabular-nums text-slate-950">{money(dashboard.summary.earned)}</p>
+                <p className="text-xs text-slate-500">earned</p>
+              </div>
+              <span className="h-4 w-px bg-slate-200" aria-hidden />
+              <div className="flex items-center gap-1.5">
+                <Target className="h-4 w-4 text-brand-red" />
+                <p className="font-bold tabular-nums text-slate-950">{dashboard.goal.amount > 0 ? money(dashboard.goal.amount) : "No goal"}</p>
+                <p className="text-xs text-slate-500">goal</p>
+              </div>
             </div>
           </div>
-          <div className="mt-4 h-72">
-            <ResponsiveContainer width="100%" height="100%">
-              <BarChart data={stageGroups}>
-                <CartesianGrid strokeDasharray="3 3" />
-                <XAxis dataKey="stageName" />
-                <YAxis tickFormatter={(value) => formatCurrency(Number(value), true)} />
-                <Tooltip formatter={(value) => formatCurrency(Number(value))} />
-                <Legend />
-                <Bar dataKey="potentialCommission" name="Potential" stackId="commission" fill={getChartColor(0)} />
-              </BarChart>
-            </ResponsiveContainer>
-          </div>
-        </div>
 
-        <div className="rounded-lg border border-slate-200 bg-white p-5">
-          <h2 className="text-base font-semibold text-slate-900">Earned per Month</h2>
-          <p className="mt-1 text-xs text-slate-500">Commission is earned when a contract is signed; Won keeps that earned status after handoff.</p>
-          <div className="mt-4 h-72">
-            <ResponsiveContainer width="100%" height="100%">
-              <LineChart data={months}>
-                <CartesianGrid strokeDasharray="3 3" />
-                <XAxis dataKey="month" />
-                <YAxis tickFormatter={(value) => formatCurrency(Number(value), true)} />
-                <Tooltip formatter={(value) => formatCurrency(Number(value))} />
-                <Legend />
-                <Line type="monotone" dataKey="earnedCommission" name="Earned" stroke={getChartColor(2)} strokeWidth={2} />
-              </LineChart>
-            </ResponsiveContainer>
-          </div>
-        </div>
-      </section>
+          <PipelineBar stageTotals={dashboard.stageTotals} />
 
-      <section className="rounded-lg border border-slate-200 bg-white p-5">
-        <div className="flex flex-wrap items-start justify-between gap-3">
+          <div className="rounded-md border border-slate-200 bg-slate-50/40 p-4">
+            <div className="flex items-center gap-2">
+              <Target className="h-4 w-4 text-brand-red" />
+              <p className="text-[11px] font-bold uppercase tracking-[0.16em] text-slate-700">Goal progress</p>
+              <p className="ml-auto text-xs font-semibold tabular-nums text-slate-700">
+                {money(dashboard.summary.earned)} / {dashboard.goal.amount > 0 ? money(dashboard.goal.amount) : "No goal"} ({percent(goalPct)})
+              </p>
+            </div>
+            <div className="mt-3 h-2 w-full overflow-hidden rounded-full bg-slate-200">
+              <div className="h-full rounded-full bg-gradient-to-r from-brand-red to-brand-red/70" style={{ width: `${Math.min(100, goalPct ?? 0)}%` }} />
+            </div>
+          </div>
+        </CardContent>
+      </Card>
+
+      <Card className="overflow-hidden rounded-lg border-slate-200 bg-white shadow-sm">
+        <div className="flex items-center justify-between border-b border-slate-100 px-5 py-4">
           <div>
-            <h2 className="text-base font-semibold text-slate-900">Contributing Deals</h2>
-            <p className="mt-1 text-xs text-slate-500">
-              Raw deal table sum: {formatCurrency(rawDealSum)}. API earned YTD: {formatCurrency(summary.earnedYtd)}.
-              {" "}
-              {reconciliationMatches ? "Reconciliation matches." : "Reconciliation mismatch."}
-            </p>
+            <p className="text-sm font-bold uppercase tracking-[0.16em] text-slate-950">Projects contributing</p>
+            <p className="mt-0.5 text-xs text-slate-500">Commission updates as deal values and stages change</p>
           </div>
-          <div className="flex flex-wrap gap-2">
-            {visibleStages.map((stage) => (
-              <label key={stage.stageSlug} className="flex items-center gap-2 rounded-md border border-slate-200 px-2 py-1 text-xs text-slate-700">
-                <input
-                  type="checkbox"
-                  checked={selectedStages.includes(stage.stageSlug)}
-                  onChange={() => toggleStage(stage.stageSlug)}
-                />
-                {stage.stageName}
-              </label>
-            ))}
+          <Button type="button" variant="outline" size="sm" onClick={exportCsv}>
+            <Download className="mr-1 h-4 w-4" />
+            Export
+          </Button>
+        </div>
+
+        <div className="overflow-x-auto">
+          <div className="min-w-[760px]">
+            <div className="grid grid-cols-[minmax(0,1fr)_130px_80px_170px_24px] gap-x-4 border-b border-slate-100 px-5 py-2.5 text-[10px] font-bold uppercase tracking-[0.16em] text-slate-500">
+              <div>Deal</div>
+              <div className="text-right">Deal value</div>
+              <div className="text-right">Rate</div>
+              <div className="text-right">Commission</div>
+              <div aria-hidden />
+            </div>
+
+            {loading ? (
+              <div className="px-5 py-8 text-sm text-slate-500">Loading commissions...</div>
+            ) : dashboard.deals.length === 0 ? (
+              <div className="px-5 py-8 text-sm text-slate-500">No commission activity for this period.</div>
+            ) : (
+              <div className="divide-y divide-slate-100">
+                {groupedDeals.map((group) => {
+                  if (group.deals.length === 0) return null;
+                  const groupTotal = group.deals.reduce((sum, deal) => sum + deal.commission, 0);
+                  return (
+                    <section key={group.stage}>
+                      <div className="grid grid-cols-[minmax(0,1fr)_130px_80px_170px_24px] gap-x-4 bg-slate-50/40 px-5 py-2.5">
+                        <div className="flex items-center gap-2">
+                          <StageBadge stage={group.stage} />
+                          <span className="hidden text-[10px] font-semibold text-slate-500 sm:inline">· {STAGE_META[group.stage].description}</span>
+                        </div>
+                        <div aria-hidden />
+                        <div aria-hidden />
+                        <p className="text-right text-xs font-black tabular-nums text-slate-950">{money(groupTotal)}</p>
+                        <div aria-hidden />
+                      </div>
+                      <div className="divide-y divide-slate-100">
+                        {group.deals.map((deal) => (
+                          <Link
+                            key={deal.dealId}
+                            to={`/deals/${deal.dealId}`}
+                            className="grid grid-cols-[minmax(0,1fr)_130px_80px_170px_24px] items-center gap-x-4 px-5 py-3 text-left transition-colors hover:bg-slate-50 focus:outline-none focus:ring-2 focus:ring-brand-red/30"
+                          >
+                            <div className="min-w-0">
+                              <p className="truncate font-bold text-slate-950">
+                                {deal.dealNumber ? `${deal.dealNumber} · ` : ""}
+                                {deal.dealName}
+                              </p>
+                              <p className="mt-0.5 truncate text-xs text-slate-500">
+                                {[deal.companyName, deal.propertyName ?? deal.propertyAddress].filter(Boolean).join(" · ")}
+                                {deal.isEarned
+                                  ? ` · signed ${formatDate(deal.contractSignedDate)}`
+                                  : ` · ${deal.expectedCloseDate ? `closes ${formatDate(deal.expectedCloseDate)} · ` : ""}${deal.daysInStage}d in stage`}
+                              </p>
+                            </div>
+                            <p className="text-right text-sm font-semibold tabular-nums text-slate-700">{money(deal.dealValue)}</p>
+                            <p className="text-right text-xs font-semibold tabular-nums text-slate-500">{(deal.commissionRate * 100).toFixed(1)}%</p>
+                            <div className="text-right">
+                              <p className="text-base font-black tabular-nums text-slate-950">{money(deal.commission)}</p>
+                              {deal.deltaCommission != null ? (
+                                <p className={`text-[10px] font-bold tabular-nums ${deal.deltaCommission > 0 ? "text-emerald-600" : "text-brand-red line-through decoration-brand-red/50"}`}>
+                                  {deal.deltaCommission > 0 ? "+" : ""}
+                                  {money(deal.deltaCommission)} since last update
+                                </p>
+                              ) : null}
+                            </div>
+                            <ChevronRight className="ml-auto h-4 w-4 text-slate-400" />
+                          </Link>
+                        ))}
+                      </div>
+                    </section>
+                  );
+                })}
+              </div>
+            )}
           </div>
         </div>
 
-        <div className="mt-4 overflow-x-auto">
-          <table className="min-w-full divide-y divide-slate-200 text-sm">
-            <thead className="bg-slate-50 text-left text-xs uppercase tracking-[0.12em] text-slate-500">
-              <tr>
-                <th className="px-3 py-2">Deal</th>
-                <th className="px-3 py-2">Rep</th>
-                <th className="px-3 py-2">Stage</th>
-                <th className="px-3 py-2 text-right">Source Value</th>
-                <th className="px-3 py-2 text-right">Rate</th>
-                <th className="px-3 py-2 text-right">Earned</th>
-                <th className="px-3 py-2 text-right">Paid YTD</th>
-              </tr>
-            </thead>
-            <tbody className="divide-y divide-slate-100">
-              {loading ? (
-                <tr><td className="px-3 py-4 text-slate-500" colSpan={7}>Loading deals...</td></tr>
-              ) : deals.length === 0 ? (
-                <tr><td className="px-3 py-4 text-slate-500" colSpan={7}>No contributing deals in this view.</td></tr>
-              ) : (
-                deals.map((deal) => (
-                  <tr key={deal.dealId} className="align-top">
-                    <td className="px-3 py-3">
-                      <Link to={`/deals/${deal.dealId}`} className="font-medium text-slate-950 hover:underline">
-                        {deal.dealNumber ? `${deal.dealNumber} - ` : ""}{deal.dealName}
-                      </Link>
-                      <p className="mt-1 text-xs text-slate-500">{deal.contractSignedDate ?? "No signed date"}</p>
-                    </td>
-                    <td className="px-3 py-3 text-slate-700">{deal.repName}</td>
-                    <td className="px-3 py-3 text-slate-700">{deal.stageName}</td>
-                    <td className="px-3 py-3 text-right text-slate-700">{formatCurrency(deal.sourceValueAmount)}</td>
-                    <td className="px-3 py-3 text-right text-slate-700">{(deal.appliedRate * 100).toFixed(2)}%</td>
-                    <td className="px-3 py-3 text-right font-semibold text-slate-950">{formatCurrency(deal.earnedCommission)}</td>
-                    <td className="px-3 py-3 text-right text-slate-700">{formatCurrency(deal.paidYtd)}</td>
-                  </tr>
-                ))
-              )}
-            </tbody>
-          </table>
+        <div className="grid grid-cols-[minmax(0,1fr)_130px_80px_170px_24px] gap-x-4 border-t border-slate-200 bg-slate-50/40 px-5 py-3">
+          <p className="text-[11px] font-bold uppercase tracking-[0.16em] text-slate-700">Total</p>
+          <div aria-hidden />
+          <div aria-hidden />
+          <p className="text-right text-lg font-black tabular-nums text-slate-950">{money(visibleTotal)}</p>
+          <div aria-hidden />
         </div>
-      </section>
+      </Card>
     </div>
   );
 }
