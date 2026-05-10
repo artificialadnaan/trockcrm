@@ -1,0 +1,27 @@
+Command:
+printf 'y\n' | DATABASE_PUBLIC_URL= npm run script -- backfill-project-numbers --tenant=office_atlanta --execute
+
+Output:
+> script
+> node --import tsx scripts/backfill-project-numbers.ts backfill-project-numbers --tenant=office_atlanta --execute
+
+[office_atlanta]
+  Total candidates examined: 0
+  Candidates eligible for backfill: 0
+  Candidates skipped: 0
+  Candidates with collisions: 0
+
+[overall]
+  Total candidates examined: 0
+  Candidates eligible for backfill: 0
+  Candidates skipped: 0
+  Candidates with collisions: 0
+
+Audit CSV: /Users/adnaaniqbal/projects/trockcrm/docs/audit/project-number-backfill-2026-05-10T18-55-02-002Z.csv
+
+Type 'y' to execute project_number updates: y
+
+EXECUTION COMPLETE
+  Rows updated: 0
+  Failed batches: 0
+  Audit CSV: /Users/adnaaniqbal/projects/trockcrm/docs/audit/project-number-backfill-2026-05-10T18-55-02-002Z.csv

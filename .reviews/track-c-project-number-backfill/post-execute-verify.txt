@@ -1,0 +1,25 @@
+Command:
+DATABASE_PUBLIC_URL= npm run script -- backfill-project-numbers --tenant=office_dallas --dry-run
+
+Output:
+> script
+> node --import tsx scripts/backfill-project-numbers.ts backfill-project-numbers --tenant=office_dallas --dry-run
+
+[office_dallas]
+  Total candidates examined: 331
+  Candidates eligible for backfill: 0
+  Candidates skipped: 331
+  Candidates with collisions: 0
+  Skip/collision reason breakdown:
+    legacy format: 311
+    no preserved value: 20
+
+[overall]
+  Total candidates examined: 331
+  Candidates eligible for backfill: 0
+  Candidates skipped: 331
+  Candidates with collisions: 0
+
+Audit CSV: /Users/adnaaniqbal/projects/trockcrm/docs/audit/project-number-backfill-2026-05-10T18-55-15-890Z.csv
+
+DRY RUN ONLY: no database writes performed. Pass --execute to update rows.

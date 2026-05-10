@@ -1,0 +1,59 @@
+Command:
+DATABASE_PUBLIC_URL= npm run script -- backfill-project-numbers --tenant=office_dallas --dry-run
+
+Output:
+> script
+> node --import tsx scripts/backfill-project-numbers.ts backfill-project-numbers --tenant=office_dallas --dry-run
+
+[office_dallas]
+  Total candidates examined: 756
+  Candidates eligible for backfill: 425
+  Candidates skipped: 331
+  Candidates with collisions: 0
+  Skip/collision reason breakdown:
+    legacy format: 311
+    no preserved value: 20
+  Eligible sample:
+    00f7c38a-f84e-5fcd-8bf5-99d1e94f1e0f / 321685825253 / ATL-4-11126-aa
+    01600d50-34b6-531f-b4f7-67cb0348f616 / 276777157317 / DFW-5-02826-ac
+    03ade023-a470-5112-965a-3d291948a455 / 320343444217 / DFW-4-09926-ad
+    044e2641-c202-59c5-ad76-e78eac799c8f / 277845811951 / DFW-7-02926-ab
+    0585db29-3230-5995-a1fa-5352ac683da5 / 320535847662 / DFW-4-10326-ai
+    075ff48e-eb75-5fd7-8ad0-96fc067a7d1e / 285661468367 / DFW-4-03626-am
+    076e4c0a-9c2b-59b2-84fe-7de386a913a6 / 320623110859 / DFW-4-10426-ab
+    07c015c3-8bf6-5770-921b-73058ada9625 / 320833839829 / DFW-4-10326-ah
+    0a10246e-2761-59de-b686-413a5354dc46 / 318186066630 / DFW-4-08926-ac
+    0a3e547a-c891-5963-a67a-7ada9cebdb1f / 272715894483 / DFW-1-02626-ab
+
+[overall]
+  Total candidates examined: 756
+  Candidates eligible for backfill: 425
+  Candidates skipped: 331
+  Candidates with collisions: 0
+
+Audit CSV: /Users/adnaaniqbal/projects/trockcrm/docs/audit/project-number-backfill-2026-05-10T18-53-47-378Z.csv
+
+DRY RUN ONLY: no database writes performed. Pass --execute to update rows.
+
+Command:
+DATABASE_PUBLIC_URL= npm run script -- backfill-project-numbers --tenant=office_atlanta --dry-run
+
+Output:
+> script
+> node --import tsx scripts/backfill-project-numbers.ts backfill-project-numbers --tenant=office_atlanta --dry-run
+
+[office_atlanta]
+  Total candidates examined: 0
+  Candidates eligible for backfill: 0
+  Candidates skipped: 0
+  Candidates with collisions: 0
+
+[overall]
+  Total candidates examined: 0
+  Candidates eligible for backfill: 0
+  Candidates skipped: 0
+  Candidates with collisions: 0
+
+Audit CSV: /Users/adnaaniqbal/projects/trockcrm/docs/audit/project-number-backfill-2026-05-10T18-53-54-958Z.csv
+
+DRY RUN ONLY: no database writes performed. Pass --execute to update rows.
