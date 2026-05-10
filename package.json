@@ -23,6 +23,7 @@
     "typecheck": "npm run build --workspace=shared && npm run typecheck --workspaces",
     "test": "npm run test --workspace=server",
     "validate:admin-users-volume": "node scripts/playwright-admin-users-volume-validation.mjs",
+    "script": "node --import tsx scripts/backfill-project-numbers.ts",
     "seed:policy-recommendation-qualification": "node --import tsx scripts/seed-intervention-policy-recommendation-qualification.ts",
     "refresh:hubspot": "node --import tsx scripts/refresh-from-hubspot.ts",
     "db:generate": "drizzle-kit generate --config=shared/drizzle.config.ts",
