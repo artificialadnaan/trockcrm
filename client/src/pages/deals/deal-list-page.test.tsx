@@ -129,8 +129,7 @@ describe("DealListPage", () => {
     mocks.useAuthMock.mockReset();
 
     mocks.readTerminalDateFilterMock.mockImplementation((outcome: string) => ({
-      mode: "preset",
-      preset: outcome === "won" ? "ytd" : "last_90_days",
+      preset: outcome === "won" ? "30" : "60",
     }));
     mocks.buildDealStageWorkspacePathMock.mockReturnValue("/deals/stages/stage-won?scope=all");
 
@@ -294,8 +293,7 @@ describe("DealListPage", () => {
     };
 
     mocks.readTerminalDateFilterMock.mockImplementation((outcome: string) => ({
-      mode: "preset",
-      preset: outcome === "won" ? "last_30_days" : "last_90_days",
+      preset: outcome === "won" ? "30" : "60",
     }));
 
     buildDealStageNavigationPath(column, "all");
@@ -305,14 +303,13 @@ describe("DealListPage", () => {
       stageSlug: "won",
       scope: "all",
       filters: {
-        won: { mode: "preset", preset: "last_30_days" },
-        lost: { mode: "preset", preset: "last_90_days" },
+        won: { preset: "30" },
+        lost: { preset: "60" },
       },
     });
 
     mocks.readTerminalDateFilterMock.mockImplementation((outcome: string) => ({
-      mode: "preset",
-      preset: outcome === "won" ? "last_7_days" : "last_30_days",
+      preset: outcome === "won" ? "7" : "30",
     }));
 
     buildDealStageNavigationPath(column, "all");
@@ -322,8 +319,8 @@ describe("DealListPage", () => {
       stageSlug: "won",
       scope: "all",
       filters: {
-        won: { mode: "preset", preset: "last_7_days" },
-        lost: { mode: "preset", preset: "last_30_days" },
+        won: { preset: "7" },
+        lost: { preset: "30" },
       },
     });
   });

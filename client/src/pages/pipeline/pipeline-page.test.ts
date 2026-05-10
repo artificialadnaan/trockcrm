@@ -6,7 +6,7 @@ import {
   readTerminalDateFilter,
   writeTerminalDateFilter,
 } from "@/lib/pipeline-terminal-filters";
-import { summarizeActivePipelineColumns, summarizeTerminalStageCounts } from "./pipeline-page";
+import { getDealDisplayNumber, summarizeActivePipelineColumns, summarizeTerminalStageCounts } from "./pipeline-page";
 
 afterEach(() => {
   vi.useRealTimers();
@@ -82,6 +82,19 @@ describe("summarizeActivePipelineColumns", () => {
   });
 });
 
+describe("getDealDisplayNumber", () => {
+  it("prefers canonical project numbers and marks deal number fallback", () => {
+    expect(getDealDisplayNumber({ projectNumber: "DFW-1-12826-aa", dealNumber: "HS-321" })).toEqual({
+      label: "DFW-1-12826-aa",
+      isFallback: false,
+    });
+    expect(getDealDisplayNumber({ projectNumber: null, dealNumber: "HS-321" })).toEqual({
+      label: "HS-321",
+      isFallback: true,
+    });
+  });
+});
+
 describe("terminal pipeline date filters", () => {
   it("defaults terminal requests to a 30-day window", () => {
     vi.useFakeTimers();
@@ -107,7 +120,19 @@ describe("terminal pipeline date filters", () => {
     ).toBe(
       "/deals/pipeline?includeDd=true&won_since=2026-03-02&lost_since=2026-03-15&lost_until=2026-04-15"
     );
-    expect(getTerminalDateFilterLabel({ preset: "custom", customStart: "2026-03-15" })).toBe("custom");
+    expect(getTerminalDateFilterLabel({ preset: "custom", customStart: "2026-03-15" })).toBe("Custom");
+  });
+
+  it("supports 7-day and all-time terminal windows", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-05-01T16:00:00Z"));
+
+    expect(
+      buildPipelineRequestPath(false, {
+        won: { preset: "7" },
+        lost: { preset: "all" },
+      })
+    ).toBe("/deals/pipeline?includeDd=false&won_since=2026-04-24&lost_all_time=true");
   });
 
   it("carries terminal date filters into stage drill-down links", () => {
@@ -121,7 +146,7 @@ describe("terminal pipeline date filters", () => {
         scope: "all",
         filters: {
           won: { preset: "30" },
-          lost: { preset: "90" },
+          lost: { preset: "60" },
         },
       })
     ).toBe("/deals/stages/stage-won?scope=all&won_since=2026-04-01");
@@ -133,7 +158,7 @@ describe("terminal pipeline date filters", () => {
         scope: "all",
         filters: {
           won: { preset: "30" },
-          lost: { preset: "90" },
+          lost: { preset: "60" },
         },
       })
     ).toBe("/deals/stages/stage-estimating?scope=all");
@@ -149,14 +174,14 @@ describe("terminal pipeline date filters", () => {
     });
 
     expect(readTerminalDateFilter("won")).toEqual({ preset: "30" });
-    writeTerminalDateFilter("won", { preset: "90" });
+    writeTerminalDateFilter("won", { preset: "60" });
     writeTerminalDateFilter("lost", {
       preset: "custom",
       customStart: "2026-04-01",
       customEnd: "2026-04-30",
     });
 
-    expect(readTerminalDateFilter("won")).toEqual({ preset: "90" });
+    expect(readTerminalDateFilter("won")).toEqual({ preset: "60" });
     expect(readTerminalDateFilter("lost")).toEqual({
       preset: "custom",
       customStart: "2026-04-01",

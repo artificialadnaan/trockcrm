@@ -147,8 +147,8 @@ describe("listDealStagePage", () => {
 
     const countQueryText = extractSqlText(tenantDb.execute.mock.calls[0][0]).toLowerCase();
     expect(countQueryText).not.toContain("d.is_active = true");
-    expect(countQueryText).toContain("deal_stage_history");
-    expect(countQueryText).toContain("actual_close_date");
+    expect(countQueryText).toContain("contract_signed_at");
+    expect(countQueryText).toContain("contract_signed_date");
     expect(countQueryText).toContain(">=");
     expect(countQueryText).toContain("<");
   });

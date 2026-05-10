@@ -20,7 +20,7 @@ export interface PipelineStagePagination {
 
 export interface PipelineStageTableColumn<T> {
   key: string;
-  header: string;
+  header: ReactNode;
   render: (row: T) => ReactNode;
 }
 

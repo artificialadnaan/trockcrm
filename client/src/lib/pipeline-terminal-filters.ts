@@ -1,9 +1,13 @@
 export type TerminalOutcome = "won" | "lost";
 export type TerminalDateFilter =
-  | { preset: "30" | "60" | "90"; customStart?: undefined; customEnd?: undefined }
+  | { preset: "7" | "30" | "60" | "all"; customStart?: undefined; customEnd?: undefined }
   | { preset: "custom"; customStart: string; customEnd?: string };
 
 const TERMINAL_FILTER_STORAGE_KEYS: Record<TerminalOutcome, string> = {
+  won: "deals.kanban.wonFilter",
+  lost: "deals.kanban.lostFilter",
+};
+const LEGACY_TERMINAL_FILTER_STORAGE_KEYS: Record<TerminalOutcome, string> = {
   won: "pipeline_terminal_filter_won",
   lost: "pipeline_terminal_filter_lost",
 };
@@ -38,12 +42,19 @@ export function daysAgo(days: number, now = new Date()) {
 
 export function readTerminalDateFilter(outcome: TerminalOutcome): TerminalDateFilter {
   if (typeof window === "undefined") return DEFAULT_TERMINAL_DATE_FILTER;
-  const raw = window.localStorage.getItem(TERMINAL_FILTER_STORAGE_KEYS[outcome]);
+  const raw =
+    window.localStorage.getItem(TERMINAL_FILTER_STORAGE_KEYS[outcome]) ??
+    window.localStorage.getItem(LEGACY_TERMINAL_FILTER_STORAGE_KEYS[outcome]);
   if (!raw) return DEFAULT_TERMINAL_DATE_FILTER;
 
   try {
     const parsed = JSON.parse(raw) as Partial<TerminalDateFilter>;
-    if (parsed.preset === "30" || parsed.preset === "60" || parsed.preset === "90") {
+    if (
+      parsed.preset === "7" ||
+      parsed.preset === "30" ||
+      parsed.preset === "60" ||
+      parsed.preset === "all"
+    ) {
       return { preset: parsed.preset };
     }
     if (parsed.preset === "custom" && typeof parsed.customStart === "string" && parsed.customStart) {
@@ -66,7 +77,9 @@ export function writeTerminalDateFilter(outcome: TerminalOutcome, filter: Termin
 }
 
 export function getTerminalDateFilterLabel(filter: TerminalDateFilter) {
-  return filter.preset === "custom" ? "custom" : `${filter.preset}d`;
+  if (filter.preset === "custom") return "Custom";
+  if (filter.preset === "all") return "All time";
+  return `Last ${filter.preset}d`;
 }
 
 function appendTerminalDateParams(
@@ -75,6 +88,10 @@ function appendTerminalDateParams(
   filter: TerminalDateFilter
 ) {
   const prefix = outcome;
+  if (filter.preset === "all") {
+    params.set(`${prefix}_all_time`, "true");
+    return;
+  }
   if (filter.preset === "custom") {
     params.set(`${prefix}_since`, filter.customStart);
     if (filter.customEnd) params.set(`${prefix}_until`, filter.customEnd);

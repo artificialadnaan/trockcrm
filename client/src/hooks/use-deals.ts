@@ -154,6 +154,7 @@ export interface Deal {
   lostAt: string | null;
   expectedCloseDate: string | null;
   actualCloseDate: string | null;
+  contractSignedAt?: string | null;
   contractSignedDate: string | null;
   rfpApprovalRequestedAt?: string | null;
   rfpApprovalRequestId?: number | null;
@@ -173,6 +174,8 @@ export interface Deal {
   isRfpTriggerEnabled?: boolean;
   lastActivityAt: string | null;
   stageEnteredAt: string;
+  stageName?: string | null;
+  stageSlug?: string | null;
   isActive: boolean;
   hubspotDealId: string | null;
   createdAt: string;
@@ -262,6 +265,8 @@ export interface DealFilters {
   isActive?: boolean;
   contractSignedFrom?: string;
   contractSignedTo?: string;
+  updatedFrom?: string;
+  updatedTo?: string;
   sortBy?: string;
   sortDir?: "asc" | "desc";
   page?: number;
@@ -371,6 +376,8 @@ export function useDeals(filters: DealFilters = {}) {
       if (filters.source) params.set("source", filters.source);
       if (filters.contractSignedFrom) params.set("contractSignedFrom", filters.contractSignedFrom);
       if (filters.contractSignedTo) params.set("contractSignedTo", filters.contractSignedTo);
+      if (filters.updatedFrom) params.set("updatedFrom", filters.updatedFrom);
+      if (filters.updatedTo) params.set("updatedTo", filters.updatedTo);
       if (filters.isActive === false) params.set("isActive", "false");
       if (filters.sortBy) params.set("sortBy", filters.sortBy);
       if (filters.sortDir) params.set("sortDir", filters.sortDir);
@@ -402,6 +409,8 @@ export function useDeals(filters: DealFilters = {}) {
     filters.source,
     filters.contractSignedFrom,
     filters.contractSignedTo,
+    filters.updatedFrom,
+    filters.updatedTo,
     filters.isActive,
     filters.sortBy,
     filters.sortDir,
@@ -624,8 +633,10 @@ export function useDealStagePage(input: StagePageQuery & { stageId: string; scop
       ...(input.filters.maxAgeDays ? { maxAgeDays: input.filters.maxAgeDays } : {}),
       ...(input.filters.wonSince ? { won_since: input.filters.wonSince } : {}),
       ...(input.filters.wonUntil ? { won_until: input.filters.wonUntil } : {}),
+      ...(input.filters.wonAllTime ? { won_all_time: "true" } : {}),
       ...(input.filters.lostSince ? { lost_since: input.filters.lostSince } : {}),
       ...(input.filters.lostUntil ? { lost_until: input.filters.lostUntil } : {}),
+      ...(input.filters.lostAllTime ? { lost_all_time: "true" } : {}),
     });
 
     setLoading(true);
