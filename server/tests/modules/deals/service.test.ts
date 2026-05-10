@@ -52,7 +52,12 @@ vi.mock("../../../src/modules/pipeline/service.js", () => ({
 // We'll import after mocks are set up
 const { AppError } = await import("../../../src/middleware/error-handler.js");
 const pipelineService = await import("../../../src/modules/pipeline/service.js");
-const { createDeal, updateDeal, resolvePipelineTerminalDateFilters } = await import("../../../src/modules/deals/service.js");
+const {
+  createDeal,
+  resolveIntendedProjectNumberFromParts,
+  updateDeal,
+  resolvePipelineTerminalDateFilters,
+} = await import("../../../src/modules/deals/service.js");
 
 describe("Deal Service", () => {
   beforeEach(() => {
@@ -728,6 +733,42 @@ describe("Deal Service", () => {
       expect(updated.projectType).toBe("roofing");
       expect(updated.intendedProjectNumber).toBeNull();
       expect(tenantDb.state.dealHistory).toHaveLength(1);
+    });
+
+    it("clears intendedProjectNumber for lowercase legacy deal numbers when the type segment already matches", async () => {
+      const tenantDb = createProjectTypeTenantDb("service");
+      tenantDb.state.deal.dealNumber = "dfw-3-10626-aa";
+      tenantDb.state.deal.intendedProjectNumber = "DFW-4-10626-aa";
+
+      const updated = await updateDeal(
+        tenantDb as never,
+        "deal-1",
+        { projectType: "roofing" },
+        "admin",
+        "admin-1"
+      );
+
+      expect(updated.dealNumber).toBe("dfw-3-10626-aa");
+      expect(updated.projectType).toBe("roofing");
+      expect(updated.intendedProjectNumber).toBeNull();
+    });
+
+    it("resolves intended project numbers with defensive issued-number comparison", () => {
+      expect(
+        resolveIntendedProjectNumberFromParts("DFW-1-12826-aa", "DFW", "1", "12826", "aa")
+      ).toBeNull();
+      expect(
+        resolveIntendedProjectNumberFromParts("dfw-1-12826-aa", "DFW", "1", "12826", "aa")
+      ).toBeNull();
+      expect(
+        resolveIntendedProjectNumberFromParts("DFW-2-12826-aa", "DFW", "1", "12826", "aa")
+      ).toBe("DFW-1-12826-aa");
+      expect(resolveIntendedProjectNumberFromParts(null, "DFW", "1", "12826", "aa")).toBe(
+        "DFW-1-12826-aa"
+      );
+      expect(resolveIntendedProjectNumberFromParts(undefined, "DFW", "1", "12826", "aa")).toBe(
+        "DFW-1-12826-aa"
+      );
     });
 
     function createOwnedDealTenantDb() {

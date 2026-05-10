@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   buildTenantNormalizationPlan,
+  reportExecutionSummary,
   normalizeProjectNumberPrefix,
   parseNormalizeArgs,
 } from "../../../scripts/normalize-project-number-case.ts";
@@ -66,5 +67,88 @@ describe("normalize-project-number-case", () => {
       }),
     ]);
   });
-});
 
+  it("marks execute runs as failed when any batch fails", () => {
+    const originalExitCode = process.exitCode;
+    process.exitCode = undefined;
+    const errors: string[] = [];
+    const logs: string[] = [];
+    const originalError = console.error;
+    const originalLog = console.log;
+    console.error = (message?: unknown) => {
+      errors.push(String(message ?? ""));
+    };
+    console.log = (message?: unknown) => {
+      logs.push(String(message ?? ""));
+    };
+
+    try {
+      reportExecutionSummary({
+        dryRun: false,
+        totalUpdated: 100,
+        totalFailedBatches: 1,
+        auditPath: "/tmp/audit.csv",
+      });
+
+      expect(process.exitCode).toBe(1);
+      expect(errors.join("\n")).toContain("EXECUTION COMPLETED WITH FAILURES");
+      expect(errors.join("\n")).toContain("Some rows were not normalized");
+      expect(logs.join("\n")).not.toContain("EXECUTION COMPLETE");
+    } finally {
+      console.error = originalError;
+      console.log = originalLog;
+      process.exitCode = originalExitCode;
+    }
+  });
+
+  it("leaves all-success execute runs at exit 0", () => {
+    const originalExitCode = process.exitCode;
+    process.exitCode = undefined;
+    const logs: string[] = [];
+    const originalLog = console.log;
+    console.log = (message?: unknown) => {
+      logs.push(String(message ?? ""));
+    };
+
+    try {
+      reportExecutionSummary({
+        dryRun: false,
+        totalUpdated: 3,
+        totalFailedBatches: 0,
+        auditPath: "/tmp/audit.csv",
+      });
+
+      expect(process.exitCode).toBeUndefined();
+      expect(logs.join("\n")).toContain("EXECUTION COMPLETE");
+      expect(logs.join("\n")).toContain("Values updated: 3");
+    } finally {
+      console.log = originalLog;
+      process.exitCode = originalExitCode;
+    }
+  });
+
+  it("keeps dry-run informational even if a failure count is reported", () => {
+    const originalExitCode = process.exitCode;
+    process.exitCode = undefined;
+    const logs: string[] = [];
+    const originalLog = console.log;
+    console.log = (message?: unknown) => {
+      logs.push(String(message ?? ""));
+    };
+
+    try {
+      reportExecutionSummary({
+        dryRun: true,
+        totalUpdated: 0,
+        totalFailedBatches: 1,
+        auditPath: "/tmp/audit.csv",
+      });
+
+      expect(process.exitCode).toBeUndefined();
+      expect(logs.join("\n")).toContain("DRY RUN ONLY");
+    } finally {
+      console.log = originalLog;
+      process.exitCode = originalExitCode;
+    }
+  });
+});

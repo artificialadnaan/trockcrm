@@ -232,6 +232,18 @@ function assertValidOfficeCode(value: string | null | undefined): "dfw" | "atl" 
   return normalized;
 }
 
+export function resolveIntendedProjectNumberFromParts(
+  issuedProjectNumber: string | null | undefined,
+  officeCode: string,
+  projectTypeCode: string,
+  julianDate: string,
+  suffix: string
+): string | null {
+  const intended = `${officeCode.toUpperCase()}-${projectTypeCode}-${julianDate}-${suffix.toLowerCase()}`;
+  if (!issuedProjectNumber) return intended;
+  return intended.toLowerCase() === issuedProjectNumber.toLowerCase() ? null : intended;
+}
+
 function resolveIntendedProjectNumberFromCode(
   issuedProjectNumber: string | null | undefined,
   projectTypeCode: string
@@ -242,8 +254,13 @@ function resolveIntendedProjectNumberFromCode(
   }
 
   const [, officeCode, julianDate, suffix] = match;
-  const intended = `${officeCode.toUpperCase()}-${projectTypeCode}-${julianDate}-${suffix.toLowerCase()}`;
-  return intended === issuedProjectNumber ? null : intended;
+  return resolveIntendedProjectNumberFromParts(
+    issuedProjectNumber,
+    officeCode,
+    projectTypeCode,
+    julianDate,
+    suffix
+  );
 }
 
 async function isAtOrBeyondOpportunity(stageId: string | null | undefined) {

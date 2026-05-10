@@ -245,6 +245,36 @@ export async function executePlan(client: pg.Client, plan: TenantNormalizationPl
   return { updated, failedBatches };
 }
 
+export function reportExecutionSummary(input: {
+  dryRun: boolean;
+  totalUpdated: number;
+  totalFailedBatches: number;
+  auditPath: string;
+}): void {
+  if (input.dryRun) {
+    console.log("\nDRY RUN ONLY: no database writes performed. Pass --execute to update rows.");
+    if (input.totalFailedBatches > 0) {
+      console.log(`  Failed batches: ${input.totalFailedBatches}`);
+    }
+    return;
+  }
+
+  if (input.totalFailedBatches > 0) {
+    console.error("\nEXECUTION COMPLETED WITH FAILURES");
+    console.error(`  Values updated: ${input.totalUpdated}`);
+    console.error(`  Failed batches: ${input.totalFailedBatches}`);
+    console.error("  Some rows were not normalized. Review CSV audit and re-run.");
+    console.error(`  Audit CSV: ${input.auditPath}`);
+    process.exitCode = 1;
+    return;
+  }
+
+  console.log("\nEXECUTION COMPLETE");
+  console.log(`  Values updated: ${input.totalUpdated}`);
+  console.log(`  Failed batches: ${input.totalFailedBatches}`);
+  console.log(`  Audit CSV: ${input.auditPath}`);
+}
+
 export async function runNormalizeProjectNumberCase(argv = process.argv.slice(2)): Promise<void> {
   const args = parseNormalizeArgs(argv);
   const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
@@ -264,7 +294,12 @@ export async function runNormalizeProjectNumberCase(argv = process.argv.slice(2)
     console.log(`\nAudit CSV: ${auditPath}`);
 
     if (args.dryRun) {
-      console.log("\nDRY RUN ONLY: no database writes performed. Pass --execute to update rows.");
+      reportExecutionSummary({
+        dryRun: true,
+        totalUpdated: 0,
+        totalFailedBatches: 0,
+        auditPath,
+      });
       return;
     }
 
@@ -281,10 +316,12 @@ export async function runNormalizeProjectNumberCase(argv = process.argv.slice(2)
       totalFailedBatches += result.failedBatches;
     }
 
-    console.log("\nEXECUTION COMPLETE");
-    console.log(`  Values updated: ${totalUpdated}`);
-    console.log(`  Failed batches: ${totalFailedBatches}`);
-    console.log(`  Audit CSV: ${auditPath}`);
+    reportExecutionSummary({
+      dryRun: false,
+      totalUpdated,
+      totalFailedBatches,
+      auditPath,
+    });
   } finally {
     await client.end();
   }
@@ -297,4 +334,3 @@ if (import.meta.url === executedPath) {
     process.exit(1);
   });
 }
-

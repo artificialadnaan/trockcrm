@@ -6,6 +6,7 @@ import {
 } from "@trock-crm/shared/types";
 
 type WorkflowRoute = "normal" | "service";
+export type ProjectNumberOfficeCode = "DFW" | "ATL" | "dfw" | "atl";
 
 export interface ProjectNumberDealInput {
   id: string;
@@ -16,7 +17,7 @@ export interface ProjectNumberDealInput {
 }
 
 export interface ProjectNumberBuildInput {
-  officeCode: string;
+  officeCode: ProjectNumberOfficeCode;
   projectTypeCode: string;
   createdAt: Date;
   suffix: string;
@@ -44,7 +45,7 @@ export function resolveOfficeCode(location: string | null | undefined): "dfw" | 
   return "dfw";
 }
 
-function formatProjectNumberOfficePrefix(officeCode: string): string {
+function formatProjectNumberOfficePrefix(officeCode: ProjectNumberOfficeCode | string): string {
   return officeCode.trim().toUpperCase();
 }
 

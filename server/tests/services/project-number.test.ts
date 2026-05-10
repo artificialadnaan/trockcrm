@@ -45,21 +45,22 @@ describe("projectNumber service", () => {
 
     expect(
       buildProjectNumber({
-        officeCode: "Dfw" as never,
-        projectTypeCode: "2",
-        createdAt: new Date("2026-05-10T15:00:00.000Z"),
-        suffix: "Ab",
-      })
-    ).toBe("DFW-2-13026-ab");
-
-    expect(
-      buildProjectNumber({
         officeCode: "atl",
         projectTypeCode: "4",
         createdAt: new Date("2026-05-10T15:00:00.000Z"),
         suffix: "ba",
       })
     ).toBe("ATL-4-13026-ba");
+  });
+
+  it("rejects malformed office prefixes at compile time", () => {
+    buildProjectNumber({
+      // @ts-expect-error Project number formatting only accepts DFW/ATL office codes.
+      officeCode: "Dfw",
+      projectTypeCode: "2",
+      createdAt: new Date("2026-05-10T15:00:00.000Z"),
+      suffix: "ab",
+    });
   });
 
   it("uses one daily suffix sequence across offices and rolls over suffixes", async () => {
