@@ -5,6 +5,7 @@ import { requireRole } from "../../middleware/rbac.js";
 import { AppError } from "../../middleware/error-handler.js";
 import { requestAuditContext, writeSoftDeleteAuditLog } from "../../lib/soft-delete-audit.js";
 import { eventBus } from "../../events/bus.js";
+import { DOMAIN_EVENTS } from "../../events/types.js";
 import {
   BID_BOARD_STAGE_READ_ONLY_MESSAGE,
   buildBidBoardOwnershipState,
@@ -65,6 +66,8 @@ import {
   DEAL_TEAM_ROLES,
   PUNCH_LIST_TYPES,
   WORKFLOW_TIMER_TYPES,
+  toCanonicalDealStageSlug,
+  type DealOpportunityEnteredEventPayload,
   type RfpRequestDeliveryPayload,
 } from "@trock-crm/shared/types";
 import {
@@ -77,6 +80,7 @@ import {
 import { writeResolvedDealFields } from "./lineage-resolver.js";
 import { inferDealBidBoardOwnership } from "./workflow-backfill.js";
 import { resolveSyncHubRfpRequestUrl } from "./rfp-payload.js";
+import { enqueueOpportunityRfpIfNeeded } from "./rfp-enqueue.js";
 
 const router = Router();
 
@@ -129,7 +133,7 @@ function readStageInput(req: Parameters<typeof router.get>[1] extends never ? ne
 
 async function queueDomainEvent(
   tenantDb: any,
-  officeId: string,
+  officeId: string | null,
   eventName: string,
   payload: Record<string, unknown>
 ) {
@@ -143,6 +147,18 @@ async function queueDomainEvent(
     status: "pending",
     runAfter: new Date(),
   });
+}
+
+async function loadDealStageSlug(tenantDb: any, stageId: string): Promise<string | null> {
+  const result = await tenantDb.execute(sql`
+    SELECT slug
+      FROM pipeline_stage_config
+     WHERE id = ${stageId}
+     LIMIT 1
+  `);
+  const rows = Array.isArray(result) ? result : result.rows ?? [];
+  const row = rows[0] as { slug?: string | null } | undefined;
+  return row?.slug ?? null;
 }
 
 async function queueAiEstimateRefresh(tenantDb: any, officeId: string, dealId: string, reason: string) {
@@ -340,6 +356,137 @@ router.get("/:id/detail", async (req, res, next) => {
     if (!detail) throw new AppError(404, "Deal not found");
     await req.commitTransaction!();
     res.json(toJsonSafe({ deal: detail }));
+  } catch (err) {
+    next(err);
+  }
+});
+
+// POST /api/deals/:id/trigger-rfp — manually enqueue an Opportunity RFP request after scope is ready.
+router.post("/:id/trigger-rfp", async (req, res, next) => {
+  try {
+    const deal = await getDealById(req.tenantDb!, req.params.id, req.user!.role, req.user!.id);
+    if (!deal) throw new AppError(404, "Deal not found");
+
+    const userRole = req.user!.role;
+    const userId = req.user!.id;
+    if (userRole !== "admin" && !(userRole === "rep" && deal.assignedRepId === userId)) {
+      throw new AppError(403, "Only the assigned rep or an admin can trigger RFP review.", "RFP_UNAUTHORIZED");
+    }
+
+    const stageSlug = await loadDealStageSlug(req.tenantDb!, deal.stageId);
+    const canonicalStageSlug = stageSlug
+      ? toCanonicalDealStageSlug(stageSlug, deal.workflowRoute)
+      : null;
+    if (canonicalStageSlug !== "opportunity") {
+      throw new AppError(400, "RFP review can only be triggered from Opportunity stage.", "RFP_WRONG_STAGE");
+    }
+
+    const inferredOwnership = inferDealBidBoardOwnership({
+      id: deal.id,
+      stageSlug: stageSlug ?? "opportunity",
+      stageEnteredAt: deal.stageEnteredAt,
+      workflowRoute: deal.workflowRoute,
+      pipelineTypeSnapshot: deal.pipelineTypeSnapshot,
+      ddEstimate: deal.ddEstimate,
+      bidEstimate: deal.bidEstimate,
+      awardedAmount: deal.awardedAmount,
+      sourceLeadId: deal.sourceLeadId,
+      isBidBoardOwned: deal.isBidBoardOwned,
+      bidBoardStageSlug: deal.bidBoardStageSlug,
+      bidBoardStageEnteredAt: deal.bidBoardStageEnteredAt,
+      bidBoardMirrorSourceEnteredAt: deal.bidBoardMirrorSourceEnteredAt,
+      isReadOnlyMirror: deal.isReadOnlyMirror,
+      readOnlySyncedAt: deal.readOnlySyncedAt,
+    });
+    if (deal.isBidBoardOwned || inferredOwnership.isBidBoardOwned) {
+      throw new AppError(
+        400,
+        "RFP review cannot be triggered after Bid Board owns this deal.",
+        "RFP_ALREADY_BID_BOARD_OWNED"
+      );
+    }
+
+    if (deal.rfpApprovalRequestedAt || deal.rfpApprovalStatus) {
+      throw new AppError(400, "RFP review has already been triggered for this deal.", "RFP_ALREADY_TRIGGERED");
+    }
+
+    const readiness = await evaluateDealScopingReadiness(req.tenantDb!, deal.id);
+    if (readiness.status === "draft") {
+      const missingSections = Object.keys(readiness.errors.sections ?? {});
+      const missingAttachments = Object.keys(readiness.errors.attachments ?? {});
+      throw new AppError(
+        400,
+        [
+          "Complete Opportunity Scope before triggering RFP review.",
+          missingSections.length > 0 ? `Missing sections: ${missingSections.join(", ")}` : null,
+          missingAttachments.length > 0 ? `Missing attachments: ${missingAttachments.join(", ")}` : null,
+        ].filter(Boolean).join(" "),
+        "RFP_SCOPE_INCOMPLETE"
+      );
+    }
+
+    const officeId = req.user!.activeOfficeId ?? req.user!.officeId ?? null;
+    const requestedAt = new Date();
+    const rfpResult = await enqueueOpportunityRfpIfNeeded({
+      tenantDb: req.tenantDb!,
+      deal,
+      userId,
+      officeId,
+      transitioningFrom: null,
+      enteredAt: requestedAt,
+    });
+
+    if (!rfpResult.enqueued) {
+      if (rfpResult.reason === "feature_disabled") {
+        throw new AppError(503, "Opportunity RFP delivery is disabled.", "RFP_EVENT_DISABLED");
+      }
+      if (rfpResult.reason === "already_requested") {
+        throw new AppError(400, "RFP review has already been triggered for this deal.", "RFP_ALREADY_TRIGGERED");
+      }
+      throw new AppError(400, "RFP review could not be triggered for this deal.", "RFP_TRIGGER_FAILED");
+    }
+
+    if (rfpResult.dealUpdates) {
+      await req.tenantDb!
+        .update(deals)
+        .set(rfpResult.dealUpdates)
+        .where(eq(deals.id, deal.id));
+    }
+
+    const updatedDeal = { ...deal, ...(rfpResult.dealUpdates ?? {}) };
+    const eventsToEmit: Array<{ name: string; payload: Record<string, unknown> }> = [];
+    if (rfpResult.eventId) {
+      const opportunityPayload = {
+        eventName: DOMAIN_EVENTS.DEAL_OPPORTUNITY_ENTERED,
+        eventId: rfpResult.eventId,
+        idempotencyKey: `deal:${deal.id}:rfp_approval:lifetime`,
+        dealId: deal.id,
+        dealNumber: updatedDeal.dealNumber,
+        dealName: updatedDeal.name,
+        officeId,
+        workflowRoute: updatedDeal.workflowRoute,
+        fromStageId: deal.stageId,
+        toStageId: deal.stageId,
+        toStageSlug: "opportunity",
+        enteredAt: rfpResult.dealUpdates?.rfpApprovalRequestedAt ?? requestedAt,
+        requestedBy: userId,
+        source: "manual_trigger",
+      } satisfies DealOpportunityEnteredEventPayload;
+      await queueDomainEvent(req.tenantDb!, officeId, DOMAIN_EVENTS.DEAL_OPPORTUNITY_ENTERED, opportunityPayload);
+      eventsToEmit.push({
+        name: DOMAIN_EVENTS.DEAL_OPPORTUNITY_ENTERED,
+        payload: opportunityPayload,
+      });
+    }
+
+    await req.commitTransaction!();
+    emitLocalDealEvents(eventsToEmit, { officeId: officeId ?? "", userId });
+    res.json(toJsonSafe({
+      success: true,
+      status: rfpResult.dealUpdates?.rfpApprovalStatus ?? "pending_outbox",
+      eventId: rfpResult.eventId,
+      jobId: rfpResult.jobId,
+    }));
   } catch (err) {
     next(err);
   }

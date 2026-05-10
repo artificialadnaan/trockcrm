@@ -1997,7 +1997,7 @@ describe("Lead Conversion Service", () => {
     expect(result.deal.projectTypeId).toBe("project-type-lead");
   });
 
-  it("enqueues an RFP request when lead conversion creates an Opportunity deal", async () => {
+  it("does not enqueue an RFP request when lead conversion creates an Opportunity deal", async () => {
     process.env.ENABLE_OPPORTUNITY_RFP_EVENT = "true";
     process.env.SYNCHUB_BASE_URL = "https://synchub.example.com";
     const tenantDb = createFakeTenantDb({
@@ -2063,36 +2063,14 @@ describe("Lead Conversion Service", () => {
     });
 
     expect(result.deal.id).toBe("deal-1");
-    expect(tenantDb.state.deals[0]?.rfpApprovalStatus).toBe("pending_outbox");
-    expect(tenantDb.state.deals[0]?.rfpApprovalRequestedAt).toEqual(new Date("2026-04-15T15:00:00.000Z"));
-    expect(tenantDb.state.deals[0]?.rfpApprovalRequestEventId).toMatch(
-      /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
-    );
-    expect(tenantDb.state.deals[0]?.rfpApprovalRequestedBy).toBe("rep-1");
-
-    const rfpJobs = tenantDb.state.jobs.filter((job) => job.jobType === "rfp_request_delivery");
-    expect(rfpJobs).toHaveLength(1);
-    expect(rfpJobs[0]).toMatchObject({
-      jobType: "rfp_request_delivery",
-      officeId: "office-1",
-      status: "pending",
-      maxAttempts: 8,
-    });
-    expect(rfpJobs[0]?.payload).toMatchObject({
-      dealId: "deal-1",
-      syncHubUrl: "https://synchub.example.com/api/rfp-requests",
-      body: {
-        sourceSystem: "trock_crm",
-        sourceDealId: "deal-1",
-        deal: {
-          name: "Palm Villas repaint",
-          projectNumber: "dfw-3-10526-aa",
-        },
-      },
-    });
+    expect(tenantDb.state.deals[0]?.rfpApprovalStatus).toBeNull();
+    expect(tenantDb.state.deals[0]?.rfpApprovalRequestedAt).toBeNull();
+    expect(tenantDb.state.deals[0]?.rfpApprovalRequestEventId).toBeNull();
+    expect(tenantDb.state.deals[0]?.rfpApprovalRequestedBy).toBeNull();
+    expect(tenantDb.state.jobs.filter((job) => job.jobType === "rfp_request_delivery")).toHaveLength(0);
   });
 
-  it("enqueues an RFP request for service-route conversions that fall back to the standard Opportunity stage", async () => {
+  it("does not enqueue RFP automatically for service-route conversions that land in standard Opportunity", async () => {
     process.env.ENABLE_OPPORTUNITY_RFP_EVENT = "true";
     process.env.SYNCHUB_BASE_URL = "https://synchub.example.com";
     pipelineMocks.getStageBySlug.mockImplementation(async (slug: string, workflowFamily?: string) => {
@@ -2187,8 +2165,8 @@ describe("Lead Conversion Service", () => {
 
     expect(result.deal.stageId).toBe("deal-stage-1");
     expect(result.deal.workflowRoute).toBe("service");
-    expect(tenantDb.state.deals[0]?.rfpApprovalStatus).toBe("pending_outbox");
-    expect(tenantDb.state.jobs.filter((job) => job.jobType === "rfp_request_delivery")).toHaveLength(1);
+    expect(tenantDb.state.deals[0]?.rfpApprovalStatus).toBeNull();
+    expect(tenantDb.state.jobs.filter((job) => job.jobType === "rfp_request_delivery")).toHaveLength(0);
   });
 
   it("copies lead salesRepId to the successor deal when no override is provided", async () => {

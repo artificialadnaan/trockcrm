@@ -154,6 +154,7 @@ export interface Deal {
   expectedCloseDate: string | null;
   actualCloseDate: string | null;
   contractSignedDate: string | null;
+  rfpApprovalRequestedAt?: string | null;
   rfpApprovalRequestId?: number | null;
   rfpApprovalToken?: string | null;
   rfpApprovalStatus?:

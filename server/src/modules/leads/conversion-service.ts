@@ -1,11 +1,10 @@
 import { eq } from "drizzle-orm";
 import type { NodePgDatabase } from "drizzle-orm/node-postgres";
-import { deals, leads, pipelineStageConfig } from "@trock-crm/shared/schema";
+import { deals, leads } from "@trock-crm/shared/schema";
 import type * as schema from "@trock-crm/shared/schema";
 import { toCanonicalLeadStageSlug, type WorkflowRoute } from "@trock-crm/shared/types";
 import { AppError } from "../../middleware/error-handler.js";
 import { createDeal } from "../deals/service.js";
-import { enqueueOpportunityRfpIfNeeded } from "../deals/rfp-enqueue.js";
 import { getStageById, getStageBySlug } from "../pipeline/service.js";
 import {
   isAnsweredQuestionValue,
@@ -252,30 +251,6 @@ export function createLeadConversionService(
       regionId: input.regionId,
       expectedCloseDate: input.expectedCloseDate,
     });
-
-    const targetDealStage = await tenantDb
-      .select({ slug: pipelineStageConfig.slug })
-      .from(pipelineStageConfig)
-      .where(eq(pipelineStageConfig.id, deal.stageId))
-      .limit(1);
-    if (targetDealStage[0]?.slug === "opportunity") {
-      const rfpResult = await enqueueOpportunityRfpIfNeeded({
-        tenantDb,
-        deal,
-        userId: input.userId,
-        officeId: input.officeId ?? null,
-        transitioningFrom: null,
-        enteredAt: deal.stageEnteredAt ?? new Date(),
-      });
-
-      if (rfpResult.enqueued && rfpResult.dealUpdates) {
-        await tenantDb
-          .update(deals)
-          .set(rfpResult.dealUpdates)
-          .where(eq(deals.id, deal.id));
-        Object.assign(deal, rfpResult.dealUpdates);
-      }
-    }
 
     const convertedAt = deps.now();
 

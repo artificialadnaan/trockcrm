@@ -57,8 +57,7 @@ async function loadRfpPayloadDeal(tenantDb: TenantDb, fallbackDeal: typeof deals
 /**
  * Idempotent: returns enqueued=false with reason='already_requested' if
  * rfpApprovalRequestedAt is already set on the deal. This is safe to call from
- * any code path that puts a deal into Opportunity, including stage changes,
- * lead conversion, and future creation paths.
+ * the manual Trigger RFP endpoint after Opportunity scope readiness is satisfied.
  */
 export async function enqueueOpportunityRfpIfNeeded(
   input: EnqueueOpportunityRfpInput

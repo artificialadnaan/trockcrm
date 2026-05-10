@@ -16,6 +16,8 @@ const mocks = vi.hoisted(() => ({
   useAuthMock: vi.fn(),
   useActivitiesMock: vi.fn(),
   createActivityMock: vi.fn(),
+  apiMock: vi.fn(),
+  toastSuccessMock: vi.fn(),
 }));
 
 vi.mock("@/hooks/use-deals", () => ({
@@ -33,6 +35,17 @@ vi.mock("@/hooks/use-pipeline-config", () => ({
 
 vi.mock("@/lib/auth", () => ({
   useAuth: mocks.useAuthMock,
+}));
+
+vi.mock("@/lib/api", () => ({
+  api: mocks.apiMock,
+  resolveApiBase: vi.fn(() => "/api"),
+}));
+
+vi.mock("sonner", () => ({
+  toast: {
+    success: mocks.toastSuccessMock,
+  },
 }));
 
 vi.mock("@/hooks/use-activities", () => ({
@@ -60,17 +73,19 @@ vi.mock("@/components/ui/button", () => ({
     onClick,
     disabled,
     type,
+    title,
   }: {
     children: ReactNode;
     render?: ReactNode;
     onClick?: () => void;
     disabled?: boolean;
     type?: "button" | "submit" | "reset";
+    title?: string;
   }) =>
     isValidElement(render) ? (
       cloneElement(render, { onClick, children } as Record<string, unknown>)
     ) : (
-      <button type={type ?? "button"} disabled={disabled} onClick={onClick}>
+      <button type={type ?? "button"} disabled={disabled} onClick={onClick} title={title}>
         {children}
       </button>
     ),
@@ -303,6 +318,20 @@ describe("DealDetailPage", () => {
     mocks.usePipelineStagesMock.mockReset();
     mocks.useAuthMock.mockReset();
     mocks.useActivitiesMock.mockReset();
+    mocks.apiMock.mockReset();
+    mocks.toastSuccessMock.mockReset();
+    mocks.apiMock.mockImplementation((url: string, options?: { method?: string }) => {
+      if (url.includes("/photos")) {
+        return Promise.resolve({ pagination: { total: 0 } });
+      }
+      if (url.includes("/scoping-intake/readiness")) {
+        return Promise.resolve({ readiness: { status: "draft" } });
+      }
+      if (url.includes("/trigger-rfp") && options?.method === "POST") {
+        return Promise.resolve({ success: true, status: "pending_outbox" });
+      }
+      return Promise.resolve({});
+    });
 
     mocks.useAuthMock.mockReturnValue({
       user: {
@@ -571,6 +600,185 @@ describe("DealDetailPage", () => {
       expect.stringContaining("Unknown RFP status"),
       expect.objectContaining({ rfpApprovalStatus: "frobnicate", dealId: "deal-1" })
     );
+  });
+
+  it("shows Trigger RFP disabled on untriggered Opportunity deals until scope is ready", () => {
+    mocks.useAuthMock.mockReturnValueOnce({
+      user: {
+        id: "rep-1",
+        role: "rep",
+      },
+    });
+    mocks.useDealDetailMock.mockReturnValueOnce({
+      loading: false,
+      error: null,
+      refetch: vi.fn(),
+      deal: makeDealDetail({
+        stageId: "stage-opportunity",
+        isBidBoardOwned: false,
+        bidBoardStageSlug: null,
+        readOnlySyncedAt: null,
+        bidBoardOwnership: null,
+        rfpApprovalStatus: null,
+        rfpApprovalRequestedAt: null,
+      }),
+    });
+
+    const html = renderPage();
+
+    expect(html).toContain("Trigger RFP");
+    expect(html).toContain("Complete Opportunity Scope to enable");
+    expect(html).toContain("disabled");
+  });
+
+  it("hides Trigger RFP outside Opportunity, when already triggered, and when Bid Board owned", () => {
+    mocks.useAuthMock.mockReturnValue({
+      user: {
+        id: "rep-1",
+        role: "rep",
+      },
+    });
+    mocks.useDealDetailMock.mockReturnValueOnce({
+      loading: false,
+      error: null,
+      refetch: vi.fn(),
+      deal: makeDealDetail({
+        stageId: "stage-estimating",
+        isBidBoardOwned: false,
+        bidBoardOwnership: null,
+      }),
+    });
+    expect(renderPage()).not.toContain("Trigger RFP");
+
+    mocks.useDealDetailMock.mockReturnValueOnce({
+      loading: false,
+      error: null,
+      refetch: vi.fn(),
+      deal: makeDealDetail({
+        stageId: "stage-opportunity",
+        isBidBoardOwned: false,
+        bidBoardOwnership: null,
+        rfpApprovalStatus: "pending_outbox",
+      }),
+    });
+    expect(renderPage()).not.toContain("Trigger RFP");
+
+    mocks.useDealDetailMock.mockReturnValueOnce({
+      loading: false,
+      error: null,
+      refetch: vi.fn(),
+      deal: makeDealDetail({
+        stageId: "stage-opportunity",
+        isBidBoardOwned: true,
+      }),
+    });
+    expect(renderPage()).not.toContain("Trigger RFP");
+  });
+
+  it("hides Trigger RFP from directors and non-assigned reps", () => {
+    mocks.useDealDetailMock.mockReturnValueOnce({
+      loading: false,
+      error: null,
+      refetch: vi.fn(),
+      deal: makeDealDetail({
+        stageId: "stage-opportunity",
+        isBidBoardOwned: false,
+        bidBoardStageSlug: null,
+        readOnlySyncedAt: null,
+        bidBoardOwnership: null,
+        rfpApprovalStatus: null,
+        rfpApprovalRequestedAt: null,
+      }),
+    });
+    expect(renderPage()).not.toContain("Trigger RFP");
+
+    mocks.useAuthMock.mockReturnValueOnce({
+      user: {
+        id: "rep-2",
+        role: "rep",
+      },
+    });
+    mocks.useDealDetailMock.mockReturnValueOnce({
+      loading: false,
+      error: null,
+      refetch: vi.fn(),
+      deal: makeDealDetail({
+        stageId: "stage-opportunity",
+        isBidBoardOwned: false,
+        bidBoardStageSlug: null,
+        readOnlySyncedAt: null,
+        bidBoardOwnership: null,
+        rfpApprovalStatus: null,
+        rfpApprovalRequestedAt: null,
+      }),
+    });
+    expect(renderPage()).not.toContain("Trigger RFP");
+  });
+
+  it("enables Trigger RFP after readiness passes and posts only after confirmation", async () => {
+    const refetch = vi.fn();
+    mocks.useAuthMock.mockReturnValue({
+      user: {
+        id: "rep-1",
+        role: "rep",
+      },
+    });
+    mocks.apiMock.mockImplementation((url: string, options?: { method?: string }) => {
+      if (url.includes("/photos")) {
+        return Promise.resolve({ pagination: { total: 0 } });
+      }
+      if (url.includes("/scoping-intake/readiness")) {
+        return Promise.resolve({ readiness: { status: "ready" } });
+      }
+      if (url.includes("/trigger-rfp") && options?.method === "POST") {
+        return Promise.resolve({ success: true, status: "pending_outbox" });
+      }
+      return Promise.resolve({});
+    });
+    mocks.useDealDetailMock.mockReturnValue({
+      loading: false,
+      error: null,
+      refetch,
+      deal: makeDealDetail({
+        stageId: "stage-opportunity",
+        isBidBoardOwned: false,
+        bidBoardStageSlug: null,
+        readOnlySyncedAt: null,
+        bidBoardOwnership: null,
+        rfpApprovalStatus: null,
+        rfpApprovalRequestedAt: null,
+      }),
+    });
+
+    const confirmSpy = vi.spyOn(window, "confirm").mockReturnValueOnce(false).mockReturnValueOnce(true);
+    mounted = mountPage();
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    const triggerButton = Array.from(mounted.container.querySelectorAll("button")).find(
+      (button) => button.textContent?.includes("Trigger RFP")
+    ) as HTMLButtonElement | undefined;
+    expect(triggerButton).toBeTruthy();
+    expect(triggerButton?.disabled).toBe(false);
+
+    await act(async () => {
+      triggerButton?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+    expect(confirmSpy).toHaveBeenCalledWith(
+      "Send this deal to RFP review? This will notify the approval team and cannot be undone from this screen."
+    );
+    expect(mocks.apiMock).not.toHaveBeenCalledWith("/deals/deal-1/trigger-rfp", { method: "POST" });
+
+    await act(async () => {
+      triggerButton?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(mocks.apiMock).toHaveBeenCalledWith("/deals/deal-1/trigger-rfp", { method: "POST" });
+    expect(mocks.toastSuccessMock).toHaveBeenCalledWith("RFP request sent to approval team.");
+    expect(refetch).toHaveBeenCalled();
   });
 
   it("keeps estimating manually reachable for owned deals that are still before the boundary", () => {

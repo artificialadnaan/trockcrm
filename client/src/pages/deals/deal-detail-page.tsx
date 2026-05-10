@@ -1,4 +1,4 @@
-import { useState, useCallback, useEffect } from "react";
+import { useState, useEffect } from "react";
 import { Link, useParams, useNavigate, useSearchParams, useLocation } from "react-router-dom";
 import {
   Activity,
@@ -20,7 +20,9 @@ import {
   Lock,
   ExternalLink,
   Users,
+  Send,
 } from "lucide-react";
+import { toast } from "sonner";
 import { Button, buttonVariants } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent } from "@/components/ui/card";
@@ -234,6 +236,10 @@ export function DealDetailPage() {
   const [teamCount, setTeamCount] = useState<number | null>(null);
   const [photoCount, setPhotoCount] = useState<number | null>(null);
   const [rfpRetrying, setRfpRetrying] = useState(false);
+  const [rfpTriggering, setRfpTriggering] = useState(false);
+  const [rfpTriggerError, setRfpTriggerError] = useState<string | null>(null);
+  const [rfpReadinessStatus, setRfpReadinessStatus] = useState<"draft" | "ready" | "activated" | null>(null);
+  const [rfpReadinessLoading, setRfpReadinessLoading] = useState(false);
   const currentStage = stages.find((s) => s.id === deal?.stageId);
   const isDirectorOrAdmin = user?.role === "director" || user?.role === "admin";
   const bidBoardOwnership = deal?.bidBoardOwnership;
@@ -353,6 +359,19 @@ export function DealDetailPage() {
 
   const currentStageSlug = currentStage?.slug ?? "";
   const isOpportunityStage = canonicalCurrentStageSlug === "opportunity";
+  const canTriggerRfp =
+    user?.role === "admin" ||
+    (user?.role === "rep" && deal?.assignedRepId === user.id);
+  const showTriggerRfpButton = Boolean(
+    deal &&
+      canTriggerRfp &&
+      isOpportunityStage &&
+      !isBidBoardOwned &&
+      !deal.rfpApprovalStatus &&
+      !deal.rfpApprovalRequestedAt
+  );
+  const isRfpScopeReady = rfpReadinessStatus === "ready" || rfpReadinessStatus === "activated";
+  const triggerRfpDisabled = rfpReadinessLoading || !isRfpScopeReady || rfpTriggering;
   const showPunchList =
     canonicalCurrentStageSlug === "won" ||
     currentStageSlug === "sent_to_production" ||
@@ -418,6 +437,42 @@ export function DealDetailPage() {
     };
   }, [deal?.id]);
 
+  useEffect(() => {
+    if (!deal?.id || !showTriggerRfpButton) {
+      setRfpReadinessStatus(null);
+      setRfpReadinessLoading(false);
+      setRfpTriggerError(null);
+      return;
+    }
+
+    let cancelled = false;
+    setRfpReadinessLoading(true);
+    api<{ readiness: { status: "draft" | "ready" | "activated" } }>(
+      `/deals/${deal.id}/scoping-intake/readiness`
+    )
+      .then((result) => {
+        if (!cancelled) {
+          setRfpReadinessStatus(result.readiness.status);
+          setRfpTriggerError(null);
+        }
+      })
+      .catch((err: unknown) => {
+        if (!cancelled) {
+          setRfpReadinessStatus("draft");
+          setRfpTriggerError(
+            err instanceof Error ? err.message : "Could not verify Opportunity Scope readiness."
+          );
+        }
+      })
+      .finally(() => {
+        if (!cancelled) setRfpReadinessLoading(false);
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [deal?.id, showTriggerRfpButton]);
+
   if (loading) {
     return (
       <div className="space-y-4">
@@ -460,6 +515,26 @@ export function DealDetailPage() {
     nextParams.set("mode", "proposal");
     nextParams.delete("focus");
     setSearchParams(nextParams, { replace: true });
+  };
+
+  const handleTriggerRfp = async () => {
+    if (!deal || triggerRfpDisabled) return;
+    setRfpTriggerError(null);
+    const confirmed = window.confirm(
+      "Send this deal to RFP review? This will notify the approval team and cannot be undone from this screen."
+    );
+    if (!confirmed) return;
+
+    setRfpTriggering(true);
+    try {
+      await api(`/deals/${deal.id}/trigger-rfp`, { method: "POST" });
+      toast.success("RFP request sent to approval team.");
+      await refetch();
+    } catch (err: unknown) {
+      setRfpTriggerError(err instanceof Error ? err.message : "Failed to trigger RFP review.");
+    } finally {
+      setRfpTriggering(false);
+    }
   };
 
   const stageAgeDays = daysSince(deal.stageEnteredAt);
@@ -561,6 +636,25 @@ export function DealDetailPage() {
           <ExternalLink className="h-4 w-4" />
           Procore
         </a>
+      ) : null}
+      {showTriggerRfpButton ? (
+        <div className="flex flex-col items-end gap-1">
+          <Button
+            type="button"
+            size="sm"
+            onClick={handleTriggerRfp}
+            disabled={triggerRfpDisabled}
+            title={!isRfpScopeReady ? "Complete Opportunity Scope to enable" : undefined}
+          >
+            <Send className="h-4 w-4" />
+            {rfpTriggering ? "Sending RFP..." : "Trigger RFP"}
+          </Button>
+          {rfpTriggerError ? (
+            <span className="max-w-64 text-right text-xs font-medium text-red-600" role="alert">
+              {rfpTriggerError}
+            </span>
+          ) : null}
+        </div>
       ) : null}
       {!currentStage?.isTerminal && (
         <DropdownMenu>
