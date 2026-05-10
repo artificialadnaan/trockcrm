@@ -336,7 +336,7 @@ describe("getDealsForPipeline team scope", () => {
     expect(closedStageConditions.every((condition) => !containsValue(condition, "stage-sent"))).toBe(true);
   });
 
-  it("keeps canonical won terminal columns scoped to the canonical stage when aliases also exist", async () => {
+  it("includes legacy won alias deals in the canonical won terminal column when aliases also exist", async () => {
     dbState.stages = [
       {
         id: "stage-won",
@@ -352,7 +352,7 @@ describe("getDealsForPipeline team scope", () => {
         name: "Sent to Production",
         displayOrder: 8,
         isTerminal: true,
-        isActivePipeline: true,
+        isActivePipeline: false,
       },
     ];
     const dealQuery = {
@@ -383,7 +383,7 @@ describe("getDealsForPipeline team scope", () => {
       .map((call) => call[0])
       .filter((condition) => containsValue(condition, "stage-won"));
     expect(canonicalConditions).toHaveLength(2);
-    expect(canonicalConditions.every((condition) => !containsValue(condition, "stage-sent"))).toBe(true);
+    expect(canonicalConditions.every((condition) => containsValue(condition, "stage-sent"))).toBe(true);
   });
 
   it("queries each active lost alias terminal column by its own stage when no canonical lost stage exists", async () => {
@@ -441,7 +441,7 @@ describe("getDealsForPipeline team scope", () => {
     expect(closedLostConditions.every((condition) => !containsValue(condition, "stage-production-lost"))).toBe(true);
   });
 
-  it("keeps canonical lost terminal columns scoped to the canonical stage when aliases also exist", async () => {
+  it("includes legacy lost alias deals in the canonical lost terminal column when aliases also exist", async () => {
     dbState.stages = [
       {
         id: "stage-lost",
@@ -457,7 +457,7 @@ describe("getDealsForPipeline team scope", () => {
         name: "Production Lost",
         displayOrder: 9,
         isTerminal: true,
-        isActivePipeline: true,
+        isActivePipeline: false,
       },
     ];
     const dealQuery = {
@@ -488,6 +488,6 @@ describe("getDealsForPipeline team scope", () => {
       .map((call) => call[0])
       .filter((condition) => containsValue(condition, "stage-lost"));
     expect(canonicalConditions).toHaveLength(2);
-    expect(canonicalConditions.every((condition) => !containsValue(condition, "stage-production-lost"))).toBe(true);
+    expect(canonicalConditions.every((condition) => containsValue(condition, "stage-production-lost"))).toBe(true);
   });
 });

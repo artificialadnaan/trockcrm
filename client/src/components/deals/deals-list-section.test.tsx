@@ -4,7 +4,12 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { renderToStaticMarkup } from "react-dom/server";
 import { MemoryRouter } from "react-router-dom";
 import type { ReactNode } from "react";
-import { DealsListSection } from "./deals-list-section";
+import {
+  DealsListSection,
+  buildDealStageFilterOptions,
+  getSelectedDealStageIds,
+  getVisibleListTerminalStageIds,
+} from "./deals-list-section";
 
 const mocks = vi.hoisted(() => ({
   useDealsMock: vi.fn(),
@@ -222,6 +227,76 @@ describe("DealsListSection", () => {
     render({ scope: "team" });
     const call = mocks.useDealsMock.mock.calls[mocks.useDealsMock.mock.calls.length - 1][0];
     expect(call.scope).toBe("team");
+  });
+
+  it("loads deal-family stages only", () => {
+    render();
+    expect(mocks.usePipelineStagesMock).toHaveBeenCalledWith("deal");
+  });
+
+  it("groups same-slug stage chip options without dropping alternate workflow stage ids", () => {
+    const options = buildDealStageFilterOptions([
+      {
+        id: "stage-estimating-standard",
+        name: "Estimating",
+        slug: "estimating",
+        displayOrder: 2,
+        isTerminal: false,
+      },
+      {
+        id: "stage-estimating-service",
+        name: "Estimating",
+        slug: "estimating",
+        displayOrder: 3,
+        isTerminal: false,
+      },
+      {
+        id: "stage-won",
+        name: "Won",
+        slug: "won",
+        displayOrder: 6,
+        isTerminal: true,
+      },
+    ] as never);
+
+    expect(options).toEqual([
+      {
+        ids: ["stage-estimating-standard", "stage-estimating-service"],
+        slug: "estimating",
+        name: "Estimating",
+        isTerminal: false,
+      },
+      { ids: ["stage-won"], slug: "won", name: "Won", isTerminal: true },
+    ]);
+    expect(getSelectedDealStageIds(["estimating"], options)).toEqual([
+      "stage-estimating-standard",
+      "stage-estimating-service",
+    ]);
+  });
+
+  it("excludes requested stage slugs from chip options", () => {
+    const html = render({
+      visibleStages: [
+        { id: "stage-dd", name: "DD", slug: "dd" },
+        { id: "stage-estimating", name: "Estimating", slug: "estimating" },
+      ],
+      excludeStageSlugs: ["dd"],
+    });
+
+    expect(html).not.toContain(">DD<");
+    expect(html).toContain(">Estimating<");
+  });
+
+  it("preserves terminal stage ids from visible stage options while metadata is unavailable", () => {
+    expect(
+      getVisibleListTerminalStageIds(
+        [],
+        [
+          { ids: ["stage-won"], slug: "won", name: "Won", isTerminal: true },
+          { ids: ["stage-estimating"], slug: "estimating", name: "Estimating", isTerminal: false },
+        ]
+      )
+    ).toEqual(["stage-won"]);
   });
 
   it("renders pagination controls (chevron buttons) when there is data", () => {

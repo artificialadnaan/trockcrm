@@ -27,6 +27,13 @@ describe("App route guards", () => {
     expect(source).toContain('path="/admin/migration" element={( <RequireRole allowedRoles={["admin", "director"]}> <MigrationDashboardPage />');
   });
 
+  it("mounts /deals directly instead of redirecting it to /pipeline", () => {
+    expect(source).not.toContain("function DealsToPipelineRedirect");
+    expect(source).not.toContain('path="/deals" element={<DealsToPipelineRedirect />}');
+    expect(source).toContain('path="/deals" element={<DealListPage />}');
+    expect(source).toContain('path="/pipeline" element={<PipelinePage />}');
+  });
+
   it("exposes team and global commissions routes with role guards", () => {
     expect(source).toContain('path="/director/commissions" element={( <RequireRole allowedRoles={["admin", "director"]}> <TeamCommissionsPage />');
     expect(source).toContain('path="/admin/commissions" element={( <RequireRole allowedRoles={["admin"]}> <GlobalCommissionsPage />');
