@@ -42,6 +42,7 @@ function createTenantDbCapturingWhere() {
       capturedWheres.push(condition);
       return dataChain;
     }),
+    leftJoin: vi.fn().mockReturnThis(),
     orderBy: vi.fn().mockReturnThis(),
     limit: vi.fn().mockReturnThis(),
     offset: vi.fn().mockResolvedValue([]),

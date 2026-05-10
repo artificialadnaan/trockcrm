@@ -1,5 +1,6 @@
 import { useState, useCallback, useEffect, useRef, useLayoutEffect, useMemo } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
+import { toast } from "sonner";
 import {
   DndContext,
   DragOverlay,
@@ -37,6 +38,7 @@ import {
   type TerminalOutcome,
 } from "@/lib/pipeline-terminal-filters";
 import { useDeals, type Deal } from "@/hooks/use-deals";
+import { usePipelineStages, type PipelineStage } from "@/hooks/use-pipeline-config";
 import { useTaskAssignees } from "@/hooks/use-task-assignees";
 import { cn } from "@/lib/utils";
 
@@ -62,6 +64,8 @@ interface TerminalStageInfo {
 }
 
 const PIPELINE_LIST_PAGE_SIZE = 25;
+export const MAX_EXPORT_PAGES = 50;
+const EXPORT_PAGE_SIZE = 500;
 const DEAL_STAGE_ORDER = [
   "opportunity",
   "estimating",
@@ -74,6 +78,7 @@ const DEAL_STAGE_ORDER = [
 
 type SortKey = "name" | "stage_entered_at" | "awarded_amount" | "updated_at";
 type SortState = { key: SortKey; dir: "asc" | "desc" };
+type DealListActiveFilter = boolean | "all" | "pipeline";
 
 export function getDealDisplayNumber(deal: Pick<Deal, "dealNumber" | "projectNumber">) {
   const projectNumber = deal.projectNumber?.trim();
@@ -101,11 +106,25 @@ function escapeCsvCell(value: string | number | null | undefined) {
   return /[",\n]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text;
 }
 
-function buildDealListParams(input: {
+export function getPipelineListIsActiveFilter(
+  selectedStageIds: string[],
+  terminalStageIds: string[]
+): DealListActiveFilter {
+  if (selectedStageIds.length === 0) return "pipeline";
+  return selectedStageIds.some((id) => terminalStageIds.includes(id)) ? "pipeline" : true;
+}
+
+export function buildStageNameById(stages: Array<Pick<PipelineStage, "id" | "name">>) {
+  return new Map(stages.map((stage) => [stage.id, stage.name]));
+}
+
+export function buildDealListParams(input: {
   search: string;
   stageIds: string[];
+  inactiveStageIds?: string[];
   assignedRepId?: string;
   dateRange: { from?: string; to?: string };
+  isActive: DealListActiveFilter;
   sort: SortState;
   page: number;
   limit: number;
@@ -113,10 +132,11 @@ function buildDealListParams(input: {
   const params = new URLSearchParams();
   if (input.search) params.set("search", input.search);
   if (input.stageIds.length) params.set("stageIds", input.stageIds.join(","));
+  if (input.inactiveStageIds?.length) params.set("inactiveStageIds", input.inactiveStageIds.join(","));
   if (input.assignedRepId) params.set("assignedRepId", input.assignedRepId);
   if (input.dateRange.from) params.set("updatedFrom", input.dateRange.from);
   if (input.dateRange.to) params.set("updatedTo", input.dateRange.to);
-  params.set("isActive", "true");
+  params.set("isActive", String(input.isActive));
   params.set("sortBy", input.sort.key);
   params.set("sortDir", input.sort.dir);
   params.set("page", String(input.page));
@@ -152,30 +172,41 @@ export function summarizeActivePipelineColumns(columns: PipelineColumn[]) {
   return { totalDeals, totalValue, averageVelocity };
 }
 
-async function fetchAllFilteredDeals(input: {
+export async function fetchAllFilteredDeals(input: {
   search: string;
   stageIds: string[];
+  inactiveStageIds?: string[];
   assignedRepId?: string;
   dateRange: { from?: string; to?: string };
+  isActive: DealListActiveFilter;
   sort: SortState;
+  apiClient?: typeof api;
 }) {
-  const limit = 500;
+  const apiClient = input.apiClient ?? api;
+  const limit = EXPORT_PAGE_SIZE;
   const firstParams = buildDealListParams({ ...input, page: 1, limit });
-  const first = await api<{ deals: Deal[]; pagination: { totalPages: number } }>(
+  const first = await apiClient<{ deals: Deal[]; pagination: { totalPages: number } }>(
     `/deals?${firstParams.toString()}`
   );
   const pages = [first.deals];
   const totalPages = Math.max(1, first.pagination.totalPages || 1);
+  const pagesToFetch = Math.min(totalPages, MAX_EXPORT_PAGES);
 
-  for (let page = 2; page <= totalPages; page += 1) {
+  for (let page = 2; page <= pagesToFetch; page += 1) {
     const params = buildDealListParams({ ...input, page, limit });
-    const next = await api<{ deals: Deal[]; pagination: { totalPages: number } }>(
+    const next = await apiClient<{ deals: Deal[]; pagination: { totalPages: number } }>(
       `/deals?${params.toString()}`
     );
     pages.push(next.deals);
   }
 
-  return pages.flat();
+  return {
+    deals: pages.flat(),
+    totalPages,
+    pagesFetched: pagesToFetch,
+    truncated: totalPages > MAX_EXPORT_PAGES,
+    maxRows: pagesToFetch * limit,
+  };
 }
 
 function formatRefreshedLabel(date: Date, now: Date): string {
@@ -404,6 +435,7 @@ export function PipelinePage() {
   const [listPage, setListPage] = useState(1);
   const [listSort, setListSort] = useState<SortState>({ key: "updated_at", dir: "desc" });
   const { assignees } = useTaskAssignees();
+  const { stages: allPipelineStages } = usePipelineStages();
 
   const sensors = useSensors(
     useSensor(PointerSensor, { activationConstraint: { distance: 8 } })
@@ -428,6 +460,19 @@ export function PipelinePage() {
     [listStageSlugs, stageFilterOptions]
   );
   const listDateRange = useMemo(() => dateRangeFromTerminalFilter(listDateFilter), [listDateFilter]);
+  const terminalStageIds = useMemo(
+    () => allPipelineStages.filter((stage) => stage.isTerminal).map((stage) => stage.id),
+    [allPipelineStages]
+  );
+  const listIsActiveFilter = useMemo(
+    () => getPipelineListIsActiveFilter(selectedStageIds, terminalStageIds),
+    [selectedStageIds, terminalStageIds]
+  );
+  const listInactiveStageIds = useMemo(() => {
+    if (listIsActiveFilter !== "pipeline") return [];
+    if (selectedStageIds.length === 0) return terminalStageIds;
+    return selectedStageIds.filter((id) => terminalStageIds.includes(id));
+  }, [listIsActiveFilter, selectedStageIds, terminalStageIds]);
   const {
     deals: listDeals,
     pagination: listPagination,
@@ -436,10 +481,11 @@ export function PipelinePage() {
   } = useDeals({
     search: listSearch,
     stageIds: selectedStageIds,
+    inactiveStageIds: listInactiveStageIds,
     assignedRepId: listOwnerId === "__all__" ? undefined : listOwnerId,
     updatedFrom: listDateRange.from,
     updatedTo: listDateRange.to,
-    isActive: true,
+    isActive: listIsActiveFilter,
     sortBy: listSort.key,
     sortDir: listSort.dir,
     page: listPage,
@@ -450,8 +496,8 @@ export function PipelinePage() {
     [assignees]
   );
   const stageNameById = useMemo(
-    () => new Map(stageFilterOptions.map((stage) => [stage.id, stage.name])),
-    [stageFilterOptions]
+    () => buildStageNameById(allPipelineStages),
+    [allPipelineStages]
   );
 
   const mainScrollRef = useRef<HTMLDivElement>(null);
@@ -600,16 +646,23 @@ export function PipelinePage() {
   };
 
   const exportListCsv = async () => {
-    const exportDeals = await fetchAllFilteredDeals({
+    const exportResult = await fetchAllFilteredDeals({
       search: listSearch,
       stageIds: selectedStageIds,
+      inactiveStageIds: listInactiveStageIds,
       assignedRepId: listOwnerId === "__all__" ? undefined : listOwnerId,
       dateRange: listDateRange,
+      isActive: listIsActiveFilter,
       sort: listSort,
     });
+    if (exportResult.truncated) {
+      toast.info(
+        `Exported first ${exportResult.maxRows.toLocaleString()} rows (${exportResult.pagesFetched} pages). Narrow filters for full export.`
+      );
+    }
     const rows = [
       ["Deal", "Project Number", "Owner", "Stage", "Days", "Value", "Last Touch"],
-      ...exportDeals.map((deal) => {
+      ...exportResult.deals.map((deal) => {
         const displayNumber = getDealDisplayNumber(deal);
         return [
           deal.name,

@@ -153,6 +153,34 @@ describe("listDealStagePage", () => {
     expect(countQueryText).toContain("<");
   });
 
+  it("keeps terminal scope active-state relaxed for all-time terminal stage drill-downs", async () => {
+    dbState.responses = [
+      [{ id: "stage-won", slug: "won", name: "Won", displayOrder: 7, isTerminal: true }],
+    ];
+
+    const tenantDb = {
+      execute: vi.fn()
+        .mockResolvedValueOnce({ rows: [{ total: "2", total_value: "400000" }] })
+        .mockResolvedValueOnce({ rows: [] }),
+    } as any;
+
+    const { listDealStagePage } = await import("../../../src/modules/deals/service.js");
+    await listDealStagePage(tenantDb, {
+      role: "admin",
+      userId: "admin-1",
+      activeOfficeId: "office-1",
+      scope: "all",
+      stageId: "stage-won",
+      page: 1,
+      pageSize: 25,
+      wonAllTime: true,
+    } as any);
+
+    const countQueryText = extractSqlText(tenantDb.execute.mock.calls[0][0]).toLowerCase();
+    expect(countQueryText).not.toContain("d.is_active = true");
+    expect(countQueryText).toContain("d.stage_id in");
+  });
+
   it("uses direct active reports in the active office for team-scoped stage drill-downs", async () => {
     dbState.responses = [
       [{ id: "stage-estimating", slug: "estimating", name: "Estimating", displayOrder: 4, isTerminal: false }],

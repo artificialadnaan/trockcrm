@@ -6,7 +6,16 @@ import {
   readTerminalDateFilter,
   writeTerminalDateFilter,
 } from "@/lib/pipeline-terminal-filters";
-import { getDealDisplayNumber, summarizeActivePipelineColumns, summarizeTerminalStageCounts } from "./pipeline-page";
+import {
+  MAX_EXPORT_PAGES,
+  buildDealListParams,
+  buildStageNameById,
+  fetchAllFilteredDeals,
+  getDealDisplayNumber,
+  getPipelineListIsActiveFilter,
+  summarizeActivePipelineColumns,
+  summarizeTerminalStageCounts,
+} from "./pipeline-page";
 
 afterEach(() => {
   vi.useRealTimers();
@@ -92,6 +101,67 @@ describe("getDealDisplayNumber", () => {
       label: "HS-321",
       isFallback: true,
     });
+  });
+});
+
+describe("pipeline list/export filtering", () => {
+  it("uses active-only filtering for non-terminal selections and mixed pipeline visibility for terminal selections", () => {
+    expect(getPipelineListIsActiveFilter(["stage-estimating"], ["stage-won", "stage-lost"])).toBe(true);
+    expect(getPipelineListIsActiveFilter(["stage-won"], ["stage-won", "stage-lost"])).toBe("pipeline");
+    expect(getPipelineListIsActiveFilter([], ["stage-won", "stage-lost"])).toBe("pipeline");
+  });
+
+  it("serializes terminal inactive stage ids for mixed list/export requests", () => {
+    const params = buildDealListParams({
+      search: "roof",
+      stageIds: ["stage-estimating", "stage-won"],
+      inactiveStageIds: ["stage-won"],
+      dateRange: {},
+      isActive: "pipeline",
+      sort: { key: "updated_at", dir: "desc" },
+      page: 1,
+      limit: 25,
+    });
+
+    expect(params.get("stageIds")).toBe("stage-estimating,stage-won");
+    expect(params.get("inactiveStageIds")).toBe("stage-won");
+    expect(params.get("isActive")).toBe("pipeline");
+  });
+
+  it("caps CSV export pagination at fifty pages and reports truncation", async () => {
+    const calls: string[] = [];
+    const apiClient = vi.fn(async (path: string) => {
+      calls.push(path);
+      return {
+        deals: [{ id: `deal-${calls.length}` }],
+        pagination: { totalPages: MAX_EXPORT_PAGES + 3 },
+      };
+    });
+
+    const result = await fetchAllFilteredDeals({
+      search: "",
+      stageIds: [],
+      inactiveStageIds: ["stage-won"],
+      dateRange: {},
+      isActive: "pipeline",
+      sort: { key: "updated_at", dir: "desc" },
+      apiClient: apiClient as never,
+    });
+
+    expect(apiClient).toHaveBeenCalledTimes(MAX_EXPORT_PAGES);
+    expect(calls[calls.length - 1]).toContain(`page=${MAX_EXPORT_PAGES}`);
+    expect(calls.some((path) => path.includes(`page=${MAX_EXPORT_PAGES + 1}`))).toBe(false);
+    expect(result.truncated).toBe(true);
+    expect(result.deals).toHaveLength(MAX_EXPORT_PAGES);
+  });
+
+  it("builds stage labels from the full stage config, including hidden kanban stages", () => {
+    const map = buildStageNameById([
+      { id: "stage-estimating", name: "Estimating" },
+      { id: "stage-dd", name: "DD" },
+    ] as never);
+
+    expect(map.get("stage-dd")).toBe("DD");
   });
 });
 

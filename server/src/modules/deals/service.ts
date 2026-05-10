@@ -39,15 +39,17 @@ type TenantDb = NodePgDatabase<typeof schema>;
 type DealRow = typeof deals.$inferSelect;
 type PipelineStageRow = typeof pipelineStageConfig.$inferSelect;
 const contractSignedDateForReporting = sql`COALESCE(contract_signed_at::date, contract_signed_date)`;
+const PIPELINE_CARDS_PER_STAGE_LIMIT = 100;
 
 export interface DealFilters {
   search?: string;
   stageIds?: string[];
+  inactiveStageIds?: string[];
   assignedRepId?: string;
   projectTypeId?: string;
   regionId?: string;
   source?: string;
-  isActive?: boolean;
+  isActive?: boolean | "all" | "pipeline";
   // Inclusive YYYY-MM-DD bounds against deals.contract_signed_at::date, with
   // deals.contract_signed_date as a transition fallback.
   contractSignedFrom?: string;
@@ -565,17 +567,26 @@ function terminalWorkspaceDateConditions(stage: PipelineStageRow, input: DealSta
   return [];
 }
 
+function isTerminalWorkspaceStage(stage?: PipelineStageRow) {
+  if (!stage) return false;
+  return (
+    WON_TERMINAL_STAGE_SLUGS.includes(stage.slug as (typeof WON_TERMINAL_STAGE_SLUGS)[number]) ||
+    LOST_TERMINAL_STAGE_SLUGS.includes(stage.slug as (typeof LOST_TERMINAL_STAGE_SLUGS)[number])
+  );
+}
+
 async function buildDealWorkspaceScope(
   tenantDb: TenantDb,
   input: DealBoardInput | DealStagePageInput,
   stage?: PipelineStageRow
 ) {
   const terminalDateConditions = stage && "stageId" in input ? terminalWorkspaceDateConditions(stage, input) : [];
+  const terminalScope = "stageId" in input && isTerminalWorkspaceStage(stage);
   const filters = [
     sql`u.office_id = ${input.activeOfficeId}`,
   ];
 
-  if (terminalDateConditions.length === 0) {
+  if (!terminalScope) {
     filters.unshift(sql`d.is_active = true`);
   } else {
     filters.push(...terminalDateConditions);
@@ -775,9 +786,30 @@ export async function getDeals(tenantDb: TenantDb, filters: DealFilters, userRol
   // Build conditions array
   const conditions: any[] = [];
 
-  // Active filter (default: true)
-  const showActive = filters.isActive ?? true;
-  conditions.push(eq(deals.isActive, showActive));
+  // Active filter defaults to true. Pipeline list/export can request mixed
+  // visibility: active rows everywhere plus inactive rows only for terminal
+  // stage ids in scope, matching kanban semantics. Client-supplied
+  // inactiveStageIds are intersected with the server's terminal stage set
+  // so a crafted request cannot widen visibility to inactive non-terminal
+  // rows.
+  if (filters.isActive === "pipeline") {
+    let terminalInactiveStageIds: string[] = [];
+    if (filters.inactiveStageIds?.length) {
+      const allStages = await listDealStages();
+      const terminalStageIds = new Set(
+        allStages.filter((stage) => isTerminalWorkspaceStage(stage)).map((stage) => stage.id)
+      );
+      terminalInactiveStageIds = filters.inactiveStageIds.filter((id) => terminalStageIds.has(id));
+    }
+    conditions.push(
+      or(
+        eq(deals.isActive, true),
+        terminalInactiveStageIds.length ? inArray(deals.stageId, terminalInactiveStageIds) : sql`false`
+      )
+    );
+  } else if (filters.isActive !== "all") {
+    conditions.push(eq(deals.isActive, filters.isActive ?? true));
+  }
 
   if (filters.activeOfficeId) {
     const officeUserIds = await resolveActiveOfficeUserIds(tenantDb, filters.activeOfficeId);
@@ -874,8 +906,12 @@ export async function getDeals(tenantDb: TenantDb, filters: DealFilters, userRol
   const [countResult, dealRows] = await Promise.all([
     tenantDb.select({ count: sql<number>`count(*)` }).from(deals).where(where),
     tenantDb
-      .select()
+      .select({
+        ...getTableColumns(deals),
+        companyName: companies.name,
+      })
       .from(deals)
+      .leftJoin(companies, eq(companies.id, deals.companyId))
       .where(where)
       .orderBy(sortOrder)
       .limit(limit)
@@ -1559,8 +1595,6 @@ export async function getDealsForPipeline(
     .map((stage) => stage.id);
   const canonicalWonStageId = stages.find((stage) => stage.slug === "won" && stage.isActivePipeline)?.id ?? null;
   const canonicalLostStageId = stages.find((stage) => stage.slug === "lost" && stage.isActivePipeline)?.id ?? null;
-  const nonTerminalStageIds = stages.filter((stage) => !stage.isTerminal).map((stage) => stage.id);
-
   // Prefer the explicit stage-history entry timestamp. Older migrated rows may
   // only have terminal marker fields, so fall back to contract/lost dates before
   // using the current stage_entered_at value.
@@ -1569,111 +1603,109 @@ export async function getDealsForPipeline(
   );
   const lostEnteredAt = dealTerminalBusinessDateSql(deals.lostAt);
 
-  // Non-terminal pipeline behavior remains active-only. Terminal stages are
-  // date-filtered separately and intentionally include inactive historical rows.
-  const visibilityConditions: any[] = [];
-  if (nonTerminalStageIds.length > 0) {
-    visibilityConditions.push(and(eq(deals.isActive, true), inArray(deals.stageId, nonTerminalStageIds)));
-  }
-  if (wonStageIds.length > 0) {
-    const wonConditions = [
-      inArray(deals.stageId, wonStageIds),
-    ];
-    if (terminalFilters.won.since) {
-      wonConditions.push(sql`${wonEnteredAt} >= ${terminalFilters.won.since}`);
-    }
-    if (terminalFilters.won.until) {
-      wonConditions.push(sql`${wonEnteredAt} < ${addUtcDays(terminalFilters.won.until, 1)}`);
-    }
-    visibilityConditions.push(and(...wonConditions));
-  }
-  if (lostStageIds.length > 0) {
-    const lostConditions = [
-      inArray(deals.stageId, lostStageIds),
-    ];
-    if (terminalFilters.lost.since) {
-      lostConditions.push(sql`${lostEnteredAt} >= ${terminalFilters.lost.since}`);
-    }
-    if (terminalFilters.lost.until) {
-      lostConditions.push(sql`${lostEnteredAt} < ${addUtcDays(terminalFilters.lost.until, 1)}`);
-    }
-    visibilityConditions.push(and(...lostConditions));
-  }
-
-  // Build deal conditions
-  const conditions: any[] = [or(...visibilityConditions)];
+  const commonConditions: any[] = [];
 
   // Reps see only their own deals
   if (userRole === "rep") {
-    conditions.push(eq(deals.assignedRepId, userId));
+    commonConditions.push(eq(deals.assignedRepId, userId));
   } else if (filters?.scope === "mine") {
-    conditions.push(eq(deals.assignedRepId, userId));
+    commonConditions.push(eq(deals.assignedRepId, userId));
   } else if (filters?.scope === "team") {
     const teamRepIds = await resolveTeamRepIds(tenantDb, userId, filters.activeOfficeId ?? null);
     if (filters.assignedRepId) {
-      conditions.push(
+      commonConditions.push(
         teamRepIds.includes(filters.assignedRepId)
           ? eq(deals.assignedRepId, filters.assignedRepId)
           : sql`false`
       );
     } else {
-      conditions.push(teamRepIds.length > 0 ? inArray(deals.assignedRepId, teamRepIds) : sql`false`);
+      commonConditions.push(teamRepIds.length > 0 ? inArray(deals.assignedRepId, teamRepIds) : sql`false`);
     }
   } else if (filters?.assignedRepId) {
-    conditions.push(eq(deals.assignedRepId, filters.assignedRepId));
+    commonConditions.push(eq(deals.assignedRepId, filters.assignedRepId));
   }
 
-  const allDeals = await tenantDb
-    .select({
-      ...getTableColumns(deals),
-      companyName: companies.name,
-      assignedRepName: users.displayName,
-    })
-    .from(deals)
-    .leftJoin(companies, eq(companies.id, deals.companyId))
-    .leftJoin(users, eq(users.id, deals.assignedRepId))
-    .where(and(...conditions))
-    .orderBy(desc(deals.updatedAt))
-    .limit(500);
+  const responseStages = stages.filter((stage) => {
+    if (!stage.isTerminal) return filters?.includeDd || stage.isActivePipeline;
+    if (!stage.isActivePipeline) return false;
+    if (WON_TERMINAL_STAGE_SLUGS.includes(stage.slug as (typeof WON_TERMINAL_STAGE_SLUGS)[number])) {
+      return canonicalWonStageId == null || stage.id === canonicalWonStageId;
+    }
+    if (LOST_TERMINAL_STAGE_SLUGS.includes(stage.slug as (typeof LOST_TERMINAL_STAGE_SLUGS)[number])) {
+      return canonicalLostStageId == null || stage.id === canonicalLostStageId;
+    }
+    return false;
+  });
 
-  // Group deals by stageId
-  const dealsByStage = new Map<string, typeof allDeals>();
-  for (const deal of allDeals) {
-    const displayStageId =
-      canonicalWonStageId && wonStageIds.includes(deal.stageId)
-        ? canonicalWonStageId
-        : canonicalLostStageId && lostStageIds.includes(deal.stageId)
-          ? canonicalLostStageId
-          : deal.stageId;
-    const stageDeals = dealsByStage.get(displayStageId) ?? [];
-    stageDeals.push(deal);
-    dealsByStage.set(displayStageId, stageDeals);
-  }
+  const dealsByStage = new Map<string, Array<DealRow & { companyName: string | null; assignedRepName: string | null }>>();
+  const countByStage = new Map<string, number>();
+  const valueByStage = new Map<string, number>();
+
+  await Promise.all(responseStages.map(async (stage) => {
+    const stageConditions: any[] = [];
+    if (WON_TERMINAL_STAGE_SLUGS.includes(stage.slug as (typeof WON_TERMINAL_STAGE_SLUGS)[number])) {
+      stageConditions.push(inArray(deals.stageId, wonStageIds));
+      if (terminalFilters.won.since) {
+        stageConditions.push(sql`${wonEnteredAt} >= ${terminalFilters.won.since}`);
+      }
+      if (terminalFilters.won.until) {
+        stageConditions.push(sql`${wonEnteredAt} < ${addUtcDays(terminalFilters.won.until, 1)}`);
+      }
+    } else if (LOST_TERMINAL_STAGE_SLUGS.includes(stage.slug as (typeof LOST_TERMINAL_STAGE_SLUGS)[number])) {
+      stageConditions.push(inArray(deals.stageId, lostStageIds));
+      if (terminalFilters.lost.since) {
+        stageConditions.push(sql`${lostEnteredAt} >= ${terminalFilters.lost.since}`);
+      }
+      if (terminalFilters.lost.until) {
+        stageConditions.push(sql`${lostEnteredAt} < ${addUtcDays(terminalFilters.lost.until, 1)}`);
+      }
+    } else {
+      stageConditions.push(eq(deals.isActive, true), eq(deals.stageId, stage.id));
+    }
+
+    const where = and(...stageConditions, ...commonConditions);
+    const [summaryRows, stageDeals] = await Promise.all([
+      tenantDb
+        .select({
+          count: sql<number>`count(*)`,
+          totalValue: sql<number>`COALESCE(SUM(COALESCE(${deals.awardedAmount}, ${deals.bidEstimate}, ${deals.ddEstimate}, 0)), 0)`,
+        })
+        .from(deals)
+        .where(where),
+      tenantDb
+        .select({
+          ...getTableColumns(deals),
+          companyName: companies.name,
+          assignedRepName: users.displayName,
+        })
+        .from(deals)
+        .leftJoin(companies, eq(companies.id, deals.companyId))
+        .leftJoin(users, eq(users.id, deals.assignedRepId))
+        .where(where)
+        .orderBy(desc(deals.updatedAt))
+        .limit(PIPELINE_CARDS_PER_STAGE_LIMIT),
+    ]);
+
+    dealsByStage.set(stage.id, stageDeals);
+    countByStage.set(stage.id, Number(summaryRows[0]?.count ?? 0));
+    valueByStage.set(stage.id, Number(summaryRows[0]?.totalValue ?? 0));
+  }));
 
   // Build response: active pipeline stages + date-filtered terminal stages.
-  const pipelineColumns = stages
-    .filter((s) => (s.isTerminal ? s.isActivePipeline : filters?.includeDd || s.isActivePipeline)) // exclude DD unless toggled
-    .map((stage) => ({
-      stage,
-      deals: dealsByStage.get(stage.id) ?? [],
-      totalValue: (dealsByStage.get(stage.id) ?? []).reduce(
-        (sum, d) => sum + Number(d.awardedAmount ?? d.bidEstimate ?? d.ddEstimate ?? 0),
-        0
-      ),
-      count: (dealsByStage.get(stage.id) ?? []).length,
-    }));
+  const pipelineColumns = responseStages.map((stage) => ({
+    stage,
+    deals: dealsByStage.get(stage.id) ?? [],
+    totalValue: valueByStage.get(stage.id) ?? 0,
+    count: countByStage.get(stage.id) ?? 0,
+  }));
 
-  const terminalStages = stages
+  const terminalStages = responseStages
     .filter((s) => s.isTerminal)
-    .filter((s) => s.isActivePipeline)
     .map((stage) => ({
       stage,
       deals: dealsByStage.get(stage.id) ?? [],
-      count: (dealsByStage.get(stage.id) ?? []).length,
-      totalValue: (dealsByStage.get(stage.id) ?? []).reduce(
-        (sum, d) => sum + Number(d.awardedAmount ?? d.bidEstimate ?? d.ddEstimate ?? 0),
-        0
-      ),
+      count: countByStage.get(stage.id) ?? 0,
+      totalValue: valueByStage.get(stage.id) ?? 0,
     }));
 
   return { pipelineColumns, terminalStages };

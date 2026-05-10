@@ -700,7 +700,7 @@ export function RepDashboardPage() {
           <ArrowUpRight className="ml-1.5 h-4 w-4" />
         </Link>
         <Link
-          to="/deals"
+          to="/pipeline"
           className={cn(buttonVariants({ variant: "default", size: "lg" }), "bg-brand-red text-white hover:bg-brand-red/90")}
         >
           Open my pipeline
