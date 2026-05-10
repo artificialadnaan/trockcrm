@@ -2,8 +2,9 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const getDealByIdMock = vi.hoisted(() => vi.fn());
 const evaluateReadinessMock = vi.hoisted(() => vi.fn());
-const enqueueRfpMock = vi.hoisted(() => vi.fn());
+const insertRfpJobMock = vi.hoisted(() => vi.fn());
 const inferBidBoardOwnershipMock = vi.hoisted(() => vi.fn());
+const isRfpEnabledMock = vi.hoisted(() => vi.fn());
 
 vi.mock("../../../src/events/bus.js", () => ({
   eventBus: {
@@ -99,7 +100,11 @@ vi.mock("../../../src/modules/deals/workflow-backfill.js", () => ({
 }));
 
 vi.mock("../../../src/modules/deals/rfp-enqueue.js", () => ({
-  enqueueOpportunityRfpIfNeeded: enqueueRfpMock,
+  insertOpportunityRfpRequestJob: insertRfpJobMock,
+}));
+
+vi.mock("../../../src/config/feature-flags.js", () => ({
+  isOpportunityRfpEventEnabled: isRfpEnabledMock,
 }));
 
 const { dealRoutes } = await import("../../../src/modules/deals/routes.js");
@@ -140,30 +145,91 @@ function makeDeal(overrides: Record<string, unknown> = {}) {
   };
 }
 
+function createRouteState(deal = makeDeal()) {
+  return {
+    deal,
+    inserted: [] as any[],
+    updatesAttempted: 0,
+    adminOverride: false,
+    beforeUpdate: null as null | (() => void),
+  };
+}
+
+function makeSelectBuilder(state: ReturnType<typeof createRouteState>) {
+  return {
+    from: vi.fn(() => ({
+      where: vi.fn(() => ({
+        limit: vi.fn(async () => state.deal ? [state.deal] : []),
+      })),
+    })),
+  };
+}
+
+function makeUpdateBuilder(state: ReturnType<typeof createRouteState>, values: Record<string, unknown>) {
+  return {
+    where: vi.fn(() => ({
+      returning: vi.fn(async () => {
+        state.updatesAttempted += 1;
+        if (state.beforeUpdate) {
+          const beforeUpdate = state.beforeUpdate;
+          state.beforeUpdate = null;
+          beforeUpdate();
+        }
+        if (
+          !state.deal ||
+          state.deal.stageId !== "stage-opportunity" ||
+          state.deal.rfpApprovalStatus != null ||
+          state.deal.rfpApprovalRequestedAt != null ||
+          state.deal.isBidBoardOwned === true ||
+          Boolean(state.deal.bidBoardStageSlug) ||
+          state.deal.isReadOnlyMirror === true ||
+          state.deal.readOnlySyncedAt != null ||
+          state.deal.bidBoardStageEnteredAt != null ||
+          state.deal.bidBoardMirrorSourceEnteredAt != null ||
+          (!state.adminOverride && state.deal.assignedRepId !== "rep-1")
+        ) {
+          return [];
+        }
+
+        state.deal = {
+          ...state.deal,
+          ...values,
+        };
+        return [state.deal];
+      }),
+    })),
+  };
+}
+
 function makeReq(options: {
   role?: string;
   stageSlug?: string;
   deal?: Record<string, unknown>;
   readinessStatus?: "draft" | "ready" | "activated";
+  state?: ReturnType<typeof createRouteState>;
 } = {}) {
-  const inserted: any[] = [];
-  const updated: any[] = [];
+  const state = options.state ?? createRouteState(makeDeal(options.deal));
+  state.adminOverride = options.role === "admin";
   const req = {
     params: { id: "deal-1" },
     tenantDb: {
       execute: vi.fn(async () => ({
-        rows: [{ slug: options.stageSlug ?? "opportunity" }],
+        rows: [{
+          slug:
+            options.stageSlug ??
+            (state.deal?.stageId === "stage-estimating" ? "estimating" : "opportunity"),
+        }],
       })),
+      select: vi.fn(() => makeSelectBuilder(state)),
       insert: vi.fn(() => ({
         values: vi.fn(async (value) => {
-          inserted.push(value);
+          state.inserted.push(value);
           return {};
         }),
       })),
       update: vi.fn(() => ({
         set: vi.fn((value) => {
-          updated.push(value);
-          return { where: vi.fn(async () => ({})) };
+          return makeUpdateBuilder(state, value);
         }),
       })),
     },
@@ -175,12 +241,11 @@ function makeReq(options: {
     },
     commitTransaction: vi.fn(async () => {}),
   } as any;
-  getDealByIdMock.mockResolvedValue(makeDeal(options.deal));
   evaluateReadinessMock.mockResolvedValue({
     status: options.readinessStatus ?? "ready",
     errors: { sections: {}, attachments: {} },
   });
-  return { req, inserted, updated };
+  return { req, state };
 }
 
 function makeRes() {
@@ -201,22 +266,13 @@ function makeRes() {
 describe("POST /api/deals/:id/trigger-rfp", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    isRfpEnabledMock.mockReturnValue(true);
     inferBidBoardOwnershipMock.mockReturnValue({ isBidBoardOwned: false });
-    enqueueRfpMock.mockResolvedValue({
-      enqueued: true,
-      eventId: "11111111-1111-4111-8111-111111111111",
-      jobId: 123,
-      dealUpdates: {
-        rfpApprovalRequestedAt: new Date("2026-05-10T12:30:00.000Z"),
-        rfpApprovalRequestEventId: "11111111-1111-4111-8111-111111111111",
-        rfpApprovalRequestedBy: "rep-1",
-        rfpApprovalStatus: "pending_outbox",
-      },
-    });
+    insertRfpJobMock.mockResolvedValue({ jobId: 123 });
   });
 
   it("enqueues an RFP request for an assigned rep when Opportunity scope is ready", async () => {
-    const { req, inserted, updated } = makeReq();
+    const { req, state } = makeReq();
     const res = makeRes();
     const next = vi.fn();
 
@@ -227,19 +283,18 @@ describe("POST /api/deals/:id/trigger-rfp", () => {
     expect(res.body).toMatchObject({
       success: true,
       status: "pending_outbox",
-      eventId: "11111111-1111-4111-8111-111111111111",
+      eventId: expect.any(String),
       jobId: 123,
     });
-    expect(enqueueRfpMock).toHaveBeenCalledWith(
+    expect(insertRfpJobMock).toHaveBeenCalledWith(
       expect.objectContaining({
         deal: expect.objectContaining({ id: "deal-1" }),
-        userId: "rep-1",
         officeId: "office-1",
-        transitioningFrom: null,
       })
     );
-    expect(updated[0]).toMatchObject({ rfpApprovalStatus: "pending_outbox" });
-    expect(inserted[0]).toMatchObject({
+    expect(state.deal).toMatchObject({ rfpApprovalStatus: "pending_outbox" });
+    expect(state.updatesAttempted).toBe(1);
+    expect(state.inserted[0]).toMatchObject({
       jobType: "domain_event",
       officeId: "office-1",
       status: "pending",
@@ -262,7 +317,7 @@ describe("POST /api/deals/:id/trigger-rfp", () => {
     const err = next.mock.calls[0]?.[0] as { statusCode: number; code: string };
     expect(err.statusCode).toBe(400);
     expect(err.code).toBe("RFP_WRONG_STAGE");
-    expect(enqueueRfpMock).not.toHaveBeenCalled();
+    expect(insertRfpJobMock).not.toHaveBeenCalled();
   });
 
   it("rejects incomplete Opportunity scope", async () => {
@@ -280,7 +335,7 @@ describe("POST /api/deals/:id/trigger-rfp", () => {
     expect(err.statusCode).toBe(400);
     expect(err.code).toBe("RFP_SCOPE_INCOMPLETE");
     expect(err.message).toContain("Missing sections: project");
-    expect(enqueueRfpMock).not.toHaveBeenCalled();
+    expect(insertRfpJobMock).not.toHaveBeenCalled();
   });
 
   it("rejects an already-triggered deal", async () => {
@@ -296,9 +351,22 @@ describe("POST /api/deals/:id/trigger-rfp", () => {
     await findRouteHandler("post", "/:id/trigger-rfp")(req, res, next);
 
     const err = next.mock.calls[0]?.[0] as { statusCode: number; code: string };
-    expect(err.statusCode).toBe(400);
+    expect(err.statusCode).toBe(409);
     expect(err.code).toBe("RFP_ALREADY_TRIGGERED");
-    expect(enqueueRfpMock).not.toHaveBeenCalled();
+    expect(insertRfpJobMock).not.toHaveBeenCalled();
+  });
+
+  it("rejects a non-assigned rep with the trigger-specific unauthorized code", async () => {
+    const { req } = makeReq({ deal: { assignedRepId: "rep-2" } });
+    const res = makeRes();
+    const next = vi.fn();
+
+    await findRouteHandler("post", "/:id/trigger-rfp")(req, res, next);
+
+    const err = next.mock.calls[0]?.[0] as { statusCode: number; code: string };
+    expect(err.statusCode).toBe(403);
+    expect(err.code).toBe("RFP_UNAUTHORIZED");
+    expect(insertRfpJobMock).not.toHaveBeenCalled();
   });
 
   it("rejects users who are neither admin nor the assigned rep", async () => {
@@ -311,6 +379,137 @@ describe("POST /api/deals/:id/trigger-rfp", () => {
     const err = next.mock.calls[0]?.[0] as { statusCode: number; code: string };
     expect(err.statusCode).toBe(403);
     expect(err.code).toBe("RFP_UNAUTHORIZED");
-    expect(enqueueRfpMock).not.toHaveBeenCalled();
+    expect(insertRfpJobMock).not.toHaveBeenCalled();
+  });
+
+  it("returns feature-disabled before reserving or enqueueing", async () => {
+    isRfpEnabledMock.mockReturnValue(false);
+    const { req, state } = makeReq();
+    const res = makeRes();
+    const next = vi.fn();
+
+    await findRouteHandler("post", "/:id/trigger-rfp")(req, res, next);
+
+    const err = next.mock.calls[0]?.[0] as { statusCode: number; code: string };
+    expect(err.statusCode).toBe(503);
+    expect(err.code).toBe("RFP_EVENT_DISABLED");
+    expect(state.updatesAttempted).toBe(0);
+    expect(insertRfpJobMock).not.toHaveBeenCalled();
+  });
+
+  it("allows admins to trigger eligible deals without assigned-rep guard", async () => {
+    const { req, state } = makeReq({ role: "admin", deal: { assignedRepId: "rep-2" } });
+    const res = makeRes();
+    const next = vi.fn();
+
+    await findRouteHandler("post", "/:id/trigger-rfp")(req, res, next);
+
+    expect(next).not.toHaveBeenCalled();
+    expect(res.statusCode).toBe(200);
+    expect(state.updatesAttempted).toBe(1);
+    expect(insertRfpJobMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("only enqueues once when two trigger requests race", async () => {
+    const state = createRouteState();
+    const first = makeReq({ state });
+    const second = makeReq({ state });
+    const firstRes = makeRes();
+    const secondRes = makeRes();
+    const firstNext = vi.fn();
+    const secondNext = vi.fn();
+    const handler = findRouteHandler("post", "/:id/trigger-rfp");
+
+    await Promise.all([
+      handler(first.req, firstRes, firstNext),
+      handler(second.req, secondRes, secondNext),
+    ]);
+
+    const statuses = [firstRes.statusCode, secondRes.statusCode];
+    const errors = [...firstNext.mock.calls, ...secondNext.mock.calls].map((call) => call[0]);
+    expect(statuses).toContain(200);
+    expect(errors).toHaveLength(1);
+    expect(errors[0]).toMatchObject({ statusCode: 409, code: "RFP_ALREADY_TRIGGERED" });
+    expect(insertRfpJobMock).toHaveBeenCalledTimes(1);
+    expect(state.inserted.filter((job) => job.jobType === "domain_event")).toHaveLength(1);
+  });
+
+  it("returns a stage mismatch conflict if the deal leaves Opportunity before reservation", async () => {
+    const state = createRouteState();
+    state.beforeUpdate = () => {
+      state.deal = { ...state.deal, stageId: "stage-estimating" };
+    };
+    const { req } = makeReq({ state });
+    const res = makeRes();
+    const next = vi.fn();
+
+    await findRouteHandler("post", "/:id/trigger-rfp")(req, res, next);
+
+    const err = next.mock.calls[0]?.[0] as { statusCode: number; code: string };
+    expect(err.statusCode).toBe(409);
+    expect(err.code).toBe("RFP_STAGE_MISMATCH");
+    expect(insertRfpJobMock).not.toHaveBeenCalled();
+  });
+
+  it("returns a handoff conflict if Bid Board ownership lands before reservation", async () => {
+    const state = createRouteState();
+    state.beforeUpdate = () => {
+      state.deal = { ...state.deal, isBidBoardOwned: true };
+    };
+    const { req } = makeReq({ state });
+    const res = makeRes();
+    const next = vi.fn();
+
+    await findRouteHandler("post", "/:id/trigger-rfp")(req, res, next);
+
+    const err = next.mock.calls[0]?.[0] as { statusCode: number; code: string };
+    expect(err.statusCode).toBe(409);
+    expect(err.code).toBe("RFP_ALREADY_HANDED_OFF");
+    expect(insertRfpJobMock).not.toHaveBeenCalled();
+  });
+
+  it("returns a handoff conflict if inferred Bid Board mirror fields land before reservation", async () => {
+    inferBidBoardOwnershipMock.mockImplementation((input: { bidBoardStageSlug?: string | null }) => ({
+      isBidBoardOwned: Boolean(input.bidBoardStageSlug),
+    }));
+    const state = createRouteState();
+    state.beforeUpdate = () => {
+      state.deal = { ...state.deal, bidBoardStageSlug: "estimate_in_progress" };
+    };
+    const { req } = makeReq({ state });
+    const res = makeRes();
+    const next = vi.fn();
+
+    await findRouteHandler("post", "/:id/trigger-rfp")(req, res, next);
+
+    const err = next.mock.calls[0]?.[0] as { statusCode: number; code: string };
+    expect(err.statusCode).toBe(409);
+    expect(err.code).toBe("RFP_ALREADY_HANDED_OFF");
+    expect(insertRfpJobMock).not.toHaveBeenCalled();
+  });
+
+  it("rechecks readiness after reservation and rolls back before enqueueing if scope regresses", async () => {
+    const { req, state } = makeReq();
+    evaluateReadinessMock
+      .mockResolvedValueOnce({
+        status: "ready",
+        errors: { sections: {}, attachments: {} },
+      })
+      .mockResolvedValueOnce({
+        status: "draft",
+        errors: { sections: { project: ["name"] }, attachments: {} },
+      });
+    const res = makeRes();
+    const next = vi.fn();
+
+    await findRouteHandler("post", "/:id/trigger-rfp")(req, res, next);
+
+    const err = next.mock.calls[0]?.[0] as { statusCode: number; code: string; message: string };
+    expect(err.statusCode).toBe(400);
+    expect(err.code).toBe("RFP_SCOPE_INCOMPLETE");
+    expect(err.message).toContain("Missing sections: project");
+    expect(state.updatesAttempted).toBe(1);
+    expect(insertRfpJobMock).not.toHaveBeenCalled();
+    expect(req.commitTransaction).not.toHaveBeenCalled();
   });
 });

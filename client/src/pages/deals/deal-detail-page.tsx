@@ -240,6 +240,7 @@ export function DealDetailPage() {
   const [rfpTriggerError, setRfpTriggerError] = useState<string | null>(null);
   const [rfpReadinessStatus, setRfpReadinessStatus] = useState<"draft" | "ready" | "activated" | null>(null);
   const [rfpReadinessLoading, setRfpReadinessLoading] = useState(false);
+  const [rfpReadinessRefreshKey, setRfpReadinessRefreshKey] = useState(0);
   const currentStage = stages.find((s) => s.id === deal?.stageId);
   const isDirectorOrAdmin = user?.role === "director" || user?.role === "admin";
   const bidBoardOwnership = deal?.bidBoardOwnership;
@@ -363,8 +364,9 @@ export function DealDetailPage() {
     user?.role === "admin" ||
     (user?.role === "rep" && deal?.assignedRepId === user.id);
   const showTriggerRfpButton = Boolean(
-    deal &&
+      deal &&
       canTriggerRfp &&
+      deal.isRfpTriggerEnabled === true &&
       isOpportunityStage &&
       !isBidBoardOwned &&
       !deal.rfpApprovalStatus &&
@@ -471,7 +473,7 @@ export function DealDetailPage() {
     return () => {
       cancelled = true;
     };
-  }, [deal?.id, showTriggerRfpButton]);
+  }, [deal?.id, rfpReadinessRefreshKey, showTriggerRfpButton]);
 
   if (loading) {
     return (
@@ -528,13 +530,23 @@ export function DealDetailPage() {
     setRfpTriggering(true);
     try {
       await api(`/deals/${deal.id}/trigger-rfp`, { method: "POST" });
-      toast.success("RFP request sent to approval team.");
-      await refetch();
     } catch (err: unknown) {
       setRfpTriggerError(err instanceof Error ? err.message : "Failed to trigger RFP review.");
+      setRfpTriggering(false);
+      return;
+    }
+
+    toast.success("RFP request sent to approval team.");
+    try {
+      await refetch();
+    } catch {
+      toast.info("RFP triggered. Refresh page to see updated status.");
     } finally {
       setRfpTriggering(false);
     }
+  };
+  const handleScopingReadinessChanged = () => {
+    setRfpReadinessRefreshKey((key) => key + 1);
   };
 
   const stageAgeDays = daysSince(deal.stageEnteredAt);
@@ -812,7 +824,11 @@ export function DealDetailPage() {
             onOpenTab={handleTabSelect}
           />
         ) : (
-          <DealScopingWorkspace deal={deal} onDealUpdated={refetch} />
+          <DealScopingWorkspace
+            deal={deal}
+            onDealUpdated={refetch}
+            onReadinessChanged={handleScopingReadinessChanged}
+          />
         ))}
       {activeTab === "files" && <DealFileTab dealId={deal.id} />}
       {activeTab === "photos" && <DealPhotosTab dealId={deal.id} onCountChange={setPhotoCount} />}
