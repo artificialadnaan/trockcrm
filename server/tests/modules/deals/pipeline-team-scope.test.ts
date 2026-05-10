@@ -280,4 +280,214 @@ describe("getDealsForPipeline team scope", () => {
 
     expect(dealQuery.limit.mock.calls.map((call) => call[0])).toEqual([100, 100]);
   });
+
+  it("queries each active won alias terminal column by its own stage when no canonical won stage exists", async () => {
+    dbState.stages = [
+      {
+        id: "stage-sent",
+        slug: "sent_to_production",
+        name: "Sent to Production",
+        displayOrder: 7,
+        isTerminal: true,
+        isActivePipeline: true,
+      },
+      {
+        id: "stage-closed",
+        slug: "closed_won",
+        name: "Closed Won",
+        displayOrder: 8,
+        isTerminal: true,
+        isActivePipeline: true,
+      },
+    ];
+    const dealQuery = {
+      leftJoin: vi.fn().mockReturnThis(),
+      where: vi.fn().mockReturnThis(),
+      orderBy: vi.fn().mockReturnThis(),
+      limit: vi.fn().mockResolvedValue([]),
+    };
+    const tenantDb = {
+      select: vi.fn(() => ({
+        from: vi.fn((table: unknown) => {
+          if (table === deals) return dealQuery;
+          return dealQuery;
+        }),
+      })),
+    } as any;
+
+    const { getDealsForPipeline } = await import("../../../src/modules/deals/service.js");
+    await getDealsForPipeline(tenantDb, "admin", "admin-1", {
+      scope: "all",
+      activeOfficeId: "office-1",
+      includeDd: true,
+      wonAllTime: true,
+    });
+
+    const sentStageConditions = dealQuery.where.mock.calls
+      .map((call) => call[0])
+      .filter((condition) => containsValue(condition, "stage-sent"));
+    const closedStageConditions = dealQuery.where.mock.calls
+      .map((call) => call[0])
+      .filter((condition) => containsValue(condition, "stage-closed"));
+
+    expect(sentStageConditions).toHaveLength(2);
+    expect(closedStageConditions).toHaveLength(2);
+    expect(sentStageConditions.every((condition) => !containsValue(condition, "stage-closed"))).toBe(true);
+    expect(closedStageConditions.every((condition) => !containsValue(condition, "stage-sent"))).toBe(true);
+  });
+
+  it("keeps canonical won terminal columns scoped to the canonical stage when aliases also exist", async () => {
+    dbState.stages = [
+      {
+        id: "stage-won",
+        slug: "won",
+        name: "Won",
+        displayOrder: 7,
+        isTerminal: true,
+        isActivePipeline: true,
+      },
+      {
+        id: "stage-sent",
+        slug: "sent_to_production",
+        name: "Sent to Production",
+        displayOrder: 8,
+        isTerminal: true,
+        isActivePipeline: true,
+      },
+    ];
+    const dealQuery = {
+      leftJoin: vi.fn().mockReturnThis(),
+      where: vi.fn().mockReturnThis(),
+      orderBy: vi.fn().mockReturnThis(),
+      limit: vi.fn().mockResolvedValue([]),
+    };
+    const tenantDb = {
+      select: vi.fn(() => ({
+        from: vi.fn((table: unknown) => {
+          if (table === deals) return dealQuery;
+          return dealQuery;
+        }),
+      })),
+    } as any;
+
+    const { getDealsForPipeline } = await import("../../../src/modules/deals/service.js");
+    const result = await getDealsForPipeline(tenantDb, "admin", "admin-1", {
+      scope: "all",
+      activeOfficeId: "office-1",
+      includeDd: true,
+      wonAllTime: true,
+    });
+
+    expect(result.pipelineColumns.map((column) => column.stage.id)).toEqual(["stage-won"]);
+    const canonicalConditions = dealQuery.where.mock.calls
+      .map((call) => call[0])
+      .filter((condition) => containsValue(condition, "stage-won"));
+    expect(canonicalConditions).toHaveLength(2);
+    expect(canonicalConditions.every((condition) => !containsValue(condition, "stage-sent"))).toBe(true);
+  });
+
+  it("queries each active lost alias terminal column by its own stage when no canonical lost stage exists", async () => {
+    dbState.stages = [
+      {
+        id: "stage-production-lost",
+        slug: "production_lost",
+        name: "Production Lost",
+        displayOrder: 8,
+        isTerminal: true,
+        isActivePipeline: true,
+      },
+      {
+        id: "stage-closed-lost",
+        slug: "closed_lost",
+        name: "Closed Lost",
+        displayOrder: 9,
+        isTerminal: true,
+        isActivePipeline: true,
+      },
+    ];
+    const dealQuery = {
+      leftJoin: vi.fn().mockReturnThis(),
+      where: vi.fn().mockReturnThis(),
+      orderBy: vi.fn().mockReturnThis(),
+      limit: vi.fn().mockResolvedValue([]),
+    };
+    const tenantDb = {
+      select: vi.fn(() => ({
+        from: vi.fn((table: unknown) => {
+          if (table === deals) return dealQuery;
+          return dealQuery;
+        }),
+      })),
+    } as any;
+
+    const { getDealsForPipeline } = await import("../../../src/modules/deals/service.js");
+    await getDealsForPipeline(tenantDb, "admin", "admin-1", {
+      scope: "all",
+      activeOfficeId: "office-1",
+      includeDd: true,
+      lostAllTime: true,
+    });
+
+    const productionLostConditions = dealQuery.where.mock.calls
+      .map((call) => call[0])
+      .filter((condition) => containsValue(condition, "stage-production-lost"));
+    const closedLostConditions = dealQuery.where.mock.calls
+      .map((call) => call[0])
+      .filter((condition) => containsValue(condition, "stage-closed-lost"));
+
+    expect(productionLostConditions).toHaveLength(2);
+    expect(closedLostConditions).toHaveLength(2);
+    expect(productionLostConditions.every((condition) => !containsValue(condition, "stage-closed-lost"))).toBe(true);
+    expect(closedLostConditions.every((condition) => !containsValue(condition, "stage-production-lost"))).toBe(true);
+  });
+
+  it("keeps canonical lost terminal columns scoped to the canonical stage when aliases also exist", async () => {
+    dbState.stages = [
+      {
+        id: "stage-lost",
+        slug: "lost",
+        name: "Lost",
+        displayOrder: 8,
+        isTerminal: true,
+        isActivePipeline: true,
+      },
+      {
+        id: "stage-production-lost",
+        slug: "production_lost",
+        name: "Production Lost",
+        displayOrder: 9,
+        isTerminal: true,
+        isActivePipeline: true,
+      },
+    ];
+    const dealQuery = {
+      leftJoin: vi.fn().mockReturnThis(),
+      where: vi.fn().mockReturnThis(),
+      orderBy: vi.fn().mockReturnThis(),
+      limit: vi.fn().mockResolvedValue([]),
+    };
+    const tenantDb = {
+      select: vi.fn(() => ({
+        from: vi.fn((table: unknown) => {
+          if (table === deals) return dealQuery;
+          return dealQuery;
+        }),
+      })),
+    } as any;
+
+    const { getDealsForPipeline } = await import("../../../src/modules/deals/service.js");
+    const result = await getDealsForPipeline(tenantDb, "admin", "admin-1", {
+      scope: "all",
+      activeOfficeId: "office-1",
+      includeDd: true,
+      lostAllTime: true,
+    });
+
+    expect(result.pipelineColumns.map((column) => column.stage.id)).toEqual(["stage-lost"]);
+    const canonicalConditions = dealQuery.where.mock.calls
+      .map((call) => call[0])
+      .filter((condition) => containsValue(condition, "stage-lost"));
+    expect(canonicalConditions).toHaveLength(2);
+    expect(canonicalConditions.every((condition) => !containsValue(condition, "stage-production-lost"))).toBe(true);
+  });
 });

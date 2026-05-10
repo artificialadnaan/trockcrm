@@ -355,14 +355,21 @@ export function normalizeDealBoardResponse(result: DealBoardApiResponse): DealBo
   };
 }
 
-export function useDeals(filters: DealFilters = {}) {
+export function useDeals(filters: DealFilters = {}, options: { enabled?: boolean } = {}) {
   const [deals, setDeals] = useState<Deal[]>([]);
   const [pagination, setPagination] = useState<Pagination>({ page: 1, limit: 50, total: 0, totalPages: 0 });
-  const [loading, setLoading] = useState(true);
+  const enabled = options.enabled ?? true;
+  const [loading, setLoading] = useState(enabled);
   const [error, setError] = useState<string | null>(null);
   const requestIdRef = useRef(0);
 
   const fetchDeals = useCallback(async () => {
+    if (!enabled) {
+      requestIdRef.current += 1;
+      setLoading(false);
+      setError(null);
+      return;
+    }
     const requestId = requestIdRef.current + 1;
     requestIdRef.current = requestId;
     setLoading(true);
@@ -420,6 +427,7 @@ export function useDeals(filters: DealFilters = {}) {
     filters.page,
     filters.limit,
     filters.scope,
+    enabled,
   ]);
 
   useEffect(() => {

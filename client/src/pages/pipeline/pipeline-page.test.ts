@@ -13,6 +13,8 @@ import {
   fetchAllFilteredDeals,
   getDealDisplayNumber,
   getPipelineListIsActiveFilter,
+  getPipelineListQueryState,
+  getVisibleTerminalStageIds,
   summarizeActivePipelineColumns,
   summarizeTerminalStageCounts,
 } from "./pipeline-page";
@@ -105,6 +107,43 @@ describe("getDealDisplayNumber", () => {
 });
 
 describe("pipeline list/export filtering", () => {
+  it("builds terminal stage ids only from terminal stages visible in the current board", () => {
+    const terminalStageIds = getVisibleTerminalStageIds(
+      [
+        { id: "stage-estimating", slug: "estimating", name: "Estimating", isTerminal: false },
+        { id: "stage-won", slug: "won", name: "Won", isTerminal: true },
+        { id: "legacy-closed-won", slug: "closed_won", name: "Closed Won", isTerminal: true },
+        { id: "legacy-production-lost", slug: "production_lost", name: "Production Lost", isTerminal: true },
+      ] as never,
+      [
+        { id: "stage-estimating", slug: "estimating", name: "Estimating" },
+        { id: "stage-won", slug: "won", name: "Won" },
+      ]
+    );
+
+    expect(terminalStageIds).toEqual(["stage-won"]);
+  });
+
+  it("does not enable the list query while pipeline stage metadata is unresolved", () => {
+    expect(
+      getPipelineListQueryState({
+        selectedStageIds: [],
+        terminalStageIds: [],
+        stagesLoading: true,
+        stagesError: null,
+      })
+    ).toMatchObject({ enabled: false, inactiveStageIds: [] });
+
+    expect(
+      getPipelineListQueryState({
+        selectedStageIds: [],
+        terminalStageIds: [],
+        stagesLoading: false,
+        stagesError: "Failed to load stages",
+      })
+    ).toMatchObject({ enabled: false, inactiveStageIds: [] });
+  });
+
   it("uses active-only filtering for non-terminal selections and mixed pipeline visibility for terminal selections", () => {
     expect(getPipelineListIsActiveFilter(["stage-estimating"], ["stage-won", "stage-lost"])).toBe(true);
     expect(getPipelineListIsActiveFilter(["stage-won"], ["stage-won", "stage-lost"])).toBe("pipeline");

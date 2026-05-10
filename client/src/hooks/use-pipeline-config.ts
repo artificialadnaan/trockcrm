@@ -142,19 +142,28 @@ export function loadRegions(fetcher?: ApiFetcher) {
 export function usePipelineStages(workflowFamily?: WorkflowFamily) {
   const [stages, setStages] = useState<PipelineStage[]>([]);
   const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
     let cancelled = false;
+    setLoading(true);
+    setError(null);
     loadPipelineStages({ workflowFamily })
       .then((data) => {
         if (!cancelled) setStages(data);
       })
-      .catch((err) => console.error("Failed to load stages:", err))
+      .catch((err) => {
+        console.error("Failed to load stages:", err);
+        if (!cancelled) {
+          setStages([]);
+          setError(err instanceof Error ? err.message : "Failed to load stages");
+        }
+      })
       .finally(() => { if (!cancelled) setLoading(false); });
     return () => { cancelled = true; };
   }, [workflowFamily]);
 
-  return { stages, loading };
+  return { stages, loading, error };
 }
 
 export function useLostReasons() {

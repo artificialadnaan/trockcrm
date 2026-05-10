@@ -114,6 +114,43 @@ export function getPipelineListIsActiveFilter(
   return selectedStageIds.some((id) => terminalStageIds.includes(id)) ? "pipeline" : true;
 }
 
+export function getVisibleTerminalStageIds(
+  stages: Array<Pick<PipelineStage, "id" | "isTerminal">>,
+  visibleStages: Array<Pick<PipelineStage, "id" | "slug" | "name">>
+) {
+  const visibleStageIds = new Set(visibleStages.map((stage) => stage.id));
+  return stages
+    .filter((stage) => stage.isTerminal && visibleStageIds.has(stage.id))
+    .map((stage) => stage.id);
+}
+
+export function getPipelineListQueryState(input: {
+  selectedStageIds: string[];
+  terminalStageIds: string[];
+  stagesLoading: boolean;
+  stagesError: string | null;
+}) {
+  if (input.stagesLoading || input.stagesError) {
+    return {
+      enabled: false,
+      isActive: "pipeline" as DealListActiveFilter,
+      inactiveStageIds: [] as string[],
+    };
+  }
+
+  const isActive = getPipelineListIsActiveFilter(input.selectedStageIds, input.terminalStageIds);
+  return {
+    enabled: true,
+    isActive,
+    inactiveStageIds:
+      isActive !== "pipeline"
+        ? []
+        : input.selectedStageIds.length === 0
+          ? input.terminalStageIds
+          : input.selectedStageIds.filter((id) => input.terminalStageIds.includes(id)),
+  };
+}
+
 export function buildStageNameById(stages: Array<Pick<PipelineStage, "id" | "name">>) {
   return new Map(stages.map((stage) => [stage.id, stage.name]));
 }
@@ -435,7 +472,11 @@ export function PipelinePage() {
   const [listPage, setListPage] = useState(1);
   const [listSort, setListSort] = useState<SortState>({ key: "updated_at", dir: "desc" });
   const { assignees } = useTaskAssignees();
-  const { stages: allPipelineStages } = usePipelineStages();
+  const {
+    stages: allPipelineStages,
+    loading: pipelineStagesLoading,
+    error: pipelineStagesError,
+  } = usePipelineStages();
 
   const sensors = useSensors(
     useSensor(PointerSensor, { activationConstraint: { distance: 8 } })
@@ -461,18 +502,21 @@ export function PipelinePage() {
   );
   const listDateRange = useMemo(() => dateRangeFromTerminalFilter(listDateFilter), [listDateFilter]);
   const terminalStageIds = useMemo(
-    () => allPipelineStages.filter((stage) => stage.isTerminal).map((stage) => stage.id),
-    [allPipelineStages]
+    () => getVisibleTerminalStageIds(allPipelineStages, stageFilterOptions),
+    [allPipelineStages, stageFilterOptions]
   );
-  const listIsActiveFilter = useMemo(
-    () => getPipelineListIsActiveFilter(selectedStageIds, terminalStageIds),
-    [selectedStageIds, terminalStageIds]
+  const listQueryState = useMemo(
+    () =>
+      getPipelineListQueryState({
+        selectedStageIds,
+        terminalStageIds,
+        stagesLoading: loading || pipelineStagesLoading,
+        stagesError: pipelineStagesError,
+      }),
+    [loading, pipelineStagesError, pipelineStagesLoading, selectedStageIds, terminalStageIds]
   );
-  const listInactiveStageIds = useMemo(() => {
-    if (listIsActiveFilter !== "pipeline") return [];
-    if (selectedStageIds.length === 0) return terminalStageIds;
-    return selectedStageIds.filter((id) => terminalStageIds.includes(id));
-  }, [listIsActiveFilter, selectedStageIds, terminalStageIds]);
+  const listIsActiveFilter = listQueryState.isActive;
+  const listInactiveStageIds = listQueryState.inactiveStageIds;
   const {
     deals: listDeals,
     pagination: listPagination,
@@ -490,7 +534,7 @@ export function PipelinePage() {
     sortDir: listSort.dir,
     page: listPage,
     limit: PIPELINE_LIST_PAGE_SIZE,
-  });
+  }, { enabled: listQueryState.enabled });
   const assigneeNameById = useMemo(
     () => new Map(assignees.map((assignee) => [assignee.id, assignee.displayName])),
     [assignees]
@@ -646,6 +690,10 @@ export function PipelinePage() {
   };
 
   const exportListCsv = async () => {
+    if (!listQueryState.enabled) {
+      toast.error(pipelineStagesError ? "Pipeline stage metadata failed to load." : "Pipeline stages are still loading.");
+      return;
+    }
     const exportResult = await fetchAllFilteredDeals({
       search: listSearch,
       stageIds: selectedStageIds,
@@ -1037,7 +1085,11 @@ export function PipelinePage() {
             <div className="rounded-lg border border-brand-red/20 bg-brand-red/5 p-4 text-sm font-semibold text-brand-red">
               {listError}
             </div>
-          ) : listLoading ? (
+          ) : pipelineStagesError ? (
+            <div className="rounded-lg border border-brand-red/20 bg-brand-red/5 p-4 text-sm font-semibold text-brand-red">
+              Pipeline stage metadata failed to load.
+            </div>
+          ) : !listQueryState.enabled || listLoading ? (
             <div className="rounded-lg border border-slate-200 bg-white p-6 text-sm font-semibold text-slate-500">
               Loading deals...
             </div>
