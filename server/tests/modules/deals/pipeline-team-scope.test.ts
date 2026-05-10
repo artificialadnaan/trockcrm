@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { deals, users } from "@trock-crm/shared/schema";
+import { deals, userOfficeAccess, users } from "@trock-crm/shared/schema";
 
 const dbState = vi.hoisted(() => ({
   stages: [
@@ -57,12 +57,26 @@ function containsValue(value: unknown, expected: string, seen = new Set<unknown>
 describe("getDealsForPipeline team scope", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    dbState.stages = [
+      {
+        id: "stage-estimating",
+        slug: "estimating",
+        name: "Estimating",
+        displayOrder: 1,
+        isTerminal: false,
+        isActivePipeline: true,
+      },
+    ];
   });
 
   it("uses direct active reports in the active office for team-scoped board queries", async () => {
     const teamQuery = {
       from: vi.fn().mockReturnThis(),
       where: vi.fn().mockResolvedValue([{ id: "rep-team-1" }, { id: "rep-team-2" }]),
+    };
+    const accessQuery = {
+      from: vi.fn().mockReturnThis(),
+      where: vi.fn().mockResolvedValue([]),
     };
     const dealQuery = {
       leftJoin: vi.fn().mockReturnThis(),
@@ -74,6 +88,7 @@ describe("getDealsForPipeline team scope", () => {
       select: vi.fn((fields?: Record<string, unknown>) => ({
         from: vi.fn((table: unknown) => {
           if (table === users) return teamQuery;
+          if (table === userOfficeAccess) return accessQuery;
           if (table === deals) return dealQuery;
           return dealQuery;
         }),
@@ -139,6 +154,10 @@ describe("getDealsForPipeline team scope", () => {
       from: vi.fn().mockReturnThis(),
       where: vi.fn().mockResolvedValue([{ id: "rep-team-1" }, { id: "rep-team-2" }]),
     };
+    const accessQuery = {
+      from: vi.fn().mockReturnThis(),
+      where: vi.fn().mockResolvedValue([]),
+    };
     const dealQuery = {
       leftJoin: vi.fn().mockReturnThis(),
       where: vi.fn().mockReturnThis(),
@@ -149,6 +168,7 @@ describe("getDealsForPipeline team scope", () => {
       select: vi.fn((fields?: Record<string, unknown>) => ({
         from: vi.fn((table: unknown) => {
           if (table === users && fields && "id" in fields) return teamQuery;
+          if (table === userOfficeAccess) return accessQuery;
           if (table === deals) return dealQuery;
           return dealQuery;
         }),
@@ -165,5 +185,99 @@ describe("getDealsForPipeline team scope", () => {
 
     expect(containsValue(dealQuery.where.mock.calls[0][0], "rep-team-1")).toBe(true);
     expect(containsValue(dealQuery.where.mock.calls[0][0], "rep-team-2")).toBe(false);
+  });
+
+  it("preserves inactive terminal history for all-time terminal pipeline columns", async () => {
+    dbState.stages = [
+      {
+        id: "stage-estimating",
+        slug: "estimating",
+        name: "Estimating",
+        displayOrder: 1,
+        isTerminal: false,
+        isActivePipeline: true,
+      },
+      {
+        id: "stage-won",
+        slug: "won",
+        name: "Won",
+        displayOrder: 7,
+        isTerminal: true,
+        isActivePipeline: true,
+      },
+    ];
+    const dealQuery = {
+      leftJoin: vi.fn().mockReturnThis(),
+      where: vi.fn().mockReturnThis(),
+      orderBy: vi.fn().mockReturnThis(),
+      limit: vi.fn().mockResolvedValue([]),
+    };
+    const tenantDb = {
+      select: vi.fn(() => ({
+        from: vi.fn((table: unknown) => {
+          if (table === deals) return dealQuery;
+          return dealQuery;
+        }),
+      })),
+    } as any;
+
+    const { getDealsForPipeline } = await import("../../../src/modules/deals/service.js");
+    await getDealsForPipeline(tenantDb, "admin", "admin-1", {
+      scope: "all",
+      activeOfficeId: "office-1",
+      includeDd: true,
+      wonAllTime: true,
+    });
+
+    const terminalWhere = dealQuery.where.mock.calls
+      .map((call) => call[0])
+      .find((condition) => containsValue(condition, "stage-won"));
+    expect(terminalWhere).toBeTruthy();
+    expect(extractSqlText(terminalWhere).toLowerCase()).not.toContain("is_active");
+  });
+
+  it("applies the card limit independently for each visible stage", async () => {
+    dbState.stages = [
+      {
+        id: "stage-estimating",
+        slug: "estimating",
+        name: "Estimating",
+        displayOrder: 1,
+        isTerminal: false,
+        isActivePipeline: true,
+      },
+      {
+        id: "stage-won",
+        slug: "won",
+        name: "Won",
+        displayOrder: 7,
+        isTerminal: true,
+        isActivePipeline: true,
+      },
+    ];
+    const dealQuery = {
+      leftJoin: vi.fn().mockReturnThis(),
+      where: vi.fn().mockReturnThis(),
+      orderBy: vi.fn().mockReturnThis(),
+      limit: vi.fn().mockResolvedValue([]),
+    };
+    const tenantDb = {
+      select: vi.fn(() => ({
+        from: vi.fn((table: unknown) => {
+          if (table === deals) return dealQuery;
+          return dealQuery;
+        }),
+      })),
+    } as any;
+
+    const { getDealsForPipeline } = await import("../../../src/modules/deals/service.js");
+    await getDealsForPipeline(tenantDb, "admin", "admin-1", {
+      scope: "all",
+      activeOfficeId: "office-1",
+      includeDd: true,
+      wonAllTime: true,
+    });
+
+    expect(dealQuery.limit.mock.calls.map((call) => call[0])).toEqual([100, 100]);
   });
 });

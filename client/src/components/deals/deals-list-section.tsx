@@ -1,5 +1,6 @@
 import { useMemo, useState } from "react";
 import { useNavigate } from "react-router-dom";
+import { toast } from "sonner";
 import { Download, Search } from "lucide-react";
 import { Input } from "@/components/ui/input";
 import {
@@ -15,7 +16,7 @@ import {
 } from "@/components/pipeline/pipeline-stage-table";
 import { TerminalDateFilterControl } from "@/components/pipeline/terminal-date-filter-control";
 import { useDeals, type Deal } from "@/hooks/use-deals";
-import { usePipelineStages } from "@/hooks/use-pipeline-config";
+import { usePipelineStages, type PipelineStage } from "@/hooks/use-pipeline-config";
 import { useTaskAssignees } from "@/hooks/use-task-assignees";
 import { bestEstimate, daysInStage, formatCurrencyCompact } from "@/lib/deal-utils";
 import {
@@ -37,9 +38,12 @@ const DEAL_STAGE_ORDER = [
 ];
 
 const DEFAULT_PAGE_SIZE = 25;
+export const MAX_EXPORT_PAGES = 50;
+const EXPORT_PAGE_SIZE = 500;
 
 type SortKey = "name" | "stage_entered_at" | "awarded_amount" | "updated_at";
 type SortState = { key: SortKey; dir: "asc" | "desc" };
+type DealListActiveFilter = boolean | "all" | "pipeline";
 
 interface DealsListSectionProps {
   scope?: "mine" | "team" | "all";
@@ -71,11 +75,31 @@ function escapeCsvCell(value: string | number | null | undefined) {
   return /[",\n]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text;
 }
 
-function buildDealListParams(input: {
+/**
+ * Decides which `isActive` filter to send to /deals when listing pipeline records.
+ * - No stages selected: "pipeline" (active stages + the named terminal stages we pass via inactiveStageIds).
+ * - Selection includes any terminal stage: "pipeline" (so terminal hits flow through despite is_active=false).
+ * - Selection is purely active stages: true (active-only).
+ */
+export function getPipelineListIsActiveFilter(
+  selectedStageIds: string[],
+  terminalStageIds: string[]
+): DealListActiveFilter {
+  if (selectedStageIds.length === 0) return "pipeline";
+  return selectedStageIds.some((id) => terminalStageIds.includes(id)) ? "pipeline" : true;
+}
+
+export function buildStageNameById(stages: Array<Pick<PipelineStage, "id" | "name">>) {
+  return new Map(stages.map((stage) => [stage.id, stage.name]));
+}
+
+export function buildDealListParams(input: {
   search: string;
   stageIds: string[];
+  inactiveStageIds?: string[];
   assignedRepId?: string;
   dateRange: { from?: string; to?: string };
+  isActive: DealListActiveFilter;
   sort: SortState;
   page: number;
   limit: number;
@@ -84,10 +108,11 @@ function buildDealListParams(input: {
   const params = new URLSearchParams();
   if (input.search) params.set("search", input.search);
   if (input.stageIds.length) params.set("stageIds", input.stageIds.join(","));
+  if (input.inactiveStageIds?.length) params.set("inactiveStageIds", input.inactiveStageIds.join(","));
   if (input.assignedRepId) params.set("assignedRepId", input.assignedRepId);
   if (input.dateRange.from) params.set("updatedFrom", input.dateRange.from);
   if (input.dateRange.to) params.set("updatedTo", input.dateRange.to);
-  params.set("isActive", "true");
+  params.set("isActive", String(input.isActive));
   params.set("sortBy", input.sort.key);
   params.set("sortDir", input.sort.dir);
   params.set("page", String(input.page));
@@ -96,31 +121,42 @@ function buildDealListParams(input: {
   return params;
 }
 
-async function fetchAllFilteredDeals(input: {
+export async function fetchAllFilteredDeals(input: {
   search: string;
   stageIds: string[];
+  inactiveStageIds?: string[];
   assignedRepId?: string;
   dateRange: { from?: string; to?: string };
+  isActive: DealListActiveFilter;
   sort: SortState;
   scope?: "mine" | "team" | "all";
+  apiClient?: typeof api;
 }) {
-  const limit = 500;
+  const apiClient = input.apiClient ?? api;
+  const limit = EXPORT_PAGE_SIZE;
   const firstParams = buildDealListParams({ ...input, page: 1, limit });
-  const first = await api<{ deals: Deal[]; pagination: { totalPages: number } }>(
+  const first = await apiClient<{ deals: Deal[]; pagination: { totalPages: number } }>(
     `/deals?${firstParams.toString()}`
   );
   const pages = [first.deals];
   const totalPages = Math.max(1, first.pagination.totalPages || 1);
+  const pagesToFetch = Math.min(totalPages, MAX_EXPORT_PAGES);
 
-  for (let page = 2; page <= totalPages; page += 1) {
+  for (let page = 2; page <= pagesToFetch; page += 1) {
     const params = buildDealListParams({ ...input, page, limit });
-    const next = await api<{ deals: Deal[]; pagination: { totalPages: number } }>(
+    const next = await apiClient<{ deals: Deal[]; pagination: { totalPages: number } }>(
       `/deals?${params.toString()}`
     );
     pages.push(next.deals);
   }
 
-  return pages.flat();
+  return {
+    deals: pages.flat(),
+    totalPages,
+    pagesFetched: pagesToFetch,
+    truncated: totalPages > MAX_EXPORT_PAGES,
+    maxRows: pagesToFetch * limit,
+  };
 }
 
 export function DealsListSection({
@@ -174,6 +210,20 @@ export function DealsListSection({
     [enableDateFilter, dateFilter]
   );
 
+  const terminalStageIds = useMemo(
+    () => stages.filter((stage) => stage.isTerminal).map((stage) => stage.id),
+    [stages]
+  );
+  const isActiveFilter = useMemo(
+    () => getPipelineListIsActiveFilter(selectedStageIds, terminalStageIds),
+    [selectedStageIds, terminalStageIds]
+  );
+  const inactiveStageIds = useMemo(() => {
+    if (isActiveFilter !== "pipeline") return [];
+    if (selectedStageIds.length === 0) return terminalStageIds;
+    return selectedStageIds.filter((id) => terminalStageIds.includes(id));
+  }, [isActiveFilter, selectedStageIds, terminalStageIds]);
+
   const {
     deals,
     pagination,
@@ -182,10 +232,11 @@ export function DealsListSection({
   } = useDeals({
     search,
     stageIds: selectedStageIds,
+    inactiveStageIds,
     assignedRepId: ownerId === "__all__" ? undefined : ownerId,
     updatedFrom: dateRange.from,
     updatedTo: dateRange.to,
-    isActive: true,
+    isActive: isActiveFilter,
     sortBy: sort.key,
     sortDir: sort.dir,
     page,
@@ -193,10 +244,7 @@ export function DealsListSection({
     scope,
   });
 
-  const stageNameById = useMemo(
-    () => new Map(stageFilterOptions.map((stage) => [stage.id, stage.name])),
-    [stageFilterOptions]
-  );
+  const stageNameById = useMemo(() => buildStageNameById(stages), [stages]);
   const assigneeNameById = useMemo(
     () => new Map(assignees.map((assignee) => [assignee.id, assignee.displayName])),
     [assignees]
@@ -217,17 +265,24 @@ export function DealsListSection({
   };
 
   const exportCsv = async () => {
-    const exportDeals = await fetchAllFilteredDeals({
+    const exportResult = await fetchAllFilteredDeals({
       search,
       stageIds: selectedStageIds,
+      inactiveStageIds,
       assignedRepId: ownerId === "__all__" ? undefined : ownerId,
       dateRange,
+      isActive: isActiveFilter,
       sort,
       scope,
     });
+    if (exportResult.truncated) {
+      toast.info(
+        `Exported first ${exportResult.maxRows.toLocaleString()} rows (${exportResult.pagesFetched} pages). Narrow filters for full export.`
+      );
+    }
     const rows = [
       ["Deal", "Project Number", "Owner", "Stage", "Days", "Value", "Last Touch"],
-      ...exportDeals.map((deal) => {
+      ...exportResult.deals.map((deal) => {
         const displayNumber = getDealDisplayNumber(deal);
         return [
           deal.name,

@@ -258,11 +258,12 @@ export interface DealDetail extends Deal {
 export interface DealFilters {
   search?: string;
   stageIds?: string[];
+  inactiveStageIds?: string[];
   assignedRepId?: string;
   projectTypeId?: string;
   regionId?: string;
   source?: string;
-  isActive?: boolean;
+  isActive?: boolean | "all" | "pipeline";
   contractSignedFrom?: string;
   contractSignedTo?: string;
   updatedFrom?: string;
@@ -370,6 +371,7 @@ export function useDeals(filters: DealFilters = {}) {
       const params = new URLSearchParams();
       if (filters.search) params.set("search", filters.search);
       if (filters.stageIds?.length) params.set("stageIds", filters.stageIds.join(","));
+      if (filters.inactiveStageIds?.length) params.set("inactiveStageIds", filters.inactiveStageIds.join(","));
       if (filters.assignedRepId) params.set("assignedRepId", filters.assignedRepId);
       if (filters.projectTypeId) params.set("projectTypeId", filters.projectTypeId);
       if (filters.regionId) params.set("regionId", filters.regionId);
@@ -378,7 +380,7 @@ export function useDeals(filters: DealFilters = {}) {
       if (filters.contractSignedTo) params.set("contractSignedTo", filters.contractSignedTo);
       if (filters.updatedFrom) params.set("updatedFrom", filters.updatedFrom);
       if (filters.updatedTo) params.set("updatedTo", filters.updatedTo);
-      if (filters.isActive === false) params.set("isActive", "false");
+      if (filters.isActive !== undefined) params.set("isActive", String(filters.isActive));
       if (filters.sortBy) params.set("sortBy", filters.sortBy);
       if (filters.sortDir) params.set("sortDir", filters.sortDir);
       if (filters.page) params.set("page", String(filters.page));
@@ -403,6 +405,7 @@ export function useDeals(filters: DealFilters = {}) {
   }, [
     filters.search,
     filters.stageIds?.join(","),
+    filters.inactiveStageIds?.join(","),
     filters.assignedRepId,
     filters.projectTypeId,
     filters.regionId,

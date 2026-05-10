@@ -492,12 +492,12 @@ describe("DealListPage", () => {
   it("loads the embedded list section with the active scope (paginated, not endless scroll)", () => {
     renderPage("/deals?scope=team", "director");
     expect(mocks.useDealsMock).toHaveBeenLastCalledWith(
-      expect.objectContaining({ scope: "team", limit: 25, page: 1, isActive: true })
+      expect.objectContaining({ scope: "team", limit: 25, page: 1 })
     );
 
     renderPage("/deals?scope=all", "admin");
     expect(mocks.useDealsMock).toHaveBeenLastCalledWith(
-      expect.objectContaining({ scope: "all", limit: 25, page: 1, isActive: true })
+      expect.objectContaining({ scope: "all", limit: 25, page: 1 })
     );
   });
 });

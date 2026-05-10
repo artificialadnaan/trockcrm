@@ -11,7 +11,7 @@ import { useAuth } from "@/lib/auth";
 
 const mobileNavItems = [
   { to: "/", icon: LayoutDashboard, label: "Home" },
-  { to: "/deals", icon: Kanban, label: "Pipeline" },
+  { to: "/pipeline", icon: Kanban, label: "Pipeline" },
   { to: "/photos/capture", icon: Camera, label: "Capture" },
   { to: "/contacts", icon: Users, label: "Contacts" },
   { to: "/tasks", icon: CheckSquare, label: "Tasks" },

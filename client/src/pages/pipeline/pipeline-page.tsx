@@ -31,7 +31,16 @@ import {
 } from "@/lib/pipeline-terminal-filters";
 import type { Deal } from "@/hooks/use-deals";
 
+// Re-exports kept for test compatibility (pipeline-page.test.ts imports these
+// helpers; they live in the shared deals-list-section module now).
 export { getDealDisplayNumber };
+export {
+  MAX_EXPORT_PAGES,
+  buildDealListParams,
+  buildStageNameById,
+  fetchAllFilteredDeals,
+  getPipelineListIsActiveFilter,
+} from "@/components/deals/deals-list-section";
 
 interface PipelineColumn {
   stage: {
