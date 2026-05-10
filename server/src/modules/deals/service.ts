@@ -788,12 +788,23 @@ export async function getDeals(tenantDb: TenantDb, filters: DealFilters, userRol
 
   // Active filter defaults to true. Pipeline list/export can request mixed
   // visibility: active rows everywhere plus inactive rows only for terminal
-  // stage ids in scope, matching kanban semantics.
+  // stage ids in scope, matching kanban semantics. Client-supplied
+  // inactiveStageIds are intersected with the server's terminal stage set
+  // so a crafted request cannot widen visibility to inactive non-terminal
+  // rows.
   if (filters.isActive === "pipeline") {
+    let terminalInactiveStageIds: string[] = [];
+    if (filters.inactiveStageIds?.length) {
+      const allStages = await listDealStages();
+      const terminalStageIds = new Set(
+        allStages.filter((stage) => isTerminalWorkspaceStage(stage)).map((stage) => stage.id)
+      );
+      terminalInactiveStageIds = filters.inactiveStageIds.filter((id) => terminalStageIds.has(id));
+    }
     conditions.push(
       or(
         eq(deals.isActive, true),
-        filters.inactiveStageIds?.length ? inArray(deals.stageId, filters.inactiveStageIds) : sql`false`
+        terminalInactiveStageIds.length ? inArray(deals.stageId, terminalInactiveStageIds) : sql`false`
       )
     );
   } else if (filters.isActive !== "all") {

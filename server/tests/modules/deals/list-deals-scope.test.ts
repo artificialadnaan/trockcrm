@@ -2,8 +2,27 @@ import { companies, deals, userOfficeAccess, users } from "@trock-crm/shared/sch
 import { describe, expect, it, vi } from "vitest";
 import { getDeals } from "../../../src/modules/deals/service.js";
 
+const dbState = vi.hoisted(() => ({
+  stages: [
+    { id: "stage-estimating", slug: "estimating", name: "Estimating", displayOrder: 1, isTerminal: false, isActivePipeline: true },
+    { id: "stage-won", slug: "won", name: "Won", displayOrder: 7, isTerminal: true, isActivePipeline: true },
+    { id: "stage-lost", slug: "lost", name: "Lost", displayOrder: 8, isTerminal: true, isActivePipeline: true },
+  ],
+}));
+
 vi.mock("@trock-crm/shared/schema", async () => import("../../../../shared/src/schema/index.js"));
 vi.mock("@trock-crm/shared/types", async () => import("../../../../shared/src/types/index.js"));
+vi.mock("../../../src/db.js", () => ({
+  db: {
+    select: vi.fn(() => ({
+      from: vi.fn().mockReturnThis(),
+      where: vi.fn().mockReturnThis(),
+      orderBy: vi.fn().mockReturnThis(),
+      then: vi.fn((resolve: (value: unknown[]) => unknown) => resolve(dbState.stages)),
+    })),
+  },
+  pool: {},
+}));
 
 type Row = Record<string, unknown>;
 
@@ -305,6 +324,41 @@ describe("getDeals scope filtering", () => {
       {
         isActive: "pipeline",
         inactiveStageIds: ["stage-won"],
+        scope: "all",
+        activeOfficeId: "office-1",
+        limit: 100,
+      } as never,
+      "director",
+      "director-1"
+    );
+
+    expect(capturedWheres.some((condition) => containsValue(condition, "stage-won"))).toBe(true);
+    expect(capturedWheres.some((condition) => containsValue(condition, "stage-estimating"))).toBe(false);
+  });
+
+  it("getDeals pipeline visibility drops client-supplied non-terminal inactiveStageIds", async () => {
+    const capturedWheres: unknown[] = [];
+    const dataChain: any = {
+      from: vi.fn().mockReturnThis(),
+      leftJoin: vi.fn().mockReturnThis(),
+      where: vi.fn((condition: unknown) => {
+        capturedWheres.push(condition);
+        return dataChain;
+      }),
+      orderBy: vi.fn().mockReturnThis(),
+      limit: vi.fn().mockReturnThis(),
+      offset: vi.fn().mockResolvedValue([]),
+      then: vi.fn((resolve: (value: Row[]) => unknown) => resolve([{ count: 0 }])),
+    };
+    const tenantDb = {
+      select: vi.fn(() => dataChain),
+    } as any;
+
+    await getDeals(
+      tenantDb,
+      {
+        isActive: "pipeline",
+        inactiveStageIds: ["stage-estimating", "stage-won"],
         scope: "all",
         activeOfficeId: "office-1",
         limit: 100,
