@@ -12,6 +12,7 @@ interface PropertySelectorProps {
   onChange: (propertyId: string) => void;
   required?: boolean;
   requireLeadCreateFields?: boolean;
+  disabled?: boolean;
 }
 
 export async function resolveSelectedPropertyLabel(
@@ -35,6 +36,7 @@ export function PropertySelector({
   onChange,
   required,
   requireLeadCreateFields,
+  disabled = false,
 }: PropertySelectorProps) {
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState("");
@@ -73,7 +75,7 @@ export function PropertySelector({
         variant="outline"
         className="w-full justify-between font-normal"
         onClick={() => setOpen((prev) => !prev)}
-        disabled={!companyId}
+        disabled={disabled || !companyId}
       >
         <span className={selectedLabel ? "text-foreground" : "text-muted-foreground"}>
           {selectedLabel ?? (!companyId ? "Select company first" : required ? "Select property *" : "Select property")}
@@ -81,7 +83,7 @@ export function PropertySelector({
         <ChevronsUpDown className="h-4 w-4 opacity-50" />
       </Button>
 
-      {open && companyId && (
+      {open && companyId && !disabled && (
         <div className="space-y-2 rounded-md border bg-background p-2 shadow-sm">
           <Input
             autoFocus
