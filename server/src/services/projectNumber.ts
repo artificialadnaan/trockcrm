@@ -6,6 +6,7 @@ import {
 } from "@trock-crm/shared/types";
 
 type WorkflowRoute = "normal" | "service";
+export type ProjectNumberOfficeCode = "DFW" | "ATL" | "dfw" | "atl";
 
 export interface ProjectNumberDealInput {
   id: string;
@@ -16,7 +17,7 @@ export interface ProjectNumberDealInput {
 }
 
 export interface ProjectNumberBuildInput {
-  officeCode: "DFW" | "ATL" | "dfw" | "atl";
+  officeCode: ProjectNumberOfficeCode;
   projectTypeCode: string;
   createdAt: Date;
   suffix: string;
@@ -42,6 +43,10 @@ export function resolveOfficeCode(location: string | null | undefined): "dfw" | 
   const normalized = String(location ?? "").trim().toUpperCase();
   if (normalized === "ATL" || normalized.includes("ATLANTA")) return "atl";
   return "dfw";
+}
+
+function formatProjectNumberOfficePrefix(officeCode: ProjectNumberOfficeCode | string): string {
+  return officeCode.trim().toUpperCase();
 }
 
 export function resolveProjectTypeCode(input: {
@@ -72,7 +77,7 @@ export function buildIntendedProjectNumber(
   if (!match) return null;
 
   const [, officeCode, julianDate, suffix] = match;
-  return `${officeCode.toLowerCase()}-${PROJECT_TYPE_CODE_BY_VALUE[normalized]}-${julianDate}-${suffix.toLowerCase()}`;
+  return `${formatProjectNumberOfficePrefix(officeCode)}-${PROJECT_TYPE_CODE_BY_VALUE[normalized]}-${julianDate}-${suffix.toLowerCase()}`;
 }
 
 export function getNextSuffix(existingSuffix: string | null | undefined): string {
@@ -91,7 +96,7 @@ export function getNextSuffix(existingSuffix: string | null | undefined): string
 }
 
 export function buildProjectNumber(input: ProjectNumberBuildInput): string {
-  return `${input.officeCode.toLowerCase()}-${input.projectTypeCode}-${generateJulianDate(input.createdAt)}-${input.suffix}`;
+  return `${formatProjectNumberOfficePrefix(input.officeCode)}-${input.projectTypeCode}-${generateJulianDate(input.createdAt)}-${input.suffix.toLowerCase()}`;
 }
 
 export function parseProjectNumberSuffix(projectNumber: string | null | undefined, julianDate: string): string | null {

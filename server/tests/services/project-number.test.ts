@@ -30,7 +30,37 @@ describe("projectNumber service", () => {
         createdAt: new Date("2026-04-16T15:00:00.000Z"),
         suffix: "ac",
       })
-    ).toBe("dfw-4-10626-ac");
+    ).toBe("DFW-4-10626-ac");
+  });
+
+  it("formats generated project numbers with uppercase office prefix and lowercase suffix", () => {
+    expect(
+      buildProjectNumber({
+        officeCode: "dfw",
+        projectTypeCode: "1",
+        createdAt: new Date("2026-05-10T15:00:00.000Z"),
+        suffix: "aa",
+      })
+    ).toBe("DFW-1-13026-aa");
+
+    expect(
+      buildProjectNumber({
+        officeCode: "atl",
+        projectTypeCode: "4",
+        createdAt: new Date("2026-05-10T15:00:00.000Z"),
+        suffix: "ba",
+      })
+    ).toBe("ATL-4-13026-ba");
+  });
+
+  it("rejects malformed office prefixes at compile time", () => {
+    buildProjectNumber({
+      // @ts-expect-error Project number formatting only accepts DFW/ATL office codes.
+      officeCode: "Dfw",
+      projectTypeCode: "2",
+      createdAt: new Date("2026-05-10T15:00:00.000Z"),
+      suffix: "ab",
+    });
   });
 
   it("uses one daily suffix sequence across offices and rolls over suffixes", async () => {
@@ -64,7 +94,7 @@ describe("projectNumber service", () => {
       new Date("2026-04-28T15:00:00.000Z")
     );
 
-    expect(dealNumber).toBe("dfw-3-11826-bb");
+    expect(dealNumber).toBe("DFW-3-11826-bb");
     expect(executeCalls).toHaveLength(4);
   });
 
@@ -99,6 +129,6 @@ describe("projectNumber service", () => {
       new Date("2026-04-28T15:00:00.000Z")
     );
 
-    expect(dealNumber).toBe("atl-4-11826-ba");
+    expect(dealNumber).toBe("ATL-4-11826-ba");
   });
 });

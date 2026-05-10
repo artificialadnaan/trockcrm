@@ -17,6 +17,7 @@ import type {
   DealDetail,
   DealResolvedFields,
   DealScopingIntake,
+  DealScopingReadiness,
 } from "@/hooks/use-deals";
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
@@ -184,12 +185,23 @@ function makeReadiness() {
 function makeScopingResponse(overrides: {
   intake?: Partial<DealScopingIntake>;
   resolved?: Partial<DealResolvedFields>;
+  readiness?: Partial<DealScopingReadiness>;
 } = {}) {
   return {
     intake: makeIntake(overrides.intake),
     resolved: makeResolved(overrides.resolved),
-    readiness: makeReadiness(),
+    readiness: { ...makeReadiness(), ...overrides.readiness },
   };
+}
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((promiseResolve, promiseReject) => {
+    resolve = promiseResolve;
+    reject = promiseReject;
+  });
+  return { promise, resolve, reject };
 }
 
 function changeTextareaValue(element: HTMLTextAreaElement, value: string) {
@@ -216,6 +228,35 @@ async function renderWorkspace(deal: DealDetail) {
 
   return {
     container,
+    cleanup: () => {
+      act(() => {
+        root.unmount();
+      });
+      container.remove();
+    },
+  };
+}
+
+async function renderWorkspaceHarness(deal: DealDetail) {
+  const container = document.createElement("div");
+  document.body.appendChild(container);
+  const root = createRoot(container);
+  const onDealUpdated = vi.fn();
+  const render = async (nextDeal: DealDetail) => {
+    await act(async () => {
+      root.render(React.createElement(DealScopingWorkspace, { deal: nextDeal, onDealUpdated }));
+    });
+    await act(async () => {
+      await Promise.resolve();
+    });
+  };
+
+  await render(deal);
+
+  return {
+    container,
+    onDealUpdated,
+    render,
     cleanup: () => {
       act(() => {
         root.unmount();
@@ -507,6 +548,214 @@ describe("DealScopingWorkspace load failures", () => {
       expect(container.textContent).not.toContain("Saved");
       expect(container.textContent).toContain("Project Type");
       expect(container.textContent).toContain("Scope Summary");
+    } finally {
+      cleanup();
+    }
+  });
+
+  it("keeps a retry control available after dismissing the initial load error banner", async () => {
+    mocks.getDealScopingIntake
+      .mockRejectedValueOnce(new Error("temporary load failure"))
+      .mockResolvedValueOnce(makeScopingResponse({
+        intake: { projectTypeId: "project-type-1" },
+        resolved: { projectTypeId: "project-type-1" },
+      }));
+
+    const { container, cleanup } = await renderWorkspace(
+      makeDeal({
+        sourceLeadId: null,
+        projectTypeId: "project-type-1",
+      })
+    );
+
+    try {
+      await vi.waitFor(() => expect(container.textContent).toContain("temporary load failure"));
+      const dismissButton = container.querySelector<HTMLButtonElement>(
+        "button[aria-label='Dismiss scoping intake error']"
+      );
+      expect(dismissButton).not.toBeNull();
+
+      await act(async () => {
+        dismissButton!.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+      });
+
+      expect(container.textContent).not.toContain("temporary load failure");
+      const retryButton = Array.from(container.querySelectorAll("button")).find(
+        (button) => button.textContent?.includes("Retry loading scope")
+      );
+      expect(retryButton).toBeDefined();
+
+      await act(async () => {
+        retryButton!.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+        await Promise.resolve();
+      });
+
+      expect(mocks.getDealScopingIntake).toHaveBeenCalledTimes(2);
+      await vi.waitFor(() => {
+        const summary = container.querySelector<HTMLTextAreaElement>("#scopeSummary");
+        expect(summary?.disabled).toBe(false);
+      });
+    } finally {
+      cleanup();
+    }
+  });
+
+  it("ignores stale load failures after a newer request has hydrated successfully", async () => {
+    const firstLoad = deferred<ReturnType<typeof makeScopingResponse>>();
+    const secondLoad = deferred<ReturnType<typeof makeScopingResponse>>();
+    mocks.getDealScopingIntake
+      .mockReturnValueOnce(firstLoad.promise)
+      .mockReturnValueOnce(secondLoad.promise);
+
+    const { container, render, cleanup } = await renderWorkspaceHarness(
+      makeDeal({ id: "deal-old", sourceLeadId: null, projectTypeId: "project-type-1" })
+    );
+
+    try {
+      await act(async () => {
+        await render(makeDeal({ id: "deal-new", sourceLeadId: null, projectTypeId: "project-type-1" }));
+      });
+
+      await vi.waitFor(() => expect(mocks.getDealScopingIntake).toHaveBeenCalledTimes(2));
+
+      await act(async () => {
+        secondLoad.resolve(makeScopingResponse({
+          intake: {
+            projectTypeId: "project-type-1",
+            sectionData: { scopeSummary: { summary: "NEW" } },
+          },
+          resolved: { projectTypeId: "project-type-1", description: "NEW" },
+        }));
+        await Promise.resolve();
+      });
+
+      await vi.waitFor(() => {
+        const summary = container.querySelector<HTMLTextAreaElement>("#scopeSummary");
+        expect(summary?.value).toBe("NEW");
+        expect(summary?.disabled).toBe(false);
+      });
+
+      await act(async () => {
+        firstLoad.reject(new Error("stale failure"));
+        await Promise.resolve();
+      });
+
+      expect(container.textContent).not.toContain("stale failure");
+      expect(container.textContent).not.toContain("Unable to load - retry");
+      const summary = container.querySelector<HTMLTextAreaElement>("#scopeSummary");
+      expect(summary?.disabled).toBe(false);
+    } finally {
+      cleanup();
+    }
+  });
+
+  it("ignores stale load successes after a newer request has already rendered newer data", async () => {
+    const firstLoad = deferred<ReturnType<typeof makeScopingResponse>>();
+    const secondLoad = deferred<ReturnType<typeof makeScopingResponse>>();
+    mocks.getDealScopingIntake
+      .mockReturnValueOnce(firstLoad.promise)
+      .mockReturnValueOnce(secondLoad.promise);
+
+    const { container, render, cleanup } = await renderWorkspaceHarness(
+      makeDeal({ id: "deal-old", sourceLeadId: null, projectTypeId: "project-type-1" })
+    );
+
+    try {
+      await act(async () => {
+        await render(makeDeal({ id: "deal-new", sourceLeadId: null, projectTypeId: "project-type-1" }));
+      });
+
+      await vi.waitFor(() => expect(mocks.getDealScopingIntake).toHaveBeenCalledTimes(2));
+
+      await act(async () => {
+        secondLoad.resolve(makeScopingResponse({
+          intake: {
+            projectTypeId: "project-type-1",
+            sectionData: { scopeSummary: { summary: "NEW" } },
+          },
+          resolved: { projectTypeId: "project-type-1", description: "NEW" },
+        }));
+        await Promise.resolve();
+      });
+
+      await vi.waitFor(() => {
+        const summary = container.querySelector<HTMLTextAreaElement>("#scopeSummary");
+        expect(summary?.value).toBe("NEW");
+      });
+
+      await act(async () => {
+        firstLoad.resolve(makeScopingResponse({
+          intake: {
+            projectTypeId: "project-type-1",
+            sectionData: { scopeSummary: { summary: "OLD" } },
+          },
+          resolved: { projectTypeId: "project-type-1", description: "OLD" },
+        }));
+        await Promise.resolve();
+      });
+
+      const summary = container.querySelector<HTMLTextAreaElement>("#scopeSummary");
+      expect(summary?.value).toBe("NEW");
+      expect(container.textContent).not.toContain("OLD");
+    } finally {
+      cleanup();
+    }
+  });
+
+  it("keeps the hydrated form editable and autosave-capable after a refresh load fails", async () => {
+    mocks.getDealScopingIntake
+      .mockResolvedValueOnce(makeScopingResponse({
+        intake: { projectTypeId: "project-type-1" },
+        resolved: { projectTypeId: "project-type-1", workflowRoute: "service" },
+        readiness: { status: "ready" },
+      }))
+      .mockRejectedValueOnce(new Error("refresh load failed"));
+    mocks.activateServiceHandoff.mockResolvedValue({});
+    mocks.patchDealScopingIntake.mockResolvedValue(makeScopingResponse({
+      intake: {
+        projectTypeId: "project-type-1",
+        sectionData: { scopeSummary: { summary: "still editable" } },
+      },
+      resolved: { projectTypeId: "project-type-1", workflowRoute: "service" },
+      readiness: { status: "ready" },
+    }));
+
+    const { container, cleanup } = await renderWorkspace(
+      makeDeal({
+        sourceLeadId: null,
+        projectTypeId: "project-type-1",
+        workflowRoute: "service",
+      })
+    );
+
+    try {
+      await vi.waitFor(() => {
+        const summary = container.querySelector<HTMLTextAreaElement>("#scopeSummary");
+        expect(summary?.disabled).toBe(false);
+      });
+
+      const activateButton = Array.from(container.querySelectorAll("button")).find(
+        (button) => button.textContent?.includes("Activate Service Handoff")
+      );
+      expect(activateButton).toBeDefined();
+
+      await act(async () => {
+        activateButton!.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+        await Promise.resolve();
+      });
+
+      await vi.waitFor(() => expect(container.textContent).toContain("refresh load failed"));
+      expect(container.textContent).not.toContain("Unable to load - retry");
+
+      const summary = container.querySelector<HTMLTextAreaElement>("#scopeSummary")!;
+      expect(summary.disabled).toBe(false);
+
+      await act(async () => {
+        changeTextareaValue(summary, "still editable");
+        await new Promise((resolve) => window.setTimeout(resolve, 500));
+      });
+
+      await vi.waitFor(() => expect(mocks.patchDealScopingIntake).toHaveBeenCalled());
     } finally {
       cleanup();
     }
