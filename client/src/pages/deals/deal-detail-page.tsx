@@ -579,7 +579,7 @@ export function DealDetailPage() {
     },
   ];
   const typeBadge = (
-    <span className="rounded-full bg-slate-100 px-2 py-1 text-[10px] font-black uppercase tracking-[0.16em] text-slate-700">
+    <span className="rounded-full bg-slate-100 px-2 py-1 text-[10px] font-black tracking-[0.16em] text-slate-700">
       {formatDealType(deal)}
     </span>
   );
@@ -946,8 +946,20 @@ function DealRightRail({
           />
         </DetailRailSection>
 
-        <DetailRailSection title="Deal number">
-          <DetailRailItem label="Deal" value={<span className="font-mono">{deal.dealNumber}</span>} />
+        <DetailRailSection title="Project number">
+          <DetailRailItem
+            label="Project number"
+            value={
+              deal.projectNumber ? (
+                <span className="font-mono">{deal.projectNumber}</span>
+              ) : (
+                <span className="space-y-1">
+                  <span className="block font-mono text-slate-500">{deal.dealNumber}</span>
+                  <span className="block text-xs font-medium text-slate-400">Not yet assigned</span>
+                </span>
+              )
+            }
+          />
           {deal.intendedProjectNumber ? (
             <DetailRailItem label="Intended" value={<span className="font-mono">{deal.intendedProjectNumber}</span>} />
           ) : null}
@@ -955,6 +967,10 @@ function DealRightRail({
         </DetailRailSection>
 
         <DetailRailSection title="System IDs">
+          <DetailRailItem
+            label="Deal ID"
+            value={<span className="font-mono text-xs">{formatNullable(deal.dealNumber)}</span>}
+          />
           <DetailRailItem
             label="HubSpot"
             value={<span className="font-mono text-xs">{formatNullable(deal.hubspotDealId)}</span>}

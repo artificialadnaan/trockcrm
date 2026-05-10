@@ -255,6 +255,7 @@ function makeDealDetail(overrides: Record<string, unknown> = {}) {
     propertyZip: "75201",
     projectType: "Roofing",
     projectTypeId: "project-type-1",
+    projectNumber: "DFW-1-12826-aa",
     regionId: null,
     source: "referral",
     winProbability: 50,
@@ -418,6 +419,81 @@ describe("DealDetailPage", () => {
     expect(html).toContain("hs_deal_82211");
     expect(html).toContain("123456");
     expect(html).toContain("DFW-3-12826-aa");
+  });
+
+  it("renders project number as the primary deal identifier when assigned", () => {
+    mocks.useDealDetailMock.mockReturnValueOnce({
+      loading: false,
+      error: null,
+      refetch: vi.fn(),
+      deal: makeDealDetail({
+        dealNumber: "HS-319925219003",
+        projectNumber: "DFW-1-12826-aa",
+        hubspotDealId: "HS-319925219003",
+      }),
+    });
+
+    const html = renderPage();
+
+    expect(html).toContain("Project number");
+    expect(html).toContain("DFW-1-12826-aa");
+    expect(html).not.toContain("Not yet assigned");
+  });
+
+  it("falls back to muted deal number with caption when project number is missing", () => {
+    mocks.useDealDetailMock.mockReturnValueOnce({
+      loading: false,
+      error: null,
+      refetch: vi.fn(),
+      deal: makeDealDetail({
+        dealNumber: "HS-319925219003",
+        projectNumber: null,
+        hubspotDealId: "HS-319925219003",
+      }),
+    });
+
+    const html = renderPage();
+
+    expect(html).toContain("Project number");
+    expect(html).toContain("HS-319925219003");
+    expect(html).toContain("Not yet assigned");
+    expect(html).toContain("text-slate-500");
+  });
+
+  it("shows deal number as Deal ID in system IDs regardless of project number state", () => {
+    mocks.useDealDetailMock.mockReturnValueOnce({
+      loading: false,
+      error: null,
+      refetch: vi.fn(),
+      deal: makeDealDetail({
+        dealNumber: "HS-319925219003",
+        projectNumber: "DFW-1-12826-aa",
+        hubspotDealId: "hubspot-system-id",
+      }),
+    });
+
+    const html = renderPage();
+
+    expect(html).toContain("System IDs");
+    expect(html).toContain("Deal ID");
+    expect(html).toContain("HS-319925219003");
+    expect(html).toContain("hubspot-system-id");
+  });
+
+  it("displays project type with proper casing", () => {
+    mocks.useDealDetailMock.mockReturnValueOnce({
+      loading: false,
+      error: null,
+      refetch: vi.fn(),
+      deal: makeDealDetail({
+        projectType: "Exterior Renovation",
+      }),
+    });
+
+    const html = renderPage();
+
+    expect(html).toContain("Exterior Renovation");
+    expect(html).not.toContain("exterior renovation");
   });
 
   it("tab change updates active tab", () => {
