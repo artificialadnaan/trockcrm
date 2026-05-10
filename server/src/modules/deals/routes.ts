@@ -1,5 +1,6 @@
+import { randomUUID } from "node:crypto";
 import { Router } from "express";
-import { and, eq, desc, isNotNull, sql } from "drizzle-orm";
+import { and, eq, desc, isNotNull, isNull, or, sql } from "drizzle-orm";
 import { dealApprovals, deals, jobQueue } from "@trock-crm/shared/schema";
 import { requireRole } from "../../middleware/rbac.js";
 import { AppError } from "../../middleware/error-handler.js";
@@ -80,7 +81,8 @@ import {
 import { writeResolvedDealFields } from "./lineage-resolver.js";
 import { inferDealBidBoardOwnership } from "./workflow-backfill.js";
 import { resolveSyncHubRfpRequestUrl } from "./rfp-payload.js";
-import { enqueueOpportunityRfpIfNeeded } from "./rfp-enqueue.js";
+import { insertOpportunityRfpRequestJob } from "./rfp-enqueue.js";
+import { isOpportunityRfpEventEnabled } from "../../config/feature-flags.js";
 
 const router = Router();
 
@@ -159,6 +161,103 @@ async function loadDealStageSlug(tenantDb: any, stageId: string): Promise<string
   const rows = Array.isArray(result) ? result : result.rows ?? [];
   const row = rows[0] as { slug?: string | null } | undefined;
   return row?.slug ?? null;
+}
+
+async function loadTriggerRfpDeal(tenantDb: any, dealId: string) {
+  const [deal] = await tenantDb
+    .select()
+    .from(deals)
+    .where(eq(deals.id, dealId))
+    .limit(1);
+  return deal ?? null;
+}
+
+async function buildTriggerRfpConflict(
+  tenantDb: any,
+  dealId: string,
+  input: {
+    userRole: string;
+    userId: string;
+    expectedOpportunityStageId: string;
+  }
+) {
+  const latest = await loadTriggerRfpDeal(tenantDb, dealId);
+  if (!latest) {
+    return new AppError(404, "Deal not found");
+  }
+
+  const latestStageSlug = await loadDealStageSlug(tenantDb, latest.stageId);
+  const canonicalStageSlug = latestStageSlug
+    ? toCanonicalDealStageSlug(latestStageSlug, latest.workflowRoute)
+    : null;
+  if (latest.stageId !== input.expectedOpportunityStageId || canonicalStageSlug !== "opportunity") {
+    return new AppError(
+      409,
+      "RFP review can only be triggered while the deal is still in Opportunity stage.",
+      "RFP_STAGE_MISMATCH"
+    );
+  }
+
+  if (latest.rfpApprovalRequestedAt || latest.rfpApprovalStatus) {
+    return new AppError(
+      409,
+      "RFP review has already been triggered for this deal.",
+      "RFP_ALREADY_TRIGGERED"
+    );
+  }
+
+  const inferredOwnership = inferDealBidBoardOwnership({
+    id: latest.id,
+    stageSlug: latestStageSlug ?? "opportunity",
+    stageEnteredAt: latest.stageEnteredAt,
+    workflowRoute: latest.workflowRoute,
+    pipelineTypeSnapshot: latest.pipelineTypeSnapshot,
+    ddEstimate: latest.ddEstimate,
+    bidEstimate: latest.bidEstimate,
+    awardedAmount: latest.awardedAmount,
+    sourceLeadId: latest.sourceLeadId,
+    isBidBoardOwned: latest.isBidBoardOwned,
+    bidBoardStageSlug: latest.bidBoardStageSlug,
+    bidBoardStageEnteredAt: latest.bidBoardStageEnteredAt,
+    bidBoardMirrorSourceEnteredAt: latest.bidBoardMirrorSourceEnteredAt,
+    isReadOnlyMirror: latest.isReadOnlyMirror,
+    readOnlySyncedAt: latest.readOnlySyncedAt,
+  });
+  if (latest.isBidBoardOwned || inferredOwnership.isBidBoardOwned) {
+    return new AppError(
+      409,
+      "RFP review cannot be triggered after Bid Board owns this deal.",
+      "RFP_ALREADY_HANDED_OFF"
+    );
+  }
+
+  if (input.userRole === "rep" && latest.assignedRepId !== input.userId) {
+    return new AppError(
+      409,
+      "This deal is no longer assigned to you.",
+      "RFP_OWNERSHIP_CHANGED"
+    );
+  }
+
+  return new AppError(
+    409,
+    "RFP review could not be triggered because the deal changed. Refresh and try again.",
+    "RFP_TRIGGER_CONFLICT"
+  );
+}
+
+function buildScopeIncompleteError(readiness: Awaited<ReturnType<typeof evaluateDealScopingReadiness>>) {
+  const missingSections = Object.keys(readiness.errors.sections ?? {});
+  const missingAttachments = Object.keys(readiness.errors.attachments ?? {});
+  return new AppError(
+    400,
+    [
+      "Complete Opportunity Scope before triggering RFP review.",
+      missingSections.length > 0 ? `Missing sections: ${missingSections.join(", ")}` : null,
+      missingAttachments.length > 0 ? `Missing attachments: ${missingAttachments.join(", ")}` : null,
+    ].filter(Boolean).join(" "),
+    "RFP_SCOPE_INCOMPLETE"
+  );
 }
 
 async function queueAiEstimateRefresh(tenantDb: any, officeId: string, dealId: string, reason: string) {
@@ -355,7 +454,12 @@ router.get("/:id/detail", async (req, res, next) => {
     const detail = await getDealDetail(req.tenantDb!, req.params.id, req.user!.role, req.user!.id);
     if (!detail) throw new AppError(404, "Deal not found");
     await req.commitTransaction!();
-    res.json(toJsonSafe({ deal: detail }));
+    res.json(toJsonSafe({
+      deal: {
+        ...detail,
+        isRfpTriggerEnabled: isOpportunityRfpEventEnabled(),
+      },
+    }));
   } catch (err) {
     next(err);
   }
@@ -364,11 +468,15 @@ router.get("/:id/detail", async (req, res, next) => {
 // POST /api/deals/:id/trigger-rfp — manually enqueue an Opportunity RFP request after scope is ready.
 router.post("/:id/trigger-rfp", async (req, res, next) => {
   try {
-    const deal = await getDealById(req.tenantDb!, req.params.id, req.user!.role, req.user!.id);
-    if (!deal) throw new AppError(404, "Deal not found");
+    if (!isOpportunityRfpEventEnabled()) {
+      throw new AppError(503, "Opportunity RFP delivery is disabled.", "RFP_EVENT_DISABLED");
+    }
 
     const userRole = req.user!.role;
     const userId = req.user!.id;
+    const deal = await loadTriggerRfpDeal(req.tenantDb!, req.params.id);
+    if (!deal) throw new AppError(404, "Deal not found");
+
     if (userRole !== "admin" && !(userRole === "rep" && deal.assignedRepId === userId)) {
       throw new AppError(403, "Only the assigned rep or an admin can trigger RFP review.", "RFP_UNAUTHORIZED");
     }
@@ -400,92 +508,101 @@ router.post("/:id/trigger-rfp", async (req, res, next) => {
     });
     if (deal.isBidBoardOwned || inferredOwnership.isBidBoardOwned) {
       throw new AppError(
-        400,
+        409,
         "RFP review cannot be triggered after Bid Board owns this deal.",
-        "RFP_ALREADY_BID_BOARD_OWNED"
+        "RFP_ALREADY_HANDED_OFF"
       );
     }
 
     if (deal.rfpApprovalRequestedAt || deal.rfpApprovalStatus) {
-      throw new AppError(400, "RFP review has already been triggered for this deal.", "RFP_ALREADY_TRIGGERED");
+      throw new AppError(409, "RFP review has already been triggered for this deal.", "RFP_ALREADY_TRIGGERED");
     }
 
     const readiness = await evaluateDealScopingReadiness(req.tenantDb!, deal.id);
     if (readiness.status === "draft") {
-      const missingSections = Object.keys(readiness.errors.sections ?? {});
-      const missingAttachments = Object.keys(readiness.errors.attachments ?? {});
-      throw new AppError(
-        400,
-        [
-          "Complete Opportunity Scope before triggering RFP review.",
-          missingSections.length > 0 ? `Missing sections: ${missingSections.join(", ")}` : null,
-          missingAttachments.length > 0 ? `Missing attachments: ${missingAttachments.join(", ")}` : null,
-        ].filter(Boolean).join(" "),
-        "RFP_SCOPE_INCOMPLETE"
-      );
+      throw buildScopeIncompleteError(readiness);
     }
 
     const officeId = req.user!.activeOfficeId ?? req.user!.officeId ?? null;
     const requestedAt = new Date();
-    const rfpResult = await enqueueOpportunityRfpIfNeeded({
-      tenantDb: req.tenantDb!,
-      deal,
-      userId,
-      officeId,
-      transitioningFrom: null,
-      enteredAt: requestedAt,
-    });
-
-    if (!rfpResult.enqueued) {
-      if (rfpResult.reason === "feature_disabled") {
-        throw new AppError(503, "Opportunity RFP delivery is disabled.", "RFP_EVENT_DISABLED");
-      }
-      if (rfpResult.reason === "already_requested") {
-        throw new AppError(400, "RFP review has already been triggered for this deal.", "RFP_ALREADY_TRIGGERED");
-      }
-      throw new AppError(400, "RFP review could not be triggered for this deal.", "RFP_TRIGGER_FAILED");
+    const eventId = randomUUID();
+    const updateConditions = [
+      eq(deals.id, deal.id),
+      eq(deals.stageId, deal.stageId),
+      isNull(deals.rfpApprovalStatus),
+      isNull(deals.rfpApprovalRequestedAt),
+      eq(deals.isBidBoardOwned, false),
+      or(isNull(deals.bidBoardStageSlug), eq(deals.bidBoardStageSlug, ""))!,
+      eq(deals.isReadOnlyMirror, false),
+      isNull(deals.readOnlySyncedAt),
+      isNull(deals.bidBoardStageEnteredAt),
+      isNull(deals.bidBoardMirrorSourceEnteredAt),
+    ];
+    if (userRole === "rep") {
+      updateConditions.push(eq(deals.assignedRepId, userId));
     }
 
-    if (rfpResult.dealUpdates) {
-      await req.tenantDb!
-        .update(deals)
-        .set(rfpResult.dealUpdates)
-        .where(eq(deals.id, deal.id));
-    }
+    const [reservedDeal] = await req.tenantDb!
+      .update(deals)
+      .set({
+        rfpApprovalRequestedAt: requestedAt,
+        rfpApprovalRequestEventId: eventId,
+        rfpApprovalRequestedBy: userId,
+        rfpApprovalStatus: "pending_outbox",
+      })
+      .where(and(...updateConditions))
+      .returning();
 
-    const updatedDeal = { ...deal, ...(rfpResult.dealUpdates ?? {}) };
-    const eventsToEmit: Array<{ name: string; payload: Record<string, unknown> }> = [];
-    if (rfpResult.eventId) {
-      const opportunityPayload = {
-        eventName: DOMAIN_EVENTS.DEAL_OPPORTUNITY_ENTERED,
-        eventId: rfpResult.eventId,
-        idempotencyKey: `deal:${deal.id}:rfp_approval:lifetime`,
-        dealId: deal.id,
-        dealNumber: updatedDeal.dealNumber,
-        dealName: updatedDeal.name,
-        officeId,
-        workflowRoute: updatedDeal.workflowRoute,
-        fromStageId: deal.stageId,
-        toStageId: deal.stageId,
-        toStageSlug: "opportunity",
-        enteredAt: rfpResult.dealUpdates?.rfpApprovalRequestedAt ?? requestedAt,
-        requestedBy: userId,
-        source: "manual_trigger",
-      } satisfies DealOpportunityEnteredEventPayload;
-      await queueDomainEvent(req.tenantDb!, officeId, DOMAIN_EVENTS.DEAL_OPPORTUNITY_ENTERED, opportunityPayload);
-      eventsToEmit.push({
-        name: DOMAIN_EVENTS.DEAL_OPPORTUNITY_ENTERED,
-        payload: opportunityPayload,
+    if (!reservedDeal) {
+      throw await buildTriggerRfpConflict(req.tenantDb!, deal.id, {
+        userRole,
+        userId,
+        expectedOpportunityStageId: deal.stageId,
       });
     }
+
+    const reservedReadiness = await evaluateDealScopingReadiness(req.tenantDb!, reservedDeal.id);
+    if (reservedReadiness.status === "draft") {
+      throw buildScopeIncompleteError(reservedReadiness);
+    }
+
+    const { jobId } = await insertOpportunityRfpRequestJob({
+      tenantDb: req.tenantDb!,
+      deal: reservedDeal,
+      officeId,
+      eventId,
+    });
+
+    const eventsToEmit: Array<{ name: string; payload: Record<string, unknown> }> = [];
+    const opportunityPayload = {
+      eventName: DOMAIN_EVENTS.DEAL_OPPORTUNITY_ENTERED,
+      eventId,
+      idempotencyKey: `deal:${deal.id}:rfp_approval:lifetime`,
+      dealId: deal.id,
+      dealNumber: reservedDeal.dealNumber,
+      dealName: reservedDeal.name,
+      officeId,
+      workflowRoute: reservedDeal.workflowRoute,
+      fromStageId: deal.stageId,
+      toStageId: reservedDeal.stageId,
+      toStageSlug: "opportunity",
+      enteredAt: requestedAt,
+      requestedBy: userId,
+      source: "manual_trigger",
+    } satisfies DealOpportunityEnteredEventPayload;
+    await queueDomainEvent(req.tenantDb!, officeId, DOMAIN_EVENTS.DEAL_OPPORTUNITY_ENTERED, opportunityPayload);
+    eventsToEmit.push({
+      name: DOMAIN_EVENTS.DEAL_OPPORTUNITY_ENTERED,
+      payload: opportunityPayload,
+    });
 
     await req.commitTransaction!();
     emitLocalDealEvents(eventsToEmit, { officeId: officeId ?? "", userId });
     res.json(toJsonSafe({
       success: true,
-      status: rfpResult.dealUpdates?.rfpApprovalStatus ?? "pending_outbox",
-      eventId: rfpResult.eventId,
-      jobId: rfpResult.jobId,
+      status: reservedDeal.rfpApprovalStatus ?? "pending_outbox",
+      eventId,
+      jobId,
     }));
   } catch (err) {
     next(err);

@@ -335,9 +335,11 @@ function normalizeWorkspaceReadiness(
 export function DealScopingWorkspace({
   deal,
   onDealUpdated,
+  onReadinessChanged,
 }: {
   deal: DealDetail;
   onDealUpdated: () => void;
+  onReadinessChanged?: () => void;
 }) {
   const { user } = useAuth();
   const { projectTypes } = useProjectTypes();
@@ -364,6 +366,7 @@ export function DealScopingWorkspace({
   const [activatingService, setActivatingService] = useState(false);
   const lastSavedFingerprintRef = useRef("");
   const hydrationCompleteRef = useRef(false);
+  const readinessSignatureRef = useRef<string | null>(null);
   const activeWorkflowRoute: WorkflowRoute = resolvedFields?.workflowRoute ?? deal.workflowRoute ?? "normal";
   const activeCompanyId = resolvedFields?.companyId ?? deal.companyId;
   const activePropertyId = resolvedFields?.propertyId ?? deal.propertyId;
@@ -420,7 +423,22 @@ export function DealScopingWorkspace({
     setDismissedError(false);
   };
 
-  const loadIntake = async () => {
+  const applyReadiness = (nextReadiness: DealScopingReadiness, notifyOnChange: boolean) => {
+    const normalized = normalizeWorkspaceReadiness(nextReadiness, activeWorkflowRoute);
+    const previousSignature = readinessSignatureRef.current;
+    const nextSignature = JSON.stringify({
+      status: normalized.status,
+      errors: normalized.errors,
+      completionState: normalized.completionState,
+    });
+    readinessSignatureRef.current = nextSignature;
+    setReadiness(normalized);
+    if (notifyOnChange && previousSignature && previousSignature !== nextSignature) {
+      onReadinessChanged?.();
+    }
+  };
+
+  const loadIntake = async (options: { notifyReadinessChange?: boolean } = {}) => {
     setLoading(true);
     clearError();
     setInitialLoadFailed(false);
@@ -428,7 +446,7 @@ export function DealScopingWorkspace({
       const result = await getDealScopingIntake(deal.id);
       const nextSectionData = buildWorkspaceSectionData(deal, result.intake, result.resolved);
       setIntake(result.intake);
-      setReadiness(normalizeWorkspaceReadiness(result.readiness, activeWorkflowRoute));
+      applyReadiness(result.readiness, Boolean(options.notifyReadinessChange));
       setResolvedFields(result.resolved);
       setSectionData(nextSectionData);
       const nextProjectTypeId = hasSourceLead
@@ -497,7 +515,7 @@ export function DealScopingWorkspace({
         );
         const nextSectionData = buildWorkspaceSectionData(deal, result.intake, result.resolved);
         setIntake(result.intake);
-        setReadiness(normalizeWorkspaceReadiness(result.readiness, activeWorkflowRoute));
+        applyReadiness(result.readiness, true);
         setResolvedFields(result.resolved);
         setSectionData(nextSectionData);
         lastSavedFingerprintRef.current = JSON.stringify({
@@ -585,7 +603,7 @@ export function DealScopingWorkspace({
         intakeSection: "attachments",
         intakeRequirementKey: requirementKey,
       });
-      await Promise.all([refetchFiles(), loadIntake()]);
+      await Promise.all([refetchFiles(), loadIntake({ notifyReadinessChange: true })]);
       toast.success(`Linked file to ${formatScopingAttachmentLabel(requirementKey)}.`);
     } catch (err) {
       toast.error(err instanceof Error ? err.message : "Failed to link file");
@@ -631,7 +649,7 @@ export function DealScopingWorkspace({
           intakeRequirementKey: requirement.key,
         });
       }
-      await Promise.all([refetchFiles(), loadIntake()]);
+      await Promise.all([refetchFiles(), loadIntake({ notifyReadinessChange: true })]);
       toast.success(`${requirement.label} uploaded and linked.`);
     } catch (err) {
       toast.error(err instanceof Error ? err.message : "Upload failed");
@@ -645,7 +663,7 @@ export function DealScopingWorkspace({
     setActivatingService(true);
     try {
       await activateServiceHandoff(deal.id);
-      await loadIntake();
+      await loadIntake({ notifyReadinessChange: true });
       onDealUpdated();
       toast.success("Service handoff activated.");
     } catch (err) {

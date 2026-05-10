@@ -18,6 +18,7 @@ const mocks = vi.hoisted(() => ({
   createActivityMock: vi.fn(),
   apiMock: vi.fn(),
   toastSuccessMock: vi.fn(),
+  toastInfoMock: vi.fn(),
 }));
 
 vi.mock("@/hooks/use-deals", () => ({
@@ -45,6 +46,7 @@ vi.mock("@/lib/api", () => ({
 vi.mock("sonner", () => ({
   toast: {
     success: mocks.toastSuccessMock,
+    info: mocks.toastInfoMock,
   },
 }));
 
@@ -127,7 +129,12 @@ vi.mock("@/components/deals/deal-timeline-tab", () => ({
 }));
 
 vi.mock("@/components/deals/deal-scoping-workspace", () => ({
-  DealScopingWorkspace: () => <div>Scoping Tab</div>,
+  DealScopingWorkspace: ({ onReadinessChanged }: { onReadinessChanged?: () => void }) => (
+    <div>
+      Scoping Tab
+      <button type="button" onClick={onReadinessChanged}>Simulate scope saved</button>
+    </div>
+  ),
 }));
 
 vi.mock("@/components/files/deal-file-tab", () => ({
@@ -288,6 +295,7 @@ function makeDealDetail(overrides: Record<string, unknown> = {}) {
     bidBoardLastUpdatedAt: "2026-04-21T10:00:00.000Z",
     bidBoardAssignedPm: null,
     readOnlySyncedAt: "2026-04-21T10:00:00.000Z",
+    isRfpTriggerEnabled: true,
     bidBoardOwnership: {
       isOwned: true,
       sourceOfTruth: "bid_board" as const,
@@ -320,6 +328,7 @@ describe("DealDetailPage", () => {
     mocks.useActivitiesMock.mockReset();
     mocks.apiMock.mockReset();
     mocks.toastSuccessMock.mockReset();
+    mocks.toastInfoMock.mockReset();
     mocks.apiMock.mockImplementation((url: string, options?: { method?: string }) => {
       if (url.includes("/photos")) {
         return Promise.resolve({ pagination: { total: 0 } });
@@ -779,6 +788,202 @@ describe("DealDetailPage", () => {
     expect(mocks.apiMock).toHaveBeenCalledWith("/deals/deal-1/trigger-rfp", { method: "POST" });
     expect(mocks.toastSuccessMock).toHaveBeenCalledWith("RFP request sent to approval team.");
     expect(refetch).toHaveBeenCalled();
+  });
+
+  it("hides Trigger RFP when the server-side RFP feature flag is disabled", async () => {
+    mocks.useAuthMock.mockReturnValue({
+      user: {
+        id: "rep-1",
+        role: "rep",
+      },
+    });
+    mocks.useDealDetailMock.mockReturnValue({
+      loading: false,
+      error: null,
+      refetch: vi.fn(),
+      deal: makeDealDetail({
+        stageId: "stage-opportunity",
+        isBidBoardOwned: false,
+        bidBoardStageSlug: null,
+        readOnlySyncedAt: null,
+        bidBoardOwnership: null,
+        rfpApprovalStatus: null,
+        rfpApprovalRequestedAt: null,
+        isRfpTriggerEnabled: false,
+      }),
+    });
+
+    mounted = mountPage();
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    expect(mounted.container.textContent).not.toContain("Trigger RFP");
+    expect(mocks.apiMock).not.toHaveBeenCalledWith("/deals/deal-1/scoping-intake/readiness");
+  });
+
+  it("refreshes Trigger RFP readiness after the scoping workspace reports a readiness change", async () => {
+    let readinessStatus: "draft" | "ready" = "draft";
+    mocks.useAuthMock.mockReturnValue({
+      user: {
+        id: "rep-1",
+        role: "rep",
+      },
+    });
+    mocks.apiMock.mockImplementation((url: string) => {
+      if (url.includes("/photos")) {
+        return Promise.resolve({ pagination: { total: 0 } });
+      }
+      if (url.includes("/scoping-intake/readiness")) {
+        return Promise.resolve({ readiness: { status: readinessStatus } });
+      }
+      return Promise.resolve({});
+    });
+    mocks.useDealDetailMock.mockReturnValue({
+      loading: false,
+      error: null,
+      refetch: vi.fn(),
+      deal: makeDealDetail({
+        stageId: "stage-opportunity",
+        isBidBoardOwned: false,
+        bidBoardStageSlug: null,
+        readOnlySyncedAt: null,
+        bidBoardOwnership: null,
+        rfpApprovalStatus: null,
+        rfpApprovalRequestedAt: null,
+      }),
+    });
+
+    mounted = mountPage();
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    const triggerButton = Array.from(mounted.container.querySelectorAll("button")).find(
+      (button) => button.textContent?.includes("Trigger RFP")
+    ) as HTMLButtonElement | undefined;
+    expect(triggerButton?.disabled).toBe(true);
+
+    readinessStatus = "ready";
+    const saveButton = Array.from(mounted.container.querySelectorAll("button")).find(
+      (button) => button.textContent?.includes("Simulate scope saved")
+    );
+    await act(async () => {
+      saveButton?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(triggerButton?.disabled).toBe(false);
+  });
+
+  it("keeps trigger success separate from a later refetch failure", async () => {
+    const refetch = vi.fn().mockRejectedValue(new Error("network down"));
+    mocks.useAuthMock.mockReturnValue({
+      user: {
+        id: "rep-1",
+        role: "rep",
+      },
+    });
+    mocks.apiMock.mockImplementation((url: string, options?: { method?: string }) => {
+      if (url.includes("/photos")) {
+        return Promise.resolve({ pagination: { total: 0 } });
+      }
+      if (url.includes("/scoping-intake/readiness")) {
+        return Promise.resolve({ readiness: { status: "ready" } });
+      }
+      if (url.includes("/trigger-rfp") && options?.method === "POST") {
+        return Promise.resolve({ success: true, status: "pending_outbox" });
+      }
+      return Promise.resolve({});
+    });
+    mocks.useDealDetailMock.mockReturnValue({
+      loading: false,
+      error: null,
+      refetch,
+      deal: makeDealDetail({
+        stageId: "stage-opportunity",
+        isBidBoardOwned: false,
+        bidBoardStageSlug: null,
+        readOnlySyncedAt: null,
+        bidBoardOwnership: null,
+        rfpApprovalStatus: null,
+        rfpApprovalRequestedAt: null,
+      }),
+    });
+    vi.spyOn(window, "confirm").mockReturnValue(true);
+    mounted = mountPage();
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    const triggerButton = Array.from(mounted.container.querySelectorAll("button")).find(
+      (button) => button.textContent?.includes("Trigger RFP")
+    ) as HTMLButtonElement | undefined;
+    await act(async () => {
+      triggerButton?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(mocks.toastSuccessMock).toHaveBeenCalledWith("RFP request sent to approval team.");
+    expect(mocks.toastInfoMock).toHaveBeenCalledWith("RFP triggered. Refresh page to see updated status.");
+    expect(mounted.container.textContent).not.toContain("Failed to trigger RFP review.");
+  });
+
+  it("shows an inline error when the trigger request itself fails", async () => {
+    mocks.useAuthMock.mockReturnValue({
+      user: {
+        id: "rep-1",
+        role: "rep",
+      },
+    });
+    mocks.apiMock.mockImplementation((url: string, options?: { method?: string }) => {
+      if (url.includes("/photos")) {
+        return Promise.resolve({ pagination: { total: 0 } });
+      }
+      if (url.includes("/scoping-intake/readiness")) {
+        return Promise.resolve({ readiness: { status: "ready" } });
+      }
+      if (url.includes("/trigger-rfp") && options?.method === "POST") {
+        return Promise.reject(new Error("RFP review has already been triggered for this deal."));
+      }
+      return Promise.resolve({});
+    });
+    mocks.useDealDetailMock.mockReturnValue({
+      loading: false,
+      error: null,
+      refetch: vi.fn(),
+      deal: makeDealDetail({
+        stageId: "stage-opportunity",
+        isBidBoardOwned: false,
+        bidBoardStageSlug: null,
+        readOnlySyncedAt: null,
+        bidBoardOwnership: null,
+        rfpApprovalStatus: null,
+        rfpApprovalRequestedAt: null,
+      }),
+    });
+    vi.spyOn(window, "confirm").mockReturnValue(true);
+    mounted = mountPage();
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    const triggerButton = Array.from(mounted.container.querySelectorAll("button")).find(
+      (button) => button.textContent?.includes("Trigger RFP")
+    ) as HTMLButtonElement | undefined;
+    await act(async () => {
+      triggerButton?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(mocks.toastSuccessMock).not.toHaveBeenCalled();
+    expect(mounted.container.textContent).toContain("RFP review has already been triggered for this deal.");
   });
 
   it("keeps estimating manually reachable for owned deals that are still before the boundary", () => {

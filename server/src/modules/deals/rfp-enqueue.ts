@@ -25,6 +25,13 @@ export interface EnqueueOpportunityRfpResult {
   dealUpdates?: Partial<typeof deals.$inferSelect>;
 }
 
+export interface InsertOpportunityRfpJobInput {
+  tenantDb: TenantDb;
+  deal: typeof deals.$inferSelect;
+  officeId: string | null;
+  eventId: string;
+}
+
 async function loadRfpPayloadDeal(tenantDb: TenantDb, fallbackDeal: typeof deals.$inferSelect) {
   const result = await tenantDb.execute(sql`
     SELECT d.*,
@@ -54,6 +61,30 @@ async function loadRfpPayloadDeal(tenantDb: TenantDb, fallbackDeal: typeof deals
   };
 }
 
+export async function insertOpportunityRfpRequestJob(
+  input: InsertOpportunityRfpJobInput
+): Promise<{ jobId: number }> {
+  const rfpPayloadDeal = await loadRfpPayloadDeal(input.tenantDb, input.deal);
+  const jobRows = await input.tenantDb
+    .insert(jobQueue)
+    .values({
+      jobType: "rfp_request_delivery",
+      payload: buildRfpRequestDeliveryPayload({
+        deal: rfpPayloadDeal,
+        sourceEventId: `crm:deal-stage:opportunity:${input.eventId}`,
+        syncHubUrl: resolveSyncHubRfpRequestUrl(),
+      }),
+      officeId: input.officeId,
+      status: "pending",
+      runAfter: new Date(),
+      // max_attempts=8 gives roughly 2.7 hours of retries with the existing 3^n backoff.
+      maxAttempts: 8,
+    })
+    .returning({ id: jobQueue.id });
+
+  return { jobId: Number(jobRows[0]?.id) };
+}
+
 /**
  * Idempotent: returns enqueued=false with reason='already_requested' if
  * rfpApprovalRequestedAt is already set on the deal. This is safe to call from
@@ -77,31 +108,20 @@ export async function enqueueOpportunityRfpIfNeeded(
     rfpApprovalRequestedBy: input.userId,
     rfpApprovalStatus: "pending_outbox",
   };
-  const rfpPayloadDeal = await loadRfpPayloadDeal(input.tenantDb, {
-    ...input.deal,
-    ...dealUpdates,
+  const { jobId } = await insertOpportunityRfpRequestJob({
+    tenantDb: input.tenantDb,
+    deal: {
+      ...input.deal,
+      ...dealUpdates,
+    },
+    officeId: input.officeId,
+    eventId,
   });
-  const jobRows = await input.tenantDb
-    .insert(jobQueue)
-    .values({
-      jobType: "rfp_request_delivery",
-      payload: buildRfpRequestDeliveryPayload({
-        deal: rfpPayloadDeal,
-        sourceEventId: `crm:deal-stage:opportunity:${eventId}`,
-        syncHubUrl: resolveSyncHubRfpRequestUrl(),
-      }),
-      officeId: input.officeId,
-      status: "pending",
-      runAfter: new Date(),
-      // max_attempts=8 gives roughly 2.7 hours of retries with the existing 3^n backoff.
-      maxAttempts: 8,
-    })
-    .returning({ id: jobQueue.id });
 
   return {
     enqueued: true,
     eventId,
-    jobId: Number(jobRows[0]?.id),
+    jobId,
     dealUpdates,
   };
 }
