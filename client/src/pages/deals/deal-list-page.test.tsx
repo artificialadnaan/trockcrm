@@ -258,20 +258,6 @@ describe("DealListPage", () => {
     expect(html).toContain("HS-321687989951");
   });
 
-  it("renders company name in the embedded list section", () => {
-    mocks.useDealsMock.mockReturnValue({
-      deals: [makeDeal({ companyName: "Acme Construction" })],
-      pagination: { page: 1, limit: 25, total: 1, totalPages: 1 },
-      loading: false,
-      error: null,
-      refetch: vi.fn(),
-    });
-
-    const html = renderPage();
-
-    expect(html).toContain("Acme Construction");
-  });
-
   it("preserves empty canonical columns so stage parity remains visible", () => {
     mocks.useDealBoardMock.mockReturnValue({
       board: {
@@ -489,15 +475,9 @@ describe("DealListPage", () => {
     expect(html).toContain('aria-pressed="false">All');
   });
 
-  it("loads the embedded list section with the active scope (paginated, not endless scroll)", () => {
+  it("does not embed a paginated list section on /deals", () => {
     renderPage("/deals?scope=team", "director");
-    expect(mocks.useDealsMock).toHaveBeenLastCalledWith(
-      expect.objectContaining({ scope: "team", limit: 25, page: 1 })
-    );
 
-    renderPage("/deals?scope=all", "admin");
-    expect(mocks.useDealsMock).toHaveBeenLastCalledWith(
-      expect.objectContaining({ scope: "all", limit: 25, page: 1 })
-    );
+    expect(mocks.useDealsMock).not.toHaveBeenCalled();
   });
 });

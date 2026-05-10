@@ -20,7 +20,6 @@ import {
 import type { PipelineScope } from "@/lib/pipeline-scope";
 import { KanbanScrollColumn } from "@/components/deals/kanban-scroll-column";
 import { KanbanDealCard } from "@/components/deals/kanban-deal-card";
-import { DealsListSection } from "@/components/deals/deals-list-section";
 
 const SCOPE_OPTIONS = [
   { value: "mine", label: "Mine" },
@@ -358,8 +357,6 @@ function DealListPageContent({ role }: { role: string }) {
           </>
         )}
       </section>
-
-      <DealsListSection scope={scope} />
     </div>
   );
 }
