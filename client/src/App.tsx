@@ -175,11 +175,6 @@ function RouteFallback() {
   );
 }
 
-function DealsToPipelineRedirect() {
-  const { search, hash } = useLocation();
-  return <Navigate to={{ pathname: "/pipeline", search, hash }} replace />;
-}
-
 export function App() {
   return (
     <AuthProvider>
@@ -194,7 +189,7 @@ export function App() {
               <Route path="/" element={<HomeDashboardPage />} />
               <Route path="/dashboard" element={<HomeDashboardPage />} />
               <Route path="/dashboard/contracts-signed" element={<ContractsSignedPage />} />
-              <Route path="/deals" element={<DealsToPipelineRedirect />} />
+              <Route path="/deals" element={<DealListPage />} />
               <Route path="/deals/board" element={<BoardAliasRedirect entity="deals" />} />
               <Route path="/deals/stages/:stageId" element={<DealStagePage />} />
               <Route path="/deals/new" element={<DealNewPage />} />

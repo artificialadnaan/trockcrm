@@ -496,6 +496,29 @@ describe("DealListPage", () => {
     });
   });
 
+  it("renders the WORKFLOW CONTROL eyebrow with DEALS title and three KPI cards", () => {
+    const html = renderPage();
+
+    expect(html).toContain("Workflow control");
+    expect(html).toContain(">Deals<");
+    expect(html).toContain("Active pipeline");
+    expect(html).toContain("Won YTD");
+    expect(html).toContain("At risk");
+  });
+
+  it("caps each kanban column height so internal scroll engages instead of page scroll", () => {
+    const html = renderPage();
+
+    expect(html).toContain("max-h-[44rem]");
+    expect(html).toContain("overflow-y-auto");
+  });
+
+  it("honors ?scope=team query param by passing it through to useDealBoard", () => {
+    renderPage("/deals?scope=team", "director");
+
+    expect(mocks.useDealBoardMock).toHaveBeenCalledWith("team", true, expect.any(Object));
+  });
+
   it("renders visibility badge using pagination total when available", () => {
     mocks.useDealsMock.mockReturnValue({
       deals: Array.from({ length: 200 }, (_, index) =>

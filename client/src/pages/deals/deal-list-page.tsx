@@ -190,7 +190,7 @@ function BoardColumn({
 
   return (
     <section
-      className="flex h-full min-h-[32rem] w-[19rem] shrink-0 flex-col overflow-hidden rounded-lg border border-slate-200 bg-slate-50"
+      className="flex h-full min-h-[32rem] max-h-[44rem] w-[19rem] shrink-0 flex-col overflow-hidden rounded-lg border border-slate-200 bg-slate-50"
       aria-label={`${column.stage.name} deals`}
       tabIndex={0}
     >

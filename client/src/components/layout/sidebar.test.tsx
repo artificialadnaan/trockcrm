@@ -34,8 +34,8 @@ describe("Sidebar navigation metadata", () => {
     expect(source).toContain('{ to: "/admin/field-users", icon: Users, label: "Field Users", roles: ["admin"] }');
   });
 
-  it("does not key navigation entries by route alone when duplicate routes exist", () => {
-    expect(source).toContain('{ to: "/pipeline", icon: Handshake, label: "Deals", roles: ["admin", "director", "rep"] }');
+  it("renders Deals and Pipeline as distinct nav entries pointing to their own routes", () => {
+    expect(source).toContain('{ to: "/deals", icon: Handshake, label: "Deals", roles: ["admin", "director", "rep"] }');
     expect(source).toContain('{ to: "/pipeline", icon: Kanban, label: "Pipeline", roles: ["admin", "director", "rep"] }');
     expect(source).toContain("function getNavItemKey");
     expect(source).toContain("key={getNavItemKey(item)}");
