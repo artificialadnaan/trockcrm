@@ -87,6 +87,7 @@ export interface DealScopingIntake {
 export interface Deal {
   id: string;
   dealNumber: string;
+  projectNumber?: string | null;
   name: string;
   stageId: string;
   pipelineDisposition: DealPipelineDisposition;

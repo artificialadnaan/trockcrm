@@ -15,6 +15,7 @@ import {
   userOfficeAccess,
   tasks,
   jobQueue,
+  projectTypeConfig,
 } from "@trock-crm/shared/schema";
 import {
   DOMAIN_EVENTS,
@@ -894,10 +895,12 @@ export async function getDealDetail(tenantDb: TenantDb, dealId: string, userRole
       ...getTableColumns(deals),
       assignedRepName: users.displayName,
       companyName: companies.name,
+      projectType: sql<string | null>`COALESCE(${projectTypeConfig.name}, ${deals.projectType})`,
     })
     .from(deals)
     .leftJoin(users, eq(users.id, deals.assignedRepId))
     .leftJoin(companies, eq(companies.id, deals.companyId))
+    .leftJoin(projectTypeConfig, eq(projectTypeConfig.id, deals.projectTypeId))
     .where(eq(deals.id, dealId))
     .limit(1);
 

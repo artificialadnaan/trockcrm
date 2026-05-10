@@ -3,6 +3,7 @@ import { deals } from "../../../../shared/src/schema/tenant/deals.js";
 import { dealApprovals } from "../../../../shared/src/schema/tenant/deal-approvals.js";
 import { changeOrders } from "../../../../shared/src/schema/tenant/change-orders.js";
 import { dealStageHistory } from "../../../../shared/src/schema/tenant/deal-stage-history.js";
+import { projectTypeConfig } from "../../../../shared/src/schema/public/project-type-config.js";
 
 const pipelineMocks = vi.hoisted(() => ({
   getStageById: vi.fn(),
@@ -13,7 +14,7 @@ vi.mock("../../../src/modules/pipeline/service.js", () => ({
 }));
 
 vi.mock("@trock-crm/shared/schema", async () => {
-  const [dealsModule, approvalsModule, changeOrdersModule, historyModule, pipelineStageModule, usersModule, companiesModule] =
+  const [dealsModule, approvalsModule, changeOrdersModule, historyModule, pipelineStageModule, usersModule, companiesModule, projectTypeConfigModule] =
     await Promise.all([
       import("../../../../shared/src/schema/tenant/deals.js"),
       import("../../../../shared/src/schema/tenant/deal-approvals.js"),
@@ -22,6 +23,7 @@ vi.mock("@trock-crm/shared/schema", async () => {
       import("../../../../shared/src/schema/public/pipeline-stage-config.js"),
       import("../../../../shared/src/schema/public/users.js"),
       import("../../../../shared/src/schema/tenant/companies.js"),
+      import("../../../../shared/src/schema/public/project-type-config.js"),
     ]);
 
   return {
@@ -32,6 +34,7 @@ vi.mock("@trock-crm/shared/schema", async () => {
     ...pipelineStageModule,
     ...usersModule,
     ...companiesModule,
+    ...projectTypeConfigModule,
   };
 });
 
@@ -40,6 +43,7 @@ import { evaluatePostConversionEnrichment } from "../../../src/modules/deals/pos
 
 function createFakeTenantDb(state: {
   deals: Array<Record<string, unknown>>;
+  projectTypes?: Array<Record<string, unknown>>;
   dealStageHistory?: Array<Record<string, unknown>>;
   dealApprovals?: Array<Record<string, unknown>>;
   changeOrders?: Array<Record<string, unknown>>;
@@ -49,14 +53,17 @@ function createFakeTenantDb(state: {
     [dealStageHistory, state.dealStageHistory ?? []],
     [dealApprovals, state.dealApprovals ?? []],
     [changeOrders, state.changeOrders ?? []],
+    [projectTypeConfig, state.projectTypes ?? []],
   ]);
 
   return {
     select() {
       const queryFor = (table: unknown) => {
         const rows = tableRows.get(table) ?? [];
+        const joinedTables: unknown[] = [];
         return {
-          leftJoin() {
+          leftJoin(joinedTable: unknown) {
+            joinedTables.push(joinedTable);
             return this;
           },
           where() {
@@ -69,7 +76,20 @@ function createFakeTenantDb(state: {
             return this;
           },
           then(onfulfilled: (value: unknown[]) => unknown) {
-            return Promise.resolve(rows.map((row) => ({ ...row }))).then(onfulfilled);
+            const selectedRows = rows.map((row) => {
+              if (table === deals && joinedTables.includes(projectTypeConfig)) {
+                const projectType = (state.projectTypes ?? []).find(
+                  (type) => type.id === row.projectTypeId
+                );
+                return {
+                  ...row,
+                  projectType: projectType?.name ?? row.projectType,
+                };
+              }
+
+              return { ...row };
+            });
+            return Promise.resolve(selectedRows).then(onfulfilled);
           },
         };
       };
@@ -285,5 +305,36 @@ describe("getDealDetail", () => {
 
     expect(detail?.assignedRepName).toBe("Brett Jones");
     expect(detail?.companyName).toBe("Palm Villas");
+  });
+
+  it("returns the proper-cased project type config name on deal detail", async () => {
+    const tenantDb = createFakeTenantDb({
+      projectTypes: [
+        {
+          id: "project-type-1",
+          name: "Exterior Renovation",
+        },
+      ],
+      deals: [
+        {
+          id: "deal-1",
+          dealNumber: "TR-2026-0001",
+          name: "Palm Villas repaint",
+          stageId: "stage-opportunity",
+          assignedRepId: "rep-1",
+          companyId: "company-1",
+          propertyId: "property-1",
+          sourceLeadId: "lead-1",
+          workflowRoute: "normal",
+          isActive: true,
+          projectTypeId: "project-type-1",
+          projectType: "exterior renovation",
+        },
+      ],
+    });
+
+    const detail = await getDealDetail(tenantDb as never, "deal-1", "director", "director-1");
+
+    expect(detail?.projectType).toBe("Exterior Renovation");
   });
 });
