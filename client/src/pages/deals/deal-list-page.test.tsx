@@ -8,10 +8,21 @@ import { MemoryRouter } from "react-router-dom";
 import type { ReactNode } from "react";
 import { DealListPage, buildDealStageNavigationPath } from "./deal-list-page";
 
+// jsdom does not implement ResizeObserver; KanbanScrollColumn + the kanban
+// horizontal-scroll-sync layout effect both rely on it.
+class ResizeObserverStub {
+  observe() {}
+  unobserve() {}
+  disconnect() {}
+}
+(globalThis as { ResizeObserver?: typeof ResizeObserver }).ResizeObserver =
+  ResizeObserverStub as unknown as typeof ResizeObserver;
+
 const mocks = vi.hoisted(() => ({
   useDealBoardMock: vi.fn(),
   useDealsMock: vi.fn(),
   usePipelineStagesMock: vi.fn(),
+  useTaskAssigneesMock: vi.fn(),
   readTerminalDateFilterMock: vi.fn(),
   buildDealStageWorkspacePathMock: vi.fn(),
   useAuthMock: vi.fn(),
@@ -24,6 +35,10 @@ vi.mock("@/hooks/use-deals", () => ({
 
 vi.mock("@/hooks/use-pipeline-config", () => ({
   usePipelineStages: mocks.usePipelineStagesMock,
+}));
+
+vi.mock("@/hooks/use-task-assignees", () => ({
+  useTaskAssignees: mocks.useTaskAssigneesMock,
 }));
 
 vi.mock("@/lib/auth", () => ({
@@ -124,6 +139,7 @@ describe("DealListPage", () => {
     mocks.useDealBoardMock.mockReset();
     mocks.useDealsMock.mockReset();
     mocks.usePipelineStagesMock.mockReset();
+    mocks.useTaskAssigneesMock.mockReset();
     mocks.readTerminalDateFilterMock.mockReset();
     mocks.buildDealStageWorkspacePathMock.mockReset();
     mocks.useAuthMock.mockReset();
@@ -132,6 +148,10 @@ describe("DealListPage", () => {
       preset: outcome === "won" ? "30" : "60",
     }));
     mocks.buildDealStageWorkspacePathMock.mockReturnValue("/deals/stages/stage-won?scope=all");
+
+    mocks.useTaskAssigneesMock.mockReturnValue({
+      assignees: [{ id: "rep-1", displayName: "Brett Jones" }],
+    });
 
     mocks.usePipelineStagesMock.mockReturnValue({
       stages: [
@@ -188,7 +208,7 @@ describe("DealListPage", () => {
 
     mocks.useDealsMock.mockReturnValue({
       deals: [makeDeal(), makeDeal({ id: "deal-2", name: "Service Hospital Roof", bidEstimate: "92000" })],
-      pagination: { page: 1, limit: 50, total: 2, totalPages: 1 },
+      pagination: { page: 1, limit: 25, total: 2, totalPages: 1 },
       loading: false,
       error: null,
       refetch: vi.fn(),
@@ -211,20 +231,37 @@ describe("DealListPage", () => {
     expect(html).toContain("Service Hospital Roof");
   });
 
-  it("renders company name on deal cards instead of UUID", () => {
-    const companyId = "a3f8c2d1-1111-4444-9999-abcdefabcdef";
+  it("renders the project number on cards when present, and falls back to deal number when null", () => {
     mocks.useDealBoardMock.mockReturnValue({
       board: {
         columns: [
           {
             stage: { id: "stage-opportunity", name: "Opportunity", slug: "opportunity" },
-            count: 1,
+            count: 2,
             totalValue: 180000,
-            cards: [makeDeal({ companyId, companyName: "Acme Construction" })],
+            cards: [
+              makeDeal({ id: "deal-pn", projectNumber: "DFW-1-12826-aa" }),
+              makeDeal({ id: "deal-fb", dealNumber: "HS-321687989951", projectNumber: null }),
+            ],
           },
         ],
         terminalStages: [],
       },
+      loading: false,
+      error: null,
+      refetch: vi.fn(),
+    });
+
+    const html = renderPage();
+
+    expect(html).toContain("DFW-1-12826-aa");
+    expect(html).toContain("HS-321687989951");
+  });
+
+  it("renders company name in the embedded list section", () => {
+    mocks.useDealsMock.mockReturnValue({
+      deals: [makeDeal({ companyName: "Acme Construction" })],
+      pagination: { page: 1, limit: 25, total: 1, totalPages: 1 },
       loading: false,
       error: null,
       refetch: vi.fn(),
@@ -233,30 +270,6 @@ describe("DealListPage", () => {
     const html = renderPage();
 
     expect(html).toContain("Acme Construction");
-    expect(html).not.toContain(companyId);
-  });
-
-  it("shows Account pending when company name is missing", () => {
-    mocks.useDealBoardMock.mockReturnValue({
-      board: {
-        columns: [
-          {
-            stage: { id: "stage-opportunity", name: "Opportunity", slug: "opportunity" },
-            count: 1,
-            totalValue: 180000,
-            cards: [makeDeal({ companyId: "company-1", companyName: null })],
-          },
-        ],
-        terminalStages: [],
-      },
-      loading: false,
-      error: null,
-      refetch: vi.fn(),
-    });
-
-    const html = renderPage();
-
-    expect(html).toContain("Account pending");
   });
 
   it("preserves empty canonical columns so stage parity remains visible", () => {
@@ -281,7 +294,7 @@ describe("DealListPage", () => {
 
     expect(html).toContain("Opportunity");
     expect(html).toContain("Estimating");
-    expect(html).toContain("No deals in this stage.");
+    expect(html).toContain("No deals");
   });
 
   it("reads terminal date filters at interaction time when opening terminal stages", () => {
@@ -476,40 +489,15 @@ describe("DealListPage", () => {
     expect(html).toContain('aria-pressed="false">All');
   });
 
-  it("loads recent deal movement with the active scope", () => {
+  it("loads the embedded list section with the active scope (paginated, not endless scroll)", () => {
     renderPage("/deals?scope=team", "director");
-    expect(mocks.useDealsMock).toHaveBeenLastCalledWith({
-      limit: 200,
-      isActive: true,
-      sortBy: "updated_at",
-      sortDir: "desc",
-      scope: "team",
-    });
+    expect(mocks.useDealsMock).toHaveBeenLastCalledWith(
+      expect.objectContaining({ scope: "team", limit: 25, page: 1 })
+    );
 
     renderPage("/deals?scope=all", "admin");
-    expect(mocks.useDealsMock).toHaveBeenLastCalledWith({
-      limit: 200,
-      isActive: true,
-      sortBy: "updated_at",
-      sortDir: "desc",
-      scope: "all",
-    });
-  });
-
-  it("renders visibility badge using pagination total when available", () => {
-    mocks.useDealsMock.mockReturnValue({
-      deals: Array.from({ length: 200 }, (_, index) =>
-        makeDeal({ id: `deal-${index}`, name: `Deal ${index}` })
-      ),
-      pagination: { page: 1, limit: 200, total: 472, totalPages: 3 },
-      loading: false,
-      error: null,
-      refetch: vi.fn(),
-    });
-
-    const html = renderPage("/deals?scope=all", "admin");
-
-    expect(html).toContain("472 visible");
-    expect(html).not.toContain("200 visible");
+    expect(mocks.useDealsMock).toHaveBeenLastCalledWith(
+      expect.objectContaining({ scope: "all", limit: 25, page: 1 })
+    );
   });
 });
