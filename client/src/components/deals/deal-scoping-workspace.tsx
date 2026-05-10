@@ -358,6 +358,7 @@ export function DealScopingWorkspace({
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [dismissedError, setDismissedError] = useState(false);
+  const [initialLoadFailed, setInitialLoadFailed] = useState(false);
   const [saveState, setSaveState] = useState<"idle" | "saving" | "saved" | "error">("idle");
   const [uploadingKey, setUploadingKey] = useState<string | null>(null);
   const [activatingService, setActivatingService] = useState(false);
@@ -387,11 +388,42 @@ export function DealScopingWorkspace({
     { completed: "Completed" },
     "Pending"
   );
+  const editingDisabled = initialLoadFailed;
+  const saveStatusLabel = initialLoadFailed
+    ? "Unable to load - retry"
+    : saveState === "saving"
+      ? "Saving..."
+      : saveState === "error"
+        ? "Save failed"
+        : hydrationCompleteRef.current
+          ? "Saved"
+          : "Loading";
+  const saveStatusDetail = initialLoadFailed
+    ? "Scoping intake did not load. Retry before editing."
+    : saveState === "saving"
+      ? "Autosaving changes..."
+      : saveState === "saved"
+        ? "All changes saved."
+        : saveState === "error"
+          ? "Autosave failed. Keep editing and retry."
+          : hydrationCompleteRef.current
+            ? `Last saved ${intake?.lastAutosavedAt ? new Date(intake.lastAutosavedAt).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" }) : "just now"}.`
+            : "Loading scoping intake...";
+
+  const showError = (message: string) => {
+    setError(message);
+    setDismissedError(false);
+  };
+
+  const clearError = () => {
+    setError(null);
+    setDismissedError(false);
+  };
 
   const loadIntake = async () => {
     setLoading(true);
-    setError(null);
-    setDismissedError(false);
+    clearError();
+    setInitialLoadFailed(false);
     try {
       const result = await getDealScopingIntake(deal.id);
       const nextSectionData = buildWorkspaceSectionData(deal, result.intake, result.resolved);
@@ -408,10 +440,13 @@ export function DealScopingWorkspace({
         sectionData: nextSectionData,
       });
       hydrationCompleteRef.current = true;
+      setInitialLoadFailed(false);
       setSaveState("idle");
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to load scoping intake");
-      setDismissedError(false);
+      hydrationCompleteRef.current = false;
+      setInitialLoadFailed(true);
+      setSaveState("error");
+      showError(err instanceof Error ? err.message : "Failed to load scoping intake");
     } finally {
       setLoading(false);
     }
@@ -473,7 +508,7 @@ export function DealScopingWorkspace({
         window.setTimeout(() => setSaveState("idle"), 1200);
       } catch (err) {
         setSaveState("error");
-        setError(err instanceof Error ? err.message : "Autosave failed");
+        showError(err instanceof Error ? err.message : "Autosave failed");
       }
     }, 400);
 
@@ -530,6 +565,7 @@ export function DealScopingWorkspace({
   );
 
   const updateField = (section: SectionKey, field: string, value: string) => {
+    if (editingDisabled) return;
     setSectionData((current) =>
       mergeSectionData(current, {
         [section]: {
@@ -538,11 +574,11 @@ export function DealScopingWorkspace({
         },
       })
     );
-    setError(null);
-    setDismissedError(false);
+    clearError();
   };
 
   const handleLinkExisting = async (fileId: string, requirementKey: string) => {
+    if (editingDisabled) return;
     try {
       await linkExistingScopingAttachment(deal.id, {
         fileId,
@@ -557,6 +593,7 @@ export function DealScopingWorkspace({
   };
 
   const handlePropertyChange = async (propertyId: string) => {
+    if (editingDisabled) return;
     setSaveState("saving");
     try {
       const result = await patchResolvedDealFields(deal.id, { propertyId });
@@ -569,7 +606,7 @@ export function DealScopingWorkspace({
       window.setTimeout(() => setSaveState("idle"), 1200);
     } catch (err) {
       setSaveState("error");
-      setError(err instanceof Error ? err.message : "Failed to change property");
+      showError(err instanceof Error ? err.message : "Failed to change property");
     }
   };
 
@@ -577,6 +614,7 @@ export function DealScopingWorkspace({
     requirement: (typeof ATTACHMENT_REQUIREMENTS)[number],
     fileList: FileList | null
   ) => {
+    if (editingDisabled) return;
     if (!fileList?.length) return;
 
     setUploadingKey(requirement.key);
@@ -603,6 +641,7 @@ export function DealScopingWorkspace({
   };
 
   const handleActivateService = async () => {
+    if (editingDisabled) return;
     setActivatingService(true);
     try {
       await activateServiceHandoff(deal.id);
@@ -622,11 +661,12 @@ export function DealScopingWorkspace({
 
   return (
     <div className="grid gap-4 lg:grid-cols-[260px_minmax(0,1fr)]">
-      <div className="fixed right-4 top-4 z-40 rounded-full border bg-background px-3 py-1 text-xs font-medium shadow-sm">
-        {saveState === "saving" && "Saving..."}
-        {saveState === "saved" && "Saved"}
-        {saveState === "error" && "Save failed"}
-        {saveState === "idle" && "Saved"}
+      <div className={`fixed right-4 top-4 z-40 rounded-full border px-3 py-1 text-xs font-medium shadow-sm ${
+        initialLoadFailed
+          ? "border-red-200 bg-red-50 text-red-700"
+          : "bg-background"
+      }`}>
+        {saveStatusLabel}
       </div>
       <div className="space-y-4 lg:sticky lg:top-4 lg:self-start">
         <Card size="sm">
@@ -664,10 +704,7 @@ export function DealScopingWorkspace({
             </div>
 
             <div className="rounded-md bg-muted px-3 py-2 text-xs text-muted-foreground">
-              {saveState === "saving" && "Autosaving changes..."}
-              {saveState === "saved" && "All changes saved."}
-              {saveState === "error" && "Autosave failed. Keep editing and retry."}
-              {saveState === "idle" && `Last saved ${intake?.lastAutosavedAt ? new Date(intake.lastAutosavedAt).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" }) : "just now"}.`}
+              {saveStatusDetail}
             </div>
           </CardContent>
         </Card>
@@ -706,6 +743,17 @@ export function DealScopingWorkspace({
             <div>
               <div className="font-medium">Scoping intake needs attention</div>
               <div className="mt-1">{error}</div>
+              {initialLoadFailed ? (
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  className="mt-3 border-red-200 bg-white text-red-700 hover:bg-red-100 hover:text-red-800"
+                  onClick={() => void loadIntake()}
+                >
+                  Retry loading scope
+                </Button>
+              ) : null}
             </div>
             <Button
               type="button"
@@ -742,8 +790,11 @@ export function DealScopingWorkspace({
               <Label htmlFor="projectTypeId">Project Type</Label>
               <Select
                 value={projectTypeId ?? "__none__"}
-                onValueChange={(value) => setProjectTypeId(value === "__none__" ? null : value)}
-                disabled={projectTypeLocked}
+                onValueChange={(value) => {
+                  if (editingDisabled) return;
+                  setProjectTypeId(value === "__none__" ? null : value);
+                }}
+                disabled={editingDisabled || projectTypeLocked}
               >
                 <SelectTrigger id="projectTypeId">
                   <SelectValue>{projectTypeLabel}</SelectValue>
@@ -796,6 +847,7 @@ export function DealScopingWorkspace({
                   id="bidDueDate"
                   type="date"
                   value={getSectionValue(sectionData, "projectOverview", "bidDueDate")}
+                  disabled={editingDisabled}
                   onChange={(event) => updateField("projectOverview", "bidDueDate", event.target.value)}
                 />
               </div>
@@ -815,6 +867,7 @@ export function DealScopingWorkspace({
               <Label htmlFor="preBidMeetingCompleted">Pre-Bid Meeting Completed</Label>
               <Select
                 value={getSectionValue(sectionData, "opportunity", "preBidMeetingCompleted") || "__unset__"}
+                disabled={editingDisabled}
                 onValueChange={(value) =>
                   updateField(
                     "opportunity",
@@ -837,6 +890,7 @@ export function DealScopingWorkspace({
               <Label htmlFor="siteVisitDecision">Site Visit Decision</Label>
               <Select
                 value={getSectionValue(sectionData, "opportunity", "siteVisitDecision") || "__unset__"}
+                disabled={editingDisabled}
                 onValueChange={(value) =>
                   updateField(
                     "opportunity",
@@ -860,6 +914,7 @@ export function DealScopingWorkspace({
               <Label htmlFor="siteVisitCompleted">Site Visit Completed</Label>
               <Select
                 value={getSectionValue(sectionData, "opportunity", "siteVisitCompleted") || "__unset__"}
+                disabled={editingDisabled}
                 onValueChange={(value) =>
                   updateField(
                     "opportunity",
@@ -884,6 +939,7 @@ export function DealScopingWorkspace({
                 id="estimatorConsultationNotes"
                 rows={3}
                 value={getSectionValue(sectionData, "opportunity", "estimatorConsultationNotes")}
+                disabled={editingDisabled}
                 onChange={(event) =>
                   updateField(
                     "opportunity",
@@ -925,6 +981,7 @@ export function DealScopingWorkspace({
                 companyId={activeCompanyId}
                 value={activePropertyId}
                 onChange={handlePropertyChange}
+                disabled={editingDisabled}
               />
             </div>
           </CardContent>
@@ -942,6 +999,7 @@ export function DealScopingWorkspace({
                 id="scopeSummary"
                 rows={6}
                 value={getSectionValue(sectionData, "scopeSummary", "summary")}
+                disabled={editingDisabled}
                 onChange={(event) => updateField("scopeSummary", "summary", event.target.value)}
                 placeholder="Describe the customer’s scope, constraints, and special conditions."
               />
@@ -983,7 +1041,11 @@ export function DealScopingWorkspace({
                         {requirement.hint} Required category: {categoryLabel}.
                       </p>
                     </div>
-                    <Label className="inline-flex cursor-pointer items-center gap-2 rounded-md border px-3 py-2 text-sm font-medium hover:bg-muted">
+                    <Label className={`inline-flex items-center gap-2 rounded-md border px-3 py-2 text-sm font-medium ${
+                      editingDisabled
+                        ? "cursor-not-allowed opacity-50"
+                        : "cursor-pointer hover:bg-muted"
+                    }`}>
                       {uploadingKey === requirement.key ? (
                         <Loader2 className="h-4 w-4 animate-spin" />
                       ) : (
@@ -994,6 +1056,7 @@ export function DealScopingWorkspace({
                         type="file"
                         multiple
                         className="hidden"
+                        disabled={editingDisabled}
                         onChange={(event) => {
                           void handleUpload(requirement, event.target.files);
                           event.currentTarget.value = "";
@@ -1030,6 +1093,7 @@ export function DealScopingWorkspace({
                               type="button"
                               variant="outline"
                               size="sm"
+                              disabled={editingDisabled}
                               onClick={() => void handleLinkExisting(file.id, requirement.key)}
                             >
                               Link
@@ -1059,7 +1123,7 @@ export function DealScopingWorkspace({
             <CardContent className="flex flex-wrap items-center gap-3">
               <Button
                 type="button"
-                disabled={activatingService || readiness?.status === "draft" || intake?.status === "activated"}
+                disabled={editingDisabled || activatingService || readiness?.status === "draft" || intake?.status === "activated"}
                 onClick={() => void handleActivateService()}
               >
                 {activatingService && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}

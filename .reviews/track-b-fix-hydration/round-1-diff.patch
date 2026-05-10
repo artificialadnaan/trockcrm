@@ -1,0 +1,543 @@
+diff --git a/client/src/components/deals/deal-scoping-workspace.test.ts b/client/src/components/deals/deal-scoping-workspace.test.ts
+index 8f2f44b..3ba576d 100644
+--- a/client/src/components/deals/deal-scoping-workspace.test.ts
++++ b/client/src/components/deals/deal-scoping-workspace.test.ts
+@@ -61,8 +61,8 @@ vi.mock("@/lib/auth", () => ({
+ }));
+ 
+ vi.mock("@/components/properties/property-selector", () => ({
+-  PropertySelector: ({ value }: { value?: string | null }) => (
+-    React.createElement("div", { "data-testid": "property-selector" }, value ?? "none")
++  PropertySelector: ({ value, disabled }: { value?: string | null; disabled?: boolean }) => (
++    React.createElement("button", { type: "button", disabled, "data-testid": "property-selector" }, value ?? "none")
+   ),
+ }));
+ 
+@@ -164,6 +164,43 @@ function makeIntake(overrides: Partial<DealScopingIntake> = {}): DealScopingInta
+   };
+ }
+ 
++function makeReadiness() {
++  return {
++    status: "draft" as const,
++    errors: { sections: {}, attachments: {} },
++    completionState: {
++      projectOverview: { isComplete: false, missingFields: [], missingAttachments: [] },
++      opportunity: { isComplete: false, missingFields: [], missingAttachments: [] },
++      propertyDetails: { isComplete: false, missingFields: [], missingAttachments: [] },
++      scopeSummary: { isComplete: false, missingFields: [], missingAttachments: [] },
++      attachments: { isComplete: false, missingFields: [], missingAttachments: [] },
++    },
++    requiredSections: [],
++    requiredAttachmentKeys: [],
++    attachmentRequirements: [],
++  };
++}
++
++function makeScopingResponse(overrides: {
++  intake?: Partial<DealScopingIntake>;
++  resolved?: Partial<DealResolvedFields>;
++} = {}) {
++  return {
++    intake: makeIntake(overrides.intake),
++    resolved: makeResolved(overrides.resolved),
++    readiness: makeReadiness(),
++  };
++}
++
++function changeTextareaValue(element: HTMLTextAreaElement, value: string) {
++  const valueSetter = Object.getOwnPropertyDescriptor(
++    HTMLTextAreaElement.prototype,
++    "value"
++  )?.set;
++  valueSetter?.call(element, value);
++  element.dispatchEvent(new Event("input", { bubbles: true }));
++}
++
+ async function renderWorkspace(deal: DealDetail) {
+   const container = document.createElement("div");
+   document.body.appendChild(container);
+@@ -316,7 +353,7 @@ describe("DealScopingWorkspace lineage routing helpers", () => {
+ });
+ 
+ describe("DealScopingWorkspace load failures", () => {
+-  it("renders the editable scope form when the initial scoping intake request fails", async () => {
++  it("disables the scope form and prevents saves when the initial scoping intake request fails", async () => {
+     mocks.getDealScopingIntake.mockRejectedValueOnce(
+       new Error("projectType cannot be cleared after Opportunity")
+     );
+@@ -331,6 +368,143 @@ describe("DealScopingWorkspace load failures", () => {
+     try {
+       await vi.waitFor(() => expect(container.textContent).toContain("Scoping Workspace"));
+       expect(container.textContent).toContain("projectType cannot be cleared after Opportunity");
++      expect(container.textContent).toContain("Retry loading scope");
++      expect(container.textContent).toContain("Unable to load - retry");
++      expect(container.textContent).not.toContain("Saved");
++
++      const summary = container.querySelector<HTMLTextAreaElement>("#scopeSummary");
++      expect(summary).not.toBeNull();
++      expect(summary?.disabled).toBe(true);
++
++      await act(async () => {
++        changeTextareaValue(summary!, "this must not autosave");
++        await new Promise((resolve) => window.setTimeout(resolve, 500));
++      });
++
++      expect(mocks.patchDealScopingIntake).not.toHaveBeenCalled();
++      expect(mocks.patchResolvedDealFields).not.toHaveBeenCalled();
++    } finally {
++      cleanup();
++    }
++  });
++
++  it("retries a failed initial load, enables editing after hydration, and autosaves later edits", async () => {
++    mocks.getDealScopingIntake
++      .mockRejectedValueOnce(new Error("temporary load failure"))
++      .mockResolvedValueOnce(makeScopingResponse({
++        intake: { projectTypeId: "project-type-1" },
++        resolved: { projectTypeId: "project-type-1" },
++      }));
++    mocks.patchDealScopingIntake.mockResolvedValue(makeScopingResponse({
++      intake: {
++        projectTypeId: "project-type-1",
++        sectionData: { scopeSummary: { summary: "retry saved value" } },
++      },
++      resolved: { projectTypeId: "project-type-1" },
++    }));
++
++    const { container, cleanup } = await renderWorkspace(
++      makeDeal({
++        sourceLeadId: null,
++        projectTypeId: "project-type-1",
++      })
++    );
++
++    try {
++      await vi.waitFor(() => expect(container.textContent).toContain("temporary load failure"));
++      const disabledSummary = container.querySelector<HTMLTextAreaElement>("#scopeSummary");
++      expect(disabledSummary?.disabled).toBe(true);
++
++      const retryButton = Array.from(container.querySelectorAll("button")).find(
++        (button) => button.textContent?.includes("Retry loading scope")
++      );
++      expect(retryButton).toBeDefined();
++
++      await act(async () => {
++        retryButton!.dispatchEvent(new MouseEvent("click", { bubbles: true }));
++        await Promise.resolve();
++      });
++
++      await vi.waitFor(() => {
++        const summary = container.querySelector<HTMLTextAreaElement>("#scopeSummary");
++        expect(summary?.disabled).toBe(false);
++      });
++
++      const summary = container.querySelector<HTMLTextAreaElement>("#scopeSummary")!;
++      await act(async () => {
++        changeTextareaValue(summary, "retry saved value");
++        await new Promise((resolve) => window.setTimeout(resolve, 500));
++      });
++
++      await vi.waitFor(() => expect(mocks.patchDealScopingIntake).toHaveBeenCalled());
++    } finally {
++      cleanup();
++    }
++  });
++
++  it("re-shows the error banner when a new autosave error occurs after dismissal", async () => {
++    mocks.getDealScopingIntake.mockResolvedValueOnce(makeScopingResponse({
++      intake: { projectTypeId: "project-type-1" },
++      resolved: { projectTypeId: "project-type-1" },
++    }));
++    mocks.patchDealScopingIntake
++      .mockRejectedValueOnce(new Error("first autosave failure"))
++      .mockRejectedValueOnce(new Error("second autosave failure"));
++
++    const { container, cleanup } = await renderWorkspace(
++      makeDeal({
++        sourceLeadId: null,
++        projectTypeId: "project-type-1",
++      })
++    );
++
++    try {
++      await vi.waitFor(() => {
++        const summary = container.querySelector<HTMLTextAreaElement>("#scopeSummary");
++        expect(summary?.disabled).toBe(false);
++      });
++
++      const summary = container.querySelector<HTMLTextAreaElement>("#scopeSummary")!;
++      await act(async () => {
++        changeTextareaValue(summary, "first edit");
++        await new Promise((resolve) => window.setTimeout(resolve, 500));
++      });
++
++      await vi.waitFor(() => expect(container.textContent).toContain("first autosave failure"));
++      const dismissButton = container.querySelector<HTMLButtonElement>(
++        "button[aria-label='Dismiss scoping intake error']"
++      );
++      expect(dismissButton).not.toBeNull();
++
++      await act(async () => {
++        dismissButton!.dispatchEvent(new MouseEvent("click", { bubbles: true }));
++      });
++      expect(container.textContent).not.toContain("first autosave failure");
++
++      await act(async () => {
++        changeTextareaValue(summary, "second edit");
++        await new Promise((resolve) => window.setTimeout(resolve, 500));
++      });
++
++      await vi.waitFor(() => expect(container.textContent).toContain("second autosave failure"));
++    } finally {
++      cleanup();
++    }
++  });
++
++  it("does not display a Saved status when the initial load fails", async () => {
++    mocks.getDealScopingIntake.mockRejectedValueOnce(new Error("load failed"));
++
++    const { container, cleanup } = await renderWorkspace(
++      makeDeal({
++        sourceLeadId: null,
++        projectTypeId: null,
++      })
++    );
++
++    try {
++      await vi.waitFor(() => expect(container.textContent).toContain("Unable to load - retry"));
++      expect(container.textContent).not.toContain("Saved");
+       expect(container.textContent).toContain("Project Type");
+       expect(container.textContent).toContain("Scope Summary");
+     } finally {
+diff --git a/client/src/components/deals/deal-scoping-workspace.tsx b/client/src/components/deals/deal-scoping-workspace.tsx
+index f4e8e0f..d3f140d 100644
+--- a/client/src/components/deals/deal-scoping-workspace.tsx
++++ b/client/src/components/deals/deal-scoping-workspace.tsx
+@@ -358,6 +358,7 @@ export function DealScopingWorkspace({
+   const [loading, setLoading] = useState(true);
+   const [error, setError] = useState<string | null>(null);
+   const [dismissedError, setDismissedError] = useState(false);
++  const [initialLoadFailed, setInitialLoadFailed] = useState(false);
+   const [saveState, setSaveState] = useState<"idle" | "saving" | "saved" | "error">("idle");
+   const [uploadingKey, setUploadingKey] = useState<string | null>(null);
+   const [activatingService, setActivatingService] = useState(false);
+@@ -387,11 +388,42 @@ export function DealScopingWorkspace({
+     { completed: "Completed" },
+     "Pending"
+   );
++  const editingDisabled = initialLoadFailed;
++  const saveStatusLabel = initialLoadFailed
++    ? "Unable to load - retry"
++    : saveState === "saving"
++      ? "Saving..."
++      : saveState === "error"
++        ? "Save failed"
++        : hydrationCompleteRef.current
++          ? "Saved"
++          : "Loading";
++  const saveStatusDetail = initialLoadFailed
++    ? "Scoping intake did not load. Retry before editing."
++    : saveState === "saving"
++      ? "Autosaving changes..."
++      : saveState === "saved"
++        ? "All changes saved."
++        : saveState === "error"
++          ? "Autosave failed. Keep editing and retry."
++          : hydrationCompleteRef.current
++            ? `Last saved ${intake?.lastAutosavedAt ? new Date(intake.lastAutosavedAt).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" }) : "just now"}.`
++            : "Loading scoping intake...";
++
++  const showError = (message: string) => {
++    setError(message);
++    setDismissedError(false);
++  };
+ 
+-  const loadIntake = async () => {
+-    setLoading(true);
++  const clearError = () => {
+     setError(null);
+     setDismissedError(false);
++  };
++
++  const loadIntake = async () => {
++    setLoading(true);
++    clearError();
++    setInitialLoadFailed(false);
+     try {
+       const result = await getDealScopingIntake(deal.id);
+       const nextSectionData = buildWorkspaceSectionData(deal, result.intake, result.resolved);
+@@ -408,10 +440,13 @@ export function DealScopingWorkspace({
+         sectionData: nextSectionData,
+       });
+       hydrationCompleteRef.current = true;
++      setInitialLoadFailed(false);
+       setSaveState("idle");
+     } catch (err) {
+-      setError(err instanceof Error ? err.message : "Failed to load scoping intake");
+-      setDismissedError(false);
++      hydrationCompleteRef.current = false;
++      setInitialLoadFailed(true);
++      setSaveState("error");
++      showError(err instanceof Error ? err.message : "Failed to load scoping intake");
+     } finally {
+       setLoading(false);
+     }
+@@ -473,7 +508,7 @@ export function DealScopingWorkspace({
+         window.setTimeout(() => setSaveState("idle"), 1200);
+       } catch (err) {
+         setSaveState("error");
+-        setError(err instanceof Error ? err.message : "Autosave failed");
++        showError(err instanceof Error ? err.message : "Autosave failed");
+       }
+     }, 400);
+ 
+@@ -530,6 +565,7 @@ export function DealScopingWorkspace({
+   );
+ 
+   const updateField = (section: SectionKey, field: string, value: string) => {
++    if (editingDisabled) return;
+     setSectionData((current) =>
+       mergeSectionData(current, {
+         [section]: {
+@@ -538,11 +574,11 @@ export function DealScopingWorkspace({
+         },
+       })
+     );
+-    setError(null);
+-    setDismissedError(false);
++    clearError();
+   };
+ 
+   const handleLinkExisting = async (fileId: string, requirementKey: string) => {
++    if (editingDisabled) return;
+     try {
+       await linkExistingScopingAttachment(deal.id, {
+         fileId,
+@@ -557,6 +593,7 @@ export function DealScopingWorkspace({
+   };
+ 
+   const handlePropertyChange = async (propertyId: string) => {
++    if (editingDisabled) return;
+     setSaveState("saving");
+     try {
+       const result = await patchResolvedDealFields(deal.id, { propertyId });
+@@ -569,7 +606,7 @@ export function DealScopingWorkspace({
+       window.setTimeout(() => setSaveState("idle"), 1200);
+     } catch (err) {
+       setSaveState("error");
+-      setError(err instanceof Error ? err.message : "Failed to change property");
++      showError(err instanceof Error ? err.message : "Failed to change property");
+     }
+   };
+ 
+@@ -577,6 +614,7 @@ export function DealScopingWorkspace({
+     requirement: (typeof ATTACHMENT_REQUIREMENTS)[number],
+     fileList: FileList | null
+   ) => {
++    if (editingDisabled) return;
+     if (!fileList?.length) return;
+ 
+     setUploadingKey(requirement.key);
+@@ -603,6 +641,7 @@ export function DealScopingWorkspace({
+   };
+ 
+   const handleActivateService = async () => {
++    if (editingDisabled) return;
+     setActivatingService(true);
+     try {
+       await activateServiceHandoff(deal.id);
+@@ -622,11 +661,12 @@ export function DealScopingWorkspace({
+ 
+   return (
+     <div className="grid gap-4 lg:grid-cols-[260px_minmax(0,1fr)]">
+-      <div className="fixed right-4 top-4 z-40 rounded-full border bg-background px-3 py-1 text-xs font-medium shadow-sm">
+-        {saveState === "saving" && "Saving..."}
+-        {saveState === "saved" && "Saved"}
+-        {saveState === "error" && "Save failed"}
+-        {saveState === "idle" && "Saved"}
++      <div className={`fixed right-4 top-4 z-40 rounded-full border px-3 py-1 text-xs font-medium shadow-sm ${
++        initialLoadFailed
++          ? "border-red-200 bg-red-50 text-red-700"
++          : "bg-background"
++      }`}>
++        {saveStatusLabel}
+       </div>
+       <div className="space-y-4 lg:sticky lg:top-4 lg:self-start">
+         <Card size="sm">
+@@ -664,10 +704,7 @@ export function DealScopingWorkspace({
+             </div>
+ 
+             <div className="rounded-md bg-muted px-3 py-2 text-xs text-muted-foreground">
+-              {saveState === "saving" && "Autosaving changes..."}
+-              {saveState === "saved" && "All changes saved."}
+-              {saveState === "error" && "Autosave failed. Keep editing and retry."}
+-              {saveState === "idle" && `Last saved ${intake?.lastAutosavedAt ? new Date(intake.lastAutosavedAt).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" }) : "just now"}.`}
++              {saveStatusDetail}
+             </div>
+           </CardContent>
+         </Card>
+@@ -706,6 +743,17 @@ export function DealScopingWorkspace({
+             <div>
+               <div className="font-medium">Scoping intake needs attention</div>
+               <div className="mt-1">{error}</div>
++              {initialLoadFailed ? (
++                <Button
++                  type="button"
++                  variant="outline"
++                  size="sm"
++                  className="mt-3 border-red-200 bg-white text-red-700 hover:bg-red-100 hover:text-red-800"
++                  onClick={() => void loadIntake()}
++                >
++                  Retry loading scope
++                </Button>
++              ) : null}
+             </div>
+             <Button
+               type="button"
+@@ -742,8 +790,11 @@ export function DealScopingWorkspace({
+               <Label htmlFor="projectTypeId">Project Type</Label>
+               <Select
+                 value={projectTypeId ?? "__none__"}
+-                onValueChange={(value) => setProjectTypeId(value === "__none__" ? null : value)}
+-                disabled={projectTypeLocked}
++                onValueChange={(value) => {
++                  if (editingDisabled) return;
++                  setProjectTypeId(value === "__none__" ? null : value);
++                }}
++                disabled={editingDisabled || projectTypeLocked}
+               >
+                 <SelectTrigger id="projectTypeId">
+                   <SelectValue>{projectTypeLabel}</SelectValue>
+@@ -796,6 +847,7 @@ export function DealScopingWorkspace({
+                   id="bidDueDate"
+                   type="date"
+                   value={getSectionValue(sectionData, "projectOverview", "bidDueDate")}
++                  disabled={editingDisabled}
+                   onChange={(event) => updateField("projectOverview", "bidDueDate", event.target.value)}
+                 />
+               </div>
+@@ -815,6 +867,7 @@ export function DealScopingWorkspace({
+               <Label htmlFor="preBidMeetingCompleted">Pre-Bid Meeting Completed</Label>
+               <Select
+                 value={getSectionValue(sectionData, "opportunity", "preBidMeetingCompleted") || "__unset__"}
++                disabled={editingDisabled}
+                 onValueChange={(value) =>
+                   updateField(
+                     "opportunity",
+@@ -837,6 +890,7 @@ export function DealScopingWorkspace({
+               <Label htmlFor="siteVisitDecision">Site Visit Decision</Label>
+               <Select
+                 value={getSectionValue(sectionData, "opportunity", "siteVisitDecision") || "__unset__"}
++                disabled={editingDisabled}
+                 onValueChange={(value) =>
+                   updateField(
+                     "opportunity",
+@@ -860,6 +914,7 @@ export function DealScopingWorkspace({
+               <Label htmlFor="siteVisitCompleted">Site Visit Completed</Label>
+               <Select
+                 value={getSectionValue(sectionData, "opportunity", "siteVisitCompleted") || "__unset__"}
++                disabled={editingDisabled}
+                 onValueChange={(value) =>
+                   updateField(
+                     "opportunity",
+@@ -884,6 +939,7 @@ export function DealScopingWorkspace({
+                 id="estimatorConsultationNotes"
+                 rows={3}
+                 value={getSectionValue(sectionData, "opportunity", "estimatorConsultationNotes")}
++                disabled={editingDisabled}
+                 onChange={(event) =>
+                   updateField(
+                     "opportunity",
+@@ -925,6 +981,7 @@ export function DealScopingWorkspace({
+                 companyId={activeCompanyId}
+                 value={activePropertyId}
+                 onChange={handlePropertyChange}
++                disabled={editingDisabled}
+               />
+             </div>
+           </CardContent>
+@@ -942,6 +999,7 @@ export function DealScopingWorkspace({
+                 id="scopeSummary"
+                 rows={6}
+                 value={getSectionValue(sectionData, "scopeSummary", "summary")}
++                disabled={editingDisabled}
+                 onChange={(event) => updateField("scopeSummary", "summary", event.target.value)}
+                 placeholder="Describe the customer’s scope, constraints, and special conditions."
+               />
+@@ -983,7 +1041,11 @@ export function DealScopingWorkspace({
+                         {requirement.hint} Required category: {categoryLabel}.
+                       </p>
+                     </div>
+-                    <Label className="inline-flex cursor-pointer items-center gap-2 rounded-md border px-3 py-2 text-sm font-medium hover:bg-muted">
++                    <Label className={`inline-flex items-center gap-2 rounded-md border px-3 py-2 text-sm font-medium ${
++                      editingDisabled
++                        ? "cursor-not-allowed opacity-50"
++                        : "cursor-pointer hover:bg-muted"
++                    }`}>
+                       {uploadingKey === requirement.key ? (
+                         <Loader2 className="h-4 w-4 animate-spin" />
+                       ) : (
+@@ -994,6 +1056,7 @@ export function DealScopingWorkspace({
+                         type="file"
+                         multiple
+                         className="hidden"
++                        disabled={editingDisabled}
+                         onChange={(event) => {
+                           void handleUpload(requirement, event.target.files);
+                           event.currentTarget.value = "";
+@@ -1030,6 +1093,7 @@ export function DealScopingWorkspace({
+                               type="button"
+                               variant="outline"
+                               size="sm"
++                              disabled={editingDisabled}
+                               onClick={() => void handleLinkExisting(file.id, requirement.key)}
+                             >
+                               Link
+@@ -1059,7 +1123,7 @@ export function DealScopingWorkspace({
+             <CardContent className="flex flex-wrap items-center gap-3">
+               <Button
+                 type="button"
+-                disabled={activatingService || readiness?.status === "draft" || intake?.status === "activated"}
++                disabled={editingDisabled || activatingService || readiness?.status === "draft" || intake?.status === "activated"}
+                 onClick={() => void handleActivateService()}
+               >
+                 {activatingService && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
+diff --git a/client/src/components/properties/property-selector.tsx b/client/src/components/properties/property-selector.tsx
+index 8e9c3ff..e9c0355 100644
+--- a/client/src/components/properties/property-selector.tsx
++++ b/client/src/components/properties/property-selector.tsx
+@@ -12,6 +12,7 @@ interface PropertySelectorProps {
+   onChange: (propertyId: string) => void;
+   required?: boolean;
+   requireLeadCreateFields?: boolean;
++  disabled?: boolean;
+ }
+ 
+ export async function resolveSelectedPropertyLabel(
+@@ -35,6 +36,7 @@ export function PropertySelector({
+   onChange,
+   required,
+   requireLeadCreateFields,
++  disabled = false,
+ }: PropertySelectorProps) {
+   const [open, setOpen] = useState(false);
+   const [query, setQuery] = useState("");
+@@ -73,7 +75,7 @@ export function PropertySelector({
+         variant="outline"
+         className="w-full justify-between font-normal"
+         onClick={() => setOpen((prev) => !prev)}
+-        disabled={!companyId}
++        disabled={disabled || !companyId}
+       >
+         <span className={selectedLabel ? "text-foreground" : "text-muted-foreground"}>
+           {selectedLabel ?? (!companyId ? "Select company first" : required ? "Select property *" : "Select property")}
+@@ -81,7 +83,7 @@ export function PropertySelector({
+         <ChevronsUpDown className="h-4 w-4 opacity-50" />
+       </Button>
+ 
+-      {open && companyId && (
++      {open && companyId && !disabled && (
+         <div className="space-y-2 rounded-md border bg-background p-2 shadow-sm">
+           <Input
+             autoFocus

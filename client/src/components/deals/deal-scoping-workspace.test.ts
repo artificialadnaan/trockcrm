@@ -61,8 +61,8 @@ vi.mock("@/lib/auth", () => ({
 }));
 
 vi.mock("@/components/properties/property-selector", () => ({
-  PropertySelector: ({ value }: { value?: string | null }) => (
-    React.createElement("div", { "data-testid": "property-selector" }, value ?? "none")
+  PropertySelector: ({ value, disabled }: { value?: string | null; disabled?: boolean }) => (
+    React.createElement("button", { type: "button", disabled, "data-testid": "property-selector" }, value ?? "none")
   ),
 }));
 
@@ -162,6 +162,43 @@ function makeIntake(overrides: Partial<DealScopingIntake> = {}): DealScopingInta
     updatedAt: "2026-04-27T00:00:00.000Z",
     ...overrides,
   };
+}
+
+function makeReadiness() {
+  return {
+    status: "draft" as const,
+    errors: { sections: {}, attachments: {} },
+    completionState: {
+      projectOverview: { isComplete: false, missingFields: [], missingAttachments: [] },
+      opportunity: { isComplete: false, missingFields: [], missingAttachments: [] },
+      propertyDetails: { isComplete: false, missingFields: [], missingAttachments: [] },
+      scopeSummary: { isComplete: false, missingFields: [], missingAttachments: [] },
+      attachments: { isComplete: false, missingFields: [], missingAttachments: [] },
+    },
+    requiredSections: [],
+    requiredAttachmentKeys: [],
+    attachmentRequirements: [],
+  };
+}
+
+function makeScopingResponse(overrides: {
+  intake?: Partial<DealScopingIntake>;
+  resolved?: Partial<DealResolvedFields>;
+} = {}) {
+  return {
+    intake: makeIntake(overrides.intake),
+    resolved: makeResolved(overrides.resolved),
+    readiness: makeReadiness(),
+  };
+}
+
+function changeTextareaValue(element: HTMLTextAreaElement, value: string) {
+  const valueSetter = Object.getOwnPropertyDescriptor(
+    HTMLTextAreaElement.prototype,
+    "value"
+  )?.set;
+  valueSetter?.call(element, value);
+  element.dispatchEvent(new Event("input", { bubbles: true }));
 }
 
 async function renderWorkspace(deal: DealDetail) {
@@ -316,7 +353,7 @@ describe("DealScopingWorkspace lineage routing helpers", () => {
 });
 
 describe("DealScopingWorkspace load failures", () => {
-  it("renders the editable scope form when the initial scoping intake request fails", async () => {
+  it("disables the scope form and prevents saves when the initial scoping intake request fails", async () => {
     mocks.getDealScopingIntake.mockRejectedValueOnce(
       new Error("projectType cannot be cleared after Opportunity")
     );
@@ -331,6 +368,143 @@ describe("DealScopingWorkspace load failures", () => {
     try {
       await vi.waitFor(() => expect(container.textContent).toContain("Scoping Workspace"));
       expect(container.textContent).toContain("projectType cannot be cleared after Opportunity");
+      expect(container.textContent).toContain("Retry loading scope");
+      expect(container.textContent).toContain("Unable to load - retry");
+      expect(container.textContent).not.toContain("Saved");
+
+      const summary = container.querySelector<HTMLTextAreaElement>("#scopeSummary");
+      expect(summary).not.toBeNull();
+      expect(summary?.disabled).toBe(true);
+
+      await act(async () => {
+        changeTextareaValue(summary!, "this must not autosave");
+        await new Promise((resolve) => window.setTimeout(resolve, 500));
+      });
+
+      expect(mocks.patchDealScopingIntake).not.toHaveBeenCalled();
+      expect(mocks.patchResolvedDealFields).not.toHaveBeenCalled();
+    } finally {
+      cleanup();
+    }
+  });
+
+  it("retries a failed initial load, enables editing after hydration, and autosaves later edits", async () => {
+    mocks.getDealScopingIntake
+      .mockRejectedValueOnce(new Error("temporary load failure"))
+      .mockResolvedValueOnce(makeScopingResponse({
+        intake: { projectTypeId: "project-type-1" },
+        resolved: { projectTypeId: "project-type-1" },
+      }));
+    mocks.patchDealScopingIntake.mockResolvedValue(makeScopingResponse({
+      intake: {
+        projectTypeId: "project-type-1",
+        sectionData: { scopeSummary: { summary: "retry saved value" } },
+      },
+      resolved: { projectTypeId: "project-type-1" },
+    }));
+
+    const { container, cleanup } = await renderWorkspace(
+      makeDeal({
+        sourceLeadId: null,
+        projectTypeId: "project-type-1",
+      })
+    );
+
+    try {
+      await vi.waitFor(() => expect(container.textContent).toContain("temporary load failure"));
+      const disabledSummary = container.querySelector<HTMLTextAreaElement>("#scopeSummary");
+      expect(disabledSummary?.disabled).toBe(true);
+
+      const retryButton = Array.from(container.querySelectorAll("button")).find(
+        (button) => button.textContent?.includes("Retry loading scope")
+      );
+      expect(retryButton).toBeDefined();
+
+      await act(async () => {
+        retryButton!.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+        await Promise.resolve();
+      });
+
+      await vi.waitFor(() => {
+        const summary = container.querySelector<HTMLTextAreaElement>("#scopeSummary");
+        expect(summary?.disabled).toBe(false);
+      });
+
+      const summary = container.querySelector<HTMLTextAreaElement>("#scopeSummary")!;
+      await act(async () => {
+        changeTextareaValue(summary, "retry saved value");
+        await new Promise((resolve) => window.setTimeout(resolve, 500));
+      });
+
+      await vi.waitFor(() => expect(mocks.patchDealScopingIntake).toHaveBeenCalled());
+    } finally {
+      cleanup();
+    }
+  });
+
+  it("re-shows the error banner when a new autosave error occurs after dismissal", async () => {
+    mocks.getDealScopingIntake.mockResolvedValueOnce(makeScopingResponse({
+      intake: { projectTypeId: "project-type-1" },
+      resolved: { projectTypeId: "project-type-1" },
+    }));
+    mocks.patchDealScopingIntake
+      .mockRejectedValueOnce(new Error("first autosave failure"))
+      .mockRejectedValueOnce(new Error("second autosave failure"));
+
+    const { container, cleanup } = await renderWorkspace(
+      makeDeal({
+        sourceLeadId: null,
+        projectTypeId: "project-type-1",
+      })
+    );
+
+    try {
+      await vi.waitFor(() => {
+        const summary = container.querySelector<HTMLTextAreaElement>("#scopeSummary");
+        expect(summary?.disabled).toBe(false);
+      });
+
+      const summary = container.querySelector<HTMLTextAreaElement>("#scopeSummary")!;
+      await act(async () => {
+        changeTextareaValue(summary, "first edit");
+        await new Promise((resolve) => window.setTimeout(resolve, 500));
+      });
+
+      await vi.waitFor(() => expect(container.textContent).toContain("first autosave failure"));
+      const dismissButton = container.querySelector<HTMLButtonElement>(
+        "button[aria-label='Dismiss scoping intake error']"
+      );
+      expect(dismissButton).not.toBeNull();
+
+      await act(async () => {
+        dismissButton!.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+      });
+      expect(container.textContent).not.toContain("first autosave failure");
+
+      await act(async () => {
+        changeTextareaValue(summary, "second edit");
+        await new Promise((resolve) => window.setTimeout(resolve, 500));
+      });
+
+      await vi.waitFor(() => expect(container.textContent).toContain("second autosave failure"));
+    } finally {
+      cleanup();
+    }
+  });
+
+  it("does not display a Saved status when the initial load fails", async () => {
+    mocks.getDealScopingIntake.mockRejectedValueOnce(new Error("load failed"));
+
+    const { container, cleanup } = await renderWorkspace(
+      makeDeal({
+        sourceLeadId: null,
+        projectTypeId: null,
+      })
+    );
+
+    try {
+      await vi.waitFor(() => expect(container.textContent).toContain("Unable to load - retry"));
+      expect(container.textContent).not.toContain("Saved");
       expect(container.textContent).toContain("Project Type");
       expect(container.textContent).toContain("Scope Summary");
     } finally {
