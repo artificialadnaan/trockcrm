@@ -8,11 +8,12 @@ import {
 } from "./service.js";
 
 const router = Router();
+type PipelineStageFamilyFilter = WorkflowFamily | "deal";
 
 // GET /api/pipeline/stages — all pipeline stages (ordered)
 router.get("/stages", async (req, res, next) => {
   try {
-    const workflowFamily = req.query.workflowFamily as WorkflowFamily | undefined;
+    const workflowFamily = req.query.workflowFamily as PipelineStageFamilyFilter | undefined;
     const stages = await getAllStages(workflowFamily);
     await req.commitTransaction!();
     res.json({ stages });

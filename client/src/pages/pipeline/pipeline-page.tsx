@@ -522,10 +522,12 @@ export function PipelinePage() {
       <DealsListSection
         enableDateFilter
         enableExport
+        excludeStageSlugs={showDd ? [] : ["dd", "due_diligence"]}
         visibleStages={columns.map((column) => ({
           id: column.stage.id,
           slug: column.stage.slug,
           name: column.stage.name,
+          isTerminal: column.stage.isTerminal,
         }))}
       />
 

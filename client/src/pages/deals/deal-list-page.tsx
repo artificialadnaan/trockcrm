@@ -1,7 +1,8 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
-import { ArrowRight, Briefcase, Plus } from "lucide-react";
+import { ArrowRight, Briefcase, Plus, Search } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
 import { MetricCard } from "@/components/shared/metric-card";
 import { ScopeToggle, type ScopeToggleOption } from "@/components/shared/scope-toggle";
 import { USD_COMPACT } from "@/components/shared/formatters";
@@ -37,6 +38,14 @@ const STAGE_SLA_DAYS: Record<string, number> = {
   won: 0,
   lost: 0,
 };
+
+const DEAL_BOARD_STAGE_SLUGS = [
+  "opportunity",
+  "estimating",
+  "service_estimating",
+  "estimate_under_review",
+  "estimate_sent_to_client",
+] as const;
 
 function getScope(searchParams: URLSearchParams, role: string | undefined): PipelineScope {
   if (role === "rep") return "mine";
@@ -162,15 +171,44 @@ export function DealListPage() {
 function DealListPageContent({ role }: { role: string }) {
   const navigate = useNavigate();
   const [searchParams, setSearchParams] = useSearchParams();
+  const [search, setSearch] = useState("");
   const scope = getScope(searchParams, role);
   const currentYear = useCurrentCalendarYear();
   const ytdTerminalFilters = useMemo(() => getYearToDateTerminalFilters(), [currentYear]);
   const { board, loading, error } = useDealBoard(scope, true, ytdTerminalFilters);
-  const { stages } = usePipelineStages();
+  const { stages } = usePipelineStages("deal");
 
   const columns = useMemo(
-    () => buildCanonicalDealBoardColumns(board?.columns, stages),
-    [board?.columns, stages]
+    () => {
+      const searchTerm = search.trim().toLowerCase();
+      return buildCanonicalDealBoardColumns(board?.columns, stages)
+        .filter((column) => DEAL_BOARD_STAGE_SLUGS.includes(column.stage.slug as (typeof DEAL_BOARD_STAGE_SLUGS)[number]))
+        .map((column) => {
+          if (!searchTerm) return column;
+          const cards = column.cards.filter((deal) => {
+            const haystack = [
+              deal.name,
+              deal.dealNumber,
+              deal.projectNumber,
+              deal.companyName,
+              deal.propertyCity,
+              deal.propertyState,
+              deal.assignedRepName,
+            ]
+              .filter(Boolean)
+              .join(" ")
+              .toLowerCase();
+            return haystack.includes(searchTerm);
+          });
+          return {
+            ...column,
+            cards,
+            count: cards.length,
+            totalValue: cards.reduce((sum, deal) => sum + moneyValue(deal), 0),
+          };
+        });
+    },
+    [board?.columns, search, stages]
   );
   const totalCount = columns.reduce((sum, column) => sum + column.count, 0);
   const totalValue = columns.reduce(
@@ -230,7 +268,7 @@ function DealListPageContent({ role }: { role: string }) {
       observer.disconnect();
       window.removeEventListener("resize", sync);
     };
-  }, [columns.length]);
+  }, [columns.length, loading]);
 
   const handleMainScroll = () => {
     if (isSyncingScrollRef.current) {
@@ -309,6 +347,19 @@ function DealListPageContent({ role }: { role: string }) {
           accent="red"
         />
       </div>
+
+      <label className="block">
+        <span className="sr-only">Search deals</span>
+        <div className="relative max-w-xl">
+          <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" />
+          <Input
+            value={search}
+            onChange={(event) => setSearch(event.target.value)}
+            placeholder="Search deals"
+            className="pl-9"
+          />
+        </div>
+      </label>
 
       {error ? (
         <div className="rounded-lg border border-brand-red/20 bg-brand-red/5 p-4 text-sm font-semibold text-brand-red">

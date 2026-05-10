@@ -124,7 +124,27 @@ describe("pipeline list/export filtering", () => {
     expect(terminalStageIds).toEqual(["stage-won"]);
   });
 
-  it("does not enable the list query while pipeline stage metadata is unresolved", () => {
+  it("keeps non-terminal list selections enabled while pipeline stage metadata is unresolved", () => {
+    expect(
+      getPipelineListQueryState({
+        selectedStageIds: ["stage-estimating"],
+        terminalStageIds: [],
+        stagesLoading: true,
+        stagesError: null,
+        selectedStageStatusKnown: true,
+      })
+    ).toMatchObject({ enabled: true, isActive: true, inactiveStageIds: [] });
+
+    expect(
+      getPipelineListQueryState({
+        selectedStageIds: ["stage-won"],
+        terminalStageIds: [],
+        stagesLoading: true,
+        stagesError: null,
+        selectedStageStatusKnown: false,
+      })
+    ).toMatchObject({ enabled: false, isActive: "pipeline", inactiveStageIds: [] });
+
     expect(
       getPipelineListQueryState({
         selectedStageIds: [],

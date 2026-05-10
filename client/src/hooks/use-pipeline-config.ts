@@ -44,6 +44,7 @@ export interface Region {
 }
 
 type ApiFetcher = typeof api;
+type PipelineStageFamilyFilter = WorkflowFamily | "deal";
 
 function createCachedLoader<T>(load: (fetcher: ApiFetcher) => Promise<T>) {
   let cachedValue: T | null = null;
@@ -74,7 +75,7 @@ function createCachedLoader<T>(load: (fetcher: ApiFetcher) => Promise<T>) {
 
 const stageLoaders = new Map<string, ReturnType<typeof createCachedLoader<PipelineStage[]>>>();
 
-function getStageLoader(workflowFamily?: WorkflowFamily) {
+function getStageLoader(workflowFamily?: PipelineStageFamilyFilter) {
   const key = workflowFamily ?? "all";
   const cached = stageLoaders.get(key);
   if (cached) {
@@ -121,7 +122,7 @@ export function clearPipelineConfigCache() {
 }
 
 export function loadPipelineStages(options?: {
-  workflowFamily?: WorkflowFamily;
+  workflowFamily?: PipelineStageFamilyFilter;
   fetcher?: ApiFetcher;
 }) {
   return getStageLoader(options?.workflowFamily).read(options?.fetcher);
@@ -139,7 +140,7 @@ export function loadRegions(fetcher?: ApiFetcher) {
   return regionsLoader.read(fetcher);
 }
 
-export function usePipelineStages(workflowFamily?: WorkflowFamily) {
+export function usePipelineStages(workflowFamily?: PipelineStageFamilyFilter) {
   const [stages, setStages] = useState<PipelineStage[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);

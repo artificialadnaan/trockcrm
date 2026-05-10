@@ -223,6 +223,7 @@ describe("DealListPage", () => {
       lost: { preset: "custom", customStart: "2026-01-01" },
     });
     expect(html).toContain("Read-only pipeline board");
+    expect(html).toContain('placeholder="Search deals"');
     expect(html).toContain("Opportunity");
     expect(html).toContain("Estimating");
     expect(html).toContain("Service Estimating");
@@ -479,5 +480,14 @@ describe("DealListPage", () => {
     renderPage("/deals?scope=team", "director");
 
     expect(mocks.useDealsMock).not.toHaveBeenCalled();
+  });
+
+  it("reflects the team scope query param in the scope toggle", () => {
+    const html = renderPage("/deals?scope=team", "director");
+
+    expect(mocks.useDealBoardMock).toHaveBeenLastCalledWith("team", true, expect.any(Object));
+    expect(html).toContain('aria-pressed="true">Team');
+    expect(html).toContain('aria-pressed="false">Mine');
+    expect(html).toContain('aria-pressed="false">All');
   });
 });

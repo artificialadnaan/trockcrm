@@ -1,4 +1,4 @@
-import { and, asc, eq } from "drizzle-orm";
+import { and, asc, eq, inArray } from "drizzle-orm";
 import {
   pipelineStageConfig,
   lostDealReasons,
@@ -8,9 +8,11 @@ import {
 import type { WorkflowFamily } from "@trock-crm/shared/types";
 import { db } from "../../db.js";
 
+type PipelineStageFamilyFilter = WorkflowFamily | "deal";
+
 function buildStageWhere(
   idOrSlug: { id?: string; slug?: string },
-  workflowFamily?: WorkflowFamily
+  workflowFamily?: PipelineStageFamilyFilter
 ) {
   const conditions = [];
 
@@ -22,14 +24,16 @@ function buildStageWhere(
     conditions.push(eq(pipelineStageConfig.slug, idOrSlug.slug));
   }
 
-  if (workflowFamily) {
+  if (workflowFamily === "deal") {
+    conditions.push(inArray(pipelineStageConfig.workflowFamily, ["standard_deal", "service_deal"]));
+  } else if (workflowFamily) {
     conditions.push(eq(pipelineStageConfig.workflowFamily, workflowFamily));
   }
 
   return conditions.length > 0 ? and(...conditions) : undefined;
 }
 
-export async function getAllStages(workflowFamily?: WorkflowFamily) {
+export async function getAllStages(workflowFamily?: PipelineStageFamilyFilter) {
   return db
     .select()
     .from(pipelineStageConfig)

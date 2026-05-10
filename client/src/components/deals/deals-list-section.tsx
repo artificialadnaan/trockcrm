@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { toast } from "sonner";
 import { Download, Search } from "lucide-react";
@@ -49,11 +49,19 @@ interface DealsListSectionProps {
   scope?: "mine" | "team" | "all";
   enableDateFilter?: boolean;
   enableExport?: boolean;
-  visibleStages?: Array<Pick<PipelineStage, "id" | "slug" | "name">>;
+  visibleStages?: Array<Pick<PipelineStage, "id" | "slug" | "name"> & Partial<Pick<PipelineStage, "isTerminal" | "displayOrder">>>;
+  excludeStageSlugs?: string[];
   eyebrow?: string;
   title?: string;
   subtitle?: string;
   pageSize?: number;
+}
+
+interface DealStageFilterOption {
+  ids: string[];
+  slug: string;
+  name: string;
+  isTerminal?: boolean;
 }
 
 function dateRangeFromTerminalFilter(filter: TerminalDateFilter) {
@@ -105,8 +113,15 @@ export function getPipelineListQueryState(input: {
   terminalStageIds: string[];
   stagesLoading: boolean;
   stagesError: string | null;
+  selectedStageStatusKnown?: boolean;
 }) {
-  if (input.stagesLoading || input.stagesError) {
+  const hasSelectedStages = input.selectedStageIds.length > 0;
+  const hasSelectedTerminalStage = input.selectedStageIds.some((id) => input.terminalStageIds.includes(id));
+  const selectedStageStatusKnown = input.selectedStageStatusKnown ?? true;
+  if (
+    (input.stagesLoading || input.stagesError) &&
+    (!hasSelectedStages || hasSelectedTerminalStage || !selectedStageStatusKnown)
+  ) {
     return {
       enabled: false,
       isActive: "pipeline" as DealListActiveFilter,
@@ -129,6 +144,67 @@ export function getPipelineListQueryState(input: {
 
 export function buildStageNameById(stages: Array<Pick<PipelineStage, "id" | "name">>) {
   return new Map(stages.map((stage) => [stage.id, stage.name]));
+}
+
+function getStageRank(slug: string) {
+  const index = DEAL_STAGE_ORDER.indexOf(slug);
+  return index === -1 ? 999 : index;
+}
+
+export function buildDealStageFilterOptions(
+  sourceStages: Array<Pick<PipelineStage, "id" | "slug" | "name"> & Partial<Pick<PipelineStage, "displayOrder" | "isTerminal">>>,
+  excludeStageSlugs: string[] = []
+): DealStageFilterOption[] {
+  const excluded = new Set(excludeStageSlugs);
+  const grouped = new Map<string, DealStageFilterOption & { displayOrder: number }>();
+  const sortedStages = [...sourceStages]
+    .filter((stage) => !excluded.has(stage.slug))
+    .sort((left, right) => {
+      const leftRank = getStageRank(left.slug);
+      const rightRank = getStageRank(right.slug);
+      if (leftRank !== rightRank) return leftRank - rightRank;
+      return (left.displayOrder ?? 0) - (right.displayOrder ?? 0);
+    });
+
+  for (const stage of sortedStages) {
+    const existing = grouped.get(stage.slug);
+    if (existing) {
+      existing.ids.push(stage.id);
+      existing.isTerminal = existing.isTerminal || stage.isTerminal;
+      continue;
+    }
+    grouped.set(stage.slug, {
+      ids: [stage.id],
+      slug: stage.slug,
+      name: stage.name,
+      isTerminal: stage.isTerminal,
+      displayOrder: stage.displayOrder ?? 0,
+    });
+  }
+
+  return Array.from(grouped.values()).map(({ displayOrder: _displayOrder, ...option }) => option);
+}
+
+export function getSelectedDealStageIds(stageSlugs: string[], options: DealStageFilterOption[]) {
+  const selected = new Set(stageSlugs);
+  return options.flatMap((stage) => (selected.has(stage.slug) ? stage.ids : []));
+}
+
+export function getVisibleListTerminalStageIds(
+  stages: Array<Pick<PipelineStage, "id" | "isTerminal">>,
+  stageFilterOptions: DealStageFilterOption[]
+) {
+  return Array.from(
+    new Set([
+      ...getVisibleTerminalStageIds(
+        stages,
+        stageFilterOptions.flatMap((stage) => stage.ids.map((id) => ({ id, slug: stage.slug, name: stage.name })))
+      ),
+      ...stageFilterOptions
+        .filter((stage) => stage.isTerminal === true)
+        .flatMap((stage) => stage.ids),
+    ])
+  );
 }
 
 export function buildDealListParams(input: {
@@ -202,6 +278,7 @@ export function DealsListSection({
   enableDateFilter = false,
   enableExport = false,
   visibleStages,
+  excludeStageSlugs = [],
   eyebrow = "Deal list",
   title = "Pipeline records",
   subtitle = "Filter and scan deals without changing the kanban above.",
@@ -215,38 +292,16 @@ export function DealsListSection({
   const [page, setPage] = useState(1);
   const [sort, setSort] = useState<SortState>({ key: "updated_at", dir: "desc" });
 
-  const { stages, loading: stagesLoading, error: stagesError } = usePipelineStages();
+  const { stages, loading: stagesLoading, error: stagesError } = usePipelineStages("deal");
   const { assignees } = useTaskAssignees();
 
   const stageFilterOptions = useMemo(() => {
     const sourceStages = visibleStages ?? stages.filter((stage) => stage.isActivePipeline !== false);
-    const sortedStages = [...sourceStages].sort((left, right) => {
-      const leftIndex = DEAL_STAGE_ORDER.indexOf(left.slug);
-      const rightIndex = DEAL_STAGE_ORDER.indexOf(right.slug);
-      const leftRank = leftIndex === -1 ? 999 : leftIndex;
-      const rightRank = rightIndex === -1 ? 999 : rightIndex;
-      if (leftRank !== rightRank) return leftRank - rightRank;
-      const leftDisplayOrder =
-        "displayOrder" in left && typeof left.displayOrder === "number" ? left.displayOrder : 0;
-      const rightDisplayOrder =
-        "displayOrder" in right && typeof right.displayOrder === "number" ? right.displayOrder : 0;
-      return leftDisplayOrder - rightDisplayOrder;
-    });
-    const seen = new Set<string>();
-    return sortedStages
-      .filter((stage) => {
-        if (seen.has(stage.slug)) return false;
-        seen.add(stage.slug);
-        return true;
-      })
-      .map((stage) => ({ id: stage.id, slug: stage.slug, name: stage.name }));
-  }, [stages, visibleStages]);
+    return buildDealStageFilterOptions(sourceStages, excludeStageSlugs);
+  }, [excludeStageSlugs, stages, visibleStages]);
 
   const selectedStageIds = useMemo(
-    () =>
-      stageFilterOptions
-        .filter((stage) => stageSlugs.includes(stage.slug))
-        .map((stage) => stage.id),
+    () => getSelectedDealStageIds(stageSlugs, stageFilterOptions),
     [stageSlugs, stageFilterOptions]
   );
   const dateRange = useMemo(
@@ -255,7 +310,7 @@ export function DealsListSection({
   );
 
   const terminalStageIds = useMemo(
-    () => getVisibleTerminalStageIds(stages, stageFilterOptions),
+    () => getVisibleListTerminalStageIds(stages, stageFilterOptions),
     [stages, stageFilterOptions]
   );
   const listQueryState = useMemo(
@@ -265,8 +320,11 @@ export function DealsListSection({
         terminalStageIds,
         stagesLoading,
         stagesError,
+        selectedStageStatusKnown: selectedStageIds.every((id) =>
+          stageFilterOptions.some((stage) => stage.ids.includes(id) && typeof stage.isTerminal === "boolean")
+        ),
       }),
-    [selectedStageIds, stagesError, stagesLoading, terminalStageIds]
+    [selectedStageIds, stageFilterOptions, stagesError, stagesLoading, terminalStageIds]
   );
   const isActiveFilter = listQueryState.isActive;
   const inactiveStageIds = listQueryState.inactiveStageIds;
@@ -296,6 +354,10 @@ export function DealsListSection({
     () => new Map(assignees.map((assignee) => [assignee.id, assignee.displayName])),
     [assignees]
   );
+
+  useEffect(() => {
+    setPage(1);
+  }, [scope]);
 
   const toggleStage = (slug: string) => {
     setPage(1);
@@ -556,7 +618,7 @@ export function DealsListSection({
           <div className="rounded-lg border border-brand-red/20 bg-brand-red/5 p-4 text-sm font-semibold text-brand-red">
             {error}
           </div>
-        ) : stagesError ? (
+        ) : stagesError && !listQueryState.enabled ? (
           <div className="rounded-lg border border-brand-red/20 bg-brand-red/5 p-4 text-sm font-semibold text-brand-red">
             Pipeline stage metadata failed to load.
           </div>

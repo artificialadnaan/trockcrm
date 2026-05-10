@@ -1589,6 +1589,18 @@ export async function getDealsForPipeline(
   const terminalFilters = resolvePipelineTerminalDateFilters(filters);
   const canonicalWonStageId = stages.find((stage) => stage.slug === "won" && stage.isActivePipeline)?.id ?? null;
   const canonicalLostStageId = stages.find((stage) => stage.slug === "lost" && stage.isActivePipeline)?.id ?? null;
+  const wonStageIds = stages
+    .filter(
+      (stage) =>
+        WON_TERMINAL_STAGE_SLUGS.includes(stage.slug as (typeof WON_TERMINAL_STAGE_SLUGS)[number])
+    )
+    .map((stage) => stage.id);
+  const lostStageIds = stages
+    .filter(
+      (stage) =>
+        LOST_TERMINAL_STAGE_SLUGS.includes(stage.slug as (typeof LOST_TERMINAL_STAGE_SLUGS)[number])
+    )
+    .map((stage) => stage.id);
   // Prefer the explicit stage-history entry timestamp. Older migrated rows may
   // only have terminal marker fields, so fall back to contract/lost dates before
   // using the current stage_entered_at value.
@@ -1638,7 +1650,7 @@ export async function getDealsForPipeline(
   await Promise.all(responseStages.map(async (stage) => {
     const stageConditions: any[] = [];
     if (WON_TERMINAL_STAGE_SLUGS.includes(stage.slug as (typeof WON_TERMINAL_STAGE_SLUGS)[number])) {
-      stageConditions.push(eq(deals.stageId, canonicalWonStageId ?? stage.id));
+      stageConditions.push(canonicalWonStageId ? inArray(deals.stageId, wonStageIds) : eq(deals.stageId, stage.id));
       if (terminalFilters.won.since) {
         stageConditions.push(sql`${wonEnteredAt} >= ${terminalFilters.won.since}`);
       }
@@ -1646,7 +1658,7 @@ export async function getDealsForPipeline(
         stageConditions.push(sql`${wonEnteredAt} < ${addUtcDays(terminalFilters.won.until, 1)}`);
       }
     } else if (LOST_TERMINAL_STAGE_SLUGS.includes(stage.slug as (typeof LOST_TERMINAL_STAGE_SLUGS)[number])) {
-      stageConditions.push(eq(deals.stageId, canonicalLostStageId ?? stage.id));
+      stageConditions.push(canonicalLostStageId ? inArray(deals.stageId, lostStageIds) : eq(deals.stageId, stage.id));
       if (terminalFilters.lost.since) {
         stageConditions.push(sql`${lostEnteredAt} >= ${terminalFilters.lost.since}`);
       }
