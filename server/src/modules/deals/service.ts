@@ -242,7 +242,7 @@ function resolveIntendedProjectNumberFromCode(
   }
 
   const [, officeCode, julianDate, suffix] = match;
-  const intended = `${officeCode.toLowerCase()}-${projectTypeCode}-${julianDate}-${suffix.toLowerCase()}`;
+  const intended = `${officeCode.toUpperCase()}-${projectTypeCode}-${julianDate}-${suffix.toLowerCase()}`;
   return intended === issuedProjectNumber ? null : intended;
 }
 

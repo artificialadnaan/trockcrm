@@ -1786,7 +1786,7 @@ describe("Lead Conversion Service", () => {
       createDeal: async (_tenantDb, input) => {
         const deal = {
           id: "deal-1",
-          dealNumber: "dfw-3-10526-aa",
+          dealNumber: "DFW-3-10526-aa",
           workflowRoute: input.workflowRoute ?? "normal",
           officeCode: input.officeCode,
           primaryContactId: input.primaryContactId ?? null,
@@ -1811,7 +1811,7 @@ describe("Lead Conversion Service", () => {
     });
 
     expect(result.deal.id).toBe("deal-1");
-    expect(result.deal.dealNumber).toMatch(/^dfw-3-\d{5}-[a-z]+$/);
+    expect(result.deal.dealNumber).toMatch(/^DFW-3-\d{5}-[a-z]+$/);
     expect(result.deal.officeCode).toBe("dfw");
     expect(result.deal.sourceLeadId).toBe("lead-1");
     expect(result.deal.workflowRoute).toBe("normal");
@@ -1858,7 +1858,7 @@ describe("Lead Conversion Service", () => {
         createDealInputs.push({ projectTypeId: input.projectTypeId ?? null });
         const deal = {
           id: "deal-1",
-          dealNumber: "dfw-1-10526-aa",
+          dealNumber: "DFW-1-10526-aa",
           workflowRoute: input.workflowRoute ?? "normal",
           primaryContactId: input.primaryContactId ?? null,
           companyId: input.companyId ?? null,
@@ -1917,7 +1917,7 @@ describe("Lead Conversion Service", () => {
       getStageBySlug: pipelineMocks.getStageBySlug as never,
       createDeal: async (_tenantDb, input) => ({
         id: "deal-1",
-        dealNumber: "dfw-2-10526-aa",
+        dealNumber: "DFW-2-10526-aa",
         workflowRoute: input.workflowRoute ?? "normal",
         primaryContactId: input.primaryContactId ?? null,
         companyId: input.companyId ?? null,
@@ -1973,7 +1973,7 @@ describe("Lead Conversion Service", () => {
       getStageBySlug: pipelineMocks.getStageBySlug as never,
       createDeal: async (_tenantDb, input) => ({
         id: "deal-1",
-        dealNumber: "dfw-1-10526-aa",
+        dealNumber: "DFW-1-10526-aa",
         workflowRoute: input.workflowRoute ?? "normal",
         primaryContactId: input.primaryContactId ?? null,
         companyId: input.companyId ?? null,
@@ -2032,7 +2032,7 @@ describe("Lead Conversion Service", () => {
       createDeal: async (_tenantDb, input) => {
         const deal = {
           id: "deal-1",
-          dealNumber: "dfw-3-10526-aa",
+          dealNumber: "DFW-3-10526-aa",
           workflowRoute: input.workflowRoute ?? "normal",
           officeCode: input.officeCode,
           primaryContactId: input.primaryContactId ?? null,
@@ -2134,7 +2134,7 @@ describe("Lead Conversion Service", () => {
       createDeal: async (_tenantDb, input) => {
         const deal = {
           id: "deal-1",
-          dealNumber: "dfw-3-10526-aa",
+          dealNumber: "DFW-3-10526-aa",
           workflowRoute: input.workflowRoute ?? "normal",
           officeCode: input.officeCode,
           primaryContactId: input.primaryContactId ?? null,
