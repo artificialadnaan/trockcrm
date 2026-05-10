@@ -9,6 +9,7 @@ import {
   Loader2,
   Upload,
   Wrench,
+  X,
 } from "lucide-react";
 import { toast } from "sonner";
 import { Badge } from "@/components/ui/badge";
@@ -356,6 +357,7 @@ export function DealScopingWorkspace({
   );
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [dismissedError, setDismissedError] = useState(false);
   const [saveState, setSaveState] = useState<"idle" | "saving" | "saved" | "error">("idle");
   const [uploadingKey, setUploadingKey] = useState<string | null>(null);
   const [activatingService, setActivatingService] = useState(false);
@@ -389,6 +391,7 @@ export function DealScopingWorkspace({
   const loadIntake = async () => {
     setLoading(true);
     setError(null);
+    setDismissedError(false);
     try {
       const result = await getDealScopingIntake(deal.id);
       const nextSectionData = buildWorkspaceSectionData(deal, result.intake, result.resolved);
@@ -408,6 +411,7 @@ export function DealScopingWorkspace({
       setSaveState("idle");
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to load scoping intake");
+      setDismissedError(false);
     } finally {
       setLoading(false);
     }
@@ -535,6 +539,7 @@ export function DealScopingWorkspace({
       })
     );
     setError(null);
+    setDismissedError(false);
   };
 
   const handleLinkExisting = async (fileId: string, requirementKey: string) => {
@@ -613,16 +618,6 @@ export function DealScopingWorkspace({
 
   if (loading) {
     return <div className="h-72 animate-pulse rounded-lg bg-muted" />;
-  }
-
-  if (error && !readiness) {
-    return (
-      <Card>
-        <CardContent className="py-8">
-          <p className="text-sm text-red-600">{error}</p>
-        </CardContent>
-      </Card>
-    );
   }
 
   return (
@@ -706,6 +701,25 @@ export function DealScopingWorkspace({
       </div>
 
       <div className="space-y-4">
+        {error && !dismissedError ? (
+          <div className="flex items-start justify-between gap-3 rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">
+            <div>
+              <div className="font-medium">Scoping intake needs attention</div>
+              <div className="mt-1">{error}</div>
+            </div>
+            <Button
+              type="button"
+              variant="ghost"
+              size="icon"
+              className="h-7 w-7 shrink-0 text-red-700 hover:bg-red-100 hover:text-red-800"
+              onClick={() => setDismissedError(true)}
+              aria-label="Dismiss scoping intake error"
+            >
+              <X className="h-4 w-4" />
+            </Button>
+          </div>
+        ) : null}
+
         <Card>
           <CardHeader>
             <CardTitle>Scoping Workspace</CardTitle>
@@ -1065,11 +1079,6 @@ export function DealScopingWorkspace({
           </Card>
         )}
 
-        {error && readiness && (
-          <div className="rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">
-            {error}
-          </div>
-        )}
       </div>
     </div>
   );

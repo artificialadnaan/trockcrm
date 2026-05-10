@@ -1,6 +1,12 @@
-import { describe, expect, it } from "vitest";
+/**
+ * @vitest-environment jsdom
+ */
+import React, { act } from "react";
+import { createRoot } from "react-dom/client";
+import { describe, expect, it, vi, beforeEach } from "vitest";
 
 import {
+  DealScopingWorkspace,
   buildLineageResolvedPatch,
   buildScopingAutosavePatch,
   buildWorkspaceSectionData,
@@ -12,6 +18,53 @@ import type {
   DealResolvedFields,
   DealScopingIntake,
 } from "@/hooks/use-deals";
+
+(globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
+
+const mocks = vi.hoisted(() => ({
+  getDealScopingIntake: vi.fn(),
+  patchDealScopingIntake: vi.fn(),
+  patchResolvedDealFields: vi.fn(),
+  activateServiceHandoff: vi.fn(),
+  linkExistingScopingAttachment: vi.fn(),
+  uploadFile: vi.fn(),
+  useFiles: vi.fn(),
+  useProjectTypes: vi.fn(),
+  usePipelineStages: vi.fn(),
+  useAuth: vi.fn(),
+}));
+
+vi.mock("@/hooks/use-deals", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@/hooks/use-deals")>();
+  return {
+    ...actual,
+    getDealScopingIntake: mocks.getDealScopingIntake,
+    patchDealScopingIntake: mocks.patchDealScopingIntake,
+    patchResolvedDealFields: mocks.patchResolvedDealFields,
+    activateServiceHandoff: mocks.activateServiceHandoff,
+    linkExistingScopingAttachment: mocks.linkExistingScopingAttachment,
+  };
+});
+
+vi.mock("@/hooks/use-files", () => ({
+  uploadFile: mocks.uploadFile,
+  useFiles: mocks.useFiles,
+}));
+
+vi.mock("@/hooks/use-pipeline-config", () => ({
+  useProjectTypes: mocks.useProjectTypes,
+  usePipelineStages: mocks.usePipelineStages,
+}));
+
+vi.mock("@/lib/auth", () => ({
+  useAuth: mocks.useAuth,
+}));
+
+vi.mock("@/components/properties/property-selector", () => ({
+  PropertySelector: ({ value }: { value?: string | null }) => (
+    React.createElement("div", { "data-testid": "property-selector" }, value ?? "none")
+  ),
+}));
 
 function makeDeal(overrides: Partial<DealDetail> = {}): DealDetail {
   return {
@@ -110,6 +163,49 @@ function makeIntake(overrides: Partial<DealScopingIntake> = {}): DealScopingInta
     ...overrides,
   };
 }
+
+async function renderWorkspace(deal: DealDetail) {
+  const container = document.createElement("div");
+  document.body.appendChild(container);
+  const root = createRoot(container);
+
+  await act(async () => {
+    root.render(React.createElement(DealScopingWorkspace, { deal, onDealUpdated: vi.fn() }));
+  });
+
+  await act(async () => {
+    await Promise.resolve();
+  });
+
+  return {
+    container,
+    cleanup: () => {
+      act(() => {
+        root.unmount();
+      });
+      container.remove();
+    },
+  };
+}
+
+beforeEach(() => {
+  vi.clearAllMocks();
+  mocks.useAuth.mockReturnValue({ user: { id: "user-1", role: "admin" } });
+  mocks.useFiles.mockReturnValue({ files: [], refetch: vi.fn() });
+  mocks.useProjectTypes.mockReturnValue({
+    projectTypes: [{ id: "project-type-1", name: "Commercial", slug: "commercial" }],
+  });
+  mocks.usePipelineStages.mockReturnValue({
+    stages: [
+      {
+        id: "stage-1",
+        slug: "opportunity",
+        workflowFamily: "standard_deal",
+        displayOrder: 2,
+      },
+    ],
+  });
+});
 
 describe("DealScopingWorkspace lineage routing helpers", () => {
   it("keeps source-lead fields from being shadowed by stale scoping intake data", () => {
@@ -216,5 +312,29 @@ describe("DealScopingWorkspace lineage routing helpers", () => {
         resolvedFields: null,
       })
     ).toBe(true);
+  });
+});
+
+describe("DealScopingWorkspace load failures", () => {
+  it("renders the editable scope form when the initial scoping intake request fails", async () => {
+    mocks.getDealScopingIntake.mockRejectedValueOnce(
+      new Error("projectType cannot be cleared after Opportunity")
+    );
+
+    const { container, cleanup } = await renderWorkspace(
+      makeDeal({
+        sourceLeadId: null,
+        projectTypeId: null,
+      })
+    );
+
+    try {
+      await vi.waitFor(() => expect(container.textContent).toContain("Scoping Workspace"));
+      expect(container.textContent).toContain("projectType cannot be cleared after Opportunity");
+      expect(container.textContent).toContain("Project Type");
+      expect(container.textContent).toContain("Scope Summary");
+    } finally {
+      cleanup();
+    }
   });
 });

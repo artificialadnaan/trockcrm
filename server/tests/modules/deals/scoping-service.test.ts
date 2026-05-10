@@ -463,6 +463,107 @@ describe("Scoping Service", () => {
     });
   });
 
+  it("initializes a legacy opportunity scoping intake without clearing a null project type", async () => {
+    pipelineMocks.getStageById.mockResolvedValue({
+      id: "stage-opportunity",
+      slug: "opportunity",
+      workflowFamily: "standard_deal",
+      displayOrder: 2,
+    });
+    pipelineMocks.getStageBySlug.mockResolvedValue({
+      id: "stage-opportunity",
+      slug: "opportunity",
+      workflowFamily: "standard_deal",
+      displayOrder: 2,
+    });
+
+    const tenantDb = createFakeTenantDb({
+      deals: [
+        {
+          id: "deal-1",
+          name: "Legacy Opportunity",
+          stageId: "stage-opportunity",
+          workflowRoute: "normal",
+          expectedCloseDate: null,
+          propertyAddress: "123 Legacy Way",
+          propertyCity: "Dallas",
+          propertyState: "TX",
+          propertyZip: "75201",
+          description: "Legacy imported opportunity",
+          projectTypeId: null,
+          assignedRepId: "rep-1",
+        },
+      ],
+    });
+
+    const result = await getOrCreateDealScopingIntake(tenantDb as never, "deal-1", "user-1");
+
+    expect(result.intake.projectTypeId).toBeNull();
+    expect(result.intake.sectionData).toMatchObject({
+      projectOverview: { propertyName: "Legacy Opportunity" },
+      propertyDetails: {
+        propertyAddress: "123 Legacy Way",
+        propertyCity: "Dallas",
+        propertyState: "TX",
+        propertyZip: "75201",
+      },
+      scopeSummary: { summary: "Legacy imported opportunity" },
+    });
+    expect(tenantDb.state.deals[0]?.projectTypeId).toBeNull();
+  });
+
+  it("still rejects explicitly clearing project type on an opportunity scoping write", async () => {
+    pipelineMocks.getStageById.mockResolvedValue({
+      id: "stage-opportunity",
+      slug: "opportunity",
+      workflowFamily: "standard_deal",
+      displayOrder: 2,
+    });
+    pipelineMocks.getStageBySlug.mockResolvedValue({
+      id: "stage-opportunity",
+      slug: "opportunity",
+      workflowFamily: "standard_deal",
+      displayOrder: 2,
+    });
+
+    const tenantDb = createFakeTenantDb({
+      deals: [
+        {
+          id: "deal-1",
+          name: "Typed Opportunity",
+          stageId: "stage-opportunity",
+          workflowRoute: "normal",
+          expectedCloseDate: null,
+          propertyAddress: "123 Typed Way",
+          propertyCity: "Dallas",
+          propertyState: "TX",
+          propertyZip: "75201",
+          description: "Typed opportunity",
+          projectTypeId: "project-type-1",
+          assignedRepId: "rep-1",
+        },
+      ],
+      users: [{ id: "user-1", officeId: "office-1", role: "admin" }],
+    });
+
+    await expect(
+      upsertDealScopingIntake(
+        tenantDb as never,
+        "deal-1",
+        {
+          projectTypeId: null,
+          sectionData: {
+            projectOverview: { propertyName: "Typed Opportunity" },
+          },
+        },
+        "user-1"
+      )
+    ).rejects.toMatchObject<AppError>({
+      statusCode: 400,
+      message: "projectType cannot be cleared after Opportunity",
+    });
+  });
+
   it("writes deal-owned scoping fields back to canonical deal columns", async () => {
     pipelineMocks.getStageById.mockResolvedValue({
       id: "stage-opportunity",

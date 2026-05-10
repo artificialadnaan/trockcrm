@@ -359,14 +359,17 @@ export async function getOrCreateDealScopingIntake(
   const resolvedDeal = await getResolvedDeal(tenantDb, dealId);
   const deal = resolvedDeal.deal;
   await assertDealScopingEditable(deal);
+  const initialPatch: DealScopingPatch = {
+    sectionData: buildSeedSectionDataFromResolvedDeal(resolvedDeal),
+  };
+  if (resolvedDeal.resolved.projectTypeId != null) {
+    initialPatch.projectTypeId = resolvedDeal.resolved.projectTypeId;
+  }
 
   return upsertDealScopingIntake(
     tenantDb,
     dealId,
-    {
-      projectTypeId: resolvedDeal.resolved.projectTypeId,
-      sectionData: buildSeedSectionDataFromResolvedDeal(resolvedDeal),
-    },
+    initialPatch,
     userId
   );
 }
