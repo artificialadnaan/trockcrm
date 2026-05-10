@@ -444,8 +444,8 @@ describe("Deal Service", () => {
         now: new Date("2026-05-01T18:30:00Z"),
       });
 
-      expect(filters.won.since.toISOString()).toBe("2026-04-01T00:00:00.000Z");
-      expect(filters.lost.since.toISOString()).toBe("2026-04-01T00:00:00.000Z");
+      expect(filters.won.since?.toISOString()).toBe("2026-04-01T00:00:00.000Z");
+      expect(filters.lost.since?.toISOString()).toBe("2026-04-01T00:00:00.000Z");
       expect(filters.won.until).toBeNull();
       expect(filters.lost.until).toBeNull();
     });
@@ -459,10 +459,21 @@ describe("Deal Service", () => {
         now: new Date("2026-05-01T18:30:00Z"),
       });
 
-      expect(filters.won.since.toISOString()).toBe("2026-03-01T00:00:00.000Z");
+      expect(filters.won.since?.toISOString()).toBe("2026-03-01T00:00:00.000Z");
       expect(filters.won.until?.toISOString()).toBe("2026-03-31T00:00:00.000Z");
-      expect(filters.lost.since.toISOString()).toBe("2026-04-01T12:00:00.000Z");
+      expect(filters.lost.since?.toISOString()).toBe("2026-04-01T12:00:00.000Z");
       expect(filters.lost.until?.toISOString()).toBe("2026-04-30T23:59:59.000Z");
+    });
+
+    it("allows all-time terminal filters without since bounds", () => {
+      const filters = resolvePipelineTerminalDateFilters({
+        wonAllTime: true,
+        lostAllTime: true,
+        now: new Date("2026-05-01T18:30:00Z"),
+      });
+
+      expect(filters.won.since).toBeNull();
+      expect(filters.lost.since).toBeNull();
     });
 
     it("should separate terminal from active stages", () => {

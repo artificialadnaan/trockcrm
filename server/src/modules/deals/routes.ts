@@ -128,8 +128,10 @@ function readStageInput(req: Parameters<typeof router.get>[1] extends never ? ne
     maxAgeDays: parseNumber(req.query.maxAgeDays),
     wonSince: req.query.won_since as string | undefined,
     wonUntil: req.query.won_until as string | undefined,
+    wonAllTime: req.query.won_all_time === "true",
     lostSince: req.query.lost_since as string | undefined,
     lostUntil: req.query.lost_until as string | undefined,
+    lostAllTime: req.query.lost_all_time === "true",
   };
 }
 
@@ -324,6 +326,8 @@ router.get("/", async (req, res, next) => {
       source: req.query.source as string | undefined,
       contractSignedFrom: req.query.contractSignedFrom as string | undefined,
       contractSignedTo: req.query.contractSignedTo as string | undefined,
+      updatedFrom: req.query.updatedFrom as string | undefined,
+      updatedTo: req.query.updatedTo as string | undefined,
       isActive: req.query.isActive === "false" ? false : true,
       sortBy: req.query.sortBy as any,
       sortDir: req.query.sortDir as "asc" | "desc" | undefined,
@@ -362,8 +366,10 @@ router.get("/pipeline", async (req, res, next) => {
       includeDd: req.query.includeDd === "true",
       wonSince: req.query.won_since as string | undefined,
       wonUntil: req.query.won_until as string | undefined,
+      wonAllTime: req.query.won_all_time === "true",
       lostSince: req.query.lost_since as string | undefined,
       lostUntil: req.query.lost_until as string | undefined,
+      lostAllTime: req.query.lost_all_time === "true",
     };
     const result = await getDealsForPipeline(
       req.tenantDb!,

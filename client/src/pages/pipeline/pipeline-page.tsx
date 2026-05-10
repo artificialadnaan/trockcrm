@@ -1,4 +1,4 @@
-import { useState, useCallback, useEffect, useRef, useLayoutEffect } from "react";
+import { useState, useCallback, useEffect, useRef, useLayoutEffect, useMemo } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import {
   DndContext,
@@ -10,14 +10,24 @@ import {
   type DragEndEvent,
 } from "@dnd-kit/core";
 import { useDroppable, useDraggable } from "@dnd-kit/core";
-import { Plus, GripVertical } from "lucide-react";
+import { ArrowRight, Download, GripVertical, Plus, Search } from "lucide-react";
 import { StageChangeDialog } from "@/components/deals/stage-change-dialog";
 import { TerminalDateFilterControl } from "@/components/pipeline/terminal-date-filter-control";
+import { PipelineStageTable, type PipelineStageTableColumn } from "@/components/pipeline/pipeline-stage-table";
+import { Input } from "@/components/ui/input";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 import { api } from "@/lib/api";
 import { formatCurrencyCompact, bestEstimate, daysInStage } from "@/lib/deal-utils";
 import {
   buildDealStageWorkspacePath,
   buildPipelineRequestPath,
+  daysAgo,
   getActivePipelineColumns,
   getTerminalDateFilterLabel,
   isTerminalOutcomeSlug,
@@ -26,7 +36,9 @@ import {
   type TerminalDateFilter,
   type TerminalOutcome,
 } from "@/lib/pipeline-terminal-filters";
-import type { Deal } from "@/hooks/use-deals";
+import { useDeals, type Deal } from "@/hooks/use-deals";
+import { useTaskAssignees } from "@/hooks/use-task-assignees";
+import { cn } from "@/lib/utils";
 
 interface PipelineColumn {
   stage: {
@@ -47,6 +59,69 @@ interface TerminalStageInfo {
   stage: { id: string; name: string; slug: string };
   deals: Deal[];
   count: number;
+}
+
+const PIPELINE_LIST_PAGE_SIZE = 25;
+const DEAL_STAGE_ORDER = [
+  "opportunity",
+  "estimating",
+  "estimate_under_review",
+  "estimate_sent_to_client",
+  "contract",
+  "won",
+  "lost",
+];
+
+type SortKey = "name" | "stage_entered_at" | "awarded_amount" | "updated_at";
+type SortState = { key: SortKey; dir: "asc" | "desc" };
+
+export function getDealDisplayNumber(deal: Pick<Deal, "dealNumber" | "projectNumber">) {
+  const projectNumber = deal.projectNumber?.trim();
+  if (projectNumber) return { label: projectNumber, isFallback: false };
+  return { label: deal.dealNumber ?? "", isFallback: true };
+}
+
+function dateRangeFromTerminalFilter(filter: TerminalDateFilter) {
+  if (filter.preset === "all") return {};
+  if (filter.preset === "custom") {
+    return { from: filter.customStart || undefined, to: filter.customEnd || undefined };
+  }
+  return { from: daysAgo(Number(filter.preset)) };
+}
+
+function formatShortDate(value: string | null | undefined) {
+  if (!value) return "--";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "--";
+  return date.toLocaleDateString("en-US", { month: "short", day: "numeric" });
+}
+
+function escapeCsvCell(value: string | number | null | undefined) {
+  const text = value == null ? "" : String(value);
+  return /[",\n]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text;
+}
+
+function buildDealListParams(input: {
+  search: string;
+  stageIds: string[];
+  assignedRepId?: string;
+  dateRange: { from?: string; to?: string };
+  sort: SortState;
+  page: number;
+  limit: number;
+}) {
+  const params = new URLSearchParams();
+  if (input.search) params.set("search", input.search);
+  if (input.stageIds.length) params.set("stageIds", input.stageIds.join(","));
+  if (input.assignedRepId) params.set("assignedRepId", input.assignedRepId);
+  if (input.dateRange.from) params.set("updatedFrom", input.dateRange.from);
+  if (input.dateRange.to) params.set("updatedTo", input.dateRange.to);
+  params.set("isActive", "true");
+  params.set("sortBy", input.sort.key);
+  params.set("sortDir", input.sort.dir);
+  params.set("page", String(input.page));
+  params.set("limit", String(input.limit));
+  return params;
 }
 
 export function summarizeTerminalStageCounts(terminalStages: TerminalStageInfo[]) {
@@ -77,6 +152,32 @@ export function summarizeActivePipelineColumns(columns: PipelineColumn[]) {
   return { totalDeals, totalValue, averageVelocity };
 }
 
+async function fetchAllFilteredDeals(input: {
+  search: string;
+  stageIds: string[];
+  assignedRepId?: string;
+  dateRange: { from?: string; to?: string };
+  sort: SortState;
+}) {
+  const limit = 500;
+  const firstParams = buildDealListParams({ ...input, page: 1, limit });
+  const first = await api<{ deals: Deal[]; pagination: { totalPages: number } }>(
+    `/deals?${firstParams.toString()}`
+  );
+  const pages = [first.deals];
+  const totalPages = Math.max(1, first.pagination.totalPages || 1);
+
+  for (let page = 2; page <= totalPages; page += 1) {
+    const params = buildDealListParams({ ...input, page, limit });
+    const next = await api<{ deals: Deal[]; pagination: { totalPages: number } }>(
+      `/deals?${params.toString()}`
+    );
+    pages.push(next.deals);
+  }
+
+  return pages.flat();
+}
+
 function formatRefreshedLabel(date: Date, now: Date): string {
   const minutes = Math.floor((now.getTime() - date.getTime()) / 60000);
   if (minutes < 1) return "Updated just now";
@@ -105,8 +206,9 @@ function PipelineCard({
 
   const days = daysInStage(deal.stageEnteredAt);
   const value = bestEstimate(deal);
+  const displayNumber = getDealDisplayNumber(deal);
 
-  const metaParts = [`TR-${deal.dealNumber}`];
+  const metaParts = [];
   if (deal.propertyCity) metaParts.push(deal.propertyCity);
   metaParts.push(`${days}d in stage`);
 
@@ -130,6 +232,16 @@ function PipelineCard({
       </button>
 
       <div className="px-3 py-2.5 pl-5">
+        {displayNumber.label ? (
+          <p
+            className={cn(
+              "mb-1 truncate text-[10px] font-black uppercase tracking-[0.16em]",
+              displayNumber.isFallback ? "text-gray-400" : "text-brand-red"
+            )}
+          >
+            {displayNumber.label}
+          </p>
+        ) : null}
         <div className="flex items-start justify-between gap-2">
           <p className="text-sm font-medium text-gray-900 truncate">{deal.name}</p>
           <span className="text-sm font-semibold text-gray-900 tabular-nums whitespace-nowrap">
@@ -285,9 +397,61 @@ export function PipelinePage() {
     won: readTerminalDateFilter("won"),
     lost: readTerminalDateFilter("lost"),
   }));
+  const [listSearch, setListSearch] = useState("");
+  const [listStageSlugs, setListStageSlugs] = useState<string[]>([]);
+  const [listOwnerId, setListOwnerId] = useState("__all__");
+  const [listDateFilter, setListDateFilter] = useState<TerminalDateFilter>({ preset: "all" });
+  const [listPage, setListPage] = useState(1);
+  const [listSort, setListSort] = useState<SortState>({ key: "updated_at", dir: "desc" });
+  const { assignees } = useTaskAssignees();
 
   const sensors = useSensors(
     useSensor(PointerSensor, { activationConstraint: { distance: 8 } })
+  );
+
+  const stageFilterOptions = useMemo(() => {
+    return [...columns]
+      .sort((left, right) => {
+        const leftIndex = DEAL_STAGE_ORDER.indexOf(left.stage.slug);
+        const rightIndex = DEAL_STAGE_ORDER.indexOf(right.stage.slug);
+        return (leftIndex === -1 ? 999 : leftIndex) - (rightIndex === -1 ? 999 : rightIndex);
+      })
+      .filter((column, index, all) => all.findIndex((item) => item.stage.slug === column.stage.slug) === index)
+      .map((column) => ({ id: column.stage.id, slug: column.stage.slug, name: column.stage.name }));
+  }, [columns]);
+
+  const selectedStageIds = useMemo(
+    () =>
+      stageFilterOptions
+        .filter((stage) => listStageSlugs.includes(stage.slug))
+        .map((stage) => stage.id),
+    [listStageSlugs, stageFilterOptions]
+  );
+  const listDateRange = useMemo(() => dateRangeFromTerminalFilter(listDateFilter), [listDateFilter]);
+  const {
+    deals: listDeals,
+    pagination: listPagination,
+    loading: listLoading,
+    error: listError,
+  } = useDeals({
+    search: listSearch,
+    stageIds: selectedStageIds,
+    assignedRepId: listOwnerId === "__all__" ? undefined : listOwnerId,
+    updatedFrom: listDateRange.from,
+    updatedTo: listDateRange.to,
+    isActive: true,
+    sortBy: listSort.key,
+    sortDir: listSort.dir,
+    page: listPage,
+    limit: PIPELINE_LIST_PAGE_SIZE,
+  });
+  const assigneeNameById = useMemo(
+    () => new Map(assignees.map((assignee) => [assignee.id, assignee.displayName])),
+    [assignees]
+  );
+  const stageNameById = useMemo(
+    () => new Map(stageFilterOptions.map((stage) => [stage.id, stage.name])),
+    [stageFilterOptions]
   );
 
   const mainScrollRef = useRef<HTMLDivElement>(null);
@@ -421,6 +585,123 @@ export function PipelinePage() {
     return Math.round((won / total) * 100);
   })();
 
+  const toggleListStage = (slug: string) => {
+    setListPage(1);
+    setListStageSlugs((current) =>
+      current.includes(slug) ? current.filter((item) => item !== slug) : [...current, slug]
+    );
+  };
+
+  const updateListSort = (key: SortKey) => {
+    setListSort((current) => ({
+      key,
+      dir: current.key === key && current.dir === "desc" ? "asc" : "desc",
+    }));
+  };
+
+  const exportListCsv = async () => {
+    const exportDeals = await fetchAllFilteredDeals({
+      search: listSearch,
+      stageIds: selectedStageIds,
+      assignedRepId: listOwnerId === "__all__" ? undefined : listOwnerId,
+      dateRange: listDateRange,
+      sort: listSort,
+    });
+    const rows = [
+      ["Deal", "Project Number", "Owner", "Stage", "Days", "Value", "Last Touch"],
+      ...exportDeals.map((deal) => {
+        const displayNumber = getDealDisplayNumber(deal);
+        return [
+          deal.name,
+          displayNumber.label,
+          deal.assignedRepName ?? assigneeNameById.get(deal.assignedRepId) ?? "",
+          deal.stageName ?? stageNameById.get(deal.stageId) ?? "",
+          daysInStage(deal.stageEnteredAt),
+          bestEstimate(deal),
+          deal.lastActivityAt ?? deal.updatedAt,
+        ];
+      }),
+    ];
+    const csv = rows.map((row) => row.map(escapeCsvCell).join(",")).join("\n");
+    const blob = new Blob([csv], { type: "text/csv;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    const anchor = document.createElement("a");
+    anchor.href = url;
+    anchor.download = "deals-pipeline-list.csv";
+    anchor.click();
+    URL.revokeObjectURL(url);
+  };
+
+  const sortHeader = (key: SortKey, label: string) => (
+    <button
+      type="button"
+      className="inline-flex items-center gap-1 font-black uppercase tracking-[0.16em] text-slate-500 hover:text-brand-red"
+      onClick={() => updateListSort(key)}
+    >
+      {label}
+      {listSort.key === key ? <span>{listSort.dir === "asc" ? "↑" : "↓"}</span> : null}
+    </button>
+  );
+
+  const listColumns: Array<PipelineStageTableColumn<Deal>> = [
+    {
+      key: "name",
+      header: sortHeader("name", "Deal"),
+      render: (deal) => {
+        const displayNumber = getDealDisplayNumber(deal);
+        return (
+          <div className="min-w-0 space-y-1">
+            <p className="truncate font-black text-slate-950">{deal.name}</p>
+            <p
+              className={cn(
+                "truncate text-xs font-bold uppercase tracking-[0.12em]",
+                displayNumber.isFallback ? "text-slate-400" : "text-brand-red"
+              )}
+            >
+              {displayNumber.label || "--"}
+            </p>
+            <p className="truncate text-xs font-medium text-slate-500">
+              {deal.companyName || [deal.propertyCity, deal.propertyState].filter(Boolean).join(", ") || "Account pending"}
+            </p>
+          </div>
+        );
+      },
+    },
+    {
+      key: "owner",
+      header: "Owner",
+      render: (deal) => deal.assignedRepName ?? assigneeNameById.get(deal.assignedRepId) ?? "Unassigned",
+    },
+    {
+      key: "stage",
+      header: "Stage",
+      render: (deal) => (
+        <span className="inline-flex rounded-full bg-slate-100 px-2.5 py-1 text-[11px] font-black uppercase tracking-[0.12em] text-slate-600">
+          {deal.stageName ?? stageNameById.get(deal.stageId) ?? deal.stageSlug ?? "Stage"}
+        </span>
+      ),
+    },
+    {
+      key: "days",
+      header: sortHeader("stage_entered_at", "Days"),
+      render: (deal) => `${daysInStage(deal.stageEnteredAt)}d`,
+    },
+    {
+      key: "value",
+      header: sortHeader("awarded_amount", "Value"),
+      render: (deal) => (
+        <span className="tabular-nums font-black text-slate-950">
+          {formatCurrencyCompact(bestEstimate(deal))}
+        </span>
+      ),
+    },
+    {
+      key: "lastTouch",
+      header: sortHeader("updated_at", "Last Touch"),
+      render: (deal) => formatShortDate(deal.lastActivityAt ?? deal.updatedAt),
+    },
+  ];
+
   if (loading) {
     return (
       <div className="space-y-4 p-6">
@@ -453,9 +734,9 @@ export function PipelinePage() {
   const refreshedLabel = formatRefreshedLabel(lastRefreshed, now);
 
   return (
-    <div className="flex flex-col h-[calc(100vh-4rem)] -m-4 md:-m-6">
+    <div className="space-y-5 -m-4 bg-[#f5f6f8] p-4 md:-m-6 md:p-6">
       {/* Header */}
-      <header className="flex items-center justify-between gap-4 px-6 pt-5 pb-4 border-b border-gray-200 bg-white flex-shrink-0">
+      <header className="flex items-center justify-between gap-4 rounded-lg border border-gray-200 bg-white px-6 py-5">
         <div className="min-w-0">
           <h1 className="text-2xl font-semibold text-gray-900">Deal Pipeline</h1>
           <p className="mt-0.5 text-xs text-gray-500">
@@ -505,7 +786,7 @@ export function PipelinePage() {
       </header>
 
       {/* Board: top scrollbar proxy + scroll container */}
-      <div className="relative flex-1 flex flex-col min-h-0 bg-white">
+      <section className="relative flex h-[min(72vh,56rem)] min-h-[42rem] flex-col overflow-hidden rounded-lg border border-gray-200 bg-white">
         <div
           ref={topScrollRef}
           onScroll={handleTopScroll}
@@ -559,10 +840,10 @@ export function PipelinePage() {
             </DragOverlay>
           </DndContext>
         </div>
-      </div>
+      </section>
 
       {/* Footer */}
-      <footer className="flex-shrink-0 border-t border-gray-200 bg-white px-6 py-3">
+      <footer className="rounded-lg border border-gray-200 bg-white px-6 py-3">
         <dl className="flex items-center gap-8">
           <div className="flex items-baseline gap-2">
             <dt className="text-xs text-gray-500 uppercase tracking-wide">Active</dt>
@@ -583,6 +864,147 @@ export function PipelinePage() {
           </div>
         </dl>
       </footer>
+
+      <section className="rounded-lg border border-gray-200 bg-white">
+        <div className="flex flex-col gap-4 border-b border-gray-200 p-4 lg:flex-row lg:items-end lg:justify-between">
+          <div>
+            <p className="text-[11px] font-black uppercase tracking-[0.18em] text-brand-red">
+              Deal list
+            </p>
+            <h2 className="mt-1 text-xl font-black uppercase text-slate-950">Pipeline records</h2>
+            <p className="mt-1 text-sm font-medium text-slate-500">
+              Filter and scan deals without changing the kanban above.
+            </p>
+          </div>
+          <button
+            type="button"
+            onClick={exportListCsv}
+            className="inline-flex h-9 items-center justify-center gap-2 rounded-md border border-slate-200 bg-white px-3 text-sm font-bold text-slate-700 hover:border-brand-red/40 hover:text-brand-red focus:outline-none focus-visible:ring-2 focus-visible:ring-brand-red"
+          >
+            <Download className="h-4 w-4" />
+            Export
+          </button>
+        </div>
+
+        <div className="grid gap-3 border-b border-gray-200 bg-[#f7f8fb] p-4 lg:grid-cols-[minmax(18rem,1fr)_220px_220px]">
+          <label className="space-y-2">
+            <span className="text-[11px] font-black uppercase tracking-[0.16em] text-slate-500">Search</span>
+            <div className="relative">
+              <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" />
+              <Input
+                value={listSearch}
+                onChange={(event) => {
+                  setListPage(1);
+                  setListSearch(event.target.value);
+                }}
+                placeholder="Deal name, number, company, address"
+                className="pl-9"
+              />
+            </div>
+          </label>
+
+          <label className="space-y-2">
+            <span className="text-[11px] font-black uppercase tracking-[0.16em] text-slate-500">Owner</span>
+            <Select
+              value={listOwnerId}
+              onValueChange={(value) => {
+                setListPage(1);
+                setListOwnerId(value ?? "__all__");
+              }}
+            >
+              <SelectTrigger>
+                <SelectValue placeholder="All reps" />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="__all__">All reps</SelectItem>
+                {assignees.map((assignee) => (
+                  <SelectItem key={assignee.id} value={assignee.id}>
+                    {assignee.displayName}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          </label>
+
+          <label className="space-y-2">
+            <span className="text-[11px] font-black uppercase tracking-[0.16em] text-slate-500">Date</span>
+            <TerminalDateFilterControl
+              stageName="List"
+              filter={listDateFilter}
+              onFilterChange={(filter) => {
+                setListPage(1);
+                setListDateFilter(filter);
+              }}
+              buttonClassName="h-10 w-full justify-between rounded-md"
+            />
+          </label>
+
+        </div>
+
+        <div className="flex flex-wrap gap-2 border-b border-gray-200 px-4 py-3">
+          <button
+            type="button"
+            aria-pressed={listStageSlugs.length === 0}
+            className={cn(
+              "rounded-full border px-3 py-1.5 text-xs font-black uppercase tracking-[0.12em]",
+              listStageSlugs.length === 0
+                ? "border-brand-red bg-brand-red text-white"
+                : "border-slate-200 bg-white text-slate-600 hover:border-brand-red/40 hover:text-brand-red"
+            )}
+            onClick={() => {
+              setListPage(1);
+              setListStageSlugs([]);
+            }}
+          >
+            All
+          </button>
+          {stageFilterOptions.map((stage) => {
+            const active = listStageSlugs.includes(stage.slug);
+            return (
+              <button
+                key={stage.slug}
+                type="button"
+                aria-pressed={active}
+                className={cn(
+                  "rounded-full border px-3 py-1.5 text-xs font-black uppercase tracking-[0.12em]",
+                  active
+                    ? "border-brand-red bg-brand-red text-white"
+                    : "border-slate-200 bg-white text-slate-600 hover:border-brand-red/40 hover:text-brand-red"
+                )}
+                onClick={() => toggleListStage(stage.slug)}
+              >
+                {stage.name}
+              </button>
+            );
+          })}
+        </div>
+
+        <div className="p-4">
+          {listError ? (
+            <div className="rounded-lg border border-brand-red/20 bg-brand-red/5 p-4 text-sm font-semibold text-brand-red">
+              {listError}
+            </div>
+          ) : listLoading ? (
+            <div className="rounded-lg border border-slate-200 bg-white p-6 text-sm font-semibold text-slate-500">
+              Loading deals...
+            </div>
+          ) : (
+            <PipelineStageTable
+              rows={listDeals}
+              columns={listColumns}
+              pagination={{
+                page: listPagination.page,
+                pageSize: listPagination.limit,
+                total: listPagination.total,
+                totalPages: listPagination.totalPages,
+              }}
+              onPageChange={setListPage}
+              onRowClick={(deal) => navigate(`/deals/${deal.id}`)}
+              getRowKey={(deal) => deal.id}
+            />
+          )}
+        </div>
+      </section>
 
       {stageChangeOpen && pendingMove && (
         <StageChangeDialog

@@ -52,6 +52,8 @@ export interface DealFilters {
   // deals.contract_signed_date as a transition fallback.
   contractSignedFrom?: string;
   contractSignedTo?: string;
+  updatedFrom?: string;
+  updatedTo?: string;
   sortBy?: "name" | "created_at" | "updated_at" | "awarded_amount" | "stage_entered_at" | "expected_close_date" | "contract_signed_date";
   sortDir?: "asc" | "desc";
   page?: number;
@@ -63,8 +65,10 @@ export interface DealFilters {
 export interface PipelineTerminalDateFilters {
   wonSince?: string;
   wonUntil?: string;
+  wonAllTime?: boolean;
   lostSince?: string;
   lostUntil?: string;
+  lostAllTime?: boolean;
   now?: Date;
 }
 
@@ -205,11 +209,11 @@ export function resolvePipelineTerminalDateFilters(input: PipelineTerminalDateFi
 
   return {
     won: {
-      since: parseIsoDateParam(input.wonSince) ?? defaultSince,
+      since: input.wonAllTime ? null : parseIsoDateParam(input.wonSince) ?? defaultSince,
       until: parseIsoDateParam(input.wonUntil),
     },
     lost: {
-      since: parseIsoDateParam(input.lostSince) ?? defaultSince,
+      since: input.lostAllTime ? null : parseIsoDateParam(input.lostSince) ?? defaultSince,
       until: parseIsoDateParam(input.lostUntil),
     },
   };
@@ -397,8 +401,10 @@ export interface DealStagePageInput extends DealBoardInput {
   maxAgeDays?: number;
   wonSince?: string;
   wonUntil?: string;
+  wonAllTime?: boolean;
   lostSince?: string;
   lostUntil?: string;
+  lostAllTime?: boolean;
 }
 
 type DealStageWorkspaceRow = {
@@ -522,19 +528,35 @@ function workspaceTerminalEnteredAtSql(stageSlugs: readonly string[], fallbackSq
   `;
 }
 
+function workspaceTerminalBusinessDateSql(fallbackSql: unknown) {
+  return sql`COALESCE(${fallbackSql}, d.stage_entered_at)`;
+}
+
+function dealTerminalBusinessDateSql(fallbackSql: unknown) {
+  return sql`COALESCE(${fallbackSql}, ${deals.stageEnteredAt})`;
+}
+
 function terminalWorkspaceDateConditions(stage: PipelineStageRow, input: DealStagePageInput) {
   const terminalFilters = resolvePipelineTerminalDateFilters(input);
   if (WON_TERMINAL_STAGE_SLUGS.includes(stage.slug as (typeof WON_TERMINAL_STAGE_SLUGS)[number])) {
-    const enteredAt = workspaceTerminalEnteredAtSql(WON_TERMINAL_STAGE_SLUGS, sql`d.actual_close_date::timestamptz`);
-    const conditions = [sql`${enteredAt} >= ${terminalFilters.won.since}`];
+    const enteredAt = workspaceTerminalBusinessDateSql(
+      sql`COALESCE(d.contract_signed_at, d.contract_signed_date::timestamptz)`
+    );
+    const conditions: any[] = [];
+    if (terminalFilters.won.since) {
+      conditions.push(sql`${enteredAt} >= ${terminalFilters.won.since}`);
+    }
     if (terminalFilters.won.until) {
       conditions.push(sql`${enteredAt} < ${addUtcDays(terminalFilters.won.until, 1)}`);
     }
     return conditions;
   }
   if (LOST_TERMINAL_STAGE_SLUGS.includes(stage.slug as (typeof LOST_TERMINAL_STAGE_SLUGS)[number])) {
-    const enteredAt = workspaceTerminalEnteredAtSql(LOST_TERMINAL_STAGE_SLUGS, sql`d.lost_at`);
-    const conditions = [sql`${enteredAt} >= ${terminalFilters.lost.since}`];
+    const enteredAt = workspaceTerminalBusinessDateSql(sql`d.lost_at`);
+    const conditions: any[] = [];
+    if (terminalFilters.lost.since) {
+      conditions.push(sql`${enteredAt} >= ${terminalFilters.lost.since}`);
+    }
     if (terminalFilters.lost.until) {
       conditions.push(sql`${enteredAt} < ${addUtcDays(terminalFilters.lost.until, 1)}`);
     }
@@ -806,6 +828,12 @@ export async function getDeals(tenantDb: TenantDb, filters: DealFilters, userRol
   if (filters.contractSignedTo) {
     conditions.push(sql`${contractSignedDateForReporting} <= ${filters.contractSignedTo}::date`);
   }
+  if (filters.updatedFrom) {
+    conditions.push(sql`${deals.updatedAt} >= ${filters.updatedFrom}::date`);
+  }
+  if (filters.updatedTo) {
+    conditions.push(sql`${deals.updatedAt} < (${filters.updatedTo}::date + interval '1 day')`);
+  }
 
   // Search across name, deal_number, description, property_address
   if (filters.search && filters.search.trim().length >= 2) {
@@ -815,7 +843,13 @@ export async function getDeals(tenantDb: TenantDb, filters: DealFilters, userRol
         ilike(deals.name, searchTerm),
         ilike(deals.dealNumber, searchTerm),
         ilike(deals.description, searchTerm),
-        ilike(deals.propertyAddress, searchTerm)
+        ilike(deals.propertyAddress, searchTerm),
+        sql`EXISTS (
+          SELECT 1
+          FROM ${companies}
+          WHERE ${companies.id} = ${deals.companyId}
+            AND ${companies.name} ILIKE ${searchTerm}
+        )`
       )
     );
   }
@@ -1528,10 +1562,12 @@ export async function getDealsForPipeline(
   const nonTerminalStageIds = stages.filter((stage) => !stage.isTerminal).map((stage) => stage.id);
 
   // Prefer the explicit stage-history entry timestamp. Older migrated rows may
-  // only have terminal marker fields, so fall back to actual_close_date/lost_at
-  // before using the current stage_entered_at value.
-  const wonEnteredAt = dealTerminalEnteredAtSql(WON_TERMINAL_STAGE_SLUGS, sql`${deals.actualCloseDate}::timestamptz`);
-  const lostEnteredAt = dealTerminalEnteredAtSql(LOST_TERMINAL_STAGE_SLUGS, deals.lostAt);
+  // only have terminal marker fields, so fall back to contract/lost dates before
+  // using the current stage_entered_at value.
+  const wonEnteredAt = dealTerminalBusinessDateSql(
+    sql`COALESCE(${deals.contractSignedAt}, ${deals.contractSignedDate}::timestamptz)`
+  );
+  const lostEnteredAt = dealTerminalBusinessDateSql(deals.lostAt);
 
   // Non-terminal pipeline behavior remains active-only. Terminal stages are
   // date-filtered separately and intentionally include inactive historical rows.
@@ -1542,8 +1578,10 @@ export async function getDealsForPipeline(
   if (wonStageIds.length > 0) {
     const wonConditions = [
       inArray(deals.stageId, wonStageIds),
-      sql`${wonEnteredAt} >= ${terminalFilters.won.since}`,
     ];
+    if (terminalFilters.won.since) {
+      wonConditions.push(sql`${wonEnteredAt} >= ${terminalFilters.won.since}`);
+    }
     if (terminalFilters.won.until) {
       wonConditions.push(sql`${wonEnteredAt} < ${addUtcDays(terminalFilters.won.until, 1)}`);
     }
@@ -1552,8 +1590,10 @@ export async function getDealsForPipeline(
   if (lostStageIds.length > 0) {
     const lostConditions = [
       inArray(deals.stageId, lostStageIds),
-      sql`${lostEnteredAt} >= ${terminalFilters.lost.since}`,
     ];
+    if (terminalFilters.lost.since) {
+      lostConditions.push(sql`${lostEnteredAt} >= ${terminalFilters.lost.since}`);
+    }
     if (terminalFilters.lost.until) {
       lostConditions.push(sql`${lostEnteredAt} < ${addUtcDays(terminalFilters.lost.until, 1)}`);
     }

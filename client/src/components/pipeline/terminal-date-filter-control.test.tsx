@@ -41,10 +41,16 @@ describe("TerminalDateFilterControl", () => {
       );
     });
 
-    const button = container.querySelector<HTMLButtonElement>(
+    const trigger = container.querySelector<HTMLButtonElement>('button[aria-label="Won date filter"]');
+    expect(trigger?.type).toBe("button");
+
+    act(() => {
+      trigger?.click();
+    });
+
+    const button = document.body.querySelector<HTMLButtonElement>(
       'button[aria-label="Show Won deals from the last 60 days"]'
     );
-
     expect(button?.type).toBe("button");
 
     act(() => {

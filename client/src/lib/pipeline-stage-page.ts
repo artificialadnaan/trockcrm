@@ -13,8 +13,10 @@ export interface StagePageFilters {
   maxAgeDays?: string;
   wonSince?: string;
   wonUntil?: string;
+  wonAllTime?: boolean;
   lostSince?: string;
   lostUntil?: string;
+  lostAllTime?: boolean;
 }
 
 export interface StagePageQuery {
@@ -56,8 +58,10 @@ export function normalizeStagePageQuery(input: Record<string, string | undefined
       maxAgeDays: input.maxAgeDays,
       wonSince: input.won_since,
       wonUntil: input.won_until,
+      wonAllTime: input.won_all_time === "true",
       lostSince: input.lost_since,
       lostUntil: input.lost_until,
+      lostAllTime: input.lost_all_time === "true",
     },
   };
 }

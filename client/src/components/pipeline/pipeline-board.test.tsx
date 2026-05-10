@@ -87,14 +87,12 @@ describe("PipelineBoard", () => {
 
     expect(html).toContain("Won");
     expect(html).toContain("Lost");
-    expect(html).toContain("· 30d");
-    expect(html).toContain("· custom");
+    expect(html).toContain("· Last 30d");
+    expect(html).toContain("· Custom");
     expect(html).toContain('type="button"');
-    expect(html).toContain('aria-label="Show Won deals from the last 30 days"');
-    expect(html).toContain('aria-label="Show Lost deals from a custom date range"');
+    expect(html).toContain('aria-label="Won date filter"');
+    expect(html).toContain('aria-label="Lost date filter"');
     expect(html).not.toContain("<select");
-    expect(html).toContain('aria-label="Lost start date"');
-    expect(html).toContain("2026-04-01");
   });
 
   it("renders the deal stage age from stageEnteredAt", () => {
