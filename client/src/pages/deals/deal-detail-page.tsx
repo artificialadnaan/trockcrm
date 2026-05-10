@@ -339,7 +339,7 @@ export function DealDetailPage() {
     }
     try {
       await apiDeleteDeal(deal.id);
-      navigate("/deals");
+      navigate("/pipeline");
     } catch (err: unknown) {
       alert(err instanceof Error ? err.message : "Failed to delete deal");
     }
@@ -488,8 +488,8 @@ export function DealDetailPage() {
     return (
       <div className="text-center py-12">
         <p className="text-red-600">{error ?? "Deal not found"}</p>
-        <Button variant="outline" className="mt-4" onClick={() => navigate("/deals")}>
-          Back to Deals
+        <Button variant="outline" className="mt-4" onClick={() => navigate("/pipeline")}>
+          Back to Pipeline
         </Button>
       </div>
     );

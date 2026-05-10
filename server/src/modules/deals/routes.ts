@@ -315,10 +315,21 @@ function isProposalDraftingEnabled() {
 // GET /api/deals — list deals (paginated, filtered, sorted)
 router.get("/", async (req, res, next) => {
   try {
+    const isActiveFilter =
+      req.query.isActive === "all"
+        ? ("all" as const)
+        : req.query.isActive === "pipeline"
+          ? ("pipeline" as const)
+          : req.query.isActive === "false"
+            ? false
+            : true;
     const filters = {
       search: req.query.search as string | undefined,
       stageIds: req.query.stageIds
         ? (req.query.stageIds as string).split(",")
+        : undefined,
+      inactiveStageIds: req.query.inactiveStageIds
+        ? (req.query.inactiveStageIds as string).split(",")
         : undefined,
       assignedRepId: req.query.assignedRepId as string | undefined,
       projectTypeId: req.query.projectTypeId as string | undefined,
@@ -328,7 +339,7 @@ router.get("/", async (req, res, next) => {
       contractSignedTo: req.query.contractSignedTo as string | undefined,
       updatedFrom: req.query.updatedFrom as string | undefined,
       updatedTo: req.query.updatedTo as string | undefined,
-      isActive: req.query.isActive === "false" ? false : true,
+      isActive: isActiveFilter,
       sortBy: req.query.sortBy as any,
       sortDir: req.query.sortDir as "asc" | "desc" | undefined,
       page: req.query.page ? parseInt(req.query.page as string, 10) : undefined,

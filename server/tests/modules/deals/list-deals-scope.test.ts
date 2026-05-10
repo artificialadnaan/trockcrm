@@ -1,4 +1,4 @@
-import { deals, userOfficeAccess, users } from "@trock-crm/shared/schema";
+import { companies, deals, userOfficeAccess, users } from "@trock-crm/shared/schema";
 import { describe, expect, it, vi } from "vitest";
 import { getDeals } from "../../../src/modules/deals/service.js";
 
@@ -41,6 +41,15 @@ function extractValuesUntilNextColumn(chunks: unknown[], startIndex: number) {
     values.push(...extractValues(chunk));
   }
   return values;
+}
+
+function containsValue(value: unknown, expected: string, seen = new Set<unknown>()): boolean {
+  if (value === expected) return true;
+  if (!value || typeof value !== "object") return false;
+  if (seen.has(value)) return false;
+  seen.add(value);
+  if (Array.isArray(value)) return value.some((item) => containsValue(item, expected, seen));
+  return Object.values(value as Record<string, unknown>).some((item) => containsValue(item, expected, seen));
 }
 
 function applyWhere(rows: Row[], condition: unknown) {
@@ -112,6 +121,10 @@ function projectRows(rows: Row[], fields?: Record<string, unknown>) {
     const projected: Row = {};
     for (const [key, field] of Object.entries(fields)) {
       const name = (field as { name?: string }).name;
+      if (key === "companyName") {
+        projected[key] = row.companyName;
+        continue;
+      }
       if (name) projected[key] = row[camelName(name)];
     }
     return projected;
@@ -130,6 +143,9 @@ function queryBuilder(rows: Row[], fields?: Record<string, unknown>) {
   return {
     where(condition: unknown) {
       filtered = applyWhere(filtered, condition);
+      return this;
+    },
+    leftJoin() {
       return this;
     },
     orderBy() {
@@ -167,6 +183,14 @@ function createTenantDb() {
       { id: "deal-unassigned", assignedRepId: null, isActive: true, updatedAt: new Date("2026-05-07T12:00:00Z") },
       { id: "deal-inactive-rep", assignedRepId: "rep-inactive", isActive: true, updatedAt: new Date("2026-05-07T12:00:00Z") },
       { id: "deal-rep-self", assignedRepId: "rep-self", isActive: true, updatedAt: new Date("2026-05-07T12:00:00Z") },
+      {
+        id: "deal-company",
+        assignedRepId: "rep-team-1",
+        companyId: "company-1",
+        companyName: "Acme Apartments",
+        isActive: true,
+        updatedAt: new Date("2026-05-07T12:00:00Z"),
+      },
     ],
     userOfficeAccess: [
       { userId: "rep-other-office", officeId: "office-1" },
@@ -180,6 +204,7 @@ function createTenantDb() {
           if (table === deals) return queryBuilder(state.deals, fields);
           if (table === users) return queryBuilder(state.users, fields);
           if (table === userOfficeAccess) return queryBuilder(state.userOfficeAccess, fields);
+          if (table === companies) return queryBuilder([], fields);
           return queryBuilder([], fields);
         },
       };
@@ -209,6 +234,7 @@ describe("getDeals scope filtering", () => {
       "deal-team-1",
       "deal-team-2",
       "deal-other-office",
+      "deal-company",
     ]);
   });
 
@@ -221,6 +247,7 @@ describe("getDeals scope filtering", () => {
       "deal-unassigned",
       "deal-inactive-rep",
       "deal-rep-self",
+      "deal-company",
     ]);
   });
 
@@ -240,5 +267,53 @@ describe("getDeals scope filtering", () => {
     await expect(listIds({ role: "rep", userId: "rep-self", scope: "all" })).resolves.toEqual([
       "deal-rep-self",
     ]);
+  });
+
+  it("getDeals returns companyName for linked companies", async () => {
+    const result = await getDeals(
+      createTenantDb() as never,
+      { isActive: true, scope: "all", activeOfficeId: "office-1", limit: 100 } as never,
+      "director",
+      "director-1"
+    );
+
+    expect(result.deals.find((row) => row.id === "deal-company")).toMatchObject({
+      companyName: "Acme Apartments",
+    });
+  });
+
+  it("getDeals pipeline visibility keeps inactive rows limited to explicit terminal stages", async () => {
+    const capturedWheres: unknown[] = [];
+    const dataChain: any = {
+      from: vi.fn().mockReturnThis(),
+      leftJoin: vi.fn().mockReturnThis(),
+      where: vi.fn((condition: unknown) => {
+        capturedWheres.push(condition);
+        return dataChain;
+      }),
+      orderBy: vi.fn().mockReturnThis(),
+      limit: vi.fn().mockReturnThis(),
+      offset: vi.fn().mockResolvedValue([]),
+      then: vi.fn((resolve: (value: Row[]) => unknown) => resolve([{ count: 0 }])),
+    };
+    const tenantDb = {
+      select: vi.fn(() => dataChain),
+    } as any;
+
+    await getDeals(
+      tenantDb,
+      {
+        isActive: "pipeline",
+        inactiveStageIds: ["stage-won"],
+        scope: "all",
+        activeOfficeId: "office-1",
+        limit: 100,
+      } as never,
+      "director",
+      "director-1"
+    );
+
+    expect(capturedWheres.some((condition) => containsValue(condition, "stage-won"))).toBe(true);
+    expect(capturedWheres.some((condition) => containsValue(condition, "stage-estimating"))).toBe(false);
   });
 });
