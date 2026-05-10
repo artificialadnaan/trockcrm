@@ -34,7 +34,7 @@ export interface ConvertLeadInput {
   ddEstimate?: string;
   bidEstimate?: string;
   awardedAmount?: string;
-  projectTypeId?: string;
+  projectTypeId?: string | null;
   regionId?: string;
   expectedCloseDate?: string;
 }
@@ -248,7 +248,7 @@ export function createLeadConversionService(
       awardedAmount: input.awardedAmount,
       officeCode: lead.officeCode ?? "dfw",
       projectType: lead.projectType ?? undefined,
-      projectTypeId: input.projectTypeId,
+      projectTypeId: input.projectTypeId ?? lead.projectTypeId ?? undefined,
       regionId: input.regionId,
       expectedCloseDate: input.expectedCloseDate,
     });

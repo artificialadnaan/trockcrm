@@ -510,6 +510,8 @@ interface FakeLeadRow {
   preQualValue?: string | null;
   source: string | null;
   description: string | null;
+  projectType?: string | null;
+  projectTypeId?: string | null;
   stageEnteredAt: Date;
   convertedAt: Date | null;
   isActive: boolean;
@@ -529,6 +531,7 @@ interface FakeDealRow {
   sourceLeadId: string | null;
   source: string | null;
   workflowRoute: "normal" | "service";
+  projectTypeId?: string | null;
 }
 
 interface FakeUserOfficeAccessRow {
@@ -1817,6 +1820,181 @@ describe("Lead Conversion Service", () => {
     expect(result.lead.stageId).toBe("lead-stage-sales-validation");
     expect(result.lead.stageEnteredAt).toEqual(new Date("2026-04-15T15:00:00.000Z"));
     expect(tenantDb.state.deals).toHaveLength(1);
+  });
+
+  it("carries lead projectTypeId into the successor deal when conversion input omits it", async () => {
+    const tenantDb = createFakeTenantDb({
+      leads: [
+        {
+          id: "lead-1",
+          companyId: "company-1",
+          propertyId: "property-1",
+          primaryContactId: null,
+          name: "Palm Villas repaint",
+          stageId: "lead-stage-sales-validation",
+          assignedRepId: "rep-1",
+          status: "open",
+          pipelineType: "normal",
+          officeCode: "dfw",
+          projectType: "exterior renovation",
+          projectTypeId: "project-type-lead",
+          preQualValue: "85000",
+          source: "Referral",
+          description: "Property manager requested pre-bid walk",
+          stageEnteredAt: new Date("2026-04-12T15:00:00.000Z"),
+          convertedAt: null,
+          isActive: true,
+          createdAt: new Date("2026-04-12T15:00:00.000Z"),
+          updatedAt: new Date("2026-04-12T15:00:00.000Z"),
+        },
+      ],
+    });
+    const createDealInputs: Array<{ projectTypeId?: string | null }> = [];
+    const service = createLeadConversionService({
+      getStageById: pipelineMocks.getStageById as never,
+      getStageBySlug: pipelineMocks.getStageBySlug as never,
+      now: () => new Date("2026-04-15T15:00:00.000Z"),
+      createDeal: async (_tenantDb, input) => {
+        createDealInputs.push({ projectTypeId: input.projectTypeId ?? null });
+        const deal = {
+          id: "deal-1",
+          dealNumber: "dfw-1-10526-aa",
+          workflowRoute: input.workflowRoute ?? "normal",
+          primaryContactId: input.primaryContactId ?? null,
+          companyId: input.companyId ?? null,
+          propertyId: input.propertyId ?? null,
+          sourceLeadId: input.sourceLeadId ?? null,
+          source: input.source ?? null,
+          assignedRepId: input.assignedRepId,
+          stageId: input.stageId,
+          name: input.name,
+          projectTypeId: input.projectTypeId ?? null,
+        };
+        tenantDb.state.deals.push(deal);
+        return deal as never;
+      },
+    });
+
+    const result = await service.convertLead(tenantDb as never, {
+      leadId: "lead-1",
+      userRole: "rep",
+      userId: "rep-1",
+    });
+
+    expect(createDealInputs[0]?.projectTypeId).toBe("project-type-lead");
+    expect(result.deal.projectTypeId).toBe("project-type-lead");
+  });
+
+  it("lets conversion input override lead projectTypeId when a different value is provided", async () => {
+    const tenantDb = createFakeTenantDb({
+      leads: [
+        {
+          id: "lead-1",
+          companyId: "company-1",
+          propertyId: "property-1",
+          primaryContactId: null,
+          name: "Palm Villas repaint",
+          stageId: "lead-stage-sales-validation",
+          assignedRepId: "rep-1",
+          status: "open",
+          pipelineType: "normal",
+          officeCode: "dfw",
+          projectType: "exterior renovation",
+          projectTypeId: "project-type-lead",
+          preQualValue: "85000",
+          source: "Referral",
+          description: "Property manager requested pre-bid walk",
+          stageEnteredAt: new Date("2026-04-12T15:00:00.000Z"),
+          convertedAt: null,
+          isActive: true,
+          createdAt: new Date("2026-04-12T15:00:00.000Z"),
+          updatedAt: new Date("2026-04-12T15:00:00.000Z"),
+        },
+      ],
+    });
+    const service = createLeadConversionService({
+      getStageById: pipelineMocks.getStageById as never,
+      getStageBySlug: pipelineMocks.getStageBySlug as never,
+      createDeal: async (_tenantDb, input) => ({
+        id: "deal-1",
+        dealNumber: "dfw-2-10526-aa",
+        workflowRoute: input.workflowRoute ?? "normal",
+        primaryContactId: input.primaryContactId ?? null,
+        companyId: input.companyId ?? null,
+        propertyId: input.propertyId ?? null,
+        sourceLeadId: input.sourceLeadId ?? null,
+        source: input.source ?? null,
+        assignedRepId: input.assignedRepId,
+        stageId: input.stageId,
+        name: input.name,
+        projectTypeId: input.projectTypeId ?? null,
+      }) as never,
+    });
+
+    const result = await service.convertLead(tenantDb as never, {
+      leadId: "lead-1",
+      userRole: "rep",
+      userId: "rep-1",
+      projectTypeId: "project-type-input",
+    });
+
+    expect(result.deal.projectTypeId).toBe("project-type-input");
+  });
+
+  it("preserves lead projectTypeId when conversion input explicitly sends null", async () => {
+    const tenantDb = createFakeTenantDb({
+      leads: [
+        {
+          id: "lead-1",
+          companyId: "company-1",
+          propertyId: "property-1",
+          primaryContactId: null,
+          name: "Palm Villas repaint",
+          stageId: "lead-stage-sales-validation",
+          assignedRepId: "rep-1",
+          status: "open",
+          pipelineType: "normal",
+          officeCode: "dfw",
+          projectType: "exterior renovation",
+          projectTypeId: "project-type-lead",
+          preQualValue: "85000",
+          source: "Referral",
+          description: "Property manager requested pre-bid walk",
+          stageEnteredAt: new Date("2026-04-12T15:00:00.000Z"),
+          convertedAt: null,
+          isActive: true,
+          createdAt: new Date("2026-04-12T15:00:00.000Z"),
+          updatedAt: new Date("2026-04-12T15:00:00.000Z"),
+        },
+      ],
+    });
+    const service = createLeadConversionService({
+      getStageById: pipelineMocks.getStageById as never,
+      getStageBySlug: pipelineMocks.getStageBySlug as never,
+      createDeal: async (_tenantDb, input) => ({
+        id: "deal-1",
+        dealNumber: "dfw-1-10526-aa",
+        workflowRoute: input.workflowRoute ?? "normal",
+        primaryContactId: input.primaryContactId ?? null,
+        companyId: input.companyId ?? null,
+        propertyId: input.propertyId ?? null,
+        sourceLeadId: input.sourceLeadId ?? null,
+        source: input.source ?? null,
+        assignedRepId: input.assignedRepId,
+        stageId: input.stageId,
+        name: input.name,
+        projectTypeId: input.projectTypeId ?? null,
+      }) as never,
+    });
+
+    const result = await service.convertLead(tenantDb as never, {
+      leadId: "lead-1",
+      userRole: "rep",
+      userId: "rep-1",
+      projectTypeId: null,
+    });
+
+    expect(result.deal.projectTypeId).toBe("project-type-lead");
   });
 
   it("enqueues an RFP request when lead conversion creates an Opportunity deal", async () => {
