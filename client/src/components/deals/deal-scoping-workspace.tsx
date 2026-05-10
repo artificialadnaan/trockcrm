@@ -364,6 +364,7 @@ export function DealScopingWorkspace({
   const [activatingService, setActivatingService] = useState(false);
   const lastSavedFingerprintRef = useRef("");
   const hydrationCompleteRef = useRef(false);
+  const loadRequestIdRef = useRef(0);
   const activeWorkflowRoute: WorkflowRoute = resolvedFields?.workflowRoute ?? deal.workflowRoute ?? "normal";
   const activeCompanyId = resolvedFields?.companyId ?? deal.companyId;
   const activePropertyId = resolvedFields?.propertyId ?? deal.propertyId;
@@ -421,11 +422,19 @@ export function DealScopingWorkspace({
   };
 
   const loadIntake = async () => {
-    setLoading(true);
+    const requestId = loadRequestIdRef.current + 1;
+    loadRequestIdRef.current = requestId;
+    const wasInitialHydration = !hydrationCompleteRef.current;
+    if (wasInitialHydration) {
+      setLoading(true);
+      setInitialLoadFailed(false);
+    }
     clearError();
-    setInitialLoadFailed(false);
     try {
       const result = await getDealScopingIntake(deal.id);
+      if (requestId !== loadRequestIdRef.current) {
+        return;
+      }
       const nextSectionData = buildWorkspaceSectionData(deal, result.intake, result.resolved);
       setIntake(result.intake);
       setReadiness(normalizeWorkspaceReadiness(result.readiness, activeWorkflowRoute));
@@ -443,12 +452,21 @@ export function DealScopingWorkspace({
       setInitialLoadFailed(false);
       setSaveState("idle");
     } catch (err) {
-      hydrationCompleteRef.current = false;
-      setInitialLoadFailed(true);
+      if (requestId !== loadRequestIdRef.current) {
+        return;
+      }
+      if (wasInitialHydration) {
+        hydrationCompleteRef.current = false;
+        setInitialLoadFailed(true);
+      } else {
+        setInitialLoadFailed(false);
+      }
       setSaveState("error");
       showError(err instanceof Error ? err.message : "Failed to load scoping intake");
     } finally {
-      setLoading(false);
+      if (requestId === loadRequestIdRef.current) {
+        setLoading(false);
+      }
     }
   };
 
@@ -706,6 +724,18 @@ export function DealScopingWorkspace({
             <div className="rounded-md bg-muted px-3 py-2 text-xs text-muted-foreground">
               {saveStatusDetail}
             </div>
+
+            {initialLoadFailed ? (
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                className="w-full border-red-200 bg-white text-red-700 hover:bg-red-100 hover:text-red-800"
+                onClick={() => void loadIntake()}
+              >
+                Retry loading scope
+              </Button>
+            ) : null}
           </CardContent>
         </Card>
 
