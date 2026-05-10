@@ -226,8 +226,10 @@ export function DealsListSection({
       const leftRank = leftIndex === -1 ? 999 : leftIndex;
       const rightRank = rightIndex === -1 ? 999 : rightIndex;
       if (leftRank !== rightRank) return leftRank - rightRank;
-      const leftDisplayOrder = "displayOrder" in left ? left.displayOrder ?? 0 : 0;
-      const rightDisplayOrder = "displayOrder" in right ? right.displayOrder ?? 0 : 0;
+      const leftDisplayOrder =
+        "displayOrder" in left && typeof left.displayOrder === "number" ? left.displayOrder : 0;
+      const rightDisplayOrder =
+        "displayOrder" in right && typeof right.displayOrder === "number" ? right.displayOrder : 0;
       return leftDisplayOrder - rightDisplayOrder;
     });
     const seen = new Set<string>();
