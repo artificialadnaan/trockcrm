@@ -49,6 +49,7 @@ interface DealsListSectionProps {
   scope?: "mine" | "team" | "all";
   enableDateFilter?: boolean;
   enableExport?: boolean;
+  visibleStages?: Array<Pick<PipelineStage, "id" | "slug" | "name">>;
   eyebrow?: string;
   title?: string;
   subtitle?: string;
@@ -87,6 +88,43 @@ export function getPipelineListIsActiveFilter(
 ): DealListActiveFilter {
   if (selectedStageIds.length === 0) return "pipeline";
   return selectedStageIds.some((id) => terminalStageIds.includes(id)) ? "pipeline" : true;
+}
+
+export function getVisibleTerminalStageIds(
+  stages: Array<Pick<PipelineStage, "id" | "isTerminal">>,
+  visibleStages: Array<Pick<PipelineStage, "id" | "slug" | "name">>
+) {
+  const visibleStageIds = new Set(visibleStages.map((stage) => stage.id));
+  return stages
+    .filter((stage) => stage.isTerminal && visibleStageIds.has(stage.id))
+    .map((stage) => stage.id);
+}
+
+export function getPipelineListQueryState(input: {
+  selectedStageIds: string[];
+  terminalStageIds: string[];
+  stagesLoading: boolean;
+  stagesError: string | null;
+}) {
+  if (input.stagesLoading || input.stagesError) {
+    return {
+      enabled: false,
+      isActive: "pipeline" as DealListActiveFilter,
+      inactiveStageIds: [] as string[],
+    };
+  }
+
+  const isActive = getPipelineListIsActiveFilter(input.selectedStageIds, input.terminalStageIds);
+  return {
+    enabled: true,
+    isActive,
+    inactiveStageIds:
+      isActive !== "pipeline"
+        ? []
+        : input.selectedStageIds.length === 0
+          ? input.terminalStageIds
+          : input.selectedStageIds.filter((id) => input.terminalStageIds.includes(id)),
+  };
 }
 
 export function buildStageNameById(stages: Array<Pick<PipelineStage, "id" | "name">>) {
@@ -163,6 +201,7 @@ export function DealsListSection({
   scope,
   enableDateFilter = false,
   enableExport = false,
+  visibleStages,
   eyebrow = "Deal list",
   title = "Pipeline records",
   subtitle = "Filter and scan deals without changing the kanban above.",
@@ -176,17 +215,22 @@ export function DealsListSection({
   const [page, setPage] = useState(1);
   const [sort, setSort] = useState<SortState>({ key: "updated_at", dir: "desc" });
 
-  const { stages } = usePipelineStages();
+  const { stages, loading: stagesLoading, error: stagesError } = usePipelineStages();
   const { assignees } = useTaskAssignees();
 
   const stageFilterOptions = useMemo(() => {
-    const sortedStages = [...stages].sort((left, right) => {
+    const sourceStages = visibleStages ?? stages.filter((stage) => stage.isActivePipeline !== false);
+    const sortedStages = [...sourceStages].sort((left, right) => {
       const leftIndex = DEAL_STAGE_ORDER.indexOf(left.slug);
       const rightIndex = DEAL_STAGE_ORDER.indexOf(right.slug);
       const leftRank = leftIndex === -1 ? 999 : leftIndex;
       const rightRank = rightIndex === -1 ? 999 : rightIndex;
       if (leftRank !== rightRank) return leftRank - rightRank;
-      return (left.displayOrder ?? 0) - (right.displayOrder ?? 0);
+      const leftDisplayOrder =
+        "displayOrder" in left && typeof left.displayOrder === "number" ? left.displayOrder : 0;
+      const rightDisplayOrder =
+        "displayOrder" in right && typeof right.displayOrder === "number" ? right.displayOrder : 0;
+      return leftDisplayOrder - rightDisplayOrder;
     });
     const seen = new Set<string>();
     return sortedStages
@@ -196,7 +240,7 @@ export function DealsListSection({
         return true;
       })
       .map((stage) => ({ id: stage.id, slug: stage.slug, name: stage.name }));
-  }, [stages]);
+  }, [stages, visibleStages]);
 
   const selectedStageIds = useMemo(
     () =>
@@ -211,18 +255,21 @@ export function DealsListSection({
   );
 
   const terminalStageIds = useMemo(
-    () => stages.filter((stage) => stage.isTerminal).map((stage) => stage.id),
-    [stages]
+    () => getVisibleTerminalStageIds(stages, stageFilterOptions),
+    [stages, stageFilterOptions]
   );
-  const isActiveFilter = useMemo(
-    () => getPipelineListIsActiveFilter(selectedStageIds, terminalStageIds),
-    [selectedStageIds, terminalStageIds]
+  const listQueryState = useMemo(
+    () =>
+      getPipelineListQueryState({
+        selectedStageIds,
+        terminalStageIds,
+        stagesLoading,
+        stagesError,
+      }),
+    [selectedStageIds, stagesError, stagesLoading, terminalStageIds]
   );
-  const inactiveStageIds = useMemo(() => {
-    if (isActiveFilter !== "pipeline") return [];
-    if (selectedStageIds.length === 0) return terminalStageIds;
-    return selectedStageIds.filter((id) => terminalStageIds.includes(id));
-  }, [isActiveFilter, selectedStageIds, terminalStageIds]);
+  const isActiveFilter = listQueryState.isActive;
+  const inactiveStageIds = listQueryState.inactiveStageIds;
 
   const {
     deals,
@@ -242,7 +289,7 @@ export function DealsListSection({
     page,
     limit: pageSize,
     scope,
-  });
+  }, { enabled: listQueryState.enabled });
 
   const stageNameById = useMemo(() => buildStageNameById(stages), [stages]);
   const assigneeNameById = useMemo(
@@ -265,6 +312,10 @@ export function DealsListSection({
   };
 
   const exportCsv = async () => {
+    if (!listQueryState.enabled) {
+      toast.error(stagesError ? "Pipeline stage metadata failed to load." : "Pipeline stages are still loading.");
+      return;
+    }
     const exportResult = await fetchAllFilteredDeals({
       search,
       stageIds: selectedStageIds,
@@ -505,7 +556,11 @@ export function DealsListSection({
           <div className="rounded-lg border border-brand-red/20 bg-brand-red/5 p-4 text-sm font-semibold text-brand-red">
             {error}
           </div>
-        ) : loading ? (
+        ) : stagesError ? (
+          <div className="rounded-lg border border-brand-red/20 bg-brand-red/5 p-4 text-sm font-semibold text-brand-red">
+            Pipeline stage metadata failed to load.
+          </div>
+        ) : !listQueryState.enabled || loading ? (
           <div className="rounded-lg border border-slate-200 bg-white p-6 text-sm font-semibold text-slate-500">
             Loading deals...
           </div>

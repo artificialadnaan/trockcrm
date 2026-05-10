@@ -41,7 +41,7 @@ vi.mock("@/components/pipeline/terminal-date-filter-control", () => ({
 }));
 
 vi.mock("sonner", () => ({
-  toast: { info: vi.fn() },
+  toast: { error: vi.fn(), info: vi.fn() },
 }));
 
 function makeDeal(overrides: Record<string, unknown> = {}) {
@@ -111,6 +111,8 @@ describe("DealsListSection", () => {
     mocks.useTaskAssigneesMock.mockReset();
 
     mocks.usePipelineStagesMock.mockReturnValue({
+      loading: false,
+      error: null,
       stages: [
         {
           id: "stage-opportunity",
@@ -172,6 +174,8 @@ describe("DealsListSection", () => {
   it("switches to active-only filtering when only non-terminal stages are selected", () => {
     // Re-mock with a non-terminal stage selected
     mocks.usePipelineStagesMock.mockReturnValue({
+      loading: false,
+      error: null,
       stages: [
         {
           id: "stage-opportunity",

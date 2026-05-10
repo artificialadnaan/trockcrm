@@ -1587,12 +1587,6 @@ export async function getDealsForPipeline(
     .orderBy(asc(pipelineStageConfig.displayOrder));
 
   const terminalFilters = resolvePipelineTerminalDateFilters(filters);
-  const wonStageIds = stages
-    .filter((stage) => WON_TERMINAL_STAGE_SLUGS.includes(stage.slug as (typeof WON_TERMINAL_STAGE_SLUGS)[number]))
-    .map((stage) => stage.id);
-  const lostStageIds = stages
-    .filter((stage) => LOST_TERMINAL_STAGE_SLUGS.includes(stage.slug as (typeof LOST_TERMINAL_STAGE_SLUGS)[number]))
-    .map((stage) => stage.id);
   const canonicalWonStageId = stages.find((stage) => stage.slug === "won" && stage.isActivePipeline)?.id ?? null;
   const canonicalLostStageId = stages.find((stage) => stage.slug === "lost" && stage.isActivePipeline)?.id ?? null;
   // Prefer the explicit stage-history entry timestamp. Older migrated rows may
@@ -1644,7 +1638,7 @@ export async function getDealsForPipeline(
   await Promise.all(responseStages.map(async (stage) => {
     const stageConditions: any[] = [];
     if (WON_TERMINAL_STAGE_SLUGS.includes(stage.slug as (typeof WON_TERMINAL_STAGE_SLUGS)[number])) {
-      stageConditions.push(inArray(deals.stageId, wonStageIds));
+      stageConditions.push(eq(deals.stageId, canonicalWonStageId ?? stage.id));
       if (terminalFilters.won.since) {
         stageConditions.push(sql`${wonEnteredAt} >= ${terminalFilters.won.since}`);
       }
@@ -1652,7 +1646,7 @@ export async function getDealsForPipeline(
         stageConditions.push(sql`${wonEnteredAt} < ${addUtcDays(terminalFilters.won.until, 1)}`);
       }
     } else if (LOST_TERMINAL_STAGE_SLUGS.includes(stage.slug as (typeof LOST_TERMINAL_STAGE_SLUGS)[number])) {
-      stageConditions.push(inArray(deals.stageId, lostStageIds));
+      stageConditions.push(eq(deals.stageId, canonicalLostStageId ?? stage.id));
       if (terminalFilters.lost.since) {
         stageConditions.push(sql`${lostEnteredAt} >= ${terminalFilters.lost.since}`);
       }

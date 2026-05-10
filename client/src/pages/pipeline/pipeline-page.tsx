@@ -40,6 +40,8 @@ export {
   buildStageNameById,
   fetchAllFilteredDeals,
   getPipelineListIsActiveFilter,
+  getPipelineListQueryState,
+  getVisibleTerminalStageIds,
 } from "@/components/deals/deals-list-section";
 
 interface PipelineColumn {
@@ -517,7 +519,15 @@ export function PipelinePage() {
         </dl>
       </footer>
 
-      <DealsListSection enableDateFilter enableExport />
+      <DealsListSection
+        enableDateFilter
+        enableExport
+        visibleStages={columns.map((column) => ({
+          id: column.stage.id,
+          slug: column.stage.slug,
+          name: column.stage.name,
+        }))}
+      />
 
       {stageChangeOpen && pendingMove && (
         <StageChangeDialog
