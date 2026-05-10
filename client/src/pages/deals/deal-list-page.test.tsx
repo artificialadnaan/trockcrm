@@ -506,7 +506,10 @@ describe("DealListPage", () => {
     expect(html).toContain("At risk");
   });
 
-  it("caps each kanban column height so internal scroll engages instead of page scroll", () => {
+  it("emits scroll-cap classes on kanban columns so internal scroll can engage", () => {
+    // Class-string regression: confirms max-h-[44rem] is rendered on the column
+    // section and overflow-y-auto on the inner body. Actual layout/scroll behavior
+    // is verified manually in the browser smoke test.
     const html = renderPage();
 
     expect(html).toContain("max-h-[44rem]");
