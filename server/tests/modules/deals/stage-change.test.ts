@@ -306,7 +306,7 @@ describe("changeDealStage", () => {
     vi.useRealTimers();
   });
 
-  it("emits deal.opportunity.entered once when the feature flag is enabled and CRM enters Opportunity", async () => {
+  it("does not enqueue RFP automatically when CRM enters Opportunity", async () => {
     process.env.ENABLE_OPPORTUNITY_RFP_EVENT = "true";
     vi.setSystemTime(new Date("2026-05-01T18:00:00.000Z"));
     const tenantDb = createTenantDb({
@@ -340,63 +340,19 @@ describe("changeDealStage", () => {
       officeId: "office-1",
     });
 
-    expect(result.eventsEmitted).toContain("deal.opportunity.entered");
-    expect(result.deal.rfpApprovalRequestedAt).toEqual(new Date("2026-05-01T18:00:00.000Z"));
-    expect(result.deal.rfpApprovalRequestEventId).toMatch(
-      /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
-    );
-    expect(result.deal.rfpApprovalRequestedBy).toBe("user-1");
-    expect(result.deal.rfpApprovalStatus).toBe("pending_outbox");
+    expect(result.eventsEmitted).not.toContain("deal.opportunity.entered");
+    expect(result.deal.rfpApprovalRequestedAt).toBeNull();
+    expect(result.deal.rfpApprovalRequestEventId).toBeNull();
+    expect(result.deal.rfpApprovalRequestedBy).toBeNull();
+    expect(result.deal.rfpApprovalStatus).toBeNull();
 
     const opportunityJobs = tenantDb.state.jobs.filter(
       (job) => (job.payload as { eventName?: string }).eventName === "deal.opportunity.entered"
     );
-    expect(opportunityJobs).toHaveLength(1);
-    expect(opportunityJobs[0]?.payload).toMatchObject({
-      eventName: "deal.opportunity.entered",
-      idempotencyKey: "deal:deal-1:rfp_approval:lifetime",
-      dealId: "deal-1",
-      dealNumber: "TR-2026-0001",
-      dealName: "Palm Villas",
-      officeId: "office-1",
-      workflowRoute: "normal",
-      fromStageId: "stage-sales-validation",
-      toStageId: "stage-opportunity",
-      toStageSlug: "opportunity",
-      requestedBy: "user-1",
-      source: "crm_stage_change",
-    });
-    expect(opportunityJobs[0]?.officeId).toBe("office-1");
+    expect(opportunityJobs).toHaveLength(0);
 
     const rfpJobs = tenantDb.state.jobs.filter((job) => job.jobType === "rfp_request_delivery");
-    expect(rfpJobs).toHaveLength(1);
-    expect(rfpJobs[0]).toMatchObject({
-      jobType: "rfp_request_delivery",
-      officeId: "office-1",
-      status: "pending",
-      maxAttempts: 8,
-    });
-    expect(rfpJobs[0]?.payload).toMatchObject({
-      dealId: "deal-1",
-      syncHubUrl: "http://localhost:5000/api/rfp-requests",
-      body: {
-        sourceSystem: "trock_crm",
-        sourceDealId: "deal-1",
-        deal: {
-          name: "Palm Villas",
-          projectNumber: "TR-2026-0001",
-          amount: 125000,
-          estimator: "Estimator One",
-          address: {
-            street: "100 Main",
-            city: "Dallas",
-            state: "TX",
-            zip: "75201",
-            country: "US",
-          },
-        },
-      },
-    });
+    expect(rfpJobs).toHaveLength(0);
     vi.useRealTimers();
   });
 

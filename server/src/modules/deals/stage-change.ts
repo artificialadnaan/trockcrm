@@ -14,7 +14,7 @@ import {
   isContractStageSelectionEnabled,
 } from "../../config/feature-flags.js";
 import { validateStageGate } from "./stage-gate.js";
-import type { DealOpportunityEnteredEventPayload, UserRole } from "@trock-crm/shared/types";
+import type { UserRole } from "@trock-crm/shared/types";
 import { createStageTimers } from "./timer-service.js";
 import { activateDealScopingIntake, evaluateDealScopingReadiness } from "./scoping-service.js";
 import {
@@ -24,7 +24,6 @@ import {
   isBidBoardOwnedDownstreamStage,
 } from "./service.js";
 import { inferDealBidBoardOwnership } from "./workflow-backfill.js";
-import { enqueueOpportunityRfpIfNeeded } from "./rfp-enqueue.js";
 
 type TenantDb = NodePgDatabase<typeof schema>;
 
@@ -257,21 +256,6 @@ export async function changeDealStage(
     stageId: targetStageId,
     stageEnteredAt: new Date(),
   };
-  const rfpResult =
-    targetStage.slug === "opportunity" && currentStage.slug !== "opportunity"
-      ? await enqueueOpportunityRfpIfNeeded({
-          tenantDb,
-          deal: currentDeal[0],
-          userId,
-          officeId: officeId ?? null,
-          transitioningFrom: currentStage.slug,
-          enteredAt: dealUpdates.stageEnteredAt,
-        })
-      : null;
-
-  if (rfpResult?.enqueued && rfpResult.dealUpdates) {
-    Object.assign(dealUpdates, rfpResult.dealUpdates);
-  }
   const shouldResetBidBoardOwnership =
     inferredOwnership.isBidBoardOwned &&
     Boolean(estimatingBoundary) &&
@@ -411,36 +395,6 @@ export async function changeDealStage(
     payload: { eventName: "deal.stage.changed", ...stageChangedPayload },
     status: "pending",
   });
-
-  if (rfpResult?.enqueued && rfpResult.eventId) {
-    const opportunityPayload = {
-      eventName: DOMAIN_EVENTS.DEAL_OPPORTUNITY_ENTERED,
-      eventId: rfpResult.eventId,
-      idempotencyKey: `deal:${dealId}:rfp_approval:lifetime`,
-      dealId,
-      dealNumber: updatedDeal.dealNumber,
-      dealName: updatedDeal.name,
-      officeId: officeId ?? null,
-      workflowRoute: updatedDeal.workflowRoute,
-      fromStageId: currentStage.id,
-      toStageId: targetStage.id,
-      toStageSlug: "opportunity",
-      enteredAt: dealUpdates.stageEnteredAt,
-      requestedBy: userId,
-      source: "crm_stage_change",
-    } satisfies DealOpportunityEnteredEventPayload;
-    eventsToEmit.push({
-      name: DOMAIN_EVENTS.DEAL_OPPORTUNITY_ENTERED,
-      payload: opportunityPayload,
-    });
-    eventsEmitted.push(DOMAIN_EVENTS.DEAL_OPPORTUNITY_ENTERED);
-    await tenantDb.insert(jobQueue).values({
-      jobType: "domain_event",
-      payload: opportunityPayload,
-      officeId: officeId ?? null,
-      status: "pending",
-    });
-  }
 
   if (isEstimatingBoundaryStageSlug(targetStage.slug, updatedDeal.workflowRoute)) {
     const scopingActivatedPayload = {

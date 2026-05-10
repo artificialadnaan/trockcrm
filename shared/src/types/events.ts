@@ -37,7 +37,7 @@ export interface DealOpportunityEnteredEventPayload {
   toStageSlug: "opportunity";
   enteredAt: Date;
   requestedBy: string;
-  source: "crm_stage_change";
+  source: "crm_stage_change" | "manual_trigger";
 }
 
 export interface DealContractSignedEventPayload {
