@@ -1,0 +1,387 @@
+diff --git a/client/src/components/deals/deal-scoping-workspace.test.ts b/client/src/components/deals/deal-scoping-workspace.test.ts
+index ae13d74..8f2f44b 100644
+--- a/client/src/components/deals/deal-scoping-workspace.test.ts
++++ b/client/src/components/deals/deal-scoping-workspace.test.ts
+@@ -1,6 +1,12 @@
+-import { describe, expect, it } from "vitest";
++/**
++ * @vitest-environment jsdom
++ */
++import React, { act } from "react";
++import { createRoot } from "react-dom/client";
++import { describe, expect, it, vi, beforeEach } from "vitest";
+ 
+ import {
++  DealScopingWorkspace,
+   buildLineageResolvedPatch,
+   buildScopingAutosavePatch,
+   buildWorkspaceSectionData,
+@@ -13,6 +19,53 @@ import type {
+   DealScopingIntake,
+ } from "@/hooks/use-deals";
+ 
++(globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
++
++const mocks = vi.hoisted(() => ({
++  getDealScopingIntake: vi.fn(),
++  patchDealScopingIntake: vi.fn(),
++  patchResolvedDealFields: vi.fn(),
++  activateServiceHandoff: vi.fn(),
++  linkExistingScopingAttachment: vi.fn(),
++  uploadFile: vi.fn(),
++  useFiles: vi.fn(),
++  useProjectTypes: vi.fn(),
++  usePipelineStages: vi.fn(),
++  useAuth: vi.fn(),
++}));
++
++vi.mock("@/hooks/use-deals", async (importOriginal) => {
++  const actual = await importOriginal<typeof import("@/hooks/use-deals")>();
++  return {
++    ...actual,
++    getDealScopingIntake: mocks.getDealScopingIntake,
++    patchDealScopingIntake: mocks.patchDealScopingIntake,
++    patchResolvedDealFields: mocks.patchResolvedDealFields,
++    activateServiceHandoff: mocks.activateServiceHandoff,
++    linkExistingScopingAttachment: mocks.linkExistingScopingAttachment,
++  };
++});
++
++vi.mock("@/hooks/use-files", () => ({
++  uploadFile: mocks.uploadFile,
++  useFiles: mocks.useFiles,
++}));
++
++vi.mock("@/hooks/use-pipeline-config", () => ({
++  useProjectTypes: mocks.useProjectTypes,
++  usePipelineStages: mocks.usePipelineStages,
++}));
++
++vi.mock("@/lib/auth", () => ({
++  useAuth: mocks.useAuth,
++}));
++
++vi.mock("@/components/properties/property-selector", () => ({
++  PropertySelector: ({ value }: { value?: string | null }) => (
++    React.createElement("div", { "data-testid": "property-selector" }, value ?? "none")
++  ),
++}));
++
+ function makeDeal(overrides: Partial<DealDetail> = {}): DealDetail {
+   return {
+     id: "deal-1",
+@@ -111,6 +164,49 @@ function makeIntake(overrides: Partial<DealScopingIntake> = {}): DealScopingInta
+   };
+ }
+ 
++async function renderWorkspace(deal: DealDetail) {
++  const container = document.createElement("div");
++  document.body.appendChild(container);
++  const root = createRoot(container);
++
++  await act(async () => {
++    root.render(React.createElement(DealScopingWorkspace, { deal, onDealUpdated: vi.fn() }));
++  });
++
++  await act(async () => {
++    await Promise.resolve();
++  });
++
++  return {
++    container,
++    cleanup: () => {
++      act(() => {
++        root.unmount();
++      });
++      container.remove();
++    },
++  };
++}
++
++beforeEach(() => {
++  vi.clearAllMocks();
++  mocks.useAuth.mockReturnValue({ user: { id: "user-1", role: "admin" } });
++  mocks.useFiles.mockReturnValue({ files: [], refetch: vi.fn() });
++  mocks.useProjectTypes.mockReturnValue({
++    projectTypes: [{ id: "project-type-1", name: "Commercial", slug: "commercial" }],
++  });
++  mocks.usePipelineStages.mockReturnValue({
++    stages: [
++      {
++        id: "stage-1",
++        slug: "opportunity",
++        workflowFamily: "standard_deal",
++        displayOrder: 2,
++      },
++    ],
++  });
++});
++
+ describe("DealScopingWorkspace lineage routing helpers", () => {
+   it("keeps source-lead fields from being shadowed by stale scoping intake data", () => {
+     const stripped = stripLineageOwnedWorkspaceFields(
+@@ -218,3 +314,27 @@ describe("DealScopingWorkspace lineage routing helpers", () => {
+     ).toBe(true);
+   });
+ });
++
++describe("DealScopingWorkspace load failures", () => {
++  it("renders the editable scope form when the initial scoping intake request fails", async () => {
++    mocks.getDealScopingIntake.mockRejectedValueOnce(
++      new Error("projectType cannot be cleared after Opportunity")
++    );
++
++    const { container, cleanup } = await renderWorkspace(
++      makeDeal({
++        sourceLeadId: null,
++        projectTypeId: null,
++      })
++    );
++
++    try {
++      await vi.waitFor(() => expect(container.textContent).toContain("Scoping Workspace"));
++      expect(container.textContent).toContain("projectType cannot be cleared after Opportunity");
++      expect(container.textContent).toContain("Project Type");
++      expect(container.textContent).toContain("Scope Summary");
++    } finally {
++      cleanup();
++    }
++  });
++});
+diff --git a/client/src/components/deals/deal-scoping-workspace.tsx b/client/src/components/deals/deal-scoping-workspace.tsx
+index 0d21cc5..f4e8e0f 100644
+--- a/client/src/components/deals/deal-scoping-workspace.tsx
++++ b/client/src/components/deals/deal-scoping-workspace.tsx
+@@ -9,6 +9,7 @@ import {
+   Loader2,
+   Upload,
+   Wrench,
++  X,
+ } from "lucide-react";
+ import { toast } from "sonner";
+ import { Badge } from "@/components/ui/badge";
+@@ -356,6 +357,7 @@ export function DealScopingWorkspace({
+   );
+   const [loading, setLoading] = useState(true);
+   const [error, setError] = useState<string | null>(null);
++  const [dismissedError, setDismissedError] = useState(false);
+   const [saveState, setSaveState] = useState<"idle" | "saving" | "saved" | "error">("idle");
+   const [uploadingKey, setUploadingKey] = useState<string | null>(null);
+   const [activatingService, setActivatingService] = useState(false);
+@@ -389,6 +391,7 @@ export function DealScopingWorkspace({
+   const loadIntake = async () => {
+     setLoading(true);
+     setError(null);
++    setDismissedError(false);
+     try {
+       const result = await getDealScopingIntake(deal.id);
+       const nextSectionData = buildWorkspaceSectionData(deal, result.intake, result.resolved);
+@@ -408,6 +411,7 @@ export function DealScopingWorkspace({
+       setSaveState("idle");
+     } catch (err) {
+       setError(err instanceof Error ? err.message : "Failed to load scoping intake");
++      setDismissedError(false);
+     } finally {
+       setLoading(false);
+     }
+@@ -535,6 +539,7 @@ export function DealScopingWorkspace({
+       })
+     );
+     setError(null);
++    setDismissedError(false);
+   };
+ 
+   const handleLinkExisting = async (fileId: string, requirementKey: string) => {
+@@ -615,16 +620,6 @@ export function DealScopingWorkspace({
+     return <div className="h-72 animate-pulse rounded-lg bg-muted" />;
+   }
+ 
+-  if (error && !readiness) {
+-    return (
+-      <Card>
+-        <CardContent className="py-8">
+-          <p className="text-sm text-red-600">{error}</p>
+-        </CardContent>
+-      </Card>
+-    );
+-  }
+-
+   return (
+     <div className="grid gap-4 lg:grid-cols-[260px_minmax(0,1fr)]">
+       <div className="fixed right-4 top-4 z-40 rounded-full border bg-background px-3 py-1 text-xs font-medium shadow-sm">
+@@ -706,6 +701,25 @@ export function DealScopingWorkspace({
+       </div>
+ 
+       <div className="space-y-4">
++        {error && !dismissedError ? (
++          <div className="flex items-start justify-between gap-3 rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">
++            <div>
++              <div className="font-medium">Scoping intake needs attention</div>
++              <div className="mt-1">{error}</div>
++            </div>
++            <Button
++              type="button"
++              variant="ghost"
++              size="icon"
++              className="h-7 w-7 shrink-0 text-red-700 hover:bg-red-100 hover:text-red-800"
++              onClick={() => setDismissedError(true)}
++              aria-label="Dismiss scoping intake error"
++            >
++              <X className="h-4 w-4" />
++            </Button>
++          </div>
++        ) : null}
++
+         <Card>
+           <CardHeader>
+             <CardTitle>Scoping Workspace</CardTitle>
+@@ -1065,11 +1079,6 @@ export function DealScopingWorkspace({
+           </Card>
+         )}
+ 
+-        {error && readiness && (
+-          <div className="rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">
+-            {error}
+-          </div>
+-        )}
+       </div>
+     </div>
+   );
+diff --git a/server/src/modules/deals/scoping-service.ts b/server/src/modules/deals/scoping-service.ts
+index 5deb122..300a5a2 100644
+--- a/server/src/modules/deals/scoping-service.ts
++++ b/server/src/modules/deals/scoping-service.ts
+@@ -359,14 +359,17 @@ export async function getOrCreateDealScopingIntake(
+   const resolvedDeal = await getResolvedDeal(tenantDb, dealId);
+   const deal = resolvedDeal.deal;
+   await assertDealScopingEditable(deal);
++  const initialPatch: DealScopingPatch = {
++    sectionData: buildSeedSectionDataFromResolvedDeal(resolvedDeal),
++  };
++  if (resolvedDeal.resolved.projectTypeId != null) {
++    initialPatch.projectTypeId = resolvedDeal.resolved.projectTypeId;
++  }
+ 
+   return upsertDealScopingIntake(
+     tenantDb,
+     dealId,
+-    {
+-      projectTypeId: resolvedDeal.resolved.projectTypeId,
+-      sectionData: buildSeedSectionDataFromResolvedDeal(resolvedDeal),
+-    },
++    initialPatch,
+     userId
+   );
+ }
+diff --git a/server/tests/modules/deals/scoping-service.test.ts b/server/tests/modules/deals/scoping-service.test.ts
+index 5f1b7fc..f2612f8 100644
+--- a/server/tests/modules/deals/scoping-service.test.ts
++++ b/server/tests/modules/deals/scoping-service.test.ts
+@@ -463,6 +463,107 @@ describe("Scoping Service", () => {
+     });
+   });
+ 
++  it("initializes a legacy opportunity scoping intake without clearing a null project type", async () => {
++    pipelineMocks.getStageById.mockResolvedValue({
++      id: "stage-opportunity",
++      slug: "opportunity",
++      workflowFamily: "standard_deal",
++      displayOrder: 2,
++    });
++    pipelineMocks.getStageBySlug.mockResolvedValue({
++      id: "stage-opportunity",
++      slug: "opportunity",
++      workflowFamily: "standard_deal",
++      displayOrder: 2,
++    });
++
++    const tenantDb = createFakeTenantDb({
++      deals: [
++        {
++          id: "deal-1",
++          name: "Legacy Opportunity",
++          stageId: "stage-opportunity",
++          workflowRoute: "normal",
++          expectedCloseDate: null,
++          propertyAddress: "123 Legacy Way",
++          propertyCity: "Dallas",
++          propertyState: "TX",
++          propertyZip: "75201",
++          description: "Legacy imported opportunity",
++          projectTypeId: null,
++          assignedRepId: "rep-1",
++        },
++      ],
++    });
++
++    const result = await getOrCreateDealScopingIntake(tenantDb as never, "deal-1", "user-1");
++
++    expect(result.intake.projectTypeId).toBeNull();
++    expect(result.intake.sectionData).toMatchObject({
++      projectOverview: { propertyName: "Legacy Opportunity" },
++      propertyDetails: {
++        propertyAddress: "123 Legacy Way",
++        propertyCity: "Dallas",
++        propertyState: "TX",
++        propertyZip: "75201",
++      },
++      scopeSummary: { summary: "Legacy imported opportunity" },
++    });
++    expect(tenantDb.state.deals[0]?.projectTypeId).toBeNull();
++  });
++
++  it("still rejects explicitly clearing project type on an opportunity scoping write", async () => {
++    pipelineMocks.getStageById.mockResolvedValue({
++      id: "stage-opportunity",
++      slug: "opportunity",
++      workflowFamily: "standard_deal",
++      displayOrder: 2,
++    });
++    pipelineMocks.getStageBySlug.mockResolvedValue({
++      id: "stage-opportunity",
++      slug: "opportunity",
++      workflowFamily: "standard_deal",
++      displayOrder: 2,
++    });
++
++    const tenantDb = createFakeTenantDb({
++      deals: [
++        {
++          id: "deal-1",
++          name: "Typed Opportunity",
++          stageId: "stage-opportunity",
++          workflowRoute: "normal",
++          expectedCloseDate: null,
++          propertyAddress: "123 Typed Way",
++          propertyCity: "Dallas",
++          propertyState: "TX",
++          propertyZip: "75201",
++          description: "Typed opportunity",
++          projectTypeId: "project-type-1",
++          assignedRepId: "rep-1",
++        },
++      ],
++      users: [{ id: "user-1", officeId: "office-1", role: "admin" }],
++    });
++
++    await expect(
++      upsertDealScopingIntake(
++        tenantDb as never,
++        "deal-1",
++        {
++          projectTypeId: null,
++          sectionData: {
++            projectOverview: { propertyName: "Typed Opportunity" },
++          },
++        },
++        "user-1"
++      )
++    ).rejects.toMatchObject<AppError>({
++      statusCode: 400,
++      message: "projectType cannot be cleared after Opportunity",
++    });
++  });
++
+   it("writes deal-owned scoping fields back to canonical deal columns", async () => {
+     pipelineMocks.getStageById.mockResolvedValue({
+       id: "stage-opportunity",
