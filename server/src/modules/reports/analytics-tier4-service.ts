@@ -229,7 +229,7 @@ export async function getMarketMixReport(
     const where = buildWhere(filters);
     const outcomeWhere = buildWhere(filters, sql`COALESCE(d.actual_close_date, d.lost_at, d.updated_at)`);
     const verticalExpr = sql`COALESCE(NULLIF(c.industry::text, ''), NULLIF(d.project_type, ''), 'Uncategorized')`;
-    const regionExpr = sql`COALESCE(NULLIF(c.region, ''), NULLIF(d.property_city, ''), NULLIF(d.property_state, ''), 'Uncategorized')`;
+    const regionExpr = sql`COALESCE(NULLIF(c.region, ''), NULLIF(rc.name, ''), NULLIF(p.city, ''), NULLIF(p.state, ''), NULLIF(d.property_city, ''), NULLIF(d.property_state, ''), 'Uncategorized')`;
     const propertyTypeExpr = sql`COALESCE(NULLIF(p.property_type, ''), NULLIF(p.type::text, ''), 'Uncategorized')`;
     const valueExpr = sql`COALESCE(d.awarded_amount, d.bid_estimate, d.dd_estimate, 0)`;
 
@@ -244,6 +244,7 @@ export async function getMarketMixReport(
             FROM deals d
             LEFT JOIN companies c ON c.id = d.company_id
             LEFT JOIN properties p ON p.id = d.property_id
+            LEFT JOIN region_config rc ON rc.id = d.region_id
             LEFT JOIN users u ON u.id = d.assigned_rep_id
             WHERE ${where}
             GROUP BY ${regionExpr}
@@ -253,6 +254,7 @@ export async function getMarketMixReport(
         FROM deals d
         LEFT JOIN companies c ON c.id = d.company_id
         LEFT JOIN properties p ON p.id = d.property_id
+        LEFT JOIN region_config rc ON rc.id = d.region_id
         LEFT JOIN users u ON u.id = d.assigned_rep_id
         LEFT JOIN pipeline_stage_config psc ON psc.id = d.stage_id
         WHERE ${where}
@@ -264,6 +266,7 @@ export async function getMarketMixReport(
         FROM deals d
         LEFT JOIN companies c ON c.id = d.company_id
         LEFT JOIN properties p ON p.id = d.property_id
+        LEFT JOIN region_config rc ON rc.id = d.region_id
         LEFT JOIN users u ON u.id = d.assigned_rep_id
         LEFT JOIN pipeline_stage_config psc ON psc.id = d.stage_id
         WHERE ${where}
@@ -278,6 +281,7 @@ export async function getMarketMixReport(
         FROM deals d
         LEFT JOIN companies c ON c.id = d.company_id
         LEFT JOIN properties p ON p.id = d.property_id
+        LEFT JOIN region_config rc ON rc.id = d.region_id
         LEFT JOIN users u ON u.id = d.assigned_rep_id
         LEFT JOIN pipeline_stage_config psc ON psc.id = d.stage_id
         WHERE ${where}
@@ -292,6 +296,7 @@ export async function getMarketMixReport(
         FROM deals d
         LEFT JOIN companies c ON c.id = d.company_id
         LEFT JOIN properties p ON p.id = d.property_id
+        LEFT JOIN region_config rc ON rc.id = d.region_id
         LEFT JOIN users u ON u.id = d.assigned_rep_id
         LEFT JOIN pipeline_stage_config psc ON psc.id = d.stage_id
         WHERE ${where}
@@ -301,12 +306,13 @@ export async function getMarketMixReport(
       `),
       tenantDb.execute(sql`
         SELECT
-          CONCAT(EXTRACT(YEAR FROM COALESCE(d.actual_close_date, d.updated_at))::int, ' Q', EXTRACT(QUARTER FROM COALESCE(d.actual_close_date, d.updated_at))::int) AS quarter,
+          CONCAT(EXTRACT(YEAR FROM COALESCE(d.actual_close_date, d.updated_at) AT TIME ZONE 'UTC')::int, ' Q', EXTRACT(QUARTER FROM COALESCE(d.actual_close_date, d.updated_at) AT TIME ZONE 'UTC')::int) AS quarter,
           ${verticalExpr} AS vertical,
           COALESCE(SUM(${valueExpr}), 0)::numeric AS won_value
         FROM deals d
         LEFT JOIN companies c ON c.id = d.company_id
         LEFT JOIN properties p ON p.id = d.property_id
+        LEFT JOIN region_config rc ON rc.id = d.region_id
         LEFT JOIN users u ON u.id = d.assigned_rep_id
         JOIN pipeline_stage_config psc ON psc.id = d.stage_id
         WHERE ${outcomeWhere}
@@ -324,6 +330,7 @@ export async function getMarketMixReport(
         FROM deals d
         LEFT JOIN companies c ON c.id = d.company_id
         LEFT JOIN properties p ON p.id = d.property_id
+        LEFT JOIN region_config rc ON rc.id = d.region_id
         LEFT JOIN users u ON u.id = d.assigned_rep_id
         LEFT JOIN pipeline_stage_config psc ON psc.id = d.stage_id
         WHERE ${where}
@@ -374,7 +381,7 @@ export async function getMarketMixReport(
       }),
       proxyNotes: [
         "Vertical uses company industry when present; deal project type is the fallback proxy.",
-        "Region uses company region, then deal/property geography fallback.",
+        "Region uses company region, configured deal region, then property/deal geography fallback.",
       ],
     };
   });
@@ -586,7 +593,7 @@ export async function getExecutiveTrendsReport(
       `),
       tenantDb.execute(sql`
         SELECT
-          CONCAT(EXTRACT(YEAR FROM d.created_at)::int, ' Q', EXTRACT(QUARTER FROM d.created_at)::int) AS quarter,
+          CONCAT(EXTRACT(YEAR FROM d.created_at AT TIME ZONE 'UTC')::int, ' Q', EXTRACT(QUARTER FROM d.created_at AT TIME ZONE 'UTC')::int) AS quarter,
           COUNT(DISTINCT d.id)::int AS deals_created,
           COUNT(DISTINCT d.id) FILTER (WHERE psc.slug IN (${sqlStringList(WON_STAGE_SLUGS)}))::int AS won,
           COUNT(DISTINCT d.id) FILTER (WHERE psc.slug IN (${sqlStringList(LOST_STAGE_SLUGS)}))::int AS lost,

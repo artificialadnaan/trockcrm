@@ -8,6 +8,18 @@ export function MarketMixPage() {
   const { query } = useReportFilters();
   const { data, loading, error, refetch } = useMarketMixReport(query);
   const report = data;
+  const quarterlyVerticals = report
+    ? Array.from(new Set(report.quarterlyWonByVertical.map((row) => row.vertical))).slice(0, 8)
+    : [];
+  const quarterlyChartData = report
+    ? Array.from(new Set(report.quarterlyWonByVertical.map((row) => row.quarter))).map((quarter) => {
+        const point: Record<string, string | number> = { quarter };
+        for (const row of report.quarterlyWonByVertical) {
+          if (row.quarter === quarter) point[row.vertical] = (Number(point[row.vertical] ?? 0) || 0) + row.wonValue;
+        }
+        return point;
+      })
+    : [];
 
   return (
     <ReportPageShell
@@ -35,16 +47,24 @@ export function MarketMixPage() {
           <Card>
             <CardContent className="p-5">
               <h2 className="text-sm font-black uppercase tracking-[0.16em] text-slate-900">Won Value by Vertical</h2>
-              {report.quarterlyWonByVertical.length ? (
+              {quarterlyChartData.length ? (
                 <div className="mt-4 h-80">
                   <ResponsiveContainer width="100%" height="100%">
-                    <BarChart data={report.quarterlyWonByVertical}>
+                    <BarChart data={quarterlyChartData}>
                       <CartesianGrid strokeDasharray="3 3" />
                       <XAxis dataKey="quarter" />
                       <YAxis tickFormatter={(value) => `$${Number(value) / 1000}k`} />
                       <Tooltip formatter={(value) => formatCurrency(Number(value))} />
                       <Legend />
-                      <Bar dataKey="wonValue" name="Won value" fill="#cc0000" />
+                      {quarterlyVerticals.map((vertical, index) => (
+                        <Bar
+                          key={vertical}
+                          dataKey={vertical}
+                          name={vertical}
+                          stackId="wonValue"
+                          fill={CHART_COLORS[index % CHART_COLORS.length]}
+                        />
+                      ))}
                     </BarChart>
                   </ResponsiveContainer>
                 </div>
