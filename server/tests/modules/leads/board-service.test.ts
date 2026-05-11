@@ -140,7 +140,7 @@ describe("listLeadBoard", () => {
     expect(dbState.chain.orderBy).toHaveBeenCalled();
   });
 
-  it("limits board payload cards to the preview window while keeping the full count", async () => {
+  it("returns every card in each board column so the rendered cards match the count", async () => {
     dbState.responses = [
       [{ id: "stage-new", slug: "new_lead", name: "New Lead", displayOrder: 1, isTerminal: false, isActivePipeline: true }],
       [{ id: "deal-stage-1" }],
@@ -173,11 +173,10 @@ describe("listLeadBoard", () => {
       userId: "director-1",
       activeOfficeId: "office-1",
       scope: "team",
-      previewLimit: 8,
     });
 
     expect(result.columns[0]?.count).toBe(10);
-    expect(result.columns[0]?.cards).toHaveLength(8);
+    expect(result.columns[0]?.cards).toHaveLength(10);
   });
 
   it("scopes board queries to the active office even for admin all scope", async () => {

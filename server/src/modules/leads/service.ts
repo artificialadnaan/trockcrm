@@ -232,7 +232,6 @@ export interface LeadBoardInput {
   userId: string;
   activeOfficeId: string;
   scope: WorkspaceScope;
-  previewLimit?: number;
 }
 
 export interface LeadStagePageInput extends LeadBoardInput {
@@ -980,7 +979,6 @@ function groupLeadBoardColumns(
 }
 
 async function listLeadBoardWorkspace(tenantDb: TenantDb, input: LeadBoardInput) {
-  const previewLimit = Math.max(1, Math.min(12, input.previewLimit ?? 8));
   const [stages, defaultConversionDealStageId, rowResult] = await Promise.all([
     listLeadStages(),
     getDefaultConversionDealStageId(),
@@ -1011,10 +1009,7 @@ async function listLeadBoardWorkspace(tenantDb: TenantDb, input: LeadBoardInput)
   ]);
 
   return {
-    columns: groupLeadBoardColumns(stages, rowResult.rows as LeadStageRow[]).map((column) => ({
-      ...column,
-      cards: column.cards.slice(0, previewLimit),
-    })),
+    columns: groupLeadBoardColumns(stages, rowResult.rows as LeadStageRow[]),
     defaultConversionDealStageId,
   };
 }

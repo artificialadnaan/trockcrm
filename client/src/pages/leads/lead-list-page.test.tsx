@@ -220,6 +220,32 @@ describe("LeadListPage", () => {
     expect(html).not.toContain("Legacy Opportunity Lead");
   });
 
+  it("renders every lead card returned for a busy column inside an internally scrollable body", () => {
+    const busyCards = Array.from({ length: 13 }).map((_, index) => ({
+      id: `lead-busy-${index + 1}`,
+      name: `Busy Lead ${index + 1}`,
+      stageId: "stage-new",
+      companyName: "Keller ISD",
+      source: "referral",
+      stageEnteredAt: "2026-04-20T10:00:00.000Z",
+      updatedAt: "2026-04-20T10:00:00.000Z",
+    }));
+    boardColumns[0] = {
+      ...boardColumns[0],
+      count: busyCards.length,
+      cards: busyCards,
+    };
+
+    const html = renderPage();
+
+    expect(html).toContain("overflow-y-auto");
+    expect(html).toContain('aria-label="New Lead leads"');
+    expect(html).toContain(">13</p>");
+    for (const lead of busyCards) {
+      expect(html).toContain(lead.name);
+    }
+  });
+
   it("loads summary leads with the active scope when role is director", () => {
     renderPage("/leads?scope=team", "director");
     expect(mocks.useLeadsMock).toHaveBeenLastCalledWith({ status: "open", isActive: true, scope: "team" });
