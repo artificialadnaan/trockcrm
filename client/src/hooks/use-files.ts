@@ -346,7 +346,31 @@ interface UploadUrlResponse {
   uploadToken: string;
 }
 
+function devMockUploadPath(uploadUrl: string): string | null {
+  try {
+    const url = new URL(uploadUrl, typeof window !== "undefined" ? window.location.origin : "http://localhost");
+    if (url.pathname !== "/api/files/dev-upload") return null;
+    return `${url.pathname.replace(/^\/api/, "")}${url.search}`;
+  } catch {
+    return null;
+  }
+}
+
 function uploadToSignedUrl(file: File, uploadUrl: string, onProgress?: (percent: number) => void): Promise<void> {
+  const mockPath = devMockUploadPath(uploadUrl);
+  if (mockPath) {
+    onProgress?.(0);
+    return api<void>(mockPath, {
+      method: "PUT",
+      headers: {
+        "Content-Type": file.type || "application/octet-stream",
+      },
+      body: file,
+    }).then(() => {
+      onProgress?.(100);
+    });
+  }
+
   return new Promise<void>((resolve, reject) => {
     const xhr = new XMLHttpRequest();
     xhr.open("PUT", uploadUrl);
