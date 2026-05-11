@@ -12,6 +12,12 @@ const ROLE_DEFAULT_SCOPE: Record<PipelineRole, PipelineScope> = {
   admin: "all",
 };
 
+const ROLE_ALLOWED_SCOPES: Record<PipelineRole, readonly PipelineScope[]> = {
+  rep: ["mine"],
+  director: ["mine", "team", "all"],
+  admin: ["mine", "team", "all"],
+};
+
 function coerceScope(value: string | null): PipelineScope | null {
   if (value === "mine" || value === "team" || value === "all") return value;
   return null;
@@ -22,7 +28,10 @@ export function normalizePipelineScope(input: {
   requestedScope: PipelineScope | null;
   entity: PipelineEntity;
 }) {
-  const allowedScope = ROLE_DEFAULT_SCOPE[input.role];
+  const role = input.role in ROLE_DEFAULT_SCOPE ? input.role : "rep";
+  const allowedScope = input.requestedScope && ROLE_ALLOWED_SCOPES[role].includes(input.requestedScope)
+    ? input.requestedScope
+    : ROLE_DEFAULT_SCOPE[role];
 
   return {
     allowedScope,
@@ -49,11 +58,12 @@ export function useNormalizedStageRoute(entity: PipelineEntity, stageId: string)
   const [searchParams, setSearchParams] = useSearchParams();
   const { user } = useAuth();
   const role = (user?.role ?? "director") as PipelineRole;
-  const requestedScope = coerceScope(searchParams.get("scope"));
-  const allowedScope =
-    role === "rep"
-      ? "mine"
-      : requestedScope ?? ROLE_DEFAULT_SCOPE[role] ?? "mine";
+  const normalized = normalizePipelineScope({
+    role,
+    requestedScope: coerceScope(searchParams.get("scope")),
+    entity,
+  });
+  const allowedScope = normalized.allowedScope;
   const needsRedirect = searchParams.get("scope") !== allowedScope;
   const nextParams = new URLSearchParams(searchParams);
   nextParams.set("scope", allowedScope);
