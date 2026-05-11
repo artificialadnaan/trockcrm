@@ -1,6 +1,7 @@
 import { Router, type Request } from "express";
 import { requireRole } from "../../middleware/rbac.js";
 import { AppError } from "../../middleware/error-handler.js";
+import { pool } from "../../db.js";
 import { runProjectsBackfill } from "./backfill-service.js";
 import {
   getProjectDetail,
@@ -68,8 +69,15 @@ router.get("/by-phase", async (req, res, next) => {
 
 router.post("/backfill", requireRole("admin"), async (req, res, next) => {
   try {
-    const data = await runProjectsBackfill(req.tenantClient!, currentSchema(req), req.officeSlug!);
+    const schemaName = currentSchema(req);
+    const officeSlug = req.officeSlug!;
+    // Release the request's tenant transaction before the long-running
+    // backfill so its Procore HTTP calls don't keep a connection
+    // idle-in-transaction (which Postgres terminates, producing
+    // "SAVEPOINT can only be used in transaction blocks" or
+    // "current transaction is aborted" on the next query).
     await req.commitTransaction!();
+    const data = await runProjectsBackfill(pool, schemaName, officeSlug);
     res.json(data);
   } catch (error) {
     next(error);
