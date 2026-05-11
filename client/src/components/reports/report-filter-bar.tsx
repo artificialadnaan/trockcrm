@@ -91,7 +91,11 @@ export function ReportFilterBar({ defaultRange = "90" }: { defaultRange?: Defaul
   const { filters } = useReportFilters({ defaultRange });
   const [draft, setDraft] = useState<ReportFilters>(filters);
   const { offices } = useAccessibleOffices();
-  const { salesReps } = useSalesReps();
+  const canonicalOfficeId = useMemo(() => {
+    if (!draft.office || draft.office === "all") return undefined;
+    return offices.find((office) => office.id === draft.office || office.slug === draft.office)?.id;
+  }, [draft.office, offices]);
+  const { salesReps } = useSalesReps(canonicalOfficeId);
 
   useEffect(() => {
     setDraft(filters);
@@ -187,12 +191,12 @@ export function ReportFilterBar({ defaultRange = "90" }: { defaultRange?: Defaul
           Office
           <select
             value={draft.office}
-            onChange={(event) => setDraft((current) => ({ ...current, office: event.target.value }))}
+            onChange={(event) => setDraft((current) => ({ ...current, office: event.target.value, ownerNames: [] }))}
             className="h-10 w-full rounded-md border border-slate-200 bg-white px-3 text-sm font-medium text-slate-700"
           >
             <option value="all">All offices</option>
             {offices.map((office) => (
-              <option key={office.id} value={office.slug}>{office.name}</option>
+              <option key={office.id} value={office.id}>{office.name}</option>
             ))}
             {offices.length === 0 ? (
               <>

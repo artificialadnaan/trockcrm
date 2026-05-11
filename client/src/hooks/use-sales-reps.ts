@@ -6,7 +6,7 @@ export interface SalesRepOption {
   displayName: string;
 }
 
-export function useSalesReps() {
+export function useSalesReps(officeId?: string) {
   const [salesReps, setSalesReps] = useState<SalesRepOption[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -15,14 +15,17 @@ export function useSalesReps() {
     setLoading(true);
     setError(null);
     try {
-      const data = await api<{ users: SalesRepOption[] }>("/users/sales-reps");
+      const headers = officeId && officeId !== "all"
+        ? { "x-office-id": officeId }
+        : undefined;
+      const data = await api<{ users: SalesRepOption[] }>("/users/sales-reps", headers ? { headers } : undefined);
       setSalesReps(data.users);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to load sales reps");
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [officeId]);
 
   useEffect(() => {
     load();
