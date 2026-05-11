@@ -13,6 +13,7 @@ import {
   Users,
 } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
+import { Link } from "react-router-dom";
 import { PageHeader } from "@/components/layout/page-header";
 import { Card, CardContent } from "@/components/ui/card";
 import type { UserRole } from "@trock-crm/shared/types";
@@ -25,6 +26,7 @@ type ReportCard = {
   name: string;
   description: string;
   icon: LucideIcon;
+  path?: string;
 };
 
 const reportCategories: Array<{ category: string; description: string; reports: ReportCard[] }> = [
@@ -50,9 +52,24 @@ const reportCategories: Array<{ category: string; description: string; reports: 
     category: "Operations",
     description: "Workflow health, due dates, handoffs, and closeout readiness.",
     reports: [
-      { name: "Workflow Bottlenecks", description: "Aging by stage and blocked handoff counts.", icon: CalendarClock },
-      { name: "Project Readiness", description: "Scoping, estimate, and kickoff completeness.", icon: ClipboardList },
-      { name: "Portfolio Load", description: "Active work grouped by company and property.", icon: BriefcaseBusiness },
+      {
+        name: "Workflow Bottlenecks",
+        description: "Aging by stage and blocked handoff counts.",
+        icon: CalendarClock,
+        path: "/reports/operations/workflow-bottlenecks",
+      },
+      {
+        name: "Project Readiness",
+        description: "Scoping, estimate, and kickoff completeness.",
+        icon: ClipboardList,
+        path: "/reports/operations/project-readiness",
+      },
+      {
+        name: "Portfolio Load",
+        description: "Active work grouped by company and property.",
+        icon: BriefcaseBusiness,
+        path: "/reports/operations/portfolio-load",
+      },
     ],
   },
   {
@@ -100,22 +117,34 @@ export function ReportsPage() {
             <div className="grid grid-cols-1 gap-3 md:grid-cols-3">
               {group.reports.map((report) => {
                 const Icon = report.icon;
-                return (
-                  <Card key={report.name} className="border-slate-200 bg-white">
-                    <CardContent className="flex items-start gap-4 p-5">
-                      <div className="grid h-12 w-12 shrink-0 place-items-center rounded-xl bg-slate-950 text-white">
-                        <Icon className="h-5 w-5" />
-                      </div>
-                      <div className="min-w-0">
-                        <div className="flex flex-wrap items-center gap-2">
-                          <h3 className="font-black uppercase tracking-tight text-slate-950">{report.name}</h3>
+                const content = (
+                  <CardContent className="flex items-start gap-4 p-5">
+                    <div className="grid h-12 w-12 shrink-0 place-items-center rounded-xl bg-slate-950 text-white">
+                      <Icon className="h-5 w-5" />
+                    </div>
+                    <div className="min-w-0">
+                      <div className="flex flex-wrap items-center gap-2">
+                        <h3 className="font-black uppercase tracking-tight text-slate-950">{report.name}</h3>
+                        {!report.path ? (
                           <span className="rounded-full bg-red-50 px-2 py-1 text-[10px] font-black uppercase tracking-[0.14em] text-brand-red">
                             Coming soon
                           </span>
-                        </div>
-                        <p className="mt-2 text-sm text-slate-600">{report.description}</p>
+                        ) : null}
                       </div>
-                    </CardContent>
+                      <p className="mt-2 text-sm text-slate-600">{report.description}</p>
+                    </div>
+                  </CardContent>
+                );
+
+                return report.path ? (
+                  <Card key={report.name} className="border-slate-200 bg-white transition hover:border-brand-red hover:shadow-md">
+                    <Link to={report.path} className="block focus:outline-none focus:ring-2 focus:ring-brand-red focus:ring-offset-2">
+                      {content}
+                    </Link>
+                  </Card>
+                ) : (
+                  <Card key={report.name} className="border-slate-200 bg-white">
+                    {content}
                   </Card>
                 );
               })}
