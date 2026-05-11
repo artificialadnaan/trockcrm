@@ -1,14 +1,14 @@
 import type { FileCategory } from "@trock-crm/shared/types";
 
 /**
- * Maximum file size in bytes (50 MB).
+ * Maximum file size in bytes (200 MB).
  */
-export const MAX_FILE_SIZE_BYTES = 50 * 1024 * 1024;
+export const MAX_FILE_SIZE_BYTES = 200 * 1024 * 1024;
 
 /**
- * Presigned URL expiry in seconds (15 minutes).
+ * Presigned URL expiry in seconds (30 minutes).
  */
-export const PRESIGNED_URL_EXPIRY_SECONDS = 15 * 60;
+export const PRESIGNED_URL_EXPIRY_SECONDS = 30 * 60;
 
 /**
  * Allowed MIME types mapped to their canonical file extensions.

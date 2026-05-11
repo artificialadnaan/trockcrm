@@ -67,11 +67,12 @@ describe("r2-client", () => {
     getSignedUrlMock.mockResolvedValueOnce("https://upload.test").mockResolvedValueOnce("https://download.test");
     const r2 = await importR2();
 
-    await expect(r2.generateUploadUrl("photos/a.jpg", "image/jpeg", 123)).resolves.toEqual({ uploadUrl: "https://upload.test", r2Key: "photos/a.jpg", expiresIn: expect.any(Number) });
+    await expect(r2.generateUploadUrl("photos/a.jpg", "image/jpeg", 123)).resolves.toEqual({ uploadUrl: "https://upload.test", r2Key: "photos/a.jpg", expiresIn: 30 * 60 });
     await expect(r2.generateDownloadUrl("photos/a.jpg", 60, "a.jpg")).resolves.toBe("https://download.test");
 
     expect(commandInstances[0]).toMatchObject({ type: "put", input: { Bucket: "bucket", Key: "photos/a.jpg", ContentType: "image/jpeg" } });
     expect(commandInstances[1]).toMatchObject({ type: "get", input: { Bucket: "bucket", Key: "photos/a.jpg", ResponseContentDisposition: 'attachment; filename="a.jpg"' } });
+    expect(getSignedUrlMock).toHaveBeenNthCalledWith(1, expect.anything(), expect.anything(), { expiresIn: 30 * 60 });
   });
 
   it("handles object metadata, buffers, deletes, puts, and CORS", async () => {

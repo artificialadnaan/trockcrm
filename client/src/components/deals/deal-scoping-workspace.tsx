@@ -363,6 +363,7 @@ export function DealScopingWorkspace({
   const [initialLoadFailed, setInitialLoadFailed] = useState(false);
   const [saveState, setSaveState] = useState<"idle" | "saving" | "saved" | "error">("idle");
   const [uploadingKey, setUploadingKey] = useState<string | null>(null);
+  const [uploadProgress, setUploadProgress] = useState<number | null>(null);
   const [activatingService, setActivatingService] = useState(false);
   const lastSavedFingerprintRef = useRef("");
   const hydrationCompleteRef = useRef(false);
@@ -654,12 +655,14 @@ export function DealScopingWorkspace({
     if (!fileList?.length) return;
 
     setUploadingKey(requirement.key);
+    setUploadProgress(0);
     try {
       for (const file of Array.from(fileList)) {
         const uploaded = await uploadFile({
           file,
           category: requirement.category,
           dealId: deal.id,
+          onProgress: setUploadProgress,
         });
         await linkExistingScopingAttachment(deal.id, {
           fileId: uploaded.id,
@@ -673,6 +676,7 @@ export function DealScopingWorkspace({
       toast.error(err instanceof Error ? err.message : "Upload failed");
     } finally {
       setUploadingKey(null);
+      setUploadProgress(null);
     }
   };
 
@@ -1099,7 +1103,9 @@ export function DealScopingWorkspace({
                       ) : (
                         <Upload className="h-4 w-4" />
                       )}
-                      Upload
+                      {uploadingKey === requirement.key && uploadProgress != null
+                        ? `Uploading ${uploadProgress}%`
+                        : "Upload"}
                       <input
                         type="file"
                         multiple
