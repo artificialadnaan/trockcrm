@@ -102,6 +102,8 @@ describe("performance tier 2 report service helpers", () => {
     expect(kpiSql).toContain("o.slug = ");
     expect(riskSql).toContain("overdue_tasks");
     expect(riskSql).toContain("task_deals");
+    expect(riskSql).toContain("u.id = t.assigned_to");
+    expect(riskSql).not.toContain("t.responsible_user_id");
     expect(repSql).toContain("rep_won");
     expect(repSql).toContain("u.id IN");
     expect(officeSql).not.toContain("0::numeric AS win_rate");
