@@ -150,6 +150,13 @@ export { estimateLineItems } from "./tenant/estimate-line-items.js";
 export { punchListItems, punchListTypeEnum, punchListStatusEnum } from "./tenant/punch-list-items.js";
 export { workflowTimers, workflowTimerTypeEnum, workflowTimerStatusEnum } from "./tenant/workflow-timers.js";
 export { closeoutChecklistItems } from "./tenant/closeout-checklist-items.js";
+export {
+  projects,
+  projectPhaseHistory,
+  projectTeam,
+  projectDocuments,
+  projectSyncState,
+} from "./tenant/projects.js";
 export { aiDocumentIndex } from "./tenant/ai-document-index.js";
 export { aiEmbeddingChunks } from "./tenant/ai-embedding-chunks.js";
 export { aiCopilotPackets } from "./tenant/ai-copilot-packets.js";
