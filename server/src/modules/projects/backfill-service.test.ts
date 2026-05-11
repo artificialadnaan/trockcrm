@@ -65,6 +65,79 @@ describe("projects backfill service", () => {
     expect(sqlText.match(/INSERT INTO "office_dallas"\.projects/g)).toHaveLength(1);
   });
 
+  it("isolates a failing row with a savepoint so later rows still backfill", async () => {
+    vi.mocked(procoreClient.get).mockResolvedValueOnce([
+      {
+        id: 2001,
+        project_number: "DFW-1-02001-aa",
+        name: "Bad row",
+        project_stage_name: "Warranty",
+      },
+      {
+        id: 2002,
+        project_number: "DFW-1-02002-aa",
+        name: "Good row",
+        project_stage_name: "Warranty",
+      },
+    ]);
+
+    let inAbortedTxn = false;
+    const savepointStack: string[] = [];
+
+    const responder = (sql: string, params?: unknown[]) => {
+      // Simulate Postgres aborted-transaction semantics: every statement after the
+      // first failure returns "current transaction is aborted" until a ROLLBACK
+      // TO SAVEPOINT clears the broken state.
+      if (inAbortedTxn) {
+        const trimmed = sql.trim().toUpperCase();
+        if (trimmed.startsWith("ROLLBACK TO SAVEPOINT") || trimmed.startsWith("RELEASE SAVEPOINT")) {
+          if (trimmed.startsWith("ROLLBACK TO SAVEPOINT")) {
+            inAbortedTxn = false;
+          }
+          return { rows: [] };
+        }
+        throw Object.assign(new Error("current transaction is aborted, commands ignored until end of transaction block"), { code: "25P02" });
+      }
+
+      const trimmed = sql.trim().toUpperCase();
+      if (trimmed.startsWith("SAVEPOINT")) {
+        savepointStack.push(sql.replace(/.*SAVEPOINT\s+/i, "").trim());
+        return { rows: [] };
+      }
+      if (trimmed.startsWith("RELEASE SAVEPOINT")) {
+        savepointStack.pop();
+        return { rows: [] };
+      }
+      if (trimmed.startsWith("ROLLBACK TO SAVEPOINT")) {
+        return { rows: [] };
+      }
+
+      if (sql.includes("SELECT id, procore_updated_at")) return { rows: [] };
+      if (sql.includes("FROM deals")) return { rows: [] };
+      if (sql.includes("SELECT id, current_phase_id, current_phase_name")) return { rows: [] };
+      if (sql.includes("INSERT INTO \"office_dallas\".projects")) {
+        if (params?.[1] === "2001") {
+          inAbortedTxn = true;
+          throw Object.assign(new Error("duplicate key value violates unique constraint"), { code: "23505" });
+        }
+        return { rows: [{ id: "project-2002", inserted: true }] };
+      }
+      return { rows: [] };
+    };
+
+    const client = createClient(responder);
+    const result = await runProjectsBackfill(client as any, "office_dallas", "dallas", "598134325683880");
+
+    expect(result).toMatchObject({ backfilled: 1, errored: 1, skipped: 0 });
+    expect(result.errors).toHaveLength(1);
+    expect(result.errors[0].procoreProjectId).toBe("2001");
+    const sqlText = client.query.mock.calls.map((call) => String(call[0])).join("\n");
+    expect(sqlText).toMatch(/SAVEPOINT projects_backfill_p1_i0/);
+    expect(sqlText).toMatch(/ROLLBACK TO SAVEPOINT projects_backfill_p1_i0/);
+    expect(sqlText).toMatch(/SAVEPOINT projects_backfill_p1_i1/);
+    expect(sqlText.match(/INSERT INTO "office_dallas"\.projects/g) ?? []).toHaveLength(2);
+  });
+
   it("mirrors unmatched projects only when their project number belongs to the current office", async () => {
     vi.mocked(procoreClient.get).mockResolvedValueOnce([
       {
