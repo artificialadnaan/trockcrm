@@ -213,6 +213,23 @@ describe("DealsListSection", () => {
     expect(html).not.toContain(">Export<");
   });
 
+  it("accepts a deal workflow family and custom search placeholder without changing page-based query", () => {
+    const html = render({
+      workflowFamily: "deal",
+      searchPlaceholder: "Search deals or accounts",
+      showFilterButton: true,
+      pageSize: 20,
+    });
+
+    expect(mocks.usePipelineStagesMock).toHaveBeenCalledWith("deal");
+    expect(mocks.useDealsMock).toHaveBeenCalledWith(
+      expect.objectContaining({ limit: 20 }),
+      expect.any(Object)
+    );
+    expect(html).toContain('placeholder="Search deals or accounts"');
+    expect(html).toContain(">Filter<");
+  });
+
   it("renders date filter control when enableDateFilter is true", () => {
     const html = render({ enableDateFilter: true });
     expect(html).toContain("data-mock-date-filter");

@@ -26,6 +26,7 @@ const mocks = vi.hoisted(() => ({
   readTerminalDateFilterMock: vi.fn(),
   buildDealStageWorkspacePathMock: vi.fn(),
   useAuthMock: vi.fn(),
+  dealsListSectionMock: vi.fn(),
 }));
 
 vi.mock("@/hooks/use-deals", () => ({
@@ -51,6 +52,23 @@ vi.mock("@/components/ui/button", () => ({
   ),
 }));
 
+vi.mock("@/components/deals/deals-list-section", () => ({
+  DealsListSection: (props: Record<string, unknown>) => {
+    mocks.dealsListSectionMock(props);
+    return (
+      <section data-testid="deals-list-section">
+        <h2>{String(props.title ?? "Pipeline records")}</h2>
+        <p>{String(props.eyebrow ?? "Deal list")}</p>
+        <p>{String(props.searchPlaceholder ?? "")}</p>
+        <p>{String(props.scope ?? "")}</p>
+        <p>{String(props.pageSize ?? "")}</p>
+        <p>{props.enableExport ? "Export" : "No export"}</p>
+        <p>{props.enableDateFilter ? "Date filter enabled" : "Date filter disabled"}</p>
+      </section>
+    );
+  },
+}));
+
 vi.mock("@/lib/pipeline-terminal-filters", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/lib/pipeline-terminal-filters")>();
   return {
@@ -74,6 +92,7 @@ function makeDeal(overrides: Record<string, unknown> = {}) {
     assignedRepId: "rep-1",
     assignedRepName: "Brett Jones",
     companyId: "company-1",
+    companyName: "Acme Construction",
     propertyId: "property-1",
     sourceLeadId: "lead-1",
     primaryContactId: null,
@@ -143,6 +162,7 @@ describe("DealListPage", () => {
     mocks.readTerminalDateFilterMock.mockReset();
     mocks.buildDealStageWorkspacePathMock.mockReset();
     mocks.useAuthMock.mockReset();
+    mocks.dealsListSectionMock.mockReset();
 
     mocks.readTerminalDateFilterMock.mockImplementation((outcome: string) => ({
       preset: outcome === "won" ? "30" : "60",
@@ -227,12 +247,15 @@ describe("DealListPage", () => {
     expect(html).toContain("Opportunity");
     expect(html).toContain("Estimating");
     expect(html).toContain("Service Estimating");
+    expect(html).toContain("Contract");
+    expect(html).toContain("Won");
+    expect(html).toContain("Lost");
     expect(html).toContain("Estimate Sent to Client");
     expect(html).toContain("Palm Villas");
     expect(html).toContain("Service Hospital Roof");
   });
 
-  it("renders the project number on cards when present, and falls back to deal number when null", () => {
+  it("renders decorated cards with project number fallback, avatar, company, SLA, and location", () => {
     mocks.useDealBoardMock.mockReturnValue({
       board: {
         columns: [
@@ -242,7 +265,13 @@ describe("DealListPage", () => {
             totalValue: 180000,
             cards: [
               makeDeal({ id: "deal-pn", projectNumber: "DFW-1-12826-aa" }),
-              makeDeal({ id: "deal-fb", dealNumber: "HS-321687989951", projectNumber: null }),
+              makeDeal({
+                id: "deal-fb",
+                dealNumber: "HS-321687989951",
+                projectNumber: null,
+                assignedRepName: null,
+                companyName: null,
+              }),
             ],
           },
         ],
@@ -257,6 +286,12 @@ describe("DealListPage", () => {
 
     expect(html).toContain("DFW-1-12826-aa");
     expect(html).toContain("HS-321687989951");
+    expect(html).toContain("BJ");
+    expect(html).toContain("TR");
+    expect(html).toContain("Acme Construction");
+    expect(html).toContain("Account pending");
+    expect(html).toContain("SLA");
+    expect(html).toContain("Dallas, TX");
   });
 
   it("preserves empty canonical columns so stage parity remains visible", () => {
@@ -476,10 +511,20 @@ describe("DealListPage", () => {
     expect(html).toContain('aria-pressed="false">All');
   });
 
-  it("does not embed a paginated list section on /deals", () => {
+  it("embeds a scoped paginated exportable deal list below the kanban without date filters", () => {
     renderPage("/deals?scope=team", "director");
 
-    expect(mocks.useDealsMock).not.toHaveBeenCalled();
+    expect(mocks.dealsListSectionMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        workflowFamily: "deal",
+        scope: "team",
+        enableExport: true,
+        enableDateFilter: false,
+        showFilterButton: true,
+        pageSize: 20,
+        searchPlaceholder: "Search deals or accounts",
+      })
+    );
   });
 
   it("reflects the team scope query param in the scope toggle", () => {
@@ -489,5 +534,14 @@ describe("DealListPage", () => {
     expect(html).toContain('aria-pressed="true">Team');
     expect(html).toContain('aria-pressed="false">Mine');
     expect(html).toContain('aria-pressed="false">All');
+  });
+
+  it("does not add preview-only board map or date filter controls to /deals", () => {
+    const html = renderPage();
+
+    expect(html).not.toContain("Coverage map");
+    expect(html).not.toContain("DFW map");
+    expect(html).not.toContain("Won date filter");
+    expect(html).not.toContain("Lost date filter");
   });
 });
