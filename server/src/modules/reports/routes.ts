@@ -1,5 +1,5 @@
 import { Router } from "express";
-import { requireRole, requireDirector, requireAnyRole } from "../../middleware/rbac.js";
+import { requireRole, requireDirector } from "../../middleware/rbac.js";
 import { AppError } from "../../middleware/error-handler.js";
 import {
   getPipelineSummary,
@@ -38,6 +38,12 @@ import {
 } from "./saved-reports-service.js";
 import { runReportBuilder } from "./report-builder-service.js";
 import {
+  getDirectorScorecard,
+  getForecastAccuracyReport,
+  getRepActivityReport,
+  normalizePerformanceReportFilters,
+} from "./performance-tier2-service.js";
+import {
   getCustomerConcentrationReport,
   getExecutiveTrendsReport,
   getMarketMixReport,
@@ -53,6 +59,7 @@ import {
 const router = Router();
 const VALID_REPORT_FREQUENCIES = ["daily", "weekly", "biweekly", "monthly", "quarterly"] as const;
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const requireAnyRole = requireRole("admin", "director", "rep");
 
 function readQueryString(value: unknown): string | undefined {
   return typeof value === "string" && value.trim() ? value.trim() : undefined;
@@ -99,6 +106,7 @@ function parseTier4Filters(query: Record<string, unknown>, user: { role: string;
     to: readQueryString(query.dateTo) ?? readQueryString(query.to),
     office: readQueryString(query.office) ?? readQueryString(query.officeId),
     ownerIds,
+    ownerNames: parseOwnerIds(query.ownerNames),
   };
 }
 
@@ -398,16 +406,64 @@ router.get("/regional-ownership", requireDirector, async (req, res, next) => {
   }
 });
 
+// GET /api/reports/director-scorecard?dateFrom=2026-02-01&dateTo=2026-05-01&office=dallas&ownerNames=Rep%20One,Rep%20Two
+router.get("/director-scorecard", requireDirector, async (req, res, next) => {
+  try {
+    const data = await getDirectorScorecard(
+      req.tenantDb!,
+      normalizePerformanceReportFilters(req.query as Record<string, unknown>),
+      req.officeSlug ?? req.user!.activeOfficeId
+    );
+    await req.commitTransaction!();
+    res.json({ data });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// GET /api/reports/rep-activity?dateFrom=2026-02-01&dateTo=2026-05-01&office=dallas&ownerNames=Rep%20One,Rep%20Two
+router.get("/rep-activity", requireAnyRole, async (req, res, next) => {
+  try {
+    const data = await getRepActivityReport(
+      req.tenantDb!,
+      normalizePerformanceReportFilters(req.query as Record<string, unknown>),
+      { role: req.user!.role, userId: req.user!.id, displayName: req.user!.displayName },
+      req.officeSlug ?? req.user!.activeOfficeId
+    );
+    await req.commitTransaction!();
+    res.json({ data });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// GET /api/reports/forecast-accuracy?dateFrom=2026-02-01&dateTo=2026-05-01&office=dallas&ownerNames=Rep%20One,Rep%20Two
+router.get("/forecast-accuracy", requireDirector, async (req, res, next) => {
+  try {
+    const data = await getForecastAccuracyReport(
+      req.tenantDb!,
+      normalizePerformanceReportFilters(req.query as Record<string, unknown>),
+      req.officeSlug ?? req.user!.activeOfficeId
+    );
+    await req.commitTransaction!();
+    res.json({ data });
+  } catch (err) {
+    next(err);
+  }
+});
+
 function parseOperationsFilters(req: any) {
   return normalizeOperationsReportFilters({
     dateFrom: req.query.dateFrom as string | undefined,
     dateTo: req.query.dateTo as string | undefined,
     office: req.query.office as string | undefined,
     ownerIds: req.query.ownerIds as string | string[] | undefined,
+    ownerNames: req.query.ownerNames as string | string[] | undefined,
     cacheScope: `${req.user?.activeOfficeId ?? req.user?.officeId ?? "unknown"}:${req.user?.role ?? "unknown"}`,
   });
 }
 
+// GET /api/reports/workflow-bottlenecks?dateFrom=2026-02-01&dateTo=2026-05-01&office=all&ownerNames=Rep%20One,Rep%20Two
 // GET /api/reports/market-mix?dateFrom=2025-05-11&dateTo=2026-05-11&office=uuid&ownerIds=uuid,uuid
 router.get("/market-mix", requireAnyRole, async (req, res, next) => {
   try {
@@ -450,7 +506,7 @@ router.get("/executive-trends", requireAnyRole, async (req, res, next) => {
   }
 });
 
-// GET /api/reports/workflow-bottlenecks?dateFrom=2026-02-01&dateTo=2026-05-01&office=all&ownerIds=uuid,uuid
+// GET /api/reports/workflow-bottlenecks?dateFrom=2026-02-01&dateTo=2026-05-01&office=all&ownerNames=Rep%20One,Rep%20Two
 router.get("/workflow-bottlenecks", requireDirector, async (req, res, next) => {
   try {
     const data = await getWorkflowBottlenecksReport(req.tenantDb!, parseOperationsFilters(req));
@@ -461,7 +517,7 @@ router.get("/workflow-bottlenecks", requireDirector, async (req, res, next) => {
   }
 });
 
-// GET /api/reports/project-readiness?dateFrom=2026-02-01&dateTo=2026-05-01&office=all&ownerIds=uuid,uuid
+// GET /api/reports/project-readiness?dateFrom=2026-02-01&dateTo=2026-05-01&office=all&ownerNames=Rep%20One,Rep%20Two
 router.get("/project-readiness", requireDirector, async (req, res, next) => {
   try {
     const data = await getProjectReadinessReport(req.tenantDb!, parseOperationsFilters(req));
@@ -472,7 +528,7 @@ router.get("/project-readiness", requireDirector, async (req, res, next) => {
   }
 });
 
-// GET /api/reports/portfolio-load?dateFrom=2026-02-01&dateTo=2026-05-01&office=all&ownerIds=uuid,uuid
+// GET /api/reports/portfolio-load?dateFrom=2026-02-01&dateTo=2026-05-01&office=all&ownerNames=Rep%20One,Rep%20Two
 router.get("/portfolio-load", requireDirector, async (req, res, next) => {
   try {
     const data = await getPortfolioLoadReport(req.tenantDb!, parseOperationsFilters(req));

@@ -35,9 +35,12 @@ describe("ReportsPage", () => {
     expect(html).not.toContain("Execute");
   });
 
-  it("makes only the shipped Operations and Analytics cards clickable", () => {
+  it("makes shipped Performance, Operations, and Analytics tier cards clickable while preserving other Coming Soon cards", () => {
     const html = renderReportsPage();
 
+    expect(html).toContain("/reports/performance/director-scorecard");
+    expect(html).toContain("/reports/performance/rep-activity");
+    expect(html).toContain("/reports/performance/forecast-accuracy");
     expect(html).toContain("/reports/operations/workflow-bottlenecks");
     expect(html).toContain("/reports/operations/project-readiness");
     expect(html).toContain("/reports/operations/portfolio-load");
@@ -45,6 +48,6 @@ describe("ReportsPage", () => {
     expect(html).toContain("/reports/analytics/customer-concentration");
     expect(html).toContain("/reports/analytics/executive-trends");
     expect(html).not.toContain("/reports/sales/pipeline-velocity");
-    expect(html).not.toContain("/reports/performance/director-scorecard");
+    expect(html).toContain("Coming soon");
   });
 });

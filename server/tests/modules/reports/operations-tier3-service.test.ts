@@ -243,12 +243,14 @@ describe("operations tier 3 reports", () => {
       dateTo: "2026-05-11",
       office: "dallas",
       ownerIds: "owner-1, owner-2",
+      ownerNames: "Avery Rep, Blake Rep",
       cacheScope: "tenant-a",
     })).toMatchObject({
       dateFrom: "2026-02-01",
       dateTo: "2026-05-11",
       office: "dallas",
       ownerIds: ["owner-1", "owner-2"],
+      ownerNames: ["Avery Rep", "Blake Rep"],
       cacheScope: "tenant-a",
     });
   });
