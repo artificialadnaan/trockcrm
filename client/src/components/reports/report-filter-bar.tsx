@@ -40,13 +40,28 @@ function toDateInput(date: Date) {
   return date.toISOString().slice(0, 10);
 }
 
+export function subtractMonthsClamped(date: Date, months: number) {
+  const targetMonthIndex = date.getMonth() - months;
+  const targetYear = date.getFullYear() + Math.floor(targetMonthIndex / 12);
+  const normalizedMonth = ((targetMonthIndex % 12) + 12) % 12;
+  const lastDayOfTargetMonth = new Date(targetYear, normalizedMonth + 1, 0).getDate();
+  return new Date(
+    targetYear,
+    normalizedMonth,
+    Math.min(date.getDate(), lastDayOfTargetMonth),
+    date.getHours(),
+    date.getMinutes(),
+    date.getSeconds(),
+    date.getMilliseconds()
+  );
+}
+
 function rangeDates(range: string) {
   const today = new Date();
   const from = new Date(today);
 
   if (range === "6m") {
-    from.setMonth(today.getMonth() - 6);
-    return { dateFrom: toDateInput(from), dateTo: toDateInput(today) };
+    return { dateFrom: toDateInput(subtractMonthsClamped(today, 6)), dateTo: toDateInput(today) };
   }
   if (range === "30" || range === "60" || range === "90") {
     from.setDate(today.getDate() - Number(range));
@@ -59,8 +74,7 @@ function rangeDates(range: string) {
   if (range === "ytd") {
     return { dateFrom: `${today.getFullYear()}-01-01`, dateTo: toDateInput(today) };
   }
-  from.setMonth(today.getMonth() - 12);
-  return { dateFrom: toDateInput(from), dateTo: toDateInput(today) };
+  return { dateFrom: toDateInput(subtractMonthsClamped(today, 12)), dateTo: toDateInput(today) };
 }
 
 function defaultFilters(defaultRange: DefaultRange = "90"): ReportFilters {
@@ -132,7 +146,11 @@ export function ReportFilterBar({ defaultRange = "90" }: { defaultRange?: Defaul
   const { filters } = useReportFilters({ defaultRange });
   const [draft, setDraft] = useState<ReportFilters>(filters);
   const { offices } = useAccessibleOffices();
-  const { salesReps } = useSalesReps();
+  const canonicalOfficeId = useMemo(() => {
+    if (!draft.office || draft.office === "all") return undefined;
+    return offices.find((office) => office.id === draft.office || office.slug === draft.office)?.id;
+  }, [draft.office, offices]);
+  const { salesReps } = useSalesReps(canonicalOfficeId);
 
   useEffect(() => {
     setDraft(hydrateOwnerSelection(filters, salesReps));
@@ -257,7 +275,13 @@ export function ReportFilterBar({ defaultRange = "90" }: { defaultRange?: Defaul
           Office
           <select
             value={draft.office}
-            onChange={(event) => setDraft((current) => ({ ...current, office: event.target.value }))}
+            onChange={(event) => setDraft((current) => ({
+              ...current,
+              office: event.target.value,
+              ownerIds: [],
+              ownerNames: [],
+              ownerEmails: [],
+            }))}
             className="h-10 w-full rounded-md border border-slate-200 bg-white px-3 text-sm font-medium text-slate-700"
           >
             <option value="all">All offices</option>

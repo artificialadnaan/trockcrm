@@ -115,11 +115,29 @@ function parseOwnerIds(value: unknown): string[] {
     .filter(Boolean);
 }
 
-function parseTier4Filters(query: Record<string, unknown>, user: { role: string; id: string }): AnalyticsTier4Filters {
+function readOptionalIsoDate(value: unknown, label: string) {
+  const raw = readQueryString(value);
+  if (!raw) return undefined;
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(raw)) {
+    throw new AppError(400, `${label} must be an ISO date in YYYY-MM-DD format`);
+  }
+  const date = new Date(`${raw}T00:00:00.000Z`);
+  if (Number.isNaN(date.getTime()) || date.toISOString().slice(0, 10) !== raw) {
+    throw new AppError(400, `${label} must be a valid ISO date`);
+  }
+  return raw;
+}
+
+export function parseTier4Filters(query: Record<string, unknown>, user: { role: string; id: string }): AnalyticsTier4Filters {
   const ownerIds = user.role === "rep" ? [user.id] : parseOwnerIds(query.ownerIds);
+  for (const ownerId of ownerIds) {
+    if (!UUID_PATTERN.test(ownerId)) {
+      throw new AppError(400, "ownerIds must contain valid UUID values");
+    }
+  }
   return {
-    from: readQueryString(query.dateFrom) ?? readQueryString(query.from),
-    to: readQueryString(query.dateTo) ?? readQueryString(query.to),
+    from: readOptionalIsoDate(query.dateFrom ?? query.from, "dateFrom"),
+    to: readOptionalIsoDate(query.dateTo ?? query.to, "dateTo"),
     office: readQueryString(query.office) ?? readQueryString(query.officeId),
     ownerIds,
     ownerNames: parseOwnerIds(query.ownerNames),

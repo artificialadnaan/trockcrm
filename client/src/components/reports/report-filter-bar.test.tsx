@@ -1,7 +1,44 @@
-import { describe, expect, it } from "vitest";
+/**
+ * @vitest-environment jsdom
+ */
+import { act } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
+import { createRoot, type Root } from "react-dom/client";
 import { MemoryRouter } from "react-router-dom";
-import { hydrateOwnerSelection, useReportFilters, type ReportFilters } from "./report-filter-bar";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { ReportFilterBar, hydrateOwnerSelection, useReportFilters, type ReportFilters } from "./report-filter-bar";
+
+const apiMock = vi.hoisted(() => vi.fn());
+
+(globalThis as unknown as { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
+
+vi.mock("@/lib/api", () => ({
+  api: apiMock,
+}));
+
+vi.mock("@/hooks/use-accessible-offices", () => ({
+  useAccessibleOffices: () => ({
+    offices: [
+      { id: "office-dallas", name: "Dallas Office", slug: "dallas" },
+      { id: "office-atlanta", name: "Atlanta Office", slug: "atlanta" },
+    ],
+    loading: false,
+    error: null,
+    refetch: vi.fn(),
+  }),
+}));
+
+let container: HTMLDivElement;
+let root: Root | null;
+
+afterEach(() => {
+  act(() => {
+    root?.unmount();
+  });
+  container?.remove();
+  root = null;
+  apiMock.mockReset();
+});
 
 function baseFilters(overrides: Partial<ReportFilters> = {}): ReportFilters {
   return {
@@ -31,7 +68,27 @@ function renderHookSnapshot(initialEntry: string) {
   return JSON.parse(snapshot) as ReturnType<typeof useReportFilters>["query"];
 }
 
-describe("report filter bar helpers", () => {
+function renderFilterBar(initialEntry = "/reports/operations/workflow-bottlenecks") {
+  container = document.createElement("div");
+  document.body.appendChild(container);
+  root = createRoot(container);
+  act(() => {
+    root?.render(
+      <MemoryRouter initialEntries={[initialEntry]}>
+        <ReportFilterBar />
+      </MemoryRouter>,
+    );
+  });
+  return container;
+}
+
+function changeSelect(select: HTMLSelectElement, value: string) {
+  const setter = Object.getOwnPropertyDescriptor(window.HTMLSelectElement.prototype, "value")?.set;
+  setter?.call(select, value);
+  select.dispatchEvent(new Event("change", { bubbles: true }));
+}
+
+describe("ReportFilterBar", () => {
   it("hydrates ownerIds from URL search params instead of hardcoding an empty owner scope", () => {
     const query = renderHookSnapshot("/reports/operations/workflow-bottlenecks?ownerIds=rep-1,rep-2&dateFrom=2026-02-01&dateTo=2026-05-01");
 
@@ -52,5 +109,35 @@ describe("report filter bar helpers", () => {
 
     expect(hydrated.ownerIds).toEqual(["rep-a"]);
     expect(hydrated.ownerIds).not.toContain("rep-b");
+  });
+
+  it("refetches sales reps scoped to the selected office", async () => {
+    apiMock.mockImplementation(() => new Promise(() => {}));
+    const node = renderFilterBar();
+
+    await vi.waitFor(() => expect(apiMock).toHaveBeenCalledWith("/users/sales-reps", undefined));
+
+    const officeSelect = Array.from(node.querySelectorAll<HTMLSelectElement>("select"))
+      .find((select) => Array.from(select.options).some((option) => option.value === "dallas"));
+    expect(officeSelect).toBeTruthy();
+
+    act(() => {
+      changeSelect(officeSelect!, "dallas");
+    });
+
+    await vi.waitFor(() => expect(apiMock).toHaveBeenCalledWith(
+      "/users/sales-reps",
+      { headers: { "x-office-id": "office-dallas" } },
+    ));
+  });
+
+  it("resolves slug office filters to canonical office ids before fetching sales reps", async () => {
+    apiMock.mockImplementation(() => new Promise(() => {}));
+    renderFilterBar("/reports/operations/workflow-bottlenecks?office=dallas");
+
+    await vi.waitFor(() => expect(apiMock).toHaveBeenCalledWith(
+      "/users/sales-reps",
+      { headers: { "x-office-id": "office-dallas" } },
+    ));
   });
 });

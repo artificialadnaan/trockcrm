@@ -260,9 +260,30 @@ export function App() {
               <Route path="/reports/analytics/market-mix" element={<MarketMixPage />} />
               <Route path="/reports/analytics/customer-concentration" element={<CustomerConcentrationPage />} />
               <Route path="/reports/analytics/executive-trends" element={<ExecutiveTrendsPage />} />
-              <Route path="/reports/operations/workflow-bottlenecks" element={<WorkflowBottlenecksPage />} />
-              <Route path="/reports/operations/project-readiness" element={<ProjectReadinessPage />} />
-              <Route path="/reports/operations/portfolio-load" element={<PortfolioLoadPage />} />
+              <Route
+                path="/reports/operations/workflow-bottlenecks"
+                element={(
+                  <RequireRole allowedRoles={["admin", "director"]}>
+                    <WorkflowBottlenecksPage />
+                  </RequireRole>
+                )}
+              />
+              <Route
+                path="/reports/operations/project-readiness"
+                element={(
+                  <RequireRole allowedRoles={["admin", "director"]}>
+                    <ProjectReadinessPage />
+                  </RequireRole>
+                )}
+              />
+              <Route
+                path="/reports/operations/portfolio-load"
+                element={(
+                  <RequireRole allowedRoles={["admin", "director"]}>
+                    <PortfolioLoadPage />
+                  </RequireRole>
+                )}
+              />
               {enableSharedPrimitivesHarness ? (
                 <Route path="/__harness__/shared-primitives" element={<SharedPrimitivesHarness />} />
               ) : null}

@@ -48,16 +48,19 @@ export interface CustomerConcentrationReport {
     topCustomerPipelinePercent: number;
     customersOverOneMillionOpen: number;
   };
+  scopeNote: string;
   topCustomers: Array<{
+    companyId: string;
     companyName: string;
     activeDeals: number;
     totalOpenValue: number;
     totalWonLifetime: number;
     lastActivityAt: string | null;
-    accountOwner: string;
+    accountOwners: string;
   }>;
   pareto: Array<{
     rank: number;
+    companyId: string;
     companyName: string;
     pipelineValue: number;
     cumulativePipelinePercent: number;
@@ -87,6 +90,7 @@ export interface ExecutiveTrendsReport {
     lostDeals: number;
     activePipelineValue: number;
   }>;
+  activePipelineNote: string;
   quarterlyComparison: Array<{
     quarter: string;
     dealsCreated: number;
@@ -137,7 +141,7 @@ function buildWhere(filters: ReturnType<typeof normalizeFilters>, dateColumn: SQ
   return sql`
     ${buildScopeWhere(filters)}
     AND ${dateColumn} >= ${filters.from}::timestamptz
-    AND ${dateColumn} <= (${filters.to}::date + INTERVAL '1 day')::timestamptz
+    AND ${dateColumn} < (${filters.to}::date + INTERVAL '1 day')::timestamptz
   `;
 }
 
@@ -149,7 +153,19 @@ function buildScopeWhere(filters: ReturnType<typeof normalizeFilters>) {
     : sql``;
   const officeFilter = filters.office
     ? UUID_PATTERN.test(filters.office)
-      ? sql`AND u.office_id = ${filters.office}::uuid`
+      ? sql`AND (
+          u.office_id = ${filters.office}::uuid
+          OR EXISTS (
+            SELECT 1
+            FROM offices office_scope
+            WHERE office_scope.id = ${filters.office}::uuid
+              AND (
+                LOWER(COALESCE(d.office_code, '')) = LOWER(office_scope.slug)
+                OR LOWER(COALESCE(d.office_code, '')) = LOWER(office_scope.name)
+                OR COALESCE(d.office_code, '') = office_scope.id::text
+              )
+          )
+        )`
       : sql`AND LOWER(COALESCE(d.office_code, '')) = LOWER(${filters.office})`
     : sql``;
 
@@ -211,6 +227,20 @@ function monthRange(from: string, to: string) {
     months.push(cursor.toISOString().slice(0, 7));
   }
   return months;
+}
+
+export function computePreviousPeriod(from: string, to: string) {
+  const start = new Date(`${from}T00:00:00.000Z`);
+  const endExclusive = new Date(`${to}T00:00:00.000Z`);
+  endExclusive.setUTCDate(endExclusive.getUTCDate() + 1);
+  const days = Math.max(1, Math.round((endExclusive.getTime() - start.getTime()) / 86400000));
+  const previousFrom = new Date(start);
+  previousFrom.setUTCDate(previousFrom.getUTCDate() - days);
+  return {
+    previousFrom: previousFrom.toISOString().slice(0, 10),
+    previousToExclusive: start.toISOString().slice(0, 10),
+    days,
+  };
 }
 
 function changePercent(current: number, previous: number) {
@@ -421,17 +451,17 @@ export async function getCustomerConcentrationReport(
       `),
       tenantDb.execute(sql`
         SELECT
+          d.company_id::text AS company_id,
           COALESCE(c.name, 'Unassigned Account') AS company_name,
           COUNT(DISTINCT d.id) FILTER (WHERE psc.is_terminal = false)::int AS active_deals,
           COALESCE(SUM(${openValueExpr}) FILTER (WHERE psc.is_terminal = false), 0)::numeric AS total_open_value,
           COALESCE(SUM(${valueExpr}) FILTER (WHERE psc.slug IN (${sqlStringList(WON_STAGE_SLUGS)})), 0)::numeric AS total_won_lifetime,
           MAX(COALESCE(d.last_activity_at, c.last_activity_at, a.last_activity_at, d.updated_at)) AS last_activity_at,
-          COALESCE(owner.display_name, rep.display_name, 'Unassigned') AS account_owner
+          COALESCE(STRING_AGG(DISTINCT rep.display_name, ', ' ORDER BY rep.display_name) FILTER (WHERE rep.display_name IS NOT NULL), 'Unassigned') AS account_owners
         FROM deals d
         LEFT JOIN companies c ON c.id = d.company_id
         LEFT JOIN users u ON u.id = d.assigned_rep_id
         LEFT JOIN users rep ON rep.id = d.assigned_rep_id
-        LEFT JOIN users owner ON owner.id = c.owner_user_id
         LEFT JOIN pipeline_stage_config psc ON psc.id = d.stage_id
         LEFT JOIN (
           SELECT deal_id, MAX(occurred_at) AS last_activity_at
@@ -439,7 +469,8 @@ export async function getCustomerConcentrationReport(
           GROUP BY deal_id
         ) a ON a.deal_id = d.id
         WHERE ${where}
-        GROUP BY COALESCE(c.name, 'Unassigned Account'), COALESCE(owner.display_name, rep.display_name, 'Unassigned')
+          AND d.company_id IS NOT NULL
+        GROUP BY d.company_id, COALESCE(c.name, 'Unassigned Account')
         HAVING COUNT(DISTINCT d.id) FILTER (WHERE psc.is_terminal = false) > 0
         ORDER BY total_open_value DESC
         LIMIT 20
@@ -469,8 +500,9 @@ export async function getCustomerConcentrationReport(
       `),
       tenantDb.execute(sql`
         SELECT
+          d.company_id::text AS company_id,
           COALESCE(c.name, 'Unassigned Account') AS company_name,
-          COALESCE(owner.display_name, rep.display_name, 'Unassigned') AS owner_name,
+          COALESCE(STRING_AGG(DISTINCT rep.display_name, ', ' ORDER BY rep.display_name) FILTER (WHERE rep.display_name IS NOT NULL), 'Unassigned') AS owner_name,
           COUNT(DISTINCT d.id)::int AS open_deals,
           COALESCE(SUM(${openValueExpr}), 0)::numeric AS open_value,
           FLOOR(EXTRACT(EPOCH FROM (NOW() - MAX(COALESCE(d.last_activity_at, c.last_activity_at, a.last_activity_at, d.updated_at)))) / 86400)::int AS days_stale
@@ -478,7 +510,6 @@ export async function getCustomerConcentrationReport(
         LEFT JOIN companies c ON c.id = d.company_id
         LEFT JOIN users u ON u.id = d.assigned_rep_id
         LEFT JOIN users rep ON rep.id = d.assigned_rep_id
-        LEFT JOIN users owner ON owner.id = c.owner_user_id
         JOIN pipeline_stage_config psc ON psc.id = d.stage_id
         LEFT JOIN (
           SELECT deal_id, MAX(occurred_at) AS last_activity_at
@@ -487,7 +518,8 @@ export async function getCustomerConcentrationReport(
         ) a ON a.deal_id = d.id
         WHERE ${where}
           AND psc.is_terminal = false
-        GROUP BY COALESCE(c.name, 'Unassigned Account'), COALESCE(owner.display_name, rep.display_name, 'Unassigned')
+          AND d.company_id IS NOT NULL
+        GROUP BY d.company_id, COALESCE(c.name, 'Unassigned Account')
         HAVING FLOOR(EXTRACT(EPOCH FROM (NOW() - MAX(COALESCE(d.last_activity_at, c.last_activity_at, a.last_activity_at, d.updated_at)))) / 86400)::int >= 60
         ORDER BY days_stale DESC, open_value DESC
         LIMIT 20
@@ -496,12 +528,13 @@ export async function getCustomerConcentrationReport(
 
     const kpi = rowsFromExecute<any>(kpiRows)[0] ?? {};
     const topCustomers = rowsFromExecute<any>(customerRows).map((row) => ({
+      companyId: String(row.company_id),
       companyName: String(row.company_name ?? "Unassigned Account"),
       activeDeals: numberFrom(row.active_deals),
       totalOpenValue: numberFrom(row.total_open_value),
       totalWonLifetime: numberFrom(row.total_won_lifetime),
       lastActivityAt: row.last_activity_at ? new Date(row.last_activity_at).toISOString() : null,
-      accountOwner: String(row.account_owner ?? "Unassigned"),
+      accountOwners: String(row.account_owners ?? "Unassigned"),
     }));
     const totalOpenValue = numberFrom(kpi.total_open_value);
     let cumulative = 0;
@@ -513,11 +546,13 @@ export async function getCustomerConcentrationReport(
         topCustomerPipelinePercent: percent(topCustomers[0]?.totalOpenValue ?? 0, totalOpenValue),
         customersOverOneMillionOpen: numberFrom(kpi.customers_over_one_million_open),
       },
+      scopeNote: "Customer concentration excludes deals without a company/account from customer totals and ranking.",
       topCustomers,
       pareto: topCustomers.map((customer, index) => {
         cumulative += customer.totalOpenValue;
         return {
           rank: index + 1,
+          companyId: customer.companyId,
           companyName: customer.companyName,
           pipelineValue: customer.totalOpenValue,
           cumulativePipelinePercent: percent(cumulative, totalOpenValue),
@@ -547,21 +582,14 @@ export async function getExecutiveTrendsReport(
     const where = buildWhere(filters);
     const valueExpr = sql`COALESCE(d.awarded_amount, d.bid_estimate, d.dd_estimate, 0)`;
     const openValueExpr = sql`COALESCE(d.forecast_revenue, d.bid_estimate, d.dd_estimate, 0)`;
-    const currentDays = Math.max(
-      1,
-      Math.ceil((new Date(`${filters.to}T00:00:00.000Z`).getTime() - new Date(`${filters.from}T00:00:00.000Z`).getTime()) / 86400000)
-    );
-    const previousFrom = new Date(`${filters.from}T00:00:00.000Z`);
-    previousFrom.setUTCDate(previousFrom.getUTCDate() - currentDays);
-    const previousTo = new Date(`${filters.from}T00:00:00.000Z`);
-    previousTo.setUTCDate(previousTo.getUTCDate() - 1);
+    const previousPeriod = computePreviousPeriod(filters.from, filters.to);
 
     const [kpiRows, monthlyRows, quarterlyRows, winRateRows, progressionRows] = await Promise.all([
       tenantDb.execute(sql`
         WITH periods AS (
           SELECT 'current' AS metric, ${filters.from}::timestamptz AS from_date, (${filters.to}::date + INTERVAL '1 day')::timestamptz AS to_date
           UNION ALL
-          SELECT 'previous' AS metric, ${previousFrom.toISOString()}::timestamptz AS from_date, (${previousTo.toISOString()}::date + INTERVAL '1 day')::timestamptz AS to_date
+          SELECT 'previous' AS metric, ${previousPeriod.previousFrom}::timestamptz AS from_date, ${previousPeriod.previousToExclusive}::timestamptz AS to_date
         )
         SELECT
           p.metric,
@@ -582,18 +610,100 @@ export async function getExecutiveTrendsReport(
         GROUP BY p.metric
       `),
       tenantDb.execute(sql`
+        WITH months AS (
+          SELECT TO_CHAR(month_start, 'YYYY-MM') AS month
+          FROM generate_series(
+            date_trunc('month', ${filters.from}::timestamptz AT TIME ZONE 'UTC'),
+            date_trunc('month', ${filters.to}::timestamptz AT TIME ZONE 'UTC'),
+            INTERVAL '1 month'
+          ) month_start
+        ),
+        new_deals AS (
+          SELECT TO_CHAR(d.created_at AT TIME ZONE 'UTC', 'YYYY-MM') AS month,
+            COUNT(DISTINCT d.id)::int AS new_deals
+          FROM deals d
+          LEFT JOIN users u ON u.id = d.assigned_rep_id
+          WHERE ${where}
+          GROUP BY TO_CHAR(d.created_at AT TIME ZONE 'UTC', 'YYYY-MM')
+        ),
+        won_history AS (
+          SELECT TO_CHAR(dsh.created_at AT TIME ZONE 'UTC', 'YYYY-MM') AS month,
+            COUNT(DISTINCT dsh.deal_id)::int AS won_deals
+          FROM deal_stage_history dsh
+          JOIN deals d ON d.id = dsh.deal_id
+          LEFT JOIN users u ON u.id = d.assigned_rep_id
+          JOIN pipeline_stage_config to_stage ON to_stage.id = dsh.to_stage_id
+          WHERE ${buildWhere(filters, sql`dsh.created_at`)}
+            AND to_stage.slug IN (${sqlStringList(WON_STAGE_SLUGS)})
+          GROUP BY TO_CHAR(dsh.created_at AT TIME ZONE 'UTC', 'YYYY-MM')
+        ),
+        won_fallback AS (
+          SELECT TO_CHAR(COALESCE(d.actual_close_date::timestamptz, d.updated_at) AT TIME ZONE 'UTC', 'YYYY-MM') AS month,
+            COUNT(DISTINCT d.id)::int AS won_deals
+          FROM deals d
+          LEFT JOIN users u ON u.id = d.assigned_rep_id
+          JOIN pipeline_stage_config psc ON psc.id = d.stage_id
+          WHERE ${buildWhere(filters, sql`COALESCE(d.actual_close_date::timestamptz, d.updated_at)`)}
+            AND psc.slug IN (${sqlStringList(WON_STAGE_SLUGS)})
+            AND NOT EXISTS (
+              SELECT 1
+              FROM deal_stage_history history
+              JOIN pipeline_stage_config history_stage ON history_stage.id = history.to_stage_id
+              WHERE history.deal_id = d.id
+                AND history_stage.slug IN (${sqlStringList(WON_STAGE_SLUGS)})
+            )
+          GROUP BY TO_CHAR(COALESCE(d.actual_close_date::timestamptz, d.updated_at) AT TIME ZONE 'UTC', 'YYYY-MM')
+        ),
+        lost_history AS (
+          SELECT TO_CHAR(dsh.created_at AT TIME ZONE 'UTC', 'YYYY-MM') AS month,
+            COUNT(DISTINCT dsh.deal_id)::int AS lost_deals
+          FROM deal_stage_history dsh
+          JOIN deals d ON d.id = dsh.deal_id
+          LEFT JOIN users u ON u.id = d.assigned_rep_id
+          JOIN pipeline_stage_config to_stage ON to_stage.id = dsh.to_stage_id
+          WHERE ${buildWhere(filters, sql`dsh.created_at`)}
+            AND to_stage.slug IN (${sqlStringList(LOST_STAGE_SLUGS)})
+          GROUP BY TO_CHAR(dsh.created_at AT TIME ZONE 'UTC', 'YYYY-MM')
+        ),
+        lost_fallback AS (
+          SELECT TO_CHAR(COALESCE(d.lost_at, d.updated_at) AT TIME ZONE 'UTC', 'YYYY-MM') AS month,
+            COUNT(DISTINCT d.id)::int AS lost_deals
+          FROM deals d
+          LEFT JOIN users u ON u.id = d.assigned_rep_id
+          JOIN pipeline_stage_config psc ON psc.id = d.stage_id
+          WHERE ${buildWhere(filters, sql`COALESCE(d.lost_at, d.updated_at)`)}
+            AND psc.slug IN (${sqlStringList(LOST_STAGE_SLUGS)})
+            AND NOT EXISTS (
+              SELECT 1
+              FROM deal_stage_history history
+              JOIN pipeline_stage_config history_stage ON history_stage.id = history.to_stage_id
+              WHERE history.deal_id = d.id
+                AND history_stage.slug IN (${sqlStringList(LOST_STAGE_SLUGS)})
+            )
+          GROUP BY TO_CHAR(COALESCE(d.lost_at, d.updated_at) AT TIME ZONE 'UTC', 'YYYY-MM')
+        ),
+        current_pipeline AS (
+          SELECT COALESCE(SUM(${openValueExpr}), 0)::numeric AS active_pipeline_value
+          FROM deals d
+          LEFT JOIN users u ON u.id = d.assigned_rep_id
+          JOIN pipeline_stage_config psc ON psc.id = d.stage_id
+          WHERE ${buildScopeWhere(filters)}
+            AND psc.is_terminal = false
+        )
         SELECT
-          TO_CHAR(d.created_at AT TIME ZONE 'UTC', 'YYYY-MM') AS month,
-          COUNT(DISTINCT d.id)::int AS new_deals,
-          COUNT(DISTINCT d.id) FILTER (WHERE psc.slug IN (${sqlStringList(WON_STAGE_SLUGS)}))::int AS won_deals,
-          COUNT(DISTINCT d.id) FILTER (WHERE psc.slug IN (${sqlStringList(LOST_STAGE_SLUGS)}))::int AS lost_deals,
-          COALESCE(SUM(${openValueExpr}) FILTER (WHERE psc.is_terminal = false), 0)::numeric AS active_pipeline_value
-        FROM deals d
-        LEFT JOIN users u ON u.id = d.assigned_rep_id
-        LEFT JOIN pipeline_stage_config psc ON psc.id = d.stage_id
-        WHERE ${where}
-        GROUP BY TO_CHAR(d.created_at AT TIME ZONE 'UTC', 'YYYY-MM')
-        ORDER BY month ASC
+          months.month,
+          COALESCE(new_deals.new_deals, 0)::int AS new_deals,
+          (COALESCE(won_history.won_deals, 0) + COALESCE(won_fallback.won_deals, 0))::int AS won_deals,
+          (COALESCE(lost_history.lost_deals, 0) + COALESCE(lost_fallback.lost_deals, 0))::int AS lost_deals,
+          current_pipeline.active_pipeline_value
+        FROM months
+        CROSS JOIN current_pipeline
+        LEFT JOIN new_deals ON new_deals.month = months.month
+        LEFT JOIN won_history ON won_history.month = months.month
+        LEFT JOIN won_fallback ON won_fallback.month = months.month
+        LEFT JOIN lost_history ON lost_history.month = months.month
+        LEFT JOIN lost_fallback ON lost_fallback.month = months.month
+        ORDER BY months.month ASC
       `),
       tenantDb.execute(sql`
         SELECT
@@ -714,6 +824,8 @@ export async function getExecutiveTrendsReport(
             activePipelineValue: 0,
           }
       ),
+      activePipelineNote:
+        "Active pipeline is a current open-pipeline snapshot repeated across the selected months; historical month-end pipeline snapshots are not available.",
       quarterlyComparison: rowsFromExecute<any>(quarterlyRows).map((row) => {
         const won = numberFrom(row.won);
         const lost = numberFrom(row.lost);
