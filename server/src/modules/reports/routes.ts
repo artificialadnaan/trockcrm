@@ -38,6 +38,12 @@ import {
 } from "./saved-reports-service.js";
 import { runReportBuilder } from "./report-builder-service.js";
 import {
+  getCustomerConcentrationReport,
+  getExecutiveTrendsReport,
+  getMarketMixReport,
+  type AnalyticsTier4Filters,
+} from "./analytics-tier4-service.js";
+import {
   getPortfolioLoadReport,
   getProjectReadinessReport,
   getWorkflowBottlenecksReport,
@@ -73,6 +79,27 @@ export function parseAnalyticsFilters(query: Record<string, unknown>): Analytics
     repId: readQueryString(query.repId),
     source: readQueryString(query.source),
   });
+}
+
+function parseOwnerIds(value: unknown): string[] {
+  if (Array.isArray(value)) {
+    return value.flatMap((item) => parseOwnerIds(item));
+  }
+  if (typeof value !== "string") return [];
+  return value
+    .split(",")
+    .map((item) => item.trim())
+    .filter(Boolean);
+}
+
+function parseTier4Filters(query: Record<string, unknown>, user: { role: string; id: string }): AnalyticsTier4Filters {
+  const ownerIds = user.role === "rep" ? [user.id] : parseOwnerIds(query.ownerIds);
+  return {
+    from: readQueryString(query.dateFrom) ?? readQueryString(query.from),
+    to: readQueryString(query.dateTo) ?? readQueryString(query.to),
+    office: readQueryString(query.office) ?? readQueryString(query.officeId),
+    ownerIds,
+  };
 }
 
 // -------------------------------------------------------------------------
@@ -380,6 +407,48 @@ function parseOperationsFilters(req: any) {
     cacheScope: `${req.user?.activeOfficeId ?? req.user?.officeId ?? "unknown"}:${req.user?.role ?? "unknown"}`,
   });
 }
+
+// GET /api/reports/market-mix?dateFrom=2025-05-11&dateTo=2026-05-11&office=uuid&ownerIds=uuid,uuid
+router.get("/market-mix", requireAnyRole, async (req, res, next) => {
+  try {
+    const data = await getMarketMixReport(
+      req.tenantDb!,
+      parseTier4Filters(req.query as Record<string, unknown>, req.user!)
+    );
+    await req.commitTransaction!();
+    res.json({ data });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// GET /api/reports/customer-concentration?dateFrom=2025-05-11&dateTo=2026-05-11&office=uuid&ownerIds=uuid,uuid
+router.get("/customer-concentration", requireAnyRole, async (req, res, next) => {
+  try {
+    const data = await getCustomerConcentrationReport(
+      req.tenantDb!,
+      parseTier4Filters(req.query as Record<string, unknown>, req.user!)
+    );
+    await req.commitTransaction!();
+    res.json({ data });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// GET /api/reports/executive-trends?dateFrom=2025-05-11&dateTo=2026-05-11&office=uuid&ownerIds=uuid,uuid
+router.get("/executive-trends", requireAnyRole, async (req, res, next) => {
+  try {
+    const data = await getExecutiveTrendsReport(
+      req.tenantDb!,
+      parseTier4Filters(req.query as Record<string, unknown>, req.user!)
+    );
+    await req.commitTransaction!();
+    res.json({ data });
+  } catch (err) {
+    next(err);
+  }
+});
 
 // GET /api/reports/workflow-bottlenecks?dateFrom=2026-02-01&dateTo=2026-05-01&office=all&ownerIds=uuid,uuid
 router.get("/workflow-bottlenecks", requireDirector, async (req, res, next) => {

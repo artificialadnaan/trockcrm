@@ -35,12 +35,15 @@ describe("ReportsPage", () => {
     expect(html).not.toContain("Execute");
   });
 
-  it("makes only the Operations Tier 3 cards clickable", () => {
+  it("makes only the shipped Operations and Analytics cards clickable", () => {
     const html = renderReportsPage();
 
     expect(html).toContain("/reports/operations/workflow-bottlenecks");
     expect(html).toContain("/reports/operations/project-readiness");
     expect(html).toContain("/reports/operations/portfolio-load");
+    expect(html).toContain("/reports/analytics/market-mix");
+    expect(html).toContain("/reports/analytics/customer-concentration");
+    expect(html).toContain("/reports/analytics/executive-trends");
     expect(html).not.toContain("/reports/sales/pipeline-velocity");
     expect(html).not.toContain("/reports/performance/director-scorecard");
   });
