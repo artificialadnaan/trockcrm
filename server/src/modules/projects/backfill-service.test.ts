@@ -187,6 +187,68 @@ describe("projects backfill service", () => {
     );
   });
 
+  it("mirrors every project when mirrorAllProjects=true, even without office prefix or matching deal", async () => {
+    vi.mocked(procoreClient.get).mockResolvedValueOnce([
+      { id: 3001, project_number: "12345", name: "No-prefix one" },
+      { id: 3002, project_number: "678910", name: "No-prefix two" },
+    ]);
+
+    const { pool, query } = createPool((sql) => {
+      if (sql.includes("SELECT id, procore_updated_at")) return { rows: [] };
+      if (sql.includes("FROM deals")) return { rows: [] };
+      if (sql.includes("SELECT id, current_phase_id, current_phase_name")) return { rows: [] };
+      if (sql.includes("INSERT INTO \"office_dallas\".projects")) {
+        return { rows: [{ id: "uuid", inserted: true }] };
+      }
+      return { rows: [] };
+    });
+
+    const result = await runProjectsBackfill(pool, "office_dallas", "dallas", {
+      companyId: "598134325683880",
+      mirrorAllProjects: true,
+    });
+
+    expect(result).toMatchObject({ backfilled: 2, skipped: 0, errored: 0 });
+    const inserts = query.mock.calls
+      .map((call) => String(call[0]))
+      .filter((s) => s.includes("INSERT INTO \"office_dallas\".projects"));
+    expect(inserts).toHaveLength(2);
+  });
+
+  it("breaks pagination when a page returns only projects already seen this run", async () => {
+    const page1 = [
+      { id: 4001, project_number: "DFW-1-04001-aa", project_stage_name: "Warranty" },
+      { id: 4002, project_number: "DFW-1-04002-aa", project_stage_name: "Warranty" },
+    ];
+    // Page 2 is identical — Procore cycling. We must NOT loop forever.
+    vi.mocked(procoreClient.get)
+      .mockResolvedValueOnce(page1)
+      .mockResolvedValueOnce(page1);
+
+    const { pool, query } = createPool((sql) => {
+      if (sql.includes("SELECT id, procore_updated_at")) return { rows: [] };
+      if (sql.includes("FROM deals")) return { rows: [] };
+      if (sql.includes("SELECT id, current_phase_id, current_phase_name")) return { rows: [] };
+      if (sql.includes("INSERT INTO \"office_dallas\".projects")) {
+        return { rows: [{ id: "uuid", inserted: true }] };
+      }
+      return { rows: [] };
+    });
+
+    const result = await runProjectsBackfill(pool, "office_dallas", "dallas", {
+      companyId: "598134325683880",
+    });
+
+    // Page 1 mirrors both rows; page 2 returns them again — every row is
+    // already in seenProjectIds, so the loop breaks before page 3.
+    expect(result).toMatchObject({ backfilled: 2, errored: 0 });
+    expect(vi.mocked(procoreClient.get)).toHaveBeenCalledTimes(2);
+    const inserts = query.mock.calls
+      .map((call) => String(call[0]))
+      .filter((s) => s.includes("INSERT INTO \"office_dallas\".projects"));
+    expect(inserts).toHaveLength(2);
+  });
+
   it("resets search_path before releasing the pool client so it does not leak to the next consumer", async () => {
     vi.mocked(procoreClient.get).mockResolvedValueOnce([]);
 
