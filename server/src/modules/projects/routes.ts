@@ -76,8 +76,10 @@ router.post("/backfill", requireRole("admin"), async (req, res, next) => {
     // idle-in-transaction (which Postgres terminates, producing
     // "SAVEPOINT can only be used in transaction blocks" or
     // "current transaction is aborted" on the next query).
+    const mirrorAllProjects =
+      readQueryString(req.query.mirror_all_projects ?? req.query.mirrorAllProjects) === "true";
     await req.commitTransaction!();
-    const data = await runProjectsBackfill(pool, schemaName, officeSlug);
+    const data = await runProjectsBackfill(pool, schemaName, officeSlug, { mirrorAllProjects });
     res.json(data);
   } catch (error) {
     next(error);

@@ -18,7 +18,19 @@ export interface ProjectsBackfillResult {
 
 export interface ProjectsBackfillOptions {
   companyId?: string;
+  // When true, ignore the office-prefix gate and mirror every Procore row
+  // returned by the company query (still respects sameTimestamp idempotency
+  // and source-deal linking). Intended for the initial admin-triggered
+  // seeding of an office whose Procore project numbers don't follow the
+  // configured office-prefix convention.
+  mirrorAllProjects?: boolean;
 }
+
+// Hard safety cap: prevent runaway pagination loops if Procore's pagination
+// ever cycles or ignores our per_page parameter. T Rock currently has ~750
+// active Procore projects; 50 pages × 1000 rows is two orders of magnitude
+// more than that, well beyond any legitimate run.
+const MAX_PAGES = 50;
 
 function asRecord(value: unknown): Record<string, unknown> | null {
   return value && typeof value === "object" && !Array.isArray(value)
@@ -80,13 +92,14 @@ async function processRow(
   officeSlug: string,
   companyId: string,
   row: unknown,
-  result: ProjectsBackfillResult
-) {
+  result: ProjectsBackfillResult,
+  mirrorAllProjects: boolean
+): Promise<string | null> {
   const normalized = normalizeProjectRow(row, companyId);
   if (!normalized) {
     result.errored += 1;
     result.errors.push({ procoreProjectId: null, message: "Malformed Procore project row" });
-    return;
+    return null;
   }
 
   // Each row runs in its own short-lived transaction so a single failure
@@ -100,7 +113,7 @@ async function processRow(
     if (existing && sameTimestamp(existing.procoreUpdatedAt, fields.procoreUpdatedAt)) {
       await client.query("COMMIT");
       result.skipped += 1;
-      return;
+      return normalized.procoreProjectId;
     }
 
     const sourceDealId = await findSourceDealIdForProcoreProject(
@@ -108,10 +121,14 @@ async function processRow(
       normalized.procoreProjectId,
       normalized.procoreProjectNumber
     );
-    if (!sourceDealId && !projectNumberBelongsToOffice(normalized.procoreProjectNumber, officeSlug)) {
+    if (
+      !mirrorAllProjects &&
+      !sourceDealId &&
+      !projectNumberBelongsToOffice(normalized.procoreProjectNumber, officeSlug)
+    ) {
       await client.query("COMMIT");
       result.skipped += 1;
-      return;
+      return normalized.procoreProjectId;
     }
 
     await upsertProjectMirror(client, schemaName, {
@@ -121,6 +138,7 @@ async function processRow(
     });
     await client.query("COMMIT");
     result.backfilled += 1;
+    return normalized.procoreProjectId;
   } catch (error) {
     await client.query("ROLLBACK").catch((rollbackError) => {
       console.error(
@@ -133,6 +151,7 @@ async function processRow(
       procoreProjectId: normalized.procoreProjectId,
       message: error instanceof Error ? error.message : "Unknown backfill error",
     });
+    return normalized.procoreProjectId;
   }
 }
 
@@ -143,6 +162,7 @@ export async function runProjectsBackfill(
   options: ProjectsBackfillOptions = {}
 ): Promise<ProjectsBackfillResult> {
   const companyId = options.companyId ?? process.env.PROCORE_COMPANY_ID ?? "598134325683880";
+  const mirrorAllProjects = options.mirrorAllProjects ?? false;
   const result: ProjectsBackfillResult = {
     companyId,
     backfilled: 0,
@@ -151,10 +171,11 @@ export async function runProjectsBackfill(
     errors: [],
   };
   const perPage = 200;
+  const seenProjectIds = new Set<string>();
 
   const client = await pool.connect();
   console.log(
-    `[ProjectsBackfill] start schema=${schemaName} office=${officeSlug} companyId=${companyId}`
+    `[ProjectsBackfill] start schema=${schemaName} office=${officeSlug} companyId=${companyId} mirrorAllProjects=${mirrorAllProjects}`
   );
   try {
     // Session-level search_path so per-row transactions can address tenant
@@ -165,7 +186,7 @@ export async function runProjectsBackfill(
     // release, and a stale search_path would leak to the next consumer.
     await client.query(`SET search_path TO ${quoteIdent(schemaName)}, public`);
 
-    for (let page = 1; ; page += 1) {
+    for (let page = 1; page <= MAX_PAGES; page += 1) {
       // HTTP fetch happens with NO active transaction, so Postgres's
       // idle_in_transaction_session_timeout cannot kill the connection
       // while Procore is responding.
@@ -179,18 +200,41 @@ export async function runProjectsBackfill(
       );
       if (!Array.isArray(rows) || rows.length === 0) break;
 
+      let pageHadNewRow = false;
       for (const row of rows) {
-        await processRow(client, schemaName, officeSlug, companyId, row, result);
+        // Don't re-process a row we've already handled this run. Procore's
+        // pagination sometimes returns the same rows when per_page is ignored;
+        // re-processing would double-count and waste DB work.
+        const previewId = readString(asRecord(row)?.id ?? asRecord(row)?.procore_id ?? asRecord(row)?.procoreId);
+        if (previewId && seenProjectIds.has(previewId)) continue;
+        const procoreProjectId = await processRow(
+          client,
+          schemaName,
+          officeSlug,
+          companyId,
+          row,
+          result,
+          mirrorAllProjects
+        );
+        if (procoreProjectId) {
+          seenProjectIds.add(procoreProjectId);
+          pageHadNewRow = true;
+        }
       }
       console.log(
-        `[ProjectsBackfill] page=${page} processed totals backfilled=${result.backfilled} skipped=${result.skipped} errored=${result.errored}`
+        `[ProjectsBackfill] page=${page} processed totals backfilled=${result.backfilled} skipped=${result.skipped} errored=${result.errored} uniqueIds=${seenProjectIds.size}`
       );
 
-      if (rows.length < perPage) break;
+      // Procore sometimes ignores per_page and returns its own default page
+      // size, so the original `rows.length < perPage` break could never fire.
+      // Detect end-of-data by either (a) the page being empty (handled above)
+      // or (b) the entire page being projects we have already seen this run
+      // (which means Procore is cycling its results).
+      if (!pageHadNewRow) break;
     }
   } finally {
     console.log(
-      `[ProjectsBackfill] done backfilled=${result.backfilled} skipped=${result.skipped} errored=${result.errored} errors=${result.errors.length}`
+      `[ProjectsBackfill] done backfilled=${result.backfilled} skipped=${result.skipped} errored=${result.errored} errors=${result.errors.length} uniqueIds=${seenProjectIds.size}`
     );
     // Reset session state before returning the client to the pool so the
     // next consumer doesn't inherit our search_path.
