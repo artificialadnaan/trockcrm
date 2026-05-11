@@ -32,6 +32,9 @@ import { TaskListPage } from "@/pages/tasks/task-list-page";
 import { FilesPage } from "@/pages/files/files-page";
 import { DirectorRepDetail } from "@/pages/director/director-rep-detail";
 import { ReportsPage } from "@/pages/reports/reports-page";
+import { CustomerConcentrationPage } from "@/pages/reports/customer-concentration-page";
+import { ExecutiveTrendsPage } from "@/pages/reports/executive-trends-page";
+import { MarketMixPage } from "@/pages/reports/market-mix-page";
 import { SalesReviewPage } from "@/pages/sales-review/sales-review-page";
 import { ProjectsPage } from "@/pages/projects/projects-page";
 import { ProcoreSyncPage } from "@/pages/admin/procore-sync-page";
@@ -218,6 +221,9 @@ export function App() {
               <Route path="/tasks" element={<TaskListPage />} />
               <Route path="/files" element={<FilesPage />} />
               <Route path="/reports" element={<ReportsPage />} />
+              <Route path="/reports/analytics/market-mix" element={<MarketMixPage />} />
+              <Route path="/reports/analytics/customer-concentration" element={<CustomerConcentrationPage />} />
+              <Route path="/reports/analytics/executive-trends" element={<ExecutiveTrendsPage />} />
               {enableSharedPrimitivesHarness ? (
                 <Route path="/__harness__/shared-primitives" element={<SharedPrimitivesHarness />} />
               ) : null}

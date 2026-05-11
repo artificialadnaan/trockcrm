@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { renderToStaticMarkup } from "react-dom/server";
+import { MemoryRouter } from "react-router-dom";
 import { ReportsPage } from "./reports-page";
 
 function normalize(html: string) {
@@ -8,7 +9,7 @@ function normalize(html: string) {
 
 describe("ReportsPage", () => {
   it("renders the placeholder report library by category", () => {
-    const html = normalize(renderToStaticMarkup(<ReportsPage />));
+    const html = normalize(renderToStaticMarkup(<MemoryRouter><ReportsPage /></MemoryRouter>));
 
     expect(html).toContain("Reports");
     expect(html).toContain("Sales");
@@ -21,7 +22,7 @@ describe("ReportsPage", () => {
   });
 
   it("does not render report execution or builder actions", () => {
-    const html = normalize(renderToStaticMarkup(<ReportsPage />));
+    const html = normalize(renderToStaticMarkup(<MemoryRouter><ReportsPage /></MemoryRouter>));
 
     expect(html).not.toContain("Report Builder");
     expect(html).not.toContain("Saved Views");
