@@ -261,6 +261,24 @@ describe("transitionLeadStage", () => {
     expect(result).toEqual(payload);
   });
 
+  it("loads the full board without requesting a per-column preview cap", async () => {
+    vi.mocked(api).mockResolvedValue({
+      columns: [],
+      defaultConversionDealStageId: null,
+    });
+
+    const root = await renderBoardHook();
+    await waitForBoardIdle();
+
+    expect(api).toHaveBeenCalledWith("/leads/board?scope=mine");
+
+    await act(async () => {
+      root.unmount();
+      await flushEffects();
+    });
+    vi.unstubAllGlobals();
+  });
+
   it("captures board load errors on mount while preserving manual refetch failures", async () => {
     const { api } = await import("@/lib/api");
     const apiMock = vi.mocked(api);
