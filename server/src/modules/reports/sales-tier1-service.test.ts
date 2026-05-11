@@ -1,10 +1,40 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
   buildClosedWonRevenueOverviewFromRows,
   buildLeadConversionOverviewFromRows,
   buildPipelineVelocityOverviewFromRows,
+  getClosedWonRevenueReport,
+  getLeadConversionReport,
+  getPipelineVelocityReport,
   normalizeSalesReportFilters,
 } from "./sales-tier1-service.js";
+
+function tenantDbWithRows(rowSets: unknown[][]) {
+  return {
+    execute: vi.fn().mockImplementation(() => Promise.resolve({ rows: rowSets.shift() ?? [] })),
+  } as any;
+}
+
+function extractSqlText(value: unknown): string {
+  if (typeof value === "string") return value;
+  if (!value || typeof value !== "object") return "";
+
+  if (Array.isArray((value as { queryChunks?: unknown[] }).queryChunks)) {
+    return (value as { queryChunks: unknown[] }).queryChunks.map(extractSqlText).join("");
+  }
+
+  if ("value" in (value as Record<string, unknown>)) {
+    const chunkValue = (value as { value: unknown }).value;
+    if (Array.isArray(chunkValue)) return chunkValue.map(extractSqlText).join("");
+    if (typeof chunkValue === "string") return chunkValue;
+  }
+
+  return "";
+}
+
+function executedSql(db: { execute: ReturnType<typeof vi.fn> }) {
+  return db.execute.mock.calls.map((call) => extractSqlText(call[0]));
+}
 
 describe("sales tier 1 report services", () => {
   it("normalizes date, office, and owner filters from report query params", () => {
@@ -160,5 +190,81 @@ describe("sales tier 1 report services", () => {
     });
     expect(overview.funnel.map((step) => step.label)).toEqual(["Leads", "Qualified", "In Deal", "Won"]);
     expect(overview.bySource[0]).toMatchObject({ source: "Trade Show", totalRevenue: 500000 });
+  });
+
+  it("matches Dallas office filters against assigned rep office or deal office_code", async () => {
+    const db = tenantDbWithRows([[], [], []]);
+
+    await getPipelineVelocityReport(db, {
+      dateFrom: "2026-02-01",
+      dateTo: "2026-05-01",
+      officeSlug: "dallas",
+      ownerIds: [],
+      ownerNames: [],
+      ownerEmails: [],
+    }, "office-code-scope");
+
+    const sqlText = executedSql(db).join("\n");
+    expect(sqlText).toContain("d.office_code");
+    expect(sqlText).toContain(" OR ");
+  });
+
+  it("matches owner filters by id, email, or display name rather than requiring all identifiers", async () => {
+    const db = tenantDbWithRows([[], [], []]);
+
+    await getPipelineVelocityReport(db, {
+      dateFrom: "2026-02-01",
+      dateTo: "2026-05-01",
+      ownerIds: ["rep-1"],
+      ownerNames: ["Jordan Rep"],
+      ownerEmails: ["jordan@trock.test"],
+    }, "owner-identity-scope");
+
+    const sqlText = executedSql(db).join("\n");
+    expect(sqlText).toContain("d.assigned_rep_id IN");
+    expect(sqlText).toContain("LOWER(u.email) IN");
+    expect(sqlText).toContain("u.display_name IN");
+    expect(sqlText).toContain(" OR ");
+  });
+
+  it("counts lost deals by lost-stage date instead of stale updated_at for closed won win rate", async () => {
+    const db = tenantDbWithRows([[], [], [], [], [], []]);
+
+    await getClosedWonRevenueReport(db, {
+      dateFrom: "2026-03-01",
+      dateTo: "2026-03-31",
+      ownerIds: [],
+      ownerNames: [],
+      ownerEmails: [],
+    }, "lost-date-scope");
+
+    const [summarySql] = executedSql(db);
+    expect(summarySql).toContain("WHEN p.slug IN");
+    expect(summarySql).toContain("stage_entered_at");
+    expect(summarySql).not.toContain("d.updated_at) >= ");
+  });
+
+  it("returns Lead Conversion monthly trend from the most recent six months in chronological order", async () => {
+    const db = tenantDbWithRows([
+      [{ totalLeads: 0, qualified: 0, inDeals: 0, won: 0 }],
+      [],
+      [
+        { month: "2026-05", leads: 5, convertedToDeal: 2, won: 1 },
+        { month: "2026-04", leads: 4, convertedToDeal: 1, won: 0 },
+      ],
+      [],
+    ]);
+
+    const report = await getLeadConversionReport(db, {
+      dateFrom: "2025-06-01",
+      dateTo: "2026-05-31",
+      ownerIds: [],
+      ownerNames: [],
+      ownerEmails: [],
+    }, "lead-trend-recent");
+
+    const monthlySql = executedSql(db)[2];
+    expect(monthlySql).toContain("ORDER BY month DESC");
+    expect(report.monthlyTrend.map((row) => row.month)).toEqual(["2026-04", "2026-05"]);
   });
 });

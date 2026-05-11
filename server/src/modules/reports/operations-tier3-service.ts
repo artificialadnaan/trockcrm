@@ -21,6 +21,7 @@ export interface OperationsReportFilters {
   dateTo: string;
   office?: string;
   ownerIds: string[];
+  ownerNames: string[];
   cacheScope: string;
 }
 
@@ -217,6 +218,7 @@ export function normalizeOperationsReportFilters(
     dateTo?: string;
     office?: string;
     ownerIds?: string[] | string;
+    ownerNames?: string[] | string;
     cacheScope?: string;
   } = {}
 ): OperationsReportFilters {
@@ -225,12 +227,18 @@ export function normalizeOperationsReportFilters(
     : typeof input.ownerIds === "string"
       ? input.ownerIds.split(",")
       : [];
+  const ownerNames = Array.isArray(input.ownerNames)
+    ? input.ownerNames
+    : typeof input.ownerNames === "string"
+      ? input.ownerNames.split(",")
+      : [];
 
   return {
     dateFrom: cleanString(input.dateFrom) ?? ninetyDaysAgoInput(),
     dateTo: cleanString(input.dateTo) ?? todayInput(),
     office: cleanString(input.office),
     ownerIds: ownerIds.map((ownerId) => ownerId.trim()).filter(Boolean),
+    ownerNames: ownerNames.map((ownerName) => ownerName.trim()).filter(Boolean),
     cacheScope: cleanString(input.cacheScope) ?? "default",
   };
 }
@@ -253,8 +261,15 @@ function withCache<T>(reportName: string, filters: OperationsReportFilters, load
 }
 
 function ownerFilter(filters: OperationsReportFilters) {
-  if (!filters.ownerIds.length) return sql`TRUE`;
-  return sql`d.assigned_rep_id::text IN (${sql.join(filters.ownerIds.map((id) => sql`${id}`), sql`, `)})`;
+  if (!filters.ownerIds.length && !filters.ownerNames.length) return sql`TRUE`;
+  const clauses = [];
+  if (filters.ownerIds.length) {
+    clauses.push(sql`d.assigned_rep_id::text IN (${sql.join(filters.ownerIds.map((id) => sql`${id}`), sql`, `)})`);
+  }
+  if (filters.ownerNames.length) {
+    clauses.push(sql`u.display_name IN (${sql.join(filters.ownerNames.map((name) => sql`${name}`), sql`, `)})`);
+  }
+  return sql`(${sql.join(clauses, sql` OR `)})`;
 }
 
 function officeFilter(filters: OperationsReportFilters) {

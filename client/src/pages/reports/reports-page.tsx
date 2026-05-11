@@ -43,9 +43,9 @@ const reportCategories: Array<{ category: string; description: string; reports: 
     category: "Performance",
     description: "Director-facing scorecards and rep-level activity views.",
     reports: [
-      { name: "Director Scorecard", description: "Executive view of targets, risk, and output.", icon: Gauge },
-      { name: "Rep Activity", description: "Touchpoints, follow-ups, and stalled accounts.", icon: Activity },
-      { name: "Forecast Accuracy", description: "Commit, best case, and pipeline reliability.", icon: LineChart },
+      { name: "Director Scorecard", description: "Executive view of targets, risk, and output.", icon: Gauge, path: "/reports/performance/director-scorecard" },
+      { name: "Rep Activity", description: "Touchpoints, follow-ups, and stalled accounts.", icon: Activity, path: "/reports/performance/rep-activity" },
+      { name: "Forecast Accuracy", description: "Commit, best case, and pipeline reliability.", icon: LineChart, path: "/reports/performance/forecast-accuracy" },
     ],
   },
   {
@@ -76,9 +76,9 @@ const reportCategories: Array<{ category: string; description: string; reports: 
     category: "Analytics",
     description: "Higher-level trends and business intelligence surfaces.",
     reports: [
-      { name: "Market Mix", description: "Work by vertical, property type, and region.", icon: PieChart },
-      { name: "Customer Concentration", description: "Revenue and opportunity exposure by account.", icon: Users },
-      { name: "Executive Trends", description: "Multi-period summary of operating indicators.", icon: BarChart3 },
+      { name: "Market Mix", description: "Work by vertical, property type, and region.", icon: PieChart, path: "/reports/analytics/market-mix" },
+      { name: "Customer Concentration", description: "Revenue and opportunity exposure by account.", icon: Users, path: "/reports/analytics/customer-concentration" },
+      { name: "Executive Trends", description: "Multi-period summary of operating indicators.", icon: BarChart3, path: "/reports/analytics/executive-trends" },
     ],
   },
 ];
@@ -126,8 +126,8 @@ export function ReportsPage() {
                       <div className="flex flex-wrap items-center gap-2">
                         <h3 className="font-black uppercase tracking-tight text-slate-950">{report.name}</h3>
                         {report.path ? (
-                          <span className="rounded-full bg-emerald-50 px-2 py-1 text-[10px] font-black uppercase tracking-[0.14em] text-emerald-700">
-                            Live
+                          <span className="rounded-full bg-slate-950 px-2 py-1 text-[10px] font-black uppercase tracking-[0.14em] text-white">
+                            Open
                           </span>
                         ) : (
                           <span className="rounded-full bg-red-50 px-2 py-1 text-[10px] font-black uppercase tracking-[0.14em] text-brand-red">
@@ -141,7 +141,7 @@ export function ReportsPage() {
                 );
 
                 return report.path ? (
-                  <Card key={report.name} className="border-slate-200 bg-white transition hover:border-brand-red hover:shadow-md">
+                  <Card key={report.name} className="border-slate-200 bg-white transition hover:border-brand-red/40 hover:shadow-md">
                     <Link to={report.path} className="block focus:outline-none focus:ring-2 focus:ring-brand-red focus:ring-offset-2">
                       {content}
                     </Link>

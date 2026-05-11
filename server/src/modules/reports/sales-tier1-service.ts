@@ -107,6 +107,34 @@ function sqlStringList(values: readonly string[]) {
   return sql.join(values.map((value) => sql`${value}`), sql`, `);
 }
 
+function buildOwnerIdentitySql(filters: Pick<SalesReportFilters, "ownerIds" | "ownerEmails" | "ownerNames">) {
+  const clauses = [];
+  if (filters.ownerIds.length > 0) clauses.push(sql`d.assigned_rep_id IN (${sqlStringList(filters.ownerIds)})`);
+  if (filters.ownerEmails.length > 0) clauses.push(sql`LOWER(u.email) IN (${sqlStringList(filters.ownerEmails)})`);
+  if (filters.ownerNames.length > 0) clauses.push(sql`u.display_name IN (${sqlStringList(filters.ownerNames)})`);
+  if (clauses.length === 0) return null;
+  return sql`(${sql.join(clauses, sql` OR `)})`;
+}
+
+function buildLeadOwnerIdentitySql(filters: Pick<SalesReportFilters, "ownerIds" | "ownerEmails" | "ownerNames">) {
+  const clauses = [];
+  if (filters.ownerIds.length > 0) clauses.push(sql`l.assigned_rep_id IN (${sqlStringList(filters.ownerIds)})`);
+  if (filters.ownerEmails.length > 0) clauses.push(sql`LOWER(u.email) IN (${sqlStringList(filters.ownerEmails)})`);
+  if (filters.ownerNames.length > 0) clauses.push(sql`u.display_name IN (${sqlStringList(filters.ownerNames)})`);
+  if (clauses.length === 0) return null;
+  return sql`(${sql.join(clauses, sql` OR `)})`;
+}
+
+function terminalOutcomeDateSql() {
+  return sql`
+    CASE
+      WHEN p.slug IN (${sqlStringList(LOST_STAGE_SLUGS)})
+        THEN COALESCE(d.actual_close_date::timestamptz, d.stage_entered_at)
+      ELSE COALESCE(d.contract_signed_at, d.actual_close_date::timestamptz, d.stage_entered_at, d.updated_at)
+    END
+  `;
+}
+
 function buildDealFilterSql(filters: SalesReportFilters, dateField?: "created_at" | "won_at") {
   const clauses = [
     sql`d.is_active = true`,
@@ -117,13 +145,15 @@ function buildDealFilterSql(filters: SalesReportFilters, dateField?: "created_at
     clauses.push(sql`d.created_at < (${filters.dateTo}::date + INTERVAL '1 day')`);
   }
   if (dateField === "won_at") {
-    clauses.push(sql`COALESCE(d.contract_signed_at, d.actual_close_date::timestamptz, d.updated_at) >= ${filters.dateFrom}::date`);
-    clauses.push(sql`COALESCE(d.contract_signed_at, d.actual_close_date::timestamptz, d.updated_at) < (${filters.dateTo}::date + INTERVAL '1 day')`);
+    const outcomeDate = terminalOutcomeDateSql();
+    clauses.push(sql`${outcomeDate} >= ${filters.dateFrom}::date`);
+    clauses.push(sql`${outcomeDate} < (${filters.dateTo}::date + INTERVAL '1 day')`);
   }
-  if (filters.officeSlug) clauses.push(sql`u.office_id IN (SELECT id FROM offices WHERE slug = ${filters.officeSlug})`);
-  if (filters.ownerIds.length > 0) clauses.push(sql`d.assigned_rep_id IN (${sqlStringList(filters.ownerIds)})`);
-  if (filters.ownerEmails.length > 0) clauses.push(sql`LOWER(u.email) IN (${sqlStringList(filters.ownerEmails)})`);
-  if (filters.ownerNames.length > 0) clauses.push(sql`u.display_name IN (${sqlStringList(filters.ownerNames)})`);
+  if (filters.officeSlug) {
+    clauses.push(sql`(u.office_id IN (SELECT id FROM offices WHERE slug = ${filters.officeSlug}) OR LOWER(COALESCE(d.office_code, '')) = LOWER(${filters.officeSlug}))`);
+  }
+  const ownerIdentity = buildOwnerIdentitySql(filters);
+  if (ownerIdentity) clauses.push(ownerIdentity);
   return sql.join(clauses, sql` AND `);
 }
 
@@ -134,10 +164,11 @@ function buildLeadFilterSql(filters: SalesReportFilters) {
     sql`l.created_at >= ${filters.dateFrom}::date`,
     sql`l.created_at < (${filters.dateTo}::date + INTERVAL '1 day')`,
   ];
-  if (filters.officeSlug) clauses.push(sql`u.office_id IN (SELECT id FROM offices WHERE slug = ${filters.officeSlug})`);
-  if (filters.ownerIds.length > 0) clauses.push(sql`l.assigned_rep_id IN (${sqlStringList(filters.ownerIds)})`);
-  if (filters.ownerEmails.length > 0) clauses.push(sql`LOWER(u.email) IN (${sqlStringList(filters.ownerEmails)})`);
-  if (filters.ownerNames.length > 0) clauses.push(sql`u.display_name IN (${sqlStringList(filters.ownerNames)})`);
+  if (filters.officeSlug) {
+    clauses.push(sql`(u.office_id IN (SELECT id FROM offices WHERE slug = ${filters.officeSlug}) OR LOWER(COALESCE(l.office_code, '')) = LOWER(${filters.officeSlug}))`);
+  }
+  const ownerIdentity = buildLeadOwnerIdentitySql(filters);
+  if (ownerIdentity) clauses.push(ownerIdentity);
   return sql.join(clauses, sql` AND `);
 }
 
@@ -527,6 +558,7 @@ export async function getClosedWonRevenueReport(
     const whereSql = buildDealFilterSql(filters, "won_at");
     const wonSlugs = sqlStringList(WON_STAGE_SLUGS);
     const lostSlugs = sqlStringList(LOST_STAGE_SLUGS);
+    const outcomeDate = terminalOutcomeDateSql();
 
     const summaryRows = rowsFromExecute<{ wonDeals: number | string; lostDeals: number | string; totalRevenue: number | string | null }>(await tenantDb.execute(sql`
       SELECT
@@ -600,7 +632,7 @@ export async function getClosedWonRevenueReport(
 
     const monthlyRows = rowsFromExecute<any>(await tenantDb.execute(sql`
       SELECT
-        TO_CHAR(DATE_TRUNC('month', COALESCE(d.contract_signed_at, d.actual_close_date::timestamptz, d.updated_at)), 'YYYY-MM') AS month,
+        TO_CHAR(DATE_TRUNC('month', ${outcomeDate}), 'YYYY-MM') AS month,
         COALESCE(SUM(COALESCE(d.awarded_amount, d.bid_board_total_sales, d.bid_estimate, d.forecast_revenue, 0)), 0)::numeric AS "totalRevenue",
         COUNT(*)::int AS "wonDeals"
       FROM deals d
@@ -618,7 +650,7 @@ export async function getClosedWonRevenueReport(
         d.name AS "dealName",
         COALESCE(u.display_name, 'Unassigned') AS "ownerName",
         COALESCE(d.awarded_amount, d.bid_board_total_sales, d.bid_estimate, d.forecast_revenue, 0)::numeric AS value,
-        COALESCE(d.contract_signed_at::date, d.actual_close_date, d.updated_at::date)::text AS "wonAt"
+        COALESCE(d.contract_signed_at::date, d.actual_close_date, d.stage_entered_at::date, d.updated_at::date)::text AS "wonAt"
       FROM deals d
       JOIN pipeline_stage_config p ON p.id = d.stage_id
       LEFT JOIN users u ON u.id = d.assigned_rep_id
@@ -691,9 +723,9 @@ export async function getLeadConversionReport(
       LEFT JOIN pipeline_stage_config p ON p.id = d.stage_id
       WHERE ${leadWhereSql}
       GROUP BY month
-      ORDER BY month
+      ORDER BY month DESC
       LIMIT 6
-    `));
+    `)).reverse();
 
     const revenueRows = rowsFromExecute<any>(await tenantDb.execute(sql`
       SELECT

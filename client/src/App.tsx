@@ -33,8 +33,14 @@ import { FilesPage } from "@/pages/files/files-page";
 import { DirectorRepDetail } from "@/pages/director/director-rep-detail";
 import { ReportsPage } from "@/pages/reports/reports-page";
 import { ClosedWonRevenuePage } from "@/pages/reports/closed-won-revenue-page";
+import { CustomerConcentrationPage } from "@/pages/reports/customer-concentration-page";
+import { DirectorScorecardPage } from "@/pages/reports/director-scorecard-page";
+import { ExecutiveTrendsPage } from "@/pages/reports/executive-trends-page";
+import { ForecastAccuracyPage } from "@/pages/reports/forecast-accuracy-page";
 import { LeadConversionPage } from "@/pages/reports/lead-conversion-page";
+import { MarketMixPage } from "@/pages/reports/market-mix-page";
 import { PipelineVelocityPage } from "@/pages/reports/pipeline-velocity-page";
+import { RepActivityPage } from "@/pages/reports/rep-activity-page";
 import { PortfolioLoadPage } from "@/pages/reports/portfolio-load-page";
 import { ProjectReadinessPage } from "@/pages/reports/project-readiness-page";
 import { WorkflowBottlenecksPage } from "@/pages/reports/workflow-bottlenecks-page";
@@ -227,6 +233,33 @@ export function App() {
               <Route path="/reports/sales/pipeline-velocity" element={<PipelineVelocityPage />} />
               <Route path="/reports/sales/closed-won-revenue" element={<ClosedWonRevenuePage />} />
               <Route path="/reports/sales/lead-conversion" element={<LeadConversionPage />} />
+              <Route
+                path="/reports/performance/director-scorecard"
+                element={(
+                  <RequireRole allowedRoles={["admin", "director"]}>
+                    <DirectorScorecardPage />
+                  </RequireRole>
+                )}
+              />
+              <Route
+                path="/reports/performance/rep-activity"
+                element={(
+                  <RequireRole allowedRoles={["admin", "director", "rep"]}>
+                    <RepActivityPage />
+                  </RequireRole>
+                )}
+              />
+              <Route
+                path="/reports/performance/forecast-accuracy"
+                element={(
+                  <RequireRole allowedRoles={["admin", "director"]}>
+                  <ForecastAccuracyPage />
+                </RequireRole>
+              )}
+              />
+              <Route path="/reports/analytics/market-mix" element={<MarketMixPage />} />
+              <Route path="/reports/analytics/customer-concentration" element={<CustomerConcentrationPage />} />
+              <Route path="/reports/analytics/executive-trends" element={<ExecutiveTrendsPage />} />
               <Route path="/reports/operations/workflow-bottlenecks" element={<WorkflowBottlenecksPage />} />
               <Route path="/reports/operations/project-readiness" element={<ProjectReadinessPage />} />
               <Route path="/reports/operations/portfolio-load" element={<PortfolioLoadPage />} />

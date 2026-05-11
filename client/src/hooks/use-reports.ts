@@ -122,6 +122,14 @@ export interface SalesReportQueryOptions {
   ownerEmails?: string[];
 }
 
+export interface AnalyticsTier4QueryOptions {
+  dateFrom?: string;
+  dateTo?: string;
+  office?: string;
+  ownerIds?: string[];
+  ownerNames?: string[];
+}
+
 export interface PipelineVelocityOverview {
   kpis: {
     avgDealAgeDays: number;
@@ -331,6 +339,95 @@ export interface RegionalOwnershipRegionRollup {
   staleDealCount: number;
 }
 
+export interface PerformanceReportQueryOptions {
+  dateFrom?: string;
+  dateTo?: string;
+  office?: string;
+  ownerIds?: string[];
+  ownerNames?: string[];
+}
+
+export interface DirectorScorecardReport {
+  kpis: {
+    totalPipelineValue: number;
+    openDealCount: number;
+    forecastCommit: number;
+    forecastBestCase: number;
+    winRate: number;
+  };
+  risks: {
+    dealsAtRisk: number;
+    dealsAtRiskValue: number;
+    stalledAccounts: number;
+    overdueTasks: number;
+    missedFollowUps: number;
+  };
+  repPerformance: Array<{
+    repName: string;
+    openDeals: number;
+    pipelineValue: number;
+    wonThisPeriod: number;
+    winRate: number;
+    activityScore: number;
+  }>;
+  officeComparison: Array<{
+    officeName: string;
+    pipelineValue: number;
+    openCount: number;
+    winRate: number;
+  }>;
+  topAtRiskDeals: Array<{
+    dealId: string;
+    dealName: string;
+    ownerName: string;
+    stageName: string;
+    daysInStage: number;
+    value: number;
+    lastActivityDate: string | null;
+  }>;
+}
+
+export interface RepActivityReport {
+  kpis: {
+    totalTouchpoints: number;
+    dealsWorked: number;
+    calls: number;
+    emails: number;
+    meetings: number;
+    followUpsCompleted: number;
+  };
+  timeline: Array<{ date: string; touchpoints: number }>;
+  stalledAccounts: Array<{
+    accountName: string;
+    ownerName: string;
+    lastActivityDate: string | null;
+    daysStalled: number;
+    openDeals: number;
+    totalOpenValue: number;
+  }>;
+  activityByType: Array<{ type: string; count: number }>;
+  repSummary: Array<{ repName: string; touchpoints: number; activeDeals: number; stalledAccounts: number }>;
+}
+
+export interface ForecastAccuracyReport {
+  kpis: {
+    commit: number;
+    bestCase: number;
+    pipelineWeighted: number;
+    wonActual: number;
+  };
+  monthly: Array<{ month: string; commit: number; bestCase: number; pipelineWeighted: number; wonActual: number }>;
+  accuracy: { variancePercent: number };
+  pipelineAtRisk: Array<{
+    dealId: string;
+    dealName: string;
+    ownerName: string;
+    stageName: string;
+    value: number;
+    expectedCloseDate: string | null;
+  }>;
+}
+
 export interface RegionalOwnershipRepRollup {
   repId: string;
   repName: string;
@@ -390,11 +487,69 @@ export interface ForecastVarianceOverview {
   deals: ForecastVarianceDealRow[];
 }
 
+export interface MarketMixReport {
+  kpis: {
+    totalDealCount: number;
+    totalWonValue: number;
+    activeMarkets: number;
+    mostActiveRegion: string;
+  };
+  verticalMix: Array<{ name: string; dealCount: number; wonValue: number }>;
+  propertyTypeMix: Array<{ name: string; dealCount: number; wonValue: number }>;
+  regionMix: Array<{ name: string; dealCount: number; wonValue: number }>;
+  quarterlyWonByVertical: Array<{ quarter: string; vertical: string; wonValue: number }>;
+  breakdown: Array<{ vertical: string; activeDeals: number; wonLastYear: number; winRate: number; avgDealSize: number }>;
+  proxyNotes: string[];
+}
+
+export interface CustomerConcentrationReport {
+  kpis: {
+    totalActiveCustomers: number;
+    totalOpenValue: number;
+    topCustomerPipelinePercent: number;
+    customersOverOneMillionOpen: number;
+  };
+  topCustomers: Array<{
+    companyName: string;
+    activeDeals: number;
+    totalOpenValue: number;
+    totalWonLifetime: number;
+    lastActivityAt: string | null;
+    accountOwner: string;
+  }>;
+  pareto: Array<{ rank: number; companyName: string; pipelineValue: number; cumulativePipelinePercent: number }>;
+  distribution: Array<{ bucket: string; customerCount: number }>;
+  staleCustomers: Array<{ companyName: string; ownerName: string; openDeals: number; openValue: number; daysStale: number }>;
+}
+
+export interface ExecutiveTrendsReport {
+  kpis: Array<{
+    label: string;
+    value: number;
+    changePercent: number;
+    direction: "up" | "down" | "flat";
+    format: "currency" | "number" | "percent";
+  }>;
+  monthlyTrends: Array<{ month: string; newDeals: number; wonDeals: number; lostDeals: number; activePipelineValue: number }>;
+  quarterlyComparison: Array<{
+    quarter: string;
+    dealsCreated: number;
+    won: number;
+    lost: number;
+    winRate: number;
+    avgDealSize: number;
+    pipelineEndValue: number;
+  }>;
+  winRateTrend: Array<{ month: string; winRate: number }>;
+  stageProgression: Array<{ stageName: string; enteredCount: number; advancedCount: number; progressionRate: number }>;
+}
+
 export interface OperationsReportQueryOptions {
   dateFrom?: string;
   dateTo?: string;
   office?: string;
   ownerIds?: string[];
+  ownerNames?: string[];
 }
 
 export interface WorkflowBottleneckStage {
@@ -640,6 +795,14 @@ function appendSalesReportQueryOptions(params: URLSearchParams, options: SalesRe
   if (options.ownerEmails?.length) params.set("ownerEmails", options.ownerEmails.join(","));
 }
 
+function appendAnalyticsTier4QueryOptions(params: URLSearchParams, options: AnalyticsTier4QueryOptions) {
+  if (options.dateFrom) params.set("dateFrom", options.dateFrom);
+  if (options.dateTo) params.set("dateTo", options.dateTo);
+  if (options.office && options.office !== "all") params.set("office", options.office);
+  if (options.ownerIds?.length) params.set("ownerIds", options.ownerIds.join(","));
+  if (options.ownerNames?.length) params.set("ownerNames", options.ownerNames.join(","));
+}
+
 async function executeSalesReport<T>(endpoint: string, options: SalesReportQueryOptions = {}) {
   const params = new URLSearchParams();
   appendSalesReportQueryOptions(params, options);
@@ -738,11 +901,33 @@ export async function executeForecastVarianceOverview(options: AnalyticsQueryOpt
   return api<{ data: ForecastVarianceOverview }>(`/reports/forecast-variance${qs ? `?${qs}` : ""}`);
 }
 
+export async function executeMarketMixReport(options: AnalyticsTier4QueryOptions = {}) {
+  const params = new URLSearchParams();
+  appendAnalyticsTier4QueryOptions(params, options);
+  const qs = params.toString();
+  return api<{ data: MarketMixReport }>(`/reports/market-mix${qs ? `?${qs}` : ""}`);
+}
+
+export async function executeCustomerConcentrationReport(options: AnalyticsTier4QueryOptions = {}) {
+  const params = new URLSearchParams();
+  appendAnalyticsTier4QueryOptions(params, options);
+  const qs = params.toString();
+  return api<{ data: CustomerConcentrationReport }>(`/reports/customer-concentration${qs ? `?${qs}` : ""}`);
+}
+
+export async function executeExecutiveTrendsReport(options: AnalyticsTier4QueryOptions = {}) {
+  const params = new URLSearchParams();
+  appendAnalyticsTier4QueryOptions(params, options);
+  const qs = params.toString();
+  return api<{ data: ExecutiveTrendsReport }>(`/reports/executive-trends${qs ? `?${qs}` : ""}`);
+}
+
 function appendOperationsReportQueryOptions(params: URLSearchParams, options: OperationsReportQueryOptions = {}) {
   if (options.dateFrom) params.set("dateFrom", options.dateFrom);
   if (options.dateTo) params.set("dateTo", options.dateTo);
   if (options.office) params.set("office", options.office);
   if (options.ownerIds?.length) params.set("ownerIds", options.ownerIds.join(","));
+  if (options.ownerNames?.length) params.set("ownerNames", options.ownerNames.join(","));
 }
 
 async function executeOperationsReport<T>(endpoint: string, options: OperationsReportQueryOptions = {}) {
@@ -768,7 +953,7 @@ export function useWorkflowBottlenecksReport(options: OperationsReportQueryOptio
     } finally {
       setLoading(false);
     }
-  }, [options.dateFrom, options.dateTo, options.office, options.ownerIds?.join(",")]);
+  }, [options.dateFrom, options.dateTo, options.office, options.ownerIds?.join(","), options.ownerNames?.join(",")]);
 
   useEffect(() => {
     fetchReport();
@@ -793,7 +978,7 @@ export function useProjectReadinessReport(options: OperationsReportQueryOptions 
     } finally {
       setLoading(false);
     }
-  }, [options.dateFrom, options.dateTo, options.office, options.ownerIds?.join(",")]);
+  }, [options.dateFrom, options.dateTo, options.office, options.ownerIds?.join(","), options.ownerNames?.join(",")]);
 
   useEffect(() => {
     fetchReport();
@@ -818,7 +1003,7 @@ export function usePortfolioLoadReport(options: OperationsReportQueryOptions = {
     } finally {
       setLoading(false);
     }
-  }, [options.dateFrom, options.dateTo, options.office, options.ownerIds?.join(",")]);
+  }, [options.dateFrom, options.dateTo, options.office, options.ownerIds?.join(","), options.ownerNames?.join(",")]);
 
   useEffect(() => {
     fetchReport();
@@ -875,6 +1060,81 @@ export function useForecastVarianceOverview(options: AnalyticsQueryOptions = {})
   }, [fetchOverview]);
 
   return { data, loading, error, refetch: fetchOverview };
+}
+
+export function useMarketMixReport(options: AnalyticsTier4QueryOptions = {}) {
+  const [data, setData] = useState<MarketMixReport | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+
+  const fetchReport = useCallback(async () => {
+    setLoading(true);
+    setError(null);
+    try {
+      const result = await executeMarketMixReport(options);
+      setData(result.data);
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : "Failed to load market mix");
+    } finally {
+      setLoading(false);
+    }
+  }, [options.dateFrom, options.dateTo, options.office, options.ownerIds?.join(","), options.ownerNames?.join(",")]);
+
+  useEffect(() => {
+    fetchReport();
+  }, [fetchReport]);
+
+  return { data, loading, error, refetch: fetchReport };
+}
+
+export function useCustomerConcentrationReport(options: AnalyticsTier4QueryOptions = {}) {
+  const [data, setData] = useState<CustomerConcentrationReport | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+
+  const fetchReport = useCallback(async () => {
+    setLoading(true);
+    setError(null);
+    try {
+      const result = await executeCustomerConcentrationReport(options);
+      setData(result.data);
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : "Failed to load customer concentration");
+    } finally {
+      setLoading(false);
+    }
+  }, [options.dateFrom, options.dateTo, options.office, options.ownerIds?.join(","), options.ownerNames?.join(",")]);
+
+  useEffect(() => {
+    fetchReport();
+  }, [fetchReport]);
+
+  return { data, loading, error, refetch: fetchReport };
+}
+
+export function useExecutiveTrendsReport(options: AnalyticsTier4QueryOptions = {}) {
+  const [data, setData] = useState<ExecutiveTrendsReport | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+
+  const fetchReport = useCallback(async () => {
+    setLoading(true);
+    setError(null);
+    try {
+      const result = await executeExecutiveTrendsReport(options);
+      setData(result.data);
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : "Failed to load executive trends");
+    } finally {
+      setLoading(false);
+    }
+  }, [options.dateFrom, options.dateTo, options.office, options.ownerIds?.join(","), options.ownerNames?.join(",")]);
+
+  useEffect(() => {
+    fetchReport();
+  }, [fetchReport]);
+
+  return { data, loading, error, refetch: fetchReport };
 }
 
 export async function executeWorkflowOverview(options: AnalyticsQueryOptions = {}) {
@@ -993,6 +1253,82 @@ export function useRegionalOwnershipOverview(options: AnalyticsQueryOptions = {}
   }, [fetchOverview]);
 
   return { data, loading, error, refetch: fetchOverview };
+}
+
+function appendPerformanceReportQueryOptions(params: URLSearchParams, options: PerformanceReportQueryOptions) {
+  if (options.dateFrom) params.set("dateFrom", options.dateFrom);
+  if (options.dateTo) params.set("dateTo", options.dateTo);
+  if (options.office && options.office !== "all") params.set("office", options.office);
+  if (options.ownerIds?.length) params.set("ownerIds", options.ownerIds.join(","));
+  if (options.ownerNames?.length) params.set("ownerNames", options.ownerNames.join(","));
+}
+
+function performanceDeps(options: PerformanceReportQueryOptions) {
+  return [
+    options.dateFrom,
+    options.dateTo,
+    options.office,
+    options.ownerIds?.join(","),
+    options.ownerNames?.join(","),
+  ] as const;
+}
+
+async function executePerformanceReport<T>(path: string, options: PerformanceReportQueryOptions = {}) {
+  const params = new URLSearchParams();
+  appendPerformanceReportQueryOptions(params, options);
+  const qs = params.toString();
+  return api<{ data: T }>(`/reports/${path}${qs ? `?${qs}` : ""}`);
+}
+
+function usePerformanceReport<T>(path: string, options: PerformanceReportQueryOptions = {}, errorMessage: string) {
+  const [data, setData] = useState<T | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const deps = performanceDeps(options);
+
+  const fetchReport = useCallback(async () => {
+    setLoading(true);
+    setError(null);
+    try {
+      const result = await executePerformanceReport<T>(path, options);
+      setData(result.data);
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : errorMessage);
+      setData(null);
+    } finally {
+      setLoading(false);
+    }
+  }, [path, errorMessage, ...deps]);
+
+  useEffect(() => {
+    fetchReport();
+  }, [fetchReport]);
+
+  return { data, loading, error, refetch: fetchReport };
+}
+
+export function useDirectorScorecardReport(options: PerformanceReportQueryOptions = {}) {
+  return usePerformanceReport<DirectorScorecardReport>(
+    "director-scorecard",
+    options,
+    "Failed to load director scorecard"
+  );
+}
+
+export function useRepActivityReport(options: PerformanceReportQueryOptions = {}) {
+  return usePerformanceReport<RepActivityReport>(
+    "rep-activity",
+    options,
+    "Failed to load rep activity"
+  );
+}
+
+export function useForecastAccuracyReport(options: PerformanceReportQueryOptions = {}) {
+  return usePerformanceReport<ForecastAccuracyReport>(
+    "forecast-accuracy",
+    options,
+    "Failed to load forecast accuracy"
+  );
 }
 
 /** Execute a custom report config */

@@ -20,9 +20,9 @@ describe("ReportsPage", () => {
     expect(html).toContain("Performance");
     expect(html).toContain("Operations");
     expect(html).toContain("Analytics");
-    expect(html).toContain("Coming soon");
     expect(html).toContain("Pipeline Velocity");
     expect(html).toContain("Director Scorecard");
+    expect(html).toContain("Executive Trends");
   });
 
   it("does not render report execution or builder actions", () => {
@@ -35,16 +35,21 @@ describe("ReportsPage", () => {
     expect(html).not.toContain("Execute");
   });
 
-  it("links the Sales Tier 1 and Operations Tier 3 report cards", () => {
+  it("makes shipped Sales, Performance, Operations, and Analytics tier cards clickable", () => {
     const html = renderReportsPage();
 
     expect(html).toContain('href="/reports/sales/pipeline-velocity"');
     expect(html).toContain('href="/reports/sales/closed-won-revenue"');
     expect(html).toContain('href="/reports/sales/lead-conversion"');
+    expect(html).toContain("/reports/performance/director-scorecard");
+    expect(html).toContain("/reports/performance/rep-activity");
+    expect(html).toContain("/reports/performance/forecast-accuracy");
     expect(html).toContain("/reports/operations/workflow-bottlenecks");
     expect(html).toContain("/reports/operations/project-readiness");
     expect(html).toContain("/reports/operations/portfolio-load");
-    expect(html).not.toContain("/reports/performance/director-scorecard");
-    expect((html.match(/Coming soon/g) || [])).toHaveLength(6);
+    expect(html).toContain("/reports/analytics/market-mix");
+    expect(html).toContain("/reports/analytics/customer-concentration");
+    expect(html).toContain("/reports/analytics/executive-trends");
+    expect(html).not.toContain("Coming soon");
   });
 });
