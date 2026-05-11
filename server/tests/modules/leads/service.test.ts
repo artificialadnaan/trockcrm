@@ -2,6 +2,7 @@ import {
   companies,
   contacts,
   deals,
+  activities,
   leadDueDiligenceApprovals,
   leadStageHistory,
   leadQuestionAnswerHistory,
@@ -128,6 +129,7 @@ function createFakeTenantDb(lead: FakeLeadRow) {
     ],
     leads: [lead],
     deals: [],
+    activities: [] as Array<Record<string, unknown>>,
     leadStageHistory: [] as Array<Record<string, unknown>>,
     leadQuestionAnswers: [] as Array<Record<string, unknown>>,
     leadQuestionAnswerHistory: [] as Array<Record<string, unknown>>,
@@ -248,6 +250,9 @@ function createFakeTenantDb(lead: FakeLeadRow) {
           if (table === deals || tableName === "deals") {
             return createQueryBuilder(state.deals as Array<Record<string, unknown>>, fields);
           }
+          if (table === activities || tableName === "activities") {
+            return createQueryBuilder(state.activities, fields);
+          }
           if (table === leadStageHistory || tableName === "lead_stage_history") {
             return createQueryBuilder(state.leadStageHistory, fields);
           }
@@ -279,6 +284,23 @@ function createFakeTenantDb(lead: FakeLeadRow) {
             return {
               returning() {
                 return Promise.resolve([insertedRow]);
+              },
+              then(onfulfilled: (value: unknown) => unknown) {
+                return Promise.resolve(insertedRow).then(onfulfilled);
+              },
+            };
+          }
+
+          if (table === activities || tableName === "activities") {
+            const insertedRow = {
+              id: value.id ?? `activity-${state.activities.length + 1}`,
+              createdAt: value.createdAt ?? new Date("2026-04-15T15:00:00.000Z"),
+              ...value,
+            };
+            state.activities.push(insertedRow);
+            return {
+              returning() {
+                return Promise.resolve([{ ...insertedRow }]);
               },
               then(onfulfilled: (value: unknown) => unknown) {
                 return Promise.resolve(insertedRow).then(onfulfilled);
@@ -764,6 +786,22 @@ describe("lead service canonical progression", () => {
         toStageId: qualifiedLeadStage.id,
         changedBy: "director-1",
         isBackwardMove: false,
+      }),
+    ]);
+    expect(tenantDb.state.activities).toEqual([
+      expect.objectContaining({
+        type: "note",
+        outcome: "lead_stage_changed",
+        responsibleUserId: "rep-1",
+        performedByUserId: "director-1",
+        sourceEntityType: "lead",
+        sourceEntityId: "lead-1",
+        leadId: "lead-1",
+        companyId: "company-1",
+        propertyId: "property-1",
+        subject: "Stage changed from New Lead to Qualified Lead",
+        body: "Moved this lead from New Lead to Qualified Lead.",
+        occurredAt: new Date("2026-04-15T15:00:00.000Z"),
       }),
     ]);
   });

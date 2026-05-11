@@ -1,6 +1,6 @@
-import { and, desc, eq, or, sql } from "drizzle-orm";
+import { and, desc, eq, inArray, or, sql } from "drizzle-orm";
 import type { NodePgDatabase } from "drizzle-orm/node-postgres";
-import { activities, deals } from "@trock-crm/shared/schema";
+import { activities, deals, users } from "@trock-crm/shared/schema";
 import type * as schema from "@trock-crm/shared/schema";
 import { AppError } from "../../middleware/error-handler.js";
 
@@ -53,6 +53,48 @@ const SOURCE_ENTITY_LINK_KEY: Record<ActivitySourceEntityType, keyof Pick<
   deal: "dealId",
   contact: "contactId",
 };
+
+async function addUserMetadata(
+  tenantDb: TenantDb,
+  rows: Array<typeof activities.$inferSelect>
+) {
+  const userIds = Array.from(
+    new Set(
+      rows
+        .flatMap((activity) => [activity.responsibleUserId, activity.performedByUserId])
+        .filter((id): id is string => Boolean(id))
+    )
+  );
+
+  if (userIds.length === 0) {
+    return rows;
+  }
+
+  const userRows = await tenantDb
+    .select({
+      id: users.id,
+      displayName: users.displayName,
+      avatarUrl: users.avatarUrl,
+    })
+    .from(users)
+    .where(inArray(users.id, userIds));
+  const userById = new Map(userRows.map((user) => [user.id, user]));
+
+  return rows.map((activity) => {
+    const responsibleUser = userById.get(activity.responsibleUserId);
+    const performedByUser = activity.performedByUserId
+      ? userById.get(activity.performedByUserId)
+      : null;
+
+    return {
+      ...activity,
+      responsibleUserName: responsibleUser?.displayName ?? null,
+      responsibleUserAvatarUrl: responsibleUser?.avatarUrl ?? null,
+      performedByUserName: performedByUser?.displayName ?? null,
+      performedByUserAvatarUrl: performedByUser?.avatarUrl ?? null,
+    };
+  });
+}
 
 function normalizeLinkedEntities(input: CreateActivityInput) {
   const linkedEntities = {
@@ -132,9 +174,10 @@ export async function getActivities(
   ]);
 
   const total = Number(countResult[0]?.count ?? 0);
+  const enrichedRows = await addUserMetadata(tenantDb, rows);
 
   return {
-    activities: rows,
+    activities: enrichedRows,
     pagination: { page, limit, total, totalPages: Math.ceil(total / limit) },
   };
 }

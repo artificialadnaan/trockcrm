@@ -25,6 +25,8 @@ interface LeadQuestionnaireEditorProps {
   onSaved: () => void | Promise<void>;
 }
 
+const LEGACY_QUALIFICATION_DUPLICATE_KEYS = new Set(["timeline"]);
+
 interface StageGateErrorState {
   message: string;
   missingLabels?: string[];
@@ -165,7 +167,11 @@ export function LeadQuestionnaireEditor({ lead, onCancel, onSaved }: LeadQuestio
 
     return [];
   }, [questionnaire]);
-  const scopedNodes = useMemo(
+  const displayedNodes = useMemo(
+    () => availableNodes.filter((node) => !LEGACY_QUALIFICATION_DUPLICATE_KEYS.has(node.key)),
+    [availableNodes]
+  );
+  const answerableNodes = useMemo(
     () => availableNodes.filter((node) => node.nodeType === "question"),
     [availableNodes]
   );
@@ -243,7 +249,12 @@ export function LeadQuestionnaireEditor({ lead, onCancel, onSaved }: LeadQuestio
 
     try {
       const leadQuestionAnswers = Object.fromEntries(
-        scopedNodes.map((node) => [node.key, formData.leadQuestionAnswers[node.key] ?? null])
+        answerableNodes.map((node) => [
+          node.key,
+          node.key === "timeline"
+            ? formData.qualificationPayload.timeline_status.trim() || null
+            : formData.leadQuestionAnswers[node.key] ?? null,
+        ])
       );
 
       if (!isConverted && formData.stageId !== lead.stageId) {
@@ -496,7 +507,7 @@ export function LeadQuestionnaireEditor({ lead, onCancel, onSaved }: LeadQuestio
         </CardHeader>
         <CardContent className="space-y-4">
           <LeadQuestionnaireSections
-            nodes={availableNodes}
+            nodes={displayedNodes}
             answers={formData.leadQuestionAnswers}
             onAnswerChange={handleAnswerChange}
             legacyAnswers={questionnaire.legacyAnswers}

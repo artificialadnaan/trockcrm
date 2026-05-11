@@ -24,6 +24,10 @@ export interface Activity {
   durationMinutes: number | null;
   occurredAt: string;
   createdAt: string;
+  responsibleUserName?: string | null;
+  responsibleUserAvatarUrl?: string | null;
+  performedByUserName?: string | null;
+  performedByUserAvatarUrl?: string | null;
 }
 
 export interface ActivityFilters {
