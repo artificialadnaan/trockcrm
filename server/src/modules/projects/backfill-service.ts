@@ -122,7 +122,12 @@ async function processRow(
     await client.query("COMMIT");
     result.backfilled += 1;
   } catch (error) {
-    await client.query("ROLLBACK").catch(() => {});
+    await client.query("ROLLBACK").catch((rollbackError) => {
+      console.error(
+        "[ProjectsBackfill] ROLLBACK failed after row error",
+        { procoreProjectId: normalized.procoreProjectId, rollbackError }
+      );
+    });
     result.errored += 1;
     result.errors.push({
       procoreProjectId: normalized.procoreProjectId,
@@ -152,6 +157,9 @@ export async function runProjectsBackfill(
     // Session-level search_path so per-row transactions can address tenant
     // tables unqualified where needed (e.g. `FROM projects`, `FROM deals`).
     // Qualified writes still use `schemaName.table` to make routing explicit.
+    // We RESET search_path in the finally below so the client returns to the
+    // pool in a clean state — node-postgres does not call DISCARD ALL on
+    // release, and a stale search_path would leak to the next consumer.
     await client.query(`SET search_path TO ${quoteIdent(schemaName)}, public`);
 
     for (let page = 1; ; page += 1) {
@@ -171,6 +179,11 @@ export async function runProjectsBackfill(
       if (rows.length < perPage) break;
     }
   } finally {
+    // Reset session state before returning the client to the pool so the
+    // next consumer doesn't inherit our search_path.
+    await client.query("RESET search_path").catch((resetError) => {
+      console.error("[ProjectsBackfill] RESET search_path failed before release", resetError);
+    });
     client.release();
   }
 

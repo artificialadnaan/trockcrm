@@ -180,4 +180,22 @@ describe("projects backfill service", () => {
     ).rejects.toThrow(/procore boom/);
     expect(release).toHaveBeenCalledTimes(1);
   });
+
+  it("resets search_path before releasing the pool client so it does not leak to the next consumer", async () => {
+    vi.mocked(procoreClient.get).mockResolvedValueOnce([]);
+
+    const { pool, query, release } = createPool(() => ({ rows: [] }));
+    await runProjectsBackfill(pool, "office_dallas", "dallas", { companyId: "598134325683880" });
+
+    const sqls = query.mock.calls.map((call) => String(call[0]));
+    const setIdx = sqls.findIndex((s) => /SET search_path/.test(s));
+    const resetIdx = sqls.findIndex((s) => /RESET search_path/.test(s));
+    expect(setIdx).toBeGreaterThanOrEqual(0);
+    expect(resetIdx).toBeGreaterThan(setIdx);
+    expect(release).toHaveBeenCalledTimes(1);
+    // release must come after RESET — verifiable via vitest invocationCallOrder
+    expect(release.mock.invocationCallOrder[0]).toBeGreaterThan(
+      query.mock.invocationCallOrder[resetIdx]
+    );
+  });
 });
