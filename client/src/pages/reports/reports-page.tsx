@@ -76,9 +76,9 @@ const reportCategories: Array<{ category: string; description: string; reports: 
     category: "Analytics",
     description: "Higher-level trends and business intelligence surfaces.",
     reports: [
-      { name: "Market Mix", description: "Work by vertical, property type, and region.", icon: PieChart },
-      { name: "Customer Concentration", description: "Revenue and opportunity exposure by account.", icon: Users },
-      { name: "Executive Trends", description: "Multi-period summary of operating indicators.", icon: BarChart3 },
+      { name: "Market Mix", description: "Work by vertical, property type, and region.", icon: PieChart, path: "/reports/analytics/market-mix" },
+      { name: "Customer Concentration", description: "Revenue and opportunity exposure by account.", icon: Users, path: "/reports/analytics/customer-concentration" },
+      { name: "Executive Trends", description: "Multi-period summary of operating indicators.", icon: BarChart3, path: "/reports/analytics/executive-trends" },
     ],
   },
 ];
