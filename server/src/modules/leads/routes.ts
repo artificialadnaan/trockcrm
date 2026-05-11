@@ -1,5 +1,6 @@
 import { Router } from "express";
 import { drizzle } from "drizzle-orm/node-postgres";
+import type { PoolClient } from "pg";
 import * as schema from "@trock-crm/shared/schema";
 import { pool } from "../../db.js";
 import { AppError } from "../../middleware/error-handler.js";
@@ -38,9 +39,10 @@ async function dispatchDueDiligenceEmailAfterCommit(input: {
   officeSlug: string;
   approvalId: string;
 }) {
-  const client = await pool.connect();
+  let client: PoolClient | null = null;
   let committed = false;
   try {
+    client = await pool.connect();
     assertSafeOfficeSlug(input.officeSlug);
     const schemaName = `office_${input.officeSlug}`;
     await client.query("BEGIN");
@@ -50,7 +52,7 @@ async function dispatchDueDiligenceEmailAfterCommit(input: {
     await client.query("COMMIT");
     committed = true;
   } catch (err) {
-    if (!committed) {
+    if (client && !committed) {
       await client.query("ROLLBACK").catch(() => {});
     }
     console.error("[lead-dd] post-commit email dispatch failed", {
@@ -58,7 +60,7 @@ async function dispatchDueDiligenceEmailAfterCommit(input: {
       err,
     });
   } finally {
-    client.release();
+    client?.release();
   }
 }
 
