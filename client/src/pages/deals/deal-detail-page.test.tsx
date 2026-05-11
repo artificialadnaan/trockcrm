@@ -412,24 +412,45 @@ describe("DealDetailPage", () => {
     expect(html).toContain("Estimates");
   });
 
-  it("renders right-rail with company, owner, and system IDs", () => {
+  it("renders right-rail sections in redesigned order with primary contact fallback", () => {
     mocks.useDealDetailMock.mockReturnValueOnce({
       loading: false,
       error: null,
       refetch: vi.fn(),
-      deal: makeDealDetail({ hubspotDealId: "hs_deal_82211" }),
+      deal: makeDealDetail({
+        hubspotDealId: "hs_deal_82211",
+        primaryContactId: "contact-1",
+      }),
     });
 
     const html = renderPage();
 
-    expect(html).toContain("Company");
+    const sectionOrder = [
+      "Owner",
+      "Account",
+      "Property",
+      "Primary Contact",
+      "Project Type",
+      "Project Number",
+      "System IDs",
+    ];
+    const positions = sectionOrder.map((label) => html.indexOf(label));
+    expect(positions.every((position) => position >= 0)).toBe(true);
+    expect([...positions].sort((a, b) => a - b)).toEqual(positions);
     expect(html).toContain("Dallas Independent SD");
-    expect(html).toContain("Owner");
     expect(html).toContain("Brett Rios");
-    expect(html).toContain("System IDs");
+    expect(html).toContain('href="/contacts/contact-1"');
+    expect(html).toContain("Contact assigned");
     expect(html).toContain("hs_deal_82211");
     expect(html).toContain("123456");
     expect(html).toContain("DFW-3-12826-aa");
+  });
+
+  it("renders muted primary contact empty state when no primary contact is assigned", () => {
+    const html = renderPage();
+
+    expect(html).toContain("Primary Contact");
+    expect(html).toContain("No primary contact");
   });
 
   it("renders project number as the primary deal identifier when assigned", () => {
