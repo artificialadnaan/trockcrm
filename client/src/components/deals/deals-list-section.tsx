@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { toast } from "sonner";
-import { Download, Search } from "lucide-react";
+import { Download, Filter, Search } from "lucide-react";
 import { Input } from "@/components/ui/input";
 import {
   Select,
@@ -47,14 +47,17 @@ type DealListActiveFilter = boolean | "all" | "pipeline";
 
 interface DealsListSectionProps {
   scope?: "mine" | "team" | "all";
+  workflowFamily?: Parameters<typeof usePipelineStages>[0];
   enableDateFilter?: boolean;
   enableExport?: boolean;
+  showFilterButton?: boolean;
   visibleStages?: Array<Pick<PipelineStage, "id" | "slug" | "name"> & Partial<Pick<PipelineStage, "isTerminal" | "displayOrder">>>;
   excludeStageSlugs?: string[];
   eyebrow?: string;
   title?: string;
   subtitle?: string;
   pageSize?: number;
+  searchPlaceholder?: string;
 }
 
 interface DealStageFilterOption {
@@ -275,14 +278,17 @@ export async function fetchAllFilteredDeals(input: {
 
 export function DealsListSection({
   scope,
+  workflowFamily = "deal",
   enableDateFilter = false,
   enableExport = false,
+  showFilterButton = false,
   visibleStages,
   excludeStageSlugs = [],
   eyebrow = "Deal list",
   title = "Pipeline records",
   subtitle = "Filter and scan deals without changing the kanban above.",
   pageSize = DEFAULT_PAGE_SIZE,
+  searchPlaceholder = "Deal name, number, company, address",
 }: DealsListSectionProps) {
   const navigate = useNavigate();
   const [search, setSearch] = useState("");
@@ -292,7 +298,7 @@ export function DealsListSection({
   const [page, setPage] = useState(1);
   const [sort, setSort] = useState<SortState>({ key: "updated_at", dir: "desc" });
 
-  const { stages, loading: stagesLoading, error: stagesError } = usePipelineStages("deal");
+  const { stages, loading: stagesLoading, error: stagesError } = usePipelineStages(workflowFamily);
   const { assignees } = useTaskAssignees();
 
   const stageFilterOptions = useMemo(() => {
@@ -492,8 +498,12 @@ export function DealsListSection({
   ];
 
   const filterGridClass = enableDateFilter
-    ? "lg:grid-cols-[minmax(18rem,1fr)_220px_220px]"
-    : "lg:grid-cols-[minmax(18rem,1fr)_220px]";
+    ? showFilterButton
+      ? "lg:grid-cols-[minmax(18rem,1fr)_auto_220px_220px]"
+      : "lg:grid-cols-[minmax(18rem,1fr)_220px_220px]"
+    : showFilterButton
+      ? "lg:grid-cols-[minmax(18rem,1fr)_auto_220px]"
+      : "lg:grid-cols-[minmax(18rem,1fr)_220px]";
 
   return (
     <section className="rounded-lg border border-gray-200 bg-white">
@@ -530,11 +540,23 @@ export function DealsListSection({
                 setPage(1);
                 setSearch(event.target.value);
               }}
-              placeholder="Deal name, number, company, address"
+              placeholder={searchPlaceholder}
               className="pl-9"
             />
           </div>
         </label>
+
+        {showFilterButton ? (
+          <div className="flex items-end">
+            <button
+              type="button"
+              className="inline-flex h-10 items-center justify-center gap-2 rounded-md border border-slate-200 bg-white px-3 text-sm font-bold text-slate-700 hover:border-brand-red/40 hover:text-brand-red focus:outline-none focus-visible:ring-2 focus-visible:ring-brand-red"
+            >
+              <Filter className="h-4 w-4" />
+              Filter
+            </button>
+          </div>
+        ) : null}
 
         <label className="space-y-2">
           <span className="text-[11px] font-black uppercase tracking-[0.16em] text-slate-500">Owner</span>

@@ -20,7 +20,8 @@ import {
 } from "@/lib/pipeline-terminal-filters";
 import type { PipelineScope } from "@/lib/pipeline-scope";
 import { KanbanScrollColumn } from "@/components/deals/kanban-scroll-column";
-import { KanbanDealCard } from "@/components/deals/kanban-deal-card";
+import { DecoratedKanbanCard } from "@/components/deals/decorated-kanban-card";
+import { DealsListSection } from "@/components/deals/deals-list-section";
 
 const SCOPE_OPTIONS = [
   { value: "mine", label: "Mine" },
@@ -38,14 +39,6 @@ const STAGE_SLA_DAYS: Record<string, number> = {
   won: 0,
   lost: 0,
 };
-
-const DEAL_BOARD_STAGE_SLUGS = [
-  "opportunity",
-  "estimating",
-  "service_estimating",
-  "estimate_under_review",
-  "estimate_sent_to_client",
-] as const;
 
 function getScope(searchParams: URLSearchParams, role: string | undefined): PipelineScope {
   if (role === "rep") return "mine";
@@ -143,7 +136,13 @@ function DealsBoardColumn({
     <KanbanScrollColumn header={header} childCount={column.cards.length}>
       {column.cards.length > 0 ? (
         column.cards.map((deal) => (
-          <KanbanDealCard key={deal.id} deal={deal} onClick={() => onOpenRecord(deal.id)} />
+          <DecoratedKanbanCard
+            key={deal.id}
+            deal={deal}
+            stageSlug={column.stage.slug}
+            slaDays={STAGE_SLA_DAYS[column.stage.slug] ?? 7}
+            onClick={() => onOpenRecord(deal.id)}
+          />
         ))
       ) : (
         <div className="border border-dashed border-gray-200 py-8 text-center text-xs text-gray-400">
@@ -182,7 +181,6 @@ function DealListPageContent({ role }: { role: string }) {
     () => {
       const searchTerm = search.trim().toLowerCase();
       return buildCanonicalDealBoardColumns(board?.columns, stages)
-        .filter((column) => DEAL_BOARD_STAGE_SLUGS.includes(column.stage.slug as (typeof DEAL_BOARD_STAGE_SLUGS)[number]))
         .map((column) => {
           if (!searchTerm) return column;
           const cards = column.cards.filter((deal) => {
@@ -408,6 +406,16 @@ function DealListPageContent({ role }: { role: string }) {
           </>
         )}
       </section>
+
+      <DealsListSection
+        workflowFamily="deal"
+        scope={scope}
+        enableExport
+        enableDateFilter={false}
+        showFilterButton
+        pageSize={20}
+        searchPlaceholder="Search deals or accounts"
+      />
     </div>
   );
 }
