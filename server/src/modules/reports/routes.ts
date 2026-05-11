@@ -1,4 +1,4 @@
-import { Router } from "express";
+import { Router, type Request } from "express";
 import { requireRole, requireDirector } from "../../middleware/rbac.js";
 import { AppError } from "../../middleware/error-handler.js";
 import {
@@ -24,6 +24,12 @@ import {
   normalizeAnalyticsFilters,
 } from "./service.js";
 import type { AnalyticsFilterInput, ReportConfig } from "./service.js";
+import {
+  getClosedWonRevenueReport,
+  getLeadConversionReport,
+  getPipelineVelocityReport,
+  normalizeSalesReportFilters,
+} from "./sales-tier1-service.js";
 import {
   getSavedReports,
   getSavedReportById,
@@ -88,6 +94,16 @@ export function parseAnalyticsFilters(query: Record<string, unknown>): Analytics
   });
 }
 
+function parseSalesReportRequest(req: Request) {
+  const filters = normalizeSalesReportFilters(req.query as Record<string, unknown>);
+  return {
+    ...filters,
+    ownerIds: req.user!.role === "rep" ? [req.user!.id] : filters.ownerIds,
+    ownerNames: req.user!.role === "rep" ? [] : filters.ownerNames,
+    ownerEmails: req.user!.role === "rep" ? [] : filters.ownerEmails,
+  };
+}
+
 function parseOwnerIds(value: unknown): string[] {
   if (Array.isArray(value)) {
     return value.flatMap((item) => parseOwnerIds(item));
@@ -131,6 +147,39 @@ export function parseTier4Filters(query: Record<string, unknown>, user: { role: 
 // -------------------------------------------------------------------------
 // Locked report execution endpoints
 // -------------------------------------------------------------------------
+
+router.get("/pipeline-velocity", async (req, res, next) => {
+  try {
+    const filters = parseSalesReportRequest(req);
+    const data = await getPipelineVelocityReport(req.tenantDb!, filters, req.officeSlug ?? req.user!.activeOfficeId ?? req.user!.officeId);
+    await req.commitTransaction!();
+    res.json({ data });
+  } catch (err) {
+    next(err);
+  }
+});
+
+router.get("/closed-won-revenue", async (req, res, next) => {
+  try {
+    const filters = parseSalesReportRequest(req);
+    const data = await getClosedWonRevenueReport(req.tenantDb!, filters, req.officeSlug ?? req.user!.activeOfficeId ?? req.user!.officeId);
+    await req.commitTransaction!();
+    res.json({ data });
+  } catch (err) {
+    next(err);
+  }
+});
+
+router.get("/lead-conversion", async (req, res, next) => {
+  try {
+    const filters = parseSalesReportRequest(req);
+    const data = await getLeadConversionReport(req.tenantDb!, filters, req.officeSlug ?? req.user!.activeOfficeId ?? req.user!.officeId);
+    await req.commitTransaction!();
+    res.json({ data });
+  } catch (err) {
+    next(err);
+  }
+});
 
 // GET /api/reports/pipeline-summary?includeDd=false&from=2026-01-01&to=2026-12-31
 router.get("/pipeline-summary", async (req, res, next) => {

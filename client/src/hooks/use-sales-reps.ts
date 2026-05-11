@@ -4,6 +4,7 @@ import { api } from "@/lib/api";
 export interface SalesRepOption {
   id: string;
   displayName: string;
+  email?: string | null;
 }
 
 export function useSalesReps(officeId?: string) {

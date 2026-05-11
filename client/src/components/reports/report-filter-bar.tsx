@@ -23,14 +23,22 @@ export interface ReportFilters {
   dateFrom: string;
   dateTo: string;
   office: string;
+  ownerIds: string[];
   ownerNames: string[];
+  ownerEmails: string[];
 }
+
+export interface ReportOwnerOption {
+  id: string;
+  displayName: string;
+  email?: string | null;
+}
+
+type DefaultRange = "30" | "60" | "90" | "6m" | "12m" | "qtd" | "ytd";
 
 function toDateInput(date: Date) {
   return date.toISOString().slice(0, 10);
 }
-
-type DefaultRange = "30" | "60" | "90" | "6m" | "12m" | "qtd" | "ytd";
 
 export function subtractMonthsClamped(date: Date, months: number) {
   const targetMonthIndex = date.getMonth() - months;
@@ -71,7 +79,37 @@ function rangeDates(range: string) {
 
 function defaultFilters(defaultRange: DefaultRange = "90"): ReportFilters {
   const dates = rangeDates(defaultRange);
-  return { range: defaultRange, ...dates, office: "all", ownerNames: [] };
+  return { range: defaultRange, ...dates, office: "all", ownerIds: [], ownerNames: [], ownerEmails: [] };
+}
+
+function splitParam(value: string | null) {
+  return value?.split(",").map((part) => part.trim()).filter(Boolean) ?? [];
+}
+
+export function hydrateOwnerSelection(filters: ReportFilters, owners: ReportOwnerOption[]) {
+  const ownerIds = new Set(filters.ownerIds);
+  const matchedNameIndexes = new Set<number>();
+
+  for (const email of filters.ownerEmails) {
+    const owner = owners.find((entry) => entry.email?.toLowerCase() === email.toLowerCase());
+    if (owner) ownerIds.add(owner.id);
+  }
+
+  filters.ownerNames.forEach((name, index) => {
+    const hasEmailForSelection = Boolean(filters.ownerEmails[index]);
+    if (hasEmailForSelection) return;
+    const owner = owners.find((entry) => entry.displayName === name);
+    if (owner) {
+      ownerIds.add(owner.id);
+      matchedNameIndexes.add(index);
+    }
+  });
+
+  return {
+    ...filters,
+    ownerIds: Array.from(ownerIds),
+    ownerNames: filters.ownerNames.filter((_, index) => !filters.ownerEmails[index] || matchedNameIndexes.has(index)),
+  };
 }
 
 export function useReportFilters(options: { defaultRange?: DefaultRange } = {}) {
@@ -79,13 +117,14 @@ export function useReportFilters(options: { defaultRange?: DefaultRange } = {}) 
   const filters = useMemo<ReportFilters>(() => {
     const defaults = defaultFilters(options.defaultRange);
     const range = searchParams.get("range") || defaults.range;
-    const ownerNames = searchParams.get("ownerNames")?.split(",").map((value) => value.trim()).filter(Boolean) ?? [];
     return {
       range,
       dateFrom: searchParams.get("dateFrom") || defaults.dateFrom,
       dateTo: searchParams.get("dateTo") || defaults.dateTo,
       office: searchParams.get("office") || defaults.office,
-      ownerNames,
+      ownerIds: splitParam(searchParams.get("ownerIds")),
+      ownerNames: splitParam(searchParams.get("owners") ?? searchParams.get("ownerNames")),
+      ownerEmails: splitParam(searchParams.get("ownerEmails")),
     };
   }, [options.defaultRange, searchParams]);
 
@@ -95,7 +134,9 @@ export function useReportFilters(options: { defaultRange?: DefaultRange } = {}) 
       dateFrom: filters.dateFrom,
       dateTo: filters.dateTo,
       office: filters.office,
+      ownerIds: filters.ownerIds,
       ownerNames: filters.ownerNames,
+      ownerEmails: filters.ownerEmails,
     },
   };
 }
@@ -112,8 +153,8 @@ export function ReportFilterBar({ defaultRange = "90" }: { defaultRange?: Defaul
   const { salesReps } = useSalesReps(canonicalOfficeId);
 
   useEffect(() => {
-    setDraft(filters);
-  }, [filters]);
+    setDraft(hydrateOwnerSelection(filters, salesReps));
+  }, [filters, salesReps]);
 
   function updateRange(range: string) {
     const dates = range === "custom" ? { dateFrom: draft.dateFrom, dateTo: draft.dateTo } : rangeDates(range);
@@ -127,8 +168,30 @@ export function ReportFilterBar({ defaultRange = "90" }: { defaultRange?: Defaul
     next.set("dateTo", nextFilters.dateTo);
     if (nextFilters.office && nextFilters.office !== "all") next.set("office", nextFilters.office);
     else next.delete("office");
-    if (nextFilters.ownerNames.length) next.set("ownerNames", nextFilters.ownerNames.join(","));
-    else next.delete("ownerNames");
+
+    if (nextFilters.ownerIds.length || nextFilters.ownerNames.length || nextFilters.ownerEmails.length) {
+      const selectedOwners = nextFilters.ownerIds.length && salesReps.length
+        ? salesReps.filter((owner) => nextFilters.ownerIds.includes(owner.id))
+        : [];
+      const existingOwnerEmails = splitParam(searchParams.get("ownerEmails"));
+      const names = selectedOwners.length ? selectedOwners.map((owner) => owner.displayName) : nextFilters.ownerNames;
+      const emails = selectedOwners.length
+        ? selectedOwners.map((owner) => owner.email).filter((email): email is string => Boolean(email))
+        : nextFilters.ownerEmails.length
+          ? nextFilters.ownerEmails
+          : existingOwnerEmails;
+      if (nextFilters.ownerIds.length) next.set("ownerIds", nextFilters.ownerIds.join(","));
+      else next.delete("ownerIds");
+      next.set("owners", names.join(","));
+      next.delete("ownerNames");
+      if (emails.length) next.set("ownerEmails", emails.join(","));
+      else next.delete("ownerEmails");
+    } else {
+      next.delete("owners");
+      next.delete("ownerNames");
+      next.delete("ownerEmails");
+      next.delete("ownerIds");
+    }
     setSearchParams(next, { replace: false });
   }
 
@@ -138,12 +201,19 @@ export function ReportFilterBar({ defaultRange = "90" }: { defaultRange?: Defaul
     applyFilters(defaults);
   }
 
-  function toggleOwner(ownerName: string, checked: boolean) {
+  function toggleOwner(ownerId: string, checked: boolean | "indeterminate") {
+    const owner = salesReps.find((entry) => entry.id === ownerId);
     setDraft((current) => ({
       ...current,
-      ownerNames: checked
-        ? Array.from(new Set([...current.ownerNames, ownerName]))
-        : current.ownerNames.filter((name) => name !== ownerName),
+      ownerIds: checked === true
+        ? Array.from(new Set([...current.ownerIds, ownerId]))
+        : current.ownerIds.filter((id) => id !== ownerId),
+      ownerNames: checked === true
+        ? Array.from(new Set([...current.ownerNames, owner?.displayName].filter(Boolean) as string[]))
+        : current.ownerNames.filter((name) => name !== owner?.displayName),
+      ownerEmails: checked === true
+        ? Array.from(new Set([...current.ownerEmails, owner?.email].filter(Boolean) as string[]))
+        : current.ownerEmails.filter((email) => email !== owner?.email),
     }));
   }
 
@@ -205,12 +275,18 @@ export function ReportFilterBar({ defaultRange = "90" }: { defaultRange?: Defaul
           Office
           <select
             value={draft.office}
-            onChange={(event) => setDraft((current) => ({ ...current, office: event.target.value, ownerNames: [] }))}
+            onChange={(event) => setDraft((current) => ({
+              ...current,
+              office: event.target.value,
+              ownerIds: [],
+              ownerNames: [],
+              ownerEmails: [],
+            }))}
             className="h-10 w-full rounded-md border border-slate-200 bg-white px-3 text-sm font-medium text-slate-700"
           >
             <option value="all">All offices</option>
             {offices.map((office) => (
-              <option key={office.id} value={office.id}>{office.name}</option>
+              <option key={office.id} value={office.slug}>{office.name}</option>
             ))}
             {offices.length === 0 ? (
               <>
@@ -228,8 +304,8 @@ export function ReportFilterBar({ defaultRange = "90" }: { defaultRange?: Defaul
             ) : salesReps.map((owner) => (
               <label key={owner.id} className="inline-flex items-center gap-2 rounded-full bg-white px-3 py-1 text-xs font-semibold text-slate-700 ring-1 ring-slate-200">
                 <Checkbox
-                  checked={draft.ownerNames.includes(owner.displayName)}
-                  onCheckedChange={(checked) => toggleOwner(owner.displayName, checked === true)}
+                  checked={draft.ownerIds.includes(owner.id) || draft.ownerEmails.includes(owner.email ?? "") || draft.ownerNames.includes(owner.displayName)}
+                  onCheckedChange={(checked) => toggleOwner(owner.id, checked)}
                   className="h-3.5 w-3.5"
                 />
                 {owner.displayName}

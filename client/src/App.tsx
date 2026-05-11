@@ -32,11 +32,14 @@ import { TaskListPage } from "@/pages/tasks/task-list-page";
 import { FilesPage } from "@/pages/files/files-page";
 import { DirectorRepDetail } from "@/pages/director/director-rep-detail";
 import { ReportsPage } from "@/pages/reports/reports-page";
+import { ClosedWonRevenuePage } from "@/pages/reports/closed-won-revenue-page";
 import { CustomerConcentrationPage } from "@/pages/reports/customer-concentration-page";
 import { DirectorScorecardPage } from "@/pages/reports/director-scorecard-page";
 import { ExecutiveTrendsPage } from "@/pages/reports/executive-trends-page";
 import { ForecastAccuracyPage } from "@/pages/reports/forecast-accuracy-page";
+import { LeadConversionPage } from "@/pages/reports/lead-conversion-page";
 import { MarketMixPage } from "@/pages/reports/market-mix-page";
+import { PipelineVelocityPage } from "@/pages/reports/pipeline-velocity-page";
 import { RepActivityPage } from "@/pages/reports/rep-activity-page";
 import { PortfolioLoadPage } from "@/pages/reports/portfolio-load-page";
 import { ProjectReadinessPage } from "@/pages/reports/project-readiness-page";
@@ -227,6 +230,9 @@ export function App() {
               <Route path="/tasks" element={<TaskListPage />} />
               <Route path="/files" element={<FilesPage />} />
               <Route path="/reports" element={<ReportsPage />} />
+              <Route path="/reports/sales/pipeline-velocity" element={<PipelineVelocityPage />} />
+              <Route path="/reports/sales/closed-won-revenue" element={<ClosedWonRevenuePage />} />
+              <Route path="/reports/sales/lead-conversion" element={<LeadConversionPage />} />
               <Route
                 path="/reports/performance/director-scorecard"
                 element={(

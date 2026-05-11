@@ -55,6 +55,7 @@ export interface PerformanceReportFilters {
   dateFrom: string;
   dateTo: string;
   office?: string;
+  ownerIds: string[];
   ownerNames: string[];
 }
 
@@ -68,17 +69,23 @@ export function normalizePerformanceReportFilters(input: Record<string, unknown>
     : typeof input.ownerNames === "string"
       ? input.ownerNames
       : "";
+  const ownerIdValue = Array.isArray(input.ownerIds)
+    ? input.ownerIds.join(",")
+    : typeof input.ownerIds === "string"
+      ? input.ownerIds
+      : "";
 
   return {
     dateFrom,
     dateTo,
     office: office && office !== "all" ? office : undefined,
+    ownerIds: ownerIdValue.split(",").map((value) => value.trim()).filter(Boolean),
     ownerNames: ownerValue.split(",").map((value) => value.trim()).filter(Boolean),
   };
 }
 
-export function resolveRepActivityScope(user: { role: UserRole; userId: string; displayName?: string | null }, ownerNames: string[]) {
-  return user.role === "rep" ? [user.displayName || user.userId] : ownerNames;
+export function resolveRepActivityScope(user: { role: UserRole; userId: string; displayName?: string | null }, ownerIds: string[]) {
+  return user.role === "rep" ? [user.userId] : ownerIds;
 }
 
 function cacheKey(reportName: string, tenantKey: string, scopeKey: string, filters: PerformanceReportFilters) {
@@ -94,23 +101,42 @@ async function withReportCache<T>(key: string, load: () => Promise<T>): Promise<
   return value;
 }
 
-function buildDealScopeSql(filters: PerformanceReportFilters, alias = "d") {
-  const clauses = [
-    sql.raw(`${alias}.is_active = true`),
-    sql.raw(`COALESCE(${alias}.is_test_data, false) = false`),
-  ];
+function dealScopeFull(filters: PerformanceReportFilters, alias = "d", options: { requireActive?: boolean; includeArchivedWinsMarker?: boolean } = {}) {
+  const clauses = [];
+  if (options.includeArchivedWinsMarker) clauses.push(sql.raw("/* include_archived_wins */ true"));
+  if (options.requireActive !== false) clauses.push(sql.raw(`${alias}.is_active = true`));
+  clauses.push(sql.raw(`COALESCE(${alias}.is_test_data, false) = false`));
   if (filters.office) clauses.push(sql`o.slug = ${filters.office}`);
-  if (filters.ownerNames.length > 0) clauses.push(sql`u.display_name IN (${sqlStringList(filters.ownerNames)})`);
+  if (filters.ownerIds.length > 0) clauses.push(sql`u.id IN (${sqlStringList(filters.ownerIds)})`);
   return sql.join(clauses, sql` AND `);
 }
 
-function buildActivityScopeSql(filters: PerformanceReportFilters, ownerNames = filters.ownerNames) {
+function buildDealScopeSql(filters: PerformanceReportFilters, alias = "d") {
+  return dealScopeFull(filters, alias);
+}
+
+function buildClosedDealScopeSql(filters: PerformanceReportFilters, alias = "d") {
+  return dealScopeFull(filters, alias, { requireActive: false });
+}
+
+function buildArchivedWonDealScopeSql(filters: PerformanceReportFilters, alias = "d") {
+  return dealScopeFull(filters, alias, { requireActive: false, includeArchivedWinsMarker: true });
+}
+
+function buildResponsibleUserScopeSql(filters: PerformanceReportFilters, alias = "u") {
+  const clauses = [sql`COALESCE(${sql.raw(alias)}.is_active, true) = true`];
+  if (filters.office) clauses.push(sql`o.slug = ${filters.office}`);
+  if (filters.ownerIds.length > 0) clauses.push(sql`${sql.raw(alias)}.id IN (${sqlStringList(filters.ownerIds)})`);
+  return sql.join(clauses, sql` AND `);
+}
+
+function buildActivityScopeSql(filters: PerformanceReportFilters, ownerIds = filters.ownerIds) {
   const clauses = [
     sql`a.occurred_at >= ${filters.dateFrom}::date`,
     sql`a.occurred_at < (${filters.dateTo}::date + INTERVAL '1 day')`,
   ];
   if (filters.office) clauses.push(sql`o.slug = ${filters.office}`);
-  if (ownerNames.length > 0) clauses.push(sql`u.display_name IN (${sqlStringList(ownerNames)})`);
+  if (ownerIds.length > 0) clauses.push(sql`u.id IN (${sqlStringList(ownerIds)})`);
   return sql.join(clauses, sql` AND `);
 }
 
@@ -252,6 +278,7 @@ export function buildDirectorScorecardFromRows(input: {
 export async function getDirectorScorecard(db: TenantDb, filters: PerformanceReportFilters, tenantKey: string) {
   return withReportCache(cacheKey("director-scorecard", tenantKey, "director", filters), async () => {
     const dealScope = buildDealScopeSql(filters);
+    const closedDealScope = buildClosedDealScopeSql(filters);
     const wonDate = buildWonDateSql(filters);
     const terminalSlugs = [...WON_STAGE_SLUGS, ...LOST_STAGE_SLUGS];
     const commitSlugs = [...COMMIT_STAGE_SLUGS];
@@ -273,7 +300,7 @@ export async function getDirectorScorecard(db: TenantDb, filters: PerformanceRep
           JOIN users u ON u.id = d.assigned_rep_id
           JOIN offices o ON o.id = u.office_id
           JOIN pipeline_stage_config psc ON psc.id = d.stage_id
-          WHERE COALESCE(d.is_test_data, false) = false AND ${wonDate}
+          WHERE ${closedDealScope} AND ${wonDate}
         )
         SELECT
           COALESCE(SUM(COALESCE(awarded_amount, bid_estimate, dd_estimate, 0)), 0)::numeric AS total_pipeline_value,
@@ -293,12 +320,32 @@ export async function getDirectorScorecard(db: TenantDb, filters: PerformanceRep
           JOIN offices o ON o.id = u.office_id
           JOIN pipeline_stage_config psc ON psc.id = d.stage_id
           WHERE ${dealScope} AND psc.slug NOT IN (${sqlStringList(terminalSlugs)})
+        ),
+        task_deals AS (
+          SELECT d.id
+          FROM deals d
+          JOIN users u ON u.id = d.assigned_rep_id
+          JOIN offices o ON o.id = u.office_id
+          WHERE ${dealScope}
         )
         SELECT
           COUNT(*) FILTER (WHERE d.stage_entered_at < now() - INTERVAL '30 days')::int AS deals_at_risk,
           COALESCE(SUM(COALESCE(d.awarded_amount, d.bid_estimate, d.dd_estimate, 0)) FILTER (WHERE d.stage_entered_at < now() - INTERVAL '30 days'), 0)::numeric AS deals_at_risk_value,
           COUNT(DISTINCT d.company_id) FILTER (WHERE d.last_activity_at IS NULL OR d.last_activity_at < now() - INTERVAL '14 days')::int AS stalled_accounts,
-          (SELECT COUNT(*)::int FROM tasks t WHERE COALESCE(t.is_test_data, false) = false AND t.status IN ('pending', 'scheduled', 'in_progress') AND t.due_date < CURRENT_DATE) AS overdue_tasks,
+          (
+            SELECT COUNT(*)::int
+            FROM tasks t
+            LEFT JOIN task_deals td ON td.id = t.deal_id
+            LEFT JOIN users u ON u.id = t.responsible_user_id
+            LEFT JOIN offices o ON o.id = u.office_id
+            WHERE COALESCE(t.is_test_data, false) = false
+              AND t.status IN ('pending', 'scheduled', 'in_progress')
+              AND t.due_date < CURRENT_DATE
+              AND (
+                (t.deal_id IS NOT NULL AND td.id IS NOT NULL)
+                OR (t.deal_id IS NULL AND ${buildResponsibleUserScopeSql(filters)})
+              )
+          ) AS overdue_tasks,
           COUNT(*) FILTER (WHERE d.last_activity_at IS NULL OR d.last_activity_at < now() - INTERVAL '14 days')::int AS missed_follow_ups
         FROM scoped_deals d
       `),
@@ -319,7 +366,7 @@ export async function getDirectorScorecard(db: TenantDb, filters: PerformanceRep
           JOIN users u ON u.id = d.assigned_rep_id
           JOIN offices o ON o.id = u.office_id
           JOIN pipeline_stage_config psc ON psc.id = d.stage_id
-          WHERE COALESCE(d.is_test_data, false) = false AND ${wonDate}
+          WHERE ${closedDealScope} AND ${wonDate}
           GROUP BY u.id
         ),
         rep_activity AS (
@@ -342,17 +389,37 @@ export async function getDirectorScorecard(db: TenantDb, filters: PerformanceRep
         ORDER BY pipeline_value DESC
       `),
       db.execute(sql`
-        SELECT o.name AS office_name,
-          COALESCE(SUM(COALESCE(d.awarded_amount, d.bid_estimate, d.dd_estimate, 0)), 0)::numeric AS pipeline_value,
-          COUNT(*)::int AS open_count,
-          0::numeric AS win_rate
-        FROM deals d
-        JOIN users u ON u.id = d.assigned_rep_id
-        JOIN offices o ON o.id = u.office_id
-        JOIN pipeline_stage_config psc ON psc.id = d.stage_id
-        WHERE ${dealScope} AND psc.slug NOT IN (${sqlStringList(terminalSlugs)})
-        GROUP BY o.name
-        ORDER BY o.name ASC
+        WITH office_open AS (
+          SELECT o.id AS office_id, o.name AS office_name,
+            COALESCE(SUM(COALESCE(d.awarded_amount, d.bid_estimate, d.dd_estimate, 0)), 0)::numeric AS pipeline_value,
+            COUNT(*)::int AS open_count
+          FROM deals d
+          JOIN users u ON u.id = d.assigned_rep_id
+          JOIN offices o ON o.id = u.office_id
+          JOIN pipeline_stage_config psc ON psc.id = d.stage_id
+          WHERE ${dealScope} AND psc.slug NOT IN (${sqlStringList(terminalSlugs)})
+          GROUP BY o.id, o.name
+        ),
+        office_outcomes AS (
+          SELECT o.id AS office_id,
+            COUNT(*) FILTER (WHERE psc.slug IN (${sqlStringList([...WON_STAGE_SLUGS])}))::int AS won_count,
+            COUNT(*) FILTER (WHERE psc.slug IN (${sqlStringList([...LOST_STAGE_SLUGS])}))::int AS lost_count
+          FROM deals d
+          JOIN users u ON u.id = d.assigned_rep_id
+          JOIN offices o ON o.id = u.office_id
+          JOIN pipeline_stage_config psc ON psc.id = d.stage_id
+          WHERE ${closedDealScope} AND ${wonDate} AND psc.slug IN (${sqlStringList(terminalSlugs)})
+          GROUP BY o.id
+        )
+        SELECT oo.office_name,
+          oo.pipeline_value,
+          oo.open_count,
+          CASE WHEN COALESCE(outcomes.won_count, 0) + COALESCE(outcomes.lost_count, 0) = 0 THEN 0
+            ELSE (COALESCE(outcomes.won_count, 0)::numeric / (COALESCE(outcomes.won_count, 0) + COALESCE(outcomes.lost_count, 0))::numeric) * 100
+          END AS win_rate
+        FROM office_open oo
+        LEFT JOIN office_outcomes outcomes ON outcomes.office_id = oo.office_id
+        ORDER BY oo.office_name ASC
       `),
       db.execute(sql`
         SELECT d.id AS deal_id, d.name AS deal_name, u.display_name AS owner_name, psc.name AS stage_name,
@@ -463,10 +530,10 @@ export function buildRepActivityFromRows(input: {
 }
 
 export async function getRepActivityReport(db: TenantDb, filters: PerformanceReportFilters, user: { role: UserRole; userId: string; displayName: string }, tenantKey: string) {
-  const ownerNames = resolveRepActivityScope(user, filters.ownerNames);
-  const scopedFilters = { ...filters, ownerNames };
+  const ownerIds = resolveRepActivityScope(user, filters.ownerIds);
+  const scopedFilters = { ...filters, ownerIds };
   return withReportCache(cacheKey("rep-activity", tenantKey, `${user.role}:${user.userId}`, scopedFilters), async () => {
-    const activityScope = buildActivityScopeSql(scopedFilters, ownerNames);
+    const activityScope = buildActivityScopeSql(scopedFilters, ownerIds);
     const dealScope = buildDealScopeSql(scopedFilters);
 
     const [summary, timeline, types, stalled, reps] = await Promise.all([
@@ -543,7 +610,7 @@ export async function getRepActivityReport(db: TenantDb, filters: PerformanceRep
         FROM users u
         LEFT JOIN activity a ON a.responsible_user_id = u.id
         LEFT JOIN active_deals ad ON ad.assigned_rep_id = u.id
-        WHERE (${ownerNames.length === 0 ? sql`true` : sql`u.display_name IN (${sqlStringList(ownerNames)})`})
+        WHERE (${ownerIds.length === 0 ? sql`true` : sql`u.id IN (${sqlStringList(ownerIds)})`})
           AND (a.touchpoints IS NOT NULL OR ad.active_deals IS NOT NULL)
         ORDER BY touchpoints DESC, active_deals DESC
       `),
@@ -638,6 +705,7 @@ export function buildForecastAccuracyFromRows(input: {
 export async function getForecastAccuracyReport(db: TenantDb, filters: PerformanceReportFilters, tenantKey: string) {
   return withReportCache(cacheKey("forecast-accuracy", tenantKey, "director", filters), async () => {
     const dealScope = buildDealScopeSql(filters);
+    const archivedWonDealScope = buildArchivedWonDealScopeSql(filters);
     const commitSlugs = [...COMMIT_STAGE_SLUGS];
     const bestCaseSlugs = [...COMMIT_STAGE_SLUGS, ...BEST_CASE_STAGE_SLUGS];
     const wonSlugs = [...WON_STAGE_SLUGS];
@@ -660,7 +728,7 @@ export async function getForecastAccuracyReport(db: TenantDb, filters: Performan
           JOIN users u ON u.id = d.assigned_rep_id
           JOIN offices o ON o.id = u.office_id
           JOIN pipeline_stage_config psc ON psc.id = d.stage_id
-          WHERE COALESCE(d.is_test_data, false) = false AND psc.slug IN (${sqlStringList(wonSlugs)}) AND ${buildWonDateSql(filters)}
+          WHERE ${archivedWonDealScope} AND psc.slug IN (${sqlStringList(wonSlugs)}) AND ${buildWonDateSql(filters)}
         )
         SELECT
           COALESCE(SUM(${forecastValue}) FILTER (WHERE psc.slug IN (${sqlStringList(commitSlugs)})), 0)::numeric AS commit,
@@ -692,7 +760,7 @@ export async function getForecastAccuracyReport(db: TenantDb, filters: Performan
         LEFT JOIN users u ON u.id = d.assigned_rep_id
         LEFT JOIN offices o ON o.id = u.office_id
         LEFT JOIN pipeline_stage_config psc ON psc.id = d.stage_id
-        WHERE d.id IS NULL OR (${dealScope})
+        WHERE d.id IS NULL OR (${dealScope}) OR (${archivedWonDealScope} AND psc.slug IN (${sqlStringList(wonSlugs)}))
         GROUP BY m.month_start
         ORDER BY m.month_start
       `),

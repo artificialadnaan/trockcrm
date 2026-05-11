@@ -9,7 +9,7 @@ router.get("/sales-reps", async (req, res, next) => {
   try {
     if (req.user!.role === "rep") {
       await req.commitTransaction!();
-      res.json({ users: [{ id: req.user!.id, displayName: req.user!.displayName }] });
+      res.json({ users: [{ id: req.user!.id, displayName: req.user!.displayName, email: req.user!.email }] });
       return;
     }
 
@@ -27,13 +27,14 @@ router.get("/sales-reps", async (req, res, next) => {
 
     const rows = (await listUsers(officeId)) as Array<{
       id: string;
+      email: string;
       displayName: string;
       isActive: boolean;
     }>;
     res.json({
       users: rows
         .filter((user) => user.isActive)
-        .map((user) => ({ id: user.id, displayName: user.displayName })),
+        .map((user) => ({ id: user.id, displayName: user.displayName, email: user.email })),
     });
   } catch (err) {
     next(err);

@@ -34,9 +34,9 @@ const reportCategories: Array<{ category: string; description: string; reports: 
     category: "Sales",
     description: "Pipeline, forecasts, close rates, and booked revenue.",
     reports: [
-      { name: "Pipeline Velocity", description: "Stage movement, aging, and value trends.", icon: TrendingUp },
-      { name: "Closed Won Revenue", description: "Booked revenue by rep, office, and period.", icon: DollarSign },
-      { name: "Lead Conversion", description: "Lead source performance through contract.", icon: ChartNoAxesCombined },
+      { name: "Pipeline Velocity", description: "Stage movement, aging, and value trends.", icon: TrendingUp, path: "/reports/sales/pipeline-velocity" },
+      { name: "Closed Won Revenue", description: "Booked revenue by rep, office, and period.", icon: DollarSign, path: "/reports/sales/closed-won-revenue" },
+      { name: "Lead Conversion", description: "Lead source performance through contract.", icon: ChartNoAxesCombined, path: "/reports/sales/lead-conversion" },
     ],
   },
   {
@@ -147,7 +147,7 @@ export function ReportsPage() {
                     </Link>
                   </Card>
                 ) : (
-                  <Card key={report.name} className="border-slate-200 bg-white">
+                  <Card key={report.name} className="border-slate-200 bg-white opacity-75">
                     {content}
                   </Card>
                 );
