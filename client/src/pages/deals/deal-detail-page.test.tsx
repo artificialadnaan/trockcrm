@@ -410,26 +410,49 @@ describe("DealDetailPage", () => {
     expect(html).toContain("History");
     expect(html).toContain("Team");
     expect(html).toContain("Estimates");
+    expect(html).toContain("overflow-x-auto");
+    expect(html).toContain("border-b-2 border-brand-red");
   });
 
-  it("renders right-rail with company, owner, and system IDs", () => {
+  it("renders right-rail sections in redesigned order with primary contact fallback", () => {
     mocks.useDealDetailMock.mockReturnValueOnce({
       loading: false,
       error: null,
       refetch: vi.fn(),
-      deal: makeDealDetail({ hubspotDealId: "hs_deal_82211" }),
+      deal: makeDealDetail({
+        hubspotDealId: "hs_deal_82211",
+        primaryContactId: "contact-1",
+      }),
     });
 
     const html = renderPage();
 
-    expect(html).toContain("Company");
+    const sectionOrder = [
+      "Owner",
+      "Account",
+      "Property",
+      "Primary Contact",
+      "Project Type",
+      "Project Number",
+      "System IDs",
+    ];
+    const positions = sectionOrder.map((label) => html.indexOf(label));
+    expect(positions.every((position) => position >= 0)).toBe(true);
+    expect([...positions].sort((a, b) => a - b)).toEqual(positions);
     expect(html).toContain("Dallas Independent SD");
-    expect(html).toContain("Owner");
     expect(html).toContain("Brett Rios");
-    expect(html).toContain("System IDs");
+    expect(html).toContain('href="/contacts/contact-1"');
+    expect(html).toContain("Contact assigned");
     expect(html).toContain("hs_deal_82211");
     expect(html).toContain("123456");
     expect(html).toContain("DFW-3-12826-aa");
+  });
+
+  it("renders muted primary contact empty state when no primary contact is assigned", () => {
+    const html = renderPage();
+
+    expect(html).toContain("Primary Contact");
+    expect(html).toContain("No primary contact");
   });
 
   it("renders project number as the primary deal identifier when assigned", () => {
@@ -562,6 +585,70 @@ describe("DealDetailPage", () => {
     expect(html).toContain('data-stage-slug="lost"');
   });
 
+  it("highlights canonical won when the current deal stage uses legacy closed_won", () => {
+    mocks.usePipelineStagesMock.mockReturnValueOnce({
+      stages: [
+        { id: "stage-opportunity", name: "Opportunity", slug: "opportunity", workflowFamily: "standard_deal", displayOrder: 0, isTerminal: false },
+        { id: "stage-estimating", name: "Estimating", slug: "estimating", workflowFamily: "standard_deal", displayOrder: 1, isTerminal: false },
+        { id: "stage-under-review", name: "Estimate Under Review", slug: "estimate_under_review", workflowFamily: "standard_deal", displayOrder: 2, isTerminal: false },
+        { id: "stage-sent", name: "Estimate Sent to Client", slug: "estimate_sent_to_client", workflowFamily: "standard_deal", displayOrder: 3, isTerminal: false },
+        { id: "stage-contract", name: "Contract", slug: "contract", workflowFamily: "standard_deal", displayOrder: 4, isTerminal: false },
+        { id: "stage-won", name: "Won", slug: "won", workflowFamily: "standard_deal", displayOrder: 5, isTerminal: true },
+        { id: "stage-lost", name: "Lost", slug: "lost", workflowFamily: "standard_deal", displayOrder: 6, isTerminal: true },
+        { id: "legacy-won", name: "Closed Won", slug: "closed_won", workflowFamily: "standard_deal", displayOrder: 14, isTerminal: true, isActivePipeline: false },
+      ],
+    });
+    mocks.useDealDetailMock.mockReturnValueOnce({
+      loading: false,
+      error: null,
+      refetch: vi.fn(),
+      deal: makeDealDetail({
+        stageId: "legacy-won",
+        isBidBoardOwned: false,
+        bidBoardStageSlug: null,
+        readOnlySyncedAt: null,
+        bidBoardOwnership: null,
+      }),
+    });
+
+    const html = renderPage();
+
+    expect(html).toMatch(/data-stage-slug="won"[^>]*data-state="current"/);
+    expect(html).not.toContain('data-stage-slug="closed_won"');
+  });
+
+  it("highlights canonical lost when the current deal stage uses legacy closed_lost", () => {
+    mocks.usePipelineStagesMock.mockReturnValueOnce({
+      stages: [
+        { id: "stage-opportunity", name: "Opportunity", slug: "opportunity", workflowFamily: "standard_deal", displayOrder: 0, isTerminal: false },
+        { id: "stage-estimating", name: "Estimating", slug: "estimating", workflowFamily: "standard_deal", displayOrder: 1, isTerminal: false },
+        { id: "stage-under-review", name: "Estimate Under Review", slug: "estimate_under_review", workflowFamily: "standard_deal", displayOrder: 2, isTerminal: false },
+        { id: "stage-sent", name: "Estimate Sent to Client", slug: "estimate_sent_to_client", workflowFamily: "standard_deal", displayOrder: 3, isTerminal: false },
+        { id: "stage-contract", name: "Contract", slug: "contract", workflowFamily: "standard_deal", displayOrder: 4, isTerminal: false },
+        { id: "stage-won", name: "Won", slug: "won", workflowFamily: "standard_deal", displayOrder: 5, isTerminal: true },
+        { id: "stage-lost", name: "Lost", slug: "lost", workflowFamily: "standard_deal", displayOrder: 6, isTerminal: true },
+        { id: "legacy-lost", name: "Closed Lost", slug: "closed_lost", workflowFamily: "standard_deal", displayOrder: 16, isTerminal: true, isActivePipeline: false },
+      ],
+    });
+    mocks.useDealDetailMock.mockReturnValueOnce({
+      loading: false,
+      error: null,
+      refetch: vi.fn(),
+      deal: makeDealDetail({
+        stageId: "legacy-lost",
+        isBidBoardOwned: false,
+        bidBoardStageSlug: null,
+        readOnlySyncedAt: null,
+        bidBoardOwnership: null,
+      }),
+    });
+
+    const html = renderPage();
+
+    expect(html).toMatch(/data-stage-slug="lost"[^>]*data-state="current"/);
+    expect(html).not.toContain('data-stage-slug="closed_lost"');
+  });
+
   it("uses service estimating in pipeline progress for service workflow deals", () => {
     mocks.usePipelineStagesMock.mockReturnValueOnce({
       stages: [
@@ -616,6 +703,18 @@ describe("DealDetailPage", () => {
     expect(html).toContain("No data");
     expect(html).not.toContain("On track");
     expect(html).not.toContain("Current");
+  });
+
+  it("uses the redesigned overdue KPI visual treatment without changing KPI values", () => {
+    const html = renderPage();
+
+    expect(html).toContain("Deal value");
+    expect(html).toContain("$875,000");
+    expect(html).toContain("Days in stage");
+    expect(html).toContain("SLA status");
+    expect(html).toContain("Overdue");
+    expect(html).toContain("border-t-4 border-brand-red");
+    expect(html).toContain("text-brand-red");
   });
 
   it("shows Bid Board ownership messaging while preserving valid CRM stage controls", () => {

@@ -13,7 +13,7 @@ export type PipelineProgressStage = {
 
 type PipelineProgressProps = {
   stages: PipelineProgressStage[];
-  currentStageId: string | null | undefined;
+  currentSlug: string | null | undefined;
   workflowRoute: "normal" | "service";
   isBidBoardOwned: boolean;
   handoffStageDisplayOrder: number | null;
@@ -27,10 +27,24 @@ function getDisabledReason(
   stage: PipelineProgressStage,
   index: number,
   currentIndex: number,
-  options: Pick<PipelineProgressProps, "workflowRoute" | "isBidBoardOwned" | "handoffStageDisplayOrder" | "canMoveBackward">
+  options: Pick<PipelineProgressProps, "workflowRoute" | "isBidBoardOwned" | "handoffStageDisplayOrder" | "canMoveBackward"> & {
+    currentIsTerminal: boolean;
+  }
 ) {
-  if (currentIndex === -1 || index === currentIndex) {
+  if (currentIndex === -1) {
+    return null;
+  }
+
+  if (options.isBidBoardOwned && options.currentIsTerminal) {
+    return "bid-board-terminal-readonly";
+  }
+
+  if (index === currentIndex) {
     return "current";
+  }
+
+  if (options.currentIsTerminal) {
+    return "terminal-locked";
   }
 
   if (stage.isTerminal && index < currentIndex) {
@@ -60,6 +74,10 @@ function disabledLabel(reason: string | null) {
       return "Director only";
     case "terminal-passed":
       return "Passed";
+    case "terminal-locked":
+      return "Terminal";
+    case "bid-board-terminal-readonly":
+      return "Read-only";
     default:
       return null;
   }
@@ -67,7 +85,7 @@ function disabledLabel(reason: string | null) {
 
 export function PipelineProgress({
   stages,
-  currentStageId,
+  currentSlug,
   workflowRoute,
   isBidBoardOwned,
   handoffStageDisplayOrder,
@@ -78,7 +96,10 @@ export function PipelineProgress({
     return null;
   }
 
-  const currentIndex = stages.findIndex((stage) => stage.id === currentStageId);
+  const currentIndex =
+    currentSlug == null ? -1 : stages.findIndex((stage) => stage.slug === currentSlug);
+  const currentStage = currentIndex === -1 ? null : stages[currentIndex] ?? null;
+  const currentIsTerminal = Boolean(currentStage?.isTerminal);
 
   return (
     <Card>
@@ -93,6 +114,7 @@ export function PipelineProgress({
               isBidBoardOwned,
               handoffStageDisplayOrder,
               canMoveBackward,
+              currentIsTerminal,
             });
             const disabled = disabledReason != null;
             const label = disabledLabel(disabledReason);
@@ -108,7 +130,12 @@ export function PipelineProgress({
                 data-stage-slug={stage.slug}
                 data-state={state}
                 data-disabled-reason={disabledReason ?? undefined}
-                onClick={() => onStageClick(stage.id)}
+                onClick={() => {
+                  if (disabledReason) {
+                    return;
+                  }
+                  onStageClick(stage.id);
+                }}
                 className={cn(
                   "group flex min-w-0 flex-col rounded-md border border-transparent p-2 text-left transition",
                   disabled ? "cursor-not-allowed" : "hover:border-slate-200 hover:bg-slate-50",

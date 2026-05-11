@@ -52,7 +52,7 @@ describe("PipelineProgress", () => {
     const html = renderToStaticMarkup(
       <PipelineProgress
         stages={standardStages}
-        currentStageId="stage-under-review"
+        currentSlug="estimate_under_review"
         workflowRoute="normal"
         isBidBoardOwned={false}
         handoffStageDisplayOrder={null}
@@ -74,29 +74,11 @@ describe("PipelineProgress", () => {
     expect(html).toContain('data-state="current"');
   });
 
-  it("renders service estimating instead of standard estimating for service deals", () => {
-    const html = renderToStaticMarkup(
-      <PipelineProgress
-        stages={serviceStages()}
-        currentStageId="stage-service-estimating"
-        workflowRoute="service"
-        isBidBoardOwned={false}
-        handoffStageDisplayOrder={null}
-        canMoveBackward
-        onStageClick={() => undefined}
-      />
-    );
-
-    expect(html).toContain("Service Estimating");
-    expect(html).not.toContain(">Estimating<");
-    expect(html).toContain('data-state="current"');
-  });
-
-  it("marks terminal stages correctly when the deal is currently won or lost", () => {
+  it("highlights current stage by canonical slug even when the stage id is legacy", () => {
     const wonHtml = renderToStaticMarkup(
       <PipelineProgress
         stages={standardStages}
-        currentStageId="stage-won"
+        currentSlug="won"
         workflowRoute="normal"
         isBidBoardOwned={false}
         handoffStageDisplayOrder={null}
@@ -111,7 +93,7 @@ describe("PipelineProgress", () => {
     const lostHtml = renderToStaticMarkup(
       <PipelineProgress
         stages={standardStages}
-        currentStageId="stage-lost"
+        currentSlug="lost"
         workflowRoute="normal"
         isBidBoardOwned={false}
         handoffStageDisplayOrder={null}
@@ -121,15 +103,90 @@ describe("PipelineProgress", () => {
     );
 
     expect(lostHtml).toContain('data-stage-slug="lost"');
+    expect(lostHtml).toContain('data-state="current"');
+  });
+
+  it("does not mark every chip current or disabled when current slug is unknown", () => {
+    const html = renderToStaticMarkup(
+      <PipelineProgress
+        stages={standardStages}
+        currentSlug={null}
+        workflowRoute="normal"
+        isBidBoardOwned={false}
+        handoffStageDisplayOrder={null}
+        canMoveBackward
+        onStageClick={() => undefined}
+      />
+    );
+
+    expect(html).not.toContain('aria-current="step"');
+    expect(html).not.toContain('data-state="current"');
+    expect(html).not.toContain('data-disabled-reason="current"');
+  });
+
+  it("renders service estimating instead of standard estimating for service deals", () => {
+    const html = renderToStaticMarkup(
+      <PipelineProgress
+        stages={serviceStages()}
+        currentSlug="service_estimating"
+        workflowRoute="service"
+        isBidBoardOwned={false}
+        handoffStageDisplayOrder={null}
+        canMoveBackward
+        onStageClick={() => undefined}
+      />
+    );
+
+    expect(html).toContain("Service Estimating");
+    expect(html).not.toContain(">Estimating<");
+    expect(html).toContain('data-state="current"');
+  });
+
+  it("disables all other stages when the current stage is won", () => {
+    const wonHtml = renderToStaticMarkup(
+      <PipelineProgress
+        stages={standardStages}
+        currentSlug="won"
+        workflowRoute="normal"
+        isBidBoardOwned={false}
+        handoffStageDisplayOrder={null}
+        canMoveBackward
+        onStageClick={() => undefined}
+      />
+    );
+
+    expect(wonHtml).toContain('data-stage-slug="won"');
+    expect(wonHtml).toContain('data-state="current"');
+    expect(wonHtml.match(/data-disabled-reason="terminal-locked"/g)).toHaveLength(6);
+    expect(wonHtml).toContain('data-stage-slug="lost"');
+    expect(wonHtml).not.toContain('data-disabled-reason="terminal-passed"');
+  });
+
+  it("disables all other stages when the current stage is lost", () => {
+    const lostHtml = renderToStaticMarkup(
+      <PipelineProgress
+        stages={standardStages}
+        currentSlug="lost"
+        workflowRoute="normal"
+        isBidBoardOwned={false}
+        handoffStageDisplayOrder={null}
+        canMoveBackward
+        onStageClick={() => undefined}
+      />
+    );
+
+    expect(lostHtml).toContain('data-stage-slug="lost"');
+    expect(lostHtml).toContain('data-state="current"');
     expect(lostHtml).toContain('data-stage-slug="won"');
-    expect(lostHtml).toContain('data-disabled-reason="terminal-passed"');
+    expect(lostHtml.match(/data-disabled-reason="terminal-locked"/g)).toHaveLength(6);
+    expect(lostHtml).not.toContain('data-disabled-reason="terminal-passed"');
   });
 
   it("disables Bid Board-managed stages after the handoff boundary", () => {
     const html = renderToStaticMarkup(
       <PipelineProgress
         stages={standardStages}
-        currentStageId="stage-estimating"
+        currentSlug="estimating"
         workflowRoute="normal"
         isBidBoardOwned
         handoffStageDisplayOrder={1}
@@ -142,11 +199,58 @@ describe("PipelineProgress", () => {
     expect(html).toContain('data-disabled-reason="bid-board-managed"');
   });
 
+  it("makes Bid Board-owned terminal deals fully read-only", () => {
+    const onStageClick = vi.fn();
+    const rendered = mount(
+      <PipelineProgress
+        stages={standardStages}
+        currentSlug="won"
+        workflowRoute="normal"
+        isBidBoardOwned
+        handoffStageDisplayOrder={1}
+        canMoveBackward
+        onStageClick={onStageClick}
+      />
+    );
+
+    expect(rendered.container.querySelectorAll('[data-disabled-reason="bid-board-terminal-readonly"]')).toHaveLength(7);
+
+    const currentButton = rendered.container.querySelector<HTMLButtonElement>('[data-stage-slug="won"]');
+    const opportunityButton = rendered.container.querySelector<HTMLButtonElement>('[data-stage-slug="opportunity"]');
+    expect(currentButton?.disabled).toBe(true);
+    expect(opportunityButton?.disabled).toBe(true);
+
+    act(() => {
+      currentButton?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+      opportunityButton?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+
+    expect(onStageClick).not.toHaveBeenCalled();
+    rendered.unmount();
+  });
+
+  it("keeps non-Bid Board terminal deals locked even for directors", () => {
+    const html = renderToStaticMarkup(
+      <PipelineProgress
+        stages={standardStages}
+        currentSlug="won"
+        workflowRoute="normal"
+        isBidBoardOwned={false}
+        handoffStageDisplayOrder={null}
+        canMoveBackward
+        onStageClick={() => undefined}
+      />
+    );
+
+    expect(html.match(/data-disabled-reason="terminal-locked"/g)).toHaveLength(6);
+    expect(html).not.toContain('data-disabled-reason="backward-restricted"');
+  });
+
   it("disables backward stage movement for non-director users", () => {
     const html = renderToStaticMarkup(
       <PipelineProgress
         stages={standardStages}
-        currentStageId="stage-contract"
+        currentSlug="contract"
         workflowRoute="normal"
         isBidBoardOwned={false}
         handoffStageDisplayOrder={null}
@@ -164,7 +268,7 @@ describe("PipelineProgress", () => {
     const rendered = mount(
       <PipelineProgress
         stages={standardStages}
-        currentStageId="stage-estimating"
+        currentSlug="estimating"
         workflowRoute="normal"
         isBidBoardOwned={false}
         handoffStageDisplayOrder={null}

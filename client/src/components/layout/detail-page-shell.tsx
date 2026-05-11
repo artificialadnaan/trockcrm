@@ -98,17 +98,26 @@ export function DetailPageShell({
         {kpis.map((kpi) => {
           const isRed = kpi.accent === "red";
           return (
-            <Card key={kpi.eyebrow} className={isRed ? "border-0 bg-brand-red text-white shadow-md" : "relative overflow-hidden"}>
+            <Card
+              key={kpi.eyebrow}
+              className={
+                isRed
+                  ? "relative overflow-hidden border-t-4 border-brand-red shadow-sm"
+                  : "relative overflow-hidden border-t-4 border-slate-200 shadow-sm"
+              }
+            >
               <CardContent className="p-5">
-                <p className={isRed ? "text-[11px] font-bold uppercase tracking-[0.2em] text-red-100" : EYEBROW}>{kpi.eyebrow}</p>
-                <div className="mt-3 text-4xl font-black tracking-tight">{kpi.value}</div>
+                <p className={isRed ? "text-[11px] font-bold uppercase tracking-[0.2em] text-brand-red" : EYEBROW}>{kpi.eyebrow}</p>
+                <div className={isRed ? "mt-3 text-4xl font-black tracking-tight text-brand-red" : "mt-3 text-4xl font-black tracking-tight text-slate-950"}>
+                  {kpi.value}
+                </div>
                 {(kpi.captionLabel || kpi.captionContext) && (
-                  <div className={isRed ? "mt-3 text-xs text-red-50" : "mt-3 text-xs text-slate-500"}>
+                  <div className="mt-3 text-xs text-slate-500">
                     {kpi.captionLabel ? (
                       <span
                         className={
                           isRed
-                            ? "mr-2 rounded-full bg-white/20 px-2 py-1 text-[10px] font-black uppercase tracking-[0.14em] text-white"
+                            ? "mr-2 rounded-full bg-red-50 px-2 py-1 text-[10px] font-black uppercase tracking-[0.14em] text-brand-red"
                             : "mr-2 rounded-full bg-slate-100 px-2 py-1 text-[10px] font-black uppercase tracking-[0.14em] text-slate-700"
                         }
                       >
@@ -119,7 +128,6 @@ export function DetailPageShell({
                   </div>
                 )}
               </CardContent>
-              {!isRed ? <div className="absolute inset-x-0 bottom-0 h-1 bg-brand-red" /> : null}
             </Card>
           );
         })}
@@ -131,7 +139,8 @@ export function DetailPageShell({
         <div className="min-w-0 space-y-4">
           <Card>
             <div className="border-b border-slate-100">
-              <div className="flex flex-wrap items-center gap-1 px-3 pt-3">
+              <div className="overflow-x-auto px-3 pt-3">
+                <div className="flex min-w-max items-center gap-1">
                 {tabs.map((tab) => {
                   const label = formatTabLabel(tab);
                   const isActive = tab.id === activeTabId;
@@ -144,8 +153,8 @@ export function DetailPageShell({
                       onClick={() => onTabChange(tab.id)}
                       className={
                         isActive
-                          ? "relative inline-flex h-11 items-center gap-2 px-3 text-sm font-black uppercase tracking-[0.12em] text-brand-red"
-                          : "inline-flex h-11 items-center gap-2 px-3 text-sm font-black uppercase tracking-[0.12em] text-slate-500 transition hover:text-slate-900"
+                          ? "relative inline-flex h-11 items-center gap-2 border-b-2 border-brand-red px-3 text-sm font-black uppercase tracking-[0.12em] text-brand-red"
+                          : "inline-flex h-11 items-center gap-2 border-b-2 border-transparent px-3 text-sm font-black uppercase tracking-[0.12em] text-slate-500 transition hover:border-slate-200 hover:text-slate-900"
                       }
                     >
                       <span className="flex h-5 w-5 items-center justify-center">{tab.icon}</span>
@@ -155,10 +164,10 @@ export function DetailPageShell({
                           {tab.count}
                         </span>
                       ) : null}
-                      {isActive ? <span className="absolute inset-x-2 bottom-0 h-0.5 rounded-full bg-brand-red" /> : null}
                     </button>
                   );
                 })}
+                </div>
               </div>
               <div className="bg-slate-50/50 px-5 py-3 text-xs font-black uppercase tracking-[0.18em] text-slate-500">
                 {activeTabLabel}

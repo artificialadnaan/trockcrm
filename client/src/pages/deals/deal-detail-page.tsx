@@ -138,6 +138,16 @@ function formatNullable(value: string | number | null | undefined) {
   return String(value);
 }
 
+function initials(value: string) {
+  return value
+    .split(/\s+/)
+    .filter(Boolean)
+    .slice(0, 2)
+    .map((part) => part[0])
+    .join("")
+    .toUpperCase();
+}
+
 function formatDate(value: string | null | undefined) {
   if (!value) return "Unscheduled";
   const date = new Date(value);
@@ -873,7 +883,7 @@ export function DealDetailPage() {
         subheaderSlot={
           <PipelineProgress
             stages={canonicalOrderedStages}
-            currentStageId={currentStage?.id ?? null}
+            currentSlug={canonicalCurrentStageSlug}
             workflowRoute={workflowRoute}
             isBidBoardOwned={isBidBoardOwned}
             handoffStageDisplayOrder={handoffStage?.displayOrder ?? null}
@@ -917,65 +927,95 @@ function DealRightRail({
   procoreProjectUrl: string | null;
   bidBoardUrl: string | null;
 }) {
+  const assignedRep = formatNullable(deal.assignedRepName ?? deal.assignedRepId);
+  const assignedRepInitials = initials(deal.assignedRepName ?? deal.assignedRepId ?? "NA");
+  const dealWithOptionalContact = deal as DealDetail & {
+    primaryContactName?: string | null;
+    primaryContactTitle?: string | null;
+    primaryContact?: { name?: string | null; title?: string | null } | null;
+    propertyName?: string | null;
+  };
+  const primaryContactName =
+    dealWithOptionalContact.primaryContactName ??
+    dealWithOptionalContact.primaryContact?.name ??
+    null;
+  const primaryContactTitle =
+    dealWithOptionalContact.primaryContactTitle ??
+    dealWithOptionalContact.primaryContact?.title ??
+    null;
+  const propertyName = dealWithOptionalContact.propertyName ?? (address || "Open property");
+
   return (
     <Card>
       <CardContent className="space-y-5 p-5">
-        <DetailRailSection title="Company">
+        <DetailRailSection title="Owner">
           <DetailRailItem
-            label="Account"
+            label="Assigned rep"
+            value={
+              <span className="inline-flex items-center gap-2">
+                <span className="grid h-8 w-8 place-items-center rounded-full bg-brand-red text-[10px] font-black uppercase text-white">
+                  {assignedRepInitials}
+                </span>
+                <span>{assignedRep}</span>
+              </span>
+            }
+          />
+        </DetailRailSection>
+
+        <DetailRailSection title="Account">
+          <DetailRailItem
+            label="Company"
             value={
               deal.companyId && deal.companyName ? (
                 <Link to={`/companies/${deal.companyId}`} className="text-brand-red hover:underline">
                   {deal.companyName}
                 </Link>
               ) : (
-                "Unassigned"
+                <span className="text-slate-500">Unassigned</span>
               )
             }
           />
         </DetailRailSection>
 
-        <DetailRailSection title="Owner">
-          <DetailRailItem
-            label="Assigned rep"
-            value={
-              <span className="inline-flex items-center gap-2">
-                <span className="grid h-7 w-7 place-items-center rounded-full bg-slate-900 text-[10px] font-black uppercase text-white">
-                  {(deal.assignedRepName ?? deal.assignedRepId ?? "NA")
-                    .split(/\s+/)
-                    .filter(Boolean)
-                    .slice(0, 2)
-                    .map((part) => part[0])
-                    .join("")}
-                </span>
-                {formatNullable(deal.assignedRepName ?? deal.assignedRepId)}
-              </span>
-            }
-          />
-        </DetailRailSection>
-
-        <DetailRailSection title="Project type">
-          <DetailRailItem label="Type" value={formatDealType(deal)} />
-          <DetailRailItem label="Source" value={formatNullable(deal.source ? titleCase(deal.source) : null)} />
-          <DetailRailItem label="Workflow" value={titleCase(deal.workflowRoute ?? "normal")} />
-        </DetailRailSection>
-
-        <DetailRailSection title="Address">
+        <DetailRailSection title="Property">
           <DetailRailItem
             label="Property"
             value={
               deal.propertyId ? (
                 <Link to={`/properties/${deal.propertyId}`} className="text-brand-red hover:underline">
-                  {address || "Open property"}
+                  {propertyName}
                 </Link>
               ) : (
-                address || "No property linked"
+                <span className="text-slate-500">{address || "No property linked"}</span>
               )
             }
           />
+          {address ? <DetailRailItem label="Address" value={address} /> : null}
         </DetailRailSection>
 
-        <DetailRailSection title="Project number">
+        <DetailRailSection title="Primary Contact">
+          <DetailRailItem
+            label="Contact"
+            value={
+              deal.primaryContactId ? (
+                <Link to={`/contacts/${deal.primaryContactId}`} className="text-brand-red hover:underline">
+                  {primaryContactName ?? "Contact assigned"}
+                </Link>
+              ) : (
+                <span className="text-slate-500">No primary contact</span>
+              )
+            }
+          />
+          {primaryContactTitle ? <DetailRailItem label="Title" value={primaryContactTitle} /> : null}
+        </DetailRailSection>
+
+        <DetailRailSection title="Project Type">
+          <DetailRailItem label="Type" value={formatDealType(deal)} />
+          <DetailRailItem label="Source" value={formatNullable(deal.source ? titleCase(deal.source) : null)} />
+          <DetailRailItem label="Workflow" value={titleCase(deal.workflowRoute ?? "normal")} />
+        </DetailRailSection>
+
+        <DetailRailSection title="Project Number">
           <DetailRailItem
             label="Project number"
             value={
