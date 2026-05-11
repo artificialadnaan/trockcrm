@@ -1,5 +1,5 @@
 import { Router } from "express";
-import { requireRole, requireDirector, requireAnyRole } from "../../middleware/rbac.js";
+import { requireRole, requireDirector } from "../../middleware/rbac.js";
 import { AppError } from "../../middleware/error-handler.js";
 import {
   getPipelineSummary,
@@ -43,10 +43,17 @@ import {
   getRepActivityReport,
   normalizePerformanceReportFilters,
 } from "./performance-tier2-service.js";
+import {
+  getPortfolioLoadReport,
+  getProjectReadinessReport,
+  getWorkflowBottlenecksReport,
+  normalizeOperationsReportFilters,
+} from "./operations-tier3-service.js";
 
 const router = Router();
 const VALID_REPORT_FREQUENCIES = ["daily", "weekly", "biweekly", "monthly", "quarterly"] as const;
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const requireAnyRole = requireRole("admin", "director", "rep");
 
 function readQueryString(value: unknown): string | undefined {
   return typeof value === "string" && value.trim() ? value.trim() : undefined;
@@ -410,6 +417,50 @@ router.get("/forecast-accuracy", requireDirector, async (req, res, next) => {
       normalizePerformanceReportFilters(req.query as Record<string, unknown>),
       req.officeSlug ?? req.user!.activeOfficeId
     );
+    await req.commitTransaction!();
+    res.json({ data });
+  } catch (err) {
+    next(err);
+  }
+});
+
+function parseOperationsFilters(req: any) {
+  return normalizeOperationsReportFilters({
+    dateFrom: req.query.dateFrom as string | undefined,
+    dateTo: req.query.dateTo as string | undefined,
+    office: req.query.office as string | undefined,
+    ownerIds: req.query.ownerIds as string | string[] | undefined,
+    ownerNames: req.query.ownerNames as string | string[] | undefined,
+    cacheScope: `${req.user?.activeOfficeId ?? req.user?.officeId ?? "unknown"}:${req.user?.role ?? "unknown"}`,
+  });
+}
+
+// GET /api/reports/workflow-bottlenecks?dateFrom=2026-02-01&dateTo=2026-05-01&office=all&ownerNames=Rep%20One,Rep%20Two
+router.get("/workflow-bottlenecks", requireDirector, async (req, res, next) => {
+  try {
+    const data = await getWorkflowBottlenecksReport(req.tenantDb!, parseOperationsFilters(req));
+    await req.commitTransaction!();
+    res.json({ data });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// GET /api/reports/project-readiness?dateFrom=2026-02-01&dateTo=2026-05-01&office=all&ownerNames=Rep%20One,Rep%20Two
+router.get("/project-readiness", requireDirector, async (req, res, next) => {
+  try {
+    const data = await getProjectReadinessReport(req.tenantDb!, parseOperationsFilters(req));
+    await req.commitTransaction!();
+    res.json({ data });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// GET /api/reports/portfolio-load?dateFrom=2026-02-01&dateTo=2026-05-01&office=all&ownerNames=Rep%20One,Rep%20Two
+router.get("/portfolio-load", requireDirector, async (req, res, next) => {
+  try {
+    const data = await getPortfolioLoadReport(req.tenantDb!, parseOperationsFilters(req));
     await req.commitTransaction!();
     res.json({ data });
   } catch (err) {

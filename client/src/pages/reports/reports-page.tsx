@@ -26,7 +26,7 @@ type ReportCard = {
   name: string;
   description: string;
   icon: LucideIcon;
-  href?: string;
+  path?: string;
 };
 
 const reportCategories: Array<{ category: string; description: string; reports: ReportCard[] }> = [
@@ -43,18 +43,33 @@ const reportCategories: Array<{ category: string; description: string; reports: 
     category: "Performance",
     description: "Director-facing scorecards and rep-level activity views.",
     reports: [
-      { name: "Director Scorecard", description: "Executive view of targets, risk, and output.", icon: Gauge, href: "/reports/performance/director-scorecard" },
-      { name: "Rep Activity", description: "Touchpoints, follow-ups, and stalled accounts.", icon: Activity, href: "/reports/performance/rep-activity" },
-      { name: "Forecast Accuracy", description: "Commit, best case, and pipeline reliability.", icon: LineChart, href: "/reports/performance/forecast-accuracy" },
+      { name: "Director Scorecard", description: "Executive view of targets, risk, and output.", icon: Gauge, path: "/reports/performance/director-scorecard" },
+      { name: "Rep Activity", description: "Touchpoints, follow-ups, and stalled accounts.", icon: Activity, path: "/reports/performance/rep-activity" },
+      { name: "Forecast Accuracy", description: "Commit, best case, and pipeline reliability.", icon: LineChart, path: "/reports/performance/forecast-accuracy" },
     ],
   },
   {
     category: "Operations",
     description: "Workflow health, due dates, handoffs, and closeout readiness.",
     reports: [
-      { name: "Workflow Bottlenecks", description: "Aging by stage and blocked handoff counts.", icon: CalendarClock },
-      { name: "Project Readiness", description: "Scoping, estimate, and kickoff completeness.", icon: ClipboardList },
-      { name: "Portfolio Load", description: "Active work grouped by company and property.", icon: BriefcaseBusiness },
+      {
+        name: "Workflow Bottlenecks",
+        description: "Aging by stage and blocked handoff counts.",
+        icon: CalendarClock,
+        path: "/reports/operations/workflow-bottlenecks",
+      },
+      {
+        name: "Project Readiness",
+        description: "Scoping, estimate, and kickoff completeness.",
+        icon: ClipboardList,
+        path: "/reports/operations/project-readiness",
+      },
+      {
+        name: "Portfolio Load",
+        description: "Active work grouped by company and property.",
+        icon: BriefcaseBusiness,
+        path: "/reports/operations/portfolio-load",
+      },
     ],
   },
   {
@@ -102,36 +117,39 @@ export function ReportsPage() {
             <div className="grid grid-cols-1 gap-3 md:grid-cols-3">
               {group.reports.map((report) => {
                 const Icon = report.icon;
-                const card = (
-                  <Card className={`border-slate-200 bg-white ${report.href ? "transition hover:border-brand-red/40 hover:shadow-md" : ""}`}>
-                    <CardContent className="flex items-start gap-4 p-5">
-                      <div className="grid h-12 w-12 shrink-0 place-items-center rounded-xl bg-slate-950 text-white">
-                        <Icon className="h-5 w-5" />
+                const content = (
+                  <CardContent className="flex items-start gap-4 p-5">
+                    <div className="grid h-12 w-12 shrink-0 place-items-center rounded-xl bg-slate-950 text-white">
+                      <Icon className="h-5 w-5" />
+                    </div>
+                    <div className="min-w-0">
+                      <div className="flex flex-wrap items-center gap-2">
+                        <h3 className="font-black uppercase tracking-tight text-slate-950">{report.name}</h3>
+                        {report.path ? (
+                          <span className="rounded-full bg-slate-950 px-2 py-1 text-[10px] font-black uppercase tracking-[0.14em] text-white">
+                            Open
+                          </span>
+                        ) : (
+                          <span className="rounded-full bg-red-50 px-2 py-1 text-[10px] font-black uppercase tracking-[0.14em] text-brand-red">
+                            Coming soon
+                          </span>
+                        )}
                       </div>
-                      <div className="min-w-0">
-                        <div className="flex flex-wrap items-center gap-2">
-                          <h3 className="font-black uppercase tracking-tight text-slate-950">{report.name}</h3>
-                          {report.href ? (
-                            <span className="rounded-full bg-slate-950 px-2 py-1 text-[10px] font-black uppercase tracking-[0.14em] text-white">
-                              Open
-                            </span>
-                          ) : (
-                            <span className="rounded-full bg-red-50 px-2 py-1 text-[10px] font-black uppercase tracking-[0.14em] text-brand-red">
-                              Coming soon
-                            </span>
-                          )}
-                        </div>
-                        <p className="mt-2 text-sm text-slate-600">{report.description}</p>
-                      </div>
-                    </CardContent>
-                  </Card>
+                      <p className="mt-2 text-sm text-slate-600">{report.description}</p>
+                    </div>
+                  </CardContent>
                 );
-                return report.href ? (
-                  <Link key={report.name} to={report.href} className="block">
-                    {card}
-                  </Link>
+
+                return report.path ? (
+                  <Card key={report.name} className="border-slate-200 bg-white transition hover:border-brand-red/40 hover:shadow-md">
+                    <Link to={report.path} className="block focus:outline-none focus:ring-2 focus:ring-brand-red focus:ring-offset-2">
+                      {content}
+                    </Link>
+                  </Card>
                 ) : (
-                  <div key={report.name}>{card}</div>
+                  <Card key={report.name} className="border-slate-200 bg-white">
+                    {content}
+                  </Card>
                 );
               })}
             </div>
