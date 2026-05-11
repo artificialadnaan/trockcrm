@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import {
+  computePreviousPeriod,
   getCustomerConcentrationReport,
   getExecutiveTrendsReport,
   getMarketMixReport,
@@ -41,20 +42,22 @@ describe("analytics tier 4 service", () => {
       [{ total_active_customers: 3, total_open_value: "2000000", customers_over_one_million_open: 1 }],
       [
         {
+          company_id: "company-1",
           company_name: "Acme Roofing",
           active_deals: 2,
           total_open_value: "1200000",
           total_won_lifetime: "500000",
           last_activity_at: "2026-03-01T00:00:00.000Z",
-          account_owner: "Jordan",
+          account_owners: "Jordan, Taylor",
         },
         {
+          company_id: "company-2",
           company_name: "Bravo Holdings",
           active_deals: 1,
           total_open_value: "800000",
           total_won_lifetime: "250000",
           last_activity_at: "2026-04-01T00:00:00.000Z",
-          account_owner: "Casey",
+          account_owners: "Casey",
         },
       ],
       [{ bucket: "$1M+", customer_count: 1 }],
@@ -68,12 +71,51 @@ describe("analytics tier 4 service", () => {
 
     expect(report.kpis.topCustomerPipelinePercent).toBe(60);
     expect(report.topCustomers[0]).toMatchObject({
+      companyId: "company-1",
       companyName: "Acme Roofing",
       totalOpenValue: 1200000,
-      accountOwner: "Jordan",
+      accountOwners: "Jordan, Taylor",
     });
-    expect(report.pareto[1]).toMatchObject({ rank: 2, cumulativePipelinePercent: 100 });
+    expect(report.pareto[1]).toMatchObject({ rank: 2, companyId: "company-2", cumulativePipelinePercent: 100 });
     expect(report.staleCustomers[0]).toMatchObject({ companyName: "Acme Roofing", daysStale: 71 });
+  });
+
+  it("keeps same-name customers separate by company id and combines owners per customer", async () => {
+    const tenantDb = tenantDbWithRows([
+      [{ total_active_customers: 2, total_open_value: "300000", customers_over_one_million_open: 0 }],
+      [
+        {
+          company_id: "company-a",
+          company_name: "Same Name LLC",
+          active_deals: 2,
+          total_open_value: "200000",
+          total_won_lifetime: "0",
+          last_activity_at: null,
+          account_owners: "Alice, Bob",
+        },
+        {
+          company_id: "company-b",
+          company_name: "Same Name LLC",
+          active_deals: 1,
+          total_open_value: "100000",
+          total_won_lifetime: "0",
+          last_activity_at: null,
+          account_owners: "Casey",
+        },
+      ],
+      [],
+      [],
+    ]);
+
+    const report = await getCustomerConcentrationReport(tenantDb, {
+      from: "2026-01-01",
+      to: "2026-12-31",
+    });
+
+    expect(report.topCustomers).toHaveLength(2);
+    expect(report.topCustomers.map((row) => row.companyId)).toEqual(["company-a", "company-b"]);
+    expect(report.topCustomers[0].accountOwners).toBe("Alice, Bob");
+    expect(report.topCustomers[0].companyName).toBe(report.topCustomers[1].companyName);
   });
 
   it("fills empty monthly periods and avoids NaN percentages in Executive Trends", async () => {
@@ -83,7 +125,7 @@ describe("analytics tier 4 service", () => {
         { metric: "previous", total_pipeline: "0", won_revenue: "0", wins: 0, losses: 0, avg_deal_size: "0" },
       ],
       [
-        { month: "2026-01", new_deals: 2, won_deals: 1, lost_deals: 0, active_pipeline_value: "150000" },
+        { month: "2026-01", new_deals: 2, won_deals: 0, lost_deals: 0, active_pipeline_value: "150000" },
         { month: "2026-03", new_deals: 1, won_deals: 0, lost_deals: 1, active_pipeline_value: "300000" },
       ],
       [{ quarter: "2026 Q1", deals_created: 3, won: 1, lost: 1, avg_deal_size: "100000", pipeline_end_value: "300000" }],
@@ -106,5 +148,37 @@ describe("analytics tier 4 service", () => {
     expect(report.kpis.find((kpi) => kpi.label === "Win Rate")?.value).toBe(50);
     expect(report.kpis.every((kpi) => Number.isFinite(kpi.changePercent))).toBe(true);
     expect(report.stageProgression[0]).toMatchObject({ stageName: "Opportunity", progressionRate: 75 });
+  });
+
+  it("counts won deals in the outcome month instead of the created month", async () => {
+    const tenantDb = tenantDbWithRows([
+      [
+        { metric: "current", total_pipeline: "0", won_revenue: "100000", wins: 1, losses: 0, avg_deal_size: "100000" },
+        { metric: "previous", total_pipeline: "0", won_revenue: "0", wins: 0, losses: 0, avg_deal_size: "0" },
+      ],
+      [
+        { month: "2026-01", new_deals: 1, won_deals: 0, lost_deals: 0, active_pipeline_value: "0" },
+        { month: "2026-05", new_deals: 0, won_deals: 1, lost_deals: 0, active_pipeline_value: "0" },
+      ],
+      [],
+      [],
+      [],
+    ]);
+
+    const report = await getExecutiveTrendsReport(tenantDb, {
+      from: "2026-01-01",
+      to: "2026-05-31",
+    });
+
+    expect(report.monthlyTrends.find((row) => row.month === "2026-01")).toMatchObject({ newDeals: 1, wonDeals: 0 });
+    expect(report.monthlyTrends.find((row) => row.month === "2026-05")).toMatchObject({ newDeals: 0, wonDeals: 1 });
+  });
+
+  it("computes inclusive current period days for previous-period comparison", () => {
+    expect(computePreviousPeriod("2026-01-01", "2026-01-31")).toEqual({
+      previousFrom: "2025-12-01",
+      previousToExclusive: "2026-01-01",
+      days: 31,
+    });
   });
 });

@@ -44,6 +44,7 @@ export function ExecutiveTrendsPage() {
           <Card>
             <CardContent className="p-5">
               <h2 className="text-sm font-black uppercase tracking-[0.16em] text-slate-900">Monthly Operating Trends</h2>
+              <p className="mt-1 text-xs font-semibold text-slate-500">{report.activePipelineNote}</p>
               {report.monthlyTrends.length ? (
                 <div className="mt-4 h-80">
                   <ResponsiveContainer width="100%" height="100%">

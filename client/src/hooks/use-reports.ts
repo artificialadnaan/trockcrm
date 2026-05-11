@@ -436,15 +436,17 @@ export interface CustomerConcentrationReport {
     topCustomerPipelinePercent: number;
     customersOverOneMillionOpen: number;
   };
+  scopeNote: string;
   topCustomers: Array<{
+    companyId: string;
     companyName: string;
     activeDeals: number;
     totalOpenValue: number;
     totalWonLifetime: number;
     lastActivityAt: string | null;
-    accountOwner: string;
+    accountOwners: string;
   }>;
-  pareto: Array<{ rank: number; companyName: string; pipelineValue: number; cumulativePipelinePercent: number }>;
+  pareto: Array<{ rank: number; companyId: string; companyName: string; pipelineValue: number; cumulativePipelinePercent: number }>;
   distribution: Array<{ bucket: string; customerCount: number }>;
   staleCustomers: Array<{ companyName: string; ownerName: string; openDeals: number; openValue: number; daysStale: number }>;
 }
@@ -458,6 +460,7 @@ export interface ExecutiveTrendsReport {
     format: "currency" | "number" | "percent";
   }>;
   monthlyTrends: Array<{ month: string; newDeals: number; wonDeals: number; lostDeals: number; activePipelineValue: number }>;
+  activePipelineNote: string;
   quarterlyComparison: Array<{
     quarter: string;
     dealsCreated: number;
