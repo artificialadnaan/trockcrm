@@ -14,6 +14,7 @@ import {
 } from "../../lib/r2-client.js";
 import {
   MAX_FILE_SIZE_BYTES,
+  PRESIGNED_URL_EXPIRY_SECONDS,
   ALLOWED_MIME_TYPES,
   ALLOWED_EXTENSIONS,
   MIME_TO_EXTENSIONS,
@@ -280,14 +281,14 @@ function linkedFileCondition(linkedType: NonNullable<FileFilters["linkedType"]>)
 }
 
 /**
- * Validate file size does not exceed the 50 MB limit.
+ * Validate file size does not exceed the 200 MB limit.
  */
 function validateFileSize(sizeBytes: number): void {
   if (sizeBytes <= 0) {
     throw new AppError(400, "File size must be greater than 0.");
   }
   if (sizeBytes > MAX_FILE_SIZE_BYTES) {
-    throw new AppError(400, `File size ${(sizeBytes / 1024 / 1024).toFixed(1)} MB exceeds the 50 MB limit.`);
+    throw new AppError(413, "File exceeds 200 MB limit.");
   }
 }
 
@@ -519,7 +520,7 @@ export async function requestUploadUrl(
     description: input.description,
     photoCategory: input.photoCategory,
     tags: input.tags,
-    expiresAt: new Date(Date.now() + 15 * 60 * 1000),
+    expiresAt: new Date(Date.now() + PRESIGNED_URL_EXPIRY_SECONDS * 1000),
   });
 
   return {

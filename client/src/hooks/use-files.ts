@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback } from "react";
-import { api, resolveApiBase } from "@/lib/api";
-import type { FileCategory } from "@/lib/file-utils";
+import { api } from "@/lib/api";
+import { MAX_FILE_SIZE_BYTES, MAX_FILE_SIZE_MB, type FileCategory } from "@/lib/file-utils";
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -339,10 +339,43 @@ export interface UploadFileInput {
   onProgress?: (percent: number) => void;
 }
 
+interface UploadUrlResponse {
+  uploadUrl: string;
+  r2Key: string;
+  expiresIn: number;
+  uploadToken: string;
+}
+
+function uploadToSignedUrl(file: File, uploadUrl: string, onProgress?: (percent: number) => void): Promise<void> {
+  return new Promise<void>((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    xhr.open("PUT", uploadUrl);
+    xhr.setRequestHeader("Content-Type", file.type || "application/octet-stream");
+
+    xhr.upload.onprogress = (event) => {
+      if (event.lengthComputable) {
+        onProgress?.(Math.round((event.loaded / event.total) * 100));
+      }
+    };
+
+    xhr.onload = () => {
+      if (xhr.status >= 200 && xhr.status < 300) {
+        resolve();
+        return;
+      }
+      const message = xhr.responseText?.trim()
+        ? `Storage upload failed with status ${xhr.status}: ${xhr.responseText.slice(0, 160)}`
+        : `Storage upload failed with status ${xhr.status}`;
+      reject(new Error(message));
+    };
+
+    xhr.onerror = () => reject(new Error("Storage upload failed: network error"));
+    xhr.send(file);
+  });
+}
+
 /**
- * Upload a file via server-side proxy to R2 (avoids CORS issues with presigned URLs).
- * Sends the file as raw body with metadata in headers.
- * Uses XHR for upload progress tracking.
+ * Upload a file directly to R2 via a presigned URL, then confirm metadata with the API.
  */
 export async function uploadFile(input: UploadFileInput): Promise<FileRecord> {
   const {
@@ -357,57 +390,36 @@ export async function uploadFile(input: UploadFileInput): Promise<FileRecord> {
     onProgress,
   } = input;
 
-  const apiBase = resolveApiBase(
-    (import.meta as any).env ?? {},
-    typeof window !== "undefined" ? window.location : undefined
-  );
-  const baseUrl = apiBase.replace(/\/api$/, "");
+  if (file.size > MAX_FILE_SIZE_BYTES) {
+    throw new Error(`File exceeds ${MAX_FILE_SIZE_MB} MB limit.`);
+  }
 
-  return new Promise<FileRecord>((resolve, reject) => {
-    const xhr = new XMLHttpRequest();
-    xhr.open("POST", `${baseUrl}/api/files/upload-direct`);
-
-    // Send metadata in headers
-    xhr.setRequestHeader("Content-Type", file.type || "application/octet-stream");
-    xhr.setRequestHeader("X-Original-Filename", encodeURIComponent(file.name));
-    xhr.setRequestHeader("X-File-Category", category);
-    if (subcategory) xhr.setRequestHeader("X-File-Subcategory", subcategory);
-    if (dealId) xhr.setRequestHeader("X-Deal-Id", dealId);
-    if (leadId) xhr.setRequestHeader("X-Lead-Id", leadId);
-    if (contactId) xhr.setRequestHeader("X-Contact-Id", contactId);
-    if (description) xhr.setRequestHeader("X-File-Description", description);
-    if (tags && tags.length > 0) xhr.setRequestHeader("X-File-Tags", tags.join(","));
-
-    // Include auth cookie
-    xhr.withCredentials = true;
-
-    xhr.upload.onprogress = (event) => {
-      if (event.lengthComputable && onProgress) {
-        onProgress(Math.round((event.loaded / event.total) * 100));
-      }
-    };
-
-    xhr.onload = () => {
-      if (xhr.status >= 200 && xhr.status < 300) {
-        try {
-          const data = JSON.parse(xhr.responseText);
-          resolve(data.file);
-        } catch {
-          reject(new Error("Failed to parse upload response"));
-        }
-      } else {
-        try {
-          const data = JSON.parse(xhr.responseText);
-          reject(new Error(data.message || `Upload failed with status ${xhr.status}`));
-        } catch {
-          reject(new Error(`Upload failed with status ${xhr.status}`));
-        }
-      }
-    };
-
-    xhr.onerror = () => reject(new Error("Upload failed: network error"));
-    xhr.send(file);
+  const presign = await api<UploadUrlResponse>("/files/upload-url", {
+    method: "POST",
+    json: {
+      originalFilename: file.name,
+      mimeType: file.type || "application/octet-stream",
+      fileSizeBytes: file.size,
+      category,
+      subcategory,
+      dealId,
+      leadId,
+      contactId,
+      procoreProjectId: input.procoreProjectId,
+      changeOrderId: input.changeOrderId,
+      description,
+      tags,
+    },
   });
+
+  await uploadToSignedUrl(file, presign.uploadUrl, onProgress);
+
+  const data = await api<{ file: FileRecord }>("/files/confirm-upload", {
+    method: "POST",
+    json: { uploadToken: presign.uploadToken },
+  });
+
+  return data.file;
 }
 
 export async function searchPhotoUploadTargets(search: string, limit = 30): Promise<PhotoUploadTarget[]> {
