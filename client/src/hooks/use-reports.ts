@@ -318,6 +318,115 @@ export interface ForecastVarianceOverview {
   deals: ForecastVarianceDealRow[];
 }
 
+export interface OperationsReportQueryOptions {
+  dateFrom?: string;
+  dateTo?: string;
+  office?: string;
+  ownerIds?: string[];
+}
+
+export interface WorkflowBottleneckStage {
+  stageName: string;
+  openDealCount: number;
+  avgDaysInStage: number;
+  medianDaysInStage: number;
+  maxDaysInStage: number;
+  stuckDealCount: number;
+}
+
+export interface WorkflowBottleneckDeal {
+  dealId: string;
+  dealName: string;
+  ownerName: string;
+  stageName: string;
+  daysInStage: number;
+  daysSinceLastActivity: number | null;
+  value: number;
+  projectNumber: string | null;
+}
+
+export interface WorkflowBottlenecksReport {
+  generatedAt: string;
+  kpis: {
+    totalStuckDeals: number;
+    avgDealAge: number;
+    longestStuckDealAge: number;
+    stagesWithFivePlusStuckDeals: number;
+  };
+  stageAging: WorkflowBottleneckStage[];
+  topStuckDeals: WorkflowBottleneckDeal[];
+  handoffBlockages: WorkflowBottleneckDeal[];
+}
+
+export interface ProjectReadinessReport {
+  generatedAt: string;
+  assumption: string;
+  kpis: {
+    dealsInScoping: number;
+    dealsInEstimating: number;
+    dealsContractReady: number;
+    dealsKickoffReady: number;
+  };
+  checklistBreakdown: Array<{
+    stageGroup: "Scoping" | "Estimating" | "Contract" | "Kickoff";
+    completeCount: number;
+    incompleteCount: number;
+    signals: string[];
+  }>;
+  missingReadiness: Array<{
+    dealId: string;
+    dealName: string;
+    ownerName: string;
+    stageName: string;
+    daysInStage: number;
+    missingItems: string[];
+    projectNumber: string | null;
+  }>;
+  ownerSummary: Array<{
+    ownerName: string;
+    scopingIncomplete: number;
+    estimatingIncomplete: number;
+    kickoffIncomplete: number;
+  }>;
+}
+
+export interface PortfolioLoadReport {
+  generatedAt: string;
+  kpis: {
+    activeCompanies: number;
+    activeProperties: number;
+    totalActiveValue: number;
+    avgDealValuePerCompany: number;
+  };
+  companyBreakdown: Array<{
+    companyId: string | null;
+    companyName: string;
+    activeDealCount: number;
+    totalOpenValue: number;
+    topProperty: string;
+    owners: string[];
+    avgDealAge: number;
+  }>;
+  propertyBreakdown: Array<{
+    propertyId: string | null;
+    propertyName: string;
+    companyName: string;
+    activeDealCount: number;
+    totalValue: number;
+    mostRecentActivity: string | null;
+    ownerName: string;
+  }>;
+  concentrationRisk: Array<{
+    companyName: string;
+    totalOpenValue: number;
+    percentOfOpenPipeline: number;
+  }>;
+  geographicSpread: {
+    byOffice: Array<{ office: string; dealCount: number; totalValue: number }>;
+    byRegion: Array<{ region: string; dealCount: number; totalValue: number }>;
+  };
+}
+
 export function useSavedReports() {
   const [reports, setReports] = useState<SavedReport[]>([]);
   const [loading, setLoading] = useState(true);
@@ -485,6 +594,95 @@ export async function executeForecastVarianceOverview(options: AnalyticsQueryOpt
   appendAnalyticsQueryOptions(params, options);
   const qs = params.toString();
   return api<{ data: ForecastVarianceOverview }>(`/reports/forecast-variance${qs ? `?${qs}` : ""}`);
+}
+
+function appendOperationsReportQueryOptions(params: URLSearchParams, options: OperationsReportQueryOptions = {}) {
+  if (options.dateFrom) params.set("dateFrom", options.dateFrom);
+  if (options.dateTo) params.set("dateTo", options.dateTo);
+  if (options.office) params.set("office", options.office);
+  if (options.ownerIds?.length) params.set("ownerIds", options.ownerIds.join(","));
+}
+
+async function executeOperationsReport<T>(endpoint: string, options: OperationsReportQueryOptions = {}) {
+  const params = new URLSearchParams();
+  appendOperationsReportQueryOptions(params, options);
+  const qs = params.toString();
+  return api<{ data: T }>(`${endpoint}${qs ? `?${qs}` : ""}`);
+}
+
+export function useWorkflowBottlenecksReport(options: OperationsReportQueryOptions = {}) {
+  const [data, setData] = useState<WorkflowBottlenecksReport | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+
+  const fetchReport = useCallback(async () => {
+    setLoading(true);
+    setError(null);
+    try {
+      const result = await executeOperationsReport<WorkflowBottlenecksReport>("/reports/workflow-bottlenecks", options);
+      setData(result.data);
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : "Failed to load workflow bottlenecks");
+    } finally {
+      setLoading(false);
+    }
+  }, [options.dateFrom, options.dateTo, options.office, options.ownerIds?.join(",")]);
+
+  useEffect(() => {
+    fetchReport();
+  }, [fetchReport]);
+
+  return { data, loading, error, refetch: fetchReport };
+}
+
+export function useProjectReadinessReport(options: OperationsReportQueryOptions = {}) {
+  const [data, setData] = useState<ProjectReadinessReport | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+
+  const fetchReport = useCallback(async () => {
+    setLoading(true);
+    setError(null);
+    try {
+      const result = await executeOperationsReport<ProjectReadinessReport>("/reports/project-readiness", options);
+      setData(result.data);
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : "Failed to load project readiness");
+    } finally {
+      setLoading(false);
+    }
+  }, [options.dateFrom, options.dateTo, options.office, options.ownerIds?.join(",")]);
+
+  useEffect(() => {
+    fetchReport();
+  }, [fetchReport]);
+
+  return { data, loading, error, refetch: fetchReport };
+}
+
+export function usePortfolioLoadReport(options: OperationsReportQueryOptions = {}) {
+  const [data, setData] = useState<PortfolioLoadReport | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+
+  const fetchReport = useCallback(async () => {
+    setLoading(true);
+    setError(null);
+    try {
+      const result = await executeOperationsReport<PortfolioLoadReport>("/reports/portfolio-load", options);
+      setData(result.data);
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : "Failed to load portfolio load");
+    } finally {
+      setLoading(false);
+    }
+  }, [options.dateFrom, options.dateTo, options.office, options.ownerIds?.join(",")]);
+
+  useEffect(() => {
+    fetchReport();
+  }, [fetchReport]);
+
+  return { data, loading, error, refetch: fetchReport };
 }
 
 export function useLeadSourceROI(options: AnalyticsQueryOptions = {}) {
