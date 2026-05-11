@@ -9,6 +9,16 @@ const serviceMocks = vi.hoisted(() => ({
   updateLead: vi.fn(),
 }));
 
+const dbMocks = vi.hoisted(() => ({
+  poolConnect: vi.fn(),
+}));
+
+const dueDiligenceMocks = vi.hoisted(() => ({
+  assertSafeOfficeSlug: vi.fn(),
+  dispatchPendingDueDiligenceEmail: vi.fn(),
+  getLeadDueDiligenceApprovalForLead: vi.fn(),
+}));
+
 class TestLeadCreateRequirementsError extends Error {
   statusCode = 400;
   code = "LEAD_CREATE_REQUIREMENTS_UNMET";
@@ -46,6 +56,18 @@ vi.mock("../../../src/modules/leads/questionnaire-service.js", () => ({
   isLeadEditV2Enabled: questionnaireMocks.isLeadEditV2Enabled,
 }));
 
+vi.mock("../../../src/db.js", () => ({
+  pool: {
+    connect: dbMocks.poolConnect,
+  },
+}));
+
+vi.mock("../../../src/modules/leads/due-diligence-service.js", () => ({
+  assertSafeOfficeSlug: dueDiligenceMocks.assertSafeOfficeSlug,
+  dispatchPendingDueDiligenceEmail: dueDiligenceMocks.dispatchPendingDueDiligenceEmail,
+  getLeadDueDiligenceApprovalForLead: dueDiligenceMocks.getLeadDueDiligenceApprovalForLead,
+}));
+
 async function loadLeadRoutes() {
   vi.resetModules();
 
@@ -67,6 +89,18 @@ async function loadLeadRoutes() {
     getLeadQuestionnaireSnapshot: questionnaireMocks.getLeadQuestionnaireSnapshot,
     getQuestionnaireTemplateSnapshot: questionnaireMocks.getQuestionnaireTemplateSnapshot,
     isLeadEditV2Enabled: questionnaireMocks.isLeadEditV2Enabled,
+  }));
+
+  vi.doMock("../../../src/db.js", () => ({
+    pool: {
+      connect: dbMocks.poolConnect,
+    },
+  }));
+
+  vi.doMock("../../../src/modules/leads/due-diligence-service.js", () => ({
+    assertSafeOfficeSlug: dueDiligenceMocks.assertSafeOfficeSlug,
+    dispatchPendingDueDiligenceEmail: dueDiligenceMocks.dispatchPendingDueDiligenceEmail,
+    getLeadDueDiligenceApprovalForLead: dueDiligenceMocks.getLeadDueDiligenceApprovalForLead,
   }));
 
   const { leadRoutes } = await import("../../../src/modules/leads/routes.js");
@@ -102,6 +136,7 @@ async function invokeLeadRoute(body: Record<string, unknown>, leadRoutes?: unkno
       role: "rep",
       activeOfficeId: "office-1",
     },
+    officeSlug: "atlanta",
     commitTransaction: vi.fn(async () => {}),
   } as any;
   const res = {
@@ -184,6 +219,7 @@ async function invokeLeadCreateRoute(body: Record<string, unknown>, leadRoutes?:
       role: "rep",
       activeOfficeId: "office-1",
     },
+    officeSlug: "atlanta",
     commitTransaction: vi.fn(async () => {}),
   } as any;
   const res = {
@@ -271,6 +307,16 @@ async function invokeQuestionnaireTemplateRoute(projectTypeId = "project-type-1"
 
   await handler(req, res, next);
   return { req, res, next };
+}
+
+function installDueDiligenceDispatchClient() {
+  const client = {
+    query: vi.fn(async () => ({ rows: [] })),
+    release: vi.fn(),
+  };
+  dbMocks.poolConnect.mockResolvedValue(client);
+  dueDiligenceMocks.dispatchPendingDueDiligenceEmail.mockResolvedValue({ success: true, messageId: "resend-1" });
+  return client;
 }
 
 describe("lead stage transition route", () => {
@@ -378,6 +424,102 @@ describe("lead stage transition route", () => {
 
     expect(res.statusCode).toBe(400);
     expect(res.body.error.missingRequirements.fields).toEqual(fields);
+  });
+
+  it("dispatches the DD email after a pending new-company lead is committed", async () => {
+    const leadRoutes = await loadLeadRoutes();
+    const client = installDueDiligenceDispatchClient();
+    serviceMocks.createLead.mockResolvedValueOnce({
+      id: "lead-new-company",
+      verificationStatus: "pending",
+    });
+    dueDiligenceMocks.getLeadDueDiligenceApprovalForLead.mockResolvedValueOnce({
+      id: "approval-1",
+    });
+
+    const { req, res } = await invokeLeadCreateRoute(
+      {
+        companyId: "company-1",
+        propertyId: "property-1",
+        name: "Lead One",
+      },
+      leadRoutes
+    );
+
+    expect(req.commitTransaction).toHaveBeenCalledOnce();
+    expect(res.statusCode).toBe(201);
+    expect(res.body).toEqual({ lead: { id: "lead-new-company", verificationStatus: "pending" } });
+    expect(dueDiligenceMocks.getLeadDueDiligenceApprovalForLead).toHaveBeenCalledWith(req.tenantDb, "lead-new-company");
+
+    await vi.waitFor(() => {
+      expect(dueDiligenceMocks.dispatchPendingDueDiligenceEmail).toHaveBeenCalledWith(
+        expect.anything(),
+        "approval-1",
+        expect.objectContaining({ now: expect.any(Date) })
+      );
+    });
+    expect(dueDiligenceMocks.assertSafeOfficeSlug).toHaveBeenCalledWith("atlanta");
+    expect(client.query).toHaveBeenCalledWith("BEGIN");
+    expect(client.query).toHaveBeenCalledWith("COMMIT");
+    expect(client.release).toHaveBeenCalledOnce();
+  });
+
+  it("does not dispatch DD email for an existing-company lead", async () => {
+    const leadRoutes = await loadLeadRoutes();
+    serviceMocks.createLead.mockResolvedValueOnce({
+      id: "lead-existing-company",
+      verificationStatus: "not_required",
+    });
+
+    const { req, res } = await invokeLeadCreateRoute(
+      {
+        companyId: "company-1",
+        propertyId: "property-1",
+        name: "Lead One",
+      },
+      leadRoutes
+    );
+
+    expect(req.commitTransaction).toHaveBeenCalledOnce();
+    expect(res.statusCode).toBe(201);
+    expect(dueDiligenceMocks.getLeadDueDiligenceApprovalForLead).not.toHaveBeenCalled();
+    expect(dbMocks.poolConnect).not.toHaveBeenCalled();
+    expect(dueDiligenceMocks.dispatchPendingDueDiligenceEmail).not.toHaveBeenCalled();
+  });
+
+  it("logs post-commit DD email connection failures without changing the lead response", async () => {
+    const leadRoutes = await loadLeadRoutes();
+    const error = vi.spyOn(console, "error").mockImplementation(() => {});
+    dbMocks.poolConnect.mockRejectedValueOnce(new Error("pool unavailable"));
+    serviceMocks.createLead.mockResolvedValueOnce({
+      id: "lead-new-company",
+      verificationStatus: "pending",
+    });
+    dueDiligenceMocks.getLeadDueDiligenceApprovalForLead.mockResolvedValueOnce({
+      id: "approval-1",
+    });
+
+    const { req, res } = await invokeLeadCreateRoute(
+      {
+        companyId: "company-1",
+        propertyId: "property-1",
+        name: "Lead One",
+      },
+      leadRoutes
+    );
+
+    expect(req.commitTransaction).toHaveBeenCalledOnce();
+    expect(res.statusCode).toBe(201);
+    expect(res.body).toEqual({ lead: { id: "lead-new-company", verificationStatus: "pending" } });
+
+    await vi.waitFor(() => {
+      expect(error).toHaveBeenCalledWith(
+        "[lead-dd] post-commit email dispatch failed",
+        expect.objectContaining({ approvalId: "approval-1", err: expect.any(Error) })
+      );
+    });
+    expect(dueDiligenceMocks.dispatchPendingDueDiligenceEmail).not.toHaveBeenCalled();
+    error.mockRestore();
   });
 
   it("serializes LeadStageTransitionError from POST /api/leads/:id/stage-transition as a 409", async () => {

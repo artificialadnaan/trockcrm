@@ -98,7 +98,18 @@ export async function getLeadDueDiligenceRecipients(tenantDb: TenantDb, key = GR
     .innerJoin(users, eq(users.id, notificationRecipientAssignments.userId))
     .where(and(eq(notificationRecipientGroups.key, key), eq(users.isActive, true)));
 
-  return rows;
+  if (rows.length > 0 || key !== GROUP_KEY) {
+    return rows;
+  }
+
+  return tenantDb
+    .select({
+      userId: users.id,
+      email: users.email,
+      displayName: users.displayName,
+    })
+    .from(users)
+    .where(and(inArray(users.role, ["admin", "director"]), eq(users.isActive, true)));
 }
 
 async function getLeadSummary(tenantDb: TenantDb, leadId: string) {

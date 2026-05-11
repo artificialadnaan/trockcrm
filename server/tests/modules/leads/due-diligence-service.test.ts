@@ -18,6 +18,7 @@ import {
   decideLeadDueDiligenceApproval,
   dispatchPendingDueDiligenceEmail,
   getLeadDueDiligenceApprovalForLead,
+  getLeadDueDiligenceRecipients,
   listLeadDueDiligenceApprovals,
   renderDueDiligenceDecisionPage,
   renderDueDiligenceNotFoundPage,
@@ -257,7 +258,7 @@ function createTenantDb(options: {
 }
 
 function createRecipientAssignmentDb(options: {
-  users: Array<{ id: string; email: string; displayName: string; isActive?: boolean }>;
+  users: Array<{ id: string; email: string; displayName: string; role?: string; isActive?: boolean }>;
   assignments?: string[];
 }) {
   const state = {
@@ -276,6 +277,12 @@ function createRecipientAssignmentDb(options: {
       .map((userId) => state.users.find((user) => user.id === userId))
       .filter((user): user is { id: string; email: string; displayName: string; isActive?: boolean } => Boolean(user))
       .filter((user) => user.isActive !== false)
+      .map((user) => ({ userId: user.id, email: user.email, displayName: user.displayName }));
+  }
+
+  function adminDirectorRecipients() {
+    return state.users
+      .filter((user) => (user.role === "admin" || user.role === "director") && user.isActive !== false)
       .map((user) => ({ userId: user.id, email: user.email, displayName: user.displayName }));
   }
 
@@ -313,6 +320,9 @@ function createRecipientAssignmentDb(options: {
           }
           if (selectedTable === notificationRecipientGroups && selectedFields && "email" in selectedFields) {
             return Promise.resolve(recipients());
+          }
+          if (selectedTable === users && selectedFields && "email" in selectedFields) {
+            return Promise.resolve(adminDirectorRecipients());
           }
           return chain;
         }),
@@ -574,6 +584,26 @@ describe("dispatchPendingDueDiligenceEmail", () => {
     );
     expect((tenantDb as any).__state.approvals[0].email_sent_at).toEqual(NOW);
     expect((tenantDb as any).__state.approvals[0].email_message_id).toBe("resend-1");
+  });
+
+  it("falls back to active admins and directors when the DD recipient group is empty", async () => {
+    vi.mocked(sendSystemEmailWithMetadata).mockResolvedValue({ success: true, messageId: "resend-1" });
+    const tenantDb = createRecipientAssignmentDb({
+      users: [
+        { id: "admin-1", email: "admin@example.com", displayName: "Admin", role: "admin" },
+        { id: "director-1", email: "director@example.com", displayName: "Director", role: "director" },
+        { id: "rep-1", email: "rep@example.com", displayName: "Rep", role: "rep" },
+        { id: "inactive-admin", email: "inactive@example.com", displayName: "Inactive", role: "admin", isActive: false },
+      ],
+      assignments: [],
+    });
+
+    const recipients = await getLeadDueDiligenceRecipients(tenantDb as never);
+
+    expect(recipients).toEqual([
+      { userId: "admin-1", email: "admin@example.com", displayName: "Admin" },
+      { userId: "director-1", email: "director@example.com", displayName: "Director" },
+    ]);
   });
 
   it("returns success false and leaves email metadata null when no recipients are configured", async () => {
