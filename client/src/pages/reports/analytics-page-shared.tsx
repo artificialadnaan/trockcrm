@@ -46,7 +46,7 @@ export function ReportPageShell({
   return (
     <div className="space-y-6">
       <PageHeader eyebrow="Analytics" title={title} description={description} />
-      <ReportFilterBar />
+      <ReportFilterBar defaultRange="12m" />
       <div className="flex justify-end">
         <Button variant="outline" size="sm" onClick={onRefresh} disabled={loading}>
           <RefreshCw className="mr-2 h-4 w-4" />

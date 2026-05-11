@@ -43,6 +43,12 @@ import {
   getMarketMixReport,
   type AnalyticsTier4Filters,
 } from "./analytics-tier4-service.js";
+import {
+  getPortfolioLoadReport,
+  getProjectReadinessReport,
+  getWorkflowBottlenecksReport,
+  normalizeOperationsReportFilters,
+} from "./operations-tier3-service.js";
 
 const router = Router();
 const VALID_REPORT_FREQUENCIES = ["daily", "weekly", "biweekly", "monthly", "quarterly"] as const;
@@ -392,6 +398,16 @@ router.get("/regional-ownership", requireDirector, async (req, res, next) => {
   }
 });
 
+function parseOperationsFilters(req: any) {
+  return normalizeOperationsReportFilters({
+    dateFrom: req.query.dateFrom as string | undefined,
+    dateTo: req.query.dateTo as string | undefined,
+    office: req.query.office as string | undefined,
+    ownerIds: req.query.ownerIds as string | string[] | undefined,
+    cacheScope: `${req.user?.activeOfficeId ?? req.user?.officeId ?? "unknown"}:${req.user?.role ?? "unknown"}`,
+  });
+}
+
 // GET /api/reports/market-mix?dateFrom=2025-05-11&dateTo=2026-05-11&office=uuid&ownerIds=uuid,uuid
 router.get("/market-mix", requireAnyRole, async (req, res, next) => {
   try {
@@ -427,6 +443,39 @@ router.get("/executive-trends", requireAnyRole, async (req, res, next) => {
       req.tenantDb!,
       parseTier4Filters(req.query as Record<string, unknown>, req.user!)
     );
+    await req.commitTransaction!();
+    res.json({ data });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// GET /api/reports/workflow-bottlenecks?dateFrom=2026-02-01&dateTo=2026-05-01&office=all&ownerIds=uuid,uuid
+router.get("/workflow-bottlenecks", requireDirector, async (req, res, next) => {
+  try {
+    const data = await getWorkflowBottlenecksReport(req.tenantDb!, parseOperationsFilters(req));
+    await req.commitTransaction!();
+    res.json({ data });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// GET /api/reports/project-readiness?dateFrom=2026-02-01&dateTo=2026-05-01&office=all&ownerIds=uuid,uuid
+router.get("/project-readiness", requireDirector, async (req, res, next) => {
+  try {
+    const data = await getProjectReadinessReport(req.tenantDb!, parseOperationsFilters(req));
+    await req.commitTransaction!();
+    res.json({ data });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// GET /api/reports/portfolio-load?dateFrom=2026-02-01&dateTo=2026-05-01&office=all&ownerIds=uuid,uuid
+router.get("/portfolio-load", requireDirector, async (req, res, next) => {
+  try {
+    const data = await getPortfolioLoadReport(req.tenantDb!, parseOperationsFilters(req));
     await req.commitTransaction!();
     res.json({ data });
   } catch (err) {

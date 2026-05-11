@@ -12,7 +12,7 @@ import {
 } from "./analytics-page-shared";
 
 export function ExecutiveTrendsPage() {
-  const { query } = useReportFilters();
+  const { query } = useReportFilters({ defaultRange: "12m" });
   const { data, loading, error, refetch } = useExecutiveTrendsReport(query);
   const report = data;
 

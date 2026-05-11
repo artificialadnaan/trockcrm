@@ -5,7 +5,7 @@ import { useMarketMixReport } from "@/hooks/use-reports";
 import { CHART_COLORS, EmptyState, formatCurrency, formatNumber, formatPercent, KpiCard, ReportPageShell } from "./analytics-page-shared";
 
 export function MarketMixPage() {
-  const { query } = useReportFilters();
+  const { query } = useReportFilters({ defaultRange: "12m" });
   const { data, loading, error, refetch } = useMarketMixReport(query);
   const report = data;
   const quarterlyVerticals = report

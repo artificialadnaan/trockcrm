@@ -5,7 +5,7 @@ import { useCustomerConcentrationReport } from "@/hooks/use-reports";
 import { EmptyState, formatCurrency, formatDate, formatNumber, formatPercent, KpiCard, ReportPageShell } from "./analytics-page-shared";
 
 export function CustomerConcentrationPage() {
-  const { query } = useReportFilters();
+  const { query } = useReportFilters({ defaultRange: "12m" });
   const { data, loading, error, refetch } = useCustomerConcentrationReport(query);
   const report = data;
 

@@ -8,8 +8,12 @@ import { useAccessibleOffices } from "@/hooks/use-accessible-offices";
 import { api } from "@/lib/api";
 
 const DATE_RANGE_OPTIONS = [
+  { value: "30", label: "Last 30 days" },
+  { value: "60", label: "Last 60 days" },
+  { value: "90", label: "Last 90 days" },
   { value: "6m", label: "Last 6 months" },
   { value: "12m", label: "Last 12 months" },
+  { value: "qtd", label: "QTD" },
   { value: "ytd", label: "YTD" },
   { value: "custom", label: "Custom" },
 ] as const;
@@ -31,6 +35,8 @@ function toDateInput(date: Date) {
   return date.toISOString().slice(0, 10);
 }
 
+type DefaultRange = "30" | "60" | "90" | "6m" | "12m" | "qtd" | "ytd";
+
 function rangeDates(range: string) {
   const today = new Date();
   const from = new Date(today);
@@ -39,23 +45,30 @@ function rangeDates(range: string) {
     from.setMonth(today.getMonth() - 6);
     return { dateFrom: toDateInput(from), dateTo: toDateInput(today) };
   }
+  if (range === "30" || range === "60" || range === "90") {
+    from.setDate(today.getDate() - Number(range));
+    return { dateFrom: toDateInput(from), dateTo: toDateInput(today) };
+  }
+  if (range === "qtd") {
+    const quarterStartMonth = Math.floor(today.getMonth() / 3) * 3;
+    return { dateFrom: toDateInput(new Date(today.getFullYear(), quarterStartMonth, 1)), dateTo: toDateInput(today) };
+  }
   if (range === "ytd") {
     return { dateFrom: `${today.getFullYear()}-01-01`, dateTo: toDateInput(today) };
   }
-
   from.setMonth(today.getMonth() - 12);
   return { dateFrom: toDateInput(from), dateTo: toDateInput(today) };
 }
 
-function defaultFilters(): ReportFilters {
-  const dates = rangeDates("12m");
-  return { range: "12m", ...dates, office: "all", ownerIds: [] };
+function defaultFilters(defaultRange: DefaultRange = "90"): ReportFilters {
+  const dates = rangeDates(defaultRange);
+  return { range: defaultRange, ...dates, office: "all", ownerIds: [] };
 }
 
-export function useReportFilters() {
+export function useReportFilters(options: { defaultRange?: DefaultRange } = {}) {
   const [searchParams] = useSearchParams();
   const filters = useMemo<ReportFilters>(() => {
-    const defaults = defaultFilters();
+    const defaults = defaultFilters(options.defaultRange);
     const range = searchParams.get("range") || defaults.range;
     const ownerIds = searchParams.get("ownerIds")?.split(",").map((value) => value.trim()).filter(Boolean) ?? [];
     return {
@@ -65,7 +78,7 @@ export function useReportFilters() {
       office: searchParams.get("office") || defaults.office,
       ownerIds,
     };
-  }, [searchParams]);
+  }, [options.defaultRange, searchParams]);
 
   return {
     filters,
@@ -78,9 +91,9 @@ export function useReportFilters() {
   };
 }
 
-export function ReportFilterBar() {
+export function ReportFilterBar({ defaultRange = "90" }: { defaultRange?: DefaultRange } = {}) {
   const [searchParams, setSearchParams] = useSearchParams();
-  const { filters } = useReportFilters();
+  const { filters } = useReportFilters({ defaultRange });
   const [draft, setDraft] = useState<ReportFilters>(filters);
   const [owners, setOwners] = useState<SalesRepOption[]>([]);
   const { offices } = useAccessibleOffices();
@@ -121,7 +134,7 @@ export function ReportFilterBar() {
   }
 
   function resetFilters() {
-    const defaults = defaultFilters();
+    const defaults = defaultFilters(defaultRange);
     setDraft(defaults);
     applyFilters(defaults);
   }

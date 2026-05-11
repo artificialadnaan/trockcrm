@@ -7,9 +7,13 @@ function normalize(html: string) {
   return html.replace(/\s+/g, " ").trim();
 }
 
+function renderReportsPage() {
+  return normalize(renderToStaticMarkup(<MemoryRouter><ReportsPage /></MemoryRouter>));
+}
+
 describe("ReportsPage", () => {
   it("renders the placeholder report library by category", () => {
-    const html = normalize(renderToStaticMarkup(<MemoryRouter><ReportsPage /></MemoryRouter>));
+    const html = renderReportsPage();
 
     expect(html).toContain("Reports");
     expect(html).toContain("Sales");
@@ -22,12 +26,25 @@ describe("ReportsPage", () => {
   });
 
   it("does not render report execution or builder actions", () => {
-    const html = normalize(renderToStaticMarkup(<MemoryRouter><ReportsPage /></MemoryRouter>));
+    const html = renderReportsPage();
 
     expect(html).not.toContain("Report Builder");
     expect(html).not.toContain("Saved Views");
     expect(html).not.toContain("CSV Export");
     expect(html).not.toContain("Run Report");
     expect(html).not.toContain("Execute");
+  });
+
+  it("makes only the shipped Operations and Analytics cards clickable", () => {
+    const html = renderReportsPage();
+
+    expect(html).toContain("/reports/operations/workflow-bottlenecks");
+    expect(html).toContain("/reports/operations/project-readiness");
+    expect(html).toContain("/reports/operations/portfolio-load");
+    expect(html).toContain("/reports/analytics/market-mix");
+    expect(html).toContain("/reports/analytics/customer-concentration");
+    expect(html).toContain("/reports/analytics/executive-trends");
+    expect(html).not.toContain("/reports/sales/pipeline-velocity");
+    expect(html).not.toContain("/reports/performance/director-scorecard");
   });
 });
