@@ -25,6 +25,7 @@ export function CustomerConcentrationPage() {
             <KpiCard label="Top customer share" value={formatPercent(report.kpis.topCustomerPipelinePercent)} />
             <KpiCard label="Customers above $1M" value={formatNumber(report.kpis.customersOverOneMillionOpen)} />
           </section>
+          <p className="text-xs font-semibold text-slate-500">{report.scopeNote}</p>
 
           <Card>
             <CardContent className="overflow-x-auto p-5">
@@ -37,18 +38,18 @@ export function CustomerConcentrationPage() {
                     <th className="py-2 text-right">Total Open Value</th>
                     <th className="py-2 text-right">Total Won</th>
                     <th className="py-2">Last Activity</th>
-                    <th className="py-2">Account Owner</th>
+                    <th className="py-2">Owners</th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-slate-100">
                   {report.topCustomers.map((row, index) => (
-                    <tr key={row.companyName} className={index < 3 ? "bg-red-50/60" : undefined}>
+                    <tr key={row.companyId} className={index < 3 ? "bg-red-50/60" : undefined}>
                       <td className="py-3 font-semibold text-slate-900">{row.companyName}</td>
                       <td className="py-3 text-right">{formatNumber(row.activeDeals)}</td>
                       <td className="py-3 text-right">{formatCurrency(row.totalOpenValue)}</td>
                       <td className="py-3 text-right">{formatCurrency(row.totalWonLifetime)}</td>
                       <td className="py-3">{formatDate(row.lastActivityAt)}</td>
-                      <td className="py-3">{row.accountOwner}</td>
+                      <td className="py-3">{row.accountOwners}</td>
                     </tr>
                   ))}
                 </tbody>

@@ -37,13 +37,28 @@ function toDateInput(date: Date) {
 
 type DefaultRange = "30" | "60" | "90" | "6m" | "12m" | "qtd" | "ytd";
 
+export function subtractMonthsClamped(date: Date, months: number) {
+  const targetMonthIndex = date.getMonth() - months;
+  const targetYear = date.getFullYear() + Math.floor(targetMonthIndex / 12);
+  const normalizedMonth = ((targetMonthIndex % 12) + 12) % 12;
+  const lastDayOfTargetMonth = new Date(targetYear, normalizedMonth + 1, 0).getDate();
+  return new Date(
+    targetYear,
+    normalizedMonth,
+    Math.min(date.getDate(), lastDayOfTargetMonth),
+    date.getHours(),
+    date.getMinutes(),
+    date.getSeconds(),
+    date.getMilliseconds()
+  );
+}
+
 function rangeDates(range: string) {
   const today = new Date();
   const from = new Date(today);
 
   if (range === "6m") {
-    from.setMonth(today.getMonth() - 6);
-    return { dateFrom: toDateInput(from), dateTo: toDateInput(today) };
+    return { dateFrom: toDateInput(subtractMonthsClamped(today, 6)), dateTo: toDateInput(today) };
   }
   if (range === "30" || range === "60" || range === "90") {
     from.setDate(today.getDate() - Number(range));
@@ -56,8 +71,7 @@ function rangeDates(range: string) {
   if (range === "ytd") {
     return { dateFrom: `${today.getFullYear()}-01-01`, dateTo: toDateInput(today) };
   }
-  from.setMonth(today.getMonth() - 12);
-  return { dateFrom: toDateInput(from), dateTo: toDateInput(today) };
+  return { dateFrom: toDateInput(subtractMonthsClamped(today, 12)), dateTo: toDateInput(today) };
 }
 
 function defaultFilters(defaultRange: DefaultRange = "90"): ReportFilters {
