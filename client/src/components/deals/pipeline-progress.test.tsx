@@ -199,6 +199,53 @@ describe("PipelineProgress", () => {
     expect(html).toContain('data-disabled-reason="bid-board-managed"');
   });
 
+  it("makes Bid Board-owned terminal deals fully read-only", () => {
+    const onStageClick = vi.fn();
+    const rendered = mount(
+      <PipelineProgress
+        stages={standardStages}
+        currentSlug="won"
+        workflowRoute="normal"
+        isBidBoardOwned
+        handoffStageDisplayOrder={1}
+        canMoveBackward
+        onStageClick={onStageClick}
+      />
+    );
+
+    expect(rendered.container.querySelectorAll('[data-disabled-reason="bid-board-terminal-readonly"]')).toHaveLength(7);
+
+    const currentButton = rendered.container.querySelector<HTMLButtonElement>('[data-stage-slug="won"]');
+    const opportunityButton = rendered.container.querySelector<HTMLButtonElement>('[data-stage-slug="opportunity"]');
+    expect(currentButton?.disabled).toBe(true);
+    expect(opportunityButton?.disabled).toBe(true);
+
+    act(() => {
+      currentButton?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+      opportunityButton?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+
+    expect(onStageClick).not.toHaveBeenCalled();
+    rendered.unmount();
+  });
+
+  it("keeps non-Bid Board terminal deals locked even for directors", () => {
+    const html = renderToStaticMarkup(
+      <PipelineProgress
+        stages={standardStages}
+        currentSlug="won"
+        workflowRoute="normal"
+        isBidBoardOwned={false}
+        handoffStageDisplayOrder={null}
+        canMoveBackward
+        onStageClick={() => undefined}
+      />
+    );
+
+    expect(html.match(/data-disabled-reason="terminal-locked"/g)).toHaveLength(6);
+    expect(html).not.toContain('data-disabled-reason="backward-restricted"');
+  });
+
   it("disables backward stage movement for non-director users", () => {
     const html = renderToStaticMarkup(
       <PipelineProgress

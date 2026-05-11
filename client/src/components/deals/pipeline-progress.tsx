@@ -35,6 +35,10 @@ function getDisabledReason(
     return null;
   }
 
+  if (options.isBidBoardOwned && options.currentIsTerminal) {
+    return "bid-board-terminal-readonly";
+  }
+
   if (index === currentIndex) {
     return "current";
   }
@@ -72,6 +76,8 @@ function disabledLabel(reason: string | null) {
       return "Passed";
     case "terminal-locked":
       return "Terminal";
+    case "bid-board-terminal-readonly":
+      return "Read-only";
     default:
       return null;
   }
@@ -124,7 +130,12 @@ export function PipelineProgress({
                 data-stage-slug={stage.slug}
                 data-state={state}
                 data-disabled-reason={disabledReason ?? undefined}
-                onClick={() => onStageClick(stage.id)}
+                onClick={() => {
+                  if (disabledReason) {
+                    return;
+                  }
+                  onStageClick(stage.id);
+                }}
                 className={cn(
                   "group flex min-w-0 flex-col rounded-md border border-transparent p-2 text-left transition",
                   disabled ? "cursor-not-allowed" : "hover:border-slate-200 hover:bg-slate-50",
