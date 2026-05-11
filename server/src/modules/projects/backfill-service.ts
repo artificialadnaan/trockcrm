@@ -69,6 +69,10 @@ function projectNumberBelongsToOffice(projectNumber: string | null | undefined, 
   return prefixes.some((prefix) => normalized.startsWith(`${prefix}-`));
 }
 
+function savepointName(page: number, index: number) {
+  return `projects_backfill_p${page}_i${index}`;
+}
+
 export async function runProjectsBackfill(
   client: QueryExecutor,
   schemaName: string,
@@ -91,7 +95,8 @@ export async function runProjectsBackfill(
     );
     if (!Array.isArray(rows) || rows.length === 0) break;
 
-    for (const row of rows) {
+    for (let index = 0; index < rows.length; index += 1) {
+      const row = rows[index];
       const normalized = normalizeProjectRow(row, companyId);
       if (!normalized) {
         result.errored += 1;
@@ -99,6 +104,10 @@ export async function runProjectsBackfill(
         continue;
       }
 
+      // Per-row savepoint: if any DB statement for this row aborts the outer transaction,
+      // ROLLBACK TO SAVEPOINT restores a clean state so the next row can still backfill.
+      const sp = savepointName(page, index);
+      await client.query(`SAVEPOINT ${sp}`);
       try {
         const fields = buildProjectMirrorFields({
           ...normalized,
@@ -107,6 +116,7 @@ export async function runProjectsBackfill(
         const existing = await findExistingProjectSyncRow(client, normalized.procoreProjectId);
         if (existing && sameTimestamp(existing.procoreUpdatedAt, fields.procoreUpdatedAt)) {
           result.skipped += 1;
+          await client.query(`RELEASE SAVEPOINT ${sp}`);
           continue;
         }
 
@@ -117,6 +127,7 @@ export async function runProjectsBackfill(
         );
         if (!sourceDealId && !projectNumberBelongsToOffice(normalized.procoreProjectNumber, officeSlug)) {
           result.skipped += 1;
+          await client.query(`RELEASE SAVEPOINT ${sp}`);
           continue;
         }
 
@@ -125,8 +136,11 @@ export async function runProjectsBackfill(
           sourceDealId,
           syncSource: "backfill",
         });
+        await client.query(`RELEASE SAVEPOINT ${sp}`);
         result.backfilled += 1;
       } catch (error) {
+        await client.query(`ROLLBACK TO SAVEPOINT ${sp}`).catch(() => {});
+        await client.query(`RELEASE SAVEPOINT ${sp}`).catch(() => {});
         result.errored += 1;
         result.errors.push({
           procoreProjectId: normalized.procoreProjectId,
