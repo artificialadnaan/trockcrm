@@ -119,6 +119,59 @@ describe("uploadFile", () => {
     expect(result).toMatchObject({ id: "file-1" });
   });
 
+  it("routes dev mock upload URLs through the API helper so auth and CSRF are included", async () => {
+    document.cookie = "csrf_token=test-csrf-token; path=/";
+    vi.stubGlobal("XMLHttpRequest", MockXHR);
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        headers: new Headers({ "content-type": "application/json" }),
+        json: async () => ({
+          uploadUrl: "http://localhost:3001/api/files/dev-upload?key=office%2Fmock.jpg",
+          uploadToken: "upload-token",
+          r2Key: "office/mock.jpg",
+          expiresIn: 1800,
+        }),
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        headers: new Headers({ "content-type": "application/json" }),
+        json: async () => ({ success: true }),
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        status: 201,
+        headers: new Headers({ "content-type": "application/json" }),
+        json: async () => ({
+          file: { id: "file-1", category: "photo", originalFilename: "roof.jpg" },
+        }),
+      });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await uploadFile({
+      file: new File(["hello"], "roof.jpg", { type: "image/jpeg" }),
+      category: "photo",
+      dealId: "deal-1",
+    });
+
+    expect(MockXHR.instances).toHaveLength(0);
+    expect(fetchMock).toHaveBeenNthCalledWith(
+      2,
+      "/api/files/dev-upload?key=office%2Fmock.jpg",
+      expect.objectContaining({
+        method: "PUT",
+        credentials: "include",
+        headers: expect.objectContaining({
+          "Content-Type": "image/jpeg",
+          "X-CSRF-Token": "test-csrf-token",
+        }),
+      })
+    );
+    expect(fetchMock.mock.calls[2][0]).toBe("/api/files/confirm-upload");
+  });
+
   it("rejects files larger than 200 MB before requesting a presigned URL", async () => {
     const fetchMock = vi.fn();
     vi.stubGlobal("fetch", fetchMock);
