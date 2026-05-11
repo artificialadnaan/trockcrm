@@ -170,15 +170,21 @@ describe("projects backfill service", () => {
     expect(query.mock.calls.map((call) => String(call[0])).join("\n").match(/INSERT INTO "office_dallas"\.projects/g)).toHaveLength(1);
   });
 
-  it("releases the pool client even when Procore throws mid-pagination", async () => {
+  it("releases the pool client and resets search_path even when Procore throws mid-pagination", async () => {
     vi.mocked(procoreClient.get).mockRejectedValueOnce(new Error("procore boom"));
 
-    const { pool, release } = createPool(() => ({ rows: [] }));
+    const { pool, query, release } = createPool(() => ({ rows: [] }));
 
     await expect(
       runProjectsBackfill(pool, "office_dallas", "dallas", { companyId: "598134325683880" })
     ).rejects.toThrow(/procore boom/);
     expect(release).toHaveBeenCalledTimes(1);
+    const sqls = query.mock.calls.map((call) => String(call[0]));
+    const resetIdx = sqls.findIndex((s) => /RESET search_path/.test(s));
+    expect(resetIdx).toBeGreaterThanOrEqual(0);
+    expect(release.mock.invocationCallOrder[0]).toBeGreaterThan(
+      query.mock.invocationCallOrder[resetIdx]
+    );
   });
 
   it("resets search_path before releasing the pool client so it does not leak to the next consumer", async () => {

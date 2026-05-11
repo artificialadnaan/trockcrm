@@ -182,7 +182,11 @@ export async function runProjectsBackfill(
     // Reset session state before returning the client to the pool so the
     // next consumer doesn't inherit our search_path.
     await client.query("RESET search_path").catch((resetError) => {
-      console.error("[ProjectsBackfill] RESET search_path failed before release", resetError);
+      console.error("[ProjectsBackfill] RESET search_path failed before release", {
+        schemaName,
+        officeSlug,
+        resetError,
+      });
     });
     client.release();
   }
