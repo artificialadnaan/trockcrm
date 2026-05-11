@@ -21,6 +21,7 @@ import { pipelineRoutes } from "./modules/pipeline/routes.js";
 import { contactRoutes } from "./modules/contacts/routes.js";
 import { leadRoutes } from "./modules/leads/routes.js";
 import { leadDueDiligencePublicRoutes } from "./modules/leads/public-due-diligence-routes.js";
+import { projectRoutes } from "./modules/projects/routes.js";
 import { emailRoutes } from "./modules/email/routes.js";
 import { fileRoutes } from "./modules/files/routes.js";
 import { callRecordingRoutes } from "./modules/call-recordings/routes.js";
@@ -228,22 +229,23 @@ export function createApp() {
     [CRM_ONLY_TENANT_ROUTE_MOUNTS[1], pipelineRoutes],
     [CRM_ONLY_TENANT_ROUTE_MOUNTS[2], contactRoutes],
     [CRM_ONLY_TENANT_ROUTE_MOUNTS[3], leadRoutes],
-    [CRM_ONLY_TENANT_ROUTE_MOUNTS[4], emailRoutes],
-    [CRM_ONLY_TENANT_ROUTE_MOUNTS[5], callRecordingRoutes],
-    [CRM_ONLY_TENANT_ROUTE_MOUNTS[6], taskRoutes],
-    [CRM_ONLY_TENANT_ROUTE_MOUNTS[7], userRoutes],
-    [CRM_ONLY_TENANT_ROUTE_MOUNTS[8], activityRoutes],
-    [CRM_ONLY_TENANT_ROUTE_MOUNTS[9], notificationCrudRoutes],
-    [CRM_ONLY_TENANT_ROUTE_MOUNTS[10], reportRoutes],
-    [CRM_ONLY_TENANT_ROUTE_MOUNTS[11], commissionRoutes],
-    [CRM_ONLY_TENANT_ROUTE_MOUNTS[12], salesReviewRoutes],
-    [CRM_ONLY_TENANT_ROUTE_MOUNTS[13], dashboardRoutes],
-    [CRM_ONLY_TENANT_ROUTE_MOUNTS[14], procoreRoutes],
-    [CRM_ONLY_TENANT_ROUTE_MOUNTS[15], searchRoutes],
-    [CRM_ONLY_TENANT_ROUTE_MOUNTS[16], companyRoutes],
-    [CRM_ONLY_TENANT_ROUTE_MOUNTS[17], propertyRoutes],
-    [CRM_ONLY_TENANT_ROUTE_MOUNTS[18], companycamRoutes],
-    [CRM_ONLY_TENANT_ROUTE_MOUNTS[19], aiCopilotRoutes],
+    [CRM_ONLY_TENANT_ROUTE_MOUNTS[4], projectRoutes],
+    [CRM_ONLY_TENANT_ROUTE_MOUNTS[5], emailRoutes],
+    [CRM_ONLY_TENANT_ROUTE_MOUNTS[6], callRecordingRoutes],
+    [CRM_ONLY_TENANT_ROUTE_MOUNTS[7], taskRoutes],
+    [CRM_ONLY_TENANT_ROUTE_MOUNTS[8], userRoutes],
+    [CRM_ONLY_TENANT_ROUTE_MOUNTS[9], activityRoutes],
+    [CRM_ONLY_TENANT_ROUTE_MOUNTS[10], notificationCrudRoutes],
+    [CRM_ONLY_TENANT_ROUTE_MOUNTS[11], reportRoutes],
+    [CRM_ONLY_TENANT_ROUTE_MOUNTS[12], commissionRoutes],
+    [CRM_ONLY_TENANT_ROUTE_MOUNTS[13], salesReviewRoutes],
+    [CRM_ONLY_TENANT_ROUTE_MOUNTS[14], dashboardRoutes],
+    [CRM_ONLY_TENANT_ROUTE_MOUNTS[15], procoreRoutes],
+    [CRM_ONLY_TENANT_ROUTE_MOUNTS[16], searchRoutes],
+    [CRM_ONLY_TENANT_ROUTE_MOUNTS[17], companyRoutes],
+    [CRM_ONLY_TENANT_ROUTE_MOUNTS[18], propertyRoutes],
+    [CRM_ONLY_TENANT_ROUTE_MOUNTS[19], companycamRoutes],
+    [CRM_ONLY_TENANT_ROUTE_MOUNTS[20], aiCopilotRoutes],
   ] as const;
 
   for (const [mount, routes] of crmOnlyTenantRoutes) {

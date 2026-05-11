@@ -13,9 +13,11 @@ describe("ProjectDetailPage shell", () => {
     expect(source).toContain("Back to Projects");
     expect(source).toContain("Project not found");
     expect(source).toContain('role="tablist"');
+    expect(source).toContain('role="tab"');
+    expect(source).toContain("aria-selected={activeTab === tab.id}");
     expect(source).toContain('aria-label="Project detail tabs"');
-    expect(source).toContain("animate-pulse");
-    expect(source).toContain("<ProjectTasksTab");
-    expect(source).toContain("Project-scoped task management.");
+    expect(source).toContain('"overview" | "team" | "documents" | "phase-history" | "source-deal"');
+    expect(source).toContain("Display-only mirror");
+    expect(source).not.toContain("Procore project id");
   });
 });

@@ -1,5 +1,6 @@
 import { pool } from "../../db.js";
 import { AppError } from "../../middleware/error-handler.js";
+import { upsertProjectMirror } from "../projects/service.js";
 
 type QueryClient = {
   query: (text: string, params?: unknown[]) => Promise<{ rows: any[] }>;
@@ -76,6 +77,33 @@ function optionalTraceId(value: unknown): string | null {
   if (value == null) return null;
   if (typeof value === "string" || typeof value === "number") return String(value);
   return null;
+}
+
+function relaySnapshot(payload: SyncHubProjectCreatedPayload): Record<string, unknown> {
+  return {
+    id: payload.procore.portfolioProjectId,
+    company_id: payload.procore.companyId,
+    project_number: payload.procore.projectNumber,
+    name: payload.procore.projectName ?? payload.procore.projectNumber,
+  };
+}
+
+async function upsertProjectMirrorForDeal(
+  client: QueryClient,
+  payload: SyncHubProjectCreatedPayload,
+  match: DealMatch,
+  procoreProjectId: number
+) {
+  await upsertProjectMirror(client as any, match.schemaName, {
+    procoreProjectId: String(procoreProjectId),
+    procoreCompanyId: payload.procore.companyId,
+    procoreProjectNumber: payload.procore.projectNumber,
+    name: payload.procore.projectName ?? payload.procore.projectNumber,
+    sourceDealId: match.dealId,
+    syncSource: "webhook",
+    snapshot: relaySnapshot(payload),
+    rawEvent: payload.rawProcoreWebhook ?? payload,
+  });
 }
 
 function parseSafeProcoreId(value: string): number {
@@ -266,6 +294,7 @@ async function linkMatchedDeal(
       ? null
       : Number(lockedDeal.procore_project_id);
     if (currentProcoreId === procoreProjectId) {
+      await upsertProjectMirrorForDeal(client, payload, match, procoreProjectId);
       await client.query("COMMIT");
       transactionOpen = false;
       return { status: "already_linked", dealId: match.dealId, officeId: match.officeId };
@@ -327,6 +356,7 @@ async function linkMatchedDeal(
         match.officeId,
       ]
     );
+    await upsertProjectMirrorForDeal(client, payload, match, procoreProjectId);
     await client.query("COMMIT");
     transactionOpen = false;
 
@@ -360,6 +390,7 @@ export async function processSyncHubProcoreProjectCreated(
       console.info(
         `[SyncHub:relay] Duplicate project relay ${payload.procore.portfolioProjectId} already linked to deal ${duplicate.dealId}`
       );
+      await linkMatchedDeal(client, payload, duplicate, procoreProjectId);
       return {
         status: "already_linked",
         dealId: duplicate.dealId,

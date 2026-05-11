@@ -3,6 +3,7 @@ export const CRM_ONLY_TENANT_ROUTE_MOUNTS = [
   "/pipeline",
   "/contacts",
   "/leads",
+  "/projects",
   "/email",
   "/call-recordings",
   "/tasks",
