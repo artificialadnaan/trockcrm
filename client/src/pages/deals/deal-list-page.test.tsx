@@ -272,6 +272,18 @@ describe("DealListPage", () => {
                 assignedRepName: null,
                 companyName: null,
               }),
+              makeDeal({
+                id: "deal-city-only",
+                dealNumber: "TR-2026-0003",
+                propertyCity: "Austin",
+                propertyState: null,
+              }),
+              makeDeal({
+                id: "deal-state-only",
+                dealNumber: "TR-2026-0004",
+                propertyCity: null,
+                propertyState: "CA",
+              }),
             ],
           },
         ],
@@ -292,6 +304,8 @@ describe("DealListPage", () => {
     expect(html).toContain("Account pending");
     expect(html).toContain("SLA");
     expect(html).toContain("Dallas, TX");
+    expect(html).toContain("Austin");
+    expect(html).toContain("CA");
   });
 
   it("preserves empty canonical columns so stage parity remains visible", () => {

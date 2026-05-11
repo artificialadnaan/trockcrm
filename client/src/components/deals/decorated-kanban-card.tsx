@@ -17,8 +17,8 @@ function getInitials(deal: Deal) {
 }
 
 function locationLine(deal: Deal) {
-  if (!deal.propertyCity || !deal.propertyState) return null;
-  return `${deal.propertyCity}, ${deal.propertyState}`;
+  const parts = [deal.propertyCity, deal.propertyState].filter(Boolean);
+  return parts.length > 0 ? parts.join(", ") : null;
 }
 
 interface DecoratedKanbanCardProps {
