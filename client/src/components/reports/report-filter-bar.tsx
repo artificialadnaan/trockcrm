@@ -5,7 +5,7 @@ import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Input } from "@/components/ui/input";
 import { useAccessibleOffices } from "@/hooks/use-accessible-offices";
-import { api } from "@/lib/api";
+import { useSalesReps } from "@/hooks/use-sales-reps";
 
 const DATE_RANGE_OPTIONS = [
   { value: "30", label: "Last 30 days" },
@@ -23,12 +23,7 @@ export interface ReportFilters {
   dateFrom: string;
   dateTo: string;
   office: string;
-  ownerIds: string[];
-}
-
-interface SalesRepOption {
-  id: string;
-  displayName: string;
+  ownerNames: string[];
 }
 
 function toDateInput(date: Date) {
@@ -62,7 +57,7 @@ function rangeDates(range: string) {
 
 function defaultFilters(defaultRange: DefaultRange = "90"): ReportFilters {
   const dates = rangeDates(defaultRange);
-  return { range: defaultRange, ...dates, office: "all", ownerIds: [] };
+  return { range: defaultRange, ...dates, office: "all", ownerNames: [] };
 }
 
 export function useReportFilters(options: { defaultRange?: DefaultRange } = {}) {
@@ -70,13 +65,13 @@ export function useReportFilters(options: { defaultRange?: DefaultRange } = {}) 
   const filters = useMemo<ReportFilters>(() => {
     const defaults = defaultFilters(options.defaultRange);
     const range = searchParams.get("range") || defaults.range;
-    const ownerIds = searchParams.get("ownerIds")?.split(",").map((value) => value.trim()).filter(Boolean) ?? [];
+    const ownerNames = searchParams.get("ownerNames")?.split(",").map((value) => value.trim()).filter(Boolean) ?? [];
     return {
       range,
       dateFrom: searchParams.get("dateFrom") || defaults.dateFrom,
       dateTo: searchParams.get("dateTo") || defaults.dateTo,
       office: searchParams.get("office") || defaults.office,
-      ownerIds,
+      ownerNames,
     };
   }, [options.defaultRange, searchParams]);
 
@@ -86,7 +81,7 @@ export function useReportFilters(options: { defaultRange?: DefaultRange } = {}) 
       dateFrom: filters.dateFrom,
       dateTo: filters.dateTo,
       office: filters.office,
-      ownerIds: filters.ownerIds,
+      ownerNames: filters.ownerNames,
     },
   };
 }
@@ -95,29 +90,16 @@ export function ReportFilterBar({ defaultRange = "90" }: { defaultRange?: Defaul
   const [searchParams, setSearchParams] = useSearchParams();
   const { filters } = useReportFilters({ defaultRange });
   const [draft, setDraft] = useState<ReportFilters>(filters);
-  const [owners, setOwners] = useState<SalesRepOption[]>([]);
   const { offices } = useAccessibleOffices();
+  const canonicalOfficeId = useMemo(() => {
+    if (!draft.office || draft.office === "all") return undefined;
+    return offices.find((office) => office.id === draft.office || office.slug === draft.office)?.id;
+  }, [draft.office, offices]);
+  const { salesReps } = useSalesReps(canonicalOfficeId);
 
   useEffect(() => {
     setDraft(filters);
   }, [filters]);
-
-  useEffect(() => {
-    let alive = true;
-    const headers = draft.office && draft.office !== "all"
-      ? { "x-office-id": draft.office }
-      : undefined;
-    api<{ users: SalesRepOption[] }>("/users/sales-reps", headers ? { headers } : undefined)
-      .then((data) => {
-        if (alive) setOwners(data.users);
-      })
-      .catch(() => {
-        if (alive) setOwners([]);
-      });
-    return () => {
-      alive = false;
-    };
-  }, [draft.office]);
 
   function updateRange(range: string) {
     const dates = range === "custom" ? { dateFrom: draft.dateFrom, dateTo: draft.dateTo } : rangeDates(range);
@@ -131,8 +113,8 @@ export function ReportFilterBar({ defaultRange = "90" }: { defaultRange?: Defaul
     next.set("dateTo", nextFilters.dateTo);
     if (nextFilters.office && nextFilters.office !== "all") next.set("office", nextFilters.office);
     else next.delete("office");
-    if (nextFilters.ownerIds.length) next.set("ownerIds", nextFilters.ownerIds.join(","));
-    else next.delete("ownerIds");
+    if (nextFilters.ownerNames.length) next.set("ownerNames", nextFilters.ownerNames.join(","));
+    else next.delete("ownerNames");
     setSearchParams(next, { replace: false });
   }
 
@@ -142,12 +124,12 @@ export function ReportFilterBar({ defaultRange = "90" }: { defaultRange?: Defaul
     applyFilters(defaults);
   }
 
-  function toggleOwner(ownerId: string, checked: boolean | "indeterminate") {
+  function toggleOwner(ownerName: string, checked: boolean) {
     setDraft((current) => ({
       ...current,
-      ownerIds: checked === true
-        ? Array.from(new Set([...current.ownerIds, ownerId]))
-        : current.ownerIds.filter((id) => id !== ownerId),
+      ownerNames: checked
+        ? Array.from(new Set([...current.ownerNames, ownerName]))
+        : current.ownerNames.filter((name) => name !== ownerName),
     }));
   }
 
@@ -209,7 +191,7 @@ export function ReportFilterBar({ defaultRange = "90" }: { defaultRange?: Defaul
           Office
           <select
             value={draft.office}
-            onChange={(event) => setDraft((current) => ({ ...current, office: event.target.value, ownerIds: [] }))}
+            onChange={(event) => setDraft((current) => ({ ...current, office: event.target.value, ownerNames: [] }))}
             className="h-10 w-full rounded-md border border-slate-200 bg-white px-3 text-sm font-medium text-slate-700"
           >
             <option value="all">All offices</option>
@@ -227,13 +209,13 @@ export function ReportFilterBar({ defaultRange = "90" }: { defaultRange?: Defaul
         <div className="space-y-2">
           <p className="text-sm font-semibold text-slate-700">Owner</p>
           <div className="flex max-h-28 flex-wrap gap-2 overflow-y-auto rounded-md border border-slate-200 bg-slate-50 p-2">
-            {owners.length === 0 ? (
+            {salesReps.length === 0 ? (
               <span className="text-xs font-medium text-slate-500">All owners</span>
-            ) : owners.map((owner) => (
+            ) : salesReps.map((owner) => (
               <label key={owner.id} className="inline-flex items-center gap-2 rounded-full bg-white px-3 py-1 text-xs font-semibold text-slate-700 ring-1 ring-slate-200">
                 <Checkbox
-                  checked={draft.ownerIds.includes(owner.id)}
-                  onCheckedChange={(checked) => toggleOwner(owner.id, checked)}
+                  checked={draft.ownerNames.includes(owner.displayName)}
+                  onCheckedChange={(checked) => toggleOwner(owner.displayName, checked === true)}
                   className="h-3.5 w-3.5"
                 />
                 {owner.displayName}

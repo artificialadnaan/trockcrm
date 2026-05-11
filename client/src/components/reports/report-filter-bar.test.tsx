@@ -39,13 +39,13 @@ afterEach(() => {
   apiMock.mockReset();
 });
 
-function renderFilterBar() {
+function renderFilterBar(initialEntry = "/reports/operations/workflow-bottlenecks") {
   container = document.createElement("div");
   document.body.appendChild(container);
   root = createRoot(container);
   act(() => {
     root?.render(
-      <MemoryRouter initialEntries={["/reports/operations/workflow-bottlenecks"]}>
+      <MemoryRouter initialEntries={[initialEntry]}>
         <ReportFilterBar />
       </MemoryRouter>,
     );
@@ -73,6 +73,16 @@ describe("ReportFilterBar", () => {
     act(() => {
       changeSelect(officeSelect!, "office-dallas");
     });
+
+    await vi.waitFor(() => expect(apiMock).toHaveBeenCalledWith(
+      "/users/sales-reps",
+      { headers: { "x-office-id": "office-dallas" } },
+    ));
+  });
+
+  it("resolves slug office filters to canonical office ids before fetching sales reps", async () => {
+    apiMock.mockImplementation(() => new Promise(() => {}));
+    renderFilterBar("/reports/operations/workflow-bottlenecks?office=dallas");
 
     await vi.waitFor(() => expect(apiMock).toHaveBeenCalledWith(
       "/users/sales-reps",

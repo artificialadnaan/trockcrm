@@ -17,6 +17,7 @@ export interface AnalyticsTier4Filters {
   to?: string;
   office?: string;
   ownerIds?: string[];
+  ownerNames?: string[];
 }
 
 export interface MarketMixReport {
@@ -124,6 +125,7 @@ function normalizeFilters(filters: AnalyticsTier4Filters = {}) {
     to: filters.to ?? todayIso(),
     office: filters.office && filters.office !== "all" ? filters.office : undefined,
     ownerIds: Array.from(new Set((filters.ownerIds ?? []).map((id) => id.trim()).filter(Boolean))),
+    ownerNames: Array.from(new Set((filters.ownerNames ?? []).map((name) => name.trim()).filter(Boolean))),
   };
 }
 
@@ -142,6 +144,8 @@ function buildWhere(filters: ReturnType<typeof normalizeFilters>, dateColumn: SQ
 function buildScopeWhere(filters: ReturnType<typeof normalizeFilters>) {
   const ownerFilter = filters.ownerIds.length
     ? sql`AND d.assigned_rep_id IN (${sql.join(filters.ownerIds.map((id) => sql`${id}::uuid`), sql`, `)})`
+    : filters.ownerNames.length
+      ? sql`AND u.display_name IN (${sqlStringList(filters.ownerNames)})`
     : sql``;
   const officeFilter = filters.office
     ? UUID_PATTERN.test(filters.office)

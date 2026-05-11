@@ -43,9 +43,9 @@ const reportCategories: Array<{ category: string; description: string; reports: 
     category: "Performance",
     description: "Director-facing scorecards and rep-level activity views.",
     reports: [
-      { name: "Director Scorecard", description: "Executive view of targets, risk, and output.", icon: Gauge },
-      { name: "Rep Activity", description: "Touchpoints, follow-ups, and stalled accounts.", icon: Activity },
-      { name: "Forecast Accuracy", description: "Commit, best case, and pipeline reliability.", icon: LineChart },
+      { name: "Director Scorecard", description: "Executive view of targets, risk, and output.", icon: Gauge, path: "/reports/performance/director-scorecard" },
+      { name: "Rep Activity", description: "Touchpoints, follow-ups, and stalled accounts.", icon: Activity, path: "/reports/performance/rep-activity" },
+      { name: "Forecast Accuracy", description: "Commit, best case, and pipeline reliability.", icon: LineChart, path: "/reports/performance/forecast-accuracy" },
     ],
   },
   {
@@ -141,7 +141,7 @@ export function ReportsPage() {
                 );
 
                 return report.path ? (
-                  <Card key={report.name} className="border-slate-200 bg-white transition hover:border-brand-red hover:shadow-md">
+                  <Card key={report.name} className="border-slate-200 bg-white transition hover:border-brand-red/40 hover:shadow-md">
                     <Link to={report.path} className="block focus:outline-none focus:ring-2 focus:ring-brand-red focus:ring-offset-2">
                       {content}
                     </Link>

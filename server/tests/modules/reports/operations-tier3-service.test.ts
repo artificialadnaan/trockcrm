@@ -216,7 +216,7 @@ describe("operations tier 3 reports", () => {
           days_in_stage: 2,
           project_number: null,
           proposal_status: "accepted",
-          proposal_sent_at: "2026-05-01T00:00:00.000Z",
+          proposal_sent_at: null,
           proposal_accepted_at: "2026-05-05T00:00:00.000Z",
           contract_signed_date: "2026-05-08",
           contract_signed_at: "2026-05-08T00:00:00.000Z",
@@ -269,6 +269,52 @@ describe("operations tier 3 reports", () => {
       estimatingIncomplete: 0,
       kickoffIncomplete: 1,
     });
+  });
+
+  it("classifies rejected proposals on ambiguous stages as estimating", async () => {
+    const tenantDb = makeTenantDb([
+      [
+        {
+          deal_id: "deal-rejected",
+          deal_name: "Rejected Proposal Deal",
+          owner_name: "Blake Rep",
+          stage_name: "Operations Review",
+          stage_slug: "ops_review",
+          days_in_stage: 3,
+          project_number: "TR-REJECTED",
+          proposal_status: "rejected",
+          proposal_sent_at: null,
+          proposal_accepted_at: null,
+          contract_signed_date: null,
+          contract_signed_at: null,
+          bid_board_assigned_pm: null,
+          next_milestone_at: null,
+          scoping_status: "ready",
+          completion_state: {},
+        },
+      ],
+    ]);
+
+    const report = await getProjectReadinessReport(tenantDb, {
+      dateFrom: "2026-02-01",
+      dateTo: "2026-05-11",
+      cacheScope: "tenant-rejected",
+    });
+
+    expect(report.kpis.dealsInEstimating).toBe(1);
+    expect(report.kpis.dealsKickoffReady).toBe(0);
+    expect(report.missingReadiness[0]).toMatchObject({
+      dealName: "Rejected Proposal Deal",
+      stageName: "Operations Review",
+    });
+    expect(report.checklistBreakdown).toContainEqual(expect.objectContaining({
+      stageGroup: "Estimating",
+      incompleteCount: 1,
+    }));
+    expect(report.checklistBreakdown).toContainEqual(expect.objectContaining({
+      stageGroup: "Kickoff",
+      incompleteCount: 0,
+    }));
   });
 
   it("builds portfolio load grouped by company, property, office, and region", async () => {
@@ -336,12 +382,14 @@ describe("operations tier 3 reports", () => {
       dateTo: "2026-05-11",
       office: "dallas",
       ownerIds: "owner-1, owner-2",
+      ownerNames: "Avery Rep, Blake Rep",
       cacheScope: "tenant-a",
     })).toMatchObject({
       dateFrom: "2026-02-01",
       dateTo: "2026-05-11",
       office: "dallas",
       ownerIds: ["owner-1", "owner-2"],
+      ownerNames: ["Avery Rep", "Blake Rep"],
       cacheScope: "tenant-a",
     });
   });

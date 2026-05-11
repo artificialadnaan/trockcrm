@@ -118,6 +118,7 @@ export interface AnalyticsTier4QueryOptions {
   dateTo?: string;
   office?: string;
   ownerIds?: string[];
+  ownerNames?: string[];
 }
 
 export interface UnifiedLeadPipelineSummaryRow {
@@ -266,6 +267,94 @@ export interface RegionalOwnershipRegionRollup {
   staleDealCount: number;
 }
 
+export interface PerformanceReportQueryOptions {
+  dateFrom?: string;
+  dateTo?: string;
+  office?: string;
+  ownerNames?: string[];
+}
+
+export interface DirectorScorecardReport {
+  kpis: {
+    totalPipelineValue: number;
+    openDealCount: number;
+    forecastCommit: number;
+    forecastBestCase: number;
+    winRate: number;
+  };
+  risks: {
+    dealsAtRisk: number;
+    dealsAtRiskValue: number;
+    stalledAccounts: number;
+    overdueTasks: number;
+    missedFollowUps: number;
+  };
+  repPerformance: Array<{
+    repName: string;
+    openDeals: number;
+    pipelineValue: number;
+    wonThisPeriod: number;
+    winRate: number;
+    activityScore: number;
+  }>;
+  officeComparison: Array<{
+    officeName: string;
+    pipelineValue: number;
+    openCount: number;
+    winRate: number;
+  }>;
+  topAtRiskDeals: Array<{
+    dealId: string;
+    dealName: string;
+    ownerName: string;
+    stageName: string;
+    daysInStage: number;
+    value: number;
+    lastActivityDate: string | null;
+  }>;
+}
+
+export interface RepActivityReport {
+  kpis: {
+    totalTouchpoints: number;
+    dealsWorked: number;
+    calls: number;
+    emails: number;
+    meetings: number;
+    followUpsCompleted: number;
+  };
+  timeline: Array<{ date: string; touchpoints: number }>;
+  stalledAccounts: Array<{
+    accountName: string;
+    ownerName: string;
+    lastActivityDate: string | null;
+    daysStalled: number;
+    openDeals: number;
+    totalOpenValue: number;
+  }>;
+  activityByType: Array<{ type: string; count: number }>;
+  repSummary: Array<{ repName: string; touchpoints: number; activeDeals: number; stalledAccounts: number }>;
+}
+
+export interface ForecastAccuracyReport {
+  kpis: {
+    commit: number;
+    bestCase: number;
+    pipelineWeighted: number;
+    wonActual: number;
+  };
+  monthly: Array<{ month: string; commit: number; bestCase: number; pipelineWeighted: number; wonActual: number }>;
+  accuracy: { variancePercent: number };
+  pipelineAtRisk: Array<{
+    dealId: string;
+    dealName: string;
+    ownerName: string;
+    stageName: string;
+    value: number;
+    expectedCloseDate: string | null;
+  }>;
+}
+
 export interface RegionalOwnershipRepRollup {
   repId: string;
   repName: string;
@@ -387,6 +476,7 @@ export interface OperationsReportQueryOptions {
   dateTo?: string;
   office?: string;
   ownerIds?: string[];
+  ownerNames?: string[];
 }
 
 export interface WorkflowBottleneckStage {
@@ -628,6 +718,7 @@ function appendAnalyticsTier4QueryOptions(params: URLSearchParams, options: Anal
   if (options.dateTo) params.set("dateTo", options.dateTo);
   if (options.office && options.office !== "all") params.set("office", options.office);
   if (options.ownerIds?.length) params.set("ownerIds", options.ownerIds.join(","));
+  if (options.ownerNames?.length) params.set("ownerNames", options.ownerNames.join(","));
 }
 
 export async function executeLockedReport(reportType: string, options: AnalyticsQueryOptions = {}) {
@@ -693,6 +784,7 @@ function appendOperationsReportQueryOptions(params: URLSearchParams, options: Op
   if (options.dateTo) params.set("dateTo", options.dateTo);
   if (options.office) params.set("office", options.office);
   if (options.ownerIds?.length) params.set("ownerIds", options.ownerIds.join(","));
+  if (options.ownerNames?.length) params.set("ownerNames", options.ownerNames.join(","));
 }
 
 async function executeOperationsReport<T>(endpoint: string, options: OperationsReportQueryOptions = {}) {
@@ -718,7 +810,7 @@ export function useWorkflowBottlenecksReport(options: OperationsReportQueryOptio
     } finally {
       setLoading(false);
     }
-  }, [options.dateFrom, options.dateTo, options.office, options.ownerIds?.join(",")]);
+  }, [options.dateFrom, options.dateTo, options.office, options.ownerIds?.join(","), options.ownerNames?.join(",")]);
 
   useEffect(() => {
     fetchReport();
@@ -743,7 +835,7 @@ export function useProjectReadinessReport(options: OperationsReportQueryOptions 
     } finally {
       setLoading(false);
     }
-  }, [options.dateFrom, options.dateTo, options.office, options.ownerIds?.join(",")]);
+  }, [options.dateFrom, options.dateTo, options.office, options.ownerIds?.join(","), options.ownerNames?.join(",")]);
 
   useEffect(() => {
     fetchReport();
@@ -768,7 +860,7 @@ export function usePortfolioLoadReport(options: OperationsReportQueryOptions = {
     } finally {
       setLoading(false);
     }
-  }, [options.dateFrom, options.dateTo, options.office, options.ownerIds?.join(",")]);
+  }, [options.dateFrom, options.dateTo, options.office, options.ownerIds?.join(","), options.ownerNames?.join(",")]);
 
   useEffect(() => {
     fetchReport();
@@ -843,7 +935,7 @@ export function useMarketMixReport(options: AnalyticsTier4QueryOptions = {}) {
     } finally {
       setLoading(false);
     }
-  }, [options.dateFrom, options.dateTo, options.office, options.ownerIds?.join(",")]);
+  }, [options.dateFrom, options.dateTo, options.office, options.ownerIds?.join(","), options.ownerNames?.join(",")]);
 
   useEffect(() => {
     fetchReport();
@@ -868,7 +960,7 @@ export function useCustomerConcentrationReport(options: AnalyticsTier4QueryOptio
     } finally {
       setLoading(false);
     }
-  }, [options.dateFrom, options.dateTo, options.office, options.ownerIds?.join(",")]);
+  }, [options.dateFrom, options.dateTo, options.office, options.ownerIds?.join(","), options.ownerNames?.join(",")]);
 
   useEffect(() => {
     fetchReport();
@@ -893,7 +985,7 @@ export function useExecutiveTrendsReport(options: AnalyticsTier4QueryOptions = {
     } finally {
       setLoading(false);
     }
-  }, [options.dateFrom, options.dateTo, options.office, options.ownerIds?.join(",")]);
+  }, [options.dateFrom, options.dateTo, options.office, options.ownerIds?.join(","), options.ownerNames?.join(",")]);
 
   useEffect(() => {
     fetchReport();
@@ -1018,6 +1110,80 @@ export function useRegionalOwnershipOverview(options: AnalyticsQueryOptions = {}
   }, [fetchOverview]);
 
   return { data, loading, error, refetch: fetchOverview };
+}
+
+function appendPerformanceReportQueryOptions(params: URLSearchParams, options: PerformanceReportQueryOptions) {
+  if (options.dateFrom) params.set("dateFrom", options.dateFrom);
+  if (options.dateTo) params.set("dateTo", options.dateTo);
+  if (options.office && options.office !== "all") params.set("office", options.office);
+  if (options.ownerNames?.length) params.set("ownerNames", options.ownerNames.join(","));
+}
+
+function performanceDeps(options: PerformanceReportQueryOptions) {
+  return [
+    options.dateFrom,
+    options.dateTo,
+    options.office,
+    options.ownerNames?.join(","),
+  ] as const;
+}
+
+async function executePerformanceReport<T>(path: string, options: PerformanceReportQueryOptions = {}) {
+  const params = new URLSearchParams();
+  appendPerformanceReportQueryOptions(params, options);
+  const qs = params.toString();
+  return api<{ data: T }>(`/reports/${path}${qs ? `?${qs}` : ""}`);
+}
+
+function usePerformanceReport<T>(path: string, options: PerformanceReportQueryOptions = {}, errorMessage: string) {
+  const [data, setData] = useState<T | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const deps = performanceDeps(options);
+
+  const fetchReport = useCallback(async () => {
+    setLoading(true);
+    setError(null);
+    try {
+      const result = await executePerformanceReport<T>(path, options);
+      setData(result.data);
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : errorMessage);
+      setData(null);
+    } finally {
+      setLoading(false);
+    }
+  }, [path, errorMessage, ...deps]);
+
+  useEffect(() => {
+    fetchReport();
+  }, [fetchReport]);
+
+  return { data, loading, error, refetch: fetchReport };
+}
+
+export function useDirectorScorecardReport(options: PerformanceReportQueryOptions = {}) {
+  return usePerformanceReport<DirectorScorecardReport>(
+    "director-scorecard",
+    options,
+    "Failed to load director scorecard"
+  );
+}
+
+export function useRepActivityReport(options: PerformanceReportQueryOptions = {}) {
+  return usePerformanceReport<RepActivityReport>(
+    "rep-activity",
+    options,
+    "Failed to load rep activity"
+  );
+}
+
+export function useForecastAccuracyReport(options: PerformanceReportQueryOptions = {}) {
+  return usePerformanceReport<ForecastAccuracyReport>(
+    "forecast-accuracy",
+    options,
+    "Failed to load forecast accuracy"
+  );
 }
 
 /** Execute a custom report config */
