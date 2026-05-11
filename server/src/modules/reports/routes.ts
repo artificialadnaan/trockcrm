@@ -37,6 +37,12 @@ import {
   createReportRun,
 } from "./saved-reports-service.js";
 import { runReportBuilder } from "./report-builder-service.js";
+import {
+  getDirectorScorecard,
+  getForecastAccuracyReport,
+  getRepActivityReport,
+  normalizePerformanceReportFilters,
+} from "./performance-tier2-service.js";
 
 const router = Router();
 const VALID_REPORT_FREQUENCIES = ["daily", "weekly", "biweekly", "monthly", "quarterly"] as const;
@@ -358,6 +364,52 @@ router.get("/regional-ownership", requireDirector, async (req, res, next) => {
       repId: req.query.repId as string | undefined,
       source: req.query.source as string | undefined,
     });
+    await req.commitTransaction!();
+    res.json({ data });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// GET /api/reports/director-scorecard?dateFrom=2026-02-01&dateTo=2026-05-01&office=dallas&ownerNames=Rep%20One,Rep%20Two
+router.get("/director-scorecard", requireDirector, async (req, res, next) => {
+  try {
+    const data = await getDirectorScorecard(
+      req.tenantDb!,
+      normalizePerformanceReportFilters(req.query as Record<string, unknown>),
+      req.officeSlug ?? req.user!.activeOfficeId
+    );
+    await req.commitTransaction!();
+    res.json({ data });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// GET /api/reports/rep-activity?dateFrom=2026-02-01&dateTo=2026-05-01&office=dallas&ownerNames=Rep%20One,Rep%20Two
+router.get("/rep-activity", requireAnyRole, async (req, res, next) => {
+  try {
+    const data = await getRepActivityReport(
+      req.tenantDb!,
+      normalizePerformanceReportFilters(req.query as Record<string, unknown>),
+      { role: req.user!.role, userId: req.user!.id, displayName: req.user!.displayName },
+      req.officeSlug ?? req.user!.activeOfficeId
+    );
+    await req.commitTransaction!();
+    res.json({ data });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// GET /api/reports/forecast-accuracy?dateFrom=2026-02-01&dateTo=2026-05-01&office=dallas&ownerNames=Rep%20One,Rep%20Two
+router.get("/forecast-accuracy", requireDirector, async (req, res, next) => {
+  try {
+    const data = await getForecastAccuracyReport(
+      req.tenantDb!,
+      normalizePerformanceReportFilters(req.query as Record<string, unknown>),
+      req.officeSlug ?? req.user!.activeOfficeId
+    );
     await req.commitTransaction!();
     res.json({ data });
   } catch (err) {

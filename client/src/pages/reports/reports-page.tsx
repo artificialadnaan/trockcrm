@@ -13,6 +13,7 @@ import {
   Users,
 } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
+import { Link } from "react-router-dom";
 import { PageHeader } from "@/components/layout/page-header";
 import { Card, CardContent } from "@/components/ui/card";
 import type { UserRole } from "@trock-crm/shared/types";
@@ -25,6 +26,7 @@ type ReportCard = {
   name: string;
   description: string;
   icon: LucideIcon;
+  href?: string;
 };
 
 const reportCategories: Array<{ category: string; description: string; reports: ReportCard[] }> = [
@@ -41,9 +43,9 @@ const reportCategories: Array<{ category: string; description: string; reports: 
     category: "Performance",
     description: "Director-facing scorecards and rep-level activity views.",
     reports: [
-      { name: "Director Scorecard", description: "Executive view of targets, risk, and output.", icon: Gauge },
-      { name: "Rep Activity", description: "Touchpoints, follow-ups, and stalled accounts.", icon: Activity },
-      { name: "Forecast Accuracy", description: "Commit, best case, and pipeline reliability.", icon: LineChart },
+      { name: "Director Scorecard", description: "Executive view of targets, risk, and output.", icon: Gauge, href: "/reports/performance/director-scorecard" },
+      { name: "Rep Activity", description: "Touchpoints, follow-ups, and stalled accounts.", icon: Activity, href: "/reports/performance/rep-activity" },
+      { name: "Forecast Accuracy", description: "Commit, best case, and pipeline reliability.", icon: LineChart, href: "/reports/performance/forecast-accuracy" },
     ],
   },
   {
@@ -100,8 +102,8 @@ export function ReportsPage() {
             <div className="grid grid-cols-1 gap-3 md:grid-cols-3">
               {group.reports.map((report) => {
                 const Icon = report.icon;
-                return (
-                  <Card key={report.name} className="border-slate-200 bg-white">
+                const card = (
+                  <Card className={`border-slate-200 bg-white ${report.href ? "transition hover:border-brand-red/40 hover:shadow-md" : ""}`}>
                     <CardContent className="flex items-start gap-4 p-5">
                       <div className="grid h-12 w-12 shrink-0 place-items-center rounded-xl bg-slate-950 text-white">
                         <Icon className="h-5 w-5" />
@@ -109,14 +111,27 @@ export function ReportsPage() {
                       <div className="min-w-0">
                         <div className="flex flex-wrap items-center gap-2">
                           <h3 className="font-black uppercase tracking-tight text-slate-950">{report.name}</h3>
-                          <span className="rounded-full bg-red-50 px-2 py-1 text-[10px] font-black uppercase tracking-[0.14em] text-brand-red">
-                            Coming soon
-                          </span>
+                          {report.href ? (
+                            <span className="rounded-full bg-slate-950 px-2 py-1 text-[10px] font-black uppercase tracking-[0.14em] text-white">
+                              Open
+                            </span>
+                          ) : (
+                            <span className="rounded-full bg-red-50 px-2 py-1 text-[10px] font-black uppercase tracking-[0.14em] text-brand-red">
+                              Coming soon
+                            </span>
+                          )}
                         </div>
                         <p className="mt-2 text-sm text-slate-600">{report.description}</p>
                       </div>
                     </CardContent>
                   </Card>
+                );
+                return report.href ? (
+                  <Link key={report.name} to={report.href} className="block">
+                    {card}
+                  </Link>
+                ) : (
+                  <div key={report.name}>{card}</div>
                 );
               })}
             </div>
