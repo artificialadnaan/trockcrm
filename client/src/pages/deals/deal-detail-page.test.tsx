@@ -585,6 +585,70 @@ describe("DealDetailPage", () => {
     expect(html).toContain('data-stage-slug="lost"');
   });
 
+  it("highlights canonical won when the current deal stage uses legacy closed_won", () => {
+    mocks.usePipelineStagesMock.mockReturnValueOnce({
+      stages: [
+        { id: "stage-opportunity", name: "Opportunity", slug: "opportunity", workflowFamily: "standard_deal", displayOrder: 0, isTerminal: false },
+        { id: "stage-estimating", name: "Estimating", slug: "estimating", workflowFamily: "standard_deal", displayOrder: 1, isTerminal: false },
+        { id: "stage-under-review", name: "Estimate Under Review", slug: "estimate_under_review", workflowFamily: "standard_deal", displayOrder: 2, isTerminal: false },
+        { id: "stage-sent", name: "Estimate Sent to Client", slug: "estimate_sent_to_client", workflowFamily: "standard_deal", displayOrder: 3, isTerminal: false },
+        { id: "stage-contract", name: "Contract", slug: "contract", workflowFamily: "standard_deal", displayOrder: 4, isTerminal: false },
+        { id: "stage-won", name: "Won", slug: "won", workflowFamily: "standard_deal", displayOrder: 5, isTerminal: true },
+        { id: "stage-lost", name: "Lost", slug: "lost", workflowFamily: "standard_deal", displayOrder: 6, isTerminal: true },
+        { id: "legacy-won", name: "Closed Won", slug: "closed_won", workflowFamily: "standard_deal", displayOrder: 14, isTerminal: true, isActivePipeline: false },
+      ],
+    });
+    mocks.useDealDetailMock.mockReturnValueOnce({
+      loading: false,
+      error: null,
+      refetch: vi.fn(),
+      deal: makeDealDetail({
+        stageId: "legacy-won",
+        isBidBoardOwned: false,
+        bidBoardStageSlug: null,
+        readOnlySyncedAt: null,
+        bidBoardOwnership: null,
+      }),
+    });
+
+    const html = renderPage();
+
+    expect(html).toMatch(/data-stage-slug="won"[^>]*data-state="current"/);
+    expect(html).not.toContain('data-stage-slug="closed_won"');
+  });
+
+  it("highlights canonical lost when the current deal stage uses legacy closed_lost", () => {
+    mocks.usePipelineStagesMock.mockReturnValueOnce({
+      stages: [
+        { id: "stage-opportunity", name: "Opportunity", slug: "opportunity", workflowFamily: "standard_deal", displayOrder: 0, isTerminal: false },
+        { id: "stage-estimating", name: "Estimating", slug: "estimating", workflowFamily: "standard_deal", displayOrder: 1, isTerminal: false },
+        { id: "stage-under-review", name: "Estimate Under Review", slug: "estimate_under_review", workflowFamily: "standard_deal", displayOrder: 2, isTerminal: false },
+        { id: "stage-sent", name: "Estimate Sent to Client", slug: "estimate_sent_to_client", workflowFamily: "standard_deal", displayOrder: 3, isTerminal: false },
+        { id: "stage-contract", name: "Contract", slug: "contract", workflowFamily: "standard_deal", displayOrder: 4, isTerminal: false },
+        { id: "stage-won", name: "Won", slug: "won", workflowFamily: "standard_deal", displayOrder: 5, isTerminal: true },
+        { id: "stage-lost", name: "Lost", slug: "lost", workflowFamily: "standard_deal", displayOrder: 6, isTerminal: true },
+        { id: "legacy-lost", name: "Closed Lost", slug: "closed_lost", workflowFamily: "standard_deal", displayOrder: 16, isTerminal: true, isActivePipeline: false },
+      ],
+    });
+    mocks.useDealDetailMock.mockReturnValueOnce({
+      loading: false,
+      error: null,
+      refetch: vi.fn(),
+      deal: makeDealDetail({
+        stageId: "legacy-lost",
+        isBidBoardOwned: false,
+        bidBoardStageSlug: null,
+        readOnlySyncedAt: null,
+        bidBoardOwnership: null,
+      }),
+    });
+
+    const html = renderPage();
+
+    expect(html).toMatch(/data-stage-slug="lost"[^>]*data-state="current"/);
+    expect(html).not.toContain('data-stage-slug="closed_lost"');
+  });
+
   it("uses service estimating in pipeline progress for service workflow deals", () => {
     mocks.usePipelineStagesMock.mockReturnValueOnce({
       stages: [
