@@ -153,6 +153,9 @@ export async function runProjectsBackfill(
   const perPage = 200;
 
   const client = await pool.connect();
+  console.log(
+    `[ProjectsBackfill] start schema=${schemaName} office=${officeSlug} companyId=${companyId}`
+  );
   try {
     // Session-level search_path so per-row transactions can address tenant
     // tables unqualified where needed (e.g. `FROM projects`, `FROM deals`).
@@ -166,19 +169,29 @@ export async function runProjectsBackfill(
       // HTTP fetch happens with NO active transaction, so Postgres's
       // idle_in_transaction_session_timeout cannot kill the connection
       // while Procore is responding.
+      const fetchStart = Date.now();
       const rows = await procoreClient.get<unknown[]>(
         `/rest/v1.0/companies/${companyId}/projects?page=${page}&per_page=${perPage}`,
         { companyId }
+      );
+      console.log(
+        `[ProjectsBackfill] page=${page} fetched rows=${Array.isArray(rows) ? rows.length : "non-array"} in ${Date.now() - fetchStart}ms`
       );
       if (!Array.isArray(rows) || rows.length === 0) break;
 
       for (const row of rows) {
         await processRow(client, schemaName, officeSlug, companyId, row, result);
       }
+      console.log(
+        `[ProjectsBackfill] page=${page} processed totals backfilled=${result.backfilled} skipped=${result.skipped} errored=${result.errored}`
+      );
 
       if (rows.length < perPage) break;
     }
   } finally {
+    console.log(
+      `[ProjectsBackfill] done backfilled=${result.backfilled} skipped=${result.skipped} errored=${result.errored} errors=${result.errors.length}`
+    );
     // Reset session state before returning the client to the pool so the
     // next consumer doesn't inherit our search_path.
     await client.query("RESET search_path").catch((resetError) => {
