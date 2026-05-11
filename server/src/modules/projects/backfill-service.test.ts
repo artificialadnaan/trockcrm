@@ -8,9 +8,14 @@ vi.mock("../../lib/procore-client.js", () => ({
   },
 }));
 
-function createClient(responder: (sql: string, params: unknown[] | undefined) => unknown) {
+type Responder = (sql: string, params: unknown[] | undefined) => unknown;
+
+function createPool(responder: Responder) {
   const query = vi.fn(async (sql: string, params?: unknown[]) => responder(sql, params));
-  return { query };
+  const release = vi.fn();
+  const client = { query, release };
+  const connect = vi.fn(async () => client);
+  return { pool: { connect } as any, client, query, release };
 }
 
 describe("projects backfill service", () => {
@@ -42,7 +47,7 @@ describe("projects backfill service", () => {
       },
     ]);
 
-    const client = createClient((sql, params) => {
+    const { pool, query } = createPool((sql, params) => {
       if (sql.includes("SELECT id, procore_updated_at")) {
         if (params?.[0] === "1001") {
           return { rows: [{ id: "project-1", procore_updated_at: "2026-05-01T12:00:00.000Z" }] };
@@ -57,15 +62,16 @@ describe("projects backfill service", () => {
       return { rows: [] };
     });
 
-    const result = await runProjectsBackfill(client as any, "office_dallas", "dallas", "598134325683880");
+    const result = await runProjectsBackfill(pool, "office_dallas", "dallas", { companyId: "598134325683880" });
 
     expect(result).toMatchObject({ backfilled: 1, skipped: 2, errored: 0 });
-    const sqlText = client.query.mock.calls.map((call) => String(call[0])).join("\n");
+    const sqlText = query.mock.calls.map((call) => String(call[0])).join("\n");
     expect(sqlText).toContain('INSERT INTO "office_dallas".projects');
     expect(sqlText.match(/INSERT INTO "office_dallas"\.projects/g)).toHaveLength(1);
+    expect(sqlText).toMatch(/SET search_path TO "office_dallas"/);
   });
 
-  it("isolates a failing row with a savepoint so later rows still backfill", async () => {
+  it("isolates a failing row in its own transaction so later rows still backfill", async () => {
     vi.mocked(procoreClient.get).mockResolvedValueOnce([
       {
         id: 2001,
@@ -81,35 +87,30 @@ describe("projects backfill service", () => {
       },
     ]);
 
-    let inAbortedTxn = false;
-    const savepointStack: string[] = [];
+    let txnAborted = false;
+    let inTxn = false;
 
-    const responder = (sql: string, params?: unknown[]) => {
-      // Simulate Postgres aborted-transaction semantics: every statement after the
-      // first failure returns "current transaction is aborted" until a ROLLBACK
-      // TO SAVEPOINT clears the broken state.
-      if (inAbortedTxn) {
-        const trimmed = sql.trim().toUpperCase();
-        if (trimmed.startsWith("ROLLBACK TO SAVEPOINT") || trimmed.startsWith("RELEASE SAVEPOINT")) {
-          if (trimmed.startsWith("ROLLBACK TO SAVEPOINT")) {
-            inAbortedTxn = false;
-          }
-          return { rows: [] };
-        }
-        throw Object.assign(new Error("current transaction is aborted, commands ignored until end of transaction block"), { code: "25P02" });
-      }
-
+    const responder: Responder = (sql, params) => {
       const trimmed = sql.trim().toUpperCase();
-      if (trimmed.startsWith("SAVEPOINT")) {
-        savepointStack.push(sql.replace(/.*SAVEPOINT\s+/i, "").trim());
+
+      if (trimmed === "BEGIN") {
+        inTxn = true;
+        txnAborted = false;
         return { rows: [] };
       }
-      if (trimmed.startsWith("RELEASE SAVEPOINT")) {
-        savepointStack.pop();
+      if (trimmed === "COMMIT" || trimmed === "ROLLBACK") {
+        inTxn = false;
+        txnAborted = false;
         return { rows: [] };
       }
-      if (trimmed.startsWith("ROLLBACK TO SAVEPOINT")) {
-        return { rows: [] };
+
+      // After a failure inside an active txn, Postgres rejects every
+      // subsequent statement until ROLLBACK clears the aborted state.
+      if (inTxn && txnAborted) {
+        throw Object.assign(
+          new Error("current transaction is aborted, commands ignored until end of transaction block"),
+          { code: "25P02" }
+        );
       }
 
       if (sql.includes("SELECT id, procore_updated_at")) return { rows: [] };
@@ -117,7 +118,7 @@ describe("projects backfill service", () => {
       if (sql.includes("SELECT id, current_phase_id, current_phase_name")) return { rows: [] };
       if (sql.includes("INSERT INTO \"office_dallas\".projects")) {
         if (params?.[1] === "2001") {
-          inAbortedTxn = true;
+          txnAborted = true;
           throw Object.assign(new Error("duplicate key value violates unique constraint"), { code: "23505" });
         }
         return { rows: [{ id: "project-2002", inserted: true }] };
@@ -125,17 +126,18 @@ describe("projects backfill service", () => {
       return { rows: [] };
     };
 
-    const client = createClient(responder);
-    const result = await runProjectsBackfill(client as any, "office_dallas", "dallas", "598134325683880");
+    const { pool, query } = createPool(responder);
+    const result = await runProjectsBackfill(pool, "office_dallas", "dallas", { companyId: "598134325683880" });
 
     expect(result).toMatchObject({ backfilled: 1, errored: 1, skipped: 0 });
     expect(result.errors).toHaveLength(1);
     expect(result.errors[0].procoreProjectId).toBe("2001");
-    const sqlText = client.query.mock.calls.map((call) => String(call[0])).join("\n");
-    expect(sqlText).toMatch(/SAVEPOINT projects_backfill_p1_i0/);
-    expect(sqlText).toMatch(/ROLLBACK TO SAVEPOINT projects_backfill_p1_i0/);
-    expect(sqlText).toMatch(/SAVEPOINT projects_backfill_p1_i1/);
-    expect(sqlText.match(/INSERT INTO "office_dallas"\.projects/g) ?? []).toHaveLength(2);
+
+    const sqls = query.mock.calls.map((call) => String(call[0]));
+    expect(sqls.filter((s) => s.trim().toUpperCase() === "BEGIN")).toHaveLength(2);
+    expect(sqls.filter((s) => s.trim().toUpperCase() === "ROLLBACK")).toHaveLength(1);
+    expect(sqls.filter((s) => s.trim().toUpperCase() === "COMMIT")).toHaveLength(1);
+    expect(sqls.filter((s) => s.includes("INSERT INTO \"office_dallas\".projects"))).toHaveLength(2);
   });
 
   it("mirrors unmatched projects only when their project number belongs to the current office", async () => {
@@ -154,7 +156,7 @@ describe("projects backfill service", () => {
       },
     ]);
 
-    const client = createClient((sql) => {
+    const { pool, query } = createPool((sql) => {
       if (sql.includes("SELECT id, procore_updated_at")) return { rows: [] };
       if (sql.includes("FROM deals")) return { rows: [] };
       if (sql.includes("SELECT id, current_phase_id, current_phase_name")) return { rows: [] };
@@ -162,9 +164,20 @@ describe("projects backfill service", () => {
       return { rows: [] };
     });
 
-    const result = await runProjectsBackfill(client as any, "office_dallas", "dallas", "598134325683880");
+    const result = await runProjectsBackfill(pool, "office_dallas", "dallas", { companyId: "598134325683880" });
 
     expect(result).toMatchObject({ backfilled: 1, skipped: 1, errored: 0 });
-    expect(client.query.mock.calls.map((call) => String(call[0])).join("\n").match(/INSERT INTO "office_dallas"\.projects/g)).toHaveLength(1);
+    expect(query.mock.calls.map((call) => String(call[0])).join("\n").match(/INSERT INTO "office_dallas"\.projects/g)).toHaveLength(1);
+  });
+
+  it("releases the pool client even when Procore throws mid-pagination", async () => {
+    vi.mocked(procoreClient.get).mockRejectedValueOnce(new Error("procore boom"));
+
+    const { pool, release } = createPool(() => ({ rows: [] }));
+
+    await expect(
+      runProjectsBackfill(pool, "office_dallas", "dallas", { companyId: "598134325683880" })
+    ).rejects.toThrow(/procore boom/);
+    expect(release).toHaveBeenCalledTimes(1);
   });
 });
