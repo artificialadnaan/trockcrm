@@ -410,6 +410,8 @@ describe("DealDetailPage", () => {
     expect(html).toContain("History");
     expect(html).toContain("Team");
     expect(html).toContain("Estimates");
+    expect(html).toContain("overflow-x-auto");
+    expect(html).toContain("border-b-2 border-brand-red");
   });
 
   it("renders right-rail sections in redesigned order with primary contact fallback", () => {
