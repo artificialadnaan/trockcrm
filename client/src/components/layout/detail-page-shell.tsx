@@ -98,17 +98,26 @@ export function DetailPageShell({
         {kpis.map((kpi) => {
           const isRed = kpi.accent === "red";
           return (
-            <Card key={kpi.eyebrow} className={isRed ? "border-0 bg-brand-red text-white shadow-md" : "relative overflow-hidden"}>
+            <Card
+              key={kpi.eyebrow}
+              className={
+                isRed
+                  ? "relative overflow-hidden border-t-4 border-brand-red shadow-sm"
+                  : "relative overflow-hidden border-t-4 border-slate-200 shadow-sm"
+              }
+            >
               <CardContent className="p-5">
-                <p className={isRed ? "text-[11px] font-bold uppercase tracking-[0.2em] text-red-100" : EYEBROW}>{kpi.eyebrow}</p>
-                <div className="mt-3 text-4xl font-black tracking-tight">{kpi.value}</div>
+                <p className={isRed ? "text-[11px] font-bold uppercase tracking-[0.2em] text-brand-red" : EYEBROW}>{kpi.eyebrow}</p>
+                <div className={isRed ? "mt-3 text-4xl font-black tracking-tight text-brand-red" : "mt-3 text-4xl font-black tracking-tight text-slate-950"}>
+                  {kpi.value}
+                </div>
                 {(kpi.captionLabel || kpi.captionContext) && (
-                  <div className={isRed ? "mt-3 text-xs text-red-50" : "mt-3 text-xs text-slate-500"}>
+                  <div className="mt-3 text-xs text-slate-500">
                     {kpi.captionLabel ? (
                       <span
                         className={
                           isRed
-                            ? "mr-2 rounded-full bg-white/20 px-2 py-1 text-[10px] font-black uppercase tracking-[0.14em] text-white"
+                            ? "mr-2 rounded-full bg-red-50 px-2 py-1 text-[10px] font-black uppercase tracking-[0.14em] text-brand-red"
                             : "mr-2 rounded-full bg-slate-100 px-2 py-1 text-[10px] font-black uppercase tracking-[0.14em] text-slate-700"
                         }
                       >
@@ -119,7 +128,6 @@ export function DetailPageShell({
                   </div>
                 )}
               </CardContent>
-              {!isRed ? <div className="absolute inset-x-0 bottom-0 h-1 bg-brand-red" /> : null}
             </Card>
           );
         })}

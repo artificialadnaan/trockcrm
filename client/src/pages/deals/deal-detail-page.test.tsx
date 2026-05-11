@@ -641,6 +641,18 @@ describe("DealDetailPage", () => {
     expect(html).not.toContain("Current");
   });
 
+  it("uses the redesigned overdue KPI visual treatment without changing KPI values", () => {
+    const html = renderPage();
+
+    expect(html).toContain("Deal value");
+    expect(html).toContain("$875,000");
+    expect(html).toContain("Days in stage");
+    expect(html).toContain("SLA status");
+    expect(html).toContain("Overdue");
+    expect(html).toContain("border-t-4 border-brand-red");
+    expect(html).toContain("text-brand-red");
+  });
+
   it("shows Bid Board ownership messaging while preserving valid CRM stage controls", () => {
     const html = renderPage();
 
