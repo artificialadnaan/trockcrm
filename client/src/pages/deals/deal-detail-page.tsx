@@ -873,7 +873,7 @@ export function DealDetailPage() {
         subheaderSlot={
           <PipelineProgress
             stages={canonicalOrderedStages}
-            currentStageId={currentStage?.id ?? null}
+            currentSlug={canonicalCurrentStageSlug}
             workflowRoute={workflowRoute}
             isBidBoardOwned={isBidBoardOwned}
             handoffStageDisplayOrder={handoffStage?.displayOrder ?? null}

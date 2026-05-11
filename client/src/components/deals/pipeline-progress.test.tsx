@@ -52,7 +52,7 @@ describe("PipelineProgress", () => {
     const html = renderToStaticMarkup(
       <PipelineProgress
         stages={standardStages}
-        currentStageId="stage-under-review"
+        currentSlug="estimate_under_review"
         workflowRoute="normal"
         isBidBoardOwned={false}
         handoffStageDisplayOrder={null}
@@ -74,11 +74,61 @@ describe("PipelineProgress", () => {
     expect(html).toContain('data-state="current"');
   });
 
+  it("highlights current stage by canonical slug even when the stage id is legacy", () => {
+    const wonHtml = renderToStaticMarkup(
+      <PipelineProgress
+        stages={standardStages}
+        currentSlug="won"
+        workflowRoute="normal"
+        isBidBoardOwned={false}
+        handoffStageDisplayOrder={null}
+        canMoveBackward
+        onStageClick={() => undefined}
+      />
+    );
+
+    expect(wonHtml).toContain('data-stage-slug="won"');
+    expect(wonHtml).toContain('data-state="current"');
+
+    const lostHtml = renderToStaticMarkup(
+      <PipelineProgress
+        stages={standardStages}
+        currentSlug="lost"
+        workflowRoute="normal"
+        isBidBoardOwned={false}
+        handoffStageDisplayOrder={null}
+        canMoveBackward
+        onStageClick={() => undefined}
+      />
+    );
+
+    expect(lostHtml).toContain('data-stage-slug="lost"');
+    expect(lostHtml).toContain('data-state="current"');
+  });
+
+  it("does not mark every chip current or disabled when current slug is unknown", () => {
+    const html = renderToStaticMarkup(
+      <PipelineProgress
+        stages={standardStages}
+        currentSlug={null}
+        workflowRoute="normal"
+        isBidBoardOwned={false}
+        handoffStageDisplayOrder={null}
+        canMoveBackward
+        onStageClick={() => undefined}
+      />
+    );
+
+    expect(html).not.toContain('aria-current="step"');
+    expect(html).not.toContain('data-state="current"');
+    expect(html).not.toContain('data-disabled-reason="current"');
+  });
+
   it("renders service estimating instead of standard estimating for service deals", () => {
     const html = renderToStaticMarkup(
       <PipelineProgress
         stages={serviceStages()}
-        currentStageId="stage-service-estimating"
+        currentSlug="service_estimating"
         workflowRoute="service"
         isBidBoardOwned={false}
         handoffStageDisplayOrder={null}
@@ -96,7 +146,7 @@ describe("PipelineProgress", () => {
     const wonHtml = renderToStaticMarkup(
       <PipelineProgress
         stages={standardStages}
-        currentStageId="stage-won"
+        currentSlug="won"
         workflowRoute="normal"
         isBidBoardOwned={false}
         handoffStageDisplayOrder={null}
@@ -111,7 +161,7 @@ describe("PipelineProgress", () => {
     const lostHtml = renderToStaticMarkup(
       <PipelineProgress
         stages={standardStages}
-        currentStageId="stage-lost"
+        currentSlug="lost"
         workflowRoute="normal"
         isBidBoardOwned={false}
         handoffStageDisplayOrder={null}
@@ -129,7 +179,7 @@ describe("PipelineProgress", () => {
     const html = renderToStaticMarkup(
       <PipelineProgress
         stages={standardStages}
-        currentStageId="stage-estimating"
+        currentSlug="estimating"
         workflowRoute="normal"
         isBidBoardOwned
         handoffStageDisplayOrder={1}
@@ -146,7 +196,7 @@ describe("PipelineProgress", () => {
     const html = renderToStaticMarkup(
       <PipelineProgress
         stages={standardStages}
-        currentStageId="stage-contract"
+        currentSlug="contract"
         workflowRoute="normal"
         isBidBoardOwned={false}
         handoffStageDisplayOrder={null}
@@ -164,7 +214,7 @@ describe("PipelineProgress", () => {
     const rendered = mount(
       <PipelineProgress
         stages={standardStages}
-        currentStageId="stage-estimating"
+        currentSlug="estimating"
         workflowRoute="normal"
         isBidBoardOwned={false}
         handoffStageDisplayOrder={null}

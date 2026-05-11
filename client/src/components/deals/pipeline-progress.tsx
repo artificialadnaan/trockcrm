@@ -13,7 +13,7 @@ export type PipelineProgressStage = {
 
 type PipelineProgressProps = {
   stages: PipelineProgressStage[];
-  currentStageId: string | null | undefined;
+  currentSlug: string | null | undefined;
   workflowRoute: "normal" | "service";
   isBidBoardOwned: boolean;
   handoffStageDisplayOrder: number | null;
@@ -29,7 +29,11 @@ function getDisabledReason(
   currentIndex: number,
   options: Pick<PipelineProgressProps, "workflowRoute" | "isBidBoardOwned" | "handoffStageDisplayOrder" | "canMoveBackward">
 ) {
-  if (currentIndex === -1 || index === currentIndex) {
+  if (currentIndex === -1) {
+    return null;
+  }
+
+  if (index === currentIndex) {
     return "current";
   }
 
@@ -67,7 +71,7 @@ function disabledLabel(reason: string | null) {
 
 export function PipelineProgress({
   stages,
-  currentStageId,
+  currentSlug,
   workflowRoute,
   isBidBoardOwned,
   handoffStageDisplayOrder,
@@ -78,7 +82,8 @@ export function PipelineProgress({
     return null;
   }
 
-  const currentIndex = stages.findIndex((stage) => stage.id === currentStageId);
+  const currentIndex =
+    currentSlug == null ? -1 : stages.findIndex((stage) => stage.slug === currentSlug);
 
   return (
     <Card>
