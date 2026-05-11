@@ -96,7 +96,10 @@ export function ReportFilterBar() {
 
   useEffect(() => {
     let alive = true;
-    api<{ users: SalesRepOption[] }>("/users/sales-reps")
+    const headers = draft.office && draft.office !== "all"
+      ? { "x-office-id": draft.office }
+      : undefined;
+    api<{ users: SalesRepOption[] }>("/users/sales-reps", headers ? { headers } : undefined)
       .then((data) => {
         if (alive) setOwners(data.users);
       })
@@ -106,7 +109,7 @@ export function ReportFilterBar() {
     return () => {
       alive = false;
     };
-  }, []);
+  }, [draft.office]);
 
   function updateRange(range: string) {
     const dates = range === "custom" ? { dateFrom: draft.dateFrom, dateTo: draft.dateTo } : rangeDates(range);
@@ -198,7 +201,7 @@ export function ReportFilterBar() {
           Office
           <select
             value={draft.office}
-            onChange={(event) => setDraft((current) => ({ ...current, office: event.target.value }))}
+            onChange={(event) => setDraft((current) => ({ ...current, office: event.target.value, ownerIds: [] }))}
             className="h-10 w-full rounded-md border border-slate-200 bg-white px-3 text-sm font-medium text-slate-700"
           >
             <option value="all">All offices</option>

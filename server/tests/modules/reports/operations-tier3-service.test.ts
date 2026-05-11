@@ -12,6 +12,23 @@ function makeTenantDb(results: unknown[][]) {
   return { execute } as any;
 }
 
+function extractSqlText(value: unknown): string {
+  if (typeof value === "string") return value;
+  if (!value || typeof value !== "object") return "";
+  if (Array.isArray((value as { queryChunks?: unknown[] }).queryChunks)) {
+    return (value as { queryChunks: unknown[] }).queryChunks.map(extractSqlText).join("");
+  }
+  if ("value" in (value as Record<string, unknown>)) {
+    const chunkValue = (value as { value: unknown }).value;
+    if (Array.isArray(chunkValue)) return chunkValue.map(extractSqlText).join("");
+    if (typeof chunkValue === "string") return chunkValue;
+  }
+  if ("name" in (value as Record<string, unknown>) && typeof (value as { name?: unknown }).name === "string") {
+    return (value as { name: string }).name;
+  }
+  return "";
+}
+
 describe("operations tier 3 reports", () => {
   beforeEach(() => {
     clearOperationsReportsCache();
@@ -26,7 +43,7 @@ describe("operations tier 3 reports", () => {
           avg_days_in_stage: "34.5",
           median_days_in_stage: "31.0",
           max_days_in_stage: 72,
-          stuck_deal_count: 6,
+          stuck_deal_count: 5,
         },
       ],
       [
@@ -64,7 +81,7 @@ describe("operations tier 3 reports", () => {
     });
 
     expect(report.kpis).toEqual({
-      totalStuckDeals: 6,
+      totalStuckDeals: 5,
       avgDealAge: 34.5,
       longestStuckDealAge: 72,
       stagesWithFivePlusStuckDeals: 1,
@@ -95,6 +112,58 @@ describe("operations tier 3 reports", () => {
     await getWorkflowBottlenecksReport(tenantDb, { dateFrom: "2026-02-01", dateTo: "2026-05-11", cacheScope: "tenant-b" });
 
     expect(tenantDb.execute).toHaveBeenCalledTimes(6);
+  });
+
+  it("does not date-bound current active-work reports by deal creation date", async () => {
+    const tenantDb = makeTenantDb([[], [], [], [], []]);
+
+    await getWorkflowBottlenecksReport(tenantDb, {
+      dateFrom: "2026-04-11",
+      dateTo: "2026-05-11",
+      cacheScope: "tenant-a",
+    });
+    await getProjectReadinessReport(tenantDb, {
+      dateFrom: "2026-04-11",
+      dateTo: "2026-05-11",
+      cacheScope: "tenant-a",
+    });
+    await getPortfolioLoadReport(tenantDb, {
+      dateFrom: "2026-04-11",
+      dateTo: "2026-05-11",
+      cacheScope: "tenant-a",
+    });
+
+    const sqlText = tenantDb.execute.mock.calls.map(([query]: [unknown]) => extractSqlText(query)).join("\n");
+    expect(sqlText).toContain("d.is_active = TRUE");
+    expect(sqlText).toContain("psc.is_terminal = FALSE");
+    expect(sqlText).not.toContain("d.created_at");
+  });
+
+  it("reports zero longest-stuck age when no deals are actually stuck", async () => {
+    const tenantDb = makeTenantDb([
+      [
+        {
+          stage_name: "Scoping",
+          open_deal_count: 3,
+          avg_days_in_stage: 10,
+          median_days_in_stage: 10,
+          max_days_in_stage: 29,
+          stuck_deal_count: 0,
+        },
+      ],
+      [],
+      [],
+    ]);
+
+    const report = await getWorkflowBottlenecksReport(tenantDb, {
+      dateFrom: "2026-04-11",
+      dateTo: "2026-05-11",
+      cacheScope: "tenant-a",
+    });
+
+    expect(report.kpis.totalStuckDeals).toBe(0);
+    expect(report.kpis.longestStuckDealAge).toBe(0);
+    expect(report.kpis.stagesWithFivePlusStuckDeals).toBe(0);
   });
 
   it("builds project readiness from scoping completion, proposal, contract, and kickoff proxies", async () => {
@@ -156,6 +225,24 @@ describe("operations tier 3 reports", () => {
           scoping_status: "ready",
           completion_state: {},
         },
+        {
+          deal_id: "deal-4",
+          deal_name: "Kickoff Deal",
+          owner_name: "Casey Ops",
+          stage_name: "Kickoff",
+          stage_slug: "kickoff",
+          days_in_stage: 14,
+          project_number: "TR-4",
+          proposal_status: "not_started",
+          proposal_sent_at: null,
+          proposal_accepted_at: null,
+          contract_signed_date: null,
+          contract_signed_at: null,
+          bid_board_assigned_pm: null,
+          next_milestone_at: null,
+          scoping_status: "ready",
+          completion_state: {},
+        },
       ],
     ]);
 
@@ -169,12 +256,18 @@ describe("operations tier 3 reports", () => {
     expect(report.kpis.dealsInEstimating).toBe(1);
     expect(report.kpis.dealsContractReady).toBe(1);
     expect(report.kpis.dealsKickoffReady).toBe(1);
-    expect(report.missingReadiness.map((deal) => deal.dealName)).toEqual(["Scoping Deal", "Estimate Deal"]);
+    expect(report.missingReadiness.map((deal) => deal.dealName)).toEqual(["Scoping Deal", "Estimate Deal", "Kickoff Deal"]);
     expect(report.ownerSummary).toContainEqual({
       ownerName: "Avery Rep",
       scopingIncomplete: 1,
       estimatingIncomplete: 0,
       kickoffIncomplete: 0,
+    });
+    expect(report.ownerSummary).toContainEqual({
+      ownerName: "Casey Ops",
+      scopingIncomplete: 0,
+      estimatingIncomplete: 0,
+      kickoffIncomplete: 1,
     });
   });
 

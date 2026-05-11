@@ -38,4 +38,10 @@ describe("App route guards", () => {
     expect(source).toContain('path="/director/commissions" element={( <RequireRole allowedRoles={["admin", "director"]}> <TeamCommissionsPage />');
     expect(source).toContain('path="/admin/commissions" element={( <RequireRole allowedRoles={["admin"]}> <GlobalCommissionsPage />');
   });
+
+  it("wraps Operations report routes with admin and director access", () => {
+    expect(source).toContain('path="/reports/operations/workflow-bottlenecks" element={( <RequireRole allowedRoles={["admin", "director"]}> <WorkflowBottlenecksPage />');
+    expect(source).toContain('path="/reports/operations/project-readiness" element={( <RequireRole allowedRoles={["admin", "director"]}> <ProjectReadinessPage />');
+    expect(source).toContain('path="/reports/operations/portfolio-load" element={( <RequireRole allowedRoles={["admin", "director"]}> <PortfolioLoadPage />');
+  });
 });

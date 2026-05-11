@@ -268,11 +268,14 @@ function officeFilter(filters: OperationsReportFilters) {
 }
 
 function baseOpenDealWhere(filters: OperationsReportFilters) {
+  // These Operations reports answer "what is currently active?" Current active
+  // work must not be bounded by the selected date range, or old-but-still-stuck
+  // deals disappear from bottleneck/readiness/load views. Date filters should
+  // only be applied by future time-bounded analyses against event timestamps
+  // such as stage_entered_at or deal_stage_history.changed_at.
   return sql`
     d.is_active = TRUE
     AND psc.is_terminal = FALSE
-    AND d.created_at::date >= ${filters.dateFrom}::date
-    AND d.created_at::date <= ${filters.dateTo}::date
     AND ${officeFilter(filters)}
     AND ${ownerFilter(filters)}
   `;
@@ -388,8 +391,8 @@ export async function getWorkflowBottlenecksReport(
       kpis: {
         totalStuckDeals: stageAging.reduce((sum, stage) => sum + stage.stuckDealCount, 0),
         avgDealAge: totalDeals > 0 ? Math.round((weightedAge / totalDeals) * 10) / 10 : 0,
-        longestStuckDealAge: Math.max(0, ...stageAging.map((stage) => stage.maxDaysInStage)),
-        stagesWithFivePlusStuckDeals: stageAging.filter((stage) => stage.stuckDealCount > 5).length,
+        longestStuckDealAge: Math.max(0, ...stuckRows.map((row) => numberFrom(row.days_in_stage))),
+        stagesWithFivePlusStuckDeals: stageAging.filter((stage) => stage.stuckDealCount >= 5).length,
       },
       stageAging,
       topStuckDeals: stuckRows.map(mapWorkflowDeal),
@@ -431,9 +434,17 @@ function missingScopingItems(row: ReadinessSqlRow): string[] {
 
 function classifyReadinessStage(row: ReadinessSqlRow): "Scoping" | "Estimating" | "Contract" | "Kickoff" {
   const haystack = `${row.stage_name ?? ""} ${row.stage_slug ?? ""}`.toLowerCase();
+  // Stage identity is the source of truth. Proposal status is only a fallback
+  // for ambiguous legacy rows because default statuses like "not_started" exist
+  // on many non-estimating deals.
   if (haystack.includes("scop")) return "Scoping";
-  if (haystack.includes("contract") || row.proposal_status === "accepted" || row.proposal_status === "signed") return "Contract";
-  if (haystack.includes("estimate") || haystack.includes("estimating") || row.proposal_status) return "Estimating";
+  if (haystack.includes("contract")) return "Contract";
+  if (haystack.includes("kickoff") || haystack.includes("production") || haystack.includes("handoff")) return "Kickoff";
+  if (haystack.includes("estimate") || haystack.includes("estimating")) return "Estimating";
+
+  const proposalStatus = row.proposal_status ?? "not_started";
+  if (proposalStatus === "accepted" || proposalStatus === "signed") return "Contract";
+  if (["drafting", "sent", "under_review", "revision_requested"].includes(proposalStatus)) return "Estimating";
   return "Kickoff";
 }
 
