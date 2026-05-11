@@ -31,6 +31,7 @@ vi.mock("../../../src/db.js", () => ({
   db: { select: vi.fn() },
   pool: {},
 }));
+vi.mock("@trock-crm/shared/schema", async () => import("../../../../shared/src/schema/index.js"));
 
 const { AppError } = await import("../../../src/middleware/error-handler.js");
 const { createActivity, getActivities } = await import("../../../src/modules/activities/service.js");
@@ -212,5 +213,46 @@ describe("activities service", () => {
       "activity-lead",
     ]);
     expect(result.pagination.total).toBe(2);
+  });
+
+  it("returns performer metadata when listing lead activities", async () => {
+    const countQuery = createSelectChain([{ count: 1 }], { resolveOnWhere: true });
+    const rowsQuery = createSelectChain(
+      [
+        {
+          id: "activity-stage",
+          leadId: "lead-1",
+          sourceEntityType: "lead",
+          responsibleUserId: "rep-1",
+          performedByUserId: "admin-1",
+        },
+      ],
+      { resolveOnOffset: true }
+    );
+    const usersQuery = createSelectChain(
+      [
+        { id: "rep-1", displayName: "Sam Sales", avatarUrl: null },
+        { id: "admin-1", displayName: "Morgan Admin", avatarUrl: "https://example.test/avatar.png" },
+      ],
+      { resolveOnWhere: true }
+    );
+
+    const tenantDb = {
+      select: vi
+        .fn()
+        .mockReturnValueOnce(countQuery)
+        .mockReturnValueOnce(rowsQuery)
+        .mockReturnValueOnce(usersQuery),
+    } as any;
+
+    const result = await getActivities(tenantDb, { leadId: "lead-1", responsibleUserId: "rep-1", limit: 100 });
+
+    expect(result.activities[0]).toMatchObject({
+      id: "activity-stage",
+      responsibleUserName: "Sam Sales",
+      performedByUserName: "Morgan Admin",
+      performedByUserAvatarUrl: "https://example.test/avatar.png",
+    });
+    expect(tenantDb.select).toHaveBeenCalledTimes(3);
   });
 });

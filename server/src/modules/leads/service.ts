@@ -2,6 +2,7 @@ import { and, asc, desc, eq, ilike, inArray, or, sql } from "drizzle-orm";
 import type { NodePgDatabase } from "drizzle-orm/node-postgres";
 import {
   CANONICAL_LEAD_STAGE_SLUGS,
+  activities,
   companies,
   contacts,
   deals,
@@ -1388,6 +1389,12 @@ export function createLeadService(
           createdAt: Date;
         }
       | null = null;
+    let stageChangeActivityCopy:
+      | {
+          fromStageName: string;
+          toStageName: string;
+        }
+      | null = null;
     let stageChangedAt: Date | null = null;
     const effectiveQualificationPayload =
       input.qualificationPayload !== undefined
@@ -1484,6 +1491,10 @@ export function createLeadService(
           durationInPreviousStage: null,
           createdAt: stageChangedAt,
         };
+        stageChangeActivityCopy = {
+          fromStageName: currentStage.name,
+          toStageName: stage.name,
+        };
       }
     }
 
@@ -1572,6 +1583,25 @@ export function createLeadService(
 
     if (stageChangeAuditRecord) {
       await tenantDb.insert(leadStageHistory).values(stageChangeAuditRecord);
+      await tenantDb.insert(activities).values({
+        type: "note",
+        responsibleUserId: nextAssignedRepId,
+        performedByUserId: userId,
+        sourceEntityType: "lead",
+        sourceEntityId: existing.id,
+        companyId: existing.companyId,
+        propertyId: existing.propertyId,
+        leadId: existing.id,
+        contactId: existing.primaryContactId,
+        subject: `Stage changed from ${stageChangeActivityCopy?.fromStageName ?? "previous stage"} to ${
+          stageChangeActivityCopy?.toStageName ?? "new stage"
+        }`,
+        body: `Moved this lead from ${stageChangeActivityCopy?.fromStageName ?? "previous stage"} to ${
+          stageChangeActivityCopy?.toStageName ?? "new stage"
+        }.`,
+        outcome: "lead_stage_changed",
+        occurredAt: stageChangedAt ?? updateTime,
+      });
     }
 
     if (

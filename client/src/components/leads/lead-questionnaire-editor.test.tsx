@@ -7,6 +7,7 @@ import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { LeadQuestionnaireEditor } from "./lead-questionnaire-editor";
 import type { LeadQuestionnaireNode, LeadRecord } from "@/hooks/use-leads";
+import { updateLead } from "@/hooks/use-leads";
 
 (globalThis as unknown as { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -237,8 +238,10 @@ describe("LeadQuestionnaireEditor universal questionnaire", () => {
   let root: Root;
 
   beforeEach(() => {
+    vi.clearAllMocks();
     container = document.createElement("div");
     document.body.appendChild(container);
+    vi.mocked(updateLead).mockResolvedValue({} as never);
   });
 
   afterEach(async () => {
@@ -282,5 +285,81 @@ describe("LeadQuestionnaireEditor universal questionnaire", () => {
     expect(container.textContent).toContain("Legacy / Archived Answers");
     expect(container.textContent).toContain("Roof Age Years");
     expect(container.textContent).toContain("15");
+  });
+
+  it("renders the qualified lead Timeline field only once when universal nodes include timeline", async () => {
+    await renderEditor(
+      lead({
+        leadQuestionnaire: {
+          projectTypeId: "type-1",
+          nodes: [
+            ...nodes,
+            node({
+              id: "timeline-node",
+              key: "timeline",
+              label: "Timeline",
+              inputType: "textarea",
+              isRequired: true,
+              displayOrder: 500,
+            }),
+          ],
+          allNodes: [
+            ...nodes,
+            node({
+              id: "timeline-node",
+              key: "timeline",
+              label: "Timeline",
+              inputType: "textarea",
+              isRequired: true,
+              displayOrder: 500,
+            }),
+          ],
+          answers: {},
+          legacyAnswers: [],
+        },
+      })
+    );
+
+    expect(Array.from(container.querySelectorAll("label")).filter((label) => label.textContent?.includes("Timeline")))
+      .toHaveLength(1);
+  });
+
+  it("submits the hidden universal timeline answer from the visible Timeline field", async () => {
+    const timelineNode = node({
+      id: "timeline-node",
+      key: "timeline",
+      label: "Timeline",
+      inputType: "textarea",
+      isRequired: true,
+      displayOrder: 500,
+    });
+    await renderEditor(
+      lead({
+        qualificationPayload: { timeline_status: "Q3 2026" },
+        leadQuestionnaire: {
+          projectTypeId: "type-1",
+          nodes: [...nodes, timelineNode],
+          allNodes: [...nodes, timelineNode],
+          answers: {
+            parking_lot_applies: true,
+            parking_surface_type: ["concrete"],
+          },
+          legacyAnswers: [],
+        },
+      })
+    );
+
+    await act(async () => {
+      container.querySelector("form")?.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+    });
+
+    expect(updateLead).toHaveBeenCalledWith(
+      "lead-1",
+      expect.objectContaining({
+        leadQuestionAnswers: expect.objectContaining({
+          timeline: "Q3 2026",
+        }),
+      })
+    );
   });
 });

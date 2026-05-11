@@ -1,6 +1,6 @@
 import { useMemo } from "react";
 import { Calendar, Clock3, FileText, Mail, Phone, MessageSquare } from "lucide-react";
-import { useActivities } from "@/hooks/use-activities";
+import { useActivities, type Activity } from "@/hooks/use-activities";
 
 interface LeadTimelineTabProps {
   leadId: string;
@@ -26,19 +26,29 @@ function formatTimestamp(value: string) {
   });
 }
 
+function getInitials(name: string) {
+  const parts = name.trim().split(/\s+/).filter(Boolean);
+  if (parts.length === 0) return "?";
+  return parts.slice(0, 2).map((part) => part[0]?.toUpperCase()).join("");
+}
+
+function getStageChangeText(activity: Activity) {
+  const actor = activity.performedByUserName ?? activity.responsibleUserName ?? "Someone";
+  const body = activity.body?.trim();
+  if (!body) {
+    return activity.subject ?? `${actor} moved this lead`;
+  }
+
+  return `${actor} ${body.replace(/^Moved/, "moved").replace(/\.$/, "")}`;
+}
+
 function ActivityList({
   title,
   items,
   emptyMessage,
 }: {
   title: string;
-  items: Array<{
-    id: string;
-    type: string;
-    subject: string | null;
-    body: string | null;
-    occurredAt: string;
-  }>;
+  items: Activity[];
   emptyMessage: string;
 }) {
   return (
@@ -54,23 +64,37 @@ function ActivityList({
       ) : (
         <div className="space-y-2">
           {items.map((activity) => {
-            const Icon = ACTIVITY_ICONS[activity.type] ?? FileText;
+            const isStageChange = activity.outcome === "lead_stage_changed";
+            const Icon = isStageChange ? Clock3 : ACTIVITY_ICONS[activity.type] ?? FileText;
+            const actorName = activity.performedByUserName ?? activity.responsibleUserName ?? "Unknown User";
+            const actorAvatarUrl = activity.performedByUserAvatarUrl ?? activity.responsibleUserAvatarUrl ?? null;
             return (
               <div key={activity.id} className="rounded-lg border bg-white p-3">
                 <div className="flex items-start gap-3">
-                  <div className="mt-0.5 flex h-8 w-8 items-center justify-center rounded-full bg-slate-100">
-                    <Icon className="h-4 w-4 text-slate-600" />
+                  <div
+                    className="mt-0.5 flex h-8 w-8 shrink-0 items-center justify-center overflow-hidden rounded-full bg-slate-100 text-xs font-semibold text-slate-700"
+                    aria-label={actorName}
+                  >
+                    {actorAvatarUrl ? (
+                      <img src={actorAvatarUrl} alt="" className="h-full w-full object-cover" />
+                    ) : isStageChange ? (
+                      getInitials(actorName)
+                    ) : (
+                      <Icon className="h-4 w-4 text-slate-600" />
+                    )}
                   </div>
                   <div className="min-w-0 flex-1">
                     <div className="flex flex-wrap items-center gap-2">
                       <span className="text-sm font-medium capitalize">
-                        {activity.type.replace(/_/g, " ")}
+                        {isStageChange ? "Stage change" : activity.type.replace(/_/g, " ")}
                       </span>
                     </div>
-                    {activity.subject && (
+                    {isStageChange ? (
+                      <p className="text-sm">{getStageChangeText(activity)}</p>
+                    ) : activity.subject ? (
                       <p className="text-sm">{activity.subject}</p>
-                    )}
-                    {activity.body && (
+                    ) : null}
+                    {!isStageChange && activity.body && (
                       <p className="text-sm text-muted-foreground whitespace-pre-wrap">
                         {activity.body}
                       </p>
