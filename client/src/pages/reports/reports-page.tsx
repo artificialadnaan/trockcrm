@@ -76,9 +76,9 @@ const reportCategories: Array<{ category: string; description: string; reports: 
     category: "Analytics",
     description: "Higher-level trends and business intelligence surfaces.",
     reports: [
-      { name: "Market Mix", description: "Work by vertical, property type, and region.", icon: PieChart },
-      { name: "Customer Concentration", description: "Revenue and opportunity exposure by account.", icon: Users },
-      { name: "Executive Trends", description: "Multi-period summary of operating indicators.", icon: BarChart3 },
+      { name: "Market Mix", description: "Work by vertical, property type, and region.", icon: PieChart, path: "/reports/analytics/market-mix" },
+      { name: "Customer Concentration", description: "Revenue and opportunity exposure by account.", icon: Users, path: "/reports/analytics/customer-concentration" },
+      { name: "Executive Trends", description: "Multi-period summary of operating indicators.", icon: BarChart3, path: "/reports/analytics/executive-trends" },
     ],
   },
 ];
@@ -125,11 +125,15 @@ export function ReportsPage() {
                     <div className="min-w-0">
                       <div className="flex flex-wrap items-center gap-2">
                         <h3 className="font-black uppercase tracking-tight text-slate-950">{report.name}</h3>
-                        {!report.path ? (
+                        {report.path ? (
+                          <span className="rounded-full bg-slate-950 px-2 py-1 text-[10px] font-black uppercase tracking-[0.14em] text-white">
+                            Open
+                          </span>
+                        ) : (
                           <span className="rounded-full bg-red-50 px-2 py-1 text-[10px] font-black uppercase tracking-[0.14em] text-brand-red">
                             Coming soon
                           </span>
-                        ) : null}
+                        )}
                       </div>
                       <p className="mt-2 text-sm text-slate-600">{report.description}</p>
                     </div>

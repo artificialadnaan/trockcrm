@@ -181,6 +181,40 @@ describe("analytics reporting sections", () => {
     );
   });
 
+  it("builds Analytics Tier 4 endpoints with URL-backed date, office, and owner filters", async () => {
+    mockApi.mockResolvedValue({ data: {} });
+
+    const {
+      executeMarketMixReport,
+      executeCustomerConcentrationReport,
+      executeExecutiveTrendsReport,
+    } = await import("@/hooks/use-reports");
+
+    const query = {
+      dateFrom: "2025-05-11",
+      dateTo: "2026-05-11",
+      office: "office-1",
+      ownerIds: ["rep-1", "rep-2"],
+    };
+
+    await executeMarketMixReport(query);
+    await executeCustomerConcentrationReport(query);
+    await executeExecutiveTrendsReport(query);
+
+    expect(mockApi).toHaveBeenNthCalledWith(
+      1,
+      "/reports/market-mix?dateFrom=2025-05-11&dateTo=2026-05-11&office=office-1&ownerIds=rep-1%2Crep-2"
+    );
+    expect(mockApi).toHaveBeenNthCalledWith(
+      2,
+      "/reports/customer-concentration?dateFrom=2025-05-11&dateTo=2026-05-11&office=office-1&ownerIds=rep-1%2Crep-2"
+    );
+    expect(mockApi).toHaveBeenNthCalledWith(
+      3,
+      "/reports/executive-trends?dateFrom=2025-05-11&dateTo=2026-05-11&office=office-1&ownerIds=rep-1%2Crep-2"
+    );
+  });
+
   it("only allows directors to view the data mining section", () => {
     expect(canViewDataMiningSection("director")).toBe(true);
     expect(canViewDataMiningSection("admin")).toBe(false);
