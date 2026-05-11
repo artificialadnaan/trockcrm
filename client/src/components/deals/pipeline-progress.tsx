@@ -27,7 +27,9 @@ function getDisabledReason(
   stage: PipelineProgressStage,
   index: number,
   currentIndex: number,
-  options: Pick<PipelineProgressProps, "workflowRoute" | "isBidBoardOwned" | "handoffStageDisplayOrder" | "canMoveBackward">
+  options: Pick<PipelineProgressProps, "workflowRoute" | "isBidBoardOwned" | "handoffStageDisplayOrder" | "canMoveBackward"> & {
+    currentIsTerminal: boolean;
+  }
 ) {
   if (currentIndex === -1) {
     return null;
@@ -35,6 +37,10 @@ function getDisabledReason(
 
   if (index === currentIndex) {
     return "current";
+  }
+
+  if (options.currentIsTerminal) {
+    return "terminal-locked";
   }
 
   if (stage.isTerminal && index < currentIndex) {
@@ -64,6 +70,8 @@ function disabledLabel(reason: string | null) {
       return "Director only";
     case "terminal-passed":
       return "Passed";
+    case "terminal-locked":
+      return "Terminal";
     default:
       return null;
   }
@@ -84,6 +92,8 @@ export function PipelineProgress({
 
   const currentIndex =
     currentSlug == null ? -1 : stages.findIndex((stage) => stage.slug === currentSlug);
+  const currentStage = currentIndex === -1 ? null : stages[currentIndex] ?? null;
+  const currentIsTerminal = Boolean(currentStage?.isTerminal);
 
   return (
     <Card>
@@ -98,6 +108,7 @@ export function PipelineProgress({
               isBidBoardOwned,
               handoffStageDisplayOrder,
               canMoveBackward,
+              currentIsTerminal,
             });
             const disabled = disabledReason != null;
             const label = disabledLabel(disabledReason);

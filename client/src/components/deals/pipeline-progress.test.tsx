@@ -142,7 +142,7 @@ describe("PipelineProgress", () => {
     expect(html).toContain('data-state="current"');
   });
 
-  it("marks terminal stages correctly when the deal is currently won or lost", () => {
+  it("disables all other stages when the current stage is won", () => {
     const wonHtml = renderToStaticMarkup(
       <PipelineProgress
         stages={standardStages}
@@ -157,7 +157,12 @@ describe("PipelineProgress", () => {
 
     expect(wonHtml).toContain('data-stage-slug="won"');
     expect(wonHtml).toContain('data-state="current"');
+    expect(wonHtml.match(/data-disabled-reason="terminal-locked"/g)).toHaveLength(6);
+    expect(wonHtml).toContain('data-stage-slug="lost"');
+    expect(wonHtml).not.toContain('data-disabled-reason="terminal-passed"');
+  });
 
+  it("disables all other stages when the current stage is lost", () => {
     const lostHtml = renderToStaticMarkup(
       <PipelineProgress
         stages={standardStages}
@@ -171,8 +176,10 @@ describe("PipelineProgress", () => {
     );
 
     expect(lostHtml).toContain('data-stage-slug="lost"');
+    expect(lostHtml).toContain('data-state="current"');
     expect(lostHtml).toContain('data-stage-slug="won"');
-    expect(lostHtml).toContain('data-disabled-reason="terminal-passed"');
+    expect(lostHtml.match(/data-disabled-reason="terminal-locked"/g)).toHaveLength(6);
+    expect(lostHtml).not.toContain('data-disabled-reason="terminal-passed"');
   });
 
   it("disables Bid Board-managed stages after the handoff boundary", () => {
