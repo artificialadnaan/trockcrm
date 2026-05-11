@@ -113,6 +113,78 @@ export interface AnalyticsQueryOptions {
   includeDd?: boolean;
 }
 
+export interface SalesReportQueryOptions {
+  dateFrom?: string;
+  dateTo?: string;
+  office?: string;
+  ownerIds?: string[];
+  ownerNames?: string[];
+  ownerEmails?: string[];
+}
+
+export interface PipelineVelocityOverview {
+  kpis: {
+    avgDealAgeDays: number;
+    totalOpenValue: number;
+    openDealCount: number;
+    stuckDealCount: number;
+  };
+  stages: Array<{
+    stageId: string;
+    stageName: string;
+    openDeals: number;
+    totalValue: number;
+    avgDaysInStage: number;
+    medianDaysInStage: number;
+    oldestDeal: { dealId: string | null; dealName: string; daysInStage: number };
+  }>;
+  agingBuckets: Array<{ bucket: string; label: string; dealCount: number; totalValue: number }>;
+  stuckDeals: Array<{
+    dealId: string;
+    dealName: string;
+    ownerName: string;
+    stageName: string;
+    daysInStage: number;
+    value: number;
+  }>;
+}
+
+export interface ClosedWonRevenueOverview {
+  kpis: {
+    totalBookedRevenue: number;
+    wonDealCount: number;
+    avgDealSize: number;
+    winRate: number;
+  };
+  monthlyRevenue: Array<{ month: string; label: string; totalRevenue: number; wonDeals: number }>;
+  byOwner: Array<{
+    ownerId: string;
+    ownerName: string;
+    wonDeals: number;
+    totalRevenue: number;
+    avgDealSize: number;
+    largestWonDeal: { dealId: string | null; dealName: string; value: number };
+  }>;
+  byOffice: Array<{ officeId: string | null; officeName: string; wonDeals: number; totalRevenue: number; avgDealSize: number; percentOfTotal: number }>;
+  byWorkflowFamily: Array<{ workflowFamily: string; workflowFamilyName: string; wonDeals: number; totalRevenue: number }>;
+  topDeals: Array<{ dealId: string; dealName: string; ownerName: string; value: number; wonAt: string }>;
+}
+
+export interface LeadConversionOverview {
+  kpis: {
+    totalLeads: number;
+    qualified: number;
+    inDeals: number;
+    won: number;
+    leadToDealRate: number;
+    dealToWonRate: number;
+  };
+  funnel: Array<{ key: string; label: string; count: number; conversionRate: number }>;
+  bySource: Array<{ source: string; leads: number; qualified: number; convertedToDeal: number; won: number; totalRevenue: number }>;
+  monthlyTrend: Array<{ month: string; label: string; leads: number; convertedToDeal: number; won: number; conversionRate: number }>;
+  topRevenueSources: Array<{ source: string; totalRevenue: number; won: number }>;
+}
+
 export interface UnifiedLeadPipelineSummaryRow {
   workflowRoute: "normal" | "service";
   validationStatus: string;
@@ -448,6 +520,76 @@ function appendAnalyticsQueryOptions(params: URLSearchParams, options: Analytics
   if (options.repId) params.set("repId", options.repId);
   if (options.source) params.set("source", options.source);
   if (options.includeDd) params.set("includeDd", "true");
+}
+
+function appendSalesReportQueryOptions(params: URLSearchParams, options: SalesReportQueryOptions) {
+  if (options.dateFrom) params.set("dateFrom", options.dateFrom);
+  if (options.dateTo) params.set("dateTo", options.dateTo);
+  if (options.office && options.office !== "all") params.set("office", options.office);
+  if (options.ownerIds?.length) params.set("ownerIds", options.ownerIds.join(","));
+  if (options.ownerNames?.length) params.set("owners", options.ownerNames.join(","));
+  if (options.ownerEmails?.length) params.set("ownerEmails", options.ownerEmails.join(","));
+}
+
+async function executeSalesReport<T>(endpoint: string, options: SalesReportQueryOptions = {}) {
+  const params = new URLSearchParams();
+  appendSalesReportQueryOptions(params, options);
+  const qs = params.toString();
+  return api<{ data: T }>(`${endpoint}${qs ? `?${qs}` : ""}`);
+}
+
+function useSalesReport<T>(
+  endpoint: string,
+  options: SalesReportQueryOptions,
+  errorMessage: string
+) {
+  const [data, setData] = useState<T | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+
+  const fetchReport = useCallback(async () => {
+    setLoading(true);
+    setError(null);
+    try {
+      const result = await executeSalesReport<T>(endpoint, options);
+      setData(result.data);
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : errorMessage);
+      setData(null);
+    } finally {
+      setLoading(false);
+    }
+  }, [endpoint, options.dateFrom, options.dateTo, options.office, options.ownerIds?.join(","), options.ownerNames?.join(","), options.ownerEmails?.join(","), errorMessage]);
+
+  useEffect(() => {
+    fetchReport();
+  }, [fetchReport]);
+
+  return { data, loading, error, refetch: fetchReport };
+}
+
+export function usePipelineVelocityReport(options: SalesReportQueryOptions = {}) {
+  return useSalesReport<PipelineVelocityOverview>(
+    "/reports/pipeline-velocity",
+    options,
+    "Failed to load pipeline velocity"
+  );
+}
+
+export function useClosedWonRevenueReport(options: SalesReportQueryOptions = {}) {
+  return useSalesReport<ClosedWonRevenueOverview>(
+    "/reports/closed-won-revenue",
+    options,
+    "Failed to load closed won revenue"
+  );
+}
+
+export function useLeadConversionReport(options: SalesReportQueryOptions = {}) {
+  return useSalesReport<LeadConversionOverview>(
+    "/reports/lead-conversion",
+    options,
+    "Failed to load lead conversion"
+  );
 }
 
 export async function executeLockedReport(reportType: string, options: AnalyticsQueryOptions = {}) {
