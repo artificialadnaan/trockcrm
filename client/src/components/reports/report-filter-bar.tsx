@@ -2,10 +2,10 @@ import { useEffect, useMemo, useState } from "react";
 import { useSearchParams } from "react-router-dom";
 import { RotateCcw, SlidersHorizontal } from "lucide-react";
 import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
 import { Checkbox } from "@/components/ui/checkbox";
-import { api } from "@/lib/api";
+import { Input } from "@/components/ui/input";
 import { useAccessibleOffices } from "@/hooks/use-accessible-offices";
+import { api } from "@/lib/api";
 
 const DATE_RANGE_OPTIONS = [
   { value: "30", label: "Last 30 days" },
@@ -59,21 +59,23 @@ function defaultFilters(): ReportFilters {
   return { range: "90", ...dates, office: "all", ownerIds: [], ownerNames: [], ownerEmails: [] };
 }
 
+function splitParam(value: string | null) {
+  return value?.split(",").map((part) => part.trim()).filter(Boolean) ?? [];
+}
+
 export function useReportFilters() {
   const [searchParams] = useSearchParams();
   const filters = useMemo<ReportFilters>(() => {
     const defaults = defaultFilters();
     const range = searchParams.get("range") || defaults.range;
-    const ownerNames = searchParams.get("owners")?.split(",").map((value) => value.trim()).filter(Boolean) ?? [];
-    const ownerEmails = searchParams.get("ownerEmails")?.split(",").map((value) => value.trim()).filter(Boolean) ?? [];
     return {
       range,
       dateFrom: searchParams.get("dateFrom") || defaults.dateFrom,
       dateTo: searchParams.get("dateTo") || defaults.dateTo,
       office: searchParams.get("office") || defaults.office,
       ownerIds: [],
-      ownerNames,
-      ownerEmails,
+      ownerNames: splitParam(searchParams.get("owners")),
+      ownerEmails: splitParam(searchParams.get("ownerEmails")),
     };
   }, [searchParams]);
 
@@ -105,18 +107,17 @@ export function ReportFilterBar() {
     let alive = true;
     api<{ users: SalesRepOption[] }>("/users/sales-reps")
       .then((data) => {
-        if (alive) {
-          setOwners(data.users);
-          setDraft((current) => {
-            if (current.ownerNames.length === 0) return current;
-            return {
-              ...current,
-              ownerIds: data.users
-                .filter((owner) => current.ownerEmails.includes(owner.email ?? "") || current.ownerNames.includes(owner.displayName))
-                .map((owner) => owner.id),
-            };
-          });
-        }
+        if (!alive) return;
+        setOwners(data.users);
+        setDraft((current) => {
+          if (current.ownerNames.length === 0 && current.ownerEmails.length === 0) return current;
+          return {
+            ...current,
+            ownerIds: data.users
+              .filter((owner) => current.ownerEmails.includes(owner.email ?? "") || current.ownerNames.includes(owner.displayName))
+              .map((owner) => owner.id),
+          };
+        });
       })
       .catch(() => {
         if (alive) setOwners([]);
@@ -138,6 +139,7 @@ export function ReportFilterBar() {
     next.set("dateTo", nextFilters.dateTo);
     if (nextFilters.office && nextFilters.office !== "all") next.set("office", nextFilters.office);
     else next.delete("office");
+
     if (nextFilters.ownerIds.length || nextFilters.ownerNames.length) {
       const selectedOwners = nextFilters.ownerIds.length
         ? owners.filter((owner) => nextFilters.ownerIds.includes(owner.id))
@@ -163,18 +165,19 @@ export function ReportFilterBar() {
     applyFilters(defaults);
   }
 
-  function toggleOwner(ownerId: string, checked: boolean) {
+  function toggleOwner(ownerId: string, checked: boolean | "indeterminate") {
+    const owner = owners.find((entry) => entry.id === ownerId);
     setDraft((current) => ({
       ...current,
-      ownerIds: checked
+      ownerIds: checked === true
         ? Array.from(new Set([...current.ownerIds, ownerId]))
         : current.ownerIds.filter((id) => id !== ownerId),
-      ownerNames: checked
-        ? Array.from(new Set([...current.ownerNames, owners.find((owner) => owner.id === ownerId)?.displayName].filter(Boolean) as string[]))
-        : current.ownerNames.filter((name) => name !== owners.find((owner) => owner.id === ownerId)?.displayName),
-      ownerEmails: checked
-        ? Array.from(new Set([...current.ownerEmails, owners.find((owner) => owner.id === ownerId)?.email].filter(Boolean) as string[]))
-        : current.ownerEmails.filter((email) => email !== owners.find((owner) => owner.id === ownerId)?.email),
+      ownerNames: checked === true
+        ? Array.from(new Set([...current.ownerNames, owner?.displayName].filter(Boolean) as string[]))
+        : current.ownerNames.filter((name) => name !== owner?.displayName),
+      ownerEmails: checked === true
+        ? Array.from(new Set([...current.ownerEmails, owner?.email].filter(Boolean) as string[]))
+        : current.ownerEmails.filter((email) => email !== owner?.email),
     }));
   }
 

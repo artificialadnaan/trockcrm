@@ -26,7 +26,7 @@ type ReportCard = {
   name: string;
   description: string;
   icon: LucideIcon;
-  href?: string;
+  path?: string;
 };
 
 const reportCategories: Array<{ category: string; description: string; reports: ReportCard[] }> = [
@@ -34,9 +34,9 @@ const reportCategories: Array<{ category: string; description: string; reports: 
     category: "Sales",
     description: "Pipeline, forecasts, close rates, and booked revenue.",
     reports: [
-      { name: "Pipeline Velocity", description: "Stage movement, aging, and value trends.", icon: TrendingUp, href: "/reports/sales/pipeline-velocity" },
-      { name: "Closed Won Revenue", description: "Booked revenue by rep, office, and period.", icon: DollarSign, href: "/reports/sales/closed-won-revenue" },
-      { name: "Lead Conversion", description: "Lead source performance through contract.", icon: ChartNoAxesCombined, href: "/reports/sales/lead-conversion" },
+      { name: "Pipeline Velocity", description: "Stage movement, aging, and value trends.", icon: TrendingUp, path: "/reports/sales/pipeline-velocity" },
+      { name: "Closed Won Revenue", description: "Booked revenue by rep, office, and period.", icon: DollarSign, path: "/reports/sales/closed-won-revenue" },
+      { name: "Lead Conversion", description: "Lead source performance through contract.", icon: ChartNoAxesCombined, path: "/reports/sales/lead-conversion" },
     ],
   },
   {
@@ -52,9 +52,24 @@ const reportCategories: Array<{ category: string; description: string; reports: 
     category: "Operations",
     description: "Workflow health, due dates, handoffs, and closeout readiness.",
     reports: [
-      { name: "Workflow Bottlenecks", description: "Aging by stage and blocked handoff counts.", icon: CalendarClock },
-      { name: "Project Readiness", description: "Scoping, estimate, and kickoff completeness.", icon: ClipboardList },
-      { name: "Portfolio Load", description: "Active work grouped by company and property.", icon: BriefcaseBusiness },
+      {
+        name: "Workflow Bottlenecks",
+        description: "Aging by stage and blocked handoff counts.",
+        icon: CalendarClock,
+        path: "/reports/operations/workflow-bottlenecks",
+      },
+      {
+        name: "Project Readiness",
+        description: "Scoping, estimate, and kickoff completeness.",
+        icon: ClipboardList,
+        path: "/reports/operations/project-readiness",
+      },
+      {
+        name: "Portfolio Load",
+        description: "Active work grouped by company and property.",
+        icon: BriefcaseBusiness,
+        path: "/reports/operations/portfolio-load",
+      },
     ],
   },
   {
@@ -102,15 +117,15 @@ export function ReportsPage() {
             <div className="grid grid-cols-1 gap-3 md:grid-cols-3">
               {group.reports.map((report) => {
                 const Icon = report.icon;
-                const body = (
+                const content = (
                   <CardContent className="flex items-start gap-4 p-5">
-                    <div className="grid h-12 w-12 shrink-0 place-items-center rounded-lg bg-slate-950 text-white">
+                    <div className="grid h-12 w-12 shrink-0 place-items-center rounded-xl bg-slate-950 text-white">
                       <Icon className="h-5 w-5" />
                     </div>
                     <div className="min-w-0">
                       <div className="flex flex-wrap items-center gap-2">
                         <h3 className="font-black uppercase tracking-tight text-slate-950">{report.name}</h3>
-                        {report.href ? (
+                        {report.path ? (
                           <span className="rounded-full bg-emerald-50 px-2 py-1 text-[10px] font-black uppercase tracking-[0.14em] text-emerald-700">
                             Live
                           </span>
@@ -124,13 +139,16 @@ export function ReportsPage() {
                     </div>
                   </CardContent>
                 );
-                return (
-                  <Card key={report.name} className={report.href ? "border-slate-200 bg-white transition hover:border-brand-red/40 hover:shadow-sm" : "border-slate-200 bg-white opacity-75"}>
-                    {report.href ? (
-                      <Link to={report.href} className="block focus:outline-none focus-visible:ring-2 focus-visible:ring-brand-red">
-                        {body}
-                      </Link>
-                    ) : body}
+
+                return report.path ? (
+                  <Card key={report.name} className="border-slate-200 bg-white transition hover:border-brand-red hover:shadow-md">
+                    <Link to={report.path} className="block focus:outline-none focus:ring-2 focus:ring-brand-red focus:ring-offset-2">
+                      {content}
+                    </Link>
+                  </Card>
+                ) : (
+                  <Card key={report.name} className="border-slate-200 bg-white opacity-75">
+                    {content}
                   </Card>
                 );
               })}
