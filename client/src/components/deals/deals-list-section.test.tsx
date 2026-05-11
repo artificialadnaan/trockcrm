@@ -227,7 +227,7 @@ describe("DealsListSection", () => {
       expect.any(Object)
     );
     expect(html).toContain('placeholder="Search deals or accounts"');
-    expect(html).toContain(">Filter<");
+    expect(html).not.toContain(">Filter<");
   });
 
   it("renders date filter control when enableDateFilter is true", () => {

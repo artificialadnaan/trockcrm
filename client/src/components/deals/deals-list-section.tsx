@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { toast } from "sonner";
-import { Download, Filter, Search } from "lucide-react";
+import { Download, Search } from "lucide-react";
 import { Input } from "@/components/ui/input";
 import {
   Select,
@@ -281,7 +281,6 @@ export function DealsListSection({
   workflowFamily = "deal",
   enableDateFilter = false,
   enableExport = false,
-  showFilterButton = false,
   visibleStages,
   excludeStageSlugs = [],
   eyebrow = "Deal list",
@@ -498,12 +497,8 @@ export function DealsListSection({
   ];
 
   const filterGridClass = enableDateFilter
-    ? showFilterButton
-      ? "lg:grid-cols-[minmax(18rem,1fr)_auto_220px_220px]"
-      : "lg:grid-cols-[minmax(18rem,1fr)_220px_220px]"
-    : showFilterButton
-      ? "lg:grid-cols-[minmax(18rem,1fr)_auto_220px]"
-      : "lg:grid-cols-[minmax(18rem,1fr)_220px]";
+    ? "lg:grid-cols-[minmax(18rem,1fr)_220px_220px]"
+    : "lg:grid-cols-[minmax(18rem,1fr)_220px]";
 
   return (
     <section className="rounded-lg border border-gray-200 bg-white">
@@ -545,18 +540,6 @@ export function DealsListSection({
             />
           </div>
         </label>
-
-        {showFilterButton ? (
-          <div className="flex items-end">
-            <button
-              type="button"
-              className="inline-flex h-10 items-center justify-center gap-2 rounded-md border border-slate-200 bg-white px-3 text-sm font-bold text-slate-700 hover:border-brand-red/40 hover:text-brand-red focus:outline-none focus-visible:ring-2 focus-visible:ring-brand-red"
-            >
-              <Filter className="h-4 w-4" />
-              Filter
-            </button>
-          </div>
-        ) : null}
 
         <label className="space-y-2">
           <span className="text-[11px] font-black uppercase tracking-[0.16em] text-slate-500">Owner</span>
