@@ -76,6 +76,7 @@ vi.mock("@/components/ui/button", () => ({
     disabled,
     type,
     title,
+    className,
   }: {
     children: ReactNode;
     render?: ReactNode;
@@ -83,11 +84,12 @@ vi.mock("@/components/ui/button", () => ({
     disabled?: boolean;
     type?: "button" | "submit" | "reset";
     title?: string;
+    className?: string;
   }) =>
     isValidElement(render) ? (
       cloneElement(render, { onClick, children } as Record<string, unknown>)
     ) : (
-      <button type={type ?? "button"} disabled={disabled} onClick={onClick} title={title}>
+      <button type={type ?? "button"} disabled={disabled} onClick={onClick} title={title} className={className}>
         {children}
       </button>
     ),
@@ -547,6 +549,50 @@ describe("DealDetailPage", () => {
     expect(mounted.container.textContent).toContain("Stage Dialog");
   });
 
+  it("renders pipeline progress from canonical deal stages", () => {
+    const html = renderPage();
+
+    expect(html).toContain("Pipeline progress");
+    expect(html).toContain('data-stage-slug="opportunity"');
+    expect(html).toContain('data-stage-slug="estimating"');
+    expect(html).toContain('data-stage-slug="estimate_under_review"');
+    expect(html).toContain('data-stage-slug="estimate_sent_to_client"');
+    expect(html).toContain('data-stage-slug="contract"');
+    expect(html).toContain('data-stage-slug="won"');
+    expect(html).toContain('data-stage-slug="lost"');
+  });
+
+  it("uses service estimating in pipeline progress for service workflow deals", () => {
+    mocks.usePipelineStagesMock.mockReturnValueOnce({
+      stages: [
+        { id: "stage-opportunity", name: "Opportunity", slug: "opportunity", workflowFamily: "standard_deal", displayOrder: 0, isTerminal: false },
+        { id: "stage-estimating", name: "Estimating", slug: "estimating", workflowFamily: "standard_deal", displayOrder: 1, isTerminal: false },
+        { id: "stage-service-estimating", name: "Service Estimating", slug: "service_estimating", workflowFamily: "service_deal", displayOrder: 1, isTerminal: false },
+        { id: "stage-under-review", name: "Estimate Under Review", slug: "estimate_under_review", workflowFamily: "service_deal", displayOrder: 2, isTerminal: false },
+        { id: "stage-sent", name: "Estimate Sent to Client", slug: "estimate_sent_to_client", workflowFamily: "service_deal", displayOrder: 3, isTerminal: false },
+        { id: "stage-contract", name: "Contract", slug: "contract", workflowFamily: "service_deal", displayOrder: 4, isTerminal: false },
+        { id: "stage-won", name: "Won", slug: "won", workflowFamily: "service_deal", displayOrder: 5, isTerminal: true },
+        { id: "stage-lost", name: "Lost", slug: "lost", workflowFamily: "service_deal", displayOrder: 6, isTerminal: true },
+      ],
+    });
+    mocks.useDealDetailMock.mockReturnValueOnce({
+      loading: false,
+      error: null,
+      refetch: vi.fn(),
+      deal: makeDealDetail({
+        stageId: "stage-service-estimating",
+        workflowRoute: "service",
+        isBidBoardOwned: false,
+        bidBoardOwnership: null,
+      }),
+    });
+
+    const html = renderPage();
+
+    expect(html).toContain('data-stage-slug="service_estimating"');
+    expect(html).not.toContain('data-stage-slug="estimating"');
+  });
+
   it("edit button navigates to edit page", () => {
     const html = renderPage();
 
@@ -714,6 +760,8 @@ describe("DealDetailPage", () => {
     expect(html).toContain("Trigger RFP");
     expect(html).toContain("Complete Opportunity Scope to enable");
     expect(html).toContain("disabled");
+    expect(html).toContain("bg-brand-red");
+    expect(html).toContain("font-black uppercase");
   });
 
   it("hides Trigger RFP outside Opportunity, when already triggered, and when Bid Board owned", () => {

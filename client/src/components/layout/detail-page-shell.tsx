@@ -29,6 +29,7 @@ export type DetailPageShellProps = {
   subtitleSlot?: ReactNode;
   actionsSlot: ReactNode;
   kpis: DetailPageShellKpi[];
+  subheaderSlot?: ReactNode;
   tabs: DetailPageShellTab[];
   activeTabId: string;
   onTabChange: (id: string) => void;
@@ -53,6 +54,7 @@ export function DetailPageShell({
   subtitleSlot,
   actionsSlot,
   kpis,
+  subheaderSlot,
   tabs,
   activeTabId,
   onTabChange,
@@ -122,6 +124,8 @@ export function DetailPageShell({
           );
         })}
       </section>
+
+      {subheaderSlot ? <section>{subheaderSlot}</section> : null}
 
       <div className="grid gap-6 lg:grid-cols-[minmax(0,1fr)_minmax(280px,320px)]">
         <div className="min-w-0 space-y-4">

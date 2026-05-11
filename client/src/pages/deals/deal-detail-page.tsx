@@ -45,6 +45,7 @@ import { RecordingList } from "@/components/call-recordings/recording-list";
 import { DealOverviewTab } from "@/components/deals/deal-overview-tab";
 import { DealHistoryTab } from "@/components/deals/deal-history-tab";
 import { DealTimelineTab } from "@/components/deals/deal-timeline-tab";
+import { PipelineProgress } from "@/components/deals/pipeline-progress";
 import { DealScopingWorkspace } from "@/components/deals/deal-scoping-workspace";
 import { DealFileTab } from "@/components/files/deal-file-tab";
 import { DealPhotosTab } from "./deal-photos-tab";
@@ -657,8 +658,9 @@ export function DealDetailPage() {
             onClick={handleTriggerRfp}
             disabled={triggerRfpDisabled}
             title={!isRfpScopeReady ? "Complete Opportunity Scope to enable" : undefined}
+            className="h-9 rounded-md bg-brand-red px-3 text-sm font-black uppercase tracking-[0.08em] text-white shadow-sm transition hover:bg-red-700 disabled:bg-slate-200 disabled:text-slate-500 disabled:shadow-none"
           >
-            <Send className="h-4 w-4" />
+            <Send className="mr-1 h-4 w-4" />
             {rfpTriggering ? "Sending RFP..." : "Trigger RFP"}
           </Button>
           {rfpTriggerError ? (
@@ -868,6 +870,17 @@ export function DealDetailPage() {
         subtitleSlot={subtitleSlot}
         actionsSlot={actionsSlot}
         kpis={kpis}
+        subheaderSlot={
+          <PipelineProgress
+            stages={canonicalOrderedStages}
+            currentStageId={currentStage?.id ?? null}
+            workflowRoute={workflowRoute}
+            isBidBoardOwned={isBidBoardOwned}
+            handoffStageDisplayOrder={handoffStage?.displayOrder ?? null}
+            canMoveBackward={isDirectorOrAdmin}
+            onStageClick={handleStageChange}
+          />
+        }
         tabs={shellTabs}
         activeTabId={activeTab}
         onTabChange={(tab) => handleTabSelect(tab as Tab)}
