@@ -53,6 +53,11 @@ export interface ProjectListFilters {
   assignedOwner?: string | null;
   startFrom?: string | null;
   completionTo?: string | null;
+  // When omitted (default), only active projects are returned. Pass `true`
+  // to include soft-deleted (inactive) rows. The API surface is opt-in so
+  // that existing callers (Kanban, list, exports) keep their pre-soft-delete
+  // semantics until they opt into the wider view.
+  includeInactive?: boolean;
   page: number;
   perPage: number;
   sortBy?: string | null;
@@ -484,6 +489,7 @@ function toApiProject(row: any) {
     procoreProjectId: row.procore_project_id,
     procoreProjectNumber: row.procore_project_number,
     name: row.name,
+    isActive: row.is_active,
     currentPhaseId: row.current_phase_id,
     currentPhaseName: row.current_phase_name,
     currentPhaseSortOrder: row.current_phase_sort_order,
@@ -515,9 +521,13 @@ function buildWhere(filters: {
   assignedOwner?: string | null;
   startFrom?: string | null;
   completionTo?: string | null;
+  includeInactive?: boolean;
 }) {
   const conditions: string[] = [];
   const params: unknown[] = [];
+  if (!filters.includeInactive) {
+    conditions.push("p.is_active = true");
+  }
   if (filters.phase) {
     params.push(filters.phase);
     conditions.push(`(p.current_phase_id = $${params.length} OR p.current_phase_name = $${params.length})`);
@@ -541,6 +551,26 @@ function buildWhere(filters: {
   return {
     clause: conditions.length ? `WHERE ${conditions.join(" AND ")}` : "",
     params,
+  };
+}
+
+export async function getProjectCounts(client: QueryExecutor): Promise<{
+  active: number;
+  inactive: number;
+  total: number;
+}> {
+  const result = await client.query(
+    `SELECT
+       COUNT(*) FILTER (WHERE is_active = true)::int  AS active,
+       COUNT(*) FILTER (WHERE is_active = false)::int AS inactive,
+       COUNT(*)::int                                  AS total
+       FROM projects`
+  );
+  const row = result.rows[0] ?? { active: 0, inactive: 0, total: 0 };
+  return {
+    active: Number(row.active ?? 0),
+    inactive: Number(row.inactive ?? 0),
+    total: Number(row.total ?? 0),
   };
 }
 

@@ -3,6 +3,7 @@ import { pathToFileURL } from "node:url";
 import { runBackfill as runProjectNumberBackfill } from "./backfill-project-numbers.js";
 import { runBackfill as runProjectTypeBackfill } from "./backfill-project-types.js";
 import { runNormalizeProjectNumberCase } from "./normalize-project-number-case.js";
+import { runBackfillProjectsActiveFlag } from "./backfill-projects-active-flag.js";
 
 export async function runScript(argv = process.argv.slice(2)): Promise<void> {
   const [scriptName, ...rest] = argv;
@@ -22,12 +23,17 @@ export async function runScript(argv = process.argv.slice(2)): Promise<void> {
     return;
   }
 
+  if (scriptName === "backfill-projects-active-flag") {
+    await runBackfillProjectsActiveFlag(rest);
+    return;
+  }
+
   if (!scriptName || scriptName.startsWith("--")) {
     await runProjectNumberBackfill(argv);
     return;
   }
 
-  throw new Error(`Unknown script '${scriptName}'. Expected backfill-project-types, backfill-project-numbers, or normalize-project-number-case.`);
+  throw new Error(`Unknown script '${scriptName}'. Expected backfill-project-types, backfill-project-numbers, normalize-project-number-case, or backfill-projects-active-flag.`);
 }
 
 const executedPath = process.argv[1] ? pathToFileURL(path.resolve(process.argv[1])).href : "";

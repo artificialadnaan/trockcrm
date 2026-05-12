@@ -16,4 +16,14 @@ describe("projects API routes", () => {
     expect(serviceSource).toContain("FROM projects p");
     expect(serviceSource).not.toContain("office_dallas.projects p");
   });
+
+  it("parses include_inactive from the query string on list and by-phase routes", () => {
+    expect(routesSource).toMatch(/includeInactive = readQueryBoolean[\s\S]*req\.query\.include_inactive/);
+    expect(routesSource.match(/readQueryBoolean\(req\.query\.include_inactive/g)?.length ?? 0).toBeGreaterThanOrEqual(2);
+  });
+
+  it("exposes a counts route returning active / inactive / total", () => {
+    expect(routesSource).toMatch(/router\.get\("\/counts"/);
+    expect(serviceSource).toContain("export async function getProjectCounts");
+  });
 });

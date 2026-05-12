@@ -249,6 +249,181 @@ describe("projects backfill service", () => {
     expect(inserts).toHaveLength(2);
   });
 
+  // ─── Active-flag transitions across re-sync runs ───────────────────────
+  //
+  // These tests pin the six Procore↔CRM transitions for the is_active flag
+  // so a future refactor cannot silently regress the soft-delete contract.
+  // The mirror upsert sets `is_active = EXCLUDED.is_active`, so whatever
+  // value Procore reports wins on every sync. The skip rule only excludes
+  // brand-new rows that don't belong to the office.
+
+  function mockUpsertResponder(opts: {
+    existingActive?: boolean | null;
+    rowFound?: boolean;
+  }): Responder {
+    return (sql, params) => {
+      if (sql.includes("SELECT id, procore_updated_at")) {
+        if (opts.rowFound) {
+          return { rows: [{ id: "existing-uuid", procore_updated_at: null }] };
+        }
+        return { rows: [] };
+      }
+      if (sql.includes("FROM deals")) return { rows: [] };
+      if (sql.includes("SELECT id, current_phase_id, current_phase_name")) {
+        if (opts.rowFound) {
+          return {
+            rows: [
+              {
+                id: "existing-uuid",
+                current_phase_id: null,
+                current_phase_name: null,
+              },
+            ],
+          };
+        }
+        return { rows: [] };
+      }
+      if (sql.includes("INSERT INTO \"office_dallas\".projects")) {
+        return { rows: [{ id: "existing-uuid", inserted: !opts.rowFound }] };
+      }
+      return { rows: [] };
+    };
+  }
+
+  it("transition: active in Procore + not in CRM → inserts as active when office prefix matches", async () => {
+    vi.mocked(procoreClient.get).mockResolvedValueOnce([
+      {
+        id: 5001,
+        project_number: "DFW-1-05001-aa",
+        name: "New active row",
+        active: true,
+      },
+    ]);
+    const { pool, query } = createPool(mockUpsertResponder({ rowFound: false }));
+    const result = await runProjectsBackfill(pool, "office_dallas", "dallas");
+    expect(result).toMatchObject({ backfilled: 1, skipped: 0, errored: 0 });
+    const upsertCall = query.mock.calls.find(([sql]) =>
+      String(sql).includes("INSERT INTO \"office_dallas\".projects")
+    );
+    expect(upsertCall).toBeDefined();
+    // Field 16 (1-indexed) is is_active per buildProjectMirrorFields ordering.
+    expect((upsertCall![1] as unknown[])[15]).toBe(true);
+  });
+
+  it("transition: active in Procore + already in CRM as active → updates fields (no skip)", async () => {
+    vi.mocked(procoreClient.get).mockResolvedValueOnce([
+      {
+        id: 5002,
+        project_number: "DFW-1-05002-aa",
+        name: "Existing active row",
+        active: true,
+      },
+    ]);
+    const { pool, query } = createPool(mockUpsertResponder({ rowFound: true }));
+    const result = await runProjectsBackfill(pool, "office_dallas", "dallas");
+    expect(result).toMatchObject({ backfilled: 1, skipped: 0, errored: 0 });
+    const upsertCall = query.mock.calls.find(([sql]) =>
+      String(sql).includes("INSERT INTO \"office_dallas\".projects")
+    );
+    expect((upsertCall![1] as unknown[])[15]).toBe(true);
+  });
+
+  it("transition: active in Procore + in CRM as inactive → reactivates via is_active=true", async () => {
+    vi.mocked(procoreClient.get).mockResolvedValueOnce([
+      {
+        id: 5003,
+        project_number: "DFW-1-05003-aa",
+        name: "Reactivated",
+        active: true,
+      },
+    ]);
+    const { pool, query } = createPool(mockUpsertResponder({ rowFound: true }));
+    const result = await runProjectsBackfill(pool, "office_dallas", "dallas");
+    expect(result).toMatchObject({ backfilled: 1 });
+    const upsertCall = query.mock.calls.find(([sql]) =>
+      String(sql).includes("INSERT INTO \"office_dallas\".projects")
+    );
+    expect((upsertCall![1] as unknown[])[15]).toBe(true);
+  });
+
+  it("transition: inactive in Procore + in CRM as active → soft-deletes via is_active=false", async () => {
+    vi.mocked(procoreClient.get).mockResolvedValueOnce([
+      {
+        id: 5004,
+        project_number: "DFW-1-05004-aa",
+        name: "Soft-deleted",
+        active: false,
+      },
+    ]);
+    const { pool, query } = createPool(mockUpsertResponder({ rowFound: true }));
+    const result = await runProjectsBackfill(pool, "office_dallas", "dallas");
+    expect(result).toMatchObject({ backfilled: 1 });
+    const upsertCall = query.mock.calls.find(([sql]) =>
+      String(sql).includes("INSERT INTO \"office_dallas\".projects")
+    );
+    expect((upsertCall![1] as unknown[])[15]).toBe(false);
+  });
+
+  it("transition: inactive in Procore + already mirrored → updates even without office prefix or source deal", async () => {
+    // This is the durability guarantee: a previously-mirrored project whose
+    // number doesn't match the office prefix and has no linked deal must
+    // still be re-synced. Otherwise an inactive→active flip in Procore
+    // would be lost forever.
+    vi.mocked(procoreClient.get).mockResolvedValueOnce([
+      {
+        id: 5005,
+        project_number: "12345-NO-PREFIX",
+        name: "Already mirrored, no prefix",
+        active: false,
+      },
+    ]);
+    const { pool, query } = createPool(mockUpsertResponder({ rowFound: true }));
+    const result = await runProjectsBackfill(pool, "office_dallas", "dallas");
+    expect(result).toMatchObject({ backfilled: 1, skipped: 0 });
+    const upsertCall = query.mock.calls.find(([sql]) =>
+      String(sql).includes("INSERT INTO \"office_dallas\".projects")
+    );
+    expect((upsertCall![1] as unknown[])[15]).toBe(false);
+  });
+
+  it("transition: inactive in Procore + not in CRM + no prefix → skips the insert", async () => {
+    // We don't want to insert brand-new inactive rows with no office tie —
+    // they'd just add noise to the mirror and be hidden by default anyway.
+    vi.mocked(procoreClient.get).mockResolvedValueOnce([
+      {
+        id: 5006,
+        project_number: "99999-NO-PREFIX",
+        name: "New, inactive, foreign",
+        active: false,
+      },
+    ]);
+    const { pool, query } = createPool(mockUpsertResponder({ rowFound: false }));
+    const result = await runProjectsBackfill(pool, "office_dallas", "dallas");
+    expect(result).toMatchObject({ backfilled: 0, skipped: 1 });
+    const insertCalls = query.mock.calls.filter(([sql]) =>
+      String(sql).includes("INSERT INTO \"office_dallas\".projects")
+    );
+    expect(insertCalls).toHaveLength(0);
+  });
+
+  it("transition: inactive in Procore + in CRM as inactive → still runs upsert (idempotent, sets is_active=false)", async () => {
+    vi.mocked(procoreClient.get).mockResolvedValueOnce([
+      {
+        id: 5007,
+        project_number: "DFW-1-05007-aa",
+        name: "Already inactive",
+        active: false,
+      },
+    ]);
+    const { pool, query } = createPool(mockUpsertResponder({ rowFound: true }));
+    const result = await runProjectsBackfill(pool, "office_dallas", "dallas");
+    expect(result).toMatchObject({ backfilled: 1 });
+    const upsertCall = query.mock.calls.find(([sql]) =>
+      String(sql).includes("INSERT INTO \"office_dallas\".projects")
+    );
+    expect((upsertCall![1] as unknown[])[15]).toBe(false);
+  });
+
   it("resets search_path before releasing the pool client so it does not leak to the next consumer", async () => {
     vi.mocked(procoreClient.get).mockResolvedValueOnce([]);
 

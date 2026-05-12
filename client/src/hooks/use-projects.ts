@@ -15,6 +15,7 @@ export interface ProjectSummary {
   procoreProjectId: string;
   procoreProjectNumber: string | null;
   name: string;
+  isActive: boolean;
   currentPhaseId: string | null;
   currentPhaseName: string | null;
   currentPhaseSortOrder: number | null;

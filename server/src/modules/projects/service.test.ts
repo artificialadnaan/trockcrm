@@ -1,6 +1,9 @@
 import { describe, expect, it, vi } from "vitest";
 import {
   buildProjectMirrorFields,
+  getProjectCounts,
+  listProjects,
+  listProjectsByPhase,
   upsertProjectMirror,
 } from "./service.js";
 
@@ -118,6 +121,63 @@ describe("projects mirror service", () => {
     expect(sqlText).toContain("RETURNING id, (xmax = 0) AS inserted");
     expect(sqlText).toContain("INSERT INTO \"office_dallas\".project_phase_history");
     expect(sqlText).toContain("ON CONFLICT DO NOTHING");
+  });
+
+  describe("active filter on list endpoints", () => {
+    function captureSql() {
+      const seen: { sql: string; params: unknown[] | undefined }[] = [];
+      const query = vi.fn(async (sql: string, params?: unknown[]) => {
+        seen.push({ sql, params });
+        if (sql.includes("SELECT COUNT(*)")) return { rows: [{ total: 0 }] };
+        return { rows: [] };
+      });
+      return { client: { query } as any, seen };
+    }
+
+    it("listProjects applies is_active = true by default", async () => {
+      const { client, seen } = captureSql();
+      await listProjects(client, { page: 1, perPage: 25 });
+      const sqls = seen.map((entry) => entry.sql).join("\n");
+      expect(sqls).toContain("p.is_active = true");
+    });
+
+    it("listProjects omits the is_active filter when includeInactive=true", async () => {
+      const { client, seen } = captureSql();
+      await listProjects(client, { page: 1, perPage: 25, includeInactive: true });
+      const sqls = seen.map((entry) => entry.sql).join("\n");
+      expect(sqls).not.toContain("p.is_active = true");
+    });
+
+    it("listProjectsByPhase applies is_active = true by default", async () => {
+      const { client, seen } = captureSql();
+      await listProjectsByPhase(client, {});
+      const sqls = seen.map((entry) => entry.sql).join("\n");
+      expect(sqls).toContain("p.is_active = true");
+    });
+
+    it("listProjectsByPhase omits the is_active filter when includeInactive=true", async () => {
+      const { client, seen } = captureSql();
+      await listProjectsByPhase(client, { includeInactive: true });
+      const sqls = seen.map((entry) => entry.sql).join("\n");
+      expect(sqls).not.toContain("p.is_active = true");
+    });
+  });
+
+  describe("getProjectCounts", () => {
+    it("returns active / inactive / total split from a single COUNT(*) FILTER query", async () => {
+      const query = vi.fn(async (_sql: string, _params?: unknown[]) => ({
+        rows: [{ active: 330, inactive: 392, total: 722 }],
+      }));
+      const counts = await getProjectCounts({ query } as any);
+      expect(counts).toEqual({ active: 330, inactive: 392, total: 722 });
+      expect(String(query.mock.calls[0]?.[0] ?? "")).toMatch(/COUNT\(\*\) FILTER \(WHERE is_active = true\)/);
+    });
+
+    it("falls back to zeros when the query returns no rows", async () => {
+      const query = vi.fn(async (_sql: string, _params?: unknown[]) => ({ rows: [] as unknown[] }));
+      const counts = await getProjectCounts({ query } as any);
+      expect(counts).toEqual({ active: 0, inactive: 0, total: 0 });
+    });
   });
 
   it("creates one initial phase history row for concurrent phase-name-only upserts", async () => {

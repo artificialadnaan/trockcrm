@@ -121,7 +121,15 @@ async function processRow(
       normalized.procoreProjectId,
       normalized.procoreProjectNumber
     );
+    // The office-prefix gate only applies to NEW inserts. Once a project is
+    // mirrored, every subsequent sync must update it — otherwise an
+    // inactive→active flip in Procore would be lost (the mirror would skip
+    // the row forever and the CRM row would stay stale). Keeping
+    // already-mirrored rows in the update path is also what makes the
+    // soft-delete reversible: if Procore reactivates a project, the next
+    // sync flips is_active back to true via EXCLUDED.is_active.
     if (
+      !existing &&
       !mirrorAllProjects &&
       !sourceDealId &&
       !projectNumberBelongsToOffice(normalized.procoreProjectNumber, officeSlug)

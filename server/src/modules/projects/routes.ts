@@ -4,6 +4,7 @@ import { AppError } from "../../middleware/error-handler.js";
 import { pool } from "../../db.js";
 import { runProjectsBackfill } from "./backfill-service.js";
 import {
+  getProjectCounts,
   getProjectDetail,
   getProjectDocuments,
   getProjectPhaseHistory,
@@ -17,6 +18,13 @@ const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3
 
 function readQueryString(value: unknown): string | null {
   return typeof value === "string" && value.trim() ? value.trim() : null;
+}
+
+function readQueryBoolean(value: unknown): boolean {
+  if (typeof value === "boolean") return value;
+  if (typeof value !== "string") return false;
+  const normalized = value.trim().toLowerCase();
+  return normalized === "true" || normalized === "1" || normalized === "yes";
 }
 
 function requireUuid(value: unknown, label: string) {
@@ -33,12 +41,14 @@ function currentSchema(req: Request) {
 
 router.get("/", async (req, res, next) => {
   try {
+    const includeInactive = readQueryBoolean(req.query.include_inactive ?? req.query.includeInactive);
     const data = await listProjects(req.tenantClient!, {
       phase: readQueryString(req.query.phase),
       search: readQueryString(req.query.search),
       assignedOwner: readQueryString(req.query.assigned_owner),
       startFrom: readQueryString(req.query.start_from),
       completionTo: readQueryString(req.query.completion_to),
+      includeInactive,
       page: Number(req.query.page ?? 1),
       perPage: Number(req.query.perPage ?? req.query.per_page ?? 25),
       sortBy: readQueryString(req.query.sortBy ?? req.query.sort_by),
@@ -51,14 +61,26 @@ router.get("/", async (req, res, next) => {
   }
 });
 
+router.get("/counts", async (req, res, next) => {
+  try {
+    const data = await getProjectCounts(req.tenantClient!);
+    await req.commitTransaction!();
+    res.json(data);
+  } catch (error) {
+    next(error);
+  }
+});
+
 router.get("/by-phase", async (req, res, next) => {
   try {
+    const includeInactive = readQueryBoolean(req.query.include_inactive ?? req.query.includeInactive);
     const data = await listProjectsByPhase(req.tenantClient!, {
       phase: readQueryString(req.query.phase),
       search: readQueryString(req.query.search),
       assignedOwner: readQueryString(req.query.assigned_owner),
       startFrom: readQueryString(req.query.start_from),
       completionTo: readQueryString(req.query.completion_to),
+      includeInactive,
     });
     await req.commitTransaction!();
     res.json(data);
