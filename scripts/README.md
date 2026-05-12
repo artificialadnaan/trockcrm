@@ -41,6 +41,7 @@ railway run --service=Postgres npx tsx scripts/companycam-import.ts --tenant=off
 ```
 
 Unscoped `--execute` is blocked unless `--limit` or the explicit `--allow-bulk-execute` flag is provided after a pilot has been reviewed.
+`--limit` must be a positive integer. The importer also enforces one CompanyCam project per matched CRM deal by default; duplicate matches write `docs/audit/companycam-match-conflicts-<timestamp>.csv` and block `--execute` unless `--no-strict-one-to-one` is passed deliberately after review. That override still imports only the highest-confidence project per deal; dropped conflicts remain deferred for manual matching.
 
 HubSpot cutover reconciliation is read-only and expects fresh HubSpot CSV exports:
 

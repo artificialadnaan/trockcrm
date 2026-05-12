@@ -1,20 +1,35 @@
 import "dotenv/config";
 import crypto from "node:crypto";
+import fs from "node:fs";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 import pg from "pg";
 import { getAllProjects, getProjectPhotos, type CCPhoto } from "../server/src/modules/companycam/client.js";
 import { isR2Configured, putObject } from "../server/src/lib/r2-client.js";
 import { buildCompanyCamImportPlan, type DealForCompanyCamPlan } from "./companycam-inventory.js";
+import type { CompanyCamImportPlanRow } from "./companycam-inventory.js";
 
 const DEFAULT_TENANT = "office_dallas";
 
-interface Options {
+export interface CompanyCamImportOptions {
   tenant: string;
   execute: boolean;
   allowBulkExecute: boolean;
+  strictOneToOne?: boolean;
   projectId?: string;
   limit?: number;
+}
+
+export interface CompanyCamMatchConflict {
+  matchedDealId: string;
+  matchedDealName: string | null;
+  keptCompanyCamProjectId: string;
+  keptCompanyCamProjectName: string;
+  keptConfidence: number;
+  droppedCompanyCamProjectId: string;
+  droppedCompanyCamProjectName: string;
+  droppedConfidence: number;
+  reason: string;
 }
 
 function quoteIdent(value: string): string {
@@ -31,21 +46,123 @@ function getConnectionString() {
   return selected;
 }
 
-function parseArgs(argv: string[]): Options {
+function parseLimit(value: string | undefined): number | undefined {
+  if (value === undefined) return undefined;
+  if (!/^\d+$/.test(value)) {
+    throw new Error(`--limit must be a positive integer (got ${value})`);
+  }
+  const limit = Number(value);
+  if (!Number.isSafeInteger(limit) || limit < 1) {
+    throw new Error(`--limit must be a positive integer (got ${value})`);
+  }
+  return limit;
+}
+
+export function parseCompanyCamImportArgs(argv: string[]): CompanyCamImportOptions {
   const limitArg = argv.find((arg) => arg.startsWith("--limit="))?.split("=").slice(1).join("=");
   return {
     tenant: argv.find((arg) => arg.startsWith("--tenant="))?.split("=").slice(1).join("=") || DEFAULT_TENANT,
     execute: argv.includes("--execute"),
     allowBulkExecute: argv.includes("--allow-bulk-execute"),
+    strictOneToOne: !argv.includes("--no-strict-one-to-one") && !argv.includes("--strict-one-to-one=false"),
     projectId: argv.find((arg) => arg.startsWith("--project-id="))?.split("=").slice(1).join("="),
-    limit: limitArg ? Number(limitArg) : undefined,
+    limit: parseLimit(limitArg),
   };
 }
 
-export function validateCompanyCamImportOptions(options: Options) {
-  if (options.execute && !options.projectId && !options.limit && !options.allowBulkExecute) {
+export function validateCompanyCamImportOptions(options: CompanyCamImportOptions) {
+  if (options.limit !== undefined && (!Number.isInteger(options.limit) || options.limit < 1)) {
+    throw new Error(`--limit must be a positive integer (got ${options.limit})`);
+  }
+  if (options.execute && !options.projectId && options.limit === undefined && !options.allowBulkExecute) {
     throw new Error("--execute requires --project-id, --limit, or --allow-bulk-execute.");
   }
+}
+
+function matchPriority(row: CompanyCamImportPlanRow) {
+  if (row.matchReason === "existing_companycam_link") return 3;
+  if (row.matchReason === "project_number_in_name") return 2;
+  return 1;
+}
+
+function compareMatches(left: CompanyCamImportPlanRow, right: CompanyCamImportPlanRow) {
+  if (left.confidence !== right.confidence) return right.confidence - left.confidence;
+  const priorityDelta = matchPriority(right) - matchPriority(left);
+  if (priorityDelta !== 0) return priorityDelta;
+  if (left.photoCount !== right.photoCount) return right.photoCount - left.photoCount;
+  return left.companyCamProjectId.localeCompare(right.companyCamProjectId);
+}
+
+export function prepareCompanyCamImportRows(
+  planRows: CompanyCamImportPlanRow[],
+  options: Pick<CompanyCamImportOptions, "projectId" | "limit"> = {}
+) {
+  const candidates = planRows.filter((row) => row.matchedDealId && row.confidence >= 0.9);
+  const byDealId = new Map<string, CompanyCamImportPlanRow[]>();
+  for (const row of candidates) {
+    byDealId.set(row.matchedDealId!, [...(byDealId.get(row.matchedDealId!) ?? []), row]);
+  }
+
+  const keptProjectIds = new Set<string>();
+  const conflicts: CompanyCamMatchConflict[] = [];
+  for (const [matchedDealId, rows] of byDealId) {
+    const [kept, ...dropped] = [...rows].sort(compareMatches);
+    if (!kept) continue;
+    keptProjectIds.add(kept.companyCamProjectId);
+    for (const row of dropped) {
+      conflicts.push({
+        matchedDealId,
+        matchedDealName: kept.matchedDealName,
+        keptCompanyCamProjectId: kept.companyCamProjectId,
+        keptCompanyCamProjectName: kept.companyCamProjectName,
+        keptConfidence: kept.confidence,
+        droppedCompanyCamProjectId: row.companyCamProjectId,
+        droppedCompanyCamProjectName: row.companyCamProjectName,
+        droppedConfidence: row.confidence,
+        reason: `CompanyCam project ${row.companyCamProjectId} dropped - deal ${matchedDealId} already matched to higher-confidence project ${kept.companyCamProjectId} (confidence ${kept.confidence} vs ${row.confidence})`,
+      });
+    }
+  }
+
+  return {
+    rows: candidates
+      .filter((row) => keptProjectIds.has(row.companyCamProjectId))
+      .filter((row) => !options.projectId || row.companyCamProjectId === options.projectId)
+      .slice(0, options.limit),
+    conflicts,
+  };
+}
+
+export function validateCompanyCamMatchConflicts(
+  conflicts: CompanyCamMatchConflict[],
+  options: Pick<CompanyCamImportOptions, "execute" | "strictOneToOne">
+) {
+  if (options.execute && options.strictOneToOne !== false && conflicts.length > 0) {
+    throw new Error(`Refusing to import with ${conflicts.length} duplicate CompanyCam deal matches. Review companycam-match-conflicts CSV or pass --no-strict-one-to-one to continue with only the highest-confidence match per deal.`);
+  }
+}
+
+function csvEscape(value: unknown) {
+  return `"${String(value ?? "").replace(/"/g, '""')}"`;
+}
+
+function writeMatchConflictsCsv(conflicts: CompanyCamMatchConflict[], outputPath: string) {
+  fs.mkdirSync(path.dirname(outputPath), { recursive: true });
+  const rows = [
+    ["matched_deal_id", "matched_deal_name", "kept_project_id", "kept_project_name", "kept_confidence", "dropped_project_id", "dropped_project_name", "dropped_confidence", "reason"],
+    ...conflicts.map((conflict) => [
+      conflict.matchedDealId,
+      conflict.matchedDealName ?? "",
+      conflict.keptCompanyCamProjectId,
+      conflict.keptCompanyCamProjectName,
+      String(conflict.keptConfidence),
+      conflict.droppedCompanyCamProjectId,
+      conflict.droppedCompanyCamProjectName,
+      String(conflict.droppedConfidence),
+      conflict.reason,
+    ]),
+  ];
+  fs.writeFileSync(outputPath, rows.map((row) => row.map(csvEscape).join(",")).join("\n"));
 }
 
 async function loadDeals(client: pg.Client, tenant: string): Promise<DealForCompanyCamPlan[]> {
@@ -203,8 +320,9 @@ async function importPhoto(input: {
 }
 
 export async function runCompanyCamImport(argv = process.argv.slice(2)) {
-  const options = parseArgs(argv);
+  const options = parseCompanyCamImportArgs(argv);
   validateCompanyCamImportOptions(options);
+  const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
   const client = new pg.Client({ connectionString: getConnectionString() });
   await client.connect();
   try {
@@ -213,11 +331,15 @@ export async function runCompanyCamImport(argv = process.argv.slice(2)) {
       projects.map((project) => ({ id: project.id, name: project.name, photoCount: project.photo_count ?? 0 })),
       deals
     );
+    const prepared = prepareCompanyCamImportRows(plan.rows, options);
+    const conflictsPath = `docs/audit/companycam-match-conflicts-${timestamp}.csv`;
+    if (prepared.conflicts.length > 0) {
+      for (const conflict of prepared.conflicts) console.warn(conflict.reason);
+      writeMatchConflictsCsv(prepared.conflicts, conflictsPath);
+    }
+    validateCompanyCamMatchConflicts(prepared.conflicts, options);
     const userId = options.execute ? await getImportUserId(client) : "dry-run";
-    const rows = plan.rows
-      .filter((row) => row.matchedDealId && row.confidence >= 0.9)
-      .filter((row) => !options.projectId || row.companyCamProjectId === options.projectId)
-      .slice(0, options.limit);
+    const rows = prepared.rows;
     let imported = 0;
     let skipped = 0;
     for (const row of rows) {
@@ -257,6 +379,8 @@ export async function runCompanyCamImport(argv = process.argv.slice(2)) {
       tenant: options.tenant,
       dryRun: !options.execute,
       projectsConsidered: rows.length,
+      matchConflicts: prepared.conflicts.length,
+      matchConflictsPath: prepared.conflicts.length > 0 ? conflictsPath : null,
       imported,
       skippedExisting: skipped,
       fullRunRecommendation: plan.totals.totalPhotos > 10_000 ? "defer_full_run_post_go_live" : "eligible_after_pilot",
