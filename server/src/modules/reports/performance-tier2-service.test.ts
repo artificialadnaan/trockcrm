@@ -99,7 +99,10 @@ describe("performance tier 2 report service helpers", () => {
     const [kpiSql, riskSql, repSql, officeSql] = executedSql(db);
     expect(kpiSql).toContain("won_lost");
     expect(kpiSql).toContain("u.id IN");
-    expect(kpiSql).toContain("o.slug = ");
+    // Office filter is now applied via the shared multi-column matcher
+    // (UUID/slug/name/office_code); the literal `o.slug = ` is no longer
+    // emitted, but the slug column is still part of the OR clause.
+    expect(kpiSql).toContain("o.slug");
     expect(riskSql).toContain("overdue_tasks");
     expect(riskSql).toContain("task_deals");
     expect(riskSql).toContain("u.id = t.assigned_to");
@@ -169,6 +172,71 @@ describe("performance tier 2 report service helpers", () => {
     expect(result.kpis.totalTouchpoints).toBe(10);
     expect(result.timeline[0]).toEqual({ date: "2026-05-01", touchpoints: 4 });
     expect(result.activityByType[0]).toEqual({ type: "Email", count: 5 });
+  });
+
+  it("emits a multi-column office matcher (id, slug, name, deal office_code) for tier 2 scopes", async () => {
+    const seenQueries: unknown[] = [];
+    const tenantDb = {
+      execute: vi.fn().mockImplementation((query: unknown) => {
+        seenQueries.push(query);
+        return Promise.resolve({ rows: [] });
+      }),
+    } as any;
+
+    await getDirectorScorecard(
+      tenantDb,
+      {
+        dateFrom: "2026-02-01",
+        dateTo: "2026-05-01",
+        office: "dallas",
+        ownerIds: [],
+        ownerNames: [],
+      },
+      "tenant-key-tier2-office",
+    );
+
+    function extractSqlText(value: unknown): string {
+      if (typeof value === "string") return value;
+      if (!value || typeof value !== "object") return "";
+      if (Array.isArray((value as { queryChunks?: unknown[] }).queryChunks)) {
+        return (value as { queryChunks: unknown[] }).queryChunks.map(extractSqlText).join("");
+      }
+      if ("value" in (value as Record<string, unknown>)) {
+        const chunkValue = (value as { value: unknown }).value;
+        if (Array.isArray(chunkValue)) return chunkValue.map(extractSqlText).join("");
+        if (typeof chunkValue === "string") return chunkValue;
+      }
+      if ("name" in (value as Record<string, unknown>) && typeof (value as { name?: unknown }).name === "string") {
+        return (value as { name: string }).name;
+      }
+      return "";
+    }
+
+    const fullSql = seenQueries.map(extractSqlText).join("\n");
+    expect(fullSql).toContain("o.id");
+    expect(fullSql).toContain("o.slug");
+    expect(fullSql).toContain("o.name");
+    expect(fullSql).toContain("d.office_code");
+  });
+
+  it("buildWonDateSql uses AT TIME ZONE 'UTC' for actual_close_date, not ::timestamptz", async () => {
+    const db = tenantDbWithEmptyRows();
+
+    await getDirectorScorecard(
+      db,
+      {
+        dateFrom: "2026-02-01",
+        dateTo: "2026-05-01",
+        office: undefined,
+        ownerIds: [],
+        ownerNames: [],
+      },
+      "tenant-tz-anchoring"
+    );
+
+    const sqlText = executedSql(db).join("\n");
+    expect(sqlText).toContain("actual_close_date AT TIME ZONE 'UTC'");
+    expect(sqlText).not.toContain("actual_close_date::timestamptz");
   });
 
   it("builds forecast accuracy with variance metrics and at-risk deals", () => {

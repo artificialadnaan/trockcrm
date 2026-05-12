@@ -1,6 +1,7 @@
 import { sql } from "drizzle-orm";
 import type { NodePgDatabase } from "drizzle-orm/node-postgres";
 import type * as schema from "@trock-crm/shared/schema";
+import { buildOfficeMatcher } from "./office-filter.js";
 
 type TenantDb = NodePgDatabase<typeof schema>;
 type ExecuteRows<T> = { rows: T[] } | T[];
@@ -247,11 +248,23 @@ export function clearOperationsReportsCache() {
   reportCache.clear();
 }
 
-function withCache<T>(reportName: string, filters: OperationsReportFilters, loader: () => Promise<T>) {
-  const cacheKey = JSON.stringify({ reportName, filters });
+function withCache<T extends { filters: OperationsReportFilters }>(
+  reportName: string,
+  filters: OperationsReportFilters,
+  loader: () => Promise<T>,
+) {
+  // Active-work reports intentionally ignore date filters in SQL (see
+  // baseOpenDealWhere). Stripping dateFrom/dateTo from the cache key prevents
+  // identical queries from re-running just because the URL date range moved.
+  const { dateFrom: _from, dateTo: _to, ...cacheableFilters } = filters;
+  const cacheKey = JSON.stringify({ reportName, filters: cacheableFilters });
   const cached = reportCache.get(cacheKey) as CacheEntry<T> | undefined;
   if (cached && cached.expiresAt > Date.now()) {
-    return Promise.resolve(cached.value);
+    // The cached payload may have been built for a different requested date
+    // range. Overlay the current request's filters so the response metadata
+    // (and any downstream consumers that read filters.dateFrom/dateTo) match
+    // what the caller asked for.
+    return Promise.resolve({ ...cached.value, filters });
   }
 
   return loader().then((value) => {
@@ -273,13 +286,12 @@ function ownerFilter(filters: OperationsReportFilters) {
 }
 
 function officeFilter(filters: OperationsReportFilters) {
-  if (!filters.office || filters.office === "all") return sql`TRUE`;
-  return sql`(
-    LOWER(COALESCE(d.office_code, '')) = LOWER(${filters.office})
-    OR office_scope.id::text = ${filters.office}
-    OR LOWER(COALESCE(office_scope.slug, '')) = LOWER(${filters.office})
-    OR LOWER(COALESCE(office_scope.name, '')) = LOWER(${filters.office})
-  )`;
+  return buildOfficeMatcher(filters.office, {
+    officeId: sql`office_scope.id`,
+    officeSlug: sql`office_scope.slug`,
+    officeName: sql`office_scope.name`,
+    dealOfficeCode: sql`d.office_code`,
+  }) ?? sql`TRUE`;
 }
 
 function baseOpenDealWhere(filters: OperationsReportFilters) {

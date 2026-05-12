@@ -181,4 +181,42 @@ describe("analytics tier 4 service", () => {
       days: 31,
     });
   });
+
+  it("anchors date bounds at UTC so monthly buckets do not drift in non-UTC sessions", async () => {
+    // We don't actually run the SQL; we inspect the drizzle query chunks to
+    // verify that filter.from / filter.to are cast to ::date AT TIME ZONE 'UTC'
+    // rather than ::timestamptz (which uses session TZ).
+    const seenQueries: unknown[] = [];
+    const tenantDb = {
+      execute: vi.fn().mockImplementation((query: unknown) => {
+        seenQueries.push(query);
+        return Promise.resolve({ rows: [] });
+      }),
+    } as any;
+
+    await getMarketMixReport(tenantDb, { from: "2026-03-01", to: "2026-03-31" });
+
+    function extractSqlText(value: unknown): string {
+      if (typeof value === "string") return value;
+      if (!value || typeof value !== "object") return "";
+      if (Array.isArray((value as { queryChunks?: unknown[] }).queryChunks)) {
+        return (value as { queryChunks: unknown[] }).queryChunks.map(extractSqlText).join("");
+      }
+      if ("value" in (value as Record<string, unknown>)) {
+        const chunkValue = (value as { value: unknown }).value;
+        if (Array.isArray(chunkValue)) return chunkValue.map(extractSqlText).join("");
+        if (typeof chunkValue === "string") return chunkValue;
+      }
+      if ("name" in (value as Record<string, unknown>) && typeof (value as { name?: unknown }).name === "string") {
+        return (value as { name: string }).name;
+      }
+      return "";
+    }
+
+    const fullSql = seenQueries.map(extractSqlText).join("\n");
+    expect(fullSql).toMatch(/AT TIME ZONE 'UTC'/);
+    // No bare `::timestamptz` casts on date literals (we use AT TIME ZONE 'UTC').
+    expect(fullSql).not.toMatch(/::date\s*\)\s*::timestamptz/);
+    expect(fullSql).not.toMatch(/\$\d+::timestamptz/);
+  });
 });

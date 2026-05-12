@@ -114,6 +114,63 @@ describe("operations tier 3 reports", () => {
     expect(tenantDb.execute).toHaveBeenCalledTimes(6);
   });
 
+  it("reuses the workflow-bottlenecks cache when only the date range changes", async () => {
+    // Active-work reports intentionally exclude date filters from SQL, so the
+    // cache key must also exclude them or every range change re-issues the
+    // same three queries.
+    const results = [
+      [{ stage_name: "Scoping", open_deal_count: 1, avg_days_in_stage: 10, median_days_in_stage: 10, max_days_in_stage: 10, stuck_deal_count: 0 }],
+      [],
+      [],
+    ];
+    const tenantDb = makeTenantDb(results);
+
+    await getWorkflowBottlenecksReport(tenantDb, {
+      dateFrom: "2026-02-01",
+      dateTo: "2026-05-11",
+      cacheScope: "tenant-a",
+    });
+    await getWorkflowBottlenecksReport(tenantDb, {
+      dateFrom: "2025-01-01",
+      dateTo: "2025-12-31",
+      cacheScope: "tenant-a",
+    });
+
+    expect(tenantDb.execute).toHaveBeenCalledTimes(3);
+  });
+
+  it("overlays the current request date range onto the cached response filters", async () => {
+    // The cache key intentionally ignores dateFrom/dateTo (active-work reports
+    // do not filter by date in SQL), but the response embeds `filters` for
+    // downstream consumers (UI badges, export metadata). On a cache hit the
+    // helper must overlay the new request's dates so a second caller does not
+    // see stale dateFrom/dateTo from the first call.
+    const results = [
+      [{ stage_name: "Scoping", open_deal_count: 1, avg_days_in_stage: 10, median_days_in_stage: 10, max_days_in_stage: 10, stuck_deal_count: 0 }],
+      [],
+      [],
+    ];
+    const tenantDb = makeTenantDb(results);
+
+    const first = await getWorkflowBottlenecksReport(tenantDb, {
+      dateFrom: "2026-02-01",
+      dateTo: "2026-05-11",
+      cacheScope: "tenant-a",
+    });
+    const second = await getWorkflowBottlenecksReport(tenantDb, {
+      dateFrom: "2025-01-01",
+      dateTo: "2025-12-31",
+      cacheScope: "tenant-a",
+    });
+
+    expect(first.filters.dateFrom).toBe("2026-02-01");
+    expect(first.filters.dateTo).toBe("2026-05-11");
+    // The second call hits cache (asserted in the previous test) but its
+    // filters should reflect ITS request, not the first one's.
+    expect(second.filters.dateFrom).toBe("2025-01-01");
+    expect(second.filters.dateTo).toBe("2025-12-31");
+  });
+
   it("does not date-bound current active-work reports by deal creation date", async () => {
     const tenantDb = makeTenantDb([[], [], [], [], []]);
 

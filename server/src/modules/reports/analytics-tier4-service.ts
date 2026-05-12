@@ -1,12 +1,12 @@
 import { sql, type SQL } from "drizzle-orm";
 import type { NodePgDatabase } from "drizzle-orm/node-postgres";
 import type * as schema from "@trock-crm/shared/schema";
+import { buildOfficeExistsMatcher } from "./office-filter.js";
 
 type TenantDb = NodePgDatabase<typeof schema>;
 type ExecuteRows<T> = { rows: T[] } | T[];
 
 const CACHE_TTL_MS = 5 * 60 * 1000;
-const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const WON_STAGE_SLUGS = ["won", "sent_to_production", "service_sent_to_production", "closed_won"];
 const LOST_STAGE_SLUGS = ["lost", "production_lost", "service_lost", "closed_lost"];
 
@@ -140,8 +140,8 @@ function sqlStringList(values: readonly string[]) {
 function buildWhere(filters: ReturnType<typeof normalizeFilters>, dateColumn: SQL = sql`d.created_at`) {
   return sql`
     ${buildScopeWhere(filters)}
-    AND ${dateColumn} >= ${filters.from}::timestamptz
-    AND ${dateColumn} < (${filters.to}::date + INTERVAL '1 day')::timestamptz
+    AND ${dateColumn} >= (${filters.from}::date AT TIME ZONE 'UTC')
+    AND ${dateColumn} < ((${filters.to}::date + INTERVAL '1 day') AT TIME ZONE 'UTC')
   `;
 }
 
@@ -151,23 +151,8 @@ function buildScopeWhere(filters: ReturnType<typeof normalizeFilters>) {
     : filters.ownerNames.length
       ? sql`AND u.display_name IN (${sqlStringList(filters.ownerNames)})`
     : sql``;
-  const officeFilter = filters.office
-    ? UUID_PATTERN.test(filters.office)
-      ? sql`AND (
-          u.office_id = ${filters.office}::uuid
-          OR EXISTS (
-            SELECT 1
-            FROM offices office_scope
-            WHERE office_scope.id = ${filters.office}::uuid
-              AND (
-                LOWER(COALESCE(d.office_code, '')) = LOWER(office_scope.slug)
-                OR LOWER(COALESCE(d.office_code, '')) = LOWER(office_scope.name)
-                OR COALESCE(d.office_code, '') = office_scope.id::text
-              )
-          )
-        )`
-      : sql`AND LOWER(COALESCE(d.office_code, '')) = LOWER(${filters.office})`
-    : sql``;
+  const officeClause = buildOfficeExistsMatcher(filters.office);
+  const officeFilter = officeClause ? sql`AND ${officeClause}` : sql``;
 
   return sql`
     COALESCE(d.is_test_data, false) = false
@@ -587,9 +572,9 @@ export async function getExecutiveTrendsReport(
     const [kpiRows, monthlyRows, quarterlyRows, winRateRows, progressionRows] = await Promise.all([
       tenantDb.execute(sql`
         WITH periods AS (
-          SELECT 'current' AS metric, ${filters.from}::timestamptz AS from_date, (${filters.to}::date + INTERVAL '1 day')::timestamptz AS to_date
+          SELECT 'current' AS metric, (${filters.from}::date AT TIME ZONE 'UTC') AS from_date, ((${filters.to}::date + INTERVAL '1 day') AT TIME ZONE 'UTC') AS to_date
           UNION ALL
-          SELECT 'previous' AS metric, ${previousPeriod.previousFrom}::timestamptz AS from_date, ${previousPeriod.previousToExclusive}::timestamptz AS to_date
+          SELECT 'previous' AS metric, (${previousPeriod.previousFrom}::date AT TIME ZONE 'UTC') AS from_date, (${previousPeriod.previousToExclusive}::date AT TIME ZONE 'UTC') AS to_date
         )
         SELECT
           p.metric,
@@ -613,8 +598,8 @@ export async function getExecutiveTrendsReport(
         WITH months AS (
           SELECT TO_CHAR(month_start, 'YYYY-MM') AS month
           FROM generate_series(
-            date_trunc('month', ${filters.from}::timestamptz AT TIME ZONE 'UTC'),
-            date_trunc('month', ${filters.to}::timestamptz AT TIME ZONE 'UTC'),
+            date_trunc('month', (${filters.from}::date AT TIME ZONE 'UTC')),
+            date_trunc('month', (${filters.to}::date AT TIME ZONE 'UTC')),
             INTERVAL '1 month'
           ) month_start
         ),
@@ -638,12 +623,12 @@ export async function getExecutiveTrendsReport(
           GROUP BY TO_CHAR(dsh.created_at AT TIME ZONE 'UTC', 'YYYY-MM')
         ),
         won_fallback AS (
-          SELECT TO_CHAR(COALESCE(d.actual_close_date::timestamptz, d.updated_at) AT TIME ZONE 'UTC', 'YYYY-MM') AS month,
+          SELECT TO_CHAR(COALESCE((d.actual_close_date AT TIME ZONE 'UTC'), d.updated_at) AT TIME ZONE 'UTC', 'YYYY-MM') AS month,
             COUNT(DISTINCT d.id)::int AS won_deals
           FROM deals d
           LEFT JOIN users u ON u.id = d.assigned_rep_id
           JOIN pipeline_stage_config psc ON psc.id = d.stage_id
-          WHERE ${buildWhere(filters, sql`COALESCE(d.actual_close_date::timestamptz, d.updated_at)`)}
+          WHERE ${buildWhere(filters, sql`COALESCE((d.actual_close_date AT TIME ZONE 'UTC'), d.updated_at)`)}
             AND psc.slug IN (${sqlStringList(WON_STAGE_SLUGS)})
             AND NOT EXISTS (
               SELECT 1
@@ -652,7 +637,7 @@ export async function getExecutiveTrendsReport(
               WHERE history.deal_id = d.id
                 AND history_stage.slug IN (${sqlStringList(WON_STAGE_SLUGS)})
             )
-          GROUP BY TO_CHAR(COALESCE(d.actual_close_date::timestamptz, d.updated_at) AT TIME ZONE 'UTC', 'YYYY-MM')
+          GROUP BY TO_CHAR(COALESCE((d.actual_close_date AT TIME ZONE 'UTC'), d.updated_at) AT TIME ZONE 'UTC', 'YYYY-MM')
         ),
         lost_history AS (
           SELECT TO_CHAR(dsh.created_at AT TIME ZONE 'UTC', 'YYYY-MM') AS month,
