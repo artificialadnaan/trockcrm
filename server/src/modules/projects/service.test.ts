@@ -1,6 +1,11 @@
 import { describe, expect, it, vi } from "vitest";
 import {
   buildProjectMirrorFields,
+  deriveIsActive,
+  getProjectCounts,
+  getProjectDetail,
+  listProjects,
+  listProjectsByPhase,
   upsertProjectMirror,
 } from "./service.js";
 
@@ -118,6 +123,161 @@ describe("projects mirror service", () => {
     expect(sqlText).toContain("RETURNING id, (xmax = 0) AS inserted");
     expect(sqlText).toContain("INSERT INTO \"office_dallas\".project_phase_history");
     expect(sqlText).toContain("ON CONFLICT DO NOTHING");
+  });
+
+  describe("active filter on list endpoints", () => {
+    function captureSql() {
+      const seen: { sql: string; params: unknown[] | undefined }[] = [];
+      const query = vi.fn(async (sql: string, params?: unknown[]) => {
+        seen.push({ sql, params });
+        if (sql.includes("SELECT COUNT(*)")) return { rows: [{ total: 0 }] };
+        return { rows: [] };
+      });
+      return { client: { query } as any, seen };
+    }
+
+    it("listProjects applies is_active = true by default", async () => {
+      const { client, seen } = captureSql();
+      await listProjects(client, { page: 1, perPage: 25 });
+      const sqls = seen.map((entry) => entry.sql).join("\n");
+      expect(sqls).toContain("p.is_active = true");
+    });
+
+    it("listProjects omits the is_active filter when includeInactive=true", async () => {
+      const { client, seen } = captureSql();
+      await listProjects(client, { page: 1, perPage: 25, includeInactive: true });
+      const sqls = seen.map((entry) => entry.sql).join("\n");
+      expect(sqls).not.toContain("p.is_active = true");
+    });
+
+    it("listProjectsByPhase applies is_active = true by default", async () => {
+      const { client, seen } = captureSql();
+      await listProjectsByPhase(client, {});
+      const sqls = seen.map((entry) => entry.sql).join("\n");
+      expect(sqls).toContain("p.is_active = true");
+    });
+
+    it("listProjectsByPhase omits the is_active filter when includeInactive=true", async () => {
+      const { client, seen } = captureSql();
+      await listProjectsByPhase(client, { includeInactive: true });
+      const sqls = seen.map((entry) => entry.sql).join("\n");
+      expect(sqls).not.toContain("p.is_active = true");
+    });
+  });
+
+  describe("deriveIsActive", () => {
+    it("returns null when the snapshot carries no active signal at all", () => {
+      // The SyncHub webhook relay sends sparse snapshots like
+      // { id, company_id, project_number, name } — no `active`, no
+      // `status_name`. The mirror must treat that as 'no information'
+      // and preserve the existing CRM row, not force-flip is_active.
+      expect(deriveIsActive(null)).toBeNull();
+      expect(deriveIsActive(undefined)).toBeNull();
+      expect(deriveIsActive({})).toBeNull();
+      expect(deriveIsActive({ name: "X", project_number: "DFW-1" })).toBeNull();
+    });
+
+    it("trusts snapshot.active when it is a boolean", () => {
+      expect(deriveIsActive({ active: true })?.isActive).toBe(true);
+      expect(deriveIsActive({ active: false })?.isActive).toBe(false);
+    });
+
+    it("falls back to status_name when active is not a boolean", () => {
+      expect(deriveIsActive({ status_name: "Active" })?.isActive).toBe(true);
+      expect(deriveIsActive({ status_name: "Inactive" })?.isActive).toBe(false);
+    });
+  });
+
+  describe("upsert preserves is_active when the snapshot is sparse", () => {
+    it("passes a null is_active param and uses COALESCE to keep the prior row state", async () => {
+      const { query } = createClient((sql) => {
+        if (sql.includes("SELECT id, current_phase_id, current_phase_name")) {
+          return { rows: [{ id: "project-1", current_phase_id: null, current_phase_name: null }] };
+        }
+        if (sql.includes("RETURNING id")) return { rows: [{ id: "project-1", inserted: false }] };
+        return { rows: [] };
+      });
+
+      await upsertProjectMirror({ query } as any, "office_dallas", {
+        procoreProjectId: "598134326517540",
+        procoreCompanyId: "598134325683880",
+        procoreProjectNumber: "DFW-1-02326-ad",
+        name: "Webhook relay payload",
+        syncSource: "webhook",
+        snapshot: {
+          id: "598134326517540",
+          company_id: "598134325683880",
+          project_number: "DFW-1-02326-ad",
+          name: "Webhook relay payload",
+        },
+      });
+
+      const insertCall = query.mock.calls.find(([sql]) =>
+        String(sql).includes("INSERT INTO \"office_dallas\".projects")
+      );
+      expect(insertCall).toBeDefined();
+      // is_active param is null because the snapshot has no signal.
+      expect((insertCall![1] as unknown[])[15]).toBeNull();
+      const sql = String(insertCall![0]);
+      expect(sql).toContain("COALESCE($16::boolean, true)");
+      expect(sql).toContain("COALESCE($16::boolean, \"office_dallas\".projects.is_active)");
+    });
+  });
+
+  describe("getProjectDetail does NOT filter by is_active", () => {
+    it("returns the project even when is_active = false so direct links keep working", async () => {
+      const { query } = createClient((sql) => {
+        if (sql.includes("SELECT p.*, d.deal_number")) {
+          return {
+            rows: [
+              {
+                id: "inactive-project",
+                procore_project_id: "999",
+                name: "Soft-deleted project",
+                is_active: false,
+                procore_raw_snapshot: {},
+                source_deal_id: null,
+                source_deal_number: null,
+                source_deal_name: null,
+                address_line_1: null,
+                address_line_2: null,
+                city: null,
+                state: null,
+                postal_code: null,
+                country: null,
+                current_phase_id: null,
+                current_phase_name: null,
+                current_phase_sort_order: null,
+              },
+            ],
+          };
+        }
+        return { rows: [] };
+      });
+
+      const detail = await getProjectDetail({ query } as any, "00000000-0000-0000-0000-0000000000aa");
+      expect(detail).not.toBeNull();
+      expect(detail!.isActive).toBe(false);
+      const sqls = query.mock.calls.map((call) => String(call[0])).join("\n");
+      expect(sqls).not.toContain("p.is_active = true");
+    });
+  });
+
+  describe("getProjectCounts", () => {
+    it("returns active / inactive / total split from a single COUNT(*) FILTER query", async () => {
+      const query = vi.fn(async (_sql: string, _params?: unknown[]) => ({
+        rows: [{ active: 330, inactive: 392, total: 722 }],
+      }));
+      const counts = await getProjectCounts({ query } as any);
+      expect(counts).toEqual({ active: 330, inactive: 392, total: 722 });
+      expect(String(query.mock.calls[0]?.[0] ?? "")).toMatch(/COUNT\(\*\) FILTER \(WHERE is_active = true\)/);
+    });
+
+    it("falls back to zeros when the query returns no rows", async () => {
+      const query = vi.fn(async (_sql: string, _params?: unknown[]) => ({ rows: [] as unknown[] }));
+      const counts = await getProjectCounts({ query } as any);
+      expect(counts).toEqual({ active: 0, inactive: 0, total: 0 });
+    });
   });
 
   it("creates one initial phase history row for concurrent phase-name-only upserts", async () => {
