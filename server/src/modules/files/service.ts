@@ -962,6 +962,17 @@ export async function getFileDownloadUrl(
   return { url, filename: file.displayName + file.fileExtension };
 }
 
+export function shouldServeExternalFileUrl(file: {
+  r2Key?: string | null;
+  externalUrl?: string | null;
+}): boolean {
+  return !file.r2Key && Boolean(file.externalUrl);
+}
+
+export function shouldLogFileDownloadEvent(query: { preview?: unknown }): boolean {
+  return query.preview !== "1" && query.preview !== "true";
+}
+
 /**
  * Update file metadata (display name, tags, description, notes, category).
  */

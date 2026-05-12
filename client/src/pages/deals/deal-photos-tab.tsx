@@ -35,6 +35,7 @@ export function DealPhotosTab({ dealId, onCountChange }: { dealId: string; onCou
     error,
     fetchPhotos,
     getPhotoImageUrl,
+    ensurePhotoImageUrl,
     patchPhoto,
     savePhotoAddress,
     deletePhoto,
@@ -102,6 +103,7 @@ export function DealPhotosTab({ dealId, onCountChange }: { dealId: string; onCou
                 key={photo.id}
                 photo={photo}
                 imageUrl={getPhotoImageUrl(photo)}
+                loadImageUrl={() => void ensurePhotoImageUrl(photo)}
                 onOpen={() => setSelectedId(photo.id)}
                 onRestore={() => restorePhoto(photo.id)}
               />
@@ -115,6 +117,7 @@ export function DealPhotosTab({ dealId, onCountChange }: { dealId: string; onCou
         selectedId={selectedId}
         onSelectedIdChange={setSelectedId}
         getPhotoImageUrl={getPhotoImageUrl}
+        ensurePhotoImageUrl={ensurePhotoImageUrl}
         patchPhoto={patchPhoto}
         savePhotoAddress={savePhotoAddress}
         deletePhoto={deletePhoto}

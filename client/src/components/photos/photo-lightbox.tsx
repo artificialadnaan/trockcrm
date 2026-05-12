@@ -3,10 +3,12 @@ import { X, ChevronLeft, ChevronRight, Download, MapPin } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { api } from "@/lib/api";
+import { getImmediatePhotoOpenUrl, hasR2PhotoSource } from "@/lib/photo-url-resolution";
 import type { FeedPhoto } from "@/hooks/use-photo-feed";
 
 interface PhotoLightboxProps {
   photo: FeedPhoto;
+  initialUrl?: string | null;
   onClose: () => void;
   onPrev?: () => void;
   onNext?: () => void;
@@ -23,7 +25,7 @@ function formatDate(dateStr: string): string {
   });
 }
 
-export function PhotoLightbox({ photo, onClose, onPrev, onNext }: PhotoLightboxProps) {
+export function PhotoLightbox({ photo, initialUrl = null, onClose, onPrev, onNext }: PhotoLightboxProps) {
   const [fullResUrl, setFullResUrl] = useState<string | null>(null);
   const [loadingUrl, setLoadingUrl] = useState(true);
 
@@ -31,22 +33,22 @@ export function PhotoLightbox({ photo, onClose, onPrev, onNext }: PhotoLightboxP
     let cancelled = false;
 
     async function loadFullRes() {
-      if (photo.externalUrl) {
-        setFullResUrl(photo.externalUrl);
+      const immediateUrl = getImmediatePhotoOpenUrl(photo, initialUrl);
+      if (immediateUrl) {
+        setFullResUrl(immediateUrl);
         setLoadingUrl(false);
         return;
       }
       try {
         const data = await api<{ url: string; filename: string }>(
-          `/files/${photo.id}/download`
+          `/files/${photo.id}/download?preview=1`
         );
         if (!cancelled) {
           setFullResUrl(data.url);
         }
       } catch (err) {
         console.error("Failed to load full-res image:", err);
-        // Fall back to thumbnail
-        if (!cancelled) {
+        if (!cancelled && !hasR2PhotoSource(photo)) {
           setFullResUrl(photo.externalThumbnailUrl);
         }
       } finally {
@@ -54,10 +56,11 @@ export function PhotoLightbox({ photo, onClose, onPrev, onNext }: PhotoLightboxP
       }
     }
 
+    setFullResUrl(null);
     setLoadingUrl(true);
     loadFullRes();
     return () => { cancelled = true; };
-  }, [photo.id, photo.externalUrl, photo.externalThumbnailUrl]);
+  }, [initialUrl, photo.id, photo.r2Key, photo.externalUrl, photo.externalThumbnailUrl]);
 
   const handleKeyDown = useCallback(
     (e: KeyboardEvent) => {
@@ -79,10 +82,19 @@ export function PhotoLightbox({ photo, onClose, onPrev, onNext }: PhotoLightboxP
     return () => { document.body.style.overflow = ""; };
   }, []);
 
-  function handleDownload() {
+  async function handleDownload() {
     if (!fullResUrl) return;
+    let downloadUrl = fullResUrl;
+    try {
+      const data = await api<{ url: string; filename: string }>(
+        `/files/${photo.id}/download`
+      );
+      downloadUrl = data.url;
+    } catch (err) {
+      console.error("Failed to create download URL:", err);
+    }
     const a = document.createElement("a");
-    a.href = fullResUrl;
+    a.href = downloadUrl;
     a.download = photo.displayName || "photo";
     a.target = "_blank";
     a.rel = "noopener noreferrer";

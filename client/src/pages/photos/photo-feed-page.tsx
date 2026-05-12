@@ -18,6 +18,11 @@ import { api } from "@/lib/api";
 import { usePhotoFeed, type FeedFilters, type FeedPhoto } from "@/hooks/use-photo-feed";
 import { PhotoLightbox } from "@/components/photos/photo-lightbox";
 import { getFileMediaKind, type FileMediaKind } from "@/lib/file-media";
+import {
+  getImmediatePhotoOpenUrl,
+  getImmediatePhotoPreviewUrl,
+  shouldFetchSignedPhotoUrl,
+} from "@/lib/photo-url-resolution";
 
 // ─── Types ──────────────────────────────────────────────────────────────────
 
@@ -116,6 +121,7 @@ function truncate(str: string, maxLen: number): string {
 
 const THUMB_CACHE_MAX = 200;
 const thumbCache = new Map<string, string>();
+const thumbRequests = new Map<string, Promise<string>>();
 
 function setThumbCache(key: string, value: string) {
   if (thumbCache.size >= THUMB_CACHE_MAX) {
@@ -126,7 +132,61 @@ function setThumbCache(key: string, value: string) {
   thumbCache.set(key, value);
 }
 
+async function fetchCachedDownloadUrl(
+  fileId: string,
+  cacheKey: string = fileId,
+  options: { preview?: boolean } = { preview: true }
+): Promise<string> {
+  const cachedUrl = thumbCache.get(cacheKey);
+  if (cachedUrl) return cachedUrl;
+
+  const pendingRequest = thumbRequests.get(cacheKey);
+  if (pendingRequest) return pendingRequest;
+
+  const previewQuery = options.preview === false ? "" : "?preview=1";
+  const request = api<{ url: string }>(`/files/${fileId}/download${previewQuery}`)
+    .then((data) => {
+      setThumbCache(cacheKey, data.url);
+      return data.url;
+    })
+    .finally(() => {
+      thumbRequests.delete(cacheKey);
+    });
+
+  thumbRequests.set(cacheKey, request);
+  return request;
+}
+
+function useInViewport<T extends HTMLElement>(): [(node: T | null) => void, boolean] {
+  const [node, setNode] = useState<T | null>(null);
+  const [inViewport, setInViewport] = useState(false);
+
+  useEffect(() => {
+    if (!node || inViewport) return;
+    if (typeof IntersectionObserver === "undefined") {
+      setInViewport(true);
+      return;
+    }
+
+    const observer = new IntersectionObserver(
+      (entries) => {
+        if (entries.some((entry) => entry.isIntersecting)) {
+          setInViewport(true);
+          observer.disconnect();
+        }
+      },
+      { rootMargin: "200px" }
+    );
+
+    observer.observe(node);
+    return () => observer.disconnect();
+  }, [inViewport, node]);
+
+  return [setNode, inViewport];
+}
+
 function fileIconForKind(kind: FileMediaKind) {
+  if (kind === "image") return ImageIcon;
   if (kind === "pdf" || kind === "document") return FileText;
   if (kind === "video") return Video;
   return FileIcon;
@@ -137,16 +197,17 @@ function openFileUrl(url: string | null) {
   window.open(url, "_blank", "noopener,noreferrer");
 }
 
-async function openFeedFile(photo: ThumbnailSource, cachedUrl: string | null) {
-  if (cachedUrl) {
-    openFileUrl(cachedUrl);
+async function openFeedFile(photo: ThumbnailSource) {
+  const cachedUrl = thumbCache.get(`open:${photo.id}`) ?? thumbCache.get(photo.id) ?? null;
+  const immediateUrl = getImmediatePhotoOpenUrl(photo, cachedUrl);
+  if (immediateUrl) {
+    openFileUrl(immediateUrl);
     return;
   }
 
   try {
-    const data = await api<{ url: string }>(`/files/${photo.id}/download`);
-    setThumbCache(`open:${photo.id}`, data.url);
-    openFileUrl(data.url);
+    const url = await fetchCachedDownloadUrl(photo.id, `open:${photo.id}`, { preview: false });
+    openFileUrl(url);
   } catch (err) {
     console.error("Failed to open file:", err);
   }
@@ -161,49 +222,30 @@ interface ThumbnailSource {
   r2Key: string | null;
 }
 
-function useThumbnailUrl(photo: ThumbnailSource): string | null {
+function useThumbnailUrl(photo: ThumbnailSource, enabled = true): string | null {
   const [url, setUrl] = useState<string | null>(() => {
-    if (photo.externalThumbnailUrl) return photo.externalThumbnailUrl;
-    if (photo.externalUrl) return photo.externalUrl;
-    return thumbCache.get(photo.id) ?? null;
+    return getImmediatePhotoPreviewUrl(photo, thumbCache.get(photo.id) ?? null);
   });
 
   useEffect(() => {
-    if (url) return;
+    const cachedSignedUrl = thumbCache.get(photo.id) ?? null;
+    const immediateUrl = getImmediatePhotoPreviewUrl(photo, cachedSignedUrl);
+    if (immediateUrl) {
+      setUrl(immediateUrl);
+      return;
+    }
+    if (!enabled) return;
+    if (!shouldFetchSignedPhotoUrl(photo, cachedSignedUrl)) return;
     let cancelled = false;
 
-    api<{ url: string }>(`/files/${photo.id}/download`)
-      .then((data) => {
-        setThumbCache(photo.id, data.url);
-        if (!cancelled) setUrl(data.url);
+    fetchCachedDownloadUrl(photo.id)
+      .then((signedUrl) => {
+        if (!cancelled) setUrl(signedUrl);
       })
       .catch(() => {});
 
     return () => { cancelled = true; };
-  }, [photo.id, url]);
-
-  return url;
-}
-
-function useFileOpenUrl(photo: ThumbnailSource): string | null {
-  const [url, setUrl] = useState<string | null>(() => {
-    if (photo.externalUrl) return photo.externalUrl;
-    return thumbCache.get(`open:${photo.id}`) ?? null;
-  });
-
-  useEffect(() => {
-    if (url) return;
-    let cancelled = false;
-
-    api<{ url: string }>(`/files/${photo.id}/download`)
-      .then((data) => {
-        setThumbCache(`open:${photo.id}`, data.url);
-        if (!cancelled) setUrl(data.url);
-      })
-      .catch(() => {});
-
-    return () => { cancelled = true; };
-  }, [photo.id, url]);
+  }, [enabled, photo.id, photo.r2Key, photo.externalThumbnailUrl, photo.externalUrl, url]);
 
   return url;
 }
@@ -246,8 +288,10 @@ function ProjectRow({
       ? project.recentPhotos.slice(0, 5)
       : project.recentPhotoIds.slice(0, 5).map((id) => ({
           id,
-          displayName: null,
-          mimeType: null,
+          displayName: `Photo ${id.slice(0, 8)}`,
+          // Project stats only supplies recentPhotoIds for category='photo'
+          // records, so degraded payloads can still fetch image thumbnails.
+          mimeType: "image/jpeg",
           r2Key: null,
           externalUrl: null,
           externalThumbnailUrl: null,
@@ -342,18 +386,21 @@ function ProjectRecentMediaThumb({
   alt: string;
   size: "feature" | "strip";
 }) {
+  const [containerRef, inViewport] = useInViewport<HTMLDivElement>();
   const kind = getFileMediaKind(photo);
-  const thumbUrl = useThumbnailUrl(photo);
+  const thumbUrl = useThumbnailUrl(photo, kind === "image" && inViewport);
   const Icon = fileIconForKind(kind);
   const iconClassName = size === "feature" ? "h-6 w-6" : "h-4 w-4";
 
-  if (kind === "image" && thumbUrl) {
-    return <img src={thumbUrl} alt={alt} className="h-full w-full object-cover" loading="lazy" />;
-  }
-
   return (
-    <div className="h-full w-full flex items-center justify-center bg-slate-100">
-      <Icon className={`${iconClassName} text-slate-400`} />
+    <div ref={containerRef} className="h-full w-full">
+      {kind === "image" && thumbUrl ? (
+        <img src={thumbUrl} alt={alt} className="h-full w-full object-cover" loading="lazy" />
+      ) : (
+        <div className="h-full w-full flex items-center justify-center bg-slate-100">
+          <Icon className={`${iconClassName} text-slate-400`} />
+        </div>
+      )}
     </div>
   );
 }
@@ -368,8 +415,7 @@ function PhotoGridCard({
   onClick: () => void;
 }) {
   const mediaKind = getFileMediaKind(photo);
-  const thumbUrl = useThumbnailUrl(photo);
-  const openUrl = useFileOpenUrl(photo);
+  const thumbUrl = useThumbnailUrl(photo, mediaKind === "image");
   const timeStr = formatTime(photo.takenAt || photo.createdAt);
   const Icon = fileIconForKind(mediaKind);
   const isImage = mediaKind === "image";
@@ -379,7 +425,7 @@ function PhotoGridCard({
       className="cursor-pointer group"
       onClick={() => {
         if (isImage) onClick();
-        else void openFeedFile(photo, openUrl);
+        else void openFeedFile(photo);
       }}
     >
       {/* Thumbnail */}
@@ -805,6 +851,7 @@ export function PhotoFeedPage() {
       {selectedPhotoIndex != null && photos[selectedPhotoIndex] && (
         <PhotoLightbox
           photo={photos[selectedPhotoIndex]}
+          initialUrl={thumbCache.get(photos[selectedPhotoIndex].id) ?? null}
           onClose={() => setSelectedPhotoIndex(null)}
           onPrev={
             selectedPhotoIndex > 0

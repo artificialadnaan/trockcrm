@@ -30,6 +30,7 @@ import {
 import { Input } from "@/components/ui/input";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { api } from "@/lib/api";
+import { getImmediatePhotoPreviewUrl, shouldFetchSignedPhotoUrl } from "@/lib/photo-url-resolution";
 import { PhotoHistoryTimeline } from "./photo-history-timeline";
 
 export type PhotoGrouping = "date" | "category" | "uploader" | "none";
@@ -106,6 +107,34 @@ export const defaultPhotoFilters: PhotoFilterState = {
   group: "date",
   showDeleted: false,
 };
+
+export function useInViewport<T extends HTMLElement>(): [(node: T | null) => void, boolean] {
+  const [node, setNode] = useState<T | null>(null);
+  const [inViewport, setInViewport] = useState(false);
+
+  useEffect(() => {
+    if (!node || inViewport) return;
+    if (typeof IntersectionObserver === "undefined") {
+      setInViewport(true);
+      return;
+    }
+
+    const observer = new IntersectionObserver(
+      (entries) => {
+        if (entries.some((entry) => entry.isIntersecting)) {
+          setInViewport(true);
+          observer.disconnect();
+        }
+      },
+      { rootMargin: "200px" }
+    );
+
+    observer.observe(node);
+    return () => observer.disconnect();
+  }, [inViewport, node]);
+
+  return [setNode, inViewport];
+}
 
 function ordinal(day: number) {
   if (day > 3 && day < 21) return `${day}th`;
@@ -227,6 +256,7 @@ export function useDealPhotosData({
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [downloadUrls, setDownloadUrls] = useState<Record<string, string>>({});
+  const previewRequests = React.useRef(new Map<string, Promise<string>>());
 
   const fetchPhotos = useCallback(async () => {
     setLoading(true);
@@ -249,33 +279,29 @@ export function useDealPhotosData({
     void fetchPhotos();
   }, [fetchPhotos]);
 
-  useEffect(() => {
-    const missingPreviewUrls = photos.filter((photo) => !photo.externalThumbnailUrl && !photo.externalUrl && !downloadUrls[photo.id]);
-    if (missingPreviewUrls.length === 0) return;
-
-    let cancelled = false;
-    void Promise.all(
-      missingPreviewUrls.map(async (photo) => {
-        try {
-          const data = await api<{ url: string }>(`/files/${photo.id}/download`);
-          return [photo.id, data.url] as const;
-        } catch {
-          return null;
-        }
-      })
-    ).then((entries) => {
-      if (cancelled) return;
-      const next = Object.fromEntries(entries.filter(Boolean) as Array<readonly [string, string]>);
-      if (Object.keys(next).length > 0) setDownloadUrls((current) => ({ ...current, ...next }));
-    });
-
-    return () => {
-      cancelled = true;
-    };
-  }, [downloadUrls, photos]);
-
   const getPhotoImageUrl = useCallback((photo: DealPhotoRecord) => {
-    return photo.externalThumbnailUrl ?? photo.externalUrl ?? downloadUrls[photo.id] ?? "";
+    return getImmediatePhotoPreviewUrl(photo, downloadUrls[photo.id]) ?? "";
+  }, [downloadUrls]);
+
+  const ensurePhotoImageUrl = useCallback(async (photo: DealPhotoRecord) => {
+    const currentUrl = downloadUrls[photo.id];
+    const immediateUrl = getImmediatePhotoPreviewUrl(photo, currentUrl);
+    if (!shouldFetchSignedPhotoUrl(photo, currentUrl)) return immediateUrl ?? "";
+
+    const pendingRequest = previewRequests.current.get(photo.id);
+    if (pendingRequest) return pendingRequest;
+
+    const request = api<{ url: string }>(`/files/${photo.id}/download?preview=1`)
+      .then((data) => {
+        setDownloadUrls((current) => ({ ...current, [photo.id]: data.url }));
+        return data.url;
+      })
+      .finally(() => {
+        previewRequests.current.delete(photo.id);
+      });
+
+    previewRequests.current.set(photo.id, request);
+    return request;
   }, [downloadUrls]);
 
   async function patchPhoto(photoId: string, body: Record<string, unknown>) {
@@ -309,6 +335,7 @@ export function useDealPhotosData({
     error,
     fetchPhotos,
     getPhotoImageUrl,
+    ensurePhotoImageUrl,
     patchPhoto,
     savePhotoAddress,
     deletePhoto,
@@ -439,6 +466,7 @@ export function PhotoViewerModal({
   selectedId,
   onSelectedIdChange,
   getPhotoImageUrl,
+  ensurePhotoImageUrl,
   patchPhoto,
   savePhotoAddress,
   deletePhoto,
@@ -448,6 +476,7 @@ export function PhotoViewerModal({
   selectedId: string | null;
   onSelectedIdChange: (id: string | null) => void;
   getPhotoImageUrl: (photo: DealPhotoRecord) => string;
+  ensurePhotoImageUrl: (photo: DealPhotoRecord) => Promise<string>;
   patchPhoto: (photoId: string, body: Record<string, unknown>) => Promise<void>;
   savePhotoAddress: (photoId: string, body: { address: string; latitude?: number; longitude?: number }) => Promise<void>;
   deletePhoto: (photoId: string) => Promise<void>;
@@ -458,6 +487,11 @@ export function PhotoViewerModal({
   const [captionDraft, setCaptionDraft] = useState("");
   const selectedIndex = selectedId ? photos.findIndex((photo) => photo.id === selectedId) : -1;
   const selectedPhoto = selectedIndex >= 0 ? photos[selectedIndex] : null;
+
+  useEffect(() => {
+    if (!selectedPhoto || getPhotoImageUrl(selectedPhoto)) return;
+    void ensurePhotoImageUrl(selectedPhoto);
+  }, [ensurePhotoImageUrl, getPhotoImageUrl, selectedPhoto]);
 
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
@@ -632,17 +666,25 @@ export function PhotoViewerModal({
 export function PhotoGridTile({
   photo,
   imageUrl,
+  loadImageUrl,
   onOpen,
   onRestore,
 }: {
   photo: DealPhotoRecord;
   imageUrl: string;
+  loadImageUrl: () => void;
   onOpen: () => void;
   onRestore: () => void;
 }) {
+  const [tileRef, inViewport] = useInViewport<HTMLDivElement>();
   const category = displayPhotoCategory(photo);
+
+  useEffect(() => {
+    if (inViewport && !imageUrl) loadImageUrl();
+  }, [imageUrl, inViewport, loadImageUrl]);
+
   return (
-    <div className={`space-y-1 ${photo.deletedAt ? "opacity-55" : ""}`}>
+    <div ref={tileRef} className={`space-y-1 ${photo.deletedAt ? "opacity-55" : ""}`}>
       <button
         type="button"
         aria-label={`Open photo ${photo.displayName}`}
