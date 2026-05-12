@@ -101,7 +101,9 @@ export interface PropertyDeal {
   lastActivityAt: string | null;
   stageEnteredAt: string;
   isActive: boolean;
-  hubspotDealId: string | null;
+  // Stripped from the default API response; gates use isHubspotSourced.
+  hubspotDealId?: string | null;
+  isHubspotSourced: boolean;
   createdAt: string;
   updatedAt: string;
 }
