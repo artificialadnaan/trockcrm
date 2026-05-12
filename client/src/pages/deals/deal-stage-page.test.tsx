@@ -65,7 +65,23 @@ vi.mock("@/components/pipeline/pipeline-stage-page-header", () => ({
   ),
 }));
 vi.mock("@/components/pipeline/pipeline-stage-table", () => ({
-  PipelineStageTable: ({ rows }: { rows: Array<{ name: string }> }) => <div>{rows.map((row) => row.name).join(", ")}</div>,
+  PipelineStageTable: ({
+    rows,
+    columns,
+  }: {
+    rows: Array<{ name: string }>;
+    columns: Array<{ render?: (row: any) => ReactNode }>;
+  }) => (
+    <div>
+      {rows.map((row) => (
+        <div key={row.name}>
+          {columns.map((column, index) => (
+            <span key={index}>{column.render ? column.render(row) : row.name}</span>
+          ))}
+        </div>
+      ))}
+    </div>
+  ),
 }));
 
 import { DealStagePage } from "./deal-stage-page";
@@ -140,6 +156,41 @@ describe("DealStagePage", () => {
     expect(html).toContain("Alex Rep");
     expect(html).not.toContain(">region-1<");
     expect(html).not.toContain(">rep-1<");
+  });
+
+  it("does not render HS-prefixed imports as the stage row number", () => {
+    mocks.useDealStagePageMock.mockReturnValue({
+      loading: false,
+      error: null,
+      data: {
+        stage: { id: "stage-estimating", name: "Estimating", slug: "estimating" },
+        summary: { count: 1, totalValue: 15000, averageDaysInStage: 4 },
+        pagination: { page: 1, pageSize: 25, total: 1, totalPages: 1 },
+        rows: [
+          {
+            id: "deal-1",
+            name: "North Campus",
+            dealNumber: "HS-324283495135",
+            projectNumber: "DFW-1-12826-aa",
+            workflowRoute: "normal",
+            assignedRepName: "Alex Rep",
+            daysInStage: 4,
+            updatedAt: "2026-04-21T10:00:00.000Z",
+          },
+        ],
+      },
+    });
+
+    const html = renderToStaticMarkup(
+      <MemoryRouter initialEntries={["/deals/stages/stage-estimating?scope=team"]}>
+        <Routes>
+          <Route path="/deals/stages/:stageId" element={<DealStagePage />} />
+        </Routes>
+      </MemoryRouter>
+    );
+
+    expect(html).toContain("DFW-1-12826-aa");
+    expect(html).not.toContain("HS-324283495135");
   });
 
   it("renders a stage error when the stage query fails", () => {

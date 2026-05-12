@@ -412,6 +412,7 @@ export interface DealStagePageInput extends DealBoardInput {
 type DealStageWorkspaceRow = {
   id: string;
   deal_number: string;
+  project_number: string | null;
   name: string;
   stage_id: string;
   workflow_route: WorkflowRoute;
@@ -606,6 +607,7 @@ function mapDealStageWorkspaceRow(row: DealStageWorkspaceRow) {
   return {
     id: row.id,
     dealNumber: row.deal_number,
+    projectNumber: row.project_number,
     name: row.name,
     stageId: row.stage_id,
     workflowRoute: row.workflow_route,
@@ -1785,6 +1787,7 @@ export async function listDealStagePage(tenantDb: TenantDb, input: DealStagePage
     select
       d.id,
       d.deal_number,
+      d.project_number,
       d.name,
       d.stage_id,
       d.workflow_route,

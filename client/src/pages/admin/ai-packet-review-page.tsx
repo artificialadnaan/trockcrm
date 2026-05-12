@@ -5,6 +5,7 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
+import { formatDealDisplayNumber } from "@/lib/deal-utils";
 
 function formatDate(value: string | null) {
   if (!value) return "Pending";
@@ -78,7 +79,8 @@ export function AiPacketReviewPage() {
                 <CardDescription>
                   {packet?.dealId ? (
                     <Link to={`/deals/${packet.dealId}`} className="text-brand-red hover:underline">
-                      {packet.dealNumber ? `${packet.dealNumber} ` : ""}{packet.dealName ?? "Unnamed deal"}
+                      {formatDealDisplayNumber(packet).label === "Pending" ? "" : `${formatDealDisplayNumber(packet).label} `}
+                      {packet.dealName ?? "Unnamed deal"}
                     </Link>
                   ) : (
                     <span>{packet?.dealName ?? "No deal attached"}</span>

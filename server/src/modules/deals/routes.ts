@@ -129,6 +129,7 @@ import {
 import { resolveSyncHubRfpRequestUrl } from "./rfp-payload.js";
 import { insertOpportunityRfpRequestJob } from "./rfp-enqueue.js";
 import { isOpportunityRfpEventEnabled } from "../../config/feature-flags.js";
+import { getAllStages } from "../pipeline/service.js";
 
 const router = Router();
 
@@ -451,6 +452,16 @@ router.get("/pipeline", async (req, res, next) => {
         deals: redactDealList(column.deals, { includeHubspotId }),
       })),
     });
+  } catch (err) {
+    next(err);
+  }
+});
+
+router.get("/stages", async (req, res, next) => {
+  try {
+    const stages = await getAllStages("deal");
+    await req.commitTransaction!();
+    res.json({ stages });
   } catch (err) {
     next(err);
   }

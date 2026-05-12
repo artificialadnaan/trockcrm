@@ -36,6 +36,8 @@ import {
 } from "@/components/photos/deal-photo-components";
 import type { PhotoAuditEvent, PhotoAuditEventType } from "@/components/photos/photo-history-timeline";
 import { api } from "@/lib/api";
+import { displayNameOrFallback } from "@/lib/display-identifiers";
+import { formatDealDisplayNumber } from "@/lib/deal-utils";
 
 const PHOTO_AUDIT_EVENTS: Array<{ value: PhotoAuditEventType; label: string; icon: React.ComponentType<{ className?: string }> }> = [
   { value: "uploaded", label: "Uploaded", icon: Upload },
@@ -333,7 +335,7 @@ export function PhotoAuditPage() {
                       <TableCell>
                         <div className="flex items-center gap-2">
                           <Avatar className="h-7 w-7"><AvatarImage src={event.userAvatarUrl ?? undefined} /><AvatarFallback>{initials(event.userName ?? "?")}</AvatarFallback></Avatar>
-                          <span className="text-sm">{event.userName ?? event.userId.slice(0, 8)}</span>
+                          <span className="text-sm">{displayNameOrFallback(event.userName ?? event.userId, "Unknown user")}</span>
                         </div>
                       </TableCell>
                       <TableCell>
@@ -347,13 +349,18 @@ export function PhotoAuditPage() {
                             </span>
                             <span>
                               <span className="block text-sm font-medium">{event.photo.displayName}</span>
-                              <span className="block text-xs text-muted-foreground">{event.photo.id.slice(0, 8)}...</span>
+                              <span className="block text-xs text-muted-foreground">{event.photo.fileExtension ?? "photo"}</span>
                             </span>
                           </button>
                         ) : <span className="text-muted-foreground">Unknown photo</span>}
                       </TableCell>
                       <TableCell>
-                        {event.deal ? <Link className="text-sm text-brand-red hover:underline" to={`/deals/${event.deal.id}`}>{event.deal.name}</Link> : <span className="text-muted-foreground">No deal</span>}
+                        {event.deal ? (
+                          <Link className="text-sm text-brand-red hover:underline" to={`/deals/${event.deal.id}`}>
+                            {formatDealDisplayNumber(event.deal).label === "Pending" ? "" : `${formatDealDisplayNumber(event.deal).label} `}
+                            {event.deal.name}
+                          </Link>
+                        ) : <span className="text-muted-foreground">No deal</span>}
                       </TableCell>
                       <TableCell className="text-xs text-muted-foreground">{event.ipAddress ?? "N/A"}</TableCell>
                       <TableCell>

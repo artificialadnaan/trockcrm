@@ -72,6 +72,8 @@ describe("AdminDataScrubPage", () => {
     expect(html).toContain('href="/admin/merge-queue"');
     expect(html).toContain("Companies missing an owner");
     expect(html).toContain("Morgan Lee");
+    expect(html).toContain("CRM user");
+    expect(html).not.toContain("user-1");
     expect(html).toContain("3");
   });
 });

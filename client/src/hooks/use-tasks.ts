@@ -23,6 +23,7 @@ export interface Task {
   dealId: string | null;
   dealName?: string | null;
   dealNumber?: string | null;
+  projectNumber?: string | null;
   contactId: string | null;
   emailId: string | null;
   dueDate: string | null;

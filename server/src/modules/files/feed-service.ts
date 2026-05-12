@@ -130,6 +130,14 @@ export async function getProjectPhotoStats(
     lastPhotoAt: string | null;
     recentUploaders: string[];
     recentPhotoIds: string[];
+    recentPhotos: Array<{
+      id: string;
+      displayName: string | null;
+      mimeType: string | null;
+      r2Key: string | null;
+      externalUrl: string | null;
+      externalThumbnailUrl: string | null;
+    }>;
   }>;
 }> {
   // Aggregate counts, last photo timestamp, recent uploaders, and recent photo IDs per deal
@@ -167,6 +175,31 @@ export async function getProjectPhotoStats(
            LIMIT 5
          ) f3
         )::text`,
+      recentPhotos: sql<string>`
+        (SELECT COALESCE(json_agg(json_build_object(
+          'id', recent.id,
+          'displayName', recent.display_name,
+          'mimeType', recent.mime_type,
+          'r2Key', recent.r2_key,
+          'externalUrl', recent.external_url,
+          'externalThumbnailUrl', recent.external_thumbnail_url
+        )), '[]'::json)
+         FROM (
+           SELECT
+             f4.id,
+             f4.display_name,
+             f4.mime_type,
+             f4.r2_key,
+             f4.external_url,
+             f4.external_thumbnail_url
+           FROM files f4
+           WHERE f4.deal_id = ${files.dealId}
+             AND f4.category = 'photo'
+             AND f4.is_active = true
+           ORDER BY COALESCE(f4.taken_at, f4.created_at) DESC
+           LIMIT 5
+         ) recent
+        )::text`,
     })
     .from(files)
     .innerJoin(deals, eq(deals.id, files.dealId))
@@ -192,6 +225,7 @@ export async function getProjectPhotoStats(
       lastPhotoAt: r.lastPhotoAt,
       recentUploaders: r.recentUploaders ? JSON.parse(r.recentUploaders) : [],
       recentPhotoIds: r.recentPhotoIds ? JSON.parse(r.recentPhotoIds) : [],
+      recentPhotos: r.recentPhotos ? JSON.parse(r.recentPhotos) : [],
     })),
   };
 }

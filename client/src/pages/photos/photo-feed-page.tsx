@@ -8,14 +8,27 @@ import {
   RefreshCw,
   ChevronLeft,
   ChevronRight,
+  FileIcon,
+  FileText,
+  Video,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { api } from "@/lib/api";
 import { usePhotoFeed, type FeedFilters, type FeedPhoto } from "@/hooks/use-photo-feed";
 import { PhotoLightbox } from "@/components/photos/photo-lightbox";
+import { getFileMediaKind, type FileMediaKind } from "@/lib/file-media";
 
 // ─── Types ──────────────────────────────────────────────────────────────────
+
+interface ProjectRecentPhoto {
+  id: string;
+  displayName: string | null;
+  mimeType: string | null;
+  r2Key: string | null;
+  externalUrl: string | null;
+  externalThumbnailUrl: string | null;
+}
 
 interface ProjectStat {
   dealId: string;
@@ -27,6 +40,7 @@ interface ProjectStat {
   lastPhotoAt: string | null;
   recentUploaders: string[];
   recentPhotoIds: string[];
+  recentPhotos?: ProjectRecentPhoto[];
 }
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
@@ -112,7 +126,42 @@ function setThumbCache(key: string, value: string) {
   thumbCache.set(key, value);
 }
 
-function useThumbnailUrl(photo: FeedPhoto): string | null {
+function fileIconForKind(kind: FileMediaKind) {
+  if (kind === "pdf" || kind === "document") return FileText;
+  if (kind === "video") return Video;
+  return FileIcon;
+}
+
+function openFileUrl(url: string | null) {
+  if (!url) return;
+  window.open(url, "_blank", "noopener,noreferrer");
+}
+
+async function openFeedFile(photo: ThumbnailSource, cachedUrl: string | null) {
+  if (cachedUrl) {
+    openFileUrl(cachedUrl);
+    return;
+  }
+
+  try {
+    const data = await api<{ url: string }>(`/files/${photo.id}/download`);
+    setThumbCache(`open:${photo.id}`, data.url);
+    openFileUrl(data.url);
+  } catch (err) {
+    console.error("Failed to open file:", err);
+  }
+}
+
+interface ThumbnailSource {
+  id: string;
+  externalThumbnailUrl: string | null;
+  externalUrl: string | null;
+  mimeType: string | null;
+  displayName: string | null;
+  r2Key: string | null;
+}
+
+function useThumbnailUrl(photo: ThumbnailSource): string | null {
   const [url, setUrl] = useState<string | null>(() => {
     if (photo.externalThumbnailUrl) return photo.externalThumbnailUrl;
     if (photo.externalUrl) return photo.externalUrl;
@@ -136,25 +185,25 @@ function useThumbnailUrl(photo: FeedPhoto): string | null {
   return url;
 }
 
-/** Fetch a thumbnail URL by file ID (for project row thumbnails) */
-function usePhotoIdThumbnail(photoId: string | undefined): string | null {
-  const [url, setUrl] = useState<string | null>(() =>
-    photoId ? thumbCache.get(photoId) ?? null : null
-  );
+function useFileOpenUrl(photo: ThumbnailSource): string | null {
+  const [url, setUrl] = useState<string | null>(() => {
+    if (photo.externalUrl) return photo.externalUrl;
+    return thumbCache.get(`open:${photo.id}`) ?? null;
+  });
 
   useEffect(() => {
-    if (!photoId || url) return;
+    if (url) return;
     let cancelled = false;
 
-    api<{ url: string }>(`/files/${photoId}/download`)
+    api<{ url: string }>(`/files/${photo.id}/download`)
       .then((data) => {
-        setThumbCache(photoId, data.url);
+        setThumbCache(`open:${photo.id}`, data.url);
         if (!cancelled) setUrl(data.url);
       })
       .catch(() => {});
 
     return () => { cancelled = true; };
-  }, [photoId, url]);
+  }, [photo.id, url]);
 
   return url;
 }
@@ -192,15 +241,18 @@ function ProjectRow({
   project: ProjectStat;
   onClick: () => void;
 }) {
-  // Load thumbnails for the recent photos strip
-  const thumb1 = usePhotoIdThumbnail(project.recentPhotoIds[0]);
-  const thumb2 = usePhotoIdThumbnail(project.recentPhotoIds[1]);
-  const thumb3 = usePhotoIdThumbnail(project.recentPhotoIds[2]);
-  const thumb4 = usePhotoIdThumbnail(project.recentPhotoIds[3]);
-  const thumb5 = usePhotoIdThumbnail(project.recentPhotoIds[4]);
-  const recentThumbs = [thumb1, thumb2, thumb3, thumb4, thumb5].filter(
-    (_, i) => i < project.recentPhotoIds.length
-  );
+  const recentPhotos =
+    project.recentPhotos?.length
+      ? project.recentPhotos.slice(0, 5)
+      : project.recentPhotoIds.slice(0, 5).map((id) => ({
+          id,
+          displayName: null,
+          mimeType: null,
+          r2Key: null,
+          externalUrl: null,
+          externalThumbnailUrl: null,
+        }));
+  const featurePhoto = recentPhotos[0];
 
   const location = [project.propertyCity, project.propertyState]
     .filter(Boolean)
@@ -215,13 +267,8 @@ function ProjectRow({
       <div className="flex items-center gap-3 min-w-0 flex-1">
         {/* Feature thumbnail */}
         <div className="h-16 w-16 rounded-lg overflow-hidden bg-gray-100 shrink-0">
-          {thumb1 ? (
-            <img
-              src={thumb1}
-              alt={project.dealName}
-              className="h-full w-full object-cover"
-              loading="lazy"
-            />
+          {featurePhoto ? (
+            <ProjectRecentMediaThumb photo={featurePhoto} alt={project.dealName} size="feature" />
           ) : (
             <div className="h-full w-full flex items-center justify-center">
               <ImageIcon className="h-6 w-6 text-gray-300" />
@@ -272,27 +319,41 @@ function ProjectRow({
             No photos have been added to this project yet.
           </p>
         ) : (
-          recentThumbs.map((thumbUrl, i) => (
+          recentPhotos.map((photo) => (
             <div
-              key={project.recentPhotoIds[i]}
+              key={photo.id}
               className="h-[72px] w-[72px] rounded-md overflow-hidden bg-gray-100 shrink-0"
             >
-              {thumbUrl ? (
-                <img
-                  src={thumbUrl}
-                  alt=""
-                  className="h-full w-full object-cover"
-                  loading="lazy"
-                />
-              ) : (
-                <div className="h-full w-full flex items-center justify-center">
-                  <ImageIcon className="h-4 w-4 text-gray-300" />
-                </div>
-              )}
+              <ProjectRecentMediaThumb photo={photo} alt="" size="strip" />
             </div>
           ))
         )}
       </div>
+    </div>
+  );
+}
+
+function ProjectRecentMediaThumb({
+  photo,
+  alt,
+  size,
+}: {
+  photo: ProjectRecentPhoto;
+  alt: string;
+  size: "feature" | "strip";
+}) {
+  const kind = getFileMediaKind(photo);
+  const thumbUrl = useThumbnailUrl(photo);
+  const Icon = fileIconForKind(kind);
+  const iconClassName = size === "feature" ? "h-6 w-6" : "h-4 w-4";
+
+  if (kind === "image" && thumbUrl) {
+    return <img src={thumbUrl} alt={alt} className="h-full w-full object-cover" loading="lazy" />;
+  }
+
+  return (
+    <div className="h-full w-full flex items-center justify-center bg-slate-100">
+      <Icon className={`${iconClassName} text-slate-400`} />
     </div>
   );
 }
@@ -306,14 +367,31 @@ function PhotoGridCard({
   photo: FeedPhoto;
   onClick: () => void;
 }) {
+  const mediaKind = getFileMediaKind(photo);
   const thumbUrl = useThumbnailUrl(photo);
+  const openUrl = useFileOpenUrl(photo);
   const timeStr = formatTime(photo.takenAt || photo.createdAt);
+  const Icon = fileIconForKind(mediaKind);
+  const isImage = mediaKind === "image";
 
   return (
-    <div className="cursor-pointer group" onClick={onClick}>
+    <div
+      className="cursor-pointer group"
+      onClick={() => {
+        if (isImage) onClick();
+        else void openFeedFile(photo, openUrl);
+      }}
+    >
       {/* Thumbnail */}
       <div className="relative w-full aspect-square rounded-lg overflow-hidden bg-gray-100">
-        {thumbUrl ? (
+        {!isImage ? (
+          <div className="flex h-full w-full flex-col items-center justify-center gap-2 bg-slate-100 p-3 text-center">
+            <Icon className="h-8 w-8 text-slate-500" />
+            <span className="line-clamp-2 text-[11px] font-semibold text-slate-600">
+              {mediaKind === "pdf" ? "PDF" : "File"}
+            </span>
+          </div>
+        ) : thumbUrl ? (
           <img
             src={thumbUrl}
             alt={photo.dealName || photo.displayName}

@@ -342,6 +342,7 @@ export async function getTasks(
         dealId: tasks.dealId,
         dealName: deals.name,
         dealNumber: deals.dealNumber,
+        projectNumber: deals.projectNumber,
         contactId: tasks.contactId,
         emailId: tasks.emailId,
         dueDate: tasks.dueDate,
@@ -401,6 +402,7 @@ export async function getProjectTaskScope(
     .select({
       id: deals.id,
       dealNumber: deals.dealNumber,
+      projectNumber: deals.projectNumber,
       name: deals.name,
       procoreProjectId: deals.procoreProjectId,
     })
@@ -447,6 +449,7 @@ export async function getProjectTasks(
       dealId: tasks.dealId,
       dealName: deals.name,
       dealNumber: deals.dealNumber,
+      projectNumber: deals.projectNumber,
       contactId: tasks.contactId,
       emailId: tasks.emailId,
       dueDate: tasks.dueDate,

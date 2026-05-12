@@ -268,7 +268,7 @@ describe("LeadDetailPage", () => {
     expect(html).toContain("Recordings");
   });
 
-  it("renders right-rail with company, owner, property, source, and system IDs", () => {
+  it("renders right-rail with company, owner, property, source, and system references", () => {
     const html = renderLeadDetail();
 
     expect(html).toContain("Company");
@@ -280,8 +280,9 @@ describe("LeadDetailPage", () => {
     expect(html).toContain("Source");
     expect(html).toContain("trade show");
     expect(html).toContain("BOMA Expo");
-    expect(html).toContain("System IDs");
-    expect(html).toContain("lead-1");
+    expect(html).toContain("System references");
+    expect(html).toContain("Tracked internally");
+    expect(html).not.toContain("lead-1");
   });
 
   it("tab change updates active tab", () => {

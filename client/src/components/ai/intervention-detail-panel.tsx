@@ -29,6 +29,8 @@ import {
   SheetHeader,
   SheetTitle,
 } from "@/components/ui/sheet";
+import { displayNameOrFallback } from "@/lib/display-identifiers";
+import { formatDealDisplayNumber } from "@/lib/deal-utils";
 
 function formatDate(value: string | null) {
   if (!value) return "N/A";
@@ -116,7 +118,8 @@ export function InterventionDetailPanel(props: {
                 <div>
                   {detail.crm.deal ? (
                     <Link to={`/deals/${detail.crm.deal.id}`} className="text-base font-semibold text-brand-red hover:underline">
-                      {detail.crm.deal.dealNumber} {detail.crm.deal.name}
+                      {formatDealDisplayNumber(detail.crm.deal).label === "Pending" ? "" : `${formatDealDisplayNumber(detail.crm.deal).label} `}
+                      {detail.crm.deal.name}
                     </Link>
                   ) : (
                     <div className="text-base font-semibold">Unlinked disconnect case</div>
@@ -132,7 +135,7 @@ export function InterventionDetailPanel(props: {
                 <div className="grid grid-cols-2 gap-3 text-sm">
                   <div>
                     <div className="text-xs uppercase tracking-widest text-muted-foreground">Assigned to</div>
-                    <div>{detail.case.assignedToName ?? detail.case.assignedTo ?? "Unassigned"}</div>
+                    <div>{displayNameOrFallback(detail.case.assignedToName ?? detail.case.assignedTo, "Unassigned")}</div>
                   </div>
                   <div>
                     <div className="text-xs uppercase tracking-widest text-muted-foreground">Snoozed until</div>
@@ -156,7 +159,7 @@ export function InterventionDetailPanel(props: {
                     <div className="font-medium">{detail.generatedTask.title}</div>
                     <div className="text-muted-foreground">{detail.generatedTask.status}</div>
                     <div className="text-muted-foreground">
-                      {detail.generatedTask.assignedToName ?? detail.generatedTask.assignedTo ?? "No task assignee"}
+                      {displayNameOrFallback(detail.generatedTask.assignedToName ?? detail.generatedTask.assignedTo, "No task assignee")}
                     </div>
                   </div>
                 ) : (
