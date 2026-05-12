@@ -970,7 +970,12 @@ export function shouldServeExternalFileUrl(file: {
 }
 
 export function shouldLogFileDownloadEvent(query: { preview?: unknown }): boolean {
-  return query.preview !== "1" && query.preview !== "true";
+  void query;
+  return true;
+}
+
+export function resolveFileDownloadAuditPurpose(query: { preview?: unknown }): "preview" | "download" {
+  return query.preview === "1" || query.preview === "true" ? "preview" : "download";
 }
 
 /**

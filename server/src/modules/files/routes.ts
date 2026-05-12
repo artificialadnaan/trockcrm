@@ -14,6 +14,7 @@ import {
   getFileById,
   getFileByIdIncludingDeleted,
   getFileDownloadUrl,
+  resolveFileDownloadAuditPurpose,
   shouldLogFileDownloadEvent,
   shouldServeExternalFileUrl,
   updateFile,
@@ -580,6 +581,7 @@ router.get("/:id/download", async (req, res, next) => {
     }
 
     const logDownload = shouldLogFileDownloadEvent(req.query);
+    const auditPurpose = resolveFileDownloadAuditPurpose(req.query);
 
     // External-only files can return their source URL. R2-backed imports keep
     // their external URL as metadata, but must render/download through R2.
@@ -590,7 +592,7 @@ router.get("/:id/download", async (req, res, next) => {
           eventType: "downloaded",
           userId: req.user!.id,
           ...requestAuditContext(req),
-          metadata: {},
+          metadata: { purpose: auditPurpose },
         });
       }
       await req.commitTransaction!();
@@ -605,7 +607,7 @@ router.get("/:id/download", async (req, res, next) => {
         eventType: "downloaded",
         userId: req.user!.id,
         ...requestAuditContext(req),
-        metadata: {},
+        metadata: { purpose: auditPurpose },
       });
     }
     await req.commitTransaction!();

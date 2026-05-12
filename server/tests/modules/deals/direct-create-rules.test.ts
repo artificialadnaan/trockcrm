@@ -70,4 +70,11 @@ describe("direct deal create rules", () => {
       origin: "migration",
     });
   });
+
+  it("treats creationContext migration as the same bypass as legacy migrationMode", () => {
+    expect(resolveDealCreationPolicy({ creationContext: "migration", sourceLeadId: null })).toEqual({
+      allowed: true,
+      origin: "migration",
+    });
+  });
 });
