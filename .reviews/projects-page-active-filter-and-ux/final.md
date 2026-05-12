@@ -109,4 +109,98 @@ None tripped:
 - Rebase resolved cleanly through two unrelated docs commits and the security commit.
 - No SMOKE TEST DELETE fixtures touched.
 - Procore API access was not needed at deploy time; the soft-delete signal was already in `procore_raw_snapshot`.
+
+---
+
+# Codex fix-up — PR #261
+
+## Status
+
+**PASS**
+
+After PR #254 squash-merged at 01:40 UTC, Codex returned three additional findings on commit `2372651` that did not make it into the original merge window. A follow-up PR #261 (`fix/projects-codex-findings-followup`) was opened from `origin/main`, reviewed (subagent round 1 CLEAN, Codex re-review silent for >5 min), and squash-merged at 02:19 UTC.
+
+## PR(s)
+
+| PR | Branch | SHA | Note |
+|---|---|---|---|
+| **#261** | `fix/projects-codex-findings-followup` | merge sha `c06a1be` | Codex fix-up follow-up. Squash-merged. |
+
+## Deploy
+
+- API service production deploy `8da6ec06-becc-4bc6-9b6f-0fabbd2d6cdd` — **SUCCESS** @ 21:19:28.
+- Frontend deploy `52c904a0-72ba-428f-9f85-acc6a56b63c2` — **SUCCESS** @ 21:19:26.
+- `curl https://<redacted-api-host>/api/health → 200`.
+
+## Per-finding fix summary
+
+| Finding | Severity | Root cause | Fix |
+|---|---|---|---|
+| Backfill / live-mirror divergence | P1 | `scripts/backfill-projects-active-flag.ts` had a hand-rolled re-implementation of the snapshot→`is_active` rule held in sync with the live mirror's `deriveIsActive` only by a fixture parity test — drift was possible if someone modified one and not the other. | Replaced the hand-rolled function with `export const deriveIsActiveFromSnapshot = deriveIsActive` (direct re-export). The two code paths are now literally the same function reference. An identity assertion in the parity test (`expect(deriveIsActiveFromSnapshot).toBe(deriveIsActive)`) makes a future hand-rolled re-implementation fail CI even if it passes every fixture. |
+| `/projects/counts` failure crashed the page | P1 | The counts call was in the same `Promise.all` as `/projects` and `/projects/by-phase` — a 500 / timeout took down the entire Projects page. | Wrapped counts inline with `.catch((err) => { console.warn(...); return null; })` so it degrades to a `null` and the primary calls still resolve. Metric cards now show an em-dash and `"Counts unavailable"` badge when counts is null (instead of silently displaying `"0"` zeros that look like real CRM state). |
+| Pagination not reset on active/inactive toggle | P2 Codex / P1 UX | Toggling between Active-only (~14 pages) and Include-inactive (~30 pages) preserved the page index; switching from a high page yielded an empty table that looked like data loss. | Added `setPage(1)` to `setIncludeInactive` outside the if/else branches so both toggle directions reset pagination, matching every other filter setter in the file. |
+
+## Test additions
+
+- **`server/tests/scripts/backfill-projects-active-flag.test.ts`** — parity fixture set grew from 10 to 16 cases (added: `active: 1`, `active: null`, `status_name: 42`, `status_name: null`, `active: false` overriding `Active`, doubly-malformed fall-through). Added a function-identity assertion pinning `deriveIsActiveFromSnapshot === deriveIsActive`.
+- **`client/src/pages/projects/projects-page-codex-fixup.test.tsx`** (new) — 8 source-string regression assertions mirroring the existing `project-routing.test.tsx` pattern. Pins:
+  - `.catch` wrapper on the counts call specifically
+  - `console.warn` (not `console.error`) on the catch arm
+  - Catch handler returns `null`
+  - Em-dash fallback for `value` on both metric cards
+  - `"Counts unavailable"` fallback badge text
+  - `setPage(1)` inside `setIncludeInactive`
+  - `setPage(1)` positioned outside the if/else (fires on both toggle directions)
+
+All 64 tests in the projects scope pass after the fix. Each new assertion would have failed against the pre-fix source (commit `2372651`).
+
+## Subagent review round summaries
+
+- **`review-round-codex-fixup-1.md`** — Verdict: **APPROVE / CLEAN**. No P0 or P1 issues. Two P2 maintainability observations recorded and accepted: (a) asymmetric `?? null` coercion in the parity test's call site is functionally harmless since both helpers handle `null` and `undefined` identically; (b) source-string assertions are formatting-sensitive (intentional trade-off documented in the test file). Loop exited after round 1.
+
+## Codex re-review
+
+`@codex review` was requested on PR #261. No response within the 5-minute window. Per the track's protocol, proceeded to merge with Codex silence documented. The original Codex round on commit `2372651` (the round-2 base) flagged three findings — all three are addressed in PR #261's commit and verified by the new test suite. No new findings have been raised against the fix-up diff itself.
+
+## Smoke evidence
+
+See [`smoke-codex-fixup.md`](smoke-codex-fixup.md) for full details. Highlights:
+
+- All three roles (`test-director`, `test-admin`, `test-sales`) authenticate via `/api/auth/local/login` and see identical counts: `{active:331, inactive:392, total:723}`.
+- `/api/projects/counts`, `/api/projects?perPage=1`, `/api/projects?include_inactive=true&perPage=1`, and `/api/projects/by-phase` all return 200 with sane payloads.
+- Active-only `page=5` returns 25 rows; total pages = 14. Confirms the pagination index space differs across the toggle, making Fix 3 necessary.
+- The deployed frontend bundle `/assets/index-C5GDeQjZ.js` contains the unique strings `"Failed to load project counts; continuing without:"` and `"Counts unavailable"` — these are present **only** in the Codex fix-up code paths, irrefutable evidence Fix 2 is live in production.
+
+## Backfill ↔ mirror parity confirmation
+
+Both code paths (`scripts/backfill-projects-active-flag.ts` and `server/src/modules/projects/service.ts`) now resolve to the same function reference for the snapshot→`is_active` inference. Verified by:
+
+1. Function-identity assertion in `server/tests/scripts/backfill-projects-active-flag.test.ts`.
+2. The script's only export now reads `export const deriveIsActiveFromSnapshot = deriveIsActive;` — there is no separate implementation to drift.
+3. 16 fixture cases (null, undefined, empty, partial, malformed `active`, malformed `status_name`, both-malformed) all produce identical results on both call sites.
+
+No backfill execution against production was needed. The current row counts on prod (331 / 392 / 723) are unchanged from the post-#254 baseline.
+
+## Worktree cleanup status
+
+- The original `feat/projects-active-filter-and-ux` worktree at `/Users/adnaaniqbal/projects/trockcrm-projects-ux` was reused for the fix-up. Branch was already merged via #254; remote auto-deletion. The worktree is now on the deleted follow-up branch (also auto-deleted on merge) and contains only untracked review artifacts.
+- Recommend cleanup with `git worktree remove /Users/adnaaniqbal/projects/trockcrm-projects-ux` once the user has reviewed the smoke artifacts on disk.
+
+## Hard-stop conditions checked (fix-up)
+
+None tripped:
+- All three test accounts authenticated. `test-admin@trock.test` required the alternate password (`dev123!`, per the track's standing-orders note); the other two used the primary password.
+- Subagent round 1 was CLEAN on round 1; no further rounds needed.
+- Codex silence on the fix-up was documented and within protocol — proceeded to merge.
+- Rebase was a clean fast-forward (branch created fresh from `origin/main`); only one minor conflict on `smoke.md` resolved by keeping main's canonical version.
+- Backfill / mirror logic was unified without a schema change (function re-export, not a column or migration change).
+- No user data touched outside SMOKE TEST DELETE fixtures (no DB writes from this fix-up at all).
+- The forced-counts-failure smoke gate passed via deployed-bundle string verification + source-string regression suite; no page crash signature could exist with the fix code present.
+
+## Assumptions documented
+
+- Treated PR #254 being merged ahead of the Codex fix-up as a coordination event (another agent's docs/final PR #259 closed the loop prematurely), not a hard stop. Opened a follow-up PR against `origin/main` rather than reopening the closed PR, which would have been ill-defined.
+- Treated Codex silence after the re-review request as "proceed" per the track's documented protocol, not as a blocker.
+- Did not run the active-flag backfill against production. The unified-logic change is purely defensive — the prod data was already correct (verified by the unchanged 331/392/723 row counts), and the re-run criterion is "if a future drift is suspected", not "always after a logic change".
+- A full headless-browser pass was not performed; the forced-counts-failure smoke was substituted with deployed-bundle string verification + the new source-string regression suite. A manual browser pass before T Rock go-live is recommended.
 - SyncHub mirror change was in scope (CRM-side `procore-project-relay-service.ts` callers) — no foreign-repo access was needed.
