@@ -271,6 +271,7 @@ async function cleanupSmokeRows(client: pg.Client, schemaName: string) {
       await client.query(`DELETE FROM ${schema}.lead_question_answers WHERE lead_id = ANY($1::uuid[])`, [ids]);
       await client.query(`DELETE FROM ${schema}.lead_stage_history WHERE lead_id = ANY($1::uuid[])`, [ids]);
       await client.query(`DELETE FROM ${schema}.lead_due_diligence_approvals WHERE lead_id = ANY($1::uuid[])`, [ids]);
+      await client.query(`DELETE FROM ${schema}.activities WHERE lead_id = ANY($1::uuid[])`, [ids]);
       await client.query(
         `
           DELETE FROM ${schema}.tasks
