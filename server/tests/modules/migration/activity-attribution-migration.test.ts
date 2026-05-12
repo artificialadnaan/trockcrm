@@ -25,7 +25,7 @@ describe("0021 activity attribution migration", () => {
   it("applies to all existing office schemas", () => {
     expect(migrationSql).toContain("FROM information_schema.schemata");
     expect(migrationSql).toContain("WHERE schema_name LIKE 'office_%'");
-    expect(migrationSql).toContain("SET LOCAL search_path = %I, public");
+    expect(migrationSql).toContain("set_config('search_path', format('%I,public', tenant_schema), true)");
     expect(migrationSql).toContain("EXECUTE tenant_sql");
   });
 

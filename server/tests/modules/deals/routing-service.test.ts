@@ -75,9 +75,9 @@ describe("Workflow Alignment Routing Contract", () => {
   it("adds active service-deal stages so under-threshold routing has an entry stage", () => {
     expect(existsSync(servicePipelineSeedMigrationPath)).toBe(true);
     expect(servicePipelineSeedMigrationSql).toContain("'service_deal'");
-    expect(servicePipelineSeedMigrationSql).toContain("'service_review'");
-    expect(servicePipelineSeedMigrationSql).toContain("'service_scheduled'");
-    expect(servicePipelineSeedMigrationSql).toContain("'service_complete'");
+    expect(servicePipelineSeedMigrationSql).toContain("'service_estimating'");
+    expect(servicePipelineSeedMigrationSql).toContain("'service_estimate_under_review'");
+    expect(servicePipelineSeedMigrationSql).toContain("'service_estimate_sent_to_client'");
     expect(servicePipelineSeedMigrationSql).toContain("is_active_pipeline");
   });
 

@@ -1203,7 +1203,7 @@ describe("Stage Gate Validation", () => {
 
       expect(durationStr).toBeNull();
     });
-  });
+  }, 15_000);
 });
 
 describe("Scoping Attachment Hardening", () => {

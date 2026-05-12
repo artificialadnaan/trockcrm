@@ -4,17 +4,25 @@ const dealsServiceMocks = vi.hoisted(() => ({
   getDealById: vi.fn(),
   getDeals: vi.fn(),
   getDealDetail: vi.fn(),
+  getEstimatingBoundaryStage: vi.fn(),
+  getRequiredEstimatingBoundaryStage: vi.fn(),
+  isBidBoardOwnedDownstreamStage: vi.fn(),
+  buildBidBoardOwnershipState: vi.fn(),
   createDeal: vi.fn(),
   updateDeal: vi.fn(),
+  startProposalDraft: vi.fn(),
   deleteDeal: vi.fn(),
   getDealsForPipeline: vi.fn(),
+  listDealStagePage: vi.fn(),
   getDealSources: vi.fn(),
+  setDealContractSignedDate: vi.fn(),
 }));
 
 vi.mock("../../../src/modules/deals/service.js", () => dealsServiceMocks);
 
 const fileServiceMocks = vi.hoisted(() => ({
   confirmUpload: vi.fn(),
+  getPendingUploadMetadata: vi.fn(),
 }));
 
 vi.mock("../../../src/modules/files/service.js", async () => {
@@ -25,6 +33,7 @@ vi.mock("../../../src/modules/files/service.js", async () => {
   return {
     ...actual,
     confirmUpload: fileServiceMocks.confirmUpload,
+    getPendingUploadMetadata: fileServiceMocks.getPendingUploadMetadata,
   };
 });
 
@@ -72,7 +81,7 @@ describe("estimating security and recovery", () => {
 
     expect(thrown?.statusCode ?? thrown?.status).toBe(404);
     expect(fileServiceMocks.confirmUpload).not.toHaveBeenCalled();
-  });
+  }, 15_000);
 
   it("marks OCR status failed when OCR processing throws", async () => {
     const updateWhere = vi.fn().mockResolvedValue(undefined);

@@ -72,7 +72,7 @@ describe("seedLockedReports", () => {
       { name: "Lost Deals by Reason" },
       { name: "Revenue by Project Type" },
       { name: "Lead Source ROI" },
-      { name: "Closed-Won Summary" },
+      { name: "Won Deals Summary" },
       { name: "Pipeline by Rep" },
     ];
 

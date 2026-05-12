@@ -55,7 +55,21 @@ export async function runEstimateDocumentOcr(
     parseProfile?: string | null;
     parseMeasurementsEnabled?: boolean;
   },
-  officeId: string | null
+  officeId: string | null,
+  dependencies?: {
+    runEstimateDocumentParse?: (input: {
+      tenantDb: unknown;
+      document: unknown;
+      options: {
+        provider: string;
+        profile: string;
+        measurementsEnabled: boolean;
+      };
+    }) => Promise<{
+      extractionCount: number;
+      parseRun: { id: string };
+    }>;
+  }
 ) {
   const schemaName = await resolveSchemaName(officeId);
   const tenantDb = drizzle(pool, { schema, casing: "snake_case" as any });
@@ -71,20 +85,24 @@ export async function runEstimateDocumentOcr(
     throw new Error(`Estimate document ${payload.documentId} not found`);
   }
 
-  const { runEstimateDocumentParse } = await importFirstAvailable<{
-    runEstimateDocumentParse: (input: {
-      tenantDb: unknown;
-      document: typeof document;
-      options: {
-        provider: string;
-        profile: string;
-        measurementsEnabled: boolean;
-      };
-    }) => Promise<{
-      extractionCount: number;
-      parseRun: { id: string };
-    }>;
-  }>(SERVER_ESTIMATING_PARSE_MODULES);
+  const runEstimateDocumentParse =
+    dependencies?.runEstimateDocumentParse ??
+    (
+      await importFirstAvailable<{
+        runEstimateDocumentParse: (input: {
+          tenantDb: unknown;
+          document: typeof document;
+          options: {
+            provider: string;
+            profile: string;
+            measurementsEnabled: boolean;
+          };
+        }) => Promise<{
+          extractionCount: number;
+          parseRun: { id: string };
+        }>;
+      }>(SERVER_ESTIMATING_PARSE_MODULES)
+    ).runEstimateDocumentParse;
 
   const result = await runEstimateDocumentParse({
     tenantDb: tenantDb as any,

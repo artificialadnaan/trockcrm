@@ -417,6 +417,7 @@ describe("setDealContractSignedDate", () => {
   });
 
   it("allows contract_signed_at to be written with handoff flag off but queues no Procore handoff event", async () => {
+    process.env.ENABLE_CONTRACT_SIGNED_HANDOFF = "false";
     const tenantDb = makeTenantDb({
       id: "deal-1",
       stageId: "stage-contract",

@@ -9,6 +9,7 @@ function createChainableMock() {
     select: vi.fn(),
     from: vi.fn(),
     where: vi.fn(),
+    leftJoin: vi.fn(),
     orderBy: vi.fn(),
     limit: vi.fn(),
     then: vi.fn((resolve: (value: any[]) => unknown) => resolve(dbState.responses.shift() ?? [])),
@@ -17,6 +18,7 @@ function createChainableMock() {
   chain.select.mockReturnValue(chain);
   chain.from.mockReturnValue(chain);
   chain.where.mockReturnValue(chain);
+  chain.leftJoin.mockReturnValue(chain);
   chain.orderBy.mockReturnValue(chain);
   chain.limit.mockReturnValue(chain);
 
@@ -28,7 +30,7 @@ vi.mock("../../../src/db.js", () => ({
   pool: {},
 }));
 
-describe("listDealBoard", () => {
+describe("getDealsForPipeline", () => {
   beforeEach(() => {
     dbState.responses = [];
   });
@@ -47,40 +49,46 @@ describe("listDealBoard", () => {
       ],
     ];
 
+    const stageDeals = Array.from({ length: 110 }).map((_, index) => ({
+      id: `deal-${index + 1}`,
+      dealNumber: `TR-2026-${String(index + 1).padStart(4, "0")}`,
+      name: `Deal ${index + 1}`,
+      stageId: "stage-estimating",
+      assignedRepId: "rep-1",
+      officeId: "office-1",
+      workflowRoute: "normal",
+      awardedAmount: "1000",
+      bidEstimate: "1000",
+      ddEstimate: null,
+      propertyCity: "Dallas",
+      propertyState: "TX",
+      source: "referral",
+      lastActivityAt: "2026-04-21T10:00:00.000Z",
+      stageEnteredAt: "2026-04-20T10:00:00.000Z",
+      updatedAt: "2026-04-21T10:00:00.000Z",
+      companyName: null,
+      assignedRepName: "Rep One",
+    }));
+    const tenantResponses = [
+      [{ count: 110, totalValue: 110000 }],
+      stageDeals.slice(0, 100),
+    ];
     const tenantDb = {
-      execute: vi.fn().mockResolvedValue({
-        rows: Array.from({ length: 10 }).map((_, index) => ({
-          id: `deal-${index + 1}`,
-          deal_number: `TR-2026-${String(index + 1).padStart(4, "0")}`,
-          name: `Deal ${index + 1}`,
-          stage_id: "stage-estimating",
-          assigned_rep_id: "rep-1",
-          office_id: "office-1",
-          workflow_route: "estimating",
-          awarded_amount: "1000",
-          bid_estimate: "1000",
-          dd_estimate: null,
-          property_city: "Dallas",
-          property_state: "TX",
-          source: "referral",
-          last_activity_at: "2026-04-21T10:00:00.000Z",
-          stage_entered_at: "2026-04-20T10:00:00.000Z",
-          updated_at: "2026-04-21T10:00:00.000Z",
-        })),
+      select: vi.fn(() => {
+        const chain = createChainableMock();
+        chain.then.mockImplementation((resolve: (value: any[]) => unknown) => resolve(tenantResponses.shift() ?? []));
+        return chain;
       }),
     } as any;
 
-    const { listDealBoard } = await import("../../../src/modules/deals/service.js");
-    const result = await listDealBoard(tenantDb, {
-      role: "director",
-      userId: "director-1",
-      activeOfficeId: "office-1",
-      scope: "team",
+    const { getDealsForPipeline } = await import("../../../src/modules/deals/service.js");
+    const result = await getDealsForPipeline(tenantDb, "director", "director-1", {
+      activeOfficeId: null,
+      scope: "all",
       includeDd: true,
-      previewLimit: 8,
     });
 
-    expect(result.columns[0]?.count).toBe(10);
-    expect(result.columns[0]?.cards).toHaveLength(8);
+    expect(result.pipelineColumns[0]?.count).toBe(110);
+    expect(result.pipelineColumns[0]?.deals).toHaveLength(100);
   });
 });

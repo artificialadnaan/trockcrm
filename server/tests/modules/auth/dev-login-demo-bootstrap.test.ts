@@ -10,6 +10,7 @@ const authServiceMocks = vi.hoisted(() => ({
   getDevUsers: vi.fn(),
   getUserByEmail: vi.fn(),
   getUserById: vi.fn(),
+  getUserOnboardingGateStatus: vi.fn(),
   signJwt: vi.fn(),
 }));
 
@@ -57,6 +58,12 @@ describe("dev login demo bootstrap", () => {
       role: "director",
       officeId: "office-dallas",
       isActive: true,
+    });
+    authServiceMocks.getUserOnboardingGateStatus.mockResolvedValue({
+      onboardingCompletedAt: null,
+      onboardingPendingCount: 0,
+      requiresOnboarding: false,
+      cleanupUrl: "http://localhost:5175",
     });
     authServiceMocks.signJwt.mockReturnValue("signed-token");
   });

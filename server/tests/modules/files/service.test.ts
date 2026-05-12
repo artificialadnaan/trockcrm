@@ -100,12 +100,12 @@ describe("File Service", () => {
   });
 
   describe("File Size Validation", () => {
-    it("should enforce 50 MB limit", () => {
-      expect(MAX_FILE_SIZE_BYTES).toBe(50 * 1024 * 1024);
+    it("should enforce 200 MB limit", () => {
+      expect(MAX_FILE_SIZE_BYTES).toBe(200 * 1024 * 1024);
     });
 
-    it("should allow files at exactly 50 MB", () => {
-      expect(MAX_FILE_SIZE_BYTES).toBe(52428800);
+    it("should allow files at exactly 200 MB", () => {
+      expect(MAX_FILE_SIZE_BYTES).toBe(209715200);
     });
   });
 
