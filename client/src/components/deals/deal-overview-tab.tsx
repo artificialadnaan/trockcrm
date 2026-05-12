@@ -8,7 +8,7 @@ import { DealCopilotPanel } from "@/components/ai/deal-copilot-panel";
 import { DealEstimatesCard } from "./deal-estimates-card";
 import { DealStageBadge } from "./deal-stage-badge";
 import { RecordAssignmentCard } from "@/components/assignment/record-assignment-card";
-import { formatDate, daysInStage, winProbabilityColor, formatCurrency } from "@/lib/deal-utils";
+import { formatDate, daysInStage, winProbabilityColor, formatCurrency, formatDealDisplayNumber } from "@/lib/deal-utils";
 import { useProjectTypes, useRegions } from "@/hooks/use-pipeline-config";
 import { updateDeal, type DealDetail } from "@/hooks/use-deals";
 import { useTaskAssignees } from "@/hooks/use-task-assignees";
@@ -163,8 +163,10 @@ export function DealOverviewTab({ deal, onDealUpdated }: DealOverviewTabProps) {
           <CardContent>
             <div className="grid grid-cols-2 gap-4 text-sm">
               <div>
-                <span className="text-muted-foreground">Deal Number</span>
-                <p className="font-mono font-medium">{deal.dealNumber}</p>
+                <span className="text-muted-foreground">Project Number</span>
+                <p className="font-mono font-medium" data-testid="deal-overview-project-number">
+                  {formatDealDisplayNumber(deal).label}
+                </p>
               </div>
               <div>
                 <span className="text-muted-foreground">Source</span>

@@ -255,6 +255,7 @@ async function searchDeals(tenantDb: TenantDb, query: string): Promise<SearchRes
     SELECT
       d.id,
       d.deal_number,
+      d.project_number,
       d.name,
       d.property_address,
       d.property_city,
@@ -262,6 +263,7 @@ async function searchDeals(tenantDb: TenantDb, query: string): Promise<SearchRes
       ts_rank(
         to_tsvector('english',
           COALESCE(d.deal_number, '') || ' ' ||
+          COALESCE(d.project_number, '') || ' ' ||
           COALESCE(d.name, '') || ' ' ||
           COALESCE(d.description, '') || ' ' ||
           COALESCE(d.property_address, '')
@@ -272,6 +274,7 @@ async function searchDeals(tenantDb: TenantDb, query: string): Promise<SearchRes
     WHERE d.is_active = true
       AND to_tsvector('english',
         COALESCE(d.deal_number, '') || ' ' ||
+        COALESCE(d.project_number, '') || ' ' ||
         COALESCE(d.name, '') || ' ' ||
         COALESCE(d.description, '') || ' ' ||
         COALESCE(d.property_address, '')
@@ -285,11 +288,21 @@ async function searchDeals(tenantDb: TenantDb, query: string): Promise<SearchRes
     entityType: "deal",
     id: r.id,
     primaryLabel: r.name ?? "Unnamed Deal",
-    secondaryLabel: r.deal_number ?? "",
+    secondaryLabel: pickDealSecondaryLabel(r.project_number, r.deal_number),
     tertiaryLabel: [r.property_city, r.property_state].filter(Boolean).join(", ") || undefined,
     deepLink: `/deals/${r.id}`,
     rank: Number(r.rank ?? 0),
   }));
+}
+
+const HUBSPOT_DEAL_NUMBER_PATTERN = /^HS[-_ ]?\d+/i;
+
+export function pickDealSecondaryLabel(projectNumber: string | null, dealNumber: string | null): string {
+  const project = projectNumber?.trim();
+  if (project) return project;
+  const deal = dealNumber?.trim();
+  if (deal && !HUBSPOT_DEAL_NUMBER_PATTERN.test(deal)) return deal;
+  return "";
 }
 
 async function searchContacts(tenantDb: TenantDb, query: string): Promise<SearchResult[]> {

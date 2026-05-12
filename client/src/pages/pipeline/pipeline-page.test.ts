@@ -94,14 +94,16 @@ describe("summarizeActivePipelineColumns", () => {
 });
 
 describe("getDealDisplayNumber", () => {
-  it("prefers canonical project numbers and marks deal number fallback", () => {
+  it("prefers canonical project numbers and never exposes the HubSpot ID to users", () => {
     expect(getDealDisplayNumber({ projectNumber: "DFW-1-12826-aa", dealNumber: "HS-321" })).toEqual({
       label: "DFW-1-12826-aa",
       isFallback: false,
+      isPending: false,
     });
     expect(getDealDisplayNumber({ projectNumber: null, dealNumber: "HS-321" })).toEqual({
-      label: "HS-321",
+      label: "Pending",
       isFallback: true,
+      isPending: true,
     });
   });
 });

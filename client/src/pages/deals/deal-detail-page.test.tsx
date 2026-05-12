@@ -55,15 +55,19 @@ vi.mock("@/hooks/use-activities", () => ({
   createActivity: mocks.createActivityMock,
 }));
 
-vi.mock("@/lib/deal-utils", () => ({
-  formatCurrency: vi.fn((value: number | string | null | undefined) => {
-    const amount = Number(value ?? 0);
-    return new Intl.NumberFormat("en-US", { style: "currency", currency: "USD", maximumFractionDigits: 0 }).format(amount);
-  }),
-  bestEstimate: vi.fn((deal: { awardedAmount?: string | null; bidEstimate?: string | null; ddEstimate?: string | null }) =>
-    Number(deal.awardedAmount ?? deal.bidEstimate ?? deal.ddEstimate ?? 0)
-  ),
-}));
+vi.mock("@/lib/deal-utils", async () => {
+  const actual = await vi.importActual<typeof import("@/lib/deal-utils")>("@/lib/deal-utils");
+  return {
+    ...actual,
+    formatCurrency: vi.fn((value: number | string | null | undefined) => {
+      const amount = Number(value ?? 0);
+      return new Intl.NumberFormat("en-US", { style: "currency", currency: "USD", maximumFractionDigits: 0 }).format(amount);
+    }),
+    bestEstimate: vi.fn((deal: { awardedAmount?: string | null; bidEstimate?: string | null; ddEstimate?: string | null }) =>
+      Number(deal.awardedAmount ?? deal.bidEstimate ?? deal.ddEstimate ?? 0)
+    ),
+  };
+});
 
 vi.mock("@/components/ui/button", () => ({
   buttonVariants: vi.fn(({ variant, size }: { variant?: string; size?: string } = {}) =>
@@ -387,12 +391,12 @@ describe("DealDetailPage", () => {
     });
   });
 
-  it("renders deal hero with name and stage badge", () => {
+  it("renders deal hero with name, stage badge, and project number (not raw deal number)", () => {
     const html = renderPage();
 
     expect(html).toContain("Palm Villas");
     expect(html).toContain("Estimate in Progress");
-    expect(html).toContain("TR-2026-0001");
+    expect(html).toContain("DFW-1-12826-aa");
     expect(html).toContain("Dallas Independent SD");
   });
 
@@ -443,7 +447,7 @@ describe("DealDetailPage", () => {
     expect(html).toContain("Brett Rios");
     expect(html).toContain('href="/contacts/contact-1"');
     expect(html).toContain("Contact assigned");
-    expect(html).toContain("hs_deal_82211");
+    expect(html).not.toContain("hs_deal_82211");
     expect(html).toContain("123456");
     expect(html).toContain("DFW-3-12826-aa");
   });
@@ -474,7 +478,7 @@ describe("DealDetailPage", () => {
     expect(html).not.toContain("Not yet assigned");
   });
 
-  it("falls back to muted deal number with caption when project number is missing", () => {
+  it("never exposes HubSpot-imported deal numbers to users when project number is missing", () => {
     mocks.useDealDetailMock.mockReturnValueOnce({
       loading: false,
       error: null,
@@ -489,12 +493,12 @@ describe("DealDetailPage", () => {
     const html = renderPage();
 
     expect(html).toContain("Project number");
-    expect(html).toContain("HS-319925219003");
+    expect(html).not.toContain("HS-319925219003");
+    expect(html).toContain("Pending");
     expect(html).toContain("Not yet assigned");
-    expect(html).toContain("text-slate-500");
   });
 
-  it("shows deal number as Deal ID in system IDs regardless of project number state", () => {
+  it("renders project number for the Deal ID system row and never the HubSpot ID", () => {
     mocks.useDealDetailMock.mockReturnValueOnce({
       loading: false,
       error: null,
@@ -510,8 +514,10 @@ describe("DealDetailPage", () => {
 
     expect(html).toContain("System IDs");
     expect(html).toContain("Deal ID");
-    expect(html).toContain("HS-319925219003");
-    expect(html).toContain("hubspot-system-id");
+    expect(html).toContain("DFW-1-12826-aa");
+    expect(html).not.toContain("HS-319925219003");
+    expect(html).not.toContain("hubspot-system-id");
+    expect(html).not.toMatch(/>\s*HubSpot\s*</);
   });
 
   it("displays project type with proper casing", () => {

@@ -1,3 +1,34 @@
+const HUBSPOT_DEAL_NUMBER_PATTERN = /^HS[-_ ]?\d+/i;
+
+export function isHubspotImportedDealNumber(value: string | null | undefined): boolean {
+  if (!value) return false;
+  return HUBSPOT_DEAL_NUMBER_PATTERN.test(value.trim());
+}
+
+export interface DealDisplayNumber {
+  label: string;
+  isFallback: boolean;
+  isPending: boolean;
+}
+
+export function formatDealDisplayNumber(
+  deal: {
+    projectNumber?: string | null;
+    dealNumber?: string | null;
+    propertyState?: string | null;
+  }
+): DealDisplayNumber {
+  const projectNumber = deal.projectNumber?.trim();
+  if (projectNumber) return { label: projectNumber, isFallback: false, isPending: false };
+
+  const dealNumber = deal.dealNumber?.trim();
+  if (dealNumber && !isHubspotImportedDealNumber(dealNumber)) {
+    return { label: dealNumber, isFallback: true, isPending: false };
+  }
+
+  return { label: "Pending", isFallback: true, isPending: true };
+}
+
 /**
  * Format a numeric string as currency (USD).
  */

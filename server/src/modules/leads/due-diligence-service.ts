@@ -798,15 +798,40 @@ export async function decideDueDiligenceByToken(input: {
   }
 }
 
-// TODO: Audit log for assignment changes. When an admin adds or removes a
-// recipient, record (actor, group, before, after, timestamp) for
-// compliance/security. Out of scope for initial DD rollout.
-export async function getNotificationRecipientGroup(tenantDb: TenantDb, key: string) {
-  const [group] = await tenantDb
+const WELL_KNOWN_GROUPS: Record<string, { name: string; description: string }> = {
+  [GROUP_KEY]: {
+    name: "Lead Due Diligence",
+    description: "Recipients who receive new-customer lead due diligence approval requests.",
+  },
+};
+
+async function ensureWellKnownGroup(tenantDb: TenantDb, key: string) {
+  const known = WELL_KNOWN_GROUPS[key];
+  if (!known) return null;
+  const [row] = await tenantDb
+    .insert(notificationRecipientGroups)
+    .values({ key, name: known.name, description: known.description })
+    .onConflictDoNothing({ target: notificationRecipientGroups.key })
+    .returning();
+  if (row) return row;
+  const [existing] = await tenantDb
     .select()
     .from(notificationRecipientGroups)
     .where(eq(notificationRecipientGroups.key, key))
     .limit(1);
+  return existing ?? null;
+}
+
+// TODO: Audit log for assignment changes. When an admin adds or removes a
+// recipient, record (actor, group, before, after, timestamp) for
+// compliance/security. Out of scope for initial DD rollout.
+export async function getNotificationRecipientGroup(tenantDb: TenantDb, key: string) {
+  const [existing] = await tenantDb
+    .select()
+    .from(notificationRecipientGroups)
+    .where(eq(notificationRecipientGroups.key, key))
+    .limit(1);
+  const group = existing ?? (await ensureWellKnownGroup(tenantDb, key));
   if (!group) {
     throw new AppError(404, "Notification recipient group not found");
   }
@@ -815,11 +840,12 @@ export async function getNotificationRecipientGroup(tenantDb: TenantDb, key: str
 }
 
 export async function updateNotificationRecipientAssignments(tenantDb: TenantDb, key: string, userIds: string[]) {
-  const [group] = await tenantDb
+  const [existing] = await tenantDb
     .select()
     .from(notificationRecipientGroups)
     .where(eq(notificationRecipientGroups.key, key))
     .limit(1);
+  const group = existing ?? (await ensureWellKnownGroup(tenantDb, key));
   if (!group) {
     throw new AppError(404, "Notification recipient group not found");
   }
