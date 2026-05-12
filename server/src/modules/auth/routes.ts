@@ -21,7 +21,7 @@ import {
   isGraphAuthConfigured,
 } from "../email/graph-auth.js";
 import { getGraphTokenStatus, revokeGraphTokens } from "../email/graph-token-service.js";
-import { getLogoutCookieClears, getTokenCookieOptions, isDevAuthEnabled } from "./http-config.js";
+import { getLogoutCookieClearsForRequest, getTokenCookieOptionsForRequest, isDevAuthEnabled } from "./http-config.js";
 import {
   clearStoredProcoreOauthTokens,
   getStoredProcoreOauthTokens,
@@ -40,7 +40,30 @@ function isDevMode(req: import("express").Request): boolean {
   const host = req.hostname || req.get("host") || "";
   return isDevAuthEnabled(process.env, host);
 }
-const tokenCookieOptions = getTokenCookieOptions(process.env);
+function tokenCookieOptionsForRequest(req: import("express").Request) {
+  return getTokenCookieOptionsForRequest(process.env, {
+    host: req.get("host"),
+    hostname: req.hostname,
+    origin: req.headers.origin,
+  });
+}
+
+function logoutCookieClearsForRequest(req: import("express").Request) {
+  return getLogoutCookieClearsForRequest(process.env, {
+    host: req.get("host"),
+    hostname: req.hostname,
+    origin: req.headers.origin,
+  });
+}
+
+function csrfTokenForResponse(res: import("express").Response): string | undefined {
+  return typeof res.locals.csrfToken === "string" ? res.locals.csrfToken : undefined;
+}
+
+function withCsrfToken<T extends Record<string, unknown>>(res: import("express").Response, payload: T) {
+  const csrfToken = csrfTokenForResponse(res);
+  return csrfToken ? { ...payload, csrfToken } : payload;
+}
 
 function normalizeOrigin(value: string | undefined): string | null {
   if (!value) return null;
@@ -139,7 +162,7 @@ router.post("/dev/login", authLimiter, async (req, res, next) => {
       authMethod: "dev",
     });
 
-    res.cookie("token", token, tokenCookieOptions);
+    res.cookie("token", token, tokenCookieOptionsForRequest(req));
 
     const responseUser = await withOnboardingGate({
         id: resolvedUser.id,
@@ -151,7 +174,7 @@ router.post("/dev/login", authLimiter, async (req, res, next) => {
         mustChangePassword: false,
       });
 
-    res.json({ user: responseUser, returnTo: safeReturnTo(req.body?.returnTo) });
+    res.json(withCsrfToken(res, { user: responseUser, returnTo: safeReturnTo(req.body?.returnTo) }));
   } catch (err) {
     next(err);
   }
@@ -177,8 +200,8 @@ router.post("/local/login", authLimiter, async (req, res, next) => {
       authMethod: "local",
     });
 
-    res.cookie("token", token, tokenCookieOptions);
-    res.json({ user: await withOnboardingGate({ ...user, activeOfficeId: user.officeId }), returnTo: safeReturnTo(req.body?.returnTo) });
+    res.cookie("token", token, tokenCookieOptionsForRequest(req));
+    res.json(withCsrfToken(res, { user: await withOnboardingGate({ ...user, activeOfficeId: user.officeId }), returnTo: safeReturnTo(req.body?.returnTo) }));
   } catch (err) {
     next(err);
   }
@@ -194,7 +217,7 @@ router.use(fieldUserAuthRouter);
 // Get current user
 router.get("/me", authMiddleware, async (req, res, next) => {
   try {
-    res.json({ user: await withOnboardingGate(req.user!) });
+    res.json(withCsrfToken(res, { user: await withOnboardingGate(req.user!) }));
   } catch (err) {
     next(err);
   }
@@ -228,20 +251,20 @@ router.post("/local/change-password", authMiddleware, async (req, res, next) => 
       newPassword,
     });
 
-    res.json({
+    res.json(withCsrfToken(res, {
       user: await withOnboardingGate({
         ...req.user!,
         mustChangePassword: false,
       }),
-    });
+    }));
   } catch (err) {
     next(err);
   }
 });
 
 // Logout
-router.post("/logout", (_req, res) => {
-  for (const clear of getLogoutCookieClears(process.env)) {
+router.post("/logout", (req, res) => {
+  for (const clear of logoutCookieClearsForRequest(req)) {
     res.cookie(clear.name, "", clear.options);
   }
   res.json({ success: true });

@@ -60,7 +60,7 @@ import {
   FIELD_CSRF_HEADER_NAME,
   CSRF_HEADER_NAME,
   getAllowedCorsOrigins,
-  getCsrfCookieOptions,
+  getCsrfCookieOptionsForRequest,
   getRequestOrigin,
   isAllowedCookieAuthOrigin,
   isFieldApiPath,
@@ -122,12 +122,17 @@ export function createApp() {
   app.use("/api/public/photo-viewer", publicPhotoViewerRoutes);
 
   app.use((req, res, next) => {
-    const csrfCookieOptions = getCsrfCookieOptions(process.env);
+    const csrfCookieOptions = getCsrfCookieOptionsForRequest(process.env, {
+      host: req.get("host"),
+      hostname: req.hostname,
+      origin: req.headers.origin,
+    });
     const existingCsrfToken =
       typeof req.cookies?.[CSRF_COOKIE_NAME] === "string"
         ? req.cookies[CSRF_COOKIE_NAME]
         : undefined;
     const csrfToken = existingCsrfToken ?? createCsrfToken();
+    res.locals.csrfToken = csrfToken;
 
     if (!existingCsrfToken) {
       res.cookie(CSRF_COOKIE_NAME, csrfToken, csrfCookieOptions);

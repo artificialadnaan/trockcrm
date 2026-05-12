@@ -1,6 +1,6 @@
 import { createContext, useContext, useState, useEffect, useCallback } from "react";
 import type { ReactNode } from "react";
-import { api } from "./api";
+import { api, clearCsrfTokenOverride } from "./api";
 
 interface User {
   id: string;
@@ -75,6 +75,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   const logout = async () => {
     await api("/auth/logout", { method: "POST" });
+    clearCsrfTokenOverride();
     setUser(null);
     window.localStorage.clear();
     window.sessionStorage.clear();
