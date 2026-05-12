@@ -318,14 +318,14 @@ function makeDealDetail(overrides: Record<string, unknown> = {}) {
     approvals: [],
     changeOrders: [],
   };
-  const merged: Record<string, unknown> = { ...base, ...overrides };
   // Auto-derive isHubspotSourced from hubspotDealId when a test specifies
   // only one. Tests can pass isHubspotSourced explicitly to model the
   // server-redacted wire response where hubspotDealId is absent.
-  if ("hubspotDealId" in overrides && !("isHubspotSourced" in overrides)) {
-    merged.isHubspotSourced = overrides.hubspotDealId != null;
-  }
-  return merged;
+  const autoSourced =
+    "hubspotDealId" in overrides && !("isHubspotSourced" in overrides)
+      ? { isHubspotSourced: overrides.hubspotDealId != null }
+      : null;
+  return { ...base, ...overrides, ...(autoSourced ?? {}) } as typeof base;
 }
 
 describe("DealDetailPage", () => {

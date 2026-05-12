@@ -78,6 +78,7 @@ describe("buildCanonicalDealBoardColumns", () => {
               stageEnteredAt: "2026-04-23T00:00:00.000Z",
               isActive: true,
               hubspotDealId: null,
+              isHubspotSourced: false,
               createdAt: "2026-04-23T00:00:00.000Z",
               updatedAt: "2026-04-23T00:00:00.000Z",
             },
