@@ -680,7 +680,7 @@ export async function convertLead(
   });
 }
 
-export function useLeadBoard(scope: "mine" | "team" | "all") {
+export function useLeadBoard(scope: "mine" | "team" | "all", assignedRepId?: string) {
   const [board, setBoard] = useState<LeadBoardResponse | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -688,7 +688,9 @@ export function useLeadBoard(scope: "mine" | "team" | "all") {
   const refetch = useCallback(() => {
     setLoading(true);
     setError(null);
-    return api<LeadBoardResponse>(`/leads/board?scope=${scope}`)
+    const params = new URLSearchParams({ scope });
+    if (assignedRepId) params.set("assignedRepId", assignedRepId);
+    return api<LeadBoardResponse>(`/leads/board?${params.toString()}`)
       .then((result) => {
         setBoard(result);
         return result;
@@ -698,7 +700,7 @@ export function useLeadBoard(scope: "mine" | "team" | "all") {
         throw err;
       })
       .finally(() => setLoading(false));
-  }, [scope]);
+  }, [assignedRepId, scope]);
 
   useEffect(() => {
     void refetch().catch(() => undefined);

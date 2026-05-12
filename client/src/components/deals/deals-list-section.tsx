@@ -359,6 +359,7 @@ export function DealsListSection({
     () => new Map(assignees.map((assignee) => [assignee.id, assignee.displayName])),
     [assignees]
   );
+  const selectedOwnerLabel = ownerId === "__all__" ? "All reps" : assigneeNameById.get(ownerId) ?? "Selected rep";
 
   useEffect(() => {
     setPage(1);
@@ -551,7 +552,7 @@ export function DealsListSection({
             }}
           >
             <SelectTrigger>
-              <SelectValue placeholder="All reps" />
+              <SelectValue placeholder="All reps">{selectedOwnerLabel}</SelectValue>
             </SelectTrigger>
             <SelectContent>
               <SelectItem value="__all__">All reps</SelectItem>

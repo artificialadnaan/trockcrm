@@ -38,7 +38,9 @@ vi.mock("@/components/ui/select", () => ({
   SelectContent: ({ children }: { children: ReactNode }) => <div>{children}</div>,
   SelectItem: ({ children }: { children: ReactNode }) => <div>{children}</div>,
   SelectTrigger: ({ children }: { children: ReactNode }) => <div>{children}</div>,
-  SelectValue: ({ placeholder }: { placeholder?: string }) => <span>{placeholder ?? ""}</span>,
+  SelectValue: ({ children, placeholder }: { children?: ReactNode; placeholder?: string }) => (
+    <span>{children ?? placeholder ?? ""}</span>
+  ),
 }));
 
 vi.mock("@/components/pipeline/terminal-date-filter-control", () => ({
@@ -158,6 +160,13 @@ describe("DealsListSection", () => {
     expect(html).toContain("Palm Villas");
     expect(html).toContain("Acme Construction");
     expect(html).toContain("DFW-1-12826-aa");
+  });
+
+  it("renders the selected owner filter label from assignees instead of the raw id", () => {
+    const html = render();
+
+    expect(html).toContain("All reps");
+    expect(html).toContain("Brett Jones");
   });
 
   it("uses paginated useDeals call (page-based, not endless scroll)", () => {
