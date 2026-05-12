@@ -69,7 +69,7 @@ import { usePipelineStages } from "@/hooks/use-pipeline-config";
 import { useAuth } from "@/lib/auth";
 import { api } from "@/lib/api";
 import { cn } from "@/lib/utils";
-import { formatCurrency, bestEstimate } from "@/lib/deal-utils";
+import { formatCurrency, bestEstimate, formatDealDisplayNumber, isHubspotImportedDealNumber } from "@/lib/deal-utils";
 import {
   getCanonicalDealStageSlugs,
   getDealStageLabelBySlug,
@@ -614,10 +614,14 @@ export function DealDetailPage() {
   ) : (
     <DealStageBadge stageId={deal.stageId} />
   );
+  const headerDisplayNumber = formatDealDisplayNumber(deal);
   const subtitleSlot = (
     <>
-      <span className="font-mono text-xs font-bold uppercase tracking-[0.14em] text-slate-500">
-        {deal.dealNumber}
+      <span
+        className="font-mono text-xs font-bold uppercase tracking-[0.14em] text-slate-500"
+        data-testid="deal-detail-header-number"
+      >
+        {headerDisplayNumber.label}
       </span>
       {deal.intendedProjectNumber ? (
         <span className="inline-flex items-center gap-1 font-mono text-xs text-slate-500">
@@ -797,7 +801,7 @@ export function DealDetailPage() {
         />
       )}
       <RfpApprovalStatusBlock deal={deal} onRetry={handleRfpRetry} retrying={rfpRetrying} />
-      {isBidBoardOwned && !deal.hubspotDealId && <BidBoardProjectSummaryPanel deal={deal} />}
+      {isBidBoardOwned && !deal.hubspotDealId && !isHubspotImportedDealNumber(deal.dealNumber) && <BidBoardProjectSummaryPanel deal={deal} />}
       {isEstimatingBoundaryStageSlug(currentStageSlug, workflowRoute) && !isBidBoardOwned && (
         <DealEstimatingSubstage deal={deal} onUpdate={refetch} />
       )}
@@ -929,6 +933,7 @@ function DealRightRail({
 }) {
   const assignedRep = formatNullable(deal.assignedRepName ?? deal.assignedRepId);
   const assignedRepInitials = initials(deal.assignedRepName ?? deal.assignedRepId ?? "NA");
+  const headerDisplayNumber = formatDealDisplayNumber(deal);
   const dealWithOptionalContact = deal as DealDetail & {
     primaryContactName?: string | null;
     primaryContactTitle?: string | null;
@@ -1023,7 +1028,7 @@ function DealRightRail({
                 <span className="font-mono">{deal.projectNumber}</span>
               ) : (
                 <span className="space-y-1">
-                  <span className="block font-mono text-slate-500">{deal.dealNumber}</span>
+                  <span className="block font-mono text-slate-500">{headerDisplayNumber.label}</span>
                   <span className="block text-xs font-medium text-slate-400">Not yet assigned</span>
                 </span>
               )
@@ -1038,11 +1043,11 @@ function DealRightRail({
         <DetailRailSection title="System IDs">
           <DetailRailItem
             label="Deal ID"
-            value={<span className="font-mono text-xs">{formatNullable(deal.dealNumber)}</span>}
-          />
-          <DetailRailItem
-            label="HubSpot"
-            value={<span className="font-mono text-xs">{formatNullable(deal.hubspotDealId)}</span>}
+            value={
+              <span className="font-mono text-xs" data-testid="deal-detail-system-id">
+                {headerDisplayNumber.label}
+              </span>
+            }
           />
           <DetailRailItem
             label="Procore project"

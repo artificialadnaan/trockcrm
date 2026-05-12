@@ -20,6 +20,7 @@ import { Plus } from "lucide-react";
 import { createProjectTask, createTask } from "@/hooks/use-tasks";
 import { useAuth } from "@/lib/auth";
 import { api } from "@/lib/api";
+import { formatDealDisplayNumber } from "@/lib/deal-utils";
 
 interface Assignee {
   id: string;
@@ -29,6 +30,7 @@ interface Assignee {
 interface DealOption {
   id: string;
   dealNumber: string;
+  projectNumber?: string | null;
   name: string;
 }
 
@@ -208,7 +210,7 @@ export function TaskCreateDialog({
                   <SelectItem value="__none__">No deal linked</SelectItem>
                   {deals.map((d) => (
                     <SelectItem key={d.id} value={d.id}>
-                      {d.dealNumber} - {d.name}
+                      {formatDealDisplayNumber(d).label} - {d.name}
                     </SelectItem>
                   ))}
                 </SelectContent>

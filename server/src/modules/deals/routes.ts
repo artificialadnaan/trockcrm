@@ -26,6 +26,7 @@ import {
   setDealContractSignedDate,
 } from "./service.js";
 import { toJsonSafe } from "../../lib/json-safe.js";
+import { redactDealList, redactDealResponse, shouldIncludeHubspotId } from "./redact.js";
 import { activateServiceHandoff, changeDealStage } from "./stage-change.js";
 import { preflightStageCheck } from "./stage-gate.js";
 import { getContactsForDeal } from "../contacts/association-service.js";
@@ -350,7 +351,11 @@ router.get("/", async (req, res, next) => {
 
     const result = await getDeals(req.tenantDb!, filters, req.user!.role, req.user!.id);
     await req.commitTransaction!();
-    res.json(result);
+    const includeHubspotId = shouldIncludeHubspotId(req.query, req.user!.role);
+    res.json({
+      ...result,
+      deals: redactDealList(result.deals, { includeHubspotId }),
+    });
   } catch (err) {
     next(err);
   }
@@ -389,7 +394,18 @@ router.get("/pipeline", async (req, res, next) => {
       filters
     );
     await req.commitTransaction!();
-    res.json(result);
+    const includeHubspotId = shouldIncludeHubspotId(req.query, req.user!.role);
+    res.json({
+      ...result,
+      pipelineColumns: result.pipelineColumns.map((column) => ({
+        ...column,
+        deals: redactDealList(column.deals, { includeHubspotId }),
+      })),
+      terminalStages: result.terminalStages.map((column) => ({
+        ...column,
+        deals: redactDealList(column.deals, { includeHubspotId }),
+      })),
+    });
   } catch (err) {
     next(err);
   }
@@ -397,6 +413,8 @@ router.get("/pipeline", async (req, res, next) => {
 
 router.get("/stages/:stageId", async (req, res, next) => {
   try {
+    // listDealStagePage returns `rows` from a hand-written SELECT that never
+    // includes hubspot_deal_id — no redaction needed here.
     const result = await listDealStagePage(req.tenantDb!, readStageInput(req));
     await req.commitTransaction!();
     res.json(result);
@@ -459,7 +477,8 @@ router.get("/:id", async (req, res, next) => {
     const deal = await getDealById(req.tenantDb!, req.params.id, req.user!.role, req.user!.id);
     if (!deal) throw new AppError(404, "Deal not found");
     await req.commitTransaction!();
-    res.json(toJsonSafe({ deal }));
+    const includeHubspotId = shouldIncludeHubspotId(req.query, req.user!.role);
+    res.json(toJsonSafe({ deal: redactDealResponse(deal, { includeHubspotId }) }));
   } catch (err) {
     next(err);
   }
@@ -471,9 +490,10 @@ router.get("/:id/detail", async (req, res, next) => {
     const detail = await getDealDetail(req.tenantDb!, req.params.id, req.user!.role, req.user!.id);
     if (!detail) throw new AppError(404, "Deal not found");
     await req.commitTransaction!();
+    const includeHubspotId = shouldIncludeHubspotId(req.query, req.user!.role);
     res.json(toJsonSafe({
       deal: {
-        ...detail,
+        ...redactDealResponse(detail, { includeHubspotId }),
         isRfpTriggerEnabled: isOpportunityRfpEventEnabled(),
       },
     }));

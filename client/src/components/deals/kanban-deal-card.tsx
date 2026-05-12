@@ -1,13 +1,11 @@
 import type { CSSProperties, ReactNode } from "react";
 import { useNavigate } from "react-router-dom";
-import { bestEstimate, daysInStage, formatCurrencyCompact } from "@/lib/deal-utils";
+import { bestEstimate, daysInStage, formatCurrencyCompact, formatDealDisplayNumber } from "@/lib/deal-utils";
 import { cn } from "@/lib/utils";
 import type { Deal } from "@/hooks/use-deals";
 
 export function getDealDisplayNumber(deal: Pick<Deal, "dealNumber" | "projectNumber">) {
-  const projectNumber = deal.projectNumber?.trim();
-  if (projectNumber) return { label: projectNumber, isFallback: false };
-  return { label: deal.dealNumber ?? "", isFallback: true };
+  return formatDealDisplayNumber(deal);
 }
 
 interface KanbanDealCardProps {

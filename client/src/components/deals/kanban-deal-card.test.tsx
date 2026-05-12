@@ -93,16 +93,17 @@ describe("KanbanDealCard", () => {
     expect(html).toContain("Palm Villas");
   });
 
-  it("falls back to deal number with muted styling when project number is null", () => {
+  it("renders 'Pending' with muted styling when project number is null and deal number is HubSpot-imported", () => {
     const html = render(makeDeal({ projectNumber: null, dealNumber: "HS-321687989951" }));
-    expect(html).toContain("HS-321687989951");
-    // muted fallback uses gray-400
+    expect(html).not.toContain("HS-321687989951");
+    expect(html).toContain("Pending");
     expect(html).toContain("text-gray-400");
   });
 
-  it("falls back to deal number when project number is whitespace-only", () => {
+  it("never surfaces the HubSpot ID even when project number is whitespace-only", () => {
     const html = render(makeDeal({ projectNumber: "   ", dealNumber: "HS-321687989951" }));
-    expect(html).toContain("HS-321687989951");
+    expect(html).not.toContain("HS-321687989951");
+    expect(html).toContain("Pending");
     expect(html).toContain("text-gray-400");
   });
 
@@ -124,20 +125,31 @@ describe("getDealDisplayNumber", () => {
     expect(getDealDisplayNumber({ projectNumber: "DFW-1-12826-aa", dealNumber: "HS-321" })).toEqual({
       label: "DFW-1-12826-aa",
       isFallback: false,
+      isPending: false,
     });
   });
 
-  it("returns deal number with isFallback true when project number is null", () => {
+  it("renders 'Pending' when project number is missing and deal number is HubSpot-imported", () => {
     expect(getDealDisplayNumber({ projectNumber: null, dealNumber: "HS-321" })).toEqual({
-      label: "HS-321",
+      label: "Pending",
       isFallback: true,
+      isPending: true,
     });
   });
 
-  it("trims whitespace-only project numbers and falls back", () => {
+  it("trims whitespace-only project numbers and hides HS- deal numbers", () => {
     expect(getDealDisplayNumber({ projectNumber: "   ", dealNumber: "HS-321" })).toEqual({
-      label: "HS-321",
+      label: "Pending",
       isFallback: true,
+      isPending: true,
+    });
+  });
+
+  it("renders native deal numbers (non-HS) when project number is missing", () => {
+    expect(getDealDisplayNumber({ projectNumber: null, dealNumber: "BB-42" })).toEqual({
+      label: "BB-42",
+      isFallback: true,
+      isPending: false,
     });
   });
 });
