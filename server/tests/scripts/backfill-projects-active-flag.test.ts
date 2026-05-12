@@ -135,18 +135,27 @@ describe("buildTenantActivePlan", () => {
 describe("parity between script's deriveIsActiveFromSnapshot and the live mirror's deriveIsActive", () => {
   // Both helpers must agree on every snapshot shape we encounter so the
   // backfill's plan and the next webhook/backfill sync produce the same
-  // is_active result for the same row.
+  // is_active result for the same row. The script's export is now a
+  // direct re-export of the live mirror's helper — these fixtures pin
+  // that contract so a future hand-rolled re-implementation would fail
+  // CI rather than silently re-introduce drift.
   const fixtures: Array<{ name: string; snapshot: Record<string, unknown> | null | undefined }> = [
     { name: "null snapshot", snapshot: null },
     { name: "undefined snapshot", snapshot: undefined },
     { name: "empty object", snapshot: {} },
     { name: "active=true", snapshot: { active: true } },
     { name: "active=false", snapshot: { active: false } },
-    { name: "active=non-boolean", snapshot: { active: "yes" } },
+    { name: "active=non-boolean string", snapshot: { active: "yes" } },
+    { name: "active=numeric truthy", snapshot: { active: 1 } },
+    { name: "active=null", snapshot: { active: null } },
     { name: "status_name Active", snapshot: { status_name: "Active" } },
     { name: "status_name Inactive", snapshot: { status_name: "Inactive" } },
+    { name: "status_name numeric (malformed)", snapshot: { status_name: 42 } },
+    { name: "status_name null", snapshot: { status_name: null } },
     { name: "active=true overrides Inactive status", snapshot: { active: true, status_name: "Inactive" } },
+    { name: "active=false overrides Active status", snapshot: { active: false, status_name: "Active" } },
     { name: "neither field present, name only", snapshot: { name: "X" } },
+    { name: "malformed both fields, falls through to null", snapshot: { active: "yes", status_name: 7 } },
   ];
 
   for (const fixture of fixtures) {
@@ -161,4 +170,11 @@ describe("parity between script's deriveIsActiveFromSnapshot and the live mirror
       }
     });
   }
+
+  it("script export is literally the same function reference as the live mirror", () => {
+    // Belt-and-suspenders: even if someone replaces the re-export with a
+    // hand-rolled copy that happens to pass the fixtures above, this
+    // identity check fails — forcing a re-route through deriveIsActive.
+    expect(deriveIsActiveFromSnapshot).toBe(deriveIsActive);
+  });
 });
