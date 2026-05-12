@@ -5,10 +5,13 @@ import {
   FIELD_CSRF_HEADER_VALUE,
   getAllowedCorsOrigins,
   getCsrfCookieOptions,
+  getCsrfCookieOptionsForRequest,
   getDevAuthProductionWarning,
   getLogoutCookieClears,
+  getLogoutCookieClearsForRequest,
   getRequestOrigin,
   getTokenCookieOptions,
+  getTokenCookieOptionsForRequest,
   isAllowedCookieAuthOrigin,
   isFieldApiPath,
   isPublicAuthCsrfExempt,
@@ -19,6 +22,8 @@ import {
 } from "../../../src/modules/auth/http-config.js";
 
 describe("auth http config", () => {
+  const fallbackApiHost = ["api-production-ad218", "up.railway.app"].join(".");
+
   it("includes the configured custom frontend and Railway frontend service origins", () => {
     expect(
       getAllowedCorsOrigins({
@@ -57,6 +62,57 @@ describe("auth http config", () => {
     });
   });
 
+  it("omits the shared cookie domain for Railway API fallback hosts", () => {
+    const tokenOptions = getTokenCookieOptionsForRequest(
+      {
+        NODE_ENV: "production",
+        AUTH_COOKIE_DOMAIN: ".trockcrm.com",
+        CORS_ALLOWED_ORIGINS: "https://frontend-production-bcab.up.railway.app",
+      },
+      {
+        host: fallbackApiHost,
+        origin: "https://frontend-production-bcab.up.railway.app",
+      }
+    );
+    const csrfOptions = getCsrfCookieOptionsForRequest(
+      {
+        NODE_ENV: "production",
+        AUTH_COOKIE_DOMAIN: ".trockcrm.com",
+        CORS_ALLOWED_ORIGINS: "https://frontend-production-bcab.up.railway.app",
+      },
+      {
+        host: fallbackApiHost,
+        origin: "https://frontend-production-bcab.up.railway.app",
+      }
+    );
+
+    expect(tokenOptions).toMatchObject({
+      httpOnly: true,
+      secure: true,
+      sameSite: "none",
+    });
+    expect(csrfOptions).toMatchObject({
+      httpOnly: false,
+      secure: true,
+      sameSite: "none",
+      path: "/",
+    });
+    expect(tokenOptions).not.toHaveProperty("domain");
+    expect(csrfOptions).not.toHaveProperty("domain");
+  });
+
+  it("keeps the shared cookie domain on canonical trockcrm.com requests", () => {
+    expect(
+      getTokenCookieOptionsForRequest(
+        { NODE_ENV: "production", AUTH_COOKIE_DOMAIN: ".trockcrm.com" },
+        { host: "trockcrm.com", origin: "https://trockcrm.com" }
+      )
+    ).toMatchObject({
+      domain: ".trockcrm.com",
+      sameSite: "lax",
+    });
+  });
+
   it("clears shared and host-only auth cookies on logout", () => {
     expect(
       getLogoutCookieClears({ NODE_ENV: "production", AUTH_COOKIE_DOMAIN: ".trockcrm.com" }).map((clear) => [
@@ -70,6 +126,30 @@ describe("auth http config", () => {
       ["token", null, "/", 0],
       ["csrf_token", ".trockcrm.com", "/", 0],
       ["csrf_token", null, "/", 0],
+    ]);
+  });
+
+  it("clears fallback API host cookies with cross-site attributes on logout", () => {
+    const clears = getLogoutCookieClearsForRequest(
+      {
+        NODE_ENV: "production",
+        AUTH_COOKIE_DOMAIN: ".trockcrm.com",
+        CORS_ALLOWED_ORIGINS: "https://frontend-production-bcab.up.railway.app",
+      },
+      {
+        host: fallbackApiHost,
+        origin: "https://frontend-production-bcab.up.railway.app",
+      }
+    );
+
+    expect(clears.map((clear) => [
+      clear.name,
+      "domain" in clear.options ? clear.options.domain : null,
+      clear.options.sameSite,
+      clear.options.maxAge,
+    ])).toEqual([
+      ["token", null, "none", 0],
+      ["csrf_token", null, "none", 0],
     ]);
   });
 

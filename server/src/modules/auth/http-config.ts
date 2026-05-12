@@ -17,6 +17,12 @@ type EnvInput = {
   I_UNDERSTAND_DEV_AUTH_IN_PROD?: string | undefined;
 };
 
+type CookieRequestInput = {
+  host?: string | undefined;
+  hostname?: string | undefined;
+  origin?: string | string[] | undefined;
+};
+
 export const CSRF_COOKIE_NAME = "csrf_token";
 export const CSRF_HEADER_NAME = "x-csrf-token";
 export const FIELD_CSRF_HEADER_NAME = "x-requested-with";
@@ -37,6 +43,22 @@ function normalizeCookieDomain(value: string | undefined): string | undefined {
 
 function sharedAuthCookieDomain(env: EnvInput): string | undefined {
   return normalizeCookieDomain(env.AUTH_COOKIE_DOMAIN) ?? (env.NODE_ENV === "production" ? ".trockcrm.com" : undefined);
+}
+
+function requestHost(input: CookieRequestInput): string | undefined {
+  return input.hostname ?? input.host;
+}
+
+function domainMatchesHost(domain: string | undefined, host: string | undefined): boolean {
+  if (!domain || !host) return false;
+  const normalizedDomain = domain.replace(/^\./, "").toLowerCase();
+  const normalizedHost = normalizeHost(host);
+  return normalizedHost === normalizedDomain || normalizedHost.endsWith(`.${normalizedDomain}`);
+}
+
+function cookieDomainForRequest(env: EnvInput, request: CookieRequestInput): string | undefined {
+  const domain = sharedAuthCookieDomain(env);
+  return domainMatchesHost(domain, requestHost(request)) ? domain : undefined;
 }
 
 function safeEqual(a: string, b: string): boolean {
@@ -140,6 +162,31 @@ export function getTokenCookieOptions(env: EnvInput) {
   } as const;
 }
 
+function sameSiteForRequest(env: EnvInput, request: CookieRequestInput): "strict" | "lax" | "none" {
+  const isProduction = env.NODE_ENV === "production";
+  if (!isProduction) return "strict";
+
+  const origin = getRequestOrigin({ origin: request.origin });
+  const host = normalizeHost(requestHost(request));
+  if (!origin || !host) return "lax";
+
+  try {
+    const parsedOrigin = new URL(origin);
+    if (normalizeHost(parsedOrigin.host) === host) return "lax";
+  } catch {
+    return "lax";
+  }
+
+  return isAllowedCookieAuthOrigin(env, origin) ? "none" : "lax";
+}
+
+export function getTokenCookieOptionsForRequest(env: EnvInput, request: CookieRequestInput) {
+  const { domain: _domain, sameSite: _sameSite, ...base } = getTokenCookieOptions(env);
+  const domain = cookieDomainForRequest(env, request);
+  const sameSite = sameSiteForRequest(env, request);
+  return domain ? { ...base, sameSite, domain } as const : { ...base, sameSite } as const;
+}
+
 export function getLogoutCookieClears(env: EnvInput) {
   const isProduction = env.NODE_ENV === "production";
   const domain = sharedAuthCookieDomain(env);
@@ -166,6 +213,35 @@ export function getLogoutCookieClears(env: EnvInput) {
   ] as const;
 }
 
+export function getLogoutCookieClearsForRequest(env: EnvInput, request: CookieRequestInput) {
+  const isProduction = env.NODE_ENV === "production";
+  const domain = cookieDomainForRequest(env, request);
+  const sameSite = sameSiteForRequest(env, request);
+  const tokenOptions = {
+    httpOnly: true,
+    secure: isProduction,
+    sameSite,
+    path: "/",
+    maxAge: 0,
+  } as const;
+  const csrfOptions = {
+    httpOnly: false,
+    secure: isProduction,
+    sameSite,
+    path: "/",
+    maxAge: 0,
+  } as const;
+
+  return [
+    ...(domain ? [
+      { name: "token", options: { ...tokenOptions, domain } },
+      { name: CSRF_COOKIE_NAME, options: { ...csrfOptions, domain } },
+    ] as const : []),
+    { name: "token", options: tokenOptions },
+    { name: CSRF_COOKIE_NAME, options: csrfOptions },
+  ] as const;
+}
+
 export function getCsrfCookieOptions(env: EnvInput) {
   const isProduction = env.NODE_ENV === "production";
   const domain = sharedAuthCookieDomain(env);
@@ -178,6 +254,13 @@ export function getCsrfCookieOptions(env: EnvInput) {
     path: "/",
     maxAge: 24 * 60 * 60 * 1000,
   } as const;
+}
+
+export function getCsrfCookieOptionsForRequest(env: EnvInput, request: CookieRequestInput) {
+  const { domain: _domain, sameSite: _sameSite, ...base } = getCsrfCookieOptions(env);
+  const domain = cookieDomainForRequest(env, request);
+  const sameSite = sameSiteForRequest(env, request);
+  return domain ? { ...base, sameSite, domain } as const : { ...base, sameSite } as const;
 }
 
 export function createCsrfToken(): string {

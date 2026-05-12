@@ -2,7 +2,7 @@ import { Router, type NextFunction, type Request, type Response } from "express"
 import { AppError } from "../../middleware/error-handler.js";
 import { authLimiter } from "../../middleware/rate-limit.js";
 import { requireAdmin } from "../../middleware/rbac.js";
-import { getTokenCookieOptions } from "../auth/http-config.js";
+import { getTokenCookieOptionsForRequest } from "../auth/http-config.js";
 import {
   acceptFieldInvite,
   inviteFieldUser,
@@ -103,7 +103,19 @@ fieldUserAdminRouter.post("/:id/reactivate", requireAdmin, async (req: Request, 
 });
 
 export const fieldUserAuthRouter = Router();
-const tokenCookieOptions = getTokenCookieOptions(process.env);
+
+function tokenCookieOptionsForRequest(req: Request) {
+  return getTokenCookieOptionsForRequest(process.env, {
+    host: req.get("host"),
+    hostname: req.hostname,
+    origin: req.headers.origin,
+  });
+}
+
+function withCsrfToken(res: Response, payload: Record<string, unknown>) {
+  const csrfToken = typeof res.locals.csrfToken === "string" ? res.locals.csrfToken : undefined;
+  return csrfToken ? { ...payload, csrfToken } : payload;
+}
 
 fieldUserAuthRouter.post("/accept-invite", authLimiter, async (req, res, next) => {
   try {
@@ -114,8 +126,8 @@ fieldUserAuthRouter.post("/accept-invite", authLimiter, async (req, res, next) =
     }
 
     const result = await acceptFieldInvite({ token, password });
-    res.cookie("token", result.token, tokenCookieOptions);
-    res.json(result);
+    res.cookie("token", result.token, tokenCookieOptionsForRequest(req));
+    res.json(withCsrfToken(res, result));
   } catch (err) {
     next(err);
   }
@@ -144,8 +156,8 @@ fieldUserAuthRouter.post("/field-login", authLimiter, async (req, res, next) => 
     }
 
     const result = await loginFieldUser({ email, password });
-    res.cookie("token", result.token, tokenCookieOptions);
-    res.json(result);
+    res.cookie("token", result.token, tokenCookieOptionsForRequest(req));
+    res.json(withCsrfToken(res, result));
   } catch (err) {
     next(err);
   }

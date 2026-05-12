@@ -32,6 +32,7 @@ export function resolveApiBase(
 const API_BASE = resolveApiBase((import.meta as any).env ?? {}, typeof window !== "undefined" ? window.location : undefined);
 const CSRF_COOKIE_NAME = "csrf_token";
 const CSRF_HEADER_NAME = "X-CSRF-Token";
+let csrfTokenOverride: string | undefined;
 
 interface ApiOptions extends RequestInit {
   json?: Record<string, any>;
@@ -54,7 +55,15 @@ function readCookie(name: string): string | undefined {
 }
 
 export function getCsrfToken(): string | undefined {
-  return readCookie(CSRF_COOKIE_NAME);
+  return csrfTokenOverride ?? readCookie(CSRF_COOKIE_NAME);
+}
+
+export function clearCsrfTokenOverride() {
+  csrfTokenOverride = undefined;
+}
+
+export function clearCsrfTokenOverrideForTests() {
+  clearCsrfTokenOverride();
 }
 
 function isUnsafeMethod(method: string | undefined): boolean {
@@ -127,10 +136,23 @@ export async function api<T = unknown>(path: string, options: ApiOptions = {}): 
     return res.json();
   }
 
+  function rememberCsrfToken(payload: unknown) {
+    if (
+      payload &&
+      typeof payload === "object" &&
+      "csrfToken" in payload &&
+      typeof (payload as { csrfToken?: unknown }).csrfToken === "string"
+    ) {
+      csrfTokenOverride = (payload as { csrfToken: string }).csrfToken;
+    }
+  }
+
   if (!res.ok) {
     const error = await parseJsonResponse().catch(() => ({ error: { message: "Request failed" } }));
     throw new ApiError(res.status, error.error);
   }
 
-  return parseJsonResponse();
+  const payload = await parseJsonResponse();
+  rememberCsrfToken(payload);
+  return payload;
 }
