@@ -14,13 +14,14 @@ import {
 import { usePipelineStages, useProjectTypes, useRegions } from "@/hooks/use-pipeline-config";
 import { createDeal, updateDeal } from "@/hooks/use-deals";
 import type { Deal } from "@/hooks/use-deals";
-import { LEAD_SOURCE_CATEGORIES } from "@trock-crm/shared/types";
+import { LEAD_SOURCE_CATEGORIES, resolveOfficeCodeFromOffice } from "@trock-crm/shared/types";
 import { Loader2, Lock } from "lucide-react";
 import { getDefaultDealStageId, getNewDealStages, getSelectedOptionLabel } from "./deal-form.helpers";
 import { CompanySelector } from "@/components/companies/company-selector";
 import { PropertySelector } from "@/components/properties/property-selector";
 import { useAuth } from "@/lib/auth";
 import { useTaskAssignees } from "@/hooks/use-task-assignees";
+import { useAccessibleOffices } from "@/hooks/use-accessible-offices";
 
 interface DealFormProps {
   deal?: Deal; // If provided, we're editing; otherwise creating
@@ -42,6 +43,7 @@ export function DealForm({ deal, onSuccess, initialValues }: DealFormProps) {
   const { hierarchy: projectTypeHierarchy } = useProjectTypes();
   const { regions } = useRegions();
   const { assignees, loading: assigneesLoading } = useTaskAssignees();
+  const { offices } = useAccessibleOffices();
 
   const isEdit = !!deal;
   const isBidBoardOwned = Boolean(deal?.isBidBoardOwned);
@@ -51,6 +53,9 @@ export function DealForm({ deal, onSuccess, initialValues }: DealFormProps) {
     ...parent.children.map((child) => ({ id: child.id, name: child.name })),
   ]);
   const assigneeOptions = assignees.map((assignee) => ({ id: assignee.id, name: assignee.displayName }));
+  const activeOfficeId = user?.activeOfficeId ?? user?.officeId ?? null;
+  const activeOffice = offices.find((office) => office.id === activeOfficeId) ?? null;
+  const activeOfficeCode = resolveOfficeCodeFromOffice(activeOffice);
   const initialSource = deal?.source ?? initialValues?.source ?? "";
   const initialSourceIsCategory = LEAD_SOURCE_CATEGORIES.includes(initialSource as (typeof LEAD_SOURCE_CATEGORIES)[number]);
 
@@ -212,8 +217,21 @@ export function DealForm({ deal, onSuccess, initialValues }: DealFormProps) {
         const resp = await updateDeal(deal.id, payload as Partial<Deal>);
         result = resp.deal;
       } else {
+        if (!activeOfficeId) {
+          setError("Cannot create deal: no active office. Contact admin.");
+          return;
+        }
+
+        const selectedProjectType = projectTypeOptions.find((option) => option.id === formData.projectTypeId);
+
         payload.stageId = formData.stageId;
         payload.assignedRepId = formData.assignedRepId;
+        if (activeOfficeCode) {
+          payload.officeCode = activeOfficeCode;
+        }
+        if (selectedProjectType) {
+          payload.projectType = selectedProjectType.name;
+        }
         payload.creationContext = "direct";
         const resp = await createDeal(payload as Partial<Deal> & { name: string; stageId: string });
         result = resp.deal;
