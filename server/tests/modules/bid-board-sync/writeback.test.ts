@@ -228,6 +228,39 @@ describe("Bid Board sync stage writeback", () => {
   });
 
 
+
+  it("casts stage metadata parameters in update SQL for production Postgres", async () => {
+    query.mockImplementation(async (sql: string, params: unknown[] = []) => {
+      const base = successfulRunBase(sql);
+      if (base) return base;
+
+      const normalizedSql = sql.toLowerCase();
+      if (normalizedSql.includes("from office_dallas.deals") && normalizedSql.includes("lower(trim(d.project_number))")) {
+        return { rows: [matchedDeal()], rowCount: 1 };
+      }
+      if (normalizedSql.includes("from public.pipeline_stage_config") && normalizedSql.includes("slug = $1")) {
+        return { rows: [{ id: "stage-won", slug: "won", display_order: 7, is_terminal: true }], rowCount: 1 };
+      }
+      if (normalizedSql.includes("update office_dallas.deals") && normalizedSql.includes("stage_id = $1")) {
+        expect(normalizedSql).toContain("bid_board_stage_slug = $2::text");
+        expect(normalizedSql).toContain("case when $2::text = 'won'");
+        expect(normalizedSql).toContain("coalesce(bid_board_loss_outcome, $4::text)");
+        expect(params.slice(0, 4)).toEqual(["stage-won", "won", "terminal_won", "Won"]);
+        return { rows: [{ id: "deal-123" }], rowCount: 1 };
+      }
+      if (normalizedSql.includes("insert into office_dallas.deal_stage_history")) return { rows: [], rowCount: 1 };
+      if (normalizedSql.includes("update office_dallas.deals") && normalizedSql.includes("bid_board_project_number")) return { rows: [], rowCount: 1 };
+      throw new Error(`Unexpected SQL: ${sql}`);
+    });
+
+    const result = await ingestBidBoardRows({
+      office_slug: "dallas",
+      rows: [{ Name: "Won Project", Status: "Won", "Project #": "DFW-4-11826-ab" }],
+    });
+
+    expect(result.metrics.stageUpdated).toBe(1);
+  });
+
   it("does not move a later-stage CRM deal backward from the Bid Board export", async () => {
     query.mockImplementation(async (sql: string, params: unknown[] = []) => {
       const base = successfulRunBase(sql);
