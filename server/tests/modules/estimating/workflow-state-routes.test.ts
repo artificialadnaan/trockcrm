@@ -114,6 +114,7 @@ vi.mock("../../../src/modules/estimating/document-service.js", () => documentSer
 const fileServiceMocks = vi.hoisted(() => ({
   confirmUpload: vi.fn(),
   getFileById: vi.fn(),
+  getPendingUploadMetadata: vi.fn(),
 }));
 
 vi.mock("../../../src/modules/files/service.js", async () => {
@@ -125,6 +126,7 @@ vi.mock("../../../src/modules/files/service.js", async () => {
     ...actual,
     confirmUpload: fileServiceMocks.confirmUpload,
     getFileById: fileServiceMocks.getFileById,
+    getPendingUploadMetadata: fileServiceMocks.getPendingUploadMetadata,
   };
 });
 
@@ -428,6 +430,10 @@ describe("estimating workflow routes", () => {
       fileSizeBytes: 1024,
       r2Key: "r2/doc-1.pdf",
     });
+    fileServiceMocks.getPendingUploadMetadata.mockReturnValue({
+      dealId: "deal-1",
+      expiresAt: new Date(Date.now() + 60_000),
+    });
     fileServiceMocks.getFileById.mockResolvedValue({
       id: "file-2",
       dealId: "deal-1",
@@ -688,6 +694,25 @@ describe("estimating workflow routes", () => {
         }),
       })
     );
+  });
+
+  it("rejects upload tokens that resolve to a different deal", async () => {
+    fileServiceMocks.getPendingUploadMetadata.mockReturnValueOnce({
+      dealId: "deal-other",
+      expiresAt: new Date(Date.now() + 60_000),
+    });
+
+    await expect(
+      invokeRoute("post", "/:id/estimating/documents", {
+        params: { id: "deal-1" },
+        body: {
+          uploadToken: "upload-other",
+        },
+      })
+    ).rejects.toMatchObject({ statusCode: 400 });
+
+    expect(fileServiceMocks.confirmUpload).not.toHaveBeenCalled();
+    expect(documentServiceMocks.createEstimateSourceDocument).not.toHaveBeenCalled();
   });
 
   it("accepts a pre-uploaded deal file when creating an estimate source document", async () => {

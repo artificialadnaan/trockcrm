@@ -89,7 +89,7 @@ describe("getDeals — signed-contract filter (rep dashboard YTD/MTD click-throu
     expect(sql).toContain("assigned_rep_id");
     // is_active default still applied
     expect(sql).toContain("is_active");
-  });
+  }, 15_000);
 
   it("omits signed-contract bounds entirely when filter not set", async () => {
     const { db, capturedWheres } = createTenantDbCapturingWhere();

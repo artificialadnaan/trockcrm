@@ -10,10 +10,22 @@ const { createAssignmentTaskIfNeeded } = await import(
 const { createLeadService } = await import("../../../src/modules/leads/service.js");
 
 function createSelectQueueDb(queue: unknown[]) {
+  const existingLead = queue[0] as unknown[];
+  const tableRows = (table: any) => {
+    const tableName = table?._?.name ?? table?.[Symbol.for("drizzle:Name")] ?? table?.tableName ?? "";
+    if (tableName === "leads") return existingLead;
+    if (tableName === "companies") return [{ id: "company-1", name: "Oakwood" }];
+    if (tableName === "properties") {
+      return [{ id: "property-1", name: "Oakwood Apartments", address: null, city: null, state: null, zip: null }];
+    }
+    if (tableName === "users") return [{ id: "rep-new", isActive: true, officeId: "office-1" }];
+    if (tableName === "user_office_access") return [];
+    return [];
+  };
   const select = vi.fn(() => ({
-    from: vi.fn(() => ({
+    from: vi.fn((table: any) => ({
       where: vi.fn(() => {
-        const next = queue.shift();
+        const next = tableRows(table);
         return {
           then: (resolve: (value: unknown) => unknown) => Promise.resolve(next).then(resolve),
           limit: vi.fn(async () => next),

@@ -10,6 +10,9 @@ function updateDb(returningRows: unknown[]) {
   const db = {
     select: vi.fn(() => ({
       from: vi.fn(() => ({
+        leftJoin: vi.fn(function leftJoin() {
+          return this;
+        }),
         where: vi.fn(() => ({
           limit: vi.fn(async () => returningRows),
         })),

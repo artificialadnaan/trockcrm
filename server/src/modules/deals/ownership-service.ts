@@ -39,7 +39,7 @@ export function inferDealDepartment(input: {
 }): DealDepartment {
   if (
     input.stageSlug &&
-    ["sent_to_production", "service_sent_to_production"].includes(input.stageSlug)
+    ["in_production", "sent_to_production", "service_sent_to_production"].includes(input.stageSlug)
   ) {
     return "operations";
   }

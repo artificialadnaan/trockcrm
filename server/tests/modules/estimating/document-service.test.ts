@@ -5,6 +5,22 @@ import {
   reprocessEstimateSourceDocument,
 } from "../../../src/modules/estimating/document-service.js";
 
+const parseOrchestratorMocks = vi.hoisted(() => ({
+  runEstimateDocumentParse: vi.fn(),
+}));
+
+vi.mock("../../../server/src/modules/estimating/document-parse-orchestrator.js", () => ({
+  runEstimateDocumentParse: parseOrchestratorMocks.runEstimateDocumentParse,
+}));
+
+vi.mock("../../../server/dist/modules/estimating/document-parse-orchestrator.js", () => ({
+  runEstimateDocumentParse: parseOrchestratorMocks.runEstimateDocumentParse,
+}));
+
+vi.mock("../../../../server/src/modules/estimating/document-parse-orchestrator.js", () => ({
+  runEstimateDocumentParse: parseOrchestratorMocks.runEstimateDocumentParse,
+}));
+
 function readSqlText(query: any) {
   const chunks = query?.queryChunks ?? [];
   return chunks
@@ -42,6 +58,20 @@ describe("runEstimateDocumentOcr", () => {
         .fn()
         .mockResolvedValueOnce(undefined)
         .mockResolvedValueOnce({ rowCount: 0 }),
+      insert: vi.fn(() => ({
+        values: vi.fn(() => ({
+          returning: vi.fn().mockResolvedValue([
+            {
+              id: "parse-run-1",
+              documentId: "doc-ocr-1",
+              status: "processing",
+              parseProvider: "queued-provider",
+              parseProfile: "queued-profile",
+              parseMeasurementsEnabled: true,
+            },
+          ]),
+        })),
+      })),
       select: vi.fn(() => ({
         from: vi.fn(() => ({
           where: vi.fn(() => ({
@@ -51,7 +81,7 @@ describe("runEstimateDocumentOcr", () => {
       })),
     } as any;
     const drizzle = vi.fn().mockReturnValue(tenantDb);
-    const runEstimateDocumentParse = vi.fn().mockResolvedValue({
+    parseOrchestratorMocks.runEstimateDocumentParse.mockResolvedValue({
       parseRun: {
         id: "parse-run-1",
       },
@@ -67,15 +97,17 @@ describe("runEstimateDocumentOcr", () => {
     vi.doMock("drizzle-orm/node-postgres", () => ({
       drizzle,
     }));
+    vi.doMock("../../../server/dist/modules/estimating/document-parse-orchestrator.js", () => ({
+      runEstimateDocumentParse: parseOrchestratorMocks.runEstimateDocumentParse,
+    }));
+    vi.doMock("../../../server/src/modules/estimating/document-parse-orchestrator.js", () => ({
+      runEstimateDocumentParse: parseOrchestratorMocks.runEstimateDocumentParse,
+    }));
     vi.doMock("../../../../worker/src/db.js", () => ({
       pool: {
         query: poolQuery,
       },
     }));
-    vi.doMock("../../../../server/src/modules/estimating/document-parse-orchestrator.js", () => ({
-      runEstimateDocumentParse,
-    }));
-
     const { runEstimateDocumentOcr } = await import("../../../../worker/src/jobs/estimate-document-ocr.js");
 
     await runEstimateDocumentOcr(
@@ -85,10 +117,13 @@ describe("runEstimateDocumentOcr", () => {
         parseProfile: "queued-profile",
         parseMeasurementsEnabled: true,
       },
-      "office-1"
+      "office-1",
+      {
+        runEstimateDocumentParse: parseOrchestratorMocks.runEstimateDocumentParse,
+      }
     );
 
-    expect(runEstimateDocumentParse).toHaveBeenCalledWith(
+    expect(parseOrchestratorMocks.runEstimateDocumentParse).toHaveBeenCalledWith(
       expect.objectContaining({
         options: expect.objectContaining({
           provider: "queued-provider",

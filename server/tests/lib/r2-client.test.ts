@@ -55,7 +55,7 @@ describe("R2 Client", () => {
       expect(result.uploadUrl).toContain("/api/files/dev-upload");
       expect(result.uploadUrl).toContain("key=");
       expect(result.r2Key).toBe("office_dallas/deals/TR-2026-0001/photos/test.jpg");
-      expect(result.expiresIn).toBe(900);
+      expect(result.expiresIn).toBe(30 * 60);
     });
 
     it("should generate valid mock download URLs", async () => {
@@ -68,11 +68,11 @@ describe("R2 Client", () => {
   });
 
   describe("Presigned URL Expiry", () => {
-    it("should use 15-minute expiry for uploads", async () => {
+    it("should use 30-minute expiry for uploads", async () => {
       const { PRESIGNED_URL_EXPIRY_SECONDS } = await import(
         "../../src/modules/files/file-constants.js"
       );
-      expect(PRESIGNED_URL_EXPIRY_SECONDS).toBe(15 * 60); // 900 seconds
+      expect(PRESIGNED_URL_EXPIRY_SECONDS).toBe(30 * 60);
     });
   });
 

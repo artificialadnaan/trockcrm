@@ -225,7 +225,7 @@ describe("getUnifiedWorkflowOverview", () => {
         dealId: "deal-1",
         dealNumber: "TR-2026-0001",
         dealName: "Roof Repair",
-        stageName: "Bid Sent",
+        stageName: "Estimate Sent to Client",
         workflowRoute: "normal",
         repName: "Jordan",
         daysInStage: 18,

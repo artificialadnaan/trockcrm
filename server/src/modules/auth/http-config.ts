@@ -207,8 +207,7 @@ export function isPublicAuthCsrfExempt(input: {
   if (
     input.path === "/api/auth/accept-invite" ||
     input.path === "/api/auth/field-login" ||
-    input.path === "/api/auth/local/login" ||
-    input.path === "/api/auth/logout"
+    input.path === "/api/auth/local/login"
   ) {
     return true;
   }

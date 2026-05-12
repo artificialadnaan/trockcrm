@@ -278,7 +278,7 @@ describe("auth http config", () => {
 
     expect(isPublicAuthCsrfExempt({ method: "GET", path: "/api/auth/accept-invite", env })).toBe(false);
     expect(isPublicAuthCsrfExempt({ method: "POST", path: "/api/auth/accept-invite/extra", env })).toBe(false);
-    expect(isPublicAuthCsrfExempt({ method: "POST", path: "/api/auth/logout", env })).toBe(true);
+    expect(isPublicAuthCsrfExempt({ method: "POST", path: "/api/auth/logout", env })).toBe(false);
     expect(isPublicAuthCsrfExempt({ method: "POST", path: "/api/auth/local/change-password", env })).toBe(false);
     expect(
       isPublicAuthCsrfExempt({

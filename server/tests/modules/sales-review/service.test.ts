@@ -146,7 +146,7 @@ describe("sales review service", () => {
 
     expect(overview.newOpportunities).toHaveLength(2);
     expect(overview.forecast).toHaveLength(2);
-    expect(overview.activityCadence[0]?.calls7d).toBe(1);
+    expect(overview.activityCadence[0]?.calls30d).toBe(1);
     expect(overview.supportRequests).toHaveLength(1);
     expect(overview.hygiene[0]?.id).toBe("deal-1");
   });

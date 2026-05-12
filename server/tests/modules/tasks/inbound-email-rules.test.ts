@@ -23,14 +23,16 @@ describe("inbound email task rules", () => {
   it("splits reply-needed and disambiguation into distinct rules", () => {
     const emailRules = TASK_RULES.filter((rule) => rule.sourceEvent === "email.received");
 
-    expect(emailRules).toHaveLength(2);
+    expect(emailRules).toHaveLength(3);
     expect(emailRules.map((rule) => rule.id)).toEqual([
       "inbound_email_reply_needed",
       "inbound_email_deal_disambiguation",
+      "email_assignment_queue",
     ]);
     expect(emailRules.map((rule) => rule.reasonCode)).toEqual([
       "reply_needed",
       "deal_disambiguation",
+      "email_assignment_queue",
     ]);
   });
 

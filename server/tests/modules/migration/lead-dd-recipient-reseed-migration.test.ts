@@ -1,10 +1,10 @@
 import { readFileSync } from "fs";
-import { join } from "path";
+import { resolve } from "path";
 import { describe, expect, it } from "vitest";
 
 describe("0111_lead_dd_recipient_reseed migration", () => {
   const migrationSql = readFileSync(
-    join(process.cwd(), "migrations/0111_lead_dd_recipient_reseed.sql"),
+    resolve(import.meta.dirname, "../../../../migrations/0111_lead_dd_recipient_reseed.sql"),
     "utf8"
   );
 

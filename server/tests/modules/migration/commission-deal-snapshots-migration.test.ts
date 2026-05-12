@@ -1,14 +1,14 @@
 import { readFileSync } from "fs";
-import { join } from "path";
+import { resolve } from "path";
 import { describe, expect, it } from "vitest";
 
 describe("commission deal snapshots migration", () => {
   const migrationSql = readFileSync(
-    join(process.cwd(), "migrations/0107_commission_deal_snapshots.sql"),
+    resolve(import.meta.dirname, "../../../../migrations/0107_commission_deal_snapshots.sql"),
     "utf8"
   );
   const compositePkMigrationSql = readFileSync(
-    join(process.cwd(), "migrations/0109_commission_deal_snapshots_composite_pk.sql"),
+    resolve(import.meta.dirname, "../../../../migrations/0109_commission_deal_snapshots_composite_pk.sql"),
     "utf8"
   );
 

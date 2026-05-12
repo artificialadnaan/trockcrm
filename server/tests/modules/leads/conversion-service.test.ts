@@ -8,6 +8,7 @@ import {
   contacts,
   deals,
   dealHistory,
+  activities,
   jobQueue,
   leadDueDiligenceApprovals,
   leadStageHistory,
@@ -377,6 +378,7 @@ async function invokeDealRoute({
   const req = {
     params,
     body,
+    query: {},
     tenantDb: {
       insert: vi.fn(() => ({
         values: vi.fn(async () => ({})),
@@ -614,6 +616,7 @@ interface FakeTenantState {
   leads: FakeLeadRow[];
   deals: FakeDealRow[];
   leadStageHistory: FakeLeadStageHistoryRow[];
+  activities: Array<Record<string, unknown>>;
   leadQuestionAnswers: FakeLeadQuestionAnswerRow[];
   leadQuestionAnswerHistory: FakeLeadQuestionAnswerHistoryRow[];
   leadDueDiligenceApprovals: Array<Record<string, unknown>>;
@@ -679,6 +682,7 @@ function createFakeTenantDb(initialState?: Partial<FakeTenantState>) {
     leads: [],
     deals: [],
     leadStageHistory: [],
+    activities: [],
     leadQuestionAnswers: [],
     leadQuestionAnswerHistory: [],
     leadDueDiligenceApprovals: [],
@@ -731,6 +735,7 @@ function createFakeTenantDb(initialState?: Partial<FakeTenantState>) {
     if (table === leads || tableName === "leads") return state.leads;
     if (table === deals || tableName === "deals") return state.deals;
     if (table === leadStageHistory || tableName === "lead_stage_history") return state.leadStageHistory;
+    if (table === activities || tableName === "activities") return state.activities;
     if (table === jobQueue || tableName === "job_queue") return state.jobs;
     if (tableName === "project_type_config") return state.projectTypes;
     if (table === pipelineStageConfig || tableName === "pipeline_stage_config") return state.pipelineStages;
@@ -898,19 +903,20 @@ function createFakeTenantDb(initialState?: Partial<FakeTenantState>) {
     },
     insert(table: unknown) {
       return {
-        values(value: Record<string, unknown>) {
+        values(value: Record<string, unknown> | Array<Record<string, unknown>>) {
           const rows = getRows(table) as Array<Record<string, unknown>>;
-          const insertedRow = {
-            id: value.id ?? `${String((table as { _: { name: string } })._?.name ?? "row")}-${rows.length + 1}`,
-            ...value,
-          };
-          rows.push(insertedRow);
+          const values = Array.isArray(value) ? value : [value];
+          const inserted = values.map((entry, index) => ({
+            id: entry.id ?? `${String((table as { _: { name: string } })._?.name ?? "row")}-${rows.length + index + 1}`,
+            ...entry,
+          }));
+          rows.push(...inserted);
           return {
             returning() {
-              return Promise.resolve([insertedRow]);
+              return Promise.resolve(inserted);
             },
             then(onfulfilled: (value: unknown) => unknown) {
-              return Promise.resolve(insertedRow).then(onfulfilled);
+              return Promise.resolve(Array.isArray(value) ? inserted : inserted[0]).then(onfulfilled);
             },
           };
         },

@@ -12,6 +12,7 @@ describe("field contractor route policy", () => {
       "/pipeline",
       "/contacts",
       "/leads",
+      "/projects",
       "/email",
       "/call-recordings",
       "/tasks",

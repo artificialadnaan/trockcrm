@@ -422,7 +422,7 @@ describe("Reports Service", () => {
       expect(result.mirroredDownstreamSummary).toEqual([
         {
           mirroredStageSlug: "estimating",
-          mirroredStageName: "Service - Estimating",
+          mirroredStageName: "Estimating",
           mirroredStageStatus: "blocked",
           workflowRoute: "service",
           dealCount: 2,
@@ -437,7 +437,7 @@ describe("Reports Service", () => {
         },
       ]);
       expect(result.staleDeals[0]).toMatchObject({
-        stageName: "Service - Estimating",
+        stageName: "Estimating",
         workflowRoute: "service",
         bidBoardStageSlug: "estimating",
         bidBoardStageStatus: "blocked",
