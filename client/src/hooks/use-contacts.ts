@@ -164,6 +164,7 @@ export interface ContactDealAssociation {
   deal: {
     id: string;
     dealNumber: string;
+    projectNumber?: string | null;
     name: string;
     stageId: string;
     isActive: boolean;

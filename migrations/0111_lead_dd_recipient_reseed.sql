@@ -14,10 +14,7 @@ VALUES (
   'Lead Due Diligence',
   'Recipients who receive new-customer lead due diligence approval requests.'
 )
-ON CONFLICT (key) DO UPDATE
-SET
-  name = EXCLUDED.name,
-  description = EXCLUDED.description;
+ON CONFLICT (key) DO NOTHING;
 
 -- Idempotent assignment re-seed: tyamashita + adnaan.iqbal, if those user
 -- rows exist. Matches the 0079 / 0081 seed shape.

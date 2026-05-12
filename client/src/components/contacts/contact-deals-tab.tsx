@@ -4,6 +4,7 @@ import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { DealStageBadge } from "@/components/deals/deal-stage-badge";
+import { formatDealDisplayNumber } from "@/lib/deal-utils";
 import type { Contact } from "@/hooks/use-contacts";
 import { useContactDeals, removeContactDealAssociation } from "@/hooks/use-contacts";
 
@@ -76,7 +77,7 @@ export function ContactDealsTab({ contactId, contact }: ContactDealsTabProps) {
             >
               <div className="flex items-center gap-2">
                 <span className="text-xs text-muted-foreground font-mono">
-                  {assoc.deal.dealNumber}
+                  {formatDealDisplayNumber(assoc.deal).label}
                 </span>
                 <DealStageBadge stageId={assoc.deal.stageId} />
                 {assoc.isPrimary && (

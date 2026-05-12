@@ -7,6 +7,7 @@ import {
   bestEstimate,
   daysInStage,
   winProbabilityColor,
+  formatDealDisplayNumber,
 } from "@/lib/deal-utils";
 import type { Deal } from "@/hooks/use-deals";
 import { Clock, MapPin, GripVertical } from "lucide-react";
@@ -54,7 +55,7 @@ export function DealCard({ deal, isDragging }: DealCardProps) {
         <div className="flex-1 min-w-0">
           <div className="flex items-center justify-between gap-1 mb-1">
             <span className="text-[10px] text-muted-foreground font-mono">
-              {deal.dealNumber}
+              {formatDealDisplayNumber(deal).label}
             </span>
             <span className="text-sm font-semibold">
               {formatCurrencyCompact(bestEstimate(deal))}

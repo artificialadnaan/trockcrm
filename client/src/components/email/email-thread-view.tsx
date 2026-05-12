@@ -15,6 +15,7 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { useDeals } from "@/hooks/use-deals";
+import { formatDealDisplayNumber } from "@/lib/deal-utils";
 import {
   associateEmailToEntity,
   assignEmailThread,
@@ -113,7 +114,7 @@ function ThreadAssignmentDialog({
                     <div className="min-w-0">
                       <p className="truncate text-sm font-medium">{deal.name}</p>
                       <p className="text-xs text-muted-foreground">
-                        {deal.dealNumber}
+                        {formatDealDisplayNumber(deal).label}
                         {deal.propertyAddress ? ` · ${deal.propertyAddress}` : ""}
                       </p>
                     </div>
@@ -133,7 +134,7 @@ function ThreadAssignmentDialog({
               <p className="font-medium">Selected deal</p>
               <p>{selectedDeal.name}</p>
               <p className="text-muted-foreground">
-                {selectedDeal.dealNumber}
+                {formatDealDisplayNumber(selectedDeal).label}
                 {selectedDeal.propertyAddress ? ` · ${selectedDeal.propertyAddress}` : ""}
               </p>
             </div>

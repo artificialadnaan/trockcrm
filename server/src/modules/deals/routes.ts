@@ -394,7 +394,18 @@ router.get("/pipeline", async (req, res, next) => {
       filters
     );
     await req.commitTransaction!();
-    res.json(result);
+    const includeHubspotId = shouldIncludeHubspotId(req.query, req.user!.role);
+    res.json({
+      ...result,
+      pipelineColumns: result.pipelineColumns.map((column) => ({
+        ...column,
+        deals: redactDealList(column.deals, { includeHubspotId }),
+      })),
+      terminalStages: result.terminalStages.map((column) => ({
+        ...column,
+        deals: redactDealList(column.deals, { includeHubspotId }),
+      })),
+    });
   } catch (err) {
     next(err);
   }
@@ -404,7 +415,11 @@ router.get("/stages/:stageId", async (req, res, next) => {
   try {
     const result = await listDealStagePage(req.tenantDb!, readStageInput(req));
     await req.commitTransaction!();
-    res.json(result);
+    const includeHubspotId = shouldIncludeHubspotId(req.query, req.user!.role);
+    res.json({
+      ...result,
+      deals: result.deals ? redactDealList(result.deals, { includeHubspotId }) : result.deals,
+    });
   } catch (err) {
     next(err);
   }

@@ -69,7 +69,7 @@ import { usePipelineStages } from "@/hooks/use-pipeline-config";
 import { useAuth } from "@/lib/auth";
 import { api } from "@/lib/api";
 import { cn } from "@/lib/utils";
-import { formatCurrency, bestEstimate, formatDealDisplayNumber } from "@/lib/deal-utils";
+import { formatCurrency, bestEstimate, formatDealDisplayNumber, isHubspotImportedDealNumber } from "@/lib/deal-utils";
 import {
   getCanonicalDealStageSlugs,
   getDealStageLabelBySlug,
@@ -801,7 +801,7 @@ export function DealDetailPage() {
         />
       )}
       <RfpApprovalStatusBlock deal={deal} onRetry={handleRfpRetry} retrying={rfpRetrying} />
-      {isBidBoardOwned && !deal.hubspotDealId && <BidBoardProjectSummaryPanel deal={deal} />}
+      {isBidBoardOwned && !deal.hubspotDealId && !isHubspotImportedDealNumber(deal.dealNumber) && <BidBoardProjectSummaryPanel deal={deal} />}
       {isEstimatingBoundaryStageSlug(currentStageSlug, workflowRoute) && !isBidBoardOwned && (
         <DealEstimatingSubstage deal={deal} onUpdate={refetch} />
       )}
