@@ -86,6 +86,10 @@ function baseApiUrl() {
   return (process.env.API_BASE_URL ?? process.env.FRONTEND_URL ?? "http://localhost:3001").replace(/\/$/, "");
 }
 
+export function buildLeadDueDiligenceReviewUrl(token: string) {
+  return `${baseApiUrl()}/api/public/lead-due-diligence/${encodeURIComponent(token)}`;
+}
+
 export async function getLeadDueDiligenceRecipients(tenantDb: TenantDb, key = GROUP_KEY) {
   const rows = await tenantDb
     .select({
@@ -202,7 +206,7 @@ export function buildLeadDueDiligenceEmail(input: {
   token: string;
   detectionSignal: ExistingCustomerSignal | null;
 }) {
-  const reviewUrl = `${baseApiUrl()}/api/public/lead-due-diligence?token=${encodeURIComponent(input.token)}`;
+  const reviewUrl = buildLeadDueDiligenceReviewUrl(input.token);
   const contactName = formatContact(input.summary);
   const role = formatPocRole(input.summary);
   const email = input.summary.contactEmail;
@@ -536,6 +540,35 @@ async function findApprovalByToken(client: PoolClient, token: string, forUpdate 
   return null;
 }
 
+function tokenFingerprint(token: string | null | undefined) {
+  if (!token) return null;
+  return crypto.createHash("sha256").update(token).digest("hex").slice(0, 12);
+}
+
+function logPublicTokenRejected(
+  reason: "missing" | "invalid_format" | "not_found" | "missing_summary" | "already_used",
+  input: { token?: string | null; tenantSchema?: string | null; leadId?: string | null; status?: string | null } = {}
+) {
+  console.warn("[lead-dd] public due diligence token rejected", {
+    reason,
+    tokenFingerprint: tokenFingerprint(input.token),
+    tenantSchema: input.tenantSchema ?? null,
+    leadId: input.leadId ?? null,
+    status: input.status ?? null,
+  });
+}
+
+function assertPublicDecisionToken(token: string) {
+  if (!token) {
+    logPublicTokenRejected("missing");
+    throw new AppError(404, "Due Diligence decision not found");
+  }
+  if (!/^[a-f0-9]{64}$/i.test(token)) {
+    logPublicTokenRejected("invalid_format", { token });
+    throw new AppError(404, "Due Diligence decision not found");
+  }
+}
+
 async function loadPublicDecisionSummary(client: PoolClient, tenantSchema: string, leadId: string) {
   const schemaIdentifier = tenantSchemaIdentifier(tenantSchema);
   const result = await client.query(
@@ -688,19 +721,23 @@ export async function renderDueDiligenceDecisionPage(token: string, options: {
   notice?: string | null;
   error?: string | null;
 } = {}) {
-  if (!token || !/^[a-f0-9]{64}$/i.test(token)) {
-    throw new AppError(404, "Due Diligence decision not found");
-  }
+  assertPublicDecisionToken(token);
 
   const client = await pool.connect();
   try {
     const approval = await findApprovalByToken(client, token);
     if (!approval) {
+      logPublicTokenRejected("not_found", { token });
       throw new AppError(404, "Due Diligence decision not found");
     }
 
     const summary = await loadPublicDecisionSummary(client, approval.tenant_schema, approval.lead_id);
     if (!summary) {
+      logPublicTokenRejected("missing_summary", {
+        token,
+        tenantSchema: approval.tenant_schema,
+        leadId: approval.lead_id,
+      });
       throw new AppError(404, "Due Diligence decision not found");
     }
 
@@ -715,25 +752,36 @@ export async function decideDueDiligenceByToken(input: {
   decision: "approve" | "reject";
   reason?: string | null;
 }) {
-  if (!input.token || !/^[a-f0-9]{64}$/i.test(input.token)) {
-    throw new AppError(404, "Due Diligence decision not found");
-  }
-  if (input.decision === "reject" && (!input.reason || input.reason.trim().length < 10)) {
-    throw new AppError(400, "Rejection reason must be at least 10 characters");
-  }
-
+  assertPublicDecisionToken(input.token);
   const client = await pool.connect();
+  let transactionActive = false;
   try {
     await client.query("BEGIN");
+    transactionActive = true;
     const approval = await findApprovalByToken(client, input.token, true);
     if (!approval) {
       await client.query("ROLLBACK");
+      transactionActive = false;
+      logPublicTokenRejected("not_found", { token: input.token });
       throw new AppError(404, "Due Diligence decision not found");
     }
 
     if (approval.status !== "pending") {
-      await client.query("COMMIT");
-      return approval;
+      await client.query("ROLLBACK");
+      transactionActive = false;
+      logPublicTokenRejected("already_used", {
+        token: input.token,
+        tenantSchema: approval.tenant_schema,
+        leadId: approval.lead_id,
+        status: approval.status,
+      });
+      throw new AppError(404, "Due Diligence decision not found");
+    }
+
+    if (input.decision === "reject" && (!input.reason || input.reason.trim().length < 10)) {
+      await client.query("ROLLBACK");
+      transactionActive = false;
+      throw new AppError(400, "Rejection reason must be at least 10 characters");
     }
 
     const status = input.decision === "approve" ? "approved" : "rejected";
@@ -789,9 +837,12 @@ export async function decideDueDiligenceByToken(input: {
     }
 
     await client.query("COMMIT");
+    transactionActive = false;
     return { ...update.rows[0], tenant_schema: tenantSchema };
   } catch (err) {
-    await client.query("ROLLBACK").catch(() => {});
+    if (transactionActive) {
+      await client.query("ROLLBACK").catch(() => {});
+    }
     throw err;
   } finally {
     client.release();

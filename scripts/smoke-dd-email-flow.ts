@@ -355,6 +355,8 @@ async function pollApproval(client: pg.Client, schemaName: string, leadId: strin
     const approval = await client.query(
       `
         SELECT a.id, a.lead_id, a.status, a.email_sent_at, a.email_message_id, a.requested_at,
+               a.approval_token,
+               l.name AS lead_name,
                ARRAY(
                  SELECT u.email
                    FROM public.notification_recipient_groups g
@@ -364,6 +366,7 @@ async function pollApproval(client: pg.Client, schemaName: string, leadId: strin
                   ORDER BY u.email
                ) AS recipients
           FROM ${schema}.lead_due_diligence_approvals a
+          JOIN ${schema}.leads l ON l.id = a.lead_id
          WHERE a.lead_id = $1
          LIMIT 1
       `,
@@ -376,6 +379,60 @@ async function pollApproval(client: pg.Client, schemaName: string, leadId: strin
     await new Promise((resolve) => setTimeout(resolve, pollMs));
   }
   throw new Error(`Timed out waiting for DD approval email_sent_at. Last approval state: ${JSON.stringify(last)}`);
+}
+
+function publicDueDiligenceUrl(options: CliOptions, token: string) {
+  return `${options.apiBaseUrl.replace(/\/$/, "")}/api/public/lead-due-diligence/${encodeURIComponent(token)}`;
+}
+
+function extractDueDiligenceHrefFromEmail(email: unknown) {
+  const serialized = JSON.stringify(email ?? {});
+  const unescaped = serialized.replace(/\\u0026/g, "&").replace(/&amp;/g, "&");
+  const quotedUrl = unescaped.match(/https?:\/\/[^"\\\s<>]+\/api\/public\/lead-due-diligence\/[a-f0-9]{64}/i)?.[0];
+  if (quotedUrl) return quotedUrl;
+  const queryUrl = unescaped.match(/https?:\/\/[^"\\\s<>]+\/api\/public\/lead-due-diligence\?token=[a-f0-9]{64}/i)?.[0];
+  if (queryUrl) return queryUrl;
+  const relativePath = unescaped.match(/\/api\/public\/lead-due-diligence\/[a-f0-9]{64}/i)?.[0];
+  return relativePath ?? null;
+}
+
+async function validatePublicDueDiligenceLink(
+  options: CliOptions,
+  approval: Record<string, unknown>,
+  resend: Record<string, unknown> | null
+) {
+  const token = typeof approval.approval_token === "string" ? approval.approval_token : "";
+  if (!/^[a-f0-9]{64}$/i.test(token)) {
+    throw new Error(`DD approval ${String(approval.id)} has an invalid approval_token shape`);
+  }
+
+  const resendEmail = resend?.checked === true ? resend.email : null;
+  const emailHref = extractDueDiligenceHrefFromEmail(resendEmail);
+  if (resendEmail && !emailHref) {
+    throw new Error(`Resend message ${String(approval.email_message_id)} did not contain a DD public review href`);
+  }
+  const url = emailHref
+    ? new URL(emailHref, options.apiBaseUrl.replace(/\/$/, "")).toString()
+    : publicDueDiligenceUrl(options, token);
+  if (emailHref && !url.includes(token)) {
+    throw new Error(`DD email href did not contain the persisted approval token for ${String(approval.id)}`);
+  }
+
+  const response = await fetch(url);
+  const html = await response.text();
+  if (response.status !== 200) {
+    throw new Error(`DD public review link returned HTTP ${response.status}: ${html.slice(0, 300)}`);
+  }
+  if (!html.includes("T Rock Construction") || !html.includes("Lead Due Diligence") || !html.includes(String(approval.lead_name))) {
+    throw new Error(`DD public review link did not render the expected approval page: ${html.slice(0, 300)}`);
+  }
+
+  return {
+    url,
+    status: response.status,
+    renderedDecisionPage: true,
+    source: emailHref ? "resend_email_href" : "db_token_fallback",
+  };
 }
 
 async function verifyResend(messageId: unknown) {
@@ -494,11 +551,13 @@ async function main() {
     let cleanup: Awaited<ReturnType<typeof cleanupSmokeRows>> | null = null;
     let lead: Awaited<ReturnType<typeof createLeadViaApi>> | null = null;
     let approval: Record<string, unknown> | null = null;
+    let publicLink: Awaited<ReturnType<typeof validatePublicDueDiligenceLink>> | null = null;
     let resend: Record<string, unknown> | null = null;
     try {
       lead = await createLeadViaApi(options, session, fixture);
       approval = await pollApproval(client, fixture.schemaName, lead.id, options.timeoutMs, options.pollMs);
       resend = await verifyResend(approval.email_message_id);
+      publicLink = await validatePublicDueDiligenceLink(options, approval, resend);
     } finally {
       if (!options.retain) {
         cleanup = await cleanupSmokeRows(client, fixture.schemaName);
@@ -513,6 +572,7 @@ async function main() {
       fixture,
       lead,
       approval,
+      publicLink,
       resend,
       remoteEmailOverride,
       cleanup,

@@ -12,9 +12,8 @@ import {
 
 const router = Router();
 
-router.get("/", publicDueDiligenceGetLimiter, async (req, res, next) => {
+async function renderDecisionPageForToken(token: string, res: any, next: (err?: unknown) => void) {
   try {
-    const token = typeof req.query.token === "string" ? req.query.token : "";
     const html = await renderDueDiligenceDecisionPage(token);
     res.setHeader("Content-Type", "text/html; charset=utf-8");
     res.send(html);
@@ -26,6 +25,16 @@ router.get("/", publicDueDiligenceGetLimiter, async (req, res, next) => {
     }
     next(err);
   }
+}
+
+router.get("/", publicDueDiligenceGetLimiter, async (req, res, next) => {
+  const token = typeof req.query.token === "string" ? req.query.token : "";
+  await renderDecisionPageForToken(token, res, next);
+});
+
+router.get("/:token", publicDueDiligenceGetLimiter, async (req, res, next) => {
+  const token = typeof req.params.token === "string" ? req.params.token : "";
+  await renderDecisionPageForToken(token, res, next);
 });
 
 router.post("/decide", publicDueDiligencePostLimiter, async (req, res, next) => {
