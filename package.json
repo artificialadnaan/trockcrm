@@ -28,12 +28,14 @@
     "refresh:hubspot": "node --import tsx scripts/refresh-from-hubspot.ts",
     "db:generate": "drizzle-kit generate --config=shared/drizzle.config.ts",
     "db:migrate": "tsx server/src/migrations/runner.ts",
-    "db:studio": "drizzle-kit studio --config=shared/drizzle.config.ts"
+    "db:studio": "drizzle-kit studio --config=shared/drizzle.config.ts",
+    "prepare": "husky"
   },
   "devDependencies": {
     "@playwright/test": "^1.59.1",
     "@vitest/coverage-v8": "^3.2.4",
     "concurrently": "^9.1.2",
+    "husky": "^9.1.7",
     "playwright": "^1.59.1",
     "typescript": "^5.7.3"
   }

@@ -1,0 +1,56 @@
+#!/usr/bin/env sh
+# trockcrm pre-commit hook: block commits that introduce known secret patterns.
+#
+# Patterns blocked (case-insensitive):
+#   - Literal test-account passwords: dev123!, TrockTest123!
+#   - password: "..." style assignments with 6+ char value
+#   - Production Railway hostnames matching api-production-<id>.up.railway.app
+#
+# To bypass for a legitimately-needed reference (rare), use `git commit --no-verify`.
+# Discussion of the canonical scrub: see PR fix/credentials-disclosure-cleanup.
+
+set -e
+
+PATTERNS_LITERAL='dev123!|TrockTest123!'
+PATTERNS_REGEX='password["'"'"']?\s*[:=]\s*["'"'"'][^"'"'"']{6,}["'"'"']|api-production-[a-z0-9]+\.up\.railway\.app'
+
+# Limit to staged additions (lines starting with '+', skip the '+++' file headers).
+DIFF=$(git diff --cached --no-color --unified=0 -- . ':(exclude).husky/pre-commit' ':(exclude)scripts/test-precommit-hook.sh')
+
+if [ -z "$DIFF" ]; then
+  exit 0
+fi
+
+ADDED=$(printf "%s\n" "$DIFF" | grep -E '^\+[^+]' || true)
+
+if [ -z "$ADDED" ]; then
+  exit 0
+fi
+
+HITS_LITERAL=$(printf "%s\n" "$ADDED" | grep -iE "$PATTERNS_LITERAL" || true)
+HITS_REGEX=$(printf "%s\n" "$ADDED" | grep -iE "$PATTERNS_REGEX" || true)
+
+if [ -n "$HITS_LITERAL" ] || [ -n "$HITS_REGEX" ]; then
+  echo "" >&2
+  echo "x pre-commit blocked: this commit introduces a known secret pattern." >&2
+  echo "" >&2
+  if [ -n "$HITS_LITERAL" ]; then
+    echo "  Literal-password matches:" >&2
+    printf "    %s\n" "$HITS_LITERAL" >&2
+  fi
+  if [ -n "$HITS_REGEX" ]; then
+    echo "  Regex-pattern matches:" >&2
+    printf "    %s\n" "$HITS_REGEX" >&2
+  fi
+  echo "" >&2
+  echo "Fix:" >&2
+  echo "  - Replace the password value with: <redacted - test creds in ops vault>" >&2
+  echo "  - Replace api-production-<id>.up.railway.app with: <prod-api-host>" >&2
+  echo "  - Stack-trace line numbers from production: drop the precise number, keep the filename only." >&2
+  echo "" >&2
+  echo "Background: see PR fix/credentials-disclosure-cleanup and .reviews/credentials-and-disclosure-cleanup/." >&2
+  echo "Bypass (only with reviewer approval): git commit --no-verify" >&2
+  exit 1
+fi
+
+exit 0
