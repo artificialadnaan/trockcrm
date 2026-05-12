@@ -4,6 +4,7 @@ import path from "node:path";
 import readline from "node:readline/promises";
 import { pathToFileURL } from "node:url";
 import pg from "pg";
+import { deriveIsActive } from "../server/src/modules/projects/service.js";
 
 const ALLOWED_TENANTS = ["office_dallas", "office_atlanta"] as const;
 const DEFAULT_BATCH_SIZE = 100;
@@ -49,25 +50,11 @@ function quoteIdent(value: string): string {
   return `"${value.replace(/"/g, '""')}"`;
 }
 
-// Re-implementation of the inference rule used by buildProjectMirrorFields.
-// Kept in lockstep so this script and the live mirror agree on what counts
-// as "inactive in Procore". If buildProjectMirrorFields changes, update this.
-export function deriveIsActiveFromSnapshot(
-  snapshot: Record<string, unknown> | null | undefined
-): { isActive: boolean; reason: string } | null {
-  if (!snapshot || typeof snapshot !== "object") return null;
-  if (typeof snapshot.active === "boolean") {
-    return { isActive: snapshot.active, reason: `snapshot.active=${snapshot.active}` };
-  }
-  if (typeof snapshot.status_name === "string") {
-    const statusName = snapshot.status_name;
-    return {
-      isActive: statusName !== "Inactive",
-      reason: `status_name=${JSON.stringify(statusName)}`,
-    };
-  }
-  return null;
-}
+// Single source of truth lives in server/src/modules/projects/service.ts.
+// This script delegates so the backfill plan and the live mirror upsert
+// cannot drift across snapshot shapes. Keep the export name for callers
+// that still import `deriveIsActiveFromSnapshot`.
+export const deriveIsActiveFromSnapshot = deriveIsActive;
 
 export function parseActiveBackfillArgs(argv: string[]): ActiveBackfillArgs {
   const args = argv[0] === "backfill-projects-active-flag" ? argv.slice(1) : argv;
