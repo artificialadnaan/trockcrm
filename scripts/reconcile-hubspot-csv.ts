@@ -25,6 +25,8 @@ export interface CrmRecord {
   amount?: string | null;
   owner?: string | null;
   closeDate?: string | null;
+  createdAt?: string | null;
+  updatedAt?: string | null;
 }
 
 export interface HubSpotReconciliationInput {
@@ -47,13 +49,14 @@ function getConnectionString() {
 }
 
 export function parseCsvText(text: string): Record<string, string>[] {
+  const source = text.charCodeAt(0) === 0xfeff ? text.slice(1) : text;
   const rows: string[][] = [];
   let row: string[] = [];
   let cell = "";
   let inQuotes = false;
-  for (let i = 0; i < text.length; i++) {
-    const char = text[i];
-    const next = text[i + 1];
+  for (let i = 0; i < source.length; i++) {
+    const char = source[i];
+    const next = source[i + 1];
     if (char === '"' && inQuotes && next === '"') {
       cell += '"';
       i++;
@@ -76,7 +79,7 @@ export function parseCsvText(text: string): Record<string, string>[] {
   if (row.some((value) => value.trim() !== "")) rows.push(row);
   const [headers = [], ...data] = rows;
   return data.map((values) =>
-    Object.fromEntries(headers.map((header, index) => [header.trim(), values[index]?.trim() ?? ""]))
+    Object.fromEntries(headers.map((header, index) => [header.replace(/^\uFEFF/, "").trim(), values[index]?.trim() ?? ""]))
   );
 }
 
@@ -114,6 +117,67 @@ function normalizeHubSpotRows(type: ObjectType, rows: Record<string, string>[]):
     .filter((row): row is HubSpotCsvRecord => Boolean(row));
 }
 
+interface ReconcileWarning {
+  type: "invalid_date";
+  objectType: ObjectType;
+  hubspotId: string;
+  name: string;
+  field: "closeDate";
+  source: "hubspot" | "crm";
+  value: string;
+}
+
+interface DuplicateCrmRow {
+  id: string;
+  name: string;
+  stage?: string | null;
+  amount?: string | null;
+  owner?: string | null;
+  closeDate?: string | null;
+  createdAt?: string | null;
+  updatedAt?: string | null;
+}
+
+interface DuplicateCrmGroup {
+  hubspotId: string;
+  canonicalCrmId: string;
+  rows: DuplicateCrmRow[];
+}
+
+function isValidUtcDate(year: number, month: number, day: number) {
+  const date = new Date(Date.UTC(year, month - 1, day));
+  return date.getUTCFullYear() === year && date.getUTCMonth() === month - 1 && date.getUTCDate() === day;
+}
+
+function formatIsoDate(year: number, month: number, day: number) {
+  return `${String(year).padStart(4, "0")}-${String(month).padStart(2, "0")}-${String(day).padStart(2, "0")}`;
+}
+
+function normalizeDateValue(value: string | null | undefined) {
+  const text = String(value ?? "").trim();
+  if (text === "") return { value: null, invalid: false };
+  const iso = text.match(/^(\d{4})-(\d{2})-(\d{2})(?:[T\s].*)?$/);
+  if (iso) {
+    const year = Number(iso[1]);
+    const month = Number(iso[2]);
+    const day = Number(iso[3]);
+    return isValidUtcDate(year, month, day)
+      ? { value: formatIsoDate(year, month, day), invalid: false }
+      : { value: text, invalid: true };
+  }
+  const slash = text.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/);
+  if (slash) {
+    // HubSpot's US export format is MM/DD/YYYY; parse it manually to avoid timezone-dependent Date.parse shifts.
+    const month = Number(slash[1]);
+    const day = Number(slash[2]);
+    const year = Number(slash[3]);
+    return isValidUtcDate(year, month, day)
+      ? { value: formatIsoDate(year, month, day), invalid: false }
+      : { value: text, invalid: true };
+  }
+  return { value: text, invalid: true };
+}
+
 function normalizeComparable(field: "stage" | "amount" | "owner" | "closeDate", value: string | null | undefined) {
   const text = String(value ?? "").trim();
   if (text === "") return null;
@@ -122,10 +186,55 @@ function normalizeComparable(field: "stage" | "amount" | "owner" | "closeDate", 
     return Number.isFinite(numeric) ? numeric.toFixed(2) : text;
   }
   if (field === "closeDate") {
-    const timestamp = Date.parse(text);
-    return Number.isNaN(timestamp) ? text : new Date(timestamp).toISOString().slice(0, 10);
+    return normalizeDateValue(text).value;
   }
   return text.toLowerCase().replace(/\s+/g, " ");
+}
+
+function canonicalCrmRow(rows: CrmRecord[]) {
+  return [...rows].sort((left, right) => {
+    const leftCreated = left.createdAt ? Date.parse(left.createdAt) : Number.NaN;
+    const rightCreated = right.createdAt ? Date.parse(right.createdAt) : Number.NaN;
+    if (Number.isFinite(leftCreated) && Number.isFinite(rightCreated) && leftCreated !== rightCreated) {
+      return leftCreated - rightCreated;
+    }
+    if (Number.isFinite(leftCreated) !== Number.isFinite(rightCreated)) {
+      return Number.isFinite(leftCreated) ? -1 : 1;
+    }
+    return left.id.localeCompare(right.id);
+  })[0];
+}
+
+function groupCrmRows(rows: CrmRecord[]) {
+  const groups = new Map<string, CrmRecord[]>();
+  for (const row of rows) {
+    if (!row.hubspotId) continue;
+    groups.set(row.hubspotId, [...(groups.get(row.hubspotId) ?? []), row]);
+  }
+  const canonicalRows = new Map<string, CrmRecord>();
+  const duplicates: DuplicateCrmGroup[] = [];
+  for (const [hubspotId, groupedRows] of groups) {
+    const canonical = canonicalCrmRow(groupedRows);
+    if (!canonical) continue;
+    canonicalRows.set(hubspotId, canonical);
+    if (groupedRows.length > 1) {
+      duplicates.push({
+        hubspotId,
+        canonicalCrmId: canonical.id,
+        rows: groupedRows.map((row) => ({
+          id: row.id,
+          name: row.name,
+          stage: row.stage,
+          amount: row.amount,
+          owner: row.owner,
+          closeDate: row.closeDate,
+          createdAt: row.createdAt,
+          updatedAt: row.updatedAt,
+        })),
+      });
+    }
+  }
+  return { canonicalRows, duplicates };
 }
 
 export function buildHubSpotReconciliationReport(input: HubSpotReconciliationInput) {
@@ -142,9 +251,17 @@ export function buildHubSpotReconciliationReport(input: HubSpotReconciliationInp
     companies: [],
     deals: [],
   };
+  const duplicateCrm: Record<ObjectType, DuplicateCrmGroup[]> = {
+    contacts: [],
+    companies: [],
+    deals: [],
+  };
+  const warnings: ReconcileWarning[] = [];
 
   for (const type of ["contacts", "companies", "deals"] as const) {
-    const crmByHubSpot = new Map(input.crm[type].filter((row) => row.hubspotId).map((row) => [row.hubspotId, row]));
+    const grouped = groupCrmRows(input.crm[type]);
+    duplicateCrm[type] = grouped.duplicates;
+    const crmByHubSpot = grouped.canonicalRows;
     const seenHubSpotIds = new Set<string>();
     for (const hubspotRow of input.hubspot[type]) {
       seenHubSpotIds.add(hubspotRow.id);
@@ -157,6 +274,16 @@ export function buildHubSpotReconciliationReport(input: HubSpotReconciliationInp
         for (const field of ["stage", "amount", "owner", "closeDate"] as const) {
           const hubspotValue = normalizeComparable(field, hubspotRow[field]);
           const crmValue = normalizeComparable(field, crmRow[field]);
+          if (field === "closeDate") {
+            const hubspotDate = normalizeDateValue(hubspotRow[field]);
+            const crmDate = normalizeDateValue(crmRow[field]);
+            if (hubspotDate.invalid) {
+              warnings.push({ type: "invalid_date", objectType: "deals", hubspotId: hubspotRow.id, name: hubspotRow.name, field, source: "hubspot", value: String(hubspotRow[field] ?? "") });
+            }
+            if (crmDate.invalid) {
+              warnings.push({ type: "invalid_date", objectType: "deals", hubspotId: hubspotRow.id, name: hubspotRow.name, field, source: "crm", value: String(crmRow[field] ?? "") });
+            }
+          }
           if (hubspotValue !== crmValue) {
             mismatches.deals.push({ hubspotId: hubspotRow.id, name: hubspotRow.name, field, hubspotValue, crmValue });
           }
@@ -184,13 +311,15 @@ export function buildHubSpotReconciliationReport(input: HubSpotReconciliationInp
     missing,
     mismatches,
     crmOnly,
+    duplicateCrm,
+    warnings,
   };
 }
 
 async function loadCrm(client: pg.Client, tenant: string): Promise<Record<ObjectType, CrmRecord[]>> {
   const schema = quoteIdent(tenant);
-  const contacts = await client.query(`SELECT id::text, hubspot_contact_id AS hubspot_id, trim(first_name || ' ' || last_name) AS name FROM ${schema}.contacts WHERE is_active = true`);
-  const companies = await client.query(`SELECT id::text, COALESCE(hubspot_company_id, hubspot_id) AS hubspot_id, name FROM ${schema}.companies WHERE is_active = true`);
+  const contacts = await client.query(`SELECT id::text, hubspot_contact_id AS hubspot_id, trim(first_name || ' ' || last_name) AS name, created_at::text, updated_at::text FROM ${schema}.contacts WHERE is_active = true`);
+  const companies = await client.query(`SELECT id::text, COALESCE(hubspot_company_id, hubspot_id) AS hubspot_id, name, created_at::text, updated_at::text FROM ${schema}.companies WHERE is_active = true`);
   const deals = await client.query(`
       SELECT d.id::text,
              d.hubspot_deal_id AS hubspot_id,
@@ -198,14 +327,16 @@ async function loadCrm(client: pg.Client, tenant: string): Promise<Record<Object
              psc.name AS stage,
              COALESCE(d.awarded_amount::text, d.bid_estimate::text, d.dd_estimate::text) AS amount,
              COALESCE(d.hubspot_owner_id, d.assigned_rep_id::text) AS owner,
-             d.expected_close_date::text AS close_date
+             d.expected_close_date::text AS close_date,
+             d.created_at::text,
+             d.updated_at::text
       FROM ${schema}.deals d
       LEFT JOIN public.pipeline_stage_config psc ON psc.id = d.stage_id
       WHERE d.is_active = true
     `);
   return {
-    contacts: contacts.rows.map((row) => ({ id: row.id, hubspotId: row.hubspot_id, name: row.name })),
-    companies: companies.rows.map((row) => ({ id: row.id, hubspotId: row.hubspot_id, name: row.name })),
+    contacts: contacts.rows.map((row) => ({ id: row.id, hubspotId: row.hubspot_id, name: row.name, createdAt: row.created_at, updatedAt: row.updated_at })),
+    companies: companies.rows.map((row) => ({ id: row.id, hubspotId: row.hubspot_id, name: row.name, createdAt: row.created_at, updatedAt: row.updated_at })),
     deals: deals.rows.map((row) => ({
       id: row.id,
       hubspotId: row.hubspot_id,
@@ -214,13 +345,15 @@ async function loadCrm(client: pg.Client, tenant: string): Promise<Record<Object
       amount: row.amount,
       owner: row.owner,
       closeDate: row.close_date,
+      createdAt: row.created_at,
+      updatedAt: row.updated_at,
     })),
   };
 }
 
 function sectionList(title: string, rows: Array<Record<string, unknown>>) {
   if (rows.length === 0) return `### ${title}\n\nNone.\n`;
-  return `### ${title}\n\n${rows.map((row) => `- ${Object.entries(row).map(([key, value]) => `${key}: ${value ?? ""}`).join("; ")}`).join("\n")}\n`;
+  return `### ${title}\n\n${rows.map((row) => `- ${Object.entries(row).map(([key, value]) => `${key}: ${typeof value === "object" && value !== null ? JSON.stringify(value) : value ?? ""}`).join("; ")}`).join("\n")}\n`;
 }
 
 function writeMarkdown(report: ReturnType<typeof buildHubSpotReconciliationReport>, outputPath: string) {
@@ -242,7 +375,15 @@ function writeMarkdown(report: ReturnType<typeof buildHubSpotReconciliationRepor
     sectionList("Missing Contacts In CRM", report.missing.contacts),
     sectionList("Missing Companies In CRM", report.missing.companies),
     sectionList("Missing Deals In CRM", report.missing.deals),
+    "## Duplicate CRM HubSpot IDs",
+    "",
+    "Canonical row selection uses the earliest created_at value, with CRM ID as the deterministic fallback.",
+    "",
+    sectionList("Duplicate CRM Contacts", report.duplicateCrm.contacts),
+    sectionList("Duplicate CRM Companies", report.duplicateCrm.companies),
+    sectionList("Duplicate CRM Deals", report.duplicateCrm.deals),
     sectionList("Deal Field Mismatches", report.mismatches.deals),
+    sectionList("Warnings", report.warnings),
     sectionList("CRM Native Contacts", report.crmOnly.contacts),
     sectionList("CRM Native Companies", report.crmOnly.companies),
     sectionList("CRM Native Deals", report.crmOnly.deals),
