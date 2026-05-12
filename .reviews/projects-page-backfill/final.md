@@ -15,7 +15,7 @@
 
 ## Root cause chain (final)
 
-1. **Surface failure** — `POST /api/projects/backfill` returned HTTP 500 in ~230ms with `current transaction is aborted, commands ignored until end of transaction block` at `tenantMiddleware:65`.
+1. **Surface failure** — `POST /api/projects/backfill` returned HTTP 500 in ~230ms with `current transaction is aborted, commands ignored until end of transaction block` at `tenantMiddleware` (compiled `tenant.js:<line>`).
 2. **Layer 1 (out of track) — pool poisoning.** A malformed SQL string in concurrent reports tier-1 code was throwing inside transactions without proper ROLLBACK, returning dirty `PoolClient` instances to the pool. Cleared incidentally by my redeploys; root-fixed in parallel track `fix/reports-500-regression` (PR #245).
 3. **Layer 2 (in track) — bad-row isolation.** Once one Procore row's INSERT threw, the whole tenant transaction was aborted and every subsequent row's queries failed with the same 25P02 error. Fixed in #246 via per-row `SAVEPOINT`.
 4. **Layer 3 (in track) — idle-in-transaction.** The savepoint code couldn't even run because the surrounding tenant transaction was being killed by Postgres `idle_in_transaction_session_timeout` during the multi-second Procore HTTPS fetch. Fixed in #247 by detaching the backfill onto its own pool client with no transaction held during HTTP fetches.
@@ -53,7 +53,7 @@ Total scoped suite: 25/25 tests pass. `npm run typecheck` exit 0.
 
 Pending deploy `9c420020` SUCCESS. Plan:
 
-1. Fresh admin login (`test-admin@trock.test` / `dev123!`).
+1. Fresh admin login (`test-admin@trock.test`; password `<redacted — test creds in ops vault>`).
 2. `POST /api/projects/backfill?mirror_all_projects=true` — capture HTTP status, body, `done` log line from Railway.
 3. Rerun the same endpoint — confirm idempotent (`backfilled` low, no new errors).
 4. `GET /api/projects?perPage=1` as admin — confirm `pagination.total > 0`.
@@ -65,7 +65,7 @@ Recorded in `smoke.md`.
 
 ## Assumptions made during autonomous operation
 
-1. Admin password is `dev123!` (NOT `TrockTest123!` as PR #243's stale FINAL.md claimed). Director/sales use `TrockTest123!`.
+1. Admin password is the dev-mode local value (NOT the shared smoke password from PR #243's stale FINAL.md). Director/sales use the shared smoke password. Both retrieved from the ops vault entry tagged `trockcrm/test-accounts`. See `<redacted — test creds in ops vault>`.
 2. POST endpoints require `Origin: https://trockcrm.com` + `x-csrf-token` header against the Railway API host.
 3. PR #243's `NULLS NOT DISTINCT` phase-history index landed correctly (verified in `.reviews/projects-tab/round-4-post-fix.md`).
 4. The existing projects-page client structure (kanban-on-top + searchable list-below) satisfies the spec's "matching Leads/Deals/Pipeline" requirement. Visual idiom polish is deferred as a non-blocking follow-up.

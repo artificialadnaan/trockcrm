@@ -6,8 +6,8 @@ PR #246 merged (savepoint isolation) and deployed. First production run of `POST
 
 ```
 [ERROR] SAVEPOINT can only be used in transaction blocks
-    at /app/node_modules/pg/lib/client.js:631:17
-    at async runProjectsBackfill (file:///app/server/dist/modules/projects/backfill-service.js:84:13)
+    at pg client.js:<line> (node_modules)
+    at async runProjectsBackfill (backfill-service.js:<line>)
 ```
 
 ## Root cause

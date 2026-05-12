@@ -59,8 +59,8 @@ Railway internal Postgres URL was not reachable from the local shell. I used the
 
 Endpoint sampled:
 
-- `GET https://api-production-ad218.up.railway.app/api/deals?page=1&limit=500&scope=all`
-- `GET https://api-production-ad218.up.railway.app/api/deals?page=2&limit=500&scope=all`
+- `GET https://<prod-api-host>/api/deals?page=1&limit=500&scope=all`
+- `GET https://<prod-api-host>/api/deals?page=2&limit=500&scope=all`
 
 Returned active deals: 756.
 

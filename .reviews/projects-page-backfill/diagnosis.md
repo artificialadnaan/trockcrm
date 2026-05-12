@@ -13,9 +13,9 @@ Proceeding.
 
 | Account | Email | Password | Result |
 |---|---|---|---|
-| Admin | `test-admin@trock.test` | `dev123!` | HTTP 200 (NB: `TrockTest123!` returns 401 for admin) |
-| Director | `test-director@trock.test` | `TrockTest123!` | HTTP 200 |
-| Sales | `test-sales@trock.test` | `TrockTest123!` | HTTP 200 |
+| Admin | `test-admin@trock.test` | `<redacted — test creds in ops vault>` | HTTP 200 (NB: the shared `<redacted — test creds in ops vault>` returns 401 for admin; admin uses a different value) |
+| Director | `test-director@trock.test` | `<redacted — test creds in ops vault>` | HTTP 200 |
+| Sales | `test-sales@trock.test` | `<redacted — test creds in ops vault>` | HTTP 200 |
 
 Login endpoint: `POST /api/auth/local/login`. Sets `token` (JWT) and `csrf_token` cookies on `.trockcrm.com`.
 
@@ -24,7 +24,7 @@ POST endpoints require `Origin: https://trockcrm.com` and `x-csrf-token` header 
 ## Production reproduction of backfill failure
 
 ```
-POST https://api-production-ad218.up.railway.app/api/projects/backfill
+POST https://<prod-api-host>/api/projects/backfill
 Origin: https://trockcrm.com
 Cookie: token=...; csrf_token=...
 x-csrf-token: ...
@@ -36,9 +36,9 @@ Railway API logs around the failing request:
 
 ```
 [ERROR] current transaction is aborted, commands ignored until end of transaction block error: current transaction is aborted, commands ignored until end of transaction block
-    at /app/node_modules/pg/lib/client.js:631:17
-    at process.processTicksAndRejections (node:internal/process/task_queues:95:5)
-    at async tenantMiddleware (file:///app/server/dist/middleware/tenant.js:65:9)
+    at pg client.js:<line> (node_modules)
+    at process.processTicksAndRejections (node:internal/process/task_queues:<line>)
+    at async tenantMiddleware (tenant.js:<line>)
 ```
 
 The error fires from the FIRST query in tenantMiddleware — before BEGIN — which is impossible unless the pool client handed to us is already in an aborted-transaction state.

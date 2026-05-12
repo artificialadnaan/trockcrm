@@ -4,7 +4,7 @@
 
 - Admin login: 200; Director login: 200; Sales login: 200.
 - `POST /api/projects/backfill`: HTTP 500.
-- Railway log: `SAVEPOINT can only be used in transaction blocks` at `runProjectsBackfill (backfill-service.js:84)` — request tenant transaction killed by Postgres `idle_in_transaction_session_timeout` during Procore HTTPS fetch.
+- Railway log: `SAVEPOINT can only be used in transaction blocks` at `runProjectsBackfill` (compiled `backfill-service.js:<line>`) — request tenant transaction killed by Postgres `idle_in_transaction_session_timeout` during Procore HTTPS fetch.
 
 ## Iteration 2 (after PR #247 deploy, API `f642ad84`) — PARTIAL
 
@@ -27,7 +27,7 @@ Observability logs revealed:
 
 ```
 POST /api/projects/backfill?mirror_all_projects=true
-Authorization: cookies for test-admin@trock.test (dev123!)
+Authorization: cookies for test-admin@trock.test (password `<redacted — test creds in ops vault>`)
 Origin: https://trockcrm.com
 ```
 
@@ -54,7 +54,7 @@ POST /api/projects/backfill?mirror_all_projects=true (same admin)
 
 ```
 GET /api/projects/by-phase
-Cookies for test-director@trock.test (TrockTest123!)
+Cookies for test-director@trock.test (password `<redacted — test creds in ops vault>`)
 ```
 
 - HTTP 200.
@@ -74,7 +74,7 @@ Cookies for test-director@trock.test (TrockTest123!)
 
 ```
 GET /api/projects?perPage=1
-Cookies for test-sales@trock.test (TrockTest123!)
+Cookies for test-sales@trock.test (password `<redacted — test creds in ops vault>`)
 ```
 
 - HTTP 200, projects visible. (Project read access is intentionally tenant-wide for read-only mirror; per the original spec, projects scope is not per-rep.)
@@ -93,9 +93,9 @@ The 723 mirrored rows match what `procoreClient.get('/rest/v1.0/companies/598134
 
 | Account | Email | Password |
 |---|---|---|
-| Admin | `test-admin@trock.test` | `dev123!` |
-| Director | `test-director@trock.test` | `TrockTest123!` |
-| Sales | `test-sales@trock.test` | `TrockTest123!` |
+| Admin | `test-admin@trock.test` | `<redacted — test creds in ops vault>` |
+| Director | `test-director@trock.test` | `<redacted — test creds in ops vault>` |
+| Sales | `test-sales@trock.test` | `<redacted — test creds in ops vault>` |
 
 ## Result
 
