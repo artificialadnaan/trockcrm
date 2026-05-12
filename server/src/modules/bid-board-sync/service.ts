@@ -407,9 +407,9 @@ async function updateBidBoardStageMetadata(
   const result = await client.query(
     `UPDATE ${schemaName}.deals
         SET is_bid_board_owned = true,
-            bid_board_stage_slug = $2,
-            bid_board_stage_family = $3,
-            bid_board_stage_status = $4,
+            bid_board_stage_slug = $2::text,
+            bid_board_stage_family = $3::text,
+            bid_board_stage_status = $4::text,
             bid_board_stage_entered_at = COALESCE(bid_board_stage_entered_at, NOW()),
             read_only_synced_at = NOW(),
             updated_at = NOW()
@@ -496,14 +496,14 @@ async function writeStageIfSafe(
         SET stage_id = $1,
             stage_entered_at = NOW(),
             is_bid_board_owned = true,
-            bid_board_stage_slug = $2,
-            bid_board_stage_family = $3,
-            bid_board_stage_status = $4,
+            bid_board_stage_slug = $2::text,
+            bid_board_stage_family = $3::text,
+            bid_board_stage_status = $4::text,
             bid_board_stage_entered_at = NOW(),
             read_only_synced_at = NOW(),
-            actual_close_date = CASE WHEN $2 = 'won' THEN COALESCE(actual_close_date, CURRENT_DATE) ELSE actual_close_date END,
-            lost_at = CASE WHEN $2 = 'lost' THEN COALESCE(lost_at, NOW()) ELSE lost_at END,
-            bid_board_loss_outcome = CASE WHEN $2 = 'lost' THEN COALESCE(bid_board_loss_outcome, $4) ELSE bid_board_loss_outcome END,
+            actual_close_date = CASE WHEN $2::text = 'won' THEN COALESCE(actual_close_date, CURRENT_DATE) ELSE actual_close_date END,
+            lost_at = CASE WHEN $2::text = 'lost' THEN COALESCE(lost_at, NOW()) ELSE lost_at END,
+            bid_board_loss_outcome = CASE WHEN $2::text = 'lost' THEN COALESCE(bid_board_loss_outcome, $4::text) ELSE bid_board_loss_outcome END,
             updated_at = NOW()
       WHERE id = $5
         AND stage_id = $6
