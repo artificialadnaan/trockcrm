@@ -242,7 +242,7 @@ export async function executePlan(client: pg.Client, plan: ReassignPlan): Promis
 
       const updateResult = await client.query(
         `UPDATE ${quoted}.deals
-            SET stage_id = $1,
+            SET stage_id = $1::uuid,
                 stage_entered_at = NOW(),
                 updated_at = NOW(),
                 hubspot_extra_properties = COALESCE(hubspot_extra_properties, '{}'::jsonb)
@@ -250,7 +250,7 @@ export async function executePlan(client: pg.Client, plan: ReassignPlan): Promis
                        'phase_b_reassignment',
                        jsonb_build_object(
                          'from_stage_id', stage_id::text,
-                         'to_stage_id', $1::text,
+                         'to_stage_id', $1::uuid::text,
                          'reassigned_at', $2::text,
                          'reason', $3::text
                        )
@@ -269,13 +269,10 @@ export async function executePlan(client: pg.Client, plan: ReassignPlan): Promis
         continue;
       }
 
-      await client.query(
-        `INSERT INTO ${quoted}.deal_stage_history
-           (deal_id, from_stage_id, to_stage_id, changed_by, change_reason, created_at)
-         VALUES ($1::uuid, $2::uuid, $3::uuid, NULL,
-                 'phase_b_hubspot_import_reassignment: ' || $4, NOW())`,
-        [row.candidate.dealId, row.candidate.currentStageId, row.targetStageId, row.reason]
-      );
+      // Audit trail is captured in deals.hubspot_extra_properties.phase_b_reassignment
+      // (from/to/when/reason). We deliberately skip inserting into
+      // deal_stage_history here — that table requires a non-null changed_by
+      // (a real user id), and this batch correction is system-initiated.
 
       await client.query("COMMIT");
       updated += 1;
