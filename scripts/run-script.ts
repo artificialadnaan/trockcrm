@@ -7,6 +7,7 @@ import { runBackfillProjectsActiveFlag } from "./backfill-projects-active-flag.j
 import { runReassignHubspotImportStages } from "./reassign-hubspot-import-stages.js";
 import { runReseedSmokeCleanup } from "./reseed-smoke-cleanup.js";
 import { runAuditTempPasswordUsers } from "./audit-tempassword-users.js";
+import { runForcePasswordChangeRealUsers } from "./force-password-change-real-users.js";
 
 export async function runScript(argv = process.argv.slice(2)): Promise<void> {
   const [scriptName, ...rest] = argv;
@@ -46,12 +47,17 @@ export async function runScript(argv = process.argv.slice(2)): Promise<void> {
     return;
   }
 
+  if (scriptName === "force-password-change-real-users") {
+    await runForcePasswordChangeRealUsers(rest);
+    return;
+  }
+
   if (!scriptName || scriptName.startsWith("--")) {
     await runProjectNumberBackfill(argv);
     return;
   }
 
-  throw new Error(`Unknown script '${scriptName}'. Expected backfill-project-types, backfill-project-numbers, normalize-project-number-case, backfill-projects-active-flag, reassign-hubspot-import-stages, reseed-smoke-cleanup, or audit-tempassword-users.`);
+  throw new Error(`Unknown script '${scriptName}'. Expected backfill-project-types, backfill-project-numbers, normalize-project-number-case, backfill-projects-active-flag, reassign-hubspot-import-stages, reseed-smoke-cleanup, audit-tempassword-users, or force-password-change-real-users.`);
 }
 
 const executedPath = process.argv[1] ? pathToFileURL(path.resolve(process.argv[1])).href : "";

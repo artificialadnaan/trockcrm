@@ -88,7 +88,7 @@ describe("local auth service", () => {
     });
   });
 
-  it("sends temporary-password invites without forcing an immediate password change", async () => {
+  it("sends temporary-password invites that force an immediate password change", async () => {
     dbMocks.limit
       .mockResolvedValueOnce([
         {
@@ -109,14 +109,14 @@ describe("local auth service", () => {
       1,
       expect.objectContaining({
         userId: "user-1",
-        mustChangePassword: false,
+        mustChangePassword: true,
         isEnabled: true,
       })
     );
     expect(dbMocks.onConflictDoUpdate).toHaveBeenCalledWith(
       expect.objectContaining({
         set: expect.objectContaining({
-          mustChangePassword: false,
+          mustChangePassword: true,
         }),
       })
     );
@@ -133,16 +133,16 @@ describe("local auth service", () => {
     expect(html).toContain("https://onboarding.trockcrm.com");
     expect(html).toContain("Mark historical");
     expect(html).toContain("469-690-2240");
-    expect(html).not.toContain("change your password immediately");
+    expect(html).toContain("change your password immediately");
     expect(options.text).toContain("1. Go to https://onboarding.trockcrm.com");
     expect(options.text).toContain("6. When all records are complete, click \"Complete onboarding\" to get full CRM access");
   });
 
-  it("keeps no-force temporary-password invites in invite_sent status before first login", () => {
+  it("keeps forced temporary-password invites in invite_sent status before first login", () => {
     expect(
       getLocalAuthStatus({
         isEnabled: true,
-        mustChangePassword: false,
+        mustChangePassword: true,
         inviteSentAt: new Date("2026-05-08T12:00:00.000Z"),
         lastLoginAt: null,
       })
