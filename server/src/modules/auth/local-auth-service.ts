@@ -92,7 +92,7 @@ function buildInviteEmailContent(input: {
 
   const steps = [
     `Go to ${input.loginUrl}`,
-    "Log in with the credentials above",
+    "Log in with the credentials above and change your password immediately when prompted",
     "Review and clean up each record assigned to you — fill in missing fields, verify existing data",
     "For records you can't fix (customer left, deal is dead, etc.), click Skip and select a reason",
     'Use the "Mark historical" button to bulk-pass any old closed deals',
@@ -309,7 +309,7 @@ export async function sendUserInvite(input: {
     .values({
       userId: user.id,
       passwordHash,
-      mustChangePassword: false,
+      mustChangePassword: true,
       isEnabled: true,
       inviteSentAt: currentTime,
       inviteSentByUserId: input.sentByUserId,
@@ -327,7 +327,7 @@ export async function sendUserInvite(input: {
       target: userLocalAuth.userId,
       set: {
         passwordHash,
-        mustChangePassword: false,
+        mustChangePassword: true,
         isEnabled: true,
         inviteSentAt: currentTime,
         inviteSentByUserId: input.sentByUserId,
