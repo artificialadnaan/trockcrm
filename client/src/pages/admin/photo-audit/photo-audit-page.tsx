@@ -33,11 +33,13 @@ import {
   PhotoViewerModal,
   type DealPhotoRecord,
   initials,
+  useInViewport,
 } from "@/components/photos/deal-photo-components";
 import type { PhotoAuditEvent, PhotoAuditEventType } from "@/components/photos/photo-history-timeline";
 import { api } from "@/lib/api";
 import { displayNameOrFallback } from "@/lib/display-identifiers";
 import { formatDealDisplayNumber, sanitizeHubspotDealIdentifiers } from "@/lib/deal-utils";
+import { getImmediatePhotoPreviewUrl, shouldFetchSignedPhotoUrl } from "@/lib/photo-url-resolution";
 
 const PHOTO_AUDIT_EVENTS: Array<{ value: PhotoAuditEventType; label: string; icon: React.ComponentType<{ className?: string }> }> = [
   { value: "uploaded", label: "Uploaded", icon: Upload },
@@ -58,6 +60,29 @@ const PROCORE_SYNC_STATUS_OPTIONS = [
   { value: "failed", label: "Failed" },
   { value: "skipped", label: "Skipped" },
 ];
+
+const auditPreviewUrlCache = new Map<string, string>();
+const auditPreviewUrlRequests = new Map<string, Promise<string>>();
+
+async function fetchAuditPreviewUrl(photoId: string): Promise<string> {
+  const cached = auditPreviewUrlCache.get(photoId);
+  if (cached) return cached;
+
+  const pending = auditPreviewUrlRequests.get(photoId);
+  if (pending) return pending;
+
+  const request = api<{ url: string }>(`/files/${photoId}/download?preview=1`)
+    .then((data) => {
+      auditPreviewUrlCache.set(photoId, data.url);
+      return data.url;
+    })
+    .finally(() => {
+      auditPreviewUrlRequests.delete(photoId);
+    });
+
+  auditPreviewUrlRequests.set(photoId, request);
+  return request;
+}
 
 interface AdminPhotoAuditEvent extends PhotoAuditEvent {
   photo: {
@@ -123,6 +148,38 @@ function MetadataPreview({ metadata }: { metadata: Record<string, unknown> }) {
   );
 }
 
+function AdminAuditPhotoThumb({
+  photo,
+}: {
+  photo: NonNullable<AdminPhotoAuditEvent["photo"]>;
+}) {
+  const [thumbRef, inViewport] = useInViewport<HTMLDivElement>();
+  const [signedUrl, setSignedUrl] = useState<string | null>(() => auditPreviewUrlCache.get(photo.id) ?? null);
+  const previewUrl = getImmediatePhotoPreviewUrl(photo, signedUrl);
+
+  useEffect(() => {
+    if (!inViewport) return;
+    if (!shouldFetchSignedPhotoUrl(photo, signedUrl)) return;
+    let cancelled = false;
+
+    void fetchAuditPreviewUrl(photo.id)
+      .then((url) => {
+        if (!cancelled) setSignedUrl(url);
+      })
+      .catch(() => undefined);
+
+    return () => {
+      cancelled = true;
+    };
+  }, [inViewport, photo.id, photo.r2Key, photo.externalThumbnailUrl, photo.externalUrl, signedUrl]);
+
+  return (
+    <div ref={thumbRef} className="h-full w-full">
+      {previewUrl ? <img src={previewUrl} alt="" className="h-full w-full object-cover" /> : null}
+    </div>
+  );
+}
+
 function MultiSelectFilter({
   label,
   ariaLabel,
@@ -172,6 +229,7 @@ export function PhotoAuditPage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [selectedPhoto, setSelectedPhoto] = useState<DealPhotoRecord | null>(null);
+  const [selectedPhotoUrl, setSelectedPhotoUrl] = useState<string | null>(null);
 
   const selectedUsers = useMemo(() => parseList(searchParams, "userId"), [searchParams]);
   const selectedEventTypes = useMemo(() => parseList(searchParams, "eventType"), [searchParams]);
@@ -223,21 +281,30 @@ export function PhotoAuditPage() {
   async function openPhoto(photoId: string) {
     const data = await api<{ file: DealPhotoRecord }>(`/files/${photoId}`);
     setSelectedPhoto(data.file);
+    const cachedUrl = auditPreviewUrlCache.get(photoId) ?? null;
+    const immediateUrl = getImmediatePhotoPreviewUrl(data.file, cachedUrl);
+    setSelectedPhotoUrl(immediateUrl);
+    if (shouldFetchSignedPhotoUrl(data.file, immediateUrl)) {
+      setSelectedPhotoUrl(await fetchAuditPreviewUrl(photoId));
+    }
   }
 
   async function patchSelectedPhoto(photoId: string, body: Record<string, unknown>) {
     const data = await api<{ file: DealPhotoRecord }>(`/files/${photoId}`, { method: "PATCH", json: body });
     setSelectedPhoto(data.file);
+    setSelectedPhotoUrl((current) => getImmediatePhotoPreviewUrl(data.file, current));
   }
 
   async function saveSelectedAddress(photoId: string, body: { address: string; latitude?: number; longitude?: number }) {
     const data = await api<{ file: DealPhotoRecord }>(`/files/${photoId}/address`, { method: "PATCH", json: body });
     setSelectedPhoto(data.file);
+    setSelectedPhotoUrl((current) => getImmediatePhotoPreviewUrl(data.file, current));
   }
 
   async function deleteSelectedPhoto(photoId: string) {
     await api(`/files/${photoId}`, { method: "DELETE" });
     setSelectedPhoto(null);
+    setSelectedPhotoUrl(null);
     await fetchEvents();
   }
 
@@ -345,7 +412,7 @@ export function PhotoAuditPage() {
                         {event.photo ? (
                           <button type="button" aria-label={`Open photo ${sanitizeHubspotDealIdentifiers(event.photo.displayName, "Imported deal")}`} className="flex items-center gap-2 text-left hover:underline" onClick={() => openPhoto(event.photo!.id)}>
                             <span className="h-10 w-10 overflow-hidden rounded border bg-muted">
-                              {event.photo.externalThumbnailUrl ? <img src={event.photo.externalThumbnailUrl} alt="" className="h-full w-full object-cover" /> : null}
+                              <AdminAuditPhotoThumb photo={event.photo} />
                             </span>
                             <span>
                               <span className="block text-sm font-medium">{sanitizeHubspotDealIdentifiers(event.photo.displayName, "Imported deal")}</span>
@@ -389,8 +456,19 @@ export function PhotoAuditPage() {
       <PhotoViewerModal
         photos={selectedPhoto ? [selectedPhoto] : []}
         selectedId={selectedPhoto?.id ?? null}
-        onSelectedIdChange={(id) => !id && setSelectedPhoto(null)}
-        getPhotoImageUrl={(photo) => photo.externalThumbnailUrl ?? photo.externalUrl ?? ""}
+        onSelectedIdChange={(id) => {
+          if (!id) {
+            setSelectedPhoto(null);
+            setSelectedPhotoUrl(null);
+          }
+        }}
+        getPhotoImageUrl={(photo) => getImmediatePhotoPreviewUrl(photo, selectedPhotoUrl) ?? ""}
+        ensurePhotoImageUrl={async (photo) => {
+          if (selectedPhotoUrl) return selectedPhotoUrl;
+          const url = await fetchAuditPreviewUrl(photo.id);
+          setSelectedPhotoUrl(url);
+          return url;
+        }}
         patchPhoto={patchSelectedPhoto}
         savePhotoAddress={saveSelectedAddress}
         deletePhoto={deleteSelectedPhoto}

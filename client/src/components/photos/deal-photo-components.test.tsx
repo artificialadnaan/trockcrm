@@ -61,6 +61,7 @@ function renderViewer() {
       selectedId="photo-1"
       onSelectedIdChange={vi.fn()}
       getPhotoImageUrl={() => "https://example.test/photo.jpg"}
+      ensurePhotoImageUrl={vi.fn(async () => "https://example.test/photo.jpg")}
       patchPhoto={vi.fn()}
       savePhotoAddress={vi.fn()}
       deletePhoto={vi.fn()}

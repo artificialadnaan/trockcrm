@@ -1,4 +1,4 @@
-import React, { useMemo, useState } from "react";
+import React, { useEffect, useMemo, useState } from "react";
 import { Download, RotateCcw, Trash2 } from "lucide-react";
 import { useSearchParams } from "react-router-dom";
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
@@ -14,6 +14,7 @@ import {
   PhotoEmptyState,
   PhotoFilterBar,
   PhotoViewerModal,
+  useInViewport,
   type DealPhotoRecord,
   type PhotoFilterState,
 } from "@/components/photos/deal-photo-components";
@@ -61,6 +62,7 @@ export function DealFilePhotosSubview({ dealId }: { dealId: string }) {
     error,
     fetchPhotos,
     getPhotoImageUrl,
+    ensurePhotoImageUrl,
     patchPhoto,
     savePhotoAddress,
     deletePhoto,
@@ -140,6 +142,7 @@ export function DealFilePhotosSubview({ dealId }: { dealId: string }) {
                 key={photo.id}
                 photo={photo}
                 imageUrl={getPhotoImageUrl(photo)}
+                loadImageUrl={() => void ensurePhotoImageUrl(photo)}
                 onOpen={() => setSelectedId(photo.id)}
                 onDownload={() => downloadPhoto(photo.id)}
                 onDelete={() => deletePhoto(photo.id)}
@@ -155,6 +158,7 @@ export function DealFilePhotosSubview({ dealId }: { dealId: string }) {
         selectedId={selectedId}
         onSelectedIdChange={setSelectedId}
         getPhotoImageUrl={getPhotoImageUrl}
+        ensurePhotoImageUrl={ensurePhotoImageUrl}
         patchPhoto={patchPhoto}
         savePhotoAddress={savePhotoAddress}
         deletePhoto={deletePhoto}
@@ -167,6 +171,7 @@ export function DealFilePhotosSubview({ dealId }: { dealId: string }) {
 function PhotoFileRow({
   photo,
   imageUrl,
+  loadImageUrl,
   onOpen,
   onDownload,
   onDelete,
@@ -174,17 +179,24 @@ function PhotoFileRow({
 }: {
   photo: DealPhotoRecord;
   imageUrl: string;
+  loadImageUrl: () => void;
   onOpen: () => void;
   onDownload: () => void;
   onDelete: () => void;
   onRestore: () => void;
 }) {
+  const [rowRef, inViewport] = useInViewport<HTMLDivElement>();
   const category = displayPhotoCategory(photo);
   const primaryLabel = photo.description || `${photo.displayName}${photo.fileExtension ?? ""}`;
   const uploadedAt = new Date(photo.createdAt).toLocaleDateString();
   const takenAt = photo.takenAt ? new Date(photo.takenAt).toLocaleDateString() : "Same as uploaded";
+
+  useEffect(() => {
+    if (inViewport && !imageUrl) loadImageUrl();
+  }, [imageUrl, inViewport, loadImageUrl]);
+
   return (
-    <div className={`grid gap-3 px-3 py-3 transition hover:bg-accent/50 lg:grid-cols-[64px_minmax(180px,1.4fr)_120px_minmax(150px,1fr)_minmax(180px,1fr)_135px_135px_90px_92px] lg:items-center ${photo.deletedAt ? "opacity-55" : ""}`}>
+    <div ref={rowRef} className={`grid gap-3 px-3 py-3 transition hover:bg-accent/50 lg:grid-cols-[64px_minmax(180px,1.4fr)_120px_minmax(150px,1fr)_minmax(180px,1fr)_135px_135px_90px_92px] lg:items-center ${photo.deletedAt ? "opacity-55" : ""}`}>
       <button type="button" aria-label={`Open photo ${photo.displayName}`} className="h-12 w-12 overflow-hidden rounded border bg-muted" onClick={onOpen}>
         {imageUrl ? <img src={imageUrl} alt={photo.displayName} loading="lazy" className="h-full w-full object-cover" /> : <div className="flex h-full w-full items-center justify-center text-xs text-muted-foreground">Photo</div>}
       </button>

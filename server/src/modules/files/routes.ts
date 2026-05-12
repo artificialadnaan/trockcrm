@@ -14,6 +14,8 @@ import {
   getFileById,
   getFileByIdIncludingDeleted,
   getFileDownloadUrl,
+  shouldLogFileDownloadEvent,
+  shouldServeExternalFileUrl,
   updateFile,
   updateFileAddress,
   deleteFile,
@@ -577,9 +579,12 @@ router.get("/:id/download", async (req, res, next) => {
       if (!lead) throw new AppError(403, "Access denied: you do not have access to this lead's files.");
     }
 
-    // External files (CompanyCam etc.) — return the CDN URL directly
-    if (file.externalUrl) {
-      if (isPhotoRecord(file)) {
+    const logDownload = shouldLogFileDownloadEvent(req.query);
+
+    // External-only files can return their source URL. R2-backed imports keep
+    // their external URL as metadata, but must render/download through R2.
+    if (shouldServeExternalFileUrl(file)) {
+      if (logDownload && isPhotoRecord(file)) {
         await logPhotoEvent(req.tenantDb!, {
           photoId: file.id,
           eventType: "downloaded",
@@ -594,7 +599,7 @@ router.get("/:id/download", async (req, res, next) => {
     }
 
     const result = await getFileDownloadUrl(req.tenantDb!, req.params.id);
-    if (isPhotoRecord(file)) {
+    if (logDownload && isPhotoRecord(file)) {
       await logPhotoEvent(req.tenantDb!, {
         photoId: file.id,
         eventType: "downloaded",
