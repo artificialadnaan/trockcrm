@@ -49,6 +49,8 @@ HubSpot cutover reconciliation is read-only and expects fresh HubSpot CSV export
 railway run --service=Postgres npx tsx scripts/reconcile-hubspot-csv.ts --tenant=office_dallas --contacts ./contacts.csv --companies ./companies.csv --deals ./deals.csv
 ```
 
+Close dates are normalized deterministically for cutover comparison. Date-only ISO strings stay date-only, ISO datetimes with `Z` or a numeric offset are converted to UTC dates, and ISO datetimes without an offset are treated as UTC by assumption.
+
 ## Surgically applying a single migration
 
 When a feature branch adds a migration but other unrelated migrations on the working tree are not ready to apply (e.g., orphaned migrations from a sibling branch), do **not** run `npm run db:migrate` — it walks the entire `migrations/` directory and would sweep up unwanted siblings. Instead, write a one-off `apply-XXXX-surgical.ts` modeled on `apply-0062-surgical.ts`: it reads the single SQL file, runs it inside a `BEGIN`/`COMMIT`, and inserts the filename into `public._migrations` so the regular runner skips it on the next deploy. Then verify with a `verify-XXXX.ts` that checks `information_schema.tables`, `pg_constraint`, and `pg_indexes` against each tenant schema (currently `office_atlanta`, `office_dallas`, `office_pwauditoffice`). After both run clean, delete the one-off scripts in the same PR or keep them under `scripts/` as a record of what was applied — team preference.
