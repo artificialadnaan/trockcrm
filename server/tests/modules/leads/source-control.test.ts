@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   LEAD_SOURCE_CATEGORIES,
   normalizeLeadSourceInput,
+  resolveLeadSourceDisplayValue,
   validateLeadSourceInput,
 } from "../../../src/modules/leads/source-control.js";
 
@@ -34,5 +35,25 @@ describe("lead source controls", () => {
     expect(() =>
       validateLeadSourceInput({ sourceCategory: "Other", sourceDetail: "legacy value" })
     ).not.toThrow();
+  });
+
+  it("uses structured source category for converted deal source values", () => {
+    expect(
+      resolveLeadSourceDisplayValue({
+        source: null,
+        sourceCategory: "Data Mine",
+        sourceDetail: null,
+      })
+    ).toBe("Data Mine");
+  });
+
+  it("uses Other source detail before stale legacy source text", () => {
+    expect(
+      resolveLeadSourceDisplayValue({
+        source: "legacy referral",
+        sourceCategory: "Other",
+        sourceDetail: "HOA board referral",
+      })
+    ).toBe("HOA board referral");
   });
 });

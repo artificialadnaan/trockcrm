@@ -285,6 +285,43 @@ describe("LeadDetailPage", () => {
     expect(html).not.toContain("lead-1");
   });
 
+  it("uses the questionnaire estimated value in the prominent KPI", () => {
+    mocks.useLeadDetailMock.mockReturnValue({
+      lead: makeLead({
+        forecastRevenue: null,
+        qualificationBudgetAmount: null,
+        qualificationPayload: { estimated_value: 2200 },
+      }),
+      loading: false,
+      error: null,
+      refetch: vi.fn(),
+    });
+
+    const html = renderLeadDetail();
+    const estimatedValueKpi = html.slice(html.indexOf("Estimated value"), html.indexOf("Days in stage"));
+
+    expect(estimatedValueKpi).toContain("$2,200");
+    expect(estimatedValueKpi).not.toContain("Unknown");
+  });
+
+  it("renders the primary contact link with the resolved contact name", () => {
+    mocks.useLeadDetailMock.mockReturnValue({
+      lead: makeLead({
+        primaryContactId: "contact-1",
+        primaryContactName: "Morgan Carter",
+      }),
+      loading: false,
+      error: null,
+      refetch: vi.fn(),
+    });
+
+    const html = renderLeadDetail();
+
+    expect(html).toContain('href="/contacts/contact-1"');
+    expect(html).toContain("Morgan Carter");
+    expect(html).not.toContain("Primary contact linked");
+  });
+
   it("tab change updates active tab", () => {
     mounted = mountLeadDetail();
 

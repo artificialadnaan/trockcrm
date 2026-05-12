@@ -27,4 +27,14 @@ describe("DealForm select labels", () => {
 
     expect(source).toContain('if (!deal.sourceLeadId) { payload.migrationMode = true; }');
   });
+
+  it("sends direct creation context and uses the lead source dropdown options", () => {
+    const source = normalize(dealFormSource);
+
+    expect(source).toContain('payload.creationContext = "direct";');
+    expect(source).toContain('formData.source === "Other"');
+    expect(source).toContain("sourceDetail");
+    expect(source).toContain("LEAD_SOURCE_CATEGORIES.map");
+    expect(source).not.toContain("Bid Board, Referral, Cold Call");
+  });
 });

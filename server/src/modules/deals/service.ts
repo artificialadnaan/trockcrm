@@ -33,6 +33,8 @@ import { createAssignmentTaskIfNeeded } from "../assignment-tasks/service.js";
 import { generateDealNumberForProject } from "../../services/projectNumber.js";
 import { isContractSignedHandoffEnabled } from "../../config/feature-flags.js";
 import { resolveActiveOfficeUserIds, resolveTeamRepIds } from "../shared/team-scope.js";
+import { resolveLeadSourceDisplayValue } from "../leads/source-control.js";
+import { resolveDealCreationPolicy, type DealCreationOrigin } from "./direct-create-rules.js";
 
 // Type alias for the tenant-scoped Drizzle instance
 type TenantDb = NodePgDatabase<typeof schema>;
@@ -84,6 +86,7 @@ export interface CreateDealInput {
   propertyId?: string;
   sourceLeadId?: string;
   sourceLeadWriteMode?: "direct" | "lead_conversion";
+  creationContext?: DealCreationOrigin;
   workflowRoute?: WorkflowRoute;
   migrationMode?: boolean;
   primaryContactId?: string;
@@ -743,7 +746,7 @@ async function resolveSourceLeadLineage(
       propertyId: input.propertyId ?? null,
       primaryContactId: input.primaryContactId ?? null,
       sourceLeadId: null,
-      source: input.source ?? null,
+      source: input.source?.trim() || null,
     };
   }
 
@@ -772,7 +775,7 @@ async function resolveSourceLeadLineage(
     propertyId: sourceLead.propertyId,
     primaryContactId: input.primaryContactId ?? sourceLead.primaryContactId ?? null,
     sourceLeadId: sourceLead.id,
-    source: input.source ?? sourceLead.source ?? null,
+    source: input.source?.trim() || (resolveLeadSourceDisplayValue(sourceLead) ?? null),
   };
 }
 
@@ -967,11 +970,14 @@ export async function getDealDetail(tenantDb: TenantDb, dealId: string, userRole
       ...getTableColumns(deals),
       assignedRepName: users.displayName,
       companyName: companies.name,
+      primaryContactName: sql<string | null>`NULLIF(TRIM(CONCAT_WS(' ', ${contacts.firstName}, ${contacts.lastName})), '')`,
+      primaryContactTitle: contacts.jobTitle,
       projectType: sql<string | null>`COALESCE(${projectTypeConfig.name}, ${deals.projectType})`,
     })
     .from(deals)
     .leftJoin(users, eq(users.id, deals.assignedRepId))
     .leftJoin(companies, eq(companies.id, deals.companyId))
+    .leftJoin(contacts, eq(contacts.id, deals.primaryContactId))
     .leftJoin(projectTypeConfig, eq(projectTypeConfig.id, deals.projectTypeId))
     .where(eq(deals.id, dealId))
     .limit(1);
@@ -1022,24 +1028,17 @@ export async function createDeal(tenantDb: TenantDb, input: CreateDealInput) {
     throw new AppError(400, "Cannot create a deal in a terminal stage");
   }
 
-  if (!input.migrationMode && !input.sourceLeadId) {
-    throw new AppError(400, "sourceLeadId is required unless migrationMode is true");
-  }
-
-  if (
-    input.sourceLeadId &&
-    !input.migrationMode &&
-    input.sourceLeadWriteMode !== "lead_conversion"
-  ) {
-    throw new AppError(400, "Use the lead conversion endpoint to create deals from leads");
+  const creationPolicy = resolveDealCreationPolicy(input);
+  if (!creationPolicy.allowed) {
+    throw new AppError(400, creationPolicy.reason ?? "Deal creation is not allowed");
   }
 
   const lineage = await resolveSourceLeadLineage(tenantDb, input);
 
-  if (!input.migrationMode && (!lineage.companyId || !lineage.propertyId || !lineage.sourceLeadId)) {
+  if (!input.migrationMode && (!lineage.companyId || !lineage.propertyId)) {
     throw new AppError(
       400,
-      "Deals require source lead lineage, company, and property unless migrationMode is true"
+      "Deals require company and property unless migrationMode is true"
     );
   }
 
@@ -1091,6 +1090,19 @@ export async function createDeal(tenantDb: TenantDb, input: CreateDealInput) {
     .returning();
 
   const newDeal = result[0];
+
+  await writeAuditLog(tenantDb, {
+    tableName: "deals",
+    recordId: newDeal.id,
+    action: "insert",
+    changedBy: input.actorUserId ?? null,
+    fullRow: {
+      id: newDeal.id,
+      dealNumber: newDeal.dealNumber,
+      creationOrigin: creationPolicy.origin,
+      sourceLeadId: newDeal.sourceLeadId,
+    },
+  });
 
   // Queue geocode as background job (the tenantDb connection will be released after commit)
   const { propertyAddress, propertyCity, propertyState, propertyZip, officeId } = input;

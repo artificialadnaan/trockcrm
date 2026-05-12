@@ -14,6 +14,7 @@ import {
 import { usePipelineStages, useProjectTypes, useRegions } from "@/hooks/use-pipeline-config";
 import { createDeal, updateDeal } from "@/hooks/use-deals";
 import type { Deal } from "@/hooks/use-deals";
+import { LEAD_SOURCE_CATEGORIES } from "@trock-crm/shared/types";
 import { Loader2, Lock } from "lucide-react";
 import { getDefaultDealStageId, getNewDealStages, getSelectedOptionLabel } from "./deal-form.helpers";
 import { CompanySelector } from "@/components/companies/company-selector";
@@ -50,6 +51,8 @@ export function DealForm({ deal, onSuccess, initialValues }: DealFormProps) {
     ...parent.children.map((child) => ({ id: child.id, name: child.name })),
   ]);
   const assigneeOptions = assignees.map((assignee) => ({ id: assignee.id, name: assignee.displayName }));
+  const initialSource = deal?.source ?? initialValues?.source ?? "";
+  const initialSourceIsCategory = LEAD_SOURCE_CATEGORIES.includes(initialSource as (typeof LEAD_SOURCE_CATEGORIES)[number]);
 
   const [formData, setFormData] = useState({
     name: deal?.name ?? initialValues?.name ?? "",
@@ -67,7 +70,8 @@ export function DealForm({ deal, onSuccess, initialValues }: DealFormProps) {
     propertyZip: deal?.propertyZip ?? "",
     projectTypeId: deal?.projectTypeId ?? initialValues?.projectTypeId ?? "",
     regionId: deal?.regionId ?? "",
-    source: deal?.source ?? initialValues?.source ?? "",
+    source: initialSourceIsCategory || !initialSource ? initialSource : "Other",
+    sourceDetail: initialSourceIsCategory ? "" : initialSource,
     winProbability: deal?.winProbability?.toString() ?? "",
     expectedCloseDate: deal?.expectedCloseDate ?? "",
   });
@@ -89,6 +93,9 @@ export function DealForm({ deal, onSuccess, initialValues }: DealFormProps) {
       const next = { ...prev, [field]: value };
       if (field === "companyId") {
         next.propertyId = "";
+      }
+      if (field === "source" && value !== "Other") {
+        next.sourceDetail = "";
       }
       return next;
     });
@@ -123,6 +130,9 @@ export function DealForm({ deal, onSuccess, initialValues }: DealFormProps) {
 
     if (formData.description.length > 5000) {
       errs.description = "Must be 5000 characters or fewer";
+    }
+    if (formData.source === "Other" && !formData.sourceDetail.trim()) {
+      errs.sourceDetail = "Source detail is required when Source is Other";
     }
 
     setFieldErrors(errs);
@@ -180,7 +190,10 @@ export function DealForm({ deal, onSuccess, initialValues }: DealFormProps) {
         propertyZip: formData.propertyZip.trim() || null,
         projectTypeId: formData.projectTypeId || null,
         regionId: formData.regionId || null,
-        source: formData.source.trim() || null,
+        source:
+          formData.source === "Other"
+            ? formData.sourceDetail.trim() || null
+            : formData.source.trim() || null,
         winProbability: formData.winProbability ? parseInt(formData.winProbability, 10) : null,
         expectedCloseDate: formData.expectedCloseDate || null,
       };
@@ -201,6 +214,7 @@ export function DealForm({ deal, onSuccess, initialValues }: DealFormProps) {
       } else {
         payload.stageId = formData.stageId;
         payload.assignedRepId = formData.assignedRepId;
+        payload.creationContext = "direct";
         const resp = await createDeal(payload as Partial<Deal> & { name: string; stageId: string });
         result = resp.deal;
       }
@@ -332,12 +346,35 @@ export function DealForm({ deal, onSuccess, initialValues }: DealFormProps) {
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
             <div className="space-y-2">
               <Label htmlFor="source">Source</Label>
-              <Input
-                id="source"
-                placeholder="e.g., Bid Board, Referral, Cold Call"
-                value={formData.source}
-                onChange={(e) => handleChange("source", e.target.value)}
-              />
+              <Select
+                value={formData.source || "none"}
+                onValueChange={(value) => handleChange("source", value === "none" ? "" : value ?? "")}
+              >
+                <SelectTrigger id="source">
+                  <SelectValue placeholder="Select source">
+                    {formData.source || "Select source"}
+                  </SelectValue>
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="none">Select source</SelectItem>
+                  {LEAD_SOURCE_CATEGORIES.map((sourceCategory) => (
+                    <SelectItem key={sourceCategory} value={sourceCategory}>
+                      {sourceCategory}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+              {formData.source === "Other" ? (
+                <div className="mt-2 space-y-2">
+                  <Label htmlFor="sourceDetail">Source detail</Label>
+                  <Input
+                    id="sourceDetail"
+                    value={formData.sourceDetail}
+                    onChange={(e) => handleChange("sourceDetail", e.target.value)}
+                  />
+                  {fieldErrors.sourceDetail && <p className="text-xs text-red-600">{fieldErrors.sourceDetail}</p>}
+                </div>
+              ) : null}
             </div>
             <div className="space-y-2">
               <Label htmlFor="winProbability">Win Probability (%)</Label>

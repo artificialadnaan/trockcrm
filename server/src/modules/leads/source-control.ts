@@ -69,3 +69,14 @@ export function resolveLeadSourceForWrite(input: LeadSourceInput & { source?: st
 
   return normalizeLeadSourceInput(input.source);
 }
+
+export function resolveLeadSourceDisplayValue(
+  input: LeadSourceInput & { source?: string | null }
+) {
+  const source = input.source?.trim() || null;
+  const sourceCategory = input.sourceCategory?.trim() || null;
+  const sourceDetail = input.sourceDetail?.trim() || null;
+
+  if (sourceCategory === "Other") return sourceDetail;
+  return sourceCategory ?? source;
+}

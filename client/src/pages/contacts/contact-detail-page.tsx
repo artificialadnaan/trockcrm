@@ -64,7 +64,7 @@ function ContactRightRail({ contact }: { contact: Contact }) {
         <DetailRailSection title="Company">
           {contact.companyId ? (
             <Link className="font-semibold text-slate-950 underline-offset-4 hover:underline" to={`/companies/${contact.companyId}`}>
-              {contact.companyName ?? "Linked company"}
+              {contact.companyName ?? "Unknown company"}
             </Link>
           ) : (
             <p className="font-semibold text-slate-900">{contact.companyName ?? "Unassigned"}</p>

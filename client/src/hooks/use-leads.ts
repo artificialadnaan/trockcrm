@@ -102,6 +102,8 @@ export interface LeadRecord {
   primaryContactId: string | null;
   primaryContactRole: LeadPocRole | null;
   primaryContactRoleOtherLabel: string | null;
+  primaryContactName?: string | null;
+  primaryContactTitle?: string | null;
   name: string;
   stageId: string;
   assignedRepId: string;

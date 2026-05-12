@@ -161,6 +161,22 @@ describe("ContactDetailPage", () => {
     act(() => root?.unmount());
   });
 
+  it("does not use placeholder copy for linked companies with unresolved names", () => {
+    mocks.useContactDetailMock.mockReturnValue({
+      contact: { ...makeContact(), companyName: null },
+      loading: false,
+      error: null,
+      refetch: vi.fn(),
+    });
+
+    renderPage();
+
+    expect(container.querySelector('a[href="/companies/company-1"]')?.textContent).toContain("Unknown company");
+    expect(container.textContent).not.toContain("Linked company");
+
+    act(() => root?.unmount());
+  });
+
   it("keeps the edit button wired to the contact edit route", () => {
     renderPage();
 
