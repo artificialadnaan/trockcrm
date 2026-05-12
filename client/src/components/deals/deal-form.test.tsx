@@ -37,4 +37,14 @@ describe("DealForm select labels", () => {
     expect(source).toContain("LEAD_SOURCE_CATEGORIES.map");
     expect(source).not.toContain("Bid Board, Referral, Cold Call");
   });
+
+  it("injects active-office officeCode and selected projectType on direct create", () => {
+    const source = normalize(dealFormSource);
+
+    expect(source).toContain("useAccessibleOffices");
+    expect(source).toContain("resolveOfficeCodeFromOffice");
+    expect(source).toContain('setError("Cannot create deal: no active office. Contact admin.");');
+    expect(source).toContain("payload.officeCode = activeOfficeCode;");
+    expect(source).toContain("payload.projectType = selectedProjectType.name;");
+  });
 });

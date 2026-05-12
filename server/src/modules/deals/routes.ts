@@ -130,6 +130,7 @@ import { resolveSyncHubRfpRequestUrl } from "./rfp-payload.js";
 import { insertOpportunityRfpRequestJob } from "./rfp-enqueue.js";
 import { isOpportunityRfpEventEnabled } from "../../config/feature-flags.js";
 import { getAllStages } from "../pipeline/service.js";
+import { resolveDealCreateOfficeCode } from "./create-context.js";
 
 const router = Router();
 
@@ -916,6 +917,14 @@ router.post("/", async (req, res, next) => {
       repId = assignedRepId || req.user!.id;
     }
 
+    const officeCodeResolution = resolveDealCreateOfficeCode({
+      requestedOfficeCode: rest.officeCode,
+      officeSlug: req.officeSlug,
+    });
+    if ("error" in officeCodeResolution) {
+      throw new AppError(400, officeCodeResolution.error);
+    }
+
     const deal = await createDeal(req.tenantDb!, {
       name,
       stageId,
@@ -924,6 +933,7 @@ router.post("/", async (req, res, next) => {
       officeId: req.user!.activeOfficeId,
       creationContext: "direct",
       ...rest,
+      officeCode: officeCodeResolution.officeCode,
     });
     await req.commitTransaction!();
     const includeHubspotId = shouldIncludeHubspotId(req.query, req.user!.role);
