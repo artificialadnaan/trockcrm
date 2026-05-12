@@ -77,11 +77,19 @@ export const apiSpec = {
           lastActivityAt: { type: "string", format: "date-time", nullable: true },
           stageEnteredAt: { type: "string", format: "date-time" },
           isActive: { type: "boolean", default: true },
-          hubspotDealId: { type: "string", nullable: true },
+          hubspotDealId: {
+            type: "string",
+            nullable: true,
+            description: "Stripped from the default response. Only returned when an admin opts in with ?includeHubspotId=true."
+          },
+          isHubspotSourced: {
+            type: "boolean",
+            description: "Server-derived flag (hubspot_id IS NOT NULL) so clients can gate behavior without ever seeing the raw HubSpot ID."
+          },
           createdAt: { type: "string", format: "date-time" },
           updatedAt: { type: "string", format: "date-time" },
         },
-        required: ["id", "dealNumber", "name", "stageId", "assignedRepId", "isActive", "createdAt", "updatedAt"],
+        required: ["id", "dealNumber", "name", "stageId", "assignedRepId", "isActive", "isHubspotSourced", "createdAt", "updatedAt"],
       },
 
       DealApproval: {

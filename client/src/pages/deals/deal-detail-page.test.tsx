@@ -244,7 +244,7 @@ function mountPage(path = "/deals/deal-1") {
 }
 
 function makeDealDetail(overrides: Record<string, unknown> = {}) {
-  return {
+  const base = {
     id: "deal-1",
     dealNumber: "TR-2026-0001",
     name: "Palm Villas",
@@ -285,7 +285,8 @@ function makeDealDetail(overrides: Record<string, unknown> = {}) {
     lastActivityAt: null,
     stageEnteredAt: "2026-04-21T10:00:00.000Z",
     isActive: true,
-    hubspotDealId: null,
+    hubspotDealId: null as string | null,
+    isHubspotSourced: false,
     bidBoardProjectNumber: "DFW-3-12826-aa",
     createdAt: "2026-04-20T10:00:00.000Z",
     updatedAt: "2026-04-21T10:00:00.000Z",
@@ -316,8 +317,15 @@ function makeDealDetail(overrides: Record<string, unknown> = {}) {
     stageHistory: [],
     approvals: [],
     changeOrders: [],
-    ...overrides,
   };
+  const merged: Record<string, unknown> = { ...base, ...overrides };
+  // Auto-derive isHubspotSourced from hubspotDealId when a test specifies
+  // only one. Tests can pass isHubspotSourced explicitly to model the
+  // server-redacted wire response where hubspotDealId is absent.
+  if ("hubspotDealId" in overrides && !("isHubspotSourced" in overrides)) {
+    merged.isHubspotSourced = overrides.hubspotDealId != null;
+  }
+  return merged;
 }
 
 describe("DealDetailPage", () => {
@@ -765,6 +773,29 @@ describe("DealDetailPage", () => {
 
     const html = renderPage();
 
+    expect(html).not.toContain("Bid Board summary");
+  });
+
+  // Codex caught on round 1 of PR #258 that the original gate
+  // (`!deal.hubspotDealId`) inverts once the API redacts the raw ID:
+  // a HubSpot-sourced deal arrives with hubspotDealId stripped, so the
+  // gate evaluates true and the Bid Board panel renders for a deal that
+  // should never see it. The fix gates on `!deal.isHubspotSourced`, a
+  // server-derived flag that survives redaction. This test models the
+  // exact post-redaction wire payload.
+  it("hides Bid Board summary panel when isHubspotSourced=true and hubspotDealId has been stripped by the API", () => {
+    mocks.useDealDetailMock.mockReturnValueOnce({
+      loading: false,
+      error: null,
+      refetch: vi.fn(),
+      deal: makeDealDetail({
+        isBidBoardOwned: true,
+        isHubspotSourced: true,
+        // hubspotDealId intentionally omitted — server stripped it
+      }),
+    });
+
+    const html = renderPage();
     expect(html).not.toContain("Bid Board summary");
   });
 

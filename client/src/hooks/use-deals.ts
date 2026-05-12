@@ -177,7 +177,12 @@ export interface Deal {
   stageName?: string | null;
   stageSlug?: string | null;
   isActive: boolean;
-  hubspotDealId: string | null;
+  // The raw HubSpot ID is stripped from the default API response (only admins
+  // see it via ?includeHubspotId=true). Client gates and display logic should
+  // branch on `isHubspotSourced` instead, which is derived server-side from
+  // `hubspot_id IS NOT NULL` and always present on the wire.
+  hubspotDealId?: string | null;
+  isHubspotSourced: boolean;
   createdAt: string;
   updatedAt: string;
 }
