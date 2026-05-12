@@ -2,6 +2,7 @@ import { sql } from "drizzle-orm";
 import type { NodePgDatabase } from "drizzle-orm/node-postgres";
 import type * as schema from "@trock-crm/shared/schema";
 import type { UserRole } from "@trock-crm/shared/types";
+import { buildOfficeMatcher } from "./office-filter.js";
 
 type TenantDb = NodePgDatabase<typeof schema>;
 type ExecuteRows = { rows: unknown[] } | unknown[];
@@ -50,6 +51,9 @@ function sqlStringList(values: readonly string[]) {
 function titleCase(value: string | null | undefined) {
   return (value || "Other").replace(/_/g, " ").replace(/\b\w/g, (char) => char.toUpperCase());
 }
+
+type DealScopeAlias = "d";
+type UserScopeAlias = "u";
 
 export interface PerformanceReportFilters {
   dateFrom: string;
@@ -101,31 +105,42 @@ async function withReportCache<T>(key: string, load: () => Promise<T>): Promise<
   return value;
 }
 
-function dealScopeFull(filters: PerformanceReportFilters, alias = "d", options: { requireActive?: boolean; includeArchivedWinsMarker?: boolean } = {}) {
+function dealScopeFull(filters: PerformanceReportFilters, alias: DealScopeAlias = "d", options: { requireActive?: boolean; includeArchivedWinsMarker?: boolean } = {}) {
   const clauses = [];
   if (options.includeArchivedWinsMarker) clauses.push(sql.raw("/* include_archived_wins */ true"));
   if (options.requireActive !== false) clauses.push(sql.raw(`${alias}.is_active = true`));
   clauses.push(sql.raw(`COALESCE(${alias}.is_test_data, false) = false`));
-  if (filters.office) clauses.push(sql`o.slug = ${filters.office}`);
+  const officeClause = buildOfficeMatcher(filters.office, {
+    officeId: sql`o.id`,
+    officeSlug: sql`o.slug`,
+    officeName: sql`o.name`,
+    dealOfficeCode: sql.raw(`${alias}.office_code`),
+  });
+  if (officeClause) clauses.push(officeClause);
   if (filters.ownerIds.length > 0) clauses.push(sql`u.id IN (${sqlStringList(filters.ownerIds)})`);
   return sql.join(clauses, sql` AND `);
 }
 
-function buildDealScopeSql(filters: PerformanceReportFilters, alias = "d") {
+function buildDealScopeSql(filters: PerformanceReportFilters, alias: DealScopeAlias = "d") {
   return dealScopeFull(filters, alias);
 }
 
-function buildClosedDealScopeSql(filters: PerformanceReportFilters, alias = "d") {
+function buildClosedDealScopeSql(filters: PerformanceReportFilters, alias: DealScopeAlias = "d") {
   return dealScopeFull(filters, alias, { requireActive: false });
 }
 
-function buildArchivedWonDealScopeSql(filters: PerformanceReportFilters, alias = "d") {
+function buildArchivedWonDealScopeSql(filters: PerformanceReportFilters, alias: DealScopeAlias = "d") {
   return dealScopeFull(filters, alias, { requireActive: false, includeArchivedWinsMarker: true });
 }
 
-function buildResponsibleUserScopeSql(filters: PerformanceReportFilters, alias = "u") {
+function buildResponsibleUserScopeSql(filters: PerformanceReportFilters, alias: UserScopeAlias = "u") {
   const clauses = [sql`COALESCE(${sql.raw(alias)}.is_active, true) = true`];
-  if (filters.office) clauses.push(sql`o.slug = ${filters.office}`);
+  const officeClause = buildOfficeMatcher(filters.office, {
+    officeId: sql`o.id`,
+    officeSlug: sql`o.slug`,
+    officeName: sql`o.name`,
+  });
+  if (officeClause) clauses.push(officeClause);
   if (filters.ownerIds.length > 0) clauses.push(sql`${sql.raw(alias)}.id IN (${sqlStringList(filters.ownerIds)})`);
   return sql.join(clauses, sql` AND `);
 }
@@ -135,15 +150,20 @@ function buildActivityScopeSql(filters: PerformanceReportFilters, ownerIds = fil
     sql`a.occurred_at >= ${filters.dateFrom}::date`,
     sql`a.occurred_at < (${filters.dateTo}::date + INTERVAL '1 day')`,
   ];
-  if (filters.office) clauses.push(sql`o.slug = ${filters.office}`);
+  const officeClause = buildOfficeMatcher(filters.office, {
+    officeId: sql`o.id`,
+    officeSlug: sql`o.slug`,
+    officeName: sql`o.name`,
+  });
+  if (officeClause) clauses.push(officeClause);
   if (ownerIds.length > 0) clauses.push(sql`u.id IN (${sqlStringList(ownerIds)})`);
   return sql.join(clauses, sql` AND `);
 }
 
 function buildWonDateSql(filters: PerformanceReportFilters) {
   return sql`
-    COALESCE(d.contract_signed_at, d.actual_close_date::timestamptz, d.updated_at) >= ${filters.dateFrom}::date
-    AND COALESCE(d.contract_signed_at, d.actual_close_date::timestamptz, d.updated_at) < (${filters.dateTo}::date + INTERVAL '1 day')
+    COALESCE(d.contract_signed_at, (d.actual_close_date AT TIME ZONE 'UTC'), d.updated_at) >= ${filters.dateFrom}::date
+    AND COALESCE(d.contract_signed_at, (d.actual_close_date AT TIME ZONE 'UTC'), d.updated_at) < (${filters.dateTo}::date + INTERVAL '1 day')
   `;
 }
 

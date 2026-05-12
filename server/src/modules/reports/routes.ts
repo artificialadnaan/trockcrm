@@ -61,6 +61,7 @@ import {
   getWorkflowBottlenecksReport,
   normalizeOperationsReportFilters,
 } from "./operations-tier3-service.js";
+import { pickQueryValue } from "./office-filter.js";
 
 const router = Router();
 const VALID_REPORT_FREQUENCIES = ["daily", "weekly", "biweekly", "monthly", "quarterly"] as const;
@@ -136,9 +137,9 @@ export function parseTier4Filters(query: Record<string, unknown>, user: { role: 
     }
   }
   return {
-    from: readOptionalIsoDate(query.dateFrom ?? query.from, "dateFrom"),
-    to: readOptionalIsoDate(query.dateTo ?? query.to, "dateTo"),
-    office: readQueryString(query.office) ?? readQueryString(query.officeId),
+    from: readOptionalIsoDate(pickQueryValue(query.dateFrom, query.from), "dateFrom"),
+    to: readOptionalIsoDate(pickQueryValue(query.dateTo, query.to), "dateTo"),
+    office: pickQueryValue(query.office, query.officeId),
     ownerIds,
     ownerNames: parseOwnerIds(query.ownerNames),
   };

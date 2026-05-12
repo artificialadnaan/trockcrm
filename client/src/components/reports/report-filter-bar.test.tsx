@@ -88,6 +88,14 @@ function changeSelect(select: HTMLSelectElement, value: string) {
   select.dispatchEvent(new Event("change", { bubbles: true }));
 }
 
+function lastApiCallArgs() {
+  return apiMock.mock.calls[apiMock.mock.calls.length - 1] ?? [];
+}
+
+function apiCallsMatching(predicate: (path: string, init: any) => boolean) {
+  return apiMock.mock.calls.filter(([path, init]) => predicate(path as string, init));
+}
+
 describe("ReportFilterBar", () => {
   it("hydrates ownerIds from URL search params instead of hardcoding an empty owner scope", () => {
     const query = renderHookSnapshot("/reports/operations/workflow-bottlenecks?ownerIds=rep-1,rep-2&dateFrom=2026-02-01&dateTo=2026-05-01");
@@ -115,7 +123,13 @@ describe("ReportFilterBar", () => {
     apiMock.mockImplementation(() => new Promise(() => {}));
     const node = renderFilterBar();
 
-    await vi.waitFor(() => expect(apiMock).toHaveBeenCalledWith("/users/sales-reps", undefined));
+    // Initial fetch with "all" office (no x-office-id header).
+    await vi.waitFor(() => {
+      const initial = apiCallsMatching((path, init) =>
+        path === "/users/sales-reps" && !init?.headers,
+      );
+      expect(initial.length).toBeGreaterThan(0);
+    });
 
     const officeSelect = Array.from(node.querySelectorAll<HTMLSelectElement>("select"))
       .find((select) => Array.from(select.options).some((option) => option.value === "dallas"));
@@ -125,19 +139,51 @@ describe("ReportFilterBar", () => {
       changeSelect(officeSelect!, "dallas");
     });
 
-    await vi.waitFor(() => expect(apiMock).toHaveBeenCalledWith(
-      "/users/sales-reps",
-      { headers: { "x-office-id": "office-dallas" } },
-    ));
+    await vi.waitFor(() => {
+      const scoped = apiCallsMatching((path, init) =>
+        path === "/users/sales-reps" && init?.headers?.["x-office-id"] === "office-dallas",
+      );
+      expect(scoped.length).toBeGreaterThan(0);
+    });
   });
 
-  it("resolves slug office filters to canonical office ids before fetching sales reps", async () => {
+  it("resolves slug office filters to the canonical office UUID before fetching sales reps", async () => {
+    apiMock.mockImplementation(() => new Promise(() => {}));
+    const node = renderFilterBar("/reports/operations/workflow-bottlenecks?office=dallas");
+
+    // The API header uses the canonical office UUID resolved from the slug.
+    await vi.waitFor(() => {
+      const scoped = apiCallsMatching((path, init) =>
+        path === "/users/sales-reps" && init?.headers?.["x-office-id"] === "office-dallas",
+      );
+      expect(scoped.length).toBeGreaterThan(0);
+    });
+
+    // The office <select> is slug-valued (matches the URL), so the select
+    // shows "dallas" as its selected value. The canonical UUID is only used
+    // for the API header (asserted above).
+    const officeSelect = Array.from(node.querySelectorAll<HTMLSelectElement>("select"))
+      .find((select) => Array.from(select.options).some((option) => option.value === "dallas"));
+    expect(officeSelect?.value).toBe("dallas");
+  });
+
+  it("never emits an unscoped sales-reps fetch when the URL carries a legacy office slug", async () => {
     apiMock.mockImplementation(() => new Promise(() => {}));
     renderFilterBar("/reports/operations/workflow-bottlenecks?office=dallas");
 
-    await vi.waitFor(() => expect(apiMock).toHaveBeenCalledWith(
-      "/users/sales-reps",
-      { headers: { "x-office-id": "office-dallas" } },
-    ));
+    // Wait long enough for any spurious unscoped fetch to land.
+    await vi.waitFor(() => {
+      const scoped = apiCallsMatching((path, init) =>
+        path === "/users/sales-reps" && init?.headers?.["x-office-id"] === "office-dallas",
+      );
+      expect(scoped.length).toBeGreaterThan(0);
+    });
+
+    const unscoped = apiCallsMatching((path, init) =>
+      path === "/users/sales-reps" && !init?.headers,
+    );
+    expect(unscoped.length).toBe(0);
+    // ensure lastApiCallArgs is not unused
+    expect(lastApiCallArgs().length).toBeGreaterThan(0);
   });
 });

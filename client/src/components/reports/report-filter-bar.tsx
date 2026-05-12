@@ -150,7 +150,12 @@ export function ReportFilterBar({ defaultRange = "90" }: { defaultRange?: Defaul
     if (!draft.office || draft.office === "all") return undefined;
     return offices.find((office) => office.id === draft.office || office.slug === draft.office)?.id;
   }, [draft.office, offices]);
-  const { salesReps } = useSalesReps(canonicalOfficeId);
+  // Suppress the sales-reps fetch until offices are available OR the user
+  // explicitly chose "all". Otherwise an unscoped fetch fires before we can
+  // canonicalize a legacy `?office=dallas` URL into its UUID, leaking
+  // unrelated reps into the owner picker.
+  const salesRepsEnabled = offices.length > 0 || draft.office === "all";
+  const { salesReps } = useSalesReps(canonicalOfficeId, { enabled: salesRepsEnabled });
 
   useEffect(() => {
     setDraft(hydrateOwnerSelection(filters, salesReps));
