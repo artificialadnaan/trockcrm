@@ -1,6 +1,40 @@
 import { describe, expect, it } from "vitest";
 import { buildHubSpotReconciliationReport, parseCsvText } from "../../../scripts/reconcile-hubspot-csv";
 
+function reconcileCloseDate(hubspotCloseDate: string, crmCloseDate: string) {
+  return buildHubSpotReconciliationReport({
+    hubspot: {
+      contacts: [],
+      companies: [],
+      deals: [
+        {
+          id: "hs-deal-1",
+          name: "Roof Job",
+          stage: "Closed Won",
+          amount: "1000",
+          owner: "owner-1",
+          closeDate: hubspotCloseDate,
+        },
+      ],
+    },
+    crm: {
+      contacts: [],
+      companies: [],
+      deals: [
+        {
+          id: "deal-1",
+          hubspotId: "hs-deal-1",
+          name: "Roof Job",
+          stage: "closed won",
+          amount: "1000.00",
+          owner: "owner-1",
+          closeDate: crmCloseDate,
+        },
+      ],
+    },
+  });
+}
+
 describe("reconcile-hubspot-csv", () => {
   it("parses quoted CSV fields", () => {
     expect(parseCsvText('Record ID,Name\n1001,"Acme, Inc."\n')).toEqual([
@@ -117,4 +151,33 @@ describe("reconcile-hubspot-csv", () => {
       expect.objectContaining({ type: "invalid_date", objectType: "deals", hubspotId: "hs-deal-2", value: "13/99/2026" }),
     ]);
   });
+
+  it.each([
+    ["2026-05-01", "2026-05-01"],
+    ["05/01/2026", "2026-05-01"],
+    ["2026-05-01T23:30:00-05:00", "2026-05-02"],
+    ["2026-05-01T23:30:00Z", "2026-05-01"],
+    ["2026-05-01T23:30:00+09:00", "2026-05-01"],
+    ["2026-05-01T03:30:00+09:00", "2026-04-30"],
+    ["2026-05-01T23:30:00", "2026-05-01"],
+  ])("normalizes close date %s to UTC date %s", (hubspotCloseDate, expectedDate) => {
+    const report = reconcileCloseDate(hubspotCloseDate, expectedDate);
+
+    expect(report.mismatches.deals).toEqual([]);
+    expect(report.warnings).toEqual([]);
+  });
+
+  it.each(["2026-05-01Tnot-a-time", "2026-05-01garbage", "2026-13-45"])(
+    "reports malformed ISO close date %s as invalid",
+    (hubspotCloseDate) => {
+      const report = reconcileCloseDate(hubspotCloseDate, "2026-05-01");
+
+      expect(report.mismatches.deals).toEqual([
+        expect.objectContaining({ hubspotId: "hs-deal-1", field: "closeDate", hubspotValue: hubspotCloseDate }),
+      ]);
+      expect(report.warnings).toEqual([
+        expect.objectContaining({ type: "invalid_date", objectType: "deals", hubspotId: "hs-deal-1", value: hubspotCloseDate }),
+      ]);
+    }
+  );
 });

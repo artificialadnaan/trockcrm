@@ -156,14 +156,46 @@ function formatIsoDate(year: number, month: number, day: number) {
 function normalizeDateValue(value: string | null | undefined) {
   const text = String(value ?? "").trim();
   if (text === "") return { value: null, invalid: false };
-  const iso = text.match(/^(\d{4})-(\d{2})-(\d{2})(?:[T\s].*)?$/);
-  if (iso) {
-    const year = Number(iso[1]);
-    const month = Number(iso[2]);
-    const day = Number(iso[3]);
+  const isoDate = text.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (isoDate) {
+    const year = Number(isoDate[1]);
+    const month = Number(isoDate[2]);
+    const day = Number(isoDate[3]);
     return isValidUtcDate(year, month, day)
       ? { value: formatIsoDate(year, month, day), invalid: false }
       : { value: text, invalid: true };
+  }
+  const isoDateTime = text.match(/^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.\d+)?(Z|[+-]\d{2}:?\d{2})?$/);
+  if (isoDateTime) {
+    const year = Number(isoDateTime[1]);
+    const month = Number(isoDateTime[2]);
+    const day = Number(isoDateTime[3]);
+    const hour = Number(isoDateTime[4]);
+    const minute = Number(isoDateTime[5]);
+    const second = Number(isoDateTime[6]);
+    const offset = isoDateTime[7];
+    if (!isValidUtcDate(year, month, day) || hour > 23 || minute > 59 || second > 59) {
+      return { value: text, invalid: true };
+    }
+    let offsetMinutes = 0;
+    if (offset && offset !== "Z") {
+      const sign = offset.startsWith("-") ? -1 : 1;
+      const digits = offset.slice(1).replace(":", "");
+      const offsetHour = Number(digits.slice(0, 2));
+      const offsetMinute = Number(digits.slice(2, 4));
+      if (offsetHour > 23 || offsetMinute > 59) return { value: text, invalid: true };
+      offsetMinutes = sign * (offsetHour * 60 + offsetMinute);
+    }
+    // HubSpot may export offset-less ISO datetimes; treat them as UTC for deterministic cutover reports.
+    const utcMs = Date.UTC(year, month - 1, day, hour, minute, second) - offsetMinutes * 60_000;
+    const utcDate = new Date(utcMs);
+    return {
+      value: formatIsoDate(utcDate.getUTCFullYear(), utcDate.getUTCMonth() + 1, utcDate.getUTCDate()),
+      invalid: false,
+    };
+  }
+  if (/^\d{4}-\d{2}-\d{2}/.test(text)) {
+    return { value: text, invalid: true };
   }
   const slash = text.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/);
   if (slash) {
