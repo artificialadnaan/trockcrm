@@ -87,7 +87,6 @@ describe("PhotoAuditPage", () => {
             takenAt: null,
             createdAt: "2026-05-04T18:00:00.000Z",
             uploadedBy: "user-1",
-            uploaderName: "Kaleb Martin",
             uploaderAvatarUrl: null,
             latitude: null,
             longitude: null,
@@ -112,8 +111,11 @@ describe("PhotoAuditPage", () => {
     expect(apiMock).toHaveBeenCalledWith(expect.stringContaining("eventType=uploaded"));
 
     node.querySelector<HTMLButtonElement>('[aria-label="User filter"]')?.click();
-    await vi.waitFor(() => expect(document.body.textContent).toContain("Kaleb Martin"));
-    Array.from(document.body.querySelectorAll<HTMLButtonElement>("button")).find((button) => button.textContent?.includes("Kaleb Martin"))?.click();
+    await vi.waitFor(() => {
+      const userOption = Array.from(document.body.querySelectorAll<HTMLButtonElement>("button")).find((button) => button.textContent?.includes("Kaleb Martin"));
+      expect(userOption).toBeTruthy();
+      userOption?.click();
+    });
     await vi.waitFor(() => expect(apiMock).toHaveBeenCalledWith(expect.stringContaining("userId=user-1")));
 
     node.querySelector<HTMLButtonElement>('[aria-label="Event type filter"]')?.click();
@@ -130,6 +132,7 @@ describe("PhotoAuditPage", () => {
     node.querySelector<HTMLButtonElement>('[aria-label="Open photo Imported deal Photo 2026-05-10 001 dad87234"]')?.click();
     await vi.waitFor(() => expect(apiMock).toHaveBeenCalledWith("/files/photo-1", expect.objectContaining({ signal: expect.any(AbortSignal) })));
     await vi.waitFor(() => expect(document.body.textContent).toContain("Uploaded by"));
+    expect(document.body.textContent).toContain("Unknown user");
   }, 10_000);
 
   it("keeps the modal on the latest clicked photo when earlier requests resolve later", async () => {

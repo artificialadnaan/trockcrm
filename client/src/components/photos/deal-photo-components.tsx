@@ -157,8 +157,8 @@ export function formatPhotoTime(value: string) {
   return new Date(value).toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit" });
 }
 
-export function initials(name: string) {
-  return name.split(/\s+/).filter(Boolean).slice(0, 2).map((part) => part[0]?.toUpperCase()).join("") || "?";
+export function initials(name?: string | null) {
+  return name?.split(/\s+/).filter(Boolean).slice(0, 2).map((part) => part[0]?.toUpperCase()).join("") || "?";
 }
 
 export function displayPhotoCategory(photo: DealPhotoRecord): string | null {
@@ -487,6 +487,7 @@ export function PhotoViewerModal({
   const [captionDraft, setCaptionDraft] = useState("");
   const selectedIndex = selectedId ? photos.findIndex((photo) => photo.id === selectedId) : -1;
   const selectedPhoto = selectedIndex >= 0 ? photos[selectedIndex] : null;
+  const selectedUploaderName = selectedPhoto?.uploaderName ?? "Unknown user";
 
   useEffect(() => {
     if (!selectedPhoto || getPhotoImageUrl(selectedPhoto)) return;
@@ -529,7 +530,7 @@ export function PhotoViewerModal({
               <div className="space-y-4">
                 <DialogHeader>
                   <DialogTitle>{selectedPhoto.description || selectedPhoto.displayName}</DialogTitle>
-                  <DialogDescription>{formatPhotoTime(selectedPhoto.takenAt ?? selectedPhoto.createdAt)} · {selectedPhoto.uploaderName}</DialogDescription>
+                  <DialogDescription>{formatPhotoTime(selectedPhoto.takenAt ?? selectedPhoto.createdAt)} · {selectedUploaderName}</DialogDescription>
                 </DialogHeader>
 
                 <section className="space-y-2">
@@ -568,9 +569,9 @@ export function PhotoViewerModal({
                 <section className="space-y-2 text-sm">
                   <span className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">Uploaded by</span>
                   <div className="flex items-center gap-2">
-                    <Avatar className="h-8 w-8"><AvatarImage src={selectedPhoto.uploaderAvatarUrl ?? undefined} /><AvatarFallback>{initials(selectedPhoto.uploaderName)}</AvatarFallback></Avatar>
+                    <Avatar className="h-8 w-8"><AvatarImage src={selectedPhoto.uploaderAvatarUrl ?? undefined} /><AvatarFallback>{initials(selectedUploaderName)}</AvatarFallback></Avatar>
                     <div>
-                      <p className="font-medium">{selectedPhoto.uploaderName}</p>
+                      <p className="font-medium">{selectedUploaderName}</p>
                       <p className="text-xs text-muted-foreground">{new Date(selectedPhoto.createdAt).toLocaleString()}</p>
                     </div>
                   </div>
