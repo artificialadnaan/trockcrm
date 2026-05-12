@@ -2,8 +2,10 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   buildDealStageWorkspacePath,
   buildPipelineRequestPath,
+  clampDateToToday,
   getTerminalDateFilterLabel,
   readTerminalDateFilter,
+  readTerminalDateFiltersFromSearchParams,
   writeTerminalDateFilter,
 } from "@/lib/pipeline-terminal-filters";
 import {
@@ -227,16 +229,16 @@ describe("pipeline list/export filtering", () => {
 });
 
 describe("terminal pipeline date filters", () => {
-  it("defaults terminal requests to a 30-day window", () => {
+  it("defaults terminal requests to all-time windows", () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-05-01T16:00:00Z"));
 
     expect(
       buildPipelineRequestPath(false, {
-        won: { preset: "30" },
-        lost: { preset: "30" },
+        won: { preset: "all" },
+        lost: { preset: "all" },
       })
-    ).toBe("/deals/pipeline?includeDd=false&won_since=2026-04-01&lost_since=2026-04-01");
+    ).toBe("/deals/pipeline?includeDd=false&won_all_time=true&lost_all_time=true");
   });
 
   it("serializes preset and custom terminal windows", () => {
@@ -264,6 +266,18 @@ describe("terminal pipeline date filters", () => {
         lost: { preset: "all" },
       })
     ).toBe("/deals/pipeline?includeDd=false&won_since=2026-04-24&lost_all_time=true");
+  });
+
+  it("supports 90-day terminal windows", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-05-01T16:00:00Z"));
+
+    expect(
+      buildPipelineRequestPath(false, {
+        won: { preset: "90" },
+        lost: { preset: "90" },
+      })
+    ).toBe("/deals/pipeline?includeDd=false&won_since=2026-01-31&lost_since=2026-01-31");
   });
 
   it("carries terminal date filters into stage drill-down links", () => {
@@ -295,6 +309,51 @@ describe("terminal pipeline date filters", () => {
     ).toBe("/deals/stages/stage-estimating?scope=all");
   });
 
+  it("clamps future custom dates from URL and API serialization", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-05-12T14:00:00Z"));
+
+    expect(clampDateToToday("2999-01-01")).toBe("2026-05-12");
+    expect(
+      readTerminalDateFiltersFromSearchParams(
+        new URLSearchParams("won_since=2999-01-01&lost_since=2026-05-01&lost_until=2999-02-01")
+      )
+    ).toEqual({
+      won: { preset: "custom", customStart: "2026-05-12", customEnd: undefined },
+      lost: { preset: "custom", customStart: "2026-05-01", customEnd: "2026-05-12" },
+    });
+    expect(
+      buildPipelineRequestPath(false, {
+        won: { preset: "custom", customStart: "2999-01-01" },
+        lost: { preset: "custom", customStart: "2026-05-01", customEnd: "2999-02-01" },
+      })
+    ).toBe("/deals/pipeline?includeDd=false&won_since=2026-05-12&lost_since=2026-05-01&lost_until=2026-05-12");
+  });
+
+  it("does not let old localStorage values create hidden page filters", () => {
+    const storage = new Map<string, string>();
+    vi.stubGlobal("window", {
+      localStorage: {
+        getItem: (key: string) => storage.get(key) ?? null,
+        setItem: (key: string, value: string) => storage.set(key, value),
+      },
+    });
+
+    writeTerminalDateFilter("won", { preset: "30" });
+    writeTerminalDateFilter("lost", { preset: "60" });
+
+    expect(readTerminalDateFiltersFromSearchParams(new URLSearchParams())).toEqual({
+      won: { preset: "all" },
+      lost: { preset: "all" },
+    });
+    expect(
+      readTerminalDateFiltersFromSearchParams(new URLSearchParams("won_preset=90&lost_preset=7"))
+    ).toEqual({
+      won: { preset: "90" },
+      lost: { preset: "7" },
+    });
+  });
+
   it("persists terminal filters in localStorage", () => {
     const storage = new Map<string, string>();
     vi.stubGlobal("window", {
@@ -304,7 +363,7 @@ describe("terminal pipeline date filters", () => {
       },
     });
 
-    expect(readTerminalDateFilter("won")).toEqual({ preset: "30" });
+    expect(readTerminalDateFilter("won")).toEqual({ preset: "all" });
     writeTerminalDateFilter("won", { preset: "60" });
     writeTerminalDateFilter("lost", {
       preset: "custom",

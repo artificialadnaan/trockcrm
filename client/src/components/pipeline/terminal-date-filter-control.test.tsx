@@ -49,7 +49,7 @@ describe("TerminalDateFilterControl", () => {
     });
 
     const button = document.body.querySelector<HTMLButtonElement>(
-      'button[aria-label="Show Won deals from the last 60 days"]'
+      'button[aria-label="Show Won deals from the last 90 days"]'
     );
     expect(button?.type).toBe("button");
 
@@ -58,6 +58,34 @@ describe("TerminalDateFilterControl", () => {
     });
 
     expect(onSubmit).not.toHaveBeenCalled();
-    expect(onFilterChange).toHaveBeenCalledWith({ preset: "60" });
+    expect(onFilterChange).toHaveBeenCalledWith({ preset: "90" });
   });
+
+  // Future dates should never be selectable for custom terminal ranges.
+  it("caps custom date inputs at today", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-05-12T14:00:00Z"));
+
+    const onFilterChange = vi.fn();
+    act(() => {
+      root?.render(
+        <TerminalDateFilterControl
+          stageName="Lost"
+          filter={{ preset: "custom", customStart: "2026-05-01" }}
+          onFilterChange={onFilterChange}
+        />
+      );
+    });
+
+    act(() => {
+      container.querySelector<HTMLButtonElement>('button[aria-label="Lost date filter"]')?.click();
+    });
+
+    const inputs = Array.from(document.body.querySelectorAll<HTMLInputElement>('input[type="date"]'));
+    expect(inputs).toHaveLength(2);
+    expect(inputs.every((input) => input.max === "2026-05-12")).toBe(true);
+
+    vi.useRealTimers();
+  });
+
 });

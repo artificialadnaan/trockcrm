@@ -1,8 +1,6 @@
 // @vitest-environment jsdom
 
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { act } from "react";
-import { createRoot, type Root } from "react-dom/client";
 import { renderToStaticMarkup } from "react-dom/server";
 import { MemoryRouter } from "react-router-dom";
 import type { ReactNode } from "react";
@@ -239,8 +237,8 @@ describe("DealListPage", () => {
     const html = renderPage();
 
     expect(mocks.useDealBoardMock).toHaveBeenCalledWith("all", true, {
-      won: { preset: "custom", customStart: "2026-01-01" },
-      lost: { preset: "custom", customStart: "2026-01-01" },
+      won: { preset: "all" },
+      lost: { preset: "all" },
     });
     expect(html).toContain("Read-only pipeline board");
     expect(html).toContain('placeholder="Search deals"');
@@ -297,7 +295,7 @@ describe("DealListPage", () => {
     const html = renderPage();
 
     expect(html).toContain("DFW-1-12826-aa");
-    expect(html).toContain("HS-321687989951");
+    expect(html).toContain("Pending");
     expect(html).toContain("BJ");
     expect(html).toContain("TR");
     expect(html).toContain("Acme Construction");
@@ -333,7 +331,7 @@ describe("DealListPage", () => {
     expect(html).toContain("No deals");
   });
 
-  it("reads terminal date filters at interaction time when opening terminal stages", () => {
+  it("defaults exported terminal stage navigation to all time", () => {
     const column = {
       stage: { id: "stage-won", name: "Won", slug: "won" },
       count: 0,
@@ -347,106 +345,49 @@ describe("DealListPage", () => {
 
     buildDealStageNavigationPath(column, "all");
 
+    expect(mocks.readTerminalDateFilterMock).not.toHaveBeenCalled();
     expect(mocks.buildDealStageWorkspacePathMock).toHaveBeenLastCalledWith({
       stageId: "stage-won",
       stageSlug: "won",
       scope: "all",
       filters: {
-        won: { preset: "30" },
-        lost: { preset: "60" },
-      },
-    });
-
-    mocks.readTerminalDateFilterMock.mockImplementation((outcome: string) => ({
-      preset: outcome === "won" ? "7" : "30",
-    }));
-
-    buildDealStageNavigationPath(column, "all");
-
-    expect(mocks.buildDealStageWorkspacePathMock).toHaveBeenLastCalledWith({
-      stageId: "stage-won",
-      stageSlug: "won",
-      scope: "all",
-      filters: {
-        won: { preset: "7" },
-        lost: { preset: "30" },
+        won: { preset: "all" },
+        lost: { preset: "all" },
       },
     });
   });
 
-  it("requests year-to-date terminal totals for the Won YTD metric", () => {
-    renderPage();
+  it("uses explicit terminal date filters when opening terminal stages", () => {
+    const column = {
+      stage: { id: "stage-won", name: "Won", slug: "won" },
+      count: 0,
+      totalValue: 0,
+      cards: [],
+    };
+
+    const filters = {
+      won: { preset: "30" as const },
+      lost: { preset: "60" as const },
+    };
+
+    buildDealStageNavigationPath(column, "all", filters);
+
+    expect(mocks.readTerminalDateFilterMock).not.toHaveBeenCalled();
+    expect(mocks.buildDealStageWorkspacePathMock).toHaveBeenLastCalledWith({
+      stageId: "stage-won",
+      stageSlug: "won",
+      scope: "all",
+      filters,
+    });
+  });
+
+  it("requests the selected terminal date filters for the deals board", () => {
+    renderPage("/deals?scope=all&won_preset=30&lost_preset=60");
 
     expect(mocks.useDealBoardMock).toHaveBeenCalledWith("all", true, {
-      won: { preset: "custom", customStart: "2026-01-01" },
-      lost: { preset: "custom", customStart: "2026-01-01" },
+      won: { preset: "30" },
+      lost: { preset: "60" },
     });
-  });
-
-  it("recomputes YTD filters when calendar year changes", () => {
-    (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
-    vi.useFakeTimers();
-    vi.setSystemTime(new Date("2026-12-31T18:00:00.000Z"));
-    mocks.useDealBoardMock.mockClear();
-    mocks.useAuthMock.mockReturnValue({
-      user: {
-        id: "user-1",
-        email: "admin@example.test",
-        displayName: "Test User",
-        role: "admin",
-        officeId: "office-1",
-        activeOfficeId: "office-1",
-      },
-      loading: false,
-    });
-    mocks.usePipelineStagesMock.mockReturnValue({
-      stages: [
-        { id: "stage-opportunity", name: "Opportunity", slug: "opportunity", displayOrder: 1 },
-      ],
-    });
-    mocks.useDealBoardMock.mockReturnValue({
-      board: {
-        columns: [],
-        terminalStages: [],
-      },
-      loading: false,
-      error: null,
-      refetch: vi.fn(),
-    });
-
-    const container = document.createElement("div");
-    document.body.appendChild(container);
-    let root: Root | null = null;
-
-    try {
-      act(() => {
-        root = createRoot(container);
-        root.render(
-          <MemoryRouter initialEntries={["/deals?scope=all"]}>
-            <DealListPage />
-          </MemoryRouter>
-        );
-      });
-
-      expect(mocks.useDealBoardMock).toHaveBeenLastCalledWith("all", true, {
-        won: { preset: "custom", customStart: "2026-01-01" },
-        lost: { preset: "custom", customStart: "2026-01-01" },
-      });
-
-      vi.setSystemTime(new Date("2027-01-02T18:00:00.000Z"));
-      act(() => {
-        window.dispatchEvent(new Event("focus"));
-      });
-
-      expect(mocks.useDealBoardMock).toHaveBeenLastCalledWith("all", true, {
-        won: { preset: "custom", customStart: "2027-01-01" },
-        lost: { preset: "custom", customStart: "2027-01-01" },
-      });
-    } finally {
-      act(() => root?.unmount());
-      container.remove();
-      vi.useRealTimers();
-    }
   });
 
   it("does not fire board fetch before auth resolves", () => {
@@ -472,7 +413,7 @@ describe("DealListPage", () => {
     expect(mocks.useDealBoardMock).toHaveBeenCalledWith("team", true, expect.any(Object));
   });
 
-  it("uses the board's YTD terminal filters when building terminal stage navigation", () => {
+  it("uses the board terminal filters when building terminal stage navigation", () => {
     const column = {
       stage: { id: "stage-won", name: "Won", slug: "won" },
       count: 0,
@@ -550,12 +491,27 @@ describe("DealListPage", () => {
     expect(html).toContain('aria-pressed="false">All');
   });
 
-  it("does not add preview-only board map or date filter controls to /deals", () => {
-    const html = renderPage();
+  it("adds terminal date filter controls to Won and Lost on /deals", () => {
+    const html = renderPage("/deals?scope=all&won_preset=30&lost_preset=60");
 
     expect(html).not.toContain("Coverage map");
     expect(html).not.toContain("DFW map");
-    expect(html).not.toContain("Won date filter");
-    expect(html).not.toContain("Lost date filter");
+    expect(html).toContain("Won<span class=\"ml-1 text-slate-400\">· Last 30d");
+    expect(html).toContain("Lost<span class=\"ml-1 text-slate-400\">· Last 60d");
+    expect(html).toContain("Last 30d");
+    expect(html).toContain("Last 60d");
+  });
+
+  it("shows a selected-range empty state for empty terminal columns", () => {
+    mocks.useDealBoardMock.mockReturnValue({
+      board: { columns: [], terminalStages: [] },
+      loading: false,
+      error: null,
+      refetch: vi.fn(),
+    });
+
+    const html = renderPage("/deals?scope=all&won_preset=30&lost_preset=60");
+
+    expect(html).toContain("No deals in selected range");
   });
 });
