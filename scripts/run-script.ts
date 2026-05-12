@@ -5,6 +5,7 @@ import { runBackfill as runProjectTypeBackfill } from "./backfill-project-types.
 import { runNormalizeProjectNumberCase } from "./normalize-project-number-case.js";
 import { runBackfillProjectsActiveFlag } from "./backfill-projects-active-flag.js";
 import { runReassignHubspotImportStages } from "./reassign-hubspot-import-stages.js";
+import { runReseedSmokeCleanup } from "./reseed-smoke-cleanup.js";
 
 export async function runScript(argv = process.argv.slice(2)): Promise<void> {
   const [scriptName, ...rest] = argv;
@@ -34,12 +35,17 @@ export async function runScript(argv = process.argv.slice(2)): Promise<void> {
     return;
   }
 
+  if (scriptName === "reseed-smoke-cleanup") {
+    await runReseedSmokeCleanup(rest);
+    return;
+  }
+
   if (!scriptName || scriptName.startsWith("--")) {
     await runProjectNumberBackfill(argv);
     return;
   }
 
-  throw new Error(`Unknown script '${scriptName}'. Expected backfill-project-types, backfill-project-numbers, normalize-project-number-case, backfill-projects-active-flag, or reassign-hubspot-import-stages.`);
+  throw new Error(`Unknown script '${scriptName}'. Expected backfill-project-types, backfill-project-numbers, normalize-project-number-case, backfill-projects-active-flag, reassign-hubspot-import-stages, or reseed-smoke-cleanup.`);
 }
 
 const executedPath = process.argv[1] ? pathToFileURL(path.resolve(process.argv[1])).href : "";

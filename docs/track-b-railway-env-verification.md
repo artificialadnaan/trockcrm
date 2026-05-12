@@ -8,15 +8,15 @@ Scope: Railway production environment variables only
 ## Intended Final State
 
 - `NODE_ENV=production`
-- `DEV_MODE=true`
-- `ALLOW_DEV_AUTH_IN_PROD=true`
+- `DEV_MODE=true` only during a time-boxed production dev-auth smoke window; otherwise `false`
+- Production dev-auth smoke now requires both `ALLOW_DEV_AUTH_IN_PROD=true` and `I_UNDERSTAND_DEV_AUTH_IN_PROD=yes`; otherwise `DEV_MODE=true` fails startup and dev-auth routes stay closed.
 - `CORS_ALLOWED_ORIGINS` includes the production frontend URL
 
 ## Code Discovery
 
 - `server/src/modules/auth/http-config.ts` defines `CORS_ALLOWED_ORIGINS` as the comma-separated origin allowlist input used by `getAllowedCorsOrigins`.
 - `server/src/modules/auth/http-config.ts` also accepts `FRONTEND_URL`, `RAILWAY_PUBLIC_DOMAIN`, `RAILWAY_STATIC_URL`, and `RAILWAY_SERVICE_FRONTEND_URL` as additional origin sources.
-- `server/src/modules/auth/http-config.ts` defines `ALLOW_DEV_AUTH_IN_PROD` as the explicit production override for `DEV_MODE=true`.
+- `server/src/modules/auth/http-config.ts` defines `ALLOW_DEV_AUTH_IN_PROD` plus `I_UNDERSTAND_DEV_AUTH_IN_PROD=yes` as the explicit production override for `DEV_MODE=true`.
 
 ## Command Log
 
@@ -96,4 +96,3 @@ Not verified because `railway whoami` failed with `Unauthorized`.
 - `DEV_MODE`: not read
 - `ALLOW_DEV_AUTH_IN_PROD`: not read
 - `CORS_ALLOWED_ORIGINS`: not read
-

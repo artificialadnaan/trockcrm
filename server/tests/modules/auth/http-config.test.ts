@@ -5,6 +5,7 @@ import {
   FIELD_CSRF_HEADER_VALUE,
   getAllowedCorsOrigins,
   getCsrfCookieOptions,
+  getDevAuthProductionWarning,
   getLogoutCookieClears,
   getRequestOrigin,
   getTokenCookieOptions,
@@ -14,6 +15,7 @@ import {
   isValidFieldCsrfHeader,
   isValidCsrfPair,
   isDevAuthEnabled,
+  isDevAuthProductionOverrideEnabled,
 } from "../../../src/modules/auth/http-config.js";
 
 describe("auth http config", () => {
@@ -138,12 +140,24 @@ describe("auth http config", () => {
     ).toThrow("DEV_MODE=true is not allowed");
   });
 
-  it("allows startup when production dev auth has the explicit pre-cutover override", () => {
+  it("keeps startup closed when production dev auth lacks the explicit acknowledgement", () => {
     expect(() =>
       assertSafeDevAuthConfig({
         NODE_ENV: "production",
         DEV_MODE: "true",
         ALLOW_DEV_AUTH_IN_PROD: "true",
+        FIELD_APP_URL: "https://trockcrm-field-production.up.railway.app",
+      })
+    ).toThrow("I_UNDERSTAND_DEV_AUTH_IN_PROD=yes");
+  });
+
+  it("allows startup when production dev auth has both explicit overrides", () => {
+    expect(() =>
+      assertSafeDevAuthConfig({
+        NODE_ENV: "production",
+        DEV_MODE: "true",
+        ALLOW_DEV_AUTH_IN_PROD: "true",
+        I_UNDERSTAND_DEV_AUTH_IN_PROD: "yes",
         FIELD_APP_URL: "https://trockcrm-field-production.up.railway.app",
       })
     ).not.toThrow();
@@ -159,7 +173,7 @@ describe("auth http config", () => {
     ).toThrow("DEV_MODE=true is not allowed");
   });
 
-  it("enables dev auth endpoints in production only when the pre-cutover override is present", () => {
+  it("does not enable dev auth endpoints in production when acknowledgement is absent", () => {
     expect(
       isDevAuthEnabled(
         {
@@ -169,7 +183,46 @@ describe("auth http config", () => {
         },
         "crm.trockconstruction.com"
       )
+    ).toBe(false);
+    expect(
+      isDevAuthProductionOverrideEnabled({
+        NODE_ENV: "production",
+        DEV_MODE: "true",
+        ALLOW_DEV_AUTH_IN_PROD: "true",
+      })
+    ).toBe(false);
+  });
+
+  it("enables dev auth endpoints in production only when both production overrides are present", () => {
+    expect(
+      isDevAuthEnabled(
+        {
+          NODE_ENV: "production",
+          DEV_MODE: "true",
+          ALLOW_DEV_AUTH_IN_PROD: "true",
+          I_UNDERSTAND_DEV_AUTH_IN_PROD: "yes",
+        },
+        "crm.trockconstruction.com"
+      )
     ).toBe(true);
+  });
+
+  it("returns a loud warning when production dev auth is explicitly enabled", () => {
+    expect(
+      getDevAuthProductionWarning({
+        NODE_ENV: "production",
+        DEV_MODE: "true",
+        ALLOW_DEV_AUTH_IN_PROD: "true",
+        I_UNDERSTAND_DEV_AUTH_IN_PROD: "yes",
+      })
+    ).toContain("[AUTH][PRODUCTION DEV AUTH ENABLED]");
+    expect(
+      getDevAuthProductionWarning({
+        NODE_ENV: "production",
+        DEV_MODE: "true",
+        ALLOW_DEV_AUTH_IN_PROD: "true",
+      })
+    ).toBeNull();
   });
 
   it("allows only exact configured origins for cookie-authenticated unsafe requests", () => {

@@ -15,7 +15,8 @@ Smoke executed against `https://trockcrm.com` after the user provided local-pass
 ## Credential Findings
 
 - Dev auth remains unusable for this smoke path: `/api/auth/dev/users` returned `{"users":[]}` and `admin@trock.dev` returned `404 User not found`.
-- Local auth succeeded for `test-admin@trock.test`, `test-director@trock.test`, and `test-sales@trock.test` with the supplied password.
+- Local auth succeeded for `test-admin@trock.test`, `test-director@trock.test`, and `test-sales@trock.test`.
+  See `docs/smoke-credentials.md` for the current test-only credential matrix; admin intentionally uses a different password than rep/director.
 
 ## Smoke Coverage
 
