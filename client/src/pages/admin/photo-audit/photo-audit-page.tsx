@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useMemo, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Link, useSearchParams } from "react-router-dom";
 import {
   AlertCircle,
@@ -64,9 +64,15 @@ const PROCORE_SYNC_STATUS_OPTIONS = [
 const auditPreviewUrlCache = new Map<string, string>();
 const auditPreviewUrlRequests = new Map<string, Promise<string>>();
 
-async function fetchAuditPreviewUrl(photoId: string): Promise<string> {
+async function fetchAuditPreviewUrl(photoId: string, signal?: AbortSignal): Promise<string> {
   const cached = auditPreviewUrlCache.get(photoId);
   if (cached) return cached;
+
+  if (signal) {
+    const data = await api<{ url: string }>(`/files/${photoId}/download?preview=1`, { signal });
+    auditPreviewUrlCache.set(photoId, data.url);
+    return data.url;
+  }
 
   const pending = auditPreviewUrlRequests.get(photoId);
   if (pending) return pending;
@@ -229,7 +235,9 @@ export function PhotoAuditPage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [selectedPhoto, setSelectedPhoto] = useState<DealPhotoRecord | null>(null);
-  const [selectedPhotoUrl, setSelectedPhotoUrl] = useState<string | null>(null);
+  const [selectedPhotoUrl, setSelectedPhotoUrl] = useState<{ photoId: string; url: string } | null>(null);
+  const selectedPhotoIdRef = useRef<string | null>(null);
+  const openPhotoRequestRef = useRef<{ id: number; controller: AbortController } | null>(null);
 
   const selectedUsers = useMemo(() => parseList(searchParams, "userId"), [searchParams]);
   const selectedEventTypes = useMemo(() => parseList(searchParams, "eventType"), [searchParams]);
@@ -278,27 +286,60 @@ export function PhotoAuditPage() {
     void fetchEvents();
   }, [fetchEvents]);
 
+  useEffect(() => {
+    selectedPhotoIdRef.current = selectedPhoto?.id ?? null;
+  }, [selectedPhoto?.id]);
+
+  useEffect(() => {
+    return () => {
+      openPhotoRequestRef.current?.controller.abort();
+    };
+  }, []);
+
   async function openPhoto(photoId: string) {
-    const data = await api<{ file: DealPhotoRecord }>(`/files/${photoId}`);
-    setSelectedPhoto(data.file);
-    const cachedUrl = auditPreviewUrlCache.get(photoId) ?? null;
-    const immediateUrl = getImmediatePhotoPreviewUrl(data.file, cachedUrl);
-    setSelectedPhotoUrl(immediateUrl);
-    if (shouldFetchSignedPhotoUrl(data.file, immediateUrl)) {
-      setSelectedPhotoUrl(await fetchAuditPreviewUrl(photoId));
+    openPhotoRequestRef.current?.controller.abort();
+    const controller = new AbortController();
+    const requestId = (openPhotoRequestRef.current?.id ?? 0) + 1;
+    openPhotoRequestRef.current = { id: requestId, controller };
+    const isCurrentRequest = () =>
+      openPhotoRequestRef.current?.id === requestId && !controller.signal.aborted;
+
+    try {
+      const data = await api<{ file: DealPhotoRecord }>(`/files/${photoId}`, { signal: controller.signal });
+      if (!isCurrentRequest()) return;
+      setSelectedPhoto(data.file);
+      const cachedUrl = auditPreviewUrlCache.get(photoId) ?? null;
+      const immediateUrl = getImmediatePhotoPreviewUrl(data.file, cachedUrl);
+      setSelectedPhotoUrl(immediateUrl ? { photoId, url: immediateUrl } : null);
+      if (shouldFetchSignedPhotoUrl(data.file, immediateUrl)) {
+        const signedUrl = await fetchAuditPreviewUrl(photoId, controller.signal);
+        if (!isCurrentRequest()) return;
+        setSelectedPhotoUrl({ photoId, url: signedUrl });
+      }
+    } catch (err) {
+      if (controller.signal.aborted) return;
+      throw err;
     }
   }
 
   async function patchSelectedPhoto(photoId: string, body: Record<string, unknown>) {
     const data = await api<{ file: DealPhotoRecord }>(`/files/${photoId}`, { method: "PATCH", json: body });
     setSelectedPhoto(data.file);
-    setSelectedPhotoUrl((current) => getImmediatePhotoPreviewUrl(data.file, current));
+    setSelectedPhotoUrl((current) => {
+      const currentUrl = current?.photoId === data.file.id ? current.url : null;
+      const nextUrl = getImmediatePhotoPreviewUrl(data.file, currentUrl);
+      return nextUrl ? { photoId: data.file.id, url: nextUrl } : null;
+    });
   }
 
   async function saveSelectedAddress(photoId: string, body: { address: string; latitude?: number; longitude?: number }) {
     const data = await api<{ file: DealPhotoRecord }>(`/files/${photoId}/address`, { method: "PATCH", json: body });
     setSelectedPhoto(data.file);
-    setSelectedPhotoUrl((current) => getImmediatePhotoPreviewUrl(data.file, current));
+    setSelectedPhotoUrl((current) => {
+      const currentUrl = current?.photoId === data.file.id ? current.url : null;
+      const nextUrl = getImmediatePhotoPreviewUrl(data.file, currentUrl);
+      return nextUrl ? { photoId: data.file.id, url: nextUrl } : null;
+    });
   }
 
   async function deleteSelectedPhoto(photoId: string) {
@@ -462,11 +503,15 @@ export function PhotoAuditPage() {
             setSelectedPhotoUrl(null);
           }
         }}
-        getPhotoImageUrl={(photo) => getImmediatePhotoPreviewUrl(photo, selectedPhotoUrl) ?? ""}
+        getPhotoImageUrl={(photo) => getImmediatePhotoPreviewUrl(photo, selectedPhotoUrl?.photoId === photo.id ? selectedPhotoUrl.url : null) ?? ""}
         ensurePhotoImageUrl={async (photo) => {
-          if (selectedPhotoUrl) return selectedPhotoUrl;
+          if (selectedPhotoUrl?.photoId === photo.id) return selectedPhotoUrl.url;
           const url = await fetchAuditPreviewUrl(photo.id);
-          setSelectedPhotoUrl(url);
+          setSelectedPhotoUrl((current) => {
+            if (current?.photoId === photo.id) return current;
+            if (selectedPhotoIdRef.current !== photo.id) return current;
+            return { photoId: photo.id, url };
+          });
           return url;
         }}
         patchPhoto={patchSelectedPhoto}

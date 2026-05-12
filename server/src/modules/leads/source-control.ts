@@ -77,6 +77,6 @@ export function resolveLeadSourceDisplayValue(
   const sourceCategory = input.sourceCategory?.trim() || null;
   const sourceDetail = input.sourceDetail?.trim() || null;
 
-  if (sourceCategory === "Other") return sourceDetail;
+  if (sourceCategory === "Other") return sourceDetail ?? source;
   return sourceCategory ?? source;
 }

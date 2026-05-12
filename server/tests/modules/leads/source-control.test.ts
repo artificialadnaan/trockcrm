@@ -56,4 +56,14 @@ describe("lead source controls", () => {
       })
     ).toBe("HOA board referral");
   });
+
+  it("falls back to the legacy source when Other source detail is blank", () => {
+    expect(
+      resolveLeadSourceDisplayValue({
+        source: " cold-call ",
+        sourceCategory: "Other",
+        sourceDetail: null,
+      })
+    ).toBe("cold-call");
+  });
 });

@@ -135,6 +135,63 @@ export interface UpdateDealInput {
   estimatingSubstage?: string | null;
 }
 
+type DealLineageRequirementInput = Pick<CreateDealInput, "migrationMode" | "creationContext">;
+type DealLineageRequirement = {
+  companyId?: string | null;
+  propertyId?: string | null;
+};
+type DealUpdateLineageInput = Pick<UpdateDealInput, "sourceLeadId" | "companyId" | "propertyId">;
+type DealUpdateLineageExisting = Pick<DealRow, "sourceLeadId" | "companyId" | "propertyId">;
+
+export function isMigrationDealCreation(input: DealLineageRequirementInput) {
+  return input.migrationMode === true || input.creationContext === "migration";
+}
+
+export function assertDealCreateLineageRequirements(
+  input: DealLineageRequirementInput,
+  lineage: DealLineageRequirement
+) {
+  if (!isMigrationDealCreation(input) && (!lineage.companyId || !lineage.propertyId)) {
+    throw new AppError(
+      400,
+      "Deals require company and property unless migrationMode is true"
+    );
+  }
+}
+
+export function assertDealUpdateLineagePolicy(
+  existing: DealUpdateLineageExisting,
+  input: DealUpdateLineageInput
+) {
+  if (input.sourceLeadId === null) {
+    throw new AppError(400, "sourceLeadId cannot be cleared once set");
+  }
+
+  if (input.companyId === null || input.propertyId === null) {
+    throw new AppError(400, "companyId and propertyId cannot be cleared once set");
+  }
+
+  if (input.sourceLeadId !== undefined && input.sourceLeadId !== existing.sourceLeadId) {
+    throw new AppError(400, "sourceLeadId is immutable once established");
+  }
+
+  if (
+    existing.companyId &&
+    input.companyId !== undefined &&
+    input.companyId !== existing.companyId
+  ) {
+    throw new AppError(400, "companyId is immutable once established");
+  }
+
+  if (
+    existing.propertyId &&
+    input.propertyId !== undefined &&
+    input.propertyId !== existing.propertyId
+  ) {
+    throw new AppError(400, "propertyId is immutable once established");
+  }
+}
+
 export const VALID_PROPOSAL_STATUSES = [
   "not_started",
   "drafting",
@@ -1034,13 +1091,7 @@ export async function createDeal(tenantDb: TenantDb, input: CreateDealInput) {
   }
 
   const lineage = await resolveSourceLeadLineage(tenantDb, input);
-
-  if (!input.migrationMode && (!lineage.companyId || !lineage.propertyId)) {
-    throw new AppError(
-      400,
-      "Deals require company and property unless migrationMode is true"
-    );
-  }
+  assertDealCreateLineageRequirements(input, lineage);
 
   // Validate the assigned rep exists, is active, and has office access
   await validateAssignee(tenantDb, input.assignedRepId, input.officeId);
@@ -1158,44 +1209,7 @@ export async function updateDeal(
     await validateAssignee(tenantDb, input.assignedRepId, officeId);
   }
 
-  if (input.sourceLeadId === null) {
-    throw new AppError(400, "sourceLeadId cannot be cleared once set");
-  }
-
-  if (input.companyId === null || input.propertyId === null) {
-    throw new AppError(400, "companyId and propertyId cannot be cleared once set");
-  }
-
-  if (!existing.sourceLeadId && input.migrationMode !== true) {
-    throw new AppError(
-      400,
-      "Legacy deals require migrationMode=true until source lead lineage is backfilled"
-    );
-  }
-
-  if (
-    existing.sourceLeadId &&
-    input.sourceLeadId !== undefined &&
-    input.sourceLeadId !== existing.sourceLeadId
-  ) {
-    throw new AppError(400, "sourceLeadId is immutable once established");
-  }
-
-  if (
-    existing.companyId &&
-    input.companyId !== undefined &&
-    input.companyId !== existing.companyId
-  ) {
-    throw new AppError(400, "companyId is immutable once established");
-  }
-
-  if (
-    existing.propertyId &&
-    input.propertyId !== undefined &&
-    input.propertyId !== existing.propertyId
-  ) {
-    throw new AppError(400, "propertyId is immutable once established");
-  }
+  assertDealUpdateLineagePolicy(existing, input);
 
   // Build update object — only include fields that are provided
   const updates: Record<string, any> = {};
@@ -1275,7 +1289,7 @@ export async function updateDeal(
       assignedRepId,
       officeId,
       officeCode: existing.officeCode ?? "dfw",
-      sourceLeadId: input.sourceLeadId,
+      sourceLeadId: input.sourceLeadId as string,
       companyId: input.companyId ?? existing.companyId ?? undefined,
       propertyId: input.propertyId ?? existing.propertyId ?? undefined,
       primaryContactId:

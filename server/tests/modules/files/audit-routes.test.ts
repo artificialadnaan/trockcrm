@@ -17,6 +17,11 @@ const serviceMocks = vi.hoisted(() => ({
   getDealFolderTree: vi.fn(),
   getDealPhotoTimeline: vi.fn(),
   searchPhotoUploadTargets: vi.fn(),
+  shouldServeExternalFileUrl: vi.fn(() => false),
+  shouldLogFileDownloadEvent: vi.fn(() => true),
+  resolveFileDownloadAuditPurpose: vi.fn((query: { preview?: unknown }) =>
+    query.preview === "1" || query.preview === "true" ? "preview" : "download"
+  ),
 }));
 
 const accessMocks = vi.hoisted(() => ({
@@ -187,7 +192,10 @@ describe("photo audit route wiring", () => {
     await invoke("patch", "/:id", { body: { deletedAt: null } });
 
     expect(auditMocks.logPhotoEvent).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ eventType: "address_changed" }));
-    expect(auditMocks.logPhotoEvent).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ eventType: "downloaded" }));
+    expect(auditMocks.logPhotoEvent).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({
+      eventType: "downloaded",
+      metadata: { purpose: "download" },
+    }));
     expect(auditMocks.logPhotoEvent).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ eventType: "deleted" }));
     expect(auditMocks.writeSoftDeleteAuditLog).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({
       actorUserId: "user-1",
@@ -197,6 +205,16 @@ describe("photo audit route wiring", () => {
     expect(auditMocks.logPhotoEvent).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({
       eventType: "restored",
       metadata: expect.objectContaining({ previouslyDeletedAt: expect.any(Date) }),
+    }));
+  });
+
+  it("logs preview download URL access instead of letting preview bypass audit", async () => {
+    await invoke("get", "/:id/download", { query: { preview: "1" } });
+
+    expect(serviceMocks.shouldLogFileDownloadEvent).toHaveBeenCalledWith({ preview: "1" });
+    expect(auditMocks.logPhotoEvent).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({
+      eventType: "downloaded",
+      metadata: { purpose: "preview" },
     }));
   });
 

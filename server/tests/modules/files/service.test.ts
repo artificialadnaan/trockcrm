@@ -30,6 +30,11 @@ const {
   CATEGORY_TO_FOLDER,
   DEAL_FOLDER_TEMPLATE,
 } = await import("../../../src/modules/files/file-constants.js");
+const {
+  resolveFileDownloadAuditPurpose,
+  shouldLogFileDownloadEvent,
+  shouldServeExternalFileUrl,
+} = await import("../../../src/modules/files/service.js");
 
 describe("File Service", () => {
   beforeEach(() => {
@@ -289,6 +294,38 @@ describe("File Service", () => {
           !!(input as any).changeOrderId;
         expect(hasAssociation).toBe(true);
       }
+    });
+  });
+
+  describe("Download audit policy", () => {
+    it("serves R2-backed imported photos from R2 even when an external URL is retained", () => {
+      expect(
+        shouldServeExternalFileUrl({
+          r2Key: "office_dallas/deals/DFW/photos/companycam_123.jpg",
+          externalUrl: "https://img.companycam.com/photo.jpg",
+        })
+      ).toBe(false);
+    });
+
+    it("serves external URLs only when no R2 key exists", () => {
+      expect(
+        shouldServeExternalFileUrl({
+          r2Key: null,
+          externalUrl: "https://example.test/photo.jpg",
+        })
+      ).toBe(true);
+    });
+
+    it("logs preview and full download URL generation as auditable file access", () => {
+      expect(shouldLogFileDownloadEvent({ preview: "1" })).toBe(true);
+      expect(shouldLogFileDownloadEvent({ preview: "true" })).toBe(true);
+      expect(shouldLogFileDownloadEvent({})).toBe(true);
+    });
+
+    it("keeps preview intent as audit metadata instead of suppressing the event", () => {
+      expect(resolveFileDownloadAuditPurpose({ preview: "1" })).toBe("preview");
+      expect(resolveFileDownloadAuditPurpose({ preview: "true" })).toBe("preview");
+      expect(resolveFileDownloadAuditPurpose({})).toBe("download");
     });
   });
 });

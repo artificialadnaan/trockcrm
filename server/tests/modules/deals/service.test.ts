@@ -57,6 +57,9 @@ const {
   resolveIntendedProjectNumberFromParts,
   updateDeal,
   resolvePipelineTerminalDateFilters,
+  assertDealCreateLineageRequirements,
+  assertDealUpdateLineagePolicy,
+  isMigrationDealCreation,
 } = await import("../../../src/modules/deals/service.js");
 
 describe("Deal Service", () => {
@@ -302,6 +305,60 @@ describe("Deal Service", () => {
     it("should be an instance of Error", () => {
       const err = new AppError(500, "Server error");
       expect(err).toBeInstanceOf(Error);
+    });
+  });
+
+  describe("Deal lineage policy", () => {
+    it("honors creationContext migration in the company/property guard", () => {
+      expect(isMigrationDealCreation({ creationContext: "migration" })).toBe(true);
+      expect(() =>
+        assertDealCreateLineageRequirements(
+          { creationContext: "migration" },
+          { companyId: null, propertyId: null }
+        )
+      ).not.toThrow();
+    });
+
+    it("continues requiring company/property for non-migration direct creation", () => {
+      expect(() =>
+        assertDealCreateLineageRequirements(
+          { creationContext: "direct" },
+          { companyId: "company-1", propertyId: null }
+        )
+      ).toThrow(/Deals require company and property/);
+    });
+
+    it("allows edits on direct-created deals that have no sourceLeadId", () => {
+      expect(() =>
+        assertDealUpdateLineagePolicy(
+          { sourceLeadId: null, companyId: "company-1", propertyId: "property-1" },
+          {}
+        )
+      ).not.toThrow();
+    });
+
+    it("keeps existing lineage identifiers immutable while allowing null-source deals", () => {
+      expect(() =>
+        assertDealUpdateLineagePolicy(
+          { sourceLeadId: "lead-1", companyId: "company-1", propertyId: "property-1" },
+          { sourceLeadId: "lead-2" }
+        )
+      ).toThrow(/sourceLeadId is immutable/);
+      expect(() =>
+        assertDealUpdateLineagePolicy(
+          { sourceLeadId: null, companyId: "company-1", propertyId: "property-1" },
+          { companyId: "company-2" }
+        )
+      ).toThrow(/companyId is immutable/);
+    });
+
+    it("does not allow generic PATCH to attach a source lead to a direct-created deal", () => {
+      expect(() =>
+        assertDealUpdateLineagePolicy(
+          { sourceLeadId: null, companyId: "company-1", propertyId: "property-1" },
+          { sourceLeadId: "lead-1" }
+        )
+      ).toThrow(/sourceLeadId is immutable/);
     });
   });
 
