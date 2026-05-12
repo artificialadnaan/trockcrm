@@ -1,6 +1,7 @@
 import { Link } from "react-router-dom";
 import type { InterventionManagerBrief as InterventionManagerBriefData } from "@/hooks/use-ai-ops";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
+import { sanitizeVisibleUuidText } from "@/lib/display-identifiers";
 
 function BriefItem({
   text,
@@ -11,12 +12,13 @@ function BriefItem({
   queueLink: string | null;
   searchParams: URLSearchParams;
 }) {
+  const safeText = sanitizeVisibleUuidText(text, "Unknown assignee");
   const href = appendDisconnectContextToHref(queueLink, searchParams);
-  if (!href) return <span>{text}</span>;
+  if (!href) return <span>{safeText}</span>;
 
   return (
     <Link to={href} className="font-medium text-gray-900 underline decoration-border underline-offset-4 hover:text-brand-red">
-      {text}
+      {safeText}
     </Link>
   );
 }
@@ -62,7 +64,7 @@ export function InterventionManagerBrief({
 
         <div className="rounded-xl border border-border/80 bg-muted/20 px-4 py-4">
           <div className="text-[11px] uppercase tracking-widest text-muted-foreground">Headline</div>
-          <p className="mt-2 text-base font-semibold text-gray-900">{brief.headline}</p>
+          <p className="mt-2 text-base font-semibold text-gray-900">{sanitizeVisibleUuidText(brief.headline, "Unknown assignee")}</p>
         </div>
 
         {!isFallback && (
@@ -99,12 +101,14 @@ export function InterventionManagerBrief({
                 const body = (
                   <>
                     <div className="flex items-center justify-between gap-3">
-                      <h3 className="font-semibold text-gray-900">{item.title}</h3>
+                      <h3 className="font-semibold text-gray-900">{sanitizeVisibleUuidText(item.title, "Unknown assignee")}</h3>
                       <span className="rounded-full border border-border bg-white px-2 py-1 text-[10px] font-semibold uppercase tracking-widest text-gray-700">
                         {item.confidence}
                       </span>
                     </div>
-                    <p className="mt-2 text-sm leading-6 text-muted-foreground">{item.summary}</p>
+                    <p className="mt-2 text-sm leading-6 text-muted-foreground">
+                      {sanitizeVisibleUuidText(item.summary, "Unknown assignee")}
+                    </p>
                   </>
                 );
 

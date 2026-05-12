@@ -221,6 +221,21 @@ describe("TaskListPage project context", () => {
     expect(source).toContain("getTaskStatusLabel(task.status)");
   });
 
+  it("does not expose HS-prefixed identifiers embedded in generated task titles", () => {
+    mocks.useTasksMock.mockImplementation((filters: { section?: string }) => ({
+      tasks: filters.section === "overdue" ? [{ ...makeTask(), title: "Follow up: HS-323641734879 closes 2026-05-08" }] : [],
+      loading: false,
+      error: null,
+      refetch: vi.fn(),
+    }));
+
+    renderPage();
+
+    expect(container.textContent).toContain("Follow up: Project pending closes 2026-05-08");
+    expect(container.textContent).not.toContain("HS-323641734879");
+    expect(container.querySelector<HTMLButtonElement>('button[aria-label="Complete Follow up: Project pending closes 2026-05-08"]')).not.toBeNull();
+  });
+
   it("keeps child action keydown events from opening the row edit dialog", () => {
     renderPage();
 

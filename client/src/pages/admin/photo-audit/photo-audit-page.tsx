@@ -37,7 +37,7 @@ import {
 import type { PhotoAuditEvent, PhotoAuditEventType } from "@/components/photos/photo-history-timeline";
 import { api } from "@/lib/api";
 import { displayNameOrFallback } from "@/lib/display-identifiers";
-import { formatDealDisplayNumber } from "@/lib/deal-utils";
+import { formatDealDisplayNumber, sanitizeHubspotDealIdentifiers } from "@/lib/deal-utils";
 
 const PHOTO_AUDIT_EVENTS: Array<{ value: PhotoAuditEventType; label: string; icon: React.ComponentType<{ className?: string }> }> = [
   { value: "uploaded", label: "Uploaded", icon: Upload },
@@ -343,12 +343,12 @@ export function PhotoAuditPage() {
                       </TableCell>
                       <TableCell>
                         {event.photo ? (
-                          <button type="button" aria-label={`Open photo ${event.photo.displayName}`} className="flex items-center gap-2 text-left hover:underline" onClick={() => openPhoto(event.photo!.id)}>
+                          <button type="button" aria-label={`Open photo ${sanitizeHubspotDealIdentifiers(event.photo.displayName, "Imported deal")}`} className="flex items-center gap-2 text-left hover:underline" onClick={() => openPhoto(event.photo!.id)}>
                             <span className="h-10 w-10 overflow-hidden rounded border bg-muted">
                               {event.photo.externalThumbnailUrl ? <img src={event.photo.externalThumbnailUrl} alt="" className="h-full w-full object-cover" /> : null}
                             </span>
                             <span>
-                              <span className="block text-sm font-medium">{event.photo.displayName}</span>
+                              <span className="block text-sm font-medium">{sanitizeHubspotDealIdentifiers(event.photo.displayName, "Imported deal")}</span>
                               <span className="block text-xs text-muted-foreground">{event.photo.fileExtension ?? "photo"}</span>
                             </span>
                           </button>

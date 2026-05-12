@@ -37,7 +37,7 @@ import type { Deal } from "@/hooks/use-deals";
 import { useContacts } from "@/hooks/use-contacts";
 import { useAuth } from "@/lib/auth";
 import { displayNameOrFallback } from "@/lib/display-identifiers";
-import { formatDealDisplayNumber } from "@/lib/deal-utils";
+import { formatDealDisplayNumber, sanitizeHubspotDealIdentifiers } from "@/lib/deal-utils";
 import {
   FILE_CATEGORIES,
   type FileCategory,
@@ -91,7 +91,7 @@ function uploaderLabel(file: FileRecord) {
 
 function fileTitle(file: FileRecord) {
   const extension = file.fileExtension && !file.displayName.endsWith(file.fileExtension) ? file.fileExtension : "";
-  return `${file.displayName}${extension}`;
+  return sanitizeHubspotDealIdentifiers(`${file.displayName}${extension}`, "Imported deal");
 }
 
 function linkedType(file: FileRecord): LinkedFilter {

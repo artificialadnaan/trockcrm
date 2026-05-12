@@ -56,7 +56,7 @@ describe("PhotoAuditPage", () => {
             metadata: {},
             photo: {
               id: "photo-1",
-              displayName: "Roof damage",
+              displayName: "HS-319925219003 Photo 2026-05-10 001 dad87234",
               fileExtension: ".jpg",
               r2Key: "photo.jpg",
               externalUrl: "https://example.test/photo.jpg",
@@ -107,7 +107,8 @@ describe("PhotoAuditPage", () => {
 
     const node = renderPage("/admin/photo-audit?eventType=uploaded");
     await vi.waitFor(() => expect(node.textContent).toContain("Photo Audit"));
-    await vi.waitFor(() => expect(node.textContent).toContain("Roof damage"));
+    await vi.waitFor(() => expect(node.textContent).toContain("Imported deal Photo 2026-05-10 001 dad87234"));
+    expect(node.textContent).not.toContain("HS-319925219003");
     expect(apiMock).toHaveBeenCalledWith(expect.stringContaining("eventType=uploaded"));
 
     node.querySelector<HTMLButtonElement>('[aria-label="User filter"]')?.click();
@@ -125,8 +126,8 @@ describe("PhotoAuditPage", () => {
     Array.from(document.body.querySelectorAll<HTMLButtonElement>("button")).find((button) => button.textContent?.includes("Failed"))?.click();
     await vi.waitFor(() => expect(apiMock).toHaveBeenCalledWith(expect.stringContaining("procoreSyncStatus=failed")));
 
-    await vi.waitFor(() => expect(node.querySelector<HTMLButtonElement>('[aria-label="Open photo Roof damage"]')).toBeTruthy());
-    node.querySelector<HTMLButtonElement>('[aria-label="Open photo Roof damage"]')?.click();
+    await vi.waitFor(() => expect(node.querySelector<HTMLButtonElement>('[aria-label="Open photo Imported deal Photo 2026-05-10 001 dad87234"]')).toBeTruthy());
+    node.querySelector<HTMLButtonElement>('[aria-label="Open photo Imported deal Photo 2026-05-10 001 dad87234"]')?.click();
     await vi.waitFor(() => expect(apiMock).toHaveBeenCalledWith("/files/photo-1"));
     await vi.waitFor(() => expect(document.body.textContent).toContain("Uploaded by"));
   });
