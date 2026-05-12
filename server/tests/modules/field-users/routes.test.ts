@@ -28,10 +28,15 @@ function findRoute(router: any, method: string, path: string) {
 }
 
 async function invokeHandlers(handlers: Array<(req: any, res: any, next: (err?: unknown) => void) => unknown>, req: Record<string, any>) {
+  req.headers ??= {};
+  req.hostname ??= "localhost";
+  req.get ??= (name: string) => req.headers?.[name.toLowerCase()];
+
   const res: Record<string, any> = {
     statusCode: 200,
     body: undefined,
     cookies: {} as Record<string, string>,
+    locals: {},
     status(code: number) {
       res.statusCode = code;
       return res;
