@@ -868,7 +868,8 @@ router.post("/", async (req, res, next) => {
       ...rest,
     });
     await req.commitTransaction!();
-    res.status(201).json({ deal });
+    const includeHubspotId = shouldIncludeHubspotId(req.query, req.user!.role);
+    res.status(201).json({ deal: redactDealResponse(deal, { includeHubspotId }) });
   } catch (err) {
     next(err);
   }
@@ -899,7 +900,8 @@ router.patch(
       );
       if (!deal) throw new AppError(404, "Deal not found");
       await req.commitTransaction!();
-      res.json({ deal });
+      const includeHubspotId = shouldIncludeHubspotId(req.query, req.user!.role);
+      res.json({ deal: redactDealResponse(deal, { includeHubspotId }) });
     } catch (err) { next(err); }
   }
 );
@@ -918,7 +920,8 @@ router.post("/:id/proposal-draft", async (req, res, next) => {
       req.user!.id
     );
     await req.commitTransaction!();
-    res.status(201).json({ deal });
+    const includeHubspotId = shouldIncludeHubspotId(req.query, req.user!.role);
+    res.status(201).json({ deal: redactDealResponse(deal, { includeHubspotId }) });
   } catch (err) {
     next(err);
   }
@@ -964,7 +967,8 @@ router.patch("/:id", async (req, res, next) => {
     }
 
     await req.commitTransaction!();
-    res.json({ deal });
+    const includeHubspotId = shouldIncludeHubspotId(req.query, req.user!.role);
+    res.json({ deal: redactDealResponse(deal, { includeHubspotId }) });
   } catch (err) {
     next(err);
   }
@@ -1008,8 +1012,9 @@ router.post("/:id/stage", async (req, res, next) => {
       userId: req.user!.id,
     });
 
+    const includeHubspotIdStage = shouldIncludeHubspotId(req.query, req.user!.role);
     res.json({
-      deal: result.deal,
+      deal: redactDealResponse(result.deal, { includeHubspotId: includeHubspotIdStage }),
       stageHistory: result.stageHistory,
       eventsEmitted: result.eventsEmitted,
     });

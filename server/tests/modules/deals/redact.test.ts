@@ -42,9 +42,37 @@ describe("redactDealResponse", () => {
     expect(result.hubspotDealId).toBe("HS-324283495135");
   });
 
-  it("is a no-op when the deal has no hubspotDealId property", () => {
+  it("injects isHubspotSourced=false when the deal has no hubspotDealId property at all", () => {
+    // The source flag must be present on every response — clients gate on
+    // its presence/value, and a missing flag would fall through to permissive
+    // behavior (same root-cause Codex caught on round 1).
     const result = redactDealResponse({ id: "deal-1", name: "Native deal" }, { includeHubspotId: false });
-    expect(result).toEqual({ id: "deal-1", name: "Native deal" });
+    expect(result).toEqual({ id: "deal-1", name: "Native deal", isHubspotSourced: false });
+    expect(result).not.toHaveProperty("hubspotDealId");
+  });
+
+  it("always injects isHubspotSourced=true for HubSpot-imported deals (default and admin override)", () => {
+    const defaultResult = redactDealResponse(
+      { id: "deal-1", hubspotDealId: "HS-324283495135" },
+      { includeHubspotId: false }
+    );
+    expect(defaultResult.isHubspotSourced).toBe(true);
+    expect(defaultResult).not.toHaveProperty("hubspotDealId");
+
+    const adminResult = redactDealResponse(
+      { id: "deal-1", hubspotDealId: "HS-324283495135" },
+      { includeHubspotId: true }
+    );
+    expect(adminResult.isHubspotSourced).toBe(true);
+    expect(adminResult.hubspotDealId).toBe("HS-324283495135");
+  });
+
+  it("injects isHubspotSourced=false for native deals carrying hubspotDealId=null", () => {
+    const result = redactDealResponse(
+      { id: "deal-1", hubspotDealId: null },
+      { includeHubspotId: false }
+    );
+    expect(result.isHubspotSourced).toBe(false);
   });
 });
 
@@ -66,5 +94,20 @@ describe("redactDealList", () => {
     const deals = [{ id: "d1", hubspotDealId: "HS-1" }];
     const result = redactDealList(deals, { includeHubspotId: true });
     expect(result[0].hubspotDealId).toBe("HS-1");
+  });
+
+  it("derives isHubspotSourced per row in both default and admin-opted modes", () => {
+    const deals = [
+      { id: "d1", hubspotDealId: "HS-1" },
+      { id: "d2", hubspotDealId: null },
+      { id: "d3", hubspotDealId: "HS-3" },
+    ];
+
+    const def = redactDealList(deals, { includeHubspotId: false });
+    expect(def.map((d) => d.isHubspotSourced)).toEqual([true, false, true]);
+
+    const admin = redactDealList(deals, { includeHubspotId: true });
+    expect(admin.map((d) => d.isHubspotSourced)).toEqual([true, false, true]);
+    expect(admin.map((d) => d.hubspotDealId)).toEqual(["HS-1", null, "HS-3"]);
   });
 });
