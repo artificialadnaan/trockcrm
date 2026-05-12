@@ -13,14 +13,15 @@ Merged at: 2026-05-12T00:51:46Z
 | Frontend | SUCCESS | `783994cf` | `32340748` |
 | Worker | DEPLOYING → (no impact for this fix) | `c298e171` | `32340748` |
 
-Health check: `GET https://api-production-ad218.up.railway.app/api/health` → **HTTP 200**.
+Health check: `GET https://<prod-api-host>/api/health` → **HTTP 200**.
 
 ## Smoke account
 
 `test-admin@trock.test` (admin role). Earlier tracks tried `test-admin` with the
-wrong password (`TrockTest123!`) and assumed the account was broken — the working
-password is `dev123!`. Admin role satisfies `requireDirector` for the
-Director Scorecard endpoint.
+shared smoke password and assumed the account was broken — the working
+password for admin is the dev-mode local value (`<redacted — test creds in
+ops vault>`). Admin role satisfies `requireDirector` for the Director
+Scorecard endpoint.
 
 ## API smoke — all four endpoints (HTTP 200 with non-error bodies)
 

@@ -81,10 +81,12 @@ None. The fix is merged, deployed, and smoked.
 ## Notes for future tracks
 
 - The brief noted `test-admin@trock.test` was "known broken". That was because
-  the previous track tried it with password `TrockTest123!`. The working
-  password is `dev123!`, and the admin role satisfies `requireDirector`.
-  Worth correcting in `.reviews/projects-tab/BACKFILL-BLOCKER.md` so the
-  next track does not get blocked by the same stale advice.
-- `test-director@trock.test` does **not** accept `dev123!`. If a director-only
-  smoke is required in a future track, the director-specific credential needs
-  to be sourced separately.
+  the previous track tried it with the shared smoke password. The working
+  password for admin is the dev-mode local value (`<redacted — test creds in
+  ops vault>`), and the admin role satisfies `requireDirector`. Worth
+  correcting in `.reviews/projects-tab/BACKFILL-BLOCKER.md` so the next
+  track does not get blocked by the same stale advice.
+- `test-director@trock.test` does **not** accept the admin's dev-mode value
+  (`<redacted — test creds in ops vault>`). If a director-only smoke is
+  required in a future track, the director-specific credential needs to be
+  sourced separately.
