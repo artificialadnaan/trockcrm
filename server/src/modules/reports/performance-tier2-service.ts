@@ -336,7 +336,7 @@ export async function getDirectorScorecard(db: TenantDb, filters: PerformanceRep
             SELECT COUNT(*)::int
             FROM tasks t
             LEFT JOIN task_deals td ON td.id = t.deal_id
-            LEFT JOIN users u ON u.id = t.responsible_user_id
+            LEFT JOIN users u ON u.id = t.assigned_to
             LEFT JOIN offices o ON o.id = u.office_id
             WHERE COALESCE(t.is_test_data, false) = false
               AND t.status IN ('pending', 'scheduled', 'in_progress')

@@ -267,4 +267,59 @@ describe("sales tier 1 report services", () => {
     expect(monthlySql).toContain("ORDER BY month DESC");
     expect(report.monthlyTrend.map((row) => row.month)).toEqual(["2026-04", "2026-05"]);
   });
+
+  it("Pipeline Velocity stage rollup does not aggregate uuid with MAX (regression: function max(uuid) does not exist)", async () => {
+    const db = tenantDbWithRows([[], [], []]);
+    await getPipelineVelocityReport(db, {
+      dateFrom: "2026-02-01",
+      dateTo: "2026-05-01",
+      ownerIds: [],
+      ownerNames: [],
+      ownerEmails: [],
+    }, "pv-uuid-regression");
+
+    const [stageSql] = executedSql(db);
+    expect(stageSql).toMatch(/array_agg\(\s*id::text\s*\)\s*FILTER\s*\(WHERE rn = 1\)/);
+    expect(stageSql).not.toMatch(/MAX\(id\)\s+FILTER\s*\(WHERE rn = 1\)/);
+  });
+
+  it("Closed Won Revenue ownerRows does not aggregate uuid with MAX (regression: function max(uuid) does not exist)", async () => {
+    const db = tenantDbWithRows([
+      [{ wonDeals: 0, lostDeals: 0, totalRevenue: 0 }],
+      [],
+      [],
+      [],
+      [],
+      [],
+    ]);
+    await getClosedWonRevenueReport(db, {
+      dateFrom: "2026-02-01",
+      dateTo: "2026-05-01",
+      ownerIds: [],
+      ownerNames: [],
+      ownerEmails: [],
+    }, "cwr-uuid-regression");
+
+    const ownerSql = executedSql(db)[1];
+    expect(ownerSql).toMatch(/array_agg\(\s*id::text\s*\)\s*FILTER\s*\(WHERE rn = 1\)/);
+    expect(ownerSql).not.toMatch(/MAX\(id\)\s+FILTER\s*\(WHERE rn = 1\)/);
+  });
+
+  it("Lead Conversion does not reference the non-existent lead_status enum label 'qualified' (regression: invalid input value for enum lead_status)", async () => {
+    const db = tenantDbWithRows([[{ totalLeads: 0, qualified: 0, inDeals: 0, won: 0 }], [], [], []]);
+    await getLeadConversionReport(db, {
+      dateFrom: "2026-02-01",
+      dateTo: "2026-05-01",
+      ownerIds: [],
+      ownerNames: [],
+      ownerEmails: [],
+    }, "lc-enum-regression");
+
+    const sqlTexts = executedSql(db);
+    for (const text of sqlTexts) {
+      expect(text).not.toMatch(/'qualified'/);
+    }
+    const [summarySql] = sqlTexts;
+    expect(summarySql).toContain("l.status = 'converted'");
+  });
 });

@@ -494,9 +494,9 @@ export async function getPipelineVelocityReport(
         COALESCE(SUM(value), 0)::numeric AS "totalValue",
         COALESCE(AVG(days_in_stage), 0)::numeric AS "avgDaysInStage",
         COALESCE(PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY days_in_stage), 0)::numeric AS "medianDaysInStage",
-        MAX(id) FILTER (WHERE rn = 1)::text AS "oldestDealId",
-        MAX(name) FILTER (WHERE rn = 1) AS "oldestDealName",
-        MAX(days_in_stage) FILTER (WHERE rn = 1)::int AS "oldestDealDays"
+        (array_agg(id::text) FILTER (WHERE rn = 1))[1] AS "oldestDealId",
+        (array_agg(name) FILTER (WHERE rn = 1))[1] AS "oldestDealName",
+        ((array_agg(days_in_stage) FILTER (WHERE rn = 1))[1])::int AS "oldestDealDays"
       FROM ranked
       GROUP BY stage_id
       ORDER BY MAX(stage_order), MAX(stage_name)
@@ -592,9 +592,9 @@ export async function getClosedWonRevenueReport(
         MAX(owner_name) AS "ownerName",
         COUNT(*)::int AS "wonDeals",
         COALESCE(SUM(value), 0)::numeric AS "totalRevenue",
-        MAX(id) FILTER (WHERE rn = 1)::text AS "largestWonDealId",
-        MAX(name) FILTER (WHERE rn = 1) AS "largestWonDealName",
-        MAX(value) FILTER (WHERE rn = 1)::numeric AS "largestWonDealValue"
+        (array_agg(id::text) FILTER (WHERE rn = 1))[1] AS "largestWonDealId",
+        (array_agg(name) FILTER (WHERE rn = 1))[1] AS "largestWonDealName",
+        ((array_agg(value) FILTER (WHERE rn = 1))[1])::numeric AS "largestWonDealValue"
       FROM won_deals
       GROUP BY assigned_rep_id
       ORDER BY "totalRevenue" DESC
@@ -679,7 +679,7 @@ export async function getLeadConversionReport(
         COUNT(DISTINCT l.id) FILTER (
           WHERE l.converted_at IS NOT NULL
              OR l.qualification_completed_at IS NOT NULL
-             OR l.status IN ('qualified', 'converted')
+             OR l.status = 'converted'
         )::int AS qualified,
         COUNT(DISTINCT d.id)::int AS "inDeals",
         COUNT(DISTINCT d.id) FILTER (WHERE p.slug IN (${wonSlugs}))::int AS won
@@ -697,7 +697,7 @@ export async function getLeadConversionReport(
         COUNT(DISTINCT l.id) FILTER (
           WHERE l.converted_at IS NOT NULL
              OR l.qualification_completed_at IS NOT NULL
-             OR l.status IN ('qualified', 'converted')
+             OR l.status = 'converted'
         )::int AS qualified,
         COUNT(DISTINCT d.id)::int AS "convertedToDeal",
         COUNT(DISTINCT d.id) FILTER (WHERE p.slug IN (${wonSlugs}))::int AS won,
