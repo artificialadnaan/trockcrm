@@ -1,6 +1,6 @@
 import { Navigate, useNavigate, useParams, useSearchParams } from "react-router-dom";
 import { useDealStagePage } from "@/hooks/use-deals";
-import { formatCurrencyCompact } from "@/lib/deal-utils";
+import { formatCurrencyCompact, formatDealDisplayNumber } from "@/lib/deal-utils";
 import { buildDealStageSummary } from "@/lib/pipeline-stage-summary";
 import { useNormalizedStageRoute } from "@/lib/pipeline-scope";
 import { PipelineStagePageHeader } from "@/components/pipeline/pipeline-stage-page-header";
@@ -174,7 +174,7 @@ export function DealStagePage() {
             header: "Number",
             render: (row) => (
               <span className="inline-flex rounded-md bg-slate-100 px-2 py-1 text-[11px] font-black tracking-[0.16em] text-slate-500 uppercase">
-                {row.dealNumber}
+                {formatDealDisplayNumber(row).label}
               </span>
             ),
           },

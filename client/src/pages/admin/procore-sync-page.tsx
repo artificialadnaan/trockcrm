@@ -21,6 +21,7 @@ import {
   type ProjectValidationAddress,
   type ProcoreAuthStatus,
 } from "@/lib/procore-validation-view-model";
+import { formatDealDisplayNumber } from "@/lib/deal-utils";
 
 interface SyncSummary {
   synced: number;
@@ -183,7 +184,8 @@ function formatDealLabel(deal: ProjectValidationDeal | null) {
   }
 
   const name = deal.name ?? "Untitled CRM deal";
-  const number = deal.dealNumber ? ` (${deal.dealNumber})` : "";
+  const displayNumber = formatDealDisplayNumber(deal).label;
+  const number = displayNumber === "Pending" ? "" : ` (${displayNumber})`;
   return `${name}${number}`;
 }
 

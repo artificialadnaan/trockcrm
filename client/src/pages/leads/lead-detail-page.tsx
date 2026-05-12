@@ -33,6 +33,7 @@ import type { LeadRecord } from "@/hooks/use-leads";
 import { usePipelineStages } from "@/hooks/use-pipeline-config";
 import { LEAD_BOARD_STAGE_SLUGS, isBidBoardMirroredStageSlug } from "@/lib/pipeline-ownership";
 import { cn } from "@/lib/utils";
+import { displayNameOrFallback } from "@/lib/display-identifiers";
 
 type LeadDetailTab = "timeline" | "questionnaire" | "recordings";
 
@@ -79,7 +80,7 @@ function sourceLabel(lead: LeadRecord) {
 }
 
 function ownerInitials(lead: LeadRecord) {
-  return (lead.assignedRepName ?? lead.assignedRepId ?? "NA")
+  return displayNameOrFallback(lead.assignedRepName ?? lead.assignedRepId, "NA")
     .split(/\s+/)
     .filter(Boolean)
     .slice(0, 2)
@@ -233,7 +234,7 @@ export function LeadDetailPage() {
         subtitleSlot={
           <>
             <span className="font-mono text-xs font-bold uppercase tracking-[0.14em] text-slate-500">
-              {lead.convertedDealNumber ?? lead.id.slice(0, 8)}
+              {lead.convertedDealNumber ?? "Lead"}
             </span>
             {lead.companyId && leadCompanyName ? (
               <Link to={`/companies/${lead.companyId}`} className="inline-flex items-center gap-1 font-semibold text-slate-700 hover:text-brand-red">
@@ -482,7 +483,7 @@ function LeadRightRail({
                   <span className="grid h-7 w-7 place-items-center rounded-full bg-slate-900 text-[10px] font-black uppercase text-white">
                     {ownerInitials(lead)}
                   </span>
-                  {formatNullable(lead.assignedRepName ?? lead.assignedRepId)}
+                  {displayNameOrFallback(lead.assignedRepName ?? lead.assignedRepId, "Unknown user")}
                 </span>
               }
             />
@@ -534,7 +535,7 @@ function LeadRightRail({
                 value={
                   lead.convertedDealId ? (
                     <Link to={`/deals/${lead.convertedDealId}`} className="text-brand-red hover:underline">
-                      {lead.convertedDealNumber ?? lead.convertedDealId}
+                      {lead.convertedDealNumber ?? "Open deal"}
                     </Link>
                   ) : (
                     formatNullable(lead.convertedDealNumber)
@@ -544,11 +545,11 @@ function LeadRightRail({
             </DetailRailSection>
           ) : null}
 
-          <DetailRailSection title="System IDs">
-            <DetailRailItem label="Lead" value={<span className="font-mono text-xs">{lead.id}</span>} />
-            <DetailRailItem label="Company" value={<span className="font-mono text-xs">{formatNullable(lead.companyId)}</span>} />
-            <DetailRailItem label="Property" value={<span className="font-mono text-xs">{formatNullable(lead.propertyId)}</span>} />
-            <DetailRailItem label="Converted deal" value={<span className="font-mono text-xs">{formatNullable(lead.convertedDealId)}</span>} />
+          <DetailRailSection title="System references">
+            <DetailRailItem label="Lead" value="Tracked internally" />
+            <DetailRailItem label="Company" value={lead.companyId ? "Linked internally" : "Not set"} />
+            <DetailRailItem label="Property" value={lead.propertyId ? "Linked internally" : "Not set"} />
+            <DetailRailItem label="Converted deal" value={lead.convertedDealId ? "Linked internally" : "Not set"} />
           </DetailRailSection>
         </CardContent>
       </Card>

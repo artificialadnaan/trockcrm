@@ -31,6 +31,7 @@ import { TaskEditDialog } from "@/components/tasks/task-edit-dialog";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { useAuth } from "@/lib/auth";
 import { cn } from "@/lib/utils";
+import { formatDealDisplayNumber } from "@/lib/deal-utils";
 import { toast } from "sonner";
 
 type GroupKey = "overdue" | "today" | "this_week" | "later" | "completed";
@@ -74,11 +75,13 @@ function getInitials(name: string | null | undefined) {
     .toUpperCase();
 }
 
-export function getTaskProjectContext(task: Pick<Task, "dealId" | "dealName" | "dealNumber">): string | null {
+export function getTaskProjectContext(task: Pick<Task, "dealId" | "dealName" | "dealNumber" | "projectNumber">): string | null {
   if (!task.dealId) return null;
-  if (task.dealNumber && task.dealName) return `${task.dealNumber} - ${task.dealName}`;
-  if (task.dealName) return task.dealName;
-  if (task.dealNumber) return task.dealNumber;
+  const displayNumber = formatDealDisplayNumber(task).label;
+  if (task.dealName) {
+    return displayNumber === "Pending" ? task.dealName : `${displayNumber} - ${task.dealName}`;
+  }
+  if (displayNumber !== "Pending") return displayNumber;
   return "Project linked";
 }
 

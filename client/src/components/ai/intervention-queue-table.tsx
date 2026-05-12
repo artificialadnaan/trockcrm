@@ -5,6 +5,8 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
+import { displayNameOrFallback } from "@/lib/display-identifiers";
+import { formatDealDisplayNumber } from "@/lib/deal-utils";
 
 const severityClassNames: Record<string, string> = {
   critical: "border-red-200 bg-red-50 text-red-700",
@@ -82,7 +84,8 @@ export function InterventionQueueTable(props: {
                     <div>
                       {item.deal ? (
                         <Link to={`/deals/${item.deal.id}`} className="text-sm font-semibold text-brand-red hover:underline">
-                          {item.deal.dealNumber} {item.deal.name}
+                          {formatDealDisplayNumber(item.deal).label === "Pending" ? "" : `${formatDealDisplayNumber(item.deal).label} `}
+                          {item.deal.name}
                         </Link>
                       ) : (
                         <div className="text-sm font-semibold">Unlinked disconnect case</div>
@@ -101,7 +104,7 @@ export function InterventionQueueTable(props: {
                   </div>
                 </TableCell>
                 <TableCell className="align-top">
-                  <div className="text-sm font-medium">{item.assignedToName ?? item.assignedTo ?? "Unassigned"}</div>
+                  <div className="text-sm font-medium">{displayNameOrFallback(item.assignedToName ?? item.assignedTo, "Unassigned")}</div>
                   {item.clusterKey && <div className="text-xs text-muted-foreground mt-1">{item.clusterKey}</div>}
                 </TableCell>
                 <TableCell className="align-top">
@@ -110,7 +113,7 @@ export function InterventionQueueTable(props: {
                       <div className="text-sm font-medium">{item.generatedTask.title}</div>
                       <div className="text-xs text-muted-foreground">{item.generatedTask.status}</div>
                       <div className="text-xs text-muted-foreground">
-                        {item.generatedTask.assignedToName ?? item.generatedTask.assignedTo ?? "No task assignee"}
+                        {displayNameOrFallback(item.generatedTask.assignedToName ?? item.generatedTask.assignedTo, "No task assignee")}
                       </div>
                     </div>
                   ) : (

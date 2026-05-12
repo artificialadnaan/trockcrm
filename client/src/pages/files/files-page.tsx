@@ -36,6 +36,8 @@ import { useDeals } from "@/hooks/use-deals";
 import type { Deal } from "@/hooks/use-deals";
 import { useContacts } from "@/hooks/use-contacts";
 import { useAuth } from "@/lib/auth";
+import { displayNameOrFallback } from "@/lib/display-identifiers";
+import { formatDealDisplayNumber } from "@/lib/deal-utils";
 import {
   FILE_CATEGORIES,
   type FileCategory,
@@ -83,6 +85,10 @@ function initials(name: string | null | undefined) {
     .join("");
 }
 
+function uploaderLabel(file: FileRecord) {
+  return displayNameOrFallback(file.uploadedBy, "Unknown user");
+}
+
 function fileTitle(file: FileRecord) {
   const extension = file.fileExtension && !file.displayName.endsWith(file.fileExtension) ? file.fileExtension : "";
   return `${file.displayName}${extension}`;
@@ -110,9 +116,10 @@ function matchesLinkedFilter(file: FileRecord, filter: LinkedFilter) {
 function linkedLabel(file: FileRecord, dealMap: Map<string, Deal>) {
   if (file.dealId) {
     const deal = dealMap.get(file.dealId);
+    const displayNumber = deal ? formatDealDisplayNumber(deal).label : "Deal";
     return {
       type: "deal" as const,
-      label: deal ? `${deal.dealNumber ?? "Deal"} · ${deal.name}` : "Linked deal",
+      label: deal ? `${displayNumber} · ${deal.name}` : "Linked deal",
       href: `/deals/${file.dealId}`,
     };
   }
@@ -122,7 +129,7 @@ function linkedLabel(file: FileRecord, dealMap: Map<string, Deal>) {
     return { type: "procore" as const, label: `Procore project ${file.procoreProjectId}`, href: null };
   }
   if (file.changeOrderId) {
-    return { type: "change_order" as const, label: `Change order ${file.changeOrderId}`, href: null };
+    return { type: "change_order" as const, label: "Linked change order", href: null };
   }
   return null;
 }
@@ -275,7 +282,7 @@ function FileGridCard({
         <div className="space-y-1 border-t border-slate-100 px-3 py-2">
           <p className="truncate text-xs font-bold text-slate-950">{fileTitle(file)}</p>
           <p className="text-[10px] text-slate-500">
-            <span className="font-bold text-slate-700">{initials(file.uploadedBy)}</span> · {file.uploadedBy || "Unknown"} ·{" "}
+            <span className="font-bold text-slate-700">{initials(uploaderLabel(file))}</span> · {uploaderLabel(file)} ·{" "}
             {formatDate(file.createdAt)} · {formatFileSize(file.fileSizeBytes)}
           </p>
           <div className="flex flex-wrap items-center gap-1.5">
@@ -332,7 +339,7 @@ function FileGridCard({
       ) : null}
       <div className="mt-auto flex items-center justify-between border-t border-slate-100 pt-2 text-[10px] text-slate-500">
         <p>
-          <span className="font-bold text-slate-700">{file.uploadedBy || "Unknown"}</span> · {formatDate(file.createdAt)}
+          <span className="font-bold text-slate-700">{uploaderLabel(file)}</span> · {formatDate(file.createdAt)}
         </p>
         <p className="font-semibold tabular-nums">{formatFileSize(file.fileSizeBytes)}</p>
       </div>
@@ -389,7 +396,7 @@ function FilesTable({
                   {formatFileSize(file.fileSizeBytes)}
                 </td>
                 <td className="px-5 py-3 text-xs text-slate-500">
-                  <span className="font-bold text-slate-700">{file.uploadedBy || "Unknown"}</span> · {formatDate(file.createdAt)}
+                  <span className="font-bold text-slate-700">{uploaderLabel(file)}</span> · {formatDate(file.createdAt)}
                 </td>
                 <td className="px-5 py-3 text-right">
                   <div className="flex justify-end gap-1">
@@ -485,6 +492,7 @@ export function FilesPage() {
   }).length;
 
   const uploadDeal = useMemo(() => deals.find((deal) => deal.id === uploadDealId) ?? null, [deals, uploadDealId]);
+  const uploadDealDisplayNumber = uploadDeal ? formatDealDisplayNumber(uploadDeal).label : undefined;
 
   const handleDownload = useCallback(async (fileId: string) => {
     try {
@@ -585,7 +593,7 @@ export function FilesPage() {
                     <SelectItem value="none">No deal</SelectItem>
                     {deals.map((deal) => (
                       <SelectItem key={deal.id} value={deal.id}>
-                        {deal.dealNumber} · {deal.name}
+                        {formatDealDisplayNumber(deal).label} · {deal.name}
                       </SelectItem>
                     ))}
                   </SelectContent>
@@ -593,7 +601,7 @@ export function FilesPage() {
               </div>
             </div>
 
-            <FileUploadZone category={uploadCategory} dealId={uploadDealId || undefined} dealNumber={uploadDeal?.dealNumber} onUploadComplete={handleUploadComplete} />
+            <FileUploadZone category={uploadCategory} dealId={uploadDealId || undefined} dealNumber={uploadDealDisplayNumber === "Pending" ? undefined : uploadDealDisplayNumber} onUploadComplete={handleUploadComplete} />
           </CardContent>
         </Card>
       ) : null}

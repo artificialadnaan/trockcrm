@@ -6,7 +6,7 @@ import { MemoryRouter } from "react-router-dom";
 import type { ReactNode } from "react";
 import { describe, expect, it } from "vitest";
 import { afterEach, beforeEach, vi } from "vitest";
-import { TaskListPage } from "./task-list-page";
+import { TaskListPage, getTaskProjectContext } from "./task-list-page";
 import taskListPageSource from "./task-list-page.tsx?raw";
 
 const mocks = vi.hoisted(() => ({
@@ -200,10 +200,20 @@ describe("TaskListPage project context", () => {
   it("formats and renders project context for deal-linked tasks", () => {
     const source = normalize(taskListPageSource);
 
+    expect(getTaskProjectContext({
+      dealId: "deal-1",
+      dealName: "Northstar Expansion",
+      dealNumber: "HS-324283495135",
+      projectNumber: "DFW-1-12826-aa",
+    })).toBe("DFW-1-12826-aa - Northstar Expansion");
+    expect(getTaskProjectContext({
+      dealId: "deal-2",
+      dealName: "HubSpot Import",
+      dealNumber: "HS-324283495135",
+      projectNumber: null,
+    })).toBe("HubSpot Import");
     expect(source).toContain("function getTaskProjectContext");
-    expect(source).toContain("if (task.dealNumber && task.dealName) return `${task.dealNumber} - ${task.dealName}`;");
-    expect(source).toContain("if (task.dealName) return task.dealName;");
-    expect(source).toContain("if (task.dealNumber) return task.dealNumber;");
+    expect(source).toContain("formatDealDisplayNumber(task)");
     expect(source).toContain("return \"Project linked\";");
     expect(source).toContain("const projectContext = getTaskProjectContext(task);");
     expect(source).toContain("{projectContext ? <span className=\"truncate\">{projectContext}</span> : null}");

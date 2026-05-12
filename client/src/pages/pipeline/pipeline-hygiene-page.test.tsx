@@ -13,5 +13,6 @@ describe("PipelineHygienePage", () => {
     expect(source).toContain("Decision maker:");
     expect(source).toContain("Ownership sync:");
     expect(source).toContain('row.assignedRepName ?? "Unassigned"');
+    expect(source).toContain('stageNameById.get(row.stageId) ?? "Unknown stage"');
   });
 });

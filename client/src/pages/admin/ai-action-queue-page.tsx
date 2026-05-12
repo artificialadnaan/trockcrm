@@ -6,6 +6,7 @@ import { triageAiActionQueueEntry, useAiActionQueue } from "@/hooks/use-ai-ops";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
+import { formatDealDisplayNumber } from "@/lib/deal-utils";
 
 function formatDate(value: string | null) {
   if (!value) return "Pending";
@@ -185,7 +186,8 @@ export function AiActionQueuePage() {
                       <div className="space-y-1">
                         {entry.dealId ? (
                           <Link to={`/deals/${entry.dealId}`} className="text-sm font-semibold text-brand-red hover:underline">
-                            {entry.dealNumber ? `${entry.dealNumber} ` : ""}{entry.dealName ?? "Unnamed deal"}
+                            {formatDealDisplayNumber(entry).label === "Pending" ? "" : `${formatDealDisplayNumber(entry).label} `}
+                            {entry.dealName ?? "Unnamed deal"}
                           </Link>
                         ) : (
                           <div className="text-sm font-semibold">{entry.dealName ?? "Unlinked deal"}</div>

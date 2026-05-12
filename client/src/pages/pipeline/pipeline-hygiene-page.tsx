@@ -2,6 +2,7 @@ import { PageHeader } from "@/components/layout/page-header";
 import { useSalesReview } from "@/hooks/use-sales-review";
 import { Badge } from "@/components/ui/badge";
 import { useAuth } from "@/lib/auth";
+import { usePipelineStages } from "@/hooks/use-pipeline-config";
 
 function prettifyIssue(issue: string) {
   return issue.replace(/_/g, " ");
@@ -15,7 +16,9 @@ function prettifyReason(reason: string | null) {
 export function PipelineHygienePage() {
   const { user } = useAuth();
   const { data, loading, error } = useSalesReview();
+  const { stages } = usePipelineStages();
   const isRep = user?.role === "rep";
+  const stageNameById = new Map(stages.map((stage) => [stage.id, stage.name]));
 
   return (
     <div className="space-y-6">
@@ -37,7 +40,7 @@ export function PipelineHygienePage() {
               <div>
                 <p className="font-medium">{row.name}</p>
                 <p className="text-xs text-muted-foreground">
-                  {row.assignedRepName ?? "Unassigned"} • {row.entityType} • {row.stageId}
+                  {row.assignedRepName ?? "Unassigned"} • {row.entityType} • {stageNameById.get(row.stageId) ?? "Unknown stage"}
                 </p>
               </div>
               <a

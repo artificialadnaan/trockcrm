@@ -277,6 +277,35 @@ describe("FilesPage", () => {
     expect(mounted.container.textContent).toContain("Photo");
   });
 
+  it("does not expose uploader UUIDs or HS-prefixed deal numbers", () => {
+    mocks.useDealsMock.mockReturnValue({
+      deals: [
+        {
+          id: "deal-1",
+          dealNumber: "HS-324283495135",
+          projectNumber: "DFW-1-12826-aa",
+          name: "Dallas ISD Roof Replacement",
+          propertyAddress: "100 Main St",
+          propertyCity: "Dallas",
+          propertyState: "TX",
+          projectTypeId: "reroof",
+        },
+      ],
+    });
+    setupFiles([
+      makeFile({
+        uploadedBy: "c90ed33e-041b-4ddb-8cb6-ea28eb67679f",
+      }),
+    ]);
+
+    mounted = mountPage();
+
+    expect(mounted.container.textContent).toContain("Unknown user");
+    expect(mounted.container.textContent).toContain("DFW-1-12826-aa");
+    expect(mounted.container.textContent).not.toContain("c90ed33e-041b-4ddb-8cb6-ea28eb67679f");
+    expect(mounted.container.textContent).not.toContain("HS-324283495135");
+  });
+
   it("file-type filter narrows the list", () => {
     mounted = mountPage();
 

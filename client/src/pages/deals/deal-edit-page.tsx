@@ -3,6 +3,7 @@ import { ArrowLeft, Loader2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { DealForm } from "@/components/deals/deal-form";
 import { useDealDetail } from "@/hooks/use-deals";
+import { formatDealDisplayNumber } from "@/lib/deal-utils";
 
 export function DealEditPage() {
   const { id } = useParams<{ id: string }>();
@@ -41,7 +42,7 @@ export function DealEditPage() {
           Back to Deal
         </Button>
         <h2 className="text-2xl font-bold">Edit Deal</h2>
-        <p className="text-sm text-muted-foreground">{deal.dealNumber} - {deal.name}</p>
+        <p className="text-sm text-muted-foreground">{formatDealDisplayNumber(deal).label} - {deal.name}</p>
       </div>
       <DealForm deal={deal} />
     </div>

@@ -242,9 +242,9 @@ export function AdminDataScrubPage() {
                       <TableCell>
                         <div className="space-y-1">
                           <div className="font-medium">{row.userName}</div>
-                          {row.userId && (
-                            <div className="text-xs text-muted-foreground">{row.userId}</div>
-                          )}
+                          <div className="text-xs text-muted-foreground">
+                            {row.userId ? "CRM user" : "No CRM user linked"}
+                          </div>
                         </div>
                       </TableCell>
                       <TableCell className="text-right font-medium">{row.actionCount.toLocaleString()}</TableCell>

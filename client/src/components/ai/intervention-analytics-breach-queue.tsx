@@ -3,6 +3,7 @@ import type { InterventionAnalyticsBreachRow } from "@/hooks/use-ai-ops";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
+import { displayNameOrFallback } from "@/lib/display-identifiers";
 
 const severityClasses: Record<string, string> = {
   critical: "border-red-200 bg-red-50 text-red-700",
@@ -79,7 +80,7 @@ export function InterventionAnalyticsBreachQueue({ breachQueue }: InterventionAn
                     </div>
                   </TableCell>
                   <TableCell className="text-right">{item.ageDays}d</TableCell>
-                  <TableCell>{item.assignedTo ?? "Unassigned"}</TableCell>
+                  <TableCell>{displayNameOrFallback(item.assignedTo, "Unassigned")}</TableCell>
                   <TableCell className="text-right">
                     <Link to={item.queueLink} className="text-sm font-medium text-brand-red hover:underline">
                       Open queue

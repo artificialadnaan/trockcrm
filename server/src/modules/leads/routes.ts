@@ -32,6 +32,7 @@ import {
   dispatchPendingDueDiligenceEmail,
   getLeadDueDiligenceApprovalForLead,
 } from "./due-diligence-service.js";
+import { getAllStages } from "../pipeline/service.js";
 
 const router = Router();
 
@@ -129,6 +130,16 @@ router.get("/board", async (req, res, next) => {
     const board = await listLeadBoard(req.tenantDb!, readBoardInput(req));
     await req.commitTransaction!();
     res.json(board);
+  } catch (err) {
+    next(err);
+  }
+});
+
+router.get("/stages", async (req, res, next) => {
+  try {
+    const stages = await getAllStages("lead");
+    await req.commitTransaction!();
+    res.json({ stages });
   } catch (err) {
     next(err);
   }

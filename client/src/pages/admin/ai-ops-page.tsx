@@ -7,6 +7,7 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
+import { formatDealDisplayNumber } from "@/lib/deal-utils";
 
 function formatPercent(value: number | null) {
   if (value == null || Number.isNaN(value)) return "N/A";
@@ -280,7 +281,8 @@ export function AiOpsPage() {
                     <TableCell className="max-w-[320px]">
                       <div className="space-y-1">
                         <Link to={`/admin/ai-ops/reviews/${row.packetId}`} className="font-medium text-brand-red hover:underline">
-                          {row.dealNumber ? `${row.dealNumber} ` : ""}{row.dealName ?? "Unnamed deal"}
+                          {formatDealDisplayNumber(row).label === "Pending" ? "" : `${formatDealDisplayNumber(row).label} `}
+                          {row.dealName ?? "Unnamed deal"}
                         </Link>
                         {row.summaryText && (
                           <p className="text-xs text-muted-foreground truncate">{row.summaryText}</p>
