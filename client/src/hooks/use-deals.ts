@@ -99,6 +99,8 @@ export interface Deal {
   propertyId: string | null;
   sourceLeadId: string | null;
   primaryContactId: string | null;
+  primaryContactName?: string | null;
+  primaryContactTitle?: string | null;
   ddEstimate: string | null;
   bidEstimate: string | null;
   awardedAmount: string | null;

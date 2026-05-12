@@ -1004,7 +1004,7 @@ function DealRightRail({
             value={
               deal.primaryContactId ? (
                 <Link to={`/contacts/${deal.primaryContactId}`} className="text-brand-red hover:underline">
-                  {primaryContactName ?? "Contact assigned"}
+                  {primaryContactName ?? "Unknown contact"}
                 </Link>
               ) : (
                 <span className="text-slate-500">No primary contact</span>

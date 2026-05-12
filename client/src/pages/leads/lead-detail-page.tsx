@@ -72,7 +72,12 @@ function daysSince(value: string | null | undefined) {
 }
 
 function leadEstimatedValue(lead: LeadRecord) {
-  return lead.forecastRevenue ?? lead.qualificationBudgetAmount ?? null;
+  const questionnaireEstimate = lead.qualificationPayload?.estimated_value;
+  return lead.forecastRevenue ??
+    lead.qualificationBudgetAmount ??
+    (typeof questionnaireEstimate === "string" || typeof questionnaireEstimate === "number"
+      ? questionnaireEstimate
+      : null);
 }
 
 function sourceLabel(lead: LeadRecord) {
@@ -373,11 +378,12 @@ function buildLeadTabs(): DetailPageShellTab[] {
 function buildLeadKpis(lead: LeadRecord): DetailPageShellKpi[] {
   const stageAgeDays = daysSince(lead.stageEnteredAt);
   const source = sourceLabel(lead);
+  const estimate = leadEstimatedValue(lead);
   return [
     {
       eyebrow: "Estimated value",
-      value: formatCurrency(leadEstimatedValue(lead)),
-      captionLabel: lead.forecastRevenue ? "Forecast" : lead.qualificationBudgetAmount ? "Qualified" : "No data",
+      value: formatCurrency(estimate),
+      captionLabel: lead.forecastRevenue ? "Forecast" : lead.qualificationBudgetAmount ? "Qualified" : estimate ? "Estimated" : "No data",
       captionContext: lead.forecastGrossProfit ? `${formatCurrency(lead.forecastGrossProfit)} gross profit` : "lead estimate",
     },
     {
@@ -475,6 +481,22 @@ function LeadRightRail({
             />
           </DetailRailSection>
 
+          <DetailRailSection title="Primary Contact">
+            <DetailRailItem
+              label="Contact"
+              value={
+                lead.primaryContactId ? (
+                  <Link to={`/contacts/${lead.primaryContactId}`} className="text-brand-red hover:underline">
+                    {lead.primaryContactName ?? "Unknown contact"}
+                  </Link>
+                ) : (
+                  "No primary contact"
+                )
+              }
+            />
+            {lead.primaryContactTitle ? <DetailRailItem label="Title" value={lead.primaryContactTitle} /> : null}
+          </DetailRailSection>
+
           <DetailRailSection title="Owner">
             <DetailRailItem
               label="Assigned rep"
@@ -524,7 +546,7 @@ function LeadRightRail({
 
           <DetailRailSection title="Status">
             <DetailRailItem label="Lead status" value={titleCase(lead.status)} />
-            <DetailRailItem label="Primary contact" value={lead.primaryContactId ? "Primary contact linked" : "No primary contact yet"} />
+            <DetailRailItem label="Primary contact" value={lead.primaryContactId ? lead.primaryContactName ?? "Unknown contact" : "No primary contact yet"} />
             <DetailRailItem label="Activity" value={lead.lastActivityAt ? "Activity recorded" : "No activity yet"} />
           </DetailRailSection>
 
@@ -564,7 +586,7 @@ function LeadRightRail({
           {contextFootnote ? <p className="text-xs text-muted-foreground">{contextFootnote}</p> : null}
           <div className="flex items-center gap-2 text-sm text-muted-foreground">
             <User className="h-4 w-4" />
-            <span>{lead.primaryContactId ? "Primary contact linked" : "No primary contact yet"}</span>
+            <span>{lead.primaryContactId ? lead.primaryContactName ?? "Unknown contact" : "No primary contact yet"}</span>
           </div>
           <div className="flex items-center gap-2 text-sm text-muted-foreground">
             <Phone className="h-4 w-4" />

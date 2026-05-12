@@ -896,6 +896,7 @@ router.post("/", async (req, res, next) => {
       name,
       stageId,
       assignedRepId,
+      creationContext: _creationContext,
       sourceLeadWriteMode: _sourceLeadWriteMode,
       migrationMode: _migrationMode,
       ...rest
@@ -921,6 +922,7 @@ router.post("/", async (req, res, next) => {
       assignedRepId: repId,
       actorUserId: req.user!.id,
       officeId: req.user!.activeOfficeId,
+      creationContext: "direct",
       ...rest,
     });
     await req.commitTransaction!();

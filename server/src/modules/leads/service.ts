@@ -440,9 +440,10 @@ async function decorateLeads(
   const propertyIds = [...new Set(rows.map((lead) => lead.propertyId).filter(Boolean))];
   const projectTypeIds = [...new Set(rows.map((lead) => lead.projectTypeId).filter(Boolean))];
   const assignedRepIds = [...new Set(rows.map((lead) => lead.assignedRepId).filter(Boolean))];
+  const primaryContactIds = [...new Set(rows.map((lead) => lead.primaryContactId).filter(Boolean))];
   const leadIds = rows.map((lead) => lead.id);
 
-  const [companyRows, propertyRows, projectTypeRows, assignedRepRows, convertedDealRows] = await Promise.all([
+  const [companyRows, propertyRows, projectTypeRows, assignedRepRows, primaryContactRows, convertedDealRows] = await Promise.all([
     companyIds.length === 0
       ? []
       : tenantDb
@@ -483,6 +484,17 @@ async function decorateLeads(
           })
           .from(users)
           .where(inArray(users.id, assignedRepIds as string[])),
+    primaryContactIds.length === 0
+      ? []
+      : tenantDb
+          .select({
+            id: contacts.id,
+            firstName: contacts.firstName,
+            lastName: contacts.lastName,
+            jobTitle: contacts.jobTitle,
+          })
+          .from(contacts)
+          .where(inArray(contacts.id, primaryContactIds as string[])),
     tenantDb
       .select({
         sourceLeadId: deals.sourceLeadId,
@@ -497,6 +509,15 @@ async function decorateLeads(
   const propertyMap = new Map(propertyRows.map((property) => [property.id, property]));
   const projectTypeMap = new Map(projectTypeRows.map((projectType) => [projectType.id, projectType]));
   const assignedRepMap = new Map(assignedRepRows.map((rep) => [rep.id, rep.displayName]));
+  const primaryContactMap = new Map(
+    primaryContactRows.map((contact) => [
+      contact.id,
+      {
+        name: [contact.firstName, contact.lastName].filter(Boolean).join(" ").trim() || null,
+        title: contact.jobTitle ?? null,
+      },
+    ])
+  );
   const convertedDealMap = new Map(
     convertedDealRows
       .filter((deal) => deal.sourceLeadId)
@@ -525,6 +546,12 @@ async function decorateLeads(
     ...lead,
     assignedRepName: assignedRepMap.get(lead.assignedRepId) ?? null,
     companyName: companyMap.get(lead.companyId) ?? null,
+    primaryContactName: lead.primaryContactId
+      ? primaryContactMap.get(lead.primaryContactId)?.name ?? null
+      : null,
+    primaryContactTitle: lead.primaryContactId
+      ? primaryContactMap.get(lead.primaryContactId)?.title ?? null
+      : null,
     property: propertyMap.get(lead.propertyId) ?? null,
     projectType: lead.projectTypeId ? projectTypeMap.get(lead.projectTypeId) ?? null : null,
     convertedDealId: convertedDealMap.get(lead.id)?.id ?? null,

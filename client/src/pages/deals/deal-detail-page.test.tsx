@@ -434,6 +434,7 @@ describe("DealDetailPage", () => {
       deal: makeDealDetail({
         hubspotDealId: "hs_deal_82211",
         primaryContactId: "contact-1",
+        primaryContactName: "Morgan Carter",
       }),
     });
 
@@ -454,7 +455,8 @@ describe("DealDetailPage", () => {
     expect(html).toContain("Dallas Independent SD");
     expect(html).toContain("Brett Rios");
     expect(html).toContain('href="/contacts/contact-1"');
-    expect(html).toContain("Contact assigned");
+    expect(html).toContain("Morgan Carter");
+    expect(html).not.toContain("Contact assigned");
     expect(html).not.toContain("hs_deal_82211");
     expect(html).toContain("123456");
     expect(html).toContain("DFW-3-12826-aa");

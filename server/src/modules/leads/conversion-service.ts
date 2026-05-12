@@ -15,6 +15,7 @@ import {
 } from "./questionnaire-service.js";
 import { LeadStageTransitionError } from "./stage-transition-service.js";
 import { computeExistingCustomerStatus } from "../companies/customer-status-service.js";
+import { resolveLeadSourceDisplayValue } from "./source-control.js";
 
 type TenantDb = NodePgDatabase<typeof schema>;
 
@@ -239,8 +240,9 @@ export function createLeadConversionService(
       companyId: lead.companyId,
       propertyId: lead.propertyId,
       sourceLeadId: lead.id,
+      creationContext: "lead_conversion",
       sourceLeadWriteMode: "lead_conversion",
-      source: input.source ?? lead.source ?? undefined,
+      source: input.source ?? resolveLeadSourceDisplayValue(lead) ?? undefined,
       description: input.description ?? lead.description ?? undefined,
       ddEstimate: input.ddEstimate,
       bidEstimate: input.bidEstimate,
