@@ -413,13 +413,11 @@ router.get("/pipeline", async (req, res, next) => {
 
 router.get("/stages/:stageId", async (req, res, next) => {
   try {
+    // listDealStagePage returns `rows` from a hand-written SELECT that never
+    // includes hubspot_deal_id — no redaction needed here.
     const result = await listDealStagePage(req.tenantDb!, readStageInput(req));
     await req.commitTransaction!();
-    const includeHubspotId = shouldIncludeHubspotId(req.query, req.user!.role);
-    res.json({
-      ...result,
-      deals: result.deals ? redactDealList(result.deals, { includeHubspotId }) : result.deals,
-    });
+    res.json(result);
   } catch (err) {
     next(err);
   }
