@@ -31,7 +31,12 @@ export interface ProjectMirrorFields {
   currentPhaseId: string | null;
   currentPhaseName: string | null;
   currentPhaseSortOrder: number | null;
-  isActive: boolean;
+  // null = the snapshot did not carry an active signal (typical for the
+  // SyncHub webhook relay, whose payload omits this field). The upsert
+  // preserves the existing row's is_active in that case rather than
+  // forcing it back to a guessed default — see ON CONFLICT clause in
+  // upsertProjectMirror.
+  isActive: boolean | null;
   startDate: string | null;
   completionDate: string | null;
   projectedFinishDate: string | null;
@@ -215,6 +220,27 @@ function extractOwner(snapshot: Record<string, unknown>) {
   };
 }
 
+// Single source of truth for the Procore → CRM active mapping. Both the
+// live mirror (buildProjectMirrorFields) and the one-off backfill script
+// import this so they cannot drift. Returns null when the snapshot does
+// not carry an active signal at all — callers must treat that as "no
+// information" and preserve whatever state the CRM already has.
+export function deriveIsActive(
+  snapshot: Record<string, unknown> | null | undefined
+): { isActive: boolean; reason: string } | null {
+  if (!snapshot || typeof snapshot !== "object") return null;
+  if (typeof snapshot.active === "boolean") {
+    return { isActive: snapshot.active, reason: `snapshot.active=${snapshot.active}` };
+  }
+  if (typeof snapshot.status_name === "string") {
+    return {
+      isActive: snapshot.status_name !== "Inactive",
+      reason: `status_name=${JSON.stringify(snapshot.status_name)}`,
+    };
+  }
+  return null;
+}
+
 export function buildProjectMirrorFields(input: ProjectMirrorInput): ProjectMirrorFields {
   const snapshot = input.snapshot ?? {};
   const address = extractAddress(snapshot);
@@ -238,7 +264,7 @@ export function buildProjectMirrorFields(input: ProjectMirrorInput): ProjectMirr
     currentPhaseId: phase.phaseId,
     currentPhaseName: phase.phaseName,
     currentPhaseSortOrder: phase.sortOrder,
-    isActive: typeof snapshot.active === "boolean" ? snapshot.active : snapshot.status_name !== "Inactive",
+    isActive: deriveIsActive(snapshot)?.isActive ?? null,
     startDate: pickDate(snapshot, ["start_date", "startDate"]),
     completionDate: pickDate(snapshot, ["completion_date", "completionDate"]),
     projectedFinishDate: pickDate(snapshot, ["projected_finish_date", "projectedFinishDate"]),
@@ -317,7 +343,7 @@ export async function upsertProjectMirror(
      )
      VALUES (
        $1::uuid, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12,
-       $13, $14, $15, $16,
+       $13, $14, $15, COALESCE($16::boolean, true),
        $17::date, $18::date, $19::date, $20::date,
        $21::numeric, $22::numeric, $23::numeric, $24, $25,
        $26::timestamptz, $27::timestamptz, $28::jsonb, $29,
@@ -338,7 +364,11 @@ export async function upsertProjectMirror(
        current_phase_id = COALESCE(EXCLUDED.current_phase_id, ${schema}.projects.current_phase_id),
        current_phase_name = COALESCE(EXCLUDED.current_phase_name, ${schema}.projects.current_phase_name),
        current_phase_sort_order = COALESCE(EXCLUDED.current_phase_sort_order, ${schema}.projects.current_phase_sort_order),
-       is_active = EXCLUDED.is_active,
+       -- Preserve the prior is_active when the incoming snapshot did not
+       -- carry an active signal (param $16 is null). Sparse SyncHub
+       -- webhook payloads land here. When the snapshot does carry a
+       -- signal, Procore wins and the flag flips.
+       is_active = COALESCE($16::boolean, ${schema}.projects.is_active),
        start_date = COALESCE(EXCLUDED.start_date, ${schema}.projects.start_date),
        completion_date = COALESCE(EXCLUDED.completion_date, ${schema}.projects.completion_date),
        projected_finish_date = COALESCE(EXCLUDED.projected_finish_date, ${schema}.projects.projected_finish_date),

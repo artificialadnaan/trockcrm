@@ -5,6 +5,7 @@ import {
   parseActiveBackfillArgs,
   type CandidateRow,
 } from "../../../scripts/backfill-projects-active-flag.js";
+import { deriveIsActive } from "../../src/modules/projects/service.js";
 
 describe("deriveIsActiveFromSnapshot", () => {
   it("returns null when snapshot is missing", () => {
@@ -129,4 +130,35 @@ describe("buildTenantActivePlan", () => {
     expect(plan.updates[0].newIsActive).toBe(false);
     expect(plan.updates[0].reason).toContain("Inactive");
   });
+});
+
+describe("parity between script's deriveIsActiveFromSnapshot and the live mirror's deriveIsActive", () => {
+  // Both helpers must agree on every snapshot shape we encounter so the
+  // backfill's plan and the next webhook/backfill sync produce the same
+  // is_active result for the same row.
+  const fixtures: Array<{ name: string; snapshot: Record<string, unknown> | null | undefined }> = [
+    { name: "null snapshot", snapshot: null },
+    { name: "undefined snapshot", snapshot: undefined },
+    { name: "empty object", snapshot: {} },
+    { name: "active=true", snapshot: { active: true } },
+    { name: "active=false", snapshot: { active: false } },
+    { name: "active=non-boolean", snapshot: { active: "yes" } },
+    { name: "status_name Active", snapshot: { status_name: "Active" } },
+    { name: "status_name Inactive", snapshot: { status_name: "Inactive" } },
+    { name: "active=true overrides Inactive status", snapshot: { active: true, status_name: "Inactive" } },
+    { name: "neither field present, name only", snapshot: { name: "X" } },
+  ];
+
+  for (const fixture of fixtures) {
+    it(`agrees on: ${fixture.name}`, () => {
+      const scriptResult = deriveIsActiveFromSnapshot(fixture.snapshot ?? null);
+      const liveResult = deriveIsActive(fixture.snapshot);
+      // Both either return null or the same isActive boolean. Reason
+      // strings are allowed to drift, since they are debug-only.
+      expect(scriptResult === null).toBe(liveResult === null);
+      if (scriptResult && liveResult) {
+        expect(scriptResult.isActive).toBe(liveResult.isActive);
+      }
+    });
+  }
 });

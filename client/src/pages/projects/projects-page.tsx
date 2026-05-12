@@ -321,16 +321,16 @@ export function ProjectsPage() {
         <MetricCard
           eyebrow="Active projects"
           value={String(counts?.active ?? 0)}
-          badge={`of ${counts?.total ?? 0} total`}
-          caption="Procore Portfolio"
+          badge={`of ${counts?.total ?? 0} mirrored`}
+          caption="CRM-wide, unfiltered"
           tone="white"
           accent="red"
         />
         <MetricCard
           eyebrow="Inactive"
           value={String(counts?.inactive ?? 0)}
-          badge={includeInactive ? "Shown" : "Hidden by default"}
-          caption="Soft-deleted in CRM"
+          badge={includeInactive ? "Shown in views" : "Hidden by default"}
+          caption="CRM-wide, unfiltered"
           tone="white"
           accent="slate"
         />
