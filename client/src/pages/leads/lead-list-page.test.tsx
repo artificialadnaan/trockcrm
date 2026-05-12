@@ -2,12 +2,13 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { renderToStaticMarkup } from "react-dom/server";
 import { MemoryRouter } from "react-router-dom";
 import type { ReactNode } from "react";
-import { LeadListPage, buildLeadIntakePath, isImmediateNextStageMove } from "./lead-list-page";
+import { LeadListPage, buildLeadIntakePath, buildLeadStageNavigationPath, isImmediateNextStageMove } from "./lead-list-page";
 
 const mocks = vi.hoisted(() => ({
   useLeadBoardMock: vi.fn(),
   useLeadsMock: vi.fn(),
   useAuthMock: vi.fn(),
+  useTaskAssigneesMock: vi.fn(),
 }));
 
 vi.mock("@/components/ui/button", () => ({
@@ -30,6 +31,20 @@ vi.mock("@/hooks/use-leads", () => ({
     })[slug] ?? slug,
   useLeadBoard: mocks.useLeadBoardMock,
   useLeads: mocks.useLeadsMock,
+}));
+
+vi.mock("@/hooks/use-task-assignees", () => ({
+  useTaskAssignees: mocks.useTaskAssigneesMock,
+}));
+
+vi.mock("@/components/ui/select", () => ({
+  Select: ({ children }: { children: ReactNode }) => <div>{children}</div>,
+  SelectContent: ({ children }: { children: ReactNode }) => <div>{children}</div>,
+  SelectItem: ({ children }: { children: ReactNode }) => <div>{children}</div>,
+  SelectTrigger: ({ children }: { children: ReactNode }) => <div>{children}</div>,
+  SelectValue: ({ children, placeholder }: { children?: ReactNode; placeholder?: string }) => (
+    <span>{children ?? placeholder ?? ""}</span>
+  ),
 }));
 
 const boardColumns = [
@@ -175,6 +190,11 @@ function renderPage(path = "/leads?scope=mine", role = "rep") {
 describe("LeadListPage", () => {
   beforeEach(() => {
     mocks.useAuthMock.mockReset();
+    mocks.useTaskAssigneesMock.mockReset();
+    mocks.useTaskAssigneesMock.mockReturnValue({
+      assignees: [{ id: "rep-1", displayName: "Brett Jones" }],
+      loading: false,
+    });
     boardColumns.splice(0, boardColumns.length, ...structuredClone(defaultBoardColumns));
     mocks.useLeadBoardMock.mockReturnValue({
       board: {
@@ -210,7 +230,7 @@ describe("LeadListPage", () => {
   it("renders the readonly lead board and excludes legacy opportunity from the board", () => {
     const html = renderPage();
 
-    expect(mocks.useLeadBoardMock).toHaveBeenCalledWith("mine");
+    expect(mocks.useLeadBoardMock).toHaveBeenCalledWith("mine", undefined);
     expect(mocks.useLeadsMock).toHaveBeenCalledWith({ status: "open", isActive: true, scope: "mine" });
     expect(html).toContain("Read-only lead board");
     expect(html).toContain("New Lead");
@@ -251,6 +271,35 @@ describe("LeadListPage", () => {
     expect(mocks.useLeadsMock).toHaveBeenLastCalledWith({ status: "open", isActive: true, scope: "team" });
   });
 
+  it("renders selected owner filter names instead of raw selected owner ids", () => {
+    const html = renderPage("/leads?scope=team&assignedRepId=rep-1", "director");
+
+    expect(html).toContain("Brett Jones");
+    expect(html).not.toContain(">rep-1<");
+    expect(mocks.useLeadsMock).toHaveBeenLastCalledWith({
+      status: "open",
+      isActive: true,
+      scope: "team",
+      assignedRepId: "rep-1",
+    });
+  });
+
+  it("preserves selected owner filter when building a lead stage navigation path", () => {
+    expect(buildLeadStageNavigationPath("stage-new", "team", "rep-1")).toBe(
+      "/leads/stages/stage-new?scope=team&assignedRepId=rep-1"
+    );
+    expect(buildLeadStageNavigationPath("stage-new", "team", "")).toBe("/leads/stages/stage-new?scope=team");
+    expect(buildLeadStageNavigationPath("stage-new", "mine", "rep-1")).toBe("/leads/stages/stage-new?scope=mine");
+  });
+
+  it("ignores stale owner query params when the lead scope is mine", () => {
+    const html = renderPage("/leads?scope=mine&assignedRepId=rep-1", "director");
+
+    expect(mocks.useLeadBoardMock).toHaveBeenLastCalledWith("mine", undefined);
+    expect(mocks.useLeadsMock).toHaveBeenLastCalledWith({ status: "open", isActive: true, scope: "mine" });
+    expect(html).not.toContain("All reps");
+  });
+
   it("does not fire board fetch before auth resolves", () => {
     mocks.useAuthMock.mockReturnValue({
       user: null,
@@ -271,34 +320,34 @@ describe("LeadListPage", () => {
 
     renderPage("/leads", "director");
 
-    expect(mocks.useLeadBoardMock).toHaveBeenCalledWith("team");
+    expect(mocks.useLeadBoardMock).toHaveBeenCalledWith("team", undefined);
   });
 
   it("forces summary leads to mine scope for reps regardless of ?scope= param", () => {
     renderPage("/leads?scope=team", "rep");
 
-    expect(mocks.useLeadBoardMock).toHaveBeenLastCalledWith("mine");
+    expect(mocks.useLeadBoardMock).toHaveBeenLastCalledWith("mine", undefined);
     expect(mocks.useLeadsMock).toHaveBeenLastCalledWith({ status: "open", isActive: true, scope: "mine" });
   });
 
   it("defaults the board scope by role when the query param is absent", () => {
     renderPage("/leads", "rep");
-    expect(mocks.useLeadBoardMock).toHaveBeenLastCalledWith("mine");
+    expect(mocks.useLeadBoardMock).toHaveBeenLastCalledWith("mine", undefined);
 
     renderPage("/leads", "director");
-    expect(mocks.useLeadBoardMock).toHaveBeenLastCalledWith("team");
+    expect(mocks.useLeadBoardMock).toHaveBeenLastCalledWith("team", undefined);
 
     renderPage("/leads", "admin");
-    expect(mocks.useLeadBoardMock).toHaveBeenLastCalledWith("all");
+    expect(mocks.useLeadBoardMock).toHaveBeenLastCalledWith("all", undefined);
 
     renderPage("/leads?scope=mine", "director");
-    expect(mocks.useLeadBoardMock).toHaveBeenLastCalledWith("mine");
+    expect(mocks.useLeadBoardMock).toHaveBeenLastCalledWith("mine", undefined);
   });
 
   it("forces reps to mine scope even when ?scope=team is set", () => {
     const html = renderPage("/leads?scope=team", "rep");
 
-    expect(mocks.useLeadBoardMock).toHaveBeenLastCalledWith("mine");
+    expect(mocks.useLeadBoardMock).toHaveBeenLastCalledWith("mine", undefined);
     expect(html).toContain('aria-pressed="true">Mine');
     expect(html).toContain('aria-pressed="false">Team');
   });
@@ -306,7 +355,7 @@ describe("LeadListPage", () => {
   it("forces reps to mine scope even when ?scope=all is set", () => {
     const html = renderPage("/leads?scope=all", "rep");
 
-    expect(mocks.useLeadBoardMock).toHaveBeenLastCalledWith("mine");
+    expect(mocks.useLeadBoardMock).toHaveBeenLastCalledWith("mine", undefined);
     expect(html).toContain('aria-pressed="true">Mine');
     expect(html).toContain('aria-pressed="false">All');
   });

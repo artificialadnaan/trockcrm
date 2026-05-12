@@ -72,8 +72,8 @@ import { DealStagePage } from "./deal-stage-page";
 
 describe("DealStagePage", () => {
   beforeEach(() => {
-    mocks.useRegionsMock.mockReturnValue({ regions: [] });
-    mocks.useTaskAssigneesMock.mockReturnValue({ assignees: [] });
+    mocks.useRegionsMock.mockReturnValue({ regions: [{ id: "region-1", name: "Dallas" }] });
+    mocks.useTaskAssigneesMock.mockReturnValue({ assignees: [{ id: "rep-1", displayName: "Alex Rep" }] });
     mocks.useNormalizedStageRouteMock.mockReturnValue({
       needsRedirect: false,
       redirectTo: "/deals/stages/stage-estimating?scope=team",
@@ -125,6 +125,21 @@ describe("DealStagePage", () => {
     expect(html).toContain("Stage value");
     expect(html).toContain("Avg. visible age");
     expect(html).toContain("North Campus");
+  });
+
+  it("renders selected filter names instead of raw selected ids", () => {
+    const html = renderToStaticMarkup(
+      <MemoryRouter initialEntries={["/deals/stages/stage-estimating?scope=team&regionId=region-1&assignedRepId=rep-1"]}>
+        <Routes>
+          <Route path="/deals/stages/:stageId" element={<DealStagePage />} />
+        </Routes>
+      </MemoryRouter>
+    );
+
+    expect(html).toContain("Dallas");
+    expect(html).toContain("Alex Rep");
+    expect(html).not.toContain(">region-1<");
+    expect(html).not.toContain(">rep-1<");
   });
 
   it("renders a stage error when the stage query fails", () => {

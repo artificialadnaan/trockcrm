@@ -2,9 +2,11 @@ import { useMemo } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import { ArrowRight, Calendar, Mail, Phone, Plus, Search } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { MetricCard } from "@/components/shared/metric-card";
 import { ScopeToggle, type ScopeToggleOption } from "@/components/shared/scope-toggle";
 import { USD_COMPACT } from "@/components/shared/formatters";
+import { useTaskAssignees } from "@/hooks/use-task-assignees";
 import { useAuth } from "@/lib/auth";
 import {
   LEAD_BOARD_STAGE_SLUGS,
@@ -28,6 +30,12 @@ const SOURCE_LABELS = ["Referral", "Inbound", "Outbound", "Bid Board", "Repeat"]
 
 export function buildLeadIntakePath(leadId: string) {
   return `/leads/${leadId}?focus=qualification`;
+}
+
+export function buildLeadStageNavigationPath(stageId: string, scope: PipelineScope, assignedRepId?: string | null) {
+  const params = new URLSearchParams({ scope });
+  if (scope !== "mine" && assignedRepId) params.set("assignedRepId", assignedRepId);
+  return `/leads/stages/${stageId}?${params.toString()}`;
 }
 
 export function isImmediateNextStageMove(
@@ -196,8 +204,18 @@ function LeadListPageContent({ role }: { role: string }) {
   const [searchParams, setSearchParams] = useSearchParams();
   const scope = getScope(searchParams, role);
   const bucket = searchParams.get("bucket");
-  const { board, loading, error } = useLeadBoard(scope);
-  const { leads } = useLeads({ status: "open", isActive: true, scope });
+  const selectedOwnerId = role === "rep" || scope === "mine" ? "" : searchParams.get("assignedRepId") ?? "";
+  const { assignees } = useTaskAssignees();
+  const selectedOwnerLabel = selectedOwnerId
+    ? assignees.find((assignee) => assignee.id === selectedOwnerId)?.displayName ?? "Selected rep"
+    : "All reps";
+  const { board, loading, error } = useLeadBoard(scope, selectedOwnerId || undefined);
+  const { leads } = useLeads({
+    status: "open",
+    isActive: true,
+    scope,
+    ...(selectedOwnerId ? { assignedRepId: selectedOwnerId } : {}),
+  });
 
   const columns = useMemo(
     () =>
@@ -222,6 +240,14 @@ function LeadListPageContent({ role }: { role: string }) {
   const updateScope = (nextScope: PipelineScope) => {
     const next = new URLSearchParams(searchParams);
     next.set("scope", nextScope);
+    if (nextScope === "mine") next.delete("assignedRepId");
+    setSearchParams(next);
+  };
+
+  const updateOwner = (ownerId: string | null) => {
+    const next = new URLSearchParams(searchParams);
+    if (!ownerId || ownerId === "__all__") next.delete("assignedRepId");
+    else next.set("assignedRepId", ownerId);
     setSearchParams(next);
   };
 
@@ -241,6 +267,21 @@ function LeadListPageContent({ role }: { role: string }) {
         </div>
         <div className="flex flex-wrap items-center gap-3">
           <ScopeToggle options={SCOPE_OPTIONS} value={scope} onChange={updateScope} ariaLabel="Lead scope" />
+          {(role === "admin" || role === "director") && scope !== "mine" ? (
+            <Select value={selectedOwnerId || "__all__"} onValueChange={updateOwner}>
+              <SelectTrigger className="w-44">
+                <SelectValue placeholder="All reps">{selectedOwnerLabel}</SelectValue>
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="__all__">All reps</SelectItem>
+                {assignees.map((assignee) => (
+                  <SelectItem key={assignee.id} value={assignee.id}>
+                    {assignee.displayName}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          ) : null}
           <Button onClick={() => navigate("/leads/new")} className="bg-brand-red text-white hover:bg-brand-red/90">
             <Plus className="mr-2 h-4 w-4" />
             New Lead
@@ -285,7 +326,7 @@ function LeadListPageContent({ role }: { role: string }) {
                   stage={column.stage}
                   count={column.count}
                   cards={column.cards}
-                  onOpenStage={(stageId) => navigate(`/leads/stages/${stageId}?scope=${scope}`)}
+                  onOpenStage={(stageId) => navigate(buildLeadStageNavigationPath(stageId, scope, selectedOwnerId))}
                   onOpenRecord={(leadId) => navigate(`/leads/${leadId}`)}
                 />
               ))}

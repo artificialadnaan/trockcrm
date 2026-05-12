@@ -55,6 +55,14 @@ vi.mock("@/components/contacts/contact-form", () => ({
   ContactForm: () => <div>Contact Form</div>,
 }));
 
+vi.mock("@/components/properties/property-create-dialog", () => ({
+  PropertyCreateDialog: ({ triggerLabel = "New Property", initialCompanyId, companyLocked }: { triggerLabel?: string; initialCompanyId?: string; companyLocked?: boolean }) => (
+    <button type="button" data-company-id={initialCompanyId} data-company-locked={String(Boolean(companyLocked))}>
+      {triggerLabel}
+    </button>
+  ),
+}));
+
 vi.mock("@/components/deals/deal-stage-badge", () => ({
   DealStageBadge: ({ stageId }: { stageId: string }) => <span>{stageId}</span>,
 }));
@@ -229,6 +237,14 @@ describe("CompanyDetailPage", () => {
     expect(html).toContain("Files");
     expect(html).toContain("Emails");
     expect(html).toContain("Recordings");
+  });
+
+  it("renders an Add Property action locked to the current company", () => {
+    const html = renderPage();
+
+    expect(html).toContain("Add Property");
+    expect(html).toContain('data-company-id="company-1"');
+    expect(html).toContain('data-company-locked="true"');
   });
 
   it("renders right-rail with owner, industry, region, domain, system IDs", () => {

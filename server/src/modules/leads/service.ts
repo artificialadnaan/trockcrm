@@ -233,6 +233,7 @@ export interface LeadBoardInput {
   userId: string;
   activeOfficeId: string;
   scope: WorkspaceScope;
+  assignedRepId?: string;
 }
 
 export interface LeadStagePageInput extends LeadBoardInput {

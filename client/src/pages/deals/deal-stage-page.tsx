@@ -28,6 +28,12 @@ export function DealStagePage() {
   const { assignees } = useTaskAssignees();
   const { user } = useAuth();
   const summary = buildDealStageSummary(data);
+  const selectedRegionId = searchParams.get("regionId") ?? "__all__";
+  const selectedRepId = searchParams.get("assignedRepId") ?? "__all__";
+  const selectedRegionLabel =
+    selectedRegionId === "__all__" ? "All regions" : regions.find((region) => region.id === selectedRegionId)?.name ?? "Selected region";
+  const selectedRepLabel =
+    selectedRepId === "__all__" ? "All reps" : assignees.find((assignee) => assignee.id === selectedRepId)?.displayName ?? "Selected rep";
 
   const updateFilter = (key: string, value: string) => {
     const params = new URLSearchParams(searchParams);
@@ -73,11 +79,11 @@ export function DealStagePage() {
         <div className="space-y-2">
           <label className="text-[11px] font-black tracking-[0.16em] text-slate-500 uppercase">Region</label>
           <Select
-            value={searchParams.get("regionId") ?? "__all__"}
+            value={selectedRegionId}
             onValueChange={(value) => updateFilter("regionId", value ?? "__all__")}
           >
             <SelectTrigger>
-              <SelectValue placeholder="All regions" />
+              <SelectValue placeholder="All regions">{selectedRegionLabel}</SelectValue>
             </SelectTrigger>
             <SelectContent>
               <SelectItem value="__all__">All regions</SelectItem>
@@ -93,11 +99,11 @@ export function DealStagePage() {
           <div className="space-y-2">
             <label className="text-[11px] font-black tracking-[0.16em] text-slate-500 uppercase">Sales rep</label>
             <Select
-              value={searchParams.get("assignedRepId") ?? "__all__"}
+              value={selectedRepId}
               onValueChange={(value) => updateFilter("assignedRepId", value ?? "__all__")}
             >
               <SelectTrigger>
-                <SelectValue placeholder="All reps" />
+                <SelectValue placeholder="All reps">{selectedRepLabel}</SelectValue>
               </SelectTrigger>
               <SelectContent>
                 <SelectItem value="__all__">All reps</SelectItem>

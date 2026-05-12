@@ -1,0 +1,177 @@
+import "dotenv/config";
+import fs from "node:fs";
+import path from "node:path";
+import { pathToFileURL } from "node:url";
+import pg from "pg";
+import { getAllProjects } from "../server/src/modules/companycam/client.js";
+
+const DEFAULT_TENANT = "office_dallas";
+const PROJECT_NUMBER_REGEX = /\b(?:DFW|ATL)-\d+-\d{5}-[a-z]{2}\b/i;
+const AUTO_IMPORT_FUZZY_THRESHOLD = 0.9;
+
+export interface CompanyCamProjectForPlan {
+  id: string;
+  name: string;
+  photoCount: number;
+}
+
+export interface DealForCompanyCamPlan {
+  id: string;
+  name: string;
+  dealNumber: string | null;
+  projectNumber: string | null;
+  companycamProjectId: string | null;
+}
+
+export interface CompanyCamImportPlanRow {
+  companyCamProjectId: string;
+  companyCamProjectName: string;
+  photoCount: number;
+  matchedDealId: string | null;
+  matchedDealName: string | null;
+  matchedDealNumber: string | null;
+  confidence: number;
+  matchReason: string;
+}
+
+export function normalizeCompanyCamProjectName(value: string): string {
+  return value
+    .toLowerCase()
+    .replace(PROJECT_NUMBER_REGEX, " ")
+    .replace(/\b(project|photos?)\b/g, " ")
+    .replace(/[^a-z0-9]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function similarity(a: string, b: string): number {
+  if (a === b) return 1;
+  if (!a || !b) return 0;
+  const rows = Array.from({ length: a.length + 1 }, (_, i) => [i]);
+  for (let j = 1; j <= b.length; j++) rows[0][j] = j;
+  for (let i = 1; i <= a.length; i++) {
+    for (let j = 1; j <= b.length; j++) {
+      rows[i][j] = a[i - 1] === b[j - 1]
+        ? rows[i - 1][j - 1]
+        : 1 + Math.min(rows[i - 1][j], rows[i][j - 1], rows[i - 1][j - 1]);
+    }
+  }
+  return 1 - rows[a.length][b.length] / Math.max(a.length, b.length);
+}
+
+export function buildCompanyCamImportPlan(projects: CompanyCamProjectForPlan[], deals: DealForCompanyCamPlan[]) {
+  const rows: CompanyCamImportPlanRow[] = projects.map((project) => {
+    const embeddedProjectNumber = project.name.match(PROJECT_NUMBER_REGEX)?.[0]?.toLowerCase() ?? null;
+    const linked = deals.find((deal) => deal.companycamProjectId === project.id);
+    const projectNumberMatch = embeddedProjectNumber
+      ? deals.find((deal) => deal.projectNumber?.toLowerCase() === embeddedProjectNumber)
+      : null;
+    const normalizedProject = normalizeCompanyCamProjectName(project.name);
+    const fuzzy = deals
+      .map((deal) => ({ deal, score: similarity(normalizedProject, normalizeCompanyCamProjectName(deal.name)) }))
+      .sort((a, b) => b.score - a.score)[0];
+    const match =
+      linked ? { deal: linked, confidence: 1, reason: "existing_companycam_link" }
+        : projectNumberMatch ? { deal: projectNumberMatch, confidence: 1, reason: "project_number_in_name" }
+          : fuzzy && fuzzy.score >= AUTO_IMPORT_FUZZY_THRESHOLD ? { deal: fuzzy.deal, confidence: Number(fuzzy.score.toFixed(3)), reason: "fuzzy_project_name" }
+            : null;
+    return {
+      companyCamProjectId: project.id,
+      companyCamProjectName: project.name,
+      photoCount: project.photoCount,
+      matchedDealId: match?.deal.id ?? null,
+      matchedDealName: match?.deal.name ?? null,
+      matchedDealNumber: match?.deal.dealNumber ?? null,
+      confidence: match?.confidence ?? 0,
+      matchReason: match?.reason ?? "unmatched",
+    };
+  });
+  return {
+    rows,
+    totals: {
+      totalProjects: rows.length,
+      matchedProjects: rows.filter((row) => row.matchedDealId).length,
+      unmatchedProjects: rows.filter((row) => !row.matchedDealId).length,
+      totalPhotos: rows.reduce((sum, row) => sum + row.photoCount, 0),
+    },
+  };
+}
+
+function quoteIdent(value: string): string {
+  if (!/^office_[a-z0-9_]+$/.test(value)) throw new Error(`Invalid tenant schema: ${value}`);
+  return `"${value.replace(/"/g, '""')}"`;
+}
+
+function getConnectionString() {
+  const selected = process.env.DATABASE_PUBLIC_URL?.trim() || process.env.DATABASE_URL?.trim();
+  if (!selected) throw new Error("DATABASE_PUBLIC_URL or DATABASE_URL is required");
+  if (selected.includes("railway.internal") && !process.env.RAILWAY_ENVIRONMENT_ID && !process.env.RAILWAY_PROJECT_ID) {
+    throw new Error("Use DATABASE_PUBLIC_URL or railway run.");
+  }
+  return selected;
+}
+
+async function loadDeals(client: pg.Client, tenant: string): Promise<DealForCompanyCamPlan[]> {
+  const schema = quoteIdent(tenant);
+  const { rows } = await client.query(`
+    SELECT id::text, name, deal_number, project_number, companycam_project_id
+    FROM ${schema}.deals
+    WHERE is_active = true
+  `);
+  return rows.map((row) => ({
+    id: row.id,
+    name: row.name,
+    dealNumber: row.deal_number,
+    projectNumber: row.project_number,
+    companycamProjectId: row.companycam_project_id,
+  }));
+}
+
+function csvEscape(value: unknown) {
+  return `"${String(value ?? "").replace(/"/g, '""')}"`;
+}
+
+export function writeCompanyCamPlanCsv(rows: CompanyCamImportPlanRow[], outputPath: string) {
+  fs.mkdirSync(path.dirname(outputPath), { recursive: true });
+  const csvRows = [
+    ["companycam_project_id", "project_name", "photo_count", "matched_deal_id", "matched_deal_number", "matched_deal_name", "confidence", "match_reason"],
+    ...rows.map((row) => [
+      row.companyCamProjectId,
+      row.companyCamProjectName,
+      String(row.photoCount),
+      row.matchedDealId ?? "unmatched",
+      row.matchedDealNumber ?? "",
+      row.matchedDealName ?? "",
+      String(row.confidence),
+      row.matchReason,
+    ]),
+  ];
+  fs.writeFileSync(outputPath, csvRows.map((row) => row.map(csvEscape).join(",")).join("\n"));
+}
+
+export async function runCompanyCamInventory(argv = process.argv.slice(2)) {
+  const tenant = argv.find((arg) => arg.startsWith("--tenant="))?.split("=").slice(1).join("=") || DEFAULT_TENANT;
+  const output = argv.find((arg) => arg.startsWith("--output="))?.split("=").slice(1).join("=");
+  const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
+  const outputPath = output || `docs/audit/companycam-import-plan-${timestamp}.csv`;
+  const client = new pg.Client({ connectionString: getConnectionString() });
+  await client.connect();
+  try {
+    const [projects, deals] = await Promise.all([getAllProjects(), loadDeals(client, tenant)]);
+    const plan = buildCompanyCamImportPlan(
+      projects.map((project) => ({ id: project.id, name: project.name, photoCount: project.photo_count ?? 0 })),
+      deals
+    );
+    writeCompanyCamPlanCsv(plan.rows, outputPath);
+    console.log(JSON.stringify({ tenant, outputPath, ...plan.totals }, null, 2));
+  } finally {
+    await client.end();
+  }
+}
+
+if (import.meta.url === pathToFileURL(process.argv[1] || "").href) {
+  runCompanyCamInventory().catch((error) => {
+    console.error(error instanceof Error ? error.message : error);
+    process.exit(1);
+  });
+}

@@ -46,6 +46,7 @@ import { useCompanyDetail, useCompanyContacts, useCompanyDeals, verifyCompany, t
 import { useLeads } from "@/hooks/use-leads";
 import { usePipelineStages } from "@/hooks/use-pipeline-config";
 import { ContactForm } from "@/components/contacts/contact-form";
+import { PropertyCreateDialog } from "@/components/properties/property-create-dialog";
 import { CompanyCopilotPanel } from "@/components/ai/company-copilot-panel";
 import { RecordingList } from "@/components/call-recordings/recording-list";
 import { api } from "@/lib/api";
@@ -204,6 +205,7 @@ export function CompanyDetailPage() {
   const [activeTab, setActiveTab] = useState<Tab>("overview");
   const [addContactOpen, setAddContactOpen] = useState(false);
   const [contactsKey, setContactsKey] = useState(0);
+  const [portfolioKey, setPortfolioKey] = useState(0);
   const [verifyingCompany, setVerifyingCompany] = useState(false);
 
   if (loading) {
@@ -366,6 +368,16 @@ export function CompanyDetailPage() {
         <Plus className="h-4 w-4" />
         New deal
       </Link>
+      <PropertyCreateDialog
+        initialCompanyId={company.id}
+        companyLocked
+        triggerLabel="Add Property"
+        onCreated={() => {
+          refetchCompany();
+          setPortfolioKey((key) => key + 1);
+          setActiveTab("portfolio");
+        }}
+      />
       <DropdownMenu>
         <DropdownMenuTrigger
           render={
@@ -423,7 +435,7 @@ export function CompanyDetailPage() {
       {activeTab === "contacts" && (
         <CompanyContactsTab key={contactsKey} companyId={company.id} onAddContact={() => setAddContactOpen(true)} />
       )}
-      {activeTab === "portfolio" && <CompanyPortfolioTab companyId={company.id} companyName={company.name} />}
+      {activeTab === "portfolio" && <CompanyPortfolioTab key={portfolioKey} companyId={company.id} companyName={company.name} />}
       {activeTab === "deals" && <CompanyDealsTab companyId={company.id} />}
       {activeTab === "files" && <CompanyFilesTab companyId={company.id} />}
       {activeTab === "emails" && <CompanyEmailsTab />}
