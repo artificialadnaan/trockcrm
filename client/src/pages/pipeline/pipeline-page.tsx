@@ -24,7 +24,8 @@ import {
   getActivePipelineColumns,
   getTerminalDateFilterLabel,
   isTerminalOutcomeSlug,
-  readTerminalDateFilter,
+  readTerminalDateFiltersFromSearchParams,
+  setTerminalDateFilterSearchParams,
   writeTerminalDateFilter,
   type TerminalDateFilter,
   type TerminalOutcome,
@@ -220,10 +221,9 @@ export function PipelinePage() {
   const [pendingMove, setPendingMove] = useState<{ deal: Deal; targetStageId: string } | null>(null);
   const [lastRefreshed, setLastRefreshed] = useState<Date>(new Date());
   const [now, setNow] = useState<Date>(new Date());
-  const [terminalDateFilters, setTerminalDateFilters] = useState<Record<TerminalOutcome, TerminalDateFilter>>(() => ({
-    won: readTerminalDateFilter("won"),
-    lost: readTerminalDateFilter("lost"),
-  }));
+  const [terminalDateFilters, setTerminalDateFilters] = useState<Record<TerminalOutcome, TerminalDateFilter>>(() =>
+    readTerminalDateFiltersFromSearchParams(searchParams)
+  );
 
   const sensors = useSensors(
     useSensor(PointerSensor, { activationConstraint: { distance: 8 } })
@@ -256,7 +256,12 @@ export function PipelinePage() {
   const updateTerminalDateFilter = useCallback((outcome: TerminalOutcome, filter: TerminalDateFilter) => {
     writeTerminalDateFilter(outcome, filter);
     setTerminalDateFilters((current) => ({ ...current, [outcome]: filter }));
-  }, []);
+    setSearchParams((current) => {
+      const next = new URLSearchParams(current);
+      setTerminalDateFilterSearchParams(next, outcome, filter);
+      return next;
+    });
+  }, [setSearchParams]);
 
   useEffect(() => {
     fetchPipeline();
@@ -264,6 +269,7 @@ export function PipelinePage() {
 
   useEffect(() => {
     setShowDd(searchParams.get("showDd") === "1");
+    setTerminalDateFilters(readTerminalDateFiltersFromSearchParams(searchParams));
   }, [searchParams]);
 
   useEffect(() => {

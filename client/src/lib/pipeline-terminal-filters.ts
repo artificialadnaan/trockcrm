@@ -1,6 +1,6 @@
 export type TerminalOutcome = "won" | "lost";
 export type TerminalDateFilter =
-  | { preset: "7" | "30" | "60" | "all"; customStart?: undefined; customEnd?: undefined }
+  | { preset: "7" | "30" | "60" | "90" | "all"; customStart?: undefined; customEnd?: undefined }
   | { preset: "custom"; customStart: string; customEnd?: string };
 
 const TERMINAL_FILTER_STORAGE_KEYS: Record<TerminalOutcome, string> = {
@@ -11,7 +11,7 @@ const LEGACY_TERMINAL_FILTER_STORAGE_KEYS: Record<TerminalOutcome, string> = {
   won: "pipeline_terminal_filter_won",
   lost: "pipeline_terminal_filter_lost",
 };
-const DEFAULT_TERMINAL_DATE_FILTER: TerminalDateFilter = { preset: "30" };
+const DEFAULT_TERMINAL_DATE_FILTER: TerminalDateFilter = { preset: "all" };
 
 export function isTerminalOutcomeSlug(slug: string): slug is TerminalOutcome {
   return slug === "won" || slug === "lost";
@@ -34,6 +34,16 @@ function formatDateParam(date: Date) {
   return date.toISOString().split("T")[0];
 }
 
+function isIsoDate(value: string) {
+  return /^\d{4}-\d{2}-\d{2}$/.test(value);
+}
+
+export function clampDateToToday(value: string, now = new Date()) {
+  if (!isIsoDate(value)) return value;
+  const today = getTodayDateParam(now);
+  return value > today ? today : value;
+}
+
 export function daysAgo(days: number, now = new Date()) {
   const date = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()));
   date.setUTCDate(date.getUTCDate() - days);
@@ -53,6 +63,7 @@ export function readTerminalDateFilter(outcome: TerminalOutcome): TerminalDateFi
       parsed.preset === "7" ||
       parsed.preset === "30" ||
       parsed.preset === "60" ||
+      parsed.preset === "90" ||
       parsed.preset === "all"
     ) {
       return { preset: parsed.preset };
@@ -76,6 +87,10 @@ export function writeTerminalDateFilter(outcome: TerminalOutcome, filter: Termin
   window.localStorage.setItem(TERMINAL_FILTER_STORAGE_KEYS[outcome], JSON.stringify(filter));
 }
 
+export function getTodayDateParam(now = new Date()) {
+  return daysAgo(0, now);
+}
+
 export function getTerminalDateFilterLabel(filter: TerminalDateFilter) {
   if (filter.preset === "custom") return "Custom";
   if (filter.preset === "all") return "All time";
@@ -93,8 +108,8 @@ function appendTerminalDateParams(
     return;
   }
   if (filter.preset === "custom") {
-    params.set(`${prefix}_since`, filter.customStart);
-    if (filter.customEnd) params.set(`${prefix}_until`, filter.customEnd);
+    params.set(`${prefix}_since`, clampDateToToday(filter.customStart));
+    if (filter.customEnd) params.set(`${prefix}_until`, clampDateToToday(filter.customEnd));
     return;
   }
 
@@ -136,4 +151,63 @@ export function buildDealStageWorkspacePath(input: {
 
 export function getActivePipelineColumns<T extends { stage: { slug: string } }>(columns: T[]) {
   return columns.filter((column) => !isTerminalPipelineStageSlug(column.stage.slug));
+}
+
+function isTerminalPreset(value: string | null): value is Exclude<TerminalDateFilter["preset"], "custom"> {
+  return value === "7" || value === "30" || value === "60" || value === "90" || value === "all";
+}
+
+function readTerminalDateFilterFromSearchParams(
+  params: URLSearchParams,
+  outcome: TerminalOutcome
+): TerminalDateFilter | null {
+  const preset = params.get(`${outcome}_preset`);
+  if (isTerminalPreset(preset)) return { preset };
+
+  if (params.get(`${outcome}_all_time`) === "true") return { preset: "all" };
+
+  const since = params.get(`${outcome}_since`);
+  const until = params.get(`${outcome}_until`);
+  if (since) {
+    return {
+      preset: "custom",
+      customStart: clampDateToToday(since),
+      customEnd: until ? clampDateToToday(until) : undefined,
+    };
+  }
+
+  return null;
+}
+
+export function readTerminalDateFiltersFromSearchParams(
+  params: URLSearchParams
+): Record<TerminalOutcome, TerminalDateFilter> {
+  return {
+    won: readTerminalDateFilterFromSearchParams(params, "won") ?? DEFAULT_TERMINAL_DATE_FILTER,
+    lost: readTerminalDateFilterFromSearchParams(params, "lost") ?? DEFAULT_TERMINAL_DATE_FILTER,
+  };
+}
+
+export function setTerminalDateFilterSearchParams(
+  params: URLSearchParams,
+  outcome: TerminalOutcome,
+  filter: TerminalDateFilter
+) {
+  params.delete(`${outcome}_preset`);
+  params.delete(`${outcome}_since`);
+  params.delete(`${outcome}_until`);
+  params.delete(`${outcome}_all_time`);
+
+  if (filter.preset === "all") {
+    params.set(`${outcome}_all_time`, "true");
+    return;
+  }
+
+  if (filter.preset === "custom") {
+    params.set(`${outcome}_since`, clampDateToToday(filter.customStart));
+    if (filter.customEnd) params.set(`${outcome}_until`, clampDateToToday(filter.customEnd));
+    return;
+  }
+
+  params.set(`${outcome}_preset`, filter.preset);
 }

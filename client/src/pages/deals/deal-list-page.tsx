@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import { ArrowRight, Briefcase, Plus, Search } from "lucide-react";
 import { Button } from "@/components/ui/button";
@@ -10,11 +10,15 @@ import { useDealBoard, type Deal, type DealBoardColumn } from "@/hooks/use-deals
 import { usePipelineStages } from "@/hooks/use-pipeline-config";
 import { buildCanonicalDealBoardColumns } from "@/lib/canonical-deal-board";
 import { daysInStage } from "@/lib/deal-utils";
-import { presetToDateRange } from "@/hooks/use-director-dashboard";
 import { useAuth } from "@/lib/auth";
+import { TerminalDateFilterControl } from "@/components/pipeline/terminal-date-filter-control";
 import {
   buildDealStageWorkspacePath,
-  readTerminalDateFilter,
+  getTerminalDateFilterLabel,
+  isTerminalOutcomeSlug,
+  readTerminalDateFiltersFromSearchParams,
+  setTerminalDateFilterSearchParams,
+  writeTerminalDateFilter,
   type TerminalDateFilter,
   type TerminalOutcome,
 } from "@/lib/pipeline-terminal-filters";
@@ -51,36 +55,9 @@ function getScope(searchParams: URLSearchParams, role: string | undefined): Pipe
 
 function readCurrentTerminalDateFilters(): Record<TerminalOutcome, TerminalDateFilter> {
   return {
-    won: readTerminalDateFilter("won"),
-    lost: readTerminalDateFilter("lost"),
+    won: { preset: "all" },
+    lost: { preset: "all" },
   };
-}
-
-function getYearToDateTerminalFilters(): Record<TerminalOutcome, TerminalDateFilter> {
-  const { from } = presetToDateRange("ytd");
-  return {
-    won: { preset: "custom", customStart: from },
-    lost: { preset: "custom", customStart: from },
-  };
-}
-
-function useCurrentCalendarYear() {
-  const [currentYear, setCurrentYear] = useState(() => new Date().getFullYear());
-
-  useEffect(() => {
-    const checkYear = () => {
-      const nextYear = new Date().getFullYear();
-      setCurrentYear((year) => (year === nextYear ? year : nextYear));
-    };
-    const interval = window.setInterval(checkYear, 60 * 60 * 1000);
-    window.addEventListener("focus", checkYear);
-    return () => {
-      window.clearInterval(interval);
-      window.removeEventListener("focus", checkYear);
-    };
-  }, []);
-
-  return currentYear;
 }
 
 export function buildDealStageNavigationPath(
@@ -104,13 +81,20 @@ function DealsBoardColumn({
   column,
   onOpenStage,
   onOpenRecord,
+  terminalFilter,
+  onTerminalFilterChange,
 }: {
   column: DealBoardColumn;
   onOpenStage: (column: DealBoardColumn) => void;
   onOpenRecord: (id: string) => void;
+  terminalFilter?: TerminalDateFilter;
+  onTerminalFilterChange?: (filter: TerminalDateFilter) => void;
 }) {
   const totalValue =
     column.totalValue ?? column.cards.reduce((sum, deal) => sum + moneyValue(deal), 0);
+  const terminalOutcome = isTerminalOutcomeSlug(column.stage.slug) ? column.stage.slug : null;
+  const terminalLabel = terminalFilter ? getTerminalDateFilterLabel(terminalFilter) : null;
+  const emptyText = terminalOutcome && terminalFilter?.preset !== "all" ? "No deals in selected range" : "No deals";
 
   const header = (
     <>
@@ -121,11 +105,22 @@ function DealsBoardColumn({
           onClick={() => onOpenStage(column)}
         >
           {column.stage.name}
+          {terminalLabel ? <span className="ml-1 text-slate-400">· {terminalLabel}</span> : null}
         </button>
         <span className="rounded-sm bg-gray-200/70 px-1.5 py-0.5 text-xs font-medium tabular-nums text-gray-600">
           {column.count}
         </span>
       </div>
+      {terminalOutcome && terminalFilter && onTerminalFilterChange ? (
+        <TerminalDateFilterControl
+          stageName={column.stage.name}
+          filter={terminalFilter}
+          onFilterChange={onTerminalFilterChange}
+          className="mt-2"
+          buttonClassName="rounded-sm text-xs"
+          inputClassName="rounded-sm text-xs"
+        />
+      ) : null}
       <p className="mt-1 text-xl font-semibold tabular-nums text-gray-900">
         {USD_COMPACT(totalValue)}
       </p>
@@ -146,7 +141,7 @@ function DealsBoardColumn({
         ))
       ) : (
         <div className="border border-dashed border-gray-200 py-8 text-center text-xs text-gray-400">
-          No deals
+          {emptyText}
         </div>
       )}
     </KanbanScrollColumn>
@@ -171,11 +166,26 @@ function DealListPageContent({ role }: { role: string }) {
   const navigate = useNavigate();
   const [searchParams, setSearchParams] = useSearchParams();
   const [search, setSearch] = useState("");
+  const [terminalDateFilters, setTerminalDateFilters] = useState<Record<TerminalOutcome, TerminalDateFilter>>(() =>
+    readTerminalDateFiltersFromSearchParams(searchParams)
+  );
   const scope = getScope(searchParams, role);
-  const currentYear = useCurrentCalendarYear();
-  const ytdTerminalFilters = useMemo(() => getYearToDateTerminalFilters(), [currentYear]);
-  const { board, loading, error } = useDealBoard(scope, true, ytdTerminalFilters);
+  const { board, loading, error } = useDealBoard(scope, true, terminalDateFilters);
   const { stages } = usePipelineStages("deal");
+
+  useEffect(() => {
+    setTerminalDateFilters(readTerminalDateFiltersFromSearchParams(searchParams));
+  }, [searchParams]);
+
+  const updateTerminalDateFilter = useCallback((outcome: TerminalOutcome, filter: TerminalDateFilter) => {
+    writeTerminalDateFilter(outcome, filter);
+    setTerminalDateFilters((current) => ({ ...current, [outcome]: filter }));
+    setSearchParams((current) => {
+      const next = new URLSearchParams(current);
+      setTerminalDateFilterSearchParams(next, outcome, filter);
+      return next;
+    });
+  }, [setSearchParams]);
 
   const columns = useMemo(
     () => {
@@ -239,7 +249,7 @@ function DealListPageContent({ role }: { role: string }) {
   };
 
   const openStage = (column: DealBoardColumn) => {
-    navigate(buildDealStageNavigationPath(column, scope, ytdTerminalFilters));
+    navigate(buildDealStageNavigationPath(column, scope, terminalDateFilters));
   };
 
   // Synced top scrollbar proxy (matches /pipeline pattern).
@@ -329,10 +339,10 @@ function DealListPageContent({ role }: { role: string }) {
           accent="red"
         />
         <MetricCard
-          eyebrow="Won YTD"
+          eyebrow="Won"
           value={USD_COMPACT(wonValue)}
           badge="Bid Board"
-          caption="Terminal filter"
+          caption={getTerminalDateFilterLabel(terminalDateFilters.won)}
           tone="blue"
           accent="blue"
         />
@@ -399,6 +409,16 @@ function DealListPageContent({ role }: { role: string }) {
                     column={column}
                     onOpenStage={openStage}
                     onOpenRecord={(id) => navigate(`/deals/${id}`)}
+                    terminalFilter={
+                      isTerminalOutcomeSlug(column.stage.slug)
+                        ? terminalDateFilters[column.stage.slug]
+                        : undefined
+                    }
+                    onTerminalFilterChange={
+                      isTerminalOutcomeSlug(column.stage.slug)
+                        ? (filter) => updateTerminalDateFilter(column.stage.slug as TerminalOutcome, filter)
+                        : undefined
+                    }
                   />
                 ))}
               </div>

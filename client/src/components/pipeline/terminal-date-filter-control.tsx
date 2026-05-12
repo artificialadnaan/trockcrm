@@ -2,15 +2,16 @@ import type { MouseEvent } from "react";
 import { ChevronDown } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
-import { daysAgo, type TerminalDateFilter } from "@/lib/pipeline-terminal-filters";
+import { clampDateToToday, daysAgo, getTodayDateParam, type TerminalDateFilter } from "@/lib/pipeline-terminal-filters";
 import { cn } from "@/lib/utils";
 
 const PRESETS = [
   { value: "7", label: "Last 7 days", chip: "Last 7d", aria: "from the last 7 days" },
   { value: "30", label: "Last 30 days", chip: "Last 30d", aria: "from the last 30 days" },
   { value: "60", label: "Last 60 days", chip: "Last 60d", aria: "from the last 60 days" },
+  { value: "90", label: "Last 90 days", chip: "Last 90d", aria: "from the last 90 days" },
   { value: "all", label: "All time", chip: "All time", aria: "from all time" },
-  { value: "custom", label: "Custom", aria: "from a custom date range" },
+  { value: "custom", label: "Custom range", aria: "from a custom date range" },
 ] as const;
 
 function chipLabel(filter: TerminalDateFilter) {
@@ -34,6 +35,8 @@ export function TerminalDateFilterControl({
   buttonClassName?: string;
   inputClassName?: string;
 }) {
+  const maxDate = getTodayDateParam();
+
   const handleClick = (
     event: MouseEvent<HTMLButtonElement>,
     value: TerminalDateFilter["preset"]
@@ -90,8 +93,9 @@ export function TerminalDateFilterControl({
                   inputClassName
                 )}
                 value={filter.customStart}
+                max={maxDate}
                 onClick={(event) => event.stopPropagation()}
-                onChange={(event) => onFilterChange({ ...filter, customStart: event.target.value })}
+                onChange={(event) => onFilterChange({ ...filter, customStart: clampDateToToday(event.target.value) })}
               />
               <input
                 aria-label={`${stageName} end date`}
@@ -101,11 +105,12 @@ export function TerminalDateFilterControl({
                   inputClassName
                 )}
                 value={filter.customEnd ?? ""}
+                max={maxDate}
                 onClick={(event) => event.stopPropagation()}
                 onChange={(event) =>
                   onFilterChange({
                     ...filter,
-                    customEnd: event.target.value || undefined,
+                    customEnd: event.target.value ? clampDateToToday(event.target.value) : undefined,
                   })
                 }
               />
