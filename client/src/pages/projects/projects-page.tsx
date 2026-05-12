@@ -186,15 +186,6 @@ function PhaseColumn({
 export function ProjectsPage() {
   const [searchParams, setSearchParams] = useSearchParams();
   const includeInactive = searchParams.get("include_inactive") === "true";
-  const setIncludeInactive = (next: boolean) => {
-    const params = new URLSearchParams(searchParams);
-    if (next) {
-      params.set("include_inactive", "true");
-    } else {
-      params.delete("include_inactive");
-    }
-    setSearchParams(params);
-  };
 
   const [phaseGroups, setPhaseGroups] = useState<ProjectPhaseGroup[]>([]);
   const [listData, setListData] = useState<ProjectsListResponse | null>(null);
@@ -210,6 +201,22 @@ export function ProjectsPage() {
   const [sortBy, setSortBy] = useState("phase");
   const [sortOrder, setSortOrder] = useState<"asc" | "desc">("asc");
   const { salesReps } = useSalesReps();
+
+  // Toggling the Active / Include-inactive segment must reset pagination —
+  // page 5 of the inactive list has no equivalent page 5 in the active-only
+  // list (~7 pages vs ~16), so preserving the page index yields an empty
+  // table that looks like data loss. Mirrors the setPage(1) pattern used
+  // by the other filter setters below.
+  const setIncludeInactive = (next: boolean) => {
+    const params = new URLSearchParams(searchParams);
+    if (next) {
+      params.set("include_inactive", "true");
+    } else {
+      params.delete("include_inactive");
+    }
+    setSearchParams(params);
+    setPage(1);
+  };
 
   const phaseOptions = useMemo(
     () => phaseGroups.map((group) => ({ id: group.phaseId, name: group.phaseName })),
@@ -232,10 +239,17 @@ export function ProjectsPage() {
     if (includeInactive) params.set("include_inactive", "true");
 
     try {
+      // Counts powers the Active/Inactive metric cards only — a failure
+      // here must not take down the Kanban or list. Catch inline so the
+      // primary calls can still resolve; metric cards fall back to the
+      // "—" placeholder when counts is null.
       const [byPhase, list, countsResp] = await Promise.all([
         api<{ phases: ProjectPhaseGroup[] }>(`/projects/by-phase?${params.toString()}`),
         api<ProjectsListResponse>(`/projects?${params.toString()}`),
-        api<ProjectCounts>(`/projects/counts`),
+        api<ProjectCounts>(`/projects/counts`).catch((err) => {
+          console.warn("Failed to load project counts; continuing without:", err);
+          return null;
+        }),
       ]);
       setPhaseGroups(byPhase.phases);
       setListData(list);
@@ -320,16 +334,16 @@ export function ProjectsPage() {
       <div className="grid gap-4 md:grid-cols-3">
         <MetricCard
           eyebrow="Active projects"
-          value={String(counts?.active ?? 0)}
-          badge={`of ${counts?.total ?? 0} mirrored`}
+          value={counts ? String(counts.active) : "—"}
+          badge={counts ? `of ${counts.total} mirrored` : "Counts unavailable"}
           caption="CRM-wide, unfiltered"
           tone="white"
           accent="red"
         />
         <MetricCard
           eyebrow="Inactive"
-          value={String(counts?.inactive ?? 0)}
-          badge={includeInactive ? "Shown in views" : "Hidden by default"}
+          value={counts ? String(counts.inactive) : "—"}
+          badge={counts ? (includeInactive ? "Shown in views" : "Hidden by default") : "Counts unavailable"}
           caption="CRM-wide, unfiltered"
           tone="white"
           accent="slate"
