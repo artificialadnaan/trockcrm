@@ -28,6 +28,7 @@ import {
   mergeContacts,
   dismissDuplicate,
 } from "./merge-service.js";
+import { redactDealResponse, shouldIncludeHubspotId } from "../deals/redact.js";
 import { getDealById } from "../deals/service.js";
 
 const router = Router();
@@ -324,7 +325,13 @@ router.get("/:id/deals", async (req, res, next) => {
 
     const associations = await getDealsForContact(req.tenantDb!, req.params.id, req.user!.id, req.user!.role);
     await req.commitTransaction!();
-    res.json({ associations });
+    const includeHubspotId = shouldIncludeHubspotId(req.query, req.user!.role);
+    res.json({
+      associations: associations.map((assoc) => ({
+        ...assoc,
+        deal: redactDealResponse(assoc.deal, { includeHubspotId }),
+      })),
+    });
   } catch (err) {
     next(err);
   }

@@ -2,6 +2,7 @@ import { Router } from "express";
 import { AppError } from "../../middleware/error-handler.js";
 import { requireAdmin } from "../../middleware/rbac.js";
 import { requestAuditContext, writeSoftDeleteAuditLog } from "../../lib/soft-delete-audit.js";
+import { redactDealList, shouldIncludeHubspotId } from "../deals/redact.js";
 import { createProperty, deleteProperty, getPropertyDetail, listProperties, updateProperty } from "./service.js";
 
 const router = Router();
@@ -93,7 +94,8 @@ router.get("/:id", async (req, res, next) => {
       throw new AppError(404, "Property not found");
     }
     await req.commitTransaction!();
-    res.json(result);
+    const includeHubspotId = shouldIncludeHubspotId(req.query, req.user!.role);
+    res.json({ ...result, deals: redactDealList(result.deals ?? [], { includeHubspotId }) });
   } catch (err) {
     next(err);
   }
