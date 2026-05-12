@@ -21,6 +21,7 @@ import { InterventionManagerConsoleSection } from "@/components/ai/intervention-
 import { InterventionPolicyRecommendationsSection } from "@/components/ai/intervention-policy-recommendations";
 import { Button, buttonVariants } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
+import { sanitizeVisibleUuidText } from "@/lib/display-identifiers";
 
 function formatOfficeLocalTime(snapshot: ManagerAlertSnapshot["snapshotJson"]) {
   const date = new Date(snapshot.generatedAt);
@@ -315,7 +316,9 @@ function ManagerAlertsPanel({ searchParams }: { searchParams: URLSearchParams })
                         >
                           <div className="flex items-start justify-between gap-3">
                             <div>
-                              <div className="font-medium text-gray-900">{item.assigneeLabel}</div>
+                              <div className="font-medium text-gray-900">
+                                {sanitizeVisibleUuidText(item.assigneeLabel, "Unknown assignee")}
+                              </div>
                               <div className="mt-1 text-xs uppercase tracking-widest text-muted-foreground">
                                 {item.caseCount} cases · weight {item.totalWeight}
                               </div>

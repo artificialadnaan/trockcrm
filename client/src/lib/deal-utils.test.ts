@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { formatDealDisplayNumber, isHubspotImportedDealNumber } from "./deal-utils";
+import { formatDealDisplayNumber, isHubspotImportedDealNumber, sanitizeHubspotDealIdentifiers } from "./deal-utils";
 
 describe("isHubspotImportedDealNumber", () => {
   it("flags HS- prefixed dealNumbers as HubSpot-imported", () => {
@@ -58,5 +58,16 @@ describe("formatDealDisplayNumber", () => {
     });
     expect(result.label).toBe("Pending");
     expect(result.isPending).toBe(true);
+  });
+});
+
+describe("sanitizeHubspotDealIdentifiers", () => {
+  it("replaces HS-prefixed identifiers embedded in generated titles and file names", () => {
+    expect(sanitizeHubspotDealIdentifiers("Follow up: HS-323641734879 closes 2026-05-08")).toBe(
+      "Follow up: Project pending closes 2026-05-08"
+    );
+    expect(sanitizeHubspotDealIdentifiers("HS-319925219003 Photo 2026-05-10 001 dad87234.jpg", "Imported deal")).toBe(
+      "Imported deal Photo 2026-05-10 001 dad87234.jpg"
+    );
   });
 });

@@ -44,7 +44,7 @@ const analyticsData = {
         key: "manager-1",
         entityType: "assignee",
         filterValue: "manager-1",
-        label: "Manager One",
+        label: "e0ddca73-d24f-4189-80d8-88c83df8d971",
         openCases: 3,
         overdueCases: 2,
         repeatOpenCases: 1,
@@ -86,13 +86,13 @@ const analyticsData = {
     timingBasis: "business_days",
   },
   managerBrief: {
-    headline: "Intervention pressure is concentrated in 2 overdue, 1 escalated-open cases.",
+    headline: "e0ddca73-d24f-4189-80d8-88c83df8d971 is carrying overdue cases.",
     summaryWindowLabel: "Compared with the prior 7 days",
     whatChanged: [
       {
         key: "escalations_up",
         tone: "worsened",
-        text: "Escalations rose to 2 in the last 7 days from 1 in the prior 7 days.",
+        text: "Escalations rose for e0ddca73-d24f-4189-80d8-88c83df8d971 in the last 7 days.",
         queueLink: "/admin/interventions?view=escalated",
       },
     ],
@@ -107,8 +107,8 @@ const analyticsData = {
     emergingPatterns: [
       {
         key: "pattern_1",
-        title: "Resolve outcomes are reopening",
-        summary: "50% of recent resolve conclusions reopened inside the 30-day window.",
+        title: "a06bf4de-da50-4f52-8f48-0e79f1930b8f outcomes are reopening",
+        summary: "50% of recent resolve conclusions reopened for a06bf4de-da50-4f52-8f48-0e79f1930b8f.",
         confidence: "high",
         queueLink: "/admin/intervention-analytics#outcome-effectiveness",
       },
@@ -164,7 +164,7 @@ const managerAlertSnapshot: ManagerAlertSnapshot = {
         items: [
           {
             assigneeId: "manager-1",
-            assigneeLabel: "Manager One",
+            assigneeLabel: "a06bf4de-da50-4f52-8f48-0e79f1930b8f",
             totalWeight: 18,
             caseCount: 4,
             queueLink: "/admin/interventions?view=all&assigneeId=manager-1",
@@ -556,10 +556,13 @@ describe("AdminInterventionAnalyticsPage", () => {
     expect(html).toContain("Open Cases");
     expect(html).toContain("Resolution Effectiveness");
     expect(html).toContain("Breach Queue");
-    expect(html).toContain("Manager One");
-    expect(html).toContain("Escalations rose to 2 in the last 7 days from 1 in the prior 7 days.");
+    expect(html).toContain("Unknown assignee is carrying overdue cases.");
+    expect(html).toContain("Escalations rose for Unknown assignee in the last 7 days.");
     expect(html).toContain("Clear 2 overdue cases before they roll into more escalations.");
-    expect(html).toContain("Resolve outcomes are reopening");
+    expect(html).toContain("Unknown assignee outcomes are reopening");
+    expect(html).toContain("50% of recent resolve conclusions reopened for Unknown assignee.");
+    expect(html).not.toContain("e0ddca73-d24f-4189-80d8-88c83df8d971");
+    expect(html).not.toContain("a06bf4de-da50-4f52-8f48-0e79f1930b8f");
     expect(html).toContain('href="#queue-health"');
     expect(html).toContain('href="#manager-brief"');
     expect(html).toContain('href="#manager-alerts"');

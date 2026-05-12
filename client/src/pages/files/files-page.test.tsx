@@ -294,12 +294,14 @@ describe("FilesPage", () => {
     });
     setupFiles([
       makeFile({
+        displayName: "HS-324283495135 Photo 2026-05-10 001 dad87234",
         uploadedBy: "c90ed33e-041b-4ddb-8cb6-ea28eb67679f",
       }),
     ]);
 
     mounted = mountPage();
 
+    expect(mounted.container.textContent).toContain("Imported deal Photo 2026-05-10 001 dad87234");
     expect(mounted.container.textContent).toContain("Unknown user");
     expect(mounted.container.textContent).toContain("DFW-1-12826-aa");
     expect(mounted.container.textContent).not.toContain("c90ed33e-041b-4ddb-8cb6-ea28eb67679f");

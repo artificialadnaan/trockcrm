@@ -31,7 +31,7 @@ import { TaskEditDialog } from "@/components/tasks/task-edit-dialog";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { useAuth } from "@/lib/auth";
 import { cn } from "@/lib/utils";
-import { formatDealDisplayNumber } from "@/lib/deal-utils";
+import { formatDealDisplayNumber, sanitizeHubspotDealIdentifiers } from "@/lib/deal-utils";
 import { toast } from "sonner";
 
 type GroupKey = "overdue" | "today" | "this_week" | "later" | "completed";
@@ -118,6 +118,7 @@ function TaskRow({ task, onUpdate }: { task: Task; onUpdate: () => void }) {
   const isDone = isTerminalTaskStatus(task.status);
   const Icon = TYPE_ICONS[task.type] ?? MoreHorizontal;
   const projectContext = getTaskProjectContext(task);
+  const taskTitle = sanitizeHubspotDealIdentifiers(task.title);
 
   const complete = async (event: React.MouseEvent) => {
     event.stopPropagation();
@@ -173,7 +174,7 @@ function TaskRow({ task, onUpdate }: { task: Task; onUpdate: () => void }) {
           disabled={busy || isDone}
           onClick={complete}
           onKeyDown={stopRowKeyDownPropagation}
-          aria-label={`Complete ${task.title}`}
+          aria-label={`Complete ${taskTitle}`}
           className={cn(
             "mt-1 flex h-6 w-6 items-center justify-center rounded border-2 transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-brand-red",
             isDone ? "border-emerald-600 bg-emerald-600 text-white" : "border-slate-300 text-slate-300 hover:border-emerald-600 hover:text-emerald-600"
@@ -204,7 +205,7 @@ function TaskRow({ task, onUpdate }: { task: Task; onUpdate: () => void }) {
                 <Icon className="h-3.5 w-3.5" />
               </span>
               <p className={cn("truncate text-sm font-black text-slate-950", isDone ? "line-through text-slate-500" : "")}>
-                {task.title}
+                {taskTitle}
               </p>
             </div>
             <div className="mt-1 flex flex-wrap gap-x-3 gap-y-1 pl-9 text-xs font-semibold text-slate-500">
@@ -241,7 +242,7 @@ function TaskRow({ task, onUpdate }: { task: Task; onUpdate: () => void }) {
               onClick={snooze}
               onKeyDown={stopRowKeyDownPropagation}
               className="flex h-8 w-8 items-center justify-center rounded-md text-slate-400 hover:bg-amber-50 hover:text-amber-600"
-              aria-label={`Snooze ${task.title}`}
+              aria-label={`Snooze ${taskTitle}`}
             >
               <Clock className="h-4 w-4" />
             </button>
@@ -252,7 +253,7 @@ function TaskRow({ task, onUpdate }: { task: Task; onUpdate: () => void }) {
               onClick={openLinkedRecord}
               onKeyDown={stopRowKeyDownPropagation}
               className="flex h-8 w-8 items-center justify-center rounded-md text-slate-400 hover:bg-blue-50 hover:text-blue-600"
-              aria-label={`Open linked record for ${task.title}`}
+              aria-label={`Open linked record for ${taskTitle}`}
             >
               <RefreshCw className="h-4 w-4" />
             </button>

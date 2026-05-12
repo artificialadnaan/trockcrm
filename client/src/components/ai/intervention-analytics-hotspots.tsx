@@ -3,6 +3,7 @@ import type { InterventionAnalyticsHotspotRow } from "@/hooks/use-ai-ops";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
+import { sanitizeVisibleUuidText } from "@/lib/display-identifiers";
 
 function formatPercent(value: number | null) {
   if (value == null || Number.isNaN(value)) return "N/A";
@@ -46,10 +47,10 @@ function HotspotTable({ title, description, rows }: HotspotTableProps) {
                   <TableCell>
                     {row.queueLink ? (
                       <Link to={row.queueLink} className="font-medium text-brand-red hover:underline">
-                        {row.label}
+                        {sanitizeVisibleUuidText(row.label, "Unknown assignee")}
                       </Link>
                     ) : (
-                      <span className="font-medium">{row.label}</span>
+                      <span className="font-medium">{sanitizeVisibleUuidText(row.label, "Unknown assignee")}</span>
                     )}
                   </TableCell>
                   <TableCell className="text-right">{row.openCases}</TableCell>

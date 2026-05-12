@@ -1,4 +1,5 @@
 const HUBSPOT_DEAL_NUMBER_PATTERN = /^HS[-_ ]?\d+/i;
+const VISIBLE_HUBSPOT_DEAL_NUMBER_PATTERN = /\bHS[-_ ]?\d{6,}\b/gi;
 
 export function isHubspotImportedDealNumber(value: string | null | undefined): boolean {
   if (!value) return false;
@@ -27,6 +28,15 @@ export function formatDealDisplayNumber(
   }
 
   return { label: "Pending", isFallback: true, isPending: true };
+}
+
+export function sanitizeHubspotDealIdentifiers(
+  value: string | null | undefined,
+  replacement = "Project pending"
+): string {
+  const trimmed = value?.trim();
+  if (!trimmed) return "";
+  return trimmed.replace(VISIBLE_HUBSPOT_DEAL_NUMBER_PATTERN, replacement);
 }
 
 /**
