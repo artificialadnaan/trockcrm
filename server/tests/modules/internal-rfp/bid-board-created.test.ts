@@ -6,7 +6,10 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 const queryMock = vi.hoisted(() => vi.fn());
 
 vi.mock("../../../src/db.js", () => ({
-  pool: { query: queryMock },
+  pool: {
+    query: queryMock,
+    connect: vi.fn(async () => ({ query: queryMock, release: vi.fn() })),
+  },
 }));
 
 const { internalRfpRoutes } = await import("../../../src/modules/internal-rfp/routes.js");
@@ -52,17 +55,24 @@ function mockDeal(
           company_id: null,
           primary_contact_id: null,
           procore_bid_id: existingBidId,
+          assigned_rep_id: "rep-1",
+          rfp_approval_requested_by: "user-rfp",
           rfp_approval_request_id: rfpApprovalRequestId,
           workflow_route: workflowRoute,
+          stage_entered_at: "2026-05-01T00:00:00.000Z",
           stage_slug: "opportunity",
+          stage_display_order: 2,
+          stage_is_terminal: false,
         }],
       };
     }
     if (sql.includes("FROM public.pipeline_stage_config") && sql.includes("slug = $1")) {
       const slug = queryMock.mock.calls.at(-1)?.[1]?.[0];
-      return { rows: [{ id: `${slug}-stage` }] };
+      return { rows: [{ id: `${slug}-stage`, display_order: 3, is_terminal: false }] };
     }
-    return { rows: [] };
+    if (sql.includes("UPDATE \"office_dallas\".deals")) return { rows: [], rowCount: 1 };
+    if (sql.includes("INSERT INTO \"office_dallas\".deal_stage_history")) return { rows: [], rowCount: 1 };
+    return { rows: [], rowCount: 0 };
   });
 }
 
@@ -87,12 +97,13 @@ describe("POST /api/internal/bid-board-created", () => {
     const sqlText = queryMock.mock.calls.map((call) => String(call[0])).join("\n");
     expect(sqlText).toContain("procore_bid_id = $1::bigint");
     expect(sqlText).toContain("is_bid_board_owned = true");
-    expect(queryMock.mock.calls.at(-1)?.[1]).toContain("123456");
-    expect(queryMock.mock.calls.at(-1)?.[1]).toContain("598134325683880");
-    expect(queryMock.mock.calls.at(-1)?.[1]).toContain("deal-1");
+    const updateCall = queryMock.mock.calls.find((call) => String(call[0]).includes("UPDATE \"office_dallas\".deals"));
+    expect(updateCall?.[1]).toContain("123456");
+    expect(updateCall?.[1]).toContain("598134325683880");
+    expect(updateCall?.[1]).toContain("deal-1");
   });
 
-  it("moves normal-route deals to estimate_in_progress when linked", async () => {
+  it("moves normal-route deals to estimating when linked", async () => {
     mockDeal(null, 77, "normal");
     const { raw, signature } = sign(body());
 
@@ -104,12 +115,22 @@ describe("POST /api/internal/bid-board-created", () => {
 
     expect(res.status).toBe(200);
     const stageLookup = queryMock.mock.calls.find((call) => String(call[0]).includes("slug = $1"));
-    expect(stageLookup?.[1]).toEqual(["estimate_in_progress"]);
-    const updateSql = String(queryMock.mock.calls.at(-1)?.[0]);
-    const updateValues = queryMock.mock.calls.at(-1)?.[1];
+    expect(stageLookup?.[1]).toEqual(["estimating"]);
+    const updateCall = queryMock.mock.calls.find((call) => String(call[0]).includes("stage_id = $1::uuid"));
+    const updateSql = String(updateCall?.[0]);
+    const updateValues = updateCall?.[1];
     expect(updateSql).toContain("stage_id");
     expect(updateSql).toContain("stage_entered_at");
-    expect(updateValues).toContain("estimate_in_progress-stage");
+    expect(updateValues).toContain("estimating-stage");
+    const historyCall = queryMock.mock.calls.find((call) => String(call[0]).includes("INSERT INTO \"office_dallas\".deal_stage_history"));
+    expect(historyCall?.[1]).toEqual([
+      "deal-1",
+      "stage-1",
+      "estimating-stage",
+      "user-rfp",
+      "Bid Board created callback - Stage estimating",
+      "2026-05-01T00:00:00.000Z",
+    ]);
   });
 
   it("moves service-route deals to service_estimating when linked", async () => {
@@ -125,8 +146,9 @@ describe("POST /api/internal/bid-board-created", () => {
     expect(res.status).toBe(200);
     const stageLookup = queryMock.mock.calls.find((call) => String(call[0]).includes("slug = $1"));
     expect(stageLookup?.[1]).toEqual(["service_estimating"]);
-    const updateSql = String(queryMock.mock.calls.at(-1)?.[0]);
-    const updateValues = queryMock.mock.calls.at(-1)?.[1];
+    const updateCall = queryMock.mock.calls.find((call) => String(call[0]).includes("stage_id = $1::uuid"));
+    const updateSql = String(updateCall?.[0]);
+    const updateValues = updateCall?.[1];
     expect(updateSql).toContain("stage_id");
     expect(updateSql).toContain("stage_entered_at");
     expect(updateValues).toContain("service_estimating-stage");
@@ -164,7 +186,8 @@ describe("POST /api/internal/bid-board-created", () => {
 
     expect(res.status).toBe(200);
     expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining("already had procore_bid_id=999999"));
-    expect(queryMock.mock.calls.at(-1)?.[1]?.[0]).toBe("123456");
+    const updateCall = queryMock.mock.calls.find((call) => String(call[0]).includes("UPDATE \"office_dallas\".deals"));
+    expect(updateCall?.[1]?.[0]).toBe("123456");
     warnSpy.mockRestore();
   });
 

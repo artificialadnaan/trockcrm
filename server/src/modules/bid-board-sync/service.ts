@@ -1,4 +1,6 @@
 import crypto from "crypto";
+import { isTerminalWorkflowStage, type WorkflowRoute } from "@trock-crm/shared/types";
+import { bidBoardStatusToCrmStage, normalizeBidBoardStatus } from "@trock-crm/shared/lib/bidBoardStatusMap";
 import { pool } from "../../db.js";
 import { AppError } from "../../middleware/error-handler.js";
 
@@ -16,6 +18,7 @@ export interface BidBoardSyncPayload {
     row_count?: number;
   };
   rows?: RawBidBoardRow[];
+  sheets?: Record<string, RawBidBoardRow[]> | Array<{ name?: string; rows?: RawBidBoardRow[] }>;
 }
 
 export interface NormalizedBidBoardRow {
@@ -38,15 +41,44 @@ export interface NormalizedBidBoardRow {
 interface IngestionMetrics {
   rowsReceived: number;
   updated: number;
+  matched: number;
+  stageUpdated: number;
   noMatch: number;
   multiMatch: number;
   warnings: number;
   duplicateProjectNumbers: number;
   nullProjectNumbers: number;
   invalidDueDates: number;
+  skippedNoProjectNumber: number;
+  skippedUnmappedStatus: number;
+  skippedTemplate: number;
+  skippedBackward: number;
+  skippedTerminal: number;
+  skippedNoStageChange: number;
+}
+
+interface DealMatch {
+  id: string;
+  stage_id: string;
+  stage_slug: string;
+  stage_display_order: number | null;
+  stage_is_terminal: boolean | null;
+  stage_entered_at: string | null;
+  workflow_route: WorkflowRoute | null;
+  deal_number: string | null;
+  project_number: string | null;
+  bid_board_project_number: string | null;
+}
+
+interface StageConfig {
+  id: string;
+  slug: string;
+  display_order: number | null;
+  is_terminal: boolean | null;
 }
 
 const STRUCTURED_PROJECT_NUMBER_PATTERN = /^[A-Z]{3}-\d+-\d{5}-[a-z]{2}$/i;
+const MAX_UNMATCHED_PROJECT_NUMBERS = 100;
 
 function textValue(value: unknown): string | null {
   if (value == null) return null;
@@ -119,6 +151,20 @@ export function parseBidBoardDueDate(
   }
 
   return { value: date.toISOString().slice(0, 10), warning: null };
+}
+
+export function normalizeBidBoardProjectNumber(value: unknown): string | null {
+  const text = textValue(value);
+  return text ? text.toLowerCase() : null;
+}
+
+function extractRows(payload: BidBoardSyncPayload): RawBidBoardRow[] {
+  if (Array.isArray(payload.rows)) return payload.rows;
+  if (!payload.sheets) return [];
+  if (Array.isArray(payload.sheets)) {
+    return payload.sheets.flatMap((sheet) => (Array.isArray(sheet.rows) ? sheet.rows : []));
+  }
+  return Object.values(payload.sheets).flatMap((rows) => (Array.isArray(rows) ? rows : []));
 }
 
 export function normalizeBidBoardRow(row: RawBidBoardRow): NormalizedBidBoardRow {
@@ -224,39 +270,278 @@ export function updateParams(dealId: string, row: NormalizedBidBoardRow, bidBoar
   ];
 }
 
-export async function findDealIds(client: { query: Function }, schemaName: string, row: NormalizedBidBoardRow) {
+function dealMatchSelectSql(schemaName: string): string {
+  return `
+    SELECT d.id,
+           d.stage_id,
+           d.stage_entered_at,
+           d.workflow_route,
+           d.deal_number,
+           d.project_number,
+           d.bid_board_project_number,
+           psc.slug AS stage_slug,
+           psc.display_order AS stage_display_order,
+           psc.is_terminal AS stage_is_terminal
+      FROM ${schemaName}.deals d
+      LEFT JOIN public.pipeline_stage_config psc ON psc.id = d.stage_id
+     WHERE d.is_active = true`;
+}
+
+async function findDealMatches(
+  client: { query: Function },
+  schemaName: string,
+  row: NormalizedBidBoardRow
+): Promise<DealMatch[]> {
   if (row.bidBoardProjectId) {
     const byBidBoardId = await client.query(
-      `SELECT id FROM ${schemaName}.deals WHERE procore_bid_id = $1::bigint`,
+      `${dealMatchSelectSql(schemaName)}
+       AND d.procore_bid_id = $1::bigint`,
       [row.bidBoardProjectId]
     );
-    if (byBidBoardId.rows.length > 0) return byBidBoardId.rows.map((r: { id: string }) => r.id);
+    if (byBidBoardId.rows.length > 0) return byBidBoardId.rows;
   }
 
-  if (row.bidBoardProjectNumber) {
+  const projectNumber = normalizeBidBoardProjectNumber(row.bidBoardProjectNumber);
+  if (projectNumber) {
     const byProject = await client.query(
-      `SELECT id FROM ${schemaName}.deals WHERE bid_board_project_number = $1`,
-      [row.bidBoardProjectNumber]
+      `${dealMatchSelectSql(schemaName)}
+       AND (
+            LOWER(TRIM(d.project_number)) = $1 OR
+            LOWER(TRIM(d.deal_number)) = $1 OR
+            LOWER(TRIM(d.bid_board_project_number)) = $1
+       )`,
+      [projectNumber]
     );
-    if (byProject.rows.length > 0) return byProject.rows.map((r: { id: string }) => r.id);
+    if (byProject.rows.length > 0) return byProject.rows;
   }
 
   if (row.bidBoardCreatedAt) {
     const byComposite = await client.query(
-      `SELECT id FROM ${schemaName}.deals
-        WHERE bid_board_project_number IS NULL
-          AND LOWER(TRIM(name)) = LOWER(TRIM($1))
-          AND bid_board_created_at = $2::timestamptz`,
+      `${dealMatchSelectSql(schemaName)}
+        AND d.bid_board_project_number IS NULL
+        AND LOWER(TRIM(d.name)) = LOWER(TRIM($1))
+        AND d.bid_board_created_at = $2::timestamptz`,
       [row.name, row.bidBoardCreatedAt]
     );
-    return byComposite.rows.map((r: { id: string }) => r.id);
+    return byComposite.rows;
   }
 
   return [];
 }
 
+export async function findDealIds(client: { query: Function }, schemaName: string, row: NormalizedBidBoardRow) {
+  const matches = await findDealMatches(client, validateSchemaName(schemaName), row);
+  return matches.map((r) => r.id);
+}
+
+async function findTargetStage(client: { query: Function }, stageSlug: string): Promise<StageConfig | null> {
+  const result = await client.query(
+    `SELECT id, slug, display_order, is_terminal
+       FROM public.pipeline_stage_config
+      WHERE slug = $1
+        AND is_active_pipeline = true
+      ORDER BY display_order ASC
+      LIMIT 1`,
+    [stageSlug]
+  );
+  return result.rows[0] ?? null;
+}
+
+async function findSystemChangedByUserId(client: { query: Function }, officeSlug: string): Promise<string | null> {
+  const result = await client.query(
+    `SELECT u.id
+       FROM public.users u
+       LEFT JOIN public.offices o ON o.id = u.office_id
+      WHERE u.is_active = true
+        AND u.role IN ('admin', 'director')
+      ORDER BY CASE WHEN o.slug = $1 THEN 0 ELSE 1 END, u.created_at ASC
+      LIMIT 1`,
+    [officeSlug]
+  );
+  return result.rows[0]?.id ?? null;
+}
+
+function workflowRoute(value: string | null): WorkflowRoute {
+  return value === "service" ? "service" : "normal";
+}
+
+function stageOrder(value: number | string | null | undefined): number | null {
+  if (value == null) return null;
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function stageFamilyForSlug(slug: string): string {
+  switch (slug) {
+    case "estimating":
+    case "service_estimating":
+    case "estimate_under_review":
+      return "estimating";
+    case "estimate_sent_to_client":
+      return "proposal";
+    case "contract":
+      return "contract";
+    case "won":
+      return "terminal_won";
+    case "lost":
+      return "terminal_loss";
+    default:
+      return "downstream";
+  }
+}
+
+function targetStageSlugForDeal(stageSlug: string, route: WorkflowRoute, row: NormalizedBidBoardRow): string {
+  const status = normalizeBidBoardStatus(row.bidBoardStatus);
+  return stageSlug === "estimating" && (route === "service" || status === "service estimating") ? "service_estimating" : stageSlug;
+}
+
+async function updateBidBoardStageMetadata(
+  client: { query: Function },
+  schemaName: string,
+  dealId: string,
+  expectedStageId: string,
+  targetStageSlug: string,
+  row: NormalizedBidBoardRow
+): Promise<boolean> {
+  const status = row.bidBoardStatus ?? targetStageSlug;
+  const result = await client.query(
+    `UPDATE ${schemaName}.deals
+        SET is_bid_board_owned = true,
+            bid_board_stage_slug = $2,
+            bid_board_stage_family = $3,
+            bid_board_stage_status = $4,
+            bid_board_stage_entered_at = COALESCE(bid_board_stage_entered_at, NOW()),
+            read_only_synced_at = NOW(),
+            updated_at = NOW()
+      WHERE id = $1
+        AND stage_id = $5`,
+    [dealId, targetStageSlug, stageFamilyForSlug(targetStageSlug), status, expectedStageId]
+  );
+  return (result.rowCount ?? 0) > 0;
+}
+
+function isTemplatesStatus(value: string | null): boolean {
+  return normalizeBidBoardStatus(value) === "templates";
+}
+
+interface StageWritebackResult {
+  updated: boolean;
+  skippedNoStageChange: boolean;
+  skippedBackward: boolean;
+  skippedTerminal: boolean;
+  warning: string | null;
+}
+
+async function writeStageIfSafe(
+  client: { query: Function },
+  schemaName: string,
+  deal: DealMatch,
+  targetStage: StageConfig,
+  row: NormalizedBidBoardRow,
+  changedByUserId: string | null
+): Promise<StageWritebackResult> {
+  const route = workflowRoute(deal.workflow_route);
+  const targetSlug = targetStageSlugForDeal(targetStage.slug, route, row);
+
+  if (deal.stage_slug === targetSlug) {
+    const refreshed = await updateBidBoardStageMetadata(client, schemaName, deal.id, deal.stage_id, targetSlug, row);
+    if (!refreshed) {
+      return {
+        updated: false,
+        skippedNoStageChange: false,
+        skippedBackward: false,
+        skippedTerminal: false,
+        warning: `Skipped Bid Board stage metadata refresh for deal ${deal.id}: stage changed during sync`,
+      };
+    }
+    return { updated: false, skippedNoStageChange: true, skippedBackward: false, skippedTerminal: false, warning: null };
+  }
+
+  if (deal.stage_is_terminal || isTerminalWorkflowStage(deal.stage_slug, route)) {
+    return {
+      updated: false,
+      skippedNoStageChange: false,
+      skippedBackward: false,
+      skippedTerminal: true,
+      warning: `Skipped terminal Bid Board stage update for deal ${deal.id}: CRM=${deal.stage_slug}, Bid Board=${row.bidBoardStatus ?? "unknown"}`,
+    };
+  }
+
+  const currentOrder = stageOrder(deal.stage_display_order);
+  const targetOrder = stageOrder(targetStage.display_order);
+  if (currentOrder != null && targetOrder != null && targetOrder < currentOrder) {
+    return {
+      updated: false,
+      skippedNoStageChange: false,
+      skippedBackward: true,
+      skippedTerminal: false,
+      warning: `Skipped backward Bid Board stage update for deal ${deal.id}: CRM=${deal.stage_slug}, Bid Board=${row.bidBoardStatus ?? "unknown"}`,
+    };
+  }
+
+  if (!changedByUserId) {
+    return {
+      updated: false,
+      skippedNoStageChange: false,
+      skippedBackward: false,
+      skippedTerminal: false,
+      warning: `Skipped Bid Board stage update for deal ${deal.id}: no active admin/director user available for audit history`,
+    };
+  }
+
+  const stageFamily = stageFamilyForSlug(targetSlug);
+  const status = row.bidBoardStatus ?? targetSlug;
+  const updateResult = await client.query(
+    `UPDATE ${schemaName}.deals
+        SET stage_id = $1,
+            stage_entered_at = NOW(),
+            is_bid_board_owned = true,
+            bid_board_stage_slug = $2,
+            bid_board_stage_family = $3,
+            bid_board_stage_status = $4,
+            bid_board_stage_entered_at = NOW(),
+            read_only_synced_at = NOW(),
+            actual_close_date = CASE WHEN $2 = 'won' THEN COALESCE(actual_close_date, CURRENT_DATE) ELSE actual_close_date END,
+            lost_at = CASE WHEN $2 = 'lost' THEN COALESCE(lost_at, NOW()) ELSE lost_at END,
+            bid_board_loss_outcome = CASE WHEN $2 = 'lost' THEN COALESCE(bid_board_loss_outcome, $4) ELSE bid_board_loss_outcome END,
+            updated_at = NOW()
+      WHERE id = $5
+        AND stage_id = $6
+      RETURNING id`,
+    [targetStage.id, targetSlug, stageFamily, status, deal.id, deal.stage_id]
+  );
+
+  if ((updateResult.rowCount ?? 0) === 0) {
+    return {
+      updated: false,
+      skippedNoStageChange: false,
+      skippedBackward: false,
+      skippedTerminal: false,
+      warning: `Skipped Bid Board stage update for deal ${deal.id}: stage changed during sync`,
+    };
+  }
+
+  await client.query(
+    `INSERT INTO ${schemaName}.deal_stage_history
+       (deal_id, from_stage_id, to_stage_id, changed_by, is_backward_move,
+        is_director_override, override_reason, duration_in_previous_stage)
+     VALUES ($1, $2, $3, $4, false, false, $5,
+       CASE WHEN $6::timestamptz IS NULL THEN NULL ELSE NOW() - $6::timestamptz END)`,
+    [
+      deal.id,
+      deal.stage_id,
+      targetStage.id,
+      changedByUserId,
+      `Bid Board export sync - Status ${status} -> Stage ${targetSlug}`,
+      deal.stage_entered_at,
+    ]
+  );
+
+  return { updated: true, skippedNoStageChange: false, skippedBackward: false, skippedTerminal: false, warning: null };
+}
+
 export async function ingestBidBoardRows(payload: BidBoardSyncPayload) {
-  const rows = Array.isArray(payload.rows) ? payload.rows : [];
+  const rows = extractRows(payload);
   const officeSlug = normalizeOfficeSlug(payload);
   const schemaName = validateSchemaName(`office_${officeSlug}`);
   const sourceFilename =
@@ -267,21 +552,30 @@ export async function ingestBidBoardRows(payload: BidBoardSyncPayload) {
   const payloadHash = hashRows(rows);
   const warnings: string[] = [];
   const errors: string[] = [];
+  const unmatchedProjectNumbers: string[] = [];
   const metrics: IngestionMetrics = {
     rowsReceived: rows.length,
     updated: 0,
+    matched: 0,
+    stageUpdated: 0,
     noMatch: 0,
     multiMatch: 0,
     warnings: 0,
     duplicateProjectNumbers: 0,
     nullProjectNumbers: 0,
     invalidDueDates: 0,
+    skippedNoProjectNumber: 0,
+    skippedUnmappedStatus: 0,
+    skippedTemplate: 0,
+    skippedBackward: 0,
+    skippedTerminal: 0,
+    skippedNoStageChange: 0,
   };
 
   const seenProjectNumbers = new Set<string>();
   const duplicateProjectNumbers = new Set<string>();
   for (const row of rows) {
-    const projectNumber = textValue(row["Project #"]);
+    const projectNumber = normalizeBidBoardProjectNumber(row["Project #"]);
     if (!projectNumber) {
       metrics.nullProjectNumbers++;
       continue;
@@ -309,6 +603,8 @@ export async function ingestBidBoardRows(payload: BidBoardSyncPayload) {
     runId = runResult.rows[0]?.id ?? null;
 
     const updateSql = buildBidBoardDealUpdateSql(schemaName);
+    const changedByUserId = await findSystemChangedByUserId(client, officeSlug);
+
     for (const rawRow of rows) {
       const normalized = normalizeBidBoardRow(rawRow);
       if (!normalized.name) {
@@ -323,16 +619,22 @@ export async function ingestBidBoardRows(payload: BidBoardSyncPayload) {
         warnings.push(dueDate.warning);
       }
       if (!normalized.bidBoardProjectNumber) {
+        metrics.skippedNoProjectNumber++;
         warnings.push(`Bid Board row "${normalized.name}" has NULL Project #`);
+        continue;
+      }
+      if (isTemplatesStatus(normalized.bidBoardStatus)) {
+        metrics.skippedTemplate++;
+        continue;
       }
 
-      const matches = await findDealIds(client, schemaName, normalized);
+      const matches = await findDealMatches(client, schemaName, normalized);
       if (matches.length === 0) {
         metrics.noMatch++;
-        if (
-          normalized.bidBoardProjectNumber &&
-          STRUCTURED_PROJECT_NUMBER_PATTERN.test(normalized.bidBoardProjectNumber)
-        ) {
+        if (unmatchedProjectNumbers.length < MAX_UNMATCHED_PROJECT_NUMBERS) {
+          unmatchedProjectNumbers.push(normalized.bidBoardProjectNumber);
+        }
+        if (STRUCTURED_PROJECT_NUMBER_PATTERN.test(normalized.bidBoardProjectNumber)) {
           warnings.push(
             `No CRM deal matched structured Bid Board Project # ${normalized.bidBoardProjectNumber} (${normalized.name})`
           );
@@ -347,8 +649,33 @@ export async function ingestBidBoardRows(payload: BidBoardSyncPayload) {
         continue;
       }
 
-      const updateResult = await client.query(updateSql, updateParams(matches[0], normalized, bidBoardLastUpdatedAt));
+      metrics.matched++;
+      const updateResult = await client.query(updateSql, updateParams(matches[0].id, normalized, bidBoardLastUpdatedAt));
       if ((updateResult.rowCount ?? 0) > 0) metrics.updated++;
+
+      const targetStageSlug = bidBoardStatusToCrmStage(normalized.bidBoardStatus);
+      if (!targetStageSlug) {
+        metrics.skippedUnmappedStatus++;
+        warnings.push(
+          `Skipped Bid Board stage writeback for ${normalized.bidBoardProjectNumber}: unmapped status ${normalized.bidBoardStatus ?? "NULL"}`
+        );
+        continue;
+      }
+
+      const route = workflowRoute(matches[0].workflow_route);
+      const targetStage = await findTargetStage(client, targetStageSlugForDeal(targetStageSlug, route, normalized));
+      if (!targetStage) {
+        metrics.skippedUnmappedStatus++;
+        warnings.push(`Skipped Bid Board stage writeback for ${normalized.bidBoardProjectNumber}: CRM stage ${targetStageSlug} not found`);
+        continue;
+      }
+
+      const stageResult = await writeStageIfSafe(client, schemaName, matches[0], targetStage, normalized, changedByUserId);
+      if (stageResult.updated) metrics.stageUpdated++;
+      if (stageResult.skippedNoStageChange) metrics.skippedNoStageChange++;
+      if (stageResult.skippedBackward) metrics.skippedBackward++;
+      if (stageResult.skippedTerminal) metrics.skippedTerminal++;
+      if (stageResult.warning) warnings.push(stageResult.warning);
     }
 
     metrics.warnings = warnings.length;
@@ -360,7 +687,16 @@ export async function ingestBidBoardRows(payload: BidBoardSyncPayload) {
               warning_count = $5,
               status = $6,
               errors = $7::jsonb,
-              warnings = $8::jsonb
+              warnings = $8::jsonb,
+              matched_count = $9,
+              stage_updated_count = $10,
+              skipped_no_project_number_count = $11,
+              skipped_unmapped_status_count = $12,
+              skipped_template_count = $13,
+              skipped_backward_count = $14,
+              skipped_terminal_count = $15,
+              skipped_no_stage_change_count = $16,
+              unmatched_project_numbers = $17::jsonb
         WHERE id = $1`,
       [
         runId,
@@ -371,6 +707,15 @@ export async function ingestBidBoardRows(payload: BidBoardSyncPayload) {
         errors.length > 0 ? "failed" : "success",
         JSON.stringify(errors),
         JSON.stringify(warnings),
+        metrics.matched,
+        metrics.stageUpdated,
+        metrics.skippedNoProjectNumber,
+        metrics.skippedUnmappedStatus,
+        metrics.skippedTemplate,
+        metrics.skippedBackward,
+        metrics.skippedTerminal,
+        metrics.skippedNoStageChange,
+        JSON.stringify(unmatchedProjectNumbers),
       ]
     );
     await client.query("COMMIT");

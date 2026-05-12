@@ -64,9 +64,14 @@ async function findDeal(sourceDealId: string) {
               d.company_id,
               d.primary_contact_id,
               d.procore_bid_id,
+              d.assigned_rep_id,
+              d.rfp_approval_requested_by,
               d.rfp_approval_request_id,
               d.workflow_route,
-              s.slug AS stage_slug
+              d.stage_entered_at,
+              s.slug AS stage_slug,
+              s.display_order AS stage_display_order,
+              s.is_terminal AS stage_is_terminal
          FROM ${quoteIdent(schemaName)}.deals d
          LEFT JOIN public.pipeline_stage_config s ON s.id = d.stage_id
         WHERE d.id = $1
@@ -117,7 +122,21 @@ function isWorkflowRoute(value: string | null): value is (typeof WORKFLOW_ROUTES
 }
 
 function bidBoardCreatedTargetStageSlug(workflowRoute: unknown) {
-  return workflowRoute === "service" ? "service_estimating" : "estimate_in_progress";
+  return workflowRoute === "service" ? "service_estimating" : "estimating";
+}
+
+function numericStageOrder(value: unknown): number | null {
+  if (value == null) return null;
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function shouldApplyBidBoardCreatedStage(currentDeal: any, targetStage: any): boolean {
+  if (!targetStage?.id || currentDeal.stage_id === targetStage.id) return false;
+  if (currentDeal.stage_is_terminal === true) return false;
+  const currentOrder = numericStageOrder(currentDeal.stage_display_order);
+  const targetOrder = numericStageOrder(targetStage.display_order);
+  return currentOrder == null || targetOrder == null || targetOrder >= currentOrder;
 }
 
 function isDealNumberUniqueViolation(error: unknown): boolean {
@@ -410,40 +429,90 @@ internalRfpRoutes.post(
 
       const targetStageSlug = bidBoardCreatedTargetStageSlug(found.deal.workflow_route);
       const targetStageResult = await pool.query(
-        `SELECT id FROM public.pipeline_stage_config WHERE slug = $1 LIMIT 1`,
+        `SELECT id, display_order, is_terminal FROM public.pipeline_stage_config WHERE slug = $1 LIMIT 1`,
         [targetStageSlug]
       );
-      const targetStageId = targetStageResult.rows[0]?.id ?? null;
-      if (!targetStageId) {
+      const targetStage = targetStageResult.rows[0] ?? null;
+      if (!targetStage?.id) {
         console.warn(
           `[RFP callback] Could not find target stage '${targetStageSlug}' for deal ${sourceDealId}; linkage will be applied without a stage transition`
         );
       }
+      const applyStage = shouldApplyBidBoardCreatedStage(found.deal, targetStage);
+      if (targetStage?.id && found.deal.stage_id !== targetStage.id && !applyStage) {
+        console.warn(
+          `[RFP callback] Skipping unsafe stage transition for deal ${sourceDealId}: ${found.deal.stage_slug ?? found.deal.stage_id} -> ${targetStageSlug}`
+        );
+      }
 
-      await pool.query(
-        `UPDATE ${quoteIdent(found.schemaName)}.deals
-            SET procore_bid_id = $1::bigint,
-                procore_company_id = $2,
-                is_bid_board_owned = true,
-                rfp_approval_status = 'approved',
-                bid_board_linked_at = NOW(),
-                stage_id = COALESCE($3::uuid, stage_id),
-                stage_entered_at = CASE
-                  WHEN $3::uuid IS NOT NULL AND stage_id IS DISTINCT FROM $3::uuid THEN NOW()
-                  ELSE stage_entered_at
-                END,
-                updated_at = NOW()
-          WHERE id = $4
-            AND (
-              procore_bid_id IS DISTINCT FROM $1::bigint OR
-              procore_company_id IS DISTINCT FROM $2 OR
-              is_bid_board_owned IS DISTINCT FROM true OR
-              rfp_approval_status IS DISTINCT FROM 'approved' OR
-              bid_board_linked_at IS NULL OR
-              ($3::uuid IS NOT NULL AND stage_id IS DISTINCT FROM $3::uuid)
-            )`,
-        [bidboardProjectId, procoreCompanyId, targetStageId, sourceDealId]
-      );
+      const changedByUserId = found.deal.rfp_approval_requested_by ?? found.deal.assigned_rep_id ?? null;
+      const canApplyStage = applyStage && Boolean(changedByUserId);
+      if (applyStage && !changedByUserId) {
+        console.warn(`[RFP callback] Skipping stage transition for deal ${sourceDealId}: no changed_by user available`);
+      }
+
+      const client = await pool.connect();
+      try {
+        await client.query("BEGIN");
+        await client.query(
+          `UPDATE ${quoteIdent(found.schemaName)}.deals
+              SET procore_bid_id = $1::bigint,
+                  procore_company_id = $2,
+                  is_bid_board_owned = true,
+                  rfp_approval_status = 'approved',
+                  bid_board_linked_at = NOW(),
+                  updated_at = NOW()
+            WHERE id = $3
+              AND (
+                procore_bid_id IS DISTINCT FROM $1::bigint OR
+                procore_company_id IS DISTINCT FROM $2 OR
+                is_bid_board_owned IS DISTINCT FROM true OR
+                rfp_approval_status IS DISTINCT FROM 'approved' OR
+                bid_board_linked_at IS NULL
+              )`,
+          [bidboardProjectId, procoreCompanyId, sourceDealId]
+        );
+
+        if (canApplyStage) {
+          const stageUpdate = await client.query(
+            `UPDATE ${quoteIdent(found.schemaName)}.deals
+                SET stage_id = $1::uuid,
+                    stage_entered_at = NOW(),
+                    updated_at = NOW()
+              WHERE id = $2
+                AND stage_id = $3::uuid
+              RETURNING id`,
+            [targetStage.id, sourceDealId, found.deal.stage_id]
+          );
+
+          if ((stageUpdate.rowCount ?? 0) > 0) {
+            await client.query(
+              `INSERT INTO ${quoteIdent(found.schemaName)}.deal_stage_history
+                 (deal_id, from_stage_id, to_stage_id, changed_by, is_backward_move,
+                  is_director_override, override_reason, duration_in_previous_stage)
+               VALUES ($1, $2, $3, $4, false, false, $5,
+                 CASE WHEN $6::timestamptz IS NULL THEN NULL ELSE NOW() - $6::timestamptz END)`,
+              [
+                sourceDealId,
+                found.deal.stage_id,
+                targetStage.id,
+                changedByUserId,
+                `Bid Board created callback - Stage ${targetStageSlug}`,
+                found.deal.stage_entered_at,
+              ]
+            );
+          } else {
+            console.warn(`[RFP callback] Skipped stage transition for deal ${sourceDealId}: stage changed during callback`);
+          }
+        }
+
+        await client.query("COMMIT");
+      } catch (err) {
+        await client.query("ROLLBACK").catch(() => {});
+        throw err;
+      } finally {
+        client.release();
+      }
 
       res.json({ success: true, dealId: sourceDealId, bidboardProjectId });
     } catch (err) {
