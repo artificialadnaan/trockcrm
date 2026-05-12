@@ -65,7 +65,37 @@ Diagnosis: incomplete consumer audit. The original implementer grep'd for places
 
 ## Deploy
 
-Tracking Railway deploy after the merge of `7c80483`. Smoke results will be appended to `smoke.md`.
+| Deploy ID | Status | Note |
+|---|---|---|
+| `e1e27b75-330d-45af-a0c1-12a1a610ae23` | FAILED @ 21:52 | Initial deploy after #265 merge. Client build (`tsc -b --force`) caught five test files with stale `Deal` fixtures missing `isHubspotSourced`. Local `tsc --noEmit` had not surfaced them. |
+| `a87fca1e-5bdd-45f2-9b4c-c1d4c7d37009` | **SUCCESS** @ 22:02 | After hotfix PR #266 (`09fa1102`) merged. **This is the deploy serving the new code.** |
+
+## Smoke
+
+All checks PASS against `https://api-production-ad218.up.railway.app`.
+
+```
+GET /api/health → 200
+
+Scan of 100 deals (director, default):
+  total=100 hubspot=97 native=3
+  hubspotDealId leaks=0          # zero rows on the wire carry the raw ID
+
+GET /api/deals/<hubspot-deal>/detail (director default)
+  → isHubspotSourced=true, hubspotDealId=<absent>
+
+GET /api/deals/<native-bidboard-owned-deal>/detail (director default)
+  → isHubspotSourced=false, hubspotDealId=<absent>, isBidBoardOwned=true
+  (gate evaluates `!false` → Bid Board summary panel renders correctly)
+
+GET /api/deals/<hubspot-deal>/detail?includeHubspotId=true (admin)
+  → isHubspotSourced=true, hubspotDealId=<full HubSpot id>
+  (admin override exposes the raw id explicitly; flag still present)
+
+GET /api/deals/<hubspot-deal>/detail (admin, NO override)
+  → isHubspotSourced=true, hubspotDealId=<absent>
+  (admin still doesn't see the raw id unless they ask for it)
+```
 
 ## Known issues / NEEDS INTERVENTION
 
