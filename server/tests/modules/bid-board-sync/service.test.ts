@@ -5,6 +5,7 @@ const {
   findDealIds,
   normalizeBidBoardRow,
   parseBidBoardDueDate,
+  normalizeBidBoardProjectNumber,
   updateParams,
 } = await import("../../../src/modules/bid-board-sync/service.js");
 
@@ -116,8 +117,15 @@ describe("Bid Board sync service", () => {
 
     expect(ids).toEqual(["deal-by-project-number"]);
     expect(query).toHaveBeenCalledTimes(1);
-    expect(query.mock.calls[0][0]).toContain("bid_board_project_number = $1");
-    expect(query.mock.calls[0][1]).toEqual(["DFW-4-11826-ab"]);
+    expect(query.mock.calls[0][0]).toContain("project_number");
+    expect(query.mock.calls[0][0]).toContain("deal_number");
+    expect(query.mock.calls[0][0]).toContain("bid_board_project_number");
+    expect(query.mock.calls[0][1]).toEqual(["dfw-4-11826-ab"]);
+  });
+
+  it("normalizes Bid Board Project # tokens for case-insensitive CRM matching", () => {
+    expect(normalizeBidBoardProjectNumber("  DFW-4-11826-ab  ")).toBe("dfw-4-11826-ab");
+    expect(normalizeBidBoardProjectNumber("\t")).toBeNull();
   });
 
   it("passes the latest ingestion cycle timestamp into the deal update", async () => {

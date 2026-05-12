@@ -16,6 +16,10 @@
     "./utils": {
       "types": "./dist/utils/normalize.d.ts",
       "default": "./dist/utils/normalize.js"
+    },
+    "./lib/bidBoardStatusMap": {
+      "types": "./dist/lib/bidBoardStatusMap.d.ts",
+      "default": "./dist/lib/bidBoardStatusMap.js"
     }
   },
   "scripts": {
