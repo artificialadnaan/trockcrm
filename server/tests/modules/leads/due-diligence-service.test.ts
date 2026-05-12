@@ -403,6 +403,39 @@ beforeEach(() => {
 });
 
 describe("buildLeadDueDiligenceEmail", () => {
+  it("builds a path-token public review link that the validator can load", async () => {
+    const previousApiBaseUrl = process.env.API_BASE_URL;
+    const previousFrontendUrl = process.env.FRONTEND_URL;
+    process.env.API_BASE_URL = "https://api.trock.test/";
+    delete process.env.FRONTEND_URL;
+    makePoolClient({
+      approval: makeApproval({ tenant_schema: "office_atlanta" }),
+      summary: makePublicSummary(),
+    });
+
+    try {
+      const token = "a".repeat(64);
+      const email = buildLeadDueDiligenceEmail({
+        summary: makeLeadSummary() as never,
+        token,
+        detectionSignal: null,
+      });
+      const href = email.html.match(/href="([^"]+)"/)?.[1];
+
+      expect(href).toBe(`https://api.trock.test/api/public/lead-due-diligence/${token}`);
+      const parsed = new URL(href ?? "");
+      expect(parsed.search).toBe("");
+      await expect(renderDueDiligenceDecisionPage(parsed.pathname.split("/").pop() ?? "")).resolves.toContain(
+        "T Rock Construction — Lead Due Diligence"
+      );
+    } finally {
+      if (previousApiBaseUrl === undefined) delete process.env.API_BASE_URL;
+      else process.env.API_BASE_URL = previousApiBaseUrl;
+      if (previousFrontendUrl === undefined) delete process.env.FRONTEND_URL;
+      else process.env.FRONTEND_URL = previousFrontendUrl;
+    }
+  });
+
   it("renders human-readable POC role and budget status labels", () => {
     const email = buildLeadDueDiligenceEmail({
       summary: makeLeadSummary() as never,
@@ -569,6 +602,10 @@ describe("createLeadDueDiligenceApproval", () => {
 describe("dispatchPendingDueDiligenceEmail", () => {
   it("sends pending approval email and records metadata", async () => {
     vi.mocked(sendSystemEmailWithMetadata).mockResolvedValue({ success: true, messageId: "resend-1" });
+    makePoolClient({
+      approval: makeApproval({ tenant_schema: "office_atlanta" }),
+      summary: makePublicSummary(),
+    });
     const tenantDb = createTenantDb({
       approvals: [makeApproval()],
       recipients: [{ userId: "user-1", email: "admin@example.com", displayName: "Admin" }],
@@ -581,6 +618,14 @@ describe("dispatchPendingDueDiligenceEmail", () => {
       ["admin@example.com"],
       "Due Diligence for New Lead/Company",
       expect.stringContaining("Review and decide")
+    );
+    const sentHtml = vi.mocked(sendSystemEmailWithMetadata).mock.calls[0][2];
+    const href = sentHtml.match(/href="([^"]+)"/)?.[1];
+    expect(href).toContain("/api/public/lead-due-diligence/");
+    const tokenFromEmail = new URL(href ?? "").pathname.split("/").pop();
+    expect(tokenFromEmail).toBe((tenantDb as any).__state.approvals[0].approvalToken);
+    await expect(renderDueDiligenceDecisionPage(tokenFromEmail ?? "")).resolves.toContain(
+      "T Rock Construction — Lead Due Diligence"
     );
     expect((tenantDb as any).__state.approvals[0].email_sent_at).toEqual(NOW);
     expect((tenantDb as any).__state.approvals[0].email_message_id).toBe("resend-1");
@@ -922,30 +967,67 @@ describe("decideDueDiligenceByToken", () => {
       approval: makeApproval({ status: "approved", tenant_schema: "office_atlanta" }),
     });
 
-    const approval = await decideDueDiligenceByToken({
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+
+    await expect(decideDueDiligenceByToken({
       token: "a".repeat(64),
       decision: "approve",
-    });
+    })).rejects.toMatchObject<AppError>({ statusCode: 404 });
 
-    expect(approval.status).toBe("approved");
+    expect(warn).toHaveBeenCalledWith(
+      "[lead-dd] public due diligence token rejected",
+      expect.objectContaining({ reason: "already_used" })
+    );
     expect(client.calls.some((call) => call.text.includes("UPDATE office_atlanta.lead_due_diligence_approvals"))).toBe(false);
+    warn.mockRestore();
   });
 
   it("requires reject reason validation on public token decisions", async () => {
+    makePoolClient({
+      approval: makeApproval({ status: "pending", tenant_schema: "office_atlanta" }),
+    });
+
     await expect(decideDueDiligenceByToken({
       token: "a".repeat(64),
       decision: "reject",
       reason: "short",
     })).rejects.toMatchObject<AppError>({ statusCode: 400 });
   });
+
+  it("checks already-used tokens before reject reason validation", async () => {
+    makePoolClient({
+      approval: makeApproval({ status: "rejected", tenant_schema: "office_atlanta" }),
+    });
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+
+    await expect(decideDueDiligenceByToken({
+      token: "a".repeat(64),
+      decision: "reject",
+      reason: "short",
+    })).rejects.toMatchObject<AppError>({ statusCode: 404 });
+
+    expect(warn).toHaveBeenCalledWith(
+      "[lead-dd] public due diligence token rejected",
+      expect.objectContaining({ reason: "already_used", status: "rejected" })
+    );
+    warn.mockRestore();
+  });
 });
 
 describe("renderDueDiligenceDecisionPage", () => {
   it("rejects invalid token format with a generic 404", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+
     await expect(renderDueDiligenceDecisionPage("not-a-token")).rejects.toMatchObject<AppError>({
       statusCode: 404,
       message: "Due Diligence decision not found",
     });
+
+    expect(warn).toHaveBeenCalledWith(
+      "[lead-dd] public due diligence token rejected",
+      expect.objectContaining({ reason: "invalid_format" })
+    );
+    warn.mockRestore();
   });
 
   it("rejects missing tokens with the styled not-found page helper available", () => {
@@ -957,12 +1039,19 @@ describe("renderDueDiligenceDecisionPage", () => {
   });
 
   it("returns generic 404 when token is not found in any tenant", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     makePoolClient({ approval: null });
 
     await expect(renderDueDiligenceDecisionPage("a".repeat(64))).rejects.toMatchObject<AppError>({
       statusCode: 404,
       message: "Due Diligence decision not found",
     });
+
+    expect(warn).toHaveBeenCalledWith(
+      "[lead-dd] public due diligence token rejected",
+      expect.objectContaining({ reason: "not_found" })
+    );
+    warn.mockRestore();
   });
 
   it("renders pending approval summary with split approve and reject forms", async () => {

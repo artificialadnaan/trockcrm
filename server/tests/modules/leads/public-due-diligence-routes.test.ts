@@ -108,6 +108,38 @@ describe("public due diligence routes", () => {
     expect(res.body).toBe("<html>decision</html>");
   });
 
+  it("renders the decision page on path-token GET links", async () => {
+    const routes = await loadRoutes();
+    const handler = findRouteHandler(routes, "get", "/:token");
+    const req = { params: { token: "b".repeat(64) }, query: {} } as any;
+    const res = {
+      statusCode: 200,
+      body: undefined as any,
+      headers: {} as Record<string, string>,
+      status(code: number) {
+        this.statusCode = code;
+        return this;
+      },
+      setHeader(name: string, value: string) {
+        this.headers[name] = value;
+        return this;
+      },
+      send(payload: string) {
+        this.body = payload;
+        return this;
+      },
+    } as any;
+    const next = vi.fn((err?: unknown) => {
+      if (err) throw err;
+    });
+
+    await handler(req, res, next);
+
+    expect(serviceMocks.renderDueDiligenceDecisionPage).toHaveBeenCalledWith("b".repeat(64));
+    expect(res.headers["Content-Type"]).toBe("text/html; charset=utf-8");
+    expect(res.body).toBe("<html>decision</html>");
+  });
+
   it("renders styled 404 HTML for invalid GET tokens", async () => {
     serviceMocks.renderDueDiligenceDecisionPage.mockRejectedValueOnce(
       new AppError(404, "Due Diligence decision not found")
