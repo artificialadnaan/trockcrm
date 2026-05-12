@@ -10,11 +10,13 @@ import {
   getLogoutCookieClears,
   getLogoutCookieClearsForRequest,
   getRequestOrigin,
+  getStrictCrossSiteAuthOrigins,
   getTokenCookieOptions,
   getTokenCookieOptionsForRequest,
   isAllowedCookieAuthOrigin,
   isFieldApiPath,
   isPublicAuthCsrfExempt,
+  shouldExposeCsrfTokenInResponse,
   isValidFieldCsrfHeader,
   isValidCsrfPair,
   isDevAuthEnabled,
@@ -43,6 +45,58 @@ describe("auth http config", () => {
     ]);
   });
 
+  it("omits localhost and http origins from the production credentialed CORS allowlist", () => {
+    expect(
+      getAllowedCorsOrigins({
+        NODE_ENV: "production",
+        CORS_ALLOWED_ORIGINS: "https://trockcrm.com, http://localhost:5173, http://insecure.example.com",
+      })
+    ).toEqual(["https://trockcrm.com"]);
+  });
+
+  it("keeps localhost in the non-production CORS allowlist for local workflows", () => {
+    expect(
+      getAllowedCorsOrigins({
+        NODE_ENV: "development",
+        CORS_ALLOWED_ORIGINS: "https://crm.example.com",
+      })
+    ).toEqual([
+      "https://crm.example.com",
+      "http://localhost:5173",
+      "http://localhost:5174",
+      "http://localhost:3000",
+    ]);
+  });
+
+  it("defaults strict cross-site auth origins to empty until production env explicitly opts in", () => {
+    expect(getStrictCrossSiteAuthOrigins({ NODE_ENV: "production" })).toEqual([
+    ]);
+  });
+
+  it("accepts explicit production HTTPS strict cross-site auth origins", () => {
+    expect(
+      getStrictCrossSiteAuthOrigins({
+        NODE_ENV: "production",
+        STRICT_CROSS_SITE_AUTH_ORIGINS:
+          "https://trockcrm.com,https://crm.trockconstruction.com,https://frontend-production-bcab.up.railway.app",
+      })
+    ).toEqual([
+      "https://trockcrm.com",
+      "https://crm.trockconstruction.com",
+      "https://frontend-production-bcab.up.railway.app",
+    ]);
+  });
+
+  it("ignores non-https and localhost strict cross-site auth origins in production", () => {
+    expect(
+      getStrictCrossSiteAuthOrigins({
+        NODE_ENV: "production",
+        STRICT_CROSS_SITE_AUTH_ORIGINS:
+          "https://frontend-production-bcab.up.railway.app,http://localhost:5173,http://insecure.example.com",
+      })
+    ).toEqual(["https://frontend-production-bcab.up.railway.app"]);
+  });
+
   it("uses secure cross-site cookie settings in production", () => {
     expect(getTokenCookieOptions({ NODE_ENV: "production" })).toMatchObject({
       httpOnly: true,
@@ -68,6 +122,7 @@ describe("auth http config", () => {
         NODE_ENV: "production",
         AUTH_COOKIE_DOMAIN: ".trockcrm.com",
         CORS_ALLOWED_ORIGINS: "https://frontend-production-bcab.up.railway.app",
+        STRICT_CROSS_SITE_AUTH_ORIGINS: "https://frontend-production-bcab.up.railway.app",
       },
       {
         host: fallbackApiHost,
@@ -79,6 +134,7 @@ describe("auth http config", () => {
         NODE_ENV: "production",
         AUTH_COOKIE_DOMAIN: ".trockcrm.com",
         CORS_ALLOWED_ORIGINS: "https://frontend-production-bcab.up.railway.app",
+        STRICT_CROSS_SITE_AUTH_ORIGINS: "https://frontend-production-bcab.up.railway.app",
       },
       {
         host: fallbackApiHost,
@@ -99,6 +155,44 @@ describe("auth http config", () => {
     });
     expect(tokenOptions).not.toHaveProperty("domain");
     expect(csrfOptions).not.toHaveProperty("domain");
+  });
+
+  it("uses SameSite=Lax for localhost origins in production even if localhost is listed", () => {
+    const tokenOptions = getTokenCookieOptionsForRequest(
+      {
+        NODE_ENV: "production",
+        CORS_ALLOWED_ORIGINS: "http://localhost:5173",
+        STRICT_CROSS_SITE_AUTH_ORIGINS: "https://frontend-production-bcab.up.railway.app",
+      },
+      {
+        host: fallbackApiHost,
+        origin: "http://localhost:5173",
+      }
+    );
+
+    expect(tokenOptions).toMatchObject({
+      secure: true,
+      sameSite: "lax",
+    });
+  });
+
+  it("uses SameSite=None only for explicit production HTTPS cross-site auth origins", () => {
+    const tokenOptions = getTokenCookieOptionsForRequest(
+      {
+        NODE_ENV: "production",
+        CORS_ALLOWED_ORIGINS: "https://frontend-production-bcab.up.railway.app",
+        STRICT_CROSS_SITE_AUTH_ORIGINS: "https://frontend-production-bcab.up.railway.app",
+      },
+      {
+        host: fallbackApiHost,
+        origin: "https://frontend-production-bcab.up.railway.app",
+      }
+    );
+
+    expect(tokenOptions).toMatchObject({
+      secure: true,
+      sameSite: "none",
+    });
   });
 
   it("keeps the shared cookie domain on canonical trockcrm.com requests", () => {
@@ -135,6 +229,7 @@ describe("auth http config", () => {
         NODE_ENV: "production",
         AUTH_COOKIE_DOMAIN: ".trockcrm.com",
         CORS_ALLOWED_ORIGINS: "https://frontend-production-bcab.up.railway.app",
+        STRICT_CROSS_SITE_AUTH_ORIGINS: "https://frontend-production-bcab.up.railway.app",
       },
       {
         host: fallbackApiHost,
@@ -314,6 +409,43 @@ describe("auth http config", () => {
     expect(isAllowedCookieAuthOrigin(env, "https://evil.example.com")).toBe(false);
     expect(isAllowedCookieAuthOrigin(env, "https://crm.trockconstruction.com.evil.example.com")).toBe(false);
     expect(isAllowedCookieAuthOrigin(env, null)).toBe(false);
+  });
+
+  it("rejects localhost as a cookie-auth origin in production", () => {
+    const env = {
+      NODE_ENV: "production",
+      CORS_ALLOWED_ORIGINS: "https://trockcrm.com,http://localhost:5173",
+    };
+
+    expect(isAllowedCookieAuthOrigin(env, "https://trockcrm.com")).toBe(true);
+    expect(isAllowedCookieAuthOrigin(env, "http://localhost:5173")).toBe(false);
+  });
+
+  it("exposes response-body CSRF tokens only to explicit production cross-site auth origins", () => {
+    const env = {
+      NODE_ENV: "production",
+      CORS_ALLOWED_ORIGINS: "https://frontend-production-bcab.up.railway.app",
+      STRICT_CROSS_SITE_AUTH_ORIGINS: "https://frontend-production-bcab.up.railway.app",
+    };
+
+    expect(
+      shouldExposeCsrfTokenInResponse(env, {
+        host: fallbackApiHost,
+        origin: "https://frontend-production-bcab.up.railway.app",
+      })
+    ).toBe(true);
+    expect(
+      shouldExposeCsrfTokenInResponse(env, {
+        host: "trockcrm.com",
+        origin: "https://trockcrm.com",
+      })
+    ).toBe(false);
+    expect(
+      shouldExposeCsrfTokenInResponse(env, {
+        host: fallbackApiHost,
+        origin: "http://localhost:5173",
+      })
+    ).toBe(false);
   });
 
   it("normalizes Origin before falling back to Referer", () => {

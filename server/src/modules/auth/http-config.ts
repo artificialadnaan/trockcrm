@@ -3,6 +3,7 @@ import crypto from "crypto";
 type EnvInput = {
   AUTH_COOKIE_DOMAIN?: string | undefined;
   CORS_ALLOWED_ORIGINS?: string | undefined;
+  STRICT_CROSS_SITE_AUTH_ORIGINS?: string | undefined;
   FRONTEND_URL?: string | undefined;
   FIELD_APP_URL?: string | undefined;
   FIELD_FRONTEND_URL?: string | undefined;
@@ -77,12 +78,17 @@ export function getAllowedCorsOrigins(env: EnvInput): string[] {
     normalizeOrigin(env.RAILWAY_STATIC_URL),
     normalizeOrigin(env.RAILWAY_SERVICE_FRONTEND_URL),
     normalizeOrigin(env.RAILWAY_SERVICE_FIELD_FRONTEND_URL),
-    "http://localhost:5173",
-    "http://localhost:5174",
-    "http://localhost:3000",
+    ...(env.NODE_ENV === "production"
+      ? []
+      : [
+          "http://localhost:5173",
+          "http://localhost:5174",
+          "http://localhost:3000",
+        ]),
   ].filter((value, index, values): value is string => Boolean(value) && values.indexOf(value) === index);
 
-  return origins;
+  if (env.NODE_ENV !== "production") return origins;
+  return origins.filter(isHttpsNonLocalOrigin);
 }
 
 export function getFieldAppUrl(env: EnvInput): string {
@@ -109,6 +115,15 @@ function isLocalOrTestHost(host: string | undefined): boolean {
     normalizedHost === "test" ||
     normalizedHost.endsWith(".test")
   );
+}
+
+function isHttpsNonLocalOrigin(origin: string): boolean {
+  try {
+    const parsed = new URL(origin);
+    return parsed.protocol === "https:" && !isLocalOrTestHost(parsed.host);
+  } catch {
+    return false;
+  }
 }
 
 export function assertSafeDevAuthConfig(env: EnvInput): void {
@@ -177,7 +192,7 @@ function sameSiteForRequest(env: EnvInput, request: CookieRequestInput): "strict
     return "lax";
   }
 
-  return isAllowedCookieAuthOrigin(env, origin) ? "none" : "lax";
+  return isAllowedCookieAuthOrigin(env, origin) && isStrictCrossSiteAuthOrigin(env, origin) ? "none" : "lax";
 }
 
 export function getTokenCookieOptionsForRequest(env: EnvInput, request: CookieRequestInput) {
@@ -261,6 +276,41 @@ export function getCsrfCookieOptionsForRequest(env: EnvInput, request: CookieReq
   const domain = cookieDomainForRequest(env, request);
   const sameSite = sameSiteForRequest(env, request);
   return domain ? { ...base, sameSite, domain } as const : { ...base, sameSite } as const;
+}
+
+export function getStrictCrossSiteAuthOrigins(env: EnvInput): string[] {
+  const configured = env.STRICT_CROSS_SITE_AUTH_ORIGINS?.trim();
+  const source = configured ? configured.split(",") : [];
+
+  return source
+    .map(normalizeOrigin)
+    .filter((value): value is string => Boolean(value))
+    .filter(isHttpsNonLocalOrigin)
+    .filter((value, index, values) => values.indexOf(value) === index);
+}
+
+function isStrictCrossSiteAuthOrigin(env: EnvInput, origin: string | null): boolean {
+  if (!origin) return false;
+  const normalized = normalizeOrigin(origin);
+  if (!normalized) return false;
+  return getStrictCrossSiteAuthOrigins(env).includes(normalized);
+}
+
+export function shouldExposeCsrfTokenInResponse(env: EnvInput, request: CookieRequestInput): boolean {
+  if (env.NODE_ENV !== "production") return false;
+
+  const origin = getRequestOrigin({ origin: request.origin });
+  const host = normalizeHost(requestHost(request));
+  if (!origin || !host) return false;
+
+  try {
+    const parsedOrigin = new URL(origin);
+    if (normalizeHost(parsedOrigin.host) === host) return false;
+  } catch {
+    return false;
+  }
+
+  return isAllowedCookieAuthOrigin(env, origin) && isStrictCrossSiteAuthOrigin(env, origin);
 }
 
 export function createCsrfToken(): string {

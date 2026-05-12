@@ -65,6 +65,7 @@ const ENV_KEYS = [
   "NODE_ENV",
   "AUTH_COOKIE_DOMAIN",
   "CORS_ALLOWED_ORIGINS",
+  "STRICT_CROSS_SITE_AUTH_ORIGINS",
   "FIELD_APP_URL",
 ] as const;
 let previousEnv: Partial<Record<(typeof ENV_KEYS)[number], string | undefined>>;
@@ -76,6 +77,7 @@ describe("password-change auth cookies", () => {
     process.env.NODE_ENV = "production";
     process.env.AUTH_COOKIE_DOMAIN = ".trockcrm.com";
     process.env.CORS_ALLOWED_ORIGINS = "https://frontend-production-bcab.up.railway.app";
+    process.env.STRICT_CROSS_SITE_AUTH_ORIGINS = "https://frontend-production-bcab.up.railway.app";
     process.env.FIELD_APP_URL = "https://trockcrm-field-production.up.railway.app";
 
     authServiceMocks.signJwt.mockReturnValue("next-session");
@@ -166,6 +168,79 @@ describe("password-change auth cookies", () => {
     expect(me.status).toBe(200);
     expect(me.body.user.email).toBe("crm@example.com");
     expect(me.body.csrfToken).toEqual(login.body.csrfToken);
+  });
+
+  it("does not expose response-body CSRF tokens on canonical same-origin auth responses", async () => {
+    const app = createApp();
+
+    const login = await request(app)
+      .post("/api/auth/local/login")
+      .set("Origin", "https://trockcrm.com")
+      .set("Host", "trockcrm.com")
+      .send({ email: "crm@example.com", password: tempSecret });
+
+    expect(login.status).toBe(200);
+    expect(login.body.csrfToken).toBeUndefined();
+    const cookieHeader = cookieHeaderFromSetCookie(login.headers["set-cookie"] ?? []);
+
+    const me = await request(app)
+      .get("/api/auth/me")
+      .set("Origin", "https://trockcrm.com")
+      .set("Host", "trockcrm.com")
+      .set("Cookie", cookieHeader);
+
+    expect(me.status).toBe(200);
+    expect(me.body.csrfToken).toBeUndefined();
+  });
+
+  it("does not expose response-body CSRF tokens to localhost origins in production", async () => {
+    const app = createApp();
+
+    const login = await request(app)
+      .post("/api/auth/local/login")
+      .set("Origin", "https://frontend-production-bcab.up.railway.app")
+      .set("Host", fallbackApiHost)
+      .send({ email: "crm@example.com", password: tempSecret });
+
+    expect(login.status).toBe(200);
+    const cookieHeader = cookieHeaderFromSetCookie(login.headers["set-cookie"] ?? []);
+
+    const me = await request(app)
+      .get("/api/auth/me")
+      .set("Origin", "http://localhost:5173")
+      .set("Host", fallbackApiHost)
+      .set("Cookie", cookieHeader);
+
+    expect(me.status).toBe(200);
+    expect(me.body.csrfToken).toBeUndefined();
+  });
+
+  it("rejects a simulated localhost state-changing attack against production", async () => {
+    const app = createApp();
+
+    const login = await request(app)
+      .post("/api/auth/local/login")
+      .set("Origin", "https://frontend-production-bcab.up.railway.app")
+      .set("Host", fallbackApiHost)
+      .send({ email: "crm@example.com", password: tempSecret });
+
+    expect(login.status).toBe(200);
+    const cookieHeader = cookieHeaderFromSetCookie(login.headers["set-cookie"] ?? []);
+
+    const attack = await request(app)
+      .post("/api/auth/local/change-password")
+      .set("Origin", "http://localhost:5173")
+      .set("Host", fallbackApiHost)
+      .set("Cookie", cookieHeader)
+      .set("X-CSRF-Token", login.body.csrfToken)
+      .send({
+        currentPassword: tempSecret,
+        newPassword: nextSecret,
+      });
+
+    expect(attack.status).toBe(403);
+    expect(attack.body).toEqual({ error: { message: "Forbidden origin" } });
+    expect(localAuthServiceMocks.changeLocalPassword).not.toHaveBeenCalled();
   });
 
   it("still rejects password changes that omit the CSRF header", async () => {

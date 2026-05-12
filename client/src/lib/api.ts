@@ -55,7 +55,7 @@ function readCookie(name: string): string | undefined {
 }
 
 export function getCsrfToken(): string | undefined {
-  return csrfTokenOverride ?? readCookie(CSRF_COOKIE_NAME);
+  return readCookie(CSRF_COOKIE_NAME) ?? csrfTokenOverride;
 }
 
 export function clearCsrfTokenOverride() {
@@ -143,7 +143,10 @@ export async function api<T = unknown>(path: string, options: ApiOptions = {}): 
       "csrfToken" in payload &&
       typeof (payload as { csrfToken?: unknown }).csrfToken === "string"
     ) {
-      csrfTokenOverride = (payload as { csrfToken: string }).csrfToken;
+      const nextToken = (payload as { csrfToken: string }).csrfToken;
+      if (readCookie(CSRF_COOKIE_NAME) === undefined) {
+        csrfTokenOverride = nextToken;
+      }
     }
   }
 

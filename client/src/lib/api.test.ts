@@ -2,7 +2,7 @@
  * @vitest-environment jsdom
  */
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { api, clearCsrfTokenOverrideForTests, resolveApiBase } from "./api";
+import { api, clearCsrfTokenOverrideForTests, getCsrfToken, resolveApiBase } from "./api";
 
 describe("resolveApiBase", () => {
   it("uses the same-origin api path by default", () => {
@@ -79,7 +79,42 @@ describe("api CSRF handling", () => {
     );
   });
 
-  it("prefers the trusted response-body token over a stale readable cookie", async () => {
+  it("uses the rotated readable cookie instead of a stale response-body override", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ csrfToken: "server-issued-token", user: { id: "user-1" } }), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        })
+      )
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ ok: true }), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        })
+      );
+    vi.stubGlobal("fetch", fetchMock);
+
+    await api("/auth/me");
+    document.cookie = "csrf_token=rotated-cookie-token; path=/";
+    await api("/auth/local/change-password", {
+      method: "POST",
+      json: { currentPassword: tempSecret, newPassword: nextSecret },
+    });
+
+    expect(fetchMock).toHaveBeenNthCalledWith(
+      2,
+      expect.any(String),
+      expect.objectContaining({
+        headers: expect.objectContaining({
+          "X-CSRF-Token": "rotated-cookie-token",
+        }),
+      })
+    );
+  });
+
+  it("keeps a readable cookie authoritative when a response-body token also arrives", async () => {
     document.cookie = "csrf_token=stale-cookie-token; path=/";
     const fetchMock = vi
       .fn()
@@ -98,6 +133,7 @@ describe("api CSRF handling", () => {
     vi.stubGlobal("fetch", fetchMock);
 
     await api("/auth/me");
+    expect(getCsrfToken()).toBe("stale-cookie-token");
     await api("/auth/local/change-password", {
       method: "POST",
       json: { currentPassword: tempSecret, newPassword: nextSecret },
@@ -108,7 +144,7 @@ describe("api CSRF handling", () => {
       expect.any(String),
       expect.objectContaining({
         headers: expect.objectContaining({
-          "X-CSRF-Token": "fresh-response-token",
+          "X-CSRF-Token": "stale-cookie-token",
         }),
       })
     );

@@ -21,7 +21,12 @@ import {
   isGraphAuthConfigured,
 } from "../email/graph-auth.js";
 import { getGraphTokenStatus, revokeGraphTokens } from "../email/graph-token-service.js";
-import { getLogoutCookieClearsForRequest, getTokenCookieOptionsForRequest, isDevAuthEnabled } from "./http-config.js";
+import {
+  getLogoutCookieClearsForRequest,
+  getTokenCookieOptionsForRequest,
+  isDevAuthEnabled,
+  shouldExposeCsrfTokenInResponse,
+} from "./http-config.js";
 import {
   clearStoredProcoreOauthTokens,
   getStoredProcoreOauthTokens,
@@ -60,7 +65,20 @@ function csrfTokenForResponse(res: import("express").Response): string | undefin
   return typeof res.locals.csrfToken === "string" ? res.locals.csrfToken : undefined;
 }
 
-function withCsrfToken<T extends Record<string, unknown>>(res: import("express").Response, payload: T) {
+function csrfResponseRequest(req: import("express").Request) {
+  return {
+    host: req.get("host"),
+    hostname: req.hostname,
+    origin: req.headers.origin,
+  };
+}
+
+function withCsrfToken<T extends Record<string, unknown>>(
+  req: import("express").Request,
+  res: import("express").Response,
+  payload: T
+) {
+  if (!shouldExposeCsrfTokenInResponse(process.env, csrfResponseRequest(req))) return payload;
   const csrfToken = csrfTokenForResponse(res);
   return csrfToken ? { ...payload, csrfToken } : payload;
 }
@@ -174,7 +192,7 @@ router.post("/dev/login", authLimiter, async (req, res, next) => {
         mustChangePassword: false,
       });
 
-    res.json(withCsrfToken(res, { user: responseUser, returnTo: safeReturnTo(req.body?.returnTo) }));
+    res.json(withCsrfToken(req, res, { user: responseUser, returnTo: safeReturnTo(req.body?.returnTo) }));
   } catch (err) {
     next(err);
   }
@@ -201,7 +219,7 @@ router.post("/local/login", authLimiter, async (req, res, next) => {
     });
 
     res.cookie("token", token, tokenCookieOptionsForRequest(req));
-    res.json(withCsrfToken(res, { user: await withOnboardingGate({ ...user, activeOfficeId: user.officeId }), returnTo: safeReturnTo(req.body?.returnTo) }));
+    res.json(withCsrfToken(req, res, { user: await withOnboardingGate({ ...user, activeOfficeId: user.officeId }), returnTo: safeReturnTo(req.body?.returnTo) }));
   } catch (err) {
     next(err);
   }
@@ -217,7 +235,7 @@ router.use(fieldUserAuthRouter);
 // Get current user
 router.get("/me", authMiddleware, async (req, res, next) => {
   try {
-    res.json(withCsrfToken(res, { user: await withOnboardingGate(req.user!) }));
+    res.json(withCsrfToken(req, res, { user: await withOnboardingGate(req.user!) }));
   } catch (err) {
     next(err);
   }
@@ -251,7 +269,7 @@ router.post("/local/change-password", authMiddleware, async (req, res, next) => 
       newPassword,
     });
 
-    res.json(withCsrfToken(res, {
+    res.json(withCsrfToken(req, res, {
       user: await withOnboardingGate({
         ...req.user!,
         mustChangePassword: false,
