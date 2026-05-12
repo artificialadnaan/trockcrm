@@ -14,6 +14,7 @@ type EnvInput = {
   AZURE_CLIENT_ID?: string | undefined;
   DEV_MODE?: string | undefined;
   ALLOW_DEV_AUTH_IN_PROD?: string | undefined;
+  I_UNDERSTAND_DEV_AUTH_IN_PROD?: string | undefined;
 };
 
 export const CSRF_COOKIE_NAME = "csrf_token";
@@ -94,7 +95,7 @@ export function assertSafeDevAuthConfig(env: EnvInput): void {
     env.DEV_MODE === "true" &&
     !isDevAuthProductionOverrideEnabled(env)
   ) {
-    throw new Error("Unsafe auth configuration: DEV_MODE=true is not allowed when NODE_ENV=production");
+    throw new Error("Unsafe auth configuration: DEV_MODE=true is not allowed when NODE_ENV=production unless ALLOW_DEV_AUTH_IN_PROD=true and I_UNDERSTAND_DEV_AUTH_IN_PROD=yes are both set");
   }
   getFieldAppUrl(env);
 }
@@ -103,8 +104,14 @@ export function isDevAuthProductionOverrideEnabled(env: EnvInput): boolean {
   return (
     env.NODE_ENV === "production" &&
     env.DEV_MODE === "true" &&
-    env.ALLOW_DEV_AUTH_IN_PROD === "true"
+    env.ALLOW_DEV_AUTH_IN_PROD === "true" &&
+    env.I_UNDERSTAND_DEV_AUTH_IN_PROD === "yes"
   );
+}
+
+export function getDevAuthProductionWarning(env: EnvInput): string | null {
+  if (!isDevAuthProductionOverrideEnabled(env)) return null;
+  return "[AUTH][PRODUCTION DEV AUTH ENABLED] DEV_MODE=true is active in production because ALLOW_DEV_AUTH_IN_PROD=true and I_UNDERSTAND_DEV_AUTH_IN_PROD=yes are both set. This is a high-risk temporary smoke-test override; remove it before go-live.";
 }
 
 export function isDevAuthEnabled(env: EnvInput, host: string | undefined): boolean {

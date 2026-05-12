@@ -90,7 +90,7 @@ Raw SQL / tenant interpolation audit:
 
 Why it exists:
 - CFO needs temporary production E2E verification with `admin@trock.dev`, `director@trock.dev`, and `rep@trock.dev` before May 15 cutover.
-- This override is intentionally loud and temporary. `ALLOW_DEV_AUTH_IN_PROD=true` must be removed before the May 15 cutover.
+- This override is intentionally loud and temporary. `ALLOW_DEV_AUTH_IN_PROD=true` and `I_UNDERSTAND_DEV_AUTH_IN_PROD=yes` must both be removed before the May 15 cutover.
 
 Validation:
 - Command: `npx vitest run tests/modules/auth/http-config.test.ts`
@@ -102,11 +102,11 @@ Validation:
   - Exit code: 0
 - Command: `docker build -t trock-track-b-api:allow-dev-auth .`
   - Exit code: 0
-- Command: production stack with `NODE_ENV=production DEV_MODE=true ALLOW_DEV_AUTH_IN_PROD=true`, `curl -i http://localhost:30014/api/auth/dev/users`
+- Command: production stack with `NODE_ENV=production DEV_MODE=true ALLOW_DEV_AUTH_IN_PROD=true I_UNDERSTAND_DEV_AUTH_IN_PROD=yes`, `curl -i http://localhost:30014/api/auth/dev/users`
   - Exit code: 0
   - Response status: 200
   - Body snippet: `admin@trock.dev`, `director@trock.dev`, `rep@trock.dev`
-  - Startup log snippet: `[AUTH][PRE-CUTOVER OVERRIDE] ALLOW_DEV_AUTH_IN_PROD=true is enabling DEV_MODE in production for temporary E2E verification. Remove this override before the May 15 cutover.`
+  - Startup log snippet: `[AUTH][PRODUCTION DEV AUTH ENABLED] DEV_MODE=true is active in production because ALLOW_DEV_AUTH_IN_PROD=true and I_UNDERSTAND_DEV_AUTH_IN_PROD=yes are both set.`
 - Command: production stack with `NODE_ENV=production DEV_MODE=true` and no override, `node server/dist/index.js`
   - Exit code: 1
   - stderr snippet: `Unsafe auth configuration: DEV_MODE=true is not allowed when NODE_ENV=production`

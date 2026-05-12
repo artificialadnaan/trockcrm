@@ -5,14 +5,14 @@ Implements Track B cutover blockers:
 - B-11: upgraded `drizzle-orm` to `0.45.2` in `server`, `shared`, and `worker`.
 - B-12: upgraded `vite` to `7.3.2` and `@vitejs/plugin-react` to `5.2.0` in `client`.
 - B-09: hardened dev auth so `DEV_MODE=true` only works in local development/test hosts, and production startup fails when `DEV_MODE=true`.
-- B-09 amendment: added temporary `ALLOW_DEV_AUTH_IN_PROD=true` override for pre-cutover production E2E verification.
+- B-09 amendment: added temporary production dev-auth override for pre-cutover production E2E verification. Current code requires `DEV_MODE=true`, `ALLOW_DEV_AUTH_IN_PROD=true`, and `I_UNDERSTAND_DEV_AUTH_IN_PROD=yes`.
 - B-08: added exact-origin/referrer and double-submit CSRF protection for cookie-authenticated unsafe methods, while leaving raw Procore webhook routes outside the CSRF guard.
 
 # Pre-cutover override
 
-`ALLOW_DEV_AUTH_IN_PROD=true` allows `NODE_ENV=production && DEV_MODE=true` to start temporarily for CFO-requested E2E verification with dev accounts before the May 15 cutover. When active, startup logs a loud warning naming the override and stating it must be removed before cutover.
+`ALLOW_DEV_AUTH_IN_PROD=true` plus `I_UNDERSTAND_DEV_AUTH_IN_PROD=yes` allows `NODE_ENV=production && DEV_MODE=true` to start temporarily for CFO-requested E2E verification with dev accounts before the May 15 cutover. When active, startup logs a loud warning naming the override and stating it must be removed before cutover.
 
-Without `ALLOW_DEV_AUTH_IN_PROD=true`, production `DEV_MODE=true` still hard-fails startup. `NODE_ENV=production && DEV_MODE=false` remains unchanged and keeps dev auth disabled.
+Without both explicit override variables, production `DEV_MODE=true` still hard-fails startup. `NODE_ENV=production && DEV_MODE=false` remains unchanged and keeps dev auth disabled.
 
 # Files changed
 

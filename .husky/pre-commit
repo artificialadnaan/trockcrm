@@ -27,7 +27,11 @@ if [ -z "$ADDED" ]; then
   exit 0
 fi
 
-HITS_LITERAL=$(printf "%s\n" "$ADDED" | grep -iE "$PATTERNS_LITERAL" || true)
+# docs/smoke-credentials.md is an explicit reviewed exception for the literal
+# test-only smoke passwords. Regex checks still run against that file.
+ADDED_FOR_LITERAL=$(git diff --cached --no-color --unified=0 -- . ':(exclude).husky/pre-commit' ':(exclude)scripts/test-precommit-hook.sh' ':(exclude)docs/smoke-credentials.md' | grep -E '^\+[^+]' || true)
+
+HITS_LITERAL=$(printf "%s\n" "$ADDED_FOR_LITERAL" | grep -iE "$PATTERNS_LITERAL" || true)
 HITS_REGEX=$(printf "%s\n" "$ADDED" | grep -iE "$PATTERNS_REGEX" || true)
 
 if [ -n "$HITS_LITERAL" ] || [ -n "$HITS_REGEX" ]; then
