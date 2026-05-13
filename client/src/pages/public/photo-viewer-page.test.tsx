@@ -98,6 +98,27 @@ describe("PublicPhotoViewerPage", () => {
     await vi.waitFor(() => expect(node.textContent).toContain("No photos have been shared yet"));
   });
 
+  it("does not render non-image shared records as images", async () => {
+    apiMock.mockResolvedValue({
+      deal: baseDeal,
+      photos: [{
+        ...basePhoto,
+        id: "photo-pdf",
+        displayName: "Bid package",
+        mimeType: "application/pdf",
+        fileExtension: ".pdf",
+        imageUrl: null,
+      }],
+    });
+
+    const node = renderPage();
+
+    await vi.waitFor(() => expect(node.textContent).toContain("Bid package"));
+    expect(node.querySelector('img[alt="Bid package"]')).toBeNull();
+    Array.from(node.querySelectorAll<HTMLButtonElement>("button")).find((button) => button.textContent?.includes("Bid package"))?.click();
+    await vi.waitFor(() => expect(document.body.textContent).toContain("No image preview available"));
+  });
+
   it("groups public photos by date", async () => {
     apiMock.mockResolvedValue({
       deal: baseDeal,

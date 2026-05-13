@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { useParams } from "react-router-dom";
-import { ChevronLeft, ChevronRight, Download, MapPin, X } from "lucide-react";
+import { ChevronLeft, ChevronRight, Download, FileText, MapPin, X } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent } from "@/components/ui/dialog";
@@ -140,8 +140,12 @@ export function PublicPhotoViewerPage() {
                   className="overflow-hidden rounded-lg border border-slate-200 bg-white text-left shadow-sm transition hover:-translate-y-0.5 hover:shadow-md"
                   onClick={() => setSelectedId(photo.id)}
                 >
-                  <div className="aspect-square bg-slate-200">
-                    {photo.imageUrl ? <img src={photo.imageUrl} alt={photo.displayName} className="h-full w-full object-cover" loading="lazy" /> : null}
+                  <div className="flex aspect-square items-center justify-center bg-slate-200">
+                    {photo.imageUrl ? (
+                      <img src={photo.imageUrl} alt={photo.displayName} className="h-full w-full object-cover" loading="lazy" />
+                    ) : (
+                      <FileText className="h-8 w-8 text-slate-400" />
+                    )}
                   </div>
                   <div className="space-y-1 p-2">
                     <p className="truncate text-sm font-medium">{photo.displayName}</p>
@@ -162,7 +166,17 @@ export function PublicPhotoViewerPage() {
                 <button type="button" className="absolute right-3 top-3 rounded-full bg-black/70 p-2 text-white" onClick={() => setSelectedId(null)}>
                   <X className="h-5 w-5" />
                 </button>
-                {selectedPhoto.imageUrl && <img src={selectedPhoto.imageUrl} alt={selectedPhoto.displayName} className="max-h-[90vh] max-w-full object-contain" />}
+                {selectedPhoto.imageUrl ? (
+                  <img src={selectedPhoto.imageUrl} alt={selectedPhoto.displayName} className="max-h-[90vh] max-w-full object-contain" />
+                ) : (
+                  <div className="flex flex-col items-center gap-3 px-6 text-center text-white">
+                    <FileText className="h-12 w-12 text-white/75" />
+                    <div>
+                      <p className="text-sm font-medium">No image preview available</p>
+                      <p className="mt-1 text-xs text-white/70">{selectedPhoto.mimeType || selectedPhoto.fileExtension || "File attachment"}</p>
+                    </div>
+                  </div>
+                )}
                 <Button className="absolute left-3 top-1/2" variant="secondary" size="icon" disabled={selectedIndex <= 0} onClick={() => setSelectedId(photos[selectedIndex - 1]?.id)}>
                   <ChevronLeft className="h-5 w-5" />
                 </Button>
