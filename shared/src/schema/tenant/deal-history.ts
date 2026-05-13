@@ -10,5 +10,7 @@ export const dealHistory = pgTable("deal_history", {
   oldValue: text("old_value"),
   newValue: text("new_value"),
   changedBy: uuid("changed_by").references(() => users.id).notNull(),
+  source: text("source"),
+  reason: text("reason"),
   changedAt: timestamp("changed_at", { withTimezone: true }).defaultNow().notNull(),
 });
