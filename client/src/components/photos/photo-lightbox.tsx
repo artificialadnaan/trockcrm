@@ -28,17 +28,15 @@ function formatDate(dateStr: string): string {
 export function PhotoLightbox({ photo, initialUrl = null, onClose, onPrev, onNext }: PhotoLightboxProps) {
   const [fullResUrl, setFullResUrl] = useState<string | null>(null);
   const [loadingUrl, setLoadingUrl] = useState(true);
+  const imagePreviewable = isPhotoImagePreviewable(photo);
 
   useEffect(() => {
     let cancelled = false;
 
     async function loadFullRes() {
-      if (!isPhotoImagePreviewable(photo)) {
-        setLoadingUrl(false);
-        return;
-      }
-
-      const immediateUrl = getImmediatePhotoOpenUrl(photo, initialUrl);
+      const immediateUrl = imagePreviewable
+        ? getImmediatePhotoOpenUrl(photo, initialUrl)
+        : initialUrl ?? (hasR2PhotoSource(photo) ? null : photo.externalUrl ?? photo.externalThumbnailUrl ?? null);
       if (immediateUrl) {
         setFullResUrl(immediateUrl);
         setLoadingUrl(false);
@@ -52,9 +50,9 @@ export function PhotoLightbox({ photo, initialUrl = null, onClose, onPrev, onNex
           setFullResUrl(data.url);
         }
       } catch (err) {
-        console.error("Failed to load full-res image:", err);
+        console.error("Failed to load full-res file:", err);
         if (!cancelled && !hasR2PhotoSource(photo)) {
-          setFullResUrl(photo.externalThumbnailUrl);
+          setFullResUrl(photo.externalUrl ?? photo.externalThumbnailUrl);
         }
       } finally {
         if (!cancelled) setLoadingUrl(false);
@@ -65,7 +63,7 @@ export function PhotoLightbox({ photo, initialUrl = null, onClose, onPrev, onNex
     setLoadingUrl(true);
     loadFullRes();
     return () => { cancelled = true; };
-  }, [initialUrl, photo.id, photo.r2Key, photo.externalUrl, photo.externalThumbnailUrl, photo.mimeType]);
+  }, [imagePreviewable, initialUrl, photo.id, photo.r2Key, photo.externalUrl, photo.externalThumbnailUrl, photo.mimeType, photo.displayName]);
 
   const handleKeyDown = useCallback(
     (e: KeyboardEvent) => {
@@ -137,7 +135,7 @@ export function PhotoLightbox({ photo, initialUrl = null, onClose, onPrev, onNex
 
         {loadingUrl ? (
           <div className="text-white/50 text-sm">Loading...</div>
-        ) : fullResUrl ? (
+        ) : fullResUrl && imagePreviewable ? (
           <img
             src={fullResUrl}
             alt={photo.displayName}
@@ -146,7 +144,7 @@ export function PhotoLightbox({ photo, initialUrl = null, onClose, onPrev, onNex
           />
         ) : (
           <div className="text-white/50 text-sm">
-            {isPhotoImagePreviewable(photo) ? "Image unavailable" : "No image preview available"}
+            {imagePreviewable ? "Image unavailable" : "No image preview available"}
           </div>
         )}
 

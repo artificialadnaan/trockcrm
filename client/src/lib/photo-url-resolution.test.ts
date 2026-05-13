@@ -78,6 +78,60 @@ describe("photo URL resolution", () => {
     expect(shouldFetchSignedPhotoUrl(file)).toBe(false);
   });
 
+  it("prefers storage key extensions over renamed display names when metadata is degraded", () => {
+    const renamedPhoto = {
+      displayName: "plan.pdf",
+      r2Key: "office_dallas/deals/DFW/photos/companycam_123.jpg",
+      mimeType: null,
+      fileExtension: null,
+      externalUrl: null,
+      externalThumbnailUrl: null,
+    };
+
+    expect(isPhotoImagePreviewable(renamedPhoto)).toBe(true);
+    expect(shouldFetchSignedPhotoUrl(renamedPhoto)).toBe(true);
+  });
+
+  it("does not let image-looking display names override non-image storage keys", () => {
+    const renamedPdf = {
+      displayName: "image.png",
+      r2Key: "office_dallas/deals/DFW/photos/actual.pdf",
+      mimeType: null,
+      fileExtension: null,
+      externalUrl: null,
+      externalThumbnailUrl: null,
+    };
+
+    expect(isPhotoImagePreviewable(renamedPdf)).toBe(false);
+    expect(shouldFetchSignedPhotoUrl(renamedPdf)).toBe(false);
+  });
+
+  it("uses display name as the last-resort extension source", () => {
+    const displayNameOnlyPhoto = {
+      displayName: "thing.jpg",
+      r2Key: null,
+      mimeType: null,
+      fileExtension: null,
+      externalUrl: null,
+      externalThumbnailUrl: null,
+    };
+
+    expect(isPhotoImagePreviewable(displayNameOnlyPhoto)).toBe(true);
+  });
+
+  it("keeps extensionless degraded records previewable as a compatibility fallback", () => {
+    const unknownPhoto = {
+      displayName: "thing",
+      r2Key: null,
+      mimeType: null,
+      fileExtension: null,
+      externalUrl: null,
+      externalThumbnailUrl: null,
+    };
+
+    expect(isPhotoImagePreviewable(unknownPhoto)).toBe(true);
+  });
+
   it("parses image extensions from URLs with query strings", () => {
     const photo = {
       r2Key: null,

@@ -290,6 +290,91 @@ describe("public photo token service", () => {
     expect(getFileDownloadUrlMock).toHaveBeenCalledWith(expect.anything(), "photo-1");
   });
 
+  it("uses storage key extensions before renamed display names for public image URLs", async () => {
+    const { getPublicPhotoViewer } = await import("./service.js");
+    executeMock.mockResolvedValueOnce({ rows: [{ id: "token-1", deal_id: "deal-1", tenant_id: "tenant-1", created_by_user_id: "user-1" }] });
+    queryMock.mockResolvedValueOnce({ rows: [{ id: "tenant-1", slug: "dallas" }] });
+    tenantQueryMock
+      .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({ rows: [{ id: "deal-1", name: "Public Deal", deal_number: "TR-1", property_address: "100 Main St, Dallas, TX" }] })
+      .mockResolvedValueOnce({ rows: [] });
+    getDealPhotoTimelineMock.mockResolvedValue({
+      photos: [{
+        id: "photo-renamed",
+        photoCategory: null,
+        subcategory: null,
+        displayName: "plan.pdf",
+        mimeType: null,
+        fileSizeBytes: 10,
+        fileExtension: null,
+        description: null,
+        takenAt: null,
+        createdAt: "2026-05-01T00:01:00.000Z",
+        uploadedBy: "user-1",
+        uploaderName: "Field User",
+        uploaderAvatarUrl: null,
+        latitude: null,
+        longitude: null,
+        address: null,
+        addressSource: null,
+        geocodedAt: null,
+        procoreSyncStatus: null,
+        externalThumbnailUrl: null,
+        externalUrl: null,
+        r2Key: "office_dallas/deals/TR-1/photos/companycam_renamed.jpg",
+      }],
+    });
+    getFileDownloadUrlMock.mockResolvedValue({ url: "https://r2.test/companycam_renamed.jpg" });
+
+    const result = await getPublicPhotoViewer("raw-token");
+
+    expect(result.photos[0]).toMatchObject({ id: "photo-renamed", imageUrl: "https://r2.test/companycam_renamed.jpg" });
+    expect(getFileDownloadUrlMock).toHaveBeenCalledWith(expect.anything(), "photo-renamed");
+  });
+
+  it("does not let image-looking display names override public non-image storage keys", async () => {
+    const { getPublicPhotoViewer } = await import("./service.js");
+    executeMock.mockResolvedValueOnce({ rows: [{ id: "token-1", deal_id: "deal-1", tenant_id: "tenant-1", created_by_user_id: "user-1" }] });
+    queryMock.mockResolvedValueOnce({ rows: [{ id: "tenant-1", slug: "dallas" }] });
+    tenantQueryMock
+      .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({ rows: [{ id: "deal-1", name: "Public Deal", deal_number: "TR-1", property_address: "100 Main St, Dallas, TX" }] })
+      .mockResolvedValueOnce({ rows: [] });
+    getDealPhotoTimelineMock.mockResolvedValue({
+      photos: [{
+        id: "photo-renamed-pdf",
+        photoCategory: null,
+        subcategory: null,
+        displayName: "image.png",
+        mimeType: null,
+        fileSizeBytes: 10,
+        fileExtension: null,
+        description: null,
+        takenAt: null,
+        createdAt: "2026-05-01T00:01:00.000Z",
+        uploadedBy: "user-1",
+        uploaderName: "Field User",
+        uploaderAvatarUrl: null,
+        latitude: null,
+        longitude: null,
+        address: null,
+        addressSource: null,
+        geocodedAt: null,
+        procoreSyncStatus: null,
+        externalThumbnailUrl: null,
+        externalUrl: null,
+        r2Key: "office_dallas/deals/TR-1/photos/actual.pdf",
+      }],
+    });
+
+    const result = await getPublicPhotoViewer("raw-token");
+
+    expect(result.photos[0]).toMatchObject({ id: "photo-renamed-pdf", imageUrl: null });
+    expect(getFileDownloadUrlMock).not.toHaveBeenCalled();
+  });
+
   it("preserves external image URLs with query strings when no R2 key is present", async () => {
     const { getPublicPhotoViewer } = await import("./service.js");
     executeMock.mockResolvedValueOnce({ rows: [{ id: "token-1", deal_id: "deal-1", tenant_id: "tenant-1", created_by_user_id: "user-1" }] });
