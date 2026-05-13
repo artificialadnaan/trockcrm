@@ -3,6 +3,7 @@ import { ChevronsUpDown, Loader2, Plus } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { api } from "@/lib/api";
+import { getOfficeRequestOptions } from "@/lib/office-selection";
 import { formatPropertyLabel, useProperties } from "@/hooks/use-properties";
 import { PropertyCreateDialog } from "./property-create-dialog";
 
@@ -13,11 +14,13 @@ interface PropertySelectorProps {
   required?: boolean;
   requireLeadCreateFields?: boolean;
   disabled?: boolean;
+  officeId?: string | null;
 }
 
 export async function resolveSelectedPropertyLabel(
   propertyId: string,
-  properties: Array<Parameters<typeof formatPropertyLabel>[0] & { id: string }>
+  properties: Array<Parameters<typeof formatPropertyLabel>[0] & { id: string }>,
+  officeId?: string | null
 ) {
   const match = properties.find((property) => property.id === propertyId);
   if (match) {
@@ -26,7 +29,7 @@ export async function resolveSelectedPropertyLabel(
 
   const data = await api<{
     property: Parameters<typeof formatPropertyLabel>[0] & { id: string };
-  }>(`/properties/${propertyId}`);
+  }>(`/properties/${propertyId}`, getOfficeRequestOptions(officeId));
   return formatPropertyLabel(data.property);
 }
 
@@ -37,16 +40,20 @@ export function PropertySelector({
   required,
   requireLeadCreateFields,
   disabled = false,
+  officeId,
 }: PropertySelectorProps) {
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState("");
   const [selectedLabel, setSelectedLabel] = useState<string | null>(null);
   const deferredQuery = useDeferredValue(query.trim());
-  const { properties, loading, refetch } = useProperties({
-    companyId: companyId || undefined,
-    search: deferredQuery || undefined,
-    limit: 25,
-  });
+  const { properties, loading, refetch } = useProperties(
+    {
+      companyId: companyId || undefined,
+      search: deferredQuery || undefined,
+      limit: 25,
+    },
+    { officeId }
+  );
 
   useEffect(() => {
     if (!value) {
@@ -55,7 +62,7 @@ export function PropertySelector({
     }
     let cancelled = false;
 
-    void resolveSelectedPropertyLabel(value, properties)
+    void resolveSelectedPropertyLabel(value, properties, officeId)
       .then((label) => {
         if (!cancelled) {
           setSelectedLabel(label);
@@ -66,7 +73,7 @@ export function PropertySelector({
     return () => {
       cancelled = true;
     };
-  }, [properties, value]);
+  }, [officeId, properties, value]);
 
   return (
     <div className="space-y-2">
@@ -123,6 +130,7 @@ export function PropertySelector({
             initialCompanyId={companyId}
             companyLocked
             requireLeadCreateFields={requireLeadCreateFields}
+            officeId={officeId}
             triggerLabel="Add New Property"
             onCreated={(property) => {
               setSelectedLabel(formatPropertyLabel(property));

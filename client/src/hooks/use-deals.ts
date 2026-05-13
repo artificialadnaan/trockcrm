@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback, useRef } from "react";
 import { api } from "@/lib/api";
+import { getOfficeRequestOptions, type OfficeRequestOptions } from "@/lib/office-selection";
 import {
   appendPipelineTerminalDateParams,
   type TerminalDateFilter,
@@ -477,8 +478,12 @@ export function useDealDetail(dealId: string | undefined) {
   return { deal, loading, error, refetch: fetchDeal };
 }
 
-export async function createDeal(input: Partial<Deal> & { name: string; stageId: string }) {
-  return api<{ deal: Deal }>("/deals", { method: "POST", json: input });
+export async function createDeal(input: Partial<Deal> & { name: string; stageId: string }, options: OfficeRequestOptions = {}) {
+  return api<{ deal: Deal }>("/deals", {
+    method: "POST",
+    json: input,
+    ...getOfficeRequestOptions(options.officeId),
+  });
 }
 
 export type UpdateDealPayload = Partial<Deal> & {

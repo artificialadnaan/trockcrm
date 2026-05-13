@@ -1,5 +1,6 @@
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
 import { api } from "@/lib/api";
+import { getOfficeRequestOptions, type OfficeRequestOptions } from "@/lib/office-selection";
 
 export interface Company {
   id: string;
@@ -101,27 +102,38 @@ export function useCompanies(filters: CompanyFilters = {}) {
   return { companies, pagination, loading, error, refetch: fetchCompanies };
 }
 
-export function useCompanyDetail(companyId: string | undefined) {
+export function useCompanyDetail(companyId: string | undefined, options: OfficeRequestOptions = {}) {
   const [company, setCompany] = useState<Company | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const requestRef = useRef(0);
 
   const fetchCompany = useCallback(async () => {
+    const requestId = ++requestRef.current;
     if (!companyId) {
+      setCompany(null);
       setLoading(false);
       return;
     }
     setLoading(true);
     setError(null);
+    setCompany(null);
     try {
-      const data = await api<{ company: Company }>(`/companies/${companyId}`);
+      const data = await api<{ company: Company }>(
+        `/companies/${companyId}`,
+        getOfficeRequestOptions(options.officeId)
+      );
+      if (requestId !== requestRef.current) return;
       setCompany(data.company);
     } catch (err: unknown) {
+      if (requestId !== requestRef.current) return;
       setError(err instanceof Error ? err.message : "Failed to load company");
     } finally {
-      setLoading(false);
+      if (requestId === requestRef.current) {
+        setLoading(false);
+      }
     }
-  }, [companyId]);
+  }, [companyId, options.officeId]);
 
   useEffect(() => {
     fetchCompany();
@@ -140,27 +152,38 @@ export interface CompanyContact {
   category: string;
 }
 
-export function useCompanyContacts(companyId: string | undefined) {
+export function useCompanyContacts(companyId: string | undefined, options: OfficeRequestOptions = {}) {
   const [contacts, setContacts] = useState<CompanyContact[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const requestRef = useRef(0);
 
   const fetchContacts = useCallback(async () => {
+    const requestId = ++requestRef.current;
     if (!companyId) {
+      setContacts([]);
       setLoading(false);
       return;
     }
     setLoading(true);
     setError(null);
+    setContacts([]);
     try {
-      const data = await api<{ contacts: CompanyContact[] }>(`/companies/${companyId}/contacts`);
+      const data = await api<{ contacts: CompanyContact[] }>(
+        `/companies/${companyId}/contacts`,
+        getOfficeRequestOptions(options.officeId)
+      );
+      if (requestId !== requestRef.current) return;
       setContacts(data.contacts);
     } catch (err: unknown) {
+      if (requestId !== requestRef.current) return;
       setError(err instanceof Error ? err.message : "Failed to load contacts");
     } finally {
-      setLoading(false);
+      if (requestId === requestRef.current) {
+        setLoading(false);
+      }
     }
-  }, [companyId]);
+  }, [companyId, options.officeId]);
 
   useEffect(() => {
     fetchContacts();
@@ -229,8 +252,12 @@ export async function createCompany(input: {
   phone?: string | null;
   website?: string | null;
   notes?: string | null;
-}) {
-  return api<{ company: Company }>("/companies", { method: "POST", json: input });
+}, options: OfficeRequestOptions = {}) {
+  return api<{ company: Company }>("/companies", {
+    method: "POST",
+    json: input,
+    ...getOfficeRequestOptions(options.officeId),
+  });
 }
 
 export async function updateCompany(companyId: string, input: Partial<Company>) {
@@ -241,8 +268,9 @@ export async function verifyCompany(companyId: string) {
   return api<{ company: Company }>(`/companies/${companyId}/verify`, { method: "POST" });
 }
 
-export async function searchCompanies(query: string) {
+export async function searchCompanies(query: string, options: OfficeRequestOptions = {}) {
   return api<{ companies: Array<{ id: string; name: string; category: string | null }> }>(
-    `/companies/search?q=${encodeURIComponent(query)}`
+    `/companies/search?q=${encodeURIComponent(query)}`,
+    getOfficeRequestOptions(options.officeId)
   );
 }

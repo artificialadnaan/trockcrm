@@ -1,5 +1,6 @@
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
 import { api } from "@/lib/api";
+import { getOfficeRequestOptions, type OfficeRequestOptions } from "@/lib/office-selection";
 
 export interface PropertySurface {
   id: string;
@@ -122,13 +123,15 @@ export function formatPropertyLabel(property: Pick<PropertySurface, "name" | "ad
   return line || property.name || "Unassigned Property";
 }
 
-export function useProperties(filters: PropertyListFilters = {}) {
+export function useProperties(filters: PropertyListFilters = {}, options: OfficeRequestOptions = {}) {
   const [properties, setProperties] = useState<PropertySurface[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const isDisabled = filters.limit === 0;
+  const requestRef = useRef(0);
 
   const fetchProperties = useCallback(async () => {
+    const requestId = ++requestRef.current;
     if (isDisabled) {
       setProperties([]);
       setError(null);
@@ -138,6 +141,7 @@ export function useProperties(filters: PropertyListFilters = {}) {
 
     setLoading(true);
     setError(null);
+    setProperties([]);
     try {
       const params = new URLSearchParams();
       if (filters.search) params.set("search", filters.search);
@@ -148,14 +152,21 @@ export function useProperties(filters: PropertyListFilters = {}) {
       if (filters.isActive === false) params.set("isActive", "false");
 
       const qs = params.toString();
-      const data = await api<{ properties: PropertySurface[] }>(`/properties${qs ? `?${qs}` : ""}`);
+      const data = await api<{ properties: PropertySurface[] }>(
+        `/properties${qs ? `?${qs}` : ""}`,
+        getOfficeRequestOptions(options.officeId)
+      );
+      if (requestId !== requestRef.current) return;
       setProperties(data.properties);
     } catch (err: unknown) {
+      if (requestId !== requestRef.current) return;
       setError(err instanceof Error ? err.message : "Failed to load properties");
     } finally {
-      setLoading(false);
+      if (requestId === requestRef.current) {
+        setLoading(false);
+      }
     }
-  }, [filters.companyId, filters.isActive, filters.limit, filters.page, filters.search, filters.type, isDisabled]);
+  }, [filters.companyId, filters.isActive, filters.limit, filters.page, filters.search, filters.type, isDisabled, options.officeId]);
 
   useEffect(() => {
     fetchProperties();
@@ -164,32 +175,47 @@ export function useProperties(filters: PropertyListFilters = {}) {
   return { properties, loading, error, refetch: fetchProperties };
 }
 
-export function usePropertyDetail(propertyId: string | undefined) {
+export function usePropertyDetail(propertyId: string | undefined, options: OfficeRequestOptions = {}) {
   const [property, setProperty] = useState<PropertyDetailResponse["property"] | null>(null);
   const [leads, setLeads] = useState<PropertyLead[]>([]);
   const [deals, setDeals] = useState<PropertyDeal[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const requestRef = useRef(0);
 
   const fetchProperty = useCallback(async () => {
+    const requestId = ++requestRef.current;
     if (!propertyId) {
+      setProperty(null);
+      setLeads([]);
+      setDeals([]);
       setLoading(false);
       return;
     }
 
     setLoading(true);
     setError(null);
+    setProperty(null);
+    setLeads([]);
+    setDeals([]);
     try {
-      const data = await api<PropertyDetailResponse>(`/properties/${propertyId}`);
+      const data = await api<PropertyDetailResponse>(
+        `/properties/${propertyId}`,
+        getOfficeRequestOptions(options.officeId)
+      );
+      if (requestId !== requestRef.current) return;
       setProperty(data.property);
       setLeads(data.leads);
       setDeals(data.deals);
     } catch (err: unknown) {
+      if (requestId !== requestRef.current) return;
       setError(err instanceof Error ? err.message : "Failed to load property");
     } finally {
-      setLoading(false);
+      if (requestId === requestRef.current) {
+        setLoading(false);
+      }
     }
-  }, [propertyId]);
+  }, [propertyId, options.officeId]);
 
   useEffect(() => {
     fetchProperty();
@@ -208,8 +234,12 @@ export async function createProperty(input: {
   buildYear?: number | null;
   unitCount?: number | null;
   notes?: string | null;
-}) {
-  return api<{ property: PropertySurface }>("/properties", { method: "POST", json: input });
+}, options: OfficeRequestOptions = {}) {
+  return api<{ property: PropertySurface }>("/properties", {
+    method: "POST",
+    json: input,
+    ...getOfficeRequestOptions(options.officeId),
+  });
 }
 
 export async function updateProperty(
@@ -217,7 +247,12 @@ export async function updateProperty(
   input: {
     buildYear?: number | null;
     unitCount?: number | null;
-  }
+  },
+  options: OfficeRequestOptions = {}
 ) {
-  return api<{ property: PropertySurface }>(`/properties/${propertyId}`, { method: "PATCH", json: input });
+  return api<{ property: PropertySurface }>(`/properties/${propertyId}`, {
+    method: "PATCH",
+    json: input,
+    ...getOfficeRequestOptions(options.officeId),
+  });
 }

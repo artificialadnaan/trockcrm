@@ -55,8 +55,14 @@ import { formatPropertyLabel, updateProperty, useProperties, usePropertyDetail }
 import { CATEGORY_LABELS } from "@/lib/contact-utils";
 import { isApiError } from "@/lib/api";
 import { useAuth } from "@/lib/auth";
+import {
+  buildOfficeSelectionOptions,
+  resolveDefaultOfficeCode,
+  type OfficeSelectionOption,
+} from "@/lib/office-selection";
 import { LEAD_BUDGET_STATUS_LABELS, LEAD_POC_ROLE_LABELS } from "@/lib/lead-display-labels";
 import { getValidationQuestionSetForProjectType } from "@/lib/validation-question-sets";
+import { useAccessibleOffices } from "@/hooks/use-accessible-offices";
 import {
   getLeadCreationStages,
   getNormalizedLeadCreationStageId,
@@ -109,6 +115,7 @@ export interface LeadFormLead {
   stageEnteredAt: string;
   verificationStatus?: "not_required" | "pending" | "approved" | "rejected";
   verificationRequiredReason?: "new_company" | "dormant_company" | "active_company" | null;
+  officeCode?: string | null;
 }
 
 type LeadSummaryFormProps = {
@@ -197,7 +204,8 @@ function normalizeLeadSourceForForm(lead?: LeadFormLead, initialSource?: string)
 
 function getEditableFormState(
   lead?: LeadFormLead,
-  initialValues?: LeadCreateFormProps["initialValues"]
+  initialValues?: LeadCreateFormProps["initialValues"],
+  fallbackOfficeCode = ""
 ) {
   const sourceState = normalizeLeadSourceForForm(lead, initialValues?.source);
 
@@ -215,6 +223,7 @@ function getEditableFormState(
     sourceDetail: sourceState.sourceDetail,
     description: lead?.description ?? initialValues?.description ?? "",
     bidDueDate: lead?.bidDueDate ?? initialValues?.bidDueDate ?? "",
+    officeCode: lead?.officeCode === "atl" || lead?.officeCode === "dfw" ? lead.officeCode : fallbackOfficeCode,
     projectTypeId: lead?.projectTypeId ?? initialValues?.projectTypeId ?? "",
     budgetStatus: lead?.budgetStatus ?? initialValues?.budgetStatus ?? "",
     qualificationPayload: {
@@ -582,18 +591,34 @@ function EditableLeadForm({
 }) {
   const navigate = useNavigate();
   const { user } = useAuth();
-  const { assignees } = useTaskAssignees();
   const { stages } = usePipelineStages();
   const { projectTypes, hierarchy: projectTypeHierarchy } = useProjectTypes();
+  const { offices } = useAccessibleOffices();
   const isCreate = mode === "create";
+  const activeOfficeId = user?.activeOfficeId ?? user?.officeId ?? null;
+  const officeOptions = buildOfficeSelectionOptions(offices);
+  const initialOfficeCode = resolveDefaultOfficeCode({
+    offices,
+    activeOfficeId,
+    currentOfficeCode: lead?.officeCode === "atl" || lead?.officeCode === "dfw" ? lead.officeCode : "",
+  });
   const [companyId, setCompanyId] = useState<string | null>(lead?.companyId ?? initialValues?.companyId ?? null);
-  const { properties } = useProperties(companyId ? { companyId, limit: 500 } : { limit: 0 });
-  const { contacts, refetch: refetchContacts } = useCompanyContacts(companyId ?? undefined);
   const leadStages = getLeadCreationStages(stages);
 
-  const [formData, setFormData] = useState(() => getEditableFormState(lead, initialValues));
+  const [formData, setFormData] = useState(() => getEditableFormState(lead, initialValues, initialOfficeCode));
+  const selectedOffice = officeOptions.find((office) => office.code === formData.officeCode) ?? null;
+  const { assignees } = useTaskAssignees({ officeId: isCreate ? selectedOffice?.officeId : null });
+  const { properties } = useProperties(
+    companyId ? { companyId, limit: 500 } : { limit: 0 },
+    { officeId: isCreate ? selectedOffice?.officeId : null }
+  );
+  const { contacts, refetch: refetchContacts } = useCompanyContacts(
+    companyId ?? undefined,
+    { officeId: isCreate ? selectedOffice?.officeId : null }
+  );
   const { property: resolvedSelectedProperty } = usePropertyDetail(
-    isCreate && formData.propertyId ? formData.propertyId : undefined
+    isCreate && formData.propertyId ? formData.propertyId : undefined,
+    { officeId: isCreate ? selectedOffice?.officeId : null }
   );
   const { questionnaire: questionnaireTemplate, loading: questionnaireTemplateLoading } = useLeadQuestionnaireTemplate(
     isCreate ? (formData.projectTypeId || null) : null
@@ -622,9 +647,24 @@ function EditableLeadForm({
   });
 
   useEffect(() => {
-    setFormData(getEditableFormState(lead, initialValues));
+    setFormData(getEditableFormState(lead, initialValues, initialOfficeCode));
     setCompanyId(lead?.companyId ?? initialValues?.companyId ?? null);
   }, [initialValues, lead]);
+
+  useEffect(() => {
+    if (!isCreate) {
+      return;
+    }
+
+    setFormData((current) => {
+      const officeCode = resolveDefaultOfficeCode({
+        offices,
+        activeOfficeId,
+        currentOfficeCode: current.officeCode,
+      });
+      return officeCode === current.officeCode ? current : { ...current, officeCode };
+    });
+  }, [activeOfficeId, isCreate, offices]);
 
   useEffect(() => {
     if (!isCreate || user?.role !== "rep") {
@@ -799,6 +839,7 @@ function EditableLeadForm({
       errors.set("primaryContactRoleOtherLabel", "Describe the other POC role.");
     }
     if (!formData.budgetStatus) errors.set("budgetStatus", "Budget status is required.");
+    if (!formData.officeCode || !selectedOffice?.officeId) errors.set("officeCode", "Office is required.");
     if (!formData.projectTypeId) errors.set("projectTypeId", "Project type is required.");
     if (!formData.bidDueDate) {
       errors.set("bidDueDate", "Bid Due Date is required.");
@@ -813,6 +854,7 @@ function EditableLeadForm({
     effectivePropertyUnitCount,
     formData.bidDueDate,
     formData.budgetStatus,
+    formData.officeCode,
     formData.primaryContactId,
     formData.primaryContactRole,
     formData.primaryContactRoleOtherLabel,
@@ -821,6 +863,7 @@ function EditableLeadForm({
     isCreate,
     maxPropertyBuildYear,
     selectedProperty,
+    selectedOffice?.officeId,
   ]);
   const createSubmitDisabled = isCreate && (questionnaireTemplateLoading || createRequirementErrors.size > 0);
   const selectedPrimaryContactLabel =
@@ -832,6 +875,8 @@ function EditableLeadForm({
   const selectedBudgetStatusLabel =
     budgetStatusSelectItems.find((item) => item.value === (formData.budgetStatus || "__none__"))?.label ??
     "Select budget status";
+  const selectedOfficeLabel =
+    officeOptions.find((item) => item.code === formData.officeCode)?.label ?? "Select office";
   const selectedRepLabel =
     repSelectItems.find((item) => item.value === formData.assignedRepId)?.label ??
     (user?.role === "rep" ? user.displayName : "Select sales rep");
@@ -878,7 +923,24 @@ function EditableLeadForm({
   };
 
   const handleFieldChange = (field: keyof typeof formData, value: string) => {
-    setFormData((current) => ({ ...current, [field]: value }));
+    if (field === "officeCode") {
+      setCompanyId(null);
+    }
+
+    setFormData((current) => {
+      if (field === "officeCode") {
+        return {
+          ...current,
+          officeCode: value,
+          companyId: "",
+          propertyId: "",
+          primaryContactId: "",
+          assignedRepId: user?.role === "rep" ? user.id : "",
+        };
+      }
+
+      return { ...current, [field]: value };
+    });
     clearCreateGateMissingKeysForField(field);
   };
 
@@ -928,16 +990,19 @@ function EditableLeadForm({
     setContactSubmitting(true);
     setContactError(null);
     try {
-      const result = await createContact({
-        firstName: newContact.firstName.trim(),
-        lastName: newContact.lastName.trim(),
-        email: newContact.email.trim() || null,
-        phone: newContact.phone.trim() || null,
-        jobTitle: newContact.jobTitle.trim() || null,
-        category: newContact.category,
-        companyId,
-        skipDedupCheck: true,
-      });
+      const result = await createContact(
+        {
+          firstName: newContact.firstName.trim(),
+          lastName: newContact.lastName.trim(),
+          email: newContact.email.trim() || null,
+          phone: newContact.phone.trim() || null,
+          jobTitle: newContact.jobTitle.trim() || null,
+          category: newContact.category,
+          companyId,
+          skipDedupCheck: true,
+        },
+        { officeId: isCreate ? selectedOffice?.officeId : null }
+      );
 
       if (!result.contact) {
         throw new Error("Contact was not created.");
@@ -1099,6 +1164,11 @@ function EditableLeadForm({
       };
 
       if (isCreate) {
+        if (!selectedOffice?.officeId) {
+          setError("Cannot create lead: selected office is unavailable. Contact admin.");
+          return;
+        }
+
         if (selectedProperty && (propertyBuildYearNeedsRepair || propertyUnitCountNeedsRepair)) {
           const propertyPatch: { buildYear?: number; unitCount?: number } = {};
           if (propertyBuildYearNeedsRepair && propertyRepair.buildYear != null) {
@@ -1109,32 +1179,34 @@ function EditableLeadForm({
           }
 
           try {
-            await updateProperty(selectedProperty.id, propertyPatch);
+            await updateProperty(selectedProperty.id, propertyPatch, { officeId: selectedOffice.officeId });
           } catch (err) {
             setError(`Failed to update property: ${err instanceof Error ? err.message : "Unknown error"}`);
             return;
           }
         }
 
-        const result = await createLead({
-          companyId: formData.companyId,
-          propertyId: formData.propertyId,
-          primaryContactId: formData.primaryContactId || null,
-          primaryContactRole: formData.primaryContactRole as LeadPocRole,
-          primaryContactRoleOtherLabel: formData.primaryContactRoleOtherLabel.trim() || null,
-          name: formData.name.trim(),
-          assignedRepId: formData.assignedRepId,
-          salesRepId: formData.assignedRepId,
-          source: formData.source.trim() || null,
-          sourceCategory: formData.sourceCategory as LeadSourceCategory,
-          sourceDetail: formData.sourceDetail.trim() || null,
-          description: formData.description.trim() || null,
-          bidDueDate: formData.bidDueDate || null,
-          budgetStatus: formData.budgetStatus as LeadBudgetStatus,
-          // TODO: replace with Office picker (dfw/atl) — demo hotfix
-          officeCode: "dfw",
-          ...workflowPayload,
-        });
+        const result = await createLead(
+          {
+            companyId: formData.companyId,
+            propertyId: formData.propertyId,
+            primaryContactId: formData.primaryContactId || null,
+            primaryContactRole: formData.primaryContactRole as LeadPocRole,
+            primaryContactRoleOtherLabel: formData.primaryContactRoleOtherLabel.trim() || null,
+            name: formData.name.trim(),
+            assignedRepId: formData.assignedRepId,
+            salesRepId: formData.assignedRepId,
+            source: formData.source.trim() || null,
+            sourceCategory: formData.sourceCategory as LeadSourceCategory,
+            sourceDetail: formData.sourceDetail.trim() || null,
+            description: formData.description.trim() || null,
+            bidDueDate: formData.bidDueDate || null,
+            budgetStatus: formData.budgetStatus as LeadBudgetStatus,
+            officeCode: formData.officeCode,
+            ...workflowPayload,
+          },
+          { officeId: selectedOffice.officeId }
+        );
 
         navigate(`/leads/${result.lead.id}`);
       } else if (lead) {
@@ -1224,7 +1296,12 @@ function EditableLeadForm({
             <>
               <div className="space-y-2">
                 <QuestionLabel required>Company</QuestionLabel>
-                <CompanySelector value={companyId} onChange={setCompanyId} required />
+                <CompanySelector
+                  value={companyId}
+                  onChange={setCompanyId}
+                  officeId={selectedOffice?.officeId}
+                  required
+                />
               </div>
 
               <div className="grid gap-4 sm:grid-cols-2">
@@ -1234,6 +1311,7 @@ function EditableLeadForm({
                     companyId={companyId}
                     value={formData.propertyId || null}
                     onChange={(propertyId) => handleFieldChange("propertyId", propertyId)}
+                    officeId={selectedOffice?.officeId}
                     required
                     requireLeadCreateFields
                   />
@@ -1561,33 +1639,64 @@ function EditableLeadForm({
                   </Select>
                 </div>
 
-                <div className="space-y-2">
-                  <QuestionLabel htmlFor="projectTypeId" required>Project Type</QuestionLabel>
-                  <Select
-                    items={projectTypeSelectItems}
-                    value={formData.projectTypeId || "__none__"}
-                    onValueChange={(value) =>
-                      handleFieldChange("projectTypeId", !value || value === "__none__" ? "" : value)
-                    }
-                  >
-                    <SelectTrigger id="projectTypeId">
-                      <SelectValue>{selectedProjectTypeLabel}</SelectValue>
-                    </SelectTrigger>
-                    <SelectContent>
-                      <SelectItem value="__none__">Select project type</SelectItem>
-                      {projectTypeHierarchy.flatMap((parent) => [
-                        <SelectItem key={parent.id} value={parent.id} className="font-medium">
-                          {parent.name}
-                        </SelectItem>,
-                        ...parent.children.map((child) => (
-                          <SelectItem key={child.id} value={child.id} className="pl-6">
-                            {child.name}
+                <div className="space-y-4">
+                  <div className="space-y-2">
+                    <QuestionLabel htmlFor="officeCode" required>Office</QuestionLabel>
+                    <Select
+                      items={officeOptions.map((office) => ({ value: office.code, label: office.label }))}
+                      value={formData.officeCode || "__none__"}
+                      onValueChange={(value) =>
+                        handleFieldChange("officeCode", !value || value === "__none__" ? "" : value)
+                      }
+                    >
+                      <SelectTrigger id="officeCode">
+                        <SelectValue>{selectedOfficeLabel}</SelectValue>
+                      </SelectTrigger>
+                      <SelectContent>
+                        {officeOptions.length === 0 ? (
+                          <SelectItem value="__none__" disabled>
+                            No offices available
                           </SelectItem>
-                        )),
-                      ])}
-                    </SelectContent>
-                  </Select>
-                  {renderCreateFieldError("projectTypeId")}
+                        ) : (
+                          officeOptions.map((office: OfficeSelectionOption) => (
+                            <SelectItem key={office.code} value={office.code}>
+                              {office.label}
+                            </SelectItem>
+                          ))
+                        )}
+                      </SelectContent>
+                    </Select>
+                    {renderCreateFieldError("officeCode")}
+                  </div>
+
+                  <div className="space-y-2">
+                    <QuestionLabel htmlFor="projectTypeId" required>Project Type</QuestionLabel>
+                    <Select
+                      items={projectTypeSelectItems}
+                      value={formData.projectTypeId || "__none__"}
+                      onValueChange={(value) =>
+                        handleFieldChange("projectTypeId", !value || value === "__none__" ? "" : value)
+                      }
+                    >
+                      <SelectTrigger id="projectTypeId">
+                        <SelectValue>{selectedProjectTypeLabel}</SelectValue>
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="__none__">Select project type</SelectItem>
+                        {projectTypeHierarchy.flatMap((parent) => [
+                          <SelectItem key={parent.id} value={parent.id} className="font-medium">
+                            {parent.name}
+                          </SelectItem>,
+                          ...parent.children.map((child) => (
+                            <SelectItem key={child.id} value={child.id} className="pl-6">
+                              {child.name}
+                            </SelectItem>
+                          )),
+                        ])}
+                      </SelectContent>
+                    </Select>
+                    {renderCreateFieldError("projectTypeId")}
+                  </div>
                 </div>
               </div>
               <div className="grid gap-4 sm:grid-cols-2">

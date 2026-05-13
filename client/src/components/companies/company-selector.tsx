@@ -28,6 +28,7 @@ interface CompanySelectorProps {
   value: string | null;
   onChange: (companyId: string) => void;
   required?: boolean;
+  officeId?: string | null;
 }
 
 interface CompanyOption {
@@ -39,6 +40,7 @@ interface CompanyOption {
 async function submitInlineCompanyCreate(input: {
   name: string;
   category: string;
+  officeId?: string | null;
   onCreated: (company: { id: string; name: string }) => void;
   onError: (message: string | null) => void;
   onCreating: (value: boolean) => void;
@@ -51,10 +53,13 @@ async function submitInlineCompanyCreate(input: {
   input.onCreating(true);
   input.onError(null);
   try {
-    const result = await createCompany({
-      name: input.name.trim(),
-      category: input.category || null,
-    });
+    const result = await createCompany(
+      {
+        name: input.name.trim(),
+        category: input.category || null,
+      },
+      { officeId: input.officeId }
+    );
     input.onCreated(result.company);
   } catch (err: unknown) {
     input.onError(err instanceof Error ? err.message : "Failed to create company");
@@ -63,7 +68,7 @@ async function submitInlineCompanyCreate(input: {
   }
 }
 
-export function CompanySelector({ value, onChange, required }: CompanySelectorProps) {
+export function CompanySelector({ value, onChange, required, officeId }: CompanySelectorProps) {
   const [query, setQuery] = useState("");
   const [results, setResults] = useState<CompanyOption[]>([]);
   const [searching, setSearching] = useState(false);
@@ -78,15 +83,32 @@ export function CompanySelector({ value, onChange, required }: CompanySelectorPr
 
   // Initialize display name from value prop
   useEffect(() => {
+    let cancelled = false;
+    if (!value) {
+      setSelectedName(null);
+      return () => {
+        cancelled = true;
+      };
+    }
     if (value && !selectedName) {
       // Fetch the company name for the current value
       import("@/lib/api").then(({ api }) => {
-        api<{ company: { name: string } }>(`/companies/${value}`)
-          .then((data) => setSelectedName(data.company.name))
+        api<{ company: { name: string } }>(
+          `/companies/${value}`,
+          officeId ? { headers: { "x-office-id": officeId } } : {}
+        )
+          .then((data) => {
+            if (!cancelled) {
+              setSelectedName(data.company.name);
+            }
+          })
           .catch(() => {});
       });
     }
-  }, [value, selectedName]);
+    return () => {
+      cancelled = true;
+    };
+  }, [officeId, value, selectedName]);
 
   // Close dropdown on outside click
   useEffect(() => {
@@ -102,24 +124,35 @@ export function CompanySelector({ value, onChange, required }: CompanySelectorPr
   // Debounced search
   useEffect(() => {
     if (!open) return;
+    let cancelled = false;
     const trimmedQuery = query.trim();
     if (trimmedQuery.length < 1) {
       setResults([]);
       return;
     }
+    setResults([]);
     const timer = setTimeout(async () => {
       setSearching(true);
       try {
-        const data = await searchCompanies(trimmedQuery);
-        setResults(data.companies);
+        const data = await searchCompanies(trimmedQuery, { officeId });
+        if (!cancelled) {
+          setResults(data.companies);
+        }
       } catch {
-        setResults([]);
+        if (!cancelled) {
+          setResults([]);
+        }
       } finally {
-        setSearching(false);
+        if (!cancelled) {
+          setSearching(false);
+        }
       }
     }, SEARCH_DEBOUNCE_MS);
-    return () => clearTimeout(timer);
-  }, [query, open]);
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+    };
+  }, [officeId, query, open]);
 
   const handleSelect = (company: CompanyOption) => {
     setSelectedName(company.name);
@@ -132,6 +165,7 @@ export function CompanySelector({ value, onChange, required }: CompanySelectorPr
     await submitInlineCompanyCreate({
       name: newName,
       category: newCategory,
+      officeId,
       onError: setCreateError,
       onCreating: setCreating,
       onCreated: (company) => {

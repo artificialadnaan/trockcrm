@@ -396,6 +396,52 @@ describe("lead stage transition route", () => {
     });
   });
 
+  it("auto-resolves missing lead officeCode from the selected office slug", async () => {
+    const leadRoutes = await loadLeadRoutes();
+    serviceMocks.createLead.mockResolvedValueOnce({
+      id: "lead-created",
+      verificationStatus: "not_required",
+    });
+
+    const { req, res } = await invokeLeadCreateRoute(
+      {
+        companyId: "company-1",
+        propertyId: "property-1",
+        name: "Lead One",
+      },
+      leadRoutes
+    );
+
+    expect(res.statusCode).toBe(201);
+    expect(serviceMocks.createLead).toHaveBeenCalledWith(
+      req.tenantDb,
+      expect.objectContaining({
+        officeCode: "atl",
+      })
+    );
+  });
+
+  it("rejects lead officeCode when it disagrees with the selected office slug", async () => {
+    const leadRoutes = await loadLeadRoutes();
+
+    await expect(
+      invokeLeadCreateRoute(
+        {
+          companyId: "company-1",
+          propertyId: "property-1",
+          name: "Lead One",
+          officeCode: "DFW",
+        },
+        leadRoutes
+      )
+    ).rejects.toMatchObject({
+      statusCode: 400,
+      message: "Cannot create lead: officeCode must match the selected office.",
+    });
+
+    expect(serviceMocks.createLead).not.toHaveBeenCalled();
+  });
+
   it("preserves every lead create prerequisite key in the structured 400 response", async () => {
     const leadRoutes = await loadLeadRoutes();
     const fields = [
