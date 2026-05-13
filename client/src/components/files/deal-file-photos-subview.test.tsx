@@ -5,6 +5,7 @@ import React from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { MemoryRouter } from "react-router-dom";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { api } from "@/lib/api";
 import {
   DealFilePhotosSubview,
   sortDealPhotosForFiles,
@@ -149,5 +150,44 @@ describe("DealFilePhotosSubview", () => {
     await vi.waitFor(() => expect(node.textContent).toContain("No photos uploaded to this deal yet."));
 
     expect(node.textContent).toContain("Upload photos");
+  });
+
+  it("uses the shared paginated loader for large deal photo sets", async () => {
+    const pageOne = Array.from({ length: 100 }, (_, index) => ({
+      ...mockPhotos[0],
+      id: `photo-${index + 1}`,
+      displayName: `Photo ${index + 1}`,
+      description: `Loaded page one photo ${index + 1}`,
+      createdAt: `2026-05-04T${String(18 - Math.floor(index / 10)).padStart(2, "0")}:00:00.000Z`,
+    }));
+    const pageTwo = [
+      {
+        ...mockPhotos[0],
+        id: "photo-101",
+        displayName: "Late files subview photo",
+        description: "Late files subview photo",
+        createdAt: "2026-05-03T12:00:00.000Z",
+      },
+    ];
+    vi.mocked(api).mockImplementation(async (path: string) => {
+      const url = new URL(`https://example.test/api${path}`);
+      const page = url.searchParams.get("page");
+      const limit = url.searchParams.get("limit");
+      if (path.includes("/download")) return { url: "https://example.test/photo.jpg", filename: "photo.jpg" };
+      if (page === "2") return { photos: pageTwo, pagination: { page: 2, limit: Number(limit), total: 101, totalPages: 2 } };
+      return { photos: pageOne, pagination: { page: 1, limit: Number(limit), total: 101, totalPages: 2 } };
+    });
+
+    const node = renderSubview();
+
+    await vi.waitFor(() => expect(node.textContent).toContain("Showing 100 of 101 photos"));
+    expect(vi.mocked(api)).toHaveBeenCalledWith(expect.stringContaining("limit=100"));
+    expect(node.querySelectorAll<HTMLButtonElement>('[aria-label="Load more photos"]')).toHaveLength(1);
+    expect(node.textContent).not.toContain("Late files subview photo");
+
+    node.querySelector<HTMLButtonElement>('[aria-label="Load more photos"]')?.click();
+
+    await vi.waitFor(() => expect(node.textContent).toContain("Late files subview photo"));
+    expect(node.textContent).toContain("Showing 101 of 101 photos");
   });
 });

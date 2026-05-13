@@ -91,17 +91,22 @@ async function installPhotosMocks(page: Parameters<typeof installCommonApiMocks>
   await page.route("**/api/deals/deal-photos/timers", (route) => route.fulfill({ json: { active: [], recent: [], all: [] } }));
   await page.route("**/api/files/deal/deal-photos/photos**", (route) => {
     const url = new URL(route.request().url());
+    const pageNum = Number(url.searchParams.get("page") ?? "1");
+    const limit = Number(url.searchParams.get("limit") ?? "0");
+    if (limit !== 1) expect(limit).toBe(100);
     const includeDeleted = url.searchParams.get("deleted") === "1" || url.searchParams.get("deleted") === "true";
     const visible = photos.filter((photo) => includeDeleted || !photo.deletedAt);
+    const start = (pageNum - 1) * limit;
+    const paged = visible.slice(start, start + limit);
     return route.fulfill({
       json: {
-        photos: visible,
-        pagination: { page: 1, limit: 200, total: visible.length, totalPages: 1 },
+        photos: paged,
+        pagination: { page: pageNum, limit, total: visible.length, totalPages: Math.ceil(visible.length / limit) },
       },
     });
   });
-  await page.route("**/api/files/photo-1/download", (route) => route.fulfill({ json: { url: "https://example.test/photo-1.jpg", filename: "photo-1.jpg" } }));
-  await page.route("**/api/files/photo-2/download", (route) => route.fulfill({ json: { url: "https://example.test/photo-2.jpg", filename: "photo-2.jpg" } }));
+  await page.route("**/api/files/photo-1/download**", (route) => route.fulfill({ json: { url: "https://example.test/photo-1.jpg", filename: "photo-1.jpg" } }));
+  await page.route("**/api/files/photo-2/download**", (route) => route.fulfill({ json: { url: "https://example.test/photo-2.jpg", filename: "photo-2.jpg" } }));
   await page.route("**/api/files/photo-1/address", async (route) => {
     const body = await route.request().postDataJSON();
     photos = photos.map((photo) => photo.id === "photo-1"
@@ -126,7 +131,9 @@ test("photo viewer edits category and address, soft deletes, then restores", asy
   await installPhotosMocks(page);
 
   await page.goto("/deals/deal-photos/photos");
-  await expect(page.getByRole("button", { name: /Photos \(2\)/ })).toHaveClass(/border-brand-red/);
+  const photosTab = page.getByRole("button", { name: "Photos", exact: true });
+  await expect(photosTab).toHaveClass(/border-brand-red/);
+  await expect(photosTab).toContainText("2");
   await expect(page.getByText("Monday, May 4th, 2026")).toBeVisible();
 
   await page.getByLabel("Open photo Damage roof photo").click();
