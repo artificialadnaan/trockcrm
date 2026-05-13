@@ -119,8 +119,7 @@ export function DealFilePhotosSubview({ dealId }: { dealId: string }) {
           totalCount={pagination.total}
           hasMore={hasMorePhotos}
           loadingMore={loadingMore}
-          loadMoreError={null}
-          showLoadMore={false}
+          loadMoreError={loadMoreError}
           onLoadMore={() => void loadMorePhotos()}
         />
       )}
@@ -178,7 +177,8 @@ export function DealFilePhotosSubview({ dealId }: { dealId: string }) {
           totalCount={pagination.total}
           hasMore={hasMorePhotos}
           loadingMore={loadingMore}
-          loadMoreError={loadMoreError}
+          loadMoreError={null}
+          showLoadMore={false}
           onLoadMore={() => void loadMorePhotos()}
         />
       )}
