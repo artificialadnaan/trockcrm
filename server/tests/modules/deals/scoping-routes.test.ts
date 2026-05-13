@@ -1,5 +1,9 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
+const auditMocks = vi.hoisted(() => ({
+  writeAuditLog: vi.fn(),
+}));
+
 vi.mock("../../../src/modules/deals/service.js", () => ({
   getDealById: vi.fn(async () => ({
     id: "deal-1",
@@ -66,10 +70,18 @@ vi.mock("../../../src/modules/contacts/association-service.js", () => ({
 }));
 
 vi.mock("../../../src/modules/deals/scoping-service.js", () => ({
+  assertDealScopingWriteAllowed: vi.fn(),
   getOrCreateDealScopingIntake: vi.fn(),
   upsertDealScopingIntake: vi.fn(),
   evaluateDealScopingReadiness: vi.fn(),
   linkDealFileToScopingRequirement: vi.fn(),
+}));
+
+vi.mock("../../../src/modules/deals/lineage-resolver.js", () => ({
+  writeResolvedDealFields: vi.fn(),
+}));
+vi.mock("../../../src/lib/audit-log.js", () => ({
+  writeAuditLog: auditMocks.writeAuditLog,
 }));
 
 vi.mock("../../../src/modules/deals/workflow-backfill.js", () => ({
@@ -80,6 +92,7 @@ vi.mock("../../../src/modules/deals/workflow-backfill.js", () => ({
 
 const { dealRoutes } = await import("../../../src/modules/deals/routes.js");
 const scopingService = await import("../../../src/modules/deals/scoping-service.js");
+const lineageResolver = await import("../../../src/modules/deals/lineage-resolver.js");
 const stageChange = await import("../../../src/modules/deals/stage-change.js");
 const dealService = await import("../../../src/modules/deals/service.js");
 const workflowBackfill = await import("../../../src/modules/deals/workflow-backfill.js");
@@ -103,7 +116,7 @@ function findRouteHandler(method: "get" | "patch" | "post", path: string) {
 async function invokeRoute(
   method: "get" | "patch" | "post",
   path: string,
-  options?: { params?: Record<string, string>; query?: Record<string, string>; body?: any }
+  options?: { params?: Record<string, string>; query?: Record<string, string>; body?: any; user?: any }
 ) {
   const handler = findRouteHandler(method, path);
   const req = {
@@ -116,7 +129,7 @@ async function invokeRoute(
       })),
     },
     officeSlug: "office-a",
-    user: {
+    user: options?.user ?? {
       id: "user-1",
       role: "director",
       officeId: "office-1",
@@ -165,6 +178,33 @@ describe("Deal Scoping Routes", () => {
     expect(res.body.intake.status).toBe("draft");
   });
 
+  it("checks deal access before scoping read/write routes call raw scoping services", async () => {
+    vi.mocked(dealService.getDealById)
+      .mockResolvedValueOnce(null as never)
+      .mockResolvedValueOnce(null as never)
+      .mockResolvedValueOnce(null as never);
+
+    await expect(
+      invokeRoute("get", "/:id/scoping-intake", { params: { id: "deal-locked" } })
+    ).rejects.toMatchObject({ statusCode: 403 });
+    await expect(
+      invokeRoute("patch", "/:id/scoping-intake", {
+        params: { id: "deal-locked" },
+        body: { sectionData: { scopeSummary: { summary: "No access" } } },
+      })
+    ).rejects.toMatchObject({ statusCode: 403 });
+    await expect(
+      invokeRoute("patch", "/:id/resolved-fields", {
+        params: { id: "deal-locked" },
+        body: { description: "No access" },
+      })
+    ).rejects.toMatchObject({ statusCode: 403 });
+
+    expect(scopingService.getOrCreateDealScopingIntake).not.toHaveBeenCalled();
+    expect(scopingService.upsertDealScopingIntake).not.toHaveBeenCalled();
+    expect(lineageResolver.writeResolvedDealFields).not.toHaveBeenCalled();
+  });
+
   it("threads scope through the pipeline board route", async () => {
     vi.mocked(dealService.getDealsForPipeline).mockResolvedValueOnce({
       pipelineColumns: [],
@@ -207,6 +247,172 @@ describe("Deal Scoping Routes", () => {
     expect(res.body.readiness.status).toBe("ready");
   });
 
+  it("checks the read-only scope policy before writing resolved scoping fields", async () => {
+    vi.mocked(scopingService.assertDealScopingWriteAllowed).mockResolvedValueOnce({
+      adminOverride: true,
+      lockState: { locked: true, reason: "rfp_submission", submittedAt: new Date("2026-05-12T12:00:00.000Z") },
+    } as never);
+    vi.mocked(lineageResolver.writeResolvedDealFields).mockResolvedValueOnce({
+      resolved: { description: "Admin correction" },
+    } as never);
+
+    const { req, res } = await invokeRoute("patch", "/:id/resolved-fields", {
+      params: { id: "deal-1" },
+      body: { description: "Admin correction", forceEditAfterRfp: true },
+      user: {
+        id: "user-1",
+        role: "admin",
+        officeId: "office-1",
+        activeOfficeId: "office-1",
+      },
+    });
+
+    expect(scopingService.assertDealScopingWriteAllowed).toHaveBeenCalledWith(
+      req.tenantDb,
+      "deal-1",
+      { role: "admin", forceEditAfterRfp: true }
+    );
+    expect(lineageResolver.writeResolvedDealFields).toHaveBeenCalledWith(
+      req.tenantDb,
+      "deal-1",
+      { description: "Admin correction" },
+      expect.objectContaining({ userId: "user-1", role: "admin" })
+    );
+    expect(auditMocks.writeAuditLog).toHaveBeenCalledWith(
+      req.tenantDb,
+      expect.objectContaining({
+        tableName: "deal_scoping_intake",
+        recordId: "deal-1",
+        changedBy: "user-1",
+        fullRow: expect.objectContaining({
+          override: "admin_force_edit_after_rfp",
+          route: "resolved-fields",
+          fields: ["description"],
+        }),
+      })
+    );
+    expect(res.statusCode).toBe(200);
+  });
+
+  it("rejects direct deal patches that mutate scoping-backed fields after RFP lock", async () => {
+    vi.mocked(scopingService.assertDealScopingWriteAllowed).mockRejectedValueOnce(
+      Object.assign(new Error("Scope is read-only after RFP submission"), {
+        statusCode: 403,
+        code: "SCOPE_READ_ONLY_AFTER_RFP",
+      })
+    );
+
+    await expect(
+      invokeRoute("patch", "/:id", {
+        params: { id: "deal-1" },
+        body: { description: "Bypass attempt" },
+      })
+    ).rejects.toMatchObject({
+      statusCode: 403,
+      code: "SCOPE_READ_ONLY_AFTER_RFP",
+    });
+
+    expect(scopingService.assertDealScopingWriteAllowed).toHaveBeenCalledWith(
+      expect.anything(),
+      "deal-1",
+      { role: "director", forceEditAfterRfp: false }
+    );
+    expect(dealService.updateDeal).not.toHaveBeenCalled();
+  });
+
+  it("treats direct deal name updates as scoping-backed after RFP lock", async () => {
+    vi.mocked(scopingService.assertDealScopingWriteAllowed).mockRejectedValueOnce(
+      Object.assign(new Error("Scope is read-only after RFP submission"), {
+        statusCode: 403,
+        code: "SCOPE_READ_ONLY_AFTER_RFP",
+      })
+    );
+
+    await expect(
+      invokeRoute("patch", "/:id", {
+        params: { id: "deal-1" },
+        body: { name: "Submitted scope rename" },
+      })
+    ).rejects.toMatchObject({
+      statusCode: 403,
+      code: "SCOPE_READ_ONLY_AFTER_RFP",
+    });
+
+    expect(scopingService.assertDealScopingWriteAllowed).toHaveBeenCalledWith(
+      expect.anything(),
+      "deal-1",
+      { role: "director", forceEditAfterRfp: false }
+    );
+    expect(dealService.updateDeal).not.toHaveBeenCalled();
+  });
+
+  it("checks deal access before generic deal patch lock policy for scoping-backed fields", async () => {
+    vi.mocked(dealService.getDealById).mockResolvedValueOnce(null as never);
+
+    await expect(
+      invokeRoute("patch", "/:id", {
+        params: { id: "other-rep-deal" },
+        body: { description: "No access" },
+        user: {
+          id: "rep-2",
+          role: "rep",
+          officeId: "office-1",
+          activeOfficeId: "office-1",
+        },
+      })
+    ).rejects.toMatchObject({ statusCode: 403 });
+
+    expect(scopingService.assertDealScopingWriteAllowed).not.toHaveBeenCalled();
+    expect(dealService.updateDeal).not.toHaveBeenCalled();
+  });
+
+  it("audits admin-forced direct deal patches that mutate scoping-backed fields after RFP lock", async () => {
+    vi.mocked(scopingService.assertDealScopingWriteAllowed).mockResolvedValueOnce({
+      adminOverride: true,
+      lockState: { locked: true, reason: "rfp_submission", submittedAt: new Date("2026-05-12T12:00:00.000Z") },
+    } as never);
+    vi.mocked(dealService.updateDeal).mockResolvedValueOnce({ id: "deal-1", description: "Admin correction" } as never);
+
+    const { req, res } = await invokeRoute("patch", "/:id", {
+      params: { id: "deal-1" },
+      body: { description: "Admin correction", forceEditAfterRfp: true },
+      user: {
+        id: "admin-1",
+        role: "admin",
+        officeId: "office-1",
+        activeOfficeId: "office-1",
+      },
+    });
+
+    expect(scopingService.assertDealScopingWriteAllowed).toHaveBeenCalledWith(
+      req.tenantDb,
+      "deal-1",
+      { role: "admin", forceEditAfterRfp: true }
+    );
+    expect(dealService.updateDeal).toHaveBeenCalledWith(
+      req.tenantDb,
+      "deal-1",
+      { description: "Admin correction" },
+      "admin",
+      "admin-1",
+      "office-1"
+    );
+    expect(auditMocks.writeAuditLog).toHaveBeenCalledWith(
+      req.tenantDb,
+      expect.objectContaining({
+        tableName: "deal_scoping_intake",
+        recordId: "deal-1",
+        changedBy: "admin-1",
+        fullRow: expect.objectContaining({
+          override: "admin_force_edit_after_rfp",
+          route: "deals",
+          fields: ["description"],
+        }),
+      })
+    );
+    expect(res.statusCode).toBe(200);
+  });
+
   it("returns readiness for the current scoping intake", async () => {
     vi.mocked(scopingService.evaluateDealScopingReadiness).mockResolvedValueOnce({
       status: "draft",
@@ -237,7 +443,12 @@ describe("Deal Scoping Routes", () => {
     expect(scopingService.linkDealFileToScopingRequirement).toHaveBeenCalledWith(
       req.tenantDb,
       "deal-1",
-      { fileId: "file-1", intakeSection: "attachments", intakeRequirementKey: "site_photos" },
+      {
+        fileId: "file-1",
+        intakeSection: "attachments",
+        intakeRequirementKey: "site_photos",
+        forceEditAfterRfp: false,
+      },
       "user-1"
     );
     expect(res.statusCode).toBe(200);

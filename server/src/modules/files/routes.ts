@@ -3,6 +3,7 @@ import { files } from "@trock-crm/shared/schema";
 import { AppError } from "../../middleware/error-handler.js";
 import { requireAdmin } from "../../middleware/rbac.js";
 import { writeSoftDeleteAuditLog } from "../../lib/soft-delete-audit.js";
+import { writeAuditLog } from "../../lib/audit-log.js";
 import type { FileCategory } from "@trock-crm/shared/types";
 import { FILE_CATEGORIES } from "@trock-crm/shared/types";
 import {
@@ -27,6 +28,7 @@ import {
   searchPhotoUploadTargets,
 } from "./service.js";
 import { getDealById } from "../deals/service.js";
+import { assertDealScopingWriteAllowed } from "../deals/scoping-service.js";
 import { getLeadById } from "../leads/service.js";
 import { getPhotoFeed, getNewPhotoCount, getProjectPhotoStats } from "./feed-service.js";
 import { getPhotoAuditEvents, logPhotoEvent } from "./audit-log-service.js";
@@ -44,6 +46,59 @@ function requestAuditContext(req: express.Request) {
 
 function isPhotoRecord(file: { category?: string | null }) {
   return file.category === "photo";
+}
+
+function isScopingLinkedFile(file: { intakeSource?: string | null; intakeRequirementKey?: string | null; dealId?: string | null }) {
+  return file.intakeSource === "scoping_intake" && Boolean(file.intakeRequirementKey) && Boolean(file.dealId);
+}
+
+function parseForceEditAfterRfp(req: express.Request) {
+  return req.body?.forceEditAfterRfp === true ||
+    req.query.forceEditAfterRfp === "true" ||
+    req.query.forceEditAfterRfp === "1";
+}
+
+async function assertScopingLinkedFileMutationAllowed(
+  req: express.Request,
+  file: {
+    id: string;
+    dealId?: string | null;
+    intakeSource?: string | null;
+    intakeRequirementKey?: string | null;
+  },
+  action: string
+) {
+  if (!isScopingLinkedFile(file) || !file.dealId) {
+    return;
+  }
+
+  const writePolicy = await assertDealScopingWriteAllowed(req.tenantDb!, file.dealId, {
+    role: req.user!.role,
+    forceEditAfterRfp: parseForceEditAfterRfp(req),
+  });
+
+  if (writePolicy.adminOverride) {
+    await writeAuditLog(req.tenantDb!, {
+      tableName: "deal_scoping_intake",
+      recordId: file.dealId,
+      action: "update",
+      changedBy: req.user!.id,
+      changes: {
+        linkedFileMutation: {
+          from: null,
+          to: action,
+        },
+      },
+      fullRow: {
+        override: "admin_force_edit_after_rfp",
+        route: "files",
+        action,
+        fileId: file.id,
+        intakeRequirementKey: file.intakeRequirementKey,
+        reason: writePolicy.lockState.reason,
+      },
+    });
+  }
 }
 
 function parseFileKind(value: unknown): "photos" | "documents" | undefined {
@@ -274,6 +329,7 @@ router.patch("/:id/address", async (req, res, next) => {
     } else if (req.user.role === "rep" && existing.uploadedBy !== req.user.id) {
       throw new AppError(403, "You can only modify files you uploaded");
     }
+    await assertScopingLinkedFileMutationAllowed(req, existing, "address_update");
 
     const { address, latitude, longitude } = req.body;
     if (!address || typeof address !== "string") {
@@ -326,6 +382,7 @@ router.post("/:id/new-version", async (req, res, next) => {
       const deal = await getDealById(req.tenantDb!, parentFile.dealId, req.user!.role, req.user!.id);
       if (!deal) throw new AppError(403, "Access denied: you do not have access to this deal's files.");
     }
+    await assertScopingLinkedFileMutationAllowed(req, parentFile, "new_version");
 
     // Fix 5: parentFileId comes from the URL param; version is computed server-side.
     // The client does NOT supply parentFileId or version.
@@ -684,6 +741,7 @@ router.patch("/:id", async (req, res, next) => {
       // Fix 8: Non-deal files (e.g. contact files) — reps can only modify files they uploaded
       throw new AppError(403, "You can only modify files you uploaded");
     }
+    await assertScopingLinkedFileMutationAllowed(req, existing, isRestore ? "restore" : "metadata_update");
 
     const { displayName, description, notes, tags, category, subcategory, folderPath, photoCategory } = req.body;
     const photoCategoryValues = ["before", "after", "progress", "site_visit", "damage", "safety", "delivery", "other"];
@@ -759,6 +817,7 @@ router.delete("/:id", requireAdmin, async (req, res, next) => {
     const fileId = req.params.id as string;
     const existing = await getFileById(req.tenantDb!, fileId);
     if (!existing) throw new AppError(404, "File not found");
+    await assertScopingLinkedFileMutationAllowed(req, existing, "delete");
 
     const deletedFile = await deleteFile(req.tenantDb!, fileId, req.user!.role, req.user!.id);
     if (deletedFile) {

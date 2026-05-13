@@ -116,8 +116,10 @@ export interface Deal {
   projectType?: string | null;
   projectTypeId: string | null;
   bidBoardProjectNumber?: string | null;
+  bidBoardLinkedAt?: string | null;
   intendedProjectNumber?: string | null;
   regionId: string | null;
+  isReadOnlyMirror?: boolean;
   source: string | null;
   winProbability: number | null;
   decisionMakerName: string | null;
@@ -145,6 +147,8 @@ export interface Deal {
   procoreLastSyncedAt: string | null;
   isBidBoardOwned: boolean;
   bidBoardStageSlug: string | null;
+  bidBoardStageEnteredAt?: string | null;
+  bidBoardMirrorSourceEnteredAt?: string | null;
   bidBoardStatus?: string | null;
   bidBoardTotalSales?: string | null;
   bidBoardLastUpdatedAt?: string | null;
@@ -549,6 +553,7 @@ export async function patchDealScopingIntake(
     workflowRoute: WorkflowRoute;
     projectTypeId: string | null;
     sectionData: DealScopingSectionData;
+    forceEditAfterRfp: boolean;
   }> &
     Record<string, unknown>
 ) {
@@ -560,7 +565,7 @@ export async function patchDealScopingIntake(
 
 export async function patchResolvedDealFields(
   dealId: string,
-  input: Partial<Record<keyof DealResolvedFields | "preBidMeetingCompleted" | "siteVisitDecision" | "siteVisitCompleted" | "estimatorConsultationNotes", unknown>>
+  input: Partial<Record<keyof DealResolvedFields | "preBidMeetingCompleted" | "siteVisitDecision" | "siteVisitCompleted" | "estimatorConsultationNotes" | "forceEditAfterRfp", unknown>>
 ) {
   return api<{ resolved: { deal?: DealDetail; resolved: DealResolvedFields } }>(`/deals/${dealId}/resolved-fields`, {
     method: "PATCH",
@@ -703,6 +708,7 @@ export async function linkExistingScopingAttachment(
     fileId: string;
     intakeSection: string;
     intakeRequirementKey: string;
+    forceEditAfterRfp?: boolean;
   }
 ) {
   return api<{ file: FileRecord }>(`/deals/${dealId}/scoping-intake/attachments/link-existing`, {

@@ -135,9 +135,19 @@ vi.mock("@/components/deals/deal-timeline-tab", () => ({
 }));
 
 vi.mock("@/components/deals/deal-scoping-workspace", () => ({
-  DealScopingWorkspace: ({ onReadinessChanged }: { onReadinessChanged?: () => void }) => (
+  DealScopingWorkspace: ({
+    onReadinessChanged,
+    mode,
+    canForceEdit,
+  }: {
+    onReadinessChanged?: () => void;
+    mode?: string;
+    canForceEdit?: boolean;
+  }) => (
     <div>
       Scoping Tab
+      <span data-testid="scope-mode">{mode ?? "edit"}</span>
+      <span data-testid="scope-force-edit">{canForceEdit ? "force-edit" : "no-force-edit"}</span>
       <button type="button" onClick={onReadinessChanged}>Simulate scope saved</button>
     </div>
   ),
@@ -1364,5 +1374,52 @@ describe("DealDetailPage", () => {
     expect(html).toContain("Open Files");
     expect(html).toContain("Open Activity");
     expect(html).toContain("Open Team");
+  });
+
+  it("keeps the scope tab visible for post-RFP deals and renders the workspace in read-only mode", async () => {
+    mocks.useDealDetailMock.mockReturnValueOnce({
+      loading: false,
+      error: null,
+      refetch: vi.fn(),
+      deal: makeDealDetail({
+        rfpApprovalRequestedAt: "2026-05-12T12:00:00.000Z",
+        rfpApprovalStatus: "pending_outbox",
+      }),
+    });
+
+    mounted = mountPage("/deals/deal-1?tab=scoping");
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    expect(mounted.container.textContent).toContain("Scoping Tab");
+    expect(mounted.container.textContent).toContain("readonly");
+    expect(mounted.container.textContent).toContain("force-edit");
+  });
+
+  it("uses the same Bid Board mirror lock signals as the backend for scoping readonly mode", async () => {
+    mocks.useDealDetailMock.mockReturnValueOnce({
+      loading: false,
+      error: null,
+      refetch: vi.fn(),
+      deal: makeDealDetail({
+        isBidBoardOwned: false,
+        bidBoardStageSlug: null,
+        readOnlySyncedAt: null,
+        rfpApprovalStatus: null,
+        rfpApprovalRequestedAt: null,
+        bidBoardStageEnteredAt: "2026-05-12T12:00:00.000Z",
+        bidBoardMirrorSourceEnteredAt: "2026-05-12T12:00:00.000Z",
+        isReadOnlyMirror: true,
+      }),
+    });
+
+    mounted = mountPage("/deals/deal-1?tab=scoping");
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    expect(mounted.container.textContent).toContain("Scoping Tab");
+    expect(mounted.container.textContent).toContain("readonly");
   });
 });
