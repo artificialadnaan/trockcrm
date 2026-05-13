@@ -53,7 +53,7 @@ export function isPhotoImagePreviewable(photo: PhotoUrlSource): boolean {
   const explicitExtension = normalizeExplicitExtension(photo.fileExtension);
   if (explicitExtension) return IMAGE_EXTENSIONS.has(explicitExtension);
 
-  const inferredExtension = firstKnownExtension(photo.displayName, photo.r2Key, photo.externalThumbnailUrl, photo.externalUrl);
+  const inferredExtension = firstKnownExtension(photo.r2Key, photo.externalThumbnailUrl, photo.externalUrl, photo.displayName);
   if (inferredExtension) return IMAGE_EXTENSIONS.has(inferredExtension);
 
   return true;
