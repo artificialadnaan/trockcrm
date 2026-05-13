@@ -5,6 +5,7 @@ import React from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { MemoryRouter } from "react-router-dom";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { api } from "@/lib/api";
 import {
   buildPhotoFilterSearchParams,
   groupDealPhotos,
@@ -85,6 +86,7 @@ afterEach(() => {
   root = null;
   container?.remove();
   container = null;
+  vi.clearAllMocks();
 });
 
 function renderTab() {
@@ -153,5 +155,70 @@ describe("DealPhotosTab component", () => {
     node.querySelector<HTMLButtonElement>('[aria-label="Show deleted photos"]')?.click();
     await vi.waitFor(() => expect(node.textContent).toContain("Adnaan Iqbal"));
     expect(node.textContent).toContain("Deleted");
+  });
+
+  it("loads additional photo pages instead of truncating large deals at the first page", async () => {
+    const pageOne = Array.from({ length: 100 }, (_, index) => ({
+      ...mockPhotos[0],
+      id: `photo-${index + 1}`,
+      displayName: `Photo ${index + 1}`,
+      description: `Loaded page one photo ${index + 1}`,
+      takenAt: `2026-05-04T${String(18 - Math.floor(index / 10)).padStart(2, "0")}:00:00.000Z`,
+    }));
+    const pageTwo = [
+      {
+        ...mockPhotos[0],
+        id: "photo-101",
+        displayName: "Late CompanyCam photo",
+        description: "Late CompanyCam photo",
+        takenAt: "2026-05-03T12:00:00.000Z",
+      },
+    ];
+    vi.mocked(api).mockImplementation(async (path: string) => {
+      const url = new URL(`https://example.test/api${path}`);
+      const page = url.searchParams.get("page");
+      const limit = url.searchParams.get("limit");
+      if (path.includes("/download")) return { url: "https://example.test/photo.jpg", filename: "photo.jpg" };
+      if (page === "2") return { photos: pageTwo, pagination: { page: 2, limit: Number(limit), total: 101, totalPages: 2 } };
+      return { photos: pageOne, pagination: { page: 1, limit: Number(limit), total: 101, totalPages: 2 } };
+    });
+
+    const node = renderTab();
+
+    await vi.waitFor(() => expect(node.textContent).toContain("Showing 100 of 101 photos"));
+    expect(vi.mocked(api)).toHaveBeenCalledWith(expect.stringContaining("page=1"));
+    expect(vi.mocked(api)).toHaveBeenCalledWith(expect.stringContaining("limit=100"));
+    expect(node.querySelectorAll<HTMLButtonElement>('[aria-label="Load more photos"]')).toHaveLength(1);
+    expect(node.textContent).not.toContain("Late CompanyCam photo");
+
+    node.querySelector<HTMLButtonElement>('[aria-label="Load more photos"]')?.click();
+
+    await vi.waitFor(() => expect(node.querySelector<HTMLButtonElement>('[aria-label="Open photo Late CompanyCam photo"]')).not.toBeNull());
+    expect(node.textContent).toContain("Showing 101 of 101 photos");
+    expect(vi.mocked(api)).toHaveBeenCalledWith(expect.stringContaining("page=2"));
+  });
+
+  it("keeps already loaded photos visible when loading the next page fails", async () => {
+    const pageOne = Array.from({ length: 100 }, (_, index) => ({
+      ...mockPhotos[0],
+      id: `photo-${index + 1}`,
+      displayName: `Photo ${index + 1}`,
+      description: `Loaded photo ${index + 1}`,
+    }));
+    vi.mocked(api).mockImplementation(async (path: string) => {
+      const url = new URL(`https://example.test/api${path}`);
+      if (path.includes("/download")) return { url: "https://example.test/photo.jpg", filename: "photo.jpg" };
+      if (url.searchParams.get("page") === "2") throw new Error("Network unavailable");
+      return { photos: pageOne, pagination: { page: 1, limit: 100, total: 101, totalPages: 2 } };
+    });
+
+    const node = renderTab();
+    await vi.waitFor(() => expect(node.textContent).toContain("Showing 100 of 101 photos"));
+
+    node.querySelector<HTMLButtonElement>('[aria-label="Load more photos"]')?.click();
+
+    await vi.waitFor(() => expect(node.textContent).toContain("Could not load more photos. Try again."));
+    expect(node.querySelector<HTMLButtonElement>('[aria-label="Open photo Photo 1"]')).not.toBeNull();
+    expect(node.textContent).not.toContain("Network unavailableRetry");
   });
 });

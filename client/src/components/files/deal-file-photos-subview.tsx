@@ -13,6 +13,7 @@ import {
   matchesPhotoFilters,
   PhotoEmptyState,
   PhotoFilterBar,
+  PhotoPaginationSummary,
   PhotoViewerModal,
   useInViewport,
   type DealPhotoRecord,
@@ -59,8 +60,13 @@ export function DealFilePhotosSubview({ dealId }: { dealId: string }) {
   const {
     photos,
     loading,
+    loadingMore,
     error,
+    loadMoreError,
+    pagination,
+    hasMorePhotos,
     fetchPhotos,
+    loadMorePhotos,
     getPhotoImageUrl,
     ensurePhotoImageUrl,
     patchPhoto,
@@ -105,6 +111,18 @@ export function DealFilePhotosSubview({ dealId }: { dealId: string }) {
   return (
     <div className="space-y-3">
       <PhotoFilterBar filters={filters} uploaders={uploaders} onChange={updateFilters} showGrouping={false} />
+
+      {!loading && !error && (
+        <PhotoPaginationSummary
+          loadedCount={photos.length}
+          totalCount={pagination.total}
+          hasMore={hasMorePhotos}
+          loadingMore={loadingMore}
+          loadMoreError={null}
+          showLoadMore={false}
+          onLoadMore={() => void loadMorePhotos()}
+        />
+      )}
 
       {loading && (
         <div className="space-y-2">
@@ -151,6 +169,17 @@ export function DealFilePhotosSubview({ dealId }: { dealId: string }) {
             ))}
           </div>
         </div>
+      )}
+
+      {!loading && !error && hasMorePhotos && sortedPhotos.length > 0 && (
+        <PhotoPaginationSummary
+          loadedCount={photos.length}
+          totalCount={pagination.total}
+          hasMore={hasMorePhotos}
+          loadingMore={loadingMore}
+          loadMoreError={loadMoreError}
+          onLoadMore={() => void loadMorePhotos()}
+        />
       )}
 
       <PhotoViewerModal

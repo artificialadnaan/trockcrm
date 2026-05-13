@@ -12,6 +12,7 @@ import {
   PhotoGridSkeleton,
   PhotoGridTile,
   PhotoGroupHeading,
+  PhotoPaginationSummary,
   PhotoViewerModal,
   useDealPhotosData,
   type DealPhotoRecord,
@@ -32,8 +33,13 @@ export function DealPhotosTab({ dealId, onCountChange }: { dealId: string; onCou
   const {
     photos,
     loading,
+    loadingMore,
     error,
+    loadMoreError,
+    pagination,
+    hasMorePhotos,
     fetchPhotos,
+    loadMorePhotos,
     getPhotoImageUrl,
     ensurePhotoImageUrl,
     patchPhoto,
@@ -81,6 +87,18 @@ export function DealPhotosTab({ dealId, onCountChange }: { dealId: string; onCou
 
       <PhotoFilterBar filters={filters} uploaders={uploaders} onChange={updateFilters} />
 
+      {!loading && !error && (
+        <PhotoPaginationSummary
+          loadedCount={photos.length}
+          totalCount={pagination.total}
+          hasMore={hasMorePhotos}
+          loadingMore={loadingMore}
+          loadMoreError={null}
+          showLoadMore={false}
+          onLoadMore={() => void loadMorePhotos()}
+        />
+      )}
+
       {loading && <PhotoGridSkeleton />}
 
       {!loading && error && (
@@ -111,6 +129,17 @@ export function DealPhotosTab({ dealId, onCountChange }: { dealId: string; onCou
           </div>
         </section>
       ))}
+
+      {!loading && !error && hasMorePhotos && flatPhotos.length > 0 && (
+        <PhotoPaginationSummary
+          loadedCount={photos.length}
+          totalCount={pagination.total}
+          hasMore={hasMorePhotos}
+          loadingMore={loadingMore}
+          loadMoreError={loadMoreError}
+          onLoadMore={() => void loadMorePhotos()}
+        />
+      )}
 
       <PhotoViewerModal
         photos={flatPhotos}

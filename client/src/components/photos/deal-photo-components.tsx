@@ -99,6 +99,8 @@ const GROUP_OPTIONS: Array<{ value: PhotoGrouping; label: string }> = [
   { value: "none", label: "None" },
 ];
 
+export const DEAL_PHOTO_PAGE_SIZE = 100;
+
 export const defaultPhotoFilters: PhotoFilterState = {
   categories: [],
   uploaderIds: [],
@@ -254,26 +256,106 @@ export function useDealPhotosData({
 }) {
   const [photos, setPhotos] = useState<DealPhotoRecord[]>([]);
   const [loading, setLoading] = useState(true);
+  const [loadingMore, setLoadingMore] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [loadMoreError, setLoadMoreError] = useState<string | null>(null);
+  const [pagination, setPagination] = useState({
+    page: 1,
+    limit: DEAL_PHOTO_PAGE_SIZE,
+    total: 0,
+    totalPages: 0,
+  });
   const [downloadUrls, setDownloadUrls] = useState<Record<string, string>>({});
   const previewRequests = React.useRef(new Map<string, Promise<string>>());
+  const requestId = React.useRef(0);
 
-  const fetchPhotos = useCallback(async () => {
-    setLoading(true);
+  const fetchPhotosPage = useCallback(async (page: number, options: { append?: boolean } = {}) => {
+    const append = options.append ?? false;
+    const currentRequestId = requestId.current + 1;
+    requestId.current = currentRequestId;
+    if (append) {
+      setLoadingMore(true);
+    } else {
+      setLoading(true);
+      setPhotos([]);
+    }
     setError(null);
+    setLoadMoreError(null);
     try {
-      const params = new URLSearchParams({ page: "1", limit: "200" });
+      const params = new URLSearchParams({ page: String(page), limit: String(DEAL_PHOTO_PAGE_SIZE) });
       const filterParams = buildPhotoFilterSearchParams(filters);
       filterParams.forEach((value, key) => params.set(key, value));
-      const data = await api<{ photos: DealPhotoRecord[]; pagination: { total: number } }>(`/files/deal/${dealId}/photos?${params}`);
-      setPhotos(data.photos);
-      onCountChange?.(data.photos.filter((photo) => !photo.deletedAt).length);
+      const data = await api<{ photos: DealPhotoRecord[]; pagination: { page: number; limit: number; total: number; totalPages: number } }>(`/files/deal/${dealId}/photos?${params}`);
+      if (requestId.current !== currentRequestId) return;
+      setPagination(data.pagination);
+      setPhotos((current) => {
+        if (!append) return data.photos;
+        const merged = new Map(current.map((photo) => [photo.id, photo]));
+        data.photos.forEach((photo) => merged.set(photo.id, photo));
+        return Array.from(merged.values());
+      });
+      onCountChange?.(data.pagination.total);
+    } catch (err) {
+      if (requestId.current === currentRequestId) {
+        const message = err instanceof Error ? err.message : "Failed to load photos";
+        if (append) {
+          setLoadMoreError(message);
+        } else {
+          setError(message);
+        }
+      }
+    } finally {
+      if (requestId.current === currentRequestId) {
+        setLoading(false);
+        setLoadingMore(false);
+      }
+    }
+  }, [dealId, filters, onCountChange]);
+
+  const fetchPhotos = useCallback(async () => {
+    await fetchPhotosPage(1);
+  }, [fetchPhotosPage]);
+
+  const loadMorePhotos = useCallback(async () => {
+    if (loading || loadingMore || pagination.page >= pagination.totalPages) return;
+    await fetchPhotosPage(pagination.page + 1, { append: true });
+  }, [fetchPhotosPage, loading, loadingMore, pagination.page, pagination.totalPages]);
+
+  const refreshLoadedPhotos = useCallback(async () => {
+    const pagesToRefresh = Math.max(1, pagination.page);
+    setLoading(true);
+    setError(null);
+    setLoadMoreError(null);
+    try {
+      const filterParams = buildPhotoFilterSearchParams(filters);
+      const requests = Array.from({ length: pagesToRefresh }, (_, index) => {
+        const params = new URLSearchParams({
+          page: String(index + 1),
+          limit: String(DEAL_PHOTO_PAGE_SIZE),
+        });
+        filterParams.forEach((value, key) => params.set(key, value));
+        return api<{ photos: DealPhotoRecord[]; pagination: { page: number; limit: number; total: number; totalPages: number } }>(
+          `/files/deal/${dealId}/photos?${params}`
+        );
+      });
+      const pages = await Promise.all(requests);
+      const merged = new Map<string, DealPhotoRecord>();
+      pages.forEach((pageResult) => pageResult.photos.forEach((photo) => merged.set(photo.id, photo)));
+      const latestPagination = pages[pages.length - 1]?.pagination ?? {
+        page: 1,
+        limit: DEAL_PHOTO_PAGE_SIZE,
+        total: 0,
+        totalPages: 0,
+      };
+      setPhotos(Array.from(merged.values()));
+      setPagination(latestPagination);
+      onCountChange?.(latestPagination.total);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to load photos");
     } finally {
       setLoading(false);
     }
-  }, [dealId, filters, onCountChange]);
+  }, [dealId, filters, onCountChange, pagination.page]);
 
   useEffect(() => {
     void fetchPhotos();
@@ -316,12 +398,12 @@ export function useDealPhotosData({
 
   async function deletePhoto(photoId: string) {
     await api(`/files/${photoId}`, { method: "DELETE" });
-    await fetchPhotos();
+    await refreshLoadedPhotos();
   }
 
   async function restorePhoto(photoId: string) {
     await patchPhoto(photoId, { deletedAt: null, deletedByUserId: null });
-    await fetchPhotos();
+    await refreshLoadedPhotos();
   }
 
   async function downloadPhoto(photoId: string) {
@@ -332,8 +414,13 @@ export function useDealPhotosData({
   return {
     photos,
     loading,
+    loadingMore,
     error,
+    loadMoreError,
+    pagination,
+    hasMorePhotos: pagination.page < pagination.totalPages,
     fetchPhotos,
+    loadMorePhotos,
     getPhotoImageUrl,
     ensurePhotoImageUrl,
     patchPhoto,
@@ -342,6 +429,42 @@ export function useDealPhotosData({
     restorePhoto,
     downloadPhoto,
   };
+}
+
+export function PhotoPaginationSummary({
+  loadedCount,
+  totalCount,
+  hasMore,
+  loadingMore,
+  loadMoreError,
+  showLoadMore = true,
+  onLoadMore,
+}: {
+  loadedCount: number;
+  totalCount: number;
+  hasMore: boolean;
+  loadingMore: boolean;
+  loadMoreError?: string | null;
+  showLoadMore?: boolean;
+  onLoadMore: () => void;
+}) {
+  if (totalCount === 0) return null;
+
+  return (
+    <div className="flex flex-wrap items-center justify-between gap-2 rounded-md border bg-background px-3 py-2 text-sm text-muted-foreground">
+      <div className="space-y-1">
+        <span>
+          Showing {loadedCount.toLocaleString()} of {totalCount.toLocaleString()} photos
+        </span>
+        {loadMoreError && <p className="text-xs text-red-600">Could not load more photos. Try again.</p>}
+      </div>
+      {showLoadMore && hasMore && (
+        <Button type="button" variant="outline" size="sm" aria-label="Load more photos" onClick={onLoadMore} disabled={loadingMore}>
+          {loadingMore ? "Loading..." : "Load more"}
+        </Button>
+      )}
+    </div>
+  );
 }
 
 export function PhotoFilterBar({
