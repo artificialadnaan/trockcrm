@@ -3,7 +3,7 @@ import { X, ChevronLeft, ChevronRight, Download, MapPin } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { api } from "@/lib/api";
-import { getImmediatePhotoOpenUrl, hasR2PhotoSource } from "@/lib/photo-url-resolution";
+import { getImmediatePhotoOpenUrl, hasR2PhotoSource, isPhotoImagePreviewable } from "@/lib/photo-url-resolution";
 import type { FeedPhoto } from "@/hooks/use-photo-feed";
 
 interface PhotoLightboxProps {
@@ -33,6 +33,11 @@ export function PhotoLightbox({ photo, initialUrl = null, onClose, onPrev, onNex
     let cancelled = false;
 
     async function loadFullRes() {
+      if (!isPhotoImagePreviewable(photo)) {
+        setLoadingUrl(false);
+        return;
+      }
+
       const immediateUrl = getImmediatePhotoOpenUrl(photo, initialUrl);
       if (immediateUrl) {
         setFullResUrl(immediateUrl);
@@ -60,7 +65,7 @@ export function PhotoLightbox({ photo, initialUrl = null, onClose, onPrev, onNex
     setLoadingUrl(true);
     loadFullRes();
     return () => { cancelled = true; };
-  }, [initialUrl, photo.id, photo.r2Key, photo.externalUrl, photo.externalThumbnailUrl]);
+  }, [initialUrl, photo.id, photo.r2Key, photo.externalUrl, photo.externalThumbnailUrl, photo.mimeType]);
 
   const handleKeyDown = useCallback(
     (e: KeyboardEvent) => {
@@ -140,7 +145,9 @@ export function PhotoLightbox({ photo, initialUrl = null, onClose, onPrev, onNex
             onClick={(e) => e.stopPropagation()}
           />
         ) : (
-          <div className="text-white/50 text-sm">Image unavailable</div>
+          <div className="text-white/50 text-sm">
+            {isPhotoImagePreviewable(photo) ? "Image unavailable" : "No image preview available"}
+          </div>
         )}
 
         {/* Next arrow */}

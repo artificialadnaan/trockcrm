@@ -12,8 +12,62 @@ import type { DealPhotoTimelineFilters } from "../files/photo-timeline-filters.j
 type TenantDb = NodePgDatabase<typeof schema>;
 
 const PUBLIC_TOKEN_BYTES = 32;
+const IMAGE_EXTENSIONS = new Set([".avif", ".gif", ".heic", ".heif", ".jpeg", ".jpg", ".png", ".webp"]);
 
 export type PublicTokenStatus = "active" | "expired" | "revoked";
+
+function normalizeExplicitExtension(value: string | null | undefined): string | null {
+  if (!value) return null;
+  const trimmed = value.trim().toLowerCase();
+  if (!trimmed) return null;
+  return trimmed.startsWith(".") ? trimmed : `.${trimmed}`;
+}
+
+function extensionFromPathLikeValue(value: string | null | undefined): string | null {
+  if (!value) return null;
+  let candidate = value.trim();
+  if (!candidate) return null;
+
+  try {
+    if (/^https?:\/\//i.test(candidate)) candidate = new URL(candidate).pathname;
+  } catch {
+    return null;
+  }
+
+  candidate = candidate.split(/[?#]/, 1)[0] ?? "";
+  const basename = candidate.slice(candidate.lastIndexOf("/") + 1).trim().toLowerCase();
+  const dotIndex = basename.lastIndexOf(".");
+  if (dotIndex <= 0 || dotIndex === basename.length - 1) return null;
+  return basename.slice(dotIndex);
+}
+
+function firstKnownExtension(...values: Array<string | null | undefined>): string | null {
+  for (const value of values) {
+    const extension = extensionFromPathLikeValue(value);
+    if (extension) return extension;
+  }
+  return null;
+}
+
+function isPublicPhotoImagePreviewable(photo: {
+  mimeType?: string | null;
+  fileExtension?: string | null;
+  displayName?: string | null;
+  r2Key?: string | null;
+  externalUrl?: string | null;
+  externalThumbnailUrl?: string | null;
+}) {
+  const mimeType = photo.mimeType?.trim().toLowerCase();
+  if (mimeType) return mimeType.startsWith("image/");
+
+  const explicitExtension = normalizeExplicitExtension(photo.fileExtension);
+  if (explicitExtension) return IMAGE_EXTENSIONS.has(explicitExtension);
+
+  const inferredExtension = firstKnownExtension(photo.displayName, photo.r2Key, photo.externalThumbnailUrl, photo.externalUrl);
+  if (inferredExtension) return IMAGE_EXTENSIONS.has(inferredExtension);
+
+  return true;
+}
 
 export function generateRawPublicToken(): string {
   return crypto.randomBytes(PUBLIC_TOKEN_BYTES).toString("base64url");
@@ -214,7 +268,11 @@ export async function getPublicPhotoViewer(rawToken: string, filters: DealPhotoT
       includeDeleted: false,
     });
     const photos = await Promise.all(timeline.photos.map(async (photo) => {
-      const imageUrl = photo.externalThumbnailUrl ?? photo.externalUrl ?? (await getFileDownloadUrl(tenantDb, photo.id)).url;
+      const imageUrl = isPublicPhotoImagePreviewable(photo)
+        ? photo.r2Key
+          ? (await getFileDownloadUrl(tenantDb, photo.id)).url
+          : photo.externalThumbnailUrl ?? photo.externalUrl ?? (await getFileDownloadUrl(tenantDb, photo.id)).url
+        : null;
       return publicPhotoShape(photo, imageUrl);
     }));
 

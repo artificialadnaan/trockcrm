@@ -40,6 +40,18 @@ const photo: DealPhotoRecord = {
   deletedByUserId: null,
 };
 
+const pdfPhoto: DealPhotoRecord = {
+  ...photo,
+  id: "photo-pdf",
+  displayName: "Bid package",
+  mimeType: "application/pdf",
+  fileExtension: ".pdf",
+  r2Key: "bid-package.pdf",
+  externalUrl: null,
+  externalThumbnailUrl: null,
+  description: null,
+};
+
 let root: Root | null = null;
 let container: HTMLDivElement | null = null;
 
@@ -70,7 +82,36 @@ function renderViewer() {
   );
 }
 
+function renderPdfViewer(ensurePhotoImageUrl = vi.fn(async () => "https://example.test/file.pdf")) {
+  container = document.createElement("div");
+  document.body.appendChild(container);
+  root = createRoot(container);
+  root.render(
+    <PhotoViewerModal
+      photos={[pdfPhoto]}
+      selectedId="photo-pdf"
+      onSelectedIdChange={vi.fn()}
+      getPhotoImageUrl={() => ""}
+      ensurePhotoImageUrl={ensurePhotoImageUrl}
+      patchPhoto={vi.fn()}
+      savePhotoAddress={vi.fn()}
+      deletePhoto={vi.fn()}
+      downloadPhoto={vi.fn()}
+    />
+  );
+  return ensurePhotoImageUrl;
+}
+
 describe("PhotoViewerModal history", () => {
+  it("does not render non-image photo records as images", async () => {
+    const ensurePhotoImageUrl = renderPdfViewer();
+
+    await vi.waitFor(() => expect(document.body.textContent).toContain("Bid package"));
+    expect(ensurePhotoImageUrl).not.toHaveBeenCalled();
+    expect(document.body.textContent).toContain("No image preview available");
+    expect(document.body.querySelector('img[alt="Bid package"]')).toBeNull();
+  });
+
   it("fetches audit history on expand and renders event descriptions with details", async () => {
     apiMock.mockResolvedValueOnce({
       events: [

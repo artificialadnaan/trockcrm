@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useState } from "react";
-import { Download, RotateCcw, Trash2 } from "lucide-react";
+import { Download, FileText, RotateCcw, Trash2 } from "lucide-react";
 import { useSearchParams } from "react-router-dom";
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
 import { Badge } from "@/components/ui/badge";
@@ -21,6 +21,7 @@ import {
 } from "@/components/photos/deal-photo-components";
 import { useDealPhotosData } from "@/components/photos/deal-photo-components";
 import { formatFileSize } from "@/lib/file-utils";
+import { isPhotoImagePreviewable } from "@/lib/photo-url-resolution";
 
 export type PhotoFileSortKey = "uploaded_at" | "taken_at" | "uploader" | "file_size" | "category";
 type SortDirection = "asc" | "desc";
@@ -219,15 +220,22 @@ function PhotoFileRow({
   const primaryLabel = photo.description || `${photo.displayName}${photo.fileExtension ?? ""}`;
   const uploadedAt = new Date(photo.createdAt).toLocaleDateString();
   const takenAt = photo.takenAt ? new Date(photo.takenAt).toLocaleDateString() : "Same as uploaded";
+  const isImage = isPhotoImagePreviewable(photo);
 
   useEffect(() => {
-    if (inViewport && !imageUrl) loadImageUrl();
-  }, [imageUrl, inViewport, loadImageUrl]);
+    if (isImage && inViewport && !imageUrl) loadImageUrl();
+  }, [imageUrl, inViewport, isImage, loadImageUrl]);
 
   return (
     <div ref={rowRef} className={`grid gap-3 px-3 py-3 transition hover:bg-accent/50 lg:grid-cols-[64px_minmax(180px,1.4fr)_120px_minmax(150px,1fr)_minmax(180px,1fr)_135px_135px_90px_92px] lg:items-center ${photo.deletedAt ? "opacity-55" : ""}`}>
       <button type="button" aria-label={`Open photo ${photo.displayName}`} className="h-12 w-12 overflow-hidden rounded border bg-muted" onClick={onOpen}>
-        {imageUrl ? <img src={imageUrl} alt={photo.displayName} loading="lazy" className="h-full w-full object-cover" /> : <div className="flex h-full w-full items-center justify-center text-xs text-muted-foreground">Photo</div>}
+        {imageUrl ? (
+          <img src={imageUrl} alt={photo.displayName} loading="lazy" className="h-full w-full object-cover" />
+        ) : (
+          <div className="flex h-full w-full items-center justify-center text-xs text-muted-foreground">
+            {isImage ? "Photo" : <FileText className="h-4 w-4" />}
+          </div>
+        )}
       </button>
 
       <button type="button" className="min-w-0 text-left" onClick={onOpen}>

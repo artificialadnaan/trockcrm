@@ -6,6 +6,7 @@ import {
   ChevronLeft,
   ChevronRight,
   Download,
+  FileText,
   Filter,
   MapPin,
   Pencil,
@@ -30,7 +31,7 @@ import {
 import { Input } from "@/components/ui/input";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { api } from "@/lib/api";
-import { getImmediatePhotoPreviewUrl, shouldFetchSignedPhotoUrl } from "@/lib/photo-url-resolution";
+import { getImmediatePhotoPreviewUrl, isPhotoImagePreviewable, shouldFetchSignedPhotoUrl } from "@/lib/photo-url-resolution";
 import { PhotoHistoryTimeline } from "./photo-history-timeline";
 
 export type PhotoGrouping = "date" | "category" | "uploader" | "none";
@@ -611,9 +612,11 @@ export function PhotoViewerModal({
   const selectedIndex = selectedId ? photos.findIndex((photo) => photo.id === selectedId) : -1;
   const selectedPhoto = selectedIndex >= 0 ? photos[selectedIndex] : null;
   const selectedUploaderName = selectedPhoto?.uploaderName ?? "Unknown user";
+  const selectedPhotoIsImage = selectedPhoto ? isPhotoImagePreviewable(selectedPhoto) : false;
+  const selectedPhotoImageUrl = selectedPhoto && selectedPhotoIsImage ? getPhotoImageUrl(selectedPhoto) : "";
 
   useEffect(() => {
-    if (!selectedPhoto || getPhotoImageUrl(selectedPhoto)) return;
+    if (!selectedPhoto || !isPhotoImagePreviewable(selectedPhoto) || getPhotoImageUrl(selectedPhoto)) return;
     void ensurePhotoImageUrl(selectedPhoto);
   }, [ensurePhotoImageUrl, getPhotoImageUrl, selectedPhoto]);
 
@@ -648,7 +651,22 @@ export function PhotoViewerModal({
           <DialogContent className="max-h-[92vh] overflow-y-auto sm:max-w-5xl">
             <div className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_360px]">
               <div className="flex min-h-[45vh] items-center justify-center rounded-lg bg-black">
-                <img src={getPhotoImageUrl(selectedPhoto)} alt={selectedPhoto.displayName} className="max-h-[72vh] max-w-full object-contain" />
+                {selectedPhotoImageUrl ? (
+                  <img src={selectedPhotoImageUrl} alt={selectedPhoto.displayName} className="max-h-[72vh] max-w-full object-contain" />
+                ) : selectedPhotoIsImage ? (
+                  <div className="flex flex-col items-center gap-3 px-6 text-center text-white">
+                    <Camera className="h-12 w-12 text-white/75" />
+                    <p className="text-sm font-medium">Loading preview</p>
+                  </div>
+                ) : (
+                  <div className="flex flex-col items-center gap-3 px-6 text-center text-white">
+                    <FileText className="h-12 w-12 text-white/75" />
+                    <div>
+                      <p className="text-sm font-medium">No image preview available</p>
+                      <p className="mt-1 text-xs text-white/70">{selectedPhoto.mimeType || selectedPhoto.fileExtension || "File attachment"}</p>
+                    </div>
+                  </div>
+                )}
               </div>
               <div className="space-y-4">
                 <DialogHeader>
@@ -802,10 +820,11 @@ export function PhotoGridTile({
 }) {
   const [tileRef, inViewport] = useInViewport<HTMLDivElement>();
   const category = displayPhotoCategory(photo);
+  const isImage = isPhotoImagePreviewable(photo);
 
   useEffect(() => {
-    if (inViewport && !imageUrl) loadImageUrl();
-  }, [imageUrl, inViewport, loadImageUrl]);
+    if (isImage && inViewport && !imageUrl) loadImageUrl();
+  }, [imageUrl, inViewport, isImage, loadImageUrl]);
 
   return (
     <div ref={tileRef} className={`space-y-1 ${photo.deletedAt ? "opacity-55" : ""}`}>
@@ -815,7 +834,13 @@ export function PhotoGridTile({
         className="group relative aspect-square w-full overflow-hidden rounded-lg border bg-muted text-left transition hover:ring-2 hover:ring-brand-red"
         onClick={onOpen}
       >
-        {imageUrl ? <img src={imageUrl} alt={photo.displayName} loading="lazy" className="h-full w-full object-cover" /> : <div className="flex h-full items-center justify-center"><Camera className="h-7 w-7 text-muted-foreground" /></div>}
+        {imageUrl ? (
+          <img src={imageUrl} alt={photo.displayName} loading="lazy" className="h-full w-full object-cover" />
+        ) : (
+          <div className="flex h-full items-center justify-center">
+            {isImage ? <Camera className="h-7 w-7 text-muted-foreground" /> : <FileText className="h-7 w-7 text-muted-foreground" />}
+          </div>
+        )}
         <Avatar className="absolute bottom-2 left-2 h-7 w-7 border border-white shadow">
           <AvatarImage src={photo.uploaderAvatarUrl ?? undefined} />
           <AvatarFallback>{initials(photo.uploaderName)}</AvatarFallback>
