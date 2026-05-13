@@ -7,7 +7,7 @@ import { writeAuditLog } from "../../lib/audit-log.js";
 import { AppError } from "../../middleware/error-handler.js";
 import { getStageById, getStageBySlug } from "../pipeline/service.js";
 import { applyProjectTypeChange, BID_BOARD_STAGE_READ_ONLY_MESSAGE } from "./service.js";
-import { inferDealBidBoardOwnership } from "./workflow-backfill.js";
+import { inferDealBidBoardOwnership, type PlanDealWorkflowBackfillInput } from "./workflow-backfill.js";
 import { evaluateScopingReadiness, type DealScopingReadinessSnapshot, type DealScopingSectionData } from "./scoping-rules.js";
 import { getResolvedDeal, type ResolvedDealView } from "./lineage-resolver.js";
 
@@ -292,9 +292,11 @@ async function getDealOrThrow(tenantDb: TenantDb, dealId: string) {
   return deal;
 }
 
-async function assertDealScopingEditable(deal: DealRow) {
-  const currentStage = await getStageById(deal.stageId);
-  const ownership = inferDealBidBoardOwnership({
+function buildBidBoardOwnershipInput(
+  deal: DealRow,
+  currentStage: Awaited<ReturnType<typeof getStageById>>
+): PlanDealWorkflowBackfillInput {
+  return {
     id: deal.id,
     stageSlug: currentStage?.slug ?? null,
     stageEnteredAt: deal.stageEnteredAt,
@@ -310,7 +312,12 @@ async function assertDealScopingEditable(deal: DealRow) {
     bidBoardMirrorSourceEnteredAt: deal.bidBoardMirrorSourceEnteredAt,
     isReadOnlyMirror: deal.isReadOnlyMirror,
     readOnlySyncedAt: deal.readOnlySyncedAt,
-  });
+  };
+}
+
+async function assertDealScopingEditable(deal: DealRow) {
+  const currentStage = await getStageById(deal.stageId);
+  const ownership = inferDealBidBoardOwnership(buildBidBoardOwnershipInput(deal, currentStage));
 
   if (!ownership.reopenInCrmEditableFlow) {
     throw new AppError(
@@ -335,11 +342,7 @@ async function resolveDealScopeLockState(deal: DealRow) {
   const hasBidBoardHandoff =
     deal.bidBoardLinkedAt != null ||
     Boolean(deal.bidBoardProjectNumber) ||
-    deal.isBidBoardOwned ||
-    deal.isReadOnlyMirror ||
-    deal.readOnlySyncedAt != null ||
-    deal.bidBoardStageEnteredAt != null ||
-    deal.bidBoardMirrorSourceEnteredAt != null;
+    inferDealBidBoardOwnership(buildBidBoardOwnershipInput(deal, currentStage)).isBidBoardOwned;
 
   return {
     locked: hasRfpSubmission || hasBidBoardHandoff || isPastOpportunity,

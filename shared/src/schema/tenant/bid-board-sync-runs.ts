@@ -25,6 +25,7 @@ export const bidBoardSyncRuns = pgTable(
     estimateUpdatedLowerCount: integer("estimate_updated_lower_count").default(0).notNull(),
     estimateSkippedNoValueCount: integer("estimate_skipped_no_value_count").default(0).notNull(),
     estimateSkippedNoChangeCount: integer("estimate_skipped_no_change_count").default(0).notNull(),
+    estimateSkippedTerminalCount: integer("estimate_skipped_terminal_count").default(0).notNull(),
     estimateWarningCount: integer("estimate_warning_count").default(0).notNull(),
     status: text("status").default("received").notNull(),
     errors: jsonb("errors").$type<string[]>().default([]).notNull(),

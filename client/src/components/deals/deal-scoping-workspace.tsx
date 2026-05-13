@@ -697,6 +697,7 @@ export function DealScopingWorkspace({
           file,
           category: requirement.category,
           dealId: deal.id,
+          ...(adminOverrideEditing ? { forceEditAfterRfp: true } : {}),
           onProgress: setUploadProgress,
         });
         await linkExistingScopingAttachment(deal.id, {

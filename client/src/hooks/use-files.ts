@@ -338,6 +338,7 @@ export interface UploadFileInput {
   changeOrderId?: string;
   description?: string;
   tags?: string[];
+  forceEditAfterRfp?: boolean;
   onProgress?: (percent: number) => void;
 }
 
@@ -413,6 +414,7 @@ export async function uploadFile(input: UploadFileInput): Promise<FileRecord> {
     contactId,
     description,
     tags,
+    forceEditAfterRfp,
     onProgress,
   } = input;
 
@@ -435,6 +437,7 @@ export async function uploadFile(input: UploadFileInput): Promise<FileRecord> {
       changeOrderId: input.changeOrderId,
       description,
       tags,
+      forceEditAfterRfp,
     },
   });
 
@@ -442,7 +445,10 @@ export async function uploadFile(input: UploadFileInput): Promise<FileRecord> {
 
   const data = await api<{ file: FileRecord }>("/files/confirm-upload", {
     method: "POST",
-    json: { uploadToken: presign.uploadToken },
+    json: {
+      uploadToken: presign.uploadToken,
+      forceEditAfterRfp,
+    },
   });
 
   return data.file;

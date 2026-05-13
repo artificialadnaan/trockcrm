@@ -60,6 +60,7 @@ interface IngestionMetrics {
   estimateUpdatedLower: number;
   estimateSkippedNoValue: number;
   estimateSkippedNoChange: number;
+  estimateSkippedTerminal: number;
   estimateWarnings: number;
 }
 
@@ -457,6 +458,7 @@ interface EstimateWritebackResult {
   updated: boolean;
   skippedNoValue: boolean;
   skippedNoChange: boolean;
+  skippedTerminal: boolean;
   higher: boolean;
   lower: boolean;
   warning: string | null;
@@ -469,12 +471,26 @@ async function writeEstimateIfNeeded(
   row: NormalizedBidBoardRow,
   changedByUserId: string | null
 ): Promise<EstimateWritebackResult> {
+  const route = workflowRoute(deal.workflow_route);
+  if (deal.stage_is_terminal || isTerminalWorkflowStage(deal.stage_slug, route)) {
+    return {
+      updated: false,
+      skippedNoValue: false,
+      skippedNoChange: false,
+      skippedTerminal: true,
+      higher: false,
+      lower: false,
+      warning: `Skipped terminal Bid Board estimate update for deal ${deal.id}: CRM=${deal.stage_slug}, Bid Board=${row.bidBoardStatus ?? "unknown"}`,
+    };
+  }
+
   const nextCents = moneyCents(row.bidBoardTotalSales);
   if (nextCents == null || nextCents <= 0) {
     return {
       updated: false,
       skippedNoValue: true,
       skippedNoChange: false,
+      skippedTerminal: false,
       higher: false,
       lower: false,
       warning: null,
@@ -486,6 +502,7 @@ async function writeEstimateIfNeeded(
       updated: false,
       skippedNoValue: false,
       skippedNoChange: false,
+      skippedTerminal: false,
       higher: false,
       lower: false,
       warning: `Skipped Bid Board estimate update for deal ${deal.id}: no active admin/director user available for audit history`,
@@ -524,6 +541,7 @@ async function writeEstimateIfNeeded(
       updated: false,
       skippedNoValue: false,
       skippedNoChange: true,
+      skippedTerminal: false,
       higher: false,
       lower: false,
       warning: null,
@@ -558,6 +576,7 @@ async function writeEstimateIfNeeded(
     updated: true,
     skippedNoValue: false,
     skippedNoChange: false,
+    skippedTerminal: false,
     higher,
     lower,
     warning,
@@ -707,6 +726,7 @@ export async function ingestBidBoardRows(payload: BidBoardSyncPayload) {
     estimateUpdatedLower: 0,
     estimateSkippedNoValue: 0,
     estimateSkippedNoChange: 0,
+    estimateSkippedTerminal: 0,
     estimateWarnings: 0,
   };
 
@@ -797,6 +817,7 @@ export async function ingestBidBoardRows(payload: BidBoardSyncPayload) {
       if (estimateResult.lower) metrics.estimateUpdatedLower++;
       if (estimateResult.skippedNoValue) metrics.estimateSkippedNoValue++;
       if (estimateResult.skippedNoChange) metrics.estimateSkippedNoChange++;
+      if (estimateResult.skippedTerminal) metrics.estimateSkippedTerminal++;
       if (estimateResult.warning) {
         metrics.estimateWarnings++;
         warnings.push(estimateResult.warning);
@@ -851,7 +872,8 @@ export async function ingestBidBoardRows(payload: BidBoardSyncPayload) {
               estimate_updated_lower_count = $20,
               estimate_skipped_no_value_count = $21,
               estimate_skipped_no_change_count = $22,
-              estimate_warning_count = $23
+              estimate_warning_count = $23,
+              estimate_skipped_terminal_count = $24
         WHERE id = $1`,
       [
         runId,
@@ -877,6 +899,7 @@ export async function ingestBidBoardRows(payload: BidBoardSyncPayload) {
         metrics.estimateSkippedNoValue,
         metrics.estimateSkippedNoChange,
         metrics.estimateWarnings,
+        metrics.estimateSkippedTerminal,
       ]
     );
     await client.query("COMMIT");

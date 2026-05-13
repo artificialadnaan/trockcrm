@@ -383,6 +383,66 @@ describe("Bid Board sync stage writeback", () => {
     expect(result.warnings.join("\n")).toContain("terminal");
   });
 
+  it("does not rewrite bid estimates for terminal CRM deals", async () => {
+    query.mockImplementation(async (sql: string, params: unknown[] = []) => {
+      const normalizedSql = sql.toLowerCase();
+      const base = successfulRunBase(sql);
+      if (base) {
+        if (normalizedSql.includes("update office_dallas.bid_board_sync_runs")) {
+          expect(params[23]).toBe(1);
+        }
+        return base;
+      }
+
+      if (normalizedSql.includes("from office_dallas.deals") && normalizedSql.includes("lower(trim(d.project_number))")) {
+        return {
+          rows: [
+            matchedDeal({
+              id: "deal-terminal-estimate",
+              stage_id: "stage-won",
+              stage_slug: "won",
+              stage_display_order: 7,
+              stage_is_terminal: true,
+              bid_estimate: "425000.00",
+              deal_number: "DFW-5-99998-aa",
+            }),
+          ],
+          rowCount: 1,
+        };
+      }
+      if (normalizedSql.includes("update office_dallas.deals") && normalizedSql.includes("bid_board_project_number")) {
+        return { rows: [], rowCount: 1 };
+      }
+      if (normalizedSql.includes("update office_dallas.deals") && normalizedSql.includes("bid_estimate = $2::numeric")) {
+        throw new Error("terminal deals must not receive Bid Board estimate writes");
+      }
+      if (normalizedSql.includes("insert into office_dallas.deal_history")) {
+        throw new Error("terminal estimate skips must not write deal history");
+      }
+      if (normalizedSql.includes("from public.pipeline_stage_config")) {
+        return { rows: [{ id: "stage-estimating", slug: "estimating", display_order: 3, is_terminal: false }], rowCount: 1 };
+      }
+      throw new Error(`Unexpected SQL: ${sql}`);
+    });
+
+    const result = await ingestBidBoardRows({
+      office_slug: "dallas",
+      rows: [
+        {
+          Name: "Already Won Estimate Project",
+          Status: "Estimate in Progress",
+          "Project #": "DFW-5-99998-aa",
+          "Total Sales": "850000",
+        },
+      ],
+    });
+
+    expect(result.metrics.estimateUpdated).toBe(0);
+    expect(result.metrics.estimateSkippedTerminal).toBe(1);
+    expect(result.metrics.estimateSkippedNoChange).toBe(0);
+    expect(result.warnings.join("\n")).toContain("terminal Bid Board estimate update");
+  });
+
   it("writes non-zero Bid Board Total Sales to bid_estimate even when it revises the CRM value downward", async () => {
     query.mockImplementation(async (sql: string, params: unknown[] = []) => {
       const base = successfulRunBase(sql);
