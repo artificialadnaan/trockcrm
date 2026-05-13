@@ -55,6 +55,12 @@ interface IngestionMetrics {
   skippedBackward: number;
   skippedTerminal: number;
   skippedNoStageChange: number;
+  estimateUpdated: number;
+  estimateUpdatedHigher: number;
+  estimateUpdatedLower: number;
+  estimateSkippedNoValue: number;
+  estimateSkippedNoChange: number;
+  estimateWarnings: number;
 }
 
 interface DealMatch {
@@ -68,6 +74,7 @@ interface DealMatch {
   deal_number: string | null;
   project_number: string | null;
   bid_board_project_number: string | null;
+  bid_estimate: string | null;
 }
 
 interface StageConfig {
@@ -79,6 +86,8 @@ interface StageConfig {
 
 const STRUCTURED_PROJECT_NUMBER_PATTERN = /^[A-Z]{3}-\d+-\d{5}-[a-z]{2}$/i;
 const MAX_UNMATCHED_PROJECT_NUMBERS = 100;
+const BID_BOARD_ESTIMATE_SYNC_SOURCE = "bid_board_sync";
+const BID_BOARD_ESTIMATE_SYNC_REASON = "Bid Board export sync - Total Sales -> Bid Estimate";
 
 function textValue(value: unknown): string | null {
   if (value == null) return null;
@@ -93,6 +102,17 @@ function numericText(value: unknown): string | null {
   if (!cleaned) return null;
   const parsed = Number(cleaned);
   return Number.isFinite(parsed) ? String(parsed) : null;
+}
+
+function moneyCents(value: string | number | null | undefined): number | null {
+  if (value == null || value === "") return null;
+  const parsed = typeof value === "number" ? value : Number(String(value).replace(/[$,\s]/g, ""));
+  if (!Number.isFinite(parsed)) return null;
+  return Math.round(parsed * 100);
+}
+
+function centsToMoneyText(value: number): string {
+  return (value / 100).toFixed(2);
 }
 
 function integerIdText(value: unknown): string | null {
@@ -279,6 +299,7 @@ function dealMatchSelectSql(schemaName: string): string {
            d.deal_number,
            d.project_number,
            d.bid_board_project_number,
+           d.bid_estimate,
            psc.slug AS stage_slug,
            psc.display_order AS stage_display_order,
            psc.is_terminal AS stage_is_terminal
@@ -432,6 +453,117 @@ interface StageWritebackResult {
   warning: string | null;
 }
 
+interface EstimateWritebackResult {
+  updated: boolean;
+  skippedNoValue: boolean;
+  skippedNoChange: boolean;
+  higher: boolean;
+  lower: boolean;
+  warning: string | null;
+}
+
+async function writeEstimateIfNeeded(
+  client: { query: Function },
+  schemaName: string,
+  deal: DealMatch,
+  row: NormalizedBidBoardRow,
+  changedByUserId: string | null
+): Promise<EstimateWritebackResult> {
+  const nextCents = moneyCents(row.bidBoardTotalSales);
+  if (nextCents == null || nextCents <= 0) {
+    return {
+      updated: false,
+      skippedNoValue: true,
+      skippedNoChange: false,
+      higher: false,
+      lower: false,
+      warning: null,
+    };
+  }
+
+  if (!changedByUserId) {
+    return {
+      updated: false,
+      skippedNoValue: false,
+      skippedNoChange: false,
+      higher: false,
+      lower: false,
+      warning: `Skipped Bid Board estimate update for deal ${deal.id}: no active admin/director user available for audit history`,
+    };
+  }
+
+  const nextValue = centsToMoneyText(nextCents);
+  const updateResult = await client.query(
+    `WITH existing AS (
+       SELECT bid_estimate
+         FROM ${schemaName}.deals
+        WHERE id = $1
+        FOR UPDATE
+     ), updated AS (
+       UPDATE ${schemaName}.deals d
+          SET bid_estimate = $2::numeric,
+              updated_at = NOW()
+         FROM existing
+        WHERE d.id = $1
+          AND existing.bid_estimate IS DISTINCT FROM $2::numeric
+        RETURNING existing.bid_estimate AS old_bid_estimate,
+                  d.bid_estimate AS new_bid_estimate
+     )
+     SELECT existing.bid_estimate AS current_bid_estimate,
+            updated.old_bid_estimate,
+            updated.new_bid_estimate
+       FROM existing
+       LEFT JOIN updated ON true`,
+    [deal.id, nextValue]
+  );
+
+  const rowResult = updateResult.rows[0];
+  const currentCents = moneyCents(rowResult?.current_bid_estimate ?? deal.bid_estimate);
+  if (!rowResult?.new_bid_estimate) {
+    return {
+      updated: false,
+      skippedNoValue: false,
+      skippedNoChange: true,
+      higher: false,
+      lower: false,
+      warning: null,
+    };
+  }
+
+  const oldValue = rowResult.old_bid_estimate == null ? null : String(rowResult.old_bid_estimate);
+  const newValue = String(rowResult.new_bid_estimate ?? nextValue);
+  await client.query(
+    `INSERT INTO ${schemaName}.deal_history
+       (deal_id, field_name, old_value, new_value, changed_by, source, reason)
+     VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+    [
+      deal.id,
+      "bid_estimate",
+      oldValue,
+      newValue,
+      changedByUserId,
+      BID_BOARD_ESTIMATE_SYNC_SOURCE,
+      BID_BOARD_ESTIMATE_SYNC_REASON,
+    ]
+  );
+
+  const higher = currentCents != null && nextCents > currentCents;
+  const lower = currentCents != null && nextCents < currentCents;
+  const warning =
+    currentCents != null && currentCents > 0 && nextCents < currentCents * 0.5
+      ? `Large Bid Board estimate decrease for deal ${deal.id}: ${centsToMoneyText(currentCents)} -> ${nextValue}`
+      : null;
+
+  return {
+    updated: true,
+    skippedNoValue: false,
+    skippedNoChange: false,
+    higher,
+    lower,
+    warning,
+  };
+}
+
 async function writeStageIfSafe(
   client: { query: Function },
   schemaName: string,
@@ -570,6 +702,12 @@ export async function ingestBidBoardRows(payload: BidBoardSyncPayload) {
     skippedBackward: 0,
     skippedTerminal: 0,
     skippedNoStageChange: 0,
+    estimateUpdated: 0,
+    estimateUpdatedHigher: 0,
+    estimateUpdatedLower: 0,
+    estimateSkippedNoValue: 0,
+    estimateSkippedNoChange: 0,
+    estimateWarnings: 0,
   };
 
   const seenProjectNumbers = new Set<string>();
@@ -653,6 +791,17 @@ export async function ingestBidBoardRows(payload: BidBoardSyncPayload) {
       const updateResult = await client.query(updateSql, updateParams(matches[0].id, normalized, bidBoardLastUpdatedAt));
       if ((updateResult.rowCount ?? 0) > 0) metrics.updated++;
 
+      const estimateResult = await writeEstimateIfNeeded(client, schemaName, matches[0], normalized, changedByUserId);
+      if (estimateResult.updated) metrics.estimateUpdated++;
+      if (estimateResult.higher) metrics.estimateUpdatedHigher++;
+      if (estimateResult.lower) metrics.estimateUpdatedLower++;
+      if (estimateResult.skippedNoValue) metrics.estimateSkippedNoValue++;
+      if (estimateResult.skippedNoChange) metrics.estimateSkippedNoChange++;
+      if (estimateResult.warning) {
+        metrics.estimateWarnings++;
+        warnings.push(estimateResult.warning);
+      }
+
       const targetStageSlug = bidBoardStatusToCrmStage(normalized.bidBoardStatus);
       if (!targetStageSlug) {
         metrics.skippedUnmappedStatus++;
@@ -696,7 +845,13 @@ export async function ingestBidBoardRows(payload: BidBoardSyncPayload) {
               skipped_backward_count = $14,
               skipped_terminal_count = $15,
               skipped_no_stage_change_count = $16,
-              unmatched_project_numbers = $17::jsonb
+              unmatched_project_numbers = $17::jsonb,
+              estimate_updated_count = $18,
+              estimate_updated_higher_count = $19,
+              estimate_updated_lower_count = $20,
+              estimate_skipped_no_value_count = $21,
+              estimate_skipped_no_change_count = $22,
+              estimate_warning_count = $23
         WHERE id = $1`,
       [
         runId,
@@ -716,6 +871,12 @@ export async function ingestBidBoardRows(payload: BidBoardSyncPayload) {
         metrics.skippedTerminal,
         metrics.skippedNoStageChange,
         JSON.stringify(unmatchedProjectNumbers),
+        metrics.estimateUpdated,
+        metrics.estimateUpdatedHigher,
+        metrics.estimateUpdatedLower,
+        metrics.estimateSkippedNoValue,
+        metrics.estimateSkippedNoChange,
+        metrics.estimateWarnings,
       ]
     );
     await client.query("COMMIT");

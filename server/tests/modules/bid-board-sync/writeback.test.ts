@@ -40,6 +40,7 @@ function matchedDeal(overrides: Record<string, unknown> = {}) {
     deal_number: "DFW-4-11826-ab",
     project_number: null,
     bid_board_project_number: null,
+    bid_estimate: null,
     ...overrides,
   };
 }
@@ -380,5 +381,156 @@ describe("Bid Board sync stage writeback", () => {
     expect(result.metrics.stageUpdated).toBe(0);
     expect(result.metrics.skippedTerminal).toBe(1);
     expect(result.warnings.join("\n")).toContain("terminal");
+  });
+
+  it("writes non-zero Bid Board Total Sales to bid_estimate even when it revises the CRM value downward", async () => {
+    query.mockImplementation(async (sql: string, params: unknown[] = []) => {
+      const base = successfulRunBase(sql);
+      if (base) return base;
+
+      const normalizedSql = sql.toLowerCase();
+      if (normalizedSql.includes("from office_dallas.deals") && normalizedSql.includes("lower(trim(d.project_number))")) {
+        return {
+          rows: [
+            matchedDeal({
+              id: "deal-down-revision",
+              stage_id: "stage-estimating",
+              stage_slug: "estimating",
+              stage_display_order: 3,
+              bid_estimate: "1200000.00",
+              deal_number: "DFW-9-55555-aa",
+            }),
+          ],
+          rowCount: 1,
+        };
+      }
+      if (normalizedSql.includes("update office_dallas.deals") && normalizedSql.includes("bid_board_project_number")) {
+        return { rows: [], rowCount: 1 };
+      }
+      if (normalizedSql.includes("update office_dallas.deals") && normalizedSql.includes("bid_estimate = $2::numeric")) {
+        expect(params).toEqual(["deal-down-revision", "850000.00"]);
+        return { rows: [{ old_bid_estimate: "1200000.00", new_bid_estimate: "850000.00" }], rowCount: 1 };
+      }
+      if (normalizedSql.includes("insert into office_dallas.deal_history")) {
+        expect(params).toEqual([
+          "deal-down-revision",
+          "bid_estimate",
+          "1200000.00",
+          "850000.00",
+          "system-user",
+          "bid_board_sync",
+          "Bid Board export sync - Total Sales -> Bid Estimate",
+        ]);
+        return { rows: [], rowCount: 1 };
+      }
+      if (normalizedSql.includes("from public.pipeline_stage_config")) {
+        return { rows: [{ id: "stage-estimating", slug: "estimating", display_order: 3, is_terminal: false }], rowCount: 1 };
+      }
+      if (normalizedSql.includes("update office_dallas.deals") && normalizedSql.includes("bid_board_stage_slug = $2")) {
+        return { rows: [], rowCount: 1 };
+      }
+      if (normalizedSql.includes("insert into office_dallas.job_queue")) {
+        throw new Error("Bid Board estimate sync must not enqueue rep notifications");
+      }
+      throw new Error(`Unexpected SQL: ${sql}`);
+    });
+
+    const result = await ingestBidBoardRows({
+      office_slug: "dallas",
+      rows: [
+        {
+          Name: "Down Revision Project",
+          Status: "Estimate in Progress",
+          "Project #": "DFW-9-55555-aa",
+          "Total Sales": "$850,000.00",
+        },
+      ],
+    });
+
+    expect(result.metrics.estimateUpdated).toBe(1);
+    expect(result.metrics.estimateUpdatedLower).toBe(1);
+    expect(result.metrics.estimateSkippedNoValue).toBe(0);
+    expect(result.metrics.estimateSkippedNoChange).toBe(0);
+    expect(query.mock.calls.some(([sql]) => String(sql).toLowerCase().includes("insert into office_dallas.deal_history"))).toBe(true);
+    expect(query.mock.calls.some(([sql]) => String(sql).toLowerCase().includes("insert into office_dallas.job_queue"))).toBe(false);
+  });
+
+  it("skips zero Bid Board Total Sales and same-value estimates without audit churn", async () => {
+    query.mockImplementation(async (sql: string, params: unknown[] = []) => {
+      const base = successfulRunBase(sql);
+      if (base) return base;
+
+      const normalizedSql = sql.toLowerCase();
+      if (normalizedSql.includes("from office_dallas.deals") && normalizedSql.includes("lower(trim(d.project_number))")) {
+        const projectNumber = params[0];
+        if (projectNumber === "dfw-9-00000-aa") {
+          return {
+            rows: [
+              matchedDeal({
+                id: "deal-zero",
+                stage_id: "stage-estimating",
+                stage_slug: "estimating",
+                stage_display_order: 3,
+                bid_estimate: "500000.00",
+                deal_number: "DFW-9-00000-aa",
+              }),
+            ],
+            rowCount: 1,
+          };
+        }
+        return {
+          rows: [
+            matchedDeal({
+              id: "deal-same",
+              stage_id: "stage-estimating",
+              stage_slug: "estimating",
+              stage_display_order: 3,
+              bid_estimate: "250000.00",
+              deal_number: "DFW-9-00001-aa",
+            }),
+          ],
+          rowCount: 1,
+        };
+      }
+      if (normalizedSql.includes("update office_dallas.deals") && normalizedSql.includes("bid_board_project_number")) {
+        return { rows: [], rowCount: 1 };
+      }
+      if (normalizedSql.includes("from public.pipeline_stage_config")) {
+        return { rows: [{ id: "stage-estimating", slug: "estimating", display_order: 3, is_terminal: false }], rowCount: 1 };
+      }
+      if (normalizedSql.includes("update office_dallas.deals") && normalizedSql.includes("bid_board_stage_slug = $2")) {
+        return { rows: [], rowCount: 1 };
+      }
+      if (normalizedSql.includes("update office_dallas.deals") && normalizedSql.includes("bid_estimate = $2::numeric")) {
+        expect(params).toEqual(["deal-same", "250000.00"]);
+        return { rows: [{ current_bid_estimate: "250000.00", old_bid_estimate: null, new_bid_estimate: null }], rowCount: 1 };
+      }
+      if (normalizedSql.includes("insert into office_dallas.deal_history")) {
+        throw new Error("zero and same-value estimate rows must not write deal history");
+      }
+      throw new Error(`Unexpected SQL: ${sql}`);
+    });
+
+    const result = await ingestBidBoardRows({
+      office_slug: "dallas",
+      rows: [
+        {
+          Name: "Zero Estimate Project",
+          Status: "Estimate in Progress",
+          "Project #": "DFW-9-00000-aa",
+          "Total Sales": "0",
+        },
+        {
+          Name: "Same Estimate Project",
+          Status: "Estimate in Progress",
+          "Project #": "DFW-9-00001-aa",
+          "Total Sales": "250000.00",
+        },
+      ],
+    });
+
+    expect(result.metrics.estimateUpdated).toBe(0);
+    expect(result.metrics.estimateSkippedNoValue).toBe(1);
+    expect(result.metrics.estimateSkippedNoChange).toBe(1);
   });
 });
