@@ -371,6 +371,37 @@ export function DealDetailPage() {
 
   const currentStageSlug = currentStage?.slug ?? "";
   const isOpportunityStage = canonicalCurrentStageSlug === "opportunity";
+  const opportunityStage = dealStages.find(
+    (stage) =>
+      stage.slug === "opportunity" &&
+      stage.workflowFamily === currentStage?.workflowFamily
+  );
+  const isPastOpportunityStage = Boolean(
+    currentStage &&
+    opportunityStage &&
+    currentStage.workflowFamily === opportunityStage.workflowFamily &&
+    currentStage.displayOrder > opportunityStage.displayOrder
+  );
+  const isScopeReadOnlyAfterRfp = Boolean(
+    deal &&
+    (
+      deal.rfpApprovalRequestedAt ||
+      deal.rfpApprovalStatus ||
+      deal.bidBoardLinkedAt ||
+      deal.bidBoardProjectNumber ||
+      deal.bidBoardStageEnteredAt ||
+      deal.bidBoardMirrorSourceEnteredAt ||
+      deal.isReadOnlyMirror ||
+      deal.readOnlySyncedAt ||
+      isBidBoardOwned ||
+      isPastOpportunityStage
+    )
+  );
+  const scopeSubmittedAt =
+    deal?.rfpApprovalRequestedAt ??
+    deal?.bidBoardLinkedAt ??
+    deal?.readOnlySyncedAt ??
+    null;
   const canTriggerRfp =
     user?.role === "admin" ||
     (user?.role === "rep" && deal?.assignedRepId === user.id);
@@ -833,19 +864,16 @@ export function DealDetailPage() {
           isConverted={Boolean(deal.sourceLeadId)}
         />
       )}
-      {activeTab === "scoping" &&
-        (isBidBoardOwned && bidBoardOwnership ? (
-          <DealScopingReadOnlyPanel
-            ownership={bidBoardOwnership}
-            onOpenTab={handleTabSelect}
-          />
-        ) : (
-          <DealScopingWorkspace
-            deal={deal}
-            onDealUpdated={refetch}
-            onReadinessChanged={handleScopingReadinessChanged}
-          />
-        ))}
+      {activeTab === "scoping" && (
+        <DealScopingWorkspace
+          deal={deal}
+          onDealUpdated={refetch}
+          onReadinessChanged={handleScopingReadinessChanged}
+          mode={isScopeReadOnlyAfterRfp ? "readonly" : "edit"}
+          readOnlySubmittedAt={scopeSubmittedAt}
+          canForceEdit={user?.role === "admin"}
+        />
+      )}
       {activeTab === "files" && <DealFileTab dealId={deal.id} />}
       {activeTab === "photos" && <DealPhotosTab dealId={deal.id} onCountChange={setPhotoCount} />}
       {activeTab === "email" && <DealEmailTab dealId={deal.id} />}

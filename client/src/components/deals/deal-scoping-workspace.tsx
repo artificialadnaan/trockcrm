@@ -336,10 +336,16 @@ export function DealScopingWorkspace({
   deal,
   onDealUpdated,
   onReadinessChanged,
+  mode = "edit",
+  readOnlySubmittedAt,
+  canForceEdit = false,
 }: {
   deal: DealDetail;
   onDealUpdated: () => void;
   onReadinessChanged?: () => void;
+  mode?: "edit" | "readonly";
+  readOnlySubmittedAt?: string | null;
+  canForceEdit?: boolean;
 }) {
   const { user } = useAuth();
   const { projectTypes } = useProjectTypes();
@@ -365,6 +371,7 @@ export function DealScopingWorkspace({
   const [uploadingKey, setUploadingKey] = useState<string | null>(null);
   const [uploadProgress, setUploadProgress] = useState<number | null>(null);
   const [activatingService, setActivatingService] = useState(false);
+  const [forceEditingReadOnlyScope, setForceEditingReadOnlyScope] = useState(false);
   const lastSavedFingerprintRef = useRef("");
   const hydrationCompleteRef = useRef(false);
   const readinessSignatureRef = useRef<string | null>(null);
@@ -393,9 +400,20 @@ export function DealScopingWorkspace({
     { completed: "Completed" },
     "Pending"
   );
-  const editingDisabled = initialLoadFailed;
+  const readOnlyModeActive = mode === "readonly" && !forceEditingReadOnlyScope;
+  const adminOverrideEditing = mode === "readonly" && forceEditingReadOnlyScope;
+  const editingDisabled = initialLoadFailed || readOnlyModeActive;
+  const submittedAtLabel = readOnlySubmittedAt
+    ? new Date(readOnlySubmittedAt).toLocaleDateString([], {
+        month: "short",
+        day: "numeric",
+        year: "numeric",
+      })
+    : null;
   const saveStatusLabel = initialLoadFailed
     ? "Unable to load - retry"
+    : readOnlyModeActive
+      ? "Read-only"
     : saveState === "saving"
       ? "Saving..."
       : saveState === "error"
@@ -405,6 +423,8 @@ export function DealScopingWorkspace({
           : "Loading";
   const saveStatusDetail = initialLoadFailed
     ? "Scoping intake did not load. Retry before editing."
+    : readOnlyModeActive
+      ? "Submitted scope is available for reference. Edits are locked after RFP submission."
     : saveState === "saving"
       ? "Autosaving changes..."
       : saveState === "saved"
@@ -491,11 +511,16 @@ export function DealScopingWorkspace({
 
   useEffect(() => {
     hydrationCompleteRef.current = false;
+    setForceEditingReadOnlyScope(false);
     void loadIntake();
-  }, [deal.id]);
+  }, [deal.id, mode]);
 
   useEffect(() => {
     if (!hydrationCompleteRef.current) {
+      return;
+    }
+
+    if (readOnlyModeActive) {
       return;
     }
 
@@ -518,7 +543,10 @@ export function DealScopingWorkspace({
           resolvedFields,
         });
         if (Object.keys(resolvedPatch).length > 0) {
-          const resolvedResult = await patchResolvedDealFields(deal.id, resolvedPatch);
+          const resolvedResult = await patchResolvedDealFields(deal.id, {
+            ...resolvedPatch,
+            ...(adminOverrideEditing ? { forceEditAfterRfp: true } : {}),
+          });
           if ("projectTypeId" in resolvedPatch) {
             setIntendedProjectNumber(resolvedResult.resolved.deal?.intendedProjectNumber ?? null);
           }
@@ -526,11 +554,14 @@ export function DealScopingWorkspace({
 
         const result = await patchDealScopingIntake(
           deal.id,
-          buildScopingAutosavePatch({
-            hasSourceLead,
-            projectTypeId,
-            sectionData,
-          })
+          {
+            ...buildScopingAutosavePatch({
+              hasSourceLead,
+              projectTypeId,
+              sectionData,
+            }),
+            ...(adminOverrideEditing ? { forceEditAfterRfp: true } : {}),
+          }
         );
         const nextSectionData = buildWorkspaceSectionData(deal, result.intake, result.resolved);
         setIntake(result.intake);
@@ -550,7 +581,7 @@ export function DealScopingWorkspace({
     }, 400);
 
     return () => window.clearTimeout(timeoutId);
-  }, [activeWorkflowRoute, deal, deal.id, hasSourceLead, projectTypeId, resolvedFields, sectionData]);
+  }, [activeWorkflowRoute, adminOverrideEditing, deal, deal.id, hasSourceLead, projectTypeId, readOnlyModeActive, resolvedFields, sectionData]);
 
   const completionCounts = getScopingCompletionCounts(readiness?.completionState);
   const attachmentRequirements = readiness?.attachmentRequirements ?? [];
@@ -621,6 +652,7 @@ export function DealScopingWorkspace({
         fileId,
         intakeSection: "attachments",
         intakeRequirementKey: requirementKey,
+        ...(adminOverrideEditing ? { forceEditAfterRfp: true } : {}),
       });
       await Promise.all([refetchFiles(), loadIntake({ notifyReadinessChange: true })]);
       toast.success(`Linked file to ${formatScopingAttachmentLabel(requirementKey)}.`);
@@ -633,7 +665,10 @@ export function DealScopingWorkspace({
     if (editingDisabled) return;
     setSaveState("saving");
     try {
-      const result = await patchResolvedDealFields(deal.id, { propertyId });
+      const result = await patchResolvedDealFields(deal.id, {
+        propertyId,
+        ...(adminOverrideEditing ? { forceEditAfterRfp: true } : {}),
+      });
       const nextResolved = result.resolved.resolved;
       setResolvedFields(nextResolved);
       setSectionData((current) =>
@@ -668,6 +703,7 @@ export function DealScopingWorkspace({
           fileId: uploaded.id,
           intakeSection: "attachments",
           intakeRequirementKey: requirement.key,
+          ...(adminOverrideEditing ? { forceEditAfterRfp: true } : {}),
         });
       }
       await Promise.all([refetchFiles(), loadIntake({ notifyReadinessChange: true })]);
@@ -693,6 +729,16 @@ export function DealScopingWorkspace({
     } finally {
       setActivatingService(false);
     }
+  };
+
+  const handleForceEdit = () => {
+    const confirmed = window.confirm(
+      "This scope was submitted to Bid Board. Editing now may cause inconsistency. Continue?"
+    );
+    if (!confirmed) {
+      return;
+    }
+    setForceEditingReadOnlyScope(true);
   };
 
   if (loading) {
@@ -820,11 +866,41 @@ export function DealScopingWorkspace({
           </div>
         ) : null}
 
+        {mode === "readonly" ? (
+          <div className={`rounded-lg border px-4 py-3 text-sm ${
+            adminOverrideEditing
+              ? "border-red-200 bg-red-50 text-red-800"
+              : "border-amber-200 bg-amber-50 text-amber-900"
+          }`}>
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <div>
+                <div className="font-medium">
+                  {adminOverrideEditing
+                    ? "Admin force edit enabled"
+                    : `This scope was submitted to Bid Board${submittedAtLabel ? ` on ${submittedAtLabel}` : ""}. Read-only.`}
+                </div>
+                <div className="mt-1">
+                  {adminOverrideEditing
+                    ? "Changes will be saved as an audited admin override."
+                    : "Submitted values remain visible for reference, but edits are locked after RFP submission."}
+                </div>
+              </div>
+              {canForceEdit && !adminOverrideEditing ? (
+                <Button type="button" variant="outline" size="sm" onClick={handleForceEdit}>
+                  Force edit
+                </Button>
+              ) : null}
+            </div>
+          </div>
+        ) : null}
+
         <Card>
           <CardHeader>
             <CardTitle>Scoping Workspace</CardTitle>
             <CardDescription>
-              Prefilled deal data is editable here and reused downstream for Bid Board handoff.
+              {readOnlyModeActive
+                ? "Submitted deal scope is available here for reference after Bid Board handoff."
+                : "Prefilled deal data is editable here and reused downstream for Bid Board handoff."}
             </CardDescription>
           </CardHeader>
           <CardContent className="grid gap-4 md:grid-cols-2">

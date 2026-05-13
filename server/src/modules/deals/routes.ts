@@ -5,6 +5,7 @@ import { dealApprovals, deals, jobQueue } from "@trock-crm/shared/schema";
 import { requireRole } from "../../middleware/rbac.js";
 import { AppError } from "../../middleware/error-handler.js";
 import { requestAuditContext, writeSoftDeleteAuditLog } from "../../lib/soft-delete-audit.js";
+import { writeAuditLog } from "../../lib/audit-log.js";
 import { eventBus } from "../../events/bus.js";
 import { DOMAIN_EVENTS } from "../../events/types.js";
 import {
@@ -73,6 +74,7 @@ import {
   type RfpRequestDeliveryPayload,
 } from "@trock-crm/shared/types";
 import {
+  assertDealScopingWriteAllowed,
   evaluateDealScopingReadiness,
   getOrCreateDealScopingIntake,
   linkDealFileToScopingRequirement,
@@ -133,6 +135,36 @@ import { getAllStages } from "../pipeline/service.js";
 import { resolveDealCreateOfficeCode } from "./create-context.js";
 
 const router = Router();
+
+const SCOPING_BACKED_DEAL_PATCH_FIELDS = new Set([
+  "companyId",
+  "description",
+  "expectedCloseDate",
+  "name",
+  "primaryContactId",
+  "projectType",
+  "projectTypeId",
+  "propertyAddress",
+  "propertyCity",
+  "propertyId",
+  "propertyState",
+  "propertyZip",
+  "source",
+  "sourceLeadId",
+  "workflowRoute",
+]);
+
+function getScopingBackedDealPatchFields(body: Record<string, unknown>) {
+  return Object.keys(body).filter((field) => SCOPING_BACKED_DEAL_PATCH_FIELDS.has(field));
+}
+
+async function assertDealRouteAccess(req: any, dealId: string) {
+  const deal = await getDealById(req.tenantDb!, dealId, req.user!.role, req.user!.id);
+  if (!deal) {
+    throw new AppError(403, "Access denied: you do not have access to this deal.");
+  }
+  return deal;
+}
 
 function isEstimatingBoundaryStageSlug(stageSlug: string, workflowRoute: "normal" | "service") {
   return (
@@ -756,6 +788,7 @@ router.post("/:id/rfp-retry", async (req, res, next) => {
 // GET /api/deals/:id/scoping-intake — load or initialize scoping intake
 router.get("/:id/scoping-intake", async (req, res, next) => {
   try {
+    await assertDealRouteAccess(req, req.params.id);
     const result = await getOrCreateDealScopingIntake(req.tenantDb!, req.params.id, req.user!.id);
     await req.commitTransaction!();
     res.json(result);
@@ -767,6 +800,7 @@ router.get("/:id/scoping-intake", async (req, res, next) => {
 // PATCH /api/deals/:id/scoping-intake — autosave scoping intake
 router.patch("/:id/scoping-intake", async (req, res, next) => {
   try {
+    await assertDealRouteAccess(req, req.params.id);
     const patch = { ...req.body };
     delete patch.workflowRoute;
 
@@ -808,11 +842,44 @@ router.patch("/:id/scoping-intake", async (req, res, next) => {
 // PATCH /api/deals/:id/resolved-fields — write lineage-routed deal fields
 router.patch("/:id/resolved-fields", async (req, res, next) => {
   try {
-    const resolved = await writeResolvedDealFields(req.tenantDb!, req.params.id, req.body ?? {}, {
+    await assertDealRouteAccess(req, req.params.id);
+    const patch = { ...(req.body ?? {}) };
+    const forceEditAfterRfp = patch.forceEditAfterRfp === true;
+    delete patch.forceEditAfterRfp;
+
+    const writePolicy = await assertDealScopingWriteAllowed(req.tenantDb!, req.params.id, {
+      role: req.user!.role,
+      forceEditAfterRfp,
+    });
+
+    const resolved = await writeResolvedDealFields(req.tenantDb!, req.params.id, patch, {
       userId: req.user!.id,
       officeId: req.user!.activeOfficeId ?? req.user!.officeId,
       role: req.user!.role,
     });
+    if (writePolicy.adminOverride) {
+      await writeAuditLog(req.tenantDb!, {
+        tableName: "deal_scoping_intake",
+        recordId: req.params.id,
+        action: "update",
+        changedBy: req.user!.id,
+        changes: Object.fromEntries(
+          Object.keys(patch).map((field) => [
+            field,
+            { from: null, to: "[admin override]" },
+          ])
+        ),
+        fullRow: {
+          override: "admin_force_edit_after_rfp",
+          route: "resolved-fields",
+          fields: Object.keys(patch),
+          reason: writePolicy.lockState.reason,
+          submittedAt: writePolicy.lockState.submittedAt instanceof Date
+            ? writePolicy.lockState.submittedAt.toISOString()
+            : writePolicy.lockState.submittedAt,
+        },
+      });
+    }
     await req.commitTransaction!();
     res.json({ resolved });
   } catch (err) {
@@ -823,6 +890,7 @@ router.patch("/:id/resolved-fields", async (req, res, next) => {
 // GET /api/deals/:id/scoping-intake/readiness — evaluate current readiness
 router.get("/:id/scoping-intake/readiness", async (req, res, next) => {
   try {
+    await assertDealRouteAccess(req, req.params.id);
     const readiness = await evaluateDealScopingReadiness(req.tenantDb!, req.params.id);
     await req.commitTransaction!();
     res.json({ readiness });
@@ -834,6 +902,7 @@ router.get("/:id/scoping-intake/readiness", async (req, res, next) => {
 // POST /api/deals/:id/scoping-intake/attachments/link-existing — reuse an existing deal file
 router.post("/:id/scoping-intake/attachments/link-existing", async (req, res, next) => {
   try {
+    await assertDealRouteAccess(req, req.params.id);
     const { fileId, intakeSection, intakeRequirementKey } = req.body;
 
     if (!fileId || !intakeSection || !intakeRequirementKey) {
@@ -843,7 +912,12 @@ router.post("/:id/scoping-intake/attachments/link-existing", async (req, res, ne
     const file = await linkDealFileToScopingRequirement(
       req.tenantDb!,
       req.params.id,
-      { fileId, intakeSection, intakeRequirementKey },
+      {
+        fileId,
+        intakeSection,
+        intakeRequirementKey,
+        forceEditAfterRfp: req.body?.forceEditAfterRfp === true,
+      },
       req.user!.id
     );
     const officeId = req.user!.activeOfficeId ?? req.user!.officeId;
@@ -1000,7 +1074,20 @@ router.patch("/:id", async (req, res, next) => {
   try {
     const body = { ...req.body };
     validateDealPayload(body);
+    const forceEditAfterRfp = body.forceEditAfterRfp === true;
+    delete body.forceEditAfterRfp;
     delete body.migrationMode;
+
+    const scopingBackedFields = getScopingBackedDealPatchFields(body);
+    if (scopingBackedFields.length > 0) {
+      await assertDealRouteAccess(req, req.params.id);
+    }
+    const writePolicy = scopingBackedFields.length > 0
+      ? await assertDealScopingWriteAllowed(req.tenantDb!, req.params.id, {
+          role: req.user!.role,
+          forceEditAfterRfp,
+        })
+      : null;
 
     const priorDeal =
       body.proposalStatus === "revision_requested"
@@ -1020,6 +1107,29 @@ router.patch("/:id", async (req, res, next) => {
       req.user!.id,
       req.user!.activeOfficeId,
     );
+    if (writePolicy?.adminOverride) {
+      await writeAuditLog(req.tenantDb!, {
+        tableName: "deal_scoping_intake",
+        recordId: req.params.id,
+        action: "update",
+        changedBy: req.user!.id,
+        changes: Object.fromEntries(
+          scopingBackedFields.map((field) => [
+            field,
+            { from: null, to: "[admin override]" },
+          ])
+        ),
+        fullRow: {
+          override: "admin_force_edit_after_rfp",
+          route: "deals",
+          fields: scopingBackedFields,
+          reason: writePolicy.lockState.reason,
+          submittedAt: writePolicy.lockState.submittedAt instanceof Date
+            ? writePolicy.lockState.submittedAt.toISOString()
+            : writePolicy.lockState.submittedAt,
+        },
+      });
+    }
 
     if (body.proposalStatus === "revision_requested") {
       const revisionRouting = await routeRevisionToEstimating(
@@ -1664,6 +1774,7 @@ router.post("/:id/stage/preflight", async (req, res, next) => {
 // POST /api/deals/:id/service-handoff/activate — activate service workflow once scoping is ready
 router.post("/:id/service-handoff/activate", async (req, res, next) => {
   try {
+    await assertDealRouteAccess(req, req.params.id);
     const result = await activateServiceHandoff(req.tenantDb!, {
       dealId: req.params.id,
       userId: req.user!.id,

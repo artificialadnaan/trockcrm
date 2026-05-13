@@ -20,11 +20,18 @@ const pipelineMocks = vi.hoisted(() => ({
   getActiveProjectTypes: vi.fn(),
 }));
 
+const auditMocks = vi.hoisted(() => ({
+  writeAuditLog: vi.fn(),
+}));
+
 vi.mock("@trock-crm/shared/schema", async () => import("../../../../shared/src/schema/index.js"));
 vi.mock("../../../src/modules/pipeline/service.js", () => ({
   getStageById: pipelineMocks.getStageById,
   getStageBySlug: pipelineMocks.getStageBySlug,
   getActiveProjectTypes: pipelineMocks.getActiveProjectTypes,
+}));
+vi.mock("../../../src/lib/audit-log.js", () => ({
+  writeAuditLog: auditMocks.writeAuditLog,
 }));
 
 const migrationPath = resolve(
@@ -86,6 +93,16 @@ interface FakeDealRow {
   description: string | null;
   projectTypeId: string | null;
   assignedRepId: string;
+  rfpApprovalRequestedAt?: Date | null;
+  rfpApprovalStatus?: string | null;
+  bidBoardLinkedAt?: Date | null;
+  bidBoardProjectNumber?: string | null;
+  bidBoardStageSlug?: string | null;
+  isBidBoardOwned?: boolean;
+  isReadOnlyMirror?: boolean;
+  readOnlySyncedAt?: Date | null;
+  bidBoardStageEnteredAt?: Date | null;
+  bidBoardMirrorSourceEnteredAt?: Date | null;
 }
 
 interface FakeUserRow {
@@ -345,6 +362,7 @@ describe("Scoping Service Shared Contract", () => {
 
 describe("Scoping Service", () => {
   beforeEach(() => {
+    auditMocks.writeAuditLog.mockReset();
     pipelineMocks.getStageBySlug.mockResolvedValue({
       id: "stage-opportunity",
       slug: "opportunity",
@@ -354,6 +372,262 @@ describe("Scoping Service", () => {
     pipelineMocks.getActiveProjectTypes.mockResolvedValue([
       { id: "project-type-1", name: "Roofing", slug: "roofing", code: "3" },
     ]);
+  });
+
+  it("loads an existing submitted scope for read-only viewing after RFP submission", async () => {
+    pipelineMocks.getStageById.mockResolvedValue({
+      id: "stage-estimating",
+      slug: "estimate_in_progress",
+      workflowFamily: "standard_deal",
+      displayOrder: 3,
+    });
+
+    const tenantDb = createFakeTenantDb({
+      deals: [
+        {
+          id: "deal-1",
+          name: "Submitted Scope Deal",
+          stageId: "stage-estimating",
+          workflowRoute: "normal",
+          expectedCloseDate: null,
+          propertyAddress: "123 Scope Way",
+          propertyCity: "Dallas",
+          propertyState: "TX",
+          propertyZip: "75201",
+          description: "Submitted exterior scope",
+          projectTypeId: "project-type-1",
+          assignedRepId: "rep-1",
+          rfpApprovalRequestedAt: new Date("2026-05-12T12:00:00.000Z"),
+          rfpApprovalStatus: "pending_outbox",
+        },
+      ],
+      dealScopingIntake: [
+        {
+          id: "intake-1",
+          dealId: "deal-1",
+          officeId: "office-1",
+          workflowRouteSnapshot: "normal",
+          status: "activated",
+          projectTypeId: "project-type-1",
+          sectionData: {
+            scopeSummary: { summary: "Submitted exterior scope" },
+          },
+          completionState: {},
+          readinessErrors: {},
+          firstReadyAt: new Date("2026-05-12T11:00:00.000Z"),
+          activatedAt: new Date("2026-05-12T12:00:00.000Z"),
+          lastAutosavedAt: new Date("2026-05-12T12:00:00.000Z"),
+          createdBy: "user-1",
+          lastEditedBy: "user-1",
+          createdAt: new Date("2026-05-12T11:00:00.000Z"),
+          updatedAt: new Date("2026-05-12T12:00:00.000Z"),
+        },
+      ],
+    });
+
+    const result = await getOrCreateDealScopingIntake(tenantDb as never, "deal-1", "user-1");
+
+    expect(result.intake.sectionData).toMatchObject({
+      scopeSummary: { summary: "Submitted exterior scope" },
+    });
+    expect(result.readiness.status).toBe("activated");
+  });
+
+  it("returns a read-only seeded snapshot for locked deals that do not yet have an intake row", async () => {
+    pipelineMocks.getStageById.mockResolvedValue({
+      id: "stage-opportunity",
+      slug: "opportunity",
+      workflowFamily: "standard_deal",
+      displayOrder: 1,
+    });
+
+    const tenantDb = createFakeTenantDb({
+      deals: [
+        {
+          id: "deal-1",
+          name: "Submitted Scope Deal",
+          stageId: "stage-opportunity",
+          workflowRoute: "normal",
+          expectedCloseDate: null,
+          propertyAddress: "123 Scope Way",
+          propertyCity: "Dallas",
+          propertyState: "TX",
+          propertyZip: "75201",
+          description: "Submitted exterior scope",
+          projectTypeId: "project-type-1",
+          assignedRepId: "rep-1",
+          rfpApprovalRequestedAt: new Date("2026-05-12T12:00:00.000Z"),
+          rfpApprovalStatus: "pending_outbox",
+        },
+      ],
+    });
+
+    const result = await getOrCreateDealScopingIntake(tenantDb as never, "deal-1", "user-1");
+
+    expect(result.intake.id).toBe("readonly-deal-1");
+    expect(result.intake.sectionData).toMatchObject({
+      scopeSummary: { summary: "Submitted exterior scope" },
+    });
+    expect(tenantDb.state.dealScopingIntake).toHaveLength(0);
+  });
+
+  it("does not persist readiness refreshes while a submitted scope is locked", async () => {
+    pipelineMocks.getStageById.mockResolvedValue({
+      id: "stage-opportunity",
+      slug: "opportunity",
+      workflowFamily: "standard_deal",
+      displayOrder: 1,
+    });
+    const originalUpdatedAt = new Date("2026-05-12T11:00:00.000Z");
+
+    const tenantDb = createFakeTenantDb({
+      deals: [
+        {
+          id: "deal-1",
+          name: "Submitted Scope Deal",
+          stageId: "stage-opportunity",
+          workflowRoute: "normal",
+          expectedCloseDate: null,
+          propertyAddress: "123 Scope Way",
+          propertyCity: "Dallas",
+          propertyState: "TX",
+          propertyZip: "75201",
+          description: "Submitted exterior scope",
+          projectTypeId: "project-type-1",
+          assignedRepId: "rep-1",
+          rfpApprovalRequestedAt: new Date("2026-05-12T12:00:00.000Z"),
+          rfpApprovalStatus: "pending_outbox",
+        },
+      ],
+      dealScopingIntake: [
+        {
+          id: "intake-1",
+          dealId: "deal-1",
+          officeId: "office-1",
+          workflowRouteSnapshot: "normal",
+          status: "draft",
+          projectTypeId: "project-type-1",
+          sectionData: { scopeSummary: { summary: "Submitted exterior scope" } },
+          completionState: {},
+          readinessErrors: {},
+          firstReadyAt: null,
+          activatedAt: null,
+          lastAutosavedAt: originalUpdatedAt,
+          createdBy: "user-1",
+          lastEditedBy: "user-1",
+          createdAt: originalUpdatedAt,
+          updatedAt: originalUpdatedAt,
+        },
+      ],
+    });
+
+    await evaluateDealScopingReadiness(tenantDb as never, "deal-1");
+
+    expect(tenantDb.state.dealScopingIntake[0]?.updatedAt).toBe(originalUpdatedAt);
+    expect(tenantDb.state.dealScopingIntake[0]?.lastAutosavedAt).toBe(originalUpdatedAt);
+  });
+
+  it("rejects non-admin scope writes after RFP submission", async () => {
+    pipelineMocks.getStageById.mockResolvedValue({
+      id: "stage-opportunity",
+      slug: "opportunity",
+      workflowFamily: "standard_deal",
+      displayOrder: 1,
+    });
+
+    const tenantDb = createFakeTenantDb({
+      deals: [
+        {
+          id: "deal-1",
+          name: "Submitted Scope Deal",
+          stageId: "stage-opportunity",
+          workflowRoute: "normal",
+          expectedCloseDate: null,
+          propertyAddress: "123 Scope Way",
+          propertyCity: "Dallas",
+          propertyState: "TX",
+          propertyZip: "75201",
+          description: "Submitted exterior scope",
+          projectTypeId: "project-type-1",
+          assignedRepId: "rep-1",
+          rfpApprovalRequestedAt: new Date("2026-05-12T12:00:00.000Z"),
+          rfpApprovalStatus: "pending_outbox",
+        },
+      ],
+      users: [{ id: "user-1", officeId: "office-1", role: "rep" }],
+    });
+
+    await expect(
+      upsertDealScopingIntake(
+        tenantDb as never,
+        "deal-1",
+        {
+          scopeSummary: { summary: "Changed after RFP" },
+        },
+        "user-1"
+      )
+    ).rejects.toMatchObject<AppError>({
+      statusCode: 403,
+      code: "SCOPE_READ_ONLY_AFTER_RFP",
+      message: "Scope is read-only after RFP submission",
+    });
+
+    expect(tenantDb.state.deals[0]?.description).toBe("Submitted exterior scope");
+  });
+
+  it("allows explicit admin override edits after RFP submission and writes an audit row", async () => {
+    pipelineMocks.getStageById.mockResolvedValue({
+      id: "stage-opportunity",
+      slug: "opportunity",
+      workflowFamily: "standard_deal",
+      displayOrder: 1,
+    });
+
+    const tenantDb = createFakeTenantDb({
+      deals: [
+        {
+          id: "deal-1",
+          name: "Submitted Scope Deal",
+          stageId: "stage-opportunity",
+          workflowRoute: "normal",
+          expectedCloseDate: null,
+          propertyAddress: "123 Scope Way",
+          propertyCity: "Dallas",
+          propertyState: "TX",
+          propertyZip: "75201",
+          description: "Submitted exterior scope",
+          projectTypeId: "project-type-1",
+          assignedRepId: "rep-1",
+          rfpApprovalRequestedAt: new Date("2026-05-12T12:00:00.000Z"),
+          rfpApprovalStatus: "pending_outbox",
+        },
+      ],
+      users: [{ id: "admin-1", officeId: "office-1", role: "admin" }],
+    });
+
+    await upsertDealScopingIntake(
+      tenantDb as never,
+      "deal-1",
+      {
+        forceEditAfterRfp: true,
+        scopeSummary: { summary: "Admin correction after RFP" },
+      },
+      "admin-1"
+    );
+
+    expect(tenantDb.state.deals[0]?.description).toBe("Admin correction after RFP");
+    expect(auditMocks.writeAuditLog).toHaveBeenCalledWith(
+      tenantDb,
+      expect.objectContaining({
+        tableName: "deal_scoping_intake",
+        recordId: "deal-1",
+        action: "update",
+        changedBy: "admin-1",
+        fullRow: expect.objectContaining({
+          override: "admin_force_edit_after_rfp",
+        }),
+      })
+    );
   });
 
   it("blocks scoping reopen/edit flows for legacy downstream Bid Board-owned stages even without mirror metadata", async () => {

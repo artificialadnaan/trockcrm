@@ -36,6 +36,11 @@ const auditMocks = vi.hoisted(() => ({
   logPhotoEvent: vi.fn(),
   getPhotoAuditEvents: vi.fn(),
   writeSoftDeleteAuditLog: vi.fn(),
+  writeAuditLog: vi.fn(),
+}));
+
+const scopingMocks = vi.hoisted(() => ({
+  assertDealScopingWriteAllowed: vi.fn(),
 }));
 
 vi.mock("../../../src/modules/files/service.js", () => serviceMocks);
@@ -49,6 +54,12 @@ vi.mock("../../../src/modules/files/feed-service.js", () => ({
 vi.mock("../../../src/modules/files/audit-log-service.js", () => auditMocks);
 vi.mock("../../../src/lib/soft-delete-audit.js", () => ({
   writeSoftDeleteAuditLog: auditMocks.writeSoftDeleteAuditLog,
+}));
+vi.mock("../../../src/lib/audit-log.js", () => ({
+  writeAuditLog: auditMocks.writeAuditLog,
+}));
+vi.mock("../../../src/modules/deals/scoping-service.js", () => ({
+  assertDealScopingWriteAllowed: scopingMocks.assertDealScopingWriteAllowed,
 }));
 vi.mock("../../../src/events/bus.js", () => ({ eventBus: { emitLocal: vi.fn() } }));
 
@@ -101,6 +112,7 @@ async function invoke(method: "get" | "post" | "patch" | "delete", routePath: st
   };
   let nextError: unknown;
   let index = 0;
+  const pendingHandlers: Promise<void>[] = [];
   const next = async (err?: unknown): Promise<void> => {
     if (err) {
       nextError = err;
@@ -108,9 +120,14 @@ async function invoke(method: "get" | "post" | "patch" | "delete", routePath: st
     }
     const handler = handlers[index++];
     if (!handler) return;
-    await handler(req, res, next);
+    const pending = Promise.resolve(handler(req, res, next)).then(() => undefined);
+    pendingHandlers.push(pending);
+    await pending;
   };
   await next();
+  for (let pendingIndex = 0; pendingIndex < pendingHandlers.length; pendingIndex += 1) {
+    await pendingHandlers[pendingIndex];
+  }
   return { req, res, nextError };
 }
 
@@ -136,6 +153,7 @@ describe("photo audit route wiring", () => {
     serviceMocks.getFileById.mockResolvedValue(existingPhoto);
     serviceMocks.getFileByIdIncludingDeleted.mockResolvedValue(existingPhoto);
     serviceMocks.confirmUpload.mockResolvedValue(existingPhoto);
+    serviceMocks.uploadNewVersion.mockResolvedValue({ file: { id: "version-2", parentFileId: "photo-1" } });
     serviceMocks.getFileDownloadUrl.mockResolvedValue({ url: "https://example.test/photo.jpg", filename: "photo.jpg" });
     serviceMocks.updateFile.mockResolvedValue({ ...existingPhoto, photoCategory: "safety", description: "New caption", deletedAt: null });
     serviceMocks.updateFileAddress.mockResolvedValue({
@@ -147,6 +165,10 @@ describe("photo audit route wiring", () => {
     });
     serviceMocks.deleteFile.mockResolvedValue({ ...existingPhoto, deletedAt: new Date("2026-05-05T00:00:00.000Z") });
     auditMocks.getPhotoAuditEvents.mockResolvedValue([{ id: "audit-1", eventType: "uploaded" }]);
+    scopingMocks.assertDealScopingWriteAllowed.mockResolvedValue({
+      adminOverride: false,
+      lockState: { locked: false, reason: null, submittedAt: null },
+    });
   });
 
   it("logs an uploaded event when confirming a photo upload", async () => {
@@ -215,6 +237,198 @@ describe("photo audit route wiring", () => {
     expect(auditMocks.logPhotoEvent).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({
       eventType: "downloaded",
       metadata: { purpose: "preview" },
+    }));
+  });
+
+  it("rejects metadata changes to linked scoping files when the scope is locked", async () => {
+    serviceMocks.getFileById.mockResolvedValueOnce({
+      ...existingPhoto,
+      intakeSource: "scoping_intake",
+      intakeRequirementKey: "site_photos",
+    });
+    scopingMocks.assertDealScopingWriteAllowed.mockRejectedValueOnce(
+      Object.assign(new Error("Scope is read-only after RFP submission"), {
+        statusCode: 403,
+        code: "SCOPE_READ_ONLY_AFTER_RFP",
+      })
+    );
+
+    const { nextError } = await invoke("patch", "/:id", {
+      body: { category: "other" },
+      user: { id: "rep-1", role: "rep", officeId: "office-1", activeOfficeId: "office-1" },
+    });
+
+    expect(nextError).toMatchObject({
+      statusCode: 403,
+      code: "SCOPE_READ_ONLY_AFTER_RFP",
+    });
+    expect(serviceMocks.updateFile).not.toHaveBeenCalled();
+  });
+
+  it("audits forced admin metadata changes to linked scoping files", async () => {
+    serviceMocks.getFileById.mockResolvedValueOnce({
+      ...existingPhoto,
+      intakeSource: "scoping_intake",
+      intakeRequirementKey: "site_photos",
+    });
+    scopingMocks.assertDealScopingWriteAllowed.mockResolvedValueOnce({
+      adminOverride: true,
+      lockState: { locked: true, reason: "rfp_submission", submittedAt: new Date("2026-05-12T12:00:00.000Z") },
+    });
+
+    await invoke("patch", "/:id", {
+      body: { displayName: "Corrected name", forceEditAfterRfp: true },
+    });
+
+    expect(serviceMocks.updateFile).toHaveBeenCalled();
+    expect(auditMocks.writeAuditLog).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({
+      tableName: "deal_scoping_intake",
+      recordId: "deal-1",
+      changedBy: "user-1",
+      fullRow: expect.objectContaining({
+        override: "admin_force_edit_after_rfp",
+        route: "files",
+        action: "metadata_update",
+        fileId: "photo-1",
+      }),
+    }));
+  });
+
+  it("requires forced admin override before deleting a linked scoping file from a locked scope", async () => {
+    serviceMocks.getFileById.mockResolvedValueOnce({
+      ...existingPhoto,
+      intakeSource: "scoping_intake",
+      intakeRequirementKey: "site_photos",
+    });
+    scopingMocks.assertDealScopingWriteAllowed.mockRejectedValueOnce(
+      Object.assign(new Error("Scope is read-only after RFP submission"), {
+        statusCode: 403,
+        code: "SCOPE_READ_ONLY_AFTER_RFP",
+      })
+    );
+
+    const { nextError } = await invoke("delete", "/:id");
+
+    expect(nextError).toMatchObject({ statusCode: 403 });
+    expect(serviceMocks.deleteFile).not.toHaveBeenCalled();
+  });
+
+  it("requires forced admin override before changing linked scoping photo address metadata", async () => {
+    serviceMocks.getFileById.mockResolvedValueOnce({
+      ...existingPhoto,
+      intakeSource: "scoping_intake",
+      intakeRequirementKey: "site_photos",
+    });
+    scopingMocks.assertDealScopingWriteAllowed.mockRejectedValueOnce(
+      Object.assign(new Error("Scope is read-only after RFP submission"), {
+        statusCode: 403,
+        code: "SCOPE_READ_ONLY_AFTER_RFP",
+      })
+    );
+
+    const { nextError } = await invoke("patch", "/:id/address", {
+      body: { address: "200 Locked St", latitude: 36, longitude: -98 },
+    });
+
+    expect(nextError).toMatchObject({
+      statusCode: 403,
+      code: "SCOPE_READ_ONLY_AFTER_RFP",
+    });
+    expect(serviceMocks.updateFileAddress).not.toHaveBeenCalled();
+  });
+
+  it("audits forced admin address edits to linked scoping photos", async () => {
+    serviceMocks.getFileById.mockResolvedValueOnce({
+      ...existingPhoto,
+      intakeSource: "scoping_intake",
+      intakeRequirementKey: "site_photos",
+    });
+    scopingMocks.assertDealScopingWriteAllowed.mockResolvedValueOnce({
+      adminOverride: true,
+      lockState: { locked: true, reason: "rfp_submission", submittedAt: new Date("2026-05-12T12:00:00.000Z") },
+    });
+
+    const { nextError } = await invoke("patch", "/:id/address", {
+      body: { address: "200 Corrected St", latitude: 36, longitude: -98, forceEditAfterRfp: true },
+    });
+
+    expect(nextError).toBeUndefined();
+    expect(serviceMocks.updateFileAddress).toHaveBeenCalled();
+    expect(auditMocks.writeAuditLog).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({
+      tableName: "deal_scoping_intake",
+      recordId: "deal-1",
+      changedBy: "user-1",
+      fullRow: expect.objectContaining({
+        override: "admin_force_edit_after_rfp",
+        route: "files",
+        action: "address_update",
+        fileId: "photo-1",
+      }),
+    }));
+  });
+
+  it("requires forced admin override before adding a new version to a linked scoping file", async () => {
+    serviceMocks.getFileById.mockResolvedValueOnce({
+      ...existingPhoto,
+      intakeSource: "scoping_intake",
+      intakeRequirementKey: "site_photos",
+    });
+    scopingMocks.assertDealScopingWriteAllowed.mockRejectedValueOnce(
+      Object.assign(new Error("Scope is read-only after RFP submission"), {
+        statusCode: 403,
+        code: "SCOPE_READ_ONLY_AFTER_RFP",
+      })
+    );
+
+    const { nextError } = await invoke("post", "/:id/new-version", {
+      body: {
+        originalFilename: "updated.jpg",
+        mimeType: "image/jpeg",
+        fileSizeBytes: 4096,
+        category: "photo",
+      },
+    });
+
+    expect(nextError).toMatchObject({
+      statusCode: 403,
+      code: "SCOPE_READ_ONLY_AFTER_RFP",
+    });
+    expect(serviceMocks.uploadNewVersion).not.toHaveBeenCalled();
+  });
+
+  it("audits forced admin new versions on linked scoping files", async () => {
+    serviceMocks.getFileById.mockResolvedValueOnce({
+      ...existingPhoto,
+      intakeSource: "scoping_intake",
+      intakeRequirementKey: "site_photos",
+    });
+    scopingMocks.assertDealScopingWriteAllowed.mockResolvedValueOnce({
+      adminOverride: true,
+      lockState: { locked: true, reason: "rfp_submission", submittedAt: new Date("2026-05-12T12:00:00.000Z") },
+    });
+
+    const { nextError } = await invoke("post", "/:id/new-version", {
+      body: {
+        originalFilename: "updated.jpg",
+        mimeType: "image/jpeg",
+        fileSizeBytes: 4096,
+        category: "photo",
+        forceEditAfterRfp: true,
+      },
+    });
+
+    expect(nextError).toBeUndefined();
+    expect(serviceMocks.uploadNewVersion).toHaveBeenCalled();
+    expect(auditMocks.writeAuditLog).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({
+      tableName: "deal_scoping_intake",
+      recordId: "deal-1",
+      changedBy: "user-1",
+      fullRow: expect.objectContaining({
+        override: "admin_force_edit_after_rfp",
+        route: "files",
+        action: "new_version",
+        fileId: "photo-1",
+      }),
     }));
   });
 

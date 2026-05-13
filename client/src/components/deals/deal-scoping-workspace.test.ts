@@ -213,13 +213,20 @@ function changeTextareaValue(element: HTMLTextAreaElement, value: string) {
   element.dispatchEvent(new Event("input", { bubbles: true }));
 }
 
-async function renderWorkspace(deal: DealDetail) {
+async function renderWorkspace(
+  deal: DealDetail,
+  props: Record<string, unknown> = {}
+) {
   const container = document.createElement("div");
   document.body.appendChild(container);
   const root = createRoot(container);
 
   await act(async () => {
-    root.render(React.createElement(DealScopingWorkspace, { deal, onDealUpdated: vi.fn() }));
+    root.render(React.createElement(DealScopingWorkspace as React.ComponentType<Record<string, unknown>>, {
+      deal,
+      onDealUpdated: vi.fn(),
+      ...props,
+    }));
   });
 
   await act(async () => {
@@ -267,7 +274,7 @@ async function renderWorkspaceHarness(deal: DealDetail) {
 }
 
 beforeEach(() => {
-  vi.clearAllMocks();
+  vi.resetAllMocks();
   mocks.useAuth.mockReturnValue({ user: { id: "user-1", role: "admin" } });
   mocks.useFiles.mockReturnValue({ files: [], refetch: vi.fn() });
   mocks.useProjectTypes.mockReturnValue({
@@ -394,6 +401,71 @@ describe("DealScopingWorkspace lineage routing helpers", () => {
 });
 
 describe("DealScopingWorkspace load failures", () => {
+  it("renders submitted scope values read-only until an admin explicitly force-edits", async () => {
+    mocks.getDealScopingIntake.mockResolvedValueOnce(makeScopingResponse({
+      intake: {
+        status: "activated",
+        activatedAt: "2026-05-12T12:00:00.000Z",
+        sectionData: {
+          scopeSummary: { summary: "Submitted exterior scope" },
+          opportunity: { estimatorConsultationNotes: "Submitted notes" },
+        },
+      },
+      resolved: { description: "Submitted exterior scope" },
+      readiness: { status: "activated" },
+    }));
+    const confirmSpy = vi.spyOn(window, "confirm").mockReturnValueOnce(true);
+
+    const { container, cleanup } = await renderWorkspace(
+      makeDeal({
+        sourceLeadId: null,
+        projectTypeId: "project-type-1",
+        rfpApprovalRequestedAt: "2026-05-12T12:00:00.000Z",
+      } as Partial<DealDetail>),
+      {
+        mode: "readonly",
+        readOnlySubmittedAt: "2026-05-12T12:00:00.000Z",
+        canForceEdit: true,
+      }
+    );
+
+    try {
+      await vi.waitFor(() => expect(container.textContent).toContain("Submitted exterior scope"));
+      expect(container.textContent).toContain("This scope was submitted to Bid Board");
+      expect(container.textContent).toContain("Read-only");
+
+      const summary = container.querySelector<HTMLTextAreaElement>("#scopeSummary");
+      const notes = container.querySelector<HTMLTextAreaElement>("#estimatorConsultationNotes");
+      const uploadInputs = container.querySelectorAll<HTMLInputElement>("input[type='file']");
+      expect(summary?.disabled).toBe(true);
+      expect(notes?.disabled).toBe(true);
+      uploadInputs.forEach((input) => expect(input.disabled).toBe(true));
+
+      await act(async () => {
+        changeTextareaValue(summary!, "should not autosave");
+        await new Promise((resolve) => window.setTimeout(resolve, 500));
+      });
+      expect(mocks.patchDealScopingIntake).not.toHaveBeenCalled();
+
+      const forceEditButton = Array.from(container.querySelectorAll("button")).find(
+        (button) => button.textContent?.includes("Force edit")
+      );
+      expect(forceEditButton).toBeDefined();
+
+      await act(async () => {
+        forceEditButton!.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+      });
+
+      expect(confirmSpy).toHaveBeenCalledWith(
+        "This scope was submitted to Bid Board. Editing now may cause inconsistency. Continue?"
+      );
+      expect(container.querySelector<HTMLTextAreaElement>("#scopeSummary")?.disabled).toBe(false);
+    } finally {
+      confirmSpy.mockRestore();
+      cleanup();
+    }
+  });
+
   it("disables the scope form and prevents saves when the initial scoping intake request fails", async () => {
     mocks.getDealScopingIntake.mockRejectedValueOnce(
       new Error("projectType cannot be cleared after Opportunity")

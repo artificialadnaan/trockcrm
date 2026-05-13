@@ -3,8 +3,9 @@ import type { NodePgDatabase } from "drizzle-orm/node-postgres";
 import { dealScopingIntake, dealTeamMembers, deals, files, tasks, users } from "@trock-crm/shared/schema";
 import type * as schema from "@trock-crm/shared/schema";
 import type { DealScopingIntakeStatus, WorkflowRoute } from "@trock-crm/shared/types";
+import { writeAuditLog } from "../../lib/audit-log.js";
 import { AppError } from "../../middleware/error-handler.js";
-import { getStageById } from "../pipeline/service.js";
+import { getStageById, getStageBySlug } from "../pipeline/service.js";
 import { applyProjectTypeChange, BID_BOARD_STAGE_READ_ONLY_MESSAGE } from "./service.js";
 import { inferDealBidBoardOwnership } from "./workflow-backfill.js";
 import { evaluateScopingReadiness, type DealScopingReadinessSnapshot, type DealScopingSectionData } from "./scoping-rules.js";
@@ -18,6 +19,7 @@ type DealScopingIntakeRow = typeof dealScopingIntake.$inferSelect;
 export type DealScopingPatch = {
   projectTypeId?: string | null;
   sectionData?: DealScopingSectionData;
+  forceEditAfterRfp?: boolean;
 } & Record<string, unknown>;
 
 export interface DealScopingServiceResult {
@@ -31,6 +33,7 @@ export interface LinkScopingFileInput {
   fileId: string;
   intakeSection: string;
   intakeRequirementKey: string;
+  forceEditAfterRfp?: boolean;
 }
 
 export interface DealRevisionRoutingResult {
@@ -53,6 +56,10 @@ export interface DealScopingAttachmentRequirement {
 
 export interface DealScopingReadinessResult extends DealScopingReadinessSnapshot {
   attachmentRequirements: DealScopingAttachmentRequirement[];
+}
+
+interface EvaluateDealScopingReadinessOptions {
+  persist?: boolean;
 }
 
 type LinkedScopingAttachmentRow = {
@@ -314,6 +321,75 @@ async function assertDealScopingEditable(deal: DealRow) {
   }
 }
 
+async function resolveDealScopeLockState(deal: DealRow) {
+  const currentStage = await getStageById(deal.stageId);
+  const opportunityStage =
+    currentStage?.workflowFamily === "standard_deal" ||
+    currentStage?.workflowFamily === "service_deal"
+      ? await getStageBySlug("opportunity", currentStage.workflowFamily)
+      : null;
+  const isPastOpportunity =
+    Boolean(currentStage && opportunityStage && currentStage.displayOrder > opportunityStage.displayOrder);
+  const hasRfpSubmission =
+    deal.rfpApprovalRequestedAt != null || Boolean(deal.rfpApprovalStatus);
+  const hasBidBoardHandoff =
+    deal.bidBoardLinkedAt != null ||
+    Boolean(deal.bidBoardProjectNumber) ||
+    deal.isBidBoardOwned ||
+    deal.isReadOnlyMirror ||
+    deal.readOnlySyncedAt != null ||
+    deal.bidBoardStageEnteredAt != null ||
+    deal.bidBoardMirrorSourceEnteredAt != null;
+
+  return {
+    locked: hasRfpSubmission || hasBidBoardHandoff || isPastOpportunity,
+    submittedAt: deal.rfpApprovalRequestedAt ?? deal.bidBoardLinkedAt ?? deal.readOnlySyncedAt ?? null,
+    reason: hasRfpSubmission
+      ? "rfp_submission"
+      : hasBidBoardHandoff
+        ? "bid_board_handoff"
+        : isPastOpportunity
+          ? "past_opportunity"
+          : null,
+  };
+}
+
+async function assertDealScopingWriteAllowedForDeal(
+  deal: DealRow,
+  input: {
+    role?: string | null;
+    forceEditAfterRfp?: boolean;
+  }
+) {
+  const lockState = await resolveDealScopeLockState(deal);
+  if (lockState.locked) {
+    if (input.role === "admin" && input.forceEditAfterRfp === true) {
+      return { adminOverride: true, lockState };
+    }
+
+    throw new AppError(
+      403,
+      "Scope is read-only after RFP submission",
+      "SCOPE_READ_ONLY_AFTER_RFP"
+    );
+  }
+
+  await assertDealScopingEditable(deal);
+  return { adminOverride: false, lockState };
+}
+
+export async function assertDealScopingWriteAllowed(
+  tenantDb: TenantDb,
+  dealId: string,
+  input: {
+    role?: string | null;
+    forceEditAfterRfp?: boolean;
+  }
+) {
+  const deal = await getDealOrThrow(tenantDb, dealId);
+  return assertDealScopingWriteAllowedForDeal(deal, input);
+}
+
 async function getUserOrThrow(tenantDb: TenantDb, userId: string) {
   const [user] = await tenantDb.select().from(users).where(eq(users.id, userId)).limit(1);
 
@@ -334,6 +410,57 @@ async function getExistingIntake(tenantDb: TenantDb, dealId: string) {
   return intake ?? null;
 }
 
+async function buildReadOnlyScopingIntakeSnapshot(input: {
+  tenantDb: TenantDb;
+  resolvedDeal: ResolvedDealView;
+  userId: string;
+}): Promise<DealScopingServiceResult> {
+  const [user, attachments] = await Promise.all([
+    getUserOrThrow(input.tenantDb, input.userId),
+    listLinkedScopingAttachments(input.tenantDb, input.resolvedDeal.deal.id),
+  ]);
+  const sectionData = buildSeedSectionDataFromResolvedDeal(input.resolvedDeal);
+  const projectTypeId = input.resolvedDeal.resolved.projectTypeId ?? null;
+  const workflowRoute = resolveScopingWorkflowRoute(input.resolvedDeal.resolved.workflowRoute);
+  const readiness = buildScopingReadiness({
+    currentStatus: "draft",
+    workflowRoute,
+    projectTypeId,
+    sectionData,
+    attachments,
+  });
+  const timestamp =
+    input.resolvedDeal.deal.rfpApprovalRequestedAt ??
+    input.resolvedDeal.deal.bidBoardLinkedAt ??
+    input.resolvedDeal.deal.readOnlySyncedAt ??
+    input.resolvedDeal.deal.updatedAt ??
+    new Date();
+
+  return {
+    intake: {
+      id: `readonly-${input.resolvedDeal.deal.id}`,
+      dealId: input.resolvedDeal.deal.id,
+      officeId: user.officeId,
+      workflowRouteSnapshot: workflowRoute,
+      status: readiness.status,
+      projectTypeId,
+      sectionData,
+      completionState: readiness.completionState,
+      readinessErrors: readiness.errors,
+      firstReadyAt: null,
+      activatedAt: null,
+      lastAutosavedAt: timestamp,
+      createdBy: input.userId,
+      lastEditedBy: input.userId,
+      createdAt: timestamp,
+      updatedAt: timestamp,
+    } as DealScopingIntakeRow,
+    readiness,
+    previousStatus: null,
+    resolved: input.resolvedDeal.resolved,
+  };
+}
+
 export async function getOrCreateDealScopingIntake(
   tenantDb: TenantDb,
   dealId: string,
@@ -343,8 +470,6 @@ export async function getOrCreateDealScopingIntake(
 
   if (existingIntake) {
     const resolvedDeal = await getResolvedDeal(tenantDb, dealId);
-    const deal = resolvedDeal.deal;
-    await assertDealScopingEditable(deal);
     const readiness = await evaluateDealScopingReadiness(tenantDb, dealId);
     const refreshedIntake = (await getExistingIntake(tenantDb, dealId)) ?? existingIntake;
 
@@ -358,7 +483,11 @@ export async function getOrCreateDealScopingIntake(
 
   const resolvedDeal = await getResolvedDeal(tenantDb, dealId);
   const deal = resolvedDeal.deal;
-  await assertDealScopingEditable(deal);
+  const lockState = await resolveDealScopeLockState(deal);
+  if (lockState.locked) {
+    return buildReadOnlyScopingIntakeSnapshot({ tenantDb, resolvedDeal, userId });
+  }
+  await assertDealScopingWriteAllowedForDeal(deal, { role: "system" });
   const initialPatch: DealScopingPatch = {
     sectionData: buildSeedSectionDataFromResolvedDeal(resolvedDeal),
   };
@@ -506,9 +635,14 @@ export async function linkDealFileToScopingRequirement(
   input: LinkScopingFileInput,
   userId: string
 ) {
-  const deal = await getDealOrThrow(tenantDb, dealId);
-  await assertDealScopingEditable(deal);
-  await getUserOrThrow(tenantDb, userId);
+  const [deal, user] = await Promise.all([
+    getDealOrThrow(tenantDb, dealId),
+    getUserOrThrow(tenantDb, userId),
+  ]);
+  const writePolicy = await assertDealScopingWriteAllowedForDeal(deal, {
+    role: user.role,
+    forceEditAfterRfp: input.forceEditAfterRfp,
+  });
 
   const [file] = await tenantDb
     .select()
@@ -537,6 +671,27 @@ export async function linkDealFileToScopingRequirement(
 
   if (!updatedFile) {
     throw new AppError(500, "Failed to update file scoping metadata");
+  }
+
+  if (writePolicy.adminOverride) {
+    await writeAuditLog(tenantDb, {
+      tableName: "deal_scoping_intake",
+      recordId: dealId,
+      action: "update",
+      changedBy: userId,
+      changes: {
+        linkedFileId: {
+          from: null,
+          to: updatedFile.id,
+        },
+      },
+      fullRow: {
+        override: "admin_force_edit_after_rfp",
+        reason: writePolicy.lockState.reason,
+        fileId: updatedFile.id,
+        intakeRequirementKey: input.intakeRequirementKey,
+      },
+    });
   }
 
   return updatedFile;
@@ -594,11 +749,11 @@ async function persistReadinessIfNeeded(
 
 export async function evaluateDealScopingReadiness(
   tenantDb: TenantDb,
-  dealId: string
+  dealId: string,
+  options: EvaluateDealScopingReadinessOptions = {}
 ): Promise<DealScopingReadinessResult> {
   const resolvedDeal = await getResolvedDeal(tenantDb, dealId);
   const deal = resolvedDeal.deal;
-  await assertDealScopingEditable(deal);
   const existingIntake = await getExistingIntake(tenantDb, dealId);
   const attachments = await listLinkedScopingAttachments(tenantDb, dealId);
   const sectionData = buildBaseSectionData(existingIntake, resolvedDeal);
@@ -612,14 +767,16 @@ export async function evaluateDealScopingReadiness(
     attachments,
   });
 
-  if (existingIntake) {
-      const user = await getUserOrThrow(tenantDb, existingIntake.lastEditedBy);
-      await persistReadinessIfNeeded(
-        tenantDb,
-        existingIntake,
+  const lockState = await resolveDealScopeLockState(deal);
+  const shouldPersist = options.persist !== false && !lockState.locked;
+  if (existingIntake && shouldPersist) {
+    const user = await getUserOrThrow(tenantDb, existingIntake.lastEditedBy);
+    await persistReadinessIfNeeded(
+      tenantDb,
+      existingIntake,
       createIntakePayload({
         existingIntake,
-          deal,
+        deal,
         userId: existingIntake.lastEditedBy,
         editorOfficeId: user.officeId,
         route: workflowRoute,
@@ -638,7 +795,7 @@ export async function activateDealScopingIntake(
   dealId: string
 ): Promise<DealScopingServiceResult> {
   const deal = await getDealOrThrow(tenantDb, dealId);
-  await assertDealScopingEditable(deal);
+  await assertDealScopingWriteAllowedForDeal(deal, { role: "system" });
   const existingIntake = await getExistingIntake(tenantDb, dealId);
 
   if (!existingIntake) {
@@ -683,7 +840,9 @@ export async function upsertDealScopingIntake(
   userId: string
 ): Promise<DealScopingServiceResult> {
   const sanitizedPatch = { ...patch };
+  const forceEditAfterRfp = sanitizedPatch.forceEditAfterRfp === true;
   delete sanitizedPatch.workflowRoute;
+  delete sanitizedPatch.forceEditAfterRfp;
 
   const [resolvedDeal, editor, existingIntake] = await Promise.all([
     getResolvedDeal(tenantDb, dealId),
@@ -691,7 +850,10 @@ export async function upsertDealScopingIntake(
     getExistingIntake(tenantDb, dealId),
   ]);
   const deal = resolvedDeal.deal;
-  await assertDealScopingEditable(deal);
+  const writePolicy = await assertDealScopingWriteAllowedForDeal(deal, {
+    role: editor.role,
+    forceEditAfterRfp,
+  });
   const baseSectionData = buildBaseSectionData(existingIntake, resolvedDeal);
   const sectionPatch = stripLineageOwnedScopingFields(
     extractSectionPatch(sanitizedPatch),
@@ -769,6 +931,28 @@ export async function upsertDealScopingIntake(
 
   if (!savedIntake) {
     throw new AppError(500, "Failed to save deal scoping intake");
+  }
+
+  if (writePolicy.adminOverride) {
+    await writeAuditLog(tenantDb, {
+      tableName: "deal_scoping_intake",
+      recordId: dealId,
+      action: "update",
+      changedBy: userId,
+      changes: {
+        readOnlyOverride: {
+          from: false,
+          to: true,
+        },
+      },
+      fullRow: {
+        override: "admin_force_edit_after_rfp",
+        reason: writePolicy.lockState.reason,
+        submittedAt: writePolicy.lockState.submittedAt instanceof Date
+          ? writePolicy.lockState.submittedAt.toISOString()
+          : writePolicy.lockState.submittedAt,
+      },
+    });
   }
 
   return {
