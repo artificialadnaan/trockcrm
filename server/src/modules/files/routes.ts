@@ -14,6 +14,7 @@ import {
   getFileStats,
   getFileById,
   getFileByIdIncludingDeleted,
+  getPendingUploadMetadata,
   getFileDownloadUrl,
   resolveFileDownloadAuditPurpose,
   shouldLogFileDownloadEvent,
@@ -48,17 +49,13 @@ function isPhotoRecord(file: { category?: string | null }) {
   return file.category === "photo";
 }
 
-function isScopingLinkedFile(file: { intakeSource?: string | null; intakeRequirementKey?: string | null; dealId?: string | null }) {
-  return file.intakeSource === "scoping_intake" && Boolean(file.intakeRequirementKey) && Boolean(file.dealId);
-}
-
 function parseForceEditAfterRfp(req: express.Request) {
   return req.body?.forceEditAfterRfp === true ||
     req.query.forceEditAfterRfp === "true" ||
     req.query.forceEditAfterRfp === "1";
 }
 
-async function assertScopingLinkedFileMutationAllowed(
+async function assertDealLinkedFileMutationAllowed(
   req: express.Request,
   file: {
     id: string;
@@ -68,7 +65,7 @@ async function assertScopingLinkedFileMutationAllowed(
   },
   action: string
 ) {
-  if (!isScopingLinkedFile(file) || !file.dealId) {
+  if (!file.dealId) {
     return;
   }
 
@@ -95,6 +92,43 @@ async function assertScopingLinkedFileMutationAllowed(
         action,
         fileId: file.id,
         intakeRequirementKey: file.intakeRequirementKey,
+        reason: writePolicy.lockState.reason,
+      },
+    });
+  }
+}
+
+async function assertDealFileUploadAllowed(
+  req: express.Request,
+  dealId: string | null | undefined,
+  action: string,
+  auditOverride = true
+) {
+  if (!dealId) {
+    return;
+  }
+
+  const writePolicy = await assertDealScopingWriteAllowed(req.tenantDb!, dealId, {
+    role: req.user!.role,
+    forceEditAfterRfp: parseForceEditAfterRfp(req),
+  });
+
+  if (auditOverride && writePolicy.adminOverride) {
+    await writeAuditLog(req.tenantDb!, {
+      tableName: "deal_scoping_intake",
+      recordId: dealId,
+      action: "update",
+      changedBy: req.user!.id,
+      changes: {
+        linkedFileMutation: {
+          from: null,
+          to: action,
+        },
+      },
+      fullRow: {
+        override: "admin_force_edit_after_rfp",
+        route: "files",
+        action,
         reason: writePolicy.lockState.reason,
       },
     });
@@ -152,6 +186,7 @@ router.post("/upload-url", async (req, res, next) => {
     if (dealId) {
       const deal = await getDealById(req.tenantDb!, dealId, req.user!.role, req.user!.id);
       if (!deal) throw new AppError(404, "Deal not found or access denied.");
+      await assertDealFileUploadAllowed(req, dealId, "upload_request", false);
     }
     if (leadId) {
       const lead = await getLeadById(req.tenantDb!, leadId, req.user!.role, req.user!.id);
@@ -217,6 +252,7 @@ router.post("/upload-direct", express.raw({ type: "*/*", limit: "50mb" }), async
     if (dealId) {
       const deal = await getDealById(req.tenantDb!, dealId, req.user!.role, req.user!.id);
       if (!deal) throw new AppError(404, "Deal not found or access denied.");
+      await assertDealFileUploadAllowed(req, dealId, "direct_upload");
     }
     if (leadId) {
       const lead = await getLeadById(req.tenantDb!, leadId, req.user!.role, req.user!.id);
@@ -278,6 +314,9 @@ router.post("/confirm-upload", async (req, res, next) => {
       throw new AppError(400, "uploadToken is required.");
     }
 
+    const pendingUpload = getPendingUploadMetadata(uploadToken);
+    await assertDealFileUploadAllowed(req, pendingUpload?.dealId, "confirm_upload");
+
     if (addressSource !== undefined && addressSource !== "exif" && addressSource !== "live_gps") {
       throw new AppError(400, "addressSource must be either exif or live_gps.");
     }
@@ -329,7 +368,7 @@ router.patch("/:id/address", async (req, res, next) => {
     } else if (req.user.role === "rep" && existing.uploadedBy !== req.user.id) {
       throw new AppError(403, "You can only modify files you uploaded");
     }
-    await assertScopingLinkedFileMutationAllowed(req, existing, "address_update");
+    await assertDealLinkedFileMutationAllowed(req, existing, "address_update");
 
     const { address, latitude, longitude } = req.body;
     if (!address || typeof address !== "string") {
@@ -382,7 +421,7 @@ router.post("/:id/new-version", async (req, res, next) => {
       const deal = await getDealById(req.tenantDb!, parentFile.dealId, req.user!.role, req.user!.id);
       if (!deal) throw new AppError(403, "Access denied: you do not have access to this deal's files.");
     }
-    await assertScopingLinkedFileMutationAllowed(req, parentFile, "new_version");
+    await assertDealLinkedFileMutationAllowed(req, parentFile, "new_version");
 
     // Fix 5: parentFileId comes from the URL param; version is computed server-side.
     // The client does NOT supply parentFileId or version.
@@ -741,7 +780,7 @@ router.patch("/:id", async (req, res, next) => {
       // Fix 8: Non-deal files (e.g. contact files) — reps can only modify files they uploaded
       throw new AppError(403, "You can only modify files you uploaded");
     }
-    await assertScopingLinkedFileMutationAllowed(req, existing, isRestore ? "restore" : "metadata_update");
+    await assertDealLinkedFileMutationAllowed(req, existing, isRestore ? "restore" : "metadata_update");
 
     const { displayName, description, notes, tags, category, subcategory, folderPath, photoCategory } = req.body;
     const photoCategoryValues = ["before", "after", "progress", "site_visit", "damage", "safety", "delivery", "other"];
@@ -817,7 +856,7 @@ router.delete("/:id", requireAdmin, async (req, res, next) => {
     const fileId = req.params.id as string;
     const existing = await getFileById(req.tenantDb!, fileId);
     if (!existing) throw new AppError(404, "File not found");
-    await assertScopingLinkedFileMutationAllowed(req, existing, "delete");
+    await assertDealLinkedFileMutationAllowed(req, existing, "delete");
 
     const deletedFile = await deleteFile(req.tenantDb!, fileId, req.user!.role, req.user!.id);
     if (deletedFile) {

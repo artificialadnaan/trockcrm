@@ -8,6 +8,7 @@ const serviceMocks = vi.hoisted(() => ({
   getFileStats: vi.fn(),
   getFileById: vi.fn(),
   getFileByIdIncludingDeleted: vi.fn(),
+  getPendingUploadMetadata: vi.fn(),
   getFileDownloadUrl: vi.fn(),
   updateFile: vi.fn(),
   updateFileAddress: vi.fn(),
@@ -150,8 +151,19 @@ const existingPhoto = {
 describe("photo audit route wiring", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    scopingMocks.assertDealScopingWriteAllowed.mockReset();
     serviceMocks.getFileById.mockResolvedValue(existingPhoto);
     serviceMocks.getFileByIdIncludingDeleted.mockResolvedValue(existingPhoto);
+    serviceMocks.getPendingUploadMetadata.mockReturnValue(null);
+    serviceMocks.requestUploadUrl.mockResolvedValue({
+      uploadUrl: "https://r2.example/upload",
+      r2Key: "office/dallas/photo.jpg",
+      expiresIn: 900,
+      systemFilename: "photo.jpg",
+      displayName: "photo.jpg",
+      folderPath: "Photos",
+      uploadToken: "upload-token-1",
+    });
     serviceMocks.confirmUpload.mockResolvedValue(existingPhoto);
     serviceMocks.uploadNewVersion.mockResolvedValue({ file: { id: "version-2", parentFileId: "photo-1" } });
     serviceMocks.getFileDownloadUrl.mockResolvedValue({ url: "https://example.test/photo.jpg", filename: "photo.jpg" });
@@ -187,6 +199,132 @@ describe("photo audit route wiring", () => {
         addressSource: "exif",
         category: "damage",
         sizeBytes: 2048,
+      }),
+    }));
+  });
+
+  it("rejects upload URL requests for locked deal files without admin force edit", async () => {
+    scopingMocks.assertDealScopingWriteAllowed.mockRejectedValueOnce(
+      Object.assign(new Error("Scope is read-only after RFP submission"), {
+        statusCode: 403,
+        code: "SCOPE_READ_ONLY_AFTER_RFP",
+      })
+    );
+
+    const { nextError } = await invoke("post", "/upload-url", {
+      body: {
+        originalFilename: "scope.pdf",
+        mimeType: "application/pdf",
+        fileSizeBytes: 2048,
+        category: "other",
+        dealId: "deal-1",
+      },
+    });
+
+    expect(nextError).toMatchObject({
+      statusCode: 403,
+      code: "SCOPE_READ_ONLY_AFTER_RFP",
+    });
+    expect(scopingMocks.assertDealScopingWriteAllowed).toHaveBeenCalledWith(
+      expect.anything(),
+      "deal-1",
+      { role: "admin", forceEditAfterRfp: false }
+    );
+    expect(serviceMocks.requestUploadUrl).not.toHaveBeenCalled();
+  });
+
+  it("allows admin-forced upload URL requests for locked deal files", async () => {
+    scopingMocks.assertDealScopingWriteAllowed.mockResolvedValueOnce({
+      adminOverride: true,
+      lockState: { locked: true, reason: "rfp_submission", submittedAt: new Date("2026-05-12T12:00:00.000Z") },
+    });
+
+    const { nextError } = await invoke("post", "/upload-url", {
+      body: {
+        originalFilename: "scope.pdf",
+        mimeType: "application/pdf",
+        fileSizeBytes: 2048,
+        category: "other",
+        dealId: "deal-1",
+        forceEditAfterRfp: true,
+      },
+    });
+
+    expect(nextError).toBeUndefined();
+    expect(serviceMocks.requestUploadUrl).toHaveBeenCalled();
+    expect(auditMocks.writeAuditLog).not.toHaveBeenCalledWith(expect.anything(), expect.objectContaining({
+      fullRow: expect.objectContaining({ action: "upload_request" }),
+    }));
+  });
+
+  it("rejects direct uploads for locked deal files without admin force edit", async () => {
+    scopingMocks.assertDealScopingWriteAllowed.mockRejectedValueOnce(
+      Object.assign(new Error("Scope is read-only after RFP submission"), {
+        statusCode: 403,
+        code: "SCOPE_READ_ONLY_AFTER_RFP",
+      })
+    );
+
+    const { nextError } = await invoke("post", "/upload-direct", {
+      body: Buffer.from("file-bytes"),
+      headers: {
+        "user-agent": "vitest",
+        "x-original-filename": encodeURIComponent("scope.pdf"),
+        "content-type": "application/pdf",
+        "x-file-category": "other",
+        "x-deal-id": "deal-1",
+      },
+    });
+
+    expect(nextError).toMatchObject({
+      statusCode: 403,
+      code: "SCOPE_READ_ONLY_AFTER_RFP",
+    });
+    expect(serviceMocks.requestUploadUrl).not.toHaveBeenCalled();
+    expect(serviceMocks.confirmUpload).not.toHaveBeenCalled();
+  });
+
+  it("rejects confirming a pending locked deal upload without force edit", async () => {
+    serviceMocks.getPendingUploadMetadata.mockReturnValueOnce({ dealId: "deal-1" });
+    scopingMocks.assertDealScopingWriteAllowed.mockRejectedValueOnce(
+      Object.assign(new Error("Scope is read-only after RFP submission"), {
+        statusCode: 403,
+        code: "SCOPE_READ_ONLY_AFTER_RFP",
+      })
+    );
+
+    const { nextError } = await invoke("post", "/confirm-upload", {
+      body: { uploadToken: "upload-token-1" },
+    });
+
+    expect(nextError).toMatchObject({
+      statusCode: 403,
+      code: "SCOPE_READ_ONLY_AFTER_RFP",
+    });
+    expect(serviceMocks.confirmUpload).not.toHaveBeenCalled();
+  });
+
+  it("audits admin-forced confirmation of a pending locked deal upload", async () => {
+    serviceMocks.getPendingUploadMetadata.mockReturnValueOnce({ dealId: "deal-1" });
+    scopingMocks.assertDealScopingWriteAllowed.mockResolvedValueOnce({
+      adminOverride: true,
+      lockState: { locked: true, reason: "rfp_submission", submittedAt: new Date("2026-05-12T12:00:00.000Z") },
+    });
+
+    const { nextError } = await invoke("post", "/confirm-upload", {
+      body: { uploadToken: "upload-token-1", forceEditAfterRfp: true },
+    });
+
+    expect(nextError).toBeUndefined();
+    expect(serviceMocks.confirmUpload).toHaveBeenCalled();
+    expect(auditMocks.writeAuditLog).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({
+      tableName: "deal_scoping_intake",
+      recordId: "deal-1",
+      changedBy: "user-1",
+      fullRow: expect.objectContaining({
+        override: "admin_force_edit_after_rfp",
+        route: "files",
+        action: "confirm_upload",
       }),
     }));
   });
@@ -292,6 +430,95 @@ describe("photo audit route wiring", () => {
         fileId: "photo-1",
       }),
     }));
+  });
+
+  it("rejects metadata changes to any deal-linked file when the deal scope is locked", async () => {
+    serviceMocks.getFileById.mockResolvedValueOnce({
+      ...existingPhoto,
+      intakeSource: null,
+      intakeRequirementKey: null,
+    });
+    scopingMocks.assertDealScopingWriteAllowed.mockRejectedValueOnce(
+      Object.assign(new Error("Scope is read-only after RFP submission"), {
+        statusCode: 403,
+        code: "SCOPE_READ_ONLY_AFTER_RFP",
+      })
+    );
+
+    const { nextError } = await invoke("patch", "/:id", {
+      body: { displayName: "Locked rename" },
+    });
+
+    expect(nextError).toMatchObject({
+      statusCode: 403,
+      code: "SCOPE_READ_ONLY_AFTER_RFP",
+    });
+    expect(scopingMocks.assertDealScopingWriteAllowed).toHaveBeenCalledWith(
+      expect.anything(),
+      "deal-1",
+      { role: "admin", forceEditAfterRfp: false }
+    );
+    expect(serviceMocks.updateFile).not.toHaveBeenCalled();
+  });
+
+  it("allows forced admin metadata changes to regular deal files on locked scopes", async () => {
+    serviceMocks.getFileById.mockResolvedValueOnce({
+      ...existingPhoto,
+      intakeSource: null,
+      intakeRequirementKey: null,
+    });
+    scopingMocks.assertDealScopingWriteAllowed.mockResolvedValueOnce({
+      adminOverride: true,
+      lockState: { locked: true, reason: "bid_board_handoff", submittedAt: new Date("2026-05-12T12:00:00.000Z") },
+    });
+
+    const { nextError } = await invoke("patch", "/:id", {
+      body: { displayName: "Forced regular rename", forceEditAfterRfp: true },
+    });
+
+    expect(nextError).toBeUndefined();
+    expect(scopingMocks.assertDealScopingWriteAllowed).toHaveBeenCalledWith(
+      expect.anything(),
+      "deal-1",
+      { role: "admin", forceEditAfterRfp: true }
+    );
+    expect(serviceMocks.updateFile).toHaveBeenCalled();
+    expect(auditMocks.writeAuditLog).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({
+      tableName: "deal_scoping_intake",
+      recordId: "deal-1",
+      changedBy: "user-1",
+      fullRow: expect.objectContaining({
+        override: "admin_force_edit_after_rfp",
+        route: "files",
+        action: "metadata_update",
+        fileId: "photo-1",
+      }),
+    }));
+  });
+
+  it("rejects non-admin force-edit attempts on locked deal files", async () => {
+    scopingMocks.assertDealScopingWriteAllowed.mockRejectedValueOnce(
+      Object.assign(new Error("Scope is read-only after RFP submission"), {
+        statusCode: 403,
+        code: "SCOPE_READ_ONLY_AFTER_RFP",
+      })
+    );
+
+    const { nextError } = await invoke("patch", "/:id", {
+      body: { displayName: "Rep forced rename", forceEditAfterRfp: true },
+      user: { id: "rep-1", role: "rep", officeId: "office-1", activeOfficeId: "office-1" },
+    });
+
+    expect(nextError).toMatchObject({
+      statusCode: 403,
+      code: "SCOPE_READ_ONLY_AFTER_RFP",
+    });
+    expect(scopingMocks.assertDealScopingWriteAllowed).toHaveBeenCalledWith(
+      expect.anything(),
+      "deal-1",
+      { role: "rep", forceEditAfterRfp: true }
+    );
+    expect(serviceMocks.updateFile).not.toHaveBeenCalled();
   });
 
   it("requires forced admin override before deleting a linked scoping file from a locked scope", async () => {

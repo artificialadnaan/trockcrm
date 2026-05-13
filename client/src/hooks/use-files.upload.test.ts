@@ -172,6 +172,48 @@ describe("uploadFile", () => {
     expect(fetchMock.mock.calls[2][0]).toBe("/api/files/confirm-upload");
   });
 
+  it("passes admin force-edit intent through presign and confirmation calls", async () => {
+    document.cookie = "csrf_token=test-csrf-token; path=/";
+    vi.stubGlobal("XMLHttpRequest", MockXHR);
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        headers: new Headers({ "content-type": "application/json" }),
+        json: async () => ({
+          uploadUrl: "https://acct.r2.cloudflarestorage.com/bucket/key",
+          uploadToken: "upload-token",
+          r2Key: "office/deals/TR-1/photos/file.jpg",
+          expiresIn: 1800,
+        }),
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        status: 201,
+        headers: new Headers({ "content-type": "application/json" }),
+        json: async () => ({
+          file: { id: "file-1", category: "photo", originalFilename: "roof.jpg" },
+        }),
+      });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await uploadFile({
+      file: new File(["hello"], "roof.jpg", { type: "image/jpeg" }),
+      category: "photo",
+      dealId: "deal-1",
+      forceEditAfterRfp: true,
+    });
+
+    expect(JSON.parse((fetchMock.mock.calls[0][1] as RequestInit).body as string)).toMatchObject({
+      dealId: "deal-1",
+      forceEditAfterRfp: true,
+    });
+    expect(JSON.parse((fetchMock.mock.calls[1][1] as RequestInit).body as string)).toEqual({
+      uploadToken: "upload-token",
+      forceEditAfterRfp: true,
+    });
+  });
+
   it("rejects files larger than 200 MB before requesting a presigned URL", async () => {
     const fetchMock = vi.fn();
     vi.stubGlobal("fetch", fetchMock);

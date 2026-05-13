@@ -630,6 +630,67 @@ describe("Scoping Service", () => {
     );
   });
 
+  it("allows admin override edits for legacy Bid Board deals identified only by bidBoardStageSlug", async () => {
+    pipelineMocks.getStageById.mockResolvedValue({
+      id: "stage-opportunity",
+      slug: "opportunity",
+      workflowFamily: "standard_deal",
+      displayOrder: 1,
+    });
+    pipelineMocks.getStageBySlug.mockResolvedValue({
+      id: "stage-opportunity",
+      slug: "opportunity",
+      workflowFamily: "standard_deal",
+      displayOrder: 1,
+    });
+
+    const tenantDb = createFakeTenantDb({
+      deals: [
+        {
+          id: "deal-1",
+          name: "Legacy Bid Board Deal",
+          stageId: "stage-opportunity",
+          workflowRoute: "normal",
+          expectedCloseDate: null,
+          propertyAddress: "123 Scope Way",
+          propertyCity: "Dallas",
+          propertyState: "TX",
+          propertyZip: "75201",
+          description: "Legacy Bid Board scope",
+          projectTypeId: "project-type-1",
+          assignedRepId: "rep-1",
+          bidBoardStageSlug: "estimate_in_progress",
+        },
+      ],
+      users: [{ id: "admin-1", officeId: "office-1", role: "admin" }],
+    });
+
+    await upsertDealScopingIntake(
+      tenantDb as never,
+      "deal-1",
+      {
+        forceEditAfterRfp: true,
+        scopeSummary: { summary: "Admin legacy correction" },
+      },
+      "admin-1"
+    );
+
+    expect(tenantDb.state.deals[0]?.description).toBe("Admin legacy correction");
+    expect(auditMocks.writeAuditLog).toHaveBeenCalledWith(
+      tenantDb,
+      expect.objectContaining({
+        tableName: "deal_scoping_intake",
+        recordId: "deal-1",
+        action: "update",
+        changedBy: "admin-1",
+        fullRow: expect.objectContaining({
+          override: "admin_force_edit_after_rfp",
+          reason: "bid_board_handoff",
+        }),
+      })
+    );
+  });
+
   it("blocks scoping reopen/edit flows for legacy downstream Bid Board-owned stages even without mirror metadata", async () => {
     pipelineMocks.getStageById.mockResolvedValue({
       id: "stage-production",
@@ -687,9 +748,8 @@ describe("Scoping Service", () => {
       )
     ).rejects.toMatchObject<AppError>({
       statusCode: 403,
-      code: "BID_BOARD_OWNED_STAGE_READ_ONLY",
-      message:
-        "Deal stage progression is read-only in CRM after estimating handoff. Bid Board is now the source of truth for downstream stages.",
+      code: "SCOPE_READ_ONLY_AFTER_RFP",
+      message: "Scope is read-only after RFP submission",
     });
 
     expect(tenantDb.state.dealScopingIntake[0]?.sectionData).toEqual({});
