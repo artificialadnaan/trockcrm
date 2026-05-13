@@ -22,7 +22,7 @@ const SECTIONS: Section[] = [
     content: [
       "The Pipeline view (/pipeline) shows all your active deals as a Kanban board. Deals are grouped by stage.",
       "Drag a deal card to advance it to the next stage. If the stage requires approval or has missing fields, you'll see a checklist of what's needed before you can advance.",
-      "The DD column (Due Diligence) is separate from the main pipeline. Toggle \"Show DD\" to include/exclude it.",
+      "The DD column (Due Diligence) is separate from the main pipeline. Toggle \"Show DD stages\" to include/exclude it.",
       "To close a deal as Lost, move it to the Closed Lost column. A modal will ask for a reason and optional notes -- both are required.",
     ],
   },

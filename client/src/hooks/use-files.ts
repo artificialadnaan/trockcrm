@@ -18,6 +18,8 @@ export interface FileRecord {
   fileExtension: string;
   r2Key: string;
   r2Bucket: string;
+  externalUrl?: string | null;
+  externalThumbnailUrl?: string | null;
   dealId: string | null;
   leadId: string | null;
   intakeSection?: string | null;

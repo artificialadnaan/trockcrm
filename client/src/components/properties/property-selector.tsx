@@ -73,11 +73,12 @@ export function PropertySelector({
       <Button
         type="button"
         variant="outline"
-        className="w-full justify-between font-normal"
+        className="w-full justify-between gap-2 font-normal"
         onClick={() => setOpen((prev) => !prev)}
         disabled={disabled || !companyId}
+        title={selectedLabel ?? undefined}
       >
-        <span className={selectedLabel ? "text-foreground" : "text-muted-foreground"}>
+        <span className={`min-w-0 flex-1 truncate text-left ${selectedLabel ? "text-foreground" : "text-muted-foreground"}`}>
           {selectedLabel ?? (!companyId ? "Select company first" : required ? "Select property *" : "Select property")}
         </span>
         <ChevronsUpDown className="h-4 w-4 opacity-50" />
@@ -111,8 +112,9 @@ export function PropertySelector({
                     setOpen(false);
                     setQuery("");
                   }}
+                  title={formatPropertyLabel(property)}
                 >
-                  {formatPropertyLabel(property)}
+                  <span className="block truncate">{formatPropertyLabel(property)}</span>
                 </button>
               ))
             )}

@@ -9,7 +9,25 @@ describe("questionnaire display helpers", () => {
   it("separates boolean storage from user-facing labels", () => {
     expect(formatQuestionAnswerValue(true)).toBe("Yes");
     expect(formatQuestionAnswerValue(false)).toBe("No");
+    expect(formatQuestionAnswerValue("true")).toBe("Yes");
+    expect(formatQuestionAnswerValue("false")).toBe("No");
     expect(formatQuestionAnswerValue(null)).toBe("Unanswered");
+  });
+
+  it("formats option-backed enum-style stored values when requested", () => {
+    expect(formatQuestionAnswerValue("senior_living", { formatStringEnums: true })).toBe("Senior Living");
+    expect(formatQuestionAnswerValue("highrise", { formatStringEnums: true })).toBe("Highrise");
+    expect(formatQuestionAnswerValue(["garden_style", "highrise"])).toBe("Garden Style, Highrise");
+  });
+
+  it("preserves free-text strings by default", () => {
+    expect(formatQuestionAnswerValue("May-June")).toBe("May-June");
+    expect(formatQuestionAnswerValue("DFW-Phase-2")).toBe("DFW-Phase-2");
+    expect(formatQuestionAnswerValue("john_smith")).toBe("john_smith");
+  });
+
+  it("preserves ISO date answers instead of treating them as hyphenated enums", () => {
+    expect(formatQuestionAnswerValue("2026-05-01")).toBe("2026-05-01");
   });
 
   it("matches boolean parent answers against string seed reveal metadata", () => {

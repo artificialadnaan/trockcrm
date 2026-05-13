@@ -413,12 +413,14 @@ export function PipelinePage() {
 
           <div className="flex items-center gap-2 rounded-sm border border-gray-200 px-3 py-1.5">
             <label htmlFor="show-dd-toggle" className="select-none text-xs text-gray-600">
-              Show DD
+              Show DD stages
             </label>
             <button
               id="show-dd-toggle"
               role="switch"
               aria-checked={showDd}
+              aria-label="Show due diligence stages in the pipeline"
+              title="Includes due diligence stages in the pipeline view"
               onClick={() => {
                 const next = new URLSearchParams(searchParams);
                 if (showDd) next.delete("showDd");

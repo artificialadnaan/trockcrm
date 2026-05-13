@@ -480,7 +480,7 @@ export function LeadQuestionnaireEditor({ lead, onCancel, onSaved }: LeadQuestio
                   />
                 </div>
                 <div className="space-y-2">
-                  <Label htmlFor="timeline-status">Timeline</Label>
+                  <Label htmlFor="timeline-status">Timeline Target Date</Label>
                   <Input
                     id="timeline-status"
                     value={formData.qualificationPayload.timeline_status}

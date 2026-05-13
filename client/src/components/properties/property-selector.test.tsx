@@ -33,6 +33,13 @@ describe("PropertySelector inline create", () => {
     expect(source).not.toContain("limit: 500");
   });
 
+  it("truncates long selected property labels inside the selector button", () => {
+    const source = normalize(propertySelectorSource);
+
+    expect(source).toContain("min-w-0 flex-1 truncate text-left");
+    expect(source).toContain("title={selectedLabel ?? undefined}");
+  });
+
   it("hydrates a selected property label from the API when it is outside the current search slice", async () => {
     apiMock.mockResolvedValueOnce({
       property: {

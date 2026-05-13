@@ -20,6 +20,7 @@ import {
   summarizeActivePipelineColumns,
   summarizeTerminalStageCounts,
 } from "./pipeline-page";
+import pipelinePageSource from "./pipeline-page.tsx?raw";
 
 afterEach(() => {
   vi.useRealTimers();
@@ -66,6 +67,14 @@ describe("summarizeTerminalStageCounts", () => {
     ]);
 
     expect(summary).toEqual({ won: 12, lost: 11 });
+  });
+});
+
+describe("pipeline DD toggle label", () => {
+  it("uses a clear Show DD stages label with explanatory switch text", () => {
+    expect(pipelinePageSource).toContain("Show DD stages");
+    expect(pipelinePageSource).toContain("Show due diligence stages in the pipeline");
+    expect(pipelinePageSource).not.toContain(">Show DD<");
   });
 });
 
