@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback } from "react";
 import { api } from "@/lib/api";
+import { getOfficeRequestOptions, type OfficeRequestOptions } from "@/lib/office-selection";
 
 export interface Contact {
   id: string;
@@ -204,10 +205,14 @@ export function useContactDeals(contactId: string | undefined) {
 
 // --- Mutation Functions ---
 
-export async function createContact(input: Partial<Contact> & { firstName: string; lastName: string; category: string; skipDedupCheck?: boolean }) {
+export async function createContact(
+  input: Partial<Contact> & { firstName: string; lastName: string; category: string; skipDedupCheck?: boolean },
+  options: OfficeRequestOptions = {}
+) {
   return api<{ contact: Contact | null; dedupWarning?: boolean; suggestions?: Array<{ id: string; firstName: string; lastName: string; email: string | null; companyName: string | null; matchReason: string }> }>("/contacts", {
     method: "POST",
     json: input,
+    ...getOfficeRequestOptions(options.officeId),
   });
 }
 

@@ -16,6 +16,7 @@ interface PropertyCreateDialogProps {
   companyLocked?: boolean;
   requireLeadCreateFields?: boolean;
   triggerLabel?: string;
+  officeId?: string | null;
 }
 
 export function PropertyCreateDialog({
@@ -24,6 +25,7 @@ export function PropertyCreateDialog({
   companyLocked = false,
   requireLeadCreateFields = false,
   triggerLabel = "New Property",
+  officeId,
 }: PropertyCreateDialogProps) {
   const [open, setOpen] = useState(false);
   const [submitting, setSubmitting] = useState(false);
@@ -39,7 +41,7 @@ export function PropertyCreateDialog({
     unitCount: "",
     notes: "",
   });
-  const { company } = useCompanyDetail(formData.companyId || undefined);
+  const { company } = useCompanyDetail(formData.companyId || undefined, { officeId });
 
   useEffect(() => {
     if (open) {
@@ -104,17 +106,20 @@ export function PropertyCreateDialog({
     setSubmitting(true);
     setError(null);
     try {
-      const result = await createProperty({
-        companyId: formData.companyId,
-        name: derivedName,
-        address: formData.address.trim() || null,
-        city: formData.city.trim() || null,
-        state: formData.state.trim() || null,
-        zip: formData.zip.trim() || null,
-        buildYear: formData.buildYear.trim() ? buildYear : null,
-        unitCount: formData.unitCount.trim() ? unitCount : null,
-        notes: formData.notes.trim() || null,
-      });
+      const result = await createProperty(
+        {
+          companyId: formData.companyId,
+          name: derivedName,
+          address: formData.address.trim() || null,
+          city: formData.city.trim() || null,
+          state: formData.state.trim() || null,
+          zip: formData.zip.trim() || null,
+          buildYear: formData.buildYear.trim() ? buildYear : null,
+          unitCount: formData.unitCount.trim() ? unitCount : null,
+          notes: formData.notes.trim() || null,
+        },
+        { officeId }
+      );
       setOpen(false);
       onCreated?.(result.property);
     } catch (err: unknown) {
@@ -149,6 +154,7 @@ export function PropertyCreateDialog({
                 value={formData.companyId || null}
                 onChange={(companyId) => setFormData((prev) => ({ ...prev, companyId }))}
                 required
+                officeId={officeId}
               />
             )}
           </div>

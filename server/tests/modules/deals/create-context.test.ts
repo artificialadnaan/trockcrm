@@ -20,6 +20,24 @@ describe("resolveDealCreateOfficeCode", () => {
     ).toEqual({ officeCode: "bad-office" });
   });
 
+  it("allows an explicit officeCode when it matches the active office slug", () => {
+    expect(
+      resolveDealCreateOfficeCode({
+        requestedOfficeCode: "ATL",
+        officeSlug: "atlanta",
+      })
+    ).toEqual({ officeCode: "atl" });
+  });
+
+  it("rejects an explicit officeCode that does not match the active office slug", () => {
+    expect(
+      resolveDealCreateOfficeCode({
+        requestedOfficeCode: "ATL",
+        officeSlug: "dallas",
+      })
+    ).toEqual({ error: "Cannot create deal: officeCode must match the selected office." });
+  });
+
   it.each([null, 123, {}])("does not infer over malformed explicit officeCode %j", (requestedOfficeCode) => {
     expect(
       resolveDealCreateOfficeCode({
@@ -33,5 +51,15 @@ describe("resolveDealCreateOfficeCode", () => {
     expect(resolveDealCreateOfficeCode({ requestedOfficeCode: undefined })).toEqual({
       error: "Cannot create deal: no active office. Contact admin.",
     });
+  });
+
+  it("uses lead-specific error text when resolving lead create context", () => {
+    expect(
+      resolveDealCreateOfficeCode({
+        requestedOfficeCode: "dfw",
+        officeSlug: "atlanta",
+        recordType: "lead",
+      })
+    ).toEqual({ error: "Cannot create lead: officeCode must match the selected office." });
   });
 });

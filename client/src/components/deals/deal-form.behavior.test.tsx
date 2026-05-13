@@ -103,7 +103,7 @@ async function renderForm(initialValues?: Parameters<typeof DealForm>[0]["initia
   await act(async () => {
     root.render(
       <MemoryRouter>
-        <DealForm initialValues={initialValues} />
+        <DealForm initialValues={initialValues} onSuccess={vi.fn()} />
       </MemoryRouter>
     );
   });
@@ -142,9 +142,12 @@ describe("DealForm direct-create context", () => {
     containers = [];
   });
 
-  it("injects officeCode and projectType when the active office is resolved", async () => {
+  it("injects officeCode, projectType, and selected tenant header when the active office is resolved", async () => {
     mocks.useAccessibleOffices.mockReturnValue({
-      offices: [{ id: "office-dallas", name: "Dallas", slug: "dallas" }],
+      offices: [
+        { id: "office-dallas", name: "Dallas", slug: "dallas" },
+        { id: "office-atlanta", name: "Atlanta", slug: "atlanta" },
+      ],
       loading: false,
       error: null,
     });
@@ -165,11 +168,12 @@ describe("DealForm direct-create context", () => {
         officeCode: "dfw",
         projectType: "Roofing",
         creationContext: "direct",
-      })
+      }),
+      { officeId: "office-dallas" }
     );
-  });
+  }, 15000);
 
-  it("does not block create when active-office metadata is still unresolved but the user has an activeOfficeId", async () => {
+  it("blocks frontend create while selected-office tenant metadata is unresolved", async () => {
     mocks.useAccessibleOffices.mockReturnValue({
       offices: [],
       loading: true,
@@ -187,16 +191,11 @@ describe("DealForm direct-create context", () => {
 
     await submit(container);
 
-    expect(container.textContent).not.toContain("Cannot create deal: no active office. Contact admin.");
-    expect(mocks.createDeal).toHaveBeenCalledWith(
-      expect.objectContaining({
-        creationContext: "direct",
-        projectType: "Roofing",
-      })
-    );
-  });
+    expect(container.textContent).toContain("Cannot create deal: selected office is unavailable. Contact admin.");
+    expect(mocks.createDeal).not.toHaveBeenCalled();
+  }, 15000);
 
-  it("does not block create when accessible-office loading fails but the user has an activeOfficeId", async () => {
+  it("blocks frontend create when accessible-office loading fails", async () => {
     mocks.useAccessibleOffices.mockReturnValue({
       offices: [],
       loading: false,
@@ -214,12 +213,7 @@ describe("DealForm direct-create context", () => {
 
     await submit(container);
 
-    expect(container.textContent).not.toContain("Cannot create deal: no active office. Contact admin.");
-    expect(mocks.createDeal).toHaveBeenCalledWith(
-      expect.objectContaining({
-        creationContext: "direct",
-        projectType: "Roofing",
-      })
-    );
-  });
+    expect(container.textContent).toContain("Cannot create deal: selected office is unavailable. Contact admin.");
+    expect(mocks.createDeal).not.toHaveBeenCalled();
+  }, 15000);
 });

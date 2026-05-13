@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { api, getCsrfToken, resolveApiBase } from "@/lib/api";
+import { getOfficeRequestOptions, type OfficeRequestOptions } from "@/lib/office-selection";
 export {
   getLeadBoardStageLabel,
   getLeadStageMetadata,
@@ -461,10 +462,11 @@ export async function createLead(input: {
     answers: Record<string, LeadAnswerValue>;
   };
   leadQuestionAnswers?: Record<string, LeadAnswerValue>;
-}) {
+}, options: OfficeRequestOptions = {}) {
   return api<{ lead: LeadRecord }>("/leads", {
     method: "POST",
     json: input,
+    ...getOfficeRequestOptions(options.officeId),
   });
 }
 

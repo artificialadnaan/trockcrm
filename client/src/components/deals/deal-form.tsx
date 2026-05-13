@@ -14,7 +14,7 @@ import {
 import { usePipelineStages, useProjectTypes, useRegions } from "@/hooks/use-pipeline-config";
 import { createDeal, updateDeal } from "@/hooks/use-deals";
 import type { Deal } from "@/hooks/use-deals";
-import { LEAD_SOURCE_CATEGORIES, resolveOfficeCodeFromOffice } from "@trock-crm/shared/types";
+import { LEAD_SOURCE_CATEGORIES } from "@trock-crm/shared/types";
 import { Loader2, Lock } from "lucide-react";
 import { getDefaultDealStageId, getNewDealStages, getSelectedOptionLabel } from "./deal-form.helpers";
 import { CompanySelector } from "@/components/companies/company-selector";
@@ -22,6 +22,11 @@ import { PropertySelector } from "@/components/properties/property-selector";
 import { useAuth } from "@/lib/auth";
 import { useTaskAssignees } from "@/hooks/use-task-assignees";
 import { useAccessibleOffices } from "@/hooks/use-accessible-offices";
+import {
+  buildOfficeSelectionOptions,
+  resolveDefaultOfficeCode,
+  type OfficeSelectionOption,
+} from "@/lib/office-selection";
 
 interface DealFormProps {
   deal?: Deal; // If provided, we're editing; otherwise creating
@@ -42,7 +47,6 @@ export function DealForm({ deal, onSuccess, initialValues }: DealFormProps) {
   const { stages } = usePipelineStages();
   const { hierarchy: projectTypeHierarchy } = useProjectTypes();
   const { regions } = useRegions();
-  const { assignees, loading: assigneesLoading } = useTaskAssignees();
   const { offices } = useAccessibleOffices();
 
   const isEdit = !!deal;
@@ -52,10 +56,13 @@ export function DealForm({ deal, onSuccess, initialValues }: DealFormProps) {
     { id: parent.id, name: parent.name },
     ...parent.children.map((child) => ({ id: child.id, name: child.name })),
   ]);
-  const assigneeOptions = assignees.map((assignee) => ({ id: assignee.id, name: assignee.displayName }));
   const activeOfficeId = user?.activeOfficeId ?? user?.officeId ?? null;
-  const activeOffice = offices.find((office) => office.id === activeOfficeId) ?? null;
-  const activeOfficeCode = resolveOfficeCodeFromOffice(activeOffice);
+  const officeOptions = buildOfficeSelectionOptions(offices);
+  const initialOfficeCode = resolveDefaultOfficeCode({
+    offices,
+    activeOfficeId,
+    currentOfficeCode: deal?.officeCode === "atl" || deal?.officeCode === "dfw" ? deal.officeCode : "",
+  });
   const initialSource = deal?.source ?? initialValues?.source ?? "";
   const initialSourceIsCategory = LEAD_SOURCE_CATEGORIES.includes(initialSource as (typeof LEAD_SOURCE_CATEGORIES)[number]);
 
@@ -73,6 +80,7 @@ export function DealForm({ deal, onSuccess, initialValues }: DealFormProps) {
     propertyCity: deal?.propertyCity ?? "",
     propertyState: deal?.propertyState ?? "",
     propertyZip: deal?.propertyZip ?? "",
+    officeCode: initialOfficeCode,
     projectTypeId: deal?.projectTypeId ?? initialValues?.projectTypeId ?? "",
     regionId: deal?.regionId ?? "",
     source: initialSourceIsCategory || !initialSource ? initialSource : "Other",
@@ -85,6 +93,9 @@ export function DealForm({ deal, onSuccess, initialValues }: DealFormProps) {
   const [error, setError] = useState<string | null>(null);
   const [fieldErrors, setFieldErrors] = useState<Record<string, string>>({});
   const [closeDateWarning, setCloseDateWarning] = useState<string | null>(null);
+  const selectedOffice = officeOptions.find((office) => office.code === formData.officeCode) ?? null;
+  const { assignees, loading: assigneesLoading } = useTaskAssignees({ officeId: !isEdit ? selectedOffice?.officeId : null });
+  const assigneeOptions = assignees.map((assignee) => ({ id: assignee.id, name: assignee.displayName }));
 
   // Default stageId when activeStages finishes loading and form stageId is still empty
   useEffect(() => {
@@ -93,11 +104,28 @@ export function DealForm({ deal, onSuccess, initialValues }: DealFormProps) {
     }
   }, [activeStages.length, formData.stageId, isEdit, stages]);
 
+  useEffect(() => {
+    if (isEdit) return;
+    setFormData((prev) => {
+      const officeCode = resolveDefaultOfficeCode({
+        offices,
+        activeOfficeId,
+        currentOfficeCode: prev.officeCode,
+      });
+      return officeCode === prev.officeCode ? prev : { ...prev, officeCode };
+    });
+  }, [activeOfficeId, isEdit, offices]);
+
   const handleChange = (field: string, value: string) => {
     setFormData((prev) => {
       const next = { ...prev, [field]: value };
       if (field === "companyId") {
         next.propertyId = "";
+      }
+      if (field === "officeCode") {
+        next.companyId = "";
+        next.propertyId = "";
+        next.assignedRepId = user?.role === "rep" ? user.id : "";
       }
       if (field === "source" && value !== "Other") {
         next.sourceDetail = "";
@@ -217,8 +245,8 @@ export function DealForm({ deal, onSuccess, initialValues }: DealFormProps) {
         const resp = await updateDeal(deal.id, payload as Partial<Deal>);
         result = resp.deal;
       } else {
-        if (!activeOfficeId) {
-          setError("Cannot create deal: no active office. Contact admin.");
+        if (!formData.officeCode || !selectedOffice?.officeId) {
+          setError("Cannot create deal: selected office is unavailable. Contact admin.");
           return;
         }
 
@@ -226,14 +254,15 @@ export function DealForm({ deal, onSuccess, initialValues }: DealFormProps) {
 
         payload.stageId = formData.stageId;
         payload.assignedRepId = formData.assignedRepId;
-        if (activeOfficeCode) {
-          payload.officeCode = activeOfficeCode;
-        }
+        payload.officeCode = formData.officeCode;
         if (selectedProjectType) {
           payload.projectType = selectedProjectType.name;
         }
         payload.creationContext = "direct";
-        const resp = await createDeal(payload as Partial<Deal> & { name: string; stageId: string });
+        const resp = await createDeal(
+          payload as Partial<Deal> & { name: string; stageId: string },
+          { officeId: selectedOffice.officeId }
+        );
         result = resp.deal;
       }
 
@@ -283,6 +312,7 @@ export function DealForm({ deal, onSuccess, initialValues }: DealFormProps) {
                 <CompanySelector
                   value={formData.companyId || null}
                   onChange={(companyId) => handleChange("companyId", companyId)}
+                  officeId={selectedOffice?.officeId}
                   required
                 />
               </div>
@@ -292,6 +322,7 @@ export function DealForm({ deal, onSuccess, initialValues }: DealFormProps) {
                   companyId={formData.companyId || null}
                   value={formData.propertyId || null}
                   onChange={(propertyId) => handleChange("propertyId", propertyId)}
+                  officeId={selectedOffice?.officeId}
                   required
                 />
               </div>
@@ -408,6 +439,37 @@ export function DealForm({ deal, onSuccess, initialValues }: DealFormProps) {
               {fieldErrors.winProbability && <p className="text-xs text-red-600">{fieldErrors.winProbability}</p>}
             </div>
           </div>
+
+          {!isEdit && (
+            <div className="space-y-2">
+              <Label htmlFor="officeCode">
+                Office <span className="text-red-500">*</span>
+              </Label>
+              <Select
+                value={formData.officeCode || "none"}
+                onValueChange={(val) => handleChange("officeCode", val && val !== "none" ? val : "")}
+              >
+                <SelectTrigger id="officeCode">
+                  <SelectValue placeholder="Select office">
+                    {selectedOffice?.label ?? "Select office"}
+                  </SelectValue>
+                </SelectTrigger>
+                <SelectContent>
+                  {officeOptions.length === 0 ? (
+                    <SelectItem value="none" disabled>
+                      No offices available
+                    </SelectItem>
+                  ) : (
+                    officeOptions.map((office: OfficeSelectionOption) => (
+                      <SelectItem key={office.code} value={office.code}>
+                        {office.label}
+                      </SelectItem>
+                    ))
+                  )}
+                </SelectContent>
+              </Select>
+            </div>
+          )}
 
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
             <div className="space-y-2">

@@ -64,8 +64,37 @@ describe("PropertySelector inline create", () => {
 
     const label = await resolveSelectedPropertyLabel("property-99", []);
 
-    expect(apiMock).toHaveBeenCalledWith("/properties/property-99");
+    expect(apiMock).toHaveBeenCalledWith("/properties/property-99", {});
     expect(label).toContain("123 Main St");
     expect(label).toContain("Dallas, TX");
+  });
+
+  it("hydrates a selected property label with the selected-office tenant header", async () => {
+    apiMock.mockResolvedValueOnce({
+      property: {
+        id: "property-99",
+        companyId: "company-1",
+        companyName: "Dallas",
+        name: "Remote Property",
+        address: "123 Main St",
+        city: "Dallas",
+        state: "TX",
+        zip: "75001",
+        notes: null,
+        isActive: true,
+        createdAt: "",
+        updatedAt: "",
+        leadCount: 0,
+        dealCount: 0,
+        convertedDealCount: 0,
+        lastActivityAt: null,
+      },
+    });
+
+    await resolveSelectedPropertyLabel("property-99", [], "office-atlanta");
+
+    expect(apiMock).toHaveBeenCalledWith("/properties/property-99", {
+      headers: { "x-office-id": "office-atlanta" },
+    });
   });
 });

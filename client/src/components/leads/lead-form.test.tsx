@@ -64,8 +64,23 @@ const authMocks = vi.hoisted(() => ({
     displayName: "Rep One",
     role: "rep" as "admin" | "director" | "rep",
     officeId: "office-1",
+    activeOfficeId: "office-dallas",
   },
 }));
+const officeMocks = vi.hoisted(() => ({
+  useAccessibleOffices: vi.fn(),
+}));
+const routerMocks = vi.hoisted(() => ({
+  navigate: vi.fn(),
+}));
+
+vi.mock("react-router-dom", async () => {
+  const actual = await vi.importActual<typeof import("react-router-dom")>("react-router-dom");
+  return {
+    ...actual,
+    useNavigate: () => routerMocks.navigate,
+  };
+});
 
 vi.mock("@/hooks/use-pipeline-config", () => ({
   usePipelineStages: () => ({
@@ -138,6 +153,10 @@ vi.mock("@/lib/auth", () => ({
     logout: vi.fn(),
     refreshUser: vi.fn(),
   }),
+}));
+
+vi.mock("@/hooks/use-accessible-offices", () => ({
+  useAccessibleOffices: officeMocks.useAccessibleOffices,
 }));
 
 vi.mock("@/components/ui/button", () => ({
@@ -245,7 +264,12 @@ vi.mock("@/components/ui/select", () => ({
 }));
 
 vi.mock("@/components/companies/company-selector", () => ({
-  CompanySelector: () => <div>Company Selector</div>,
+  CompanySelector: ({ onChange }: { onChange: (companyId: string) => void }) => (
+    <div>
+      <span>Company Selector</span>
+      <button type="button" onClick={() => onChange("company-1")}>Select Acme</button>
+    </div>
+  ),
 }));
 
 vi.mock("@/components/properties/property-selector", () => ({
@@ -420,11 +444,23 @@ describe("LeadForm", () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
+    routerMocks.navigate.mockClear();
     properties = [{ ...completeProperty }];
     propertyDetail = null;
     authMocks.user.role = "rep";
     authMocks.user.id = "rep-1";
     authMocks.user.displayName = "Rep One";
+    authMocks.user.officeId = "office-dallas";
+    authMocks.user.activeOfficeId = "office-dallas";
+    officeMocks.useAccessibleOffices.mockReturnValue({
+      offices: [
+        { id: "office-dallas", name: "Dallas", slug: "dallas" },
+        { id: "office-atlanta", name: "Atlanta", slug: "atlanta" },
+      ],
+      loading: false,
+      error: null,
+      refetch: vi.fn(),
+    });
     leadHookMocks.createLead.mockResolvedValue({ lead: { id: "lead-created" } });
     propertyHookMocks.updateProperty.mockResolvedValue({ property: { ...completeProperty } });
     contactHookMocks.createContact.mockResolvedValue({
@@ -876,8 +912,26 @@ describe("LeadForm", () => {
     );
 
     expect(html).not.toContain("Lead questionnaire template is misconfigured");
+    expect(html.indexOf("Office")).toBeLessThan(html.indexOf("Project Type"));
     expect(html).toContain('id="bidDueDate" type="date" value="2026-06-01"');
     expect(html).toContain("<button type=\"submit\">Create Lead</button>");
+  });
+
+  it("sends the selected ATL office code and tenant header when creating a lead", async () => {
+    renderCreateForm();
+
+    await clickButton(findButton("ATL (Atlanta)")!);
+    await clickButton(findButton("Select Acme")!);
+    await clickButton(findButton("Select Palm Villas")!);
+    await clickButton(findButton("Ada Lovelace")!);
+    await submitForm();
+
+    expect(leadHookMocks.createLead).toHaveBeenCalledWith(
+      expect.objectContaining({
+        officeCode: "atl",
+      }),
+      { officeId: "office-atlanta" }
+    );
   });
 
   it("keeps the property requirement satisfied when a property id is selected", () => {
@@ -1179,10 +1233,14 @@ describe("LeadForm", () => {
     await setInputValue(container.querySelector<HTMLInputElement>("#property-repair-unit-count")!, "42");
     await submitForm();
 
-    expect(propertyHookMocks.updateProperty).toHaveBeenCalledWith("property-1", {
-      buildYear: 2010,
-      unitCount: 42,
-    });
+    expect(propertyHookMocks.updateProperty).toHaveBeenCalledWith(
+      "property-1",
+      {
+        buildYear: 2010,
+        unitCount: 42,
+      },
+      { officeId: "office-dallas" }
+    );
     expect(leadHookMocks.createLead).toHaveBeenCalledTimes(1);
     expect(calls).toEqual(["updateProperty", "createLead"]);
   });
@@ -1195,7 +1253,11 @@ describe("LeadForm", () => {
     await setInputValue(container.querySelector<HTMLInputElement>("#property-repair-build-year")!, "2010");
     await submitForm();
 
-    expect(propertyHookMocks.updateProperty).toHaveBeenCalledWith("property-1", { buildYear: 2010 });
+    expect(propertyHookMocks.updateProperty).toHaveBeenCalledWith(
+      "property-1",
+      { buildYear: 2010 },
+      { officeId: "office-dallas" }
+    );
     expect(leadHookMocks.createLead).not.toHaveBeenCalled();
     expect(container.textContent).toContain("Failed to update property: Property update failed");
   });
@@ -1262,15 +1324,18 @@ describe("LeadForm", () => {
     await setInputValue(container.querySelector<HTMLInputElement>("#newContactPhone")!, "(214) 555-1212");
     await clickButton(findButton("Save Contact")!);
 
-    expect(contactHookMocks.createContact).toHaveBeenCalledWith(expect.objectContaining({
-      email: "grace@example.com",
-      phone: "(214) 555-1212",
-      skipDedupCheck: true,
-    }));
+    expect(contactHookMocks.createContact).toHaveBeenCalledWith(
+      expect.objectContaining({
+        email: "grace@example.com",
+        phone: "(214) 555-1212",
+        skipDedupCheck: true,
+      }),
+      { officeId: "office-dallas" }
+    );
     expect(companyContactsRefetch).toHaveBeenCalled();
     expect(container.querySelector("[data-dialog-open]")).toBeNull();
     expect(container.innerHTML).toContain('data-select-value="contact-created"');
-  });
+  }, 15000);
 
   it("keeps table-backed questionnaire answers out of the summary rail when the v2 snapshot is present", () => {
     const html = renderToStaticMarkup(

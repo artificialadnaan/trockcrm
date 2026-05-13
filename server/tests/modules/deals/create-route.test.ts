@@ -94,6 +94,31 @@ describe("POST /api/deals create context", () => {
     );
   });
 
+  it("honors an explicit officeCode when it matches the selected office slug", async () => {
+    const res = await request(createApp("atlanta"))
+      .post("/api/deals")
+      .send(validBody({ officeCode: "atl" }));
+
+    expect(res.status).toBe(201);
+    expect(dealsServiceMocks.createDeal).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({
+        officeCode: "atl",
+        creationContext: "direct",
+      })
+    );
+  });
+
+  it("rejects explicit officeCode when it disagrees with the selected office slug", async () => {
+    const res = await request(createApp("dallas"))
+      .post("/api/deals")
+      .send(validBody({ officeCode: "ATL" }));
+
+    expect(res.status).toBe(400);
+    expect(res.body.error.message).toBe("Cannot create deal: officeCode must match the selected office.");
+    expect(dealsServiceMocks.createDeal).not.toHaveBeenCalled();
+  });
+
   it.each([null, 123, {}])("rejects malformed explicit officeCode %j instead of inferring", async (officeCode) => {
     const res = await request(createApp("dallas"))
       .post("/api/deals")

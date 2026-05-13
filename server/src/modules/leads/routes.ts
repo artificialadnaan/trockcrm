@@ -22,6 +22,7 @@ import { convertLead } from "./conversion-service.js";
 import { preflightLeadStageCheck } from "./stage-gate.js";
 import { getLeadQualificationByLeadId } from "./qualification-service.js";
 import { getLeadScopingSnapshot, upsertLeadScopingIntake } from "./scoping-service.js";
+import { resolveCreateOfficeCode } from "../deals/create-context.js";
 import {
   getLeadQuestionnaireSnapshot,
   getQuestionnaireTemplateSnapshot,
@@ -276,6 +277,14 @@ router.post("/", async (req, res, next) => {
 
     const repId = req.user!.role === "rep" ? req.user!.id : (assignedRepId || salesRepId || req.user!.id);
     const leadSalesRepId = salesRepId === undefined ? repId : salesRepId;
+    const officeCodeResolution = resolveCreateOfficeCode({
+      requestedOfficeCode: rest.officeCode,
+      officeSlug: req.officeSlug,
+      recordType: "lead",
+    });
+    if ("error" in officeCodeResolution) {
+      throw new AppError(400, officeCodeResolution.error);
+    }
 
     const lead = await createLead(req.tenantDb!, {
       companyId,
@@ -288,6 +297,7 @@ router.post("/", async (req, res, next) => {
       name,
       bidDueDate,
       ...rest,
+      officeCode: officeCodeResolution.officeCode,
     });
     const dueDiligenceApproval =
       lead.verificationStatus === "pending"
