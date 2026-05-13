@@ -1,4 +1,4 @@
-import { useCallback, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import {
   ArrowDownToLine,
@@ -6,7 +6,9 @@ import {
   Briefcase,
   Camera,
   ChevronDown,
+  FileArchive,
   FileIcon,
+  FileImage,
   FileSpreadsheet,
   FileText,
   FolderOpen,
@@ -18,6 +20,7 @@ import {
   Trash2,
   Upload,
   Users,
+  Video,
   X,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
@@ -35,9 +38,11 @@ import type { FileRecord } from "@/hooks/use-files";
 import { useDeals } from "@/hooks/use-deals";
 import type { Deal } from "@/hooks/use-deals";
 import { useContacts } from "@/hooks/use-contacts";
+import { api } from "@/lib/api";
 import { useAuth } from "@/lib/auth";
 import { displayNameOrFallback } from "@/lib/display-identifiers";
 import { formatDealDisplayNumber, sanitizeHubspotDealIdentifiers } from "@/lib/deal-utils";
+import { getFileMediaKind, type FileMediaKind } from "@/lib/file-media";
 import {
   FILE_CATEGORIES,
   type FileCategory,
@@ -45,6 +50,10 @@ import {
   getCategoryLabel,
   formatFileSize,
 } from "@/lib/file-utils";
+import {
+  getImmediatePhotoPreviewUrl,
+  shouldFetchSignedPhotoUrl,
+} from "@/lib/photo-url-resolution";
 
 type FileTab = "all" | "photos" | "documents";
 type FileView = "grid" | "list";
@@ -57,13 +66,121 @@ const TYPE_FILTERS: Array<{ value: FileCategory | "all"; label: string }> = [
   ...FILE_CATEGORIES.map((category) => ({ value: category, label: getCategoryLabel(category) })),
 ];
 
-function getFileIcon(mimeType: string) {
-  if (mimeType.startsWith("image/")) return Camera;
-  if (mimeType === "application/pdf" || mimeType.includes("word")) return FileText;
-  if (mimeType.includes("sheet") || mimeType.includes("excel") || mimeType === "text/csv") {
-    return FileSpreadsheet;
+const PREVIEW_CACHE_MAX = 200;
+const previewUrlCache = new Map<string, string>();
+const previewUrlRequests = new Map<string, Promise<string>>();
+
+function setPreviewUrlCache(key: string, value: string) {
+  if (previewUrlCache.size >= PREVIEW_CACHE_MAX) {
+    const firstKey = previewUrlCache.keys().next().value;
+    if (firstKey) previewUrlCache.delete(firstKey);
+  }
+  previewUrlCache.set(key, value);
+}
+
+async function fetchCachedPreviewUrl(fileId: string): Promise<string> {
+  const cached = previewUrlCache.get(fileId);
+  if (cached) return cached;
+
+  const pending = previewUrlRequests.get(fileId);
+  if (pending) return pending;
+
+  const request = api<{ url: string }>(`/files/${fileId}/download?preview=1`)
+    .then((data) => {
+      setPreviewUrlCache(fileId, data.url);
+      return data.url;
+    })
+    .finally(() => {
+      previewUrlRequests.delete(fileId);
+    });
+
+  previewUrlRequests.set(fileId, request);
+  return request;
+}
+
+function useInViewport<T extends HTMLElement>(): [(node: T | null) => void, boolean] {
+  const [node, setNode] = useState<T | null>(null);
+  const [inViewport, setInViewport] = useState(false);
+
+  useEffect(() => {
+    if (!node || inViewport) return;
+    if (typeof IntersectionObserver === "undefined") {
+      setInViewport(true);
+      return;
+    }
+
+    const observer = new IntersectionObserver(
+      (entries) => {
+        if (entries.some((entry) => entry.isIntersecting)) {
+          setInViewport(true);
+          observer.disconnect();
+        }
+      },
+      { rootMargin: "200px" }
+    );
+
+    observer.observe(node);
+    return () => observer.disconnect();
+  }, [inViewport, node]);
+
+  return [setNode, inViewport];
+}
+
+function useFilePreviewUrl(file: FileRecord, enabled: boolean): string | null {
+  const [url, setUrl] = useState<string | null>(() =>
+    getImmediatePhotoPreviewUrl(file, previewUrlCache.get(file.id) ?? null)
+  );
+
+  useEffect(() => {
+    const cachedSignedUrl = previewUrlCache.get(file.id) ?? null;
+    const immediateUrl = getImmediatePhotoPreviewUrl(file, cachedSignedUrl);
+    if (immediateUrl) {
+      setUrl(immediateUrl);
+      return;
+    }
+    if (!enabled) return;
+    if (!shouldFetchSignedPhotoUrl(file, cachedSignedUrl)) return;
+
+    let cancelled = false;
+    fetchCachedPreviewUrl(file.id)
+      .then((signedUrl) => {
+        if (!cancelled) setUrl(signedUrl);
+      })
+      .catch(() => {
+        if (!cancelled) setUrl(null);
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [enabled, file.externalThumbnailUrl, file.externalUrl, file.id, file.r2Key]);
+
+  return url;
+}
+
+function getFileIcon(file: FileRecord) {
+  const kind = getFileMediaKind(file);
+  if (kind === "image") return FileImage;
+  if (kind === "pdf") return FileText;
+  if (kind === "video") return Video;
+  if (kind === "document") {
+    const mimeType = file.mimeType.toLowerCase();
+    const ext = file.fileExtension.toLowerCase();
+    if (mimeType.includes("sheet") || mimeType.includes("excel") || ext === ".csv" || ext === ".xls" || ext === ".xlsx") {
+      return FileSpreadsheet;
+    }
+    if (mimeType.includes("zip") || ext === ".zip") return FileArchive;
+    return FileText;
   }
   return FileIcon;
+}
+
+function getFileKindLabel(kind: FileMediaKind) {
+  if (kind === "image") return "Image";
+  if (kind === "pdf") return "PDF";
+  if (kind === "video") return "Video";
+  if (kind === "document") return "Document";
+  return "File";
 }
 
 function formatDate(value: string | null | undefined) {
@@ -250,16 +367,31 @@ function FileGridCard({
   onDownload: (id: string) => void;
   onDelete: (id: string) => void;
 }) {
-  const Icon = getFileIcon(file.mimeType);
-  const isPhoto = file.category === "photo" || file.mimeType.startsWith("image/");
+  const [previewRef, previewInViewport] = useInViewport<HTMLDivElement>();
+  const [previewFailed, setPreviewFailed] = useState(false);
+  const mediaKind = getFileMediaKind(file);
+  const Icon = getFileIcon(file);
+  const isPhoto = mediaKind === "image";
+  const previewUrl = useFilePreviewUrl(file, isPhoto && previewInViewport && !previewFailed);
 
   if (isPhoto) {
     return (
       <article className="group overflow-hidden rounded-md border border-slate-200 bg-white" data-file-card>
-        <div className="relative aspect-[4/3] bg-gradient-to-br from-slate-200 to-slate-300">
-          <div className="flex h-full w-full items-center justify-center">
-            <Camera className="h-8 w-8 text-white/75" />
-          </div>
+        <div ref={previewRef} className="relative aspect-[4/3] bg-slate-100">
+          {previewUrl && !previewFailed ? (
+            <img
+              src={previewUrl}
+              alt={fileTitle(file)}
+              className="h-full w-full object-cover"
+              loading="lazy"
+              data-file-preview-image
+              onError={() => setPreviewFailed(true)}
+            />
+          ) : (
+            <div className="flex h-full w-full items-center justify-center bg-slate-100">
+              <FileImage className="h-8 w-8 text-slate-400" />
+            </div>
+          )}
           <div className="absolute bottom-2 right-2 flex gap-1 opacity-0 transition-opacity group-hover:opacity-100 group-focus-within:opacity-100">
             <button
               type="button"
@@ -321,6 +453,7 @@ function FileGridCard({
           </button>
         </div>
       </div>
+      <p className="text-[10px] font-black uppercase tracking-[0.16em] text-slate-500">{getFileKindLabel(mediaKind)}</p>
       <p className="line-clamp-2 text-sm font-bold text-slate-950">{fileTitle(file)}</p>
       <div className="flex flex-wrap items-center gap-1.5">
         <span className={`inline-flex items-center rounded-full px-2 py-0.5 text-[10px] font-bold uppercase tracking-wide ring-1 ring-slate-200 ${getCategoryColor(file.category)}`}>
@@ -373,7 +506,7 @@ function FilesTable({
         </thead>
         <tbody className="divide-y divide-slate-100">
           {rows.map((file) => {
-            const Icon = getFileIcon(file.mimeType);
+            const Icon = getFileIcon(file);
             return (
               <tr key={file.id} className="transition-colors hover:bg-slate-50">
                 <td className="px-5 py-3">

@@ -1,19 +1,12 @@
+import { formatDisplayValue } from "@/lib/display-format";
+
 export type QuestionAnswerValue = string | boolean | number | string[] | null | undefined;
 
-export function formatQuestionAnswerValue(value: QuestionAnswerValue) {
-  if (value == null) {
-    return "Unanswered";
-  }
-  if (typeof value === "boolean") {
-    return value ? "Yes" : "No";
-  }
-  if (typeof value === "string") {
-    return value.trim().length > 0 ? value : "Unanswered";
-  }
-  if (Array.isArray(value)) {
-    return value.length > 0 ? value.join(", ") : "Unanswered";
-  }
-  return String(value);
+export function formatQuestionAnswerValue(
+  value: QuestionAnswerValue,
+  options: { formatStringEnums?: boolean } = {}
+) {
+  return formatDisplayValue(value, options);
 }
 
 function normalizeRevealValue(value: unknown) {

@@ -1040,9 +1040,9 @@ function DealRightRail({
           <DetailRailItem label="Close target" value={formatDate(deal.expectedCloseDate)} />
         </DetailRailSection>
 
-        <DetailRailSection title="System IDs">
+        <DetailRailSection title="System references">
           <DetailRailItem
-            label="Deal ID"
+            label="Deal reference"
             value={
               <span className="font-mono text-xs" data-testid="deal-detail-system-id">
                 {headerDisplayNumber.label}

@@ -322,6 +322,8 @@ describe("LeadQuestionnaireEditor universal questionnaire", () => {
 
     expect(Array.from(container.querySelectorAll("label")).filter((label) => label.textContent?.includes("Timeline")))
       .toHaveLength(1);
+    expect(container.textContent).toContain("Timeline Target Date");
+    expect(container.textContent).not.toContain("Timeline Notes");
   });
 
   it("submits the hidden universal timeline answer from the visible Timeline field", async () => {

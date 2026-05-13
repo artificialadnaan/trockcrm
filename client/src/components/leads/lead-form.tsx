@@ -237,8 +237,8 @@ function getEditableFormState(
   };
 }
 
-function renderAnswerValue(value: LeadAnswerValue | undefined) {
-  const formatted = formatQuestionAnswerValue(value);
+function renderAnswerValue(value: LeadAnswerValue | undefined, options: { formatStringEnums?: boolean } = {}) {
+  const formatted = formatQuestionAnswerValue(value, options);
   return formatted === "Unanswered" ? "--" : formatted;
 }
 
@@ -548,7 +548,9 @@ export function LeadQuestionnaireSummary({ lead }: { lead: LeadFormLead }) {
                   <div key={node.id} className="rounded-md border p-3 transition-all duration-150">
                     <p className="text-muted-foreground">{node.label}</p>
                     <p className="font-medium">
-                      {renderAnswerValue(lead.leadQuestionnaire?.answers?.[node.key])}
+                      {renderAnswerValue(lead.leadQuestionnaire?.answers?.[node.key], {
+                        formatStringEnums: Array.isArray(node.options) && node.options.length > 0,
+                      })}
                     </p>
                   </div>
                 ))
@@ -1042,7 +1044,7 @@ function EditableLeadForm({
 
     if (isLegacyTimelineStatusValue(formData.qualificationPayload.timeline_status)) {
       setError(
-        `Timeline Status holds a legacy value ("${formData.qualificationPayload.timeline_status.trim()}"). Pick a real date before saving.`
+        `Timeline Target Date holds a legacy value ("${formData.qualificationPayload.timeline_status.trim()}"). Pick a real date before saving.`
       );
       return;
     }

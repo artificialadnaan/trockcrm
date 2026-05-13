@@ -447,7 +447,7 @@ describe("DealDetailPage", () => {
       "Primary Contact",
       "Project Type",
       "Project Number",
-      "System IDs",
+      "System references",
     ];
     const positions = sectionOrder.map((label) => html.indexOf(label));
     expect(positions.every((position) => position >= 0)).toBe(true);
@@ -508,7 +508,7 @@ describe("DealDetailPage", () => {
     expect(html).toContain("Not yet assigned");
   });
 
-  it("renders project number for the Deal ID system row and never the HubSpot ID", () => {
+  it("renders project number for the deal reference system row and never the HubSpot ID", () => {
     mocks.useDealDetailMock.mockReturnValueOnce({
       loading: false,
       error: null,
@@ -522,8 +522,8 @@ describe("DealDetailPage", () => {
 
     const html = renderPage();
 
-    expect(html).toContain("System IDs");
-    expect(html).toContain("Deal ID");
+    expect(html).toContain("System references");
+    expect(html).toContain("Deal reference");
     expect(html).toContain("DFW-1-12826-aa");
     expect(html).not.toContain("HS-319925219003");
     expect(html).not.toContain("hubspot-system-id");

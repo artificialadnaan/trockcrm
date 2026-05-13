@@ -513,7 +513,7 @@ function LeadRightRail({
 
           <DetailRailSection title="Property">
             <DetailRailItem
-              label="Linked property"
+              label="Property"
               value={
                 lead.propertyId ? (
                   <Link to={`/properties/${lead.propertyId}`} className="text-brand-red hover:underline">

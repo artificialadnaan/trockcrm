@@ -312,6 +312,7 @@ export function LeadQuestionnaireSections({
 
             return (
               <div key={group.key} data-scope-group={group.key} className="rounded-md border">
+                {/* The applies question stays inside the collapsed group so every scope section uses the same accordion pattern. */}
                 <button
                   type="button"
                   aria-expanded={isOpen}

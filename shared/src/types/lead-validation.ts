@@ -80,7 +80,7 @@ export const LEAD_VALIDATION_QUESTION_SETS: Record<
       },
       {
         id: "timeline_target",
-        label: "Timeline Target",
+        label: "Timeline Notes",
         prompt: "When does the customer need this project to move?",
         input: "text",
       },
@@ -122,7 +122,7 @@ export const LEAD_QUALIFICATION_FIELDS = [
   },
   {
     id: "timeline_status",
-    label: "Timeline Status",
+    label: "Timeline Target Date",
     input: "date",
   },
 ] as const;

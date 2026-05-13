@@ -2,7 +2,7 @@
 
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { MemoryRouter } from "react-router-dom";
 import type { ReactNode } from "react";
 import { FilesPage } from "./files-page";
@@ -16,6 +16,7 @@ const mocks = vi.hoisted(() => ({
   useDealsMock: vi.fn(),
   useContactsMock: vi.fn(),
   useAuthMock: vi.fn(),
+  apiMock: vi.fn(),
   fileUploadZoneMock: vi.fn(),
 }));
 
@@ -36,6 +37,10 @@ vi.mock("@/hooks/use-contacts", () => ({
 
 vi.mock("@/lib/auth", () => ({
   useAuth: mocks.useAuthMock,
+}));
+
+vi.mock("@/lib/api", () => ({
+  api: mocks.apiMock,
 }));
 
 vi.mock("@/components/files/file-upload-zone", () => ({
@@ -182,11 +187,23 @@ function mountPage() {
 describe("FilesPage", () => {
   let mounted: ReturnType<typeof mountPage> | null = null;
 
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
   beforeEach(() => {
     (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
     mounted?.unmount();
     mounted = null;
     vi.clearAllMocks();
+    vi.stubGlobal(
+      "IntersectionObserver",
+      class {
+        observe() {}
+        disconnect() {}
+      }
+    );
+    mocks.apiMock.mockResolvedValue({ url: "https://r2.example.test/preview.jpg" });
     mocks.useAuthMock.mockReturnValue({ user: { id: "user-1", role: "admin" } });
     mocks.useDealsMock.mockReturnValue({
       deals: [
@@ -275,6 +292,39 @@ describe("FilesPage", () => {
     expect(mounted.container.textContent).toContain("2.3 MB");
     expect(mounted.container.textContent).toContain("Brett Rios");
     expect(mounted.container.textContent).toContain("Photo");
+  });
+
+  it("lazy-loads an R2-backed image preview for photo cards", async () => {
+    vi.stubGlobal("IntersectionObserver", undefined);
+    mounted = mountPage();
+
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    const image = mounted.container.querySelector<HTMLImageElement>("[data-file-preview-image]");
+    expect(image?.getAttribute("src")).toBe("https://r2.example.test/preview.jpg");
+    expect(image?.getAttribute("alt")).toBe("Roof photo.jpg");
+    expect(mocks.apiMock).toHaveBeenCalledWith("/files/file-1/download?preview=1");
+  });
+
+  it("keeps PDFs on file-type icons instead of the camera placeholder", () => {
+    setupFiles([
+      makeFile({
+        id: "pdf-1",
+        category: "contract",
+        displayName: "Signed contract",
+        originalFilename: "signed-contract.pdf",
+        mimeType: "application/pdf",
+        fileSizeBytes: 1024 * 1024,
+        fileExtension: ".pdf",
+      }),
+    ]);
+
+    mounted = mountPage();
+
+    expect(mounted.container.textContent).toContain("PDF");
+    expect(mounted.container.querySelector("[data-file-preview-image]")).toBeNull();
   });
 
   it("does not expose uploader UUIDs or HS-prefixed deal numbers", () => {
