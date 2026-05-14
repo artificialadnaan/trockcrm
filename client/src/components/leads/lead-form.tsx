@@ -174,6 +174,8 @@ const LEAD_QUALIFICATION_FIELD_LABELS = new Map(
 const EDITABLE_QUALIFICATION_FIELDS = LEAD_QUALIFICATION_FIELDS.filter(
   (field) => field.id !== "existing_customer_status"
 );
+const V2_QUALIFICATION_DUPLICATE_KEYS = new Set(["timeline"]);
+const V2_QUALIFICATION_DUPLICATE_LABELS = new Map([["timeline", "Timeline Target Date"]]);
 
 function normalizeLeadSourceForForm(lead?: LeadFormLead, initialSource?: string) {
   const category = lead?.sourceCategory ?? null;
@@ -791,7 +793,11 @@ function EditableLeadForm({
     [questionnaireTemplateNodes]
   );
   const v2RenderedQuestionNodes = useMemo(
-    () => v2QuestionNodes.filter((node) => !["bid_due_date", "number_of_bidders", "poc"].includes(node.key)),
+    () =>
+      v2QuestionNodes.filter(
+        (node) => !["bid_due_date", "number_of_bidders", "poc"].includes(node.key) &&
+          !V2_QUALIFICATION_DUPLICATE_KEYS.has(node.key)
+      ),
     [v2QuestionNodes]
   );
   const numberOfBiddersNode = useMemo(
@@ -1115,9 +1121,21 @@ function EditableLeadForm({
     }
 
     if (isCreate && useV2Questionnaire) {
+      const visibleCache = new Map<string, boolean>();
       const missingRequiredQuestions = v2VisibleQuestionNodes
         .filter((node) => node.isRequired && !isAnsweredQuestionValue(formData.projectTypeQuestionAnswers[node.key]))
         .map((node) => node.label);
+      const missingRequiredQualificationQuestions = v2QuestionNodes
+        .filter((node) => V2_QUALIFICATION_DUPLICATE_KEYS.has(node.key))
+        .filter((node) => node.isRequired)
+        .filter((node) => isVisibleQuestionNode(node.id, v2NodeById, formData.projectTypeQuestionAnswers, visibleCache))
+        .filter((node) =>
+          node.key === "timeline"
+            ? !isAnsweredQuestionValue(formData.qualificationPayload.timeline_status)
+            : true
+        )
+        .map((node) => V2_QUALIFICATION_DUPLICATE_LABELS.get(node.key) ?? node.label);
+      missingRequiredQuestions.push(...missingRequiredQualificationQuestions);
 
       if (missingRequiredQuestions.length > 0) {
         setError(`Answer required project intake questions: ${missingRequiredQuestions.join(", ")}`);
@@ -1130,6 +1148,7 @@ function EditableLeadForm({
     setStageGateError(null);
 
     try {
+      const normalizedTimelineStatus = normalizeTimelineStatusForSave(formData.qualificationPayload.timeline_status);
       const workflowPayload = {
         projectTypeId: formData.projectTypeId || null,
         qualificationPayload: {
@@ -1138,7 +1157,7 @@ function EditableLeadForm({
             formData.qualificationPayload.estimated_value.trim() === ""
               ? null
               : Number(formData.qualificationPayload.estimated_value),
-          timeline_status: normalizeTimelineStatusForSave(formData.qualificationPayload.timeline_status),
+          timeline_status: normalizedTimelineStatus,
         },
         projectTypeQuestionPayload: useV2Questionnaire
           ? undefined
@@ -1153,7 +1172,12 @@ function EditableLeadForm({
             },
         leadQuestionAnswers: useV2Questionnaire
           ? Object.fromEntries(
-              v2QuestionNodes.map((node) => [node.key, formData.projectTypeQuestionAnswers[node.key] ?? null])
+              v2QuestionNodes.map((node) => [
+                node.key,
+                node.key === "timeline"
+                  ? normalizedTimelineStatus
+                  : formData.projectTypeQuestionAnswers[node.key] ?? null,
+              ])
             )
           : Object.fromEntries(
               questionSet.questions.map((question) => [
