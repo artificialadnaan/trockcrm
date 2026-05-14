@@ -1,6 +1,6 @@
 import { and, eq } from "drizzle-orm";
 import type { NodePgDatabase } from "drizzle-orm/node-postgres";
-import { deals, files, leads } from "@trock-crm/shared/schema";
+import { companies, deals, files, leads } from "@trock-crm/shared/schema";
 import type * as schema from "@trock-crm/shared/schema";
 import { toCanonicalLeadStageSlug, type FileCategory, type WorkflowRoute } from "@trock-crm/shared/types";
 import { AppError } from "../../middleware/error-handler.js";
@@ -17,6 +17,7 @@ import {
 import { LeadStageTransitionError } from "./stage-transition-service.js";
 import { computeExistingCustomerStatus } from "../companies/customer-status-service.js";
 import { resolveLeadSourceDisplayValue } from "./source-control.js";
+import { logActivity, type AuditContext } from "../audit/audit-logger.js";
 
 type TenantDb = NodePgDatabase<typeof schema>;
 
@@ -106,6 +107,7 @@ export interface ConvertLeadInput {
   projectTypeId?: string | null;
   regionId?: string;
   expectedCloseDate?: string;
+  auditContext?: AuditContext;
 }
 
 interface LeadConversionDependencies {
@@ -325,6 +327,7 @@ export function createLeadConversionService(
       projectTypeId: input.projectTypeId ?? lead.projectTypeId ?? undefined,
       regionId: input.regionId,
       expectedCloseDate: input.expectedCloseDate,
+      auditContext: input.auditContext,
     });
 
     await attachLeadFilesToConvertedDeal(tenantDb, lead.id, deal.id);
@@ -343,6 +346,37 @@ export function createLeadConversionService(
       })
       .where(eq(leads.id, input.leadId))
       .returning();
+
+    if (input.auditContext) {
+      const [company] = await tenantDb
+        .select()
+        .from(companies)
+        .where(eq(companies.id, lead.companyId))
+        .limit(1);
+
+      await logActivity({
+        tenantDb,
+        actor: input.auditContext.actor,
+        action: "update",
+        entity: {
+          tableName: "leads",
+          entityType: "lead",
+          recordId: input.leadId,
+          nameSnapshot: company?.name ? `${lead.name} for ${company.name}` : lead.name,
+          secondaryIdSnapshot: null,
+        },
+        fieldChanges: {
+          status: { from: lead.status, to: "converted" },
+          isActive: { from: lead.isActive, to: false },
+        },
+        metadata: {
+          convertedToDealId: deal.id,
+          convertedToDealNumber: deal.dealNumber ?? null,
+        },
+        ipAddress: input.auditContext.ipAddress ?? null,
+        userAgent: input.auditContext.userAgent ?? null,
+      });
+    }
 
     return {
       lead: updatedLead ?? {

@@ -1,5 +1,5 @@
 import { describe, expect, it, vi, beforeEach } from "vitest";
-import { dealApprovals, deals, dealStageHistory, jobQueue, tasks } from "@trock-crm/shared/schema";
+import { auditLog, dealApprovals, deals, dealStageHistory, jobQueue, tasks } from "@trock-crm/shared/schema";
 
 vi.mock("../../../src/modules/deals/stage-gate.js", () => ({
   validateStageGate: vi.fn(),
@@ -117,6 +117,7 @@ function createTenantDb(overrides?: Partial<FakeDeal>) {
       },
     ] as FakeDeal[],
     stageHistory: [] as Array<Record<string, unknown>>,
+    auditLog: [] as Array<Record<string, unknown>>,
     jobs: [] as Array<Record<string, unknown>>,
   };
 
@@ -214,6 +215,11 @@ function createTenantDb(overrides?: Partial<FakeDeal>) {
                 return Promise.resolve([row]).then(onfulfilled);
               },
             };
+          }
+
+          if (name === tableName(auditLog)) {
+            state.auditLog.push(row);
+            return Promise.resolve([]);
           }
 
           throw new Error(`Unexpected insert on ${name}`);
@@ -981,6 +987,62 @@ describe("changeDealStage", () => {
       code: "BID_BOARD_BOUNDARY_STAGE_MISSING",
       message: BID_BOARD_BOUNDARY_STAGE_MISSING_MESSAGE,
     });
+  });
+
+  it("writes a rich audit_log entry for stage transitions when audit context is present", async () => {
+    const tenantDb = createTenantDb();
+    vi.mocked(validateStageGate).mockResolvedValue({
+      allowed: true,
+      isBackwardMove: false,
+      requiresOverride: false,
+      targetStage: {
+        id: "stage-opportunity",
+        name: "Opportunity",
+        slug: "opportunity",
+        isTerminal: false,
+        displayOrder: 3,
+      },
+      currentStage: {
+        id: "stage-discovery",
+        name: "Discovery",
+        slug: "discovery",
+        isTerminal: false,
+        displayOrder: 2,
+      },
+    } as never);
+
+    await changeDealStage(tenantDb as never, {
+      dealId: "deal-1",
+      targetStageId: "stage-opportunity",
+      userId: "user-1",
+      userRole: "director",
+      auditContext: {
+        actor: {
+          type: "user",
+          userId: "director-1",
+          name: "Director User",
+          role: "director",
+        },
+      },
+    });
+
+    expect(tenantDb.state.auditLog).toEqual([
+      expect.objectContaining({
+        tableName: "deals",
+        recordId: "deal-1",
+        action: "update",
+        actorName: "Director User",
+        entityType: "deal",
+        entityNameSnapshot: "Palm Villas",
+        fieldChangesJsonb: [
+          expect.objectContaining({
+            key: "stageId",
+            fromDisplay: "Discovery",
+            toDisplay: "Opportunity",
+          }),
+        ],
+      }),
+    ]);
   });
 
 });

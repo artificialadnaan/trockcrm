@@ -35,6 +35,7 @@ import { isContractSignedHandoffEnabled } from "../../config/feature-flags.js";
 import { resolveActiveOfficeUserIds, resolveTeamRepIds } from "../shared/team-scope.js";
 import { resolveLeadSourceDisplayValue } from "../leads/source-control.js";
 import { resolveDealCreationPolicy, type DealCreationOrigin } from "./direct-create-rules.js";
+import { logActivity, type AuditContext } from "../audit/audit-logger.js";
 
 // Type alias for the tenant-scoped Drizzle instance
 type TenantDb = NodePgDatabase<typeof schema>;
@@ -105,6 +106,7 @@ export interface CreateDealInput {
   source?: string;
   winProbability?: number;
   expectedCloseDate?: string;
+  auditContext?: AuditContext;
 }
 
 export interface UpdateDealInput {
@@ -133,6 +135,7 @@ export interface UpdateDealInput {
   proposalStatus?: string | null;
   proposalNotes?: string | null;
   estimatingSubstage?: string | null;
+  auditContext?: AuditContext;
 }
 
 type DealLineageRequirementInput = Pick<CreateDealInput, "migrationMode" | "creationContext">;
@@ -257,6 +260,41 @@ function addUtcDays(value: Date, days: number) {
   const next = new Date(value);
   next.setUTCDate(next.getUTCDate() + days);
   return next;
+}
+
+function getDealSecondaryIdSnapshot(deal: Pick<DealRow, "projectNumber" | "dealNumber">) {
+  return deal.projectNumber ?? deal.dealNumber ?? null;
+}
+
+function buildDealAuditEntity(
+  deal: Pick<DealRow, "id" | "name" | "projectNumber" | "dealNumber">
+) {
+  return {
+    tableName: "deals",
+    entityType: "deal" as const,
+    recordId: deal.id,
+    nameSnapshot: deal.name,
+    secondaryIdSnapshot: getDealSecondaryIdSnapshot(deal),
+  };
+}
+
+function toIsoIfDate(value: unknown) {
+  return value instanceof Date ? value.toISOString() : value ?? null;
+}
+
+function buildRawFieldChanges(
+  before: Record<string, unknown>,
+  after: Record<string, unknown>,
+  keys: string[]
+) {
+  const changes: Record<string, { from: unknown; to: unknown }> = {};
+  for (const key of keys) {
+    const from = toIsoIfDate(before[key]);
+    const to = toIsoIfDate(after[key]);
+    if (from === to) continue;
+    changes[key] = { from, to };
+  }
+  return changes;
 }
 
 function parseIsoDateParam(value: string | undefined): Date | null {
@@ -1142,18 +1180,38 @@ export async function createDeal(tenantDb: TenantDb, input: CreateDealInput) {
 
   const newDeal = result[0];
 
-  await writeAuditLog(tenantDb, {
-    tableName: "deals",
-    recordId: newDeal.id,
-    action: "insert",
-    changedBy: input.actorUserId ?? null,
-    fullRow: {
-      id: newDeal.id,
-      dealNumber: newDeal.dealNumber,
-      creationOrigin: creationPolicy.origin,
-      sourceLeadId: newDeal.sourceLeadId,
-    },
-  });
+  if (input.auditContext) {
+    await logActivity({
+      tenantDb,
+      actor: input.auditContext.actor,
+      action: "insert",
+      entity: buildDealAuditEntity(newDeal),
+      fieldChanges: {
+        name: { from: null, to: newDeal.name },
+        stageId: { from: null, to: stage.name ?? input.stageId },
+        assignedRepId: { from: null, to: newDeal.assignedRepId },
+      },
+      metadata: {
+        creationOrigin: creationPolicy.origin,
+        sourceLeadId: newDeal.sourceLeadId,
+      },
+      ipAddress: input.auditContext.ipAddress ?? null,
+      userAgent: input.auditContext.userAgent ?? null,
+    });
+  } else {
+    await writeAuditLog(tenantDb, {
+      tableName: "deals",
+      recordId: newDeal.id,
+      action: "insert",
+      changedBy: input.actorUserId ?? null,
+      fullRow: {
+        id: newDeal.id,
+        dealNumber: newDeal.dealNumber,
+        creationOrigin: creationPolicy.origin,
+        sourceLeadId: newDeal.sourceLeadId,
+      },
+    });
+  }
 
   // Queue geocode as background job (the tenantDb connection will be released after commit)
   const { propertyAddress, propertyCity, propertyState, propertyZip, officeId } = input;
@@ -1409,6 +1467,45 @@ export async function updateDeal(
     .returning();
 
   const updatedDeal = result[0];
+  const auditFieldChanges = buildRawFieldChanges(
+    existing as Record<string, unknown>,
+    updatedDeal as Record<string, unknown>,
+    [
+      "name",
+      "assignedRepId",
+      "primaryContactId",
+      "ddEstimate",
+      "bidEstimate",
+      "awardedAmount",
+      "description",
+      "propertyAddress",
+      "propertyCity",
+      "propertyState",
+      "propertyZip",
+      "projectType",
+      "projectTypeId",
+      "regionId",
+      "source",
+      "winProbability",
+      "expectedCloseDate",
+      "proposalStatus",
+      "proposalNotes",
+      "estimatingSubstage",
+      "workflowRoute",
+    ]
+  );
+
+  if (input.auditContext && Object.keys(auditFieldChanges).length > 0) {
+    await logActivity({
+      tenantDb,
+      actor: input.auditContext.actor,
+      action: "update",
+      entity: buildDealAuditEntity(updatedDeal),
+      fieldChanges: auditFieldChanges,
+      ipAddress: input.auditContext.ipAddress ?? null,
+      userAgent: input.auditContext.userAgent ?? null,
+    });
+  }
 
   if (assignedRepChanged && updatedDeal) {
     const changedAt = new Date();
@@ -1493,7 +1590,8 @@ export async function startProposalDraft(
   tenantDb: TenantDb,
   dealId: string,
   userRole: string,
-  userId: string
+  userId: string,
+  auditContext?: AuditContext
 ) {
   const existing = await getDealById(tenantDb, dealId, userRole, userId);
   if (!existing) {
@@ -1528,28 +1626,49 @@ export async function startProposalDraft(
     .where(eq(deals.id, dealId))
     .returning();
 
-  await writeAuditLog(tenantDb, {
-    tableName: "proposal_drafts",
-    recordId: dealId,
-    action: "insert",
-    changedBy: userId,
-    changes: {
-      proposalStatus: {
-        from: existing.proposalStatus ?? "not_started",
-        to: "drafting",
+  if (auditContext) {
+    await logActivity({
+      tenantDb,
+      actor: auditContext.actor,
+      action: "update",
+      entity: buildDealAuditEntity(updatedDeal),
+      fieldChanges: {
+        proposalStatus: {
+          from: existing.proposalStatus ?? "not_started",
+          to: "drafting",
+        },
+        proposalDraftStartedAt: {
+          from: existing.proposalDraftStartedAt ? existing.proposalDraftStartedAt.toISOString() : null,
+          to: startedAt.toISOString(),
+        },
       },
-      proposalDraftStartedAt: {
-        from: existing.proposalDraftStartedAt ?? null,
-        to: startedAt.toISOString(),
+      ipAddress: auditContext.ipAddress ?? null,
+      userAgent: auditContext.userAgent ?? null,
+    });
+  } else {
+    await writeAuditLog(tenantDb, {
+      tableName: "proposal_drafts",
+      recordId: dealId,
+      action: "insert",
+      changedBy: userId,
+      changes: {
+        proposalStatus: {
+          from: existing.proposalStatus ?? "not_started",
+          to: "drafting",
+        },
+        proposalDraftStartedAt: {
+          from: existing.proposalDraftStartedAt ?? null,
+          to: startedAt.toISOString(),
+        },
       },
-    },
-    fullRow: {
-      dealId,
-      status: "draft",
-      startedAt: startedAt.toISOString(),
-      createdBy: userId,
-    },
-  });
+      fullRow: {
+        dealId,
+        status: "draft",
+        startedAt: startedAt.toISOString(),
+        createdBy: userId,
+      },
+    });
+  }
 
   return updatedDeal;
 }
@@ -1895,7 +2014,8 @@ export async function setDealContractSignedDate(
   dealId: string,
   contractSignedDate: string | null,
   userId: string,
-  officeId: string | null = null
+  officeId: string | null = null,
+  auditContext?: AuditContext
 ): Promise<typeof deals.$inferSelect | null> {
   return tenantDb.transaction(async (tx) => {
     const [existing] = await tx
@@ -1947,19 +2067,33 @@ export async function setDealContractSignedDate(
 
     if (!updated) return null;
 
-    await writeAuditLog(tx, {
-      tableName: "deals",
-      recordId: dealId,
-      action: "update",
-      changedBy: userId,
-      changes: {
-        contractSignedDate: { from: oldValue, to: newValue },
-        contractSignedAt: {
-          from: oldContractSignedAt ? oldContractSignedAt.toISOString() : null,
-          to: newContractSignedAt ? newContractSignedAt.toISOString() : null,
-        },
+    const contractChangeSet = {
+      contractSignedDate: { from: oldValue, to: newValue },
+      contractSignedAt: {
+        from: oldContractSignedAt ? oldContractSignedAt.toISOString() : null,
+        to: newContractSignedAt ? newContractSignedAt.toISOString() : null,
       },
-    });
+    };
+
+    if (auditContext) {
+      await logActivity({
+        tenantDb: tx,
+        actor: auditContext.actor,
+        action: "update",
+        entity: buildDealAuditEntity(updated),
+        fieldChanges: contractChangeSet,
+        ipAddress: auditContext.ipAddress ?? null,
+        userAgent: auditContext.userAgent ?? null,
+      });
+    } else {
+      await writeAuditLog(tx, {
+        tableName: "deals",
+        recordId: dealId,
+        action: "update",
+        changedBy: userId,
+        changes: contractChangeSet,
+      });
+    }
 
     // Commission fires only on null → date. Edits and clears do not
     // recalculate (per Decision 5; recalc-on-edit is a TODO follow-up).

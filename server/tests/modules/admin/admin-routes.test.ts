@@ -111,7 +111,7 @@ vi.mock("../../../src/modules/admin/users-service.js", () => ({
   updatePipelineStage: vi.fn(),
   reorderPipelineStages: vi.fn(),
   getAuditLog: vi.fn(),
-  getAuditLogTables: vi.fn(),
+  getAuditLogEntityTypes: vi.fn(),
   getUserLocalAuthEvents: mocks.getUserLocalAuthEvents,
 }));
 

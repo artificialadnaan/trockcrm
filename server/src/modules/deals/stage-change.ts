@@ -24,6 +24,7 @@ import {
   isBidBoardOwnedDownstreamStage,
 } from "./service.js";
 import { inferDealBidBoardOwnership } from "./workflow-backfill.js";
+import { logActivity, type AuditContext } from "../audit/audit-logger.js";
 
 type TenantDb = NodePgDatabase<typeof schema>;
 
@@ -91,6 +92,7 @@ export interface StageChangeInput {
   lostReasonId?: string;
   lostNotes?: string;
   lostCompetitor?: string;
+  auditContext?: AuditContext;
 }
 
 export interface StageChangeResult {
@@ -328,6 +330,35 @@ export async function changeDealStage(
     .where(eq(deals.id, dealId))
     .returning();
   const updatedDeal = updatedDealResult[0];
+
+  if (input.auditContext) {
+    await logActivity({
+      tenantDb,
+      actor: input.auditContext.actor,
+      action: "update",
+      entity: {
+        tableName: "deals",
+        entityType: "deal",
+        recordId: updatedDeal.id,
+        nameSnapshot: updatedDeal.name,
+        secondaryIdSnapshot: updatedDeal.projectNumber ?? updatedDeal.dealNumber ?? null,
+      },
+      fieldChanges: {
+        stageId: {
+          from: currentStage.name ?? currentStage.slug,
+          to: targetStage.name ?? targetStage.slug,
+        },
+      },
+      metadata: {
+        overrideReason: overrideReason ?? null,
+        lostReasonId: lostReasonId ?? null,
+        lostNotes: lostNotes ?? null,
+        lostCompetitor: lostCompetitor ?? null,
+      },
+      ipAddress: input.auditContext.ipAddress ?? null,
+      userAgent: input.auditContext.userAgent ?? null,
+    });
+  }
 
   // Auto-dismiss pending/in-progress tasks when deal reaches a terminal stage
   if (targetStage.isTerminal) {
