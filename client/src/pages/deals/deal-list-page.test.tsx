@@ -253,6 +253,14 @@ describe("DealListPage", () => {
     expect(html).toContain("Service Hospital Roof");
   });
 
+  it("renders the Service-only direct-create button in the Deals header without the old New Deal button", () => {
+    const html = renderPage();
+
+    expect(html).toContain("New Service Opportunity");
+    expect(html).not.toContain("New Deal");
+    expect(html).not.toContain("/deals/new");
+  });
+
   it("renders decorated cards with project number fallback, avatar, company, SLA, and location", () => {
     mocks.useDealBoardMock.mockReturnValue({
       board: {

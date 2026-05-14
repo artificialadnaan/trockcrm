@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { Router } from "express";
 import { and, eq, desc, isNotNull, isNull, or, sql } from "drizzle-orm";
-import { dealApprovals, deals, jobQueue } from "@trock-crm/shared/schema";
+import { companies, dealApprovals, deals, jobQueue, properties } from "@trock-crm/shared/schema";
 import { requireRole } from "../../middleware/rbac.js";
 import { AppError } from "../../middleware/error-handler.js";
 import { requestAuditContext, writeSoftDeleteAuditLog } from "../../lib/soft-delete-audit.js";
@@ -131,7 +131,7 @@ import {
 import { resolveSyncHubRfpRequestUrl } from "./rfp-payload.js";
 import { insertOpportunityRfpRequestJob } from "./rfp-enqueue.js";
 import { isOpportunityRfpEventEnabled } from "../../config/feature-flags.js";
-import { getAllStages } from "../pipeline/service.js";
+import { getActiveProjectTypes, getAllStages, getStageBySlug } from "../pipeline/service.js";
 import { resolveDealCreateOfficeCode } from "./create-context.js";
 
 const router = Router();
@@ -963,6 +963,142 @@ function validateDealPayload(body: Record<string, unknown>): void {
     }
   }
 }
+
+function normalizeServiceCandidate(value: unknown) {
+  return String(value ?? "").trim().toLowerCase().replace(/[-_]+/g, " ").replace(/\s+/g, " ");
+}
+
+async function resolveServiceProjectType(projectTypeId: unknown, projectType: unknown) {
+  const projectTypes = await getActiveProjectTypes();
+  const serviceType = projectTypes.find((entry) => normalizeServiceCandidate(entry.slug) === "service") ??
+    projectTypes.find((entry) => normalizeServiceCandidate(entry.name) === "service");
+
+  if (!serviceType) {
+    throw new AppError(500, "Service project type is not configured.");
+  }
+
+  if (projectTypeId != null && projectTypeId !== "") {
+    const selected = projectTypes.find((entry) => entry.id === projectTypeId);
+    if (!selected || normalizeServiceCandidate(selected.slug || selected.name) !== "service") {
+      throw new AppError(400, "Direct-create is only available for Service projects.");
+    }
+  }
+
+  if (projectType != null && projectType !== "" && normalizeServiceCandidate(projectType) !== "service") {
+    throw new AppError(400, "Direct-create is only available for Service projects.");
+  }
+
+  return serviceType;
+}
+
+async function assertServiceOpportunityHierarchy(
+  tenantDb: Parameters<typeof createDeal>[0],
+  input: { companyId: string; propertyId: string }
+) {
+  const [companyRows, propertyRows] = await Promise.all([
+    tenantDb
+      .select({ id: companies.id })
+      .from(companies)
+      .where(and(eq(companies.id, input.companyId), eq(companies.isActive, true)))
+      .limit(1),
+    tenantDb
+      .select({ id: properties.id, companyId: properties.companyId })
+      .from(properties)
+      .where(and(eq(properties.id, input.propertyId), eq(properties.isActive, true)))
+      .limit(1),
+  ]);
+
+  const company = companyRows[0] ?? null;
+  if (!company) {
+    throw new AppError(400, "Company not found");
+  }
+
+  const property = propertyRows[0] ?? null;
+  if (!property) {
+    throw new AppError(400, "Property not found");
+  }
+
+  if (property.companyId !== input.companyId) {
+    throw new AppError(400, "Property does not belong to the company");
+  }
+}
+
+// POST /api/deals/service-opportunity — direct-create a Service-only Opportunity.
+router.post("/service-opportunity", async (req, res, next) => {
+  try {
+    const {
+      name,
+      assignedRepId,
+      companyId,
+      propertyId,
+      primaryContactId,
+      description,
+      source,
+      winProbability,
+      expectedCloseDate,
+      projectTypeId,
+      projectType,
+      officeCode,
+    } = req.body;
+    if (!name) {
+      throw new AppError(400, "Name is required");
+    }
+    if (!companyId || !propertyId) {
+      throw new AppError(400, "Company and property are required");
+    }
+    validateDealPayload(req.body);
+    await assertServiceOpportunityHierarchy(req.tenantDb!, { companyId, propertyId });
+
+    const serviceProjectType = await resolveServiceProjectType(projectTypeId, projectType);
+    const opportunityStage = await getStageBySlug("opportunity", "standard_deal");
+    if (!opportunityStage) {
+      throw new AppError(500, "Canonical opportunity stage config is incomplete");
+    }
+
+    let repId: string;
+    if (req.user!.role === "rep") {
+      repId = req.user!.id;
+    } else {
+      repId = assignedRepId || req.user!.id;
+    }
+
+    const officeCodeResolution = resolveDealCreateOfficeCode({
+      requestedOfficeCode: officeCode,
+      officeSlug: req.officeSlug,
+    });
+    if ("error" in officeCodeResolution) {
+      throw new AppError(400, officeCodeResolution.error);
+    }
+
+    const deal = await createDeal(req.tenantDb!, {
+      name,
+      assignedRepId: repId,
+      actorUserId: req.user!.id,
+      officeId: req.user!.activeOfficeId,
+      creationContext: "direct",
+      // RFP eligibility for direct-created Service opportunities depends on
+      // the service workflow route. The RFP request/status fields intentionally
+      // remain null until the normal Trigger RFP path reserves the request.
+      stageId: opportunityStage.id,
+      primaryContactId,
+      companyId,
+      propertyId,
+      description,
+      source,
+      winProbability,
+      expectedCloseDate,
+      workflowRoute: "service",
+      projectType: "service",
+      projectTypeId: serviceProjectType.id,
+      officeCode: officeCodeResolution.officeCode,
+    });
+    await req.commitTransaction!();
+    const includeHubspotId = shouldIncludeHubspotId(req.query, req.user!.role);
+    res.status(201).json({ deal: redactDealResponse(deal, { includeHubspotId }) });
+  } catch (err) {
+    next(err);
+  }
+});
 
 // POST /api/deals — create a new deal
 router.post("/", async (req, res, next) => {
