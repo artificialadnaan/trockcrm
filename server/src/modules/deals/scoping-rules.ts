@@ -44,6 +44,8 @@ const REQUIRED_SCOPING_SECTIONS = [
   "scopeSummary",
   "attachments",
 ] as const;
+// Attachments remain visible/uploadable in the scoping workspace, but they are
+// informational for readiness and RFP triggering.
 const SERVICE_REQUIRED_ATTACHMENT_KEYS = [] as const;
 const STANDARD_REQUIRED_ATTACHMENT_KEYS = [] as const;
 

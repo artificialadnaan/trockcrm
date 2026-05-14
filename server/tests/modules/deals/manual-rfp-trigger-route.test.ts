@@ -338,6 +338,29 @@ describe("POST /api/deals/:id/trigger-rfp", () => {
     expect(insertRfpJobMock).not.toHaveBeenCalled();
   });
 
+  it("does not block attachment-only scoping gaps when triggering RFP", async () => {
+    const { req, state } = makeReq({ readinessStatus: "draft" });
+    evaluateReadinessMock.mockResolvedValueOnce({
+      status: "draft",
+      errors: { sections: {}, attachments: { scope_docs: ["scope_docs"], site_photos: ["site_photos"] } },
+    });
+    const res = makeRes();
+    const next = vi.fn();
+
+    await findRouteHandler("post", "/:id/trigger-rfp")(req, res, next);
+
+    expect(next).not.toHaveBeenCalled();
+    expect(res.statusCode).toBe(200);
+    expect(res.body).toEqual(
+      expect.objectContaining({
+        success: true,
+        status: "pending_outbox",
+      })
+    );
+    expect(state.updatesAttempted).toBe(1);
+    expect(insertRfpJobMock).toHaveBeenCalledTimes(1);
+  });
+
   it("rejects an already-triggered deal", async () => {
     const { req } = makeReq({
       deal: {
