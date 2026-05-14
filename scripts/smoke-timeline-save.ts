@@ -159,8 +159,10 @@ async function findFixture(session: Session): Promise<Fixture> {
   for (const property of properties) {
     const propertyId = property.id;
     const companyId = property.companyId ?? property.company_id;
+    const buildYear = property.buildYear ?? property.build_year;
+    const unitCount = property.unitCount ?? property.unit_count;
     if (!propertyId || !companyId) continue;
-    if (!property.address || !property.zip || !property.buildYear || !property.unitCount) continue;
+    if (!property.address || !property.zip || !buildYear || !unitCount) continue;
 
     const contactsResult = await apiJson<unknown>(
       `${apiBaseUrl()}/api/contacts?page=1&limit=25&companyId=${encodeURIComponent(companyId)}`,
