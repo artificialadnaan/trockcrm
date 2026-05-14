@@ -33,6 +33,9 @@ export const ALLOWED_MIME_TYPES: Record<string, string> = {
   // Presentations
   "application/vnd.ms-powerpoint": ".ppt",
   "application/vnd.openxmlformats-officedocument.presentationml.presentation": ".pptx",
+  // Email exports
+  "message/rfc822": ".eml",
+  "application/vnd.ms-outlook": ".msg",
   // Other
   "text/plain": ".txt",
   "application/zip": ".zip",
@@ -47,6 +50,7 @@ export const ALLOWED_EXTENSIONS = new Set([
   ".pdf", ".doc", ".docx",
   ".xls", ".xlsx", ".csv",
   ".ppt", ".pptx",
+  ".eml", ".msg",
   ".txt", ".zip",
 ]);
 
@@ -137,6 +141,8 @@ export const MIME_TO_EXTENSIONS: Record<string, string[]> = {
   "text/csv": [".csv"],
   "application/vnd.ms-powerpoint": [".ppt"],
   "application/vnd.openxmlformats-officedocument.presentationml.presentation": [".pptx"],
+  "message/rfc822": [".eml"],
+  "application/vnd.ms-outlook": [".msg"],
   "text/plain": [".txt"],
   "application/zip": [".zip"],
   "application/x-zip-compressed": [".zip"],

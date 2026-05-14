@@ -8,6 +8,7 @@ import {
   Trash2,
   Edit,
   History,
+  Mail,
 } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -33,6 +34,7 @@ function getFileIcon(mimeType: string) {
   if (mimeType === "application/pdf" || mimeType.includes("word")) return FileText;
   if (mimeType.includes("sheet") || mimeType.includes("excel") || mimeType === "text/csv")
     return FileSpreadsheet;
+  if (mimeType === "message/rfc822" || mimeType === "application/vnd.ms-outlook") return Mail;
   return FileIcon;
 }
 

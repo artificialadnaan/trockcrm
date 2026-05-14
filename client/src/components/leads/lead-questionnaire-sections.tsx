@@ -25,6 +25,7 @@ interface LeadQuestionnaireSectionsProps {
   onAnswerChange: (key: string, value: LeadAnswerValue) => void;
   legacyAnswers?: LegacyLeadQuestionnaireAnswer[];
   showLegacyAnswers?: boolean;
+  renderQuestionOverride?: (node: LeadQuestionnaireNode) => ReactNode | null;
 }
 
 function isVisibleQuestion(
@@ -105,6 +106,7 @@ export function LeadQuestionnaireSections({
   onAnswerChange,
   legacyAnswers,
   showLegacyAnswers = false,
+  renderQuestionOverride,
 }: LeadQuestionnaireSectionsProps) {
   const [openScopeGroups, setOpenScopeGroups] = useState<Record<string, boolean>>({});
   const scopedNodes = useMemo(() => nodes.filter((node) => node.nodeType === "question"), [nodes]);
@@ -192,6 +194,9 @@ export function LeadQuestionnaireSections({
   };
 
   const renderQuestion = (node: LeadQuestionnaireNode, options?: { nested?: boolean }) => {
+    const override = renderQuestionOverride?.(node);
+    if (override) return override;
+
     const inputType = getQuestionInputType(node);
     const currentValue = answers[node.key];
     const questionOptions = normalizeQuestionOptions(node.options);

@@ -52,6 +52,7 @@ export interface SendEmailInput {
 
 export interface EmailFilters {
   dealId?: string;
+  leadId?: string;
   contactId?: string;
   direction?: "inbound" | "outbound";
   filter?: "all" | "unread" | "unassigned" | "sent";
@@ -1045,12 +1046,16 @@ export async function getEmails(
   }
 
   if (filters.dealId) {
-    conditions.push(
-      or(
+    const dealConditions = [
         eq(emails.dealId, filters.dealId),
-        and(eq(emails.assignedEntityType, "deal"), eq(emails.assignedEntityId, filters.dealId))
-      )
-    );
+        and(eq(emails.assignedEntityType, "deal"), eq(emails.assignedEntityId, filters.dealId)),
+    ];
+    if (filters.leadId) {
+      dealConditions.push(and(eq(emails.assignedEntityType, "lead"), eq(emails.assignedEntityId, filters.leadId)));
+    }
+    conditions.push(or(...dealConditions));
+  } else if (filters.leadId) {
+    conditions.push(and(eq(emails.assignedEntityType, "lead"), eq(emails.assignedEntityId, filters.leadId)));
   }
   if (filters.contactId) {
     conditions.push(

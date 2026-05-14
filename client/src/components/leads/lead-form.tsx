@@ -72,6 +72,9 @@ import {
   questionnaireRevealMatches,
 } from "./questionnaire-display";
 import { LeadQuestionnaireSections } from "./lead-questionnaire-sections";
+import { uploadFile } from "@/hooks/use-files";
+import { ALLOWED_EXTENSIONS, validateFileForUpload } from "@/lib/file-utils";
+import { CLIENT_PROVIDED_DOCS_TAG, inferClientProvidedDocsCategory } from "@/lib/lead-attachment-routing";
 
 export interface LeadFormLead {
   id: string;
@@ -344,6 +347,55 @@ function QuestionLabel({
         </span>
       ) : null}
     </Label>
+  );
+}
+
+function ClientProvidedDocsUploadField({
+  files,
+  onAddFiles,
+  onRemoveFile,
+  disabled = false,
+}: {
+  files: File[];
+  onAddFiles: (files: File[]) => void;
+  onRemoveFile: (index: number) => void;
+  disabled?: boolean;
+}) {
+  const accept = Array.from(ALLOWED_EXTENSIONS).join(",");
+
+  return (
+    <div data-question-key="client_provided_docs" className="space-y-3 rounded-md border p-3">
+      <QuestionLabel htmlFor="client-provided-docs-upload">
+        Client Provided Docs (Plans, Scope, Specs)
+      </QuestionLabel>
+      <Input
+        id="client-provided-docs-upload"
+        type="file"
+        multiple
+        accept={accept}
+        disabled={disabled}
+        onChange={(event) => {
+          const nextFiles = Array.from(event.target.files ?? []);
+          onAddFiles(nextFiles);
+          event.currentTarget.value = "";
+        }}
+      />
+      <p className="text-xs text-muted-foreground">
+        Upload plans, scope documents, specs, email exports, or site photos. Files are attached to this lead and auto-routed when converted.
+      </p>
+      {files.length > 0 ? (
+        <div className="space-y-2">
+          {files.map((file, index) => (
+            <div key={`${file.name}-${file.size}-${index}`} className="flex items-center justify-between gap-3 rounded-md border bg-muted/20 px-3 py-2 text-sm">
+              <span className="min-w-0 truncate">{file.name}</span>
+              <Button type="button" variant="ghost" size="sm" onClick={() => onRemoveFile(index)}>
+                Remove
+              </Button>
+            </div>
+          ))}
+        </div>
+      ) : null}
+    </div>
   );
 }
 
@@ -656,6 +708,7 @@ function EditableLeadForm({
     unitCount: null,
   });
   const [repairedProperties, setRepairedProperties] = useState(new Map<string, PropertySurface>());
+  const [clientProvidedDocFiles, setClientProvidedDocFiles] = useState<File[]>([]);
 
   useEffect(() => {
     setFormData(getEditableFormState(lead, initialValues, initialOfficeCode));
@@ -1105,6 +1158,70 @@ function EditableLeadForm({
     clearCreateGateMissingKeys([`leadQuestionAnswers.${questionId}`]);
   };
 
+  const addClientProvidedDocs = (files: File[]) => {
+    const invalidFile = files.find((file) => validateFileForUpload(file));
+    if (invalidFile) {
+      setError(validateFileForUpload(invalidFile));
+      return;
+    }
+    setClientProvidedDocFiles((current) => [...current, ...files]);
+    setFormData((current) => ({
+      ...current,
+      projectTypeQuestionAnswers: {
+        ...current.projectTypeQuestionAnswers,
+        [CLIENT_PROVIDED_DOCS_TAG]: "uploaded",
+      },
+    }));
+    clearCreateGateMissingKeys([`leadQuestionAnswers.${CLIENT_PROVIDED_DOCS_TAG}`]);
+  };
+
+  const removeClientProvidedDoc = (index: number) => {
+    setClientProvidedDocFiles((current) => {
+      const nextFiles = current.filter((_, itemIndex) => itemIndex !== index);
+      if (nextFiles.length === 0) {
+        setFormData((form) => ({
+          ...form,
+          projectTypeQuestionAnswers: {
+            ...form.projectTypeQuestionAnswers,
+            [CLIENT_PROVIDED_DOCS_TAG]: null,
+          },
+        }));
+      }
+      return nextFiles;
+    });
+  };
+
+  const uploadClientProvidedDocs = async (leadId: string) => {
+    for (const file of clientProvidedDocFiles) {
+      await uploadFile({
+        file,
+        leadId,
+        category: inferClientProvidedDocsCategory(file),
+        tags: [CLIENT_PROVIDED_DOCS_TAG],
+      });
+    }
+    setClientProvidedDocFiles([]);
+  };
+
+  const renderClientProvidedDocsQuestion = (node: LeadQuestionnaireSnapshot["allNodes"][number]) => {
+    if (node.key !== CLIENT_PROVIDED_DOCS_TAG) return null;
+    return (
+      <ClientProvidedDocsUploadField
+        files={clientProvidedDocFiles}
+        onAddFiles={addClientProvidedDocs}
+        onRemoveFile={removeClientProvidedDoc}
+        disabled={submitting}
+      />
+    );
+  };
+
+  const serializeLeadQuestionAnswer = (key: string, value: LeadAnswerValue | undefined): LeadAnswerValue => {
+    if (key === CLIENT_PROVIDED_DOCS_TAG && value === "uploaded") {
+      return null;
+    }
+    return value ?? null;
+  };
+
   const handleV2QuestionAnswerChange = (questionKey: string, value: LeadAnswerValue) => {
     setFormData((current) => ({
       ...current,
@@ -1211,7 +1328,7 @@ function EditableLeadForm({
                 node.key,
                 node.key === "timeline"
                   ? normalizedTimelineStatus
-                  : formData.projectTypeQuestionAnswers[node.key] ?? null,
+                  : serializeLeadQuestionAnswer(node.key, formData.projectTypeQuestionAnswers[node.key]),
               ])
             )
           : Object.fromEntries(
@@ -1295,6 +1412,7 @@ function EditableLeadForm({
           { officeId: selectedOffice.officeId }
         );
 
+        await uploadClientProvidedDocs(result.lead.id);
         navigate(`/leads/${result.lead.id}`);
       } else if (lead) {
         await updateLead(lead.id, {
@@ -1307,6 +1425,7 @@ function EditableLeadForm({
           bidDueDate: formData.bidDueDate || null,
           ...workflowPayload,
         });
+        await uploadClientProvidedDocs(lead.id);
         if (onSaved) {
           onSaved();
         } else {
@@ -2082,6 +2201,7 @@ function EditableLeadForm({
                   nodes={v2RenderedQuestionNodes}
                   answers={formData.projectTypeQuestionAnswers}
                   onAnswerChange={handleV2QuestionAnswerChange}
+                  renderQuestionOverride={renderClientProvidedDocsQuestion}
                 />
               )
             : questionSet.questions.map((question) => {

@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback } from "react";
 import { api } from "@/lib/api";
-import { MAX_FILE_SIZE_BYTES, MAX_FILE_SIZE_MB, type FileCategory } from "@/lib/file-utils";
+import { getFileExtension, MAX_FILE_SIZE_BYTES, MAX_FILE_SIZE_MB, type FileCategory } from "@/lib/file-utils";
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -359,14 +359,22 @@ function devMockUploadPath(uploadUrl: string): string | null {
   }
 }
 
-function uploadToSignedUrl(file: File, uploadUrl: string, onProgress?: (percent: number) => void): Promise<void> {
+function declaredMimeTypeForUpload(file: File): string {
+  if (file.type) return file.type;
+  const extension = getFileExtension(file.name);
+  if (extension === ".eml") return "message/rfc822";
+  if (extension === ".msg") return "application/vnd.ms-outlook";
+  return "application/octet-stream";
+}
+
+function uploadToSignedUrl(file: File, uploadUrl: string, mimeType: string, onProgress?: (percent: number) => void): Promise<void> {
   const mockPath = devMockUploadPath(uploadUrl);
   if (mockPath) {
     onProgress?.(0);
     return api<void>(mockPath, {
       method: "PUT",
       headers: {
-        "Content-Type": file.type || "application/octet-stream",
+        "Content-Type": mimeType,
       },
       body: file,
     }).then(() => {
@@ -377,7 +385,7 @@ function uploadToSignedUrl(file: File, uploadUrl: string, onProgress?: (percent:
   return new Promise<void>((resolve, reject) => {
     const xhr = new XMLHttpRequest();
     xhr.open("PUT", uploadUrl);
-    xhr.setRequestHeader("Content-Type", file.type || "application/octet-stream");
+    xhr.setRequestHeader("Content-Type", mimeType);
 
     xhr.upload.onprogress = (event) => {
       if (event.lengthComputable) {
@@ -421,12 +429,13 @@ export async function uploadFile(input: UploadFileInput): Promise<FileRecord> {
   if (file.size > MAX_FILE_SIZE_BYTES) {
     throw new Error(`File exceeds ${MAX_FILE_SIZE_MB} MB limit.`);
   }
+  const mimeType = declaredMimeTypeForUpload(file);
 
   const presign = await api<UploadUrlResponse>("/files/upload-url", {
     method: "POST",
     json: {
       originalFilename: file.name,
-      mimeType: file.type || "application/octet-stream",
+      mimeType,
       fileSizeBytes: file.size,
       category,
       subcategory,
@@ -441,7 +450,7 @@ export async function uploadFile(input: UploadFileInput): Promise<FileRecord> {
     },
   });
 
-  await uploadToSignedUrl(file, presign.uploadUrl, onProgress);
+  await uploadToSignedUrl(file, presign.uploadUrl, mimeType, onProgress);
 
   const data = await api<{ file: FileRecord }>("/files/confirm-upload", {
     method: "POST",

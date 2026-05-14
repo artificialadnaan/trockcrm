@@ -1,11 +1,12 @@
 import type { NodePgDatabase } from "drizzle-orm/node-postgres";
 import {
+  files,
   leadQuestionAnswerHistory,
   leadQuestionAnswers,
   projectTypeQuestionNodes,
 } from "@trock-crm/shared/schema";
 import type * as schema from "@trock-crm/shared/schema";
-import { eq } from "drizzle-orm";
+import { and, eq } from "drizzle-orm";
 import { AppError } from "../../middleware/error-handler.js";
 
 type TenantDb = NodePgDatabase<typeof schema>;
@@ -114,6 +115,7 @@ const SECTION_ORDER: Record<string, number> = {
   property: 1,
   scope: 2,
 };
+const CLIENT_PROVIDED_DOCS_TAG = "client_provided_docs";
 
 function sortQuestionnaireNodes(left: QuestionnaireNode, right: QuestionnaireNode) {
   const leftSection = SECTION_ORDER[left.sectionKey ?? ""] ?? 99;
@@ -315,6 +317,38 @@ export interface LeadQuestionGateMissing {
   missingScopeSelection: boolean;
 }
 
+export async function applyLeadAttachmentAnswers(
+  tenantDb: TenantDb,
+  leadId: string,
+  answers: Record<string, unknown>
+): Promise<Record<string, LeadQuestionAnswerValue>> {
+  const leadFiles = await tenantDb
+    .select({
+      tags: files.tags,
+    })
+    .from(files)
+    .where(and(eq(files.leadId, leadId), eq(files.isActive, true)));
+  const hasClientProvidedDocs = leadFiles.some((file) =>
+    file.tags.some((tag) => tag.toLowerCase() === CLIENT_PROVIDED_DOCS_TAG)
+  );
+
+  if (hasClientProvidedDocs) {
+    return {
+      ...answers,
+      [CLIENT_PROVIDED_DOCS_TAG]: "uploaded",
+    };
+  }
+
+  if (answers[CLIENT_PROVIDED_DOCS_TAG] === "uploaded") {
+    return {
+      ...answers,
+      [CLIENT_PROVIDED_DOCS_TAG]: null,
+    };
+  }
+
+  return answers as Record<string, LeadQuestionAnswerValue>;
+}
+
 function hasSatisfiedScopeGroup(
   nodes: QuestionnaireNode[],
   answers: Record<string, LeadQuestionAnswerValue>,
@@ -365,10 +399,10 @@ export async function evaluateLeadQuestionGate(
     listLeadQuestionAnswers(tenantDb, input.leadId),
     listQuestionnaireNodes(tenantDb),
   ]);
-  const mergedAnswers = {
+  const mergedAnswers = await applyLeadAttachmentAnswers(tenantDb, input.leadId, {
     ...storedAnswers,
     ...(input.leadQuestionAnswers ?? {}),
-  };
+  });
   const qualificationFields = ["estimated_value", "timeline_status"].filter(
     (fieldId) => !isAnsweredQuestionValue(input.qualificationPayload[fieldId])
   );

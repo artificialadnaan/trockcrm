@@ -11,6 +11,8 @@ import {
 } from "@/lib/file-utils";
 import type { FileCategory } from "@/lib/file-utils";
 
+const IMAGE_EXTENSIONS = new Set([".jpg", ".jpeg", ".png", ".gif", ".webp", ".heic"]);
+
 interface FileUploadZoneProps {
   category: FileCategory;
   subcategory?: string;
@@ -58,6 +60,9 @@ export function FileUploadZone({
     }
     if (file.size === 0) {
       return "File is empty.";
+    }
+    if (category === "photo" && !file.type.startsWith("image/") && !IMAGE_EXTENSIONS.has(ext)) {
+      return "Photos must be image files.";
     }
     return null;
   };
@@ -198,7 +203,7 @@ export function FileUploadZone({
               Drop files here or click to browse
             </p>
             <p className="text-xs text-muted-foreground mt-1">
-              Max {MAX_FILE_SIZE_MB} MB. Images, PDF, Office docs, CSV, TXT, ZIP.
+              Max {MAX_FILE_SIZE_MB} MB. Images, PDF, Office docs, CSV, TXT, ZIP, EML, MSG.
             </p>
           </div>
         </div>
@@ -208,7 +213,7 @@ export function FileUploadZone({
           multiple
           className="hidden"
           onChange={(e) => e.target.files && handleFiles(e.target.files)}
-          accept={Array.from(ALLOWED_EXTENSIONS).join(",")}
+          accept={Array.from(category === "photo" ? IMAGE_EXTENSIONS : ALLOWED_EXTENSIONS).join(",")}
         />
       </div>
 

@@ -131,6 +131,30 @@ router.get("/deal/:dealId", async (req, res, next) => {
 
     const filters = {
       dealId: req.params.dealId,
+      leadId: deal.sourceLeadId ?? undefined,
+      direction: req.query.direction as "inbound" | "outbound" | undefined,
+      search: req.query.search as string | undefined,
+      page: req.query.page ? parseInt(req.query.page as string, 10) : undefined,
+      limit: req.query.limit ? parseInt(req.query.limit as string, 10) : undefined,
+    };
+
+    const result = await getEmails(req.tenantDb!, filters, req.user!.id, req.user!.role);
+    await req.commitTransaction!();
+    res.json(result);
+  } catch (err) {
+    next(err);
+  }
+});
+
+// GET /api/email/lead/:leadId — emails for a specific lead
+// RBAC: verify user has access to this lead before returning emails.
+router.get("/lead/:leadId", async (req, res, next) => {
+  try {
+    const lead = await getLeadById(req.tenantDb!, req.params.leadId, req.user!.role, req.user!.id);
+    if (!lead) throw new AppError(404, "Lead not found");
+
+    const filters = {
+      leadId: req.params.leadId,
       direction: req.query.direction as "inbound" | "outbound" | undefined,
       search: req.query.search as string | undefined,
       page: req.query.page ? parseInt(req.query.page as string, 10) : undefined,

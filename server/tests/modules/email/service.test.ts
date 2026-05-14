@@ -272,6 +272,45 @@ describe("email service inbound association", () => {
     ).toBe(true);
   });
 
+  it("includes lead assignments when filtering emails by lead", async () => {
+    const whereClauses: unknown[] = [];
+    const tenantDb = {
+      select: vi.fn(() => {
+        const callIndex = (tenantDb.select as any).mock.calls.length;
+        const chain: any = {
+          from: vi.fn(() => chain),
+          where: vi.fn((whereArg: unknown) => {
+            whereClauses.push(whereArg);
+            return chain;
+          }),
+          orderBy: vi.fn(() => chain),
+          limit: vi.fn(() => chain),
+          offset: vi.fn(() => chain),
+          then(resolve: (value: any) => void) {
+            if (callIndex === 1) {
+              resolve([{ count: 1 }]);
+            } else {
+              resolve([]);
+            }
+          },
+        };
+        return chain;
+      }),
+    };
+
+    await getEmails(tenantDb as any, { leadId: "lead-1" }, "director-1", "director");
+
+    expect(whereClauses.length).toBe(2);
+    expect(
+      hasColumnName(whereClauses[0], "assigned_entity_type") ||
+        hasColumnName(whereClauses[0], "assignedEntityType")
+    ).toBe(true);
+    expect(
+      hasColumnName(whereClauses[0], "assigned_entity_id") ||
+        hasColumnName(whereClauses[0], "assignedEntityId")
+    ).toBe(true);
+  });
+
   it("does not hide archived emails from deal or contact email history", async () => {
     const whereClauses: unknown[] = [];
     const tenantDb = {
