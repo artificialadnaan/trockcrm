@@ -1105,6 +1105,56 @@ describe("LeadForm", () => {
     ]);
   });
 
+  it("uses Timeline Target Date as the single timeline input and mirrors it to the V2 timeline answer", async () => {
+    mockUniversalCreateQuestionnaire([
+      ...universalCreateQuestionnaireNodes(),
+      makeQuestionNode({
+        id: "baseline-timeline",
+        key: "timeline",
+        label: "Timeline",
+        inputType: "textarea",
+        isRequired: true,
+        displayOrder: 500,
+      }),
+    ]);
+
+    renderCreateForm();
+
+    expect(Array.from(container.querySelectorAll("label")).filter((label) => label.textContent?.includes("Timeline")))
+      .toHaveLength(1);
+    expect(container.textContent).toContain("Timeline Target Date");
+    expect(container.textContent).not.toContain("Timeline Notes");
+
+    const timelineInput = container.querySelector<HTMLInputElement>("#timeline_status");
+    expect(timelineInput).toBeTruthy();
+    await setInputValue(timelineInput!, "2026-12-31");
+    await submitForm();
+
+    expect(leadHookMocks.createLead).toHaveBeenCalledTimes(1);
+    expect(leadHookMocks.createLead.mock.calls[0][0].qualificationPayload?.timeline_status).toBe("2026-12-31");
+    expect(leadHookMocks.createLead.mock.calls[0][0].leadQuestionAnswers?.timeline).toBe("2026-12-31");
+  });
+
+  it("requires Timeline Target Date when the hidden V2 timeline node is required", async () => {
+    mockUniversalCreateQuestionnaire([
+      ...universalCreateQuestionnaireNodes(),
+      makeQuestionNode({
+        id: "baseline-timeline",
+        key: "timeline",
+        label: "Timeline",
+        inputType: "textarea",
+        isRequired: true,
+        displayOrder: 500,
+      }),
+    ]);
+
+    renderCreateForm();
+    await submitForm();
+
+    expect(leadHookMocks.createLead).not.toHaveBeenCalled();
+    expect(container.textContent).toContain("Answer required project intake questions: Timeline Target Date");
+  });
+
   it("renders a Year Built repair input when the selected property is missing buildYear", () => {
     properties = [{ ...completeProperty, buildYear: null }];
 
