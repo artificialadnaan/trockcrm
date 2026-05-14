@@ -68,12 +68,15 @@ function isVisibleQuestion(
   return visible;
 }
 
+const UNANSWERED_SELECT_VALUE = "__unanswered__";
+
 function getQuestionInputType(node: LeadQuestionnaireNode) {
   if (node.inputType === "textarea") return "textarea";
   if (node.inputType === "boolean") return "boolean";
   if (node.inputType === "date") return "date";
   if (node.inputType === "multiselect") return "multiselect";
-  if (node.inputType === "currency" || node.inputType === "number") return "number";
+  if (node.inputType === "currency") return "currency";
+  if (node.inputType === "number") return "number";
   if (Array.isArray(node.options) && node.options.length > 0) return "select";
   return "text";
 }
@@ -97,6 +100,32 @@ function QuestionLabel({
         </span>
       ) : null}
     </Label>
+  );
+}
+
+function CurrencyInput({
+  id,
+  value,
+  onChange,
+}: {
+  id: string;
+  value: string;
+  onChange: (value: string) => void;
+}) {
+  return (
+    <div className="relative">
+      <span className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-sm text-muted-foreground">
+        $
+      </span>
+      <Input
+        id={id}
+        type="number"
+        inputMode="decimal"
+        className="pl-7"
+        value={value}
+        onChange={(event) => onChange(event.target.value)}
+      />
+    </div>
   );
 }
 
@@ -220,30 +249,30 @@ export function LeadQuestionnaireSections({
           />
         ) : inputType === "boolean" ? (
           <Select
-            value={typeof currentValue === "boolean" ? String(currentValue) : "__unanswered__"}
+            value={typeof currentValue === "boolean" ? String(currentValue) : UNANSWERED_SELECT_VALUE}
             onValueChange={(value) =>
-              onAnswerChange(node.key, !value || value === "__unanswered__" ? null : value === "true")
+              onAnswerChange(node.key, !value || value === UNANSWERED_SELECT_VALUE ? null : value === "true")
             }
           >
             <SelectTrigger id={node.key}>
               <SelectValue placeholder="Select" />
             </SelectTrigger>
             <SelectContent>
-              <SelectItem value="__unanswered__">Unanswered</SelectItem>
+              <SelectItem value={UNANSWERED_SELECT_VALUE}>Select...</SelectItem>
               <SelectItem value="true">Yes</SelectItem>
               <SelectItem value="false">No</SelectItem>
             </SelectContent>
           </Select>
         ) : inputType === "select" ? (
           <Select
-            value={typeof currentValue === "string" ? currentValue : "__unanswered__"}
-            onValueChange={(value) => onAnswerChange(node.key, !value || value === "__unanswered__" ? null : value)}
+            value={typeof currentValue === "string" ? currentValue : UNANSWERED_SELECT_VALUE}
+            onValueChange={(value) => onAnswerChange(node.key, !value || value === UNANSWERED_SELECT_VALUE ? null : value)}
           >
             <SelectTrigger id={node.key}>
               <SelectValue placeholder="Select" />
             </SelectTrigger>
             <SelectContent>
-              <SelectItem value="__unanswered__">Unanswered</SelectItem>
+              <SelectItem value={UNANSWERED_SELECT_VALUE}>Select...</SelectItem>
               {questionOptions.map((option) => (
                 <SelectItem key={option.value} value={option.value}>
                   {option.label}
@@ -269,6 +298,20 @@ export function LeadQuestionnaireSections({
               );
             })}
           </div>
+        ) : inputType === "currency" ? (
+          <CurrencyInput
+            id={node.key}
+            value={
+              typeof currentValue === "number"
+                ? String(currentValue)
+                : typeof currentValue === "string"
+                  ? currentValue
+                  : ""
+            }
+            onChange={(value) =>
+              onAnswerChange(node.key, value.trim() === "" ? null : Number(value))
+            }
+          />
         ) : (
           <Input
             id={node.key}

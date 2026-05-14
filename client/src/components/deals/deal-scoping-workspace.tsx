@@ -116,6 +116,12 @@ function scrollToScopingTarget(targetId: string) {
   });
 }
 
+const OPPORTUNITY_PROGRESS_OPTIONS = [
+  { value: "scheduled", label: "Scheduled" },
+  { value: "reviewing", label: "Reviewing" },
+  { value: "completed", label: "Completed" },
+] as const;
+
 const FILE_CATEGORY_LABELS: Record<string, string> = {
   photo: "Photo",
   other: "Other",
@@ -428,14 +434,17 @@ export function DealScopingWorkspace({
   const projectTypeLocked = user?.role !== "admin" && isOpportunityOrLater(deal.stageId, stages);
   const preBidMeetingLabel = getSelectDisplayLabel(
     getSectionValue(sectionData, "opportunity", "preBidMeetingCompleted"),
-    { yes: "Completed" },
+    { yes: "Completed", scheduled: "Scheduled", reviewing: "Reviewing", completed: "Completed" },
     "Pending"
   );
   const siteVisitDecisionLabel = getSelectDisplayLabel(
     getSectionValue(sectionData, "opportunity", "siteVisitDecision"),
     {
-      required: "Site Visit Required",
-      not_required: "No Site Visit Required",
+      required: "Scheduled",
+      not_required: "Completed",
+      scheduled: "Scheduled",
+      reviewing: "Reviewing",
+      completed: "Completed",
     },
     "Pending"
   );
@@ -1087,7 +1096,11 @@ export function DealScopingWorkspace({
                 </SelectTrigger>
                 <SelectContent>
                   <SelectItem value="__unset__">Pending</SelectItem>
-                  <SelectItem value="yes">Completed</SelectItem>
+                  {OPPORTUNITY_PROGRESS_OPTIONS.map((option) => (
+                    <SelectItem key={option.value} value={option.value}>
+                      {option.label}
+                    </SelectItem>
+                  ))}
                 </SelectContent>
               </Select>
             </div>
@@ -1110,8 +1123,11 @@ export function DealScopingWorkspace({
                 </SelectTrigger>
                 <SelectContent>
                   <SelectItem value="__unset__">Pending</SelectItem>
-                  <SelectItem value="required">Site Visit Required</SelectItem>
-                  <SelectItem value="not_required">No Site Visit Required</SelectItem>
+                  {OPPORTUNITY_PROGRESS_OPTIONS.map((option) => (
+                    <SelectItem key={option.value} value={option.value}>
+                      {option.label}
+                    </SelectItem>
+                  ))}
                 </SelectContent>
               </Select>
             </div>

@@ -438,6 +438,36 @@ describe("questionnaire-service universal questionnaire", () => {
     expect(tenantDb.answers[0]?.valueJson).toEqual([]);
   });
 
+  it("rejects string values for boolean questionnaire answers", async () => {
+    const tenantDb = createMutationDb({
+      nodes: [
+        node({
+          id: "life-safety",
+          key: "life_safety",
+          inputType: "boolean",
+          isRequired: true,
+        }),
+      ],
+    });
+
+    await expect(
+      upsertLeadQuestionAnswerSet(tenantDb as never, {
+        leadId: "lead-1",
+        projectTypeId: null,
+        changedBy: "user-1",
+        changedAt: new Date("2026-01-02T00:00:00Z"),
+        answers: {
+          life_safety: "true" as never,
+        },
+      })
+    ).rejects.toMatchObject({
+      statusCode: 400,
+      message: "Boolean answer life_safety must be true or false.",
+    });
+
+    expect(tenantDb.answers).toHaveLength(0);
+  });
+
   it("rejects malformed multi-select array answers", async () => {
     const tenantDb = createMutationDb({
       nodes: [

@@ -94,7 +94,11 @@ export function getRequiredScopingRules(input: DealScopingRulesInput): DealScopi
             ? input.sectionData.opportunity
             : {};
           const baseFields = ["preBidMeetingCompleted", "siteVisitDecision"];
-          if (opportunityValue.siteVisitDecision === "required") {
+          if (
+            opportunityValue.siteVisitDecision === "required" ||
+            opportunityValue.siteVisitDecision === "scheduled" ||
+            opportunityValue.siteVisitDecision === "reviewing"
+          ) {
             baseFields.push("siteVisitCompleted");
           }
           return baseFields;

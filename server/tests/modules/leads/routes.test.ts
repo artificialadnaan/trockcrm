@@ -421,6 +421,50 @@ describe("lead stage transition route", () => {
     );
   });
 
+  it("rejects whitespace-only lead names on create", async () => {
+    const leadRoutes = await loadLeadRoutes();
+
+    await expect(
+      invokeLeadCreateRoute(
+        {
+          companyId: "company-1",
+          propertyId: "property-1",
+          name: "   ",
+        },
+        leadRoutes
+      )
+    ).rejects.toMatchObject({
+      statusCode: 400,
+      message: "companyId, propertyId, and name are required",
+    });
+
+    expect(serviceMocks.createLead).not.toHaveBeenCalled();
+  });
+
+  it("trims lead names before create", async () => {
+    const leadRoutes = await loadLeadRoutes();
+    serviceMocks.createLead.mockResolvedValueOnce({
+      id: "lead-created",
+      verificationStatus: "not_required",
+    });
+
+    await invokeLeadCreateRoute(
+      {
+        companyId: "company-1",
+        propertyId: "property-1",
+        name: "  Lead One  ",
+      },
+      leadRoutes
+    );
+
+    expect(serviceMocks.createLead).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({
+        name: "Lead One",
+      })
+    );
+  });
+
   it("rejects lead officeCode when it disagrees with the selected office slug", async () => {
     const leadRoutes = await loadLeadRoutes();
 

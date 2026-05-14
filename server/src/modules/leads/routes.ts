@@ -271,7 +271,8 @@ router.patch("/:id/scoping", async (req, res, next) => {
 router.post("/", async (req, res, next) => {
   try {
     const { companyId, propertyId, assignedRepId, salesRepId, name, bidDueDate, ...rest } = req.body;
-    if (!companyId || !propertyId || !name) {
+    const trimmedName = typeof name === "string" ? name.trim() : "";
+    if (!companyId || !propertyId || !trimmedName) {
       throw new AppError(400, "companyId, propertyId, and name are required");
     }
 
@@ -294,7 +295,7 @@ router.post("/", async (req, res, next) => {
       actorUserId: req.user!.id,
       salesRepId: leadSalesRepId,
       officeId: req.user!.activeOfficeId,
-      name,
+      name: trimmedName,
       bidDueDate,
       ...rest,
       officeCode: officeCodeResolution.officeCode,
@@ -404,6 +405,14 @@ router.patch("/:id", async (req, res, next) => {
 
     if (req.user!.role === "rep" && body.assignedRepId !== undefined) {
       delete body.assignedRepId;
+    }
+
+    if (body.name !== undefined) {
+      const trimmedName = typeof body.name === "string" ? body.name.trim() : "";
+      if (!trimmedName) {
+        throw new AppError(400, "Lead name is required");
+      }
+      body.name = trimmedName;
     }
 
     const lead = await updateLead(

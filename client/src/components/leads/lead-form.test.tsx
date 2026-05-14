@@ -330,6 +330,14 @@ function universalCreateQuestionnaireNodes(): LeadQuestionnaireNode[] {
       displayOrder: 200,
     }),
     makeQuestionNode({
+      id: "baseline-life-safety",
+      key: "life_safety",
+      label: "Life Safety",
+      inputType: "boolean",
+      isRequired: false,
+      displayOrder: 900,
+    }),
+    makeQuestionNode({
       id: "property-building-type",
       key: "building_type",
       label: "Building Type",
@@ -1019,6 +1027,94 @@ describe("LeadForm", () => {
     expect(container.textContent).not.toContain("Select or create a property.");
   });
 
+  it("renders only active business-approved POC role choices", () => {
+    renderCreateForm();
+
+    const pocRole = container.querySelector("#primaryContactRole")?.closest("[data-select-value]");
+    const optionLabels = Array.from(pocRole?.querySelectorAll("button[data-value]") ?? []).map((button) =>
+      button.textContent?.trim()
+    );
+    expect(optionLabels).toEqual([
+      "Select POC role",
+      "Regional Manager",
+      "Regional VP",
+      "VP",
+      "Asset Manager",
+      "Facilities Manager",
+      "Project Manager",
+      "Other",
+    ]);
+  });
+
+  it("marks Lead Name required and shows a field-level create requirement message", () => {
+    renderCreateForm({ name: "" });
+
+    const leadNameLabel = Array.from(container.querySelectorAll("label")).find(
+      (label) => label.getAttribute("for") === "name"
+    );
+    expect(leadNameLabel?.textContent).toContain("Lead Name *");
+    expect(container.textContent).toContain("Lead name is required.");
+  });
+
+  it("uses the retained Estimated Value field with a currency prefix and hides the redundant Budget question", () => {
+    mockUniversalCreateQuestionnaire();
+
+    renderCreateForm();
+
+    const estimatedValue = container.querySelector("#estimated_value")?.parentElement;
+    expect(estimatedValue?.textContent).toContain("$");
+    expect(container.querySelector('[data-question-key="budget"]')).toBeNull();
+  });
+
+  it("renders questionnaire currency and Life Safety fields with production-safe controls", async () => {
+    mockUniversalCreateQuestionnaire([
+      makeQuestionNode({
+        id: "baseline-life-safety",
+        key: "life_safety",
+        label: "Life Safety",
+        inputType: "boolean",
+        isRequired: true,
+        displayOrder: 900,
+      }),
+      makeQuestionNode({
+        id: "unit-upgrades-applies",
+        key: "unit_upgrades_applies",
+        label: "Does unit upgrades scope apply?",
+        inputType: "boolean",
+        displayOrder: 0,
+        sectionKey: "scope",
+        groupKey: "unit_upgrades",
+        groupLabel: "Unit Upgrades",
+        groupOrder: 7,
+      }),
+      makeQuestionNode({
+        id: "unit-upgrades-cost",
+        key: "unit_upgrades_cost_per_unit",
+        label: "Cost per Unit / Average Budget",
+        inputType: "currency",
+        isRequired: true,
+        displayOrder: 4,
+        sectionKey: "scope",
+        groupKey: "unit_upgrades",
+        groupLabel: "Unit Upgrades",
+        groupOrder: 7,
+        parentNodeId: "unit-upgrades-applies",
+        parentOptionValue: "true",
+      }),
+    ]);
+
+    renderCreateForm();
+
+    expect(container.querySelector('[data-question-key="life_safety"]')?.textContent).toContain("Yes");
+    expect(container.querySelector('[data-question-key="life_safety"]')?.textContent).toContain("No");
+    expect(container.textContent).not.toContain("__unanswered__");
+
+    await clickButton(container.querySelector<HTMLButtonElement>('[data-scope-group="unit_upgrades"] button')!);
+    await chooseQuestionSelectValue("unit_upgrades_applies", "true");
+    const currencyQuestion = container.querySelector('[data-question-key="unit_upgrades_cost_per_unit"]');
+    expect(currencyQuestion?.textContent).toContain("$");
+  });
+
   it("renders universal questionnaire baseline, property, and scope sections in create mode", () => {
     mockUniversalCreateQuestionnaire();
 
@@ -1042,11 +1138,10 @@ describe("LeadForm", () => {
       </MemoryRouter>
     );
 
-    expect(html).toContain("Budget");
     expect(html).toContain("Property/Building Info");
     expect(html).toContain("Building Type");
     expect(html).toContain("Scope");
-    expect(html.indexOf("Budget")).toBeLessThan(html.indexOf("Property/Building Info"));
+    expect(html).not.toContain('data-question-key="budget"');
     expect(html.indexOf("Property/Building Info")).toBeLessThan(html.indexOf("Scope"));
   });
 
