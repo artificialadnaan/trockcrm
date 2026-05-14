@@ -3,11 +3,14 @@ import type { ReactNode } from "react";
 import { LEAD_SOURCE_CATEGORIES, type LeadSourceCategory } from "@trock-crm/shared/types";
 import type { LeadAnswerValue, LeadRecord } from "@/hooks/use-leads";
 import { transitionLeadStage, updateLead } from "@/hooks/use-leads";
-import { uploadFile } from "@/hooks/use-files";
 import { usePipelineStages, useProjectTypes } from "@/hooks/use-pipeline-config";
 import { isApiError } from "@/lib/api";
 import { ALLOWED_EXTENSIONS, validateFileForUpload } from "@/lib/file-utils";
-import { CLIENT_PROVIDED_DOCS_TAG, inferClientProvidedDocsCategory } from "@/lib/lead-attachment-routing";
+import { CLIENT_PROVIDED_DOCS_TAG } from "@/lib/lead-attachment-routing";
+import {
+  removeUploadedFileFromQueue,
+  uploadClientProvidedDocsWithQueueRemoval,
+} from "@/lib/client-provided-doc-upload";
 import { CRM_OWNED_LEAD_STAGE_SLUGS } from "@/lib/sales-workflow";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -92,7 +95,7 @@ function ClientProvidedDocsUploadField({
   disabled?: boolean;
 }) {
   return (
-    <div data-question-key="client_provided_docs" className="space-y-3 rounded-md border p-3">
+    <div key={CLIENT_PROVIDED_DOCS_TAG} data-question-key="client_provided_docs" className="space-y-3 rounded-md border p-3">
       <QuestionLabel htmlFor="client-provided-docs-upload">Client Provided Docs (Plans, Scope, Specs)</QuestionLabel>
       <Input
         id="client-provided-docs-upload"
@@ -301,21 +304,16 @@ export function LeadQuestionnaireEditor({ lead, onCancel, onSaved }: LeadQuestio
   };
 
   const uploadClientProvidedDocs = async () => {
-    for (const file of clientProvidedDocFiles) {
-      await uploadFile({
-        file,
-        leadId: lead.id,
-        category: inferClientProvidedDocsCategory(file),
-        tags: [CLIENT_PROVIDED_DOCS_TAG],
-      });
-    }
-    setClientProvidedDocFiles([]);
+    await uploadClientProvidedDocsWithQueueRemoval(clientProvidedDocFiles, lead.id, (file) => {
+      setClientProvidedDocFiles((current) => removeUploadedFileFromQueue(current, file));
+    });
   };
 
   const renderClientProvidedDocsQuestion = (node: (typeof availableNodes)[number]) => {
     if (node.key !== CLIENT_PROVIDED_DOCS_TAG) return null;
     return (
       <ClientProvidedDocsUploadField
+        key={node.id}
         files={clientProvidedDocFiles}
         onAddFiles={addClientProvidedDocs}
         onRemoveFile={removeClientProvidedDoc}

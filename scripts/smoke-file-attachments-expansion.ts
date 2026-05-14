@@ -352,7 +352,7 @@ async function loadFixture(client: pg.Client, options: CliOptions, session: Sess
         VALUES (
           $1, $2, $3, $4, 'property_manager', $5,
           $6, $7, 'open', 'Referral', 'SMOKE TEST DELETE file attachment flow', $8,
-          $9, $9, lower($10), $11, (CURRENT_DATE + INTERVAL '14 days')::date, 'budgeted_q2',
+          $9::text, $9::${schema}.lead_office, lower($10), $11, (CURRENT_DATE + INTERVAL '14 days')::date, 'budgeted_q2',
           $12::jsonb, $13::jsonb, 'not_required',
           NOW(), true, true, NOW(), NOW()
         )

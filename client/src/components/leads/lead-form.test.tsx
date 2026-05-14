@@ -51,6 +51,9 @@ const leadHookMocks = vi.hoisted(() => ({
     loading: false,
   })),
 }));
+const fileHookMocks = vi.hoisted(() => ({
+  uploadFile: vi.fn(),
+}));
 const propertyHookMocks = vi.hoisted(() => ({
   updateProperty: vi.fn(),
 }));
@@ -129,6 +132,10 @@ vi.mock("@/hooks/use-leads", () => ({
   createLead: leadHookMocks.createLead,
   updateLead: leadHookMocks.updateLead,
   useLeadQuestionnaireTemplate: leadHookMocks.useLeadQuestionnaireTemplate,
+}));
+
+vi.mock("@/hooks/use-files", () => ({
+  uploadFile: fileHookMocks.uploadFile,
 }));
 
 vi.mock("@/hooks/use-task-assignees", () => ({
@@ -446,6 +453,26 @@ function mockUniversalCreateQuestionnaire(nodes = universalCreateQuestionnaireNo
   });
 }
 
+function clientProvidedDocsNode(): LeadQuestionnaireNode {
+  return makeQuestionNode({
+    id: "client-provided-docs",
+    key: "client_provided_docs",
+    label: "Client Provided Docs (Plans, Scope, Specs)",
+    inputType: "file",
+    displayOrder: 300,
+  });
+}
+
+function deferred<T>() {
+  let resolve!: (value: T | PromiseLike<T>) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((promiseResolve, promiseReject) => {
+    resolve = promiseResolve;
+    reject = promiseReject;
+  });
+  return { promise, resolve, reject };
+}
+
 describe("LeadForm", () => {
   let container: HTMLDivElement;
   let root: Root;
@@ -470,6 +497,8 @@ describe("LeadForm", () => {
       refetch: vi.fn(),
     });
     leadHookMocks.createLead.mockResolvedValue({ lead: { id: "lead-created" } });
+    leadHookMocks.updateLead.mockResolvedValue({ lead: { id: "lead-1" } });
+    fileHookMocks.uploadFile.mockResolvedValue({ id: "file-1" });
     propertyHookMocks.updateProperty.mockResolvedValue({ property: { ...completeProperty } });
     contactHookMocks.createContact.mockResolvedValue({
       contact: { id: "contact-created", firstName: "Grace", lastName: "Hopper" },
@@ -532,6 +561,18 @@ describe("LeadForm", () => {
     expect(form).toBeTruthy();
     await act(async () => {
       form?.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+    });
+  }
+
+  async function addClientProvidedDocs(files: File[]) {
+    const input = container.querySelector<HTMLInputElement>("#client-provided-docs-upload");
+    expect(input).toBeTruthy();
+    Object.defineProperty(input!, "files", {
+      configurable: true,
+      value: files,
+    });
+    await act(async () => {
+      input!.dispatchEvent(new Event("change", { bubbles: true }));
     });
   }
 
@@ -1198,6 +1239,47 @@ describe("LeadForm", () => {
     expect(leadHookMocks.createLead.mock.calls[0][0].leadQuestionAnswers.parking_surface_type).toEqual([
       "concrete",
     ]);
+  });
+
+  it("navigates to the created lead and blocks duplicate create submits when client doc upload fails", async () => {
+    mockUniversalCreateQuestionnaire([
+      ...universalCreateQuestionnaireNodes(),
+      clientProvidedDocsNode(),
+    ]);
+    const firstUpload = Promise.resolve({ id: "file-success" });
+    const secondUpload = deferred<{ id: string }>();
+    fileHookMocks.uploadFile
+      .mockReturnValueOnce(firstUpload)
+      .mockReturnValueOnce(secondUpload.promise);
+
+    renderCreateForm();
+    await addClientProvidedDocs([
+      new File(["plans"], "success.pdf", { type: "application/pdf" }),
+      new File(["bad"], "failed.pdf", { type: "application/pdf" }),
+    ]);
+
+    await submitForm();
+    await act(async () => {
+      await firstUpload;
+    });
+
+    expect(container.textContent).not.toContain("success.pdf");
+    expect(container.textContent).toContain("failed.pdf");
+
+    await act(async () => {
+      secondUpload.reject(new Error("Upload failed"));
+      await secondUpload.promise.catch(() => undefined);
+    });
+
+    expect(leadHookMocks.createLead).toHaveBeenCalledTimes(1);
+    expect(routerMocks.navigate).toHaveBeenCalledWith("/leads/lead-created");
+    expect(container.textContent).toContain("Lead created, but some attachments failed to upload");
+    expect(container.textContent).not.toContain("failed.pdf");
+
+    await submitForm();
+
+    expect(leadHookMocks.createLead).toHaveBeenCalledTimes(1);
+    expect(routerMocks.navigate).toHaveBeenCalledWith("/leads/lead-created");
   });
 
   it("uses Timeline Target Date as the single timeline input and mirrors it to the V2 timeline answer", async () => {

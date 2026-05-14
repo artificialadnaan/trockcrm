@@ -75,9 +75,12 @@ import {
   questionnaireRevealMatches,
 } from "./questionnaire-display";
 import { LeadQuestionnaireSections } from "./lead-questionnaire-sections";
-import { uploadFile } from "@/hooks/use-files";
 import { ALLOWED_EXTENSIONS, validateFileForUpload } from "@/lib/file-utils";
-import { CLIENT_PROVIDED_DOCS_TAG, inferClientProvidedDocsCategory } from "@/lib/lead-attachment-routing";
+import { CLIENT_PROVIDED_DOCS_TAG } from "@/lib/lead-attachment-routing";
+import {
+  removeUploadedFileFromQueue,
+  uploadClientProvidedDocsWithQueueRemoval,
+} from "@/lib/client-provided-doc-upload";
 
 export interface LeadFormLead {
   id: string;
@@ -367,7 +370,7 @@ function ClientProvidedDocsUploadField({
   const accept = Array.from(ALLOWED_EXTENSIONS).join(",");
 
   return (
-    <div data-question-key="client_provided_docs" className="space-y-3 rounded-md border p-3">
+    <div key={CLIENT_PROVIDED_DOCS_TAG} data-question-key="client_provided_docs" className="space-y-3 rounded-md border p-3">
       <QuestionLabel htmlFor="client-provided-docs-upload">
         Client Provided Docs (Plans, Scope, Specs)
       </QuestionLabel>
@@ -738,6 +741,7 @@ function EditableLeadForm({
   });
   const [repairedProperties, setRepairedProperties] = useState(new Map<string, PropertySurface>());
   const [clientProvidedDocFiles, setClientProvidedDocFiles] = useState<File[]>([]);
+  const [createdLeadAfterAttachmentFailureId, setCreatedLeadAfterAttachmentFailureId] = useState<string | null>(null);
 
   useEffect(() => {
     setFormData(getEditableFormState(lead, initialValues, initialOfficeCode));
@@ -1226,21 +1230,16 @@ function EditableLeadForm({
   };
 
   const uploadClientProvidedDocs = async (leadId: string) => {
-    for (const file of clientProvidedDocFiles) {
-      await uploadFile({
-        file,
-        leadId,
-        category: inferClientProvidedDocsCategory(file),
-        tags: [CLIENT_PROVIDED_DOCS_TAG],
-      });
-    }
-    setClientProvidedDocFiles([]);
+    await uploadClientProvidedDocsWithQueueRemoval(clientProvidedDocFiles, leadId, (file) => {
+      setClientProvidedDocFiles((current) => removeUploadedFileFromQueue(current, file));
+    });
   };
 
   const renderClientProvidedDocsQuestion = (node: LeadQuestionnaireSnapshot["allNodes"][number]) => {
     if (node.key !== CLIENT_PROVIDED_DOCS_TAG) return null;
     return (
       <ClientProvidedDocsUploadField
+        key={node.id}
         files={clientProvidedDocFiles}
         onAddFiles={addClientProvidedDocs}
         onRemoveFile={removeClientProvidedDoc}
@@ -1269,6 +1268,11 @@ function EditableLeadForm({
 
   const handleSubmit = async (event: React.FormEvent) => {
     event.preventDefault();
+
+    if (isCreate && createdLeadAfterAttachmentFailureId) {
+      navigate(`/leads/${createdLeadAfterAttachmentFailureId}`);
+      return;
+    }
 
     const effectiveStageId = isCreate
       ? getNormalizedLeadCreationStageId(leadStages, formData.stageId)
@@ -1446,7 +1450,15 @@ function EditableLeadForm({
           { officeId: selectedOffice.officeId }
         );
 
-        await uploadClientProvidedDocs(result.lead.id);
+        try {
+          await uploadClientProvidedDocs(result.lead.id);
+        } catch {
+          setCreatedLeadAfterAttachmentFailureId(result.lead.id);
+          setClientProvidedDocFiles([]);
+          setError("Lead created, but some attachments failed to upload — please retry from the lead detail page.");
+          navigate(`/leads/${result.lead.id}`);
+          return;
+        }
         navigate(`/leads/${result.lead.id}`);
       } else if (lead) {
         await updateLead(lead.id, {

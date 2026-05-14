@@ -11,6 +11,10 @@ import { updateLead } from "@/hooks/use-leads";
 
 (globalThis as unknown as { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
+const fileHookMocks = vi.hoisted(() => ({
+  uploadFile: vi.fn(),
+}));
+
 vi.mock("@/hooks/use-leads", async () => {
   const actual = await vi.importActual<typeof import("@/hooks/use-leads")>("@/hooks/use-leads");
   return {
@@ -19,6 +23,10 @@ vi.mock("@/hooks/use-leads", async () => {
     transitionLeadStage: vi.fn(),
   };
 });
+
+vi.mock("@/hooks/use-files", () => ({
+  uploadFile: fileHookMocks.uploadFile,
+}));
 
 vi.mock("@/hooks/use-pipeline-config", () => ({
   usePipelineStages: () => ({
@@ -146,6 +154,26 @@ const nodes = [
   }),
 ];
 
+function clientProvidedDocsNode(): LeadQuestionnaireNode {
+  return node({
+    id: "client-provided-docs",
+    key: "client_provided_docs",
+    label: "Client Provided Docs (Plans, Scope, Specs)",
+    inputType: "file",
+    displayOrder: 300,
+  });
+}
+
+function deferred<T>() {
+  let resolve!: (value: T | PromiseLike<T>) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((promiseResolve, promiseReject) => {
+    resolve = promiseResolve;
+    reject = promiseReject;
+  });
+  return { promise, resolve, reject };
+}
+
 function lead(overrides: Partial<LeadRecord> = {}): LeadRecord {
   return {
     id: "lead-1",
@@ -242,6 +270,7 @@ describe("LeadQuestionnaireEditor universal questionnaire", () => {
     container = document.createElement("div");
     document.body.appendChild(container);
     vi.mocked(updateLead).mockResolvedValue({} as never);
+    fileHookMocks.uploadFile.mockResolvedValue({ id: "file-1" });
   });
 
   afterEach(async () => {
@@ -253,12 +282,30 @@ describe("LeadQuestionnaireEditor universal questionnaire", () => {
     container.remove();
   });
 
-  async function renderEditor(input: LeadRecord = lead()) {
+  async function renderEditor(input: LeadRecord = lead(), onSaved: () => void | Promise<void> = () => undefined) {
     root = createRoot(container);
     await act(async () => {
       root.render(
-        <LeadQuestionnaireEditor lead={input} onCancel={() => undefined} onSaved={() => undefined} />
+        <LeadQuestionnaireEditor lead={input} onCancel={() => undefined} onSaved={onSaved} />
       );
+    });
+  }
+
+  async function submitForm() {
+    await act(async () => {
+      container.querySelector("form")?.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+    });
+  }
+
+  async function addClientProvidedDocs(files: File[]) {
+    const input = container.querySelector<HTMLInputElement>("#client-provided-docs-upload");
+    expect(input).toBeTruthy();
+    Object.defineProperty(input!, "files", {
+      configurable: true,
+      value: files,
+    });
+    await act(async () => {
+      input!.dispatchEvent(new Event("change", { bubbles: true }));
     });
   }
 
@@ -363,5 +410,54 @@ describe("LeadQuestionnaireEditor universal questionnaire", () => {
         }),
       })
     );
+  });
+
+  it("keeps only failed client docs queued after a partial upload failure", async () => {
+    const onSaved = vi.fn();
+    const firstUpload = Promise.resolve({ id: "file-success" });
+    const secondUpload = deferred<{ id: string }>();
+    fileHookMocks.uploadFile
+      .mockReturnValueOnce(firstUpload)
+      .mockReturnValueOnce(secondUpload.promise);
+    const leadWithClientDocs = lead({
+      leadQuestionnaire: {
+        projectTypeId: "type-1",
+        nodes: [...nodes, clientProvidedDocsNode()],
+        allNodes: [...nodes, clientProvidedDocsNode()],
+        answers: {},
+        legacyAnswers: [],
+      },
+    });
+
+    await renderEditor(leadWithClientDocs, onSaved);
+    await addClientProvidedDocs([
+      new File(["plans"], "success.pdf", { type: "application/pdf" }),
+      new File(["bad"], "failed.pdf", { type: "application/pdf" }),
+    ]);
+
+    await submitForm();
+    await act(async () => {
+      await firstUpload;
+    });
+
+    expect(container.textContent).not.toContain("success.pdf");
+    expect(container.textContent).toContain("failed.pdf");
+
+    await act(async () => {
+      secondUpload.reject(new Error("Upload failed"));
+      await secondUpload.promise.catch(() => undefined);
+    });
+
+    expect(onSaved).not.toHaveBeenCalled();
+    expect(container.textContent).toContain("Upload failed");
+    expect(container.textContent).toContain("failed.pdf");
+
+    fileHookMocks.uploadFile.mockClear();
+    fileHookMocks.uploadFile.mockResolvedValue({ id: "file-retry" });
+    await submitForm();
+
+    expect(fileHookMocks.uploadFile).toHaveBeenCalledTimes(1);
+    expect(fileHookMocks.uploadFile.mock.calls[0][0].file.name).toBe("failed.pdf");
+    expect(onSaved).toHaveBeenCalledTimes(1);
   });
 });
