@@ -5,12 +5,37 @@ import { Client } from "pg";
 const DEFAULT_WEB_BASE_URL = "https://trockcrm.com";
 const DEFAULT_API_BASE_URL = "https://api-production-ad218.up.railway.app";
 const SALES_EMAIL = "test-sales@trock.test";
-const SALES_PASSWORD = "TrockTest123!";
+const SALES_PASSWORD = process.env.SMOKE_PASSWORD ?? "TrockTest123!";
 const SMOKE_PREFIX = "SMOKE TEST DELETE - Service Opportunity";
 
 function arg(name: string) {
   const index = process.argv.indexOf(name);
-  return index >= 0 ? process.argv[index + 1] : undefined;
+  if (index >= 0) return process.argv[index + 1];
+  const prefix = `${name}=`;
+  return process.argv.find((value) => value.startsWith(prefix))?.slice(prefix.length);
+}
+
+function hasFlag(name: string) {
+  return process.argv.includes(name);
+}
+
+function printHelp() {
+  console.log(`Smoke test: New Service Opportunity direct-create
+
+Usage:
+  SMOKE_PASSWORD=... DATABASE_URL=... node --import tsx scripts/smoke-new-service-opportunity.ts [options]
+
+Options:
+  --origin <url>          Web origin to test. Alias for --web-base-url.
+  --web-base-url <url>    CRM web base URL. Defaults to ${DEFAULT_WEB_BASE_URL}.
+  --api-base-url <url>    CRM API base URL. Defaults to ${DEFAULT_API_BASE_URL}.
+  --help                  Show this help text.
+
+Environment:
+  SMOKE_PASSWORD          Password for ${SALES_EMAIL}. Defaults to the test account password.
+  DATABASE_URL            Postgres URL used for fixture setup, verification, and cleanup.
+  DATABASE_PUBLIC_URL     Fallback Postgres URL when DATABASE_URL is not set.
+`);
 }
 
 function assertCondition(condition: unknown, message: string): asserts condition {
@@ -140,11 +165,17 @@ async function cleanup(client: Client, schemaName: string, ids: { dealId?: strin
 }
 
 async function main() {
-  const webBaseUrl = arg("--web-base-url") ?? process.env.SMOKE_WEB_BASE_URL ?? DEFAULT_WEB_BASE_URL;
-  const apiBaseUrl = arg("--api-base-url") ?? process.env.SMOKE_API_BASE_URL ?? DEFAULT_API_BASE_URL;
-  assertCondition(process.env.DATABASE_URL, "DATABASE_URL is required for DB verification and cleanup.");
+  if (hasFlag("--help")) {
+    printHelp();
+    return;
+  }
 
-  const db = new Client({ connectionString: process.env.DATABASE_URL });
+  const webBaseUrl = arg("--origin") ?? arg("--web-base-url") ?? process.env.SMOKE_WEB_BASE_URL ?? DEFAULT_WEB_BASE_URL;
+  const apiBaseUrl = arg("--api-base-url") ?? process.env.SMOKE_API_BASE_URL ?? DEFAULT_API_BASE_URL;
+  const databaseUrl = process.env.DATABASE_URL ?? process.env.DATABASE_PUBLIC_URL;
+  assertCondition(databaseUrl, "DATABASE_URL or DATABASE_PUBLIC_URL is required for DB verification and cleanup.");
+
+  const db = new Client({ connectionString: databaseUrl });
   await db.connect();
   const schemaName = await resolveOfficeSchema(db, SALES_EMAIL);
   const fixture = await ensureFixture(db, schemaName);

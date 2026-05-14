@@ -40,7 +40,23 @@ const { dealRoutes } = await import("../../../src/modules/deals/routes.js");
 const { errorHandler } = await import("../../../src/middleware/error-handler.js");
 const { AppError } = await import("../../../src/middleware/error-handler.js");
 
-function createApp(officeSlug: string | null = "dallas") {
+function createTenantDb(selectRows: unknown[][] = [
+  [{ id: "company-1", isActive: true }],
+  [{ id: "property-1", companyId: "company-1", isActive: true }],
+]) {
+  const queue = [...selectRows];
+  return {
+    select: vi.fn(() => ({
+      from: vi.fn(() => ({
+        where: vi.fn(() => ({
+          limit: vi.fn(() => Promise.resolve(queue.shift() ?? [])),
+        })),
+      })),
+    })),
+  };
+}
+
+function createApp(officeSlug: string | null = "dallas", tenantDb = createTenantDb()) {
   const app = express();
   app.use(express.json());
   app.use((req, _res, next) => {
@@ -53,7 +69,7 @@ function createApp(officeSlug: string | null = "dallas") {
       activeOfficeId: "office-dallas",
     };
     (req as any).officeSlug = officeSlug ?? undefined;
-    (req as any).tenantDb = {};
+    (req as any).tenantDb = tenantDb;
     (req as any).commitTransaction = vi.fn().mockResolvedValue(undefined);
     next();
   });
@@ -203,6 +219,27 @@ describe("POST /api/deals create context", () => {
 
     expect(res.status).toBe(400);
     expect(res.body.error.message).toBe("Direct-create is only available for Service projects.");
+    expect(dealsServiceMocks.createDeal).not.toHaveBeenCalled();
+  });
+
+  it("rejects a Service opportunity when the property does not belong to the selected company", async () => {
+    const tenantDb = createTenantDb([
+      [{ id: "company-1", isActive: true }],
+      [{ id: "property-1", companyId: "company-other", isActive: true }],
+    ]);
+
+    const res = await request(createApp("dallas", tenantDb))
+      .post("/api/deals/service-opportunity")
+      .send({
+        name: "Mismatched Service Opportunity",
+        assignedRepId: "rep-1",
+        companyId: "company-1",
+        propertyId: "property-1",
+        projectTypeId: "type-service",
+      });
+
+    expect(res.status).toBe(400);
+    expect(res.body.error.message).toBe("Property does not belong to the company");
     expect(dealsServiceMocks.createDeal).not.toHaveBeenCalled();
   });
 
