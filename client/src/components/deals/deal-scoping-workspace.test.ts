@@ -64,9 +64,22 @@ vi.mock("@/lib/auth", () => ({
 }));
 
 vi.mock("@/components/properties/property-selector", () => ({
-  PropertySelector: (props: { value?: string | null; disabled?: boolean }) => {
+  PropertySelector: (props: {
+    value?: string | null;
+    disabled?: boolean;
+    onChange?: (value: string) => void;
+  }) => {
     mocks.propertySelectorProps.push(props as Record<string, unknown>);
-    return React.createElement("button", { type: "button", disabled: props.disabled, "data-testid": "property-selector" }, props.value ?? "none");
+    return React.createElement(
+      "button",
+      {
+        type: "button",
+        disabled: props.disabled,
+        "data-testid": "property-selector",
+        onClick: () => props.onChange?.("property-2"),
+      },
+      props.value ?? "none"
+    );
   },
 }));
 
@@ -1200,6 +1213,81 @@ describe("DealScopingWorkspace scoping UX", () => {
       );
       const projectTypeTrigger = container.querySelector("#projectTypeId");
       expect(projectTypeTrigger?.textContent).toContain("Roofing");
+    } finally {
+      cleanup();
+    }
+  });
+
+  it("preserves multiple selected scope items when a property change reseeds resolved fields", async () => {
+    mocks.useProjectTypes.mockReturnValue({
+      projectTypes: [
+        { id: "roofing", name: "Roofing", slug: "roofing" },
+        { id: "parking-lot", name: "Parking Lot", slug: "parking-lot" },
+        { id: "service", name: "Service", slug: "service" },
+      ],
+    });
+    mocks.getDealScopingIntake.mockResolvedValueOnce(makeScopingResponse({
+      intake: {
+        projectTypeId: "roofing",
+        sectionData: { scope: { selectedProjectTypeIds: ["roofing", "parking-lot"] } },
+      },
+      resolved: { projectTypeId: "roofing", propertyId: "property-1" },
+    }));
+    mocks.patchResolvedDealFields.mockResolvedValueOnce({
+      resolved: {
+        resolved: makeResolved({
+          projectTypeId: "roofing",
+          propertyId: "property-2",
+          propertyName: "Changed Property",
+          propertyAddress: "456 Changed Way",
+        }),
+      },
+    });
+    mocks.patchDealScopingIntake.mockResolvedValue(makeScopingResponse({
+      intake: {
+        projectTypeId: "roofing",
+        sectionData: { scope: { selectedProjectTypeIds: ["roofing", "parking-lot"] } },
+      },
+      resolved: {
+        projectTypeId: "roofing",
+        propertyId: "property-2",
+        propertyName: "Changed Property",
+        propertyAddress: "456 Changed Way",
+      },
+    }));
+
+    const { container, cleanup } = await renderWorkspace(
+      makeDeal({ sourceLeadId: "lead-1", projectTypeId: "roofing", propertyId: "property-1" })
+    );
+
+    try {
+      await vi.waitFor(() => expect(container.querySelector("#scoping-section-scope")).not.toBeNull());
+      const scopeButtons = () => Array.from(container.querySelectorAll("button[aria-pressed]"));
+      const roofing = () => scopeButtons().find((button) => button.textContent?.includes("Roofing"));
+      const parkingLot = () => scopeButtons().find((button) => button.textContent?.includes("Parking Lot"));
+
+      expect(roofing()?.getAttribute("aria-pressed")).toBe("true");
+      expect(parkingLot()?.getAttribute("aria-pressed")).toBe("true");
+
+      const propertySelector = container.querySelector("[data-testid='property-selector']");
+      expect(propertySelector).not.toBeNull();
+
+      await act(async () => {
+        clickElement(propertySelector!);
+        await Promise.resolve();
+      });
+
+      await vi.waitFor(() => {
+        expect(mocks.patchResolvedDealFields).toHaveBeenCalledWith("deal-1", {
+          propertyId: "property-2",
+        });
+      });
+      await vi.waitFor(() => {
+        expect(container.textContent).toContain("Changed Property");
+      });
+
+      expect(roofing()?.getAttribute("aria-pressed")).toBe("true");
+      expect(parkingLot()?.getAttribute("aria-pressed")).toBe("true");
     } finally {
       cleanup();
     }
