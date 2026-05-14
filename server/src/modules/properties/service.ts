@@ -33,6 +33,10 @@ export interface CreatePropertyInput {
 }
 
 export interface UpdatePropertyInput {
+  address?: string | null;
+  city?: string | null;
+  state?: string | null;
+  zip?: string | null;
   buildYear?: number | string | null;
   unitCount?: number | string | null;
 }
@@ -103,6 +107,92 @@ function validateOptionalPropertyUnitCount(value: unknown) {
     return null;
   }
   return validatePropertyUnitCount(value);
+}
+
+function normalizeOptionalText(value: unknown) {
+  if (value === undefined) {
+    return undefined;
+  }
+  if (value === null) {
+    return null;
+  }
+  if (typeof value !== "string") {
+    throw new AppError(400, "Property address fields must be strings or null");
+  }
+  const trimmed = value.trim();
+  return trimmed.length > 0 ? trimmed : null;
+}
+
+function normalizeRequiredUpdateText(value: unknown, fieldLabel: string) {
+  const normalized = normalizeOptionalText(value);
+  if (normalized == null) {
+    throw new AppError(400, `${fieldLabel} cannot be blank when provided`);
+  }
+  return normalized;
+}
+
+function validateOptionalState(value: unknown) {
+  const normalized = normalizeOptionalText(value);
+  if (normalized == null) {
+    return normalized;
+  }
+  const state = normalized.toUpperCase();
+  if (!US_STATE_PATTERN.test(state)) {
+    throw new AppError(400, "State must be a 2-letter US state code");
+  }
+  return state;
+}
+
+function validateRequiredUpdateState(value: unknown) {
+  const state = normalizeRequiredUpdateText(value, "State").toUpperCase();
+  if (!US_STATE_PATTERN.test(state)) {
+    throw new AppError(400, "State must be a 2-letter US state code");
+  }
+  return state;
+}
+
+function validateOptionalZip(value: unknown) {
+  const normalized = normalizeOptionalText(value);
+  if (normalized == null) {
+    return normalized;
+  }
+  if (!ZIP_PATTERN.test(normalized)) {
+    throw new AppError(400, "ZIP must be 5 digits or ZIP+4");
+  }
+  return normalized;
+}
+
+function validateRequiredUpdateZip(value: unknown) {
+  const zip = normalizeRequiredUpdateText(value, "ZIP");
+  if (!ZIP_PATTERN.test(zip)) {
+    throw new AppError(400, "ZIP must be 5 digits or ZIP+4");
+  }
+  return zip;
+}
+
+export function buildPropertyUpdatePatch(input: UpdatePropertyInput): Partial<typeof properties.$inferInsert> {
+  const patch: Partial<typeof properties.$inferInsert> = {};
+
+  if (Object.prototype.hasOwnProperty.call(input, "address")) {
+    patch.address = normalizeRequiredUpdateText(input.address, "Address");
+  }
+  if (Object.prototype.hasOwnProperty.call(input, "city")) {
+    patch.city = normalizeRequiredUpdateText(input.city, "City");
+  }
+  if (Object.prototype.hasOwnProperty.call(input, "state")) {
+    patch.state = validateRequiredUpdateState(input.state);
+  }
+  if (Object.prototype.hasOwnProperty.call(input, "zip")) {
+    patch.zip = validateRequiredUpdateZip(input.zip);
+  }
+  if (Object.prototype.hasOwnProperty.call(input, "buildYear")) {
+    patch.buildYear = validateOptionalPropertyBuildYear(input.buildYear);
+  }
+  if (Object.prototype.hasOwnProperty.call(input, "unitCount")) {
+    patch.unitCount = validateOptionalPropertyUnitCount(input.unitCount);
+  }
+
+  return patch;
 }
 
 function coerceCount(value: unknown) {
@@ -372,14 +462,7 @@ export async function createProperty(tenantDb: TenantDb, input: CreatePropertyIn
 }
 
 export async function updateProperty(tenantDb: TenantDb, propertyId: string, input: UpdatePropertyInput) {
-  const patch: Partial<typeof properties.$inferInsert> = {};
-
-  if (Object.prototype.hasOwnProperty.call(input, "buildYear")) {
-    patch.buildYear = validateOptionalPropertyBuildYear(input.buildYear);
-  }
-  if (Object.prototype.hasOwnProperty.call(input, "unitCount")) {
-    patch.unitCount = validateOptionalPropertyUnitCount(input.unitCount);
-  }
+  const patch = buildPropertyUpdatePatch(input);
 
   if (Object.keys(patch).length === 0) {
     const [existing] = await tenantDb.select().from(properties).where(eq(properties.id, propertyId)).limit(1);

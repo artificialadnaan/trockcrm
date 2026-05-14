@@ -54,10 +54,14 @@ router.post("/", async (req, res, next) => {
 
 router.patch("/:id", async (req, res, next) => {
   try {
-    const property = await updateProperty(req.tenantDb!, req.params.id, {
-      buildYear: req.body.buildYear,
-      unitCount: req.body.unitCount,
-    });
+    const allowedFields = ["address", "city", "state", "zip", "buildYear", "unitCount"] as const;
+    const input: Parameters<typeof updateProperty>[2] = {};
+    for (const field of allowedFields) {
+      if (Object.prototype.hasOwnProperty.call(req.body, field)) {
+        input[field] = req.body[field];
+      }
+    }
+    const property = await updateProperty(req.tenantDb!, req.params.id, input);
     if (!property) {
       throw new AppError(404, "Property not found");
     }

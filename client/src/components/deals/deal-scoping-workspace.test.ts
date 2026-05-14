@@ -33,6 +33,7 @@ const mocks = vi.hoisted(() => ({
   useProjectTypes: vi.fn(),
   usePipelineStages: vi.fn(),
   useAuth: vi.fn(),
+  propertySelectorProps: [] as Array<Record<string, unknown>>,
 }));
 
 vi.mock("@/hooks/use-deals", async (importOriginal) => {
@@ -62,9 +63,10 @@ vi.mock("@/lib/auth", () => ({
 }));
 
 vi.mock("@/components/properties/property-selector", () => ({
-  PropertySelector: ({ value, disabled }: { value?: string | null; disabled?: boolean }) => (
-    React.createElement("button", { type: "button", disabled, "data-testid": "property-selector" }, value ?? "none")
-  ),
+  PropertySelector: (props: { value?: string | null; disabled?: boolean }) => {
+    mocks.propertySelectorProps.push(props as Record<string, unknown>);
+    return React.createElement("button", { type: "button", disabled: props.disabled, "data-testid": "property-selector" }, props.value ?? "none");
+  },
 }));
 
 function makeDeal(overrides: Partial<DealDetail> = {}): DealDetail {
@@ -275,6 +277,7 @@ async function renderWorkspaceHarness(deal: DealDetail) {
 
 beforeEach(() => {
   vi.resetAllMocks();
+  mocks.propertySelectorProps.length = 0;
   mocks.useAuth.mockReturnValue({ user: { id: "user-1", role: "admin" } });
   mocks.useFiles.mockReturnValue({ files: [], refetch: vi.fn() });
   mocks.useProjectTypes.mockReturnValue({
@@ -293,6 +296,23 @@ beforeEach(() => {
 });
 
 describe("DealScopingWorkspace lineage routing helpers", () => {
+  it("enables inline repair for incomplete property addresses before changing linked property", async () => {
+    mocks.getDealScopingIntake.mockResolvedValue(makeScopingResponse({
+      intake: { officeId: "office-dallas" },
+    }));
+
+    const rendered = await renderWorkspace(makeDeal({ sourceLeadId: null }));
+
+    try {
+      expect(mocks.propertySelectorProps[0]).toMatchObject({
+        officeId: "office-dallas",
+        repairIncompleteAddressOnSelect: true,
+      });
+    } finally {
+      rendered.cleanup();
+    }
+  });
+
   it("keeps source-lead fields from being shadowed by stale scoping intake data", () => {
     const stripped = stripLineageOwnedWorkspaceFields(
       {
@@ -655,7 +675,7 @@ describe("DealScopingWorkspace load failures", () => {
     }));
     mocks.patchDealScopingIntake
       .mockRejectedValueOnce(new Error("first autosave failure"))
-      .mockRejectedValueOnce(new Error("second autosave failure"));
+      .mockRejectedValue(new Error("second autosave failure"));
 
     const { container, cleanup } = await renderWorkspace(
       makeDeal({

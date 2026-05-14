@@ -1,6 +1,11 @@
 import { describe, expect, it, vi } from "vitest";
 import propertySelectorSource from "./property-selector.tsx?raw";
-import { resolveSelectedPropertyLabel } from "./property-selector";
+import {
+  getMissingPropertyAddressFields,
+  getPropertySelectorLabel,
+  resolveSelectedPropertyLabel,
+  sortPropertiesForSelection,
+} from "./property-selector";
 
 const { apiMock } = vi.hoisted(() => ({
   apiMock: vi.fn(),
@@ -20,7 +25,7 @@ describe("PropertySelector inline create", () => {
 
     expect(source).toContain("const { properties, loading, refetch } = useProperties");
     expect(source).toContain("resolveSelectedPropertyLabel");
-    expect(source).toContain("if (match) { return formatPropertyLabel(match); }");
+    expect(source).toContain("if (match) { return getPropertySelectorLabel(match as PropertySelectorRecord); }");
     expect(source).toContain("void refetch();");
   });
 
@@ -96,5 +101,67 @@ describe("PropertySelector inline create", () => {
     expect(apiMock).toHaveBeenCalledWith("/properties/property-99", {
       headers: { "x-office-id": "office-atlanta" },
     });
+  });
+
+  it("labels incomplete address properties with company, property name, location, and warning text", () => {
+    const label = getPropertySelectorLabel({
+      id: "property-1",
+      companyId: "company-1",
+      companyName: "Radco",
+      name: "Peachtree Corners Property",
+      address: null,
+      city: "Peachtree Corners",
+      state: "GA",
+      zip: null,
+      notes: null,
+      isActive: true,
+      createdAt: "",
+      updatedAt: "",
+      leadCount: 0,
+      dealCount: 0,
+      convertedDealCount: 0,
+      lastActivityAt: null,
+      buildYear: null,
+      unitCount: null,
+    });
+
+    expect(label).toBe("Radco - Peachtree Corners Property - Peachtree Corners, GA (incomplete address)");
+  });
+
+  it("sorts complete address properties before incomplete address properties", () => {
+    const complete = {
+      id: "complete",
+      name: "Complete",
+      address: "123 Main",
+      city: "Dallas",
+      state: "TX",
+      zip: "75201",
+      companyName: "Acme",
+    };
+    const incomplete = {
+      id: "incomplete",
+      name: "Incomplete",
+      address: null,
+      city: "Peachtree Corners",
+      state: "GA",
+      zip: null,
+      companyName: "Radco",
+    };
+
+    expect(sortPropertiesForSelection([incomplete, complete]).map((property) => property.id)).toEqual([
+      "complete",
+      "incomplete",
+    ]);
+  });
+
+  it("returns the exact address fields that need inline repair", () => {
+    expect(
+      getMissingPropertyAddressFields({
+        address: null,
+        city: "Peachtree Corners",
+        state: "GA",
+        zip: null,
+      })
+    ).toEqual(["address", "zip"]);
   });
 });

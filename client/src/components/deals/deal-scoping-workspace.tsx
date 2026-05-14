@@ -1132,6 +1132,8 @@ export function DealScopingWorkspace({
                 value={activePropertyId}
                 onChange={handlePropertyChange}
                 disabled={editingDisabled}
+                officeId={intake?.officeId ?? null}
+                repairIncompleteAddressOnSelect
               />
             </div>
           </CardContent>
