@@ -176,12 +176,53 @@ const STRICT_ISO_8601_PATTERNS = [
   /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$/,
 ];
 
+const HUBSPOT_LOCAL_DATETIME_PATTERN =
+  /^(\d{4})-(\d{2})-(\d{2}) (\d{2}):(\d{2})(?::(\d{2}))?$/;
+
+function getAmericaChicagoOffsetMilliseconds(date: Date): number {
+  const timeZonePart = new Intl.DateTimeFormat("en-US", {
+    timeZone: "America/Chicago",
+    timeZoneName: "shortOffset",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hourCycle: "h23",
+  })
+    .formatToParts(date)
+    .find((part) => part.type === "timeZoneName")?.value;
+  if (!timeZonePart) throw new Error("Unable to resolve America/Chicago offset");
+  const match = /^GMT([+-])(\d{1,2})(?::(\d{2}))?$/.exec(timeZonePart);
+  if (!match) throw new Error(`Unexpected America/Chicago offset format: ${timeZonePart}`);
+  const sign = match[1] === "-" ? -1 : 1;
+  const hours = Number(match[2] ?? "0");
+  const minutes = Number(match[3] ?? "0");
+  return sign * (hours * 60 + minutes) * 60 * 1000;
+}
+
+function parseHubSpotLocalDate(text: string): Date | null {
+  const match = HUBSPOT_LOCAL_DATETIME_PATTERN.exec(text);
+  if (!match) return null;
+  const year = Number(match[1]);
+  const month = Number(match[2]);
+  const day = Number(match[3]);
+  const hour = Number(match[4]);
+  const minute = Number(match[5]);
+  const second = Number(match[6] ?? "0");
+  const utcGuess = Date.UTC(year, month - 1, day, hour, minute, second);
+  const firstPass = utcGuess - getAmericaChicagoOffsetMilliseconds(new Date(utcGuess));
+  const secondPass = utcGuess - getAmericaChicagoOffsetMilliseconds(new Date(firstPass));
+  const parsed = new Date(secondPass);
+  return Number.isNaN(parsed.getTime()) ? null : parsed;
+}
+
 function parseDate(value: string | null | undefined): Date | null {
   const text = String(value ?? "").trim();
   if (!text) return null;
-  if (!STRICT_ISO_8601_PATTERNS.some((pattern) => pattern.test(text))) return null;
-  const date = new Date(text);
-  return Number.isNaN(date.getTime()) ? null : date;
+  if (STRICT_ISO_8601_PATTERNS.some((pattern) => pattern.test(text))) {
+    const date = new Date(text);
+    return Number.isNaN(date.getTime()) ? null : date;
+  }
+  return parseHubSpotLocalDate(text);
 }
 
 function normalizeText(value: string | null | undefined): string | null {
