@@ -140,7 +140,7 @@ type DealLineageRequirement = {
   companyId?: string | null;
   propertyId?: string | null;
 };
-type DealUpdateLineageInput = Pick<UpdateDealInput, "sourceLeadId" | "companyId" | "propertyId">;
+type DealUpdateLineageInput = Pick<UpdateDealInput, "sourceLeadId" | "companyId" | "propertyId" | "migrationMode">;
 type DealUpdateLineageExisting = Pick<DealRow, "sourceLeadId" | "companyId" | "propertyId">;
 
 export function isMigrationDealCreation(input: DealLineageRequirementInput) {
@@ -163,6 +163,13 @@ export function assertDealUpdateLineagePolicy(
   existing: DealUpdateLineageExisting,
   input: DealUpdateLineageInput
 ) {
+  if (!existing.sourceLeadId && input.migrationMode !== true) {
+    throw new AppError(
+      400,
+      "Legacy deals require migrationMode=true until source lead lineage is backfilled"
+    );
+  }
+
   if (input.sourceLeadId === null) {
     throw new AppError(400, "sourceLeadId cannot be cleared once set");
   }
@@ -171,7 +178,11 @@ export function assertDealUpdateLineagePolicy(
     throw new AppError(400, "companyId and propertyId cannot be cleared once set");
   }
 
-  if (input.sourceLeadId !== undefined && input.sourceLeadId !== existing.sourceLeadId) {
+  if (
+    existing.sourceLeadId &&
+    input.sourceLeadId !== undefined &&
+    input.sourceLeadId !== existing.sourceLeadId
+  ) {
     throw new AppError(400, "sourceLeadId is immutable once established");
   }
 

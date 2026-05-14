@@ -149,6 +149,24 @@ BEGIN
         schema_name_var
       )
       USING schema_name_var;
+
+      EXECUTE format(
+        $sql$
+          UPDATE %I.lead_question_answers AS a
+          SET value_json = 'null'::jsonb,
+              updated_at = NOW()
+          WHERE a.value_json IS NOT NULL
+            AND jsonb_typeof(a.value_json) = 'string'
+            AND btrim(a.value_json #>> '{}') = ''
+            AND a.question_id IN (
+              SELECT id
+              FROM public.project_type_question_nodes
+              WHERE key = 'life_safety'
+                AND is_active = true
+            )
+        $sql$,
+        schema_name_var
+      );
     END LOOP;
   END IF;
 END $$;

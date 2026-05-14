@@ -3,6 +3,8 @@
 Date: 2026-05-14  
 Policy: preserve every non-empty free-text Life Safety answer in `public.lead_form_field_batch_life_safety_audit`, then convert stored answers to boolean JSON. Recognizable negative/not-applicable values (`no`, `n/a`, `na`, `none`, `not applicable`) become `false`; other non-empty values become `true` for manual review without blocking required-question gates.
 
+Update: blank JSON string Life Safety answers are normalized to JSON `null` during the same tenant-schema pass. They are not written to the audit table because they contain no recoverable answer text; the `UPDATE` is idempotent because reruns no longer match `jsonb_typeof(value_json) = 'string'`.
+
 ## Discovery Counts
 
 | Schema | Non-empty Life Safety free-text answers |

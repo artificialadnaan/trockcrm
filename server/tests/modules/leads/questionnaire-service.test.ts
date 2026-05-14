@@ -1,3 +1,4 @@
+import { readFileSync } from "node:fs";
 import {
   leadQuestionAnswerHistory,
   leadQuestionAnswers,
@@ -15,6 +16,11 @@ import {
 } from "../../../src/modules/leads/questionnaire-service.js";
 
 vi.mock("@trock-crm/shared/schema", async () => import("../../../../shared/src/schema/index.js"));
+
+const leadFormFieldBatchMigrationSql = readFileSync(
+  new URL("../../../../migrations/0117_lead_form_field_batch.sql", import.meta.url),
+  "utf8"
+);
 
 function node(overrides: Partial<typeof projectTypeQuestionNodes.$inferSelect>) {
   return {
@@ -466,6 +472,53 @@ describe("questionnaire-service universal questionnaire", () => {
     });
 
     expect(tenantDb.answers).toHaveLength(0);
+  });
+
+  it("keeps blank legacy life_safety answers migrated to null for boolean resubmits", async () => {
+    expect(leadFormFieldBatchMigrationSql).toMatch(
+      /SET\s+value_json\s*=\s*'null'::jsonb[\s\S]*WHERE[\s\S]*jsonb_typeof\(a\.value_json\)\s*=\s*'string'[\s\S]*btrim\(a\.value_json\s*#>>\s*'\{\}'\)\s*=\s*''[\s\S]*key\s*=\s*'life_safety'/i
+    );
+
+    const tenantDb = createMutationDb({
+      nodes: [
+        node({
+          id: "life-safety",
+          key: "life_safety",
+          inputType: "boolean",
+          isRequired: true,
+        }),
+      ],
+      answers: [
+        {
+          id: "answer-life-safety",
+          leadId: "lead-1",
+          questionId: "life-safety",
+          valueJson: null,
+          updatedBy: null,
+          createdAt: new Date("2026-01-01T00:00:00Z"),
+          updatedAt: new Date("2026-01-01T00:00:00Z"),
+        },
+      ],
+    });
+
+    const snapshot = await getLeadQuestionnaireSnapshot(tenantDb as never, {
+      leadId: "lead-1",
+      projectTypeId: null,
+    });
+
+    expect(snapshot.answers).toEqual({ life_safety: null });
+
+    await expect(
+      upsertLeadQuestionAnswerSet(tenantDb as never, {
+        leadId: "lead-1",
+        projectTypeId: null,
+        changedBy: "user-1",
+        changedAt: new Date("2026-01-02T00:00:00Z"),
+        answers: snapshot.answers,
+      })
+    ).resolves.toBe(false);
+
+    expect(tenantDb.answers[0]?.valueJson).toBeNull();
   });
 
   it("rejects malformed multi-select array answers", async () => {
