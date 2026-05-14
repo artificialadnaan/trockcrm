@@ -8,6 +8,7 @@ export interface ScopingCompletionStateEntry {
 
 const SECTION_LABELS: Record<string, string> = {
   projectOverview: "Project Overview",
+  scope: "Scope",
   propertyDetails: "Property Details",
   scopeSummary: "Scope Summary",
   opportunity: "Opportunity Review",
@@ -21,6 +22,7 @@ const FIELD_LABELS: Record<string, string> = {
   propertyCity: "Property City",
   propertyState: "Property State",
   propertyZip: "Property Zip",
+  selectedProjectTypeIds: "Selected Scope Items",
   summary: "Summary",
   preBidMeetingCompleted: "Pre-Bid Meeting Completed",
   estimatorConsultationNotes: "Estimator Consultation Notes",
@@ -74,6 +76,7 @@ export function getScopingCompletionCounts(
 
 export function buildScopingSeedFromDeal(deal: {
   name: string;
+  projectTypeId?: string | null;
   propertyAddress: string | null;
   propertyCity: string | null;
   propertyState: string | null;
@@ -90,6 +93,9 @@ export function buildScopingSeedFromDeal(deal: {
       propertyState: deal.propertyState ?? "",
       propertyZip: deal.propertyZip ?? "",
     },
+    scope: {
+      selectedProjectTypeIds: deal.projectTypeId ? [deal.projectTypeId] : [],
+    },
     scopeSummary: {
       summary: deal.description ?? "",
     },
@@ -104,6 +110,7 @@ export function buildScopingSeedFromDeal(deal: {
 }
 
 export function buildScopingSeedFromResolvedFields(resolved: {
+  projectTypeId?: string | null;
   propertyName: string | null;
   propertyAddress: string | null;
   propertyCity: string | null;
@@ -122,6 +129,9 @@ export function buildScopingSeedFromResolvedFields(resolved: {
       propertyCity: resolved.propertyCity ?? "",
       propertyState: resolved.propertyState ?? "",
       propertyZip: resolved.propertyZip ?? "",
+    },
+    scope: {
+      selectedProjectTypeIds: resolved.projectTypeId ? [resolved.projectTypeId] : [],
     },
     scopeSummary: {
       summary: resolved.description ?? "",

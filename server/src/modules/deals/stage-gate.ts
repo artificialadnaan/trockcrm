@@ -451,7 +451,11 @@ export async function validateStageGate(
       ([sectionName, fieldNames]) => fieldNames.map((fieldName) => `${sectionName}.${fieldName}`)
     );
     const scopingAttachmentRequirements = scopingReadiness.attachmentRequirements ?? [];
-    const scopingMissingDocuments = scopingAttachmentRequirements
+    const requiredScopingAttachmentKeys = new Set(scopingReadiness.requiredAttachmentKeys ?? []);
+    const requiredScopingAttachmentRequirements = scopingAttachmentRequirements.filter((attachment) =>
+      requiredScopingAttachmentKeys.has(attachment.key)
+    );
+    const scopingMissingDocuments = requiredScopingAttachmentRequirements
       .filter((attachment) => !attachment.satisfied)
       .map((attachment) => attachment.category);
 
@@ -464,7 +468,7 @@ export async function validateStageGate(
       });
     }
 
-    for (const attachment of scopingAttachmentRequirements) {
+    for (const attachment of requiredScopingAttachmentRequirements) {
       pushChecklistItem(effectiveChecklist.attachments, {
         key: attachment.category,
         label: attachment.label,

@@ -1022,7 +1022,7 @@ describe("Scoping Service", () => {
 
     expect(tenantDb.state.deals[0]?.workflowRoute).toBe("normal");
     expect(result.intake.workflowRouteSnapshot).toBe("normal");
-    expect(result.readiness.requiredAttachmentKeys).toEqual(["scope_docs", "site_photos"]);
+    expect(result.readiness.requiredAttachmentKeys).toEqual([]);
   });
 
   it("stores assign percent in scoping data without deriving readiness from it", async () => {
@@ -1059,7 +1059,7 @@ describe("Scoping Service", () => {
     expect(result.readiness.errors.sections.projectOverview ?? []).not.toContain("assignPercent");
   });
 
-  it("marks intake ready only when required sections and attachments are satisfied", async () => {
+  it("marks intake ready when required sections and scope are satisfied without requiring attachments", async () => {
     pipelineMocks.getStageById.mockResolvedValue({
       id: "stage-opportunity",
       slug: "opportunity",
@@ -1092,42 +1092,22 @@ describe("Scoping Service", () => {
     const readiness = await evaluateDealScopingReadiness(tenantDb as never, "deal-1");
 
     expect(readiness.status).toBe("draft");
+    expect(readiness.errors.sections.scope).toContain("selectedProjectTypeIds");
     expect(readiness.errors.sections.projectOverview).toContain("bidDueDate");
-    expect(readiness.errors.attachments.site_photos).toContain("site_photos");
+    expect(readiness.errors.attachments).toEqual({});
     expect(readiness.completionState.projectOverview.isComplete).toBe(false);
 
     await upsertDealScopingIntake(
       tenantDb as never,
       "deal-1",
       {
+        projectTypeId: "project-type-1",
         projectOverview: { propertyName: "Palm Villas", bidDueDate: "2026-04-30" },
         opportunity: { preBidMeetingCompleted: "yes", siteVisitDecision: "not_required" },
         propertyDetails: { propertyAddress: "123 Palm Way" },
         scopeSummary: { summary: "Exterior refresh" },
       },
       "user-1"
-    );
-    tenantDb.state.files.push(
-      {
-        id: "file-1",
-        dealId: "deal-1",
-        category: "other",
-        r2Key: "office_a/deals/D-1/scope_docs/file-1.pdf",
-        r2Bucket: "trock-crm-files",
-        intakeRequirementKey: "scope_docs",
-        intakeSource: "scoping_intake",
-        isActive: true,
-      },
-      {
-        id: "file-2",
-        dealId: "deal-1",
-        category: "photo",
-        r2Key: "office_a/deals/D-1/site_photos/file-2.jpg",
-        r2Bucket: "trock-crm-files",
-        intakeRequirementKey: "site_photos",
-        intakeSource: "scoping_intake",
-        isActive: true,
-      }
     );
 
     const readyReadiness = await evaluateDealScopingReadiness(tenantDb as never, "deal-1");
@@ -1136,6 +1116,10 @@ describe("Scoping Service", () => {
     expect(readyReadiness.errors.sections).toEqual({});
     expect(readyReadiness.errors.attachments).toEqual({});
     expect(readyReadiness.completionState.attachments.isComplete).toBe(true);
+    expect(readyReadiness.attachmentRequirements).toEqual([
+      expect.objectContaining({ key: "scope_docs", satisfied: false }),
+      expect.objectContaining({ key: "site_photos", satisfied: false }),
+    ]);
 
     const [savedIntake] = tenantDb.state.dealScopingIntake;
     expect(savedIntake.status).toBe("ready");

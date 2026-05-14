@@ -192,6 +192,12 @@ function buildSeedSectionDataFromDeal(deal: DealRow): DealScopingSectionData {
     };
   }
 
+  if (deal.projectTypeId) {
+    sectionData.scope = {
+      selectedProjectTypeIds: [deal.projectTypeId],
+    };
+  }
+
   if (deal.description) {
     sectionData.scopeSummary = {
       summary: deal.description,
@@ -223,6 +229,12 @@ function buildSeedSectionDataFromResolvedDeal(resolvedDeal: ResolvedDealView): D
       propertyCity: resolved.propertyCity,
       propertyState: resolved.propertyState,
       propertyZip: resolved.propertyZip,
+    };
+  }
+
+  if (resolved.projectTypeId) {
+    sectionData.scope = {
+      selectedProjectTypeIds: [resolved.projectTypeId],
     };
   }
 
@@ -598,8 +610,9 @@ function buildScopingReadiness(input: {
         attachment.category === requirement.category
     ),
   }));
+  const requiredAttachmentKeySet = new Set(baseReadiness.requiredAttachmentKeys);
   const missingAttachments = attachmentRequirements.filter(
-    (requirement) => !requirement.satisfied
+    (requirement) => requiredAttachmentKeySet.has(requirement.key) && !requirement.satisfied
   );
   const hasSectionErrors = Object.values(baseReadiness.errors.sections).some(
     (fields) => fields.length > 0
@@ -627,7 +640,7 @@ function buildScopingReadiness(input: {
         missingAttachments: missingAttachments.map((requirement) => requirement.key),
       },
     },
-    requiredAttachmentKeys: attachmentRequirements.map((requirement) => requirement.key),
+    requiredAttachmentKeys: baseReadiness.requiredAttachmentKeys,
     attachmentRequirements,
   };
 }
