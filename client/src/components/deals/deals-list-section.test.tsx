@@ -162,6 +162,36 @@ describe("DealsListSection", () => {
     expect(html).toContain("DFW-1-12826-aa");
   });
 
+  it("renders deal descriptions in a separate column with muted fallback and hover title", () => {
+    mocks.useDealsMock.mockReturnValue({
+      deals: [
+        makeDeal({
+          description: "Long deal description that should stay available on hover for the list view.",
+        }),
+        makeDeal({
+          id: "deal-2",
+          name: "No Description Deal",
+          description: null,
+        }),
+      ],
+      pagination: { page: 1, limit: 25, total: 2, totalPages: 1 },
+      loading: false,
+      error: null,
+      refetch: vi.fn(),
+    });
+
+    const html = render();
+
+    expect(html).toContain(">Description<");
+    expect(html).toContain('aria-label="Long deal description that should stay available on hover for the list view."');
+    expect(html).toContain('title="Long deal description that should stay available on hover for the list view."');
+    expect(html).toContain("Long deal description that should stay available on hover for the list view.");
+    expect(html).toContain("No Description Deal");
+    expect(html).toContain(">—<");
+    expect(html).toContain("table-fixed");
+    expect(html).toContain("hidden md:table-cell md:w-[18rem]");
+  });
+
   it("renders the selected owner filter label from assignees instead of the raw id", () => {
     const html = render();
 

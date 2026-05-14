@@ -22,6 +22,8 @@ export interface PipelineStageTableColumn<T> {
   key: string;
   header: ReactNode;
   render: (row: T) => ReactNode;
+  headClassName?: string;
+  cellClassName?: string;
 }
 
 interface PipelineStageTableProps<T> {
@@ -31,6 +33,7 @@ interface PipelineStageTableProps<T> {
   onPageChange: (page: number) => void;
   onRowClick?: (row: T) => void;
   getRowKey?: (row: T, index: number) => string;
+  tableClassName?: string;
 }
 
 export function PipelineStageTable<T>({
@@ -40,6 +43,7 @@ export function PipelineStageTable<T>({
   onPageChange,
   onRowClick,
   getRowKey,
+  tableClassName,
 }: PipelineStageTableProps<T>) {
   return (
     <div className="space-y-4">
@@ -51,13 +55,16 @@ export function PipelineStageTable<T>({
           Page {pagination.page} of {pagination.totalPages || 1}
         </p>
       </div>
-      <Table className="overflow-hidden rounded-[1.25rem]">
+      <Table className={cn("overflow-hidden rounded-[1.25rem]", tableClassName)}>
         <TableHeader>
           <TableRow>
             {columns.map((column) => (
               <TableHead
                 key={column.key}
-                className="border-b border-slate-200 bg-[#f7f8fb] px-4 py-3 text-[11px] font-black tracking-[0.16em] text-slate-500 uppercase"
+                className={cn(
+                  "border-b border-slate-200 bg-[#f7f8fb] px-4 py-3 text-[11px] font-black tracking-[0.16em] text-slate-500 uppercase",
+                  column.headClassName
+                )}
               >
                 {column.header}
               </TableHead>
@@ -75,7 +82,10 @@ export function PipelineStageTable<T>({
               onClick={onRowClick ? () => onRowClick(row) : undefined}
             >
               {columns.map((column) => (
-                <TableCell key={column.key} className="px-4 py-4 align-top text-sm text-slate-700">
+                <TableCell
+                  key={column.key}
+                  className={cn("px-4 py-4 align-top text-sm text-slate-700", column.cellClassName)}
+                >
                   {column.render(row)}
                 </TableCell>
               ))}
