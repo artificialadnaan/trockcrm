@@ -273,15 +273,19 @@ async function runBrowserSmoke(options: CliOptions, sales: Session, deal: Deal) 
   await context.addCookies(
     sales.cookies.split(";").flatMap((part) => {
       const [name, ...rest] = part.trim().split("=");
-      return cookieTargets.map((domain) => ({
-        name,
-        value: rest.join("="),
-        domain,
-        path: "/",
-        httpOnly: name === "token",
-        secure: (domain === apiUrl.hostname ? apiUrl : frontendUrl).protocol === "https:",
-        sameSite: domain === apiUrl.hostname ? "None" as const : "Lax" as const,
-      }));
+      return cookieTargets.map((domain) => {
+        const targetUrl = domain === apiUrl.hostname ? apiUrl : frontendUrl;
+        const secure = targetUrl.protocol === "https:";
+        return {
+          name,
+          value: rest.join("="),
+          domain,
+          path: "/",
+          httpOnly: name === "token",
+          secure,
+          sameSite: domain === apiUrl.hostname && secure ? "None" as const : "Lax" as const,
+        };
+      });
     })
   );
   const page = await context.newPage();
