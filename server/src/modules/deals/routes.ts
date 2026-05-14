@@ -1114,6 +1114,7 @@ router.post("/service-opportunity", async (req, res, next) => {
       projectType: "service",
       projectTypeId: serviceProjectType.id,
       officeCode: officeCodeResolution.officeCode,
+      auditContext: buildRouteAuditContext(req),
     });
     await req.commitTransaction!();
     const includeHubspotId = shouldIncludeHubspotId(req.query, req.user!.role);

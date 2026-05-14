@@ -202,6 +202,12 @@ describe("POST /api/deals create context", () => {
         officeCode: "dfw",
         officeId: "office-dallas",
         actorUserId: "admin-1",
+        auditContext: expect.objectContaining({
+          actor: expect.objectContaining({
+            type: "user",
+            userId: "admin-1",
+          }),
+        }),
       })
     );
   });
