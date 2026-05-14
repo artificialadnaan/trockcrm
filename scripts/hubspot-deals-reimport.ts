@@ -101,6 +101,13 @@ export interface PlanEntry {
   ambiguousMatches: ExistingDealRow[];
   fieldDiffs: FieldDiff[];
   skippedFieldClears: SkippedFieldClear[];
+  invalidAmountRaw: string | null;
+}
+
+export interface InvalidAmountIssue {
+  hubspotRecordId: string;
+  bucket: "MISSING" | "EXISTS_NEWER_IN_CSV";
+  rawValue: string;
 }
 
 export interface ReimportPlan {
@@ -109,6 +116,7 @@ export interface ReimportPlan {
   ambiguousRate: number;
   shouldStopForAmbiguousRate: boolean;
   skippedFieldClearCount: number;
+  invalidAmountIssues: InvalidAmountIssue[];
 }
 
 interface ReportSections {
@@ -163,9 +171,15 @@ function formatIso(value: Date | null): string | null {
   return value ? value.toISOString() : null;
 }
 
+const STRICT_ISO_8601_PATTERNS = [
+  /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/,
+  /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$/,
+];
+
 function parseDate(value: string | null | undefined): Date | null {
   const text = String(value ?? "").trim();
   if (!text) return null;
+  if (!STRICT_ISO_8601_PATTERNS.some((pattern) => pattern.test(text))) return null;
   const date = new Date(text);
   return Number.isNaN(date.getTime()) ? null : date;
 }
@@ -187,11 +201,60 @@ function normalizeWritableProjectType(value: string | null | undefined): string 
   return isProjectTypeValue(normalized) ? normalized : null;
 }
 
-function normalizeAmount(value: string | null | undefined): string | null {
-  const text = String(value ?? "").trim();
+export function validateAmount(value: unknown): number | null {
+  if (value == null) return null;
+  if (typeof value === "number") {
+    if (!Number.isFinite(value)) throw new Error(`Invalid numeric amount '${String(value)}'`);
+    return value;
+  }
+  if (typeof value !== "string") {
+    throw new Error(`Invalid amount type '${typeof value}'`);
+  }
+  const text = value.trim();
   if (!text) return null;
-  const numeric = Number(text.replace(/[$,]/g, ""));
-  return Number.isFinite(numeric) ? numeric.toFixed(2) : text;
+  const cleaned = text.replace(/[$,\s]/g, "");
+  if (!cleaned) return null;
+  if (!/^[+-]?(?:\d+\.?\d*|\.\d+)$/.test(cleaned)) {
+    throw new Error(`Invalid amount '${value}'`);
+  }
+  const numeric = Number(cleaned);
+  if (!Number.isFinite(numeric)) {
+    throw new Error(`Invalid amount '${value}'`);
+  }
+  return numeric;
+}
+
+function normalizeAmount(value: unknown): string | null {
+  try {
+    const numeric = validateAmount(value);
+    return numeric == null ? null : numeric.toFixed(2);
+  } catch {
+    return normalizeText(typeof value === "string" ? value : value == null ? null : String(value));
+  }
+}
+
+function getInvalidAmountRawValue(value: unknown): string {
+  if (typeof value === "string") return value;
+  if (value == null) return "";
+  return String(value);
+}
+
+function assessCsvAmount(value: unknown): {
+  normalized: string | null;
+  invalidRaw: string | null;
+} {
+  try {
+    const numeric = validateAmount(value);
+    return {
+      normalized: numeric == null ? null : numeric.toFixed(2),
+      invalidRaw: null,
+    };
+  } catch {
+    return {
+      normalized: null,
+      invalidRaw: getInvalidAmountRawValue(value),
+    };
+  }
 }
 
 function sameDayWithin24Hours(left: string | null, right: string | null): boolean {
@@ -202,7 +265,11 @@ function sameDayWithin24Hours(left: string | null, right: string | null): boolea
 }
 
 function resolveCsvPath(explicitPath?: string | null): string {
-  const candidates = explicitPath ? [explicitPath, ...DEFAULT_CSV_CANDIDATES] : DEFAULT_CSV_CANDIDATES;
+  if (explicitPath) {
+    if (fs.existsSync(explicitPath)) return explicitPath;
+    throw new Error(`CSV not found at explicit path: ${explicitPath}`);
+  }
+  const candidates = DEFAULT_CSV_CANDIDATES;
   for (const candidate of candidates) {
     if (candidate && fs.existsSync(candidate)) return candidate;
   }
@@ -214,10 +281,10 @@ function quoteIdent(value: string): string {
   return `"${value.replace(/"/g, '""')}"`;
 }
 
-function readEnvValueFromFile(filePath: string, key: string): string | null {
+export function readEnvValueFromFile(filePath: string, key: string): string | null {
   if (!fs.existsSync(filePath)) return null;
   for (const line of fs.readFileSync(filePath, "utf8").split(/\r?\n/)) {
-    if (line.startsWith(`${key}=`)) return line.split("=", 2)[1]?.trim() || null;
+    if (line.startsWith(`${key}=`)) return line.slice(line.indexOf("=") + 1).trim() || null;
   }
   return null;
 }
@@ -247,8 +314,12 @@ function resolveDatabaseUrl(): string {
 export function parseReimportArgs(argv: string[]): ReimportArgs {
   const args = argv.slice(2);
   const apply = args.includes("--apply");
+  const explicitDryRun = args.includes("--dry-run");
+  if (apply && explicitDryRun) {
+    throw new Error("Cannot pass both --dry-run and --apply.");
+  }
   const confirmProduction = args.includes("--confirm-production");
-  const dryRun = !apply || args.includes("--dry-run");
+  const dryRun = !apply;
   if (apply && !confirmProduction) {
     throw new Error("--apply requires --confirm-production");
   }
@@ -277,7 +348,7 @@ export function parseHubSpotDealsCsv(text: string): CsvDealRow[] {
         hubspotRecordId,
         dealName: first(row, ["Deal Name"]),
         dealOwner: normalizeText(first(row, ["Deal owner"])),
-        amount: normalizeAmount(first(row, ["Amount"])) ?? null,
+        amount: normalizeText(first(row, ["Amount"])),
         createDate: formatIso(parseDate(first(row, ["Create Date"]))),
         lastModifiedDate: formatIso(parseDate(first(row, ["Last Modified Date"]))),
         dealStage: normalizeText(first(row, ["Deal Stage"])),
@@ -297,8 +368,11 @@ function buildFieldDelta(
   const diffs: FieldDiff[] = [];
   const skippedFieldClears: SkippedFieldClear[] = [];
   const crmAmount = normalizeAmount(crmDeal.amount);
-  const csvAmount = normalizeAmount(csvRow.amount);
-  if (csvAmount == null && crmAmount != null) {
+  const csvAmountAssessment = assessCsvAmount(csvRow.amount);
+  const csvAmount = csvAmountAssessment.normalized;
+  if (csvAmountAssessment.invalidRaw != null) {
+    // Invalid CSV amounts are surfaced separately and never treated as field clears.
+  } else if (csvAmount == null && crmAmount != null) {
     skippedFieldClears.push({ field: "amount", currentValue: crmAmount, csvValue: null });
   } else if (csvAmount !== crmAmount) {
     diffs.push({ field: "amount", currentValue: crmAmount, csvValue: csvAmount });
@@ -371,6 +445,16 @@ export function buildReimportPlan(input: {
     SOFT_DELETED: 0,
   };
   let skippedFieldClearCount = 0;
+  const invalidAmountIssues: InvalidAmountIssue[] = [];
+
+  const duplicateActiveHubspotDealIds = findDuplicateActiveHubspotDealIds(input.crmDeals);
+  if (duplicateActiveHubspotDealIds.length > 0) {
+    throw new Error(
+      `Duplicate active hubspot_deal_id values found: ${duplicateActiveHubspotDealIds
+        .map(({ hubspotDealId, count }) => `${hubspotDealId} (${count})`)
+        .join(", ")}`
+    );
+  }
 
   const byHubspotId = new Map<string, ExistingDealRow>();
   const softDeletedByHubspotId = new Map<string, ExistingDealRow>();
@@ -381,6 +465,7 @@ export function buildReimportPlan(input: {
   }
 
   const entries: PlanEntry[] = input.csvRows.map((csvRow) => {
+    const amountAssessment = assessCsvAmount(csvRow.amount);
     const activeMatch = byHubspotId.get(csvRow.hubspotRecordId) ?? null;
     const softDeletedMatch = softDeletedByHubspotId.get(csvRow.hubspotRecordId) ?? null;
     if (softDeletedMatch) {
@@ -392,6 +477,7 @@ export function buildReimportPlan(input: {
         ambiguousMatches: [],
         fieldDiffs: [],
         skippedFieldClears: [],
+        invalidAmountRaw: null,
       };
     }
     if (activeMatch) {
@@ -403,6 +489,13 @@ export function buildReimportPlan(input: {
           : "EXISTS_UNCHANGED";
       const delta = bucket === "EXISTS_NEWER_IN_CSV" ? buildFieldDelta(csvRow, activeMatch) : null;
       skippedFieldClearCount += delta?.skippedFieldClears.length ?? 0;
+      if (bucket === "EXISTS_NEWER_IN_CSV" && amountAssessment.invalidRaw != null) {
+        invalidAmountIssues.push({
+          hubspotRecordId: csvRow.hubspotRecordId,
+          bucket,
+          rawValue: amountAssessment.invalidRaw,
+        });
+      }
       counts[bucket] += 1;
       return {
         bucket,
@@ -411,6 +504,7 @@ export function buildReimportPlan(input: {
         ambiguousMatches: [],
         fieldDiffs: delta?.fieldDiffs ?? [],
         skippedFieldClears: delta?.skippedFieldClears ?? [],
+        invalidAmountRaw: bucket === "EXISTS_NEWER_IN_CSV" ? amountAssessment.invalidRaw : null,
       };
     }
 
@@ -430,9 +524,17 @@ export function buildReimportPlan(input: {
         ambiguousMatches,
         fieldDiffs: [],
         skippedFieldClears: [],
+        invalidAmountRaw: null,
       };
     }
 
+    if (amountAssessment.invalidRaw != null) {
+      invalidAmountIssues.push({
+        hubspotRecordId: csvRow.hubspotRecordId,
+        bucket: "MISSING",
+        rawValue: amountAssessment.invalidRaw,
+      });
+    }
     counts.MISSING += 1;
     return {
       bucket: "MISSING",
@@ -441,6 +543,7 @@ export function buildReimportPlan(input: {
       ambiguousMatches: [],
       fieldDiffs: [],
       skippedFieldClears: [],
+      invalidAmountRaw: amountAssessment.invalidRaw,
     };
   });
 
@@ -451,7 +554,22 @@ export function buildReimportPlan(input: {
     ambiguousRate,
     shouldStopForAmbiguousRate: ambiguousRate > 0.05,
     skippedFieldClearCount,
+    invalidAmountIssues,
   };
+}
+
+function findDuplicateActiveHubspotDealIds(
+  crmDeals: ExistingDealRow[]
+): Array<{ hubspotDealId: string; count: number }> {
+  const counts = new Map<string, number>();
+  for (const deal of crmDeals) {
+    if (!deal.isActive || !deal.hubspotDealId) continue;
+    counts.set(deal.hubspotDealId, (counts.get(deal.hubspotDealId) ?? 0) + 1);
+  }
+  return [...counts.entries()]
+    .filter(([, count]) => count > 1)
+    .map(([hubspotDealId, count]) => ({ hubspotDealId, count }))
+    .sort((left, right) => left.hubspotDealId.localeCompare(right.hubspotDealId));
 }
 
 interface ApplyResult {
@@ -587,7 +705,7 @@ async function insertMissingDeal(
       row.dealName || "Unnamed Deal",
       stageId,
       assignedRepId,
-      row.amount,
+      validateAmount(row.amount),
       "hubspot_deals_reimport_2026_05_14",
       row.hubspotRecordId,
       officeCode,
@@ -616,7 +734,7 @@ async function updateExistingDeal(
   for (const diff of actionableDiffs) {
     if (diff.field === "amount") {
       sets.push(`bid_estimate = $${index++}::numeric`);
-      values.push(diff.csvValue);
+      values.push(validateAmount(diff.csvValue));
     } else if (diff.field === "deal_name") {
       sets.push(`name = $${index++}`);
       values.push(diff.csvValue);
@@ -734,12 +852,29 @@ function renderRiskAssessment(plan: ReimportPlan): string {
   if (plan.counts.SOFT_DELETED > 0) {
     risks.push("- Soft-deleted HubSpot-linked deals exist and need human review before any restore/create action.");
   }
+  if (plan.invalidAmountIssues.length > 0) {
+    risks.push(
+      `- Invalid CSV amounts detected for ${plan.invalidAmountIssues.length} row(s); apply will hard-stop until they are resolved.`
+    );
+  }
   if (risks.length === 0) {
     risks.push("- No hard-stop thresholds were triggered in this dry-run.");
   }
   risks.push("- Stage, assignment, and other workflow-owned fields are intentionally excluded from update application.");
   risks.push("- Bucket b update plans are limited to amount, deal_name, project_number, project_type, and last_modified_at.");
   return risks.join("\n");
+}
+
+function renderInvalidAmountTable(plan: ReimportPlan): string {
+  if (plan.invalidAmountIssues.length === 0) return "_None_\n";
+  const lines = [
+    "| HubSpot Record ID | Bucket | Raw Amount |",
+    "| --- | --- | --- |",
+  ];
+  for (const issue of plan.invalidAmountIssues.slice(0, 100)) {
+    lines.push(`| ${issue.hubspotRecordId} | ${issue.bucket} | ${issue.rawValue} |`);
+  }
+  return `${lines.join("\n")}\n`;
 }
 
 export function renderDryRunReport(plan: ReimportPlan, args: ReimportArgs): string {
@@ -751,6 +886,7 @@ export function renderDryRunReport(plan: ReimportPlan, args: ReimportArgs): stri
       `- AMBIGUOUS: ${plan.counts.AMBIGUOUS}`,
       `- SOFT_DELETED: ${plan.counts.SOFT_DELETED}`,
       `- Skipped field-clears (blank CSV vs non-null CRM): ${plan.skippedFieldClearCount}`,
+      `- Invalid amount rows: ${plan.invalidAmountIssues.length}`,
       `- Ambiguous rate: ${(plan.ambiguousRate * 100).toFixed(2)}%`,
       `- Hard stop threshold breached: ${plan.shouldStopForAmbiguousRate ? "yes" : "no"}`,
     ].join("\n"),
@@ -793,6 +929,10 @@ ${sections.samples}
 
 ${sections.updateDiffs}
 
+## Invalid Amount Rows
+
+${renderInvalidAmountTable(plan)}
+
 ## Risk Assessment
 
 ${sections.risks}
@@ -803,10 +943,20 @@ function ensureParentDir(filePath: string): void {
   fs.mkdirSync(path.dirname(filePath), { recursive: true });
 }
 
+function validatePlanBeforeApply(plan: ReimportPlan): void {
+  if (plan.invalidAmountIssues.length === 0) return;
+  throw new Error(
+    `Refusing to apply because CSV amount validation failed for: ${plan.invalidAmountIssues
+      .map((issue) => `${issue.hubspotRecordId} (${issue.bucket}, raw='${issue.rawValue}')`)
+      .join(", ")}`
+  );
+}
+
 async function applyPlan(client: pg.PoolClient, tenant: string, plan: ReimportPlan): Promise<ApplyResult> {
   if (plan.shouldStopForAmbiguousRate) {
     throw new Error("Refusing to apply: ambiguous match rate exceeds 5%");
   }
+  validatePlanBeforeApply(plan);
   const result: ApplyResult = {
     createdHubspotRecordIds: [],
     updatedHubspotRecordIds: [],
@@ -870,6 +1020,7 @@ async function run(): Promise<void> {
       console.log(`AMBIGUOUS: ${plan.counts.AMBIGUOUS} deals`);
       console.log(`SOFT_DELETED: ${plan.counts.SOFT_DELETED} deals`);
       console.log(`SKIPPED_FIELD_CLEARS: ${plan.skippedFieldClearCount} fields`);
+      console.log(`INVALID_AMOUNT_ROWS: ${plan.invalidAmountIssues.length}`);
       console.log(`Report: ${args.reportPath}`);
 
       if (args.apply) {
