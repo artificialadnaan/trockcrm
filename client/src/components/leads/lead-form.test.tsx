@@ -1295,6 +1295,43 @@ describe("LeadForm", () => {
     expect(calls).toEqual(["updateProperty", "createLead"]);
   });
 
+  it("updates repaired property address fields before creating the lead", async () => {
+    const calls: string[] = [];
+    properties = [
+      {
+        ...completeProperty,
+        address: null,
+        city: "Peachtree Corners",
+        state: "GA",
+        zip: null,
+      },
+    ];
+    propertyHookMocks.updateProperty.mockImplementation(async () => {
+      calls.push("updateProperty");
+      return { property: { ...completeProperty, address: "5000 Triangle Pkwy", city: "Peachtree Corners", state: "GA", zip: "30092" } };
+    });
+    leadHookMocks.createLead.mockImplementation(async () => {
+      calls.push("createLead");
+      return { lead: { id: "lead-created" } };
+    });
+
+    renderCreateForm();
+    await setInputValue(container.querySelector<HTMLInputElement>("#property-repair-address")!, "5000 Triangle Pkwy");
+    await setInputValue(container.querySelector<HTMLInputElement>("#property-repair-zip")!, "30092");
+    await submitForm();
+
+    expect(propertyHookMocks.updateProperty).toHaveBeenCalledWith(
+      "property-1",
+      {
+        address: "5000 Triangle Pkwy",
+        zip: "30092",
+      },
+      { officeId: "office-dallas" }
+    );
+    expect(leadHookMocks.createLead).toHaveBeenCalledTimes(1);
+    expect(calls).toEqual(["updateProperty", "createLead"]);
+  });
+
   it("skips lead creation and shows an error if property repair fails", async () => {
     properties = [{ ...completeProperty, buildYear: null }];
     propertyHookMocks.updateProperty.mockRejectedValue(new Error("Property update failed"));

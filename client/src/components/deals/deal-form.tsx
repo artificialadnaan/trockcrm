@@ -324,6 +324,17 @@ export function DealForm({ deal, onSuccess, initialValues }: DealFormProps) {
                   onChange={(propertyId) => handleChange("propertyId", propertyId)}
                   officeId={selectedOffice?.officeId}
                   required
+                  repairIncompleteAddressOnSelect
+                  onPropertyRepaired={(property) => {
+                    setFormData((prev) => ({
+                      ...prev,
+                      propertyId: property.id,
+                      propertyAddress: property.address ?? prev.propertyAddress,
+                      propertyCity: property.city ?? prev.propertyCity,
+                      propertyState: property.state ?? prev.propertyState,
+                      propertyZip: property.zip ?? prev.propertyZip,
+                    }));
+                  }}
                 />
               </div>
             </div>

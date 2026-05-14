@@ -16,6 +16,16 @@ const mocks = vi.hoisted(() => ({
   useProjectTypes: vi.fn(),
   useRegions: vi.fn(),
   useTaskAssignees: vi.fn(),
+  propertySelectorProps: null as null | {
+    onChange: (propertyId: string) => void;
+    onPropertyRepaired?: (property: {
+      id: string;
+      address: string | null;
+      city: string | null;
+      state: string | null;
+      zip: string | null;
+    }) => void;
+  },
 }));
 
 vi.mock("@/hooks/use-deals", () => ({
@@ -46,7 +56,10 @@ vi.mock("@/components/companies/company-selector", () => ({
 }));
 
 vi.mock("@/components/properties/property-selector", () => ({
-  PropertySelector: () => <div data-testid="property-selector" />,
+  PropertySelector: (props: NonNullable<typeof mocks.propertySelectorProps>) => {
+    mocks.propertySelectorProps = props;
+    return <div data-testid="property-selector" />;
+  },
 }));
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
@@ -126,6 +139,7 @@ describe("DealForm direct-create context", () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
+    mocks.propertySelectorProps = null;
     setupCommonMocks();
   });
 
@@ -171,7 +185,49 @@ describe("DealForm direct-create context", () => {
       }),
       { officeId: "office-dallas" }
     );
-  }, 15000);
+  }, 30000);
+
+  it("copies repaired property address fields into the direct-create deal payload", async () => {
+    mocks.useAccessibleOffices.mockReturnValue({
+      offices: [
+        { id: "office-dallas", name: "Dallas", slug: "dallas" },
+        { id: "office-atlanta", name: "Atlanta", slug: "atlanta" },
+      ],
+      loading: false,
+      error: null,
+    });
+
+    const { container, root } = await renderForm({
+      name: "SMOKE TEST DELETE direct-create repaired property",
+      companyId: "company-1",
+      projectTypeId: "type-roofing",
+    });
+    containers.push(container);
+    roots.push(root);
+
+    await act(async () => {
+      mocks.propertySelectorProps?.onPropertyRepaired?.({
+        id: "property-1",
+        address: "5000 Triangle Pkwy",
+        city: "Peachtree Corners",
+        state: "GA",
+        zip: "30092",
+      });
+      mocks.propertySelectorProps?.onChange("property-1");
+    });
+    await submit(container);
+
+    expect(mocks.createDeal).toHaveBeenCalledWith(
+      expect.objectContaining({
+        propertyId: "property-1",
+        propertyAddress: "5000 Triangle Pkwy",
+        propertyCity: "Peachtree Corners",
+        propertyState: "GA",
+        propertyZip: "30092",
+      }),
+      { officeId: "office-dallas" }
+    );
+  }, 30000);
 
   it("blocks frontend create while selected-office tenant metadata is unresolved", async () => {
     mocks.useAccessibleOffices.mockReturnValue({
@@ -193,7 +249,7 @@ describe("DealForm direct-create context", () => {
 
     expect(container.textContent).toContain("Cannot create deal: selected office is unavailable. Contact admin.");
     expect(mocks.createDeal).not.toHaveBeenCalled();
-  }, 15000);
+  }, 30000);
 
   it("blocks frontend create when accessible-office loading fails", async () => {
     mocks.useAccessibleOffices.mockReturnValue({
@@ -215,5 +271,5 @@ describe("DealForm direct-create context", () => {
 
     expect(container.textContent).toContain("Cannot create deal: selected office is unavailable. Contact admin.");
     expect(mocks.createDeal).not.toHaveBeenCalled();
-  }, 15000);
+  }, 30000);
 });

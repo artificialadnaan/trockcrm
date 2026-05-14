@@ -245,6 +245,10 @@ export async function createProperty(input: {
 export async function updateProperty(
   propertyId: string,
   input: {
+    address?: string | null;
+    city?: string | null;
+    state?: string | null;
+    zip?: string | null;
     buildYear?: number | null;
     unitCount?: number | null;
   },

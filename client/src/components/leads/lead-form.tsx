@@ -51,7 +51,7 @@ import {
   type LeadQuestionnaireSnapshot,
 } from "@/hooks/use-leads";
 import { usePipelineStages, useProjectTypes } from "@/hooks/use-pipeline-config";
-import { formatPropertyLabel, updateProperty, useProperties, usePropertyDetail } from "@/hooks/use-properties";
+import { formatPropertyLabel, updateProperty, useProperties, usePropertyDetail, type PropertySurface } from "@/hooks/use-properties";
 import { CATEGORY_LABELS } from "@/lib/contact-utils";
 import { isApiError } from "@/lib/api";
 import { useAuth } from "@/lib/auth";
@@ -641,12 +641,21 @@ function EditableLeadForm({
   const [stageGateError, setStageGateError] = useState<LeadStageGateErrorState | null>(null);
   const [createGateMissingKeys, setCreateGateMissingKeys] = useState<string[]>([]);
   const [propertyRepair, setPropertyRepair] = useState<{
+    address: string;
+    city: string;
+    state: string;
+    zip: string;
     buildYear: number | null;
     unitCount: number | null;
   }>({
+    address: "",
+    city: "",
+    state: "",
+    zip: "",
     buildYear: null,
     unitCount: null,
   });
+  const [repairedProperties, setRepairedProperties] = useState(new Map<string, PropertySurface>());
 
   useEffect(() => {
     setFormData(getEditableFormState(lead, initialValues, initialOfficeCode));
@@ -712,18 +721,32 @@ function EditableLeadForm({
       return;
     }
 
-    setPropertyRepair({ buildYear: null, unitCount: null });
+    setPropertyRepair({ address: "", city: "", state: "", zip: "", buildYear: null, unitCount: null });
   }, [formData.propertyId, isCreate]);
 
   const selectedProjectType = projectTypes.find((entry) => entry.id === formData.projectTypeId) ?? null;
   const selectedProperty =
+    repairedProperties.get(formData.propertyId) ??
+    (resolvedSelectedProperty?.id === formData.propertyId ? resolvedSelectedProperty : null) ??
     properties.find((property) => property.id === formData.propertyId) ??
-    (resolvedSelectedProperty?.id === formData.propertyId ? resolvedSelectedProperty : null);
+    null;
   const maxPropertyBuildYear = new Date().getFullYear() + 2;
+  const propertyAddressNeedsRepair =
+    isCreate && Boolean(selectedProperty) && !selectedProperty?.address?.trim();
+  const propertyCityNeedsRepair =
+    isCreate && Boolean(selectedProperty) && !selectedProperty?.city?.trim();
+  const propertyStateNeedsRepair =
+    isCreate && Boolean(selectedProperty) && !/^[A-Z]{2}$/.test((selectedProperty?.state ?? "").trim().toUpperCase());
+  const propertyZipNeedsRepair =
+    isCreate && Boolean(selectedProperty) && !/^\d{5}(-\d{4})?$/.test((selectedProperty?.zip ?? "").trim());
   const propertyBuildYearNeedsRepair =
     isCreate && Boolean(selectedProperty) && !isValidBuildYear(selectedProperty?.buildYear, maxPropertyBuildYear);
   const propertyUnitCountNeedsRepair =
     isCreate && Boolean(selectedProperty) && !isPositiveInteger(selectedProperty?.unitCount);
+  const effectivePropertyAddress = propertyAddressNeedsRepair ? propertyRepair.address : selectedProperty?.address ?? "";
+  const effectivePropertyCity = propertyCityNeedsRepair ? propertyRepair.city : selectedProperty?.city ?? "";
+  const effectivePropertyState = propertyStateNeedsRepair ? propertyRepair.state : selectedProperty?.state ?? "";
+  const effectivePropertyZip = propertyZipNeedsRepair ? propertyRepair.zip : selectedProperty?.zip ?? "";
   const effectivePropertyBuildYear = propertyBuildYearNeedsRepair
     ? propertyRepair.buildYear
     : selectedProperty?.buildYear ?? null;
@@ -824,12 +847,12 @@ function EditableLeadForm({
     if (!selectedProperty) {
       errors.set("propertyId", "Select or create a property.");
     } else {
-      if (!selectedProperty.address?.trim()) errors.set("property.address", "Address line 1 is required.");
-      if (!selectedProperty.city?.trim()) errors.set("property.city", "City is required.");
-      if (!selectedProperty.state?.trim() || !/^[A-Z]{2}$/.test(selectedProperty.state.trim().toUpperCase())) {
+      if (!effectivePropertyAddress.trim()) errors.set("property.address", "Address line 1 is required.");
+      if (!effectivePropertyCity.trim()) errors.set("property.city", "City is required.");
+      if (!effectivePropertyState.trim() || !/^[A-Z]{2}$/.test(effectivePropertyState.trim().toUpperCase())) {
         errors.set("property.state", "State must be a 2-letter US state code.");
       }
-      if (!selectedProperty.zip?.trim() || !/^\d{5}(-\d{4})?$/.test(selectedProperty.zip.trim())) {
+      if (!effectivePropertyZip.trim() || !/^\d{5}(-\d{4})?$/.test(effectivePropertyZip.trim())) {
         errors.set("property.zip", "ZIP must be 5 digits or ZIP+4.");
       }
       if (!isValidBuildYear(effectivePropertyBuildYear, maxPropertyBuildYear)) {
@@ -856,8 +879,12 @@ function EditableLeadForm({
     return errors;
   }, [
     createGateMissingKeys,
+    effectivePropertyAddress,
     effectivePropertyBuildYear,
+    effectivePropertyCity,
+    effectivePropertyState,
     effectivePropertyUnitCount,
+    effectivePropertyZip,
     formData.bidDueDate,
     formData.budgetStatus,
     formData.officeCode,
@@ -951,10 +978,18 @@ function EditableLeadForm({
   };
 
   const handlePropertyRepairChange = (field: keyof typeof propertyRepair, value: string) => {
-    setPropertyRepair((current) => ({ ...current, [field]: parseIntegerInput(value) }));
-    clearCreateGateMissingKeys([
-      field === "buildYear" ? "property.buildYear" : "property.unitCount",
-    ]);
+    const nextValue =
+      field === "buildYear" || field === "unitCount"
+        ? parseIntegerInput(value)
+        : field === "state"
+          ? value.toUpperCase()
+          : value;
+    setPropertyRepair((current) => ({ ...current, [field]: nextValue }));
+    const fieldKey =
+      field === "buildYear" || field === "unitCount"
+        ? `property.${field}`
+        : `property.${field}`;
+    clearCreateGateMissingKeys([fieldKey]);
   };
 
   const renderCreateFieldError = (fieldKey: string) =>
@@ -1193,8 +1228,35 @@ function EditableLeadForm({
           return;
         }
 
-        if (selectedProperty && (propertyBuildYearNeedsRepair || propertyUnitCountNeedsRepair)) {
-          const propertyPatch: { buildYear?: number; unitCount?: number } = {};
+        if (
+          selectedProperty &&
+          (propertyAddressNeedsRepair ||
+            propertyCityNeedsRepair ||
+            propertyStateNeedsRepair ||
+            propertyZipNeedsRepair ||
+            propertyBuildYearNeedsRepair ||
+            propertyUnitCountNeedsRepair)
+        ) {
+          const propertyPatch: {
+            address?: string;
+            city?: string;
+            state?: string;
+            zip?: string;
+            buildYear?: number;
+            unitCount?: number;
+          } = {};
+          if (propertyAddressNeedsRepair && propertyRepair.address.trim()) {
+            propertyPatch.address = propertyRepair.address.trim();
+          }
+          if (propertyCityNeedsRepair && propertyRepair.city.trim()) {
+            propertyPatch.city = propertyRepair.city.trim();
+          }
+          if (propertyStateNeedsRepair && propertyRepair.state.trim()) {
+            propertyPatch.state = propertyRepair.state.trim().toUpperCase();
+          }
+          if (propertyZipNeedsRepair && propertyRepair.zip.trim()) {
+            propertyPatch.zip = propertyRepair.zip.trim();
+          }
           if (propertyBuildYearNeedsRepair && propertyRepair.buildYear != null) {
             propertyPatch.buildYear = propertyRepair.buildYear;
           }
@@ -1203,7 +1265,8 @@ function EditableLeadForm({
           }
 
           try {
-            await updateProperty(selectedProperty.id, propertyPatch, { officeId: selectedOffice.officeId });
+            const result = await updateProperty(selectedProperty.id, propertyPatch, { officeId: selectedOffice.officeId });
+            setRepairedProperties((current) => new Map(current).set(result.property.id, result.property));
           } catch (err) {
             setError(`Failed to update property: ${err instanceof Error ? err.message : "Unknown error"}`);
             return;
@@ -1338,6 +1401,9 @@ function EditableLeadForm({
                     officeId={selectedOffice?.officeId}
                     required
                     requireLeadCreateFields
+                    onPropertyRepaired={(property) => {
+                      setRepairedProperties((current) => new Map(current).set(property.id, property));
+                    }}
                   />
                   {selectedProperty ? (
                     <p className="text-xs text-muted-foreground">
@@ -1346,12 +1412,74 @@ function EditableLeadForm({
                       {selectedProperty.unitCount ? ` · ${selectedProperty.unitCount} units` : ""}
                     </p>
                   ) : null}
-                  {propertyBuildYearNeedsRepair || propertyUnitCountNeedsRepair ? (
+                  {propertyAddressNeedsRepair ||
+                  propertyCityNeedsRepair ||
+                  propertyStateNeedsRepair ||
+                  propertyZipNeedsRepair ||
+                  propertyBuildYearNeedsRepair ||
+                  propertyUnitCountNeedsRepair ? (
                     <div className="rounded-md border border-amber-200 bg-amber-50 px-3 py-3">
                       <p className="text-sm font-medium text-amber-900">
                         This property is missing required information. Please provide:
                       </p>
                       <div className="mt-3 grid gap-3 sm:grid-cols-2">
+                        {propertyAddressNeedsRepair ? (
+                          <div className="space-y-1">
+                            <QuestionLabel htmlFor="property-repair-address" required>
+                              Street Address
+                            </QuestionLabel>
+                            <Input
+                              id="property-repair-address"
+                              value={propertyRepair.address}
+                              onChange={(event) => handlePropertyRepairChange("address", event.target.value)}
+                              required
+                            />
+                            {renderCreateFieldError("property.address")}
+                          </div>
+                        ) : null}
+                        {propertyCityNeedsRepair ? (
+                          <div className="space-y-1">
+                            <QuestionLabel htmlFor="property-repair-city" required>
+                              City
+                            </QuestionLabel>
+                            <Input
+                              id="property-repair-city"
+                              value={propertyRepair.city}
+                              onChange={(event) => handlePropertyRepairChange("city", event.target.value)}
+                              required
+                            />
+                            {renderCreateFieldError("property.city")}
+                          </div>
+                        ) : null}
+                        {propertyStateNeedsRepair ? (
+                          <div className="space-y-1">
+                            <QuestionLabel htmlFor="property-repair-state" required>
+                              State
+                            </QuestionLabel>
+                            <Input
+                              id="property-repair-state"
+                              maxLength={2}
+                              value={propertyRepair.state}
+                              onChange={(event) => handlePropertyRepairChange("state", event.target.value)}
+                              required
+                            />
+                            {renderCreateFieldError("property.state")}
+                          </div>
+                        ) : null}
+                        {propertyZipNeedsRepair ? (
+                          <div className="space-y-1">
+                            <QuestionLabel htmlFor="property-repair-zip" required>
+                              ZIP
+                            </QuestionLabel>
+                            <Input
+                              id="property-repair-zip"
+                              value={propertyRepair.zip}
+                              onChange={(event) => handlePropertyRepairChange("zip", event.target.value)}
+                              required
+                            />
+                            {renderCreateFieldError("property.zip")}
+                          </div>
+                        ) : null}
                         {propertyBuildYearNeedsRepair ? (
                           <div className="space-y-1">
                             <QuestionLabel htmlFor="property-repair-build-year" required>
@@ -1389,10 +1517,10 @@ function EditableLeadForm({
                     </div>
                   ) : null}
                   {renderCreateFieldError("propertyId")}
-                  {renderCreateFieldError("property.address")}
-                  {renderCreateFieldError("property.city")}
-                  {renderCreateFieldError("property.state")}
-                  {renderCreateFieldError("property.zip")}
+                  {!propertyAddressNeedsRepair ? renderCreateFieldError("property.address") : null}
+                  {!propertyCityNeedsRepair ? renderCreateFieldError("property.city") : null}
+                  {!propertyStateNeedsRepair ? renderCreateFieldError("property.state") : null}
+                  {!propertyZipNeedsRepair ? renderCreateFieldError("property.zip") : null}
                   {!propertyBuildYearNeedsRepair ? renderCreateFieldError("property.buildYear") : null}
                   {!propertyUnitCountNeedsRepair ? renderCreateFieldError("property.unitCount") : null}
                 </div>
