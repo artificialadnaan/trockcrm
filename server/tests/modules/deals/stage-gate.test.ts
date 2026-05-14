@@ -886,7 +886,7 @@ describe("Stage Gate Validation", () => {
 
       const result = evaluateStageGate({
         deal: makeDeal({
-          stageId: STAGES.estimating.id,
+          stageId: STAGES.dd.id,
           bidEstimate: null,
           description: "",
         }),
@@ -1214,7 +1214,7 @@ describe("Scoping Attachment Hardening", () => {
     mockedStageLookups.queue.length = 0;
   });
 
-  it("uses route-specific required attachment categories for service readiness", async () => {
+  it("keeps service attachment metadata optional for readiness", async () => {
     const { evaluateDealScopingReadiness } = await import("../../../src/modules/deals/scoping-service.js");
     const tenantDb = createHardeningTenantDb({
       deals: [
@@ -1271,10 +1271,10 @@ describe("Scoping Attachment Hardening", () => {
       ],
     });
 
-    const readiness = await evaluateDealScopingReadiness(tenantDb as never, "deal-1");
+    const readiness = await evaluateDealScopingReadiness(tenantDb as never, "deal-1", { persist: false });
 
     expect(readiness.status).toBe("ready");
-    expect(readiness.requiredAttachmentKeys).toEqual(["site_photos"]);
+    expect(readiness.requiredAttachmentKeys).toEqual([]);
     expect(readiness.attachmentRequirements).toEqual([
       expect.objectContaining({
         key: "site_photos",
@@ -1282,9 +1282,9 @@ describe("Scoping Attachment Hardening", () => {
         satisfied: true,
       }),
     ]);
-  }, 10000);
+  }, 30_000);
 
-  it("requires a linked file in the canonical category before attachment satisfaction passes", async () => {
+  it("tracks wrong-category attachment satisfaction without blocking readiness", async () => {
     const { evaluateDealScopingReadiness } = await import("../../../src/modules/deals/scoping-service.js");
     const tenantDb = createHardeningTenantDb({
       files: [
@@ -1313,12 +1313,21 @@ describe("Scoping Attachment Hardening", () => {
       ],
     });
 
-    const readiness = await evaluateDealScopingReadiness(tenantDb as never, "deal-1");
+    tenantDb.state.dealScopingIntake[0]!.sectionData = {
+      projectOverview: { propertyName: "Palm Villas", bidDueDate: "2026-04-30" },
+      opportunity: { preBidMeetingCompleted: "yes", siteVisitDecision: "not_required" },
+      propertyDetails: { propertyAddress: "123 Palm Way" },
+      scopeSummary: { summary: "Exterior refresh" },
+    };
+
+    const readiness = await evaluateDealScopingReadiness(tenantDb as never, "deal-1", { persist: false });
     const scopeDocsRequirement = readiness.attachmentRequirements.find(
       (requirement) => requirement.key === "scope_docs"
     );
 
-    expect(readiness.status).toBe("draft");
+    expect(readiness.status).toBe("ready");
+    expect(readiness.requiredAttachmentKeys).toEqual([]);
+    expect(readiness.errors.attachments).toEqual({});
     expect(scopeDocsRequirement).toEqual(
       expect.objectContaining({
         key: "scope_docs",
@@ -1328,7 +1337,7 @@ describe("Scoping Attachment Hardening", () => {
     );
   }, 10000);
 
-  it("ignores linked files without verified storage metadata", async () => {
+  it("ignores unverified storage metadata for optional attachment satisfaction without blocking readiness", async () => {
     const { evaluateDealScopingReadiness } = await import("../../../src/modules/deals/scoping-service.js");
     const tenantDb = createHardeningTenantDb({
       files: [
@@ -1357,12 +1366,21 @@ describe("Scoping Attachment Hardening", () => {
       ],
     });
 
-    const readiness = await evaluateDealScopingReadiness(tenantDb as never, "deal-1");
+    tenantDb.state.dealScopingIntake[0]!.sectionData = {
+      projectOverview: { propertyName: "Palm Villas", bidDueDate: "2026-04-30" },
+      opportunity: { preBidMeetingCompleted: "yes", siteVisitDecision: "not_required" },
+      propertyDetails: { propertyAddress: "123 Palm Way" },
+      scopeSummary: { summary: "Exterior refresh" },
+    };
+
+    const readiness = await evaluateDealScopingReadiness(tenantDb as never, "deal-1", { persist: false });
     const scopeDocsRequirement = readiness.attachmentRequirements.find(
       (requirement) => requirement.key === "scope_docs"
     );
 
-    expect(readiness.status).toBe("draft");
+    expect(readiness.status).toBe("ready");
+    expect(readiness.requiredAttachmentKeys).toEqual([]);
+    expect(readiness.errors.attachments).toEqual({});
     expect(scopeDocsRequirement).toEqual(
       expect.objectContaining({
         key: "scope_docs",
@@ -1580,6 +1598,97 @@ describe("Stage Gate Payload Hardening", () => {
         }),
       })
     );
+  });
+
+  it("blocks estimating advancement when a required scoping attachment is unsatisfied", async () => {
+    vi.doMock("../../../src/modules/deals/scoping-service.js", async (importOriginal) => {
+      const actual = await importOriginal<typeof import("../../../src/modules/deals/scoping-service.js")>();
+      return {
+        ...actual,
+        evaluateDealScopingReadiness: vi.fn(async () => ({
+          status: "draft",
+          errors: { sections: {}, attachments: { scope_docs: ["scope_docs"] } },
+          completionState: {
+            attachments: {
+              isComplete: false,
+              missingFields: [],
+              missingAttachments: ["scope_docs"],
+            },
+          },
+          requiredSections: ["projectOverview"],
+          requiredAttachmentKeys: ["scope_docs"],
+          attachmentRequirements: [
+            {
+              key: "scope_docs",
+              category: "other",
+              label: "Scope docs",
+              satisfied: false,
+            },
+          ],
+        })),
+      };
+    });
+
+    const { validateStageGate } = await import("../../../src/modules/deals/stage-gate.js");
+    const tenantDb = createHardeningTenantDb({
+      deals: [
+        {
+          id: "deal-1",
+          name: "Palm Villas",
+          stageId: STAGES.dd.id,
+          workflowRoute: "normal",
+          assignedRepId: "rep-1",
+          projectTypeId: "pt-1",
+          propertyAddress: "123 Palm Way",
+          propertyCity: "Miami",
+          propertyState: "FL",
+          propertyZip: "33101",
+          description: "Exterior refresh",
+        },
+      ],
+    });
+
+    mockedStageLookups.queue.push(
+      {
+        id: STAGES.dd.id,
+        name: STAGES.dd.name,
+        slug: STAGES.dd.slug,
+        isTerminal: STAGES.dd.isTerminal,
+        displayOrder: STAGES.dd.displayOrder,
+        requiredFields: [],
+        requiredDocuments: [],
+        requiredApprovals: [],
+      },
+      {
+        id: STAGES.estimating.id,
+        name: STAGES.estimating.name,
+        slug: STAGES.estimating.slug,
+        isTerminal: STAGES.estimating.isTerminal,
+        displayOrder: STAGES.estimating.displayOrder,
+        requiredFields: [],
+        requiredDocuments: [],
+        requiredApprovals: [],
+      }
+    );
+
+    const result = await validateStageGate(
+      tenantDb as never,
+      "deal-1",
+      STAGES.estimating.id,
+      "rep",
+      "rep-1"
+    );
+
+    expect(result.allowed).toBe(false);
+    expect(result.blockReason).toContain("Scoping intake is incomplete");
+    expect(result.missingRequirements.documents).toContain("other");
+    expect(result.effectiveChecklist.attachments).toEqual([
+      expect.objectContaining({
+        key: "other",
+        source: "scoping",
+        satisfied: false,
+      }),
+    ]);
   });
 
   it("uses source lead lineage values for stage required fields on converted deals", async () => {

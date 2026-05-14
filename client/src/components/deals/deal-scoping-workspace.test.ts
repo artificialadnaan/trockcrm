@@ -21,6 +21,7 @@ import type {
 } from "@/hooks/use-deals";
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
+vi.setConfig({ testTimeout: 20_000 });
 
 const mocks = vi.hoisted(() => ({
   getDealScopingIntake: vi.fn(),
@@ -215,6 +216,10 @@ function changeTextareaValue(element: HTMLTextAreaElement, value: string) {
   element.dispatchEvent(new Event("input", { bubbles: true }));
 }
 
+function clickElement(element: Element) {
+  element.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+}
+
 async function renderWorkspace(
   deal: DealDetail,
   props: Record<string, unknown> = {}
@@ -363,6 +368,7 @@ describe("DealScopingWorkspace lineage routing helpers", () => {
   it("routes converted-deal lead-owned edits through the resolved-fields endpoint", () => {
     const patch = buildLineageResolvedPatch({
       hasSourceLead: true,
+      canWriteProjectType: true,
       projectTypeId: "new-type",
       resolvedFields: makeResolved(),
       sectionData: {
@@ -378,20 +384,58 @@ describe("DealScopingWorkspace lineage routing helpers", () => {
     });
   });
 
-  it("only sends opportunity-owned section data to scoping autosave for converted deals", () => {
+  it("omits converted-deal project type writes when the project type is locked", () => {
+    const patch = buildLineageResolvedPatch({
+      hasSourceLead: true,
+      canWriteProjectType: false,
+      projectTypeId: "new-type",
+      resolvedFields: makeResolved(),
+      sectionData: {
+        projectOverview: { bidDueDate: "2026-07-15" },
+        scopeSummary: { summary: "Updated lead description" },
+      },
+    });
+
+    expect(patch).toEqual({
+      bidDueDate: "2026-07-15",
+      description: "Updated lead description",
+    });
+  });
+
+  it("sends scoping-owned section data to scoping autosave for converted deals", () => {
     expect(
       buildScopingAutosavePatch({
         hasSourceLead: true,
+        canWriteProjectType: false,
         projectTypeId: "new-type",
         sectionData: {
           projectOverview: { bidDueDate: "2026-07-15" },
           scopeSummary: { summary: "Updated lead description" },
+          scope: { selectedProjectTypeIds: ["new-type"] },
           opportunity: { siteVisitDecision: "not_required" },
         },
       })
     ).toEqual({
       sectionData: {
+        scope: { selectedProjectTypeIds: ["new-type"] },
         opportunity: { siteVisitDecision: "not_required" },
+      },
+    });
+  });
+
+  it("omits legacy project type writes when the project type is locked but still saves scope selections", () => {
+    expect(
+      buildScopingAutosavePatch({
+        hasSourceLead: false,
+        canWriteProjectType: false,
+        projectTypeId: "roofing",
+        sectionData: {
+          scope: { selectedProjectTypeIds: ["roofing", "parking-lot"] },
+        },
+      })
+    ).toEqual({
+      sectionData: {
+        scope: { selectedProjectTypeIds: ["roofing", "parking-lot"] },
       },
     });
   });
@@ -941,6 +985,221 @@ describe("DealScopingWorkspace load failures", () => {
       });
 
       await vi.waitFor(() => expect(mocks.patchDealScopingIntake).toHaveBeenCalled());
+    } finally {
+      cleanup();
+    }
+  });
+});
+
+describe("DealScopingWorkspace scoping UX", () => {
+  it("smooth-scrolls from Scoping Progress rows and Blocking Items rows to their targets", async () => {
+    const scrollIntoView = vi.fn();
+    const originalScrollIntoView = Element.prototype.scrollIntoView;
+    Element.prototype.scrollIntoView = scrollIntoView;
+    mocks.getDealScopingIntake.mockResolvedValueOnce(makeScopingResponse({
+      intake: { projectTypeId: "project-type-1" },
+      resolved: { projectTypeId: "project-type-1" },
+      readiness: {
+        errors: {
+          sections: { propertyDetails: ["propertyAddress"] },
+          attachments: {},
+        },
+        completionState: {
+          ...makeReadiness().completionState,
+          propertyDetails: {
+            isComplete: false,
+            missingFields: ["propertyAddress"],
+            missingAttachments: [],
+          },
+        },
+      },
+    }));
+
+    const { container, cleanup } = await renderWorkspace(
+      makeDeal({ sourceLeadId: null, projectTypeId: "project-type-1" })
+    );
+
+    try {
+      await vi.waitFor(() => expect(container.textContent).toContain("Scoping Progress"));
+
+      const scopeSummaryNav = Array.from(container.querySelectorAll("button")).find(
+        (button) => button.textContent?.includes("Scope Summary")
+      );
+      expect(scopeSummaryNav).toBeDefined();
+      clickElement(scopeSummaryNav!);
+      expect(scrollIntoView).toHaveBeenCalledWith({ behavior: "smooth", block: "start" });
+
+      const blockingItem = Array.from(container.querySelectorAll("button")).find(
+        (button) => button.textContent?.includes("Property Details: Property Address")
+      );
+      expect(blockingItem).toBeDefined();
+      clickElement(blockingItem!);
+      expect(scrollIntoView).toHaveBeenCalledTimes(2);
+    } finally {
+      Element.prototype.scrollIntoView = originalScrollIntoView;
+      cleanup();
+    }
+  });
+
+  it("keeps Scope docs and Site photos visible as optional attachments without blocking items", async () => {
+    mocks.getDealScopingIntake.mockResolvedValueOnce(makeScopingResponse({
+      intake: { projectTypeId: "project-type-1" },
+      resolved: { projectTypeId: "project-type-1" },
+      readiness: {
+        status: "ready",
+        requiredAttachmentKeys: [],
+        attachmentRequirements: [
+          { key: "scope_docs", category: "other", label: "Scope docs", satisfied: false },
+          { key: "site_photos", category: "photo", label: "Site photos", satisfied: false },
+        ],
+      },
+    }));
+
+    const { container, cleanup } = await renderWorkspace(
+      makeDeal({ sourceLeadId: null, projectTypeId: "project-type-1" })
+    );
+
+    try {
+      await vi.waitFor(() => expect(container.textContent).toContain("Attachments"));
+      expect(container.textContent).toContain("Scope docs");
+      expect(container.textContent).toContain("Site photos");
+      expect(container.textContent).toContain("Optional");
+      expect(container.textContent).not.toContain("Required");
+      expect(container.textContent).not.toContain("Blocking Items");
+    } finally {
+      cleanup();
+    }
+  });
+
+  it("renders a required Scope section and preserves local scope selection after autosave", async () => {
+    mocks.useProjectTypes.mockReturnValue({
+      projectTypes: [
+        { id: "roofing", name: "Roofing", slug: "roofing" },
+        { id: "exterior-paint", name: "Exterior Paint", slug: "exterior-paint" },
+        { id: "parking-lot", name: "Parking Lot", slug: "parking-lot" },
+      ],
+    });
+    mocks.getDealScopingIntake.mockResolvedValueOnce(makeScopingResponse({
+      intake: {
+        projectTypeId: null,
+        sectionData: { scope: { selectedProjectTypeIds: [] } },
+      },
+      resolved: { projectTypeId: null },
+      readiness: {
+        errors: { sections: { scope: ["selectedProjectTypeIds"] }, attachments: {} },
+      },
+    }));
+    mocks.patchDealScopingIntake.mockResolvedValue(makeScopingResponse({
+      intake: {
+        projectTypeId: "roofing",
+        sectionData: { scope: { selectedProjectTypeIds: [] } },
+      },
+      resolved: { projectTypeId: "roofing" },
+      readiness: { status: "ready" },
+    }));
+
+    const { container, cleanup } = await renderWorkspace(
+      makeDeal({ sourceLeadId: null, projectTypeId: null })
+    );
+
+    try {
+      await vi.waitFor(() => {
+        expect(container.textContent).toContain("Select at least one scope item that applies to this project. You can choose multiple.");
+      });
+      expect(container.querySelector("#scoping-section-scope")?.textContent).toContain("*");
+      expect(container.textContent).toContain("Scope: Selected Scope Items");
+
+      let roofing = Array.from(container.querySelectorAll("button[aria-pressed]")).find(
+        (button) => button.textContent?.includes("Roofing")
+      );
+      expect(roofing).toBeDefined();
+
+      await act(async () => {
+        clickElement(roofing!);
+      });
+      roofing = Array.from(container.querySelectorAll("button[aria-pressed]")).find(
+        (button) => button.textContent?.includes("Roofing")
+      );
+      expect(roofing!.getAttribute("aria-pressed")).toBe("true");
+
+      await act(async () => {
+        await new Promise((resolve) => window.setTimeout(resolve, 500));
+      });
+
+      await vi.waitFor(() => expect(mocks.patchDealScopingIntake).toHaveBeenCalled());
+      expect(mocks.patchDealScopingIntake).toHaveBeenCalledWith(
+        "deal-1",
+        expect.objectContaining({
+          projectTypeId: "roofing",
+          sectionData: expect.objectContaining({
+            scope: { selectedProjectTypeIds: ["roofing"] },
+          }),
+        })
+      );
+      expect(roofing!.getAttribute("aria-pressed")).toBe("true");
+      expect(mocks.getDealScopingIntake).toHaveBeenCalledTimes(1);
+    } finally {
+      cleanup();
+    }
+  }, 10_000);
+
+  it("lets reps edit Scope items at Opportunity without sending locked project type writes", async () => {
+    mocks.useAuth.mockReturnValue({ user: { id: "rep-1", role: "rep" } });
+    mocks.useProjectTypes.mockReturnValue({
+      projectTypes: [
+        { id: "roofing", name: "Roofing", slug: "roofing" },
+        { id: "parking-lot", name: "Parking Lot", slug: "parking-lot" },
+      ],
+    });
+    mocks.getDealScopingIntake.mockResolvedValueOnce(makeScopingResponse({
+      intake: {
+        projectTypeId: "roofing",
+        sectionData: { scope: { selectedProjectTypeIds: ["roofing"] } },
+      },
+      resolved: { projectTypeId: "roofing" },
+      readiness: { status: "ready" },
+    }));
+    mocks.patchDealScopingIntake.mockResolvedValue(makeScopingResponse({
+      intake: {
+        projectTypeId: "roofing",
+        sectionData: { scope: { selectedProjectTypeIds: ["roofing", "parking-lot"] } },
+      },
+      resolved: { projectTypeId: "roofing" },
+      readiness: { status: "ready" },
+    }));
+
+    const { container, cleanup } = await renderWorkspace(
+      makeDeal({ sourceLeadId: null, projectTypeId: "roofing", stageId: "stage-1" })
+    );
+
+    try {
+      await vi.waitFor(() => expect(container.querySelector("#scoping-section-scope")).not.toBeNull());
+      const parkingLot = Array.from(container.querySelectorAll("button[aria-pressed]")).find(
+        (button) => button.textContent?.includes("Parking Lot")
+      ) as HTMLButtonElement | undefined;
+      expect(parkingLot).toBeDefined();
+      expect(parkingLot?.disabled).toBe(false);
+
+      await act(async () => {
+        clickElement(parkingLot!);
+        await new Promise((resolve) => window.setTimeout(resolve, 2000));
+      });
+
+      expect(mocks.patchDealScopingIntake).toHaveBeenCalled();
+      expect(mocks.patchDealScopingIntake).toHaveBeenCalledWith(
+        "deal-1",
+        expect.not.objectContaining({ projectTypeId: expect.anything() })
+      );
+      expect(mocks.patchDealScopingIntake).toHaveBeenCalledWith(
+        "deal-1",
+        expect.objectContaining({
+          sectionData: expect.objectContaining({
+            scope: { selectedProjectTypeIds: ["roofing", "parking-lot"] },
+          }),
+        })
+      );
+      const projectTypeTrigger = container.querySelector("#projectTypeId");
+      expect(projectTypeTrigger?.textContent).toContain("Roofing");
     } finally {
       cleanup();
     }

@@ -61,6 +61,7 @@ type SectionKey =
   | "projectOverview"
   | "opportunity"
   | "propertyDetails"
+  | "scope"
   | "scopeSummary"
   | "attachments";
 
@@ -68,6 +69,7 @@ const SECTION_ORDER: Array<{ key: SectionKey; label: string }> = [
   { key: "projectOverview", label: "Project Overview" },
   { key: "opportunity", label: "Opportunity Review" },
   { key: "propertyDetails", label: "Property Details" },
+  { key: "scope", label: "Scope" },
   { key: "scopeSummary", label: "Scope Summary" },
   { key: "attachments", label: "Attachments" },
 ];
@@ -98,6 +100,21 @@ const ATTACHMENT_REQUIREMENTS: Array<{
 const ATTACHMENT_REQUIREMENT_BY_KEY = Object.fromEntries(
   ATTACHMENT_REQUIREMENTS.map((requirement) => [requirement.key, requirement])
 ) as Record<"scope_docs" | "site_photos", (typeof ATTACHMENT_REQUIREMENTS)[number]>;
+
+function getSectionElementId(section: SectionKey) {
+  return `scoping-section-${section}`;
+}
+
+function getFieldElementId(section: string, field: string) {
+  return `scoping-field-${section}-${field}`;
+}
+
+function scrollToScopingTarget(targetId: string) {
+  document.getElementById(targetId)?.scrollIntoView({
+    behavior: "smooth",
+    block: "start",
+  });
+}
 
 const FILE_CATEGORY_LABELS: Record<string, string> = {
   photo: "Photo",
@@ -197,6 +214,20 @@ function createWorkspaceFingerprint(
   return JSON.stringify({ projectTypeId, sectionData });
 }
 
+function getSelectedScopeProjectTypeIds(
+  sectionData: Record<string, unknown>,
+  projectTypeId: string | null
+) {
+  const scopeValue = sectionData.scope;
+  if (isRecord(scopeValue) && Array.isArray(scopeValue.selectedProjectTypeIds)) {
+    return scopeValue.selectedProjectTypeIds.filter(
+      (value): value is string => typeof value === "string" && value.trim().length > 0
+    );
+  }
+
+  return projectTypeId ? [projectTypeId] : [];
+}
+
 function getReadinessTone(status: DealScopingReadiness["status"]) {
   if (status === "activated") return "bg-green-50 text-green-700 border-green-200";
   if (status === "ready") return "bg-emerald-50 text-emerald-700 border-emerald-200";
@@ -241,6 +272,7 @@ function getSelectDisplayLabel(
 
 export function buildLineageResolvedPatch(input: {
   hasSourceLead: boolean;
+  canWriteProjectType: boolean;
   projectTypeId: string | null;
   sectionData: Record<string, unknown>;
   resolvedFields: DealResolvedFields | null;
@@ -256,7 +288,7 @@ export function buildLineageResolvedPatch(input: {
     typeof input.resolvedFields.bidDueDate === "string" ? input.resolvedFields.bidDueDate : "";
   const currentSummary = input.resolvedFields.description ?? "";
 
-  if (input.projectTypeId !== input.resolvedFields.projectTypeId) {
+  if (input.canWriteProjectType && input.projectTypeId !== input.resolvedFields.projectTypeId) {
     patch.projectTypeId = input.projectTypeId;
   }
 
@@ -273,20 +305,27 @@ export function buildLineageResolvedPatch(input: {
 
 export function buildScopingAutosavePatch(input: {
   hasSourceLead: boolean;
+  canWriteProjectType: boolean;
   projectTypeId: string | null;
   sectionData: Record<string, unknown>;
 }) {
   if (!input.hasSourceLead) {
     return {
-      projectTypeId: input.projectTypeId,
+      ...(input.canWriteProjectType ? { projectTypeId: input.projectTypeId } : {}),
       sectionData: input.sectionData,
     };
   }
 
+  const scopingOwnedSectionData: Record<string, unknown> = {};
+  if (isRecord(input.sectionData.opportunity)) {
+    scopingOwnedSectionData.opportunity = input.sectionData.opportunity;
+  }
+  if (isRecord(input.sectionData.scope)) {
+    scopingOwnedSectionData.scope = input.sectionData.scope;
+  }
+
   return {
-    sectionData: {
-      opportunity: isRecord(input.sectionData.opportunity) ? input.sectionData.opportunity : {},
-    },
+    sectionData: scopingOwnedSectionData,
   };
 }
 
@@ -298,7 +337,7 @@ export function canAutosaveScopingWorkspace(input: {
 }
 
 function getDefaultAttachmentRequirementKeys(route: WorkflowRoute) {
-  return route === "service" ? ["site_photos"] : ["scope_docs", "site_photos"];
+  return [];
 }
 
 function normalizeWorkspaceReadiness(
@@ -309,24 +348,18 @@ function normalizeWorkspaceReadiness(
     readiness.requiredAttachmentKeys.length > 0
       ? readiness.requiredAttachmentKeys
       : getDefaultAttachmentRequirementKeys(route);
-  const attachmentRequirements = requiredAttachmentKeys
-    .map((key) => {
-      const baseRequirement =
-        ATTACHMENT_REQUIREMENT_BY_KEY[key as keyof typeof ATTACHMENT_REQUIREMENT_BY_KEY];
-      if (!baseRequirement) {
-        return null;
-      }
-
+  const attachmentRequirements = ATTACHMENT_REQUIREMENTS
+    .map((baseRequirement) => {
       const existingRequirement = readiness.attachmentRequirements.find(
-        (requirement) => requirement.key === key
+        (requirement) => requirement.key === baseRequirement.key
       );
 
       return (
         existingRequirement ?? {
-          key,
+          key: baseRequirement.key,
           category: baseRequirement.category,
           label: baseRequirement.label,
-          satisfied: !(readiness.errors.attachments[key]?.length ?? 0),
+          satisfied: false,
         }
       );
     })
@@ -552,6 +585,7 @@ export function DealScopingWorkspace({
       try {
         const resolvedPatch = buildLineageResolvedPatch({
           hasSourceLead,
+          canWriteProjectType: !projectTypeLocked,
           projectTypeId,
           sectionData,
           resolvedFields,
@@ -571,14 +605,14 @@ export function DealScopingWorkspace({
           {
             ...buildScopingAutosavePatch({
               hasSourceLead,
+              canWriteProjectType: !projectTypeLocked,
               projectTypeId,
               sectionData,
             }),
             ...(adminOverrideEditing ? { forceEditAfterRfp: true } : {}),
           }
         );
-        const nextSectionData = buildWorkspaceSectionData(deal, result.intake, result.resolved);
-        const responseFingerprint = createWorkspaceFingerprint(projectTypeId, nextSectionData);
+        const responseFingerprint = createWorkspaceFingerprint(projectTypeId, sectionData);
         if (latestWorkspaceFingerprintRef.current !== requestFingerprint) {
           return;
         }
@@ -586,7 +620,6 @@ export function DealScopingWorkspace({
         setIntake(result.intake);
         applyReadiness(result.readiness, true);
         setResolvedFields(result.resolved);
-        setSectionData(nextSectionData);
         lastSavedFingerprintRef.current = responseFingerprint;
         setSaveState("saved");
         window.setTimeout(() => setSaveState("idle"), 1200);
@@ -606,33 +639,23 @@ export function DealScopingWorkspace({
 
   const completionCounts = getScopingCompletionCounts(readiness?.completionState);
   const attachmentRequirements = readiness?.attachmentRequirements ?? [];
-  const visibleAttachmentRequirements = useMemo(() => {
-    const requirementKeys =
-      readiness?.requiredAttachmentKeys ??
-      ATTACHMENT_REQUIREMENTS.map((requirement) => requirement.key);
-
-    return requirementKeys
-      .map((key) => {
-        const baseRequirement =
-          ATTACHMENT_REQUIREMENT_BY_KEY[key as keyof typeof ATTACHMENT_REQUIREMENT_BY_KEY];
-        if (!baseRequirement) {
-          return null;
-        }
-
-        return {
-          ...baseRequirement,
-          status:
-            attachmentRequirements.find(
-              (requirement) => requirement.key === key
-            ) ?? null,
-        };
-      })
-      .filter((requirement): requirement is (typeof ATTACHMENT_REQUIREMENTS)[number] & { status: DealScopingAttachmentRequirement | null } => Boolean(requirement));
-  }, [attachmentRequirements, readiness?.requiredAttachmentKeys]);
+  const visibleAttachmentRequirements = useMemo(
+    () =>
+      ATTACHMENT_REQUIREMENTS.map((requirement) => ({
+        ...requirement,
+        status:
+          attachmentRequirements.find(
+            (attachmentRequirement) => attachmentRequirement.key === requirement.key
+          ) ?? null,
+      })),
+    [attachmentRequirements]
+  );
   const visibleSections = useMemo(
     () =>
       SECTION_ORDER.filter((section) =>
-        section.key === "attachments" || Boolean(readiness?.completionState[section.key])
+        section.key === "attachments" ||
+        section.key === "scope" ||
+        Boolean(readiness?.completionState[section.key])
       ),
     [readiness?.completionState]
   );
@@ -652,6 +675,10 @@ export function DealScopingWorkspace({
     () => files.filter((file) => !file.intakeRequirementKey),
     [files]
   );
+  const selectedScopeProjectTypeIds = useMemo(
+    () => getSelectedScopeProjectTypeIds(sectionData, projectTypeId),
+    [projectTypeId, sectionData]
+  );
 
   const updateField = (section: SectionKey, field: string, value: string) => {
     if (editingDisabled) return;
@@ -664,6 +691,35 @@ export function DealScopingWorkspace({
       })
     );
     clearError();
+  };
+
+  const updateScopeSelection = (nextSelectedIds: string[]) => {
+    if (editingDisabled) return;
+    const uniqueSelectedIds = Array.from(new Set(nextSelectedIds.filter(Boolean)));
+    if (!projectTypeLocked) {
+      setProjectTypeId(uniqueSelectedIds[0] ?? null);
+    }
+    setSectionData((current) =>
+      mergeSectionData(current, {
+        scope: {
+          ...(isRecord(current.scope) ? current.scope : {}),
+          selectedProjectTypeIds: uniqueSelectedIds,
+        },
+      })
+    );
+    clearError();
+  };
+
+  const handleProjectTypeChange = (value: string | null) => {
+    const nextProjectTypeId = value === "__none__" ? null : value;
+    updateScopeSelection(nextProjectTypeId ? [nextProjectTypeId] : []);
+  };
+
+  const toggleScopeProjectType = (projectTypeOptionId: string) => {
+    const nextSelectedIds = selectedScopeProjectTypeIds.includes(projectTypeOptionId)
+      ? selectedScopeProjectTypeIds.filter((id) => id !== projectTypeOptionId)
+      : [...selectedScopeProjectTypeIds, projectTypeOptionId];
+    updateScopeSelection(nextSelectedIds);
   };
 
   const handleLinkExisting = async (fileId: string, requirementKey: string) => {
@@ -799,14 +855,19 @@ export function DealScopingWorkspace({
                 const entry = readiness?.completionState[section.key];
                 const complete = entry?.isComplete ?? false;
                 return (
-                  <div key={section.key} className="flex items-center justify-between rounded-md border px-3 py-2 text-sm">
+                  <button
+                    key={section.key}
+                    type="button"
+                    className="flex w-full items-center justify-between rounded-md border px-3 py-2 text-left text-sm transition-colors hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                    onClick={() => scrollToScopingTarget(getSectionElementId(section.key))}
+                  >
                     <span>{section.label}</span>
                     {complete ? (
                       <CheckCircle2 className="h-4 w-4 text-green-600" />
                     ) : (
                       <Clock3 className="h-4 w-4 text-amber-500" />
                     )}
-                  </div>
+                  </button>
                 );
               })}
             </div>
@@ -829,7 +890,7 @@ export function DealScopingWorkspace({
           </CardContent>
         </Card>
 
-        {readiness && (readiness.errors.sections && Object.keys(readiness.errors.sections).length > 0 || readiness.errors.attachments && Object.keys(readiness.errors.attachments).length > 0) && (
+        {readiness && readiness.errors.sections && Object.keys(readiness.errors.sections).length > 0 && (
           <Card size="sm">
             <CardHeader>
               <CardTitle className="flex items-center gap-2">
@@ -840,18 +901,16 @@ export function DealScopingWorkspace({
             <CardContent className="space-y-2 text-sm">
               {Object.entries(readiness.errors.sections).flatMap(([section, fields]) =>
                 fields.map((field) => (
-                  <div key={`${section}.${field}`} className="text-red-600">
+                  <button
+                    key={`${section}.${field}`}
+                    type="button"
+                    className="block w-full rounded-md px-2 py-1 text-left text-red-600 transition-colors hover:bg-red-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                    onClick={() => scrollToScopingTarget(getFieldElementId(section, field))}
+                  >
                     {formatScopingFieldLabel(`${section}.${field}`)}
-                  </div>
+                  </button>
                 ))
               )}
-              {attachmentRequirements
-                .filter((attachment) => !attachment.satisfied)
-                .map((attachment) => (
-                  <div key={attachment.key} className="text-red-600">
-                    {formatScopingAttachmentLabel(attachment.key)} ({FILE_CATEGORY_LABELS[attachment.category] ?? attachment.category})
-                  </div>
-                ))}
             </CardContent>
           </Card>
         )}
@@ -940,10 +999,7 @@ export function DealScopingWorkspace({
               <Label htmlFor="projectTypeId">Project Type</Label>
               <Select
                 value={projectTypeId ?? "__none__"}
-                onValueChange={(value) => {
-                  if (editingDisabled) return;
-                  setProjectTypeId(value === "__none__" ? null : value);
-                }}
+                onValueChange={handleProjectTypeChange}
                 disabled={editingDisabled || projectTypeLocked}
               >
                 <SelectTrigger id="projectTypeId">
@@ -975,13 +1031,13 @@ export function DealScopingWorkspace({
           </CardContent>
         </Card>
 
-        <Card>
+        <Card id={getSectionElementId("projectOverview")} className="scroll-mt-6">
           <CardHeader>
             <CardTitle>Project Overview</CardTitle>
             <CardDescription>Route, property identity, and estimating kickoff timing.</CardDescription>
           </CardHeader>
           <CardContent className="grid gap-4 md:grid-cols-2">
-            <div className="space-y-2">
+            <div id={getFieldElementId("projectOverview", "propertyName")} className="space-y-2 scroll-mt-6">
               <Label htmlFor="propertyName">Property Name</Label>
               <div
                 id="propertyName"
@@ -991,7 +1047,7 @@ export function DealScopingWorkspace({
               </div>
             </div>
             {activeWorkflowRoute === "normal" && (
-              <div className="space-y-2">
+              <div id={getFieldElementId("projectOverview", "bidDueDate")} className="space-y-2 scroll-mt-6">
                 <Label htmlFor="bidDueDate">Bid Due Date</Label>
                 <Input
                   id="bidDueDate"
@@ -1005,7 +1061,7 @@ export function DealScopingWorkspace({
           </CardContent>
         </Card>
 
-        <Card>
+        <Card id={getSectionElementId("opportunity")} className="scroll-mt-6">
           <CardHeader>
             <CardTitle>Opportunity Review</CardTitle>
             <CardDescription>
@@ -1013,7 +1069,7 @@ export function DealScopingWorkspace({
             </CardDescription>
           </CardHeader>
           <CardContent className="grid gap-4 md:grid-cols-2">
-            <div className="space-y-2">
+            <div id={getFieldElementId("opportunity", "preBidMeetingCompleted")} className="space-y-2 scroll-mt-6">
               <Label htmlFor="preBidMeetingCompleted">Pre-Bid Meeting Completed</Label>
               <Select
                 value={getSectionValue(sectionData, "opportunity", "preBidMeetingCompleted") || "__unset__"}
@@ -1036,7 +1092,7 @@ export function DealScopingWorkspace({
               </Select>
             </div>
 
-            <div className="space-y-2">
+            <div id={getFieldElementId("opportunity", "siteVisitDecision")} className="space-y-2 scroll-mt-6">
               <Label htmlFor="siteVisitDecision">Site Visit Decision</Label>
               <Select
                 value={getSectionValue(sectionData, "opportunity", "siteVisitDecision") || "__unset__"}
@@ -1060,7 +1116,7 @@ export function DealScopingWorkspace({
               </Select>
             </div>
 
-            <div className="space-y-2">
+            <div id={getFieldElementId("opportunity", "siteVisitCompleted")} className="space-y-2 scroll-mt-6">
               <Label htmlFor="siteVisitCompleted">Site Visit Completed</Label>
               <Select
                 value={getSectionValue(sectionData, "opportunity", "siteVisitCompleted") || "__unset__"}
@@ -1083,7 +1139,7 @@ export function DealScopingWorkspace({
               </Select>
             </div>
 
-            <div className="space-y-2 md:col-span-2">
+            <div id={getFieldElementId("opportunity", "estimatorConsultationNotes")} className="space-y-2 md:col-span-2 scroll-mt-6">
               <Label htmlFor="estimatorConsultationNotes">Estimator Consultation Notes</Label>
               <Textarea
                 id="estimatorConsultationNotes"
@@ -1103,13 +1159,13 @@ export function DealScopingWorkspace({
           </CardContent>
         </Card>
 
-        <Card>
+        <Card id={getSectionElementId("propertyDetails")} className="scroll-mt-6">
           <CardHeader>
             <CardTitle>Property Details</CardTitle>
             <CardDescription>Property identity comes from the linked lead/property record.</CardDescription>
           </CardHeader>
           <CardContent className="grid gap-4 md:grid-cols-2">
-            <div className="space-y-2">
+            <div id={getFieldElementId("propertyDetails", "propertyAddress")} className="space-y-2 scroll-mt-6">
               <Label>Linked Property</Label>
               <div className="rounded-md border bg-muted/40 px-3 py-2 text-sm">
                 <div className="font-medium text-foreground">
@@ -1139,13 +1195,51 @@ export function DealScopingWorkspace({
           </CardContent>
         </Card>
 
-        <Card>
+        <Card id={getSectionElementId("scope")} className="scroll-mt-6 border-primary/30">
+          <CardHeader>
+            <CardTitle className="flex items-center gap-1 text-xl">
+              Scope <span className="text-red-600" aria-hidden="true">*</span>
+            </CardTitle>
+            <CardDescription>
+              Select at least one scope item that applies to this project. You can choose multiple.
+            </CardDescription>
+          </CardHeader>
+          <CardContent>
+            <div id={getFieldElementId("scope", "selectedProjectTypeIds")} className="space-y-3 scroll-mt-6">
+              <Label>Scope Items</Label>
+              <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
+                {projectTypes.map((type) => {
+                  const selected = selectedScopeProjectTypeIds.includes(type.id);
+                  return (
+                    <Button
+                      key={type.id}
+                      type="button"
+                      variant={selected ? "default" : "outline"}
+                      className="justify-start"
+                      aria-pressed={selected}
+                      disabled={editingDisabled}
+                      onClick={() => toggleScopeProjectType(type.id)}
+                    >
+                      {selected ? <CheckCircle2 className="mr-2 h-4 w-4" /> : null}
+                      {type.name}
+                    </Button>
+                  );
+                })}
+              </div>
+              {projectTypes.length === 0 ? (
+                <p className="text-sm text-muted-foreground">No active scope items are configured.</p>
+              ) : null}
+            </div>
+          </CardContent>
+        </Card>
+
+        <Card id={getSectionElementId("scopeSummary")} className="scroll-mt-6">
           <CardHeader>
             <CardTitle>Scope Summary</CardTitle>
             <CardDescription>This summary feeds the deal description and the next team’s kickoff context.</CardDescription>
           </CardHeader>
           <CardContent>
-            <div className="space-y-2">
+            <div id={getFieldElementId("scopeSummary", "summary")} className="space-y-2 scroll-mt-6">
               <Label htmlFor="scopeSummary">Summary</Label>
               <Textarea
                 id="scopeSummary"
@@ -1159,7 +1253,7 @@ export function DealScopingWorkspace({
           </CardContent>
         </Card>
 
-        <Card>
+        <Card id={getSectionElementId("attachments")} className="scroll-mt-6">
           <CardHeader>
             <CardTitle>Attachments</CardTitle>
             <CardDescription>Upload documents directly here or reuse existing deal files without double entry.</CardDescription>
@@ -1185,12 +1279,12 @@ export function DealScopingWorkspace({
                           </Badge>
                         ) : (
                           <Badge variant="outline" className="text-amber-700">
-                            Required
+                            Optional
                           </Badge>
                         )}
                       </div>
                       <p className="mt-1 text-sm text-muted-foreground">
-                        {requirement.hint} Required category: {categoryLabel}.
+                        {requirement.hint} Category: {categoryLabel}.
                       </p>
                     </div>
                     <Label className={`inline-flex items-center gap-2 rounded-md border px-3 py-2 text-sm font-medium ${

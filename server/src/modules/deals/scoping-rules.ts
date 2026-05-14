@@ -39,12 +39,13 @@ const SERVICE_REQUIRED_PROJECT_OVERVIEW_FIELDS = ["propertyName"] as const;
 const STANDARD_REQUIRED_PROJECT_OVERVIEW_FIELDS = ["propertyName", "bidDueDate"] as const;
 const REQUIRED_SCOPING_SECTIONS = [
   "projectOverview",
+  "scope",
   "propertyDetails",
   "scopeSummary",
   "attachments",
 ] as const;
-const SERVICE_REQUIRED_ATTACHMENT_KEYS = ["site_photos"] as const;
-const STANDARD_REQUIRED_ATTACHMENT_KEYS = ["scope_docs", "site_photos"] as const;
+const SERVICE_REQUIRED_ATTACHMENT_KEYS = [] as const;
+const STANDARD_REQUIRED_ATTACHMENT_KEYS = [] as const;
 
 function isPlainRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -64,6 +65,15 @@ function isMissingRequiredValue(value: unknown): boolean {
   }
 
   return false;
+}
+
+function hasSelectedScopeItem(sectionValue: Record<string, unknown>, projectTypeId: string | null): boolean {
+  const selectedProjectTypeIds = sectionValue.selectedProjectTypeIds;
+  if (Array.isArray(selectedProjectTypeIds)) {
+    return selectedProjectTypeIds.some((value) => typeof value === "string" && value.trim().length > 0);
+  }
+
+  return typeof projectTypeId === "string" && projectTypeId.trim().length > 0;
 }
 
 export function getRequiredScopingRules(input: DealScopingRulesInput): DealScopingRules {
@@ -93,6 +103,7 @@ export function getRequiredScopingRules(input: DealScopingRulesInput): DealScopi
   return {
     requiredSections: [
       "projectOverview",
+      "scope",
       "propertyDetails",
       "scopeSummary",
       ...(opportunityFields.length > 0 ? ["opportunity"] : []),
@@ -100,6 +111,7 @@ export function getRequiredScopingRules(input: DealScopingRulesInput): DealScopi
     ],
     requiredFieldsBySection: {
       projectOverview: projectOverviewFields,
+      scope: ["selectedProjectTypeIds"],
       propertyDetails: ["propertyAddress"],
       scopeSummary: ["summary"],
       ...(opportunityFields.length > 0 ? { opportunity: opportunityFields } : {}),
@@ -132,9 +144,13 @@ export function evaluateScopingReadiness(input: {
 
     const requiredFields = rules.requiredFieldsBySection[sectionName] ?? [];
     const sectionValue = isPlainRecord(input.sectionData[sectionName]) ? input.sectionData[sectionName] : {};
-    const missingFields = requiredFields.filter((fieldName) =>
-      isMissingRequiredValue(sectionValue[fieldName])
-    );
+    const missingFields = requiredFields.filter((fieldName) => {
+      if (sectionName === "scope" && fieldName === "selectedProjectTypeIds") {
+        return !hasSelectedScopeItem(sectionValue, input.projectTypeId);
+      }
+
+      return isMissingRequiredValue(sectionValue[fieldName]);
+    });
 
     if (missingFields.length > 0) {
       sectionErrors[sectionName] = missingFields;
