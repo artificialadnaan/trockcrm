@@ -369,7 +369,7 @@ describe("hubspot-deals-reimport", () => {
     ).toThrow("Duplicate active hubspot_deal_id values found: hs-dup (2)");
   });
 
-  it("treats non-ISO datetimes as null instead of host-timezone-dependent values", () => {
+  it("parses HubSpot export datetimes deterministically in America/Chicago", () => {
     const plan = buildReimportPlan({
       csvRows: [
         {
@@ -377,7 +377,7 @@ describe("hubspot-deals-reimport", () => {
           dealName: "Alpha",
           amount: "1000",
           createDate: "2026-05-01T12:00:00",
-          lastModifiedDate: "2026-05-05T00:00:00",
+          lastModifiedDate: "2026-05-05 00:00",
           dealStage: "Proposal Sent",
           projectNumber: "DFW-1-12126-aa",
           projectType: "Roofing",
@@ -399,7 +399,11 @@ describe("hubspot-deals-reimport", () => {
       ],
     });
 
-    expect(plan.counts.EXISTS_UNCHANGED).toBe(1);
-    expect(plan.entries[0]?.fieldDiffs).toEqual([]);
+    expect(plan.counts.EXISTS_NEWER_IN_CSV).toBe(1);
+    expect(plan.entries[0]?.fieldDiffs).toContainEqual({
+      field: "last_modified_at",
+      currentValue: "2026-05-05T00:00:00.000Z",
+      csvValue: "2026-05-05T05:00:00.000Z",
+    });
   });
 });
