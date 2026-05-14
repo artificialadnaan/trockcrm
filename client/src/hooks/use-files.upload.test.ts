@@ -214,6 +214,47 @@ describe("uploadFile", () => {
     });
   });
 
+  it("infers MIME types for email export files when the browser leaves File.type empty", async () => {
+    document.cookie = "csrf_token=test-csrf-token; path=/";
+    vi.stubGlobal("XMLHttpRequest", MockXHR);
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        headers: new Headers({ "content-type": "application/json" }),
+        json: async () => ({
+          uploadUrl: "https://acct.r2.cloudflarestorage.com/bucket/email.msg",
+          uploadToken: "upload-token",
+          r2Key: "office/leads/lead-1/other/email.msg",
+          expiresIn: 1800,
+        }),
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        status: 201,
+        headers: new Headers({ "content-type": "application/json" }),
+        json: async () => ({
+          file: { id: "file-1", category: "other", originalFilename: "email.msg" },
+        }),
+      });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await uploadFile({
+      file: new File(["msg"], "email.msg"),
+      category: "other",
+      leadId: "lead-1",
+    });
+
+    expect(JSON.parse((fetchMock.mock.calls[0][1] as RequestInit).body as string)).toMatchObject({
+      originalFilename: "email.msg",
+      mimeType: "application/vnd.ms-outlook",
+      leadId: "lead-1",
+    });
+    expect(MockXHR.instances[0].requestHeaders).toEqual({
+      "Content-Type": "application/vnd.ms-outlook",
+    });
+  });
+
   it("rejects files larger than 200 MB before requesting a presigned URL", async () => {
     const fetchMock = vi.fn();
     vi.stubGlobal("fetch", fetchMock);

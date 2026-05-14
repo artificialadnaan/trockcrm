@@ -3,8 +3,11 @@ import type { ReactNode } from "react";
 import { LEAD_SOURCE_CATEGORIES, type LeadSourceCategory } from "@trock-crm/shared/types";
 import type { LeadAnswerValue, LeadRecord } from "@/hooks/use-leads";
 import { transitionLeadStage, updateLead } from "@/hooks/use-leads";
+import { uploadFile } from "@/hooks/use-files";
 import { usePipelineStages, useProjectTypes } from "@/hooks/use-pipeline-config";
 import { isApiError } from "@/lib/api";
+import { ALLOWED_EXTENSIONS, validateFileForUpload } from "@/lib/file-utils";
+import { CLIENT_PROVIDED_DOCS_TAG, inferClientProvidedDocsCategory } from "@/lib/lead-attachment-routing";
 import { CRM_OWNED_LEAD_STAGE_SLUGS } from "@/lib/sales-workflow";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -77,6 +80,50 @@ function QuestionLabel({
   );
 }
 
+function ClientProvidedDocsUploadField({
+  files,
+  onAddFiles,
+  onRemoveFile,
+  disabled = false,
+}: {
+  files: File[];
+  onAddFiles: (files: File[]) => void;
+  onRemoveFile: (index: number) => void;
+  disabled?: boolean;
+}) {
+  return (
+    <div data-question-key="client_provided_docs" className="space-y-3 rounded-md border p-3">
+      <QuestionLabel htmlFor="client-provided-docs-upload">Client Provided Docs (Plans, Scope, Specs)</QuestionLabel>
+      <Input
+        id="client-provided-docs-upload"
+        type="file"
+        multiple
+        accept={Array.from(ALLOWED_EXTENSIONS).join(",")}
+        disabled={disabled}
+        onChange={(event) => {
+          onAddFiles(Array.from(event.target.files ?? []));
+          event.currentTarget.value = "";
+        }}
+      />
+      <p className="text-xs text-muted-foreground">
+        Upload plans, scope documents, specs, email exports, or site photos. Files are attached to this lead and auto-routed when converted.
+      </p>
+      {files.length > 0 ? (
+        <div className="space-y-2">
+          {files.map((file, index) => (
+            <div key={`${file.name}-${file.size}-${index}`} className="flex items-center justify-between gap-3 rounded-md border bg-muted/20 px-3 py-2 text-sm">
+              <span className="min-w-0 truncate">{file.name}</span>
+              <Button type="button" variant="ghost" size="sm" onClick={() => onRemoveFile(index)}>
+                Remove
+              </Button>
+            </div>
+          ))}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
 function getInitialSourceState(lead: LeadRecord) {
   if (lead.sourceCategory) {
     return {
@@ -103,6 +150,7 @@ export function LeadQuestionnaireEditor({ lead, onCancel, onSaved }: LeadQuestio
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [stageGateError, setStageGateError] = useState<StageGateErrorState | null>(null);
+  const [clientProvidedDocFiles, setClientProvidedDocFiles] = useState<File[]>([]);
   const initialSourceState = getInitialSourceState(lead);
   const [formData, setFormData] = useState(() => ({
     name: lead.name,
@@ -220,6 +268,69 @@ export function LeadQuestionnaireEditor({ lead, onCancel, onSaved }: LeadQuestio
     }));
   };
 
+  const addClientProvidedDocs = (files: File[]) => {
+    const invalidFile = files.find((file) => validateFileForUpload(file));
+    if (invalidFile) {
+      setError(validateFileForUpload(invalidFile));
+      return;
+    }
+    setClientProvidedDocFiles((current) => [...current, ...files]);
+    setFormData((current) => ({
+      ...current,
+      leadQuestionAnswers: {
+        ...current.leadQuestionAnswers,
+        [CLIENT_PROVIDED_DOCS_TAG]: "uploaded",
+      },
+    }));
+  };
+
+  const removeClientProvidedDoc = (index: number) => {
+    setClientProvidedDocFiles((current) => {
+      const nextFiles = current.filter((_, itemIndex) => itemIndex !== index);
+      if (nextFiles.length === 0) {
+        setFormData((form) => ({
+          ...form,
+          leadQuestionAnswers: {
+            ...form.leadQuestionAnswers,
+            [CLIENT_PROVIDED_DOCS_TAG]: null,
+          },
+        }));
+      }
+      return nextFiles;
+    });
+  };
+
+  const uploadClientProvidedDocs = async () => {
+    for (const file of clientProvidedDocFiles) {
+      await uploadFile({
+        file,
+        leadId: lead.id,
+        category: inferClientProvidedDocsCategory(file),
+        tags: [CLIENT_PROVIDED_DOCS_TAG],
+      });
+    }
+    setClientProvidedDocFiles([]);
+  };
+
+  const renderClientProvidedDocsQuestion = (node: (typeof availableNodes)[number]) => {
+    if (node.key !== CLIENT_PROVIDED_DOCS_TAG) return null;
+    return (
+      <ClientProvidedDocsUploadField
+        files={clientProvidedDocFiles}
+        onAddFiles={addClientProvidedDocs}
+        onRemoveFile={removeClientProvidedDoc}
+        disabled={submitting}
+      />
+    );
+  };
+
+  const serializeLeadQuestionAnswer = (key: string, value: LeadAnswerValue | undefined): LeadAnswerValue => {
+    if (key === CLIENT_PROVIDED_DOCS_TAG && value === "uploaded") {
+      return null;
+    }
+    return value ?? null;
+  };
+
   const handleSourceCategoryChange = (value: string | null) => {
     setFormData((current) => ({
       ...current,
@@ -253,21 +364,11 @@ export function LeadQuestionnaireEditor({ lead, onCancel, onSaved }: LeadQuestio
           node.key,
           node.key === "timeline"
             ? formData.qualificationPayload.timeline_status.trim() || null
-            : formData.leadQuestionAnswers[node.key] ?? null,
+            : serializeLeadQuestionAnswer(node.key, formData.leadQuestionAnswers[node.key]),
         ])
       );
 
-      if (!isConverted && formData.stageId !== lead.stageId) {
-        const transitionResult = await transitionLeadStage(lead.id, { targetStageId: formData.stageId });
-        if (!transitionResult.ok) {
-          setStageGateError({
-            message: formatLeadStageBlockReason(transitionResult.code),
-            missingLabels: transitionResult.missing.map((field) => field.label),
-          });
-          return;
-        }
-      }
-
+      const stageChanged = !isConverted && formData.stageId !== lead.stageId;
       const payload = isConverted
         ? { leadQuestionAnswers }
         : {
@@ -288,6 +389,19 @@ export function LeadQuestionnaireEditor({ lead, onCancel, onSaved }: LeadQuestio
           };
 
       await updateLead(lead.id, payload);
+      await uploadClientProvidedDocs();
+
+      if (stageChanged) {
+        const transitionResult = await transitionLeadStage(lead.id, { targetStageId: formData.stageId });
+        if (!transitionResult.ok) {
+          setStageGateError({
+            message: formatLeadStageBlockReason(transitionResult.code),
+            missingLabels: transitionResult.missing.map((field) => field.label),
+          });
+          return;
+        }
+      }
+
       await onSaved();
     } catch (err: unknown) {
       if (isApiError(err) && err.code === "LEAD_STAGE_REQUIREMENTS_UNMET") {
@@ -512,6 +626,7 @@ export function LeadQuestionnaireEditor({ lead, onCancel, onSaved }: LeadQuestio
             onAnswerChange={handleAnswerChange}
             legacyAnswers={questionnaire.legacyAnswers}
             showLegacyAnswers
+            renderQuestionOverride={renderClientProvidedDocsQuestion}
           />
         </CardContent>
       </Card>

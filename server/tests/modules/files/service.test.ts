@@ -54,6 +54,8 @@ describe("File Service", () => {
         "application/pdf",
         "application/msword",
         "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        "message/rfc822",
+        "application/vnd.ms-outlook",
       ];
       for (const mime of docMimes) {
         expect(ALLOWED_MIME_TYPES[mime]).toBeDefined();
@@ -92,7 +94,7 @@ describe("File Service", () => {
     });
 
     it("should accept common document extensions", () => {
-      for (const ext of [".pdf", ".doc", ".docx", ".xls", ".xlsx", ".csv", ".txt"]) {
+      for (const ext of [".pdf", ".doc", ".docx", ".xls", ".xlsx", ".csv", ".txt", ".eml", ".msg"]) {
         expect(ALLOWED_EXTENSIONS.has(ext)).toBe(true);
       }
     });

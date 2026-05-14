@@ -9,6 +9,7 @@ import {
   deals,
   dealHistory,
   activities,
+  files,
   jobQueue,
   leadDueDiligenceApprovals,
   leadStageHistory,
@@ -29,7 +30,10 @@ import {
 import { LEAD_STATUSES } from "../../helpers/worktree-shared-contracts.js";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { AppError } from "../../../src/middleware/error-handler.js";
-import { createLeadConversionService } from "../../../src/modules/leads/conversion-service.js";
+import {
+  createLeadConversionService,
+  resolveLeadAttachmentConversionMetadata,
+} from "../../../src/modules/leads/conversion-service.js";
 import { createDeal, updateDeal } from "../../../src/modules/deals/service.js";
 import { createLeadService } from "../../../src/modules/leads/service.js";
 
@@ -588,6 +592,21 @@ interface FakeLeadQuestionNodeRow {
   isActive: boolean;
 }
 
+interface FakeFileRow {
+  id: string;
+  category: string;
+  originalFilename: string;
+  mimeType: string;
+  tags: string[];
+  leadId: string | null;
+  dealId: string | null;
+  intakeSection?: string | null;
+  intakeRequirementKey?: string | null;
+  intakeSource?: string | null;
+  isActive: boolean;
+  updatedAt?: Date;
+}
+
 interface FakeProjectTypeRow {
   id: string;
   name: string;
@@ -615,6 +634,7 @@ interface FakeTenantState {
   userOfficeAccess: FakeUserOfficeAccessRow[];
   leads: FakeLeadRow[];
   deals: FakeDealRow[];
+  files: FakeFileRow[];
   leadStageHistory: FakeLeadStageHistoryRow[];
   activities: Array<Record<string, unknown>>;
   leadQuestionAnswers: FakeLeadQuestionAnswerRow[];
@@ -681,6 +701,7 @@ function createFakeTenantDb(initialState?: Partial<FakeTenantState>) {
     userOfficeAccess: [],
     leads: [],
     deals: [],
+    files: [],
     leadStageHistory: [],
     activities: [],
     leadQuestionAnswers: [],
@@ -734,6 +755,7 @@ function createFakeTenantDb(initialState?: Partial<FakeTenantState>) {
     if (table === userOfficeAccess || tableName === "user_office_access") return state.userOfficeAccess;
     if (table === leads || tableName === "leads") return state.leads;
     if (table === deals || tableName === "deals") return state.deals;
+    if (table === files || tableName === "files") return state.files;
     if (table === leadStageHistory || tableName === "lead_stage_history") return state.leadStageHistory;
     if (table === activities || tableName === "activities") return state.activities;
     if (table === jobQueue || tableName === "job_queue") return state.jobs;
@@ -754,6 +776,7 @@ function createFakeTenantDb(initialState?: Partial<FakeTenantState>) {
     if ("userId" in candidate && "roleOverride" in candidate) return state.userOfficeAccess;
     if ("convertedAt" in candidate && "stageEnteredAt" in candidate && "assignedRepId" in candidate) return state.leads;
     if ("dealNumber" in candidate && "workflowRoute" in candidate && "sourceLeadId" in candidate) return state.deals;
+    if ("originalFilename" in candidate && "r2Key" in candidate) return state.files;
     if ("leadId" in candidate && "changedBy" in candidate && "toStageId" in candidate) return state.leadStageHistory;
     if ("jobType" in candidate && "payload" in candidate) return state.jobs;
     if ("leadId" in candidate && "questionId" in candidate && "valueJson" in candidate) return state.leadQuestionAnswers;
@@ -1760,6 +1783,64 @@ describe("Lead Service", () => {
 });
 
 describe("Lead Conversion Service", () => {
+  it("routes client provided lead documents into deal scoping attachment buckets", () => {
+    expect(
+      resolveLeadAttachmentConversionMetadata({
+        originalFilename: "roof-plan.pdf",
+        mimeType: "application/pdf",
+        category: "other",
+        tags: ["client_provided_docs"],
+      })
+    ).toEqual({
+      category: "other",
+      intakeSection: "attachments",
+      intakeRequirementKey: "scope_docs",
+      intakeSource: "scoping_intake",
+    });
+
+    expect(
+      resolveLeadAttachmentConversionMetadata({
+        originalFilename: "site-photo.jpg",
+        mimeType: "image/jpeg",
+        category: "other",
+        tags: ["client_provided_docs"],
+      })
+    ).toEqual({
+      category: "photo",
+      intakeSection: "attachments",
+      intakeRequirementKey: "site_photos",
+      intakeSource: "scoping_intake",
+    });
+
+    expect(
+      resolveLeadAttachmentConversionMetadata({
+        originalFilename: "customer-email.eml",
+        mimeType: "message/rfc822",
+        category: "other",
+        tags: ["client_provided_docs"],
+      })
+    ).toEqual({
+      category: "other",
+      intakeSection: "attachments",
+      intakeRequirementKey: "scope_docs",
+      intakeSource: "scoping_intake",
+    });
+
+    expect(
+      resolveLeadAttachmentConversionMetadata({
+        originalFilename: "general-note.txt",
+        mimeType: "text/plain",
+        category: "other",
+        tags: [],
+      })
+    ).toEqual({
+      category: "other",
+      intakeSection: null,
+      intakeRequirementKey: null,
+      intakeSource: null,
+    });
+  });
+
   it("converts one lead into one successor deal", async () => {
     const tenantDb = createFakeTenantDb({
       leads: [
@@ -2443,6 +2524,184 @@ describe("Lead Conversion Service", () => {
 
     expect(result.deal.id).toBe("deal-1");
     expect(result.lead.status).toBe("converted");
+  });
+
+  it("treats uploaded client provided docs as satisfying the required questionnaire question", async () => {
+    process.env.ENABLE_LEAD_EDIT_V2 = "true";
+
+    const tenantDb = createFakeTenantDb({
+      leads: [
+        {
+          id: "lead-1",
+          companyId: "company-1",
+          propertyId: "property-1",
+          primaryContactId: null,
+          name: "Palm Villas repaint",
+          stageId: "lead-stage-sales-validation",
+          assignedRepId: "rep-1",
+          status: "open",
+          pipelineType: "normal",
+          projectTypeId: "project-type-multifamily",
+          qualificationPayload: {
+            estimated_value: 85000,
+            timeline_status: "Q3 2026",
+          },
+          source: "Referral",
+          description: "Property manager requested pre-bid walk",
+          stageEnteredAt: new Date("2026-04-12T15:00:00.000Z"),
+          convertedAt: null,
+          isActive: true,
+          createdAt: new Date("2026-04-12T15:00:00.000Z"),
+          updatedAt: new Date("2026-04-12T15:00:00.000Z"),
+        } as any,
+      ],
+      leadQuestionNodes: [
+        {
+          id: "question-client-provided-docs",
+          projectTypeId: null,
+          parentNodeId: null,
+          parentOptionValue: null,
+          nodeType: "question",
+          key: "client_provided_docs",
+          label: "Client Provided Docs",
+          prompt: null,
+          inputType: "textarea",
+          options: [],
+          isRequired: true,
+          displayOrder: 1,
+          isActive: true,
+        },
+      ],
+      files: [
+        {
+          id: "file-client-docs",
+          category: "other",
+          originalFilename: "client-plans.pdf",
+          mimeType: "application/pdf",
+          tags: ["client_provided_docs"],
+          leadId: "lead-1",
+          dealId: null,
+          isActive: true,
+        },
+      ],
+    });
+
+    const service = createLeadConversionService({
+      getStageById: pipelineMocks.getStageById as never,
+      now: () => new Date("2026-04-15T15:00:00.000Z"),
+      createDeal: async (_tenantDb, input) => {
+        const deal = {
+          id: "deal-1",
+          dealNumber: "TR-2026-0001",
+          workflowRoute: input.workflowRoute ?? "normal",
+          primaryContactId: input.primaryContactId ?? null,
+          companyId: input.companyId ?? null,
+          propertyId: input.propertyId ?? null,
+          sourceLeadId: input.sourceLeadId ?? null,
+          source: input.source ?? null,
+          assignedRepId: input.assignedRepId,
+          stageId: input.stageId,
+          name: input.name,
+        };
+        tenantDb.state.deals.push(deal);
+        return deal as never;
+      },
+    });
+
+    const result = await service.convertLead(tenantDb as never, {
+      leadId: "lead-1",
+      dealStageId: "deal-stage-1",
+      userRole: "rep",
+      userId: "rep-1",
+    });
+
+    expect(result.deal.id).toBe("deal-1");
+    expect(tenantDb.state.files[0]).toMatchObject({
+      dealId: "deal-1",
+      intakeRequirementKey: "scope_docs",
+    });
+  });
+
+  it("does not treat a stale uploaded placeholder as satisfying client provided docs without a file", async () => {
+    process.env.ENABLE_LEAD_EDIT_V2 = "true";
+
+    const tenantDb = createFakeTenantDb({
+      leads: [
+        {
+          id: "lead-1",
+          companyId: "company-1",
+          propertyId: "property-1",
+          primaryContactId: null,
+          name: "Palm Villas repaint",
+          stageId: "lead-stage-sales-validation",
+          assignedRepId: "rep-1",
+          status: "open",
+          pipelineType: "normal",
+          projectTypeId: "project-type-multifamily",
+          qualificationPayload: {
+            estimated_value: 85000,
+            timeline_status: "Q3 2026",
+          },
+          source: "Referral",
+          description: "Property manager requested pre-bid walk",
+          stageEnteredAt: new Date("2026-04-12T15:00:00.000Z"),
+          convertedAt: null,
+          isActive: true,
+          createdAt: new Date("2026-04-12T15:00:00.000Z"),
+          updatedAt: new Date("2026-04-12T15:00:00.000Z"),
+        } as any,
+      ],
+      leadQuestionNodes: [
+        {
+          id: "question-client-provided-docs",
+          projectTypeId: null,
+          parentNodeId: null,
+          parentOptionValue: null,
+          nodeType: "question",
+          key: "client_provided_docs",
+          label: "Client Provided Docs",
+          prompt: null,
+          inputType: "textarea",
+          options: [],
+          isRequired: true,
+          displayOrder: 1,
+          isActive: true,
+        },
+      ],
+      leadQuestionAnswers: [
+        {
+          id: "answer-client-provided-docs",
+          leadId: "lead-1",
+          questionId: "question-client-provided-docs",
+          valueJson: "uploaded",
+          updatedBy: "rep-1",
+          createdAt: new Date("2026-04-12T15:00:00.000Z"),
+          updatedAt: new Date("2026-04-12T15:00:00.000Z"),
+        },
+      ],
+    });
+
+    const service = createLeadConversionService({
+      getStageById: pipelineMocks.getStageById as never,
+      now: () => new Date("2026-04-15T15:00:00.000Z"),
+      createDeal: vi.fn(),
+    });
+
+    await expect(
+      service.convertLead(tenantDb as never, {
+        leadId: "lead-1",
+        dealStageId: "deal-stage-1",
+        userRole: "rep",
+        userId: "rep-1",
+      })
+    ).rejects.toMatchObject({
+      code: "LEAD_STAGE_REQUIREMENTS_UNMET",
+      result: expect.objectContaining({
+        missingRequirements: expect.objectContaining({
+          projectTypeQuestionIds: ["client_provided_docs"],
+        }),
+      }),
+    });
   });
 
   it("defaults conversion into the canonical opportunity deal stage when dealStageId is omitted", async () => {

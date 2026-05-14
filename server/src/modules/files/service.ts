@@ -179,7 +179,7 @@ function validateOptionalCoordinate(value: number | undefined, min: number, max:
  */
 function validateMimeType(mimeType: string): void {
   if (!ALLOWED_MIME_TYPES[mimeType]) {
-    throw new AppError(400, `File type "${mimeType}" is not supported. Allowed types: images, PDF, Office documents, CSV, TXT, ZIP.`);
+    throw new AppError(400, `File type "${mimeType}" is not supported. Allowed types: images, PDF, Office documents, email exports, CSV, TXT, ZIP.`);
   }
 }
 
@@ -205,6 +205,12 @@ function validateMimeMatchesExtension(mimeType: string, extension: string): void
   const expectedExts = MIME_TO_EXTENSIONS[mimeType];
   if (!expectedExts || !expectedExts.includes(extension.toLowerCase())) {
     throw new AppError(400, `MIME type ${mimeType} does not match extension ${extension}`);
+  }
+}
+
+function validateCategoryMatchesMime(category: FileCategory, mimeType: string): void {
+  if (category === "photo" && !mimeType.toLowerCase().startsWith("image/")) {
+    throw new AppError(400, "Photo uploads must use an image file type.");
   }
 }
 
@@ -448,6 +454,7 @@ export async function requestUploadUrl(
   validateMimeType(input.mimeType);
   const ext = validateExtension(input.originalFilename);
   validateMimeMatchesExtension(input.mimeType, ext); // Fix 3: MIME must match extension
+  validateCategoryMatchesMime(input.category, input.mimeType);
   validateFileSize(input.fileSizeBytes);
   validateAssociations(input);
 

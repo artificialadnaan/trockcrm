@@ -7,6 +7,9 @@ import {
   Clock3,
   Edit,
   ExternalLink,
+  FileText,
+  Images,
+  Mail,
   MapPin,
   Mic,
   Phone,
@@ -28,6 +31,9 @@ import { LeadStageBadge } from "@/components/leads/lead-stage-badge";
 import { LeadTimelineTab } from "@/components/leads/lead-timeline-tab";
 import { LeadQuestionnaireEditor } from "@/components/leads/lead-questionnaire-editor";
 import { RecordingList } from "@/components/call-recordings/recording-list";
+import { LeadEmailTab } from "@/components/email/lead-email-tab";
+import { LeadFileTab } from "@/components/files/lead-file-tab";
+import { LeadPhotosTab } from "./lead-photos-tab";
 import { formatLeadPropertyLine, getLeadStageMetadata, useLeadDetail } from "@/hooks/use-leads";
 import type { LeadRecord } from "@/hooks/use-leads";
 import { usePipelineStages } from "@/hooks/use-pipeline-config";
@@ -35,7 +41,7 @@ import { LEAD_BOARD_STAGE_SLUGS, isBidBoardMirroredStageSlug } from "@/lib/pipel
 import { cn } from "@/lib/utils";
 import { displayNameOrFallback } from "@/lib/display-identifiers";
 
-type LeadDetailTab = "timeline" | "questionnaire" | "recordings";
+type LeadDetailTab = "timeline" | "questionnaire" | "files" | "photos" | "emails" | "recordings";
 
 function formatNullable(value: string | number | null | undefined) {
   if (value == null || value === "") return "Not set";
@@ -338,6 +344,9 @@ export function LeadDetailPage() {
             />
           )
         ) : null}
+        {activeTab === "files" ? <LeadFileTab leadId={lead.id} /> : null}
+        {activeTab === "photos" ? <LeadPhotosTab leadId={lead.id} /> : null}
+        {activeTab === "emails" ? <LeadEmailTab leadId={lead.id} /> : null}
         {activeTab === "recordings" ? <RecordingList entityType="lead" entityId={lead.id} /> : null}
       </DetailPageShell>
 
@@ -371,6 +380,9 @@ function buildLeadTabs(): DetailPageShellTab[] {
   return [
     { id: "timeline", label: "Timeline", icon: <Clock className={iconClassName} /> },
     { id: "questionnaire", label: "Questionnaire", icon: <ClipboardList className={iconClassName} /> },
+    { id: "files", label: "Files", icon: <FileText className={iconClassName} /> },
+    { id: "photos", label: "Photos", icon: <Images className={iconClassName} /> },
+    { id: "emails", label: "Emails", icon: <Mail className={iconClassName} /> },
     { id: "recordings", label: "Recordings", icon: <Mic className={iconClassName} /> },
   ];
 }

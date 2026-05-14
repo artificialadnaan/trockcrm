@@ -40,6 +40,8 @@ const ALLOWED_MIME_TYPES: Record<string, string> = {
   "text/csv": ".csv",
   "application/vnd.ms-powerpoint": ".ppt",
   "application/vnd.openxmlformats-officedocument.presentationml.presentation": ".pptx",
+  "message/rfc822": ".eml",
+  "application/vnd.ms-outlook": ".msg",
   "text/plain": ".txt",
   "application/zip": ".zip",
   "application/x-zip-compressed": ".zip",
@@ -50,6 +52,7 @@ export const ALLOWED_EXTENSIONS = new Set([
   ".pdf", ".doc", ".docx",
   ".xls", ".xlsx", ".csv",
   ".ppt", ".pptx",
+  ".eml", ".msg",
   ".txt", ".zip",
 ]);
 
@@ -82,7 +85,7 @@ export function getFileExtension(filename: string): string {
 
 // ─── MIME Type to Icon Name Mapping ─────────────────────────────────────────
 
-export type FileIconType = "image" | "pdf" | "word" | "spreadsheet" | "presentation" | "text" | "archive" | "generic";
+export type FileIconType = "image" | "pdf" | "word" | "spreadsheet" | "presentation" | "email" | "text" | "archive" | "generic";
 
 /**
  * Map a MIME type to an icon type for rendering the correct lucide icon.
@@ -100,6 +103,7 @@ export function getMimeIconType(mimeType: string): FileIconType {
     return "spreadsheet";
   }
   if (mimeType.includes("presentation") || mimeType.includes("powerpoint")) return "presentation";
+  if (mimeType === "message/rfc822" || mimeType === "application/vnd.ms-outlook") return "email";
   if (mimeType === "text/plain") return "text";
   if (mimeType.includes("zip")) return "archive";
   return "generic";

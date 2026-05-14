@@ -1,14 +1,15 @@
-import { eq } from "drizzle-orm";
+import { and, eq } from "drizzle-orm";
 import type { NodePgDatabase } from "drizzle-orm/node-postgres";
-import { deals, leads } from "@trock-crm/shared/schema";
+import { deals, files, leads } from "@trock-crm/shared/schema";
 import type * as schema from "@trock-crm/shared/schema";
-import { toCanonicalLeadStageSlug, type WorkflowRoute } from "@trock-crm/shared/types";
+import { toCanonicalLeadStageSlug, type FileCategory, type WorkflowRoute } from "@trock-crm/shared/types";
 import { AppError } from "../../middleware/error-handler.js";
 import { createDeal } from "../deals/service.js";
 import { getStageById, getStageBySlug } from "../pipeline/service.js";
 import {
   isAnsweredQuestionValue,
   isLeadEditV2Enabled,
+  applyLeadAttachmentAnswers,
   listLeadQuestionAnswers,
   listMissingRequiredQuestionKeys,
   listQuestionnaireNodes,
@@ -18,6 +19,74 @@ import { computeExistingCustomerStatus } from "../companies/customer-status-serv
 import { resolveLeadSourceDisplayValue } from "./source-control.js";
 
 type TenantDb = NodePgDatabase<typeof schema>;
+
+const CLIENT_PROVIDED_DOCS_TAG = "client_provided_docs";
+const IMAGE_FILE_EXTENSIONS = new Set([".jpg", ".jpeg", ".png", ".gif", ".webp", ".heic", ".heif"]);
+
+export function resolveLeadAttachmentConversionMetadata(file: {
+  originalFilename: string;
+  mimeType: string;
+  category: string;
+  tags: string[];
+}): {
+  category: FileCategory | string;
+  intakeSection: "attachments" | null;
+  intakeRequirementKey: "scope_docs" | "site_photos" | null;
+  intakeSource: "scoping_intake" | null;
+} {
+  const isClientProvidedDocs = file.tags.some((tag) => tag.toLowerCase() === CLIENT_PROVIDED_DOCS_TAG);
+  if (!isClientProvidedDocs) {
+    return {
+      category: file.category,
+      intakeSection: null,
+      intakeRequirementKey: null,
+      intakeSource: null,
+    };
+  }
+
+  const extension = file.originalFilename.lastIndexOf(".") >= 0
+    ? file.originalFilename.substring(file.originalFilename.lastIndexOf(".")).toLowerCase()
+    : "";
+  const isImage = file.mimeType.toLowerCase().startsWith("image/") || IMAGE_FILE_EXTENSIONS.has(extension);
+
+  return {
+    category: isImage ? "photo" : "other",
+    intakeSection: "attachments",
+    intakeRequirementKey: isImage ? "site_photos" : "scope_docs",
+    intakeSource: "scoping_intake",
+  };
+}
+
+async function attachLeadFilesToConvertedDeal(tenantDb: TenantDb, leadId: string, dealId: string) {
+  const leadFiles = await tenantDb
+    .select({
+      id: files.id,
+      category: files.category,
+      originalFilename: files.originalFilename,
+      mimeType: files.mimeType,
+      tags: files.tags,
+    })
+    .from(files)
+    .where(and(eq(files.leadId, leadId), eq(files.isActive, true)));
+
+  for (const file of leadFiles) {
+    const metadata = resolveLeadAttachmentConversionMetadata(file);
+    const updates: Partial<typeof files.$inferInsert> = {
+      dealId,
+      category: metadata.category as FileCategory,
+      updatedAt: new Date(),
+    };
+    if (metadata.intakeSection && metadata.intakeRequirementKey && metadata.intakeSource) {
+      updates.intakeSection = metadata.intakeSection;
+      updates.intakeRequirementKey = metadata.intakeRequirementKey;
+      updates.intakeSource = metadata.intakeSource;
+    }
+    await tenantDb
+      .update(files)
+      .set(updates)
+      .where(eq(files.id, file.id));
+  }
+}
 
 export interface ConvertLeadInput {
   leadId: string;
@@ -99,7 +168,11 @@ export function createLeadConversionService(
     if (!isAnsweredQuestionValue(existingCustomerStatus.status)) {
       qualificationFields.unshift("existing_customer_status");
     }
-    const questionAnswers = await listLeadQuestionAnswers(tenantDb, lead.id);
+    const questionAnswers = await applyLeadAttachmentAnswers(
+      tenantDb,
+      lead.id,
+      await listLeadQuestionAnswers(tenantDb, lead.id)
+    );
     const nodes = await listQuestionnaireNodes(tenantDb);
     const projectTypeQuestionIds = listMissingRequiredQuestionKeys(nodes, questionAnswers);
 
@@ -253,6 +326,8 @@ export function createLeadConversionService(
       regionId: input.regionId,
       expectedCloseDate: input.expectedCloseDate,
     });
+
+    await attachLeadFilesToConvertedDeal(tenantDb, lead.id, deal.id);
 
     const convertedAt = deps.now();
 
