@@ -8,6 +8,7 @@ import {
   assertSafeDevAuthConfig,
   getDevAuthProductionWarning,
 } from "./modules/auth/http-config.js";
+import { ensureAuditLogPhase1Columns } from "./modules/audit/startup-migration.js";
 
 assertSafeDevAuthConfig(process.env);
 const devAuthProductionWarning = getDevAuthProductionWarning(process.env);
@@ -15,6 +16,8 @@ if (devAuthProductionWarning) console.warn(devAuthProductionWarning);
 
 const PORT = parseInt(process.env.PORT || "3001", 10);
 const app = createApp();
+
+await ensureAuditLogPhase1Columns(pool);
 
 const server = app.listen(PORT, () => {
   console.log(`[API] T Rock CRM server running on port ${PORT}`);

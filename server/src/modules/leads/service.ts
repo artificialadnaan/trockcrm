@@ -50,6 +50,7 @@ import {
   type LeadPocRole,
   type LeadSourceCategory,
 } from "@trock-crm/shared/types";
+import { logActivity, type AuditContext } from "../audit/audit-logger.js";
 
 type TenantDb = NodePgDatabase<typeof schema>;
 
@@ -91,6 +92,7 @@ export interface CreateLeadInput {
     answers: Record<string, string | boolean | number | null>;
   };
   leadQuestionAnswers?: Record<string, string | boolean | number | null>;
+  auditContext?: AuditContext;
 }
 
 export interface UpdateLeadInput {
@@ -116,6 +118,7 @@ export interface UpdateLeadInput {
   };
   leadQuestionAnswers?: Record<string, string | boolean | number | null>;
   status?: "open" | "disqualified";
+  auditContext?: AuditContext;
 }
 
 interface LeadServiceDependencies {
@@ -163,6 +166,7 @@ interface TransitionLeadStageInput {
   userRole: string;
   officeId?: string;
   inlinePatch?: Partial<UpdateLeadInput>;
+  auditContext?: AuditContext;
 }
 
 type TransitionBlockedResult = {
@@ -274,6 +278,29 @@ const QUALIFIED_LEAD_BOARD_STAGE_SLUGS = [
   "pre_qual_value_assigned",
   "director_go_no_go",
 ] as const;
+
+function buildLeadEntityName(leadName: string, companyName?: string | null) {
+  return companyName ? `${leadName} for ${companyName}` : leadName;
+}
+
+function toIsoIfDate(value: unknown) {
+  return value instanceof Date ? value.toISOString() : value ?? null;
+}
+
+function buildRawFieldChanges(
+  before: Record<string, unknown>,
+  after: Record<string, unknown>,
+  keys: string[]
+) {
+  const changes: Record<string, { from: unknown; to: unknown }> = {};
+  for (const key of keys) {
+    const from = toIsoIfDate(before[key]);
+    const to = toIsoIfDate(after[key]);
+    if (from === to) continue;
+    changes[key] = { from, to };
+  }
+  return changes;
+}
 
 const SALES_VALIDATION_BOARD_STAGE_SLUGS = [
   "lead_go_no_go",
@@ -709,7 +736,7 @@ async function validateLeadHierarchy(
   }
 
   await validatePrimaryContact(tenantDb, input.companyId, input.primaryContactId);
-  return property;
+  return { company, property };
 }
 
 function isValidUsState(value: unknown) {
@@ -1191,12 +1218,12 @@ export function createLeadService(
   async function createLead(tenantDb: TenantDb, input: CreateLeadInput) {
     const stage = await resolveCreateStage(input.stageId, deps);
     const now = deps.now();
-    const property = await validateLeadHierarchy(tenantDb, input);
+    const hierarchy = await validateLeadHierarchy(tenantDb, input);
     await validateAssignee(tenantDb, input.assignedRepId, input.officeId);
     await validateOptionalUserId(tenantDb, input.salesRepId, "salesRepId", input.officeId);
     const resolvedProjectType = await resolveProjectType(input.projectTypeId ?? null, deps.getActiveProjectTypes);
     const officeCode = assertValidOfficeCode(input.officeCode);
-    assertLeadCreateRequirements(input, property, now);
+    assertLeadCreateRequirements(input, hierarchy.property, now);
     if (!resolvedProjectType) {
       throw new AppError(400, "Project type is required");
     }
@@ -1322,6 +1349,29 @@ export function createLeadService(
         nextAssignedRepId: lead.assignedRepId,
         actorUserId: input.actorUserId,
         officeId: input.officeId ?? null,
+      });
+    }
+
+    if (input.auditContext) {
+      await logActivity({
+        tenantDb,
+        actor: input.auditContext.actor,
+        action: "insert",
+        entity: {
+          tableName: "leads",
+          entityType: "lead",
+          recordId: lead.id,
+          nameSnapshot: buildLeadEntityName(lead.name, hierarchy.company.name),
+          secondaryIdSnapshot: null,
+        },
+        fieldChanges: {
+          name: { from: null, to: lead.name },
+          stageId: { from: null, to: resolvedStageId },
+          assignedRepId: { from: null, to: lead.assignedRepId },
+          status: { from: null, to: lead.status },
+        },
+        ipAddress: input.auditContext.ipAddress ?? null,
+        userAgent: input.auditContext.userAgent ?? null,
       });
     }
 
@@ -1604,6 +1654,31 @@ export function createLeadService(
       .where(eq(leads.id, leadId))
       .returning();
 
+    const auditFieldChanges = buildRawFieldChanges(
+      existing as Record<string, unknown>,
+      lead as Record<string, unknown>,
+      [
+        "stageId",
+        "assignedRepId",
+        "salesRepId",
+        "primaryContactId",
+        "projectTypeId",
+        "projectType",
+        "officeCode",
+        "office",
+        "name",
+        "source",
+        "sourceCategory",
+        "sourceDetail",
+        "description",
+        "qualificationPayload",
+        "projectTypeQuestionPayload",
+        "bidDueDate",
+        "status",
+        "isActive",
+      ]
+    );
+
     if (stageChangeAuditRecord) {
       await tenantDb.insert(leadStageHistory).values(stageChangeAuditRecord);
       await tenantDb.insert(activities).values({
@@ -1624,6 +1699,27 @@ export function createLeadService(
         }.`,
         outcome: "lead_stage_changed",
         occurredAt: stageChangedAt ?? updateTime,
+      });
+    }
+
+    if (input.auditContext && Object.keys(auditFieldChanges).length > 0) {
+      await logActivity({
+        tenantDb,
+        actor: input.auditContext.actor,
+        action: "update",
+        entity: {
+          tableName: "leads",
+          entityType: "lead",
+          recordId: lead.id,
+          nameSnapshot: buildLeadEntityName(
+            lead.name,
+            (existing as { companyName?: string | null }).companyName
+          ),
+          secondaryIdSnapshot: null,
+        },
+        fieldChanges: auditFieldChanges,
+        ipAddress: input.auditContext.ipAddress ?? null,
+        userAgent: input.auditContext.userAgent ?? null,
       });
     }
 
@@ -1706,6 +1802,7 @@ export function createLeadService(
         ...(input.inlinePatch ?? {}),
         stageId: input.targetStageId,
         officeId: input.officeId,
+        auditContext: input.auditContext,
       },
       input.userRole,
       input.userId

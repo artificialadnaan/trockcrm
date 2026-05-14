@@ -3,6 +3,7 @@ import {
   contacts,
   deals,
   activities,
+  auditLog,
   leadDueDiligenceApprovals,
   leadStageHistory,
   leadQuestionAnswerHistory,
@@ -130,6 +131,7 @@ function createFakeTenantDb(lead: FakeLeadRow) {
     leads: [lead],
     deals: [],
     activities: [] as Array<Record<string, unknown>>,
+    auditLog: [] as Array<Record<string, unknown>>,
     leadStageHistory: [] as Array<Record<string, unknown>>,
     leadQuestionAnswers: [] as Array<Record<string, unknown>>,
     leadQuestionAnswerHistory: [] as Array<Record<string, unknown>>,
@@ -139,6 +141,12 @@ function createFakeTenantDb(lead: FakeLeadRow) {
   };
 
   const resolveTableName = (table: unknown) => (table as { _: { name?: string } })?._?.name;
+  const resolveDrizzleTableName = (table: unknown) =>
+    String(
+      resolveTableName(table)
+      ?? (table as Record<PropertyKey, unknown> | undefined)?.[Symbol.for("drizzle:Name")]
+      ?? ""
+    );
 
   const filterRows = (rows: Array<Record<string, unknown>>, condition: unknown) => {
     if (rows.length <= 1) {
@@ -218,7 +226,7 @@ function createFakeTenantDb(lead: FakeLeadRow) {
     select(fields?: Record<string, unknown>) {
       return {
         from(table: unknown) {
-          const tableName = resolveTableName(table);
+          const tableName = resolveDrizzleTableName(table);
 
           if (table === leads || tableName === "leads") {
             return createQueryBuilder(state.leads as Array<Record<string, unknown>>, fields);
@@ -253,6 +261,22 @@ function createFakeTenantDb(lead: FakeLeadRow) {
           if (table === activities || tableName === "activities") {
             return createQueryBuilder(state.activities, fields);
           }
+
+          if (table === auditLog || tableName === "audit_log") {
+            const insertedRow = {
+              id: value.id ?? `audit-log-${state.auditLog.length + 1}`,
+              ...value,
+            };
+            state.auditLog.push(insertedRow);
+            return {
+              returning() {
+                return Promise.resolve([{ ...insertedRow }]);
+              },
+              then(onfulfilled: (value: unknown) => unknown) {
+                return Promise.resolve(insertedRow).then(onfulfilled);
+              },
+            };
+          }
           if (table === leadStageHistory || tableName === "lead_stage_history") {
             return createQueryBuilder(state.leadStageHistory, fields);
           }
@@ -273,7 +297,7 @@ function createFakeTenantDb(lead: FakeLeadRow) {
     insert(table: unknown) {
       return {
         values(value: Record<string, unknown>) {
-          const tableName = resolveTableName(table);
+          const tableName = resolveDrizzleTableName(table);
 
           if (table === leadStageHistory || tableName === "lead_stage_history") {
             const insertedRow = {
@@ -298,6 +322,22 @@ function createFakeTenantDb(lead: FakeLeadRow) {
               ...value,
             };
             state.activities.push(insertedRow);
+            return {
+              returning() {
+                return Promise.resolve([{ ...insertedRow }]);
+              },
+              then(onfulfilled: (value: unknown) => unknown) {
+                return Promise.resolve(insertedRow).then(onfulfilled);
+              },
+            };
+          }
+
+          if (table === auditLog || tableName === "audit_log") {
+            const insertedRow = {
+              id: value.id ?? `audit-log-${state.auditLog.length + 1}`,
+              ...value,
+            };
+            state.auditLog.push(insertedRow);
             return {
               returning() {
                 return Promise.resolve([{ ...insertedRow }]);
@@ -2524,5 +2564,116 @@ describe("lead service canonical progression", () => {
     );
 
     expect(lead.stageId).toBe(opportunityStage.id);
+  });
+
+  it("writes a rich audit_log entry for lead create when audit context is present", async () => {
+    const tenantDb = createFakeTenantDb({} as FakeLeadRow);
+    tenantDb.state.leads = [];
+    const service = createLeadService({
+      getStageById: pipelineMocks.getStageById as never,
+      getActiveProjectTypes: pipelineMocks.getActiveProjectTypes as never,
+      now: () => new Date("2026-04-15T15:00:00.000Z"),
+    });
+
+    const lead = await service.createLead(tenantDb as never, {
+      companyId: "company-1",
+      propertyId: "property-1",
+      stageId: newLeadStage.id,
+      assignedRepId: "rep-1",
+      officeId: "office-1",
+      primaryContactId: "contact-1",
+      primaryContactRole: "property_manager",
+      name: "Created Lead",
+      source: "Referral",
+      officeCode: "dfw",
+      projectTypeId: "project-type-commercial",
+      budgetStatus: "budgeted_q1",
+      bidDueDate: "2026-06-01",
+      auditContext: {
+        actor: {
+          type: "user",
+          userId: "admin-1",
+          name: "Admin User",
+          role: "admin",
+        },
+      },
+    } as never);
+
+    expect(lead.id).toBeTruthy();
+    expect(tenantDb.state.auditLog).toEqual([
+      expect.objectContaining({
+        tableName: "leads",
+        recordId: lead.id,
+        action: "insert",
+        actorName: "Admin User",
+        entityType: "lead",
+        entityNameSnapshot: "Created Lead for Palm Villas",
+        fieldChangesJsonb: expect.arrayContaining([
+          expect.objectContaining({ key: "name", toDisplay: "Created Lead" }),
+          expect.objectContaining({ key: "status", toDisplay: "Open" }),
+        ]),
+      }),
+    ]);
+  });
+
+  it("writes a rich audit_log entry for lead updates when audit context is present", async () => {
+    const tenantDb = createFakeTenantDb({
+      id: "lead-1",
+      companyId: "company-1",
+      propertyId: "property-1",
+      primaryContactId: null,
+      name: "Palm Villas repaint",
+      stageId: newLeadStage.id,
+      assignedRepId: "rep-1",
+      status: "open",
+      projectTypeId: "project-type-commercial",
+      source: "Referral",
+      description: null,
+      stageEnteredAt: new Date("2026-04-12T15:00:00.000Z"),
+      convertedAt: null,
+      isActive: true,
+      createdAt: new Date("2026-04-12T15:00:00.000Z"),
+      updatedAt: new Date("2026-04-12T15:00:00.000Z"),
+    });
+    const service = createLeadService({
+      getStageById: pipelineMocks.getStageById as never,
+      getActiveProjectTypes: pipelineMocks.getActiveProjectTypes as never,
+      now: () => new Date("2026-04-15T15:00:00.000Z"),
+    });
+
+    await service.updateLead(
+      tenantDb as never,
+      "lead-1",
+      {
+        description: "Updated lead note",
+        auditContext: {
+          actor: {
+            type: "user",
+            userId: "director-1",
+            name: "Director User",
+            role: "director",
+          },
+        },
+      },
+      "director",
+      "director-1"
+    );
+
+    expect(tenantDb.state.auditLog).toEqual([
+      expect.objectContaining({
+        tableName: "leads",
+        recordId: "lead-1",
+        action: "update",
+        actorName: "Director User",
+        entityNameSnapshot: "Palm Villas repaint for Palm Villas",
+        fieldChangesJsonb: [
+          expect.objectContaining({
+            key: "description",
+            fromDisplay: null,
+            toDisplay: "Updated lead note",
+          }),
+        ],
+      }),
+    ]);
   });
 });

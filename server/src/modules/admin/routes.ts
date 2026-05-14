@@ -26,7 +26,7 @@ import {
 import {
   listPipelineStages, updatePipelineStage, reorderPipelineStages,
 } from "./pipeline-service.js";
-import { getAuditLog, getAuditLogTables } from "./audit-service.js";
+import { getAuditLog, getAuditLogEntityTypes } from "./audit-service.js";
 import {
   getAdminPhotoAuditEvents,
   parseCsvQueryParam,
@@ -802,13 +802,12 @@ router.get(
   async (req: Request, res: Response, next: NextFunction) => {
     try {
       const {
-        tableName, recordId, changedBy, action, fromDate, toDate, page, limit,
+        entityType, actorQuery, action, fromDate, toDate, page, limit,
       } = req.query as Record<string, string>;
 
-      const result = await getAuditLog(req.tenantDb!, {
-        tableName: tableName || undefined,
-        recordId: recordId || undefined,
-        changedBy: changedBy || undefined,
+      const result = await getAuditLog(req.tenantDb!, req.user!.role, {
+        entityType: entityType || undefined,
+        actorQuery: actorQuery || undefined,
         action: action as any || undefined,
         fromDate: fromDate || undefined,
         toDate: toDate || undefined,
@@ -825,14 +824,14 @@ router.get(
 );
 
 router.get(
-  "/admin/audit/tables",
+  "/admin/audit/entity-types",
   requireDirector,
   tenantMiddleware,
   async (req: Request, res: Response, next: NextFunction) => {
     try {
-      const tables = await getAuditLogTables(req.tenantDb!);
+      const entityTypes = await getAuditLogEntityTypes(req.tenantDb!);
       await req.commitTransaction!();
-      return res.json({ tables });
+      return res.json({ entityTypes });
     } catch (err) {
       return next(err);
     }

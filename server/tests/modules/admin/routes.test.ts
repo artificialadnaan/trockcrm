@@ -90,7 +90,7 @@ vi.mock("../../../../server/src/modules/admin/pipeline-service.js", () => ({
 
 vi.mock("../../../../server/src/modules/admin/audit-service.js", () => ({
   getAuditLog: vi.fn(),
-  getAuditLogTables: vi.fn(),
+  getAuditLogEntityTypes: vi.fn(),
 }));
 
 import { adminRoutes } from "../../../../server/src/modules/admin/routes.js";

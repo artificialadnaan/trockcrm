@@ -4,7 +4,6 @@ import { and, eq, desc, isNotNull, isNull, or, sql } from "drizzle-orm";
 import { companies, dealApprovals, deals, jobQueue, properties } from "@trock-crm/shared/schema";
 import { requireRole } from "../../middleware/rbac.js";
 import { AppError } from "../../middleware/error-handler.js";
-import { requestAuditContext, writeSoftDeleteAuditLog } from "../../lib/soft-delete-audit.js";
 import { writeAuditLog } from "../../lib/audit-log.js";
 import { eventBus } from "../../events/bus.js";
 import { DOMAIN_EVENTS } from "../../events/types.js";
@@ -47,6 +46,7 @@ import {
   updateLineItem,
   deleteLineItem,
 } from "./estimate-service.js";
+import { buildAuditActorFromUser, logActivity } from "../audit/audit-logger.js";
 import {
   getPunchList,
   createPunchListItem,
@@ -96,6 +96,25 @@ import {
 import {
   updateEstimatePricingRecommendationReviewState,
 } from "../estimating/workbench-service.js";
+
+function buildRouteAuditContext(req: { user?: any; headers: Record<string, unknown>; ip?: string | undefined }) {
+  const actor = buildAuditActorFromUser({
+    userId: req.user!.id,
+    name: req.user!.displayName ?? req.user!.email ?? req.user!.id,
+    role: req.user!.role,
+  });
+  const userAgentHeader = (req as { headers?: Record<string, unknown> }).headers?.["user-agent"];
+  return {
+    actor,
+    ipAddress: req.ip ?? null,
+    userAgent:
+      Array.isArray(userAgentHeader)
+        ? userAgentHeader.join(", ")
+        : typeof userAgentHeader === "string"
+          ? userAgentHeader
+          : null,
+  };
+}
 import {
   createManualEstimateRow,
   updateManualEstimateRow,
@@ -1148,6 +1167,7 @@ router.post("/", async (req, res, next) => {
       creationContext: "direct",
       ...rest,
       officeCode: officeCodeResolution.officeCode,
+      auditContext: buildRouteAuditContext(req),
     });
     await req.commitTransaction!();
     const includeHubspotId = shouldIncludeHubspotId(req.query, req.user!.role);
@@ -1178,7 +1198,8 @@ router.patch(
         req.params.id as string,
         date,
         req.user!.id,
-        req.user!.activeOfficeId ?? req.user!.officeId
+        req.user!.activeOfficeId ?? req.user!.officeId,
+        buildRouteAuditContext(req)
       );
       if (!deal) throw new AppError(404, "Deal not found");
       await req.commitTransaction!();
@@ -1199,7 +1220,8 @@ router.post("/:id/proposal-draft", async (req, res, next) => {
       req.tenantDb!,
       req.params.id,
       req.user!.role,
-      req.user!.id
+      req.user!.id,
+      buildRouteAuditContext(req)
     );
     await req.commitTransaction!();
     const includeHubspotId = shouldIncludeHubspotId(req.query, req.user!.role);
@@ -1242,7 +1264,7 @@ router.patch("/:id", async (req, res, next) => {
     let deal = await updateDeal(
       req.tenantDb!,
       req.params.id,
-      body,
+      { ...body, auditContext: buildRouteAuditContext(req) },
       req.user!.role,
       req.user!.id,
       req.user!.activeOfficeId,
@@ -1797,6 +1819,7 @@ router.post("/:id/stage", async (req, res, next) => {
       lostReasonId,
       lostNotes,
       lostCompetitor,
+      auditContext: buildRouteAuditContext(req),
     });
 
     await req.tenantDb!.insert(jobQueue).values({
@@ -2122,11 +2145,23 @@ router.delete("/:id", requireRole("admin"), async (req, res, next) => {
     const dealId = req.params.id as string;
     const deal = await deleteDeal(req.tenantDb!, dealId, req.user!.role);
     if (deal) {
-      await writeSoftDeleteAuditLog(req.tenantDb!, {
-        actorUserId: req.user!.id,
-        entityType: "deal",
-        entityId: dealId,
-        ...requestAuditContext(req),
+      const auditContext = buildRouteAuditContext(req);
+      await logActivity({
+        tenantDb: req.tenantDb!,
+        actor: auditContext.actor,
+        action: "soft_delete",
+        entity: {
+          tableName: "deals",
+          entityType: "deal",
+          recordId: dealId,
+          nameSnapshot: deal.name,
+          secondaryIdSnapshot: deal.projectNumber ?? deal.dealNumber ?? null,
+        },
+        fieldChanges: {
+          isActive: { from: true, to: false },
+        },
+        ipAddress: auditContext.ipAddress ?? null,
+        userAgent: auditContext.userAgent ?? null,
       });
     }
     await req.commitTransaction!();

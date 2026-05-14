@@ -5,7 +5,6 @@ import * as schema from "@trock-crm/shared/schema";
 import { pool } from "../../db.js";
 import { AppError } from "../../middleware/error-handler.js";
 import { requireAdmin } from "../../middleware/rbac.js";
-import { requestAuditContext, writeSoftDeleteAuditLog } from "../../lib/soft-delete-audit.js";
 import { LeadStageTransitionError } from "./stage-transition-service.js";
 import {
   createLead,
@@ -34,8 +33,28 @@ import {
   getLeadDueDiligenceApprovalForLead,
 } from "./due-diligence-service.js";
 import { getAllStages } from "../pipeline/service.js";
+import { buildAuditActorFromUser, logActivity } from "../audit/audit-logger.js";
 
 const router = Router();
+
+function buildRouteAuditContext(req: { user?: any; headers: Record<string, unknown>; ip?: string | undefined }) {
+  const actor = buildAuditActorFromUser({
+    userId: req.user!.id,
+    name: req.user!.displayName ?? req.user!.email ?? req.user!.id,
+    role: req.user!.role,
+  });
+  const userAgentHeader = (req as { headers?: Record<string, unknown> }).headers?.["user-agent"];
+  return {
+    actor,
+    ipAddress: req.ip ?? null,
+    userAgent:
+      Array.isArray(userAgentHeader)
+        ? userAgentHeader.join(", ")
+        : typeof userAgentHeader === "string"
+          ? userAgentHeader
+          : null,
+  };
+}
 
 async function dispatchDueDiligenceEmailAfterCommit(input: {
   officeSlug: string;
@@ -299,6 +318,7 @@ router.post("/", async (req, res, next) => {
       bidDueDate,
       ...rest,
       officeCode: officeCodeResolution.officeCode,
+      auditContext: buildRouteAuditContext(req),
     });
     const dueDiligenceApproval =
       lead.verificationStatus === "pending"
@@ -359,6 +379,7 @@ router.post("/:id/stage-transition", async (req, res, next) => {
       userRole: req.user!.role,
       officeId: req.user!.activeOfficeId,
       inlinePatch: req.body.inlinePatch,
+      auditContext: buildRouteAuditContext(req),
     });
 
     await req.commitTransaction!();
@@ -418,7 +439,7 @@ router.patch("/:id", async (req, res, next) => {
     const lead = await updateLead(
       req.tenantDb!,
       req.params.id,
-      { ...body, officeId: req.user!.activeOfficeId },
+      { ...body, officeId: req.user!.activeOfficeId, auditContext: buildRouteAuditContext(req) },
       req.user!.role,
       req.user!.id
     );
@@ -470,6 +491,7 @@ router.post("/:id/convert", async (req, res, next) => {
       userId: req.user!.id,
       userRole: req.user!.role,
       officeId: req.user!.activeOfficeId,
+      auditContext: buildRouteAuditContext(req),
     });
 
     await req.commitTransaction!();
@@ -497,11 +519,23 @@ router.delete("/:id", requireAdmin, async (req, res, next) => {
     const leadId = req.params.id as string;
     const lead = await deleteLead(req.tenantDb!, leadId, req.user!.role, req.user!.id);
     if (lead) {
-      await writeSoftDeleteAuditLog(req.tenantDb!, {
-        actorUserId: req.user!.id,
-        entityType: "lead",
-        entityId: leadId,
-        ...requestAuditContext(req),
+      const auditContext = buildRouteAuditContext(req);
+      await logActivity({
+        tenantDb: req.tenantDb!,
+        actor: auditContext.actor,
+        action: "soft_delete",
+        entity: {
+          tableName: "leads",
+          entityType: "lead",
+          recordId: leadId,
+          nameSnapshot: lead.name,
+          secondaryIdSnapshot: null,
+        },
+        fieldChanges: {
+          isActive: { from: true, to: false },
+        },
+        ipAddress: auditContext.ipAddress ?? null,
+        userAgent: auditContext.userAgent ?? null,
       });
     }
     await req.commitTransaction!();

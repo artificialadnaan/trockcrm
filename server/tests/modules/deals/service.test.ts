@@ -1056,4 +1056,214 @@ describe("Deal Service", () => {
       expect(updated.proposalStatus).toBe("drafting");
     });
   });
+
+  describe("Phase 1 rich audit logging", () => {
+    function tableName(table: unknown) {
+      const candidate = table as { _?: { name?: string } } & Record<PropertyKey, unknown>;
+      return String(candidate?._?.name ?? candidate?.[Symbol.for("drizzle:Name")] ?? "");
+    }
+
+    it("writes a rich audit_log entry for direct deal create when audit context is present", async () => {
+      const auditRows: Array<Record<string, unknown>> = [];
+      const state = {
+        insertedDeal: null as Record<string, unknown> | null,
+        executeCalls: 0,
+      };
+      const tenantDb = {
+        select() {
+          return {
+            from() {
+              return {
+                where() {
+                  return {
+                    limit() {
+                      return Promise.resolve([{ id: "rep-1", isActive: true, officeId: "office-1" }]);
+                    },
+                  };
+                },
+              };
+            },
+          };
+        },
+        execute() {
+          state.executeCalls += 1;
+          if (state.executeCalls === 1) return Promise.resolve({ rows: [{ deal_number: "dfw-3-11826-aa" }] });
+          if (state.executeCalls === 3) return Promise.resolve({ rows: [{ last_suffix: "aa" }] });
+          return Promise.resolve({ rows: [] });
+        },
+        insert(table?: { _?: { name?: string } }) {
+          const resolvedTableName = tableName(table) || "deals";
+          return {
+            values(values: Record<string, unknown>) {
+              if (resolvedTableName === "audit_log") {
+                auditRows.push(values);
+                return Promise.resolve([]);
+              }
+              state.insertedDeal = {
+                id: "deal-1",
+                bidBoardProjectNumber: null,
+                projectNumber: null,
+                ...values,
+              };
+              return {
+                returning() {
+                  return Promise.resolve([state.insertedDeal]);
+                },
+              };
+            },
+          };
+        },
+      };
+
+      await createDeal(tenantDb as never, {
+        name: "Direct Deal",
+        stageId: "stage-dd",
+        assignedRepId: "rep-1",
+        officeId: "office-1",
+        migrationMode: true,
+        officeCode: "dfw",
+        projectType: "roofing",
+        auditContext: {
+          actor: {
+            type: "user",
+            userId: "admin-1",
+            name: "Admin User",
+            role: "admin",
+          },
+        },
+      });
+
+      expect(auditRows).toEqual([
+        expect.objectContaining({
+          tableName: "deals",
+          action: "insert",
+          actorName: "Admin User",
+          entityType: "deal",
+          entityNameSnapshot: "Direct Deal",
+          fieldChangesJsonb: expect.arrayContaining([
+            expect.objectContaining({ key: "name", toDisplay: "Direct Deal" }),
+            expect.objectContaining({ key: "assignedRepId", toDisplay: "rep-1" }),
+          ]),
+        }),
+      ]);
+    });
+
+    it("writes a rich audit_log entry for deal field updates when audit context is present", async () => {
+      const auditRows: Array<Record<string, unknown>> = [];
+      const existingDeal = {
+        id: "deal-1",
+        name: "Palm Villas",
+        dealNumber: "TR-2026-0001",
+        projectNumber: "DFW-1-12345-AA",
+        stageId: "stage-estimating",
+        assignedRepId: "rep-1",
+        primaryContactId: null,
+        sourceLeadId: "lead-1",
+        companyId: "company-1",
+        propertyId: "property-1",
+        workflowRoute: "normal",
+        migrationMode: false,
+        ddEstimate: null,
+        bidEstimate: null,
+        awardedAmount: null,
+        description: "Exterior refresh",
+        propertyAddress: "123 Palm Way",
+        propertyCity: "Dallas",
+        propertyState: "TX",
+        propertyZip: "75201",
+        projectTypeId: null,
+        regionId: null,
+        source: "referral",
+        winProbability: 50,
+        expectedCloseDate: null,
+        proposalStatus: "drafting",
+        proposalNotes: null,
+        estimatingSubstage: "building_estimate",
+        isBidBoardOwned: false,
+      };
+      const tenantDb = {
+        select() {
+          return {
+            from() {
+              return {
+                where() {
+                  return {
+                    limit() {
+                      return Promise.resolve([existingDeal]);
+                    },
+                  };
+                },
+              };
+            },
+          };
+        },
+        update() {
+          return {
+            set(values: Record<string, unknown>) {
+              return {
+                where() {
+                  return {
+                    returning() {
+                      return Promise.resolve([{ ...existingDeal, ...values }]);
+                    },
+                  };
+                },
+              };
+            },
+          };
+        },
+        insert(table?: { _?: { name?: string } }) {
+          const resolvedTableName = tableName(table);
+          return {
+            values(values: Record<string, unknown>) {
+              if (resolvedTableName === "audit_log") {
+                auditRows.push(values);
+              }
+              return Promise.resolve([]);
+            },
+          };
+        },
+      };
+
+      await updateDeal(
+        tenantDb as never,
+        "deal-1",
+        {
+          description: "Updated scope summary",
+          expectedCloseDate: "2026-05-15",
+          auditContext: {
+            actor: {
+              type: "user",
+              userId: "director-1",
+              name: "Director User",
+              role: "director",
+            },
+          },
+        },
+        "director",
+        "director-1"
+      );
+
+      expect(auditRows).toEqual([
+        expect.objectContaining({
+          tableName: "deals",
+          recordId: "deal-1",
+          action: "update",
+          actorName: "Director User",
+          entitySecondaryIdSnapshot: "DFW-1-12345-AA",
+          fieldChangesJsonb: expect.arrayContaining([
+            expect.objectContaining({
+              key: "description",
+              fromDisplay: "Exterior refresh",
+              toDisplay: "Updated scope summary",
+            }),
+            expect.objectContaining({
+              key: "expectedCloseDate",
+              toDisplay: "May 15, 2026",
+            }),
+          ]),
+        }),
+      ]);
+    });
+  });
 });
