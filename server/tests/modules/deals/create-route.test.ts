@@ -5,6 +5,10 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 const dealsServiceMocks = vi.hoisted(() => ({
   createDeal: vi.fn(),
 }));
+const pipelineServiceMocks = vi.hoisted(() => ({
+  getStageBySlug: vi.fn(),
+  getActiveProjectTypes: vi.fn(),
+}));
 
 vi.mock("../../../src/events/bus.js", () => ({
   eventBus: {
@@ -20,6 +24,15 @@ vi.mock("../../../src/modules/deals/service.js", async () => {
   return {
     ...(actual as Record<string, unknown>),
     createDeal: dealsServiceMocks.createDeal,
+  };
+});
+
+vi.mock("../../../src/modules/pipeline/service.js", async () => {
+  const actual = await vi.importActual("../../../src/modules/pipeline/service.js");
+  return {
+    ...(actual as Record<string, unknown>),
+    getStageBySlug: pipelineServiceMocks.getStageBySlug,
+    getActiveProjectTypes: pipelineServiceMocks.getActiveProjectTypes,
   };
 });
 
@@ -63,6 +76,17 @@ function validBody(overrides: Record<string, unknown> = {}) {
 describe("POST /api/deals create context", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    pipelineServiceMocks.getStageBySlug.mockResolvedValue({
+      id: "stage-opportunity",
+      name: "Opportunity",
+      slug: "opportunity",
+      workflowFamily: "standard_deal",
+      isTerminal: false,
+    });
+    pipelineServiceMocks.getActiveProjectTypes.mockResolvedValue([
+      { id: "type-service", name: "Service", slug: "service", code: "4", isActive: true },
+      { id: "type-roofing", name: "Roofing", slug: "roofing", code: "9", isActive: true },
+    ]);
     dealsServiceMocks.createDeal.mockImplementation(async (_tenantDb, input) => {
       if (input.officeCode !== "dfw" && input.officeCode !== "atl") {
         throw new AppError(400, "officeCode must be 'dfw' or 'atl'");
@@ -132,5 +156,92 @@ describe("POST /api/deals create context", () => {
         officeCode: String(officeCode ?? ""),
       })
     );
+  });
+
+  it("creates a direct Service opportunity with service workflow routing and canonical Opportunity stage", async () => {
+    const res = await request(createApp("dallas"))
+      .post("/api/deals/service-opportunity")
+      .send({
+        name: "SMOKE TEST DELETE Service Opportunity",
+        assignedRepId: "rep-1",
+        companyId: "company-1",
+        propertyId: "property-1",
+        projectTypeId: "type-service",
+      });
+
+    expect(res.status).toBe(201);
+    expect(pipelineServiceMocks.getStageBySlug).toHaveBeenCalledWith("opportunity", "standard_deal");
+    expect(dealsServiceMocks.createDeal).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({
+        name: "SMOKE TEST DELETE Service Opportunity",
+        stageId: "stage-opportunity",
+        assignedRepId: "rep-1",
+        companyId: "company-1",
+        propertyId: "property-1",
+        projectType: "service",
+        projectTypeId: "type-service",
+        workflowRoute: "service",
+        creationContext: "direct",
+        officeCode: "dfw",
+        officeId: "office-dallas",
+        actorUserId: "admin-1",
+      })
+    );
+  });
+
+  it("rejects a non-Service project type on the Service opportunity endpoint", async () => {
+    const res = await request(createApp("dallas"))
+      .post("/api/deals/service-opportunity")
+      .send({
+        name: "Malicious Roofing Opportunity",
+        assignedRepId: "rep-1",
+        companyId: "company-1",
+        propertyId: "property-1",
+        projectTypeId: "type-roofing",
+      });
+
+    expect(res.status).toBe(400);
+    expect(res.body.error.message).toBe("Direct-create is only available for Service projects.");
+    expect(dealsServiceMocks.createDeal).not.toHaveBeenCalled();
+  });
+
+  it("ignores hostile server-owned fields on the Service opportunity endpoint", async () => {
+    const res = await request(createApp("dallas"))
+      .post("/api/deals/service-opportunity")
+      .send({
+        name: "SMOKE TEST DELETE Service Opportunity",
+        assignedRepId: "rep-1",
+        companyId: "company-1",
+        propertyId: "property-1",
+        projectTypeId: "type-service",
+        creationContext: "migration",
+        migrationMode: true,
+        sourceLeadWriteMode: "lead_conversion",
+        sourceLeadId: "lead-1",
+        officeId: "office-attacker",
+        actorUserId: "user-attacker",
+        workflowRoute: "normal",
+        stageId: "stage-estimating",
+      });
+
+    expect(res.status).toBe(201);
+    expect(dealsServiceMocks.createDeal).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({
+        actorUserId: "admin-1",
+        officeId: "office-dallas",
+        creationContext: "direct",
+        stageId: "stage-opportunity",
+        workflowRoute: "service",
+        projectType: "service",
+        projectTypeId: "type-service",
+      })
+    );
+    expect(dealsServiceMocks.createDeal.mock.calls[0]?.[1]).not.toMatchObject({
+      migrationMode: true,
+      sourceLeadWriteMode: "lead_conversion",
+      sourceLeadId: "lead-1",
+    });
   });
 });

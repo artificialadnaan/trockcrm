@@ -8,6 +8,7 @@ import { AppShell } from "@/components/layout/app-shell";
 import { DealDetailPage } from "@/pages/deals/deal-detail-page";
 import { DealNewPage } from "@/pages/deals/deal-new-page";
 import { DealEditPage } from "@/pages/deals/deal-edit-page";
+import { ServiceOpportunityNewPage } from "@/pages/deals/service-opportunity-new-page";
 import { PipelinePage } from "@/pages/pipeline/pipeline-page";
 import { MyCleanupPage } from "@/pages/pipeline/my-cleanup-page";
 import { ContactListPage } from "@/pages/contacts/contact-list-page";
@@ -204,6 +205,7 @@ export function App() {
               <Route path="/deals" element={<DealListPage />} />
               <Route path="/deals/board" element={<BoardAliasRedirect entity="deals" />} />
               <Route path="/deals/stages/:stageId" element={<DealStagePage />} />
+              <Route path="/deals/service-opportunity/new" element={<ServiceOpportunityNewPage />} />
               <Route path="/deals/new" element={<DealNewPage />} />
               <Route path="/deals/:id/photos" element={<DealDetailPage />} />
               <Route path="/deals/:id" element={<DealDetailPage />} />

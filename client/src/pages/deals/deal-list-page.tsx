@@ -322,9 +322,9 @@ function DealListPageContent({ role }: { role: string }) {
         </div>
         <div className="flex flex-wrap items-center gap-3">
           <ScopeToggle options={SCOPE_OPTIONS} value={scope} onChange={updateScope} ariaLabel="Deal scope" />
-          <Button onClick={() => navigate("/deals/new")} className="bg-brand-red text-white hover:bg-brand-red/90">
+          <Button onClick={() => navigate("/deals/service-opportunity/new")} className="bg-brand-red text-white hover:bg-brand-red/90">
             <Plus className="mr-2 h-4 w-4" />
-            New Deal
+            New Service Opportunity
           </Button>
         </div>
       </section>

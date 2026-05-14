@@ -486,6 +486,31 @@ export async function createDeal(input: Partial<Deal> & { name: string; stageId:
   });
 }
 
+export type CreateServiceOpportunityInput = Partial<Pick<
+  Deal,
+  | "assignedRepId"
+  | "companyId"
+  | "description"
+  | "expectedCloseDate"
+  | "officeCode"
+  | "projectType"
+  | "projectTypeId"
+  | "propertyId"
+  | "source"
+  | "winProbability"
+>> & { name: string };
+
+export async function createServiceOpportunity(
+  input: CreateServiceOpportunityInput,
+  options: OfficeRequestOptions = {}
+) {
+  return api<{ deal: Deal }>("/deals/service-opportunity", {
+    method: "POST",
+    json: input,
+    ...getOfficeRequestOptions(options.officeId),
+  });
+}
+
 export type UpdateDealPayload = Partial<Deal> & {
   migrationMode?: boolean;
 };
