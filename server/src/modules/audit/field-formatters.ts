@@ -84,6 +84,8 @@ const FIELD_DEFINITIONS: Record<string, AuditFieldDefinition> = {
   description: { label: "Description", kind: "text" },
   expectedCloseDate: { label: "Expected Close Date", kind: "date" },
   name: { label: "Name" },
+  projectType: { label: "Project Type" },
+  projectTypeId: { label: "Project Type" },
   proposalDraftStartedAt: { label: "Proposal Draft Started", kind: "date" },
   stageId: { label: "Stage" },
   status: { label: "Status", kind: "enum", enumLabels: ENUM_LABELS.status },
@@ -150,6 +152,28 @@ function truncateText(value: string | null): { compact: string | null; full: str
   return { compact: `${value.slice(0, 60)}...`, full: value };
 }
 
+function formatUnknownValue(value: unknown): string | null {
+  if (value == null || value === "") return null;
+  if (Array.isArray(value)) {
+    return value.map((item) => formatUnknownValue(item)).filter((item): item is string => Boolean(item)).join(", ");
+  }
+  if (typeof value === "object") {
+    const record = value as Record<string, unknown>;
+    const preferred =
+      record.label ??
+      record.name ??
+      record.displayName ??
+      record.title ??
+      record.slug;
+    if (typeof preferred === "string" && preferred.trim().length > 0) {
+      return preferred;
+    }
+    const compactJson = JSON.stringify(record);
+    return compactJson && compactJson !== "{}" ? compactJson : String(value);
+  }
+  return String(value);
+}
+
 function formatDisplayValue(key: string, value: unknown): { display: string | null; full?: string | null } {
   const definition = FIELD_DEFINITIONS[key];
   const kind = definition?.kind
@@ -164,8 +188,7 @@ function formatDisplayValue(key: string, value: unknown): { display: string | nu
     return { display: truncated.compact, full: truncated.full };
   }
 
-  if (value == null || value === "") return { display: null };
-  return { display: String(value) };
+  return { display: formatUnknownValue(value) };
 }
 
 export function isInternalOnlyAuditField(fieldKey: string): boolean {
