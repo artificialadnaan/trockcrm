@@ -1,19 +1,67 @@
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import { describe, expect, it } from "vitest";
 import {
   buildReimportPlan,
   diffSafeUpdateFields,
   parseReimportArgs,
+  readEnvValueFromFile,
+  validateAmount,
 } from "../../../scripts/hubspot-deals-reimport.ts";
+
+function makeTempCsvFile(): string {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "hubspot-reimport-csv-"));
+  const csvPath = path.join(dir, "deals.csv");
+  fs.writeFileSync(csvPath, "Record ID,Deal Name\n1,Example Deal\n");
+  return csvPath;
+}
 
 describe("hubspot-deals-reimport", () => {
   it("requires both apply flags before write mode is enabled", () => {
-    expect(parseReimportArgs(["node", "script", "--dry-run"]).apply).toBe(false);
-    expect(() => parseReimportArgs(["node", "script", "--apply"])).toThrow(
+    const csvPath = makeTempCsvFile();
+    expect(parseReimportArgs(["node", "script", `--csv=${csvPath}`, "--dry-run"]).apply).toBe(false);
+    expect(() => parseReimportArgs(["node", "script", `--csv=${csvPath}`, "--apply"])).toThrow(
       "--apply requires --confirm-production"
     );
-    expect(parseReimportArgs(["node", "script", "--apply", "--confirm-production"]).apply).toBe(
-      true
-    );
+    expect(
+      parseReimportArgs(["node", "script", `--csv=${csvPath}`, "--apply", "--confirm-production"]).apply
+    ).toBe(true);
+    expect(() =>
+      parseReimportArgs([
+        "node",
+        "script",
+        `--csv=${csvPath}`,
+        "--dry-run",
+        "--apply",
+        "--confirm-production",
+      ])
+    ).toThrow("Cannot pass both --dry-run and --apply.");
+  });
+
+  it("throws when an explicit csv path does not exist", () => {
+    expect(() =>
+      parseReimportArgs(["node", "script", "--csv=/definitely/missing-hubspot-export.csv"])
+    ).toThrow("CSV not found at explicit path: /definitely/missing-hubspot-export.csv");
+  });
+
+  it("preserves env values with embedded equals signs", () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "hubspot-reimport-env-"));
+    const envPath = path.join(dir, ".env");
+    fs.writeFileSync(envPath, "KEY=value?with=equals&other=stuff\n");
+    expect(readEnvValueFromFile(envPath, "KEY")).toBe("value?with=equals&other=stuff");
+  });
+
+  it("validates amounts consistently", () => {
+    expect(validateAmount("1234.56")).toBe(1234.56);
+    expect(validateAmount(" $1,234.56 ")).toBe(1234.56);
+    expect(validateAmount("1,234")).toBe(1234);
+    expect(validateAmount("")).toBeNull();
+    expect(validateAmount("   ")).toBeNull();
+    expect(validateAmount(null)).toBeNull();
+    expect(validateAmount(42)).toBe(42);
+    expect(() => validateAmount("N/A")).toThrow("Invalid amount");
+    expect(() => validateAmount({ value: 12 })).toThrow("Invalid amount type 'object'");
   });
 
   it("classifies unchanged, newer, missing, ambiguous, and soft-deleted rows", () => {
@@ -287,5 +335,71 @@ describe("hubspot-deals-reimport", () => {
         csvValue: "2026-05-13T17:01:00.000Z",
       },
     ]);
+  });
+
+  it("hard-stops when duplicate active hubspot ids exist in CRM", () => {
+    expect(() =>
+      buildReimportPlan({
+        csvRows: [],
+        crmDeals: [
+          {
+            id: "deal-1",
+            isActive: true,
+            hubspotDealId: "hs-dup",
+            name: "Alpha",
+            projectNumber: "DFW-1-12126-aa",
+            projectType: "roofing",
+            amount: "1000.00",
+            createdAt: "2026-05-01T12:00:00Z",
+            updatedAt: "2026-05-05T00:00:00Z",
+          },
+          {
+            id: "deal-2",
+            isActive: true,
+            hubspotDealId: "hs-dup",
+            name: "Bravo",
+            projectNumber: "DFW-1-12126-ab",
+            projectType: "roofing",
+            amount: "1200.00",
+            createdAt: "2026-05-02T12:00:00Z",
+            updatedAt: "2026-05-06T00:00:00Z",
+          },
+        ],
+      })
+    ).toThrow("Duplicate active hubspot_deal_id values found: hs-dup (2)");
+  });
+
+  it("treats non-ISO datetimes as null instead of host-timezone-dependent values", () => {
+    const plan = buildReimportPlan({
+      csvRows: [
+        {
+          hubspotRecordId: "hs-iso",
+          dealName: "Alpha",
+          amount: "1000",
+          createDate: "2026-05-01T12:00:00",
+          lastModifiedDate: "2026-05-05T00:00:00",
+          dealStage: "Proposal Sent",
+          projectNumber: "DFW-1-12126-aa",
+          projectType: "Roofing",
+          associatedCompany: "Acme",
+        },
+      ],
+      crmDeals: [
+        {
+          id: "deal-1",
+          isActive: true,
+          hubspotDealId: "hs-iso",
+          name: "Alpha",
+          projectNumber: "DFW-1-12126-aa",
+          projectType: "Roofing",
+          amount: "1000.00",
+          createdAt: "2026-05-01T12:00:00Z",
+          updatedAt: "2026-05-05T00:00:00Z",
+        },
+      ],
+    });
+
+    expect(plan.counts.EXISTS_UNCHANGED).toBe(1);
+    expect(plan.entries[0]?.fieldDiffs).toEqual([]);
   });
 });
