@@ -12,9 +12,13 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 // Mock the db module (public schema queries)
 vi.mock("../../../src/db.js", () => {
   const mockSelect = vi.fn();
+  const mockInsert = vi.fn(() => ({
+    values: vi.fn(async () => ({})),
+  }));
   return {
     db: {
       select: mockSelect,
+      insert: mockInsert,
     },
     pool: {},
   };
@@ -750,6 +754,27 @@ describe("Deal Service", () => {
         statusCode: 403,
         message: "Only admins can edit project type after Opportunity",
       });
+    });
+
+    it("updates editable fields on legacy direct-created deals without migrationMode", async () => {
+      const tenantDb = createProjectTypeTenantDb();
+      tenantDb.state.deal.sourceLeadId = null;
+
+      const updated = await updateDeal(
+        tenantDb as never,
+        "deal-1",
+        {
+          description: "Updated legacy deal description",
+          propertyAddress: "456 Oak Ave",
+        },
+        "director",
+        "director-1"
+      );
+
+      expect(updated.description).toBe("Updated legacy deal description");
+      expect(updated.propertyAddress).toBe("456 Oak Ave");
+      expect(tenantDb.state.deal.description).toBe("Updated legacy deal description");
+      expect(tenantDb.state.deal.propertyAddress).toBe("456 Oak Ave");
     });
 
     it("keeps the issued project number and records intendedProjectNumber for admin project type changes", async () => {
