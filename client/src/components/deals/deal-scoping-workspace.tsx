@@ -190,6 +190,13 @@ function getSectionValue(
   return typeof value === "string" ? value : "";
 }
 
+function createWorkspaceFingerprint(
+  projectTypeId: string | null,
+  sectionData: Record<string, unknown>
+) {
+  return JSON.stringify({ projectTypeId, sectionData });
+}
+
 function getReadinessTone(status: DealScopingReadiness["status"]) {
   if (status === "activated") return "bg-green-50 text-green-700 border-green-200";
   if (status === "ready") return "bg-emerald-50 text-emerald-700 border-emerald-200";
@@ -372,10 +379,14 @@ export function DealScopingWorkspace({
   const [uploadProgress, setUploadProgress] = useState<number | null>(null);
   const [activatingService, setActivatingService] = useState(false);
   const [forceEditingReadOnlyScope, setForceEditingReadOnlyScope] = useState(false);
+  const [autosaveRetryToken, setAutosaveRetryToken] = useState(0);
   const lastSavedFingerprintRef = useRef("");
+  const latestWorkspaceFingerprintRef = useRef("");
+  const autosaveInFlightRef = useRef(false);
   const hydrationCompleteRef = useRef(false);
   const readinessSignatureRef = useRef<string | null>(null);
   const loadRequestIdRef = useRef(0);
+  const currentWorkspaceFingerprint = createWorkspaceFingerprint(projectTypeId, sectionData);
   const activeWorkflowRoute: WorkflowRoute = resolvedFields?.workflowRoute ?? deal.workflowRoute ?? "normal";
   const activeCompanyId = resolvedFields?.companyId ?? deal.companyId;
   const activePropertyId = resolvedFields?.propertyId ?? deal.propertyId;
@@ -403,6 +414,7 @@ export function DealScopingWorkspace({
   const readOnlyModeActive = mode === "readonly" && !forceEditingReadOnlyScope;
   const adminOverrideEditing = mode === "readonly" && forceEditingReadOnlyScope;
   const editingDisabled = initialLoadFailed || readOnlyModeActive;
+  latestWorkspaceFingerprintRef.current = currentWorkspaceFingerprint;
   const submittedAtLabel = readOnlySubmittedAt
     ? new Date(readOnlySubmittedAt).toLocaleDateString([], {
         month: "short",
@@ -483,10 +495,7 @@ export function DealScopingWorkspace({
         ? result.resolved.projectTypeId ?? null
         : result.intake.projectTypeId ?? result.resolved.projectTypeId ?? deal.projectTypeId;
       setProjectTypeId(nextProjectTypeId);
-      lastSavedFingerprintRef.current = JSON.stringify({
-        projectTypeId: nextProjectTypeId,
-        sectionData: nextSectionData,
-      });
+      lastSavedFingerprintRef.current = createWorkspaceFingerprint(nextProjectTypeId, nextSectionData);
       hydrationCompleteRef.current = true;
       setInitialLoadFailed(false);
       setSaveState("idle");
@@ -528,12 +537,17 @@ export function DealScopingWorkspace({
       return;
     }
 
-    const fingerprint = JSON.stringify({ projectTypeId, sectionData });
-    if (fingerprint === lastSavedFingerprintRef.current) {
+    const requestFingerprint = currentWorkspaceFingerprint;
+    if (requestFingerprint === lastSavedFingerprintRef.current) {
+      return;
+    }
+
+    if (autosaveInFlightRef.current) {
       return;
     }
 
     const timeoutId = window.setTimeout(async () => {
+      autosaveInFlightRef.current = true;
       setSaveState("saving");
       try {
         const resolvedPatch = buildLineageResolvedPatch({
@@ -564,24 +578,31 @@ export function DealScopingWorkspace({
           }
         );
         const nextSectionData = buildWorkspaceSectionData(deal, result.intake, result.resolved);
+        const responseFingerprint = createWorkspaceFingerprint(projectTypeId, nextSectionData);
+        if (latestWorkspaceFingerprintRef.current !== requestFingerprint) {
+          return;
+        }
+
         setIntake(result.intake);
         applyReadiness(result.readiness, true);
         setResolvedFields(result.resolved);
         setSectionData(nextSectionData);
-        lastSavedFingerprintRef.current = JSON.stringify({
-          projectTypeId,
-          sectionData: nextSectionData,
-        });
+        lastSavedFingerprintRef.current = responseFingerprint;
         setSaveState("saved");
         window.setTimeout(() => setSaveState("idle"), 1200);
       } catch (err) {
         setSaveState("error");
         showError(err instanceof Error ? err.message : "Autosave failed");
+      } finally {
+        autosaveInFlightRef.current = false;
+        if (latestWorkspaceFingerprintRef.current !== lastSavedFingerprintRef.current) {
+          setAutosaveRetryToken((current) => current + 1);
+        }
       }
     }, 400);
 
     return () => window.clearTimeout(timeoutId);
-  }, [activeWorkflowRoute, adminOverrideEditing, deal, deal.id, hasSourceLead, projectTypeId, readOnlyModeActive, resolvedFields, sectionData]);
+  }, [activeWorkflowRoute, adminOverrideEditing, autosaveRetryToken, currentWorkspaceFingerprint, deal, deal.id, hasSourceLead, projectTypeId, readOnlyModeActive, resolvedFields, sectionData]);
 
   const completionCounts = getScopingCompletionCounts(readiness?.completionState);
   const attachmentRequirements = readiness?.attachmentRequirements ?? [];

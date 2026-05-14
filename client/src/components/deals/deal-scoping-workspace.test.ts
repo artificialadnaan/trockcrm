@@ -401,6 +401,99 @@ describe("DealScopingWorkspace lineage routing helpers", () => {
 });
 
 describe("DealScopingWorkspace load failures", () => {
+  it("keeps newer estimator notes when an older autosave response resolves during typing", async () => {
+    const firstAutosave = deferred<ReturnType<typeof makeScopingResponse>>();
+    const secondAutosave = deferred<ReturnType<typeof makeScopingResponse>>();
+    mocks.getDealScopingIntake.mockResolvedValueOnce(makeScopingResponse({
+      intake: {
+        projectTypeId: "project-type-1",
+        sectionData: { opportunity: { estimatorConsultationNotes: "" } },
+      },
+      resolved: { projectTypeId: "project-type-1" },
+    }));
+    mocks.patchDealScopingIntake
+      .mockReturnValueOnce(firstAutosave.promise)
+      .mockReturnValueOnce(secondAutosave.promise);
+
+    const { container, cleanup } = await renderWorkspace(
+      makeDeal({
+        sourceLeadId: null,
+        projectTypeId: "project-type-1",
+      })
+    );
+
+    try {
+      await vi.waitFor(() => {
+        const notes = container.querySelector<HTMLTextAreaElement>("#estimatorConsultationNotes");
+        expect(notes?.disabled).toBe(false);
+      });
+
+      const notes = container.querySelector<HTMLTextAreaElement>("#estimatorConsultationNotes")!;
+      await act(async () => {
+        changeTextareaValue(notes, "this is a te");
+        await new Promise((resolve) => window.setTimeout(resolve, 450));
+      });
+
+      await vi.waitFor(() => expect(mocks.patchDealScopingIntake).toHaveBeenCalledTimes(1));
+
+      await act(async () => {
+        changeTextareaValue(notes, "this is a test sentence");
+        await new Promise((resolve) => window.setTimeout(resolve, 450));
+      });
+
+      expect(mocks.patchDealScopingIntake).toHaveBeenCalledTimes(1);
+      expect(container.querySelector<HTMLTextAreaElement>("#estimatorConsultationNotes")?.value)
+        .toBe("this is a test sentence");
+
+      await act(async () => {
+        firstAutosave.resolve(makeScopingResponse({
+          intake: {
+            projectTypeId: "project-type-1",
+            sectionData: {
+              opportunity: { estimatorConsultationNotes: "this is a te" },
+            },
+          },
+          resolved: { projectTypeId: "project-type-1" },
+        }));
+        await Promise.resolve();
+      });
+
+      expect(container.querySelector<HTMLTextAreaElement>("#estimatorConsultationNotes")?.value)
+        .toBe("this is a test sentence");
+
+      await act(async () => {
+        await new Promise((resolve) => window.setTimeout(resolve, 450));
+      });
+
+      await vi.waitFor(() => expect(mocks.patchDealScopingIntake).toHaveBeenCalledTimes(2));
+      expect(mocks.patchDealScopingIntake.mock.calls[1]?.[1]).toMatchObject({
+        sectionData: {
+          opportunity: {
+            estimatorConsultationNotes: "this is a test sentence",
+          },
+        },
+      });
+
+      await act(async () => {
+        secondAutosave.resolve(makeScopingResponse({
+          intake: {
+            projectTypeId: "project-type-1",
+            sectionData: {
+              opportunity: { estimatorConsultationNotes: "this is a test sentence" },
+            },
+          },
+          resolved: { projectTypeId: "project-type-1" },
+        }));
+        await Promise.resolve();
+      });
+
+      expect(container.querySelector<HTMLTextAreaElement>("#estimatorConsultationNotes")?.value)
+        .toBe("this is a test sentence");
+    } finally {
+      cleanup();
+    }
+  }, 10_000);
+
   it("renders submitted scope values read-only until an admin explicitly force-edits", async () => {
     mocks.getDealScopingIntake.mockResolvedValueOnce(makeScopingResponse({
       intake: {
