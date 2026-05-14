@@ -1600,7 +1600,7 @@ describe("Stage Gate Payload Hardening", () => {
     );
   });
 
-  it("blocks estimating advancement when a required scoping attachment is unsatisfied", async () => {
+  it("ignores unsatisfied scoping attachments when they are not required readiness blockers", async () => {
     vi.doMock("../../../src/modules/deals/scoping-service.js", async (importOriginal) => {
       const actual = await importOriginal<typeof import("../../../src/modules/deals/scoping-service.js")>();
       return {
@@ -1679,9 +1679,9 @@ describe("Stage Gate Payload Hardening", () => {
       "rep-1"
     );
 
-    expect(result.allowed).toBe(false);
-    expect(result.blockReason).toContain("Scoping intake is incomplete");
-    expect(result.missingRequirements.documents).toContain("other");
+    expect(result.allowed).toBe(true);
+    expect(result.blockReason).toBeNull();
+    expect(result.missingRequirements.documents).toEqual([]);
     expect(result.effectiveChecklist.attachments).toEqual([
       expect.objectContaining({
         key: "other",
@@ -1689,6 +1689,97 @@ describe("Stage Gate Payload Hardening", () => {
         satisfied: false,
       }),
     ]);
+  });
+
+  it("does not block estimating advancement for attachment-only scoping gaps", async () => {
+    vi.doMock("../../../src/modules/deals/scoping-service.js", async (importOriginal) => {
+      const actual = await importOriginal<typeof import("../../../src/modules/deals/scoping-service.js")>();
+      return {
+        ...actual,
+        evaluateDealScopingReadiness: vi.fn(async () => ({
+          status: "draft",
+          errors: { sections: {}, attachments: { scope_docs: ["scope_docs"], site_photos: ["site_photos"] } },
+          completionState: {
+            attachments: {
+              isComplete: false,
+              missingFields: [],
+              missingAttachments: ["scope_docs", "site_photos"],
+            },
+          },
+          requiredSections: ["projectOverview", "scope", "propertyDetails", "scopeSummary", "attachments"],
+          requiredAttachmentKeys: [],
+          attachmentRequirements: [
+            {
+              key: "scope_docs",
+              category: "other",
+              label: "Scope docs",
+              satisfied: false,
+            },
+            {
+              key: "site_photos",
+              category: "photo",
+              label: "Site photos",
+              satisfied: false,
+            },
+          ],
+        })),
+      };
+    });
+
+    const { validateStageGate } = await import("../../../src/modules/deals/stage-gate.js");
+    const tenantDb = createHardeningTenantDb({
+      deals: [
+        {
+          id: "deal-1",
+          name: "Palm Villas",
+          stageId: STAGES.dd.id,
+          workflowRoute: "normal",
+          assignedRepId: "rep-1",
+          projectTypeId: "pt-1",
+          propertyAddress: "123 Palm Way",
+          propertyCity: "Miami",
+          propertyState: "FL",
+          propertyZip: "33101",
+          description: "Exterior refresh",
+        },
+      ],
+    });
+
+    mockedStageLookups.queue.push(
+      {
+        id: STAGES.dd.id,
+        name: STAGES.dd.name,
+        slug: STAGES.dd.slug,
+        isTerminal: STAGES.dd.isTerminal,
+        displayOrder: STAGES.dd.displayOrder,
+        requiredFields: [],
+        requiredDocuments: [],
+        requiredApprovals: [],
+      },
+      {
+        id: STAGES.estimating.id,
+        name: STAGES.estimating.name,
+        slug: STAGES.estimating.slug,
+        isTerminal: STAGES.estimating.isTerminal,
+        displayOrder: STAGES.estimating.displayOrder,
+        requiredFields: [],
+        requiredDocuments: [],
+        requiredApprovals: [],
+      }
+    );
+
+    const result = await validateStageGate(
+      tenantDb as never,
+      "deal-1",
+      STAGES.estimating.id,
+      "rep",
+      "rep-1"
+    );
+
+    expect(result.allowed).toBe(true);
+    expect(result.blockReason).toBeNull();
+    expect(result.missingRequirements.documents).toEqual([]);
+    expect(result.effectiveChecklist.attachments).toEqual([]);
   });
 
   it("uses source lead lineage values for stage required fields on converted deals", async () => {

@@ -477,7 +477,7 @@ export async function validateStageGate(
       });
     }
 
-    if (scopingReadiness.status === "draft") {
+    if (scopingMissingFields.length > 0) {
       allowed = false;
       requiresOverride = false;
       overrideType = null;

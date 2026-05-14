@@ -611,6 +611,8 @@ function buildScopingReadiness(input: {
     ),
   }));
   const requiredAttachmentKeySet = new Set(baseReadiness.requiredAttachmentKeys);
+  // Attachment slots still surface in readiness payloads so the UI can show
+  // upload targets, but only keys declared as required can force draft status.
   const missingAttachments = attachmentRequirements.filter(
     (requirement) => requiredAttachmentKeySet.has(requirement.key) && !requirement.satisfied
   );

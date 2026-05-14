@@ -330,16 +330,20 @@ async function buildTriggerRfpConflict(
 
 function buildScopeIncompleteError(readiness: Awaited<ReturnType<typeof evaluateDealScopingReadiness>>) {
   const missingSections = Object.keys(readiness.errors.sections ?? {});
-  const missingAttachments = Object.keys(readiness.errors.attachments ?? {});
   return new AppError(
     400,
     [
       "Complete Opportunity Scope before triggering RFP review.",
       missingSections.length > 0 ? `Missing sections: ${missingSections.join(", ")}` : null,
-      missingAttachments.length > 0 ? `Missing attachments: ${missingAttachments.join(", ")}` : null,
     ].filter(Boolean).join(" "),
     "RFP_SCOPE_INCOMPLETE"
   );
+}
+
+function hasBlockingScopingReadinessErrors(
+  readiness: Awaited<ReturnType<typeof evaluateDealScopingReadiness>>
+) {
+  return Object.values(readiness.errors.sections ?? {}).some((fields) => fields.length > 0);
 }
 
 async function queueAiEstimateRefresh(tenantDb: any, officeId: string, dealId: string, reason: string) {
@@ -645,7 +649,7 @@ router.post("/:id/trigger-rfp", async (req, res, next) => {
     }
 
     const readiness = await evaluateDealScopingReadiness(req.tenantDb!, deal.id);
-    if (readiness.status === "draft") {
+    if (hasBlockingScopingReadinessErrors(readiness)) {
       throw buildScopeIncompleteError(readiness);
     }
 
@@ -688,7 +692,7 @@ router.post("/:id/trigger-rfp", async (req, res, next) => {
     }
 
     const reservedReadiness = await evaluateDealScopingReadiness(req.tenantDb!, reservedDeal.id);
-    if (reservedReadiness.status === "draft") {
+    if (hasBlockingScopingReadinessErrors(reservedReadiness)) {
       throw buildScopeIncompleteError(reservedReadiness);
     }
 
