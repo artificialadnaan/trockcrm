@@ -43,7 +43,13 @@ import {
 import { isExistingCustomer } from "./verification-service.js";
 import { resolveLeadSourceForWrite } from "./source-control.js";
 import { resolveActiveOfficeUserIds, resolveTeamRepIds } from "../shared/team-scope.js";
-import type { LeadBudgetStatus, LeadPocRole, LeadSourceCategory } from "@trock-crm/shared/types";
+import {
+  LEAD_BUDGET_STATUSES,
+  LEAD_POC_ROLES,
+  type LeadBudgetStatus,
+  type LeadPocRole,
+  type LeadSourceCategory,
+} from "@trock-crm/shared/types";
 
 type TenantDb = NodePgDatabase<typeof schema>;
 
@@ -179,20 +185,9 @@ type TransitionSuccessResult = {
 
 type WorkspaceScope = "mine" | "team" | "all";
 
-const LEAD_BUDGET_STATUS_VALUES = new Set<LeadBudgetStatus>([
-  "budgeted_q1",
-  "budgeted_q2",
-  "budgeted_q3",
-  "budgeted_q4",
-  "not_budgeted",
-]);
+const LEAD_BUDGET_STATUS_VALUES = new Set<LeadBudgetStatus>(LEAD_BUDGET_STATUSES);
 
-const LEAD_POC_ROLE_VALUES = new Set<LeadPocRole>([
-  "property_manager",
-  "construction_manager",
-  "director",
-  "other",
-]);
+const LEAD_POC_ROLE_VALUES = new Set<LeadPocRole>(LEAD_POC_ROLES);
 
 const CREATE_GATE_FIELD_LABELS = new Map<string, string>([
   ["property.address", "Project address"],

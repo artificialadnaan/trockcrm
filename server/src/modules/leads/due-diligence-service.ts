@@ -35,6 +35,12 @@ const POC_ROLE_LABELS: Record<string, string> = {
   property_manager: "Property Manager",
   construction_manager: "Construction Manager",
   director: "Director",
+  regional_manager: "Regional Manager",
+  regional_vp: "Regional VP",
+  vp: "VP",
+  asset_manager: "Asset Manager",
+  facilities_manager: "Facilities Manager",
+  project_manager: "Project Manager",
   other: "Other",
 };
 

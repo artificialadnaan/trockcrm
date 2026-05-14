@@ -95,6 +95,16 @@ function normalizeAnswerValueForNode(
   node: QuestionnaireNode,
   value: LeadQuestionAnswerValue | undefined
 ): LeadQuestionAnswerValue {
+  if (node.inputType === "boolean") {
+    if (value == null) {
+      return null;
+    }
+    if (typeof value !== "boolean") {
+      throw new AppError(400, `Boolean answer ${node.key} must be true or false.`);
+    }
+    return value;
+  }
+
   if (node.inputType !== "multiselect") {
     return value ?? null;
   }

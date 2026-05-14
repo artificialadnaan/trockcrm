@@ -270,6 +270,7 @@ async function loadDealRoutesWithServiceMocks() {
   }));
 
   vi.doMock("../../../src/modules/deals/scoping-service.js", () => ({
+    assertDealScopingWriteAllowed: vi.fn(async () => ({ allowed: true })),
     evaluateDealScopingReadiness: vi.fn(),
     getOrCreateDealScopingIntake: vi.fn(),
     linkDealFileToScopingRequirement: vi.fn(),
@@ -383,6 +384,7 @@ async function invokeDealRoute({
     params,
     body,
     query: {},
+    officeSlug: "dallas",
     tenantDb: {
       insert: vi.fn(() => ({
         values: vi.fn(async () => ({})),
@@ -437,6 +439,7 @@ async function invokeLeadRoute({
   const req = {
     params,
     body,
+    officeSlug: "dallas",
     tenantDb: {
       insert: vi.fn(() => ({
         values: vi.fn(async () => ({})),

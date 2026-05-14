@@ -142,6 +142,12 @@ export const LEAD_POC_ROLES = [
   "property_manager",
   "construction_manager",
   "director",
+  "regional_manager",
+  "regional_vp",
+  "vp",
+  "asset_manager",
+  "facilities_manager",
+  "project_manager",
   "other",
 ] as const;
 export type LeadPocRole = (typeof LEAD_POC_ROLES)[number];

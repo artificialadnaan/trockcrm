@@ -20,7 +20,6 @@ import {
   getLeadValidationQuestionSetForProjectType,
   isLegacyTimelineStatusValue,
   LEAD_BUDGET_STATUSES,
-  LEAD_POC_ROLES,
   LEAD_SOURCE_CATEGORIES,
   type LeadBudgetStatus,
   type LeadPocRole,
@@ -60,7 +59,11 @@ import {
   resolveDefaultOfficeCode,
   type OfficeSelectionOption,
 } from "@/lib/office-selection";
-import { LEAD_BUDGET_STATUS_LABELS, LEAD_POC_ROLE_LABELS } from "@/lib/lead-display-labels";
+import {
+  LEAD_BUDGET_STATUS_LABELS,
+  LEAD_POC_ROLE_FORM_OPTIONS,
+  LEAD_POC_ROLE_LABELS,
+} from "@/lib/lead-display-labels";
 import { getValidationQuestionSetForProjectType } from "@/lib/validation-question-sets";
 import { useAccessibleOffices } from "@/hooks/use-accessible-offices";
 import {
@@ -395,6 +398,32 @@ function ClientProvidedDocsUploadField({
           ))}
         </div>
       ) : null}
+    </div>
+  );
+}
+
+function CurrencyInput({
+  id,
+  value,
+  onChange,
+}: {
+  id: string;
+  value: string;
+  onChange: (value: string) => void;
+}) {
+  return (
+    <div className="relative">
+      <span className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-sm text-muted-foreground">
+        $
+      </span>
+      <Input
+        id={id}
+        type="number"
+        inputMode="decimal"
+        className="pl-7"
+        value={value}
+        onChange={(event) => onChange(event.target.value)}
+      />
     </div>
   );
 }
@@ -819,7 +848,7 @@ function EditableLeadForm({
   const pocRoleSelectItems = useMemo(
     () => [
       { value: "__none__", label: "Select POC role" },
-      ...LEAD_POC_ROLES.map((role) => ({ value: role, label: LEAD_POC_ROLE_LABELS[role] })),
+      ...LEAD_POC_ROLE_FORM_OPTIONS.map((role) => ({ value: role, label: LEAD_POC_ROLE_LABELS[role] })),
     ],
     []
   );
@@ -865,7 +894,7 @@ function EditableLeadForm({
     [questionnaireTemplate]
   );
   const v2QuestionNodes = useMemo(
-    () => questionnaireTemplateNodes.filter((node) => node.nodeType === "question"),
+    () => questionnaireTemplateNodes.filter((node) => node.nodeType === "question" && node.key !== "budget"),
     [questionnaireTemplateNodes]
   );
   const v2RenderedQuestionNodes = useMemo(
@@ -920,6 +949,7 @@ function EditableLeadForm({
     if (formData.primaryContactRole === "other" && !formData.primaryContactRoleOtherLabel.trim()) {
       errors.set("primaryContactRoleOtherLabel", "Describe the other POC role.");
     }
+    if (!formData.name.trim()) errors.set("name", "Lead name is required.");
     if (!formData.budgetStatus) errors.set("budgetStatus", "Budget status is required.");
     if (!formData.officeCode || !selectedOffice?.officeId) errors.set("officeCode", "Office is required.");
     if (!formData.projectTypeId) errors.set("projectTypeId", "Project type is required.");
@@ -944,6 +974,7 @@ function EditableLeadForm({
     formData.primaryContactId,
     formData.primaryContactRole,
     formData.primaryContactRoleOtherLabel,
+    formData.name,
     formData.projectTypeId,
     formData.projectTypeQuestionAnswers,
     isCreate,
@@ -957,6 +988,9 @@ function EditableLeadForm({
     "Optional";
   const selectedPocRoleLabel =
     pocRoleSelectItems.find((item) => item.value === (formData.primaryContactRole || "__none__"))?.label ??
+    (formData.primaryContactRole
+      ? LEAD_POC_ROLE_LABELS[formData.primaryContactRole as LeadPocRole] ?? formData.primaryContactRole
+      : null) ??
     "Select POC role";
   const selectedBudgetStatusLabel =
     budgetStatusSelectItems.find((item) => item.value === (formData.budgetStatus || "__none__"))?.label ??
@@ -1696,7 +1730,7 @@ function EditableLeadForm({
                     </SelectTrigger>
                     <SelectContent>
                       <SelectItem value="__none__">Select POC role</SelectItem>
-                      {LEAD_POC_ROLES.map((role) => (
+                      {LEAD_POC_ROLE_FORM_OPTIONS.map((role) => (
                         <SelectItem key={role} value={role}>
                           {LEAD_POC_ROLE_LABELS[role]}
                         </SelectItem>
@@ -1830,13 +1864,14 @@ function EditableLeadForm({
 
               <div className="grid gap-4 sm:grid-cols-2">
                 <div className="space-y-2">
-                  <Label htmlFor="name">Lead Name</Label>
+                  <QuestionLabel htmlFor="name" required>Lead Name</QuestionLabel>
                   <Input
                     id="name"
                     value={formData.name}
                     onChange={(event) => handleFieldChange("name", event.target.value)}
                     placeholder="e.g., Palm Villas exterior refresh"
                   />
+                  {renderCreateFieldError("name")}
                 </div>
 
                 <div className="space-y-2">
@@ -2170,6 +2205,12 @@ function EditableLeadForm({
                       value={currentValue}
                       onChange={(value) => handleQualificationChange(field.id, value)}
                     />
+                  ) : field.id === "estimated_value" ? (
+                    <CurrencyInput
+                      id={field.id}
+                      value={currentValue}
+                      onChange={(value) => handleQualificationChange(field.id, value)}
+                    />
                   ) : (
                     <Input
                       id={field.id}
@@ -2234,7 +2275,7 @@ function EditableLeadForm({
                       <SelectValue placeholder="Select" />
                     </SelectTrigger>
                     <SelectContent>
-                      <SelectItem value="__unanswered__">Unanswered</SelectItem>
+                      <SelectItem value="__unanswered__">Select...</SelectItem>
                       <SelectItem value="true">Yes</SelectItem>
                       <SelectItem value="false">No</SelectItem>
                     </SelectContent>

@@ -124,6 +124,36 @@ describe("evaluateScopingReadiness", () => {
     expect(result.errors.sections.opportunity).toEqual(["siteVisitCompleted"]);
   });
 
+  it("requires a completed site visit for scheduled or reviewing site visit decisions", () => {
+    for (const siteVisitDecision of ["scheduled", "reviewing"] as const) {
+      const result = evaluateScopingReadiness({
+        currentStatus: "draft",
+        workflowRoute: "estimating",
+        projectTypeId: "pt-1",
+        sectionData: {
+          projectOverview: {
+            propertyName: "Palm Villas",
+            bidDueDate: "2026-05-01",
+          },
+          propertyDetails: {
+            propertyAddress: "123 Palm Way",
+          },
+          scopeSummary: {
+            summary: "Exterior renovation",
+          },
+          opportunity: {
+            preBidMeetingCompleted: "completed",
+            siteVisitDecision,
+            siteVisitCompleted: "",
+          },
+        },
+        attachmentKeys: ["scope_docs", "site_photos"],
+      });
+
+      expect(result.errors.sections.opportunity).toEqual(["siteVisitCompleted"]);
+    }
+  });
+
   it("does not require opportunity review fields for service-routed work", () => {
     const result = evaluateScopingReadiness({
       currentStatus: "draft",
