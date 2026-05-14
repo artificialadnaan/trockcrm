@@ -240,6 +240,33 @@ describe("LeadListPage", () => {
     expect(html).not.toContain("Legacy Opportunity Lead");
   });
 
+  it("renders lead descriptions as a muted responsive column with hover title and dash fallback", () => {
+    mocks.useLeadsMock.mockReturnValue({
+      leads: [
+        makeLead({
+          description: "Long lead description that should stay available on hover in the recent leads list.",
+        }),
+        makeLead({
+          id: "lead-row-2",
+          name: "No Description Lead",
+          description: null,
+        }),
+      ],
+      loading: false,
+      error: null,
+      refetch: vi.fn(),
+    });
+
+    const html = renderPage();
+
+    expect(html).toContain('aria-label="Long lead description that should stay available on hover in the recent leads list."');
+    expect(html).toContain('title="Long lead description that should stay available on hover in the recent leads list."');
+    expect(html).toContain("Long lead description that should stay available on hover in the recent leads list.");
+    expect(html).toContain("No Description Lead");
+    expect(html).toContain(">—<");
+    expect(html).toContain("hidden min-w-0 md:block");
+  });
+
   it("renders every lead card returned for a busy column inside an internally scrollable body", () => {
     const busyCards = Array.from({ length: 13 }).map((_, index) => ({
       id: `lead-busy-${index + 1}`,

@@ -87,6 +87,27 @@ function escapeCsvCell(value: string | number | null | undefined) {
   return /[",\n]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text;
 }
 
+function renderDescriptionPreview(description: string | null | undefined) {
+  const value = description?.trim() ?? "";
+  if (!value) {
+    return <span className="text-xs font-medium text-slate-400">—</span>;
+  }
+
+  return (
+    <span
+      className="group relative block w-full max-w-[18rem] outline-none"
+      tabIndex={0}
+      aria-label={value}
+      title={value}
+    >
+      <span className="block truncate text-xs font-medium text-slate-500">{value}</span>
+      <span className="pointer-events-none absolute left-0 top-full z-20 mt-1 hidden max-w-sm rounded-md border bg-popover px-2 py-1 text-xs font-medium text-popover-foreground shadow-md ring-1 ring-foreground/10 group-hover:block group-focus:block">
+        {value}
+      </span>
+    </span>
+  );
+}
+
 /**
  * Decides which `isActive` filter to send to /deals when listing pipeline records.
  * - No stages selected: "pipeline" (active stages + the named terminal stages we pass via inactiveStageIds).
@@ -462,6 +483,13 @@ export function DealsListSection({
       },
     },
     {
+      key: "description",
+      header: "Description",
+      headClassName: "hidden md:table-cell md:w-[18rem]",
+      cellClassName: "hidden md:table-cell md:w-[18rem]",
+      render: (deal) => renderDescriptionPreview(deal.description),
+    },
+    {
       key: "owner",
       header: "Owner",
       render: (deal) =>
@@ -636,6 +664,7 @@ export function DealsListSection({
           <PipelineStageTable
             rows={deals}
             columns={tableColumns}
+            tableClassName="table-fixed"
             pagination={{
               page: pagination.page,
               pageSize: pagination.limit,

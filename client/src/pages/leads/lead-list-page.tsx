@@ -99,6 +99,27 @@ function sourceLabel(value: string | null | undefined) {
     .join(" ");
 }
 
+function renderDescriptionPreview(description: string | null | undefined) {
+  const value = description?.trim() ?? "";
+  if (!value) {
+    return <span className="text-xs font-medium text-slate-400">—</span>;
+  }
+
+  return (
+    <span
+      className="group relative block w-full max-w-full outline-none"
+      tabIndex={0}
+      aria-label={value}
+      title={value}
+    >
+      <span className="block truncate text-xs font-medium text-slate-500">{value}</span>
+      <span className="pointer-events-none absolute left-0 top-full z-20 mt-1 hidden max-w-sm rounded-md border bg-popover px-2 py-1 text-xs font-medium text-popover-foreground shadow-md ring-1 ring-foreground/10 group-hover:block group-focus:block">
+        {value}
+      </span>
+    </span>
+  );
+}
+
 function LeadCard({ lead, onOpen }: { lead: LeadBoardCard; onOpen: (id: string) => void }) {
   const location = [lead.propertyCity, lead.propertyState].filter(Boolean).join(", ");
   const age = daysInStage(lead.stageEnteredAt);
@@ -345,11 +366,14 @@ function LeadListPageContent({ role }: { role: string }) {
               type="button"
               key={lead.id}
               onClick={() => navigate(`/leads/${lead.id}`)}
-              className="grid w-full gap-3 px-4 py-3 text-left transition-colors hover:bg-slate-50 md:grid-cols-[minmax(0,1fr)_160px_140px_120px_92px]"
+              className="grid w-full gap-3 px-4 py-3 text-left transition-colors hover:bg-slate-50 md:grid-cols-[minmax(0,1fr)_minmax(0,0.9fr)_160px_140px_120px_92px]"
             >
               <div className="min-w-0">
                 <p className="truncate text-sm font-black text-slate-950">{lead.name}</p>
                 <p className="mt-1 truncate text-xs font-semibold text-slate-500">{lead.companyName ?? "Company pending"}</p>
+              </div>
+              <div className="hidden min-w-0 md:block">
+                {renderDescriptionPreview(lead.description)}
               </div>
               <div className="flex items-center gap-2 text-xs font-semibold text-slate-500">
                 <span className="flex h-7 w-7 items-center justify-center rounded-full bg-brand-red text-[10px] font-black text-white">
