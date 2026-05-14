@@ -61,6 +61,19 @@ describe("audit field formatters", () => {
     });
   });
 
+  it("formats object-valued fields into human-readable labels", () => {
+    expect(
+      formatAuditFieldChange("projectType", {
+        from: { id: "pt-old", name: "Exterior Renovation" },
+        to: { id: "pt-new", label: "Service" },
+      })
+    ).toMatchObject({
+      label: "Project Type",
+      fromDisplay: "Exterior Renovation",
+      toDisplay: "Service",
+    });
+  });
+
   it("keeps the internal-only denylist as a single source of truth", () => {
     expect(INTERNAL_ONLY_AUDIT_FIELDS).toContain("rowVersion");
     expect(INTERNAL_ONLY_AUDIT_FIELDS).toContain("lastSyncedAt");
