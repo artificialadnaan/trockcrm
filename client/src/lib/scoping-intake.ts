@@ -130,9 +130,9 @@ export function buildScopingSeedFromResolvedFields(resolved: {
       propertyState: resolved.propertyState ?? "",
       propertyZip: resolved.propertyZip ?? "",
     },
-    scope: {
-      selectedProjectTypeIds: resolved.projectTypeId ? [resolved.projectTypeId] : [],
-    },
+    // Resolved-field reseeds refresh lineage-owned property data. Scope choices are
+    // user-owned multi-select state, so callers must preserve existing selections.
+    scope: {},
     scopeSummary: {
       summary: resolved.description ?? "",
     },

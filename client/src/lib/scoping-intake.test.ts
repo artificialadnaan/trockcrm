@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  buildScopingSeedFromResolvedFields,
   formatScopingAttachmentLabel,
   formatScopingFieldLabel,
   getScopingCompletionCounts,
@@ -40,5 +41,20 @@ describe("scoping intake helpers", () => {
         },
       })
     ).toEqual({ completed: 2, total: 3 });
+  });
+
+  it("does not seed multi-select scope choices from resolved field reseeds", () => {
+    expect(
+      buildScopingSeedFromResolvedFields({
+        projectTypeId: "roofing",
+        propertyName: "Lead Property",
+        propertyAddress: "123 Lead Way",
+        propertyCity: "Atlanta",
+        propertyState: "GA",
+        propertyZip: "30301",
+        description: "Lead description",
+        bidDueDate: "2026-06-01",
+      }).scope
+    ).toEqual({});
   });
 });

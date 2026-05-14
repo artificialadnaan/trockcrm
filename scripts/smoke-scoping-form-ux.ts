@@ -95,6 +95,7 @@ async function apiJson<T>(
   const response = await fetch(`${options.apiBaseUrl.replace(/\/$/, "")}${path}`, {
     ...init,
     headers: {
+      origin: options.origin.replace(/\/$/, ""),
       ...(init.body ? { "content-type": "application/json" } : {}),
       ...(session ? { cookie: session.cookies, "x-csrf-token": session.csrf } : {}),
       ...(init.headers ?? {}),
@@ -186,7 +187,6 @@ async function createSmokeDeal(options: CliOptions, sales: Session, admin: Sessi
       body: JSON.stringify({
         name,
         stageId: opportunityStage.id,
-        projectTypeId: projectType.id,
         companyId,
         propertyId,
         description: "SMOKE TEST DELETE - verifies deal scoping form UX",
@@ -231,15 +231,28 @@ async function cleanupSmokeFixture(
 
 async function openScopeTab(page: Page, options: CliOptions, dealId: string) {
   await page.goto(`${options.origin.replace(/\/$/, "")}/deals/${dealId}`, { waitUntil: "domcontentloaded" });
-  await page.getByRole("tab", { name: /scoping|opportunity scope/i }).click({ timeout: 15_000 }).catch(async () => {
-    await page.getByRole("button", { name: /scoping|opportunity scope/i }).click({ timeout: 15_000 });
-  });
+  const scopeSection = page.locator("#scoping-section-scope");
+  if (!(await scopeSection.isVisible({ timeout: 5_000 }).catch(() => false))) {
+    await page.getByRole("tab", { name: /^(scoping|opportunity scope)$/i }).click({ timeout: 15_000 }).catch(async () => {
+      await page.getByRole("button", { name: /^(scoping|opportunity scope)$/i }).click({ timeout: 15_000 });
+    });
+  }
   await page.locator("#scoping-section-scope").waitFor({ timeout: 20_000 });
 }
 
 async function assertScroll(page: Page, label: string, targetSelector: string) {
   const before = await page.evaluate(() => window.scrollY);
-  await page.getByRole("button", { name: new RegExp(label, "i") }).first().click();
+  const button = page.locator("button").filter({ hasText: new RegExp(label, "i") }).first();
+  if (!(await button.isVisible({ timeout: 10_000 }).catch(() => false))) {
+    const buttons = await page.locator("button").evaluateAll((elements) =>
+      elements.map((element) => element.textContent?.replace(/\s+/g, " ").trim()).filter(Boolean)
+    );
+    const bodyText = (await page.locator("body").innerText()).replace(/\s+/g, " ").trim();
+    throw new Error(
+      `Could not find scroll button ${label}. Visible buttons: ${buttons.join(" | ")}. Body: ${bodyText.slice(0, 1200)}`
+    );
+  }
+  await button.click();
   await page.waitForTimeout(500);
   await page.locator(targetSelector).waitFor({ timeout: 5_000 });
   const after = await page.evaluate(() => window.scrollY);
@@ -260,15 +273,19 @@ async function runBrowserSmoke(options: CliOptions, sales: Session, deal: Deal) 
   await context.addCookies(
     sales.cookies.split(";").flatMap((part) => {
       const [name, ...rest] = part.trim().split("=");
-      return cookieTargets.map((domain) => ({
-        name,
-        value: rest.join("="),
-        domain,
-        path: "/",
-        httpOnly: name === "token",
-        secure: (domain === apiUrl.hostname ? apiUrl : frontendUrl).protocol === "https:",
-        sameSite: "Lax" as const,
-      }));
+      return cookieTargets.map((domain) => {
+        const targetUrl = domain === apiUrl.hostname ? apiUrl : frontendUrl;
+        const secure = targetUrl.protocol === "https:";
+        return {
+          name,
+          value: rest.join("="),
+          domain,
+          path: "/",
+          httpOnly: name === "token",
+          secure,
+          sameSite: domain === apiUrl.hostname && secure ? "None" as const : "Lax" as const,
+        };
+      });
     })
   );
   const page = await context.newPage();
@@ -291,9 +308,9 @@ async function runBrowserSmoke(options: CliOptions, sales: Session, deal: Deal) 
       await assertScroll(page, label, selector);
     }
 
-    await page.getByRole("button", { name: /Property Details: Property Address/i }).click();
+    await page.getByRole("button", { name: /Scope: Selected Scope Items/i }).click();
     await page.waitForTimeout(500);
-    await page.locator("#scoping-field-propertyDetails-propertyAddress").waitFor();
+    await page.locator("#scoping-field-scope-selectedProjectTypeIds").waitFor();
 
     const bodyText = await page.locator("body").innerText();
     if (!bodyText.includes("Scope docs") || !bodyText.includes("Site photos")) {
@@ -333,7 +350,7 @@ async function runBrowserSmoke(options: CliOptions, sales: Session, deal: Deal) 
   }
 }
 
-async function assertServerValidation(options: CliOptions, sales: Session, deal: Deal) {
+async function assertServerValidation(options: CliOptions, sales: Session, deal: Deal, projectType: ProjectType) {
   const bidDueDate = new Date(Date.now() + 14 * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
   await apiJson(options, `/api/deals/${deal.id}/scoping-intake`, sales, {
     method: "PATCH",
@@ -345,7 +362,7 @@ async function assertServerValidation(options: CliOptions, sales: Session, deal:
           siteVisitDecision: "not_required",
         },
         propertyDetails: { propertyAddress: "501 Smoke Test Way" },
-        scope: { selectedProjectTypeIds: deal.projectTypeId ? [deal.projectTypeId] : [] },
+        scope: { selectedProjectTypeIds: [projectType.id] },
         scopeSummary: { summary: "SMOKE TEST DELETE - verifies deal scoping form UX" },
       },
     }),
@@ -393,7 +410,7 @@ async function main() {
   console.log(`[smoke] created ${deal.name} (${deal.id}) using ${projectType.name}`);
   try {
     await runBrowserSmoke(options, sales, deal);
-    await assertServerValidation(options, sales, deal);
+    await assertServerValidation(options, sales, deal, projectType);
     console.log("[smoke] scoping form UX smoke passed");
   } finally {
     await cleanupSmokeFixture(options, admin, {
