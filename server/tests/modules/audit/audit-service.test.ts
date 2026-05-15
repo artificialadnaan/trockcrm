@@ -13,7 +13,7 @@ function extractSqlText(value: unknown): string {
 }
 
 describe("audit activity feed dedup", () => {
-  it("filters legacy trigger rows when a rich row exists for the same write second", async () => {
+  it("filters legacy trigger rows only when a rich row exists with matching field-change content", async () => {
     const execute = vi
       .fn()
       .mockResolvedValueOnce({ rows: [{ total: 1 }] })
@@ -37,7 +37,12 @@ describe("audit activity feed dedup", () => {
 
     expect(result.rows).toHaveLength(1);
     expect(result.rows[0].actorLabel).toBe("Bid Board Sync");
-    expect(sqlText).toContain("date_trunc('second'");
+    expect(sqlText).not.toContain("date_trunc('second'");
+    expect(sqlText).toContain("INTERVAL '500 milliseconds'");
+    expect(sqlText).toContain("rich.created_at BETWEEN");
+    expect(sqlText).toContain("rich.field_changes_jsonb IS NOT NULL");
+    expect(sqlText).toContain("al.field_changes_jsonb IS NULL");
+    expect(sqlText).toContain("rich.field_changes_jsonb::text = al.field_changes_jsonb::text");
     expect(sqlText).toContain("rich.actor_system_process IS NOT NULL");
     expect(sqlText).toContain("al.actor_name IS NULL");
   });
