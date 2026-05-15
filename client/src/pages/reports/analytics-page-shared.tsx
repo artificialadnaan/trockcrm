@@ -2,8 +2,11 @@ import type { ReactNode } from "react";
 import { ArrowDown, ArrowRight, ArrowUp, RefreshCw } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
+import { ExportExcelButton } from "@/components/reports/export-excel-button";
 import { PageHeader } from "@/components/layout/page-header";
 import { ReportFilterBar } from "@/components/reports/report-filter-bar";
+import type { ExcelSheet } from "@/lib/excel-export";
+export { sheetsFromReport } from "@/lib/excel-export";
 
 export const CHART_COLORS = ["#cc0000", "#111827", "#2563eb", "#16a34a", "#f59e0b", "#7c3aed", "#0891b2", "#db2777"];
 
@@ -34,6 +37,8 @@ export function ReportPageShell({
   loading,
   error,
   onRefresh,
+  exportFilename,
+  exportSheets = [],
   children,
 }: {
   title: string;
@@ -41,17 +46,22 @@ export function ReportPageShell({
   loading: boolean;
   error: string | null;
   onRefresh: () => void;
+  exportFilename?: string;
+  exportSheets?: ExcelSheet[];
   children: ReactNode;
 }) {
   return (
     <div className="space-y-6">
       <PageHeader eyebrow="Analytics" title={title} description={description} />
       <ReportFilterBar defaultRange="12m" />
-      <div className="flex justify-end">
+      <div className="flex justify-end gap-2">
         <Button variant="outline" size="sm" onClick={onRefresh} disabled={loading}>
           <RefreshCw className="mr-2 h-4 w-4" />
           Refresh
         </Button>
+        {exportFilename ? (
+          <ExportExcelButton filename={exportFilename} sheets={exportSheets} disabled={loading} />
+        ) : null}
       </div>
       {error ? (
         <Card className="border-red-200 bg-red-50">

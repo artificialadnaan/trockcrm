@@ -1,7 +1,9 @@
 import { Bar, BarChart, CartesianGrid, Cell, Pie, PieChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
 import { PageHeader } from "@/components/layout/page-header";
 import { ReportFilterBar, useReportFilters } from "@/components/reports/report-filter-bar";
+import { ExportExcelButton } from "@/components/reports/export-excel-button";
 import { useRepActivityReport } from "@/hooks/use-reports";
+import { sheetsFromReport } from "@/lib/excel-export";
 import {
   EmptyState,
   ErrorState,
@@ -27,6 +29,13 @@ export function RepActivityPage() {
         description="Touchpoints, follow-ups, and stalled accounts by owner."
       />
       <ReportFilterBar />
+      <div className="flex justify-end">
+        <ExportExcelButton
+          filename="rep-activity-report"
+          sheets={sheetsFromReport("Rep Activity", data)}
+          disabled={loading || !data}
+        />
+      </div>
 
       {loading ? <LoadingState /> : null}
       {error ? <ErrorState message={error} /> : null}

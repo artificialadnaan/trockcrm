@@ -2,6 +2,7 @@ import { Bar, BarChart, CartesianGrid, Legend, Line, LineChart, ResponsiveContai
 import { Card, CardContent } from "@/components/ui/card";
 import { useReportFilters } from "@/components/reports/report-filter-bar";
 import { useExecutiveTrendsReport } from "@/hooks/use-reports";
+import { sheetsFromReport } from "@/lib/excel-export";
 import {
   EmptyState,
   formatCurrency,
@@ -23,6 +24,8 @@ export function ExecutiveTrendsPage() {
       loading={loading}
       error={error}
       onRefresh={() => void refetch()}
+      exportFilename="executive-trends-report"
+      exportSheets={sheetsFromReport("Executive Trends", report)}
     >
       {report ? (
         <div className="space-y-6">

@@ -46,12 +46,14 @@ describe("performance report pages", () => {
     const html = htmlFor(<DirectorScorecardPage />);
     expect(html).toContain("Director Scorecard");
     expect(html).toContain("Report Filters");
+    expect(html).toContain("Export to Excel");
     expect(html).toContain("Total Pipeline Value");
   });
 
   it("renders Rep Activity with filters and activity labels", () => {
     const html = htmlFor(<RepActivityPage />);
     expect(html).toContain("Rep Activity");
+    expect(html).toContain("Export to Excel");
     expect(html).toContain("Total Touchpoints");
     expect(html).toContain("Activity Timeline");
   });
@@ -59,6 +61,7 @@ describe("performance report pages", () => {
   it("renders Forecast Accuracy with forecast labels", () => {
     const html = htmlFor(<ForecastAccuracyPage />);
     expect(html).toContain("Forecast Accuracy");
+    expect(html).toContain("Export to Excel");
     expect(html).toContain("Commit");
     expect(html).toContain("Pipeline At Risk");
   });

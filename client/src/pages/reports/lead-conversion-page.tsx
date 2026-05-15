@@ -9,6 +9,7 @@ import {
   KpiStrip,
   Panel,
   ReportShell,
+  sheetsFromReport,
   TableBody,
   TableCell,
   TableHead,
@@ -33,6 +34,8 @@ export function LeadConversionPage() {
       hasData={hasRows}
       emptyText="No leads match this filter."
       onRefresh={() => void refetch()}
+      exportFilename="lead-conversion-report"
+      exportSheets={sheetsFromReport("Lead Conversion", data)}
     >
       {data ? (
         <div className="space-y-6">

@@ -11,6 +11,7 @@ import {
   KpiStrip,
   Panel,
   ReportShell,
+  sheetsFromReport,
   TableBody,
   TableCell,
   TableHead,
@@ -35,6 +36,8 @@ export function ClosedWonRevenuePage() {
       hasData={hasRows}
       emptyText="No won deals match this filter."
       onRefresh={() => void refetch()}
+      exportFilename="closed-won-revenue-report"
+      exportSheets={sheetsFromReport("Closed Won Revenue", data)}
     >
       {data ? (
         <div className="space-y-6">

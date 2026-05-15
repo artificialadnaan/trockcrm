@@ -44,4 +44,13 @@ describe("App route guards", () => {
     expect(source).toContain('path="/reports/operations/project-readiness" element={( <RequireRole allowedRoles={["admin", "director"]}> <ProjectReadinessPage />');
     expect(source).toContain('path="/reports/operations/portfolio-load" element={( <RequireRole allowedRoles={["admin", "director"]}> <PortfolioLoadPage />');
   });
+
+  it("preserves report route guards while export remains page-local", () => {
+    expect(source).toContain('path="/reports/performance/director-scorecard" element={( <RequireRole allowedRoles={["admin", "director"]}> <DirectorScorecardPage />');
+    expect(source).toContain('path="/reports/performance/rep-activity" element={( <RequireRole allowedRoles={["admin", "director", "rep"]}> <RepActivityPage />');
+    expect(source).toContain('path="/reports/performance/forecast-accuracy" element={( <RequireRole allowedRoles={["admin", "director"]}> <ForecastAccuracyPage />');
+    expect(source).toContain('path="/reports/analytics/market-mix" element={<MarketMixPage />}');
+    expect(source).toContain('path="/reports/analytics/customer-concentration" element={<CustomerConcentrationPage />}');
+    expect(source).toContain('path="/reports/analytics/executive-trends" element={<ExecutiveTrendsPage />}');
+  });
 });

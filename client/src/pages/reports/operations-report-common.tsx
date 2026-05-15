@@ -1,5 +1,8 @@
 import type { ReactNode } from "react";
 import { Link } from "react-router-dom";
+import { ExportExcelButton } from "@/components/reports/export-excel-button";
+import type { ExcelSheet } from "@/lib/excel-export";
+export { sheetsFromReport } from "@/lib/excel-export";
 
 export const usdFormatter = new Intl.NumberFormat("en-US", {
   style: "currency",
@@ -28,10 +31,14 @@ export function formatDate(value: string | null | undefined) {
 export function OperationsReportShell({
   title,
   description,
+  exportFilename,
+  exportSheets = [],
   children,
 }: {
   title: string;
   description: string;
+  exportFilename?: string;
+  exportSheets?: ExcelSheet[];
   children: ReactNode;
 }) {
   return (
@@ -45,6 +52,7 @@ export function OperationsReportShell({
             <h1 className="mt-2 text-3xl font-black tracking-tight text-slate-950">{title}</h1>
             <p className="mt-1 max-w-3xl text-sm text-slate-600">{description}</p>
           </div>
+          {exportFilename ? <ExportExcelButton filename={exportFilename} sheets={exportSheets} /> : null}
         </div>
         {children}
       </div>

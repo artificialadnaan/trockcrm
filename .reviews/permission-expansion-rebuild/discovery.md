@@ -6,13 +6,14 @@ Base: `origin/main` at `075c358d`
 
 ## Assumption
 
-Bug #23 does not line up cleanly with current `origin/main`. Current shipped code has CSV/PDF-style report exports and several report pages still role-gated, but no shared Excel export endpoint or button on `main`. A stale local worktree from the killed session contains a client-side Excel export implementation. For this rebuild, I am treating Bug #23 as:
+Bug #23 on current `origin/main` means:
 
-- restore the lost client-side Excel export surface for reports
-- relax the remaining report page role gates so reps can access the same export surface where intended
-- do not broaden unrelated admin-only report surfaces
+- add Excel export only to the report pages a user can already access
+- keep every existing report page role gate exactly as-is
+- keep every existing report API role gate exactly as-is
+- do not add broader report-data visibility for reps
 
-If this assumption proves wrong during verification, stop at the scope boundary and report it.
+Current shipped code has CSV/PDF-style helpers but no shared Excel export endpoint or button on `main`. A stale local worktree from the killed session contains a client-side Excel export implementation. For this rebuild, Bug #23 is scoped to restoring that client-side export surface without changing report authorization.
 
 ## Bug #10 - Recording uploads gated to admins
 
@@ -106,23 +107,43 @@ Likely adjacent gate to keep:
 - `server/src/modules/tasks/service.ts:533-539`
   - reps can only view their own tasks via `getTaskById()`. That is a different visibility rule than assignment and should not be changed unless tests prove the create/edit flow requires it.
 
-## Bug #23 - Excel export on reports gated by role
+## Bug #23 - Excel export should match the parent report gate
 
 Current `origin/main` findings:
 
-- `client/src/App.tsx:238-287`
-  - several report pages are still wrapped in `RequireRole(["admin", "director"])`:
-    - director scorecard
-    - forecast accuracy
-    - workflow bottlenecks
-    - project readiness
-    - portfolio load
-- `server/src/modules/reports/routes.ts:221-620`
-  - many report API routes still use `requireDirector`, while others already use `requireAnyRole`.
+- `client/src/App.tsx:234-284`
+  - current report page gates:
+    - `/reports/sales/pipeline-velocity` - no route wrapper in `App.tsx`
+    - `/reports/sales/closed-won-revenue` - no route wrapper in `App.tsx`
+    - `/reports/sales/lead-conversion` - no route wrapper in `App.tsx`
+    - `/reports/performance/director-scorecard` - `RequireRole(["admin", "director"])`
+    - `/reports/performance/rep-activity` - `RequireRole(["admin", "director", "rep"])`
+    - `/reports/performance/forecast-accuracy` - `RequireRole(["admin", "director"])`
+    - `/reports/analytics/market-mix` - no route wrapper in `App.tsx`
+    - `/reports/analytics/customer-concentration` - no route wrapper in `App.tsx`
+    - `/reports/analytics/executive-trends` - no route wrapper in `App.tsx`
+    - `/reports/operations/workflow-bottlenecks` - `RequireRole(["admin", "director"])`
+    - `/reports/operations/project-readiness` - `RequireRole(["admin", "director"])`
+    - `/reports/operations/portfolio-load` - `RequireRole(["admin", "director"])`
+- `server/src/modules/reports/routes.ts:152-600`
+  - current report API gates:
+    - `GET /api/reports/pipeline-velocity` - no explicit route-level role wrapper in this file
+    - `GET /api/reports/lead-conversion` - no explicit route-level role wrapper in this file
+    - `GET /api/reports/closed-won-summary` - `requireDirector`
+    - `GET /api/reports/director-scorecard` - `requireDirector`
+    - `GET /api/reports/rep-activity` - `requireAnyRole`
+    - `GET /api/reports/forecast-accuracy` - `requireDirector`
+    - `GET /api/reports/market-mix` - `requireAnyRole`
+    - `GET /api/reports/customer-concentration` - `requireAnyRole`
+    - `GET /api/reports/executive-trends` - `requireAnyRole`
+    - `GET /api/reports/workflow-bottlenecks` - `requireDirector`
+    - `GET /api/reports/project-readiness` - `requireDirector`
+    - `GET /api/reports/portfolio-load` - `requireDirector`
 - `client/src/pages/reports/reports-page.tsx:21-23`
   - `canViewDataMiningSection()` still hardcodes director-only logic, though it is not clearly used in the current page.
 - `client/src/lib/report-export.ts`
   - current `main` only has CSV/PDF helpers, no XLSX builder.
+- there are no dedicated `/export`, `/excel`, or `/xlsx` report endpoints on current `main`.
 
 Stale local evidence from the killed session:
 
@@ -134,7 +155,7 @@ Stale local evidence from the killed session:
 
 Rebuild interpretation:
 
-- recreate the shared client-side Excel export button/helper in the report surfaces touched by the lost session
-- remove only the role gates necessary so reps can access the intended export-capable report pages
-- keep unrelated admin-only pages such as global admin dashboards out of scope
-
+- recreate the shared client-side Excel export button/helper in the report pages users can already reach
+- keep director-only report pages director-only
+- keep broader-role report pages broader-role
+- leave server report authorization untouched because there is no dedicated server export endpoint to relax or align

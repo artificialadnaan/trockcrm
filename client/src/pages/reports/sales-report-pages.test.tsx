@@ -100,6 +100,7 @@ describe("Sales report pages", () => {
 
     expect(html).toContain("Pipeline Velocity");
     expect(html).toContain("Shared report filters");
+    expect(html).toContain("Export to Excel");
     expect(html).toContain("$425,000");
     expect(html).toContain("Opportunity");
     expect(html).toContain("Jordan Lee");
@@ -111,6 +112,7 @@ describe("Sales report pages", () => {
     const html = normalize(renderToStaticMarkup(<MemoryRouter><ClosedWonRevenuePage /></MemoryRouter>));
 
     expect(html).toContain("Closed Won Revenue");
+    expect(html).toContain("Export to Excel");
     expect(html).toContain("$600,000");
     expect(html).toContain("$300,000");
     expect(html).toContain("Standard Deal");
@@ -122,6 +124,7 @@ describe("Sales report pages", () => {
     const html = normalize(renderToStaticMarkup(<MemoryRouter><LeadConversionPage /></MemoryRouter>));
 
     expect(html).toContain("Lead Conversion");
+    expect(html).toContain("Export to Excel");
     expect(html).toContain("Lead-to-Deal");
     expect(html).toContain("40%");
     expect(html).toContain("Trade Show");

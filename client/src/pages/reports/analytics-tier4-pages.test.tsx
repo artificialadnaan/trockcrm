@@ -105,6 +105,7 @@ describe("analytics tier 4 report pages", () => {
 
     expect(html).toContain("Market Mix");
     expect(html).toContain("Report Filters");
+    expect(html).toContain("Export to Excel");
     expect(html).toContain("$250,000");
     expect(html).toContain("Healthcare");
     expect(html).toContain("66.7%");
@@ -115,6 +116,7 @@ describe("analytics tier 4 report pages", () => {
     const html = renderPage(<CustomerConcentrationPage />);
 
     expect(html).toContain("Customer Concentration");
+    expect(html).toContain("Export to Excel");
     expect(html).toContain("Acme Roofing");
     expect(html).toContain("$1,200,000");
     expect(html).toContain("60.0%");
@@ -125,6 +127,7 @@ describe("analytics tier 4 report pages", () => {
     const html = renderPage(<ExecutiveTrendsPage />);
 
     expect(html).toContain("Executive Trends");
+    expect(html).toContain("Export to Excel");
     expect(html).toContain("Total Pipeline");
     expect(html).toContain("$300,000");
     expect(html).toContain("12.5%");
