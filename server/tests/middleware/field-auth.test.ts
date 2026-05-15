@@ -5,12 +5,17 @@ const mocks = vi.hoisted(() => ({
   verifyJwt: vi.fn(),
   getUserById: vi.fn(),
   getOfficeAccess: vi.fn(),
+  getUserLocalAuthGate: vi.fn(),
 }));
 
 vi.mock("../../src/modules/auth/service.js", () => ({
   verifyJwt: mocks.verifyJwt,
   getUserById: mocks.getUserById,
   getOfficeAccess: mocks.getOfficeAccess,
+}));
+
+vi.mock("../../src/modules/auth/local-auth-service.js", () => ({
+  getUserLocalAuthGate: mocks.getUserLocalAuthGate,
 }));
 
 const { requireCrmUser, requireFieldContractor } = await import("../../src/middleware/field-auth.js");
@@ -43,6 +48,13 @@ describe("field auth middleware", () => {
     mocks.verifyJwt.mockReturnValue({ userId: "user-1", authMethod: "local" });
     mocks.getUserById.mockResolvedValue(createUser());
     mocks.getOfficeAccess.mockResolvedValue({ hasAccess: true });
+    mocks.getUserLocalAuthGate.mockResolvedValue({
+      mustChangePassword: false,
+      isEnabled: true,
+      inviteExpiresAt: null,
+      lockedUntil: null,
+      revokedAt: null,
+    });
   });
 
   it.each(["field_contractor", "admin", "director", "rep", "construction"] as const)(
@@ -99,6 +111,44 @@ describe("field auth middleware", () => {
     await requireFieldContractor(createRequest(), {} as Response, unsupportedNext);
 
     expect(unsupportedNext.mock.calls[0]?.[0]).toMatchObject({ statusCode: 403 });
+  });
+
+  it("rejects local field sessions that require a password change", async () => {
+    mocks.getUserLocalAuthGate.mockResolvedValueOnce({
+      mustChangePassword: true,
+      isEnabled: true,
+      inviteExpiresAt: null,
+      lockedUntil: null,
+      revokedAt: null,
+    });
+    const next = vi.fn() as NextFunction;
+
+    await requireFieldContractor(createRequest(), {} as Response, next);
+
+    const error = next.mock.calls[0]?.[0];
+    expect(error).toMatchObject({
+      statusCode: 403,
+      message: "Field app access requires password change",
+    });
+  });
+
+  it("rejects revoked local field sessions", async () => {
+    mocks.getUserLocalAuthGate.mockResolvedValueOnce({
+      mustChangePassword: false,
+      isEnabled: true,
+      inviteExpiresAt: null,
+      lockedUntil: null,
+      revokedAt: "2026-04-20T10:00:00.000Z",
+    });
+    const next = vi.fn() as NextFunction;
+
+    await requireFieldContractor(createRequest(), {} as Response, next);
+
+    const error = next.mock.calls[0]?.[0];
+    expect(error).toMatchObject({
+      statusCode: 401,
+      message: "Local login is no longer enabled for this user",
+    });
   });
 
   it("preserves requested active office context for accessible CRM users", async () => {

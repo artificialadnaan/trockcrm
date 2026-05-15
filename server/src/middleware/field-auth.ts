@@ -1,6 +1,7 @@
 import type { NextFunction, Request, Response } from "express";
 import type { UserRole } from "@trock-crm/shared/types";
 import { getOfficeAccess, getUserById, verifyJwt } from "../modules/auth/service.js";
+import { getUserLocalAuthGate } from "../modules/auth/local-auth-service.js";
 import { AppError } from "./error-handler.js";
 
 type FieldUserRequest = {
@@ -58,6 +59,22 @@ export async function requireFieldContractor(req: Request, _res: Response, next:
       throw new AppError(403, "Field user is inactive");
     }
 
+    const authMethod = claims.authMethod;
+    if (!authMethod) {
+      throw new AppError(401, "Session expired, please sign in again");
+    }
+
+    const localAuthGate = await getUserLocalAuthGate(user.id);
+    if (
+      authMethod === "local"
+      && (!localAuthGate.isEnabled || localAuthGate.revokedAt)
+    ) {
+      throw new AppError(401, "Local login is no longer enabled for this user");
+    }
+    if (localAuthGate.mustChangePassword) {
+      throw new AppError(403, "Field app access requires password change");
+    }
+
     const requestedOfficeId = req.headers["x-office-id"] as string | undefined;
     let activeOfficeId = user.officeId;
     let effectiveRole = user.role as UserRole;
@@ -80,8 +97,8 @@ export async function requireFieldContractor(req: Request, _res: Response, next:
       role: effectiveRole,
       officeId: user.officeId,
       activeOfficeId,
-      mustChangePassword: false,
-      authMethod: claims.authMethod,
+      mustChangePassword: localAuthGate.mustChangePassword,
+      authMethod,
     };
     req.fieldUser = {
       id: user.id,
