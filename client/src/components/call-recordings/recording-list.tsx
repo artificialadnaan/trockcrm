@@ -56,7 +56,7 @@ export function RecordingList({
 }) {
   const { user } = useAuth();
   const isAdmin = user?.role === "admin";
-  const canUseRecordings = Boolean(user);
+  const canUseRecordings = Boolean(user) && user?.role !== "construction";
   const canUpload = canUseRecordings;
   const [recordings, setRecordings] = useState<CallRecording[]>([]);
   const [loading, setLoading] = useState(true);

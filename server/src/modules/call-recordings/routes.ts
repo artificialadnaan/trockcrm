@@ -31,6 +31,12 @@ function requireCallRecordingRole(role: UserRole): asserts role is CallRecording
   }
 }
 
+function requireCallRecordingUploadRole(role: UserRole) {
+  if (role === "field_contractor" || role === "construction") {
+    throw new AppError(403, "Call recordings are not available for this role.");
+  }
+}
+
 async function assertEntityReadable(req: any, entityType: CallRecordingEntityType, entityId: string) {
   if (entityType === "deal") {
     const deal = await getDealById(req.tenantDb!, entityId, req.user!.role, req.user!.id);
@@ -51,7 +57,7 @@ async function assertEntityReadable(req: any, entityType: CallRecordingEntityTyp
 
 router.post("/upload-url", async (req, res, next) => {
   try {
-    requireCallRecordingRole(req.user!.role);
+    requireCallRecordingUploadRole(req.user!.role);
     const { entityType, entityId, filename, mimeType, title, notes, callDate } = req.body;
     if (!entityType || !entityId || !filename || !mimeType) {
       throw new AppError(400, "entityType, entityId, filename, and mimeType are required.");
@@ -79,7 +85,7 @@ router.post("/upload-url", async (req, res, next) => {
 
 router.post("/:id/confirm", async (req, res, next) => {
   try {
-    requireCallRecordingRole(req.user!.role);
+    requireCallRecordingUploadRole(req.user!.role);
     const { fileSizeBytes, durationSeconds } = req.body;
     const recording = await confirmUpload(req.tenantDb!, req.params.id, {
       fileSizeBytes: Number(fileSizeBytes),

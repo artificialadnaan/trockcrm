@@ -669,6 +669,13 @@ describe("email routes", () => {
     });
     expect(req.commitTransaction).toHaveBeenCalled();
     expect(res.body.binding).toEqual({ id: "binding-1", dealId: "deal-1" });
+    expect(emailServiceMocks.getEmailThread).toHaveBeenLastCalledWith(
+      expect.any(Object),
+      "conversation-1",
+      "director-1",
+      "director",
+      expect.any(Function)
+    );
   });
 
   it("reassigns a thread and returns a preview", async () => {
@@ -703,6 +710,13 @@ describe("email routes", () => {
       nextDealId: "deal-2",
     });
     expect(res.body.preview.affectedMessageIds).toEqual(["email-1", "email-2"]);
+    expect(emailServiceMocks.getEmailThread).toHaveBeenLastCalledWith(
+      expect.any(Object),
+      "conversation-1",
+      "director-1",
+      "director",
+      expect.any(Function)
+    );
   });
 
   it("detaches a thread using the thread mailbox account id", async () => {
@@ -725,6 +739,13 @@ describe("email routes", () => {
       "mailbox-2",
       "conversation-1",
       "director-1"
+    );
+    expect(emailServiceMocks.getEmailThread).toHaveBeenLastCalledWith(
+      expect.any(Object),
+      "conversation-1",
+      "director-1",
+      "director",
+      expect.any(Function)
     );
   });
 });

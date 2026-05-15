@@ -57,6 +57,16 @@ describe("RecordingList role gates", () => {
     await unmount(root);
   });
 
+  it("keeps the recording surface hidden for construction users", async () => {
+    mocks.user = { id: "construction-1", role: "construction" };
+    const { container, root } = await renderList();
+
+    expect(container.textContent).not.toContain("Call Recordings");
+    expect(mocks.apiMock).not.toHaveBeenCalled();
+
+    await unmount(root);
+  });
+
   it("hides the recording surface until a CRM user is loaded", async () => {
     mocks.user = null;
     const { container, root } = await renderList();

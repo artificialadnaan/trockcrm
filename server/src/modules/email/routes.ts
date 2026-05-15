@@ -28,6 +28,10 @@ import { getPropertyDetail } from "../properties/service.js";
 
 const router = Router();
 
+function canUserViewDeal(req: any, dealId: string) {
+  return getDealById(req.tenantDb!, dealId, req.user!.role, req.user!.id).then(Boolean);
+}
+
 // POST /api/email/send — compose and send an email
 router.post("/send", async (req, res, next) => {
   try {
@@ -196,7 +200,7 @@ router.get("/thread/:conversationId", async (req, res, next) => {
       req.params.conversationId,
       req.user!.id,
       req.user!.role,
-      async (dealId) => Boolean(await getDealById(req.tenantDb!, dealId, req.user!.role, req.user!.id))
+      (dealId) => canUserViewDeal(req, dealId)
     );
     await req.commitTransaction!();
     res.json(thread);
@@ -223,7 +227,13 @@ router.post("/thread/:conversationId/assign", async (req, res, next) => {
       actingUserId: req.user!.id,
     });
 
-    const refreshedThread = await getEmailThread(req.tenantDb!, req.params.conversationId, req.user!.id, req.user!.role);
+    const refreshedThread = await getEmailThread(
+      req.tenantDb!,
+      req.params.conversationId,
+      req.user!.id,
+      req.user!.role,
+      (candidateDealId) => canUserViewDeal(req, candidateDealId)
+    );
     await req.commitTransaction!();
     res.json({ ...result, thread: refreshedThread });
   } catch (err) {
@@ -255,7 +265,13 @@ router.post("/thread/:conversationId/reassign", async (req, res, next) => {
       actingUserId: req.user!.id,
     });
 
-    const refreshedThread = await getEmailThread(req.tenantDb!, req.params.conversationId, req.user!.id, req.user!.role);
+    const refreshedThread = await getEmailThread(
+      req.tenantDb!,
+      req.params.conversationId,
+      req.user!.id,
+      req.user!.role,
+      (candidateDealId) => canUserViewDeal(req, candidateDealId)
+    );
     await req.commitTransaction!();
     res.json({ ...result, preview, thread: refreshedThread });
   } catch (err) {
@@ -269,7 +285,13 @@ router.post("/thread/:conversationId/detach", async (req, res, next) => {
     await assertCanMutateEmailThread(req.tenantDb!, thread, req.user!);
 
     await detachThreadByConversation(req.tenantDb!, thread.mailboxAccountId, req.params.conversationId, req.user!.id);
-    const refreshedThread = await getEmailThread(req.tenantDb!, req.params.conversationId, req.user!.id, req.user!.role);
+    const refreshedThread = await getEmailThread(
+      req.tenantDb!,
+      req.params.conversationId,
+      req.user!.id,
+      req.user!.role,
+      (candidateDealId) => canUserViewDeal(req, candidateDealId)
+    );
     await req.commitTransaction!();
     res.json({ success: true, thread: refreshedThread });
   } catch (err) {

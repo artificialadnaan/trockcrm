@@ -38,7 +38,8 @@ export function ProjectTasksTab({
   const [selectedTask, setSelectedTask] = useState<Task | null>(null);
   const [editOpen, setEditOpen] = useState(false);
 
-  const canManage = user?.role === "admin" || user?.role === "director" || user?.role === "rep";
+  const canCreateProjectTasks = user?.role === "admin" || user?.role === "director" || user?.role === "rep";
+  const canManageAllProjectTasks = user?.role === "admin" || user?.role === "director";
 
   const sortedTasks = useMemo(() => {
     const priorityRank: Record<string, number> = { urgent: 0, high: 1, normal: 2, low: 3 };
@@ -68,7 +69,7 @@ export function ProjectTasksTab({
     return <p className="text-sm text-red-600">{error}</p>;
   }
 
-  const createAction = canManage ? (
+  const createAction = canCreateProjectTasks ? (
     <TaskCreateDialog
       onCreated={handleTaskUpdated}
       projectScopedProjectId={projectId}
@@ -100,7 +101,7 @@ export function ProjectTasksTab({
 
       <div className="space-y-3">
         {sortedTasks.map((task) => {
-          const canEditTask = canManage || task.assignedTo === user?.id;
+          const canEditTask = canManageAllProjectTasks || task.assignedTo === user?.id;
           return (
             <div
               key={task.id}

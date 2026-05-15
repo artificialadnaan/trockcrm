@@ -145,6 +145,17 @@ describe("call recording routes", () => {
     );
   });
 
+  it("blocks construction users from requesting upload URLs", async () => {
+    const { res, nextError } = await invokeRoute("post", "/upload-url", {
+      user: testUser("construction"),
+      body: { entityType: "deal", entityId: "deal-1", filename: "call.m4a", mimeType: "audio/m4a" },
+    });
+
+    expect(res.statusCode).toBe(200);
+    expect(nextError).toMatchObject({ statusCode: 403 });
+    expect(serviceMocks.createUploadUrl).not.toHaveBeenCalled();
+  });
+
   it("lets reps list only their own recordings", async () => {
     mockListForCurrentUser();
 
