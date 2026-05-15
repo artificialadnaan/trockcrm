@@ -41,12 +41,12 @@ const DEAL_STAGE_ORDER = [
 const DEFAULT_PAGE_SIZE = 25;
 export const MAX_EXPORT_PAGES = 50;
 const EXPORT_PAGE_SIZE = 500;
+const DEFAULT_SORT_STATE = { key: "updated_at", dir: "desc" } satisfies DealListSortState;
+const EMPTY_STAGE_SLUGS: string[] = [];
 
 type SortKey = "name" | "stage_entered_at" | "awarded_amount" | "updated_at";
 export type DealListSortState = { key: SortKey | "expected_close_date" | "contract_signed_date"; dir: "asc" | "desc" };
 type DealListActiveFilter = boolean | "all" | "pipeline";
-const DEFAULT_SORT: DealListSortState = { key: "updated_at", dir: "desc" };
-const DEFAULT_STAGE_SLUGS: string[] = [];
 
 interface DealsListSectionProps {
   scope?: "mine" | "team" | "all";
@@ -107,8 +107,8 @@ function getDealPropertyLabel(deal: Deal) {
   );
 }
 
-function getDealCloseDate(deal: Deal) {
-  return deal.expectedCloseDate ?? deal.actualCloseDate ?? null;
+export function getDealCloseDate(deal: Deal) {
+  return deal.actualCloseDate ?? deal.expectedCloseDate ?? null;
 }
 
 function renderStageChip(label: string) {
@@ -126,6 +126,51 @@ function renderStageChip(label: string) {
 function escapeCsvCell(value: string | number | null | undefined) {
   const text = value == null ? "" : String(value);
   return /[",\n]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text;
+}
+
+function DealsListPagination({
+  page,
+  total,
+  totalPages,
+  onPageChange,
+}: {
+  page: number;
+  total: number;
+  totalPages: number;
+  onPageChange: (page: number) => void;
+}) {
+  return (
+    <div className="flex items-center justify-between gap-4 border-t border-slate-200 pt-4">
+      <div>
+        <p className="text-[11px] font-black uppercase tracking-[0.18em] text-slate-500">
+          {total} total records
+        </p>
+        <p className="text-sm font-medium text-slate-500">
+          Page {page} of {totalPages || 1}
+        </p>
+      </div>
+      <div className="flex items-center gap-2">
+        <button
+          type="button"
+          aria-label="Previous page"
+          disabled={page <= 1}
+          onClick={() => onPageChange(page - 1)}
+          className="inline-flex h-9 w-9 items-center justify-center rounded-full border border-slate-200 bg-white text-slate-700 disabled:cursor-not-allowed disabled:opacity-50"
+        >
+          <span aria-hidden="true">‹</span>
+        </button>
+        <button
+          type="button"
+          aria-label="Next page"
+          disabled={page >= totalPages}
+          onClick={() => onPageChange(page + 1)}
+          className="inline-flex h-9 w-9 items-center justify-center rounded-full border border-slate-200 bg-white text-slate-700 disabled:cursor-not-allowed disabled:opacity-50"
+        >
+          <span aria-hidden="true">›</span>
+        </button>
+      </div>
+    </div>
+  );
 }
 
 function renderDescriptionPreview(description: string | null | undefined) {
@@ -363,8 +408,8 @@ export function DealsListSection({
   pageSize = DEFAULT_PAGE_SIZE,
   searchPlaceholder = "Deal name, number, company, address",
   baseFilters,
-  initialSort = DEFAULT_SORT,
-  initialStageSlugs = DEFAULT_STAGE_SLUGS,
+  initialSort = DEFAULT_SORT_STATE,
+  initialStageSlugs = EMPTY_STAGE_SLUGS,
 }: DealsListSectionProps) {
   const navigate = useNavigate();
   const [search, setSearch] = useState("");
@@ -486,6 +531,16 @@ export function DealsListSection({
       dir: current.key === key && current.dir === "desc" ? "asc" : "desc",
     }));
   };
+
+  const restoreUpdatedSort = () => {
+    setSort((current) => (
+      current.key === "updated_at"
+        ? { key: "updated_at", dir: current.dir === "desc" ? "asc" : "desc" }
+        : DEFAULT_SORT_STATE
+    ));
+  };
+
+  const isUpdatedSortActive = sort.key === "updated_at";
 
   const exportCsv = async () => {
     if (!listQueryState.enabled) {
@@ -771,6 +826,18 @@ export function DealsListSection({
             </button>
           );
         })}
+        <button
+          type="button"
+          className={cn(
+            "ml-auto rounded-full border px-3 py-1.5 text-xs font-black uppercase tracking-[0.12em]",
+            isUpdatedSortActive
+              ? "border-brand-red bg-brand-red text-white"
+              : "border-slate-200 bg-white text-slate-600 hover:border-brand-red/40 hover:text-brand-red"
+          )}
+          onClick={restoreUpdatedSort}
+        >
+          Updated {isUpdatedSortActive ? (sort.dir === "asc" ? "↑" : "↓") : null}
+        </button>
       </div>
 
       <div className="p-4">
@@ -789,14 +856,6 @@ export function DealsListSection({
         ) : (
           <>
             <div className="space-y-3 md:hidden" aria-label="Deals list cards">
-              <div className="flex items-center justify-between gap-4 px-1">
-                <p className="text-[11px] font-black uppercase tracking-[0.18em] text-slate-500">
-                  {pagination.total} total records
-                </p>
-                <p className="text-sm font-medium text-slate-500">
-                  Page {pagination.page} of {pagination.totalPages || 1}
-                </p>
-              </div>
               {deals.map((deal) => {
                 const displayNumber = getDealDisplayNumber(deal);
                 const ownerName = deal.assignedRepName ?? assigneeNameById.get(deal.assignedRepId) ?? "Unassigned";
@@ -873,6 +932,7 @@ export function DealsListSection({
                 rows={deals}
                 columns={tableColumns}
                 tableClassName="table-fixed w-full md:min-w-[44rem] lg:min-w-[58rem] xl:min-w-0"
+                showPagination={false}
                 pagination={{
                   page: pagination.page,
                   pageSize: pagination.limit,
@@ -884,6 +944,12 @@ export function DealsListSection({
                 getRowKey={(deal) => deal.id}
               />
             </div>
+            <DealsListPagination
+              page={pagination.page}
+              total={pagination.total}
+              totalPages={pagination.totalPages || 1}
+              onPageChange={setPage}
+            />
           </>
         )}
       </div>

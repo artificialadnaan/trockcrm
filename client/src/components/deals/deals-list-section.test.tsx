@@ -9,9 +9,12 @@ import type { ReactNode } from "react";
 import {
   DealsListSection,
   buildDealStageFilterOptions,
+  getDealCloseDate,
   getSelectedDealStageIds,
   getVisibleListTerminalStageIds,
 } from "./deals-list-section";
+
+(globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
 const mocks = vi.hoisted(() => ({
   useDealsMock: vi.fn(),
@@ -19,8 +22,6 @@ const mocks = vi.hoisted(() => ({
   useTaskAssigneesMock: vi.fn(),
   apiMock: vi.fn(),
 }));
-
-(globalThis as unknown as { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
 vi.mock("@/hooks/use-deals", () => ({
   useDeals: mocks.useDealsMock,
@@ -148,6 +149,28 @@ async function renderDom(props: Parameters<typeof DealsListSection>[0] = {}) {
         root.unmount();
       });
       container.remove();
+    },
+  };
+}
+
+function renderInteractive(props: Parameters<typeof DealsListSection>[0] = {}) {
+  const container = document.createElement("div");
+  const root = createRoot(container);
+
+  act(() => {
+    root.render(
+      <MemoryRouter>
+        <DealsListSection {...props} />
+      </MemoryRouter>
+    );
+  });
+
+  return {
+    container,
+    unmount: () => {
+      act(() => {
+        root.unmount();
+      });
     },
   };
 }
@@ -507,9 +530,9 @@ describe("DealsListSection", () => {
       initialStageSlugs: [],
     });
     try {
-      const nextPageButton = Array.from(container.querySelectorAll("svg"))
-        .find((icon) => icon.className.baseVal?.includes("lucide-chevron-right") || String(icon.getAttribute("class")).includes("lucide-chevron-right"))
-        ?.closest("button");
+      const nextPageButton = Array.from(container.querySelectorAll("button")).find(
+        (button) => button.getAttribute("aria-label") === "Next page"
+      );
       expect(nextPageButton).not.toBeNull();
 
       await act(async () => {
@@ -533,6 +556,32 @@ describe("DealsListSection", () => {
     }
   });
 
+  it("renders shared pagination controls for the mobile card view and advances pages", () => {
+    mocks.useDealsMock.mockReturnValue({
+      deals: [makeDeal(), makeDeal({ id: "deal-2", name: "Second" })],
+      pagination: { page: 1, limit: 25, total: 60, totalPages: 3 },
+      loading: false,
+      error: null,
+      refetch: vi.fn(),
+    });
+
+    const { container, unmount } = renderInteractive();
+
+    expect(container.textContent).toContain("Page 1 of 3");
+    const buttons = Array.from(container.querySelectorAll("button"));
+    const nextButton = buttons.find((button) => button.getAttribute("aria-label") === "Next page");
+    expect(nextButton).toBeTruthy();
+
+    act(() => {
+      nextButton!.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+
+    const lastCall = mocks.useDealsMock.mock.calls[mocks.useDealsMock.mock.calls.length - 1][0];
+    expect(lastCall.page).toBe(2);
+
+    unmount();
+  });
+
   it("renders a mobile card layout and keeps the desktop table hidden below md", () => {
     const html = render({
       searchPlaceholder: "Search deals or accounts",
@@ -544,6 +593,60 @@ describe("DealsListSection", () => {
     expect(html).toContain("line-clamp-2");
     expect(html).toContain("min-h-11");
     expect(html).toContain("hidden overflow-x-auto md:block");
+  });
+
+  it("prefers actual close date over expected close date when both exist", () => {
+    expect(
+      getDealCloseDate(
+        makeDeal({
+          actualCloseDate: "2026-04-15T00:00:00.000Z",
+          expectedCloseDate: "2026-05-20T00:00:00.000Z",
+        }) as never
+      )
+    ).toBe("2026-04-15T00:00:00.000Z");
+  });
+
+  it("uses expected close date when actual close date is absent", () => {
+    expect(
+      getDealCloseDate(
+        makeDeal({
+          actualCloseDate: null,
+          expectedCloseDate: "2026-05-20T00:00:00.000Z",
+        }) as never
+      )
+    ).toBe("2026-05-20T00:00:00.000Z");
+  });
+
+  it("returns null when neither close date exists", () => {
+    expect(
+      getDealCloseDate(
+        makeDeal({
+          actualCloseDate: null,
+          expectedCloseDate: null,
+        }) as never
+      )
+    ).toBeNull();
+  });
+
+  it("restores updated sort control reachable from the shared list UI", () => {
+    const { container, unmount } = renderInteractive({
+      initialSort: { key: "name", dir: "asc" },
+    });
+
+    const updatedButton = Array.from(container.querySelectorAll("button")).find((button) =>
+      button.textContent?.includes("Updated")
+    );
+    expect(updatedButton).toBeTruthy();
+
+    act(() => {
+      updatedButton!.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+
+    const lastCall = mocks.useDealsMock.mock.calls[mocks.useDealsMock.mock.calls.length - 1][0];
+    expect(lastCall.sortBy).toBe("updated_at");
+    expect(lastCall.sortDir).toBe("desc");
+
+    unmount();
   });
 
   it("uses fixed-width tablet and desktop columns so stage, sla, value, and dates cannot overlap", () => {

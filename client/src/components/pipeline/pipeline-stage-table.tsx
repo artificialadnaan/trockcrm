@@ -34,6 +34,7 @@ interface PipelineStageTableProps<T> {
   onRowClick?: (row: T) => void;
   getRowKey?: (row: T, index: number) => string;
   tableClassName?: string;
+  showPagination?: boolean;
 }
 
 export function PipelineStageTable<T>({
@@ -44,17 +45,20 @@ export function PipelineStageTable<T>({
   onRowClick,
   getRowKey,
   tableClassName,
+  showPagination = true,
 }: PipelineStageTableProps<T>) {
   return (
     <div className="space-y-4">
-      <div className="flex items-center justify-between gap-4 px-1">
-        <p className="text-[11px] font-black tracking-[0.18em] text-slate-500 uppercase">
-          {pagination.total} total records
-        </p>
-        <p className="text-sm font-medium text-slate-500">
-          Page {pagination.page} of {pagination.totalPages || 1}
-        </p>
-      </div>
+      {showPagination ? (
+        <div className="flex items-center justify-between gap-4 px-1">
+          <p className="text-[11px] font-black tracking-[0.18em] text-slate-500 uppercase">
+            {pagination.total} total records
+          </p>
+          <p className="text-sm font-medium text-slate-500">
+            Page {pagination.page} of {pagination.totalPages || 1}
+          </p>
+        </div>
+      ) : null}
       <Table className={cn("overflow-hidden rounded-[1.25rem]", tableClassName)}>
         <TableHeader>
           <TableRow>
@@ -93,7 +97,8 @@ export function PipelineStageTable<T>({
           ))}
         </TableBody>
       </Table>
-      <div className="flex items-center justify-end gap-2 px-1">
+      {showPagination ? (
+        <div className="flex items-center justify-end gap-2 px-1">
           <Button
             variant="outline"
             size="sm"
@@ -112,7 +117,8 @@ export function PipelineStageTable<T>({
           >
             <ChevronRight className="h-4 w-4" />
           </Button>
-      </div>
+        </div>
+      ) : null}
     </div>
   );
 }
