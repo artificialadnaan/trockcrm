@@ -24,6 +24,7 @@ import {
   type WorkflowRoute,
 } from "@trock-crm/shared/types";
 import { db } from "../../db.js";
+import { TERMINAL_STAGE_SLUGS } from "../shared/pipeline-terminal-stages.js";
 import {
   getPipelineSummary,
   getWinRateTrend,
@@ -41,6 +42,17 @@ type ExecuteRows<T> = { rows: T[] } | T[];
 
 function rowsFromExecute<T>(result: ExecuteRows<T>): T[] {
   return Array.isArray(result) ? result : result.rows;
+}
+
+function sqlSlugList(values: readonly string[]) {
+  return sql.join(values.map((value) => sql`${value}`), sql`, `);
+}
+
+function nonTerminalDealStageSql() {
+  return sql`
+    psc.is_terminal = false
+    AND COALESCE(d.bid_board_stage_slug, psc.slug) NOT IN (${sqlSlugList(TERMINAL_STAGE_SLUGS)})
+  `;
 }
 // Intentionally includes canonical stage-v2 slugs plus historical aliases so
 // dashboard counts stay accurate while legacy rows still exist during rollout.
@@ -1156,7 +1168,7 @@ export async function getRepDashboard(
       JOIN pipeline_stage_config psc ON psc.id = d.stage_id
       WHERE d.is_active = true
         AND d.assigned_rep_id = ${userId}
-        AND NOT psc.is_terminal
+        AND ${nonTerminalDealStageSql()}
     `),
 
     // 2. Tasks: overdue + today counts
@@ -1203,7 +1215,7 @@ export async function getRepDashboard(
       JOIN pipeline_stage_config psc ON psc.id = d.stage_id
       WHERE d.is_active = true
         AND d.assigned_rep_id = ${userId}
-        AND NOT psc.is_terminal
+        AND ${nonTerminalDealStageSql()}
         AND psc.is_active_pipeline = true
       GROUP BY d.stage_id, psc.name, psc.color, psc.display_order
       ORDER BY psc.display_order ASC
@@ -1253,7 +1265,7 @@ export async function getRepDashboard(
       JOIN pipeline_stage_config psc ON psc.id = d.stage_id
       WHERE d.is_active = true
         AND d.assigned_rep_id = ${userId}
-        AND NOT psc.is_terminal
+        AND ${nonTerminalDealStageSql()}
       ORDER BY d.updated_at DESC
       LIMIT 5
     `),
@@ -2048,10 +2060,10 @@ async function buildRepPerformanceCards(
     WITH rep_deals AS (
       SELECT
         d.assigned_rep_id AS rep_id,
-        COUNT(*) FILTER (WHERE d.is_active AND NOT psc.is_terminal)::int AS active_deals,
+        COUNT(*) FILTER (WHERE d.is_active AND ${nonTerminalDealStageSql()})::int AS active_deals,
         COALESCE(SUM(
           COALESCE(d.awarded_amount, d.bid_estimate, d.dd_estimate, 0)
-        ) FILTER (WHERE d.is_active AND NOT psc.is_terminal AND psc.is_active_pipeline), 0)::numeric AS pipeline_value
+        ) FILTER (WHERE d.is_active AND ${nonTerminalDealStageSql()} AND psc.is_active_pipeline), 0)::numeric AS pipeline_value
       FROM deals d
       JOIN pipeline_stage_config psc ON psc.id = d.stage_id
       GROUP BY d.assigned_rep_id
@@ -2089,7 +2101,7 @@ async function buildRepPerformanceCards(
       FROM deals d
       JOIN pipeline_stage_config psc ON psc.id = d.stage_id
       WHERE d.is_active = true
-        AND NOT psc.is_terminal
+        AND ${nonTerminalDealStageSql()}
         AND psc.stale_threshold_days IS NOT NULL
         AND EXTRACT(DAY FROM NOW() - d.stage_entered_at) > psc.stale_threshold_days
       GROUP BY d.assigned_rep_id

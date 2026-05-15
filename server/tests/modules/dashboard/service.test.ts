@@ -208,6 +208,34 @@ describe("Dashboard Service", () => {
       expect(activityQueryText).not.toContain("where user_id =");
     });
 
+    it("excludes mirrored terminal stage slugs from rep active deal counts and pipeline value", async () => {
+      const { getRepDashboard } = await import("../../../src/modules/dashboard/service.js");
+      const tenantDb = createMockTenantDb([
+        [{ count: "0" }],
+        [{ count: "0", total_value: "0" }],
+        [{ overdue: "0", today: "0" }],
+        [{ calls: "0", emails: "0", meetings: "0", notes: "0", total: "0" }],
+        [{ total: "0", on_time: "0" }],
+        [],
+        [],
+        [],
+        [],
+      ]);
+
+      await getRepDashboard(tenantDb, "user-1");
+
+      const activeDealQuery = extractSqlText(tenantDb.execute.mock.calls[1][0]).toLowerCase();
+      const pipelineByStageQuery = extractSqlText(tenantDb.execute.mock.calls[5][0]).toLowerCase();
+      expect(activeDealQuery).toContain("coalesce(d.bid_board_stage_slug, psc.slug)");
+      expect(activeDealQuery).toContain("not in");
+      expect(activeDealQuery).toContain("closed_won");
+      expect(activeDealQuery).toContain("service_lost");
+      expect(pipelineByStageQuery).toContain("coalesce(d.bid_board_stage_slug, psc.slug)");
+      expect(pipelineByStageQuery).toContain("not in");
+      expect(pipelineByStageQuery).toContain("closed_won");
+      expect(pipelineByStageQuery).toContain("service_lost");
+    });
+
     it("returns canonical funnel buckets for the rep dashboard", async () => {
       const { getRepDashboard } = await import("../../../src/modules/dashboard/service.js");
       const tenantDb = createMockTenantDb([

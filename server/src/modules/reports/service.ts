@@ -15,6 +15,7 @@ import {
 import type * as schema from "@trock-crm/shared/schema";
 import type { DealScopingIntakeStatus, WorkflowRoute } from "@trock-crm/shared/types";
 import { db } from "../../db.js";
+import { TERMINAL_STAGE_SLUGS } from "../shared/pipeline-terminal-stages.js";
 
 type TenantDb = NodePgDatabase<typeof schema>;
 type ExecuteRows<T> = { rows: T[] } | T[];
@@ -161,6 +162,13 @@ export function normalizeAnalyticsFilters(
 
 function sqlSlugList(values: readonly string[]) {
   return sql.join(values.map((value) => sql`${value}`), sql`, `);
+}
+
+function nonTerminalDealStageSql() {
+  return sql`
+    psc.is_terminal = false
+    AND COALESCE(d.bid_board_stage_slug, psc.slug) NOT IN (${sqlSlugList(TERMINAL_STAGE_SLUGS)})
+  `;
 }
 
 // ---------------------------------------------------------------------------
@@ -509,6 +517,7 @@ export async function getPipelineSummary(
     WHERE d.is_active = true
       AND COALESCE(d.is_test_data, false) = false
       AND d.stage_id IN (${sql.join(stageIds.map(id => sql`${id}`), sql`, `)})
+      AND COALESCE(d.bid_board_stage_slug, '') NOT IN (${sqlSlugList(TERMINAL_STAGE_SLUGS)})
       ${repFilter}
     GROUP BY d.stage_id
   `);
@@ -574,7 +583,7 @@ export async function getWeightedPipelineForecast(
     JOIN pipeline_stage_config psc ON psc.id = d.stage_id
     WHERE d.is_active = true
       AND COALESCE(d.is_test_data, false) = false
-      AND psc.is_terminal = false
+      AND ${nonTerminalDealStageSql()}
       AND d.expected_close_date IS NOT NULL
       AND d.expected_close_date >= ${from}::date
       AND d.expected_close_date <= ${to}::date
@@ -820,7 +829,7 @@ export async function getStaleDeals(
     JOIN users u ON u.id = d.assigned_rep_id
     WHERE d.is_active = true
       AND COALESCE(d.is_test_data, false) = false
-      AND psc.is_terminal = false
+      AND ${nonTerminalDealStageSql()}
       AND COALESCE(mirror_psc.stale_threshold_days, psc.stale_threshold_days) IS NOT NULL
       AND EXTRACT(DAY FROM NOW() - COALESCE(d.bid_board_stage_entered_at, d.stage_entered_at))
         > COALESCE(mirror_psc.stale_threshold_days, psc.stale_threshold_days)
@@ -1016,12 +1025,12 @@ export async function getLeadSourceROI(
       COALESCE(NULLIF(TRIM(d.source), ''), 'Unknown') AS source,
       COUNT(DISTINCT dsi.id)::int AS lead_count,
       COUNT(DISTINCT d.id)::int AS deal_count,
-      COUNT(DISTINCT d.id) FILTER (WHERE d.is_active = true AND NOT psc.is_terminal)::int AS active_deals,
+      COUNT(DISTINCT d.id) FILTER (WHERE d.is_active = true AND ${nonTerminalDealStageSql()})::int AS active_deals,
       COUNT(DISTINCT d.id) FILTER (WHERE psc.slug IN (${sqlSlugList(WON_OUTCOME_STAGE_SLUGS)}))::int AS won_deals,
       COUNT(DISTINCT d.id) FILTER (WHERE psc.slug IN (${sqlSlugList(LOST_OUTCOME_STAGE_SLUGS)}))::int AS lost_deals,
       COALESCE(SUM(
         COALESCE(d.awarded_amount, d.bid_estimate, d.dd_estimate, 0)
-      ) FILTER (WHERE d.is_active = true AND NOT psc.is_terminal), 0)::numeric AS active_pipeline_value,
+      ) FILTER (WHERE d.is_active = true AND ${nonTerminalDealStageSql()}), 0)::numeric AS active_pipeline_value,
       COALESCE(SUM(
         COALESCE(d.awarded_amount, d.bid_estimate, 0)
       ) FILTER (WHERE psc.slug IN (${sqlSlugList(WON_OUTCOME_STAGE_SLUGS)})), 0)::numeric AS won_value
@@ -1460,14 +1469,14 @@ export async function getRegionalOwnershipOverview(
       SELECT
         d.region_id,
         COALESCE(rc.name, 'Unassigned') AS region_name,
-        COUNT(*) FILTER (WHERE d.is_active = true AND NOT psc.is_terminal)::int AS deal_count,
+        COUNT(*) FILTER (WHERE d.is_active = true AND ${nonTerminalDealStageSql()})::int AS deal_count,
         COALESCE(SUM(
           COALESCE(d.awarded_amount, d.bid_estimate, d.dd_estimate, 0)
-        ) FILTER (WHERE d.is_active = true AND NOT psc.is_terminal), 0)::numeric AS pipeline_value,
+        ) FILTER (WHERE d.is_active = true AND ${nonTerminalDealStageSql()}), 0)::numeric AS pipeline_value,
         COUNT(*) FILTER (
           WHERE d.is_active = true
       AND COALESCE(d.is_test_data, false) = false
-            AND NOT psc.is_terminal
+            AND ${nonTerminalDealStageSql()}
             AND psc.stale_threshold_days IS NOT NULL
             AND EXTRACT(DAY FROM NOW() - d.stage_entered_at) > psc.stale_threshold_days
         )::int AS stale_deal_count
@@ -1488,14 +1497,14 @@ export async function getRegionalOwnershipOverview(
       SELECT
         d.assigned_rep_id AS rep_id,
         COALESCE(u.display_name, 'Unassigned') AS rep_name,
-        COUNT(*) FILTER (WHERE d.is_active = true AND NOT psc.is_terminal)::int AS deal_count,
+        COUNT(*) FILTER (WHERE d.is_active = true AND ${nonTerminalDealStageSql()})::int AS deal_count,
         COALESCE(SUM(
           COALESCE(d.awarded_amount, d.bid_estimate, d.dd_estimate, 0)
-        ) FILTER (WHERE d.is_active = true AND NOT psc.is_terminal), 0)::numeric AS pipeline_value,
+        ) FILTER (WHERE d.is_active = true AND ${nonTerminalDealStageSql()}), 0)::numeric AS pipeline_value,
         COUNT(*) FILTER (
           WHERE d.is_active = true
       AND COALESCE(d.is_test_data, false) = false
-            AND NOT psc.is_terminal
+            AND ${nonTerminalDealStageSql()}
             AND psc.stale_threshold_days IS NOT NULL
             AND EXTRACT(DAY FROM NOW() - d.stage_entered_at) > psc.stale_threshold_days
         )::int AS stale_deal_count
@@ -1659,12 +1668,12 @@ export async function getDdVsPipeline(
     SELECT
       COALESCE(SUM(
         COALESCE(d.awarded_amount, d.bid_estimate, d.dd_estimate, 0)
-      ) FILTER (WHERE NOT psc.is_active_pipeline AND NOT psc.is_terminal), 0)::numeric AS dd_value,
-      COUNT(*) FILTER (WHERE NOT psc.is_active_pipeline AND NOT psc.is_terminal)::int AS dd_count,
+      ) FILTER (WHERE NOT psc.is_active_pipeline AND ${nonTerminalDealStageSql()}), 0)::numeric AS dd_value,
+      COUNT(*) FILTER (WHERE NOT psc.is_active_pipeline AND ${nonTerminalDealStageSql()})::int AS dd_count,
       COALESCE(SUM(
         COALESCE(d.awarded_amount, d.bid_estimate, d.dd_estimate, 0)
-      ) FILTER (WHERE psc.is_active_pipeline AND NOT psc.is_terminal), 0)::numeric AS pipeline_value,
-      COUNT(*) FILTER (WHERE psc.is_active_pipeline AND NOT psc.is_terminal)::int AS pipeline_count
+      ) FILTER (WHERE psc.is_active_pipeline AND ${nonTerminalDealStageSql()}), 0)::numeric AS pipeline_value,
+      COUNT(*) FILTER (WHERE psc.is_active_pipeline AND ${nonTerminalDealStageSql()})::int AS pipeline_count
     FROM deals d
     JOIN pipeline_stage_config psc ON psc.id = d.stage_id
     WHERE d.is_active = true
@@ -1850,7 +1859,7 @@ export async function getPipelineByRep(
     JOIN users u ON u.id = d.assigned_rep_id
     WHERE d.is_active = true
       AND COALESCE(d.is_test_data, false) = false
-      AND psc.is_terminal = false
+      AND ${nonTerminalDealStageSql()}
       ${repFilter}
     GROUP BY d.assigned_rep_id, u.display_name, d.stage_id, psc.name, psc.display_order
     ORDER BY u.display_name ASC, psc.display_order ASC
@@ -2024,14 +2033,14 @@ export async function getUnifiedWorkflowOverview(
     tenantDb.execute(sql`
       SELECT
         d.workflow_route,
-        COUNT(*) FILTER (WHERE d.is_active = true AND NOT psc.is_terminal)::int AS deal_count,
+        COUNT(*) FILTER (WHERE d.is_active = true AND ${nonTerminalDealStageSql()})::int AS deal_count,
         COALESCE(SUM(
           COALESCE(d.awarded_amount, d.bid_estimate, d.dd_estimate, 0)
-        ) FILTER (WHERE d.is_active = true AND NOT psc.is_terminal), 0)::numeric AS total_value,
+        ) FILTER (WHERE d.is_active = true AND ${nonTerminalDealStageSql()}), 0)::numeric AS total_value,
         COUNT(*) FILTER (
           WHERE d.is_active = true
       AND COALESCE(d.is_test_data, false) = false
-            AND NOT psc.is_terminal
+            AND ${nonTerminalDealStageSql()}
             AND psc.stale_threshold_days IS NOT NULL
             AND EXTRACT(DAY FROM NOW() - d.stage_entered_at) > psc.stale_threshold_days
         )::int AS stale_deal_count
@@ -2058,9 +2067,9 @@ export async function getUnifiedWorkflowOverview(
             COALESCE(LOWER(NULLIF(TRIM(d.property_zip), '')), '')
         END)::int AS property_count,
         COUNT(*)::int AS deal_count,
-        COUNT(*) FILTER (WHERE d.is_active = true AND NOT psc.is_terminal)::int AS active_deal_count,
-        COUNT(*) FILTER (WHERE d.workflow_route = 'normal' AND NOT psc.is_terminal)::int AS standard_deal_count,
-        COUNT(*) FILTER (WHERE d.workflow_route = 'service' AND NOT psc.is_terminal)::int AS service_deal_count,
+        COUNT(*) FILTER (WHERE d.is_active = true AND ${nonTerminalDealStageSql()})::int AS active_deal_count,
+        COUNT(*) FILTER (WHERE d.workflow_route = 'normal' AND ${nonTerminalDealStageSql()})::int AS standard_deal_count,
+        COUNT(*) FILTER (WHERE d.workflow_route = 'service' AND ${nonTerminalDealStageSql()})::int AS service_deal_count,
         COALESCE(SUM(
           COALESCE(d.awarded_amount, d.bid_estimate, d.dd_estimate, 0)
         ), 0)::numeric AS total_value
@@ -2146,7 +2155,7 @@ export async function getUnifiedWorkflowOverview(
       JOIN users u ON u.id = d.assigned_rep_id
       WHERE d.is_active = true
       AND COALESCE(d.is_test_data, false) = false
-        AND psc.is_terminal = false
+        AND ${nonTerminalDealStageSql()}
         AND COALESCE(mirror_psc.stale_threshold_days, psc.stale_threshold_days) IS NOT NULL
         AND EXTRACT(DAY FROM NOW() - COALESCE(d.bid_board_stage_entered_at, d.stage_entered_at))
           > COALESCE(mirror_psc.stale_threshold_days, psc.stale_threshold_days)

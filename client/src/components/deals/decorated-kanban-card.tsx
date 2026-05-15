@@ -3,6 +3,7 @@ import { bestEstimate, daysInStage, formatCurrencyCompact } from "@/lib/deal-uti
 import type { Deal } from "@/hooks/use-deals";
 import { cn } from "@/lib/utils";
 import { getDealDisplayNumber } from "@/components/deals/kanban-deal-card";
+import { isTerminalStage } from "@/lib/pipeline-terminal-filters";
 
 function getInitials(deal: Deal) {
   if (!deal.assignedRepName) return "TR";
@@ -30,13 +31,14 @@ interface DecoratedKanbanCardProps {
 
 export function DecoratedKanbanCard({
   deal,
-  stageSlug: _stageSlug,
+  stageSlug,
   slaDays,
   onClick,
 }: DecoratedKanbanCardProps) {
   const displayNumber = getDealDisplayNumber(deal);
   const days = daysInStage(deal.stageEnteredAt);
-  const isOverSla = slaDays > 0 && days > slaDays;
+  const showSla = !isTerminalStage(stageSlug);
+  const isOverSla = showSla && slaDays > 0 && days > slaDays;
   const location = locationLine(deal);
 
   return (
@@ -78,7 +80,7 @@ export function DecoratedKanbanCard({
         <div className="flex flex-col gap-1 text-[11px] font-semibold text-slate-500">
           <span className={cn("inline-flex items-center gap-1", isOverSla ? "text-brand-red" : "")}>
             <Clock className="h-3 w-3" />
-            {days}d / {slaDays}d SLA
+            {showSla ? `${days}d / ${slaDays}d SLA` : `${days}d`}
           </span>
           {location ? (
             <span className="inline-flex min-w-0 items-center gap-1 truncate">

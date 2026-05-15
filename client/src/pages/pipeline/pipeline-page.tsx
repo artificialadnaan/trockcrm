@@ -10,7 +10,7 @@ import {
   type DragEndEvent,
 } from "@dnd-kit/core";
 import { useDroppable, useDraggable } from "@dnd-kit/core";
-import { GripVertical, Plus } from "lucide-react";
+import { GripVertical } from "lucide-react";
 import { StageChangeDialog } from "@/components/deals/stage-change-dialog";
 import { TerminalDateFilterControl } from "@/components/pipeline/terminal-date-filter-control";
 import { DealsListSection } from "@/components/deals/deals-list-section";
@@ -21,8 +21,10 @@ import { formatCurrencyCompact, daysInStage } from "@/lib/deal-utils";
 import {
   buildDealStageWorkspacePath,
   buildPipelineRequestPath,
+  calculateActivePipelineTotal,
   getActivePipelineColumns,
   getTerminalDateFilterLabel,
+  getTerminalStageOutcome,
   isTerminalOutcomeSlug,
   readTerminalDateFiltersFromSearchParams,
   setTerminalDateFilterSearchParams,
@@ -67,13 +69,11 @@ interface TerminalStageInfo {
 }
 
 export function summarizeTerminalStageCounts(terminalStages: TerminalStageInfo[]) {
-  const wonStageSlugs = ["won", "sent_to_production", "service_sent_to_production", "closed_won"];
-  const lostStageSlugs = ["lost", "production_lost", "service_lost", "closed_lost"];
   const won = terminalStages
-    .filter((ts) => wonStageSlugs.includes(ts.stage.slug))
+    .filter((ts) => getTerminalStageOutcome(ts.stage.slug) === "won")
     .reduce((sum, ts) => sum + ts.count, 0);
   const lost = terminalStages
-    .filter((ts) => lostStageSlugs.includes(ts.stage.slug))
+    .filter((ts) => getTerminalStageOutcome(ts.stage.slug) === "lost")
     .reduce((sum, ts) => sum + ts.count, 0);
 
   return { won, lost };
@@ -81,17 +81,27 @@ export function summarizeTerminalStageCounts(terminalStages: TerminalStageInfo[]
 
 export function summarizeActivePipelineColumns(columns: PipelineColumn[]) {
   const activeColumns = getActivePipelineColumns(columns);
-  const totalDeals = activeColumns.reduce((sum, col) => sum + col.count, 0);
-  const totalValue = activeColumns.reduce((sum, col) => sum + col.totalValue, 0);
-  const allDeals = activeColumns.flatMap((col) => col.deals);
+  const allDeals = activeColumns.flatMap((col) =>
+    col.deals.map((deal) => ({
+      ...deal,
+      stageSlug: col.stage.slug,
+    }))
+  );
+  const activePipelineTotal = calculateActivePipelineTotal(allDeals);
   const averageVelocity =
-    allDeals.length === 0
+    activePipelineTotal.count === 0
       ? 0
       : Math.round(
-          allDeals.reduce((sum, deal) => sum + daysInStage(deal.stageEnteredAt), 0) / allDeals.length
+          allDeals
+            .filter((deal) => !deal.bidBoardStageSlug || getTerminalStageOutcome(deal.bidBoardStageSlug) === null)
+            .reduce((sum, deal) => sum + daysInStage(deal.stageEnteredAt), 0) / activePipelineTotal.count
         );
 
-  return { totalDeals, totalValue, averageVelocity };
+  return {
+    totalDeals: activePipelineTotal.count,
+    totalValue: activePipelineTotal.amount,
+    averageVelocity,
+  };
 }
 
 function formatRefreshedLabel(date: Date, now: Date): string {
@@ -438,14 +448,6 @@ export function PipelinePage() {
               />
             </button>
           </div>
-
-          <button
-            onClick={() => navigate("/deals/new")}
-            className="inline-flex items-center gap-1.5 bg-brand-red px-3 py-1.5 text-sm font-medium text-white hover:bg-brand-red/90 focus:outline-none focus-visible:ring-2 focus-visible:ring-brand-red focus-visible:ring-offset-2"
-          >
-            <Plus className="h-4 w-4" />
-            New Deal
-          </button>
         </div>
       </header>
 

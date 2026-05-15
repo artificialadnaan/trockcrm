@@ -14,7 +14,9 @@ import { useAuth } from "@/lib/auth";
 import { TerminalDateFilterControl } from "@/components/pipeline/terminal-date-filter-control";
 import {
   buildDealStageWorkspacePath,
+  calculateActivePipelineTotal,
   getTerminalDateFilterLabel,
+  isTerminalStage,
   isTerminalOutcomeSlug,
   readTerminalDateFiltersFromSearchParams,
   setTerminalDateFilterSearchParams,
@@ -218,13 +220,16 @@ function DealListPageContent({ role }: { role: string }) {
     },
     [board?.columns, search, stages]
   );
-  const totalCount = columns.reduce((sum, column) => sum + column.count, 0);
-  const totalValue = columns.reduce(
-    (sum, column) =>
-      sum +
-      (column.totalValue ?? column.cards.reduce((cardSum, deal) => cardSum + moneyValue(deal), 0)),
-    0
+  const activePipelineTotal = calculateActivePipelineTotal(
+    columns.flatMap((column) =>
+      column.cards.map((deal) => ({
+        ...deal,
+        stageSlug: column.stage.slug,
+      }))
+    )
   );
+  const totalCount = activePipelineTotal.count;
+  const totalValue = activePipelineTotal.amount;
   const wonValue =
     board?.terminalStages
       ?.filter((terminal) => terminal.stage.slug === "won")
@@ -235,10 +240,12 @@ function DealListPageContent({ role }: { role: string }) {
   const overSlaCount = columns.reduce(
     (sum, column) =>
       sum +
-      column.cards.filter((deal) => {
-        const sla = STAGE_SLA_DAYS[column.stage.slug] ?? 7;
-        return sla > 0 && daysInStage(deal.stageEnteredAt) > sla;
-      }).length,
+      (isTerminalStage(column.stage.slug)
+        ? 0
+        : column.cards.filter((deal) => {
+            const sla = STAGE_SLA_DAYS[column.stage.slug] ?? 7;
+            return sla > 0 && daysInStage(deal.stageEnteredAt) > sla;
+          }).length),
     0
   );
 
