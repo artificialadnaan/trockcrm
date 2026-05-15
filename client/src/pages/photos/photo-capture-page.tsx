@@ -13,6 +13,7 @@ import {
 } from "lucide-react";
 import { Button, buttonVariants } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { useAuth } from "@/lib/auth";
 import { buildFieldCaptureUrl } from "@/lib/field-app";
 import { searchPhotoUploadTargets, uploadFile, type PhotoUploadTarget } from "@/hooks/use-files";
 
@@ -46,6 +47,7 @@ export function groupPhotoUploadTargets(targets: PhotoUploadTarget[]) {
 }
 
 export function PhotoCapturePage() {
+  const { user } = useAuth();
   const [searchParams] = useSearchParams();
   const [targetSearch, setTargetSearch] = useState("");
   const [targetResults, setTargetResults] = useState<PhotoUploadTarget[]>([]);
@@ -56,7 +58,11 @@ export function PhotoCapturePage() {
   const [uploading, setUploading] = useState(false);
   const [uploadComplete, setUploadComplete] = useState(false);
   const [sessionCount, setSessionCount] = useState(0);
-  const fieldCaptureHref = buildFieldCaptureUrl(searchParams.toString() ? `?${searchParams.toString()}` : "");
+  const fieldCaptureParams = new URLSearchParams(searchParams);
+  if (user?.activeOfficeId && !fieldCaptureParams.get("officeId")) {
+    fieldCaptureParams.set("officeId", user.activeOfficeId);
+  }
+  const fieldCaptureHref = buildFieldCaptureUrl(fieldCaptureParams.toString() ? `?${fieldCaptureParams.toString()}` : "");
 
   const fileInputRef = useRef<HTMLInputElement>(null);
   const blobUrlsRef = useRef<string[]>([]);

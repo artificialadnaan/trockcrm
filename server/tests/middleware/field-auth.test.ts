@@ -4,11 +4,13 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 const mocks = vi.hoisted(() => ({
   verifyJwt: vi.fn(),
   getUserById: vi.fn(),
+  getOfficeAccess: vi.fn(),
 }));
 
 vi.mock("../../src/modules/auth/service.js", () => ({
   verifyJwt: mocks.verifyJwt,
   getUserById: mocks.getUserById,
+  getOfficeAccess: mocks.getOfficeAccess,
 }));
 
 const { requireCrmUser, requireFieldContractor } = await import("../../src/middleware/field-auth.js");
@@ -40,6 +42,7 @@ describe("field auth middleware", () => {
     vi.clearAllMocks();
     mocks.verifyJwt.mockReturnValue({ userId: "user-1", authMethod: "local" });
     mocks.getUserById.mockResolvedValue(createUser());
+    mocks.getOfficeAccess.mockResolvedValue({ hasAccess: true });
   });
 
   it.each(["field_contractor", "admin", "director", "rep", "construction"] as const)(
@@ -96,6 +99,31 @@ describe("field auth middleware", () => {
     await requireFieldContractor(createRequest(), {} as Response, unsupportedNext);
 
     expect(unsupportedNext.mock.calls[0]?.[0]).toMatchObject({ statusCode: 403 });
+  });
+
+  it("preserves requested active office context for accessible CRM users", async () => {
+    mocks.getUserById.mockResolvedValueOnce(createUser({ role: "admin", officeId: "office-primary" }));
+    mocks.getOfficeAccess.mockResolvedValueOnce({ hasAccess: true, roleOverride: "director" });
+    const req = createRequest({ headers: { "x-office-id": "office-branch" } as any });
+    const next = vi.fn() as NextFunction;
+
+    await requireFieldContractor(req, {} as Response, next);
+
+    expect(next).toHaveBeenCalledWith();
+    expect(mocks.getOfficeAccess).toHaveBeenCalledWith("user-1", "office-branch");
+    expect(req.user).toMatchObject({ role: "director", officeId: "office-primary", activeOfficeId: "office-branch" });
+    expect(req.fieldUser).toMatchObject({ role: "director", tenantId: "office-branch" });
+  });
+
+  it("rejects unauthorized office overrides for CRM users", async () => {
+    mocks.getUserById.mockResolvedValueOnce(createUser({ role: "admin", officeId: "office-primary" }));
+    mocks.getOfficeAccess.mockResolvedValueOnce({ hasAccess: false });
+    const req = createRequest({ headers: { "x-office-id": "office-unauthorized" } as any });
+    const next = vi.fn() as NextFunction;
+
+    await requireFieldContractor(req, {} as Response, next);
+
+    expect(next.mock.calls[0]?.[0]).toMatchObject({ statusCode: 403 });
   });
 
   it("requireCrmUser allows CRM users and rejects field contractors", () => {

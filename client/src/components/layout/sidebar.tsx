@@ -189,7 +189,8 @@ export function Sidebar() {
   const visibleDirectorItems = useMemo(() => getVisibleDirectorItems(role), [role]);
   const visibleAdminGroups = useMemo(() => getVisibleAdminGroups(role), [role]);
   const visibleHelpItems = useMemo(() => filterByRole(helpItems, role), [role]);
-  const captureHref = buildFieldCaptureUrl();
+  const captureSearch = user?.activeOfficeId ? `?${new URLSearchParams({ officeId: user.activeOfficeId }).toString()}` : "";
+  const captureHref = buildFieldCaptureUrl(captureSearch);
   const [expandedGroups, setExpandedGroups] = useState<Record<string, boolean>>(() =>
     getNextExpandedGroups({}, getVisibleAdminGroups(role), pathname),
   );

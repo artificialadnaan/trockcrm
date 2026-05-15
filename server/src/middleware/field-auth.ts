@@ -1,6 +1,6 @@
 import type { NextFunction, Request, Response } from "express";
 import type { UserRole } from "@trock-crm/shared/types";
-import { getUserById, verifyJwt } from "../modules/auth/service.js";
+import { getOfficeAccess, getUserById, verifyJwt } from "../modules/auth/service.js";
 import { AppError } from "./error-handler.js";
 
 type FieldUserRequest = {
@@ -58,13 +58,28 @@ export async function requireFieldContractor(req: Request, _res: Response, next:
       throw new AppError(403, "Field user is inactive");
     }
 
+    const requestedOfficeId = req.headers["x-office-id"] as string | undefined;
+    let activeOfficeId = user.officeId;
+    let effectiveRole = user.role as UserRole;
+
+    if (requestedOfficeId && requestedOfficeId !== user.officeId) {
+      const access = await getOfficeAccess(user.id, requestedOfficeId);
+      if (!access.hasAccess) {
+        throw new AppError(403, "No access to requested office");
+      }
+      activeOfficeId = requestedOfficeId;
+      if (access.roleOverride && FIELD_APP_ALLOWED_ROLE_SET.has(access.roleOverride as UserRole)) {
+        effectiveRole = access.roleOverride as UserRole;
+      }
+    }
+
     req.user = {
       id: user.id,
       email: user.email,
       displayName: user.displayName,
-      role: user.role,
+      role: effectiveRole,
       officeId: user.officeId,
-      activeOfficeId: user.officeId,
+      activeOfficeId,
       mustChangePassword: false,
       authMethod: claims.authMethod,
     };
@@ -73,8 +88,8 @@ export async function requireFieldContractor(req: Request, _res: Response, next:
       email: user.email,
       firstName: user.firstName ?? null,
       lastName: user.lastName ?? null,
-      role: user.role as UserRole,
-      tenantId: user.officeId,
+      role: effectiveRole,
+      tenantId: activeOfficeId,
       active: user.isActive,
     };
 

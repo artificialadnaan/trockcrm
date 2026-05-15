@@ -1,5 +1,6 @@
 import { Router } from "express";
 import { requireFieldContractor } from "../../middleware/field-auth.js";
+import { AppError } from "../../middleware/error-handler.js";
 import { tenantMiddleware } from "../../middleware/tenant.js";
 import { toFieldUserResponse } from "../field-users/service.js";
 import {
@@ -16,6 +17,15 @@ import {
 } from "./projects-service.js";
 
 export const fieldRoutes = Router();
+
+function parseOptionalPositiveInt(value: unknown): number | undefined {
+  if (typeof value !== "string") return undefined;
+  const parsed = Number.parseInt(value, 10);
+  if (Number.isNaN(parsed) || parsed < 1 || parsed > 100) {
+    throw new AppError(400, "limit must be a positive integer between 1 and 100");
+  }
+  return parsed;
+}
 
 function requestAuditContext(req: any) {
   const userAgentHeader = req.headers?.["user-agent"];
@@ -142,7 +152,7 @@ fieldRoutes.get("/photo-targets/search", ...fieldProjectMiddleware, async (req, 
       userRole: req.fieldUser!.role,
     }, {
       search: req.query.search as string | undefined,
-      limit: req.query.limit ? parseInt(req.query.limit as string, 10) : undefined,
+      limit: parseOptionalPositiveInt(req.query.limit),
     });
     await req.commitTransaction();
     res.json(result);

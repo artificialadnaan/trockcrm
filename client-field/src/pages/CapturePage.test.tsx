@@ -108,7 +108,7 @@ describe("CapturePage", () => {
   it("opens the target picker, searches, selects a target, and single-selects category", async () => {
     const node = renderPage();
 
-    await vi.waitFor(() => expect(apiMock).toHaveBeenCalled());
+    await vi.waitFor(() => expect(node.textContent).toContain("Choose target"));
     node.querySelector<HTMLButtonElement>('[aria-label="Choose target"]')?.click();
     await vi.waitFor(() => expect(node.textContent).toContain("Roof Repair"));
 
@@ -124,7 +124,7 @@ describe("CapturePage", () => {
     await vi.waitFor(() => expect(node.querySelector('[aria-pressed="true"]')?.textContent).toBe("Damage"));
   });
 
-  it("uploads lead-target photos with leadId and keeps the user on capture", async () => {
+  it("uploads lead-target photos, clears the session, and returns to projects", async () => {
     const node = renderPage("/capture?leadId=lead-1&targetName=Lead%20One");
     await vi.waitFor(() => expect(node.textContent).toContain("Lead One"));
 
@@ -146,7 +146,9 @@ describe("CapturePage", () => {
       category: null,
       file: fileB,
     }));
-    expect(node.textContent).not.toContain("Project detail");
+    await vi.waitFor(() => expect(node.textContent).toContain("Projects page"));
+    expect(node.textContent).not.toContain("1 photo in this session");
+    expect(Array.from(node.querySelectorAll("button")).find((button) => button.textContent === "Upload")).toBeUndefined();
   });
 
   it("uploads opportunity-target photos with opportunityId and navigates to project detail", async () => {
@@ -185,7 +187,7 @@ describe("CapturePage", () => {
 
   it("keeps upload disabled when no target is selected", async () => {
     const node = renderPage();
-    await vi.waitFor(() => expect(apiMock).toHaveBeenCalled());
+    await vi.waitFor(() => expect(node.textContent).toContain("Choose target"));
 
     const input = node.querySelector<HTMLInputElement>('input[type="file"]')!;
     Object.defineProperty(input, "files", { value: [new File(["a"], "a.jpg", { type: "image/jpeg" })], configurable: true });

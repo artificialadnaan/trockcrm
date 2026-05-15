@@ -27,7 +27,8 @@ export function MobileNav() {
   const navItems = user?.role === "rep"
     ? [...mobileNavItems, { to: "/commissions", icon: DollarSign, label: "Commissions" }]
     : mobileNavItems;
-  const captureHref = buildFieldCaptureUrl();
+  const captureSearch = user?.activeOfficeId ? `?${new URLSearchParams({ officeId: user.activeOfficeId }).toString()}` : "";
+  const captureHref = buildFieldCaptureUrl(captureSearch);
 
   return (
     <nav className="md:hidden fixed bottom-0 left-0 right-0 bg-white border-t z-50">

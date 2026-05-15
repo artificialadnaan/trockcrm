@@ -176,6 +176,13 @@ describe("field routes", () => {
       limit: 15,
     });
   });
+
+  it.each(["abc", "-1", "999"])("rejects invalid field target search limit %s with 400", async (limit) => {
+    await expect(invokeRoute("get", "/photo-targets/search", { query: { search: "waters", limit } })).rejects.toMatchObject({
+      statusCode: 400,
+    });
+    expect(projectMocks.searchFieldCaptureTargets).not.toHaveBeenCalled();
+  });
 });
 
 async function invokeRoute(method: string, path: string, reqPatch: Record<string, unknown>) {

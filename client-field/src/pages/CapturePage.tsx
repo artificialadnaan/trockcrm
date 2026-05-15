@@ -219,7 +219,12 @@ export function CapturePage() {
 
     setUploading(false);
     if (results.every((result) => result.status === "fulfilled")) {
-      if (selectedTarget.type === "deal" || selectedTarget.type === "opportunity") {
+      setSessionPhotos([]);
+      setUploadState({});
+      if (selectedTarget.type === "lead") {
+        // The field app does not have a lead detail route yet, so return to the target list.
+        navigate("/projects");
+      } else {
         navigate(`/projects/${selectedTarget.id}`);
       }
     }
