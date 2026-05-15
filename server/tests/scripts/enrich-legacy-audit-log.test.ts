@@ -251,9 +251,12 @@ describe("prepared statement names", () => {
 
   it("scopes names deterministically by schema hash", () => {
     const base = "legacy-audit-enrich-deal";
+    const statementName = buildStatementName("office_dallas", base);
+    const hash = statementName.slice(base.length + 1);
 
     expect(buildStatementName("office_a", base)).not.toBe(buildStatementName("office_b", base));
-    expect(buildStatementName("office_dallas", base)).toBe(buildStatementName("office_dallas", base));
+    expect(statementName).toBe(buildStatementName("office_dallas", base));
+    expect(hash).toMatch(/^[0-9a-f]{16}$/);
   });
 
   it("does not collide for long slugs with the same first 63 characters", () => {
