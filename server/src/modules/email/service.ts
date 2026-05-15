@@ -1150,38 +1150,61 @@ export async function getEmailThread(
   }
 
   const mutationContext = await getEmailThreadForMutation(tenantDb, conversationId);
+  const dealVisibilityCache = new Map<string, boolean>();
+
+  async function canReadThroughDealId(dealId: string) {
+    if (!canViewDeal) return false;
+    if (dealVisibilityCache.has(dealId)) {
+      return dealVisibilityCache.get(dealId)!;
+    }
+    const visible = await canViewDeal(dealId);
+    dealVisibilityCache.set(dealId, visible);
+    return visible;
+  }
+
+  async function canReadEmail(email: typeof emails.$inferSelect) {
+    if (email.userId === userId) return true;
+
+    const candidateDealIds = new Set<string>();
+    if (email.dealId) candidateDealIds.add(email.dealId);
+    if (email.assignedEntityType === "deal" && email.assignedEntityId) {
+      candidateDealIds.add(email.assignedEntityId);
+    }
+    if (mutationContext.binding?.dealId) {
+      candidateDealIds.add(mutationContext.binding.dealId);
+    }
+
+    for (const dealId of candidateDealIds) {
+      if (await canReadThroughDealId(dealId)) {
+        return true;
+      }
+    }
+
+    return false;
+  }
+
+  let visibleThread = thread;
 
   if (userId && userRole === "rep") {
+    visibleThread = [];
     for (const email of thread) {
-      if (email.userId === userId) continue;
+      if (await canReadEmail(email)) {
+        visibleThread.push(email);
+      }
+    }
 
-      const candidateDealIds = new Set<string>();
-      if (email.dealId) candidateDealIds.add(email.dealId);
-      if (email.assignedEntityType === "deal" && email.assignedEntityId) {
-        candidateDealIds.add(email.assignedEntityId);
-      }
-      if (mutationContext.binding?.dealId) {
-        candidateDealIds.add(mutationContext.binding.dealId);
-      }
-
-      let canReadThroughDeal = false;
-      if (canViewDeal) {
-        for (const dealId of candidateDealIds) {
-          if (await canViewDeal(dealId)) {
-            canReadThroughDeal = true;
-            break;
-          }
-        }
-      }
-
-      if (!canReadThroughDeal) {
-        return { binding: null, preview: null, emails: [] };
-      }
+    if (visibleThread.length === 0) {
+      return { binding: null, preview: null, emails: [] };
     }
   }
 
   let bindingPayload: EmailThreadResponse["binding"] = null;
-  if (mutationContext.binding) {
+  const canExposeBinding =
+    !mutationContext.binding?.dealId ||
+    userRole !== "rep" ||
+    (await canReadThroughDealId(mutationContext.binding.dealId));
+
+  if (mutationContext.binding && canExposeBinding) {
     const [dealRow] = mutationContext.binding.dealId
       ? await tenantDb
           .select({ id: deals.id, name: deals.name })
@@ -1212,7 +1235,7 @@ export async function getEmailThread(
   return {
     binding: bindingPayload,
     preview: null,
-    emails: thread,
+    emails: visibleThread,
   };
 }
 

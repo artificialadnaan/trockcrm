@@ -28,6 +28,7 @@ const {
   associateEmailToDeal,
   buildThreadAssignmentFallbackWhereClause,
   getEmails,
+  getEmailThread,
   getUserEmails,
   isEmailAssignmentQueueCandidate,
   sendEmail,
@@ -101,6 +102,45 @@ function createTenantDbMock(options: {
     select,
     update,
     insert: vi.fn(),
+  };
+}
+
+function createEmailThreadDb(options: {
+  thread: any[];
+  binding?: any | null;
+  mailboxAccountId?: string;
+  dealRows?: Record<string, { id: string; name: string }>;
+}) {
+  let selectCalls = 0;
+  return {
+    select: vi.fn((selection?: Record<string, unknown>) => {
+      selectCalls += 1;
+      let rows: any[] = [];
+
+      if (selectCalls === 1 || selectCalls === 2) {
+        rows = options.thread;
+      } else if (selectCalls === 3) {
+        rows = [{ id: options.mailboxAccountId ?? "mailbox-1" }];
+      } else if (selectCalls === 4) {
+        rows = options.binding ? [options.binding] : [];
+      } else if (selection && "id" in selection && "name" in selection && options.binding?.dealId) {
+        rows = options.dealRows?.[options.binding.dealId]
+          ? [options.dealRows[options.binding.dealId]]
+          : [];
+      }
+
+      const chain: any = {
+        from: vi.fn(() => chain),
+        where: vi.fn(() => chain),
+        orderBy: vi.fn(() => chain),
+        limit: vi.fn(() => chain),
+        then(resolve: (value: any[]) => void) {
+          resolve(rows);
+        },
+      };
+
+      return chain;
+    }),
   };
 }
 
@@ -342,6 +382,117 @@ describe("email service inbound association", () => {
     expect(whereClauses.length).toBe(2);
     expect(sqlConditionReferencesColumn(whereClauses[0], "archived_at")).toBe(false);
     expect(sqlConditionReferencesColumn(whereClauses[0], "deleted_at")).toBe(false);
+  });
+
+  it("returns only the rep-visible subset of a mixed thread", async () => {
+    const tenantDb = createEmailThreadDb({
+      thread: [
+        {
+          id: "email-own",
+          userId: "rep-1",
+          dealId: null,
+          assignedEntityType: null,
+          assignedEntityId: null,
+          contactId: null,
+          sentAt: new Date("2026-05-15T10:00:00Z"),
+        },
+        {
+          id: "email-hidden",
+          userId: "teammate-1",
+          dealId: "deal-hidden",
+          assignedEntityType: "deal",
+          assignedEntityId: "deal-hidden",
+          contactId: null,
+          sentAt: new Date("2026-05-15T11:00:00Z"),
+        },
+      ],
+    });
+
+    const result = await getEmailThread(
+      tenantDb as any,
+      "conversation-1",
+      "rep-1",
+      "rep",
+      async () => false
+    );
+
+    expect(result.emails.map((email) => email.id)).toEqual(["email-own"]);
+    expect(result.binding).toBeNull();
+  });
+
+  it("returns all messages when the thread is deal-visible to the rep", async () => {
+    const tenantDb = createEmailThreadDb({
+      thread: [
+        {
+          id: "email-1",
+          userId: "teammate-1",
+          dealId: "deal-visible",
+          assignedEntityType: "deal",
+          assignedEntityId: "deal-visible",
+          contactId: null,
+          sentAt: new Date("2026-05-15T10:00:00Z"),
+        },
+        {
+          id: "email-2",
+          userId: "rep-1",
+          dealId: "deal-visible",
+          assignedEntityType: "deal",
+          assignedEntityId: "deal-visible",
+          contactId: null,
+          sentAt: new Date("2026-05-15T11:00:00Z"),
+        },
+      ],
+      binding: {
+        id: "binding-1",
+        mailboxAccountId: "mailbox-1",
+        provider: "microsoft_graph",
+        providerConversationId: "conversation-1",
+        dealId: "deal-visible",
+        projectId: null,
+        confidence: "high",
+        assignmentReason: "manual_thread_assignment",
+      },
+      dealRows: {
+        "deal-visible": { id: "deal-visible", name: "Visible Deal" },
+      },
+    });
+
+    const result = await getEmailThread(
+      tenantDb as any,
+      "conversation-1",
+      "rep-1",
+      "rep",
+      async (dealId) => dealId === "deal-visible"
+    );
+
+    expect(result.emails.map((email) => email.id)).toEqual(["email-1", "email-2"]);
+    expect(result.binding?.dealId).toBe("deal-visible");
+  });
+
+  it("returns an empty thread when the rep cannot read any message", async () => {
+    const tenantDb = createEmailThreadDb({
+      thread: [
+        {
+          id: "email-hidden",
+          userId: "teammate-1",
+          dealId: "deal-hidden",
+          assignedEntityType: "deal",
+          assignedEntityId: "deal-hidden",
+          contactId: null,
+          sentAt: new Date("2026-05-15T10:00:00Z"),
+        },
+      ],
+    });
+
+    const result = await getEmailThread(
+      tenantDb as any,
+      "conversation-1",
+      "rep-1",
+      "rep",
+      async () => false
+    );
+
+    expect(result).toEqual({ binding: null, preview: null, emails: [] });
   });
 
   it("uses recency ordering based on sentAt or syncedAt for user inbox", async () => {
