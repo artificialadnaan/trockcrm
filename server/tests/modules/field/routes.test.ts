@@ -28,6 +28,7 @@ const projectMocks = vi.hoisted(() => ({
   listFieldProjectPhotos: vi.fn(),
   listStarredFieldProjects: vi.fn(),
   searchFieldCaptureTargets: vi.fn(),
+  assertAccessibleFieldCaptureTarget: vi.fn(),
   starFieldProject: vi.fn(),
   unstarFieldProject: vi.fn(),
 }));
@@ -54,6 +55,7 @@ describe("field routes", () => {
     projectMocks.listFieldProjects.mockResolvedValue({ projects: [], total: 0, page: 1, perPage: 50 });
     projectMocks.listStarredFieldProjects.mockResolvedValue({ projects: [] });
     projectMocks.searchFieldCaptureTargets.mockResolvedValue({ targets: [] });
+    projectMocks.assertAccessibleFieldCaptureTarget.mockResolvedValue({ id: "lead-1", type: "lead" });
     projectMocks.starFieldProject.mockResolvedValue({ starred: true });
     projectMocks.unstarFieldProject.mockResolvedValue({ starred: false });
     projectMocks.listFieldProjectPhotos.mockResolvedValue({ photos: [], pagination: { page: 1, limit: 200, total: 0, totalPages: 0 } });
@@ -182,6 +184,18 @@ describe("field routes", () => {
       statusCode: 400,
     });
     expect(projectMocks.searchFieldCaptureTargets).not.toHaveBeenCalled();
+  });
+
+  it("validates URL-selected capture targets before the field app activates capture", async () => {
+    await invokeRoute("get", "/photo-targets/validate", { query: { leadId: "lead-1" } });
+
+    expect(projectMocks.assertAccessibleFieldCaptureTarget).toHaveBeenCalledWith(expect.anything(), {
+      userId: "admin-1",
+      userRole: "admin",
+      dealId: undefined,
+      leadId: "lead-1",
+      opportunityId: undefined,
+    });
   });
 });
 

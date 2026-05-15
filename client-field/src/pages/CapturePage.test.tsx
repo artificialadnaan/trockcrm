@@ -40,6 +40,18 @@ beforeEach(() => {
   apiMock.mockReset();
   apiMock.mockImplementation(async (path: string) => {
     const url = new URL(path, "https://example.test");
+    if (url.pathname === "/field/photo-targets/validate") {
+      const leadId = url.searchParams.get("leadId");
+      const opportunityId = url.searchParams.get("opportunityId");
+      const dealId = url.searchParams.get("dealId");
+      const target = TARGETS.find((entry) =>
+        (leadId && entry.type === "lead" && entry.id === leadId) ||
+        (opportunityId && entry.type === "opportunity" && entry.id === opportunityId) ||
+        (dealId && entry.type === "deal" && entry.id === dealId)
+      );
+      if (!target) throw new Error("Capture target not found");
+      return { target };
+    }
     const search = (url.searchParams.get("search") ?? "").toLowerCase();
     const filtered = TARGETS.filter((target) => !search || target.name.toLowerCase().includes(search));
     return { targets: filtered };
@@ -103,6 +115,21 @@ describe("CapturePage", () => {
     expect(input.accept).toBe("image/*");
     expect(input.multiple).toBe(true);
     expect(input.hasAttribute("capture")).toBe(false);
+  });
+
+  it("keeps capture disabled while validating a URL-selected target", async () => {
+    apiMock.mockImplementation((path: string) => {
+      const url = new URL(path, "https://example.test");
+      if (url.pathname === "/field/photo-targets/validate") {
+        return new Promise(() => undefined);
+      }
+      return Promise.resolve({ targets: TARGETS });
+    });
+
+    const node = renderPage("/capture?dealId=deal-1&targetName=Roof%20Repair");
+
+    await vi.waitFor(() => expect(node.textContent).toContain("Validating target..."));
+    expect(node.querySelector<HTMLButtonElement>('[aria-label="Capture photo"]')?.disabled).toBe(true);
   });
 
   it("opens the target picker, searches, selects a target, and single-selects category", async () => {

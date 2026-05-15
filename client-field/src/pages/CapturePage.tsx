@@ -55,6 +55,18 @@ function initialTargetFromParams(params: URLSearchParams): FieldCaptureTarget | 
   };
 }
 
+function validationQueryForTarget(target: FieldCaptureTarget): string {
+  const params = new URLSearchParams();
+  if (target.type === "lead") {
+    params.set("leadId", target.id);
+  } else if (target.type === "opportunity") {
+    params.set("opportunityId", target.id);
+  } else {
+    params.set("dealId", target.id);
+  }
+  return params.toString();
+}
+
 export function CapturePage() {
   const navigate = useNavigate();
   const [params] = useSearchParams();
@@ -62,7 +74,8 @@ export function CapturePage() {
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
   const [targetResults, setTargetResults] = useState<FieldCaptureTarget[]>([]);
-  const [selectedTarget, setSelectedTarget] = useState<FieldCaptureTarget | null>(initialTarget);
+  const [selectedTarget, setSelectedTarget] = useState<FieldCaptureTarget | null>(null);
+  const [validatingInitialTarget, setValidatingInitialTarget] = useState(Boolean(initialTarget));
   const [pickerOpen, setPickerOpen] = useState(false);
   const [targetSearch, setTargetSearch] = useState(initialTarget?.name ?? "");
   const [category, setCategory] = useState<string | null>(null);
@@ -72,6 +85,42 @@ export function CapturePage() {
   const [uploadState, setUploadState] = useState<UploadState>({});
   const [error, setError] = useState<string | null>(null);
   const galleryInputRef = useRef<HTMLInputElement | null>(null);
+
+  useEffect(() => {
+    if (!initialTarget) {
+      setValidatingInitialTarget(false);
+      setSelectedTarget(null);
+      return;
+    }
+
+    let cancelled = false;
+    setValidatingInitialTarget(true);
+    setSelectedTarget(null);
+    api<{ target: { id: string; type: FieldCaptureTarget["type"] } }>(
+      `/field/photo-targets/validate?${validationQueryForTarget(initialTarget)}`
+    )
+      .then((result) => {
+        if (cancelled) return;
+        if (result.target.id !== initialTarget.id || result.target.type !== initialTarget.type) {
+          throw new Error("Capture target validation mismatch");
+        }
+        setSelectedTarget(initialTarget);
+        setTargetSearch(initialTarget.name);
+      })
+      .catch((err) => {
+        if (!cancelled) {
+          setError(err instanceof Error ? err.message : "Failed to validate capture target");
+          setPickerOpen(true);
+        }
+      })
+      .finally(() => {
+        if (!cancelled) setValidatingInitialTarget(false);
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [initialTarget]);
 
   useEffect(() => {
     let cancelled = false;
@@ -231,7 +280,7 @@ export function CapturePage() {
   }
 
   const failedCount = Object.values(uploadState).filter((state) => state.status === "failed").length;
-  const canCapture = Boolean(selectedTarget) && !cameraError;
+  const canCapture = Boolean(selectedTarget) && !validatingInitialTarget && !cameraError;
   const sessionLabel = `${sessionPhotos.length} ${sessionPhotos.length === 1 ? "photo" : "photos"} in this session`;
   const targetCount = groupedTargets.lead.length + groupedTargets.opportunity.length + groupedTargets.deal.length;
 
@@ -244,7 +293,7 @@ export function CapturePage() {
           className="min-h-11 min-w-0 flex-1 rounded-full bg-white/15 px-4 text-left font-bold backdrop-blur"
           onClick={() => setPickerOpen(true)}
         >
-          {selectedTarget ? selectedTarget.name : "Choose target"}
+          {validatingInitialTarget ? "Validating target..." : selectedTarget ? selectedTarget.name : "Choose target"}
         </button>
         <button
           type="button"

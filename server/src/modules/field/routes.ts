@@ -8,6 +8,7 @@ import {
   requestFieldPhotoUploadUrl,
 } from "./photos-service.js";
 import {
+  assertAccessibleFieldCaptureTarget,
   listFieldProjects,
   listFieldProjectPhotos,
   listStarredFieldProjects,
@@ -156,6 +157,22 @@ fieldRoutes.get("/photo-targets/search", ...fieldProjectMiddleware, async (req, 
     });
     await req.commitTransaction();
     res.json(result);
+  } catch (err) {
+    next(err);
+  }
+});
+
+fieldRoutes.get("/photo-targets/validate", ...fieldProjectMiddleware, async (req, res, next) => {
+  try {
+    const result = await assertAccessibleFieldCaptureTarget(req.tenantDb!, {
+      userId: req.fieldUser!.id,
+      userRole: req.fieldUser!.role,
+      dealId: typeof req.query.dealId === "string" ? req.query.dealId : undefined,
+      leadId: typeof req.query.leadId === "string" ? req.query.leadId : undefined,
+      opportunityId: typeof req.query.opportunityId === "string" ? req.query.opportunityId : undefined,
+    });
+    await req.commitTransaction();
+    res.json({ target: result });
   } catch (err) {
     next(err);
   }
