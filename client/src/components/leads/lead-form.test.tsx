@@ -419,6 +419,21 @@ function universalCreateQuestionnaireNodes(): LeadQuestionnaireNode[] {
       parentOptionValue: "true",
     }),
     makeQuestionNode({
+      id: "balcony-type",
+      key: "balcony_type",
+      label: "Balcony Type",
+      inputType: "select",
+      options: [{ value: "concrete_cantilever", label: "Concrete Cantilever" }],
+      isRequired: true,
+      displayOrder: 1,
+      sectionKey: "scope",
+      groupKey: "balconies",
+      groupLabel: "Balconies",
+      groupOrder: 4,
+      parentNodeId: "balconies-applies",
+      parentOptionValue: "true",
+    }),
+    makeQuestionNode({
       id: "parking-surface-type",
       key: "parking_surface_type",
       label: "Concrete or Asphalt",
@@ -592,6 +607,14 @@ describe("LeadForm", () => {
     const question = container.querySelector(`[data-question-key="${questionKey}"]`);
     expect(question).toBeTruthy();
     const option = question?.querySelector<HTMLButtonElement>(`button[data-value="${value}"]`);
+    expect(option).toBeTruthy();
+    await clickButton(option!);
+  }
+
+  async function chooseBranchCardValue(questionKey: string, value: "yes" | "no") {
+    const option = container.querySelector<HTMLButtonElement>(
+      `[data-branch-choice="${questionKey}:${value}"]`
+    );
     expect(option).toBeTruthy();
     await clickButton(option!);
   }
@@ -1150,8 +1173,7 @@ describe("LeadForm", () => {
     expect(container.querySelector('[data-question-key="life_safety"]')?.textContent).toContain("No");
     expect(container.textContent).not.toContain("__unanswered__");
 
-    await clickButton(container.querySelector<HTMLButtonElement>('[data-scope-group="unit_upgrades"] button')!);
-    await chooseQuestionSelectValue("unit_upgrades_applies", "true");
+    await clickButton(container.querySelector<HTMLButtonElement>('[data-scope-card="unit_upgrades"]')!);
     const currencyQuestion = container.querySelector('[data-question-key="unit_upgrades_cost_per_unit"]');
     expect(currencyQuestion?.textContent).toContain("$");
   });
@@ -1227,45 +1249,132 @@ describe("LeadForm", () => {
     expect(html.indexOf("Property/Building Info")).toBeLessThan(html.indexOf("Scope"));
   });
 
-  it("renders scope groups as ten accordions with children hidden until applies is yes", async () => {
+  it("keeps create disabled until at least one scope card is selected", async () => {
     mockUniversalCreateQuestionnaire();
 
     renderCreateForm();
 
-    const scopeGroups = container.querySelectorAll("[data-scope-group]");
-    expect(scopeGroups).toHaveLength(10);
+    const createButton = findButton("Create Lead");
+    expect(createButton).toBeTruthy();
+    expect(createButton?.disabled).toBe(true);
+
+    await clickButton(container.querySelector<HTMLButtonElement>('[data-scope-card="roofing"]')!);
+    expect(findButton("Create Lead")?.disabled).toBe(false);
+  });
+
+  it("shows a scope validation message near the card grid until a scope is selected", async () => {
+    mockUniversalCreateQuestionnaire();
+
+    renderCreateForm();
+
+    expect(container.textContent).toContain("Select at least one scope.");
+
+    await clickButton(container.querySelector<HTMLButtonElement>('[data-scope-card="roofing"]')!);
+
+    expect(container.textContent).not.toContain("Select at least one scope.");
+  });
+
+  it("renders scope groups as ten selectable cards and activates a scope panel on click", async () => {
+    mockUniversalCreateQuestionnaire();
+
+    renderCreateForm();
+
+    const scopeCards = container.querySelectorAll("[data-scope-card]");
+    expect(scopeCards).toHaveLength(10);
     expect(container.textContent).toContain("Roofing");
     expect(container.textContent).not.toContain("Roof Type");
 
-    const roofingHeader = container.querySelector<HTMLButtonElement>('[data-scope-group="roofing"] button');
-    expect(roofingHeader).toBeTruthy();
-    await clickButton(roofingHeader!);
-    expect(container.textContent).toContain("Does roofing scope apply?");
-    expect(container.textContent).not.toContain("Roof Type");
+    const roofingCard = container.querySelector<HTMLButtonElement>('[data-scope-card="roofing"]');
+    expect(roofingCard).toBeTruthy();
+    expect(roofingCard?.getAttribute("aria-selected")).toBe("false");
 
-    await chooseQuestionSelectValue("roofing_applies", "true");
+    await clickButton(roofingCard!);
+
+    expect(roofingCard?.getAttribute("aria-selected")).toBe("true");
+    expect(roofingCard?.getAttribute("data-scope-active")).toBe("true");
+    expect(container.textContent).toContain("Selected scope");
     expect(container.textContent).toContain("Roof Type");
     expect(container.textContent).toContain("Insurance Claim");
   });
 
-  it("reveals nested cascade questions inside scope accordions", async () => {
+  it("keeps multiple scope selections while only showing one active scope panel", async () => {
     mockUniversalCreateQuestionnaire();
 
     renderCreateForm();
-    await clickButton(container.querySelector<HTMLButtonElement>('[data-scope-group="roofing"] button')!);
-    await chooseQuestionSelectValue("roofing_applies", "true");
+
+    const roofingCard = container.querySelector<HTMLButtonElement>('[data-scope-card="roofing"]');
+    const balconiesCard = container.querySelector<HTMLButtonElement>('[data-scope-card="balconies"]');
+    expect(roofingCard).toBeTruthy();
+    expect(balconiesCard).toBeTruthy();
+
+    await clickButton(roofingCard!);
+    expect(container.textContent).toContain("Roof Type");
+
+    await clickButton(balconiesCard!);
+
+    expect(roofingCard?.getAttribute("aria-selected")).toBe("true");
+    expect(balconiesCard?.getAttribute("aria-selected")).toBe("true");
+    expect(balconiesCard?.getAttribute("data-scope-active")).toBe("true");
+    expect(container.textContent).toContain("Balcony Type");
+    expect(container.textContent).not.toContain("Roof Type");
+  });
+
+  it("deselects the active scope and hides the panel without auto-switching to another selected scope", async () => {
+    mockUniversalCreateQuestionnaire();
+
+    renderCreateForm();
+
+    const roofingCard = container.querySelector<HTMLButtonElement>('[data-scope-card="roofing"]');
+    const balconiesCard = container.querySelector<HTMLButtonElement>('[data-scope-card="balconies"]');
+    expect(roofingCard).toBeTruthy();
+    expect(balconiesCard).toBeTruthy();
+
+    await clickButton(roofingCard!);
+    await chooseBranchCardValue("roofing_insurance_claim", "yes");
+    await clickButton(balconiesCard!);
+
+    expect(container.textContent).toContain("Balcony Type");
+    expect(container.textContent).not.toContain("Roof Type");
+
+    await clickButton(balconiesCard!);
+
+    expect(balconiesCard?.getAttribute("aria-selected")).toBe("false");
+    expect(balconiesCard?.getAttribute("data-scope-active")).toBeNull();
+    expect(container.textContent).not.toContain("Selected scope");
+    expect(container.textContent).not.toContain("Balcony Type");
+    expect(container.textContent).not.toContain("Roof Type");
+    expect(roofingCard?.getAttribute("aria-selected")).toBe("true");
+    expect(roofingCard?.getAttribute("data-scope-active")).toBeNull();
+    expect(balconiesCard?.textContent).toContain("Not selected");
+  });
+
+  it("reveals nested cascade questions inside the active scope panel", async () => {
+    mockUniversalCreateQuestionnaire();
+
+    renderCreateForm();
+    await clickButton(container.querySelector<HTMLButtonElement>('[data-scope-card="roofing"]')!);
 
     expect(container.textContent).not.toContain("Xactimate");
-    await chooseQuestionSelectValue("roofing_insurance_claim", "true");
+    await chooseBranchCardValue("roofing_insurance_claim", "yes");
     expect(container.textContent).toContain("Xactimate");
   });
 
-  it("saves universal multi-select answers from scope accordions", async () => {
+  it("renders branch-like boolean questions as sub-cards inside the active scope panel", async () => {
     mockUniversalCreateQuestionnaire();
 
     renderCreateForm();
-    await clickButton(container.querySelector<HTMLButtonElement>('[data-scope-group="parking_lot"] button')!);
-    await chooseQuestionSelectValue("parking_lot_applies", "true");
+    await clickButton(container.querySelector<HTMLButtonElement>('[data-scope-card="roofing"]')!);
+
+    const insuranceBranch = container.querySelector('[data-branch-card="roofing_insurance_claim"]');
+    expect(insuranceBranch).toBeTruthy();
+    expect(container.textContent).toContain("Insurance Claim");
+  });
+
+  it("saves universal multi-select answers from the active scope panel", async () => {
+    mockUniversalCreateQuestionnaire();
+
+    renderCreateForm();
+    await clickButton(container.querySelector<HTMLButtonElement>('[data-scope-card="parking_lot"]')!);
 
     const concreteOption = container.querySelector<HTMLInputElement>(
       '[data-question-key="parking_surface_type"] input[value="concrete"]'
@@ -1294,6 +1403,7 @@ describe("LeadForm", () => {
       .mockReturnValueOnce(secondUpload.promise);
 
     renderCreateForm();
+    await clickButton(container.querySelector<HTMLButtonElement>('[data-scope-card="roofing"]')!);
     await addClientProvidedDocs([
       new File(["plans"], "success.pdf", { type: "application/pdf" }),
       new File(["bad"], "failed.pdf", { type: "application/pdf" }),
@@ -1345,6 +1455,7 @@ describe("LeadForm", () => {
 
     const timelineInput = container.querySelector<HTMLInputElement>("#timeline_status");
     expect(timelineInput).toBeTruthy();
+    await clickButton(container.querySelector<HTMLButtonElement>('[data-scope-card="roofing"]')!);
     await setInputValue(timelineInput!, "2026-12-31");
     await submitForm();
 
@@ -1367,6 +1478,7 @@ describe("LeadForm", () => {
     ]);
 
     renderCreateForm();
+    await clickButton(container.querySelector<HTMLButtonElement>('[data-scope-card="roofing"]')!);
     await submitForm();
 
     expect(leadHookMocks.createLead).not.toHaveBeenCalled();

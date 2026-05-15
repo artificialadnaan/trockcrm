@@ -250,4 +250,99 @@ describe("LeadQuestionnaireSections", () => {
 
     expect(sanitizeQuestionAnswerForSave(node, CLEAR_SELECTION_VALUE)).toBeNull();
   });
+
+  it("renders scope groups as selectable cards instead of accordion rows", () => {
+    root = createRoot(container);
+    act(() => {
+      root.render(
+        <LeadQuestionnaireSections
+          nodes={[
+            makeQuestionNode({
+              id: "roofing-applies",
+              key: "roofing_applies",
+              label: "Does roofing scope apply?",
+              inputType: "boolean",
+              sectionKey: "scope",
+              groupKey: "roofing",
+              groupLabel: "Roofing",
+              groupOrder: 1,
+              displayOrder: 0,
+            }),
+            makeQuestionNode({
+              id: "balconies-applies",
+              key: "balconies_applies",
+              label: "Does balcony scope apply?",
+              inputType: "boolean",
+              sectionKey: "scope",
+              groupKey: "balconies",
+              groupLabel: "Balconies",
+              groupOrder: 2,
+              displayOrder: 0,
+            }),
+          ]}
+          answers={{}}
+          onAnswerChange={() => {}}
+        />
+      );
+    });
+
+    expect(container.querySelectorAll("[data-scope-card]")).toHaveLength(2);
+    expect(container.querySelector("[data-scope-group]")).toBeNull();
+    expect(container.querySelector('[role="listbox"]')?.className).toContain("grid-cols-1");
+    expect(container.querySelector('[role="listbox"]')?.className).toContain("sm:grid-cols-2");
+    expect(container.querySelector('[role="listbox"]')?.className).toContain("md:grid-cols-3");
+  });
+
+  it("shows child branch nodes as branch cards inside the active scope panel", () => {
+    root = createRoot(container);
+    act(() => {
+      root.render(
+        <LeadQuestionnaireSections
+          nodes={[
+            makeQuestionNode({
+              id: "roofing-applies",
+              key: "roofing_applies",
+              label: "Does roofing scope apply?",
+              inputType: "boolean",
+              sectionKey: "scope",
+              groupKey: "roofing",
+              groupLabel: "Roofing",
+              groupOrder: 1,
+              displayOrder: 0,
+            }),
+            makeQuestionNode({
+              id: "roofing-insurance",
+              key: "roofing_insurance_claim",
+              label: "Insurance Claim",
+              inputType: "boolean",
+              sectionKey: "scope",
+              groupKey: "roofing",
+              groupLabel: "Roofing",
+              groupOrder: 1,
+              displayOrder: 1,
+              parentNodeId: "roofing-applies",
+              parentOptionValue: "true",
+            }),
+            makeQuestionNode({
+              id: "roofing-xactimate",
+              key: "roofing_xactimate",
+              label: "Xactimate",
+              inputType: "boolean",
+              sectionKey: "scope",
+              groupKey: "roofing",
+              groupLabel: "Roofing",
+              groupOrder: 1,
+              displayOrder: 2,
+              parentNodeId: "roofing-insurance",
+              parentOptionValue: "true",
+            }),
+          ]}
+          answers={{ roofing_applies: true }}
+          onAnswerChange={() => {}}
+        />
+      );
+    });
+
+    expect(container.querySelector('[data-branch-card="roofing_insurance_claim"]')).toBeTruthy();
+  });
 });
