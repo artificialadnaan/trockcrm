@@ -182,10 +182,12 @@ async function invokeRoute({
         : url.startsWith("/thread/") && url.endsWith("/reassign")
           ? "/thread/:conversationId/reassign"
           : url.startsWith("/thread/") && url.endsWith("/detach")
-            ? "/thread/:conversationId/detach"
-            : url.startsWith("/thread/")
+          ? "/thread/:conversationId/detach"
+          : url.startsWith("/thread/")
               ? "/thread/:conversationId"
-              : "/:id/associate";
+              : method === "get"
+                ? "/:id"
+                : "/:id/associate";
   const handler = findRouteHandler(method, routePath);
   const req: Record<string, any> = {
     method: method.toUpperCase(),
@@ -196,7 +198,7 @@ async function invokeRoute({
     query,
     body,
     params:
-      routePath === "/:id/associate" || routePath === "/:id/actions"
+      routePath === "/:id/associate" || routePath === "/:id/actions" || routePath === "/:id"
         ? { id: url.split("/")[1] }
         : routePath.startsWith("/thread/:conversationId")
           ? { conversationId: url.split("/")[2] }
@@ -325,6 +327,46 @@ describe("email routes", () => {
     );
     expect(req.commitTransaction).toHaveBeenCalled();
     expect(res.body.email).toEqual({ id: "email-1", isStarred: true });
+  });
+
+  it("allows reps to open full email bodies when the email is linked to a visible deal", async () => {
+    emailServiceMocks.getEmailById.mockResolvedValue({
+      id: "email-1",
+      userId: "admin-1",
+      dealId: "deal-1",
+      assignedEntityType: null,
+      assignedEntityId: null,
+    });
+    dealServiceMocks.getDealById.mockResolvedValue({ id: "deal-1" });
+
+    const { req, res } = await invokeRoute({
+      method: "get",
+      url: "/email-1",
+      user: makeRepUser(),
+    });
+
+    expect(dealServiceMocks.getDealById).toHaveBeenCalledWith(expect.any(Object), "deal-1", "rep", "rep-1");
+    expect(req.commitTransaction).toHaveBeenCalled();
+    expect(res.body.email.id).toBe("email-1");
+  });
+
+  it("still blocks reps from full email bodies with no owner or deal access", async () => {
+    emailServiceMocks.getEmailById.mockResolvedValue({
+      id: "email-1",
+      userId: "admin-1",
+      dealId: "deal-1",
+      assignedEntityType: null,
+      assignedEntityId: null,
+    });
+    dealServiceMocks.getDealById.mockRejectedValue(new Error("forbidden"));
+
+    await expect(
+      invokeRoute({
+        method: "get",
+        url: "/email-1",
+        user: makeRepUser(),
+      })
+    ).rejects.toThrow("You do not have permission to view this email");
   });
 
   it("routes manual deal association through the generic entity resolver", async () => {
@@ -589,7 +631,8 @@ describe("email routes", () => {
       expect.any(Object),
       "conversation-1",
       "director-1",
-      "director"
+      "director",
+      expect.any(Function)
     );
     expect(res.body).toEqual({
       binding: { id: "binding-1", dealId: "deal-1", dealName: "Deal One", confidence: "high", assignmentReason: "manual_thread_assignment" },
