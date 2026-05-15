@@ -24,6 +24,10 @@ export function buildCanonicalDealBoardColumns(
   const deals = (rawColumns ?? []).flatMap((column) => column.cards);
 
   return getDealBoardStageSlugs().map((slug) => {
+    const matchingRawColumns = (rawColumns ?? []).filter((column) => {
+      const rawSlug = column.stage.slug;
+      return normalizeDealStageSlug(rawSlug, "normal") === slug || normalizeDealStageSlug(rawSlug, "service") === slug;
+    });
     const cards = deals.filter((deal) => {
       const workflowRoute = deal.workflowRoute ?? "normal";
       return getDealStageMetadata(
@@ -51,6 +55,7 @@ export function buildCanonicalDealBoardColumns(
           normalizeDealStageSlug(column.stage.slug, "normal") === slug ||
           normalizeDealStageSlug(column.stage.slug, "service") === slug
       )?.stage;
+    const hasBackendAggregate = matchingRawColumns.length > 0;
 
     return {
       stage: {
@@ -62,8 +67,12 @@ export function buildCanonicalDealBoardColumns(
         isActivePipeline: matchingStage?.isActivePipeline ?? true,
         isTerminal: matchingStage?.isTerminal ?? false,
       },
-      count: cards.length,
-      totalValue: cards.reduce((sum, deal) => sum + getDealValue(deal), 0),
+      count: hasBackendAggregate
+        ? matchingRawColumns.reduce((sum, column) => sum + column.count, 0)
+        : cards.length,
+      totalValue: hasBackendAggregate
+        ? matchingRawColumns.reduce((sum, column) => sum + column.totalValue, 0)
+        : cards.reduce((sum, deal) => sum + getDealValue(deal), 0),
       cards,
     };
   });

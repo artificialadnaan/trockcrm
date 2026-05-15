@@ -14,7 +14,7 @@ import { useAuth } from "@/lib/auth";
 import { TerminalDateFilterControl } from "@/components/pipeline/terminal-date-filter-control";
 import {
   buildDealStageWorkspacePath,
-  calculateActivePipelineTotal,
+  getActivePipelineColumns,
   getTerminalDateFilterLabel,
   isTerminalStage,
   isTerminalOutcomeSlug,
@@ -189,10 +189,14 @@ function DealListPageContent({ role }: { role: string }) {
     });
   }, [setSearchParams]);
 
+  const boardColumns = useMemo(
+    () => buildCanonicalDealBoardColumns(board?.columns, stages),
+    [board?.columns, stages]
+  );
   const columns = useMemo(
     () => {
       const searchTerm = search.trim().toLowerCase();
-      return buildCanonicalDealBoardColumns(board?.columns, stages)
+      return boardColumns
         .map((column) => {
           if (!searchTerm) return column;
           const cards = column.cards.filter((deal) => {
@@ -218,18 +222,11 @@ function DealListPageContent({ role }: { role: string }) {
           };
         });
     },
-    [board?.columns, search, stages]
+    [boardColumns, search]
   );
-  const activePipelineTotal = calculateActivePipelineTotal(
-    columns.flatMap((column) =>
-      column.cards.map((deal) => ({
-        ...deal,
-        stageSlug: column.stage.slug,
-      }))
-    )
-  );
-  const totalCount = activePipelineTotal.count;
-  const totalValue = activePipelineTotal.amount;
+  const activePipelineColumns = getActivePipelineColumns(boardColumns);
+  const totalCount = activePipelineColumns.reduce((sum, column) => sum + column.count, 0);
+  const totalValue = activePipelineColumns.reduce((sum, column) => sum + column.totalValue, 0);
   const wonValue =
     board?.terminalStages
       ?.filter((terminal) => terminal.stage.slug === "won")
