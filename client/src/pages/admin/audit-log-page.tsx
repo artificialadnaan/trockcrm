@@ -18,6 +18,7 @@ export function AuditLogPage() {
     rows,
     total,
     totalLoading,
+    totalError,
     hasMore,
     page,
     setPage,
@@ -28,15 +29,18 @@ export function AuditLogPage() {
     loadGroupChildren,
   } = useAuditLog();
   const totalPages = total == null ? null : Math.max(1, Math.ceil(total / 50));
+  const totalLabel = totalLoading && total == null
+    ? "Loading total..."
+    : totalError
+      ? "Total unavailable"
+      : `${(total ?? 0).toLocaleString()} entries`;
 
   return (
     <div className="mx-auto max-w-5xl space-y-4 p-6">
       <div className="flex items-end justify-between gap-4">
         <div>
           <h1 className="text-2xl font-semibold text-slate-950">All Activity</h1>
-          <p className="mt-1 text-sm text-slate-500">
-            {totalLoading && total == null ? "Loading total..." : `${(total ?? 0).toLocaleString()} entries`}
-          </p>
+          <p className="mt-1 text-sm text-slate-500">{totalLabel}</p>
         </div>
       </div>
 

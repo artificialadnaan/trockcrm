@@ -175,4 +175,101 @@ describe("useAuditLog", () => {
       await flushEffects();
     });
   });
+
+  it("marks the total as unavailable when the async count request fails", async () => {
+    const snapshots: Array<ReturnType<typeof useAuditLog>> = [];
+
+    apiMock.mockImplementation((path: string) => {
+      if (path.startsWith("/admin/audit/entity-types")) {
+        return Promise.resolve({ entityTypes: ["deals"] });
+      }
+      if (path.startsWith("/admin/audit/count")) {
+        return Promise.reject(new Error("count failed"));
+      }
+      if (path.startsWith("/admin/audit?")) {
+        return Promise.resolve({ rows: [], hasMore: false });
+      }
+      throw new Error(`Unexpected path ${path}`);
+    });
+
+    const container = document.createElement("div");
+    const root = createRoot(container);
+
+    await act(async () => {
+      root.render(<HookProbe onSnapshot={(snapshot) => snapshots.push(snapshot)} />);
+      await flushEffects();
+    });
+
+    const finalSnapshot = snapshots[snapshots.length - 1];
+    expect(finalSnapshot?.total).toBeNull();
+    expect(finalSnapshot?.totalLoading).toBe(false);
+    expect(finalSnapshot?.totalError).toBe(true);
+
+    await act(async () => {
+      root.unmount();
+      await flushEffects();
+    });
+  });
+
+  it("clears totalError on a user-initiated retry and shows the new total", async () => {
+    const firstCountRequest = deferred<{ total: number }>();
+    const secondCountRequest = deferred<{ total: number }>();
+    const snapshots: Array<ReturnType<typeof useAuditLog>> = [];
+    let latestState: ReturnType<typeof useAuditLog> | null = null;
+
+    apiMock.mockImplementation((path: string) => {
+      if (path.startsWith("/admin/audit/entity-types")) {
+        return Promise.resolve({ entityTypes: ["deals", "tasks"] });
+      }
+      if (path === "/admin/audit/count?") {
+        return Promise.reject(new Error("count failed"));
+      }
+      if (path === "/admin/audit/count?entityType=tasks") {
+        return secondCountRequest.promise;
+      }
+      if (path.startsWith("/admin/audit?entityType=tasks")) {
+        return Promise.resolve({ rows: [], hasMore: false });
+      }
+      if (path.startsWith("/admin/audit?")) {
+        return Promise.resolve({ rows: [], hasMore: false });
+      }
+      throw new Error(`Unexpected path ${path}`);
+    });
+
+    const container = document.createElement("div");
+    const root = createRoot(container);
+
+    await act(async () => {
+      root.render(<HookProbe onSnapshot={(snapshot) => {
+        latestState = snapshot;
+        snapshots.push(snapshot);
+      }} />);
+      await flushEffects();
+    });
+
+    expect(snapshots[snapshots.length - 1]?.totalError).toBe(true);
+
+    await act(async () => {
+      latestState?.setFilter((current) => ({ ...current, entityType: "tasks" }));
+      await flushEffects();
+    });
+
+    expect(snapshots[snapshots.length - 1]?.totalError).toBe(false);
+    expect(snapshots[snapshots.length - 1]?.totalLoading).toBe(true);
+
+    await act(async () => {
+      secondCountRequest.resolve({ total: 1000 });
+      await flushEffects();
+    });
+
+    const finalSnapshot = snapshots[snapshots.length - 1];
+    expect(finalSnapshot?.totalError).toBe(false);
+    expect(finalSnapshot?.totalLoading).toBe(false);
+    expect(finalSnapshot?.total).toBe(1000);
+
+    await act(async () => {
+      root.unmount();
+      await flushEffects();
+    });
+  });
 });

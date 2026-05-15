@@ -10,6 +10,70 @@ vi.mock("@/hooks/use-audit-log", () => ({
 }));
 
 describe("AuditLogPage", () => {
+  it("shows a loading label while the async total is still pending", () => {
+    auditHookState = {
+      rows: [],
+      total: null,
+      totalLoading: true,
+      totalError: false,
+      hasMore: false,
+      page: 1,
+      setPage: vi.fn(),
+      loading: false,
+      filter: {},
+      setFilter: vi.fn(),
+      entityTypes: [],
+      loadGroupChildren: vi.fn(),
+    };
+
+    const html = ReactDOMServer.renderToStaticMarkup(<AuditLogPage />);
+
+    expect(html).toContain("Loading total...");
+  });
+
+  it("shows a failure label when the async total request fails", () => {
+    auditHookState = {
+      rows: [],
+      total: null,
+      totalLoading: false,
+      totalError: true,
+      hasMore: false,
+      page: 1,
+      setPage: vi.fn(),
+      loading: false,
+      filter: {},
+      setFilter: vi.fn(),
+      entityTypes: [],
+      loadGroupChildren: vi.fn(),
+    };
+
+    const html = ReactDOMServer.renderToStaticMarkup(<AuditLogPage />);
+
+    expect(html).toContain("Total unavailable");
+    expect(html).not.toContain("0 entries");
+  });
+
+  it("shows the loaded total when the async count succeeds", () => {
+    auditHookState = {
+      rows: [],
+      total: 1000,
+      totalLoading: false,
+      totalError: false,
+      hasMore: false,
+      page: 1,
+      setPage: vi.fn(),
+      loading: false,
+      filter: {},
+      setFilter: vi.fn(),
+      entityTypes: [],
+      loadGroupChildren: vi.fn(),
+    };
+
+    const html = ReactDOMServer.renderToStaticMarkup(<AuditLogPage />);
+
+    expect(html).toContain("1,000 entries");
+  });
+
   it("renders grouped batch audit rows without exploding them into child entries", () => {
     auditHookState = {
       rows: [
@@ -29,6 +93,7 @@ describe("AuditLogPage", () => {
       ],
       total: 352,
       totalLoading: false,
+      totalError: false,
       hasMore: true,
       page: 1,
       setPage: vi.fn(),

@@ -14,6 +14,7 @@ export function useAuditLog() {
   const [rows, setRows] = useState<ActivityFeedItemRecord[]>([]);
   const [total, setTotal] = useState<number | null>(null);
   const [totalLoading, setTotalLoading] = useState(true);
+  const [totalError, setTotalError] = useState(false);
   const [hasMore, setHasMore] = useState(false);
   const [page, setPage] = useState(1);
   const [loading, setLoading] = useState(true);
@@ -45,6 +46,7 @@ export function useAuditLog() {
     const requestId = totalRequestIdRef.current + 1;
     totalRequestIdRef.current = requestId;
     setTotalLoading(true);
+    setTotalError(false);
     setTotal(null);
     try {
       const params = new URLSearchParams();
@@ -57,6 +59,10 @@ export function useAuditLog() {
       const data = await api<{ total: number }>(`/admin/audit/count?${params}`);
       if (totalRequestIdRef.current === requestId) {
         setTotal(data.total);
+      }
+    } catch {
+      if (totalRequestIdRef.current === requestId) {
+        setTotalError(true);
       }
     } finally {
       if (totalRequestIdRef.current === requestId) {
@@ -93,6 +99,7 @@ export function useAuditLog() {
     rows,
     total,
     totalLoading,
+    totalError,
     hasMore,
     page,
     setPage,
