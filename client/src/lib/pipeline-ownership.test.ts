@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { LEGACY_DEAL_STAGE_TO_CANONICAL_STAGE } from "@trock-crm/shared/types";
 import {
   getCanonicalDealStageSlugs,
   getDealBoardStageSlugs,
@@ -126,6 +127,14 @@ describe("pipeline ownership helpers", () => {
       "estimate_under_review"
     );
     expect(normalizeDealStageSlug("closed_lost", "service")).toBe("lost");
+  });
+
+  it("covers every shared legacy deal-stage alias in the client normalizer", () => {
+    for (const [workflowRoute, aliases] of Object.entries(LEGACY_DEAL_STAGE_TO_CANONICAL_STAGE)) {
+      for (const [alias, canonical] of Object.entries(aliases)) {
+        expect(normalizeDealStageSlug(alias, workflowRoute as "normal" | "service")).toBe(canonical);
+      }
+    }
   });
 
   it("keeps truly shared canonical stage slugs stable for both routes", () => {

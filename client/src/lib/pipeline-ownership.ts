@@ -60,6 +60,15 @@ function normalizeWorkflowRoute(workflowRoute: WorkflowRouteLike): "normal" | "s
   return workflowRoute === "service" ? "service" : "normal";
 }
 
+export function workflowRouteFromStage(input: {
+  workflowFamily?: string | null;
+  slug?: string | null;
+}): "normal" | "service" {
+  if (input.workflowFamily === "service_deal") return "service";
+  if (input.workflowFamily === "standard_deal") return "normal";
+  return normalizeWorkflowRoute(input.slug?.startsWith("service_") ? "service" : "normal");
+}
+
 export function getLeadStageMetadata(
   stageId: string,
   stages: Array<{ id: string; name: string; slug: string }>
@@ -120,6 +129,8 @@ export function normalizeDealStageSlug(
   if (!stageSlug) return null;
 
   switch (stageSlug) {
+    case "dd":
+      return "opportunity";
     case "opportunity":
     case "contract":
     case "won":
@@ -143,11 +154,13 @@ export function normalizeDealStageSlug(
       return "contract";
     case "sent_to_production":
     case "service_sent_to_production":
+    case "service_scheduled":
     case "in_production":
     case "close_out":
     case "closed_won":
     case "service_complete":
       return "won";
+    case "deal_canceled":
     case "production_lost":
     case "service_lost":
     case "closed_lost":
