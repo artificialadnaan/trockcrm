@@ -9,6 +9,7 @@ export * from "./lead-scoping.js";
 export * from "./offices.js";
 export * from "./project-types.js";
 export * from "./sales-review.js";
+export * from "./deal-scope-lock.js";
 export * from "./workflow-gates.js";
 export * from "./workflow.js";
 export * from "./rfp.js";

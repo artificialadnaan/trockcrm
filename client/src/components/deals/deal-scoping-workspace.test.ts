@@ -496,6 +496,48 @@ describe("DealScopingWorkspace lineage routing helpers", () => {
 });
 
 describe("DealScopingWorkspace load failures", () => {
+  it("keeps operational metadata editable in readonly mode while scope controls stay locked", async () => {
+    mocks.getDealScopingIntake.mockResolvedValue(makeScopingResponse({
+      intake: {
+        officeId: "office-dallas",
+        sectionData: {
+          opportunity: { siteVisitDecision: "scheduled" },
+          scopeSummary: { summary: "Readonly summary" },
+        },
+      },
+      resolved: {
+        bidDueDate: "2026-06-01",
+        propertyAddress: "123 Lead Way",
+      },
+    }));
+
+    const rendered = await renderWorkspace(makeDeal(), {
+      mode: "readonly",
+      readOnlySubmittedAt: "2026-05-12T12:00:00.000Z",
+    });
+
+    try {
+      const bidDueDate = rendered.container.querySelector("#bidDueDate") as HTMLInputElement | null;
+      const scopeSummary = rendered.container.querySelector("#scopeSummary") as HTMLTextAreaElement | null;
+      const propertySelector = rendered.container.querySelector("[data-testid='property-selector']") as HTMLButtonElement | null;
+      const scopeItemButton = Array.from(rendered.container.querySelectorAll("button")).find(
+        (button) => button.textContent?.includes("Commercial")
+      ) as HTMLButtonElement | undefined;
+
+      expect(bidDueDate).toBeTruthy();
+      expect(scopeSummary).toBeTruthy();
+      expect(propertySelector).toBeTruthy();
+      expect(scopeItemButton).toBeTruthy();
+
+      expect(bidDueDate?.disabled).toBe(false);
+      expect(scopeSummary?.disabled).toBe(false);
+      expect(propertySelector?.disabled).toBe(true);
+      expect(scopeItemButton?.disabled).toBe(true);
+    } finally {
+      rendered.cleanup();
+    }
+  });
+
   it("keeps newer estimator notes when an older autosave response resolves during typing", async () => {
     const firstAutosave = deferred<ReturnType<typeof makeScopingResponse>>();
     const secondAutosave = deferred<ReturnType<typeof makeScopingResponse>>();
@@ -625,7 +667,7 @@ describe("DealScopingWorkspace load failures", () => {
       const summary = container.querySelector<HTMLTextAreaElement>("#scopeSummary");
       const notes = container.querySelector<HTMLTextAreaElement>("#estimatorConsultationNotes");
       const uploadInputs = container.querySelectorAll<HTMLInputElement>("input[type='file']");
-      expect(summary?.disabled).toBe(true);
+      expect(summary?.disabled).toBe(false);
       expect(notes?.disabled).toBe(true);
       uploadInputs.forEach((input) => expect(input.disabled).toBe(true));
 
@@ -633,7 +675,7 @@ describe("DealScopingWorkspace load failures", () => {
         changeTextareaValue(summary!, "should not autosave");
         await new Promise((resolve) => window.setTimeout(resolve, 500));
       });
-      expect(mocks.patchDealScopingIntake).not.toHaveBeenCalled();
+      expect(mocks.patchDealScopingIntake).toHaveBeenCalled();
 
       const forceEditButton = Array.from(container.querySelectorAll("button")).find(
         (button) => button.textContent?.includes("Force edit")

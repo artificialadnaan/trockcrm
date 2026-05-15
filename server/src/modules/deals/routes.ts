@@ -69,6 +69,8 @@ import {
   DEAL_TEAM_ROLES,
   PUNCH_LIST_TYPES,
   WORKFLOW_TIMER_TYPES,
+  getScopeLockedDealPatchFields,
+  getScopeLockedResolvedFields,
   toCanonicalDealStageSlug,
   type DealOpportunityEnteredEventPayload,
   type RfpRequestDeliveryPayload,
@@ -154,28 +156,6 @@ import { getActiveProjectTypes, getAllStages, getStageBySlug } from "../pipeline
 import { resolveDealCreateOfficeCode } from "./create-context.js";
 
 const router = Router();
-
-const SCOPING_BACKED_DEAL_PATCH_FIELDS = new Set([
-  "companyId",
-  "description",
-  "expectedCloseDate",
-  "name",
-  "primaryContactId",
-  "projectType",
-  "projectTypeId",
-  "propertyAddress",
-  "propertyCity",
-  "propertyId",
-  "propertyState",
-  "propertyZip",
-  "source",
-  "sourceLeadId",
-  "workflowRoute",
-]);
-
-function getScopingBackedDealPatchFields(body: Record<string, unknown>) {
-  return Object.keys(body).filter((field) => SCOPING_BACKED_DEAL_PATCH_FIELDS.has(field));
-}
 
 async function assertDealRouteAccess(req: any, dealId: string) {
   const deal = await getDealById(req.tenantDb!, dealId, req.user!.role, req.user!.id);
@@ -870,24 +850,27 @@ router.patch("/:id/resolved-fields", async (req, res, next) => {
     const forceEditAfterRfp = patch.forceEditAfterRfp === true;
     delete patch.forceEditAfterRfp;
 
-    const writePolicy = await assertDealScopingWriteAllowed(req.tenantDb!, req.params.id, {
-      role: req.user!.role,
-      forceEditAfterRfp,
-    });
+    const scopeLockedFields = getScopeLockedResolvedFields(patch);
+    const writePolicy = scopeLockedFields.length > 0
+      ? await assertDealScopingWriteAllowed(req.tenantDb!, req.params.id, {
+          role: req.user!.role,
+          forceEditAfterRfp,
+        })
+      : null;
 
     const resolved = await writeResolvedDealFields(req.tenantDb!, req.params.id, patch, {
       userId: req.user!.id,
       officeId: req.user!.activeOfficeId ?? req.user!.officeId,
       role: req.user!.role,
     });
-    if (writePolicy.adminOverride) {
+    if (writePolicy?.adminOverride) {
       await writeAuditLog(req.tenantDb!, {
         tableName: "deal_scoping_intake",
         recordId: req.params.id,
         action: "update",
         changedBy: req.user!.id,
         changes: Object.fromEntries(
-          Object.keys(patch).map((field) => [
+          scopeLockedFields.map((field) => [
             field,
             { from: null, to: "[admin override]" },
           ])
@@ -895,7 +878,7 @@ router.patch("/:id/resolved-fields", async (req, res, next) => {
         fullRow: {
           override: "admin_force_edit_after_rfp",
           route: "resolved-fields",
-          fields: Object.keys(patch),
+          fields: scopeLockedFields,
           reason: writePolicy.lockState.reason,
           submittedAt: writePolicy.lockState.submittedAt instanceof Date
             ? writePolicy.lockState.submittedAt.toISOString()
@@ -1241,11 +1224,11 @@ router.patch("/:id", async (req, res, next) => {
     delete body.forceEditAfterRfp;
     delete body.migrationMode;
 
-    const scopingBackedFields = getScopingBackedDealPatchFields(body);
-    if (scopingBackedFields.length > 0) {
+    const scopeLockedFields = getScopeLockedDealPatchFields(body);
+    if (scopeLockedFields.length > 0) {
       await assertDealRouteAccess(req, req.params.id);
     }
-    const writePolicy = scopingBackedFields.length > 0
+    const writePolicy = scopeLockedFields.length > 0
       ? await assertDealScopingWriteAllowed(req.tenantDb!, req.params.id, {
           role: req.user!.role,
           forceEditAfterRfp,
@@ -1277,7 +1260,7 @@ router.patch("/:id", async (req, res, next) => {
         action: "update",
         changedBy: req.user!.id,
         changes: Object.fromEntries(
-          scopingBackedFields.map((field) => [
+          scopeLockedFields.map((field) => [
             field,
             { from: null, to: "[admin override]" },
           ])
@@ -1285,7 +1268,7 @@ router.patch("/:id", async (req, res, next) => {
         fullRow: {
           override: "admin_force_edit_after_rfp",
           route: "deals",
-          fields: scopingBackedFields,
+          fields: scopeLockedFields,
           reason: writePolicy.lockState.reason,
           submittedAt: writePolicy.lockState.submittedAt instanceof Date
             ? writePolicy.lockState.submittedAt.toISOString()

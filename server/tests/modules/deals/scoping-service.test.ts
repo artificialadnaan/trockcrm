@@ -527,7 +527,7 @@ describe("Scoping Service", () => {
     expect(tenantDb.state.dealScopingIntake[0]?.lastAutosavedAt).toBe(originalUpdatedAt);
   });
 
-  it("rejects non-admin scope writes after RFP submission", async () => {
+  it("allows non-admin operational metadata writes after RFP submission", async () => {
     pipelineMocks.getStageById.mockResolvedValue({
       id: "stage-opportunity",
       slug: "opportunity",
@@ -566,16 +566,14 @@ describe("Scoping Service", () => {
         },
         "user-1"
       )
-    ).rejects.toMatchObject<AppError>({
-      statusCode: 403,
-      code: "SCOPE_READ_ONLY_AFTER_RFP",
-      message: "Scope is read-only after RFP submission",
+    ).resolves.toMatchObject({
+      intake: expect.any(Object),
     });
 
-    expect(tenantDb.state.deals[0]?.description).toBe("Submitted exterior scope");
+    expect(tenantDb.state.deals[0]?.description).toBe("Changed after RFP");
   });
 
-  it("allows explicit admin override edits after RFP submission and writes an audit row", async () => {
+  it("allows explicit admin override edits for locked scope fields after RFP submission and writes an audit row", async () => {
     pipelineMocks.getStageById.mockResolvedValue({
       id: "stage-opportunity",
       slug: "opportunity",
@@ -610,12 +608,14 @@ describe("Scoping Service", () => {
       "deal-1",
       {
         forceEditAfterRfp: true,
-        scopeSummary: { summary: "Admin correction after RFP" },
+        opportunity: { siteVisitDecision: "scheduled" },
       },
       "admin-1"
     );
 
-    expect(tenantDb.state.deals[0]?.description).toBe("Admin correction after RFP");
+    expect(
+      (tenantDb.state.dealScopingIntake[0]?.sectionData as Record<string, unknown>)?.opportunity
+    ).toMatchObject({ siteVisitDecision: "scheduled" });
     expect(auditMocks.writeAuditLog).toHaveBeenCalledWith(
       tenantDb,
       expect.objectContaining({
@@ -670,12 +670,12 @@ describe("Scoping Service", () => {
       "deal-1",
       {
         forceEditAfterRfp: true,
-        scopeSummary: { summary: "Admin legacy correction" },
+        projectOverview: { propertyName: "Admin legacy correction" },
       },
       "admin-1"
     );
 
-    expect(tenantDb.state.deals[0]?.description).toBe("Admin legacy correction");
+    expect(tenantDb.state.deals[0]?.name).toBe("Admin legacy correction");
     expect(auditMocks.writeAuditLog).toHaveBeenCalledWith(
       tenantDb,
       expect.objectContaining({

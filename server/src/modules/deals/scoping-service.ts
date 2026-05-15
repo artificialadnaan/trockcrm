@@ -2,7 +2,14 @@ import { and, eq } from "drizzle-orm";
 import type { NodePgDatabase } from "drizzle-orm/node-postgres";
 import { dealScopingIntake, dealTeamMembers, deals, files, tasks, users } from "@trock-crm/shared/schema";
 import type * as schema from "@trock-crm/shared/schema";
-import type { DealScopingIntakeStatus, WorkflowRoute } from "@trock-crm/shared/types";
+import {
+  isScopeLockedAttachmentKey,
+  isScopeLockedWorkspaceField,
+  isScopeLockedWorkspaceSection,
+  isScopeLockedWorkspaceTopLevelField,
+  type DealScopingIntakeStatus,
+  type WorkflowRoute,
+} from "@trock-crm/shared/types";
 import { writeAuditLog } from "../../lib/audit-log.js";
 import { AppError } from "../../middleware/error-handler.js";
 import { getStageById, getStageBySlug } from "../pipeline/service.js";
@@ -257,6 +264,47 @@ function removeKeys(value: unknown, keys: string[]) {
     delete next[key];
   }
   return next;
+}
+
+function areJsonValuesEqual(left: unknown, right: unknown) {
+  return JSON.stringify(left ?? null) === JSON.stringify(right ?? null);
+}
+
+function hasLockedScopingIntakeChanges(input: {
+  currentProjectTypeId: string | null;
+  nextProjectTypeId: string | null;
+  baseSectionData: DealScopingSectionData;
+  nextSectionData: DealScopingSectionData;
+}) {
+  if (
+    isScopeLockedWorkspaceTopLevelField("projectTypeId") &&
+    input.currentProjectTypeId !== input.nextProjectTypeId
+  ) {
+    return true;
+  }
+
+  for (const sectionKey of Object.keys(input.nextSectionData)) {
+    if (sectionKey === "projectOverview") {
+      const currentProjectOverview = toSectionData(input.baseSectionData.projectOverview);
+      const nextProjectOverview = toSectionData(input.nextSectionData.projectOverview);
+      if (
+        isScopeLockedWorkspaceField("projectOverview", "propertyName") &&
+        !areJsonValuesEqual(currentProjectOverview.propertyName, nextProjectOverview.propertyName)
+      ) {
+        return true;
+      }
+    }
+
+    if (!isScopeLockedWorkspaceSection(sectionKey)) {
+      continue;
+    }
+
+    if (!areJsonValuesEqual(input.baseSectionData[sectionKey], input.nextSectionData[sectionKey])) {
+      return true;
+    }
+  }
+
+  return false;
 }
 
 function stripLineageOwnedScopingFields(
@@ -657,10 +705,12 @@ export async function linkDealFileToScopingRequirement(
     getDealOrThrow(tenantDb, dealId),
     getUserOrThrow(tenantDb, userId),
   ]);
-  const writePolicy = await assertDealScopingWriteAllowedForDeal(deal, {
-    role: user.role,
-    forceEditAfterRfp: input.forceEditAfterRfp,
-  });
+  const writePolicy = isScopeLockedAttachmentKey(input.intakeRequirementKey)
+    ? await assertDealScopingWriteAllowedForDeal(deal, {
+        role: user.role,
+        forceEditAfterRfp: input.forceEditAfterRfp,
+      })
+    : { adminOverride: false, lockState: await resolveDealScopeLockState(deal) };
 
   const [file] = await tenantDb
     .select()
@@ -868,10 +918,6 @@ export async function upsertDealScopingIntake(
     getExistingIntake(tenantDb, dealId),
   ]);
   const deal = resolvedDeal.deal;
-  const writePolicy = await assertDealScopingWriteAllowedForDeal(deal, {
-    role: editor.role,
-    forceEditAfterRfp,
-  });
   const baseSectionData = buildBaseSectionData(existingIntake, resolvedDeal);
   const sectionPatch = stripLineageOwnedScopingFields(
     extractSectionPatch(sanitizedPatch),
@@ -881,6 +927,25 @@ export async function upsertDealScopingIntake(
     baseSectionData,
     sectionPatch
   );
+  const currentProjectTypeId = existingIntake?.projectTypeId ?? resolvedDeal.resolved.projectTypeId ?? null;
+  const nextProjectTypeId =
+    resolvedDeal.sourceLead
+      ? resolvedDeal.resolved.projectTypeId ?? null
+      : sanitizedPatch.projectTypeId === undefined
+        ? currentProjectTypeId
+        : sanitizedPatch.projectTypeId;
+  const shouldEnforceScopeLock = hasLockedScopingIntakeChanges({
+    currentProjectTypeId,
+    nextProjectTypeId,
+    baseSectionData,
+    nextSectionData,
+  });
+  const writePolicy = shouldEnforceScopeLock
+    ? await assertDealScopingWriteAllowedForDeal(deal, {
+        role: editor.role,
+        forceEditAfterRfp,
+      })
+    : { adminOverride: false, lockState: await resolveDealScopeLockState(deal) };
   const dealUpdates = buildDealWritebackPatch(sanitizedPatch, nextSectionData);
   if (!resolvedDeal.sourceLead && sanitizedPatch.projectTypeId !== undefined) {
     Object.assign(
@@ -908,7 +973,7 @@ export async function upsertDealScopingIntake(
     resolvedDeal.sourceLead
       ? resolvedDeal.resolved.projectTypeId ?? null
       : sanitizedPatch.projectTypeId === undefined
-      ? existingIntake?.projectTypeId ?? resolvedDeal.resolved.projectTypeId ?? null
+      ? currentProjectTypeId
       : sanitizedPatch.projectTypeId;
   const attachments = await listLinkedScopingAttachments(tenantDb, dealId);
   const readiness = buildScopingReadiness({

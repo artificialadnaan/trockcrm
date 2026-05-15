@@ -1,11 +1,11 @@
 import express, { Router } from "express";
 import { files } from "@trock-crm/shared/schema";
+import { FILE_CATEGORIES, isScopeLockedFileAction } from "@trock-crm/shared/types";
 import { AppError } from "../../middleware/error-handler.js";
 import { requireAdmin } from "../../middleware/rbac.js";
 import { writeSoftDeleteAuditLog } from "../../lib/soft-delete-audit.js";
 import { writeAuditLog } from "../../lib/audit-log.js";
 import type { FileCategory } from "@trock-crm/shared/types";
-import { FILE_CATEGORIES } from "@trock-crm/shared/types";
 import {
   requestUploadUrl,
   confirmUpload,
@@ -69,6 +69,14 @@ async function assertDealLinkedFileMutationAllowed(
     return;
   }
 
+  if (!isScopeLockedFileAction({
+    action,
+    intakeRequirementKey: file.intakeRequirementKey,
+    intakeSource: file.intakeSource,
+  })) {
+    return;
+  }
+
   const writePolicy = await assertDealScopingWriteAllowed(req.tenantDb!, file.dealId, {
     role: req.user!.role,
     forceEditAfterRfp: parseForceEditAfterRfp(req),
@@ -92,43 +100,6 @@ async function assertDealLinkedFileMutationAllowed(
         action,
         fileId: file.id,
         intakeRequirementKey: file.intakeRequirementKey,
-        reason: writePolicy.lockState.reason,
-      },
-    });
-  }
-}
-
-async function assertDealFileUploadAllowed(
-  req: express.Request,
-  dealId: string | null | undefined,
-  action: string,
-  auditOverride = true
-) {
-  if (!dealId) {
-    return;
-  }
-
-  const writePolicy = await assertDealScopingWriteAllowed(req.tenantDb!, dealId, {
-    role: req.user!.role,
-    forceEditAfterRfp: parseForceEditAfterRfp(req),
-  });
-
-  if (auditOverride && writePolicy.adminOverride) {
-    await writeAuditLog(req.tenantDb!, {
-      tableName: "deal_scoping_intake",
-      recordId: dealId,
-      action: "update",
-      changedBy: req.user!.id,
-      changes: {
-        linkedFileMutation: {
-          from: null,
-          to: action,
-        },
-      },
-      fullRow: {
-        override: "admin_force_edit_after_rfp",
-        route: "files",
-        action,
         reason: writePolicy.lockState.reason,
       },
     });
@@ -186,7 +157,6 @@ router.post("/upload-url", async (req, res, next) => {
     if (dealId) {
       const deal = await getDealById(req.tenantDb!, dealId, req.user!.role, req.user!.id);
       if (!deal) throw new AppError(404, "Deal not found or access denied.");
-      await assertDealFileUploadAllowed(req, dealId, "upload_request", false);
     }
     if (leadId) {
       const lead = await getLeadById(req.tenantDb!, leadId, req.user!.role, req.user!.id);
@@ -252,7 +222,6 @@ router.post("/upload-direct", express.raw({ type: "*/*", limit: "50mb" }), async
     if (dealId) {
       const deal = await getDealById(req.tenantDb!, dealId, req.user!.role, req.user!.id);
       if (!deal) throw new AppError(404, "Deal not found or access denied.");
-      await assertDealFileUploadAllowed(req, dealId, "direct_upload");
     }
     if (leadId) {
       const lead = await getLeadById(req.tenantDb!, leadId, req.user!.role, req.user!.id);
@@ -315,7 +284,6 @@ router.post("/confirm-upload", async (req, res, next) => {
     }
 
     const pendingUpload = getPendingUploadMetadata(uploadToken);
-    await assertDealFileUploadAllowed(req, pendingUpload?.dealId, "confirm_upload");
 
     if (addressSource !== undefined && addressSource !== "exif" && addressSource !== "live_gps") {
       throw new AppError(400, "addressSource must be either exif or live_gps.");
