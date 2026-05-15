@@ -1,8 +1,12 @@
+import { readFileSync } from "node:fs";
+import { dirname, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import {
   buildBatchSummary,
   buildEntityNameSnapshot,
   buildLegacyAuditEnrichmentPlan,
+  buildStatementName,
   enrichLegacyAuditLog,
   listTenantSchemas,
   parseEnrichLegacyAuditLogArgs,
@@ -43,23 +47,39 @@ class MockQueryable implements Queryable {
   readonly entityRows: Record<string, LegacyAuditEntityRecord>;
   readonly actorRows: Record<string, string>;
   readonly queries: string[] = [];
+  readonly preparedStatements = new Map<string, string>();
+  readonly maxLockedFetches: number | null;
+  readonly lockedFetchRowIdsByCall: number[][] | null;
+  lockedFetches = 0;
 
   constructor(options: {
     tenantSchemas?: string[];
     auditRows?: LegacyAuditRow[];
     entityRows?: Record<string, LegacyAuditEntityRecord>;
     actorRows?: Record<string, string>;
+    maxLockedFetches?: number | null;
+    lockedFetchRowIdsByCall?: number[][] | null;
   } = {}) {
     this.tenantSchemas = options.tenantSchemas ?? ["office_atlanta", "office_dallas"];
     this.auditRows = options.auditRows ?? [];
     this.entityRows = options.entityRows ?? {};
     this.actorRows = options.actorRows ?? {};
+    this.maxLockedFetches = options.maxLockedFetches ?? null;
+    this.lockedFetchRowIdsByCall = options.lockedFetchRowIdsByCall ?? null;
   }
 
   async query(input: string | { text: string; values?: unknown[] }, params?: unknown[]) {
     const text = typeof input === "string" ? input : input.text;
     const values = (typeof input === "string" ? params : input.values) ?? [];
     this.queries.push(text);
+
+    if (typeof input !== "string" && "name" in input && typeof input.name === "string") {
+      const existingText = this.preparedStatements.get(input.name);
+      if (existingText && existingText !== input.text) {
+        throw new Error(`Prepared statement collision for ${input.name}`);
+      }
+      this.preparedStatements.set(input.name, input.text);
+    }
 
     if (text.includes("FROM pg_namespace")) {
       return { rows: this.tenantSchemas.map((nspname) => ({ nspname })) };
@@ -69,6 +89,7 @@ class MockQueryable implements Queryable {
       const cutoff = String(values[0] ?? "");
       const total = this.auditRows
         .filter((row) => row.createdAt < cutoff)
+        .filter((row) => row.enrichAttemptedAt == null)
         .filter((row) => row.entityNameSnapshot == null)
         .filter((row) => row.actorName == null)
         .filter((row) => row.actorSystemProcess == null)
@@ -77,15 +98,24 @@ class MockQueryable implements Queryable {
     }
 
     if (text.includes(".audit_log") && text.includes("FOR UPDATE SKIP LOCKED")) {
+      this.lockedFetches += 1;
+      if (this.maxLockedFetches != null && this.lockedFetches > this.maxLockedFetches) {
+        throw new Error("execute loop did not terminate");
+      }
       const cutoff = String(values[0] ?? "");
       const batchSize = Number(values[1] ?? this.auditRows.length);
-      const filtered = this.auditRows
+      const eligibleRows = this.auditRows
         .filter((row) => row.createdAt < cutoff)
+        .filter((row) => row.enrichAttemptedAt == null)
         .filter((row) => row.entityNameSnapshot == null)
         .filter((row) => row.actorName == null)
         .filter((row) => row.actorSystemProcess == null)
-        .filter((row) => row.fieldChangesJsonb == null)
-        .slice(0, batchSize);
+        .filter((row) => row.fieldChangesJsonb == null);
+      const requestedIds = this.lockedFetchRowIdsByCall?.[this.lockedFetches - 1] ?? null;
+      const filtered = (requestedIds
+        ? eligibleRows.filter((row) => requestedIds.includes(row.id))
+        : eligibleRows
+      ).slice(0, batchSize);
       return { rows: filtered };
     }
 
@@ -96,6 +126,7 @@ class MockQueryable implements Queryable {
       const filtered = this.auditRows
         .filter((row) => row.id > afterId)
         .filter((row) => row.createdAt < cutoff)
+        .filter((row) => row.enrichAttemptedAt == null)
         .filter((row) => row.entityNameSnapshot == null)
         .filter((row) => row.actorName == null)
         .filter((row) => row.actorSystemProcess == null)
@@ -153,6 +184,7 @@ class MockQueryable implements Queryable {
           ...existing,
           entityNameSnapshot: existing.entityNameSnapshot ?? ((values[0] as string | null) ?? null),
           actorName: existing.actorName ?? ((values[1] as string | null) ?? null),
+          enrichAttemptedAt: existing.enrichAttemptedAt ?? "2026-05-15T16:30:00.000Z",
         };
       }
       this.updates.push({
@@ -196,6 +228,73 @@ describe("entity snapshot formatting", () => {
         state: "TX",
       })
     ).toBe("Dallas, TX");
+  });
+});
+
+describe("prepared statement names", () => {
+  it("bounds names below the PostgreSQL 63-byte prepared statement limit", () => {
+    const longSlug = `office_${"a".repeat(94)}`;
+    const bases = [
+      "legacy-audit-enrich-deal",
+      "legacy-audit-enrich-lead",
+      "legacy-audit-enrich-property",
+      "legacy-audit-enrich-company",
+      "legacy-audit-enrich-user-entity",
+      "legacy-audit-enrich-actor",
+      "legacy-audit-enrich-update",
+    ];
+
+    for (const base of bases) {
+      expect(buildStatementName(longSlug, base).length).toBeLessThanOrEqual(63);
+    }
+  });
+
+  it("scopes names deterministically by schema hash", () => {
+    const base = "legacy-audit-enrich-deal";
+
+    expect(buildStatementName("office_a", base)).not.toBe(buildStatementName("office_b", base));
+    expect(buildStatementName("office_dallas", base)).toBe(buildStatementName("office_dallas", base));
+  });
+
+  it("does not collide for long slugs with the same first 63 characters", () => {
+    const sharedPrefix = `office_${"a".repeat(94)}`;
+    const first = buildStatementName(`${sharedPrefix}x`, "legacy-audit-enrich-deal");
+    const second = buildStatementName(`${sharedPrefix}y`, "legacy-audit-enrich-deal");
+
+    expect(first.slice(0, 63)).not.toBe(second.slice(0, 63));
+  });
+});
+
+describe("audit log enrichment migration replay", () => {
+  const migrationPath = resolve(
+    dirname(fileURLToPath(import.meta.url)),
+    "../../../migrations/0121_audit_log_enrich_attempted_at.sql"
+  );
+  const migrationSql = readFileSync(migrationPath, "utf-8");
+
+  it("contains a tenant schema replay block using the office_dallas placeholder", () => {
+    expect(migrationSql).toContain("-- TENANT_SCHEMA_START");
+    expect(migrationSql).toContain("-- TENANT_SCHEMA_END");
+    expect(migrationSql).toContain("ALTER TABLE office_dallas.audit_log");
+  });
+
+  it("keeps the replay block idempotent for new tenant provisioning", () => {
+    const start = migrationSql.indexOf("-- TENANT_SCHEMA_START");
+    const end = migrationSql.indexOf("-- TENANT_SCHEMA_END");
+    const replayBlock = migrationSql.slice(start, end);
+
+    expect(replayBlock).toContain("ADD COLUMN IF NOT EXISTS enrich_attempted_at");
+    expect(replayBlock).toContain("CREATE INDEX IF NOT EXISTS audit_log_enrich_attempted_at_idx");
+    expect(replayBlock).toContain("WHERE enrich_attempted_at IS NULL");
+  });
+
+  it("creates the supporting partial index for existing tenant schemas", () => {
+    const replayStart = migrationSql.indexOf("-- TENANT_SCHEMA_START");
+    const existingTenantBlock = migrationSql.slice(0, replayStart);
+
+    expect(existingTenantBlock).toContain("CREATE INDEX IF NOT EXISTS audit_log_enrich_attempted_at_idx");
+    expect(existingTenantBlock).toContain("ON %I.audit_log (enrich_attempted_at)");
+    expect(existingTenantBlock).toContain("WHERE enrich_attempted_at IS NULL");
   });
 });
 
@@ -461,5 +560,68 @@ describe("tenant discovery and dry-run execution", () => {
 
     expect(second.rowsToUpdate).toBe(0);
     expect(client.updates).toHaveLength(1);
+  });
+
+  it("processes rows skipped by SKIP LOCKED in a later batch", async () => {
+    const changedBy = "22222222-2222-4222-8222-222222222222";
+    const client = new MockQueryable({
+      auditRows: [
+        baseRow({ id: 101, changedBy }),
+        baseRow({
+          id: 102,
+          recordId: "33333333-3333-4333-8333-333333333333",
+          changedBy,
+        }),
+      ],
+      entityRows: {
+        "deals:11111111-1111-4111-8111-111111111111": {
+          tableName: "deals",
+          id: "11111111-1111-4111-8111-111111111111",
+          name: "Legacy Roof Replacement",
+          projectNumber: "DFW-2-10001-aa",
+        },
+        "deals:33333333-3333-4333-8333-333333333333": {
+          tableName: "deals",
+          id: "33333333-3333-4333-8333-333333333333",
+          name: "Second Deal",
+          projectNumber: "DFW-2-10002-aa",
+        },
+      },
+      actorRows: {
+        [changedBy]: "Morgan Sales",
+      },
+      lockedFetchRowIdsByCall: [[102], [101]],
+      maxLockedFetches: 3,
+    });
+
+    const result = await enrichLegacyAuditLog(client, {
+      officeName: "office_dallas",
+      dryRun: false,
+      batchSize: 1,
+    });
+
+    expect(result.rowsToUpdate).toBe(2);
+    expect(client.updates.map((update) => update.id).sort()).toEqual([101, 102]);
+  });
+
+  it("terminates execute mode even when a batch contains unenrichable rows", async () => {
+    const client = new MockQueryable({
+      auditRows: [
+        baseRow({ id: 101, tableName: "audit_log" }),
+        baseRow({ id: 102, recordId: "not-a-uuid" }),
+      ],
+      maxLockedFetches: 2,
+    });
+
+    await expect(
+      enrichLegacyAuditLog(client, {
+        officeName: "office_dallas",
+        dryRun: false,
+        batchSize: 500,
+      })
+    ).resolves.toMatchObject({
+      examinedRows: 2,
+      rowsToUpdate: 0,
+    });
   });
 });
