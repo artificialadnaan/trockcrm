@@ -7,6 +7,7 @@ import type { ReactNode } from "react";
 import {
   DealListPage,
   buildDealStageNavigationPath,
+  formatDateInput,
   getDashboardDealListView,
 } from "./deal-list-page";
 
@@ -657,6 +658,17 @@ describe("DealListPage", () => {
       contractSignedTo: "2026-05-08",
     });
     expect(view.listInitialSort).toEqual({ key: "contract_signed_date", dir: "desc" });
+  });
+
+  it("formats dashboard drill-down dates in local calendar time instead of UTC truncation", () => {
+    const fakeLocalDate = {
+      getFullYear: () => 2026,
+      getMonth: () => 4,
+      getDate: () => 15,
+      toISOString: () => "2026-05-16T02:00:00.000Z",
+    } as unknown as Date;
+
+    expect(formatDateInput(fakeLocalDate)).toBe("2026-05-15");
   });
 
   it("passes dashboard active-pipeline drill-down props into the embedded deals list", () => {

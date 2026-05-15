@@ -1,7 +1,9 @@
 // @vitest-environment jsdom
 
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { renderToStaticMarkup } from "react-dom/server";
+import { createRoot, type Root } from "react-dom/client";
+import { act } from "react";
 import { MemoryRouter } from "react-router-dom";
 import type { ReactNode } from "react";
 import {
@@ -15,7 +17,10 @@ const mocks = vi.hoisted(() => ({
   useDealsMock: vi.fn(),
   usePipelineStagesMock: vi.fn(),
   useTaskAssigneesMock: vi.fn(),
+  apiMock: vi.fn(),
 }));
+
+(globalThis as unknown as { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
 vi.mock("@/hooks/use-deals", () => ({
   useDeals: mocks.useDealsMock,
@@ -27,6 +32,10 @@ vi.mock("@/hooks/use-pipeline-config", () => ({
 
 vi.mock("@/hooks/use-task-assignees", () => ({
   useTaskAssignees: mocks.useTaskAssigneesMock,
+}));
+
+vi.mock("@/lib/api", () => ({
+  api: mocks.apiMock,
 }));
 
 vi.mock("@/components/ui/input", () => ({
@@ -111,11 +120,45 @@ function render(props: Parameters<typeof DealsListSection>[0] = {}) {
   );
 }
 
+async function renderDom(props: Parameters<typeof DealsListSection>[0] = {}) {
+  const container = document.createElement("div");
+  document.body.appendChild(container);
+  let root!: Root;
+  await act(async () => {
+    root = createRoot(container);
+    root.render(
+      <MemoryRouter>
+        <DealsListSection {...props} />
+      </MemoryRouter>
+    );
+  });
+  return {
+    container,
+    rerender: async (nextProps: Parameters<typeof DealsListSection>[0] = props) => {
+      await act(async () => {
+        root.render(
+          <MemoryRouter>
+            <DealsListSection {...nextProps} />
+          </MemoryRouter>
+        );
+      });
+    },
+    cleanup: async () => {
+      await act(async () => {
+        root.unmount();
+      });
+      container.remove();
+    },
+  };
+}
+
 describe("DealsListSection", () => {
   beforeEach(() => {
+    document.body.innerHTML = "";
     mocks.useDealsMock.mockReset();
     mocks.usePipelineStagesMock.mockReset();
     mocks.useTaskAssigneesMock.mockReset();
+    mocks.apiMock.mockReset();
 
     mocks.usePipelineStagesMock.mockReturnValue({
       loading: false,
@@ -143,6 +186,15 @@ describe("DealsListSection", () => {
       error: null,
       refetch: vi.fn(),
     });
+
+    mocks.apiMock.mockResolvedValue({
+      deals: [makeDeal()],
+      pagination: { totalPages: 1 },
+    });
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
   });
 
   it("renders search, stage filter chips, owner select, and a table", () => {
@@ -279,10 +331,81 @@ describe("DealsListSection", () => {
     expect(html).toContain(">Export<");
   });
 
+  it("mounts without drill-down props and does not thrash renders", async () => {
+    const { cleanup } = await renderDom();
+    try {
+      expect(mocks.useDealsMock.mock.calls.length).toBeLessThan(5);
+      const lastCall = mocks.useDealsMock.mock.calls[mocks.useDealsMock.mock.calls.length - 1]?.[0];
+      expect(lastCall).toMatchObject({ sortBy: "updated_at", sortDir: "desc" });
+    } finally {
+      await cleanup();
+    }
+  });
+
+  it("keeps a user-selected sort across rerenders when drill-down props are omitted", async () => {
+    const { container, rerender, cleanup } = await renderDom();
+    try {
+      const dealSortButton = Array.from(container.querySelectorAll("button")).find((button) =>
+        button.textContent?.includes("Deal")
+      );
+      expect(dealSortButton).not.toBeNull();
+
+      await act(async () => {
+        dealSortButton?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+      });
+
+      let lastCall = mocks.useDealsMock.mock.calls[mocks.useDealsMock.mock.calls.length - 1]?.[0];
+      expect(lastCall).toMatchObject({ sortBy: "name", sortDir: "desc" });
+
+      await rerender();
+
+      lastCall = mocks.useDealsMock.mock.calls[mocks.useDealsMock.mock.calls.length - 1]?.[0];
+      expect(lastCall).toMatchObject({ sortBy: "name", sortDir: "desc" });
+    } finally {
+      await cleanup();
+    }
+  });
+
   it("forwards scope to useDeals", () => {
     render({ scope: "team" });
     const call = mocks.useDealsMock.mock.calls[mocks.useDealsMock.mock.calls.length - 1][0];
     expect(call.scope).toBe("team");
+  });
+
+  it("forwards updatedFrom and updatedTo into the CSV export request", async () => {
+    const originalCreateObjectURL = URL.createObjectURL;
+    const originalRevokeObjectURL = URL.revokeObjectURL;
+    Object.assign(URL, {
+      createObjectURL: vi.fn(() => "blob:test"),
+      revokeObjectURL: vi.fn(),
+    });
+    const { container, cleanup } = await renderDom({
+      enableExport: true,
+      baseFilters: {
+        updatedFrom: "2026-04-01",
+        updatedTo: "2026-05-08",
+      },
+    });
+    try {
+      const exportButton = Array.from(container.querySelectorAll("button")).find((button) =>
+        button.textContent?.includes("Export")
+      );
+      expect(exportButton).not.toBeNull();
+
+      await act(async () => {
+        exportButton?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+      });
+
+      const requestUrl = String(mocks.apiMock.mock.calls[0]?.[0] ?? "");
+      expect(requestUrl).toContain("updatedFrom=2026-04-01");
+      expect(requestUrl).toContain("updatedTo=2026-05-08");
+    } finally {
+      Object.assign(URL, {
+        createObjectURL: originalCreateObjectURL,
+        revokeObjectURL: originalRevokeObjectURL,
+      });
+      await cleanup();
+    }
   });
 
   it("loads deal-family stages only", () => {
@@ -369,6 +492,45 @@ describe("DealsListSection", () => {
     // Page indicator from PipelineStageTable
     expect(html).toContain("Page 1 of 3");
     expect(html).toContain("60 total records");
+  });
+
+  it("resets pagination when the drill-down context changes", async () => {
+    mocks.useDealsMock.mockImplementation((input: { page: number }) => ({
+      deals: [makeDeal({ id: `deal-page-${input.page}` })],
+      pagination: { page: input.page, limit: 25, total: 125, totalPages: 5 },
+      loading: false,
+      error: null,
+      refetch: vi.fn(),
+    }));
+
+    const { container, rerender, cleanup } = await renderDom({
+      initialStageSlugs: [],
+    });
+    try {
+      const nextPageButton = Array.from(container.querySelectorAll("svg"))
+        .find((icon) => icon.className.baseVal?.includes("lucide-chevron-right") || String(icon.getAttribute("class")).includes("lucide-chevron-right"))
+        ?.closest("button");
+      expect(nextPageButton).not.toBeNull();
+
+      await act(async () => {
+        nextPageButton?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+      });
+      await act(async () => {
+        nextPageButton?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+      });
+
+      let lastCall = mocks.useDealsMock.mock.calls[mocks.useDealsMock.mock.calls.length - 1]?.[0];
+      expect(lastCall.page).toBe(3);
+
+      await rerender({
+        initialStageSlugs: ["opportunity"],
+      });
+
+      lastCall = mocks.useDealsMock.mock.calls[mocks.useDealsMock.mock.calls.length - 1]?.[0];
+      expect(lastCall.page).toBe(1);
+    } finally {
+      await cleanup();
+    }
   });
 
   it("renders a mobile card layout and keeps the desktop table hidden below md", () => {

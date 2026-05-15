@@ -45,6 +45,8 @@ const EXPORT_PAGE_SIZE = 500;
 type SortKey = "name" | "stage_entered_at" | "awarded_amount" | "updated_at";
 export type DealListSortState = { key: SortKey | "expected_close_date" | "contract_signed_date"; dir: "asc" | "desc" };
 type DealListActiveFilter = boolean | "all" | "pipeline";
+const DEFAULT_SORT: DealListSortState = { key: "updated_at", dir: "desc" };
+const DEFAULT_STAGE_SLUGS: string[] = [];
 
 interface DealsListSectionProps {
   scope?: "mine" | "team" | "all";
@@ -278,6 +280,8 @@ export function buildDealListParams(input: {
   dateRange: { from?: string; to?: string };
   contractSignedFrom?: string;
   contractSignedTo?: string;
+  updatedFrom?: string;
+  updatedTo?: string;
   isActive: DealListActiveFilter;
   sort: DealListSortState;
   page: number;
@@ -289,8 +293,10 @@ export function buildDealListParams(input: {
   if (input.stageIds.length) params.set("stageIds", input.stageIds.join(","));
   if (input.inactiveStageIds?.length) params.set("inactiveStageIds", input.inactiveStageIds.join(","));
   if (input.assignedRepId) params.set("assignedRepId", input.assignedRepId);
-  if (input.dateRange.from) params.set("updatedFrom", input.dateRange.from);
-  if (input.dateRange.to) params.set("updatedTo", input.dateRange.to);
+  const updatedFrom = input.updatedFrom ?? input.dateRange.from;
+  const updatedTo = input.updatedTo ?? input.dateRange.to;
+  if (updatedFrom) params.set("updatedFrom", updatedFrom);
+  if (updatedTo) params.set("updatedTo", updatedTo);
   if (input.contractSignedFrom) params.set("contractSignedFrom", input.contractSignedFrom);
   if (input.contractSignedTo) params.set("contractSignedTo", input.contractSignedTo);
   params.set("isActive", String(input.isActive));
@@ -310,6 +316,8 @@ export async function fetchAllFilteredDeals(input: {
   dateRange: { from?: string; to?: string };
   contractSignedFrom?: string;
   contractSignedTo?: string;
+  updatedFrom?: string;
+  updatedTo?: string;
   isActive: DealListActiveFilter;
   sort: DealListSortState;
   scope?: "mine" | "team" | "all";
@@ -355,8 +363,8 @@ export function DealsListSection({
   pageSize = DEFAULT_PAGE_SIZE,
   searchPlaceholder = "Deal name, number, company, address",
   baseFilters,
-  initialSort = { key: "updated_at", dir: "desc" },
-  initialStageSlugs = [],
+  initialSort = DEFAULT_SORT,
+  initialStageSlugs = DEFAULT_STAGE_SLUGS,
 }: DealsListSectionProps) {
   const navigate = useNavigate();
   const [search, setSearch] = useState("");
@@ -382,6 +390,17 @@ export function DealsListSection({
     () => (enableDateFilter ? dateRangeFromTerminalFilter(dateFilter) : {}),
     [enableDateFilter, dateFilter]
   );
+  const drilldownContextKey = useMemo(
+    () =>
+      JSON.stringify({
+        baseFilters: baseFilters ?? {},
+        excludeStageSlugs,
+        initialSort,
+        initialStageSlugs,
+        visibleStages: visibleStages?.map((stage) => `${stage.id}:${stage.slug}:${stage.name}`) ?? [],
+      }),
+    [baseFilters, excludeStageSlugs, initialSort, initialStageSlugs, visibleStages]
+  );
 
   const terminalStageIds = useMemo(
     () => getVisibleListTerminalStageIds(stages, stageFilterOptions),
@@ -404,11 +423,18 @@ export function DealsListSection({
   const inactiveStageIds = listQueryState.inactiveStageIds;
 
   useEffect(() => {
-    setStageSlugs(initialStageSlugs);
+    setStageSlugs((current) =>
+      current.length === initialStageSlugs.length &&
+      current.every((slug, index) => slug === initialStageSlugs[index])
+        ? current
+        : initialStageSlugs
+    );
   }, [initialStageSlugs]);
 
   useEffect(() => {
-    setSort(initialSort);
+    setSort((current) =>
+      current.key === initialSort.key && current.dir === initialSort.dir ? current : initialSort
+    );
   }, [initialSort]);
 
   const {
@@ -443,6 +469,10 @@ export function DealsListSection({
     setPage(1);
   }, [scope]);
 
+  useEffect(() => {
+    setPage(1);
+  }, [drilldownContextKey]);
+
   const toggleStage = (slug: string) => {
     setPage(1);
     setStageSlugs((current) =>
@@ -473,6 +503,8 @@ export function DealsListSection({
       scope,
       contractSignedFrom: baseFilters?.contractSignedFrom,
       contractSignedTo: baseFilters?.contractSignedTo,
+      updatedFrom: baseFilters?.updatedFrom,
+      updatedTo: baseFilters?.updatedTo,
     });
     if (exportResult.truncated) {
       toast.info(
