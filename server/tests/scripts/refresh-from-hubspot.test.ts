@@ -341,7 +341,62 @@ describe("HubSpot refresh field policies", () => {
       },
     ]);
 
-    expect(result).toEqual({ auditRowsWritten: 0, skippedUpdate: true });
+    expect(result).toEqual({ auditRowsWritten: 0, skippedUpdate: true, skippedAuditRows: 1 });
+  });
+
+  it("counts skipped audit rows by the number of planned field changes", async () => {
+    const client = {
+      query: async (sql: string) => {
+        if (sql.includes("UPDATE office_dallas.deals")) {
+          return {
+            rows: [],
+            rowCount: 0,
+          };
+        }
+        throw new Error(`Unexpected SQL: ${sql}`);
+      },
+    };
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+
+    const result = await applyDealChanges(client as never, "run-1", "deal-missing", [
+      {
+        dealId: "deal-missing",
+        fieldName: "stage_id",
+        oldValue: "stage-old",
+        newValue: "stage-new",
+        reason: "hubspot_stage:Closed Won",
+      },
+      {
+        dealId: "deal-missing",
+        fieldName: "expected_close_date",
+        oldValue: "2026-05-01",
+        newValue: "2026-05-15",
+        reason: "hubspot_closedate",
+      },
+      {
+        dealId: "deal-missing",
+        fieldName: "property_city",
+        oldValue: "Dallas",
+        newValue: "Plano",
+        reason: "hubspot_city",
+      },
+      {
+        dealId: "deal-missing",
+        fieldName: "property_state",
+        oldValue: "TX",
+        newValue: "OK",
+        reason: "hubspot_state",
+      },
+      {
+        dealId: "deal-missing",
+        fieldName: "bid_estimate",
+        oldValue: "1000",
+        newValue: "1500",
+        reason: "gt_5_percent_drift",
+      },
+    ]);
+
+    expect(result).toEqual({ auditRowsWritten: 0, skippedUpdate: true, skippedAuditRows: 5 });
   });
 
   it("tracks written and skipped audit counts separately across multiple refresh updates", async () => {

@@ -322,9 +322,7 @@ describe("syncHubRoutes", () => {
     const rawFieldChanges = String(auditQuery?.params?.[11] ?? "");
     const formattedFieldChanges = String(auditQuery?.params?.[12] ?? "");
     expect(rawFieldChanges).toContain('"estimatingSubstage":{"from":"building_estimate","to":null}');
-    expect(rawFieldChanges).toContain('"proposalStatus":{"from":"drafting","to":null}');
     expect(formattedFieldChanges).toContain('"key":"estimatingSubstage"');
-    expect(formattedFieldChanges).toContain('"key":"proposalStatus"');
     expect(formattedFieldChanges).toContain('"transition":"cleared"');
   });
 
@@ -386,6 +384,35 @@ describe("syncHubRoutes", () => {
     const auditQuery = queries.find((entry) => entry.sql.includes('INSERT INTO "office_dallas".audit_log'));
     const rawFieldChanges = String(auditQuery?.params?.[11] ?? "");
     expect(rawFieldChanges).not.toContain('"ddEstimate"');
+  });
+
+  it("preserves live proposal_status when the webhook omits it", async () => {
+    const { client, queries } = createClient({
+      existingDealIdByProcoreBid: "deal-1",
+      targetStageSlug: "won",
+      targetStageWorkflowFamily: "standard_deal",
+    });
+    dbMocks.connect.mockResolvedValue(client);
+
+    const app = createApp();
+    const response = await request(app)
+      .post("/api/integrations/synchub/opportunities")
+      .set("x-synchub-secret", "test-secret")
+      .send({
+        office_slug: "dallas",
+        bid_board_id: "bb-1",
+        procore_bid_id: 101,
+        name: "Palm Villas",
+        stage_slug: "won",
+      });
+
+    expect(response.status).toBe(200);
+    const updateQuery = queries.find((entry) => entry.sql.includes("UPDATE office_dallas.deals"));
+    expect(updateQuery?.sql).toContain("proposal_status = COALESCE($16, proposal_status)");
+    expect(updateQuery?.params?.[15]).toBeNull();
+    const auditQuery = queries.find((entry) => entry.sql.includes('INSERT INTO "office_dallas".audit_log'));
+    const rawFieldChanges = String(auditQuery?.params?.[11] ?? "");
+    expect(rawFieldChanges).not.toContain('"proposalStatus"');
   });
 
   it("logs non-null updates for COALESCE-protected webhook fields when the value actually changes", async () => {

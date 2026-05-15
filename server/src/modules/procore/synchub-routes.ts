@@ -30,6 +30,7 @@ const COALESCE_PROTECTED_WEBHOOK_FIELDS = new Set<string>([
   "bidEstimate",
   "awardedAmount",
   "proposalNotes",
+  "proposalStatus",
 ]);
 
 const SHARED_CANONICAL_DEAL_STAGE_SLUGS = [
@@ -357,7 +358,7 @@ router.post("/opportunities", requireSyncHubSecret, async (req, res, next) => {
           stageStatus: stage_status,
           stageFamily: stage_family,
           estimatingSubstage: estimating_substage,
-          proposalStatus: proposal_status,
+          ...(proposal_status !== undefined ? { proposalStatus: proposal_status } : {}),
           stageEnteredAt: stage_entered_at,
           stageExitedAt: stage_exited_at,
           mirrorSourceEnteredAt: mirror_source_entered_at,
@@ -378,7 +379,7 @@ router.post("/opportunities", requireSyncHubSecret, async (req, res, next) => {
       );
       const proposalStatusForUpdate = hasProposalStatusUpdate
         ? (mirrorResult.updates.proposalStatus ?? null)
-        : (currentDeal.proposal_status ?? null);
+        : null;
 
       if (mirrorResult.history?.isBackwardMove) {
         console.warn(
@@ -464,7 +465,7 @@ router.post("/opportunities", requireSyncHubSecret, async (req, res, next) => {
              awarded_amount = COALESCE($13, awarded_amount),
              proposal_notes = COALESCE($14, proposal_notes),
              estimating_substage = $15,
-             proposal_status = $16,
+             proposal_status = COALESCE($16, proposal_status),
              actual_close_date = $17,
              lost_reason_id = $18,
              lost_notes = $19,

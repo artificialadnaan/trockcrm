@@ -339,6 +339,10 @@ export function buildBidBoardMirrorUpdate(input: {
   const proposalStatus =
     normalizeOptionalText(input.payload.proposalStatus) ??
     (stageStatus && VALID_PROPOSAL_STATUS_SET.has(stageStatus) ? stageStatus : null);
+  const hasProposalStatusPayload = Object.prototype.hasOwnProperty.call(
+    input.payload,
+    "proposalStatus"
+  );
   const derivedStageFamily =
     deriveInternalStageFamily({
       stageSlug: input.targetStage.slug,
@@ -404,8 +408,8 @@ export function buildBidBoardMirrorUpdate(input: {
     if (proposalStatus) {
       updates.proposalStatus = proposalStatus;
     }
-  } else {
-    updates.proposalStatus = null;
+  } else if (hasProposalStatusPayload) {
+    updates.proposalStatus = proposalStatus;
   }
 
   updates.actualCloseDate = null;

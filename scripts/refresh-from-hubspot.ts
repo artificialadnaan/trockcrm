@@ -605,8 +605,11 @@ export async function applyDealChanges(
   runId: string,
   dealId: string,
   changes: FieldChange[]
-): Promise<{ auditRowsWritten: number; skippedUpdate: boolean }> {
-  if (changes.length === 0) return { auditRowsWritten: 0, skippedUpdate: false };
+): Promise<{ auditRowsWritten: number; skippedUpdate: boolean; skippedAuditRows: number }> {
+  if (changes.length === 0) {
+    return { auditRowsWritten: 0, skippedUpdate: false, skippedAuditRows: 0 };
+  }
+  const skippedAuditRows = new Set(changes.map((change) => change.fieldName)).size;
   const allowed = new Set([
     "stage_id",
     "expected_close_date",
@@ -642,7 +645,7 @@ export async function applyDealChanges(
 
   if (updateResult.rows.length === 0) {
     console.warn(`HubSpot Refresh: deal ${dealId} not updated (row not found). Skipping audit log entry.`);
-    return { auditRowsWritten: 0, skippedUpdate: true };
+    return { auditRowsWritten: 0, skippedUpdate: true, skippedAuditRows };
   }
 
   for (const change of changes) {
@@ -677,7 +680,7 @@ export async function applyDealChanges(
     metadata: { runId, reasons: changes.map((change) => change.reason) },
   });
 
-  return { auditRowsWritten: changes.length, skippedUpdate: false };
+  return { auditRowsWritten: changes.length, skippedUpdate: false, skippedAuditRows: 0 };
 }
 
 function emptyReport(runId: string, dryRun: boolean, refreshCompanyId: boolean) {
@@ -883,7 +886,7 @@ async function runRefresh() {
             await db.query("COMMIT");
             report.auditRowsWritten += auditResult.auditRowsWritten;
             if (auditResult.skippedUpdate) {
-              report.auditRowsSkipped++;
+              report.auditRowsSkipped += auditResult.skippedAuditRows;
             }
           } catch (error) {
             await db.query("ROLLBACK");
