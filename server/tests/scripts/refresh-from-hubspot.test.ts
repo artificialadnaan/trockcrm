@@ -316,4 +316,31 @@ describe("HubSpot refresh field policies", () => {
     expect(queries.some((query) => query.sql.includes("INSERT INTO public.hubspot_refresh_log"))).toBe(false);
     expect(queries.some((query) => query.sql.includes('INSERT INTO "office_dallas".audit_log'))).toBe(false);
   });
+
+  it("returns zero audit rows written when the UPDATE matches zero rows", async () => {
+    const client = {
+      query: async (sql: string) => {
+        if (sql.includes("UPDATE office_dallas.deals")) {
+          return {
+            rows: [],
+            rowCount: 0,
+          };
+        }
+        throw new Error(`Unexpected SQL: ${sql}`);
+      },
+    };
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+
+    const auditRowsWritten = await applyDealChanges(client as never, "run-1", "deal-missing", [
+      {
+        dealId: "deal-missing",
+        fieldName: "bid_estimate",
+        oldValue: "1000",
+        newValue: "1500",
+        reason: "gt_5_percent_drift",
+      },
+    ]);
+
+    expect(auditRowsWritten).toBe(0);
+  });
 });

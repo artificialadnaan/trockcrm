@@ -400,8 +400,12 @@ export function buildBidBoardMirrorUpdate(input: {
     !["contract", "won", "lost"].includes(canonicalTargetStageSlug)
       ? estimatingSubstage
       : null;
-  if (proposalStatus) {
-    updates.proposalStatus = proposalStatus;
+  if (stageFamily === "proposal") {
+    if (proposalStatus) {
+      updates.proposalStatus = proposalStatus;
+    }
+  } else {
+    updates.proposalStatus = null;
   }
 
   updates.actualCloseDate = null;

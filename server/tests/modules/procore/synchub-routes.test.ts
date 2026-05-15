@@ -316,7 +316,9 @@ describe("syncHubRoutes", () => {
     const rawFieldChanges = String(auditQuery?.params?.[11] ?? "");
     const formattedFieldChanges = String(auditQuery?.params?.[12] ?? "");
     expect(rawFieldChanges).toContain('"estimatingSubstage":{"from":"building_estimate","to":null}');
+    expect(rawFieldChanges).toContain('"proposalStatus":{"from":"drafting","to":null}');
     expect(formattedFieldChanges).toContain('"key":"estimatingSubstage"');
+    expect(formattedFieldChanges).toContain('"key":"proposalStatus"');
     expect(formattedFieldChanges).toContain('"transition":"cleared"');
   });
 

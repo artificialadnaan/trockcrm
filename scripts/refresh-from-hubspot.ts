@@ -600,8 +600,8 @@ function auditFieldKeyForRefreshColumn(fieldName: string): string {
   return fieldName;
 }
 
-export async function applyDealChanges(client: Client, runId: string, dealId: string, changes: FieldChange[]) {
-  if (changes.length === 0) return;
+export async function applyDealChanges(client: Client, runId: string, dealId: string, changes: FieldChange[]): Promise<number> {
+  if (changes.length === 0) return 0;
   const allowed = new Set([
     "stage_id",
     "expected_close_date",
@@ -637,7 +637,7 @@ export async function applyDealChanges(client: Client, runId: string, dealId: st
 
   if (updateResult.rows.length === 0) {
     console.warn(`HubSpot Refresh: deal ${dealId} not updated (row not found). Skipping audit log entry.`);
-    return;
+    return 0;
   }
 
   for (const change of changes) {
@@ -671,6 +671,8 @@ export async function applyDealChanges(client: Client, runId: string, dealId: st
     fieldChanges,
     metadata: { runId, reasons: changes.map((change) => change.reason) },
   });
+
+  return changes.length;
 }
 
 function emptyReport(runId: string, dryRun: boolean, refreshCompanyId: boolean) {
@@ -870,9 +872,9 @@ async function runRefresh() {
         if (!options.dryRun) {
           await db.query("BEGIN");
           try {
-            await applyDealChanges(db, runId, crmDeal.id, plan.changes);
+            const auditRowsWritten = await applyDealChanges(db, runId, crmDeal.id, plan.changes);
             await db.query("COMMIT");
-            report.auditRowsWritten += plan.changes.length;
+            report.auditRowsWritten += auditRowsWritten;
           } catch (error) {
             await db.query("ROLLBACK");
             report.errors.push(`${crmDeal.id}: ${error instanceof Error ? error.message : String(error)}`);

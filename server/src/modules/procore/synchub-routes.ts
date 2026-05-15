@@ -366,6 +366,13 @@ router.post("/opportunities", requireSyncHubSecret, async (req, res, next) => {
           lossOutcome: loss_outcome,
         },
       });
+      const hasProposalStatusUpdate = Object.prototype.hasOwnProperty.call(
+        mirrorResult.updates,
+        "proposalStatus"
+      );
+      const proposalStatusForUpdate = hasProposalStatusUpdate
+        ? (mirrorResult.updates.proposalStatus ?? null)
+        : (currentDeal.proposal_status ?? null);
 
       if (mirrorResult.history?.isBackwardMove) {
         console.warn(
@@ -451,7 +458,7 @@ router.post("/opportunities", requireSyncHubSecret, async (req, res, next) => {
              awarded_amount = COALESCE($13, awarded_amount),
              proposal_notes = COALESCE($14, proposal_notes),
              estimating_substage = $15,
-             proposal_status = COALESCE($16, proposal_status),
+             proposal_status = $16,
              actual_close_date = $17,
              lost_reason_id = $18,
              lost_notes = $19,
@@ -479,7 +486,7 @@ router.post("/opportunities", requireSyncHubSecret, async (req, res, next) => {
           mirrorResult.updates.awardedAmount ?? null,
           mirrorResult.updates.proposalNotes ?? null,
           mirrorResult.updates.estimatingSubstage ?? null,
-          mirrorResult.updates.proposalStatus ?? null,
+          proposalStatusForUpdate,
           mirrorResult.updates.actualCloseDate ?? null,
           mirrorResult.updates.lostReasonId ?? null,
           mirrorResult.updates.lostNotes ?? null,
