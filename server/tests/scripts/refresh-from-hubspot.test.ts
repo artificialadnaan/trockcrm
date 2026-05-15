@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   applyDealChanges,
   buildDealUpdatePlan,
@@ -9,6 +9,10 @@ import {
   shouldRefreshBidEstimate,
   STAGE_MAPPING,
 } from "../../../scripts/refresh-from-hubspot";
+
+afterEach(() => {
+  vi.restoreAllMocks();
+});
 
 describe("HubSpot refresh stage mapping", () => {
   const hubSpotStages = new Map([
@@ -272,5 +276,177 @@ describe("HubSpot refresh field policies", () => {
       "DFW-1-11126-aa",
     ]));
     expect(JSON.stringify(auditInsert?.params)).toContain("bidEstimate");
+  });
+
+  it("skips refresh log and audit log when the UPDATE matches zero rows", async () => {
+    const queries: Array<{ sql: string; params: unknown[] }> = [];
+    const client = {
+      query: async (sql: string, params: unknown[] = []) => {
+        queries.push({ sql, params });
+        if (sql.includes("UPDATE office_dallas.deals")) {
+          return {
+            rows: [],
+            rowCount: 0,
+          };
+        }
+        if (sql.includes("INSERT INTO public.hubspot_refresh_log")) {
+          return { rows: [], rowCount: 1 };
+        }
+        if (sql.includes('INSERT INTO "office_dallas".audit_log')) {
+          return { rows: [], rowCount: 1 };
+        }
+        throw new Error(`Unexpected SQL: ${sql}`);
+      },
+    };
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+
+    await applyDealChanges(client as never, "run-1", "deal-missing", [
+      {
+        dealId: "deal-missing",
+        fieldName: "bid_estimate",
+        oldValue: "1000",
+        newValue: "1500",
+        reason: "gt_5_percent_drift",
+      },
+    ]);
+
+    expect(warnSpy).toHaveBeenCalledWith(
+      "HubSpot Refresh: deal deal-missing not updated (row not found). Skipping audit log entry."
+    );
+    expect(queries.some((query) => query.sql.includes("INSERT INTO public.hubspot_refresh_log"))).toBe(false);
+    expect(queries.some((query) => query.sql.includes('INSERT INTO "office_dallas".audit_log'))).toBe(false);
+  });
+
+  it("returns zero audit rows written when the UPDATE matches zero rows", async () => {
+    const client = {
+      query: async (sql: string) => {
+        if (sql.includes("UPDATE office_dallas.deals")) {
+          return {
+            rows: [],
+            rowCount: 0,
+          };
+        }
+        throw new Error(`Unexpected SQL: ${sql}`);
+      },
+    };
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+
+    const result = await applyDealChanges(client as never, "run-1", "deal-missing", [
+      {
+        dealId: "deal-missing",
+        fieldName: "bid_estimate",
+        oldValue: "1000",
+        newValue: "1500",
+        reason: "gt_5_percent_drift",
+      },
+    ]);
+
+    expect(result).toEqual({ auditRowsWritten: 0, skippedUpdate: true, skippedAuditRows: 1 });
+  });
+
+  it("counts skipped audit rows by the number of planned field changes", async () => {
+    const client = {
+      query: async (sql: string) => {
+        if (sql.includes("UPDATE office_dallas.deals")) {
+          return {
+            rows: [],
+            rowCount: 0,
+          };
+        }
+        throw new Error(`Unexpected SQL: ${sql}`);
+      },
+    };
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+
+    const result = await applyDealChanges(client as never, "run-1", "deal-missing", [
+      {
+        dealId: "deal-missing",
+        fieldName: "stage_id",
+        oldValue: "stage-old",
+        newValue: "stage-new",
+        reason: "hubspot_stage:Closed Won",
+      },
+      {
+        dealId: "deal-missing",
+        fieldName: "expected_close_date",
+        oldValue: "2026-05-01",
+        newValue: "2026-05-15",
+        reason: "hubspot_closedate",
+      },
+      {
+        dealId: "deal-missing",
+        fieldName: "property_city",
+        oldValue: "Dallas",
+        newValue: "Plano",
+        reason: "hubspot_city",
+      },
+      {
+        dealId: "deal-missing",
+        fieldName: "property_state",
+        oldValue: "TX",
+        newValue: "OK",
+        reason: "hubspot_state",
+      },
+      {
+        dealId: "deal-missing",
+        fieldName: "bid_estimate",
+        oldValue: "1000",
+        newValue: "1500",
+        reason: "gt_5_percent_drift",
+      },
+    ]);
+
+    expect(result).toEqual({ auditRowsWritten: 0, skippedUpdate: true, skippedAuditRows: 5 });
+  });
+
+  it("tracks written and skipped audit counts separately across multiple refresh updates", async () => {
+    const clients = Array.from({ length: 7 }, (_, index) => ({
+      query: async (sql: string) => {
+        if (sql.includes("UPDATE office_dallas.deals")) {
+          if (index < 5) {
+            return {
+              rows: [{
+                id: `deal-${index + 1}`,
+                name: `Deal ${index + 1}`,
+                deal_number: `DFW-1-1112${index}-aa`,
+                project_number: null,
+              }],
+              rowCount: 1,
+            };
+          }
+          return {
+            rows: [],
+            rowCount: 0,
+          };
+        }
+        if (sql.includes("INSERT INTO public.hubspot_refresh_log")) {
+          return { rows: [], rowCount: 1 };
+        }
+        if (sql.includes('INSERT INTO "office_dallas".audit_log')) {
+          return { rows: [], rowCount: 1 };
+        }
+        throw new Error(`Unexpected SQL: ${sql}`);
+      },
+    }));
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+
+    let auditRowsWritten = 0;
+    let skippedUpdates = 0;
+    for (const [index, client] of clients.entries()) {
+      const result = await applyDealChanges(client as never, "run-1", `deal-${index + 1}`, [
+        {
+          dealId: `deal-${index + 1}`,
+          fieldName: "bid_estimate",
+          oldValue: "1000",
+          newValue: "1500",
+          reason: "gt_5_percent_drift",
+        },
+      ]);
+      auditRowsWritten += result.auditRowsWritten;
+      skippedUpdates += result.skippedUpdate ? 1 : 0;
+    }
+
+    expect(auditRowsWritten).toBe(5);
+    expect(skippedUpdates).toBe(2);
   });
 });

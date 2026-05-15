@@ -415,7 +415,14 @@ function buildDedupCondition(): SQL {
           AND rich.table_name = al.table_name
           AND rich.record_id = al.record_id
           AND rich.action = al.action
-          AND date_trunc('second', rich.created_at) = date_trunc('second', al.created_at)
+          AND rich.created_at BETWEEN
+            al.created_at - INTERVAL '500 milliseconds'
+            AND al.created_at + INTERVAL '500 milliseconds'
+          AND rich.field_changes_jsonb IS NOT NULL
+          AND (
+            al.field_changes_jsonb IS NULL
+            OR rich.field_changes_jsonb::text = al.field_changes_jsonb::text
+          )
           AND (
             rich.actor_name IS NOT NULL
             OR rich.actor_system_process IS NOT NULL

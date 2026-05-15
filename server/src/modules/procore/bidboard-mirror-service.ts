@@ -339,6 +339,10 @@ export function buildBidBoardMirrorUpdate(input: {
   const proposalStatus =
     normalizeOptionalText(input.payload.proposalStatus) ??
     (stageStatus && VALID_PROPOSAL_STATUS_SET.has(stageStatus) ? stageStatus : null);
+  const hasProposalStatusPayload = Object.prototype.hasOwnProperty.call(
+    input.payload,
+    "proposalStatus"
+  );
   const derivedStageFamily =
     deriveInternalStageFamily({
       stageSlug: input.targetStage.slug,
@@ -400,7 +404,11 @@ export function buildBidBoardMirrorUpdate(input: {
     !["contract", "won", "lost"].includes(canonicalTargetStageSlug)
       ? estimatingSubstage
       : null;
-  if (proposalStatus) {
+  if (stageFamily === "proposal") {
+    if (proposalStatus) {
+      updates.proposalStatus = proposalStatus;
+    }
+  } else if (hasProposalStatusPayload) {
     updates.proposalStatus = proposalStatus;
   }
 

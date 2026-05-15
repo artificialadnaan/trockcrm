@@ -25,6 +25,13 @@ import { PROCORE_SYNCHUB_WEBHOOK } from "../audit/system-processes.js";
 
 const router = Router();
 type WorkflowRoute = "normal" | "service";
+const COALESCE_PROTECTED_WEBHOOK_FIELDS = new Set<string>([
+  "ddEstimate",
+  "bidEstimate",
+  "awardedAmount",
+  "proposalNotes",
+  "proposalStatus",
+]);
 
 const SHARED_CANONICAL_DEAL_STAGE_SLUGS = [
   // opportunity is a CRM-only stage seeded as standard_deal family but applies
@@ -351,7 +358,7 @@ router.post("/opportunities", requireSyncHubSecret, async (req, res, next) => {
           stageStatus: stage_status,
           stageFamily: stage_family,
           estimatingSubstage: estimating_substage,
-          proposalStatus: proposal_status,
+          ...(proposal_status !== undefined ? { proposalStatus: proposal_status } : {}),
           stageEnteredAt: stage_entered_at,
           stageExitedAt: stage_exited_at,
           mirrorSourceEnteredAt: mirror_source_entered_at,
@@ -366,6 +373,13 @@ router.post("/opportunities", requireSyncHubSecret, async (req, res, next) => {
           lossOutcome: loss_outcome,
         },
       });
+      const hasProposalStatusUpdate = Object.prototype.hasOwnProperty.call(
+        mirrorResult.updates,
+        "proposalStatus"
+      );
+      const proposalStatusForUpdate = hasProposalStatusUpdate
+        ? (mirrorResult.updates.proposalStatus ?? null)
+        : null;
 
       if (mirrorResult.history?.isBackwardMove) {
         console.warn(
@@ -479,7 +493,7 @@ router.post("/opportunities", requireSyncHubSecret, async (req, res, next) => {
           mirrorResult.updates.awardedAmount ?? null,
           mirrorResult.updates.proposalNotes ?? null,
           mirrorResult.updates.estimatingSubstage ?? null,
-          mirrorResult.updates.proposalStatus ?? null,
+          proposalStatusForUpdate,
           mirrorResult.updates.actualCloseDate ?? null,
           mirrorResult.updates.lostReasonId ?? null,
           mirrorResult.updates.lostNotes ?? null,
@@ -510,8 +524,12 @@ router.post("/opportunities", requireSyncHubSecret, async (req, res, next) => {
         { key: "actualCloseDate", column: "actual_close_date", value: mirrorResult.updates.actualCloseDate },
       ] as const;
       for (const { key, column, value } of optionalWebhookFields) {
-        if (value !== undefined && value !== null) {
-          webhookFieldChanges[key] = { from: currentDeal[column] ?? null, to: value };
+        if (value === undefined) continue;
+        const normalizedOld = currentDeal[column] ?? null;
+        const normalizedNew = value ?? null;
+        if (COALESCE_PROTECTED_WEBHOOK_FIELDS.has(key) && normalizedNew === null) continue;
+        if (normalizedOld !== normalizedNew) {
+          webhookFieldChanges[key] = { from: normalizedOld, to: normalizedNew };
         }
       }
       await logActivityWithPgClient({
