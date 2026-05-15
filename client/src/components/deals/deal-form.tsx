@@ -51,6 +51,7 @@ export function DealForm({ deal, onSuccess, initialValues }: DealFormProps) {
 
   const isEdit = !!deal;
   const isBidBoardOwned = Boolean(deal?.isBidBoardOwned);
+  const showRelationshipSelectors = !isEdit || !deal?.companyId || !deal?.propertyId;
   const activeStages = getNewDealStages(stages);
   const projectTypeOptions = projectTypeHierarchy.flatMap((parent) => [
     { id: parent.id, name: parent.name },
@@ -305,7 +306,7 @@ export function DealForm({ deal, onSuccess, initialValues }: DealFormProps) {
             />
           </div>
 
-          {!isEdit && (
+          {showRelationshipSelectors && (
             <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
               <div className="space-y-2">
                 <Label>Company <span className="text-red-500">*</span></Label>
