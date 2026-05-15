@@ -317,11 +317,13 @@ describe("LeadQuestionnaireEditor universal questionnaire", () => {
     expect(container.textContent).toContain("Building Type");
   });
 
-  it("renders scope accordions and auto-expands an answered group", async () => {
+  it("renders scope cards and activates an answered group panel", async () => {
     await renderEditor();
 
-    expect(container.textContent).toContain("Parking Lot");
-    expect(container.textContent).toContain("Applies");
+    const parkingCard = container.querySelector('[data-scope-card="parking_lot"]');
+    expect(parkingCard).toBeTruthy();
+    expect(parkingCard?.getAttribute("aria-selected")).toBe("true");
+    expect(parkingCard?.getAttribute("data-scope-active")).toBe("true");
     expect(container.textContent).toContain("Concrete or Asphalt");
     expect(container.textContent).toContain("Concrete");
   });

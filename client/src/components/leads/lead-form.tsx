@@ -955,6 +955,16 @@ function EditableLeadForm({
       )
       .sort((left, right) => left.displayOrder - right.displayOrder);
   }, [formData.projectTypeQuestionAnswers, v2NodeById, v2RenderedQuestionNodes]);
+  const v2ScopeAppliesNodes = useMemo(
+    () =>
+      v2QuestionNodes.filter(
+        (node) =>
+          node.sectionKey === "scope" &&
+          !node.parentNodeId &&
+          (node.key.endsWith("_applies") || node.displayOrder === 0)
+      ),
+    [v2QuestionNodes]
+  );
   const useV2Questionnaire = isCreate && questionnaireTemplateNodes.length > 0;
   const createRequirementErrors = useMemo(() => {
     if (!isCreate) return new Map<string, string>();
@@ -989,6 +999,13 @@ function EditableLeadForm({
     if (!formData.bidDueDate) {
       errors.set("bidDueDate", "Bid Due Date is required.");
     }
+    if (
+      useV2Questionnaire &&
+      v2ScopeAppliesNodes.length > 0 &&
+      !v2ScopeAppliesNodes.some((node) => formData.projectTypeQuestionAnswers[node.key] === true)
+    ) {
+      errors.set("leadQuestionnaire.scopeRequired", "Select at least one scope.");
+    }
     for (const key of createGateMissingKeys) {
       if (!errors.has(key)) errors.set(key, "Required before creating a lead.");
     }
@@ -1014,6 +1031,8 @@ function EditableLeadForm({
     maxPropertyBuildYear,
     selectedProperty,
     selectedOffice?.officeId,
+    useV2Questionnaire,
+    v2ScopeAppliesNodes,
   ]);
   const createSubmitDisabled = isCreate && (questionnaireTemplateLoading || createRequirementErrors.size > 0);
   const selectedPrimaryContactLabel =
@@ -2357,6 +2376,7 @@ function EditableLeadForm({
               </div>
             );
           })}
+          {useV2Questionnaire ? renderCreateFieldError("leadQuestionnaire.scopeRequired") : null}
         </CardContent>
       </Card>
 
