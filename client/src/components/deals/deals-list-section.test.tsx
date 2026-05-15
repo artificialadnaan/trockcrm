@@ -158,7 +158,7 @@ describe("DealsListSection", () => {
     expect(html).toContain("Owner");
     // Row content
     expect(html).toContain("Palm Villas");
-    expect(html).toContain("Acme Construction");
+    expect(html).toContain("Dallas, TX");
     expect(html).toContain("DFW-1-12826-aa");
   });
 
@@ -189,7 +189,7 @@ describe("DealsListSection", () => {
     expect(html).toContain("No Description Deal");
     expect(html).toContain(">—<");
     expect(html).toContain("table-fixed");
-    expect(html).toContain("hidden md:table-cell md:w-[18rem]");
+    expect(html).toContain("hidden lg:table-cell lg:w-[11rem]");
   });
 
   it("renders the selected owner filter label from assignees instead of the raw id", () => {
@@ -369,5 +369,73 @@ describe("DealsListSection", () => {
     // Page indicator from PipelineStageTable
     expect(html).toContain("Page 1 of 3");
     expect(html).toContain("60 total records");
+  });
+
+  it("renders a mobile card layout and keeps the desktop table hidden below md", () => {
+    const html = render({
+      searchPlaceholder: "Search deals or accounts",
+    });
+
+    expect(html).toContain('aria-label="Deals list cards"');
+    expect(html).toContain("md:hidden");
+    expect(html).toContain('aria-label="Open deal Palm Villas"');
+    expect(html).toContain("line-clamp-2");
+    expect(html).toContain("min-h-11");
+    expect(html).toContain("hidden overflow-x-auto md:block");
+  });
+
+  it("uses fixed-width tablet and desktop columns so stage, sla, value, and dates cannot overlap", () => {
+    const html = render({
+      visibleStages: [
+        { id: "stage-opportunity", name: "Opportunity", slug: "opportunity" },
+        {
+          id: "stage-sent",
+          name: "Estimate Sent to Client",
+          slug: "estimate_sent_to_client",
+        },
+      ],
+    });
+
+    expect(html).toContain("overflow-x-auto");
+    expect(html).toContain("md:min-w-[44rem] lg:min-w-[58rem]");
+    expect(html).toContain("md:w-[13.5rem] md:!px-2 lg:w-[15rem]");
+    expect(html).toContain("hidden lg:table-cell lg:w-[11rem]");
+    expect(html).toContain("md:w-[4rem] md:!px-2 lg:w-[7.5rem]");
+    expect(html).toContain("md:w-[8rem] md:!px-2 lg:w-[8.5rem]");
+    expect(html).toContain("hidden lg:table-cell lg:w-[3rem]");
+    expect(html).toContain("md:w-[5.75rem] md:!px-2");
+    expect(html).toContain("md:w-[4.75rem] md:!px-2");
+  });
+
+  it("truncates long text cleanly and preserves full values in accessibility labels", () => {
+    mocks.useDealsMock.mockReturnValue({
+      deals: [
+        makeDeal({
+          name: "The Long Deal Name That Should Clamp Before It Ever Pushes Into Neighboring Columns On Small Screens",
+          projectNumber: "DFW-1-12826-zz",
+          stageName: "ESTIMATE SENT TO CLIENT",
+          description:
+            "Very long deal description that should truncate in the desktop column while still remaining available to assistive technology and hover affordances.",
+          propertyAddress:
+            "742 Evergreen Terrace Building 2000 Suite 450 With An Unreasonably Long Address Label",
+        }),
+      ],
+      pagination: { page: 1, limit: 25, total: 1, totalPages: 1 },
+      loading: false,
+      error: null,
+      refetch: vi.fn(),
+    });
+
+    const html = render();
+
+    expect(html).toContain(
+      'aria-label="The Long Deal Name That Should Clamp Before It Ever Pushes Into Neighboring Columns On Small Screens"'
+    );
+    expect(html).toContain(
+      'aria-label="742 Evergreen Terrace Building 2000 Suite 450 With An Unreasonably Long Address Label"'
+    );
+    expect(html).toContain('title="ESTIMATE SENT TO CLIENT"');
+    expect(html).toContain("truncate");
+    expect(html).toContain("whitespace-nowrap");
   });
 });
