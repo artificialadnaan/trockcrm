@@ -6,6 +6,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { api } from "@/lib/api";
 import { useAuth } from "@/lib/auth";
+import { canUploadCallRecordings, canViewCallRecordings } from "@trock-crm/shared/types";
 import { UploadRecordingModal } from "./upload-modal";
 
 type EntityType = "deal" | "lead" | "company" | "contact";
@@ -56,8 +57,8 @@ export function RecordingList({
 }) {
   const { user } = useAuth();
   const isAdmin = user?.role === "admin";
-  const canUseRecordings = Boolean(user) && user?.role !== "construction";
-  const canUpload = canUseRecordings;
+  const canUseRecordings = canViewCallRecordings(user?.role);
+  const canUpload = canUploadCallRecordings(user?.role);
   const [recordings, setRecordings] = useState<CallRecording[]>([]);
   const [loading, setLoading] = useState(true);
   const [uploadOpen, setUploadOpen] = useState(false);
