@@ -1096,7 +1096,7 @@ export interface RepDashboardData {
 export async function getRepDashboard(
   tenantDb: TenantDb,
   userId: string,
-  options: { range?: ActivityRange } = {}
+  options: { range?: ActivityRange; activityDateRange?: { from?: string; to?: string } } = {}
 ): Promise<RepDashboardData> {
   const today = new Date().toLocaleDateString("en-CA", { timeZone: "America/Chicago" }); // YYYY-MM-DD in CT
 
@@ -1105,6 +1105,13 @@ export async function getRepDashboard(
   const yearStart = `${year}-01-01`;
   const yearEnd = `${year}-12-31`;
   const monthStart = `${year}-${String(now.getMonth() + 1).padStart(2, "0")}-01`;
+
+  const explicitActivityDateRange = options.activityDateRange?.from
+    ? {
+        from: options.activityDateRange.from,
+        to: options.activityDateRange.to ?? today,
+      }
+    : null;
 
   // Activity range start as a YYYY-MM-DD string. SQL applies AT TIME ZONE
   // 'America/Chicago' to anchor it to CT midnight (DST-aware via Postgres,
@@ -1116,7 +1123,9 @@ export async function getRepDashboard(
       : DEFAULT_ACTIVITY_RANGE
   ) as ActivityRange;
   let activityRangeStartDate: string;
-  if (range === "month") {
+  if (explicitActivityDateRange) {
+    activityRangeStartDate = explicitActivityDateRange.from;
+  } else if (range === "month") {
     activityRangeStartDate = `${today.slice(0, 7)}-01`;
   } else if (range === "ytd") {
     activityRangeStartDate = `${today.slice(0, 4)}-01-01`;
@@ -1129,6 +1138,7 @@ export async function getRepDashboard(
     const ref = new Date(Date.UTC(y!, m! - 1, d!) - 7 * 24 * 60 * 60 * 1000);
     activityRangeStartDate = `${ref.getUTCFullYear()}-${String(ref.getUTCMonth() + 1).padStart(2, "0")}-${String(ref.getUTCDate()).padStart(2, "0")}`;
   }
+  const activityRangeEndDate = explicitActivityDateRange?.to ?? today;
 
   const [
     activeLeadResult,
@@ -1195,6 +1205,7 @@ export async function getRepDashboard(
       FROM activities
       WHERE responsible_user_id = ${userId}
         AND occurred_at >= (${activityRangeStartDate}::date AT TIME ZONE 'America/Chicago')
+        AND occurred_at < ((${activityRangeEndDate}::date + INTERVAL '1 day') AT TIME ZONE 'America/Chicago')
     `),
 
     // 4. Follow-up compliance YTD
@@ -2177,7 +2188,9 @@ export async function getRepDetail(
   const to = options.to ?? `${year}-12-31`;
 
   const [dashboard, winLoss, winTrend, staleDeals, staleLeads] = await Promise.all([
-    getRepDashboard(tenantDb, repId),
+    getRepDashboard(tenantDb, repId, {
+      activityDateRange: { from, to },
+    }),
     getWinLossRatioByRep(tenantDb, { from, to }),
     getWinRateTrend(tenantDb, { from, to, repId }),
     getStaleDeals(tenantDb, { repId }),

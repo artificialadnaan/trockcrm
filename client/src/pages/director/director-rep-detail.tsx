@@ -24,12 +24,48 @@ import {
   ArrowLeft,
 } from "lucide-react";
 
+const PRESET_LABELS: Record<DateRangePreset, string> = {
+  mtd: "MTD",
+  qtd: "QTD",
+  ytd: "YTD",
+  last_month: "Last month",
+  last_quarter: "Last quarter",
+  last_year: "Last year",
+  custom: "Custom range",
+};
+
+const PRESET_ACTIVITY_LABELS: Record<DateRangePreset, string> = {
+  mtd: "this month",
+  qtd: "this quarter",
+  ytd: "this year",
+  last_month: "last month",
+  last_quarter: "last quarter",
+  last_year: "last year",
+  custom: "the selected period",
+};
+
+function isDateRangePreset(value: string | null): value is DateRangePreset {
+  return value !== null && value in PRESET_LABELS;
+}
+
 export function DirectorRepDetail() {
   const { repId } = useParams<{ repId: string }>();
-  const [searchParams] = useSearchParams();
-  const [preset, setPreset] = useState<DateRangePreset>("ytd");
+  const [searchParams, setSearchParams] = useSearchParams();
+  const [preset, setPreset] = useState<DateRangePreset>(() => {
+    const requestedPreset = searchParams.get("preset");
+    return isDateRangePreset(requestedPreset) ? requestedPreset : "ytd";
+  });
   const dateRange = presetToDateRange(preset);
   const { data, loading, error } = useRepDetail(repId, dateRange);
+  const periodLabel = PRESET_LABELS[preset];
+  const activityPeriodLabel = PRESET_ACTIVITY_LABELS[preset];
+
+  const handlePresetChange = (nextPreset: DateRangePreset) => {
+    setPreset(nextPreset);
+    const nextParams = new URLSearchParams(searchParams);
+    nextParams.set("preset", nextPreset);
+    setSearchParams(nextParams, { replace: true });
+  };
 
   useEffect(() => {
     if (searchParams.get("focus") !== "activity") {
@@ -113,7 +149,7 @@ export function DirectorRepDetail() {
           </Link>
           <h2 className="text-2xl font-bold">{data.winLoss.repName || "Rep Detail"}</h2>
         </div>
-        <DateRangeToggle value={preset} onChange={setPreset} />
+        <DateRangeToggle value={preset} onChange={handlePresetChange} />
       </div>
 
       {/* KPI Cards */}
@@ -141,13 +177,13 @@ export function DirectorRepDetail() {
           icon={<CheckSquare className="h-5 w-5" />}
         />
         <StatCard
-          title="Activity This Week"
+          title={`Activity · ${periodLabel}`}
           value={data.activityThisWeek.total}
-          subtitle={`${data.activityThisWeek.calls} calls`}
+          subtitle={`${data.activityThisWeek.calls} calls in ${activityPeriodLabel}`}
           icon={<Activity className="h-5 w-5" />}
         />
         <StatCard
-          title="Win Rate"
+          title={`Win Rate · ${periodLabel}`}
           value={`${data.winLoss.winRate}%`}
           subtitle={`${data.winLoss.wins}W / ${data.winLoss.losses}L`}
           icon={<Trophy className="h-5 w-5" />}
@@ -174,7 +210,7 @@ export function DirectorRepDetail() {
                 {data.activityThisWeek.total}
               </p>
               <p className="mt-2 text-sm text-gray-500">
-                Logged this week across calls, emails, meetings, and notes.
+                Logged in {activityPeriodLabel} across calls, emails, meetings, and notes.
               </p>
               <div className="mt-4 grid grid-cols-2 gap-3 text-sm">
                 <div className="rounded-xl border border-gray-200 bg-white px-3 py-2">
@@ -194,7 +230,9 @@ export function DirectorRepDetail() {
                   <p className="text-[10px] font-bold uppercase tracking-widest opacity-70">{item.label}</p>
                   <p className="mt-3 text-3xl font-black">{item.value}</p>
                   <p className="mt-1 text-xs opacity-80">
-                    {item.value === 1 ? `${item.label.slice(0, -1)} logged` : `${item.label} logged`}
+                    {item.value === 1
+                      ? `${item.label.slice(0, -1)} logged in ${activityPeriodLabel}`
+                      : `${item.label} logged in ${activityPeriodLabel}`}
                   </p>
                 </div>
               ))}

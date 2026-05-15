@@ -88,6 +88,13 @@ function formatPercent(value: number | null | undefined): string {
   return `${Math.round(value)}%`;
 }
 
+function buildRepDetailPath(repId: string, preset: DateRangePreset, focus?: string): string {
+  const params = new URLSearchParams();
+  params.set("preset", preset);
+  if (focus) params.set("focus", focus);
+  return `/director/rep/${repId}?${params.toString()}`;
+}
+
 function formatDelta(value: number | null | undefined, suffix = "") {
   if (value === null || value === undefined) {
     return (
@@ -601,7 +608,7 @@ export function DirectorDashboardPage() {
                           </div>
                           <div className="min-w-0">
                             <div className="flex items-center gap-2">
-                              <Link to={`/director/rep/${rep.repId}`} className="font-bold text-gray-950 hover:text-[#CC0000]">
+                              <Link to={buildRepDetailPath(rep.repId, preset)} className="font-bold text-gray-950 hover:text-[#CC0000]" data-testid={`rep-link-${rep.repId}`}>
                                 {rep.repName}
                               </Link>
                               {needsHelp && (
@@ -646,7 +653,7 @@ export function DirectorDashboardPage() {
                         <div className="flex items-center justify-end gap-2">
                           <MiniSparkline values={snapshot?.sparkline8w ?? []} />
                           <Link
-                            to={`/director/rep/${rep.repId}`}
+                            to={buildRepDetailPath(rep.repId, preset)}
                             aria-label={`Open ${rep.repName} breakdown`}
                             className="text-gray-300 opacity-0 transition-opacity group-hover:opacity-100"
                           >
@@ -677,7 +684,7 @@ export function DirectorDashboardPage() {
                   <p className="text-sm font-bold leading-snug">{alert.title}</p>
                   <p className="mt-1 text-xs leading-5 text-gray-400">{alert.detail}</p>
                   <Link
-                    to={alert.repId ? `/director/rep/${alert.repId}` : "/reports"}
+                    to={alert.repId ? buildRepDetailPath(alert.repId, preset) : "/reports"}
                     className="mt-3 inline-flex items-center gap-1 text-[10px] font-black uppercase tracking-wide text-red-300 hover:text-white"
                   >
                     {ActionIcon({ severity: alert.severity })} <ArrowUpRight className="h-3 w-3" />
@@ -768,7 +775,7 @@ export function DirectorDashboardPage() {
                   <p className="mt-3 text-sm font-bold text-gray-900">{prompt.prompt}</p>
                   <p className="mt-1 text-xs leading-5 text-gray-500">{prompt.reason}</p>
                   <Link
-                    to={`/director/rep/${prompt.repId}`}
+                    to={buildRepDetailPath(prompt.repId, preset)}
                     className="mt-3 inline-flex items-center gap-1 text-[10px] font-black uppercase tracking-wide text-[#CC0000] hover:text-red-700"
                   >
                     Schedule 1:1 <ArrowUpRight className="h-3 w-3" />
