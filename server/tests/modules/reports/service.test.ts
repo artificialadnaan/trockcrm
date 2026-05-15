@@ -89,6 +89,12 @@ describe("Reports Service", () => {
       expect(result[0].dealCount).toBe(5);
       expect(result[0].rawValue).toBe(500000);
       expect(result[0].weightedValue).toBe(250000);
+
+      const queryText = extractSqlText(tenantDb.execute.mock.calls[0][0]).toLowerCase();
+      expect(queryText).toContain("coalesce(d.bid_board_stage_slug, psc.slug)");
+      expect(queryText).toContain("not in");
+      expect(queryText).toContain("closed_won");
+      expect(queryText).toContain("service_lost");
     });
   });
 
@@ -250,6 +256,21 @@ describe("Reports Service", () => {
     });
   });
 
+  describe("getPipelineByRep", () => {
+    it("filters mirrored terminal stage slugs out of active rep pipeline", async () => {
+      const { getPipelineByRep } = await import("../../../src/modules/reports/service.js");
+      const tenantDb = createMockTenantDb([]);
+
+      await getPipelineByRep(tenantDb);
+
+      const queryText = extractSqlText(tenantDb.execute.mock.calls[0][0]).toLowerCase();
+      expect(queryText).toContain("coalesce(d.bid_board_stage_slug, psc.slug)");
+      expect(queryText).toContain("not in");
+      expect(queryText).toContain("closed_won");
+      expect(queryText).toContain("service_lost");
+    });
+  });
+
   describe("getStaleDeals", () => {
     it("should return stale deal rows with numeric coercion", async () => {
       const { getStaleDeals } = await import("../../../src/modules/reports/service.js");
@@ -298,6 +319,19 @@ describe("Reports Service", () => {
       expect(queryText).toContain("left join pipeline_stage_config mirror_psc");
       expect(queryText).toContain("coalesce(d.bid_board_stage_entered_at, d.stage_entered_at)");
       expect(queryText).toContain("coalesce(mirror_psc.stale_threshold_days, psc.stale_threshold_days)");
+    });
+
+    it("filters mirrored terminal stage slugs out of stale deal results", async () => {
+      const { getStaleDeals } = await import("../../../src/modules/reports/service.js");
+      const tenantDb = createMockTenantDb([]);
+
+      await getStaleDeals(tenantDb);
+
+      const queryText = extractSqlText(tenantDb.execute.mock.calls[0][0]).toLowerCase();
+      expect(queryText).toContain("coalesce(d.bid_board_stage_slug, psc.slug)");
+      expect(queryText).toContain("not in");
+      expect(queryText).toContain("closed_won");
+      expect(queryText).toContain("service_lost");
     });
   });
 
@@ -461,6 +495,10 @@ describe("Reports Service", () => {
       expect(staleDealQuery).toContain("left join pipeline_stage_config mirror_psc");
       expect(staleDealQuery).toContain("coalesce(d.bid_board_stage_entered_at, d.stage_entered_at)");
       expect(staleDealQuery).toContain("coalesce(mirror_psc.stale_threshold_days, psc.stale_threshold_days)");
+      expect(staleDealQuery).toContain("coalesce(d.bid_board_stage_slug, psc.slug)");
+      expect(staleDealQuery).toContain("not in");
+      expect(staleDealQuery).toContain("closed_won");
+      expect(staleDealQuery).toContain("service_lost");
     });
 
     it("returns CRM-owned progression in workflow order instead of alphabetical stage order", async () => {

@@ -1,3 +1,43 @@
+import {
+  CANONICAL_TERMINAL_DEAL_STAGE_SLUGS,
+  LEGACY_DEAL_STAGE_TO_CANONICAL_STAGE,
+  isTerminalWorkflowStage,
+  toCanonicalDealStageSlug,
+  type WorkflowRoute,
+} from "@trock-crm/shared/types";
+
+const legacyTerminalStageSlugs = Object.entries(LEGACY_DEAL_STAGE_TO_CANONICAL_STAGE.normal)
+  .filter(([, canonicalSlug]) => isTerminalWorkflowStage(canonicalSlug))
+  .map(([slug]) => slug);
+
+export const TERMINAL_STAGE_SLUGS = [
+  ...new Set([...CANONICAL_TERMINAL_DEAL_STAGE_SLUGS, ...legacyTerminalStageSlugs]),
+] as readonly string[];
+
+const TERMINAL_STAGE_SLUG_SET = new Set<string>(TERMINAL_STAGE_SLUGS);
+
+export function isTerminalStage(stageSlug: string | null | undefined, workflowRoute?: WorkflowRoute | null) {
+  if (!stageSlug) return false;
+  return TERMINAL_STAGE_SLUG_SET.has(stageSlug) || isTerminalWorkflowStage(stageSlug, workflowRoute);
+}
+
+export function getTerminalStageOutcome(
+  stageSlug: string | null | undefined,
+  workflowRoute?: WorkflowRoute | null
+): TerminalOutcome | null {
+  if (!stageSlug) return null;
+  const canonicalSlug =
+    toCanonicalDealStageSlug(stageSlug, workflowRoute) ??
+    LEGACY_DEAL_STAGE_TO_CANONICAL_STAGE.normal[
+      stageSlug as keyof typeof LEGACY_DEAL_STAGE_TO_CANONICAL_STAGE.normal
+    ] ??
+    LEGACY_DEAL_STAGE_TO_CANONICAL_STAGE.service[
+      stageSlug as keyof typeof LEGACY_DEAL_STAGE_TO_CANONICAL_STAGE.service
+    ] ??
+    null;
+  return canonicalSlug === "won" || canonicalSlug === "lost" ? canonicalSlug : null;
+}
+
 export type TerminalOutcome = "won" | "lost";
 export type TerminalDateFilter =
   | { preset: "7" | "30" | "60" | "90" | "all"; customStart?: undefined; customEnd?: undefined }
@@ -18,16 +58,49 @@ export function isTerminalOutcomeSlug(slug: string): slug is TerminalOutcome {
 }
 
 export function isTerminalPipelineStageSlug(slug: string) {
+  return isTerminalStage(slug);
+}
+
+type DealWithStageSlug = {
+  stageSlug?: string | null;
+  bidBoardStageSlug?: string | null;
+  stage?: { slug?: string | null } | null;
+};
+
+type DealWithValue = DealWithStageSlug & {
+  awardedAmount?: string | number | null;
+  bidEstimate?: string | number | null;
+  ddEstimate?: string | number | null;
+};
+
+function hasTerminalDealStage(deal: DealWithStageSlug) {
+  return isTerminalStage(deal.bidBoardStageSlug) || isTerminalStage(deal.stageSlug ?? deal.stage?.slug ?? null);
+}
+
+function numericDealValue(value: string | number | null | undefined) {
+  if (value == null || value === "") return 0;
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : 0;
+}
+
+function activePipelineDealValue(deal: DealWithValue) {
   return (
-    slug === "won" ||
-    slug === "lost" ||
-    slug === "sent_to_production" ||
-    slug === "service_sent_to_production" ||
-    slug === "closed_won" ||
-    slug === "production_lost" ||
-    slug === "service_lost" ||
-    slug === "closed_lost"
+    numericDealValue(deal.awardedAmount) ||
+    numericDealValue(deal.bidEstimate) ||
+    numericDealValue(deal.ddEstimate)
   );
+}
+
+export function excludeTerminalDeals<T extends DealWithStageSlug>(deals: T[]) {
+  return deals.filter((deal) => !hasTerminalDealStage(deal));
+}
+
+export function calculateActivePipelineTotal<T extends DealWithValue>(deals: T[]) {
+  const activeDeals = excludeTerminalDeals(deals);
+  return {
+    amount: activeDeals.reduce((sum, deal) => sum + activePipelineDealValue(deal), 0),
+    count: activeDeals.length,
+  };
 }
 
 function formatDateParam(date: Date) {

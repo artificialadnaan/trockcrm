@@ -25,6 +25,27 @@ function createChainableMock() {
   return chain;
 }
 
+function extractSqlText(value: unknown): string {
+  if (typeof value === "string") return value;
+  if (!value || typeof value !== "object") return "";
+
+  if (Array.isArray((value as { queryChunks?: unknown[] }).queryChunks)) {
+    return (value as { queryChunks: unknown[] }).queryChunks.map(extractSqlText).join("");
+  }
+
+  if ("value" in (value as Record<string, unknown>)) {
+    const chunkValue = (value as { value: unknown }).value;
+    if (Array.isArray(chunkValue)) return chunkValue.map(extractSqlText).join("");
+    if (typeof chunkValue === "string") return chunkValue;
+  }
+
+  if ("name" in (value as Record<string, unknown>) && typeof (value as { name?: unknown }).name === "string") {
+    return (value as { name: string }).name;
+  }
+
+  return "";
+}
+
 vi.mock("../../../src/db.js", () => ({
   db: createChainableMock(),
   pool: {},
@@ -73,9 +94,11 @@ describe("getDealsForPipeline", () => {
       [{ count: 110, totalValue: 110000 }],
       stageDeals.slice(0, 100),
     ];
+    const tenantChains: any[] = [];
     const tenantDb = {
       select: vi.fn(() => {
         const chain = createChainableMock();
+        tenantChains.push(chain);
         chain.then.mockImplementation((resolve: (value: any[]) => unknown) => resolve(tenantResponses.shift() ?? []));
         return chain;
       }),
@@ -90,5 +113,13 @@ describe("getDealsForPipeline", () => {
 
     expect(result.pipelineColumns[0]?.count).toBe(110);
     expect(result.pipelineColumns[0]?.deals).toHaveLength(100);
+    const summaryWhere = extractSqlText(tenantChains[0].where.mock.calls[0][0]).toLowerCase();
+    const cardsWhere = extractSqlText(tenantChains[1].where.mock.calls[0][0]).toLowerCase();
+    expect(summaryWhere).toContain("bid_board_stage_slug");
+    expect(summaryWhere).toContain("not in");
+    expect(summaryWhere).toContain("closed_won");
+    expect(cardsWhere).toContain("bid_board_stage_slug");
+    expect(cardsWhere).toContain("not in");
+    expect(cardsWhere).toContain("service_lost");
   });
 });

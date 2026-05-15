@@ -36,6 +36,7 @@ import { resolveActiveOfficeUserIds, resolveTeamRepIds } from "../shared/team-sc
 import { resolveLeadSourceDisplayValue } from "../leads/source-control.js";
 import { resolveDealCreationPolicy, type DealCreationOrigin } from "./direct-create-rules.js";
 import { logActivity, type AuditContext } from "../audit/audit-logger.js";
+import { TERMINAL_STAGE_SLUGS } from "../shared/pipeline-terminal-stages.js";
 
 // Type alias for the tenant-scoped Drizzle instance
 type TenantDb = NodePgDatabase<typeof schema>;
@@ -43,6 +44,14 @@ type DealRow = typeof deals.$inferSelect;
 type PipelineStageRow = typeof pipelineStageConfig.$inferSelect;
 const contractSignedDateForReporting = sql`COALESCE(contract_signed_at::date, contract_signed_date)`;
 const PIPELINE_CARDS_PER_STAGE_LIMIT = 100;
+
+function sqlStringList(values: readonly string[]) {
+  return sql.join(values.map((value) => sql`${value}`), sql`, `);
+}
+
+function nonTerminalMirroredStageCondition() {
+  return sql`COALESCE(${deals.bidBoardStageSlug}, '') NOT IN (${sqlStringList(TERMINAL_STAGE_SLUGS)})`;
+}
 
 export interface DealFilters {
   search?: string;
@@ -1814,6 +1823,7 @@ export async function getDealsForPipeline(
       }
     } else {
       stageConditions.push(eq(deals.isActive, true), eq(deals.stageId, stage.id));
+      stageConditions.push(nonTerminalMirroredStageCondition());
     }
 
     const where = and(...stageConditions, ...commonConditions);

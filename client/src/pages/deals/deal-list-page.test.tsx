@@ -261,6 +261,69 @@ describe("DealListPage", () => {
     expect(html).not.toContain("/deals/new");
   });
 
+  it("excludes terminal-stage cards from the Active Pipeline value and count", () => {
+    mocks.useDealBoardMock.mockReturnValue({
+      board: {
+        columns: [
+          {
+            stage: { id: "stage-opportunity", name: "Opportunity", slug: "opportunity" },
+            count: 1,
+            totalValue: 180000,
+            cards: [makeDeal({ id: "deal-open", bidEstimate: "180000", awardedAmount: null })],
+          },
+          {
+            stage: { id: "stage-won", name: "Won", slug: "won" },
+            count: 1,
+            totalValue: 410000,
+            cards: [
+              makeDeal({
+                id: "deal-won",
+                name: "Won Terminal Deal",
+                stageId: "stage-won",
+                awardedAmount: "410000",
+                bidEstimate: null,
+                ddEstimate: null,
+              }),
+            ],
+          },
+          {
+            stage: { id: "stage-lost", name: "Lost", slug: "lost" },
+            count: 1,
+            totalValue: 92000,
+            cards: [
+              makeDeal({
+                id: "deal-lost",
+                name: "Lost Terminal Deal",
+                stageId: "stage-lost",
+                bidEstimate: "92000",
+                ddEstimate: null,
+              }),
+              makeDeal({
+                id: "deal-mirrored-terminal",
+                name: "Mirrored Terminal Deal",
+                stageId: "stage-opportunity",
+                bidBoardStageSlug: "service_sent_to_production",
+                bidEstimate: "900000",
+                ddEstimate: null,
+              }),
+            ],
+          },
+        ],
+        terminalStages: [],
+      },
+      loading: false,
+      error: null,
+      refetch: vi.fn(),
+    });
+
+    const html = renderPage();
+
+    expect(html).toContain("Active pipeline");
+    expect(html).toMatch(/Active pipeline.*\$180\.0K.*1 deals/);
+    expect(html).not.toContain("$1.6M");
+    expect(html).not.toContain("4 deals");
+  });
+
   it("renders decorated cards with project number fallback, avatar, company, SLA, and location", () => {
     mocks.useDealBoardMock.mockReturnValue({
       board: {

@@ -76,6 +76,11 @@ describe("pipeline DD toggle label", () => {
     expect(pipelinePageSource).toContain("Show due diligence stages in the pipeline");
     expect(pipelinePageSource).not.toContain(">Show DD<");
   });
+
+  it("does not render the legacy New Deal button", () => {
+    expect(pipelinePageSource).not.toContain('navigate("/deals/new")');
+    expect(pipelinePageSource).not.toContain("New Deal");
+  });
 });
 
 describe("summarizeActivePipelineColumns", () => {
@@ -85,9 +90,14 @@ describe("summarizeActivePipelineColumns", () => {
         stage: { id: "estimating", name: "Estimating", slug: "estimating" },
         deals: [
           { id: "deal-1", stageEnteredAt: "2026-04-20T12:00:00.000Z" },
+          {
+            id: "deal-mirrored-terminal",
+            bidBoardStageSlug: "service_sent_to_production",
+            stageEnteredAt: "2026-04-20T12:00:00.000Z",
+          },
         ],
-        count: 30,
-        totalValue: 300000,
+        count: 31,
+        totalValue: 1200000,
       },
       {
         stage: { id: "won", name: "Won", slug: "won" },
@@ -99,8 +109,8 @@ describe("summarizeActivePipelineColumns", () => {
       },
     ] as any);
 
-    expect(summary.totalDeals).toBe(30);
-    expect(summary.totalValue).toBe(300000);
+    expect(summary.totalDeals).toBe(1);
+    expect(summary.totalValue).toBe(0);
   });
 });
 
