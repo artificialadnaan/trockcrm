@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
 import { api } from "@/lib/api";
 import type { ActivityFeedEntryRecord, ActivityFeedItemRecord } from "@/components/audit/activity-feed-entry";
 
@@ -12,11 +12,14 @@ export interface AuditLogFilter {
 
 export function useAuditLog() {
   const [rows, setRows] = useState<ActivityFeedItemRecord[]>([]);
-  const [total, setTotal] = useState(0);
+  const [total, setTotal] = useState<number | null>(null);
+  const [totalLoading, setTotalLoading] = useState(true);
+  const [hasMore, setHasMore] = useState(false);
   const [page, setPage] = useState(1);
   const [loading, setLoading] = useState(true);
   const [filter, setFilter] = useState<AuditLogFilter>({});
   const [entityTypes, setEntityTypes] = useState<string[]>([]);
+  const totalRequestIdRef = useRef(0);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -28,15 +31,39 @@ export function useAuditLog() {
       if (filter.fromDate) params.set("fromDate", filter.fromDate);
       if (filter.toDate) params.set("toDate", filter.toDate);
 
-      const data = await api<{ rows: ActivityFeedItemRecord[]; total: number }>(
+      const data = await api<{ rows: ActivityFeedItemRecord[]; hasMore: boolean }>(
         `/admin/audit?${params}`
       );
       setRows(data.rows);
-      setTotal(data.total);
+      setHasMore(data.hasMore);
     } finally {
       setLoading(false);
     }
   }, [page, filter]);
+
+  const loadTotal = useCallback(async () => {
+    const requestId = totalRequestIdRef.current + 1;
+    totalRequestIdRef.current = requestId;
+    setTotalLoading(true);
+    setTotal(null);
+    try {
+      const params = new URLSearchParams();
+      if (filter.entityType) params.set("entityType", filter.entityType);
+      if (filter.actorQuery) params.set("actorQuery", filter.actorQuery);
+      if (filter.action) params.set("action", filter.action);
+      if (filter.fromDate) params.set("fromDate", filter.fromDate);
+      if (filter.toDate) params.set("toDate", filter.toDate);
+
+      const data = await api<{ total: number }>(`/admin/audit/count?${params}`);
+      if (totalRequestIdRef.current === requestId) {
+        setTotal(data.total);
+      }
+    } finally {
+      if (totalRequestIdRef.current === requestId) {
+        setTotalLoading(false);
+      }
+    }
+  }, [filter]);
 
   const loadEntityTypes = useCallback(async () => {
     try {
@@ -48,6 +75,7 @@ export function useAuditLog() {
   }, []);
 
   useEffect(() => { void load(); }, [load]);
+  useEffect(() => { void loadTotal(); }, [loadTotal]);
   useEffect(() => { void loadEntityTypes(); }, [loadEntityTypes]);
 
   const loadGroupChildren = useCallback(async (groupId: string, page = 1, limit = 100) => {
@@ -61,5 +89,17 @@ export function useAuditLog() {
     return data;
   }, [filter]);
 
-  return { rows, total, page, setPage, loading, filter, setFilter, entityTypes, loadGroupChildren };
+  return {
+    rows,
+    total,
+    totalLoading,
+    hasMore,
+    page,
+    setPage,
+    loading,
+    filter,
+    setFilter,
+    entityTypes,
+    loadGroupChildren,
+  };
 }

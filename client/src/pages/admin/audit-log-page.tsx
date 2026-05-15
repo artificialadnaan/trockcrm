@@ -14,15 +14,29 @@ const ACTION_OPTIONS = [
 ];
 
 export function AuditLogPage() {
-  const { rows, total, page, setPage, loading, filter, setFilter, entityTypes, loadGroupChildren } = useAuditLog();
-  const totalPages = Math.max(1, Math.ceil(total / 50));
+  const {
+    rows,
+    total,
+    totalLoading,
+    hasMore,
+    page,
+    setPage,
+    loading,
+    filter,
+    setFilter,
+    entityTypes,
+    loadGroupChildren,
+  } = useAuditLog();
+  const totalPages = total == null ? null : Math.max(1, Math.ceil(total / 50));
 
   return (
     <div className="mx-auto max-w-5xl space-y-4 p-6">
       <div className="flex items-end justify-between gap-4">
         <div>
           <h1 className="text-2xl font-semibold text-slate-950">All Activity</h1>
-          <p className="mt-1 text-sm text-slate-500">{total.toLocaleString()} entries</p>
+          <p className="mt-1 text-sm text-slate-500">
+            {totalLoading && total == null ? "Loading total..." : `${(total ?? 0).toLocaleString()} entries`}
+          </p>
         </div>
       </div>
 
@@ -124,12 +138,12 @@ export function AuditLogPage() {
       </section>
 
       <div className="flex items-center justify-between text-sm text-slate-500">
-        <span>Page {page} of {totalPages}</span>
+        <span>{totalPages == null ? `Page ${page}` : `Page ${page} of ${totalPages}`}</span>
         <div className="flex items-center gap-1">
           <Button variant="outline" size="sm" onClick={() => setPage(page - 1)} disabled={page <= 1}>
             <ChevronLeft className="h-4 w-4" />
           </Button>
-          <Button variant="outline" size="sm" onClick={() => setPage(page + 1)} disabled={page >= totalPages}>
+          <Button variant="outline" size="sm" onClick={() => setPage(page + 1)} disabled={totalPages == null ? !hasMore : page >= totalPages}>
             <ChevronRight className="h-4 w-4" />
           </Button>
         </div>

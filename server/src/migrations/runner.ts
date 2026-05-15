@@ -3,6 +3,10 @@ import { join, dirname } from "path";
 import { fileURLToPath } from "url";
 import pg from "pg";
 import dotenv from "dotenv";
+import {
+  AUDIT_LOG_PERFORMANCE_MIGRATION,
+  runAuditLogPerformanceIndexMigration,
+} from "./audit-log-performance-indexes.js";
 
 dotenv.config({
   path: join(dirname(fileURLToPath(import.meta.url)), "../../../.env"),
@@ -42,8 +46,12 @@ async function runMigrations(): Promise<void> {
       }
 
       console.log(`Running ${file}...`);
-      const sql = readFileSync(join(MIGRATIONS_DIR, file), "utf-8");
-      await client.query(sql);
+      if (file === AUDIT_LOG_PERFORMANCE_MIGRATION) {
+        await runAuditLogPerformanceIndexMigration(client);
+      } else {
+        const sql = readFileSync(join(MIGRATIONS_DIR, file), "utf-8");
+        await client.query(sql);
+      }
 
       await client.query(
         "INSERT INTO public._migrations (name) VALUES ($1)",
