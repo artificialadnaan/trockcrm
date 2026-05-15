@@ -15,6 +15,14 @@ BEGIN
       $sql$,
       tenant_schema
     );
+    EXECUTE format(
+      $sql$
+        CREATE INDEX IF NOT EXISTS audit_log_enrich_attempted_at_idx
+          ON %I.audit_log (enrich_attempted_at)
+          WHERE enrich_attempted_at IS NULL;
+      $sql$,
+      tenant_schema
+    );
   END LOOP;
 END
 $tenant$;

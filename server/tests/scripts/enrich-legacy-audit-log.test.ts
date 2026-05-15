@@ -1,4 +1,6 @@
 import { readFileSync } from "node:fs";
+import { dirname, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import {
   buildBatchSummary,
@@ -232,9 +234,19 @@ describe("entity snapshot formatting", () => {
 describe("prepared statement names", () => {
   it("bounds names below the PostgreSQL 63-byte prepared statement limit", () => {
     const longSlug = `office_${"a".repeat(94)}`;
-    const name = buildStatementName(longSlug, "legacy-audit-enrich-deal");
+    const bases = [
+      "legacy-audit-enrich-deal",
+      "legacy-audit-enrich-lead",
+      "legacy-audit-enrich-property",
+      "legacy-audit-enrich-company",
+      "legacy-audit-enrich-user-entity",
+      "legacy-audit-enrich-actor",
+      "legacy-audit-enrich-update",
+    ];
 
-    expect(name.length).toBeLessThanOrEqual(63);
+    for (const base of bases) {
+      expect(buildStatementName(longSlug, base).length).toBeLessThanOrEqual(63);
+    }
   });
 
   it("scopes names deterministically by schema hash", () => {
@@ -254,7 +266,11 @@ describe("prepared statement names", () => {
 });
 
 describe("audit log enrichment migration replay", () => {
-  const migrationSql = readFileSync("migrations/0121_audit_log_enrich_attempted_at.sql", "utf-8");
+  const migrationPath = resolve(
+    dirname(fileURLToPath(import.meta.url)),
+    "../../../migrations/0121_audit_log_enrich_attempted_at.sql"
+  );
+  const migrationSql = readFileSync(migrationPath, "utf-8");
 
   it("contains a tenant schema replay block using the office_dallas placeholder", () => {
     expect(migrationSql).toContain("-- TENANT_SCHEMA_START");
@@ -270,6 +286,15 @@ describe("audit log enrichment migration replay", () => {
     expect(replayBlock).toContain("ADD COLUMN IF NOT EXISTS enrich_attempted_at");
     expect(replayBlock).toContain("CREATE INDEX IF NOT EXISTS audit_log_enrich_attempted_at_idx");
     expect(replayBlock).toContain("WHERE enrich_attempted_at IS NULL");
+  });
+
+  it("creates the supporting partial index for existing tenant schemas", () => {
+    const replayStart = migrationSql.indexOf("-- TENANT_SCHEMA_START");
+    const existingTenantBlock = migrationSql.slice(0, replayStart);
+
+    expect(existingTenantBlock).toContain("CREATE INDEX IF NOT EXISTS audit_log_enrich_attempted_at_idx");
+    expect(existingTenantBlock).toContain("ON %I.audit_log (enrich_attempted_at)");
+    expect(existingTenantBlock).toContain("WHERE enrich_attempted_at IS NULL");
   });
 });
 

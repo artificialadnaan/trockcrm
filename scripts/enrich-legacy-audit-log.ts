@@ -134,7 +134,7 @@ function quoteIdent(value: string): string {
 }
 
 export function buildStatementName(schemaName: string, base: string): string {
-  const hash = crypto.createHash("sha256").update(schemaName).digest("hex").slice(0, 8);
+  const hash = crypto.createHash("sha256").update(schemaName).digest("hex").slice(0, 24);
   return `${base}-${hash}`;
 }
 
