@@ -6,6 +6,9 @@ export function formatQuestionAnswerValue(
   value: QuestionAnswerValue,
   options: { formatStringEnums?: boolean } = {}
 ) {
+  if (typeof value === "string" && value.trim() === "__unanswered__") {
+    return formatDisplayValue(null, options);
+  }
   return formatDisplayValue(value, options);
 }
 

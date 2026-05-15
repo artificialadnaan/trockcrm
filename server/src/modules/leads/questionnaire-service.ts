@@ -10,6 +10,7 @@ import { and, eq } from "drizzle-orm";
 import { AppError } from "../../middleware/error-handler.js";
 
 type TenantDb = NodePgDatabase<typeof schema>;
+const UNANSWERED_PLACEHOLDER_VALUE = "__unanswered__";
 
 export type LeadQuestionAnswerValue = string | boolean | number | string[] | null;
 
@@ -99,10 +100,21 @@ function normalizeAnswerValueForNode(
     if (value == null) {
       return null;
     }
+    if (typeof value === "string" && value.trim() === UNANSWERED_PLACEHOLDER_VALUE) {
+      return null;
+    }
     if (typeof value !== "boolean") {
       throw new AppError(400, `Boolean answer ${node.key} must be true or false.`);
     }
     return value;
+  }
+
+  if (
+    (node.inputType === "select" || (Array.isArray(node.options) && node.options.length > 0) || node.key === "life_safety") &&
+    typeof value === "string" &&
+    value.trim() === UNANSWERED_PLACEHOLDER_VALUE
+  ) {
+    return null;
   }
 
   if (node.inputType !== "multiselect") {
@@ -139,6 +151,25 @@ function sortQuestionnaireNodes(left: QuestionnaireNode, right: QuestionnaireNod
   return left.displayOrder - right.displayOrder;
 }
 
+function normalizeStoredAnswerValue(value: LeadQuestionAnswerValue | undefined) {
+  if (typeof value === "string" && value.trim() === UNANSWERED_PLACEHOLDER_VALUE) {
+    return null;
+  }
+  return value ?? null;
+}
+
+function normalizeQuestionnaireNode(node: QuestionnaireNode): QuestionnaireNode {
+  if (node.key !== "life_safety") {
+    return node;
+  }
+
+  return {
+    ...node,
+    inputType: "boolean",
+    options: [],
+  };
+}
+
 export async function listQuestionnaireNodes(tenantDb: TenantDb): Promise<QuestionnaireNode[]> {
   return listAllQuestionnaireNodes(tenantDb);
 }
@@ -148,6 +179,7 @@ export async function listAllQuestionnaireNodes(tenantDb: TenantDb): Promise<Que
 
   return rows
     .filter((row) => row.isActive && row.projectTypeId == null)
+    .map(normalizeQuestionnaireNode)
     .sort(sortQuestionnaireNodes);
 }
 
@@ -170,7 +202,7 @@ export async function listLeadQuestionAnswers(
   return rows.reduce<Record<string, LeadQuestionAnswerValue>>((accumulator, row) => {
     const key = keyByQuestionId.get(row.questionId);
     if (key) {
-      accumulator[key] = (row.valueJson as LeadQuestionAnswerValue | undefined) ?? null;
+      accumulator[key] = normalizeStoredAnswerValue(row.valueJson as LeadQuestionAnswerValue | undefined);
     }
     return accumulator;
   }, {});
@@ -189,7 +221,7 @@ export async function listLegacyLeadQuestionAnswers(
     return [];
   }
 
-  const nodes = await tenantDb.select().from(projectTypeQuestionNodes);
+  const nodes = (await tenantDb.select().from(projectTypeQuestionNodes)).map(normalizeQuestionnaireNode);
   const nodeById = new Map(nodes.map((node) => [node.id, node]));
   const activeUniversalIds = new Set(
     nodes

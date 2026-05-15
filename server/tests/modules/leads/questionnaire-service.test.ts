@@ -21,6 +21,10 @@ const leadFormFieldBatchMigrationSql = readFileSync(
   new URL("../../../../migrations/0117_lead_form_field_batch.sql", import.meta.url),
   "utf8"
 );
+const unansweredPlaceholderHotfixMigrationSql = readFileSync(
+  new URL("../../../../migrations/0118_unanswered_placeholder_life_safety_hotfix.sql", import.meta.url),
+  "utf8"
+);
 
 function node(overrides: Partial<typeof projectTypeQuestionNodes.$inferSelect>) {
   return {
@@ -519,6 +523,43 @@ describe("questionnaire-service universal questionnaire", () => {
     ).resolves.toBe(false);
 
     expect(tenantDb.answers[0]?.valueJson).toBeNull();
+  });
+
+  it("treats stored __unanswered__ strings as empty questionnaire answers and reasserts life_safety as boolean", async () => {
+    expect(unansweredPlaceholderHotfixMigrationSql).toMatch(/btrim\(a\.value_json #>> '\{\}'\) = '__unanswered__'/i);
+    expect(unansweredPlaceholderHotfixMigrationSql).toMatch(/SET input_type = 'boolean'/i);
+
+    const tenantDb = createReadDb({
+      nodes: [
+        node({
+          id: "life-safety",
+          key: "life_safety",
+          label: "Life Safety",
+          inputType: "textarea",
+          options: [{ value: "yes", label: "Yes" }],
+        }),
+      ],
+      answers: [
+        {
+          id: "answer-life-safety",
+          leadId: "lead-1",
+          questionId: "life-safety",
+          valueJson: "__unanswered__",
+          updatedBy: null,
+          createdAt: new Date("2026-01-01T00:00:00Z"),
+          updatedAt: new Date("2026-01-01T00:00:00Z"),
+        },
+      ],
+    });
+
+    const snapshot = await getLeadQuestionnaireSnapshot(tenantDb as never, {
+      leadId: "lead-1",
+      projectTypeId: null,
+    });
+    const template = await getQuestionnaireTemplateSnapshot(tenantDb as never, null);
+
+    expect(snapshot.answers.life_safety).toBeNull();
+    expect(template.nodes.find((entry) => entry.key === "life_safety")?.inputType).toBe("boolean");
   });
 
   it("rejects malformed multi-select array answers", async () => {
