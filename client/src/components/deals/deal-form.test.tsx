@@ -28,6 +28,22 @@ describe("DealForm select labels", () => {
     expect(source).toContain('if (!deal.sourceLeadId) { payload.migrationMode = true; }');
   });
 
+  it("shows company and property selectors in edit mode when either relationship is missing", () => {
+    const source = normalize(dealFormSource);
+
+    expect(source).toContain("const showRelationshipSelectors = !isEdit || !deal?.companyId || !deal?.propertyId;");
+    expect(source).toContain("{showRelationshipSelectors && (");
+    expect(source).toContain("<CompanySelector");
+    expect(source).toContain("<PropertySelector");
+  });
+
+  it("keeps company and property selectors hidden for normal edit flows when both relationships already exist", () => {
+    const source = normalize(dealFormSource);
+
+    expect(source).toContain("const showRelationshipSelectors = !isEdit || !deal?.companyId || !deal?.propertyId;");
+    expect(source).not.toContain('{!isEdit && ( <div className="grid grid-cols-1 gap-4 sm:grid-cols-2"> <div className="space-y-2"> <Label>Company');
+  });
+
   it("sends direct creation context and uses the lead source dropdown options", () => {
     const source = normalize(dealFormSource);
 

@@ -221,6 +221,78 @@ async function loadLockedResolvedFieldComparisonBaseline(tenantDb: any, dealId: 
   } as Record<string, unknown>;
 }
 
+const LEGACY_CLEANUP_PATCH_ALLOWED_FIELDS = new Set([
+  "name",
+  "companyId",
+  "propertyId",
+  "primaryContactId",
+  "description",
+  "propertyAddress",
+  "propertyCity",
+  "propertyState",
+  "propertyZip",
+  "projectTypeId",
+  "regionId",
+  "source",
+  "winProbability",
+  "expectedCloseDate",
+  "ddEstimate",
+  "bidEstimate",
+  "awardedAmount",
+  "proposalStatus",
+  "proposalNotes",
+  "estimatingSubstage",
+  "forecastWindow",
+  "forecastCategory",
+  "forecastConfidencePercent",
+  "forecastRevenue",
+  "forecastGrossProfit",
+  "forecastBlockers",
+  "nextMilestoneAt",
+  "nextStep",
+  "nextStepDueAt",
+  "supportNeededType",
+  "supportNeededNotes",
+  "decisionMakerName",
+  "budgetStatus",
+]);
+
+function isLegacyCleanupEligibleRole(role: string) {
+  return role === "admin" || role === "director" || role === "rep";
+}
+
+function isLegacyCleanupFieldSet(body: Record<string, unknown>) {
+  const fields = Object.keys(body);
+  return fields.length > 0 && fields.every((field) => LEGACY_CLEANUP_PATCH_ALLOWED_FIELDS.has(field));
+}
+
+function shouldTreatPatchAsLegacyCleanup(
+  body: Record<string, unknown>,
+  requestedCleanupContext: boolean,
+  role: string,
+  deal: Record<string, unknown> | null
+) {
+  if (
+    !requestedCleanupContext ||
+    !deal ||
+    !isLegacyCleanupEligibleRole(role) ||
+    !isLegacyCleanupFieldSet(body)
+  ) {
+    return false;
+  }
+
+  if (deal.sourceLeadId != null) {
+    return false;
+  }
+
+  return (
+    !deal.companyId ||
+    !deal.propertyId ||
+    body.companyId !== undefined ||
+    body.propertyId !== undefined
+  );
+}
+
 function isEstimatingBoundaryStageSlug(stageSlug: string, workflowRoute: "normal" | "service") {
   return (
     stageSlug === "estimating" ||
@@ -1283,6 +1355,7 @@ router.patch("/:id", async (req, res, next) => {
     const body = { ...req.body };
     validateDealPayload(body);
     const forceEditAfterRfp = body.forceEditAfterRfp === true;
+    const clientRequestedMigrationMode = body.migrationMode === true;
     delete body.forceEditAfterRfp;
     delete body.migrationMode;
 
@@ -1318,14 +1391,93 @@ router.patch("/:id", async (req, res, next) => {
           )
         : null;
 
+    const shouldLoadCleanupBaseline =
+      existingDeal == null &&
+      clientRequestedMigrationMode &&
+      isLegacyCleanupEligibleRole(req.user!.role) &&
+      isLegacyCleanupFieldSet(body);
+    const cleanupBaseline =
+      existingDeal ??
+      (
+        shouldLoadCleanupBaseline
+          ? await getDealById(
+              req.tenantDb!,
+              req.params.id,
+              req.user!.role,
+              req.user!.id
+            )
+          : null
+      );
+    const isLegacyCleanupPatch = shouldTreatPatchAsLegacyCleanup(
+      body,
+      clientRequestedMigrationMode,
+      req.user!.role,
+      (cleanupBaseline ?? null) as Record<string, unknown> | null
+    );
+
+    if (isLegacyCleanupPatch) {
+      const effectiveCompanyId =
+        body.companyId !== undefined
+          ? body.companyId
+          : (cleanupBaseline as Record<string, unknown>).companyId;
+      const effectivePropertyId =
+        body.propertyId !== undefined
+          ? body.propertyId
+          : (cleanupBaseline as Record<string, unknown>).propertyId;
+
+      if (!effectiveCompanyId || !effectivePropertyId) {
+        throw new AppError(
+          400,
+          "Legacy cleanup requires both company and property before this deal can be saved."
+        );
+      }
+    }
+
     let deal = await updateDeal(
       req.tenantDb!,
       req.params.id,
-      { ...body, auditContext: buildRouteAuditContext(req) },
+      {
+        ...body,
+        ...(isLegacyCleanupPatch ? { migrationMode: true } : {}),
+        auditContext: buildRouteAuditContext(req),
+      },
       req.user!.role,
       req.user!.id,
       req.user!.activeOfficeId,
     );
+    if (isLegacyCleanupPatch) {
+      await writeAuditLog(req.tenantDb!, {
+        tableName: "deals",
+        recordId: req.params.id,
+        action: "update",
+        changedBy: req.user!.id,
+        changes: {
+          cleanupMode: {
+            from: false,
+            to: true,
+          },
+          requestedMigrationMode: {
+            from: clientRequestedMigrationMode,
+            to: false,
+          },
+        },
+        fullRow: {
+          route: "deals",
+          reason: "legacy_cleanup_relationship_repair",
+          sourceLeadId: (cleanupBaseline as Record<string, unknown> | null)?.sourceLeadId ?? null,
+          companyIdBefore: (cleanupBaseline as Record<string, unknown> | null)?.companyId ?? null,
+          propertyIdBefore: (cleanupBaseline as Record<string, unknown> | null)?.propertyId ?? null,
+          companyIdAfter:
+            body.companyId !== undefined
+              ? body.companyId
+              : (cleanupBaseline as Record<string, unknown> | null)?.companyId ?? null,
+          propertyIdAfter:
+            body.propertyId !== undefined
+              ? body.propertyId
+              : (cleanupBaseline as Record<string, unknown> | null)?.propertyId ?? null,
+        },
+      });
+    }
     if (writePolicy?.adminOverride) {
       await writeAuditLog(req.tenantDb!, {
         tableName: "deal_scoping_intake",
