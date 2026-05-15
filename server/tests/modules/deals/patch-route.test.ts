@@ -195,6 +195,37 @@ describe("PATCH /api/deals/:id cleanup legacy handling", () => {
     );
   });
 
+  it("does not treat unchanged relationship ids as cleanup on legacy deals", async () => {
+    dealsServiceMocks.getDealById.mockResolvedValue(baseDeal({
+      companyId: "company-1",
+      propertyId: null,
+    }));
+
+    const { req, res, error } = await invokePatch(
+      {
+        companyId: "company-1",
+        propertyId: null,
+        nextStep: "Follow up tomorrow",
+        migrationMode: true,
+      },
+      createUser("rep")
+    );
+
+    expect(error).toBeNull();
+    expect(res.statusCode).toBe(200);
+    expect(dealsServiceMocks.updateDeal).toHaveBeenCalledWith(
+      req.tenantDb,
+      "deal-1",
+      expect.not.objectContaining({
+        migrationMode: true,
+      }),
+      "rep",
+      "rep-1",
+      "office-1"
+    );
+    expect(auditMocks.writeAuditLog).not.toHaveBeenCalled();
+  });
+
   it("ignores client-supplied migrationMode on normal deals with source lead lineage", async () => {
     dealsServiceMocks.getDealById.mockResolvedValue(baseDeal({
       sourceLeadId: "lead-1",
@@ -230,7 +261,7 @@ describe("PATCH /api/deals/:id cleanup legacy handling", () => {
 
     const { error } = await invokePatch(
       {
-        description: "Trying to update without repairing lineage",
+        companyId: "company-1",
         migrationMode: true,
       },
       createUser("rep")
@@ -264,6 +295,32 @@ describe("PATCH /api/deals/:id cleanup legacy handling", () => {
     expect(dealsServiceMocks.updateDeal).not.toHaveBeenCalled();
   });
 
+  it("still honors the scope-readonly guard on RFP'd legacy non-cleanup edits", async () => {
+    dealsServiceMocks.getDealById.mockResolvedValue(baseDeal({
+      companyId: "company-1",
+      propertyId: null,
+    }));
+    scopingServiceMocks.assertDealScopingWriteAllowed.mockRejectedValue(
+      new AppError(403, "Scope is read-only after RFP submission", "SCOPE_READ_ONLY_AFTER_RFP")
+    );
+
+    const { error } = await invokePatch(
+      {
+        companyId: "company-1",
+        propertyId: null,
+        projectTypeId: "project-type-2",
+      },
+      createUser("rep")
+    );
+
+    expect(error).toMatchObject({
+      statusCode: 403,
+      message: "Scope is read-only after RFP submission",
+    });
+    expect(dealsServiceMocks.updateDeal).not.toHaveBeenCalled();
+    expect(auditMocks.writeAuditLog).not.toHaveBeenCalled();
+  });
+
   it("does not force cleanup validation onto non-cleanup legacy PATCH flows", async () => {
     dealsServiceMocks.getDealById.mockResolvedValue(baseDeal());
 
@@ -287,5 +344,120 @@ describe("PATCH /api/deals/:id cleanup legacy handling", () => {
       "office-1"
     );
     expect(auditMocks.writeAuditLog).not.toHaveBeenCalled();
+  });
+
+  it("does not force cleanup validation when legacy edits include unchanged relationship fields", async () => {
+    dealsServiceMocks.getDealById.mockResolvedValue(baseDeal({
+      companyId: "company-1",
+      propertyId: null,
+    }));
+
+    const { req, res, error } = await invokePatch(
+      {
+        nextStep: "Standard legacy note update",
+        companyId: "company-1",
+        propertyId: null,
+        migrationMode: true,
+      },
+      createUser("rep")
+    );
+
+    expect(error).toBeNull();
+    expect(res.statusCode).toBe(200);
+    expect(dealsServiceMocks.updateDeal).toHaveBeenCalledWith(
+      req.tenantDb,
+      "deal-1",
+      expect.not.objectContaining({
+        migrationMode: true,
+      }),
+      "rep",
+      "rep-1",
+      "office-1"
+    );
+    expect(auditMocks.writeAuditLog).not.toHaveBeenCalled();
+  });
+
+  it("treats actual relationship value changes as cleanup on legacy deals", async () => {
+    dealsServiceMocks.getDealById.mockResolvedValue(baseDeal({
+      companyId: null,
+      propertyId: "property-1",
+    }));
+
+    const { req, res, error } = await invokePatch(
+      {
+        companyId: "company-2",
+        propertyId: "property-1",
+        migrationMode: true,
+      },
+      createUser("rep")
+    );
+
+    expect(error).toBeNull();
+    expect(res.statusCode).toBe(200);
+    expect(dealsServiceMocks.updateDeal).toHaveBeenCalledWith(
+      req.tenantDb,
+      "deal-1",
+      expect.objectContaining({
+        companyId: "company-2",
+        propertyId: "property-1",
+        migrationMode: true,
+      }),
+      "rep",
+      "rep-1",
+      "office-1"
+    );
+    expect(auditMocks.writeAuditLog).toHaveBeenCalledWith(
+      req.tenantDb,
+      expect.objectContaining({
+        fullRow: expect.objectContaining({
+          reason: "legacy_cleanup_relationship_repair",
+          companyIdBefore: null,
+          companyIdAfter: "company-2",
+        }),
+      })
+    );
+  });
+
+  it("allows cleanup-mode relationship repair on RFP'd legacy deals", async () => {
+    dealsServiceMocks.getDealById.mockResolvedValue(baseDeal({
+      companyId: null,
+      propertyId: "property-1",
+    }));
+    scopingServiceMocks.assertDealScopingWriteAllowed.mockResolvedValue({
+      adminOverride: false,
+      lockState: { locked: true, submittedAt: new Date("2026-05-15T12:00:00.000Z"), reason: "rfp_submission" },
+    });
+
+    const { req, res, error } = await invokePatch(
+      {
+        companyId: "company-9",
+        propertyId: "property-1",
+        migrationMode: true,
+      },
+      createUser("rep")
+    );
+
+    expect(error).toBeNull();
+    expect(res.statusCode).toBe(200);
+    expect(dealsServiceMocks.updateDeal).toHaveBeenCalledWith(
+      req.tenantDb,
+      "deal-1",
+      expect.objectContaining({
+        companyId: "company-9",
+        propertyId: "property-1",
+        migrationMode: true,
+      }),
+      "rep",
+      "rep-1",
+      "office-1"
+    );
+    expect(auditMocks.writeAuditLog).toHaveBeenCalledWith(
+      req.tenantDb,
+      expect.objectContaining({
+        fullRow: expect.objectContaining({
+          reason: "legacy_cleanup_relationship_repair",
+        }),
+      })
+    );
   });
 });
