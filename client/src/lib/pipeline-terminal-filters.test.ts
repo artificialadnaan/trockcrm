@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   TERMINAL_STAGE_SLUGS,
+  activePipelineDealValue,
   calculateActivePipelineTotal,
   excludeTerminalDeals,
   getTerminalStageOutcome,
@@ -16,6 +17,9 @@ describe("pipeline terminal filters", () => {
         "sent_to_production",
         "service_sent_to_production",
         "closed_won",
+        "service_scheduled",
+        "service_complete",
+        "deal_canceled",
         "production_lost",
         "service_lost",
         "closed_lost",
@@ -29,7 +33,12 @@ describe("pipeline terminal filters", () => {
     expect(isTerminalStage("opportunity")).toBe(false);
     expect(isTerminalStage("estimating")).toBe(false);
     expect(isTerminalStage("service_estimating")).toBe(false);
+    expect(isTerminalStage("service_scheduled")).toBe(true);
+    expect(isTerminalStage("service_complete")).toBe(true);
     expect(getTerminalStageOutcome("service_sent_to_production")).toBe("won");
+    expect(getTerminalStageOutcome("service_scheduled")).toBe("won");
+    expect(getTerminalStageOutcome("service_complete")).toBe("won");
+    expect(getTerminalStageOutcome("deal_canceled")).toBe("lost");
     expect(getTerminalStageOutcome("service_lost")).toBe("lost");
     expect(getTerminalStageOutcome("opportunity")).toBe(null);
   });
@@ -55,5 +64,12 @@ describe("pipeline terminal filters", () => {
     ];
 
     expect(calculateActivePipelineTotal(deals)).toEqual({ amount: 180_000, count: 2 });
+  });
+
+  it("uses zero as the selected active pipeline value instead of falling through", () => {
+    expect(activePipelineDealValue({ awardedAmount: 0, bidEstimate: 50_000, ddEstimate: 30_000 })).toBe(0);
+    expect(activePipelineDealValue({ awardedAmount: null, bidEstimate: 50_000, ddEstimate: 30_000 })).toBe(50_000);
+    expect(activePipelineDealValue({ awardedAmount: null, bidEstimate: null, ddEstimate: 30_000 })).toBe(30_000);
+    expect(activePipelineDealValue({ awardedAmount: null, bidEstimate: null, ddEstimate: null })).toBe(0);
   });
 });

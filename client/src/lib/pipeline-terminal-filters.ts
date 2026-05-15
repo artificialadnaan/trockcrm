@@ -6,9 +6,11 @@ import {
   type WorkflowRoute,
 } from "@trock-crm/shared/types";
 
-const legacyTerminalStageSlugs = Object.entries(LEGACY_DEAL_STAGE_TO_CANONICAL_STAGE.normal)
-  .filter(([, canonicalSlug]) => isTerminalWorkflowStage(canonicalSlug))
-  .map(([slug]) => slug);
+const legacyTerminalStageSlugs = Object.values(LEGACY_DEAL_STAGE_TO_CANONICAL_STAGE).flatMap((stageMap) =>
+  Object.entries(stageMap)
+    .filter(([, canonicalSlug]) => isTerminalWorkflowStage(canonicalSlug))
+    .map(([slug]) => slug)
+);
 
 export const TERMINAL_STAGE_SLUGS = [
   ...new Set([...CANONICAL_TERMINAL_DEAL_STAGE_SLUGS, ...legacyTerminalStageSlugs]),
@@ -78,17 +80,19 @@ function hasTerminalDealStage(deal: DealWithStageSlug) {
 }
 
 function numericDealValue(value: string | number | null | undefined) {
-  if (value == null || value === "") return 0;
+  if (value == null || value === "") return null;
   const parsed = Number(value);
-  return Number.isFinite(parsed) ? parsed : 0;
+  return Number.isFinite(parsed) ? parsed : null;
 }
 
-function activePipelineDealValue(deal: DealWithValue) {
-  return (
-    numericDealValue(deal.awardedAmount) ||
-    numericDealValue(deal.bidEstimate) ||
-    numericDealValue(deal.ddEstimate)
-  );
+export function activePipelineDealValue(deal: DealWithValue) {
+  const awarded = numericDealValue(deal.awardedAmount);
+  if (awarded !== null) return awarded;
+
+  const bid = numericDealValue(deal.bidEstimate);
+  if (bid !== null) return bid;
+
+  return numericDealValue(deal.ddEstimate) ?? 0;
 }
 
 export function excludeTerminalDeals<T extends DealWithStageSlug>(deals: T[]) {

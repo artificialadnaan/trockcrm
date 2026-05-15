@@ -324,6 +324,67 @@ describe("DealListPage", () => {
     expect(html).not.toContain("4 deals");
   });
 
+  it("uses backend column aggregates for Active Pipeline instead of truncated card arrays", () => {
+    mocks.useDealBoardMock.mockReturnValue({
+      board: {
+        columns: [
+          {
+            stage: { id: "stage-opportunity", name: "Opportunity", slug: "opportunity" },
+            count: 150,
+            totalValue: 1500000,
+            cards: Array.from({ length: 100 }, (_, index) =>
+              makeDeal({
+                id: `deal-open-${index}`,
+                bidEstimate: "10000",
+                awardedAmount: null,
+                ddEstimate: null,
+              })
+            ),
+          },
+          {
+            stage: { id: "stage-service", name: "Service Estimating", slug: "service_estimating" },
+            count: 2,
+            totalValue: 50000,
+            cards: [
+              makeDeal({
+                id: "deal-service-1",
+                name: "Service Deal",
+                stageId: "stage-service",
+                bidEstimate: "25000",
+                awardedAmount: null,
+                ddEstimate: null,
+              }),
+            ],
+          },
+          {
+            stage: { id: "stage-won", name: "Won", slug: "won" },
+            count: 80,
+            totalValue: 800000,
+            cards: [
+              makeDeal({
+                id: "deal-won",
+                name: "Won Terminal Deal",
+                stageId: "stage-won",
+                awardedAmount: "800000",
+                bidEstimate: null,
+                ddEstimate: null,
+              }),
+            ],
+          },
+        ],
+        terminalStages: [],
+      },
+      loading: false,
+      error: null,
+      refetch: vi.fn(),
+    });
+
+    const html = renderPage();
+
+    expect(html).toMatch(/Active pipeline.*\$1\.6M.*152 deals/);
+    expect(html).not.toContain("101 deals");
+  });
+
   it("renders decorated cards with project number fallback, avatar, company, SLA, and location", () => {
     mocks.useDealBoardMock.mockReturnValue({
       board: {

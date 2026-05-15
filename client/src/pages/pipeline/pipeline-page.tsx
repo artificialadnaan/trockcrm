@@ -21,7 +21,6 @@ import { formatCurrencyCompact, daysInStage } from "@/lib/deal-utils";
 import {
   buildDealStageWorkspacePath,
   buildPipelineRequestPath,
-  calculateActivePipelineTotal,
   getActivePipelineColumns,
   getTerminalDateFilterLabel,
   getTerminalStageOutcome,
@@ -81,25 +80,20 @@ export function summarizeTerminalStageCounts(terminalStages: TerminalStageInfo[]
 
 export function summarizeActivePipelineColumns(columns: PipelineColumn[]) {
   const activeColumns = getActivePipelineColumns(columns);
-  const allDeals = activeColumns.flatMap((col) =>
-    col.deals.map((deal) => ({
-      ...deal,
-      stageSlug: col.stage.slug,
-    }))
+  const totalDeals = activeColumns.reduce((sum, col) => sum + col.count, 0);
+  const totalValue = activeColumns.reduce((sum, col) => sum + col.totalValue, 0);
+  const allDeals = activeColumns.flatMap((col) => col.deals);
+  const velocityDeals = allDeals.filter(
+    (deal) => !deal.bidBoardStageSlug || getTerminalStageOutcome(deal.bidBoardStageSlug) === null
   );
-  const activePipelineTotal = calculateActivePipelineTotal(allDeals);
   const averageVelocity =
-    activePipelineTotal.count === 0
+    velocityDeals.length === 0
       ? 0
-      : Math.round(
-          allDeals
-            .filter((deal) => !deal.bidBoardStageSlug || getTerminalStageOutcome(deal.bidBoardStageSlug) === null)
-            .reduce((sum, deal) => sum + daysInStage(deal.stageEnteredAt), 0) / activePipelineTotal.count
-        );
+      : Math.round(velocityDeals.reduce((sum, deal) => sum + daysInStage(deal.stageEnteredAt), 0) / velocityDeals.length);
 
   return {
-    totalDeals: activePipelineTotal.count,
-    totalValue: activePipelineTotal.amount,
+    totalDeals,
+    totalValue,
     averageVelocity,
   };
 }

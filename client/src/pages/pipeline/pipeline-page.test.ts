@@ -88,14 +88,7 @@ describe("summarizeActivePipelineColumns", () => {
     const summary = summarizeActivePipelineColumns([
       {
         stage: { id: "estimating", name: "Estimating", slug: "estimating" },
-        deals: [
-          { id: "deal-1", stageEnteredAt: "2026-04-20T12:00:00.000Z" },
-          {
-            id: "deal-mirrored-terminal",
-            bidBoardStageSlug: "service_sent_to_production",
-            stageEnteredAt: "2026-04-20T12:00:00.000Z",
-          },
-        ],
+        deals: [{ id: "deal-1", stageEnteredAt: "2026-04-20T12:00:00.000Z" }],
         count: 31,
         totalValue: 1200000,
       },
@@ -109,8 +102,37 @@ describe("summarizeActivePipelineColumns", () => {
       },
     ] as any);
 
-    expect(summary.totalDeals).toBe(1);
-    expect(summary.totalValue).toBe(0);
+    expect(summary.totalDeals).toBe(31);
+    expect(summary.totalValue).toBe(1200000);
+  });
+
+  it("uses backend aggregates instead of truncated card arrays", () => {
+    const summary = summarizeActivePipelineColumns([
+      {
+        stage: { id: "opportunity", name: "Opportunity", slug: "opportunity" },
+        deals: Array.from({ length: 100 }, (_, index) => ({
+          id: `opportunity-${index}`,
+          stageEnteredAt: "2026-04-20T12:00:00.000Z",
+        })),
+        count: 150,
+        totalValue: 1500000,
+      },
+      {
+        stage: { id: "service", name: "Service Estimating", slug: "service_estimating" },
+        deals: [{ id: "service-1", stageEnteredAt: "2026-04-20T12:00:00.000Z" }],
+        count: 2,
+        totalValue: 50000,
+      },
+      {
+        stage: { id: "lost", name: "Lost", slug: "lost" },
+        deals: [{ id: "lost-1", stageEnteredAt: "2026-04-18T12:00:00.000Z" }],
+        count: 75,
+        totalValue: 750000,
+      },
+    ] as any);
+
+    expect(summary.totalDeals).toBe(152);
+    expect(summary.totalValue).toBe(1550000);
   });
 });
 
