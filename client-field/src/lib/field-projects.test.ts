@@ -11,6 +11,7 @@ const basePhoto: FieldPhoto = {
   fileSizeBytes: 1000,
   fileExtension: ".jpg",
   dealId: "deal-1",
+  leadId: null,
   description: null,
   takenAt: "2026-05-05T12:00:00.000Z",
   createdAt: "2026-05-05T12:00:00.000Z",

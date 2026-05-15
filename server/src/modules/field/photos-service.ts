@@ -1,6 +1,6 @@
 import type { NodePgDatabase } from "drizzle-orm/node-postgres";
 import type * as schema from "@trock-crm/shared/schema";
-import type { PhotoCategory } from "@trock-crm/shared/types";
+import type { PhotoCategory, UserRole } from "@trock-crm/shared/types";
 import { AppError } from "../../middleware/error-handler.js";
 import {
   confirmUpload,
@@ -9,7 +9,7 @@ import {
   requestUploadUrl,
 } from "../files/service.js";
 import { recordUploadedFileSideEffects, type UploadAuditContext } from "../files/upload-workflow.js";
-import { assertActiveFieldProject, type FieldPhoto } from "./projects-service.js";
+import { assertAccessibleFieldCaptureTarget, type FieldPhoto } from "./projects-service.js";
 
 type TenantDb = NodePgDatabase<typeof schema>;
 
@@ -71,6 +71,7 @@ function toFieldUploadedPhoto(file: any, imageUrl: string | null): FieldPhoto {
     fileSizeBytes: file.fileSizeBytes ?? null,
     fileExtension: file.fileExtension ?? null,
     dealId: file.dealId ?? null,
+    leadId: file.leadId ?? null,
     description: file.description ?? null,
     takenAt: iso(file.takenAt),
     createdAt: iso(file.createdAt)!,
@@ -93,14 +94,23 @@ export async function requestFieldPhotoUploadUrl(
   input: {
     officeSlug: string;
     userId: string;
-    dealId: string;
+    userRole: UserRole;
+    dealId?: string;
+    leadId?: string;
+    opportunityId?: string;
     contentType: string;
     sizeBytes: number;
     photoCategory?: string | null;
     caption?: string | null;
   }
 ) {
-  await assertActiveFieldProject(tenantDb, input.dealId);
+  await assertAccessibleFieldCaptureTarget(tenantDb, {
+    dealId: input.dealId,
+    leadId: input.leadId,
+    opportunityId: input.opportunityId,
+    userId: input.userId,
+    userRole: input.userRole,
+  });
   assertImageContentType(input.contentType);
   assertUploadSize(input.sizeBytes);
   const photoCategory = cleanPhotoCategory(input.photoCategory);
@@ -110,7 +120,9 @@ export async function requestFieldPhotoUploadUrl(
     mimeType: input.contentType,
     fileSizeBytes: Number(input.sizeBytes),
     category: "photo",
-    dealId: input.dealId,
+    dealId: input.dealId ?? input.opportunityId,
+    leadId: input.leadId,
+    opportunityId: input.opportunityId,
     description: input.caption ?? undefined,
     photoCategory,
   });
@@ -131,8 +143,11 @@ export async function confirmFieldPhotoUpload(
   tenantDb: TenantDb,
   input: {
     userId: string;
+    userRole: UserRole;
     officeId: string;
-    dealId: string;
+    dealId?: string;
+    leadId?: string;
+    opportunityId?: string;
     uploadToken: string;
     objectKey: string;
     latitude?: number;
@@ -142,11 +157,22 @@ export async function confirmFieldPhotoUpload(
     auditContext?: UploadAuditContext;
   }
 ) {
-  await assertActiveFieldProject(tenantDb, input.dealId);
+  await assertAccessibleFieldCaptureTarget(tenantDb, {
+    dealId: input.dealId,
+    leadId: input.leadId,
+    opportunityId: input.opportunityId,
+    userId: input.userId,
+    userRole: input.userRole,
+  });
   const pending = getPendingUploadMetadata(input.uploadToken);
   if (!pending) throw new AppError(400, "Invalid or expired upload token");
   if (pending.r2Key !== input.objectKey) throw new AppError(400, "objectKey does not match the issued upload.");
-  if (pending.dealId !== input.dealId || pending.category !== "photo") {
+  if (
+    pending.dealId !== (input.dealId ?? input.opportunityId ?? undefined) ||
+    pending.leadId !== (input.leadId ?? undefined) ||
+    pending.opportunityId !== (input.opportunityId ?? undefined) ||
+    pending.category !== "photo"
+  ) {
     throw new AppError(400, "Upload token does not match this project photo upload.");
   }
 

@@ -12,6 +12,13 @@ type ApiEnv = {
   VITE_API_URL?: string | undefined;
 };
 
+const FIELD_APP_OFFICE_STORAGE_KEY = "trock-field-active-office-id";
+
+export function clearStoredActiveOfficeId() {
+  if (typeof window === "undefined") return;
+  window.sessionStorage.removeItem(FIELD_APP_OFFICE_STORAGE_KEY);
+}
+
 export function resolveApiBase(env: ApiEnv): string {
   const configured = env.VITE_API_BASE_URL?.trim() || env.VITE_API_URL?.trim();
   if (!configured) {
@@ -22,6 +29,18 @@ export function resolveApiBase(env: ApiEnv): string {
 
 function configuredApiBase(): string {
   return resolveApiBase(import.meta.env as ApiEnv);
+}
+
+function activeOfficeId(): string | undefined {
+  if (typeof window === "undefined") return undefined;
+  const params = new URLSearchParams(window.location.search);
+  const fromQuery = params.get("officeId")?.trim();
+  if (fromQuery) {
+    window.sessionStorage.setItem(FIELD_APP_OFFICE_STORAGE_KEY, fromQuery);
+    return fromQuery;
+  }
+  const stored = window.sessionStorage.getItem(FIELD_APP_OFFICE_STORAGE_KEY)?.trim();
+  return stored || undefined;
 }
 
 function csrfToken(): string | undefined {
@@ -41,6 +60,8 @@ export async function api<T>(path: string, options: {
   const method = options.method ?? (options.json === undefined ? "GET" : "POST");
   const headers = new Headers(options.headers);
   headers.set("X-Requested-With", "XMLHttpRequest");
+  const officeId = activeOfficeId();
+  if (officeId) headers.set("x-office-id", officeId);
   if (options.json !== undefined) headers.set("Content-Type", "application/json");
   const unsafe = ["POST", "PUT", "PATCH", "DELETE"].includes(method.toUpperCase());
   const csrf = unsafe ? csrfToken() : undefined;
@@ -76,6 +97,9 @@ export async function api<T>(path: string, options: {
       message = payload?.error?.message ?? payload?.error ?? message;
     } catch (err) {
       message = err instanceof Error ? err.message : message;
+    }
+    if (response.status === 401 || response.status === 403) {
+      clearStoredActiveOfficeId();
     }
     throw new ApiError(message, response.status);
   }

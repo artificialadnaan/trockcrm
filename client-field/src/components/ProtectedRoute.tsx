@@ -1,5 +1,14 @@
 import { Navigate, Outlet, useLocation } from "react-router-dom";
+import type { UserRole } from "@trock-crm/shared/types";
 import { useAuth } from "@/lib/auth";
+
+const FIELD_APP_ALLOWED_ROLES = new Set<UserRole>([
+  "admin",
+  "director",
+  "rep",
+  "construction",
+  "field_contractor",
+]);
 
 export function ProtectedRoute() {
   const { user, loading, logout } = useAuth();
@@ -13,9 +22,9 @@ export function ProtectedRoute() {
     return <Navigate to="/" replace state={{ from: location.pathname }} />;
   }
 
-  if (user.role !== "field_contractor") {
+  if (!FIELD_APP_ALLOWED_ROLES.has(user.role)) {
     void logout();
-    return <Navigate to="/" replace state={{ authError: "Field contractor access required" }} />;
+    return <Navigate to="/" replace state={{ authError: "Field app access required" }} />;
   }
 
   return <Outlet />;

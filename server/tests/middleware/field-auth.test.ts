@@ -4,11 +4,18 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 const mocks = vi.hoisted(() => ({
   verifyJwt: vi.fn(),
   getUserById: vi.fn(),
+  getOfficeAccess: vi.fn(),
+  getUserLocalAuthGate: vi.fn(),
 }));
 
 vi.mock("../../src/modules/auth/service.js", () => ({
   verifyJwt: mocks.verifyJwt,
   getUserById: mocks.getUserById,
+  getOfficeAccess: mocks.getOfficeAccess,
+}));
+
+vi.mock("../../src/modules/auth/local-auth-service.js", () => ({
+  getUserLocalAuthGate: mocks.getUserLocalAuthGate,
 }));
 
 const { requireCrmUser, requireFieldContractor } = await import("../../src/middleware/field-auth.js");
@@ -40,24 +47,37 @@ describe("field auth middleware", () => {
     vi.clearAllMocks();
     mocks.verifyJwt.mockReturnValue({ userId: "user-1", authMethod: "local" });
     mocks.getUserById.mockResolvedValue(createUser());
-  });
-
-  it("allows active field contractors and attaches req.fieldUser", async () => {
-    const req = createRequest();
-    const next = vi.fn() as NextFunction;
-
-    await requireFieldContractor(req, {} as Response, next);
-
-    expect(next).toHaveBeenCalledWith();
-    expect(req.user).toMatchObject({ id: "user-1", role: "field_contractor" });
-    expect(req.fieldUser).toMatchObject({
-      id: "user-1",
-      firstName: "Field",
-      lastName: "User",
-      tenantId: "office-1",
-      active: true,
+    mocks.getOfficeAccess.mockResolvedValue({ hasAccess: true });
+    mocks.getUserLocalAuthGate.mockResolvedValue({
+      mustChangePassword: false,
+      isEnabled: true,
+      inviteExpiresAt: null,
+      lockedUntil: null,
+      revokedAt: null,
     });
   });
+
+  it.each(["field_contractor", "admin", "director", "rep", "construction"] as const)(
+    "allows active %s users and attaches req.fieldUser",
+    async (role) => {
+      mocks.getUserById.mockResolvedValueOnce(createUser({ role }));
+      const req = createRequest();
+      const next = vi.fn() as NextFunction;
+
+      await requireFieldContractor(req, {} as Response, next);
+
+      expect(next).toHaveBeenCalledWith();
+      expect(req.user).toMatchObject({ id: "user-1", role });
+      expect(req.fieldUser).toMatchObject({
+        id: "user-1",
+        firstName: "Field",
+        lastName: "User",
+        role,
+        tenantId: "office-1",
+        active: true,
+      });
+    }
+  );
 
   it("rejects missing and invalid field tokens with 401", async () => {
     const missingReq = createRequest({ cookies: {}, headers: {} });
@@ -77,20 +97,83 @@ describe("field auth middleware", () => {
     expect(invalidNext.mock.calls[0]?.[0]).toMatchObject({ statusCode: 401 });
   });
 
-  it("rejects CRM users and inactive field contractors with 403", async () => {
-    mocks.getUserById.mockResolvedValueOnce(createUser({ role: "admin" }));
-    const crmNext = vi.fn() as NextFunction;
-
-    await requireFieldContractor(createRequest(), {} as Response, crmNext);
-
-    expect(crmNext.mock.calls[0]?.[0]).toMatchObject({ statusCode: 403 });
-
+  it("rejects inactive and unsupported field users with 403", async () => {
     mocks.getUserById.mockResolvedValueOnce(createUser({ isActive: false }));
     const inactiveNext = vi.fn() as NextFunction;
 
     await requireFieldContractor(createRequest(), {} as Response, inactiveNext);
 
     expect(inactiveNext.mock.calls[0]?.[0]).toMatchObject({ statusCode: 403 });
+
+    mocks.getUserById.mockResolvedValueOnce(createUser({ role: "sales_manager" }));
+    const unsupportedNext = vi.fn() as NextFunction;
+
+    await requireFieldContractor(createRequest(), {} as Response, unsupportedNext);
+
+    expect(unsupportedNext.mock.calls[0]?.[0]).toMatchObject({ statusCode: 403 });
+  });
+
+  it("rejects local field sessions that require a password change", async () => {
+    mocks.getUserLocalAuthGate.mockResolvedValueOnce({
+      mustChangePassword: true,
+      isEnabled: true,
+      inviteExpiresAt: null,
+      lockedUntil: null,
+      revokedAt: null,
+    });
+    const next = vi.fn() as NextFunction;
+
+    await requireFieldContractor(createRequest(), {} as Response, next);
+
+    const error = next.mock.calls[0]?.[0];
+    expect(error).toMatchObject({
+      statusCode: 403,
+      message: "Field app access requires password change",
+    });
+  });
+
+  it("rejects revoked local field sessions", async () => {
+    mocks.getUserLocalAuthGate.mockResolvedValueOnce({
+      mustChangePassword: false,
+      isEnabled: true,
+      inviteExpiresAt: null,
+      lockedUntil: null,
+      revokedAt: "2026-04-20T10:00:00.000Z",
+    });
+    const next = vi.fn() as NextFunction;
+
+    await requireFieldContractor(createRequest(), {} as Response, next);
+
+    const error = next.mock.calls[0]?.[0];
+    expect(error).toMatchObject({
+      statusCode: 401,
+      message: "Local login is no longer enabled for this user",
+    });
+  });
+
+  it("preserves requested active office context for accessible CRM users", async () => {
+    mocks.getUserById.mockResolvedValueOnce(createUser({ role: "admin", officeId: "office-primary" }));
+    mocks.getOfficeAccess.mockResolvedValueOnce({ hasAccess: true, roleOverride: "director" });
+    const req = createRequest({ headers: { "x-office-id": "office-branch" } as any });
+    const next = vi.fn() as NextFunction;
+
+    await requireFieldContractor(req, {} as Response, next);
+
+    expect(next).toHaveBeenCalledWith();
+    expect(mocks.getOfficeAccess).toHaveBeenCalledWith("user-1", "office-branch");
+    expect(req.user).toMatchObject({ role: "director", officeId: "office-primary", activeOfficeId: "office-branch" });
+    expect(req.fieldUser).toMatchObject({ role: "director", tenantId: "office-branch" });
+  });
+
+  it("rejects unauthorized office overrides for CRM users", async () => {
+    mocks.getUserById.mockResolvedValueOnce(createUser({ role: "admin", officeId: "office-primary" }));
+    mocks.getOfficeAccess.mockResolvedValueOnce({ hasAccess: false });
+    const req = createRequest({ headers: { "x-office-id": "office-unauthorized" } as any });
+    const next = vi.fn() as NextFunction;
+
+    await requireFieldContractor(req, {} as Response, next);
+
+    expect(next.mock.calls[0]?.[0]).toMatchObject({ statusCode: 403 });
   });
 
   it("requireCrmUser allows CRM users and rejects field contractors", () => {

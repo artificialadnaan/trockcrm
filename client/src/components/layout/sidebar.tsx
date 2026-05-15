@@ -33,6 +33,7 @@ import {
   type LucideIcon,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import { buildFieldCaptureUrl } from "@/lib/field-app";
 
 type Role = "admin" | "director" | "sales_manager" | "rep" | "construction";
 
@@ -61,8 +62,8 @@ const navItems: NavItem[] = [
   { to: "/email", icon: Mail, label: "Email", roles: ["admin", "director", "rep"] },
   { to: "/tasks", icon: CheckSquare, label: "Tasks", roles: ["admin", "director", "rep"] },
   { to: "/files", icon: FileImage, label: "Files", roles: ["admin", "director", "rep"] },
-  { to: "/photos/capture", icon: Camera, label: "Capture", roles: ["admin", "director", "rep"] },
-  { to: "/photos/feed", icon: Image, label: "Feed", roles: ["admin", "director", "rep"] },
+  { to: "/photos/capture", icon: Camera, label: "Capture", roles: ["admin", "director", "rep", "construction"] },
+  { to: "/photos/feed", icon: Image, label: "Feed", roles: ["admin", "director", "rep", "construction"] },
   { to: "/reports", icon: BarChart3, label: "Reports", roles: ["admin", "director", "rep"] },
   { to: "/commissions", icon: DollarSign, label: "Commissions", roles: ["rep"] },
   { to: "/projects", icon: Building2, label: "Projects", roles: ["admin", "director", "rep"] },
@@ -188,6 +189,8 @@ export function Sidebar() {
   const visibleDirectorItems = useMemo(() => getVisibleDirectorItems(role), [role]);
   const visibleAdminGroups = useMemo(() => getVisibleAdminGroups(role), [role]);
   const visibleHelpItems = useMemo(() => filterByRole(helpItems, role), [role]);
+  const captureSearch = user?.activeOfficeId ? `?${new URLSearchParams({ officeId: user.activeOfficeId }).toString()}` : "";
+  const captureHref = buildFieldCaptureUrl(captureSearch);
   const [expandedGroups, setExpandedGroups] = useState<Record<string, boolean>>(() =>
     getNextExpandedGroups({}, getVisibleAdminGroups(role), pathname),
   );
@@ -212,6 +215,7 @@ export function Sidebar() {
         ? "bg-brand-red/10 text-brand-red ring-1 ring-brand-red/15"
         : "text-slate-600 hover:bg-slate-100 hover:text-slate-950"
     }`;
+  const inactiveNavLinkClass = navLinkClass({ isActive: false });
 
   return (
     <aside className="hidden min-h-screen w-60 flex-col border-r border-slate-200 bg-white text-slate-950 md:flex">
@@ -229,15 +233,25 @@ export function Sidebar() {
 
       <nav className="flex-1 px-2 space-y-1">
         {visibleNavItems.map((item) => (
-          <NavLink
-            key={getNavItemKey(item)}
-            to={item.to}
-            end={item.to === "/"}
-            className={navLinkClass}
-          >
-            <item.icon className="h-4 w-4" />
-            {item.label}
-          </NavLink>
+          item.to === "/photos/capture" && captureHref
+            ? (
+              <a key={getNavItemKey(item)} href={captureHref} className={inactiveNavLinkClass} data-capture-nav="field-app">
+                <item.icon className="h-4 w-4" />
+                {item.label}
+              </a>
+            )
+            : (
+              <NavLink
+                key={getNavItemKey(item)}
+                to={item.to}
+                end={item.to === "/"}
+                className={navLinkClass}
+                data-capture-nav={item.to === "/photos/capture" ? "crm-fallback" : undefined}
+              >
+                <item.icon className="h-4 w-4" />
+                {item.label}
+              </NavLink>
+            )
         ))}
 
         {visibleDirectorItems.length > 0 && (

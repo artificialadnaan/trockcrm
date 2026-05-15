@@ -9,6 +9,7 @@ const apiMock = vi.hoisted(() => vi.fn());
 
 vi.mock("./api", () => ({
   api: apiMock,
+  clearStoredActiveOfficeId: vi.fn(() => window.sessionStorage.removeItem("trock-field-active-office-id")),
   ApiError: class ApiError extends Error {
     status: number;
     constructor(message: string, status: number) {
@@ -29,6 +30,7 @@ afterEach(() => {
   container?.remove();
   container = null;
   apiMock.mockReset();
+  window.sessionStorage.clear();
 });
 
 function renderProbe(onReady?: (auth: ReturnType<typeof useAuth>) => void) {
@@ -73,7 +75,7 @@ describe("field AuthProvider", () => {
         email: "login@example.com",
         firstName: "Login",
         lastName: "User",
-        role: "field_contractor",
+        role: "admin",
         tenantId: "office-1",
         active: true,
       },
@@ -85,8 +87,10 @@ describe("field AuthProvider", () => {
     });
 
     apiMock.mockResolvedValueOnce({ success: true });
+    window.sessionStorage.setItem("trock-field-active-office-id", "office-stale");
     await latest!.logout();
     await vi.waitFor(() => expect(node.textContent).toContain("signed out"));
+    expect(window.sessionStorage.getItem("trock-field-active-office-id")).toBeNull();
   });
 
   it("clears state on 401 hydrate failures", async () => {
@@ -112,5 +116,22 @@ describe("field AuthProvider", () => {
 
     await vi.waitFor(() => expect(node.textContent).toContain("signed out"));
     expect(latest?.error).toBe("Server returned malformed user data");
+  });
+
+  it("accepts CRM roles in field auth payloads", async () => {
+    apiMock.mockResolvedValueOnce({
+      user: {
+        id: "admin-1",
+        email: "admin@example.com",
+        firstName: "Admin",
+        lastName: "User",
+        role: "admin",
+        tenantId: "office-1",
+        active: true,
+      },
+    });
+
+    const node = renderProbe();
+    await vi.waitFor(() => expect(node.textContent).toContain("admin@example.com"));
   });
 });

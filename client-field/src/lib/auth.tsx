@@ -1,15 +1,24 @@
 import React, { createContext, useCallback, useContext, useEffect, useMemo, useState } from "react";
-import { api, ApiError } from "./api";
+import type { UserRole } from "@trock-crm/shared/types";
+import { api, ApiError, clearStoredActiveOfficeId } from "./api";
 
 export type FieldUser = {
   id: string;
   email: string;
   firstName: string | null;
   lastName: string | null;
-  role: "field_contractor";
+  role: UserRole;
   tenantId: string;
   active: boolean;
 };
+
+const FIELD_APP_ALLOWED_ROLES = new Set<UserRole>([
+  "admin",
+  "director",
+  "rep",
+  "construction",
+  "field_contractor",
+]);
 
 type AuthState = {
   user: FieldUser | null;
@@ -29,7 +38,7 @@ function assertFieldUser(user: FieldUser | null | undefined): FieldUser {
     !user ||
     typeof user.id !== "string" ||
     typeof user.email !== "string" ||
-    user.role !== "field_contractor" ||
+    !FIELD_APP_ALLOWED_ROLES.has(user.role) ||
     typeof user.tenantId !== "string" ||
     typeof user.active !== "boolean"
   ) {
@@ -44,6 +53,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [error, setError] = useState<string | null>(null);
 
   const clearSession = useCallback(() => {
+    clearStoredActiveOfficeId();
     setUser(null);
   }, []);
 

@@ -11,8 +11,10 @@ import {
   Plus,
   Search,
 } from "lucide-react";
-import { Button } from "@/components/ui/button";
+import { Button, buttonVariants } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { useAuth } from "@/lib/auth";
+import { buildFieldCaptureUrl } from "@/lib/field-app";
 import { searchPhotoUploadTargets, uploadFile, type PhotoUploadTarget } from "@/hooks/use-files";
 
 const SUBCATEGORIES = [
@@ -44,7 +46,44 @@ export function groupPhotoUploadTargets(targets: PhotoUploadTarget[]) {
   };
 }
 
+export function buildUnifiedCaptureHref(
+  searchParams: URLSearchParams,
+  selectedTarget: PhotoUploadTarget | null,
+  activeOfficeId?: string | null
+) {
+  const fieldCaptureParams = new URLSearchParams(searchParams);
+  fieldCaptureParams.delete("dealId");
+  fieldCaptureParams.delete("leadId");
+  fieldCaptureParams.delete("opportunityId");
+  fieldCaptureParams.delete("targetType");
+  fieldCaptureParams.delete("targetName");
+  fieldCaptureParams.delete("dealName");
+  fieldCaptureParams.delete("leadName");
+  fieldCaptureParams.delete("opportunityName");
+
+  if (selectedTarget) {
+    if (selectedTarget.type === "lead") {
+      fieldCaptureParams.set("leadId", selectedTarget.id);
+      fieldCaptureParams.set("leadName", selectedTarget.name);
+    } else if (selectedTarget.type === "opportunity") {
+      fieldCaptureParams.set("opportunityId", selectedTarget.id);
+      fieldCaptureParams.set("opportunityName", selectedTarget.name);
+      fieldCaptureParams.set("targetType", "opportunity");
+    } else {
+      fieldCaptureParams.set("dealId", selectedTarget.id);
+      fieldCaptureParams.set("dealName", selectedTarget.name);
+    }
+    fieldCaptureParams.set("targetName", selectedTarget.name);
+  }
+
+  if (activeOfficeId && !fieldCaptureParams.get("officeId")) {
+    fieldCaptureParams.set("officeId", activeOfficeId);
+  }
+  return buildFieldCaptureUrl(fieldCaptureParams.toString() ? `?${fieldCaptureParams.toString()}` : "");
+}
+
 export function PhotoCapturePage() {
+  const { user } = useAuth();
   const [searchParams] = useSearchParams();
   const [targetSearch, setTargetSearch] = useState("");
   const [targetResults, setTargetResults] = useState<PhotoUploadTarget[]>([]);
@@ -55,13 +94,16 @@ export function PhotoCapturePage() {
   const [uploading, setUploading] = useState(false);
   const [uploadComplete, setUploadComplete] = useState(false);
   const [sessionCount, setSessionCount] = useState(0);
+  const fieldCaptureHref = buildUnifiedCaptureHref(searchParams, selectedTarget, user?.activeOfficeId);
 
   const fileInputRef = useRef<HTMLInputElement>(null);
   const blobUrlsRef = useRef<string[]>([]);
+  const initializedUrlTargetRef = useRef(false);
 
   useEffect(() => {
     const dealId = searchParams.get("dealId");
-    if (!dealId || selectedTarget) return;
+    if (!dealId || initializedUrlTargetRef.current) return;
+    initializedUrlTargetRef.current = true;
     setSelectedTarget({
       id: dealId,
       type: "deal",
@@ -72,7 +114,7 @@ export function PhotoCapturePage() {
       lastUpdatedAt: new Date().toISOString(),
     });
     setTargetSearch(searchParams.get("dealName") ?? "Selected deal");
-  }, [searchParams, selectedTarget]);
+  }, [searchParams]);
 
   useEffect(() => {
     let cancelled = false;
@@ -235,6 +277,22 @@ export function PhotoCapturePage() {
       {/* Scrollable Content */}
       <div className="flex-1 overflow-y-auto">
         <div className="max-w-lg mx-auto px-4 py-4 space-y-5">
+          <div className="rounded-xl border border-amber-400/30 bg-amber-400/10 px-4 py-3 text-amber-100">
+            <p className="text-sm font-semibold">Capture is moving to the unified field app.</p>
+            <p className="mt-1 text-xs text-amber-100/80">
+              This CRM page stays available for now, but new capture work should start in the field app.
+            </p>
+            {fieldCaptureHref ? (
+              <div className="mt-3">
+                <a
+                  href={fieldCaptureHref}
+                  className={buttonVariants({ className: "bg-white text-slate-950 hover:bg-white/90" })}
+                >
+                  Open unified capture
+                </a>
+              </div>
+            ) : null}
+          </div>
 
           {/* Project Selector */}
           <div className="space-y-2">
