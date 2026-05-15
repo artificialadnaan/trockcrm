@@ -56,6 +56,8 @@ export function RecordingList({
 }) {
   const { user } = useAuth();
   const isAdmin = user?.role === "admin";
+  const canUseRecordings = Boolean(user);
+  const canUpload = canUseRecordings;
   const [recordings, setRecordings] = useState<CallRecording[]>([]);
   const [loading, setLoading] = useState(true);
   const [uploadOpen, setUploadOpen] = useState(false);
@@ -68,7 +70,7 @@ export function RecordingList({
   const [transcriptLoadingId, setTranscriptLoadingId] = useState<string | null>(null);
 
   const load = useCallback(async () => {
-    if (user?.role === "construction") return;
+    if (!canUseRecordings) return;
     setLoading(true);
     try {
       const params = new URLSearchParams({ entityType, entityId });
@@ -82,12 +84,12 @@ export function RecordingList({
     } finally {
       setLoading(false);
     }
-  }, [entityId, entityType, search, user?.role]);
+  }, [canUseRecordings, entityId, entityType, search]);
 
   useEffect(() => {
-    if (user?.role === "construction") return;
+    if (!canUseRecordings) return;
     void load();
-  }, [load, user?.role]);
+  }, [canUseRecordings, load]);
 
   useEffect(() => {
     if (!recordings.some((recording) => ["pending", "processing"].includes(recording.transcriptionStatus))) {
@@ -175,7 +177,7 @@ export function RecordingList({
     );
   };
 
-  if (user?.role === "construction") return null;
+  if (!canUseRecordings) return null;
 
   return (
     <section className="space-y-3">
@@ -184,7 +186,7 @@ export function RecordingList({
           <h3 className="text-sm font-semibold">Call Recordings</h3>
           <p className="text-xs text-muted-foreground">Playback-only audio linked to this record.</p>
         </div>
-        {isAdmin && (
+        {canUpload && (
           <Button size="sm" onClick={() => setUploadOpen(true)}>
             <Upload className="mr-2 h-4 w-4" />
             Upload Recording

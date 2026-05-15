@@ -51,7 +51,7 @@ async function assertEntityReadable(req: any, entityType: CallRecordingEntityTyp
 
 router.post("/upload-url", async (req, res, next) => {
   try {
-    requireAdminRole(req.user!.role);
+    requireCallRecordingRole(req.user!.role);
     const { entityType, entityId, filename, mimeType, title, notes, callDate } = req.body;
     if (!entityType || !entityId || !filename || !mimeType) {
       throw new AppError(400, "entityType, entityId, filename, and mimeType are required.");
@@ -79,7 +79,7 @@ router.post("/upload-url", async (req, res, next) => {
 
 router.post("/:id/confirm", async (req, res, next) => {
   try {
-    requireAdminRole(req.user!.role);
+    requireCallRecordingRole(req.user!.role);
     const { fileSizeBytes, durationSeconds } = req.body;
     const recording = await confirmUpload(req.tenantDb!, req.params.id, {
       fileSizeBytes: Number(fileSizeBytes),
