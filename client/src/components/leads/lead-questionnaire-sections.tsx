@@ -292,7 +292,7 @@ export function LeadQuestionnaireSections({
     }
 
     panel.scrollIntoView({ behavior: "smooth", block: "start" });
-  }, [activeScopeGroupKey, selectedScopeIds]);
+  }, [activeScopeGroupKey]);
 
   const renderQuestion = (node: LeadQuestionnaireNode, options?: { nested?: boolean }) => {
     const override = renderQuestionOverride?.(node);
