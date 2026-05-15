@@ -23,7 +23,7 @@ BEGIN
   FOR schema_name_var IN
     SELECT schema_name
     FROM information_schema.schemata
-    WHERE schema_name LIKE 'office_%'
+    WHERE schema_name ~ '^office_[a-z0-9_]+$'
     ORDER BY schema_name
   LOOP
     EXECUTE format(
