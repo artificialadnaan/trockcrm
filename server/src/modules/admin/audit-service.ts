@@ -179,10 +179,12 @@ export async function getAuditLog(
   filter: AuditLogFilter = {}
 ): Promise<AuditLogFeedResult> {
   if (filter.expand) {
+    const limit = Math.min(filter.limit ?? 500, 1000);
+    const offset = ((filter.page ?? 1) - 1) * limit;
     const expanded = await getAuditLogGroupChildren(tenantDb, userRole, filter);
     return {
       rows: expanded.rows,
-      hasMore: expanded.rows.length < expanded.total,
+      hasMore: offset + expanded.rows.length < expanded.total,
       total: expanded.total,
     };
   }
