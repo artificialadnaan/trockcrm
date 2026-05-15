@@ -285,12 +285,17 @@ function shouldTreatPatchAsLegacyCleanup(
     return false;
   }
 
-  return (
-    !deal.companyId ||
-    !deal.propertyId ||
-    body.companyId !== undefined ||
-    body.propertyId !== undefined
-  );
+  const isMissingCompany = deal.companyId == null;
+  const isMissingProperty = deal.propertyId == null;
+
+  if (!isMissingCompany && !isMissingProperty) {
+    return false;
+  }
+
+  const companyChanged = body.companyId !== undefined && body.companyId !== deal.companyId;
+  const propertyChanged = body.propertyId !== undefined && body.propertyId !== deal.propertyId;
+
+  return (isMissingCompany && companyChanged) || (isMissingProperty && propertyChanged);
 }
 
 function isEstimatingBoundaryStageSlug(stageSlug: string, workflowRoute: "normal" | "service") {
