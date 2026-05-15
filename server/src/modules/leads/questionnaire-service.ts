@@ -92,11 +92,34 @@ function valuesEqual(left: unknown, right: unknown) {
   return JSON.stringify(left ?? null) === JSON.stringify(right ?? null);
 }
 
+function getNormalizedQuestionInputType(node: Pick<QuestionnaireNode, "key" | "inputType" | "options">) {
+  if (node.key === "life_safety") {
+    return "boolean";
+  }
+  if (node.inputType === "boolean") {
+    return "boolean";
+  }
+  if (node.inputType === "select") {
+    return "select";
+  }
+  if (Array.isArray(node.options) && node.options.length > 0) {
+    return "select";
+  }
+  return node.inputType;
+}
+
+function shouldNormalizeUnansweredPlaceholder(node: Pick<QuestionnaireNode, "key" | "inputType" | "options">) {
+  const inputType = getNormalizedQuestionInputType(node);
+  return inputType === "boolean" || inputType === "select";
+}
+
 function normalizeAnswerValueForNode(
   node: QuestionnaireNode,
   value: LeadQuestionAnswerValue | undefined
 ): LeadQuestionAnswerValue {
-  if (node.inputType === "boolean") {
+  const inputType = getNormalizedQuestionInputType(node);
+
+  if (inputType === "boolean") {
     if (value == null) {
       return null;
     }
@@ -109,15 +132,11 @@ function normalizeAnswerValueForNode(
     return value;
   }
 
-  if (
-    (node.inputType === "select" || (Array.isArray(node.options) && node.options.length > 0) || node.key === "life_safety") &&
-    typeof value === "string" &&
-    value.trim() === UNANSWERED_PLACEHOLDER_VALUE
-  ) {
+  if (shouldNormalizeUnansweredPlaceholder(node) && typeof value === "string" && value.trim() === UNANSWERED_PLACEHOLDER_VALUE) {
     return null;
   }
 
-  if (node.inputType !== "multiselect") {
+  if (inputType !== "multiselect") {
     return value ?? null;
   }
 
@@ -151,8 +170,16 @@ function sortQuestionnaireNodes(left: QuestionnaireNode, right: QuestionnaireNod
   return left.displayOrder - right.displayOrder;
 }
 
-function normalizeStoredAnswerValue(value: LeadQuestionAnswerValue | undefined) {
-  if (typeof value === "string" && value.trim() === UNANSWERED_PLACEHOLDER_VALUE) {
+function normalizeStoredAnswerValue(
+  node: Pick<QuestionnaireNode, "key" | "inputType" | "options"> | null | undefined,
+  value: LeadQuestionAnswerValue | undefined
+) {
+  if (
+    node &&
+    shouldNormalizeUnansweredPlaceholder(node) &&
+    typeof value === "string" &&
+    value.trim() === UNANSWERED_PLACEHOLDER_VALUE
+  ) {
     return null;
   }
   return value ?? null;
@@ -197,12 +224,12 @@ export async function listLeadQuestionAnswers(
   }
 
   const nodes = await listQuestionnaireNodes(tenantDb);
-  const keyByQuestionId = new Map(nodes.map((node) => [node.id, node.key]));
+  const nodeByQuestionId = new Map(nodes.map((node) => [node.id, node]));
 
   return rows.reduce<Record<string, LeadQuestionAnswerValue>>((accumulator, row) => {
-    const key = keyByQuestionId.get(row.questionId);
-    if (key) {
-      accumulator[key] = normalizeStoredAnswerValue(row.valueJson as LeadQuestionAnswerValue | undefined);
+    const node = nodeByQuestionId.get(row.questionId);
+    if (node) {
+      accumulator[node.key] = normalizeStoredAnswerValue(node, row.valueJson as LeadQuestionAnswerValue | undefined);
     }
     return accumulator;
   }, {});
@@ -243,7 +270,7 @@ export async function listLegacyLeadQuestionAnswers(
           label: node.label,
           inputType: node.inputType,
           options: node.options,
-          value: (row.valueJson as LeadQuestionAnswerValue | undefined) ?? null,
+          value: normalizeStoredAnswerValue(node, row.valueJson as LeadQuestionAnswerValue | undefined),
           displayOrder: node.displayOrder,
           projectTypeId: node.projectTypeId,
           sectionKey: node.sectionKey,

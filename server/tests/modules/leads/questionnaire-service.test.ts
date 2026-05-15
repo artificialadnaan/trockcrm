@@ -526,6 +526,7 @@ describe("questionnaire-service universal questionnaire", () => {
   });
 
   it("treats stored __unanswered__ strings as empty questionnaire answers and reasserts life_safety as boolean", async () => {
+    expect(unansweredPlaceholderHotfixMigrationSql).toMatch(/schema_name\s+LIKE\s+'office_%'/i);
     expect(unansweredPlaceholderHotfixMigrationSql).toMatch(/btrim\(a\.value_json #>> '\{\}'\) = '__unanswered__'/i);
     expect(unansweredPlaceholderHotfixMigrationSql).toMatch(/SET input_type = 'boolean'/i);
 
@@ -560,6 +561,38 @@ describe("questionnaire-service universal questionnaire", () => {
 
     expect(snapshot.answers.life_safety).toBeNull();
     expect(template.nodes.find((entry) => entry.key === "life_safety")?.inputType).toBe("boolean");
+  });
+
+  it("preserves literal __unanswered__ in free-text questionnaire answers", async () => {
+    const tenantDb = createReadDb({
+      nodes: [
+        node({
+          id: "project-notes",
+          key: "project_notes",
+          label: "Project Notes",
+          inputType: "textarea",
+          options: [],
+        }),
+      ],
+      answers: [
+        {
+          id: "answer-project-notes",
+          leadId: "lead-1",
+          questionId: "project-notes",
+          valueJson: "__unanswered__",
+          updatedBy: null,
+          createdAt: new Date("2026-01-01T00:00:00Z"),
+          updatedAt: new Date("2026-01-01T00:00:00Z"),
+        },
+      ],
+    });
+
+    const snapshot = await getLeadQuestionnaireSnapshot(tenantDb as never, {
+      leadId: "lead-1",
+      projectTypeId: null,
+    });
+
+    expect(snapshot.answers.project_notes).toBe("__unanswered__");
   });
 
   it("rejects malformed multi-select array answers", async () => {

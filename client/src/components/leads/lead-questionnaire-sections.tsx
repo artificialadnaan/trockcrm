@@ -19,6 +19,7 @@ import {
   questionnaireRevealMatches,
 } from "./questionnaire-display";
 import {
+  CLEAR_SELECTION_VALUE,
   getNormalizedQuestionInputType,
   normalizeBooleanAnswerForDisplay,
   normalizeDropdownAnswerForDisplay,
@@ -242,12 +243,20 @@ export function LeadQuestionnaireSections({
         ) : inputType === "boolean" ? (
           <Select
             value={normalizeBooleanAnswerForDisplay(currentValue)}
-            onValueChange={(value) => onAnswerChange(node.key, !value ? null : value === "true")}
+            onValueChange={(value) =>
+              onAnswerChange(
+                node.key,
+                !value || value === CLEAR_SELECTION_VALUE ? null : value === "true"
+              )
+            }
           >
             <SelectTrigger id={node.key}>
               <SelectValue placeholder="Select" />
             </SelectTrigger>
             <SelectContent>
+              {!node.isRequired ? (
+                <SelectItem value={CLEAR_SELECTION_VALUE}>-- (no selection)</SelectItem>
+              ) : null}
               <SelectItem value="true">Yes</SelectItem>
               <SelectItem value="false">No</SelectItem>
             </SelectContent>
@@ -255,12 +264,17 @@ export function LeadQuestionnaireSections({
         ) : inputType === "select" ? (
           <Select
             value={normalizeDropdownAnswerForDisplay(currentValue)}
-            onValueChange={(value) => onAnswerChange(node.key, !value ? null : value)}
+            onValueChange={(value) =>
+              onAnswerChange(node.key, !value || value === CLEAR_SELECTION_VALUE ? null : value)
+            }
           >
             <SelectTrigger id={node.key}>
               <SelectValue placeholder="Select" />
             </SelectTrigger>
             <SelectContent>
+              {!node.isRequired ? (
+                <SelectItem value={CLEAR_SELECTION_VALUE}>-- (no selection)</SelectItem>
+              ) : null}
               {questionOptions.map((option) => (
                 <SelectItem key={option.value} value={option.value}>
                   {option.label}

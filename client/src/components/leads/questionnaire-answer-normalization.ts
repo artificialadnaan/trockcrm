@@ -7,6 +7,7 @@ type QuestionNodeShape = Pick<LeadQuestionnaireNode, "key" | "inputType" | "opti
 };
 
 export const UNANSWERED_PLACEHOLDER_VALUE = "__unanswered__";
+export const CLEAR_SELECTION_VALUE = "__clear__";
 
 export function isUnansweredPlaceholderValue(value: unknown): boolean {
   return typeof value === "string" && value.trim() === UNANSWERED_PLACEHOLDER_VALUE;
@@ -22,6 +23,12 @@ export function getNormalizedQuestionInputType(node: QuestionNodeShape) {
   if (node.inputType === "number") return "number";
   if (Array.isArray(node.options) && node.options.length > 0) return "select";
   return "text";
+}
+
+export function shouldNormalizeUnansweredPlaceholder(node: QuestionNodeShape | null | undefined) {
+  if (!node) return false;
+  const inputType = getNormalizedQuestionInputType(node);
+  return inputType === "boolean" || inputType === "select";
 }
 
 export function normalizeDropdownAnswerForDisplay(value: LeadAnswerValue | undefined): string | undefined {
@@ -59,14 +66,23 @@ export function normalizeBooleanAnswerForDisplay(value: LeadAnswerValue | undefi
 }
 
 export function normalizeStoredQuestionAnswers(
-  answers: Record<string, LeadAnswerValue> | null | undefined
+  answers: Record<string, LeadAnswerValue> | null | undefined,
+  nodes?: readonly QuestionNodeShape[] | null
 ): Record<string, LeadAnswerValue> {
   if (!answers) {
     return {};
   }
 
+  const nodeByKey = new Map((nodes ?? []).map((node) => [node.key, node]));
+
   return Object.fromEntries(
-    Object.entries(answers).map(([key, value]) => [key, isUnansweredPlaceholderValue(value) ? null : value])
+    Object.entries(answers).map(([key, value]) => {
+      const node = nodeByKey.get(key);
+      if (shouldNormalizeUnansweredPlaceholder(node) && isUnansweredPlaceholderValue(value)) {
+        return [key, null];
+      }
+      return [key, value];
+    })
   );
 }
 
@@ -82,7 +98,7 @@ export function sanitizeQuestionAnswerForSave(
     }
     if (typeof value === "string") {
       const trimmed = value.trim().toLowerCase();
-      if (!trimmed || trimmed === UNANSWERED_PLACEHOLDER_VALUE) {
+      if (!trimmed || trimmed === UNANSWERED_PLACEHOLDER_VALUE || trimmed === CLEAR_SELECTION_VALUE) {
         return null;
       }
       if (trimmed === "true") return true;
@@ -92,8 +108,11 @@ export function sanitizeQuestionAnswerForSave(
   }
 
   if (inputType === "select") {
+    if (typeof value === "string" && value.trim() === CLEAR_SELECTION_VALUE) {
+      return null;
+    }
     return normalizeDropdownAnswerForDisplay(value) ?? null;
   }
 
-  return isUnansweredPlaceholderValue(value) ? null : (value ?? null);
+  return value ?? null;
 }

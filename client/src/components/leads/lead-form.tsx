@@ -76,8 +76,10 @@ import {
 } from "./questionnaire-display";
 import { LeadQuestionnaireSections } from "./lead-questionnaire-sections";
 import {
+  CLEAR_SELECTION_VALUE,
   normalizeStoredQuestionAnswers,
   sanitizeQuestionAnswerForSave,
+  shouldNormalizeUnansweredPlaceholder,
 } from "./questionnaire-answer-normalization";
 import { ALLOWED_EXTENSIONS, validateFileForUpload } from "@/lib/file-utils";
 import { CLIENT_PROVIDED_DOCS_TAG } from "@/lib/lead-attachment-routing";
@@ -223,6 +225,10 @@ function getEditableFormState(
   fallbackOfficeCode = ""
 ) {
   const sourceState = normalizeLeadSourceForForm(lead, initialValues?.source);
+  const questionnaireNodes =
+    lead?.leadQuestionnaire?.nodes?.length
+      ? lead.leadQuestionnaire.nodes
+      : lead?.leadQuestionnaire?.allNodes ?? [];
 
   return {
     companyId: lead?.companyId ?? initialValues?.companyId ?? "",
@@ -257,15 +263,27 @@ function getEditableFormState(
     } as Record<string, string>,
     projectTypeQuestionAnswers: {
       ...normalizeStoredQuestionAnswers(
-        lead?.leadQuestionnaire?.answers ?? lead?.projectTypeQuestionPayload?.answers ?? {}
+        lead?.leadQuestionnaire?.answers ?? {},
+        questionnaireNodes
       ),
+      ...(lead?.projectTypeQuestionPayload?.answers ?? {}),
     } as Record<string, LeadAnswerValue>,
   };
 }
 
-function renderAnswerValue(value: LeadAnswerValue | undefined, options: { formatStringEnums?: boolean } = {}) {
+function renderAnswerValue(
+  value: LeadAnswerValue | undefined,
+  options: {
+    formatStringEnums?: boolean;
+    questionNode?: { key: string; inputType: string | null; options?: unknown } | null;
+  } = {}
+) {
   const formatted = formatQuestionAnswerValue(
-    typeof value === "string" && value.trim() === "__unanswered__" ? null : value,
+    shouldNormalizeUnansweredPlaceholder(options.questionNode) &&
+      typeof value === "string" &&
+      value.trim() === "__unanswered__"
+      ? null
+      : value,
     options
   );
   return formatted === "Unanswered" ? "--" : formatted;
@@ -654,6 +672,7 @@ export function LeadQuestionnaireSummary({ lead }: { lead: LeadFormLead }) {
                     <p className="font-medium">
                       {renderAnswerValue(lead.leadQuestionnaire?.answers?.[node.key], {
                         formatStringEnums: Array.isArray(node.options) && node.options.length > 0,
+                        questionNode: node,
                       })}
                     </p>
                   </div>
@@ -1189,7 +1208,10 @@ function EditableLeadForm({
       nextValue = typeof value === "string" && value.trim() === "" ? null : Number(value);
     }
     if (input === "boolean") {
-      nextValue = typeof value === "string" && value.trim() === "" ? null : value === "true";
+      nextValue =
+        typeof value === "string" && (value.trim() === "" || value === CLEAR_SELECTION_VALUE)
+          ? null
+          : value === "true";
     }
     if (input === "multiselect") {
       nextValue = Array.isArray(value) ? value : [];
@@ -2310,6 +2332,7 @@ function EditableLeadForm({
                       <SelectValue placeholder="Select" />
                     </SelectTrigger>
                     <SelectContent>
+                      <SelectItem value={CLEAR_SELECTION_VALUE}>-- (no selection)</SelectItem>
                       <SelectItem value="true">Yes</SelectItem>
                       <SelectItem value="false">No</SelectItem>
                     </SelectContent>

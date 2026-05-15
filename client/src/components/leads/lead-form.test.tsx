@@ -1176,6 +1176,27 @@ describe("LeadForm", () => {
     expect(leadHookMocks.createLead.mock.calls[0][0].leadQuestionAnswers.life_safety).toBe(true);
   });
 
+  it("lets legacy optional yes/no questions clear back to null", async () => {
+    const originalSlug = projectTypes[0]!.slug;
+    projectTypes[0]!.slug = "service";
+
+    try {
+      renderCreateForm();
+
+      const question = container.querySelector("#site_contact_available")?.parentElement;
+      expect(question).toBeTruthy();
+
+      await clickButton(question!.querySelector<HTMLButtonElement>('button[data-value="true"]')!);
+      await clickButton(question!.querySelector<HTMLButtonElement>('button[data-value="__clear__"]')!);
+      await submitForm();
+
+      expect(leadHookMocks.createLead).toHaveBeenCalledTimes(1);
+      expect(leadHookMocks.createLead.mock.calls[0][0].leadQuestionAnswers.site_contact_available).toBeNull();
+    } finally {
+      projectTypes[0]!.slug = originalSlug;
+    }
+  });
+
   it("renders universal questionnaire baseline, property, and scope sections in create mode", () => {
     mockUniversalCreateQuestionnaire();
 
