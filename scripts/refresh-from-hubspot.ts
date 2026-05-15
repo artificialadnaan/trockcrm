@@ -635,6 +635,11 @@ export async function applyDealChanges(client: Client, runId: string, dealId: st
     values
   );
 
+  if (updateResult.rows.length === 0) {
+    console.warn(`HubSpot Refresh: deal ${dealId} not updated (row not found). Skipping audit log entry.`);
+    return;
+  }
+
   for (const change of changes) {
     await client.query(
       `INSERT INTO public.hubspot_refresh_log
@@ -644,12 +649,7 @@ export async function applyDealChanges(client: Client, runId: string, dealId: st
     );
   }
 
-  const deal = updateResult.rows[0] ?? {
-    id: dealId,
-    name: "Deal",
-    deal_number: null,
-    project_number: null,
-  };
+  const deal = updateResult.rows[0];
   const fieldChanges = Object.fromEntries(
     changes.map((change) => [
       auditFieldKeyForRefreshColumn(change.fieldName),

@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   applyDealChanges,
   buildDealUpdatePlan,
@@ -9,6 +9,10 @@ import {
   shouldRefreshBidEstimate,
   STAGE_MAPPING,
 } from "../../../scripts/refresh-from-hubspot";
+
+afterEach(() => {
+  vi.restoreAllMocks();
+});
 
 describe("HubSpot refresh stage mapping", () => {
   const hubSpotStages = new Map([
@@ -272,5 +276,44 @@ describe("HubSpot refresh field policies", () => {
       "DFW-1-11126-aa",
     ]));
     expect(JSON.stringify(auditInsert?.params)).toContain("bidEstimate");
+  });
+
+  it("skips refresh log and audit log when the UPDATE matches zero rows", async () => {
+    const queries: Array<{ sql: string; params: unknown[] }> = [];
+    const client = {
+      query: async (sql: string, params: unknown[] = []) => {
+        queries.push({ sql, params });
+        if (sql.includes("UPDATE office_dallas.deals")) {
+          return {
+            rows: [],
+            rowCount: 0,
+          };
+        }
+        if (sql.includes("INSERT INTO public.hubspot_refresh_log")) {
+          return { rows: [], rowCount: 1 };
+        }
+        if (sql.includes('INSERT INTO "office_dallas".audit_log')) {
+          return { rows: [], rowCount: 1 };
+        }
+        throw new Error(`Unexpected SQL: ${sql}`);
+      },
+    };
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+
+    await applyDealChanges(client as never, "run-1", "deal-missing", [
+      {
+        dealId: "deal-missing",
+        fieldName: "bid_estimate",
+        oldValue: "1000",
+        newValue: "1500",
+        reason: "gt_5_percent_drift",
+      },
+    ]);
+
+    expect(warnSpy).toHaveBeenCalledWith(
+      "HubSpot Refresh: deal deal-missing not updated (row not found). Skipping audit log entry."
+    );
+    expect(queries.some((query) => query.sql.includes("INSERT INTO public.hubspot_refresh_log"))).toBe(false);
+    expect(queries.some((query) => query.sql.includes('INSERT INTO "office_dallas".audit_log'))).toBe(false);
   });
 });
