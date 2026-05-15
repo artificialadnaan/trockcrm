@@ -26,7 +26,7 @@ export function getNormalizedQuestionInputType(node: QuestionNodeShape) {
 }
 
 export function shouldNormalizeUnansweredPlaceholder(node: QuestionNodeShape | null | undefined) {
-  if (!node) return false;
+  if (!node) return true;
   const inputType = getNormalizedQuestionInputType(node);
   return inputType === "boolean" || inputType === "select";
 }

@@ -24,6 +24,7 @@ describe("questionnaire display helpers", () => {
     expect(formatQuestionAnswerValue("May-June")).toBe("May-June");
     expect(formatQuestionAnswerValue("DFW-Phase-2")).toBe("DFW-Phase-2");
     expect(formatQuestionAnswerValue("john_smith")).toBe("john_smith");
+    expect(formatQuestionAnswerValue("__unanswered__")).toBe("__unanswered__");
   });
 
   it("preserves ISO date answers instead of treating them as hyphenated enums", () => {
