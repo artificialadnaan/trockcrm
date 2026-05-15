@@ -75,6 +75,10 @@ import {
   questionnaireRevealMatches,
 } from "./questionnaire-display";
 import { LeadQuestionnaireSections } from "./lead-questionnaire-sections";
+import {
+  normalizeStoredQuestionAnswers,
+  sanitizeQuestionAnswerForSave,
+} from "./questionnaire-answer-normalization";
 import { ALLOWED_EXTENSIONS, validateFileForUpload } from "@/lib/file-utils";
 import { CLIENT_PROVIDED_DOCS_TAG } from "@/lib/lead-attachment-routing";
 import {
@@ -252,13 +256,18 @@ function getEditableFormState(
           : "",
     } as Record<string, string>,
     projectTypeQuestionAnswers: {
-      ...(lead?.leadQuestionnaire?.answers ?? lead?.projectTypeQuestionPayload?.answers ?? {}),
+      ...normalizeStoredQuestionAnswers(
+        lead?.leadQuestionnaire?.answers ?? lead?.projectTypeQuestionPayload?.answers ?? {}
+      ),
     } as Record<string, LeadAnswerValue>,
   };
 }
 
 function renderAnswerValue(value: LeadAnswerValue | undefined, options: { formatStringEnums?: boolean } = {}) {
-  const formatted = formatQuestionAnswerValue(value, options);
+  const formatted = formatQuestionAnswerValue(
+    typeof value === "string" && value.trim() === "__unanswered__" ? null : value,
+    options
+  );
   return formatted === "Unanswered" ? "--" : formatted;
 }
 
@@ -1180,7 +1189,7 @@ function EditableLeadForm({
       nextValue = typeof value === "string" && value.trim() === "" ? null : Number(value);
     }
     if (input === "boolean") {
-      nextValue = value === "true";
+      nextValue = typeof value === "string" && value.trim() === "" ? null : value === "true";
     }
     if (input === "multiselect") {
       nextValue = Array.isArray(value) ? value : [];
@@ -1356,7 +1365,14 @@ function EditableLeadForm({
               answers: Object.fromEntries(
                 questionSet.questions.map((question) => [
                   question.id,
-                  formData.projectTypeQuestionAnswers[question.id] ?? null,
+                  sanitizeQuestionAnswerForSave(
+                    {
+                      key: question.id,
+                      inputType: question.input,
+                      options: [],
+                    },
+                    formData.projectTypeQuestionAnswers[question.id]
+                  ),
                 ])
               ),
             },
@@ -1366,13 +1382,20 @@ function EditableLeadForm({
                 node.key,
                 node.key === "timeline"
                   ? normalizedTimelineStatus
-                  : serializeLeadQuestionAnswer(node.key, formData.projectTypeQuestionAnswers[node.key]),
+                  : sanitizeQuestionAnswerForSave(node, serializeLeadQuestionAnswer(node.key, formData.projectTypeQuestionAnswers[node.key])),
               ])
             )
           : Object.fromEntries(
               questionSet.questions.map((question) => [
                 question.id,
-                formData.projectTypeQuestionAnswers[question.id] ?? null,
+                sanitizeQuestionAnswerForSave(
+                  {
+                    key: question.id,
+                    inputType: question.input,
+                    options: [],
+                  },
+                  formData.projectTypeQuestionAnswers[question.id]
+                ),
               ])
             ),
       };
@@ -2274,12 +2297,12 @@ function EditableLeadForm({
                   />
                 ) : question.input === "boolean" ? (
                   <Select
-                    value={typeof currentValue === "boolean" ? String(currentValue) : "__unanswered__"}
+                    value={typeof currentValue === "boolean" ? String(currentValue) : undefined}
                     onValueChange={(value) =>
                       handleQuestionAnswerChange(
                         question.id,
                         question.input,
-                        !value || value === "__unanswered__" ? "" : value
+                        !value ? "" : value
                       )
                     }
                   >
@@ -2287,7 +2310,6 @@ function EditableLeadForm({
                       <SelectValue placeholder="Select" />
                     </SelectTrigger>
                     <SelectContent>
-                      <SelectItem value="__unanswered__">Select...</SelectItem>
                       <SelectItem value="true">Yes</SelectItem>
                       <SelectItem value="false">No</SelectItem>
                     </SelectContent>

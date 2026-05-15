@@ -1156,6 +1156,26 @@ describe("LeadForm", () => {
     expect(currencyQuestion?.textContent).toContain("$");
   });
 
+  it("persists Life Safety yes as a real boolean answer", async () => {
+    mockUniversalCreateQuestionnaire([
+      makeQuestionNode({
+        id: "baseline-life-safety",
+        key: "life_safety",
+        label: "Life Safety",
+        inputType: "boolean",
+        isRequired: true,
+        displayOrder: 900,
+      }),
+    ]);
+
+    renderCreateForm();
+    await chooseQuestionSelectValue("life_safety", "true");
+    await submitForm();
+
+    expect(leadHookMocks.createLead).toHaveBeenCalledTimes(1);
+    expect(leadHookMocks.createLead.mock.calls[0][0].leadQuestionAnswers.life_safety).toBe(true);
+  });
+
   it("renders universal questionnaire baseline, property, and scope sections in create mode", () => {
     mockUniversalCreateQuestionnaire();
 

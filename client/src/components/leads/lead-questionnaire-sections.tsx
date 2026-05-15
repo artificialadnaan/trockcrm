@@ -18,6 +18,11 @@ import {
   normalizeQuestionOptions,
   questionnaireRevealMatches,
 } from "./questionnaire-display";
+import {
+  getNormalizedQuestionInputType,
+  normalizeBooleanAnswerForDisplay,
+  normalizeDropdownAnswerForDisplay,
+} from "./questionnaire-answer-normalization";
 
 interface LeadQuestionnaireSectionsProps {
   nodes: LeadQuestionnaireNode[];
@@ -66,19 +71,6 @@ function isVisibleQuestion(
 
   visibleCache.set(nodeId, visible);
   return visible;
-}
-
-const UNANSWERED_SELECT_VALUE = "__unanswered__";
-
-function getQuestionInputType(node: LeadQuestionnaireNode) {
-  if (node.inputType === "textarea") return "textarea";
-  if (node.inputType === "boolean") return "boolean";
-  if (node.inputType === "date") return "date";
-  if (node.inputType === "multiselect") return "multiselect";
-  if (node.inputType === "currency") return "currency";
-  if (node.inputType === "number") return "number";
-  if (Array.isArray(node.options) && node.options.length > 0) return "select";
-  return "text";
 }
 
 function QuestionLabel({
@@ -226,7 +218,7 @@ export function LeadQuestionnaireSections({
     const override = renderQuestionOverride?.(node);
     if (override) return override;
 
-    const inputType = getQuestionInputType(node);
+    const inputType = getNormalizedQuestionInputType(node);
     const currentValue = answers[node.key];
     const questionOptions = normalizeQuestionOptions(node.options);
 
@@ -249,30 +241,26 @@ export function LeadQuestionnaireSections({
           />
         ) : inputType === "boolean" ? (
           <Select
-            value={typeof currentValue === "boolean" ? String(currentValue) : UNANSWERED_SELECT_VALUE}
-            onValueChange={(value) =>
-              onAnswerChange(node.key, !value || value === UNANSWERED_SELECT_VALUE ? null : value === "true")
-            }
+            value={normalizeBooleanAnswerForDisplay(currentValue)}
+            onValueChange={(value) => onAnswerChange(node.key, !value ? null : value === "true")}
           >
             <SelectTrigger id={node.key}>
               <SelectValue placeholder="Select" />
             </SelectTrigger>
             <SelectContent>
-              <SelectItem value={UNANSWERED_SELECT_VALUE}>Select...</SelectItem>
               <SelectItem value="true">Yes</SelectItem>
               <SelectItem value="false">No</SelectItem>
             </SelectContent>
           </Select>
         ) : inputType === "select" ? (
           <Select
-            value={typeof currentValue === "string" ? currentValue : UNANSWERED_SELECT_VALUE}
-            onValueChange={(value) => onAnswerChange(node.key, !value || value === UNANSWERED_SELECT_VALUE ? null : value)}
+            value={normalizeDropdownAnswerForDisplay(currentValue)}
+            onValueChange={(value) => onAnswerChange(node.key, !value ? null : value)}
           >
             <SelectTrigger id={node.key}>
               <SelectValue placeholder="Select" />
             </SelectTrigger>
             <SelectContent>
-              <SelectItem value={UNANSWERED_SELECT_VALUE}>Select...</SelectItem>
               {questionOptions.map((option) => (
                 <SelectItem key={option.value} value={option.value}>
                   {option.label}

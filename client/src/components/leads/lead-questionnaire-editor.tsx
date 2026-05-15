@@ -24,6 +24,10 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { LeadQuestionnaireSections } from "./lead-questionnaire-sections";
+import {
+  normalizeStoredQuestionAnswers,
+  sanitizeQuestionAnswerForSave,
+} from "./questionnaire-answer-normalization";
 
 interface LeadQuestionnaireEditorProps {
   lead: LeadRecord;
@@ -177,7 +181,7 @@ export function LeadQuestionnaireEditor({ lead, onCancel, onSaved }: LeadQuestio
           ? lead.qualificationPayload.timeline_status
           : "",
     },
-    leadQuestionAnswers: { ...(questionnaire?.answers ?? {}) },
+    leadQuestionAnswers: normalizeStoredQuestionAnswers(questionnaire?.answers ?? {}),
   }));
 
   useEffect(() => {
@@ -204,7 +208,7 @@ export function LeadQuestionnaireEditor({ lead, onCancel, onSaved }: LeadQuestio
             ? lead.qualificationPayload.timeline_status
             : "",
       },
-      leadQuestionAnswers: { ...(lead.leadQuestionnaire?.answers ?? {}) },
+      leadQuestionAnswers: normalizeStoredQuestionAnswers(lead.leadQuestionnaire?.answers ?? {}),
     });
     setError(null);
     setStageGateError(null);
@@ -362,7 +366,10 @@ export function LeadQuestionnaireEditor({ lead, onCancel, onSaved }: LeadQuestio
           node.key,
           node.key === "timeline"
             ? formData.qualificationPayload.timeline_status.trim() || null
-            : serializeLeadQuestionAnswer(node.key, formData.leadQuestionAnswers[node.key]),
+            : sanitizeQuestionAnswerForSave(
+                node,
+                serializeLeadQuestionAnswer(node.key, formData.leadQuestionAnswers[node.key])
+              ),
         ])
       );
 
