@@ -14,7 +14,7 @@ const ACTION_OPTIONS = [
 ];
 
 export function AuditLogPage() {
-  const { rows, total, page, setPage, loading, filter, setFilter, entityTypes } = useAuditLog();
+  const { rows, total, page, setPage, loading, filter, setFilter, entityTypes, loadGroupChildren } = useAuditLog();
   const totalPages = Math.max(1, Math.ceil(total / 50));
 
   return (
@@ -119,7 +119,7 @@ export function AuditLogPage() {
         ) : rows.length === 0 ? (
           <div className="rounded-lg border bg-white px-4 py-8 text-center text-sm text-slate-500">No activity found.</div>
         ) : (
-          rows.map((entry) => <ActivityFeedEntry key={entry.id} entry={entry} />)
+          rows.map((entry) => <ActivityFeedEntry key={entry.id} entry={entry} onLoadGroupChildren={loadGroupChildren} />)
         )}
       </section>
 
