@@ -49,6 +49,11 @@ import { usePipelineStages, useProjectTypes, type PipelineStage } from "@/hooks/
 import { useAuth } from "@/lib/auth";
 import { PropertySelector } from "@/components/properties/property-selector";
 import {
+  isScopeLockedWorkspaceField,
+  isScopeLockedWorkspaceSection,
+  isScopeLockedWorkspaceTopLevelField,
+} from "@trock-crm/shared/types";
+import {
   buildScopingSeedFromResolvedFields,
   buildScopingSeedFromDeal,
   formatScopingAttachmentLabel,
@@ -455,7 +460,11 @@ export function DealScopingWorkspace({
   );
   const readOnlyModeActive = mode === "readonly" && !forceEditingReadOnlyScope;
   const adminOverrideEditing = mode === "readonly" && forceEditingReadOnlyScope;
-  const editingDisabled = initialLoadFailed || readOnlyModeActive;
+  const editingDisabled = initialLoadFailed;
+  const projectTypeReadOnly = readOnlyModeActive && isScopeLockedWorkspaceTopLevelField("projectTypeId");
+  const opportunityFieldsReadOnly = readOnlyModeActive && isScopeLockedWorkspaceSection("opportunity");
+  const scopeFieldsReadOnly = readOnlyModeActive && isScopeLockedWorkspaceSection("scope");
+  const attachmentActionsReadOnly = readOnlyModeActive && isScopeLockedWorkspaceSection("attachments");
   latestWorkspaceFingerprintRef.current = currentWorkspaceFingerprint;
   const submittedAtLabel = readOnlySubmittedAt
     ? new Date(readOnlySubmittedAt).toLocaleDateString([], {
@@ -466,19 +475,19 @@ export function DealScopingWorkspace({
     : null;
   const saveStatusLabel = initialLoadFailed
     ? "Unable to load - retry"
-    : readOnlyModeActive
-      ? "Read-only"
     : saveState === "saving"
       ? "Saving..."
       : saveState === "error"
         ? "Save failed"
         : hydrationCompleteRef.current
-          ? "Saved"
+          ? readOnlyModeActive
+            ? "Scoped Fields Locked"
+            : "Saved"
           : "Loading";
   const saveStatusDetail = initialLoadFailed
     ? "Scoping intake did not load. Retry before editing."
     : readOnlyModeActive
-      ? "Submitted scope is available for reference. Edits are locked after RFP submission."
+      ? "Scope selections, opportunity review fields, and submitted scope attachments are locked after RFP submission. Operational metadata remains editable."
     : saveState === "saving"
       ? "Autosaving changes..."
       : saveState === "saved"
@@ -568,10 +577,6 @@ export function DealScopingWorkspace({
 
   useEffect(() => {
     if (!hydrationCompleteRef.current) {
-      return;
-    }
-
-    if (readOnlyModeActive) {
       return;
     }
 
@@ -690,7 +695,7 @@ export function DealScopingWorkspace({
   );
 
   const updateField = (section: SectionKey, field: string, value: string) => {
-    if (editingDisabled) return;
+    if (editingDisabled || (readOnlyModeActive && isScopeLockedWorkspaceField(section, field))) return;
     setSectionData((current) =>
       mergeSectionData(current, {
         [section]: {
@@ -703,7 +708,7 @@ export function DealScopingWorkspace({
   };
 
   const updateScopeSelection = (nextSelectedIds: string[]) => {
-    if (editingDisabled) return;
+    if (editingDisabled || scopeFieldsReadOnly) return;
     const uniqueSelectedIds = Array.from(new Set(nextSelectedIds.filter(Boolean)));
     if (!projectTypeLocked) {
       setProjectTypeId(uniqueSelectedIds[0] ?? null);
@@ -732,7 +737,7 @@ export function DealScopingWorkspace({
   };
 
   const handleLinkExisting = async (fileId: string, requirementKey: string) => {
-    if (editingDisabled) return;
+    if (editingDisabled || attachmentActionsReadOnly) return;
     try {
       await linkExistingScopingAttachment(deal.id, {
         fileId,
@@ -748,7 +753,7 @@ export function DealScopingWorkspace({
   };
 
   const handlePropertyChange = async (propertyId: string) => {
-    if (editingDisabled) return;
+    if (editingDisabled || readOnlyModeActive) return;
     setSaveState("saving");
     try {
       const result = await patchResolvedDealFields(deal.id, {
@@ -772,7 +777,7 @@ export function DealScopingWorkspace({
     requirement: (typeof ATTACHMENT_REQUIREMENTS)[number],
     fileList: FileList | null
   ) => {
-    if (editingDisabled) return;
+    if (editingDisabled || attachmentActionsReadOnly) return;
     if (!fileList?.length) return;
 
     setUploadingKey(requirement.key);
@@ -1009,7 +1014,7 @@ export function DealScopingWorkspace({
               <Select
                 value={projectTypeId ?? "__none__"}
                 onValueChange={handleProjectTypeChange}
-                disabled={editingDisabled || projectTypeLocked}
+                disabled={editingDisabled || projectTypeLocked || projectTypeReadOnly}
               >
                 <SelectTrigger id="projectTypeId">
                   <SelectValue>{projectTypeLabel}</SelectValue>
@@ -1082,7 +1087,7 @@ export function DealScopingWorkspace({
               <Label htmlFor="preBidMeetingCompleted">Pre-Bid Meeting Completed</Label>
               <Select
                 value={getSectionValue(sectionData, "opportunity", "preBidMeetingCompleted") || "__unset__"}
-                disabled={editingDisabled}
+                disabled={editingDisabled || opportunityFieldsReadOnly}
                 onValueChange={(value) =>
                   updateField(
                     "opportunity",
@@ -1109,7 +1114,7 @@ export function DealScopingWorkspace({
               <Label htmlFor="siteVisitDecision">Site Visit Decision</Label>
               <Select
                 value={getSectionValue(sectionData, "opportunity", "siteVisitDecision") || "__unset__"}
-                disabled={editingDisabled}
+                disabled={editingDisabled || opportunityFieldsReadOnly}
                 onValueChange={(value) =>
                   updateField(
                     "opportunity",
@@ -1136,7 +1141,7 @@ export function DealScopingWorkspace({
               <Label htmlFor="siteVisitCompleted">Site Visit Completed</Label>
               <Select
                 value={getSectionValue(sectionData, "opportunity", "siteVisitCompleted") || "__unset__"}
-                disabled={editingDisabled}
+                disabled={editingDisabled || opportunityFieldsReadOnly}
                 onValueChange={(value) =>
                   updateField(
                     "opportunity",
@@ -1161,7 +1166,7 @@ export function DealScopingWorkspace({
                 id="estimatorConsultationNotes"
                 rows={3}
                 value={getSectionValue(sectionData, "opportunity", "estimatorConsultationNotes")}
-                disabled={editingDisabled}
+                disabled={editingDisabled || opportunityFieldsReadOnly}
                 onChange={(event) =>
                   updateField(
                     "opportunity",
@@ -1203,7 +1208,7 @@ export function DealScopingWorkspace({
                 companyId={activeCompanyId}
                 value={activePropertyId}
                 onChange={handlePropertyChange}
-                disabled={editingDisabled}
+                disabled={editingDisabled || readOnlyModeActive}
                 officeId={intake?.officeId ?? null}
                 repairIncompleteAddressOnSelect
               />
@@ -1233,7 +1238,7 @@ export function DealScopingWorkspace({
                       variant={selected ? "default" : "outline"}
                       className="justify-start"
                       aria-pressed={selected}
-                      disabled={editingDisabled}
+                      disabled={editingDisabled || scopeFieldsReadOnly}
                       onClick={() => toggleScopeProjectType(type.id)}
                     >
                       {selected ? <CheckCircle2 className="mr-2 h-4 w-4" /> : null}
@@ -1304,7 +1309,7 @@ export function DealScopingWorkspace({
                       </p>
                     </div>
                     <Label className={`inline-flex items-center gap-2 rounded-md border px-3 py-2 text-sm font-medium ${
-                      editingDisabled
+                      editingDisabled || attachmentActionsReadOnly
                         ? "cursor-not-allowed opacity-50"
                         : "cursor-pointer hover:bg-muted"
                     }`}>
@@ -1320,7 +1325,7 @@ export function DealScopingWorkspace({
                         type="file"
                         multiple
                         className="hidden"
-                        disabled={editingDisabled}
+                        disabled={editingDisabled || attachmentActionsReadOnly}
                         onChange={(event) => {
                           void handleUpload(requirement, event.target.files);
                           event.currentTarget.value = "";
@@ -1357,7 +1362,7 @@ export function DealScopingWorkspace({
                               type="button"
                               variant="outline"
                               size="sm"
-                              disabled={editingDisabled}
+                              disabled={editingDisabled || attachmentActionsReadOnly}
                               onClick={() => void handleLinkExisting(file.id, requirement.key)}
                             >
                               Link

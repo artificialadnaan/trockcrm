@@ -203,14 +203,7 @@ describe("photo audit route wiring", () => {
     }));
   });
 
-  it("rejects upload URL requests for locked deal files without admin force edit", async () => {
-    scopingMocks.assertDealScopingWriteAllowed.mockRejectedValueOnce(
-      Object.assign(new Error("Scope is read-only after RFP submission"), {
-        statusCode: 403,
-        code: "SCOPE_READ_ONLY_AFTER_RFP",
-      })
-    );
-
+  it("allows upload URL requests for locked deal files because generic uploads stay available", async () => {
     const { nextError } = await invoke("post", "/upload-url", {
       body: {
         originalFilename: "scope.pdf",
@@ -221,24 +214,12 @@ describe("photo audit route wiring", () => {
       },
     });
 
-    expect(nextError).toMatchObject({
-      statusCode: 403,
-      code: "SCOPE_READ_ONLY_AFTER_RFP",
-    });
-    expect(scopingMocks.assertDealScopingWriteAllowed).toHaveBeenCalledWith(
-      expect.anything(),
-      "deal-1",
-      { role: "admin", forceEditAfterRfp: false }
-    );
-    expect(serviceMocks.requestUploadUrl).not.toHaveBeenCalled();
+    expect(nextError).toBeUndefined();
+    expect(scopingMocks.assertDealScopingWriteAllowed).not.toHaveBeenCalled();
+    expect(serviceMocks.requestUploadUrl).toHaveBeenCalled();
   });
 
-  it("allows admin-forced upload URL requests for locked deal files", async () => {
-    scopingMocks.assertDealScopingWriteAllowed.mockResolvedValueOnce({
-      adminOverride: true,
-      lockState: { locked: true, reason: "rfp_submission", submittedAt: new Date("2026-05-12T12:00:00.000Z") },
-    });
-
+  it("does not write admin override audit rows for locked deal upload URL requests", async () => {
     const { nextError } = await invoke("post", "/upload-url", {
       body: {
         originalFilename: "scope.pdf",
@@ -252,19 +233,10 @@ describe("photo audit route wiring", () => {
 
     expect(nextError).toBeUndefined();
     expect(serviceMocks.requestUploadUrl).toHaveBeenCalled();
-    expect(auditMocks.writeAuditLog).not.toHaveBeenCalledWith(expect.anything(), expect.objectContaining({
-      fullRow: expect.objectContaining({ action: "upload_request" }),
-    }));
+    expect(auditMocks.writeAuditLog).not.toHaveBeenCalled();
   });
 
-  it("rejects direct uploads for locked deal files without admin force edit", async () => {
-    scopingMocks.assertDealScopingWriteAllowed.mockRejectedValueOnce(
-      Object.assign(new Error("Scope is read-only after RFP submission"), {
-        statusCode: 403,
-        code: "SCOPE_READ_ONLY_AFTER_RFP",
-      })
-    );
-
+  it("allows direct uploads for locked deal files because generic uploads stay available", async () => {
     const { nextError } = await invoke("post", "/upload-direct", {
       body: Buffer.from("file-bytes"),
       headers: {
@@ -276,40 +248,26 @@ describe("photo audit route wiring", () => {
       },
     });
 
-    expect(nextError).toMatchObject({
-      statusCode: 403,
-      code: "SCOPE_READ_ONLY_AFTER_RFP",
-    });
-    expect(serviceMocks.requestUploadUrl).not.toHaveBeenCalled();
-    expect(serviceMocks.confirmUpload).not.toHaveBeenCalled();
+    expect(nextError).toBeUndefined();
+    expect(scopingMocks.assertDealScopingWriteAllowed).not.toHaveBeenCalled();
+    expect(serviceMocks.requestUploadUrl).toHaveBeenCalled();
+    expect(serviceMocks.confirmUpload).toHaveBeenCalled();
   });
 
-  it("rejects confirming a pending locked deal upload without force edit", async () => {
+  it("allows confirming a pending locked deal upload because confirmation is not scope-specific", async () => {
     serviceMocks.getPendingUploadMetadata.mockReturnValueOnce({ dealId: "deal-1" });
-    scopingMocks.assertDealScopingWriteAllowed.mockRejectedValueOnce(
-      Object.assign(new Error("Scope is read-only after RFP submission"), {
-        statusCode: 403,
-        code: "SCOPE_READ_ONLY_AFTER_RFP",
-      })
-    );
 
     const { nextError } = await invoke("post", "/confirm-upload", {
       body: { uploadToken: "upload-token-1" },
     });
 
-    expect(nextError).toMatchObject({
-      statusCode: 403,
-      code: "SCOPE_READ_ONLY_AFTER_RFP",
-    });
-    expect(serviceMocks.confirmUpload).not.toHaveBeenCalled();
+    expect(nextError).toBeUndefined();
+    expect(scopingMocks.assertDealScopingWriteAllowed).not.toHaveBeenCalled();
+    expect(serviceMocks.confirmUpload).toHaveBeenCalled();
   });
 
-  it("audits admin-forced confirmation of a pending locked deal upload", async () => {
+  it("does not write admin override audit rows when confirming a locked deal upload", async () => {
     serviceMocks.getPendingUploadMetadata.mockReturnValueOnce({ dealId: "deal-1" });
-    scopingMocks.assertDealScopingWriteAllowed.mockResolvedValueOnce({
-      adminOverride: true,
-      lockState: { locked: true, reason: "rfp_submission", submittedAt: new Date("2026-05-12T12:00:00.000Z") },
-    });
 
     const { nextError } = await invoke("post", "/confirm-upload", {
       body: { uploadToken: "upload-token-1", forceEditAfterRfp: true },
@@ -317,16 +275,7 @@ describe("photo audit route wiring", () => {
 
     expect(nextError).toBeUndefined();
     expect(serviceMocks.confirmUpload).toHaveBeenCalled();
-    expect(auditMocks.writeAuditLog).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({
-      tableName: "deal_scoping_intake",
-      recordId: "deal-1",
-      changedBy: "user-1",
-      fullRow: expect.objectContaining({
-        override: "admin_force_edit_after_rfp",
-        route: "files",
-        action: "confirm_upload",
-      }),
-    }));
+    expect(auditMocks.writeAuditLog).not.toHaveBeenCalled();
   });
 
   it("logs category and caption changes from the metadata patch route", async () => {
@@ -378,40 +327,45 @@ describe("photo audit route wiring", () => {
     }));
   });
 
-  it("rejects metadata changes to linked scoping files when the scope is locked", async () => {
+  it("allows metadata changes to linked scoping files when the scope is locked", async () => {
     serviceMocks.getFileById.mockResolvedValueOnce({
       ...existingPhoto,
       intakeSource: "scoping_intake",
       intakeRequirementKey: "site_photos",
     });
-    scopingMocks.assertDealScopingWriteAllowed.mockRejectedValueOnce(
-      Object.assign(new Error("Scope is read-only after RFP submission"), {
-        statusCode: 403,
-        code: "SCOPE_READ_ONLY_AFTER_RFP",
-      })
-    );
 
     const { nextError } = await invoke("patch", "/:id", {
       body: { category: "other" },
       user: { id: "rep-1", role: "rep", officeId: "office-1", activeOfficeId: "office-1" },
     });
 
-    expect(nextError).toMatchObject({
-      statusCode: 403,
-      code: "SCOPE_READ_ONLY_AFTER_RFP",
-    });
-    expect(serviceMocks.updateFile).not.toHaveBeenCalled();
+    expect(nextError).toBeUndefined();
+    expect(scopingMocks.assertDealScopingWriteAllowed).not.toHaveBeenCalled();
+    expect(serviceMocks.updateFile).toHaveBeenCalled();
   });
 
-  it("audits forced admin metadata changes to linked scoping files", async () => {
+  it("allows metadata changes to linked scoping files even when the deal scope is locked", async () => {
     serviceMocks.getFileById.mockResolvedValueOnce({
       ...existingPhoto,
       intakeSource: "scoping_intake",
       intakeRequirementKey: "site_photos",
     });
-    scopingMocks.assertDealScopingWriteAllowed.mockResolvedValueOnce({
-      adminOverride: true,
-      lockState: { locked: true, reason: "rfp_submission", submittedAt: new Date("2026-05-12T12:00:00.000Z") },
+
+    const { nextError } = await invoke("patch", "/:id", {
+      body: { displayName: "Corrected site photo name" },
+      user: { id: "rep-1", role: "rep", officeId: "office-1", activeOfficeId: "office-1" },
+    });
+
+    expect(nextError).toBeUndefined();
+    expect(scopingMocks.assertDealScopingWriteAllowed).not.toHaveBeenCalled();
+    expect(serviceMocks.updateFile).toHaveBeenCalled();
+  });
+
+  it("does not write admin override audit rows for linked scoping metadata changes", async () => {
+    serviceMocks.getFileById.mockResolvedValueOnce({
+      ...existingPhoto,
+      intakeSource: "scoping_intake",
+      intakeRequirementKey: "site_photos",
     });
 
     await invoke("patch", "/:id", {
@@ -419,57 +373,30 @@ describe("photo audit route wiring", () => {
     });
 
     expect(serviceMocks.updateFile).toHaveBeenCalled();
-    expect(auditMocks.writeAuditLog).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({
-      tableName: "deal_scoping_intake",
-      recordId: "deal-1",
-      changedBy: "user-1",
-      fullRow: expect.objectContaining({
-        override: "admin_force_edit_after_rfp",
-        route: "files",
-        action: "metadata_update",
-        fileId: "photo-1",
-      }),
-    }));
+    expect(auditMocks.writeAuditLog).not.toHaveBeenCalled();
   });
 
-  it("rejects metadata changes to any deal-linked file when the deal scope is locked", async () => {
+  it("allows metadata changes to regular deal files when the deal scope is locked", async () => {
     serviceMocks.getFileById.mockResolvedValueOnce({
       ...existingPhoto,
       intakeSource: null,
       intakeRequirementKey: null,
     });
-    scopingMocks.assertDealScopingWriteAllowed.mockRejectedValueOnce(
-      Object.assign(new Error("Scope is read-only after RFP submission"), {
-        statusCode: 403,
-        code: "SCOPE_READ_ONLY_AFTER_RFP",
-      })
-    );
 
     const { nextError } = await invoke("patch", "/:id", {
       body: { displayName: "Locked rename" },
     });
 
-    expect(nextError).toMatchObject({
-      statusCode: 403,
-      code: "SCOPE_READ_ONLY_AFTER_RFP",
-    });
-    expect(scopingMocks.assertDealScopingWriteAllowed).toHaveBeenCalledWith(
-      expect.anything(),
-      "deal-1",
-      { role: "admin", forceEditAfterRfp: false }
-    );
-    expect(serviceMocks.updateFile).not.toHaveBeenCalled();
+    expect(nextError).toBeUndefined();
+    expect(scopingMocks.assertDealScopingWriteAllowed).not.toHaveBeenCalled();
+    expect(serviceMocks.updateFile).toHaveBeenCalled();
   });
 
-  it("allows forced admin metadata changes to regular deal files on locked scopes", async () => {
+  it("does not require admin override for regular deal metadata changes on locked scopes", async () => {
     serviceMocks.getFileById.mockResolvedValueOnce({
       ...existingPhoto,
       intakeSource: null,
       intakeRequirementKey: null,
-    });
-    scopingMocks.assertDealScopingWriteAllowed.mockResolvedValueOnce({
-      adminOverride: true,
-      lockState: { locked: true, reason: "bid_board_handoff", submittedAt: new Date("2026-05-12T12:00:00.000Z") },
     });
 
     const { nextError } = await invoke("patch", "/:id", {
@@ -477,48 +404,20 @@ describe("photo audit route wiring", () => {
     });
 
     expect(nextError).toBeUndefined();
-    expect(scopingMocks.assertDealScopingWriteAllowed).toHaveBeenCalledWith(
-      expect.anything(),
-      "deal-1",
-      { role: "admin", forceEditAfterRfp: true }
-    );
+    expect(scopingMocks.assertDealScopingWriteAllowed).not.toHaveBeenCalled();
     expect(serviceMocks.updateFile).toHaveBeenCalled();
-    expect(auditMocks.writeAuditLog).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({
-      tableName: "deal_scoping_intake",
-      recordId: "deal-1",
-      changedBy: "user-1",
-      fullRow: expect.objectContaining({
-        override: "admin_force_edit_after_rfp",
-        route: "files",
-        action: "metadata_update",
-        fileId: "photo-1",
-      }),
-    }));
+    expect(auditMocks.writeAuditLog).not.toHaveBeenCalled();
   });
 
-  it("rejects non-admin force-edit attempts on locked deal files", async () => {
-    scopingMocks.assertDealScopingWriteAllowed.mockRejectedValueOnce(
-      Object.assign(new Error("Scope is read-only after RFP submission"), {
-        statusCode: 403,
-        code: "SCOPE_READ_ONLY_AFTER_RFP",
-      })
-    );
-
+  it("ignores forceEditAfterRfp on unlocked metadata changes for non-admin users", async () => {
     const { nextError } = await invoke("patch", "/:id", {
       body: { displayName: "Rep forced rename", forceEditAfterRfp: true },
       user: { id: "rep-1", role: "rep", officeId: "office-1", activeOfficeId: "office-1" },
     });
 
-    expect(nextError).toMatchObject({
-      statusCode: 403,
-      code: "SCOPE_READ_ONLY_AFTER_RFP",
-    });
-    expect(scopingMocks.assertDealScopingWriteAllowed).toHaveBeenCalledWith(
-      expect.anything(),
-      "deal-1",
-      { role: "rep", forceEditAfterRfp: true }
-    );
-    expect(serviceMocks.updateFile).not.toHaveBeenCalled();
+    expect(nextError).toBeUndefined();
+    expect(scopingMocks.assertDealScopingWriteAllowed).not.toHaveBeenCalled();
+    expect(serviceMocks.updateFile).toHaveBeenCalled();
   });
 
   it("requires forced admin override before deleting a linked scoping file from a locked scope", async () => {
@@ -540,39 +439,44 @@ describe("photo audit route wiring", () => {
     expect(serviceMocks.deleteFile).not.toHaveBeenCalled();
   });
 
-  it("requires forced admin override before changing linked scoping photo address metadata", async () => {
+  it("allows linked scoping photo address metadata changes without override", async () => {
     serviceMocks.getFileById.mockResolvedValueOnce({
       ...existingPhoto,
       intakeSource: "scoping_intake",
       intakeRequirementKey: "site_photos",
     });
-    scopingMocks.assertDealScopingWriteAllowed.mockRejectedValueOnce(
-      Object.assign(new Error("Scope is read-only after RFP submission"), {
-        statusCode: 403,
-        code: "SCOPE_READ_ONLY_AFTER_RFP",
-      })
-    );
 
     const { nextError } = await invoke("patch", "/:id/address", {
       body: { address: "200 Locked St", latitude: 36, longitude: -98 },
     });
 
-    expect(nextError).toMatchObject({
-      statusCode: 403,
-      code: "SCOPE_READ_ONLY_AFTER_RFP",
-    });
-    expect(serviceMocks.updateFileAddress).not.toHaveBeenCalled();
+    expect(nextError).toBeUndefined();
+    expect(scopingMocks.assertDealScopingWriteAllowed).not.toHaveBeenCalled();
+    expect(serviceMocks.updateFileAddress).toHaveBeenCalled();
   });
 
-  it("audits forced admin address edits to linked scoping photos", async () => {
+  it("allows photo address corrections on linked scoping photos even when the deal scope is locked", async () => {
     serviceMocks.getFileById.mockResolvedValueOnce({
       ...existingPhoto,
       intakeSource: "scoping_intake",
       intakeRequirementKey: "site_photos",
     });
-    scopingMocks.assertDealScopingWriteAllowed.mockResolvedValueOnce({
-      adminOverride: true,
-      lockState: { locked: true, reason: "rfp_submission", submittedAt: new Date("2026-05-12T12:00:00.000Z") },
+
+    const { nextError } = await invoke("patch", "/:id/address", {
+      body: { address: "200 Corrected St", latitude: 36, longitude: -98 },
+      user: { id: "rep-1", role: "rep", officeId: "office-1", activeOfficeId: "office-1" },
+    });
+
+    expect(nextError).toBeUndefined();
+    expect(scopingMocks.assertDealScopingWriteAllowed).not.toHaveBeenCalled();
+    expect(serviceMocks.updateFileAddress).toHaveBeenCalled();
+  });
+
+  it("does not write admin override audit rows for linked scoping photo address edits", async () => {
+    serviceMocks.getFileById.mockResolvedValueOnce({
+      ...existingPhoto,
+      intakeSource: "scoping_intake",
+      intakeRequirementKey: "site_photos",
     });
 
     const { nextError } = await invoke("patch", "/:id/address", {
@@ -581,17 +485,7 @@ describe("photo audit route wiring", () => {
 
     expect(nextError).toBeUndefined();
     expect(serviceMocks.updateFileAddress).toHaveBeenCalled();
-    expect(auditMocks.writeAuditLog).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({
-      tableName: "deal_scoping_intake",
-      recordId: "deal-1",
-      changedBy: "user-1",
-      fullRow: expect.objectContaining({
-        override: "admin_force_edit_after_rfp",
-        route: "files",
-        action: "address_update",
-        fileId: "photo-1",
-      }),
-    }));
+    expect(auditMocks.writeAuditLog).not.toHaveBeenCalled();
   });
 
   it("requires forced admin override before adding a new version to a linked scoping file", async () => {
