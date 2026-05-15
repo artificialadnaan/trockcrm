@@ -7,6 +7,7 @@ import { api, ApiError, resolveApiBase } from "./api";
 afterEach(() => {
   vi.restoreAllMocks();
   vi.unstubAllEnvs();
+  window.sessionStorage.clear();
   Object.defineProperty(document, "cookie", { value: "", writable: true });
 });
 
@@ -103,6 +104,24 @@ describe("field api client", () => {
       status: 403,
       message: "CRM access required",
     });
+  });
+
+  it("clears the stored office id when a field request returns 403", async () => {
+    vi.stubEnv("VITE_API_BASE_URL", "https://api.example.com");
+    window.sessionStorage.setItem("trock-field-active-office-id", "stale-office");
+    vi.spyOn(globalThis, "fetch").mockResolvedValue({
+      ok: false,
+      status: 403,
+      headers: new Headers({ "content-type": "application/json" }),
+      json: async () => ({ error: { message: "No access to requested office" } }),
+    } as Response);
+
+    await expect(api("/field/me")).rejects.toMatchObject({
+      status: 403,
+      message: "No access to requested office",
+    });
+
+    expect(window.sessionStorage.getItem("trock-field-active-office-id")).toBeNull();
   });
 
   it("throws a diagnostic error when the API returns a non-JSON response", async () => {

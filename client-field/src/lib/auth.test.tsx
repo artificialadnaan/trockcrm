@@ -9,6 +9,7 @@ const apiMock = vi.hoisted(() => vi.fn());
 
 vi.mock("./api", () => ({
   api: apiMock,
+  clearStoredActiveOfficeId: vi.fn(() => window.sessionStorage.removeItem("trock-field-active-office-id")),
   ApiError: class ApiError extends Error {
     status: number;
     constructor(message: string, status: number) {
@@ -29,6 +30,7 @@ afterEach(() => {
   container?.remove();
   container = null;
   apiMock.mockReset();
+  window.sessionStorage.clear();
 });
 
 function renderProbe(onReady?: (auth: ReturnType<typeof useAuth>) => void) {
@@ -85,8 +87,10 @@ describe("field AuthProvider", () => {
     });
 
     apiMock.mockResolvedValueOnce({ success: true });
+    window.sessionStorage.setItem("trock-field-active-office-id", "office-stale");
     await latest!.logout();
     await vi.waitFor(() => expect(node.textContent).toContain("signed out"));
+    expect(window.sessionStorage.getItem("trock-field-active-office-id")).toBeNull();
   });
 
   it("clears state on 401 hydrate failures", async () => {

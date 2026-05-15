@@ -1,6 +1,6 @@
 import React, { createContext, useCallback, useContext, useEffect, useMemo, useState } from "react";
 import type { UserRole } from "@trock-crm/shared/types";
-import { api, ApiError } from "./api";
+import { api, ApiError, clearStoredActiveOfficeId } from "./api";
 
 export type FieldUser = {
   id: string;
@@ -53,6 +53,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [error, setError] = useState<string | null>(null);
 
   const clearSession = useCallback(() => {
+    clearStoredActiveOfficeId();
     setUser(null);
   }, []);
 

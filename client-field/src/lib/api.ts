@@ -14,6 +14,11 @@ type ApiEnv = {
 
 const FIELD_APP_OFFICE_STORAGE_KEY = "trock-field-active-office-id";
 
+export function clearStoredActiveOfficeId() {
+  if (typeof window === "undefined") return;
+  window.sessionStorage.removeItem(FIELD_APP_OFFICE_STORAGE_KEY);
+}
+
 export function resolveApiBase(env: ApiEnv): string {
   const configured = env.VITE_API_BASE_URL?.trim() || env.VITE_API_URL?.trim();
   if (!configured) {
@@ -92,6 +97,9 @@ export async function api<T>(path: string, options: {
       message = payload?.error?.message ?? payload?.error ?? message;
     } catch (err) {
       message = err instanceof Error ? err.message : message;
+    }
+    if (response.status === 401 || response.status === 403) {
+      clearStoredActiveOfficeId();
     }
     throw new ApiError(message, response.status);
   }
