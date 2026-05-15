@@ -29,7 +29,14 @@ import { getPropertyDetail } from "../properties/service.js";
 const router = Router();
 
 function canUserViewDeal(req: any, dealId: string) {
-  return getDealById(req.tenantDb!, dealId, req.user!.role, req.user!.id).then(Boolean);
+  return getDealById(req.tenantDb!, dealId, req.user!.role, req.user!.id)
+    .then(Boolean)
+    .catch((err) => {
+      if (err?.statusCode === 403 || err?.status === 403) {
+        return false;
+      }
+      throw err;
+    });
 }
 
 // POST /api/email/send — compose and send an email

@@ -641,6 +641,48 @@ describe("email routes", () => {
     });
   });
 
+  it("treats deal 403s as not-visible when resolving thread access", async () => {
+    dealServiceMocks.getDealById.mockRejectedValueOnce(
+      Object.assign(new Error("Forbidden"), { statusCode: 403 })
+    );
+    emailServiceMocks.getEmailThread.mockImplementation(
+      async (_db, _conversationId, _userId, _role, canViewDeal: (dealId: string) => Promise<boolean>) => ({
+        binding: null,
+        preview: null,
+        emails: [{ id: "email-1", visible: await canViewDeal("deal-hidden") }],
+      })
+    );
+
+    const { res } = await invokeRoute({
+      method: "get",
+      url: "/thread/conversation-1",
+      user: makeRepUser(),
+    });
+
+    expect(res.statusCode).toBe(200);
+    expect(res.body.emails).toEqual([{ id: "email-1", visible: false }]);
+  });
+
+  it("still propagates non-403 deal lookup errors during thread access checks", async () => {
+    dealServiceMocks.getDealById.mockRejectedValueOnce(
+      Object.assign(new Error("Missing"), { statusCode: 404 })
+    );
+    emailServiceMocks.getEmailThread.mockImplementation(
+      async (_db, _conversationId, _userId, _role, canViewDeal: (dealId: string) => Promise<boolean>) => {
+        await canViewDeal("deal-missing");
+        return { binding: null, preview: null, emails: [] };
+      }
+    );
+
+    await expect(
+      invokeRoute({
+        method: "get",
+        url: "/thread/conversation-1",
+        user: makeRepUser(),
+      })
+    ).rejects.toThrow("Missing");
+  });
+
   it("assigns an unbound thread to a deal", async () => {
     emailServiceMocks.getEmailThreadForMutation.mockResolvedValue({
       mailboxAccountId: "mailbox-1",
