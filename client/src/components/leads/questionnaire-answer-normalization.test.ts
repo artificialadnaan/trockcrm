@@ -99,6 +99,21 @@ describe("questionnaire answer normalization", () => {
     expect(shouldNormalizeUnansweredPlaceholder(selectNode)).toBe(true);
   });
 
+  it("does not erase a real option value that matches the clear sentinel", () => {
+    const selectNode = makeQuestionNode({
+      id: "special-select",
+      key: "special_select",
+      label: "Special Select",
+      inputType: "select",
+      options: [
+        { value: CLEAR_SELECTION_VALUE, label: "Literal clear" },
+        { value: "other", label: "Other" },
+      ],
+    });
+
+    expect(sanitizeQuestionAnswerForSave(selectNode, CLEAR_SELECTION_VALUE)).toBe(CLEAR_SELECTION_VALUE);
+  });
+
   it("preserves literal __unanswered__ in free-text answers", () => {
     const textNode = makeQuestionNode({
       id: "project-notes",

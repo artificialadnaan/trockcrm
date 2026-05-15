@@ -31,6 +31,38 @@ export function shouldNormalizeUnansweredPlaceholder(node: QuestionNodeShape | n
   return inputType === "boolean" || inputType === "select";
 }
 
+function getQuestionOptionValues(node: QuestionNodeShape | null | undefined): string[] {
+  if (!node || !Array.isArray(node.options)) {
+    return [];
+  }
+
+  return node.options.flatMap((option) => {
+    if (typeof option === "string") {
+      return [option];
+    }
+    if (
+      option &&
+      typeof option === "object" &&
+      "value" in option &&
+      typeof (option as { value?: unknown }).value === "string"
+    ) {
+      return [(option as { value: string }).value];
+    }
+    return [];
+  });
+}
+
+function isSelectClearSentinel(
+  value: unknown,
+  node: QuestionNodeShape | null | undefined
+): value is typeof CLEAR_SELECTION_VALUE {
+  if (typeof value !== "string" || value.trim() !== CLEAR_SELECTION_VALUE) {
+    return false;
+  }
+
+  return !getQuestionOptionValues(node).includes(CLEAR_SELECTION_VALUE);
+}
+
 export function normalizeDropdownAnswerForDisplay(value: LeadAnswerValue | undefined): string | undefined {
   if (typeof value !== "string") {
     return undefined;
@@ -98,7 +130,7 @@ export function sanitizeQuestionAnswerForSave(
     }
     if (typeof value === "string") {
       const trimmed = value.trim().toLowerCase();
-      if (!trimmed || trimmed === UNANSWERED_PLACEHOLDER_VALUE || trimmed === CLEAR_SELECTION_VALUE) {
+      if (!trimmed || trimmed === UNANSWERED_PLACEHOLDER_VALUE || isSelectClearSentinel(trimmed, node)) {
         return null;
       }
       if (trimmed === "true") return true;
@@ -108,7 +140,7 @@ export function sanitizeQuestionAnswerForSave(
   }
 
   if (inputType === "select") {
-    if (typeof value === "string" && value.trim() === CLEAR_SELECTION_VALUE) {
+    if (isSelectClearSentinel(value, node)) {
       return null;
     }
     return normalizeDropdownAnswerForDisplay(value) ?? null;
