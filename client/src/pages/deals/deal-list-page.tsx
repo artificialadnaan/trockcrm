@@ -28,6 +28,8 @@ import type { PipelineScope } from "@/lib/pipeline-scope";
 import { KanbanScrollColumn } from "@/components/deals/kanban-scroll-column";
 import { DecoratedKanbanCard } from "@/components/deals/decorated-kanban-card";
 import { DealsListSection } from "@/components/deals/deals-list-section";
+import type { DealFilters } from "@/hooks/use-deals";
+import type { DealListSortState } from "@/components/deals/deals-list-section";
 
 const SCOPE_OPTIONS = [
   { value: "mine", label: "Mine" },
@@ -45,6 +47,170 @@ const STAGE_SLA_DAYS: Record<string, number> = {
   won: 0,
   lost: 0,
 };
+
+export type DashboardDealListFilter = "active" | "won" | "closing_soon" | null;
+
+type DashboardPeriod = "mtd" | "qtd" | "ytd" | "last_month" | "last_quarter" | "last_year";
+
+type DashboardDealListView = {
+  filter: DashboardDealListFilter;
+  title: string;
+  subtitle: string;
+  eyebrow: string;
+  boardMode: "all" | "active" | "won";
+  listBaseFilters: Partial<DealFilters>;
+  listInitialSort: DealListSortState;
+};
+
+function formatDateInput(date: Date) {
+  return date.toISOString().slice(0, 10);
+}
+
+function startOfQuarter(date: Date) {
+  return new Date(date.getFullYear(), Math.floor(date.getMonth() / 3) * 3, 1);
+}
+
+function endOfPreviousMonth(date: Date) {
+  return new Date(date.getFullYear(), date.getMonth(), 0);
+}
+
+function endOfPreviousQuarter(date: Date) {
+  return new Date(date.getFullYear(), Math.floor(date.getMonth() / 3) * 3, 0);
+}
+
+function normalizeDashboardPeriod(periodParam: string | null | undefined): DashboardPeriod {
+  switch (periodParam) {
+    case "mtd":
+    case "qtd":
+    case "ytd":
+    case "last_month":
+    case "last_quarter":
+    case "last_year":
+      return periodParam;
+    default:
+      return "qtd";
+  }
+}
+
+function getDashboardPeriodLabel(period: DashboardPeriod) {
+  switch (period) {
+    case "mtd":
+      return "MTD";
+    case "qtd":
+      return "QTD";
+    case "ytd":
+      return "YTD";
+    case "last_month":
+      return "Last month";
+    case "last_quarter":
+      return "Last quarter";
+    case "last_year":
+      return "Last year";
+  }
+}
+
+function getDashboardPeriodDateRange(period: DashboardPeriod, now = new Date()) {
+  const today = new Date(now);
+  if (period === "mtd") {
+    return { from: formatDateInput(new Date(today.getFullYear(), today.getMonth(), 1)), to: formatDateInput(today) };
+  }
+  if (period === "qtd") {
+    return { from: formatDateInput(startOfQuarter(today)), to: formatDateInput(today) };
+  }
+  if (period === "ytd") {
+    return { from: `${today.getFullYear()}-01-01`, to: formatDateInput(today) };
+  }
+  if (period === "last_month") {
+    const end = endOfPreviousMonth(today);
+    return { from: formatDateInput(new Date(end.getFullYear(), end.getMonth(), 1)), to: formatDateInput(end) };
+  }
+  if (period === "last_quarter") {
+    const end = endOfPreviousQuarter(today);
+    return { from: formatDateInput(startOfQuarter(end)), to: formatDateInput(end) };
+  }
+  const end = new Date(today.getFullYear() - 1, 11, 31);
+  return { from: `${today.getFullYear() - 1}-01-01`, to: formatDateInput(end) };
+}
+
+function normalizeDashboardDealFilter(filterParam: string | null | undefined): DashboardDealListFilter {
+  switch (filterParam) {
+    case "active":
+      return "active";
+    case "won":
+      return "won";
+    case "closing_soon":
+    case "closing-soon":
+      return "closing_soon";
+    default:
+      return null;
+  }
+}
+
+export function getDashboardDealListView(input: {
+  filterParam: string | null | undefined;
+  periodParam: string | null | undefined;
+  now?: Date;
+}): DashboardDealListView {
+  const filter = normalizeDashboardDealFilter(input.filterParam);
+  const period = normalizeDashboardPeriod(input.periodParam);
+  const periodLabel = getDashboardPeriodLabel(period);
+  const periodRange = getDashboardPeriodDateRange(period, input.now);
+
+  if (filter === "active") {
+    return {
+      filter,
+      eyebrow: "Director drill-down",
+      title: "Active Pipeline",
+      subtitle: `Open-stage deals for ${periodLabel}.`,
+      boardMode: "active",
+      listBaseFilters: {
+        updatedFrom: periodRange.from,
+        updatedTo: periodRange.to,
+      },
+      listInitialSort: { key: "updated_at", dir: "desc" },
+    };
+  }
+
+  if (filter === "won") {
+    return {
+      filter,
+      eyebrow: "Director drill-down",
+      title: "Closed Won",
+      subtitle: `Booked wins for ${periodLabel}.`,
+      boardMode: "won",
+      listBaseFilters: {
+        contractSignedFrom: periodRange.from,
+        contractSignedTo: periodRange.to,
+      },
+      listInitialSort: { key: "contract_signed_date", dir: "desc" },
+    };
+  }
+
+  if (filter === "closing_soon") {
+    return {
+      filter,
+      eyebrow: "Director drill-down",
+      title: "Closing Pipeline",
+      subtitle: `Active deals sorted by expected close date for ${periodLabel}.`,
+      boardMode: "active",
+      listBaseFilters: {
+        updatedFrom: periodRange.from,
+        updatedTo: periodRange.to,
+      },
+      listInitialSort: { key: "expected_close_date", dir: "asc" },
+    };
+  }
+
+  return {
+    filter,
+    eyebrow: "Workflow control",
+    title: "Deals",
+    subtitle: "Read-only pipeline board over the existing deal stages. Open a card or stage for the working surface.",
+    boardMode: "all",
+    listBaseFilters: {},
+    listInitialSort: { key: "updated_at", dir: "desc" },
+  };
+}
 
 function getScope(searchParams: URLSearchParams, role: string | undefined): PipelineScope {
   if (role === "rep") return "mine";
@@ -174,6 +340,14 @@ function DealListPageContent({ role }: { role: string }) {
   const scope = getScope(searchParams, role);
   const { board, loading, error } = useDealBoard(scope, true, terminalDateFilters);
   const { stages } = usePipelineStages("deal");
+  const dashboardView = useMemo(
+    () =>
+      getDashboardDealListView({
+        filterParam: searchParams.get("filter"),
+        periodParam: searchParams.get("period"),
+      }),
+    [searchParams]
+  );
 
   useEffect(() => {
     setTerminalDateFilters(readTerminalDateFiltersFromSearchParams(searchParams));
@@ -196,7 +370,13 @@ function DealListPageContent({ role }: { role: string }) {
   const columns = useMemo(
     () => {
       const searchTerm = search.trim().toLowerCase();
-      return boardColumns
+      const sourceColumns =
+        dashboardView.boardMode === "active"
+          ? boardColumns.filter((column) => !isTerminalStage(column.stage.slug))
+          : dashboardView.boardMode === "won"
+            ? boardColumns.filter((column) => column.stage.slug === "won")
+            : boardColumns;
+      return sourceColumns
         .map((column) => {
           if (!searchTerm) return column;
           const cards = column.cards.filter((deal) => {
@@ -222,9 +402,18 @@ function DealListPageContent({ role }: { role: string }) {
           };
         });
     },
-    [boardColumns, search]
+    [boardColumns, dashboardView.boardMode, search]
   );
   const activePipelineColumns = getActivePipelineColumns(boardColumns);
+  const drilldownVisibleStages = useMemo(
+    () =>
+      dashboardView.boardMode === "active"
+        ? stages.filter((stage) => !isTerminalStage(stage.slug))
+        : dashboardView.boardMode === "won"
+          ? stages.filter((stage) => stage.slug === "won")
+          : undefined,
+    [dashboardView.boardMode, stages]
+  );
   const totalCount = activePipelineColumns.reduce((sum, column) => sum + column.count, 0);
   const totalValue = activePipelineColumns.reduce((sum, column) => sum + column.totalValue, 0);
   const wonValue =
@@ -315,13 +504,13 @@ function DealListPageContent({ role }: { role: string }) {
       <section className="flex flex-col gap-5 lg:flex-row lg:items-end lg:justify-between">
         <div>
           <p className="text-[11px] font-black uppercase tracking-[0.2em] text-brand-red">
-            Workflow control
+            {dashboardView.eyebrow}
           </p>
           <h1 className="mt-2 text-4xl font-black uppercase leading-none tracking-tight text-slate-950">
-            Deals
+            {dashboardView.title}
           </h1>
           <p className="mt-2 max-w-2xl text-sm font-medium text-slate-500">
-            Read-only pipeline board over the existing deal stages. Open a card or stage for the working surface.
+            {dashboardView.subtitle}
           </p>
         </div>
         <div className="flex flex-wrap items-center gap-3">
@@ -439,6 +628,12 @@ function DealListPageContent({ role }: { role: string }) {
         showFilterButton
         pageSize={20}
         searchPlaceholder="Search deals or accounts"
+        title={dashboardView.title}
+        subtitle={dashboardView.subtitle}
+        eyebrow={dashboardView.eyebrow}
+        visibleStages={drilldownVisibleStages}
+        baseFilters={dashboardView.listBaseFilters}
+        initialSort={dashboardView.listInitialSort}
       />
     </div>
   );

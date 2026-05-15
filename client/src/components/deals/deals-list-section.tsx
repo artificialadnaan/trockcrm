@@ -16,7 +16,7 @@ import {
   type PipelineStageTableColumn,
 } from "@/components/pipeline/pipeline-stage-table";
 import { TerminalDateFilterControl } from "@/components/pipeline/terminal-date-filter-control";
-import { useDeals, type Deal } from "@/hooks/use-deals";
+import { useDeals, type Deal, type DealFilters } from "@/hooks/use-deals";
 import { usePipelineStages, type PipelineStage } from "@/hooks/use-pipeline-config";
 import { useTaskAssignees } from "@/hooks/use-task-assignees";
 import { bestEstimate, daysInStage, formatCurrencyCompact } from "@/lib/deal-utils";
@@ -43,7 +43,7 @@ export const MAX_EXPORT_PAGES = 50;
 const EXPORT_PAGE_SIZE = 500;
 
 type SortKey = "name" | "stage_entered_at" | "awarded_amount" | "updated_at";
-type SortState = { key: SortKey; dir: "asc" | "desc" };
+export type DealListSortState = { key: SortKey | "expected_close_date" | "contract_signed_date"; dir: "asc" | "desc" };
 type DealListActiveFilter = boolean | "all" | "pipeline";
 
 interface DealsListSectionProps {
@@ -59,6 +59,9 @@ interface DealsListSectionProps {
   subtitle?: string;
   pageSize?: number;
   searchPlaceholder?: string;
+  baseFilters?: Partial<DealFilters>;
+  initialSort?: DealListSortState;
+  initialStageSlugs?: string[];
 }
 
 interface DealStageFilterOption {
@@ -273,8 +276,10 @@ export function buildDealListParams(input: {
   inactiveStageIds?: string[];
   assignedRepId?: string;
   dateRange: { from?: string; to?: string };
+  contractSignedFrom?: string;
+  contractSignedTo?: string;
   isActive: DealListActiveFilter;
-  sort: SortState;
+  sort: DealListSortState;
   page: number;
   limit: number;
   scope?: "mine" | "team" | "all";
@@ -286,6 +291,8 @@ export function buildDealListParams(input: {
   if (input.assignedRepId) params.set("assignedRepId", input.assignedRepId);
   if (input.dateRange.from) params.set("updatedFrom", input.dateRange.from);
   if (input.dateRange.to) params.set("updatedTo", input.dateRange.to);
+  if (input.contractSignedFrom) params.set("contractSignedFrom", input.contractSignedFrom);
+  if (input.contractSignedTo) params.set("contractSignedTo", input.contractSignedTo);
   params.set("isActive", String(input.isActive));
   params.set("sortBy", input.sort.key);
   params.set("sortDir", input.sort.dir);
@@ -301,8 +308,10 @@ export async function fetchAllFilteredDeals(input: {
   inactiveStageIds?: string[];
   assignedRepId?: string;
   dateRange: { from?: string; to?: string };
+  contractSignedFrom?: string;
+  contractSignedTo?: string;
   isActive: DealListActiveFilter;
-  sort: SortState;
+  sort: DealListSortState;
   scope?: "mine" | "team" | "all";
   apiClient?: typeof api;
 }) {
@@ -345,14 +354,17 @@ export function DealsListSection({
   subtitle = "Filter and scan deals without changing the kanban above.",
   pageSize = DEFAULT_PAGE_SIZE,
   searchPlaceholder = "Deal name, number, company, address",
+  baseFilters,
+  initialSort = { key: "updated_at", dir: "desc" },
+  initialStageSlugs = [],
 }: DealsListSectionProps) {
   const navigate = useNavigate();
   const [search, setSearch] = useState("");
-  const [stageSlugs, setStageSlugs] = useState<string[]>([]);
+  const [stageSlugs, setStageSlugs] = useState<string[]>(initialStageSlugs);
   const [ownerId, setOwnerId] = useState("__all__");
   const [dateFilter, setDateFilter] = useState<TerminalDateFilter>({ preset: "all" });
   const [page, setPage] = useState(1);
-  const [sort, setSort] = useState<SortState>({ key: "updated_at", dir: "desc" });
+  const [sort, setSort] = useState<DealListSortState>(initialSort);
 
   const { stages, loading: stagesLoading, error: stagesError } = usePipelineStages(workflowFamily);
   const { assignees } = useTaskAssignees();
@@ -391,18 +403,27 @@ export function DealsListSection({
   const isActiveFilter = listQueryState.isActive;
   const inactiveStageIds = listQueryState.inactiveStageIds;
 
+  useEffect(() => {
+    setStageSlugs(initialStageSlugs);
+  }, [initialStageSlugs]);
+
+  useEffect(() => {
+    setSort(initialSort);
+  }, [initialSort]);
+
   const {
     deals,
     pagination,
     loading,
     error,
   } = useDeals({
+    ...baseFilters,
     search,
     stageIds: selectedStageIds,
     inactiveStageIds,
     assignedRepId: ownerId === "__all__" ? undefined : ownerId,
-    updatedFrom: dateRange.from,
-    updatedTo: dateRange.to,
+    updatedFrom: dateRange.from ?? baseFilters?.updatedFrom,
+    updatedTo: dateRange.to ?? baseFilters?.updatedTo,
     isActive: isActiveFilter,
     sortBy: sort.key,
     sortDir: sort.dir,
@@ -429,7 +450,7 @@ export function DealsListSection({
     );
   };
 
-  const updateSort = (key: SortKey) => {
+  const updateSort = (key: DealListSortState["key"]) => {
     setSort((current) => ({
       key,
       dir: current.key === key && current.dir === "desc" ? "asc" : "desc",
@@ -450,6 +471,8 @@ export function DealsListSection({
       isActive: isActiveFilter,
       sort,
       scope,
+      contractSignedFrom: baseFilters?.contractSignedFrom,
+      contractSignedTo: baseFilters?.contractSignedTo,
     });
     if (exportResult.truncated) {
       toast.info(
@@ -481,7 +504,7 @@ export function DealsListSection({
     URL.revokeObjectURL(url);
   };
 
-  const sortHeader = (key: SortKey, label: string) => (
+  const sortHeader = (key: DealListSortState["key"], label: string) => (
     <button
       type="button"
       className="inline-flex items-center gap-1 font-black uppercase tracking-[0.16em] text-slate-500 hover:text-brand-red"

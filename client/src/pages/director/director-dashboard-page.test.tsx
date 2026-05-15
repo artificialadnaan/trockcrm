@@ -469,7 +469,7 @@ describe("DirectorDashboardPage", () => {
   it("routes stale deal drilldowns to the reports stale deals section", () => {
     const html = renderPageHtml();
 
-    expect(html).toContain('href="/reports#stale-deals"');
+    expect(html).toContain('href="/reports?range=qtd#stale-deals"');
     expect(html).not.toContain('href="/deals?filter=stale"');
   });
 
@@ -482,6 +482,42 @@ describe("DirectorDashboardPage", () => {
     expect(html).toContain("Weighted forecast");
     expect(html).toContain("Goal $500,000 QTD");
     expect(html).toContain("$910,000");
+  });
+
+  it("links the summary cards and drill-down badges to their filtered destinations", () => {
+    const html = renderPageHtml();
+
+    expect(html).toContain('href="/deals?filter=active&amp;period=qtd"');
+    expect(html).toContain('href="/deals?filter=won&amp;period=qtd"');
+    expect(html).toContain('href="/reports?range=qtd#stale-deals"');
+    expect(html).toContain('href="/reports/performance/forecast-accuracy?range=qtd"');
+    expect(html).toContain('href="/reports/performance/rep-activity?range=qtd"');
+  });
+
+  it("preserves the selected dashboard period in drill-down links", async () => {
+    const { container, cleanup } = await renderPageDom();
+    try {
+      const ytdPreset = Array.from(container.querySelectorAll("button")).find((button) =>
+        button.textContent?.includes("YTD")
+      );
+      expect(ytdPreset).not.toBeNull();
+
+      await act(async () => {
+        ytdPreset?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+      });
+
+      const activeLink = Array.from(container.querySelectorAll("a")).find((link) =>
+        link.getAttribute("aria-label")?.includes("View active pipeline deals")
+      );
+      const activityLink = Array.from(container.querySelectorAll("a")).find((link) =>
+        link.getAttribute("aria-label")?.includes("View activity report")
+      );
+
+      expect(activeLink?.getAttribute("href")).toBe("/deals?filter=active&period=ytd");
+      expect(activityLink?.getAttribute("href")).toBe("/reports/performance/rep-activity?range=ytd");
+    } finally {
+      await cleanup();
+    }
   });
 
   it("renders forecast vs goal with mini metrics and progress bars", () => {
@@ -630,7 +666,7 @@ describe("DirectorDashboardPage", () => {
     const html = renderPageHtml();
 
     expect(html).toContain("2 flagged deals across 2 reps");
-    expect(html).toContain('href="/deals?filter=at-risk"');
+    expect(html).toContain('href="/reports/performance/forecast-accuracy?range=qtd"');
     expect(html).not.toContain('href="/reports#stale-deals"');
   });
 

@@ -1,10 +1,14 @@
 // @vitest-environment jsdom
 
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { renderToStaticMarkup } from "react-dom/server";
 import { MemoryRouter } from "react-router-dom";
 import type { ReactNode } from "react";
-import { DealListPage, buildDealStageNavigationPath } from "./deal-list-page";
+import {
+  DealListPage,
+  buildDealStageNavigationPath,
+  getDashboardDealListView,
+} from "./deal-list-page";
 
 // jsdom does not implement ResizeObserver; KanbanScrollColumn + the kanban
 // horizontal-scroll-sync layout effect both rely on it.
@@ -153,6 +157,8 @@ function renderPage(path = "/deals?scope=all", role = "admin") {
 
 describe("DealListPage", () => {
   beforeEach(() => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-05-08T12:00:00Z"));
     mocks.useDealBoardMock.mockReset();
     mocks.useDealsMock.mockReset();
     mocks.usePipelineStagesMock.mockReset();
@@ -231,6 +237,10 @@ describe("DealListPage", () => {
       error: null,
       refetch: vi.fn(),
     });
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
   });
 
   it("renders a readonly deal board with canonical stage labels", () => {
@@ -610,6 +620,75 @@ describe("DealListPage", () => {
         showFilterButton: true,
         pageSize: 20,
         searchPlaceholder: "Search deals or accounts",
+      })
+    );
+  });
+
+  it("builds the active pipeline drill-down view from dashboard query params", () => {
+    const view = getDashboardDealListView({
+      filterParam: "active",
+      periodParam: "ytd",
+      now: new Date("2026-05-08T12:00:00Z"),
+    });
+
+    expect(view.filter).toBe("active");
+    expect(view.title).toBe("Active Pipeline");
+    expect(view.subtitle).toContain("YTD");
+    expect(view.boardMode).toBe("active");
+    expect(view.listBaseFilters).toMatchObject({
+      updatedFrom: "2026-01-01",
+      updatedTo: "2026-05-08",
+    });
+    expect(view.listInitialSort).toEqual({ key: "updated_at", dir: "desc" });
+  });
+
+  it("builds the closed won drill-down view with contract-signed date filters", () => {
+    const view = getDashboardDealListView({
+      filterParam: "won",
+      periodParam: "qtd",
+      now: new Date("2026-05-08T12:00:00Z"),
+    });
+
+    expect(view.filter).toBe("won");
+    expect(view.title).toBe("Closed Won");
+    expect(view.boardMode).toBe("won");
+    expect(view.listBaseFilters).toMatchObject({
+      contractSignedFrom: "2026-04-01",
+      contractSignedTo: "2026-05-08",
+    });
+    expect(view.listInitialSort).toEqual({ key: "contract_signed_date", dir: "desc" });
+  });
+
+  it("passes dashboard active-pipeline drill-down props into the embedded deals list", () => {
+    renderPage("/deals?scope=team&filter=active&period=ytd", "director");
+
+    expect(mocks.dealsListSectionMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        title: "Active Pipeline",
+        eyebrow: "Director drill-down",
+        enableExport: true,
+        scope: "team",
+        initialSort: { key: "updated_at", dir: "desc" },
+        baseFilters: expect.objectContaining({
+          updatedFrom: "2026-01-01",
+          updatedTo: "2026-05-08",
+        }),
+      })
+    );
+  });
+
+  it("passes dashboard closed-won drill-down props into the embedded deals list", () => {
+    renderPage("/deals?scope=all&filter=won&period=qtd", "admin");
+
+    expect(mocks.dealsListSectionMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        title: "Closed Won",
+        scope: "all",
+        initialSort: { key: "contract_signed_date", dir: "desc" },
+        baseFilters: expect.objectContaining({
+          contractSignedFrom: "2026-04-01",
+          contractSignedTo: "2026-05-08",
+        }),
       })
     );
   });

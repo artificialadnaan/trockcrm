@@ -249,6 +249,8 @@ function KpiCard({
   caption,
   accent,
   dark = false,
+  to,
+  ariaLabel,
 }: {
   label: string;
   value: string;
@@ -256,10 +258,14 @@ function KpiCard({
   caption: string;
   accent: "red" | "blue";
   dark?: boolean;
+  to?: string;
+  ariaLabel?: string;
 }) {
   const accentClass = accent === "red" ? "bg-[#CC0000]" : "bg-blue-500";
-  return (
-    <div className={`relative overflow-hidden rounded-xl border p-5 shadow-sm ${dark ? "border-[#CC0000] bg-[#CC0000] text-white" : "border-gray-200 bg-white text-gray-950"}`}>
+  const className = `group relative overflow-hidden rounded-xl border p-5 shadow-sm transition-all hover:-translate-y-0.5 hover:shadow-md focus:outline-none focus-visible:ring-2 focus-visible:ring-[#CC0000] ${dark ? "border-[#CC0000] bg-[#CC0000] text-white" : "border-gray-200 bg-white text-gray-950"}`;
+
+  const content = (
+    <>
       <p className={`text-[10px] font-black uppercase tracking-widest ${dark ? "text-white/70" : "text-gray-400"}`}>{label}</p>
       <p className="mt-3 text-5xl font-black leading-none tracking-tight">{value}</p>
       <div className="mt-4 flex flex-wrap items-center gap-2">
@@ -269,7 +275,17 @@ function KpiCard({
         <span className={`text-[10px] font-bold uppercase tracking-wide ${dark ? "text-white/70" : "text-gray-400"}`}>{caption}</span>
       </div>
       {!dark && <div className={`absolute inset-x-0 bottom-0 h-1 ${accentClass}`} />}
-    </div>
+    </>
+  );
+
+  if (!to) {
+    return <div className={className}>{content}</div>;
+  }
+
+  return (
+    <Link to={to} aria-label={ariaLabel} className={`${className} block cursor-pointer`}>
+      {content}
+    </Link>
   );
 }
 
@@ -288,6 +304,27 @@ function csvCell(value: string | number | null | undefined): string {
   return /[",\n]/.test(raw) ? `"${raw.replace(/"/g, '""')}"` : raw;
 }
 
+function buildDealsDrilldownPath(filter: "active" | "won" | "closing_soon", preset: DateRangePreset) {
+  return `/deals?filter=${filter}&period=${preset}`;
+}
+
+function buildReportDrilldownPath(
+  basePath: string,
+  preset: DateRangePreset,
+  dateRange: { from: string; to: string },
+  hash?: string
+) {
+  const params = new URLSearchParams();
+  if (preset === "qtd" || preset === "ytd") {
+    params.set("range", preset);
+  } else {
+    params.set("range", "custom");
+    params.set("dateFrom", dateRange.from);
+    params.set("dateTo", dateRange.to);
+  }
+  return `${basePath}?${params.toString()}${hash ? `#${hash}` : ""}`;
+}
+
 export function DirectorDashboardPage() {
   const navigate = useNavigate();
   const [preset, setPreset] = useState<DateRangePreset>("qtd");
@@ -302,6 +339,14 @@ export function DirectorDashboardPage() {
   } = useRepPerformance(repPerformancePeriod);
 
   const selectedPreset = PRESETS.find((p) => p.value === preset) ?? PRESETS[1];
+  const activeDealsDestination = buildDealsDrilldownPath("active", preset);
+  const wonDealsDestination = buildDealsDrilldownPath("won", preset);
+  // This tile is sourced from period closes, so the drill-down stays in the
+  // deals workspace and sorts that slice by expected close date.
+  const closingDestination = buildDealsDrilldownPath("closing_soon", preset);
+  const forecastDestination = buildReportDrilldownPath("/reports/performance/forecast-accuracy", preset, dateRange);
+  const activityDestination = buildReportDrilldownPath("/reports/performance/rep-activity", preset, dateRange);
+  const staleDealsDestination = buildReportDrilldownPath("/reports", preset, dateRange, "stale-deals");
 
   if (loading) {
     return (
@@ -347,7 +392,7 @@ export function DirectorDashboardPage() {
   const activityPulse = (data.activityPulse ?? data.activityByRep).slice().sort((a, b) => b.total - a.total);
   const isUsingStaleDeals = data.staleDeals.length > 0;
   const atRiskDeals = isUsingStaleDeals ? data.staleDeals : data.atRiskDeals ?? [];
-  const atRiskDestination = isUsingStaleDeals ? "/reports#stale-deals" : "/deals?filter=at-risk";
+  const atRiskDestination = isUsingStaleDeals ? staleDealsDestination : forecastDestination;
   const totalAtRiskValue = atRiskDeals.reduce((sum, deal) => sum + deal.dealValue, 0);
   const atRiskRepCount = new Set(atRiskDeals.map((deal) => deal.repName).filter(Boolean)).size;
   const closedValue = usablePerfData ? usablePerfData.reps.reduce((sum, row) => sum + row.current.totalWonValue, 0) : null;
@@ -470,6 +515,8 @@ export function DirectorDashboardPage() {
           badge={`${opportunityVsPipeline.pipelineCount} deals`}
           caption="Weighted forecast"
           accent="red"
+          to={activeDealsDestination}
+          ariaLabel="View active pipeline deals"
         />
         <KpiCard
           label={`Closed ${selectedPreset.label}`}
@@ -477,6 +524,8 @@ export function DirectorDashboardPage() {
           badge={!hasPerformanceData ? "loading" : goal > 0 && wonPercent !== null ? `${wonPercent}% to goal` : `${closedCount ?? 0} won`}
           caption={perfError ? "Performance unavailable" : goal > 0 ? `Goal ${formatCurrency(goal)} ${selectedPreset.label}` : "Goal not configured"}
           accent="blue"
+          to={wonDealsDestination}
+          ariaLabel="View closed won deals"
         />
         <KpiCard
           label="At risk"
@@ -485,12 +534,19 @@ export function DirectorDashboardPage() {
           caption={`${atRiskDeals.length} flagged deals across ${atRiskRepCount} reps`}
           accent="red"
           dark
+          to={atRiskDestination}
+          ariaLabel="View at-risk deals"
         />
       </section>
 
       <section className="mt-4 rounded-xl border border-gray-200 bg-white p-5 shadow-sm">
         <div className="grid gap-5 xl:grid-cols-[1fr_430px] xl:items-start">
-          <div>
+          <Link
+            to={forecastDestination}
+            aria-label="View forecast accuracy report"
+            className="block rounded-lg focus:outline-none focus-visible:ring-2 focus-visible:ring-[#CC0000]"
+            title={goal > 0 ? "Open forecast accuracy report" : "Goal not configured. Open forecast accuracy report."}
+          >
             <p className="text-[10px] font-black uppercase tracking-widest text-gray-400">Forecast vs goal</p>
             {performanceUnavailable && (
               <p className={`mt-2 rounded-lg border px-3 py-2 text-sm font-semibold ${perfError ? "border-red-200 bg-red-50 text-red-700" : "border-gray-200 bg-gray-50 text-gray-500"}`}>
@@ -507,24 +563,36 @@ export function DirectorDashboardPage() {
                 ? `${formatCurrency(goalGap)} behind goal · ${remainingWeeks ?? "--"} weeks remaining`
                 : "Goal met or ahead · current period"}
             </p>
-          </div>
+          </Link>
 
           <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
-            <div className="rounded-lg border border-gray-200 bg-gray-50 p-3">
+            <Link
+              to={forecastDestination}
+              aria-label="View forecast pace details"
+              className="rounded-lg border border-gray-200 bg-gray-50 p-3 transition-colors hover:bg-gray-100 focus:outline-none focus-visible:ring-2 focus-visible:ring-[#CC0000]"
+            >
               <Target className="h-4 w-4 text-[#CC0000]" />
               <p className="mt-2 text-[10px] font-black uppercase tracking-widest text-gray-400">Pace</p>
               <p className="mt-1 font-black text-gray-950">{paceLabel}</p>
-            </div>
-            <div className="rounded-lg border border-gray-200 bg-gray-50 p-3">
+            </Link>
+            <Link
+              to={closingDestination}
+              aria-label="View closing pipeline deals"
+              className="rounded-lg border border-gray-200 bg-gray-50 p-3 transition-colors hover:bg-gray-100 focus:outline-none focus-visible:ring-2 focus-visible:ring-[#CC0000]"
+            >
               <Trophy className="h-4 w-4 text-emerald-600" />
               <p className="mt-2 text-[10px] font-black uppercase tracking-widest text-gray-400">Closing</p>
               <p className="mt-1 font-black text-gray-950">{wonCloses} {activityPeriodLabel}</p>
-            </div>
-            <div className="rounded-lg border border-gray-200 bg-gray-50 p-3">
+            </Link>
+            <Link
+              to={activityDestination}
+              aria-label="View activity report"
+              className="rounded-lg border border-gray-200 bg-gray-50 p-3 transition-colors hover:bg-gray-100 focus:outline-none focus-visible:ring-2 focus-visible:ring-[#CC0000]"
+            >
               <Zap className="h-4 w-4 text-blue-600" />
               <p className="mt-2 text-[10px] font-black uppercase tracking-widest text-gray-400">Activity</p>
               <p className="mt-1 font-black text-gray-950">{totalActivity} {activityPeriodLabel}</p>
-            </div>
+            </Link>
           </div>
         </div>
 
