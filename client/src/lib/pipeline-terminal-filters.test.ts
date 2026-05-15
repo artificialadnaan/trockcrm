@@ -6,6 +6,7 @@ import {
   excludeTerminalDeals,
   getTerminalStageOutcome,
   isTerminalStage,
+  numericDealValue,
 } from "./pipeline-terminal-filters";
 
 describe("pipeline terminal filters", () => {
@@ -71,5 +72,22 @@ describe("pipeline terminal filters", () => {
     expect(activePipelineDealValue({ awardedAmount: null, bidEstimate: 50_000, ddEstimate: 30_000 })).toBe(50_000);
     expect(activePipelineDealValue({ awardedAmount: null, bidEstimate: null, ddEstimate: 30_000 })).toBe(30_000);
     expect(activePipelineDealValue({ awardedAmount: null, bidEstimate: null, ddEstimate: null })).toBe(0);
+  });
+
+  it("treats whitespace-only strings as missing values instead of explicit zero", () => {
+    expect(numericDealValue("  ")).toBeNull();
+    expect(numericDealValue("")).toBeNull();
+    expect(numericDealValue(null)).toBeNull();
+    expect(numericDealValue("0")).toBe(0);
+    expect(numericDealValue("0.00")).toBe(0);
+    expect(numericDealValue("100")).toBe(100);
+    expect(numericDealValue(" 100 ")).toBe(100);
+  });
+
+  it("falls back past whitespace-only awarded and bid values", () => {
+    expect(activePipelineDealValue({ awardedAmount: "  ", bidEstimate: "120000", ddEstimate: "80000" })).toBe(
+      120_000
+    );
+    expect(activePipelineDealValue({ awardedAmount: " ", bidEstimate: " ", ddEstimate: "80000" })).toBe(80_000);
   });
 });
