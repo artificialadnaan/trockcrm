@@ -33,6 +33,7 @@ export interface LegacyAuditRow {
   actorSystemProcess: string | null;
   entityNameSnapshot: string | null;
   fieldChangesJsonb: unknown;
+  enrichAttemptedAt?: string | null;
   createdAt: string;
 }
 
@@ -202,6 +203,7 @@ export function buildEntityNameSnapshot(entity: LegacyAuditEntityRecord): string
 }
 
 export function isLegacyAuditRowCandidate(row: LegacyAuditRow): boolean {
+  if (row.enrichAttemptedAt != null) return false;
   return row.entityNameSnapshot == null
     && row.actorName == null
     && row.actorSystemProcess == null
@@ -395,6 +397,7 @@ async function countLegacyAuditCandidates(
       SELECT COUNT(*)::int AS total
       FROM ${safeSchema}.audit_log
       WHERE created_at < $1::timestamptz
+        AND enrich_attempted_at IS NULL
         AND entity_name_snapshot IS NULL
         AND actor_name IS NULL
         AND actor_system_process IS NULL
@@ -425,10 +428,12 @@ async function fetchLegacyAuditBatch(
         actor_system_process AS "actorSystemProcess",
         entity_name_snapshot AS "entityNameSnapshot",
         field_changes_jsonb AS "fieldChangesJsonb",
+        enrich_attempted_at::text AS "enrichAttemptedAt",
         created_at::text AS "createdAt"
       FROM ${safeSchema}.audit_log
       WHERE id > $1
         AND created_at < $3::timestamptz
+        AND enrich_attempted_at IS NULL
         AND entity_name_snapshot IS NULL
         AND actor_name IS NULL
         AND actor_system_process IS NULL
@@ -444,7 +449,6 @@ async function fetchLegacyAuditBatch(
 async function fetchLegacyAuditBatchForUpdate(
   client: Queryable,
   schemaName: string,
-  afterId: number,
   batchSize: number,
   cutoffAt: string
 ): Promise<LegacyAuditRow[]> {
@@ -455,13 +459,13 @@ async function fetchLegacyAuditBatchForUpdate(
         SELECT id
         FROM ${safeSchema}.audit_log
         WHERE created_at < $1::timestamptz
-          AND id > $2
+          AND enrich_attempted_at IS NULL
           AND entity_name_snapshot IS NULL
           AND actor_name IS NULL
           AND actor_system_process IS NULL
           AND field_changes_jsonb IS NULL
         ORDER BY id ASC
-        LIMIT $3
+        LIMIT $2
         FOR UPDATE SKIP LOCKED
       )
       SELECT
@@ -474,12 +478,13 @@ async function fetchLegacyAuditBatchForUpdate(
         al.actor_system_process AS "actorSystemProcess",
         al.entity_name_snapshot AS "entityNameSnapshot",
         al.field_changes_jsonb AS "fieldChangesJsonb",
+        al.enrich_attempted_at::text AS "enrichAttemptedAt",
         al.created_at::text AS "createdAt"
       FROM ${safeSchema}.audit_log al
       JOIN candidate c ON c.id = al.id
       ORDER BY al.id ASC
     `,
-    [cutoffAt, afterId, batchSize]
+    [cutoffAt, batchSize]
   );
   return result.rows as LegacyAuditRow[];
 }
@@ -571,18 +576,19 @@ async function applyPlans(
   schemaName: string,
   plans: LegacyAuditEnrichmentPlan[]
 ): Promise<number> {
-  const updates = plans.filter((plan) => plan.update);
-  if (updates.length === 0) return 0;
+  if (plans.length === 0) return 0;
   const safeSchema = quoteIdent(schemaName);
   let updatedRows = 0;
-  for (const plan of updates) {
+  for (const plan of plans) {
     const result = await client.query({
       name: buildStatementName(schemaName, "legacy-audit-enrich-update"),
       text: `
         UPDATE ${safeSchema}.audit_log
            SET entity_name_snapshot = COALESCE(entity_name_snapshot, $1),
-               actor_name = COALESCE(actor_name, $2)
+               actor_name = COALESCE(actor_name, $2),
+               enrich_attempted_at = COALESCE(enrich_attempted_at, NOW())
          WHERE id = $3
+           AND enrich_attempted_at IS NULL
            AND entity_name_snapshot IS NULL
            AND actor_name IS NULL
            AND actor_system_process IS NULL
@@ -648,9 +654,8 @@ export async function enrichLegacyAuditLog(
   const limit = options.limit ?? null;
   const cutoffAt = DEFAULT_CUTOFF_AT;
   const totalCandidateRows = await countLegacyAuditCandidates(client, schemaName, cutoffAt);
-  let afterId = 0;
+  let dryRunAfterId = 0;
   let examinedRows = 0;
-  let actualRowsUpdated = 0;
   let processedSinceProgressLog = 0;
   let summary: BatchSummary = {
     totalRows: 0,
@@ -670,15 +675,14 @@ export async function enrichLegacyAuditLog(
     if (remaining <= 0) break;
 
     let rows: LegacyAuditRow[] = [];
-    let updatedRowsInBatch = 0;
 
     if (dryRun) {
-      rows = await fetchLegacyAuditBatch(client, schemaName, afterId, remaining, cutoffAt);
+      rows = await fetchLegacyAuditBatch(client, schemaName, dryRunAfterId, remaining, cutoffAt);
       if (rows.length === 0) break;
     } else {
       await client.query("BEGIN");
       try {
-        rows = await fetchLegacyAuditBatchForUpdate(client, schemaName, afterId, remaining, cutoffAt);
+        rows = await fetchLegacyAuditBatchForUpdate(client, schemaName, remaining, cutoffAt);
         if (rows.length === 0) {
           await client.query("COMMIT");
           break;
@@ -703,8 +707,7 @@ export async function enrichLegacyAuditLog(
 
     if (!dryRun) {
       try {
-        updatedRowsInBatch = await applyPlans(client, schemaName, plans);
-        actualRowsUpdated += updatedRowsInBatch;
+        await applyPlans(client, schemaName, plans);
         await client.query("COMMIT");
       } catch (error) {
         await client.query("ROLLBACK");
@@ -716,13 +719,15 @@ export async function enrichLegacyAuditLog(
     summary = mergeSummaries(summary, batchSummary);
     examinedRows += rows.length;
     processedSinceProgressLog += rows.length;
-    afterId = rows[rows.length - 1]?.id ?? afterId;
+    if (dryRun) {
+      dryRunAfterId = rows[rows.length - 1]?.id ?? dryRunAfterId;
+    }
 
     if (processedSinceProgressLog >= PROGRESS_LOG_INTERVAL) {
       const percent = totalCandidateRows > 0 ? ((examinedRows / totalCandidateRows) * 100).toFixed(1) : "100.0";
       const remaining = Math.max(totalCandidateRows - examinedRows, 0);
       console.log(
-        `[legacy-audit-enrichment] ${schemaName}: enriched ${dryRun ? summary.rowsToUpdate : actualRowsUpdated}/${totalCandidateRows} rows so far (${percent}% complete, est ${remaining} candidate rows remaining)`
+        `[legacy-audit-enrichment] ${schemaName}: enriched ${summary.rowsToUpdate}/${totalCandidateRows} rows so far (${percent}% complete, est ${remaining} candidate rows remaining)`
       );
       processedSinceProgressLog = 0;
     }
@@ -738,7 +743,7 @@ export async function enrichLegacyAuditLog(
     estimatedExecuteMs: observedMsPerCandidate * summary.rowsToUpdate,
     elapsedMs,
     ...summary,
-    rowsToUpdate: dryRun ? summary.rowsToUpdate : actualRowsUpdated,
+    rowsToUpdate: summary.rowsToUpdate,
   };
 }
 
