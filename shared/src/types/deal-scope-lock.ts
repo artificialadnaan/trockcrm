@@ -54,12 +54,62 @@ export const SCOPE_LOCKED_WORKSPACE_FIELDS = new Set<string>(SCOPE_LOCKED_WORKSP
 export const SCOPE_LOCKED_ATTACHMENT_KEYS = new Set<string>(SCOPE_LOCKED_ATTACHMENT_KEY_VALUES);
 export const SCOPE_LOCKED_FILE_ACTIONS = new Set<string>(SCOPE_LOCKED_FILE_ACTION_VALUES);
 
-export function getScopeLockedDealPatchFields(body: Record<string, unknown>) {
-  return Object.keys(body).filter((field) => SCOPE_LOCKED_DEAL_PATCH_FIELDS.has(field));
+function normalizeComparableValue(value: unknown): unknown {
+  if (value == null) return null;
+
+  if (typeof value === "string") {
+    return value.length === 0 ? null : value;
+  }
+
+  if (typeof value === "number") {
+    return Number.isFinite(value) ? value : String(value);
+  }
+
+  if (typeof value === "boolean") {
+    return value;
+  }
+
+  if (Array.isArray(value)) {
+    return value
+      .map((entry) => normalizeComparableValue(entry))
+      .sort((left, right) => JSON.stringify(left).localeCompare(JSON.stringify(right)));
+  }
+
+  if (typeof value === "object") {
+    return Object.fromEntries(
+      Object.entries(value)
+        .sort(([left], [right]) => left.localeCompare(right))
+        .map(([key, entryValue]) => [key, normalizeComparableValue(entryValue)])
+    );
+  }
+
+  return value;
 }
 
-export function getScopeLockedResolvedFields(patch: Record<string, unknown>) {
-  return Object.keys(patch).filter((field) => SCOPE_LOCKED_RESOLVED_FIELDS.has(field));
+function comparableValuesEqual(left: unknown, right: unknown) {
+  return JSON.stringify(normalizeComparableValue(left)) === JSON.stringify(normalizeComparableValue(right));
+}
+
+export function getScopeLockedDealPatchFields(
+  body: Record<string, unknown>,
+  existing: Record<string, unknown>
+) {
+  return Object.keys(body).filter(
+    (field) =>
+      SCOPE_LOCKED_DEAL_PATCH_FIELDS.has(field) &&
+      !comparableValuesEqual(body[field], existing[field])
+  );
+}
+
+export function getScopeLockedResolvedFields(
+  patch: Record<string, unknown>,
+  existing: Record<string, unknown>
+) {
+  return Object.keys(patch).filter(
+    (field) =>
+      SCOPE_LOCKED_RESOLVED_FIELDS.has(field) &&
+      !comparableValuesEqual(patch[field], existing[field])
+  );
 }
 
 export function isScopeLockedWorkspaceTopLevelField(field: string) {
