@@ -418,6 +418,150 @@ describe("PATCH /api/deals/:id cleanup legacy handling", () => {
     );
   });
 
+  it("treats empty-string company lineage as missing when repairing to a real id", async () => {
+    dealsServiceMocks.getDealById.mockResolvedValue(baseDeal({
+      companyId: "",
+      propertyId: "property-1",
+    }));
+
+    const { req, res, error } = await invokePatch(
+      {
+        companyId: "company-2",
+        propertyId: "property-1",
+        migrationMode: true,
+      },
+      createUser("rep")
+    );
+
+    expect(error).toBeNull();
+    expect(res.statusCode).toBe(200);
+    expect(dealsServiceMocks.updateDeal).toHaveBeenCalledWith(
+      req.tenantDb,
+      "deal-1",
+      expect.objectContaining({
+        companyId: "company-2",
+        propertyId: "property-1",
+        migrationMode: true,
+      }),
+      "rep",
+      "rep-1",
+      "office-1"
+    );
+    expect(auditMocks.writeAuditLog).toHaveBeenCalledWith(
+      req.tenantDb,
+      expect.objectContaining({
+        fullRow: expect.objectContaining({
+          reason: "legacy_cleanup_relationship_repair",
+          companyIdBefore: "",
+          companyIdAfter: "company-2",
+        }),
+      })
+    );
+  });
+
+  it("does not enter cleanup mode when empty-string company lineage stays unchanged", async () => {
+    dealsServiceMocks.getDealById.mockResolvedValue(baseDeal({
+      companyId: "",
+      propertyId: "property-1",
+    }));
+
+    const { req, res, error } = await invokePatch(
+      {
+        companyId: "",
+        propertyId: "property-1",
+        nextStep: "Standard edit with unchanged empty company id",
+        migrationMode: true,
+      },
+      createUser("rep")
+    );
+
+    expect(error).toBeNull();
+    expect(res.statusCode).toBe(200);
+    expect(dealsServiceMocks.updateDeal).toHaveBeenCalledWith(
+      req.tenantDb,
+      "deal-1",
+      expect.not.objectContaining({
+        migrationMode: true,
+      }),
+      "rep",
+      "rep-1",
+      "office-1"
+    );
+    expect(auditMocks.writeAuditLog).not.toHaveBeenCalled();
+  });
+
+  it("treats empty-string property lineage as missing when repairing to a real id", async () => {
+    dealsServiceMocks.getDealById.mockResolvedValue(baseDeal({
+      companyId: "company-1",
+      propertyId: "",
+    }));
+
+    const { req, res, error } = await invokePatch(
+      {
+        companyId: "company-1",
+        propertyId: "property-2",
+        migrationMode: true,
+      },
+      createUser("rep")
+    );
+
+    expect(error).toBeNull();
+    expect(res.statusCode).toBe(200);
+    expect(dealsServiceMocks.updateDeal).toHaveBeenCalledWith(
+      req.tenantDb,
+      "deal-1",
+      expect.objectContaining({
+        companyId: "company-1",
+        propertyId: "property-2",
+        migrationMode: true,
+      }),
+      "rep",
+      "rep-1",
+      "office-1"
+    );
+    expect(auditMocks.writeAuditLog).toHaveBeenCalledWith(
+      req.tenantDb,
+      expect.objectContaining({
+        fullRow: expect.objectContaining({
+          reason: "legacy_cleanup_relationship_repair",
+          propertyIdBefore: "",
+          propertyIdAfter: "property-2",
+        }),
+      })
+    );
+  });
+
+  it("does not enter cleanup mode when empty-string property lineage stays unchanged", async () => {
+    dealsServiceMocks.getDealById.mockResolvedValue(baseDeal({
+      companyId: "company-1",
+      propertyId: "",
+    }));
+
+    const { req, res, error } = await invokePatch(
+      {
+        companyId: "company-1",
+        propertyId: "",
+        nextStep: "Standard edit with unchanged empty property id",
+        migrationMode: true,
+      },
+      createUser("rep")
+    );
+
+    expect(error).toBeNull();
+    expect(res.statusCode).toBe(200);
+    expect(dealsServiceMocks.updateDeal).toHaveBeenCalledWith(
+      req.tenantDb,
+      "deal-1",
+      expect.not.objectContaining({
+        migrationMode: true,
+      }),
+      "rep",
+      "rep-1",
+      "office-1"
+    );
+    expect(auditMocks.writeAuditLog).not.toHaveBeenCalled();
+  });
+
   it("allows cleanup-mode relationship repair on RFP'd legacy deals", async () => {
     dealsServiceMocks.getDealById.mockResolvedValue(baseDeal({
       companyId: null,

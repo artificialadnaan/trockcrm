@@ -285,8 +285,8 @@ function shouldTreatPatchAsLegacyCleanup(
     return false;
   }
 
-  const isMissingCompany = deal.companyId == null;
-  const isMissingProperty = deal.propertyId == null;
+  const isMissingCompany = !deal.companyId;
+  const isMissingProperty = !deal.propertyId;
 
   if (!isMissingCompany && !isMissingProperty) {
     return false;
