@@ -109,10 +109,16 @@ function makeQuestionNode(
 describe("LeadQuestionnaireSections", () => {
   let container: HTMLDivElement;
   let root: Root;
+  let scrollIntoViewMock: ReturnType<typeof vi.fn>;
 
   beforeEach(() => {
     container = document.createElement("div");
     document.body.appendChild(container);
+    scrollIntoViewMock = vi.fn();
+    Object.defineProperty(HTMLElement.prototype, "scrollIntoView", {
+      configurable: true,
+      value: scrollIntoViewMock,
+    });
   });
 
   afterEach(async () => {
@@ -409,5 +415,110 @@ describe("LeadQuestionnaireSections", () => {
 
     expect(container.querySelector('[data-scope-panel="roofing"]')?.textContent).toContain("Roof Type");
     expect(container.querySelector('[data-scope-panel="balconies"]')?.textContent).toContain("Balcony Type");
+  });
+
+  it("scrolls when a scope card is activated but not when typing inside a selected panel", () => {
+    let updateAnswers: React.Dispatch<
+      React.SetStateAction<Record<string, string | boolean | null>>
+    > | null = null;
+
+    function Harness() {
+      const [answers, setAnswers] = React.useState<Record<string, string | boolean | null>>({});
+      updateAnswers = setAnswers;
+
+      const handleAnswerChange = (key: string, value: string | boolean | null) => {
+        setAnswers((current) => ({
+          ...current,
+          [key]: value,
+        }));
+      };
+
+      return (
+        <LeadQuestionnaireSections
+          nodes={[
+            makeQuestionNode({
+              id: "roofing-applies",
+              key: "roofing_applies",
+              label: "Does roofing scope apply?",
+              inputType: "boolean",
+              sectionKey: "scope",
+              groupKey: "roofing",
+              groupLabel: "Roofing",
+              groupOrder: 1,
+              displayOrder: 0,
+            }),
+            makeQuestionNode({
+              id: "roof-type",
+              key: "roof_type",
+              label: "Roof Type",
+              inputType: "text",
+              sectionKey: "scope",
+              groupKey: "roofing",
+              groupLabel: "Roofing",
+              groupOrder: 1,
+              displayOrder: 1,
+              parentNodeId: "roofing-applies",
+              parentOptionValue: "true",
+            }),
+            makeQuestionNode({
+              id: "balconies-applies",
+              key: "balconies_applies",
+              label: "Does balcony scope apply?",
+              inputType: "boolean",
+              sectionKey: "scope",
+              groupKey: "balconies",
+              groupLabel: "Balconies",
+              groupOrder: 2,
+              displayOrder: 0,
+            }),
+            makeQuestionNode({
+              id: "balcony-type",
+              key: "balcony_type",
+              label: "Balcony Type",
+              inputType: "text",
+              sectionKey: "scope",
+              groupKey: "balconies",
+              groupLabel: "Balconies",
+              groupOrder: 2,
+              displayOrder: 1,
+              parentNodeId: "balconies-applies",
+              parentOptionValue: "true",
+            }),
+          ]}
+          answers={answers}
+          onAnswerChange={handleAnswerChange}
+        />
+      );
+    }
+
+    root = createRoot(container);
+    act(() => {
+      root.render(<Harness />);
+    });
+
+    const roofingCard = container.querySelector<HTMLButtonElement>('[data-scope-card="roofing"]');
+    const balconiesCard = container.querySelector<HTMLButtonElement>('[data-scope-card="balconies"]');
+
+    expect(roofingCard).toBeTruthy();
+    expect(balconiesCard).toBeTruthy();
+    expect(updateAnswers).toBeTruthy();
+
+    act(() => {
+      roofingCard?.click();
+    });
+    expect(scrollIntoViewMock).toHaveBeenCalledTimes(1);
+
+    act(() => {
+      updateAnswers?.((current) => ({
+        ...current,
+        roof_type: "Shingle",
+      }));
+    });
+    expect(scrollIntoViewMock).toHaveBeenCalledTimes(1);
+
+    act(() => {
+      balconiesCard?.click();
+    });
+    expect(scrollIntoViewMock).toHaveBeenCalledTimes(2);
   });
 });
