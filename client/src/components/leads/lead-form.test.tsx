@@ -1297,29 +1297,45 @@ describe("LeadForm", () => {
     expect(container.textContent).toContain("Insurance Claim");
   });
 
-  it("keeps multiple scope selections while only showing one active scope panel", async () => {
+  it("shows all selected scope panels simultaneously when multiple are selected", async () => {
     mockUniversalCreateQuestionnaire();
 
     renderCreateForm();
 
     const roofingCard = container.querySelector<HTMLButtonElement>('[data-scope-card="roofing"]');
-    const balconiesCard = container.querySelector<HTMLButtonElement>('[data-scope-card="balconies"]');
+    const exteriorPaintCard = container.querySelector<HTMLButtonElement>('[data-scope-card="exterior_paint"]');
     expect(roofingCard).toBeTruthy();
-    expect(balconiesCard).toBeTruthy();
+    expect(exteriorPaintCard).toBeTruthy();
 
     await clickButton(roofingCard!);
     expect(container.textContent).toContain("Roof Type");
 
-    await clickButton(balconiesCard!);
+    await clickButton(exteriorPaintCard!);
 
     expect(roofingCard?.getAttribute("aria-selected")).toBe("true");
-    expect(balconiesCard?.getAttribute("aria-selected")).toBe("true");
-    expect(balconiesCard?.getAttribute("data-scope-active")).toBe("true");
-    expect(container.textContent).toContain("Balcony Type");
-    expect(container.textContent).not.toContain("Roof Type");
+    expect(exteriorPaintCard?.getAttribute("aria-selected")).toBe("true");
+    expect(exteriorPaintCard?.getAttribute("data-scope-active")).toBe("true");
+    expect(container.querySelector('[data-scope-panel="roofing"]')?.textContent).toContain("Roof Type");
+    expect(container.querySelector('[data-scope-panel="roofing"]')?.textContent).toContain("Insurance Claim");
+    expect(container.querySelector('[data-scope-panel="exterior_paint"]')).toBeTruthy();
+    expect(container.querySelector('[data-scope-panel="exterior_paint"]')?.textContent).toContain("Exterior Paint");
   });
 
-  it("deselects the active scope and hides the panel without auto-switching to another selected scope", async () => {
+  it("shows all selected panels when three scopes are selected", async () => {
+    mockUniversalCreateQuestionnaire();
+
+    renderCreateForm();
+
+    await clickButton(container.querySelector<HTMLButtonElement>('[data-scope-card="roofing"]')!);
+    await clickButton(container.querySelector<HTMLButtonElement>('[data-scope-card="exterior_paint"]')!);
+    await clickButton(container.querySelector<HTMLButtonElement>('[data-scope-card="balconies"]')!);
+
+    expect(container.querySelector('[data-scope-panel="roofing"]')?.textContent).toContain("Roof Type");
+    expect(container.querySelector('[data-scope-panel="exterior_paint"]')?.textContent).toContain("Exterior Paint");
+    expect(container.querySelector('[data-scope-panel="balconies"]')?.textContent).toContain("Balcony Type");
+  });
+
+  it("deselects one of multiple selected scopes and only removes that panel", async () => {
     mockUniversalCreateQuestionnaire();
 
     renderCreateForm();
@@ -1334,15 +1350,15 @@ describe("LeadForm", () => {
     await clickButton(balconiesCard!);
 
     expect(container.textContent).toContain("Balcony Type");
-    expect(container.textContent).not.toContain("Roof Type");
+    expect(container.textContent).toContain("Roof Type");
 
     await clickButton(balconiesCard!);
 
     expect(balconiesCard?.getAttribute("aria-selected")).toBe("false");
     expect(balconiesCard?.getAttribute("data-scope-active")).toBeNull();
-    expect(container.textContent).not.toContain("Selected scope");
     expect(container.textContent).not.toContain("Balcony Type");
-    expect(container.textContent).not.toContain("Roof Type");
+    expect(container.textContent).toContain("Roof Type");
+    expect(container.textContent).toContain("Xactimate");
     expect(roofingCard?.getAttribute("aria-selected")).toBe("true");
     expect(roofingCard?.getAttribute("data-scope-active")).toBeNull();
     expect(balconiesCard?.textContent).toContain("Not selected");

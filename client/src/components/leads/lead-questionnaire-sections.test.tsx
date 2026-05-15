@@ -345,4 +345,69 @@ describe("LeadQuestionnaireSections", () => {
 
     expect(container.querySelector('[data-branch-card="roofing_insurance_claim"]')).toBeTruthy();
   });
+
+  it("renders all selected scope panels simultaneously while keeping one active card", () => {
+    root = createRoot(container);
+    act(() => {
+      root.render(
+        <LeadQuestionnaireSections
+          nodes={[
+            makeQuestionNode({
+              id: "roofing-applies",
+              key: "roofing_applies",
+              label: "Does roofing scope apply?",
+              inputType: "boolean",
+              sectionKey: "scope",
+              groupKey: "roofing",
+              groupLabel: "Roofing",
+              groupOrder: 1,
+              displayOrder: 0,
+            }),
+            makeQuestionNode({
+              id: "roof-type",
+              key: "roof_type",
+              label: "Roof Type",
+              inputType: "text",
+              sectionKey: "scope",
+              groupKey: "roofing",
+              groupLabel: "Roofing",
+              groupOrder: 1,
+              displayOrder: 1,
+              parentNodeId: "roofing-applies",
+              parentOptionValue: "true",
+            }),
+            makeQuestionNode({
+              id: "balconies-applies",
+              key: "balconies_applies",
+              label: "Does balcony scope apply?",
+              inputType: "boolean",
+              sectionKey: "scope",
+              groupKey: "balconies",
+              groupLabel: "Balconies",
+              groupOrder: 2,
+              displayOrder: 0,
+            }),
+            makeQuestionNode({
+              id: "balcony-type",
+              key: "balcony_type",
+              label: "Balcony Type",
+              inputType: "text",
+              sectionKey: "scope",
+              groupKey: "balconies",
+              groupLabel: "Balconies",
+              groupOrder: 2,
+              displayOrder: 1,
+              parentNodeId: "balconies-applies",
+              parentOptionValue: "true",
+            }),
+          ]}
+          answers={{ roofing_applies: true, balconies_applies: true }}
+          onAnswerChange={() => {}}
+        />
+      );
+    });
+
+    expect(container.querySelector('[data-scope-panel="roofing"]')?.textContent).toContain("Roof Type");
+    expect(container.querySelector('[data-scope-panel="balconies"]')?.textContent).toContain("Balcony Type");
+  });
 });
