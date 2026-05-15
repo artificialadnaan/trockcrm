@@ -3,6 +3,7 @@ import os from "node:os";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
 import {
+  applyPlan,
   buildReimportPlan,
   diffSafeUpdateFields,
   parseReimportArgs,
@@ -405,5 +406,158 @@ describe("hubspot-deals-reimport", () => {
       currentValue: "2026-05-05T00:00:00.000Z",
       csvValue: "2026-05-05T05:00:00.000Z",
     });
+  });
+
+  it("writes rich system-process audit rows for applied creates and updates", async () => {
+    const queries: Array<{ sql: string; params: unknown[] }> = [];
+    const client = {
+      query: async (sql: string, params: unknown[] = []) => {
+        queries.push({ sql, params });
+        const normalized = sql.toLowerCase();
+        if (normalized === "begin" || normalized === "commit" || normalized === "rollback") {
+          return { rows: [], rowCount: 0 };
+        }
+        if (normalized.includes("select id, display_name from public.users")) {
+          return { rows: [{ id: "rep-1", display_name: "Rep One" }], rowCount: 1 };
+        }
+        if (normalized.includes("select workflow_family, slug, id from public.pipeline_stage_config")) {
+          return {
+            rows: [{ workflow_family: "standard_deal", slug: "opportunity", id: "stage-opportunity" }],
+            rowCount: 1,
+          };
+        }
+        if (normalized.includes("select deal_number") && normalized.includes("from \"office_dallas\".deals")) {
+          return { rows: [], rowCount: 0 };
+        }
+        if (normalized.includes("insert into public.deal_number_daily_sequences")) {
+          return { rows: [], rowCount: 1 };
+        }
+        if (normalized.includes("select last_suffix")) {
+          return { rows: [{ last_suffix: "" }], rowCount: 1 };
+        }
+        if (normalized.includes("update public.deal_number_daily_sequences")) {
+          return { rows: [], rowCount: 1 };
+        }
+        if (normalized.includes("insert into \"office_dallas\".deals")) {
+          return {
+            rows: [{
+              id: "created-deal-1",
+              name: "Created Deal",
+              project_number: "DFW-1-12126-aa",
+              deal_number: "DFW-1-12126-aa",
+            }],
+            rowCount: 1,
+          };
+        }
+        if (normalized.includes("update \"office_dallas\".deals set")) {
+          return {
+            rows: [{
+              id: "updated-deal-1",
+              name: "Updated Deal",
+              project_number: "DFW-1-12226-aa",
+              deal_number: "DFW-1-12226-aa",
+            }],
+            rowCount: 1,
+          };
+        }
+        if (normalized.includes("insert into \"office_dallas\".audit_log")) {
+          return { rows: [], rowCount: 1 };
+        }
+        throw new Error(`Unexpected SQL: ${sql}`);
+      },
+    };
+    const plan = buildReimportPlan({
+      csvRows: [
+        {
+          hubspotRecordId: "hs-create",
+          dealName: "Created Deal",
+          dealOwner: "Rep One",
+          amount: "1000",
+          createDate: "2026-05-01T12:00:00Z",
+          lastModifiedDate: "2026-05-02T12:00:00Z",
+          dealStage: "Pipe Line",
+          pipeline: null,
+          projectNumber: "DFW-1-12126-aa",
+          projectType: "Roofing",
+          associatedCompany: "Acme",
+        },
+        {
+          hubspotRecordId: "hs-update",
+          dealName: "Updated Deal",
+          dealOwner: null,
+          amount: "2500",
+          createDate: "2026-05-02T12:00:00Z",
+          lastModifiedDate: "2026-05-03T12:00:00Z",
+          dealStage: "Pipe Line",
+          pipeline: null,
+          projectNumber: "DFW-1-12226-aa",
+          projectType: "Service",
+          associatedCompany: "Bravo",
+        },
+        {
+          hubspotRecordId: "hs-skip-clear",
+          dealName: "Rayside Apartments",
+          dealOwner: null,
+          amount: null,
+          createDate: "2026-05-02T12:00:00Z",
+          lastModifiedDate: "2026-05-03T12:00:00Z",
+          dealStage: "RFP",
+          pipeline: null,
+          projectNumber: "DFW-1-12326-aa",
+          projectType: null,
+          associatedCompany: "Rayside",
+        },
+      ],
+      crmDeals: [
+        {
+          id: "updated-deal-1",
+          isActive: true,
+          hubspotDealId: "hs-update",
+          name: "Old Deal",
+          projectNumber: "DFW-1-12226-aa",
+          projectType: "roofing",
+          amount: "2000.00",
+          createdAt: "2026-05-02T12:00:00.000Z",
+          updatedAt: "2026-05-02T12:00:00.000Z",
+        },
+        {
+          id: "skip-clear-deal",
+          isActive: true,
+          hubspotDealId: "hs-skip-clear",
+          name: "Rayside Apartments",
+          projectNumber: "DFW-1-12326-aa",
+          projectType: "roofing",
+          amount: "700000.00",
+          createdAt: "2026-05-02T12:00:00.000Z",
+          updatedAt: "2026-05-02T12:00:00.000Z",
+        },
+      ],
+    });
+
+    await applyPlan(client as never, "office_dallas", plan);
+
+    const auditInserts = queries.filter((query) =>
+      query.sql.toLowerCase().includes("insert into \"office_dallas\".audit_log")
+    );
+    expect(auditInserts).toHaveLength(2);
+    expect(auditInserts[0].params).toEqual(expect.arrayContaining([
+      "deals",
+      "created-deal-1",
+      "insert",
+      "HubSpot Reimport",
+      "HubSpot Reimport",
+    ]));
+    expect(JSON.stringify(auditInserts[0].params)).toContain("Created Deal");
+    expect(JSON.stringify(auditInserts[0].params)).toContain("DFW-1-12126-aa");
+    expect(auditInserts[1].params).toEqual(expect.arrayContaining([
+      "deals",
+      "updated-deal-1",
+      "update",
+      "HubSpot Reimport",
+      "HubSpot Reimport",
+    ]));
+    expect(JSON.stringify(auditInserts[1].params)).toContain("bidEstimate");
+    expect(JSON.stringify(auditInserts[1].params)).toContain("projectType");
+    expect(JSON.stringify(auditInserts[1].params)).not.toContain("hs-skip-clear");
   });
 });

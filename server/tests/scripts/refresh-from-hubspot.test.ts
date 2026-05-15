@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  applyDealChanges,
   buildDealUpdatePlan,
   findCompanyByHubSpotName,
   normalizePropertyState,
@@ -223,5 +224,53 @@ describe("HubSpot refresh field policies", () => {
       })
     );
     expect(plan.companyRefreshSuppressed).toBe(false);
+  });
+
+  it("writes a rich HubSpot Refresh audit row when applying deal changes", async () => {
+    const queries: Array<{ sql: string; params: unknown[] }> = [];
+    const client = {
+      query: async (sql: string, params: unknown[] = []) => {
+        queries.push({ sql, params });
+        if (sql.includes("UPDATE office_dallas.deals")) {
+          return {
+            rows: [{
+              id: "deal-1",
+              name: "Refresh Deal",
+              deal_number: "DFW-1-11126-aa",
+              project_number: null,
+            }],
+            rowCount: 1,
+          };
+        }
+        if (sql.includes("INSERT INTO public.hubspot_refresh_log")) {
+          return { rows: [], rowCount: 1 };
+        }
+        if (sql.includes('INSERT INTO "office_dallas".audit_log')) {
+          return { rows: [], rowCount: 1 };
+        }
+        throw new Error(`Unexpected SQL: ${sql}`);
+      },
+    };
+
+    await applyDealChanges(client as never, "run-1", "deal-1", [
+      {
+        dealId: "deal-1",
+        fieldName: "bid_estimate",
+        oldValue: "1000",
+        newValue: "1500",
+        reason: "gt_5_percent_drift",
+      },
+    ]);
+
+    const auditInsert = queries.find((query) => query.sql.includes('INSERT INTO "office_dallas".audit_log'));
+    expect(auditInsert?.params).toEqual(expect.arrayContaining([
+      "deals",
+      "deal-1",
+      "update",
+      "HubSpot Refresh",
+      "Refresh Deal",
+      "DFW-1-11126-aa",
+    ]));
+    expect(JSON.stringify(auditInsert?.params)).toContain("bidEstimate");
   });
 });

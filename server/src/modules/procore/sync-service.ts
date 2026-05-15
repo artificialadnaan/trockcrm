@@ -12,6 +12,8 @@ import type * as schema from "@trock-crm/shared/schema";
 import { db } from "../../db.js";
 import { procoreClient } from "../../lib/procore-client.js";
 import { startCatalogSync as startProcoreCatalogSync, syncCostCatalog } from "./catalog-sync-service.js";
+import { buildAuditActorFromSystem, logActivity } from "../audit/audit-logger.js";
+import { PROCORE_SYNC } from "../audit/system-processes.js";
 
 type TenantDb = NodePgDatabase<typeof schema>;
 
@@ -98,6 +100,24 @@ export async function createProcoreProject(
       procoreLastSyncedAt: new Date(),
     })
     .where(eq(deals.id, dealId));
+
+  await logActivity({
+    tenantDb,
+    actor: buildAuditActorFromSystem({ systemProcess: PROCORE_SYNC }),
+    action: "update",
+    entity: {
+      tableName: "deals",
+      entityType: "deal",
+      recordId: dealId,
+      nameSnapshot: deal.name,
+      secondaryIdSnapshot: deal.projectNumber ?? deal.dealNumber ?? null,
+    },
+    fieldChanges: {
+      procoreProjectId: { from: deal.procoreProjectId, to: procoreProjectId },
+      procoreLastSyncedAt: { from: deal.procoreLastSyncedAt ?? null, to: "now" },
+    },
+    metadata: { officeId },
+  });
 
   // Upsert procore_sync_state
   await upsertSyncState({
@@ -191,6 +211,23 @@ export async function syncDealStageToProcore(
     .update(deals)
     .set({ procoreLastSyncedAt: new Date() })
     .where(eq(deals.id, dealId));
+
+  await logActivity({
+    tenantDb,
+    actor: buildAuditActorFromSystem({ systemProcess: PROCORE_SYNC }),
+    action: "update",
+    entity: {
+      tableName: "deals",
+      entityType: "deal",
+      recordId: dealId,
+      nameSnapshot: deal.name,
+      secondaryIdSnapshot: deal.projectNumber ?? deal.dealNumber ?? null,
+    },
+    fieldChanges: {
+      procoreLastSyncedAt: { from: deal.procoreLastSyncedAt ?? null, to: "now" },
+    },
+    metadata: { officeId, procoreStageMapping: stageConfig.procoreStageMapping },
+  });
 
   await upsertSyncState({
     entityType: "project",

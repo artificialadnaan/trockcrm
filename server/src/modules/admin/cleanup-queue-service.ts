@@ -4,6 +4,7 @@ import type { AuthenticatedUser } from "@trock-crm/shared/types";
 import type * as schema from "@trock-crm/shared/schema";
 import { pool } from "../../db.js";
 import { AppError } from "../../middleware/error-handler.js";
+import { buildAuditActorFromUser } from "../audit/audit-logger.js";
 import { updateDeal } from "../deals/service.js";
 import { updateLead } from "../leads/service.js";
 
@@ -64,7 +65,7 @@ type CleanupDb = {
   execute: NodePgDatabase<typeof schema>["execute"];
 };
 
-type CleanupActor = Pick<AuthenticatedUser, "id" | "role" | "officeId" | "activeOfficeId">;
+type CleanupActor = Pick<AuthenticatedUser, "id" | "role" | "officeId" | "activeOfficeId" | "displayName" | "email">;
 
 type OfficeRow = {
   id: string;
@@ -448,7 +449,16 @@ export async function bulkReassignOwnershipQueueRows(
       await updateDeal(
         tenantDb as any,
         row.recordId,
-        { assignedRepId: input.assigneeId },
+        {
+          assignedRepId: input.assigneeId,
+          auditContext: {
+            actor: buildAuditActorFromUser({
+              userId: actor.id,
+              name: actor.displayName ?? actor.email ?? actor.id,
+              role: actor.role,
+            }),
+          },
+        },
         actor.role,
         actor.id,
         input.officeId
@@ -461,7 +471,17 @@ export async function bulkReassignOwnershipQueueRows(
     await updateLead(
       tenantDb as any,
       row.recordId,
-      { assignedRepId: input.assigneeId, officeId: input.officeId },
+      {
+        assignedRepId: input.assigneeId,
+        officeId: input.officeId,
+        auditContext: {
+          actor: buildAuditActorFromUser({
+            userId: actor.id,
+            name: actor.displayName ?? actor.email ?? actor.id,
+            role: actor.role,
+          }),
+        },
+      },
       actor.role,
       actor.id
     );

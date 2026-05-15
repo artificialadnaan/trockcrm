@@ -76,12 +76,21 @@ describe("SyncHub Procore project relay service", () => {
     const sqlText = query.mock.calls.map((call) => String(call[0])).join("\n");
     expect(result).toEqual({ status: "linked", dealId: "deal-1", officeId: "office-1", jobId: 77 });
     expect(sqlText).toContain('UPDATE "office_main".deals');
+    expect(sqlText).toContain('INSERT INTO "office_main".audit_log');
     expect(sqlText).toContain("INSERT INTO public.procore_sync_state");
     expect(sqlText).toContain('INSERT INTO "office_main".projects');
     expect(query.mock.calls.some((call) => String(call[1]?.[0]).includes("\"action\":\"create_project\""))).toBe(true);
     expect(query.mock.calls.some((call) => String(call[1]?.[0]).includes("\"projectAlreadyExists\":true"))).toBe(true);
     expect(sqlText).toContain("INSERT INTO public.job_queue");
     expect(sqlText).not.toContain("rest/v1.0/companies");
+    const auditCall = query.mock.calls.find((call) => String(call[0]).includes('INSERT INTO "office_main".audit_log'));
+    expect(auditCall?.[1]).toEqual(expect.arrayContaining([
+      "deals",
+      "deal-1",
+      "update",
+      "Procore Project Relay",
+      "DFW-1-02326-ad",
+    ]));
     expectDealQueriesUseActiveFilter(query);
   });
 

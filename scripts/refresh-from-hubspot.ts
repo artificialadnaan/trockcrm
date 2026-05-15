@@ -1,6 +1,9 @@
 import { randomUUID } from "node:crypto";
 import { pathToFileURL } from "node:url";
 import { Client } from "pg";
+import { buildAuditActorFromSystem } from "../server/src/modules/audit/audit-logger.js";
+import { logActivityWithPgClient } from "../server/src/modules/audit/pg-activity-logger.js";
+import { HUBSPOT_REFRESH } from "../server/src/modules/audit/system-processes.js";
 
 type WorkflowFamily = "standard_deal" | "service_deal";
 type StageAction = "update" | "skip";
@@ -587,7 +590,17 @@ async function ensureAuditTable(client: Client) {
   `);
 }
 
-async function applyDealChanges(client: Client, runId: string, dealId: string, changes: FieldChange[]) {
+function auditFieldKeyForRefreshColumn(fieldName: string): string {
+  if (fieldName === "stage_id") return "stageId";
+  if (fieldName === "expected_close_date") return "expectedCloseDate";
+  if (fieldName === "property_city") return "propertyCity";
+  if (fieldName === "property_state") return "propertyState";
+  if (fieldName === "bid_estimate") return "bidEstimate";
+  if (fieldName === "company_id") return "companyId";
+  return fieldName;
+}
+
+export async function applyDealChanges(client: Client, runId: string, dealId: string, changes: FieldChange[]) {
   if (changes.length === 0) return;
   const allowed = new Set([
     "stage_id",
@@ -609,10 +622,16 @@ async function applyDealChanges(client: Client, runId: string, dealId: string, c
   assignments.push(`last_synced_from_hubspot_at = $${values.length + 1}`);
   values.push(new Date().toISOString());
   values.push(dealId);
-  await client.query(
+  const updateResult = await client.query<{
+    id: string;
+    name: string | null;
+    deal_number: string | null;
+    project_number: string | null;
+  }>(
     `UPDATE office_dallas.deals
        SET ${assignments.join(", ")}, updated_at = NOW()
-     WHERE id = $${values.length}`,
+     WHERE id = $${values.length}
+     RETURNING id, name, deal_number, project_number`,
     values
   );
 
@@ -624,6 +643,34 @@ async function applyDealChanges(client: Client, runId: string, dealId: string, c
       [runId, TENANT_SCHEMA, dealId, change.fieldName, change.oldValue, change.newValue, change.reason]
     );
   }
+
+  const deal = updateResult.rows[0] ?? {
+    id: dealId,
+    name: "Deal",
+    deal_number: null,
+    project_number: null,
+  };
+  const fieldChanges = Object.fromEntries(
+    changes.map((change) => [
+      auditFieldKeyForRefreshColumn(change.fieldName),
+      { from: change.oldValue, to: change.newValue },
+    ])
+  );
+  await logActivityWithPgClient({
+    client,
+    schemaName: TENANT_SCHEMA,
+    actor: buildAuditActorFromSystem({ systemProcess: HUBSPOT_REFRESH }),
+    action: "update",
+    entity: {
+      tableName: "deals",
+      entityType: "deal",
+      recordId: deal.id,
+      nameSnapshot: deal.name ?? "Deal",
+      secondaryIdSnapshot: deal.project_number ?? deal.deal_number ?? null,
+    },
+    fieldChanges,
+    metadata: { runId, reasons: changes.map((change) => change.reason) },
+  });
 }
 
 function emptyReport(runId: string, dryRun: boolean, refreshCompanyId: boolean) {

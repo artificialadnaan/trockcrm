@@ -28,10 +28,24 @@ function sign(body: object, secret = "secret") {
 function mockTenantDeal(stage = "opportunity", rfpApprovalRequestId = 11) {
   queryMock.mockImplementation(async (sql: string) => {
     if (sql.includes("FROM pg_namespace")) return { rows: [{ nspname: "office_dallas" }] };
+    if (sql.includes('INSERT INTO "office_dallas".audit_log')) return { rows: [], rowCount: 1 };
+    if (sql.includes("UPDATE \"office_dallas\".deals")) {
+      return {
+        rows: [{
+          id: "deal-1",
+          name: "Updated Deal",
+          deal_number: "DFW-1-11326-aa",
+          project_number: null,
+        }],
+        rowCount: 1,
+      };
+    }
     if (sql.includes("FROM \"office_dallas\".deals")) {
       return {
         rows: [{
           id: "deal-1",
+          name: "Original Deal",
+          deal_number: "DFW-1-11326-aa",
           stage_id: "stage-1",
           company_id: "company-1",
           primary_contact_id: "contact-1",
@@ -118,6 +132,16 @@ describe("internal RFP routes", () => {
     const sqlText = queryMock.mock.calls.map((call) => String(call[0])).join("\n");
     expect(sqlText).toContain("UPDATE \"office_dallas\".deals");
     expect(sqlText).toContain("\"bid_due_date\"");
+    expect(sqlText).toContain('INSERT INTO "office_dallas".audit_log');
+    const auditCall = queryMock.mock.calls.find((call) => String(call[0]).includes('INSERT INTO "office_dallas".audit_log'));
+    expect(auditCall?.[1]).toEqual(expect.arrayContaining([
+      "deals",
+      "deal-1",
+      "update",
+      "Internal RFP Receiver",
+      "Updated Deal",
+      "DFW-1-11326-aa",
+    ]));
   });
 
   it("ignores stale RFP edits when the request id no longer matches the deal", async () => {

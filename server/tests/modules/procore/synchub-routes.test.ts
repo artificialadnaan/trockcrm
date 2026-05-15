@@ -64,11 +64,14 @@ function createClient(options: ClientOptions = {}) {
       if (sql.includes("LOWER(TRIM(name)) = LOWER(TRIM($2))")) {
         return { rows: options.existingDealIdByName ? [{ id: options.existingDealIdByName }] : [] };
       }
-      if (sql.includes("SELECT id, stage_id, stage_entered_at")) {
+      if (sql.includes("SELECT id, name, deal_number")) {
         return {
           rows: [
             {
               id: options.existingDealIdByProcoreBid ?? options.existingDealIdByName ?? "deal-1",
+              name: "Palm Villas",
+              deal_number: "DFW-1-11426-aa",
+              project_number: null,
               stage_id: "stage-estimating",
               stage_entered_at: currentStageEnteredAt,
               workflow_route: workflowRoute,
@@ -138,6 +141,9 @@ function createClient(options: ClientOptions = {}) {
       if (sql.includes("INSERT INTO public.job_queue")) {
         return { rows: [] };
       }
+      if (sql.includes('INSERT INTO "office_dallas".audit_log')) {
+        return { rows: [], rowCount: 1 };
+      }
       if (sql.includes("UPDATE office_dallas.deals")) {
         return { rows: [] };
       }
@@ -192,6 +198,15 @@ describe("syncHubRoutes", () => {
     expect(updateQuery?.params?.[4]).toBe("under_review");
     expect(updateQuery?.params?.[14]).toBe("under_review");
     expect(updateQuery?.params?.[15]).toBe("under_review");
+    const auditQuery = queries.find((entry) => entry.sql.includes('INSERT INTO "office_dallas".audit_log'));
+    expect(auditQuery?.params).toEqual(expect.arrayContaining([
+      "deals",
+      "deal-1",
+      "update",
+      "Procore SyncHub Webhook",
+      "Palm Villas",
+      "DFW-1-11426-aa",
+    ]));
   });
 
   it("scopes fallback dedupe by workflow route so service and normal deals with the same name do not collide", async () => {

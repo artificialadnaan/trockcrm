@@ -25,12 +25,16 @@ function successfulRunBase(sql: string) {
   if (normalizedSql.includes("from public.users")) {
     return { rows: [{ id: "system-user" }], rowCount: 1 };
   }
+  if (normalizedSql.includes("insert into") && normalizedSql.includes(".audit_log")) {
+    return { rows: [], rowCount: 1 };
+  }
   return null;
 }
 
 function matchedDeal(overrides: Record<string, unknown> = {}) {
   return {
     id: "deal-123",
+    name: "Palm Villas",
     stage_id: "stage-opportunity",
     stage_slug: "opportunity",
     stage_display_order: 1,
@@ -84,7 +88,19 @@ describe("Bid Board sync stage writeback", () => {
           "deal-123",
           "stage-opportunity",
         ]);
-        return { rows: [{ id: "deal-123" }], rowCount: 1 };
+        return {
+          rows: [{
+            id: "deal-123",
+            name: "Palm Villas",
+            deal_number: "DFW-4-11826-ab",
+            project_number: null,
+            old_stage_id: "stage-opportunity",
+            new_stage_id: "stage-under-review",
+            old_bid_board_stage_slug: null,
+            new_bid_board_stage_slug: "estimate_under_review",
+          }],
+          rowCount: 1,
+        };
       }
       if (normalizedSql.includes("insert into office_dallas.deal_stage_history")) {
         expect(params).toEqual([
@@ -123,6 +139,15 @@ describe("Bid Board sync stage writeback", () => {
     expect(result.metrics.noMatch).toBe(0);
     expect(query.mock.calls.some(([sql]) => String(sql).toLowerCase().includes("insert into office_dallas.deal_stage_history"))).toBe(true);
     expect(query.mock.calls.some(([sql]) => String(sql).toLowerCase().includes("insert into office_dallas.job_queue"))).toBe(false);
+    const auditCall = query.mock.calls.find(([sql]) => String(sql).toLowerCase().includes(".audit_log"));
+    expect(auditCall?.[1]).toEqual(expect.arrayContaining([
+      "deals",
+      "deal-123",
+      "update",
+      "Bid Board Sync",
+      "Palm Villas",
+      "DFW-4-11826-ab",
+    ]));
   });
 
   it("routes service estimating statuses to the service_estimating stage for service deals", async () => {

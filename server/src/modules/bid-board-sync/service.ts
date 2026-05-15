@@ -3,6 +3,9 @@ import { isTerminalWorkflowStage, type WorkflowRoute } from "@trock-crm/shared/t
 import { bidBoardStatusToCrmStage, normalizeBidBoardStatus } from "@trock-crm/shared/lib/bidBoardStatusMap";
 import { pool } from "../../db.js";
 import { AppError } from "../../middleware/error-handler.js";
+import { buildAuditActorFromSystem } from "../audit/audit-logger.js";
+import { logActivityWithPgClient } from "../audit/pg-activity-logger.js";
+import { BID_BOARD_SYNC } from "../audit/system-processes.js";
 
 type RawBidBoardRow = Record<string, unknown>;
 
@@ -66,6 +69,7 @@ interface IngestionMetrics {
 
 interface DealMatch {
   id: string;
+  name: string | null;
   stage_id: string;
   stage_slug: string;
   stage_display_order: number | null;
@@ -75,7 +79,49 @@ interface DealMatch {
   deal_number: string | null;
   project_number: string | null;
   bid_board_project_number: string | null;
+  bid_board_estimator: string | null;
+  bid_board_office: string | null;
+  bid_board_status: string | null;
+  bid_board_sales_price_per_area: string | null;
+  bid_board_project_cost: string | null;
+  bid_board_profit_margin_pct: string | null;
+  bid_board_total_sales: string | null;
+  bid_board_created_at: string | null;
+  bid_board_due_date: string | null;
+  bid_board_customer_name: string | null;
+  bid_board_customer_contact_raw: string | null;
+  bid_board_stage_slug: string | null;
+  bid_board_stage_family: string | null;
+  bid_board_stage_status: string | null;
+  bid_board_last_updated_at: string | null;
   bid_estimate: string | null;
+}
+
+type BidBoardAuditDeal = Pick<DealMatch, "id" | "name" | "deal_number" | "project_number">;
+
+async function logBidBoardActivity(
+  client: { query: Function },
+  schemaName: string,
+  deal: BidBoardAuditDeal,
+  fieldChanges: Record<string, { from: unknown; to: unknown }>,
+  metadata: Record<string, unknown> = {}
+) {
+  if (Object.keys(fieldChanges).length === 0) return;
+  await logActivityWithPgClient({
+    client: client as never,
+    schemaName,
+    actor: buildAuditActorFromSystem({ systemProcess: BID_BOARD_SYNC }),
+    action: "update",
+    entity: {
+      tableName: "deals",
+      entityType: "deal",
+      recordId: deal.id,
+      nameSnapshot: deal.name ?? "Deal",
+      secondaryIdSnapshot: deal.project_number ?? deal.deal_number ?? null,
+    },
+    fieldChanges,
+    metadata,
+  });
 }
 
 interface StageConfig {
@@ -268,6 +314,7 @@ export function buildBidBoardDealUpdateSql(schemaName: string): string {
             bid_board_project_number IS DISTINCT FROM $14 OR
             bid_board_last_updated_at IS DISTINCT FROM $15::timestamptz
        )
+     RETURNING id, name, deal_number, project_number
   `;
 }
 
@@ -294,12 +341,28 @@ export function updateParams(dealId: string, row: NormalizedBidBoardRow, bidBoar
 function dealMatchSelectSql(schemaName: string): string {
   return `
     SELECT d.id,
+           d.name,
            d.stage_id,
            d.stage_entered_at,
            d.workflow_route,
            d.deal_number,
            d.project_number,
            d.bid_board_project_number,
+           d.bid_board_estimator,
+           d.bid_board_office,
+           d.bid_board_status,
+           d.bid_board_sales_price_per_area,
+           d.bid_board_project_cost,
+           d.bid_board_profit_margin_pct,
+           d.bid_board_total_sales,
+           d.bid_board_created_at,
+           d.bid_board_due_date,
+           d.bid_board_customer_name,
+           d.bid_board_customer_contact_raw,
+           d.bid_board_stage_slug,
+           d.bid_board_stage_family,
+           d.bid_board_stage_status,
+           d.bid_board_last_updated_at,
            d.bid_estimate,
            psc.slug AS stage_slug,
            psc.display_order AS stage_display_order,
@@ -417,10 +480,29 @@ function targetStageSlugForDeal(stageSlug: string, route: WorkflowRoute, row: No
   return stageSlug === "estimating" && (route === "service" || status === "service estimating") ? "service_estimating" : stageSlug;
 }
 
+function buildBidBoardMirrorFieldChanges(deal: DealMatch, row: NormalizedBidBoardRow, bidBoardLastUpdatedAt: string) {
+  return {
+    name: { from: deal.name, to: row.name },
+    bidBoardEstimator: { from: deal.bid_board_estimator, to: row.bidBoardEstimator },
+    bidBoardOffice: { from: deal.bid_board_office, to: row.bidBoardOffice },
+    bidBoardStatus: { from: deal.bid_board_status, to: row.bidBoardStatus },
+    bidBoardSalesPricePerArea: { from: deal.bid_board_sales_price_per_area, to: row.bidBoardSalesPricePerArea },
+    bidBoardProjectCost: { from: deal.bid_board_project_cost, to: row.bidBoardProjectCost },
+    bidBoardProfitMarginPct: { from: deal.bid_board_profit_margin_pct, to: row.bidBoardProfitMarginPct },
+    bidBoardTotalSales: { from: deal.bid_board_total_sales, to: row.bidBoardTotalSales },
+    bidBoardCreatedAt: { from: deal.bid_board_created_at, to: row.bidBoardCreatedAt },
+    bidBoardDueDate: { from: deal.bid_board_due_date, to: row.bidBoardDueDate },
+    bidBoardCustomerName: { from: deal.bid_board_customer_name, to: row.bidBoardCustomerName },
+    bidBoardCustomerContactRaw: { from: deal.bid_board_customer_contact_raw, to: row.bidBoardCustomerContactRaw },
+    bidBoardProjectNumber: { from: deal.bid_board_project_number, to: row.bidBoardProjectNumber },
+    bidBoardLastUpdatedAt: { from: deal.bid_board_last_updated_at, to: bidBoardLastUpdatedAt },
+  };
+}
+
 async function updateBidBoardStageMetadata(
   client: { query: Function },
   schemaName: string,
-  dealId: string,
+  deal: DealMatch,
   expectedStageId: string,
   targetStageSlug: string,
   row: NormalizedBidBoardRow
@@ -437,9 +519,18 @@ async function updateBidBoardStageMetadata(
             updated_at = NOW()
       WHERE id = $1
         AND stage_id = $5`,
-    [dealId, targetStageSlug, stageFamilyForSlug(targetStageSlug), status, expectedStageId]
+    [deal.id, targetStageSlug, stageFamilyForSlug(targetStageSlug), status, expectedStageId]
   );
-  return (result.rowCount ?? 0) > 0;
+  const updated = (result.rowCount ?? 0) > 0;
+  if (updated) {
+    await logBidBoardActivity(client, schemaName, { ...deal, name: deal.name ?? row.name }, {
+      bidBoardStageSlug: { from: deal.bid_board_stage_slug, to: targetStageSlug },
+      bidBoardStageFamily: { from: deal.bid_board_stage_family, to: stageFamilyForSlug(targetStageSlug) },
+      bidBoardStageStatus: { from: deal.bid_board_stage_status, to: status },
+      readOnlySyncedAt: { from: null, to: "now" },
+    }, { source: "stage_metadata_refresh" });
+  }
+  return updated;
 }
 
 function isTemplatesStatus(value: string | null): boolean {
@@ -565,6 +656,10 @@ async function writeEstimateIfNeeded(
     ]
   );
 
+  await logBidBoardActivity(client, schemaName, { ...deal, name: deal.name ?? row.name }, {
+    bidEstimate: { from: oldValue, to: newValue },
+  }, { source: BID_BOARD_ESTIMATE_SYNC_SOURCE, reason: BID_BOARD_ESTIMATE_SYNC_REASON });
+
   const higher = currentCents != null && nextCents > currentCents;
   const lower = currentCents != null && nextCents < currentCents;
   const warning =
@@ -595,7 +690,7 @@ async function writeStageIfSafe(
   const targetSlug = targetStageSlugForDeal(targetStage.slug, route, row);
 
   if (deal.stage_slug === targetSlug) {
-    const refreshed = await updateBidBoardStageMetadata(client, schemaName, deal.id, deal.stage_id, targetSlug, row);
+    const refreshed = await updateBidBoardStageMetadata(client, schemaName, deal, deal.stage_id, targetSlug, row);
     if (!refreshed) {
       return {
         updated: false,
@@ -687,6 +782,14 @@ async function writeStageIfSafe(
       deal.stage_entered_at,
     ]
   );
+
+  await logBidBoardActivity(client, schemaName, { ...deal, name: deal.name ?? row.name }, {
+    stageId: { from: deal.stage_id, to: targetStage.id },
+    bidBoardStageSlug: { from: deal.bid_board_stage_slug, to: targetSlug },
+    bidBoardStageFamily: { from: deal.bid_board_stage_family, to: stageFamily },
+    bidBoardStageStatus: { from: deal.bid_board_stage_status, to: status },
+    readOnlySyncedAt: { from: null, to: "now" },
+  }, { source: "stage_writeback", bidBoardStatus: row.bidBoardStatus });
 
   return { updated: true, skippedNoStageChange: false, skippedBackward: false, skippedTerminal: false, warning: null };
 }
@@ -809,7 +912,17 @@ export async function ingestBidBoardRows(payload: BidBoardSyncPayload) {
 
       metrics.matched++;
       const updateResult = await client.query(updateSql, updateParams(matches[0].id, normalized, bidBoardLastUpdatedAt));
-      if ((updateResult.rowCount ?? 0) > 0) metrics.updated++;
+      if ((updateResult.rowCount ?? 0) > 0) {
+        metrics.updated++;
+        const updateDeal = updateResult.rows?.[0] ?? matches[0];
+        await logBidBoardActivity(
+          client,
+          schemaName,
+          updateDeal,
+          buildBidBoardMirrorFieldChanges(matches[0], normalized, bidBoardLastUpdatedAt),
+          { source: "bid_board_mirror", runId }
+        );
+      }
 
       const estimateResult = await writeEstimateIfNeeded(client, schemaName, matches[0], normalized, changedByUserId);
       if (estimateResult.updated) metrics.estimateUpdated++;

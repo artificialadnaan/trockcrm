@@ -2,6 +2,9 @@ import crypto from "node:crypto";
 import express, { Router } from "express";
 import { WORKFLOW_ROUTES } from "@trock-crm/shared/types";
 import { pool } from "../../db.js";
+import { buildAuditActorFromSystem } from "../audit/audit-logger.js";
+import { logActivityWithPgClient } from "../audit/pg-activity-logger.js";
+import { INTERNAL_RFP_RECEIVER } from "../audit/system-processes.js";
 
 export const internalRfpRoutes = Router();
 
@@ -60,10 +63,27 @@ async function findDeal(sourceDealId: string) {
   for (const schemaName of await listTenantSchemas()) {
     const result = await pool.query(
       `SELECT d.id,
+              d.name,
+              d.deal_number,
+              d.project_number,
+              d.project_type,
+              d.bid_estimate,
+              d.estimator,
+              d.description,
+              d.bid_due_date,
+              d.property_address,
+              d.property_city,
+              d.property_state,
+              d.property_zip,
+              d.property_country,
               d.stage_id,
               d.company_id,
               d.primary_contact_id,
               d.procore_bid_id,
+              d.procore_company_id,
+              d.is_bid_board_owned,
+              d.rfp_approval_status,
+              d.bid_board_linked_at,
               d.assigned_rep_id,
               d.rfp_approval_requested_by,
               d.rfp_approval_request_id,
@@ -115,6 +135,20 @@ function asDateOrNull(value: unknown) {
   if (value == null || value === "") return null;
   const parsed = new Date(String(value));
   return Number.isFinite(parsed.getTime()) ? parsed.toISOString() : null;
+}
+
+function auditFieldKeyForInternalRfpColumn(column: string): string {
+  if (column === "deal_number") return "projectNumber";
+  if (column === "project_type") return "projectType";
+  if (column === "bid_estimate") return "bidEstimate";
+  if (column === "bid_due_date") return "bidDueDate";
+  if (column === "property_address") return "propertyAddress";
+  if (column === "property_city") return "propertyCity";
+  if (column === "property_state") return "propertyState";
+  if (column === "property_zip") return "propertyZip";
+  if (column === "property_country") return "propertyCountry";
+  if (column === "workflow_route") return "workflowRoute";
+  return column;
 }
 
 function isWorkflowRoute(value: string | null): value is (typeof WORKFLOW_ROUTES)[number] {
@@ -258,17 +292,19 @@ internalRfpRoutes.post(
       if (Object.keys(dealUpdates).length > 0) {
         const runDealUpdate = async () => {
           const assignments = Object.keys(dealUpdates).map((column, index) => `${quoteIdent(column)} = $${index + 1}`);
-          await pool.query(
+          return pool.query(
             `UPDATE ${quoteIdent(found.schemaName)}.deals
                 SET ${assignments.join(", ")},
                     updated_at = NOW()
-              WHERE id = $${assignments.length + 1}`,
+              WHERE id = $${assignments.length + 1}
+              RETURNING id, name, deal_number, project_number`,
             [...Object.values(dealUpdates), sourceDealId]
           );
         };
 
+        let updatedDeal: Record<string, unknown> | null = null;
         try {
-          await runDealUpdate();
+          updatedDeal = (await runDealUpdate()).rows[0] ?? null;
         } catch (err) {
           if (!isDealNumberUniqueViolation(err) || !Object.prototype.hasOwnProperty.call(dealUpdates, "deal_number")) {
             throw err;
@@ -280,8 +316,31 @@ internalRfpRoutes.post(
           delete dealUpdates.deal_number;
           rejectField(applied, rejected, "projectNumber");
           if (Object.keys(dealUpdates).length > 0) {
-            await runDealUpdate();
+            updatedDeal = (await runDealUpdate()).rows[0] ?? null;
           }
+        }
+        if (updatedDeal && Object.keys(dealUpdates).length > 0) {
+          const fieldChanges = Object.fromEntries(
+            Object.entries(dealUpdates).map(([column, to]) => [
+              auditFieldKeyForInternalRfpColumn(column),
+              { from: found.deal[column], to },
+            ])
+          );
+          await logActivityWithPgClient({
+            client: pool,
+            schemaName: found.schemaName,
+            actor: buildAuditActorFromSystem({ systemProcess: INTERNAL_RFP_RECEIVER }),
+            action: "update",
+            entity: {
+              tableName: "deals",
+              entityType: "deal",
+              recordId: String(updatedDeal.id ?? sourceDealId),
+              nameSnapshot: String(updatedDeal.name ?? found.deal.name ?? "Deal"),
+              secondaryIdSnapshot: (updatedDeal.project_number ?? updatedDeal.deal_number ?? found.deal.project_number ?? found.deal.deal_number ?? null) as string | null,
+            },
+            fieldChanges,
+            metadata: { rfpApprovalRequestId: payload.rfpApprovalRequestId },
+          });
         }
       }
 
@@ -454,7 +513,7 @@ internalRfpRoutes.post(
       const client = await pool.connect();
       try {
         await client.query("BEGIN");
-        await client.query(
+        const linkageUpdate = await client.query(
           `UPDATE ${quoteIdent(found.schemaName)}.deals
               SET procore_bid_id = $1::bigint,
                   procore_company_id = $2,
@@ -469,9 +528,34 @@ internalRfpRoutes.post(
                 is_bid_board_owned IS DISTINCT FROM true OR
                 rfp_approval_status IS DISTINCT FROM 'approved' OR
                 bid_board_linked_at IS NULL
-              )`,
+              )
+            RETURNING id, name, deal_number, project_number, bid_board_linked_at`,
           [bidboardProjectId, procoreCompanyId, sourceDealId]
         );
+        if ((linkageUpdate.rowCount ?? 0) > 0) {
+          const linkedDeal = linkageUpdate.rows[0] ?? found.deal;
+          await logActivityWithPgClient({
+            client,
+            schemaName: found.schemaName,
+            actor: buildAuditActorFromSystem({ systemProcess: INTERNAL_RFP_RECEIVER }),
+            action: "update",
+            entity: {
+              tableName: "deals",
+              entityType: "deal",
+              recordId: sourceDealId,
+              nameSnapshot: String(linkedDeal.name ?? found.deal.name ?? "Deal"),
+              secondaryIdSnapshot: (linkedDeal.project_number ?? linkedDeal.deal_number ?? found.deal.project_number ?? found.deal.deal_number ?? null) as string | null,
+            },
+            fieldChanges: {
+              procoreBidId: { from: found.deal.procore_bid_id ?? null, to: bidboardProjectId },
+              procoreCompanyId: { from: found.deal.procore_company_id ?? null, to: procoreCompanyId },
+              isBidBoardOwned: { from: found.deal.is_bid_board_owned ?? null, to: true },
+              rfpApprovalStatus: { from: found.deal.rfp_approval_status ?? null, to: "approved" },
+              bidBoardLinkedAt: { from: found.deal.bid_board_linked_at ?? null, to: linkedDeal.bid_board_linked_at ?? "now" },
+            },
+            metadata: { rfpApprovalRequestId: payload.rfpApprovalRequestId, bidboardProjectId },
+          });
+        }
 
         if (canApplyStage) {
           const stageUpdate = await client.query(
@@ -501,6 +585,23 @@ internalRfpRoutes.post(
                 found.deal.stage_entered_at,
               ]
             );
+            await logActivityWithPgClient({
+              client,
+              schemaName: found.schemaName,
+              actor: buildAuditActorFromSystem({ systemProcess: INTERNAL_RFP_RECEIVER }),
+              action: "update",
+              entity: {
+                tableName: "deals",
+                entityType: "deal",
+                recordId: sourceDealId,
+                nameSnapshot: String(found.deal.name ?? "Deal"),
+                secondaryIdSnapshot: (found.deal.project_number ?? found.deal.deal_number ?? null) as string | null,
+              },
+              fieldChanges: {
+                stageId: { from: found.deal.stage_id, to: targetStage.id },
+              },
+              metadata: { rfpApprovalRequestId: payload.rfpApprovalRequestId, bidboardProjectId, targetStageSlug },
+            });
           } else {
             console.warn(`[RFP callback] Skipped stage transition for deal ${sourceDealId}: stage changed during callback`);
           }

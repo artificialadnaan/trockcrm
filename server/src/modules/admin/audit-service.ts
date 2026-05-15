@@ -37,7 +37,28 @@ export async function getAuditLog(
 ): Promise<{ rows: AuditLogRow[]; total: number }> {
   const limit = Math.min(filter.limit ?? 50, 200);
   const offset = ((filter.page ?? 1) - 1) * limit;
-  const conditions: SQL[] = [sql`1=1`];
+  const conditions: SQL[] = [sql`
+    NOT (
+      al.actor_name IS NULL
+      AND al.actor_system_process IS NULL
+      AND al.entity_name_snapshot IS NULL
+      AND EXISTS (
+        SELECT 1
+        FROM audit_log rich
+        WHERE rich.id <> al.id
+          AND rich.table_name = al.table_name
+          AND rich.record_id = al.record_id
+          AND rich.action = al.action
+          AND date_trunc('second', rich.created_at) = date_trunc('second', al.created_at)
+          AND (
+            rich.actor_name IS NOT NULL
+            OR rich.actor_system_process IS NOT NULL
+            OR rich.entity_name_snapshot IS NOT NULL
+            OR rich.field_changes_jsonb IS NOT NULL
+          )
+      )
+    )
+  `];
 
   if (filter.entityType) {
     conditions.push(sql`al.entity_type = ${filter.entityType}`);

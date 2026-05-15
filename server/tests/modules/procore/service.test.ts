@@ -116,6 +116,83 @@ describe("Procore Sync Service", () => {
 
       expect(procoreClient.post).not.toHaveBeenCalled();
     });
+
+    it("createProcoreProject writes a rich Procore Sync audit row after linking the deal", async () => {
+      process.env.PROCORE_COMPANY_ID = "company-1";
+      const { createProcoreProject } = await import("../../../src/modules/procore/sync-service.js");
+      const { procoreClient } = await import("../../../src/lib/procore-client.js");
+      const { db } = await import("../../../src/db.js");
+      vi.mocked(procoreClient.post).mockResolvedValueOnce({ id: 12345 });
+      vi.mocked(db.insert).mockReturnValue({
+        values: vi.fn().mockReturnValue({
+          onConflictDoUpdate: vi.fn().mockResolvedValue([]),
+        }),
+      } as never);
+      const auditRows: Array<Record<string, unknown>> = [];
+      const tenantDb = {
+        select() {
+          return {
+            from() {
+              return {
+                where() {
+                  return {
+                    limit() {
+                      return Promise.resolve([
+                        {
+                          id: "deal-1",
+                          name: "Procore Deal",
+                          dealNumber: "DFW-1-11226-aa",
+                          projectNumber: null,
+                          procoreProjectId: null,
+                          propertyAddress: null,
+                          propertyCity: null,
+                          propertyState: null,
+                          propertyZip: null,
+                        },
+                      ]);
+                    },
+                  };
+                },
+              };
+            },
+          };
+        },
+        update() {
+          return {
+            set() {
+              return {
+                where() {
+                  return Promise.resolve([]);
+                },
+              };
+            },
+          };
+        },
+        insert() {
+          return {
+            values(values: Record<string, unknown>) {
+              auditRows.push(values);
+              return Promise.resolve([]);
+            },
+          };
+        },
+      };
+
+      await createProcoreProject(tenantDb as never, "deal-1", "office-1");
+
+      expect(auditRows).toEqual([
+        expect.objectContaining({
+          tableName: "deals",
+          recordId: "deal-1",
+          action: "update",
+          actorName: "Procore Sync",
+          actorSystemProcess: "Procore Sync",
+          entityNameSnapshot: "Procore Deal",
+          entitySecondaryIdSnapshot: "DFW-1-11226-aa",
+        }),
+      ]);
+      expect(JSON.stringify(auditRows[0]?.fieldChangesJsonb)).toContain("procoreProjectId");
+    });
   });
 
   describe("Stage Mapping Logic", () => {

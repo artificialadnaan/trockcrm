@@ -1,6 +1,9 @@
 import { pool } from "../../db.js";
 import { AppError } from "../../middleware/error-handler.js";
 import { upsertProjectMirror } from "../projects/service.js";
+import { buildAuditActorFromSystem } from "../audit/audit-logger.js";
+import { logActivityWithPgClient } from "../audit/pg-activity-logger.js";
+import { PROCORE_PROJECT_RELAY } from "../audit/system-processes.js";
 
 type QueryClient = {
   query: (text: string, params?: unknown[]) => Promise<{ rows: any[] }>;
@@ -34,6 +37,7 @@ type DealMatch = {
   schemaName: string;
   dealId: string;
   dealNumber: string;
+  dealName?: string | null;
   procoreProjectId: number | null;
 };
 
@@ -165,6 +169,7 @@ async function findDealLinkedToProcoreProject(
               $3::text AS office_slug,
               $4::text AS schema_name,
               id AS deal_id,
+              name AS deal_name,
               deal_number,
               procore_project_id
        FROM ${quoteIdent(schemaName)}.deals
@@ -191,6 +196,7 @@ async function findDealsByProjectNumber(
               $3::text AS office_slug,
               $4::text AS schema_name,
               id AS deal_id,
+              name AS deal_name,
               deal_number,
               procore_project_id
        FROM ${quoteIdent(schemaName)}.deals
@@ -210,6 +216,7 @@ function mapDealMatch(row: any): DealMatch {
     schemaName: row.schema_name,
     dealId: row.deal_id,
     dealNumber: row.deal_number,
+    dealName: row.deal_name ?? null,
     procoreProjectId: row.procore_project_id == null ? null : Number(row.procore_project_id),
   };
 }
@@ -275,7 +282,7 @@ async function linkMatchedDeal(
       [match.dealId]
     );
     const lockedResult = await client.query(
-      `SELECT id, procore_project_id
+      `SELECT id, name, deal_number, project_number, procore_project_id
        FROM ${quoteIdent(match.schemaName)}.deals
        WHERE id = $1 AND is_active = true
        LIMIT 1
@@ -322,6 +329,27 @@ async function linkMatchedDeal(
        WHERE id = $2`,
       [procoreProjectId, match.dealId]
     );
+    await logActivityWithPgClient({
+      client,
+      schemaName: match.schemaName,
+      actor: buildAuditActorFromSystem({ systemProcess: PROCORE_PROJECT_RELAY }),
+      action: "update",
+      entity: {
+        tableName: "deals",
+        entityType: "deal",
+        recordId: match.dealId,
+        nameSnapshot: lockedDeal.name ?? match.dealName ?? payload.procore.projectName ?? match.dealNumber,
+        secondaryIdSnapshot: lockedDeal.project_number ?? lockedDeal.deal_number ?? match.dealNumber,
+      },
+      fieldChanges: {
+        procoreProjectId: { from: currentProcoreId, to: procoreProjectId },
+        procoreLastSyncedAt: { from: null, to: "now" },
+      },
+      metadata: {
+        synchubWebhookLogId: optionalTraceId(payload.synchub?.webhookLogId),
+        procoreProjectNumber: payload.procore.projectNumber,
+      },
+    });
     await client.query(
       `INSERT INTO public.procore_sync_state
          (id, entity_type, procore_id, crm_entity_type, crm_entity_id, office_id,
