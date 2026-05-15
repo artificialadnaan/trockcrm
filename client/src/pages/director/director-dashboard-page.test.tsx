@@ -494,6 +494,15 @@ describe("DirectorDashboardPage", () => {
     expect(html).toContain('href="/reports/performance/rep-activity?range=qtd"');
   });
 
+  it("routes the Closing KPI to closed won deals for the active period", () => {
+    const html = renderPageHtml();
+
+    expect(html).toContain("Closing");
+    expect(html).toContain("1 this quarter");
+    expect(html).toContain('aria-label="View recent closed deals"');
+    expect(html).toContain('href="/deals?filter=won&amp;period=qtd"');
+  });
+
   it("preserves the selected dashboard period in drill-down links", async () => {
     const { container, cleanup } = await renderPageDom();
     try {

@@ -341,9 +341,9 @@ export function DirectorDashboardPage() {
   const selectedPreset = PRESETS.find((p) => p.value === preset) ?? PRESETS[1];
   const activeDealsDestination = buildDealsDrilldownPath("active", preset);
   const wonDealsDestination = buildDealsDrilldownPath("won", preset);
-  // This tile is sourced from period closes, so the drill-down stays in the
-  // deals workspace and sorts that slice by expected close date.
-  const closingDestination = buildDealsDrilldownPath("closing_soon", preset);
+  // This KPI is sourced from recent period closes, so it should drill into the
+  // same closed-won slice rather than forecasted near-close deals.
+  const closingDestination = buildDealsDrilldownPath("won", preset);
   const forecastDestination = buildReportDrilldownPath("/reports/performance/forecast-accuracy", preset, dateRange);
   const activityDestination = buildReportDrilldownPath("/reports/performance/rep-activity", preset, dateRange);
   const staleDealsDestination = buildReportDrilldownPath("/reports", preset, dateRange, "stale-deals");
@@ -577,7 +577,7 @@ export function DirectorDashboardPage() {
             </Link>
             <Link
               to={closingDestination}
-              aria-label="View closing pipeline deals"
+              aria-label="View recent closed deals"
               className="rounded-lg border border-gray-200 bg-gray-50 p-3 transition-colors hover:bg-gray-100 focus:outline-none focus-visible:ring-2 focus-visible:ring-[#CC0000]"
             >
               <Trophy className="h-4 w-4 text-emerald-600" />
