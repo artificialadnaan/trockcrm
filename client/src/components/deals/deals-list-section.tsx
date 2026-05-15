@@ -1,7 +1,8 @@
 import { useEffect, useMemo, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { toast } from "sonner";
-import { Download, Search } from "lucide-react";
+import { CalendarDays, Clock3, Download, MapPin, Search } from "lucide-react";
+import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import { Input } from "@/components/ui/input";
 import {
   Select,
@@ -80,6 +81,41 @@ function formatShortDate(value: string | null | undefined) {
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) return "--";
   return date.toLocaleDateString("en-US", { month: "short", day: "numeric" });
+}
+
+function initials(name: string | null | undefined) {
+  return (name ?? "")
+    .split(" ")
+    .map((part) => part.trim())
+    .filter(Boolean)
+    .slice(0, 2)
+    .map((part) => part[0]?.toUpperCase() ?? "")
+    .join("") || "?";
+}
+
+function getDealPropertyLabel(deal: Deal) {
+  return (
+    deal.propertyAddress ||
+    [deal.propertyCity, deal.propertyState].filter(Boolean).join(", ") ||
+    deal.companyName ||
+    "Property pending"
+  );
+}
+
+function getDealCloseDate(deal: Deal) {
+  return deal.expectedCloseDate ?? deal.actualCloseDate ?? null;
+}
+
+function renderStageChip(label: string) {
+  return (
+    <span
+      className="inline-flex max-w-full items-center rounded-full bg-slate-100 px-2.5 py-1 text-[11px] font-black uppercase tracking-[0.12em] text-slate-600"
+      title={label}
+      aria-label={label}
+    >
+      <span className="block truncate whitespace-nowrap">{label}</span>
+    </span>
+  );
 }
 
 function escapeCsvCell(value: string | number | null | undefined) {
@@ -460,23 +496,32 @@ export function DealsListSection({
     {
       key: "name",
       header: sortHeader("name", "Deal"),
+      headClassName: "md:w-[13.5rem] md:!px-2 lg:w-[15rem] lg:!px-3",
+      cellClassName: "md:w-[13.5rem] md:!px-2 lg:w-[15rem] lg:!px-3",
       render: (deal) => {
         const displayNumber = getDealDisplayNumber(deal);
+        const propertyLabel = getDealPropertyLabel(deal);
         return (
           <div className="min-w-0 space-y-1">
-            <p className="truncate font-black text-slate-950">{deal.name}</p>
+            <p className="truncate whitespace-nowrap font-black text-slate-950" aria-label={deal.name} title={deal.name}>
+              {deal.name}
+            </p>
             <p
               className={cn(
-                "truncate text-xs font-bold uppercase tracking-[0.12em]",
+                "truncate whitespace-nowrap text-xs font-bold uppercase tracking-[0.12em]",
                 displayNumber.isFallback ? "text-slate-400" : "text-brand-red"
               )}
+              aria-label={displayNumber.label || "--"}
+              title={displayNumber.label || "--"}
             >
               {displayNumber.label || "--"}
             </p>
-            <p className="truncate text-xs font-medium text-slate-500">
-              {deal.companyName ||
-                [deal.propertyCity, deal.propertyState].filter(Boolean).join(", ") ||
-                "Account pending"}
+            <p
+              className="truncate whitespace-nowrap text-xs font-medium text-slate-500"
+              aria-label={propertyLabel}
+              title={propertyLabel}
+            >
+              {propertyLabel}
             </p>
           </div>
         );
@@ -485,43 +530,69 @@ export function DealsListSection({
     {
       key: "description",
       header: "Description",
-      headClassName: "hidden md:table-cell md:w-[18rem]",
-      cellClassName: "hidden md:table-cell md:w-[18rem]",
+      headClassName: "hidden lg:table-cell lg:w-[11rem] lg:!px-3",
+      cellClassName: "hidden lg:table-cell lg:w-[11rem] lg:!px-3",
       render: (deal) => renderDescriptionPreview(deal.description),
     },
     {
       key: "owner",
       header: "Owner",
-      render: (deal) =>
-        deal.assignedRepName ?? assigneeNameById.get(deal.assignedRepId) ?? "Unassigned",
+      headClassName: "md:w-[4rem] md:!px-2 lg:w-[7.5rem] lg:!px-3",
+      cellClassName: "md:w-[4rem] md:!px-2 lg:w-[7.5rem] lg:!px-3",
+      render: (deal) => {
+        const ownerName = deal.assignedRepName ?? assigneeNameById.get(deal.assignedRepId) ?? "Unassigned";
+        return (
+          <div className="flex items-center gap-2 md:justify-center lg:justify-start" aria-label={ownerName} title={ownerName}>
+            <Avatar size="sm" className="bg-slate-100">
+              <AvatarFallback>{initials(ownerName)}</AvatarFallback>
+            </Avatar>
+            <span className="hidden truncate whitespace-nowrap text-sm font-medium text-slate-700 lg:inline">
+              {ownerName}
+            </span>
+          </div>
+        );
+      },
     },
     {
       key: "stage",
       header: "Stage",
-      render: (deal) => (
-        <span className="inline-flex rounded-full bg-slate-100 px-2.5 py-1 text-[11px] font-black uppercase tracking-[0.12em] text-slate-600">
-          {deal.stageName ?? stageNameById.get(deal.stageId) ?? deal.stageSlug ?? "Stage"}
-        </span>
-      ),
+      headClassName: "md:w-[8rem] md:!px-2 lg:w-[8.5rem] lg:!px-3",
+      cellClassName: "md:w-[8rem] md:!px-2 lg:w-[8.5rem] lg:!px-3",
+      render: (deal) =>
+        renderStageChip(deal.stageName ?? stageNameById.get(deal.stageId) ?? deal.stageSlug ?? "Stage"),
     },
     {
       key: "days",
       header: sortHeader("stage_entered_at", "Days"),
-      render: (deal) => `${daysInStage(deal.stageEnteredAt)}d`,
+      headClassName: "hidden lg:table-cell lg:w-[3rem] lg:!px-3 lg:text-right",
+      cellClassName: "hidden lg:table-cell lg:w-[3rem] lg:!px-3 lg:text-right",
+      render: (deal) => (
+        <span className="inline-flex justify-end whitespace-nowrap font-medium tabular-nums text-slate-500">
+          {daysInStage(deal.stageEnteredAt)}d
+        </span>
+      ),
     },
     {
       key: "value",
       header: sortHeader("awarded_amount", "Value"),
+      headClassName: "md:w-[5.75rem] md:!px-2 md:text-right lg:w-[6rem] lg:!px-3",
+      cellClassName: "md:w-[5.75rem] md:!px-2 md:text-right lg:w-[6rem] lg:!px-3",
       render: (deal) => (
-        <span className="font-black tabular-nums text-slate-950">
+        <span className="inline-flex justify-end whitespace-nowrap font-black tabular-nums text-slate-950">
           {formatCurrencyCompact(bestEstimate(deal))}
         </span>
       ),
     },
     {
-      key: "lastTouch",
-      header: sortHeader("updated_at", "Last Touch"),
-      render: (deal) => formatShortDate(deal.lastActivityAt ?? deal.updatedAt),
+      key: "closeDate",
+      header: "Close",
+      headClassName: "md:w-[4.75rem] md:!px-2 md:text-right lg:w-[5rem] lg:!px-3",
+      cellClassName: "md:w-[4.75rem] md:!px-2 md:text-right lg:w-[5rem] lg:!px-3",
+      render: (deal) => (
+        <span className="inline-flex justify-end whitespace-nowrap text-sm font-medium text-slate-600">
+          {formatShortDate(getDealCloseDate(deal))}
+        </span>
+      ),
     },
   ];
 
@@ -661,20 +732,104 @@ export function DealsListSection({
             Loading deals...
           </div>
         ) : (
-          <PipelineStageTable
-            rows={deals}
-            columns={tableColumns}
-            tableClassName="table-fixed"
-            pagination={{
-              page: pagination.page,
-              pageSize: pagination.limit,
-              total: pagination.total,
-              totalPages: pagination.totalPages,
-            }}
-            onPageChange={setPage}
-            onRowClick={(deal) => navigate(`/deals/${deal.id}`)}
-            getRowKey={(deal) => deal.id}
-          />
+          <>
+            <div className="space-y-3 md:hidden" aria-label="Deals list cards">
+              <div className="flex items-center justify-between gap-4 px-1">
+                <p className="text-[11px] font-black uppercase tracking-[0.18em] text-slate-500">
+                  {pagination.total} total records
+                </p>
+                <p className="text-sm font-medium text-slate-500">
+                  Page {pagination.page} of {pagination.totalPages || 1}
+                </p>
+              </div>
+              {deals.map((deal) => {
+                const displayNumber = getDealDisplayNumber(deal);
+                const ownerName = deal.assignedRepName ?? assigneeNameById.get(deal.assignedRepId) ?? "Unassigned";
+                const propertyLabel = getDealPropertyLabel(deal);
+                const stageLabel = deal.stageName ?? stageNameById.get(deal.stageId) ?? deal.stageSlug ?? "Stage";
+                return (
+                  <button
+                    key={deal.id}
+                    type="button"
+                    className="min-h-11 w-full rounded-xl border border-slate-200 bg-slate-50/60 p-4 text-left transition hover:border-brand-red/30 hover:bg-white focus:outline-none focus-visible:ring-2 focus-visible:ring-brand-red"
+                    onClick={() => navigate(`/deals/${deal.id}`)}
+                    aria-label={`Open deal ${deal.name}`}
+                  >
+                    <div className="space-y-3">
+                      <div className="space-y-1">
+                        <p className="line-clamp-2 text-sm font-black leading-5 text-slate-950" aria-label={deal.name} title={deal.name}>
+                          {deal.name}
+                        </p>
+                        <p
+                          className={cn(
+                            "truncate whitespace-nowrap text-[11px] font-bold uppercase tracking-[0.12em]",
+                            displayNumber.isFallback ? "text-slate-400" : "text-brand-red"
+                          )}
+                          aria-label={displayNumber.label || "--"}
+                          title={displayNumber.label || "--"}
+                        >
+                          {displayNumber.label || "--"}
+                        </p>
+                      </div>
+
+                      <div className="space-y-3">
+                        <div className="flex min-w-0 items-start gap-2 text-xs font-medium text-slate-500">
+                          <MapPin className="mt-0.5 h-3.5 w-3.5 flex-none text-slate-400" />
+                          <span className="min-w-0 truncate" aria-label={propertyLabel} title={propertyLabel}>
+                            {propertyLabel}
+                          </span>
+                        </div>
+
+                        <div className="grid grid-cols-[minmax(0,1fr)_auto] gap-3">
+                          <div className="flex min-w-0 items-center gap-2">
+                            <Avatar size="sm" className="bg-slate-100">
+                              <AvatarFallback>{initials(ownerName)}</AvatarFallback>
+                            </Avatar>
+                            <span className="truncate text-sm font-medium text-slate-700" aria-label={ownerName} title={ownerName}>
+                              {ownerName}
+                            </span>
+                          </div>
+                          <span className="whitespace-nowrap text-right text-sm font-black tabular-nums text-slate-950">
+                            {formatCurrencyCompact(bestEstimate(deal))}
+                          </span>
+                        </div>
+
+                        <div>{renderStageChip(stageLabel)}</div>
+                      </div>
+
+                      <div className="flex items-center justify-between gap-3 border-t border-slate-200 pt-3 text-xs font-medium text-slate-500">
+                        <span className="inline-flex items-center gap-1 whitespace-nowrap">
+                          <CalendarDays className="h-3.5 w-3.5 text-slate-400" />
+                          {formatShortDate(getDealCloseDate(deal))}
+                        </span>
+                        <span className="inline-flex items-center gap-1 whitespace-nowrap text-right">
+                          <Clock3 className="h-3.5 w-3.5 text-slate-400" />
+                          {daysInStage(deal.stageEnteredAt)}d SLA
+                        </span>
+                      </div>
+                    </div>
+                  </button>
+                );
+              })}
+            </div>
+
+            <div className="hidden overflow-x-auto md:block">
+              <PipelineStageTable
+                rows={deals}
+                columns={tableColumns}
+                tableClassName="table-fixed w-full md:min-w-[44rem] lg:min-w-[58rem] xl:min-w-0"
+                pagination={{
+                  page: pagination.page,
+                  pageSize: pagination.limit,
+                  total: pagination.total,
+                  totalPages: pagination.totalPages,
+                }}
+                onPageChange={setPage}
+                onRowClick={(deal) => navigate(`/deals/${deal.id}`)}
+                getRowKey={(deal) => deal.id}
+              />
+            </div>
+          </>
         )}
       </div>
     </section>
