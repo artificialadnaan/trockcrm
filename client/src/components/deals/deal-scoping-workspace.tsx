@@ -1392,7 +1392,13 @@ export function DealScopingWorkspace({
             <CardContent className="flex flex-wrap items-center gap-3">
               <Button
                 type="button"
-                disabled={editingDisabled || activatingService || readiness?.status === "draft" || intake?.status === "activated"}
+                disabled={
+                  editingDisabled ||
+                  readOnlyModeActive ||
+                  activatingService ||
+                  readiness?.status === "draft" ||
+                  intake?.status === "activated"
+                }
                 onClick={() => void handleActivateService()}
               >
                 {activatingService && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}

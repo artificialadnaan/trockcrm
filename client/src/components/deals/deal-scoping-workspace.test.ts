@@ -696,6 +696,134 @@ describe("DealScopingWorkspace load failures", () => {
     }
   });
 
+  it("disables Activate Service Handoff on readonly-locked deals", async () => {
+    mocks.getDealScopingIntake.mockResolvedValueOnce(makeScopingResponse({
+      intake: {
+        status: "ready",
+        projectTypeId: "project-type-1",
+      },
+      resolved: {
+        projectTypeId: "project-type-1",
+        workflowRoute: "service",
+      },
+      readiness: { status: "ready" },
+    }));
+
+    const { container, cleanup } = await renderWorkspace(
+      makeDeal({
+        sourceLeadId: null,
+        projectTypeId: "project-type-1",
+        workflowRoute: "service",
+        rfpApprovalRequestedAt: "2026-05-12T12:00:00.000Z",
+      }),
+      {
+        mode: "readonly",
+        readOnlySubmittedAt: "2026-05-12T12:00:00.000Z",
+      }
+    );
+
+    try {
+      await vi.waitFor(() => {
+        const activateButton = Array.from(container.querySelectorAll("button")).find(
+          (button) => button.textContent?.includes("Activate Service Handoff")
+        ) as HTMLButtonElement | undefined;
+        expect(activateButton).toBeDefined();
+        expect(activateButton?.disabled).toBe(true);
+      });
+    } finally {
+      cleanup();
+    }
+  });
+
+  it("keeps Activate Service Handoff enabled on editable service deals", async () => {
+    mocks.getDealScopingIntake.mockResolvedValueOnce(makeScopingResponse({
+      intake: {
+        status: "ready",
+        projectTypeId: "project-type-1",
+      },
+      resolved: {
+        projectTypeId: "project-type-1",
+        workflowRoute: "service",
+      },
+      readiness: { status: "ready" },
+    }));
+
+    const { container, cleanup } = await renderWorkspace(
+      makeDeal({
+        sourceLeadId: null,
+        projectTypeId: "project-type-1",
+        workflowRoute: "service",
+      })
+    );
+
+    try {
+      await vi.waitFor(() => {
+        const activateButton = Array.from(container.querySelectorAll("button")).find(
+          (button) => button.textContent?.includes("Activate Service Handoff")
+        ) as HTMLButtonElement | undefined;
+        expect(activateButton).toBeDefined();
+        expect(activateButton?.disabled).toBe(false);
+      });
+    } finally {
+      cleanup();
+    }
+  });
+
+  it("keeps Activate Service Handoff enabled during admin force-edit on readonly deals", async () => {
+    mocks.getDealScopingIntake.mockResolvedValueOnce(makeScopingResponse({
+      intake: {
+        status: "ready",
+        projectTypeId: "project-type-1",
+      },
+      resolved: {
+        projectTypeId: "project-type-1",
+        workflowRoute: "service",
+      },
+      readiness: { status: "ready" },
+    }));
+    const confirmSpy = vi.spyOn(window, "confirm").mockReturnValueOnce(true);
+
+    const { container, cleanup } = await renderWorkspace(
+      makeDeal({
+        sourceLeadId: null,
+        projectTypeId: "project-type-1",
+        workflowRoute: "service",
+        rfpApprovalRequestedAt: "2026-05-12T12:00:00.000Z",
+      }),
+      {
+        mode: "readonly",
+        readOnlySubmittedAt: "2026-05-12T12:00:00.000Z",
+        canForceEdit: true,
+      }
+    );
+
+    try {
+      await vi.waitFor(() => {
+        expect(container.textContent).toContain("Force edit");
+      });
+
+      const forceEditButton = Array.from(container.querySelectorAll("button")).find(
+        (button) => button.textContent?.includes("Force edit")
+      );
+      expect(forceEditButton).toBeDefined();
+
+      await act(async () => {
+        forceEditButton!.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+      });
+
+      await vi.waitFor(() => {
+        const activateButton = Array.from(container.querySelectorAll("button")).find(
+          (button) => button.textContent?.includes("Activate Service Handoff")
+        ) as HTMLButtonElement | undefined;
+        expect(activateButton).toBeDefined();
+        expect(activateButton?.disabled).toBe(false);
+      });
+    } finally {
+      confirmSpy.mockRestore();
+      cleanup();
+    }
+  });
+
   it("disables the scope form and prevents saves when the initial scoping intake request fails", async () => {
     mocks.getDealScopingIntake.mockRejectedValueOnce(
       new Error("projectType cannot be cleared after Opportunity")

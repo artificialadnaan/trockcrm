@@ -67,6 +67,8 @@ import {
 } from "./closeout-service.js";
 import {
   DEAL_TEAM_ROLES,
+  SCOPE_LOCKED_DEAL_PATCH_FIELDS,
+  SCOPE_LOCKED_RESOLVED_FIELDS,
   PUNCH_LIST_TYPES,
   WORKFLOW_TIMER_TYPES,
   getScopeLockedDealPatchFields,
@@ -83,7 +85,7 @@ import {
   routeRevisionToEstimating,
   upsertDealScopingIntake,
 } from "./scoping-service.js";
-import { writeResolvedDealFields } from "./lineage-resolver.js";
+import { getResolvedDeal, writeResolvedDealFields } from "./lineage-resolver.js";
 import { inferDealBidBoardOwnership } from "./workflow-backfill.js";
 import { confirmUpload, getFileById, getPendingUploadMetadata } from "../files/service.js";
 import {
@@ -850,7 +852,13 @@ router.patch("/:id/resolved-fields", async (req, res, next) => {
     const forceEditAfterRfp = patch.forceEditAfterRfp === true;
     delete patch.forceEditAfterRfp;
 
-    const scopeLockedFields = getScopeLockedResolvedFields(patch);
+    const hasLockedResolvedFieldCandidates = Object.keys(patch).some((field) =>
+      SCOPE_LOCKED_RESOLVED_FIELDS.has(field)
+    );
+    const existingResolved = hasLockedResolvedFieldCandidates
+      ? (await getResolvedDeal(req.tenantDb!, req.params.id)).resolved as Record<string, unknown>
+      : {};
+    const scopeLockedFields = getScopeLockedResolvedFields(patch, existingResolved);
     const writePolicy = scopeLockedFields.length > 0
       ? await assertDealScopingWriteAllowed(req.tenantDb!, req.params.id, {
           role: req.user!.role,
@@ -1224,10 +1232,24 @@ router.patch("/:id", async (req, res, next) => {
     delete body.forceEditAfterRfp;
     delete body.migrationMode;
 
-    const scopeLockedFields = getScopeLockedDealPatchFields(body);
-    if (scopeLockedFields.length > 0) {
-      await assertDealRouteAccess(req, req.params.id);
+    const hasLockedDealFieldCandidates = Object.keys(body).some((field) =>
+      SCOPE_LOCKED_DEAL_PATCH_FIELDS.has(field)
+    );
+    const existingDeal = hasLockedDealFieldCandidates
+      ? await getDealById(
+          req.tenantDb!,
+          req.params.id,
+          req.user!.role,
+          req.user!.id
+        )
+      : null;
+    if (hasLockedDealFieldCandidates && !existingDeal) {
+      throw new AppError(403, "Forbidden");
     }
+    const scopeLockedFields = getScopeLockedDealPatchFields(
+      body,
+      (existingDeal ?? {}) as Record<string, unknown>
+    );
     const writePolicy = scopeLockedFields.length > 0
       ? await assertDealScopingWriteAllowed(req.tenantDb!, req.params.id, {
           role: req.user!.role,
