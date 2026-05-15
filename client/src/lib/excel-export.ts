@@ -53,8 +53,8 @@ function columnName(index: number) {
   return name;
 }
 
-function excelDateSerial(value: Date) {
-  const utc = Date.UTC(value.getFullYear(), value.getMonth(), value.getDate());
+export function excelDateSerial(value: Date) {
+  const utc = Date.UTC(value.getUTCFullYear(), value.getUTCMonth(), value.getUTCDate());
   return Math.round((utc - Date.UTC(1899, 11, 30)) / 86_400_000);
 }
 
