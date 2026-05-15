@@ -21,7 +21,7 @@ import {
 
 const router = Router();
 
-async function listAssignableUsersForRequest(req: any) {
+async function resolveRequestedTaskOfficeId(req: any) {
   const requestedOfficeId = req.headers["x-office-id"] as string | undefined;
   const accessibleOffices = await getAccessibleOffices(
     req.user!.id,
@@ -32,17 +32,25 @@ async function listAssignableUsersForRequest(req: any) {
     throw new AppError(403, "Requested office is not accessible");
   }
 
-  const officeIds = requestedOfficeId
-    ? [requestedOfficeId]
-    : Array.from(new Set(accessibleOffices.map((office) => office.id)));
+  const officeId = requestedOfficeId ?? req.user!.activeOfficeId ?? req.user!.officeId;
+  if (!officeId) {
+    throw new AppError(400, "Task office context is required. Specify x-office-id.");
+  }
+  if (!accessibleOffices.some((office) => office.id === officeId)) {
+    throw new AppError(403, "Requested office is not accessible");
+  }
+
+  return officeId;
+}
+
+async function listAssignableUsersForRequest(req: any) {
+  const officeId = await resolveRequestedTaskOfficeId(req);
   const usersById = new Map<string, { id: string; displayName: string; isActive: boolean }>();
 
-  for (const officeId of officeIds) {
-    const rows = (await listUsers(officeId)) as Array<{ id: string; displayName: string; isActive: boolean }>;
-    for (const user of rows) {
-      if (user.isActive && !usersById.has(user.id)) {
-        usersById.set(user.id, user);
-      }
+  const rows = (await listUsers(officeId)) as Array<{ id: string; displayName: string; isActive: boolean }>;
+  for (const user of rows) {
+    if (user.isActive && !usersById.has(user.id)) {
+      usersById.set(user.id, user);
     }
   }
 
@@ -52,7 +60,7 @@ async function listAssignableUsersForRequest(req: any) {
 async function assertAssignableUser(req: any, userId: string) {
   const users = await listAssignableUsersForRequest(req);
   if (!users.some((user) => user.id === userId)) {
-    throw new AppError(400, "Assigned user is not active or is outside your accessible offices");
+    throw new AppError(400, "Assigned user is not active or is outside the current office");
   }
 }
 

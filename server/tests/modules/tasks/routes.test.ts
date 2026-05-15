@@ -331,7 +331,7 @@ describe("task routes", () => {
           assignedTo: "outside-user",
         },
       })
-    ).rejects.toThrow("Assigned user is not active or is outside your accessible offices");
+    ).rejects.toThrow("Assigned user is not active or is outside the current office");
 
     expect(taskServiceMocks.createTask).not.toHaveBeenCalled();
   });
@@ -350,9 +350,90 @@ describe("task routes", () => {
           assignedTo: "outside-user",
         },
       })
-    ).rejects.toThrow("Assigned user is not active or is outside your accessible offices");
+    ).rejects.toThrow("Assigned user is not active or is outside the current office");
 
     expect(taskServiceMocks.updateTask).not.toHaveBeenCalled();
+  });
+
+  it("defaults assignee loading to the active office instead of aggregating all accessible offices", async () => {
+    authServiceMocks.getAccessibleOffices.mockResolvedValue([
+      { id: "office-1", name: "Office One", slug: "office-one" },
+      { id: "office-2", name: "Office Two", slug: "office-two" },
+    ]);
+    adminUsersMocks.listUsers.mockResolvedValue([
+      { id: "office-1-user", displayName: "Office One User", isActive: true },
+    ]);
+
+    const { res } = await invokeRoute({
+      method: "get",
+      url: "/assignees",
+      user: makeDirectorUser({ activeOfficeId: "office-1" }),
+    });
+
+    expect(adminUsersMocks.listUsers).toHaveBeenCalledTimes(1);
+    expect(adminUsersMocks.listUsers).toHaveBeenCalledWith("office-1");
+    expect(res.body.users).toEqual([{ id: "office-1-user", displayName: "Office One User" }]);
+  });
+
+  it("rejects task creation when the assignee is only active in another accessible office", async () => {
+    authServiceMocks.getAccessibleOffices.mockResolvedValue([
+      { id: "office-1", name: "Office One", slug: "office-one" },
+      { id: "office-2", name: "Office Two", slug: "office-two" },
+    ]);
+    adminUsersMocks.listUsers.mockResolvedValue([
+      { id: "office-1-user", displayName: "Office One User", isActive: true },
+    ]);
+
+    await expect(
+      invokeRoute({
+        method: "post",
+        url: "/",
+        user: makeDirectorUser({ activeOfficeId: "office-1" }),
+        body: {
+          title: "Cross-office task",
+          type: "manual",
+          assignedTo: "office-2-user",
+        },
+      })
+    ).rejects.toThrow("Assigned user is not active or is outside the current office");
+
+    expect(adminUsersMocks.listUsers).toHaveBeenCalledTimes(1);
+    expect(adminUsersMocks.listUsers).toHaveBeenCalledWith("office-1");
+    expect(taskServiceMocks.createTask).not.toHaveBeenCalled();
+  });
+
+  it("allows task creation in a requested office when the assignee belongs to that office", async () => {
+    authServiceMocks.getAccessibleOffices.mockResolvedValue([
+      { id: "office-1", name: "Office One", slug: "office-one" },
+      { id: "office-2", name: "Office Two", slug: "office-two" },
+    ]);
+    adminUsersMocks.listUsers.mockResolvedValue([
+      { id: "office-2-user", displayName: "Office Two User", isActive: true },
+    ]);
+    taskServiceMocks.createTask.mockResolvedValue({
+      id: "task-2",
+      title: "Office Two task",
+      assignedTo: "office-2-user",
+    });
+
+    const { res } = await invokeRoute({
+      method: "post",
+      url: "/",
+      user: makeDirectorUser({ activeOfficeId: "office-1" }),
+      headers: { "x-office-id": "office-2" },
+      body: {
+        title: "Office Two task",
+        type: "manual",
+        assignedTo: "office-2-user",
+      },
+    });
+
+    expect(res.statusCode).toBe(201);
+    expect(adminUsersMocks.listUsers).toHaveBeenCalledWith("office-2");
+    expect(taskServiceMocks.createTask).toHaveBeenCalledWith(
+      expect.any(Object),
+      expect.objectContaining({ assignedTo: "office-2-user" })
+    );
   });
 
   it("filters inactive users out of the assignee picker for directors", async () => {
