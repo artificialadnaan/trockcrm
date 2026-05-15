@@ -19,6 +19,9 @@ import {
   resolveOfficeCode,
   resolveProjectTypeCode,
 } from "../../services/projectNumber.js";
+import { buildAuditActorFromSystem } from "../audit/audit-logger.js";
+import { logActivityWithPgClient } from "../audit/pg-activity-logger.js";
+import { PROCORE_SYNCHUB_WEBHOOK } from "../audit/system-processes.js";
 
 const router = Router();
 type WorkflowRoute = "normal" | "service";
@@ -247,8 +250,11 @@ router.post("/opportunities", requireSyncHubSecret, async (req, res, next) => {
     if (existingDealId) {
       // Fetch current deal state for stage comparison and mirror updates
       const currentDealResult = await client.query(
-        `SELECT id, stage_id, stage_entered_at, workflow_route, is_bid_board_owned,
+        `SELECT id, name, deal_number, project_number,
+                stage_id, stage_entered_at, workflow_route, is_bid_board_owned,
                 proposal_status, estimating_substage, actual_close_date,
+                dd_estimate, bid_estimate, awarded_amount, proposal_notes,
+                bid_board_stage_slug, bid_board_stage_family, bid_board_stage_status,
                 lost_reason_id, lost_notes, lost_competitor, lost_at
            FROM ${schemaName}.deals
           WHERE id = $1`,
@@ -487,6 +493,43 @@ router.post("/opportunities", requireSyncHubSecret, async (req, res, next) => {
         ]
       );
 
+      const webhookFieldChanges: Record<string, { from: unknown; to: unknown }> = {
+        stageId: { from: currentDeal.stage_id, to: mirrorResult.updates.stageId },
+        bidBoardStageSlug: { from: currentDeal.bid_board_stage_slug ?? null, to: mirrorResult.updates.bidBoardStageSlug },
+        bidBoardStageFamily: { from: currentDeal.bid_board_stage_family ?? null, to: mirrorResult.updates.bidBoardStageFamily },
+        bidBoardStageStatus: { from: currentDeal.bid_board_stage_status ?? null, to: mirrorResult.updates.bidBoardStageStatus },
+        readOnlySyncedAt: { from: null, to: mirrorResult.updates.readOnlySyncedAt },
+      };
+      const optionalWebhookFields = [
+        { key: "ddEstimate", column: "dd_estimate", value: mirrorResult.updates.ddEstimate },
+        { key: "bidEstimate", column: "bid_estimate", value: mirrorResult.updates.bidEstimate },
+        { key: "awardedAmount", column: "awarded_amount", value: mirrorResult.updates.awardedAmount },
+        { key: "proposalNotes", column: "proposal_notes", value: mirrorResult.updates.proposalNotes },
+        { key: "estimatingSubstage", column: "estimating_substage", value: mirrorResult.updates.estimatingSubstage },
+        { key: "proposalStatus", column: "proposal_status", value: mirrorResult.updates.proposalStatus },
+        { key: "actualCloseDate", column: "actual_close_date", value: mirrorResult.updates.actualCloseDate },
+      ] as const;
+      for (const { key, column, value } of optionalWebhookFields) {
+        if (value !== undefined && value !== null) {
+          webhookFieldChanges[key] = { from: currentDeal[column] ?? null, to: value };
+        }
+      }
+      await logActivityWithPgClient({
+        client,
+        schemaName,
+        actor: buildAuditActorFromSystem({ systemProcess: PROCORE_SYNCHUB_WEBHOOK }),
+        action: "update",
+        entity: {
+          tableName: "deals",
+          entityType: "deal",
+          recordId: existingDealId,
+          nameSnapshot: currentDeal.name ?? name,
+          secondaryIdSnapshot: currentDeal.project_number ?? currentDeal.deal_number ?? null,
+        },
+        fieldChanges: webhookFieldChanges,
+        metadata: { procoreBidId: procore_bid_id ?? null, bidBoardId: bid_board_id },
+      });
+
       await client.query("COMMIT");
       console.log(
         `[SyncHub] Updated existing deal ${existingDealId} from Bid Board push` +
@@ -599,7 +642,7 @@ router.post("/opportunities", requireSyncHubSecret, async (req, res, next) => {
                END,
                $21, $22, $23, $24, $25, $26, $27, $28, $29, $30, $31, $32, $33,
                $34, $35)
-       RETURNING id`,
+       RETURNING id, name, deal_number, project_number`,
       [
         dealNumber,
         name,
@@ -639,7 +682,34 @@ router.post("/opportunities", requireSyncHubSecret, async (req, res, next) => {
       ]
     );
 
-    const newDealId: string = insertResult.rows[0].id;
+    const insertedDeal = insertResult.rows[0];
+    const newDealId: string = insertedDeal.id;
+
+    await logActivityWithPgClient({
+      client,
+      schemaName,
+      actor: buildAuditActorFromSystem({ systemProcess: PROCORE_SYNCHUB_WEBHOOK }),
+      action: "insert",
+      entity: {
+        tableName: "deals",
+        entityType: "deal",
+        recordId: newDealId,
+        nameSnapshot: insertedDeal.name ?? name,
+        secondaryIdSnapshot: insertedDeal.project_number ?? insertedDeal.deal_number ?? dealNumber,
+      },
+      fieldChanges: {
+        name: { from: null, to: name },
+        stageId: { from: null, to: mirrorResult.updates.stageId },
+        assignedRepId: { from: null, to: assignedRepId },
+        bidEstimate: { from: null, to: mirrorResult.updates.bidEstimate ?? null },
+        ddEstimate: { from: null, to: mirrorResult.updates.ddEstimate ?? null },
+        awardedAmount: { from: null, to: mirrorResult.updates.awardedAmount ?? null },
+        workflowRoute: { from: null, to: workflow_route },
+        bidBoardStageSlug: { from: null, to: mirrorResult.updates.bidBoardStageSlug },
+        readOnlySyncedAt: { from: null, to: mirrorResult.updates.readOnlySyncedAt },
+      },
+      metadata: { procoreBidId: procore_bid_id ?? null, bidBoardId: bid_board_id },
+    });
 
     // Write to job_queue so worker can fire deal.created notification
     await client.query(

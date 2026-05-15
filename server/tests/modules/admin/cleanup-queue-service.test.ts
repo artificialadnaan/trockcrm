@@ -388,7 +388,16 @@ describe("cleanup queue service", () => {
     expect(updateDealMock).toHaveBeenCalledWith(
       tenantDb,
       "deal-1",
-      { assignedRepId: "rep-1" },
+      {
+        assignedRepId: "rep-1",
+        auditContext: expect.objectContaining({
+          actor: expect.objectContaining({
+            role: "director",
+            type: "user",
+            userId: "director-1",
+          }),
+        }),
+      },
       "director",
       "director-1",
       "office-2"
@@ -396,7 +405,17 @@ describe("cleanup queue service", () => {
     expect(updateLeadMock).toHaveBeenCalledWith(
       tenantDb,
       "lead-1",
-      { assignedRepId: "rep-1", officeId: "office-2" },
+      {
+        assignedRepId: "rep-1",
+        officeId: "office-2",
+        auditContext: expect.objectContaining({
+          actor: expect.objectContaining({
+            role: "director",
+            type: "user",
+            userId: "director-1",
+          }),
+        }),
+      },
       "director",
       "director-1"
     );

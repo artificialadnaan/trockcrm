@@ -20,6 +20,8 @@ import { AppError } from "../../middleware/error-handler.js";
 import { sendSystemEmailWithMetadata } from "../../lib/resend-client.js";
 import { getStageBySlug } from "../pipeline/service.js";
 import { transitionLeadStage } from "./service.js";
+import { buildAuditActorFromSystem } from "../audit/audit-logger.js";
+import { DUE_DILIGENCE_WORKER } from "../audit/system-processes.js";
 import type {
   ExistingCustomerSignal,
   LeadDueDiligenceDetectionSignal,
@@ -500,6 +502,12 @@ async function maybeAutoTransitionAfterDdApproval(
       targetStageId: qualifiedLeadStage.id,
       userId: input.actorUserId,
       userRole: "admin",
+      auditContext: {
+        actor: buildAuditActorFromSystem({
+          systemProcess: DUE_DILIGENCE_WORKER,
+          userId: input.actorUserId,
+        }),
+      },
     });
 
     if (!result.ok) {

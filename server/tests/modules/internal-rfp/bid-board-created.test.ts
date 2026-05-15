@@ -51,10 +51,17 @@ function mockDeal(
       return {
         rows: [{
           id: "deal-1",
+          name: "Austin Center",
+          deal_number: "DFW-4-12345-aa",
+          project_number: null,
           stage_id: "stage-1",
           company_id: null,
           primary_contact_id: null,
           procore_bid_id: existingBidId,
+          procore_company_id: null,
+          is_bid_board_owned: false,
+          rfp_approval_status: "requested",
+          bid_board_linked_at: null,
           assigned_rep_id: "rep-1",
           rfp_approval_requested_by: "user-rfp",
           rfp_approval_request_id: rfpApprovalRequestId,
@@ -101,6 +108,16 @@ describe("POST /api/internal/bid-board-created", () => {
     expect(updateCall?.[1]).toContain("123456");
     expect(updateCall?.[1]).toContain("598134325683880");
     expect(updateCall?.[1]).toContain("deal-1");
+    const auditCalls = queryMock.mock.calls.filter((call) => String(call[0]).includes("INSERT INTO \"office_dallas\".audit_log"));
+    expect(auditCalls.length).toBeGreaterThanOrEqual(1);
+    expect(auditCalls[0]?.[1]).toEqual(expect.arrayContaining([
+      "deals",
+      "deal-1",
+      "update",
+      "Internal RFP Receiver",
+      "Austin Center",
+      "DFW-4-12345-aa",
+    ]));
   });
 
   it("moves normal-route deals to estimating when linked", async () => {

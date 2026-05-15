@@ -4,6 +4,7 @@ import { pool } from "../../../src/db.js";
 import { sendSystemEmailWithMetadata } from "../../../src/lib/resend-client.js";
 import { getStageBySlug } from "../../../src/modules/pipeline/service.js";
 import { transitionLeadStage } from "../../../src/modules/leads/service.js";
+import { DUE_DILIGENCE_WORKER } from "../../../src/modules/audit/system-processes.js";
 import {
   notificationRecipientAssignments,
   notificationRecipientGroups,
@@ -804,6 +805,13 @@ describe("decideLeadDueDiligenceApproval", () => {
       targetStageId: "stage-qualified-lead",
       userId: "director-1",
       userRole: "admin",
+      auditContext: {
+        actor: expect.objectContaining({
+          type: "system",
+          systemProcess: DUE_DILIGENCE_WORKER,
+          userId: "director-1",
+        }),
+      },
     });
   });
 
@@ -928,6 +936,13 @@ describe("decideDueDiligenceByToken", () => {
       targetStageId: "stage-qualified-lead",
       userId: "requester-1",
       userRole: "admin",
+      auditContext: {
+        actor: expect.objectContaining({
+          type: "system",
+          systemProcess: DUE_DILIGENCE_WORKER,
+          userId: "requester-1",
+        }),
+      },
     });
   });
 

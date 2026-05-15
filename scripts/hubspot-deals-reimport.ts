@@ -13,6 +13,9 @@ import {
   resolveProjectTypeCode,
 } from "../server/src/services/projectNumber.js";
 import { isProjectTypeValue, normalizeProjectType } from "../shared/src/types/project-types.js";
+import { buildAuditActorFromSystem } from "../server/src/modules/audit/audit-logger.js";
+import { logActivityWithPgClient } from "../server/src/modules/audit/pg-activity-logger.js";
+import { HUBSPOT_REIMPORT } from "../server/src/modules/audit/system-processes.js";
 
 /**
  * HubSpot deals re-import assumptions:
@@ -621,6 +624,51 @@ interface ApplyResult {
   errors: Array<{ hubspotRecordId: string; message: string }>;
 }
 
+type AppliedDealRow = {
+  id: string;
+  name: string | null;
+  project_number: string | null;
+  deal_number: string | null;
+};
+
+function auditFieldKeyForHubSpotReimportField(field: SafeUpdateField): string | null {
+  if (field === "amount") return "bidEstimate";
+  if (field === "deal_name") return "name";
+  if (field === "project_number") return "projectNumber";
+  if (field === "project_type") return "projectType";
+  return null;
+}
+
+function entityForAppliedDeal(row: AppliedDealRow) {
+  return {
+    tableName: "deals",
+    entityType: "deal" as const,
+    recordId: row.id,
+    nameSnapshot: row.name ?? "Deal",
+    secondaryIdSnapshot: row.project_number ?? row.deal_number ?? null,
+  };
+}
+
+async function logHubSpotReimportActivity(
+  client: pg.PoolClient,
+  tenant: string,
+  action: "insert" | "update",
+  deal: AppliedDealRow,
+  fieldChanges: Record<string, { from: unknown; to: unknown }>,
+  metadata: Record<string, unknown>
+) {
+  if (Object.keys(fieldChanges).length === 0) return;
+  await logActivityWithPgClient({
+    client,
+    schemaName: tenant,
+    actor: buildAuditActorFromSystem({ systemProcess: HUBSPOT_REIMPORT }),
+    action,
+    entity: entityForAppliedDeal(deal),
+    fieldChanges,
+    metadata,
+  });
+}
+
 async function fetchUserLookup(client: pg.PoolClient): Promise<Map<string, string>> {
   const { rows } = await client.query<{ id: string; display_name: string }>(
     `SELECT id, display_name FROM public.users WHERE is_active = true`
@@ -702,7 +750,7 @@ async function insertMissingDeal(
   row: CsvDealRow,
   userLookup: Map<string, string>,
   stageLookup: Map<string, string>
-): Promise<void> {
+): Promise<AppliedDealRow> {
   const schema = quoteIdent(tenant);
   const assignedRepId = row.dealOwner
     ? userLookup.get(normalizeComparableText(row.dealOwner) ?? "") ?? null
@@ -721,7 +769,7 @@ async function insertMissingDeal(
     createdAt,
   });
 
-  await client.query(
+  const insertResult = await client.query<AppliedDealRow>(
     `INSERT INTO ${schema}.deals (
       deal_number,
       name,
@@ -740,7 +788,8 @@ async function insertMissingDeal(
       is_active
     ) VALUES (
       $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,true
-    )`,
+    )
+    RETURNING id, name, project_number, deal_number`,
     [
       dealNumber,
       row.dealName || "Unnamed Deal",
@@ -758,6 +807,19 @@ async function insertMissingDeal(
       parseDate(row.lastModifiedDate) ?? createdAt,
     ]
   );
+  const deal = insertResult.rows[0];
+  await logHubSpotReimportActivity(client, tenant, "insert", deal, {
+    name: { from: null, to: deal.name },
+    stageId: { from: null, to: stageId },
+    assignedRepId: { from: null, to: assignedRepId },
+    bidEstimate: { from: null, to: validateAmount(row.amount) },
+    source: { from: null, to: "hubspot_deals_reimport_2026_05_14" },
+    hubspotDealId: { from: null, to: row.hubspotRecordId },
+    projectNumber: { from: null, to: row.projectNumber },
+    projectType: { from: null, to: writableProjectType },
+    workflowRoute: { from: null, to: workflowRoute },
+  }, { hubspotRecordId: row.hubspotRecordId });
+  return deal;
 }
 
 async function updateExistingDeal(
@@ -790,7 +852,29 @@ async function updateExistingDeal(
   sets.push(`updated_at = $${index++}::timestamptz`);
   values.push(entry.csvRow.lastModifiedDate);
   values.push(entry.crmDeal.id);
-  await client.query(`UPDATE ${schema}.deals SET ${sets.join(", ")} WHERE id = $${index}`, values);
+  const updateResult = await client.query<AppliedDealRow>(
+    `UPDATE ${schema}.deals SET ${sets.join(", ")} WHERE id = $${index}
+     RETURNING id, name, project_number, deal_number`,
+    values
+  );
+  const deal = updateResult.rows[0] ?? {
+    id: entry.crmDeal.id,
+    name: entry.csvRow.dealName || entry.crmDeal.name,
+    project_number: entry.csvRow.projectNumber ?? entry.crmDeal.projectNumber,
+    deal_number: entry.crmDeal.projectNumber,
+  };
+  const auditFieldChanges: Record<string, { from: unknown; to: unknown }> = {};
+  for (const diff of actionableDiffs) {
+    const key = auditFieldKeyForHubSpotReimportField(diff.field);
+    if (!key) continue;
+    auditFieldChanges[key] = {
+      from: diff.currentValue,
+      to: diff.field === "amount" ? validateAmount(diff.csvValue) : diff.csvValue,
+    };
+  }
+  await logHubSpotReimportActivity(client, tenant, "update", deal, auditFieldChanges, {
+    hubspotRecordId: entry.csvRow.hubspotRecordId,
+  });
   return true;
 }
 
@@ -993,7 +1077,7 @@ function validatePlanBeforeApply(plan: ReimportPlan): void {
   );
 }
 
-async function applyPlan(client: pg.PoolClient, tenant: string, plan: ReimportPlan): Promise<ApplyResult> {
+export async function applyPlan(client: pg.PoolClient, tenant: string, plan: ReimportPlan): Promise<ApplyResult> {
   if (plan.shouldStopForAmbiguousRate) {
     throw new Error("Refusing to apply: ambiguous match rate exceeds 5%");
   }
