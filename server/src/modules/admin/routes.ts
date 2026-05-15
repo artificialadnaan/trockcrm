@@ -26,7 +26,7 @@ import {
 import {
   listPipelineStages, updatePipelineStage, reorderPipelineStages,
 } from "./pipeline-service.js";
-import { getAuditLog, getAuditLogEntityTypes } from "./audit-service.js";
+import { getAuditLog, getAuditLogCount, getAuditLogEntityTypes } from "./audit-service.js";
 import {
   getAdminPhotoAuditEvents,
   parseCsvQueryParam,
@@ -833,6 +833,32 @@ router.get(
       const entityTypes = await getAuditLogEntityTypes(req.tenantDb!);
       await req.commitTransaction!();
       return res.json({ entityTypes });
+    } catch (err) {
+      return next(err);
+    }
+  }
+);
+
+router.get(
+  "/admin/audit/count",
+  requireDirector,
+  tenantMiddleware,
+  async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const {
+        entityType, actorQuery, action, fromDate, toDate,
+      } = req.query as Record<string, string>;
+
+      const result = await getAuditLogCount(req.tenantDb!, {
+        entityType: entityType || undefined,
+        actorQuery: actorQuery || undefined,
+        action: action as any || undefined,
+        fromDate: fromDate || undefined,
+        toDate: toDate || undefined,
+      });
+
+      await req.commitTransaction!();
+      return res.json(result);
     } catch (err) {
       return next(err);
     }

@@ -53,6 +53,16 @@ export interface AuditLogGroupEntry {
 
 export type AuditLogFeedItem = AuditLogSingleEntry | AuditLogGroupEntry;
 
+export interface AuditLogFeedResult {
+  rows: AuditLogFeedItem[];
+  hasMore: boolean;
+  total?: number;
+}
+
+export interface AuditLogCountResult {
+  total: number;
+}
+
 interface GroupAuditOptions {
   minGroupSize?: number;
   maxGapSeconds?: number;
@@ -167,45 +177,38 @@ export async function getAuditLog(
   tenantDb: TenantDb,
   userRole: UserRole,
   filter: AuditLogFilter = {}
-): Promise<{ rows: AuditLogFeedItem[]; total: number }> {
+): Promise<AuditLogFeedResult> {
   if (filter.expand) {
-    return getAuditLogGroupChildren(tenantDb, userRole, filter);
+    const expanded = await getAuditLogGroupChildren(tenantDb, userRole, filter);
+    return {
+      rows: expanded.rows,
+      hasMore: expanded.rows.length < expanded.total,
+      total: expanded.total,
+    };
   }
 
   const limit = Math.min(filter.limit ?? 50, 200);
   const offset = ((filter.page ?? 1) - 1) * limit;
-  const conditions: SQL[] = [buildDedupCondition()];
-
-  if (filter.entityType) {
-    conditions.push(sql`al.entity_type = ${filter.entityType}`);
-  }
-  if (filter.actorQuery) {
-    const pattern = `%${filter.actorQuery.trim()}%`;
-    conditions.push(sql`COALESCE(al.actor_name, u.display_name, '') ILIKE ${pattern}`);
-  }
-  if (filter.action) {
-    conditions.push(sql`al.action = ${filter.action}`);
-  }
-  if (filter.fromDate) {
-    conditions.push(sql`al.created_at >= ${filter.fromDate}::timestamptz`);
-  }
-  if (filter.toDate) {
-    conditions.push(sql`al.created_at <= (${filter.toDate}::date + INTERVAL '1 day')::timestamptz`);
-  }
-
-  const where = conditions.reduce((acc, cond) => sql`${acc} AND ${cond}`);
-  const countResult = await tenantDb.execute(
-    buildGroupedFeedCountSql(where)
-  );
-  const countRows = ((countResult as unknown) as { rows?: Array<{ total: number }> }).rows ?? [];
-  const total = Number(countRows[0]?.total ?? 0);
-
-  const dataResult = await tenantDb.execute(buildGroupedFeedDataSql(where, limit, offset));
+  const where = buildAuditLogWhere(filter);
+  const dataResult = await tenantDb.execute(buildGroupedFeedDataSql(where, limit + 1, offset));
 
   const dataRows = ((dataResult as unknown) as { rows?: Array<Record<string, unknown>> }).rows ?? [];
+  const hasMore = dataRows.length > limit;
   return {
-    rows: dataRows.map((row) => mapFeedItem(row, userRole)),
-    total,
+    rows: dataRows.slice(0, limit).map((row) => mapFeedItem(row, userRole)),
+    hasMore,
+  };
+}
+
+export async function getAuditLogCount(
+  tenantDb: TenantDb,
+  filter: AuditLogFilter = {}
+): Promise<AuditLogCountResult> {
+  const where = buildAuditLogWhere(filter);
+  const countResult = await tenantDb.execute(buildGroupedFeedCountSql(where));
+  const countRows = ((countResult as unknown) as { rows?: Array<{ total: number }> }).rows ?? [];
+  return {
+    total: Number(countRows[0]?.total ?? 0),
   };
 }
 
@@ -228,7 +231,7 @@ async function getAuditLogGroupChildren(
   ];
 
   if (filter.entityType) {
-    conditions.push(sql`al.entity_type = ${filter.entityType}`);
+    conditions.push(sql`COALESCE(al.entity_type, al.table_name) = ${filter.entityType}`);
   }
   if (filter.action) {
     conditions.push(sql`al.action = ${filter.action}`);
@@ -383,6 +386,29 @@ function buildGroupedFeedCte(where: SQL): SQL {
       WHERE group_stats.group_key IS NULL
     )
   `;
+}
+
+function buildAuditLogWhere(filter: AuditLogFilter): SQL {
+  const conditions: SQL[] = [buildDedupCondition()];
+
+  if (filter.entityType) {
+    conditions.push(sql`COALESCE(al.entity_type, al.table_name) = ${filter.entityType}`);
+  }
+  if (filter.actorQuery) {
+    const pattern = `%${filter.actorQuery.trim()}%`;
+    conditions.push(sql`COALESCE(al.actor_name, u.display_name, '') ILIKE ${pattern}`);
+  }
+  if (filter.action) {
+    conditions.push(sql`al.action = ${filter.action}`);
+  }
+  if (filter.fromDate) {
+    conditions.push(sql`al.created_at >= ${filter.fromDate}::timestamptz`);
+  }
+  if (filter.toDate) {
+    conditions.push(sql`al.created_at <= (${filter.toDate}::date + INTERVAL '1 day')::timestamptz`);
+  }
+
+  return conditions.reduce((acc, cond) => sql`${acc} AND ${cond}`);
 }
 
 function buildGroupedFeedCountSql(where: SQL): SQL {

@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { getAuditLog, groupAuditLogRows } from "../../../src/modules/admin/audit-service.js";
+import { getAuditLog, getAuditLogCount, groupAuditLogRows } from "../../../src/modules/admin/audit-service.js";
 
 function extractSqlText(value: unknown): string {
   if (typeof value === "string") return value;
@@ -16,19 +16,27 @@ describe("audit activity feed dedup", () => {
   it("filters legacy trigger rows only when a rich row exists with matching field-change content", async () => {
     const execute = vi
       .fn()
-      .mockResolvedValueOnce({ rows: [{ total: 1 }] })
       .mockResolvedValueOnce({
         rows: [{
+          item_type: "single",
           id: 101,
           action: "update",
           entity_type: "deal",
           entity_name: "Rich Deal",
           entity_secondary_id_snapshot: "DFW-1-11526-aa",
+          actor_system_process: "Bid Board Sync",
+          record_id: "deal-101",
           actor_label: "Bid Board Sync",
           actor_type: "system",
           field_changes_jsonb: [],
           visibility_scope: "internal",
           created_at: "2026-05-15T10:00:00.000Z",
+          start_time: null,
+          end_time: null,
+          total_count: null,
+          distinct_entity_count: null,
+          preview_entities: null,
+          child_entries: null,
         }],
       });
 
@@ -45,6 +53,57 @@ describe("audit activity feed dedup", () => {
     expect(sqlText).toContain("rich.field_changes_jsonb::text = al.field_changes_jsonb::text");
     expect(sqlText).toContain("rich.actor_system_process IS NOT NULL");
     expect(sqlText).toContain("al.actor_name IS NULL");
+  });
+
+  it("uses the coalesced entity filter and avoids the blocking count query on main feed loads", async () => {
+    const rows = Array.from({ length: 51 }, (_, index) => ({
+      item_type: "single",
+      id: index + 1,
+      action: "update",
+      entity_type: "deals",
+      entity_name: `Deal ${index + 1}`,
+      entity_secondary_id_snapshot: `DFW-${index + 1}`,
+      actor_system_process: null,
+      record_id: `deal-${index + 1}`,
+      actor_label: "Kevin Scott",
+      actor_type: "user",
+      field_changes_jsonb: [],
+      visibility_scope: "internal",
+      created_at: "2026-05-15T10:00:00.000Z",
+      start_time: null,
+      end_time: null,
+      total_count: null,
+      distinct_entity_count: null,
+      preview_entities: null,
+      child_entries: null,
+    }));
+
+    const execute = vi.fn().mockResolvedValueOnce({ rows });
+
+    const result = await getAuditLog({ execute } as never, "admin", {
+      entityType: "deals",
+      limit: 50,
+    });
+    const sqlText = extractSqlText(execute.mock.calls[0]?.[0]);
+
+    expect(execute).toHaveBeenCalledTimes(1);
+    expect(sqlText).toContain("COALESCE(al.entity_type, al.table_name) =");
+    expect(sqlText).toContain("LIMIT ");
+    expect(result.rows).toHaveLength(50);
+    expect(result.hasMore).toBe(true);
+  });
+
+  it("builds the count query with the coalesced entity filter so legacy rows are included", async () => {
+    const execute = vi.fn().mockResolvedValueOnce({ rows: [{ total: 105244 }] });
+
+    const result = await getAuditLogCount({ execute } as never, {
+      entityType: "deals",
+    });
+    const sqlText = extractSqlText(execute.mock.calls[0]?.[0]);
+
+    expect(result.total).toBe(105244);
+    expect(sqlText).toContain("COALESCE(al.entity_type, al.table_name) =");
+    expect(sqlText).toContain("SELECT COUNT(*)::int AS total FROM feed_items");
   });
 });
 

@@ -28,6 +28,8 @@ describe("AuditLogPage", () => {
         },
       ],
       total: 352,
+      totalLoading: false,
+      hasMore: true,
       page: 1,
       setPage: vi.fn(),
       loading: false,
