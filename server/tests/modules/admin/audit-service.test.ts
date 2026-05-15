@@ -20,8 +20,10 @@ function makeExpandedRow(id: number) {
 
 describe("expanded audit log pagination", () => {
   it.each([
+    { page: 0, limit: 100, rowCount: 20, total: 20, expected: false },
     { page: 3, limit: 100, rowCount: 20, total: 220, expected: false },
     { page: 2, limit: 100, rowCount: 100, total: 220, expected: true },
+    { page: 2, limit: 100, rowCount: 100, total: 200, expected: false },
     { page: 1, limit: 100, rowCount: 50, total: 50, expected: false },
     { page: 1, limit: 100, rowCount: 100, total: 200, expected: true },
   ])(
