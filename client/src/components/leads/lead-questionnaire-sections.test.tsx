@@ -7,7 +7,7 @@ import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { LeadQuestionnaireSections } from "./lead-questionnaire-sections";
 import { CLEAR_SELECTION_VALUE, sanitizeQuestionAnswerForSave } from "./questionnaire-answer-normalization";
-import type { LeadQuestionnaireNode } from "@/hooks/use-leads";
+import type { LeadAnswerValue, LeadQuestionnaireNode } from "@/hooks/use-leads";
 
 (globalThis as unknown as { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -419,14 +419,14 @@ describe("LeadQuestionnaireSections", () => {
 
   it("scrolls when a scope card is activated but not when typing inside a selected panel", () => {
     let updateAnswers: React.Dispatch<
-      React.SetStateAction<Record<string, string | boolean | null>>
+      React.SetStateAction<Record<string, LeadAnswerValue>>
     > | null = null;
 
     function Harness() {
-      const [answers, setAnswers] = React.useState<Record<string, string | boolean | null>>({});
+      const [answers, setAnswers] = React.useState<Record<string, LeadAnswerValue>>({});
       updateAnswers = setAnswers;
 
-      const handleAnswerChange = (key: string, value: string | boolean | null) => {
+      const handleAnswerChange = (key: string, value: LeadAnswerValue) => {
         setAnswers((current) => ({
           ...current,
           [key]: value,
