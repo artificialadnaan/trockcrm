@@ -149,6 +149,7 @@ export function LeadQuestionnaireSections({
 }: LeadQuestionnaireSectionsProps) {
   const [activeScopeGroupKey, setActiveScopeGroupKey] = useState<string | null>(null);
   const suppressAutoActivateRef = useRef(false);
+  const scopePanelRefs = useRef(new Map<string, HTMLDivElement | null>());
   const scopedNodes = useMemo(() => nodes.filter((node) => node.nodeType === "question"), [nodes]);
   const nodeById = useMemo(() => new Map(nodes.map((node) => [node.id, node])), [nodes]);
   const visibleNodes = useMemo(() => {
@@ -279,6 +280,19 @@ export function LeadQuestionnaireSections({
     if (!selectedScopeIds.has(groupKey)) return;
     setActiveScopeGroupKey(groupKey);
   };
+
+  useEffect(() => {
+    if (!activeScopeGroupKey || !selectedScopeIds.has(activeScopeGroupKey)) {
+      return;
+    }
+
+    const panel = scopePanelRefs.current.get(activeScopeGroupKey);
+    if (!panel || typeof panel.scrollIntoView !== "function") {
+      return;
+    }
+
+    panel.scrollIntoView({ behavior: "smooth", block: "start" });
+  }, [activeScopeGroupKey, selectedScopeIds]);
 
   const renderQuestion = (node: LeadQuestionnaireNode, options?: { nested?: boolean }) => {
     const override = renderQuestionOverride?.(node);
@@ -481,16 +495,18 @@ export function LeadQuestionnaireSections({
     );
   };
 
-  const activeScopeGroup = scopeGroups.find((group) => group.key === activeScopeGroupKey) ?? null;
-  const activeScopeContentNodes = useMemo(() => {
-    if (!activeScopeGroup?.appliesNode) return [];
-    return activeScopeGroup.nodes
-      .filter((node) => node.parentNodeId === activeScopeGroup.appliesNode?.id)
+  const selectedScopeGroups = useMemo(
+    () => scopeGroups.filter((group) => selectedScopeIds.has(group.key)),
+    [scopeGroups, selectedScopeIds]
+  );
+
+  const getScopeContentNodes = (group: ScopeGroup) => {
+    if (!group.appliesNode) return [];
+    return group.nodes
+      .filter((node) => node.parentNodeId === group.appliesNode?.id)
       .filter((node) => visibleNodeIds.has(node.id))
       .sort((left, right) => left.displayOrder - right.displayOrder);
-  }, [activeScopeGroup, visibleNodeIds]);
-  const activeBranchNodes = activeScopeContentNodes.filter(isBranchNode);
-  const activeRegularNodes = activeScopeContentNodes.filter((node) => !isBranchNode(node));
+  };
 
   return (
     <>
@@ -513,27 +529,48 @@ export function LeadQuestionnaireSections({
             onSelect={toggleScopeSelection}
             onActivate={activateScope}
           />
-          {activeScopeGroup ? (
-            <div className="space-y-4 rounded-lg border p-4">
-              <div className="space-y-1">
-                <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
-                  Selected scope
-                </p>
-                <h4 className="text-lg font-semibold">{activeScopeGroup.label}</h4>
-              </div>
-              {activeBranchNodes.length > 0 ? (
-                <div className="space-y-3">
-                  <p className="text-sm font-medium">Branch details</p>
-                  <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
-                    {activeBranchNodes.map((node) => renderNodeTree(node))}
+          {selectedScopeGroups.length > 0 ? (
+            <div className="space-y-4">
+              {selectedScopeGroups.map((group) => {
+                const scopeContentNodes = getScopeContentNodes(group);
+                const branchNodes = scopeContentNodes.filter(isBranchNode);
+                const regularNodes = scopeContentNodes.filter((node) => !isBranchNode(node));
+                const active = activeScopeGroupKey === group.key;
+
+                return (
+                  <div
+                    key={group.key}
+                    ref={(node) => {
+                      scopePanelRefs.current.set(group.key, node);
+                    }}
+                    data-scope-panel={group.key}
+                    className={cn(
+                      "space-y-4 rounded-lg border p-4",
+                      active && "ring-2 ring-pink-300 ring-offset-2"
+                    )}
+                  >
+                    <div className="space-y-1">
+                      <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
+                        Selected scope
+                      </p>
+                      <h4 className="text-lg font-semibold">{group.label}</h4>
+                    </div>
+                    {branchNodes.length > 0 ? (
+                      <div className="space-y-3">
+                        <p className="text-sm font-medium">Branch details</p>
+                        <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
+                          {branchNodes.map((node) => renderNodeTree(node))}
+                        </div>
+                      </div>
+                    ) : null}
+                    {regularNodes.length > 0 ? (
+                      <div className="space-y-3">
+                        {regularNodes.map((node) => renderNodeTree(node))}
+                      </div>
+                    ) : null}
                   </div>
-                </div>
-              ) : null}
-              {activeRegularNodes.length > 0 ? (
-                <div className="space-y-3">
-                  {activeRegularNodes.map((node) => renderNodeTree(node))}
-                </div>
-              ) : null}
+                );
+              })}
             </div>
           ) : null}
         </section>
