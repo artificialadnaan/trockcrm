@@ -25,6 +25,10 @@ const unansweredPlaceholderHotfixMigrationSql = readFileSync(
   new URL("../../../../migrations/0118_unanswered_placeholder_life_safety_hotfix.sql", import.meta.url),
   "utf8"
 );
+const unansweredPlaceholderHotfixFollowupMigrationSql = readFileSync(
+  new URL("../../../../migrations/0119_unanswered_placeholder_life_safety_followup.sql", import.meta.url),
+  "utf8"
+);
 
 function node(overrides: Partial<typeof projectTypeQuestionNodes.$inferSelect>) {
   return {
@@ -561,6 +565,23 @@ describe("questionnaire-service universal questionnaire", () => {
 
     expect(snapshot.answers.life_safety).toBeNull();
     expect(template.nodes.find((entry) => entry.key === "life_safety")?.inputType).toBe("boolean");
+  });
+
+  it("ships a follow-up migration that always updates the public life_safety node and only targets literal office_ tenant schemas", () => {
+    expect(unansweredPlaceholderHotfixFollowupMigrationSql).toMatch(/UPDATE public\.project_type_question_nodes/i);
+    expect(unansweredPlaceholderHotfixFollowupMigrationSql).toMatch(/schema_name\s+~\s+'\^office_\[a-z0-9_]\+\$'/i);
+    expect(unansweredPlaceholderHotfixFollowupMigrationSql).not.toMatch(/schema_name\s+LIKE\s+'office_%'/i);
+
+    const publicUpdateIndex = unansweredPlaceholderHotfixFollowupMigrationSql.indexOf(
+      "UPDATE public.project_type_question_nodes"
+    );
+    const loopStartIndex = unansweredPlaceholderHotfixFollowupMigrationSql.indexOf("FOR schema_name_var IN");
+    const loopEndIndex = unansweredPlaceholderHotfixFollowupMigrationSql.indexOf("END LOOP");
+
+    expect(publicUpdateIndex).toBeGreaterThanOrEqual(0);
+    expect(loopStartIndex).toBeGreaterThanOrEqual(0);
+    expect(loopEndIndex).toBeGreaterThan(loopStartIndex);
+    expect(publicUpdateIndex < loopStartIndex || publicUpdateIndex > loopEndIndex).toBe(true);
   });
 
   it("preserves literal __unanswered__ in free-text questionnaire answers", async () => {

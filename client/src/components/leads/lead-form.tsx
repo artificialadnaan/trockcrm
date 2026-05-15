@@ -219,7 +219,7 @@ function normalizeLeadSourceForForm(lead?: LeadFormLead, initialSource?: string)
   };
 }
 
-function getEditableFormState(
+export function getEditableFormState(
   lead?: LeadFormLead,
   initialValues?: LeadCreateFormProps["initialValues"],
   fallbackOfficeCode = ""
@@ -262,11 +262,12 @@ function getEditableFormState(
           : "",
     } as Record<string, string>,
     projectTypeQuestionAnswers: {
+      ...(lead?.projectTypeQuestionPayload?.answers ?? {}),
+      // Legacy payload provides initial values; v2 questionnaire answers override for matching keys.
       ...normalizeStoredQuestionAnswers(
         lead?.leadQuestionnaire?.answers ?? {},
         questionnaireNodes
       ),
-      ...(lead?.projectTypeQuestionPayload?.answers ?? {}),
     } as Record<string, LeadAnswerValue>,
   };
 }

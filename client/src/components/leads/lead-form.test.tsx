@@ -7,7 +7,7 @@ import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { renderToStaticMarkup } from "react-dom/server";
 import { MemoryRouter } from "react-router-dom";
-import { LeadForm } from "./lead-form";
+import { getEditableFormState, LeadForm } from "./lead-form";
 import type { LeadQuestionnaireNode } from "@/hooks/use-leads";
 import type { PropertySurface } from "@/hooks/use-properties";
 
@@ -1700,5 +1700,153 @@ describe("LeadForm", () => {
     expect(html).not.toContain("Project Questions");
     expect(html).not.toContain("Bid Due Date");
     expect(html).not.toContain("2026-05-01");
+  });
+
+  it("prefers v2 questionnaire answers over stale legacy payload answers for matching keys", () => {
+    const formState = getEditableFormState({
+      id: "lead-1",
+      name: "Lead One",
+      convertedDealId: null,
+      convertedDealNumber: null,
+      companyId: "company-1",
+      companyName: "Acme",
+      stageId: "stage-new",
+      propertyId: "property-1",
+      propertyName: "Palm Villas",
+      propertyAddress: "123 Main",
+      propertyCity: "Dallas",
+      propertyState: "TX",
+      propertyZip: "75001",
+      source: "Referral",
+      description: "",
+      projectTypeId: "type-1",
+      projectType: null,
+      qualificationPayload: {},
+      projectTypeQuestionPayload: {
+        projectTypeId: "type-1",
+        answers: { permit_question: "no" },
+      },
+      leadQuestionnaire: {
+        projectTypeId: "type-1",
+        nodes: [
+          {
+            id: "node-1",
+            projectTypeId: null,
+            parentNodeId: null,
+            parentOptionValue: null,
+            nodeType: "question",
+            key: "permit_question",
+            label: "Is this project Permitted",
+            prompt: null,
+            inputType: "select",
+            options: [
+              { value: "yes", label: "Yes" },
+              { value: "no", label: "No" },
+            ],
+            isRequired: false,
+            displayOrder: 10,
+            isActive: true,
+          },
+        ],
+        allNodes: [],
+        answers: {
+          permit_question: "yes",
+        },
+      } as any,
+      stageEnteredAt: "2026-04-22T00:00:00.000Z",
+    } as any);
+
+    expect(formState.projectTypeQuestionAnswers.permit_question).toBe("yes");
+  });
+
+  it("falls back to legacy payload questionnaire answers when no v2 answer exists", () => {
+    const formState = getEditableFormState({
+      id: "lead-1",
+      name: "Lead One",
+      convertedDealId: null,
+      convertedDealNumber: null,
+      companyId: "company-1",
+      companyName: "Acme",
+      stageId: "stage-new",
+      propertyId: "property-1",
+      propertyName: "Palm Villas",
+      propertyAddress: "123 Main",
+      propertyCity: "Dallas",
+      propertyState: "TX",
+      propertyZip: "75001",
+      source: "Referral",
+      description: "",
+      projectTypeId: "type-1",
+      projectType: null,
+      qualificationPayload: {},
+      projectTypeQuestionPayload: {
+        projectTypeId: "type-1",
+        answers: { permit_question: "no" },
+      },
+      leadQuestionnaire: {
+        projectTypeId: "type-1",
+        nodes: [
+          {
+            id: "node-1",
+            projectTypeId: null,
+            parentNodeId: null,
+            parentOptionValue: null,
+            nodeType: "question",
+            key: "permit_question",
+            label: "Is this project Permitted",
+            prompt: null,
+            inputType: "select",
+            options: [
+              { value: "yes", label: "Yes" },
+              { value: "no", label: "No" },
+            ],
+            isRequired: false,
+            displayOrder: 10,
+            isActive: true,
+          },
+        ],
+        allNodes: [],
+        answers: {},
+      } as any,
+      stageEnteredAt: "2026-04-22T00:00:00.000Z",
+    } as any);
+
+    expect(formState.projectTypeQuestionAnswers.permit_question).toBe("no");
+  });
+
+  it("masks unanswered placeholders in legacy summary rendering when question metadata is absent", () => {
+    const html = renderToStaticMarkup(
+      <MemoryRouter>
+        <LeadForm
+          lead={{
+            id: "lead-1",
+            name: "Lead One",
+            convertedDealId: null,
+            convertedDealNumber: null,
+            companyId: "company-1",
+            companyName: "Acme",
+            stageId: "stage-new",
+            propertyId: "property-1",
+            propertyName: "Palm Villas",
+            propertyAddress: "123 Main",
+            propertyCity: "Dallas",
+            propertyState: "TX",
+            propertyZip: "75001",
+            source: "Referral",
+            description: "",
+            projectTypeId: "type-1",
+            projectType: null,
+            qualificationPayload: {},
+            projectTypeQuestionPayload: {
+              projectTypeId: "type-1",
+              answers: { permit_question: "__unanswered__" },
+            },
+            stageEnteredAt: "2026-04-22T00:00:00.000Z",
+          }}
+        />
+      </MemoryRouter>
+    );
+
+    expect(html).not.toContain("__unanswered__");
   });
 });

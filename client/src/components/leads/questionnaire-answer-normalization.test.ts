@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   CLEAR_SELECTION_VALUE,
+  shouldNormalizeUnansweredPlaceholder,
   normalizeStoredQuestionAnswers,
   sanitizeQuestionAnswerForSave,
 } from "./questionnaire-answer-normalization";
@@ -73,6 +74,44 @@ describe("questionnaire answer normalization", () => {
 
     expect(sanitizeQuestionAnswerForSave(selectNode, CLEAR_SELECTION_VALUE)).toBeNull();
     expect(sanitizeQuestionAnswerForSave(booleanNode, CLEAR_SELECTION_VALUE)).toBeNull();
+  });
+
+  it("masks unanswered placeholders when question metadata is absent", () => {
+    expect(shouldNormalizeUnansweredPlaceholder(undefined)).toBe(true);
+  });
+
+  it("preserves literal __unanswered__ for free-text nodes while masking typed nodes", () => {
+    const textNode = makeQuestionNode({
+      id: "project-notes",
+      key: "project_notes",
+      label: "Project Notes",
+      inputType: "textarea",
+    });
+    const selectNode = makeQuestionNode({
+      id: "market-type",
+      key: "market_type",
+      label: "Market Type",
+      inputType: "select",
+      options: [{ value: "garden", label: "Garden" }],
+    });
+
+    expect(shouldNormalizeUnansweredPlaceholder(textNode)).toBe(false);
+    expect(shouldNormalizeUnansweredPlaceholder(selectNode)).toBe(true);
+  });
+
+  it("does not erase a real option value that matches the clear sentinel", () => {
+    const selectNode = makeQuestionNode({
+      id: "special-select",
+      key: "special_select",
+      label: "Special Select",
+      inputType: "select",
+      options: [
+        { value: CLEAR_SELECTION_VALUE, label: "Literal clear" },
+        { value: "other", label: "Other" },
+      ],
+    });
+
+    expect(sanitizeQuestionAnswerForSave(selectNode, CLEAR_SELECTION_VALUE)).toBe(CLEAR_SELECTION_VALUE);
   });
 
   it("preserves literal __unanswered__ in free-text answers", () => {
