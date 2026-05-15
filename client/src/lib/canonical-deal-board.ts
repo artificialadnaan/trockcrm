@@ -4,6 +4,7 @@ import {
   getDealStageLabelBySlug,
   getDealStageMetadata,
   normalizeDealStageSlug,
+  workflowRouteFromStage,
 } from "@/lib/pipeline-ownership";
 
 type DealStageLike = {
@@ -26,7 +27,8 @@ export function buildCanonicalDealBoardColumns(
   return getDealBoardStageSlugs().map((slug) => {
     const matchingRawColumns = (rawColumns ?? []).filter((column) => {
       const rawSlug = column.stage.slug;
-      return normalizeDealStageSlug(rawSlug, "normal") === slug || normalizeDealStageSlug(rawSlug, "service") === slug;
+      const columnRoute = workflowRouteFromStage(column.stage as DealStageLike);
+      return normalizeDealStageSlug(rawSlug, columnRoute) === slug;
     });
     const cards = deals.filter((deal) => {
       const workflowRoute = deal.workflowRoute ?? "normal";
@@ -51,9 +53,10 @@ export function buildCanonicalDealBoardColumns(
           normalizeDealStageSlug(stage.slug, "service") === slug
       ) ??
       rawColumns?.find(
-        (column) =>
-          normalizeDealStageSlug(column.stage.slug, "normal") === slug ||
-          normalizeDealStageSlug(column.stage.slug, "service") === slug
+        (column) => {
+          const columnRoute = workflowRouteFromStage(column.stage as DealStageLike);
+          return normalizeDealStageSlug(column.stage.slug, columnRoute) === slug;
+        }
       )?.stage;
     const hasBackendAggregate = matchingRawColumns.length > 0;
 
