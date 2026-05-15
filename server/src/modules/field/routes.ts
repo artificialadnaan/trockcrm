@@ -20,8 +20,8 @@ export const fieldRoutes = Router();
 
 function parseOptionalPositiveInt(value: unknown): number | undefined {
   if (typeof value !== "string") return undefined;
-  const parsed = Number.parseInt(value, 10);
-  if (Number.isNaN(parsed) || parsed < 1 || parsed > 100) {
+  const parsed = Number(value);
+  if (!Number.isInteger(parsed) || parsed < 1 || parsed > 100) {
     throw new AppError(400, "limit must be a positive integer between 1 and 100");
   }
   return parsed;
