@@ -1,6 +1,7 @@
 import { Link } from "react-router-dom";
 import { ReportFilterBar, useReportFilters } from "@/components/reports/report-filter-bar";
 import { usePortfolioLoadReport } from "@/hooks/use-reports";
+import { sheetsFromReport } from "@/lib/excel-export";
 import {
   EmptyState,
   ErrorState,
@@ -24,6 +25,8 @@ export function PortfolioLoadPage() {
     <OperationsReportShell
       title="Portfolio Load"
       description="Active work grouped by company, property, concentration, and geography."
+      exportFilename="portfolio-load-report"
+      exportSheets={sheetsFromReport("Portfolio Load", data)}
     >
       <ReportFilterBar />
       {loading ? <LoadingState /> : null}

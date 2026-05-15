@@ -60,10 +60,10 @@ export function TaskCreateDialog({
   const [assignees, setAssignees] = useState<Assignee[]>([]);
   const [deals, setDeals] = useState<DealOption[]>([]);
 
-  const canAssign = user?.role === "admin" || user?.role === "director";
+  const canAssign = user?.role === "admin" || user?.role === "director" || user?.role === "rep";
   const isProjectScoped = Boolean(projectScopedProjectId);
 
-  // Fetch assignees for directors/admins
+  // Fetch assignees for every role that can create assignable tasks.
   useEffect(() => {
     if (!canAssign || !open) return;
     api<{ users: Assignee[] }>("/tasks/assignees")
@@ -187,7 +187,7 @@ export function TaskCreateDialog({
               <label className="text-xs text-muted-foreground mb-1 block">Assignee</label>
               <Select value={assignedTo} onValueChange={(v) => setAssignedTo(v ?? "")}>
                 <SelectTrigger>
-                  <SelectValue placeholder={isProjectScoped ? "Choose assignee" : "Assign to myself"} />
+                  <SelectValue placeholder={isProjectScoped ? "Choose assignee" : "Assign to teammate"} />
                 </SelectTrigger>
                 <SelectContent>
                   {assignees.map((u) => (

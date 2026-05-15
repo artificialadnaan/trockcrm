@@ -1,6 +1,7 @@
 import { ClipboardList } from "lucide-react";
 import { ReportFilterBar, useReportFilters } from "@/components/reports/report-filter-bar";
 import { useProjectReadinessReport } from "@/hooks/use-reports";
+import { sheetsFromReport } from "@/lib/excel-export";
 import {
   DealLink,
   EmptyState,
@@ -23,6 +24,8 @@ export function ProjectReadinessPage() {
     <OperationsReportShell
       title="Project Readiness"
       description="Scoping, estimating, contract, and kickoff completeness for active work."
+      exportFilename="project-readiness-report"
+      exportSheets={sheetsFromReport("Project Readiness", data)}
     >
       <ReportFilterBar />
       {loading ? <LoadingState /> : null}

@@ -89,6 +89,7 @@ describe("operations report pages", () => {
     const html = renderPage(<WorkflowBottlenecksPage />);
 
     expect(html).toContain("Workflow Bottlenecks");
+    expect(html).toContain("Export to Excel");
     expect(html).toContain("Estimating");
     expect(html).toContain("Avery Rep");
     expect(html).toContain("$123,456");
@@ -100,6 +101,7 @@ describe("operations report pages", () => {
     const html = renderPage(<ProjectReadinessPage />);
 
     expect(html).toContain("Project Readiness");
+    expect(html).toContain("Export to Excel");
     expect(html).toContain("Attachments: Site Photos");
     expect(html).toContain("Blake Rep");
     expect(html).toContain("Kickoff readiness is a v1 proxy.");
@@ -109,6 +111,7 @@ describe("operations report pages", () => {
     const html = renderPage(<PortfolioLoadPage />);
 
     expect(html).toContain("Portfolio Load");
+    expect(html).toContain("Export to Excel");
     expect(html).toContain("Acme Properties");
     expect(html).toContain("Acme Tower");
     expect(html).toContain("$250,000");

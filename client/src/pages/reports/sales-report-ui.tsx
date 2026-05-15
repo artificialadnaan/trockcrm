@@ -15,9 +15,12 @@ import {
 } from "recharts";
 import { ArrowLeft, RefreshCw } from "lucide-react";
 import { PageHeader } from "@/components/layout/page-header";
+import { ExportExcelButton } from "@/components/reports/export-excel-button";
 import { ReportFilterBar } from "@/components/reports/report-filter-bar";
 import { Button } from "@/components/ui/button";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
+import type { ExcelSheet } from "@/lib/excel-export";
+export { sheetsFromReport } from "@/lib/excel-export";
 
 export const CHART_COLORS = ["#CC0000", "#0f172a", "#2563eb", "#059669", "#d97706", "#7c3aed"];
 
@@ -55,6 +58,8 @@ export function ReportShell({
   hasData,
   emptyText,
   onRefresh,
+  exportFilename,
+  exportSheets = [],
   children,
 }: {
   eyebrow: string;
@@ -65,6 +70,8 @@ export function ReportShell({
   hasData: boolean;
   emptyText: string;
   onRefresh: () => void;
+  exportFilename?: string;
+  exportSheets?: ExcelSheet[];
   children: React.ReactNode;
 }) {
   return (
@@ -83,6 +90,9 @@ export function ReportShell({
             <RefreshCw className="mr-2 h-4 w-4" />
             Refresh
           </Button>
+          {exportFilename ? (
+            <ExportExcelButton filename={exportFilename} sheets={exportSheets} disabled={loading || !hasData} />
+          ) : null}
         </div>
       </div>
       <ReportFilterBar />

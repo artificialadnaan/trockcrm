@@ -2,6 +2,7 @@ import type { ReactNode } from "react";
 import { AlertTriangle } from "lucide-react";
 import { ReportFilterBar, useReportFilters } from "@/components/reports/report-filter-bar";
 import { useWorkflowBottlenecksReport } from "@/hooks/use-reports";
+import { sheetsFromReport } from "@/lib/excel-export";
 import {
   DealLink,
   EmptyState,
@@ -32,6 +33,8 @@ export function WorkflowBottlenecksPage() {
     <OperationsReportShell
       title="Workflow Bottlenecks"
       description="Stage aging, stuck deals, and handoff pressure for active work."
+      exportFilename="workflow-bottlenecks-report"
+      exportSheets={sheetsFromReport("Workflow Bottlenecks", data)}
     >
       <ReportFilterBar />
       {loading ? <LoadingState /> : null}

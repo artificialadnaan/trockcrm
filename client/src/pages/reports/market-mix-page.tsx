@@ -2,6 +2,7 @@ import { Bar, BarChart, CartesianGrid, Cell, Legend, Pie, PieChart, ResponsiveCo
 import { Card, CardContent } from "@/components/ui/card";
 import { useReportFilters } from "@/components/reports/report-filter-bar";
 import { useMarketMixReport } from "@/hooks/use-reports";
+import { sheetsFromReport } from "@/lib/excel-export";
 import { CHART_COLORS, EmptyState, formatCurrency, formatNumber, formatPercent, KpiCard, ReportPageShell } from "./analytics-page-shared";
 
 export function MarketMixPage() {
@@ -28,6 +29,8 @@ export function MarketMixPage() {
       loading={loading}
       error={error}
       onRefresh={() => void refetch()}
+      exportFilename="market-mix-report"
+      exportSheets={sheetsFromReport("Market Mix", report)}
     >
       {report ? (
         <div className="space-y-6">

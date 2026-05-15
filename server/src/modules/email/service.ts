@@ -1040,8 +1040,10 @@ export async function getEmails(
 
   const conditions: any[] = [];
 
-  // RBAC: reps can only see their own emails; directors/admins see all
-  if (userId && userRole === "rep") {
+  // Inbox views remain mailbox-scoped. Deal views are authorized at the route
+  // level and should return the whole linked deal history regardless of which
+  // teammate mailbox originally synced the message.
+  if (userId && userRole === "rep" && !filters.dealId) {
     conditions.push(eq(emails.userId, userId));
   }
 
@@ -1129,16 +1131,12 @@ export async function getEmailThread(
   tenantDb: TenantDb,
   conversationId: string,
   userId?: string,
-  userRole?: string
+  userRole?: string,
+  canViewDeal?: (dealId: string) => Promise<boolean>
 ) : Promise<EmailThreadResponse> {
   if (!conversationId) return { binding: null, preview: null, emails: [] };
 
   const conditions: any[] = [eq(emails.graphConversationId, conversationId)];
-
-  // RBAC: reps can only see their own emails in the thread
-  if (userId && userRole === "rep") {
-    conditions.push(eq(emails.userId, userId));
-  }
 
   // Thread view: chronological order (oldest first) for natural reading context
   const thread = await tenantDb
@@ -1152,6 +1150,35 @@ export async function getEmailThread(
   }
 
   const mutationContext = await getEmailThreadForMutation(tenantDb, conversationId);
+
+  if (userId && userRole === "rep") {
+    for (const email of thread) {
+      if (email.userId === userId) continue;
+
+      const candidateDealIds = new Set<string>();
+      if (email.dealId) candidateDealIds.add(email.dealId);
+      if (email.assignedEntityType === "deal" && email.assignedEntityId) {
+        candidateDealIds.add(email.assignedEntityId);
+      }
+      if (mutationContext.binding?.dealId) {
+        candidateDealIds.add(mutationContext.binding.dealId);
+      }
+
+      let canReadThroughDeal = false;
+      if (canViewDeal) {
+        for (const dealId of candidateDealIds) {
+          if (await canViewDeal(dealId)) {
+            canReadThroughDeal = true;
+            break;
+          }
+        }
+      }
+
+      if (!canReadThroughDeal) {
+        return { binding: null, preview: null, emails: [] };
+      }
+    }
+  }
 
   let bindingPayload: EmailThreadResponse["binding"] = null;
   if (mutationContext.binding) {

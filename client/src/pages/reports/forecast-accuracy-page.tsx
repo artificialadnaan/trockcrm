@@ -1,7 +1,9 @@
 import { Bar, BarChart, CartesianGrid, Legend, Line, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
 import { PageHeader } from "@/components/layout/page-header";
 import { ReportFilterBar, useReportFilters } from "@/components/reports/report-filter-bar";
+import { ExportExcelButton } from "@/components/reports/export-excel-button";
 import { useForecastAccuracyReport } from "@/hooks/use-reports";
+import { sheetsFromReport } from "@/lib/excel-export";
 import {
   DealLink,
   EmptyState,
@@ -26,6 +28,13 @@ export function ForecastAccuracyPage() {
         description="Commit, best case, weighted pipeline, and actual won reliability by period."
       />
       <ReportFilterBar />
+      <div className="flex justify-end">
+        <ExportExcelButton
+          filename="forecast-accuracy-report"
+          sheets={sheetsFromReport("Forecast Accuracy", data)}
+          disabled={loading || !data}
+        />
+      </div>
 
       {loading ? <LoadingState /> : null}
       {error ? <ErrorState message={error} /> : null}

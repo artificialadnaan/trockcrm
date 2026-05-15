@@ -121,13 +121,38 @@ describe("call recording routes", () => {
     vi.clearAllMocks();
   });
 
-  it("rejects non-admin upload-url requests", async () => {
-    const { nextError } = await invokeRoute("post", "/upload-url", {
+  it("allows reps to request recording upload URLs", async () => {
+    serviceMocks.createUploadUrl.mockResolvedValue({
+      uploadUrl: "https://upload.example.test",
+      recordingId: "rec-1",
+      r2Key: "call-recordings/office-1/rec-1.m4a",
+    });
+
+    const { res, nextError } = await invokeRoute("post", "/upload-url", {
       user: testUser("rep"),
       body: { entityType: "deal", entityId: "deal-1", filename: "call.m4a", mimeType: "audio/m4a" },
     });
 
-    expect((nextError as any).statusCode).toBe(403);
+    expect(nextError).toBeUndefined();
+    expect(res.statusCode).toBe(200);
+    expect(serviceMocks.createUploadUrl).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({
+        uploadedBy: "rep-1",
+        entityType: "deal",
+        entityId: "deal-1",
+      })
+    );
+  });
+
+  it("blocks construction users from requesting upload URLs", async () => {
+    const { res, nextError } = await invokeRoute("post", "/upload-url", {
+      user: testUser("construction"),
+      body: { entityType: "deal", entityId: "deal-1", filename: "call.m4a", mimeType: "audio/m4a" },
+    });
+
+    expect(res.statusCode).toBe(200);
+    expect(nextError).toMatchObject({ statusCode: 403 });
     expect(serviceMocks.createUploadUrl).not.toHaveBeenCalled();
   });
 
@@ -293,14 +318,25 @@ describe("call recording routes", () => {
     expect(serviceMocks.softDelete).not.toHaveBeenCalled();
   });
 
-  it("rejects non-admin upload confirmations", async () => {
-    const { nextError } = await invokeRoute("post", "/:id/confirm", {
+  it("allows reps to confirm uploaded recordings", async () => {
+    serviceMocks.confirmUpload.mockResolvedValue({ id: "rec-1" });
+
+    const { res, nextError } = await invokeRoute("post", "/:id/confirm", {
       user: testUser("rep"),
       params: { id: "rec-1" },
       body: { fileSizeBytes: 100, durationSeconds: 10 },
     });
 
-    expect((nextError as any).statusCode).toBe(403);
-    expect(serviceMocks.confirmUpload).not.toHaveBeenCalled();
+    expect(nextError).toBeUndefined();
+    expect(res.statusCode).toBe(200);
+    expect(serviceMocks.confirmUpload).toHaveBeenCalledWith(
+      expect.anything(),
+      "rec-1",
+      expect.objectContaining({
+        userId: "rep-1",
+        fileSizeBytes: 100,
+        durationSeconds: 10,
+      })
+    );
   });
 });

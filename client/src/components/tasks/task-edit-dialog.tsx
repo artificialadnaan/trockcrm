@@ -74,7 +74,7 @@ export function TaskEditDialog({ task, open, onOpenChange, onUpdated }: TaskEdit
   const [transitionError, setTransitionError] = useState<string | null>(null);
   const [assignees, setAssignees] = useState<Assignee[]>([]);
 
-  const canAssign = user?.role === "admin" || user?.role === "director";
+  const canAssign = user?.role === "admin" || user?.role === "director" || user?.role === "rep";
   const isTerminal = isTerminalTaskStatus(task.status);
   const statusLabel = getTaskStatusLabel(task.status);
   const lifecycleSummary = getTaskLifecycleSummary(task);
@@ -107,7 +107,7 @@ export function TaskEditDialog({ task, open, onOpenChange, onUpdated }: TaskEdit
     setTransitionError(null);
   }, [task]);
 
-  // Fetch assignees for directors/admins
+  // Fetch assignees for every role that can edit assignee selection.
   useEffect(() => {
     if (!canAssign || !open) return;
     api<{ users: Assignee[] }>("/tasks/assignees")

@@ -153,6 +153,8 @@ async function invokeRoute({
       ? "/"
       : url === "/assignees"
         ? "/assignees"
+        : method === "patch"
+          ? "/:id"
         : url.endsWith("/complete")
           ? "/:id/complete"
           : "/:id/transition";
@@ -178,7 +180,7 @@ async function invokeRoute({
     res._resolve = resolve;
     res._reject = reject;
     req.params = routePath === "/:id/transition" ? { id: url.split("/")[1] } : {};
-    if (routePath === "/:id/complete") {
+    if (routePath === "/:id/complete" || routePath === "/:id") {
       req.params = { id: url.split("/")[1] };
     }
     Promise.resolve(handler(req as any, res as any, (err?: any) => {
@@ -219,6 +221,13 @@ function makeRepUser(overrides: Partial<TestUser> = {}): TestUser {
 describe("task routes", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    authServiceMocks.getAccessibleOffices.mockResolvedValue([
+      { id: "office-1", name: "Office One", slug: "office-one" },
+    ]);
+    adminUsersMocks.listUsers.mockResolvedValue([
+      { id: "rep-1", displayName: "Rep One", isActive: true },
+      { id: "admin-1", displayName: "Admin One", isActive: true },
+    ]);
     taskServiceMocks.queueTaskCreateSideEffects.mockResolvedValue({
       shouldEmitAssignmentEvent: false,
     });
@@ -257,17 +266,93 @@ describe("task routes", () => {
     );
   });
 
-  it("returns only the current rep in the assignee picker", async () => {
+  it("returns active office users in the assignee picker for reps", async () => {
+    adminUsersMocks.listUsers.mockResolvedValue([
+      { id: "rep-1", displayName: "Rep One", isActive: true },
+      { id: "admin-1", displayName: "Admin One", isActive: true },
+      { id: "inactive-1", displayName: "Inactive One", isActive: false },
+    ]);
+
     const { res } = await invokeRoute({
       method: "get",
       url: "/assignees",
       user: makeRepUser(),
     });
 
-    expect(adminUsersMocks.listUsers).not.toHaveBeenCalled();
+    expect(adminUsersMocks.listUsers).toHaveBeenCalledWith("office-1");
     expect(res.body.users).toEqual([
       { id: "rep-1", displayName: "Rep One" },
+      { id: "admin-1", displayName: "Admin One" },
     ]);
+  });
+
+  it("honors a rep-selected assignee when creating a manual task", async () => {
+    taskServiceMocks.createTask.mockResolvedValue({
+      id: "task-1",
+      title: "Prep handoff",
+      assignedTo: "admin-1",
+    });
+
+    const { res } = await invokeRoute({
+      method: "post",
+      url: "/",
+      user: makeRepUser(),
+      body: {
+        title: "Prep handoff",
+        type: "manual",
+        assignedTo: "admin-1",
+      },
+    });
+
+    expect(res.statusCode).toBe(201);
+    expect(taskServiceMocks.createTask).toHaveBeenCalledWith(
+      expect.any(Object),
+      expect.objectContaining({
+        title: "Prep handoff",
+        assignedTo: "admin-1",
+        createdBy: "rep-1",
+      })
+    );
+  });
+
+  it("rejects rep task assignment to users outside accessible offices", async () => {
+    adminUsersMocks.listUsers.mockResolvedValue([
+      { id: "rep-1", displayName: "Rep One", isActive: true },
+    ]);
+
+    await expect(
+      invokeRoute({
+        method: "post",
+        url: "/",
+        user: makeRepUser(),
+        body: {
+          title: "Prep handoff",
+          type: "manual",
+          assignedTo: "outside-user",
+        },
+      })
+    ).rejects.toThrow("Assigned user is not active or is outside your accessible offices");
+
+    expect(taskServiceMocks.createTask).not.toHaveBeenCalled();
+  });
+
+  it("rejects rep task reassignment to users outside accessible offices", async () => {
+    adminUsersMocks.listUsers.mockResolvedValue([
+      { id: "rep-1", displayName: "Rep One", isActive: true },
+    ]);
+
+    await expect(
+      invokeRoute({
+        method: "patch",
+        url: "/task-1",
+        user: makeRepUser(),
+        body: {
+          assignedTo: "outside-user",
+        },
+      })
+    ).rejects.toThrow("Assigned user is not active or is outside your accessible offices");
+
+    expect(taskServiceMocks.updateTask).not.toHaveBeenCalled();
   });
 
   it("filters inactive users out of the assignee picker for directors", async () => {

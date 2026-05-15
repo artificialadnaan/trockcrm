@@ -28,6 +28,10 @@ import { getPropertyDetail } from "../properties/service.js";
 
 const router = Router();
 
+function canUserViewDeal(req: any, dealId: string) {
+  return getDealById(req.tenantDb!, dealId, req.user!.role, req.user!.id).then(Boolean);
+}
+
 // POST /api/email/send — compose and send an email
 router.post("/send", async (req, res, next) => {
   try {
@@ -191,7 +195,13 @@ router.get("/contact/:contactId", async (req, res, next) => {
 // GET /api/email/thread/:conversationId — all emails in a thread
 router.get("/thread/:conversationId", async (req, res, next) => {
   try {
-    const thread = await getEmailThread(req.tenantDb!, req.params.conversationId, req.user!.id, req.user!.role);
+    const thread = await getEmailThread(
+      req.tenantDb!,
+      req.params.conversationId,
+      req.user!.id,
+      req.user!.role,
+      (dealId) => canUserViewDeal(req, dealId)
+    );
     await req.commitTransaction!();
     res.json(thread);
   } catch (err) {
@@ -217,7 +227,13 @@ router.post("/thread/:conversationId/assign", async (req, res, next) => {
       actingUserId: req.user!.id,
     });
 
-    const refreshedThread = await getEmailThread(req.tenantDb!, req.params.conversationId, req.user!.id, req.user!.role);
+    const refreshedThread = await getEmailThread(
+      req.tenantDb!,
+      req.params.conversationId,
+      req.user!.id,
+      req.user!.role,
+      (candidateDealId) => canUserViewDeal(req, candidateDealId)
+    );
     await req.commitTransaction!();
     res.json({ ...result, thread: refreshedThread });
   } catch (err) {
@@ -249,7 +265,13 @@ router.post("/thread/:conversationId/reassign", async (req, res, next) => {
       actingUserId: req.user!.id,
     });
 
-    const refreshedThread = await getEmailThread(req.tenantDb!, req.params.conversationId, req.user!.id, req.user!.role);
+    const refreshedThread = await getEmailThread(
+      req.tenantDb!,
+      req.params.conversationId,
+      req.user!.id,
+      req.user!.role,
+      (candidateDealId) => canUserViewDeal(req, candidateDealId)
+    );
     await req.commitTransaction!();
     res.json({ ...result, preview, thread: refreshedThread });
   } catch (err) {
@@ -263,7 +285,13 @@ router.post("/thread/:conversationId/detach", async (req, res, next) => {
     await assertCanMutateEmailThread(req.tenantDb!, thread, req.user!);
 
     await detachThreadByConversation(req.tenantDb!, thread.mailboxAccountId, req.params.conversationId, req.user!.id);
-    const refreshedThread = await getEmailThread(req.tenantDb!, req.params.conversationId, req.user!.id, req.user!.role);
+    const refreshedThread = await getEmailThread(
+      req.tenantDb!,
+      req.params.conversationId,
+      req.user!.id,
+      req.user!.role,
+      (candidateDealId) => canUserViewDeal(req, candidateDealId)
+    );
     await req.commitTransaction!();
     res.json({ success: true, thread: refreshedThread });
   } catch (err) {
@@ -337,7 +365,19 @@ router.get("/:id", async (req, res, next) => {
 
     const isOwner = email.userId === req.user!.id;
     const isAdmin = req.user!.role === "director" || req.user!.role === "admin";
-    if (!isOwner && !isAdmin) {
+    const dealId =
+      email.dealId ??
+      (email.assignedEntityType === "deal" ? email.assignedEntityId : null);
+    let canViewDealEmail = false;
+    if (!isOwner && !isAdmin && dealId) {
+      try {
+        canViewDealEmail = Boolean(await getDealById(req.tenantDb!, dealId, req.user!.role, req.user!.id));
+      } catch {
+        canViewDealEmail = false;
+      }
+    }
+
+    if (!isOwner && !isAdmin && !canViewDealEmail) {
       throw new AppError(403, "You do not have permission to view this email");
     }
 

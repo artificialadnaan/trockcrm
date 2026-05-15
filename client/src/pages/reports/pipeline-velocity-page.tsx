@@ -10,6 +10,7 @@ import {
   KpiStrip,
   Panel,
   ReportShell,
+  sheetsFromReport,
   TableBody,
   TableCell,
   TableHead,
@@ -33,6 +34,8 @@ export function PipelineVelocityPage() {
       hasData={hasRows}
       emptyText="No deals match this filter."
       onRefresh={() => void refetch()}
+      exportFilename="pipeline-velocity-report"
+      exportSheets={sheetsFromReport("Pipeline Velocity", data)}
     >
       {data ? (
         <div className="space-y-6">

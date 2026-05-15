@@ -21,29 +21,45 @@ import {
 
 const router = Router();
 
-// GET /api/tasks/assignees — list users for assignee picker (directors/admins)
+async function listAssignableUsersForRequest(req: any) {
+  const requestedOfficeId = req.headers["x-office-id"] as string | undefined;
+  const accessibleOffices = await getAccessibleOffices(
+    req.user!.id,
+    req.user!.role,
+    req.user!.activeOfficeId ?? req.user!.officeId
+  );
+  if (requestedOfficeId && !accessibleOffices.some((office) => office.id === requestedOfficeId)) {
+    throw new AppError(403, "Requested office is not accessible");
+  }
+
+  const officeIds = requestedOfficeId
+    ? [requestedOfficeId]
+    : Array.from(new Set(accessibleOffices.map((office) => office.id)));
+  const usersById = new Map<string, { id: string; displayName: string; isActive: boolean }>();
+
+  for (const officeId of officeIds) {
+    const rows = (await listUsers(officeId)) as Array<{ id: string; displayName: string; isActive: boolean }>;
+    for (const user of rows) {
+      if (user.isActive && !usersById.has(user.id)) {
+        usersById.set(user.id, user);
+      }
+    }
+  }
+
+  return Array.from(usersById.values());
+}
+
+async function assertAssignableUser(req: any, userId: string) {
+  const users = await listAssignableUsersForRequest(req);
+  if (!users.some((user) => user.id === userId)) {
+    throw new AppError(400, "Assigned user is not active or is outside your accessible offices");
+  }
+}
+
+// GET /api/tasks/assignees — list active users for the assignee picker.
 router.get("/assignees", async (req, res, next) => {
   try {
-    // Reps only see themselves — they can only assign tasks to themselves
-    if (req.user!.role === "rep") {
-      await req.commitTransaction!();
-      res.json({ users: [{ id: req.user!.id, displayName: req.user!.displayName }] });
-      return;
-    }
-
-    const requestedOfficeId = req.headers["x-office-id"] as string | undefined;
-    const accessibleOffices = await getAccessibleOffices(
-      req.user!.id,
-      req.user!.role,
-      req.user!.activeOfficeId ?? req.user!.officeId
-    );
-    const officeId = requestedOfficeId ?? req.user!.activeOfficeId ?? req.user!.officeId;
-    if (requestedOfficeId && !accessibleOffices.some((office) => office.id === requestedOfficeId)) {
-      throw new AppError(403, "Requested office is not accessible");
-    }
-    const rows = (await listUsers(officeId)) as Array<{ id: string; displayName: string; isActive: boolean }>;
-    const users = rows
-      .filter((u) => u.isActive)
+    const users = (await listAssignableUsersForRequest(req))
       .map((u) => ({ id: u.id, displayName: u.displayName }));
     res.json({ users });
   } catch (err) {
@@ -110,10 +126,10 @@ router.post("/", async (req, res, next) => {
       throw new AppError(400, `Invalid task type. Must be one of: ${TASK_TYPES.join(", ")}`);
     }
 
-    // Reps create tasks assigned to themselves; directors/admins can assign to anyone
-    const targetAssignee = req.user!.role === "rep"
-      ? req.user!.id
-      : (assignedTo ?? req.user!.id);
+    const targetAssignee = assignedTo ?? req.user!.id;
+    if (assignedTo) {
+      await assertAssignableUser(req, targetAssignee);
+    }
 
     const task = await createTask(req.tenantDb!, {
       title,
@@ -170,9 +186,8 @@ router.patch("/:id", async (req, res, next) => {
       throw new AppError(400, `Invalid priority. Must be one of: ${TASK_PRIORITIES.join(", ")}`);
     }
 
-    // Reps cannot reassign tasks
-    if (req.user!.role === "rep") {
-      delete body.assignedTo;
+    if (body.assignedTo !== undefined) {
+      await assertAssignableUser(req, body.assignedTo);
     }
 
     const task = await updateTask(

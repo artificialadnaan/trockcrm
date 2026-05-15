@@ -2,6 +2,7 @@ import { Bar, BarChart, CartesianGrid, Line, LineChart, ResponsiveContainer, Too
 import { Card, CardContent } from "@/components/ui/card";
 import { useReportFilters } from "@/components/reports/report-filter-bar";
 import { useCustomerConcentrationReport } from "@/hooks/use-reports";
+import { sheetsFromReport } from "@/lib/excel-export";
 import { EmptyState, formatCurrency, formatDate, formatNumber, formatPercent, KpiCard, ReportPageShell } from "./analytics-page-shared";
 
 export function CustomerConcentrationPage() {
@@ -16,6 +17,8 @@ export function CustomerConcentrationPage() {
       loading={loading}
       error={error}
       onRefresh={() => void refetch()}
+      exportFilename="customer-concentration-report"
+      exportSheets={sheetsFromReport("Customer Concentration", report)}
     >
       {report ? (
         <div className="space-y-6">
