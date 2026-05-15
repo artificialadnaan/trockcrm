@@ -179,16 +179,20 @@ export async function getAuditLog(
   filter: AuditLogFilter = {}
 ): Promise<AuditLogFeedResult> {
   if (filter.expand) {
+    const limit = Math.min(filter.limit ?? 500, 1000);
+    const page = Math.max(filter.page ?? 1, 1);
+    const offset = (page - 1) * limit;
     const expanded = await getAuditLogGroupChildren(tenantDb, userRole, filter);
     return {
       rows: expanded.rows,
-      hasMore: expanded.rows.length < expanded.total,
+      hasMore: offset + expanded.rows.length < expanded.total,
       total: expanded.total,
     };
   }
 
   const limit = Math.min(filter.limit ?? 50, 200);
-  const offset = ((filter.page ?? 1) - 1) * limit;
+  const page = Math.max(filter.page ?? 1, 1);
+  const offset = (page - 1) * limit;
   const where = buildAuditLogWhere(filter);
   const dataResult = await tenantDb.execute(buildGroupedFeedDataSql(where, limit + 1, offset));
 
@@ -246,7 +250,8 @@ async function getAuditLogGroupChildren(
   `);
   const countRows = ((countResult as unknown) as { rows?: Array<{ total: number }> }).rows ?? [];
   const total = Number(countRows[0]?.total ?? 0);
-  const offset = ((filter.page ?? 1) - 1) * limit;
+  const page = Math.max(filter.page ?? 1, 1);
+  const offset = (page - 1) * limit;
   const dataResult = await tenantDb.execute(sql`
     SELECT
       al.id,
