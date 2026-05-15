@@ -18,6 +18,22 @@ type DealStageLike = {
   workflowFamily?: string | null;
 };
 
+type RawColumnRouteLike = DealBoardColumn & {
+  workflowRoute?: "normal" | "service" | null;
+  stage: DealBoardColumn["stage"] & DealStageLike;
+};
+
+function workflowRouteFromColumn(column: RawColumnRouteLike): "normal" | "service" {
+  if (column.workflowRoute === "service") return "service";
+  if (column.workflowRoute === "normal") return "normal";
+
+  const firstCardRoute = column.cards.find((deal) => deal.workflowRoute != null)?.workflowRoute;
+  if (firstCardRoute === "service") return "service";
+  if (firstCardRoute === "normal") return "normal";
+
+  return workflowRouteFromStage(column.stage);
+}
+
 export function buildCanonicalDealBoardColumns(
   rawColumns: DealBoardColumn[] | null | undefined,
   stages: DealStageLike[]
@@ -27,7 +43,7 @@ export function buildCanonicalDealBoardColumns(
   return getDealBoardStageSlugs().map((slug) => {
     const matchingRawColumns = (rawColumns ?? []).filter((column) => {
       const rawSlug = column.stage.slug;
-      const columnRoute = workflowRouteFromStage(column.stage as DealStageLike);
+      const columnRoute = workflowRouteFromColumn(column as RawColumnRouteLike);
       return normalizeDealStageSlug(rawSlug, columnRoute) === slug;
     });
     const cards = deals.filter((deal) => {
@@ -54,7 +70,7 @@ export function buildCanonicalDealBoardColumns(
       ) ??
       rawColumns?.find(
         (column) => {
-          const columnRoute = workflowRouteFromStage(column.stage as DealStageLike);
+          const columnRoute = workflowRouteFromColumn(column as RawColumnRouteLike);
           return normalizeDealStageSlug(column.stage.slug, columnRoute) === slug;
         }
       )?.stage;

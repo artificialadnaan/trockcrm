@@ -212,6 +212,101 @@ describe("buildCanonicalDealBoardColumns", () => {
     });
   });
 
+  it("derives a raw column route from service cards when stage workflow metadata is missing", () => {
+    const columns = buildCanonicalDealBoardColumns(
+      [
+        {
+          stage: {
+            id: "service-estimating",
+            name: "Estimating",
+            slug: "estimating",
+          },
+          count: 2,
+          totalValue: 40_000,
+          cards: [
+            {
+              id: "service-deal-1",
+              dealNumber: "TR-100",
+              name: "Service fallback route",
+              stageId: "service-estimating",
+              pipelineDisposition: "deals",
+              workflowRoute: "service",
+              assignedRepId: "rep-1",
+              companyId: null,
+              propertyId: null,
+              sourceLeadId: null,
+              primaryContactId: null,
+              ddEstimate: "40000",
+              bidEstimate: null,
+              awardedAmount: null,
+              changeOrderTotal: null,
+              description: null,
+              propertyAddress: null,
+              propertyCity: null,
+              propertyState: null,
+              propertyZip: null,
+              projectTypeId: null,
+              regionId: null,
+              source: null,
+              winProbability: null,
+              decisionMakerName: null,
+              decisionProcess: null,
+              budgetStatus: null,
+              incumbentVendor: null,
+              unitCount: null,
+              buildYear: null,
+              forecastWindow: null,
+              forecastCategory: null,
+              forecastConfidencePercent: null,
+              forecastRevenue: null,
+              forecastGrossProfit: null,
+              forecastBlockers: null,
+              nextStep: null,
+              nextStepDueAt: null,
+              nextMilestoneAt: null,
+              supportNeededType: null,
+              supportNeededNotes: null,
+              forecastUpdatedAt: null,
+              forecastUpdatedBy: null,
+              procoreProjectId: null,
+              procoreBidId: null,
+              procoreLastSyncedAt: null,
+              isBidBoardOwned: false,
+              bidBoardStageSlug: null,
+              readOnlySyncedAt: null,
+              lostReasonId: null,
+              lostNotes: null,
+              lostCompetitor: null,
+              lostAt: null,
+              expectedCloseDate: null,
+              actualCloseDate: null, contractSignedDate: null,
+              lastActivityAt: null,
+              stageEnteredAt: "2026-04-23T00:00:00.000Z",
+              isActive: true,
+              hubspotDealId: null,
+              isHubspotSourced: false,
+              createdAt: "2026-04-23T00:00:00.000Z",
+              updatedAt: "2026-04-23T00:00:00.000Z",
+            },
+          ],
+        },
+      ] as never,
+      [
+        {
+          id: "service-estimating",
+          name: "Service Estimating",
+          slug: "service_estimating",
+          workflowFamily: "service_deal",
+        },
+      ]
+    );
+
+    expect(columns.find((column) => column.stage.slug === "service_estimating")).toMatchObject({
+      count: 2,
+      totalValue: 40_000,
+    });
+  });
+
   it("maps deal_canceled cards into the canonical lost column", () => {
     const columns = buildCanonicalDealBoardColumns(
       [
