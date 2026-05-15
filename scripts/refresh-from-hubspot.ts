@@ -600,8 +600,13 @@ function auditFieldKeyForRefreshColumn(fieldName: string): string {
   return fieldName;
 }
 
-export async function applyDealChanges(client: Client, runId: string, dealId: string, changes: FieldChange[]): Promise<number> {
-  if (changes.length === 0) return 0;
+export async function applyDealChanges(
+  client: Client,
+  runId: string,
+  dealId: string,
+  changes: FieldChange[]
+): Promise<{ auditRowsWritten: number; skippedUpdate: boolean }> {
+  if (changes.length === 0) return { auditRowsWritten: 0, skippedUpdate: false };
   const allowed = new Set([
     "stage_id",
     "expected_close_date",
@@ -637,7 +642,7 @@ export async function applyDealChanges(client: Client, runId: string, dealId: st
 
   if (updateResult.rows.length === 0) {
     console.warn(`HubSpot Refresh: deal ${dealId} not updated (row not found). Skipping audit log entry.`);
-    return 0;
+    return { auditRowsWritten: 0, skippedUpdate: true };
   }
 
   for (const change of changes) {
@@ -672,7 +677,7 @@ export async function applyDealChanges(client: Client, runId: string, dealId: st
     metadata: { runId, reasons: changes.map((change) => change.reason) },
   });
 
-  return changes.length;
+  return { auditRowsWritten: changes.length, skippedUpdate: false };
 }
 
 function emptyReport(runId: string, dryRun: boolean, refreshCompanyId: boolean) {
@@ -705,6 +710,7 @@ function emptyReport(runId: string, dryRun: boolean, refreshCompanyId: boolean) 
     sampleMultiFieldChanges: [] as Array<{ dealId: string; name: string; hubSpotDealId: string; changes: FieldChange[] }>,
     fieldChangeCounts: new Map<string, number>(),
     auditRowsWritten: 0,
+    auditRowsSkipped: 0,
   };
 }
 
@@ -751,6 +757,7 @@ function serializeReport(report: ReturnType<typeof emptyReport>, runtimeMs: numb
     description_backfills_proposed: report.descriptionBackfills,
     field_change_counts: fieldChangeCounts,
     audit_rows_written: report.auditRowsWritten,
+    audit_rows_skipped: report.auditRowsSkipped,
     total_sanity_check:
       report.totalDealsWithAtLeastOneChange + report.totalDealsWithNoChanges + report.hubSpot404 + report.hubSpotErrored,
     warnings: report.warnings,
@@ -872,9 +879,12 @@ async function runRefresh() {
         if (!options.dryRun) {
           await db.query("BEGIN");
           try {
-            const auditRowsWritten = await applyDealChanges(db, runId, crmDeal.id, plan.changes);
+            const auditResult = await applyDealChanges(db, runId, crmDeal.id, plan.changes);
             await db.query("COMMIT");
-            report.auditRowsWritten += auditRowsWritten;
+            report.auditRowsWritten += auditResult.auditRowsWritten;
+            if (auditResult.skippedUpdate) {
+              report.auditRowsSkipped++;
+            }
           } catch (error) {
             await db.query("ROLLBACK");
             report.errors.push(`${crmDeal.id}: ${error instanceof Error ? error.message : String(error)}`);

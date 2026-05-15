@@ -331,7 +331,7 @@ describe("HubSpot refresh field policies", () => {
     };
     vi.spyOn(console, "warn").mockImplementation(() => {});
 
-    const auditRowsWritten = await applyDealChanges(client as never, "run-1", "deal-missing", [
+    const result = await applyDealChanges(client as never, "run-1", "deal-missing", [
       {
         dealId: "deal-missing",
         fieldName: "bid_estimate",
@@ -341,6 +341,57 @@ describe("HubSpot refresh field policies", () => {
       },
     ]);
 
-    expect(auditRowsWritten).toBe(0);
+    expect(result).toEqual({ auditRowsWritten: 0, skippedUpdate: true });
+  });
+
+  it("tracks written and skipped audit counts separately across multiple refresh updates", async () => {
+    const clients = Array.from({ length: 7 }, (_, index) => ({
+      query: async (sql: string) => {
+        if (sql.includes("UPDATE office_dallas.deals")) {
+          if (index < 5) {
+            return {
+              rows: [{
+                id: `deal-${index + 1}`,
+                name: `Deal ${index + 1}`,
+                deal_number: `DFW-1-1112${index}-aa`,
+                project_number: null,
+              }],
+              rowCount: 1,
+            };
+          }
+          return {
+            rows: [],
+            rowCount: 0,
+          };
+        }
+        if (sql.includes("INSERT INTO public.hubspot_refresh_log")) {
+          return { rows: [], rowCount: 1 };
+        }
+        if (sql.includes('INSERT INTO "office_dallas".audit_log')) {
+          return { rows: [], rowCount: 1 };
+        }
+        throw new Error(`Unexpected SQL: ${sql}`);
+      },
+    }));
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+
+    let auditRowsWritten = 0;
+    let skippedUpdates = 0;
+    for (const [index, client] of clients.entries()) {
+      const result = await applyDealChanges(client as never, "run-1", `deal-${index + 1}`, [
+        {
+          dealId: `deal-${index + 1}`,
+          fieldName: "bid_estimate",
+          oldValue: "1000",
+          newValue: "1500",
+          reason: "gt_5_percent_drift",
+        },
+      ]);
+      auditRowsWritten += result.auditRowsWritten;
+      skippedUpdates += result.skippedUpdate ? 1 : 0;
+    }
+
+    expect(auditRowsWritten).toBe(5);
+    expect(skippedUpdates).toBe(2);
   });
 });

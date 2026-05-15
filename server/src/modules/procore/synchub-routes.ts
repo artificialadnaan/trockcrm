@@ -25,6 +25,12 @@ import { PROCORE_SYNCHUB_WEBHOOK } from "../audit/system-processes.js";
 
 const router = Router();
 type WorkflowRoute = "normal" | "service";
+const COALESCE_PROTECTED_WEBHOOK_FIELDS = new Set<string>([
+  "ddEstimate",
+  "bidEstimate",
+  "awardedAmount",
+  "proposalNotes",
+]);
 
 const SHARED_CANONICAL_DEAL_STAGE_SLUGS = [
   // opportunity is a CRM-only stage seeded as standard_deal family but applies
@@ -517,8 +523,12 @@ router.post("/opportunities", requireSyncHubSecret, async (req, res, next) => {
         { key: "actualCloseDate", column: "actual_close_date", value: mirrorResult.updates.actualCloseDate },
       ] as const;
       for (const { key, column, value } of optionalWebhookFields) {
-        if (value !== undefined) {
-          webhookFieldChanges[key] = { from: currentDeal[column] ?? null, to: value };
+        if (value === undefined) continue;
+        const normalizedOld = currentDeal[column] ?? null;
+        const normalizedNew = value ?? null;
+        if (COALESCE_PROTECTED_WEBHOOK_FIELDS.has(key) && normalizedNew === null) continue;
+        if (normalizedOld !== normalizedNew) {
+          webhookFieldChanges[key] = { from: normalizedOld, to: normalizedNew };
         }
       }
       await logActivityWithPgClient({

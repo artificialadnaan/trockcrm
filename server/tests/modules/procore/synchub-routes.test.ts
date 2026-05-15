@@ -31,6 +31,7 @@ type ClientOptions = {
   requestStageFamily?: string | null;
   targetStageSlug?: string;
   targetStageWorkflowFamily?: "standard_deal" | "service_deal";
+  currentDealOverrides?: Record<string, unknown>;
 };
 
 function createClient(options: ClientOptions = {}) {
@@ -76,6 +77,10 @@ function createClient(options: ClientOptions = {}) {
               stage_entered_at: currentStageEnteredAt,
               workflow_route: workflowRoute,
               is_bid_board_owned: true,
+              dd_estimate: "50000",
+              bid_estimate: "55000",
+              awarded_amount: "0",
+              proposal_notes: "Initial draft",
               proposal_status: "drafting",
               estimating_substage: "building_estimate",
               actual_close_date: null,
@@ -83,6 +88,7 @@ function createClient(options: ClientOptions = {}) {
               lost_notes: null,
               lost_competitor: null,
               lost_at: null,
+              ...options.currentDealOverrides,
             },
           ],
         };
@@ -320,6 +326,95 @@ describe("syncHubRoutes", () => {
     expect(formattedFieldChanges).toContain('"key":"estimatingSubstage"');
     expect(formattedFieldChanges).toContain('"key":"proposalStatus"');
     expect(formattedFieldChanges).toContain('"transition":"cleared"');
+  });
+
+  it("skips no-op null clear audit entries when a field was already null", async () => {
+    const { client, queries } = createClient({
+      existingDealIdByProcoreBid: "deal-1",
+      targetStageSlug: "won",
+      targetStageWorkflowFamily: "standard_deal",
+      currentDealOverrides: {
+        proposal_status: null,
+        estimating_substage: null,
+      },
+    });
+    dbMocks.connect.mockResolvedValue(client);
+
+    const app = createApp();
+    const response = await request(app)
+      .post("/api/integrations/synchub/opportunities")
+      .set("x-synchub-secret", "test-secret")
+      .send({
+        office_slug: "dallas",
+        bid_board_id: "bb-1",
+        procore_bid_id: 101,
+        name: "Palm Villas",
+        stage_slug: "won",
+      });
+
+    expect(response.status).toBe(200);
+    const auditQuery = queries.find((entry) => entry.sql.includes('INSERT INTO "office_dallas".audit_log'));
+    const rawFieldChanges = String(auditQuery?.params?.[11] ?? "");
+    expect(rawFieldChanges).not.toContain('"estimatingSubstage"');
+    expect(rawFieldChanges).not.toContain('"proposalStatus"');
+  });
+
+  it("skips COALESCE-protected null webhook fields that do not change the database", async () => {
+    const { client, queries } = createClient({
+      existingDealIdByProcoreBid: "deal-1",
+      targetStageSlug: "estimate_under_review",
+      targetStageWorkflowFamily: "standard_deal",
+    });
+    dbMocks.connect.mockResolvedValue(client);
+
+    const app = createApp();
+    const response = await request(app)
+      .post("/api/integrations/synchub/opportunities")
+      .set("x-synchub-secret", "test-secret")
+      .send({
+        office_slug: "dallas",
+        bid_board_id: "bb-1",
+        procore_bid_id: 101,
+        name: "Palm Villas",
+        stage_slug: "estimate_under_review",
+        dd_estimate: null,
+      });
+
+    expect(response.status).toBe(200);
+    const updateQuery = queries.find((entry) => entry.sql.includes("UPDATE office_dallas.deals"));
+    expect(updateQuery?.params?.[10]).toBeNull();
+    const auditQuery = queries.find((entry) => entry.sql.includes('INSERT INTO "office_dallas".audit_log'));
+    const rawFieldChanges = String(auditQuery?.params?.[11] ?? "");
+    expect(rawFieldChanges).not.toContain('"ddEstimate"');
+  });
+
+  it("logs non-null updates for COALESCE-protected webhook fields when the value actually changes", async () => {
+    const { client, queries } = createClient({
+      existingDealIdByProcoreBid: "deal-1",
+      targetStageSlug: "estimate_under_review",
+      targetStageWorkflowFamily: "standard_deal",
+    });
+    dbMocks.connect.mockResolvedValue(client);
+
+    const app = createApp();
+    const response = await request(app)
+      .post("/api/integrations/synchub/opportunities")
+      .set("x-synchub-secret", "test-secret")
+      .send({
+        office_slug: "dallas",
+        bid_board_id: "bb-1",
+        procore_bid_id: 101,
+        name: "Palm Villas",
+        stage_slug: "estimate_under_review",
+        dd_estimate: "60000",
+      });
+
+    expect(response.status).toBe(200);
+    const updateQuery = queries.find((entry) => entry.sql.includes("UPDATE office_dallas.deals"));
+    expect(updateQuery?.params?.[10]).toBe("60000");
+    const auditQuery = queries.find((entry) => entry.sql.includes('INSERT INTO "office_dallas".audit_log'));
+    const rawFieldChanges = String(auditQuery?.params?.[11] ?? "");
+    expect(rawFieldChanges).toContain('"ddEstimate":{"from":"50000","to":"60000"}');
   });
 
   it("rejects payload stage families that conflict with internal derivation", async () => {
