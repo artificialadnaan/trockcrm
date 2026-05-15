@@ -510,7 +510,7 @@ router.post("/opportunities", requireSyncHubSecret, async (req, res, next) => {
         { key: "actualCloseDate", column: "actual_close_date", value: mirrorResult.updates.actualCloseDate },
       ] as const;
       for (const { key, column, value } of optionalWebhookFields) {
-        if (value !== undefined && value !== null) {
+        if (value !== undefined) {
           webhookFieldChanges[key] = { from: currentDeal[column] ?? null, to: value };
         }
       }

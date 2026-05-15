@@ -291,6 +291,35 @@ describe("syncHubRoutes", () => {
     expect(updateQuery?.params?.[5]).toEqual(priorStageEnteredAt);
   });
 
+  it("logs intentional null clears from SyncHub webhook updates", async () => {
+    const { client, queries } = createClient({
+      existingDealIdByProcoreBid: "deal-1",
+      targetStageSlug: "won",
+      targetStageWorkflowFamily: "standard_deal",
+    });
+    dbMocks.connect.mockResolvedValue(client);
+
+    const app = createApp();
+    const response = await request(app)
+      .post("/api/integrations/synchub/opportunities")
+      .set("x-synchub-secret", "test-secret")
+      .send({
+        office_slug: "dallas",
+        bid_board_id: "bb-1",
+        procore_bid_id: 101,
+        name: "Palm Villas",
+        stage_slug: "won",
+      });
+
+    expect(response.status).toBe(200);
+    const auditQuery = queries.find((entry) => entry.sql.includes('INSERT INTO "office_dallas".audit_log'));
+    const rawFieldChanges = String(auditQuery?.params?.[11] ?? "");
+    const formattedFieldChanges = String(auditQuery?.params?.[12] ?? "");
+    expect(rawFieldChanges).toContain('"estimatingSubstage":{"from":"building_estimate","to":null}');
+    expect(formattedFieldChanges).toContain('"key":"estimatingSubstage"');
+    expect(formattedFieldChanges).toContain('"transition":"cleared"');
+  });
+
   it("rejects payload stage families that conflict with internal derivation", async () => {
     const { client } = createClient({
       existingDealIdByProcoreBid: "deal-1",
