@@ -532,6 +532,16 @@ export function DealsListSection({
     }));
   };
 
+  const restoreUpdatedSort = () => {
+    setSort((current) => (
+      current.key === "updated_at"
+        ? { key: "updated_at", dir: current.dir === "desc" ? "asc" : "desc" }
+        : DEFAULT_SORT_STATE
+    ));
+  };
+
+  const isUpdatedSortActive = sort.key === "updated_at";
+
   const exportCsv = async () => {
     if (!listQueryState.enabled) {
       toast.error(stagesError ? "Pipeline stage metadata failed to load." : "Pipeline stages are still loading.");
@@ -816,6 +826,18 @@ export function DealsListSection({
             </button>
           );
         })}
+        <button
+          type="button"
+          className={cn(
+            "ml-auto rounded-full border px-3 py-1.5 text-xs font-black uppercase tracking-[0.12em]",
+            isUpdatedSortActive
+              ? "border-brand-red bg-brand-red text-white"
+              : "border-slate-200 bg-white text-slate-600 hover:border-brand-red/40 hover:text-brand-red"
+          )}
+          onClick={restoreUpdatedSort}
+        >
+          Updated {isUpdatedSortActive ? (sort.dir === "asc" ? "↑" : "↓") : null}
+        </button>
       </div>
 
       <div className="p-4">

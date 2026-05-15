@@ -628,6 +628,27 @@ describe("DealsListSection", () => {
     ).toBeNull();
   });
 
+  it("restores updated sort control reachable from the shared list UI", () => {
+    const { container, unmount } = renderInteractive({
+      initialSort: { key: "name", dir: "asc" },
+    });
+
+    const updatedButton = Array.from(container.querySelectorAll("button")).find((button) =>
+      button.textContent?.includes("Updated")
+    );
+    expect(updatedButton).toBeTruthy();
+
+    act(() => {
+      updatedButton!.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+
+    const lastCall = mocks.useDealsMock.mock.calls[mocks.useDealsMock.mock.calls.length - 1][0];
+    expect(lastCall.sortBy).toBe("updated_at");
+    expect(lastCall.sortDir).toBe("desc");
+
+    unmount();
+  });
+
   it("uses fixed-width tablet and desktop columns so stage, sla, value, and dates cannot overlap", () => {
     const html = render({
       visibleStages: [
