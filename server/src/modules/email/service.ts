@@ -1212,10 +1212,11 @@ export async function getEmailThread(
           .where(eq(deals.id, mutationContext.binding.dealId))
           .limit(1)
       : [null];
+    const bindingSourceEmail = visibleThread[0] ?? null;
     bindingPayload = {
       id: mutationContext.binding.id,
       mailboxAccountId: mutationContext.binding.mailboxAccountId,
-      contactId: thread[0]?.contactId ?? null,
+      contactId: bindingSourceEmail?.contactId ?? null,
       contactName: null,
       companyId: null,
       companyName: null,

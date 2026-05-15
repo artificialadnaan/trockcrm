@@ -469,6 +469,52 @@ describe("email service inbound association", () => {
     expect(result.binding?.dealId).toBe("deal-visible");
   });
 
+  it("builds binding metadata from the visible subset rather than the raw thread", async () => {
+    const tenantDb = createEmailThreadDb({
+      thread: [
+        {
+          id: "email-hidden",
+          userId: "teammate-1",
+          dealId: null,
+          assignedEntityType: null,
+          assignedEntityId: null,
+          contactId: "contact-hidden",
+          sentAt: new Date("2026-05-15T10:00:00Z"),
+        },
+        {
+          id: "email-own",
+          userId: "rep-1",
+          dealId: null,
+          assignedEntityType: null,
+          assignedEntityId: null,
+          contactId: "contact-visible",
+          sentAt: new Date("2026-05-15T11:00:00Z"),
+        },
+      ],
+      binding: {
+        id: "binding-1",
+        mailboxAccountId: "mailbox-1",
+        provider: "microsoft_graph",
+        providerConversationId: "conversation-1",
+        dealId: null,
+        projectId: null,
+        confidence: "high",
+        assignmentReason: "manual_thread_assignment",
+      },
+    });
+
+    const result = await getEmailThread(
+      tenantDb as any,
+      "conversation-1",
+      "rep-1",
+      "rep",
+      async () => false
+    );
+
+    expect(result.emails.map((email) => email.id)).toEqual(["email-own"]);
+    expect(result.binding?.contactId).toBe("contact-visible");
+  });
+
   it("returns an empty thread when the rep cannot read any message", async () => {
     const tenantDb = createEmailThreadDb({
       thread: [
