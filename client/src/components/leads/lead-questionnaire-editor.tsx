@@ -159,6 +159,8 @@ export function LeadQuestionnaireEditor({ lead, onCancel, onSaved }: LeadQuestio
   const [stageGateError, setStageGateError] = useState<StageGateErrorState | null>(null);
   const [clientProvidedDocFiles, setClientProvidedDocFiles] = useState<File[]>([]);
   const initialSourceState = getInitialSourceState(lead);
+  const initialQuestionnaireNodes =
+    questionnaire?.nodes.length ? questionnaire.nodes : questionnaire?.allNodes ?? [];
   const [formData, setFormData] = useState(() => ({
     name: lead.name,
     source: lead.source ?? "",
@@ -181,7 +183,7 @@ export function LeadQuestionnaireEditor({ lead, onCancel, onSaved }: LeadQuestio
           ? lead.qualificationPayload.timeline_status
           : "",
     },
-    leadQuestionAnswers: normalizeStoredQuestionAnswers(questionnaire?.answers ?? {}),
+    leadQuestionAnswers: normalizeStoredQuestionAnswers(questionnaire?.answers ?? {}, initialQuestionnaireNodes),
   }));
 
   useEffect(() => {
@@ -208,7 +210,12 @@ export function LeadQuestionnaireEditor({ lead, onCancel, onSaved }: LeadQuestio
             ? lead.qualificationPayload.timeline_status
             : "",
       },
-      leadQuestionAnswers: normalizeStoredQuestionAnswers(lead.leadQuestionnaire?.answers ?? {}),
+      leadQuestionAnswers: normalizeStoredQuestionAnswers(
+        lead.leadQuestionnaire?.answers ?? {},
+        lead.leadQuestionnaire?.nodes.length
+          ? lead.leadQuestionnaire.nodes
+          : lead.leadQuestionnaire?.allNodes ?? []
+      ),
     });
     setError(null);
     setStageGateError(null);
