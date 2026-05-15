@@ -332,15 +332,35 @@ describe("project task surface", () => {
     expect(taskServiceMocks.createTask).not.toHaveBeenCalled();
   });
 
-  it("rejects project-scoped task creation for reps", async () => {
+  it("allows reps with project access to create project-scoped tasks for other users", async () => {
+    taskServiceMocks.getProjectTaskScope.mockResolvedValue({
+      id: "deal-123",
+      procoreProjectId: 999,
+    });
+    taskServiceMocks.createTask.mockResolvedValue({
+      id: "task-1",
+      title: "Rep-created project task",
+      assignedTo: "rep-2",
+      dealId: "deal-123",
+    });
+
     const response = await request(createProcoreApp(createUser("rep"))).post(
       "/api/procore/my-projects/deal-123/tasks"
     ).send({
-      title: "Rep cannot create this",
+      title: "Rep-created project task",
+      assignedTo: "rep-2",
     });
 
-    expect(response.status).toBe(403);
-    expect(taskServiceMocks.createTask).not.toHaveBeenCalled();
+    expect(response.status).toBe(201);
+    expect(taskServiceMocks.createTask).toHaveBeenCalledWith(
+      expect.any(Object),
+      expect.objectContaining({
+        title: "Rep-created project task",
+        assignedTo: "rep-2",
+        createdBy: "rep-1",
+        dealId: "deal-123",
+      })
+    );
   });
 
   it("preserves generic rep restrictions by composing rep scope with dealId filters", async () => {

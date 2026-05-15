@@ -38,7 +38,7 @@ export function ProjectTasksTab({
   const [selectedTask, setSelectedTask] = useState<Task | null>(null);
   const [editOpen, setEditOpen] = useState(false);
 
-  const canManage = user?.role === "admin" || user?.role === "director";
+  const canManage = user?.role === "admin" || user?.role === "director" || user?.role === "rep";
 
   const sortedTasks = useMemo(() => {
     const priorityRank: Record<string, number> = { urgent: 0, high: 1, normal: 2, low: 3 };

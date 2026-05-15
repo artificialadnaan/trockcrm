@@ -456,7 +456,7 @@ router.get("/my-projects/:id/tasks", async (req, res, next) => {
 // POST /api/procore/my-projects/:id/tasks — create project-scoped task
 router.post(
   "/my-projects/:id/tasks",
-  requireRole("admin", "director"),
+  requireRole("admin", "director", "rep"),
   async (req, res, next) => {
     try {
       const projectId = req.params.id as string;
