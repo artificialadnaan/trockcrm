@@ -530,9 +530,9 @@ describe("DealsListSection", () => {
       initialStageSlugs: [],
     });
     try {
-      const nextPageButton = Array.from(container.querySelectorAll("svg"))
-        .find((icon) => icon.className.baseVal?.includes("lucide-chevron-right") || String(icon.getAttribute("class")).includes("lucide-chevron-right"))
-        ?.closest("button");
+      const nextPageButton = Array.from(container.querySelectorAll("button")).find(
+        (button) => button.getAttribute("aria-label") === "Next page"
+      );
       expect(nextPageButton).not.toBeNull();
 
       await act(async () => {
