@@ -81,6 +81,22 @@ function findRouteHandler(method: "get" | "post" | "delete", routePath: string) 
   return layer.route.stack[0].handle as (req: any, res: any, next: (err?: unknown) => void) => unknown;
 }
 
+function createTenantDbWithRecording(recording?: Record<string, any> | null) {
+  return {
+    select: vi.fn(() => {
+      const chain: any = {
+        from: vi.fn(() => chain),
+        where: vi.fn(() => chain),
+        limit: vi.fn(() => chain),
+        then(resolve: (value: any[]) => void) {
+          resolve(recording ? [recording] : []);
+        },
+      };
+      return chain;
+    }),
+  };
+}
+
 async function invokeRoute(method: "get" | "post" | "delete", routePath: string, overrides: Record<string, any> = {}) {
   const handler = findRouteHandler(method, routePath);
   const req = {
@@ -324,6 +340,12 @@ describe("call recording routes", () => {
     const { res, nextError } = await invokeRoute("post", "/:id/confirm", {
       user: testUser("rep"),
       params: { id: "rec-1" },
+      tenantDb: createTenantDbWithRecording({
+        id: "rec-1",
+        uploadedBy: "rep-1",
+        fileSizeBytes: 0,
+        transcriptionStatus: "none",
+      }),
       body: { fileSizeBytes: 100, durationSeconds: 10 },
     });
 
@@ -337,6 +359,48 @@ describe("call recording routes", () => {
         fileSizeBytes: 100,
         durationSeconds: 10,
       })
+    );
+  });
+
+  it("rejects confirm when a different non-admin uploader tries to finalize the recording", async () => {
+    const { nextError } = await invokeRoute("post", "/:id/confirm", {
+      user: testUser("rep", "rep-2"),
+      params: { id: "rec-1" },
+      tenantDb: createTenantDbWithRecording({
+        id: "rec-1",
+        uploadedBy: "rep-1",
+        fileSizeBytes: 0,
+        transcriptionStatus: "none",
+      }),
+      body: { fileSizeBytes: 100, durationSeconds: 10 },
+    });
+
+    expect((nextError as any).statusCode).toBe(403);
+    expect((nextError as any).message).toBe("Cannot confirm recording you did not initiate.");
+    expect(serviceMocks.confirmUpload).not.toHaveBeenCalled();
+  });
+
+  it("allows admins to confirm another user's pending upload", async () => {
+    serviceMocks.confirmUpload.mockResolvedValue({ id: "rec-1" });
+
+    const { res, nextError } = await invokeRoute("post", "/:id/confirm", {
+      user: testUser("admin", "admin-1"),
+      params: { id: "rec-1" },
+      tenantDb: createTenantDbWithRecording({
+        id: "rec-1",
+        uploadedBy: "rep-1",
+        fileSizeBytes: 0,
+        transcriptionStatus: "none",
+      }),
+      body: { fileSizeBytes: 100, durationSeconds: 10 },
+    });
+
+    expect(nextError).toBeUndefined();
+    expect(res.statusCode).toBe(200);
+    expect(serviceMocks.confirmUpload).toHaveBeenCalledWith(
+      expect.anything(),
+      "rec-1",
+      expect.objectContaining({ userId: "admin-1" })
     );
   });
 });

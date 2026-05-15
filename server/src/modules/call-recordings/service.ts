@@ -3,7 +3,7 @@ import { and, desc, eq, ilike, isNull, lt, or, sql } from "drizzle-orm";
 import type { NodePgDatabase } from "drizzle-orm/node-postgres";
 import { callRecordings, users } from "@trock-crm/shared/schema";
 import type * as schema from "@trock-crm/shared/schema";
-import type { UserRole } from "@trock-crm/shared/types";
+import { CALL_RECORDING_VIEW_ROLES, type UserRole } from "@trock-crm/shared/types";
 import { AppError } from "../../middleware/error-handler.js";
 import {
   deleteObject,
@@ -18,7 +18,7 @@ import { createActivity } from "../activities/service.js";
 
 type TenantDb = NodePgDatabase<typeof schema>;
 export type CallRecordingEntityType = "deal" | "lead" | "company" | "contact";
-export type CallRecordingAllowedRole = Exclude<UserRole, "field_contractor">;
+export type CallRecordingAllowedRole = (typeof CALL_RECORDING_VIEW_ROLES)[number];
 export type CallRecordingViewer = {
   role: CallRecordingAllowedRole;
   userId: string;

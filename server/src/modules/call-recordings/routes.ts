@@ -1,10 +1,17 @@
 import { Router } from "express";
+import { and, eq, isNull } from "drizzle-orm";
+import { callRecordings } from "@trock-crm/shared/schema";
 import { AppError } from "../../middleware/error-handler.js";
 import { requestAuditContext, writeSoftDeleteAuditLog } from "../../lib/soft-delete-audit.js";
 import { getDealById } from "../deals/service.js";
 import { getLeadById } from "../leads/service.js";
 import { getCompanyById } from "../companies/service.js";
 import { getContactById } from "../contacts/service.js";
+import {
+  canUploadCallRecordings,
+  canViewCallRecordings,
+  type UserRole,
+} from "@trock-crm/shared/types";
 import {
   confirmUpload,
   createUploadUrl,
@@ -15,7 +22,6 @@ import {
   type CallRecordingAllowedRole,
   type CallRecordingEntityType,
 } from "./service.js";
-import type { UserRole } from "@trock-crm/shared/types";
 
 const router = Router();
 
@@ -26,13 +32,13 @@ function requireAdminRole(role: string) {
 }
 
 function requireCallRecordingRole(role: UserRole): asserts role is CallRecordingAllowedRole {
-  if (role === "field_contractor") {
+  if (!canViewCallRecordings(role)) {
     throw new AppError(403, "Call recordings are not available for this role.");
   }
 }
 
 function requireCallRecordingUploadRole(role: UserRole) {
-  if (role === "field_contractor" || role === "construction") {
+  if (!canUploadCallRecordings(role)) {
     throw new AppError(403, "Call recordings are not available for this role.");
   }
 }
@@ -86,6 +92,27 @@ router.post("/upload-url", async (req, res, next) => {
 router.post("/:id/confirm", async (req, res, next) => {
   try {
     requireCallRecordingUploadRole(req.user!.role);
+    const [recordingRow] = await req.tenantDb!
+      .select({
+        id: callRecordings.id,
+        uploadedBy: callRecordings.uploadedBy,
+        fileSizeBytes: callRecordings.fileSizeBytes,
+        transcriptionStatus: callRecordings.transcriptionStatus,
+      })
+      .from(callRecordings)
+      .where(and(eq(callRecordings.id, req.params.id), isNull(callRecordings.deletedAt)))
+      .limit(1);
+
+    if (!recordingRow) {
+      throw new AppError(404, "Call recording not found.");
+    }
+    if (recordingRow.fileSizeBytes > 0 || recordingRow.transcriptionStatus !== "none") {
+      throw new AppError(409, "Call recording upload has already been confirmed.");
+    }
+    if (req.user!.role !== "admin" && recordingRow.uploadedBy !== req.user!.id) {
+      throw new AppError(403, "Cannot confirm recording you did not initiate.");
+    }
+
     const { fileSizeBytes, durationSeconds } = req.body;
     const recording = await confirmUpload(req.tenantDb!, req.params.id, {
       fileSizeBytes: Number(fileSizeBytes),

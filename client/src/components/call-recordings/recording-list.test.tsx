@@ -61,7 +61,19 @@ describe("RecordingList role gates", () => {
     mocks.user = { id: "construction-1", role: "construction" };
     const { container, root } = await renderList();
 
+    expect(container.textContent).toContain("Call Recordings");
+    expect(container.textContent).not.toContain("Upload Recording");
+    expect(mocks.apiMock).toHaveBeenCalled();
+
+    await unmount(root);
+  });
+
+  it("hides the recording surface for field contractors", async () => {
+    mocks.user = { id: "field-1", role: "field_contractor" };
+    const { container, root } = await renderList();
+
     expect(container.textContent).not.toContain("Call Recordings");
+    expect(container.textContent).not.toContain("Upload Recording");
     expect(mocks.apiMock).not.toHaveBeenCalled();
 
     await unmount(root);

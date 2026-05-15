@@ -6,6 +6,7 @@ export * from "./lead-validation.js";
 export * from "./lead-due-diligence.js";
 export * from "./sales-workflow.js";
 export * from "./lead-scoping.js";
+export * from "./call-recordings.js";
 export * from "./offices.js";
 export * from "./project-types.js";
 export * from "./sales-review.js";
