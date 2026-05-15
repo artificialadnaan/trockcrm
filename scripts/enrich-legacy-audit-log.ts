@@ -6,7 +6,8 @@ import pg from "pg";
 
 const DEFAULT_BATCH_SIZE = 500;
 const PROGRESS_LOG_INTERVAL = 5_000;
-export const DEFAULT_CUTOFF_AT = "2026-05-15T00:00:00.000Z";
+// Phase 1.5 rich audit logging (PR #332 / merge 534c5efb) landed on May 15, 2026 at 10:55:50 -0500.
+export const DEFAULT_CUTOFF_AT = "2026-05-15T15:55:50.000Z";
 const REPORT_PATH = ".reviews/legacy-audit-enrichment/report.md";
 
 const LOOKUPABLE_TABLES = new Set(["deals", "leads", "properties", "companies", "users"] as const);
@@ -129,6 +130,10 @@ function connectionString(): string {
 
 function quoteIdent(value: string): string {
   return `"${value.replace(/"/g, "\"\"")}"`;
+}
+
+function buildStatementName(schemaName: string, base: string): string {
+  return `${base}-${schemaName}`;
 }
 
 function validateOfficeSchema(schemaName: string): string {
@@ -439,6 +444,7 @@ async function fetchLegacyAuditBatch(
 async function fetchLegacyAuditBatchForUpdate(
   client: Queryable,
   schemaName: string,
+  afterId: number,
   batchSize: number,
   cutoffAt: string
 ): Promise<LegacyAuditRow[]> {
@@ -449,12 +455,13 @@ async function fetchLegacyAuditBatchForUpdate(
         SELECT id
         FROM ${safeSchema}.audit_log
         WHERE created_at < $1::timestamptz
+          AND id > $2
           AND entity_name_snapshot IS NULL
           AND actor_name IS NULL
           AND actor_system_process IS NULL
           AND field_changes_jsonb IS NULL
         ORDER BY id ASC
-        LIMIT $2
+        LIMIT $3
         FOR UPDATE SKIP LOCKED
       )
       SELECT
@@ -472,7 +479,7 @@ async function fetchLegacyAuditBatchForUpdate(
       JOIN candidate c ON c.id = al.id
       ORDER BY al.id ASC
     `,
-    [cutoffAt, batchSize]
+    [cutoffAt, afterId, batchSize]
   );
   return result.rows as LegacyAuditRow[];
 }
@@ -498,35 +505,35 @@ async function lookupEntity(
   switch (row.tableName) {
     case "deals":
       query = {
-        name: "legacy-audit-enrich-deal",
+        name: buildStatementName(schemaName, "legacy-audit-enrich-deal"),
         text: `SELECT id::text, name, project_number AS "projectNumber" FROM ${safeSchema}.deals WHERE id = $1::uuid LIMIT 1`,
         values: [row.recordId],
       };
       break;
     case "leads":
       query = {
-        name: "legacy-audit-enrich-lead",
+        name: buildStatementName(schemaName, "legacy-audit-enrich-lead"),
         text: `SELECT id::text, name FROM ${safeSchema}.leads WHERE id = $1::uuid LIMIT 1`,
         values: [row.recordId],
       };
       break;
     case "properties":
       query = {
-        name: "legacy-audit-enrich-property",
+        name: buildStatementName(schemaName, "legacy-audit-enrich-property"),
         text: `SELECT id::text, address, city, state, name FROM ${safeSchema}.properties WHERE id = $1::uuid LIMIT 1`,
         values: [row.recordId],
       };
       break;
     case "companies":
       query = {
-        name: "legacy-audit-enrich-company",
+        name: buildStatementName(schemaName, "legacy-audit-enrich-company"),
         text: `SELECT id::text, name FROM ${safeSchema}.companies WHERE id = $1::uuid LIMIT 1`,
         values: [row.recordId],
       };
       break;
     case "users":
       query = {
-        name: "legacy-audit-enrich-user-entity",
+        name: buildStatementName(schemaName, "legacy-audit-enrich-user-entity"),
         text: `SELECT id::text, display_name AS "displayName" FROM public.users WHERE id = $1::uuid LIMIT 1`,
         values: [row.recordId],
       };
@@ -543,13 +550,14 @@ async function lookupEntity(
 
 async function lookupActorName(
   client: Queryable,
+  schemaName: string,
   changedBy: string | null,
   cache: Map<string, string | null>
 ): Promise<string | null> {
   if (!changedBy || !isUuid(changedBy)) return null;
   if (cache.has(changedBy)) return cache.get(changedBy) ?? null;
   const result = await client.query({
-    name: "legacy-audit-enrich-actor",
+    name: buildStatementName(schemaName, "legacy-audit-enrich-actor"),
     text: `SELECT display_name AS "displayName" FROM public.users WHERE id = $1::uuid LIMIT 1`,
     values: [changedBy],
   });
@@ -569,7 +577,7 @@ async function applyPlans(
   let updatedRows = 0;
   for (const plan of updates) {
     const result = await client.query({
-      name: "legacy-audit-enrich-update",
+      name: buildStatementName(schemaName, "legacy-audit-enrich-update"),
       text: `
         UPDATE ${safeSchema}.audit_log
            SET entity_name_snapshot = COALESCE(entity_name_snapshot, $1),
@@ -670,7 +678,7 @@ export async function enrichLegacyAuditLog(
     } else {
       await client.query("BEGIN");
       try {
-        rows = await fetchLegacyAuditBatchForUpdate(client, schemaName, remaining, cutoffAt);
+        rows = await fetchLegacyAuditBatchForUpdate(client, schemaName, afterId, remaining, cutoffAt);
         if (rows.length === 0) {
           await client.query("COMMIT");
           break;
@@ -688,7 +696,7 @@ export async function enrichLegacyAuditLog(
     for (const row of rows) {
       const [entity, actorName] = await Promise.all([
         lookupEntity(client, schemaName, row, entityCache),
-        lookupActorName(client, row.changedBy, actorCache),
+        lookupActorName(client, schemaName, row.changedBy, actorCache),
       ]);
       plans.push(await buildLegacyAuditEnrichmentPlan(row, { entity, actorName }));
     }

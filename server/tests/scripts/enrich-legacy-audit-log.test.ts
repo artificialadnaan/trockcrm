@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  DEFAULT_CUTOFF_AT,
   buildBatchSummary,
   buildEntityNameSnapshot,
   buildLegacyAuditEnrichmentPlan,
@@ -43,23 +44,36 @@ class MockQueryable implements Queryable {
   readonly entityRows: Record<string, LegacyAuditEntityRecord>;
   readonly actorRows: Record<string, string>;
   readonly queries: string[] = [];
+  readonly preparedStatements = new Map<string, string>();
+  readonly maxLockedFetches: number | null;
+  lockedFetches = 0;
 
   constructor(options: {
     tenantSchemas?: string[];
     auditRows?: LegacyAuditRow[];
     entityRows?: Record<string, LegacyAuditEntityRecord>;
     actorRows?: Record<string, string>;
+    maxLockedFetches?: number | null;
   } = {}) {
     this.tenantSchemas = options.tenantSchemas ?? ["office_atlanta", "office_dallas"];
     this.auditRows = options.auditRows ?? [];
     this.entityRows = options.entityRows ?? {};
     this.actorRows = options.actorRows ?? {};
+    this.maxLockedFetches = options.maxLockedFetches ?? null;
   }
 
   async query(input: string | { text: string; values?: unknown[] }, params?: unknown[]) {
     const text = typeof input === "string" ? input : input.text;
     const values = (typeof input === "string" ? params : input.values) ?? [];
     this.queries.push(text);
+
+    if (typeof input !== "string" && "name" in input && typeof input.name === "string") {
+      const existingText = this.preparedStatements.get(input.name);
+      if (existingText && existingText !== input.text) {
+        throw new Error(`Prepared statement collision for ${input.name}`);
+      }
+      this.preparedStatements.set(input.name, input.text);
+    }
 
     if (text.includes("FROM pg_namespace")) {
       return { rows: this.tenantSchemas.map((nspname) => ({ nspname })) };
@@ -77,9 +91,15 @@ class MockQueryable implements Queryable {
     }
 
     if (text.includes(".audit_log") && text.includes("FOR UPDATE SKIP LOCKED")) {
+      this.lockedFetches += 1;
+      if (this.maxLockedFetches != null && this.lockedFetches > this.maxLockedFetches) {
+        throw new Error("execute loop did not terminate");
+      }
       const cutoff = String(values[0] ?? "");
-      const batchSize = Number(values[1] ?? this.auditRows.length);
+      const afterId = Number(values[1] ?? 0);
+      const batchSize = Number(values[2] ?? this.auditRows.length);
       const filtered = this.auditRows
+        .filter((row) => row.id > afterId)
         .filter((row) => row.createdAt < cutoff)
         .filter((row) => row.entityNameSnapshot == null)
         .filter((row) => row.actorName == null)
@@ -377,6 +397,77 @@ describe("batch summaries and arg parsing", () => {
 });
 
 describe("tenant discovery and dry-run execution", () => {
+  it("uses tenant-safe prepared statement names across multiple offices on the same client", async () => {
+    const changedBy = "22222222-2222-4222-8222-222222222222";
+    const client = new MockQueryable({
+      auditRows: [
+        baseRow({ id: 101, changedBy }),
+      ],
+      entityRows: {
+        "deals:11111111-1111-4111-8111-111111111111": {
+          tableName: "deals",
+          id: "11111111-1111-4111-8111-111111111111",
+          name: "Legacy Roof Replacement",
+          projectNumber: "DFW-2-10001-aa",
+        },
+      },
+      actorRows: {
+        [changedBy]: "Morgan Sales",
+      },
+    });
+
+    await expect(
+      enrichLegacyAuditLog(client, {
+        officeName: "office_dallas",
+        dryRun: true,
+        batchSize: 500,
+      })
+    ).resolves.toMatchObject({ rowsToUpdate: 1 });
+
+    await expect(
+      enrichLegacyAuditLog(client, {
+        officeName: "office_atlanta",
+        dryRun: true,
+        batchSize: 500,
+      })
+    ).resolves.toMatchObject({ rowsToUpdate: 1 });
+  });
+
+  it("uses the real Phase 1.5 rollout cutoff timestamp", async () => {
+    expect(DEFAULT_CUTOFF_AT).toBe("2026-05-15T15:55:50.000Z");
+
+    const changedBy = "22222222-2222-4222-8222-222222222222";
+    const client = new MockQueryable({
+      auditRows: [
+        baseRow({
+          id: 101,
+          changedBy,
+          createdAt: "2026-05-15T12:00:00.000Z",
+        }),
+      ],
+      entityRows: {
+        "deals:11111111-1111-4111-8111-111111111111": {
+          tableName: "deals",
+          id: "11111111-1111-4111-8111-111111111111",
+          name: "Legacy Roof Replacement",
+          projectNumber: "DFW-2-10001-aa",
+        },
+      },
+      actorRows: {
+        [changedBy]: "Morgan Sales",
+      },
+    });
+
+    const result = await enrichLegacyAuditLog(client, {
+      officeName: "office_dallas",
+      dryRun: true,
+      batchSize: 500,
+    });
+
+    expect(result.examinedRows).toBe(1);
+    expect(result.rowsToUpdate).toBe(1);
+  });
+
   it("lists tenant schemas with the escaped office_ pattern", async () => {
     const client = new MockQueryable();
     const schemas = await listTenantSchemas(client);
@@ -390,7 +481,7 @@ describe("tenant discovery and dry-run execution", () => {
     const client = new MockQueryable({
       auditRows: [
         baseRow({ id: 101, changedBy }),
-        baseRow({ id: 102, createdAt: "2026-05-15T00:00:00.000Z" }),
+        baseRow({ id: 102, createdAt: "2026-05-15T16:00:00.000Z" }),
         baseRow({ id: 103, actorSystemProcess: "HubSpot Refresh" }),
       ],
       entityRows: {
@@ -461,5 +552,26 @@ describe("tenant discovery and dry-run execution", () => {
 
     expect(second.rowsToUpdate).toBe(0);
     expect(client.updates).toHaveLength(1);
+  });
+
+  it("terminates execute mode even when a batch contains unenrichable rows", async () => {
+    const client = new MockQueryable({
+      auditRows: [
+        baseRow({ id: 101, tableName: "audit_log" }),
+        baseRow({ id: 102, recordId: "not-a-uuid" }),
+      ],
+      maxLockedFetches: 2,
+    });
+
+    await expect(
+      enrichLegacyAuditLog(client, {
+        officeName: "office_dallas",
+        dryRun: false,
+        batchSize: 500,
+      })
+    ).resolves.toMatchObject({
+      examinedRows: 2,
+      rowsToUpdate: 0,
+    });
   });
 });
