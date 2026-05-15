@@ -506,8 +506,8 @@ describe("DirectorDashboardPage", () => {
     expect(html).toContain("Export");
     expect(html).toContain("Distribution");
     expect(html).toContain("North DFW");
-    expect(html).toContain('href="/director/rep/rep-1"');
-    expect(html).toContain('href="/director/rep/rep-2"');
+    expect(html).toContain('href="/director/rep/rep-1?preset=qtd"');
+    expect(html).toContain('href="/director/rep/rep-2?preset=qtd"');
   });
 
   it("renders strategic alerts and AI coaching panels from real hook data", () => {

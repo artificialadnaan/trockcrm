@@ -208,6 +208,81 @@ describe("Dashboard Service", () => {
       expect(activityQueryText).not.toContain("where user_id =");
     });
 
+    it("defaults activity counts to the weekly window when no explicit date range is passed", async () => {
+      vi.useFakeTimers();
+      vi.setSystemTime(new Date("2026-05-15T12:00:00Z"));
+      try {
+        const { getRepDashboard } = await import("../../../src/modules/dashboard/service.js");
+        const tenantDb = createMockTenantDb([
+          [{ count: "0" }],
+          [{ count: "0", total_value: "0" }],
+          [{ overdue: "0", today: "0" }],
+          [{ calls: "0", emails: "0", meetings: "0", notes: "0", total: "0" }],
+          [{ total: "0", on_time: "0" }],
+          [],
+          [],
+          [],
+          [],
+        ]);
+
+        await getRepDashboard(tenantDb, "user-1");
+
+        const activityQueryText = extractSqlText(tenantDb.execute.mock.calls[3][0]).toLowerCase();
+        expect(activityQueryText).toContain("2026-05-08");
+        expect(activityQueryText).toContain("2026-05-15");
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("uses an explicit activity date range when provided", async () => {
+      const { getRepDashboard } = await import("../../../src/modules/dashboard/service.js");
+      const tenantDb = createMockTenantDb([
+        [{ count: "0" }],
+        [{ count: "0", total_value: "0" }],
+        [{ overdue: "0", today: "0" }],
+        [{ calls: "35", emails: "0", meetings: "5", notes: "17", total: "57" }],
+        [{ total: "0", on_time: "0" }],
+        [],
+        [],
+        [],
+        [],
+      ]);
+
+      const result = await getRepDashboard(tenantDb, "user-1", {
+        activityDateRange: { from: "2026-04-01", to: "2026-05-15" },
+      });
+
+      const activityQueryText = extractSqlText(tenantDb.execute.mock.calls[3][0]).toLowerCase();
+      expect(result.activityThisWeek.total).toBe(57);
+      expect(activityQueryText).toContain("2026-04-01");
+      expect(activityQueryText).toContain("2026-05-15");
+    });
+
+    it("supports custom explicit activity date ranges", async () => {
+      const { getRepDashboard } = await import("../../../src/modules/dashboard/service.js");
+      const tenantDb = createMockTenantDb([
+        [{ count: "0" }],
+        [{ count: "0", total_value: "0" }],
+        [{ overdue: "0", today: "0" }],
+        [{ calls: "3", emails: "1", meetings: "2", notes: "4", total: "10" }],
+        [{ total: "0", on_time: "0" }],
+        [],
+        [],
+        [],
+        [],
+      ]);
+
+      const result = await getRepDashboard(tenantDb, "user-1", {
+        activityDateRange: { from: "2026-04-15", to: "2026-04-30" },
+      });
+
+      const activityQueryText = extractSqlText(tenantDb.execute.mock.calls[3][0]).toLowerCase();
+      expect(result.activityThisWeek.total).toBe(10);
+      expect(activityQueryText).toContain("2026-04-15");
+      expect(activityQueryText).toContain("2026-04-30");
+    });
+
     it("excludes mirrored terminal stage slugs from rep active deal counts and pipeline value", async () => {
       const { getRepDashboard } = await import("../../../src/modules/dashboard/service.js");
       const tenantDb = createMockTenantDb([
@@ -605,6 +680,54 @@ describe("Dashboard Service", () => {
     it("should be a function accepting repId and options", async () => {
       const { getRepDetail } = await import("../../../src/modules/dashboard/service.js");
       expect(typeof getRepDetail).toBe("function");
+    });
+
+    it("passes the selected qtd range through to the rep activity query", async () => {
+      const { getRepDetail } = await import("../../../src/modules/dashboard/service.js");
+      const tenantDb = createMockTenantDb([
+        [{ count: "0" }],
+        [{ count: "0", total_value: "0" }],
+        [{ overdue: "0", today: "0" }],
+        [{ calls: "35", emails: "0", meetings: "5", notes: "17", total: "57" }],
+        [{ total: "0", on_time: "0" }],
+        [],
+        [],
+        [],
+        [],
+      ]);
+
+      await getRepDetail(tenantDb, "rep-1", { from: "2026-04-01", to: "2026-05-15" });
+
+      const activityQueryText = tenantDb.execute.mock.calls
+        .map(([query]: [unknown]) => extractSqlText(query).toLowerCase())
+        .find((text: string) => text.includes("from activities") && text.includes("responsible_user_id")) ?? "";
+
+      expect(activityQueryText).toContain("2026-04-01");
+      expect(activityQueryText).toContain("2026-05-15");
+    });
+
+    it("passes the selected weekly range through to the rep activity query", async () => {
+      const { getRepDetail } = await import("../../../src/modules/dashboard/service.js");
+      const tenantDb = createMockTenantDb([
+        [{ count: "0" }],
+        [{ count: "0", total_value: "0" }],
+        [{ overdue: "0", today: "0" }],
+        [{ calls: "0", emails: "0", meetings: "0", notes: "2", total: "2" }],
+        [{ total: "0", on_time: "0" }],
+        [],
+        [],
+        [],
+        [],
+      ]);
+
+      await getRepDetail(tenantDb, "rep-1", { from: "2026-05-08", to: "2026-05-15" });
+
+      const activityQueryText = tenantDb.execute.mock.calls
+        .map(([query]: [unknown]) => extractSqlText(query).toLowerCase())
+        .find((text: string) => text.includes("from activities") && text.includes("responsible_user_id")) ?? "";
+
+      expect(activityQueryText).toContain("2026-05-08");
+      expect(activityQueryText).toContain("2026-05-15");
     });
   });
 
