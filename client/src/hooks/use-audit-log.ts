@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback } from "react";
 import { api } from "@/lib/api";
-import type { ActivityFeedEntryRecord } from "@/components/audit/activity-feed-entry";
+import type { ActivityFeedEntryRecord, ActivityFeedItemRecord } from "@/components/audit/activity-feed-entry";
 
 export interface AuditLogFilter {
   entityType?: string;
@@ -11,7 +11,7 @@ export interface AuditLogFilter {
 }
 
 export function useAuditLog() {
-  const [rows, setRows] = useState<ActivityFeedEntryRecord[]>([]);
+  const [rows, setRows] = useState<ActivityFeedItemRecord[]>([]);
   const [total, setTotal] = useState(0);
   const [page, setPage] = useState(1);
   const [loading, setLoading] = useState(true);
@@ -28,7 +28,7 @@ export function useAuditLog() {
       if (filter.fromDate) params.set("fromDate", filter.fromDate);
       if (filter.toDate) params.set("toDate", filter.toDate);
 
-      const data = await api<{ rows: ActivityFeedEntryRecord[]; total: number }>(
+      const data = await api<{ rows: ActivityFeedItemRecord[]; total: number }>(
         `/admin/audit?${params}`
       );
       setRows(data.rows);
@@ -50,5 +50,16 @@ export function useAuditLog() {
   useEffect(() => { void load(); }, [load]);
   useEffect(() => { void loadEntityTypes(); }, [loadEntityTypes]);
 
-  return { rows, total, page, setPage, loading, filter, setFilter, entityTypes };
+  const loadGroupChildren = useCallback(async (groupId: string, page = 1, limit = 100) => {
+    const params = new URLSearchParams({ expand: groupId, page: String(page), limit: String(limit) });
+    if (filter.entityType) params.set("entityType", filter.entityType);
+    if (filter.action) params.set("action", filter.action);
+
+    const data = await api<{ rows: ActivityFeedEntryRecord[]; total: number }>(
+      `/admin/audit?${params}`
+    );
+    return data;
+  }, [filter]);
+
+  return { rows, total, page, setPage, loading, filter, setFilter, entityTypes, loadGroupChildren };
 }
