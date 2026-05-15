@@ -595,6 +595,39 @@ describe("DealsListSection", () => {
     expect(html).toContain("hidden overflow-x-auto md:block");
   });
 
+  it("prefers actual close date over expected close date when both exist", () => {
+    expect(
+      getDealCloseDate(
+        makeDeal({
+          actualCloseDate: "2026-04-15T00:00:00.000Z",
+          expectedCloseDate: "2026-05-20T00:00:00.000Z",
+        }) as never
+      )
+    ).toBe("2026-04-15T00:00:00.000Z");
+  });
+
+  it("uses expected close date when actual close date is absent", () => {
+    expect(
+      getDealCloseDate(
+        makeDeal({
+          actualCloseDate: null,
+          expectedCloseDate: "2026-05-20T00:00:00.000Z",
+        }) as never
+      )
+    ).toBe("2026-05-20T00:00:00.000Z");
+  });
+
+  it("returns null when neither close date exists", () => {
+    expect(
+      getDealCloseDate(
+        makeDeal({
+          actualCloseDate: null,
+          expectedCloseDate: null,
+        }) as never
+      )
+    ).toBeNull();
+  });
+
   it("uses fixed-width tablet and desktop columns so stage, sla, value, and dates cannot overlap", () => {
     const html = render({
       visibleStages: [
