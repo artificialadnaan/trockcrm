@@ -10,6 +10,16 @@ export type FieldProject = {
   starred: boolean;
 };
 
+export type FieldCaptureTarget = {
+  id: string;
+  type: "lead" | "opportunity" | "deal";
+  name: string;
+  recordNumber: string | null;
+  stageName: string | null;
+  companyName: string | null;
+  lastUpdatedAt: string;
+};
+
 export type FieldPhoto = {
   id: string;
   category: "photo";
@@ -20,6 +30,7 @@ export type FieldPhoto = {
   fileSizeBytes: number | null;
   fileExtension: string | null;
   dealId: string | null;
+  leadId: string | null;
   description: string | null;
   takenAt: string | null;
   createdAt: string;
@@ -48,6 +59,14 @@ export const PHOTO_CATEGORIES = [
   { value: "delivery", label: "Delivery" },
   { value: "other", label: "Other" },
 ] as const;
+
+export function groupCaptureTargets(targets: FieldCaptureTarget[]) {
+  return {
+    lead: targets.filter((target) => target.type === "lead"),
+    opportunity: targets.filter((target) => target.type === "opportunity"),
+    deal: targets.filter((target) => target.type === "deal"),
+  };
+}
 
 export function relativeDate(value: string | null) {
   if (!value) return "no recent activity";

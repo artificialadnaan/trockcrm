@@ -42,22 +42,27 @@ describe("field auth middleware", () => {
     mocks.getUserById.mockResolvedValue(createUser());
   });
 
-  it("allows active field contractors and attaches req.fieldUser", async () => {
-    const req = createRequest();
-    const next = vi.fn() as NextFunction;
+  it.each(["field_contractor", "admin", "director", "rep", "construction"] as const)(
+    "allows active %s users and attaches req.fieldUser",
+    async (role) => {
+      mocks.getUserById.mockResolvedValueOnce(createUser({ role }));
+      const req = createRequest();
+      const next = vi.fn() as NextFunction;
 
-    await requireFieldContractor(req, {} as Response, next);
+      await requireFieldContractor(req, {} as Response, next);
 
-    expect(next).toHaveBeenCalledWith();
-    expect(req.user).toMatchObject({ id: "user-1", role: "field_contractor" });
-    expect(req.fieldUser).toMatchObject({
-      id: "user-1",
-      firstName: "Field",
-      lastName: "User",
-      tenantId: "office-1",
-      active: true,
-    });
-  });
+      expect(next).toHaveBeenCalledWith();
+      expect(req.user).toMatchObject({ id: "user-1", role });
+      expect(req.fieldUser).toMatchObject({
+        id: "user-1",
+        firstName: "Field",
+        lastName: "User",
+        role,
+        tenantId: "office-1",
+        active: true,
+      });
+    }
+  );
 
   it("rejects missing and invalid field tokens with 401", async () => {
     const missingReq = createRequest({ cookies: {}, headers: {} });
@@ -77,20 +82,20 @@ describe("field auth middleware", () => {
     expect(invalidNext.mock.calls[0]?.[0]).toMatchObject({ statusCode: 401 });
   });
 
-  it("rejects CRM users and inactive field contractors with 403", async () => {
-    mocks.getUserById.mockResolvedValueOnce(createUser({ role: "admin" }));
-    const crmNext = vi.fn() as NextFunction;
-
-    await requireFieldContractor(createRequest(), {} as Response, crmNext);
-
-    expect(crmNext.mock.calls[0]?.[0]).toMatchObject({ statusCode: 403 });
-
+  it("rejects inactive and unsupported field users with 403", async () => {
     mocks.getUserById.mockResolvedValueOnce(createUser({ isActive: false }));
     const inactiveNext = vi.fn() as NextFunction;
 
     await requireFieldContractor(createRequest(), {} as Response, inactiveNext);
 
     expect(inactiveNext.mock.calls[0]?.[0]).toMatchObject({ statusCode: 403 });
+
+    mocks.getUserById.mockResolvedValueOnce(createUser({ role: "sales_manager" }));
+    const unsupportedNext = vi.fn() as NextFunction;
+
+    await requireFieldContractor(createRequest(), {} as Response, unsupportedNext);
+
+    expect(unsupportedNext.mock.calls[0]?.[0]).toMatchObject({ statusCode: 403 });
   });
 
   it("requireCrmUser allows CRM users and rejects field contractors", () => {

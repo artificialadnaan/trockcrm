@@ -10,6 +10,7 @@ import {
   listFieldProjects,
   listFieldProjectPhotos,
   listStarredFieldProjects,
+  searchFieldCaptureTargets,
   starFieldProject,
   unstarFieldProject,
 } from "./projects-service.js";
@@ -34,7 +35,10 @@ const fieldProjectMiddleware = [requireFieldContractor, tenantMiddleware] as con
 
 fieldRoutes.get("/projects", ...fieldProjectMiddleware, async (req, res, next) => {
   try {
-    const result = await listFieldProjects(req.tenantDb!, req.fieldUser!.id, {
+    const result = await listFieldProjects(req.tenantDb!, {
+      userId: req.fieldUser!.id,
+      userRole: req.fieldUser!.role,
+    }, {
       search: req.query.search as string | undefined,
       status: req.query.status as string | undefined,
       page: req.query.page ? parseInt(req.query.page as string, 10) : undefined,
@@ -49,7 +53,10 @@ fieldRoutes.get("/projects", ...fieldProjectMiddleware, async (req, res, next) =
 
 fieldRoutes.get("/projects/starred", ...fieldProjectMiddleware, async (req, res, next) => {
   try {
-    const result = await listStarredFieldProjects(req.tenantDb!, req.fieldUser!.id);
+    const result = await listStarredFieldProjects(req.tenantDb!, {
+      userId: req.fieldUser!.id,
+      userRole: req.fieldUser!.role,
+    });
     await req.commitTransaction();
     res.json(result);
   } catch (err) {
@@ -59,7 +66,10 @@ fieldRoutes.get("/projects/starred", ...fieldProjectMiddleware, async (req, res,
 
 fieldRoutes.post("/projects/:dealId/star", ...fieldProjectMiddleware, async (req, res, next) => {
   try {
-    const result = await starFieldProject(req.tenantDb!, req.fieldUser!.id, String(req.params.dealId));
+    const result = await starFieldProject(req.tenantDb!, {
+      userId: req.fieldUser!.id,
+      userRole: req.fieldUser!.role,
+    }, String(req.params.dealId));
     await req.commitTransaction();
     res.json(result);
   } catch (err) {
@@ -69,7 +79,10 @@ fieldRoutes.post("/projects/:dealId/star", ...fieldProjectMiddleware, async (req
 
 fieldRoutes.delete("/projects/:dealId/star", ...fieldProjectMiddleware, async (req, res, next) => {
   try {
-    const result = await unstarFieldProject(req.tenantDb!, req.fieldUser!.id, String(req.params.dealId));
+    const result = await unstarFieldProject(req.tenantDb!, {
+      userId: req.fieldUser!.id,
+      userRole: req.fieldUser!.role,
+    }, String(req.params.dealId));
     await req.commitTransaction();
     res.json(result);
   } catch (err) {
@@ -82,7 +95,10 @@ fieldRoutes.post("/photos/upload-url", ...fieldProjectMiddleware, async (req, re
     const result = await requestFieldPhotoUploadUrl(req.tenantDb!, {
       officeSlug: req.officeSlug!,
       userId: req.fieldUser!.id,
-      dealId: String(req.body.dealId),
+      userRole: req.fieldUser!.role,
+      dealId: typeof req.body.dealId === "string" ? req.body.dealId : undefined,
+      leadId: typeof req.body.leadId === "string" ? req.body.leadId : undefined,
+      opportunityId: typeof req.body.opportunityId === "string" ? req.body.opportunityId : undefined,
       contentType: String(req.body.contentType),
       sizeBytes: Number(req.body.sizeBytes),
       photoCategory: req.body.category ?? req.body.photoCategory ?? null,
@@ -99,8 +115,11 @@ fieldRoutes.post("/photos/confirm-upload", ...fieldProjectMiddleware, async (req
   try {
     const result = await confirmFieldPhotoUpload(req.tenantDb!, {
       userId: req.fieldUser!.id,
+      userRole: req.fieldUser!.role,
       officeId: req.fieldUser!.tenantId,
-      dealId: String(req.body.dealId),
+      dealId: typeof req.body.dealId === "string" ? req.body.dealId : undefined,
+      leadId: typeof req.body.leadId === "string" ? req.body.leadId : undefined,
+      opportunityId: typeof req.body.opportunityId === "string" ? req.body.opportunityId : undefined,
       uploadToken: String(req.body.uploadToken),
       objectKey: String(req.body.objectKey),
       latitude: req.body.latitude !== undefined ? Number(req.body.latitude) : undefined,
@@ -116,6 +135,22 @@ fieldRoutes.post("/photos/confirm-upload", ...fieldProjectMiddleware, async (req
   }
 });
 
+fieldRoutes.get("/photo-targets/search", ...fieldProjectMiddleware, async (req, res, next) => {
+  try {
+    const result = await searchFieldCaptureTargets(req.tenantDb!, {
+      userId: req.fieldUser!.id,
+      userRole: req.fieldUser!.role,
+    }, {
+      search: req.query.search as string | undefined,
+      limit: req.query.limit ? parseInt(req.query.limit as string, 10) : undefined,
+    });
+    await req.commitTransaction();
+    res.json(result);
+  } catch (err) {
+    next(err);
+  }
+});
+
 fieldRoutes.get("/projects/:dealId/photos", ...fieldProjectMiddleware, async (req, res, next) => {
   try {
     const categories = typeof req.query.category === "string" && req.query.category.length > 0
@@ -124,7 +159,10 @@ fieldRoutes.get("/projects/:dealId/photos", ...fieldProjectMiddleware, async (re
     const uploaderIds = typeof req.query.uploader === "string" && req.query.uploader.length > 0
       ? req.query.uploader.split(",")
       : undefined;
-    const result = await listFieldProjectPhotos(req.tenantDb!, String(req.params.dealId), {
+    const result = await listFieldProjectPhotos(req.tenantDb!, {
+      userId: req.fieldUser!.id,
+      userRole: req.fieldUser!.role,
+    }, String(req.params.dealId), {
       categories,
       uploaderIds,
       from: req.query.from as string | undefined,

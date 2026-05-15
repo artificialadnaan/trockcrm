@@ -620,15 +620,21 @@ describe("field user service helpers", () => {
     expect(authMocks.verifyPassword).not.toHaveBeenCalled();
   });
 
-  it("rejects CRM users and inactive field users from field login", async () => {
+  it("allows CRM users and rejects inactive users from field login", async () => {
     dbMocks.execute.mockResolvedValueOnce({ rows: [{
       id: "admin-1",
       email: "admin@example.com",
+      first_name: "Admin",
+      last_name: "User",
       role: "admin",
+      office_id: "office-1",
       is_active: true,
       is_enabled: true,
+      password_hash: "hash",
     }] });
-    await expect(loginFieldUser({ email: "admin@example.com", password: "correct-password-12" })).rejects.toMatchObject({ statusCode: 401 });
+    authMocks.verifyPassword.mockResolvedValueOnce(true);
+    const adminResult = await loginFieldUser({ email: "admin@example.com", password: "correct-password-12" });
+    expect(adminResult.user).toMatchObject({ id: "admin-1", role: "admin" });
 
     dbMocks.execute.mockResolvedValueOnce({ rows: [{
       id: "field-1",

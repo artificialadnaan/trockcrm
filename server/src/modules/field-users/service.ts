@@ -1,5 +1,6 @@
 import crypto from "crypto";
 import { sql } from "drizzle-orm";
+import type { UserRole } from "@trock-crm/shared/types";
 import { db } from "../../db.js";
 import { AppError } from "../../middleware/error-handler.js";
 import { sendSystemEmail } from "../../lib/resend-client.js";
@@ -59,10 +60,18 @@ export type FieldUserResponse = {
   email: string;
   firstName: string | null;
   lastName: string | null;
-  role: "field_contractor";
+  role: UserRole;
   tenantId: string;
   active: boolean;
 };
+
+const FIELD_APP_ALLOWED_ROLE_SET = new Set<UserRole>([
+  "admin",
+  "director",
+  "rep",
+  "construction",
+  "field_contractor",
+]);
 
 export function toFieldUserResponse(row: {
   id: string;
@@ -77,12 +86,15 @@ export function toFieldUserResponse(row: {
   is_active?: boolean | null;
   active?: boolean | null;
 }): FieldUserResponse {
+  if (!FIELD_APP_ALLOWED_ROLE_SET.has(row.role as UserRole)) {
+    throw new AppError(500, "Field app user has an unsupported role");
+  }
   return {
     id: row.id,
     email: row.email,
     firstName: row.firstName ?? row.first_name ?? null,
     lastName: row.lastName ?? row.last_name ?? null,
-    role: "field_contractor",
+    role: row.role as UserRole,
     tenantId: row.tenantId ?? row.office_id ?? "",
     active: Boolean(row.active ?? row.is_active),
   };
@@ -585,7 +597,7 @@ export async function loginFieldUser(input: { email: string; password: string })
     LIMIT 1
   `);
   const user = ((result as any).rows ?? result)[0];
-  if (!user || user.role !== "field_contractor" || !user.is_active || !user.is_enabled) {
+  if (!user || !FIELD_APP_ALLOWED_ROLE_SET.has(user.role as UserRole) || !user.is_active || !user.is_enabled) {
     throw new AppError(401, "Invalid email or password");
   }
 
@@ -637,7 +649,7 @@ export async function loginFieldUser(input: { email: string; password: string })
     userId: user.id,
     email: user.email,
     officeId: user.office_id,
-    role: "field_contractor",
+    role: user.role as UserRole,
     authMethod: "local",
   });
   await db.execute(sql`

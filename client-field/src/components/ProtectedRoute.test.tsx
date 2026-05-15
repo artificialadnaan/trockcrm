@@ -53,24 +53,19 @@ describe("ProtectedRoute", () => {
     await vi.waitFor(() => expect(node.textContent).toContain("Login"));
   });
 
-  it("renders for field contractors and logs out wrong roles", async () => {
-    authMock.user = { role: "field_contractor" };
-    const node = renderProtected();
-    await vi.waitFor(() => expect(node.textContent).toContain("Protected Home"));
+  it.each(["field_contractor", "admin", "director", "rep", "construction"] as const)(
+    "renders for allowed %s users",
+    async (role) => {
+      authMock.user = { role };
+      const node = renderProtected();
+      await vi.waitFor(() => expect(node.textContent).toContain("Protected Home"));
+    }
+  );
 
-    root?.unmount();
-    authMock.user = { role: "admin" };
-    root = createRoot(container!);
-    root.render(
-      <MemoryRouter initialEntries={["/home"]}>
-        <Routes>
-          <Route path="/" element={<div>Login</div>} />
-          <Route element={<ProtectedRoute />}>
-            <Route path="/home" element={<div>Protected Home</div>} />
-          </Route>
-        </Routes>
-      </MemoryRouter>
-    );
-    await vi.waitFor(() => expect(authMock.logout).toHaveBeenCalled());
+  it("logs out unsupported roles", async () => {
+    authMock.user = { role: "sales_manager" };
+    const node = renderProtected();
+    await vi.waitFor(() => expect(node.textContent).toContain("Login"));
+    expect(authMock.logout).toHaveBeenCalled();
   });
 });

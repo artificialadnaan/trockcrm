@@ -1,11 +1,19 @@
 import { sql } from "drizzle-orm";
 import type { NodePgDatabase } from "drizzle-orm/node-postgres";
 import type * as schema from "@trock-crm/shared/schema";
+import type { UserRole } from "@trock-crm/shared/types";
 import { AppError } from "../../middleware/error-handler.js";
-import { getFileDownloadUrl, getDealPhotoTimeline } from "../files/service.js";
+import { getDealPhotoTimeline, getFileDownloadUrl, searchPhotoUploadTargets } from "../files/service.js";
 import type { DealPhotoTimelineFilters } from "../files/photo-timeline-filters.js";
+import { getDealById } from "../deals/service.js";
+import { getLeadById } from "../leads/service.js";
 
 type TenantDb = NodePgDatabase<typeof schema>;
+
+export type FieldAccessContext = {
+  userId: string;
+  userRole: UserRole;
+};
 
 const TERMINAL_FIELD_STAGE_SLUGS = [
   "won",
@@ -42,6 +50,7 @@ export type FieldPhoto = {
   fileSizeBytes: number | null;
   fileExtension: string | null;
   dealId: string | null;
+  leadId: string | null;
   description: string | null;
   takenAt: string | null;
   createdAt: string;
@@ -94,9 +103,13 @@ function activeProjectWhere(search?: string) {
   `;
 }
 
+function repDealVisibilityClause(access: FieldAccessContext) {
+  return access.userRole === "rep" ? sql`AND d.assigned_rep_id = ${access.userId}::uuid` : sql``;
+}
+
 export async function listFieldProjects(
   tenantDb: TenantDb,
-  userId: string,
+  access: FieldAccessContext,
   input: { search?: string; status?: string; page?: number; perPage?: number } = {}
 ) {
   if (input.status && input.status !== "active") {
@@ -113,6 +126,7 @@ export async function listFieldProjects(
       FROM deals d
       LEFT JOIN public.pipeline_stage_config psc ON psc.id = d.stage_id
       WHERE ${where}
+      ${repDealVisibilityClause(access)}
     `),
     tenantDb.execute(sql`
       SELECT
@@ -127,7 +141,7 @@ export async function listFieldProjects(
         (fsp.user_id IS NOT NULL) AS starred
       FROM deals d
       LEFT JOIN public.pipeline_stage_config psc ON psc.id = d.stage_id
-      LEFT JOIN field_user_starred_projects fsp ON fsp.deal_id = d.id AND fsp.user_id = ${userId}::uuid
+      LEFT JOIN field_user_starred_projects fsp ON fsp.deal_id = d.id AND fsp.user_id = ${access.userId}::uuid
       LEFT JOIN LATERAL (
         SELECT count(*) AS photo_count, max(COALESCE(f.taken_at, f.created_at)) AS last_photo_at
         FROM files f
@@ -137,6 +151,7 @@ export async function listFieldProjects(
           AND f.deleted_at IS NULL
       ) photo_stats ON true
       WHERE ${where}
+      ${repDealVisibilityClause(access)}
       ORDER BY COALESCE(photo_stats.last_photo_at, d.last_activity_at, d.updated_at, d.created_at) DESC NULLS LAST
       LIMIT ${perPage}
       OFFSET ${offset}
@@ -148,7 +163,7 @@ export async function listFieldProjects(
   return { projects, total, page, perPage };
 }
 
-export async function listStarredFieldProjects(tenantDb: TenantDb, userId: string) {
+export async function listStarredFieldProjects(tenantDb: TenantDb, access: FieldAccessContext) {
   const result = await tenantDb.execute(sql`
     SELECT
       d.id,
@@ -171,33 +186,39 @@ export async function listStarredFieldProjects(tenantDb: TenantDb, userId: strin
         AND f.is_active = true
         AND f.deleted_at IS NULL
     ) photo_stats ON true
-    WHERE fsp.user_id = ${userId}::uuid
+    WHERE fsp.user_id = ${access.userId}::uuid
       AND ${activeProjectWhere()}
+      ${repDealVisibilityClause(access)}
     ORDER BY COALESCE(photo_stats.last_photo_at, d.last_activity_at, d.updated_at, d.created_at) DESC NULLS LAST
   `);
 
   return { projects: ((result as any).rows ?? result).map(mapFieldProject) };
 }
 
-export async function starFieldProject(tenantDb: TenantDb, userId: string, dealId: string) {
-  await assertActiveFieldProject(tenantDb, dealId);
+export async function starFieldProject(tenantDb: TenantDb, access: FieldAccessContext, dealId: string) {
+  await assertActiveFieldProject(tenantDb, access, dealId);
   await tenantDb.execute(sql`
     INSERT INTO field_user_starred_projects (user_id, deal_id)
-    VALUES (${userId}::uuid, ${dealId}::uuid)
+    VALUES (${access.userId}::uuid, ${dealId}::uuid)
     ON CONFLICT (user_id, deal_id) DO NOTHING
   `);
   return { starred: true };
 }
 
-export async function unstarFieldProject(tenantDb: TenantDb, userId: string, dealId: string) {
+export async function unstarFieldProject(tenantDb: TenantDb, access: FieldAccessContext, dealId: string) {
   await tenantDb.execute(sql`
     DELETE FROM field_user_starred_projects
-    WHERE user_id = ${userId}::uuid AND deal_id = ${dealId}::uuid
+    WHERE user_id = ${access.userId}::uuid AND deal_id = ${dealId}::uuid
   `);
   return { starred: false };
 }
 
-export async function assertActiveFieldProject(tenantDb: TenantDb, dealId: string): Promise<FieldProject> {
+export async function assertActiveFieldProject(tenantDb: TenantDb, access: FieldAccessContext, dealId: string): Promise<FieldProject> {
+  const deal = await getDealById(tenantDb, dealId, access.userRole, access.userId);
+  if (!deal || !deal.isActive) {
+    throw new AppError(404, "Project not found");
+  }
+
   const result = await tenantDb.execute(sql`
     SELECT
       d.id,
@@ -220,6 +241,37 @@ export async function assertActiveFieldProject(tenantDb: TenantDb, dealId: strin
   return mapFieldProject(row);
 }
 
+export async function assertAccessibleFieldCaptureTarget(
+  tenantDb: TenantDb,
+  input: { dealId?: string; leadId?: string; opportunityId?: string; userRole: UserRole; userId: string }
+) {
+  if ((input.dealId ? 1 : 0) + (input.leadId ? 1 : 0) + (input.opportunityId ? 1 : 0) !== 1) {
+    throw new AppError(400, "Exactly one capture target must be provided.");
+  }
+
+  if (input.opportunityId) {
+    const opportunity = await getDealById(tenantDb, input.opportunityId, input.userRole, input.userId);
+    if (!opportunity || !opportunity.isActive || opportunity.pipelineDisposition !== "opportunity") {
+      throw new AppError(404, "Capture target not found");
+    }
+    return { id: opportunity.id, type: "opportunity" as const };
+  }
+
+  if (input.dealId) {
+    const deal = await getDealById(tenantDb, input.dealId, input.userRole, input.userId);
+    if (!deal || !deal.isActive) {
+      throw new AppError(404, "Capture target not found");
+    }
+    return { id: deal.id, type: "deal" as const };
+  }
+
+  const lead = await getLeadById(tenantDb, input.leadId!, input.userRole, input.userId);
+  if (!lead || !lead.isActive) {
+    throw new AppError(404, "Capture target not found");
+  }
+  return { id: lead.id, type: "lead" as const };
+}
+
 function safePhoto(photo: any, imageUrl: string | null): FieldPhoto {
   return {
     id: photo.id,
@@ -231,6 +283,7 @@ function safePhoto(photo: any, imageUrl: string | null): FieldPhoto {
     fileSizeBytes: photo.fileSizeBytes ?? null,
     fileExtension: photo.fileExtension ?? null,
     dealId: photo.dealId ?? null,
+    leadId: photo.leadId ?? null,
     description: photo.description ?? null,
     takenAt: iso(photo.takenAt),
     createdAt: iso(photo.createdAt)!,
@@ -250,14 +303,28 @@ function safePhoto(photo: any, imageUrl: string | null): FieldPhoto {
 
 export async function listFieldProjectPhotos(
   tenantDb: TenantDb,
+  access: FieldAccessContext,
   dealId: string,
   filters: DealPhotoTimelineFilters = {}
 ) {
-  await assertActiveFieldProject(tenantDb, dealId);
+  await assertActiveFieldProject(tenantDb, access, dealId);
   const result = await getDealPhotoTimeline(tenantDb, dealId, 1, 200, filters);
   const photos = await Promise.all(result.photos.map(async (photo) => {
     const imageUrl = photo.externalThumbnailUrl ?? photo.externalUrl ?? (await getFileDownloadUrl(tenantDb, photo.id)).url;
     return safePhoto(photo, imageUrl);
   }));
   return { photos, pagination: result.pagination };
+}
+
+export async function searchFieldCaptureTargets(
+  tenantDb: TenantDb,
+  access: FieldAccessContext,
+  input: { search?: string; limit?: number } = {}
+) {
+  return searchPhotoUploadTargets(tenantDb, {
+    search: input.search,
+    limit: input.limit,
+    userId: access.userId,
+    userRole: access.userRole,
+  });
 }

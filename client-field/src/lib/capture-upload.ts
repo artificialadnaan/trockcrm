@@ -77,7 +77,9 @@ export function fileToDataUrl(file: File): Promise<string> {
 }
 
 export function buildUploadMetadata(input: {
-  dealId: string;
+  dealId?: string;
+  leadId?: string;
+  opportunityId?: string;
   objectKey: string;
   uploadToken: string;
   category: string | null;
@@ -86,6 +88,8 @@ export function buildUploadMetadata(input: {
 }) {
   return {
     dealId: input.dealId,
+    leadId: input.leadId,
+    opportunityId: input.opportunityId,
     objectKey: input.objectKey,
     uploadToken: input.uploadToken,
     category: input.category,
@@ -98,7 +102,9 @@ export function buildUploadMetadata(input: {
 }
 
 export async function uploadSessionPhoto(input: {
-  dealId: string;
+  dealId?: string;
+  leadId?: string;
+  opportunityId?: string;
   file: File;
   category: string | null;
   caption?: string | null;
@@ -110,11 +116,13 @@ export async function uploadSessionPhoto(input: {
     objectKey: string;
     uploadToken: string;
   }>("/field/photos/upload-url", {
-    method: "POST",
-    json: {
-      dealId: input.dealId,
-      contentType: compressed.type || "image/jpeg",
-      sizeBytes: compressed.size,
+      method: "POST",
+      json: {
+        dealId: input.dealId,
+        leadId: input.leadId,
+        opportunityId: input.opportunityId,
+        contentType: compressed.type || "image/jpeg",
+        sizeBytes: compressed.size,
       category: input.category,
       caption: input.caption ?? null,
     },
@@ -131,6 +139,8 @@ export async function uploadSessionPhoto(input: {
     method: "POST",
     json: buildUploadMetadata({
       dealId: input.dealId,
+      leadId: input.leadId,
+      opportunityId: input.opportunityId,
       objectKey: upload.objectKey,
       uploadToken: upload.uploadToken,
       category: input.category,

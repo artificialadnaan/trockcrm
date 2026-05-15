@@ -42,6 +42,7 @@ interface PendingUpload {
   subcategory?: string;
   dealId?: string;
   leadId?: string;
+  opportunityId?: string;
   contactId?: string;
   procoreProjectId?: number;
   changeOrderId?: string;
@@ -84,6 +85,8 @@ export interface RequestUploadInput {
   dealId?: string;
   /** Target lead ID; lead files follow converted deals through sourceLeadId lineage */
   leadId?: string;
+  /** Target opportunity ID; stored as a deal-linked file because opportunities are deal records */
+  opportunityId?: string;
   /** Target contact ID */
   contactId?: string;
   /** Target Procore project ID */
@@ -220,11 +223,12 @@ function validateCategoryMatchesMime(category: FileCategory, mimeType: string): 
 function validateAssociations(input: {
   dealId?: string;
   leadId?: string;
+  opportunityId?: string;
   contactId?: string;
   procoreProjectId?: number;
   changeOrderId?: string;
 }): void {
-  if (!input.dealId && !input.leadId && !input.contactId && !input.procoreProjectId && !input.changeOrderId) {
+  if (!input.dealId && !input.leadId && !input.opportunityId && !input.contactId && !input.procoreProjectId && !input.changeOrderId) {
     throw new AppError(400, "File must be associated with at least one entity (lead, deal, contact, Procore project, or change order).");
   }
 }
@@ -521,6 +525,7 @@ export async function requestUploadUrl(
     subcategory: input.subcategory,
     dealId: input.dealId,
     leadId: input.leadId,
+    opportunityId: input.opportunityId,
     contactId: input.contactId,
     procoreProjectId: input.procoreProjectId,
     changeOrderId: input.changeOrderId,
@@ -836,7 +841,7 @@ export async function getFileStats(tenantDb: TenantDb, _filters: Record<string, 
 
 export async function searchPhotoUploadTargets(
   tenantDb: TenantDb,
-  input: { search?: string; limit?: number }
+  input: { search?: string; limit?: number; userRole?: string; userId?: string }
 ): Promise<{ targets: PhotoUploadTarget[] }> {
   const limit = Math.min(Math.max(input.limit ?? 30, 1), 60);
   const trimmed = input.search?.trim() ?? "";
@@ -844,6 +849,10 @@ export async function searchPhotoUploadTargets(
 
   const leadConditions: SQL[] = [];
   const dealConditions: SQL[] = [];
+  if (input.userRole === "rep" && input.userId) {
+    leadConditions.push(eq(leads.assignedRepId, input.userId));
+    dealConditions.push(eq(deals.assignedRepId, input.userId));
+  }
   if (trimmed.length > 0) {
     leadConditions.push(
       or(

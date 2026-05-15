@@ -8,10 +8,18 @@ type FieldUserRequest = {
   email: string;
   firstName: string | null;
   lastName: string | null;
-  role: "field_contractor";
+  role: UserRole;
   tenantId: string;
   active: boolean;
 };
+
+const FIELD_APP_ALLOWED_ROLE_SET = new Set<UserRole>([
+  "admin",
+  "director",
+  "rep",
+  "construction",
+  "field_contractor",
+]);
 
 declare global {
   namespace Express {
@@ -43,8 +51,8 @@ export async function requireFieldContractor(req: Request, _res: Response, next:
     if (!user) {
       throw new AppError(401, "Authentication required");
     }
-    if (user.role !== "field_contractor") {
-      throw new AppError(403, "Field contractor access required");
+    if (!FIELD_APP_ALLOWED_ROLE_SET.has(user.role as UserRole)) {
+      throw new AppError(403, "Field app access required");
     }
     if (!user.isActive) {
       throw new AppError(403, "Field user is inactive");
@@ -65,7 +73,7 @@ export async function requireFieldContractor(req: Request, _res: Response, next:
       email: user.email,
       firstName: user.firstName ?? null,
       lastName: user.lastName ?? null,
-      role: "field_contractor",
+      role: user.role as UserRole,
       tenantId: user.officeId,
       active: user.isActive,
     };

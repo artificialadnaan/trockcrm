@@ -73,7 +73,7 @@ describe("field AuthProvider", () => {
         email: "login@example.com",
         firstName: "Login",
         lastName: "User",
-        role: "field_contractor",
+        role: "admin",
         tenantId: "office-1",
         active: true,
       },
@@ -112,5 +112,22 @@ describe("field AuthProvider", () => {
 
     await vi.waitFor(() => expect(node.textContent).toContain("signed out"));
     expect(latest?.error).toBe("Server returned malformed user data");
+  });
+
+  it("accepts CRM roles in field auth payloads", async () => {
+    apiMock.mockResolvedValueOnce({
+      user: {
+        id: "admin-1",
+        email: "admin@example.com",
+        firstName: "Admin",
+        lastName: "User",
+        role: "admin",
+        tenantId: "office-1",
+        active: true,
+      },
+    });
+
+    const node = renderProbe();
+    await vi.waitFor(() => expect(node.textContent).toContain("admin@example.com"));
   });
 });

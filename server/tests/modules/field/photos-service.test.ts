@@ -3,6 +3,7 @@ import { AppError } from "../../../src/middleware/error-handler.js";
 
 const projectMocks = vi.hoisted(() => ({
   assertActiveFieldProject: vi.fn(),
+  assertAccessibleFieldCaptureTarget: vi.fn(),
 }));
 
 const fileMocks = vi.hoisted(() => ({
@@ -24,6 +25,7 @@ vi.mock("../../../src/modules/field/projects-service.js", async () => {
   return {
     ...actual,
     assertActiveFieldProject: projectMocks.assertActiveFieldProject,
+    assertAccessibleFieldCaptureTarget: projectMocks.assertAccessibleFieldCaptureTarget,
   };
 });
 
@@ -77,6 +79,7 @@ describe("field photo upload service", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     projectMocks.assertActiveFieldProject.mockResolvedValue({ id: "deal-1" });
+    projectMocks.assertAccessibleFieldCaptureTarget.mockResolvedValue({ id: "deal-1", type: "deal" });
     fileMocks.requestUploadUrl.mockResolvedValue({
       uploadUrl: "https://r2.example/upload",
       r2Key: "office/deals/TR-1/photos/photo.jpg",
@@ -101,6 +104,7 @@ describe("field photo upload service", () => {
     const result = await requestFieldPhotoUploadUrl(db, {
       officeSlug: "trock",
       userId: "field-1",
+      userRole: "field_contractor",
       dealId: "deal-1",
       contentType: "image/jpeg",
       sizeBytes: 850_000,
@@ -108,7 +112,13 @@ describe("field photo upload service", () => {
       caption: "North slope",
     });
 
-    expect(projectMocks.assertActiveFieldProject).toHaveBeenCalledWith(db, "deal-1");
+    expect(projectMocks.assertAccessibleFieldCaptureTarget).toHaveBeenCalledWith(db, {
+      dealId: "deal-1",
+      leadId: undefined,
+      opportunityId: undefined,
+      userId: "field-1",
+      userRole: "field_contractor",
+    });
     expect(fileMocks.requestUploadUrl).toHaveBeenCalledWith(db, "trock", "field-1", expect.objectContaining({
       category: "photo",
       dealId: "deal-1",
@@ -128,6 +138,7 @@ describe("field photo upload service", () => {
     await expect(requestFieldPhotoUploadUrl(db, {
       officeSlug: "trock",
       userId: "field-1",
+      userRole: "field_contractor",
       dealId: "deal-1",
       contentType: "application/pdf",
       sizeBytes: 1000,
@@ -139,6 +150,7 @@ describe("field photo upload service", () => {
   it("rejects confirm-upload when the object key does not match the issued upload token", async () => {
     await expect(confirmFieldPhotoUpload(db, {
       userId: "field-1",
+      userRole: "field_contractor",
       officeId: "office-1",
       dealId: "deal-1",
       uploadToken: "upload-token-1",
@@ -152,6 +164,7 @@ describe("field photo upload service", () => {
   it("confirms uploads through the existing file confirm service, records upload side effects, and returns field-safe photo", async () => {
     const result = await confirmFieldPhotoUpload(db, {
       userId: "field-1",
+      userRole: "field_contractor",
       officeId: "office-1",
       dealId: "deal-1",
       uploadToken: "upload-token-1",
@@ -163,7 +176,13 @@ describe("field photo upload service", () => {
       auditContext: { ipAddress: "127.0.0.1", userAgent: "vitest" },
     });
 
-    expect(projectMocks.assertActiveFieldProject).toHaveBeenCalledWith(db, "deal-1");
+    expect(projectMocks.assertAccessibleFieldCaptureTarget).toHaveBeenCalledWith(db, {
+      dealId: "deal-1",
+      leadId: undefined,
+      opportunityId: undefined,
+      userId: "field-1",
+      userRole: "field_contractor",
+    });
     expect(fileMocks.confirmUpload).toHaveBeenCalledWith(db, "field-1", {
       uploadToken: "upload-token-1",
       latitude: 35.123456,
@@ -185,5 +204,101 @@ describe("field photo upload service", () => {
       addressSource: "live_gps",
     }));
     expect(JSON.stringify(result.photo)).not.toContain("r2Key");
+  });
+
+  it("supports lead photo uploads without forcing a deal-backed project", async () => {
+    fileMocks.getPendingUploadMetadata.mockReturnValueOnce({
+      r2Key: "office/leads/LD-1/photos/photo.jpg",
+      leadId: "lead-1",
+      category: "photo",
+    });
+
+    await requestFieldPhotoUploadUrl(db, {
+      officeSlug: "trock",
+      userId: "admin-1",
+      userRole: "admin",
+      leadId: "lead-1",
+      opportunityId: undefined,
+      contentType: "image/jpeg",
+      sizeBytes: 850_000,
+      caption: "Lead photo",
+    });
+
+    expect(fileMocks.requestUploadUrl).toHaveBeenLastCalledWith(db, "trock", "admin-1", expect.objectContaining({
+      dealId: undefined,
+      leadId: "lead-1",
+      description: "Lead photo",
+    }));
+
+    await confirmFieldPhotoUpload(db, {
+      userId: "admin-1",
+      userRole: "admin",
+      officeId: "office-1",
+      leadId: "lead-1",
+      opportunityId: undefined,
+      uploadToken: "upload-token-1",
+      objectKey: "office/leads/LD-1/photos/photo.jpg",
+      auditContext: {},
+    });
+
+    expect(fileMocks.confirmUpload).toHaveBeenLastCalledWith(db, "admin-1", {
+      uploadToken: "upload-token-1",
+      latitude: undefined,
+      longitude: undefined,
+      addressSource: undefined,
+      takenAt: undefined,
+    });
+  });
+
+  it("supports opportunity uploads through opportunityId while storing against the underlying deal", async () => {
+    projectMocks.assertAccessibleFieldCaptureTarget.mockResolvedValueOnce({ id: "deal-2", type: "opportunity" });
+    fileMocks.getPendingUploadMetadata.mockReturnValueOnce({
+      r2Key: "office/deals/TR-2/photos/photo.jpg",
+      dealId: "deal-2",
+      opportunityId: "deal-2",
+      category: "photo",
+    });
+
+    await requestFieldPhotoUploadUrl(db, {
+      officeSlug: "trock",
+      userId: "admin-1",
+      userRole: "admin",
+      opportunityId: "deal-2",
+      contentType: "image/jpeg",
+      sizeBytes: 850_000,
+      caption: "Opportunity photo",
+    });
+
+    expect(projectMocks.assertAccessibleFieldCaptureTarget).toHaveBeenLastCalledWith(db, {
+      dealId: undefined,
+      leadId: undefined,
+      opportunityId: "deal-2",
+      userId: "admin-1",
+      userRole: "admin",
+    });
+    expect(fileMocks.requestUploadUrl).toHaveBeenLastCalledWith(db, "trock", "admin-1", expect.objectContaining({
+      dealId: "deal-2",
+      leadId: undefined,
+      opportunityId: "deal-2",
+      description: "Opportunity photo",
+    }));
+
+    await confirmFieldPhotoUpload(db, {
+      userId: "admin-1",
+      userRole: "admin",
+      officeId: "office-1",
+      opportunityId: "deal-2",
+      uploadToken: "upload-token-1",
+      objectKey: "office/deals/TR-2/photos/photo.jpg",
+      auditContext: {},
+    });
+
+    expect(fileMocks.confirmUpload).toHaveBeenLastCalledWith(db, "admin-1", {
+      uploadToken: "upload-token-1",
+      latitude: undefined,
+      longitude: undefined,
+      addressSource: undefined,
+      takenAt: undefined,
+    });
   });
 });

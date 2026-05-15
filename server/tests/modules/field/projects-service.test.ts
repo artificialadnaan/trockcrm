@@ -4,8 +4,12 @@ const fileServiceMocks = vi.hoisted(() => ({
   getDealPhotoTimeline: vi.fn(),
   getFileDownloadUrl: vi.fn(),
 }));
+const dealServiceMocks = vi.hoisted(() => ({
+  getDealById: vi.fn(),
+}));
 
 vi.mock("../../../src/modules/files/service.js", () => fileServiceMocks);
+vi.mock("../../../src/modules/deals/service.js", () => dealServiceMocks);
 
 const {
   listFieldProjects,
@@ -25,6 +29,11 @@ describe("field projects service", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     fileServiceMocks.getFileDownloadUrl.mockResolvedValue({ url: "https://signed.example/photo.jpg" });
+    dealServiceMocks.getDealById.mockResolvedValue({
+      id: "deal-1",
+      assignedRepId: "field-1",
+      isActive: true,
+    });
   });
 
   it("lists active projects with a field-safe response shape", async () => {
@@ -45,7 +54,7 @@ describe("field projects service", () => {
       }],
     ]);
 
-    const result = await listFieldProjects(db, "field-1", { search: "roof", page: 2, perPage: 10 });
+    const result = await listFieldProjects(db, { userId: "field-1", userRole: "field_contractor" }, { search: "roof", page: 2, perPage: 10 });
 
     expect(result).toEqual({
       projects: [{
@@ -82,7 +91,7 @@ describe("field projects service", () => {
       }],
     ]);
 
-    const result = await listStarredFieldProjects(db, "field-1");
+    const result = await listStarredFieldProjects(db, { userId: "field-1", userRole: "field_contractor" });
 
     expect(result.projects).toHaveLength(1);
     expect(result.projects[0]).toMatchObject({ id: "deal-1", starred: true, photoCount: 3 });
@@ -100,11 +109,11 @@ describe("field projects service", () => {
       }],
       [],
     ]);
-    await expect(starFieldProject(starDb, "field-1", "deal-1")).resolves.toEqual({ starred: true });
+    await expect(starFieldProject(starDb, { userId: "field-1", userRole: "field_contractor" }, "deal-1")).resolves.toEqual({ starred: true });
     expect(starDb.execute).toHaveBeenCalledTimes(2);
 
     const unstarDb = tenantDb([[]]);
-    await expect(unstarFieldProject(unstarDb, "field-1", "deal-1")).resolves.toEqual({ starred: false });
+    await expect(unstarFieldProject(unstarDb, { userId: "field-1", userRole: "field_contractor" }, "deal-1")).resolves.toEqual({ starred: false });
     expect(unstarDb.execute).toHaveBeenCalledTimes(1);
   });
 
@@ -150,7 +159,7 @@ describe("field projects service", () => {
       pagination: { page: 1, limit: 200, total: 1, totalPages: 1 },
     });
 
-    const result = await listFieldProjectPhotos(db, "deal-1", { categories: ["damage"] });
+    const result = await listFieldProjectPhotos(db, { userId: "field-1", userRole: "field_contractor" }, "deal-1", { categories: ["damage"] });
 
     expect(fileServiceMocks.getDealPhotoTimeline).toHaveBeenCalledWith(db, "deal-1", 1, 200, {
       categories: ["damage"],
@@ -164,5 +173,19 @@ describe("field projects service", () => {
     }));
     expect(JSON.stringify(result.photos[0])).not.toContain("r2Key");
     expect(JSON.stringify(result.photos[0])).not.toContain("r2Bucket");
+  });
+
+  it("accepts rep access context for project queries", async () => {
+    const db = tenantDb([
+      [{ total: 0 }],
+      [],
+    ]);
+
+    await expect(listFieldProjects(db, { userId: "rep-1", userRole: "rep" }, { search: "roof" })).resolves.toEqual({
+      projects: [],
+      total: 0,
+      page: 1,
+      perPage: 50,
+    });
   });
 });

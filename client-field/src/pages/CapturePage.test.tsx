@@ -11,26 +11,46 @@ const apiMock = vi.hoisted(() => vi.fn());
 const captureMocks = vi.hoisted(() => ({
   fileToDataUrl: vi.fn(),
   uploadSessionPhoto: vi.fn(),
+  extractPhotoMetadata: vi.fn(),
+  getLiveGps: vi.fn(),
 }));
 
-vi.mock("@/lib/api", () => ({ api: apiMock }));
-vi.mock("@/lib/capture-upload", async () => {
-  const actual = await vi.importActual<typeof import("@/lib/capture-upload")>("@/lib/capture-upload");
+vi.mock("../lib/api", () => ({ api: apiMock }));
+vi.mock("../lib/capture-upload", async () => {
+  const actual = await vi.importActual<typeof import("../lib/capture-upload")>("../lib/capture-upload");
   return {
     ...actual,
     fileToDataUrl: captureMocks.fileToDataUrl,
     uploadSessionPhoto: captureMocks.uploadSessionPhoto,
+    extractPhotoMetadata: captureMocks.extractPhotoMetadata,
+    getLiveGps: captureMocks.getLiveGps,
   };
 });
 
 let root: Root | null = null;
 let container: HTMLDivElement | null = null;
 
+const TARGETS = [
+  { id: "lead-1", type: "lead", name: "Lead One", recordNumber: null, stageName: "New", companyName: "Acme", lastUpdatedAt: "2026-05-15T10:00:00.000Z" },
+  { id: "deal-2", type: "opportunity", name: "Safety Walk", recordNumber: "TR-2", stageName: "Opportunity", companyName: "Bravo", lastUpdatedAt: "2026-05-15T09:00:00.000Z" },
+  { id: "deal-1", type: "deal", name: "Roof Repair", recordNumber: "TR-1", stageName: "Contract", companyName: "Acme", lastUpdatedAt: "2026-05-15T08:00:00.000Z" },
+];
+
 beforeEach(() => {
   apiMock.mockReset();
+  apiMock.mockImplementation(async (path: string) => {
+    const url = new URL(path, "https://example.test");
+    const search = (url.searchParams.get("search") ?? "").toLowerCase();
+    const filtered = TARGETS.filter((target) => !search || target.name.toLowerCase().includes(search));
+    return { targets: filtered };
+  });
   captureMocks.fileToDataUrl.mockReset();
   captureMocks.uploadSessionPhoto.mockReset();
+  captureMocks.extractPhotoMetadata.mockReset();
+  captureMocks.getLiveGps.mockReset();
   captureMocks.fileToDataUrl.mockResolvedValue("data:image/jpeg;base64,preview");
+  captureMocks.extractPhotoMetadata.mockResolvedValue({});
+  captureMocks.getLiveGps.mockResolvedValue({ latitude: 35, longitude: -97, addressSource: "live_gps", takenAt: "2026-05-15T12:00:00.000Z" });
   captureMocks.uploadSessionPhoto.mockResolvedValue({ photo: { id: "photo-1" } });
   HTMLMediaElement.prototype.play = vi.fn(async () => undefined);
   Object.defineProperty(globalThis.navigator, "mediaDevices", {
@@ -58,14 +78,6 @@ afterEach(() => {
 });
 
 function renderPage(path = "/capture") {
-  apiMock
-    .mockResolvedValueOnce({ projects: [
-      { id: "deal-1", name: "Roof Repair", dealNumber: "TR-1", propertyName: "Roof Repair", propertyAddress: "123 Main", stage: "Contract", lastActivityAt: null, photoCount: 2, starred: true },
-      { id: "deal-2", name: "Safety Walk", dealNumber: "TR-2", propertyName: "Safety Walk", propertyAddress: "456 Main", stage: "Estimating", lastActivityAt: null, photoCount: 0, starred: false },
-    ] })
-    .mockResolvedValueOnce({ projects: [
-      { id: "deal-1", name: "Roof Repair", dealNumber: "TR-1", propertyName: "Roof Repair", propertyAddress: "123 Main", stage: "Contract", lastActivityAt: null, photoCount: 2, starred: true },
-    ] });
   container = document.createElement("div");
   document.body.appendChild(container);
   root = createRoot(container);
@@ -74,6 +86,7 @@ function renderPage(path = "/capture") {
       <Routes>
         <Route path="/capture" element={<CapturePage />} />
         <Route path="/projects/:id" element={<div>Project detail</div>} />
+        <Route path="/projects" element={<div>Projects page</div>} />
       </Routes>
     </MemoryRouter>
   );
@@ -82,38 +95,38 @@ function renderPage(path = "/capture") {
 
 describe("CapturePage", () => {
   it("renders the gallery picker as a multi-image input without camera capture", async () => {
-    const node = renderPage("/capture?dealId=deal-1");
+    const node = renderPage("/capture?dealId=deal-1&targetName=Roof Repair");
     await vi.waitFor(() => expect(node.textContent).toContain("Roof Repair"));
 
     const input = node.querySelector<HTMLInputElement>('input[aria-label="Gallery photo picker"]')!;
-    expect(input).toBeTruthy();
     expect(input.type).toBe("file");
     expect(input.accept).toBe("image/*");
     expect(input.multiple).toBe(true);
     expect(input.hasAttribute("capture")).toBe(false);
   });
 
-  it("opens the project picker, searches, selects a project, and single-selects category", async () => {
+  it("opens the target picker, searches, selects a target, and single-selects category", async () => {
     const node = renderPage();
 
-    await vi.waitFor(() => expect(node.textContent).toContain("Choose project"));
-    node.querySelector<HTMLButtonElement>('[aria-label="Choose project"]')?.click();
+    await vi.waitFor(() => expect(apiMock).toHaveBeenCalled());
+    node.querySelector<HTMLButtonElement>('[aria-label="Choose target"]')?.click();
     await vi.waitFor(() => expect(node.textContent).toContain("Roof Repair"));
 
-    const search = node.querySelector<HTMLInputElement>('input[aria-label="Search projects"]')!;
+    const search = node.querySelector<HTMLInputElement>('input[aria-label="Search targets"]')!;
     search.value = "Safety";
     search.dispatchEvent(new InputEvent("input", { bubbles: true, inputType: "insertText", data: "Safety" }));
     await vi.waitFor(() => expect(node.textContent).toContain("Safety Walk"));
 
     Array.from(node.querySelectorAll("button")).find((button) => button.textContent?.includes("Safety Walk"))?.click();
     await vi.waitFor(() => expect(node.textContent).toContain("Safety Walk"));
+
     Array.from(node.querySelectorAll("button")).find((button) => button.textContent === "Damage")?.click();
     await vi.waitFor(() => expect(node.querySelector('[aria-pressed="true"]')?.textContent).toBe("Damage"));
   });
 
-  it("adds gallery photos to the session, removes thumbnails, and uploads remaining photos", async () => {
-    const node = renderPage("/capture?dealId=deal-1");
-    await vi.waitFor(() => expect(node.textContent).toContain("Roof Repair"));
+  it("uploads lead-target photos with leadId and keeps the user on capture", async () => {
+    const node = renderPage("/capture?leadId=lead-1&targetName=Lead%20One");
+    await vi.waitFor(() => expect(node.textContent).toContain("Lead One"));
 
     const input = node.querySelector<HTMLInputElement>('input[type="file"]')!;
     const fileA = new File(["a"], "a.jpg", { type: "image/jpeg" });
@@ -128,16 +141,40 @@ describe("CapturePage", () => {
     Array.from(node.querySelectorAll("button")).find((button) => button.textContent === "Upload")?.click();
     await vi.waitFor(() => expect(captureMocks.uploadSessionPhoto).toHaveBeenCalledTimes(1));
     expect(captureMocks.uploadSessionPhoto).toHaveBeenCalledWith(expect.objectContaining({
-      dealId: "deal-1",
+      dealId: undefined,
+      leadId: "lead-1",
       category: null,
       file: fileB,
     }));
+    expect(node.textContent).not.toContain("Project detail");
+  });
+
+  it("uploads opportunity-target photos with opportunityId and navigates to project detail", async () => {
+    const node = renderPage("/capture?opportunityId=deal-2&targetName=Safety%20Walk");
+    await vi.waitFor(() => expect(node.textContent).toContain("Safety Walk"));
+
+    const input = node.querySelector<HTMLInputElement>('input[type="file"]')!;
+    const file = new File(["b"], "b.jpg", { type: "image/jpeg" });
+    Object.defineProperty(input, "files", { value: [file], configurable: true });
+    input.dispatchEvent(new Event("change", { bubbles: true }));
+
+    await vi.waitFor(() => expect(node.textContent).toContain("1 photo in this session"));
+    Array.from(node.querySelectorAll("button")).find((button) => button.textContent === "Upload")?.click();
+
+    await vi.waitFor(() => expect(captureMocks.uploadSessionPhoto).toHaveBeenCalledTimes(1));
+    expect(captureMocks.uploadSessionPhoto).toHaveBeenCalledWith(expect.objectContaining({
+      dealId: undefined,
+      leadId: undefined,
+      opportunityId: "deal-2",
+      file,
+    }));
+    await vi.waitFor(() => expect(node.textContent).toContain("Project detail"));
   });
 
   it("captures a camera frame into the session", async () => {
     HTMLCanvasElement.prototype.getContext = vi.fn(() => ({ drawImage: vi.fn() })) as any;
     HTMLCanvasElement.prototype.toBlob = vi.fn((callback: BlobCallback) => callback(new Blob(["photo"], { type: "image/jpeg" }))) as any;
-    const node = renderPage("/capture?dealId=deal-1");
+    const node = renderPage("/capture?dealId=deal-1&targetName=Roof Repair");
     await vi.waitFor(() => expect(node.textContent).toContain("Roof Repair"));
 
     node.querySelector<HTMLButtonElement>('[aria-label="Capture photo"]')?.click();
@@ -146,9 +183,9 @@ describe("CapturePage", () => {
     expect(captureMocks.fileToDataUrl).toHaveBeenCalledWith(expect.objectContaining({ type: "image/jpeg" }));
   });
 
-  it("keeps upload disabled when no project is selected", async () => {
+  it("keeps upload disabled when no target is selected", async () => {
     const node = renderPage();
-    await vi.waitFor(() => expect(node.textContent).toContain("Choose project"));
+    await vi.waitFor(() => expect(apiMock).toHaveBeenCalled());
 
     const input = node.querySelector<HTMLInputElement>('input[type="file"]')!;
     Object.defineProperty(input, "files", { value: [new File(["a"], "a.jpg", { type: "image/jpeg" })], configurable: true });
@@ -172,7 +209,7 @@ describe("CapturePage", () => {
     captureMocks.uploadSessionPhoto
       .mockRejectedValueOnce(new Error("network"))
       .mockResolvedValueOnce({ photo: { id: "photo-2" } });
-    const node = renderPage("/capture?dealId=deal-1");
+    const node = renderPage("/capture?dealId=deal-1&targetName=Roof Repair");
     await vi.waitFor(() => expect(node.textContent).toContain("Roof Repair"));
 
     const input = node.querySelector<HTMLInputElement>('input[type="file"]')!;

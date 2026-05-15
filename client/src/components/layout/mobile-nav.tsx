@@ -8,6 +8,7 @@ import {
   DollarSign,
 } from "lucide-react";
 import { useAuth } from "@/lib/auth";
+import { buildFieldCaptureUrl } from "@/lib/field-app";
 
 const mobileNavItems = [
   { to: "/", icon: LayoutDashboard, label: "Home" },
@@ -26,26 +27,40 @@ export function MobileNav() {
   const navItems = user?.role === "rep"
     ? [...mobileNavItems, { to: "/commissions", icon: DollarSign, label: "Commissions" }]
     : mobileNavItems;
+  const captureHref = buildFieldCaptureUrl();
 
   return (
     <nav className="md:hidden fixed bottom-0 left-0 right-0 bg-white border-t z-50">
       <div className="flex items-center justify-around h-16">
         {navItems.map((item) => (
-          <NavLink
-            key={getNavItemKey(item)}
-            to={item.to}
-            end={item.to === "/"}
-            className={({ isActive }) =>
-              `flex flex-col items-center justify-center gap-1 min-w-[3rem] min-h-[2.75rem] rounded-md transition-colors ${
-                isActive
-                  ? "text-brand-red"
-                  : "text-muted-foreground"
-              }`
-            }
-          >
-            <item.icon className="h-5 w-5" />
-            <span className="text-[10px] font-medium">{item.label}</span>
-          </NavLink>
+          item.to === "/photos/capture" && captureHref ? (
+            <a
+              key={getNavItemKey(item)}
+              href={captureHref}
+              className="flex flex-col items-center justify-center gap-1 min-w-[3rem] min-h-[2.75rem] rounded-md transition-colors text-muted-foreground"
+              data-capture-nav="field-app"
+            >
+              <item.icon className="h-5 w-5" />
+              <span className="text-[10px] font-medium">{item.label}</span>
+            </a>
+          ) : (
+            <NavLink
+              key={getNavItemKey(item)}
+              to={item.to}
+              end={item.to === "/"}
+              data-capture-nav={item.to === "/photos/capture" ? "crm-fallback" : undefined}
+              className={({ isActive }) =>
+                `flex flex-col items-center justify-center gap-1 min-w-[3rem] min-h-[2.75rem] rounded-md transition-colors ${
+                  isActive
+                    ? "text-brand-red"
+                    : "text-muted-foreground"
+                }`
+              }
+            >
+              <item.icon className="h-5 w-5" />
+              <span className="text-[10px] font-medium">{item.label}</span>
+            </NavLink>
+          )
         ))}
       </div>
     </nav>
