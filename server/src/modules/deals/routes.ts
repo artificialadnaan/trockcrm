@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { Router } from "express";
 import { and, eq, desc, isNotNull, isNull, or, sql } from "drizzle-orm";
-import { companies, dealApprovals, deals, jobQueue, properties } from "@trock-crm/shared/schema";
+import { companies, dealApprovals, dealScopingIntake, deals, jobQueue, properties } from "@trock-crm/shared/schema";
 import { requireRole } from "../../middleware/rbac.js";
 import { AppError } from "../../middleware/error-handler.js";
 import { writeAuditLog } from "../../lib/audit-log.js";
@@ -165,6 +165,60 @@ async function assertDealRouteAccess(req: any, dealId: string) {
     throw new AppError(403, "Access denied: you do not have access to this deal.");
   }
   return deal;
+}
+
+async function lockScopeComparisonRows(tenantDb: any, dealId: string) {
+  await tenantDb.execute(sql`SELECT id FROM deals WHERE id = ${dealId} FOR UPDATE`);
+  await tenantDb.execute(sql`SELECT id FROM deal_scoping_intake WHERE deal_id = ${dealId} FOR UPDATE`);
+}
+
+function readScopeLockedResolvedBaseline(sectionData: unknown) {
+  const sectionRecord =
+    typeof sectionData === "object" && sectionData !== null && !Array.isArray(sectionData)
+      ? sectionData as Record<string, unknown>
+      : {};
+  const opportunity =
+    typeof sectionRecord.opportunity === "object" &&
+    sectionRecord.opportunity !== null &&
+    !Array.isArray(sectionRecord.opportunity)
+      ? sectionRecord.opportunity as Record<string, unknown>
+      : {};
+
+  return {
+    preBidMeetingCompleted: opportunity.preBidMeetingCompleted,
+    siteVisitDecision: opportunity.siteVisitDecision,
+    siteVisitCompleted: opportunity.siteVisitCompleted,
+    estimatorConsultationNotes: opportunity.estimatorConsultationNotes,
+  };
+}
+
+async function loadLockedDealPatchComparisonBaseline(
+  tenantDb: any,
+  dealId: string,
+  role: string,
+  userId: string,
+) {
+  await lockScopeComparisonRows(tenantDb, dealId);
+  const deal = await getDealById(tenantDb, dealId, role, userId);
+  if (!deal) {
+    throw new AppError(403, "Forbidden");
+  }
+  return deal as Record<string, unknown>;
+}
+
+async function loadLockedResolvedFieldComparisonBaseline(tenantDb: any, dealId: string) {
+  await lockScopeComparisonRows(tenantDb, dealId);
+  const resolvedDeal = await getResolvedDeal(tenantDb, dealId);
+  const [intake] = await tenantDb
+    .select({ sectionData: dealScopingIntake.sectionData })
+    .from(dealScopingIntake)
+    .where(eq(dealScopingIntake.dealId, dealId))
+    .limit(1);
+
+  return {
+    ...resolvedDeal.resolved,
+    ...readScopeLockedResolvedBaseline(intake?.sectionData),
+  } as Record<string, unknown>;
 }
 
 function isEstimatingBoundaryStageSlug(stageSlug: string, workflowRoute: "normal" | "service") {
@@ -856,7 +910,7 @@ router.patch("/:id/resolved-fields", async (req, res, next) => {
       SCOPE_LOCKED_RESOLVED_FIELDS.has(field)
     );
     const existingResolved = hasLockedResolvedFieldCandidates
-      ? (await getResolvedDeal(req.tenantDb!, req.params.id)).resolved as Record<string, unknown>
+      ? await loadLockedResolvedFieldComparisonBaseline(req.tenantDb!, req.params.id)
       : {};
     const scopeLockedFields = getScopeLockedResolvedFields(patch, existingResolved);
     const writePolicy = scopeLockedFields.length > 0
@@ -1236,16 +1290,13 @@ router.patch("/:id", async (req, res, next) => {
       SCOPE_LOCKED_DEAL_PATCH_FIELDS.has(field)
     );
     const existingDeal = hasLockedDealFieldCandidates
-      ? await getDealById(
+      ? await loadLockedDealPatchComparisonBaseline(
           req.tenantDb!,
           req.params.id,
           req.user!.role,
           req.user!.id
         )
       : null;
-    if (hasLockedDealFieldCandidates && !existingDeal) {
-      throw new AppError(403, "Forbidden");
-    }
     const scopeLockedFields = getScopeLockedDealPatchFields(
       body,
       (existingDeal ?? {}) as Record<string, unknown>

@@ -40,19 +40,84 @@ describe("deal scope lock comparisons", () => {
     ).toEqual(["name", "projectTypeId"]);
   });
 
-  it("treats nullish and blank resolved values as equivalent absence", () => {
+  it("treats numeric-looking locked strings as exact strings", () => {
     expect(
-      getScopeLockedResolvedFields(
+      getScopeLockedDealPatchFields(
         {
-          siteVisitDecision: "   ",
-          estimatorConsultationNotes: undefined,
+          name: "12",
+          workflowRoute: "normal",
         },
         {
-          siteVisitDecision: null,
-          estimatorConsultationNotes: null,
+          name: "0012",
+          workflowRoute: "normal",
+        }
+      )
+    ).toEqual(["name"]);
+
+    expect(
+      getScopeLockedDealPatchFields(
+        {
+          name: "12",
+          workflowRoute: "normal",
+        },
+        {
+          name: "12.0",
+          workflowRoute: "normal",
+        }
+      )
+    ).toEqual(["name"]);
+
+    expect(
+      getScopeLockedDealPatchFields(
+        {
+          name: "0012",
+          workflowRoute: "normal",
+        },
+        {
+          name: "0012",
+          workflowRoute: "normal",
         }
       )
     ).toEqual([]);
+  });
+
+  it("treats whitespace differences in locked strings as real changes", () => {
+    expect(
+      getScopeLockedDealPatchFields(
+        {
+          name: " Acme",
+          workflowRoute: "normal",
+        },
+        {
+          name: "Acme",
+          workflowRoute: "normal",
+        }
+      )
+    ).toEqual(["name"]);
+
+    expect(
+      getScopeLockedDealPatchFields(
+        {
+          name: "Acme ",
+          workflowRoute: "normal",
+        },
+        {
+          name: "Acme",
+          workflowRoute: "normal",
+        }
+      )
+    ).toEqual(["name"]);
+    
+    expect(
+      getScopeLockedResolvedFields(
+        {
+          estimatorConsultationNotes: " Existing notes",
+        },
+        {
+          estimatorConsultationNotes: "Existing notes",
+        }
+      )
+    ).toEqual(["estimatorConsultationNotes"]);
   });
 
   it("compares arrays order-independently for resolved fields", () => {
