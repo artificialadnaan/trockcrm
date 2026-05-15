@@ -46,6 +46,42 @@ export function groupPhotoUploadTargets(targets: PhotoUploadTarget[]) {
   };
 }
 
+export function buildUnifiedCaptureHref(
+  searchParams: URLSearchParams,
+  selectedTarget: PhotoUploadTarget | null,
+  activeOfficeId?: string | null
+) {
+  const fieldCaptureParams = new URLSearchParams(searchParams);
+  fieldCaptureParams.delete("dealId");
+  fieldCaptureParams.delete("leadId");
+  fieldCaptureParams.delete("opportunityId");
+  fieldCaptureParams.delete("targetType");
+  fieldCaptureParams.delete("targetName");
+  fieldCaptureParams.delete("dealName");
+  fieldCaptureParams.delete("leadName");
+  fieldCaptureParams.delete("opportunityName");
+
+  if (selectedTarget) {
+    if (selectedTarget.type === "lead") {
+      fieldCaptureParams.set("leadId", selectedTarget.id);
+      fieldCaptureParams.set("leadName", selectedTarget.name);
+    } else if (selectedTarget.type === "opportunity") {
+      fieldCaptureParams.set("opportunityId", selectedTarget.id);
+      fieldCaptureParams.set("opportunityName", selectedTarget.name);
+      fieldCaptureParams.set("targetType", "opportunity");
+    } else {
+      fieldCaptureParams.set("dealId", selectedTarget.id);
+      fieldCaptureParams.set("dealName", selectedTarget.name);
+    }
+    fieldCaptureParams.set("targetName", selectedTarget.name);
+  }
+
+  if (activeOfficeId && !fieldCaptureParams.get("officeId")) {
+    fieldCaptureParams.set("officeId", activeOfficeId);
+  }
+  return buildFieldCaptureUrl(fieldCaptureParams.toString() ? `?${fieldCaptureParams.toString()}` : "");
+}
+
 export function PhotoCapturePage() {
   const { user } = useAuth();
   const [searchParams] = useSearchParams();
@@ -58,18 +94,16 @@ export function PhotoCapturePage() {
   const [uploading, setUploading] = useState(false);
   const [uploadComplete, setUploadComplete] = useState(false);
   const [sessionCount, setSessionCount] = useState(0);
-  const fieldCaptureParams = new URLSearchParams(searchParams);
-  if (user?.activeOfficeId && !fieldCaptureParams.get("officeId")) {
-    fieldCaptureParams.set("officeId", user.activeOfficeId);
-  }
-  const fieldCaptureHref = buildFieldCaptureUrl(fieldCaptureParams.toString() ? `?${fieldCaptureParams.toString()}` : "");
+  const fieldCaptureHref = buildUnifiedCaptureHref(searchParams, selectedTarget, user?.activeOfficeId);
 
   const fileInputRef = useRef<HTMLInputElement>(null);
   const blobUrlsRef = useRef<string[]>([]);
+  const initializedUrlTargetRef = useRef(false);
 
   useEffect(() => {
     const dealId = searchParams.get("dealId");
-    if (!dealId || selectedTarget) return;
+    if (!dealId || initializedUrlTargetRef.current) return;
+    initializedUrlTargetRef.current = true;
     setSelectedTarget({
       id: dealId,
       type: "deal",
@@ -80,7 +114,7 @@ export function PhotoCapturePage() {
       lastUpdatedAt: new Date().toISOString(),
     });
     setTargetSearch(searchParams.get("dealName") ?? "Selected deal");
-  }, [searchParams, selectedTarget]);
+  }, [searchParams]);
 
   useEffect(() => {
     let cancelled = false;
