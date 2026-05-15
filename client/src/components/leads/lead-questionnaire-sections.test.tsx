@@ -418,13 +418,8 @@ describe("LeadQuestionnaireSections", () => {
   });
 
   it("scrolls when a scope card is activated but not when typing inside a selected panel", () => {
-    let updateAnswers: React.Dispatch<
-      React.SetStateAction<Record<string, LeadAnswerValue>>
-    > | null = null;
-
     function Harness() {
       const [answers, setAnswers] = React.useState<Record<string, LeadAnswerValue>>({});
-      updateAnswers = setAnswers;
 
       const handleAnswerChange = (key: string, value: LeadAnswerValue) => {
         setAnswers((current) => ({
@@ -501,18 +496,17 @@ describe("LeadQuestionnaireSections", () => {
 
     expect(roofingCard).toBeTruthy();
     expect(balconiesCard).toBeTruthy();
-    expect(updateAnswers).toBeTruthy();
-
     act(() => {
       roofingCard?.click();
     });
     expect(scrollIntoViewMock).toHaveBeenCalledTimes(1);
 
+    const roofTypeInput = container.querySelector<HTMLInputElement>("#roof_type");
+    expect(roofTypeInput).toBeTruthy();
+
     act(() => {
-      updateAnswers?.((current) => ({
-        ...current,
-        roof_type: "Shingle",
-      }));
+      roofTypeInput!.value = "Shingle";
+      roofTypeInput!.dispatchEvent(new Event("input", { bubbles: true }));
     });
     expect(scrollIntoViewMock).toHaveBeenCalledTimes(1);
 

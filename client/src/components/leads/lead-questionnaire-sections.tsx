@@ -292,6 +292,7 @@ export function LeadQuestionnaireSections({
     }
 
     panel.scrollIntoView({ behavior: "smooth", block: "start" });
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- selectedScopeIds is intentionally read only as a safety guard; adding it back causes scroll on every answer change
   }, [activeScopeGroupKey]);
 
   const renderQuestion = (node: LeadQuestionnaireNode, options?: { nested?: boolean }) => {
