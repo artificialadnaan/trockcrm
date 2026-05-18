@@ -760,22 +760,30 @@ function DealListPageContent({ role }: { role: string }) {
     board?.terminalStages
       ?.filter((terminal) => terminal.stage.slug === "won")
       .reduce(
-        (sum, terminal) =>
-          sum +
-          terminal.deals
-            .filter((deal) => {
-              const contractSignedValue = deal.contractSignedDate ?? deal.contractSignedAt ?? null;
-              const closedAt = parseFlexibleDate(contractSignedValue);
-              if (closedAt === null) return false;
-              if (wonDateRange.from && closedAt < parseDayStart(wonDateRange.from)) {
-                return false;
-              }
-              if (wonDateRange.to && closedAt > parseDayEnd(wonDateRange.to)) {
-                return false;
-              }
-              return true;
-            })
-            .reduce((dealSum, deal) => dealSum + moneyValue(deal), 0),
+        (sum, terminal) => {
+          if (!terminal.deals?.length) {
+            return sum + (terminal.totalValue ?? 0);
+          }
+
+          const terminalDeals = terminal.deals;
+          return (
+            sum +
+            terminalDeals
+              .filter((deal) => {
+                const contractSignedValue = deal.contractSignedDate ?? deal.contractSignedAt ?? null;
+                const closedAt = parseFlexibleDate(contractSignedValue);
+                if (closedAt === null) return false;
+                if (wonDateRange.from && closedAt < parseDayStart(wonDateRange.from)) {
+                  return false;
+                }
+                if (wonDateRange.to && closedAt > parseDayEnd(wonDateRange.to)) {
+                  return false;
+                }
+                return true;
+              })
+              .reduce((dealSum, deal) => dealSum + moneyValue(deal), 0)
+          );
+        },
         0
       ) ?? 0;
   const unsearchedOverSlaCount = unsearchedColumns.reduce(
