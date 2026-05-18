@@ -255,7 +255,7 @@ router.post("/thread/:conversationId/assign", async (req, res, next) => {
     const dealId = req.body.dealId as string | undefined;
     if (!dealId) throw new AppError(400, "dealId is required");
 
-    const thread = await getEmailThreadForMutation(req.tenantDb!, req.params.conversationId);
+    const thread = await getEmailThreadForMutation(req.tenantDb!, req.params.conversationId, req.user!.id);
     await assertCanMutateEmailThread(req.tenantDb!, thread, req.user!);
 
     const deal = await getDealById(req.tenantDb!, dealId, req.user!.role, req.user!.id);
@@ -287,7 +287,7 @@ router.post("/thread/:conversationId/reassign", async (req, res, next) => {
     const dealId = req.body.dealId as string | undefined;
     if (!dealId) throw new AppError(400, "dealId is required");
 
-    const thread = await getEmailThreadForMutation(req.tenantDb!, req.params.conversationId);
+    const thread = await getEmailThreadForMutation(req.tenantDb!, req.params.conversationId, req.user!.id);
     await assertCanMutateEmailThread(req.tenantDb!, thread, req.user!);
 
     const deal = await getDealById(req.tenantDb!, dealId, req.user!.role, req.user!.id);
@@ -322,7 +322,7 @@ router.post("/thread/:conversationId/reassign", async (req, res, next) => {
 
 router.post("/thread/:conversationId/detach", async (req, res, next) => {
   try {
-    const thread = await getEmailThreadForMutation(req.tenantDb!, req.params.conversationId);
+    const thread = await getEmailThreadForMutation(req.tenantDb!, req.params.conversationId, req.user!.id);
     await assertCanMutateEmailThread(req.tenantDb!, thread, req.user!);
 
     await detachThreadByConversation(req.tenantDb!, thread.mailboxAccountId, req.params.conversationId, req.user!.id);
@@ -399,27 +399,13 @@ router.patch("/:id/actions", async (req, res, next) => {
 });
 
 // GET /api/email/:id — single email with full body
-// RBAC: only the email owner or a director/admin can view
+// Security: mailbox data is always scoped to the owning CRM user.
 router.get("/:id", async (req, res, next) => {
   try {
     const email = await getEmailById(req.tenantDb!, req.params.id);
     if (!email) throw new AppError(404, "Email not found");
 
-    const isOwner = email.userId === req.user!.id;
-    const isAdmin = req.user!.role === "director" || req.user!.role === "admin";
-    const dealId =
-      email.dealId ??
-      (email.assignedEntityType === "deal" ? email.assignedEntityId : null);
-    let canViewDealEmail = false;
-    if (!isOwner && !isAdmin && dealId) {
-      try {
-        canViewDealEmail = Boolean(await getDealById(req.tenantDb!, dealId, req.user!.role, req.user!.id));
-      } catch {
-        canViewDealEmail = false;
-      }
-    }
-
-    if (!isOwner && !isAdmin && !canViewDealEmail) {
+    if (email.userId !== req.user!.id) {
       throw new AppError(403, "You do not have permission to view this email");
     }
 
@@ -462,8 +448,8 @@ router.post("/:id/associate", async (req, res, next) => {
     const email = await getEmailById(req.tenantDb!, req.params.id);
     if (!email) throw new AppError(404, "Email not found");
 
-    if (req.user!.role === "rep" && email.userId !== req.user!.id) {
-      throw new AppError(403, "You can only modify your own emails");
+    if (email.userId !== req.user!.id) {
+      throw new AppError(403, "You do not have permission to modify this email");
     }
 
     if (assignedEntityType === "deal") {

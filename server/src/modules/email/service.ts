@@ -445,17 +445,41 @@ async function resolveMailboxUserId(
   return tokenRow.userId;
 }
 
-export async function getEmailThreadForMutation(
+async function findAnyEmailInConversation(
   tenantDb: TenantDb,
   providerConversationId: string
+): Promise<{ id: string; userId: string } | null> {
+  const [email] = await tenantDb
+    .select({ id: emails.id, userId: emails.userId })
+    .from(emails)
+    .where(eq(emails.graphConversationId, providerConversationId))
+    .limit(1);
+
+  return email ?? null;
+}
+
+export async function getEmailThreadForMutation(
+  tenantDb: TenantDb,
+  providerConversationId: string,
+  userId?: string
 ): Promise<EmailThreadMutationContext> {
+  const conditions: any[] = [eq(emails.graphConversationId, providerConversationId)];
+  if (userId) {
+    conditions.push(eq(emails.userId, userId));
+  }
   const threadEmails = await tenantDb
     .select()
     .from(emails)
-    .where(eq(emails.graphConversationId, providerConversationId))
+    .where(and(...conditions))
     .orderBy(sql`${emails.sentAt} ASC`);
 
   if (threadEmails.length === 0) {
+    if (userId) {
+      const existingThreadEmail = await findAnyEmailInConversation(tenantDb, providerConversationId);
+      if (existingThreadEmail) {
+        throw new AppError(403, "You can only view and modify your own email threads");
+      }
+    }
     throw new AppError(404, "Email thread not found");
   }
 
@@ -474,10 +498,6 @@ export async function assertCanMutateEmailThread(
   thread: EmailThreadMutationContext,
   user: { id: string; role: string }
 ) {
-  if (user.role === "admin" || user.role === "director") {
-    return;
-  }
-
   const mailboxAccountId = await resolveMailboxAccountIdForCrmUser(tenantDb, user.id);
   if (thread.mailboxAccountId !== mailboxAccountId) {
     throw new AppError(403, "You can only modify your own email threads");
@@ -688,7 +708,7 @@ export async function getEmailAssignmentQueue(
     conditions.push(sql`${emails.assignmentAmbiguityReason} IS NOT NULL`);
   }
 
-  if (userId && userRole === "rep") {
+  if (userId) {
     conditions.push(eq(emails.userId, userId));
   }
 
@@ -1059,7 +1079,7 @@ export async function getEmails(
   // Inbox views remain mailbox-scoped. Deal views are authorized at the route
   // level and should return the whole linked deal history regardless of which
   // teammate mailbox originally synced the message.
-  if (userId && userRole === "rep" && !filters.dealId) {
+  if (userId) {
     conditions.push(eq(emails.userId, userId));
   }
 
@@ -1153,6 +1173,9 @@ export async function getEmailThread(
   if (!conversationId) return { binding: null, preview: null, emails: [] };
 
   const conditions: any[] = [eq(emails.graphConversationId, conversationId)];
+  if (userId) {
+    conditions.push(eq(emails.userId, userId));
+  }
 
   // Thread view: chronological order (oldest first) for natural reading context
   const thread = await tenantDb
@@ -1162,65 +1185,20 @@ export async function getEmailThread(
     .orderBy(sql`${emails.sentAt} ASC`);
 
   if (thread.length === 0) {
+    if (userId) {
+      const existingThreadEmail = await findAnyEmailInConversation(tenantDb, conversationId);
+      if (existingThreadEmail) {
+        throw new AppError(403, "You do not have permission to view this email thread");
+      }
+    }
     return { binding: null, preview: null, emails: [] };
   }
 
-  const mutationContext = await getEmailThreadForMutation(tenantDb, conversationId);
-  const dealVisibilityCache = new Map<string, boolean>();
-
-  async function canReadThroughDealId(dealId: string) {
-    if (!canViewDeal) return false;
-    if (dealVisibilityCache.has(dealId)) {
-      return dealVisibilityCache.get(dealId)!;
-    }
-    const visible = await canViewDeal(dealId);
-    dealVisibilityCache.set(dealId, visible);
-    return visible;
-  }
-
-  async function canReadEmail(email: typeof emails.$inferSelect) {
-    if (email.userId === userId) return true;
-
-    const candidateDealIds = new Set<string>();
-    if (email.dealId) candidateDealIds.add(email.dealId);
-    if (email.assignedEntityType === "deal" && email.assignedEntityId) {
-      candidateDealIds.add(email.assignedEntityId);
-    }
-    if (mutationContext.binding?.dealId) {
-      candidateDealIds.add(mutationContext.binding.dealId);
-    }
-
-    for (const dealId of candidateDealIds) {
-      if (await canReadThroughDealId(dealId)) {
-        return true;
-      }
-    }
-
-    return false;
-  }
-
-  let visibleThread = thread;
-
-  if (userId && userRole === "rep") {
-    visibleThread = [];
-    for (const email of thread) {
-      if (await canReadEmail(email)) {
-        visibleThread.push(email);
-      }
-    }
-
-    if (visibleThread.length === 0) {
-      return { binding: null, preview: null, emails: [] };
-    }
-  }
+  const mutationContext = await getEmailThreadForMutation(tenantDb, conversationId, userId);
+  const visibleThread = thread;
 
   let bindingPayload: EmailThreadResponse["binding"] = null;
-  const canExposeBinding =
-    !mutationContext.binding?.dealId ||
-    userRole !== "rep" ||
-    (await canReadThroughDealId(mutationContext.binding.dealId));
-
-  if (mutationContext.binding && canExposeBinding) {
+  if (mutationContext.binding) {
     const [dealRow] = mutationContext.binding.dealId
       ? await tenantDb
           .select({ id: deals.id, name: deals.name })
@@ -1339,7 +1317,7 @@ export async function updateEmailInboxAction(
 ) {
   const email = await getEmailById(tenantDb, emailId);
   if (!email) throw new AppError(404, "Email not found");
-  if (userRole === "rep" && email.userId !== userId) {
+  if (email.userId !== userId) {
     throw new AppError(403, "You can only modify your own emails");
   }
 
@@ -1376,7 +1354,7 @@ export async function ignoreEmailAssignment(
 ) {
   const email = await getEmailById(tenantDb, emailId);
   if (!email) throw new AppError(404, "Email not found");
-  if (userRole === "rep" && email.userId !== userId) {
+  if (email.userId !== userId) {
     throw new AppError(403, "You can only modify your own emails");
   }
 
@@ -1400,7 +1378,7 @@ export async function unignoreEmailAssignment(
 ) {
   const email = await getEmailById(tenantDb, emailId);
   if (!email) throw new AppError(404, "Email not found");
-  if (userRole === "rep" && email.userId !== userId) {
+  if (email.userId !== userId) {
     throw new AppError(403, "You can only modify your own emails");
   }
 
@@ -1597,6 +1575,9 @@ export async function associateEmailToEntity(
 ): Promise<void> {
   const email = await getEmailById(tenantDb, emailId);
   if (!email) throw new AppError(404, "Email not found");
+  if (email.userId !== userId) {
+    throw new AppError(403, "You can only modify your own emails");
+  }
 
   if (!["deal", "company", "property", "lead", "contact"].includes(input.assignedEntityType)) {
     throw new AppError(400, "Unsupported assignment target");

@@ -54,7 +54,8 @@ export interface DealCopilotContext {
 
 export async function getDealCopilotContext(
   tenantDb: TenantDb,
-  dealId: string
+  dealId: string,
+  viewerUserId: string
 ): Promise<DealCopilotContext> {
   const [dealResult, activitiesResult, emailsResult, taskSummaryResult] = await Promise.all([
     tenantDb.execute(sql`
@@ -81,6 +82,7 @@ export async function getDealCopilotContext(
       SELECT id, type, subject, body, occurred_at
       FROM activities
       WHERE deal_id = ${dealId}
+        AND (type <> 'email' OR responsible_user_id = ${viewerUserId})
       ORDER BY occurred_at DESC
       LIMIT 10
     `),
@@ -88,6 +90,7 @@ export async function getDealCopilotContext(
       SELECT id, subject, body_preview, direction, sent_at, from_address, to_addresses
       FROM emails
       WHERE deal_id = ${dealId}
+        AND user_id = ${viewerUserId}
       ORDER BY sent_at DESC
       LIMIT 10
     `),

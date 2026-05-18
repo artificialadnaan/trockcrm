@@ -36,6 +36,23 @@ vi.mock("@trock-crm/shared/schema", async () => import("../../../../shared/src/s
 const { AppError } = await import("../../../src/middleware/error-handler.js");
 const { createActivity, getActivities } = await import("../../../src/modules/activities/service.js");
 
+function flattenQueryChunks(input: unknown, seen = new WeakSet<object>()): unknown[] {
+  if (!input || typeof input !== "object") return [input];
+  if (seen.has(input as object)) return [];
+  seen.add(input as object);
+
+  const queryChunks = (input as { queryChunks?: unknown[] }).queryChunks;
+  if (Array.isArray(queryChunks)) {
+    return queryChunks.flatMap((chunk) => flattenQueryChunks(chunk, seen));
+  }
+
+  if ("value" in (input as Record<string, unknown>)) {
+    return [(input as Record<string, unknown>).value];
+  }
+
+  return Object.values(input as Record<string, unknown>).flatMap((value) => flattenQueryChunks(value, seen));
+}
+
 function createSelectChain(rows: unknown[], options?: { resolveOnWhere?: boolean; resolveOnLimit?: boolean; resolveOnOffset?: boolean }) {
   const builder: Record<string, any> = {};
 
@@ -254,5 +271,34 @@ describe("activities service", () => {
       performedByUserAvatarUrl: "https://example.test/avatar.png",
     });
     expect(tenantDb.select).toHaveBeenCalledTimes(3);
+  });
+
+  it("filters email activities to the current mailbox owner while leaving non-email activity visible", async () => {
+    const whereClauses: unknown[] = [];
+    const countQuery = createSelectChain([{ count: 0 }], { resolveOnWhere: true });
+    const rowsQuery = createSelectChain([], { resolveOnOffset: true });
+
+    countQuery.where = vi.fn((condition: unknown) => {
+      whereClauses.push(condition);
+      return Promise.resolve([{ count: 0 }]);
+    });
+    rowsQuery.where = vi.fn((condition: unknown) => {
+      whereClauses.push(condition);
+      return rowsQuery;
+    });
+
+    const tenantDb = {
+      select: vi
+        .fn()
+        .mockReturnValueOnce(countQuery)
+        .mockReturnValueOnce(rowsQuery),
+    } as any;
+
+    await getActivities(tenantDb, { contactId: "contact-1", viewerUserId: "rep-1", limit: 100 });
+
+    const flattened = whereClauses.flatMap((condition) => flattenQueryChunks(condition));
+    expect(flattened).toContain("contact-1");
+    expect(flattened).toContain("rep-1");
+    expect(flattened).toContain("email");
   });
 });

@@ -36,6 +36,7 @@ export interface ActivityFilters {
   contactId?: string;
   responsibleUserId?: string;
   userId?: string;
+  viewerUserId?: string;
   sourceEntityType?: ActivitySourceEntityType;
   sourceEntityId?: string;
   type?: string;
@@ -154,6 +155,14 @@ export async function getActivities(
   if (dealCondition) conditions.push(dealCondition);
   if (filters.contactId) conditions.push(eq(activities.contactId, filters.contactId));
   if (responsibleUserId) conditions.push(eq(activities.responsibleUserId, responsibleUserId));
+  if (filters.viewerUserId) {
+    conditions.push(
+      or(
+        sql`${activities.type} <> 'email'`,
+        eq(activities.responsibleUserId, filters.viewerUserId)
+      )
+    );
+  }
   if (filters.sourceEntityType) {
     conditions.push(eq(activities.sourceEntityType, filters.sourceEntityType as any));
   }

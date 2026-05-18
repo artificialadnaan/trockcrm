@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 
-const { generateDealCopilotPacket } = await import("../../../src/modules/ai-copilot/service.js");
+const { generateDealCopilotPacket, getDealCopilotView } = await import("../../../src/modules/ai-copilot/service.js");
 
 describe("AI copilot service", () => {
   it("assembles context, signals, retrieval evidence, and persists one packet bundle", async () => {
@@ -280,5 +280,21 @@ describe("AI copilot service", () => {
       summary: "Fresh summary",
       generatedAt: "2026-04-15T12:45:00.000Z",
     });
+  });
+
+  it("hides the deal copilot packet when the deal includes another user's emails", async () => {
+    const tenantDb = {
+      execute: vi.fn(async () => ({ rows: [{ exists: 1 }] })),
+      select: vi.fn(),
+    } as any;
+
+    const view = await getDealCopilotView(tenantDb, "deal-1", "user-1");
+
+    expect(view).toEqual({
+      packet: null,
+      suggestedTasks: [],
+      blindSpotFlags: [],
+    });
+    expect(tenantDb.select).not.toHaveBeenCalled();
   });
 });

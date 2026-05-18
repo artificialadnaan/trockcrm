@@ -514,6 +514,7 @@ router.get("/:id/activities", async (req, res, next) => {
     const { getActivities } = await import("../activities/service.js");
     const result = await getActivities(req.tenantDb!, {
       contactId: req.params.id,
+      viewerUserId: req.user!.id,
       page: req.query.page ? parseInt(req.query.page as string, 10) : undefined,
       limit: req.query.limit ? parseInt(req.query.limit as string, 10) : undefined,
     });

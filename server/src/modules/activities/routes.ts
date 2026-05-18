@@ -54,6 +54,7 @@ router.get("/", async (req, res, next) => {
         ? req.user!.id
         : ((req.query.responsibleUserId as string | undefined) ??
           (req.query.userId as string | undefined)),
+      viewerUserId: req.user!.id,
       sourceEntityType: req.query.sourceEntityType as ActivitySourceEntityType | undefined,
       sourceEntityId: req.query.sourceEntityId as string | undefined,
       type: req.query.type as string | undefined,
