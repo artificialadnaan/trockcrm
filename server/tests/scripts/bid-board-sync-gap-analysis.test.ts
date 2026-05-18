@@ -500,6 +500,83 @@ describe("bid-board-sync-gap-analysis", () => {
     expect(result.state).toEqual({ truncated: false, fetchedCount: 2, maxRecords: 2 });
   });
 
+  it("marks Portfolio truncated when maxRecords lands on a page boundary with a next-page indicator", async () => {
+    const query = vi.fn().mockResolvedValueOnce({
+      rows: [
+        {
+          access_token: "encrypted-access-token",
+          token_expires_at: new Date("2026-05-18T13:00:00.000Z"),
+          status: "active",
+        },
+      ],
+    });
+    const fetchImpl = vi.fn().mockResolvedValueOnce({
+      ok: true,
+      status: 200,
+      headers: new Headers({
+        Link: '<https://api.procore.com/rest/v1.0/companies/company-1/projects?page=2&per_page=100>; rel="next"',
+      }),
+      json: async () => Array.from({ length: 100 }, (_, index) => ({
+        id: 1000 + index,
+        name: `Project ${index}`,
+        project_number: `DFW-${index}`,
+      })),
+      text: async () => "",
+    });
+
+    const result = await fetchPortfolioProjects(100, {
+      env: {
+        PROCORE_COMPANY_ID: "company-1",
+        PROCORE_CLIENT_ID: "client-1",
+        PROCORE_CLIENT_SECRET: "secret-1",
+      },
+      now: () => new Date("2026-05-18T12:00:00.000Z"),
+      tokenClient: { query },
+      decryptToken: (value: string) => `decrypted:${value}`,
+      fetchImpl,
+    });
+
+    expect(result.records).toHaveLength(100);
+    expect(result.state).toEqual({ truncated: true, fetchedCount: 100, maxRecords: 100 });
+  });
+
+  it("does not mark Portfolio truncated for a partial page without a next-page indicator", async () => {
+    const query = vi.fn().mockResolvedValueOnce({
+      rows: [
+        {
+          access_token: "encrypted-access-token",
+          token_expires_at: new Date("2026-05-18T13:00:00.000Z"),
+          status: "active",
+        },
+      ],
+    });
+    const fetchImpl = vi.fn().mockResolvedValueOnce({
+      ok: true,
+      status: 200,
+      headers: new Headers(),
+      json: async () => [
+        { id: 101, name: "One", project_number: "DFW-1" },
+        { id: 102, name: "Two", project_number: "DFW-2" },
+      ],
+      text: async () => "",
+    });
+
+    const result = await fetchPortfolioProjects(10, {
+      env: {
+        PROCORE_COMPANY_ID: "company-1",
+        PROCORE_CLIENT_ID: "client-1",
+        PROCORE_CLIENT_SECRET: "secret-1",
+      },
+      now: () => new Date("2026-05-18T12:00:00.000Z"),
+      tokenClient: { query },
+      decryptToken: (value: string) => `decrypted:${value}`,
+      fetchImpl,
+    });
+
+    expect(result.records).toHaveLength(2);
+    expect(result.state).toEqual({ truncated: false, fetchedCount: 2, maxRecords: 10 });
+  });
+
   it("marks HubSpot truncated when maxRecords cuts through a later page", async () => {
     const fetchImpl = vi
       .fn()

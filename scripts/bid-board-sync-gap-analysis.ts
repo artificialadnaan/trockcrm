@@ -992,6 +992,112 @@ async function resolveReadOnlyProcoreToken(options: PortfolioFetchOptions = {}) 
   }
 }
 
+type PortfolioApiProject = {
+  id: number;
+  name?: string | null;
+  display_name?: string | null;
+  displayName?: string | null;
+  project_number?: string | null;
+  projectNumber?: string | null;
+  city?: string | null;
+  state_code?: string | null;
+  stateCode?: string | null;
+  address?: string | { street?: string | null; city?: string | null; state_code?: string | null; stateCode?: string | null } | null;
+  updated_at?: string | null;
+  updatedAt?: string | null;
+};
+
+type PortfolioApiPage = PortfolioApiProject[] | {
+  data?: PortfolioApiProject[];
+  projects?: PortfolioApiProject[];
+  results?: PortfolioApiProject[];
+  next_page_url?: string | null;
+  nextPageUrl?: string | null;
+  next_page?: string | number | null;
+  nextPage?: string | number | null;
+  total_count?: number | null;
+  totalCount?: number | null;
+  total?: number | null;
+  pagination?: {
+    next_page_url?: string | null;
+    nextPageUrl?: string | null;
+    next_page?: string | number | null;
+    nextPage?: string | number | null;
+    total_count?: number | null;
+    totalCount?: number | null;
+    total?: number | null;
+  };
+  meta?: {
+    pagination?: {
+      next_page_url?: string | null;
+      nextPageUrl?: string | null;
+      next_page?: string | number | null;
+      nextPage?: string | number | null;
+      total_count?: number | null;
+      totalCount?: number | null;
+      total?: number | null;
+    };
+  };
+};
+
+function portfolioRowsFromPage(page: PortfolioApiPage): PortfolioApiProject[] {
+  if (Array.isArray(page)) return page;
+  return page.data ?? page.projects ?? page.results ?? [];
+}
+
+function numericPageField(value: unknown): number | null {
+  if (typeof value === "number" && Number.isFinite(value)) return value;
+  if (typeof value === "string" && value.trim() !== "") {
+    const parsed = Number(value);
+    return Number.isFinite(parsed) ? parsed : null;
+  }
+  return null;
+}
+
+function portfolioTotalFromPage(page: PortfolioApiPage): number | null {
+  if (Array.isArray(page)) return null;
+  return numericPageField(
+    page.total_count ??
+    page.totalCount ??
+    page.total ??
+    page.pagination?.total_count ??
+    page.pagination?.totalCount ??
+    page.pagination?.total ??
+    page.meta?.pagination?.total_count ??
+    page.meta?.pagination?.totalCount ??
+    page.meta?.pagination?.total
+  );
+}
+
+function portfolioPageHasNext(response: Response, page: PortfolioApiPage, fetchedAfterPage: number): boolean {
+  const headers = response.headers;
+  const link = headers?.get("Link") ?? headers?.get("link") ?? "";
+  if (/<[^>]+>;\s*rel="?next"?/i.test(link) || /rel="?next"?/i.test(link)) return true;
+
+  const nextHeader = headers?.get("X-Next-Page") ?? headers?.get("x-next-page");
+  if (cleanText(nextHeader)) return true;
+
+  if (!Array.isArray(page)) {
+    const nextField =
+      page.next_page_url ??
+      page.nextPageUrl ??
+      page.next_page ??
+      page.nextPage ??
+      page.pagination?.next_page_url ??
+      page.pagination?.nextPageUrl ??
+      page.pagination?.next_page ??
+      page.pagination?.nextPage ??
+      page.meta?.pagination?.next_page_url ??
+      page.meta?.pagination?.nextPageUrl ??
+      page.meta?.pagination?.next_page ??
+      page.meta?.pagination?.nextPage;
+    if (cleanText(nextField)) return true;
+  }
+
+  const total = portfolioTotalFromPage(page);
+  return total != null && total > fetchedAfterPage;
+}
+
 export async function fetchPortfolioProjects(maxRecords: number, options: PortfolioFetchOptions = {}): Promise<SourceFetchResult> {
   const auth = await resolveReadOnlyProcoreToken(options);
   const fetchImpl = options.fetchImpl ?? fetch;
@@ -1012,23 +1118,13 @@ export async function fetchPortfolioProjects(maxRecords: number, options: Portfo
       const text = await response.text().catch(() => "");
       throw new Error(`Procore read-only portfolio fetch failed: ${response.status} ${text}`);
     }
-    const pageRows = await response.json() as Array<{
-      id: number;
-      name?: string | null;
-      display_name?: string | null;
-      displayName?: string | null;
-      project_number?: string | null;
-      projectNumber?: string | null;
-      city?: string | null;
-      state_code?: string | null;
-      stateCode?: string | null;
-      address?: string | { street?: string | null; city?: string | null; state_code?: string | null; stateCode?: string | null } | null;
-      updated_at?: string | null;
-      updatedAt?: string | null;
-    }>;
+    const parsedPage = await response.json() as PortfolioApiPage;
+    const pageRows = portfolioRowsFromPage(parsedPage);
     if (pageRows.length === 0) break;
     const remainingCapacity = maxRecords - rows.length;
-    if (pageRows.length > remainingCapacity) truncated = true;
+    const fetchedAfterPage = rows.length + pageRows.length;
+    const hasNextPage = portfolioPageHasNext(response, parsedPage, fetchedAfterPage);
+    if (pageRows.length > remainingCapacity || (pageRows.length === remainingCapacity && hasNextPage)) truncated = true;
     rows.push(
       ...pageRows.slice(0, remainingCapacity).map((row) => ({
         id: String(row.id),
@@ -1044,7 +1140,8 @@ export async function fetchPortfolioProjects(maxRecords: number, options: Portfo
         },
       }))
     );
-    if (pageRows.length < pageSize || rows.length >= maxRecords) break;
+    if (!hasNextPage && pageRows.length < pageSize) break;
+    if (rows.length >= maxRecords) break;
     page += 1;
   }
   return {
