@@ -95,6 +95,30 @@ function collectSqlText(node: any, seen = new Set<unknown>()): string {
     .join(" ");
 }
 
+function stringifyQueryNode(node: unknown, seen = new WeakSet<object>()): string {
+  if (node == null) return "";
+  if (typeof node === "string" || typeof node === "number" || typeof node === "boolean") {
+    return String(node);
+  }
+  if (typeof node !== "object") return "";
+  if (seen.has(node as object)) return "";
+  seen.add(node as object);
+
+  if (Array.isArray(node)) {
+    return node.map((entry) => stringifyQueryNode(entry, seen)).join(" ");
+  }
+  if ("queryChunks" in (node as Record<string, unknown>)) {
+    return stringifyQueryNode((node as { queryChunks?: unknown[] }).queryChunks ?? [], seen);
+  }
+  if ("value" in (node as Record<string, unknown>)) {
+    return stringifyQueryNode((node as { value?: unknown }).value, seen);
+  }
+
+  return Object.values(node as Record<string, unknown>)
+    .map((entry) => stringifyQueryNode(entry, seen))
+    .join(" ");
+}
+
 function createSelectChain(result: any[]) {
   const chain: any = {
     from: vi.fn(() => chain),
@@ -276,7 +300,7 @@ describe("email service inbound association", () => {
     expect(hasColumnName(whereClause, "graph_conversation_id")).toBe(true);
   });
 
-  it("includes assigned-entity fallback when filtering emails by contact", async () => {
+  it("includes assigned-entity fallback when filtering emails by contact without mailbox-owner scoping", async () => {
     const whereClauses: unknown[] = [];
     const tenantDb = {
       select: vi.fn(() => {
@@ -302,10 +326,10 @@ describe("email service inbound association", () => {
       }),
     };
 
-    await getEmails(tenantDb as any, { contactId: "contact-1" }, "director-1", "director");
+    await getEmails(tenantDb as any, { contactId: "contact-1" }, undefined, "director");
 
     expect(whereClauses.length).toBe(2);
-    expect(hasColumnName(whereClauses[0], "user_id") || hasColumnName(whereClauses[0], "userId")).toBe(true);
+    expect(stringifyQueryNode(whereClauses[0])).not.toContain("user_id =");
     expect(hasColumnName(whereClauses[0], "contact_id") || hasColumnName(whereClauses[0], "contactId")).toBe(true);
     expect(
       hasColumnName(whereClauses[0], "assigned_entity_type") ||
@@ -317,7 +341,7 @@ describe("email service inbound association", () => {
     ).toBe(true);
   });
 
-  it("includes assigned-entity fallback when filtering emails by deal", async () => {
+  it("includes assigned-entity fallback when filtering emails by deal without mailbox-owner scoping", async () => {
     const whereClauses: unknown[] = [];
     const tenantDb = {
       select: vi.fn(() => {
@@ -343,10 +367,10 @@ describe("email service inbound association", () => {
       }),
     };
 
-    await getEmails(tenantDb as any, { dealId: "deal-1" }, "director-1", "director");
+    await getEmails(tenantDb as any, { dealId: "deal-1" }, undefined, "director");
 
     expect(whereClauses.length).toBe(2);
-    expect(hasColumnName(whereClauses[0], "user_id") || hasColumnName(whereClauses[0], "userId")).toBe(true);
+    expect(stringifyQueryNode(whereClauses[0])).not.toContain("user_id =");
     expect(hasColumnName(whereClauses[0], "deal_id") || hasColumnName(whereClauses[0], "dealId")).toBe(true);
     expect(
       hasColumnName(whereClauses[0], "assigned_entity_type") ||
@@ -358,7 +382,7 @@ describe("email service inbound association", () => {
     ).toBe(true);
   });
 
-  it("includes lead assignments when filtering emails by lead", async () => {
+  it("includes lead assignments when filtering emails by lead without mailbox-owner scoping", async () => {
     const whereClauses: unknown[] = [];
     const tenantDb = {
       select: vi.fn(() => {
@@ -384,9 +408,10 @@ describe("email service inbound association", () => {
       }),
     };
 
-    await getEmails(tenantDb as any, { leadId: "lead-1" }, "director-1", "director");
+    await getEmails(tenantDb as any, { leadId: "lead-1" }, undefined, "director");
 
     expect(whereClauses.length).toBe(2);
+    expect(stringifyQueryNode(whereClauses[0])).not.toContain("user_id =");
     expect(
       hasColumnName(whereClauses[0], "assigned_entity_type") ||
         hasColumnName(whereClauses[0], "assignedEntityType")
@@ -397,7 +422,7 @@ describe("email service inbound association", () => {
     ).toBe(true);
   });
 
-  it("includes company-linked assignment and relationship paths when filtering emails by company", async () => {
+  it("includes company-linked assignment and relationship paths when filtering emails by company without mailbox-owner scoping", async () => {
     const whereClauses: unknown[] = [];
     const tenantDb = {
       select: vi.fn(() => {
@@ -423,10 +448,10 @@ describe("email service inbound association", () => {
       }),
     };
 
-    await getEmails(tenantDb as any, { companyId: "company-1" } as any, "director-1", "director");
+    await getEmails(tenantDb as any, { companyId: "company-1" } as any, undefined, "director");
 
     expect(whereClauses.length).toBe(2);
-    expect(hasColumnName(whereClauses[0], "user_id") || hasColumnName(whereClauses[0], "userId")).toBe(true);
+    expect(stringifyQueryNode(whereClauses[0])).not.toContain("user_id =");
     expect(
       hasColumnName(whereClauses[0], "assigned_entity_type") ||
         hasColumnName(whereClauses[0], "assignedEntityType")
@@ -439,7 +464,7 @@ describe("email service inbound association", () => {
     expect(hasColumnName(whereClauses[0], "contact_id") || hasColumnName(whereClauses[0], "contactId")).toBe(true);
   });
 
-  it("does not hide archived emails from deal or contact email history", async () => {
+  it("hides archived, deleted, and ignored emails from shared entity email history", async () => {
     const whereClauses: unknown[] = [];
     const tenantDb = {
       select: vi.fn(() => {
@@ -465,11 +490,12 @@ describe("email service inbound association", () => {
       }),
     };
 
-    await getEmails(tenantDb as any, { dealId: "deal-1" }, "director-1", "director");
+    await getEmails(tenantDb as any, { dealId: "deal-1" }, undefined, "director");
 
     expect(whereClauses.length).toBe(2);
-    expect(sqlConditionReferencesColumn(whereClauses[0], "archived_at")).toBe(false);
-    expect(sqlConditionReferencesColumn(whereClauses[0], "deleted_at")).toBe(false);
+    expect(sqlConditionReferencesColumn(whereClauses[0], "archived_at")).toBe(true);
+    expect(sqlConditionReferencesColumn(whereClauses[0], "deleted_at")).toBe(true);
+    expect(stringifyQueryNode(whereClauses[0])).toContain("ignored");
   });
 
   it("returns only the rep-visible subset of a mixed thread", async () => {

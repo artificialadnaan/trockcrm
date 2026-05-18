@@ -1358,14 +1358,18 @@ export async function generateDealCopilotPacket(
 }
 
 export async function getDealCopilotView(tenantDb: TenantDb, dealId: string, viewerUserId: string) {
-  const foreignEmailResult = await tenantDb.execute(sql`
+  const inactiveLinkedEmailResult = await tenantDb.execute(sql`
     SELECT 1
     FROM emails
     WHERE ${buildDealEmailLinkCondition("emails", sql`${dealId}`)}
-      AND user_id <> ${viewerUserId}
+      AND (
+        archived_at IS NOT NULL
+        OR deleted_at IS NOT NULL
+        OR assignment_status = 'ignored'
+      )
     LIMIT 1
   `);
-  if (foreignEmailResult.rows?.length) {
+  if (inactiveLinkedEmailResult.rows?.length) {
     return {
       packet: null,
       suggestedTasks: [],

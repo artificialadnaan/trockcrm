@@ -563,7 +563,7 @@ describe("email routes", () => {
     expect(emailServiceMocks.getEmails).toHaveBeenCalledWith(
       tenantDb,
       expect.objectContaining({ companyId: "company-1" }),
-      "director-1",
+      undefined,
       "director"
     );
     expect(req.commitTransaction).toHaveBeenCalled();
@@ -595,7 +595,55 @@ describe("email routes", () => {
     expect(emailServiceMocks.getEmails).toHaveBeenCalledWith(
       tenantDb,
       expect.objectContaining({ contactId: "contact-1" }),
-      "director-1",
+      undefined,
+      "director"
+    );
+  });
+
+  it("returns deal-linked emails without mailbox-owner scoping after deal access passes", async () => {
+    const tenantDb = {};
+    dealServiceMocks.getDealById.mockResolvedValue({ id: "deal-1", sourceLeadId: "lead-1" });
+    emailServiceMocks.getEmails.mockResolvedValue({
+      emails: [{ id: "email-1", userId: "rep-2" }],
+      pagination: { page: 1, limit: 20, total: 1, totalPages: 1 },
+    });
+
+    await invokeRoute({
+      method: "get",
+      url: "/deal/deal-1",
+      user: makeRepUser(),
+      tenantDb,
+    });
+
+    expect(dealServiceMocks.getDealById).toHaveBeenCalledWith(tenantDb, "deal-1", "rep", "rep-1");
+    expect(emailServiceMocks.getEmails).toHaveBeenCalledWith(
+      tenantDb,
+      expect.objectContaining({ dealId: "deal-1", leadId: "lead-1" }),
+      undefined,
+      "rep"
+    );
+  });
+
+  it("returns lead-linked emails without mailbox-owner scoping after lead access passes", async () => {
+    const tenantDb = {};
+    leadServiceMocks.getLeadById.mockResolvedValue({ id: "lead-1" });
+    emailServiceMocks.getEmails.mockResolvedValue({
+      emails: [{ id: "email-1", userId: "rep-2" }],
+      pagination: { page: 1, limit: 20, total: 1, totalPages: 1 },
+    });
+
+    await invokeRoute({
+      method: "get",
+      url: "/lead/lead-1",
+      user: makeDirectorUser(),
+      tenantDb,
+    });
+
+    expect(leadServiceMocks.getLeadById).toHaveBeenCalledWith(tenantDb, "lead-1", "director", "director-1");
+    expect(emailServiceMocks.getEmails).toHaveBeenCalledWith(
+      tenantDb,
+      expect.objectContaining({ leadId: "lead-1" }),
+      undefined,
       "director"
     );
   });
@@ -609,6 +657,134 @@ describe("email routes", () => {
       assignedEntityId: null,
     });
     dealServiceMocks.getDealById.mockResolvedValue({ id: "deal-1" });
+
+    await expect(
+      invokeRoute({
+        method: "get",
+        url: "/email-1",
+        user: makeRepUser(),
+      })
+    ).rejects.toThrow("You do not have permission to view this email");
+
+    expect(dealServiceMocks.getDealById).not.toHaveBeenCalled();
+  });
+
+  it("allows viewing another user's email when it is assigned to an accessible deal", async () => {
+    emailServiceMocks.getEmailById.mockResolvedValue({
+      id: "email-1",
+      userId: "rep-2",
+      dealId: "deal-1",
+      assignedEntityType: "deal",
+      assignedEntityId: "deal-1",
+    });
+    dealServiceMocks.getDealById.mockResolvedValue({ id: "deal-1" });
+
+    const { res } = await invokeRoute({
+      method: "get",
+      url: "/email-1",
+      user: makeRepUser(),
+    });
+
+    expect(dealServiceMocks.getDealById).toHaveBeenCalledWith(expect.any(Object), "deal-1", "rep", "rep-1");
+    expect(res.body).toEqual({
+      email: expect.objectContaining({ id: "email-1", assignedEntityType: "deal", assignedEntityId: "deal-1" }),
+    });
+  });
+
+  it("allows viewing another user's email when it is assigned to an accessible company", async () => {
+    emailServiceMocks.getEmailById.mockResolvedValue({
+      id: "email-1",
+      userId: "rep-2",
+      dealId: null,
+      assignedEntityType: "company",
+      assignedEntityId: "company-1",
+    });
+    companyServiceMocks.getCompanyById.mockResolvedValue({ id: "company-1", name: "Alpha Roofing" });
+
+    const { res } = await invokeRoute({
+      method: "get",
+      url: "/email-1",
+      user: makeRepUser(),
+    });
+
+    expect(companyServiceMocks.getCompanyById).toHaveBeenCalledWith(expect.any(Object), "company-1");
+    expect(res.body).toEqual({
+      email: expect.objectContaining({ id: "email-1", assignedEntityType: "company", assignedEntityId: "company-1" }),
+    });
+  });
+
+  it("allows viewing another user's email when it is assigned to an accessible contact", async () => {
+    emailServiceMocks.getEmailById.mockResolvedValue({
+      id: "email-1",
+      userId: "rep-2",
+      dealId: null,
+      assignedEntityType: "contact",
+      assignedEntityId: "contact-1",
+    });
+    contactServiceMocks.getContactById.mockResolvedValue({ id: "contact-1", companyId: "company-1" });
+
+    const { res } = await invokeRoute({
+      method: "get",
+      url: "/email-1",
+      user: makeRepUser(),
+    });
+
+    expect(contactServiceMocks.getContactById).toHaveBeenCalledWith(expect.any(Object), "contact-1");
+    expect(res.body).toEqual({
+      email: expect.objectContaining({ id: "email-1", assignedEntityType: "contact", assignedEntityId: "contact-1" }),
+    });
+  });
+
+  it("blocks viewing another user's email when the assigned deal is not accessible", async () => {
+    emailServiceMocks.getEmailById.mockResolvedValue({
+      id: "email-1",
+      userId: "rep-2",
+      dealId: "deal-1",
+      assignedEntityType: "deal",
+      assignedEntityId: "deal-1",
+    });
+    dealServiceMocks.getDealById.mockResolvedValue(null);
+
+    await expect(
+      invokeRoute({
+        method: "get",
+        url: "/email-1",
+        user: makeRepUser(),
+      })
+    ).rejects.toThrow("You do not have permission to view this email");
+  });
+
+  it("blocks viewing another user's email when it is only assigned to a property", async () => {
+    emailServiceMocks.getEmailById.mockResolvedValue({
+      id: "email-1",
+      userId: "rep-2",
+      dealId: null,
+      assignedEntityType: "property",
+      assignedEntityId: "property-1",
+    });
+
+    await expect(
+      invokeRoute({
+        method: "get",
+        url: "/email-1",
+        user: makeRepUser(),
+      })
+    ).rejects.toThrow("You do not have permission to view this email");
+
+    expect(propertyServiceMocks.getPropertyDetail).not.toHaveBeenCalled();
+  });
+
+  it("blocks viewing another user's ignored shared email by id", async () => {
+    emailServiceMocks.getEmailById.mockResolvedValue({
+      id: "email-1",
+      userId: "rep-2",
+      dealId: "deal-1",
+      assignedEntityType: "deal",
+      assignedEntityId: "deal-1",
+      assignmentStatus: "ignored",
+      archivedAt: null,
+      deletedAt: null,
+    });
 
     await expect(
       invokeRoute({

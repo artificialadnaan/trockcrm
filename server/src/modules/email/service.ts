@@ -1388,6 +1388,14 @@ export async function getEmails(
     conditions.push(eq(emails.userId, userId));
   }
 
+  const isEntityScoped = Boolean(
+    filters.companyId || filters.dealId || filters.leadId || filters.contactId
+  );
+  if (!userId && isEntityScoped) {
+    conditions.push(...activeEmailConditions());
+    conditions.push(sql`${emails.assignmentStatus} <> 'ignored'`);
+  }
+
   if (filters.companyId) {
     conditions.push(
       or(
