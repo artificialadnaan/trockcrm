@@ -466,11 +466,11 @@ describe("DirectorDashboardPage", () => {
     expect(html).toContain("Refresh dashboard");
   });
 
-  it("routes stale deal drilldowns to the reports stale deals section", () => {
+  it("routes stale deal drilldowns to the filtered deals list", () => {
     const html = renderPageHtml();
 
-    expect(html).toContain('href="/reports?range=qtd#stale-deals"');
-    expect(html).not.toContain('href="/deals?filter=stale"');
+    expect(html).toContain('href="/deals?filter=stale&amp;period=qtd&amp;scope=team"');
+    expect(html).not.toContain('href="/reports?range=qtd#stale-deals"');
   });
 
   it("renders KPI strip with all expected metrics", () => {
@@ -487,9 +487,9 @@ describe("DirectorDashboardPage", () => {
   it("links the summary cards and drill-down badges to their filtered destinations", () => {
     const html = renderPageHtml();
 
-    expect(html).toContain('href="/deals?filter=active&amp;period=qtd"');
-    expect(html).toContain('href="/deals?filter=won&amp;period=qtd"');
-    expect(html).toContain('href="/reports?range=qtd#stale-deals"');
+    expect(html).toContain('href="/deals?filter=active_pipeline&amp;period=qtd&amp;scope=team"');
+    expect(html).toContain('href="/deals?filter=won&amp;period=qtd&amp;scope=team"');
+    expect(html).toContain('href="/deals?filter=stale&amp;period=qtd&amp;scope=team"');
     expect(html).toContain('href="/reports/performance/forecast-accuracy?range=qtd"');
     expect(html).toContain('href="/reports/performance/rep-activity?range=qtd"');
   });
@@ -500,7 +500,7 @@ describe("DirectorDashboardPage", () => {
     expect(html).toContain("Closing");
     expect(html).toContain("1 this quarter");
     expect(html).toContain('aria-label="View recent closed deals"');
-    expect(html).toContain('href="/deals?filter=won&amp;period=qtd"');
+    expect(html).toContain('href="/deals?filter=won&amp;period=qtd&amp;scope=team"');
   });
 
   it("preserves the selected dashboard period in drill-down links", async () => {
@@ -522,7 +522,7 @@ describe("DirectorDashboardPage", () => {
         link.getAttribute("aria-label")?.includes("View activity report")
       );
 
-      expect(activeLink?.getAttribute("href")).toBe("/deals?filter=active&period=ytd");
+      expect(activeLink?.getAttribute("href")).toBe("/deals?filter=active_pipeline&period=ytd&scope=team");
       expect(activityLink?.getAttribute("href")).toBe("/reports/performance/rep-activity?range=ytd");
     } finally {
       await cleanup();

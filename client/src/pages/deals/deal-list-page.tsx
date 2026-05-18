@@ -48,7 +48,16 @@ const STAGE_SLA_DAYS: Record<string, number> = {
   lost: 0,
 };
 
-export type DashboardDealListFilter = "active" | "won" | "closing_soon" | null;
+export type DashboardDealListFilter =
+  | "active"
+  | "active_pipeline"
+  | "won"
+  | "closing_soon"
+  | "stale"
+  | "at_risk"
+  | "opportunities"
+  | "bid_board"
+  | null;
 
 type DashboardPeriod = "mtd" | "qtd" | "ytd" | "last_month" | "last_quarter" | "last_year";
 
@@ -57,9 +66,12 @@ type DashboardDealListView = {
   title: string;
   subtitle: string;
   eyebrow: string;
-  boardMode: "all" | "active" | "won";
+  boardMode: "all" | "active" | "won" | "at_risk";
   listBaseFilters: Partial<DealFilters>;
   listInitialSort: DealListSortState;
+  showEmbeddedList: boolean;
+  initialStageSlugs: string[];
+  boardStageSlugs: string[];
 };
 
 export function formatDateInput(date: Date) {
@@ -138,12 +150,27 @@ function getDashboardPeriodDateRange(period: DashboardPeriod, now = new Date()) 
 function normalizeDashboardDealFilter(filterParam: string | null | undefined): DashboardDealListFilter {
   switch (filterParam) {
     case "active":
+    case "active_pipeline":
       return "active";
+    case "pipeline":
+      return "active_pipeline";
     case "won":
       return "won";
     case "closing_soon":
     case "closing-soon":
       return "closing_soon";
+    case "stale":
+      return "stale";
+    case "at_risk":
+    case "at-risk":
+      return "at_risk";
+    case "opportunities":
+    case "opportunity":
+      return "opportunities";
+    case "bid_board":
+    case "bid-board":
+    case "estimating":
+      return "bid_board";
     default:
       return null;
   }
@@ -159,9 +186,9 @@ export function getDashboardDealListView(input: {
   const periodLabel = getDashboardPeriodLabel(period);
   const periodRange = getDashboardPeriodDateRange(period, input.now);
 
-  if (filter === "active") {
+  if (filter === "active" || filter === "active_pipeline") {
     return {
-      filter,
+      filter: input.filterParam === "active_pipeline" || input.filterParam === "pipeline" ? "active_pipeline" : "active",
       eyebrow: "Director drill-down",
       title: "Active Pipeline",
       subtitle: `Open-stage deals for ${periodLabel}.`,
@@ -171,6 +198,9 @@ export function getDashboardDealListView(input: {
         updatedTo: periodRange.to,
       },
       listInitialSort: { key: "updated_at", dir: "desc" },
+      showEmbeddedList: true,
+      initialStageSlugs: [],
+      boardStageSlugs: [],
     };
   }
 
@@ -186,6 +216,9 @@ export function getDashboardDealListView(input: {
         contractSignedTo: periodRange.to,
       },
       listInitialSort: { key: "contract_signed_date", dir: "desc" },
+      showEmbeddedList: true,
+      initialStageSlugs: [],
+      boardStageSlugs: [],
     };
   }
 
@@ -201,6 +234,52 @@ export function getDashboardDealListView(input: {
         updatedTo: periodRange.to,
       },
       listInitialSort: { key: "expected_close_date", dir: "asc" },
+      showEmbeddedList: true,
+      initialStageSlugs: [],
+      boardStageSlugs: [],
+    };
+  }
+
+  if (filter === "opportunities" || filter === "bid_board") {
+    const stageSlugs = filter === "opportunities" ? ["opportunity"] : ["estimating", "service_estimating"];
+    return {
+      filter,
+      eyebrow: "Dashboard drill-down",
+      title: filter === "opportunities" ? "Opportunities" : "Bid Board",
+      subtitle:
+        filter === "opportunities"
+          ? `Opportunity-stage deals for ${periodLabel}.`
+          : `Estimating-stage deals for ${periodLabel}.`,
+      boardMode: "all",
+      listBaseFilters: {
+        updatedFrom: periodRange.from,
+        updatedTo: periodRange.to,
+      },
+      listInitialSort: { key: "updated_at", dir: "desc" },
+      showEmbeddedList: true,
+      initialStageSlugs: stageSlugs,
+      boardStageSlugs: stageSlugs,
+    };
+  }
+
+  if (filter === "stale" || filter === "at_risk") {
+    return {
+      filter,
+      eyebrow: "Dashboard drill-down",
+      title: filter === "stale" ? "Stale Deals" : "Deals At Risk",
+      subtitle:
+        filter === "stale"
+          ? `Open-stage deals past their stage SLA for ${periodLabel}.`
+          : `Open-stage deals over SLA and needing attention for ${periodLabel}.`,
+      boardMode: "at_risk",
+      listBaseFilters: {
+        updatedFrom: periodRange.from,
+        updatedTo: periodRange.to,
+      },
+      listInitialSort: { key: "stage_entered_at", dir: "asc" },
+      showEmbeddedList: false,
+      initialStageSlugs: [],
+      boardStageSlugs: [],
     };
   }
 
@@ -212,6 +291,9 @@ export function getDashboardDealListView(input: {
     boardMode: "all",
     listBaseFilters: {},
     listInitialSort: { key: "updated_at", dir: "desc" },
+    showEmbeddedList: true,
+    initialStageSlugs: [],
+    boardStageSlugs: [],
   };
 }
 
@@ -374,11 +456,28 @@ function DealListPageContent({ role }: { role: string }) {
     () => {
       const searchTerm = search.trim().toLowerCase();
       const sourceColumns =
-        dashboardView.boardMode === "active"
+        dashboardView.boardStageSlugs.length > 0
+          ? boardColumns.filter((column) => dashboardView.boardStageSlugs.includes(column.stage.slug))
+          : dashboardView.boardMode === "active"
           ? boardColumns.filter((column) => !isTerminalStage(column.stage.slug))
           : dashboardView.boardMode === "won"
             ? boardColumns.filter((column) => column.stage.slug === "won")
-            : boardColumns;
+            : dashboardView.boardMode === "at_risk"
+              ? boardColumns
+                  .filter((column) => !isTerminalStage(column.stage.slug))
+                  .map((column) => {
+                    const cards = column.cards.filter((deal) => {
+                      const sla = STAGE_SLA_DAYS[column.stage.slug] ?? 7;
+                      return sla > 0 && daysInStage(deal.stageEnteredAt) > sla;
+                    });
+                    return {
+                      ...column,
+                      cards,
+                      count: cards.length,
+                      totalValue: cards.reduce((sum, deal) => sum + moneyValue(deal), 0),
+                    };
+                  })
+          : boardColumns;
       return sourceColumns
         .map((column) => {
           if (!searchTerm) return column;
@@ -405,17 +504,21 @@ function DealListPageContent({ role }: { role: string }) {
           };
         });
     },
-    [boardColumns, dashboardView.boardMode, search]
+    [boardColumns, dashboardView.boardMode, dashboardView.boardStageSlugs, search]
   );
   const activePipelineColumns = getActivePipelineColumns(boardColumns);
   const drilldownVisibleStages = useMemo(
     () =>
-      dashboardView.boardMode === "active"
+      dashboardView.boardStageSlugs.length > 0
+        ? stages.filter((stage) => dashboardView.boardStageSlugs.includes(stage.slug))
+        : dashboardView.boardMode === "active"
         ? stages.filter((stage) => !isTerminalStage(stage.slug))
         : dashboardView.boardMode === "won"
           ? stages.filter((stage) => stage.slug === "won")
+          : dashboardView.boardMode === "at_risk"
+            ? stages.filter((stage) => !isTerminalStage(stage.slug))
           : undefined,
-    [dashboardView.boardMode, stages]
+    [dashboardView.boardMode, dashboardView.boardStageSlugs, stages]
   );
   const totalCount = activePipelineColumns.reduce((sum, column) => sum + column.count, 0);
   const totalValue = activePipelineColumns.reduce((sum, column) => sum + column.totalValue, 0);
@@ -623,21 +726,29 @@ function DealListPageContent({ role }: { role: string }) {
         )}
       </section>
 
-      <DealsListSection
-        workflowFamily="deal"
-        scope={scope}
-        enableExport
-        enableDateFilter={false}
-        showFilterButton
-        pageSize={20}
-        searchPlaceholder="Search deals or accounts"
-        title={dashboardView.title}
-        subtitle={dashboardView.subtitle}
-        eyebrow={dashboardView.eyebrow}
-        visibleStages={drilldownVisibleStages}
-        baseFilters={dashboardView.listBaseFilters}
-        initialSort={dashboardView.listInitialSort}
-      />
+      {dashboardView.showEmbeddedList ? (
+        <DealsListSection
+          workflowFamily="deal"
+          scope={scope}
+          enableExport
+          enableDateFilter={false}
+          showFilterButton
+          pageSize={20}
+          searchPlaceholder="Search deals or accounts"
+          title={dashboardView.title}
+          subtitle={dashboardView.subtitle}
+          eyebrow={dashboardView.eyebrow}
+          visibleStages={drilldownVisibleStages}
+          baseFilters={dashboardView.listBaseFilters}
+          initialSort={dashboardView.listInitialSort}
+          initialStageSlugs={dashboardView.initialStageSlugs}
+        />
+      ) : (
+        <section className="rounded-lg border border-amber-200 bg-amber-50 p-4 text-sm font-semibold text-amber-900">
+          The filtered board above is the source of truth for this dashboard drill-down. The paginated deal list is hidden here because the
+          current deal-list API does not expose stale or at-risk filters without changing the protected deals service.
+        </section>
+      )}
     </div>
   );
 }

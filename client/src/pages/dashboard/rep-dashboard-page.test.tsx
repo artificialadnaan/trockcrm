@@ -225,6 +225,14 @@ describe("RepDashboardPage", () => {
     expect(html).toContain("2 QUALIFIED");
   });
 
+  it("links the KPI cards to the matching drill-down views", () => {
+    const html = renderDashboard();
+
+    expect(html).toContain('href="/deals?filter=active_pipeline&amp;scope=mine"');
+    expect(html).toContain('href="/leads?scope=mine"');
+    expect(html).toContain('href="/commissions"');
+  });
+
   it("renders top deals table with stage badges and values", () => {
     const html = renderDashboard();
 
@@ -251,6 +259,13 @@ describe("RepDashboardPage", () => {
     expect(html).toContain("Lead One");
   });
 
+  it("links AI blind spot rows to the affected record", () => {
+    const html = renderDashboard();
+
+    expect(html).toContain('href="/deals/deal-1"');
+    expect(html).toContain('href="/leads/lead-1"');
+  });
+
   it("renders 4 KPI tiles: leads, qualified, opportunities, bid board", () => {
     const html = renderDashboard();
 
@@ -258,6 +273,15 @@ describe("RepDashboardPage", () => {
     expect(html).toContain("QUALIFIED");
     expect(html).toContain("OPPORTUNITIES");
     expect(html).toContain("BID BOARD");
+  });
+
+  it("links funnel KPI tiles to their filtered worklists", () => {
+    const html = renderDashboard();
+
+    expect(html).toContain('href="/leads?scope=mine"');
+    expect(html).toContain('href="/leads?stage=qualified_lead&amp;scope=mine"');
+    expect(html).toContain('href="/deals?filter=opportunities&amp;scope=mine"');
+    expect(html).toContain('href="/deals?filter=bid_board&amp;scope=mine"');
   });
 
   it("renders MY NUMBERS section with 8 metric cells", () => {
@@ -274,13 +298,23 @@ describe("RepDashboardPage", () => {
     expect(html).toContain("NOTES");
   });
 
+  it("links every MY NUMBERS metric cell to a drill-down destination", () => {
+    const html = renderDashboard();
+
+    expect(html).toContain('href="/pipeline/my-cleanup"');
+    expect(html).toContain('href="/leads?stale=true&amp;scope=mine"');
+    expect(html).toContain('href="/tasks"');
+    expect(html).toContain('href="/tasks?filter=overdue"');
+    expect(html).toContain('href="/reports/performance"');
+  });
+
   it("renders bottom action bar with Performance report and Open my pipeline", () => {
     const html = renderDashboard();
 
     expect(html).toContain("Performance report");
     expect(html).toContain("Open my pipeline");
     expect(html).toContain("href=\"/reports/performance\"");
-    expect(html).toContain("href=\"/deals\"");
+    expect(html).toContain("href=\"/deals?filter=active_pipeline&amp;scope=mine\"");
   });
 
   it("TimeRangeTabs default to YTD", () => {
@@ -294,7 +328,7 @@ describe("RepDashboardPage", () => {
     const html = renderDashboard();
 
     expect(html).toContain("<a");
-    expect(html).toContain("href=\"/deals\"");
+    expect(html).toContain("href=\"/deals?filter=active_pipeline&amp;scope=mine\"");
     expect(html).not.toContain("My Board");
   });
 });

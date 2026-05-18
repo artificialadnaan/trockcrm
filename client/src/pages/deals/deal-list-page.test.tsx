@@ -643,6 +643,59 @@ describe("DealListPage", () => {
     expect(view.listInitialSort).toEqual({ key: "updated_at", dir: "desc" });
   });
 
+  it("accepts active_pipeline dashboard aliases for active-pipeline drill-downs", () => {
+    const view = getDashboardDealListView({
+      filterParam: "active_pipeline",
+      periodParam: "qtd",
+      now: new Date("2026-05-08T12:00:00Z"),
+    });
+
+    expect(view.filter).toBe("active_pipeline");
+    expect(view.title).toBe("Active Pipeline");
+    expect(view.boardMode).toBe("active");
+  });
+
+  it("builds stale and at-risk drill-down views from dashboard query params", () => {
+    const staleView = getDashboardDealListView({
+      filterParam: "stale",
+      periodParam: "qtd",
+      now: new Date("2026-05-08T12:00:00Z"),
+    });
+    const riskView = getDashboardDealListView({
+      filterParam: "at_risk",
+      periodParam: "qtd",
+      now: new Date("2026-05-08T12:00:00Z"),
+    });
+
+    expect(staleView.title).toBe("Stale Deals");
+    expect(staleView.boardMode).toBe("at_risk");
+    expect(staleView.listInitialSort).toEqual({ key: "stage_entered_at", dir: "asc" });
+    expect(staleView.showEmbeddedList).toBe(false);
+    expect(riskView.title).toBe("Deals At Risk");
+    expect(riskView.boardMode).toBe("at_risk");
+    expect(riskView.showEmbeddedList).toBe(false);
+  });
+
+  it("builds stage-specific rep funnel drill-down views", () => {
+    const opportunitiesView = getDashboardDealListView({
+      filterParam: "opportunities",
+      periodParam: "qtd",
+      now: new Date("2026-05-08T12:00:00Z"),
+    });
+    const bidBoardView = getDashboardDealListView({
+      filterParam: "bid_board",
+      periodParam: "qtd",
+      now: new Date("2026-05-08T12:00:00Z"),
+    });
+
+    expect(opportunitiesView.title).toBe("Opportunities");
+    expect(opportunitiesView.initialStageSlugs).toEqual(["opportunity"]);
+    expect(opportunitiesView.boardStageSlugs).toEqual(["opportunity"]);
+    expect(bidBoardView.title).toBe("Bid Board");
+    expect(bidBoardView.initialStageSlugs).toEqual(["estimating", "service_estimating"]);
+    expect(bidBoardView.boardStageSlugs).toEqual(["estimating", "service_estimating"]);
+  });
+
   it("builds the closed won drill-down view with contract-signed date filters", () => {
     const view = getDashboardDealListView({
       filterParam: "won",
@@ -672,7 +725,7 @@ describe("DealListPage", () => {
   });
 
   it("passes dashboard active-pipeline drill-down props into the embedded deals list", () => {
-    renderPage("/deals?scope=team&filter=active&period=ytd", "director");
+    renderPage("/deals?scope=team&filter=active_pipeline&period=ytd", "director");
 
     expect(mocks.dealsListSectionMock).toHaveBeenCalledWith(
       expect.objectContaining({
