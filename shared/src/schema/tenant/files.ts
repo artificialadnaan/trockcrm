@@ -12,6 +12,7 @@ import {
   timestamp,
   index,
   primaryKey,
+  uniqueIndex,
 } from "drizzle-orm/pg-core";
 import {
   FILE_CATEGORIES,
@@ -119,5 +120,23 @@ export const fieldUserStarredProjects = pgTable(
       columns: [table.userId, table.dealId],
     }),
     index("field_user_starred_projects_user_idx").on(table.userId),
+  ]
+);
+
+export const photoTags = pgTable(
+  "photo_tags",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    photoId: uuid("photo_id").notNull().references(() => files.id, { onDelete: "cascade" }),
+    tag: text("tag").notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+    createdByUserId: uuid("created_by_user_id").notNull().references(() => users.id),
+  },
+  (table) => [
+    index("photo_tags_photo_idx").on(table.photoId),
+    index("photo_tags_tag_idx").on(table.tag),
+    index("photo_tags_created_at_idx").on(table.createdAt.desc()),
+    index("photo_tags_photo_created_idx").on(table.photoId, table.createdAt.desc()),
+    uniqueIndex("photo_tags_photo_id_tag_idx").on(table.photoId, table.tag),
   ]
 );

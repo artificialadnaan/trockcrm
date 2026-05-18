@@ -72,6 +72,8 @@ function csrfToken(): string | undefined {
 export async function api<T>(path: string, options: {
   method?: string;
   json?: unknown;
+  body?: BodyInit | null;
+  contentType?: string | false;
   signal?: AbortSignal;
   headers?: HeadersInit;
 } = {}): Promise<T> {
@@ -80,7 +82,11 @@ export async function api<T>(path: string, options: {
   headers.set("X-Requested-With", "XMLHttpRequest");
   const officeId = activeOfficeId();
   if (officeId) headers.set("x-office-id", officeId);
-  if (options.json !== undefined) headers.set("Content-Type", "application/json");
+  if (options.json !== undefined) {
+    headers.set("Content-Type", "application/json");
+  } else if (options.contentType) {
+    headers.set("Content-Type", options.contentType);
+  }
   const unsafe = ["POST", "PUT", "PATCH", "DELETE"].includes(method.toUpperCase());
   const csrf = unsafe ? csrfToken() : undefined;
   if (csrf) headers.set("x-csrf-token", csrf);
@@ -90,7 +96,7 @@ export async function api<T>(path: string, options: {
     headers,
     credentials: "include",
     signal: options.signal,
-    body: options.json === undefined ? undefined : JSON.stringify(options.json),
+    body: options.json !== undefined ? JSON.stringify(options.json) : options.body,
   });
 
   async function parseJsonResponse() {

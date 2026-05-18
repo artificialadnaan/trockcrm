@@ -32,6 +32,7 @@ export type FieldPhoto = {
   dealId: string | null;
   leadId: string | null;
   description: string | null;
+  tags?: string[];
   takenAt: string | null;
   createdAt: string;
   uploadedBy: string;

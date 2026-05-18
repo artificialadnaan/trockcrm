@@ -52,6 +52,7 @@ export type FieldPhoto = {
   dealId: string | null;
   leadId: string | null;
   description: string | null;
+  tags: string[];
   takenAt: string | null;
   createdAt: string;
   uploadedBy: string;
@@ -285,6 +286,7 @@ function safePhoto(photo: any, imageUrl: string | null): FieldPhoto {
     dealId: photo.dealId ?? null,
     leadId: photo.leadId ?? null,
     description: photo.description ?? null,
+    tags: Array.isArray(photo.tags) ? photo.tags : [],
     takenAt: iso(photo.takenAt),
     createdAt: iso(photo.createdAt)!,
     uploadedBy: photo.uploadedBy,

@@ -15,6 +15,8 @@ export type SessionPhoto = {
   previewUrl: string;
   metadata: PhotoMetadata;
   name: string;
+  description: string;
+  tags: string[];
 };
 
 export async function compressForUpload(file: File): Promise<File> {
@@ -109,7 +111,7 @@ export async function uploadSessionPhoto(input: {
   category: string | null;
   caption?: string | null;
   metadata: PhotoMetadata;
-}) {
+}): Promise<{ photo: { id: string } & Record<string, unknown> }> {
   const compressed = await compressForUpload(input.file);
   const upload = await api<{
     uploadUrl: string;
@@ -135,7 +137,7 @@ export async function uploadSessionPhoto(input: {
   });
   if (!put.ok) throw new Error("Upload to storage failed");
 
-  return api("/field/photos/confirm-upload", {
+  return api<{ photo: { id: string } & Record<string, unknown> }>("/field/photos/confirm-upload", {
     method: "POST",
     json: buildUploadMetadata({
       dealId: input.dealId,

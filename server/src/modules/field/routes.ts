@@ -1,4 +1,4 @@
-import { Router } from "express";
+import express, { Router } from "express";
 import { requireFieldContractor } from "../../middleware/field-auth.js";
 import { AppError } from "../../middleware/error-handler.js";
 import { tenantMiddleware } from "../../middleware/tenant.js";
@@ -7,6 +7,15 @@ import {
   confirmFieldPhotoUpload,
   requestFieldPhotoUploadUrl,
 } from "./photos-service.js";
+import {
+  transcribeAndPersistFieldPhotoDescription,
+  transcribePhotoDescriptionAudio,
+} from "./photo-transcription-service.js";
+import {
+  deleteFieldPhotoTag,
+  replaceFieldPhotoTags,
+  searchFieldProjectTags,
+} from "./photo-tags-service.js";
 import {
   assertAccessibleFieldCaptureTarget,
   listFieldProjects,
@@ -34,6 +43,16 @@ function requestAuditContext(req: any) {
     ipAddress: req.ip ?? null,
     userAgent: Array.isArray(userAgentHeader) ? userAgentHeader.join(", ") : userAgentHeader ?? null,
   };
+}
+
+function rawAudioBody() {
+  if (process.env.NODE_ENV === "test") {
+    return (_req: any, _res: any, next: (err?: unknown) => void) => next();
+  }
+  return express.raw({
+    type: ["audio/*", "application/octet-stream"],
+    limit: "25mb",
+  });
 }
 
 fieldRoutes.get("/me", requireFieldContractor, (req, res) => {
@@ -141,6 +160,89 @@ fieldRoutes.post("/photos/confirm-upload", ...fieldProjectMiddleware, async (req
     });
     await req.commitTransaction();
     res.status(201).json(result);
+  } catch (err) {
+    next(err);
+  }
+});
+
+fieldRoutes.post("/photos/transcribe-description", requireFieldContractor, rawAudioBody(), async (req, res, next) => {
+  try {
+    const body = Buffer.isBuffer(req.body) ? req.body : Buffer.alloc(0);
+    const result = await transcribePhotoDescriptionAudio({
+      audio: body,
+      mimeType: String(req.headers["content-type"] ?? ""),
+      fileName: typeof req.headers["x-file-name"] === "string" ? req.headers["x-file-name"] : undefined,
+    });
+    res.json(result);
+  } catch (err) {
+    next(err);
+  }
+});
+
+fieldRoutes.post("/photos/:photoId/transcribe-description", ...fieldProjectMiddleware, rawAudioBody(), async (req, res, next) => {
+  try {
+    const body = Buffer.isBuffer(req.body) ? req.body : Buffer.alloc(0);
+    const result = await transcribeAndPersistFieldPhotoDescription(req.tenantDb!, {
+      userId: req.fieldUser!.id,
+      userRole: req.fieldUser!.role,
+    }, {
+      photoId: String(req.params.photoId),
+      audio: body,
+      mimeType: String(req.headers["content-type"] ?? ""),
+      fileName: typeof req.headers["x-file-name"] === "string" ? req.headers["x-file-name"] : undefined,
+      auditContext: requestAuditContext(req),
+    });
+    await req.commitTransaction();
+    res.json(result);
+  } catch (err) {
+    next(err);
+  }
+});
+
+fieldRoutes.post("/photos/:photoId/tags", ...fieldProjectMiddleware, async (req, res, next) => {
+  try {
+    const result = await replaceFieldPhotoTags(req.tenantDb!, {
+      userId: req.fieldUser!.id,
+      userRole: req.fieldUser!.role,
+    }, {
+      photoId: String(req.params.photoId),
+      tags: Array.isArray(req.body.tags) ? req.body.tags.map(String) : [],
+    });
+    await req.commitTransaction();
+    res.json(result);
+  } catch (err) {
+    next(err);
+  }
+});
+
+fieldRoutes.delete("/photos/:photoId/tags/:tag", ...fieldProjectMiddleware, async (req, res, next) => {
+  try {
+    const result = await deleteFieldPhotoTag(req.tenantDb!, {
+      userId: req.fieldUser!.id,
+      userRole: req.fieldUser!.role,
+    }, {
+      photoId: String(req.params.photoId),
+      tag: decodeURIComponent(String(req.params.tag)),
+    });
+    await req.commitTransaction();
+    res.json(result);
+  } catch (err) {
+    next(err);
+  }
+});
+
+fieldRoutes.get("/projects/:dealId/tags", ...fieldProjectMiddleware, async (req, res, next) => {
+  try {
+    const result = await searchFieldProjectTags(req.tenantDb!, {
+      userId: req.fieldUser!.id,
+      userRole: req.fieldUser!.role,
+    }, {
+      projectId: String(req.params.dealId),
+      query: typeof req.query.q === "string" ? req.query.q : undefined,
+      limit: req.query.limit ? parseOptionalPositiveInt(req.query.limit) : undefined,
+    });
+    await req.commitTransaction();
+    res.json(result);
   } catch (err) {
     next(err);
   }

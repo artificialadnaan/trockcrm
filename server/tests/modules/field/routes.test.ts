@@ -38,8 +38,21 @@ const photoMocks = vi.hoisted(() => ({
   confirmFieldPhotoUpload: vi.fn(),
 }));
 
+const transcriptionMocks = vi.hoisted(() => ({
+  transcribePhotoDescriptionAudio: vi.fn(),
+  transcribeAndPersistFieldPhotoDescription: vi.fn(),
+}));
+
+const tagMocks = vi.hoisted(() => ({
+  replaceFieldPhotoTags: vi.fn(),
+  deleteFieldPhotoTag: vi.fn(),
+  searchFieldProjectTags: vi.fn(),
+}));
+
 vi.mock("../../../src/modules/field/projects-service.js", () => projectMocks);
 vi.mock("../../../src/modules/field/photos-service.js", () => photoMocks);
+vi.mock("../../../src/modules/field/photo-transcription-service.js", () => transcriptionMocks);
+vi.mock("../../../src/modules/field/photo-tags-service.js", () => tagMocks);
 
 const { fieldRoutes } = await import("../../../src/modules/field/routes.js");
 
@@ -61,6 +74,11 @@ describe("field routes", () => {
     projectMocks.listFieldProjectPhotos.mockResolvedValue({ photos: [], pagination: { page: 1, limit: 200, total: 0, totalPages: 0 } });
     photoMocks.requestFieldPhotoUploadUrl.mockResolvedValue({ uploadUrl: "https://r2.example/upload", objectKey: "key", uploadToken: "token" });
     photoMocks.confirmFieldPhotoUpload.mockResolvedValue({ photo: { id: "photo-1", category: "photo" } });
+    transcriptionMocks.transcribePhotoDescriptionAudio.mockResolvedValue({ transcript: "North slope detail", language: "en" });
+    transcriptionMocks.transcribeAndPersistFieldPhotoDescription.mockResolvedValue({ transcript: "North slope detail", language: "en" });
+    tagMocks.replaceFieldPhotoTags.mockResolvedValue({ tags: ["roofing", "urgent"] });
+    tagMocks.deleteFieldPhotoTag.mockResolvedValue({ tags: ["urgent"] });
+    tagMocks.searchFieldProjectTags.mockResolvedValue({ tags: ["roofing", "urgent"] });
   });
 
   it("returns the authenticated field contractor profile", async () => {
@@ -195,6 +213,73 @@ describe("field routes", () => {
       dealId: undefined,
       leadId: "lead-1",
       opportunityId: undefined,
+    });
+  });
+
+  it("routes session and persisted photo dictation through the transcription service", async () => {
+    await invokeRoute("post", "/photos/transcribe-description", {
+      body: Buffer.from("audio"),
+      headers: { "content-type": "audio/webm", "x-file-name": "clip.webm" },
+    });
+    expect(transcriptionMocks.transcribePhotoDescriptionAudio).toHaveBeenCalledWith({
+      audio: Buffer.from("audio"),
+      mimeType: "audio/webm",
+      fileName: "clip.webm",
+    });
+
+    await invokeRoute("post", "/photos/:photoId/transcribe-description", {
+      params: { photoId: "photo-1" },
+      body: Buffer.from("audio"),
+      headers: { "content-type": "audio/webm", "x-file-name": "clip.webm", "user-agent": "vitest" },
+      ip: "127.0.0.1",
+    });
+    expect(transcriptionMocks.transcribeAndPersistFieldPhotoDescription).toHaveBeenCalledWith(expect.anything(), {
+      userId: "admin-1",
+      userRole: "admin",
+    }, {
+      photoId: "photo-1",
+      audio: Buffer.from("audio"),
+      mimeType: "audio/webm",
+      fileName: "clip.webm",
+      auditContext: { ipAddress: "127.0.0.1", userAgent: "vitest" },
+    });
+  });
+
+  it("routes field photo tag writes and project tag autocomplete through the tag service", async () => {
+    await invokeRoute("post", "/photos/:photoId/tags", {
+      params: { photoId: "photo-1" },
+      body: { tags: ["roofing", "urgent"] },
+    });
+    expect(tagMocks.replaceFieldPhotoTags).toHaveBeenCalledWith(expect.anything(), {
+      userId: "admin-1",
+      userRole: "admin",
+    }, {
+      photoId: "photo-1",
+      tags: ["roofing", "urgent"],
+    });
+
+    await invokeRoute("delete", "/photos/:photoId/tags/:tag", {
+      params: { photoId: "photo-1", tag: encodeURIComponent("roofing") },
+    });
+    expect(tagMocks.deleteFieldPhotoTag).toHaveBeenCalledWith(expect.anything(), {
+      userId: "admin-1",
+      userRole: "admin",
+    }, {
+      photoId: "photo-1",
+      tag: "roofing",
+    });
+
+    await invokeRoute("get", "/projects/:dealId/tags", {
+      params: { dealId: "deal-1" },
+      query: { q: "ro", limit: "5" },
+    });
+    expect(tagMocks.searchFieldProjectTags).toHaveBeenCalledWith(expect.anything(), {
+      userId: "admin-1",
+      userRole: "admin",
+    }, {
+      projectId: "deal-1",
+      query: "ro",
+      limit: 5,
     });
   });
 });
