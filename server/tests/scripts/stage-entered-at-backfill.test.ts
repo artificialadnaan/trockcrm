@@ -61,7 +61,7 @@ class MockStageEnteredAtDb implements Queryable {
 
     if (text.includes("WHERE (d.deal_number = $1 OR LOWER(d.name) = LOWER($2))")) {
       const [dealNumber, name] = values as [string, string];
-      const matching = this.staleRows().filter(
+      const matching = this.staleRows({ useIntervalDayComponent: text.includes("EXTRACT(DAY FROM") }).filter(
         (row) => row.deal_number === dealNumber || row.name.toLowerCase() === name.toLowerCase(),
       );
       return { rows: matching };
@@ -88,13 +88,13 @@ class MockStageEnteredAtDb implements Queryable {
 
     if (text.includes("FROM stale_deals") && text.includes("LIMIT")) {
       const limit = Number(values[0] ?? 50);
-      return { rows: this.staleRows().slice(0, limit) };
+      return { rows: this.staleRows({ useIntervalDayComponent: text.includes("EXTRACT(DAY FROM") }).slice(0, limit) };
     }
 
     throw new Error(`Unexpected query: ${text}`);
   }
 
-  private staleRows(): DiagnosticDealRow[] {
+  private staleRows(options: { useIntervalDayComponent?: boolean } = {}): DiagnosticDealRow[] {
     return this.deals
       .map((deal) => {
         const latest = this.history
@@ -108,6 +108,11 @@ class MockStageEnteredAtDb implements Queryable {
         const latestDate = new Date(latest);
         const nowDate = new Date("2026-05-18T12:00:00.000Z");
         const msPerDay = 24 * 60 * 60 * 1000;
+        const totalDays = (from: Date, to: Date) => Math.floor((to.getTime() - from.getTime()) / msPerDay);
+        const maybeIntervalDayComponent = (days: number | null) => {
+          if (days === null || !options.useIntervalDayComponent) return days;
+          return days % 30;
+        };
         return {
           id: deal.id,
           name: deal.name,
@@ -115,9 +120,9 @@ class MockStageEnteredAtDb implements Queryable {
           stage_id: deal.stage_id,
           stored_stage_entered_at: deal.stage_entered_at,
           latest_history_entry: latest,
-          days_diff: storedDate ? Math.floor((latestDate.getTime() - storedDate.getTime()) / msPerDay) : null,
-          stored_days_in_stage: storedDate ? Math.floor((nowDate.getTime() - storedDate.getTime()) / msPerDay) : null,
-          actual_days_in_stage: Math.floor((nowDate.getTime() - latestDate.getTime()) / msPerDay),
+          days_diff: maybeIntervalDayComponent(storedDate ? totalDays(storedDate, latestDate) : null),
+          stored_days_in_stage: maybeIntervalDayComponent(storedDate ? totalDays(storedDate, nowDate) : null),
+          actual_days_in_stage: maybeIntervalDayComponent(totalDays(latestDate, nowDate)),
         };
       })
       .filter((row): row is DiagnosticDealRow => row !== null)
@@ -179,7 +184,17 @@ describe("stage_entered_at diagnostic", () => {
       deal_number: "DFW-5-02826-AC",
       stored_stage_entered_at: "2026-01-29T00:00:00.000Z",
       latest_history_entry: "2026-05-18T09:00:00.000Z",
+      days_diff: 109,
+      stored_days_in_stage: 109,
+      actual_days_in_stage: 0,
     });
+    expect(report.sampleRows.find((row) => row.id === "stale-1")).toMatchObject({
+      days_diff: 109,
+      stored_days_in_stage: 109,
+      actual_days_in_stage: 0,
+    });
+    expect(db.queries.some((query) => query.includes("EXTRACT(EPOCH FROM"))).toBe(true);
+    expect(db.queries.some((query) => query.includes("EXTRACT(DAY FROM"))).toBe(false);
     expect(db.queries.some((query) => /\bUPDATE\b/i.test(query))).toBe(false);
   });
 
@@ -230,7 +245,7 @@ describe("stage_entered_at backfill", () => {
     });
 
     expect(report.updatedCount).toBe(2);
-    expect(report.batches).toBe(3);
+    expect(report.batches).toBe(2);
     expect(db.transactionEvents).toEqual(["BEGIN", "COMMIT", "BEGIN", "COMMIT", "BEGIN", "COMMIT"]);
   });
 
@@ -257,6 +272,21 @@ describe("stage_entered_at backfill", () => {
     expect(db.queries.some((query) => /\bUPDATE\b/i.test(query))).toBe(false);
   });
 
+  it("defaults the exported backfill helper to dry-run when dryRun is omitted", async () => {
+    const db = makeDb();
+    const report = await backfillStaleStageEnteredAt(db, {
+      officeName: "office_dallas",
+      batchSize: 500,
+      logPath: null,
+    });
+
+    expect(report.dryRun).toBe(true);
+    expect(report.updatedCount).toBe(0);
+    expect(report.wouldUpdateCount).toBe(2);
+    expect(db.deals.find((deal) => deal.id === "stale-1")?.stage_entered_at).toBe("2026-01-29T00:00:00.000Z");
+    expect(db.queries.some((query) => /\bUPDATE\b/i.test(query))).toBe(false);
+  });
+
   it("writes an audit CSV with tenant, deal, stage, old value, and new value", async () => {
     const db = makeDb();
     const logPath = path.join(os.tmpdir(), "stage-entered-at-backfill-test.csv");
@@ -276,6 +306,21 @@ describe("stage_entered_at backfill", () => {
 
     fs.rmSync(logPath, { force: true });
   });
+
+  it("uses the platform temp directory for the default audit CSV path", async () => {
+    const db = makeDb();
+    const report = await backfillStaleStageEnteredAt(db, {
+      officeName: "office_dallas",
+      dryRun: false,
+      batchSize: 500,
+    });
+
+    expect(report.logPath).not.toBeNull();
+    expect(path.dirname(report.logPath as string)).toBe(os.tmpdir());
+    expect(fs.existsSync(report.logPath as string)).toBe(true);
+
+    fs.rmSync(report.logPath as string, { force: true });
+  });
 });
 
 describe("stage_entered_at CLI helpers", () => {
@@ -287,11 +332,19 @@ describe("stage_entered_at CLI helpers", () => {
       sampleSize: 10,
     });
 
-    expect(parseBackfillArgs(["--all", "--dry-run", "--batch-size=25"])).toMatchObject({
+    expect(parseBackfillArgs(["--all", "--batch-size=25"])).toMatchObject({
       all: true,
       dryRun: true,
       batchSize: 25,
     });
+    expect(parseBackfillArgs(["--all", "--execute"])).toMatchObject({
+      all: true,
+      dryRun: false,
+      batchSize: 500,
+    });
+    expect(() => parseBackfillArgs(["--all", "--execute", "--dry-run"])).toThrow(
+      "Cannot specify both --execute and --dry-run",
+    );
     expect(() => parseBackfillArgs(["--office=public"])).toThrow("--office must match office_<name>");
     expect(() => parseBackfillArgs([])).toThrow("Specify either --all or --office=office_<name>");
   });
