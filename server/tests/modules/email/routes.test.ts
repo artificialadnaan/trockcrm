@@ -177,6 +177,8 @@ async function invokeRoute({
   const routePath =
     url === "/"
       ? "/"
+      : url === "/send"
+      ? "/send"
       : url === "/assignment-queue"
       ? "/assignment-queue"
       : url.startsWith("/company/")
@@ -201,7 +203,9 @@ async function invokeRoute({
           ? "/thread/:conversationId/detach"
           : url.startsWith("/thread/")
               ? "/thread/:conversationId"
-              : method === "get"
+              : url === "/send"
+                ? "/send"
+                : method === "get"
                 ? "/:id"
                 : "/:id/associate";
   const handler = findRouteHandler(method, routePath);
@@ -313,6 +317,136 @@ describe("email routes", () => {
     ).rejects.toThrow("Invalid page query parameter");
 
     expect(emailServiceMocks.getEmailAssignmentQueue).not.toHaveBeenCalled();
+  });
+
+  it("routes outbound compose sends with an explicit deal association", async () => {
+    dealServiceMocks.getDealById.mockResolvedValue({ id: "deal-1" });
+    emailServiceMocks.sendEmail.mockResolvedValue({ id: "email-1" });
+    const tenantDb = {
+      insert: vi.fn(() => ({
+        values: vi.fn(async () => undefined),
+      })),
+    };
+
+    const { req, res } = await invokeRoute({
+      method: "post",
+      url: "/send",
+      user: makeDirectorUser(),
+      tenantDb,
+      body: {
+        to: ["client@example.com"],
+        subject: "Deal follow up",
+        bodyHtml: "<p>Hello</p>",
+        assignedEntityType: "deal",
+        assignedEntityId: "deal-1",
+      },
+    });
+
+    expect(dealServiceMocks.getDealById).toHaveBeenCalledWith(expect.any(Object), "deal-1", "director", "director-1");
+    expect(emailServiceMocks.sendEmail).toHaveBeenCalledWith(
+      expect.any(Object),
+      "director-1",
+      expect.objectContaining({
+        to: ["client@example.com"],
+        subject: "Deal follow up",
+        assignedEntityType: "deal",
+        assignedEntityId: "deal-1",
+        assignedDealId: "deal-1",
+        dealId: "deal-1",
+      })
+    );
+    expect(req.commitTransaction).toHaveBeenCalled();
+    expect(res.statusCode).toBe(201);
+  });
+
+  it("routes outbound compose sends with explicit company, contact, and lead associations", async () => {
+    companyServiceMocks.getCompanyById.mockResolvedValue({ id: "company-1" });
+    contactServiceMocks.getContactById.mockResolvedValue({ id: "contact-1", companyId: "company-1" });
+    leadServiceMocks.getLeadById.mockResolvedValue({ id: "lead-1" });
+    emailServiceMocks.sendEmail.mockResolvedValue({ id: "email-1" });
+    const tenantDb = {
+      insert: vi.fn(() => ({
+        values: vi.fn(async () => undefined),
+      })),
+    };
+
+    await invokeRoute({
+      method: "post",
+      url: "/send",
+      user: makeRepUser(),
+      tenantDb,
+      body: {
+        to: ["client@example.com"],
+        subject: "Company follow up",
+        bodyHtml: "<p>Hello</p>",
+        assignedEntityType: "company",
+        assignedEntityId: "company-1",
+      },
+    });
+
+    expect(companyServiceMocks.getCompanyById).toHaveBeenCalledWith(expect.any(Object), "company-1");
+    expect(emailServiceMocks.sendEmail).toHaveBeenCalledWith(
+      expect.any(Object),
+      "rep-1",
+      expect.objectContaining({
+        assignedEntityType: "company",
+        assignedEntityId: "company-1",
+        dealId: null,
+        contactId: null,
+      })
+    );
+
+    await invokeRoute({
+      method: "post",
+      url: "/send",
+      user: makeRepUser(),
+      tenantDb,
+      body: {
+        to: ["client@example.com"],
+        subject: "Contact follow up",
+        bodyHtml: "<p>Hello</p>",
+        assignedEntityType: "contact",
+        assignedEntityId: "contact-1",
+      },
+    });
+
+    expect(contactServiceMocks.getContactById).toHaveBeenCalledWith(expect.any(Object), "contact-1");
+    expect(emailServiceMocks.sendEmail).toHaveBeenCalledWith(
+      expect.any(Object),
+      "rep-1",
+      expect.objectContaining({
+        assignedEntityType: "contact",
+        assignedEntityId: "contact-1",
+        contactId: "contact-1",
+        dealId: null,
+      })
+    );
+
+    await invokeRoute({
+      method: "post",
+      url: "/send",
+      user: makeRepUser(),
+      tenantDb,
+      body: {
+        to: ["client@example.com"],
+        subject: "Lead follow up",
+        bodyHtml: "<p>Hello</p>",
+        assignedEntityType: "lead",
+        assignedEntityId: "lead-1",
+      },
+    });
+
+    expect(leadServiceMocks.getLeadById).toHaveBeenCalledWith(expect.any(Object), "lead-1", "rep", "rep-1");
+    expect(emailServiceMocks.sendEmail).toHaveBeenCalledWith(
+      expect.any(Object),
+      "rep-1",
+      expect.objectContaining({
+        assignedEntityType: "lead",
+        assignedEntityId: "lead-1",
+        dealId: null,
+        contactId: null,
+      })
+    );
   });
 
   it("rejects out-of-bounds assignment queue pagination params with 400s", async () => {
@@ -451,7 +585,7 @@ describe("email routes", () => {
     expect(emailServiceMocks.getEmails).toHaveBeenCalledWith(
       expect.any(Object),
       expect.objectContaining({ dealId: "deal-1", limit: 10 }),
-      "director-1",
+      undefined,
       "director"
     );
   });

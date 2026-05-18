@@ -28,6 +28,12 @@ import { getPropertyDetail } from "../properties/service.js";
 
 const router = Router();
 
+type RequestedEmailAssociation = {
+  assignedEntityType: "deal" | "lead" | "property" | "company" | "contact";
+  assignedEntityId: string;
+  assignedDealId: string | null;
+};
+
 function parsePaginationParam(
   rawValue: unknown,
   name: "page" | "limit",
@@ -88,10 +94,92 @@ async function canUserViewAssignedEmailEntity(
   }
 }
 
+function parseRequestedEmailAssociation(
+  body: Record<string, unknown>,
+  options: {
+    allowedTypes?: Array<RequestedEmailAssociation["assignedEntityType"]>;
+    allowMissing?: boolean;
+  } = {}
+): RequestedEmailAssociation | null {
+  const allowedTypes = options.allowedTypes ?? ["deal", "lead", "property", "company", "contact"];
+  const requestedEntityType = body.assignedEntityType as string | undefined;
+  const assignedEntityId = (body.assignedEntityId as string | undefined) ?? (body.dealId as string | undefined);
+  const hasExplicitAssociation =
+    requestedEntityType !== undefined || assignedEntityId !== undefined || body.assignedDealId != null;
+
+  if (!hasExplicitAssociation && options.allowMissing) {
+    return null;
+  }
+
+  const assignedEntityType = (requestedEntityType ?? "deal") as RequestedEmailAssociation["assignedEntityType"];
+  if (!allowedTypes.includes(assignedEntityType)) {
+    throw new AppError(400, "Unsupported assignment target");
+  }
+
+  const assignedDealId =
+    assignedEntityType === "deal"
+      ? ((body.assignedDealId as string | null | undefined) ??
+          (body.dealId as string | undefined) ??
+          assignedEntityId ??
+          null)
+      : null;
+
+  if (!assignedEntityId) {
+    throw new AppError(400, "assignedEntityId is required");
+  }
+  if (assignedEntityType === "deal" && assignedDealId != null && assignedDealId !== assignedEntityId) {
+    throw new AppError(400, "assignedDealId must match assignedEntityId for deal assignments");
+  }
+  if (assignedEntityType !== "deal" && body.assignedDealId != null) {
+    throw new AppError(400, "assignedDealId is only valid for deal assignments");
+  }
+
+  return {
+    assignedEntityType,
+    assignedEntityId,
+    assignedDealId,
+  };
+}
+
+async function assertRequestedAssociationExists(req: any, association: RequestedEmailAssociation) {
+  if (association.assignedEntityType === "deal") {
+    const deal = await getDealById(req.tenantDb!, association.assignedEntityId, req.user!.role, req.user!.id);
+    if (!deal) throw new AppError(404, "Deal not found");
+    return;
+  }
+
+  if (association.assignedEntityType === "contact") {
+    const contact = await getContactById(req.tenantDb!, association.assignedEntityId);
+    if (!contact) throw new AppError(404, "Contact not found");
+    return;
+  }
+
+  if (association.assignedEntityType === "lead") {
+    const lead = await getLeadById(req.tenantDb!, association.assignedEntityId, req.user!.role, req.user!.id);
+    if (!lead) throw new AppError(404, "Lead not found");
+    return;
+  }
+
+  if (association.assignedEntityType === "company") {
+    const company = await getCompanyById(req.tenantDb!, association.assignedEntityId);
+    if (!company) throw new AppError(404, "Company not found");
+    return;
+  }
+
+  if (association.assignedEntityType === "property") {
+    const property = await getPropertyDetail(req.tenantDb!, association.assignedEntityId);
+    if (!property) throw new AppError(404, "Property not found");
+  }
+}
+
 // POST /api/email/send — compose and send an email
 router.post("/send", async (req, res, next) => {
   try {
     const { to, cc, subject, bodyHtml, dealId, contactId } = req.body;
+    const association = parseRequestedEmailAssociation(req.body, {
+      allowedTypes: ["deal", "lead", "company", "contact"],
+      allowMissing: true,
+    });
 
     if (!to || !Array.isArray(to) || to.length === 0) {
       throw new AppError(400, "At least one recipient (to) is required");
@@ -103,8 +191,9 @@ router.post("/send", async (req, res, next) => {
       throw new AppError(400, "Email body is required");
     }
 
-    // Validate dealId access if provided
-    if (dealId) {
+    if (association) {
+      await assertRequestedAssociationExists(req, association);
+    } else if (dealId) {
       const deal = await getDealById(req.tenantDb!, dealId, req.user!.role, req.user!.id);
       if (!deal) throw new AppError(404, "Deal not found or access denied");
     }
@@ -114,8 +203,11 @@ router.post("/send", async (req, res, next) => {
       cc,
       subject: subject.trim(),
       bodyHtml,
-      dealId: dealId || null,
-      contactId: contactId || null,
+      assignedEntityType: association?.assignedEntityType,
+      assignedEntityId: association?.assignedEntityId,
+      assignedDealId: association?.assignedDealId,
+      dealId: association?.assignedEntityType === "deal" ? association.assignedEntityId : dealId || null,
+      contactId: association?.assignedEntityType === "contact" ? association.assignedEntityId : contactId || null,
     });
 
     // Durable outbox insert INSIDE the transaction (matches deals pattern)
@@ -126,8 +218,10 @@ router.post("/send", async (req, res, next) => {
         emailId: email.id,
         to,
         subject: subject.trim(),
-        dealId: dealId || null,
-        contactId: contactId || null,
+        dealId: association?.assignedEntityType === "deal" ? association.assignedEntityId : dealId || null,
+        contactId: association?.assignedEntityType === "contact" ? association.assignedEntityId : contactId || null,
+        assignedEntityType: association?.assignedEntityType ?? null,
+        assignedEntityId: association?.assignedEntityId ?? null,
         userId: req.user!.id,
       },
       officeId: req.user!.activeOfficeId ?? req.user!.officeId,
@@ -145,8 +239,10 @@ router.post("/send", async (req, res, next) => {
           emailId: email.id,
           to,
           subject: subject.trim(),
-          dealId: dealId || null,
-          contactId: contactId || null,
+          dealId: association?.assignedEntityType === "deal" ? association.assignedEntityId : dealId || null,
+          contactId: association?.assignedEntityType === "contact" ? association.assignedEntityId : contactId || null,
+          assignedEntityType: association?.assignedEntityType ?? null,
+          assignedEntityId: association?.assignedEntityId ?? null,
         },
         officeId: req.user!.activeOfficeId ?? req.user!.officeId,
         userId: req.user!.id,
@@ -505,28 +601,9 @@ router.get("/:id", async (req, res, next) => {
 // RBAC: verify user owns the email (if rep) and has access to the target deal when needed
 router.post("/:id/associate", async (req, res, next) => {
   try {
-    const requestedEntityType = req.body.assignedEntityType as string | undefined;
-    const assignedEntityType = (requestedEntityType ?? "deal") as "deal" | "lead" | "property" | "company" | "contact";
-    if (!["deal", "lead", "property", "company", "contact"].includes(assignedEntityType)) {
-      throw new AppError(400, "Unsupported assignment target");
-    }
-    const assignedEntityId = (req.body.assignedEntityId as string | undefined) ?? (req.body.dealId as string | undefined);
-    const assignedDealId =
-      assignedEntityType === "deal"
-        ? (req.body.assignedDealId as string | null | undefined) ??
-          (req.body.dealId as string | undefined) ??
-          assignedEntityId ??
-          null
-        : null;
-
-    if (!assignedEntityId) {
+    const association = parseRequestedEmailAssociation(req.body);
+    if (!association) {
       throw new AppError(400, "assignedEntityId is required");
-    }
-    if (assignedEntityType === "deal" && assignedDealId != null && assignedDealId !== assignedEntityId) {
-      throw new AppError(400, "assignedDealId must match assignedEntityId for deal assignments");
-    }
-    if (assignedEntityType !== "deal" && req.body.assignedDealId != null) {
-      throw new AppError(400, "assignedDealId is only valid for deal assignments");
     }
 
     // Verify the email exists and the user has permission to modify it
@@ -537,30 +614,15 @@ router.post("/:id/associate", async (req, res, next) => {
       throw new AppError(403, "You do not have permission to modify this email");
     }
 
-    if (assignedEntityType === "deal") {
-      const deal = await getDealById(req.tenantDb!, assignedEntityId, req.user!.role, req.user!.id);
-      if (!deal) throw new AppError(404, "Deal not found");
-    } else if (assignedEntityType === "contact") {
-      const contact = await getContactById(req.tenantDb!, assignedEntityId);
-      if (!contact) throw new AppError(404, "Contact not found");
-    } else if (assignedEntityType === "lead") {
-      const lead = await getLeadById(req.tenantDb!, assignedEntityId, req.user!.role, req.user!.id);
-      if (!lead) throw new AppError(404, "Lead not found");
-    } else if (assignedEntityType === "company") {
-      const company = await getCompanyById(req.tenantDb!, assignedEntityId);
-      if (!company) throw new AppError(404, "Company not found");
-    } else if (assignedEntityType === "property") {
-      const property = await getPropertyDetail(req.tenantDb!, assignedEntityId);
-      if (!property) throw new AppError(404, "Property not found");
-    }
+    await assertRequestedAssociationExists(req, association);
 
     await associateEmailToEntity(
       req.tenantDb!,
       req.params.id,
       {
-        assignedEntityType,
-        assignedEntityId,
-        assignedDealId,
+        assignedEntityType: association.assignedEntityType,
+        assignedEntityId: association.assignedEntityId,
+        assignedDealId: association.assignedDealId,
       },
       req.user!.role,
       req.user!.id,
