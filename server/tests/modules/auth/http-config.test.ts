@@ -73,6 +73,30 @@ describe("auth http config", () => {
     ]);
   });
 
+  it("treats the field app public origin as a default strict cross-site auth origin when present", () => {
+    expect(
+      getStrictCrossSiteAuthOrigins({
+        NODE_ENV: "production",
+        RAILWAY_SERVICE_TROCKCRM_FIELD_URL: "trockcam.com",
+      })
+    ).toEqual(["https://trockcam.com"]);
+  });
+
+  it("does not implicitly trust legacy field frontend hosts for strict cross-site auth", () => {
+    expect(
+      getStrictCrossSiteAuthOrigins({
+        NODE_ENV: "production",
+        FIELD_FRONTEND_URL: "https://legacy-field.example.com",
+        RAILWAY_SERVICE_FIELD_FRONTEND_URL: "trockcrm-field.up.railway.app",
+        RAILWAY_SERVICE_TROCKCRM_FIELD_URL: "trockcam.com",
+        FIELD_APP_URL: "https://field-app.trockcrm.com",
+      })
+    ).toEqual([
+      "https://trockcam.com",
+      "https://field-app.trockcrm.com",
+    ]);
+  });
+
   it("accepts explicit production HTTPS strict cross-site auth origins", () => {
     expect(
       getStrictCrossSiteAuthOrigins({

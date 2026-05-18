@@ -133,7 +133,14 @@ describe("app CSRF cross-origin field support", () => {
 
     expect(response.status).toBe(200);
     expect(response.body).toEqual({ starred: true });
-    expect(projectMocks.starFieldProject).toHaveBeenCalledWith(expect.anything(), "field-1", "deal-1");
+    expect(projectMocks.starFieldProject).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({
+        userId: "field-1",
+        userRole: "field_contractor",
+      }),
+      "deal-1"
+    );
   });
 
   it("rejects unsafe field requests without the cross-origin requested-with header", async () => {

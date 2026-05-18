@@ -78,6 +78,13 @@ function getFieldFrontendOrigins(env: EnvInput): Array<string | null> {
   ];
 }
 
+function getDefaultStrictCrossSiteAuthOrigins(env: EnvInput): string[] {
+  return [
+    normalizeOrigin(env.RAILWAY_SERVICE_TROCKCRM_FIELD_URL),
+    normalizeOrigin(env.FIELD_APP_URL),
+  ].filter((value, index, values): value is string => Boolean(value) && values.indexOf(value) === index);
+}
+
 export function getAllowedCorsOrigins(env: EnvInput): string[] {
   const origins = [
     ...((env.CORS_ALLOWED_ORIGINS ?? "").split(",").map(normalizeOrigin)),
@@ -100,7 +107,11 @@ export function getAllowedCorsOrigins(env: EnvInput): string[] {
 }
 
 export function getFieldAppUrl(env: EnvInput): string {
-  const configured = normalizeOrigin(env.FIELD_APP_URL);
+  const configured =
+    normalizeOrigin(env.FIELD_APP_URL) ??
+    normalizeOrigin(env.RAILWAY_SERVICE_TROCKCRM_FIELD_URL) ??
+    normalizeOrigin(env.FIELD_FRONTEND_URL) ??
+    normalizeOrigin(env.RAILWAY_SERVICE_FIELD_FRONTEND_URL);
   if (configured) return configured;
   if (env.NODE_ENV === "production") {
     throw new Error("FIELD_APP_URL is required when NODE_ENV=production");
@@ -287,11 +298,10 @@ export function getCsrfCookieOptionsForRequest(env: EnvInput, request: CookieReq
 }
 
 export function getStrictCrossSiteAuthOrigins(env: EnvInput): string[] {
-  const configured = env.STRICT_CROSS_SITE_AUTH_ORIGINS?.trim().split(",") ?? [];
-  const source = [
-    ...configured,
-    ...getFieldFrontendOrigins(env),
-  ];
+  const configured = env.STRICT_CROSS_SITE_AUTH_ORIGINS?.trim();
+  const source = configured
+    ? configured.split(",")
+    : getDefaultStrictCrossSiteAuthOrigins(env);
 
   return source
     .map(normalizeOrigin)

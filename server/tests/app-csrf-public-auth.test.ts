@@ -1,5 +1,5 @@
 import request from "supertest";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const authServiceMocks = vi.hoisted(() => ({
   getUserByEmail: vi.fn(),
@@ -57,8 +57,20 @@ const { createApp } = await import("../src/app.js");
 const origin = "http://localhost:5174";
 const fieldProdOrigin = "https://trockcam.com";
 const crmProdOrigin = "https://crm.trockconstruction.com";
-const staleAuthCookies = ["token=existing-session", "csrf_token=server-token"];
 const fallbackApiHost = ["api-production-ad218", "up.railway.app"].join(".");
+const staleAuthCookies = ["token=existing-session", "csrf_token=server-token"];
+const ENV_KEYS = [
+  "NODE_ENV",
+  "DEV_MODE",
+  "AUTH_COOKIE_DOMAIN",
+  "CORS_ALLOWED_ORIGINS",
+  "STRICT_CROSS_SITE_AUTH_ORIGINS",
+  "FIELD_APP_URL",
+  "FRONTEND_URL",
+  "RAILWAY_SERVICE_FRONTEND_URL",
+  "RAILWAY_SERVICE_TROCKCRM_FIELD_URL",
+] as const;
+let previousEnv: Partial<Record<(typeof ENV_KEYS)[number], string | undefined>>;
 
 const crmUser = {
   id: "crm-user-1",
@@ -84,6 +96,7 @@ const fieldUser = {
 describe("app CSRF public auth exemptions", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    previousEnv = Object.fromEntries(ENV_KEYS.map((key) => [key, process.env[key]]));
     process.env.NODE_ENV = "test";
     process.env.DEV_MODE = "true";
     process.env.FIELD_APP_URL = origin;
@@ -99,6 +112,17 @@ describe("app CSRF public auth exemptions", () => {
     localAuthServiceMocks.loginWithLocalPassword.mockResolvedValue({ user: crmUser });
     fieldUserServiceMocks.acceptFieldInvite.mockResolvedValue({ user: fieldUser, token: "field-session" });
     fieldUserServiceMocks.loginFieldUser.mockResolvedValue({ user: fieldUser, token: "field-session" });
+  });
+
+  afterEach(() => {
+    for (const key of ENV_KEYS) {
+      const value = previousEnv[key];
+      if (value === undefined) {
+        delete process.env[key];
+      } else {
+        process.env[key] = value;
+      }
+    }
   });
 
   it("allows field invite acceptance without a CSRF header even when a stale auth cookie exists", async () => {
@@ -127,6 +151,27 @@ describe("app CSRF public auth exemptions", () => {
       email: "field@example.com",
       password: "Password123!",
     });
+  });
+
+  it("returns credentialed CORS headers and cross-site auth cookies for the trockcam.com field origin in production", async () => {
+    process.env.NODE_ENV = "production";
+    process.env.DEV_MODE = "false";
+    process.env.AUTH_COOKIE_DOMAIN = ".trockcrm.com";
+    process.env.FIELD_APP_URL = "https://trockcrm-field-production.up.railway.app";
+    process.env.RAILWAY_SERVICE_TROCKCRM_FIELD_URL = "trockcam.com";
+
+    const response = await request(createApp())
+      .post("/api/auth/field-login")
+      .set("Origin", "https://trockcam.com")
+      .set("Host", fallbackApiHost)
+      .send({ email: "field@example.com", password: "Password123!" });
+
+    expect(response.status).toBe(200);
+    expect(response.headers["access-control-allow-origin"]).toBe("https://trockcam.com");
+    expect(response.headers["access-control-allow-credentials"]).toBe("true");
+    expect(response.body.csrfToken).toEqual(expect.any(String));
+    expect(response.headers["set-cookie"]?.join("\n")).toContain("SameSite=None");
+    expect(response.headers["set-cookie"]?.join("\n")).not.toContain("Domain=.trockcrm.com");
   });
 
   it("allows CRM local login without a CSRF header even when a stale auth cookie exists", async () => {
