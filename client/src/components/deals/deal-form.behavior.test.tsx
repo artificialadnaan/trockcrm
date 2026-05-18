@@ -21,6 +21,13 @@ const mocks = vi.hoisted(() => ({
   },
   propertySelectorProps: null as null | {
     onChange: (propertyId: string) => void;
+    onPropertySelected?: (property: {
+      id: string;
+      address: string | null;
+      city: string | null;
+      state: string | null;
+      zip: string | null;
+    }) => void;
     onPropertyRepaired?: (property: {
       id: string;
       address: string | null;
@@ -365,6 +372,39 @@ describe("DealForm direct-create context", () => {
     expect(container.querySelector('[data-testid="property-selector"]')).toBeNull();
   });
 
+  it("shows company and property selectors for post-RFP edit mode even when relationships already exist", async () => {
+    mocks.useAccessibleOffices.mockReturnValue({
+      offices: [
+        { id: "office-dallas", name: "Dallas", slug: "dallas" },
+      ],
+      loading: false,
+      error: null,
+    });
+
+    const { container, root } = await renderEditForm({
+      id: "deal-rfp",
+      dealNumber: "DFW-1-00004-aa",
+      name: "Submitted RFP Deal",
+      stageId: "stage-opportunity",
+      assignedRepId: "rep-1",
+      companyId: "company-1",
+      propertyId: "property-1",
+      sourceLeadId: null,
+      isBidBoardOwned: false,
+      projectTypeId: "type-roofing",
+      regionId: null,
+      source: null,
+      workflowRoute: "normal",
+      rfpApprovalRequestedAt: "2026-05-12T12:00:00.000Z",
+      rfpApprovalStatus: "pending_outbox",
+    } as any);
+    containers.push(container);
+    roots.push(root);
+
+    expect(container.querySelector('[data-testid="company-selector"]')).not.toBeNull();
+    expect(container.querySelector('[data-testid="property-selector"]')).not.toBeNull();
+  });
+
   it("submits repaired company and property ids during edit saves", async () => {
     mocks.useAccessibleOffices.mockReturnValue({
       offices: [
@@ -403,6 +443,73 @@ describe("DealForm direct-create context", () => {
       expect.objectContaining({
         companyId: "company-9",
         propertyId: "property-9",
+        migrationMode: true,
+      })
+    );
+  });
+
+  it("copies selected property address fields and locks manual address entry while a property is attached", async () => {
+    mocks.useAccessibleOffices.mockReturnValue({
+      offices: [
+        { id: "office-dallas", name: "Dallas", slug: "dallas" },
+      ],
+      loading: false,
+      error: null,
+    });
+
+    const { container, root } = await renderEditForm({
+      id: "deal-rfp-address",
+      dealNumber: "DFW-1-00005-aa",
+      name: "Submitted RFP Address Deal",
+      stageId: "stage-opportunity",
+      assignedRepId: "rep-1",
+      companyId: "company-1",
+      propertyId: "property-1",
+      sourceLeadId: null,
+      isBidBoardOwned: false,
+      projectTypeId: "type-roofing",
+      regionId: null,
+      source: null,
+      workflowRoute: "normal",
+      propertyAddress: "Old deal address",
+      propertyCity: "Dallas",
+      propertyState: "TX",
+      propertyZip: "75201",
+      rfpApprovalRequestedAt: "2026-05-12T12:00:00.000Z",
+      rfpApprovalStatus: "pending_outbox",
+    } as any);
+    containers.push(container);
+    roots.push(root);
+
+    const addressInput = container.querySelector<HTMLInputElement>("#propertyAddress");
+    expect(addressInput?.readOnly).toBe(true);
+
+    await act(async () => {
+      mocks.propertySelectorProps?.onPropertySelected?.({
+        id: "property-2",
+        address: "5000 Triangle Pkwy",
+        city: "Peachtree Corners",
+        state: "GA",
+        zip: "30092",
+      });
+      mocks.propertySelectorProps?.onChange("property-2");
+    });
+
+    expect(container.querySelector<HTMLInputElement>("#propertyAddress")?.value).toBe("5000 Triangle Pkwy");
+    expect(container.querySelector<HTMLInputElement>("#propertyCity")?.value).toBe("Peachtree Corners");
+    expect(container.querySelector<HTMLInputElement>("#propertyState")?.value).toBe("GA");
+    expect(container.querySelector<HTMLInputElement>("#propertyZip")?.value).toBe("30092");
+
+    await submit(container);
+
+    expect(mocks.updateDeal).toHaveBeenCalledWith(
+      "deal-rfp-address",
+      expect.objectContaining({
+        propertyId: "property-2",
+        propertyAddress: "5000 Triangle Pkwy",
+        propertyCity: "Peachtree Corners",
+        propertyState: "GA",
+        propertyZip: "30092",
         migrationMode: true,
       })
     );

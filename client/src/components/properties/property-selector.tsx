@@ -1,4 +1,4 @@
-import { useDeferredValue, useEffect, useState } from "react";
+import { useDeferredValue, useEffect, useRef, useState } from "react";
 import { AlertTriangle, ChevronsUpDown, Loader2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -23,6 +23,7 @@ interface PropertySelectorProps {
   officeId?: string | null;
   repairIncompleteAddressOnSelect?: boolean;
   onPropertyRepaired?: (property: PropertySurface) => void;
+  onPropertySelected?: (property: PropertySurface) => void;
 }
 
 function clean(value: string | null | undefined) {
@@ -80,15 +81,30 @@ export async function resolveSelectedPropertyLabel(
   properties: Array<Parameters<typeof formatPropertyLabel>[0] & { id: string }>,
   officeId?: string | null
 ) {
+  const selection = await resolveSelectedPropertySelection(propertyId, properties, officeId);
+  return selection.label;
+}
+
+export async function resolveSelectedPropertySelection(
+  propertyId: string,
+  properties: Array<Parameters<typeof formatPropertyLabel>[0] & { id: string }>,
+  officeId?: string | null
+) {
   const match = properties.find((property) => property.id === propertyId);
   if (match) {
-    return getPropertySelectorLabel(match as PropertySelectorRecord);
+    return {
+      label: getPropertySelectorLabel(match as PropertySelectorRecord),
+      property: match as PropertySelectorRecord,
+    };
   }
 
   const data = await api<{
     property: Parameters<typeof formatPropertyLabel>[0] & { id: string };
   }>(`/properties/${propertyId}`, getOfficeRequestOptions(officeId));
-  return getPropertySelectorLabel(data.property as PropertySelectorRecord);
+  return {
+    label: getPropertySelectorLabel(data.property as PropertySelectorRecord),
+    property: data.property as PropertySelectorRecord,
+  };
 }
 
 export function PropertySelector({
@@ -101,6 +117,7 @@ export function PropertySelector({
   officeId,
   repairIncompleteAddressOnSelect,
   onPropertyRepaired,
+  onPropertySelected,
 }: PropertySelectorProps) {
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState("");
@@ -123,6 +140,8 @@ export function PropertySelector({
     },
     { officeId }
   );
+  const onPropertySelectedRef = useRef(onPropertySelected);
+  onPropertySelectedRef.current = onPropertySelected;
   const sortedProperties = sortPropertiesForSelection(properties);
   const shouldRepairIncompleteAddress = Boolean(requireLeadCreateFields || repairIncompleteAddressOnSelect);
 
@@ -133,10 +152,11 @@ export function PropertySelector({
     }
     let cancelled = false;
 
-    void resolveSelectedPropertyLabel(value, properties, officeId)
-      .then((label) => {
+    void resolveSelectedPropertySelection(value, properties, officeId)
+      .then((selection) => {
         if (!cancelled) {
-          setSelectedLabel(label);
+          setSelectedLabel(selection.label);
+          onPropertySelectedRef.current?.(selection.property as PropertySurface);
         }
       })
       .catch(() => {});
@@ -299,6 +319,7 @@ export function PropertySelector({
                       return;
                     }
                     setSelectedLabel(label);
+                    onPropertySelected?.(property);
                     onChange(property.id);
                     setOpen(false);
                     setQuery("");
@@ -322,6 +343,7 @@ export function PropertySelector({
             triggerLabel="Add New Property"
             onCreated={(property) => {
               setSelectedLabel(formatPropertyLabel(property));
+              onPropertySelected?.(property);
               onChange(property.id);
               void refetch();
               setOpen(false);

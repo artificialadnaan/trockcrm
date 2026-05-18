@@ -108,8 +108,31 @@ function findPatchHandler() {
   return routeLayer.handle;
 }
 
-async function invokePatch(body: Record<string, unknown>, user: TestUser) {
+async function invokePatch(
+  body: Record<string, unknown>,
+  user: TestUser,
+  options: {
+    selectedProperty?: {
+      companyId?: string | null;
+      address: string | null;
+      city: string | null;
+      state: string | null;
+      zip: string | null;
+    } | null;
+  } = {}
+) {
   const handler = findPatchHandler();
+  const selectedProperty =
+    options.selectedProperty ??
+    (typeof body.propertyId === "string"
+      ? {
+          companyId: "company-1",
+          address: "100 Property Way",
+          city: "Dallas",
+          state: "TX",
+          zip: "75201",
+        }
+      : null);
   const req = {
     params: { id: "deal-1" },
     query: {},
@@ -117,6 +140,17 @@ async function invokePatch(body: Record<string, unknown>, user: TestUser) {
     user,
     tenantDb: {
       execute: vi.fn(async () => ({ rows: [] })),
+      select: vi.fn(() => ({
+        from: vi.fn(() => ({
+          where: vi.fn(() => ({
+            limit: vi.fn(async () => (
+              selectedProperty
+                ? [selectedProperty]
+                : []
+            )),
+          })),
+        })),
+      })),
       insert: vi.fn(() => ({
         values: vi.fn(async () => ({})),
       })),
@@ -243,13 +277,10 @@ describe("PATCH /api/deals/:id cleanup legacy handling", () => {
     expect(dealsServiceMocks.updateDeal).not.toHaveBeenCalled();
   });
 
-  it("still honors the scope-readonly guard on legacy deals", async () => {
+  it("allows company/property relationship repair without invoking the post-RFP scope guard", async () => {
     dealsServiceMocks.getDealById.mockResolvedValue(baseDeal());
-    scopingServiceMocks.assertDealScopingWriteAllowed.mockRejectedValue(
-      new AppError(403, "Scope is read-only after RFP submission", "SCOPE_READ_ONLY_AFTER_RFP")
-    );
 
-    const { error } = await invokePatch(
+    const { req, res, error } = await invokePatch(
       {
         companyId: "company-1",
         propertyId: "property-1",
@@ -257,9 +288,183 @@ describe("PATCH /api/deals/:id cleanup legacy handling", () => {
       createUser("rep")
     );
 
+    expect(error).toBeNull();
+    expect(res.statusCode).toBe(200);
+    expect(scopingServiceMocks.assertDealScopingWriteAllowed).not.toHaveBeenCalled();
+    expect(dealsServiceMocks.updateDeal).toHaveBeenCalledWith(
+      req.tenantDb,
+      "deal-1",
+      expect.objectContaining({
+        companyId: "company-1",
+        propertyId: "property-1",
+      }),
+      "rep",
+      "rep-1",
+      "office-1"
+    );
+  });
+
+  it("still honors the scope-readonly guard for scope-defining deal fields", async () => {
+    dealsServiceMocks.getDealById.mockResolvedValue(baseDeal());
+    scopingServiceMocks.assertDealScopingWriteAllowed.mockRejectedValue(
+      new AppError(403, "Scope is read-only after RFP submission", "SCOPE_READ_ONLY_AFTER_RFP")
+    );
+
+    const { error } = await invokePatch(
+      {
+        projectTypeId: "project-type-2",
+      },
+      createUser("rep")
+    );
+
     expect(error).toMatchObject({
       statusCode: 403,
       message: "Scope is read-only after RFP submission",
+    });
+    expect(dealsServiceMocks.updateDeal).not.toHaveBeenCalled();
+  });
+
+  it("syncs deal address fields from the selected property instead of trusting client-supplied address", async () => {
+    dealsServiceMocks.getDealById.mockResolvedValue(baseDeal());
+
+    const { req, error } = await invokePatch(
+      {
+        companyId: "company-1",
+        propertyId: "property-1",
+        propertyAddress: "Client typed address",
+        propertyCity: "Client City",
+        propertyState: "ZZ",
+        propertyZip: "00000",
+      },
+      createUser("rep"),
+      {
+        selectedProperty: {
+          companyId: "company-1",
+          address: "5000 Triangle Pkwy",
+          city: "Peachtree Corners",
+          state: "GA",
+          zip: "30092",
+        },
+      }
+    );
+
+    expect(error).toBeNull();
+    expect(dealsServiceMocks.updateDeal).toHaveBeenCalledWith(
+      req.tenantDb,
+      "deal-1",
+      expect.objectContaining({
+        propertyId: "property-1",
+        propertyAddress: "5000 Triangle Pkwy",
+        propertyCity: "Peachtree Corners",
+        propertyState: "GA",
+        propertyZip: "30092",
+      }),
+      "rep",
+      "rep-1",
+      "office-1"
+    );
+  });
+
+  it("does not overwrite an existing attached deal address when propertyId is unchanged", async () => {
+    dealsServiceMocks.getDealById.mockResolvedValue(baseDeal({
+      companyId: "company-1",
+      propertyId: "property-1",
+      propertyAddress: "Existing manual address",
+      propertyCity: "Dallas",
+      propertyState: "TX",
+      propertyZip: "75201",
+    }));
+
+    const { req, error } = await invokePatch(
+      {
+        description: "Unrelated edit",
+        companyId: "company-1",
+        propertyId: "property-1",
+        propertyAddress: "Client typed address",
+        propertyCity: "Client City",
+        propertyState: "ZZ",
+        propertyZip: "00000",
+      },
+      createUser("rep"),
+      {
+        selectedProperty: {
+          companyId: "company-1",
+          address: "5000 Triangle Pkwy",
+          city: "Peachtree Corners",
+          state: "GA",
+          zip: "30092",
+        },
+      }
+    );
+
+    expect(error).toBeNull();
+    expect(dealsServiceMocks.updateDeal).toHaveBeenCalledWith(
+      req.tenantDb,
+      "deal-1",
+      expect.not.objectContaining({
+        propertyAddress: expect.anything(),
+        propertyCity: expect.anything(),
+        propertyState: expect.anything(),
+        propertyZip: expect.anything(),
+      }),
+      "rep",
+      "rep-1",
+      "office-1"
+    );
+  });
+
+  it("rejects relationship repair when the selected property belongs to a different company", async () => {
+    dealsServiceMocks.getDealById.mockResolvedValue(baseDeal());
+
+    const { error } = await invokePatch(
+      {
+        companyId: "company-1",
+        propertyId: "property-1",
+      },
+      createUser("rep"),
+      {
+        selectedProperty: {
+          companyId: "company-2",
+          address: "5000 Triangle Pkwy",
+          city: "Peachtree Corners",
+          state: "GA",
+          zip: "30092",
+        },
+      }
+    );
+
+    expect(error).toMatchObject({
+      statusCode: 400,
+      message: "Property does not belong to the company",
+    });
+    expect(dealsServiceMocks.updateDeal).not.toHaveBeenCalled();
+  });
+
+  it("rejects company repair when the existing property belongs to a different company", async () => {
+    dealsServiceMocks.getDealById.mockResolvedValue(baseDeal({
+      companyId: null,
+      propertyId: "property-1",
+    }));
+
+    const { error } = await invokePatch(
+      {
+        companyId: "company-1",
+      },
+      createUser("rep"),
+      {
+        selectedProperty: {
+          companyId: "company-2",
+          address: "5000 Triangle Pkwy",
+          city: "Peachtree Corners",
+          state: "GA",
+          zip: "30092",
+        },
+      }
+    );
+
+    expect(error).toMatchObject({
+      statusCode: 400,
+      message: "Property does not belong to the company",
     });
     expect(dealsServiceMocks.updateDeal).not.toHaveBeenCalled();
   });

@@ -221,6 +221,51 @@ async function loadLockedResolvedFieldComparisonBaseline(tenantDb: any, dealId: 
   } as Record<string, unknown>;
 }
 
+const DEAL_LOCATION_FIELDS = [
+  "propertyAddress",
+  "propertyCity",
+  "propertyState",
+  "propertyZip",
+] as const;
+
+function removeDealLocationFields(body: Record<string, unknown>) {
+  for (const field of DEAL_LOCATION_FIELDS) {
+    delete body[field];
+  }
+}
+
+function hasDealLocationFields(body: Record<string, unknown>) {
+  return DEAL_LOCATION_FIELDS.some((field) => body[field] !== undefined);
+}
+
+async function loadDealLocationFromProperty(tenantDb: any, propertyId: string) {
+  const [property] = await tenantDb
+    .select({
+      companyId: properties.companyId,
+      address: properties.address,
+      city: properties.city,
+      state: properties.state,
+      zip: properties.zip,
+    })
+    .from(properties)
+    .where(eq(properties.id, propertyId))
+    .limit(1);
+
+  if (!property) {
+    throw new AppError(400, "Selected property was not found.");
+  }
+
+  return {
+    companyId: property.companyId ?? null,
+    dealLocation: {
+      propertyAddress: property.address ?? null,
+      propertyCity: property.city ?? null,
+      propertyState: property.state ?? null,
+      propertyZip: property.zip ?? null,
+    },
+  };
+}
+
 const LEGACY_CLEANUP_PATCH_ALLOWED_FIELDS = new Set([
   "name",
   "companyId",
@@ -1433,11 +1478,57 @@ router.patch("/:id", async (req, res, next) => {
       }
     }
 
+    const shouldInspectRelationship =
+      body.companyId !== undefined ||
+      body.propertyId !== undefined ||
+      hasDealLocationFields(body);
+    const relationshipBaseline =
+      cleanupBaseline ??
+      existingDeal ??
+      (
+        shouldInspectRelationship
+          ? await getDealById(
+              req.tenantDb!,
+              req.params.id,
+              req.user!.role,
+              req.user!.id
+            )
+          : null
+      );
+    const existingPropertyId =
+      typeof (relationshipBaseline as Record<string, unknown> | null)?.propertyId === "string"
+        ? (relationshipBaseline as Record<string, unknown>).propertyId as string
+        : null;
+    const requestedPropertyId = typeof body.propertyId === "string" && body.propertyId ? body.propertyId : null;
+    const effectivePropertyId = requestedPropertyId ?? existingPropertyId;
+    const effectiveCompanyId =
+      typeof body.companyId === "string" && body.companyId
+        ? body.companyId
+        : typeof (relationshipBaseline as Record<string, unknown> | null)?.companyId === "string"
+          ? (relationshipBaseline as Record<string, unknown>).companyId as string
+          : null;
+    let propertyAddressSync: Record<string, unknown> = {};
+
+    if (effectivePropertyId && (requestedPropertyId || body.companyId !== undefined)) {
+      const property = await loadDealLocationFromProperty(req.tenantDb!, effectivePropertyId);
+      if (effectiveCompanyId && property.companyId !== effectiveCompanyId) {
+        throw new AppError(400, "Property does not belong to the company");
+      }
+      if (requestedPropertyId && requestedPropertyId !== existingPropertyId) {
+        propertyAddressSync = property.dealLocation;
+      } else {
+        removeDealLocationFields(body);
+      }
+    } else if (existingPropertyId && hasDealLocationFields(body)) {
+      removeDealLocationFields(body);
+    }
+
     let deal = await updateDeal(
       req.tenantDb!,
       req.params.id,
       {
         ...body,
+        ...propertyAddressSync,
         ...(isLegacyCleanupPatch ? { migrationMode: true } : {}),
         auditContext: buildRouteAuditContext(req),
       },

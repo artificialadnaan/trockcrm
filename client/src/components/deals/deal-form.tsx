@@ -51,7 +51,8 @@ export function DealForm({ deal, onSuccess, initialValues }: DealFormProps) {
 
   const isEdit = !!deal;
   const isBidBoardOwned = Boolean(deal?.isBidBoardOwned);
-  const showRelationshipSelectors = !isEdit || !deal?.companyId || !deal?.propertyId;
+  const isPostRfp = Boolean(deal?.rfpApprovalRequestedAt || deal?.rfpApprovalStatus);
+  const showRelationshipSelectors = !isEdit || isPostRfp || !deal?.companyId || !deal?.propertyId;
   const activeStages = getNewDealStages(stages);
   const projectTypeOptions = projectTypeHierarchy.flatMap((parent) => [
     { id: parent.id, name: parent.name },
@@ -94,6 +95,7 @@ export function DealForm({ deal, onSuccess, initialValues }: DealFormProps) {
   const [error, setError] = useState<string | null>(null);
   const [fieldErrors, setFieldErrors] = useState<Record<string, string>>({});
   const [closeDateWarning, setCloseDateWarning] = useState<string | null>(null);
+  const isPropertyAddressManaged = Boolean(formData.propertyId);
   const selectedOffice = officeOptions.find((office) => office.code === formData.officeCode) ?? null;
   const { assignees, loading: assigneesLoading } = useTaskAssignees({ officeId: !isEdit ? selectedOffice?.officeId : null });
   const assigneeOptions = assignees.map((assignee) => ({ id: assignee.id, name: assignee.displayName }));
@@ -326,14 +328,24 @@ export function DealForm({ deal, onSuccess, initialValues }: DealFormProps) {
                   officeId={selectedOffice?.officeId}
                   required
                   repairIncompleteAddressOnSelect
+                  onPropertySelected={(property) => {
+                    setFormData((prev) => ({
+                      ...prev,
+                      propertyId: property.id,
+                      propertyAddress: property.address ?? "",
+                      propertyCity: property.city ?? "",
+                      propertyState: property.state ?? "",
+                      propertyZip: property.zip ?? "",
+                    }));
+                  }}
                   onPropertyRepaired={(property) => {
                     setFormData((prev) => ({
                       ...prev,
                       propertyId: property.id,
-                      propertyAddress: property.address ?? prev.propertyAddress,
-                      propertyCity: property.city ?? prev.propertyCity,
-                      propertyState: property.state ?? prev.propertyState,
-                      propertyZip: property.zip ?? prev.propertyZip,
+                      propertyAddress: property.address ?? "",
+                      propertyCity: property.city ?? "",
+                      propertyState: property.state ?? "",
+                      propertyZip: property.zip ?? "",
                     }));
                   }}
                 />
@@ -624,6 +636,7 @@ export function DealForm({ deal, onSuccess, initialValues }: DealFormProps) {
               id="propertyAddress"
               placeholder="123 Main St"
               value={formData.propertyAddress}
+              readOnly={isPropertyAddressManaged}
               onChange={(e) => handleChange("propertyAddress", e.target.value)}
             />
           </div>
@@ -634,6 +647,7 @@ export function DealForm({ deal, onSuccess, initialValues }: DealFormProps) {
                 id="propertyCity"
                 placeholder="Dallas"
                 value={formData.propertyCity}
+                readOnly={isPropertyAddressManaged}
                 onChange={(e) => handleChange("propertyCity", e.target.value)}
               />
             </div>
@@ -644,6 +658,7 @@ export function DealForm({ deal, onSuccess, initialValues }: DealFormProps) {
                 maxLength={2}
                 placeholder="TX"
                 value={formData.propertyState}
+                readOnly={isPropertyAddressManaged}
                 onChange={(e) =>
                   handleChange("propertyState", e.target.value.toUpperCase())
                 }
@@ -656,6 +671,7 @@ export function DealForm({ deal, onSuccess, initialValues }: DealFormProps) {
                 maxLength={10}
                 placeholder="75201"
                 value={formData.propertyZip}
+                readOnly={isPropertyAddressManaged}
                 onChange={(e) => handleChange("propertyZip", e.target.value)}
               />
             </div>
