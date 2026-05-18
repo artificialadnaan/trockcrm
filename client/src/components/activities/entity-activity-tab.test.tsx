@@ -25,6 +25,7 @@ vi.mock("@/components/activities/activity-log-form", () => ({
     nextStep?: string;
     nextStepDueAt?: string;
     durationMinutes?: number;
+    occurredAt?: string;
     responsibleUserId?: string;
   }) => Promise<void> }) => (
     <div>
@@ -38,6 +39,17 @@ vi.mock("@/components/activities/activity-log-form", () => ({
         })}
       >
         Add Note
+      </button>
+      <button
+        type="button"
+        onClick={() => onSubmit({
+          type: "email",
+          subject: "Manual email",
+          body: "Subject: Manual email\nNotes: Sent from phone",
+          occurredAt: "2026-05-18T09:15:00.000Z",
+        })}
+      >
+        Log Email
       </button>
       <button
         type="button"
@@ -197,6 +209,39 @@ describe("EntityActivityTab", () => {
       nextStep: undefined,
       nextStepDueAt: undefined,
       durationMinutes: undefined,
+      dealId: "deal-1",
+    });
+    expect(refetch).toHaveBeenCalled();
+  });
+
+  it("creates manually logged email activities scoped to the deal with occurredAt", async () => {
+    const refetch = vi.fn();
+    mocks.useActivitiesMock.mockReturnValueOnce({
+      activities: [],
+      loading: false,
+      error: null,
+      refetch,
+    });
+
+    mounted = mount(<EntityActivityTab entityType="deal" entityId="deal-1" emptyLabel="deal" />);
+
+    const logEmail = Array.from(mounted.container.querySelectorAll("button")).find((button) =>
+      button.textContent?.includes("Log Email")
+    );
+
+    await act(async () => {
+      logEmail?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+
+    expect(mocks.createActivityMock).toHaveBeenCalledWith({
+      type: "email",
+      subject: "Manual email",
+      body: "Subject: Manual email\nNotes: Sent from phone",
+      outcome: undefined,
+      nextStep: undefined,
+      nextStepDueAt: undefined,
+      durationMinutes: undefined,
+      occurredAt: "2026-05-18T09:15:00.000Z",
       dealId: "deal-1",
     });
     expect(refetch).toHaveBeenCalled();

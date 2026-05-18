@@ -137,6 +137,7 @@ export async function createContactActivity(
     nextStep?: string;
     nextStepDueAt?: string;
     durationMinutes?: number;
+    occurredAt?: string;
     responsibleUserId?: string;
     dealId?: string;
   }
