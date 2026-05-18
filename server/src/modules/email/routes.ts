@@ -59,6 +59,35 @@ function canUserViewDeal(req: any, dealId: string) {
     });
 }
 
+async function canUserViewAssignedEmailEntity(
+  req: any,
+  entityType: string | null | undefined,
+  entityId: string | null | undefined
+) {
+  if (!entityType || !entityId) {
+    return false;
+  }
+
+  switch (entityType) {
+    case "deal":
+      return canUserViewDeal(req, entityId);
+    case "lead": {
+      const lead = await getLeadById(req.tenantDb!, entityId, req.user!.role, req.user!.id);
+      return Boolean(lead);
+    }
+    case "company": {
+      const company = await getCompanyById(req.tenantDb!, entityId);
+      return Boolean(company);
+    }
+    case "contact": {
+      const contact = await getContactById(req.tenantDb!, entityId);
+      return Boolean(contact);
+    }
+    default:
+      return false;
+  }
+}
+
 // POST /api/email/send — compose and send an email
 router.post("/send", async (req, res, next) => {
   try {
@@ -171,7 +200,7 @@ router.get("/deal/:dealId", async (req, res, next) => {
       limit: parsePaginationParam(req.query.limit, "limit", { defaultValue: 20, max: 100 }),
     };
 
-    const result = await getEmails(req.tenantDb!, filters, req.user!.id, req.user!.role);
+    const result = await getEmails(req.tenantDb!, filters, undefined, req.user!.role);
     await req.commitTransaction!();
     res.json(result);
   } catch (err) {
@@ -225,7 +254,7 @@ router.get("/company/:companyId", async (req, res, next) => {
       limit: parsePaginationParam(req.query.limit, "limit", { defaultValue: 20, max: 100 }),
     };
 
-    const result = await getEmails(req.tenantDb!, filters, req.user!.id, req.user!.role);
+    const result = await getEmails(req.tenantDb!, filters, undefined, req.user!.role);
     await req.commitTransaction!();
     res.json(result);
   } catch (err) {
@@ -248,7 +277,7 @@ router.get("/lead/:leadId", async (req, res, next) => {
       limit: parsePaginationParam(req.query.limit, "limit", { defaultValue: 20, max: 100 }),
     };
 
-    const result = await getEmails(req.tenantDb!, filters, req.user!.id, req.user!.role);
+    const result = await getEmails(req.tenantDb!, filters, undefined, req.user!.role);
     await req.commitTransaction!();
     res.json(result);
   } catch (err) {
@@ -270,7 +299,7 @@ router.get("/contact/:contactId", async (req, res, next) => {
       limit: parsePaginationParam(req.query.limit, "limit", { defaultValue: 20, max: 100 }),
     };
 
-    const result = await getEmails(req.tenantDb!, filters, req.user!.id, req.user!.role);
+    const result = await getEmails(req.tenantDb!, filters, undefined, req.user!.role);
     await req.commitTransaction!();
     res.json(result);
   } catch (err) {
@@ -444,13 +473,24 @@ router.patch("/:id/actions", async (req, res, next) => {
 });
 
 // GET /api/email/:id — single email with full body
-// Security: mailbox data is always scoped to the owning CRM user.
+// Security: mailbox data is visible to the owner, or to teammates when it has
+// been explicitly assigned to an entity the viewer can access.
 router.get("/:id", async (req, res, next) => {
   try {
     const email = await getEmailById(req.tenantDb!, req.params.id);
     if (!email) throw new AppError(404, "Email not found");
 
-    if (email.userId !== req.user!.id) {
+    const ownsEmail = email.userId === req.user!.id;
+    const isSharedEmailActive =
+      email.archivedAt == null &&
+      email.deletedAt == null &&
+      email.assignmentStatus !== "ignored";
+    const hasAssignedEntityAccess = ownsEmail
+      ? true
+      : isSharedEmailActive &&
+        await canUserViewAssignedEmailEntity(req, email.assignedEntityType, email.assignedEntityId);
+
+    if (!hasAssignedEntityAccess) {
       throw new AppError(403, "You do not have permission to view this email");
     }
 

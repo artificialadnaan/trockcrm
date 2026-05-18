@@ -91,7 +91,9 @@ export async function getDealCopilotContext(
       SELECT id, subject, body_preview, direction, sent_at, from_address, to_addresses
       FROM emails
       WHERE ${buildDealEmailLinkCondition("emails", sql`${dealId}`)}
-        AND user_id = ${viewerUserId}
+        AND archived_at IS NULL
+        AND deleted_at IS NULL
+        AND assignment_status <> 'ignored'
       ORDER BY sent_at DESC
       LIMIT 10
     `),

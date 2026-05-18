@@ -363,10 +363,21 @@ describe("AI copilot service", () => {
     expect(getDealCopilotContext).toHaveBeenCalledWith(expect.anything(), "deal-1", "user-99");
   });
 
-  it("hides the deal copilot packet when the deal includes another user's emails", async () => {
+  it("does not hide the deal copilot packet when the deal includes another user's assigned emails", async () => {
     const tenantDb = {
-      execute: vi.fn(async () => ({ rows: [{ exists: 1 }] })),
-      select: vi.fn(),
+      execute: vi.fn(async () => ({ rows: [] })),
+      select: vi.fn(() => {
+        const chain: any = {
+          from: vi.fn(() => chain),
+          where: vi.fn(() => chain),
+          orderBy: vi.fn(() => chain),
+          limit: vi.fn(async () => []),
+          then(resolve: (value: any[]) => void) {
+            resolve([]);
+          },
+        };
+        return chain;
+      }),
     } as any;
 
     const view = await getDealCopilotView(tenantDb, "deal-1", "user-1");
@@ -376,11 +387,12 @@ describe("AI copilot service", () => {
       suggestedTasks: [],
       blindSpotFlags: [],
     });
-    expect(tenantDb.select).not.toHaveBeenCalled();
-
+    expect(tenantDb.select).toHaveBeenCalled();
     const guardQuerySql = flattenQueryChunks(tenantDb.execute.mock.calls[0]?.[0]).map((chunk) => String(chunk)).join(" ");
     expect(guardQuerySql).toContain("deal");
     expect(guardQuerySql).toContain("assigned_entity_type");
     expect(guardQuerySql).toContain("assigned_entity_id");
+    expect(guardQuerySql).toContain("ignored");
+    expect(guardQuerySql).not.toContain("user_id <>");
   });
 });
