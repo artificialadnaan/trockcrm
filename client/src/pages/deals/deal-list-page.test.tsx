@@ -643,6 +643,30 @@ describe("DealListPage", () => {
     expect(view.listInitialSort).toEqual({ key: "updated_at", dir: "desc" });
   });
 
+  it("supports today and week dashboard periods for rep drill-down links", () => {
+    const todayView = getDashboardDealListView({
+      filterParam: "active_pipeline",
+      periodParam: "today",
+      now: new Date("2026-05-08T12:00:00Z"),
+    });
+    const weekView = getDashboardDealListView({
+      filterParam: "active_pipeline",
+      periodParam: "week",
+      now: new Date("2026-05-08T12:00:00Z"),
+    });
+
+    expect(todayView.subtitle).toBe("Open-stage deals for Today.");
+    expect(todayView.listBaseFilters).toMatchObject({
+      updatedFrom: "2026-05-08",
+      updatedTo: "2026-05-08",
+    });
+    expect(weekView.subtitle).toBe("Open-stage deals for Week.");
+    expect(weekView.listBaseFilters).toMatchObject({
+      updatedFrom: "2026-05-04",
+      updatedTo: "2026-05-08",
+    });
+  });
+
   it("accepts active_pipeline dashboard aliases for active-pipeline drill-downs", () => {
     const view = getDashboardDealListView({
       filterParam: "active_pipeline",

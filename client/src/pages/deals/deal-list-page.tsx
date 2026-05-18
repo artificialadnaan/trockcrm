@@ -59,7 +59,7 @@ export type DashboardDealListFilter =
   | "bid_board"
   | null;
 
-type DashboardPeriod = "mtd" | "qtd" | "ytd" | "last_month" | "last_quarter" | "last_year";
+type DashboardPeriod = "today" | "week" | "mtd" | "qtd" | "ytd" | "last_month" | "last_quarter" | "last_year";
 
 type DashboardDealListView = {
   filter: DashboardDealListFilter;
@@ -95,6 +95,8 @@ function endOfPreviousQuarter(date: Date) {
 
 function normalizeDashboardPeriod(periodParam: string | null | undefined): DashboardPeriod {
   switch (periodParam) {
+    case "today":
+    case "week":
     case "mtd":
     case "qtd":
     case "ytd":
@@ -109,6 +111,10 @@ function normalizeDashboardPeriod(periodParam: string | null | undefined): Dashb
 
 function getDashboardPeriodLabel(period: DashboardPeriod) {
   switch (period) {
+    case "today":
+      return "Today";
+    case "week":
+      return "Week";
     case "mtd":
       return "MTD";
     case "qtd":
@@ -126,6 +132,16 @@ function getDashboardPeriodLabel(period: DashboardPeriod) {
 
 function getDashboardPeriodDateRange(period: DashboardPeriod, now = new Date()) {
   const today = new Date(now);
+  if (period === "today") {
+    return { from: formatDateInput(today), to: formatDateInput(today) };
+  }
+  if (period === "week") {
+    const start = new Date(today);
+    const dayOfWeek = start.getDay();
+    const diffToMonday = (dayOfWeek + 6) % 7;
+    start.setDate(start.getDate() - diffToMonday);
+    return { from: formatDateInput(start), to: formatDateInput(today) };
+  }
   if (period === "mtd") {
     return { from: formatDateInput(new Date(today.getFullYear(), today.getMonth(), 1)), to: formatDateInput(today) };
   }

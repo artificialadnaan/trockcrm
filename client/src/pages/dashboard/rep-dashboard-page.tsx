@@ -106,7 +106,9 @@ function periodToActivityRange(period: Period): ActivityRange {
   return "week";
 }
 
-function periodToDealDrilldownPeriod(period: Period): "mtd" | "qtd" | "ytd" {
+function periodToDealDrilldownPeriod(period: Period): "today" | "week" | "mtd" | "qtd" | "ytd" {
+  if (period === "Today") return "today";
+  if (period === "Week") return "week";
   if (period === "QTD") return "qtd";
   if (period === "YTD") return "ytd";
   return "mtd";

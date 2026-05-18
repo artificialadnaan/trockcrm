@@ -333,8 +333,8 @@ describe("RepDashboardPage", () => {
   });
 
   it("maps rep dashboard periods to supported deal drill-down periods", () => {
-    expect(buildRepDealsDrilldownPath("active_pipeline", "Today")).toBe("/deals?filter=active_pipeline&period=mtd&scope=mine");
-    expect(buildRepDealsDrilldownPath("active_pipeline", "Week")).toBe("/deals?filter=active_pipeline&period=mtd&scope=mine");
+    expect(buildRepDealsDrilldownPath("active_pipeline", "Today")).toBe("/deals?filter=active_pipeline&period=today&scope=mine");
+    expect(buildRepDealsDrilldownPath("active_pipeline", "Week")).toBe("/deals?filter=active_pipeline&period=week&scope=mine");
     expect(buildRepDealsDrilldownPath("active_pipeline", "MTD")).toBe("/deals?filter=active_pipeline&period=mtd&scope=mine");
     expect(buildRepDealsDrilldownPath("active_pipeline", "QTD")).toBe("/deals?filter=active_pipeline&period=qtd&scope=mine");
     expect(buildRepDealsDrilldownPath("active_pipeline", "YTD")).toBe("/deals?filter=active_pipeline&period=ytd&scope=mine");
