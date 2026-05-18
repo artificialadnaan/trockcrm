@@ -1819,6 +1819,10 @@ export async function getDealsForPipeline(
 
   await Promise.all(responseStages.map(async (stage) => {
     const stageConditions: any[] = [];
+    const isTerminalStage =
+      stage.isTerminal ||
+      stage.slug === "won" ||
+      stage.slug === "lost";
     if (WON_TERMINAL_STAGE_SLUGS.includes(stage.slug as (typeof WON_TERMINAL_STAGE_SLUGS)[number])) {
       stageConditions.push(canonicalWonStageId ? inArray(deals.stageId, wonStageIds) : eq(deals.stageId, stage.id));
       if (terminalFilters.won.since) {
@@ -1841,6 +1845,22 @@ export async function getDealsForPipeline(
     }
 
     const where = and(...stageConditions, ...commonConditions);
+    const stageDealsQueryBase = tenantDb
+      .select({
+        ...getTableColumns(deals),
+        companyName: companies.name,
+        assignedRepName: users.displayName,
+      })
+      .from(deals)
+      .leftJoin(companies, eq(companies.id, deals.companyId))
+      .leftJoin(users, eq(users.id, deals.assignedRepId))
+      .where(where)
+      .orderBy(desc(deals.updatedAt));
+
+    const stageDealsQuery = isTerminalStage
+      ? stageDealsQueryBase
+      : stageDealsQueryBase.limit(pipelineCardsPerStageLimit);
+
     const [summaryRows, stageDeals] = await Promise.all([
       tenantDb
         .select({
@@ -1849,18 +1869,7 @@ export async function getDealsForPipeline(
         })
         .from(deals)
         .where(where),
-      tenantDb
-        .select({
-          ...getTableColumns(deals),
-          companyName: companies.name,
-          assignedRepName: users.displayName,
-        })
-        .from(deals)
-        .leftJoin(companies, eq(companies.id, deals.companyId))
-        .leftJoin(users, eq(users.id, deals.assignedRepId))
-        .where(where)
-        .orderBy(desc(deals.updatedAt))
-        .limit(pipelineCardsPerStageLimit),
+      stageDealsQuery,
     ]);
 
     dealsByStage.set(stage.id, stageDeals);

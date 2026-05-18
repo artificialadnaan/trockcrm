@@ -236,7 +236,7 @@ describe("getDealsForPipeline team scope", () => {
     expect(extractSqlText(terminalWhere).toLowerCase()).not.toContain("is_active");
   });
 
-  it("applies the card limit independently for each visible stage", async () => {
+  it("applies the card limit only to non-terminal visible stages", async () => {
     dbState.stages = [
       {
         id: "stage-estimating",
@@ -278,7 +278,7 @@ describe("getDealsForPipeline team scope", () => {
       wonAllTime: true,
     });
 
-    expect(dealQuery.limit.mock.calls.map((call) => call[0])).toEqual([100, 100]);
+    expect(dealQuery.limit.mock.calls.map((call) => call[0])).toEqual([100]);
   });
 
   it("queries each active won alias terminal column by its own stage when no canonical won stage exists", async () => {
