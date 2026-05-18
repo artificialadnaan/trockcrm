@@ -8,6 +8,7 @@ type EnvInput = {
   FIELD_APP_URL?: string | undefined;
   FIELD_FRONTEND_URL?: string | undefined;
   RAILWAY_SERVICE_FIELD_FRONTEND_URL?: string | undefined;
+  RAILWAY_SERVICE_TROCKCRM_FIELD_URL?: string | undefined;
   RAILWAY_PUBLIC_DOMAIN?: string | undefined;
   RAILWAY_STATIC_URL?: string | undefined;
   RAILWAY_SERVICE_FRONTEND_URL?: string | undefined;
@@ -29,7 +30,7 @@ export const CSRF_HEADER_NAME = "x-csrf-token";
 export const FIELD_CSRF_HEADER_NAME = "x-requested-with";
 export const FIELD_CSRF_HEADER_VALUE = "XMLHttpRequest";
 
-function normalizeOrigin(value: string | undefined): string | null {
+function normalizeOrigin(value: string | null | undefined): string | null {
   if (!value) return null;
   const trimmed = value.trim();
   if (!trimmed) return null;
@@ -68,16 +69,23 @@ function safeEqual(a: string, b: string): boolean {
   return left.length === right.length && crypto.timingSafeEqual(left, right);
 }
 
+function getFieldFrontendOrigins(env: EnvInput): Array<string | null> {
+  return [
+    normalizeOrigin(env.FIELD_APP_URL),
+    normalizeOrigin(env.FIELD_FRONTEND_URL),
+    normalizeOrigin(env.RAILWAY_SERVICE_FIELD_FRONTEND_URL),
+    normalizeOrigin(env.RAILWAY_SERVICE_TROCKCRM_FIELD_URL),
+  ];
+}
+
 export function getAllowedCorsOrigins(env: EnvInput): string[] {
   const origins = [
     ...((env.CORS_ALLOWED_ORIGINS ?? "").split(",").map(normalizeOrigin)),
     normalizeOrigin(env.FRONTEND_URL),
-    normalizeOrigin(env.FIELD_APP_URL),
-    normalizeOrigin(env.FIELD_FRONTEND_URL),
+    ...getFieldFrontendOrigins(env),
     normalizeOrigin(env.RAILWAY_PUBLIC_DOMAIN),
     normalizeOrigin(env.RAILWAY_STATIC_URL),
     normalizeOrigin(env.RAILWAY_SERVICE_FRONTEND_URL),
-    normalizeOrigin(env.RAILWAY_SERVICE_FIELD_FRONTEND_URL),
     ...(env.NODE_ENV === "production"
       ? []
       : [
@@ -279,8 +287,11 @@ export function getCsrfCookieOptionsForRequest(env: EnvInput, request: CookieReq
 }
 
 export function getStrictCrossSiteAuthOrigins(env: EnvInput): string[] {
-  const configured = env.STRICT_CROSS_SITE_AUTH_ORIGINS?.trim();
-  const source = configured ? configured.split(",") : [];
+  const configured = env.STRICT_CROSS_SITE_AUTH_ORIGINS?.trim().split(",") ?? [];
+  const source = [
+    ...configured,
+    ...getFieldFrontendOrigins(env),
+  ];
 
   return source
     .map(normalizeOrigin)
