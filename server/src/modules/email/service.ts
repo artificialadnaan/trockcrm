@@ -56,6 +56,7 @@ export interface EmailFilters {
   contactId?: string;
   direction?: "inbound" | "outbound";
   filter?: "all" | "unread" | "unassigned" | "sent";
+  status?: "unassigned" | "assigned" | "ignored" | "deleted";
   search?: string;
   page?: number;
   limit?: number;
@@ -69,6 +70,7 @@ export interface EmailInboxActionInput {
 
 export interface EmailAssignmentQueueFilters {
   search?: string;
+  status?: "unassigned" | "ignored";
   page?: number;
   limit?: number;
 }
@@ -87,13 +89,19 @@ export interface EmailAssignmentQueueItem {
 export function isEmailAssignmentQueueCandidate(emailRow: {
   direction: "inbound" | "outbound";
   assignmentAmbiguityReason: string | null;
+  assignmentStatus?: string | null;
 }) {
-  return emailRow.direction === "inbound" && emailRow.assignmentAmbiguityReason != null;
+  return (
+    emailRow.direction === "inbound" &&
+    emailRow.assignmentAmbiguityReason != null &&
+    (emailRow.assignmentStatus ?? "unassigned") === "unassigned"
+  );
 }
 
 function emailIsUnassignedCondition() {
   return and(
     eq(emails.direction, "inbound"),
+    eq(emails.assignmentStatus, "unassigned"),
     isNull(emails.assignedEntityId),
     isNull(emails.dealId),
     isNull(emails.contactId)
@@ -673,8 +681,12 @@ export async function getEmailAssignmentQueue(
 
   const conditions: any[] = [
     eq(emails.direction, "inbound"),
-    sql`${emails.assignmentAmbiguityReason} IS NOT NULL`,
+    eq(emails.assignmentStatus, filters.status ?? "unassigned"),
   ];
+
+  if ((filters.status ?? "unassigned") === "unassigned") {
+    conditions.push(sql`${emails.assignmentAmbiguityReason} IS NOT NULL`);
+  }
 
   if (userId && userRole === "rep") {
     conditions.push(eq(emails.userId, userId));
@@ -708,7 +720,11 @@ export async function getEmailAssignmentQueue(
   ]);
 
   const items = await Promise.all(
-    emailRows.filter(isEmailAssignmentQueueCandidate).map(async (emailRow) => {
+    emailRows
+      .filter((emailRow) =>
+        (filters.status ?? "unassigned") === "ignored" ? emailRow.assignmentStatus === "ignored" : isEmailAssignmentQueueCandidate(emailRow)
+      )
+      .map(async (emailRow) => {
       const [contactRow] = emailRow.contactId
         ? await tenantDb
             .select({
@@ -1253,6 +1269,9 @@ export async function getUserEmails(tenantDb: TenantDb, userId: string, filters:
   if (filters.direction) {
     baseConditions.push(eq(emails.direction, filters.direction));
   }
+  if (filters.status) {
+    baseConditions.push(eq(emails.assignmentStatus, filters.status));
+  }
   if (filters.search && filters.search.trim().length >= 2) {
     const term = `%${filters.search.trim()}%`;
     baseConditions.push(
@@ -1340,6 +1359,62 @@ export async function updateEmailInboxAction(
     .returning();
 
   return updated ?? email;
+}
+
+function deriveAssignmentStatus(email: {
+  assignedEntityId?: string | null;
+  dealId?: string | null;
+}) {
+  return email.assignedEntityId || email.dealId ? "assigned" : "unassigned";
+}
+
+export async function ignoreEmailAssignment(
+  tenantDb: TenantDb,
+  emailId: string,
+  userId: string,
+  userRole: string
+) {
+  const email = await getEmailById(tenantDb, emailId);
+  if (!email) throw new AppError(404, "Email not found");
+  if (userRole === "rep" && email.userId !== userId) {
+    throw new AppError(403, "You can only modify your own emails");
+  }
+
+  const [updated] = await tenantDb
+    .update(emails)
+    .set({
+      assignmentStatus: "ignored",
+      syncedAt: new Date(),
+    })
+    .where(eq(emails.id, emailId))
+    .returning();
+
+  return updated ?? { ...email, assignmentStatus: "ignored" };
+}
+
+export async function unignoreEmailAssignment(
+  tenantDb: TenantDb,
+  emailId: string,
+  userId: string,
+  userRole: string
+) {
+  const email = await getEmailById(tenantDb, emailId);
+  if (!email) throw new AppError(404, "Email not found");
+  if (userRole === "rep" && email.userId !== userId) {
+    throw new AppError(403, "You can only modify your own emails");
+  }
+
+  const assignmentStatus = deriveAssignmentStatus(email);
+  const [updated] = await tenantDb
+    .update(emails)
+    .set({
+      assignmentStatus,
+      syncedAt: new Date(),
+    })
+    .where(eq(emails.id, emailId))
+    .returning();
+
+  return updated ?? { ...email, assignmentStatus };
 }
 
 /**
@@ -1633,6 +1708,7 @@ export async function associateEmailToEntity(
     .set({
       assignedEntityType: input.assignedEntityType,
       assignedEntityId: input.assignedEntityId,
+      assignmentStatus: "assigned",
       assignmentConfidence: "high",
       assignmentAmbiguityReason: null,
       dealId: assignedDealId,
@@ -1686,6 +1762,7 @@ export async function associateEmailToDeal(
     .update(emails)
     .set({
       ...assignmentUpdateForDeal(dealId),
+      assignmentStatus: "assigned",
       syncedAt: new Date(),
     })
     .where(eq(emails.id, emailId));
