@@ -61,6 +61,27 @@ describe("field app auth HTTP config", () => {
     });
   });
 
+  it("keeps the trockcam.com field origin on the strict cross-site cookie path even when production strict origins are explicitly configured", () => {
+    expect(
+      getTokenCookieOptionsForRequest(
+        {
+          NODE_ENV: "production",
+          RAILWAY_SERVICE_TROCKCRM_FIELD_URL: "trockcam.com",
+          STRICT_CROSS_SITE_AUTH_ORIGINS: "https://crm.trockconstruction.com",
+        } as any,
+        {
+          host: fallbackApiHost,
+          origin: "https://trockcam.com",
+        }
+      )
+    ).toMatchObject({
+      secure: true,
+      sameSite: "none",
+      path: "/",
+      partitioned: true,
+    });
+  });
+
   it("uses SameSite=None when FIELD_APP_URL is the custom trockcam.com origin", () => {
     expect(
       getTokenCookieOptionsForRequest(

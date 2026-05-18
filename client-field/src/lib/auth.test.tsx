@@ -10,6 +10,7 @@ const apiMock = vi.hoisted(() => vi.fn());
 vi.mock("./api", () => ({
   api: apiMock,
   clearStoredActiveOfficeId: vi.fn(() => window.sessionStorage.removeItem("trock-field-active-office-id")),
+  clearStoredCsrfToken: vi.fn(() => window.sessionStorage.removeItem("trock-field-csrf-token")),
   ApiError: class ApiError extends Error {
     status: number;
     constructor(message: string, status: number) {
@@ -88,9 +89,11 @@ describe("field AuthProvider", () => {
 
     apiMock.mockResolvedValueOnce({ success: true });
     window.sessionStorage.setItem("trock-field-active-office-id", "office-stale");
+    window.sessionStorage.setItem("trock-field-csrf-token", "csrf-stale");
     await latest!.logout();
     await vi.waitFor(() => expect(node.textContent).toContain("signed out"));
     expect(window.sessionStorage.getItem("trock-field-active-office-id")).toBeNull();
+    expect(window.sessionStorage.getItem("trock-field-csrf-token")).toBeNull();
   });
 
   it("clears state on 401 hydrate failures", async () => {

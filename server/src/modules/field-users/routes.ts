@@ -2,7 +2,11 @@ import { Router, type NextFunction, type Request, type Response } from "express"
 import { AppError } from "../../middleware/error-handler.js";
 import { authLimiter } from "../../middleware/rate-limit.js";
 import { requireAdmin } from "../../middleware/rbac.js";
-import { getTokenCookieOptionsForRequest, shouldExposeCsrfTokenInResponse } from "../auth/http-config.js";
+import {
+  getLegacyTokenCookieClearsForRequest,
+  getTokenCookieOptionsForRequest,
+  shouldExposeCsrfTokenInResponse,
+} from "../auth/http-config.js";
 import {
   acceptFieldInvite,
   inviteFieldUser,
@@ -112,6 +116,17 @@ function tokenCookieOptionsForRequest(req: Request) {
   });
 }
 
+function refreshAuthTokenCookie(req: Request, res: Response, token: string) {
+  for (const clear of getLegacyTokenCookieClearsForRequest(process.env, {
+    host: req.get("host"),
+    hostname: req.hostname,
+    origin: req.headers.origin,
+  })) {
+    res.cookie(clear.name, "", clear.options);
+  }
+  res.cookie("token", token, tokenCookieOptionsForRequest(req));
+}
+
 function withCsrfToken(req: Request, res: Response, payload: Record<string, unknown>) {
   if (
     !shouldExposeCsrfTokenInResponse(process.env, {
@@ -135,7 +150,7 @@ fieldUserAuthRouter.post("/accept-invite", authLimiter, async (req, res, next) =
     }
 
     const result = await acceptFieldInvite({ token, password });
-    res.cookie("token", result.token, tokenCookieOptionsForRequest(req));
+    refreshAuthTokenCookie(req, res, result.token);
     res.json(withCsrfToken(req, res, result));
   } catch (err) {
     next(err);
@@ -165,7 +180,7 @@ fieldUserAuthRouter.post("/field-login", authLimiter, async (req, res, next) => 
     }
 
     const result = await loginFieldUser({ email, password });
-    res.cookie("token", result.token, tokenCookieOptionsForRequest(req));
+    refreshAuthTokenCookie(req, res, result.token);
     res.json(withCsrfToken(req, res, result));
   } catch (err) {
     next(err);

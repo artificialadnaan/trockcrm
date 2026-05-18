@@ -17,6 +17,13 @@ const LEGACY_R2_CORS_ALLOWED_ORIGINS = [
   "http://localhost:3000",
 ];
 
+function normalizeOrigin(value: string | undefined): string | null {
+  const trimmed = value?.trim();
+  if (!trimmed) return null;
+  if (/^https?:\/\//i.test(trimmed)) return trimmed.replace(/\/+$/, "");
+  return `https://${trimmed.replace(/\/+$/, "")}`;
+}
+
 function getR2Config() {
   const accountId = process.env.R2_ACCOUNT_ID;
   const accessKeyId = process.env.R2_ACCESS_KEY_ID;
@@ -69,13 +76,18 @@ export function getAllowedR2CorsOrigins(env: NodeJS.ProcessEnv = process.env): s
   const configured = env.R2_ALLOWED_ORIGINS?.split(",")
     .map((origin) => origin.trim())
     .filter(Boolean);
+  const fieldOrigins = [
+    normalizeOrigin(env.FIELD_APP_URL),
+    normalizeOrigin(env.RAILWAY_SERVICE_TROCKCRM_FIELD_URL),
+  ].filter((origin): origin is string => Boolean(origin));
 
   if (configured?.length) {
-    return Array.from(new Set(configured));
+    return Array.from(new Set([...fieldOrigins, ...configured]));
   }
 
   const frontendUrl = env.FRONTEND_URL?.trim();
   return Array.from(new Set([
+    ...fieldOrigins,
     ...(frontendUrl ? [frontendUrl] : []),
     ...LEGACY_R2_CORS_ALLOWED_ORIGINS,
   ]));

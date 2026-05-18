@@ -13,10 +13,27 @@ type ApiEnv = {
 };
 
 const FIELD_APP_OFFICE_STORAGE_KEY = "trock-field-active-office-id";
+const FIELD_APP_CSRF_STORAGE_KEY = "trock-field-csrf-token";
 
 export function clearStoredActiveOfficeId() {
   if (typeof window === "undefined") return;
   window.sessionStorage.removeItem(FIELD_APP_OFFICE_STORAGE_KEY);
+}
+
+export function clearStoredCsrfToken() {
+  if (typeof window === "undefined") return;
+  window.sessionStorage.removeItem(FIELD_APP_CSRF_STORAGE_KEY);
+}
+
+function storeCsrfToken(token: string) {
+  if (typeof window === "undefined") return;
+  window.sessionStorage.setItem(FIELD_APP_CSRF_STORAGE_KEY, token);
+}
+
+function storedCsrfToken(): string | undefined {
+  if (typeof window === "undefined") return undefined;
+  const value = window.sessionStorage.getItem(FIELD_APP_CSRF_STORAGE_KEY)?.trim();
+  return value || undefined;
 }
 
 export function resolveApiBase(env: ApiEnv): string {
@@ -44,11 +61,12 @@ function activeOfficeId(): string | undefined {
 }
 
 function csrfToken(): string | undefined {
-  return document.cookie
+  const cookieToken = document.cookie
     .split(";")
     .map((part) => part.trim())
     .find((part) => part.startsWith("csrf_token="))
     ?.split("=")[1];
+  return cookieToken || storedCsrfToken();
 }
 
 export async function api<T>(path: string, options: {
@@ -87,7 +105,12 @@ export async function api<T>(path: string, options: {
         }`
       );
     }
-    return response.json() as Promise<T>;
+    const payload = await response.json() as T;
+    const csrf = (payload as { csrfToken?: unknown } | null)?.csrfToken;
+    if (typeof csrf === "string" && csrf.length > 0) {
+      storeCsrfToken(csrf);
+    }
+    return payload;
   }
 
   if (!response.ok) {
@@ -100,6 +123,7 @@ export async function api<T>(path: string, options: {
     }
     if (response.status === 401 || response.status === 403) {
       clearStoredActiveOfficeId();
+      clearStoredCsrfToken();
     }
     throw new ApiError(message, response.status);
   }

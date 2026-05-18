@@ -2,13 +2,13 @@
  * @vitest-environment jsdom
  */
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { api, ApiError, resolveApiBase } from "./api";
+import { api, ApiError, clearStoredCsrfToken, resolveApiBase } from "./api";
 
-afterEach(() => {
-  vi.restoreAllMocks();
-  vi.unstubAllEnvs();
-  window.sessionStorage.clear();
-  Object.defineProperty(document, "cookie", { value: "", writable: true });
+  afterEach(() => {
+    vi.restoreAllMocks();
+    vi.unstubAllEnvs();
+    window.sessionStorage.clear();
+    Object.defineProperty(document, "cookie", { value: "", writable: true });
 });
 
 describe("field api client", () => {
@@ -67,6 +67,36 @@ describe("field api client", () => {
     const headers = fetchMock.mock.calls[0]?.[1]?.headers as Headers;
     expect(headers.get("X-Requested-With")).toBe("XMLHttpRequest");
     expect(headers.get("X-Correlation-Id")).toBe("trace-1");
+  });
+
+  it("stores response-body csrf tokens from cross-site auth and reuses them for later unsafe requests", async () => {
+    vi.stubEnv("VITE_API_BASE_URL", "https://api.example.com/");
+    Object.defineProperty(document, "cookie", { value: "", writable: true });
+    const fetchMock = vi.spyOn(globalThis, "fetch")
+      .mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        headers: new Headers({ "content-type": "application/json" }),
+        json: async () => ({ user: { id: "field-1" }, csrfToken: "csrf-from-body" }),
+      } as Response)
+      .mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        headers: new Headers({ "content-type": "application/json" }),
+        json: async () => ({ success: true }),
+      } as Response);
+
+    await api("/auth/field-login", {
+      method: "POST",
+      json: { email: "field@example.com", password: "password-123" },
+    });
+    await api("/auth/logout", { method: "POST" });
+
+    const logoutHeaders = fetchMock.mock.calls[1]?.[1]?.headers as Headers;
+    expect(logoutHeaders.get("x-csrf-token")).toBe("csrf-from-body");
+
+    clearStoredCsrfToken();
+    expect(window.sessionStorage.getItem("trock-field-csrf-token")).toBeNull();
   });
 
   it("routes all current field app endpoints through the configured API service", async () => {
