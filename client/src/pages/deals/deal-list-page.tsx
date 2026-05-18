@@ -330,6 +330,26 @@ function moneyValue(deal: Deal) {
   return Number(deal.awardedAmount ?? deal.bidEstimate ?? deal.ddEstimate ?? 0);
 }
 
+function parseDayStart(value: string) {
+  return new Date(`${value}T00:00:00.000Z`).getTime();
+}
+
+function parseDayEnd(value: string) {
+  return new Date(`${value}T23:59:59.999Z`).getTime();
+}
+
+function matchesUpdatedRange(deal: Deal, updatedFrom?: string, updatedTo?: string) {
+  if (!updatedFrom && !updatedTo) return true;
+
+  const updatedAt = new Date(deal.updatedAt).getTime();
+  if (Number.isNaN(updatedAt)) return false;
+
+  if (updatedFrom && updatedAt < parseDayStart(updatedFrom)) return false;
+  if (updatedTo && updatedAt > parseDayEnd(updatedTo)) return false;
+
+  return true;
+}
+
 function DealsBoardColumn({
   column,
   onOpenStage,
@@ -455,6 +475,7 @@ function DealListPageContent({ role }: { role: string }) {
   const columns = useMemo(
     () => {
       const searchTerm = search.trim().toLowerCase();
+      const { updatedFrom, updatedTo } = dashboardView.listBaseFilters;
       const sourceColumns =
         dashboardView.boardStageSlugs.length > 0
           ? boardColumns.filter((column) => dashboardView.boardStageSlugs.includes(column.stage.slug))
@@ -468,7 +489,7 @@ function DealListPageContent({ role }: { role: string }) {
                   .map((column) => {
                     const cards = column.cards.filter((deal) => {
                       const sla = STAGE_SLA_DAYS[column.stage.slug] ?? 7;
-                      return sla > 0 && daysInStage(deal.stageEnteredAt) > sla;
+                      return sla > 0 && daysInStage(deal.stageEnteredAt) > sla && matchesUpdatedRange(deal, updatedFrom, updatedTo);
                     });
                     return {
                       ...column,
@@ -504,7 +525,7 @@ function DealListPageContent({ role }: { role: string }) {
           };
         });
     },
-    [boardColumns, dashboardView.boardMode, dashboardView.boardStageSlugs, search]
+    [boardColumns, dashboardView.boardMode, dashboardView.boardStageSlugs, dashboardView.listBaseFilters, search]
   );
   const activePipelineColumns = getActivePipelineColumns(boardColumns);
   const drilldownVisibleStages = useMemo(

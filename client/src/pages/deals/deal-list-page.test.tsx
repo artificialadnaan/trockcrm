@@ -758,6 +758,47 @@ describe("DealListPage", () => {
     );
   });
 
+  it("filters stale kanban drill-down cards to the selected dashboard period", () => {
+    mocks.useDealBoardMock.mockReturnValue({
+      board: {
+        columns: [
+          {
+            stage: { id: "stage-contract", name: "Contract", slug: "contract" },
+            count: 2,
+            totalValue: 300000,
+            cards: [
+              makeDeal({
+                id: "deal-in-period",
+                name: "QTD Stale Deal",
+                stageId: "stage-contract",
+                stageEnteredAt: "2026-04-02T10:00:00.000Z",
+                updatedAt: "2026-05-01T10:00:00.000Z",
+                bidEstimate: "200000",
+              }),
+              makeDeal({
+                id: "deal-old-period",
+                name: "Old Quarter Stale Deal",
+                stageId: "stage-contract",
+                stageEnteredAt: "2026-03-01T10:00:00.000Z",
+                updatedAt: "2026-03-15T10:00:00.000Z",
+                bidEstimate: "100000",
+              }),
+            ],
+          },
+        ],
+        terminalStages: [],
+      },
+      loading: false,
+      error: null,
+      refetch: vi.fn(),
+    });
+
+    const html = renderPage("/deals?scope=team&filter=stale&period=qtd", "director");
+
+    expect(html).toContain("QTD Stale Deal");
+    expect(html).not.toContain("Old Quarter Stale Deal");
+  });
+
   it("reflects the team scope query param in the scope toggle", () => {
     const html = renderPage("/deals?scope=team", "director");
 
