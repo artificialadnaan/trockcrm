@@ -1131,6 +1131,67 @@ describe("Deal Scoping Routes", () => {
     expect(lineageResolver.writeResolvedDealFields).not.toHaveBeenCalled();
   });
 
+  it("rejects resolved-fields cleanup when only one missing relationship is repaired", async () => {
+    vi.mocked(dealService.getDealById).mockResolvedValue({
+      id: "deal-1",
+      name: "Legacy Missing Relationships",
+      assignedRepId: "user-1",
+      companyId: null,
+      propertyId: null,
+      projectType: "Commercial",
+      projectTypeId: "project-type-1",
+      workflowRoute: "normal",
+      sourceLeadId: null,
+      stageEnteredAt: new Date("2026-04-21T12:00:00.000Z"),
+      pipelineTypeSnapshot: "normal",
+      ddEstimate: null,
+      bidEstimate: null,
+      awardedAmount: null,
+      isBidBoardOwned: false,
+      bidBoardStageSlug: null,
+      bidBoardStageEnteredAt: null,
+      bidBoardMirrorSourceEnteredAt: null,
+      isReadOnlyMirror: false,
+      readOnlySyncedAt: null,
+    } as never);
+    vi.mocked(lineageResolver.getResolvedDeal).mockResolvedValueOnce({
+      resolved: {
+        assignedRepId: "user-1",
+        companyId: null,
+        projectTypeId: "project-type-1",
+        propertyId: null,
+        propertyName: "Property One",
+        workflowRoute: "normal",
+      },
+    } as never);
+    vi.mocked(scopingService.assertDealScopingWriteAllowed).mockRejectedValueOnce(
+      Object.assign(new Error("Scope is read-only after RFP submission"), {
+        statusCode: 403,
+        code: "SCOPE_READ_ONLY_AFTER_RFP",
+      })
+    );
+
+    await expect(
+      invokeRoute("patch", "/:id/resolved-fields", {
+        params: { id: "deal-1" },
+        body: {
+          companyId: "company-1",
+          projectTypeId: "project-type-2",
+        },
+      })
+    ).rejects.toMatchObject({
+      statusCode: 403,
+      code: "SCOPE_READ_ONLY_AFTER_RFP",
+    });
+
+    expect(scopingService.assertDealScopingWriteAllowed).toHaveBeenCalledWith(
+      expect.anything(),
+      "deal-1",
+      { role: "director", forceEditAfterRfp: false }
+    );
+    expect(lineageResolver.writeResolvedDealFields).not.toHaveBeenCalled();
+  });
+
 
   it.each([
     ["preBidMeetingCompleted", "completed"],

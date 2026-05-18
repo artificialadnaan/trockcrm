@@ -397,6 +397,23 @@ function isLegacyCleanupRepairTrigger(body: Record<string, unknown>, deal: Recor
   return repairsMissingCompany || repairsMissingProperty;
 }
 
+function hasCompleteLegacyCleanupRelationships(
+  patch: Record<string, unknown>,
+  existing: Record<string, unknown> | null | undefined
+) {
+  const baseline = (existing ?? {}) as Record<string, unknown>;
+  const effectiveCompanyId =
+    patch.companyId !== undefined
+      ? normalizeRelationshipId(patch.companyId)
+      : normalizeRelationshipId(baseline.companyId);
+  const effectivePropertyId =
+    patch.propertyId !== undefined
+      ? normalizeRelationshipId(patch.propertyId)
+      : normalizeRelationshipId(baseline.propertyId);
+
+  return effectiveCompanyId != null && effectivePropertyId != null;
+}
+
 function getLegacyCleanupScopeFieldChanges(
   patch: Record<string, unknown>,
   existing: Record<string, unknown> | null | undefined
@@ -1174,11 +1191,13 @@ router.patch("/:id/resolved-fields", async (req, res, next) => {
       ...((dealBaseline ?? {}) as Record<string, unknown>),
       ...existingResolved,
     };
-    const isLegacyCleanupPatch = shouldTreatPatchAsLegacyCleanup(
-      patch,
-      req.user!.role,
-      cleanupBaseline
-    );
+    const isLegacyCleanupPatch =
+      shouldTreatPatchAsLegacyCleanup(
+        patch,
+        req.user!.role,
+        cleanupBaseline
+      ) &&
+      hasCompleteLegacyCleanupRelationships(patch, cleanupBaseline);
     const scopeLockedFields = getLockedResolvedFieldsRequiringScopeGuard(patch, existingResolved);
     const writePolicy = scopeLockedFields.length > 0
       ? await assertDealScopingWriteAllowed(req.tenantDb!, req.params.id, {
@@ -1600,20 +1619,26 @@ router.patch("/:id", async (req, res, next) => {
           : null
       );
     const cleanupBaseline = relationshipBaseline ?? existingDeal;
-    const isLegacyCleanupPatch = shouldTreatPatchAsLegacyCleanup(
-      body,
-      req.user!.role,
-      (cleanupBaseline ?? null) as Record<string, unknown> | null
-    );
+    const isLegacyCleanupPatch =
+      shouldTreatPatchAsLegacyCleanup(
+        body,
+        req.user!.role,
+        (cleanupBaseline ?? null) as Record<string, unknown> | null
+      ) &&
+      hasCompleteLegacyCleanupRelationships(
+        body,
+        (cleanupBaseline ?? null) as Record<string, unknown> | null
+      );
     const scopeLockedFields = getScopeLockedDealPatchFields(
       body,
       (existingDeal ?? cleanupBaseline ?? {}) as Record<string, unknown>
     );
     const writePolicy =
-      scopeLockedFields.length > 0 && !isLegacyCleanupPatch
+      scopeLockedFields.length > 0
         ? await assertDealScopingWriteAllowed(req.tenantDb!, req.params.id, {
             role: req.user!.role,
             forceEditAfterRfp,
+            ...(isLegacyCleanupPatch ? { cleanupMode: true } : {}),
           })
         : null;
 

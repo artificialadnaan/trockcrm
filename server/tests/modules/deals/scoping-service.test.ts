@@ -7,6 +7,7 @@ import { DEAL_SCOPING_INTAKE_STATUSES, WORKFLOW_ROUTES } from "@trock-crm/shared
 import { dealHistory, dealScopingIntake, deals, files, users } from "@trock-crm/shared/schema";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
+  assertDealScopingWriteAllowed,
   evaluateDealScopingReadiness,
   getOrCreateDealScopingIntake,
   linkDealFileToScopingRequirement,
@@ -372,6 +373,181 @@ describe("Scoping Service", () => {
     pipelineMocks.getActiveProjectTypes.mockResolvedValue([
       { id: "project-type-1", name: "Roofing", slug: "roofing", code: "3" },
     ]);
+  });
+
+  it("allows cleanup mode to bypass only the post-RFP scope lock", async () => {
+    pipelineMocks.getStageById.mockResolvedValue({
+      id: "stage-opportunity",
+      slug: "opportunity",
+      workflowFamily: "standard_deal",
+      displayOrder: 1,
+    });
+
+    const tenantDb = createFakeTenantDb({
+      deals: [
+        {
+          id: "deal-1",
+          name: "Submitted Scope Deal",
+          stageId: "stage-opportunity",
+          workflowRoute: "normal",
+          expectedCloseDate: null,
+          propertyAddress: null,
+          propertyCity: null,
+          propertyState: null,
+          propertyZip: null,
+          description: null,
+          projectTypeId: null,
+          assignedRepId: "rep-1",
+          rfpApprovalRequestedAt: new Date("2026-04-08T09:00:00.000Z"),
+          rfpApprovalStatus: "submitted",
+        },
+      ],
+    });
+
+    await expect(
+      assertDealScopingWriteAllowed(tenantDb as never, "deal-1", {
+        role: "rep",
+        forceEditAfterRfp: false,
+        cleanupMode: true,
+      })
+    ).resolves.toMatchObject({
+      adminOverride: false,
+    });
+  });
+
+  it("still blocks cleanup mode on bid board-owned deals", async () => {
+    pipelineMocks.getStageById.mockResolvedValue({
+      id: "stage-contract",
+      slug: "contract",
+      workflowFamily: "standard_deal",
+      displayOrder: 5,
+    });
+
+    const tenantDb = createFakeTenantDb({
+      deals: [
+        {
+          id: "deal-1",
+          name: "Bid Board Owned Deal",
+          stageId: "stage-contract",
+          workflowRoute: "normal",
+          expectedCloseDate: null,
+          propertyAddress: null,
+          propertyCity: null,
+          propertyState: null,
+          propertyZip: null,
+          description: null,
+          projectTypeId: null,
+          assignedRepId: "rep-1",
+          bidBoardLinkedAt: new Date("2026-04-08T09:00:00.000Z"),
+          bidBoardProjectNumber: "ATL-1-10026-aa",
+          bidBoardStageSlug: "contract",
+          isBidBoardOwned: true,
+        },
+      ],
+    });
+
+    await expect(
+      assertDealScopingWriteAllowed(tenantDb as never, "deal-1", {
+        role: "rep",
+        forceEditAfterRfp: false,
+        cleanupMode: true,
+      })
+    ).rejects.toMatchObject<AppError>({
+      statusCode: 403,
+      code: "SCOPE_READ_ONLY_AFTER_RFP",
+    });
+  });
+
+  it("still blocks cleanup mode on past-opportunity read-only stages", async () => {
+    pipelineMocks.getStageById.mockResolvedValue({
+      id: "stage-estimating",
+      slug: "estimating",
+      workflowFamily: "standard_deal",
+      displayOrder: 2,
+    });
+    pipelineMocks.getStageBySlug.mockResolvedValue({
+      id: "stage-opportunity",
+      slug: "opportunity",
+      displayOrder: 1,
+      workflowFamily: "standard_deal",
+    });
+
+    const tenantDb = createFakeTenantDb({
+      deals: [
+        {
+          id: "deal-1",
+          name: "Past Opportunity Deal",
+          stageId: "stage-estimating",
+          workflowRoute: "normal",
+          expectedCloseDate: null,
+          propertyAddress: null,
+          propertyCity: null,
+          propertyState: null,
+          propertyZip: null,
+          description: null,
+          projectTypeId: null,
+          assignedRepId: "rep-1",
+        },
+      ],
+    });
+
+    await expect(
+      assertDealScopingWriteAllowed(tenantDb as never, "deal-1", {
+        role: "rep",
+        forceEditAfterRfp: false,
+        cleanupMode: true,
+      })
+    ).rejects.toMatchObject<AppError>({
+      statusCode: 403,
+      code: "SCOPE_READ_ONLY_AFTER_RFP",
+    });
+  });
+
+  it("still blocks cleanup mode when RFP submission and past-opportunity locks both apply", async () => {
+    pipelineMocks.getStageById.mockResolvedValue({
+      id: "stage-site-visit",
+      slug: "site_visit",
+      workflowFamily: "standard_deal",
+      displayOrder: 2,
+    });
+    pipelineMocks.getStageBySlug.mockResolvedValue({
+      id: "stage-opportunity",
+      slug: "opportunity",
+      displayOrder: 1,
+      workflowFamily: "standard_deal",
+    });
+
+    const tenantDb = createFakeTenantDb({
+      deals: [
+        {
+          id: "deal-1",
+          name: "Mixed Lock Deal",
+          stageId: "stage-site-visit",
+          workflowRoute: "normal",
+          expectedCloseDate: null,
+          propertyAddress: null,
+          propertyCity: null,
+          propertyState: null,
+          propertyZip: null,
+          description: null,
+          projectTypeId: null,
+          assignedRepId: "rep-1",
+          rfpApprovalRequestedAt: new Date("2026-04-08T09:00:00.000Z"),
+          rfpApprovalStatus: "submitted",
+        },
+      ],
+    });
+
+    await expect(
+      assertDealScopingWriteAllowed(tenantDb as never, "deal-1", {
+        role: "rep",
+        forceEditAfterRfp: false,
+        cleanupMode: true,
+      })
+    ).rejects.toMatchObject<AppError>({
+      statusCode: 403,
+      code: "SCOPE_READ_ONLY_AFTER_RFP",
+    });
   });
 
   it("loads an existing submitted scope for read-only viewing after RFP submission", async () => {

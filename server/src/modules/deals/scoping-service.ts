@@ -406,6 +406,9 @@ async function resolveDealScopeLockState(deal: DealRow) {
 
   return {
     locked: hasRfpSubmission || hasBidBoardHandoff || isPastOpportunity,
+    hasRfpSubmission,
+    hasBidBoardHandoff,
+    isPastOpportunity,
     submittedAt: deal.rfpApprovalRequestedAt ?? deal.bidBoardLinkedAt ?? deal.readOnlySyncedAt ?? null,
     reason: hasRfpSubmission
       ? "rfp_submission"
@@ -425,16 +428,18 @@ async function assertDealScopingWriteAllowedForDeal(
     cleanupMode?: boolean;
   }
 ) {
-  if (input.cleanupMode === true) {
-    await assertDealScopingEditable(deal);
-    return {
-      adminOverride: false,
-      lockState: { locked: false, submittedAt: null, reason: null as string | null },
-    };
-  }
-
   const lockState = await resolveDealScopeLockState(deal);
   if (lockState.locked) {
+    if (
+      input.cleanupMode === true &&
+      lockState.hasRfpSubmission &&
+      !lockState.hasBidBoardHandoff &&
+      !lockState.isPastOpportunity
+    ) {
+      await assertDealScopingEditable(deal);
+      return { adminOverride: false, lockState };
+    }
+
     if (input.role === "admin" && input.forceEditAfterRfp === true) {
       return { adminOverride: true, lockState };
     }
