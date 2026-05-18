@@ -256,6 +256,39 @@ export function useTasks(filters: TaskFilters = {}) {
   return { tasks, pagination, loading, error, refetch: fetchTasks };
 }
 
+export function useTask(taskId: string | undefined) {
+  const [task, setTask] = useState<Task | null>(null);
+  const [loading, setLoading] = useState(Boolean(taskId));
+  const [error, setError] = useState<string | null>(null);
+
+  const fetchTask = useCallback(async () => {
+    if (!taskId) {
+      setTask(null);
+      setLoading(false);
+      setError(null);
+      return;
+    }
+
+    setLoading(true);
+    setError(null);
+    try {
+      const data = await api<{ task: Task }>(`/tasks/${encodeURIComponent(taskId)}`);
+      setTask(data.task);
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : "Failed to load task");
+      setTask(null);
+    } finally {
+      setLoading(false);
+    }
+  }, [taskId]);
+
+  useEffect(() => {
+    fetchTask();
+  }, [fetchTask]);
+
+  return { task, loading, error, refetch: fetchTask };
+}
+
 export function useTaskCounts(userId?: string) {
   const [counts, setCounts] = useState<TaskCounts>({ overdue: 0, today: 0, upcoming: 0, completed: 0 });
   const [loading, setLoading] = useState(true);

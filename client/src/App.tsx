@@ -230,6 +230,7 @@ export function App() {
               <Route path="/companies/:id/edit" element={<CompanyEditPage />} />
               <Route path="/email" element={<EmailInboxPage />} />
               <Route path="/tasks" element={<TaskListPage />} />
+              <Route path="/tasks/:taskId" element={<TaskListPage />} />
               <Route path="/files" element={<FilesPage />} />
               <Route path="/reports" element={<ReportsPage />} />
               <Route path="/reports/sales/pipeline-velocity" element={<PipelineVelocityPage />} />
