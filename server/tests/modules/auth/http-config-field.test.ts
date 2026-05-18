@@ -56,6 +56,8 @@ describe("field app auth HTTP config", () => {
     ).toMatchObject({
       secure: true,
       sameSite: "none",
+      path: "/",
+      partitioned: true,
     });
   });
 
@@ -74,6 +76,8 @@ describe("field app auth HTTP config", () => {
     ).toMatchObject({
       secure: true,
       sameSite: "none",
+      path: "/",
+      partitioned: true,
     });
   });
 

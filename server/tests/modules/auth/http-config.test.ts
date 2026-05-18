@@ -127,6 +127,7 @@ describe("auth http config", () => {
       secure: true,
       sameSite: "lax",
       domain: ".trockcrm.com",
+      path: "/",
     });
   });
 
@@ -170,12 +171,15 @@ describe("auth http config", () => {
       httpOnly: true,
       secure: true,
       sameSite: "none",
+      path: "/",
+      partitioned: true,
     });
     expect(csrfOptions).toMatchObject({
       httpOnly: false,
       secure: true,
       sameSite: "none",
       path: "/",
+      partitioned: true,
     });
     expect(tokenOptions).not.toHaveProperty("domain");
     expect(csrfOptions).not.toHaveProperty("domain");
@@ -197,6 +201,7 @@ describe("auth http config", () => {
     expect(tokenOptions).toMatchObject({
       secure: true,
       sameSite: "lax",
+      path: "/",
     });
   });
 
@@ -216,6 +221,8 @@ describe("auth http config", () => {
     expect(tokenOptions).toMatchObject({
       secure: true,
       sameSite: "none",
+      path: "/",
+      partitioned: true,
     });
   });
 
@@ -228,6 +235,7 @@ describe("auth http config", () => {
     ).toMatchObject({
       domain: ".trockcrm.com",
       sameSite: "lax",
+      path: "/",
     });
   });
 
@@ -265,10 +273,13 @@ describe("auth http config", () => {
       clear.name,
       "domain" in clear.options ? clear.options.domain : null,
       clear.options.sameSite,
+      "partitioned" in clear.options ? clear.options.partitioned : false,
       clear.options.maxAge,
     ])).toEqual([
-      ["token", null, "none", 0],
-      ["csrf_token", null, "none", 0],
+      ["token", null, "none", false, 0],
+      ["token", null, "none", true, 0],
+      ["csrf_token", null, "none", false, 0],
+      ["csrf_token", null, "none", true, 0],
     ]);
   });
 
