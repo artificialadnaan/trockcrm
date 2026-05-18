@@ -813,10 +813,7 @@ router.get("/pipeline", async (req, res, next) => {
         ...column,
         deals: redactDealList(column.deals, { includeHubspotId }),
       })),
-      terminalStages: result.terminalStages.map((column) => ({
-        ...column,
-        deals: redactDealList(column.deals, { includeHubspotId }),
-      })),
+      terminalStages: result.terminalStages,
     });
   } catch (err) {
     next(err);
