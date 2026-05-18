@@ -202,7 +202,22 @@ vi.mock("@/components/leads/lead-timeline-tab", () => ({
 }));
 
 vi.mock("@/components/activities/activity-log-form", () => ({
-  ActivityLogForm: () => <div>Activity Form</div>,
+  ActivityLogForm: ({ onSubmit }: { onSubmit: (data: { type: string; subject: string; body: string; occurredAt?: string }) => Promise<void> }) => (
+    <div>
+      Activity Form
+      <button
+        type="button"
+        onClick={() => onSubmit({
+          type: "email",
+          subject: "Manual email",
+          body: "Subject: Manual email\nNotes: Sent from phone",
+          occurredAt: "2026-05-18T09:15",
+        })}
+      >
+        Submit Mock Email Activity
+      </button>
+    </div>
+  ),
 }));
 
 vi.mock("@/components/deals/stage-change-dialog", () => ({
@@ -434,6 +449,36 @@ describe("DealDetailPage", () => {
     expect(html).toContain("Estimates");
     expect(html).toContain("overflow-x-auto");
     expect(html).toContain("border-b-2 border-brand-red");
+  });
+
+  it("persists manually logged email activities from the Activity tab", async () => {
+    mounted = mountPage();
+
+    const activityTab = Array.from(mounted.container.querySelectorAll("button"))
+      .find((button) => button.textContent?.includes("Activity"));
+    expect(activityTab).toBeTruthy();
+
+    await act(async () => {
+      activityTab!.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+
+    const submitEmail = Array.from(mounted.container.querySelectorAll("button"))
+      .find((button) => button.textContent?.includes("Submit Mock Email Activity"));
+    expect(submitEmail).toBeTruthy();
+
+    await act(async () => {
+      submitEmail!.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+
+    expect(mocks.createActivityMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        type: "email",
+        subject: "Manual email",
+        body: expect.stringContaining("Sent from phone"),
+        occurredAt: "2026-05-18T09:15",
+        dealId: "deal-1",
+      })
+    );
   });
 
   it("renders right-rail sections in redesigned order with primary contact fallback", () => {

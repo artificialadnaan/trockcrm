@@ -73,6 +73,7 @@ export function EntityActivityTab({
     nextStep?: string;
     nextStepDueAt?: string;
     durationMinutes?: number;
+    occurredAt?: string;
     responsibleUserId?: string;
   }) => {
     await createActivity({
@@ -83,6 +84,7 @@ export function EntityActivityTab({
       nextStep: data.nextStep,
       nextStepDueAt: data.nextStepDueAt,
       durationMinutes: data.durationMinutes,
+      occurredAt: data.occurredAt,
       responsibleUserId: entityType === "deal" ? undefined : data.responsibleUserId,
       ...scopedPayload,
     });

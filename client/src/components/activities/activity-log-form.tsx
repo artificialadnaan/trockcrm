@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { Phone, FileText, Calendar, Plus, Handshake, MapPinned, PhoneCall, SendHorizontal } from "lucide-react";
+import { Phone, FileText, Calendar, Plus, Handshake, MapPinned, PhoneCall, SendHorizontal, Mail } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
@@ -22,6 +22,7 @@ type LogType =
   | "voicemail"
   | "lunch"
   | "site_visit"
+  | "email"
   | "proposal_sent"
   | "follow_up"
   | "go_no_go";
@@ -41,6 +42,7 @@ interface ActivityLogFormProps {
     nextStep?: string;
     nextStepDueAt?: string;
     durationMinutes?: number;
+    occurredAt?: string;
     responsibleUserId?: string;
     sourceEntityType?: ActivitySourceEntityType;
     sourceEntityId?: string;
@@ -69,6 +71,21 @@ function decodeTarget(value: string) {
   };
 }
 
+function toDateTimeLocal(date: Date) {
+  const pad = (value: number) => String(value).padStart(2, "0");
+
+  return [
+    date.getFullYear(),
+    pad(date.getMonth() + 1),
+    pad(date.getDate()),
+  ].join("-") + `T${pad(date.getHours())}:${pad(date.getMinutes())}`;
+}
+
+function getFormLabel(type: LogType) {
+  if (type === "email") return "Email";
+  return type.replace(/_/g, " ");
+}
+
 export function ActivityLogForm({
   onSubmit,
   targetOptions = [],
@@ -82,6 +99,11 @@ export function ActivityLogForm({
   const [duration, setDuration] = useState<string>("");
   const [nextStep, setNextStep] = useState("");
   const [nextStepDueAt, setNextStepDueAt] = useState("");
+  const [emailSubject, setEmailSubject] = useState("");
+  const [emailFrom, setEmailFrom] = useState("");
+  const [emailTo, setEmailTo] = useState("");
+  const [emailBody, setEmailBody] = useState("");
+  const [emailOccurredAt, setEmailOccurredAt] = useState(() => toDateTimeLocal(new Date()));
   const [target, setTarget] = useState<string>(targetOptions[0] ? encodeTarget(targetOptions[0]) : "");
   const [assignees, setAssignees] = useState<Assignee[]>([]);
   const [responsibleUserId, setResponsibleUserId] = useState<string>(
@@ -126,8 +148,37 @@ export function ActivityLogForm({
     };
   }, [defaultResponsibleUserId, user]);
 
+  const resetForm = () => {
+    setBody("");
+    setOutcome("");
+    setDuration("");
+    setNextStep("");
+    setNextStepDueAt("");
+    setEmailSubject("");
+    setEmailFrom("");
+    setEmailTo("");
+    setEmailBody("");
+    setEmailOccurredAt(toDateTimeLocal(new Date()));
+    setActiveForm(null);
+    setError(null);
+  };
+
+  const setActiveLogForm = (type: LogType) => {
+    if (activeForm === type) {
+      resetForm();
+      return;
+    }
+
+    setActiveForm(type);
+    setError(null);
+    if (type === "email") {
+      setEmailOccurredAt(toDateTimeLocal(new Date()));
+    }
+  };
+
   const handleSubmit = async () => {
-    if (!body.trim() || !activeForm) return;
+    if (!activeForm) return;
+    if (activeForm !== "email" && !body.trim()) return;
 
     const selectedTarget = decodeTarget(target);
 
@@ -141,27 +192,47 @@ export function ActivityLogForm({
       return;
     }
 
+    if (activeForm === "email" && !emailSubject.trim()) {
+      setError("Subject is required");
+      return;
+    }
+
     setSubmitting(true);
     setError(null);
     try {
-      await onSubmit({
-        type: activeForm,
-        subject: `${activeForm} logged`,
-        body: body.trim(),
-        outcome: outcome || undefined,
-        nextStep: nextStep || undefined,
-        nextStepDueAt: nextStepDueAt || undefined,
-        durationMinutes: duration ? parseInt(duration, 10) : undefined,
-        responsibleUserId: responsibleUserId || undefined,
-        sourceEntityType: selectedTarget?.sourceEntityType,
-        sourceEntityId: selectedTarget?.sourceEntityId,
-      });
-      setBody("");
-      setOutcome("");
-      setDuration("");
-      setNextStep("");
-      setNextStepDueAt("");
-      setActiveForm(null);
+      if (activeForm === "email") {
+        const trimmedSubject = emailSubject.trim();
+        const emailDetails = [
+          `Subject: ${trimmedSubject}`,
+          emailFrom.trim() ? `From: ${emailFrom.trim()}` : null,
+          emailTo.trim() ? `To: ${emailTo.trim()}` : null,
+          emailBody.trim() ? `Notes: ${emailBody.trim()}` : null,
+        ].filter(Boolean).join("\n");
+
+        await onSubmit({
+          type: "email",
+          subject: trimmedSubject,
+          body: emailDetails,
+          occurredAt: emailOccurredAt ? new Date(emailOccurredAt).toISOString() : undefined,
+          responsibleUserId: responsibleUserId || undefined,
+          sourceEntityType: selectedTarget?.sourceEntityType,
+          sourceEntityId: selectedTarget?.sourceEntityId,
+        });
+      } else {
+        await onSubmit({
+          type: activeForm,
+          subject: `${activeForm} logged`,
+          body: body.trim(),
+          outcome: outcome || undefined,
+          nextStep: nextStep || undefined,
+          nextStepDueAt: nextStepDueAt || undefined,
+          durationMinutes: duration ? parseInt(duration, 10) : undefined,
+          responsibleUserId: responsibleUserId || undefined,
+          sourceEntityType: selectedTarget?.sourceEntityType,
+          sourceEntityId: selectedTarget?.sourceEntityId,
+        });
+      }
+      resetForm();
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : "Failed to log activity");
     } finally {
@@ -176,45 +247,53 @@ export function ActivityLogForm({
         <Button
           size="sm"
           variant={activeForm === "call" ? "default" : "outline"}
-          onClick={() => setActiveForm(activeForm === "call" ? null : "call")}
+          onClick={() => setActiveLogForm("call")}
         >
           <Phone className="h-4 w-4 mr-1" /> Log Call
         </Button>
         <Button
           size="sm"
           variant={activeForm === "note" ? "default" : "outline"}
-          onClick={() => setActiveForm(activeForm === "note" ? null : "note")}
+          onClick={() => setActiveLogForm("note")}
         >
           <FileText className="h-4 w-4 mr-1" /> Add Note
         </Button>
         <Button
           size="sm"
           variant={activeForm === "meeting" ? "default" : "outline"}
-          onClick={() => setActiveForm(activeForm === "meeting" ? null : "meeting")}
+          onClick={() => setActiveLogForm("meeting")}
         >
           <Calendar className="h-4 w-4 mr-1" /> Log Meeting
         </Button>
-        <Button size="sm" variant={activeForm === "voicemail" ? "default" : "outline"} onClick={() => setActiveForm(activeForm === "voicemail" ? null : "voicemail")}>
+        <Button size="sm" variant={activeForm === "voicemail" ? "default" : "outline"} onClick={() => setActiveLogForm("voicemail")}>
           <PhoneCall className="h-4 w-4 mr-1" /> Voicemail
         </Button>
-        <Button size="sm" variant={activeForm === "lunch" ? "default" : "outline"} onClick={() => setActiveForm(activeForm === "lunch" ? null : "lunch")}>
+        <Button size="sm" variant={activeForm === "lunch" ? "default" : "outline"} onClick={() => setActiveLogForm("lunch")}>
           <Handshake className="h-4 w-4 mr-1" /> Lunch
         </Button>
-        <Button size="sm" variant={activeForm === "site_visit" ? "default" : "outline"} onClick={() => setActiveForm(activeForm === "site_visit" ? null : "site_visit")}>
+        <Button size="sm" variant={activeForm === "site_visit" ? "default" : "outline"} onClick={() => setActiveLogForm("site_visit")}>
           <MapPinned className="h-4 w-4 mr-1" /> Site Visit
         </Button>
         {showProposalSent ? (
-          <Button size="sm" variant={activeForm === "proposal_sent" ? "default" : "outline"} onClick={() => setActiveForm(activeForm === "proposal_sent" ? null : "proposal_sent")}>
+          <Button size="sm" variant={activeForm === "proposal_sent" ? "default" : "outline"} onClick={() => setActiveLogForm("proposal_sent")}>
             <SendHorizontal className="h-4 w-4 mr-1" /> Proposal Sent
           </Button>
         ) : null}
+        <Button
+          size="sm"
+          variant={activeForm === "email" ? "default" : "outline"}
+          onClick={() => setActiveLogForm("email")}
+          aria-label="Log Email"
+        >
+          <Mail className="h-4 w-4 mr-1" /> Log Email
+        </Button>
       </div>
 
       {/* Inline log form */}
       {activeForm && (
         <Card>
           <CardContent className="pt-4 space-y-3">
-            <p className="text-sm font-medium capitalize">{activeForm} details</p>
+            <p className="text-sm font-medium capitalize">{getFormLabel(activeForm)} details</p>
             {(targetOptions.length > 1 || assignees.length > 1) && (
               <div className="grid gap-3 md:grid-cols-2">
                 {targetOptions.length > 1 && (
@@ -253,12 +332,66 @@ export function ActivityLogForm({
                 )}
               </div>
             )}
-            <Textarea
-              placeholder={`Describe this ${activeForm}...`}
-              value={body}
-              onChange={(e) => setBody(e.target.value)}
-              rows={3}
-            />
+            {activeForm === "email" ? (
+              <div className="space-y-3">
+                <div>
+                  <label className="text-xs text-muted-foreground mb-1 block" htmlFor="emailSubject">Subject</label>
+                  <Input
+                    id="emailSubject"
+                    name="emailSubject"
+                    value={emailSubject}
+                    onChange={(e) => setEmailSubject(e.target.value)}
+                    placeholder="Email subject"
+                  />
+                </div>
+                <div className="grid gap-3 md:grid-cols-2">
+                  <div>
+                    <label className="text-xs text-muted-foreground mb-1 block" htmlFor="emailFrom">From</label>
+                    <Input
+                      id="emailFrom"
+                      name="emailFrom"
+                      value={emailFrom}
+                      onChange={(e) => setEmailFrom(e.target.value)}
+                      placeholder="sender@example.com"
+                    />
+                  </div>
+                  <div>
+                    <label className="text-xs text-muted-foreground mb-1 block" htmlFor="emailTo">To</label>
+                    <Input
+                      id="emailTo"
+                      name="emailTo"
+                      value={emailTo}
+                      onChange={(e) => setEmailTo(e.target.value)}
+                      placeholder="recipient@example.com"
+                    />
+                  </div>
+                </div>
+                <div>
+                  <label className="text-xs text-muted-foreground mb-1 block" htmlFor="emailOccurredAt">Date/time</label>
+                  <Input
+                    id="emailOccurredAt"
+                    name="emailOccurredAt"
+                    type="datetime-local"
+                    value={emailOccurredAt}
+                    onChange={(e) => setEmailOccurredAt(e.target.value)}
+                  />
+                </div>
+                <Textarea
+                  name="emailBody"
+                  placeholder="Email body or notes"
+                  value={emailBody}
+                  onChange={(e) => setEmailBody(e.target.value)}
+                  rows={4}
+                />
+              </div>
+            ) : (
+              <Textarea
+                placeholder={`Describe this ${activeForm}...`}
+                value={body}
+                onChange={(e) => setBody(e.target.value)}
+                rows={3}
+              />
+            )}
             {activeForm === "call" && (
               <div className="grid grid-cols-2 gap-3">
                 <div>
@@ -298,7 +431,7 @@ export function ActivityLogForm({
                 />
               </div>
             )}
-            <div className="grid gap-3 md:grid-cols-2">
+            {activeForm !== "email" && <div className="grid gap-3 md:grid-cols-2">
               <div>
                 <label className="text-xs text-muted-foreground mb-1 block">Next Step</label>
                 <Input
@@ -315,24 +448,21 @@ export function ActivityLogForm({
                   onChange={(e) => setNextStepDueAt(e.target.value)}
                 />
               </div>
-            </div>
+            </div>}
             {error && <p className="text-sm text-red-600">{error}</p>}
             <div className="flex gap-2">
-              <Button size="sm" onClick={handleSubmit} disabled={submitting || !body.trim()}>
+              <Button
+                size="sm"
+                onClick={handleSubmit}
+                disabled={submitting || (activeForm !== "email" && !body.trim())}
+                data-testid="activity-save"
+              >
                 <Plus className="h-4 w-4 mr-1" /> {submitting ? "Saving..." : "Save"}
               </Button>
               <Button
                 size="sm"
                 variant="ghost"
-                onClick={() => {
-                  setActiveForm(null);
-                  setBody("");
-                  setOutcome("");
-                  setDuration("");
-                  setNextStep("");
-                  setNextStepDueAt("");
-                  setError(null);
-                }}
+                onClick={resetForm}
               >
                 Cancel
               </Button>
