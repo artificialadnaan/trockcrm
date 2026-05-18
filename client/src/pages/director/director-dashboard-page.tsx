@@ -347,6 +347,7 @@ export function DirectorDashboardPage() {
   const forecastDestination = buildReportDrilldownPath("/reports/performance/forecast-accuracy", preset, dateRange);
   const activityDestination = buildReportDrilldownPath("/reports/performance/rep-activity", preset, dateRange);
   const staleDealsDestination = buildDealsDrilldownPath("stale", preset);
+  const atRiskDealsDestination = buildDealsDrilldownPath("at_risk", preset);
 
   if (loading) {
     return (
@@ -392,7 +393,7 @@ export function DirectorDashboardPage() {
   const activityPulse = (data.activityPulse ?? data.activityByRep).slice().sort((a, b) => b.total - a.total);
   const isUsingStaleDeals = data.staleDeals.length > 0;
   const atRiskDeals = isUsingStaleDeals ? data.staleDeals : data.atRiskDeals ?? [];
-  const atRiskDestination = isUsingStaleDeals ? staleDealsDestination : forecastDestination;
+  const atRiskDestination = atRiskDealsDestination;
   const totalAtRiskValue = atRiskDeals.reduce((sum, deal) => sum + deal.dealValue, 0);
   const atRiskRepCount = new Set(atRiskDeals.map((deal) => deal.repName).filter(Boolean)).size;
   const closedValue = usablePerfData ? usablePerfData.reps.reduce((sum, row) => sum + row.current.totalWonValue, 0) : null;
