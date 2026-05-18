@@ -1,7 +1,12 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
   const {
+    buildSourceLookup,
     buildGapAnalysisReport,
+    dedupeSyncHubMappingRows,
+    dealExistsInLookup,
+    fetchPortfolioProjects,
+    fetchHubSpotDeals,
     parseCliArgs,
     resolveTenantSchemas,
     summarizeTenantDeals,
@@ -298,5 +303,238 @@ describe("bid-board-sync-gap-analysis", () => {
     expect(district?.diagnosis).toContain(
       "office_dallas/district-crm: hubspotDealId=null, procoreBidId=456789, bidBoardProjectNumber=DFW-2-12326-aa, procoreProjectId=null"
     );
+  });
+
+  it("deduplicates historical SyncHub mappings by Bid Board ID and project number, keeping latest row", () => {
+    const rows = dedupeSyncHubMappingRows([
+      {
+        id: "1",
+        hubspot_deal_id: "old-hs",
+        procore_project_number: "DFW-4-11111-aa",
+        bidboard_project_id: "900",
+        created_at: "2026-05-01T10:00:00.000Z",
+      },
+      {
+        id: "2",
+        hubspot_deal_id: "new-hs",
+        procore_project_number: "DFW-4-11111-aa",
+        bidboard_project_id: "900",
+        created_at: "2026-05-02T10:00:00.000Z",
+      },
+      {
+        id: "3",
+        hubspot_deal_id: "same-time-higher-id",
+        procore_project_number: "DFW-4-22222-aa",
+        bidboard_project_id: "901",
+        created_at: "2026-05-02T10:00:00.000Z",
+      },
+      {
+        id: "4",
+        hubspot_deal_id: "same-time-kept",
+        procore_project_number: "DFW-4-22222-aa",
+        bidboard_project_id: "901",
+        created_at: "2026-05-02T10:00:00.000Z",
+      },
+    ]);
+
+    expect(rows).toEqual([
+      expect.objectContaining({ id: "4", hubspot_deal_id: "same-time-kept" }),
+      expect.objectContaining({ id: "2", hubspot_deal_id: "new-hs" }),
+    ]);
+  });
+
+  it("does not treat name-only matches as source existence", () => {
+    const lookup = buildSourceLookup([{ id: "source-1", name: "Same Name", projectNumber: null }]);
+    const deal = {
+      tenantSchema: "office_dallas",
+      id: "crm-same-name",
+      name: "Same Name",
+      dealNumber: "DFW-1-00126-aa",
+      projectNumber: null,
+      hubspotDealId: null,
+      procoreBidId: null,
+      bidBoardProjectNumber: null,
+      procoreProjectId: null,
+      isActive: true,
+    };
+
+    expect(dealExistsInLookup(deal, lookup, null)).toBe(false);
+  });
+
+  it("throws for Portfolio fetch when read-only Procore auth is unavailable instead of using mock data", async () => {
+    const query = vi.fn().mockResolvedValueOnce({ rows: [] });
+
+    await expect(
+      fetchPortfolioProjects(10, {
+        env: {
+          PROCORE_COMPANY_ID: "company-1",
+          PROCORE_CLIENT_ID: "client-1",
+          PROCORE_CLIENT_SECRET: "secret-1",
+        },
+        tokenClient: { query },
+        decryptToken: (value: string) => value,
+        fetchImpl: vi.fn(),
+      })
+    ).rejects.toThrow("Procore OAuth token not found");
+
+    expect(query).toHaveBeenCalledWith(expect.stringContaining("FROM public.procore_oauth_tokens"), [1]);
+  });
+
+  it("marks truncated source snapshots and downgrades stored-id misses against truncated sources", () => {
+    const report = buildGapAnalysisReport({
+      generatedAt: "2026-05-18T12:00:00.000Z",
+      mode: "full-report",
+      scope: { tenantSchemas: ["office_dallas"], source: "hubspot" },
+      crmDeals: [
+        {
+          tenantSchema: "office_dallas",
+          id: "crm-truncated",
+          name: "Stored ID Outside Page",
+          dealNumber: "DFW-1-00126-aa",
+          projectNumber: null,
+          hubspotDealId: "hs-outside-snapshot",
+          procoreBidId: null,
+          bidBoardProjectNumber: null,
+          procoreProjectId: null,
+          isActive: true,
+        },
+      ],
+      hubspotDeals: [{ id: "hs-first-page", name: "First Page", projectNumber: null }],
+      bidBoardProjects: [],
+      portfolioProjects: [],
+      includeRows: true,
+      districtSearch: "District at Pointon",
+      sourceStates: {
+        hubspot: { truncated: true, fetchedCount: 1, maxRecords: 1 },
+        bidboard: { truncated: false, fetchedCount: 0, maxRecords: 1 },
+        portfolio: { truncated: false, fetchedCount: 0, maxRecords: 1 },
+      },
+    });
+
+    expect(report.partialSnapshotWarning).toContain("PARTIAL SNAPSHOT WARNING");
+    expect(report.sections.crmMissingOrIncorrectSourceIds.rows).toContainEqual(
+      expect.objectContaining({
+        field: "hubspotDealId",
+        issue: "stored_id_not_in_partial_snapshot",
+      })
+    );
+    expect(renderTextReport(report)).toContain("PARTIAL SNAPSHOT WARNING");
+  });
+
+  it("uses read-only Portfolio token access and does not write to procore_oauth_tokens", async () => {
+    const query = vi.fn().mockResolvedValueOnce({
+      rows: [
+        {
+          access_token: "encrypted-access-token",
+          token_expires_at: new Date("2026-05-18T13:00:00.000Z"),
+          status: "active",
+        },
+      ],
+    });
+    const fetchImpl = vi.fn().mockResolvedValueOnce({
+      ok: true,
+      status: 200,
+      json: async () => [],
+      text: async () => "",
+    });
+
+    await fetchPortfolioProjects(10, {
+      env: {
+        PROCORE_COMPANY_ID: "company-1",
+        PROCORE_CLIENT_ID: "client-1",
+        PROCORE_CLIENT_SECRET: "secret-1",
+      },
+      now: () => new Date("2026-05-18T12:00:00.000Z"),
+      tokenClient: { query },
+      decryptToken: (value: string) => `decrypted:${value}`,
+      fetchImpl,
+    });
+
+    expect(query).toHaveBeenCalledTimes(1);
+    expect(query.mock.calls[0][0]).toMatch(/^SELECT\b/i);
+    expect(fetchImpl).toHaveBeenCalledWith(
+      expect.stringContaining("/rest/v1.0/companies/company-1/projects?page=1&per_page=100"),
+      expect.objectContaining({
+        method: "GET",
+        headers: expect.objectContaining({
+          Authorization: "Bearer decrypted:encrypted-access-token",
+          "Procore-Company-Id": "company-1",
+        }),
+      })
+    );
+  });
+
+  it("does not mark Portfolio truncated when the complete snapshot exactly equals maxRecords", async () => {
+    const query = vi.fn().mockResolvedValueOnce({
+      rows: [
+        {
+          access_token: "encrypted-access-token",
+          token_expires_at: new Date("2026-05-18T13:00:00.000Z"),
+          status: "active",
+        },
+      ],
+    });
+    const fetchImpl = vi.fn().mockResolvedValueOnce({
+      ok: true,
+      status: 200,
+      json: async () => [
+        { id: 101, name: "One", project_number: "DFW-1" },
+        { id: 102, name: "Two", project_number: "DFW-2" },
+      ],
+      text: async () => "",
+    });
+
+    const result = await fetchPortfolioProjects(2, {
+      env: {
+        PROCORE_COMPANY_ID: "company-1",
+        PROCORE_CLIENT_ID: "client-1",
+        PROCORE_CLIENT_SECRET: "secret-1",
+      },
+      now: () => new Date("2026-05-18T12:00:00.000Z"),
+      tokenClient: { query },
+      decryptToken: (value: string) => `decrypted:${value}`,
+      fetchImpl,
+    });
+
+    expect(result.records).toHaveLength(2);
+    expect(result.state).toEqual({ truncated: false, fetchedCount: 2, maxRecords: 2 });
+  });
+
+  it("marks HubSpot truncated when maxRecords cuts through a later page", async () => {
+    const fetchImpl = vi
+      .fn()
+      .mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: async () => ({
+          results: Array.from({ length: 100 }, (_, index) => ({
+            id: `hs-page-1-${index}`,
+            properties: { dealname: `Page 1 ${index}`, project_number: null },
+          })),
+          paging: { next: { after: "page-2" } },
+        }),
+        text: async () => "",
+        headers: new Headers(),
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: async () => ({
+          results: Array.from({ length: 75 }, (_, index) => ({
+            id: `hs-page-2-${index}`,
+            properties: { dealname: `Page 2 ${index}`, project_number: null },
+          })),
+        }),
+        text: async () => "",
+        headers: new Headers(),
+      });
+
+    const result = await fetchHubSpotDeals(150, {
+      env: { HUBSPOT_PRIVATE_APP_TOKEN: "token" },
+      fetchImpl,
+    });
+
+    expect(result.records).toHaveLength(150);
+    expect(result.state).toEqual({ truncated: true, fetchedCount: 150, maxRecords: 150 });
   });
 });

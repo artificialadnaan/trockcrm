@@ -1,7 +1,7 @@
 import fs from "node:fs/promises";
 import { pathToFileURL } from "node:url";
 import pg from "pg";
-import { listCompanyProjectCandidatesPage } from "../server/src/lib/procore-client.js";
+import { decrypt } from "../server/src/lib/encryption.js";
 
 type SourceFilter = "all" | "hubspot" | "bidboard" | "portfolio";
 type ReportMode = "dry-run" | "full-report";
@@ -52,6 +52,7 @@ interface ReportInput {
   includeRows: boolean;
   districtSearch: string;
   sourceNotes?: string[];
+  sourceStates?: SourceStates;
 }
 
 interface LikelyMatch {
@@ -74,7 +75,10 @@ interface BrokenLinkRow {
   name: string;
   field: "hubspotDealId" | "procoreBidId" | "bidBoardProjectNumber" | "procoreProjectId";
   storedValue: string | null;
-  issue: "stored_id_not_found_in_source" | "missing_stored_id_for_likely_source_match";
+  issue:
+    | "stored_id_not_found_in_source"
+    | "stored_id_not_in_partial_snapshot"
+    | "missing_stored_id_for_likely_source_match";
   likelySourceMatches: SourceRecord[];
 }
 
@@ -90,6 +94,23 @@ interface Section<T> {
   rows?: T[];
 }
 
+export interface SourceFetchState {
+  truncated: boolean;
+  fetchedCount: number;
+  maxRecords: number;
+}
+
+export interface SourceStates {
+  hubspot: SourceFetchState;
+  bidboard: SourceFetchState;
+  portfolio: SourceFetchState;
+}
+
+interface SourceFetchResult {
+  records: SourceRecord[];
+  state: SourceFetchState;
+}
+
 export interface GapAnalysisReport {
   generatedAt: string;
   mode: ReportMode;
@@ -97,6 +118,8 @@ export interface GapAnalysisReport {
   assumptions: string[];
   scope: ReportInput["scope"];
   sourceNotes: string[];
+  sourceStates: SourceStates;
+  partialSnapshotWarning: string | null;
   inventory: {
     byTenant: Record<string, ReturnType<typeof summarizeTenantDeals>>;
     allTenants: ReturnType<typeof summarizeTenantDeals>;
@@ -186,21 +209,15 @@ function sourceProjectNumberSet(records: SourceRecord[]) {
   return new Set(records.map((record) => normalizeId(record.projectNumber)).filter((id): id is string => Boolean(id)));
 }
 
-function sourceNameSet(records: SourceRecord[]) {
-  return new Set(records.map((record) => normalizeName(record.name)).filter((name): name is string => Boolean(name)));
-}
-
 interface SourceLookup {
   ids: Set<string>;
   projectNumbers: Set<string>;
-  names: Set<string>;
 }
 
-function sourceLookup(records: SourceRecord[]): SourceLookup {
+export function buildSourceLookup(records: SourceRecord[]): SourceLookup {
   return {
     ids: sourceIdSet(records),
     projectNumbers: sourceProjectNumberSet(records),
-    names: sourceNameSet(records),
   };
 }
 
@@ -284,6 +301,12 @@ function matchingSourceRecords(deal: CrmDealDiagnosticRow, records: SourceRecord
   });
 }
 
+function brokenIssueForSource(input: ReportInput, source: keyof SourceStates) {
+  return input.sourceStates?.[source]?.truncated
+    ? "stored_id_not_in_partial_snapshot" as const
+    : "stored_id_not_found_in_source" as const;
+}
+
 function brokenLinkRows(input: ReportInput): BrokenLinkRow[] {
   const sources = selectedSources(input.scope.source);
   const rows: BrokenLinkRow[] = [];
@@ -302,7 +325,7 @@ function brokenLinkRows(input: ReportInput): BrokenLinkRow[] {
           name: deal.name,
           field: "hubspotDealId",
           storedValue: String(deal.hubspotDealId),
-          issue: "stored_id_not_found_in_source",
+          issue: brokenIssueForSource(input, "hubspot"),
           likelySourceMatches: matchingSourceRecords(deal, input.hubspotDeals),
         });
       } else if (!stored) {
@@ -331,7 +354,7 @@ function brokenLinkRows(input: ReportInput): BrokenLinkRow[] {
           name: deal.name,
           field: "procoreBidId",
           storedValue: String(deal.procoreBidId),
-          issue: "stored_id_not_found_in_source",
+          issue: brokenIssueForSource(input, "bidboard"),
           likelySourceMatches: matchingSourceRecords(deal, input.bidBoardProjects),
         });
       }
@@ -342,7 +365,7 @@ function brokenLinkRows(input: ReportInput): BrokenLinkRow[] {
           name: deal.name,
           field: "bidBoardProjectNumber",
           storedValue: String(deal.bidBoardProjectNumber),
-          issue: "stored_id_not_found_in_source",
+          issue: brokenIssueForSource(input, "bidboard"),
           likelySourceMatches: matchingSourceRecords(deal, input.bidBoardProjects),
         });
       }
@@ -371,7 +394,7 @@ function brokenLinkRows(input: ReportInput): BrokenLinkRow[] {
           name: deal.name,
           field: "procoreProjectId",
           storedValue: String(deal.procoreProjectId),
-          issue: "stored_id_not_found_in_source",
+          issue: brokenIssueForSource(input, "portfolio"),
           likelySourceMatches: matchingSourceRecords(deal, input.portfolioProjects),
         });
       } else if (!stored) {
@@ -406,13 +429,12 @@ function crmOrphanRows(crmDeals: CrmDealDiagnosticRow[]): OrphanRow[] {
     .sort((left, right) => left.tenantSchema.localeCompare(right.tenantSchema) || left.name.localeCompare(right.name));
 }
 
-function dealExistsInLookup(deal: CrmDealDiagnosticRow, lookup: SourceLookup, storedId: unknown) {
+export function dealExistsInLookup(deal: CrmDealDiagnosticRow, lookup: SourceLookup, storedId: unknown) {
   const normalizedStoredId = normalizeId(storedId);
   if (normalizedStoredId && lookup.ids.has(normalizedStoredId)) return true;
   const crmProjectNumbers = [deal.projectNumber, deal.dealNumber, deal.bidBoardProjectNumber].map(normalizeId);
   if (crmProjectNumbers.some((projectNumber) => Boolean(projectNumber && lookup.projectNumbers.has(projectNumber)))) return true;
-  const crmName = normalizeName(deal.name);
-  return Boolean(crmName && lookup.names.has(crmName));
+  return false;
 }
 
 function dealExistsInFetchedSource(deal: CrmDealDiagnosticRow, input: ReportInput, lookups: {
@@ -435,9 +457,9 @@ function dealExistsInFetchedSource(deal: CrmDealDiagnosticRow, input: ReportInpu
 
 function crmNotInAnyFetchedSourceRows(input: ReportInput): OrphanRow[] {
   const lookups = {
-    hubspot: sourceLookup(input.hubspotDeals),
-    bidboard: sourceLookup(input.bidBoardProjects),
-    portfolio: sourceLookup(input.portfolioProjects),
+    hubspot: buildSourceLookup(input.hubspotDeals),
+    bidboard: buildSourceLookup(input.bidBoardProjects),
+    portfolio: buildSourceLookup(input.portfolioProjects),
   };
   return input.crmDeals
     .filter((deal) => !dealExistsInFetchedSource(deal, input, lookups))
@@ -546,6 +568,18 @@ export function buildGapAnalysisReport(input: ReportInput): GapAnalysisReport {
   for (const tenant of input.scope.tenantSchemas) {
     byTenant[tenant] = summarizeTenantDeals(input.crmDeals.filter((deal) => deal.tenantSchema === tenant));
   }
+  const defaultSourceStates: SourceStates = {
+    hubspot: { truncated: false, fetchedCount: input.hubspotDeals.length, maxRecords: input.hubspotDeals.length },
+    bidboard: { truncated: false, fetchedCount: input.bidBoardProjects.length, maxRecords: input.bidBoardProjects.length },
+    portfolio: { truncated: false, fetchedCount: input.portfolioProjects.length, maxRecords: input.portfolioProjects.length },
+  };
+  const sourceStates = input.sourceStates ?? defaultSourceStates;
+  const truncatedSources = Object.entries(sourceStates)
+    .filter(([, state]) => state.truncated)
+    .map(([source, state]) => `${source} fetched ${state.fetchedCount} at cap ${state.maxRecords}`);
+  const partialSnapshotWarning = truncatedSources.length > 0
+    ? `PARTIAL SNAPSHOT WARNING: ${truncatedSources.join("; ")}. Missing-source findings may be outside the fetched snapshot.`
+    : null;
 
   return {
     generatedAt: input.generatedAt,
@@ -558,6 +592,8 @@ export function buildGapAnalysisReport(input: ReportInput): GapAnalysisReport {
     ],
     scope: input.scope,
     sourceNotes: input.sourceNotes ?? [],
+    sourceStates,
+    partialSnapshotWarning,
     inventory: {
       byTenant,
       allTenants: summarizeTenantDeals(input.crmDeals),
@@ -718,12 +754,19 @@ async function loadCrmDeals(client: pg.Client, tenantSchemas: string[]): Promise
   return rows;
 }
 
-async function hubspotFetch<T>(path: string): Promise<T> {
-  const token = process.env.HUBSPOT_PRIVATE_APP_TOKEN;
+interface HubSpotFetchOptions {
+  env?: NodeJS.ProcessEnv | Record<string, string | undefined>;
+  fetchImpl?: typeof fetch;
+}
+
+async function hubspotFetch<T>(path: string, options: HubSpotFetchOptions = {}): Promise<T> {
+  const env = options.env ?? process.env;
+  const fetchImpl = options.fetchImpl ?? fetch;
+  const token = env.HUBSPOT_PRIVATE_APP_TOKEN;
   if (!token) throw new Error("HUBSPOT_PRIVATE_APP_TOKEN is required for HubSpot source diagnostics");
   const maxAttempts = 3;
   for (let attempt = 0; attempt < maxAttempts; attempt++) {
-    const response = await fetch(`https://api.hubapi.com${path}`, {
+    const response = await fetchImpl(`https://api.hubapi.com${path}`, {
       headers: {
         Authorization: `Bearer ${token}`,
         "Content-Type": "application/json",
@@ -744,7 +787,7 @@ async function hubspotFetch<T>(path: string): Promise<T> {
   throw new Error(`HubSpot read failed after ${maxAttempts} attempts`);
 }
 
-async function fetchHubSpotDeals(maxRecords: number): Promise<SourceRecord[]> {
+export async function fetchHubSpotDeals(maxRecords: number, options: HubSpotFetchOptions = {}): Promise<SourceFetchResult> {
   const properties = [
     "dealname",
     "dealstage",
@@ -760,8 +803,9 @@ async function fetchHubSpotDeals(maxRecords: number): Promise<SourceRecord[]> {
     const page = await hubspotFetch<{
       results?: Array<{ id: string; properties?: Record<string, string | null> }>;
       paging?: { next?: { after?: string } };
-    }>(`/crm/v3/objects/deals?${params}`);
-    for (const row of page.results ?? []) {
+    }>(`/crm/v3/objects/deals?${params}`, options);
+    const pageRows = page.results ?? [];
+    for (const row of pageRows) {
       rows.push({
         id: row.id,
         name: row.properties?.dealname ?? null,
@@ -773,14 +817,19 @@ async function fetchHubSpotDeals(maxRecords: number): Promise<SourceRecord[]> {
           hsLastModifiedDate: row.properties?.hs_lastmodifieddate ?? null,
         },
       });
-      if (rows.length >= maxRecords) return rows;
+      if (rows.length >= maxRecords) {
+        return {
+          records: rows,
+          state: { truncated: Boolean(page.paging?.next?.after) || pageRows.indexOf(row) < pageRows.length - 1, fetchedCount: rows.length, maxRecords },
+        };
+      }
     }
     after = page.paging?.next?.after;
   } while (after);
-  return rows;
+  return { records: rows, state: { truncated: false, fetchedCount: rows.length, maxRecords } };
 }
 
-async function fetchBidBoardFromExport(path: string, maxRecords: number): Promise<SourceRecord[]> {
+async function fetchBidBoardFromExport(path: string, maxRecords: number): Promise<SourceFetchResult> {
   const raw = await fs.readFile(path, "utf8");
   const parsed = JSON.parse(raw) as unknown;
   const rows = Array.isArray(parsed)
@@ -788,7 +837,7 @@ async function fetchBidBoardFromExport(path: string, maxRecords: number): Promis
     : Array.isArray((parsed as { rows?: unknown[] }).rows)
       ? (parsed as { rows: unknown[] }).rows
       : [];
-  return limitSourceRows(rows.map((row, index) => {
+  const records = rows.map((row, index) => {
     const record = row as Record<string, unknown>;
     const id = cleanText(record["BidBoard Project ID"]) ?? cleanText(record["Bid Board Project ID"]) ?? cleanText(record["Project ID"]) ?? cleanText(record.bidboardProjectId) ?? `export-row-${index + 1}`;
     return {
@@ -798,22 +847,55 @@ async function fetchBidBoardFromExport(path: string, maxRecords: number): Promis
       sourceSystem: "bidboard_export",
       metadata: { status: cleanText(record.Status), estimator: cleanText(record.Estimator) },
     };
-  }), maxRecords);
+  });
+  return {
+    records: limitSourceRows(records, maxRecords),
+    state: { truncated: records.length > maxRecords, fetchedCount: Math.min(records.length, maxRecords), maxRecords },
+  };
 }
 
-async function fetchBidBoardFromSyncHub(maxRecords: number): Promise<SourceRecord[]> {
+export interface SyncHubMappingRow {
+  id: string;
+  hubspot_deal_id: string | null;
+  procore_project_number: string | null;
+  bidboard_project_id: string | null;
+  created_at: string | null;
+}
+
+function syncHubDedupKey(row: SyncHubMappingRow) {
+  return `${normalizeId(row.bidboard_project_id) ?? ""}|${normalizeId(row.procore_project_number) ?? ""}`;
+}
+
+function syncHubLatestFirst(left: SyncHubMappingRow, right: SyncHubMappingRow) {
+  const leftTime = Date.parse(left.created_at ?? "");
+  const rightTime = Date.parse(right.created_at ?? "");
+  const timeDelta = (Number.isFinite(rightTime) ? rightTime : 0) - (Number.isFinite(leftTime) ? leftTime : 0);
+  if (timeDelta !== 0) return timeDelta;
+  return Number(right.id) - Number(left.id);
+}
+
+export function dedupeSyncHubMappingRows(rows: SyncHubMappingRow[]): SyncHubMappingRow[] {
+  const byKey = new Map<string, SyncHubMappingRow[]>();
+  for (const row of rows) {
+    const key = syncHubDedupKey(row);
+    if (key === "|") continue;
+    const group = byKey.get(key) ?? [];
+    group.push(row);
+    byKey.set(key, group);
+  }
+  return [...byKey.values()]
+    .map((group) => [...group].sort(syncHubLatestFirst)[0]!)
+    .sort(syncHubLatestFirst);
+}
+
+async function fetchBidBoardFromSyncHub(maxRecords: number): Promise<SourceFetchResult> {
   const syncHubUrl = process.env.SYNCHUB_DATABASE_URL;
   if (!syncHubUrl) throw new Error("SYNCHUB_DATABASE_URL or BID_BOARD_EXPORT_PATH is required for Bid Board source diagnostics");
   const client = new pg.Client({ connectionString: syncHubUrl });
   try {
     await client.connect();
-    const result = await client.query<{
-      id: string;
-      hubspot_deal_id: string | null;
-      procore_project_number: string | null;
-      bidboard_project_id: string | null;
-      created_at: string | null;
-    }>(
+    const queryLimit = maxRecords * 5;
+    const result = await client.query<SyncHubMappingRow>(
       `SELECT id::text,
               hubspot_deal_id,
               procore_project_number,
@@ -824,9 +906,10 @@ async function fetchBidBoardFromSyncHub(maxRecords: number): Promise<SourceRecor
            OR (procore_project_number IS NOT NULL AND btrim(procore_project_number) <> '')
         ORDER BY created_at DESC NULLS LAST, id DESC
         LIMIT $1`,
-      [maxRecords]
+      [queryLimit]
     );
-    return result.rows.map((row) => ({
+    const deduped = dedupeSyncHubMappingRows(result.rows);
+    const records = deduped.slice(0, maxRecords).map((row) => ({
       id: cleanText(row.bidboard_project_id) ?? `sync_mapping:${row.id}`,
       name: null,
       projectNumber: cleanText(row.procore_project_number),
@@ -837,45 +920,137 @@ async function fetchBidBoardFromSyncHub(maxRecords: number): Promise<SourceRecor
         createdAt: row.created_at,
       },
     }));
+    return {
+      records,
+      state: { truncated: deduped.length > maxRecords || result.rows.length === queryLimit, fetchedCount: records.length, maxRecords },
+    };
   } finally {
     await client.end().catch(() => {});
   }
 }
 
-async function fetchBidBoardProjects(maxRecords: number): Promise<SourceRecord[]> {
+async function fetchBidBoardProjects(maxRecords: number): Promise<SourceFetchResult> {
   const exportPath = process.env.BID_BOARD_EXPORT_PATH?.trim();
   if (exportPath) return fetchBidBoardFromExport(exportPath, maxRecords);
   return fetchBidBoardFromSyncHub(maxRecords);
 }
 
-async function fetchPortfolioProjects(maxRecords: number): Promise<SourceRecord[]> {
-  const companyId = process.env.PROCORE_COMPANY_ID;
+interface ProcoreTokenRow {
+  access_token: string | null;
+  token_expires_at: Date | string | null;
+  status: string | null;
+}
+
+interface TokenClient {
+  query: (text: string, values?: unknown[]) => Promise<{ rows: ProcoreTokenRow[] }>;
+}
+
+interface PortfolioFetchOptions {
+  env?: NodeJS.ProcessEnv | Record<string, string | undefined>;
+  tokenClient?: TokenClient;
+  fetchImpl?: typeof fetch;
+  decryptToken?: (value: string) => string;
+  now?: () => Date;
+}
+
+async function resolveReadOnlyProcoreToken(options: PortfolioFetchOptions = {}) {
+  const env = options.env ?? process.env;
+  const companyId = env.PROCORE_COMPANY_ID?.trim();
   if (!companyId) throw new Error("PROCORE_COMPANY_ID is required for Portfolio source diagnostics");
+  if (!env.PROCORE_CLIENT_ID?.trim()) throw new Error("PROCORE_CLIENT_ID is required for Portfolio source diagnostics");
+  if (!env.PROCORE_CLIENT_SECRET?.trim()) throw new Error("PROCORE_CLIENT_SECRET is required for Portfolio source diagnostics");
+
+  const client = options.tokenClient ?? new pg.Client({ connectionString: connectionString() });
+  const ownsClient = !options.tokenClient;
+  try {
+    if (ownsClient && "connect" in client && typeof client.connect === "function") {
+      await client.connect();
+    }
+    const result = await client.query(
+      `SELECT access_token, token_expires_at, status
+         FROM public.procore_oauth_tokens
+        WHERE singleton_key = $1
+        LIMIT 1`,
+      [1]
+    );
+    const row = result.rows[0];
+    if (!row) throw new Error("Procore OAuth token not found. Connect Procore via the normal CRM flow before running this diagnostic.");
+    if (row.status !== "active") throw new Error("Procore OAuth token is not active. Reconnect Procore via the normal CRM flow before running this diagnostic.");
+    if (!row.access_token) throw new Error("Procore OAuth token is empty. Reconnect Procore via the normal CRM flow before running this diagnostic.");
+    const expiresAt = row.token_expires_at instanceof Date ? row.token_expires_at : new Date(String(row.token_expires_at));
+    if (Number.isNaN(expiresAt.getTime()) || expiresAt.getTime() <= (options.now?.() ?? new Date()).getTime()) {
+      throw new Error("Procore token expired. Refresh manually via the normal CRM flow before running this diagnostic.");
+    }
+    return {
+      companyId,
+      accessToken: (options.decryptToken ?? decrypt)(row.access_token),
+    };
+  } finally {
+    if (ownsClient && "end" in client && typeof client.end === "function") {
+      await client.end().catch(() => {});
+    }
+  }
+}
+
+export async function fetchPortfolioProjects(maxRecords: number, options: PortfolioFetchOptions = {}): Promise<SourceFetchResult> {
+  const auth = await resolveReadOnlyProcoreToken(options);
+  const fetchImpl = options.fetchImpl ?? fetch;
   const rows: SourceRecord[] = [];
   let page = 1;
   const pageSize = 100;
+  let truncated = false;
   while (rows.length < maxRecords) {
-    const pageRows = await listCompanyProjectCandidatesPage(companyId, page, pageSize);
+    const response = await fetchImpl(`https://api.procore.com/rest/v1.0/companies/${auth.companyId}/projects?page=${page}&per_page=${pageSize}`, {
+      method: "GET",
+      headers: {
+        Authorization: `Bearer ${auth.accessToken}`,
+        Accept: "application/json",
+        "Procore-Company-Id": auth.companyId,
+      },
+    });
+    if (!response.ok) {
+      const text = await response.text().catch(() => "");
+      throw new Error(`Procore read-only portfolio fetch failed: ${response.status} ${text}`);
+    }
+    const pageRows = await response.json() as Array<{
+      id: number;
+      name?: string | null;
+      display_name?: string | null;
+      displayName?: string | null;
+      project_number?: string | null;
+      projectNumber?: string | null;
+      city?: string | null;
+      state_code?: string | null;
+      stateCode?: string | null;
+      address?: string | { street?: string | null; city?: string | null; state_code?: string | null; stateCode?: string | null } | null;
+      updated_at?: string | null;
+      updatedAt?: string | null;
+    }>;
     if (pageRows.length === 0) break;
+    const remainingCapacity = maxRecords - rows.length;
+    if (pageRows.length > remainingCapacity) truncated = true;
     rows.push(
-      ...pageRows.map((row) => ({
+      ...pageRows.slice(0, remainingCapacity).map((row) => ({
         id: String(row.id),
-        name: row.name,
-        projectNumber: row.projectNumber,
+        name: row.display_name ?? row.displayName ?? row.name ?? `Project ${row.id}`,
+        projectNumber: row.project_number ?? row.projectNumber ?? null,
         active: true,
         sourceSystem: "procore_portfolio",
         metadata: {
-          city: row.city,
-          state: row.state,
-          address: row.address,
-          updatedAt: row.updatedAt,
+          city: row.city ?? (typeof row.address === "object" ? row.address?.city ?? null : null),
+          state: row.state_code ?? row.stateCode ?? (typeof row.address === "object" ? row.address?.state_code ?? row.address?.stateCode ?? null : null),
+          address: typeof row.address === "string" ? row.address : row.address?.street ?? null,
+          updatedAt: row.updated_at ?? row.updatedAt ?? null,
         },
       }))
     );
-    if (pageRows.length < pageSize) break;
+    if (pageRows.length < pageSize || rows.length >= maxRecords) break;
     page += 1;
   }
-  return rows.slice(0, maxRecords);
+  return {
+    records: rows.slice(0, maxRecords),
+    state: { truncated, fetchedCount: Math.min(rows.length, maxRecords), maxRecords },
+  };
 }
 
 export function renderTextReport(report: GapAnalysisReport): string {
@@ -886,6 +1061,10 @@ export function renderTextReport(report: GapAnalysisReport): string {
   lines.push(`Tenants: ${report.scope.tenantSchemas.join(", ")}`);
   lines.push(`Source: ${report.scope.source}`);
   lines.push("");
+  if (report.partialSnapshotWarning) {
+    lines.push(report.partialSnapshotWarning);
+    lines.push("");
+  }
   lines.push("Assumptions");
   for (const assumption of report.assumptions) lines.push(`- ${assumption}`);
   lines.push("");
@@ -930,11 +1109,19 @@ export async function main() {
     await client.connect();
     const tenantSchemas = await loadTenantSchemas(client, options);
     const crmDeals = await loadCrmDeals(client, tenantSchemas);
-    const [hubspotDeals, bidBoardProjects, portfolioProjects] = await Promise.all([
+    const [hubspotResult, bidBoardResult, portfolioResult] = await Promise.all([
       sources.hubspot ? fetchHubSpotDeals(options.maxSourceRecords) : Promise.resolve([]),
       sources.bidboard ? fetchBidBoardProjects(options.maxSourceRecords) : Promise.resolve([]),
       sources.portfolio ? fetchPortfolioProjects(options.maxSourceRecords) : Promise.resolve([]),
     ]);
+    const hubspotDeals = Array.isArray(hubspotResult) ? hubspotResult : hubspotResult.records;
+    const bidBoardProjects = Array.isArray(bidBoardResult) ? bidBoardResult : bidBoardResult.records;
+    const portfolioProjects = Array.isArray(portfolioResult) ? portfolioResult : portfolioResult.records;
+    const sourceStates: SourceStates = {
+      hubspot: Array.isArray(hubspotResult) ? { truncated: false, fetchedCount: 0, maxRecords: options.maxSourceRecords } : hubspotResult.state,
+      bidboard: Array.isArray(bidBoardResult) ? { truncated: false, fetchedCount: 0, maxRecords: options.maxSourceRecords } : bidBoardResult.state,
+      portfolio: Array.isArray(portfolioResult) ? { truncated: false, fetchedCount: 0, maxRecords: options.maxSourceRecords } : portfolioResult.state,
+    };
 
     if (sources.bidboard && !process.env.BID_BOARD_EXPORT_PATH) {
       sourceNotes.push("Bid Board source rows came from SyncHub sync_mappings because no BID_BOARD_EXPORT_PATH was provided.");
@@ -951,6 +1138,7 @@ export async function main() {
       includeRows: options.mode === "full-report",
       districtSearch: options.districtSearch,
       sourceNotes,
+      sourceStates,
     });
 
     if (options.format === "text") printText(report);
