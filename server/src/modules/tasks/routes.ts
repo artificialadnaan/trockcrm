@@ -348,6 +348,7 @@ router.post("/:id/complete", async (req, res, next) => {
           dealId: task.dealId,
           reason: "task_completed",
           taskId: task.id,
+          requestedBy: req.user!.id,
         },
         officeId: req.user!.activeOfficeId ?? req.user!.officeId,
         status: "pending",

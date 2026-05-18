@@ -3,6 +3,7 @@ import { pool } from "../db.js";
 export async function runAiRefreshCopilot(payload: {
   dealId: string;
   reason?: string;
+  requestedBy?: string;
 }, officeId: string | null): Promise<void> {
   console.log(
     `[Worker:ai-refresh-copilot] Refresh request dealId=${payload.dealId} reason=${payload.reason ?? "unknown"}`
@@ -15,6 +16,7 @@ export async function runAiRefreshCopilot(payload: {
       JSON.stringify({
         dealId: payload.dealId,
         reason: payload.reason ?? "refresh",
+        requestedBy: payload.requestedBy ?? null,
       }),
       officeId,
     ]

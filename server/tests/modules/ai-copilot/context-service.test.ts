@@ -94,7 +94,11 @@ describe("AI copilot schema exports", () => {
 
     const activityQueryChunks = flattenQueryChunks(tenantDb.execute.mock.calls[1]?.[0]);
     const emailQueryChunks = flattenQueryChunks(tenantDb.execute.mock.calls[2]?.[0]);
+    const emailQuerySql = emailQueryChunks.map((chunk) => String(chunk)).join(" ");
     expect(activityQueryChunks).toContain("user-1");
     expect(emailQueryChunks).toContain("user-1");
+    expect(emailQuerySql).toContain("assigned_entity_type");
+    expect(emailQuerySql).toContain("assigned_entity_id");
+    expect(emailQuerySql).toContain("deal");
   });
 });
