@@ -466,10 +466,10 @@ describe("DirectorDashboardPage", () => {
     expect(html).toContain("Refresh dashboard");
   });
 
-  it("routes stale deal drilldowns to the filtered deals list", () => {
+  it("routes at-risk deal drilldowns to the filtered deals list", () => {
     const html = renderPageHtml();
 
-    expect(html).toContain('href="/deals?filter=stale&amp;period=qtd&amp;scope=team"');
+    expect(html).toContain('href="/deals?filter=at_risk&amp;period=qtd&amp;scope=team"');
     expect(html).not.toContain('href="/reports?range=qtd#stale-deals"');
   });
 
@@ -489,7 +489,7 @@ describe("DirectorDashboardPage", () => {
 
     expect(html).toContain('href="/deals?filter=active_pipeline&amp;period=qtd&amp;scope=team"');
     expect(html).toContain('href="/deals?filter=won&amp;period=qtd&amp;scope=team"');
-    expect(html).toContain('href="/deals?filter=stale&amp;period=qtd&amp;scope=team"');
+    expect(html).toContain('href="/deals?filter=at_risk&amp;period=qtd&amp;scope=team"');
     expect(html).toContain('href="/reports/performance/forecast-accuracy?range=qtd"');
     expect(html).toContain('href="/reports/performance/rep-activity?range=qtd"');
   });
@@ -675,7 +675,7 @@ describe("DirectorDashboardPage", () => {
     const html = renderPageHtml();
 
     expect(html).toContain("2 flagged deals across 2 reps");
-    expect(html).toContain('href="/reports/performance/forecast-accuracy?range=qtd"');
+    expect(html).toContain('href="/deals?filter=at_risk&amp;period=qtd&amp;scope=team"');
     expect(html).not.toContain('href="/reports#stale-deals"');
   });
 

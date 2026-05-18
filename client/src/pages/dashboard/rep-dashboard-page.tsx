@@ -25,6 +25,7 @@ const PERIODS = ["Today", "Week", "MTD", "QTD", "YTD"] as const;
 
 type Period = (typeof PERIODS)[number];
 type StageVariant = "amber" | "blue" | "green" | "red";
+type RepDealsFilter = "active_pipeline" | "opportunities" | "bid_board";
 
 interface TopDealRow {
   id: string;
@@ -103,6 +104,18 @@ function periodToActivityRange(period: Period): ActivityRange {
   if (period === "MTD") return "month";
   if (period === "YTD" || period === "QTD") return "ytd";
   return "week";
+}
+
+function periodToDealDrilldownPeriod(period: Period): "today" | "week" | "mtd" | "qtd" | "ytd" {
+  if (period === "Today") return "week";
+  if (period === "Week") return "week";
+  if (period === "QTD") return "qtd";
+  if (period === "YTD") return "ytd";
+  return "mtd";
+}
+
+export function buildRepDealsDrilldownPath(filter: RepDealsFilter, period: Period) {
+  return `/deals?filter=${filter}&period=${periodToDealDrilldownPeriod(period)}&scope=mine`;
 }
 
 function initials(name: string | null | undefined) {
@@ -576,6 +589,9 @@ export function RepDashboardPage() {
   const bidBoardCount = bucketCount(data, "estimating");
   const bidBoardValue = bucketValue(data, "estimating");
   const staleAge = Math.round(data.staleLeads.averageDaysInStage ?? 14);
+  const activeDealsPath = buildRepDealsDrilldownPath("active_pipeline", period);
+  const opportunitiesPath = buildRepDealsDrilldownPath("opportunities", period);
+  const bidBoardPath = buildRepDealsDrilldownPath("bid_board", period);
 
   return (
     <div className="space-y-6">
@@ -630,7 +646,7 @@ export function RepDashboardPage() {
           badge={`${data.activeDeals.count} deals`}
           caption="Open pipeline"
           accent="red"
-          to="/deals?filter=active_pipeline&scope=mine"
+          to={activeDealsPath}
           ariaLabel="View active deals"
         />
         <KpiCard
@@ -665,9 +681,9 @@ export function RepDashboardPage() {
         <CardContent className="p-0">
           <div className="grid grid-cols-2 divide-x divide-slate-100 border-b border-slate-100 lg:grid-cols-4">
             <KpiTile label="Leads" value={data.activeLeads.count} subtext={`${data.activeLeads.count} active`} to="/leads?scope=mine" />
-            <KpiTile label="Qualified" value={qualifiedCount} subtext={`${qualifiedCount} active`} to="/leads?stage=qualified_lead&scope=mine" />
-            <KpiTile label="Opportunities" value={opportunityCount} subtext={formatCompactUsd(opportunityValue)} to="/deals?filter=opportunities&scope=mine" />
-            <KpiTile label="Bid Board" value={bidBoardCount} subtext={formatCompactUsd(bidBoardValue)} to="/deals?filter=bid_board&scope=mine" />
+            <KpiTile label="Qualified" value={qualifiedCount} subtext={`${qualifiedCount} active`} to="/leads?bucket=qualified_lead&scope=mine" />
+            <KpiTile label="Opportunities" value={opportunityCount} subtext={formatCompactUsd(opportunityValue)} to={opportunitiesPath} />
+            <KpiTile label="Bid Board" value={bidBoardCount} subtext={formatCompactUsd(bidBoardValue)} to={bidBoardPath} />
           </div>
         </CardContent>
       </Card>
@@ -723,7 +739,7 @@ export function RepDashboardPage() {
           <ArrowUpRight className="ml-1.5 h-4 w-4" />
         </Link>
         <Link
-          to="/deals?filter=active_pipeline&scope=mine"
+          to={activeDealsPath}
           className={cn(buttonVariants({ variant: "default", size: "lg" }), "bg-brand-red text-white hover:bg-brand-red/90")}
         >
           Open my pipeline

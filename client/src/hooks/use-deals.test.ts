@@ -136,10 +136,11 @@ function flushEffects() {
 let latestResult: ReturnType<typeof useDealBoard> | null = null;
 let latestDealsResult: ReturnType<typeof useDeals> | null = null;
 let hookTerminalDateFilters: Record<TerminalOutcome, TerminalDateFilter> | undefined;
+let hookPreviewLimit: number | null | undefined;
 let hookDealFilters: DealFilters = {};
 
 function HookProbe() {
-  latestResult = useDealBoard("mine", false, hookTerminalDateFilters);
+  latestResult = useDealBoard("mine", false, hookTerminalDateFilters, hookPreviewLimit);
   return null;
 }
 
@@ -221,6 +222,7 @@ describe("normalizeDealBoardResponse", () => {
     latestResult = null;
     latestDealsResult = null;
     hookTerminalDateFilters = undefined;
+    hookPreviewLimit = undefined;
     hookDealFilters = {};
     vi.clearAllMocks();
   });
@@ -439,6 +441,30 @@ describe("normalizeDealBoardResponse", () => {
       await flushEffects();
     });
     vi.unstubAllGlobals();
+  });
+
+  it("passes a larger previewLimit when the caller requests a drill-down board window", async () => {
+    const apiMock = vi.mocked(api);
+    apiMock.mockResolvedValueOnce({
+      pipelineColumns: [],
+      terminalStages: [],
+    });
+    hookTerminalDateFilters = undefined;
+    hookPreviewLimit = 1000;
+
+    const root = await renderHook();
+    await waitForIdle();
+
+    const requestPath = String(apiMock.mock.calls[apiMock.mock.calls.length - 1]?.[0]);
+    expect(requestPath).toContain("/deals/pipeline?");
+    expect(requestPath).toContain("previewLimit=1000");
+
+    await act(async () => {
+      root.unmount();
+      await flushEffects();
+    });
+    vi.unstubAllGlobals();
+    hookPreviewLimit = undefined;
   });
 
   it("passes terminal date filters through to deal stage drill-down requests", async () => {

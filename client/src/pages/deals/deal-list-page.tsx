@@ -48,6 +48,8 @@ const STAGE_SLA_DAYS: Record<string, number> = {
   lost: 0,
 };
 
+const SLA_DRILLDOWN_PREVIEW_LIMIT = 1000;
+
 export type DashboardDealListFilter =
   | "active"
   | "active_pipeline"
@@ -59,7 +61,7 @@ export type DashboardDealListFilter =
   | "bid_board"
   | null;
 
-type DashboardPeriod = "mtd" | "qtd" | "ytd" | "last_month" | "last_quarter" | "last_year";
+type DashboardPeriod = "today" | "week" | "mtd" | "qtd" | "ytd" | "last_month" | "last_quarter" | "last_year";
 
 type DashboardDealListView = {
   filter: DashboardDealListFilter;
@@ -72,6 +74,10 @@ type DashboardDealListView = {
   showEmbeddedList: boolean;
   initialStageSlugs: string[];
   boardStageSlugs: string[];
+};
+
+type DrilldownListRow = Deal & {
+  boardStageName: string;
 };
 
 export function formatDateInput(date: Date) {
@@ -95,6 +101,8 @@ function endOfPreviousQuarter(date: Date) {
 
 function normalizeDashboardPeriod(periodParam: string | null | undefined): DashboardPeriod {
   switch (periodParam) {
+    case "today":
+    case "week":
     case "mtd":
     case "qtd":
     case "ytd":
@@ -109,6 +117,10 @@ function normalizeDashboardPeriod(periodParam: string | null | undefined): Dashb
 
 function getDashboardPeriodLabel(period: DashboardPeriod) {
   switch (period) {
+    case "today":
+      return "Today";
+    case "week":
+      return "Week";
     case "mtd":
       return "MTD";
     case "qtd":
@@ -126,6 +138,16 @@ function getDashboardPeriodLabel(period: DashboardPeriod) {
 
 function getDashboardPeriodDateRange(period: DashboardPeriod, now = new Date()) {
   const today = new Date(now);
+  if (period === "today") {
+    return { from: formatDateInput(today), to: formatDateInput(today) };
+  }
+  if (period === "week") {
+    const start = new Date(today);
+    const dayOfWeek = start.getDay();
+    const diffToMonday = (dayOfWeek + 6) % 7;
+    start.setDate(start.getDate() - diffToMonday);
+    return { from: formatDateInput(start), to: formatDateInput(today) };
+  }
   if (period === "mtd") {
     return { from: formatDateInput(new Date(today.getFullYear(), today.getMonth(), 1)), to: formatDateInput(today) };
   }
@@ -277,7 +299,7 @@ export function getDashboardDealListView(input: {
         updatedTo: periodRange.to,
       },
       listInitialSort: { key: "stage_entered_at", dir: "asc" },
-      showEmbeddedList: false,
+      showEmbeddedList: true,
       initialStageSlugs: [],
       boardStageSlugs: [],
     };
@@ -328,6 +350,57 @@ export function buildDealStageNavigationPath(
 
 function moneyValue(deal: Deal) {
   return Number(deal.awardedAmount ?? deal.bidEstimate ?? deal.ddEstimate ?? 0);
+}
+
+function compareDrilldownDeals(left: DrilldownListRow, right: DrilldownListRow, sort: DealListSortState) {
+  const direction = sort.dir === "asc" ? 1 : -1;
+  const textCompare = (a: string, b: string) => a.localeCompare(b) * direction;
+  const numberCompare = (a: number, b: number) => (a - b) * direction;
+  const dateCompare = (a?: string | null, b?: string | null) =>
+    numberCompare(new Date(a ?? 0).getTime() || 0, new Date(b ?? 0).getTime() || 0);
+
+  switch (sort.key) {
+    case "name":
+      return textCompare(left.name, right.name);
+    case "awarded_amount":
+      return numberCompare(moneyValue(left), moneyValue(right));
+    case "stage_entered_at":
+      return dateCompare(left.stageEnteredAt, right.stageEnteredAt);
+    case "expected_close_date":
+      return dateCompare(left.expectedCloseDate, right.expectedCloseDate);
+    case "contract_signed_date":
+      return dateCompare(left.actualCloseDate, right.actualCloseDate);
+    case "updated_at":
+    default:
+      return dateCompare(left.updatedAt, right.updatedAt);
+  }
+}
+
+function parseLocalDay(value: string) {
+  const [year, month, day] = value.split("-").map(Number);
+  return new Date(year, month - 1, day, 0, 0, 0, 0);
+}
+
+function parseDayEnd(value: string) {
+  const date = parseLocalDay(value);
+  date.setHours(23, 59, 59, 999);
+  return date.getTime();
+}
+
+function parseDayStart(value: string) {
+  return parseLocalDay(value).getTime();
+}
+
+export function matchesUpdatedRange(deal: Deal, updatedFrom?: string, updatedTo?: string) {
+  if (!updatedFrom && !updatedTo) return true;
+
+  const updatedAt = new Date(deal.updatedAt).getTime();
+  if (Number.isNaN(updatedAt)) return false;
+
+  if (updatedFrom && updatedAt < parseDayStart(updatedFrom)) return false;
+  if (updatedTo && updatedAt > parseDayEnd(updatedTo)) return false;
+
+  return true;
 }
 
 function DealsBoardColumn({
@@ -419,11 +492,11 @@ function DealListPageContent({ role }: { role: string }) {
   const navigate = useNavigate();
   const [searchParams, setSearchParams] = useSearchParams();
   const [search, setSearch] = useState("");
+  const [drilldownPage, setDrilldownPage] = useState(1);
   const [terminalDateFilters, setTerminalDateFilters] = useState<Record<TerminalOutcome, TerminalDateFilter>>(() =>
     readTerminalDateFiltersFromSearchParams(searchParams)
   );
   const scope = getScope(searchParams, role);
-  const { board, loading, error } = useDealBoard(scope, true, terminalDateFilters);
   const { stages } = usePipelineStages("deal");
   const dashboardView = useMemo(
     () =>
@@ -432,6 +505,13 @@ function DealListPageContent({ role }: { role: string }) {
         periodParam: searchParams.get("period"),
       }),
     [searchParams]
+  );
+  const isAtRiskDrilldown = dashboardView.filter === "stale" || dashboardView.filter === "at_risk";
+  const { board, loading, error } = useDealBoard(
+    scope,
+    true,
+    terminalDateFilters,
+    isAtRiskDrilldown ? SLA_DRILLDOWN_PREVIEW_LIMIT : 8
   );
 
   useEffect(() => {
@@ -455,6 +535,7 @@ function DealListPageContent({ role }: { role: string }) {
   const columns = useMemo(
     () => {
       const searchTerm = search.trim().toLowerCase();
+      const { updatedFrom, updatedTo } = dashboardView.listBaseFilters;
       const sourceColumns =
         dashboardView.boardStageSlugs.length > 0
           ? boardColumns.filter((column) => dashboardView.boardStageSlugs.includes(column.stage.slug))
@@ -468,7 +549,7 @@ function DealListPageContent({ role }: { role: string }) {
                   .map((column) => {
                     const cards = column.cards.filter((deal) => {
                       const sla = STAGE_SLA_DAYS[column.stage.slug] ?? 7;
-                      return sla > 0 && daysInStage(deal.stageEnteredAt) > sla;
+                      return sla > 0 && daysInStage(deal.stageEnteredAt) > sla && matchesUpdatedRange(deal, updatedFrom, updatedTo);
                     });
                     return {
                       ...column,
@@ -504,7 +585,7 @@ function DealListPageContent({ role }: { role: string }) {
           };
         });
     },
-    [boardColumns, dashboardView.boardMode, dashboardView.boardStageSlugs, search]
+    [boardColumns, dashboardView.boardMode, dashboardView.boardStageSlugs, dashboardView.listBaseFilters, search]
   );
   const activePipelineColumns = getActivePipelineColumns(boardColumns);
   const drilldownVisibleStages = useMemo(
@@ -520,6 +601,24 @@ function DealListPageContent({ role }: { role: string }) {
           : undefined,
     [dashboardView.boardMode, dashboardView.boardStageSlugs, stages]
   );
+  const drilldownDeals = useMemo(() => {
+    if (!isAtRiskDrilldown) return [];
+
+    return columns
+      .flatMap((column) =>
+        column.cards.map((deal) => ({
+          ...deal,
+          boardStageName: column.stage.name,
+        }))
+      )
+      .sort((left, right) => compareDrilldownDeals(left, right, dashboardView.listInitialSort));
+  }, [columns, dashboardView.listInitialSort, isAtRiskDrilldown]);
+  const drilldownPageSize = 20;
+  const drilldownTotalPages = Math.max(1, Math.ceil(drilldownDeals.length / drilldownPageSize));
+  const paginatedDrilldownDeals = useMemo(() => {
+    const start = (drilldownPage - 1) * drilldownPageSize;
+    return drilldownDeals.slice(start, start + drilldownPageSize);
+  }, [drilldownDeals, drilldownPage]);
   const totalCount = activePipelineColumns.reduce((sum, column) => sum + column.count, 0);
   const totalValue = activePipelineColumns.reduce((sum, column) => sum + column.totalValue, 0);
   const wonValue =
@@ -550,6 +649,10 @@ function DealListPageContent({ role }: { role: string }) {
   const openStage = (column: DealBoardColumn) => {
     navigate(buildDealStageNavigationPath(column, scope, terminalDateFilters));
   };
+
+  useEffect(() => {
+    setDrilldownPage(1);
+  }, [drilldownDeals.length, search, searchParams]);
 
   // Synced top scrollbar proxy (matches /pipeline pattern).
   const mainScrollRef = useRef<HTMLDivElement>(null);
@@ -727,22 +830,85 @@ function DealListPageContent({ role }: { role: string }) {
       </section>
 
       {dashboardView.showEmbeddedList ? (
-        <DealsListSection
-          workflowFamily="deal"
-          scope={scope}
-          enableExport
-          enableDateFilter={false}
-          showFilterButton
-          pageSize={20}
-          searchPlaceholder="Search deals or accounts"
-          title={dashboardView.title}
-          subtitle={dashboardView.subtitle}
-          eyebrow={dashboardView.eyebrow}
-          visibleStages={drilldownVisibleStages}
-          baseFilters={dashboardView.listBaseFilters}
-          initialSort={dashboardView.listInitialSort}
-          initialStageSlugs={dashboardView.initialStageSlugs}
-        />
+        <>
+          {isAtRiskDrilldown ? (
+            <section className="rounded-lg border border-amber-200 bg-amber-50 p-4 text-sm font-semibold text-amber-900">
+              Drill-down view: SLA filter applied to list and board.
+            </section>
+          ) : null}
+          {isAtRiskDrilldown && !loading ? (
+            <section className="rounded-lg border border-slate-200 bg-white p-5 shadow-sm">
+              <div className="flex items-end justify-between gap-4 border-b border-slate-100 pb-4">
+                <div>
+                  <p className="text-[11px] font-black uppercase tracking-[0.18em] text-slate-500">{dashboardView.eyebrow}</p>
+                  <h2 className="mt-2 text-2xl font-black uppercase tracking-tight text-slate-950">{dashboardView.title}</h2>
+                  <p className="mt-1 text-sm font-medium text-slate-500">{dashboardView.subtitle}</p>
+                </div>
+                <div className="text-right">
+                  <p className="text-[11px] font-black uppercase tracking-[0.18em] text-slate-500">Filtered results</p>
+                  <p className="mt-1 text-2xl font-black text-slate-950">{drilldownDeals.length}</p>
+                </div>
+              </div>
+              <div className="divide-y divide-slate-100">
+                {paginatedDrilldownDeals.map((deal) => (
+                  <button
+                    key={deal.id}
+                    type="button"
+                    onClick={() => navigate(`/deals/${deal.id}`)}
+                    className="grid w-full gap-3 px-1 py-4 text-left transition-colors hover:bg-slate-50 md:grid-cols-[minmax(0,1.4fr)_auto_auto_auto]"
+                  >
+                    <div className="min-w-0">
+                      <p className="truncate text-sm font-black text-slate-950">{deal.name}</p>
+                      <p className="mt-1 text-xs font-semibold uppercase tracking-[0.12em] text-slate-500">{deal.boardStageName}</p>
+                    </div>
+                    <p className="text-sm font-semibold text-slate-500">{daysInStage(deal.stageEnteredAt)}d in stage</p>
+                    <p className="text-sm font-semibold text-slate-500">{formatDateInput(new Date(deal.updatedAt))}</p>
+                    <p className="text-sm font-black text-slate-950">{USD_COMPACT(moneyValue(deal))}</p>
+                  </button>
+                ))}
+                {paginatedDrilldownDeals.length === 0 ? (
+                  <div className="px-1 py-8 text-sm font-semibold text-slate-500">No deals match this SLA drill-down.</div>
+                ) : null}
+              </div>
+              {drilldownTotalPages > 1 ? (
+                <div className="mt-4 flex items-center justify-between border-t border-slate-100 pt-4">
+                  <p className="text-sm font-medium text-slate-500">
+                    Page {drilldownPage} of {drilldownTotalPages}
+                  </p>
+                  <div className="flex items-center gap-2">
+                    <Button type="button" variant="outline" onClick={() => setDrilldownPage((page) => Math.max(1, page - 1))} disabled={drilldownPage <= 1}>
+                      Previous
+                    </Button>
+                    <Button type="button" variant="outline" onClick={() => setDrilldownPage((page) => Math.min(drilldownTotalPages, page + 1))} disabled={drilldownPage >= drilldownTotalPages}>
+                      Next
+                    </Button>
+                  </div>
+                </div>
+              ) : null}
+            </section>
+          ) : isAtRiskDrilldown ? (
+            <section className="rounded-lg border border-slate-200 bg-white p-5 shadow-sm">
+              <div className="text-sm font-semibold text-slate-500">Loading SLA drill-down...</div>
+            </section>
+          ) : (
+            <DealsListSection
+              workflowFamily="deal"
+              scope={scope}
+              enableExport
+              enableDateFilter={false}
+              showFilterButton
+              pageSize={20}
+              searchPlaceholder="Search deals or accounts"
+              title={dashboardView.title}
+              subtitle={dashboardView.subtitle}
+              eyebrow={dashboardView.eyebrow}
+              visibleStages={drilldownVisibleStages}
+              baseFilters={dashboardView.listBaseFilters}
+              initialSort={dashboardView.listInitialSort}
+              initialStageSlugs={dashboardView.initialStageSlugs}
+            />
+          )}
+        </>
       ) : (
         <section className="rounded-lg border border-amber-200 bg-amber-50 p-4 text-sm font-semibold text-amber-900">
           The filtered board above is the source of truth for this dashboard drill-down. The paginated deal list is hidden here because the

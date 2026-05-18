@@ -56,7 +56,7 @@ describe("getDealsForPipeline", () => {
     dbState.responses = [];
   });
 
-  it("limits board payload cards to the preview window while keeping the full count", async () => {
+  it("uses the requested drill-down preview limit while keeping the full count", async () => {
     dbState.responses = [
       [
         {
@@ -92,7 +92,7 @@ describe("getDealsForPipeline", () => {
     }));
     const tenantResponses = [
       [{ count: 110, totalValue: 110000 }],
-      stageDeals.slice(0, 100),
+      stageDeals,
     ];
     const tenantChains: any[] = [];
     const tenantDb = {
@@ -109,10 +109,12 @@ describe("getDealsForPipeline", () => {
       activeOfficeId: null,
       scope: "all",
       includeDd: true,
+      previewLimit: 1000,
     });
 
     expect(result.pipelineColumns[0]?.count).toBe(110);
-    expect(result.pipelineColumns[0]?.deals).toHaveLength(100);
+    expect(result.pipelineColumns[0]?.deals).toHaveLength(110);
+    expect(tenantChains[1].limit).toHaveBeenCalledWith(1000);
     const summaryWhere = extractSqlText(tenantChains[0].where.mock.calls[0][0]).toLowerCase();
     const cardsWhere = extractSqlText(tenantChains[1].where.mock.calls[0][0]).toLowerCase();
     expect(summaryWhere).toContain("bid_board_stage_slug");
@@ -121,5 +123,44 @@ describe("getDealsForPipeline", () => {
     expect(cardsWhere).toContain("bid_board_stage_slug");
     expect(cardsWhere).toContain("not in");
     expect(cardsWhere).toContain("service_lost");
+  });
+
+  it("clamps oversized drill-down preview requests to the server maximum", async () => {
+    dbState.responses = [
+      [
+        {
+          id: "stage-estimating",
+          slug: "estimating",
+          name: "Estimating",
+          displayOrder: 1,
+          isTerminal: false,
+          isActivePipeline: true,
+        },
+      ],
+    ];
+
+    const tenantResponses = [
+      [{ count: 1500, totalValue: 1500000 }],
+      [],
+    ];
+    const tenantChains: any[] = [];
+    const tenantDb = {
+      select: vi.fn(() => {
+        const chain = createChainableMock();
+        tenantChains.push(chain);
+        chain.then.mockImplementation((resolve: (value: any[]) => unknown) => resolve(tenantResponses.shift() ?? []));
+        return chain;
+      }),
+    } as any;
+
+    const { getDealsForPipeline } = await import("../../../src/modules/deals/service.js");
+    await getDealsForPipeline(tenantDb, "director", "director-1", {
+      activeOfficeId: null,
+      scope: "all",
+      includeDd: true,
+      previewLimit: 5000,
+    });
+
+    expect(tenantChains[1].limit).toHaveBeenCalledWith(1000);
   });
 });
