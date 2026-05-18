@@ -137,10 +137,11 @@ let latestResult: ReturnType<typeof useDealBoard> | null = null;
 let latestDealsResult: ReturnType<typeof useDeals> | null = null;
 let hookTerminalDateFilters: Record<TerminalOutcome, TerminalDateFilter> | undefined;
 let hookPreviewLimit: number | null | undefined;
+let hookWonPeriodRange: { from?: string; to?: string } | null | undefined;
 let hookDealFilters: DealFilters = {};
 
 function HookProbe() {
-  latestResult = useDealBoard("mine", false, hookTerminalDateFilters, hookPreviewLimit);
+  latestResult = useDealBoard("mine", false, hookTerminalDateFilters, hookPreviewLimit, hookWonPeriodRange);
   return null;
 }
 
@@ -223,6 +224,7 @@ describe("normalizeDealBoardResponse", () => {
     latestDealsResult = null;
     hookTerminalDateFilters = undefined;
     hookPreviewLimit = undefined;
+    hookWonPeriodRange = undefined;
     hookDealFilters = {};
     vi.clearAllMocks();
   });
@@ -435,6 +437,33 @@ describe("normalizeDealBoardResponse", () => {
     expect(requestPath).toMatch(/won_since=\d{4}-\d{2}-\d{2}/);
     expect(requestPath).toContain("lost_since=2026-04-01");
     expect(requestPath).toContain("lost_until=2026-04-30");
+
+    await act(async () => {
+      root.unmount();
+      await flushEffects();
+    });
+    vi.unstubAllGlobals();
+  });
+
+  it("adds the won period range to the board request when provided", async () => {
+    const apiMock = vi.mocked(api);
+    apiMock.mockResolvedValueOnce({
+      pipelineColumns: [],
+      terminalStages: [],
+    });
+    hookWonPeriodRange = {
+      from: "2026-04-01",
+      to: "2026-04-30",
+    };
+
+    const root = await renderHook();
+    await waitForIdle();
+
+    expect(apiMock).toHaveBeenCalledTimes(1);
+    const requestPath = String(apiMock.mock.calls[0]?.[0]);
+    expect(requestPath).toContain("/deals/pipeline?");
+    expect(requestPath).toContain("won_period_from=2026-04-01");
+    expect(requestPath).toContain("won_period_to=2026-04-30");
 
     await act(async () => {
       root.unmount();

@@ -81,6 +81,8 @@ export interface PipelineTerminalDateFilters {
   wonSince?: string;
   wonUntil?: string;
   wonAllTime?: boolean;
+  wonPeriodFrom?: string;
+  wonPeriodTo?: string;
   lostSince?: string;
   lostUntil?: string;
   lostAllTime?: boolean;
@@ -311,6 +313,17 @@ function parseIsoDateParam(value: string | undefined): Date | null {
   if (!value) return null;
   const parsed = new Date(value);
   return Number.isNaN(parsed.getTime()) ? null : parsed;
+}
+
+function resolvePipelineWonPeriodRange(input: Pick<PipelineTerminalDateFilters, "wonPeriodFrom" | "wonPeriodTo">) {
+  return {
+    from: parseIsoDateParam(input.wonPeriodFrom),
+    to: parseIsoDateParam(input.wonPeriodTo),
+  };
+}
+
+function toIsoDateOnly(value: Date | null) {
+  return value ? value.toISOString().slice(0, 10) : null;
 }
 
 export function resolvePipelineTerminalDateFilters(input: PipelineTerminalDateFilters = {}) {
@@ -1750,6 +1763,7 @@ export async function getDealsForPipeline(
     .orderBy(asc(pipelineStageConfig.displayOrder));
 
   const terminalFilters = resolvePipelineTerminalDateFilters(filters);
+  const wonPeriodRange = resolvePipelineWonPeriodRange(filters ?? {});
   const canonicalWonStageId = stages.find((stage) => stage.slug === "won" && stage.isActivePipeline)?.id ?? null;
   const canonicalLostStageId = stages.find((stage) => stage.slug === "lost" && stage.isActivePipeline)?.id ?? null;
   const wonStageIds = stages
@@ -1764,12 +1778,10 @@ export async function getDealsForPipeline(
         LOST_TERMINAL_STAGE_SLUGS.includes(stage.slug as (typeof LOST_TERMINAL_STAGE_SLUGS)[number])
     )
     .map((stage) => stage.id);
-  // Prefer the explicit stage-history entry timestamp. Older migrated rows may
-  // only have terminal marker fields, so fall back to contract/lost dates before
-  // using the current stage_entered_at value.
-  const wonEnteredAt = dealTerminalBusinessDateSql(
-    sql`COALESCE(${deals.contractSignedAt}, ${deals.contractSignedDate}::timestamptz)`
-  );
+  const wonSignedDateSince = toIsoDateOnly(terminalFilters.won.since);
+  const wonSignedDateUntil = toIsoDateOnly(terminalFilters.won.until);
+  const wonPeriodFrom = toIsoDateOnly(wonPeriodRange.from);
+  const wonPeriodTo = toIsoDateOnly(wonPeriodRange.to);
   const lostEnteredAt = dealTerminalBusinessDateSql(deals.lostAt);
   const pipelineCardsPerStageLimit = Math.max(
     1,
@@ -1825,11 +1837,17 @@ export async function getDealsForPipeline(
       stage.slug === "lost";
     if (WON_TERMINAL_STAGE_SLUGS.includes(stage.slug as (typeof WON_TERMINAL_STAGE_SLUGS)[number])) {
       stageConditions.push(canonicalWonStageId ? inArray(deals.stageId, wonStageIds) : eq(deals.stageId, stage.id));
-      if (terminalFilters.won.since) {
-        stageConditions.push(sql`${wonEnteredAt} >= ${terminalFilters.won.since}`);
+      if (wonSignedDateSince) {
+        stageConditions.push(sql`${contractSignedDateForReporting} >= ${wonSignedDateSince}::date`);
       }
-      if (terminalFilters.won.until) {
-        stageConditions.push(sql`${wonEnteredAt} < ${addUtcDays(terminalFilters.won.until, 1)}`);
+      if (wonSignedDateUntil) {
+        stageConditions.push(sql`${contractSignedDateForReporting} <= ${wonSignedDateUntil}::date`);
+      }
+      if (wonPeriodFrom) {
+        stageConditions.push(sql`${contractSignedDateForReporting} >= ${wonPeriodFrom}::date`);
+      }
+      if (wonPeriodTo) {
+        stageConditions.push(sql`${contractSignedDateForReporting} <= ${wonPeriodTo}::date`);
       }
     } else if (LOST_TERMINAL_STAGE_SLUGS.includes(stage.slug as (typeof LOST_TERMINAL_STAGE_SLUGS)[number])) {
       stageConditions.push(canonicalLostStageId ? inArray(deals.stageId, lostStageIds) : eq(deals.stageId, stage.id));

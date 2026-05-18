@@ -309,7 +309,14 @@ describe("Deal Scoping Routes", () => {
     } as never);
 
     const { req } = await invokeRoute("get", "/pipeline", {
-      query: { scope: "team", includeDd: "true", previewLimit: "1000", won_since: "2026-01-01" },
+      query: {
+        scope: "team",
+        includeDd: "true",
+        previewLimit: "1000",
+        won_since: "2026-01-01",
+        won_period_from: "2026-04-01",
+        won_period_to: "2026-04-30",
+      },
     });
 
     expect(dealService.getDealsForPipeline).toHaveBeenCalledWith(
@@ -321,6 +328,8 @@ describe("Deal Scoping Routes", () => {
         includeDd: true,
         previewLimit: 1000,
         wonSince: "2026-01-01",
+        wonPeriodFrom: "2026-04-01",
+        wonPeriodTo: "2026-04-30",
       })
     );
   });

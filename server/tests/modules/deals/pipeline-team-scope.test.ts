@@ -47,6 +47,9 @@ function extractSqlText(value: unknown): string {
 
 function containsValue(value: unknown, expected: string, seen = new Set<unknown>()): boolean {
   if (value === expected) return true;
+  if (value instanceof Date) {
+    return value.toISOString().startsWith(expected);
+  }
   if (!value || typeof value !== "object") return false;
   if (seen.has(value)) return false;
   seen.add(value);
@@ -404,6 +407,57 @@ describe("getDealsForPipeline team scope", () => {
       .filter((condition) => containsValue(condition, "stage-won"));
     expect(canonicalConditions).toHaveLength(1);
     expect(canonicalConditions.every((condition) => containsValue(condition, "stage-sent"))).toBe(true);
+  });
+
+  it("intersects won period bounds with the won terminal date filter for terminal aggregates", async () => {
+    dbState.stages = [
+      {
+        id: "stage-won",
+        slug: "won",
+        name: "Won",
+        displayOrder: 7,
+        isTerminal: true,
+        isActivePipeline: true,
+      },
+    ];
+    const dealQuery = {
+      leftJoin: vi.fn().mockReturnThis(),
+      where: vi.fn().mockReturnThis(),
+      orderBy: vi.fn().mockReturnThis(),
+      limit: vi.fn().mockResolvedValue([]),
+    };
+    const tenantDb = {
+      select: vi.fn(() => ({
+        from: vi.fn((table: unknown) => {
+          if (table === deals) return dealQuery;
+          return dealQuery;
+        }),
+      })),
+    } as any;
+
+    const { getDealsForPipeline } = await import("../../../src/modules/deals/service.js");
+    await getDealsForPipeline(tenantDb, "admin", "admin-1", {
+      scope: "all",
+      activeOfficeId: "office-1",
+      includeDd: true,
+      wonSince: "2026-04-08",
+      wonUntil: "2026-05-08",
+      wonPeriodFrom: "2026-04-01",
+      wonPeriodTo: "2026-04-30",
+    });
+
+    const wonConditions = dealQuery.where.mock.calls
+      .map((call) => call[0])
+      .filter((condition) => containsValue(condition, "stage-won"));
+
+    expect(wonConditions).toHaveLength(1);
+    expect(containsValue(wonConditions[0], "2026-04-08")).toBe(true);
+    expect(containsValue(wonConditions[0], "2026-05-08")).toBe(true);
+    expect(containsValue(wonConditions[0], "2026-04-01")).toBe(true);
+    expect(containsValue(wonConditions[0], "2026-04-30")).toBe(true);
+    expect(extractSqlText(wonConditions[0])).toContain("contract_signed_at");
+    expect(extractSqlText(wonConditions[0])).toContain("contract_signed_date");
+    expect(extractSqlText(wonConditions[0])).not.toContain("stage_entered_at");
   });
 
   it("queries each active lost alias terminal column by its own stage when no canonical lost stage exists", async () => {

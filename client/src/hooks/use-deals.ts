@@ -631,7 +631,8 @@ export function useDealBoard(
   scope: "mine" | "team" | "all",
   includeDd: boolean,
   terminalDateFilters?: Record<TerminalOutcome, TerminalDateFilter>,
-  previewLimit: number | null = 8
+  previewLimit: number | null = 8,
+  wonPeriodRange?: { from?: string; to?: string } | null
 ) {
   const [board, setBoard] = useState<DealBoardResponse | null>(null);
   const [loading, setLoading] = useState(true);
@@ -650,6 +651,12 @@ export function useDealBoard(
     if (terminalDateFilters) {
       appendPipelineTerminalDateParams(params, terminalDateFilters);
     }
+    if (wonPeriodRange?.from) {
+      params.set("won_period_from", wonPeriodRange.from);
+    }
+    if (wonPeriodRange?.to) {
+      params.set("won_period_to", wonPeriodRange.to);
+    }
     return api<DealBoardApiResponse>(`/deals/pipeline?${params.toString()}`)
       .then((result) => {
         const normalized = normalizeDealBoardResponse(result);
@@ -661,7 +668,7 @@ export function useDealBoard(
         throw err;
       })
       .finally(() => setLoading(false));
-  }, [includeDd, previewLimit, scope, terminalDateFilters]);
+  }, [includeDd, previewLimit, scope, terminalDateFilters, wonPeriodRange?.from, wonPeriodRange?.to]);
 
   useEffect(() => {
     void refetch().catch(() => undefined);
