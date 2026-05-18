@@ -742,6 +742,20 @@ describe("DealListPage", () => {
     );
   });
 
+  it("treats period as a separate query param in active-pipeline drill-down urls", () => {
+    renderPage("/deals?scope=team&filter=active_pipeline&period=ytd", "director");
+
+    expect(mocks.dealsListSectionMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        title: "Active Pipeline",
+        baseFilters: expect.objectContaining({
+          updatedFrom: "2026-01-01",
+          updatedTo: "2026-05-08",
+        }),
+      })
+    );
+  });
+
   it("passes dashboard closed-won drill-down props into the embedded deals list", () => {
     renderPage("/deals?scope=all&filter=won&period=qtd", "admin");
 
