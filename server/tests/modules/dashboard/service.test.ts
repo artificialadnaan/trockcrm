@@ -675,7 +675,7 @@ describe("Dashboard Service", () => {
       });
     });
 
-    it("uses the latest current-stage history entry for downstream days-in-stage", async () => {
+    it("prefers canonical upstream stage timestamps over history ingest time for downstream days-in-stage", async () => {
       const { getDirectorDashboard } = await import("../../../src/modules/dashboard/service.js");
       const tenantDb = createMockTenantDb([
         [],
@@ -701,7 +701,36 @@ describe("Dashboard Service", () => {
       expect(downstreamQuery).toContain("from deal_stage_history");
       expect(downstreamQuery).toContain("max(dsh.created_at)");
       expect(downstreamQuery).toContain("dsh.to_stage_id = d.stage_id");
-      expect(downstreamQuery).toContain("coalesce(latest_current_stage_entered_at.entered_at, d.bid_board_stage_entered_at, d.stage_entered_at)");
+      expect(downstreamQuery).toContain("coalesce(d.bid_board_stage_entered_at, d.stage_entered_at, latest_current_stage_entered_at.entered_at)");
+      expect(downstreamQuery).not.toContain("coalesce(latest_current_stage_entered_at.entered_at, d.bid_board_stage_entered_at, d.stage_entered_at)");
+    });
+
+    it("keeps history as the downstream days-in-stage fallback when canonical timestamps are null", async () => {
+      const { getDirectorDashboard } = await import("../../../src/modules/dashboard/service.js");
+      const tenantDb = createMockTenantDb([
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+      ]);
+
+      await getDirectorDashboard(tenantDb, {
+        from: "2026-01-01",
+        to: "2026-03-31",
+        officeId: "office-1",
+        periodKind: "qtd",
+      });
+
+      const downstreamQuery = tenantDb.execute.mock.calls
+        .map(([query]: [unknown]) => extractSqlText(query).toLowerCase())
+        .find((text: string) => text.includes("mirrored_stage_status"));
+
+      const stageClockExpression = "coalesce(d.bid_board_stage_entered_at, d.stage_entered_at, latest_current_stage_entered_at.entered_at)";
+      expect(downstreamQuery).toContain(`extract(day from now() - ${stageClockExpression})::int as days_in_stage`);
+      expect(downstreamQuery).toContain(`extract(day from now() - ${stageClockExpression})::int`);
     });
   });
 

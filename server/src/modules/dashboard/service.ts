@@ -481,7 +481,7 @@ async function getDownstreamBottlenecks(
       d.workflow_route,
       COALESCE(NULLIF(TRIM(d.region_classification), ''), TRIM(CONCAT_WS(', ', d.property_city, d.property_state)), 'Unassigned region') AS region_classification,
       COALESCE(d.awarded_amount, d.bid_estimate, d.dd_estimate, 0)::numeric AS deal_value,
-      EXTRACT(DAY FROM NOW() - COALESCE(latest_current_stage_entered_at.entered_at, d.bid_board_stage_entered_at, d.stage_entered_at))::int AS days_in_stage,
+      EXTRACT(DAY FROM NOW() - COALESCE(d.bid_board_stage_entered_at, d.stage_entered_at, latest_current_stage_entered_at.entered_at))::int AS days_in_stage,
       COALESCE(mirror_psc.stale_threshold_days, psc.stale_threshold_days, 14)::int AS stale_threshold_days
     FROM deals d
     JOIN pipeline_stage_config psc ON psc.id = d.stage_id
@@ -499,7 +499,7 @@ async function getDownstreamBottlenecks(
       ${repFilter}
     ORDER BY
       GREATEST(
-        EXTRACT(DAY FROM NOW() - COALESCE(latest_current_stage_entered_at.entered_at, d.bid_board_stage_entered_at, d.stage_entered_at))::int
+        EXTRACT(DAY FROM NOW() - COALESCE(d.bid_board_stage_entered_at, d.stage_entered_at, latest_current_stage_entered_at.entered_at))::int
         - COALESCE(mirror_psc.stale_threshold_days, psc.stale_threshold_days, 14),
         0
       ) DESC,
