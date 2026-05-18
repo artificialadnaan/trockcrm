@@ -62,6 +62,7 @@ export type DashboardDealListFilter =
   | null;
 
 type DashboardPeriod = "today" | "week" | "mtd" | "qtd" | "ytd" | "last_month" | "last_quarter" | "last_year";
+type DashboardPeriodSelection = DashboardPeriod | null;
 
 type DashboardDealListView = {
   filter: DashboardDealListFilter;
@@ -99,7 +100,7 @@ function endOfPreviousQuarter(date: Date) {
   return new Date(date.getFullYear(), Math.floor(date.getMonth() / 3) * 3, 0);
 }
 
-function normalizeDashboardPeriod(periodParam: string | null | undefined): DashboardPeriod {
+function normalizeDashboardPeriod(periodParam: string | null | undefined): DashboardPeriodSelection {
   switch (periodParam) {
     case "today":
     case "week":
@@ -111,11 +112,12 @@ function normalizeDashboardPeriod(periodParam: string | null | undefined): Dashb
     case "last_year":
       return periodParam;
     default:
-      return "qtd";
+      return null;
   }
 }
 
-function getDashboardPeriodLabel(period: DashboardPeriod) {
+function getDashboardPeriodLabel(period: DashboardPeriodSelection) {
+  if (!period) return "All time";
   switch (period) {
     case "today":
       return "Today";
@@ -136,7 +138,8 @@ function getDashboardPeriodLabel(period: DashboardPeriod) {
   }
 }
 
-function getDashboardPeriodDateRange(period: DashboardPeriod, now = new Date()) {
+function getDashboardPeriodDateRange(period: DashboardPeriodSelection, now = new Date()) {
+  if (!period) return null;
   const today = new Date(now);
   if (period === "today") {
     return { from: formatDateInput(today), to: formatDateInput(today) };
@@ -213,12 +216,14 @@ export function getDashboardDealListView(input: {
       filter: input.filterParam === "active_pipeline" || input.filterParam === "pipeline" ? "active_pipeline" : "active",
       eyebrow: "Director drill-down",
       title: "Active Pipeline",
-      subtitle: `Open-stage deals for ${periodLabel}.`,
+      subtitle: period ? `Open-stage deals for ${periodLabel}.` : "Open-stage deals across the current pipeline.",
       boardMode: "active",
-      listBaseFilters: {
-        updatedFrom: periodRange.from,
-        updatedTo: periodRange.to,
-      },
+      listBaseFilters: periodRange
+        ? {
+            updatedFrom: periodRange.from,
+            updatedTo: periodRange.to,
+          }
+        : {},
       listInitialSort: { key: "updated_at", dir: "desc" },
       showEmbeddedList: true,
       initialStageSlugs: [],
@@ -231,12 +236,14 @@ export function getDashboardDealListView(input: {
       filter,
       eyebrow: "Director drill-down",
       title: "Closed Won",
-      subtitle: `Booked wins for ${periodLabel}.`,
+      subtitle: period ? `Booked wins for ${periodLabel}.` : "Booked wins across all time.",
       boardMode: "won",
-      listBaseFilters: {
-        contractSignedFrom: periodRange.from,
-        contractSignedTo: periodRange.to,
-      },
+      listBaseFilters: periodRange
+        ? {
+            contractSignedFrom: periodRange.from,
+            contractSignedTo: periodRange.to,
+          }
+        : {},
       listInitialSort: { key: "contract_signed_date", dir: "desc" },
       showEmbeddedList: true,
       initialStageSlugs: [],
@@ -249,12 +256,16 @@ export function getDashboardDealListView(input: {
       filter,
       eyebrow: "Director drill-down",
       title: "Closing Pipeline",
-      subtitle: `Active deals sorted by expected close date for ${periodLabel}.`,
+      subtitle: period
+        ? `Active deals sorted by expected close date for ${periodLabel}.`
+        : "Active deals sorted by expected close date.",
       boardMode: "active",
-      listBaseFilters: {
-        updatedFrom: periodRange.from,
-        updatedTo: periodRange.to,
-      },
+      listBaseFilters: periodRange
+        ? {
+            updatedFrom: periodRange.from,
+            updatedTo: periodRange.to,
+          }
+        : {},
       listInitialSort: { key: "expected_close_date", dir: "asc" },
       showEmbeddedList: true,
       initialStageSlugs: [],
@@ -270,13 +281,19 @@ export function getDashboardDealListView(input: {
       title: filter === "opportunities" ? "Opportunities" : "Bid Board",
       subtitle:
         filter === "opportunities"
-          ? `Opportunity-stage deals for ${periodLabel}.`
-          : `Estimating-stage deals for ${periodLabel}.`,
+          ? period
+            ? `Opportunity-stage deals for ${periodLabel}.`
+            : "Opportunity-stage deals."
+          : period
+            ? `Estimating-stage deals for ${periodLabel}.`
+            : "Estimating-stage deals.",
       boardMode: "all",
-      listBaseFilters: {
-        updatedFrom: periodRange.from,
-        updatedTo: periodRange.to,
-      },
+      listBaseFilters: periodRange
+        ? {
+            updatedFrom: periodRange.from,
+            updatedTo: periodRange.to,
+          }
+        : {},
       listInitialSort: { key: "updated_at", dir: "desc" },
       showEmbeddedList: true,
       initialStageSlugs: stageSlugs,
@@ -291,13 +308,19 @@ export function getDashboardDealListView(input: {
       title: filter === "stale" ? "Stale Deals" : "Deals At Risk",
       subtitle:
         filter === "stale"
-          ? `Open-stage deals past their stage SLA for ${periodLabel}.`
-          : `Open-stage deals over SLA and needing attention for ${periodLabel}.`,
+          ? period
+            ? `Open-stage deals past their stage SLA for ${periodLabel}.`
+            : "Open-stage deals past their stage SLA."
+          : period
+            ? `Open-stage deals over SLA and needing attention for ${periodLabel}.`
+            : "Open-stage deals over SLA and needing attention.",
       boardMode: "at_risk",
-      listBaseFilters: {
-        updatedFrom: periodRange.from,
-        updatedTo: periodRange.to,
-      },
+      listBaseFilters: periodRange
+        ? {
+            updatedFrom: periodRange.from,
+            updatedTo: periodRange.to,
+          }
+        : {},
       listInitialSort: { key: "stage_entered_at", dir: "asc" },
       showEmbeddedList: true,
       initialStageSlugs: [],
@@ -346,6 +369,18 @@ export function buildDealStageNavigationPath(
     scope,
     filters,
   });
+}
+
+export function buildDealsPageKpiDrilldownPath(
+  filter: Exclude<DashboardDealListFilter, null>,
+  scope: PipelineScope,
+  period?: DashboardPeriodSelection
+) {
+  const params = new URLSearchParams();
+  params.set("filter", filter);
+  params.set("scope", scope);
+  if (period) params.set("period", period);
+  return `/deals?${params.toString()}`;
 }
 
 function moneyValue(deal: Deal) {
@@ -497,6 +532,8 @@ function DealListPageContent({ role }: { role: string }) {
     readTerminalDateFiltersFromSearchParams(searchParams)
   );
   const scope = getScope(searchParams, role);
+  const selectedPeriod = useMemo(() => normalizeDashboardPeriod(searchParams.get("period")), [searchParams]);
+  const selectedPeriodRange = useMemo(() => getDashboardPeriodDateRange(selectedPeriod), [selectedPeriod]);
   const { stages } = usePipelineStages("deal");
   const dashboardView = useMemo(
     () =>
@@ -587,6 +624,35 @@ function DealListPageContent({ role }: { role: string }) {
     },
     [boardColumns, dashboardView.boardMode, dashboardView.boardStageSlugs, dashboardView.listBaseFilters, search]
   );
+  const unsearchedColumns = useMemo(() => {
+    const { updatedFrom, updatedTo } = dashboardView.listBaseFilters;
+    if (dashboardView.boardStageSlugs.length > 0) {
+      return boardColumns.filter((column) => dashboardView.boardStageSlugs.includes(column.stage.slug));
+    }
+    if (dashboardView.boardMode === "active") {
+      return boardColumns.filter((column) => !isTerminalStage(column.stage.slug));
+    }
+    if (dashboardView.boardMode === "won") {
+      return boardColumns.filter((column) => column.stage.slug === "won");
+    }
+    if (dashboardView.boardMode === "at_risk") {
+      return boardColumns
+        .filter((column) => !isTerminalStage(column.stage.slug))
+        .map((column) => {
+          const cards = column.cards.filter((deal) => {
+            const sla = STAGE_SLA_DAYS[column.stage.slug] ?? 7;
+            return sla > 0 && daysInStage(deal.stageEnteredAt) > sla && matchesUpdatedRange(deal, updatedFrom, updatedTo);
+          });
+          return {
+            ...column,
+            cards,
+            count: cards.length,
+            totalValue: cards.reduce((sum, deal) => sum + moneyValue(deal), 0),
+          };
+        });
+    }
+    return boardColumns;
+  }, [boardColumns, dashboardView.boardMode, dashboardView.boardStageSlugs, dashboardView.listBaseFilters]);
   const activePipelineColumns = getActivePipelineColumns(boardColumns);
   const drilldownVisibleStages = useMemo(
     () =>
@@ -624,8 +690,27 @@ function DealListPageContent({ role }: { role: string }) {
   const wonValue =
     board?.terminalStages
       ?.filter((terminal) => terminal.stage.slug === "won")
-      .reduce((sum, terminal) => sum + (terminal.totalValue ?? 0), 0) ?? 0;
-  const overSlaCount = columns.reduce(
+      .reduce(
+        (sum, terminal) =>
+          sum +
+          terminal.deals
+            .filter((deal) => {
+              if (!selectedPeriodRange) return true;
+              const contractSignedValue = deal.contractSignedDate ?? deal.contractSignedAt ?? null;
+              if (!contractSignedValue) return false;
+              const closedAt = parseDayStart(contractSignedValue);
+              if (closedAt < parseDayStart(selectedPeriodRange.from)) {
+                return false;
+              }
+              if (closedAt > parseDayEnd(selectedPeriodRange.to)) {
+                return false;
+              }
+              return true;
+            })
+            .reduce((dealSum, deal) => dealSum + moneyValue(deal), 0),
+        0
+      ) ?? 0;
+  const unsearchedOverSlaCount = unsearchedColumns.reduce(
     (sum, column) =>
       sum +
       (isTerminalStage(column.stage.slug)
@@ -636,6 +721,9 @@ function DealListPageContent({ role }: { role: string }) {
           }).length),
     0
   );
+  const activePipelineDestination = buildDealsPageKpiDrilldownPath("active_pipeline", scope);
+  const wonDestination = buildDealsPageKpiDrilldownPath("won", scope, selectedPeriod);
+  const atRiskDestination = buildDealsPageKpiDrilldownPath("at_risk", scope);
 
   const updateScope = (nextScope: PipelineScope) => {
     const next = new URLSearchParams(searchParams);
@@ -736,22 +824,28 @@ function DealListPageContent({ role }: { role: string }) {
           caption="Open board"
           tone="white"
           accent="red"
+          to={activePipelineDestination}
+          ariaLabel="View active pipeline deals"
         />
         <MetricCard
           eyebrow="Won"
           value={USD_COMPACT(wonValue)}
           badge="Bid Board"
-          caption={getTerminalDateFilterLabel(terminalDateFilters.won)}
+          caption={selectedPeriod ? getDashboardPeriodLabel(selectedPeriod) : "All time"}
           tone="blue"
           accent="blue"
+          to={wonDestination}
+          ariaLabel="View won deals"
         />
         <MetricCard
           eyebrow="At risk"
-          value={String(overSlaCount)}
+          value={String(unsearchedOverSlaCount)}
           badge="Over SLA"
           caption="Needs touch"
-          tone={overSlaCount > 0 ? "red" : "green"}
+          tone={unsearchedOverSlaCount > 0 ? "red" : "green"}
           accent="red"
+          to={atRiskDestination}
+          ariaLabel="View at-risk deals"
         />
       </div>
 

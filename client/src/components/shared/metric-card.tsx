@@ -1,5 +1,6 @@
 import { Card, CardContent } from "@/components/ui/card";
 import { cn } from "@/lib/utils";
+import { Link } from "react-router-dom";
 import { Eyebrow } from "./eyebrow";
 
 export type MetricTone = "green" | "blue" | "white" | "red";
@@ -27,6 +28,8 @@ export function MetricCard({
   tone = "green",
   accent = "red",
   className,
+  to,
+  ariaLabel,
 }: {
   eyebrow: string;
   value: string;
@@ -35,10 +38,18 @@ export function MetricCard({
   tone?: MetricTone;
   accent?: MetricAccent;
   className?: string;
+  to?: string;
+  ariaLabel?: string;
 }) {
+  const interactiveClassName = cn(
+    "group relative block overflow-hidden transition-all duration-150",
+    to ? "cursor-pointer hover:-translate-y-0.5 hover:shadow-md focus:outline-none focus-visible:ring-2 focus-visible:ring-brand-red" : "",
+    className
+  );
+
   if (tone === "red") {
-    return (
-      <Card className={cn("relative overflow-hidden border-0 bg-brand-red text-white shadow-md", className)}>
+    const card = (
+      <Card className={cn("border-0 bg-brand-red text-white shadow-md", interactiveClassName)}>
         <CardContent className="p-5">
           <p className="text-[11px] font-bold uppercase tracking-[0.2em] text-white/80">{eyebrow}</p>
           <p className="mt-2 text-4xl font-black leading-none text-white">{value}</p>
@@ -51,10 +62,17 @@ export function MetricCard({
         </CardContent>
       </Card>
     );
+
+    if (!to) return card;
+    return (
+      <Link to={to} aria-label={ariaLabel} className="block">
+        {card}
+      </Link>
+    );
   }
 
-  return (
-    <Card className={cn("relative overflow-hidden border-slate-200 bg-white shadow-none", className)}>
+  const card = (
+    <Card className={cn("border-slate-200 bg-white shadow-none", interactiveClassName)}>
       <CardContent className="p-5">
         <Eyebrow>{eyebrow}</Eyebrow>
         <p className="mt-2 text-4xl font-black leading-none text-slate-950">{value}</p>
@@ -67,5 +85,12 @@ export function MetricCard({
       </CardContent>
       <div className={cn("absolute inset-x-0 bottom-0 h-1", accentClasses[accent])} aria-hidden />
     </Card>
+  );
+
+  if (!to) return card;
+  return (
+    <Link to={to} aria-label={ariaLabel} className="block">
+      {card}
+    </Link>
   );
 }

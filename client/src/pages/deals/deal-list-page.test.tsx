@@ -9,6 +9,7 @@ import { act } from "react";
 import type { Deal } from "@/hooks/use-deals";
 import {
   DealListPage,
+  buildDealsPageKpiDrilldownPath,
   buildDealStageNavigationPath,
   formatDateInput,
   getDashboardDealListView,
@@ -797,6 +798,75 @@ describe("DealListPage", () => {
         searchPlaceholder: "Search deals or accounts",
       })
     );
+  });
+
+  it("builds clickable KPI drilldown paths with preserved scope and period", () => {
+    expect(buildDealsPageKpiDrilldownPath("active_pipeline", "all")).toBe(
+      "/deals?filter=active_pipeline&scope=all"
+    );
+    expect(buildDealsPageKpiDrilldownPath("won", "team", "last_month")).toBe(
+      "/deals?filter=won&scope=team&period=last_month"
+    );
+    expect(buildDealsPageKpiDrilldownPath("at_risk", "mine")).toBe(
+      "/deals?filter=at_risk&scope=mine"
+    );
+  });
+
+  it("renders clickable KPI cards on the deals page", () => {
+    const html = renderPage("/deals?scope=team&period=last_month", "director");
+
+    expect(html).toContain('href="/deals?filter=active_pipeline&amp;scope=team"');
+    expect(html).toContain('href="/deals?filter=won&amp;scope=team&amp;period=last_month"');
+    expect(html).toContain('href="/deals?filter=at_risk&amp;scope=team"');
+    expect(html).toContain("View active pipeline deals");
+    expect(html).toContain("View won deals");
+    expect(html).toContain("View at-risk deals");
+  });
+
+  it("scopes the Won KPI value to the current period when the won drilldown preserves period", () => {
+    mocks.useDealBoardMock.mockReturnValue({
+      board: {
+        columns: [
+          {
+            stage: { id: "stage-opportunity", name: "Opportunity", slug: "opportunity" },
+            count: 1,
+            totalValue: 180000,
+            cards: [makeDeal()],
+          },
+        ],
+        terminalStages: [
+          {
+            stage: { id: "stage-won", name: "Won", slug: "won" },
+            count: 2,
+            deals: [
+              makeDeal({ id: "won-in-period", awardedAmount: "125000", contractSignedDate: "2026-04-12", actualCloseDate: null }),
+              makeDeal({ id: "won-out-of-period", awardedAmount: "410000", contractSignedDate: "2026-03-15", actualCloseDate: null }),
+            ],
+          },
+        ],
+      },
+      loading: false,
+      error: null,
+      refetch: vi.fn(),
+    });
+
+    const html = renderPage("/deals?scope=team&period=last_month", "director");
+
+    expect(html).toContain('href="/deals?filter=won&amp;scope=team&amp;period=last_month"');
+    expect(html).toContain("$125.0K");
+    expect(html).not.toContain("$410.0K");
+  });
+
+  it("treats no-period won drill-downs as all-time instead of forcing a default dashboard range", () => {
+    const view = getDashboardDealListView({
+      filterParam: "won",
+      periodParam: null,
+      now: new Date("2026-05-08T12:00:00Z"),
+    });
+
+    expect(view.title).toBe("Closed Won");
+    expect(view.subtitle).toBe("Booked wins across all time.");
+    expect(view.listBaseFilters).toEqual({});
   });
 
   it("builds the active pipeline drill-down view from dashboard query params", () => {
