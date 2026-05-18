@@ -15,15 +15,18 @@ describe("field app auth HTTP config", () => {
       FIELD_APP_URL: "https://field-app.trockcrm.com/",
       FIELD_FRONTEND_URL: "https://field.trockconstruction.com/",
       RAILWAY_SERVICE_FIELD_FRONTEND_URL: "trockcrm-field.up.railway.app",
+      RAILWAY_SERVICE_TROCKCRM_FIELD_URL: "trockcam.com",
     };
 
     expect(getAllowedCorsOrigins(env)).toEqual(expect.arrayContaining([
       "https://field-app.trockcrm.com",
       "https://field.trockconstruction.com",
       "https://trockcrm-field.up.railway.app",
+      "https://trockcam.com",
       "http://localhost:5174",
     ]));
     expect(isAllowedCookieAuthOrigin(env, "https://field.trockconstruction.com")).toBe(true);
+    expect(isAllowedCookieAuthOrigin(env, "https://trockcam.com")).toBe(true);
   });
 
   it("accepts the Railway-managed trockcrm-field public domain env name", () => {
@@ -85,5 +88,17 @@ describe("field app auth HTTP config", () => {
   it("normalizes FIELD_APP_URL and falls back to the local field app in development", () => {
     expect(getFieldAppUrl({ NODE_ENV: "development" })).toBe("http://localhost:5174");
     expect(getFieldAppUrl({ FIELD_APP_URL: "https://field.example.com/" })).toBe("https://field.example.com");
+    expect(getFieldAppUrl({ RAILWAY_SERVICE_TROCKCRM_FIELD_URL: "trockcam.com" })).toBe("https://trockcam.com");
+  });
+
+  it("keeps FIELD_APP_URL as the canonical invite-link origin when multiple field URLs are configured", () => {
+    expect(
+      getFieldAppUrl({
+        FIELD_APP_URL: "https://field.example.com/",
+        RAILWAY_SERVICE_TROCKCRM_FIELD_URL: "trockcam.com",
+        FIELD_FRONTEND_URL: "https://legacy-field.example.com/",
+        RAILWAY_SERVICE_FIELD_FRONTEND_URL: "trockcrm-field.up.railway.app",
+      })
+    ).toBe("https://field.example.com");
   });
 });
