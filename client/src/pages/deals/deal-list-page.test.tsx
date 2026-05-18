@@ -250,7 +250,7 @@ describe("DealListPage", () => {
     expect(mocks.useDealBoardMock).toHaveBeenCalledWith("all", true, {
       won: { preset: "all" },
       lost: { preset: "all" },
-    });
+    }, 8);
     expect(html).toContain("Read-only pipeline board");
     expect(html).toContain('placeholder="Search deals"');
     expect(html).toContain("Opportunity");
@@ -530,7 +530,7 @@ describe("DealListPage", () => {
     expect(mocks.useDealBoardMock).toHaveBeenCalledWith("all", true, {
       won: { preset: "30" },
       lost: { preset: "60" },
-    });
+    }, 8);
   });
 
   it("does not fire board fetch before auth resolves", () => {
@@ -553,7 +553,7 @@ describe("DealListPage", () => {
 
     renderPage("/deals", "director");
 
-    expect(mocks.useDealBoardMock).toHaveBeenCalledWith("team", true, expect.any(Object));
+    expect(mocks.useDealBoardMock).toHaveBeenCalledWith("team", true, expect.any(Object), 8);
   });
 
   it("uses the board terminal filters when building terminal stage navigation", () => {
@@ -581,22 +581,22 @@ describe("DealListPage", () => {
 
   it("defaults the board scope by role when the query param is absent", () => {
     renderPage("/deals", "rep");
-    expect(mocks.useDealBoardMock).toHaveBeenLastCalledWith("mine", true, expect.any(Object));
+    expect(mocks.useDealBoardMock).toHaveBeenLastCalledWith("mine", true, expect.any(Object), 8);
 
     renderPage("/deals", "director");
-    expect(mocks.useDealBoardMock).toHaveBeenLastCalledWith("team", true, expect.any(Object));
+    expect(mocks.useDealBoardMock).toHaveBeenLastCalledWith("team", true, expect.any(Object), 8);
 
     renderPage("/deals", "admin");
-    expect(mocks.useDealBoardMock).toHaveBeenLastCalledWith("all", true, expect.any(Object));
+    expect(mocks.useDealBoardMock).toHaveBeenLastCalledWith("all", true, expect.any(Object), 8);
 
     renderPage("/deals?scope=mine", "director");
-    expect(mocks.useDealBoardMock).toHaveBeenLastCalledWith("mine", true, expect.any(Object));
+    expect(mocks.useDealBoardMock).toHaveBeenLastCalledWith("mine", true, expect.any(Object), 8);
   });
 
   it("forces reps to mine scope even when ?scope=team is set", () => {
     const html = renderPage("/deals?scope=team", "rep");
 
-    expect(mocks.useDealBoardMock).toHaveBeenLastCalledWith("mine", true, expect.any(Object));
+    expect(mocks.useDealBoardMock).toHaveBeenLastCalledWith("mine", true, expect.any(Object), 8);
     expect(html).toContain('aria-pressed="true">Mine');
     expect(html).toContain('aria-pressed="false">Team');
   });
@@ -604,7 +604,7 @@ describe("DealListPage", () => {
   it("forces reps to mine scope even when ?scope=all is set", () => {
     const html = renderPage("/deals?scope=all", "rep");
 
-    expect(mocks.useDealBoardMock).toHaveBeenLastCalledWith("mine", true, expect.any(Object));
+    expect(mocks.useDealBoardMock).toHaveBeenLastCalledWith("mine", true, expect.any(Object), 8);
     expect(html).toContain('aria-pressed="true">Mine');
     expect(html).toContain('aria-pressed="false">All');
   });
@@ -849,6 +849,7 @@ describe("DealListPage", () => {
   it("keeps the embedded list visible for stale drill-down views", () => {
     const html = renderPage("/deals?scope=team&filter=stale&period=qtd", "director");
 
+    expect(mocks.useDealBoardMock).toHaveBeenLastCalledWith("team", true, expect.any(Object), null);
     expect(mocks.dealsListSectionMock).not.toHaveBeenCalled();
     expect(html).toContain("Drill-down view: SLA filter applied to list and board.");
     expect(html).toContain("Filtered results");
@@ -858,7 +859,7 @@ describe("DealListPage", () => {
   it("reflects the team scope query param in the scope toggle", () => {
     const html = renderPage("/deals?scope=team", "director");
 
-    expect(mocks.useDealBoardMock).toHaveBeenLastCalledWith("team", true, expect.any(Object));
+    expect(mocks.useDealBoardMock).toHaveBeenLastCalledWith("team", true, expect.any(Object), 8);
     expect(html).toContain('aria-pressed="true">Team');
     expect(html).toContain('aria-pressed="false">Mine');
     expect(html).toContain('aria-pressed="false">All');

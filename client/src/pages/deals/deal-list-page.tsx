@@ -488,7 +488,6 @@ function DealListPageContent({ role }: { role: string }) {
     readTerminalDateFiltersFromSearchParams(searchParams)
   );
   const scope = getScope(searchParams, role);
-  const { board, loading, error } = useDealBoard(scope, true, terminalDateFilters);
   const { stages } = usePipelineStages("deal");
   const dashboardView = useMemo(
     () =>
@@ -498,6 +497,8 @@ function DealListPageContent({ role }: { role: string }) {
       }),
     [searchParams]
   );
+  const isAtRiskDrilldown = dashboardView.filter === "stale" || dashboardView.filter === "at_risk";
+  const { board, loading, error } = useDealBoard(scope, true, terminalDateFilters, isAtRiskDrilldown ? null : 8);
 
   useEffect(() => {
     setTerminalDateFilters(readTerminalDateFiltersFromSearchParams(searchParams));
@@ -586,7 +587,6 @@ function DealListPageContent({ role }: { role: string }) {
           : undefined,
     [dashboardView.boardMode, dashboardView.boardStageSlugs, stages]
   );
-  const isAtRiskDrilldown = dashboardView.filter === "stale" || dashboardView.filter === "at_risk";
   const drilldownDeals = useMemo(() => {
     if (!isAtRiskDrilldown) return [];
 

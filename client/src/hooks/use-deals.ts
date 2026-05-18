@@ -624,7 +624,8 @@ export async function getDealScopingReadiness(dealId: string) {
 export function useDealBoard(
   scope: "mine" | "team" | "all",
   includeDd: boolean,
-  terminalDateFilters?: Record<TerminalOutcome, TerminalDateFilter>
+  terminalDateFilters?: Record<TerminalOutcome, TerminalDateFilter>,
+  previewLimit: number | null = 8
 ) {
   const [board, setBoard] = useState<DealBoardResponse | null>(null);
   const [loading, setLoading] = useState(true);
@@ -636,8 +637,10 @@ export function useDealBoard(
     const params = new URLSearchParams({
       scope,
       includeDd: String(includeDd),
-      previewLimit: "8",
     });
+    if (previewLimit !== null) {
+      params.set("previewLimit", String(previewLimit));
+    }
     if (terminalDateFilters) {
       appendPipelineTerminalDateParams(params, terminalDateFilters);
     }
@@ -652,7 +655,7 @@ export function useDealBoard(
         throw err;
       })
       .finally(() => setLoading(false));
-  }, [includeDd, scope, terminalDateFilters]);
+  }, [includeDd, previewLimit, scope, terminalDateFilters]);
 
   useEffect(() => {
     void refetch().catch(() => undefined);
