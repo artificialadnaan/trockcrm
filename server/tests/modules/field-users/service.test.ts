@@ -48,6 +48,7 @@ describe("field user service helpers", () => {
   const originalFieldAppUrl = process.env.FIELD_APP_URL;
   const originalFrontendUrl = process.env.FRONTEND_URL;
   const originalFieldFrontendUrl = process.env.FIELD_FRONTEND_URL;
+  const originalRailwayFieldUrl = process.env.RAILWAY_SERVICE_TROCKCRM_FIELD_URL;
 
   beforeEach(() => {
     vi.clearAllMocks();
@@ -65,6 +66,8 @@ describe("field user service helpers", () => {
     else process.env.FRONTEND_URL = originalFrontendUrl;
     if (originalFieldFrontendUrl === undefined) delete process.env.FIELD_FRONTEND_URL;
     else process.env.FIELD_FRONTEND_URL = originalFieldFrontendUrl;
+    if (originalRailwayFieldUrl === undefined) delete process.env.RAILWAY_SERVICE_TROCKCRM_FIELD_URL;
+    else process.env.RAILWAY_SERVICE_TROCKCRM_FIELD_URL = originalRailwayFieldUrl;
   });
 
   it("normalizes and validates email addresses", () => {
@@ -167,6 +170,7 @@ describe("field user service helpers", () => {
     process.env.FIELD_APP_URL = "https://field.example.com/";
     process.env.FRONTEND_URL = "https://crm.example.com";
     process.env.FIELD_FRONTEND_URL = "https://legacy-field.example.com";
+    process.env.RAILWAY_SERVICE_TROCKCRM_FIELD_URL = "internal-field-host.up.railway.app";
 
     dbMocks.execute
       .mockResolvedValueOnce({ rows: [] })
@@ -195,6 +199,7 @@ describe("field user service helpers", () => {
     );
     expect(emailMocks.sendSystemEmail.mock.calls[0][2]).not.toContain("crm.example.com");
     expect(emailMocks.sendSystemEmail.mock.calls[0][2]).not.toContain("legacy-field.example.com");
+    expect(emailMocks.sendSystemEmail.mock.calls[0][2]).not.toContain("internal-field-host.up.railway.app");
   });
 
   it("rejects duplicate field invite emails", async () => {

@@ -107,11 +107,7 @@ export function getAllowedCorsOrigins(env: EnvInput): string[] {
 }
 
 export function getFieldAppUrl(env: EnvInput): string {
-  const configured =
-    normalizeOrigin(env.FIELD_APP_URL) ??
-    normalizeOrigin(env.RAILWAY_SERVICE_TROCKCRM_FIELD_URL) ??
-    normalizeOrigin(env.FIELD_FRONTEND_URL) ??
-    normalizeOrigin(env.RAILWAY_SERVICE_FIELD_FRONTEND_URL);
+  const configured = normalizeOrigin(env.FIELD_APP_URL);
   if (configured) return configured;
   if (env.NODE_ENV === "production") {
     throw new Error("FIELD_APP_URL is required when NODE_ENV=production");

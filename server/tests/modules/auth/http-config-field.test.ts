@@ -37,6 +37,8 @@ describe("field app auth HTTP config", () => {
 
     expect(getAllowedCorsOrigins(env as any)).toEqual(["https://trockcam.com"]);
     expect(isAllowedCookieAuthOrigin(env as any, "https://trockcam.com")).toBe(true);
+    expect(() => assertSafeDevAuthConfig(env as any)).toThrow("FIELD_APP_URL is required");
+    expect(() => getFieldAppUrl(env as any)).toThrow("FIELD_APP_URL is required");
   });
 
   it("uses SameSite=None for the Railway-managed trockcrm-field public domain", () => {
@@ -80,15 +82,26 @@ describe("field app auth HTTP config", () => {
     expect(() =>
       assertSafeDevAuthConfig({
         NODE_ENV: "production",
+        RAILWAY_SERVICE_TROCKCRM_FIELD_URL: "trockcam.com",
+      } as any)
+    ).toThrow("FIELD_APP_URL is required");
+    expect(() =>
+      assertSafeDevAuthConfig({
+        NODE_ENV: "production",
         FIELD_APP_URL: "https://trockcrm-field-production.up.railway.app",
       })
     ).not.toThrow();
   });
 
-  it("normalizes FIELD_APP_URL and falls back to the local field app in development", () => {
+  it("normalizes FIELD_APP_URL and falls back to the local field app only in development", () => {
     expect(getFieldAppUrl({ NODE_ENV: "development" })).toBe("http://localhost:5174");
     expect(getFieldAppUrl({ FIELD_APP_URL: "https://field.example.com/" })).toBe("https://field.example.com");
-    expect(getFieldAppUrl({ RAILWAY_SERVICE_TROCKCRM_FIELD_URL: "trockcam.com" })).toBe("https://trockcam.com");
+    expect(() =>
+      getFieldAppUrl({
+        NODE_ENV: "production",
+        RAILWAY_SERVICE_TROCKCRM_FIELD_URL: "trockcam.com",
+      } as any)
+    ).toThrow("FIELD_APP_URL is required");
   });
 
   it("keeps FIELD_APP_URL as the canonical invite-link origin when multiple field URLs are configured", () => {
@@ -100,5 +113,23 @@ describe("field app auth HTTP config", () => {
         RAILWAY_SERVICE_FIELD_FRONTEND_URL: "trockcrm-field.up.railway.app",
       })
     ).toBe("https://field.example.com");
+  });
+
+  it("allows both the canonical field origin and Railway fallback origins for CORS while using FIELD_APP_URL as the canonical app URL", () => {
+    const env = {
+      NODE_ENV: "production",
+      FIELD_APP_URL: "https://field.example.com/",
+      RAILWAY_SERVICE_TROCKCRM_FIELD_URL: "trockcam.com",
+      FIELD_FRONTEND_URL: "https://legacy-field.example.com/",
+      RAILWAY_SERVICE_FIELD_FRONTEND_URL: "trockcrm-field.up.railway.app",
+    };
+
+    expect(getFieldAppUrl(env)).toBe("https://field.example.com");
+    expect(getAllowedCorsOrigins(env)).toEqual(expect.arrayContaining([
+      "https://field.example.com",
+      "https://trockcam.com",
+      "https://legacy-field.example.com",
+      "https://trockcrm-field.up.railway.app",
+    ]));
   });
 });
