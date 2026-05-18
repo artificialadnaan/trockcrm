@@ -188,8 +188,14 @@ export function getTokenCookieOptions(env: EnvInput) {
     secure: isProduction,
     sameSite: isProduction ? "lax" : "strict",
     domain,
+    path: "/",
     maxAge: 24 * 60 * 60 * 1000,
   } as const;
+}
+
+function shouldPartitionCookieForRequest(env: EnvInput, request: CookieRequestInput): boolean {
+  if (env.NODE_ENV !== "production") return false;
+  return sameSiteForRequest(env, request) === "none";
 }
 
 function sameSiteForRequest(env: EnvInput, request: CookieRequestInput): "strict" | "lax" | "none" {
@@ -214,7 +220,10 @@ export function getTokenCookieOptionsForRequest(env: EnvInput, request: CookieRe
   const { domain: _domain, sameSite: _sameSite, ...base } = getTokenCookieOptions(env);
   const domain = cookieDomainForRequest(env, request);
   const sameSite = sameSiteForRequest(env, request);
-  return domain ? { ...base, sameSite, domain } as const : { ...base, sameSite } as const;
+  const partitioned = shouldPartitionCookieForRequest(env, request) || undefined;
+  return domain
+    ? { ...base, sameSite, domain, ...(partitioned ? { partitioned } : {}) } as const
+    : { ...base, sameSite, ...(partitioned ? { partitioned } : {}) } as const;
 }
 
 export function getLogoutCookieClears(env: EnvInput) {
@@ -247,28 +256,37 @@ export function getLogoutCookieClearsForRequest(env: EnvInput, request: CookieRe
   const isProduction = env.NODE_ENV === "production";
   const domain = cookieDomainForRequest(env, request);
   const sameSite = sameSiteForRequest(env, request);
-  const tokenOptions = {
+  const partitioned = shouldPartitionCookieForRequest(env, request);
+  const tokenOptionsBase = {
     httpOnly: true,
     secure: isProduction,
     sameSite,
     path: "/",
     maxAge: 0,
   } as const;
-  const csrfOptions = {
+  const csrfOptionsBase = {
     httpOnly: false,
     secure: isProduction,
     sameSite,
     path: "/",
     maxAge: 0,
   } as const;
+  const tokenOptionVariants = partitioned
+    ? [tokenOptionsBase, { ...tokenOptionsBase, partitioned: true } as const]
+    : [tokenOptionsBase];
+  const csrfOptionVariants = partitioned
+    ? [csrfOptionsBase, { ...csrfOptionsBase, partitioned: true } as const]
+    : [csrfOptionsBase];
 
   return [
-    ...(domain ? [
-      { name: "token", options: { ...tokenOptions, domain } },
-      { name: CSRF_COOKIE_NAME, options: { ...csrfOptions, domain } },
-    ] as const : []),
-    { name: "token", options: tokenOptions },
-    { name: CSRF_COOKIE_NAME, options: csrfOptions },
+    ...(domain
+      ? tokenOptionVariants.map((options) => ({ name: "token", options: { ...options, domain } }))
+      : []),
+    ...(domain
+      ? csrfOptionVariants.map((options) => ({ name: CSRF_COOKIE_NAME, options: { ...options, domain } }))
+      : []),
+    ...tokenOptionVariants.map((options) => ({ name: "token", options })),
+    ...csrfOptionVariants.map((options) => ({ name: CSRF_COOKIE_NAME, options })),
   ] as const;
 }
 
@@ -290,7 +308,10 @@ export function getCsrfCookieOptionsForRequest(env: EnvInput, request: CookieReq
   const { domain: _domain, sameSite: _sameSite, ...base } = getCsrfCookieOptions(env);
   const domain = cookieDomainForRequest(env, request);
   const sameSite = sameSiteForRequest(env, request);
-  return domain ? { ...base, sameSite, domain } as const : { ...base, sameSite } as const;
+  const partitioned = shouldPartitionCookieForRequest(env, request) || undefined;
+  return domain
+    ? { ...base, sameSite, domain, ...(partitioned ? { partitioned } : {}) } as const
+    : { ...base, sameSite, ...(partitioned ? { partitioned } : {}) } as const;
 }
 
 export function getStrictCrossSiteAuthOrigins(env: EnvInput): string[] {

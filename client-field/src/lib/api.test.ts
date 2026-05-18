@@ -79,16 +79,33 @@ describe("field api client", () => {
     } as Response);
 
     await api("/field/me");
+    await api("/field/projects");
+    await api("/field/projects/starred");
+    await api("/field/projects/deal-1/star", { method: "POST" });
+    await api("/field/projects/deal-1/photos");
+    await api("/field/photo-targets/search?search=roof");
+    await api("/field/photo-targets/validate?dealId=deal-1");
+    await api("/field/photos/upload-url", { method: "POST", json: { dealId: "deal-1", contentType: "image/jpeg", sizeBytes: 1024 } });
+    await api("/field/photos/confirm-upload", { method: "POST", json: { dealId: "deal-1", uploadToken: "upload-token", objectKey: "photo.jpg" } });
     await api("/auth/invite-preview?token=raw-token");
     await api("/auth/accept-invite", { method: "POST", json: { token: "raw-token", password: "password-123" } });
     await api("/auth/field-login", { method: "POST", json: { email: "field@example.com", password: "password-123" } });
 
     expect(fetchMock.mock.calls.map((call) => call[0])).toEqual([
       "https://api.example.com/api/field/me",
+      "https://api.example.com/api/field/projects",
+      "https://api.example.com/api/field/projects/starred",
+      "https://api.example.com/api/field/projects/deal-1/star",
+      "https://api.example.com/api/field/projects/deal-1/photos",
+      "https://api.example.com/api/field/photo-targets/search?search=roof",
+      "https://api.example.com/api/field/photo-targets/validate?dealId=deal-1",
+      "https://api.example.com/api/field/photos/upload-url",
+      "https://api.example.com/api/field/photos/confirm-upload",
       "https://api.example.com/api/auth/invite-preview?token=raw-token",
       "https://api.example.com/api/auth/accept-invite",
       "https://api.example.com/api/auth/field-login",
     ]);
+    expect(fetchMock.mock.calls.every((call) => call[1]?.credentials === "include")).toBe(true);
   });
 
   it("throws ApiError with server messages", async () => {

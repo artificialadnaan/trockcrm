@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const fieldUserMocks = vi.hoisted(() => ({
   acceptFieldInvite: vi.fn(),
@@ -35,14 +35,14 @@ async function invokeHandlers(handlers: Array<(req: any, res: any, next: (err?: 
   const res: Record<string, any> = {
     statusCode: 200,
     body: undefined,
-    cookies: {} as Record<string, string>,
+    cookies: {} as Record<string, { value: string; options?: Record<string, unknown> }>,
     locals: {},
     status(code: number) {
       res.statusCode = code;
       return res;
     },
-    cookie(name: string, value: string) {
-      res.cookies[name] = value;
+    cookie(name: string, value: string, options?: Record<string, unknown>) {
+      res.cookies[name] = { value, options };
       return res;
     },
     json(payload: any) {
@@ -64,8 +64,15 @@ async function invokeHandlers(handlers: Array<(req: any, res: any, next: (err?: 
 }
 
 describe("field user routes", () => {
+  const previousNodeEnv = process.env.NODE_ENV;
+  const previousFieldAppUrl = process.env.FIELD_APP_URL;
+  const previousRailwayFieldUrl = process.env.RAILWAY_SERVICE_TROCKCRM_FIELD_URL;
+
   beforeEach(() => {
     vi.clearAllMocks();
+    process.env.NODE_ENV = "test";
+    delete process.env.FIELD_APP_URL;
+    delete process.env.RAILWAY_SERVICE_TROCKCRM_FIELD_URL;
     fieldUserMocks.inviteFieldUser.mockResolvedValue({ invite: { id: "invite-1", email: "field@example.com", expiresAt: "2026-05-12" } });
     fieldUserMocks.listFieldUsers.mockResolvedValue({ users: [], total: 0, page: 1, perPage: 25 });
     fieldUserMocks.resendFieldUserInvite.mockResolvedValue({ invite: { id: "invite-1", email: "field@example.com", expiresAt: "2026-05-12" } });
@@ -78,6 +85,20 @@ describe("field user routes", () => {
       lastName: "User",
       email: "field@example.com",
     });
+  });
+
+  afterEach(() => {
+    process.env.NODE_ENV = previousNodeEnv;
+    if (previousFieldAppUrl === undefined) {
+      delete process.env.FIELD_APP_URL;
+    } else {
+      process.env.FIELD_APP_URL = previousFieldAppUrl;
+    }
+    if (previousRailwayFieldUrl === undefined) {
+      delete process.env.RAILWAY_SERVICE_TROCKCRM_FIELD_URL;
+    } else {
+      process.env.RAILWAY_SERVICE_TROCKCRM_FIELD_URL = previousRailwayFieldUrl;
+    }
   });
 
   it("requires admin and passes tenant context when inviting field users", async () => {
@@ -136,7 +157,7 @@ describe("field user routes", () => {
     });
 
     expect(fieldUserMocks.acceptFieldInvite).toHaveBeenCalledWith({ token: "raw", password: "correct-password-12" });
-    expect(res.cookies.token).toBe("jwt");
+    expect(res.cookies.token?.value).toBe("jwt");
     expect(res.body.token).toBe("jwt");
   });
 
@@ -146,7 +167,30 @@ describe("field user routes", () => {
     });
 
     expect(fieldUserMocks.loginFieldUser).toHaveBeenCalledWith({ email: "field@example.com", password: "correct-password-12" });
-    expect(res.cookies.token).toBe("jwt");
+    expect(res.cookies.token?.value).toBe("jwt");
+  });
+
+  it("sets a partitioned cross-site auth cookie for production trockcam logins", async () => {
+    process.env.NODE_ENV = "production";
+    process.env.RAILWAY_SERVICE_TROCKCRM_FIELD_URL = "trockcam.com";
+
+    const { res } = await invokeHandlers(findRoute(fieldUserAuthRouter, "post", "/field-login"), {
+      body: { email: "field@example.com", password: "correct-password-12" },
+      headers: { origin: "https://trockcam.com" },
+      hostname: "api-production-ad218.up.railway.app",
+      get(name: string) {
+        if (name.toLowerCase() === "host") return "api-production-ad218.up.railway.app";
+        return this.headers?.[name.toLowerCase()];
+      },
+    });
+
+    expect(res.cookies.token?.options).toMatchObject({
+      httpOnly: true,
+      secure: true,
+      sameSite: "none",
+      path: "/",
+      partitioned: true,
+    });
   });
 
   it("previews valid field invites without consuming them", async () => {
