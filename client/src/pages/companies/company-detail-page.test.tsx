@@ -51,6 +51,12 @@ vi.mock("@/components/call-recordings/recording-list", () => ({
   RecordingList: () => <div>Recording List</div>,
 }));
 
+vi.mock("@/components/activities/entity-activity-tab", () => ({
+  EntityActivityTab: ({ entityType, entityId }: { entityType: string; entityId: string }) => (
+    <div>Activity tab for {entityType}:{entityId}</div>
+  ),
+}));
+
 vi.mock("@/components/contacts/contact-form", () => ({
   ContactForm: () => <div>Contact Form</div>,
 }));
@@ -237,6 +243,7 @@ describe("CompanyDetailPage", () => {
     expect(html).toContain("Files");
     expect(html).toContain("Emails");
     expect(html).toContain("Recordings");
+    expect(html).toContain("Activity");
   });
 
   it("renders an Add Property action locked to the current company", () => {
@@ -288,6 +295,20 @@ describe("CompanyDetailPage", () => {
 
     expect(mounted.container.textContent).toContain("Dallas ISD Roof Replacement");
     expect(mounted.container.textContent).not.toContain("Company Copilot");
+  });
+
+  it("renders the activity tab scoped to the current company", () => {
+    mounted = mountPage();
+
+    const activityTab = mounted.container.querySelector('button[aria-label="Activity"]');
+    expect(activityTab).not.toBeNull();
+
+    act(() => {
+      activityTab?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+
+    expect(mounted.container.textContent).toContain("Activity tab for company:company-1");
+    expect(mounted.container.textContent).not.toContain("Activity tab for lead:company-1");
   });
 
   it("verify action triggers verification handler", async () => {

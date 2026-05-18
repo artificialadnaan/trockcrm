@@ -125,6 +125,12 @@ vi.mock("@/components/call-recordings/recording-list", () => ({
   RecordingList: () => <div>Recording List</div>,
 }));
 
+vi.mock("@/components/activities/entity-activity-tab", () => ({
+  EntityActivityTab: ({ entityType, entityId }: { entityType: string; entityId: string }) => (
+    <div>Activity tab for {entityType}:{entityId}</div>
+  ),
+}));
+
 function makeLead(overrides: Record<string, unknown> = {}) {
   return {
     id: "lead-1",
@@ -265,6 +271,7 @@ describe("LeadDetailPage", () => {
 
     expect(html).toContain("Timeline");
     expect(html).toContain("Questionnaire");
+    expect(html).toContain("Activity");
     expect(html).toContain("Recordings");
   });
 
@@ -334,6 +341,20 @@ describe("LeadDetailPage", () => {
 
     expect(mounted.container.textContent).toContain("Recording List");
     expect(mounted.container.textContent).not.toContain("Lead Timeline");
+  });
+
+  it("renders the activity tab scoped to the current lead", () => {
+    mounted = mountLeadDetail();
+
+    const activityTab = mounted.container.querySelector('button[aria-label="Activity"]');
+    expect(activityTab).not.toBeNull();
+
+    act(() => {
+      activityTab?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+
+    expect(mounted.container.textContent).toContain("Activity tab for lead:lead-1");
+    expect(mounted.container.textContent).not.toContain("Activity tab for company:lead-1");
   });
 
   it("convert action opens conversion dialog", () => {
