@@ -821,6 +821,14 @@ describe("DealListPage", () => {
                 updatedAt: "2026-03-15T10:00:00.000Z",
                 bidEstimate: "100000",
               }),
+              makeDeal({
+                id: "deal-fresh",
+                name: "Fresh QTD Deal",
+                stageId: "stage-contract",
+                stageEnteredAt: "2026-05-06T10:00:00.000Z",
+                updatedAt: "2026-05-07T10:00:00.000Z",
+                bidEstimate: "150000",
+              }),
             ],
           },
         ],
@@ -835,23 +843,15 @@ describe("DealListPage", () => {
 
     expect(html).toContain("QTD Stale Deal");
     expect(html).not.toContain("Old Quarter Stale Deal");
+    expect(html).not.toContain("Fresh QTD Deal");
   });
 
   it("keeps the embedded list visible for stale drill-down views", () => {
     const html = renderPage("/deals?scope=team&filter=stale&period=qtd", "director");
 
-    expect(mocks.dealsListSectionMock).toHaveBeenCalledWith(
-      expect.objectContaining({
-        title: "Stale Deals",
-        scope: "team",
-        initialSort: { key: "stage_entered_at", dir: "asc" },
-        baseFilters: expect.objectContaining({
-          updatedFrom: "2026-04-01",
-          updatedTo: "2026-05-08",
-        }),
-      })
-    );
+    expect(mocks.dealsListSectionMock).not.toHaveBeenCalled();
     expect(html).toContain("Drill-down view: SLA filter applied to list and board.");
+    expect(html).toContain("Filtered results");
     expect(html).not.toContain("The filtered board above is the source of truth");
   });
 
