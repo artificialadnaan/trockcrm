@@ -374,15 +374,22 @@ function compareDrilldownDeals(left: DrilldownListRow, right: DrilldownListRow, 
   }
 }
 
-function parseDayStart(value: string) {
-  return new Date(`${value}T00:00:00.000Z`).getTime();
+function parseLocalDay(value: string) {
+  const [year, month, day] = value.split("-").map(Number);
+  return new Date(year, month - 1, day, 0, 0, 0, 0);
 }
 
 function parseDayEnd(value: string) {
-  return new Date(`${value}T23:59:59.999Z`).getTime();
+  const date = parseLocalDay(value);
+  date.setHours(23, 59, 59, 999);
+  return date.getTime();
 }
 
-function matchesUpdatedRange(deal: Deal, updatedFrom?: string, updatedTo?: string) {
+function parseDayStart(value: string) {
+  return parseLocalDay(value).getTime();
+}
+
+export function matchesUpdatedRange(deal: Deal, updatedFrom?: string, updatedTo?: string) {
   if (!updatedFrom && !updatedTo) return true;
 
   const updatedAt = new Date(deal.updatedAt).getTime();
@@ -822,7 +829,7 @@ function DealListPageContent({ role }: { role: string }) {
               Drill-down view: SLA filter applied to list and board.
             </section>
           ) : null}
-          {isAtRiskDrilldown ? (
+          {isAtRiskDrilldown && !loading ? (
             <section className="rounded-lg border border-slate-200 bg-white p-5 shadow-sm">
               <div className="flex items-end justify-between gap-4 border-b border-slate-100 pb-4">
                 <div>
@@ -871,6 +878,10 @@ function DealListPageContent({ role }: { role: string }) {
                   </div>
                 </div>
               ) : null}
+            </section>
+          ) : isAtRiskDrilldown ? (
+            <section className="rounded-lg border border-slate-200 bg-white p-5 shadow-sm">
+              <div className="text-sm font-semibold text-slate-500">Loading SLA drill-down...</div>
             </section>
           ) : (
             <DealsListSection

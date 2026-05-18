@@ -2,14 +2,92 @@
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { renderToStaticMarkup } from "react-dom/server";
+import { createRoot, type Root } from "react-dom/client";
 import { MemoryRouter } from "react-router-dom";
 import type { ReactNode } from "react";
+import { act } from "react";
+import type { Deal } from "@/hooks/use-deals";
 import {
   DealListPage,
   buildDealStageNavigationPath,
   formatDateInput,
   getDashboardDealListView,
+  matchesUpdatedRange,
 } from "./deal-list-page";
+
+(globalThis as unknown as { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
+
+const NativeDate = globalThis.Date;
+
+async function withMockedTimezoneOffset<T>(offsetMinutes: number, run: () => T | Promise<T>) {
+  const fakeNow = Date.now();
+  vi.useRealTimers();
+
+  const offsetMs = offsetMinutes * 60_000;
+
+  class MockDate extends NativeDate {
+    constructor(...args: unknown[]) {
+      if (args.length === 0) {
+        super();
+        return;
+      }
+
+      if (args.length > 1) {
+        const [year, month, day = 1, hours = 0, minutes = 0, seconds = 0, ms = 0] =
+          args as unknown as [number, number, number?, number?, number?, number?, number?];
+        super(NativeDate.UTC(year, month, day, hours, minutes, seconds, ms) + offsetMs);
+        return;
+      }
+
+      super(args[0] as string | number | Date);
+    }
+
+    static UTC = NativeDate.UTC.bind(NativeDate);
+    static parse = NativeDate.parse.bind(NativeDate);
+    static now = NativeDate.now.bind(NativeDate);
+
+    getTimezoneOffset() {
+      return offsetMinutes;
+    }
+
+    getFullYear() {
+      return new NativeDate(super.getTime() - offsetMs).getUTCFullYear();
+    }
+
+    getMonth() {
+      return new NativeDate(super.getTime() - offsetMs).getUTCMonth();
+    }
+
+    getDate() {
+      return new NativeDate(super.getTime() - offsetMs).getUTCDate();
+    }
+
+    getDay() {
+      return new NativeDate(super.getTime() - offsetMs).getUTCDay();
+    }
+
+    setDate(date: number) {
+      const shifted = new NativeDate(super.getTime() - offsetMs);
+      shifted.setUTCDate(date);
+      return super.setTime(shifted.getTime() + offsetMs);
+    }
+
+    setHours(hours: number, minutes = 0, seconds = 0, ms = 0) {
+      const shifted = new NativeDate(super.getTime() - offsetMs);
+      shifted.setUTCHours(hours, minutes, seconds, ms);
+      return super.setTime(shifted.getTime() + offsetMs);
+    }
+  }
+
+  globalThis.Date = MockDate as unknown as DateConstructor;
+  try {
+    return await run();
+  } finally {
+    globalThis.Date = NativeDate;
+    vi.useFakeTimers();
+    vi.setSystemTime(fakeNow);
+  }
+}
 
 // jsdom does not implement ResizeObserver; KanbanScrollColumn + the kanban
 // horizontal-scroll-sync layout effect both rely on it.
@@ -131,7 +209,7 @@ function makeDeal(overrides: Record<string, unknown> = {}) {
     createdAt: "2026-04-09T10:00:00.000Z",
     updatedAt: "2026-04-20T10:00:00.000Z",
     ...overrides,
-  };
+  } as Deal;
 }
 
 function renderPage(path = "/deals?scope=all", role = "admin") {
@@ -154,6 +232,64 @@ function renderPage(path = "/deals?scope=all", role = "admin") {
       </MemoryRouter>
     )
   );
+}
+
+async function renderPageDom(path = "/deals?scope=all", role = "admin") {
+  mocks.useAuthMock.mockReturnValue({
+    user: {
+      id: "user-1",
+      email: `${role}@example.test`,
+      displayName: "Test User",
+      role,
+      officeId: "office-1",
+      activeOfficeId: "office-1",
+    },
+    loading: false,
+  });
+
+  const container = document.createElement("div");
+  document.body.appendChild(container);
+  let root: Root | null = null;
+
+  await act(async () => {
+    root = createRoot(container);
+    root.render(
+      <MemoryRouter initialEntries={[path]}>
+        <DealListPage />
+      </MemoryRouter>
+    );
+  });
+
+  return {
+    container,
+    rerender: async (nextPath = path, nextRole = role) => {
+      mocks.useAuthMock.mockReturnValue({
+        user: {
+          id: "user-1",
+          email: `${nextRole}@example.test`,
+          displayName: "Test User",
+          role: nextRole,
+          officeId: "office-1",
+          activeOfficeId: "office-1",
+        },
+        loading: false,
+      });
+
+      await act(async () => {
+        root?.render(
+          <MemoryRouter initialEntries={[nextPath]}>
+            <DealListPage />
+          </MemoryRouter>
+        );
+      });
+    },
+    cleanup: async () => {
+      await act(async () => {
+        root?.unmount();
+      });
+      container.remove();
+    },
+  };
 }
 
 describe("DealListPage", () => {
@@ -644,26 +780,28 @@ describe("DealListPage", () => {
   });
 
   it("supports today and week dashboard periods for rep drill-down links", () => {
-    const todayView = getDashboardDealListView({
-      filterParam: "active_pipeline",
-      periodParam: "today",
-      now: new Date("2026-05-08T12:00:00Z"),
-    });
-    const weekView = getDashboardDealListView({
-      filterParam: "active_pipeline",
-      periodParam: "week",
-      now: new Date("2026-05-08T12:00:00Z"),
-    });
+    return withMockedTimezoneOffset(300, () => {
+      const todayView = getDashboardDealListView({
+        filterParam: "active_pipeline",
+        periodParam: "today",
+        now: new Date("2026-05-09T04:30:00.000Z"),
+      });
+      const weekView = getDashboardDealListView({
+        filterParam: "active_pipeline",
+        periodParam: "week",
+        now: new Date("2026-05-11T04:30:00.000Z"),
+      });
 
-    expect(todayView.subtitle).toBe("Open-stage deals for Today.");
-    expect(todayView.listBaseFilters).toMatchObject({
-      updatedFrom: "2026-05-08",
-      updatedTo: "2026-05-08",
-    });
-    expect(weekView.subtitle).toBe("Open-stage deals for Week.");
-    expect(weekView.listBaseFilters).toMatchObject({
-      updatedFrom: "2026-05-04",
-      updatedTo: "2026-05-08",
+      expect(todayView.subtitle).toBe("Open-stage deals for Today.");
+      expect(todayView.listBaseFilters).toMatchObject({
+        updatedFrom: "2026-05-08",
+        updatedTo: "2026-05-08",
+      });
+      expect(weekView.subtitle).toBe("Open-stage deals for Week.");
+      expect(weekView.listBaseFilters).toMatchObject({
+        updatedFrom: "2026-05-04",
+        updatedTo: "2026-05-10",
+      });
     });
   });
 
@@ -780,6 +918,26 @@ describe("DealListPage", () => {
     );
   });
 
+  it("uses local-day bounds for stale drill-down updated-date filtering west of UTC", () => {
+    return withMockedTimezoneOffset(300, () => {
+      const sameLocalDayDeal = makeDeal({ updatedAt: "2026-05-09T04:30:00.000Z" });
+      const priorLocalDayDeal = makeDeal({ updatedAt: "2026-05-08T04:30:00.000Z" });
+
+      expect(matchesUpdatedRange(sameLocalDayDeal, "2026-05-08", "2026-05-08")).toBe(true);
+      expect(matchesUpdatedRange(priorLocalDayDeal, "2026-05-08", "2026-05-08")).toBe(false);
+    });
+  });
+
+  it("uses local-day bounds for stale drill-down updated-date filtering east of UTC", () => {
+    return withMockedTimezoneOffset(-300, () => {
+      const sameLocalDayDeal = makeDeal({ updatedAt: "2026-05-07T19:30:00.000Z" });
+      const nextLocalDayDeal = makeDeal({ updatedAt: "2026-05-08T19:30:00.000Z" });
+
+      expect(matchesUpdatedRange(sameLocalDayDeal, "2026-05-08", "2026-05-08")).toBe(true);
+      expect(matchesUpdatedRange(nextLocalDayDeal, "2026-05-08", "2026-05-08")).toBe(false);
+    });
+  });
+
   it("passes dashboard closed-won drill-down props into the embedded deals list", () => {
     renderPage("/deals?scope=all&filter=won&period=qtd", "admin");
 
@@ -854,6 +1012,79 @@ describe("DealListPage", () => {
     expect(html).toContain("Drill-down view: SLA filter applied to list and board.");
     expect(html).toContain("Filtered results");
     expect(html).not.toContain("The filtered board above is the source of truth");
+  });
+
+  it("shows a loading state instead of previous at-risk rows while the uncapped board refetch is running", async () => {
+    const boardState = {
+      board: {
+        columns: [
+          {
+            stage: { id: "stage-contract", name: "Contract", slug: "contract" },
+            count: 1,
+            totalValue: 200000,
+            cards: [
+              makeDeal({
+                id: "deal-stale-visible",
+                name: "Previous At Risk Deal",
+                stageId: "stage-contract",
+                stageEnteredAt: "2026-04-01T10:00:00.000Z",
+                updatedAt: "2026-05-07T10:00:00.000Z",
+                bidEstimate: "200000",
+              }),
+            ],
+          },
+        ],
+        terminalStages: [],
+      },
+      loading: false,
+      error: null,
+      refetch: vi.fn(),
+    };
+    mocks.useDealBoardMock.mockImplementation(() => boardState);
+
+    const view = await renderPageDom("/deals?scope=team&filter=at_risk&period=week", "director");
+    expect(view.container.textContent).toContain("Previous At Risk Deal");
+
+    boardState.loading = true;
+    await view.rerender("/deals?scope=team&filter=at_risk&period=week", "director");
+
+    expect(view.container.textContent).toContain("Loading SLA drill-down");
+    expect(view.container.textContent).not.toContain("Previous At Risk Deal");
+
+    await view.cleanup();
+  });
+
+  it("renders refreshed at-risk rows after the uncapped board fetch completes", () => {
+    mocks.useDealBoardMock.mockReturnValue({
+      board: {
+        columns: [
+          {
+            stage: { id: "stage-contract", name: "Contract", slug: "contract" },
+            count: 1,
+            totalValue: 250000,
+            cards: [
+              makeDeal({
+                id: "deal-updated-visible",
+                name: "Updated At Risk Deal",
+                stageId: "stage-contract",
+                stageEnteredAt: "2026-04-01T10:00:00.000Z",
+                updatedAt: "2026-05-08T10:00:00.000Z",
+                bidEstimate: "250000",
+              }),
+            ],
+          },
+        ],
+        terminalStages: [],
+      },
+      loading: false,
+      error: null,
+      refetch: vi.fn(),
+    });
+
+    const html = renderPage("/deals?scope=team&filter=at_risk&period=week", "director");
+
+    expect(html).not.toContain("Loading SLA drill-down");
+    expect(html).toContain("Updated At Risk Deal");
   });
 
   it("reflects the team scope query param in the scope toggle", () => {
