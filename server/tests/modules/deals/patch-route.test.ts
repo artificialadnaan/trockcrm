@@ -413,6 +413,49 @@ describe("PATCH /api/deals/:id cleanup legacy handling", () => {
     );
   });
 
+  it("does not revalidate historical company/property mismatches when relationship ids are unchanged", async () => {
+    dealsServiceMocks.getDealById.mockResolvedValue(baseDeal({
+      companyId: "company-1",
+      propertyId: "property-1",
+      propertyAddress: "Existing manual address",
+      propertyCity: "Dallas",
+      propertyState: "TX",
+      propertyZip: "75201",
+    }));
+
+    const { req, error } = await invokePatch(
+      {
+        description: "Unrelated edit",
+        companyId: "company-1",
+        propertyId: "property-1",
+      },
+      createUser("rep"),
+      {
+        selectedProperty: {
+          companyId: "company-2",
+          address: "5000 Triangle Pkwy",
+          city: "Peachtree Corners",
+          state: "GA",
+          zip: "30092",
+        },
+      }
+    );
+
+    expect(error).toBeNull();
+    expect(dealsServiceMocks.updateDeal).toHaveBeenCalledWith(
+      req.tenantDb,
+      "deal-1",
+      expect.objectContaining({
+        description: "Unrelated edit",
+        companyId: "company-1",
+        propertyId: "property-1",
+      }),
+      "rep",
+      "rep-1",
+      "office-1"
+    );
+  });
+
   it("rejects relationship repair when the selected property belongs to a different company", async () => {
     dealsServiceMocks.getDealById.mockResolvedValue(baseDeal());
 

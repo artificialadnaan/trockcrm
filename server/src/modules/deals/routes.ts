@@ -1499,22 +1499,25 @@ router.patch("/:id", async (req, res, next) => {
       typeof (relationshipBaseline as Record<string, unknown> | null)?.propertyId === "string"
         ? (relationshipBaseline as Record<string, unknown>).propertyId as string
         : null;
+    const existingCompanyId =
+      typeof (relationshipBaseline as Record<string, unknown> | null)?.companyId === "string"
+        ? (relationshipBaseline as Record<string, unknown>).companyId as string
+        : null;
     const requestedPropertyId = typeof body.propertyId === "string" && body.propertyId ? body.propertyId : null;
+    const requestedCompanyId = typeof body.companyId === "string" && body.companyId ? body.companyId : null;
     const effectivePropertyId = requestedPropertyId ?? existingPropertyId;
     const effectiveCompanyId =
-      typeof body.companyId === "string" && body.companyId
-        ? body.companyId
-        : typeof (relationshipBaseline as Record<string, unknown> | null)?.companyId === "string"
-          ? (relationshipBaseline as Record<string, unknown>).companyId as string
-          : null;
+      requestedCompanyId ?? existingCompanyId;
+    const propertyRelationshipChanged = requestedPropertyId != null && requestedPropertyId !== existingPropertyId;
+    const companyRelationshipChanged = requestedCompanyId != null && requestedCompanyId !== existingCompanyId;
     let propertyAddressSync: Record<string, unknown> = {};
 
-    if (effectivePropertyId && (requestedPropertyId || body.companyId !== undefined)) {
+    if (effectivePropertyId && (propertyRelationshipChanged || companyRelationshipChanged)) {
       const property = await loadDealLocationFromProperty(req.tenantDb!, effectivePropertyId);
       if (effectiveCompanyId && property.companyId !== effectiveCompanyId) {
         throw new AppError(400, "Property does not belong to the company");
       }
-      if (requestedPropertyId && requestedPropertyId !== existingPropertyId) {
+      if (propertyRelationshipChanged) {
         propertyAddressSync = property.dealLocation;
       } else {
         removeDealLocationFields(body);

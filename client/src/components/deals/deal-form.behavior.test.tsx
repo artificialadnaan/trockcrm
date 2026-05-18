@@ -372,7 +372,7 @@ describe("DealForm direct-create context", () => {
     expect(container.querySelector('[data-testid="property-selector"]')).toBeNull();
   });
 
-  it("shows company and property selectors for post-RFP edit mode even when relationships already exist", async () => {
+  it("keeps company and property selectors hidden for post-RFP edit mode when relationships already exist", async () => {
     mocks.useAccessibleOffices.mockReturnValue({
       offices: [
         { id: "office-dallas", name: "Dallas", slug: "dallas" },
@@ -401,8 +401,8 @@ describe("DealForm direct-create context", () => {
     containers.push(container);
     roots.push(root);
 
-    expect(container.querySelector('[data-testid="company-selector"]')).not.toBeNull();
-    expect(container.querySelector('[data-testid="property-selector"]')).not.toBeNull();
+    expect(container.querySelector('[data-testid="company-selector"]')).toBeNull();
+    expect(container.querySelector('[data-testid="property-selector"]')).toBeNull();
   });
 
   it("submits repaired company and property ids during edit saves", async () => {
@@ -464,7 +464,7 @@ describe("DealForm direct-create context", () => {
       stageId: "stage-opportunity",
       assignedRepId: "rep-1",
       companyId: "company-1",
-      propertyId: "property-1",
+      propertyId: null,
       sourceLeadId: null,
       isBidBoardOwned: false,
       projectTypeId: "type-roofing",
@@ -482,7 +482,7 @@ describe("DealForm direct-create context", () => {
     roots.push(root);
 
     const addressInput = container.querySelector<HTMLInputElement>("#propertyAddress");
-    expect(addressInput?.readOnly).toBe(true);
+    expect(addressInput?.readOnly).toBe(false);
 
     await act(async () => {
       mocks.propertySelectorProps?.onPropertySelected?.({
@@ -499,6 +499,7 @@ describe("DealForm direct-create context", () => {
     expect(container.querySelector<HTMLInputElement>("#propertyCity")?.value).toBe("Peachtree Corners");
     expect(container.querySelector<HTMLInputElement>("#propertyState")?.value).toBe("GA");
     expect(container.querySelector<HTMLInputElement>("#propertyZip")?.value).toBe("30092");
+    expect(container.querySelector<HTMLInputElement>("#propertyAddress")?.readOnly).toBe(true);
 
     await submit(container);
 

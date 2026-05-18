@@ -51,8 +51,7 @@ export function DealForm({ deal, onSuccess, initialValues }: DealFormProps) {
 
   const isEdit = !!deal;
   const isBidBoardOwned = Boolean(deal?.isBidBoardOwned);
-  const isPostRfp = Boolean(deal?.rfpApprovalRequestedAt || deal?.rfpApprovalStatus);
-  const showRelationshipSelectors = !isEdit || isPostRfp || !deal?.companyId || !deal?.propertyId;
+  const showRelationshipSelectors = !isEdit || !deal?.companyId || !deal?.propertyId;
   const activeStages = getNewDealStages(stages);
   const projectTypeOptions = projectTypeHierarchy.flatMap((parent) => [
     { id: parent.id, name: parent.name },
