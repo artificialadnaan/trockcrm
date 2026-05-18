@@ -277,7 +277,7 @@ export function getDashboardDealListView(input: {
         updatedTo: periodRange.to,
       },
       listInitialSort: { key: "stage_entered_at", dir: "asc" },
-      showEmbeddedList: false,
+      showEmbeddedList: true,
       initialStageSlugs: [],
       boardStageSlugs: [],
     };
@@ -748,22 +748,29 @@ function DealListPageContent({ role }: { role: string }) {
       </section>
 
       {dashboardView.showEmbeddedList ? (
-        <DealsListSection
-          workflowFamily="deal"
-          scope={scope}
-          enableExport
-          enableDateFilter={false}
-          showFilterButton
-          pageSize={20}
-          searchPlaceholder="Search deals or accounts"
-          title={dashboardView.title}
-          subtitle={dashboardView.subtitle}
-          eyebrow={dashboardView.eyebrow}
-          visibleStages={drilldownVisibleStages}
-          baseFilters={dashboardView.listBaseFilters}
-          initialSort={dashboardView.listInitialSort}
-          initialStageSlugs={dashboardView.initialStageSlugs}
-        />
+        <>
+          {dashboardView.boardMode === "at_risk" ? (
+            <section className="rounded-lg border border-amber-200 bg-amber-50 p-4 text-sm font-semibold text-amber-900">
+              Drill-down view: SLA filter applied to list and board.
+            </section>
+          ) : null}
+          <DealsListSection
+            workflowFamily="deal"
+            scope={scope}
+            enableExport
+            enableDateFilter={false}
+            showFilterButton
+            pageSize={20}
+            searchPlaceholder="Search deals or accounts"
+            title={dashboardView.title}
+            subtitle={dashboardView.subtitle}
+            eyebrow={dashboardView.eyebrow}
+            visibleStages={drilldownVisibleStages}
+            baseFilters={dashboardView.listBaseFilters}
+            initialSort={dashboardView.listInitialSort}
+            initialStageSlugs={dashboardView.initialStageSlugs}
+          />
+        </>
       ) : (
         <section className="rounded-lg border border-amber-200 bg-amber-50 p-4 text-sm font-semibold text-amber-900">
           The filtered board above is the source of truth for this dashboard drill-down. The paginated deal list is hidden here because the

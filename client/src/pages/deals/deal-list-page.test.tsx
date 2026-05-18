@@ -670,10 +670,10 @@ describe("DealListPage", () => {
     expect(staleView.title).toBe("Stale Deals");
     expect(staleView.boardMode).toBe("at_risk");
     expect(staleView.listInitialSort).toEqual({ key: "stage_entered_at", dir: "asc" });
-    expect(staleView.showEmbeddedList).toBe(false);
+    expect(staleView.showEmbeddedList).toBe(true);
     expect(riskView.title).toBe("Deals At Risk");
     expect(riskView.boardMode).toBe("at_risk");
-    expect(riskView.showEmbeddedList).toBe(false);
+    expect(riskView.showEmbeddedList).toBe(true);
   });
 
   it("builds stage-specific rep funnel drill-down views", () => {
@@ -797,6 +797,24 @@ describe("DealListPage", () => {
 
     expect(html).toContain("QTD Stale Deal");
     expect(html).not.toContain("Old Quarter Stale Deal");
+  });
+
+  it("keeps the embedded list visible for stale drill-down views", () => {
+    const html = renderPage("/deals?scope=team&filter=stale&period=qtd", "director");
+
+    expect(mocks.dealsListSectionMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        title: "Stale Deals",
+        scope: "team",
+        initialSort: { key: "stage_entered_at", dir: "asc" },
+        baseFilters: expect.objectContaining({
+          updatedFrom: "2026-04-01",
+          updatedTo: "2026-05-08",
+        }),
+      })
+    );
+    expect(html).toContain("Drill-down view: SLA filter applied to list and board.");
+    expect(html).not.toContain("The filtered board above is the source of truth");
   });
 
   it("reflects the team scope query param in the scope toggle", () => {
