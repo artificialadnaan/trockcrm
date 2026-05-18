@@ -437,11 +437,12 @@ describe("bid board mirror service", () => {
     ).toThrow("Bid Board mirror stage family mismatch");
   });
 
-  it("preserves the prior mirrored stage-entered timestamp when SyncHub omits it", () => {
+  it("resets mirrored stage-entered timestamp on stage changes when SyncHub omits it", () => {
     const previousStageEnteredAt = new Date("2026-04-20T12:00:00.000Z");
+    const now = new Date("2026-04-22T18:00:00.000Z");
 
     const result = buildBidBoardMirrorUpdate({
-      now: new Date("2026-04-22T18:00:00.000Z"),
+      now,
       deal: {
         id: "deal-1",
         stageId: "stage-estimating",
@@ -476,9 +477,54 @@ describe("bid board mirror service", () => {
       },
     });
 
+    expect(result.updates.stageEnteredAt).toEqual(now);
+    expect(result.updates.bidBoardStageEnteredAt).toEqual(now);
+    expect(result.history?.durationInPreviousStage).toBe("194400 seconds");
+  });
+
+  it("preserves mirrored stage-entered timestamp for same-stage refreshes when SyncHub omits it", () => {
+    const previousStageEnteredAt = new Date("2026-04-20T12:00:00.000Z");
+
+    const result = buildBidBoardMirrorUpdate({
+      now: new Date("2026-04-22T18:00:00.000Z"),
+      deal: {
+        id: "deal-1",
+        stageId: "stage-estimate-sent",
+        stageEnteredAt: previousStageEnteredAt,
+        workflowRoute: "normal",
+        isBidBoardOwned: true,
+        proposalStatus: "under_review",
+        estimatingSubstage: "under_review",
+        actualCloseDate: null,
+        lostReasonId: null,
+        lostNotes: null,
+        lostCompetitor: null,
+        lostAt: null,
+      },
+      currentStage: {
+        id: "stage-estimate-sent",
+        slug: "estimate_sent_to_client",
+        displayOrder: 3,
+      },
+      targetStage: {
+        id: "stage-estimate-sent",
+        slug: "estimate_sent_to_client",
+        name: "Estimate Sent to Client",
+        displayOrder: 3,
+        isTerminal: false,
+        workflowFamily: "standard_deal",
+      },
+      payload: {
+        stageSlug: "estimate_sent_to_client",
+        stageStatus: "under_review",
+        proposalStatus: "under_review",
+      },
+    });
+
+    expect(result.stageChanged).toBe(false);
     expect(result.updates.stageEnteredAt).toEqual(previousStageEnteredAt);
     expect(result.updates.bidBoardStageEnteredAt).toEqual(previousStageEnteredAt);
-    expect(result.history?.durationInPreviousStage).toBeNull();
+    expect(result.history).toBeNull();
   });
 
   it("rejects payload stage families that do not match the internal mirror mapping", () => {

@@ -360,12 +360,12 @@ export function buildBidBoardMirrorUpdate(input: {
     toCanonicalMirroredDealStageSlug(input.targetStage.slug, input.deal.workflowRoute) ??
     toCanonicalMirroredDealStageSlug(input.payload.stageSlug, input.deal.workflowRoute);
   const payloadStageEnteredAt = parseOptionalDate(input.payload.stageEnteredAt);
+  const stageChanged = input.deal.stageId !== input.targetStage.id;
   const stageEnteredAt =
-    payloadStageEnteredAt ?? parseOptionalDate(input.deal.stageEnteredAt) ?? now;
+    payloadStageEnteredAt ?? (stageChanged ? now : parseOptionalDate(input.deal.stageEnteredAt)) ?? now;
   const stageExitedAt = parseOptionalDate(input.payload.stageExitedAt);
   const mirrorSourceEnteredAt = parseOptionalDate(input.payload.mirrorSourceEnteredAt);
   const mirrorSourceExitedAt = parseOptionalDate(input.payload.mirrorSourceExitedAt);
-  const stageChanged = input.deal.stageId !== input.targetStage.id;
   const isBackwardMove =
     stageChanged &&
     input.currentStage != null &&
@@ -441,9 +441,7 @@ export function buildBidBoardMirrorUpdate(input: {
           toStageId: input.targetStage.id,
           isBackwardMove,
           overrideReason: BID_BOARD_MIRROR_OVERRIDE_REASON,
-          durationInPreviousStage: payloadStageEnteredAt
-            ? durationSince(input.deal.stageEnteredAt, payloadStageEnteredAt)
-            : null,
+          durationInPreviousStage: durationSince(input.deal.stageEnteredAt, stageEnteredAt),
         }
       : null,
   };
