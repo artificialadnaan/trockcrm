@@ -222,6 +222,7 @@ describe("deal activity backfill service", () => {
       dealId: "deal-1",
       assignedEntityType: "deal",
       assignedEntityId: "deal-1",
+      assignmentStatus: "assigned",
       userId: "user-1",
       hasAttachments: true,
     });
@@ -232,6 +233,27 @@ describe("deal activity backfill service", () => {
       dealId: "deal-1",
       subject: "Proposal Follow Up",
     });
+  });
+
+  it("maps HubSpot EMAIL direction as outbound and clamps long activity subjects", () => {
+    const longSubject = "A".repeat(700);
+    const result = mapEmailToRecords({
+      engagement: makeEngagement({
+        id: "hs-email-2",
+        objectType: "email",
+        properties: {
+          hs_email_subject: longSubject,
+          hs_email_text: "Outbound note",
+          hs_email_direction: "EMAIL",
+        },
+      }),
+      deal: { id: "deal-1" },
+      userId: "user-1",
+    });
+
+    expect(result.email.direction).toBe("outbound");
+    expect(result.email.subject).toBe(longSubject);
+    expect(result.activity.subject).toHaveLength(500);
   });
 
   it("writes a note activity and ledger atomically", async () => {

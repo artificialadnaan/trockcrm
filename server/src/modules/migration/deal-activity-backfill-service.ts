@@ -88,6 +88,11 @@ function normalizeEmail(value: string | undefined): string | null {
   return trimmed ? trimmed : null;
 }
 
+function clampText(value: string | null, maxLength: number): string | null {
+  if (!value) return null;
+  return value.length > maxLength ? value.slice(0, maxLength) : value;
+}
+
 function stripHtml(input: string): string {
   return input.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim();
 }
@@ -186,7 +191,7 @@ function parseEmailHeaders(rawHeaders: string | undefined) {
 
 function mapDirection(value: string | undefined): "inbound" | "outbound" {
   const normalized = value?.trim().toLowerCase();
-  if (normalized?.includes("outgoing") || normalized === "outbound") return "outbound";
+  if (normalized === "email" || normalized?.includes("outgoing") || normalized === "outbound") return "outbound";
   return "inbound";
 }
 
@@ -202,7 +207,7 @@ export function mapNoteToActivity(input: {
     sourceEntityType: "deal" as const,
     sourceEntityId: input.deal.id,
     dealId: input.deal.id,
-    subject: "HubSpot Note",
+    subject: clampText("HubSpot Note", 500),
     body: normalizeText(input.engagement.properties.hs_note_body),
     occurredAt: parseDate(input.engagement.properties.hs_timestamp),
   };
@@ -220,7 +225,7 @@ export function mapCallToActivity(input: {
     sourceEntityType: "deal" as const,
     sourceEntityId: input.deal.id,
     dealId: input.deal.id,
-    subject: normalizeText(input.engagement.properties.hs_call_title) ?? "HubSpot Call",
+    subject: clampText(normalizeText(input.engagement.properties.hs_call_title) ?? "HubSpot Call", 500),
     body: normalizeText(input.engagement.properties.hs_call_body),
     outcome:
       normalizeText(input.engagement.properties.hs_call_outcome) ??
@@ -242,7 +247,7 @@ export function mapMeetingToActivity(input: {
     sourceEntityType: "deal" as const,
     sourceEntityId: input.deal.id,
     dealId: input.deal.id,
-    subject: normalizeText(input.engagement.properties.hs_meeting_title) ?? "HubSpot Meeting",
+    subject: clampText(normalizeText(input.engagement.properties.hs_meeting_title) ?? "HubSpot Meeting", 500),
     body:
       normalizeText(input.engagement.properties.hs_meeting_body) ??
       normalizeText(input.engagement.properties.hs_internal_meeting_notes),
@@ -267,6 +272,7 @@ export function mapEmailToRecords(input: {
     (bodyHtml ? stripHtml(bodyHtml) : null);
   const participants = parseEmailHeaders(input.engagement.properties.hs_email_headers);
   const subject = normalizeText(input.engagement.properties.hs_email_subject) ?? "HubSpot Email";
+  const activitySubject = clampText(subject, 500);
   const sentAt = parseDate(input.engagement.properties.hs_timestamp);
 
   return {
@@ -285,6 +291,7 @@ export function mapEmailToRecords(input: {
       dealId: input.deal.id,
       assignedEntityType: "deal",
       assignedEntityId: input.deal.id,
+      assignmentStatus: "assigned",
       assignmentConfidence: "high",
       assignmentAmbiguityReason: null,
       userId: input.userId,
@@ -297,7 +304,7 @@ export function mapEmailToRecords(input: {
       sourceEntityType: "deal" as const,
       sourceEntityId: input.deal.id,
       dealId: input.deal.id,
-      subject,
+      subject: activitySubject,
       body: bodyText?.slice(0, 1000) ?? null,
       occurredAt: sentAt,
     } satisfies typeof activities.$inferInsert,

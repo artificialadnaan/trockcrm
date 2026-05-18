@@ -369,6 +369,13 @@ function buildActivityProperties(type: HubSpotActivityObjectType): string {
 
 /** Fetch all owners (used to resolve hubspot_owner_id -> email for rep matching). */
 export async function fetchAllOwners(): Promise<HubSpotOwner[]> {
-  const body = await hsFetch<{ results: HubSpotOwner[] }>("/crm/v3/owners?limit=500");
-  return body.results ?? [];
+  return fetchAllPages<HubSpotOwner>(
+    (after) => {
+      const params = new URLSearchParams({ limit: String(PAGE_SIZE) });
+      if (after) params.set("after", after);
+      return `/crm/v3/owners?${params.toString()}`;
+    },
+    (body) => body.results ?? [],
+    (body) => body.paging?.next?.after
+  );
 }
