@@ -48,6 +48,9 @@ export interface SendEmailInput {
   bodyHtml: string;
   dealId?: string | null;
   contactId?: string | null;
+  assignedEntityType?: "deal" | "company" | "lead" | "contact" | "property" | null;
+  assignedEntityId?: string | null;
+  assignedDealId?: string | null;
 }
 
 export interface EmailFilters {
@@ -143,6 +146,7 @@ async function refreshEntityEmailStats(
               (e.assigned_entity_type = 'company' AND e.assigned_entity_id = ${entityId})
               OR e.deal_id IN (SELECT id FROM ${deals} WHERE ${deals.companyId} = ${entityId})
               OR e.contact_id IN (SELECT id FROM ${contacts} WHERE ${contacts.companyId} = ${entityId})
+              OR (e.assigned_entity_type = 'lead' AND e.assigned_entity_id IN (SELECT id FROM ${leads} WHERE ${leads.companyId} = ${entityId}))
               OR (e.assigned_entity_type = 'deal' AND e.assigned_entity_id IN (SELECT id FROM ${deals} WHERE ${deals.companyId} = ${entityId}))
               OR (e.assigned_entity_type = 'contact' AND e.assigned_entity_id IN (SELECT id FROM ${contacts} WHERE ${contacts.companyId} = ${entityId}))
             )
@@ -155,6 +159,7 @@ async function refreshEntityEmailStats(
               (e.assigned_entity_type = 'company' AND e.assigned_entity_id = ${entityId})
               OR e.deal_id IN (SELECT id FROM ${deals} WHERE ${deals.companyId} = ${entityId})
               OR e.contact_id IN (SELECT id FROM ${contacts} WHERE ${contacts.companyId} = ${entityId})
+              OR (e.assigned_entity_type = 'lead' AND e.assigned_entity_id IN (SELECT id FROM ${leads} WHERE ${leads.companyId} = ${entityId}))
               OR (e.assigned_entity_type = 'deal' AND e.assigned_entity_id IN (SELECT id FROM ${deals} WHERE ${deals.companyId} = ${entityId}))
               OR (e.assigned_entity_type = 'contact' AND e.assigned_entity_id IN (SELECT id FROM ${contacts} WHERE ${contacts.companyId} = ${entityId}))
             )
@@ -308,8 +313,35 @@ async function refreshEmailStatsForEmailRecord(
 ) {
   await refreshEmailStatsForTargets(tenantDb, [
     ...deriveEmailStatTargetsFromEmail(email),
+    ...(await deriveDealStatTargetsFromEmail(tenantDb, email)),
     ...(await deriveCompanyStatTargetsFromEmail(tenantDb, email)),
   ]);
+}
+
+async function deriveDealStatTargetsFromEmail(
+  tenantDb: TenantDb,
+  email: {
+    assignedEntityType?: string | null;
+    assignedEntityId?: string | null;
+    dealId?: string | null;
+    contactId?: string | null;
+  }
+) {
+  const dealIds = new Set<string>();
+
+  if (email.assignedEntityType === "lead" && email.assignedEntityId) {
+    const linkedDeals = await tenantDb
+      .select({ id: deals.id })
+      .from(deals)
+      .where(eq(deals.sourceLeadId, email.assignedEntityId));
+    for (const deal of linkedDeals) {
+      if (deal?.id) {
+        dealIds.add(deal.id);
+      }
+    }
+  }
+
+  return Array.from(dealIds).map((dealId) => ({ entityType: "deal" as const, entityId: dealId }));
 }
 
 async function deriveCompanyStatTargetsFromEmail(
@@ -353,6 +385,19 @@ async function deriveCompanyStatTargetsFromEmail(
       .where(eq(contacts.id, contactId))
       .limit(1);
     if (contactRow?.companyId) companyIds.add(contactRow.companyId);
+  }
+
+  const candidateLeadIds = new Set<string>();
+  if (email.assignedEntityType === "lead" && email.assignedEntityId) {
+    candidateLeadIds.add(email.assignedEntityId);
+  }
+  for (const leadId of candidateLeadIds) {
+    const [leadRow] = await tenantDb
+      .select({ companyId: leads.companyId })
+      .from(leads)
+      .where(eq(leads.id, leadId))
+      .limit(1);
+    if (leadRow?.companyId) companyIds.add(leadRow.companyId);
   }
 
   return Array.from(companyIds).map((companyId) => ({ entityType: "company" as const, entityId: companyId }));
@@ -402,6 +447,16 @@ type EmailAssignmentUpdate = {
   dealId: string | null;
 };
 
+type OutboundActivityLinks = {
+  sourceEntityType: "deal" | "company" | "contact" | "lead" | "property";
+  sourceEntityId: string;
+  companyId: string | null;
+  propertyId: string | null;
+  leadId: string | null;
+  dealId: string | null;
+  contactId: string | null;
+};
+
 function assignmentUpdateForDeal(dealId: string): EmailAssignmentUpdate {
   return {
     assignedEntityType: "deal",
@@ -410,6 +465,174 @@ function assignmentUpdateForDeal(dealId: string): EmailAssignmentUpdate {
     assignmentAmbiguityReason: null,
     dealId,
   };
+}
+
+async function resolveOutboundAssociation(
+  tenantDb: TenantDb,
+  input: SendEmailInput
+): Promise<{ assignment: EmailAssignmentUpdate; links: OutboundActivityLinks } | null> {
+  if (input.assignedEntityType && input.assignedEntityId) {
+    if (input.assignedEntityType === "deal") {
+      const [deal] = await tenantDb
+        .select({
+          id: deals.id,
+          companyId: deals.companyId,
+          propertyId: deals.propertyId,
+          sourceLeadId: deals.sourceLeadId,
+        })
+        .from(deals)
+        .where(eq(deals.id, input.assignedEntityId))
+        .limit(1);
+      if (!deal) throw new AppError(404, "Deal not found");
+
+      return {
+        assignment: assignmentUpdateForDeal(input.assignedEntityId),
+        links: {
+          sourceEntityType: "deal",
+          sourceEntityId: input.assignedEntityId,
+          companyId: deal.companyId ?? null,
+          propertyId: deal.propertyId ?? null,
+          leadId: deal.sourceLeadId ?? null,
+          dealId: input.assignedEntityId,
+          contactId: null,
+        },
+      };
+    }
+
+    if (input.assignedEntityType === "company") {
+      return {
+        assignment: {
+          assignedEntityType: "company",
+          assignedEntityId: input.assignedEntityId,
+          assignmentConfidence: "high",
+          assignmentAmbiguityReason: null,
+          dealId: null,
+        },
+        links: {
+          sourceEntityType: "company",
+          sourceEntityId: input.assignedEntityId,
+          companyId: input.assignedEntityId,
+          propertyId: null,
+          leadId: null,
+          dealId: null,
+          contactId: null,
+        },
+      };
+    }
+
+    if (input.assignedEntityType === "contact") {
+      const [contact] = await tenantDb
+        .select({ id: contacts.id, companyId: contacts.companyId })
+        .from(contacts)
+        .where(eq(contacts.id, input.assignedEntityId))
+        .limit(1);
+      if (!contact) throw new AppError(404, "Contact not found");
+
+      return {
+        assignment: {
+          assignedEntityType: "contact",
+          assignedEntityId: input.assignedEntityId,
+          assignmentConfidence: "high",
+          assignmentAmbiguityReason: null,
+          dealId: null,
+        },
+        links: {
+          sourceEntityType: "contact",
+          sourceEntityId: input.assignedEntityId,
+          companyId: contact.companyId ?? null,
+          propertyId: null,
+          leadId: null,
+          dealId: null,
+          contactId: input.assignedEntityId,
+        },
+      };
+    }
+
+    if (input.assignedEntityType === "lead") {
+      const [lead] = await tenantDb
+        .select({ id: leads.id, companyId: leads.companyId, propertyId: leads.propertyId })
+        .from(leads)
+        .where(eq(leads.id, input.assignedEntityId))
+        .limit(1);
+      if (!lead) throw new AppError(404, "Lead not found");
+
+      return {
+        assignment: {
+          assignedEntityType: "lead",
+          assignedEntityId: input.assignedEntityId,
+          assignmentConfidence: "high",
+          assignmentAmbiguityReason: null,
+          dealId: null,
+        },
+        links: {
+          sourceEntityType: "lead",
+          sourceEntityId: input.assignedEntityId,
+          companyId: lead.companyId ?? null,
+          propertyId: lead.propertyId ?? null,
+          leadId: input.assignedEntityId,
+          dealId: null,
+          contactId: null,
+        },
+      };
+    }
+  }
+
+  if (input.dealId) {
+    const [deal] = await tenantDb
+      .select({
+        id: deals.id,
+        companyId: deals.companyId,
+        propertyId: deals.propertyId,
+        sourceLeadId: deals.sourceLeadId,
+      })
+      .from(deals)
+      .where(eq(deals.id, input.dealId))
+      .limit(1);
+    if (!deal) throw new AppError(404, "Deal not found");
+
+    return {
+      assignment: assignmentUpdateForDeal(input.dealId),
+      links: {
+        sourceEntityType: "deal",
+        sourceEntityId: input.dealId,
+        companyId: deal.companyId ?? null,
+        propertyId: deal.propertyId ?? null,
+        leadId: deal.sourceLeadId ?? null,
+        dealId: input.dealId,
+        contactId: null,
+      },
+    };
+  }
+
+  if (input.contactId) {
+    const [contactRow] = await tenantDb
+      .select({ companyId: contacts.companyId })
+      .from(contacts)
+      .where(eq(contacts.id, input.contactId))
+      .limit(1);
+    if (contactRow?.companyId) {
+      return {
+        assignment: {
+          assignedEntityType: "company",
+          assignedEntityId: contactRow.companyId,
+          assignmentConfidence: "medium",
+          assignmentAmbiguityReason: null,
+          dealId: null,
+        },
+        links: {
+          sourceEntityType: "company",
+          sourceEntityId: contactRow.companyId,
+          companyId: contactRow.companyId,
+          propertyId: null,
+          leadId: null,
+          dealId: null,
+          contactId: input.contactId,
+        },
+      };
+    }
+  }
+
+  return null;
 }
 
 function normalizeEmailSubject(subject: string): string {
@@ -1110,39 +1333,11 @@ export async function sendEmail(
   userId: string,
   input: SendEmailInput
 ): Promise<any> {
-  let outboundAssignment: EmailAssignmentUpdate = {
-    assignedEntityType: null,
-    assignedEntityId: null,
-    assignmentConfidence: "low",
-    assignmentAmbiguityReason: null,
-    dealId: null,
-  };
-  if (input.dealId) {
-    outboundAssignment = assignmentUpdateForDeal(input.dealId);
-  } else if (input.contactId) {
-    const [contactRow] = await tenantDb
-      .select({ companyId: contacts.companyId })
-      .from(contacts)
-      .where(eq(contacts.id, input.contactId))
-      .limit(1);
-    if (contactRow?.companyId) {
-      outboundAssignment = {
-        assignedEntityType: "company",
-        assignedEntityId: contactRow.companyId,
-        assignmentConfidence: "medium",
-        assignmentAmbiguityReason: null,
-        dealId: null,
-      };
-    }
-  }
-
-  const activitySourceEntityType =
-    input.dealId ? "deal" : outboundAssignment.assignedEntityType === "company" ? "company" : "contact";
-  const activitySourceEntityId =
-    input.dealId ?? outboundAssignment.assignedEntityId ?? input.contactId ?? null;
-  if (!activitySourceEntityId) {
+  const outboundAssociation = await resolveOutboundAssociation(tenantDb, input);
+  if (!outboundAssociation) {
     throw new AppError(400, "Outbound email must be associated to a deal, company, or contact.");
   }
+  const outboundAssignment = outboundAssociation.assignment;
 
   // Dev mode: store email locally without sending via Graph
   if (!isGraphAuthConfigured()) {
@@ -1220,14 +1415,14 @@ export async function sendEmail(
       bodyPreview: stripHtml(input.bodyHtml).substring(0, 500),
       bodyHtml: input.bodyHtml,
       hasAttachments: false,
-      contactId: input.contactId ?? null,
+      contactId: outboundAssociation.links.contactId,
       ...outboundAssignment,
       userId,
       sentAt: new Date(),
     })
     .returning();
 
-  if (input.dealId) {
+  if (outboundAssociation.links.dealId) {
     const mailboxAccountId = await resolveMailboxAccountIdForCrmUser(tenantDb, userId);
     const binding = await seedOutboundThreadBinding(tenantDb, {
       mailboxAccountId,
@@ -1235,7 +1430,7 @@ export async function sendEmail(
       providerConversationId: graphConversationId,
       normalizedSubject: normalizeEmailSubject(input.subject),
       participantFingerprint: buildParticipantFingerprint(input.to, input.cc ?? []),
-      dealId: input.dealId,
+      dealId: outboundAssociation.links.dealId,
       actingUserId: userId,
     });
 
@@ -1252,11 +1447,13 @@ export async function sendEmail(
     type: "email",
     responsibleUserId: userId,
     performedByUserId: userId,
-    sourceEntityType: activitySourceEntityType,
-    sourceEntityId: activitySourceEntityId,
-    companyId: outboundAssignment.assignedEntityType === "company" ? outboundAssignment.assignedEntityId : null,
-    dealId: input.dealId ?? null,
-    contactId: input.contactId ?? null,
+    sourceEntityType: outboundAssociation.links.sourceEntityType,
+    sourceEntityId: outboundAssociation.links.sourceEntityId,
+    companyId: outboundAssociation.links.companyId,
+    propertyId: outboundAssociation.links.propertyId,
+    leadId: outboundAssociation.links.leadId,
+    dealId: outboundAssociation.links.dealId,
+    contactId: outboundAssociation.links.contactId,
     emailId: emailRecord.id,
     subject: input.subject,
     body: stripHtml(input.bodyHtml).substring(0, 1000),
@@ -1277,31 +1474,11 @@ async function createMockSentEmail(
   input: SendEmailInput
 ): Promise<any> {
   const graphMessageId = `dev-sent-${crypto.randomUUID()}`;
-  let outboundAssignment: EmailAssignmentUpdate = {
-    assignedEntityType: null,
-    assignedEntityId: null,
-    assignmentConfidence: "low",
-    assignmentAmbiguityReason: null,
-    dealId: null,
-  };
-  if (input.dealId) {
-    outboundAssignment = assignmentUpdateForDeal(input.dealId);
-  } else if (input.contactId) {
-    const [contactRow] = await tenantDb
-      .select({ companyId: contacts.companyId })
-      .from(contacts)
-      .where(eq(contacts.id, input.contactId))
-      .limit(1);
-    if (contactRow?.companyId) {
-      outboundAssignment = {
-        assignedEntityType: "company",
-        assignedEntityId: contactRow.companyId,
-        assignmentConfidence: "medium",
-        assignmentAmbiguityReason: null,
-        dealId: null,
-      };
-    }
+  const outboundAssociation = await resolveOutboundAssociation(tenantDb, input);
+  if (!outboundAssociation) {
+    throw new AppError(400, "Outbound email must be associated to a deal, company, or contact.");
   }
+  const outboundAssignment = outboundAssociation.assignment;
 
   const [emailRecord] = await tenantDb
     .insert(emails)
@@ -1315,14 +1492,14 @@ async function createMockSentEmail(
       bodyPreview: stripHtml(input.bodyHtml).substring(0, 500),
       bodyHtml: input.bodyHtml,
       hasAttachments: false,
-      contactId: input.contactId ?? null,
+      contactId: outboundAssociation.links.contactId,
       ...outboundAssignment,
       userId,
       sentAt: new Date(),
     })
     .returning();
 
-  if (input.dealId) {
+  if (outboundAssociation.links.dealId) {
     const mailboxAccountId = await resolveMailboxAccountIdForCrmUser(tenantDb, userId);
     const binding = await seedOutboundThreadBinding(tenantDb, {
       mailboxAccountId,
@@ -1330,7 +1507,7 @@ async function createMockSentEmail(
       providerConversationId: null,
       normalizedSubject: normalizeEmailSubject(input.subject),
       participantFingerprint: buildParticipantFingerprint(input.to, input.cc ?? []),
-      dealId: input.dealId,
+      dealId: outboundAssociation.links.dealId,
       actingUserId: userId,
     });
 
@@ -1342,22 +1519,17 @@ async function createMockSentEmail(
     emailRecord.threadBindingId = binding.id;
   }
 
-  const activitySourceEntityType =
-    input.dealId ? "deal" : outboundAssignment.assignedEntityType === "company" ? "company" : "contact";
-  const activitySourceEntityId =
-    input.dealId ?? outboundAssignment.assignedEntityId ?? input.contactId ?? null;
-  if (!activitySourceEntityId) {
-    throw new AppError(400, "Outbound email must be associated to a deal, company, or contact.");
-  }
   await tenantDb.insert(activities).values({
     type: "email",
     responsibleUserId: userId,
     performedByUserId: userId,
-    sourceEntityType: activitySourceEntityType,
-    sourceEntityId: activitySourceEntityId,
-    companyId: outboundAssignment.assignedEntityType === "company" ? outboundAssignment.assignedEntityId : null,
-    dealId: input.dealId ?? null,
-    contactId: input.contactId ?? null,
+    sourceEntityType: outboundAssociation.links.sourceEntityType,
+    sourceEntityId: outboundAssociation.links.sourceEntityId,
+    companyId: outboundAssociation.links.companyId,
+    propertyId: outboundAssociation.links.propertyId,
+    leadId: outboundAssociation.links.leadId,
+    dealId: outboundAssociation.links.dealId,
+    contactId: outboundAssociation.links.contactId,
     emailId: emailRecord.id,
     subject: input.subject,
     body: stripHtml(input.bodyHtml).substring(0, 1000),

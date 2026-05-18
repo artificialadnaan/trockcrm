@@ -1809,6 +1809,160 @@ describe("email service inbound association", () => {
     expect(tenantDb.insert).not.toHaveBeenCalled();
   });
 
+  it("persists an explicitly selected contact association instead of falling back to company-only linkage", async () => {
+    isGraphAuthConfiguredMock.mockReturnValue(false);
+
+    const emailInsertPayloads: any[] = [];
+    const activityInsertPayloads: any[] = [];
+    let insertCallCount = 0;
+    const selectMock = vi.fn((shape?: Record<string, unknown>) => {
+      if (shape && "companyId" in shape && "id" in shape) {
+        return createSelectChain([{ id: "contact-1", companyId: "company-1" }]);
+      }
+      if (shape && "companyId" in shape) {
+        return createSelectChain([{ companyId: "company-1" }]);
+      }
+      return createSelectChain([]);
+    });
+    const tenantDb = {
+      select: selectMock,
+      insert: vi.fn((table: any) => ({
+        values: vi.fn((payload: any) => {
+          insertCallCount += 1;
+          if (insertCallCount === 1) {
+            emailInsertPayloads.push(payload);
+            return {
+              returning: vi.fn(async () => [
+                {
+                  id: "email-1",
+                  assignedEntityType: payload.assignedEntityType,
+                  assignedEntityId: payload.assignedEntityId,
+                  dealId: payload.dealId,
+                  contactId: payload.contactId,
+                  threadBindingId: null,
+                },
+              ]),
+            };
+          }
+
+          activityInsertPayloads.push(payload);
+
+          return {
+            returning: vi.fn(async () => []),
+            then(resolve: (value: any[]) => void) {
+              resolve([]);
+            },
+          };
+        }),
+      })),
+      update: vi.fn(() => ({
+        set: vi.fn(() => ({
+          where: vi.fn(async () => []),
+        })),
+      })),
+    };
+
+    await sendEmail(tenantDb as any, "user-1", {
+      to: ["client@example.com"],
+      subject: "Contact follow up",
+      bodyHtml: "<p>Hello</p>",
+      assignedEntityType: "contact",
+      assignedEntityId: "contact-1",
+      contactId: "contact-1",
+    });
+
+    expect(emailInsertPayloads[0]).toEqual(
+      expect.objectContaining({
+        assignedEntityType: "contact",
+        assignedEntityId: "contact-1",
+        contactId: "contact-1",
+      })
+    );
+    expect(activityInsertPayloads[0]).toEqual(
+      expect.objectContaining({
+        sourceEntityType: "contact",
+        sourceEntityId: "contact-1",
+        contactId: "contact-1",
+      })
+    );
+  });
+
+  it("persists explicit lead associations and refreshes lead email stats", async () => {
+    isGraphAuthConfiguredMock.mockReturnValue(false);
+
+    const updatePayloads: Array<{ table: string; payload: any }> = [];
+    const activityInsertPayloads: any[] = [];
+    let insertCallCount = 0;
+    const selectMock = vi.fn((shape?: Record<string, unknown>) => {
+      if (shape && "id" in shape && !("companyId" in shape) && !("propertyId" in shape)) {
+        return createSelectChain([{ id: "deal-7" }]);
+      }
+      if (shape && "propertyId" in shape) {
+        return createSelectChain([{ id: "lead-1", companyId: "company-1", propertyId: "property-1" }]);
+      }
+      if (shape && "companyId" in shape) {
+        return createSelectChain([{ companyId: "company-1" }]);
+      }
+      return createSelectChain([]);
+    });
+    const tenantDb = {
+      select: selectMock,
+      insert: vi.fn((table: any) => ({
+        values: vi.fn((payload: any) => {
+          insertCallCount += 1;
+          if (insertCallCount > 1) {
+            activityInsertPayloads.push(payload);
+          }
+          return {
+            returning: vi.fn(async () => {
+              if (insertCallCount === 1) {
+                return [
+                  {
+                    id: "email-1",
+                    assignedEntityType: payload.assignedEntityType,
+                    assignedEntityId: payload.assignedEntityId,
+                    dealId: payload.dealId ?? null,
+                    contactId: payload.contactId ?? null,
+                    threadBindingId: null,
+                  },
+                ];
+              }
+              return [];
+            }),
+            then(resolve: (value: any[]) => void) {
+              resolve([]);
+            },
+          };
+        }),
+      })),
+      update: vi.fn((table: any) => ({
+        set: vi.fn((payload: any) => {
+          updatePayloads.push({ table: table?.name ?? "unknown", payload });
+          return {
+            where: vi.fn(async () => []),
+          };
+        }),
+      })),
+    };
+
+    await sendEmail(tenantDb as any, "user-1", {
+      to: ["client@example.com"],
+      subject: "Lead follow up",
+      bodyHtml: "<p>Hello</p>",
+      assignedEntityType: "lead",
+      assignedEntityId: "lead-1",
+    });
+
+    expect(activityInsertPayloads[0]).toEqual(
+      expect.objectContaining({
+        sourceEntityType: "lead",
+        sourceEntityId: "lead-1",
+        leadId: "lead-1",
+      })
+    );
+    expect(updatePayloads.length).toBeGreaterThanOrEqual(3);
+  });
+
   it("recomputes linked entity email stats after sending an outbound email", async () => {
     isGraphAuthConfiguredMock.mockReturnValue(false);
 

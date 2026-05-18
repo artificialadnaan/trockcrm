@@ -61,6 +61,7 @@ export interface EmailAssociationTarget {
   assignedEntityType: "deal" | "lead" | "property" | "company" | "contact";
   assignedEntityId: string;
   assignedDealId: string | null;
+  displayLabel?: string;
 }
 
 export interface EmailFilters {
@@ -364,8 +365,11 @@ export async function sendEmail(input: {
   cc?: string[];
   subject: string;
   bodyHtml: string;
-  dealId?: string;
-  contactId?: string;
+  dealId?: string | null;
+  contactId?: string | null;
+  assignedEntityType?: EmailAssociationTarget["assignedEntityType"];
+  assignedEntityId?: string;
+  assignedDealId?: string | null;
 }) {
   return api<{ email: Email }>("/email/send", {
     method: "POST",

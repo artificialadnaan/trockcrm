@@ -1,5 +1,5 @@
-import { useEffect, useState } from "react";
-import { Send } from "lucide-react";
+import { useEffect, useMemo, useState } from "react";
+import { ChevronDown, Send } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -9,7 +9,8 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
-import { sendEmail } from "@/hooks/use-emails";
+import { EmailManualAssignmentDialog } from "./email-manual-assignment-dialog";
+import { sendEmail, type EmailAssociationTarget } from "@/hooks/use-emails";
 
 interface EmailComposeDialogProps {
   open: boolean;
@@ -32,10 +33,34 @@ export function EmailComposeDialog({
   dealId,
   contactId,
 }: EmailComposeDialogProps) {
+  const defaultAssociation = useMemo<EmailAssociationTarget | null>(() => {
+    if (dealId) {
+      return {
+        assignedEntityType: "deal",
+        assignedEntityId: dealId,
+        assignedDealId: dealId,
+        displayLabel: "Deal selected",
+      };
+    }
+
+    if (contactId) {
+      return {
+        assignedEntityType: "contact",
+        assignedEntityId: contactId,
+        assignedDealId: null,
+        displayLabel: "Contact selected",
+      };
+    }
+
+    return null;
+  }, [contactId, dealId]);
+
   const [to, setTo] = useState(defaultTo ?? "");
   const [cc, setCc] = useState("");
   const [subject, setSubject] = useState("");
   const [body, setBody] = useState("");
+  const [association, setAssociation] = useState<EmailAssociationTarget | null>(defaultAssociation);
+  const [associationPickerOpen, setAssociationPickerOpen] = useState(false);
   const [sending, setSending] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -45,10 +70,17 @@ export function EmailComposeDialog({
     setCc("");
     setSubject(defaultSubject ?? "");
     setBody(defaultBody ?? "");
+    setAssociation(defaultAssociation);
     setError(null);
-  }, [defaultBody, defaultSubject, defaultTo, open]);
+  }, [defaultAssociation, defaultBody, defaultSubject, defaultTo, open]);
+
+  const canSend = Boolean(association && to.trim() && subject.trim() && !sending);
 
   const handleSend = async () => {
+    if (!association) {
+      setError("Association is required");
+      return;
+    }
     if (!to.trim()) {
       setError("Recipient is required");
       return;
@@ -88,8 +120,11 @@ export function EmailComposeDialog({
         cc: ccList,
         subject: subject.trim(),
         bodyHtml,
-        dealId,
-        contactId,
+        assignedEntityType: association.assignedEntityType,
+        assignedEntityId: association.assignedEntityId,
+        assignedDealId: association.assignedDealId,
+        dealId: association.assignedEntityType === "deal" ? association.assignedEntityId : null,
+        contactId: association.assignedEntityType === "contact" ? association.assignedEntityId : null,
       });
 
       onOpenChange(false);
@@ -109,6 +144,22 @@ export function EmailComposeDialog({
         </DialogHeader>
 
         <div className="space-y-3">
+          <div>
+            <Label htmlFor="email-association">Associate to</Label>
+            <Button
+              id="email-association"
+              type="button"
+              variant="outline"
+              className="mt-1 w-full justify-between font-normal"
+              onClick={() => setAssociationPickerOpen(true)}
+            >
+              <span className={association ? "truncate" : "truncate text-muted-foreground"}>
+                {association?.displayLabel ?? "Pick a deal, company, contact, or lead"}
+              </span>
+              <ChevronDown className="ml-2 h-4 w-4 shrink-0 text-muted-foreground" />
+            </Button>
+          </div>
+
           <div>
             <Label htmlFor="email-to">To</Label>
             <Input
@@ -162,7 +213,7 @@ export function EmailComposeDialog({
             >
               Cancel
             </Button>
-            <Button onClick={handleSend} disabled={sending}>
+            <Button onClick={handleSend} disabled={!canSend}>
               {sending ? (
                 "Sending..."
               ) : (
@@ -175,6 +226,18 @@ export function EmailComposeDialog({
           </div>
         </div>
       </DialogContent>
+
+      <EmailManualAssignmentDialog
+        open={associationPickerOpen}
+        onOpenChange={setAssociationPickerOpen}
+        onAssign={async (target) => {
+          setAssociation(target);
+          setError(null);
+        }}
+        title="Associate outbound email"
+        description="Search the CRM and attach this email to a deal, lead, contact, or company before sending."
+        searchTypes={["deal", "lead", "contact", "company"]}
+      />
     </Dialog>
   );
 }

@@ -67,6 +67,22 @@ type PropertySearchRow = {
   companyName: string | null;
 };
 
+const DEFAULT_SEARCH_TYPES: ManualSearchType[] = ["deal", "lead", "contact", "company", "property"];
+const DEFAULT_TYPE_LABELS: Array<{ type: ManualSearchType; label: string }> = [
+  { type: "deal", label: "Deals" },
+  { type: "lead", label: "Leads" },
+  { type: "contact", label: "Contacts" },
+  { type: "company", label: "Companies" },
+  { type: "property", label: "Properties" },
+];
+const SEARCH_TYPE_COPY: Record<ManualSearchType, { singular: string; plural: string }> = {
+  deal: { singular: "deal", plural: "deals" },
+  lead: { singular: "lead", plural: "leads" },
+  contact: { singular: "contact", plural: "contacts" },
+  company: { singular: "company", plural: "companies" },
+  property: { singular: "property", plural: "properties" },
+};
+
 function formatLocation(parts: Array<string | null | undefined>) {
   return parts.filter(Boolean).join(" · ") || null;
 }
@@ -87,6 +103,7 @@ async function searchManualTargets(type: ManualSearchType, query: string): Promi
         assignedEntityType: "contact",
         assignedEntityId: contact.id,
         assignedDealId: null,
+        displayLabel: [contact.firstName, contact.lastName].filter(Boolean).join(" ") || "Unknown Contact",
       },
     }));
   }
@@ -103,6 +120,7 @@ async function searchManualTargets(type: ManualSearchType, query: string): Promi
         assignedEntityType: "company",
         assignedEntityId: company.id,
         assignedDealId: null,
+        displayLabel: company.name,
       },
     }));
   }
@@ -123,6 +141,7 @@ async function searchManualTargets(type: ManualSearchType, query: string): Promi
         assignedEntityType: "property",
         assignedEntityId: property.id,
         assignedDealId: null,
+        displayLabel: property.name,
       },
     }));
   }
@@ -144,6 +163,7 @@ async function searchManualTargets(type: ManualSearchType, query: string): Promi
         assignedEntityType: "lead",
         assignedEntityId: lead.id,
         assignedDealId: null,
+        displayLabel: lead.name,
       },
     }));
   }
@@ -162,6 +182,7 @@ async function searchManualTargets(type: ManualSearchType, query: string): Promi
       assignedEntityType: "deal",
       assignedEntityId: deal.id,
       assignedDealId: deal.id,
+      displayLabel: `${deal.dealNumber} · ${deal.name}`,
     },
   }));
 }
@@ -173,6 +194,7 @@ interface EmailManualAssignmentDialogProps {
   title?: string;
   description?: string;
   safeOptions?: Array<{ label: string; value: EmailAssociationTarget }>;
+  searchTypes?: ManualSearchType[];
 }
 
 export function EmailManualAssignmentDialog({
@@ -182,8 +204,13 @@ export function EmailManualAssignmentDialog({
   title = "Assign intake manually",
   description = "No safe match found. Search the CRM and attach this email to any deal, lead, contact, company, or property.",
   safeOptions = [],
+  searchTypes,
 }: EmailManualAssignmentDialogProps) {
-  const [searchType, setSearchType] = useState<ManualSearchType>("deal");
+  const availableSearchTypes = useMemo(
+    () => searchTypes ?? DEFAULT_SEARCH_TYPES,
+    [searchTypes]
+  );
+  const [searchType, setSearchType] = useState<ManualSearchType>(availableSearchTypes[0] ?? "deal");
   const [query, setQuery] = useState("");
   const [results, setResults] = useState<ManualSearchResult[]>([]);
   const [searching, setSearching] = useState(false);
@@ -199,6 +226,7 @@ export function EmailManualAssignmentDialog({
       setSearching(false);
       setResolvingKey(null);
       setAssignmentError(null);
+      setSearchType(availableSearchTypes[0] ?? "deal");
       return;
     }
 
@@ -227,18 +255,13 @@ export function EmailManualAssignmentDialog({
     }, 250);
 
     return () => window.clearTimeout(timeoutId);
-  }, [open, query, searchType]);
+  }, [availableSearchTypes, open, query, searchType]);
 
   const typeLabels: Array<{ type: ManualSearchType; label: string }> = useMemo(
-    () => [
-      { type: "deal", label: "Deals" },
-      { type: "lead", label: "Leads" },
-      { type: "contact", label: "Contacts" },
-      { type: "company", label: "Companies" },
-      { type: "property", label: "Properties" },
-    ],
-    []
+    () => DEFAULT_TYPE_LABELS.filter((entry) => availableSearchTypes.includes(entry.type)),
+    [availableSearchTypes]
   );
+  const searchCopy = SEARCH_TYPE_COPY[searchType];
 
   async function handleAssignTarget(target: EmailAssociationTarget) {
     const key = `${target.assignedEntityType}:${target.assignedEntityId}`;
@@ -306,7 +329,7 @@ export function EmailManualAssignmentDialog({
             <Input
               value={query}
               onChange={(event) => setQuery(event.target.value)}
-              placeholder={`Search ${searchType}s...`}
+              placeholder={`Search ${searchCopy.plural}...`}
               className="pl-9"
             />
           </div>
@@ -316,12 +339,12 @@ export function EmailManualAssignmentDialog({
 
           {query.trim().length < 2 ? (
             <p className="text-sm text-muted-foreground">
-              Type at least 2 characters to search across {searchType}s.
+              Type at least 2 characters to search across {searchCopy.plural}.
             </p>
           ) : searching ? (
-            <p className="text-sm text-muted-foreground">Searching {searchType}s...</p>
+            <p className="text-sm text-muted-foreground">Searching {searchCopy.plural}...</p>
           ) : results.length === 0 ? (
-            <p className="text-sm text-muted-foreground">No {searchType} results matched this search.</p>
+            <p className="text-sm text-muted-foreground">No {searchCopy.singular} results matched this search.</p>
           ) : (
             <div className="grid max-h-72 gap-2 overflow-y-auto">
               {results.map((result) => {
