@@ -3,10 +3,13 @@ import {
   assertSafeDevAuthConfig,
   getAllowedCorsOrigins,
   getFieldAppUrl,
+  getTokenCookieOptionsForRequest,
   isAllowedCookieAuthOrigin,
 } from "../../../src/modules/auth/http-config.js";
 
 describe("field app auth HTTP config", () => {
+  const fallbackApiHost = ["api-production-ad218", "up.railway.app"].join(".");
+
   it("allows the configured field frontend origins for CORS and cookie auth", () => {
     const env = {
       FIELD_APP_URL: "https://field-app.trockcrm.com/",
@@ -21,6 +24,52 @@ describe("field app auth HTTP config", () => {
       "http://localhost:5174",
     ]));
     expect(isAllowedCookieAuthOrigin(env, "https://field.trockconstruction.com")).toBe(true);
+  });
+
+  it("accepts the Railway-managed trockcrm-field public domain env name", () => {
+    const env = {
+      NODE_ENV: "production",
+      RAILWAY_SERVICE_TROCKCRM_FIELD_URL: "trockcam.com",
+    };
+
+    expect(getAllowedCorsOrigins(env as any)).toEqual(["https://trockcam.com"]);
+    expect(isAllowedCookieAuthOrigin(env as any, "https://trockcam.com")).toBe(true);
+  });
+
+  it("uses SameSite=None for the Railway-managed trockcrm-field public domain", () => {
+    expect(
+      getTokenCookieOptionsForRequest(
+        {
+          NODE_ENV: "production",
+          RAILWAY_SERVICE_TROCKCRM_FIELD_URL: "trockcam.com",
+        } as any,
+        {
+          host: fallbackApiHost,
+          origin: "https://trockcam.com",
+        }
+      )
+    ).toMatchObject({
+      secure: true,
+      sameSite: "none",
+    });
+  });
+
+  it("uses SameSite=None when FIELD_APP_URL is the custom trockcam.com origin", () => {
+    expect(
+      getTokenCookieOptionsForRequest(
+        {
+          NODE_ENV: "production",
+          FIELD_APP_URL: "https://trockcam.com",
+        },
+        {
+          host: fallbackApiHost,
+          origin: "https://trockcam.com",
+        }
+      )
+    ).toMatchObject({
+      secure: true,
+      sameSite: "none",
+    });
   });
 
   it("requires FIELD_APP_URL for production field invite links", () => {

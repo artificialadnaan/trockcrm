@@ -55,7 +55,10 @@ vi.mock("../src/modules/field-users/service.js", async () => {
 const { createApp } = await import("../src/app.js");
 
 const origin = "http://localhost:5174";
+const fieldProdOrigin = "https://trockcam.com";
+const crmProdOrigin = "https://crm.trockconstruction.com";
 const staleAuthCookies = ["token=existing-session", "csrf_token=server-token"];
+const fallbackApiHost = ["api-production-ad218", "up.railway.app"].join(".");
 
 const crmUser = {
   id: "crm-user-1",
@@ -84,6 +87,11 @@ describe("app CSRF public auth exemptions", () => {
     process.env.NODE_ENV = "test";
     process.env.DEV_MODE = "true";
     process.env.FIELD_APP_URL = origin;
+    delete process.env.CORS_ALLOWED_ORIGINS;
+    delete process.env.STRICT_CROSS_SITE_AUTH_ORIGINS;
+    delete process.env.FRONTEND_URL;
+    delete process.env.RAILWAY_SERVICE_FRONTEND_URL;
+    delete process.env.RAILWAY_SERVICE_TROCKCRM_FIELD_URL;
 
     authServiceMocks.signJwt.mockReturnValue("next-session");
     authServiceMocks.getUserByEmail.mockResolvedValue(crmUser);
@@ -133,6 +141,64 @@ describe("app CSRF public auth exemptions", () => {
       email: "crm@example.com",
       password: "Password123!",
     });
+  });
+
+  it("allows trockcam.com preflight requests in production", async () => {
+    process.env.NODE_ENV = "production";
+    process.env.DEV_MODE = "false";
+    process.env.FIELD_APP_URL = fieldProdOrigin;
+
+    const response = await request(createApp())
+      .options("/api/auth/field-login")
+      .set("Origin", fieldProdOrigin)
+      .set("Access-Control-Request-Method", "POST")
+      .set("Access-Control-Request-Headers", "content-type,x-requested-with");
+
+    expect(response.status).toBe(204);
+    expect(response.headers["access-control-allow-origin"]).toBe(fieldProdOrigin);
+    expect(response.headers["access-control-allow-credentials"]).toBe("true");
+  });
+
+  it("sets cross-site cookies for field login from trockcam.com in production", async () => {
+    process.env.NODE_ENV = "production";
+    process.env.DEV_MODE = "false";
+    process.env.FIELD_APP_URL = fieldProdOrigin;
+
+    const response = await request(createApp())
+      .post("/api/auth/field-login")
+      .set("Host", fallbackApiHost)
+      .set("Origin", fieldProdOrigin)
+      .set("Cookie", staleAuthCookies)
+      .send({ email: "field@example.com", password: "Password123!" });
+
+    expect(response.status).toBe(200);
+    expect(response.headers["access-control-allow-origin"]).toBe(fieldProdOrigin);
+    expect(response.headers["content-type"]).toContain("application/json");
+    expect(response.headers["set-cookie"]?.[0]).toContain("SameSite=None");
+    expect(response.headers["set-cookie"]?.[0]).toContain("Secure");
+  });
+
+  it("keeps main CRM local login cross-site cookie behavior intact in production", async () => {
+    process.env.NODE_ENV = "production";
+    process.env.DEV_MODE = "false";
+    process.env.CORS_ALLOWED_ORIGINS = crmProdOrigin;
+    process.env.STRICT_CROSS_SITE_AUTH_ORIGINS = crmProdOrigin;
+    process.env.RAILWAY_SERVICE_FRONTEND_URL = "crm.trockconstruction.com";
+    process.env.FRONTEND_URL = "https://frontend-production-bcab.up.railway.app";
+    process.env.FIELD_APP_URL = "https://trockcrm-field-production.up.railway.app";
+
+    const response = await request(createApp())
+      .post("/api/auth/local/login")
+      .set("Host", fallbackApiHost)
+      .set("Origin", crmProdOrigin)
+      .set("Cookie", staleAuthCookies)
+      .send({ email: "crm@example.com", password: "Password123!" });
+
+    expect(response.status).toBe(200);
+    expect(response.headers["access-control-allow-origin"]).toBe(crmProdOrigin);
+    expect(response.headers["content-type"]).toContain("application/json");
+    expect(response.headers["set-cookie"]?.[0]).toContain("SameSite=None");
+    expect(response.headers["set-cookie"]?.[0]).toContain("Secure");
   });
 
   it("allows gated dev login without a CSRF header when dev mode is enabled", async () => {
