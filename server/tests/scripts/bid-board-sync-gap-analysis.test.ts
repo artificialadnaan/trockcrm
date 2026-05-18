@@ -439,11 +439,7 @@ describe("bid-board-sync-gap-analysis", () => {
     });
 
     await fetchPortfolioProjects(10, {
-      env: {
-        PROCORE_COMPANY_ID: "company-1",
-        PROCORE_CLIENT_ID: "client-1",
-        PROCORE_CLIENT_SECRET: "secret-1",
-      },
+      env: { PROCORE_COMPANY_ID: "company-1" },
       now: () => new Date("2026-05-18T12:00:00.000Z"),
       tokenClient: { query },
       decryptToken: (value: string) => `decrypted:${value}`,
@@ -485,11 +481,7 @@ describe("bid-board-sync-gap-analysis", () => {
     });
 
     const result = await fetchPortfolioProjects(2, {
-      env: {
-        PROCORE_COMPANY_ID: "company-1",
-        PROCORE_CLIENT_ID: "client-1",
-        PROCORE_CLIENT_SECRET: "secret-1",
-      },
+      env: { PROCORE_COMPANY_ID: "company-1" },
       now: () => new Date("2026-05-18T12:00:00.000Z"),
       tokenClient: { query },
       decryptToken: (value: string) => `decrypted:${value}`,
@@ -525,11 +517,7 @@ describe("bid-board-sync-gap-analysis", () => {
     });
 
     const result = await fetchPortfolioProjects(100, {
-      env: {
-        PROCORE_COMPANY_ID: "company-1",
-        PROCORE_CLIENT_ID: "client-1",
-        PROCORE_CLIENT_SECRET: "secret-1",
-      },
+      env: { PROCORE_COMPANY_ID: "company-1" },
       now: () => new Date("2026-05-18T12:00:00.000Z"),
       tokenClient: { query },
       decryptToken: (value: string) => `decrypted:${value}`,
@@ -562,11 +550,7 @@ describe("bid-board-sync-gap-analysis", () => {
     });
 
     const result = await fetchPortfolioProjects(10, {
-      env: {
-        PROCORE_COMPANY_ID: "company-1",
-        PROCORE_CLIENT_ID: "client-1",
-        PROCORE_CLIENT_SECRET: "secret-1",
-      },
+      env: { PROCORE_COMPANY_ID: "company-1" },
       now: () => new Date("2026-05-18T12:00:00.000Z"),
       tokenClient: { query },
       decryptToken: (value: string) => `decrypted:${value}`,
@@ -746,6 +730,46 @@ describe("bid-board-sync-gap-analysis", () => {
 
     expect(fetchImpl).toHaveBeenCalledTimes(1);
     expect(sleep).not.toHaveBeenCalled();
+  });
+
+  it("passes Portfolio precheck with company ID and stored token but no client credentials", async () => {
+    const query = vi.fn().mockResolvedValueOnce({
+      rows: [
+        {
+          access_token: "encrypted-access-token",
+          token_expires_at: new Date("2026-05-18T13:00:00.000Z"),
+          status: "active",
+        },
+      ],
+    });
+    const fetchImpl = vi.fn().mockResolvedValueOnce({
+      ok: true,
+      status: 200,
+      headers: new Headers(),
+      json: async () => [],
+      text: async () => "",
+    });
+
+    await expect(
+      fetchPortfolioProjects(10, {
+        env: { PROCORE_COMPANY_ID: "company-1" },
+        now: () => new Date("2026-05-18T12:00:00.000Z"),
+        tokenClient: { query },
+        decryptToken: (value: string) => `decrypted:${value}`,
+        fetchImpl,
+      })
+    ).resolves.toMatchObject({ records: [] });
+  });
+
+  it("fails Portfolio precheck when PROCORE_COMPANY_ID is missing", async () => {
+    await expect(
+      fetchPortfolioProjects(10, {
+        env: {},
+        tokenClient: { query: vi.fn() },
+        decryptToken: (value: string) => value,
+        fetchImpl: vi.fn(),
+      })
+    ).rejects.toThrow("PROCORE_COMPANY_ID is required for Portfolio source diagnostics");
   });
 
   it("marks HubSpot truncated when maxRecords cuts through a later page", async () => {

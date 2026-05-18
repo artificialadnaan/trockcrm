@@ -958,8 +958,6 @@ async function resolveReadOnlyProcoreToken(options: PortfolioFetchOptions = {}) 
   const env = options.env ?? process.env;
   const companyId = env.PROCORE_COMPANY_ID?.trim();
   if (!companyId) throw new Error("PROCORE_COMPANY_ID is required for Portfolio source diagnostics");
-  if (!env.PROCORE_CLIENT_ID?.trim()) throw new Error("PROCORE_CLIENT_ID is required for Portfolio source diagnostics");
-  if (!env.PROCORE_CLIENT_SECRET?.trim()) throw new Error("PROCORE_CLIENT_SECRET is required for Portfolio source diagnostics");
 
   const client = options.tokenClient ?? new pg.Client({ connectionString: connectionString() });
   const ownsClient = !options.tokenClient;
