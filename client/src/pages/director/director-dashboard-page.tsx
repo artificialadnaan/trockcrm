@@ -304,8 +304,8 @@ function csvCell(value: string | number | null | undefined): string {
   return /[",\n]/.test(raw) ? `"${raw.replace(/"/g, '""')}"` : raw;
 }
 
-function buildDealsDrilldownPath(filter: "active" | "won" | "closing_soon", preset: DateRangePreset) {
-  return `/deals?filter=${filter}&period=${preset}`;
+function buildDealsDrilldownPath(filter: "active_pipeline" | "won" | "closing_soon" | "stale" | "at_risk", preset: DateRangePreset) {
+  return `/deals?filter=${filter}&period=${preset}&scope=team`;
 }
 
 function buildReportDrilldownPath(
@@ -339,14 +339,14 @@ export function DirectorDashboardPage() {
   } = useRepPerformance(repPerformancePeriod);
 
   const selectedPreset = PRESETS.find((p) => p.value === preset) ?? PRESETS[1];
-  const activeDealsDestination = buildDealsDrilldownPath("active", preset);
+  const activeDealsDestination = buildDealsDrilldownPath("active_pipeline", preset);
   const wonDealsDestination = buildDealsDrilldownPath("won", preset);
   // This KPI is sourced from recent period closes, so it should drill into the
   // same closed-won slice rather than forecasted near-close deals.
   const closingDestination = buildDealsDrilldownPath("won", preset);
   const forecastDestination = buildReportDrilldownPath("/reports/performance/forecast-accuracy", preset, dateRange);
   const activityDestination = buildReportDrilldownPath("/reports/performance/rep-activity", preset, dateRange);
-  const staleDealsDestination = buildReportDrilldownPath("/reports", preset, dateRange, "stale-deals");
+  const staleDealsDestination = buildDealsDrilldownPath("stale", preset);
 
   if (loading) {
     return (

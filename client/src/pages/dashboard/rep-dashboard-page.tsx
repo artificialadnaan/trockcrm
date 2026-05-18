@@ -45,6 +45,7 @@ interface StrategicAlert {
 
 interface BlindSpot {
   id: string;
+  type: "deal" | "lead";
   name: string;
   ref: string;
   issue: string;
@@ -184,6 +185,7 @@ function buildBlindSpots(data: RepDashboardData): BlindSpot[] {
     .filter((deal) => deal.daysInStage > deal.staleThresholdDays)
     .map((deal) => ({
       id: deal.dealId,
+      type: "deal" as const,
       name: deal.dealName,
       ref: deal.regionClassification,
       issue: "Service stage is past SLA",
@@ -193,6 +195,7 @@ function buildBlindSpots(data: RepDashboardData): BlindSpot[] {
     }));
   const staleLeadItems = data.staleLeads.leads.map((lead) => ({
     id: lead.leadId,
+    type: "lead" as const,
     name: lead.leadName,
     ref: lead.locationLabel ?? lead.stageName,
     issue: "Lead has gone stale",
@@ -245,6 +248,8 @@ function KpiCard({
   caption,
   accent = "red",
   drenched = false,
+  to,
+  ariaLabel,
 }: {
   eyebrow: string;
   value: string;
@@ -252,10 +257,14 @@ function KpiCard({
   caption: string;
   accent?: "red" | "blue" | "green";
   drenched?: boolean;
+  to?: string;
+  ariaLabel?: string;
 }) {
   const accentColor = accent === "blue" ? "bg-blue-400" : accent === "green" ? "bg-emerald-400" : "bg-brand-red";
+  const interactiveClass =
+    "block cursor-pointer transition-all hover:-translate-y-0.5 hover:shadow-md focus:outline-none focus-visible:ring-2 focus-visible:ring-brand-red";
   if (drenched) {
-    return (
+    const card = (
       <Card className="relative overflow-hidden border-0 bg-brand-red text-white shadow-md">
         <CardContent className="p-6">
           <div className="flex items-start justify-between gap-4">
@@ -274,8 +283,13 @@ function KpiCard({
         </CardContent>
       </Card>
     );
+    return to ? (
+      <Link to={to} aria-label={ariaLabel} className={interactiveClass}>
+        {card}
+      </Link>
+    ) : card;
   }
-  return (
+  const card = (
     <Card className="relative overflow-hidden">
       <CardContent className="p-6">
       <p className={EYEBROW}>{eyebrow.toUpperCase()}</p>
@@ -290,6 +304,11 @@ function KpiCard({
       <div className={cn("absolute inset-x-0 bottom-0 h-1", accentColor)} aria-hidden />
     </Card>
   );
+  return to ? (
+    <Link to={to} aria-label={ariaLabel} className={interactiveClass}>
+      {card}
+    </Link>
+  ) : card;
 }
 
 function TopDealsTable({ deals, onOpen }: { deals: TopDealRow[]; onOpen: (id: string) => void }) {
@@ -391,9 +410,9 @@ function AiBlindSpotsPanel({ items }: { items: BlindSpot[] }) {
       ) : (
         <div className="divide-y divide-slate-100">
           {items.map((item) => (
-            <button
+            <Link
               key={item.id}
-              type="button"
+              to={item.type === "deal" ? `/deals/${item.id}` : `/leads/${item.id}`}
               className="flex w-full items-start justify-between gap-3 px-5 py-4 text-left transition-colors hover:bg-slate-50"
             >
               <div className="min-w-0">
@@ -413,7 +432,7 @@ function AiBlindSpotsPanel({ items }: { items: BlindSpot[] }) {
                 </div>
               </div>
               <ChevronRight className="mt-1 h-4 w-4 shrink-0 text-slate-400" />
-            </button>
+            </Link>
           ))}
         </div>
       )}
@@ -421,13 +440,13 @@ function AiBlindSpotsPanel({ items }: { items: BlindSpot[] }) {
   );
 }
 
-function KpiTile({ label, value, subtext }: { label: string; value: string | number; subtext?: string }) {
+function KpiTile({ label, value, subtext, to }: { label: string; value: string | number; subtext?: string; to: string }) {
   return (
-    <button type="button" className="group flex flex-col items-start gap-1 px-6 py-5 text-left transition-colors hover:bg-slate-50">
+    <Link to={to} className="group flex flex-col items-start gap-1 px-6 py-5 text-left transition-colors hover:bg-slate-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-brand-red">
       <p className={EYEBROW}>{label.toUpperCase()}</p>
       <p className="text-4xl font-black leading-none tracking-tight text-slate-950">{value}</p>
       {subtext ? <p className="text-xs font-semibold text-slate-500">{subtext}</p> : null}
-    </button>
+    </Link>
   );
 }
 
@@ -436,13 +455,13 @@ function MetricCell({
   value,
   subtitle,
   emphasis = "neutral",
-  onClick,
+  to,
 }: {
   label: string;
   value: string | number;
   subtitle?: string;
   emphasis?: "neutral" | "danger" | "warning";
-  onClick?: () => void;
+  to: string;
 }) {
   const valueClass =
     emphasis === "danger" ? "text-brand-red" : emphasis === "warning" ? "text-amber-700" : "text-slate-950";
@@ -453,13 +472,10 @@ function MetricCell({
       {subtitle ? <p className="text-xs text-muted-foreground">{subtitle}</p> : null}
     </>
   );
-  if (!onClick) {
-    return <div className="flex flex-col items-start gap-1 text-left">{body}</div>;
-  }
   return (
-    <button type="button" onClick={onClick} className="flex flex-col items-start gap-1 text-left transition-opacity hover:opacity-70">
+    <Link to={to} className="flex flex-col items-start gap-1 text-left transition-opacity hover:opacity-70 focus:outline-none focus-visible:ring-2 focus-visible:ring-brand-red">
       {body}
-    </button>
+    </Link>
   );
 }
 
@@ -614,6 +630,8 @@ export function RepDashboardPage() {
           badge={`${data.activeDeals.count} deals`}
           caption="Open pipeline"
           accent="red"
+          to="/deals?filter=active_pipeline&scope=mine"
+          ariaLabel="View active deals"
         />
         <KpiCard
           eyebrow="Active leads"
@@ -621,6 +639,8 @@ export function RepDashboardPage() {
           badge={`${qualifiedCount} qualified`}
           caption="Top of funnel"
           accent="blue"
+          to="/leads?scope=mine"
+          ariaLabel="View active leads"
         />
         <KpiCard
           eyebrow={`Commission ${period}`}
@@ -628,6 +648,8 @@ export function RepDashboardPage() {
           badge={`${formatCompactUsd(data.commissionSummary.directEarnedCommission)} direct`}
           caption="Your earnings"
           drenched
+          to="/commissions"
+          ariaLabel="View commissions"
         />
       </div>
 
@@ -642,10 +664,10 @@ export function RepDashboardPage() {
       <Card>
         <CardContent className="p-0">
           <div className="grid grid-cols-2 divide-x divide-slate-100 border-b border-slate-100 lg:grid-cols-4">
-            <KpiTile label="Leads" value={data.activeLeads.count} subtext={`${data.activeLeads.count} active`} />
-            <KpiTile label="Qualified" value={qualifiedCount} subtext={`${qualifiedCount} active`} />
-            <KpiTile label="Opportunities" value={opportunityCount} subtext={formatCompactUsd(opportunityValue)} />
-            <KpiTile label="Bid Board" value={bidBoardCount} subtext={formatCompactUsd(bidBoardValue)} />
+            <KpiTile label="Leads" value={data.activeLeads.count} subtext={`${data.activeLeads.count} active`} to="/leads?scope=mine" />
+            <KpiTile label="Qualified" value={qualifiedCount} subtext={`${qualifiedCount} active`} to="/leads?stage=qualified_lead&scope=mine" />
+            <KpiTile label="Opportunities" value={opportunityCount} subtext={formatCompactUsd(opportunityValue)} to="/deals?filter=opportunities&scope=mine" />
+            <KpiTile label="Bid Board" value={bidBoardCount} subtext={formatCompactUsd(bidBoardValue)} to="/deals?filter=bid_board&scope=mine" />
           </div>
         </CardContent>
       </Card>
@@ -662,34 +684,35 @@ export function RepDashboardPage() {
               value={data.myCleanup.total}
               subtitle={`${derived.ownershipGaps} ownership gaps`}
               emphasis={data.myCleanup.total > 0 ? "warning" : "neutral"}
-              onClick={() => navigate("/pipeline/my-cleanup")}
+              to="/pipeline/my-cleanup"
             />
             <MetricCell
               label="Stale leads"
               value={data.staleLeads.count}
               subtitle={`${staleAge}+ days`}
               emphasis={data.staleLeads.count > 0 ? "warning" : "neutral"}
-              onClick={() => navigate("/leads?stale=true")}
+              to="/leads?stale=true&scope=mine"
             />
             <MetricCell
               label="Follow-up"
               value={`${data.followUpCompliance.complianceRate}%`}
               subtitle={`${data.followUpCompliance.onTime} of ${data.followUpCompliance.total} on time`}
               emphasis={data.followUpCompliance.complianceRate < 80 ? "warning" : "neutral"}
+              to="/tasks"
             />
             <MetricCell
               label="Overdue"
               value={Math.max(data.tasksToday.overdue, overdueTasks.length)}
               subtitle="tasks"
               emphasis={data.tasksToday.overdue > 0 || overdueTasks.length > 0 ? "danger" : "neutral"}
-              onClick={() => navigate("/tasks?filter=overdue")}
+              to="/tasks?filter=overdue"
             />
           </div>
           <div className="grid grid-cols-2 gap-x-6 gap-y-4 border-t border-slate-100 pt-5 sm:grid-cols-4">
-            <MetricCell label="Calls" value={data.activityThisWeek.calls} />
-            <MetricCell label="Emails" value={data.activityThisWeek.emails} />
-            <MetricCell label="Meetings" value={data.activityThisWeek.meetings} />
-            <MetricCell label="Notes" value={data.activityThisWeek.notes} />
+            <MetricCell label="Calls" value={data.activityThisWeek.calls} to="/reports/performance" />
+            <MetricCell label="Emails" value={data.activityThisWeek.emails} to="/reports/performance" />
+            <MetricCell label="Meetings" value={data.activityThisWeek.meetings} to="/reports/performance" />
+            <MetricCell label="Notes" value={data.activityThisWeek.notes} to="/reports/performance" />
           </div>
         </CardContent>
       </Card>
@@ -700,7 +723,7 @@ export function RepDashboardPage() {
           <ArrowUpRight className="ml-1.5 h-4 w-4" />
         </Link>
         <Link
-          to="/pipeline"
+          to="/deals?filter=active_pipeline&scope=mine"
           className={cn(buttonVariants({ variant: "default", size: "lg" }), "bg-brand-red text-white hover:bg-brand-red/90")}
         >
           Open my pipeline
