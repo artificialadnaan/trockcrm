@@ -795,6 +795,8 @@ router.get("/pipeline", async (req, res, next) => {
       wonSince: req.query.won_since as string | undefined,
       wonUntil: req.query.won_until as string | undefined,
       wonAllTime: req.query.won_all_time === "true",
+      wonPeriodFrom: req.query.won_period_from as string | undefined,
+      wonPeriodTo: req.query.won_period_to as string | undefined,
       lostSince: req.query.lost_since as string | undefined,
       lostUntil: req.query.lost_until as string | undefined,
       lostAllTime: req.query.lost_all_time === "true",

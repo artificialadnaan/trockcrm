@@ -444,14 +444,6 @@ function parseDayStart(value: string) {
   return parseLocalDay(value).getTime();
 }
 
-function parseFlexibleDate(value: string | null) {
-  if (!value) return null;
-  if (/^\d{4}-\d{2}-\d{2}$/.test(value)) return parseDayStart(value);
-
-  const timestamp = new Date(value).getTime();
-  return Number.isFinite(timestamp) ? timestamp : null;
-}
-
 function getWonMetricTerminalLabel(filter: TerminalDateFilter) {
   if (filter.preset === "custom") return "Custom";
   if (filter.preset === "all") return "All time";
@@ -613,7 +605,8 @@ function DealListPageContent({ role }: { role: string }) {
     scope,
     true,
     terminalDateFilters,
-    isAtRiskDrilldown ? SLA_DRILLDOWN_PREVIEW_LIMIT : 8
+    isAtRiskDrilldown ? SLA_DRILLDOWN_PREVIEW_LIMIT : 8,
+    selectedPeriodRange
   );
 
   useEffect(() => {
@@ -759,33 +752,7 @@ function DealListPageContent({ role }: { role: string }) {
   const wonValue =
     board?.terminalStages
       ?.filter((terminal) => terminal.stage.slug === "won")
-      .reduce(
-        (sum, terminal) => {
-          if (!terminal.deals?.length) {
-            return sum + (terminal.totalValue ?? 0);
-          }
-
-          const terminalDeals = terminal.deals;
-          return (
-            sum +
-            terminalDeals
-              .filter((deal) => {
-                const contractSignedValue = deal.contractSignedDate ?? deal.contractSignedAt ?? null;
-                const closedAt = parseFlexibleDate(contractSignedValue);
-                if (closedAt === null) return false;
-                if (wonDateRange.from && closedAt < parseDayStart(wonDateRange.from)) {
-                  return false;
-                }
-                if (wonDateRange.to && closedAt > parseDayEnd(wonDateRange.to)) {
-                  return false;
-                }
-                return true;
-              })
-              .reduce((dealSum, deal) => dealSum + moneyValue(deal), 0)
-          );
-        },
-        0
-      ) ?? 0;
+      .reduce((sum, terminal) => sum + (terminal.totalValue ?? 0), 0) ?? 0;
   const unsearchedOverSlaCount = unsearchedColumns.reduce(
     (sum, column) =>
       sum +

@@ -387,7 +387,7 @@ describe("DealListPage", () => {
     expect(mocks.useDealBoardMock).toHaveBeenCalledWith("all", true, {
       won: { preset: "all" },
       lost: { preset: "all" },
-    }, 8);
+    }, 8, null);
     expect(html).toContain("Read-only pipeline board");
     expect(html).toContain('placeholder="Search deals"');
     expect(html).toContain("Opportunity");
@@ -696,7 +696,7 @@ describe("DealListPage", () => {
     expect(mocks.useDealBoardMock).toHaveBeenCalledWith("all", true, {
       won: { preset: "30" },
       lost: { preset: "60" },
-    }, 8);
+    }, 8, null);
   });
 
   it("requests an expanded preview window for the SLA drill-down board", () => {
@@ -705,7 +705,16 @@ describe("DealListPage", () => {
     expect(mocks.useDealBoardMock).toHaveBeenCalledWith("team", true, {
       won: { preset: "all" },
       lost: { preset: "all" },
-    }, 1000);
+    }, 1000, { from: "2026-05-04", to: "2026-05-08" });
+  });
+
+  it("passes the selected page period to the board request so won aggregates match the drilldown window", () => {
+    renderPage("/deals?scope=team&period=last_month&won_preset=30", "director");
+
+    expect(mocks.useDealBoardMock).toHaveBeenCalledWith("team", true, {
+      won: { preset: "30" },
+      lost: { preset: "all" },
+    }, 8, { from: "2026-04-01", to: "2026-04-30" });
   });
 
   it("does not fire board fetch before auth resolves", () => {
@@ -728,7 +737,7 @@ describe("DealListPage", () => {
 
     renderPage("/deals", "director");
 
-    expect(mocks.useDealBoardMock).toHaveBeenCalledWith("team", true, expect.any(Object), 8);
+    expect(mocks.useDealBoardMock).toHaveBeenCalledWith("team", true, expect.any(Object), 8, null);
   });
 
   it("uses the board terminal filters when building terminal stage navigation", () => {
@@ -756,22 +765,22 @@ describe("DealListPage", () => {
 
   it("defaults the board scope by role when the query param is absent", () => {
     renderPage("/deals", "rep");
-    expect(mocks.useDealBoardMock).toHaveBeenLastCalledWith("mine", true, expect.any(Object), 8);
+    expect(mocks.useDealBoardMock).toHaveBeenLastCalledWith("mine", true, expect.any(Object), 8, null);
 
     renderPage("/deals", "director");
-    expect(mocks.useDealBoardMock).toHaveBeenLastCalledWith("team", true, expect.any(Object), 8);
+    expect(mocks.useDealBoardMock).toHaveBeenLastCalledWith("team", true, expect.any(Object), 8, null);
 
     renderPage("/deals", "admin");
-    expect(mocks.useDealBoardMock).toHaveBeenLastCalledWith("all", true, expect.any(Object), 8);
+    expect(mocks.useDealBoardMock).toHaveBeenLastCalledWith("all", true, expect.any(Object), 8, null);
 
     renderPage("/deals?scope=mine", "director");
-    expect(mocks.useDealBoardMock).toHaveBeenLastCalledWith("mine", true, expect.any(Object), 8);
+    expect(mocks.useDealBoardMock).toHaveBeenLastCalledWith("mine", true, expect.any(Object), 8, null);
   });
 
   it("forces reps to mine scope even when ?scope=team is set", () => {
     const html = renderPage("/deals?scope=team", "rep");
 
-    expect(mocks.useDealBoardMock).toHaveBeenLastCalledWith("mine", true, expect.any(Object), 8);
+    expect(mocks.useDealBoardMock).toHaveBeenLastCalledWith("mine", true, expect.any(Object), 8, null);
     expect(html).toContain('aria-pressed="true">Mine');
     expect(html).toContain('aria-pressed="false">Team');
   });
@@ -779,7 +788,7 @@ describe("DealListPage", () => {
   it("forces reps to mine scope even when ?scope=all is set", () => {
     const html = renderPage("/deals?scope=all", "rep");
 
-    expect(mocks.useDealBoardMock).toHaveBeenLastCalledWith("mine", true, expect.any(Object), 8);
+    expect(mocks.useDealBoardMock).toHaveBeenLastCalledWith("mine", true, expect.any(Object), 8, null);
     expect(html).toContain('aria-pressed="true">Mine');
     expect(html).toContain('aria-pressed="false">All');
   });
@@ -836,7 +845,7 @@ describe("DealListPage", () => {
     );
   });
 
-  it("scopes the Won KPI value to the current period when the won drilldown preserves period", () => {
+  it("renders the Won KPI from the backend aggregate when the request preserves the page period", () => {
     mocks.useDealBoardMock.mockReturnValue({
       board: {
         columns: [
@@ -851,10 +860,7 @@ describe("DealListPage", () => {
           {
             stage: { id: "stage-won", name: "Won", slug: "won" },
             count: 2,
-            deals: [
-              makeDeal({ id: "won-in-period", awardedAmount: "125000", contractSignedDate: "2026-04-12", actualCloseDate: null }),
-              makeDeal({ id: "won-out-of-period", awardedAmount: "410000", contractSignedDate: "2026-03-15", actualCloseDate: null }),
-            ],
+            totalValue: 125000,
           },
         ],
       },
@@ -870,7 +876,7 @@ describe("DealListPage", () => {
     expect(html).not.toContain("$410.0K");
   });
 
-  it("filters Won KPI deals by ISO contractSignedAt timestamps when contractSignedDate is missing", () => {
+  it("preserves the aggregate-only terminal response shape for Won KPI rendering", () => {
     mocks.useDealBoardMock.mockReturnValue({
       board: {
         columns: [
@@ -885,26 +891,7 @@ describe("DealListPage", () => {
           {
             stage: { id: "stage-won", name: "Won", slug: "won" },
             count: 3,
-            deals: [
-              makeDeal({
-                id: "won-in-period-iso",
-                awardedAmount: "125000",
-                contractSignedDate: null,
-                contractSignedAt: "2026-04-12T14:30:00.000Z",
-              }),
-              makeDeal({
-                id: "won-out-of-period-iso",
-                awardedAmount: "410000",
-                contractSignedDate: null,
-                contractSignedAt: "2026-03-15T14:30:00.000Z",
-              }),
-              makeDeal({
-                id: "won-invalid-iso",
-                awardedAmount: "500000",
-                contractSignedDate: null,
-                contractSignedAt: "not-a-date",
-              }),
-            ],
+            totalValue: 125000,
           },
         ],
       },
@@ -917,10 +904,9 @@ describe("DealListPage", () => {
 
     expect(html).toContain("$125.0K");
     expect(html).not.toContain("$410.0K");
-    expect(html).not.toContain("$500.0K");
   });
 
-  it("passes the same effective won date range into the drilldown list as the Won KPI uses", () => {
+  it("passes the same effective won date range into the board request and drilldown list", () => {
     mocks.useDealBoardMock.mockReturnValue({
       board: {
         columns: [
@@ -935,23 +921,7 @@ describe("DealListPage", () => {
           {
             stage: { id: "stage-won", name: "Won", slug: "won" },
             count: 3,
-            deals: [
-              makeDeal({
-                id: "won-before-terminal-window",
-                awardedAmount: "410000",
-                contractSignedDate: "2026-04-04",
-              }),
-              makeDeal({
-                id: "won-in-shared-window",
-                awardedAmount: "125000",
-                contractSignedDate: "2026-04-12",
-              }),
-              makeDeal({
-                id: "won-after-page-window",
-                awardedAmount: "500000",
-                contractSignedDate: "2026-05-01",
-              }),
-            ],
+            totalValue: 125000,
           },
         ],
       },
@@ -965,6 +935,16 @@ describe("DealListPage", () => {
     expect(html).toContain("$125.0K");
     expect(html).not.toContain("$410.0K");
     expect(html).not.toContain("$500.0K");
+    expect(mocks.useDealBoardMock).toHaveBeenLastCalledWith(
+      "team",
+      true,
+      {
+        won: { preset: "30" },
+        lost: { preset: "all" },
+      },
+      8,
+      { from: "2026-04-01", to: "2026-04-30" }
+    );
     expect(mocks.dealsListSectionMock).toHaveBeenCalledWith(
       expect.objectContaining({
         baseFilters: expect.objectContaining({
@@ -1253,7 +1233,13 @@ describe("DealListPage", () => {
   it("keeps the embedded list visible for stale drill-down views", () => {
     const html = renderPage("/deals?scope=team&filter=stale&period=qtd", "director");
 
-    expect(mocks.useDealBoardMock).toHaveBeenLastCalledWith("team", true, expect.any(Object), 1000);
+    expect(mocks.useDealBoardMock).toHaveBeenLastCalledWith(
+      "team",
+      true,
+      expect.any(Object),
+      1000,
+      { from: "2026-04-01", to: "2026-05-08" }
+    );
     expect(mocks.dealsListSectionMock).not.toHaveBeenCalled();
     expect(html).toContain("Drill-down view: SLA filter applied to list and board.");
     expect(html).toContain("Filtered results");
@@ -1336,7 +1322,7 @@ describe("DealListPage", () => {
   it("reflects the team scope query param in the scope toggle", () => {
     const html = renderPage("/deals?scope=team", "director");
 
-    expect(mocks.useDealBoardMock).toHaveBeenLastCalledWith("team", true, expect.any(Object), 8);
+    expect(mocks.useDealBoardMock).toHaveBeenLastCalledWith("team", true, expect.any(Object), 8, null);
     expect(html).toContain('aria-pressed="true">Team');
     expect(html).toContain('aria-pressed="false">Mine');
     expect(html).toContain('aria-pressed="false">All');
