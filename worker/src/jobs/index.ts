@@ -142,13 +142,9 @@ export function registerAllJobs() {
     await runAiBackfillDocuments(payload, officeId);
   });
 
-  registerJobHandler("ai_refresh_copilot", async (payload, officeId) => {
-    await runAiRefreshCopilot(payload, officeId);
-  });
+  registerJobHandler("ai_refresh_copilot", (payload, officeId) => runAiRefreshCopilot(payload, officeId));
 
-  registerJobHandler("ai_generate_deal_copilot", async (payload, officeId) => {
-    await runAiGenerateDealCopilot(payload, officeId);
-  });
+  registerJobHandler("ai_generate_deal_copilot", (payload, officeId) => runAiGenerateDealCopilot(payload, officeId));
 
   registerJobHandler("ai_generate_intervention_policy_recommendations", async (payload) => {
     await runAiGenerateInterventionPolicyRecommendations(payload);

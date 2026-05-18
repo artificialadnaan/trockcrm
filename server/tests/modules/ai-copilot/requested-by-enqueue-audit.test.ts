@@ -1,19 +1,23 @@
 import { readFileSync } from "node:fs";
-import { resolve } from "node:path";
+import { dirname, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 
+const __dirname = dirname(fileURLToPath(import.meta.url));
+const SERVER_ROOT = resolve(__dirname, "../../..");
+
 const SOURCE_FILES = [
-  "server/src/modules/activities/routes.ts",
-  "server/src/modules/ai-copilot/routes.ts",
-  "server/src/modules/deals/routes.ts",
-  "server/src/modules/tasks/routes.ts",
-  "server/src/modules/tasks/service.ts",
+  "src/modules/activities/routes.ts",
+  "src/modules/ai-copilot/routes.ts",
+  "src/modules/deals/routes.ts",
+  "src/modules/tasks/routes.ts",
+  "src/modules/tasks/service.ts",
 ];
 
 describe("copilot requestedBy enqueue audit", () => {
   it("keeps requestedBy on every ai_refresh_copilot enqueue site", () => {
     for (const relativePath of SOURCE_FILES) {
-      const contents = readFileSync(resolve(process.cwd(), relativePath), "utf8");
+      const contents = readFileSync(resolve(SERVER_ROOT, relativePath), "utf8");
       const enqueueBlocks = contents
         .split('jobType: "ai_refresh_copilot"')
         .slice(1)
