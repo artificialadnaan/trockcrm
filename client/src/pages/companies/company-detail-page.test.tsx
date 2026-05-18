@@ -57,6 +57,10 @@ vi.mock("@/components/activities/entity-activity-tab", () => ({
   ),
 }));
 
+vi.mock("@/components/email/company-email-tab", () => ({
+  CompanyEmailTab: ({ companyId }: { companyId: string }) => <div>Company Email Tab {companyId}</div>,
+}));
+
 vi.mock("@/components/contacts/contact-form", () => ({
   ContactForm: () => <div>Contact Form</div>,
 }));
@@ -125,6 +129,7 @@ function makeCompany(overrides: Record<string, unknown> = {}) {
     propertiesCount: 14,
     activeDealsCount: 3,
     pipelineValue: "1240000",
+    emailCount: 6,
     createdAt: "2026-04-10T10:00:00.000Z",
     updatedAt: "2026-04-11T10:00:00.000Z",
     ...overrides,
@@ -295,6 +300,20 @@ describe("CompanyDetailPage", () => {
 
     expect(mounted.container.textContent).toContain("Dallas ISD Roof Replacement");
     expect(mounted.container.textContent).not.toContain("Company Copilot");
+  });
+
+  it("renders the email count badge from the company payload and lazy-loads the tab", () => {
+    mounted = mountPage();
+
+    const emailsTab = mounted.container.querySelector('button[aria-label="Emails"]');
+    expect(emailsTab?.textContent).toContain("6");
+    expect(mounted.container.textContent).not.toContain("Company Email Tab company-1");
+
+    act(() => {
+      emailsTab?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+
+    expect(mounted.container.textContent).toContain("Company Email Tab company-1");
   });
 
   it("renders the activity tab scoped to the current company", () => {

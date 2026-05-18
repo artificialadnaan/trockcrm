@@ -37,6 +37,8 @@ export const contacts = pgTable(
     notes: text("notes"),
     touchpointCount: integer("touchpoint_count").default(0).notNull(),
     lastContactedAt: timestamp("last_contacted_at", { withTimezone: true }),
+    emailCount: integer("email_count").default(0).notNull(),
+    lastEmailAt: timestamp("last_email_at", { withTimezone: true }),
     firstOutreachCompleted: boolean("first_outreach_completed").default(false).notNull(),
     linkedinUrl: text("linkedin_url"),
     procoreContactId: bigint("procore_contact_id", { mode: "number" }),

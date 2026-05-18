@@ -426,7 +426,7 @@ export function DealDetailPage() {
     { key: "scoping", label: isOpportunityStage ? "Opportunity Scope" : "Scoping" },
     { key: "files", label: "Files" },
     { key: "photos", label: photoCount != null ? `Photos (${photoCount})` : "Photos" },
-    { key: "email", label: "Email" },
+    { key: "email", label: "Emails" },
     { key: "activity", label: "Activity" },
     { key: "timeline", label: "Timeline" },
     { key: "history", label: "History" },
@@ -604,6 +604,8 @@ export function DealDetailPage() {
         ? photoCount
         : tab.key === "team" && teamCount != null
           ? teamCount
+          : tab.key === "email"
+            ? deal.emailCount ?? 0
           : undefined,
   }));
   const kpis: DetailPageShellKpi[] = [

@@ -18,6 +18,8 @@ export interface Company {
   region?: string | null;
   domain?: string | null;
   lastActivityAt?: string | null;
+  emailCount?: number;
+  lastEmailAt?: string | null;
   hubspotId?: string | null;
   hubspotCompanyId?: string | null;
   procoreId?: string | null;

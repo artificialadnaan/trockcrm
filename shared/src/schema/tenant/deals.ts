@@ -109,6 +109,8 @@ export const deals = pgTable(
     supportNeededNotes: text("support_needed_notes"),
     forecastUpdatedAt: timestamp("forecast_updated_at", { withTimezone: true }),
     forecastUpdatedBy: uuid("forecast_updated_by"),
+    emailCount: integer("email_count").default(0).notNull(),
+    lastEmailAt: timestamp("last_email_at", { withTimezone: true }),
     procoreProjectId: bigint("procore_project_id", { mode: "number" }),
     procoreCompanyId: text("procore_company_id"),
     procoreBidId: bigint("procore_bid_id", { mode: "number" }),

@@ -1,16 +1,16 @@
 import { useEffect, useState } from "react";
 import { EmailList } from "./email-list";
 import { GraphAuthBanner } from "./graph-auth-banner";
-import { useLeadEmails } from "@/hooks/use-emails";
+import { useCompanyEmails } from "@/hooks/use-emails";
 
-export function LeadEmailTab({ leadId }: { leadId: string }) {
+export function CompanyEmailTab({ companyId }: { companyId: string }) {
   const [page, setPage] = useState(1);
 
   useEffect(() => {
     setPage(1);
-  }, [leadId]);
+  }, [companyId]);
 
-  const { emails, pagination, loading, error } = useLeadEmails(leadId, {
+  const { emails, pagination, loading, error } = useCompanyEmails(companyId, {
     page,
     limit: 20,
   });
@@ -29,7 +29,7 @@ export function LeadEmailTab({ leadId }: { leadId: string }) {
         loading={loading}
         error={error}
         onPageChange={setPage}
-        emptyMessage="No emails linked to this lead yet."
+        emptyMessage="No emails linked to this company yet."
       />
     </div>
   );

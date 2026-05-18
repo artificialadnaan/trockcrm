@@ -51,6 +51,7 @@ export interface SendEmailInput {
 }
 
 export interface EmailFilters {
+  companyId?: string;
   dealId?: string;
   leadId?: string;
   contactId?: string;
@@ -121,6 +122,211 @@ function applyInboxFilter(conditions: any[], filter: EmailFilters["filter"]) {
 
 function activeEmailConditions() {
   return [isNull(emails.archivedAt), isNull(emails.deletedAt)];
+}
+
+type EmailStatsEntityType = "company" | "deal" | "lead" | "contact";
+
+async function refreshEntityEmailStats(
+  tenantDb: TenantDb,
+  entityType: EmailStatsEntityType,
+  entityId: string
+) {
+  if (entityType === "company") {
+    await tenantDb
+      .update(companies)
+      .set({
+        emailCount: sql<number>`(
+          SELECT COUNT(*)::int
+          FROM ${emails} e
+          WHERE e.assignment_status <> 'ignored'
+            AND (
+              (e.assigned_entity_type = 'company' AND e.assigned_entity_id = ${entityId})
+              OR e.deal_id IN (SELECT id FROM ${deals} WHERE ${deals.companyId} = ${entityId})
+              OR e.contact_id IN (SELECT id FROM ${contacts} WHERE ${contacts.companyId} = ${entityId})
+              OR (e.assigned_entity_type = 'deal' AND e.assigned_entity_id IN (SELECT id FROM ${deals} WHERE ${deals.companyId} = ${entityId}))
+              OR (e.assigned_entity_type = 'contact' AND e.assigned_entity_id IN (SELECT id FROM ${contacts} WHERE ${contacts.companyId} = ${entityId}))
+            )
+        )`,
+        lastEmailAt: sql<Date | null>`(
+          SELECT MAX(e.sent_at)
+          FROM ${emails} e
+          WHERE e.assignment_status <> 'ignored'
+            AND (
+              (e.assigned_entity_type = 'company' AND e.assigned_entity_id = ${entityId})
+              OR e.deal_id IN (SELECT id FROM ${deals} WHERE ${deals.companyId} = ${entityId})
+              OR e.contact_id IN (SELECT id FROM ${contacts} WHERE ${contacts.companyId} = ${entityId})
+              OR (e.assigned_entity_type = 'deal' AND e.assigned_entity_id IN (SELECT id FROM ${deals} WHERE ${deals.companyId} = ${entityId}))
+              OR (e.assigned_entity_type = 'contact' AND e.assigned_entity_id IN (SELECT id FROM ${contacts} WHERE ${contacts.companyId} = ${entityId}))
+            )
+        )`,
+      })
+      .where(eq(companies.id, entityId));
+    return;
+  }
+
+  if (entityType === "deal") {
+    await tenantDb
+      .update(deals)
+      .set({
+        emailCount: sql<number>`(
+          SELECT COUNT(*)::int
+          FROM ${emails} e
+          WHERE e.assignment_status <> 'ignored'
+            AND (
+              (e.assigned_entity_type = 'deal' AND e.assigned_entity_id = ${entityId})
+              OR e.deal_id = ${entityId}
+            )
+        )`,
+        lastEmailAt: sql<Date | null>`(
+          SELECT MAX(e.sent_at)
+          FROM ${emails} e
+          WHERE e.assignment_status <> 'ignored'
+            AND (
+              (e.assigned_entity_type = 'deal' AND e.assigned_entity_id = ${entityId})
+              OR e.deal_id = ${entityId}
+            )
+        )`,
+      })
+      .where(eq(deals.id, entityId));
+    return;
+  }
+
+  if (entityType === "lead") {
+    await tenantDb
+      .update(leads)
+      .set({
+        emailCount: sql<number>`(
+          SELECT COUNT(*)::int
+          FROM ${emails} e
+          WHERE e.assignment_status <> 'ignored'
+            AND e.assigned_entity_type = 'lead'
+            AND e.assigned_entity_id = ${entityId}
+        )`,
+        lastEmailAt: sql<Date | null>`(
+          SELECT MAX(e.sent_at)
+          FROM ${emails} e
+          WHERE e.assignment_status <> 'ignored'
+            AND e.assigned_entity_type = 'lead'
+            AND e.assigned_entity_id = ${entityId}
+        )`,
+      })
+      .where(eq(leads.id, entityId));
+    return;
+  }
+
+  await tenantDb
+    .update(contacts)
+    .set({
+      emailCount: sql<number>`(
+        SELECT COUNT(*)::int
+        FROM ${emails} e
+        WHERE e.assignment_status <> 'ignored'
+          AND (
+            (e.assigned_entity_type = 'contact' AND e.assigned_entity_id = ${entityId})
+            OR e.contact_id = ${entityId}
+          )
+      )`,
+      lastEmailAt: sql<Date | null>`(
+        SELECT MAX(e.sent_at)
+        FROM ${emails} e
+        WHERE e.assignment_status <> 'ignored'
+          AND (
+            (e.assigned_entity_type = 'contact' AND e.assigned_entity_id = ${entityId})
+            OR e.contact_id = ${entityId}
+          )
+      )`,
+    })
+    .where(eq(contacts.id, entityId));
+}
+
+async function refreshEmailStatsForTargets(
+  tenantDb: TenantDb,
+  targets: Array<{ entityType: EmailStatsEntityType; entityId: string | null | undefined }>
+) {
+  const seen = new Set<string>();
+  for (const target of targets) {
+    if (!target.entityId) continue;
+    const key = `${target.entityType}:${target.entityId}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    await refreshEntityEmailStats(tenantDb, target.entityType, target.entityId);
+  }
+}
+
+function deriveEmailStatTargetsFromEmail(email: {
+  assignedEntityType?: string | null;
+  assignedEntityId?: string | null;
+  dealId?: string | null;
+  contactId?: string | null;
+}) {
+  const targets: Array<{ entityType: EmailStatsEntityType; entityId: string | null }> = [];
+
+  if (email.assignedEntityType === "company" && email.assignedEntityId) {
+    targets.push({ entityType: "company", entityId: email.assignedEntityId });
+  }
+  if (email.assignedEntityType === "deal" && email.assignedEntityId) {
+    targets.push({ entityType: "deal", entityId: email.assignedEntityId });
+  }
+  if (email.assignedEntityType === "lead" && email.assignedEntityId) {
+    targets.push({ entityType: "lead", entityId: email.assignedEntityId });
+  }
+  if (email.assignedEntityType === "contact" && email.assignedEntityId) {
+    targets.push({ entityType: "contact", entityId: email.assignedEntityId });
+  }
+  if (email.dealId) {
+    targets.push({ entityType: "deal", entityId: email.dealId });
+  }
+  if (email.contactId) {
+    targets.push({ entityType: "contact", entityId: email.contactId });
+  }
+
+  return targets;
+}
+
+async function deriveCompanyStatTargetsFromEmail(
+  tenantDb: TenantDb,
+  email: {
+    assignedEntityType?: string | null;
+    assignedEntityId?: string | null;
+    dealId?: string | null;
+    contactId?: string | null;
+  }
+) {
+  const companyIds = new Set<string>();
+
+  if (email.assignedEntityType === "company" && email.assignedEntityId) {
+    companyIds.add(email.assignedEntityId);
+  }
+
+  const candidateDealIds = new Set<string>();
+  if (email.dealId) candidateDealIds.add(email.dealId);
+  if (email.assignedEntityType === "deal" && email.assignedEntityId) {
+    candidateDealIds.add(email.assignedEntityId);
+  }
+  for (const dealId of candidateDealIds) {
+    const [dealRow] = await tenantDb
+      .select({ companyId: deals.companyId })
+      .from(deals)
+      .where(eq(deals.id, dealId))
+      .limit(1);
+    if (dealRow?.companyId) companyIds.add(dealRow.companyId);
+  }
+
+  const candidateContactIds = new Set<string>();
+  if (email.contactId) candidateContactIds.add(email.contactId);
+  if (email.assignedEntityType === "contact" && email.assignedEntityId) {
+    candidateContactIds.add(email.assignedEntityId);
+  }
+  for (const contactId of candidateContactIds) {
+    const [contactRow] = await tenantDb
+      .select({ companyId: contacts.companyId })
+      .from(contacts)
+      .where(eq(contacts.id, contactId))
+      .limit(1);
+    if (contactRow?.companyId) companyIds.add(contactRow.companyId);
+  }
+
+  return Array.from(companyIds).map((companyId) => ({ entityType: "company" as const, entityId: companyId }));
 }
 
 type ThreadBindingRecord = typeof emailThreadBindings.$inferSelect;
@@ -565,26 +771,95 @@ async function backAssociateStoredMessagesForBinding(
   }
 ) {
   const mailboxUserId = await resolveMailboxUserId(tenantDb, input.mailboxAccountId);
+  const [deal] = await tenantDb
+    .select({
+      id: deals.id,
+      companyId: deals.companyId,
+      propertyId: deals.propertyId,
+      sourceLeadId: deals.sourceLeadId,
+    })
+    .from(deals)
+    .where(eq(deals.id, input.dealId))
+    .limit(1);
+  if (!deal) {
+    throw new AppError(404, "Deal not found");
+  }
+
+  const messageRows = await tenantDb
+    .select()
+    .from(emails)
+    .where(
+      and(
+        eq(emails.userId, mailboxUserId),
+        eq(emails.graphConversationId, input.providerConversationId)
+      )
+    );
+
+  const previousStatTargets = [
+    ...messageRows.flatMap((email) => deriveEmailStatTargetsFromEmail(email)),
+    ...(
+      await Promise.all(messageRows.map((email) => deriveCompanyStatTargetsFromEmail(tenantDb, email)))
+    ).flat(),
+  ];
+
   await tenantDb
     .update(emails)
     .set({
       dealId: input.dealId,
       assignedEntityType: "deal",
       assignedEntityId: input.dealId,
+      assignmentStatus: "assigned",
       assignmentConfidence: "high",
       assignmentAmbiguityReason: null,
       threadBindingId: input.bindingId,
+      syncedAt: new Date(),
     })
     .where(
       and(
         eq(emails.userId, mailboxUserId),
-        eq(emails.graphConversationId, input.providerConversationId),
-        or(
-          sql`${emails.threadBindingId} IS NULL`,
-          eq(emails.threadBindingId, input.bindingId)
-        )
+        eq(emails.graphConversationId, input.providerConversationId)
       )
     );
+
+  for (const email of messageRows) {
+    const updatedActivities = await tenantDb
+      .update(activities)
+      .set({
+        sourceEntityType: "deal",
+        sourceEntityId: input.dealId,
+        companyId: deal.companyId ?? null,
+        propertyId: deal.propertyId ?? null,
+        leadId: deal.sourceLeadId ?? null,
+        dealId: input.dealId,
+      })
+      .where(eq(activities.emailId, email.id))
+      .returning({ id: activities.id });
+
+    if (updatedActivities.length === 0) {
+      await tenantDb.insert(activities).values({
+        type: "email",
+        responsibleUserId: email.userId,
+        performedByUserId: input.actingUserId,
+        sourceEntityType: "deal",
+        sourceEntityId: input.dealId,
+        companyId: deal.companyId ?? null,
+        propertyId: deal.propertyId ?? null,
+        leadId: deal.sourceLeadId ?? null,
+        dealId: input.dealId,
+        contactId: email.contactId ?? null,
+        emailId: email.id,
+        subject: email.subject ?? null,
+        body: email.bodyPreview ?? (email.bodyHtml ? stripHtml(email.bodyHtml).substring(0, 1000) : null),
+        occurredAt: email.sentAt,
+      });
+    }
+  }
+
+  await refreshEmailStatsForTargets(tenantDb, [
+    ...previousStatTargets,
+    { entityType: "deal", entityId: input.dealId },
+    ...(deal.companyId ? [{ entityType: "company" as const, entityId: deal.companyId }] : []),
+  ]);
 }
 
 export async function bindThreadToDeal(
@@ -1076,14 +1351,21 @@ export async function getEmails(
 
   const conditions: any[] = [];
 
-  // Inbox views remain mailbox-scoped. Deal views are authorized at the route
-  // level and should return the whole linked deal history regardless of which
-  // teammate mailbox originally synced the message.
   if (userId) {
     conditions.push(eq(emails.userId, userId));
   }
 
-  if (filters.dealId) {
+  if (filters.companyId) {
+    conditions.push(
+      or(
+        and(eq(emails.assignedEntityType, "company"), eq(emails.assignedEntityId, filters.companyId)),
+        sql`${emails.dealId} IN (SELECT id FROM ${deals} WHERE ${deals.companyId} = ${filters.companyId})`,
+        sql`${emails.contactId} IN (SELECT id FROM ${contacts} WHERE ${contacts.companyId} = ${filters.companyId})`,
+        sql`${emails.assignedEntityType} = 'deal' AND ${emails.assignedEntityId} IN (SELECT id FROM ${deals} WHERE ${deals.companyId} = ${filters.companyId})`,
+        sql`${emails.assignedEntityType} = 'contact' AND ${emails.assignedEntityId} IN (SELECT id FROM ${contacts} WHERE ${contacts.companyId} = ${filters.companyId})`
+      )
+    );
+  } else if (filters.dealId) {
     const dealConditions = [
         eq(emails.dealId, filters.dealId),
         and(eq(emails.assignedEntityType, "deal"), eq(emails.assignedEntityId, filters.dealId)),
@@ -1358,6 +1640,11 @@ export async function ignoreEmailAssignment(
     throw new AppError(403, "You can only modify your own emails");
   }
 
+  const statTargets = [
+    ...deriveEmailStatTargetsFromEmail(email),
+    ...(await deriveCompanyStatTargetsFromEmail(tenantDb, email)),
+  ];
+
   const [updated] = await tenantDb
     .update(emails)
     .set({
@@ -1367,6 +1654,7 @@ export async function ignoreEmailAssignment(
     .where(eq(emails.id, emailId))
     .returning();
 
+  await refreshEmailStatsForTargets(tenantDb, statTargets);
   return updated ?? { ...email, assignmentStatus: "ignored" };
 }
 
@@ -1382,6 +1670,11 @@ export async function unignoreEmailAssignment(
     throw new AppError(403, "You can only modify your own emails");
   }
 
+  const statTargets = [
+    ...deriveEmailStatTargetsFromEmail(email),
+    ...(await deriveCompanyStatTargetsFromEmail(tenantDb, email)),
+  ];
+
   const assignmentStatus = deriveAssignmentStatus(email);
   const [updated] = await tenantDb
     .update(emails)
@@ -1392,6 +1685,7 @@ export async function unignoreEmailAssignment(
     .where(eq(emails.id, emailId))
     .returning();
 
+  await refreshEmailStatsForTargets(tenantDb, statTargets);
   return updated ?? { ...email, assignmentStatus };
 }
 
@@ -1684,6 +1978,21 @@ export async function associateEmailToEntity(
     };
   }
 
+  const previousStatTargets = [
+    ...deriveEmailStatTargetsFromEmail(email),
+    ...(await deriveCompanyStatTargetsFromEmail(tenantDb, email)),
+  ];
+  const nextContactId = input.assignedEntityType === "contact" ? input.assignedEntityId : email.contactId ?? null;
+  const nextStatTargets = [
+    ...deriveEmailStatTargetsFromEmail({
+      assignedEntityType: input.assignedEntityType,
+      assignedEntityId: input.assignedEntityId,
+      dealId: assignedDealId,
+      contactId: nextContactId,
+    }),
+    ...(assignmentLinks.companyId ? [{ entityType: "company" as const, entityId: assignmentLinks.companyId }] : []),
+  ];
+
   await tenantDb
     .update(emails)
     .set({
@@ -1693,7 +2002,7 @@ export async function associateEmailToEntity(
       assignmentConfidence: "high",
       assignmentAmbiguityReason: null,
       dealId: assignedDealId,
-      contactId: input.assignedEntityType === "contact" ? input.assignedEntityId : email.contactId ?? null,
+      contactId: nextContactId,
       syncedAt: new Date(),
     })
     .where(eq(emails.id, emailId));
@@ -1707,7 +2016,7 @@ export async function associateEmailToEntity(
       propertyId: assignmentLinks.propertyId,
       leadId: assignmentLinks.leadId,
       dealId: assignmentLinks.dealId,
-      contactId: input.assignedEntityType === "contact" ? input.assignedEntityId : email.contactId ?? null,
+      contactId: nextContactId,
     })
     .where(eq(activities.emailId, emailId))
     .returning({ id: activities.id });
@@ -1723,7 +2032,7 @@ export async function associateEmailToEntity(
       propertyId: assignmentLinks.propertyId,
       leadId: assignmentLinks.leadId,
       dealId: assignmentLinks.dealId,
-      contactId: input.assignedEntityType === "contact" ? input.assignedEntityId : email.contactId ?? null,
+      contactId: nextContactId,
       emailId: email.id,
       subject: email.subject ?? null,
       body: email.bodyPreview ?? (email.bodyHtml ? stripHtml(email.bodyHtml).substring(0, 1000) : null),
@@ -1731,6 +2040,7 @@ export async function associateEmailToEntity(
     });
   }
 
+  await refreshEmailStatsForTargets(tenantDb, [...previousStatTargets, ...nextStatTargets]);
   await completeInboundEmailTasks(tenantDb, emailId, userRole, userId, officeId);
 }
 

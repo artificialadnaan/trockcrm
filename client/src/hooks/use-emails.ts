@@ -64,6 +64,7 @@ export interface EmailAssociationTarget {
 }
 
 export interface EmailFilters {
+  companyId?: string;
   direction?: "inbound" | "outbound";
   filter?: "all" | "unread" | "unassigned" | "sent";
   search?: string;
@@ -182,6 +183,51 @@ export function useDealEmails(dealId: string | undefined, filters: EmailFilters 
       setLoading(false);
     }
   }, [dealId, filters.direction, filters.search, filters.page, filters.limit]);
+
+  useEffect(() => {
+    fetchEmails();
+  }, [fetchEmails]);
+
+  return { emails, pagination, loading, error, refetch: fetchEmails };
+}
+
+export function useCompanyEmails(companyId: string | undefined, filters: EmailFilters = {}) {
+  const [emails, setEmails] = useState<Email[]>([]);
+  const [pagination, setPagination] = useState<Pagination>({
+    page: 1,
+    limit: 25,
+    total: 0,
+    totalPages: 0,
+  });
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+
+  const fetchEmails = useCallback(async () => {
+    if (!companyId) {
+      setLoading(false);
+      return;
+    }
+    setLoading(true);
+    setError(null);
+    try {
+      const params = new URLSearchParams();
+      if (filters.direction) params.set("direction", filters.direction);
+      if (filters.search) params.set("search", filters.search);
+      if (filters.page) params.set("page", String(filters.page));
+      if (filters.limit) params.set("limit", String(filters.limit));
+
+      const qs = params.toString();
+      const data = await api<{ emails: Email[]; pagination: Pagination }>(
+        `/email/company/${companyId}${qs ? `?${qs}` : ""}`
+      );
+      setEmails(data.emails);
+      setPagination(data.pagination);
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : "Failed to load company emails");
+    } finally {
+      setLoading(false);
+    }
+  }, [companyId, filters.direction, filters.search, filters.page, filters.limit]);
 
   useEffect(() => {
     fetchEmails();

@@ -313,6 +313,7 @@ function makeDealDetail(overrides: Record<string, unknown> = {}) {
     hubspotDealId: null as string | null,
     isHubspotSourced: false,
     bidBoardProjectNumber: "DFW-3-12826-aa",
+    emailCount: 5,
     createdAt: "2026-04-20T10:00:00.000Z",
     updatedAt: "2026-04-21T10:00:00.000Z",
     proposalStatus: "drafting",
@@ -604,7 +605,7 @@ describe("DealDetailPage", () => {
   it("tab change updates active tab", () => {
     mounted = mountPage();
 
-    const emailTab = mounted.container.querySelector('button[aria-label="Email"]');
+    const emailTab = mounted.container.querySelector('button[aria-label="Emails"]');
     expect(emailTab).not.toBeNull();
 
     act(() => {
@@ -613,6 +614,14 @@ describe("DealDetailPage", () => {
 
     expect(mounted.container.textContent).toContain("Email Tab");
     expect(mounted.container.textContent).not.toContain("Overview Tab");
+  });
+
+  it("renders the email count badge from the deal payload", () => {
+    mounted = mountPage();
+
+    const emailTab = mounted.container.querySelector('button[aria-label="Emails"]');
+    expect(emailTab?.textContent).toContain("5");
+    expect(mounted.container.textContent).not.toContain("Email Tab");
   });
 
   it("stage change action triggers handler", () => {
