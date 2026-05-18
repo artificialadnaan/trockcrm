@@ -7,7 +7,7 @@ describe("graph auth consent URL", () => {
     delete process.env.AZURE_TENANT_ID;
   });
 
-  it("requests only delegated user mailbox scopes and never admin consent", () => {
+  it("requests only delegated user mailbox scopes and does not force consent", () => {
     process.env.AZURE_CLIENT_ID = "client-id-123";
     process.env.AZURE_TENANT_ID = "common";
 
@@ -22,6 +22,6 @@ describe("graph auth consent URL", () => {
       "offline_access",
     ].sort());
     expect(scopes?.some((scope) => scope.endsWith(".All") || scope.endsWith(".Shared"))).toBe(false);
-    expect(url.searchParams.get("prompt")).not.toBe("admin_consent");
+    expect(url.searchParams.has("prompt")).toBe(false);
   });
 });
