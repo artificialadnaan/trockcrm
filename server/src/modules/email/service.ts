@@ -169,7 +169,7 @@ async function refreshEntityEmailStats(
       .update(deals)
       .set({
         emailCount: sql<number>`(
-          SELECT COUNT(*)::int
+          SELECT COUNT(e.id)::int
           FROM ${deals} d
           LEFT JOIN ${emails} e
             ON e.assignment_status <> 'ignored'
@@ -177,9 +177,9 @@ async function refreshEntityEmailStats(
              (e.assigned_entity_type = 'deal' AND e.assigned_entity_id = d.id)
              OR e.deal_id = d.id
              OR (
-               d.sourceLeadId IS NOT NULL
+               d.source_lead_id IS NOT NULL
                AND e.assigned_entity_type = 'lead'
-               AND e.assigned_entity_id = d.sourceLeadId
+               AND e.assigned_entity_id = d.source_lead_id
              )
            )
           WHERE d.id = ${entityId}
@@ -193,9 +193,9 @@ async function refreshEntityEmailStats(
              (e.assigned_entity_type = 'deal' AND e.assigned_entity_id = d.id)
              OR e.deal_id = d.id
              OR (
-               d.sourceLeadId IS NOT NULL
+               d.source_lead_id IS NOT NULL
                AND e.assigned_entity_type = 'lead'
-               AND e.assigned_entity_id = d.sourceLeadId
+               AND e.assigned_entity_id = d.source_lead_id
              )
            )
           WHERE d.id = ${entityId}

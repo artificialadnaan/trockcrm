@@ -71,6 +71,30 @@ function sqlConditionReferencesColumn(node: any, columnName: string, seen = new 
   return false;
 }
 
+function collectSqlText(node: any, seen = new Set<unknown>()): string {
+  if (node == null) return "";
+  if (typeof node === "string") return node;
+  if (typeof node !== "object") return "";
+  if (seen.has(node)) return "";
+  seen.add(node);
+
+  if (Array.isArray(node)) {
+    return node.map((entry) => collectSqlText(entry, seen)).join(" ");
+  }
+
+  if ("queryChunks" in node) {
+    return collectSqlText((node as any).queryChunks, seen);
+  }
+
+  if ("value" in node && Array.isArray((node as any).value)) {
+    return collectSqlText((node as any).value, seen);
+  }
+
+  return Object.values(node)
+    .map((entry) => collectSqlText(entry, seen))
+    .join(" ");
+}
+
 function createSelectChain(result: any[]) {
   const chain: any = {
     from: vi.fn(() => chain),
@@ -1364,9 +1388,14 @@ describe("email service inbound association", () => {
 
     const dealStatsUpdate = updatePayloads.find((entry) => entry.payload?.emailCount && hasColumnName(entry.payload.emailCount, "source_lead_id"));
     expect(dealStatsUpdate).toBeDefined();
-    expect(hasColumnName(dealStatsUpdate?.payload?.emailCount, "source_lead_id")).toBe(true);
-    expect(hasColumnName(dealStatsUpdate?.payload?.emailCount, "assigned_entity_type")).toBe(true);
-    expect(hasColumnName(dealStatsUpdate?.payload?.emailCount, "assigned_entity_id")).toBe(true);
+    const emailCountSql = collectSqlText(dealStatsUpdate?.payload?.emailCount);
+    const lastEmailSql = collectSqlText(dealStatsUpdate?.payload?.lastEmailAt);
+    expect(emailCountSql).toContain("COUNT(e.id)::int");
+    expect(emailCountSql).toContain("source_lead_id");
+    expect(lastEmailSql).toContain("source_lead_id");
+    expect(emailCountSql).not.toContain("sourceLeadId");
+    expect(lastEmailSql).not.toContain("sourceLeadId");
+    expect(emailCountSql).not.toContain("COUNT(*)");
   });
 
   it("bumps email syncedAt when using associateEmailToDeal helper", async () => {
