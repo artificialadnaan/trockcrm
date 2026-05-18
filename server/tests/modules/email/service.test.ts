@@ -26,14 +26,18 @@ const {
   autoAssociateEmailToDeal,
   associateEmailToEntity,
   associateEmailToDeal,
+  assertCanMutateEmailThread,
   buildThreadAssignmentFallbackWhereClause,
+  getEmailAssignmentQueue,
   getEmails,
   getEmailThread,
+  getEmailThreadForMutation,
   getUserEmails,
   ignoreEmailAssignment,
   isEmailAssignmentQueueCandidate,
   sendEmail,
   unignoreEmailAssignment,
+  updateEmailInboxAction,
 } = await import("../../../src/modules/email/service.js");
 
 function hasColumnName(node: any, columnName: string, seen = new Set<unknown>()): boolean {
@@ -112,6 +116,7 @@ function createEmailThreadDb(options: {
   binding?: any | null;
   mailboxAccountId?: string;
   dealRows?: Record<string, { id: string; name: string }>;
+  currentUserId?: string;
 }) {
   let selectCalls = 0;
   return {
@@ -120,7 +125,9 @@ function createEmailThreadDb(options: {
       let rows: any[] = [];
 
       if (selectCalls === 1 || selectCalls === 2) {
-        rows = options.thread;
+        rows = options.currentUserId
+          ? options.thread.filter((row) => row.userId === options.currentUserId)
+          : options.thread;
       } else if (selectCalls === 3) {
         rows = [{ id: options.mailboxAccountId ?? "mailbox-1" }];
       } else if (selectCalls === 4) {
@@ -274,6 +281,7 @@ describe("email service inbound association", () => {
     await getEmails(tenantDb as any, { contactId: "contact-1" }, "director-1", "director");
 
     expect(whereClauses.length).toBe(2);
+    expect(hasColumnName(whereClauses[0], "user_id") || hasColumnName(whereClauses[0], "userId")).toBe(true);
     expect(hasColumnName(whereClauses[0], "contact_id") || hasColumnName(whereClauses[0], "contactId")).toBe(true);
     expect(
       hasColumnName(whereClauses[0], "assigned_entity_type") ||
@@ -314,6 +322,7 @@ describe("email service inbound association", () => {
     await getEmails(tenantDb as any, { dealId: "deal-1" }, "director-1", "director");
 
     expect(whereClauses.length).toBe(2);
+    expect(hasColumnName(whereClauses[0], "user_id") || hasColumnName(whereClauses[0], "userId")).toBe(true);
     expect(hasColumnName(whereClauses[0], "deal_id") || hasColumnName(whereClauses[0], "dealId")).toBe(true);
     expect(
       hasColumnName(whereClauses[0], "assigned_entity_type") ||
@@ -419,6 +428,7 @@ describe("email service inbound association", () => {
           sentAt: new Date("2026-05-15T11:00:00Z"),
         },
       ],
+      currentUserId: "rep-1",
     });
 
     const result = await getEmailThread(
@@ -433,7 +443,7 @@ describe("email service inbound association", () => {
     expect(result.binding).toBeNull();
   });
 
-  it("returns all messages when the thread is deal-visible to the rep", async () => {
+  it("returns only the current user's messages even when the deal is visible", async () => {
     const tenantDb = createEmailThreadDb({
       thread: [
         {
@@ -468,6 +478,7 @@ describe("email service inbound association", () => {
       dealRows: {
         "deal-visible": { id: "deal-visible", name: "Visible Deal" },
       },
+      currentUserId: "rep-1",
     });
 
     const result = await getEmailThread(
@@ -478,7 +489,7 @@ describe("email service inbound association", () => {
       async (dealId) => dealId === "deal-visible"
     );
 
-    expect(result.emails.map((email) => email.id)).toEqual(["email-1", "email-2"]);
+    expect(result.emails.map((email) => email.id)).toEqual(["email-2"]);
     expect(result.binding?.dealId).toBe("deal-visible");
   });
 
@@ -514,6 +525,7 @@ describe("email service inbound association", () => {
         confidence: "high",
         assignmentReason: "manual_thread_assignment",
       },
+      currentUserId: "rep-1",
     });
 
     const result = await getEmailThread(
@@ -528,30 +540,56 @@ describe("email service inbound association", () => {
     expect(result.binding?.contactId).toBe("contact-visible");
   });
 
-  it("returns an empty thread when the rep cannot read any message", async () => {
-    const tenantDb = createEmailThreadDb({
-      thread: [
-        {
-          id: "email-hidden",
-          userId: "teammate-1",
-          dealId: "deal-hidden",
-          assignedEntityType: "deal",
-          assignedEntityId: "deal-hidden",
-          contactId: null,
-          sentAt: new Date("2026-05-15T10:00:00Z"),
-        },
-      ],
-    });
+  it("returns 403 when the thread belongs to another user's mailbox", async () => {
+    const tenantDb = {
+      select: vi.fn(() => {
+        const callIndex = (tenantDb.select as any).mock.calls.length;
+        const chain: any = {
+          from: vi.fn(() => chain),
+          where: vi.fn(() => chain),
+          orderBy: vi.fn(() => chain),
+          limit: vi.fn(() => chain),
+          then(resolve: (value: any[]) => void) {
+            if (callIndex === 1) {
+              resolve([]);
+            } else {
+              resolve([{ id: "email-hidden", userId: "teammate-1" }]);
+            }
+          },
+        };
+        return chain;
+      }),
+    };
 
-    const result = await getEmailThread(
-      tenantDb as any,
-      "conversation-1",
-      "rep-1",
-      "rep",
-      async () => false
-    );
+    await expect(
+      getEmailThread(tenantDb as any, "conversation-1", "rep-1", "rep", async () => false)
+    ).rejects.toThrow("You do not have permission to view this email thread");
+  });
 
-    expect(result).toEqual({ binding: null, preview: null, emails: [] });
+  it("returns 403 when a user tries to mutate another user's thread", async () => {
+    const tenantDb = {
+      select: vi.fn(() => {
+        const callIndex = (tenantDb.select as any).mock.calls.length;
+        const chain: any = {
+          from: vi.fn(() => chain),
+          where: vi.fn(() => chain),
+          orderBy: vi.fn(() => chain),
+          limit: vi.fn(() => chain),
+          then(resolve: (value: any[]) => void) {
+            if (callIndex === 1) {
+              resolve([]);
+            } else {
+              resolve([{ id: "email-hidden", userId: "teammate-1" }]);
+            }
+          },
+        };
+        return chain;
+      }),
+    };
+
+    await expect(
+      getEmailThreadForMutation(tenantDb as any, "conversation-1", "rep-1")
+    ).rejects.toThrow("You can only view and modify your own email threads");
   });
 
   it("uses recency ordering based on sentAt or syncedAt for user inbox", async () => {
@@ -590,6 +628,38 @@ describe("email service inbound association", () => {
           (hasColumnName(clause, "sent_at") || hasColumnName(clause, "sentAt"))
       )
     ).toBe(true);
+  });
+
+  it("scopes the assignment queue to the current user for directors too", async () => {
+    const whereClauses: unknown[] = [];
+    const tenantDb = {
+      select: vi.fn(() => {
+        const callIndex = (tenantDb.select as any).mock.calls.length;
+        const chain: any = {
+          from: vi.fn(() => chain),
+          where: vi.fn((whereArg: unknown) => {
+            whereClauses.push(whereArg);
+            return chain;
+          }),
+          orderBy: vi.fn(() => chain),
+          limit: vi.fn(() => chain),
+          offset: vi.fn(() => chain),
+          then(resolve: (value: any) => void) {
+            if (callIndex === 1) {
+              resolve([{ count: 0 }]);
+            } else {
+              resolve([]);
+            }
+          },
+        };
+        return chain;
+      }),
+    };
+
+    await getEmailAssignmentQueue(tenantDb as any, {}, "director-1", "director");
+
+    expect(whereClauses.length).toBe(2);
+    expect(hasColumnName(whereClauses[0], "user_id") || hasColumnName(whereClauses[0], "userId")).toBe(true);
   });
 
   it("completes inbound email tasks when an email is manually associated to a deal", async () => {
@@ -670,13 +740,117 @@ describe("email service inbound association", () => {
         assignedDealId: "deal-1",
       },
       "director",
-      "director-1",
+      "user-1",
       "office-1"
     );
 
     expect(updatePayloads.some((entry) => entry.payload.status === "completed")).toBe(true);
     expect(updatePayloads.some((entry) => entry.payload.completedAt)).toBe(true);
     expect(insertPayloads.some((entry) => entry.jobType === "domain_event" && entry.payload?.eventName === "task.completed")).toBe(true);
+  });
+
+  it("blocks inbox actions against another user's email for directors", async () => {
+    const tenantDb = {
+      select: vi.fn(() => {
+        const chain: any = {
+          from: vi.fn(() => chain),
+          where: vi.fn(() => chain),
+          limit: vi.fn(() => chain),
+          then(resolve: (value: any[]) => void) {
+            resolve([{ id: "email-1", userId: "rep-2" }]);
+          },
+        };
+        return chain;
+      }),
+    };
+
+    await expect(
+      updateEmailInboxAction(tenantDb as any, "email-1", "director-1", "director", { isStarred: true })
+    ).rejects.toThrow("You can only modify your own emails");
+  });
+
+  it("blocks ignore and unignore against another user's email for directors", async () => {
+    const tenantDb = {
+      select: vi.fn(() => {
+        const chain: any = {
+          from: vi.fn(() => chain),
+          where: vi.fn(() => chain),
+          limit: vi.fn(() => chain),
+          then(resolve: (value: any[]) => void) {
+            resolve([{ id: "email-1", userId: "rep-2" }]);
+          },
+        };
+        return chain;
+      }),
+    };
+
+    await expect(ignoreEmailAssignment(tenantDb as any, "email-1", "director-1", "director")).rejects.toThrow(
+      "You can only modify your own emails"
+    );
+    await expect(unignoreEmailAssignment(tenantDb as any, "email-1", "director-1", "director")).rejects.toThrow(
+      "You can only modify your own emails"
+    );
+  });
+
+  it("blocks manual association against another user's email for directors", async () => {
+    const tenantDb = {
+      select: vi.fn(() => {
+        const callIndex = (tenantDb.select as any).mock.calls.length;
+        const chain: any = {
+          from: vi.fn(() => chain),
+          where: vi.fn(() => chain),
+          limit: vi.fn(() => chain),
+          then(resolve: (value: any[]) => void) {
+            if (callIndex === 1) {
+              resolve([{ id: "email-1", userId: "rep-2" }]);
+            } else {
+              resolve([]);
+            }
+          },
+        };
+        return chain;
+      }),
+    };
+
+    await expect(
+      associateEmailToEntity(
+        tenantDb as any,
+        "email-1",
+        { assignedEntityType: "company", assignedEntityId: "company-1" },
+        "director",
+        "director-1",
+        "office-1"
+      )
+    ).rejects.toThrow("You can only modify your own emails");
+  });
+
+  it("blocks thread mutations when the mailbox belongs to another user, even for directors", async () => {
+    const tenantDb = {
+      select: vi.fn(() => {
+        const callIndex = (tenantDb.select as any).mock.calls.length;
+        const chain: any = {
+          from: vi.fn(() => chain),
+          where: vi.fn(() => chain),
+          limit: vi.fn(() => chain),
+          then(resolve: (value: any[]) => void) {
+            if (callIndex === 1) {
+              resolve([{ id: "mailbox-1" }]);
+            } else {
+              resolve([]);
+            }
+          },
+        };
+        return chain;
+      }),
+    };
+
+    await expect(
+      assertCanMutateEmailThread(
+        tenantDb as any,
+        { mailboxAccountId: "mailbox-2", binding: null, emails: [] },
+        { id: "director-1", role: "director" }
+      )
+    ).rejects.toThrow("You can only modify your own email threads");
   });
 
   it("completes legacy email assignment queue tasks when an email is manually associated", async () => {
@@ -756,7 +930,7 @@ describe("email service inbound association", () => {
         assignedEntityId: "contact-1",
       },
       "director",
-      "director-1",
+      "user-1",
       "office-1"
     );
 
@@ -849,7 +1023,7 @@ describe("email service inbound association", () => {
           assignedEntityId: "contact-1",
         },
         "director",
-        "director-1",
+        "user-1",
         "office-1"
       )
     ).resolves.toBeUndefined();
@@ -915,7 +1089,7 @@ describe("email service inbound association", () => {
         assignedDealId: null,
       },
       "director",
-      "director-1",
+      "user-1",
       "office-1"
     );
 
@@ -999,7 +1173,7 @@ describe("email service inbound association", () => {
         assignedDealId: "deal-1",
       },
       "director",
-      "director-1",
+      "user-1",
       "office-1"
     );
 
@@ -1089,7 +1263,7 @@ describe("email service inbound association", () => {
         assignedDealId: null,
       },
       "director",
-      "director-1",
+      "user-1",
       "office-1"
     );
 
@@ -1157,7 +1331,7 @@ describe("email service inbound association", () => {
         assignedDealId: null,
       },
       "director",
-      "director-1",
+      "user-1",
       "office-1"
     );
 
@@ -1227,7 +1401,7 @@ describe("email service inbound association", () => {
         assignedDealId: null,
       },
       "director",
-      "director-1",
+      "user-1",
       "office-1"
     );
 
@@ -1309,7 +1483,7 @@ describe("email service inbound association", () => {
         assignedDealId: null,
       },
       "director",
-      "director-1",
+      "user-1",
       "office-1"
     );
 
@@ -1348,7 +1522,7 @@ describe("email service inbound association", () => {
           assignedDealId: "deal-2",
         },
         "director",
-        "director-1",
+        "user-1",
         "office-1"
       )
     ).rejects.toThrow("assignedDealId must match assignedEntityId for deal assignments");

@@ -247,6 +247,18 @@ function makeDirectorUser(overrides: Partial<TestUser> = {}): TestUser {
   };
 }
 
+function makeAdminUser(overrides: Partial<TestUser> = {}): TestUser {
+  return {
+    id: "admin-1",
+    role: "admin",
+    displayName: "Admin One",
+    email: "admin@example.com",
+    officeId: "office-1",
+    activeOfficeId: "office-1",
+    ...overrides,
+  };
+}
+
 function makeRepUser(overrides: Partial<TestUser> = {}): TestUser {
   return {
     id: "rep-1",
@@ -376,7 +388,7 @@ describe("email routes", () => {
     expect(unignored.res.body).toEqual({ email: { id: "email-1", assignmentStatus: "unassigned" } });
   });
 
-  it("allows reps to open full email bodies when the email is linked to a visible deal", async () => {
+  it("blocks reps from opening another user's email even when the deal is visible", async () => {
     emailServiceMocks.getEmailById.mockResolvedValue({
       id: "email-1",
       userId: "admin-1",
@@ -386,32 +398,49 @@ describe("email routes", () => {
     });
     dealServiceMocks.getDealById.mockResolvedValue({ id: "deal-1" });
 
-    const { req, res } = await invokeRoute({
-      method: "get",
-      url: "/email-1",
-      user: makeRepUser(),
-    });
-
-    expect(dealServiceMocks.getDealById).toHaveBeenCalledWith(expect.any(Object), "deal-1", "rep", "rep-1");
-    expect(req.commitTransaction).toHaveBeenCalled();
-    expect(res.body.email.id).toBe("email-1");
-  });
-
-  it("still blocks reps from full email bodies with no owner or deal access", async () => {
-    emailServiceMocks.getEmailById.mockResolvedValue({
-      id: "email-1",
-      userId: "admin-1",
-      dealId: "deal-1",
-      assignedEntityType: null,
-      assignedEntityId: null,
-    });
-    dealServiceMocks.getDealById.mockRejectedValue(new Error("forbidden"));
-
     await expect(
       invokeRoute({
         method: "get",
         url: "/email-1",
         user: makeRepUser(),
+      })
+    ).rejects.toThrow("You do not have permission to view this email");
+
+    expect(dealServiceMocks.getDealById).not.toHaveBeenCalled();
+  });
+
+  it("blocks directors from opening another user's email", async () => {
+    emailServiceMocks.getEmailById.mockResolvedValue({
+      id: "email-1",
+      userId: "rep-2",
+      dealId: "deal-1",
+      assignedEntityType: null,
+      assignedEntityId: null,
+    });
+
+    await expect(
+      invokeRoute({
+        method: "get",
+        url: "/email-1",
+        user: makeDirectorUser(),
+      })
+    ).rejects.toThrow("You do not have permission to view this email");
+  });
+
+  it("blocks admins from opening another user's email", async () => {
+    emailServiceMocks.getEmailById.mockResolvedValue({
+      id: "email-1",
+      userId: "rep-2",
+      dealId: null,
+      assignedEntityType: null,
+      assignedEntityId: null,
+    });
+
+    await expect(
+      invokeRoute({
+        method: "get",
+        url: "/email-1",
+        user: makeAdminUser(),
       })
     ).rejects.toThrow("You do not have permission to view this email");
   });
@@ -442,6 +471,22 @@ describe("email routes", () => {
     );
     expect(req.commitTransaction).toHaveBeenCalled();
     expect(res.body).toEqual({ success: true });
+  });
+
+  it("returns 403 when a director tries to assign another user's email", async () => {
+    emailServiceMocks.getEmailById.mockResolvedValue({ id: "email-1", userId: "rep-2" });
+
+    await expect(
+      invokeRoute({
+        method: "post",
+        url: "/email-1/associate",
+        user: makeDirectorUser(),
+        body: { dealId: "deal-1" },
+      })
+    ).rejects.toThrow("You do not have permission to modify this email");
+
+    expect(emailServiceMocks.associateEmailToEntity).not.toHaveBeenCalled();
+    expect(dealServiceMocks.getDealById).not.toHaveBeenCalled();
   });
 
   it("routes manual lead association through the generic entity resolver", async () => {
@@ -801,6 +846,23 @@ describe("email routes", () => {
     });
   });
 
+  it("returns 403 when a user opens another user's email thread", async () => {
+    emailServiceMocks.getEmailThread.mockRejectedValue(
+      Object.assign(new Error("You do not have permission to view this email thread"), { statusCode: 403 })
+    );
+
+    await expect(
+      invokeRoute({
+        method: "get",
+        url: "/thread/conversation-1",
+        user: makeDirectorUser(),
+      })
+    ).rejects.toMatchObject({
+      message: "You do not have permission to view this email thread",
+      statusCode: 403,
+    });
+  });
+
   it("treats deal 403s as not-visible when resolving thread access", async () => {
     dealServiceMocks.getDealById.mockRejectedValueOnce(
       Object.assign(new Error("Forbidden"), { statusCode: 403 })
@@ -878,6 +940,24 @@ describe("email routes", () => {
       "director",
       expect.any(Function)
     );
+  });
+
+  it("returns 403 when a user tries to assign another user's thread", async () => {
+    emailServiceMocks.getEmailThreadForMutation.mockRejectedValue(
+      Object.assign(new Error("You can only view and modify your own email threads"), { statusCode: 403 })
+    );
+
+    await expect(
+      invokeRoute({
+        method: "post",
+        url: "/thread/conversation-1/assign",
+        user: makeDirectorUser(),
+        body: { dealId: "deal-1" },
+      })
+    ).rejects.toMatchObject({
+      message: "You can only view and modify your own email threads",
+      statusCode: 403,
+    });
   });
 
   it("reassigns a thread and returns a preview", async () => {

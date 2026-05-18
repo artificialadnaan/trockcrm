@@ -9,6 +9,23 @@ import {
 } from "../../../../shared/src/schema/index.js";
 const { getDealCopilotContext } = await import("../../../src/modules/ai-copilot/context-service.js");
 
+function flattenQueryChunks(input: unknown, seen = new WeakSet<object>()): unknown[] {
+  if (!input || typeof input !== "object") return [input];
+  if (seen.has(input as object)) return [];
+  seen.add(input as object);
+
+  const queryChunks = (input as { queryChunks?: unknown[] }).queryChunks;
+  if (Array.isArray(queryChunks)) {
+    return queryChunks.flatMap((chunk) => flattenQueryChunks(chunk, seen));
+  }
+
+  if ("value" in (input as Record<string, unknown>)) {
+    return [(input as Record<string, unknown>).value];
+  }
+
+  return Object.values(input as Record<string, unknown>).flatMap((value) => flattenQueryChunks(value, seen));
+}
+
 describe("AI copilot schema exports", () => {
   it("exports all tenant AI tables from the shared schema barrel", () => {
     expect(aiDocumentIndex).toBeDefined();
@@ -66,7 +83,7 @@ describe("AI copilot schema exports", () => {
         }),
     };
 
-    const context = await getDealCopilotContext(tenantDb as any, "deal-1");
+    const context = await getDealCopilotContext(tenantDb as any, "deal-1", "user-1");
 
     expect(context.deal.id).toBe("deal-1");
     expect(context.deal.stageName).toBe("Estimating");
@@ -74,5 +91,10 @@ describe("AI copilot schema exports", () => {
     expect(context.recentActivities.map((activity) => activity.id)).toEqual(["activity-2", "activity-1"]);
     expect(context.recentEmails[0]?.bodyPreview).toBe("Please revise the estimate");
     expect(context.taskSummary).toEqual({ openTaskCount: 1, overdueTaskCount: 0 });
+
+    const activityQueryChunks = flattenQueryChunks(tenantDb.execute.mock.calls[1]?.[0]);
+    const emailQueryChunks = flattenQueryChunks(tenantDb.execute.mock.calls[2]?.[0]);
+    expect(activityQueryChunks).toContain("user-1");
+    expect(emailQueryChunks).toContain("user-1");
   });
 });

@@ -50,14 +50,14 @@ function createCapturedEmailDb() {
 }
 
 describe("deal email visibility", () => {
-  it("does not mailbox-scope deal email history for reps who can view the deal", async () => {
+  it("keeps deal email history mailbox-scoped for reps who can view the deal", async () => {
     const { db, getCapturedWhere } = createCapturedEmailDb();
 
     await getEmails(db as any, { dealId: "deal-1" }, "rep-1", "rep");
 
     const flattened = getCapturedWhere().flatMap((condition) => flattenQueryChunks(condition));
     expect(flattened).toContain("deal-1");
-    expect(flattened).not.toContain("rep-1");
+    expect(flattened).toContain("rep-1");
   });
 
   it("keeps the personal inbox path mailbox-scoped", async () => {

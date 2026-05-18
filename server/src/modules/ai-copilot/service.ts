@@ -29,6 +29,7 @@ const PACKET_TTL_MS = 30 * 60 * 1000;
 export interface GenerateDealCopilotPacketInput {
   dealId: string;
   forceRegenerate?: boolean;
+  viewerUserId?: string;
 }
 
 export interface PersistedPacketBundleResult {
@@ -320,7 +321,11 @@ export interface SalesProcessDisconnectDashboard {
 }
 
 interface GenerateDealCopilotPacketDeps {
-  getDealCopilotContext: (tenantDb: TenantDb, dealId: string) => Promise<DealCopilotContext>;
+  getDealCopilotContext: (
+    tenantDb: TenantDb,
+    dealId: string,
+    viewerUserId: string
+  ) => Promise<DealCopilotContext>;
   getDealBlindSpotSignals: (tenantDb: TenantDb, dealId: string, now?: Date) => Promise<DealBlindSpotSignal[]>;
   searchDealKnowledge: (
     tenantDb: TenantDb,
@@ -1291,7 +1296,7 @@ export async function generateDealCopilotPacket(
   overrides: Partial<GenerateDealCopilotPacketDeps> = {}
 ): Promise<GenerateDealCopilotPacketResult> {
   const deps = { ...DEFAULT_DEPS, ...overrides } as GenerateDealCopilotPacketDeps;
-  const context = await deps.getDealCopilotContext(tenantDb, input.dealId);
+  const context = await deps.getDealCopilotContext(tenantDb, input.dealId, input.viewerUserId ?? "system");
   const signals = await deps.getDealBlindSpotSignals(tenantDb, input.dealId, deps.now);
   const snapshotHash = createSnapshotHash({ context, signals });
 
@@ -1355,7 +1360,22 @@ export async function generateDealCopilotPacket(
   };
 }
 
-export async function getDealCopilotView(tenantDb: TenantDb, dealId: string) {
+export async function getDealCopilotView(tenantDb: TenantDb, dealId: string, viewerUserId: string) {
+  const foreignEmailResult = await tenantDb.execute(sql`
+    SELECT 1
+    FROM emails
+    WHERE deal_id = ${dealId}
+      AND user_id <> ${viewerUserId}
+    LIMIT 1
+  `);
+  if (foreignEmailResult.rows?.length) {
+    return {
+      packet: null,
+      suggestedTasks: [],
+      blindSpotFlags: [],
+    };
+  }
+
   const [packet] = await tenantDb
     .select()
     .from(aiCopilotPackets)

@@ -307,7 +307,7 @@ describe("ai copilot routes", () => {
     const res = await request(app).get("/api/ai/deals/deal-1/copilot");
 
     expect(res.status).toBe(200);
-    expect(serviceMocks.getDealCopilotView).toHaveBeenCalledWith(expect.anything(), "deal-1");
+    expect(serviceMocks.getDealCopilotView).toHaveBeenCalledWith(expect.anything(), "deal-1", "rep-1");
     expect(res.body.packet.summary).toBe("Deal needs follow-up.");
   });
 

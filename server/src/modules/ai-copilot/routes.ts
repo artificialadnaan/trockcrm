@@ -180,7 +180,7 @@ function assertNoLegacyConclusionConflict(input: {
 router.get("/deals/:id/copilot", async (req, res, next) => {
   try {
     await assertDealAccess(req, req.params.id);
-    const view = await getDealCopilotView(req.tenantDb!, req.params.id);
+    const view = await getDealCopilotView(req.tenantDb!, req.params.id, req.user!.id);
     await req.commitTransaction!();
     res.json(view);
   } catch (err) {
