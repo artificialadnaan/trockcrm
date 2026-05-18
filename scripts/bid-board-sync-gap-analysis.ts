@@ -951,6 +951,7 @@ interface PortfolioFetchOptions {
   fetchImpl?: typeof fetch;
   decryptToken?: (value: string) => string;
   now?: () => Date;
+  sleep?: (ms: number) => Promise<void>;
 }
 
 async function resolveReadOnlyProcoreToken(options: PortfolioFetchOptions = {}) {
@@ -1098,26 +1099,87 @@ function portfolioPageHasNext(response: Response, page: PortfolioApiPage, fetche
   return total != null && total > fetchedAfterPage;
 }
 
+function retryDelayFromResponse(response: Response, attempt: number): number {
+  const retryAfter = response.headers.get("Retry-After");
+  if (retryAfter) {
+    const seconds = Number(retryAfter);
+    if (Number.isFinite(seconds) && seconds >= 0) return seconds * 1000;
+    const retryAt = Date.parse(retryAfter);
+    if (Number.isFinite(retryAt)) return Math.max(0, retryAt - Date.now());
+  }
+  return [1000, 2000, 4000][attempt] ?? 4000;
+}
+
+function isRetryableProcoreStatus(status: number) {
+  return status === 429 || status >= 500;
+}
+
+async function readProcorePortfolioPage(
+  url: string,
+  init: RequestInit,
+  options: PortfolioFetchOptions
+): Promise<Response> {
+  const fetchImpl = options.fetchImpl ?? fetch;
+  const sleep = options.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
+  const maxRetries = 3;
+  let lastFailure = "";
+
+  for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    try {
+      const response = await fetchImpl(url, init);
+      if (response.ok) return response;
+
+      const text = await response.text().catch(() => "");
+      lastFailure = `${response.status} ${text}`.trim();
+      if (response.status === 401 || response.status === 403) {
+        throw new Error(`Procore token invalid or expired: ${lastFailure}`);
+      }
+      if (!isRetryableProcoreStatus(response.status)) {
+        throw new Error(`Procore read-only portfolio fetch failed: ${lastFailure}`);
+      }
+      if (attempt === maxRetries) {
+        throw new Error(`Procore read-only portfolio fetch failed after ${maxRetries + 1} attempts: ${lastFailure}`);
+      }
+
+      const delayMs = retryDelayFromResponse(response, attempt);
+      console.warn(`[Procore diagnostic] read-only portfolio fetch ${response.status}; retrying in ${delayMs}ms (attempt ${attempt + 1}/${maxRetries})`);
+      await sleep(delayMs);
+    } catch (error) {
+      if (error instanceof Error && (
+        error.message.startsWith("Procore token invalid or expired:") ||
+        error.message.startsWith("Procore read-only portfolio fetch failed:")
+      )) {
+        throw error;
+      }
+
+      lastFailure = error instanceof Error ? `network error: ${error.message}` : `network error: ${String(error)}`;
+      if (attempt === maxRetries) {
+        throw new Error(`Procore read-only portfolio fetch failed after ${maxRetries + 1} attempts: ${lastFailure}`);
+      }
+      const delayMs = [1000, 2000, 4000][attempt] ?? 4000;
+      console.warn(`[Procore diagnostic] read-only portfolio fetch network error; retrying in ${delayMs}ms (attempt ${attempt + 1}/${maxRetries}): ${lastFailure}`);
+      await sleep(delayMs);
+    }
+  }
+
+  throw new Error(`Procore read-only portfolio fetch failed after ${maxRetries + 1} attempts: ${lastFailure}`);
+}
+
 export async function fetchPortfolioProjects(maxRecords: number, options: PortfolioFetchOptions = {}): Promise<SourceFetchResult> {
   const auth = await resolveReadOnlyProcoreToken(options);
-  const fetchImpl = options.fetchImpl ?? fetch;
   const rows: SourceRecord[] = [];
   let page = 1;
   const pageSize = 100;
   let truncated = false;
   while (rows.length < maxRecords) {
-    const response = await fetchImpl(`https://api.procore.com/rest/v1.0/companies/${auth.companyId}/projects?page=${page}&per_page=${pageSize}`, {
+    const response = await readProcorePortfolioPage(`https://api.procore.com/rest/v1.0/companies/${auth.companyId}/projects?page=${page}&per_page=${pageSize}`, {
       method: "GET",
       headers: {
         Authorization: `Bearer ${auth.accessToken}`,
         Accept: "application/json",
         "Procore-Company-Id": auth.companyId,
       },
-    });
-    if (!response.ok) {
-      const text = await response.text().catch(() => "");
-      throw new Error(`Procore read-only portfolio fetch failed: ${response.status} ${text}`);
-    }
+    }, options);
     const parsedPage = await response.json() as PortfolioApiPage;
     const pageRows = portfolioRowsFromPage(parsedPage);
     if (pageRows.length === 0) break;
