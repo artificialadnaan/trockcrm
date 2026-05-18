@@ -7,6 +7,7 @@ import {
   getCsrfCookieOptions,
   getCsrfCookieOptionsForRequest,
   getDevAuthProductionWarning,
+  getLegacyTokenCookieClearsForRequest,
   getLogoutCookieClears,
   getLogoutCookieClearsForRequest,
   getRequestOrigin,
@@ -106,6 +107,21 @@ describe("auth http config", () => {
       })
     ).toEqual([
       "https://trockcrm.com",
+      "https://crm.trockconstruction.com",
+      "https://frontend-production-bcab.up.railway.app",
+    ]);
+  });
+
+  it("merges configured strict cross-site auth origins with the field app defaults", () => {
+    expect(
+      getStrictCrossSiteAuthOrigins({
+        NODE_ENV: "production",
+        RAILWAY_SERVICE_TROCKCRM_FIELD_URL: "trockcam.com",
+        STRICT_CROSS_SITE_AUTH_ORIGINS:
+          "https://crm.trockconstruction.com,https://frontend-production-bcab.up.railway.app",
+      })
+    ).toEqual([
+      "https://trockcam.com",
       "https://crm.trockconstruction.com",
       "https://frontend-production-bcab.up.railway.app",
     ]);
@@ -278,8 +294,38 @@ describe("auth http config", () => {
     ])).toEqual([
       ["token", null, "none", false, 0],
       ["token", null, "none", true, 0],
+      ["token", null, "none", false, 0],
+      ["token", null, "none", true, 0],
       ["csrf_token", null, "none", false, 0],
       ["csrf_token", null, "none", true, 0],
+    ]);
+  });
+
+  it("clears both root and legacy /api/auth token variants during cross-site auth refresh", () => {
+    const clears = getLegacyTokenCookieClearsForRequest(
+      {
+        NODE_ENV: "production",
+        AUTH_COOKIE_DOMAIN: ".trockcrm.com",
+        RAILWAY_SERVICE_TROCKCRM_FIELD_URL: "trockcam.com",
+        STRICT_CROSS_SITE_AUTH_ORIGINS: "https://crm.trockconstruction.com",
+      },
+      {
+        host: fallbackApiHost,
+        origin: "https://trockcam.com",
+      }
+    );
+
+    expect(clears.map((clear) => [
+      clear.name,
+      clear.options.path,
+      "partitioned" in clear.options ? clear.options.partitioned : false,
+      clear.options.sameSite,
+      clear.options.maxAge,
+    ])).toEqual([
+      ["token", "/", false, "none", 0],
+      ["token", "/", true, "none", 0],
+      ["token", "/api/auth", false, "none", 0],
+      ["token", "/api/auth", true, "none", 0],
     ]);
   });
 

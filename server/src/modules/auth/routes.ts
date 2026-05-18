@@ -22,6 +22,7 @@ import {
 } from "../email/graph-auth.js";
 import { getGraphTokenStatus, revokeGraphTokens } from "../email/graph-token-service.js";
 import {
+  getLegacyTokenCookieClearsForRequest,
   getLogoutCookieClearsForRequest,
   getTokenCookieOptionsForRequest,
   isDevAuthEnabled,
@@ -59,6 +60,25 @@ function logoutCookieClearsForRequest(req: import("express").Request) {
     hostname: req.hostname,
     origin: req.headers.origin,
   });
+}
+
+function legacyTokenCookieClearsForRequest(req: import("express").Request) {
+  return getLegacyTokenCookieClearsForRequest(process.env, {
+    host: req.get("host"),
+    hostname: req.hostname,
+    origin: req.headers.origin,
+  });
+}
+
+function refreshAuthTokenCookie(
+  req: import("express").Request,
+  res: import("express").Response,
+  token: string
+) {
+  for (const clear of legacyTokenCookieClearsForRequest(req)) {
+    res.cookie(clear.name, "", clear.options);
+  }
+  res.cookie("token", token, tokenCookieOptionsForRequest(req));
 }
 
 function csrfTokenForResponse(res: import("express").Response): string | undefined {
@@ -206,7 +226,7 @@ router.post("/dev/login", authLimiter, async (req, res, next) => {
       authMethod: "dev",
     });
 
-    res.cookie("token", token, tokenCookieOptionsForRequest(req));
+    refreshAuthTokenCookie(req, res, token);
 
     const responseUser = await withOnboardingGate({
         id: resolvedUser.id,
@@ -244,7 +264,7 @@ router.post("/local/login", authLimiter, async (req, res, next) => {
       authMethod: "local",
     });
 
-    res.cookie("token", token, tokenCookieOptionsForRequest(req));
+    refreshAuthTokenCookie(req, res, token);
     res.json(withCsrfToken(req, res, { user: await withOnboardingGate({ ...user, activeOfficeId: user.officeId }), returnTo: safeReturnTo(req.body?.returnTo) }));
   } catch (err) {
     next(err);

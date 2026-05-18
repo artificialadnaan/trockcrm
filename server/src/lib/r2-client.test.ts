@@ -45,6 +45,8 @@ describe("r2-client", () => {
     delete process.env.R2_BUCKET_NAME;
     delete process.env.R2_ALLOWED_ORIGINS;
     delete process.env.FRONTEND_URL;
+    delete process.env.FIELD_APP_URL;
+    delete process.env.RAILWAY_SERVICE_TROCKCRM_FIELD_URL;
   });
 
   it("reports configuration and builds allowed CORS origins", async () => {
@@ -57,6 +59,20 @@ describe("r2-client", () => {
     process.env.R2_ACCESS_KEY_ID = "key";
     process.env.R2_SECRET_ACCESS_KEY = "secret";
     expect(r2.isR2Configured()).toBe(true);
+  });
+
+  it("merges configured R2 origins with field app defaults", async () => {
+    const r2 = await importR2();
+    expect(
+      r2.getAllowedR2CorsOrigins({
+        R2_ALLOWED_ORIGINS: "https://crm.trockconstruction.com,https://api-production-ad218.up.railway.app",
+        RAILWAY_SERVICE_TROCKCRM_FIELD_URL: "trockcam.com",
+      } as any)
+    ).toEqual([
+      "https://trockcam.com",
+      "https://crm.trockconstruction.com",
+      "https://api-production-ad218.up.railway.app",
+    ]);
   });
 
   it("generates upload and download signed urls with expected commands", async () => {

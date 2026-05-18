@@ -36,12 +36,14 @@ async function invokeHandlers(handlers: Array<(req: any, res: any, next: (err?: 
     statusCode: 200,
     body: undefined,
     cookies: {} as Record<string, { value: string; options?: Record<string, unknown> }>,
+    cookieCalls: [] as Array<{ name: string; value: string; options?: Record<string, unknown> }>,
     locals: {},
     status(code: number) {
       res.statusCode = code;
       return res;
     },
     cookie(name: string, value: string, options?: Record<string, unknown>) {
+      res.cookieCalls.push({ name, value, options });
       res.cookies[name] = { value, options };
       return res;
     },
@@ -191,6 +193,19 @@ describe("field user routes", () => {
       path: "/",
       partitioned: true,
     });
+    expect(res.cookieCalls
+      .filter((call: { name: string }) => call.name === "token")
+      .map((call: { value: string; options?: Record<string, unknown> }) => [
+        call.value,
+        call.options?.path,
+        call.options?.partitioned ?? false,
+      ])).toEqual([
+      ["", "/", false],
+      ["", "/", true],
+      ["", "/api/auth", false],
+      ["", "/api/auth", true],
+      ["jwt", "/", true],
+    ]);
   });
 
   it("previews valid field invites without consuming them", async () => {

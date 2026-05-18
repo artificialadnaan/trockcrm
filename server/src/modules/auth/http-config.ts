@@ -226,6 +226,39 @@ export function getTokenCookieOptionsForRequest(env: EnvInput, request: CookieRe
     : { ...base, sameSite, ...(partitioned ? { partitioned } : {}) } as const;
 }
 
+function tokenClearOptionVariantsForRequest(
+  env: EnvInput,
+  request: CookieRequestInput,
+  path: string
+) {
+  const isProduction = env.NODE_ENV === "production";
+  const domain = cookieDomainForRequest(env, request);
+  const sameSite = sameSiteForRequest(env, request);
+  const partitioned = shouldPartitionCookieForRequest(env, request);
+  const base = {
+    httpOnly: true,
+    secure: isProduction,
+    sameSite,
+    path,
+    maxAge: 0,
+  } as const;
+  const variants = partitioned
+    ? [base, { ...base, partitioned: true } as const]
+    : [base];
+
+  return [
+    ...(domain ? variants.map((options) => ({ ...options, domain })) : []),
+    ...variants,
+  ] as const;
+}
+
+export function getLegacyTokenCookieClearsForRequest(env: EnvInput, request: CookieRequestInput) {
+  return [
+    ...tokenClearOptionVariantsForRequest(env, request, "/"),
+    ...tokenClearOptionVariantsForRequest(env, request, "/api/auth"),
+  ].map((options) => ({ name: "token" as const, options }));
+}
+
 export function getLogoutCookieClears(env: EnvInput) {
   const isProduction = env.NODE_ENV === "production";
   const domain = sharedAuthCookieDomain(env);
@@ -254,16 +287,8 @@ export function getLogoutCookieClears(env: EnvInput) {
 
 export function getLogoutCookieClearsForRequest(env: EnvInput, request: CookieRequestInput) {
   const isProduction = env.NODE_ENV === "production";
-  const domain = cookieDomainForRequest(env, request);
   const sameSite = sameSiteForRequest(env, request);
-  const partitioned = shouldPartitionCookieForRequest(env, request);
-  const tokenOptionsBase = {
-    httpOnly: true,
-    secure: isProduction,
-    sameSite,
-    path: "/",
-    maxAge: 0,
-  } as const;
+  const domain = cookieDomainForRequest(env, request);
   const csrfOptionsBase = {
     httpOnly: false,
     secure: isProduction,
@@ -271,21 +296,16 @@ export function getLogoutCookieClearsForRequest(env: EnvInput, request: CookieRe
     path: "/",
     maxAge: 0,
   } as const;
-  const tokenOptionVariants = partitioned
-    ? [tokenOptionsBase, { ...tokenOptionsBase, partitioned: true } as const]
-    : [tokenOptionsBase];
+  const partitioned = shouldPartitionCookieForRequest(env, request);
   const csrfOptionVariants = partitioned
     ? [csrfOptionsBase, { ...csrfOptionsBase, partitioned: true } as const]
     : [csrfOptionsBase];
 
   return [
-    ...(domain
-      ? tokenOptionVariants.map((options) => ({ name: "token", options: { ...options, domain } }))
-      : []),
+    ...getLegacyTokenCookieClearsForRequest(env, request),
     ...(domain
       ? csrfOptionVariants.map((options) => ({ name: CSRF_COOKIE_NAME, options: { ...options, domain } }))
       : []),
-    ...tokenOptionVariants.map((options) => ({ name: "token", options })),
     ...csrfOptionVariants.map((options) => ({ name: CSRF_COOKIE_NAME, options })),
   ] as const;
 }
@@ -317,7 +337,7 @@ export function getCsrfCookieOptionsForRequest(env: EnvInput, request: CookieReq
 export function getStrictCrossSiteAuthOrigins(env: EnvInput): string[] {
   const configured = env.STRICT_CROSS_SITE_AUTH_ORIGINS?.trim();
   const source = configured
-    ? configured.split(",")
+    ? [...getDefaultStrictCrossSiteAuthOrigins(env), ...configured.split(",")]
     : getDefaultStrictCrossSiteAuthOrigins(env);
 
   return source
