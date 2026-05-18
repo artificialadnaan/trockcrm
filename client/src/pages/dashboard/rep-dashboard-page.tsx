@@ -665,7 +665,7 @@ export function RepDashboardPage() {
         <CardContent className="p-0">
           <div className="grid grid-cols-2 divide-x divide-slate-100 border-b border-slate-100 lg:grid-cols-4">
             <KpiTile label="Leads" value={data.activeLeads.count} subtext={`${data.activeLeads.count} active`} to="/leads?scope=mine" />
-            <KpiTile label="Qualified" value={qualifiedCount} subtext={`${qualifiedCount} active`} to="/leads?stage=qualified_lead&scope=mine" />
+            <KpiTile label="Qualified" value={qualifiedCount} subtext={`${qualifiedCount} active`} to="/leads?bucket=qualified_lead&scope=mine" />
             <KpiTile label="Opportunities" value={opportunityCount} subtext={formatCompactUsd(opportunityValue)} to="/deals?filter=opportunities&scope=mine" />
             <KpiTile label="Bid Board" value={bidBoardCount} subtext={formatCompactUsd(bidBoardValue)} to="/deals?filter=bid_board&scope=mine" />
           </div>

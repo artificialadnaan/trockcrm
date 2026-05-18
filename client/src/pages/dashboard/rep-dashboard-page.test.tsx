@@ -279,7 +279,7 @@ describe("RepDashboardPage", () => {
     const html = renderDashboard();
 
     expect(html).toContain('href="/leads?scope=mine"');
-    expect(html).toContain('href="/leads?stage=qualified_lead&amp;scope=mine"');
+    expect(html).toContain('href="/leads?bucket=qualified_lead&amp;scope=mine"');
     expect(html).toContain('href="/deals?filter=opportunities&amp;scope=mine"');
     expect(html).toContain('href="/deals?filter=bid_board&amp;scope=mine"');
   });
