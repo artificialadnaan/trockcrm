@@ -22,6 +22,7 @@ export { procoreWebhookLog } from "./public/procore-webhook-log.js";
 export { syncHubWebhookOrphans } from "./public/synchub-webhook-orphans.js";
 export { publicPhotoTokens } from "./public/public-photo-tokens.js";
 export { hubspotOwnerMappings } from "./public/hubspot-owner-mappings.js";
+export { hubspotActivityBackfillLedger } from "./public/hubspot-activity-backfill-ledger.js";
 export { userGraphTokens, graphTokenStatusEnum } from "./public/user-graph-tokens.js";
 export { userExternalIdentities, externalUserSourceEnum } from "./public/user-external-identities.js";
 export { userLocalAuth } from "./public/user-local-auth.js";
