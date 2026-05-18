@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const connectMock = vi.fn();
 const generateDealCopilotPacketMock = vi.fn();
+const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
 
 vi.mock("../../src/db.js", () => ({
   pool: {
@@ -25,6 +26,26 @@ function createClient(queryImpl: (sql: string, params?: unknown[]) => Promise<{ 
 describe("ai generate deal copilot job", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+  });
+
+  it("rejects and logs when requestedBy is missing", async () => {
+    const result = await runAiGenerateDealCopilot(
+      {
+        dealId: "deal-1",
+        reason: "manual_regenerate",
+      } as any,
+      "office-1"
+    );
+
+    expect(result).toEqual({
+      status: "dead",
+      error: "[Worker:ai-generate-deal-copilot] Missing requestedBy for dealId=deal-1",
+    });
+    expect(errorSpy).toHaveBeenCalledWith(
+      "[Worker:ai-generate-deal-copilot] Missing requestedBy for dealId=deal-1"
+    );
+    expect(connectMock).not.toHaveBeenCalled();
+    expect(generateDealCopilotPacketMock).not.toHaveBeenCalled();
   });
 
   it("passes requestedBy through as viewerUserId", async () => {
