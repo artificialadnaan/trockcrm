@@ -153,9 +153,9 @@ export async function diagnoseStaleStageEnteredAt(
          d.stage_id::text,
          d.stage_entered_at AS stored_stage_entered_at,
          MAX(dsh.created_at) AS latest_history_entry,
-         EXTRACT(DAY FROM (MAX(dsh.created_at) - d.stage_entered_at))::int AS days_diff,
-         EXTRACT(DAY FROM (NOW() - d.stage_entered_at))::int AS stored_days_in_stage,
-         EXTRACT(DAY FROM (NOW() - MAX(dsh.created_at)))::int AS actual_days_in_stage
+         FLOOR(EXTRACT(EPOCH FROM (MAX(dsh.created_at) - d.stage_entered_at)) / 86400)::int AS days_diff,
+         FLOOR(EXTRACT(EPOCH FROM (NOW() - d.stage_entered_at)) / 86400)::int AS stored_days_in_stage,
+         FLOOR(EXTRACT(EPOCH FROM (NOW() - MAX(dsh.created_at))) / 86400)::int AS actual_days_in_stage
        FROM ${schema}.deals d
        JOIN ${schema}.deal_stage_history dsh
          ON dsh.deal_id = d.id
@@ -180,9 +180,9 @@ export async function diagnoseStaleStageEnteredAt(
          d.stage_id::text,
          d.stage_entered_at AS stored_stage_entered_at,
          MAX(dsh.created_at) AS latest_history_entry,
-         EXTRACT(DAY FROM (MAX(dsh.created_at) - d.stage_entered_at))::int AS days_diff,
-         EXTRACT(DAY FROM (NOW() - d.stage_entered_at))::int AS stored_days_in_stage,
-         EXTRACT(DAY FROM (NOW() - MAX(dsh.created_at)))::int AS actual_days_in_stage,
+         FLOOR(EXTRACT(EPOCH FROM (MAX(dsh.created_at) - d.stage_entered_at)) / 86400)::int AS days_diff,
+         FLOOR(EXTRACT(EPOCH FROM (NOW() - d.stage_entered_at)) / 86400)::int AS stored_days_in_stage,
+         FLOOR(EXTRACT(EPOCH FROM (NOW() - MAX(dsh.created_at))) / 86400)::int AS actual_days_in_stage,
          (d.stage_entered_at IS NULL OR d.stage_entered_at < MAX(dsh.created_at)) AS affected
        FROM ${schema}.deals d
        JOIN ${schema}.deal_stage_history dsh

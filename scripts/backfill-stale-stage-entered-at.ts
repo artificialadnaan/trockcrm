@@ -1,10 +1,21 @@
 import "dotenv/config";
 import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import { pathToFileURL } from "node:url";
 import pg from "pg";
 
 const DEFAULT_BATCH_SIZE = 500;
 const DEFAULT_DRY_RUN_SAMPLE_SIZE = 10;
+
+export const BACKFILL_USAGE = `Usage:
+  npx tsx scripts/backfill-stale-stage-entered-at.ts --all [--dry-run]
+  npx tsx scripts/backfill-stale-stage-entered-at.ts --office=office_dallas [--dry-run]
+  npx tsx scripts/backfill-stale-stage-entered-at.ts --all --execute
+  npx tsx scripts/backfill-stale-stage-entered-at.ts --office=office_dallas --execute
+
+Run without --execute to preview changes (dry-run is the default).
+Pass --execute to perform the actual backfill.`;
 
 export interface Queryable {
   query(
@@ -105,12 +116,18 @@ function writeCsvLog(logPath: string, rows: BackfillChangeRow[]) {
 }
 
 function defaultLogPath() {
-  return `/tmp/stage-entered-at-backfill-${new Date().toISOString().slice(0, 10)}.csv`;
+  return path.join(os.tmpdir(), `stage-entered-at-backfill-${new Date().toISOString().slice(0, 10)}.csv`);
 }
 
 export function parseBackfillArgs(argv: string[]): BackfillArgs {
   const args = argv[0]?.endsWith("backfill-stale-stage-entered-at") ? argv.slice(1) : argv;
   const all = args.includes("--all");
+  const execute = args.includes("--execute");
+  const dryRunFlag = args.includes("--dry-run");
+  if (execute && dryRunFlag) {
+    throw new Error("Cannot specify both --execute and --dry-run");
+  }
+
   const officeArg = args.find((arg) => arg.startsWith("--office="));
   const office = officeArg ? assertOfficeName(officeArg.split("=").slice(1).join("=")) : null;
   if (all === Boolean(office)) {
@@ -128,7 +145,7 @@ export function parseBackfillArgs(argv: string[]): BackfillArgs {
   return {
     all,
     office,
-    dryRun: args.includes("--dry-run"),
+    dryRun: !execute,
     batchSize,
   };
 }
@@ -249,7 +266,7 @@ export async function backfillStaleStageEnteredAt(
 ): Promise<BackfillReport> {
   const officeName = assertOfficeName(options.officeName);
   const batchSize = options.batchSize ?? DEFAULT_BATCH_SIZE;
-  const dryRun = options.dryRun ?? false;
+  const dryRun = options.dryRun ?? true;
   const logPath = options.logPath === undefined ? defaultLogPath() : options.logPath;
 
   if (dryRun) {
@@ -275,8 +292,8 @@ export async function backfillStaleStageEnteredAt(
     try {
       const changes = await updateBatch(db, officeName, batchSize);
       await db.query("COMMIT");
-      batches += 1;
       if (changes.length === 0) break;
+      batches += 1;
       allChanges.push(...changes);
       if (logPath) writeCsvLog(logPath, changes);
       if (changes.length < batchSize) break;
@@ -338,6 +355,11 @@ function connectionString() {
 }
 
 async function main() {
+  if (process.argv.includes("--help") || process.argv.includes("-h")) {
+    console.log(BACKFILL_USAGE);
+    return;
+  }
+
   const args = parseBackfillArgs(process.argv.slice(2));
   const client = new pg.Client({ connectionString: connectionString() });
   await client.connect();
