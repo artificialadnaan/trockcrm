@@ -47,6 +47,7 @@ interface ActivityLogFormProps {
   }) => Promise<void>;
   targetOptions?: ActivityTargetOption[];
   defaultResponsibleUserId?: string;
+  showProposalSent?: boolean;
 }
 
 interface Assignee {
@@ -72,6 +73,7 @@ export function ActivityLogForm({
   onSubmit,
   targetOptions = [],
   defaultResponsibleUserId,
+  showProposalSent = true,
 }: ActivityLogFormProps) {
   const { user } = useAuth();
   const [activeForm, setActiveForm] = useState<LogType | null>(null);
@@ -170,7 +172,7 @@ export function ActivityLogForm({
   return (
     <div className="space-y-3">
       {/* Quick-log action buttons */}
-      <div className="flex gap-2">
+      <div className="flex flex-wrap gap-2">
         <Button
           size="sm"
           variant={activeForm === "call" ? "default" : "outline"}
@@ -201,9 +203,11 @@ export function ActivityLogForm({
         <Button size="sm" variant={activeForm === "site_visit" ? "default" : "outline"} onClick={() => setActiveForm(activeForm === "site_visit" ? null : "site_visit")}>
           <MapPinned className="h-4 w-4 mr-1" /> Site Visit
         </Button>
-        <Button size="sm" variant={activeForm === "proposal_sent" ? "default" : "outline"} onClick={() => setActiveForm(activeForm === "proposal_sent" ? null : "proposal_sent")}>
-          <SendHorizontal className="h-4 w-4 mr-1" /> Proposal Sent
-        </Button>
+        {showProposalSent ? (
+          <Button size="sm" variant={activeForm === "proposal_sent" ? "default" : "outline"} onClick={() => setActiveForm(activeForm === "proposal_sent" ? null : "proposal_sent")}>
+            <SendHorizontal className="h-4 w-4 mr-1" /> Proposal Sent
+          </Button>
+        ) : null}
       </div>
 
       {/* Inline log form */}

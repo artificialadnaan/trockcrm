@@ -41,7 +41,7 @@ import {
 } from "@/components/layout/detail-page-shell";
 import { DealStageBadge } from "@/components/deals/deal-stage-badge";
 import { DealEmailTab } from "@/components/email/deal-email-tab";
-import { RecordingList } from "@/components/call-recordings/recording-list";
+import { EntityActivityTab } from "@/components/activities/entity-activity-tab";
 import { DealOverviewTab } from "@/components/deals/deal-overview-tab";
 import { DealHistoryTab } from "@/components/deals/deal-history-tab";
 import { DealTimelineTab } from "@/components/deals/deal-timeline-tab";
@@ -59,10 +59,8 @@ import { DealContractSignedCard } from "./deal-contract-signed-card";
 import { DealEstimatingSubstage } from "./deal-estimating-substage";
 import { LeadForm } from "@/components/leads/lead-form";
 import { LeadTimelineTab } from "@/components/leads/lead-timeline-tab";
-import { ActivityLogForm } from "@/components/activities/activity-log-form";
 import { StageChangeDialog } from "@/components/deals/stage-change-dialog";
 import { TaskCreateDialog } from "@/components/tasks/task-create-dialog";
-import { useActivities, createActivity } from "@/hooks/use-activities";
 import { useDealDetail, deleteDeal as apiDeleteDeal, type DealDetail } from "@/hooks/use-deals";
 import { useLeadDetail } from "@/hooks/use-leads";
 import { usePipelineStages } from "@/hooks/use-pipeline-config";
@@ -877,7 +875,7 @@ export function DealDetailPage() {
       {activeTab === "files" && <DealFileTab dealId={deal.id} />}
       {activeTab === "photos" && <DealPhotosTab dealId={deal.id} onCountChange={setPhotoCount} />}
       {activeTab === "email" && <DealEmailTab dealId={deal.id} />}
-      {activeTab === "activity" && <DealActivityPanel dealId={deal.id} />}
+      {activeTab === "activity" && <EntityActivityTab entityType="deal" entityId={deal.id} emptyLabel="deal" showRecordings />}
       {activeTab === "timeline" && (
         <DealTimelineTab
           dealId={deal.id}
@@ -1403,58 +1401,6 @@ export function DealScopingReadOnlyPanel({
       </section>
 
       <BidBoardReadOnlySummary ownership={ownership} />
-    </div>
-  );
-}
-
-function DealActivityPanel({ dealId }: { dealId: string }) {
-  const { activities, loading, refetch } = useActivities({ dealId });
-
-  const handleLogActivity = async (data: {
-    type: string;
-    subject: string;
-    body: string;
-    outcome?: string;
-    durationMinutes?: number;
-  }) => {
-    await createActivity({
-      type: data.type,
-      subject: data.subject,
-      body: data.body,
-      outcome: data.outcome,
-      durationMinutes: data.durationMinutes,
-      dealId,
-    });
-    refetch();
-  };
-
-  return (
-    <div className="space-y-4">
-      <RecordingList entityType="deal" entityId={dealId} />
-      <ActivityLogForm onSubmit={handleLogActivity} />
-      {loading ? (
-        <div className="h-32 bg-muted animate-pulse rounded" />
-      ) : activities.length === 0 ? (
-        <p className="text-center py-8 text-muted-foreground text-sm">
-          No activities logged for this deal yet.
-        </p>
-      ) : (
-        <div className="space-y-2">
-          {activities.map((a) => (
-            <div key={a.id} className="flex items-start gap-3 px-3 py-2.5 rounded-md border">
-              <div className="flex-1">
-                <span className="text-sm font-medium capitalize">{a.type}</span>
-                {a.body && <p className="text-sm text-muted-foreground mt-0.5 line-clamp-2">{a.body}</p>}
-                <p className="text-xs text-muted-foreground mt-1">
-                  {new Date(a.occurredAt).toLocaleDateString("en-US", {
-                    month: "short", day: "numeric", hour: "numeric", minute: "2-digit",
-                  })}
-                </p>
-              </div>
-            </div>
-          ))}
-        </div>
-      )}
     </div>
   );
 }

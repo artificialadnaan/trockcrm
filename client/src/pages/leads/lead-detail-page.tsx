@@ -3,6 +3,7 @@ import { Link, useNavigate, useParams } from "react-router-dom";
 import {
   Building2,
   ClipboardList,
+  Activity,
   Clock,
   Clock3,
   Edit,
@@ -31,6 +32,7 @@ import { LeadStageBadge } from "@/components/leads/lead-stage-badge";
 import { LeadTimelineTab } from "@/components/leads/lead-timeline-tab";
 import { LeadQuestionnaireEditor } from "@/components/leads/lead-questionnaire-editor";
 import { RecordingList } from "@/components/call-recordings/recording-list";
+import { EntityActivityTab } from "@/components/activities/entity-activity-tab";
 import { LeadEmailTab } from "@/components/email/lead-email-tab";
 import { LeadFileTab } from "@/components/files/lead-file-tab";
 import { LeadPhotosTab } from "./lead-photos-tab";
@@ -41,7 +43,7 @@ import { LEAD_BOARD_STAGE_SLUGS, isBidBoardMirroredStageSlug } from "@/lib/pipel
 import { cn } from "@/lib/utils";
 import { displayNameOrFallback } from "@/lib/display-identifiers";
 
-type LeadDetailTab = "timeline" | "questionnaire" | "files" | "photos" | "emails" | "recordings";
+type LeadDetailTab = "timeline" | "questionnaire" | "files" | "photos" | "emails" | "activity" | "recordings";
 
 function formatNullable(value: string | number | null | undefined) {
   if (value == null || value === "") return "Not set";
@@ -347,6 +349,7 @@ export function LeadDetailPage() {
         {activeTab === "files" ? <LeadFileTab leadId={lead.id} /> : null}
         {activeTab === "photos" ? <LeadPhotosTab leadId={lead.id} /> : null}
         {activeTab === "emails" ? <LeadEmailTab leadId={lead.id} /> : null}
+        {activeTab === "activity" ? <EntityActivityTab entityType="lead" entityId={lead.id} emptyLabel="lead" /> : null}
         {activeTab === "recordings" ? <RecordingList entityType="lead" entityId={lead.id} /> : null}
       </DetailPageShell>
 
@@ -383,6 +386,7 @@ function buildLeadTabs(): DetailPageShellTab[] {
     { id: "files", label: "Files", icon: <FileText className={iconClassName} /> },
     { id: "photos", label: "Photos", icon: <Images className={iconClassName} /> },
     { id: "emails", label: "Emails", icon: <Mail className={iconClassName} /> },
+    { id: "activity", label: "Activity", icon: <Activity className={iconClassName} /> },
     { id: "recordings", label: "Recordings", icon: <Mic className={iconClassName} /> },
   ];
 }

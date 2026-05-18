@@ -17,6 +17,7 @@ import {
   Plus,
   MoreHorizontal,
   Mic,
+  Activity as ActivityIcon,
 } from "lucide-react";
 import { Button, buttonVariants } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -49,6 +50,7 @@ import { ContactForm } from "@/components/contacts/contact-form";
 import { PropertyCreateDialog } from "@/components/properties/property-create-dialog";
 import { CompanyCopilotPanel } from "@/components/ai/company-copilot-panel";
 import { RecordingList } from "@/components/call-recordings/recording-list";
+import { EntityActivityTab } from "@/components/activities/entity-activity-tab";
 import { api } from "@/lib/api";
 import { cn } from "@/lib/utils";
 import { formatPropertyLabel, useProperties } from "@/hooks/use-properties";
@@ -193,7 +195,7 @@ function exportCompanyCSV(
 
 // --- Types ---
 
-type Tab = "overview" | "contacts" | "portfolio" | "deals" | "files" | "emails" | "recordings";
+type Tab = "overview" | "contacts" | "portfolio" | "deals" | "files" | "emails" | "activity" | "recordings";
 
 // --- Main Component ---
 
@@ -277,6 +279,7 @@ export function CompanyDetailPage() {
     { id: "deals", label: "Deals", icon: <Handshake className="h-4 w-4" />, count: dealCount },
     { id: "files", label: "Files", icon: <FileText className="h-4 w-4" /> },
     { id: "emails", label: "Emails", icon: <Mail className="h-4 w-4" /> },
+    { id: "activity", label: "Activity", icon: <ActivityIcon className="h-4 w-4" /> },
     { id: "recordings", label: "Recordings", icon: <Mic className="h-4 w-4" /> },
   ];
 
@@ -439,6 +442,7 @@ export function CompanyDetailPage() {
       {activeTab === "deals" && <CompanyDealsTab companyId={company.id} />}
       {activeTab === "files" && <CompanyFilesTab companyId={company.id} />}
       {activeTab === "emails" && <CompanyEmailsTab />}
+      {activeTab === "activity" && <EntityActivityTab entityType="company" entityId={company.id} emptyLabel="company" />}
       {activeTab === "recordings" && <RecordingList entityType="company" entityId={company.id} />}
     </div>
   );
