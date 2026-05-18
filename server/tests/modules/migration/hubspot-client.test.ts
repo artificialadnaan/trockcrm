@@ -96,4 +96,27 @@ describe("HubSpot migration client", () => {
     await expectation;
     expect(fetchMock).toHaveBeenCalledTimes(3);
   });
+
+  it("paginates HubSpot owners across multiple pages", async () => {
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(
+        jsonResponse({
+          results: [{ id: "owner-1", email: "one@example.com" }],
+          paging: { next: { after: "cursor-2" } },
+        })
+      )
+      .mockResolvedValueOnce(
+        jsonResponse({
+          results: [{ id: "owner-2", email: "two@example.com" }],
+        })
+      );
+    vi.stubGlobal("fetch", fetchMock);
+    const { fetchAllOwners } = await import("../../../src/modules/migration/hubspot-client.js");
+
+    await expect(fetchAllOwners()).resolves.toEqual([
+      { id: "owner-1", email: "one@example.com" },
+      { id: "owner-2", email: "two@example.com" },
+    ]);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
 });
