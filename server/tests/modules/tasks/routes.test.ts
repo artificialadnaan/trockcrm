@@ -28,6 +28,12 @@ const eventBusMocks = vi.hoisted(() => ({
   setMaxListeners: vi.fn(),
 }));
 
+const taskNotificationMocks = vi.hoisted(() => ({
+  sendTaskAssignmentEmail: vi.fn(),
+  prepareTaskAssignmentEmail: vi.fn(),
+  sendPreparedTaskAssignmentEmail: vi.fn(),
+}));
+
 vi.mock("../../../src/modules/tasks/service.js", async () => {
   const actual = await vi.importActual<typeof import("../../../src/modules/tasks/service.js")>(
     "../../../src/modules/tasks/service.js"
@@ -73,6 +79,8 @@ vi.mock("../../../src/modules/auth/service.js", async () => {
 vi.mock("../../../src/events/bus.js", () => ({
   eventBus: eventBusMocks,
 }));
+
+vi.mock("../../../src/modules/tasks/notifications.js", () => taskNotificationMocks);
 
 const { taskRoutes } = await import("../../../src/modules/tasks/routes.js");
 
@@ -231,6 +239,14 @@ describe("task routes", () => {
     taskServiceMocks.queueTaskCreateSideEffects.mockResolvedValue({
       shouldEmitAssignmentEvent: false,
     });
+    taskNotificationMocks.sendTaskAssignmentEmail.mockResolvedValue(true);
+    taskNotificationMocks.prepareTaskAssignmentEmail.mockResolvedValue({
+      to: "admin@example.com",
+      subject: "New task assigned: Prep handoff",
+      html: "<p>Body</p>",
+      options: { cc: "rep@example.com", text: "Body" },
+    });
+    taskNotificationMocks.sendPreparedTaskAssignmentEmail.mockResolvedValue(true);
   });
 
   it("forwards assignee filters when listing tasks", async () => {
@@ -313,6 +329,141 @@ describe("task routes", () => {
         createdBy: "rep-1",
       })
     );
+  });
+
+  it("emails the assignee and CCs the creator when a task is created for another user", async () => {
+    const createdTask = {
+      id: "task-1",
+      title: "Prep handoff",
+      description: "Bring the scope notes",
+      assignedTo: "admin-1",
+      createdBy: "rep-1",
+      dueDate: "2026-05-20",
+    };
+    taskServiceMocks.createTask.mockResolvedValue(createdTask);
+
+    await invokeRoute({
+      method: "post",
+      url: "/",
+      user: makeRepUser({ id: "rep-1", displayName: "Rep One", email: "rep@example.com" }),
+      body: {
+        title: "Prep handoff",
+        description: "Bring the scope notes",
+        type: "manual",
+        assignedTo: "admin-1",
+        dueDate: "2026-05-20",
+      },
+    });
+
+    expect(taskNotificationMocks.prepareTaskAssignmentEmail).toHaveBeenCalledWith(
+      expect.any(Object),
+      expect.objectContaining({
+        task: createdTask,
+        assigneeId: "admin-1",
+        assigner: expect.objectContaining({
+          id: "rep-1",
+          displayName: "Rep One",
+          email: "rep@example.com",
+        }),
+      })
+    );
+    expect(taskNotificationMocks.sendPreparedTaskAssignmentEmail).toHaveBeenCalledWith(
+      expect.objectContaining({
+        to: "admin@example.com",
+        subject: "New task assigned: Prep handoff",
+      })
+    );
+  });
+
+  it("skips task assignment email for self-assigned created tasks", async () => {
+    taskServiceMocks.createTask.mockResolvedValue({
+      id: "task-1",
+      title: "Self follow-up",
+      assignedTo: "rep-1",
+      createdBy: "rep-1",
+    });
+
+    await invokeRoute({
+      method: "post",
+      url: "/",
+      user: makeRepUser(),
+      body: {
+        title: "Self follow-up",
+        type: "manual",
+        assignedTo: "rep-1",
+      },
+    });
+
+    expect(taskNotificationMocks.prepareTaskAssignmentEmail).not.toHaveBeenCalled();
+    expect(taskNotificationMocks.sendPreparedTaskAssignmentEmail).not.toHaveBeenCalled();
+  });
+
+  it("emails the new assignee when a task is reassigned", async () => {
+    taskServiceMocks.getTaskById.mockResolvedValue({
+      id: "task-1",
+      title: "Existing task",
+      assignedTo: "rep-1",
+    });
+    const updatedTask = {
+      id: "task-1",
+      title: "Existing task",
+      description: "Updated owner",
+      assignedTo: "admin-1",
+      dueDate: "2026-05-21",
+    };
+    taskServiceMocks.updateTask.mockResolvedValue(updatedTask);
+
+    await invokeRoute({
+      method: "patch",
+      url: "/task-1",
+      user: makeDirectorUser({ id: "director-1", displayName: "Director One", email: "director@example.com" }),
+      body: {
+        assignedTo: "admin-1",
+      },
+    });
+
+    expect(taskNotificationMocks.prepareTaskAssignmentEmail).toHaveBeenCalledWith(
+      expect.any(Object),
+      expect.objectContaining({
+        task: updatedTask,
+        assigneeId: "admin-1",
+        assigner: expect.objectContaining({
+          id: "director-1",
+          displayName: "Director One",
+          email: "director@example.com",
+        }),
+      })
+    );
+    expect(taskNotificationMocks.sendPreparedTaskAssignmentEmail).toHaveBeenCalledWith(
+      expect.objectContaining({
+        to: "admin@example.com",
+      })
+    );
+  });
+
+  it("skips task assignment email when assignedTo is unchanged on update", async () => {
+    taskServiceMocks.getTaskById.mockResolvedValue({
+      id: "task-1",
+      title: "Existing task",
+      assignedTo: "rep-1",
+    });
+    taskServiceMocks.updateTask.mockResolvedValue({
+      id: "task-1",
+      title: "Existing task",
+      assignedTo: "rep-1",
+    });
+
+    await invokeRoute({
+      method: "patch",
+      url: "/task-1",
+      user: makeRepUser(),
+      body: {
+        assignedTo: "rep-1",
+      },
+    });
+
+    expect(taskNotificationMocks.prepareTaskAssignmentEmail).not.toHaveBeenCalled();
+    expect(taskNotificationMocks.sendPreparedTaskAssignmentEmail).not.toHaveBeenCalled();
   });
 
   it("rejects rep task assignment to users outside accessible offices", async () => {

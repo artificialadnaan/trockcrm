@@ -1,0 +1,18 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+</head>
+<body style="margin:0;padding:0;background-color:#f4f4f5;font-family:Arial,Helvetica,sans-serif;">
+  <div style="max-width:640px;margin:0 auto;padding:24px;">
+    <div style="background:#ffffff;border:1px solid #e5e7eb;border-radius:8px;padding:24px;color:#111827;line-height:1.5;">
+      <p>Hi {{assigneeFirstName}},</p>
+      <p>{{assignerName}} assigned you a task: {{taskTitle}}</p>
+      <p>Due: {{dueDate}}</p>
+      {{descriptionBlock}}
+      <p>Click here to open the task: <a href="{{taskUrl}}">{{taskUrl}}</a></p>
+    </div>
+  </div>
+</body>
+</html>

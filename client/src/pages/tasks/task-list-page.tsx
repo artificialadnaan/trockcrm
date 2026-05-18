@@ -1,5 +1,5 @@
 import { useMemo, useState } from "react";
-import { useNavigate, useSearchParams } from "react-router-dom";
+import { useNavigate, useParams, useSearchParams } from "react-router-dom";
 import {
   AlertTriangle,
   Check,
@@ -22,6 +22,7 @@ import {
   isTerminalTaskStatus,
   snoozeTask,
   useTaskCounts,
+  useTask,
   useTasks,
   type Task,
 } from "@/hooks/use-tasks";
@@ -365,6 +366,7 @@ export function TaskListPage() {
 }
 
 function TaskListPageContent({ role }: { role: string }) {
+  const { taskId } = useParams();
   const [searchParams, setSearchParams] = useSearchParams();
   const [query, setQuery] = useState("");
   const canAssign = role === "admin" || role === "director";
@@ -376,9 +378,10 @@ function TaskListPageContent({ role }: { role: string }) {
   const { tasks: upcomingTasks, loading: upcomingLoading, error: upcomingError, refetch: refetchUpcoming } = useTasks({ section: "upcoming", assignedTo: assigneeFilter });
   const { tasks: completedTasks, loading: completedLoading, error: completedError, refetch: refetchCompleted } = useTasks({ section: "completed", limit: 20, assignedTo: assigneeFilter });
   const { tasks: scheduledTasks, loading: scheduledLoading, error: scheduledError, refetch: refetchScheduled } = useTasks({ status: "scheduled", limit: 100, assignedTo: assigneeFilter });
+  const { task: linkedTask, loading: linkedTaskLoading, error: linkedTaskError, refetch: refetchLinkedTask } = useTask(taskId);
 
-  const loading = countsLoading || overdueLoading || todayLoading || upcomingLoading || completedLoading || scheduledLoading;
-  const error = overdueError ?? todayError ?? upcomingError ?? completedError ?? scheduledError;
+  const loading = countsLoading || overdueLoading || todayLoading || upcomingLoading || completedLoading || scheduledLoading || linkedTaskLoading;
+  const error = linkedTaskError ?? overdueError ?? todayError ?? upcomingError ?? completedError ?? scheduledError;
 
   const updateAssignee = (assigneeId: string) => {
     const next = new URLSearchParams(searchParams);
@@ -394,6 +397,7 @@ function TaskListPageContent({ role }: { role: string }) {
     refetchUpcoming();
     refetchCompleted();
     refetchScheduled();
+    refetchLinkedTask();
   };
 
   const grouped = useMemo(() => {
@@ -444,6 +448,15 @@ function TaskListPageContent({ role }: { role: string }) {
         </div>
         <TaskCreateDialog onCreated={refetchAll} />
       </section>
+
+      {taskId && linkedTask ? (
+        <section className="overflow-hidden rounded-lg border border-brand-red/30 bg-white">
+          <div className="border-b border-brand-red/20 bg-brand-red/5 px-4 py-3">
+            <p className="text-[11px] font-black uppercase tracking-[0.18em] text-brand-red">Linked task</p>
+          </div>
+          <TaskRow task={linkedTask} onUpdate={refetchAll} />
+        </section>
+      ) : null}
 
       <div className="grid gap-4 md:grid-cols-3">
         <MetricCard eyebrow="Overdue" value={String(counts.overdue)} badge="Red path" caption="Past due" tone={counts.overdue > 0 ? "red" : "white"} accent="red" />

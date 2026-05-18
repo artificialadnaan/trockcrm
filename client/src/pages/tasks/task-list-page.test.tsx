@@ -2,7 +2,7 @@
 
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
-import { MemoryRouter } from "react-router-dom";
+import { MemoryRouter, Route, Routes } from "react-router-dom";
 import type { ReactNode } from "react";
 import { describe, expect, it } from "vitest";
 import { afterEach, beforeEach, vi } from "vitest";
@@ -18,6 +18,7 @@ const mocks = vi.hoisted(() => ({
   useAuthMock: vi.fn(),
   useTaskAssigneesMock: vi.fn(),
   useTaskCountsMock: vi.fn(),
+  useTaskMock: vi.fn(),
   useTasksMock: vi.fn(),
 }));
 
@@ -27,6 +28,7 @@ vi.mock("@/hooks/use-tasks", () => ({
   isTerminalTaskStatus: mocks.isTerminalTaskStatusMock,
   snoozeTask: mocks.snoozeTaskMock,
   useTaskCounts: mocks.useTaskCountsMock,
+  useTask: mocks.useTaskMock,
   useTasks: mocks.useTasksMock,
 }));
 
@@ -168,6 +170,13 @@ describe("TaskListPage project context", () => {
       error: null,
       refetch: vi.fn(),
     });
+    mocks.useTaskMock.mockReset();
+    mocks.useTaskMock.mockReturnValue({
+      task: null,
+      loading: false,
+      error: null,
+      refetch: vi.fn(),
+    });
     mocks.useTasksMock.mockReset();
     mocks.useTasksMock.mockImplementation((filters: { section?: string }) => ({
       tasks: filters.section === "overdue" ? [makeTask()] : [],
@@ -186,12 +195,15 @@ describe("TaskListPage project context", () => {
     container.remove();
   });
 
-  function renderPage() {
+  function renderPage(initialEntry = "/tasks") {
     act(() => {
       root = createRoot(container);
       root.render(
-        <MemoryRouter initialEntries={["/tasks"]}>
-          <TaskListPage />
+        <MemoryRouter initialEntries={[initialEntry]}>
+          <Routes>
+            <Route path="/tasks" element={<TaskListPage />} />
+            <Route path="/tasks/:taskId" element={<TaskListPage />} />
+          </Routes>
         </MemoryRouter>
       );
     });
@@ -234,6 +246,34 @@ describe("TaskListPage project context", () => {
     expect(container.textContent).toContain("Follow up: Project pending closes 2026-05-08");
     expect(container.textContent).not.toContain("HS-323641734879");
     expect(container.querySelector<HTMLButtonElement>('button[aria-label="Complete Follow up: Project pending closes 2026-05-08"]')).not.toBeNull();
+  });
+
+  it("surfaces the linked task when opened from /tasks/:taskId", () => {
+    const linkedTask = {
+      ...makeTask(),
+      id: "linked-task",
+      title: "Review linked task",
+      dueDate: "2026-05-20",
+      isOverdue: false,
+    };
+    mocks.useTasksMock.mockImplementation(() => ({
+      tasks: [],
+      loading: false,
+      error: null,
+      refetch: vi.fn(),
+    }));
+    mocks.useTaskMock.mockReturnValue({
+      task: linkedTask,
+      loading: false,
+      error: null,
+      refetch: vi.fn(),
+    });
+
+    renderPage("/tasks/linked-task");
+
+    expect(mocks.useTaskMock).toHaveBeenCalledWith("linked-task");
+    expect(container.textContent).toContain("Linked task");
+    expect(container.textContent).toContain("Review linked task");
   });
 
   it("keeps child action keydown events from opening the row edit dialog", () => {

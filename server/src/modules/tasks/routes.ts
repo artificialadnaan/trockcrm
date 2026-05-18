@@ -18,6 +18,11 @@ import {
   dismissTask,
   snoozeTask,
 } from "./service.js";
+import {
+  prepareTaskAssignmentEmail,
+  sendPreparedTaskAssignmentEmail,
+  type PreparedTaskAssignmentEmail,
+} from "./notifications.js";
 
 const router = Router();
 
@@ -61,6 +66,44 @@ async function assertAssignableUser(req: any, userId: string) {
   const users = await listAssignableUsersForRequest(req);
   if (!users.some((user) => user.id === userId)) {
     throw new AppError(400, "Assigned user is not active or is outside the current office");
+  }
+}
+
+async function prepareTaskAssignmentEmailBestEffort(
+  req: any,
+  task: {
+    id: string;
+    title: string;
+    description?: string | null;
+    dueDate?: string | Date | null;
+  },
+  assigneeId: string
+) {
+  if (!assigneeId || assigneeId === req.user!.id) return null;
+
+  try {
+    return await prepareTaskAssignmentEmail(req.tenantDb!, {
+      task,
+      assigneeId,
+      assigner: {
+        id: req.user!.id,
+        displayName: req.user!.displayName,
+        email: req.user!.email,
+      },
+    });
+  } catch (err) {
+    console.error("[Tasks] Failed to prepare task assignment email:", err);
+    return null;
+  }
+}
+
+async function sendTaskAssignmentEmailBestEffort(email: PreparedTaskAssignmentEmail | null) {
+  if (!email) return;
+
+  try {
+    await sendPreparedTaskAssignmentEmail(email);
+  } catch (err) {
+    console.error("[Tasks] Failed to send task assignment email:", err);
   }
 }
 
@@ -158,7 +201,11 @@ router.post("/", async (req, res, next) => {
       officeId: req.user!.activeOfficeId ?? req.user!.officeId,
     });
 
+    const taskAssignmentEmail = await prepareTaskAssignmentEmailBestEffort(req, task, targetAssignee);
+
     await req.commitTransaction!();
+
+    await sendTaskAssignmentEmailBestEffort(taskAssignmentEmail);
 
     // Best-effort local emit for SSE push (already persisted via outbox above)
     if (sideEffects.shouldEmitAssignmentEvent) {
@@ -198,6 +245,13 @@ router.patch("/:id", async (req, res, next) => {
       await assertAssignableUser(req, body.assignedTo);
     }
 
+    const existingTask = body.assignedTo !== undefined
+      ? await getTaskById(req.tenantDb!, req.params.id, req.user!.role, req.user!.id)
+      : null;
+    if (body.assignedTo !== undefined && !existingTask) {
+      throw new AppError(404, "Task not found");
+    }
+
     const task = await updateTask(
       req.tenantDb!,
       req.params.id,
@@ -205,7 +259,17 @@ router.patch("/:id", async (req, res, next) => {
       req.user!.role,
       req.user!.id
     );
+    const taskAssignmentEmail =
+      body.assignedTo !== undefined &&
+      existingTask &&
+      body.assignedTo !== existingTask.assignedTo
+        ? await prepareTaskAssignmentEmailBestEffort(req, task, body.assignedTo)
+        : null;
+
     await req.commitTransaction!();
+
+    await sendTaskAssignmentEmailBestEffort(taskAssignmentEmail);
+
     res.json({ task });
   } catch (err) {
     next(err);
