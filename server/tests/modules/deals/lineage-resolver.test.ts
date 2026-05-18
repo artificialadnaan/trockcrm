@@ -299,4 +299,21 @@ describe("deal lineage resolver field ownership", () => {
     expect(tenantDb.state.leads[0]?.bidDueDate).toBe("2026-08-20");
     expect(tenantDb.state.leadQuestionAnswers).toEqual([]);
   });
+
+  it("writes company fill-in through the resolved-fields lineage path", async () => {
+    const tenantDb = createLineageTenantDb({
+      deal: { companyId: null },
+      lead: { companyId: null },
+    });
+
+    await writeResolvedDealFields(
+      tenantDb as never,
+      "deal-1",
+      { companyId: "company-2" },
+      { userId: "user-1", officeId: "office-1", role: "director", now: new Date("2026-05-01T00:00:00.000Z") }
+    );
+
+    expect(tenantDb.state.leads[0]?.companyId).toBe("company-2");
+    expect(tenantDb.state.deals[0]?.companyId).toBe("company-2");
+  });
 });

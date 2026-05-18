@@ -304,6 +304,61 @@ describe("PATCH /api/deals/:id cleanup legacy handling", () => {
     );
   });
 
+  it("surfaces the service lineage rejection when companyId replacement is attempted", async () => {
+    dealsServiceMocks.getDealById.mockResolvedValue(baseDeal({
+      companyId: "company-1",
+      propertyId: "property-1",
+    }));
+    dealsServiceMocks.updateDeal.mockRejectedValueOnce(
+      new AppError(400, "companyId is immutable once established")
+    );
+
+    const { error } = await invokePatch(
+      {
+        companyId: "company-2",
+      },
+      createUser("rep"),
+      {
+        selectedProperty: {
+          companyId: "company-2",
+          address: "100 Property Way",
+          city: "Dallas",
+          state: "TX",
+          zip: "75201",
+        },
+      }
+    );
+
+    expect(error).toMatchObject({
+      statusCode: 400,
+      message: "companyId is immutable once established",
+    });
+    expect(scopingServiceMocks.assertDealScopingWriteAllowed).not.toHaveBeenCalled();
+  });
+
+  it("surfaces the service lineage rejection when propertyId replacement is attempted", async () => {
+    dealsServiceMocks.getDealById.mockResolvedValue(baseDeal({
+      companyId: "company-1",
+      propertyId: "property-1",
+    }));
+    dealsServiceMocks.updateDeal.mockRejectedValueOnce(
+      new AppError(400, "propertyId is immutable once established")
+    );
+
+    const { error } = await invokePatch(
+      {
+        propertyId: "property-2",
+      },
+      createUser("rep")
+    );
+
+    expect(error).toMatchObject({
+      statusCode: 400,
+      message: "propertyId is immutable once established",
+    });
+    expect(scopingServiceMocks.assertDealScopingWriteAllowed).not.toHaveBeenCalled();
+  });
+
   it("still honors the scope-readonly guard for scope-defining deal fields", async () => {
     dealsServiceMocks.getDealById.mockResolvedValue(baseDeal());
     scopingServiceMocks.assertDealScopingWriteAllowed.mockRejectedValue(
