@@ -255,17 +255,28 @@ describe("getDealsForPipeline team scope", () => {
         isActivePipeline: true,
       },
     ];
-    const dealQuery = {
-      leftJoin: vi.fn().mockReturnThis(),
-      where: vi.fn().mockReturnThis(),
-      orderBy: vi.fn().mockReturnThis(),
-      limit: vi.fn().mockResolvedValue([]),
-    };
+    const dealQueries: any[] = [];
     const tenantDb = {
       select: vi.fn(() => ({
         from: vi.fn((table: unknown) => {
-          if (table === deals) return dealQuery;
-          return dealQuery;
+          if (table === deals) {
+            const dealQuery = {
+              leftJoin: vi.fn().mockReturnThis(),
+              where: vi.fn().mockReturnThis(),
+              orderBy: vi.fn().mockReturnThis(),
+              limit: vi.fn().mockResolvedValue([]),
+            };
+            dealQueries.push(dealQuery);
+            return dealQuery;
+          }
+          const fallbackQuery = {
+            leftJoin: vi.fn().mockReturnThis(),
+            where: vi.fn().mockReturnThis(),
+            orderBy: vi.fn().mockReturnThis(),
+            limit: vi.fn().mockResolvedValue([]),
+          };
+          dealQueries.push(fallbackQuery);
+          return fallbackQuery;
         }),
       })),
     } as any;
@@ -278,7 +289,16 @@ describe("getDealsForPipeline team scope", () => {
       wonAllTime: true,
     });
 
-    expect(dealQuery.limit.mock.calls.map((call) => call[0])).toEqual([100]);
+    const cardQueries = dealQueries.filter((query) => query.leftJoin.mock.calls.length > 0);
+    const nonTerminalCardsQuery = cardQueries.find((query) =>
+      containsValue(query.where.mock.calls[0]?.[0], "stage-estimating")
+    );
+    const wonCardsQuery = cardQueries.find((query) =>
+      containsValue(query.where.mock.calls[0]?.[0], "stage-won")
+    );
+
+    expect(nonTerminalCardsQuery?.limit.mock.calls.map((call: [number]) => call[0])).toEqual([100]);
+    expect(wonCardsQuery?.limit).not.toHaveBeenCalled();
   });
 
   it("queries each active won alias terminal column by its own stage when no canonical won stage exists", async () => {

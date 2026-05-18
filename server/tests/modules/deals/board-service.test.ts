@@ -46,6 +46,23 @@ function extractSqlText(value: unknown): string {
   return "";
 }
 
+function findStageCardsChain(chains: any[], stageId: string) {
+  return chains.find(
+    (chain) =>
+      chain.leftJoin.mock.calls.length > 0 &&
+      containsValue(chain.where.mock.calls[0]?.[0], stageId)
+  );
+}
+
+function containsValue(value: unknown, expected: string, seen = new Set<unknown>()): boolean {
+  if (value === expected) return true;
+  if (!value || typeof value !== "object") return false;
+  if (seen.has(value)) return false;
+  seen.add(value);
+  if (Array.isArray(value)) return value.some((item) => containsValue(item, expected, seen));
+  return Object.values(value as Record<string, unknown>).some((item) => containsValue(item, expected, seen));
+}
+
 vi.mock("../../../src/db.js", () => ({
   db: createChainableMock(),
   pool: {},
@@ -145,11 +162,14 @@ describe("getDealsForPipeline", () => {
       won_since: "2026-01-01",
     });
 
+    const opportunityCardsChain = findStageCardsChain(tenantChains, "stage-opportunity");
+    const wonCardsChain = findStageCardsChain(tenantChains, "stage-won");
+
     expect(result.pipelineColumns.find((column) => column.stage.slug === "opportunity")?.deals).toHaveLength(8);
     expect(result.terminalStages.find((column) => column.stage.slug === "won")?.deals).toHaveLength(12);
     expect(result.terminalStages.find((column) => column.stage.slug === "won")?.totalValue).toBe(60000);
-    expect(tenantChains[0].limit).toHaveBeenCalledWith(8);
-    expect(tenantChains[2].limit).not.toHaveBeenCalled();
+    expect(opportunityCardsChain?.limit).toHaveBeenCalledWith(8);
+    expect(wonCardsChain?.limit).not.toHaveBeenCalled();
   });
 
   it("uses the requested drill-down preview limit while keeping the full count", async () => {
@@ -208,11 +228,18 @@ describe("getDealsForPipeline", () => {
       previewLimit: 1000,
     });
 
+    const cardsChain = findStageCardsChain(tenantChains, "stage-estimating");
+    const summaryChain = tenantChains.find(
+      (chain) =>
+        chain.leftJoin.mock.calls.length === 0 &&
+        containsValue(chain.where.mock.calls[0]?.[0], "stage-estimating")
+    );
+
     expect(result.pipelineColumns[0]?.count).toBe(110);
     expect(result.pipelineColumns[0]?.deals).toHaveLength(110);
-    expect(tenantChains[0].limit).toHaveBeenCalledWith(1000);
-    const cardsWhere = extractSqlText(tenantChains[0].where.mock.calls[0][0]).toLowerCase();
-    const summaryWhere = extractSqlText(tenantChains[1].where.mock.calls[0][0]).toLowerCase();
+    expect(cardsChain?.limit).toHaveBeenCalledWith(1000);
+    const cardsWhere = extractSqlText(cardsChain?.where.mock.calls[0][0]).toLowerCase();
+    const summaryWhere = extractSqlText(summaryChain?.where.mock.calls[0][0]).toLowerCase();
     expect(summaryWhere).toContain("bid_board_stage_slug");
     expect(summaryWhere).toContain("not in");
     expect(summaryWhere).toContain("closed_won");
@@ -257,6 +284,7 @@ describe("getDealsForPipeline", () => {
       previewLimit: 5000,
     });
 
-    expect(tenantChains[0].limit).toHaveBeenCalledWith(1000);
+    const cardsChain = findStageCardsChain(tenantChains, "stage-estimating");
+    expect(cardsChain?.limit).toHaveBeenCalledWith(1000);
   });
 });
