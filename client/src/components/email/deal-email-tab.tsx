@@ -21,13 +21,13 @@ export function DealEmailTab({ dealId, primaryContactEmail }: DealEmailTabProps)
 
   const { emails, pagination, loading, error, refetch } = useDealEmails(dealId, {
     page,
-    limit: 15,
+    limit: 20,
   });
 
   return (
     <div className="space-y-4">
       <div className="flex items-center justify-between">
-        <h3 className="text-lg font-semibold">Email</h3>
+        <h3 className="text-lg font-semibold">Emails</h3>
         <Button size="sm" onClick={() => setComposeOpen(true)}>
           <Plus className="h-4 w-4 mr-1" />
           Compose

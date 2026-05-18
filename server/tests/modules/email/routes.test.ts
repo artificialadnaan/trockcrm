@@ -179,6 +179,14 @@ async function invokeRoute({
       ? "/"
       : url === "/assignment-queue"
       ? "/assignment-queue"
+      : url.startsWith("/company/")
+        ? "/company/:companyId"
+      : url.startsWith("/contact/")
+        ? "/contact/:contactId"
+      : url.startsWith("/deal/")
+        ? "/deal/:dealId"
+      : url.startsWith("/lead/")
+        ? "/lead/:leadId"
       : url.startsWith("/") && url.endsWith("/actions")
       ? "/:id/actions"
       : url.startsWith("/") && url.endsWith("/ignore")
@@ -212,6 +220,14 @@ async function invokeRoute({
         routePath === "/:id/un-ignore" ||
         routePath === "/:id"
         ? { id: url.split("/")[1] }
+        : routePath === "/company/:companyId"
+          ? { companyId: url.split("/")[2] }
+          : routePath === "/contact/:contactId"
+            ? { contactId: url.split("/")[2] }
+            : routePath === "/deal/:dealId"
+              ? { dealId: url.split("/")[2] }
+              : routePath === "/lead/:leadId"
+                ? { leadId: url.split("/")[2] }
         : routePath.startsWith("/thread/:conversationId")
           ? { conversationId: url.split("/")[2] }
           : {},
@@ -386,6 +402,62 @@ describe("email routes", () => {
     );
     expect(unignored.req.commitTransaction).toHaveBeenCalled();
     expect(unignored.res.body).toEqual({ email: { id: "email-1", assignmentStatus: "unassigned" } });
+  });
+
+  it("returns company-linked emails after company existence passes", async () => {
+    const tenantDb = {};
+    companyServiceMocks.getCompanyById.mockResolvedValue({ id: "company-1", name: "Alpha Roofing" });
+    emailServiceMocks.getEmails.mockResolvedValue({
+      emails: [{ id: "email-1" }],
+      pagination: { page: 1, limit: 20, total: 1, totalPages: 1 },
+    });
+
+    const { req, res } = await invokeRoute({
+      method: "get",
+      url: "/company/company-1",
+      user: makeDirectorUser(),
+      tenantDb,
+    });
+
+    expect(companyServiceMocks.getCompanyById).toHaveBeenCalledWith(tenantDb, "company-1");
+    expect(emailServiceMocks.getEmails).toHaveBeenCalledWith(
+      tenantDb,
+      expect.objectContaining({ companyId: "company-1" }),
+      "director-1",
+      "director"
+    );
+    expect(req.commitTransaction).toHaveBeenCalled();
+    expect(res.body).toEqual({
+      emails: [{ id: "email-1" }],
+      pagination: { page: 1, limit: 20, total: 1, totalPages: 1 },
+    });
+  });
+
+  it("verifies contact existence before returning contact-linked emails", async () => {
+    const tenantDb = {};
+    contactServiceMocks.getContactById.mockResolvedValue({
+      id: "contact-1",
+      companyId: "company-1",
+    });
+    emailServiceMocks.getEmails.mockResolvedValue({
+      emails: [{ id: "email-1" }],
+      pagination: { page: 1, limit: 20, total: 1, totalPages: 1 },
+    });
+
+    await invokeRoute({
+      method: "get",
+      url: "/contact/contact-1",
+      user: makeDirectorUser(),
+      tenantDb,
+    });
+
+    expect(contactServiceMocks.getContactById).toHaveBeenCalledWith(tenantDb, "contact-1");
+    expect(emailServiceMocks.getEmails).toHaveBeenCalledWith(
+      tenantDb,
+      expect.objectContaining({ contactId: "contact-1" }),
+      "director-1",
+      "director"
+    );
   });
 
   it("blocks reps from opening another user's email even when the deal is visible", async () => {

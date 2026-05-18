@@ -148,7 +148,7 @@ router.get("/deal/:dealId", async (req, res, next) => {
       search: req.query.search as string | undefined,
       status: req.query.status as "unassigned" | "ignored" | undefined,
       page: req.query.page ? parseInt(req.query.page as string, 10) : undefined,
-      limit: req.query.limit ? parseInt(req.query.limit as string, 10) : undefined,
+      limit: req.query.limit ? parseInt(req.query.limit as string, 10) : 20,
     };
 
     const result = await getEmails(req.tenantDb!, filters, req.user!.id, req.user!.role);
@@ -191,6 +191,28 @@ router.post("/:id/un-ignore", async (req, res, next) => {
   }
 });
 
+// GET /api/email/company/:companyId — emails for a specific company
+router.get("/company/:companyId", async (req, res, next) => {
+  try {
+    const company = await getCompanyById(req.tenantDb!, req.params.companyId);
+    if (!company) throw new AppError(404, "Company not found");
+
+    const filters = {
+      companyId: req.params.companyId,
+      direction: req.query.direction as "inbound" | "outbound" | undefined,
+      search: req.query.search as string | undefined,
+      page: req.query.page ? parseInt(req.query.page as string, 10) : undefined,
+      limit: req.query.limit ? parseInt(req.query.limit as string, 10) : 20,
+    };
+
+    const result = await getEmails(req.tenantDb!, filters, req.user!.id, req.user!.role);
+    await req.commitTransaction!();
+    res.json(result);
+  } catch (err) {
+    next(err);
+  }
+});
+
 // GET /api/email/lead/:leadId — emails for a specific lead
 // RBAC: verify user has access to this lead before returning emails.
 router.get("/lead/:leadId", async (req, res, next) => {
@@ -203,7 +225,7 @@ router.get("/lead/:leadId", async (req, res, next) => {
       direction: req.query.direction as "inbound" | "outbound" | undefined,
       search: req.query.search as string | undefined,
       page: req.query.page ? parseInt(req.query.page as string, 10) : undefined,
-      limit: req.query.limit ? parseInt(req.query.limit as string, 10) : undefined,
+      limit: req.query.limit ? parseInt(req.query.limit as string, 10) : 20,
     };
 
     const result = await getEmails(req.tenantDb!, filters, req.user!.id, req.user!.role);
@@ -217,12 +239,15 @@ router.get("/lead/:leadId", async (req, res, next) => {
 // GET /api/email/contact/:contactId — emails for a specific contact
 router.get("/contact/:contactId", async (req, res, next) => {
   try {
+    const contact = await getContactById(req.tenantDb!, req.params.contactId);
+    if (!contact) throw new AppError(404, "Contact not found");
+
     const filters = {
       contactId: req.params.contactId,
       direction: req.query.direction as "inbound" | "outbound" | undefined,
       search: req.query.search as string | undefined,
       page: req.query.page ? parseInt(req.query.page as string, 10) : undefined,
-      limit: req.query.limit ? parseInt(req.query.limit as string, 10) : undefined,
+      limit: req.query.limit ? parseInt(req.query.limit as string, 10) : 20,
     };
 
     const result = await getEmails(req.tenantDb!, filters, req.user!.id, req.user!.role);

@@ -114,6 +114,8 @@ export const leads = pgTable(
     supportNeededNotes: text("support_needed_notes"),
     forecastUpdatedAt: timestamp("forecast_updated_at", { withTimezone: true }),
     forecastUpdatedBy: uuid("forecast_updated_by").references(() => users.id),
+    emailCount: integer("email_count").default(0).notNull(),
+    lastEmailAt: timestamp("last_email_at", { withTimezone: true }),
     qualificationScope: varchar("qualification_scope", { length: 255 }),
     qualificationBudgetAmount: numeric("qualification_budget_amount", { precision: 12, scale: 2 }),
     qualificationCompanyFit: boolean("qualification_company_fit"),

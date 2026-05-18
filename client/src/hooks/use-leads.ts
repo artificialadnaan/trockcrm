@@ -114,6 +114,8 @@ export interface LeadRecord {
   source: string | null;
   sourceCategory: LeadSourceCategory | null;
   sourceDetail: string | null;
+  emailCount?: number;
+  lastEmailAt?: string | null;
   existingCustomerStatus?: "Existing" | "New" | null;
   description: string | null;
   officeCode?: string | null;

@@ -304,7 +304,9 @@ export function LeadDetailPage() {
           </>
         }
         kpis={buildLeadKpis(lead)}
-        tabs={buildLeadTabs()}
+        tabs={buildLeadTabs().map((tab) => (
+          tab.id === "emails" ? { ...tab, count: lead.emailCount ?? 0 } : tab
+        ))}
         activeTabId={activeTab}
         onTabChange={(tab) => handleTabChange(tab as LeadDetailTab)}
         rightRail={
@@ -385,7 +387,7 @@ function buildLeadTabs(): DetailPageShellTab[] {
     { id: "questionnaire", label: "Questionnaire", icon: <ClipboardList className={iconClassName} /> },
     { id: "files", label: "Files", icon: <FileText className={iconClassName} /> },
     { id: "photos", label: "Photos", icon: <Images className={iconClassName} /> },
-    { id: "emails", label: "Emails", icon: <Mail className={iconClassName} /> },
+    { id: "emails", label: "Emails", icon: <Mail className={iconClassName} />, count: 0 },
     { id: "activity", label: "Activity", icon: <Activity className={iconClassName} /> },
     { id: "recordings", label: "Recordings", icon: <Mic className={iconClassName} /> },
   ];

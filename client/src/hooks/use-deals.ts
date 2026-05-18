@@ -123,6 +123,8 @@ export interface Deal {
   isReadOnlyMirror?: boolean;
   source: string | null;
   winProbability: number | null;
+  emailCount?: number;
+  lastEmailAt?: string | null;
   decisionMakerName: string | null;
   decisionProcess: string | null;
   budgetStatus: string | null;

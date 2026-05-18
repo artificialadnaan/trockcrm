@@ -51,6 +51,7 @@ import { PropertyCreateDialog } from "@/components/properties/property-create-di
 import { CompanyCopilotPanel } from "@/components/ai/company-copilot-panel";
 import { RecordingList } from "@/components/call-recordings/recording-list";
 import { EntityActivityTab } from "@/components/activities/entity-activity-tab";
+import { CompanyEmailTab } from "@/components/email/company-email-tab";
 import { api } from "@/lib/api";
 import { cn } from "@/lib/utils";
 import { formatPropertyLabel, useProperties } from "@/hooks/use-properties";
@@ -278,7 +279,7 @@ export function CompanyDetailPage() {
     { id: "portfolio", label: "Portfolio", icon: <Building2 className="h-4 w-4" />, count: propertyCount },
     { id: "deals", label: "Deals", icon: <Handshake className="h-4 w-4" />, count: dealCount },
     { id: "files", label: "Files", icon: <FileText className="h-4 w-4" /> },
-    { id: "emails", label: "Emails", icon: <Mail className="h-4 w-4" /> },
+    { id: "emails", label: "Emails", icon: <Mail className="h-4 w-4" />, count: company.emailCount ?? 0 },
     { id: "activity", label: "Activity", icon: <ActivityIcon className="h-4 w-4" /> },
     { id: "recordings", label: "Recordings", icon: <Mic className="h-4 w-4" /> },
   ];
@@ -441,7 +442,7 @@ export function CompanyDetailPage() {
       {activeTab === "portfolio" && <CompanyPortfolioTab key={portfolioKey} companyId={company.id} companyName={company.name} />}
       {activeTab === "deals" && <CompanyDealsTab companyId={company.id} />}
       {activeTab === "files" && <CompanyFilesTab companyId={company.id} />}
-      {activeTab === "emails" && <CompanyEmailsTab />}
+      {activeTab === "emails" && <CompanyEmailTab companyId={company.id} />}
       {activeTab === "activity" && <EntityActivityTab entityType="company" entityId={company.id} emptyLabel="company" />}
       {activeTab === "recordings" && <RecordingList entityType="company" entityId={company.id} />}
     </div>
@@ -879,18 +880,6 @@ function CompanyFilesTab({ companyId }: { companyId: string }) {
 }
 
 // --- Emails Tab ---
-
-function CompanyEmailsTab() {
-  return (
-    <div className="text-center py-12 text-muted-foreground">
-      <Mail className="h-10 w-10 mx-auto mb-3 opacity-20" />
-      <p className="text-sm font-medium mb-1">Email integration coming soon</p>
-      <p className="text-xs text-zinc-400">
-        Emails associated with this company's contacts and deals will appear here.
-      </p>
-    </div>
-  );
-}
 
 function CompanyPortfolioTab({ companyId, companyName }: { companyId: string; companyName: string }) {
   const { deals } = useCompanyDeals(companyId);

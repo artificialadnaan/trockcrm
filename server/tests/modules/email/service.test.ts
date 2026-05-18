@@ -373,6 +373,48 @@ describe("email service inbound association", () => {
     ).toBe(true);
   });
 
+  it("includes company-linked assignment and relationship paths when filtering emails by company", async () => {
+    const whereClauses: unknown[] = [];
+    const tenantDb = {
+      select: vi.fn(() => {
+        const callIndex = (tenantDb.select as any).mock.calls.length;
+        const chain: any = {
+          from: vi.fn(() => chain),
+          where: vi.fn((whereArg: unknown) => {
+            whereClauses.push(whereArg);
+            return chain;
+          }),
+          orderBy: vi.fn(() => chain),
+          limit: vi.fn(() => chain),
+          offset: vi.fn(() => chain),
+          then(resolve: (value: any) => void) {
+            if (callIndex === 1) {
+              resolve([{ count: 1 }]);
+            } else {
+              resolve([]);
+            }
+          },
+        };
+        return chain;
+      }),
+    };
+
+    await getEmails(tenantDb as any, { companyId: "company-1" } as any, "director-1", "director");
+
+    expect(whereClauses.length).toBe(2);
+    expect(hasColumnName(whereClauses[0], "user_id") || hasColumnName(whereClauses[0], "userId")).toBe(true);
+    expect(
+      hasColumnName(whereClauses[0], "assigned_entity_type") ||
+        hasColumnName(whereClauses[0], "assignedEntityType")
+    ).toBe(true);
+    expect(
+      hasColumnName(whereClauses[0], "assigned_entity_id") ||
+        hasColumnName(whereClauses[0], "assignedEntityId")
+    ).toBe(true);
+    expect(hasColumnName(whereClauses[0], "deal_id") || hasColumnName(whereClauses[0], "dealId")).toBe(true);
+    expect(hasColumnName(whereClauses[0], "contact_id") || hasColumnName(whereClauses[0], "contactId")).toBe(true);
+  });
+
   it("does not hide archived emails from deal or contact email history", async () => {
     const whereClauses: unknown[] = [];
     const tenantDb = {
@@ -790,6 +832,86 @@ describe("email service inbound association", () => {
     await expect(unignoreEmailAssignment(tenantDb as any, "email-1", "director-1", "director")).rejects.toThrow(
       "You can only modify your own emails"
     );
+  });
+
+  it("recomputes denormalized stats for a company-linked email when ignoring it", async () => {
+    const updateTables: string[] = [];
+    const tenantDb = {
+      select: vi.fn(() => {
+        const chain: any = {
+          from: vi.fn(() => chain),
+          where: vi.fn(() => chain),
+          limit: vi.fn(() => chain),
+          then(resolve: (value: any[]) => void) {
+            resolve([
+              {
+                id: "email-1",
+                userId: "rep-1",
+                assignedEntityType: "company",
+                assignedEntityId: "company-1",
+                dealId: null,
+                contactId: null,
+              },
+            ]);
+          },
+        };
+        return chain;
+      }),
+      update: vi.fn((table: any) => {
+        updateTables.push(table?.name ?? "unknown");
+        return {
+          set: vi.fn(() => ({
+            where: vi.fn(() => ({
+              returning: vi.fn(async () => []),
+            })),
+          })),
+        };
+      }),
+    };
+
+    await ignoreEmailAssignment(tenantDb as any, "email-1", "rep-1", "rep");
+
+    expect(updateTables.length).toBeGreaterThan(1);
+  });
+
+  it("recomputes denormalized stats for a company-linked email when unignoring it", async () => {
+    const updateTables: string[] = [];
+    const tenantDb = {
+      select: vi.fn(() => {
+        const chain: any = {
+          from: vi.fn(() => chain),
+          where: vi.fn(() => chain),
+          limit: vi.fn(() => chain),
+          then(resolve: (value: any[]) => void) {
+            resolve([
+              {
+                id: "email-1",
+                userId: "rep-1",
+                assignedEntityType: "company",
+                assignedEntityId: "company-1",
+                dealId: null,
+                contactId: null,
+              },
+            ]);
+          },
+        };
+        return chain;
+      }),
+      update: vi.fn((table: any) => {
+        updateTables.push(table?.name ?? "unknown");
+        return {
+          set: vi.fn(() => ({
+            where: vi.fn(() => ({
+              returning: vi.fn(async () => []),
+            })),
+          })),
+        };
+      }),
+    };
+
+    await unignoreEmailAssignment(tenantDb as any, "email-1", "rep-1", "rep");
+
+    expect(updateTables.length).toBeGreaterThan(1);
   });
 
   it("blocks manual association against another user's email for directors", async () => {

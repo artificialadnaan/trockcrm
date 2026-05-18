@@ -131,6 +131,10 @@ vi.mock("@/components/activities/entity-activity-tab", () => ({
   ),
 }));
 
+vi.mock("@/components/email/lead-email-tab", () => ({
+  LeadEmailTab: ({ leadId }: { leadId: string }) => <div>Lead Email Tab {leadId}</div>,
+}));
+
 function makeLead(overrides: Record<string, unknown> = {}) {
   return {
     id: "lead-1",
@@ -174,6 +178,7 @@ function makeLead(overrides: Record<string, unknown> = {}) {
     },
     convertedDealId: null,
     convertedDealNumber: null,
+    emailCount: 4,
     ...overrides,
   };
 }
@@ -273,6 +278,20 @@ describe("LeadDetailPage", () => {
     expect(html).toContain("Questionnaire");
     expect(html).toContain("Activity");
     expect(html).toContain("Recordings");
+  });
+
+  it("renders the email count badge from the lead payload and lazy-loads the tab", () => {
+    mounted = mountLeadDetail();
+
+    const emailsTab = mounted.container.querySelector('button[aria-label="Emails"]');
+    expect(emailsTab?.textContent).toContain("4");
+    expect(mounted.container.textContent).not.toContain("Lead Email Tab lead-1");
+
+    act(() => {
+      emailsTab?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+
+    expect(mounted.container.textContent).toContain("Lead Email Tab lead-1");
   });
 
   it("renders right-rail with company, owner, property, source, and system references", () => {
