@@ -1,6 +1,4 @@
 import { Router } from "express";
-import { eq } from "drizzle-orm";
-import { contacts } from "@trock-crm/shared/schema";
 import { AppError } from "../../middleware/error-handler.js";
 import { eventBus } from "../../events/bus.js";
 import { DOMAIN_EVENTS } from "@trock-crm/shared/types";
@@ -14,7 +12,9 @@ import {
   getUserEmails,
   getEmailAssignmentQueue,
   associateEmailToEntity,
+  ignoreEmailAssignment,
   updateEmailInboxAction,
+  unignoreEmailAssignment,
   bindThreadToDeal,
   detachThreadByConversation,
   previewThreadReassignmentImpact,
@@ -119,6 +119,7 @@ router.get("/", async (req, res, next) => {
     const filters = {
       direction: req.query.direction as "inbound" | "outbound" | undefined,
       filter: req.query.filter as "all" | "unread" | "unassigned" | "sent" | undefined,
+      status: req.query.status as "unassigned" | "assigned" | "ignored" | "deleted" | undefined,
       search: req.query.search as string | undefined,
       page: req.query.page ? parseInt(req.query.page as string, 10) : undefined,
       limit: req.query.limit ? parseInt(req.query.limit as string, 10) : undefined,
@@ -145,6 +146,7 @@ router.get("/deal/:dealId", async (req, res, next) => {
       leadId: deal.sourceLeadId ?? undefined,
       direction: req.query.direction as "inbound" | "outbound" | undefined,
       search: req.query.search as string | undefined,
+      status: req.query.status as "unassigned" | "ignored" | undefined,
       page: req.query.page ? parseInt(req.query.page as string, 10) : undefined,
       limit: req.query.limit ? parseInt(req.query.limit as string, 10) : undefined,
     };
@@ -152,6 +154,38 @@ router.get("/deal/:dealId", async (req, res, next) => {
     const result = await getEmails(req.tenantDb!, filters, req.user!.id, req.user!.role);
     await req.commitTransaction!();
     res.json(result);
+  } catch (err) {
+    next(err);
+  }
+});
+
+// POST /api/email/:id/ignore — remove irrelevant email from parking-lot assignment intake
+router.post("/:id/ignore", async (req, res, next) => {
+  try {
+    const email = await ignoreEmailAssignment(
+      req.tenantDb!,
+      req.params.id,
+      req.user!.id,
+      req.user!.role
+    );
+    await req.commitTransaction!();
+    res.json({ email });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// POST /api/email/:id/un-ignore — return ignored email to normal assignment status
+router.post("/:id/un-ignore", async (req, res, next) => {
+  try {
+    const email = await unignoreEmailAssignment(
+      req.tenantDb!,
+      req.params.id,
+      req.user!.id,
+      req.user!.role
+    );
+    await req.commitTransaction!();
+    res.json({ email });
   } catch (err) {
     next(err);
   }
@@ -311,6 +345,7 @@ router.get("/assignment-queue", async (req, res, next) => {
   try {
     const filters = {
       search: req.query.search as string | undefined,
+      status: req.query.status as "unassigned" | "ignored" | undefined,
       page: req.query.page ? parseInt(req.query.page as string, 10) : undefined,
       limit: req.query.limit ? parseInt(req.query.limit as string, 10) : undefined,
     };
@@ -431,51 +466,21 @@ router.post("/:id/associate", async (req, res, next) => {
       throw new AppError(403, "You can only modify your own emails");
     }
 
-    let emailContactCompanyId: string | null = null;
-    if (
-      req.user!.role === "rep" &&
-      (assignedEntityType === "company" || assignedEntityType === "property" || assignedEntityType === "contact")
-    ) {
-      if (!email.contactId) {
-        throw new AppError(403, "This email does not have enough CRM context for company, property, or contact resolution");
-      }
-
-      const [contact] = await req.tenantDb!
-        .select({ companyId: contacts.companyId })
-        .from(contacts)
-        .where(eq(contacts.id, email.contactId))
-        .limit(1);
-
-      emailContactCompanyId = contact?.companyId ?? null;
-      if (!emailContactCompanyId) {
-        throw new AppError(403, "This email does not have enough CRM company context for company, property, or contact resolution");
-      }
-    }
-
     if (assignedEntityType === "deal") {
       const deal = await getDealById(req.tenantDb!, assignedEntityId, req.user!.role, req.user!.id);
       if (!deal) throw new AppError(404, "Deal not found");
     } else if (assignedEntityType === "contact") {
       const contact = await getContactById(req.tenantDb!, assignedEntityId);
       if (!contact) throw new AppError(404, "Contact not found");
-      if (req.user!.role === "rep" && contact.companyId !== emailContactCompanyId) {
-        throw new AppError(403, "You can only resolve this email to a contact under its contact company");
-      }
     } else if (assignedEntityType === "lead") {
       const lead = await getLeadById(req.tenantDb!, assignedEntityId, req.user!.role, req.user!.id);
       if (!lead) throw new AppError(404, "Lead not found");
     } else if (assignedEntityType === "company") {
       const company = await getCompanyById(req.tenantDb!, assignedEntityId);
       if (!company) throw new AppError(404, "Company not found");
-      if (req.user!.role === "rep" && emailContactCompanyId !== assignedEntityId) {
-        throw new AppError(403, "You can only resolve this email to its contact company");
-      }
     } else if (assignedEntityType === "property") {
       const property = await getPropertyDetail(req.tenantDb!, assignedEntityId);
       if (!property) throw new AppError(404, "Property not found");
-      if (req.user!.role === "rep" && property.property.companyId !== emailContactCompanyId) {
-        throw new AppError(403, "You can only resolve this email to a property under its contact company");
-      }
     }
 
     await associateEmailToEntity(

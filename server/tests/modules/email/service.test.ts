@@ -30,8 +30,10 @@ const {
   getEmails,
   getEmailThread,
   getUserEmails,
+  ignoreEmailAssignment,
   isEmailAssignmentQueueCandidate,
   sendEmail,
+  unignoreEmailAssignment,
 } = await import("../../../src/modules/email/service.js");
 
 function hasColumnName(node: any, columnName: string, seen = new Set<unknown>()): boolean {
@@ -207,6 +209,7 @@ describe("email service inbound association", () => {
       isEmailAssignmentQueueCandidate({
         direction: "inbound",
         assignmentAmbiguityReason: "multiple_deal_candidates",
+        assignmentStatus: "unassigned",
       })
     ).toBe(true);
 
@@ -214,6 +217,7 @@ describe("email service inbound association", () => {
       isEmailAssignmentQueueCandidate({
         direction: "inbound",
         assignmentAmbiguityReason: null,
+        assignmentStatus: "unassigned",
       })
     ).toBe(false);
 
@@ -221,6 +225,15 @@ describe("email service inbound association", () => {
       isEmailAssignmentQueueCandidate({
         direction: "outbound",
         assignmentAmbiguityReason: "multiple_deal_candidates",
+        assignmentStatus: "unassigned",
+      })
+    ).toBe(false);
+
+    expect(
+      isEmailAssignmentQueueCandidate({
+        direction: "inbound",
+        assignmentAmbiguityReason: "multiple_deal_candidates",
+        assignmentStatus: "ignored",
       })
     ).toBe(false);
   });
@@ -1339,6 +1352,35 @@ describe("email service inbound association", () => {
         "office-1"
       )
     ).rejects.toThrow("assignedDealId must match assignedEntityId for deal assignments");
+  });
+
+  it("returns an ignored contact-context email to the parking lot when unignored", async () => {
+    const email = {
+      id: "email-1",
+      userId: "rep-1",
+      contactId: "contact-1",
+      assignedEntityId: null,
+      dealId: null,
+    };
+    const updateSet = vi.fn(() => ({
+      where: vi.fn(() => ({
+        returning: vi.fn(async () => [{ ...email, assignmentStatus: "unassigned" }]),
+      })),
+    }));
+    const tenantDb = {
+      select: vi.fn(() => createSelectChain([email])),
+      update: vi.fn(() => ({ set: updateSet })),
+    };
+
+    const result = await unignoreEmailAssignment(tenantDb as any, "email-1", "rep-1", "rep");
+
+    expect(updateSet).toHaveBeenCalledWith(
+      expect.objectContaining({
+        assignmentStatus: "unassigned",
+        syncedAt: expect.any(Date),
+      })
+    );
+    expect(result.assignmentStatus).toBe("unassigned");
   });
 
   it("rejects outbound email without an association before sending through Microsoft", async () => {

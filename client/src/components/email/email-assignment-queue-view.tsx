@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { EyeOff } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { EmailManualAssignmentDialog, type EmailAssociationTarget } from "./email-manual-assignment-dialog";
 
@@ -61,6 +62,9 @@ interface EmailAssignmentQueueViewProps {
     emailId: string,
     target: EmailAssociationTarget
   ) => Promise<{ ok: true } | { ok: false; message: string }>;
+  onIgnore: (emailId: string) => Promise<{ ok: true } | { ok: false; message: string }>;
+  onUnignore?: (emailId: string) => Promise<{ ok: true } | { ok: false; message: string }>;
+  status?: "unassigned" | "ignored";
 }
 
 function formatDateTime(value: string) {
@@ -118,9 +122,9 @@ function buildSafeAssignmentOptions(item: EmailAssignmentQueueItem): Array<{ lab
   if (options.length === 0) {
     const companyId = item.companyId ?? item.suggestedAssignment.assignedEntityId;
     const companyName = item.companyName;
-    if (companyId && companyName) {
+    if (companyId) {
       options.push({
-        label: `Company · ${companyName}`,
+        label: `Company · ${companyName ?? "Matched company"}`,
         value: {
           assignedEntityType: "company",
           assignedEntityId: companyId,
@@ -136,15 +140,35 @@ function buildSafeAssignmentOptions(item: EmailAssignmentQueueItem): Array<{ lab
 function AssignmentQueueCard({
   item,
   onAssign,
+  onIgnore,
+  onUnignore,
+  status,
 }: {
   item: EmailAssignmentQueueItem;
   onAssign: (
     emailId: string,
     target: EmailAssociationTarget
   ) => Promise<{ ok: true } | { ok: false; message: string }>;
+  onIgnore: (emailId: string) => Promise<{ ok: true } | { ok: false; message: string }>;
+  onUnignore?: (emailId: string) => Promise<{ ok: true } | { ok: false; message: string }>;
+  status: "unassigned" | "ignored";
 }) {
   const safeOptions = buildSafeAssignmentOptions(item);
   const [dialogOpen, setDialogOpen] = useState(false);
+  const [updatingStatus, setUpdatingStatus] = useState(false);
+
+  async function handleAssignmentStatusAction() {
+    setUpdatingStatus(true);
+    try {
+      if (status === "ignored" && onUnignore) {
+        await onUnignore(item.email.id);
+      } else {
+        await onIgnore(item.email.id);
+      }
+    } finally {
+      setUpdatingStatus(false);
+    }
+  }
 
   return (
     <div className="rounded-lg border bg-background p-4 shadow-sm">
@@ -156,7 +180,9 @@ function AssignmentQueueCard({
           </p>
           <h3 className="truncate text-sm font-semibold">{item.email.subject ?? "(No Subject)"}</h3>
           <p className="text-xs text-muted-foreground">{item.email.fromAddress}</p>
-          <p className="mt-1 text-xs text-muted-foreground">Parking lot intake</p>
+          <p className="mt-1 text-xs text-muted-foreground">
+            {status === "ignored" ? "Ignored email" : "Parking lot intake"}
+          </p>
         </div>
         <span className="shrink-0 rounded-full border px-2 py-1 text-xs">
           {item.suggestedAssignment.confidence} confidence
@@ -175,6 +201,10 @@ function AssignmentQueueCard({
         </p>
         <Button type="button" variant="outline" onClick={() => setDialogOpen(true)}>
           Assign manually
+        </Button>
+        <Button type="button" variant="ghost" onClick={() => void handleAssignmentStatusAction()} disabled={updatingStatus}>
+          <EyeOff className="mr-2 h-4 w-4" />
+          {status === "ignored" ? (updatingStatus ? "Restoring..." : "Unignore") : updatingStatus ? "Ignoring..." : "Ignore"}
         </Button>
       </div>
 
@@ -210,11 +240,17 @@ function AssignmentQueueCard({
   );
 }
 
-export function EmailAssignmentQueueView({ items, onAssign }: EmailAssignmentQueueViewProps) {
+export function EmailAssignmentQueueView({
+  items,
+  onAssign,
+  onIgnore,
+  onUnignore,
+  status = "unassigned",
+}: EmailAssignmentQueueViewProps) {
   if (items.length === 0) {
     return (
       <div className="rounded-lg border border-dashed p-6 text-sm text-muted-foreground">
-        No unresolved parking-lot email intake.
+        {status === "ignored" ? "No ignored email intake." : "No unresolved parking-lot email intake."}
       </div>
     );
   }
@@ -222,7 +258,14 @@ export function EmailAssignmentQueueView({ items, onAssign }: EmailAssignmentQue
   return (
     <div className="grid gap-3">
       {items.map((item) => (
-        <AssignmentQueueCard key={item.email.id} item={item} onAssign={onAssign} />
+        <AssignmentQueueCard
+          key={item.email.id}
+          item={item}
+          onAssign={onAssign}
+          onIgnore={onIgnore}
+          onUnignore={onUnignore}
+          status={status}
+        />
       ))}
     </div>
   );

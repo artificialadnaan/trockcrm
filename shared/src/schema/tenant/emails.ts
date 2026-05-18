@@ -31,6 +31,7 @@ export const emails = pgTable("emails", {
   dealId: uuid("deal_id"),
   assignedEntityType: varchar("assigned_entity_type", { length: 20 }),
   assignedEntityId: uuid("assigned_entity_id"),
+  assignmentStatus: varchar("assignment_status", { length: 20 }).default("unassigned").notNull(),
   assignmentConfidence: varchar("assignment_confidence", { length: 20 }),
   assignmentAmbiguityReason: varchar("assignment_ambiguity_reason", { length: 255 }),
   aiSuggestions: jsonb("ai_suggestions").default([]).notNull(),

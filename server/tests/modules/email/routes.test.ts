@@ -9,6 +9,8 @@ const emailServiceMocks = vi.hoisted(() => ({
   getUserEmails: vi.fn(),
   sendEmail: vi.fn(),
   associateEmailToEntity: vi.fn(),
+  ignoreEmailAssignment: vi.fn(),
+  unignoreEmailAssignment: vi.fn(),
   updateEmailInboxAction: vi.fn(),
   bindThreadToDeal: vi.fn(),
   detachThreadByConversation: vi.fn(),
@@ -51,6 +53,8 @@ vi.mock("../../../src/modules/email/service.js", async () => {
     getUserEmails: emailServiceMocks.getUserEmails,
     sendEmail: emailServiceMocks.sendEmail,
     associateEmailToEntity: emailServiceMocks.associateEmailToEntity,
+    ignoreEmailAssignment: emailServiceMocks.ignoreEmailAssignment,
+    unignoreEmailAssignment: emailServiceMocks.unignoreEmailAssignment,
     updateEmailInboxAction: emailServiceMocks.updateEmailInboxAction,
     bindThreadToDeal: emailServiceMocks.bindThreadToDeal,
     detachThreadByConversation: emailServiceMocks.detachThreadByConversation,
@@ -176,7 +180,11 @@ async function invokeRoute({
       : url === "/assignment-queue"
       ? "/assignment-queue"
       : url.startsWith("/") && url.endsWith("/actions")
-        ? "/:id/actions"
+      ? "/:id/actions"
+      : url.startsWith("/") && url.endsWith("/ignore")
+        ? "/:id/ignore"
+      : url.startsWith("/") && url.endsWith("/un-ignore")
+        ? "/:id/un-ignore"
       : url.startsWith("/thread/") && url.endsWith("/assign")
         ? "/thread/:conversationId/assign"
         : url.startsWith("/thread/") && url.endsWith("/reassign")
@@ -198,7 +206,11 @@ async function invokeRoute({
     query,
     body,
     params:
-      routePath === "/:id/associate" || routePath === "/:id/actions" || routePath === "/:id"
+      routePath === "/:id/associate" ||
+        routePath === "/:id/actions" ||
+        routePath === "/:id/ignore" ||
+        routePath === "/:id/un-ignore" ||
+        routePath === "/:id"
         ? { id: url.split("/")[1] }
         : routePath.startsWith("/thread/:conversationId")
           ? { conversationId: url.split("/")[2] }
@@ -263,12 +275,12 @@ describe("email routes", () => {
       method: "get",
       url: "/assignment-queue",
       user: makeDirectorUser(),
-      query: { search: "alpha", page: "2", limit: "10" },
+      query: { search: "alpha", status: "ignored", page: "2", limit: "10" },
     });
 
     expect(emailServiceMocks.getEmailAssignmentQueue).toHaveBeenCalledWith(
       expect.any(Object),
-      { search: "alpha", page: 2, limit: 10 },
+      { search: "alpha", status: "ignored", page: 2, limit: 10 },
       "director-1",
       "director"
     );
@@ -327,6 +339,41 @@ describe("email routes", () => {
     );
     expect(req.commitTransaction).toHaveBeenCalled();
     expect(res.body.email).toEqual({ id: "email-1", isStarred: true });
+  });
+
+  it("routes ignore and un-ignore actions through the assignment status services", async () => {
+    emailServiceMocks.ignoreEmailAssignment.mockResolvedValue({ id: "email-1", assignmentStatus: "ignored" });
+    emailServiceMocks.unignoreEmailAssignment.mockResolvedValue({ id: "email-1", assignmentStatus: "unassigned" });
+
+    const ignored = await invokeRoute({
+      method: "post",
+      url: "/email-1/ignore",
+      user: makeRepUser(),
+    });
+
+    expect(emailServiceMocks.ignoreEmailAssignment).toHaveBeenCalledWith(
+      expect.any(Object),
+      "email-1",
+      "rep-1",
+      "rep"
+    );
+    expect(ignored.req.commitTransaction).toHaveBeenCalled();
+    expect(ignored.res.body).toEqual({ email: { id: "email-1", assignmentStatus: "ignored" } });
+
+    const unignored = await invokeRoute({
+      method: "post",
+      url: "/email-1/un-ignore",
+      user: makeRepUser(),
+    });
+
+    expect(emailServiceMocks.unignoreEmailAssignment).toHaveBeenCalledWith(
+      expect.any(Object),
+      "email-1",
+      "rep-1",
+      "rep"
+    );
+    expect(unignored.req.commitTransaction).toHaveBeenCalled();
+    expect(unignored.res.body).toEqual({ email: { id: "email-1", assignmentStatus: "unassigned" } });
   });
 
   it("allows reps to open full email bodies when the email is linked to a visible deal", async () => {
@@ -453,6 +500,34 @@ describe("email routes", () => {
     expect(res.body).toEqual({ success: true });
   });
 
+  it("lets a rep manually assign a company even when the email has no CRM contact context", async () => {
+    emailServiceMocks.getEmailById.mockResolvedValue({ id: "email-1", userId: "rep-1", contactId: null });
+    companyServiceMocks.getCompanyById.mockResolvedValue({ id: "company-1" });
+
+    const { req, res } = await invokeRoute({
+      method: "post",
+      url: "/email-1/associate",
+      user: makeRepUser(),
+      body: { assignedEntityType: "company", assignedEntityId: "company-1" },
+    });
+
+    expect(companyServiceMocks.getCompanyById).toHaveBeenCalledWith(expect.any(Object), "company-1");
+    expect(emailServiceMocks.associateEmailToEntity).toHaveBeenCalledWith(
+      expect.any(Object),
+      "email-1",
+      {
+        assignedEntityType: "company",
+        assignedEntityId: "company-1",
+        assignedDealId: null,
+      },
+      "rep",
+      "rep-1",
+      "office-1"
+    );
+    expect(req.commitTransaction).toHaveBeenCalled();
+    expect(res.body).toEqual({ success: true });
+  });
+
   it("routes manual property association through the generic entity resolver", async () => {
     emailServiceMocks.getEmailById.mockResolvedValue({ id: "email-1", userId: "director-1", contactId: null });
     propertyServiceMocks.getPropertyDetail.mockResolvedValue({ id: "property-1" });
@@ -478,6 +553,35 @@ describe("email routes", () => {
       "office-1"
     );
     expect(req.commitTransaction).toHaveBeenCalled();
+    expect(res.body).toEqual({ success: true });
+  });
+
+  it("lets a rep manually assign a property even when the email has no CRM contact context", async () => {
+    emailServiceMocks.getEmailById.mockResolvedValue({ id: "email-1", userId: "rep-1", contactId: null });
+    propertyServiceMocks.getPropertyDetail.mockResolvedValue({
+      property: { id: "property-1", companyId: "company-1" },
+    });
+
+    const { res } = await invokeRoute({
+      method: "post",
+      url: "/email-1/associate",
+      user: makeRepUser(),
+      body: { assignedEntityType: "property", assignedEntityId: "property-1" },
+    });
+
+    expect(propertyServiceMocks.getPropertyDetail).toHaveBeenCalledWith(expect.any(Object), "property-1");
+    expect(emailServiceMocks.associateEmailToEntity).toHaveBeenCalledWith(
+      expect.any(Object),
+      "email-1",
+      {
+        assignedEntityType: "property",
+        assignedEntityId: "property-1",
+        assignedDealId: null,
+      },
+      "rep",
+      "rep-1",
+      "office-1"
+    );
     expect(res.body).toEqual({ success: true });
   });
 
@@ -509,94 +613,94 @@ describe("email routes", () => {
     expect(res.body).toEqual({ success: true });
   });
 
-  it("prevents reps from resolving an email to a different company", async () => {
+  it("lets a rep manually assign a contact even when the email has no CRM contact context", async () => {
+    emailServiceMocks.getEmailById.mockResolvedValue({ id: "email-1", userId: "rep-1", contactId: null });
+    contactServiceMocks.getContactById.mockResolvedValue({ id: "contact-1", companyId: "company-1" });
+
+    const { res } = await invokeRoute({
+      method: "post",
+      url: "/email-1/associate",
+      user: makeRepUser(),
+      body: { assignedEntityType: "contact", assignedEntityId: "contact-1" },
+    });
+
+    expect(contactServiceMocks.getContactById).toHaveBeenCalledWith(expect.any(Object), "contact-1");
+    expect(emailServiceMocks.associateEmailToEntity).toHaveBeenCalledWith(
+      expect.any(Object),
+      "email-1",
+      {
+        assignedEntityType: "contact",
+        assignedEntityId: "contact-1",
+        assignedDealId: null,
+      },
+      "rep",
+      "rep-1",
+      "office-1"
+    );
+    expect(res.body).toEqual({ success: true });
+  });
+
+  it("does not gate manual company assignment against inferred contact company context", async () => {
     emailServiceMocks.getEmailById.mockResolvedValue({ id: "email-1", userId: "rep-1", contactId: "contact-1" });
     companyServiceMocks.getCompanyById.mockResolvedValue({ id: "company-2" });
-    const tenantDb = {
-      select: vi.fn(() => {
-        const chain: any = {
-          from: vi.fn(() => chain),
-          where: vi.fn(() => chain),
-          limit: vi.fn(() => chain),
-          then(resolve: (value: any) => void) {
-            resolve([{ companyId: "company-1" }]);
-          },
-        };
-        return chain;
-      }),
-    };
 
-    await expect(
-      invokeRoute({
-        method: "post",
-        url: "/email-1/associate",
-        user: makeRepUser(),
-        body: { assignedEntityType: "company", assignedEntityId: "company-2" },
-        tenantDb,
-      })
-    ).rejects.toThrow("You can only resolve this email to its contact company");
+    await invokeRoute({
+      method: "post",
+      url: "/email-1/associate",
+      user: makeRepUser(),
+      body: { assignedEntityType: "company", assignedEntityId: "company-2" },
+    });
 
-    expect(emailServiceMocks.associateEmailToEntity).not.toHaveBeenCalled();
+    expect(emailServiceMocks.associateEmailToEntity).toHaveBeenCalledWith(
+      expect.any(Object),
+      "email-1",
+      { assignedEntityType: "company", assignedEntityId: "company-2", assignedDealId: null },
+      "rep",
+      "rep-1",
+      "office-1"
+    );
   });
 
-  it("prevents reps from resolving an email to a contact outside the contact company", async () => {
+  it("does not gate manual contact assignment against inferred contact company context", async () => {
     emailServiceMocks.getEmailById.mockResolvedValue({ id: "email-1", userId: "rep-1", contactId: "contact-1" });
     contactServiceMocks.getContactById.mockResolvedValue({ id: "contact-2", companyId: "company-2" });
-    const tenantDb = {
-      select: vi.fn(() => {
-        const chain: any = {
-          from: vi.fn(() => chain),
-          where: vi.fn(() => chain),
-          limit: vi.fn(() => chain),
-          then(resolve: (value: any) => void) {
-            resolve([{ companyId: "company-1" }]);
-          },
-        };
-        return chain;
-      }),
-    };
 
-    await expect(
-      invokeRoute({
-        method: "post",
-        url: "/email-1/associate",
-        user: makeRepUser(),
-        body: { assignedEntityType: "contact", assignedEntityId: "contact-2" },
-        tenantDb,
-      })
-    ).rejects.toThrow("You can only resolve this email to a contact under its contact company");
+    await invokeRoute({
+      method: "post",
+      url: "/email-1/associate",
+      user: makeRepUser(),
+      body: { assignedEntityType: "contact", assignedEntityId: "contact-2" },
+    });
 
-    expect(emailServiceMocks.associateEmailToEntity).not.toHaveBeenCalled();
+    expect(emailServiceMocks.associateEmailToEntity).toHaveBeenCalledWith(
+      expect.any(Object),
+      "email-1",
+      { assignedEntityType: "contact", assignedEntityId: "contact-2", assignedDealId: null },
+      "rep",
+      "rep-1",
+      "office-1"
+    );
   });
 
-  it("prevents reps from resolving an email to a property outside the contact company", async () => {
+  it("does not gate manual property assignment against inferred contact company context", async () => {
     emailServiceMocks.getEmailById.mockResolvedValue({ id: "email-1", userId: "rep-1", contactId: "contact-1" });
     propertyServiceMocks.getPropertyDetail.mockResolvedValue({ property: { id: "property-2", companyId: "company-2" } });
-    const tenantDb = {
-      select: vi.fn(() => {
-        const chain: any = {
-          from: vi.fn(() => chain),
-          where: vi.fn(() => chain),
-          limit: vi.fn(() => chain),
-          then(resolve: (value: any) => void) {
-            resolve([{ companyId: "company-1" }]);
-          },
-        };
-        return chain;
-      }),
-    };
 
-    await expect(
-      invokeRoute({
-        method: "post",
-        url: "/email-1/associate",
-        user: makeRepUser(),
-        body: { assignedEntityType: "property", assignedEntityId: "property-2" },
-        tenantDb,
-      })
-    ).rejects.toThrow("You can only resolve this email to a property under its contact company");
+    await invokeRoute({
+      method: "post",
+      url: "/email-1/associate",
+      user: makeRepUser(),
+      body: { assignedEntityType: "property", assignedEntityId: "property-2" },
+    });
 
-    expect(emailServiceMocks.associateEmailToEntity).not.toHaveBeenCalled();
+    expect(emailServiceMocks.associateEmailToEntity).toHaveBeenCalledWith(
+      expect.any(Object),
+      "email-1",
+      { assignedEntityType: "property", assignedEntityId: "property-2", assignedDealId: null },
+      "rep",
+      "rep-1",
+      "office-1"
+    );
   });
 
   it("rejects mismatched deal identifiers before hitting the service", async () => {
@@ -610,6 +714,62 @@ describe("email routes", () => {
         body: { assignedEntityType: "deal", assignedEntityId: "deal-1", assignedDealId: "deal-2" },
       })
     ).rejects.toThrow("assignedDealId must match assignedEntityId for deal assignments");
+
+    expect(emailServiceMocks.associateEmailToEntity).not.toHaveBeenCalled();
+  });
+
+  it("rejects manual assignment when the selected target does not exist", async () => {
+    emailServiceMocks.getEmailById.mockResolvedValue({ id: "email-1", userId: "rep-1", contactId: null });
+    dealServiceMocks.getDealById.mockResolvedValue(null);
+    leadServiceMocks.getLeadById.mockResolvedValue(null);
+    companyServiceMocks.getCompanyById.mockResolvedValue(null);
+    contactServiceMocks.getContactById.mockResolvedValue(null);
+    propertyServiceMocks.getPropertyDetail.mockResolvedValue(null);
+
+    await expect(
+      invokeRoute({
+        method: "post",
+        url: "/email-1/associate",
+        user: makeRepUser(),
+        body: { assignedEntityType: "deal", assignedEntityId: "missing-deal" },
+      })
+    ).rejects.toThrow("Deal not found");
+
+    await expect(
+      invokeRoute({
+        method: "post",
+        url: "/email-1/associate",
+        user: makeRepUser(),
+        body: { assignedEntityType: "lead", assignedEntityId: "missing-lead" },
+      })
+    ).rejects.toThrow("Lead not found");
+
+    await expect(
+      invokeRoute({
+        method: "post",
+        url: "/email-1/associate",
+        user: makeRepUser(),
+        body: { assignedEntityType: "company", assignedEntityId: "missing-company" },
+      })
+    ).rejects.toThrow("Company not found");
+
+    await expect(
+      invokeRoute({
+        method: "post",
+        url: "/email-1/associate",
+        user: makeRepUser(),
+        body: { assignedEntityType: "contact", assignedEntityId: "missing-contact" },
+      })
+    ).rejects.toThrow("Contact not found");
+
+    await expect(
+      invokeRoute({
+        method: "post",
+        url: "/email-1/associate",
+        user: makeRepUser(),
+        body: { assignedEntityType: "property", assignedEntityId: "missing-property" },
+      })
+    ).rejects.toThrow("Property not found");
 
     expect(emailServiceMocks.associateEmailToEntity).not.toHaveBeenCalled();
   });
