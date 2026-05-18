@@ -9,6 +9,7 @@ import { act } from "react";
 import type { Deal } from "@/hooks/use-deals";
 import {
   DealListPage,
+  buildDealsPageKpiDrilldownPath,
   buildDealStageNavigationPath,
   formatDateInput,
   getDashboardDealListView,
@@ -797,6 +798,203 @@ describe("DealListPage", () => {
         searchPlaceholder: "Search deals or accounts",
       })
     );
+  });
+
+  it("builds clickable KPI drilldown paths with preserved scope and period", () => {
+    expect(buildDealsPageKpiDrilldownPath("active_pipeline", "all")).toBe(
+      "/deals?filter=active_pipeline&scope=all"
+    );
+    expect(buildDealsPageKpiDrilldownPath("won", "team", "last_month")).toBe(
+      "/deals?filter=won&scope=team&period=last_month"
+    );
+    expect(
+      buildDealsPageKpiDrilldownPath("won", "team", "last_month", {
+        wonQueryParams: new URLSearchParams("won_preset=30&won_since=2026-04-01&won_until=2026-04-30"),
+      })
+    ).toBe("/deals?filter=won&scope=team&period=last_month&won_preset=30&won_since=2026-04-01&won_until=2026-04-30");
+    expect(buildDealsPageKpiDrilldownPath("at_risk", "mine")).toBe(
+      "/deals?filter=at_risk&scope=mine"
+    );
+  });
+
+  it("renders clickable KPI cards on the deals page", () => {
+    const html = renderPage("/deals?scope=team&period=last_month", "director");
+
+    expect(html).toContain('href="/deals?filter=active_pipeline&amp;scope=team"');
+    expect(html).toContain('href="/deals?filter=won&amp;scope=team&amp;period=last_month"');
+    expect(html).toContain('href="/deals?filter=at_risk&amp;scope=team"');
+    expect(html).toContain("View active pipeline deals");
+    expect(html).toContain("View won deals");
+    expect(html).toContain("View at-risk deals");
+  });
+
+  it("preserves won terminal query params on the Won KPI drilldown link", () => {
+    const html = renderPage("/deals?scope=team&period=last_month&won_preset=30&won_since=2026-04-01&won_until=2026-04-30", "director");
+
+    expect(html).toContain(
+      'href="/deals?filter=won&amp;scope=team&amp;period=last_month&amp;won_preset=30&amp;won_since=2026-04-01&amp;won_until=2026-04-30"'
+    );
+  });
+
+  it("scopes the Won KPI value to the current period when the won drilldown preserves period", () => {
+    mocks.useDealBoardMock.mockReturnValue({
+      board: {
+        columns: [
+          {
+            stage: { id: "stage-opportunity", name: "Opportunity", slug: "opportunity" },
+            count: 1,
+            totalValue: 180000,
+            cards: [makeDeal()],
+          },
+        ],
+        terminalStages: [
+          {
+            stage: { id: "stage-won", name: "Won", slug: "won" },
+            count: 2,
+            deals: [
+              makeDeal({ id: "won-in-period", awardedAmount: "125000", contractSignedDate: "2026-04-12", actualCloseDate: null }),
+              makeDeal({ id: "won-out-of-period", awardedAmount: "410000", contractSignedDate: "2026-03-15", actualCloseDate: null }),
+            ],
+          },
+        ],
+      },
+      loading: false,
+      error: null,
+      refetch: vi.fn(),
+    });
+
+    const html = renderPage("/deals?scope=team&period=last_month", "director");
+
+    expect(html).toContain('href="/deals?filter=won&amp;scope=team&amp;period=last_month"');
+    expect(html).toContain("$125.0K");
+    expect(html).not.toContain("$410.0K");
+  });
+
+  it("filters Won KPI deals by ISO contractSignedAt timestamps when contractSignedDate is missing", () => {
+    mocks.useDealBoardMock.mockReturnValue({
+      board: {
+        columns: [
+          {
+            stage: { id: "stage-opportunity", name: "Opportunity", slug: "opportunity" },
+            count: 1,
+            totalValue: 180000,
+            cards: [makeDeal()],
+          },
+        ],
+        terminalStages: [
+          {
+            stage: { id: "stage-won", name: "Won", slug: "won" },
+            count: 3,
+            deals: [
+              makeDeal({
+                id: "won-in-period-iso",
+                awardedAmount: "125000",
+                contractSignedDate: null,
+                contractSignedAt: "2026-04-12T14:30:00.000Z",
+              }),
+              makeDeal({
+                id: "won-out-of-period-iso",
+                awardedAmount: "410000",
+                contractSignedDate: null,
+                contractSignedAt: "2026-03-15T14:30:00.000Z",
+              }),
+              makeDeal({
+                id: "won-invalid-iso",
+                awardedAmount: "500000",
+                contractSignedDate: null,
+                contractSignedAt: "not-a-date",
+              }),
+            ],
+          },
+        ],
+      },
+      loading: false,
+      error: null,
+      refetch: vi.fn(),
+    });
+
+    const html = renderPage("/deals?scope=team&period=last_month", "director");
+
+    expect(html).toContain("$125.0K");
+    expect(html).not.toContain("$410.0K");
+    expect(html).not.toContain("$500.0K");
+  });
+
+  it("passes the same effective won date range into the drilldown list as the Won KPI uses", () => {
+    mocks.useDealBoardMock.mockReturnValue({
+      board: {
+        columns: [
+          {
+            stage: { id: "stage-opportunity", name: "Opportunity", slug: "opportunity" },
+            count: 1,
+            totalValue: 180000,
+            cards: [makeDeal()],
+          },
+        ],
+        terminalStages: [
+          {
+            stage: { id: "stage-won", name: "Won", slug: "won" },
+            count: 3,
+            deals: [
+              makeDeal({
+                id: "won-before-terminal-window",
+                awardedAmount: "410000",
+                contractSignedDate: "2026-04-04",
+              }),
+              makeDeal({
+                id: "won-in-shared-window",
+                awardedAmount: "125000",
+                contractSignedDate: "2026-04-12",
+              }),
+              makeDeal({
+                id: "won-after-page-window",
+                awardedAmount: "500000",
+                contractSignedDate: "2026-05-01",
+              }),
+            ],
+          },
+        ],
+      },
+      loading: false,
+      error: null,
+      refetch: vi.fn(),
+    });
+
+    const html = renderPage("/deals?scope=team&filter=won&period=last_month&won_preset=30", "director");
+
+    expect(html).toContain("$125.0K");
+    expect(html).not.toContain("$410.0K");
+    expect(html).not.toContain("$500.0K");
+    expect(mocks.dealsListSectionMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        baseFilters: expect.objectContaining({
+          contractSignedFrom: "2026-04-08",
+          contractSignedTo: "2026-04-30",
+        }),
+      })
+    );
+  });
+
+  it("uses the Won terminal filter caption ahead of the page period and falls back correctly", () => {
+    const htmlWithTerminalFilter = renderPage("/deals?scope=team&period=last_month&won_preset=30", "director");
+    const htmlWithPeriodOnly = renderPage("/deals?scope=team&period=last_month", "director");
+    const htmlAllTime = renderPage("/deals?scope=team", "director");
+
+    expect(htmlWithTerminalFilter).toContain("Last 30 days");
+    expect(htmlWithPeriodOnly).toContain("Last month");
+    expect(htmlAllTime).toContain("All time");
+  });
+
+  it("treats no-period won drill-downs as all-time instead of forcing a default dashboard range", () => {
+    const view = getDashboardDealListView({
+      filterParam: "won",
+      periodParam: null,
+      now: new Date("2026-05-08T12:00:00Z"),
+    });
+
+    expect(view.title).toBe("Closed Won");
+    expect(view.subtitle).toBe("Booked wins across all time.");
+    expect(view.listBaseFilters).toEqual({});
   });
 
   it("builds the active pipeline drill-down view from dashboard query params", () => {
