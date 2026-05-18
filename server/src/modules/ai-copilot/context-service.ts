@@ -1,6 +1,7 @@
 import { sql } from "drizzle-orm";
 import type { NodePgDatabase } from "drizzle-orm/node-postgres";
 import type * as schema from "@trock-crm/shared/schema";
+import { buildDealEmailLinkCondition } from "./email-linking.js";
 
 type TenantDb = NodePgDatabase<typeof schema>;
 
@@ -89,7 +90,7 @@ export async function getDealCopilotContext(
     tenantDb.execute(sql`
       SELECT id, subject, body_preview, direction, sent_at, from_address, to_addresses
       FROM emails
-      WHERE deal_id = ${dealId}
+      WHERE ${buildDealEmailLinkCondition("emails", sql`${dealId}`)}
         AND user_id = ${viewerUserId}
       ORDER BY sent_at DESC
       LIMIT 10

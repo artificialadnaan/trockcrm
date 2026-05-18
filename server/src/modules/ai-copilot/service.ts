@@ -12,10 +12,16 @@ import {
   contacts,
   deals,
 } from "@trock-crm/shared/schema";
+import { AppError } from "../../middleware/error-handler.js";
 import { getDealCopilotContext } from "./context-service.js";
 import { getDealBlindSpotSignals } from "./signal-service.js";
 import { searchDealKnowledge } from "./retrieval-service.js";
 import { buildDealRetrievalQuery } from "./document-service.js";
+import {
+  buildCanonicalDealIdExpression,
+  buildDealEmailFollowupGapCondition,
+  buildDealEmailLinkCondition,
+} from "./email-linking.js";
 import type { AiCopilotProvider } from "./provider.js";
 import { getAiCopilotProvider } from "./provider.js";
 import type { DealBlindSpotSignal } from "./signal-service.js";
@@ -682,15 +688,9 @@ async function getCurrentDisconnectMetadataForDeal(tenantDb: TenantDb, dealId: s
         COALESCE((
           SELECT COUNT(*)::int
           FROM emails e
-          WHERE e.deal_id = d.id
+          WHERE ${buildDealEmailLinkCondition("e", "d.id")}
             AND e.direction = 'inbound'
-            AND NOT EXISTS (
-              SELECT 1
-              FROM activities a
-              WHERE a.deal_id = e.deal_id
-                AND a.occurred_at >= e.sent_at
-                AND a.type IN ('call', 'email', 'meeting', 'note')
-            )
+            AND ${buildDealEmailFollowupGapCondition("a", "e", "d.id")}
         ), 0) AS inbound_without_followup_count,
         pss.sync_status AS procore_sync_status
       FROM deals d
@@ -1005,20 +1005,14 @@ export async function listCurrentSalesProcessDisconnectRows(
         COALESCE((
           SELECT COUNT(*)::int
           FROM emails e
-          WHERE e.deal_id = d.id
+          WHERE ${buildDealEmailLinkCondition("e", "d.id")}
             AND e.direction = 'inbound'
-            AND NOT EXISTS (
-              SELECT 1
-              FROM activities a
-              WHERE a.deal_id = e.deal_id
-                AND a.occurred_at >= e.sent_at
-                AND a.type IN ('call', 'email', 'meeting', 'note')
-            )
+            AND ${buildDealEmailFollowupGapCondition("a", "e", "d.id")}
         ), 0) AS inbound_without_followup_count,
         (
           SELECT MAX(e.sent_at)
           FROM emails e
-          WHERE e.deal_id = d.id
+          WHERE ${buildDealEmailLinkCondition("e", "d.id")}
             AND e.direction = 'inbound'
         ) AS latest_customer_email_at,
         lps.sync_status AS procore_sync_status,
@@ -1296,7 +1290,10 @@ export async function generateDealCopilotPacket(
   overrides: Partial<GenerateDealCopilotPacketDeps> = {}
 ): Promise<GenerateDealCopilotPacketResult> {
   const deps = { ...DEFAULT_DEPS, ...overrides } as GenerateDealCopilotPacketDeps;
-  const context = await deps.getDealCopilotContext(tenantDb, input.dealId, input.viewerUserId ?? "system");
+  if (!input.viewerUserId) {
+    throw new AppError(400, "viewerUserId required to generate copilot packet");
+  }
+  const context = await deps.getDealCopilotContext(tenantDb, input.dealId, input.viewerUserId);
   const signals = await deps.getDealBlindSpotSignals(tenantDb, input.dealId, deps.now);
   const snapshotHash = createSnapshotHash({ context, signals });
 
@@ -1364,7 +1361,7 @@ export async function getDealCopilotView(tenantDb: TenantDb, dealId: string, vie
   const foreignEmailResult = await tenantDb.execute(sql`
     SELECT 1
     FROM emails
-    WHERE deal_id = ${dealId}
+    WHERE ${buildDealEmailLinkCondition("emails", sql`${dealId}`)}
       AND user_id <> ${viewerUserId}
     LIMIT 1
   `);
@@ -1513,8 +1510,16 @@ export async function getCompanyCopilotView(
   };
 }
 
-export async function regenerateDealCopilot(tenantDb: TenantDb, dealId: string) {
-  return generateDealCopilotPacket(tenantDb, { dealId, forceRegenerate: true });
+export async function regenerateDealCopilot(
+  tenantDb: TenantDb,
+  input: { dealId: string; viewerUserId: string },
+  overrides: Partial<GenerateDealCopilotPacketDeps> = {}
+) {
+  return generateDealCopilotPacket(
+    tenantDb,
+    { dealId: input.dealId, forceRegenerate: true, viewerUserId: input.viewerUserId },
+    overrides
+  );
 }
 
 export async function dismissTaskSuggestion(
@@ -1740,20 +1745,14 @@ export async function getSalesProcessDisconnectDashboard(
       ),
       deal_inbound_counts AS (
         SELECT
-          e.deal_id,
+          ${buildCanonicalDealIdExpression("e")} AS deal_id,
           COUNT(*) FILTER (
             WHERE e.direction = 'inbound'
-              AND NOT EXISTS (
-                SELECT 1
-                FROM activities a
-                WHERE a.deal_id = e.deal_id
-                  AND a.occurred_at >= e.sent_at
-                  AND a.type IN ('call', 'email', 'meeting', 'note')
-              )
+              AND ${buildDealEmailFollowupGapCondition("a", "e", buildCanonicalDealIdExpression("e"))}
           )::int AS inbound_without_followup_count
         FROM emails e
-        WHERE e.deal_id IS NOT NULL
-        GROUP BY e.deal_id
+        WHERE ${buildCanonicalDealIdExpression("e")} IS NOT NULL
+        GROUP BY ${buildCanonicalDealIdExpression("e")}
       ),
       deal_file_counts AS (
         SELECT
@@ -1849,15 +1848,9 @@ export async function getSalesProcessDisconnectDashboard(
           AND EXISTS (
             SELECT 1
             FROM emails e
-            WHERE e.deal_id = d.id
+            WHERE ${buildDealEmailLinkCondition("e", "d.id")}
               AND e.direction = 'inbound'
-              AND NOT EXISTS (
-                SELECT 1
-                FROM activities a
-                WHERE a.deal_id = e.deal_id
-                  AND a.occurred_at >= e.sent_at
-                  AND a.type IN ('call', 'email', 'meeting', 'note')
-              )
+              AND ${buildDealEmailFollowupGapCondition("a", "e", "d.id")}
           )
 
         UNION ALL
@@ -1931,20 +1924,14 @@ export async function getSalesProcessDisconnectDashboard(
           COALESCE((
             SELECT COUNT(*)::int
             FROM emails e
-            WHERE e.deal_id = d.id
+            WHERE ${buildDealEmailLinkCondition("e", "d.id")}
               AND e.direction = 'inbound'
-              AND NOT EXISTS (
-                SELECT 1
-                FROM activities a
-                WHERE a.deal_id = e.deal_id
-                  AND a.occurred_at >= e.sent_at
-                  AND a.type IN ('call', 'email', 'meeting', 'note')
-              )
+              AND ${buildDealEmailFollowupGapCondition("a", "e", "d.id")}
           ), 0) AS inbound_without_followup_count,
           (
             SELECT MAX(e.sent_at)
             FROM emails e
-            WHERE e.deal_id = d.id
+            WHERE ${buildDealEmailLinkCondition("e", "d.id")}
               AND e.direction = 'inbound'
           ) AS latest_customer_email_at,
           COALESCE(jsonb_array_length(psc.required_documents), 0) AS required_document_count,

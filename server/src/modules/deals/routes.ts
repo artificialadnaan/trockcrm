@@ -578,7 +578,13 @@ function hasBlockingScopingReadinessErrors(
   return Object.values(readiness.errors.sections ?? {}).some((fields) => fields.length > 0);
 }
 
-async function queueAiEstimateRefresh(tenantDb: any, officeId: string, dealId: string, reason: string) {
+async function queueAiEstimateRefresh(
+  tenantDb: any,
+  officeId: string,
+  dealId: string,
+  reason: string,
+  requestedBy: string
+) {
   await tenantDb.insert(jobQueue).values([
     {
       jobType: "ai_index_document",
@@ -597,6 +603,7 @@ async function queueAiEstimateRefresh(tenantDb: any, officeId: string, dealId: s
       payload: {
         dealId,
         reason,
+        requestedBy,
       },
       officeId,
       status: "pending",
@@ -2194,6 +2201,7 @@ router.post("/:id/stage", async (req, res, next) => {
         dealId: req.params.id,
         reason: "deal_stage_changed",
         targetStageId,
+        requestedBy: req.user!.id,
       },
       officeId: req.user!.activeOfficeId ?? req.user!.officeId,
       status: "pending",
@@ -2665,7 +2673,8 @@ router.post("/:id/estimates/sections", async (req, res, next) => {
       req.tenantDb!,
       req.user!.activeOfficeId ?? req.user!.officeId,
       req.params.id,
-      "estimate_section_created"
+      "estimate_section_created",
+      req.user!.id
     );
     await req.commitTransaction!();
     res.status(201).json({ section });
@@ -2686,7 +2695,8 @@ router.patch("/:id/estimates/sections/:sectionId", async (req, res, next) => {
       req.tenantDb!,
       req.user!.activeOfficeId ?? req.user!.officeId,
       req.params.id,
-      "estimate_section_updated"
+      "estimate_section_updated",
+      req.user!.id
     );
     await req.commitTransaction!();
     res.json({ section });
@@ -2706,7 +2716,8 @@ router.delete("/:id/estimates/sections/:sectionId", async (req, res, next) => {
       req.tenantDb!,
       req.user!.activeOfficeId ?? req.user!.officeId,
       req.params.id,
-      "estimate_section_deleted"
+      "estimate_section_deleted",
+      req.user!.id
     );
     await req.commitTransaction!();
     res.json({ success: true });
@@ -2734,7 +2745,8 @@ router.post("/:id/estimates/sections/:sectionId/items", async (req, res, next) =
       req.tenantDb!,
       req.user!.activeOfficeId ?? req.user!.officeId,
       req.params.id,
-      "estimate_item_created"
+      "estimate_item_created",
+      req.user!.id
     );
     await req.commitTransaction!();
     res.status(201).json({ item });
@@ -2762,7 +2774,8 @@ router.patch("/:id/estimates/items/:itemId", async (req, res, next) => {
       req.tenantDb!,
       req.user!.activeOfficeId ?? req.user!.officeId,
       req.params.id,
-      "estimate_item_updated"
+      "estimate_item_updated",
+      req.user!.id
     );
     await req.commitTransaction!();
     res.json({ item });
@@ -2782,7 +2795,8 @@ router.delete("/:id/estimates/items/:itemId", async (req, res, next) => {
       req.tenantDb!,
       req.user!.activeOfficeId ?? req.user!.officeId,
       req.params.id,
-      "estimate_item_deleted"
+      "estimate_item_deleted",
+      req.user!.id
     );
     await req.commitTransaction!();
     res.json({ success: true });

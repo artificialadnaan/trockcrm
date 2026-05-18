@@ -24,6 +24,7 @@ async function importFirstAvailable<T>(paths: readonly string[]): Promise<T> {
 export async function runAiGenerateDealCopilot(payload: {
   dealId: string;
   reason?: string;
+  requestedBy?: string | null;
 }, officeId: string | null): Promise<void> {
   console.log(
     `[Worker:ai-generate-deal-copilot] Generate request dealId=${payload.dealId} reason=${payload.reason ?? "manual"}`
@@ -51,17 +52,18 @@ export async function runAiGenerateDealCopilot(payload: {
     const module = await importFirstAvailable<{
       generateDealCopilotPacket: (
         tenantDb: unknown,
-        input: { dealId: string; forceRegenerate?: boolean }
+        input: { dealId: string; forceRegenerate?: boolean; viewerUserId?: string }
       ) => Promise<unknown>;
     }>(SERVER_AI_COPILOT_SERVICE_MODULES);
     const generateDealCopilotPacket = module.generateDealCopilotPacket as (
       tenantDb: unknown,
-      input: { dealId: string; forceRegenerate?: boolean }
+      input: { dealId: string; forceRegenerate?: boolean; viewerUserId?: string }
     ) => Promise<unknown>;
 
     await generateDealCopilotPacket(tenantDb, {
       dealId: payload.dealId,
       forceRegenerate: true,
+      viewerUserId: payload.requestedBy ?? undefined,
     });
 
     await client.query("COMMIT");

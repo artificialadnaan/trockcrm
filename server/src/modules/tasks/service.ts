@@ -600,6 +600,7 @@ export async function queueTaskCreateSideEffects(
         dealId: task.dealId,
         reason: "task_created",
         taskId: task.id,
+        requestedBy: input.actorUserId,
       },
       officeId: input.officeId,
       status: "pending",

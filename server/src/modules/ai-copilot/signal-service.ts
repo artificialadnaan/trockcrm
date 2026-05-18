@@ -1,6 +1,7 @@
 import { sql } from "drizzle-orm";
 import type { NodePgDatabase } from "drizzle-orm/node-postgres";
 import type * as schema from "@trock-crm/shared/schema";
+import { buildDealEmailFollowupGapCondition, buildDealEmailLinkCondition } from "./email-linking.js";
 
 type TenantDb = NodePgDatabase<typeof schema>;
 
@@ -53,15 +54,9 @@ export async function getDealBlindSpotSignals(
     tenantDb.execute(sql`
       SELECT COUNT(*)::int AS inbound_without_followup_count
       FROM emails e
-      WHERE e.deal_id = ${dealId}
+      WHERE ${buildDealEmailLinkCondition("e", sql`${dealId}`)}
         AND e.direction = 'inbound'
-        AND NOT EXISTS (
-          SELECT 1
-          FROM activities a
-          WHERE a.deal_id = e.deal_id
-            AND a.occurred_at >= e.sent_at
-            AND a.type IN ('call', 'email', 'meeting', 'note')
-        )
+        AND ${buildDealEmailFollowupGapCondition("a", "e", sql`${dealId}`)}
     `),
     tenantDb.execute(sql`
       SELECT COUNT(*)::int AS revision_owner_movement_count

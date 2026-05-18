@@ -188,6 +188,7 @@ router.post("/", async (req, res, next) => {
           dealId: activity.dealId,
           reason: "activity_created",
           activityId: activity.id,
+          requestedBy: req.user!.id,
         },
         officeId: req.user!.activeOfficeId ?? req.user!.officeId,
         status: "pending",

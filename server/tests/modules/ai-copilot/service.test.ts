@@ -1,6 +1,26 @@
 import { describe, expect, it, vi } from "vitest";
+import { AppError } from "../../../src/middleware/error-handler.js";
 
-const { generateDealCopilotPacket, getDealCopilotView } = await import("../../../src/modules/ai-copilot/service.js");
+const { generateDealCopilotPacket, getDealCopilotView, regenerateDealCopilot } = await import(
+  "../../../src/modules/ai-copilot/service.js"
+);
+
+function flattenQueryChunks(input: unknown, seen = new WeakSet<object>()): unknown[] {
+  if (!input || typeof input !== "object") return [input];
+  if (seen.has(input as object)) return [];
+  seen.add(input as object);
+
+  const queryChunks = (input as { queryChunks?: unknown[] }).queryChunks;
+  if (Array.isArray(queryChunks)) {
+    return queryChunks.flatMap((chunk) => flattenQueryChunks(chunk, seen));
+  }
+
+  if ("value" in (input as Record<string, unknown>)) {
+    return [(input as Record<string, unknown>).value];
+  }
+
+  return Object.values(input as Record<string, unknown>).flatMap((value) => flattenQueryChunks(value, seen));
+}
 
 describe("AI copilot service", () => {
   it("assembles context, signals, retrieval evidence, and persists one packet bundle", async () => {
@@ -10,7 +30,7 @@ describe("AI copilot service", () => {
 
     const result = await generateDealCopilotPacket(
       tenantDb,
-      { dealId: "deal-1", forceRegenerate: true },
+      { dealId: "deal-1", forceRegenerate: true, viewerUserId: "user-1" },
       {
         getDealCopilotContext: vi.fn(async () => {
           callOrder.push("context");
@@ -108,7 +128,7 @@ describe("AI copilot service", () => {
 
     await generateDealCopilotPacket(
       {} as any,
-      { dealId: "deal-1", forceRegenerate: true },
+      { dealId: "deal-1", forceRegenerate: true, viewerUserId: "user-1" },
       {
         getDealCopilotContext: vi.fn(async () => ({
           deal: {
@@ -173,7 +193,7 @@ describe("AI copilot service", () => {
   it("reuses a fresh packet when the snapshot hash is unchanged", async () => {
     const result = await generateDealCopilotPacket(
       {} as any,
-      { dealId: "deal-1", forceRegenerate: false },
+      { dealId: "deal-1", forceRegenerate: false, viewerUserId: "user-1" },
       {
         getDealCopilotContext: vi.fn(async () => ({
           deal: { id: "deal-1", name: "Alpha Plaza", stageName: "Estimating", proposalStatus: "drafting" },
@@ -225,7 +245,7 @@ describe("AI copilot service", () => {
 
     const result = await generateDealCopilotPacket(
       {} as any,
-      { dealId: "deal-1", forceRegenerate: false },
+      { dealId: "deal-1", forceRegenerate: false, viewerUserId: "user-1" },
       {
         getDealCopilotContext: vi.fn(async () => ({
           deal: { id: "deal-1", name: "Alpha Plaza", stageName: "Estimating", proposalStatus: "drafting" },
@@ -282,6 +302,67 @@ describe("AI copilot service", () => {
     });
   });
 
+  it("rejects packet generation when viewerUserId is omitted", async () => {
+    await expect(
+      generateDealCopilotPacket({} as any, { dealId: "deal-1", forceRegenerate: true })
+    ).rejects.toMatchObject({
+      statusCode: 400,
+      message: "viewerUserId required to generate copilot packet",
+    } satisfies Partial<AppError>);
+  });
+
+  it("threads viewerUserId through forced regeneration", async () => {
+    const getDealCopilotContext = vi.fn(async () => ({
+      deal: { id: "deal-1", name: "Alpha Plaza", stageName: "Estimating", proposalStatus: "drafting" },
+      recentActivities: [],
+      recentEmails: [],
+      taskSummary: { openTaskCount: 0, overdueTaskCount: 0 },
+    }));
+
+    await regenerateDealCopilot(
+      {} as any,
+      { dealId: "deal-1", viewerUserId: "user-99" },
+      {
+        getDealCopilotContext,
+        getDealBlindSpotSignals: vi.fn(async () => []),
+        searchDealKnowledge: vi.fn(async () => []),
+        provider: {
+          generateCopilotPacket: vi.fn(async () => ({
+            summary: "Summary",
+            recommendedNextStep: { action: "Action", ownerId: null, dueLabel: null, rationale: "Why" },
+            suggestedTasks: [],
+            blindSpotFlags: [],
+            confidence: 0.5,
+            evidence: [],
+          })),
+          generateInterventionCopilotPacket: vi.fn(async () => ({
+            summary: "Intervention summary",
+            recommendedAction: {
+              action: "investigate",
+              rationale: "Review the case context.",
+              suggestedOwner: null,
+              suggestedOwnerId: null,
+            },
+            rootCause: null,
+            blockerOwner: null,
+            reopenRisk: null,
+            blindSpotFlags: [],
+            evidence: [],
+            confidence: 0.5,
+          })),
+        },
+        getExistingFreshPacket: vi.fn(async () => null),
+        persistPacketBundle: vi.fn(async () => ({
+          packetId: "packet-1",
+          generatedAt: "2026-04-15T12:00:00.000Z",
+        })),
+        now: new Date("2026-04-15T12:00:00.000Z"),
+      }
+    );
+
+    expect(getDealCopilotContext).toHaveBeenCalledWith(expect.anything(), "deal-1", "user-99");
+  });
+
   it("hides the deal copilot packet when the deal includes another user's emails", async () => {
     const tenantDb = {
       execute: vi.fn(async () => ({ rows: [{ exists: 1 }] })),
@@ -296,5 +377,10 @@ describe("AI copilot service", () => {
       blindSpotFlags: [],
     });
     expect(tenantDb.select).not.toHaveBeenCalled();
+
+    const guardQuerySql = flattenQueryChunks(tenantDb.execute.mock.calls[0]?.[0]).map((chunk) => String(chunk)).join(" ");
+    expect(guardQuerySql).toContain("deal");
+    expect(guardQuerySql).toContain("assigned_entity_type");
+    expect(guardQuerySql).toContain("assigned_entity_id");
   });
 });

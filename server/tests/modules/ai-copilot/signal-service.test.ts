@@ -2,6 +2,23 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const { getDealBlindSpotSignals } = await import("../../../src/modules/ai-copilot/signal-service.js");
 
+function flattenQueryChunks(input: unknown, seen = new WeakSet<object>()): unknown[] {
+  if (!input || typeof input !== "object") return [input];
+  if (seen.has(input as object)) return [];
+  seen.add(input as object);
+
+  const queryChunks = (input as { queryChunks?: unknown[] }).queryChunks;
+  if (Array.isArray(queryChunks)) {
+    return queryChunks.flatMap((chunk) => flattenQueryChunks(chunk, seen));
+  }
+
+  if ("value" in (input as Record<string, unknown>)) {
+    return [(input as Record<string, unknown>).value];
+  }
+
+  return Object.values(input as Record<string, unknown>).flatMap((value) => flattenQueryChunks(value, seen));
+}
+
 describe("AI copilot signal service", () => {
   beforeEach(() => {
     vi.restoreAllMocks();
@@ -39,6 +56,11 @@ describe("AI copilot signal service", () => {
     ]);
     expect(signals.every((signal) => Array.isArray(signal.evidence))).toBe(true);
     expect(signals.every((signal) => typeof signal.severity === "string")).toBe(true);
+
+    const inboundQuerySql = flattenQueryChunks(tenantDb.execute.mock.calls[2]?.[0]).map((chunk) => String(chunk)).join(" ");
+    expect(inboundQuerySql).toContain("assigned_entity_type");
+    expect(inboundQuerySql).toContain("assigned_entity_id");
+    expect(inboundQuerySql).toContain("deal");
   });
 
   it("returns an empty array when no deterministic blind spots are present", async () => {
