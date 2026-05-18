@@ -200,6 +200,7 @@ describe("deal activity backfill service", () => {
           hs_email_subject: "Proposal Follow Up",
           hs_email_text: "Checking in on the proposal.",
           hs_email_direction: "INCOMING_EMAIL",
+          hs_attachment_ids: "12345;67890",
           hs_email_headers: JSON.stringify({
             from: { email: "client@example.com" },
             to: [{ email: "rep@trock.com" }],
@@ -222,6 +223,7 @@ describe("deal activity backfill service", () => {
       assignedEntityType: "deal",
       assignedEntityId: "deal-1",
       userId: "user-1",
+      hasAttachments: true,
     });
     expect(result.activity).toMatchObject({
       type: "email",
@@ -259,6 +261,7 @@ describe("deal activity backfill service", () => {
 
     expect(result.activityId).toBe("activity-1");
     expect(result.emailId).toBeNull();
+    expect(result.didImport).toBe(true);
     expect(state.activities).toHaveLength(1);
     expect(state.ledger).toHaveLength(1);
     expect(state.ledger[0]).toMatchObject({
@@ -346,6 +349,7 @@ describe("deal activity backfill service", () => {
 
     expect(result.emailId).toBe("email-1");
     expect(result.activityId).toBe("activity-1");
+    expect(result.didImport).toBe(true);
     expect(state.emails).toHaveLength(1);
     expect(state.activities).toHaveLength(1);
     expect(state.activities[0]?.emailId).toBe("email-1");
@@ -447,7 +451,7 @@ describe("deal activity backfill service", () => {
       },
     });
 
-    expect(result).toEqual({ activityId: "activity-existing", emailId: null });
+    expect(result).toEqual({ activityId: "activity-existing", emailId: null, didImport: false });
     expect(state.activities).toHaveLength(0);
     expect(state.ledger).toHaveLength(1);
   });

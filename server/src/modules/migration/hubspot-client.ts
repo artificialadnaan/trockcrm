@@ -158,6 +158,7 @@ export interface HubSpotActivity {
     hs_email_headers?: string;
     hs_email_direction?: string;
     hs_email_status?: string;
+    hs_attachment_ids?: string;
     hubspot_owner_id?: string;
     hs_task_subject?: string;
     hs_task_body?: string;
@@ -360,6 +361,7 @@ function buildActivityProperties(type: HubSpotActivityObjectType): string {
       "hs_email_headers",
       "hs_email_direction",
       "hs_email_status",
+      "hs_attachment_ids",
     ],
   };
   return [...base, ...(typeProps[type] ?? [])].join(",");

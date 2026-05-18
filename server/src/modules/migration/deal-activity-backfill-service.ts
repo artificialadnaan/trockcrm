@@ -113,6 +113,15 @@ function parseDurationMinutes(value: string | undefined): number | null {
   return Math.max(1, Math.round(millis / 60_000));
 }
 
+function hasHubSpotAttachments(value: string | undefined): boolean {
+  const trimmed = value?.trim();
+  if (!trimmed) return false;
+  return trimmed
+    .split(/[;,]/)
+    .map((entry) => entry.trim())
+    .some(Boolean);
+}
+
 function parseHeaderAddresses(raw: unknown): string[] {
   if (Array.isArray(raw)) {
     return raw
@@ -271,7 +280,7 @@ export function mapEmailToRecords(input: {
       subject,
       bodyPreview: buildBodyPreview(bodyHtml, bodyText),
       bodyHtml,
-      hasAttachments: false,
+      hasAttachments: hasHubSpotAttachments(input.engagement.properties.hs_attachment_ids),
       contactId: null,
       dealId: input.deal.id,
       assignedEntityType: "deal",
@@ -478,6 +487,7 @@ export async function writeAtomic(db: any, input: AtomicWriteInput) {
       return {
         activityId: existingLedger.activityId as string,
         emailId: (existingLedger.emailId as string | null) ?? null,
+        didImport: false,
       };
     }
 
@@ -530,6 +540,6 @@ export async function writeAtomic(db: any, input: AtomicWriteInput) {
       })
       .returning();
 
-    return { activityId: activityRow.id as string, emailId };
+    return { activityId: activityRow.id as string, emailId, didImport: true };
   });
 }

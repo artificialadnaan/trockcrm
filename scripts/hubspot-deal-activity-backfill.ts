@@ -1,4 +1,5 @@
 import "dotenv/config";
+import { and, eq } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/node-postgres";
 import pg from "pg";
 import * as schema from "@trock-crm/shared/schema";
@@ -104,8 +105,13 @@ function emptyTypeReport(): TypeReport {
 
 function parseDateFilter(value: string | null): Date | null {
   if (!value) return null;
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) {
+    throw new Error(`Invalid --since value: ${value}`);
+  }
   const parsed = new Date(`${value}T00:00:00.000Z`);
   if (Number.isNaN(parsed.getTime())) throw new Error(`Invalid --since value: ${value}`);
+  const normalized = parsed.toISOString().slice(0, 10);
+  if (normalized !== value) throw new Error(`Invalid --since value: ${value}`);
   return parsed;
 }
 
@@ -350,7 +356,7 @@ export async function runBackfill(args: BackfillArgs, deps: RunDeps = defaultDep
               deal: dealResult.deal,
               userId: user.id,
             });
-            await deps.writeAtomic(bootstrap.publicDb, {
+            const result = await deps.writeAtomic(bootstrap.publicDb, {
               ledger: {
                 tenantSchema: args.office,
                 hubspotObjectType: type,
@@ -363,6 +369,10 @@ export async function runBackfill(args: BackfillArgs, deps: RunDeps = defaultDep
               email: payload.email,
               activity: payload.activity,
             });
+            if (!result.didImport) {
+              report.alreadyImported += 1;
+              continue;
+            }
           } else {
             const activity =
               type === "note"
@@ -370,7 +380,7 @@ export async function runBackfill(args: BackfillArgs, deps: RunDeps = defaultDep
                 : type === "call"
                   ? deps.mapCallToActivity({ engagement, deal: dealResult.deal, userId: user.id })
                   : deps.mapMeetingToActivity({ engagement, deal: dealResult.deal, userId: user.id });
-            await deps.writeAtomic(bootstrap.publicDb, {
+            const result = await deps.writeAtomic(bootstrap.publicDb, {
               ledger: {
                 tenantSchema: args.office,
                 hubspotObjectType: type,
@@ -382,6 +392,10 @@ export async function runBackfill(args: BackfillArgs, deps: RunDeps = defaultDep
               },
               activity,
             });
+            if (!result.didImport) {
+              report.alreadyImported += 1;
+              continue;
+            }
           }
 
           report.imported += 1;

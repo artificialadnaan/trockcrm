@@ -43,7 +43,11 @@ function makeDeps() {
     mapEmailToRecords: vi.fn(() => ({ email: { graphMessageId: "hubspot:1" }, activity: { type: "email" } })),
     writeAtomic: vi.fn(async (_db: unknown, payload: { ledger: { hubspotObjectType: string; hubspotObjectId: string } }) => {
       imported.add(`${payload.ledger.hubspotObjectType}:${payload.ledger.hubspotObjectId}`);
-      return { activityId: "activity-1", emailId: payload.ledger.hubspotObjectType === "email" ? "email-1" : null };
+      return {
+        activityId: "activity-1",
+        emailId: payload.ledger.hubspotObjectType === "email" ? "email-1" : null,
+        didImport: true,
+      };
     }),
     writeLedgerOnly: vi.fn(async (_db: unknown, payload: { hubspotObjectType: string; hubspotObjectId: string }) => {
       imported.add(`${payload.hubspotObjectType}:${payload.hubspotObjectId}`);
@@ -71,6 +75,12 @@ describe("hubspot-deal-activity-backfill script", () => {
     expect(() =>
       parseBackfillArgs(["node", "script", "--office=office_dallas", "--dry-run", "--execute"])
     ).toThrow("--dry-run and --execute are mutually exclusive");
+  });
+
+  it("rejects impossible calendar dates for --since", () => {
+    expect(() =>
+      parseBackfillArgs(["node", "script", "--office=office_dallas", "--since=2026-02-30"])
+    ).toThrow("Invalid --since value: 2026-02-30");
   });
 
   it("requires an office argument", () => {
@@ -165,7 +175,7 @@ describe("hubspot-deal-activity-backfill script", () => {
         ledgerState.set(`${payload.ledger.hubspotObjectType}:${payload.ledger.hubspotObjectId}`, {
           status: payload.ledger.status,
         });
-        return { activityId: "activity-1", emailId: null };
+        return { activityId: "activity-1", emailId: null, didImport: true };
       }
     );
     deps.findUserForHubspotOwner
@@ -213,5 +223,18 @@ describe("hubspot-deal-activity-backfill script", () => {
     expect(report.byType.note?.skippedUnmappedUser).toBe(1);
     expect(deps.writeAtomic).not.toHaveBeenCalled();
     expect(deps.writeLedgerOnly).toHaveBeenCalledTimes(3);
+  });
+
+  it("counts raced idempotent rows as already imported instead of imported", async () => {
+    const deps = makeDeps();
+    deps.writeAtomic.mockResolvedValueOnce({ activityId: "activity-1", emailId: null, didImport: false });
+
+    const report = await runBackfill(
+      { office: "office_dallas", type: "note", mode: "execute", since: null, limit: null, dealId: null },
+      deps as any
+    );
+
+    expect(report.byType.note?.imported).toBe(0);
+    expect(report.byType.note?.alreadyImported).toBe(1);
   });
 });
