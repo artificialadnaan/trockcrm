@@ -10,6 +10,9 @@ export interface AuditLogEntry {
   recordId: string;
   action: AuditAction;
   changedBy: string | null;
+  actorName?: string | null;
+  actorRole?: string | null;
+  entityType?: string | null;
   changes?: Record<string, { from: unknown; to: unknown }> | null;
   fullRow?: Record<string, unknown> | null;
   ipAddress?: string | null;
@@ -31,6 +34,9 @@ export async function writeAuditLog(tenantDb: TenantDb, entry: AuditLogEntry): P
     recordId: entry.recordId,
     action: entry.action,
     changedBy: entry.changedBy,
+    actorName: entry.actorName ?? null,
+    actorRole: entry.actorRole ?? null,
+    entityType: entry.entityType ?? null,
     changes: entry.changes ?? null,
     fullRow: entry.fullRow ?? null,
     ipAddress: entry.ipAddress ?? null,

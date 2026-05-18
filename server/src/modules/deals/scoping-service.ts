@@ -422,8 +422,17 @@ async function assertDealScopingWriteAllowedForDeal(
   input: {
     role?: string | null;
     forceEditAfterRfp?: boolean;
+    cleanupMode?: boolean;
   }
 ) {
+  if (input.cleanupMode === true) {
+    await assertDealScopingEditable(deal);
+    return {
+      adminOverride: false,
+      lockState: { locked: false, submittedAt: null, reason: null as string | null },
+    };
+  }
+
   const lockState = await resolveDealScopeLockState(deal);
   if (lockState.locked) {
     if (input.role === "admin" && input.forceEditAfterRfp === true) {
@@ -447,6 +456,7 @@ export async function assertDealScopingWriteAllowed(
   input: {
     role?: string | null;
     forceEditAfterRfp?: boolean;
+    cleanupMode?: boolean;
   }
 ) {
   const deal = await getDealOrThrow(tenantDb, dealId);

@@ -373,7 +373,7 @@ export type DuplicateStatus = (typeof DUPLICATE_STATUSES)[number];
 export const EMAIL_DIRECTIONS = ["inbound", "outbound"] as const;
 export type EmailDirection = (typeof EMAIL_DIRECTIONS)[number];
 
-export const AUDIT_ACTIONS = ["insert", "update", "delete", "soft_delete"] as const;
+export const AUDIT_ACTIONS = ["insert", "update", "delete", "soft_delete", "legacy_cleanup_scope_change"] as const;
 export type AuditAction = (typeof AUDIT_ACTIONS)[number];
 
 export const DEAL_TEAM_ROLES = [

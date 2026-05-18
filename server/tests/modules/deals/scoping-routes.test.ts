@@ -223,6 +223,42 @@ async function invokeRoute(
 describe("Deal Scoping Routes", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    vi.mocked(dealService.getDealById).mockImplementation(async () => ({
+      id: "deal-1",
+      name: "deal-1",
+      assignedRepId: "user-1",
+      companyId: "company-1",
+      propertyId: "property-1",
+      projectType: "Commercial",
+      projectTypeId: "project-type-1",
+      workflowRoute: "normal",
+      sourceLeadId: null,
+      stageEnteredAt: new Date("2026-04-21T12:00:00.000Z"),
+      pipelineTypeSnapshot: "normal",
+      ddEstimate: null,
+      bidEstimate: null,
+      awardedAmount: null,
+      isBidBoardOwned: false,
+      bidBoardStageSlug: null,
+      bidBoardStageEnteredAt: null,
+      bidBoardMirrorSourceEnteredAt: null,
+      isReadOnlyMirror: false,
+      readOnlySyncedAt: null,
+    }) as never);
+    vi.mocked(lineageResolver.getResolvedDeal).mockImplementation(async () => ({
+      resolved: {
+        assignedRepId: "user-1",
+        companyId: "company-1",
+        projectTypeId: "project-type-1",
+        propertyId: "property-1",
+        propertyName: "Property One",
+        workflowRoute: "normal",
+        siteVisitDecision: "scheduled",
+        preBidMeetingCompleted: "completed",
+        siteVisitCompleted: "completed",
+        estimatorConsultationNotes: "Existing notes",
+      },
+    }) as never);
   });
 
   it("loads or initializes the scoping intake for a deal", async () => {
@@ -675,6 +711,101 @@ describe("Deal Scoping Routes", () => {
     expect(res.statusCode).toBe(200);
   });
 
+  it("allows locked resolved-field edits during cleanup relationship repair and tags the scope audit", async () => {
+    vi.mocked(dealService.getDealById).mockResolvedValue({
+      id: "deal-1",
+      name: "Legacy Cleanup Deal",
+      assignedRepId: "user-1",
+      companyId: null,
+      propertyId: null,
+      projectType: "Commercial",
+      projectTypeId: "project-type-1",
+      workflowRoute: "normal",
+      sourceLeadId: null,
+      stageEnteredAt: new Date("2026-04-21T12:00:00.000Z"),
+      pipelineTypeSnapshot: "normal",
+      ddEstimate: null,
+      bidEstimate: null,
+      awardedAmount: null,
+      isBidBoardOwned: false,
+      bidBoardStageSlug: null,
+      bidBoardStageEnteredAt: null,
+      bidBoardMirrorSourceEnteredAt: null,
+      isReadOnlyMirror: false,
+      readOnlySyncedAt: null,
+    } as never);
+    vi.mocked(scopingService.assertDealScopingWriteAllowed).mockResolvedValueOnce({
+      adminOverride: false,
+      lockState: { locked: false, reason: null, submittedAt: null },
+    } as never);
+    vi.mocked(lineageResolver.getResolvedDeal).mockResolvedValueOnce({
+      resolved: {
+        assignedRepId: "user-1",
+        companyId: null,
+        projectTypeId: "project-type-1",
+        propertyId: null,
+        propertyName: "Property One",
+        workflowRoute: "normal",
+      },
+    } as never);
+    vi.mocked(lineageResolver.writeResolvedDealFields).mockResolvedValueOnce({
+      resolved: {
+        companyId: "company-1",
+        propertyId: "property-1",
+        projectTypeId: "project-type-2",
+      },
+    } as never);
+
+    const tenantDb = createTenantDbMockWithProperty();
+
+    const { req, res } = await invokeRoute("patch", "/:id/resolved-fields", {
+      params: { id: "deal-1" },
+      tenantDb,
+      body: {
+        companyId: "company-1",
+        propertyId: "property-1",
+        projectTypeId: "project-type-2",
+      },
+    });
+
+    expect(scopingService.assertDealScopingWriteAllowed).toHaveBeenCalledWith(
+      tenantDb,
+      "deal-1",
+      { role: "director", forceEditAfterRfp: false, cleanupMode: true }
+    );
+    expect(lineageResolver.writeResolvedDealFields).toHaveBeenCalledWith(
+      req.tenantDb,
+      "deal-1",
+      expect.objectContaining({
+        companyId: "company-1",
+        propertyId: "property-1",
+        projectTypeId: "project-type-2",
+      }),
+      expect.objectContaining({ userId: "user-1", role: "director" })
+    );
+    expect(auditMocks.writeAuditLog).toHaveBeenCalledWith(
+      req.tenantDb,
+      expect.objectContaining({
+        tableName: "deals",
+        recordId: "deal-1",
+        action: "legacy_cleanup_scope_change",
+        changedBy: "user-1",
+        entityType: "deal",
+        changes: expect.objectContaining({
+          projectTypeId: {
+            from: "project-type-1",
+            to: "project-type-2",
+          },
+        }),
+        fullRow: expect.objectContaining({
+          route: "resolved-fields",
+          cleanupMode: true,
+        }),
+      })
+    );
+    expect(res.statusCode).toBe(200);
+  });
+
   it("blocks resolved-field company replacement after the relationship is established", async () => {
     vi.mocked(scopingService.assertDealScopingWriteAllowed).mockRejectedValueOnce(
       Object.assign(new Error("Scope is read-only after RFP submission"), {
@@ -687,6 +818,67 @@ describe("Deal Scoping Routes", () => {
       invokeRoute("patch", "/:id/resolved-fields", {
         params: { id: "deal-1" },
         body: { companyId: "company-2" },
+      })
+    ).rejects.toMatchObject({
+      statusCode: 403,
+      code: "SCOPE_READ_ONLY_AFTER_RFP",
+    });
+
+    expect(scopingService.assertDealScopingWriteAllowed).toHaveBeenCalledWith(
+      expect.anything(),
+      "deal-1",
+      { role: "director", forceEditAfterRfp: false }
+    );
+    expect(lineageResolver.writeResolvedDealFields).not.toHaveBeenCalled();
+  });
+
+  it("still blocks locked resolved-field edits on non-legacy deals when relationship keys are merely present", async () => {
+    vi.mocked(dealService.getDealById).mockResolvedValue({
+      id: "deal-1",
+      name: "Non Legacy Deal",
+      assignedRepId: "user-1",
+      companyId: "company-1",
+      propertyId: "property-1",
+      projectType: "Commercial",
+      projectTypeId: "project-type-1",
+      workflowRoute: "normal",
+      sourceLeadId: "lead-1",
+      stageEnteredAt: new Date("2026-04-21T12:00:00.000Z"),
+      pipelineTypeSnapshot: "normal",
+      ddEstimate: null,
+      bidEstimate: null,
+      awardedAmount: null,
+      isBidBoardOwned: false,
+      bidBoardStageSlug: null,
+      bidBoardStageEnteredAt: null,
+      bidBoardMirrorSourceEnteredAt: null,
+      isReadOnlyMirror: false,
+      readOnlySyncedAt: null,
+    } as never);
+    vi.mocked(lineageResolver.getResolvedDeal).mockResolvedValueOnce({
+      resolved: {
+        assignedRepId: "user-1",
+        companyId: "company-1",
+        projectTypeId: "project-type-1",
+        propertyId: "property-1",
+        propertyName: "Property One",
+        workflowRoute: "normal",
+      },
+    } as never);
+    vi.mocked(scopingService.assertDealScopingWriteAllowed).mockRejectedValueOnce(
+      Object.assign(new Error("Scope is read-only after RFP submission"), {
+        statusCode: 403,
+        code: "SCOPE_READ_ONLY_AFTER_RFP",
+      })
+    );
+
+    await expect(
+      invokeRoute("patch", "/:id/resolved-fields", {
+        params: { id: "deal-1" },
+        body: {
+          companyId: "company-1",
+          projectTypeId: "project-type-2",
+        },
       })
     ).rejects.toMatchObject({
       statusCode: 403,
@@ -815,6 +1007,127 @@ describe("Deal Scoping Routes", () => {
       message: "Property does not belong to the company",
     });
 
+    expect(lineageResolver.writeResolvedDealFields).not.toHaveBeenCalled();
+  });
+
+  it("still rejects cleanup resolved-field repairs when the selected property belongs to a different company", async () => {
+    vi.mocked(dealService.getDealById).mockResolvedValue({
+      id: "deal-1",
+      name: "Legacy Cleanup Deal",
+      assignedRepId: "user-1",
+      companyId: null,
+      propertyId: null,
+      projectType: "Commercial",
+      projectTypeId: "project-type-1",
+      workflowRoute: "normal",
+      sourceLeadId: null,
+      stageEnteredAt: new Date("2026-04-21T12:00:00.000Z"),
+      pipelineTypeSnapshot: "normal",
+      ddEstimate: null,
+      bidEstimate: null,
+      awardedAmount: null,
+      isBidBoardOwned: false,
+      bidBoardStageSlug: null,
+      bidBoardStageEnteredAt: null,
+      bidBoardMirrorSourceEnteredAt: null,
+      isReadOnlyMirror: false,
+      readOnlySyncedAt: null,
+    } as never);
+    vi.mocked(lineageResolver.getResolvedDeal).mockResolvedValueOnce({
+      resolved: {
+        assignedRepId: "user-1",
+        companyId: null,
+        projectTypeId: "project-type-1",
+        propertyId: null,
+        propertyName: "Property One",
+        workflowRoute: "normal",
+      },
+    } as never);
+
+    const tenantDb = createTenantDbMockWithProperty("company-2");
+
+    await expect(
+      invokeRoute("patch", "/:id/resolved-fields", {
+        params: { id: "deal-1" },
+        tenantDb,
+        body: {
+          companyId: "company-1",
+          propertyId: "property-1",
+          projectTypeId: "project-type-2",
+        },
+      })
+    ).rejects.toMatchObject({
+      statusCode: 400,
+      message: "Property does not belong to the company",
+    });
+
+    expect(scopingService.assertDealScopingWriteAllowed).toHaveBeenCalledWith(
+      tenantDb,
+      "deal-1",
+      { role: "director", forceEditAfterRfp: false, cleanupMode: true }
+    );
+    expect(lineageResolver.writeResolvedDealFields).not.toHaveBeenCalled();
+  });
+
+  it("does not activate cleanup mode on resolved-fields when relationship ids are unchanged", async () => {
+    vi.mocked(dealService.getDealById).mockResolvedValue({
+      id: "deal-1",
+      name: "Legacy With Established Relationships",
+      assignedRepId: "user-1",
+      companyId: "company-1",
+      propertyId: "property-1",
+      projectType: "Commercial",
+      projectTypeId: "project-type-1",
+      workflowRoute: "normal",
+      sourceLeadId: null,
+      stageEnteredAt: new Date("2026-04-21T12:00:00.000Z"),
+      pipelineTypeSnapshot: "normal",
+      ddEstimate: null,
+      bidEstimate: null,
+      awardedAmount: null,
+      isBidBoardOwned: false,
+      bidBoardStageSlug: null,
+      bidBoardStageEnteredAt: null,
+      bidBoardMirrorSourceEnteredAt: null,
+      isReadOnlyMirror: false,
+      readOnlySyncedAt: null,
+    } as never);
+    vi.mocked(lineageResolver.getResolvedDeal).mockResolvedValueOnce({
+      resolved: {
+        assignedRepId: "user-1",
+        companyId: "company-1",
+        projectTypeId: "project-type-1",
+        propertyId: "property-1",
+        propertyName: "Property One",
+        workflowRoute: "normal",
+      },
+    } as never);
+    vi.mocked(scopingService.assertDealScopingWriteAllowed).mockRejectedValueOnce(
+      Object.assign(new Error("Scope is read-only after RFP submission"), {
+        statusCode: 403,
+        code: "SCOPE_READ_ONLY_AFTER_RFP",
+      })
+    );
+
+    await expect(
+      invokeRoute("patch", "/:id/resolved-fields", {
+        params: { id: "deal-1" },
+        body: {
+          companyId: "company-1",
+          propertyId: "property-1",
+          projectTypeId: "project-type-2",
+        },
+      })
+    ).rejects.toMatchObject({
+      statusCode: 403,
+      code: "SCOPE_READ_ONLY_AFTER_RFP",
+    });
+
+    expect(scopingService.assertDealScopingWriteAllowed).toHaveBeenCalledWith(
+      expect.anything(),
+      "deal-1",
+      { role: "director", forceEditAfterRfp: false }
+    );
     expect(lineageResolver.writeResolvedDealFields).not.toHaveBeenCalled();
   });
 

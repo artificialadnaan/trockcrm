@@ -326,62 +326,137 @@ async function assertResolvedRelationshipConsistency(
   }
 }
 
-const LEGACY_CLEANUP_PATCH_ALLOWED_FIELDS = new Set([
+const LEGACY_CLEANUP_SCOPE_AUDIT_FIELDS = new Set([
   "name",
-  "companyId",
-  "propertyId",
-  "primaryContactId",
   "description",
-  "propertyAddress",
-  "propertyCity",
-  "propertyState",
-  "propertyZip",
+  "projectType",
   "projectTypeId",
   "regionId",
-  "source",
-  "winProbability",
-  "expectedCloseDate",
-  "ddEstimate",
-  "bidEstimate",
-  "awardedAmount",
-  "proposalStatus",
-  "proposalNotes",
-  "estimatingSubstage",
-  "forecastWindow",
-  "forecastCategory",
-  "forecastConfidencePercent",
-  "forecastRevenue",
-  "forecastGrossProfit",
-  "forecastBlockers",
-  "nextMilestoneAt",
-  "nextStep",
-  "nextStepDueAt",
-  "supportNeededType",
-  "supportNeededNotes",
-  "decisionMakerName",
-  "budgetStatus",
+  "workflowRoute",
+  "propertyName",
+  ...SCOPE_LOCKED_RESOLVED_FIELDS,
 ]);
 
 function isLegacyCleanupEligibleRole(role: string) {
   return role === "admin" || role === "director" || role === "rep";
 }
 
-function isLegacyCleanupFieldSet(body: Record<string, unknown>) {
-  const fields = Object.keys(body);
-  return fields.length > 0 && fields.every((field) => LEGACY_CLEANUP_PATCH_ALLOWED_FIELDS.has(field));
+function normalizeComparableValue(value: unknown): unknown {
+  if (value == null) return null;
+
+  if (typeof value === "string") {
+    return value.trim().length === 0 ? null : value;
+  }
+
+  if (typeof value === "number") {
+    return Number.isFinite(value) ? value : String(value);
+  }
+
+  if (typeof value === "boolean") {
+    return value;
+  }
+
+  if (Array.isArray(value)) {
+    return value
+      .map((entry) => normalizeComparableValue(entry))
+      .sort((left, right) => JSON.stringify(left).localeCompare(JSON.stringify(right)));
+  }
+
+  if (typeof value === "object") {
+    return Object.fromEntries(
+      Object.entries(value as Record<string, unknown>)
+        .sort(([left], [right]) => left.localeCompare(right))
+        .map(([key, entryValue]) => [key, normalizeComparableValue(entryValue)])
+    );
+  }
+
+  return value;
+}
+
+function comparableValuesEqual(left: unknown, right: unknown) {
+  return JSON.stringify(normalizeComparableValue(left)) === JSON.stringify(normalizeComparableValue(right));
+}
+
+function isLegacyCleanupRepairTrigger(body: Record<string, unknown>, deal: Record<string, unknown>) {
+  const missingCompany = normalizeRelationshipId(deal.companyId) == null;
+  const missingProperty = normalizeRelationshipId(deal.propertyId) == null;
+
+  if (!missingCompany && !missingProperty) {
+    return false;
+  }
+
+  const repairsMissingCompany =
+    missingCompany &&
+    body.companyId !== undefined &&
+    normalizeRelationshipId(body.companyId) != null;
+  const repairsMissingProperty =
+    missingProperty &&
+    body.propertyId !== undefined &&
+    normalizeRelationshipId(body.propertyId) != null;
+
+  return repairsMissingCompany || repairsMissingProperty;
+}
+
+function getLegacyCleanupScopeFieldChanges(
+  patch: Record<string, unknown>,
+  existing: Record<string, unknown> | null | undefined
+) {
+  const baseline = (existing ?? {}) as Record<string, unknown>;
+  return Object.fromEntries(
+    Object.keys(patch)
+      .filter(
+        (field) =>
+          LEGACY_CLEANUP_SCOPE_AUDIT_FIELDS.has(field) &&
+          !comparableValuesEqual(patch[field], baseline[field])
+      )
+      .map((field) => [
+        field,
+        {
+          from: baseline[field] ?? null,
+          to: patch[field] ?? null,
+        },
+      ])
+  );
+}
+
+async function writeLegacyCleanupScopeAuditLog(
+  req: any,
+  route: "deals" | "resolved-fields",
+  dealBaseline: Record<string, unknown> | null | undefined,
+  patch: Record<string, unknown>
+) {
+  const changes = getLegacyCleanupScopeFieldChanges(patch, dealBaseline);
+  if (Object.keys(changes).length === 0) {
+    return;
+  }
+
+  await writeAuditLog(req.tenantDb!, {
+    tableName: "deals",
+    recordId: req.params.id,
+    action: "legacy_cleanup_scope_change",
+    changedBy: req.user!.id,
+    actorName: req.user!.displayName ?? req.user!.email ?? req.user!.id,
+    actorRole: req.user!.role,
+    entityType: "deal",
+    changes,
+    fullRow: {
+      route,
+      cleanupMode: true,
+      sourceLeadId: dealBaseline?.sourceLeadId ?? null,
+    },
+    ipAddress: req.ip ?? null,
+    userAgent: buildRouteAuditContext(req).userAgent,
+  });
 }
 
 function shouldTreatPatchAsLegacyCleanup(
   body: Record<string, unknown>,
-  requestedCleanupContext: boolean,
   role: string,
   deal: Record<string, unknown> | null
 ) {
   if (
-    !requestedCleanupContext ||
     !deal ||
-    !isLegacyCleanupEligibleRole(role) ||
-    !isLegacyCleanupFieldSet(body)
+    !isLegacyCleanupEligibleRole(role)
   ) {
     return false;
   }
@@ -390,12 +465,7 @@ function shouldTreatPatchAsLegacyCleanup(
     return false;
   }
 
-  return (
-    !deal.companyId ||
-    !deal.propertyId ||
-    body.companyId !== undefined ||
-    body.propertyId !== undefined
-  );
+  return isLegacyCleanupRepairTrigger(body, deal);
 }
 
 function isEstimatingBoundaryStageSlug(stageSlug: string, workflowRoute: "normal" | "service") {
@@ -1090,17 +1160,31 @@ router.patch("/:id/resolved-fields", async (req, res, next) => {
     const forceEditAfterRfp = patch.forceEditAfterRfp === true;
     delete patch.forceEditAfterRfp;
 
+    const dealBaseline =
+      Object.keys(patch).length > 0
+        ? await getDealById(req.tenantDb!, req.params.id, req.user!.role, req.user!.id)
+        : null;
     const hasLockedResolvedFieldCandidates = Object.keys(patch).some((field) =>
       SCOPE_LOCKED_RESOLVED_FIELDS.has(field)
     );
     const existingResolved = hasLockedResolvedFieldCandidates
       ? await loadLockedResolvedFieldComparisonBaseline(req.tenantDb!, req.params.id)
       : {};
+    const cleanupBaseline = {
+      ...((dealBaseline ?? {}) as Record<string, unknown>),
+      ...existingResolved,
+    };
+    const isLegacyCleanupPatch = shouldTreatPatchAsLegacyCleanup(
+      patch,
+      req.user!.role,
+      cleanupBaseline
+    );
     const scopeLockedFields = getLockedResolvedFieldsRequiringScopeGuard(patch, existingResolved);
     const writePolicy = scopeLockedFields.length > 0
       ? await assertDealScopingWriteAllowed(req.tenantDb!, req.params.id, {
           role: req.user!.role,
           forceEditAfterRfp,
+          ...(isLegacyCleanupPatch ? { cleanupMode: true } : {}),
         })
       : null;
 
@@ -1112,6 +1196,9 @@ router.patch("/:id/resolved-fields", async (req, res, next) => {
       officeId: req.user!.activeOfficeId ?? req.user!.officeId,
       role: req.user!.role,
     });
+    if (isLegacyCleanupPatch) {
+      await writeLegacyCleanupScopeAuditLog(req, "resolved-fields", cleanupBaseline, patch);
+    }
     if (writePolicy?.adminOverride) {
       await writeAuditLog(req.tenantDb!, {
         tableName: "deal_scoping_intake",
@@ -1485,16 +1572,6 @@ router.patch("/:id", async (req, res, next) => {
           req.user!.id
         )
       : null;
-    const scopeLockedFields = getScopeLockedDealPatchFields(
-      body,
-      (existingDeal ?? {}) as Record<string, unknown>
-    );
-    const writePolicy = scopeLockedFields.length > 0
-      ? await assertDealScopingWriteAllowed(req.tenantDb!, req.params.id, {
-          role: req.user!.role,
-          forceEditAfterRfp,
-        })
-      : null;
 
     const priorDeal =
       body.proposalStatus === "revision_requested"
@@ -1506,15 +1583,14 @@ router.patch("/:id", async (req, res, next) => {
           )
         : null;
 
-    const shouldLoadCleanupBaseline =
-      existingDeal == null &&
-      clientRequestedMigrationMode &&
-      isLegacyCleanupEligibleRole(req.user!.role) &&
-      isLegacyCleanupFieldSet(body);
-    const cleanupBaseline =
+    const shouldInspectRelationship =
+      body.companyId !== undefined ||
+      body.propertyId !== undefined ||
+      hasDealLocationFields(body);
+    const relationshipBaseline =
       existingDeal ??
       (
-        shouldLoadCleanupBaseline
+        shouldInspectRelationship
           ? await getDealById(
               req.tenantDb!,
               req.params.id,
@@ -1523,12 +1599,23 @@ router.patch("/:id", async (req, res, next) => {
             )
           : null
       );
+    const cleanupBaseline = relationshipBaseline ?? existingDeal;
     const isLegacyCleanupPatch = shouldTreatPatchAsLegacyCleanup(
       body,
-      clientRequestedMigrationMode,
       req.user!.role,
       (cleanupBaseline ?? null) as Record<string, unknown> | null
     );
+    const scopeLockedFields = getScopeLockedDealPatchFields(
+      body,
+      (existingDeal ?? cleanupBaseline ?? {}) as Record<string, unknown>
+    );
+    const writePolicy =
+      scopeLockedFields.length > 0 && !isLegacyCleanupPatch
+        ? await assertDealScopingWriteAllowed(req.tenantDb!, req.params.id, {
+            role: req.user!.role,
+            forceEditAfterRfp,
+          })
+        : null;
 
     if (isLegacyCleanupPatch) {
       const effectiveCompanyId =
@@ -1548,23 +1635,6 @@ router.patch("/:id", async (req, res, next) => {
       }
     }
 
-    const shouldInspectRelationship =
-      body.companyId !== undefined ||
-      body.propertyId !== undefined ||
-      hasDealLocationFields(body);
-    const relationshipBaseline =
-      cleanupBaseline ??
-      existingDeal ??
-      (
-        shouldInspectRelationship
-          ? await getDealById(
-              req.tenantDb!,
-              req.params.id,
-              req.user!.role,
-              req.user!.id
-            )
-          : null
-      );
     const existingPropertyId =
       typeof (relationshipBaseline as Record<string, unknown> | null)?.propertyId === "string"
         ? (relationshipBaseline as Record<string, unknown>).propertyId as string
@@ -1596,15 +1666,16 @@ router.patch("/:id", async (req, res, next) => {
       removeDealLocationFields(body);
     }
 
+    const patchToApply = {
+      ...body,
+      ...propertyAddressSync,
+      ...(isLegacyCleanupPatch ? { migrationMode: true } : {}),
+      auditContext: buildRouteAuditContext(req),
+    };
     let deal = await updateDeal(
       req.tenantDb!,
       req.params.id,
-      {
-        ...body,
-        ...propertyAddressSync,
-        ...(isLegacyCleanupPatch ? { migrationMode: true } : {}),
-        auditContext: buildRouteAuditContext(req),
-      },
+      patchToApply,
       req.user!.role,
       req.user!.id,
       req.user!.activeOfficeId,
@@ -1641,6 +1712,12 @@ router.patch("/:id", async (req, res, next) => {
               : (cleanupBaseline as Record<string, unknown> | null)?.propertyId ?? null,
         },
       });
+      await writeLegacyCleanupScopeAuditLog(
+        req,
+        "deals",
+        (cleanupBaseline ?? null) as Record<string, unknown> | null,
+        patchToApply
+      );
     }
     if (writePolicy?.adminOverride) {
       await writeAuditLog(req.tenantDb!, {
