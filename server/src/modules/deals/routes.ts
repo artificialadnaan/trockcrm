@@ -697,11 +697,14 @@ router.get("/sources", async (req, res, next) => {
 // GET /api/deals/pipeline — deals grouped by stage for kanban
 router.get("/pipeline", async (req, res, next) => {
   try {
+    const rawPreviewLimit = req.query.previewLimit as string | undefined;
+    const parsedPreviewLimit = rawPreviewLimit ? parseInt(rawPreviewLimit, 10) : undefined;
     const filters = {
       assignedRepId: req.query.assignedRepId as string | undefined,
       scope: req.query.scope as "mine" | "team" | "all" | undefined,
       activeOfficeId: req.user!.activeOfficeId ?? req.user!.officeId,
       includeDd: req.query.includeDd === "true",
+      previewLimit: Number.isFinite(parsedPreviewLimit) ? parsedPreviewLimit : undefined,
       wonSince: req.query.won_since as string | undefined,
       wonUntil: req.query.won_until as string | undefined,
       wonAllTime: req.query.won_all_time === "true",

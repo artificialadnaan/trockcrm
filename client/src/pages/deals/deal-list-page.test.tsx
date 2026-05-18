@@ -669,6 +669,15 @@ describe("DealListPage", () => {
     }, 8);
   });
 
+  it("requests an expanded preview window for the SLA drill-down board", () => {
+    renderPage("/deals?scope=team&filter=at_risk&period=week", "director");
+
+    expect(mocks.useDealBoardMock).toHaveBeenCalledWith("team", true, {
+      won: { preset: "all" },
+      lost: { preset: "all" },
+    }, 1000);
+  });
+
   it("does not fire board fetch before auth resolves", () => {
     mocks.useAuthMock.mockReturnValue({
       user: null,
@@ -960,8 +969,8 @@ describe("DealListPage", () => {
         columns: [
           {
             stage: { id: "stage-contract", name: "Contract", slug: "contract" },
-            count: 2,
-            totalValue: 300000,
+            count: 4,
+            totalValue: 430000,
             cards: [
               makeDeal({
                 id: "deal-in-period",
@@ -970,6 +979,14 @@ describe("DealListPage", () => {
                 stageEnteredAt: "2026-04-02T10:00:00.000Z",
                 updatedAt: "2026-05-01T10:00:00.000Z",
                 bidEstimate: "200000",
+              }),
+              makeDeal({
+                id: "deal-in-period-2",
+                name: "Second QTD Stale Deal",
+                stageId: "stage-contract",
+                stageEnteredAt: "2026-04-04T10:00:00.000Z",
+                updatedAt: "2026-04-22T10:00:00.000Z",
+                bidEstimate: "130000",
               }),
               makeDeal({
                 id: "deal-old-period",
@@ -1000,14 +1017,16 @@ describe("DealListPage", () => {
     const html = renderPage("/deals?scope=team&filter=stale&period=qtd", "director");
 
     expect(html).toContain("QTD Stale Deal");
+    expect(html).toContain("Second QTD Stale Deal");
     expect(html).not.toContain("Old Quarter Stale Deal");
     expect(html).not.toContain("Fresh QTD Deal");
+    expect(html).toMatch(/Filtered results.*>2</);
   });
 
   it("keeps the embedded list visible for stale drill-down views", () => {
     const html = renderPage("/deals?scope=team&filter=stale&period=qtd", "director");
 
-    expect(mocks.useDealBoardMock).toHaveBeenLastCalledWith("team", true, expect.any(Object), null);
+    expect(mocks.useDealBoardMock).toHaveBeenLastCalledWith("team", true, expect.any(Object), 1000);
     expect(mocks.dealsListSectionMock).not.toHaveBeenCalled();
     expect(html).toContain("Drill-down view: SLA filter applied to list and board.");
     expect(html).toContain("Filtered results");

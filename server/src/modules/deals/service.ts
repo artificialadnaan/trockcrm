@@ -43,7 +43,8 @@ type TenantDb = NodePgDatabase<typeof schema>;
 type DealRow = typeof deals.$inferSelect;
 type PipelineStageRow = typeof pipelineStageConfig.$inferSelect;
 const contractSignedDateForReporting = sql`COALESCE(contract_signed_at::date, contract_signed_date)`;
-const PIPELINE_CARDS_PER_STAGE_LIMIT = 100;
+const DEFAULT_PIPELINE_CARDS_PER_STAGE_LIMIT = 100;
+const MAX_PIPELINE_CARDS_PER_STAGE_LIMIT = 1000;
 
 function sqlStringList(values: readonly string[]) {
   return sql.join(values.map((value) => sql`${value}`), sql`, `);
@@ -1733,7 +1734,13 @@ export async function getDealsForPipeline(
   tenantDb: TenantDb,
   userRole: string,
   userId: string,
-  filters?: { assignedRepId?: string; includeDd?: boolean; scope?: WorkspaceScope; activeOfficeId?: string | null } & PipelineTerminalDateFilters
+  filters?: {
+    assignedRepId?: string;
+    includeDd?: boolean;
+    previewLimit?: number;
+    scope?: WorkspaceScope;
+    activeOfficeId?: string | null;
+  } & PipelineTerminalDateFilters
 ) {
   // Get all stages ordered
   const stages = await db
@@ -1764,6 +1771,13 @@ export async function getDealsForPipeline(
     sql`COALESCE(${deals.contractSignedAt}, ${deals.contractSignedDate}::timestamptz)`
   );
   const lostEnteredAt = dealTerminalBusinessDateSql(deals.lostAt);
+  const pipelineCardsPerStageLimit = Math.max(
+    1,
+    Math.min(
+      Number.isFinite(filters?.previewLimit) ? Math.floor(filters!.previewLimit as number) : DEFAULT_PIPELINE_CARDS_PER_STAGE_LIMIT,
+      MAX_PIPELINE_CARDS_PER_STAGE_LIMIT
+    )
+  );
 
   const commonConditions: any[] = [];
 
@@ -1846,7 +1860,7 @@ export async function getDealsForPipeline(
         .leftJoin(users, eq(users.id, deals.assignedRepId))
         .where(where)
         .orderBy(desc(deals.updatedAt))
-        .limit(PIPELINE_CARDS_PER_STAGE_LIMIT),
+        .limit(pipelineCardsPerStageLimit),
     ]);
 
     dealsByStage.set(stage.id, stageDeals);

@@ -48,6 +48,8 @@ const STAGE_SLA_DAYS: Record<string, number> = {
   lost: 0,
 };
 
+const SLA_DRILLDOWN_PREVIEW_LIMIT = 1000;
+
 export type DashboardDealListFilter =
   | "active"
   | "active_pipeline"
@@ -505,7 +507,12 @@ function DealListPageContent({ role }: { role: string }) {
     [searchParams]
   );
   const isAtRiskDrilldown = dashboardView.filter === "stale" || dashboardView.filter === "at_risk";
-  const { board, loading, error } = useDealBoard(scope, true, terminalDateFilters, isAtRiskDrilldown ? null : 8);
+  const { board, loading, error } = useDealBoard(
+    scope,
+    true,
+    terminalDateFilters,
+    isAtRiskDrilldown ? SLA_DRILLDOWN_PREVIEW_LIMIT : 8
+  );
 
   useEffect(() => {
     setTerminalDateFilters(readTerminalDateFiltersFromSearchParams(searchParams));

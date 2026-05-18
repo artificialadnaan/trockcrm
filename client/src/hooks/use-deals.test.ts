@@ -443,21 +443,21 @@ describe("normalizeDealBoardResponse", () => {
     vi.unstubAllGlobals();
   });
 
-  it("omits previewLimit when an uncapped board request is needed", async () => {
+  it("passes a larger previewLimit when the caller requests a drill-down board window", async () => {
     const apiMock = vi.mocked(api);
     apiMock.mockResolvedValueOnce({
       pipelineColumns: [],
       terminalStages: [],
     });
     hookTerminalDateFilters = undefined;
-    hookPreviewLimit = null;
+    hookPreviewLimit = 1000;
 
     const root = await renderHook();
     await waitForIdle();
 
     const requestPath = String(apiMock.mock.calls[apiMock.mock.calls.length - 1]?.[0]);
     expect(requestPath).toContain("/deals/pipeline?");
-    expect(requestPath).not.toContain("previewLimit=");
+    expect(requestPath).toContain("previewLimit=1000");
 
     await act(async () => {
       root.unmount();
