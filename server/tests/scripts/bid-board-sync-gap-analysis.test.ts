@@ -439,11 +439,7 @@ describe("bid-board-sync-gap-analysis", () => {
     });
 
     await fetchPortfolioProjects(10, {
-      env: {
-        PROCORE_COMPANY_ID: "company-1",
-        PROCORE_CLIENT_ID: "client-1",
-        PROCORE_CLIENT_SECRET: "secret-1",
-      },
+      env: { PROCORE_COMPANY_ID: "company-1" },
       now: () => new Date("2026-05-18T12:00:00.000Z"),
       tokenClient: { query },
       decryptToken: (value: string) => `decrypted:${value}`,
@@ -485,11 +481,7 @@ describe("bid-board-sync-gap-analysis", () => {
     });
 
     const result = await fetchPortfolioProjects(2, {
-      env: {
-        PROCORE_COMPANY_ID: "company-1",
-        PROCORE_CLIENT_ID: "client-1",
-        PROCORE_CLIENT_SECRET: "secret-1",
-      },
+      env: { PROCORE_COMPANY_ID: "company-1" },
       now: () => new Date("2026-05-18T12:00:00.000Z"),
       tokenClient: { query },
       decryptToken: (value: string) => `decrypted:${value}`,
@@ -498,6 +490,286 @@ describe("bid-board-sync-gap-analysis", () => {
 
     expect(result.records).toHaveLength(2);
     expect(result.state).toEqual({ truncated: false, fetchedCount: 2, maxRecords: 2 });
+  });
+
+  it("marks Portfolio truncated when maxRecords lands on a page boundary with a next-page indicator", async () => {
+    const query = vi.fn().mockResolvedValueOnce({
+      rows: [
+        {
+          access_token: "encrypted-access-token",
+          token_expires_at: new Date("2026-05-18T13:00:00.000Z"),
+          status: "active",
+        },
+      ],
+    });
+    const fetchImpl = vi.fn().mockResolvedValueOnce({
+      ok: true,
+      status: 200,
+      headers: new Headers({
+        Link: '<https://api.procore.com/rest/v1.0/companies/company-1/projects?page=2&per_page=100>; rel="next"',
+      }),
+      json: async () => Array.from({ length: 100 }, (_, index) => ({
+        id: 1000 + index,
+        name: `Project ${index}`,
+        project_number: `DFW-${index}`,
+      })),
+      text: async () => "",
+    });
+
+    const result = await fetchPortfolioProjects(100, {
+      env: { PROCORE_COMPANY_ID: "company-1" },
+      now: () => new Date("2026-05-18T12:00:00.000Z"),
+      tokenClient: { query },
+      decryptToken: (value: string) => `decrypted:${value}`,
+      fetchImpl,
+    });
+
+    expect(result.records).toHaveLength(100);
+    expect(result.state).toEqual({ truncated: true, fetchedCount: 100, maxRecords: 100 });
+  });
+
+  it("does not mark Portfolio truncated for a partial page without a next-page indicator", async () => {
+    const query = vi.fn().mockResolvedValueOnce({
+      rows: [
+        {
+          access_token: "encrypted-access-token",
+          token_expires_at: new Date("2026-05-18T13:00:00.000Z"),
+          status: "active",
+        },
+      ],
+    });
+    const fetchImpl = vi.fn().mockResolvedValueOnce({
+      ok: true,
+      status: 200,
+      headers: new Headers(),
+      json: async () => [
+        { id: 101, name: "One", project_number: "DFW-1" },
+        { id: 102, name: "Two", project_number: "DFW-2" },
+      ],
+      text: async () => "",
+    });
+
+    const result = await fetchPortfolioProjects(10, {
+      env: { PROCORE_COMPANY_ID: "company-1" },
+      now: () => new Date("2026-05-18T12:00:00.000Z"),
+      tokenClient: { query },
+      decryptToken: (value: string) => `decrypted:${value}`,
+      fetchImpl,
+    });
+
+    expect(result.records).toHaveLength(2);
+    expect(result.state).toEqual({ truncated: false, fetchedCount: 2, maxRecords: 10 });
+  });
+
+  it("retries a read-only Portfolio 429 using Retry-After and succeeds on the second attempt", async () => {
+    const query = vi.fn().mockResolvedValueOnce({
+      rows: [
+        {
+          access_token: "encrypted-access-token",
+          token_expires_at: new Date("2026-05-18T13:00:00.000Z"),
+          status: "active",
+        },
+      ],
+    });
+    const fetchImpl = vi
+      .fn()
+      .mockResolvedValueOnce({
+        ok: false,
+        status: 429,
+        headers: new Headers({ "Retry-After": "3" }),
+        text: async () => "rate limited",
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        headers: new Headers(),
+        json: async () => [{ id: 101, name: "Recovered", project_number: "DFW-1" }],
+        text: async () => "",
+      });
+    const sleep = vi.fn().mockResolvedValue(undefined);
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+
+    try {
+      const result = await fetchPortfolioProjects(10, {
+        env: {
+          PROCORE_COMPANY_ID: "company-1",
+          PROCORE_CLIENT_ID: "client-1",
+          PROCORE_CLIENT_SECRET: "secret-1",
+        },
+        now: () => new Date("2026-05-18T12:00:00.000Z"),
+        tokenClient: { query },
+        decryptToken: (value: string) => `decrypted:${value}`,
+        fetchImpl,
+        sleep,
+      });
+
+      expect(result.records).toEqual([expect.objectContaining({ id: "101", name: "Recovered" })]);
+      expect(fetchImpl).toHaveBeenCalledTimes(2);
+      expect(sleep).toHaveBeenCalledWith(3000);
+      expect(warn).toHaveBeenCalledWith(expect.stringContaining("retrying in 3000ms"));
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it("retries a read-only Portfolio 503 three times then fails clearly", async () => {
+    const query = vi.fn().mockResolvedValueOnce({
+      rows: [
+        {
+          access_token: "encrypted-access-token",
+          token_expires_at: new Date("2026-05-18T13:00:00.000Z"),
+          status: "active",
+        },
+      ],
+    });
+    const fetchImpl = vi.fn().mockResolvedValue({
+      ok: false,
+      status: 503,
+      headers: new Headers(),
+      text: async () => "service unavailable",
+    });
+    const sleep = vi.fn().mockResolvedValue(undefined);
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+
+    try {
+      await expect(
+        fetchPortfolioProjects(10, {
+          env: {
+            PROCORE_COMPANY_ID: "company-1",
+            PROCORE_CLIENT_ID: "client-1",
+            PROCORE_CLIENT_SECRET: "secret-1",
+          },
+          now: () => new Date("2026-05-18T12:00:00.000Z"),
+          tokenClient: { query },
+          decryptToken: (value: string) => `decrypted:${value}`,
+          fetchImpl,
+          sleep,
+        })
+      ).rejects.toThrow("Procore read-only portfolio fetch failed after 4 attempts: 503 service unavailable");
+
+      expect(fetchImpl).toHaveBeenCalledTimes(4);
+      expect(sleep).toHaveBeenCalledTimes(3);
+      expect(sleep).toHaveBeenNthCalledWith(1, 1000);
+      expect(sleep).toHaveBeenNthCalledWith(2, 2000);
+      expect(sleep).toHaveBeenNthCalledWith(3, 4000);
+      expect(warn).toHaveBeenCalledTimes(3);
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it("fails a read-only Portfolio 401 immediately with a token-invalid message", async () => {
+    const query = vi.fn().mockResolvedValueOnce({
+      rows: [
+        {
+          access_token: "encrypted-access-token",
+          token_expires_at: new Date("2026-05-18T13:00:00.000Z"),
+          status: "active",
+        },
+      ],
+    });
+    const fetchImpl = vi.fn().mockResolvedValueOnce({
+      ok: false,
+      status: 401,
+      headers: new Headers(),
+      text: async () => "unauthorized",
+    });
+    const sleep = vi.fn().mockResolvedValue(undefined);
+
+    await expect(
+      fetchPortfolioProjects(10, {
+        env: {
+          PROCORE_COMPANY_ID: "company-1",
+          PROCORE_CLIENT_ID: "client-1",
+          PROCORE_CLIENT_SECRET: "secret-1",
+        },
+        now: () => new Date("2026-05-18T12:00:00.000Z"),
+        tokenClient: { query },
+        decryptToken: (value: string) => `decrypted:${value}`,
+        fetchImpl,
+        sleep,
+      })
+    ).rejects.toThrow("Procore token invalid or expired: 401 unauthorized");
+
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+    expect(sleep).not.toHaveBeenCalled();
+  });
+
+  it("fails a read-only Portfolio 400 immediately without retrying", async () => {
+    const query = vi.fn().mockResolvedValueOnce({
+      rows: [
+        {
+          access_token: "encrypted-access-token",
+          token_expires_at: new Date("2026-05-18T13:00:00.000Z"),
+          status: "active",
+        },
+      ],
+    });
+    const fetchImpl = vi.fn().mockResolvedValueOnce({
+      ok: false,
+      status: 400,
+      headers: new Headers(),
+      text: async () => "bad request",
+    });
+    const sleep = vi.fn().mockResolvedValue(undefined);
+
+    await expect(
+      fetchPortfolioProjects(10, {
+        env: {
+          PROCORE_COMPANY_ID: "company-1",
+          PROCORE_CLIENT_ID: "client-1",
+          PROCORE_CLIENT_SECRET: "secret-1",
+        },
+        now: () => new Date("2026-05-18T12:00:00.000Z"),
+        tokenClient: { query },
+        decryptToken: (value: string) => `decrypted:${value}`,
+        fetchImpl,
+        sleep,
+      })
+    ).rejects.toThrow("Procore read-only portfolio fetch failed: 400 bad request");
+
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+    expect(sleep).not.toHaveBeenCalled();
+  });
+
+  it("passes Portfolio precheck with company ID and stored token but no client credentials", async () => {
+    const query = vi.fn().mockResolvedValueOnce({
+      rows: [
+        {
+          access_token: "encrypted-access-token",
+          token_expires_at: new Date("2026-05-18T13:00:00.000Z"),
+          status: "active",
+        },
+      ],
+    });
+    const fetchImpl = vi.fn().mockResolvedValueOnce({
+      ok: true,
+      status: 200,
+      headers: new Headers(),
+      json: async () => [],
+      text: async () => "",
+    });
+
+    await expect(
+      fetchPortfolioProjects(10, {
+        env: { PROCORE_COMPANY_ID: "company-1" },
+        now: () => new Date("2026-05-18T12:00:00.000Z"),
+        tokenClient: { query },
+        decryptToken: (value: string) => `decrypted:${value}`,
+        fetchImpl,
+      })
+    ).resolves.toMatchObject({ records: [] });
+  });
+
+  it("fails Portfolio precheck when PROCORE_COMPANY_ID is missing", async () => {
+    await expect(
+      fetchPortfolioProjects(10, {
+        env: {},
+        tokenClient: { query: vi.fn() },
+        decryptToken: (value: string) => value,
+        fetchImpl: vi.fn(),
+      })
+    ).rejects.toThrow("PROCORE_COMPANY_ID is required for Portfolio source diagnostics");
   });
 
   it("marks HubSpot truncated when maxRecords cuts through a later page", async () => {

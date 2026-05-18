@@ -951,14 +951,13 @@ interface PortfolioFetchOptions {
   fetchImpl?: typeof fetch;
   decryptToken?: (value: string) => string;
   now?: () => Date;
+  sleep?: (ms: number) => Promise<void>;
 }
 
 async function resolveReadOnlyProcoreToken(options: PortfolioFetchOptions = {}) {
   const env = options.env ?? process.env;
   const companyId = env.PROCORE_COMPANY_ID?.trim();
   if (!companyId) throw new Error("PROCORE_COMPANY_ID is required for Portfolio source diagnostics");
-  if (!env.PROCORE_CLIENT_ID?.trim()) throw new Error("PROCORE_CLIENT_ID is required for Portfolio source diagnostics");
-  if (!env.PROCORE_CLIENT_SECRET?.trim()) throw new Error("PROCORE_CLIENT_SECRET is required for Portfolio source diagnostics");
 
   const client = options.tokenClient ?? new pg.Client({ connectionString: connectionString() });
   const ownsClient = !options.tokenClient;
@@ -992,43 +991,200 @@ async function resolveReadOnlyProcoreToken(options: PortfolioFetchOptions = {}) 
   }
 }
 
+type PortfolioApiProject = {
+  id: number;
+  name?: string | null;
+  display_name?: string | null;
+  displayName?: string | null;
+  project_number?: string | null;
+  projectNumber?: string | null;
+  city?: string | null;
+  state_code?: string | null;
+  stateCode?: string | null;
+  address?: string | { street?: string | null; city?: string | null; state_code?: string | null; stateCode?: string | null } | null;
+  updated_at?: string | null;
+  updatedAt?: string | null;
+};
+
+type PortfolioApiPage = PortfolioApiProject[] | {
+  data?: PortfolioApiProject[];
+  projects?: PortfolioApiProject[];
+  results?: PortfolioApiProject[];
+  next_page_url?: string | null;
+  nextPageUrl?: string | null;
+  next_page?: string | number | null;
+  nextPage?: string | number | null;
+  total_count?: number | null;
+  totalCount?: number | null;
+  total?: number | null;
+  pagination?: {
+    next_page_url?: string | null;
+    nextPageUrl?: string | null;
+    next_page?: string | number | null;
+    nextPage?: string | number | null;
+    total_count?: number | null;
+    totalCount?: number | null;
+    total?: number | null;
+  };
+  meta?: {
+    pagination?: {
+      next_page_url?: string | null;
+      nextPageUrl?: string | null;
+      next_page?: string | number | null;
+      nextPage?: string | number | null;
+      total_count?: number | null;
+      totalCount?: number | null;
+      total?: number | null;
+    };
+  };
+};
+
+function portfolioRowsFromPage(page: PortfolioApiPage): PortfolioApiProject[] {
+  if (Array.isArray(page)) return page;
+  return page.data ?? page.projects ?? page.results ?? [];
+}
+
+function numericPageField(value: unknown): number | null {
+  if (typeof value === "number" && Number.isFinite(value)) return value;
+  if (typeof value === "string" && value.trim() !== "") {
+    const parsed = Number(value);
+    return Number.isFinite(parsed) ? parsed : null;
+  }
+  return null;
+}
+
+function portfolioTotalFromPage(page: PortfolioApiPage): number | null {
+  if (Array.isArray(page)) return null;
+  return numericPageField(
+    page.total_count ??
+    page.totalCount ??
+    page.total ??
+    page.pagination?.total_count ??
+    page.pagination?.totalCount ??
+    page.pagination?.total ??
+    page.meta?.pagination?.total_count ??
+    page.meta?.pagination?.totalCount ??
+    page.meta?.pagination?.total
+  );
+}
+
+function portfolioPageHasNext(response: Response, page: PortfolioApiPage, fetchedAfterPage: number): boolean {
+  const headers = response.headers;
+  const link = headers?.get("Link") ?? headers?.get("link") ?? "";
+  if (/<[^>]+>;\s*rel="?next"?/i.test(link) || /rel="?next"?/i.test(link)) return true;
+
+  const nextHeader = headers?.get("X-Next-Page") ?? headers?.get("x-next-page");
+  if (cleanText(nextHeader)) return true;
+
+  if (!Array.isArray(page)) {
+    const nextField =
+      page.next_page_url ??
+      page.nextPageUrl ??
+      page.next_page ??
+      page.nextPage ??
+      page.pagination?.next_page_url ??
+      page.pagination?.nextPageUrl ??
+      page.pagination?.next_page ??
+      page.pagination?.nextPage ??
+      page.meta?.pagination?.next_page_url ??
+      page.meta?.pagination?.nextPageUrl ??
+      page.meta?.pagination?.next_page ??
+      page.meta?.pagination?.nextPage;
+    if (cleanText(nextField)) return true;
+  }
+
+  const total = portfolioTotalFromPage(page);
+  return total != null && total > fetchedAfterPage;
+}
+
+function retryDelayFromResponse(response: Response, attempt: number): number {
+  const retryAfter = response.headers.get("Retry-After");
+  if (retryAfter) {
+    const seconds = Number(retryAfter);
+    if (Number.isFinite(seconds) && seconds >= 0) return seconds * 1000;
+    const retryAt = Date.parse(retryAfter);
+    if (Number.isFinite(retryAt)) return Math.max(0, retryAt - Date.now());
+  }
+  return [1000, 2000, 4000][attempt] ?? 4000;
+}
+
+function isRetryableProcoreStatus(status: number) {
+  return status === 429 || status >= 500;
+}
+
+async function readProcorePortfolioPage(
+  url: string,
+  init: RequestInit,
+  options: PortfolioFetchOptions
+): Promise<Response> {
+  const fetchImpl = options.fetchImpl ?? fetch;
+  const sleep = options.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
+  const maxRetries = 3;
+  let lastFailure = "";
+
+  for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    try {
+      const response = await fetchImpl(url, init);
+      if (response.ok) return response;
+
+      const text = await response.text().catch(() => "");
+      lastFailure = `${response.status} ${text}`.trim();
+      if (response.status === 401 || response.status === 403) {
+        throw new Error(`Procore token invalid or expired: ${lastFailure}`);
+      }
+      if (!isRetryableProcoreStatus(response.status)) {
+        throw new Error(`Procore read-only portfolio fetch failed: ${lastFailure}`);
+      }
+      if (attempt === maxRetries) {
+        throw new Error(`Procore read-only portfolio fetch failed after ${maxRetries + 1} attempts: ${lastFailure}`);
+      }
+
+      const delayMs = retryDelayFromResponse(response, attempt);
+      console.warn(`[Procore diagnostic] read-only portfolio fetch ${response.status}; retrying in ${delayMs}ms (attempt ${attempt + 1}/${maxRetries})`);
+      await sleep(delayMs);
+    } catch (error) {
+      if (error instanceof Error && (
+        error.message.startsWith("Procore token invalid or expired:") ||
+        error.message.startsWith("Procore read-only portfolio fetch failed:")
+      )) {
+        throw error;
+      }
+
+      lastFailure = error instanceof Error ? `network error: ${error.message}` : `network error: ${String(error)}`;
+      if (attempt === maxRetries) {
+        throw new Error(`Procore read-only portfolio fetch failed after ${maxRetries + 1} attempts: ${lastFailure}`);
+      }
+      const delayMs = [1000, 2000, 4000][attempt] ?? 4000;
+      console.warn(`[Procore diagnostic] read-only portfolio fetch network error; retrying in ${delayMs}ms (attempt ${attempt + 1}/${maxRetries}): ${lastFailure}`);
+      await sleep(delayMs);
+    }
+  }
+
+  throw new Error(`Procore read-only portfolio fetch failed after ${maxRetries + 1} attempts: ${lastFailure}`);
+}
+
 export async function fetchPortfolioProjects(maxRecords: number, options: PortfolioFetchOptions = {}): Promise<SourceFetchResult> {
   const auth = await resolveReadOnlyProcoreToken(options);
-  const fetchImpl = options.fetchImpl ?? fetch;
   const rows: SourceRecord[] = [];
   let page = 1;
   const pageSize = 100;
   let truncated = false;
   while (rows.length < maxRecords) {
-    const response = await fetchImpl(`https://api.procore.com/rest/v1.0/companies/${auth.companyId}/projects?page=${page}&per_page=${pageSize}`, {
+    const response = await readProcorePortfolioPage(`https://api.procore.com/rest/v1.0/companies/${auth.companyId}/projects?page=${page}&per_page=${pageSize}`, {
       method: "GET",
       headers: {
         Authorization: `Bearer ${auth.accessToken}`,
         Accept: "application/json",
         "Procore-Company-Id": auth.companyId,
       },
-    });
-    if (!response.ok) {
-      const text = await response.text().catch(() => "");
-      throw new Error(`Procore read-only portfolio fetch failed: ${response.status} ${text}`);
-    }
-    const pageRows = await response.json() as Array<{
-      id: number;
-      name?: string | null;
-      display_name?: string | null;
-      displayName?: string | null;
-      project_number?: string | null;
-      projectNumber?: string | null;
-      city?: string | null;
-      state_code?: string | null;
-      stateCode?: string | null;
-      address?: string | { street?: string | null; city?: string | null; state_code?: string | null; stateCode?: string | null } | null;
-      updated_at?: string | null;
-      updatedAt?: string | null;
-    }>;
+    }, options);
+    const parsedPage = await response.json() as PortfolioApiPage;
+    const pageRows = portfolioRowsFromPage(parsedPage);
     if (pageRows.length === 0) break;
     const remainingCapacity = maxRecords - rows.length;
-    if (pageRows.length > remainingCapacity) truncated = true;
+    const fetchedAfterPage = rows.length + pageRows.length;
+    const hasNextPage = portfolioPageHasNext(response, parsedPage, fetchedAfterPage);
+    if (pageRows.length > remainingCapacity || (pageRows.length === remainingCapacity && hasNextPage)) truncated = true;
     rows.push(
       ...pageRows.slice(0, remainingCapacity).map((row) => ({
         id: String(row.id),
@@ -1044,7 +1200,8 @@ export async function fetchPortfolioProjects(maxRecords: number, options: Portfo
         },
       }))
     );
-    if (pageRows.length < pageSize || rows.length >= maxRecords) break;
+    if (!hasNextPage && pageRows.length < pageSize) break;
+    if (rows.length >= maxRecords) break;
     page += 1;
   }
   return {
