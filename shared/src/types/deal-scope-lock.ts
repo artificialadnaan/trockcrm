@@ -1,17 +1,13 @@
 const SCOPE_LOCKED_DEAL_PATCH_FIELD_VALUES = [
-  "companyId",
   "name",
   "projectType",
   "projectTypeId",
-  "propertyId",
   "sourceLeadId",
   "workflowRoute",
 ] as const;
 
 const SCOPE_LOCKED_RESOLVED_FIELD_VALUES = [
-  "companyId",
   "projectTypeId",
-  "propertyId",
   "propertyName",
   "workflowRoute",
   "preBidMeetingCompleted",

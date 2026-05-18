@@ -4,6 +4,7 @@ import {
   getMissingPropertyAddressFields,
   getPropertySelectorLabel,
   resolveSelectedPropertyLabel,
+  resolveSelectedPropertySelection,
   sortPropertiesForSelection,
 } from "./property-selector";
 
@@ -25,7 +26,8 @@ describe("PropertySelector inline create", () => {
 
     expect(source).toContain("const { properties, loading, refetch } = useProperties");
     expect(source).toContain("resolveSelectedPropertyLabel");
-    expect(source).toContain("if (match) { return getPropertySelectorLabel(match as PropertySelectorRecord); }");
+    expect(source).toContain("resolveSelectedPropertySelection");
+    expect(source).toContain("property: match as PropertySelectorRecord");
     expect(source).toContain("void refetch();");
   });
 
@@ -100,6 +102,40 @@ describe("PropertySelector inline create", () => {
 
     expect(apiMock).toHaveBeenCalledWith("/properties/property-99", {
       headers: { "x-office-id": "office-atlanta" },
+    });
+  });
+
+  it("returns the selected property record while hydrating the selected label", async () => {
+    apiMock.mockResolvedValueOnce({
+      property: {
+        id: "property-99",
+        companyId: "company-1",
+        companyName: "Dallas",
+        name: "Remote Property",
+        address: "123 Main St",
+        city: "Dallas",
+        state: "TX",
+        zip: "75001",
+        notes: null,
+        isActive: true,
+        createdAt: "",
+        updatedAt: "",
+        leadCount: 0,
+        dealCount: 0,
+        convertedDealCount: 0,
+        lastActivityAt: null,
+      },
+    });
+
+    const selection = await resolveSelectedPropertySelection("property-99", [], "office-atlanta");
+
+    expect(selection.label).toContain("123 Main St");
+    expect(selection.property).toMatchObject({
+      id: "property-99",
+      address: "123 Main St",
+      city: "Dallas",
+      state: "TX",
+      zip: "75001",
     });
   });
 

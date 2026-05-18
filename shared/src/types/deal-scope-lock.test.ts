@@ -40,6 +40,34 @@ describe("deal scope lock comparisons", () => {
     ).toEqual(["name", "projectTypeId"]);
   });
 
+  it("keeps company and property relationship changes outside the post-RFP scope lock", () => {
+    expect(
+      getScopeLockedDealPatchFields(
+        {
+          companyId: "company-2",
+          propertyId: "property-2",
+        },
+        {
+          companyId: "company-1",
+          propertyId: "property-1",
+        }
+      )
+    ).toEqual([]);
+
+    expect(
+      getScopeLockedResolvedFields(
+        {
+          companyId: "company-2",
+          propertyId: "property-2",
+        },
+        {
+          companyId: "company-1",
+          propertyId: "property-1",
+        }
+      )
+    ).toEqual([]);
+  });
+
   it("treats numeric-looking locked strings as exact strings", () => {
     expect(
       getScopeLockedDealPatchFields(
