@@ -243,6 +243,68 @@ describe("changeDealStage", () => {
     vi.mocked(createStageTimers).mockResolvedValue(undefined as never);
   });
 
+  it("resets stageEnteredAt on every transition including re-entry to a previous stage", async () => {
+    vi.useFakeTimers();
+    const tenantDb = createTenantDb({
+      stageId: "stage-a",
+      stageEnteredAt: new Date("2026-05-01T12:00:00.000Z"),
+      ddEstimate: null,
+      bidEstimate: null,
+    });
+    const stageA = {
+      id: "stage-a",
+      name: "Sales Validation",
+      slug: "sales_validation",
+      isTerminal: false,
+      displayOrder: 0,
+    };
+    const stageB = {
+      id: "stage-b",
+      name: "Opportunity",
+      slug: "opportunity",
+      isTerminal: false,
+      displayOrder: 1,
+    };
+
+    vi.mocked(validateStageGate).mockImplementation(async (_tenantDb, _dealId, targetStageId) => ({
+      allowed: true,
+      isBackwardMove: targetStageId === "stage-a",
+      requiresOverride: false,
+      targetStage: targetStageId === "stage-a" ? stageA : stageB,
+      currentStage: targetStageId === "stage-a" ? stageB : stageA,
+    }) as never);
+
+    vi.setSystemTime(new Date("2026-05-02T09:00:00.000Z"));
+    const firstMove = await changeDealStage(tenantDb as never, {
+      dealId: "deal-1",
+      targetStageId: "stage-b",
+      userId: "user-1",
+      userRole: "director",
+    });
+
+    vi.setSystemTime(new Date("2026-05-03T10:30:00.000Z"));
+    const reentryMove = await changeDealStage(tenantDb as never, {
+      dealId: "deal-1",
+      targetStageId: "stage-a",
+      userId: "user-1",
+      userRole: "director",
+    });
+
+    expect(firstMove.deal.stageEnteredAt).toEqual(new Date("2026-05-02T09:00:00.000Z"));
+    expect(reentryMove.deal.stageEnteredAt).toEqual(new Date("2026-05-03T10:30:00.000Z"));
+    expect(tenantDb.state.stageHistory).toEqual([
+      expect.objectContaining({
+        fromStageId: "stage-a",
+        toStageId: "stage-b",
+      }),
+      expect.objectContaining({
+        fromStageId: "stage-b",
+        toStageId: "stage-a",
+      }),
+    ]);
+    vi.useRealTimers();
+  });
+
   it("marks the deal as Bid Board-owned once CRM hands it off into estimate in progress", async () => {
     const tenantDb = createTenantDb();
     vi.mocked(validateStageGate).mockResolvedValue({
