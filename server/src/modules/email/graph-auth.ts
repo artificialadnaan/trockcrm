@@ -56,7 +56,6 @@ export function getConsentUrl(redirectUri: string, state?: string): string {
     redirect_uri: redirectUri,
     response_mode: "query",
     scope: GRAPH_SCOPES.join(" "),
-    prompt: "consent",
   });
   if (state) params.set("state", state);
 
