@@ -30,6 +30,7 @@ import {
   BellRing,
   ChevronDown,
   DollarSign,
+  Ticket,
   type LucideIcon,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
@@ -42,6 +43,8 @@ export type NavItem = {
   icon: LucideIcon;
   label: string;
   roles: Role[];
+  external?: boolean;
+  ariaLabel?: string;
 };
 
 export type AdminGroup = {
@@ -118,6 +121,14 @@ const adminGroups: AdminGroup[] = [
 ];
 
 const helpItems: NavItem[] = [
+  {
+    to: "https://support-hub-production.up.railway.app/",
+    icon: Ticket,
+    label: "Tickets",
+    roles: ["admin", "director", "rep", "construction"],
+    external: true,
+    ariaLabel: "Open Tickets in a new tab",
+  },
   { to: "/help/user-guide", icon: BookOpen, label: "User Guide", roles: ["admin", "director", "rep"] },
   { to: "/help/admin-guide", icon: HelpCircle, label: "Admin Guide", roles: ["admin"] },
 ];
@@ -311,14 +322,30 @@ export function Sidebar() {
               Help
             </p>
             {visibleHelpItems.map((item) => (
-              <NavLink
-                key={getNavItemKey(item)}
-                to={item.to}
-                className={navLinkClass}
-              >
-                <item.icon className="h-4 w-4" />
-                {item.label}
-              </NavLink>
+              item.external
+                ? (
+                  <a
+                    key={getNavItemKey(item)}
+                    href={item.to}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    aria-label={item.ariaLabel}
+                    className={inactiveNavLinkClass}
+                  >
+                    <item.icon className="h-4 w-4" />
+                    {item.label}
+                  </a>
+                )
+                : (
+                  <NavLink
+                    key={getNavItemKey(item)}
+                    to={item.to}
+                    className={navLinkClass}
+                  >
+                    <item.icon className="h-4 w-4" />
+                    {item.label}
+                  </NavLink>
+                )
             ))}
           </div>
         )}

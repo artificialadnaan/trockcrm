@@ -6,16 +6,33 @@ import {
   Users,
   CheckSquare,
   DollarSign,
+  Ticket,
+  type LucideIcon,
 } from "lucide-react";
 import { useAuth } from "@/lib/auth";
 import { buildFieldCaptureUrl } from "@/lib/field-app";
 
-const mobileNavItems = [
+type MobileNavItem = {
+  to: string;
+  icon: LucideIcon;
+  label: string;
+  external?: boolean;
+  ariaLabel?: string;
+};
+
+const mobileNavItems: MobileNavItem[] = [
   { to: "/", icon: LayoutDashboard, label: "Home" },
   { to: "/pipeline", icon: Kanban, label: "Pipeline" },
   { to: "/photos/capture", icon: Camera, label: "Capture" },
   { to: "/contacts", icon: Users, label: "Contacts" },
   { to: "/tasks", icon: CheckSquare, label: "Tasks" },
+  {
+    to: "https://support-hub-production.up.railway.app/",
+    icon: Ticket,
+    label: "Tickets",
+    external: true,
+    ariaLabel: "Open Tickets in a new tab",
+  },
 ];
 
 function getNavItemKey(item: { label: string; to: string }) {
@@ -25,7 +42,7 @@ function getNavItemKey(item: { label: string; to: string }) {
 export function MobileNav() {
   const { user } = useAuth();
   const navItems = user?.role === "rep"
-    ? [...mobileNavItems, { to: "/commissions", icon: DollarSign, label: "Commissions" }]
+    ? [...mobileNavItems, { to: "/commissions", icon: DollarSign, label: "Commissions" } satisfies MobileNavItem]
     : mobileNavItems;
   const captureSearch = user?.activeOfficeId ? `?${new URLSearchParams({ officeId: user.activeOfficeId }).toString()}` : "";
   const captureHref = buildFieldCaptureUrl(captureSearch);
@@ -40,6 +57,18 @@ export function MobileNav() {
               href={captureHref}
               className="flex flex-col items-center justify-center gap-1 min-w-[3rem] min-h-[2.75rem] rounded-md transition-colors text-muted-foreground"
               data-capture-nav="field-app"
+            >
+              <item.icon className="h-5 w-5" />
+              <span className="text-[10px] font-medium">{item.label}</span>
+            </a>
+          ) : item.external ? (
+            <a
+              key={getNavItemKey(item)}
+              href={item.to}
+              target="_blank"
+              rel="noopener noreferrer"
+              aria-label={item.ariaLabel}
+              className="flex flex-col items-center justify-center gap-1 min-w-[3rem] min-h-[2.75rem] rounded-md transition-colors text-muted-foreground"
             >
               <item.icon className="h-5 w-5" />
               <span className="text-[10px] font-medium">{item.label}</span>
