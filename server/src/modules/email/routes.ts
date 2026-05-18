@@ -28,6 +28,26 @@ import { getPropertyDetail } from "../properties/service.js";
 
 const router = Router();
 
+function parsePaginationParam(
+  rawValue: unknown,
+  name: "page" | "limit",
+  options: { defaultValue?: number; min?: number; max?: number } = {}
+) {
+  if (rawValue === undefined) return options.defaultValue;
+  if (typeof rawValue !== "string" || !/^\d+$/.test(rawValue)) {
+    throw new AppError(400, `Invalid ${name} query parameter`);
+  }
+
+  const parsed = Number(rawValue);
+  const min = options.min ?? 1;
+  const max = options.max;
+  if (!Number.isFinite(parsed) || !Number.isInteger(parsed) || parsed < min || (max !== undefined && parsed > max)) {
+    throw new AppError(400, `Invalid ${name} query parameter`);
+  }
+
+  return parsed;
+}
+
 function canUserViewDeal(req: any, dealId: string) {
   return getDealById(req.tenantDb!, dealId, req.user!.role, req.user!.id)
     .then(Boolean)
@@ -121,8 +141,8 @@ router.get("/", async (req, res, next) => {
       filter: req.query.filter as "all" | "unread" | "unassigned" | "sent" | undefined,
       status: req.query.status as "unassigned" | "assigned" | "ignored" | "deleted" | undefined,
       search: req.query.search as string | undefined,
-      page: req.query.page ? parseInt(req.query.page as string, 10) : undefined,
-      limit: req.query.limit ? parseInt(req.query.limit as string, 10) : undefined,
+      page: parsePaginationParam(req.query.page, "page"),
+      limit: parsePaginationParam(req.query.limit, "limit", { max: 100 }),
     };
 
     const result = await getUserEmails(req.tenantDb!, req.user!.id, filters);
@@ -147,8 +167,8 @@ router.get("/deal/:dealId", async (req, res, next) => {
       direction: req.query.direction as "inbound" | "outbound" | undefined,
       search: req.query.search as string | undefined,
       status: req.query.status as "unassigned" | "ignored" | undefined,
-      page: req.query.page ? parseInt(req.query.page as string, 10) : undefined,
-      limit: req.query.limit ? parseInt(req.query.limit as string, 10) : 20,
+      page: parsePaginationParam(req.query.page, "page"),
+      limit: parsePaginationParam(req.query.limit, "limit", { defaultValue: 20, max: 100 }),
     };
 
     const result = await getEmails(req.tenantDb!, filters, req.user!.id, req.user!.role);
@@ -201,8 +221,8 @@ router.get("/company/:companyId", async (req, res, next) => {
       companyId: req.params.companyId,
       direction: req.query.direction as "inbound" | "outbound" | undefined,
       search: req.query.search as string | undefined,
-      page: req.query.page ? parseInt(req.query.page as string, 10) : undefined,
-      limit: req.query.limit ? parseInt(req.query.limit as string, 10) : 20,
+      page: parsePaginationParam(req.query.page, "page"),
+      limit: parsePaginationParam(req.query.limit, "limit", { defaultValue: 20, max: 100 }),
     };
 
     const result = await getEmails(req.tenantDb!, filters, req.user!.id, req.user!.role);
@@ -224,8 +244,8 @@ router.get("/lead/:leadId", async (req, res, next) => {
       leadId: req.params.leadId,
       direction: req.query.direction as "inbound" | "outbound" | undefined,
       search: req.query.search as string | undefined,
-      page: req.query.page ? parseInt(req.query.page as string, 10) : undefined,
-      limit: req.query.limit ? parseInt(req.query.limit as string, 10) : 20,
+      page: parsePaginationParam(req.query.page, "page"),
+      limit: parsePaginationParam(req.query.limit, "limit", { defaultValue: 20, max: 100 }),
     };
 
     const result = await getEmails(req.tenantDb!, filters, req.user!.id, req.user!.role);
@@ -246,8 +266,8 @@ router.get("/contact/:contactId", async (req, res, next) => {
       contactId: req.params.contactId,
       direction: req.query.direction as "inbound" | "outbound" | undefined,
       search: req.query.search as string | undefined,
-      page: req.query.page ? parseInt(req.query.page as string, 10) : undefined,
-      limit: req.query.limit ? parseInt(req.query.limit as string, 10) : 20,
+      page: parsePaginationParam(req.query.page, "page"),
+      limit: parsePaginationParam(req.query.limit, "limit", { defaultValue: 20, max: 100 }),
     };
 
     const result = await getEmails(req.tenantDb!, filters, req.user!.id, req.user!.role);
@@ -371,8 +391,8 @@ router.get("/assignment-queue", async (req, res, next) => {
     const filters = {
       search: req.query.search as string | undefined,
       status: req.query.status as "unassigned" | "ignored" | undefined,
-      page: req.query.page ? parseInt(req.query.page as string, 10) : undefined,
-      limit: req.query.limit ? parseInt(req.query.limit as string, 10) : undefined,
+      page: parsePaginationParam(req.query.page, "page"),
+      limit: parsePaginationParam(req.query.limit, "limit", { max: 100 }),
     };
 
     const result = await getEmailAssignmentQueue(

@@ -71,6 +71,30 @@ function sqlConditionReferencesColumn(node: any, columnName: string, seen = new 
   return false;
 }
 
+function collectSqlText(node: any, seen = new Set<unknown>()): string {
+  if (node == null) return "";
+  if (typeof node === "string") return node;
+  if (typeof node !== "object") return "";
+  if (seen.has(node)) return "";
+  seen.add(node);
+
+  if (Array.isArray(node)) {
+    return node.map((entry) => collectSqlText(entry, seen)).join(" ");
+  }
+
+  if ("queryChunks" in node) {
+    return collectSqlText((node as any).queryChunks, seen);
+  }
+
+  if ("value" in node && Array.isArray((node as any).value)) {
+    return collectSqlText((node as any).value, seen);
+  }
+
+  return Object.values(node)
+    .map((entry) => collectSqlText(entry, seen))
+    .join(" ");
+}
+
 function createSelectChain(result: any[]) {
   const chain: any = {
     from: vi.fn(() => chain),
@@ -1313,6 +1337,67 @@ describe("email service inbound association", () => {
     );
   });
 
+  it("includes source lead email paths when recomputing deal email stats", async () => {
+    const updatePayloads: Array<{ table: string; payload: any }> = [];
+    const tenantDb = {
+      select: vi.fn(() => {
+        const chain: any = {
+          from: vi.fn(() => chain),
+          where: vi.fn(() => chain),
+          limit: vi.fn(() => chain),
+          then(resolve: (value: any) => void) {
+            const callIndex = (tenantDb.select as any).mock.calls.length;
+            if (callIndex === 1) {
+              resolve([{ id: "email-1", userId: "user-1", contactId: null }]);
+            } else if (callIndex === 2) {
+              resolve([{ id: "deal-1", companyId: "company-1", propertyId: "property-1", sourceLeadId: "lead-1" }]);
+            } else {
+              resolve([]);
+            }
+          },
+        };
+        return chain;
+      }),
+      update: vi.fn((table: any) => ({
+        set: vi.fn((payload: any) => {
+          updatePayloads.push({ table: table?.name ?? "unknown", payload });
+          return {
+            where: vi.fn(() => ({
+              returning: vi.fn(async () => []),
+            })),
+          };
+        }),
+      })),
+      insert: vi.fn(() => ({
+        values: vi.fn(async () => []),
+      })),
+    };
+
+    await associateEmailToEntity(
+      tenantDb as any,
+      "email-1",
+      {
+        assignedEntityType: "deal",
+        assignedEntityId: "deal-1",
+        assignedDealId: "deal-1",
+      },
+      "director",
+      "user-1",
+      "office-1"
+    );
+
+    const dealStatsUpdate = updatePayloads.find((entry) => entry.payload?.emailCount && hasColumnName(entry.payload.emailCount, "source_lead_id"));
+    expect(dealStatsUpdate).toBeDefined();
+    const emailCountSql = collectSqlText(dealStatsUpdate?.payload?.emailCount);
+    const lastEmailSql = collectSqlText(dealStatsUpdate?.payload?.lastEmailAt);
+    expect(emailCountSql).toContain("COUNT(e.id)::int");
+    expect(emailCountSql).toContain("source_lead_id");
+    expect(lastEmailSql).toContain("source_lead_id");
+    expect(emailCountSql).not.toContain("sourceLeadId");
+    expect(lastEmailSql).not.toContain("sourceLeadId");
+    expect(emailCountSql).not.toContain("COUNT(*)");
+  });
+
   it("bumps email syncedAt when using associateEmailToDeal helper", async () => {
     const updatePayloads: Array<{ table: string; payload: any }> = [];
     const tenantDb = {
@@ -1696,5 +1781,67 @@ describe("email service inbound association", () => {
 
     expect(graphRequestMock).not.toHaveBeenCalled();
     expect(tenantDb.insert).not.toHaveBeenCalled();
+  });
+
+  it("recomputes linked entity email stats after sending an outbound email", async () => {
+    isGraphAuthConfiguredMock.mockReturnValue(false);
+
+    let insertCalls = 0;
+    const updatePayloads: Array<{ table: string; payload: any }> = [];
+    const tenantDb = {
+      select: vi.fn(() => {
+        const chain: any = {
+          from: vi.fn(() => chain),
+          where: vi.fn(() => chain),
+          limit: vi.fn(() => chain),
+          then(resolve: (value: any) => void) {
+            resolve([{ companyId: "company-1" }]);
+          },
+        };
+        return chain;
+      }),
+      insert: vi.fn((table: any) => ({
+        values: vi.fn((_payload: any) => ({
+          returning: vi.fn(async () => {
+            insertCalls += 1;
+            if (insertCalls === 1) {
+              return [
+                {
+                  id: "email-1",
+                  assignedEntityType: "company",
+                  assignedEntityId: "company-1",
+                  dealId: null,
+                  contactId: "contact-1",
+                  threadBindingId: null,
+                },
+              ];
+            }
+            return [];
+          }),
+          then(resolve: (value: any[]) => void) {
+            resolve([]);
+          },
+        })),
+      })),
+      update: vi.fn((table: any) => ({
+        set: vi.fn((payload: any) => {
+          updatePayloads.push({ table: table?.name ?? "unknown", payload });
+          return {
+            where: vi.fn(async () => []),
+          };
+        }),
+      })),
+    };
+
+    await sendEmail(tenantDb as any, "user-1", {
+      to: ["client@example.com"],
+      subject: "Follow up",
+      bodyHtml: "<p>Hello</p>",
+      contactId: "contact-1",
+    });
+
+    expect(updatePayloads).toHaveLength(2);
+    expect(updatePayloads.some((entry) => hasColumnName(entry.payload?.emailCount, "company_id"))).toBe(true);
+    expect(updatePayloads.some((entry) => hasColumnName(entry.payload?.emailCount, "contact_id"))).toBe(true);
   });
 });

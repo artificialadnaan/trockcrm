@@ -169,22 +169,36 @@ async function refreshEntityEmailStats(
       .update(deals)
       .set({
         emailCount: sql<number>`(
-          SELECT COUNT(*)::int
-          FROM ${emails} e
-          WHERE e.assignment_status <> 'ignored'
-            AND (
-              (e.assigned_entity_type = 'deal' AND e.assigned_entity_id = ${entityId})
-              OR e.deal_id = ${entityId}
-            )
+          SELECT COUNT(e.id)::int
+          FROM ${deals} d
+          LEFT JOIN ${emails} e
+            ON e.assignment_status <> 'ignored'
+           AND (
+             (e.assigned_entity_type = 'deal' AND e.assigned_entity_id = d.id)
+             OR e.deal_id = d.id
+             OR (
+               d.source_lead_id IS NOT NULL
+               AND e.assigned_entity_type = 'lead'
+               AND e.assigned_entity_id = d.source_lead_id
+             )
+           )
+          WHERE d.id = ${entityId}
         )`,
         lastEmailAt: sql<Date | null>`(
           SELECT MAX(e.sent_at)
-          FROM ${emails} e
-          WHERE e.assignment_status <> 'ignored'
-            AND (
-              (e.assigned_entity_type = 'deal' AND e.assigned_entity_id = ${entityId})
-              OR e.deal_id = ${entityId}
-            )
+          FROM ${deals} d
+          LEFT JOIN ${emails} e
+            ON e.assignment_status <> 'ignored'
+           AND (
+             (e.assigned_entity_type = 'deal' AND e.assigned_entity_id = d.id)
+             OR e.deal_id = d.id
+             OR (
+               d.source_lead_id IS NOT NULL
+               AND e.assigned_entity_type = 'lead'
+               AND e.assigned_entity_id = d.source_lead_id
+             )
+           )
+          WHERE d.id = ${entityId}
         )`,
       })
       .where(eq(deals.id, entityId));
@@ -281,6 +295,21 @@ function deriveEmailStatTargetsFromEmail(email: {
   }
 
   return targets;
+}
+
+async function refreshEmailStatsForEmailRecord(
+  tenantDb: TenantDb,
+  email: {
+    assignedEntityType?: string | null;
+    assignedEntityId?: string | null;
+    dealId?: string | null;
+    contactId?: string | null;
+  }
+) {
+  await refreshEmailStatsForTargets(tenantDb, [
+    ...deriveEmailStatTargetsFromEmail(email),
+    ...(await deriveCompanyStatTargetsFromEmail(tenantDb, email)),
+  ]);
 }
 
 async function deriveCompanyStatTargetsFromEmail(
@@ -1234,6 +1263,8 @@ export async function sendEmail(
     occurredAt: new Date(),
   });
 
+  await refreshEmailStatsForEmailRecord(tenantDb, emailRecord);
+
   return emailRecord;
 }
 
@@ -1332,6 +1363,8 @@ async function createMockSentEmail(
     body: stripHtml(input.bodyHtml).substring(0, 1000),
     occurredAt: new Date(),
   });
+
+  await refreshEmailStatsForEmailRecord(tenantDb, emailRecord);
 
   return emailRecord;
 }

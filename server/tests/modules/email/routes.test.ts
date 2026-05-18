@@ -293,6 +293,48 @@ describe("email routes", () => {
     emailServiceMocks.assertCanMutateEmailThread.mockResolvedValue(undefined);
   });
 
+  it("rejects invalid assignment queue pagination params with 400s", async () => {
+    await expect(
+      invokeRoute({
+        method: "get",
+        url: "/assignment-queue",
+        user: makeDirectorUser(),
+        query: { limit: "foo" },
+      })
+    ).rejects.toThrow("Invalid limit query parameter");
+
+    await expect(
+      invokeRoute({
+        method: "get",
+        url: "/assignment-queue",
+        user: makeDirectorUser(),
+        query: { page: "abc" },
+      })
+    ).rejects.toThrow("Invalid page query parameter");
+
+    expect(emailServiceMocks.getEmailAssignmentQueue).not.toHaveBeenCalled();
+  });
+
+  it("rejects out-of-bounds assignment queue pagination params with 400s", async () => {
+    await expect(
+      invokeRoute({
+        method: "get",
+        url: "/assignment-queue",
+        user: makeDirectorUser(),
+        query: { page: "0" },
+      })
+    ).rejects.toThrow("Invalid page query parameter");
+
+    await expect(
+      invokeRoute({
+        method: "get",
+        url: "/assignment-queue",
+        user: makeDirectorUser(),
+        query: { limit: "101" },
+      })
+    ).rejects.toThrow("Invalid limit query parameter");
+  });
+
   it("forwards assignment queue filters to the service", async () => {
     emailServiceMocks.getEmailAssignmentQueue.mockResolvedValue({
       items: [],
@@ -314,6 +356,104 @@ describe("email routes", () => {
     );
     expect(req.commitTransaction).toHaveBeenCalled();
     expect(res.body).toEqual({ items: [], pagination: { page: 1, limit: 25, total: 0, totalPages: 0 } });
+  });
+
+  it("rejects invalid entity-email pagination params with 400s", async () => {
+    dealServiceMocks.getDealById.mockResolvedValue({ id: "deal-1", sourceLeadId: null });
+    companyServiceMocks.getCompanyById.mockResolvedValue({ id: "company-1" });
+    leadServiceMocks.getLeadById.mockResolvedValue({ id: "lead-1" });
+    contactServiceMocks.getContactById.mockResolvedValue({ id: "contact-1", companyId: "company-1" });
+
+    await expect(
+      invokeRoute({
+        method: "get",
+        url: "/deal/deal-1",
+        user: makeDirectorUser(),
+        query: { limit: "foo" },
+      })
+    ).rejects.toThrow("Invalid limit query parameter");
+
+    await expect(
+      invokeRoute({
+        method: "get",
+        url: "/deal/deal-1",
+        user: makeDirectorUser(),
+        query: { page: "abc" },
+      })
+    ).rejects.toThrow("Invalid page query parameter");
+
+    await expect(
+      invokeRoute({
+        method: "get",
+        url: "/company/company-1",
+        user: makeDirectorUser(),
+        query: { limit: "foo" },
+      })
+    ).rejects.toThrow("Invalid limit query parameter");
+
+    await expect(
+      invokeRoute({
+        method: "get",
+        url: "/lead/lead-1",
+        user: makeDirectorUser(),
+        query: { page: "abc" },
+      })
+    ).rejects.toThrow("Invalid page query parameter");
+
+    await expect(
+      invokeRoute({
+        method: "get",
+        url: "/contact/contact-1",
+        user: makeDirectorUser(),
+        query: { page: "abc" },
+      })
+    ).rejects.toThrow("Invalid page query parameter");
+
+    expect(emailServiceMocks.getEmails).not.toHaveBeenCalled();
+  });
+
+  it("rejects invalid inbox pagination params with 400s", async () => {
+    await expect(
+      invokeRoute({
+        method: "get",
+        url: "/",
+        user: makeRepUser(),
+        query: { page: "0" },
+      })
+    ).rejects.toThrow("Invalid page query parameter");
+
+    await expect(
+      invokeRoute({
+        method: "get",
+        url: "/",
+        user: makeRepUser(),
+        query: { limit: "101" },
+      })
+    ).rejects.toThrow("Invalid limit query parameter");
+
+    expect(emailServiceMocks.getUserEmails).not.toHaveBeenCalled();
+  });
+
+  it("forwards valid entity-email pagination params to the service", async () => {
+    dealServiceMocks.getDealById.mockResolvedValue({ id: "deal-1", sourceLeadId: null });
+    emailServiceMocks.getEmails.mockResolvedValue({
+      emails: [],
+      pagination: { page: 1, limit: 10, total: 0, totalPages: 0 },
+    });
+
+    await invokeRoute({
+      method: "get",
+      url: "/deal/deal-1",
+      user: makeDirectorUser(),
+      query: { limit: "10" },
+    });
+
+    expect(emailServiceMocks.getEmails).toHaveBeenCalledWith(
+      expect.any(Object),
+      expect.objectContaining({ dealId: "deal-1", limit: 10 }),
+      "director-1",
+      "director"
+    );
   });
 
   it("forwards inbox filters to getUserEmails for server-side filtering before pagination", async () => {
