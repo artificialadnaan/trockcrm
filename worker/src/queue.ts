@@ -1,11 +1,22 @@
 import { pool } from "./db.js";
 
-type JobHandler = (payload: any, officeId: string | null) => Promise<void>;
+export type JobHandlerResult =
+  | void
+  | {
+      status: "dead";
+      error: string;
+    };
+
+type JobHandler = (payload: any, officeId: string | null) => Promise<JobHandlerResult>;
 
 const jobHandlers = new Map<string, JobHandler>();
 
 export function registerJobHandler(jobType: string, handler: JobHandler) {
   jobHandlers.set(jobType, handler);
+}
+
+export function deadJob(error: string): Extract<JobHandlerResult, { status: "dead" }> {
+  return { status: "dead", error };
 }
 
 let polling = false;
@@ -68,7 +79,15 @@ async function processJob(job: any): Promise<void> {
   if (!handler) return; // Already marked dead above
 
   try {
-    await handler(job.payload, job.office_id);
+    const result = await handler(job.payload, job.office_id);
+    if (result && result.status === "dead") {
+      await pool.query(
+        "UPDATE public.job_queue SET status = 'dead', last_error = $1 WHERE id = $2",
+        [result.error, job.id]
+      );
+      console.error(`[Worker] Job ${job.id} (${job.job_type}) rejected without retry: ${result.error}`);
+      return;
+    }
     await pool.query(
       "UPDATE public.job_queue SET status = 'completed', completed_at = NOW() WHERE id = $1",
       [job.id]

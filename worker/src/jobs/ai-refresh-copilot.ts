@@ -1,10 +1,17 @@
+import { deadJob } from "../queue.js";
 import { pool } from "../db.js";
 
 export async function runAiRefreshCopilot(payload: {
   dealId: string;
   reason?: string;
-  requestedBy?: string;
-}, officeId: string | null): Promise<void> {
+  requestedBy: string;
+}, officeId: string | null) {
+  if (!payload?.requestedBy) {
+    const error = `[Worker:ai-refresh-copilot] Missing requestedBy for dealId=${payload?.dealId ?? "unknown"}`;
+    console.error(error);
+    return deadJob(error);
+  }
+
   console.log(
     `[Worker:ai-refresh-copilot] Refresh request dealId=${payload.dealId} reason=${payload.reason ?? "unknown"}`
   );
@@ -16,7 +23,7 @@ export async function runAiRefreshCopilot(payload: {
       JSON.stringify({
         dealId: payload.dealId,
         reason: payload.reason ?? "refresh",
-        requestedBy: payload.requestedBy ?? null,
+        requestedBy: payload.requestedBy,
       }),
       officeId,
     ]

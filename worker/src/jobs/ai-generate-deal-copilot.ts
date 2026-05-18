@@ -1,6 +1,7 @@
 import { drizzle } from "drizzle-orm/node-postgres";
 import * as schema from "@trock-crm/shared/schema";
 import { pool } from "../db.js";
+import { deadJob } from "../queue.js";
 
 const SERVER_AI_COPILOT_SERVICE_MODULES = [
   "../../../server/dist/modules/ai-copilot/service.js",
@@ -24,8 +25,14 @@ async function importFirstAvailable<T>(paths: readonly string[]): Promise<T> {
 export async function runAiGenerateDealCopilot(payload: {
   dealId: string;
   reason?: string;
-  requestedBy?: string | null;
-}, officeId: string | null): Promise<void> {
+  requestedBy: string;
+}, officeId: string | null) {
+  if (!payload?.requestedBy) {
+    const error = `[Worker:ai-generate-deal-copilot] Missing requestedBy for dealId=${payload?.dealId ?? "unknown"}`;
+    console.error(error);
+    return deadJob(error);
+  }
+
   console.log(
     `[Worker:ai-generate-deal-copilot] Generate request dealId=${payload.dealId} reason=${payload.reason ?? "manual"}`
   );
@@ -52,18 +59,18 @@ export async function runAiGenerateDealCopilot(payload: {
     const module = await importFirstAvailable<{
       generateDealCopilotPacket: (
         tenantDb: unknown,
-        input: { dealId: string; forceRegenerate?: boolean; viewerUserId?: string }
+        input: { dealId: string; forceRegenerate?: boolean; viewerUserId: string }
       ) => Promise<unknown>;
     }>(SERVER_AI_COPILOT_SERVICE_MODULES);
     const generateDealCopilotPacket = module.generateDealCopilotPacket as (
       tenantDb: unknown,
-      input: { dealId: string; forceRegenerate?: boolean; viewerUserId?: string }
+      input: { dealId: string; forceRegenerate?: boolean; viewerUserId: string }
     ) => Promise<unknown>;
 
     await generateDealCopilotPacket(tenantDb, {
       dealId: payload.dealId,
       forceRegenerate: true,
-      viewerUserId: payload.requestedBy ?? undefined,
+      viewerUserId: payload.requestedBy,
     });
 
     await client.query("COMMIT");

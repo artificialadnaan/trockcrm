@@ -338,6 +338,16 @@ describe("ai copilot routes", () => {
     expect(res.status).toBe(202);
     expect(res.body).toEqual({ queued: true });
     expect(insertMock).toHaveBeenCalledTimes(1);
+    expect(insertMock.mock.results[0]?.value.values).toHaveBeenCalledWith(
+      expect.objectContaining({
+        jobType: "ai_refresh_copilot",
+        payload: expect.objectContaining({
+          dealId: "deal-1",
+          reason: "manual_regenerate",
+          requestedBy: "rep-1",
+        }),
+      })
+    );
   });
 
   it("accepts a suggested task and creates a real task", async () => {
