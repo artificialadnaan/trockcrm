@@ -455,7 +455,7 @@ describe("normalizeDealBoardResponse", () => {
     const root = await renderHook();
     await waitForIdle();
 
-    const requestPath = String(apiMock.mock.calls.at(-1)?.[0]);
+    const requestPath = String(apiMock.mock.calls[apiMock.mock.calls.length - 1]?.[0]);
     expect(requestPath).toContain("/deals/pipeline?");
     expect(requestPath).not.toContain("previewLimit=");
 
