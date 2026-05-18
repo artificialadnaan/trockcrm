@@ -155,6 +155,29 @@ function createTenantDbMock(options?: { scopingSectionData?: Record<string, unkn
   };
 }
 
+function createTenantDbMockWithProperty(propertyCompanyId = "company-1") {
+  const tenantDb = createTenantDbMock();
+  tenantDb.select = vi.fn((selection?: Record<string, unknown>) => {
+    if (selection && Object.prototype.hasOwnProperty.call(selection, "companyId")) {
+      return {
+        from: vi.fn(() => ({
+          where: vi.fn(() => ({
+            limit: vi.fn(async () => [{
+              companyId: propertyCompanyId,
+              address: "5000 Triangle Pkwy",
+              city: "Peachtree Corners",
+              state: "GA",
+              zip: "30092",
+            }]),
+          })),
+        })),
+      };
+    }
+    return createTenantDbMock().select(selection);
+  });
+  return tenantDb;
+}
+
 async function invokeRoute(
   method: "get" | "patch" | "post",
   path: string,
@@ -611,6 +634,188 @@ describe("Deal Scoping Routes", () => {
       expect.objectContaining({ userId: "user-1", role: "director" })
     );
     expect(res.statusCode).toBe(200);
+  });
+
+  it("allows resolved-field relationship fill-in when company and property are currently missing", async () => {
+    vi.mocked(lineageResolver.getResolvedDeal).mockResolvedValueOnce({
+      resolved: {
+        assignedRepId: "user-1",
+        companyId: null,
+        projectTypeId: "project-type-1",
+        propertyId: null,
+        propertyName: "Property One",
+        workflowRoute: "normal",
+      },
+    } as never);
+    vi.mocked(lineageResolver.writeResolvedDealFields).mockResolvedValueOnce({
+      resolved: { companyId: "company-1", propertyId: "property-1" },
+    } as never);
+
+    const tenantDb = createTenantDbMockWithProperty();
+
+    const { req, res } = await invokeRoute("patch", "/:id/resolved-fields", {
+      params: { id: "deal-1" },
+      tenantDb,
+      body: {
+        companyId: "company-1",
+        propertyId: "property-1",
+      },
+    });
+
+    expect(scopingService.assertDealScopingWriteAllowed).not.toHaveBeenCalled();
+    expect(lineageResolver.writeResolvedDealFields).toHaveBeenCalledWith(
+      req.tenantDb,
+      "deal-1",
+      expect.objectContaining({
+        companyId: "company-1",
+        propertyId: "property-1",
+      }),
+      expect.objectContaining({ userId: "user-1", role: "director" })
+    );
+    expect(res.statusCode).toBe(200);
+  });
+
+  it("blocks resolved-field company replacement after the relationship is established", async () => {
+    vi.mocked(scopingService.assertDealScopingWriteAllowed).mockRejectedValueOnce(
+      Object.assign(new Error("Scope is read-only after RFP submission"), {
+        statusCode: 403,
+        code: "SCOPE_READ_ONLY_AFTER_RFP",
+      })
+    );
+
+    await expect(
+      invokeRoute("patch", "/:id/resolved-fields", {
+        params: { id: "deal-1" },
+        body: { companyId: "company-2" },
+      })
+    ).rejects.toMatchObject({
+      statusCode: 403,
+      code: "SCOPE_READ_ONLY_AFTER_RFP",
+    });
+
+    expect(scopingService.assertDealScopingWriteAllowed).toHaveBeenCalledWith(
+      expect.anything(),
+      "deal-1",
+      { role: "director", forceEditAfterRfp: false }
+    );
+    expect(lineageResolver.writeResolvedDealFields).not.toHaveBeenCalled();
+  });
+
+  it("blocks resolved-field company replacement even when an admin forces post-RFP edits", async () => {
+    vi.mocked(scopingService.assertDealScopingWriteAllowed).mockResolvedValueOnce({
+      adminOverride: true,
+      lockState: { locked: true, reason: "rfp_submission", submittedAt: new Date("2026-05-12T12:00:00.000Z") },
+    } as never);
+
+    await expect(
+      invokeRoute("patch", "/:id/resolved-fields", {
+        params: { id: "deal-1" },
+        body: { companyId: "company-2", forceEditAfterRfp: true },
+        user: {
+          id: "admin-1",
+          role: "admin",
+          officeId: "office-1",
+          activeOfficeId: "office-1",
+        },
+      })
+    ).rejects.toMatchObject({
+      statusCode: 400,
+      message: "companyId is immutable once established",
+    });
+
+    expect(scopingService.assertDealScopingWriteAllowed).toHaveBeenCalledWith(
+      expect.anything(),
+      "deal-1",
+      { role: "admin", forceEditAfterRfp: true }
+    );
+    expect(lineageResolver.writeResolvedDealFields).not.toHaveBeenCalled();
+  });
+
+  it("blocks resolved-field property replacement after the relationship is established", async () => {
+    vi.mocked(scopingService.assertDealScopingWriteAllowed).mockRejectedValueOnce(
+      Object.assign(new Error("Scope is read-only after RFP submission"), {
+        statusCode: 403,
+        code: "SCOPE_READ_ONLY_AFTER_RFP",
+      })
+    );
+
+    await expect(
+      invokeRoute("patch", "/:id/resolved-fields", {
+        params: { id: "deal-1" },
+        body: { propertyId: "property-2" },
+      })
+    ).rejects.toMatchObject({
+      statusCode: 403,
+      code: "SCOPE_READ_ONLY_AFTER_RFP",
+    });
+
+    expect(scopingService.assertDealScopingWriteAllowed).toHaveBeenCalledWith(
+      expect.anything(),
+      "deal-1",
+      { role: "director", forceEditAfterRfp: false }
+    );
+    expect(lineageResolver.writeResolvedDealFields).not.toHaveBeenCalled();
+  });
+
+  it("allows filling only the missing resolved-field relationship and keeps the established one locked", async () => {
+    vi.mocked(lineageResolver.getResolvedDeal).mockResolvedValueOnce({
+      resolved: {
+        assignedRepId: "user-1",
+        companyId: "company-1",
+        projectTypeId: "project-type-1",
+        propertyId: null,
+        propertyName: "Property One",
+        workflowRoute: "normal",
+      },
+    } as never);
+    vi.mocked(lineageResolver.writeResolvedDealFields).mockResolvedValueOnce({
+      resolved: { companyId: "company-1", propertyId: "property-1" },
+    } as never);
+
+    const tenantDb = createTenantDbMockWithProperty();
+
+    const { res } = await invokeRoute("patch", "/:id/resolved-fields", {
+      params: { id: "deal-1" },
+      tenantDb,
+      body: {
+        companyId: "company-1",
+        propertyId: "property-1",
+      },
+    });
+
+    expect(scopingService.assertDealScopingWriteAllowed).not.toHaveBeenCalled();
+    expect(res.statusCode).toBe(200);
+  });
+
+  it("rejects resolved-field relationship fill-in when the selected property belongs to a different company", async () => {
+    vi.mocked(lineageResolver.getResolvedDeal).mockResolvedValueOnce({
+      resolved: {
+        assignedRepId: "user-1",
+        companyId: null,
+        projectTypeId: "project-type-1",
+        propertyId: null,
+        propertyName: "Property One",
+        workflowRoute: "normal",
+      },
+    } as never);
+
+    const tenantDb = createTenantDbMockWithProperty("company-2");
+
+    await expect(
+      invokeRoute("patch", "/:id/resolved-fields", {
+        params: { id: "deal-1" },
+        tenantDb,
+        body: {
+          companyId: "company-1",
+          propertyId: "property-1",
+        },
+      })
+    ).rejects.toMatchObject({
+      statusCode: 400,
+      message: "Property does not belong to the company",
+    });
+
+    expect(lineageResolver.writeResolvedDealFields).not.toHaveBeenCalled();
   });
 
 

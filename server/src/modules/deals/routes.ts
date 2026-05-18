@@ -192,6 +192,44 @@ function readScopeLockedResolvedBaseline(sectionData: unknown) {
   };
 }
 
+function normalizeRelationshipId(value: unknown) {
+  return typeof value === "string" && value.trim().length > 0 ? value.trim() : null;
+}
+
+function isRelationshipFillIn(field: string, patch: Record<string, unknown>, existing: Record<string, unknown>) {
+  if (field !== "companyId" && field !== "propertyId") {
+    return false;
+  }
+
+  return normalizeRelationshipId(existing[field]) == null && normalizeRelationshipId(patch[field]) != null;
+}
+
+function getLockedResolvedFieldsRequiringScopeGuard(
+  patch: Record<string, unknown>,
+  existing: Record<string, unknown>
+) {
+  return getScopeLockedResolvedFields(patch, existing).filter(
+    (field) => !isRelationshipFillIn(field, patch, existing)
+  );
+}
+
+function assertResolvedRelationshipLineagePolicy(
+  patch: Record<string, unknown>,
+  existing: Record<string, unknown>
+) {
+  const existingCompanyId = normalizeRelationshipId(existing.companyId);
+  const requestedCompanyId = normalizeRelationshipId(patch.companyId);
+  if (existingCompanyId && patch.companyId !== undefined && requestedCompanyId !== existingCompanyId) {
+    throw new AppError(400, "companyId is immutable once established");
+  }
+
+  const existingPropertyId = normalizeRelationshipId(existing.propertyId);
+  const requestedPropertyId = normalizeRelationshipId(patch.propertyId);
+  if (existingPropertyId && patch.propertyId !== undefined && requestedPropertyId !== existingPropertyId) {
+    throw new AppError(400, "propertyId is immutable once established");
+  }
+}
+
 async function loadLockedDealPatchComparisonBaseline(
   tenantDb: any,
   dealId: string,
@@ -264,6 +302,28 @@ async function loadDealLocationFromProperty(tenantDb: any, propertyId: string) {
       propertyZip: property.zip ?? null,
     },
   };
+}
+
+async function assertResolvedRelationshipConsistency(
+  tenantDb: any,
+  patch: Record<string, unknown>,
+  existing: Record<string, unknown>
+) {
+  const requestedPropertyId = normalizeRelationshipId(patch.propertyId);
+  const requestedCompanyId = normalizeRelationshipId(patch.companyId);
+  const existingPropertyId = normalizeRelationshipId(existing.propertyId);
+  const existingCompanyId = normalizeRelationshipId(existing.companyId);
+  const effectivePropertyId = requestedPropertyId ?? existingPropertyId;
+  const effectiveCompanyId = requestedCompanyId ?? existingCompanyId;
+  const propertyRelationshipChanged = requestedPropertyId != null && requestedPropertyId !== existingPropertyId;
+  const companyRelationshipChanged = requestedCompanyId != null && requestedCompanyId !== existingCompanyId;
+
+  if (effectivePropertyId && (propertyRelationshipChanged || companyRelationshipChanged)) {
+    const property = await loadDealLocationFromProperty(tenantDb, effectivePropertyId);
+    if (effectiveCompanyId && property.companyId !== effectiveCompanyId) {
+      throw new AppError(400, "Property does not belong to the company");
+    }
+  }
 }
 
 const LEGACY_CLEANUP_PATCH_ALLOWED_FIELDS = new Set([
@@ -1029,13 +1089,16 @@ router.patch("/:id/resolved-fields", async (req, res, next) => {
     const existingResolved = hasLockedResolvedFieldCandidates
       ? await loadLockedResolvedFieldComparisonBaseline(req.tenantDb!, req.params.id)
       : {};
-    const scopeLockedFields = getScopeLockedResolvedFields(patch, existingResolved);
+    const scopeLockedFields = getLockedResolvedFieldsRequiringScopeGuard(patch, existingResolved);
     const writePolicy = scopeLockedFields.length > 0
       ? await assertDealScopingWriteAllowed(req.tenantDb!, req.params.id, {
           role: req.user!.role,
           forceEditAfterRfp,
         })
       : null;
+
+    assertResolvedRelationshipLineagePolicy(patch, existingResolved);
+    await assertResolvedRelationshipConsistency(req.tenantDb!, patch, existingResolved);
 
     const resolved = await writeResolvedDealFields(req.tenantDb!, req.params.id, patch, {
       userId: req.user!.id,

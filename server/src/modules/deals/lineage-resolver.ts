@@ -105,6 +105,7 @@ export type ResolvedDealFieldPatch = Partial<Record<ResolvedDealField, unknown>>
 
 const DEAL_COMPATIBILITY_SNAPSHOT_FIELDS = new Set<ResolvedDealField>([
   "projectTypeId",
+  "companyId",
   "propertyId",
   "propertyName",
   "propertyAddress",
@@ -394,6 +395,7 @@ export async function writeResolvedDealFields(
           })
         );
       }
+      if (field === "companyId") leadUpdates.companyId = normalizeOptionalText(value);
       if (field === "sourceCategory") leadUpdates.sourceCategory = normalizeOptionalText(value);
       if (field === "sourceDetail") leadUpdates.sourceDetail = normalizeOptionalText(value);
       if (field === "primaryContactId") leadUpdates.primaryContactId = normalizeOptionalText(value);
@@ -403,6 +405,7 @@ export async function writeResolvedDealFields(
       if (field === "bidDueDate") leadUpdates.bidDueDate = normalizeOptionalText(value);
 
       if (writePlan.compatibilityWriteThrough) {
+        if (field === "companyId") dealUpdates.companyId = normalizeOptionalText(value);
         if (field === "primaryContactId") dealUpdates.primaryContactId = normalizeOptionalText(value);
         if (field === "assignedRepId") dealUpdates.assignedRepId = normalizeOptionalText(value);
         if (field === "workflowRoute") dealUpdates.workflowRoute = value === "service" ? "service" : "normal";
@@ -421,6 +424,7 @@ export async function writeResolvedDealFields(
           })
         );
       }
+      if (field === "companyId") dealUpdates.companyId = normalizeOptionalText(value);
       if (field === "primaryContactId") dealUpdates.primaryContactId = normalizeOptionalText(value);
       if (field === "assignedRepId") dealUpdates.assignedRepId = normalizeOptionalText(value);
       if (field === "workflowRoute") dealUpdates.workflowRoute = value === "service" ? "service" : "normal";

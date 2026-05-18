@@ -1,11 +1,17 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  SCOPE_LOCKED_RESOLVED_FIELDS,
   getScopeLockedDealPatchFields,
   getScopeLockedResolvedFields,
 } from "./deal-scope-lock.js";
 
 describe("deal scope lock comparisons", () => {
+  it("keeps relationship ids in the resolved-fields post-RFP lock set", () => {
+    expect(SCOPE_LOCKED_RESOLVED_FIELDS.has("companyId")).toBe(true);
+    expect(SCOPE_LOCKED_RESOLVED_FIELDS.has("propertyId")).toBe(true);
+  });
+
   it("ignores unchanged locked deal fields in full payload saves", () => {
     expect(
       getScopeLockedDealPatchFields(
@@ -40,7 +46,7 @@ describe("deal scope lock comparisons", () => {
     ).toEqual(["name", "projectTypeId"]);
   });
 
-  it("keeps company and property relationship changes outside the post-RFP scope lock", () => {
+  it("keeps company and property relationship changes outside the main deal patch lock only", () => {
     expect(
       getScopeLockedDealPatchFields(
         {
@@ -65,7 +71,7 @@ describe("deal scope lock comparisons", () => {
           propertyId: "property-1",
         }
       )
-    ).toEqual([]);
+    ).toEqual(["companyId", "propertyId"]);
   });
 
   it("treats numeric-looking locked strings as exact strings", () => {
