@@ -63,8 +63,8 @@ interface PipelineColumn {
 
 interface TerminalStageInfo {
   stage: { id: string; name: string; slug: string };
-  deals: Deal[];
   count: number;
+  totalValue?: number;
 }
 
 export function summarizeTerminalStageCounts(terminalStages: TerminalStageInfo[]) {

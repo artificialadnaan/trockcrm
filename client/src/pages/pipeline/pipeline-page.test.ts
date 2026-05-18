@@ -32,13 +32,13 @@ describe("summarizeTerminalStageCounts", () => {
     const summary = summarizeTerminalStageCounts([
       {
         stage: { id: "won", name: "Won", slug: "won" },
-        deals: [],
         count: 7,
+        totalValue: 700000,
       },
       {
         stage: { id: "won-normal", name: "Sent to Production", slug: "sent_to_production" },
-        deals: [],
         count: 2,
+        totalValue: 200000,
       },
       {
         stage: {
@@ -46,23 +46,23 @@ describe("summarizeTerminalStageCounts", () => {
           name: "Service - Sent to Production",
           slug: "service_sent_to_production",
         },
-        deals: [],
         count: 3,
+        totalValue: 300000,
       },
       {
         stage: { id: "lost-normal", name: "Production Lost", slug: "production_lost" },
-        deals: [],
         count: 1,
+        totalValue: 0,
       },
       {
         stage: { id: "lost-service", name: "Service - Lost", slug: "service_lost" },
-        deals: [],
         count: 4,
+        totalValue: 0,
       },
       {
         stage: { id: "lost", name: "Lost", slug: "lost" },
-        deals: [],
         count: 6,
+        totalValue: 0,
       },
     ]);
 

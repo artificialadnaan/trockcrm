@@ -532,7 +532,7 @@ describe("DealListPage", () => {
     expect(html).not.toContain("101 deals");
   });
 
-  it("renders the Won KPI from the full terminal deal list returned by the board", () => {
+  it("renders the Won KPI from terminal-stage aggregates returned by the board", () => {
     mocks.useDealBoardMock.mockReturnValue({
       board: {
         columns: [
@@ -547,15 +547,7 @@ describe("DealListPage", () => {
           {
             stage: { id: "stage-won", name: "Won", slug: "won" },
             count: 12,
-            deals: Array.from({ length: 12 }, (_, index) =>
-              makeDeal({
-                id: `deal-won-${index + 1}`,
-                stageId: "stage-won",
-                awardedAmount: "5000",
-                bidEstimate: null,
-                ddEstimate: null,
-              })
-            ),
+            totalValue: 60000,
           },
         ],
       },

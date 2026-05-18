@@ -316,7 +316,8 @@ export interface DealBoardResponse {
   terminalStages: Array<{
     stage: DealBoardColumn["stage"];
     count: number;
-    deals: Deal[];
+    totalValue?: number;
+    deals?: Deal[];
   }>;
 }
 
@@ -365,7 +366,10 @@ export function normalizeDealBoardResponse(result: DealBoardApiResponse): DealBo
 
   return {
     columns: normalizedColumns,
-    terminalStages: result.terminalStages ?? [],
+    terminalStages: (result.terminalStages ?? []).map((terminal) => ({
+      ...terminal,
+      totalValue: terminal.totalValue ?? 0,
+    })),
   };
 }
 

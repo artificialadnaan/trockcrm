@@ -624,10 +624,7 @@ function DealListPageContent({ role }: { role: string }) {
   const wonValue =
     board?.terminalStages
       ?.filter((terminal) => terminal.stage.slug === "won")
-      .reduce(
-        (sum, terminal) => sum + terminal.deals.reduce((dealSum, deal) => dealSum + moneyValue(deal), 0),
-        0
-      ) ?? 0;
+      .reduce((sum, terminal) => sum + (terminal.totalValue ?? 0), 0) ?? 0;
   const overSlaCount = columns.reduce(
     (sum, column) =>
       sum +

@@ -73,7 +73,7 @@ describe("getDealsForPipeline", () => {
     dbState.responses = [];
   });
 
-  it("keeps terminal stages uncapped while preserving preview limits for active pipeline columns", async () => {
+  it("returns aggregate-only terminal stages while preserving preview limits for active pipeline columns", async () => {
     dbState.responses = [
       [
         {
@@ -115,41 +115,29 @@ describe("getDealsForPipeline", () => {
       companyName: null,
       assignedRepName: "Rep One",
     }));
-    const wonDeals = Array.from({ length: 12 }).map((_, index) => ({
-      id: `deal-won-${index + 1}`,
-      dealNumber: `TR-2026-WON-${String(index + 1).padStart(4, "0")}`,
-      name: `Won Deal ${index + 1}`,
-      stageId: "stage-won",
-      assignedRepId: "rep-1",
-      officeId: "office-1",
-      workflowRoute: "normal",
-      awardedAmount: "5000",
-      bidEstimate: null,
-      ddEstimate: null,
-      propertyCity: "Dallas",
-      propertyState: "TX",
-      source: "referral",
-      lastActivityAt: "2026-04-21T10:00:00.000Z",
-      stageEnteredAt: "2026-04-20T10:00:00.000Z",
-      updatedAt: "2026-04-21T10:00:00.000Z",
-      companyName: null,
-      assignedRepName: "Rep One",
-      contractSignedAt: "2026-04-18T10:00:00.000Z",
-      contractSignedDate: "2026-04-18",
-      lostAt: null,
-    }));
-    const tenantResponses = [
-      [{ count: 12, totalValue: 12000 }],
-      nonTerminalDeals,
-      [{ count: 12, totalValue: 60000 }],
-      wonDeals,
-    ];
     const tenantChains: any[] = [];
     const tenantDb = {
       select: vi.fn(() => {
         const chain = createChainableMock();
         tenantChains.push(chain);
-        chain.then.mockImplementation((resolve: (value: any[]) => unknown) => resolve(tenantResponses.shift() ?? []));
+        chain.then.mockImplementation((resolve: (value: any[]) => unknown) => {
+          const whereClause = chain.where.mock.calls[0]?.[0];
+          const isOpportunityQuery = containsValue(whereClause, "stage-opportunity");
+          const isWonQuery = containsValue(whereClause, "stage-won");
+          const isCardsQuery = chain.leftJoin.mock.calls.length > 0;
+
+          if (isCardsQuery && isOpportunityQuery) {
+            return resolve(nonTerminalDeals);
+          }
+          if (isWonQuery) {
+            return resolve([{ count: 12, totalValue: 60000 }]);
+          }
+          if (isOpportunityQuery) {
+            return resolve([{ count: 12, totalValue: 12000 }]);
+          }
+
+          return resolve([]);
+        });
         return chain;
       }),
     } as any;
@@ -166,10 +154,14 @@ describe("getDealsForPipeline", () => {
     const wonCardsChain = findStageCardsChain(tenantChains, "stage-won");
 
     expect(result.pipelineColumns.find((column) => column.stage.slug === "opportunity")?.deals).toHaveLength(8);
-    expect(result.terminalStages.find((column) => column.stage.slug === "won")?.deals).toHaveLength(12);
-    expect(result.terminalStages.find((column) => column.stage.slug === "won")?.totalValue).toBe(60000);
+    expect(result.pipelineColumns.find((column) => column.stage.slug === "won")?.deals).toEqual([]);
+    expect(result.terminalStages.find((column) => column.stage.slug === "won")).toEqual({
+      stage: expect.objectContaining({ id: "stage-won", slug: "won", name: "Won" }),
+      count: 12,
+      totalValue: 60000,
+    });
     expect(opportunityCardsChain?.limit).toHaveBeenCalledWith(8);
-    expect(wonCardsChain?.limit).not.toHaveBeenCalled();
+    expect(wonCardsChain).toBeUndefined();
   });
 
   it("uses the requested drill-down preview limit while keeping the full count", async () => {

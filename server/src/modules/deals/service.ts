@@ -1845,34 +1845,34 @@ export async function getDealsForPipeline(
     }
 
     const where = and(...stageConditions, ...commonConditions);
-    const stageDealsQueryBase = tenantDb
+    const summaryRows = await tenantDb
       .select({
-        ...getTableColumns(deals),
-        companyName: companies.name,
-        assignedRepName: users.displayName,
+        count: sql<number>`count(*)`,
+        totalValue: isTerminalStage
+          ? sql<number>`COALESCE(SUM(COALESCE(${deals.awardedAmount}, 0)), 0)`
+          : sql<number>`COALESCE(SUM(COALESCE(${deals.awardedAmount}, ${deals.bidEstimate}, ${deals.ddEstimate}, 0)), 0)`,
       })
       .from(deals)
-      .leftJoin(companies, eq(companies.id, deals.companyId))
-      .leftJoin(users, eq(users.id, deals.assignedRepId))
-      .where(where)
-      .orderBy(desc(deals.updatedAt));
+      .where(where);
 
-    const stageDealsQuery = isTerminalStage
-      ? stageDealsQueryBase
-      : stageDealsQueryBase.limit(pipelineCardsPerStageLimit);
-
-    const [summaryRows, stageDeals] = await Promise.all([
-      tenantDb
+    if (!isTerminalStage) {
+      const stageDeals = await tenantDb
         .select({
-          count: sql<number>`count(*)`,
-          totalValue: sql<number>`COALESCE(SUM(COALESCE(${deals.awardedAmount}, ${deals.bidEstimate}, ${deals.ddEstimate}, 0)), 0)`,
+          ...getTableColumns(deals),
+          companyName: companies.name,
+          assignedRepName: users.displayName,
         })
         .from(deals)
-        .where(where),
-      stageDealsQuery,
-    ]);
+        .leftJoin(companies, eq(companies.id, deals.companyId))
+        .leftJoin(users, eq(users.id, deals.assignedRepId))
+        .where(where)
+        .orderBy(desc(deals.updatedAt))
+        .limit(pipelineCardsPerStageLimit);
+      dealsByStage.set(stage.id, stageDeals);
+    } else {
+      dealsByStage.set(stage.id, []);
+    }
 
-    dealsByStage.set(stage.id, stageDeals);
     countByStage.set(stage.id, Number(summaryRows[0]?.count ?? 0));
     valueByStage.set(stage.id, Number(summaryRows[0]?.totalValue ?? 0));
   }));
@@ -1889,7 +1889,6 @@ export async function getDealsForPipeline(
     .filter((s) => s.isTerminal)
     .map((stage) => ({
       stage,
-      deals: dealsByStage.get(stage.id) ?? [],
       count: countByStage.get(stage.id) ?? 0,
       totalValue: valueByStage.get(stage.id) ?? 0,
     }));
