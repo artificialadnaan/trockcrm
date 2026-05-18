@@ -1,5 +1,7 @@
 import { describe, expect, it } from "vitest";
 import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 
 import {
   diagnoseStaleStageEnteredAt,
@@ -257,7 +259,7 @@ describe("stage_entered_at backfill", () => {
 
   it("writes an audit CSV with tenant, deal, stage, old value, and new value", async () => {
     const db = makeDb();
-    const logPath = "/private/tmp/stage-entered-at-backfill-test.csv";
+    const logPath = path.join(os.tmpdir(), "stage-entered-at-backfill-test.csv");
     fs.rmSync(logPath, { force: true });
 
     await backfillStaleStageEnteredAt(db, {
