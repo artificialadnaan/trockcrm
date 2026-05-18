@@ -24,6 +24,7 @@ export function useEmailAssignmentQueue() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [page, setPage] = useState(1);
+  const [status, setStatus] = useState<"unassigned" | "ignored">("unassigned");
   const [pagination, setPagination] = useState<AssignmentQueueResponse["pagination"]>({
     page: 1,
     limit: 10,
@@ -35,7 +36,9 @@ export function useEmailAssignmentQueue() {
     setLoading(true);
     setError(null);
     try {
-      const data = await api<AssignmentQueueResponse>(`/email/assignment-queue?page=${page}&limit=10`);
+      const data = await api<AssignmentQueueResponse>(
+        `/email/assignment-queue?page=${page}&limit=10&status=${status}`
+      );
       setItems(data.items);
       setPagination(data.pagination);
     } catch (err: unknown) {
@@ -45,9 +48,24 @@ export function useEmailAssignmentQueue() {
     }
   };
 
+  const handleUnignore = async (emailId: string) => {
+    try {
+      await api<{ email: unknown }>(`/email/${emailId}/un-ignore`, {
+        method: "POST",
+      });
+      await fetchQueue();
+      toast.success("Email returned to parking lot");
+      return { ok: true as const };
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : "Failed to restore email";
+      toast.error(message);
+      return { ok: false as const, message };
+    }
+  };
+
   useEffect(() => {
     void fetchQueue();
-  }, [page]);
+  }, [page, status]);
 
   const handleAssign = async (emailId: string, target: EmailAssignmentTarget) => {
     try {
@@ -65,6 +83,21 @@ export function useEmailAssignmentQueue() {
     }
   };
 
+  const handleIgnore = async (emailId: string) => {
+    try {
+      await api<{ email: unknown }>(`/email/${emailId}/ignore`, {
+        method: "POST",
+      });
+      await fetchQueue();
+      toast.success("Email marked as irrelevant");
+      return { ok: true as const };
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : "Failed to mark email as irrelevant";
+      toast.error(message);
+      return { ok: false as const, message };
+    }
+  };
+
   return {
     items,
     loading,
@@ -72,8 +105,12 @@ export function useEmailAssignmentQueue() {
     page,
     pagination,
     setPage,
+    status,
+    setStatus,
     refresh: fetchQueue,
     assign: handleAssign,
+    ignore: handleIgnore,
+    unignore: handleUnignore,
   };
 }
 
@@ -86,7 +123,7 @@ export function EmailAssignmentQueuePanel({
   queue: EmailAssignmentQueueState;
   embedded?: boolean;
 }) {
-  const { items, loading, error, page, pagination, setPage, refresh, assign } = queue;
+  const { items, loading, error, page, pagination, setPage, status, setStatus, refresh, assign, ignore, unignore } = queue;
 
   return (
     <section className={embedded ? "p-5" : "rounded-lg border bg-card p-4"}>
@@ -100,6 +137,31 @@ export function EmailAssignmentQueuePanel({
         <Button variant="outline" size="sm" onClick={() => void refresh()} disabled={loading}>
           <RefreshCw className="mr-2 h-4 w-4" />
           Refresh
+        </Button>
+      </div>
+
+      <div className="mb-3 flex flex-wrap gap-2">
+        <Button
+          type="button"
+          size="sm"
+          variant={status === "unassigned" ? "default" : "outline"}
+          onClick={() => {
+            setPage(1);
+            setStatus("unassigned");
+          }}
+        >
+          Parking Lot
+        </Button>
+        <Button
+          type="button"
+          size="sm"
+          variant={status === "ignored" ? "default" : "outline"}
+          onClick={() => {
+            setPage(1);
+            setStatus("ignored");
+          }}
+        >
+          Ignored
         </Button>
       </div>
 
@@ -118,7 +180,13 @@ export function EmailAssignmentQueuePanel({
         </div>
       ) : (
         <>
-          <EmailAssignmentQueueView items={items} onAssign={assign} />
+          <EmailAssignmentQueueView
+            items={items}
+            onAssign={assign}
+            onIgnore={ignore}
+            onUnignore={unignore}
+            status={status}
+          />
           {pagination.totalPages > 1 && (
             <div className="mt-3 flex items-center justify-between text-sm text-muted-foreground">
               <span>
