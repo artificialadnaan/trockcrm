@@ -2,7 +2,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { renderToStaticMarkup } from "react-dom/server";
 import type { ReactNode } from "react";
 import { MemoryRouter } from "react-router-dom";
-import { RepDashboardPage } from "./rep-dashboard-page";
+import { RepDashboardPage, buildRepDealsDrilldownPath } from "./rep-dashboard-page";
 
 const mocks = vi.hoisted(() => ({
   useRepDashboardMock: vi.fn(),
@@ -228,7 +228,7 @@ describe("RepDashboardPage", () => {
   it("links the KPI cards to the matching drill-down views", () => {
     const html = renderDashboard();
 
-    expect(html).toContain('href="/deals?filter=active_pipeline&amp;scope=mine"');
+    expect(html).toContain('href="/deals?filter=active_pipeline&amp;period=ytd&amp;scope=mine"');
     expect(html).toContain('href="/leads?scope=mine"');
     expect(html).toContain('href="/commissions"');
   });
@@ -280,8 +280,8 @@ describe("RepDashboardPage", () => {
 
     expect(html).toContain('href="/leads?scope=mine"');
     expect(html).toContain('href="/leads?bucket=qualified_lead&amp;scope=mine"');
-    expect(html).toContain('href="/deals?filter=opportunities&amp;scope=mine"');
-    expect(html).toContain('href="/deals?filter=bid_board&amp;scope=mine"');
+    expect(html).toContain('href="/deals?filter=opportunities&amp;period=ytd&amp;scope=mine"');
+    expect(html).toContain('href="/deals?filter=bid_board&amp;period=ytd&amp;scope=mine"');
   });
 
   it("renders MY NUMBERS section with 8 metric cells", () => {
@@ -314,7 +314,7 @@ describe("RepDashboardPage", () => {
     expect(html).toContain("Performance report");
     expect(html).toContain("Open my pipeline");
     expect(html).toContain("href=\"/reports/performance\"");
-    expect(html).toContain("href=\"/deals?filter=active_pipeline&amp;scope=mine\"");
+    expect(html).toContain("href=\"/deals?filter=active_pipeline&amp;period=ytd&amp;scope=mine\"");
   });
 
   it("TimeRangeTabs default to YTD", () => {
@@ -328,7 +328,15 @@ describe("RepDashboardPage", () => {
     const html = renderDashboard();
 
     expect(html).toContain("<a");
-    expect(html).toContain("href=\"/deals?filter=active_pipeline&amp;scope=mine\"");
+    expect(html).toContain("href=\"/deals?filter=active_pipeline&amp;period=ytd&amp;scope=mine\"");
     expect(html).not.toContain("My Board");
+  });
+
+  it("maps rep dashboard periods to supported deal drill-down periods", () => {
+    expect(buildRepDealsDrilldownPath("active_pipeline", "Today")).toBe("/deals?filter=active_pipeline&period=mtd&scope=mine");
+    expect(buildRepDealsDrilldownPath("active_pipeline", "Week")).toBe("/deals?filter=active_pipeline&period=mtd&scope=mine");
+    expect(buildRepDealsDrilldownPath("active_pipeline", "MTD")).toBe("/deals?filter=active_pipeline&period=mtd&scope=mine");
+    expect(buildRepDealsDrilldownPath("active_pipeline", "QTD")).toBe("/deals?filter=active_pipeline&period=qtd&scope=mine");
+    expect(buildRepDealsDrilldownPath("active_pipeline", "YTD")).toBe("/deals?filter=active_pipeline&period=ytd&scope=mine");
   });
 });
