@@ -392,6 +392,18 @@ describe("EmailInboxPage", () => {
     page.unmount();
   });
 
+  it("explains Microsoft tenant admin-consent blocks without exposing the raw OAuth code", () => {
+    const page = mountPage("/email?error=microsoft_admin_consent_required");
+
+    expect(page.container.textContent).toContain(
+      "Your Microsoft 365 admin has blocked user consent for third-party apps."
+    );
+    expect(page.container.textContent).toContain("Grant admin consent for the T Rock CRM app");
+    expect(page.container.textContent).not.toContain("Failed to connect email: microsoft_admin_consent_required");
+
+    page.unmount();
+  });
+
   it("passes the page Graph auth state into the banner", () => {
     const page = mountPage();
 

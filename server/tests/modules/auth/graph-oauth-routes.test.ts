@@ -1,5 +1,6 @@
 import cookieParser from "cookie-parser";
 import express from "express";
+import jwt from "jsonwebtoken";
 import request from "supertest";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -100,5 +101,67 @@ describe("graph oauth auth routes", () => {
     expect(setCookie[0]).toContain("HttpOnly");
     expect(setCookie[0]).toContain("Secure");
     expect(setCookie[0]).toContain("SameSite=None");
+  });
+
+  it("redirects Microsoft admin-consent OAuth failures to a stable friendly error code", async () => {
+    const app = createTestApp();
+
+    const res = await request(app)
+      .get("/api/auth/graph/callback")
+      .query({
+        error: "access_denied",
+        error_description: "AADSTS65001: The user or administrator has not consented to use the application.",
+      });
+
+    expect(res.status).toBe(302);
+    expect(res.headers.location).toBe(
+      "https://frontend.example.com/email?error=microsoft_admin_consent_required"
+    );
+  });
+
+  it("redirects token-exchange admin-consent failures to the friendly error code", async () => {
+    const app = createTestApp();
+    const nonce = "nonce-123";
+    const state = jwt.sign(
+      { userId: authTestUsers.admin.id, nonce },
+      process.env.JWT_SECRET!,
+      { expiresIn: "10m" }
+    );
+    graphAuthMocks.exchangeCodeForTokens.mockRejectedValue(
+      new Error("AADSTS65001: The user or administrator has not consented to use the application.")
+    );
+
+    const res = await request(app)
+      .get("/api/auth/graph/callback")
+      .query({ code: "oauth-code", state })
+      .set("Cookie", `graph_auth_nonce=${nonce}`);
+
+    expect(res.status).toBe(302);
+    expect(res.headers.location).toBe(
+      "https://frontend.example.com/email?error=microsoft_admin_consent_required"
+    );
+  });
+
+  it("keeps non-admin token-exchange failures behind a stable generic error code", async () => {
+    const app = createTestApp();
+    const nonce = "nonce-456";
+    const state = jwt.sign(
+      { userId: authTestUsers.admin.id, nonce },
+      process.env.JWT_SECRET!,
+      { expiresIn: "10m" }
+    );
+    graphAuthMocks.exchangeCodeForTokens.mockRejectedValue(
+      new Error("invalid_client: client secret expired")
+    );
+
+    const res = await request(app)
+      .get("/api/auth/graph/callback")
+      .query({ code: "oauth-code", state })
+      .set("Cookie", `graph_auth_nonce=${nonce}`);
+
+    expect(res.status).toBe(302);
+    expect(res.headers.location).toBe(
+      "https://frontend.example.com/email?error=exchange_failed"
+    );
   });
 });

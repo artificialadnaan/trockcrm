@@ -110,6 +110,32 @@ function safeReturnTo(value: unknown) {
   return allowedOrigins.includes(parsed.origin) ? parsed.toString() : null;
 }
 
+function isMicrosoftAdminConsentError(error: unknown, description?: unknown): boolean {
+  const text = `${String(error ?? "")} ${String(description ?? "")}`.toLowerCase();
+  return (
+    text.includes("admin consent") ||
+    text.includes("administrator has not consented") ||
+    text.includes("admin approval") ||
+    text.includes("aadsts65001")
+  );
+}
+
+function graphOAuthErrorRedirect(error: unknown, description?: unknown) {
+  const frontendUrl = process.env.FRONTEND_URL || "http://localhost:5173";
+  const code = isMicrosoftAdminConsentError(error, description)
+    ? "microsoft_admin_consent_required"
+    : String(error || "exchange_failed");
+  return `${frontendUrl}/email?error=${encodeURIComponent(code)}`;
+}
+
+function graphOAuthExchangeErrorRedirect(error: unknown) {
+  const frontendUrl = process.env.FRONTEND_URL || "http://localhost:5173";
+  const code = isMicrosoftAdminConsentError(error)
+    ? "microsoft_admin_consent_required"
+    : "exchange_failed";
+  return `${frontendUrl}/email?error=${encodeURIComponent(code)}`;
+}
+
 async function withOnboardingGate<T extends { id: string; officeId: string; activeOfficeId?: string; role: string }>(user: T) {
   const gate = await getUserOnboardingGateStatus({
     userId: user.id,
@@ -339,7 +365,7 @@ router.get("/graph/callback", async (req, res, next) => {
 
     if (error) {
       console.error(`[GraphAuth] OAuth error: ${error} — ${req.query.error_description}`);
-      res.redirect(`${process.env.FRONTEND_URL || "http://localhost:5173"}/email?error=${error}`);
+      res.redirect(graphOAuthErrorRedirect(error, req.query.error_description));
       return;
     }
 
@@ -374,7 +400,7 @@ router.get("/graph/callback", async (req, res, next) => {
     res.redirect(`${process.env.FRONTEND_URL || "http://localhost:5173"}/email?connected=true`);
   } catch (err) {
     console.error("[GraphAuth] Callback error:", err);
-    res.redirect(`${process.env.FRONTEND_URL || "http://localhost:5173"}/email?error=exchange_failed`);
+    res.redirect(graphOAuthExchangeErrorRedirect(err instanceof Error ? err.message : err));
   }
 });
 

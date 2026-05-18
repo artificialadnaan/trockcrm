@@ -50,6 +50,43 @@ const FILTERS: Array<{
   { key: "parking-lot", label: "Parking Lot Intake", icon: AlertTriangle },
 ];
 
+const MICROSOFT_ADMIN_CONSENT_MESSAGE =
+  "Your Microsoft 365 admin has blocked user consent for third-party apps.";
+
+function isMicrosoftAdminConsentError(error: string | null) {
+  if (!error) return false;
+  const normalized = error.toLowerCase();
+  return (
+    normalized === "microsoft_admin_consent_required" ||
+    normalized.includes("admin consent") ||
+    normalized.includes("administrator has not consented") ||
+    normalized.includes("admin approval") ||
+    normalized.includes("aadsts65001")
+  );
+}
+
+function OAuthErrorAlert({ error }: { error: string }) {
+  if (isMicrosoftAdminConsentError(error)) {
+    return (
+      <div className="rounded-lg border border-red-200 bg-red-50 p-3 text-sm font-semibold text-red-800">
+        <p>{MICROSOFT_ADMIN_CONSENT_MESSAGE}</p>
+        <p className="mt-2">Please ask your IT admin to either:</p>
+        <ol className="mt-1 list-decimal pl-5">
+          <li>Enable user consent in Azure AD, OR</li>
+          <li>Grant admin consent for the T Rock CRM app</li>
+        </ol>
+        <p className="mt-2">Contact support if you need help with this.</p>
+      </div>
+    );
+  }
+
+  return (
+    <div className="rounded-lg border border-red-200 bg-red-50 p-3 text-sm font-semibold text-red-800">
+      Failed to connect email: {error}
+    </div>
+  );
+}
+
 function getDisplayName(email: Email) {
   if (email.direction === "outbound") return "You";
   return email.fromAddress.split("@")[0]?.replace(/[._-]/g, " ") || email.fromAddress;
@@ -586,11 +623,7 @@ export function EmailInboxPage() {
           Microsoft email connected successfully.
         </div>
       ) : null}
-      {oauthError ? (
-        <div className="rounded-lg border border-red-200 bg-red-50 p-3 text-sm font-semibold text-red-800">
-          Failed to connect email: {oauthError}
-        </div>
-      ) : null}
+      {oauthError ? <OAuthErrorAlert error={oauthError} /> : null}
 
       <GraphAuthBanner auth={graphAuth} />
 
