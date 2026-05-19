@@ -131,7 +131,7 @@ export function ProjectDetailPage() {
         <div className="mb-3 flex items-center justify-between">
           <div className="flex items-center gap-3">
             <div className="flex h-11 w-11 items-center justify-center rounded-xl border border-border bg-white shadow-sm">
-              <BrandLogo className="h-8 w-auto" alt="T Rock Construction reports" />
+              <BrandLogo className="h-6 w-auto" alt="T Rock Construction reports" surfaceClassName="rounded-lg px-2 py-1.5" />
             </div>
             <div>
             <h2 className="text-lg font-black">Reports</h2>

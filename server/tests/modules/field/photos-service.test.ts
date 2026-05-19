@@ -18,30 +18,18 @@ const workflowMocks = vi.hoisted(() => ({
   recordUploadedFileSideEffects: vi.fn(),
 }));
 
-vi.mock("../../../src/modules/field/projects-service.js", async () => {
-  const actual = await vi.importActual<typeof import("../../../src/modules/field/projects-service.js")>(
-    "../../../src/modules/field/projects-service.js"
-  );
-  return {
-    ...actual,
-    assertActiveFieldProject: projectMocks.assertActiveFieldProject,
-    assertAccessibleFieldCaptureTarget: projectMocks.assertAccessibleFieldCaptureTarget,
-  };
-});
+vi.mock("../../../src/modules/field/projects-service.js", () => ({
+  assertActiveFieldProject: projectMocks.assertActiveFieldProject,
+  assertAccessibleFieldCaptureTarget: projectMocks.assertAccessibleFieldCaptureTarget,
+}));
 
-vi.mock("../../../src/modules/files/service.js", async () => {
-  const actual = await vi.importActual<typeof import("../../../src/modules/files/service.js")>(
-    "../../../src/modules/files/service.js"
-  );
-  return {
-    ...actual,
-    requestUploadUrl: fileMocks.requestUploadUrl,
-    confirmUpload: fileMocks.confirmUpload,
-    getPendingUploadMetadata: fileMocks.getPendingUploadMetadata,
-    getFileDownloadUrl: fileMocks.getFileDownloadUrl,
-    updateFile: fileMocks.updateFile,
-  };
-});
+vi.mock("../../../src/modules/files/service.js", () => ({
+  requestUploadUrl: fileMocks.requestUploadUrl,
+  confirmUpload: fileMocks.confirmUpload,
+  getPendingUploadMetadata: fileMocks.getPendingUploadMetadata,
+  getFileDownloadUrl: fileMocks.getFileDownloadUrl,
+  updateFile: fileMocks.updateFile,
+}));
 
 vi.mock("../../../src/modules/files/upload-workflow.js", () => workflowMocks);
 
@@ -90,6 +78,7 @@ const confirmedFile = {
 describe("field photo upload service", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    db.execute.mockReset();
     projectMocks.assertActiveFieldProject.mockResolvedValue({ id: DEAL_ID });
     projectMocks.assertAccessibleFieldCaptureTarget.mockResolvedValue({ id: DEAL_ID, type: "deal" });
     fileMocks.requestUploadUrl.mockResolvedValue({
@@ -327,6 +316,47 @@ describe("field photo upload service", () => {
       dealId: null,
       leadId: null,
     }));
+  });
+
+  it("falls back to the legacy pending-photo query when extended linkage columns are missing", async () => {
+    db.execute
+      .mockRejectedValueOnce(Object.assign(new Error('column "contact_id" does not exist'), { code: "42703" }))
+      .mockResolvedValueOnce({
+        rows: [{
+          id: PHOTO_ID,
+          category: "photo",
+          photo_category: "damage",
+          subcategory: null,
+          display_name: "Pending photo",
+          mime_type: "image/jpeg",
+          file_size_bytes: 850000,
+          file_extension: ".jpg",
+          deal_id: null,
+          lead_id: null,
+          description: null,
+          tags: [],
+          taken_at: new Date("2026-05-05T12:00:00.000Z"),
+          created_at: new Date("2026-05-05T12:01:00.000Z"),
+          uploaded_by: FIELD_USER_ID,
+          latitude: null,
+          longitude: null,
+          address: null,
+          address_source: null,
+          geocoded_at: null,
+          procore_sync_status: null,
+          deleted_at: null,
+        }],
+      });
+
+    const result = await listPendingFieldPhotos(db, {
+      userId: FIELD_USER_ID,
+      userRole: "field_contractor",
+    });
+
+    expect(db.execute).toHaveBeenCalledTimes(2);
+    expect(result.photos).toHaveLength(1);
+    expect(result.photos[0].id).toBe(PHOTO_ID);
+    expect(fileMocks.getFileDownloadUrl).toHaveBeenCalledWith(db, PHOTO_ID);
   });
 
   it("assigns a pending field photo to a selected target", async () => {

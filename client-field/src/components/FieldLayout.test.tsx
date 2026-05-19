@@ -44,6 +44,7 @@ describe("FieldLayout", () => {
 
     await vi.waitFor(() => expect(container!.textContent).toContain("Field User"));
     expect(container.querySelector('img[alt="T Rock logo"]')).toBeTruthy();
+    expect(container.querySelector('[data-brand-logo-surface="dark"]')).toBeTruthy();
     expect(container.textContent).toContain("Projects");
     expect(container.textContent).toContain("Capture");
     expect(container.textContent).toContain("Profile");

@@ -39,7 +39,7 @@ export function LoginPage() {
         <div className="h-1 bg-primary" />
         <div className="p-6">
           <div className="mb-6 flex items-start gap-4">
-            <BrandLogo className="h-16 w-auto" />
+            <BrandLogo className="h-16 w-auto" surfaceClassName="rounded-2xl px-4 py-3" />
             <div className="pt-1">
               <p className="text-xs font-black uppercase tracking-[0.24em] text-primary">Field App</p>
               <h1 className="mt-1 text-3xl font-black text-slate-950">Sign in</h1>

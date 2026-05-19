@@ -19,6 +19,7 @@ const PHOTO_CATEGORY_VALUES = new Set(["before", "after", "progress", "site_visi
 const PHOTO_ADDRESS_SOURCES = new Set(["exif", "live_gps"]);
 const UUID_PATTERN =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const LEGACY_PENDING_LINKAGE_COLUMNS = ["contact_id", "procore_project_id", "change_order_id"] as const;
 
 function extensionForContentType(contentType: string): string {
   switch (contentType) {
@@ -133,6 +134,13 @@ function hasSelectedCaptureTarget(input: {
 }) {
   const normalized = normalizeCaptureTargetIds(input);
   return Boolean(normalized.dealId || normalized.leadId || normalized.opportunityId);
+}
+
+function isMissingLegacyPendingLinkageColumnError(error: unknown): boolean {
+  if (!error || typeof error !== "object") return false;
+  const code = "code" in error ? String((error as { code?: unknown }).code ?? "") : "";
+  const message = error instanceof Error ? error.message : String(error);
+  return code === "42703" && LEGACY_PENDING_LINKAGE_COLUMNS.some((column) => message.includes(column));
 }
 
 export async function requestFieldPhotoUploadUrl(
@@ -260,7 +268,9 @@ export async function listPendingFieldPhotos(
     userRole: UserRole;
   }
 ) {
-  const result = await tenantDb.execute(sql`
+  let result;
+  try {
+    result = await tenantDb.execute(sql`
     SELECT
       f.id,
       f.category,
@@ -297,6 +307,43 @@ export async function listPendingFieldPhotos(
     ORDER BY COALESCE(f.taken_at, f.created_at) DESC
     LIMIT 50
   `);
+  } catch (error) {
+    if (!isMissingLegacyPendingLinkageColumnError(error)) throw error;
+    result = await tenantDb.execute(sql`
+      SELECT
+        f.id,
+        f.category,
+        f.photo_category,
+        f.subcategory,
+        f.display_name,
+        f.mime_type,
+        f.file_size_bytes,
+        f.file_extension,
+        f.deal_id,
+        f.lead_id,
+        f.description,
+        f.tags,
+        f.taken_at,
+        f.created_at,
+        f.uploaded_by,
+        f.latitude,
+        f.longitude,
+        f.address,
+        f.address_source,
+        f.geocoded_at,
+        f.procore_sync_status,
+        f.deleted_at
+      FROM files f
+      WHERE f.category = 'photo'
+        AND f.is_active = true
+        AND f.deleted_at IS NULL
+        AND f.uploaded_by = ${access.userId}::uuid
+        AND f.deal_id IS NULL
+        AND f.lead_id IS NULL
+      ORDER BY COALESCE(f.taken_at, f.created_at) DESC
+      LIMIT 50
+    `);
+  }
 
   const rows = (result as any).rows ?? result;
   const photos = await Promise.all(rows.map(async (row: any) => {
@@ -393,7 +440,9 @@ export async function assignPendingFieldPhotoTarget(
     throw new AppError(404, "Pending photo not found.");
   }
 
-  const assignResult = await tenantDb.execute(sql`
+  let assignResult;
+  try {
+    assignResult = await tenantDb.execute(sql`
     UPDATE files
     SET
       deal_id = ${target.type === "lead" ? null : target.id}::uuid,
@@ -432,6 +481,45 @@ export async function assignPendingFieldPhotoTarget(
       procore_sync_status,
       deleted_at
   `);
+  } catch (error) {
+    if (!isMissingLegacyPendingLinkageColumnError(error)) throw error;
+    assignResult = await tenantDb.execute(sql`
+      UPDATE files
+      SET
+        deal_id = ${target.type === "lead" ? null : target.id}::uuid,
+        lead_id = ${target.type === "lead" ? target.id : null}::uuid
+      WHERE id = ${input.photoId}::uuid
+        AND category = 'photo'
+        AND is_active = true
+        AND deleted_at IS NULL
+        AND uploaded_by = ${access.userId}::uuid
+        AND deal_id IS NULL
+        AND lead_id IS NULL
+      RETURNING
+        id,
+        category,
+        photo_category,
+        subcategory,
+        display_name,
+        mime_type,
+        file_size_bytes,
+        file_extension,
+        deal_id,
+        lead_id,
+        description,
+        tags,
+        taken_at,
+        created_at,
+        uploaded_by,
+        latitude,
+        longitude,
+        address,
+        address_source,
+        geocoded_at,
+        procore_sync_status,
+        deleted_at
+    `);
+  }
   const assigned = ((assignResult as any)?.rows ?? assignResult)?.[0];
   if (!assigned) {
     throw new AppError(409, "Pending photo could not be assigned. Refresh and try again.");

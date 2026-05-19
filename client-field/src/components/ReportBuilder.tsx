@@ -240,7 +240,7 @@ export function ReportBuilder({ isOpen, projectId, projectName, creatorName, pho
         <div className="flex items-center justify-between border-b border-border px-4 py-3">
           <div className="flex items-center gap-3">
             <div className="flex h-12 w-12 items-center justify-center rounded-xl border border-border bg-white shadow-sm">
-              <BrandLogo className="h-9 w-auto" alt="T Rock Construction logo" />
+              <BrandLogo className="h-7 w-auto" alt="T Rock Construction logo" surfaceClassName="rounded-lg px-2 py-1.5" />
             </div>
             <div>
               <p className="text-[11px] font-black uppercase tracking-[0.24em] text-primary">Reports</p>

@@ -104,6 +104,7 @@ describe("ReportBuilder", () => {
 
     await vi.waitFor(() => expect(node.textContent).toContain("Generate Report"));
     expect(node.querySelector('img[alt="T Rock Construction logo"]')).toBeTruthy();
+    expect(node.querySelector('[data-brand-logo-surface="dark"]')).toBeTruthy();
     expect(node.textContent).toContain("Front elevation crack");
     expect(node.textContent).toContain("Rear elevation note");
     expect(node.textContent).toContain("#roofing");
