@@ -295,7 +295,9 @@ function stripDecodedHtmlTags(input: string): string {
   return input
     .replace(/<\s*br\s*\/?>/gi, " ")
     .replace(/<\/\s*(p|div|li|tr|h[1-6])\s*>/gi, " ")
-    .replace(/<[^>]+>/g, " ");
+    .replace(/<\/?([a-z][\w:-]*)(?:\s[^>]*)?\s*\/?>/gi, (match, tagName: string) =>
+      KNOWN_HTML_TAGS.has(tagName.toLowerCase()) ? " " : match
+    );
 }
 
 export function htmlToPlainText(input: string | null | undefined): string {
@@ -359,6 +361,22 @@ function buildImportedBody(input: {
 }) {
   const textBody = plainTextOrNull(input.body);
   if (textBody) return textBody;
+  if (hasHubSpotAttachments(input.attachmentIds)) {
+    return `${input.fallback} Attachments were present in HubSpot, but no inline text was available.`;
+  }
+  return `${input.fallback} HubSpot did not provide inline text for this activity.`;
+}
+
+function buildImportedBodyFromCandidates(input: {
+  bodies: Array<string | undefined>;
+  fallback: string;
+  attachmentIds?: string | undefined;
+}) {
+  for (const body of input.bodies) {
+    const textBody = plainTextOrNull(body);
+    if (textBody) return textBody;
+  }
+
   if (hasHubSpotAttachments(input.attachmentIds)) {
     return `${input.fallback} Attachments were present in HubSpot, but no inline text was available.`;
   }
@@ -555,8 +573,11 @@ export function mapMeetingToActivity(input: {
     sourceEntityId: input.targetEntity.id,
     ...links,
     subject: clampText(plainTextOrNull(input.engagement.properties.hs_meeting_title) ?? "HubSpot Meeting", 500),
-    body: buildImportedBody({
-      body: input.engagement.properties.hs_meeting_body ?? input.engagement.properties.hs_internal_meeting_notes,
+    body: buildImportedBodyFromCandidates({
+      bodies: [
+        input.engagement.properties.hs_meeting_body,
+        input.engagement.properties.hs_internal_meeting_notes,
+      ],
       fallback: "HubSpot meeting imported without agenda notes.",
       attachmentIds: input.engagement.properties.hs_attachment_ids,
     }),

@@ -505,6 +505,7 @@ describe("deal activity backfill service", () => {
     expect(htmlToPlainText("<img src=\"https://example.com/x.png\" alt=\"x\">")).toBe("");
     expect(htmlToPlainText("<br/>Hello")).toBe("Hello");
     expect(htmlToPlainText("&lt;div&gt;Hello&lt;/div&gt;")).toBe("Hello");
+    expect(htmlToPlainText("<p>Discuss &lt;materials&gt; with PM</p>")).toBe("Discuss <materials> with PM");
     expect(htmlToPlainText("Tom&rsquo;s &ldquo;quote&rdquo; &mdash; ok")).toBe("Tom’s “quote” — ok");
     expect(htmlToPlainText("<div>Broken<p>tag")).toBe("Broken tag");
     expect(htmlToPlainText("Value: &#9999999999; and &#x110000;")).toBe("Value: &#9999999999; and &#x110000;");
@@ -603,6 +604,24 @@ describe("deal activity backfill service", () => {
     });
 
     expect(result.activity.body).toBe("Discuss <materials> with PM");
+  });
+
+  it("falls back to internal meeting notes when the public meeting body sanitizes empty", () => {
+    const result = mapMeetingToActivity({
+      engagement: makeEngagement({
+        objectType: "meeting",
+        properties: {
+          hs_meeting_title: "Internal Notes Check",
+          hs_meeting_body: "<div><img src=\"https://example.com/empty.png\" /></div>",
+          hs_internal_meeting_notes: "Crew discussed staging and access.",
+          hs_meeting_start_time: "2026-05-10T09:00:00.000Z",
+        },
+      }),
+      targetEntity: makeDealTarget(),
+      userId: "user-1",
+    });
+
+    expect(result.body).toBe("Crew discussed staging and access.");
   });
 
   it("writes a note activity and company-targeted ledger atomically", async () => {
