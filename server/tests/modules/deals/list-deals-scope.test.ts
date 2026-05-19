@@ -282,6 +282,7 @@ function createTenantDb() {
       { id: "deal-created", assignedRepId: "rep-team-1", createdByUserId: "director-1", officeCode: "dfw", isActive: true, updatedAt: new Date("2026-05-07T12:00:00Z") },
       { id: "deal-activity", assignedRepId: "rep-team-2", createdByUserId: "rep-team-2", officeCode: "dfw", activityPerformedByUserIds: ["director-1"], isActive: true, updatedAt: new Date("2026-05-07T12:00:00Z") },
       { id: "deal-subscribed", assignedRepId: "rep-team-2", createdByUserId: "rep-team-2", officeCode: "dfw", subscriberUserIds: ["director-1"], isActive: true, updatedAt: new Date("2026-05-07T12:00:00Z") },
+      { id: "deal-legacy-office-fallback", assignedRepId: "rep-team-1", createdByUserId: "rep-team-1", officeCode: null, isActive: true, updatedAt: new Date("2026-05-07T12:00:00Z") },
       {
         id: "deal-company",
         assignedRepId: "rep-team-1",
@@ -342,6 +343,7 @@ describe("getDeals scope filtering", () => {
       "deal-created",
       "deal-activity",
       "deal-subscribed",
+      "deal-legacy-office-fallback",
       "deal-company",
     ]);
   });
@@ -358,6 +360,7 @@ describe("getDeals scope filtering", () => {
       "deal-created",
       "deal-activity",
       "deal-subscribed",
+      "deal-legacy-office-fallback",
       "deal-company",
     ]);
   });
@@ -386,6 +389,7 @@ describe("getDeals scope filtering", () => {
       "deal-created",
       "deal-activity",
       "deal-subscribed",
+      "deal-legacy-office-fallback",
       "deal-company",
     ]);
   });

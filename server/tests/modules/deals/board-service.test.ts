@@ -300,7 +300,16 @@ describe("getDealsForPipeline", () => {
     ];
     const tenantChains: any[] = [];
     const tenantDb = {
-      execute: vi.fn(async () => ({ rows: [{ relation_name: null }] })),
+      execute: vi.fn(async (query?: unknown) => {
+        const text = extractSqlText(query).toLowerCase();
+        if (text.includes("to_regclass(current_schema()")) {
+          return { rows: [{ relation_name: null }] };
+        }
+        if (text.includes("information_schema.columns")) {
+          return { rows: [{ column_exists: false }] };
+        }
+        return { rows: [] };
+      }),
       select: vi.fn(() => {
         const chain = createChainableMock();
         tenantChains.push(chain);
@@ -321,8 +330,80 @@ describe("getDealsForPipeline", () => {
 
     expect(result.pipelineColumns[0]?.deals).toEqual([]);
     expect(cardsWhere).toContain("assigned_rep_id");
-    expect(cardsWhere).toContain("created_by_user_id");
+    expect(cardsWhere).not.toContain("created_by_user_id");
     expect(cardsWhere).toContain("performed_by_user_id");
     expect(cardsWhere).not.toContain("deal_subscriptions");
+  });
+
+  it("keeps all mine-scope pipeline query paths free of subscription-table references", async () => {
+    dbState.responses = [
+      [
+        {
+          id: "stage-estimating",
+          slug: "estimating",
+          name: "Estimating",
+          displayOrder: 1,
+          isTerminal: false,
+          isActivePipeline: true,
+        },
+        {
+          id: "stage-won",
+          slug: "won",
+          name: "Won",
+          displayOrder: 2,
+          isTerminal: true,
+          isActivePipeline: true,
+        },
+        {
+          id: "stage-lost",
+          slug: "lost",
+          name: "Lost",
+          displayOrder: 3,
+          isTerminal: true,
+          isActivePipeline: true,
+        },
+      ],
+    ];
+
+    const tenantResponses = [
+      [{ count: 0, totalValue: 0 }],
+      [],
+      [{ count: 0, totalValue: 0 }],
+      [{ count: 0, totalValue: 0 }],
+    ];
+    const tenantChains: any[] = [];
+    const tenantDb = {
+      execute: vi.fn(async (query?: unknown) => {
+        const text = extractSqlText(query).toLowerCase();
+        if (text.includes("to_regclass(current_schema()")) {
+          return { rows: [{ relation_name: null }] };
+        }
+        if (text.includes("information_schema.columns")) {
+          return { rows: [{ column_exists: false }] };
+        }
+        return { rows: [] };
+      }),
+      select: vi.fn(() => {
+        const chain = createChainableMock();
+        tenantChains.push(chain);
+        chain.then.mockImplementation((resolve: (value: any[]) => unknown) => resolve(tenantResponses.shift() ?? []));
+        return chain;
+      }),
+    } as any;
+
+    const { getDealsForPipeline } = await import("../../../src/modules/deals/service.js");
+    await getDealsForPipeline(tenantDb, "admin", "admin-1", {
+      activeOfficeId: null,
+      scope: "mine",
+      includeDd: true,
+      wonAllTime: true,
+      lostAllTime: true,
+    });
+
+    const allWhereText = tenantChains
+      .map((chain) => extractSqlText(chain.where.mock.calls[0]?.[0]).toLowerCase())
+      .join("\n");
+    expect(allWhereText).not.toContain("deal_subscriptions");
+    expect(allWhereText).not.toContain("created_by_user_id");
   });
 });

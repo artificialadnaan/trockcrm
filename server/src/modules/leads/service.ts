@@ -215,6 +215,30 @@ async function resolveActiveOfficeScope(tenantDb: TenantDb, activeOfficeId: stri
   };
 }
 
+function buildLeadOfficeScopeCondition(
+  alias: string,
+  input: { officeCode: string | null; officeUserIds: string[] }
+) {
+  const leadAlias = sql.raw(alias);
+  const assignedRepFallback =
+    input.officeUserIds.length > 0
+      ? sql`${leadAlias}.office_code is null and exists (
+          select 1
+          from ${users} assigned_rep
+          where assigned_rep.id = ${leadAlias}.assigned_rep_id
+            and assigned_rep.office_id in (${sql.join(input.officeUserIds.map((id) => sql`${id}`), sql`, `)})
+        )`
+      : sql`false`;
+
+  if (input.officeCode) {
+    return sql`(${leadAlias}.office_code = ${input.officeCode} or ${assignedRepFallback})`;
+  }
+
+  return input.officeUserIds.length > 0
+    ? sql`${leadAlias}.assigned_rep_id in (${sql.join(input.officeUserIds.map((id) => sql`${id}`), sql`, `)})`
+    : sql`false`;
+}
+
 const LEAD_POC_ROLE_VALUES = new Set<LeadPocRole>(LEAD_POC_ROLES);
 
 const CREATE_GATE_FIELD_LABELS = new Map<string, string>([
@@ -930,9 +954,10 @@ async function getDefaultConversionDealStageId() {
 }
 
 async function buildLeadWorkspaceScope(tenantDb: TenantDb, input: LeadBoardInput | LeadStagePageInput) {
+  const activeOfficeScope = await resolveActiveOfficeScope(tenantDb, input.activeOfficeId);
   const filters = [
     sql`l.is_active = true`,
-    sql`u.office_id = ${input.activeOfficeId}`,
+    buildLeadOfficeScopeCondition("l", activeOfficeScope),
   ];
   const mineVisibility = input.scope === "mine" ? await resolveMineVisibilityFeatures(tenantDb) : null;
 
@@ -940,6 +965,8 @@ async function buildLeadWorkspaceScope(tenantDb: TenantDb, input: LeadBoardInput
     filters.push(
       buildAliasedLeadMineVisibilityCondition("l", input.userId, {
         includeSubscriptions: mineVisibility?.leadSubscriptions,
+        includeCreatedBy: mineVisibility?.leadsCreatedByUserId,
+        includeSubscriptionDeletedAt: mineVisibility?.leadSubscriptionsDeletedAt,
       })
     );
   } else if (input.scope === "team") {
@@ -1079,7 +1106,7 @@ async function listLeadBoardWorkspace(tenantDb: TenantDb, input: LeadBoardInput)
         l.stage_entered_at,
         l.updated_at
       from leads l
-      join users u on u.id = l.assigned_rep_id
+      left join users u on u.id = l.assigned_rep_id
       join public.pipeline_stage_config psc on psc.id = l.stage_id
       left join companies c on c.id = l.company_id
       left join properties p on p.id = l.property_id
@@ -1108,7 +1135,7 @@ async function listLeadStageWorkspacePage(tenantDb: TenantDb, input: LeadStagePa
   const countResult = await tenantDb.execute(sql`
     select count(*)::int as total
     from leads l
-    join users u on u.id = l.assigned_rep_id
+    left join users u on u.id = l.assigned_rep_id
     join public.pipeline_stage_config psc on psc.id = l.stage_id
     left join companies c on c.id = l.company_id
     left join properties p on p.id = l.property_id
@@ -1131,7 +1158,7 @@ async function listLeadStageWorkspacePage(tenantDb: TenantDb, input: LeadStagePa
       l.stage_entered_at,
       l.updated_at
     from leads l
-    join users u on u.id = l.assigned_rep_id
+    left join users u on u.id = l.assigned_rep_id
     join public.pipeline_stage_config psc on psc.id = l.stage_id
     left join companies c on c.id = l.company_id
     left join properties p on p.id = l.property_id
@@ -1205,14 +1232,8 @@ export function createLeadService(
     }
 
     if (filters.activeOfficeId) {
-      const { officeCode, officeUserIds } = await resolveActiveOfficeScope(tenantDb, filters.activeOfficeId);
-      conditions.push(
-        officeCode && officeUserIds.length > 0
-          ? eq(leads.officeCode, officeCode)
-          : !officeCode && officeUserIds.length > 0
-            ? inArray(leads.assignedRepId, officeUserIds)
-            : sql`false`
-      );
+      const officeScope = await resolveActiveOfficeScope(tenantDb, filters.activeOfficeId);
+      conditions.push(buildLeadOfficeScopeCondition("leads", officeScope));
     }
 
     const mineVisibility = scope === "mine" ? await resolveMineVisibilityFeatures(tenantDb) : null;
@@ -1221,6 +1242,8 @@ export function createLeadService(
       conditions.push(
         buildLeadMineVisibilityCondition(userId, {
           includeSubscriptions: mineVisibility?.leadSubscriptions,
+          includeCreatedBy: mineVisibility?.leadsCreatedByUserId,
+          includeSubscriptionDeletedAt: mineVisibility?.leadSubscriptionsDeletedAt,
         })
       );
     } else if (scope === "team") {

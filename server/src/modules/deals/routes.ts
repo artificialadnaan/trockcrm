@@ -539,7 +539,7 @@ function readBoardInput(req: Parameters<typeof router.get>[1] extends never ? ne
 }
 
 function readListScope(value: unknown, role: string): "mine" | "team" | "all" {
-  return value === "mine" || value === "team" || value === "all" ? value : "all";
+  return value === "mine" || value === "team" || value === "all" ? value : "mine";
 }
 
 function readStageInput(req: Parameters<typeof router.get>[1] extends never ? never : any) {
@@ -831,9 +831,13 @@ router.get("/pipeline", async (req, res, next) => {
   try {
     const rawPreviewLimit = req.query.previewLimit as string | undefined;
     const parsedPreviewLimit = rawPreviewLimit ? parseInt(rawPreviewLimit, 10) : undefined;
+    const scope = normalizeCollaborativeScope(
+      req.user!.role,
+      req.query.scope as "mine" | "team" | "all" | undefined
+    );
     const filters = {
       assignedRepId: req.query.assignedRepId as string | undefined,
-      scope: req.query.scope as "mine" | "team" | "all" | undefined,
+      scope,
       activeOfficeId: req.user!.activeOfficeId ?? req.user!.officeId,
       includeDd: req.query.includeDd === "true",
       previewLimit: Number.isFinite(parsedPreviewLimit) ? parsedPreviewLimit : undefined,
@@ -848,7 +852,7 @@ router.get("/pipeline", async (req, res, next) => {
     };
     const result = await getDealsForPipeline(
       req.tenantDb!,
-      getCollaborativeReadRole(req.user!.role, filters.scope),
+      getCollaborativeReadRole(req.user!.role, scope),
       req.user!.id,
       filters
     );
@@ -1197,6 +1201,10 @@ router.post("/:id/trigger-rfp", async (req, res, next) => {
 // POST /api/deals/:id/rfp-retry — enqueue a fresh RFP delivery job from the latest dead row.
 router.post("/:id/rfp-retry", async (req, res, next) => {
   try {
+    await assertDealOwnerRouteAccess(req, req.params.id, {
+      allowAdmin: true,
+      message: "Only the assigned rep or an admin can retry this RFP delivery",
+    });
     const deal = await getDealById(
       req.tenantDb!,
       req.params.id,

@@ -201,5 +201,82 @@ describe("POST /api/deals/:id/rfp-retry", () => {
     expect(inserted[0].payload.syncHubUrl).toBe("https://new.example.com/api/rfp-requests");
     expect(inserted[0].payload.dealHandled).toBeUndefined();
     expect(updated[0]).toMatchObject({ rfpApprovalStatus: "pending_outbox" });
+    expect(accessMocks.assertDealOwnerAccess).toHaveBeenCalledWith(
+      req.tenantDb,
+      "deal-1",
+      expect.objectContaining({ id: "user-1", role: "director" }),
+      expect.objectContaining({ allowAdmin: true })
+    );
+  });
+
+  it("rejects retries when owner/admin access is denied before loading the deal", async () => {
+    accessMocks.assertDealOwnerAccess.mockRejectedValueOnce({ statusCode: 403, message: "forbidden" });
+    const req = {
+      params: { id: "deal-1" },
+      tenantDb: { execute: vi.fn(), insert: vi.fn(), update: vi.fn() },
+      user: {
+        id: "rep-2",
+        role: "rep",
+        officeId: "office-1",
+        activeOfficeId: "office-1",
+      },
+      commitTransaction: vi.fn(async () => {}),
+    } as any;
+    const res = { status: vi.fn(), json: vi.fn() } as any;
+    const next = vi.fn();
+
+    await findRouteHandler("post", "/:id/rfp-retry")(req, res, next);
+
+    expect(next).toHaveBeenCalledWith(expect.objectContaining({ statusCode: 403 }));
+    expect(getDealByIdMock).not.toHaveBeenCalled();
+  });
+
+  it("keeps admin retry support for deals outside the acting office", async () => {
+    accessMocks.assertDealOwnerAccess.mockResolvedValueOnce({
+      id: "deal-1",
+      assignedRepId: "rep-9",
+      officeId: "office-9",
+    });
+    const inserted: any[] = [];
+    const req = {
+      params: { id: "deal-1" },
+      tenantDb: {
+        execute: vi.fn(async () => ({
+          rows: [{ id: 10, payload: { dealId: "deal-1", body: { sourceDealId: "deal-1" } } }],
+        })),
+        insert: vi.fn(() => ({
+          values: vi.fn(async (value) => {
+            inserted.push(value);
+            return {};
+          }),
+        })),
+        update: vi.fn(() => ({
+          set: vi.fn(() => ({ where: vi.fn(async () => ({})) })),
+        })),
+      },
+      user: {
+        id: "admin-1",
+        role: "admin",
+        officeId: "office-1",
+        activeOfficeId: "office-1",
+      },
+      commitTransaction: vi.fn(async () => {}),
+    } as any;
+    const res = {
+      statusCode: 200,
+      status(code: number) {
+        this.statusCode = code;
+        return this;
+      },
+      json: vi.fn(),
+    } as any;
+    const next = vi.fn((err?: unknown) => {
+      if (err) throw err;
+    });
+
+    await findRouteHandler("post", "/:id/rfp-retry")(req, res, next);
+
+    expect(res.statusCode).toBe(202);
+    expect(inserted).toHaveLength(1);
   });
 });

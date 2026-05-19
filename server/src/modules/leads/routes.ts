@@ -146,7 +146,7 @@ function readStageInput(req: Parameters<typeof router.get>[1] extends never ? ne
 }
 
 function readListScope(value: unknown): "mine" | "team" | "all" {
-  return value === "mine" || value === "team" || value === "all" ? value : "all";
+  return value === "mine" || value === "team" || value === "all" ? value : "mine";
 }
 
 // GET /api/leads

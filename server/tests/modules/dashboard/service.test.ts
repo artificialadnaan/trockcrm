@@ -55,6 +55,13 @@ function createMockTenantDb(responses: any[][] = []) {
             : null;
         return Promise.resolve({ rows: [{ relation_name: relationName }] });
       }
+      if (text.includes("information_schema.columns")) {
+        const columnExists =
+          text.includes("deal_subscriptions") ||
+          text.includes("lead_subscriptions") ||
+          text.includes("created_by_user_id");
+        return Promise.resolve({ rows: [{ column_exists: columnExists }] });
+      }
       const rows = responses[callIndex] ?? [];
       callIndex++;
       return Promise.resolve({ rows });
@@ -91,7 +98,7 @@ function extractSqlText(value: unknown): string {
 function nonIntrospectionExecuteCalls(tenantDb: { execute: { mock: { calls: unknown[][] } } }) {
   return tenantDb.execute.mock.calls.filter((call) => {
     const text = extractSqlText(call[0]).toLowerCase();
-    return !text.includes("to_regclass(current_schema()");
+    return !text.includes("to_regclass(current_schema()") && !text.includes("information_schema.columns");
   });
 }
 
@@ -766,6 +773,43 @@ describe("Dashboard Service", () => {
 
       expect(result.scopeSummary.atRisk).toEqual({ count: 2, totalValue: 6500 });
       expect(result.atRiskDeals).toHaveLength(1);
+    });
+
+    it("forwards mine fallback flags into director scope subqueries when subscription tables are unavailable", async () => {
+      const { getDirectorDashboard } = await import("../../../src/modules/dashboard/service.js");
+      const tenantDb = {
+        execute: vi.fn().mockImplementation((query: unknown) => {
+          const text = extractSqlText(query).toLowerCase();
+          if (text.includes("to_regclass(current_schema()")) {
+            return Promise.resolve({ rows: [{ relation_name: null }] });
+          }
+          if (text.includes("information_schema.columns")) {
+            return Promise.resolve({ rows: [{ column_exists: false }] });
+          }
+          if (text.includes("dd_value") && text.includes("pipeline_value")) {
+            return Promise.resolve({
+              rows: [{ dd_value: "0", dd_count: "0", pipeline_value: "0", pipeline_count: "0", total_value: "0", total_count: "0" }],
+            });
+          }
+          return Promise.resolve({ rows: [] });
+        }),
+      } as any;
+
+      await getDirectorDashboard(tenantDb, {
+        from: "2026-01-01",
+        to: "2026-03-31",
+        officeId: "office-1",
+        scope: "mine",
+        viewerUserId: "admin-1",
+      });
+
+      const scopeQueries = tenantDb.execute.mock.calls
+        .map(([query]: [unknown]) => extractSqlText(query).toLowerCase())
+        .filter((text: string) => text.includes("assigned_rep_id = ") || text.includes("performed_by_user_id = "));
+
+      expect(scopeQueries.some((text: string) => text.includes("deal_subscriptions"))).toBe(false);
+      expect(scopeQueries.some((text: string) => text.includes("lead_subscriptions"))).toBe(false);
+      expect(scopeQueries.some((text: string) => text.includes("created_by_user_id"))).toBe(false);
     });
 
     it("includes rep attribution in downstream at-risk deals", async () => {

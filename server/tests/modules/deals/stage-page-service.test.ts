@@ -45,6 +45,13 @@ function extractSqlText(value: unknown): string {
   return "";
 }
 
+function createOfficeScopeSelectMock(rows: any[] = [{ id: "rep-1" }]) {
+  return vi.fn(() => ({
+    from: vi.fn().mockReturnThis(),
+    where: vi.fn().mockResolvedValue(rows),
+  }));
+}
+
 describe("listDealStagePage", () => {
   beforeEach(() => {
     dbState.responses = [];
@@ -56,6 +63,7 @@ describe("listDealStagePage", () => {
     ];
 
     const tenantDb = {
+      select: createOfficeScopeSelectMock(),
       execute: vi.fn()
         .mockResolvedValueOnce({ rows: [{ total: "26", total_value: "400000" }] })
         .mockResolvedValueOnce({
@@ -98,6 +106,7 @@ describe("listDealStagePage", () => {
     ];
 
     const tenantDb = {
+      select: createOfficeScopeSelectMock(),
       execute: vi.fn()
         .mockResolvedValueOnce({ rows: [{ total: "0", total_value: "0" }] })
         .mockResolvedValueOnce({ rows: [] }),
@@ -127,6 +136,7 @@ describe("listDealStagePage", () => {
     ];
 
     const tenantDb = {
+      select: createOfficeScopeSelectMock(),
       execute: vi.fn()
         .mockResolvedValueOnce({ rows: [{ total: "2", total_value: "400000" }] })
         .mockResolvedValueOnce({ rows: [] }),
@@ -159,6 +169,7 @@ describe("listDealStagePage", () => {
     ];
 
     const tenantDb = {
+      select: createOfficeScopeSelectMock(),
       execute: vi.fn()
         .mockResolvedValueOnce({ rows: [{ total: "2", total_value: "400000" }] })
         .mockResolvedValueOnce({ rows: [] }),
@@ -214,5 +225,49 @@ describe("listDealStagePage", () => {
     expect(countQueryText).toContain("assigned_rep_id");
     expect(countQueryText).toContain("rep-team-1");
     expect(countQueryText).toContain("rep-team-2");
+  });
+
+  it("keeps mine-scope stage drill-downs accessible for unassigned legacy deals", async () => {
+    dbState.responses = [
+      [{ id: "stage-estimating", slug: "estimating", name: "Estimating", displayOrder: 4, isTerminal: false }],
+    ];
+
+    let businessQueryIndex = 0;
+    const tenantDb = {
+      select: createOfficeScopeSelectMock(),
+      execute: vi.fn().mockImplementation((query?: unknown) => {
+        const text = extractSqlText(query).toLowerCase();
+        if (text.includes("to_regclass(current_schema()")) {
+          return Promise.resolve({ rows: [{ relation_name: null }] });
+        }
+        if (text.includes("information_schema.columns")) {
+          return Promise.resolve({ rows: [{ column_exists: false }] });
+        }
+        businessQueryIndex += 1;
+        if (businessQueryIndex === 1) {
+          return Promise.resolve({ rows: [{ total: "1", total_value: "1000" }] });
+        }
+        return Promise.resolve({ rows: [] });
+      }),
+    } as any;
+
+    const { listDealStagePage } = await import("../../../src/modules/deals/service.js");
+    await listDealStagePage(tenantDb, {
+      role: "admin",
+      userId: "admin-1",
+      activeOfficeId: "office-1",
+      scope: "mine",
+      stageId: "stage-estimating",
+      page: 1,
+      pageSize: 25,
+    } as any);
+
+    const businessQueries = tenantDb.execute.mock.calls
+      .map(([query]: [unknown]) => extractSqlText(query).toLowerCase())
+      .filter((text: string) => !text.includes("to_regclass(current_schema()") && !text.includes("information_schema.columns"));
+    const countQueryText = businessQueries[0] ?? "";
+    const rowsQueryText = businessQueries[1] ?? "";
+    expect(countQueryText).toContain("left join users u");
+    expect(rowsQueryText).toContain("left join users u");
   });
 });

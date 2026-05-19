@@ -7,9 +7,11 @@ type TenantDbLike = {
 
 type MineVisibilityOptions = {
   includeSubscriptions?: boolean;
+  includeCreatedBy?: boolean;
+  includeSubscriptionDeletedAt?: boolean;
 };
 
-const tableExistsCache = new WeakMap<object, Map<string, Promise<boolean>>>();
+const schemaCapabilityCache = new WeakMap<object, Map<string, Promise<boolean>>>();
 
 function requireSchemaValue<T>(value: T | undefined, name: string): T {
   if (value === undefined) {
@@ -31,43 +33,97 @@ async function currentSchemaTableExists(tenantDb: TenantDbLike, tableName: strin
     return true;
   }
 
-  const cacheKey = tenantDb as object;
-  let entry = tableExistsCache.get(cacheKey);
-  if (!entry) {
-    entry = new Map<string, Promise<boolean>>();
-    tableExistsCache.set(cacheKey, entry);
+  return currentSchemaCapability(tenantDb, `table:${tableName}`, async () => {
+    const result = await tenantDb.execute!(
+      sql`SELECT to_regclass(current_schema() || '.' || ${tableName}) AS relation_name`
+    );
+    const rows = Array.isArray(result)
+      ? result
+      : (((result as { rows?: Array<{ relation_name?: string | null }> }).rows) ?? []);
+    return rows[0]?.relation_name != null;
+  });
+}
+
+async function currentSchemaColumnExists(
+  tenantDb: TenantDbLike,
+  tableName: string,
+  columnName: string
+): Promise<boolean> {
+  if (!tenantDb.execute) {
+    return true;
   }
 
-  const existing = entry.get(tableName);
+  return currentSchemaCapability(tenantDb, `column:${tableName}.${columnName}`, async () => {
+    const result = await tenantDb.execute!(sql`
+      SELECT EXISTS (
+        SELECT 1
+        FROM information_schema.columns
+        WHERE table_schema = current_schema()
+          AND table_name = ${tableName}
+          AND column_name = ${columnName}
+      ) AS column_exists
+    `);
+    const rows = Array.isArray(result)
+      ? result
+      : (((result as { rows?: Array<{ column_exists?: boolean | string | null }> }).rows) ?? []);
+    return rows[0]?.column_exists === true || rows[0]?.column_exists === "t";
+  });
+}
+
+async function currentSchemaCapability(
+  tenantDb: TenantDbLike,
+  key: string,
+  loader: () => Promise<boolean>
+) {
+  const cacheKey = tenantDb as object;
+  let entry = schemaCapabilityCache.get(cacheKey);
+  if (!entry) {
+    entry = new Map<string, Promise<boolean>>();
+    schemaCapabilityCache.set(cacheKey, entry);
+  }
+
+  const existing = entry.get(key);
   if (existing) {
     return existing;
   }
 
   const promise = (async () => {
     try {
-      const result = await tenantDb.execute!(
-        sql`SELECT to_regclass(current_schema() || '.' || ${tableName}) AS relation_name`
-      );
-      const rows = Array.isArray(result)
-        ? result
-        : (((result as { rows?: Array<{ relation_name?: string | null }> }).rows) ?? []);
-      return rows[0]?.relation_name != null;
+      return await loader();
     } catch {
       return true;
     }
   })();
 
-  entry.set(tableName, promise);
+  entry.set(key, promise);
   return promise;
 }
 
 export async function resolveMineVisibilityFeatures(tenantDb: TenantDbLike) {
-  const [dealSubscriptions, leadSubscriptions] = await Promise.all([
+  const [
+    dealSubscriptions,
+    leadSubscriptions,
+    dealSubscriptionsDeletedAt,
+    leadSubscriptionsDeletedAt,
+    dealsCreatedByUserId,
+    leadsCreatedByUserId,
+  ] = await Promise.all([
     currentSchemaTableExists(tenantDb, "deal_subscriptions"),
     currentSchemaTableExists(tenantDb, "lead_subscriptions"),
+    currentSchemaColumnExists(tenantDb, "deal_subscriptions", "deleted_at"),
+    currentSchemaColumnExists(tenantDb, "lead_subscriptions", "deleted_at"),
+    currentSchemaColumnExists(tenantDb, "deals", "created_by_user_id"),
+    currentSchemaColumnExists(tenantDb, "leads", "created_by_user_id"),
   ]);
 
-  return { dealSubscriptions, leadSubscriptions };
+  return {
+    dealSubscriptions,
+    leadSubscriptions,
+    dealSubscriptionsDeletedAt,
+    leadSubscriptionsDeletedAt,
+    dealsCreatedByUserId,
+    leadsCreatedByUserId,
+  };
 }
 
 export function buildDealMineVisibilityCondition(
@@ -78,7 +134,6 @@ export function buildDealMineVisibilityCondition(
   const deals = requireSchemaValue(schema.deals, "deals");
   const clauses = [
     sql`assigned_rep_id = ${userId}`,
-    sql`created_by_user_id = ${userId}`,
     sql`exists (
       select 1
       from ${activities} a
@@ -87,6 +142,10 @@ export function buildDealMineVisibilityCondition(
     )`,
   ];
 
+  if (options.includeCreatedBy !== false) {
+    clauses.unshift(sql`created_by_user_id = ${userId}`);
+  }
+
   if (options.includeSubscriptions !== false) {
     const dealSubscriptions = requireSchemaValue(schema.dealSubscriptions, "dealSubscriptions");
     clauses.push(sql`exists (
@@ -94,7 +153,7 @@ export function buildDealMineVisibilityCondition(
       from ${dealSubscriptions} ds
       where ds.deal_id = ${deals.id}
         and ds.user_id = ${userId}
-        and ds.deleted_at is null
+        ${options.includeSubscriptionDeletedAt === false ? sql`` : sql`and ds.deleted_at is null`}
     )`);
   }
 
@@ -112,7 +171,6 @@ export function buildAliasedDealMineVisibilityCondition(
   const recordAlias = sqlIdentifier(alias);
   const clauses = [
     sql`${recordAlias}.assigned_rep_id = ${userId}`,
-    sql`${recordAlias}.created_by_user_id = ${userId}`,
     sql`exists (
       select 1
       from ${activities} a
@@ -121,6 +179,10 @@ export function buildAliasedDealMineVisibilityCondition(
     )`,
   ];
 
+  if (options.includeCreatedBy !== false) {
+    clauses.unshift(sql`${recordAlias}.created_by_user_id = ${userId}`);
+  }
+
   if (options.includeSubscriptions !== false) {
     const dealSubscriptions = requireSchemaValue(schema.dealSubscriptions, "dealSubscriptions");
     clauses.push(sql`exists (
@@ -128,7 +190,7 @@ export function buildAliasedDealMineVisibilityCondition(
       from ${dealSubscriptions} ds
       where ds.deal_id = ${recordAlias}.id
         and ds.user_id = ${userId}
-        and ds.deleted_at is null
+        ${options.includeSubscriptionDeletedAt === false ? sql`` : sql`and ds.deleted_at is null`}
     )`);
   }
 
@@ -145,7 +207,6 @@ export function buildLeadMineVisibilityCondition(
   const leads = requireSchemaValue(schema.leads, "leads");
   const clauses = [
     sql`assigned_rep_id = ${userId}`,
-    sql`created_by_user_id = ${userId}`,
     sql`exists (
       select 1
       from ${activities} a
@@ -154,6 +215,10 @@ export function buildLeadMineVisibilityCondition(
     )`,
   ];
 
+  if (options.includeCreatedBy !== false) {
+    clauses.unshift(sql`created_by_user_id = ${userId}`);
+  }
+
   if (options.includeSubscriptions !== false) {
     const leadSubscriptions = requireSchemaValue(schema.leadSubscriptions, "leadSubscriptions");
     clauses.push(sql`exists (
@@ -161,7 +226,7 @@ export function buildLeadMineVisibilityCondition(
       from ${leadSubscriptions} ls
       where ls.lead_id = ${leads.id}
         and ls.user_id = ${userId}
-        and ls.deleted_at is null
+        ${options.includeSubscriptionDeletedAt === false ? sql`` : sql`and ls.deleted_at is null`}
     )`);
   }
 
@@ -179,7 +244,6 @@ export function buildAliasedLeadMineVisibilityCondition(
   const recordAlias = sqlIdentifier(alias);
   const clauses = [
     sql`${recordAlias}.assigned_rep_id = ${userId}`,
-    sql`${recordAlias}.created_by_user_id = ${userId}`,
     sql`exists (
       select 1
       from ${activities} a
@@ -188,6 +252,10 @@ export function buildAliasedLeadMineVisibilityCondition(
     )`,
   ];
 
+  if (options.includeCreatedBy !== false) {
+    clauses.unshift(sql`${recordAlias}.created_by_user_id = ${userId}`);
+  }
+
   if (options.includeSubscriptions !== false) {
     const leadSubscriptions = requireSchemaValue(schema.leadSubscriptions, "leadSubscriptions");
     clauses.push(sql`exists (
@@ -195,7 +263,7 @@ export function buildAliasedLeadMineVisibilityCondition(
       from ${leadSubscriptions} ls
       where ls.lead_id = ${recordAlias}.id
         and ls.user_id = ${userId}
-        and ls.deleted_at is null
+        ${options.includeSubscriptionDeletedAt === false ? sql`` : sql`and ls.deleted_at is null`}
     )`);
   }
 

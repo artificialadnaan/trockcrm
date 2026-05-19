@@ -879,3 +879,45 @@ describe("lead stage transition route", () => {
     });
   });
 });
+
+describe("lead list route", () => {
+  it("defaults list scope to mine when the query param is missing", async () => {
+    const routes = await loadLeadRoutes();
+    serviceMocks.listLeads.mockResolvedValueOnce([]);
+    const handler = findRouteHandler(routes, "get", "/");
+    const req = {
+      query: {},
+      tenantDb: {},
+      user: {
+        id: "rep-1",
+        role: "rep",
+        officeId: "office-1",
+        activeOfficeId: "office-1",
+      },
+      commitTransaction: vi.fn(async () => {}),
+    } as any;
+    const res = {
+      statusCode: 200,
+      body: undefined as any,
+      status(code: number) {
+        this.statusCode = code;
+        return this;
+      },
+      json(payload: any) {
+        this.body = payload;
+        return this;
+      },
+    } as any;
+
+    await handler(req, res, (err?: unknown) => {
+      if (err) throw err;
+    });
+
+    expect(serviceMocks.listLeads).toHaveBeenCalledWith(
+      req.tenantDb,
+      expect.objectContaining({ scope: "mine" }),
+      "rep",
+      "rep-1"
+    );
+  });
+});
