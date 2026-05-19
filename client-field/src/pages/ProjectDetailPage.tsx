@@ -1,8 +1,10 @@
 import { useEffect, useMemo, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
-import { ArrowLeft, Camera, ChevronLeft, ChevronRight, Filter, Star, X } from "lucide-react";
-import { api } from "@/lib/api";
-import { Button, TextInput } from "@/components/ui";
+import { ArrowLeft, Camera, ChevronLeft, ChevronRight, Download, FileText, Filter, Star, X } from "lucide-react";
+import { api } from "../lib/api";
+import { useAuth } from "../lib/auth";
+import { Button, TextInput } from "../components/ui";
+import { ReportBuilder } from "../components/ReportBuilder";
 import {
   categoryLabel,
   filterPhotos,
@@ -11,35 +13,44 @@ import {
   type FieldPhoto,
   type FieldProject,
   type PhotoGrouping,
-} from "@/lib/field-projects";
+} from "../lib/field-projects";
 
 const GROUP_SEQUENCE: PhotoGrouping[] = ["date", "category", "uploader", "none"];
 
 export function ProjectDetailPage() {
   const { id = "" } = useParams();
   const navigate = useNavigate();
+  const { user } = useAuth();
   const [project, setProject] = useState<FieldProject | null>(null);
   const [photos, setPhotos] = useState<FieldPhoto[]>([]);
+  const [reports, setReports] = useState<Array<{ id: string; title: string; createdAt: string; description: string | null }>>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [categories, setCategories] = useState<string[]>([]);
+  const [tags, setTags] = useState<string[]>([]);
   const [grouping, setGrouping] = useState<PhotoGrouping>("date");
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [from, setFrom] = useState("");
   const [to, setTo] = useState("");
   const [uploaderIds, setUploaderIds] = useState<string[]>([]);
   const [selectedPhotoId, setSelectedPhotoId] = useState<string | null>(null);
+  const [reportBuilderOpen, setReportBuilderOpen] = useState(false);
 
   async function loadDetail() {
     setLoading(true);
     setError(null);
     try {
-      const [projectsResult, photosResult] = await Promise.all([
+      const [projectsResult, photosResult, reportsResult] = await Promise.allSettled([
         api<{ projects: FieldProject[] }>("/field/projects?status=active&page=1&perPage=100"),
         api<{ photos: FieldPhoto[] }>(`/field/projects/${id}/photos`),
+        api<{ reports: Array<{ id: string; title: string; createdAt: string; description: string | null }> }>(`/field/projects/${id}/reports`),
       ]);
-      setProject(projectsResult.projects.find((item) => item.id === id) ?? null);
-      setPhotos(photosResult.photos);
+      if (projectsResult.status !== "fulfilled" || photosResult.status !== "fulfilled") {
+        throw new Error("Failed to load project");
+      }
+      setProject(projectsResult.value.projects.find((item) => item.id === id) ?? null);
+      setPhotos(photosResult.value.photos);
+      setReports(reportsResult.status === "fulfilled" ? reportsResult.value.reports : []);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to load project");
     } finally {
@@ -68,7 +79,19 @@ export function ProjectDetailPage() {
     photos.forEach((photo) => map.set(photo.uploadedBy, photo.uploaderName || "Unknown"));
     return Array.from(map, ([id, name]) => ({ id, name }));
   }, [photos]);
-  const filteredPhotos = useMemo(() => filterPhotos(photos, { categories, uploaderIds, from, to }), [categories, from, photos, to, uploaderIds]);
+  const availableTags = useMemo(() => {
+    const map = new Map<string, string>();
+    photos.forEach((photo) => {
+      for (const tag of photo.tags ?? []) {
+        const normalized = tag.trim();
+        if (!normalized) continue;
+        const key = normalized.toLowerCase();
+        if (!map.has(key)) map.set(key, normalized);
+      }
+    });
+    return Array.from(map.values()).sort((left, right) => left.localeCompare(right));
+  }, [photos]);
+  const filteredPhotos = useMemo(() => filterPhotos(photos, { categories, tags, uploaderIds, from, to }), [categories, from, photos, tags, to, uploaderIds]);
   const groupedPhotos = useMemo(() => groupPhotos(filteredPhotos, grouping), [filteredPhotos, grouping]);
   const selectedIndex = selectedPhotoId ? filteredPhotos.findIndex((photo) => photo.id === selectedPhotoId) : -1;
   const selectedPhoto = selectedIndex >= 0 ? filteredPhotos[selectedIndex] : null;
@@ -93,9 +116,51 @@ export function ProjectDetailPage() {
         {project ? (
           <p className="mt-2 text-sm font-semibold text-muted-foreground">{project.dealNumber} • <span className="rounded-full bg-muted px-2 py-0.5">{project.stage}</span></p>
         ) : null}
+        <div className="mt-3 flex flex-wrap gap-2">
+          <Button variant="ghost" onClick={() => setReportBuilderOpen(true)}>
+            <FileText className="mr-2 h-4 w-4" />
+            Generate Report
+          </Button>
+        </div>
       </header>
 
       {error ? <p className="rounded-md bg-red-50 p-3 text-sm font-semibold text-red-700">{error}</p> : null}
+
+      <section className="rounded-2xl border border-border bg-white p-4">
+        <div className="mb-3 flex items-center justify-between">
+          <div>
+            <h2 className="text-lg font-black">Reports</h2>
+            <p className="text-sm text-muted-foreground">Generated photo PDFs for this project.</p>
+          </div>
+          <Button variant="ghost" onClick={() => setReportBuilderOpen(true)}>
+            <FileText className="mr-2 h-4 w-4" />
+            Build
+          </Button>
+        </div>
+        {reports.length === 0 ? (
+          <p className="text-sm font-semibold text-muted-foreground">No reports yet.</p>
+        ) : (
+          <div className="space-y-2">
+            {reports.map((report) => (
+              <button
+                key={report.id}
+                type="button"
+                className="flex w-full items-center justify-between rounded-xl border border-border px-3 py-3 text-left"
+                onClick={async () => {
+                  const result = await api<{ url: string }>(`/field/reports/${report.id}/download`);
+                  window.open(result.url, "_blank");
+                }}
+              >
+                <div className="min-w-0">
+                  <p className="truncate font-bold">{report.title}</p>
+                  <p className="truncate text-sm text-muted-foreground">{new Date(report.createdAt).toLocaleString()}</p>
+                </div>
+                <Download className="h-5 w-5 text-muted-foreground" />
+              </button>
+            ))}
+          </div>
+        )}
+      </section>
 
       <div className="sticky top-[154px] z-10 -mx-4 flex gap-2 overflow-x-auto border-b border-border bg-white px-4 py-2">
         <button
@@ -113,6 +178,16 @@ export function ProjectDetailPage() {
             onClick={() => setCategories((current) => current.includes(category.value) ? current.filter((value) => value !== category.value) : [...current, category.value])}
           >
             {category.label}
+          </button>
+        ))}
+        {availableTags.map((tag) => (
+          <button
+            key={tag}
+            type="button"
+            className={`shrink-0 rounded-full border px-3 py-2 text-sm font-bold ${tags.includes(tag) ? "border-primary bg-primary text-primary-foreground" : "border-border bg-background text-foreground"}`}
+            onClick={() => setTags((current) => current.includes(tag) ? current.filter((value) => value !== tag) : [...current, tag])}
+          >
+            #{tag}
           </button>
         ))}
         <button type="button" className="shrink-0 rounded-full bg-muted px-3 py-2 text-sm font-bold" onClick={() => setGrouping(GROUP_SEQUENCE[(GROUP_SEQUENCE.indexOf(grouping) + 1) % GROUP_SEQUENCE.length])}>
@@ -145,6 +220,14 @@ export function ProjectDetailPage() {
                       {photo.photoCategory ? <span className="absolute bottom-1 right-1 rounded-full bg-black/70 px-2 py-0.5 text-[10px] font-bold text-white">{categoryLabel(photo.photoCategory)}</span> : null}
                     </span>
                     <span className="mt-1 block truncate text-xs font-semibold text-muted-foreground">{photo.description || photo.uploaderName}</span>
+                    {(photo.tags?.length ?? 0) > 0 ? (
+                      <span className="mt-1 flex flex-wrap gap-1">
+                        {photo.tags!.slice(0, 2).map((tag) => (
+                          <span key={tag} className="rounded-full bg-primary/10 px-2 py-0.5 text-[10px] font-bold text-primary">#{tag}</span>
+                        ))}
+                        {photo.tags!.length > 2 ? <span className="rounded-full bg-muted px-2 py-0.5 text-[10px] font-bold text-muted-foreground">+{photo.tags!.length - 2}</span> : null}
+                      </span>
+                    ) : null}
                   </button>
                 ))}
               </div>
@@ -191,6 +274,19 @@ export function ProjectDetailPage() {
           onNext={selectedIndex < filteredPhotos.length - 1 ? () => setSelectedPhotoId(filteredPhotos[selectedIndex + 1].id) : undefined}
         />
       ) : null}
+
+      <ReportBuilder
+        isOpen={reportBuilderOpen}
+        projectId={id}
+        projectName={project?.name ?? project?.dealNumber ?? "Project"}
+        creatorName={[user?.firstName, user?.lastName].filter(Boolean).join(" ") || user?.email || "Field User"}
+        photos={photos}
+        onClose={() => setReportBuilderOpen(false)}
+        onGenerated={() => {
+          setReportBuilderOpen(false);
+          void loadDetail();
+        }}
+      />
     </section>
   );
 }
@@ -288,6 +384,13 @@ function FieldPhotoViewer({ photo, onClose, onPrev, onNext }: { photo: FieldPhot
         <aside className="absolute inset-x-0 bottom-0 max-h-[50vh] overflow-y-auto rounded-t-2xl bg-white p-4 text-foreground">
           <h2 className="text-xl font-black">{photo.description || photo.displayName}</h2>
           <p className="mt-1 text-sm font-semibold text-muted-foreground">{categoryLabel(photo.photoCategory ?? photo.subcategory)} • {photo.uploaderName}</p>
+          {(photo.tags?.length ?? 0) > 0 ? (
+            <div className="mt-3 flex flex-wrap gap-2">
+              {photo.tags!.map((tag) => (
+                <span key={tag} className="rounded-full bg-primary/10 px-3 py-1 text-xs font-bold text-primary">#{tag}</span>
+              ))}
+            </div>
+          ) : null}
           <dl className="mt-4 grid gap-3 text-sm">
             <Meta label="Taken" value={photo.takenAt ? new Date(photo.takenAt).toLocaleString() : "Same as uploaded"} />
             <Meta label="Uploaded" value={new Date(photo.createdAt).toLocaleString()} />

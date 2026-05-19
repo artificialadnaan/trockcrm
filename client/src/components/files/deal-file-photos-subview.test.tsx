@@ -16,6 +16,7 @@ import type { DealPhotoRecord } from "@/components/photos/deal-photo-components"
 vi.mock("@/lib/api", () => ({
   api: vi.fn(async (path: string, options?: { method?: string; json?: Record<string, unknown> }) => {
     if (path.includes("/download")) return { url: "https://example.test/photo.jpg", filename: "photo.jpg" };
+    if (path.startsWith("/files/tags")) return { tags: ["roofing", "urgent", "safety"] };
     if (options?.method === "PATCH") return { file: { ...mockPhotos[0], ...options.json } };
     if (options?.method === "DELETE") return { success: true };
     return { photos: currentPhotos, pagination: { page: 1, limit: 200, total: currentPhotos.length, totalPages: 1 } };
@@ -36,6 +37,7 @@ const mockPhotos: DealPhotoRecord[] = [
     externalUrl: "https://example.test/one.jpg",
     externalThumbnailUrl: "https://example.test/one-thumb.jpg",
     description: "Roof corner damage",
+    tags: ["roofing", "urgent"],
     takenAt: "2026-05-04T17:43:00.000Z",
     createdAt: "2026-05-04T18:00:00.000Z",
     uploadedBy: "user-1",
@@ -63,6 +65,7 @@ const mockPhotos: DealPhotoRecord[] = [
     externalUrl: "https://example.test/two.jpg",
     externalThumbnailUrl: null,
     description: null,
+    tags: ["safety"],
     takenAt: null,
     createdAt: "2026-05-03T12:00:00.000Z",
     uploadedBy: "user-2",
@@ -126,10 +129,12 @@ describe("DealFilePhotosSubview", () => {
     expect(node.textContent).toContain("Damage");
     expect(node.textContent).toContain("Kaleb Martin");
     expect(node.textContent).toContain("100 Main St");
+    expect(node.textContent).toContain("#roofing");
 
     node.querySelector<HTMLButtonElement>('[aria-label="Open photo Damage photo"]')?.click();
     await vi.waitFor(() => expect(document.body.textContent).toContain("Uploaded by"));
     expect(document.body.textContent).toContain("From photo");
+    expect(document.body.textContent).toContain("#urgent");
   });
 
   it("filters by category from the shared filter bar", async () => {
@@ -139,6 +144,18 @@ describe("DealFilePhotosSubview", () => {
     node.querySelector<HTMLButtonElement>('[aria-label="Category filter"]')?.click();
     await vi.waitFor(() => expect(document.body.textContent).toContain("Safety"));
     Array.from(document.body.querySelectorAll<HTMLButtonElement>("button")).find((button) => button.textContent === "Safety")?.click();
+
+    await vi.waitFor(() => expect(node.textContent).toContain("Safety setup"));
+    expect(node.textContent).not.toContain("Roof corner damage");
+  });
+
+  it("filters by tag from the shared filter bar", async () => {
+    const node = renderSubview();
+    await vi.waitFor(() => expect(node.textContent).toContain("Roof corner damage"));
+
+    node.querySelector<HTMLButtonElement>('[aria-label="Tags filter"]')?.click();
+    await vi.waitFor(() => expect(document.body.textContent).toContain("#safety"));
+    Array.from(document.body.querySelectorAll<HTMLButtonElement>("button")).find((button) => button.textContent === "#safety")?.click();
 
     await vi.waitFor(() => expect(node.textContent).toContain("Safety setup"));
     expect(node.textContent).not.toContain("Roof corner damage");
@@ -174,6 +191,7 @@ describe("DealFilePhotosSubview", () => {
       const page = url.searchParams.get("page");
       const limit = url.searchParams.get("limit");
       if (path.includes("/download")) return { url: "https://example.test/photo.jpg", filename: "photo.jpg" };
+      if (path.startsWith("/files/tags")) return { tags: ["roofing", "urgent", "safety"] };
       if (page === "2") return { photos: pageTwo, pagination: { page: 2, limit: Number(limit), total: 101, totalPages: 2 } };
       return { photos: pageOne, pagination: { page: 1, limit: Number(limit), total: 101, totalPages: 2 } };
     });

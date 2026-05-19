@@ -162,6 +162,9 @@ describe("CapturePage", () => {
     input.dispatchEvent(new Event("change", { bubbles: true }));
 
     await vi.waitFor(() => expect(node.textContent).toContain("2 photos in this session"));
+    const description = node.querySelector<HTMLTextAreaElement>('textarea[aria-label="Photo 2 description"]')!;
+    description.value = "Sagging stringer";
+    description.dispatchEvent(new InputEvent("input", { bubbles: true, inputType: "insertText", data: "Sagging stringer" }));
     node.querySelector<HTMLButtonElement>('[aria-label="Remove a.jpg"]')?.click();
     await vi.waitFor(() => expect(node.textContent).toContain("1 photo in this session"));
 
@@ -171,6 +174,7 @@ describe("CapturePage", () => {
       dealId: undefined,
       leadId: "lead-1",
       category: null,
+      caption: "Sagging stringer",
       file: fileB,
     }));
     await vi.waitFor(() => expect(node.textContent).toContain("Projects page"));

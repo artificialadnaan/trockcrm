@@ -263,6 +263,7 @@ export const PHOTO_AUDIT_EVENT_TYPES = [
   "category_changed",
   "address_changed",
   "caption_changed",
+  "voice_description_transcribed",
   "downloaded",
   "deleted",
   "restored",

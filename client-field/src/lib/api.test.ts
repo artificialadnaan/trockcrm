@@ -69,6 +69,32 @@ describe("field api client", () => {
     expect(headers.get("X-Correlation-Id")).toBe("trace-1");
   });
 
+  it("supports raw request bodies for binary field uploads", async () => {
+    vi.stubEnv("VITE_API_BASE_URL", "https://api.example.com/");
+    Object.defineProperty(document, "cookie", { value: "csrf_token=csrf-123", writable: true });
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue({
+      ok: true,
+      status: 200,
+      headers: new Headers({ "content-type": "application/json" }),
+      json: async () => ({ transcript: "north slope" }),
+    } as Response);
+
+    const audio = new Blob(["audio"], { type: "audio/webm" });
+    await api("/field/photos/transcribe-description", {
+      method: "POST",
+      body: audio,
+      contentType: "audio/webm",
+      headers: { "x-file-name": "clip.webm" },
+    });
+
+    const request = fetchMock.mock.calls[0]?.[1];
+    const headers = request?.headers as Headers;
+    expect(request?.body).toBe(audio);
+    expect(headers.get("Content-Type")).toBe("audio/webm");
+    expect(headers.get("x-file-name")).toBe("clip.webm");
+    expect(headers.get("x-csrf-token")).toBe("csrf-123");
+  });
+
   it("stores response-body csrf tokens from cross-site auth and reuses them for later unsafe requests", async () => {
     vi.stubEnv("VITE_API_BASE_URL", "https://api.example.com/");
     Object.defineProperty(document, "cookie", { value: "", writable: true });

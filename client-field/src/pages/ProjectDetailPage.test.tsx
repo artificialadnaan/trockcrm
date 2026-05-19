@@ -9,7 +9,17 @@ import { ProjectDetailPage } from "./ProjectDetailPage";
 
 const apiMock = vi.hoisted(() => vi.fn());
 
-vi.mock("@/lib/api", () => ({ api: apiMock }));
+vi.mock("../lib/api", () => ({ api: apiMock }));
+vi.mock("../lib/auth", () => ({
+  useAuth: () => ({
+    user: {
+      id: "field-1",
+      email: "field@example.com",
+      firstName: "Field",
+      lastName: "User",
+    },
+  }),
+}));
 
 let root: Root | null = null;
 let container: HTMLDivElement | null = null;
@@ -34,6 +44,7 @@ function photo(id: string, category: string, uploader = "uploader-1") {
     fileExtension: ".jpg",
     dealId: "deal-1",
     description: `${category} caption`,
+    tags: category === "damage" ? ["roofing", "urgent"] : ["safety"],
     takenAt: "2026-05-05T12:00:00.000Z",
     createdAt: "2026-05-05T12:00:00.000Z",
     uploadedBy: uploader,
@@ -71,13 +82,15 @@ describe("ProjectDetailPage", () => {
       .mockResolvedValueOnce({ projects: [
         { id: "deal-1", name: "Roof Repair", dealNumber: "TR-1", propertyName: "Roof Repair", propertyAddress: "123 Main", stage: "Contract", lastActivityAt: null, photoCount: 2, starred: false },
       ] })
-      .mockResolvedValueOnce({ photos: [photo("photo-1", "damage"), photo("photo-2", "safety", "uploader-2")] });
+      .mockResolvedValueOnce({ photos: [photo("photo-1", "damage"), photo("photo-2", "safety", "uploader-2")] })
+      .mockResolvedValueOnce({ reports: [] });
 
     const node = renderPage();
 
     await vi.waitFor(() => expect(node.textContent).toContain("Roof Repair"));
     expect(node.textContent).toContain("damage caption");
     expect(node.textContent).toContain("safety caption");
+    expect(node.textContent).toContain("#roofing");
 
     Array.from(node.querySelectorAll("button")).find((button) => button.textContent === "Damage")?.click();
     await vi.waitFor(() => expect(node.textContent).toContain("damage caption"));
@@ -93,8 +106,26 @@ describe("ProjectDetailPage", () => {
     Array.from(node.querySelectorAll("button")).find((button) => button.textContent?.includes("damage caption"))?.click();
     await vi.waitFor(() => expect(node.textContent).toContain("Coordinates"));
     expect(node.textContent).toContain("From photo");
+    expect(node.textContent).toContain("#urgent");
     expect(node.textContent).not.toContain("Delete");
     expect(node.textContent).not.toContain("Download");
+  });
+
+  it("filters photos by tag pills", async () => {
+    apiMock
+      .mockResolvedValueOnce({ projects: [
+        { id: "deal-1", name: "Roof Repair", dealNumber: "TR-1", propertyName: "Roof Repair", propertyAddress: "123 Main", stage: "Contract", lastActivityAt: null, photoCount: 2, starred: false },
+      ] })
+      .mockResolvedValueOnce({ photos: [photo("photo-1", "damage"), photo("photo-2", "safety", "uploader-2")] })
+      .mockResolvedValueOnce({ reports: [] });
+
+    const node = renderPage();
+
+    await vi.waitFor(() => expect(node.textContent).toContain("safety caption"));
+    Array.from(node.querySelectorAll("button")).find((button) => button.textContent === "#roofing")?.click();
+
+    await vi.waitFor(() => expect(node.textContent).toContain("damage caption"));
+    expect(node.textContent).not.toContain("safety caption");
   });
 
   it("cycles grouping with the grouping pill", async () => {
@@ -102,7 +133,8 @@ describe("ProjectDetailPage", () => {
       .mockResolvedValueOnce({ projects: [
         { id: "deal-1", name: "Roof Repair", dealNumber: "TR-1", propertyName: "Roof Repair", propertyAddress: "123 Main", stage: "Contract", lastActivityAt: null, photoCount: 2, starred: false },
       ] })
-      .mockResolvedValueOnce({ photos: [photo("photo-1", "damage")] });
+      .mockResolvedValueOnce({ photos: [photo("photo-1", "damage")] })
+      .mockResolvedValueOnce({ reports: [] });
 
     const node = renderPage();
     await vi.waitFor(() => expect(node.textContent).toContain("Roof Repair"));
@@ -116,7 +148,8 @@ describe("ProjectDetailPage", () => {
       .mockResolvedValueOnce({ projects: [
         { id: "deal-1", name: "Roof Repair", dealNumber: "TR-1", propertyName: "Roof Repair", propertyAddress: "123 Main", stage: "Contract", lastActivityAt: null, photoCount: 0, starred: false },
       ] })
-      .mockResolvedValueOnce({ photos: [] });
+      .mockResolvedValueOnce({ photos: [] })
+      .mockResolvedValueOnce({ reports: [] });
 
     const node = renderPage();
     await vi.waitFor(() => expect(node.textContent).toContain("No photos in this project yet."));
@@ -126,12 +159,28 @@ describe("ProjectDetailPage", () => {
     await vi.waitFor(() => expect(node.textContent).toContain("Capture route"));
   });
 
+  it("keeps the photo gallery available when reports fail to load", async () => {
+    apiMock
+      .mockResolvedValueOnce({ projects: [
+        { id: "deal-1", name: "Roof Repair", dealNumber: "TR-1", propertyName: "Roof Repair", propertyAddress: "123 Main", stage: "Contract", lastActivityAt: null, photoCount: 1, starred: false },
+      ] })
+      .mockResolvedValueOnce({ photos: [photo("photo-1", "damage")] })
+      .mockRejectedValueOnce(new Error("reports unavailable"));
+
+    const node = renderPage();
+
+    await vi.waitFor(() => expect(node.textContent).toContain("Roof Repair"));
+    expect(node.textContent).toContain("damage caption");
+    expect(node.textContent).toContain("No reports yet.");
+  });
+
   it("toggles star optimistically and rolls back when the API fails", async () => {
     apiMock
       .mockResolvedValueOnce({ projects: [
         { id: "deal-1", name: "Roof Repair", dealNumber: "TR-1", propertyName: "Roof Repair", propertyAddress: "123 Main", stage: "Contract", lastActivityAt: null, photoCount: 1, starred: false },
       ] })
       .mockResolvedValueOnce({ photos: [photo("photo-1", "damage")] })
+      .mockResolvedValueOnce({ reports: [] })
       .mockRejectedValueOnce(new Error("star failed"));
 
     const node = renderPage();
@@ -148,7 +197,8 @@ describe("ProjectDetailPage", () => {
       .mockResolvedValueOnce({ projects: [
         { id: "deal-1", name: "Roof Repair", dealNumber: "TR-1", propertyName: "Roof Repair", propertyAddress: "123 Main", stage: "Contract", lastActivityAt: null, photoCount: 2, starred: false },
       ] })
-      .mockResolvedValueOnce({ photos: [photo("photo-1", "damage"), photo("photo-2", "safety", "uploader-2")] });
+      .mockResolvedValueOnce({ photos: [photo("photo-1", "damage"), photo("photo-2", "safety", "uploader-2")] })
+      .mockResolvedValueOnce({ reports: [] });
 
     const node = renderPage();
     await vi.waitFor(() => expect(node.textContent).toContain("safety caption"));

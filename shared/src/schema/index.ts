@@ -114,6 +114,7 @@ export {
   fieldUserStarredProjects,
   files,
   fileCategoryEnum,
+  photoTags,
   photoAddressSourceEnum,
   photoAuditEventTypeEnum,
   photoAuditLog,

@@ -13,6 +13,7 @@ const basePhoto: FieldPhoto = {
   dealId: "deal-1",
   leadId: null,
   description: null,
+  tags: ["roofing"],
   takenAt: "2026-05-05T12:00:00.000Z",
   createdAt: "2026-05-05T12:00:00.000Z",
   uploadedBy: "user-1",
@@ -37,6 +38,7 @@ describe("field project photo helpers", () => {
 
     expect(filterPhotos(photos, {
       categories: ["damage"],
+      tags: [],
       uploaderIds: ["user-1"],
       from: "2026-05-04",
       to: "2026-05-06",

@@ -7,6 +7,7 @@ type TenantDb = NodePgDatabase<typeof schema>;
 
 export interface DealPhotoTimelineFilters {
   categories?: string[];
+  tags?: string[];
   uploaderIds?: string[];
   from?: string;
   to?: string;
@@ -19,11 +20,13 @@ function normalizeList(values?: string[]): string[] {
 
 export function describeDealPhotoTimelineFilters(filters: DealPhotoTimelineFilters): string[] {
   const categories = normalizeList(filters.categories);
+  const tags = normalizeList(filters.tags).map((tag) => tag.toLowerCase());
   const uploaderIds = normalizeList(filters.uploaderIds);
   const keys = ["deal_scope", "file_category", "active_file", "latest_version"];
 
   if (!filters.includeDeleted) keys.push("deleted_at");
   if (categories.length > 0) keys.push("photo_category");
+  if (tags.length > 0) keys.push("tags");
   if (uploaderIds.length > 0) keys.push("uploaded_by");
   if (filters.from || filters.to) keys.push("taken_at", "created_at");
 
@@ -50,6 +53,7 @@ export async function buildDealPhotoTimelineConditions(
   filters: DealPhotoTimelineFilters
 ): Promise<SQL> {
   const categories = normalizeList(filters.categories);
+  const tags = normalizeList(filters.tags).map((tag) => tag.toLowerCase());
   const uploaderIds = normalizeList(filters.uploaderIds);
   const concreteCategories = categories.filter((category) => category !== "uncategorized");
   const wantsUncategorized = categories.includes("uncategorized");
@@ -79,6 +83,14 @@ export async function buildDealPhotoTimelineConditions(
 
   if (uploaderIds.length > 0) {
     conditions.push(inArray(files.uploadedBy, uploaderIds));
+  }
+
+  if (tags.length > 0) {
+    conditions.push(sql`EXISTS (
+      SELECT 1
+      FROM unnest(COALESCE(${files.tags}, ARRAY[]::text[])) AS photo_tag(tag)
+      WHERE LOWER(photo_tag.tag) = ANY(${tags})
+    )`);
   }
 
   if (filters.from) {

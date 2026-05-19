@@ -1,4 +1,4 @@
-import { Router } from "express";
+import express, { Router } from "express";
 import { requireFieldContractor } from "../../middleware/field-auth.js";
 import { AppError } from "../../middleware/error-handler.js";
 import { tenantMiddleware } from "../../middleware/tenant.js";
@@ -7,6 +7,21 @@ import {
   confirmFieldPhotoUpload,
   requestFieldPhotoUploadUrl,
 } from "./photos-service.js";
+import {
+  transcribeAndPersistFieldPhotoDescription,
+  transcribePhotoDescriptionAudio,
+} from "./photo-transcription-service.js";
+import {
+  deleteFieldPhotoTag,
+  replaceFieldPhotoTags,
+  searchFieldProjectTags,
+} from "./photo-tags-service.js";
+import {
+  generateFieldPhotoReport,
+  getFieldProjectReportDownload,
+  listFieldProjectReports,
+  previewFieldPhotoReport,
+} from "./photo-reports-service.js";
 import {
   assertAccessibleFieldCaptureTarget,
   listFieldProjects,
@@ -34,6 +49,16 @@ function requestAuditContext(req: any) {
     ipAddress: req.ip ?? null,
     userAgent: Array.isArray(userAgentHeader) ? userAgentHeader.join(", ") : userAgentHeader ?? null,
   };
+}
+
+function rawAudioBody() {
+  if (process.env.NODE_ENV === "test") {
+    return (_req: any, _res: any, next: (err?: unknown) => void) => next();
+  }
+  return express.raw({
+    type: ["audio/*", "application/octet-stream"],
+    limit: "25mb",
+  });
 }
 
 fieldRoutes.get("/me", requireFieldContractor, (req, res) => {
@@ -138,6 +163,168 @@ fieldRoutes.post("/photos/confirm-upload", ...fieldProjectMiddleware, async (req
       addressSource: req.body.addressSource,
       takenAt: req.body.takenAt,
       auditContext: requestAuditContext(req),
+    });
+    await req.commitTransaction();
+    res.status(201).json(result);
+  } catch (err) {
+    next(err);
+  }
+});
+
+fieldRoutes.post("/photos/transcribe-description", requireFieldContractor, rawAudioBody(), async (req, res, next) => {
+  try {
+    const body = Buffer.isBuffer(req.body) ? req.body : Buffer.alloc(0);
+    const result = await transcribePhotoDescriptionAudio({
+      audio: body,
+      mimeType: String(req.headers["content-type"] ?? ""),
+      fileName: typeof req.headers["x-file-name"] === "string" ? req.headers["x-file-name"] : undefined,
+    });
+    res.json(result);
+  } catch (err) {
+    next(err);
+  }
+});
+
+fieldRoutes.post("/photos/:photoId/transcribe-description", ...fieldProjectMiddleware, rawAudioBody(), async (req, res, next) => {
+  try {
+    const body = Buffer.isBuffer(req.body) ? req.body : Buffer.alloc(0);
+    const result = await transcribeAndPersistFieldPhotoDescription(req.tenantDb!, {
+      userId: req.fieldUser!.id,
+      userRole: req.fieldUser!.role,
+    }, {
+      photoId: String(req.params.photoId),
+      audio: body,
+      mimeType: String(req.headers["content-type"] ?? ""),
+      fileName: typeof req.headers["x-file-name"] === "string" ? req.headers["x-file-name"] : undefined,
+      auditContext: requestAuditContext(req),
+    });
+    await req.commitTransaction();
+    res.json(result);
+  } catch (err) {
+    next(err);
+  }
+});
+
+fieldRoutes.post("/photos/:photoId/tags", ...fieldProjectMiddleware, async (req, res, next) => {
+  try {
+    const result = await replaceFieldPhotoTags(req.tenantDb!, {
+      userId: req.fieldUser!.id,
+      userRole: req.fieldUser!.role,
+    }, {
+      photoId: String(req.params.photoId),
+      tags: Array.isArray(req.body.tags) ? req.body.tags.map(String) : [],
+    });
+    await req.commitTransaction();
+    res.json(result);
+  } catch (err) {
+    next(err);
+  }
+});
+
+fieldRoutes.delete("/photos/:photoId/tags/:tag", ...fieldProjectMiddleware, async (req, res, next) => {
+  try {
+    const result = await deleteFieldPhotoTag(req.tenantDb!, {
+      userId: req.fieldUser!.id,
+      userRole: req.fieldUser!.role,
+    }, {
+      photoId: String(req.params.photoId),
+      tag: decodeURIComponent(String(req.params.tag)),
+    });
+    await req.commitTransaction();
+    res.json(result);
+  } catch (err) {
+    next(err);
+  }
+});
+
+fieldRoutes.get("/projects/:dealId/tags", ...fieldProjectMiddleware, async (req, res, next) => {
+  try {
+    const result = await searchFieldProjectTags(req.tenantDb!, {
+      userId: req.fieldUser!.id,
+      userRole: req.fieldUser!.role,
+    }, {
+      projectId: String(req.params.dealId),
+      query: typeof req.query.q === "string" ? req.query.q : undefined,
+      limit: req.query.limit ? parseOptionalPositiveInt(req.query.limit) : undefined,
+    });
+    await req.commitTransaction();
+    res.json(result);
+  } catch (err) {
+    next(err);
+  }
+});
+
+fieldRoutes.get("/projects/:dealId/reports", ...fieldProjectMiddleware, async (req, res, next) => {
+  try {
+    const result = await listFieldProjectReports(req.tenantDb!, {
+      userId: req.fieldUser!.id,
+      userRole: req.fieldUser!.role,
+    }, String(req.params.dealId));
+    await req.commitTransaction();
+    res.json(result);
+  } catch (err) {
+    next(err);
+  }
+});
+
+fieldRoutes.get("/reports/:reportId/download", ...fieldProjectMiddleware, async (req, res, next) => {
+  try {
+    const result = await getFieldProjectReportDownload(req.tenantDb!, {
+      userId: req.fieldUser!.id,
+      userRole: req.fieldUser!.role,
+    }, String(req.params.reportId));
+    await req.commitTransaction();
+    res.json(result);
+  } catch (err) {
+    next(err);
+  }
+});
+
+fieldRoutes.post("/reports/preview", ...fieldProjectMiddleware, async (req, res, next) => {
+  try {
+    const result = await previewFieldPhotoReport(req.tenantDb!, {
+      userId: req.fieldUser!.id,
+      userRole: req.fieldUser!.role,
+    }, {
+      projectId: String(req.body.projectId),
+      photoIds: Array.isArray(req.body.photoIds) ? req.body.photoIds.map(String) : [],
+      groupBy: req.body.groupBy === "tag" || req.body.groupBy === "date" ? req.body.groupBy : "none",
+      creatorName: [req.fieldUser!.firstName, req.fieldUser!.lastName].filter(Boolean).join(" ") || req.fieldUser!.email,
+    });
+    await req.commitTransaction();
+    res.json(result);
+  } catch (err) {
+    next(err);
+  }
+});
+
+fieldRoutes.post("/reports/generate", ...fieldProjectMiddleware, async (req, res, next) => {
+  try {
+    const result = await generateFieldPhotoReport(req.tenantDb!, {
+      userId: req.fieldUser!.id,
+      userRole: req.fieldUser!.role,
+    }, {
+      officeSlug: req.officeSlug!,
+      projectId: String(req.body.projectId),
+      reportTitle: String(req.body.reportTitle ?? ""),
+      coverData: {
+        creatorName: String(req.body.coverData?.creatorName ?? ""),
+        companyName: req.body.coverData?.companyName ?? null,
+        reportDateLabel: req.body.coverData?.reportDateLabel ?? null,
+        projectName: req.body.coverData?.projectName ?? null,
+      },
+      sections: Array.isArray(req.body.sections)
+        ? req.body.sections.map((section: any) => ({
+            title: String(section?.title ?? ""),
+            photoIds: Array.isArray(section?.photoIds) ? section.photoIds.map(String) : [],
+            photoOverrides: Array.isArray(section?.photoOverrides)
+              ? section.photoOverrides.map((entry: any) => ({
+                  id: String(entry?.id),
+                  description: entry?.description == null ? null : String(entry.description),
+                }))
+              : [],
+          }))
+        : [],
     });
     await req.commitTransaction();
     res.status(201).json(result);

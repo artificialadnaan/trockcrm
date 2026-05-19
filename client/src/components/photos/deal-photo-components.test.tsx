@@ -25,6 +25,7 @@ const photo: DealPhotoRecord = {
   externalUrl: "https://example.test/photo.jpg",
   externalThumbnailUrl: "https://example.test/photo-thumb.jpg",
   description: "Roof corner damage",
+  tags: ["roofing", "urgent"],
   takenAt: "2026-05-04T17:43:00.000Z",
   createdAt: "2026-05-04T18:00:00.000Z",
   uploadedBy: "user-1",
@@ -50,6 +51,7 @@ const pdfPhoto: DealPhotoRecord = {
   externalUrl: null,
   externalThumbnailUrl: null,
   description: null,
+  tags: [],
 };
 
 let root: Root | null = null;

@@ -17,6 +17,8 @@ import {
 vi.mock("@/lib/api", () => ({
   api: vi.fn(async (path: string, options?: { method?: string; json?: Record<string, unknown> }) => {
     if (path.includes("/download")) return { url: "https://example.test/photo.jpg", filename: "photo.jpg" };
+    if (path.startsWith("/files/tags")) return { tags: ["roofing", "urgent", "safety"] };
+    if (path.startsWith("/files?")) return { files: [], pagination: { page: 1, limit: 20, total: 0, totalPages: 0 } };
     if (options?.method === "PATCH") {
       return { file: { ...mockPhotos[0], ...options.json, addressSource: options.json?.address ? "manual_override" : mockPhotos[0].addressSource } };
     }
@@ -37,6 +39,7 @@ const mockPhotos: DealPhotoRecord[] = [
     externalUrl: "https://example.test/one.jpg",
     externalThumbnailUrl: "https://example.test/one-thumb.jpg",
     description: "Original caption",
+    tags: ["roofing", "urgent"],
     takenAt: "2026-05-04T17:43:00.000Z",
     createdAt: "2026-05-04T18:00:00.000Z",
     uploadedBy: "user-1",
@@ -62,6 +65,7 @@ const mockPhotos: DealPhotoRecord[] = [
     externalUrl: "https://example.test/two.jpg",
     externalThumbnailUrl: null,
     description: null,
+    tags: ["safety"],
     takenAt: null,
     createdAt: "2026-05-03T12:00:00.000Z",
     uploadedBy: "user-2",
@@ -105,6 +109,7 @@ describe("DealPhotosTab helpers", () => {
   it("serializes active filters to shareable URL params", () => {
     const params = buildPhotoFilterSearchParams({
       categories: ["damage", "uncategorized"],
+      tags: ["roofing"],
       uploaderIds: ["user-1"],
       from: "2026-01-01",
       to: "2026-05-04",
@@ -112,11 +117,11 @@ describe("DealPhotosTab helpers", () => {
       showDeleted: true,
     });
 
-    expect(params.toString()).toBe("category=damage%2Cuncategorized&uploader=user-1&from=2026-01-01&to=2026-05-04&group=category&deleted=1");
+    expect(params.toString()).toBe("category=damage%2Cuncategorized&tags=roofing&uploader=user-1&from=2026-01-01&to=2026-05-04&group=category&deleted=1");
   });
 
   it("groups photos by date, category, uploader, or none", () => {
-    const baseFilters: PhotoFilterState = { categories: [], uploaderIds: [], from: "", to: "", group: "date", showDeleted: false };
+    const baseFilters: PhotoFilterState = { categories: [], tags: [], uploaderIds: [], from: "", to: "", group: "date", showDeleted: false };
 
     expect(groupDealPhotos(mockPhotos, baseFilters).map((group) => group.label)).toEqual([
       "Monday, May 4th, 2026",
@@ -141,10 +146,12 @@ describe("DealPhotosTab component", () => {
     expect(node.textContent).toContain("Photos");
     expect(node.textContent).toContain("Kaleb Mar");
     expect(node.textContent).toContain("Damage");
+    expect(node.textContent).toContain("#roofing");
     node.querySelector<HTMLButtonElement>('[aria-label="Open photo Damage photo"]')?.click();
     await vi.waitFor(() => expect(document.body.textContent).toContain("Uploaded by"));
     expect(document.body.textContent).toContain("From photo");
     expect(document.body.textContent).toContain("Procore");
+    expect(document.body.textContent).toContain("#urgent");
   });
 
   it("shows deleted photos only when the toggle is enabled", async () => {
@@ -155,6 +162,18 @@ describe("DealPhotosTab component", () => {
     node.querySelector<HTMLButtonElement>('[aria-label="Show deleted photos"]')?.click();
     await vi.waitFor(() => expect(node.textContent).toContain("Adnaan Iqbal"));
     expect(node.textContent).toContain("Deleted");
+  });
+
+  it("filters photos by tags from the shared filter bar", async () => {
+    const node = renderTab();
+    await vi.waitFor(() => expect(node.textContent).toContain("Kaleb Martin"));
+
+    node.querySelector<HTMLButtonElement>('[aria-label="Tags filter"]')?.click();
+    await vi.waitFor(() => expect(document.body.textContent).toContain("#roofing"));
+    Array.from(document.body.querySelectorAll<HTMLButtonElement>("button")).find((button) => button.textContent === "#roofing")?.click();
+
+    await vi.waitFor(() => expect(node.textContent).toContain("Kaleb Martin"));
+    expect(node.textContent).not.toContain("Adnaan Iqbal");
   });
 
   it("loads additional photo pages instead of truncating large deals at the first page", async () => {
@@ -179,6 +198,8 @@ describe("DealPhotosTab component", () => {
       const page = url.searchParams.get("page");
       const limit = url.searchParams.get("limit");
       if (path.includes("/download")) return { url: "https://example.test/photo.jpg", filename: "photo.jpg" };
+      if (path.startsWith("/files/tags")) return { tags: ["roofing", "urgent", "safety"] };
+       if (path.startsWith("/files?")) return { files: [], pagination: { page: 1, limit: 20, total: 0, totalPages: 0 } };
       if (page === "2") return { photos: pageTwo, pagination: { page: 2, limit: Number(limit), total: 101, totalPages: 2 } };
       return { photos: pageOne, pagination: { page: 1, limit: Number(limit), total: 101, totalPages: 2 } };
     });
@@ -208,6 +229,8 @@ describe("DealPhotosTab component", () => {
     vi.mocked(api).mockImplementation(async (path: string) => {
       const url = new URL(`https://example.test/api${path}`);
       if (path.includes("/download")) return { url: "https://example.test/photo.jpg", filename: "photo.jpg" };
+      if (path.startsWith("/files/tags")) return { tags: ["roofing", "urgent", "safety"] };
+      if (path.startsWith("/files?")) return { files: [], pagination: { page: 1, limit: 20, total: 0, totalPages: 0 } };
       if (url.searchParams.get("page") === "2") throw new Error("Network unavailable");
       return { photos: pageOne, pagination: { page: 1, limit: 100, total: 101, totalPages: 2 } };
     });

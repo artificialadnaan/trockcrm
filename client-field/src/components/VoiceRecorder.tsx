@@ -1,0 +1,137 @@
+import { useEffect, useRef, useState } from "react";
+import { LoaderCircle, Mic, Square } from "lucide-react";
+import { Button } from "./ui";
+import { transcribeDescriptionAudio } from "../lib/photo-dictation";
+
+type VoiceRecorderProps = {
+  disabled?: boolean;
+  onTranscript: (text: string) => void;
+};
+
+type RecorderState = "idle" | "recording" | "transcribing";
+
+const MAX_RECORDING_MS = 60_000;
+
+export function VoiceRecorder({ disabled, onTranscript }: VoiceRecorderProps) {
+  const [state, setState] = useState<RecorderState>("idle");
+  const [seconds, setSeconds] = useState(0);
+  const [error, setError] = useState<string | null>(null);
+  const recorderRef = useRef<MediaRecorder | null>(null);
+  const streamRef = useRef<MediaStream | null>(null);
+  const chunksRef = useRef<BlobPart[]>([]);
+  const timeoutRef = useRef<number | null>(null);
+  const intervalRef = useRef<number | null>(null);
+
+  useEffect(() => () => {
+    streamRef.current?.getTracks().forEach((track) => track.stop());
+    if (timeoutRef.current) window.clearTimeout(timeoutRef.current);
+    if (intervalRef.current) window.clearInterval(intervalRef.current);
+  }, []);
+
+  async function start() {
+    setError(null);
+    if (!navigator.mediaDevices?.getUserMedia || typeof MediaRecorder === "undefined") {
+      setError("Voice dictation is not available in this browser. Use the keyboard option instead.");
+      return;
+    }
+
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      const recorder = new MediaRecorder(stream);
+      recorderRef.current = recorder;
+      streamRef.current = stream;
+      chunksRef.current = [];
+      setSeconds(0);
+      setState("recording");
+
+      recorder.addEventListener("dataavailable", (event) => {
+        if (event.data?.size) chunksRef.current.push(event.data);
+      });
+      recorder.addEventListener("stop", () => {
+        void finishRecording();
+      }, { once: true });
+
+      intervalRef.current = window.setInterval(() => {
+        setSeconds((current) => current + 1);
+      }, 1000);
+      timeoutRef.current = window.setTimeout(() => {
+        stop();
+      }, MAX_RECORDING_MS);
+
+      recorder.start();
+    } catch {
+      setError("Microphone access is blocked. Enable microphone permission or use the keyboard option.");
+      setState("idle");
+    }
+  }
+
+  function stop() {
+    if (recorderRef.current?.state === "recording") {
+      recorderRef.current.stop();
+    }
+    if (timeoutRef.current) window.clearTimeout(timeoutRef.current);
+    if (intervalRef.current) window.clearInterval(intervalRef.current);
+  }
+
+  async function finishRecording() {
+    const recorder = recorderRef.current;
+    const mimeType = recorder?.mimeType || "audio/webm";
+    streamRef.current?.getTracks().forEach((track) => track.stop());
+    recorderRef.current = null;
+    streamRef.current = null;
+    if (timeoutRef.current) window.clearTimeout(timeoutRef.current);
+    if (intervalRef.current) window.clearInterval(intervalRef.current);
+    timeoutRef.current = null;
+    intervalRef.current = null;
+
+    const audio = new Blob(chunksRef.current, { type: mimeType });
+    chunksRef.current = [];
+    if (!audio.size) {
+      setError("No audio was captured. Try again.");
+      setState("idle");
+      return;
+    }
+
+    setState("transcribing");
+    try {
+      const result = await transcribeDescriptionAudio({
+        audio,
+        mimeType,
+        fileName: `photo-description-${Date.now()}.${mimeType.includes("mp4") ? "m4a" : "webm"}`,
+      });
+      onTranscript(result.transcript);
+      setState("idle");
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Voice transcription failed.");
+      setState("idle");
+    }
+  }
+
+  const recording = state === "recording";
+  const transcribing = state === "transcribing";
+
+  return (
+    <div className="space-y-2">
+      <div className="flex items-center gap-2">
+        <Button
+          type="button"
+          variant={recording ? "danger" : "ghost"}
+          disabled={disabled || transcribing}
+          aria-label={recording ? "Stop voice dictation" : "Start voice dictation"}
+          onClick={() => {
+            if (recording) {
+              stop();
+            } else {
+              void start();
+            }
+          }}
+        >
+          {transcribing ? <LoaderCircle className="mr-2 h-4 w-4 animate-spin" /> : recording ? <Square className="mr-2 h-4 w-4" /> : <Mic className="mr-2 h-4 w-4" />}
+          {transcribing ? "Transcribing..." : recording ? `Stop (${seconds}s)` : "Voice"}
+        </Button>
+        {recording ? <span className="text-xs font-bold text-red-200">Recording now</span> : null}
+      </div>
+      {error ? <p className="text-xs font-semibold text-red-200">{error}</p> : null}
+    </div>
+  );
+}

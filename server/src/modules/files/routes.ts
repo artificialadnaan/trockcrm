@@ -523,12 +523,16 @@ router.get("/deal/:dealId/photos", async (req, res, next) => {
     const categories = typeof req.query.category === "string" && req.query.category.length > 0
       ? req.query.category.split(",")
       : undefined;
+    const tags = typeof req.query.tags === "string" && req.query.tags.length > 0
+      ? req.query.tags.split(",")
+      : undefined;
     const uploaderIds = typeof req.query.uploader === "string" && req.query.uploader.length > 0
       ? req.query.uploader.split(",")
       : undefined;
 
     const result = await getDealPhotoTimeline(req.tenantDb!, req.params.dealId, page, limit, {
       categories,
+      tags,
       uploaderIds,
       from: req.query.from as string | undefined,
       to: req.query.to as string | undefined,

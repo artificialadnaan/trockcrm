@@ -32,6 +32,7 @@ export type FieldPhoto = {
   dealId: string | null;
   leadId: string | null;
   description: string | null;
+  tags?: string[];
   takenAt: string | null;
   createdAt: string;
   uploadedBy: string;
@@ -138,14 +139,20 @@ export function groupPhotos(photos: FieldPhoto[], grouping: PhotoGrouping) {
 
 export function filterPhotos(photos: FieldPhoto[], filters: {
   categories: string[];
+  tags: string[];
   uploaderIds: string[];
   from: string;
   to: string;
 }) {
+  const normalizedTags = filters.tags.map((tag) => tag.toLowerCase());
   return photos.filter((photo) => {
     if (filters.categories.length > 0) {
       const category = photo.photoCategory ?? photo.subcategory ?? "uncategorized";
       if (!filters.categories.includes(category)) return false;
+    }
+    if (filters.tags.length > 0) {
+      const photoTags = (Array.isArray(photo.tags) ? photo.tags : []).map((tag) => tag.toLowerCase());
+      if (!photoTags.some((tag) => normalizedTags.includes(tag))) return false;
     }
     if (filters.uploaderIds.length > 0 && !filters.uploaderIds.includes(photo.uploadedBy)) return false;
     const day = new Date(photo.takenAt ?? photo.createdAt).toISOString().slice(0, 10);

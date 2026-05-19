@@ -73,6 +73,7 @@ function toFieldUploadedPhoto(file: any, imageUrl: string | null): FieldPhoto {
     dealId: file.dealId ?? null,
     leadId: file.leadId ?? null,
     description: file.description ?? null,
+    tags: Array.isArray(file.tags) ? file.tags : [],
     takenAt: iso(file.takenAt),
     createdAt: iso(file.createdAt)!,
     uploadedBy: file.uploadedBy,
