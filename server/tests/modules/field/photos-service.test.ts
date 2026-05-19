@@ -62,6 +62,7 @@ const LEAD_ID = "33333333-3333-4333-8333-333333333333";
 const PHOTO_ID = "44444444-4444-4444-8444-444444444444";
 const PENDING_PHOTO_ID = "55555555-5555-4555-8555-555555555555";
 const PENDING_OPPORTUNITY_PHOTO_ID = "66666666-6666-4666-8666-666666666666";
+const UUID_V7 = "019e4188-7d1b-7860-a57d-fb59484cd705";
 
 const confirmedFile = {
   id: PHOTO_ID,
@@ -411,6 +412,63 @@ describe("field photo upload service", () => {
 
     expect(projectMocks.assertAccessibleFieldCaptureTarget).not.toHaveBeenCalled();
     expect(db.execute).not.toHaveBeenCalled();
+  });
+
+  it("accepts non-v1-v5 UUIDs that Postgres still treats as valid uuids", async () => {
+    const localDb = { execute: vi.fn() } as any;
+    localDb.execute.mockResolvedValueOnce({
+      rows: [{
+        id: UUID_V7,
+        category: "photo",
+        deal_id: null,
+        lead_id: null,
+        uploaded_by: FIELD_USER_ID,
+      }],
+    }).mockResolvedValueOnce({
+      rows: [{
+        id: UUID_V7,
+        category: "photo",
+        photo_category: "damage",
+        subcategory: null,
+        display_name: "Pending photo",
+        mime_type: "image/jpeg",
+        file_size_bytes: 850000,
+        file_extension: ".jpg",
+        deal_id: UUID_V7,
+        lead_id: null,
+        description: null,
+        tags: [],
+        taken_at: new Date("2026-05-05T12:00:00.000Z"),
+        created_at: new Date("2026-05-05T12:01:00.000Z"),
+        uploaded_by: FIELD_USER_ID,
+        latitude: null,
+        longitude: null,
+        address: null,
+        address_source: null,
+        geocoded_at: null,
+        procore_sync_status: null,
+        deleted_at: null,
+      }],
+    });
+    projectMocks.assertAccessibleFieldCaptureTarget.mockResolvedValueOnce({ id: UUID_V7, type: "deal" });
+    fileMocks.getFileDownloadUrl.mockResolvedValueOnce({ url: "https://signed.example/photo.jpg" });
+
+    const result = await assignPendingFieldPhotoTarget(localDb, {
+      userId: FIELD_USER_ID,
+      userRole: "field_contractor",
+    }, {
+      photoId: UUID_V7,
+      dealId: UUID_V7,
+    });
+
+    expect(projectMocks.assertAccessibleFieldCaptureTarget).toHaveBeenCalledWith(localDb, {
+      dealId: UUID_V7,
+      leadId: undefined,
+      opportunityId: undefined,
+      userId: FIELD_USER_ID,
+      userRole: "field_contractor",
+    });
+    expect(result.photo.id).toBe(UUID_V7);
   });
 
   it("assigns a pending field photo to an opportunity target using the same persisted deal linkage as direct uploads", async () => {

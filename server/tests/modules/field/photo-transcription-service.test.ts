@@ -112,6 +112,49 @@ describe("photo transcription service", () => {
     });
   });
 
+  it("does not allow uploader fallback once the photo is linked through another entity column", async () => {
+    fileMocks.getFileById.mockResolvedValueOnce({
+      id: "photo-1",
+      category: "photo",
+      dealId: null,
+      leadId: null,
+      contactId: "contact-1",
+      procoreProjectId: null,
+      changeOrderId: null,
+      uploadedBy: "field-1",
+      description: "Old caption",
+    });
+
+    await expect(getAccessibleFieldPhoto(db, {
+      userId: "field-1",
+      userRole: "field_contractor",
+    }, "photo-1")).rejects.toEqual(new AppError(404, "Photo not found."));
+
+    expect(projectMocks.assertAccessibleFieldCaptureTarget).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    { contactId: null, procoreProjectId: 101, changeOrderId: null },
+    { contactId: null, procoreProjectId: null, changeOrderId: "co-1" },
+  ])("does not allow uploader fallback when other linkage metadata is present: %j", async (links) => {
+    fileMocks.getFileById.mockResolvedValueOnce({
+      id: "photo-1",
+      category: "photo",
+      dealId: null,
+      leadId: null,
+      uploadedBy: "field-1",
+      description: "Old caption",
+      ...links,
+    });
+
+    await expect(getAccessibleFieldPhoto(db, {
+      userId: "field-1",
+      userRole: "field_contractor",
+    }, "photo-1")).rejects.toEqual(new AppError(404, "Photo not found."));
+
+    expect(projectMocks.assertAccessibleFieldCaptureTarget).not.toHaveBeenCalled();
+  });
+
   it("transcribes audio, persists the new description, and writes a photo audit event", async () => {
     vi.stubGlobal("fetch", vi.fn(async () => ({
       ok: true,

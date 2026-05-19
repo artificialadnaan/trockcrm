@@ -18,7 +18,7 @@ const IMAGE_CONTENT_TYPES = new Set(["image/jpeg", "image/png", "image/webp", "i
 const PHOTO_CATEGORY_VALUES = new Set(["before", "after", "progress", "site_visit", "damage", "safety", "delivery", "other"]);
 const PHOTO_ADDRESS_SOURCES = new Set(["exif", "live_gps"]);
 const UUID_PATTERN =
-  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 function extensionForContentType(contentType: string): string {
   switch (contentType) {
