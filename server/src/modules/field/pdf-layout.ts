@@ -1,8 +1,6 @@
-import fs from "node:fs/promises";
-import path from "node:path";
-import { fileURLToPath } from "node:url";
 import PDFDocument from "pdfkit";
 import { getObjectBuffer, isR2Configured } from "../../lib/r2-client.js";
+import { TROCK_LOGO_PNG_BASE64 } from "./pdf-logo.js";
 
 const PAGE_WIDTH = 612;
 const PAGE_HEIGHT = 792;
@@ -12,12 +10,7 @@ const BRAND_BLACK = "#111111";
 const BRAND_MUTED = "#7589A3";
 const BRAND_BORDER = "#EAECEF";
 const BRAND_PANEL = "#F7F7F8";
-const LOGO_PATH_CANDIDATES = [
-  path.resolve(process.cwd(), "client/public/logo.png"),
-  path.resolve(process.cwd(), "client-field/public/logo.png"),
-  fileURLToPath(new URL("../../../../client/public/logo.png", import.meta.url)),
-  fileURLToPath(new URL("../../../../client-field/public/logo.png", import.meta.url)),
-];
+const LOGO_BUFFER = Buffer.from(TROCK_LOGO_PNG_BASE64, "base64");
 
 export type ReportRenderablePhoto = {
   id: string;
@@ -75,17 +68,6 @@ function formatPhotoDate(value: string | null, fallback: string): string {
     hour: "numeric",
     minute: "2-digit",
   }).replace(/^/, ", ");
-}
-
-async function loadLogoBuffer(): Promise<Buffer | null> {
-  for (const logoPath of LOGO_PATH_CANDIDATES) {
-    try {
-      return await fs.readFile(logoPath);
-    } catch {
-      // Try the next candidate.
-    }
-  }
-  return null;
 }
 
 async function fetchExternalImageBuffer(url: string): Promise<Buffer | null> {
@@ -213,8 +195,6 @@ export async function renderFieldPhotoReportPdf(input: {
   const pageMeta: PageMeta[] = [];
   doc.on("data", (chunk) => chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)));
 
-  const logoBuffer = await loadLogoBuffer();
-
   doc.rect(0, 0, PAGE_WIDTH, PAGE_HEIGHT).fill("white");
   doc.fillColor(BRAND_BLACK).font("Helvetica-Bold").fontSize(18).text(input.cover.creatorName, PAGE_MARGIN, 222, {
     width: PAGE_WIDTH - PAGE_MARGIN * 2,
@@ -228,16 +208,10 @@ export async function renderFieldPhotoReportPdf(input: {
     width: PAGE_WIDTH - PAGE_MARGIN * 2,
     align: "center",
   });
-  if (logoBuffer) {
-    try {
-      doc.image(logoBuffer, PAGE_WIDTH / 2 - 186, 330, { fit: [372, 210], align: "center", valign: "center" });
-    } catch {
-      doc.fillColor(BRAND_RED).font("Helvetica-Bold").fontSize(30).text("T ROCK", PAGE_MARGIN, 380, {
-        width: PAGE_WIDTH - PAGE_MARGIN * 2,
-        align: "center",
-      });
-    }
-  } else {
+  try {
+    doc.image(LOGO_BUFFER, PAGE_WIDTH / 2 - 186, 330, { fit: [372, 210], align: "center", valign: "center" });
+  } catch (error) {
+    console.error("[field-report-pdf] failed to embed T Rock logo", error);
     doc.fillColor(BRAND_RED).font("Helvetica-Bold").fontSize(30).text("T ROCK", PAGE_MARGIN, 380, {
       width: PAGE_WIDTH - PAGE_MARGIN * 2,
       align: "center",
