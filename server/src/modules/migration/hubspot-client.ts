@@ -141,6 +141,8 @@ export interface HubSpotActivity {
     hs_call_title?: string;
     hs_call_body?: string;
     hs_call_duration?: string;
+    hs_call_direction?: string;
+    hs_call_disposition?: string;
     hs_call_status?: string;
     hs_call_outcome?: string;
     hs_call_recording_url?: string;
@@ -167,6 +169,7 @@ export interface HubSpotActivity {
     hs_task_type?: string;
     hs_task_reminders?: string;
     hs_lastmodifieddate?: string;
+    createdate?: string;
   };
   associations?: {
     deals?: { results: Array<{ id: string }> };
@@ -335,24 +338,28 @@ export async function fetchHubSpotActivitiesByType(type: HubSpotActivityObjectTy
 }
 
 function buildActivityProperties(type: HubSpotActivityObjectType): string {
-  const base = ["hubspot_owner_id", "hs_timestamp", "hs_lastmodifieddate"];
+  const base = ["hubspot_owner_id", "hs_timestamp", "hs_lastmodifieddate", "createdate"];
   const typeProps: Record<HubSpotActivityObjectType, string[]> = {
     call: [
       "hs_call_title",
       "hs_call_body",
       "hs_call_duration",
+      "hs_call_direction",
       "hs_call_status",
+      "hs_call_disposition",
       "hs_call_outcome",
       "hs_call_recording_url",
       "hs_call_has_voicemail",
+      "hs_attachment_ids",
     ],
-    note: ["hs_note_body"],
+    note: ["hs_note_body", "hs_attachment_ids"],
     meeting: [
       "hs_meeting_title",
       "hs_meeting_body",
       "hs_meeting_start_time",
       "hs_meeting_end_time",
       "hs_internal_meeting_notes",
+      "hs_attachment_ids",
     ],
     email: [
       "hs_email_subject",

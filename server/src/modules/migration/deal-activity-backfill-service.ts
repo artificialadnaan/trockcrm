@@ -139,6 +139,16 @@ function normalizeText(value: string | undefined): string | null {
   return trimmed ? trimmed : null;
 }
 
+const HTML_ENTITY_MAP: Record<string, string> = {
+  nbsp: " ",
+  amp: "&",
+  lt: "<",
+  gt: ">",
+  quot: "\"",
+  apos: "'",
+  "#39": "'",
+};
+
 function normalizeEmail(value: string | undefined): string | null {
   const trimmed = value?.trim().toLowerCase();
   return trimmed ? trimmed : null;
@@ -149,8 +159,45 @@ function clampText(value: string | null, maxLength: number): string | null {
   return value.length > maxLength ? value.slice(0, maxLength) : value;
 }
 
+function decodeHtmlEntity(entity: string): string {
+  if (HTML_ENTITY_MAP[entity]) return HTML_ENTITY_MAP[entity];
+  if (entity.startsWith("#x")) {
+    const codePoint = Number.parseInt(entity.slice(2), 16);
+    return Number.isFinite(codePoint) ? String.fromCodePoint(codePoint) : `&${entity};`;
+  }
+  if (entity.startsWith("#")) {
+    const codePoint = Number.parseInt(entity.slice(1), 10);
+    return Number.isFinite(codePoint) ? String.fromCodePoint(codePoint) : `&${entity};`;
+  }
+  return `&${entity};`;
+}
+
+export function htmlToPlainText(input: string | null | undefined): string {
+  if (!input) return "";
+
+  return input
+    .replace(/<\s*br\s*\/?>/gi, " ")
+    .replace(/<\/\s*(p|div|li|tr|h[1-6])\s*>/gi, " ")
+    .replace(/<[^>]+>/g, " ")
+    .replace(/&([^;\s]+);/g, (_match, entity: string) => decodeHtmlEntity(entity))
+    .replace(/\s+/g, " ")
+    .replace(/\s+([.,!?;:])/g, "$1")
+    .trim();
+}
+
+function looksLikeHtml(input: string): boolean {
+  return /<\/?[a-z][\w:-]*(?:\s[^>]*)?>/i.test(input) || /&(?:nbsp|amp|lt|gt|quot|apos|#39|#\d+|#x[0-9a-f]+);/i.test(input);
+}
+
+function plainTextOrNull(input: string | null | undefined): string | null {
+  if (!input) return null;
+  if (!looksLikeHtml(input)) return normalizeText(input);
+  const normalized = htmlToPlainText(input);
+  return normalized.length > 0 ? normalized : null;
+}
+
 function stripHtml(input: string): string {
-  return input.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim();
+  return htmlToPlainText(input);
 }
 
 function escapeHtml(input: string): string {
@@ -165,6 +212,27 @@ function escapeHtml(input: string): string {
 function buildBodyPreview(bodyHtml: string | null, bodyText: string | null) {
   const source = bodyHtml ? stripHtml(bodyHtml) : bodyText ?? "";
   return source.slice(0, 500) || null;
+}
+
+function parseCreatedAt(properties: Record<string, string | undefined>, fallback: Date): Date {
+  const rawValue = properties.createdate ?? properties.hs_timestamp;
+  if (!rawValue) return fallback;
+  const parsed = new Date(rawValue);
+  if (Number.isNaN(parsed.getTime())) return fallback;
+  return parsed;
+}
+
+function buildImportedBody(input: {
+  body: string | undefined;
+  fallback: string;
+  attachmentIds?: string | undefined;
+}) {
+  const textBody = plainTextOrNull(input.body);
+  if (textBody) return textBody;
+  if (hasHubSpotAttachments(input.attachmentIds)) {
+    return `${input.fallback} Attachments were present in HubSpot, but no inline text was available.`;
+  }
+  return `${input.fallback} HubSpot did not provide inline text for this activity.`;
 }
 
 function parseDurationMinutes(value: string | undefined): number | null {
@@ -282,6 +350,7 @@ export function mapNoteToActivity(input: {
   userId: string;
 }) {
   const links = resolveEntityLinkFields(input.targetEntity);
+  const occurredAt = parseDate(input.engagement.properties.hs_timestamp);
   return {
     type: "note" as const,
     responsibleUserId: input.userId,
@@ -290,8 +359,13 @@ export function mapNoteToActivity(input: {
     sourceEntityId: input.targetEntity.id,
     ...links,
     subject: clampText("HubSpot Note", 500),
-    body: normalizeText(input.engagement.properties.hs_note_body),
-    occurredAt: parseDate(input.engagement.properties.hs_timestamp),
+    body: buildImportedBody({
+      body: input.engagement.properties.hs_note_body,
+      fallback: "HubSpot note imported without a text body.",
+      attachmentIds: input.engagement.properties.hs_attachment_ids,
+    }),
+    occurredAt,
+    createdAt: parseCreatedAt(input.engagement.properties, occurredAt),
   };
 }
 
@@ -301,6 +375,7 @@ export function mapCallToActivity(input: {
   userId: string;
 }) {
   const links = resolveEntityLinkFields(input.targetEntity);
+  const occurredAt = parseDate(input.engagement.properties.hs_timestamp);
   return {
     type: "call" as const,
     responsibleUserId: input.userId,
@@ -308,13 +383,19 @@ export function mapCallToActivity(input: {
     sourceEntityType: input.targetEntity.type,
     sourceEntityId: input.targetEntity.id,
     ...links,
-    subject: clampText(normalizeText(input.engagement.properties.hs_call_title) ?? "HubSpot Call", 500),
-    body: normalizeText(input.engagement.properties.hs_call_body),
+    subject: clampText(plainTextOrNull(input.engagement.properties.hs_call_title) ?? "HubSpot Call", 500),
+    body: buildImportedBody({
+      body: input.engagement.properties.hs_call_body,
+      fallback: "HubSpot call imported without a transcript body.",
+      attachmentIds: input.engagement.properties.hs_attachment_ids,
+    }),
     outcome:
-      normalizeText(input.engagement.properties.hs_call_outcome) ??
-      normalizeText(input.engagement.properties.hs_call_status),
+      plainTextOrNull(input.engagement.properties.hs_call_outcome) ??
+      plainTextOrNull(input.engagement.properties.hs_call_disposition) ??
+      plainTextOrNull(input.engagement.properties.hs_call_status),
     durationMinutes: parseDurationMinutes(input.engagement.properties.hs_call_duration),
-    occurredAt: parseDate(input.engagement.properties.hs_timestamp),
+    occurredAt,
+    createdAt: parseCreatedAt(input.engagement.properties, occurredAt),
   };
 }
 
@@ -324,6 +405,9 @@ export function mapMeetingToActivity(input: {
   userId: string;
 }) {
   const links = resolveEntityLinkFields(input.targetEntity);
+  const occurredAt = parseDate(
+    input.engagement.properties.hs_meeting_start_time ?? input.engagement.properties.hs_timestamp
+  );
   return {
     type: "meeting" as const,
     responsibleUserId: input.userId,
@@ -331,13 +415,14 @@ export function mapMeetingToActivity(input: {
     sourceEntityType: input.targetEntity.type,
     sourceEntityId: input.targetEntity.id,
     ...links,
-    subject: clampText(normalizeText(input.engagement.properties.hs_meeting_title) ?? "HubSpot Meeting", 500),
-    body:
-      normalizeText(input.engagement.properties.hs_meeting_body) ??
-      normalizeText(input.engagement.properties.hs_internal_meeting_notes),
-    occurredAt: parseDate(
-      input.engagement.properties.hs_meeting_start_time ?? input.engagement.properties.hs_timestamp
-    ),
+    subject: clampText(plainTextOrNull(input.engagement.properties.hs_meeting_title) ?? "HubSpot Meeting", 500),
+    body: buildImportedBody({
+      body: input.engagement.properties.hs_meeting_body ?? input.engagement.properties.hs_internal_meeting_notes,
+      fallback: "HubSpot meeting imported without agenda notes.",
+      attachmentIds: input.engagement.properties.hs_attachment_ids,
+    }),
+    occurredAt,
+    createdAt: parseCreatedAt(input.engagement.properties, occurredAt),
   };
 }
 
@@ -352,12 +437,13 @@ export function mapEmailToRecords(input: {
       ? `<pre>${escapeHtml(input.engagement.properties.hs_email_text as string)}</pre>`
       : null);
   const bodyText =
-    normalizeText(input.engagement.properties.hs_email_text) ??
+    plainTextOrNull(input.engagement.properties.hs_email_text) ??
     (bodyHtml ? stripHtml(bodyHtml) : null);
   const participants = parseEmailHeaders(input.engagement.properties.hs_email_headers);
-  const subject = normalizeText(input.engagement.properties.hs_email_subject) ?? "HubSpot Email";
+  const subject = plainTextOrNull(input.engagement.properties.hs_email_subject) ?? "HubSpot Email";
   const activitySubject = clampText(subject, 500);
   const sentAt = parseDate(input.engagement.properties.hs_timestamp);
+  const createdAt = parseCreatedAt(input.engagement.properties, sentAt);
   const links = resolveEntityLinkFields(input.targetEntity);
 
   return {
@@ -392,6 +478,7 @@ export function mapEmailToRecords(input: {
       subject: activitySubject,
       body: bodyText?.slice(0, 1000) ?? null,
       occurredAt: sentAt,
+      createdAt,
     } satisfies typeof activities.$inferInsert,
   };
 }
