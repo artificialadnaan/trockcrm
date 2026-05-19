@@ -1,4 +1,4 @@
-import { companies, deals, userOfficeAccess, users } from "@trock-crm/shared/schema";
+import { companies, deals, offices, userOfficeAccess, users } from "@trock-crm/shared/schema";
 import { describe, expect, it, vi } from "vitest";
 import { getDeals } from "../../../src/modules/deals/service.js";
 
@@ -14,12 +14,25 @@ vi.mock("@trock-crm/shared/schema", async () => import("../../../../shared/src/s
 vi.mock("@trock-crm/shared/types", async () => import("../../../../shared/src/types/index.js"));
 vi.mock("../../../src/db.js", () => ({
   db: {
-    select: vi.fn(() => ({
-      from: vi.fn().mockReturnThis(),
-      where: vi.fn().mockReturnThis(),
-      orderBy: vi.fn().mockReturnThis(),
-      then: vi.fn((resolve: (value: unknown[]) => unknown) => resolve(dbState.stages)),
-    })),
+    select: vi.fn(() => {
+      let sourceTable: unknown = null;
+      const builder = {
+        from: vi.fn((table: unknown) => {
+          sourceTable = table;
+          return builder;
+        }),
+        where: vi.fn().mockReturnThis(),
+        orderBy: vi.fn().mockReturnThis(),
+        limit: vi.fn().mockReturnThis(),
+        then: vi.fn((resolve: (value: unknown[]) => unknown) => {
+          if (sourceTable === offices) {
+            return resolve([{ slug: "dallas", name: "Dallas" }]);
+          }
+          return resolve(dbState.stages);
+        }),
+      };
+      return builder;
+    }),
   },
   pool: {},
 }));
@@ -259,20 +272,21 @@ function createTenantDb() {
       { id: "rep-inactive", reportsTo: "director-1", officeId: "office-1", isActive: false },
     ],
     deals: [
-      { id: "deal-self", assignedRepId: "director-1", createdByUserId: "director-1", isActive: true, updatedAt: new Date("2026-05-07T12:00:00Z") },
-      { id: "deal-team-1", assignedRepId: "rep-team-1", createdByUserId: "rep-team-1", isActive: true, updatedAt: new Date("2026-05-07T12:00:00Z") },
-      { id: "deal-team-2", assignedRepId: "rep-team-2", createdByUserId: "rep-team-2", isActive: true, updatedAt: new Date("2026-05-07T12:00:00Z") },
-      { id: "deal-other-office", assignedRepId: "rep-other-office", createdByUserId: "rep-other-office", isActive: true, updatedAt: new Date("2026-05-07T12:00:00Z") },
-      { id: "deal-unassigned", assignedRepId: null, createdByUserId: "director-1", isActive: true, updatedAt: new Date("2026-05-07T12:00:00Z") },
-      { id: "deal-inactive-rep", assignedRepId: "rep-inactive", createdByUserId: "rep-inactive", isActive: true, updatedAt: new Date("2026-05-07T12:00:00Z") },
-      { id: "deal-rep-self", assignedRepId: "rep-self", createdByUserId: "rep-self", isActive: true, updatedAt: new Date("2026-05-07T12:00:00Z") },
-      { id: "deal-created", assignedRepId: "rep-team-1", createdByUserId: "director-1", isActive: true, updatedAt: new Date("2026-05-07T12:00:00Z") },
-      { id: "deal-activity", assignedRepId: "rep-team-2", createdByUserId: "rep-team-2", activityPerformedByUserIds: ["director-1"], isActive: true, updatedAt: new Date("2026-05-07T12:00:00Z") },
-      { id: "deal-subscribed", assignedRepId: "rep-team-2", createdByUserId: "rep-team-2", subscriberUserIds: ["director-1"], isActive: true, updatedAt: new Date("2026-05-07T12:00:00Z") },
+      { id: "deal-self", assignedRepId: "director-1", createdByUserId: "director-1", officeCode: "dfw", isActive: true, updatedAt: new Date("2026-05-07T12:00:00Z") },
+      { id: "deal-team-1", assignedRepId: "rep-team-1", createdByUserId: "rep-team-1", officeCode: "dfw", isActive: true, updatedAt: new Date("2026-05-07T12:00:00Z") },
+      { id: "deal-team-2", assignedRepId: "rep-team-2", createdByUserId: "rep-team-2", officeCode: "dfw", isActive: true, updatedAt: new Date("2026-05-07T12:00:00Z") },
+      { id: "deal-other-office", assignedRepId: "rep-other-office", createdByUserId: "rep-other-office", officeCode: "dfw", isActive: true, updatedAt: new Date("2026-05-07T12:00:00Z") },
+      { id: "deal-unassigned", assignedRepId: null, createdByUserId: "director-1", officeCode: "dfw", isActive: true, updatedAt: new Date("2026-05-07T12:00:00Z") },
+      { id: "deal-inactive-rep", assignedRepId: "rep-inactive", createdByUserId: "rep-inactive", officeCode: "dfw", isActive: true, updatedAt: new Date("2026-05-07T12:00:00Z") },
+      { id: "deal-rep-self", assignedRepId: "rep-self", createdByUserId: "rep-self", officeCode: "dfw", isActive: true, updatedAt: new Date("2026-05-07T12:00:00Z") },
+      { id: "deal-created", assignedRepId: "rep-team-1", createdByUserId: "director-1", officeCode: "dfw", isActive: true, updatedAt: new Date("2026-05-07T12:00:00Z") },
+      { id: "deal-activity", assignedRepId: "rep-team-2", createdByUserId: "rep-team-2", officeCode: "dfw", activityPerformedByUserIds: ["director-1"], isActive: true, updatedAt: new Date("2026-05-07T12:00:00Z") },
+      { id: "deal-subscribed", assignedRepId: "rep-team-2", createdByUserId: "rep-team-2", officeCode: "dfw", subscriberUserIds: ["director-1"], isActive: true, updatedAt: new Date("2026-05-07T12:00:00Z") },
       {
         id: "deal-company",
         assignedRepId: "rep-team-1",
         createdByUserId: "rep-team-1",
+        officeCode: "dfw",
         companyId: "company-1",
         companyName: "Acme Apartments",
         isActive: true,

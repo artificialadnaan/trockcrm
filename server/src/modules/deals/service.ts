@@ -16,11 +16,13 @@ import {
   tasks,
   jobQueue,
   projectTypeConfig,
+  offices,
 } from "@trock-crm/shared/schema";
 import {
   DOMAIN_EVENTS,
   type DealContractSignedEventPayload,
   type WorkflowRoute,
+  resolveOfficeCodeFromOffice,
 } from "@trock-crm/shared/types";
 import type * as schema from "@trock-crm/shared/schema";
 import { db } from "../../db.js";
@@ -53,6 +55,23 @@ function sqlStringList(values: readonly string[]) {
 
 function nonTerminalMirroredStageCondition() {
   return sql`COALESCE(${deals.bidBoardStageSlug}, '') NOT IN (${sqlStringList(TERMINAL_STAGE_SLUGS)})`;
+}
+
+async function resolveActiveOfficeScope(tenantDb: TenantDb, activeOfficeId: string) {
+  const [office, officeUserIds] = await Promise.all([
+    db
+      .select({ slug: offices.slug, name: offices.name })
+      .from(offices)
+      .where(eq(offices.id, activeOfficeId))
+      .limit(1)
+      .then((rows) => rows[0] ?? null),
+    resolveActiveOfficeUserIds(tenantDb, activeOfficeId),
+  ]);
+
+  return {
+    officeCode: resolveOfficeCodeFromOffice(office),
+    officeUserIds,
+  };
 }
 
 export interface DealFilters {
@@ -935,14 +954,16 @@ export async function getDeals(tenantDb: TenantDb, filters: DealFilters, userRol
     conditions.push(eq(deals.isActive, filters.isActive ?? true));
   }
 
-  if (filters.activeOfficeId) {
-    const officeUserIds = await resolveActiveOfficeUserIds(tenantDb, filters.activeOfficeId);
-    conditions.push(
-      officeUserIds.length > 0
-        ? or(inArray(deals.assignedRepId, officeUserIds), isNull(deals.assignedRepId))
-        : sql`false`
-    );
-  }
+    if (filters.activeOfficeId) {
+      const { officeCode, officeUserIds } = await resolveActiveOfficeScope(tenantDb, filters.activeOfficeId);
+      conditions.push(
+        officeCode && officeUserIds.length > 0
+          ? eq(deals.officeCode, officeCode)
+          : !officeCode && officeUserIds.length > 0
+            ? inArray(deals.assignedRepId, officeUserIds)
+            : sql`false`
+      );
+    }
 
   if (scope === "mine") {
     conditions.push(buildDealMineVisibilityCondition(userId));

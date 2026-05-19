@@ -1,9 +1,32 @@
-import { leads, userOfficeAccess, users } from "@trock-crm/shared/schema";
+import { leads, offices, userOfficeAccess, users } from "@trock-crm/shared/schema";
 import { describe, expect, it, vi } from "vitest";
 import { createLeadService } from "../../../src/modules/leads/service.js";
 
 vi.mock("@trock-crm/shared/schema", async () => import("../../../../shared/src/schema/index.js"));
 vi.mock("@trock-crm/shared/types", async () => import("../../../../shared/src/types/index.js"));
+vi.mock("../../../src/db.js", () => ({
+  db: {
+    select: vi.fn(() => {
+      let sourceTable: unknown = null;
+      const builder = {
+        from: vi.fn((table: unknown) => {
+          sourceTable = table;
+          return builder;
+        }),
+        where: vi.fn().mockReturnThis(),
+        limit: vi.fn().mockReturnThis(),
+        then: vi.fn((resolve: (value: unknown[]) => unknown) => {
+          if (sourceTable === offices) {
+            return resolve([{ slug: "dallas", name: "Dallas" }]);
+          }
+          return resolve([]);
+        }),
+      };
+      return builder;
+    }),
+  },
+  pool: {},
+}));
 
 type Row = Record<string, unknown>;
 
@@ -176,15 +199,15 @@ function createTenantDb() {
       { id: "rep-inactive", reportsTo: "director-1", officeId: "office-1", isActive: false },
     ],
     leads: [
-      { id: "lead-self", assignedRepId: "director-1", createdByUserId: "director-1", isActive: true, status: "open", companyId: null, propertyId: null, projectTypeId: null },
-      { id: "lead-team-1", assignedRepId: "rep-team-1", createdByUserId: "rep-team-1", isActive: true, status: "open", companyId: null, propertyId: null, projectTypeId: null },
-      { id: "lead-team-2", assignedRepId: "rep-team-2", createdByUserId: "rep-team-2", isActive: true, status: "open", companyId: null, propertyId: null, projectTypeId: null },
-      { id: "lead-other-office", assignedRepId: "rep-other-office", createdByUserId: "rep-other-office", isActive: true, status: "open", companyId: null, propertyId: null, projectTypeId: null },
-      { id: "lead-inactive-rep", assignedRepId: "rep-inactive", createdByUserId: "rep-inactive", isActive: true, status: "open", companyId: null, propertyId: null, projectTypeId: null },
-      { id: "lead-rep-self", assignedRepId: "rep-self", createdByUserId: "rep-self", isActive: true, status: "open", companyId: null, propertyId: null, projectTypeId: null },
-      { id: "lead-created", assignedRepId: "rep-team-1", createdByUserId: "director-1", isActive: true, status: "open", companyId: null, propertyId: null, projectTypeId: null },
-      { id: "lead-activity", assignedRepId: "rep-team-2", createdByUserId: "rep-team-2", activityPerformedByUserIds: ["director-1"], isActive: true, status: "open", companyId: null, propertyId: null, projectTypeId: null },
-      { id: "lead-subscribed", assignedRepId: "rep-team-2", createdByUserId: "rep-team-2", subscriberUserIds: ["director-1"], isActive: true, status: "open", companyId: null, propertyId: null, projectTypeId: null },
+      { id: "lead-self", assignedRepId: "director-1", createdByUserId: "director-1", officeCode: "dfw", isActive: true, status: "open", companyId: null, propertyId: null, projectTypeId: null },
+      { id: "lead-team-1", assignedRepId: "rep-team-1", createdByUserId: "rep-team-1", officeCode: "dfw", isActive: true, status: "open", companyId: null, propertyId: null, projectTypeId: null },
+      { id: "lead-team-2", assignedRepId: "rep-team-2", createdByUserId: "rep-team-2", officeCode: "dfw", isActive: true, status: "open", companyId: null, propertyId: null, projectTypeId: null },
+      { id: "lead-other-office", assignedRepId: "rep-other-office", createdByUserId: "rep-other-office", officeCode: "dfw", isActive: true, status: "open", companyId: null, propertyId: null, projectTypeId: null },
+      { id: "lead-inactive-rep", assignedRepId: "rep-inactive", createdByUserId: "rep-inactive", officeCode: "dfw", isActive: true, status: "open", companyId: null, propertyId: null, projectTypeId: null },
+      { id: "lead-rep-self", assignedRepId: "rep-self", createdByUserId: "rep-self", officeCode: "dfw", isActive: true, status: "open", companyId: null, propertyId: null, projectTypeId: null },
+      { id: "lead-created", assignedRepId: "rep-team-1", createdByUserId: "director-1", officeCode: "dfw", isActive: true, status: "open", companyId: null, propertyId: null, projectTypeId: null },
+      { id: "lead-activity", assignedRepId: "rep-team-2", createdByUserId: "rep-team-2", officeCode: "dfw", activityPerformedByUserIds: ["director-1"], isActive: true, status: "open", companyId: null, propertyId: null, projectTypeId: null },
+      { id: "lead-subscribed", assignedRepId: "rep-team-2", createdByUserId: "rep-team-2", officeCode: "dfw", subscriberUserIds: ["director-1"], isActive: true, status: "open", companyId: null, propertyId: null, projectTypeId: null },
     ],
     userOfficeAccess: [
       { userId: "rep-other-office", officeId: "office-1" },

@@ -1,4 +1,4 @@
-import { and, asc, desc, eq, ilike, inArray, or, sql } from "drizzle-orm";
+import { and, asc, desc, eq, ilike, inArray, or, sql, isNull } from "drizzle-orm";
 import type { NodePgDatabase } from "drizzle-orm/node-postgres";
 import {
   CANONICAL_LEAD_STAGE_SLUGS,
@@ -12,12 +12,14 @@ import {
   pipelineStageConfig,
   projectTypeConfig,
   properties,
+  offices,
   userOfficeAccess,
   users,
 } from "@trock-crm/shared/schema";
 import type * as schema from "@trock-crm/shared/schema";
 import {
   toCanonicalLeadStageSlug,
+  resolveOfficeCodeFromOffice,
   type WorkflowFamily,
 } from "@trock-crm/shared/types";
 import { db } from "../../db.js";
@@ -191,6 +193,23 @@ type TransitionSuccessResult = {
 type WorkspaceScope = "mine" | "team" | "all";
 
 const LEAD_BUDGET_STATUS_VALUES = new Set<LeadBudgetStatus>(LEAD_BUDGET_STATUSES);
+
+async function resolveActiveOfficeScope(tenantDb: TenantDb, activeOfficeId: string) {
+  const [office, officeUserIds] = await Promise.all([
+    db
+      .select({ slug: offices.slug, name: offices.name })
+      .from(offices)
+      .where(eq(offices.id, activeOfficeId))
+      .limit(1)
+      .then((rows) => rows[0] ?? null),
+    resolveActiveOfficeUserIds(tenantDb, activeOfficeId),
+  ]);
+
+  return {
+    officeCode: resolveOfficeCodeFromOffice(office),
+    officeUserIds,
+  };
+}
 
 const LEAD_POC_ROLE_VALUES = new Set<LeadPocRole>(LEAD_POC_ROLES);
 
@@ -1177,8 +1196,14 @@ export function createLeadService(
     }
 
     if (filters.activeOfficeId) {
-      const officeUserIds = await resolveActiveOfficeUserIds(tenantDb, filters.activeOfficeId);
-      conditions.push(officeUserIds.length > 0 ? inArray(leads.assignedRepId, officeUserIds) : sql`false`);
+      const { officeCode, officeUserIds } = await resolveActiveOfficeScope(tenantDb, filters.activeOfficeId);
+      conditions.push(
+        officeCode && officeUserIds.length > 0
+          ? eq(leads.officeCode, officeCode)
+          : !officeCode && officeUserIds.length > 0
+            ? inArray(leads.assignedRepId, officeUserIds)
+            : sql`false`
+      );
     }
 
     if (scope === "mine") {
