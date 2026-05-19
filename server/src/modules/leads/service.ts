@@ -43,6 +43,7 @@ import {
 import { isExistingCustomer } from "./verification-service.js";
 import { resolveLeadSourceForWrite } from "./source-control.js";
 import { resolveActiveOfficeUserIds, resolveTeamRepIds } from "../shared/team-scope.js";
+import { buildAliasedLeadMineVisibilityCondition, buildLeadMineVisibilityCondition } from "../shared/mine-visibility.js";
 import {
   LEAD_BUDGET_STATUSES,
   LEAD_POC_ROLES,
@@ -911,8 +912,8 @@ async function buildLeadWorkspaceScope(tenantDb: TenantDb, input: LeadBoardInput
     sql`u.office_id = ${input.activeOfficeId}`,
   ];
 
-  if (input.role === "rep" || input.scope === "mine") {
-    filters.push(sql`l.assigned_rep_id = ${input.userId}`);
+  if (input.scope === "mine") {
+    filters.push(buildAliasedLeadMineVisibilityCondition("l", input.userId));
   } else if (input.scope === "team") {
     const teamRepIds = await resolveTeamRepIds(tenantDb, input.userId, input.activeOfficeId);
     filters.push(teamRepIds.length > 0 ? sql`l.assigned_rep_id IN (${sql.join(teamRepIds.map((id) => sql`${id}`), sql`, `)})` : sql`false`);
@@ -1169,7 +1170,7 @@ export function createLeadService(
     userId: string
   ) {
     const conditions: any[] = [];
-    const scope = userRole === "rep" ? "mine" : filters.scope ?? "all";
+    const scope = filters.scope ?? "mine";
 
     if (filters.isActive !== "all") {
       conditions.push(eq(leads.isActive, filters.isActive ?? true));
@@ -1181,7 +1182,7 @@ export function createLeadService(
     }
 
     if (scope === "mine") {
-      conditions.push(eq(leads.assignedRepId, userId));
+      conditions.push(buildLeadMineVisibilityCondition(userId));
     } else if (scope === "team") {
       const teamUserIds = await resolveTeamRepIds(tenantDb, userId, filters.activeOfficeId ?? null);
       conditions.push(teamUserIds.length > 0 ? inArray(leads.assignedRepId, teamUserIds) : sql`false`);
@@ -1298,6 +1299,7 @@ export function createLeadService(
         projectTypeQuestionPayload: v2Enabled
           ? { projectTypeId: input.projectTypeId ?? null, answers: {} }
           : normalizedProjectTypeQuestionPayload,
+        createdByUserId: input.actorUserId ?? null,
         verificationStatus,
         verificationRequiredReason,
         stageEnteredAt: now,

@@ -34,6 +34,7 @@ import { getLeadById } from "../leads/service.js";
 import { getPhotoFeed, getNewPhotoCount, getProjectPhotoStats } from "./feed-service.js";
 import { getPhotoAuditEvents, logPhotoEvent } from "./audit-log-service.js";
 import { emitUploadedFileEvent, recordUploadedFileSideEffects } from "./upload-workflow.js";
+import { assertDealCollaboratorAccess, assertLeadCollaboratorAccess } from "../../lib/collaboration-access.js";
 
 const router = Router();
 
@@ -127,6 +128,14 @@ function parseLinkedType(value: unknown): "deal" | "lead" | "contact" | "procore
   throw new AppError(400, "linkedType must be deal, lead, contact, procore, change_order, or unassigned.");
 }
 
+async function assertDealFileAccess(req: express.Request, dealId: string) {
+  await assertDealCollaboratorAccess(req.tenantDb!, dealId, req.user!);
+}
+
+async function assertLeadFileAccess(req: express.Request, leadId: string) {
+  await assertLeadCollaboratorAccess(req.tenantDb!, leadId, req.user!);
+}
+
 // POST /api/files/upload-url — Step 1: request presigned URL
 router.post("/upload-url", async (req, res, next) => {
   try {
@@ -155,12 +164,10 @@ router.post("/upload-url", async (req, res, next) => {
 
     // Validate deal access if dealId provided
     if (dealId) {
-      const deal = await getDealById(req.tenantDb!, dealId, req.user!.role, req.user!.id);
-      if (!deal) throw new AppError(404, "Deal not found or access denied.");
+      await assertDealFileAccess(req, dealId);
     }
     if (leadId) {
-      const lead = await getLeadById(req.tenantDb!, leadId, req.user!.role, req.user!.id);
-      if (!lead) throw new AppError(404, "Lead not found or access denied.");
+      await assertLeadFileAccess(req, leadId);
     }
 
     const result = await requestUploadUrl(
@@ -220,12 +227,10 @@ router.post("/upload-direct", express.raw({ type: "*/*", limit: "50mb" }), async
 
     // Validate deal access if dealId provided
     if (dealId) {
-      const deal = await getDealById(req.tenantDb!, dealId, req.user!.role, req.user!.id);
-      if (!deal) throw new AppError(404, "Deal not found or access denied.");
+      await assertDealFileAccess(req, dealId);
     }
     if (leadId) {
-      const lead = await getLeadById(req.tenantDb!, leadId, req.user!.role, req.user!.id);
-      if (!lead) throw new AppError(404, "Lead not found or access denied.");
+      await assertLeadFileAccess(req, leadId);
     }
 
     // Reuse the presign logic to generate filenames, r2Key, folderPath
@@ -328,11 +333,9 @@ router.patch("/:id/address", async (req, res, next) => {
     if (!existing) throw new AppError(404, "File not found");
 
     if (existing.dealId) {
-      const deal = await getDealById(req.tenantDb!, existing.dealId, req.user.role, req.user.id);
-      if (!deal) throw new AppError(403, "Access denied: you do not have access to this deal's files.");
+      await assertDealFileAccess(req, existing.dealId);
     } else if (existing.leadId) {
-      const lead = await getLeadById(req.tenantDb!, existing.leadId, req.user.role, req.user.id);
-      if (!lead) throw new AppError(403, "Access denied: you do not have access to this lead's files.");
+      await assertLeadFileAccess(req, existing.leadId);
     } else if (req.user.role === "rep" && existing.uploadedBy !== req.user.id) {
       throw new AppError(403, "You can only modify files you uploaded");
     }
@@ -386,8 +389,7 @@ router.post("/:id/new-version", async (req, res, next) => {
     const parentFile = await getFileById(req.tenantDb!, req.params.id);
     if (!parentFile) throw new AppError(404, "File not found");
     if (parentFile.dealId) {
-      const deal = await getDealById(req.tenantDb!, parentFile.dealId, req.user!.role, req.user!.id);
-      if (!deal) throw new AppError(403, "Access denied: you do not have access to this deal's files.");
+      await assertDealFileAccess(req, parentFile.dealId);
     }
     await assertDealLinkedFileMutationAllowed(req, parentFile, "new_version");
 
@@ -431,12 +433,10 @@ router.get("/", async (req, res, next) => {
 
     // If rep specifies a dealId, verify they have access to it
     if (isRep && req.query.dealId) {
-      const deal = await getDealById(req.tenantDb!, req.query.dealId as string, req.user!.role, req.user!.id);
-      if (!deal) throw new AppError(403, "Access denied: you do not have access to this deal's files.");
+      await assertDealFileAccess(req, req.query.dealId as string);
     }
     if (isRep && req.query.leadId) {
-      const lead = await getLeadById(req.tenantDb!, req.query.leadId as string, req.user!.role, req.user!.id);
-      if (!lead) throw new AppError(403, "Access denied: you do not have access to this lead's files.");
+      await assertLeadFileAccess(req, req.query.leadId as string);
     }
 
     const filters = {
@@ -501,8 +501,7 @@ router.get("/tags", async (req, res, next) => {
 // GET /api/files/deal/:dealId/folders — virtual folder tree for a deal
 router.get("/deal/:dealId/folders", async (req, res, next) => {
   try {
-    const deal = await getDealById(req.tenantDb!, req.params.dealId, req.user!.role, req.user!.id);
-    if (!deal) throw new AppError(404, "Deal not found or access denied.");
+    await assertDealFileAccess(req, req.params.dealId);
 
     const tree = await getDealFolderTree(req.tenantDb!, req.params.dealId);
     await req.commitTransaction!();
@@ -515,8 +514,7 @@ router.get("/deal/:dealId/folders", async (req, res, next) => {
 // GET /api/files/deal/:dealId/photos — photo timeline for a deal
 router.get("/deal/:dealId/photos", async (req, res, next) => {
   try {
-    const deal = await getDealById(req.tenantDb!, req.params.dealId, req.user!.role, req.user!.id);
-    if (!deal) throw new AppError(404, "Deal not found or access denied.");
+    await assertDealFileAccess(req, req.params.dealId);
 
     const page = req.query.page ? parseInt(req.query.page as string, 10) : 1;
     const limit = req.query.limit ? parseInt(req.query.limit as string, 10) : 50;
@@ -619,11 +617,9 @@ router.get("/:id", async (req, res, next) => {
     // RBAC: if file has a dealId, verify the user has access to that deal.
     // Contact/project files are office-scoped so any tenant user can view.
     if (file.dealId) {
-      const deal = await getDealById(req.tenantDb!, file.dealId, req.user!.role, req.user!.id);
-      if (!deal) throw new AppError(403, "Access denied: you do not have access to this deal's files.");
+      await assertDealFileAccess(req, file.dealId);
     } else if (file.leadId) {
-      const lead = await getLeadById(req.tenantDb!, file.leadId, req.user!.role, req.user!.id);
-      if (!lead) throw new AppError(403, "Access denied: you do not have access to this lead's files.");
+      await assertLeadFileAccess(req, file.leadId);
     }
 
     await req.commitTransaction!();
@@ -641,11 +637,9 @@ router.get("/:id/download", async (req, res, next) => {
 
     // RBAC: deal-scoped files require deal access check
     if (file.dealId) {
-      const deal = await getDealById(req.tenantDb!, file.dealId, req.user!.role, req.user!.id);
-      if (!deal) throw new AppError(403, "Access denied: you do not have access to this deal's files.");
+      await assertDealFileAccess(req, file.dealId);
     } else if (file.leadId) {
-      const lead = await getLeadById(req.tenantDb!, file.leadId, req.user!.role, req.user!.id);
-      if (!lead) throw new AppError(403, "Access denied: you do not have access to this lead's files.");
+      await assertLeadFileAccess(req, file.leadId);
     }
 
     const logDownload = shouldLogFileDownloadEvent(req.query);
@@ -693,11 +687,9 @@ router.get("/:id/audit-log", async (req, res, next) => {
     if (!isPhotoRecord(file)) throw new AppError(400, "Audit history is only available for photos.");
 
     if (file.dealId) {
-      const deal = await getDealById(req.tenantDb!, file.dealId, req.user!.role, req.user!.id);
-      if (!deal) throw new AppError(403, "Access denied: you do not have access to this deal's files.");
+      await assertDealFileAccess(req, file.dealId);
     } else if (file.leadId) {
-      const lead = await getLeadById(req.tenantDb!, file.leadId, req.user!.role, req.user!.id);
-      if (!lead) throw new AppError(403, "Access denied: you do not have access to this lead's files.");
+      await assertLeadFileAccess(req, file.leadId);
     } else if (req.user!.role === "rep" && file.uploadedBy !== req.user!.id) {
       throw new AppError(403, "You can only view files you uploaded");
     }
@@ -717,11 +709,9 @@ router.get("/:id/versions", async (req, res, next) => {
     const file = await getFileById(req.tenantDb!, req.params.id);
     if (!file) throw new AppError(404, "File not found");
     if (file.dealId) {
-      const deal = await getDealById(req.tenantDb!, file.dealId, req.user!.role, req.user!.id);
-      if (!deal) throw new AppError(403, "Access denied: you do not have access to this deal's files.");
+      await assertDealFileAccess(req, file.dealId);
     } else if (file.leadId) {
-      const lead = await getLeadById(req.tenantDb!, file.leadId, req.user!.role, req.user!.id);
-      if (!lead) throw new AppError(403, "Access denied: you do not have access to this lead's files.");
+      await assertLeadFileAccess(req, file.leadId);
     }
 
     const versions = await getFileVersions(req.tenantDb!, req.params.id);
@@ -743,11 +733,9 @@ router.patch("/:id", async (req, res, next) => {
 
     // RBAC: deal-scoped files require deal access check
     if (existing.dealId) {
-      const deal = await getDealById(req.tenantDb!, existing.dealId, req.user!.role, req.user!.id);
-      if (!deal) throw new AppError(403, "Access denied: you do not have access to this deal's files.");
+      await assertDealFileAccess(req, existing.dealId);
     } else if (existing.leadId) {
-      const lead = await getLeadById(req.tenantDb!, existing.leadId, req.user!.role, req.user!.id);
-      if (!lead) throw new AppError(403, "Access denied: you do not have access to this lead's files.");
+      await assertLeadFileAccess(req, existing.leadId);
     } else if (req.user!.role === "rep" && existing.uploadedBy !== req.user!.id) {
       // Fix 8: Non-deal files (e.g. contact files) — reps can only modify files they uploaded
       throw new AppError(403, "You can only modify files you uploaded");

@@ -1,7 +1,9 @@
 import { Router } from "express";
+import { and, eq, isNull } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/node-postgres";
 import type { PoolClient } from "pg";
 import * as schema from "@trock-crm/shared/schema";
+import { leadSubscriptions } from "@trock-crm/shared/schema";
 import { pool } from "../../db.js";
 import { AppError } from "../../middleware/error-handler.js";
 import { requireAdmin } from "../../middleware/rbac.js";
@@ -34,8 +36,30 @@ import {
 } from "./due-diligence-service.js";
 import { getAllStages } from "../pipeline/service.js";
 import { buildAuditActorFromUser, logActivity } from "../audit/audit-logger.js";
+import {
+  assertLeadCollaboratorAccess,
+  assertLeadOwnerAccess,
+  getCollaborativeReadRole,
+  normalizeCollaborativeScope,
+} from "../../lib/collaboration-access.js";
 
 const router = Router();
+
+async function isLeadWatchedByUser(tenantDb: any, leadId: string, userId: string) {
+  const [row] = await tenantDb
+    .select({ id: leadSubscriptions.id })
+    .from(leadSubscriptions)
+    .where(
+      and(
+        eq(leadSubscriptions.leadId, leadId),
+        eq(leadSubscriptions.userId, userId),
+        isNull(leadSubscriptions.deletedAt)
+      )
+    )
+    .limit(1);
+
+  return Boolean(row);
+}
 
 function buildRouteAuditContext(req: { user?: any; headers: Record<string, unknown>; ip?: string | undefined }) {
   const actor = buildAuditActorFromUser({
@@ -86,11 +110,15 @@ async function dispatchDueDiligenceEmailAfterCommit(input: {
 }
 
 function readBoardInput(req: Parameters<typeof router.get>[1] extends never ? never : any) {
+  const scope = normalizeCollaborativeScope(
+    req.user!.role,
+    req.query.scope as "mine" | "team" | "all" | undefined
+  );
   return {
-    role: req.user!.role,
+    role: getCollaborativeReadRole(req.user!.role, scope),
     userId: req.user!.id,
     activeOfficeId: req.user!.activeOfficeId ?? req.user!.officeId,
-    scope: (req.query.scope as "mine" | "team" | "all" | undefined) ?? "mine",
+    scope,
     assignedRepId: req.query.assignedRepId as string | undefined,
   };
 }
@@ -125,7 +153,7 @@ router.get("/", async (req, res, next) => {
         companyId: req.query.companyId as string | undefined,
         propertyId: req.query.propertyId as string | undefined,
         assignedRepId: req.query.assignedRepId as string | undefined,
-        scope: readListScope(req.query.scope),
+        scope: normalizeCollaborativeScope(req.user!.role, readListScope(req.query.scope)),
         activeOfficeId: req.user!.activeOfficeId ?? req.user!.officeId,
         status: req.query.status as "open" | "converted" | "disqualified" | undefined,
         isActive:
@@ -135,7 +163,7 @@ router.get("/", async (req, res, next) => {
               ? false
               : true,
       },
-      req.user!.role,
+      getCollaborativeReadRole(req.user!.role, normalizeCollaborativeScope(req.user!.role, readListScope(req.query.scope))),
       req.user!.id
     );
     await req.commitTransaction!();
@@ -198,14 +226,21 @@ router.get("/questionnaire-template", async (req, res, next) => {
 // GET /api/leads/:id
 router.get("/:id", async (req, res, next) => {
   try {
-    const lead = await getLeadById(req.tenantDb!, req.params.id, req.user!.role, req.user!.id);
+    const access = await assertLeadCollaboratorAccess(req.tenantDb!, req.params.id, req.user!);
+    const lead = await getLeadById(
+      req.tenantDb!,
+      req.params.id,
+      getCollaborativeReadRole(req.user!.role, access.assignedRepId === req.user!.id ? "mine" : "all"),
+      req.user!.id
+    );
     if (!lead) {
       throw new AppError(404, "Lead not found");
     }
+    const isWatching = await isLeadWatchedByUser(req.tenantDb!, req.params.id, req.user!.id);
 
     if (!isLeadEditV2Enabled()) {
       await req.commitTransaction!();
-      res.json({ lead });
+      res.json({ lead: { ...lead, isWatching } });
       return;
     }
 
@@ -217,6 +252,7 @@ router.get("/:id", async (req, res, next) => {
     res.json({
       lead: {
         ...lead,
+        isWatching,
         leadQuestionnaire: questionnaire,
       },
     });
@@ -225,10 +261,60 @@ router.get("/:id", async (req, res, next) => {
   }
 });
 
+router.post("/:id/watch", async (req, res, next) => {
+  try {
+    await assertLeadCollaboratorAccess(req.tenantDb!, req.params.id, req.user!);
+    await req.tenantDb!
+      .insert(leadSubscriptions)
+      .values({
+        leadId: req.params.id,
+        userId: req.user!.id,
+        createdAt: new Date(),
+        deletedAt: null,
+      })
+      .onConflictDoUpdate({
+        target: [leadSubscriptions.leadId, leadSubscriptions.userId],
+        set: {
+          deletedAt: null,
+        },
+      });
+    await req.commitTransaction!();
+    res.status(200).json({ watching: true });
+  } catch (err) {
+    next(err);
+  }
+});
+
+router.delete("/:id/watch", async (req, res, next) => {
+  try {
+    await assertLeadCollaboratorAccess(req.tenantDb!, req.params.id, req.user!);
+    await req.tenantDb!
+      .update(leadSubscriptions)
+      .set({ deletedAt: new Date() })
+      .where(
+        and(
+          eq(leadSubscriptions.leadId, req.params.id),
+          eq(leadSubscriptions.userId, req.user!.id),
+          isNull(leadSubscriptions.deletedAt)
+        )
+      );
+    await req.commitTransaction!();
+    res.status(200).json({ watching: false });
+  } catch (err) {
+    next(err);
+  }
+});
+
 // GET /api/leads/:id/qualification
 router.get("/:id/qualification", async (req, res, next) => {
   try {
-    const lead = await getLeadById(req.tenantDb!, req.params.id, req.user!.role, req.user!.id);
+    await assertLeadCollaboratorAccess(req.tenantDb!, req.params.id, req.user!);
+    const lead = await getLeadById(
+      req.tenantDb!,
+      req.params.id,
+      getCollaborativeReadRole(req.user!.role, "all"),
+      req.user!.id
+    );
     if (!lead) {
       throw new AppError(404, "Lead not found");
     }
@@ -244,7 +330,13 @@ router.get("/:id/qualification", async (req, res, next) => {
 // GET /api/leads/:id/scoping
 router.get("/:id/scoping", async (req, res, next) => {
   try {
-    const lead = await getLeadById(req.tenantDb!, req.params.id, req.user!.role, req.user!.id);
+    await assertLeadCollaboratorAccess(req.tenantDb!, req.params.id, req.user!);
+    const lead = await getLeadById(
+      req.tenantDb!,
+      req.params.id,
+      getCollaborativeReadRole(req.user!.role, "all"),
+      req.user!.id
+    );
     if (!lead) {
       throw new AppError(404, "Lead not found");
     }
@@ -260,7 +352,10 @@ router.get("/:id/scoping", async (req, res, next) => {
 // PATCH /api/leads/:id/scoping
 router.patch("/:id/scoping", async (req, res, next) => {
   try {
-    const lead = await getLeadById(req.tenantDb!, req.params.id, req.user!.role, req.user!.id);
+    await assertLeadOwnerAccess(req.tenantDb!, req.params.id, req.user!, {
+      message: "Only the assigned rep can modify this lead",
+    });
+    const lead = await getLeadById(req.tenantDb!, req.params.id, getCollaborativeReadRole(req.user!.role, "mine"), req.user!.id);
     if (!lead) {
       throw new AppError(404, "Lead not found");
     }
@@ -372,6 +467,9 @@ router.post("/:id/stage/preflight", async (req, res, next) => {
 // POST /api/leads/:id/stage-transition
 router.post("/:id/stage-transition", async (req, res, next) => {
   try {
+    await assertLeadOwnerAccess(req.tenantDb!, req.params.id, req.user!, {
+      message: "Only the assigned rep can modify this lead",
+    });
     const result = await transitionLeadStage(req.tenantDb!, {
       leadId: req.params.id,
       targetStageId: req.body.targetStageId,
@@ -405,8 +503,20 @@ router.post("/:id/stage-transition", async (req, res, next) => {
 router.patch("/:id", async (req, res, next) => {
   try {
     const body = { ...req.body };
+    const patchKeys = Object.keys(body);
+    const isAssignmentTransferOnly = patchKeys.length > 0 && patchKeys.every((field) => field === "assignedRepId" || field === "salesRepId");
+    if (isAssignmentTransferOnly) {
+      const access = await assertLeadCollaboratorAccess(req.tenantDb!, req.params.id, req.user!);
+      if (req.user!.role !== "admin" && access.assignedRepId !== req.user!.id) {
+        throw new AppError(403, "Only the assigned rep or an admin can transfer this lead");
+      }
+    } else {
+      await assertLeadOwnerAccess(req.tenantDb!, req.params.id, req.user!, {
+        message: "Only the assigned rep can modify this lead",
+      });
+    }
     if (body.stageId !== undefined) {
-      const existing = await getLeadById(req.tenantDb!, req.params.id, req.user!.role, req.user!.id);
+      const existing = await getLeadById(req.tenantDb!, req.params.id, getCollaborativeReadRole(req.user!.role, "mine"), req.user!.id);
       if (!existing) {
         throw new AppError(404, "Lead not found");
       }
@@ -466,6 +576,9 @@ router.patch("/:id", async (req, res, next) => {
 // POST /api/leads/:id/convert
 router.post("/:id/convert", async (req, res, next) => {
   try {
+    await assertLeadOwnerAccess(req.tenantDb!, req.params.id, req.user!, {
+      message: "Only the assigned rep can modify this lead",
+    });
     const body = { ...req.body };
     const {
       dealStageId,
@@ -513,11 +626,15 @@ router.post("/:id/convert", async (req, res, next) => {
   }
 });
 
-// DELETE /api/leads/:id — admin-only soft-delete
-router.delete("/:id", requireAdmin, async (req, res, next) => {
+// DELETE /api/leads/:id — owner/admin soft-delete
+router.delete("/:id", async (req, res, next) => {
   try {
     const leadId = req.params.id as string;
-    const lead = await deleteLead(req.tenantDb!, leadId, req.user!.role, req.user!.id);
+    await assertLeadOwnerAccess(req.tenantDb!, leadId, req.user!, {
+      allowAdmin: true,
+      message: "Only the assigned rep or an admin can delete this lead",
+    });
+    const lead = await deleteLead(req.tenantDb!, leadId, "admin", req.user!.id);
     if (lead) {
       const auditContext = buildRouteAuditContext(req);
       await logActivity({

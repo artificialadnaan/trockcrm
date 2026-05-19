@@ -1,6 +1,12 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const getDealByIdMock = vi.hoisted(() => vi.fn());
+const accessMocks = vi.hoisted(() => ({
+  assertDealCollaboratorAccess: vi.fn(),
+  assertDealOwnerAccess: vi.fn(),
+  getCollaborativeReadRole: vi.fn((role: string) => role),
+  normalizeCollaborativeScope: vi.fn((_role: string, scope: "mine" | "team" | "all" | undefined) => scope ?? "all"),
+}));
 
 vi.mock("../../../src/events/bus.js", () => ({
   eventBus: {
@@ -95,6 +101,13 @@ vi.mock("../../../src/modules/deals/workflow-backfill.js", () => ({
   inferDealBidBoardOwnership: vi.fn(),
 }));
 
+vi.mock("../../../src/lib/collaboration-access.js", () => ({
+  assertDealCollaboratorAccess: accessMocks.assertDealCollaboratorAccess,
+  assertDealOwnerAccess: accessMocks.assertDealOwnerAccess,
+  getCollaborativeReadRole: accessMocks.getCollaborativeReadRole,
+  normalizeCollaborativeScope: accessMocks.normalizeCollaborativeScope,
+}));
+
 const { dealRoutes } = await import("../../../src/modules/deals/routes.js");
 
 function findRouteHandler(method: "post", path: string) {
@@ -110,6 +123,16 @@ function findRouteHandler(method: "post", path: string) {
 describe("POST /api/deals/:id/rfp-retry", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    accessMocks.assertDealCollaboratorAccess.mockResolvedValue({
+      id: "deal-1",
+      assignedRepId: "rep-1",
+      officeId: "office-1",
+    });
+    accessMocks.assertDealOwnerAccess.mockResolvedValue({
+      id: "deal-1",
+      assignedRepId: "rep-1",
+      officeId: "office-1",
+    });
     process.env.SYNCHUB_BASE_URL = "https://new.example.com";
     getDealByIdMock.mockResolvedValue({
       id: "deal-1",

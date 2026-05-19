@@ -10,6 +10,12 @@ const scopingServiceMocks = vi.hoisted(() => ({
 const auditMocks = vi.hoisted(() => ({
   writeAuditLog: vi.fn(),
 }));
+const accessMocks = vi.hoisted(() => ({
+  assertDealCollaboratorAccess: vi.fn(),
+  assertDealOwnerAccess: vi.fn(),
+  getCollaborativeReadRole: vi.fn((role: string) => role),
+  normalizeCollaborativeScope: vi.fn((_role: string, scope: "mine" | "team" | "all" | undefined) => scope ?? "all"),
+}));
 
 vi.mock("../../../src/events/bus.js", () => ({
   eventBus: {
@@ -39,6 +45,13 @@ vi.mock("../../../src/modules/deals/scoping-service.js", async () => {
 
 vi.mock("../../../src/lib/audit-log.js", () => ({
   writeAuditLog: auditMocks.writeAuditLog,
+}));
+
+vi.mock("../../../src/lib/collaboration-access.js", () => ({
+  assertDealCollaboratorAccess: accessMocks.assertDealCollaboratorAccess,
+  assertDealOwnerAccess: accessMocks.assertDealOwnerAccess,
+  getCollaborativeReadRole: accessMocks.getCollaborativeReadRole,
+  normalizeCollaborativeScope: accessMocks.normalizeCollaborativeScope,
 }));
 
 const { dealRoutes } = await import("../../../src/modules/deals/routes.js");
@@ -181,6 +194,8 @@ async function invokePatch(
 describe("PATCH /api/deals/:id cleanup legacy handling", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    accessMocks.assertDealCollaboratorAccess.mockResolvedValue({ id: "deal-1", assignedRepId: "rep-1", officeId: "office-1" });
+    accessMocks.assertDealOwnerAccess.mockResolvedValue({ id: "deal-1", assignedRepId: "rep-1", officeId: "office-1" });
     scopingServiceMocks.assertDealScopingWriteAllowed.mockResolvedValue({
       adminOverride: false,
       lockState: { locked: false, submittedAt: null, reason: null },

@@ -1,5 +1,5 @@
 import { useMemo, useState } from "react";
-import { Link, useNavigate } from "react-router-dom";
+import { Link, useNavigate, useSearchParams } from "react-router-dom";
 import {
   useDirectorDashboard,
   presetToDateRange,
@@ -31,6 +31,10 @@ import {
 } from "lucide-react";
 import { DIRECTOR_DASHBOARD_ACTIONS } from "@/lib/director-dashboard-actions";
 import { getWorkflowRouteLabel } from "@/lib/pipeline-ownership";
+import { ScopeToggle, type ScopeToggleOption } from "@/components/shared/scope-toggle";
+import { useAuth } from "@/lib/auth";
+import type { PipelineScope } from "@/lib/pipeline-scope";
+import { resolvePreferredScope, writeStoredScopePreference } from "@/lib/scope-preferences";
 
 const PRESETS: Array<{ value: DateRangePreset; label: string }> = [
   { value: "mtd", label: "MTD" },
@@ -60,6 +64,12 @@ const PERIOD_ACTIVITY_LABELS: Record<DateRangePreset, string> = {
   last_year: "last year",
   custom: "selected period",
 };
+
+const SCOPE_OPTIONS = [
+  { value: "mine", label: "Mine" },
+  { value: "team", label: "Team" },
+  { value: "all", label: "All" },
+] as const satisfies readonly ScopeToggleOption<PipelineScope>[];
 
 type ActivityLevel = { dot: string; label: "High" | "Moderate" | "Low" };
 
@@ -304,8 +314,12 @@ function csvCell(value: string | number | null | undefined): string {
   return /[",\n]/.test(raw) ? `"${raw.replace(/"/g, '""')}"` : raw;
 }
 
-function buildDealsDrilldownPath(filter: "active_pipeline" | "won" | "closing_soon" | "stale" | "at_risk", preset: DateRangePreset) {
-  return `/deals?filter=${filter}&period=${preset}&scope=team`;
+function buildDealsDrilldownPath(
+  filter: "active_pipeline" | "won" | "closing_soon" | "stale" | "at_risk",
+  preset: DateRangePreset,
+  scope: PipelineScope
+) {
+  return `/deals?filter=${filter}&period=${preset}&scope=${scope}`;
 }
 
 function buildReportDrilldownPath(
@@ -326,11 +340,28 @@ function buildReportDrilldownPath(
 }
 
 export function DirectorDashboardPage() {
+  const { user } = useAuth();
   const navigate = useNavigate();
+  const [searchParams, setSearchParams] = useSearchParams();
   const [preset, setPreset] = useState<DateRangePreset>("qtd");
   const dateRange = presetToDateRange(preset);
   const repPerformancePeriod = preset as RepPerformancePeriodKind;
-  const { data, loading, error, refetch, lastFetchedAt } = useDirectorDashboard(dateRange, repPerformancePeriod);
+  const scope = resolvePreferredScope({
+    requestedScope: searchParams.get("scope"),
+    userId: user?.id,
+    fallback: "mine",
+  });
+  const updateScope = (nextScope: PipelineScope) => {
+    writeStoredScopePreference(user?.id, nextScope);
+    const next = new URLSearchParams(searchParams);
+    next.set("scope", nextScope);
+    setSearchParams(next);
+  };
+  const { data, loading, error, refetch, lastFetchedAt } = useDirectorDashboard(
+    dateRange,
+    repPerformancePeriod,
+    scope === "all" ? "all" : "mine"
+  );
   const {
     data: perfData,
     loading: perfLoading,
@@ -339,15 +370,15 @@ export function DirectorDashboardPage() {
   } = useRepPerformance(repPerformancePeriod);
 
   const selectedPreset = PRESETS.find((p) => p.value === preset) ?? PRESETS[1];
-  const activeDealsDestination = buildDealsDrilldownPath("active_pipeline", preset);
-  const wonDealsDestination = buildDealsDrilldownPath("won", preset);
+  const activeDealsDestination = buildDealsDrilldownPath("active_pipeline", preset, scope);
+  const wonDealsDestination = buildDealsDrilldownPath("won", preset, scope);
   // This KPI is sourced from recent period closes, so it should drill into the
   // same closed-won slice rather than forecasted near-close deals.
-  const closingDestination = buildDealsDrilldownPath("won", preset);
+  const closingDestination = buildDealsDrilldownPath("won", preset, scope);
   const forecastDestination = buildReportDrilldownPath("/reports/performance/forecast-accuracy", preset, dateRange);
   const activityDestination = buildReportDrilldownPath("/reports/performance/rep-activity", preset, dateRange);
-  const staleDealsDestination = buildDealsDrilldownPath("stale", preset);
-  const atRiskDealsDestination = buildDealsDrilldownPath("at_risk", preset);
+  const staleDealsDestination = buildDealsDrilldownPath("stale", preset, scope);
+  const atRiskDealsDestination = buildDealsDrilldownPath("at_risk", preset, scope);
 
   if (loading) {
     return (
@@ -373,6 +404,30 @@ export function DirectorDashboardPage() {
   }
 
   if (!data) return null;
+
+  if (scope === "team") {
+    return (
+      <div className="min-h-screen space-y-6 bg-[#F5F4F2] p-4 sm:p-6">
+        <header className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
+          <div>
+            <h1 className="text-3xl font-black uppercase tracking-tight text-gray-950 sm:text-4xl">
+              Director Dashboard
+            </h1>
+            <p className="mt-1 text-[11px] font-bold uppercase tracking-widest text-gray-500">
+              Team view is not yet configured
+            </p>
+          </div>
+          <ScopeToggle options={SCOPE_OPTIONS} value={scope} onChange={updateScope} ariaLabel="Dashboard scope" />
+        </header>
+
+        <section className="rounded-3xl border border-dashed border-slate-300 bg-white px-8 py-14 text-center shadow-sm">
+          <p className="text-[11px] font-black uppercase tracking-[0.22em] text-slate-500">Team Scope</p>
+          <h2 className="mt-3 text-2xl font-black tracking-tight text-slate-950">Team view is not yet configured.</h2>
+          <p className="mt-2 text-sm font-medium text-slate-500">Contact your admin to set up team groupings.</p>
+        </section>
+      </div>
+    );
+  }
 
   const opportunityVsPipeline = data.opportunityVsPipeline ?? {
     opportunityValue: data.ddVsPipeline.ddValue,
@@ -416,6 +471,12 @@ export function DirectorDashboardPage() {
   const periodLabel = PERIOD_LABELS[preset];
   const activityPeriodLabel = PERIOD_ACTIVITY_LABELS[preset];
   const performanceUnavailable = perfLoading || Boolean(perfError);
+  const scopeSummary = data.scopeSummary ?? {
+    activePipeline: { count: 0, totalValue: 0 },
+    won: { count: 0, totalValue: 0 },
+    atRisk: { count: 0, totalValue: 0 },
+    stale: { count: 0, totalValue: 0 },
+  };
 
   function exportSalesForceCsv() {
     const header = ["Rep", "Region", "Closed Value", "Closed Deals", "Pipeline Value", "Active Deals", "Win Rate", "At Risk", "Activity"];
@@ -461,6 +522,7 @@ export function DirectorDashboardPage() {
         </div>
 
         <div className="flex flex-wrap items-center gap-3">
+          <ScopeToggle options={SCOPE_OPTIONS} value={scope} onChange={updateScope} ariaLabel="Dashboard scope" />
           <div className="flex flex-wrap items-center gap-1 rounded-full bg-gray-200 px-1.5 py-1.5">
             {PRESETS.map((item) => (
               <button
@@ -512,8 +574,8 @@ export function DirectorDashboardPage() {
       <section className="mt-6 grid grid-cols-1 gap-4 lg:grid-cols-3">
         <KpiCard
           label="Active pipeline"
-          value={formatCurrency(opportunityVsPipeline.pipelineValue)}
-          badge={`${opportunityVsPipeline.pipelineCount} deals`}
+          value={formatCurrency(scopeSummary.activePipeline.totalValue)}
+          badge={`${scopeSummary.activePipeline.count} deals`}
           caption="Weighted forecast"
           accent="red"
           to={activeDealsDestination}
@@ -521,8 +583,8 @@ export function DirectorDashboardPage() {
         />
         <KpiCard
           label={`Closed ${selectedPreset.label}`}
-          value={hasPerformanceData && closedValue !== null ? formatCurrency(closedValue) : "--"}
-          badge={!hasPerformanceData ? "loading" : goal > 0 && wonPercent !== null ? `${wonPercent}% to goal` : `${closedCount ?? 0} won`}
+          value={formatCurrency(scopeSummary.won.totalValue)}
+          badge={`${scopeSummary.won.count} won`}
           caption={perfError ? "Performance unavailable" : goal > 0 ? `Goal ${formatCurrency(goal)} ${selectedPreset.label}` : "Goal not configured"}
           accent="blue"
           to={wonDealsDestination}
@@ -530,9 +592,9 @@ export function DirectorDashboardPage() {
         />
         <KpiCard
           label="At risk"
-          value={String(atRiskDeals.length)}
-          badge={`${formatCurrency(totalAtRiskValue)} blocked`}
-          caption={`${atRiskDeals.length} flagged deals across ${atRiskRepCount} reps`}
+          value={String(scopeSummary.atRisk.count)}
+          badge={`${formatCurrency(scopeSummary.atRisk.totalValue)} blocked`}
+          caption={scope === "mine" ? "Your stale mirrored deals" : `${atRiskDeals.length} flagged deals across ${atRiskRepCount} reps`}
           accent="red"
           dark
           to={atRiskDestination}
@@ -540,6 +602,13 @@ export function DirectorDashboardPage() {
         />
       </section>
 
+      {scope === "mine" ? (
+        <section className="rounded-xl border border-slate-200 bg-white p-5 text-sm font-medium text-slate-600 shadow-sm">
+          Mine scope currently applies to the KPI cards and drilldowns on this dashboard. Switch to All for office-wide director analytics.
+        </section>
+      ) : null}
+
+      {scope === "all" ? (
       <section className="mt-4 rounded-xl border border-gray-200 bg-white p-5 shadow-sm">
         <div className="grid gap-5 xl:grid-cols-[1fr_430px] xl:items-start">
           <Link
@@ -614,7 +683,9 @@ export function DirectorDashboardPage() {
           </div>
         </div>
       </section>
+      ) : null}
 
+      {scope === "all" ? (
       <section className="mt-4 grid grid-cols-1 gap-4 xl:grid-cols-[minmax(0,1fr)_390px]">
         <div className="overflow-hidden rounded-xl border border-gray-200 bg-white shadow-sm">
           <div className="flex items-start justify-between gap-3 border-b border-gray-100 px-5 py-4">
@@ -766,6 +837,7 @@ export function DirectorDashboardPage() {
           </div>
         </aside>
       </section>
+      ) : null}
 
       <section className="mt-4 grid grid-cols-1 gap-4 xl:grid-cols-[minmax(0,1fr)_390px]">
         <div className="overflow-hidden rounded-xl border border-gray-200 bg-white shadow-sm">

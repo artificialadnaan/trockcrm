@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { Router } from "express";
 import { and, eq, desc, isNotNull, isNull, or, sql } from "drizzle-orm";
-import { companies, dealApprovals, dealScopingIntake, deals, jobQueue, properties } from "@trock-crm/shared/schema";
+import { companies, dealApprovals, dealScopingIntake, deals, dealSubscriptions, jobQueue, properties } from "@trock-crm/shared/schema";
 import { requireRole } from "../../middleware/rbac.js";
 import { AppError } from "../../middleware/error-handler.js";
 import { writeAuditLog } from "../../lib/audit-log.js";
@@ -26,7 +26,7 @@ import {
   setDealContractSignedDate,
 } from "./service.js";
 import { toJsonSafe } from "../../lib/json-safe.js";
-import { redactDealList, redactDealResponse, shouldIncludeHubspotId } from "./redact.js";
+import { redactDealList, redactDealResponse, shouldIncludeHubspotId, stripPrivateDealFieldsForViewer } from "./redact.js";
 import { activateServiceHandoff, changeDealStage } from "./stage-change.js";
 import { preflightStageCheck } from "./stage-gate.js";
 import { getContactsForDeal } from "../contacts/association-service.js";
@@ -156,15 +156,41 @@ import { insertOpportunityRfpRequestJob } from "./rfp-enqueue.js";
 import { isOpportunityRfpEventEnabled } from "../../config/feature-flags.js";
 import { getActiveProjectTypes, getAllStages, getStageBySlug } from "../pipeline/service.js";
 import { resolveDealCreateOfficeCode } from "./create-context.js";
+import {
+  assertDealCollaboratorAccess,
+  assertDealOwnerAccess,
+  getCollaborativeReadRole,
+  normalizeCollaborativeScope,
+} from "../../lib/collaboration-access.js";
 
 const router = Router();
 
 async function assertDealRouteAccess(req: any, dealId: string) {
-  const deal = await getDealById(req.tenantDb!, dealId, req.user!.role, req.user!.id);
-  if (!deal) {
-    throw new AppError(403, "Access denied: you do not have access to this deal.");
-  }
-  return deal;
+  return assertDealCollaboratorAccess(req.tenantDb!, dealId, req.user!);
+}
+
+async function assertDealOwnerRouteAccess(
+  req: any,
+  dealId: string,
+  options: { allowAdmin?: boolean; message?: string } = {}
+) {
+  return assertDealOwnerAccess(req.tenantDb!, dealId, req.user!, options);
+}
+
+async function isDealWatchedByUser(tenantDb: any, dealId: string, userId: string) {
+  const [row] = await tenantDb
+    .select({ id: dealSubscriptions.id })
+    .from(dealSubscriptions)
+    .where(
+      and(
+        eq(dealSubscriptions.dealId, dealId),
+        eq(dealSubscriptions.userId, userId),
+        isNull(dealSubscriptions.deletedAt)
+      )
+    )
+    .limit(1);
+
+  return Boolean(row);
 }
 
 async function lockScopeComparisonRows(tenantDb: any, dealId: string) {
@@ -493,16 +519,20 @@ function isEstimatingBoundaryStageSlug(stageSlug: string, workflowRoute: "normal
 }
 
 function readBoardInput(req: Parameters<typeof router.get>[1] extends never ? never : any) {
+  const scope = normalizeCollaborativeScope(
+    req.user!.role,
+    req.query.scope as "mine" | "team" | "all" | undefined
+  );
   return {
-    role: req.user!.role,
+    role: getCollaborativeReadRole(req.user!.role, scope),
     userId: req.user!.id,
     activeOfficeId: req.user!.activeOfficeId ?? req.user!.officeId,
-    scope: (req.query.scope as "mine" | "team" | "all" | undefined) ?? "mine",
+    scope,
     includeDd: req.query.includeDd === "true",
   };
 }
 
-function readListScope(value: unknown): "mine" | "team" | "all" {
+function readListScope(value: unknown, role: string): "mine" | "team" | "all" {
   return value === "mine" || value === "team" || value === "all" ? value : "all";
 }
 
@@ -754,16 +784,25 @@ router.get("/", async (req, res, next) => {
       sortDir: req.query.sortDir as "asc" | "desc" | undefined,
       page: req.query.page ? parseInt(req.query.page as string, 10) : undefined,
       limit: req.query.limit ? parseInt(req.query.limit as string, 10) : undefined,
-      scope: readListScope(req.query.scope),
+      scope: normalizeCollaborativeScope(req.user!.role, readListScope(req.query.scope, req.user!.role)),
       activeOfficeId: req.user!.activeOfficeId ?? req.user!.officeId,
     };
 
-    const result = await getDeals(req.tenantDb!, filters, req.user!.role, req.user!.id);
+    const result = await getDeals(
+      req.tenantDb!,
+      filters,
+      getCollaborativeReadRole(req.user!.role, filters.scope),
+      req.user!.id
+    );
     await req.commitTransaction!();
     const includeHubspotId = shouldIncludeHubspotId(req.query, req.user!.role);
     res.json({
       ...result,
-      deals: redactDealList(result.deals, { includeHubspotId }),
+      deals: redactDealList(result.deals, { includeHubspotId }).map((deal) =>
+        stripPrivateDealFieldsForViewer(deal as Record<string, unknown>, {
+          isOwner: (deal as { assignedRepId?: string | null }).assignedRepId === req.user!.id,
+        })
+      ),
     });
   } catch (err) {
     next(err);
@@ -803,7 +842,7 @@ router.get("/pipeline", async (req, res, next) => {
     };
     const result = await getDealsForPipeline(
       req.tenantDb!,
-      req.user!.role,
+      getCollaborativeReadRole(req.user!.role, filters.scope),
       req.user!.id,
       filters
     );
@@ -813,9 +852,21 @@ router.get("/pipeline", async (req, res, next) => {
       ...result,
       pipelineColumns: result.pipelineColumns.map((column) => ({
         ...column,
-        deals: redactDealList(column.deals, { includeHubspotId }),
+        deals: redactDealList(column.deals, { includeHubspotId }).map((deal) =>
+          stripPrivateDealFieldsForViewer(deal as Record<string, unknown>, {
+            isOwner: (deal as { assignedRepId?: string | null }).assignedRepId === req.user!.id,
+          })
+        ),
       })),
       terminalStages: result.terminalStages,
+      terminalStages: result.terminalStages.map((column) => ({
+        ...column,
+        deals: redactDealList(column.deals, { includeHubspotId }).map((deal) =>
+          stripPrivateDealFieldsForViewer(deal as Record<string, unknown>, {
+            isOwner: (deal as { assignedRepId?: string | null }).assignedRepId === req.user!.id,
+          })
+        ),
+      })),
     });
   } catch (err) {
     next(err);
@@ -895,11 +946,26 @@ router.get("/nearby", async (req, res, next) => {
 // GET /api/deals/:id — single deal (basic)
 router.get("/:id", async (req, res, next) => {
   try {
-    const deal = await getDealById(req.tenantDb!, req.params.id, req.user!.role, req.user!.id);
+    const dealAccess = await assertDealCollaboratorAccess(req.tenantDb!, req.params.id, req.user!);
+    const deal = await getDealById(
+      req.tenantDb!,
+      req.params.id,
+      getCollaborativeReadRole(req.user!.role, dealAccess.assignedRepId === req.user!.id ? "mine" : "all"),
+      req.user!.id
+    );
     if (!deal) throw new AppError(404, "Deal not found");
+    const isWatching = await isDealWatchedByUser(req.tenantDb!, req.params.id, req.user!.id);
     await req.commitTransaction!();
     const includeHubspotId = shouldIncludeHubspotId(req.query, req.user!.role);
-    res.json(toJsonSafe({ deal: redactDealResponse(deal, { includeHubspotId }) }));
+    res.json(toJsonSafe({
+      deal: {
+        ...stripPrivateDealFieldsForViewer(
+          redactDealResponse(deal, { includeHubspotId }) as Record<string, unknown>,
+          { isOwner: deal.assignedRepId === req.user!.id }
+        ),
+        isWatching,
+      },
+    }));
   } catch (err) {
     next(err);
   }
@@ -908,16 +974,71 @@ router.get("/:id", async (req, res, next) => {
 // GET /api/deals/:id/detail — deal with stage history, approvals, change orders
 router.get("/:id/detail", async (req, res, next) => {
   try {
-    const detail = await getDealDetail(req.tenantDb!, req.params.id, req.user!.role, req.user!.id);
+    const dealAccess = await assertDealCollaboratorAccess(req.tenantDb!, req.params.id, req.user!);
+    const detail = await getDealDetail(
+      req.tenantDb!,
+      req.params.id,
+      getCollaborativeReadRole(req.user!.role, dealAccess.assignedRepId === req.user!.id ? "mine" : "all"),
+      req.user!.id
+    );
     if (!detail) throw new AppError(404, "Deal not found");
+    const isWatching = await isDealWatchedByUser(req.tenantDb!, req.params.id, req.user!.id);
     await req.commitTransaction!();
     const includeHubspotId = shouldIncludeHubspotId(req.query, req.user!.role);
     res.json(toJsonSafe({
       deal: {
-        ...redactDealResponse(detail, { includeHubspotId }),
+        ...stripPrivateDealFieldsForViewer(
+          redactDealResponse(detail, { includeHubspotId }) as Record<string, unknown>,
+          { isOwner: detail.assignedRepId === req.user!.id }
+        ),
+        isWatching,
         isRfpTriggerEnabled: isOpportunityRfpEventEnabled(),
       },
     }));
+  } catch (err) {
+    next(err);
+  }
+});
+
+router.post("/:id/watch", async (req, res, next) => {
+  try {
+    await assertDealCollaboratorAccess(req.tenantDb!, req.params.id, req.user!);
+    await req.tenantDb!
+      .insert(dealSubscriptions)
+      .values({
+        dealId: req.params.id,
+        userId: req.user!.id,
+        createdAt: new Date(),
+        deletedAt: null,
+      })
+      .onConflictDoUpdate({
+        target: [dealSubscriptions.dealId, dealSubscriptions.userId],
+        set: {
+          deletedAt: null,
+        },
+      });
+    await req.commitTransaction!();
+    res.status(200).json({ watching: true });
+  } catch (err) {
+    next(err);
+  }
+});
+
+router.delete("/:id/watch", async (req, res, next) => {
+  try {
+    await assertDealCollaboratorAccess(req.tenantDb!, req.params.id, req.user!);
+    await req.tenantDb!
+      .update(dealSubscriptions)
+      .set({ deletedAt: new Date() })
+      .where(
+        and(
+          eq(dealSubscriptions.dealId, req.params.id),
+          eq(dealSubscriptions.userId, req.user!.id),
+          isNull(dealSubscriptions.deletedAt)
+        )
+      );
+    await req.commitTransaction!();
+    res.status(200).json({ watching: false });
   } catch (err) {
     next(err);
   }
@@ -1070,7 +1191,12 @@ router.post("/:id/trigger-rfp", async (req, res, next) => {
 // POST /api/deals/:id/rfp-retry — enqueue a fresh RFP delivery job from the latest dead row.
 router.post("/:id/rfp-retry", async (req, res, next) => {
   try {
-    const deal = await getDealById(req.tenantDb!, req.params.id, req.user!.role, req.user!.id);
+    const deal = await getDealById(
+      req.tenantDb!,
+      req.params.id,
+      getCollaborativeReadRole(req.user!.role, "all"),
+      req.user!.id
+    );
     if (!deal) throw new AppError(404, "Deal not found");
 
     const deadJobResult = await req.tenantDb!.execute(sql`
@@ -1120,7 +1246,7 @@ router.post("/:id/rfp-retry", async (req, res, next) => {
 // GET /api/deals/:id/scoping-intake — load or initialize scoping intake
 router.get("/:id/scoping-intake", async (req, res, next) => {
   try {
-    await assertDealRouteAccess(req, req.params.id);
+    await assertDealOwnerRouteAccess(req, req.params.id);
     const result = await getOrCreateDealScopingIntake(req.tenantDb!, req.params.id, req.user!.id);
     await req.commitTransaction!();
     res.json(result);
@@ -1132,7 +1258,7 @@ router.get("/:id/scoping-intake", async (req, res, next) => {
 // PATCH /api/deals/:id/scoping-intake — autosave scoping intake
 router.patch("/:id/scoping-intake", async (req, res, next) => {
   try {
-    await assertDealRouteAccess(req, req.params.id);
+    await assertDealOwnerRouteAccess(req, req.params.id);
     const patch = { ...req.body };
     delete patch.workflowRoute;
 
@@ -1181,7 +1307,7 @@ router.patch("/:id/resolved-fields", async (req, res, next) => {
 
     const dealBaseline =
       Object.keys(patch).length > 0
-        ? await getDealById(req.tenantDb!, req.params.id, req.user!.role, req.user!.id)
+        ? await getDealById(req.tenantDb!, req.params.id, getCollaborativeReadRole(req.user!.role, "mine"), req.user!.id)
         : null;
     const hasLockedResolvedFieldCandidates = Object.keys(patch).some((field) =>
       SCOPE_LOCKED_RESOLVED_FIELDS.has(field)
@@ -1253,7 +1379,7 @@ router.patch("/:id/resolved-fields", async (req, res, next) => {
 // GET /api/deals/:id/scoping-intake/readiness — evaluate current readiness
 router.get("/:id/scoping-intake/readiness", async (req, res, next) => {
   try {
-    await assertDealRouteAccess(req, req.params.id);
+    await assertDealOwnerRouteAccess(req, req.params.id);
     const readiness = await evaluateDealScopingReadiness(req.tenantDb!, req.params.id);
     await req.commitTransaction!();
     res.json({ readiness });
@@ -1265,7 +1391,7 @@ router.get("/:id/scoping-intake/readiness", async (req, res, next) => {
 // POST /api/deals/:id/scoping-intake/attachments/link-existing — reuse an existing deal file
 router.post("/:id/scoping-intake/attachments/link-existing", async (req, res, next) => {
   try {
-    await assertDealRouteAccess(req, req.params.id);
+    await assertDealCollaboratorAccess(req.tenantDb!, req.params.id, req.user!);
     const { fileId, intakeSection, intakeRequirementKey } = req.body;
 
     if (!fileId || !intakeSection || !intakeRequirementKey) {
@@ -1575,12 +1701,25 @@ router.post("/:id/proposal-draft", async (req, res, next) => {
 // PATCH /api/deals/:id — update deal fields (not stage)
 router.patch("/:id", async (req, res, next) => {
   try {
+    const dealAccess = await assertDealCollaboratorAccess(req.tenantDb!, req.params.id, req.user!);
     const body = { ...req.body };
     validateDealPayload(body);
     const forceEditAfterRfp = body.forceEditAfterRfp === true;
     const clientRequestedMigrationMode = body.migrationMode === true;
     delete body.forceEditAfterRfp;
     delete body.migrationMode;
+
+    const patchKeys = Object.keys(body);
+    const isAssignmentTransferOnly = patchKeys.length > 0 && patchKeys.every((field) => field === "assignedRepId");
+    if (isAssignmentTransferOnly) {
+      if (req.user!.role !== "admin" && dealAccess.assignedRepId !== req.user!.id) {
+        throw new AppError(403, "Only the assigned rep or an admin can transfer this deal");
+      }
+    } else {
+      await assertDealOwnerRouteAccess(req, req.params.id, {
+        message: "Only the assigned rep can modify this deal",
+      });
+    }
 
     const hasLockedDealFieldCandidates = Object.keys(body).some((field) =>
       SCOPE_LOCKED_DEAL_PATCH_FIELDS.has(field)
@@ -2281,6 +2420,9 @@ router.post("/:id/estimating/copilot", async (req, res, next) => {
 // POST /api/deals/:id/stage — change deal stage (with validation)
 router.post("/:id/stage", async (req, res, next) => {
   try {
+    await assertDealOwnerRouteAccess(req, req.params.id, {
+      message: "Only the assigned rep can modify this deal",
+    });
     const { targetStageId, overrideReason, lostReasonId, lostNotes, lostCompetitor } = req.body;
     if (!targetStageId) {
       throw new AppError(400, "targetStageId is required");
@@ -2617,11 +2759,15 @@ router.get("/:id/contacts", async (req, res, next) => {
   }
 });
 
-// DELETE /api/deals/:id — admin-only soft-delete
-router.delete("/:id", requireRole("admin"), async (req, res, next) => {
+// DELETE /api/deals/:id — owner/admin soft-delete
+router.delete("/:id", async (req, res, next) => {
   try {
     const dealId = req.params.id as string;
-    const deal = await deleteDeal(req.tenantDb!, dealId, req.user!.role);
+    await assertDealOwnerRouteAccess(req, dealId, {
+      allowAdmin: true,
+      message: "Only the assigned rep or an admin can delete this deal",
+    });
+    const deal = await deleteDeal(req.tenantDb!, dealId, "admin");
     if (deal) {
       const auditContext = buildRouteAuditContext(req);
       await logActivity({

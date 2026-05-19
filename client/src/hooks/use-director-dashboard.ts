@@ -157,6 +157,12 @@ export interface DirectorDashboardData {
     totalValue: number;
     totalCount: number;
   };
+  scopeSummary?: {
+    activePipeline: { count: number; totalValue: number };
+    won: { count: number; totalValue: number };
+    atRisk: { count: number; totalValue: number };
+    stale: { count: number; totalValue: number };
+  };
 }
 
 export interface DirectorRepFunnelRow {
@@ -309,7 +315,11 @@ export function presetToDateRange(preset: DateRangePreset): { from: string; to: 
   }
 }
 
-export function useDirectorDashboard(dateRange?: { from: string; to: string }, periodKind?: RepPerformancePeriodKind) {
+export function useDirectorDashboard(
+  dateRange?: { from: string; to: string },
+  periodKind?: RepPerformancePeriodKind,
+  scope?: "mine" | "all"
+) {
   const [data, setData] = useState<DirectorDashboardData | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -323,6 +333,7 @@ export function useDirectorDashboard(dateRange?: { from: string; to: string }, p
       if (dateRange?.from) params.set("from", dateRange.from);
       if (dateRange?.to) params.set("to", dateRange.to);
       if (periodKind) params.set("periodKind", periodKind);
+      if (scope) params.set("scope", scope);
       const qs = params.toString();
       const res = await api<{ data: DirectorDashboardData }>(
         `/dashboard/director${qs ? `?${qs}` : ""}`
@@ -334,7 +345,7 @@ export function useDirectorDashboard(dateRange?: { from: string; to: string }, p
     } finally {
       setLoading(false);
     }
-  }, [dateRange?.from, dateRange?.to, periodKind]);
+  }, [dateRange?.from, dateRange?.to, periodKind, scope]);
 
   useEffect(() => {
     fetchData();

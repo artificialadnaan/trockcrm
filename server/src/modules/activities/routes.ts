@@ -4,6 +4,7 @@ import { DOMAIN_EVENTS } from "@trock-crm/shared/types";
 import { AppError } from "../../middleware/error-handler.js";
 import { eventBus } from "../../events/bus.js";
 import { getActivities, createActivity } from "./service.js";
+import { assertDealCollaboratorAccess, assertLeadCollaboratorAccess } from "../../lib/collaboration-access.js";
 
 const router = Router();
 type ActivitySourceEntityType = "company" | "property" | "lead" | "deal" | "contact";
@@ -43,6 +44,7 @@ function inferSourceEntity(body: Record<string, unknown>) {
 // GET /api/activities — list activities (filtered by deal, contact, or user)
 router.get("/", async (req, res, next) => {
   try {
+    const collaboratorEntityScopedRequest = Boolean(req.query.leadId || req.query.dealId);
     const filters = {
       companyId: req.query.companyId as string | undefined,
       propertyId: req.query.propertyId as string | undefined,
@@ -50,7 +52,7 @@ router.get("/", async (req, res, next) => {
       dealId: req.query.dealId as string | undefined,
       contactId: req.query.contactId as string | undefined,
       // RBAC: Reps can only see their own activities
-      responsibleUserId: req.user!.role === "rep"
+      responsibleUserId: req.user!.role === "rep" && !collaboratorEntityScopedRequest
         ? req.user!.id
         : ((req.query.responsibleUserId as string | undefined) ??
           (req.query.userId as string | undefined)),
@@ -64,9 +66,11 @@ router.get("/", async (req, res, next) => {
 
     // RBAC: If filtering by dealId, verify the user has access to this deal
     if (filters.dealId) {
-      const { getDealById } = await import("../deals/service.js");
-      const deal = await getDealById(req.tenantDb!, filters.dealId, req.user!.role, req.user!.id);
-      if (!deal) throw new AppError(404, "Deal not found");
+      await assertDealCollaboratorAccess(req.tenantDb!, filters.dealId, req.user!);
+    }
+
+    if (filters.leadId) {
+      await assertLeadCollaboratorAccess(req.tenantDb!, filters.leadId, req.user!);
     }
 
     const result = await getActivities(req.tenantDb!, filters);
@@ -104,25 +108,15 @@ router.post("/", async (req, res, next) => {
     }
 
     let resolvedResponsibleUserId: string | undefined =
-      req.user!.role === "rep" ? req.user!.id : requestedResponsibleUserId;
+      req.user!.role === "rep" ? req.user!.id : (requestedResponsibleUserId ?? req.user!.id);
 
     // RBAC: If dealId is provided, verify the user has access to this deal
     if (sourceEntityType === "deal") {
-      const { getDealById } = await import("../deals/service.js");
-      const deal = await getDealById(req.tenantDb!, sourceEntityId, req.user!.role, req.user!.id);
-      if (!deal) throw new AppError(404, "Deal not found");
-      if (!resolvedResponsibleUserId && deal.assignedRepId) {
-        resolvedResponsibleUserId = deal.assignedRepId;
-      }
+      await assertDealCollaboratorAccess(req.tenantDb!, sourceEntityId, req.user!);
     }
 
     if (sourceEntityType === "lead") {
-      const { getLeadById } = await import("../leads/service.js");
-      const lead = await getLeadById(req.tenantDb!, sourceEntityId, req.user!.role, req.user!.id);
-      if (!lead) throw new AppError(404, "Lead not found");
-      if (!resolvedResponsibleUserId && lead.assignedRepId) {
-        resolvedResponsibleUserId = lead.assignedRepId;
-      }
+      await assertLeadCollaboratorAccess(req.tenantDb!, sourceEntityId, req.user!);
     }
 
     const activity = await createActivity(req.tenantDb!, {

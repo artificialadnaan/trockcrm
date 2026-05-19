@@ -211,9 +211,11 @@ export function appendPipelineTerminalDateParams(
 
 export function buildPipelineRequestPath(
   showDd: boolean,
-  filters: Record<TerminalOutcome, TerminalDateFilter>
+  filters: Record<TerminalOutcome, TerminalDateFilter>,
+  scope?: string
 ) {
   const params = new URLSearchParams({ includeDd: String(showDd) });
+  if (scope) params.set("scope", scope);
   appendPipelineTerminalDateParams(params, filters);
   return `/deals/pipeline?${params.toString()}`;
 }

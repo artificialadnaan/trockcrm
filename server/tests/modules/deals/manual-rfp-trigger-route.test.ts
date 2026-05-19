@@ -5,6 +5,12 @@ const evaluateReadinessMock = vi.hoisted(() => vi.fn());
 const insertRfpJobMock = vi.hoisted(() => vi.fn());
 const inferBidBoardOwnershipMock = vi.hoisted(() => vi.fn());
 const isRfpEnabledMock = vi.hoisted(() => vi.fn());
+const accessMocks = vi.hoisted(() => ({
+  assertDealCollaboratorAccess: vi.fn(),
+  assertDealOwnerAccess: vi.fn(),
+  getCollaborativeReadRole: vi.fn((role: string) => role),
+  normalizeCollaborativeScope: vi.fn((_role: string, scope: "mine" | "team" | "all" | undefined) => scope ?? "all"),
+}));
 
 vi.mock("../../../src/events/bus.js", () => ({
   eventBus: {
@@ -105,6 +111,13 @@ vi.mock("../../../src/modules/deals/rfp-enqueue.js", () => ({
 
 vi.mock("../../../src/config/feature-flags.js", () => ({
   isOpportunityRfpEventEnabled: isRfpEnabledMock,
+}));
+
+vi.mock("../../../src/lib/collaboration-access.js", () => ({
+  assertDealCollaboratorAccess: accessMocks.assertDealCollaboratorAccess,
+  assertDealOwnerAccess: accessMocks.assertDealOwnerAccess,
+  getCollaborativeReadRole: accessMocks.getCollaborativeReadRole,
+  normalizeCollaborativeScope: accessMocks.normalizeCollaborativeScope,
 }));
 
 const { dealRoutes } = await import("../../../src/modules/deals/routes.js");
@@ -266,6 +279,16 @@ function makeRes() {
 describe("POST /api/deals/:id/trigger-rfp", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    accessMocks.assertDealCollaboratorAccess.mockResolvedValue({
+      id: "deal-1",
+      assignedRepId: "rep-1",
+      officeId: "office-1",
+    });
+    accessMocks.assertDealOwnerAccess.mockResolvedValue({
+      id: "deal-1",
+      assignedRepId: "rep-1",
+      officeId: "office-1",
+    });
     isRfpEnabledMock.mockReturnValue(true);
     inferBidBoardOwnershipMock.mockReturnValue({ isBidBoardOwned: false });
     insertRfpJobMock.mockResolvedValue({ jobId: 123 });

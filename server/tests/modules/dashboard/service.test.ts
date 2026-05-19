@@ -1,5 +1,8 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 
+vi.mock("@trock-crm/shared/schema", async () => import("../../../../shared/src/schema/index.js"));
+vi.mock("@trock-crm/shared/types", async () => import("../../../../shared/src/types/index.js"));
+
 function createChainableMock(resolveValue: any[] = []) {
   const chain: any = {
     select: vi.fn(),

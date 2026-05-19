@@ -25,6 +25,11 @@ import { getLeadById } from "../leads/service.js";
 import { getCompanyById } from "../companies/service.js";
 import { getContactById } from "../contacts/service.js";
 import { getPropertyDetail } from "../properties/service.js";
+import {
+  assertDealCollaboratorAccess,
+  assertLeadCollaboratorAccess,
+  getCollaborativeReadRole,
+} from "../../lib/collaboration-access.js";
 
 const router = Router();
 
@@ -55,7 +60,7 @@ function parsePaginationParam(
 }
 
 function canUserViewDeal(req: any, dealId: string) {
-  return getDealById(req.tenantDb!, dealId, req.user!.role, req.user!.id)
+  return assertDealCollaboratorAccess(req.tenantDb!, dealId, req.user!)
     .then(Boolean)
     .catch((err) => {
       if (err?.statusCode === 403 || err?.status === 403) {
@@ -143,8 +148,7 @@ function parseRequestedEmailAssociation(
 
 async function assertRequestedAssociationExists(req: any, association: RequestedEmailAssociation) {
   if (association.assignedEntityType === "deal") {
-    const deal = await getDealById(req.tenantDb!, association.assignedEntityId, req.user!.role, req.user!.id);
-    if (!deal) throw new AppError(404, "Deal not found");
+    await assertDealCollaboratorAccess(req.tenantDb!, association.assignedEntityId, req.user!);
     return;
   }
 
@@ -155,8 +159,7 @@ async function assertRequestedAssociationExists(req: any, association: Requested
   }
 
   if (association.assignedEntityType === "lead") {
-    const lead = await getLeadById(req.tenantDb!, association.assignedEntityId, req.user!.role, req.user!.id);
-    if (!lead) throw new AppError(404, "Lead not found");
+    await assertLeadCollaboratorAccess(req.tenantDb!, association.assignedEntityId, req.user!);
     return;
   }
 
@@ -194,8 +197,7 @@ router.post("/send", async (req, res, next) => {
     if (association) {
       await assertRequestedAssociationExists(req, association);
     } else if (dealId) {
-      const deal = await getDealById(req.tenantDb!, dealId, req.user!.role, req.user!.id);
-      if (!deal) throw new AppError(404, "Deal not found or access denied");
+      await assertDealCollaboratorAccess(req.tenantDb!, dealId, req.user!);
     }
 
     const email = await sendEmail(req.tenantDb!, req.user!.id, {
@@ -283,7 +285,13 @@ router.get("/", async (req, res, next) => {
 router.get("/deal/:dealId", async (req, res, next) => {
   try {
     // Ownership check: reuse existing getDealById which enforces RBAC
-    const deal = await getDealById(req.tenantDb!, req.params.dealId, req.user!.role, req.user!.id);
+    const access = await assertDealCollaboratorAccess(req.tenantDb!, req.params.dealId, req.user!);
+    const deal = await getDealById(
+      req.tenantDb!,
+      req.params.dealId,
+      getCollaborativeReadRole(req.user!.role, access.assignedRepId === req.user!.id ? "mine" : "all"),
+      req.user!.id
+    );
     if (!deal) throw new AppError(404, "Deal not found");
 
     const filters = {
@@ -362,7 +370,13 @@ router.get("/company/:companyId", async (req, res, next) => {
 // RBAC: verify user has access to this lead before returning emails.
 router.get("/lead/:leadId", async (req, res, next) => {
   try {
-    const lead = await getLeadById(req.tenantDb!, req.params.leadId, req.user!.role, req.user!.id);
+    await assertLeadCollaboratorAccess(req.tenantDb!, req.params.leadId, req.user!);
+    const lead = await getLeadById(
+      req.tenantDb!,
+      req.params.leadId,
+      getCollaborativeReadRole(req.user!.role, "all"),
+      req.user!.id
+    );
     if (!lead) throw new AppError(404, "Lead not found");
 
     const filters = {
@@ -428,8 +442,7 @@ router.post("/thread/:conversationId/assign", async (req, res, next) => {
     const thread = await getEmailThreadForMutation(req.tenantDb!, req.params.conversationId, req.user!.id);
     await assertCanMutateEmailThread(req.tenantDb!, thread, req.user!);
 
-    const deal = await getDealById(req.tenantDb!, dealId, req.user!.role, req.user!.id);
-    if (!deal) throw new AppError(404, "Deal not found");
+    await assertDealCollaboratorAccess(req.tenantDb!, dealId, req.user!);
 
     const result = await bindThreadToDeal(req.tenantDb!, {
       mailboxAccountId: thread.mailboxAccountId,
@@ -460,8 +473,7 @@ router.post("/thread/:conversationId/reassign", async (req, res, next) => {
     const thread = await getEmailThreadForMutation(req.tenantDb!, req.params.conversationId, req.user!.id);
     await assertCanMutateEmailThread(req.tenantDb!, thread, req.user!);
 
-    const deal = await getDealById(req.tenantDb!, dealId, req.user!.role, req.user!.id);
-    if (!deal) throw new AppError(404, "Deal not found");
+    await assertDealCollaboratorAccess(req.tenantDb!, dealId, req.user!);
 
     const preview = await previewThreadReassignmentImpact(req.tenantDb!, {
       mailboxAccountId: thread.mailboxAccountId,

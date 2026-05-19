@@ -11,6 +11,7 @@ import { LeadDetailPage } from "./lead-detail-page";
 const mocks = vi.hoisted(() => ({
   useLeadDetailMock: vi.fn(),
   usePipelineStagesMock: vi.fn(),
+  useAuthMock: vi.fn(),
 }));
 
 vi.mock("@/hooks/use-leads", () => ({
@@ -39,6 +40,10 @@ vi.mock("@/hooks/use-leads", () => ({
 
 vi.mock("@/hooks/use-pipeline-config", () => ({
   usePipelineStages: mocks.usePipelineStagesMock,
+}));
+
+vi.mock("@/lib/auth", () => ({
+  useAuth: mocks.useAuthMock,
 }));
 
 vi.mock("@/lib/sales-workflow", () => ({
@@ -237,6 +242,12 @@ describe("LeadDetailPage", () => {
   let mounted: ReturnType<typeof mountLeadDetail> | null = null;
 
   beforeEach(() => {
+    mocks.useAuthMock.mockReturnValue({
+      user: {
+        id: "rep-1",
+        role: "rep",
+      },
+    });
     (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
     mounted?.unmount();
     mounted = null;

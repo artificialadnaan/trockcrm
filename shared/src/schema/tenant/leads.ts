@@ -129,6 +129,7 @@ export const leads = pgTable(
       .default("not_required")
       .notNull(),
     verificationRequiredReason: text("verification_required_reason"),
+    createdByUserId: uuid("created_by_user_id").references(() => users.id),
     stageEnteredAt: timestamp("stage_entered_at", { withTimezone: true }).defaultNow().notNull(),
     convertedAt: timestamp("converted_at", { withTimezone: true }),
     isTestData: boolean("is_test_data").default(false).notNull(),

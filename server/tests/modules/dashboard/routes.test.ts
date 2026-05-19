@@ -198,6 +198,8 @@ describe("dashboard routes", () => {
       to: "2026-03-31",
       officeId: "office-1",
       periodKind: "last_quarter",
+      scope: "mine",
+      viewerUserId: "director-1",
     });
   });
 });

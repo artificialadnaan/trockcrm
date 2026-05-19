@@ -230,12 +230,29 @@ type LeadRouteServiceMocks = {
   convertLead: ReturnType<typeof vi.fn>;
 };
 
+type CollaborationRouteMocks = {
+  assertDealCollaboratorAccess: ReturnType<typeof vi.fn>;
+  assertDealOwnerAccess: ReturnType<typeof vi.fn>;
+  assertLeadCollaboratorAccess: ReturnType<typeof vi.fn>;
+  assertLeadOwnerAccess: ReturnType<typeof vi.fn>;
+  getCollaborativeReadRole: ReturnType<typeof vi.fn>;
+  normalizeCollaborativeScope: ReturnType<typeof vi.fn>;
+};
+
 async function loadDealRoutesWithServiceMocks() {
   vi.resetModules();
 
   const routeServiceMocks: RouteServiceMocks = {
     createDeal: vi.fn(),
     updateDeal: vi.fn(),
+  };
+  const collaborationRouteMocks: CollaborationRouteMocks = {
+    assertDealCollaboratorAccess: vi.fn(),
+    assertDealOwnerAccess: vi.fn(),
+    assertLeadCollaboratorAccess: vi.fn(),
+    assertLeadOwnerAccess: vi.fn(),
+    getCollaborativeReadRole: vi.fn((role: string) => role),
+    normalizeCollaborativeScope: vi.fn((_role: string, scope: "mine" | "team" | "all" | undefined) => scope ?? "all"),
   };
 
   vi.doMock("../../../src/modules/deals/service.js", async () => {
@@ -270,6 +287,10 @@ async function loadDealRoutesWithServiceMocks() {
   }));
 
   vi.doMock("../../../src/modules/deals/scoping-service.js", () => ({
+    assertDealScopingWriteAllowed: vi.fn(async () => ({
+      adminOverride: false,
+      lockState: { locked: false, reason: null, submittedAt: null },
+    })),
     evaluateDealScopingReadiness: vi.fn(),
     getOrCreateDealScopingIntake: vi.fn(),
     linkDealFileToScopingRequirement: vi.fn(),
@@ -285,6 +306,26 @@ async function loadDealRoutesWithServiceMocks() {
     },
   }));
 
+  vi.doMock("../../../src/lib/collaboration-access.js", () => ({
+    assertDealCollaboratorAccess: collaborationRouteMocks.assertDealCollaboratorAccess,
+    assertDealOwnerAccess: collaborationRouteMocks.assertDealOwnerAccess,
+    assertLeadCollaboratorAccess: collaborationRouteMocks.assertLeadCollaboratorAccess,
+    assertLeadOwnerAccess: collaborationRouteMocks.assertLeadOwnerAccess,
+    getCollaborativeReadRole: collaborationRouteMocks.getCollaborativeReadRole,
+    normalizeCollaborativeScope: collaborationRouteMocks.normalizeCollaborativeScope,
+  }));
+
+  collaborationRouteMocks.assertDealCollaboratorAccess.mockResolvedValue({
+    id: "deal-1",
+    assignedRepId: "rep-1",
+    officeId: "office-1",
+  });
+  collaborationRouteMocks.assertDealOwnerAccess.mockResolvedValue({
+    id: "deal-1",
+    assignedRepId: "rep-1",
+    officeId: "office-1",
+  });
+
   const { dealRoutes } = await import("../../../src/modules/deals/routes.js");
   return { dealRoutes, routeServiceMocks };
 }
@@ -296,6 +337,14 @@ async function loadLeadRoutesWithServiceMocks() {
     createLead: vi.fn(),
     updateLead: vi.fn(),
     convertLead: vi.fn(),
+  };
+  const collaborationRouteMocks: CollaborationRouteMocks = {
+    assertDealCollaboratorAccess: vi.fn(),
+    assertDealOwnerAccess: vi.fn(),
+    assertLeadCollaboratorAccess: vi.fn(),
+    assertLeadOwnerAccess: vi.fn(),
+    getCollaborativeReadRole: vi.fn((role: string) => role),
+    normalizeCollaborativeScope: vi.fn((_role: string, scope: "mine" | "team" | "all" | undefined) => scope ?? "all"),
   };
 
   vi.doMock("../../../src/modules/leads/service.js", async () => {
@@ -316,6 +365,26 @@ async function loadLeadRoutesWithServiceMocks() {
   vi.doMock("../../../src/modules/leads/conversion-service.js", () => ({
     convertLead: leadRouteServiceMocks.convertLead,
   }));
+
+  vi.doMock("../../../src/lib/collaboration-access.js", () => ({
+    assertDealCollaboratorAccess: collaborationRouteMocks.assertDealCollaboratorAccess,
+    assertDealOwnerAccess: collaborationRouteMocks.assertDealOwnerAccess,
+    assertLeadCollaboratorAccess: collaborationRouteMocks.assertLeadCollaboratorAccess,
+    assertLeadOwnerAccess: collaborationRouteMocks.assertLeadOwnerAccess,
+    getCollaborativeReadRole: collaborationRouteMocks.getCollaborativeReadRole,
+    normalizeCollaborativeScope: collaborationRouteMocks.normalizeCollaborativeScope,
+  }));
+
+  collaborationRouteMocks.assertLeadCollaboratorAccess.mockResolvedValue({
+    id: "lead-1",
+    assignedRepId: "rep-1",
+    officeId: "office-1",
+  });
+  collaborationRouteMocks.assertLeadOwnerAccess.mockResolvedValue({
+    id: "lead-1",
+    assignedRepId: "rep-1",
+    officeId: "office-1",
+  });
 
   const { leadRoutes } = await import("../../../src/modules/leads/routes.js");
   return { leadRoutes, leadRouteServiceMocks };
@@ -383,13 +452,15 @@ async function invokeDealRoute({
     params,
     body,
     query: {},
+    officeSlug: "dallas",
     tenantDb: {
+      execute: vi.fn(async () => ({ rows: [] })),
       insert: vi.fn(() => ({
         values: vi.fn(async () => ({})),
       })),
     },
     user: {
-      id: userRole === "rep" ? "rep-1" : "director-1",
+      id: userRole === "rep" ? "rep-1" : userRole === "admin" ? "admin-1" : "director-1",
       role: userRole,
       officeId: "office-1",
       activeOfficeId: "office-1",
@@ -437,13 +508,15 @@ async function invokeLeadRoute({
   const req = {
     params,
     body,
+    officeSlug: "dallas",
     tenantDb: {
+      execute: vi.fn(async () => ({ rows: [] })),
       insert: vi.fn(() => ({
         values: vi.fn(async () => ({})),
       })),
     },
     user: {
-      id: userRole === "rep" ? "rep-1" : "director-1",
+      id: userRole === "rep" ? "rep-1" : userRole === "admin" ? "admin-1" : "director-1",
       role: userRole,
       officeId: "office-1",
       activeOfficeId: "office-1",
@@ -1161,6 +1234,7 @@ describe("Lead Conversion Shared Contract", () => {
     expect(config.foreignKeys.map((fk) => fk.getName()).sort()).toEqual([
       "leads_assigned_rep_id_users_id_fk",
       "leads_company_id_companies_id_fk",
+      "leads_created_by_user_id_users_id_fk",
       "leads_director_reviewed_by_users_id_fk",
       "leads_disqualified_by_users_id_fk",
       "leads_executive_decision_by_users_id_fk",
@@ -3811,7 +3885,7 @@ describe("Lead Route Guardrails", () => {
       body: {
         salesRepId: null,
       },
-      userRole: "director",
+      userRole: "admin",
     });
 
     expect(leadRouteServiceMocks.updateLead).toHaveBeenCalledWith(
@@ -3820,8 +3894,8 @@ describe("Lead Route Guardrails", () => {
       expect.objectContaining({
         salesRepId: null,
       }),
-      "director",
-      "director-1"
+      "admin",
+      "admin-1"
     );
     expect(leadRouteServiceMocks.updateLead.mock.calls[0]?.[2]).not.toHaveProperty("assignedRepId");
   });

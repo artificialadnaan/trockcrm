@@ -30,6 +30,7 @@ import { DecoratedKanbanCard } from "@/components/deals/decorated-kanban-card";
 import { DealsListSection } from "@/components/deals/deals-list-section";
 import type { DealFilters } from "@/hooks/use-deals";
 import type { DealListSortState } from "@/components/deals/deals-list-section";
+import { resolvePreferredScope, writeStoredScopePreference } from "@/lib/scope-preferences";
 
 const SCOPE_OPTIONS = [
   { value: "mine", label: "Mine" },
@@ -348,11 +349,9 @@ export function getDashboardDealListView(input: {
 }
 
 function getScope(searchParams: URLSearchParams, role: string | undefined): PipelineScope {
-  if (role === "rep") return "mine";
+  void role;
   const scope = searchParams.get("scope");
   if (scope === "mine" || scope === "team" || scope === "all") return scope;
-  if (role === "director") return "team";
-  if (role === "admin") return "all";
   return "mine";
 }
 
@@ -577,10 +576,10 @@ export function DealListPage() {
     );
   }
 
-  return <DealListPageContent role={user.role} />;
+  return <DealListPageContent role={user.role} userId={user.id} />;
 }
 
-function DealListPageContent({ role }: { role: string }) {
+function DealListPageContent({ role, userId }: { role: string; userId: string }) {
   const navigate = useNavigate();
   const [searchParams, setSearchParams] = useSearchParams();
   const [search, setSearch] = useState("");
@@ -588,9 +587,14 @@ function DealListPageContent({ role }: { role: string }) {
   const [terminalDateFilters, setTerminalDateFilters] = useState<Record<TerminalOutcome, TerminalDateFilter>>(() =>
     readTerminalDateFiltersFromSearchParams(searchParams)
   );
-  const scope = getScope(searchParams, role);
+  const scope = resolvePreferredScope({
+    requestedScope: searchParams.get("scope"),
+    userId,
+    fallback: getScope(searchParams, role),
+  });
   const selectedPeriod = useMemo(() => normalizeDashboardPeriod(searchParams.get("period")), [searchParams]);
   const selectedPeriodRange = useMemo(() => getDashboardPeriodDateRange(selectedPeriod), [selectedPeriod]);
+  const scopeOptions = SCOPE_OPTIONS;
   const { stages } = usePipelineStages("deal");
   const dashboardView = useMemo(
     () =>
@@ -786,6 +790,7 @@ function DealListPageContent({ role }: { role: string }) {
   }, [dashboardView.filter, dashboardView.listBaseFilters, wonDateRange.from, wonDateRange.to]);
 
   const updateScope = (nextScope: PipelineScope) => {
+    writeStoredScopePreference(userId, nextScope);
     const next = new URLSearchParams(searchParams);
     next.set("scope", nextScope);
     setSearchParams(next);
@@ -868,7 +873,7 @@ function DealListPageContent({ role }: { role: string }) {
           </p>
         </div>
         <div className="flex flex-wrap items-center gap-3">
-          <ScopeToggle options={SCOPE_OPTIONS} value={scope} onChange={updateScope} ariaLabel="Deal scope" />
+          <ScopeToggle options={scopeOptions} value={scope} onChange={updateScope} ariaLabel="Deal scope" />
           <Button onClick={() => navigate("/deals/service-opportunity/new")} className="bg-brand-red text-white hover:bg-brand-red/90">
             <Plus className="mr-2 h-4 w-4" />
             New Service Opportunity
@@ -876,6 +881,16 @@ function DealListPageContent({ role }: { role: string }) {
         </div>
       </section>
 
+      {scope === "team" ? (
+        <section className="rounded-3xl border border-dashed border-slate-300 bg-slate-50 px-8 py-14 text-center">
+          <p className="text-[11px] font-black uppercase tracking-[0.22em] text-slate-500">Team Scope</p>
+          <h2 className="mt-3 text-2xl font-black tracking-tight text-slate-950">Team view is not yet configured.</h2>
+          <p className="mt-2 text-sm font-medium text-slate-500">Contact your admin to set up team groupings.</p>
+        </section>
+      ) : null}
+
+      {scope === "team" ? null : (
+        <>
       <div className="grid gap-4 md:grid-cols-3">
         <MetricCard
           eyebrow="Active pipeline"
@@ -1065,6 +1080,8 @@ function DealListPageContent({ role }: { role: string }) {
           The filtered board above is the source of truth for this dashboard drill-down. The paginated deal list is hidden here because the
           current deal-list API does not expose stale or at-risk filters without changing the protected deals service.
         </section>
+      )}
+        </>
       )}
     </div>
   );

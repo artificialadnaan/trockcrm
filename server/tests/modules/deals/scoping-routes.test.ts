@@ -4,6 +4,13 @@ const auditMocks = vi.hoisted(() => ({
   writeAuditLog: vi.fn(),
 }));
 
+const accessMocks = vi.hoisted(() => ({
+  assertDealCollaboratorAccess: vi.fn(),
+  assertDealOwnerAccess: vi.fn(),
+  getCollaborativeReadRole: vi.fn((role: string) => role),
+  normalizeCollaborativeScope: vi.fn((_role: string, scope: "mine" | "team" | "all" | undefined) => scope ?? "all"),
+}));
+
 vi.mock("../../../src/modules/deals/service.js", () => ({
   getDealById: vi.fn(async () => ({
     id: "deal-1",
@@ -101,6 +108,13 @@ vi.mock("../../../src/modules/deals/lineage-resolver.js", () => ({
 }));
 vi.mock("../../../src/lib/audit-log.js", () => ({
   writeAuditLog: auditMocks.writeAuditLog,
+}));
+
+vi.mock("../../../src/lib/collaboration-access.js", () => ({
+  assertDealCollaboratorAccess: accessMocks.assertDealCollaboratorAccess,
+  assertDealOwnerAccess: accessMocks.assertDealOwnerAccess,
+  getCollaborativeReadRole: accessMocks.getCollaborativeReadRole,
+  normalizeCollaborativeScope: accessMocks.normalizeCollaborativeScope,
 }));
 
 vi.mock("../../../src/modules/deals/workflow-backfill.js", () => ({
@@ -223,6 +237,16 @@ async function invokeRoute(
 describe("Deal Scoping Routes", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    accessMocks.assertDealCollaboratorAccess.mockResolvedValue({
+      id: "deal-1",
+      assignedRepId: "user-1",
+      officeId: "office-1",
+    });
+    accessMocks.assertDealOwnerAccess.mockResolvedValue({
+      id: "deal-1",
+      assignedRepId: "user-1",
+      officeId: "office-1",
+    });
     vi.mocked(dealService.getDealById).mockImplementation(async () => ({
       id: "deal-1",
       name: "deal-1",
@@ -276,10 +300,10 @@ describe("Deal Scoping Routes", () => {
   });
 
   it("checks deal access before scoping read/write routes call raw scoping services", async () => {
-    vi.mocked(dealService.getDealById)
-      .mockResolvedValueOnce(null as never)
-      .mockResolvedValueOnce(null as never)
-      .mockResolvedValueOnce(null as never);
+    accessMocks.assertDealCollaboratorAccess
+      .mockRejectedValueOnce({ statusCode: 403 })
+      .mockRejectedValueOnce({ statusCode: 403 });
+    accessMocks.assertDealOwnerAccess.mockRejectedValueOnce({ statusCode: 403 });
 
     await expect(
       invokeRoute("get", "/:id/scoping-intake", { params: { id: "deal-locked" } })

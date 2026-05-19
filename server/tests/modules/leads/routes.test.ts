@@ -1,5 +1,8 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
+vi.mock("@trock-crm/shared/schema", async () => import("../../../../shared/src/schema/index.js"));
+vi.mock("@trock-crm/shared/types", async () => import("../../../../shared/src/types/index.js"));
+
 const serviceMocks = vi.hoisted(() => ({
   createLead: vi.fn(),
   deleteLead: vi.fn(),
@@ -36,6 +39,13 @@ const questionnaireMocks = vi.hoisted(() => ({
   isLeadEditV2Enabled: vi.fn(),
 }));
 
+const accessMocks = vi.hoisted(() => ({
+  assertLeadCollaboratorAccess: vi.fn(),
+  assertLeadOwnerAccess: vi.fn(),
+  getCollaborativeReadRole: vi.fn((role: string) => role),
+  normalizeCollaborativeScope: vi.fn((_role: string, scope: "mine" | "team" | "all" | undefined) => scope ?? "all"),
+}));
+
 vi.mock("../../../src/modules/leads/service.js", () => ({
   createLead: serviceMocks.createLead,
   deleteLead: serviceMocks.deleteLead,
@@ -66,6 +76,13 @@ vi.mock("../../../src/modules/leads/due-diligence-service.js", () => ({
   assertSafeOfficeSlug: dueDiligenceMocks.assertSafeOfficeSlug,
   dispatchPendingDueDiligenceEmail: dueDiligenceMocks.dispatchPendingDueDiligenceEmail,
   getLeadDueDiligenceApprovalForLead: dueDiligenceMocks.getLeadDueDiligenceApprovalForLead,
+}));
+
+vi.mock("../../../src/lib/collaboration-access.js", () => ({
+  assertLeadCollaboratorAccess: accessMocks.assertLeadCollaboratorAccess,
+  assertLeadOwnerAccess: accessMocks.assertLeadOwnerAccess,
+  getCollaborativeReadRole: accessMocks.getCollaborativeReadRole,
+  normalizeCollaborativeScope: accessMocks.normalizeCollaborativeScope,
 }));
 
 async function loadLeadRoutes() {
@@ -101,6 +118,13 @@ async function loadLeadRoutes() {
     assertSafeOfficeSlug: dueDiligenceMocks.assertSafeOfficeSlug,
     dispatchPendingDueDiligenceEmail: dueDiligenceMocks.dispatchPendingDueDiligenceEmail,
     getLeadDueDiligenceApprovalForLead: dueDiligenceMocks.getLeadDueDiligenceApprovalForLead,
+  }));
+
+  vi.doMock("../../../src/lib/collaboration-access.js", () => ({
+    assertLeadCollaboratorAccess: accessMocks.assertLeadCollaboratorAccess,
+    assertLeadOwnerAccess: accessMocks.assertLeadOwnerAccess,
+    getCollaborativeReadRole: accessMocks.getCollaborativeReadRole,
+    normalizeCollaborativeScope: accessMocks.normalizeCollaborativeScope,
   }));
 
   const { leadRoutes } = await import("../../../src/modules/leads/routes.js");
@@ -165,7 +189,15 @@ async function invokeLeadDetailRoute(leadRoutes?: unknown) {
   let committed = false;
   const req = {
     params: { id: "lead-1" },
-    tenantDb: {},
+    tenantDb: {
+      select: vi.fn(() => ({
+        from: vi.fn(() => ({
+          where: vi.fn(() => ({
+            limit: vi.fn(async () => []),
+          })),
+        })),
+      })),
+    },
     user: {
       id: "rep-1",
       role: "rep",
@@ -323,6 +355,8 @@ describe("lead stage transition route", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     questionnaireMocks.isLeadEditV2Enabled.mockReturnValue(false);
+    accessMocks.assertLeadCollaboratorAccess.mockResolvedValue({ id: "lead-1", assignedRepId: "rep-1", officeId: "office-1" });
+    accessMocks.assertLeadOwnerAccess.mockResolvedValue({ id: "lead-1", assignedRepId: "rep-1", officeId: "office-1" });
   });
 
   it("returns the structured blocked-move payload from POST /api/leads/:id/stage-transition", async () => {
@@ -696,6 +730,7 @@ describe("lead stage transition route", () => {
     expect(res.body).toEqual({
       lead: {
         id: "lead-1",
+        isWatching: false,
         name: "Lead One",
         stageId: "stage-1",
         projectTypeId: "project-type-1",

@@ -737,7 +737,7 @@ describe("DealListPage", () => {
 
     renderPage("/deals", "director");
 
-    expect(mocks.useDealBoardMock).toHaveBeenCalledWith("team", true, expect.any(Object), 8, null);
+    expect(mocks.useDealBoardMock).toHaveBeenCalledWith("mine", true, expect.any(Object), 8, null);
   });
 
   it("uses the board terminal filters when building terminal stage navigation", () => {
@@ -768,38 +768,38 @@ describe("DealListPage", () => {
     expect(mocks.useDealBoardMock).toHaveBeenLastCalledWith("mine", true, expect.any(Object), 8, null);
 
     renderPage("/deals", "director");
-    expect(mocks.useDealBoardMock).toHaveBeenLastCalledWith("team", true, expect.any(Object), 8, null);
+    expect(mocks.useDealBoardMock).toHaveBeenLastCalledWith("mine", true, expect.any(Object), 8, null);
 
     renderPage("/deals", "admin");
-    expect(mocks.useDealBoardMock).toHaveBeenLastCalledWith("all", true, expect.any(Object), 8, null);
+    expect(mocks.useDealBoardMock).toHaveBeenLastCalledWith("mine", true, expect.any(Object), 8, null);
 
     renderPage("/deals?scope=mine", "director");
     expect(mocks.useDealBoardMock).toHaveBeenLastCalledWith("mine", true, expect.any(Object), 8, null);
   });
 
-  it("forces reps to mine scope even when ?scope=team is set", () => {
+  it("shows the deferred Team empty state when team scope is requested", () => {
     const html = renderPage("/deals?scope=team", "rep");
 
-    expect(mocks.useDealBoardMock).toHaveBeenLastCalledWith("mine", true, expect.any(Object), 8, null);
-    expect(html).toContain('aria-pressed="true">Mine');
-    expect(html).toContain('aria-pressed="false">Team');
+    expect(mocks.useDealBoardMock).toHaveBeenLastCalledWith("team", true, expect.any(Object), 8, null);
+    expect(html).toContain('aria-pressed="true">Team');
+    expect(html).toContain("Team view is not yet configured");
   });
 
-  it("forces reps to mine scope even when ?scope=all is set", () => {
+  it("allows reps to opt into all-office scope", () => {
     const html = renderPage("/deals?scope=all", "rep");
 
-    expect(mocks.useDealBoardMock).toHaveBeenLastCalledWith("mine", true, expect.any(Object), 8, null);
-    expect(html).toContain('aria-pressed="true">Mine');
-    expect(html).toContain('aria-pressed="false">All');
+    expect(mocks.useDealBoardMock).toHaveBeenLastCalledWith("all", true, expect.any(Object), 8, null);
+    expect(html).toContain('aria-pressed="false">Mine');
+    expect(html).toContain('aria-pressed="true">All');
+    expect(html).toContain('aria-pressed="false">Team');
   });
-
   it("embeds a scoped paginated exportable deal list below the kanban without date filters", () => {
-    renderPage("/deals?scope=team", "director");
+    renderPage("/deals?scope=mine", "director");
 
     expect(mocks.dealsListSectionMock).toHaveBeenCalledWith(
       expect.objectContaining({
         workflowFamily: "deal",
-        scope: "team",
+        scope: "mine",
         enableExport: true,
         enableDateFilter: false,
         showFilterButton: true,
@@ -1103,14 +1103,14 @@ describe("DealListPage", () => {
   });
 
   it("passes dashboard active-pipeline drill-down props into the embedded deals list", () => {
-    renderPage("/deals?scope=team&filter=active_pipeline&period=ytd", "director");
+    renderPage("/deals?scope=all&filter=active_pipeline&period=ytd", "director");
 
     expect(mocks.dealsListSectionMock).toHaveBeenCalledWith(
       expect.objectContaining({
         title: "Active Pipeline",
         eyebrow: "Director drill-down",
         enableExport: true,
-        scope: "team",
+        scope: "all",
         initialSort: { key: "updated_at", dir: "desc" },
         baseFilters: expect.objectContaining({
           updatedFrom: "2026-01-01",
@@ -1121,7 +1121,7 @@ describe("DealListPage", () => {
   });
 
   it("treats period as a separate query param in active-pipeline drill-down urls", () => {
-    renderPage("/deals?scope=team&filter=active_pipeline&period=ytd", "director");
+    renderPage("/deals?scope=all&filter=active_pipeline&period=ytd", "director");
 
     expect(mocks.dealsListSectionMock).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -1221,7 +1221,7 @@ describe("DealListPage", () => {
       refetch: vi.fn(),
     });
 
-    const html = renderPage("/deals?scope=team&filter=stale&period=qtd", "director");
+    const html = renderPage("/deals?scope=all&filter=stale&period=qtd", "director");
 
     expect(html).toContain("QTD Stale Deal");
     expect(html).toContain("Second QTD Stale Deal");
@@ -1231,10 +1231,10 @@ describe("DealListPage", () => {
   });
 
   it("keeps the embedded list visible for stale drill-down views", () => {
-    const html = renderPage("/deals?scope=team&filter=stale&period=qtd", "director");
+    const html = renderPage("/deals?scope=all&filter=stale&period=qtd", "director");
 
     expect(mocks.useDealBoardMock).toHaveBeenLastCalledWith(
-      "team",
+      "all",
       true,
       expect.any(Object),
       1000,
@@ -1274,11 +1274,11 @@ describe("DealListPage", () => {
     };
     mocks.useDealBoardMock.mockImplementation(() => boardState);
 
-    const view = await renderPageDom("/deals?scope=team&filter=at_risk&period=week", "director");
+    const view = await renderPageDom("/deals?scope=all&filter=at_risk&period=week", "director");
     expect(view.container.textContent).toContain("Previous At Risk Deal");
 
     boardState.loading = true;
-    await view.rerender("/deals?scope=team&filter=at_risk&period=week", "director");
+    await view.rerender("/deals?scope=all&filter=at_risk&period=week", "director");
 
     expect(view.container.textContent).toContain("Loading SLA drill-down");
     expect(view.container.textContent).not.toContain("Previous At Risk Deal");
@@ -1313,7 +1313,7 @@ describe("DealListPage", () => {
       refetch: vi.fn(),
     });
 
-    const html = renderPage("/deals?scope=team&filter=at_risk&period=week", "director");
+    const html = renderPage("/deals?scope=all&filter=at_risk&period=week", "director");
 
     expect(html).not.toContain("Loading SLA drill-down");
     expect(html).toContain("Updated At Risk Deal");

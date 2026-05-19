@@ -16,6 +16,7 @@ import {
   Phone,
   User,
 } from "lucide-react";
+import { toast } from "sonner";
 import { Button, buttonVariants } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import {
@@ -38,10 +39,12 @@ import { LeadFileTab } from "@/components/files/lead-file-tab";
 import { LeadPhotosTab } from "./lead-photos-tab";
 import { formatLeadPropertyLine, getLeadStageMetadata, useLeadDetail } from "@/hooks/use-leads";
 import type { LeadRecord } from "@/hooks/use-leads";
+import { useAuth } from "@/lib/auth";
 import { usePipelineStages } from "@/hooks/use-pipeline-config";
 import { LEAD_BOARD_STAGE_SLUGS, isBidBoardMirroredStageSlug } from "@/lib/pipeline-ownership";
 import { cn } from "@/lib/utils";
 import { displayNameOrFallback } from "@/lib/display-identifiers";
+import { api } from "@/lib/api";
 
 type LeadDetailTab = "timeline" | "questionnaire" | "files" | "photos" | "emails" | "activity" | "recordings";
 
@@ -105,12 +108,14 @@ function ownerInitials(lead: LeadRecord) {
 export function LeadDetailPage() {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
+  const { user } = useAuth();
   const { lead, loading, error, refetch } = useLeadDetail(id);
   const { stages } = usePipelineStages();
   const [activeTab, setActiveTab] = useState<LeadDetailTab>("timeline");
   const [isConvertDialogOpen, setIsConvertDialogOpen] = useState(false);
   const [isStageDialogOpen, setIsStageDialogOpen] = useState(false);
   const [isEditing, setIsEditing] = useState(false);
+  const [watchPending, setWatchPending] = useState(false);
 
   const currentStage = useMemo(
     () => stages.find((stage) => stage.id === lead?.stageId) ?? null,
@@ -130,6 +135,7 @@ export function LeadDetailPage() {
   }, [lead?.stageId, stages]);
   const isConverted = lead?.status === "converted" || Boolean(lead?.convertedDealId);
   const convertedAt = lead?.convertedAt ?? null;
+  const viewerOwnsLead = lead?.assignedRepId === user?.id;
 
   if (loading) {
     return (
@@ -177,6 +183,24 @@ export function LeadDetailPage() {
       setIsEditing(false);
     }
     setActiveTab(tab);
+  };
+  const handleWatchToggle = async () => {
+    if (!lead?.id || watchPending) return;
+    setWatchPending(true);
+    try {
+      if (lead.isWatching) {
+        await api(`/leads/${lead.id}/watch`, { method: "DELETE" });
+        toast.success("Lead removed from Mine");
+      } else {
+        await api(`/leads/${lead.id}/watch`, { method: "POST" });
+        toast.success("Lead added to Mine");
+      }
+      await refetch();
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Failed to update watch state");
+    } finally {
+      setWatchPending(false);
+    }
   };
 
   const secondaryAction = isHiddenReadOnly
@@ -260,6 +284,7 @@ export function LeadDetailPage() {
                 Unassigned company
               </span>
             )}
+            {lead.assignedRepName ? <span>Assigned to {lead.assignedRepName}</span> : null}
             {propertyLine ? (
               <span className="inline-flex items-center gap-1">
                 <MapPin className="h-4 w-4" />
@@ -271,6 +296,9 @@ export function LeadDetailPage() {
         }
         actionsSlot={
           <>
+            <Button variant="outline" size="sm" onClick={handleWatchToggle} disabled={watchPending}>
+              {lead.isWatching ? "Watching" : "Watch this lead"}
+            </Button>
             {!isEditing && secondaryAction ? (
               secondaryAction.label.startsWith("Open") && lead.convertedDealId ? (
                 <Link
@@ -285,19 +313,37 @@ export function LeadDetailPage() {
                   {secondaryAction.label}
                 </Link>
               ) : (
-                <Button variant="outline" size="sm" onClick={secondaryAction.onClick}>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={secondaryAction.onClick}
+                  disabled={!viewerOwnsLead}
+                  title={!viewerOwnsLead ? "Only the assigned rep can edit" : undefined}
+                >
                   <Edit className="h-4 w-4" />
                   {secondaryAction.label}
                 </Button>
               )
             ) : null}
             {!isEditing && canAdvanceLeadStage ? (
-              <Button variant="secondary" size="sm" onClick={() => setIsStageDialogOpen(true)}>
+              <Button
+                variant="secondary"
+                size="sm"
+                onClick={() => setIsStageDialogOpen(true)}
+                disabled={!viewerOwnsLead}
+                title={!viewerOwnsLead ? "Only the assigned rep can edit" : undefined}
+              >
                 Move to {nextLeadStage.name}
               </Button>
             ) : null}
             {!isEditing && canConvertToOpportunity ? (
-              <Button size="sm" className="bg-brand-red text-white hover:bg-brand-red/90" onClick={() => setIsConvertDialogOpen(true)}>
+              <Button
+                size="sm"
+                className="bg-brand-red text-white hover:bg-brand-red/90"
+                onClick={() => setIsConvertDialogOpen(true)}
+                disabled={!viewerOwnsLead}
+                title={!viewerOwnsLead ? "Only the assigned rep can edit" : undefined}
+              >
                 Convert to Opportunity
               </Button>
             ) : null}
@@ -325,6 +371,11 @@ export function LeadDetailPage() {
           />
         }
       >
+        {!viewerOwnsLead ? (
+          <div className="mb-4 rounded-lg border border-slate-200 bg-slate-50 px-4 py-3 text-sm font-medium text-slate-600">
+            Assigned to {lead.assignedRepName ?? lead.assignedRepId ?? "another rep"}. You can collaborate with notes, activity, files, photos, and emails, but only the assigned rep can edit.
+          </div>
+        ) : null}
         {activeTab === "timeline" ? (
           <LeadTimelineTab
             leadId={lead.id}

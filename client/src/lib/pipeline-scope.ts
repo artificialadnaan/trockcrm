@@ -8,12 +8,12 @@ export type PipelineRole = "rep" | "director" | "admin";
 
 const ROLE_DEFAULT_SCOPE: Record<PipelineRole, PipelineScope> = {
   rep: "mine",
-  director: "team",
-  admin: "all",
+  director: "mine",
+  admin: "mine",
 };
 
 const ROLE_ALLOWED_SCOPES: Record<PipelineRole, readonly PipelineScope[]> = {
-  rep: ["mine"],
+  rep: ["mine", "team", "all"],
   director: ["mine", "team", "all"],
   admin: ["mine", "team", "all"],
 };

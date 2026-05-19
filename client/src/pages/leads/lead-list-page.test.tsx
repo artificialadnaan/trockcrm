@@ -347,14 +347,14 @@ describe("LeadListPage", () => {
 
     renderPage("/leads", "director");
 
-    expect(mocks.useLeadBoardMock).toHaveBeenCalledWith("team", undefined);
+    expect(mocks.useLeadBoardMock).toHaveBeenCalledWith("mine", undefined);
   });
 
-  it("forces summary leads to mine scope for reps regardless of ?scope= param", () => {
+  it("shows the deferred Team empty state when team scope is requested", () => {
     renderPage("/leads?scope=team", "rep");
 
-    expect(mocks.useLeadBoardMock).toHaveBeenLastCalledWith("mine", undefined);
-    expect(mocks.useLeadsMock).toHaveBeenLastCalledWith({ status: "open", isActive: true, scope: "mine" });
+    expect(mocks.useLeadBoardMock).toHaveBeenLastCalledWith("team", undefined);
+    expect(mocks.useLeadsMock).toHaveBeenLastCalledWith({ status: "open", isActive: true, scope: "team" });
   });
 
   it("defaults the board scope by role when the query param is absent", () => {
@@ -362,29 +362,30 @@ describe("LeadListPage", () => {
     expect(mocks.useLeadBoardMock).toHaveBeenLastCalledWith("mine", undefined);
 
     renderPage("/leads", "director");
-    expect(mocks.useLeadBoardMock).toHaveBeenLastCalledWith("team", undefined);
+    expect(mocks.useLeadBoardMock).toHaveBeenLastCalledWith("mine", undefined);
 
     renderPage("/leads", "admin");
-    expect(mocks.useLeadBoardMock).toHaveBeenLastCalledWith("all", undefined);
+    expect(mocks.useLeadBoardMock).toHaveBeenLastCalledWith("mine", undefined);
 
     renderPage("/leads?scope=mine", "director");
     expect(mocks.useLeadBoardMock).toHaveBeenLastCalledWith("mine", undefined);
   });
 
-  it("forces reps to mine scope even when ?scope=team is set", () => {
+  it("renders Team as a first-class scope option even before it is configured", () => {
     const html = renderPage("/leads?scope=team", "rep");
 
-    expect(mocks.useLeadBoardMock).toHaveBeenLastCalledWith("mine", undefined);
-    expect(html).toContain('aria-pressed="true">Mine');
-    expect(html).toContain('aria-pressed="false">Team');
+    expect(mocks.useLeadBoardMock).toHaveBeenLastCalledWith("team", undefined);
+    expect(html).toContain('aria-pressed="true">Team');
+    expect(html).toContain("Team view is not yet configured");
   });
 
-  it("forces reps to mine scope even when ?scope=all is set", () => {
+  it("allows reps to opt into all-office scope", () => {
     const html = renderPage("/leads?scope=all", "rep");
 
-    expect(mocks.useLeadBoardMock).toHaveBeenLastCalledWith("mine", undefined);
-    expect(html).toContain('aria-pressed="true">Mine');
-    expect(html).toContain('aria-pressed="false">All');
+    expect(mocks.useLeadBoardMock).toHaveBeenLastCalledWith("all", undefined);
+    expect(html).toContain('aria-pressed="false">Mine');
+    expect(html).toContain('aria-pressed="true">All');
+    expect(html).toContain('aria-pressed="false">Team');
   });
 
   it("filters columns by the dashboard bucket query param", () => {

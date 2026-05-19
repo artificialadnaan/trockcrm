@@ -42,3 +42,27 @@ export function redactDealList<T extends WithMaybeHubspotId>(
 ): DealResponseWithSourceFlag<T>[] {
   return deals.map((deal) => redactDealResponse(deal, options));
 }
+
+const PRIVATE_DEAL_FIELD_KEYS = [
+  "commissionRate",
+  "calculatedCommission",
+  "commissionSplits",
+  "commissionNotes",
+  "internalPricingNotes",
+  "privateToRep",
+] as const;
+
+export function stripPrivateDealFieldsForViewer<T extends Record<string, unknown>>(
+  deal: T,
+  options: { isOwner: boolean }
+) {
+  if (options.isOwner) {
+    return deal;
+  }
+
+  const redacted = { ...deal };
+  for (const key of PRIVATE_DEAL_FIELD_KEYS) {
+    delete redacted[key];
+  }
+  return redacted;
+}
