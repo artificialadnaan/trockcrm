@@ -136,7 +136,7 @@ export function buildDealMineVisibilityCondition(
   const activities = requireSchemaValue(schema.activities, "activities");
   const deals = requireSchemaValue(schema.deals, "deals");
   const clauses = [
-    sql`assigned_rep_id = ${userId}`,
+    sql`${deals.assignedRepId} = ${userId}`,
     sql`exists (
       select 1
       from ${activities} a
@@ -146,7 +146,7 @@ export function buildDealMineVisibilityCondition(
   ];
 
   if (options.includeCreatedBy !== false) {
-    clauses.unshift(sql`created_by_user_id = ${userId}`);
+    clauses.unshift(sql`${deals.createdByUserId} = ${userId}`);
   }
 
   if (options.includeSubscriptions !== false) {
@@ -209,7 +209,7 @@ export function buildLeadMineVisibilityCondition(
   const activities = requireSchemaValue(schema.activities, "activities");
   const leads = requireSchemaValue(schema.leads, "leads");
   const clauses = [
-    sql`assigned_rep_id = ${userId}`,
+    sql`${leads.assignedRepId} = ${userId}`,
     sql`exists (
       select 1
       from ${activities} a
@@ -219,7 +219,7 @@ export function buildLeadMineVisibilityCondition(
   ];
 
   if (options.includeCreatedBy !== false) {
-    clauses.unshift(sql`created_by_user_id = ${userId}`);
+    clauses.unshift(sql`${leads.createdByUserId} = ${userId}`);
   }
 
   if (options.includeSubscriptions !== false) {
