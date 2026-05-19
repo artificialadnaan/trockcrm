@@ -138,11 +138,18 @@ export async function getAccessibleFieldPhoto(
     throw new AppError(404, "Photo not found.");
   }
 
-  if (!photo.dealId && !photo.leadId) {
+  const hasDealOrLeadLink = Boolean(photo.dealId || photo.leadId);
+  const hasOtherEntityLink = Boolean(photo.contactId || photo.procoreProjectId || photo.changeOrderId);
+
+  if (!hasDealOrLeadLink && !hasOtherEntityLink) {
     if (photo.uploadedBy !== access.userId) {
       throw new AppError(404, "Photo not found.");
     }
     return photo;
+  }
+
+  if (!hasDealOrLeadLink) {
+    throw new AppError(404, "Photo not found.");
   }
 
   await assertAccessibleFieldCaptureTarget(tenantDb, {
