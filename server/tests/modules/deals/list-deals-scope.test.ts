@@ -16,16 +16,24 @@ vi.mock("../../../src/db.js", () => ({
   db: {
     select: vi.fn(() => {
       let sourceTable: unknown = null;
+      let officeLookupId: string | null = null;
       const builder = {
         from: vi.fn((table: unknown) => {
           sourceTable = table;
           return builder;
         }),
-        where: vi.fn().mockReturnThis(),
+        where: vi.fn((condition: unknown) => {
+          const values = collectScalarValues(condition);
+          officeLookupId = values.find((value): value is string => typeof value === "string" && value.startsWith("office-")) ?? null;
+          return builder;
+        }),
         orderBy: vi.fn().mockReturnThis(),
         limit: vi.fn().mockReturnThis(),
         then: vi.fn((resolve: (value: unknown[]) => unknown) => {
           if (sourceTable === offices) {
+            if (officeLookupId === "office-empty") {
+              return resolve([]);
+            }
             return resolve([{ slug: "dallas", name: "Dallas" }]);
           }
           return resolve(dbState.stages);
@@ -119,7 +127,7 @@ function containsValue(value: unknown, expected: string, seen = new Set<unknown>
   return Object.values(value as Record<string, unknown>).some((item) => containsValue(item, expected, seen));
 }
 
-function applyWhere(rows: Row[], condition: unknown) {
+function applyWhere(rows: Row[], condition: unknown, usersState: Row[]) {
   const chunks = flattenChunks(condition);
   const conditionText = flattenText(condition).toLowerCase();
   const hasExpandedMinePredicate =
@@ -163,6 +171,35 @@ function applyWhere(rows: Row[], condition: unknown) {
   }
 
   let filtered = rows;
+  const hasLegacyOfficeFallback =
+    conditionText.includes("office_code") &&
+    conditionText.includes("assigned_rep") &&
+    conditionText.includes("office_id");
+  const officeCodesInCondition = new Set(
+    collectScalarValues(condition).filter(
+      (value): value is string => typeof value === "string" && ["dfw", "atl", "hqt"].includes(value)
+    )
+  );
+  const officeIdsInCondition = new Set(
+    collectScalarValues(condition).filter(
+      (value): value is string => typeof value === "string" && value.startsWith("office-")
+    )
+  );
+  if (hasLegacyOfficeFallback) {
+    filtered = filtered.filter((row) => {
+      if (typeof row.officeCode === "string" && officeCodesInCondition.has(row.officeCode)) {
+        return true;
+      }
+      if (row.officeCode != null) {
+        return false;
+      }
+      if (row.assignedRepId == null || officeIdsInCondition.size === 0) {
+        return false;
+      }
+      const assignedRep = usersState.find((user) => user.id === row.assignedRepId);
+      return Boolean(assignedRep?.officeId && officeIdsInCondition.has(String(assignedRep.officeId)));
+    });
+  }
   const hasAssignedRepNullPredicate = chunks.some(
     (chunk) =>
       Boolean(chunk) &&
@@ -227,7 +264,7 @@ function projectRows(rows: Row[], fields?: Record<string, unknown>) {
   });
 }
 
-function queryBuilder(rows: Row[], fields?: Record<string, unknown>) {
+function queryBuilder(rows: Row[], usersState: Row[], fields?: Record<string, unknown>) {
   let filtered = rows;
   let offsetCount = 0;
   let limitCount: number | null = null;
@@ -238,7 +275,7 @@ function queryBuilder(rows: Row[], fields?: Record<string, unknown>) {
 
   return {
     where(condition: unknown) {
-      filtered = applyWhere(filtered, condition);
+      filtered = applyWhere(filtered, condition, usersState);
       return this;
     },
     leftJoin() {
@@ -283,6 +320,8 @@ function createTenantDb() {
       { id: "deal-activity", assignedRepId: "rep-team-2", createdByUserId: "rep-team-2", officeCode: "dfw", activityPerformedByUserIds: ["director-1"], isActive: true, updatedAt: new Date("2026-05-07T12:00:00Z") },
       { id: "deal-subscribed", assignedRepId: "rep-team-2", createdByUserId: "rep-team-2", officeCode: "dfw", subscriberUserIds: ["director-1"], isActive: true, updatedAt: new Date("2026-05-07T12:00:00Z") },
       { id: "deal-legacy-office-fallback", assignedRepId: "rep-team-1", createdByUserId: "rep-team-1", officeCode: null, isActive: true, updatedAt: new Date("2026-05-07T12:00:00Z") },
+      { id: "deal-legacy-office-other", assignedRepId: "rep-other-office", createdByUserId: "rep-other-office", officeCode: null, isActive: true, updatedAt: new Date("2026-05-07T12:00:00Z") },
+      { id: "deal-legacy-office-unassigned", assignedRepId: null, createdByUserId: "rep-team-1", officeCode: null, isActive: true, updatedAt: new Date("2026-05-07T12:00:00Z") },
       {
         id: "deal-company",
         assignedRepId: "rep-team-1",
@@ -303,11 +342,11 @@ function createTenantDb() {
     select(fields?: Record<string, unknown>) {
       return {
         from(table: unknown) {
-          if (table === deals) return queryBuilder(state.deals, fields);
-          if (table === users) return queryBuilder(state.users, fields);
-          if (table === userOfficeAccess) return queryBuilder(state.userOfficeAccess, fields);
-          if (table === companies) return queryBuilder([], fields);
-          return queryBuilder([], fields);
+          if (table === deals) return queryBuilder(state.deals, state.users, fields);
+          if (table === users) return queryBuilder(state.users, state.users, fields);
+          if (table === userOfficeAccess) return queryBuilder(state.userOfficeAccess, state.users, fields);
+          if (table === companies) return queryBuilder([], state.users, fields);
+          return queryBuilder([], state.users, fields);
         },
       };
     },
@@ -363,6 +402,18 @@ describe("getDeals scope filtering", () => {
       "deal-legacy-office-fallback",
       "deal-company",
     ]);
+  });
+
+  it("scope=all excludes legacy null-office deals assigned to a rep in a different office", async () => {
+    await expect(listIds({ role: "director", userId: "director-1", scope: "all" })).resolves.not.toContain(
+      "deal-legacy-office-other"
+    );
+  });
+
+  it("scope=all excludes legacy null-office deals with no assigned rep", async () => {
+    await expect(listIds({ role: "director", userId: "director-1", scope: "all" })).resolves.not.toContain(
+      "deal-legacy-office-unassigned"
+    );
   });
 
   it("getDeals includes unassigned deals when scope filter is active", async () => {

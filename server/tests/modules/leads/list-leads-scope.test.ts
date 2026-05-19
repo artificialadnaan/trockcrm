@@ -8,15 +8,23 @@ vi.mock("../../../src/db.js", () => ({
   db: {
     select: vi.fn(() => {
       let sourceTable: unknown = null;
+      let officeLookupId: string | null = null;
       const builder = {
         from: vi.fn((table: unknown) => {
           sourceTable = table;
           return builder;
         }),
-        where: vi.fn().mockReturnThis(),
+        where: vi.fn((condition: unknown) => {
+          const values = collectScalarValues(condition);
+          officeLookupId = values.find((value): value is string => typeof value === "string" && value.startsWith("office-")) ?? null;
+          return builder;
+        }),
         limit: vi.fn().mockReturnThis(),
         then: vi.fn((resolve: (value: unknown[]) => unknown) => {
           if (sourceTable === offices) {
+            if (officeLookupId === "office-empty") {
+              return resolve([]);
+            }
             return resolve([{ slug: "dallas", name: "Dallas" }]);
           }
           return resolve([]);
@@ -101,7 +109,7 @@ function extractValuesUntilNextColumn(chunks: unknown[], startIndex: number) {
   return values;
 }
 
-function applyWhere(rows: Row[], condition: unknown) {
+function applyWhere(rows: Row[], condition: unknown, usersState: Row[]) {
   const chunks = flattenChunks(condition);
   const conditionText = flattenText(condition).toLowerCase();
   const hasExpandedMinePredicate =
@@ -144,6 +152,35 @@ function applyWhere(rows: Row[], condition: unknown) {
   }
 
   let filtered = rows;
+  const hasLegacyOfficeFallback =
+    conditionText.includes("office_code") &&
+    conditionText.includes("assigned_rep") &&
+    conditionText.includes("office_id");
+  const officeCodesInCondition = new Set(
+    collectScalarValues(condition).filter(
+      (value): value is string => typeof value === "string" && ["dfw", "atl", "hqt"].includes(value)
+    )
+  );
+  const officeIdsInCondition = new Set(
+    collectScalarValues(condition).filter(
+      (value): value is string => typeof value === "string" && value.startsWith("office-")
+    )
+  );
+  if (hasLegacyOfficeFallback) {
+    filtered = filtered.filter((row) => {
+      if (typeof row.officeCode === "string" && officeCodesInCondition.has(row.officeCode)) {
+        return true;
+      }
+      if (row.officeCode != null) {
+        return false;
+      }
+      if (row.assignedRepId == null || officeIdsInCondition.size === 0) {
+        return false;
+      }
+      const assignedRep = usersState.find((user) => user.id === row.assignedRepId);
+      return Boolean(assignedRep?.officeId && officeIdsInCondition.has(String(assignedRep.officeId)));
+    });
+  }
   for (let index = 0; index < chunks.length; index += 1) {
     const chunk = chunks[index];
     if (!chunk || typeof chunk !== "object" || typeof (chunk as { name?: unknown }).name !== "string") {
@@ -172,11 +209,11 @@ function projectRows(rows: Row[], fields?: Record<string, unknown>) {
   });
 }
 
-function queryBuilder(rows: Row[], fields?: Record<string, unknown>) {
+function queryBuilder(rows: Row[], usersState: Row[], fields?: Record<string, unknown>) {
   let filtered = rows;
   return {
     where(condition: unknown) {
-      filtered = applyWhere(filtered, condition);
+      filtered = applyWhere(filtered, condition, usersState);
       return this;
     },
     orderBy() {
@@ -209,6 +246,8 @@ function createTenantDb() {
       { id: "lead-activity", assignedRepId: "rep-team-2", createdByUserId: "rep-team-2", officeCode: "dfw", activityPerformedByUserIds: ["director-1"], isActive: true, status: "open", companyId: null, propertyId: null, projectTypeId: null },
       { id: "lead-subscribed", assignedRepId: "rep-team-2", createdByUserId: "rep-team-2", officeCode: "dfw", subscriberUserIds: ["director-1"], isActive: true, status: "open", companyId: null, propertyId: null, projectTypeId: null },
       { id: "lead-legacy-office-fallback", assignedRepId: "rep-team-1", createdByUserId: "rep-team-1", officeCode: null, isActive: true, status: "open", companyId: null, propertyId: null, projectTypeId: null },
+      { id: "lead-legacy-office-other", assignedRepId: "rep-other-office", createdByUserId: "rep-other-office", officeCode: null, isActive: true, status: "open", companyId: null, propertyId: null, projectTypeId: null },
+      { id: "lead-legacy-office-unassigned", assignedRepId: null, createdByUserId: "rep-team-1", officeCode: null, isActive: true, status: "open", companyId: null, propertyId: null, projectTypeId: null },
     ],
     userOfficeAccess: [
       { userId: "rep-other-office", officeId: "office-1" },
@@ -220,10 +259,10 @@ function createTenantDb() {
     select(fields?: Record<string, unknown>) {
       return {
         from(table: unknown) {
-          if (table === leads) return queryBuilder(state.leads, fields);
-          if (table === users) return queryBuilder(state.users, fields);
-          if (table === userOfficeAccess) return queryBuilder(state.userOfficeAccess, fields);
-          return queryBuilder([], fields);
+          if (table === leads) return queryBuilder(state.leads, state.users, fields);
+          if (table === users) return queryBuilder(state.users, state.users, fields);
+          if (table === userOfficeAccess) return queryBuilder(state.userOfficeAccess, state.users, fields);
+          return queryBuilder([], state.users, fields);
         },
       };
     },
@@ -276,6 +315,18 @@ describe("listLeads scope filtering", () => {
       "lead-subscribed",
       "lead-legacy-office-fallback",
     ]);
+  });
+
+  it("scope=all excludes legacy null-office leads assigned to a rep in a different office", async () => {
+    await expect(listIds({ role: "director", userId: "director-1", scope: "all" })).resolves.not.toContain(
+      "lead-legacy-office-other"
+    );
+  });
+
+  it("scope=all excludes legacy null-office leads with no assigned rep", async () => {
+    await expect(listIds({ role: "director", userId: "director-1", scope: "all" })).resolves.not.toContain(
+      "lead-legacy-office-unassigned"
+    );
   });
 
   it("narrows team scope to a specific assigned rep when both filters are set", async () => {
