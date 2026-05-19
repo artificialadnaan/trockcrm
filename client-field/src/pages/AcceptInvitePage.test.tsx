@@ -13,7 +13,7 @@ const authMock = vi.hoisted(() => ({
   previewInvite: vi.fn(),
 }));
 
-vi.mock("@/lib/auth", () => ({
+vi.mock("../lib/auth", () => ({
   useAuth: () => authMock,
 }));
 

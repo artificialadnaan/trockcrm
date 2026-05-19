@@ -1,9 +1,9 @@
 import { useEffect, useMemo, useState } from "react";
 import { Link } from "react-router-dom";
 import { Search, Star, X } from "lucide-react";
-import { api } from "@/lib/api";
-import { Button, TextInput } from "@/components/ui";
-import { type FieldProject, relativeDate } from "@/lib/field-projects";
+import { api } from "../lib/api";
+import { Button, TextInput } from "../components/ui";
+import { type FieldProject, relativeDate } from "../lib/field-projects";
 
 function ProjectCard({ project, onToggleStar }: { project: FieldProject; onToggleStar: (project: FieldProject) => void }) {
   return (

@@ -1,14 +1,14 @@
 import { Navigate, Route, Routes } from "react-router-dom";
 import { Toaster } from "sonner";
-import { AuthProvider } from "@/lib/auth";
-import { FieldLayout } from "@/components/FieldLayout";
-import { ProtectedRoute } from "@/components/ProtectedRoute";
-import { AcceptInvitePage } from "@/pages/AcceptInvitePage";
-import { HomePage } from "@/pages/HomePage";
-import { LoginPage } from "@/pages/LoginPage";
-import { CapturePage } from "@/pages/CapturePage";
-import { ProjectDetailPage } from "@/pages/ProjectDetailPage";
-import { ProjectsPage } from "@/pages/ProjectsPage";
+import { FieldLayout } from "./components/FieldLayout";
+import { ProtectedRoute } from "./components/ProtectedRoute";
+import { AuthProvider } from "./lib/auth";
+import { AcceptInvitePage } from "./pages/AcceptInvitePage";
+import { CapturePage } from "./pages/CapturePage";
+import { HomePage } from "./pages/HomePage";
+import { LoginPage } from "./pages/LoginPage";
+import { ProjectDetailPage } from "./pages/ProjectDetailPage";
+import { ProjectsPage } from "./pages/ProjectsPage";
 
 export function App() {
   return (

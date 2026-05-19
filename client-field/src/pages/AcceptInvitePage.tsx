@@ -1,7 +1,8 @@
 import { FormEvent, useEffect, useMemo, useState } from "react";
 import { Navigate, useNavigate, useSearchParams } from "react-router-dom";
-import { useAuth } from "@/lib/auth";
-import { Button, TextInput } from "@/components/ui";
+import { useAuth } from "../lib/auth";
+import { Button, TextInput } from "../components/ui";
+import { BrandLogo } from "../components/BrandLogo";
 
 const MIN_PASSWORD_LENGTH = 8;
 
@@ -72,33 +73,41 @@ export function AcceptInvitePage() {
   }
 
   return (
-    <main className="flex min-h-screen items-center justify-center bg-muted px-4 py-8">
-      <section className="w-full max-w-sm rounded-lg border border-border bg-white p-6 shadow-sm">
-        <p className="text-sm font-bold uppercase tracking-wide text-primary">T Rock Field</p>
-        <h1 className="mt-1 text-3xl font-bold">Accept invite</h1>
-        {loading ? <p className="mt-5 text-muted-foreground">Loading invite...</p> : null}
-        {!loading && preview ? (
-          <form className="mt-5 space-y-4" onSubmit={onSubmit}>
-            <p className="rounded-md bg-muted p-3 text-sm">
-              Joining as <strong>{preview.firstName} {preview.lastName}</strong><br />
-              <span className="text-muted-foreground">{preview.email}</span>
-            </p>
-            <label className="block space-y-2">
-              <span className="text-sm font-semibold">Password</span>
-              <TextInput autoComplete="new-password" name="password" type="password" value={password} onChange={(event) => setPassword(event.target.value)} />
-            </label>
-            <label className="block space-y-2">
-              <span className="text-sm font-semibold">Confirm password</span>
-              <TextInput autoComplete="new-password" name="confirmPassword" type="password" value={confirmPassword} onChange={(event) => setConfirmPassword(event.target.value)} />
-            </label>
-            <p className="text-sm text-muted-foreground">{passwordHint}</p>
-            {error ? <p className="rounded-md bg-red-50 p-3 text-sm font-medium text-red-700">{error}</p> : null}
-            <Button className="w-full" disabled={submitting} type="submit">
-              {submitting ? "Creating account..." : "Create Account"}
-            </Button>
-          </form>
-        ) : null}
-        {!loading && !preview && error ? <p className="mt-5 rounded-md bg-red-50 p-3 text-sm font-medium text-red-700">{error}</p> : null}
+    <main className="flex min-h-screen items-center justify-center bg-gradient-to-b from-white via-muted to-white px-4 py-8">
+      <section className="w-full max-w-sm overflow-hidden rounded-2xl border border-border bg-white shadow-[0_24px_60px_rgba(15,23,42,0.08)]">
+        <div className="h-1 bg-primary" />
+        <div className="p-6">
+          <div className="mb-5 flex items-start gap-4">
+            <BrandLogo className="h-14 w-auto" />
+            <div className="pt-1">
+              <p className="text-xs font-black uppercase tracking-[0.24em] text-primary">Field App</p>
+              <h1 className="mt-1 text-3xl font-black">Accept invite</h1>
+            </div>
+          </div>
+          {loading ? <p className="mt-5 text-muted-foreground">Loading invite...</p> : null}
+          {!loading && preview ? (
+            <form className="mt-5 space-y-4" onSubmit={onSubmit}>
+              <p className="rounded-md bg-muted p-3 text-sm">
+                Joining as <strong>{preview.firstName} {preview.lastName}</strong><br />
+                <span className="text-muted-foreground">{preview.email}</span>
+              </p>
+              <label className="block space-y-2">
+                <span className="text-sm font-semibold">Password</span>
+                <TextInput autoComplete="new-password" name="password" type="password" value={password} onChange={(event) => setPassword(event.target.value)} />
+              </label>
+              <label className="block space-y-2">
+                <span className="text-sm font-semibold">Confirm password</span>
+                <TextInput autoComplete="new-password" name="confirmPassword" type="password" value={confirmPassword} onChange={(event) => setConfirmPassword(event.target.value)} />
+              </label>
+              <p className="text-sm text-muted-foreground">{passwordHint}</p>
+              {error ? <p className="rounded-md bg-red-50 p-3 text-sm font-medium text-red-700">{error}</p> : null}
+              <Button className="w-full" disabled={submitting} type="submit">
+                {submitting ? "Creating account..." : "Create Account"}
+              </Button>
+            </form>
+          ) : null}
+          {!loading && !preview && error ? <p className="mt-5 rounded-md bg-red-50 p-3 text-sm font-medium text-red-700">{error}</p> : null}
+        </div>
       </section>
     </main>
   );

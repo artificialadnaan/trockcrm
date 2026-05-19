@@ -211,11 +211,11 @@ export async function renderFieldPhotoReportPdf(input: {
     width: PAGE_WIDTH - PAGE_MARGIN * 2,
     align: "center",
   });
-  doc.fillColor("#1667D5").font("Helvetica-Bold").fontSize(16).text(input.cover.companyName, PAGE_MARGIN, 256, {
+  doc.fillColor(BRAND_RED).font("Helvetica-Bold").fontSize(16).text(input.cover.companyName, PAGE_MARGIN, 256, {
     width: PAGE_WIDTH - PAGE_MARGIN * 2,
     align: "center",
   });
-  doc.font("Helvetica-Bold").fontSize(15).fillColor("#1F3047").text(`${input.cover.reportDateLabel} | ${input.cover.photoCount} Photos`, PAGE_MARGIN, 288, {
+  doc.font("Helvetica-Bold").fontSize(15).fillColor(BRAND_BLACK).text(`${input.cover.reportDateLabel} | ${input.cover.photoCount} Photos`, PAGE_MARGIN, 288, {
     width: PAGE_WIDTH - PAGE_MARGIN * 2,
     align: "center",
   });

@@ -9,7 +9,7 @@ import { ProjectsPage } from "./ProjectsPage";
 
 const apiMock = vi.hoisted(() => vi.fn());
 
-vi.mock("@/lib/api", () => ({ api: apiMock }));
+vi.mock("../lib/api", () => ({ api: apiMock }));
 
 let root: Root | null = null;
 let container: HTMLDivElement | null = null;

@@ -1,7 +1,8 @@
 import { FormEvent, useState } from "react";
 import { Navigate, useLocation, useNavigate } from "react-router-dom";
-import { useAuth } from "@/lib/auth";
-import { Button, TextInput } from "@/components/ui";
+import { useAuth } from "../lib/auth";
+import { Button, TextInput } from "../components/ui";
+import { BrandLogo } from "../components/BrandLogo";
 
 export function LoginPage() {
   const { user, login } = useAuth();
@@ -33,27 +34,34 @@ export function LoginPage() {
   }
 
   return (
-    <main className="flex min-h-screen items-center justify-center bg-muted px-4 py-8">
-      <section className="w-full max-w-sm rounded-lg border border-border bg-white p-6 shadow-sm">
-        <div className="mb-6">
-          <p className="text-sm font-bold uppercase tracking-wide text-primary">T Rock</p>
-          <h1 className="text-3xl font-bold">Field App</h1>
+    <main className="flex min-h-screen items-center justify-center bg-gradient-to-b from-white via-muted to-white px-4 py-8">
+      <section className="w-full max-w-sm overflow-hidden rounded-2xl border border-border bg-white shadow-[0_24px_60px_rgba(15,23,42,0.08)]">
+        <div className="h-1 bg-primary" />
+        <div className="p-6">
+          <div className="mb-6 flex items-start gap-4">
+            <BrandLogo className="h-16 w-auto" />
+            <div className="pt-1">
+              <p className="text-xs font-black uppercase tracking-[0.24em] text-primary">Field App</p>
+              <h1 className="mt-1 text-3xl font-black text-slate-950">Sign in</h1>
+              <p className="mt-1 text-sm font-medium text-muted-foreground">T Rock Construction</p>
+            </div>
+          </div>
+          <form className="space-y-4" onSubmit={onSubmit}>
+            <label className="block space-y-2">
+              <span className="text-sm font-semibold">Email</span>
+              <TextInput autoComplete="email" inputMode="email" name="email" value={email} onChange={(event) => setEmail(event.target.value)} />
+            </label>
+            <label className="block space-y-2">
+              <span className="text-sm font-semibold">Password</span>
+              <TextInput autoComplete="current-password" name="password" type="password" value={password} onChange={(event) => setPassword(event.target.value)} />
+            </label>
+            {error ? <p className="rounded-md bg-red-50 p-3 text-sm font-medium text-red-700">{error}</p> : null}
+            <Button className="w-full rounded-lg" disabled={submitting} type="submit">
+              {submitting ? "Signing in..." : "Sign In"}
+            </Button>
+          </form>
+          <p className="mt-5 text-center text-sm text-muted-foreground">Forgot password? Contact your administrator.</p>
         </div>
-        <form className="space-y-4" onSubmit={onSubmit}>
-          <label className="block space-y-2">
-            <span className="text-sm font-semibold">Email</span>
-            <TextInput autoComplete="email" inputMode="email" name="email" value={email} onChange={(event) => setEmail(event.target.value)} />
-          </label>
-          <label className="block space-y-2">
-            <span className="text-sm font-semibold">Password</span>
-            <TextInput autoComplete="current-password" name="password" type="password" value={password} onChange={(event) => setPassword(event.target.value)} />
-          </label>
-          {error ? <p className="rounded-md bg-red-50 p-3 text-sm font-medium text-red-700">{error}</p> : null}
-          <Button className="w-full" disabled={submitting} type="submit">
-            {submitting ? "Signing in..." : "Sign In"}
-          </Button>
-        </form>
-        <p className="mt-5 text-center text-sm text-muted-foreground">Forgot password? Contact your administrator.</p>
       </section>
     </main>
   );
