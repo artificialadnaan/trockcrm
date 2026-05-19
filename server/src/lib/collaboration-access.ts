@@ -1,4 +1,4 @@
-import { eq } from "drizzle-orm";
+import { and, eq } from "drizzle-orm";
 import { deals, leads, offices, userOfficeAccess, users } from "@trock-crm/shared/schema";
 import { resolveOfficeCodeFromOffice } from "@trock-crm/shared/types";
 import { AppError } from "../middleware/error-handler.js";
@@ -66,7 +66,7 @@ async function viewerMatchesRecordOffice(
   }
 
   if (!input.assignedRepId) {
-    return false;
+    return true;
   }
 
   if (input.assigneeOfficeId === viewerOfficeId) {
@@ -76,7 +76,7 @@ async function viewerMatchesRecordOffice(
   const [officeAccess] = await tenantDb
     .select({ officeId: userOfficeAccess.officeId })
     .from(userOfficeAccess)
-    .where(eq(userOfficeAccess.userId, input.assignedRepId))
+    .where(and(eq(userOfficeAccess.userId, input.assignedRepId), eq(userOfficeAccess.officeId, viewerOfficeId)))
     .limit(1);
 
   return officeAccess?.officeId === viewerOfficeId;
@@ -166,9 +166,17 @@ export async function assertDealOwnerAccess(
   viewer: Viewer,
   options: { allowAdmin?: boolean; message?: string } = {}
 ) {
+  const isAdminOverride = options.allowAdmin === true && viewer.role === "admin";
+  if (isAdminOverride) {
+    const row = await getDealOfficeAccess(tenantDb, dealId);
+    if (!row) {
+      throw new AppError(404, "Deal not found");
+    }
+    return row;
+  }
+
   const row = await assertDealCollaboratorAccess(tenantDb, dealId, viewer);
   const isOwner = row.assignedRepId === viewer.id;
-  const isAdminOverride = options.allowAdmin === true && viewer.role === "admin";
   if (!isOwner && !isAdminOverride) {
     throw new AppError(403, options.message ?? "Only the assigned rep can modify this deal");
   }
@@ -181,9 +189,17 @@ export async function assertLeadOwnerAccess(
   viewer: Viewer,
   options: { allowAdmin?: boolean; message?: string } = {}
 ) {
+  const isAdminOverride = options.allowAdmin === true && viewer.role === "admin";
+  if (isAdminOverride) {
+    const row = await getLeadOfficeAccess(tenantDb, leadId);
+    if (!row) {
+      throw new AppError(404, "Lead not found");
+    }
+    return row;
+  }
+
   const row = await assertLeadCollaboratorAccess(tenantDb, leadId, viewer);
   const isOwner = row.assignedRepId === viewer.id;
-  const isAdminOverride = options.allowAdmin === true && viewer.role === "admin";
   if (!isOwner && !isAdminOverride) {
     throw new AppError(403, options.message ?? "Only the assigned rep can modify this lead");
   }

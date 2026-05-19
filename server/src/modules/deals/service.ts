@@ -78,6 +78,30 @@ async function resolveActiveOfficeScope(tenantDb: TenantDb, activeOfficeId: stri
   };
 }
 
+function buildDealOfficeScopeCondition(
+  alias: string,
+  input: { officeCode: string | null; officeUserIds: string[] }
+) {
+  const dealAlias = sql.raw(alias);
+  const assignedRepFallback =
+    input.officeUserIds.length > 0
+      ? sql`${dealAlias}.office_code is null and exists (
+          select 1
+          from ${users} assigned_rep
+          where assigned_rep.id = ${dealAlias}.assigned_rep_id
+            and assigned_rep.office_id in (${sqlList(input.officeUserIds)})
+        )`
+      : sql`false`;
+
+  if (input.officeCode) {
+    return sql`(${dealAlias}.office_code = ${input.officeCode} or ${assignedRepFallback})`;
+  }
+
+  return input.officeUserIds.length > 0
+    ? sql`${dealAlias}.assigned_rep_id in (${sqlList(input.officeUserIds)})`
+    : sql`false`;
+}
+
 export interface DealFilters {
   search?: string;
   stageIds?: string[];
@@ -728,8 +752,9 @@ async function buildDealWorkspaceScope(
 ) {
   const terminalDateConditions = stage && "stageId" in input ? terminalWorkspaceDateConditions(stage, input) : [];
   const terminalScope = "stageId" in input && isTerminalWorkspaceStage(stage);
+  const activeOfficeScope = await resolveActiveOfficeScope(tenantDb, input.activeOfficeId);
   const filters = [
-    sql`u.office_id = ${input.activeOfficeId}`,
+    buildDealOfficeScopeCondition("d", activeOfficeScope),
   ];
 
   if (!terminalScope) {
@@ -744,6 +769,8 @@ async function buildDealWorkspaceScope(
     filters.push(
       buildAliasedDealMineVisibilityCondition("d", input.userId, {
         includeSubscriptions: mineVisibility?.dealSubscriptions,
+        includeCreatedBy: mineVisibility?.dealsCreatedByUserId,
+        includeSubscriptionDeletedAt: mineVisibility?.dealSubscriptionsDeletedAt,
       })
     );
   } else if (input.scope === "team") {
@@ -965,14 +992,8 @@ export async function getDeals(tenantDb: TenantDb, filters: DealFilters, userRol
   }
 
   if (filters.activeOfficeId) {
-      const { officeCode, officeUserIds } = await resolveActiveOfficeScope(tenantDb, filters.activeOfficeId);
-      conditions.push(
-        officeCode && officeUserIds.length > 0
-          ? eq(deals.officeCode, officeCode)
-          : !officeCode && officeUserIds.length > 0
-            ? inArray(deals.assignedRepId, officeUserIds)
-            : sql`false`
-      );
+      const officeScope = await resolveActiveOfficeScope(tenantDb, filters.activeOfficeId);
+      conditions.push(buildDealOfficeScopeCondition("deals", officeScope));
   }
 
   const mineVisibility = scope === "mine" ? await resolveMineVisibilityFeatures(tenantDb) : null;
@@ -981,6 +1002,8 @@ export async function getDeals(tenantDb: TenantDb, filters: DealFilters, userRol
     conditions.push(
       buildDealMineVisibilityCondition(userId, {
         includeSubscriptions: mineVisibility?.dealSubscriptions,
+        includeCreatedBy: mineVisibility?.dealsCreatedByUserId,
+        includeSubscriptionDeletedAt: mineVisibility?.dealSubscriptionsDeletedAt,
       })
     );
   } else if (scope === "team") {
@@ -1837,6 +1860,8 @@ export async function getDealsForPipeline(
     commonConditions.push(
       buildDealMineVisibilityCondition(userId, {
         includeSubscriptions: mineVisibility?.dealSubscriptions,
+        includeCreatedBy: mineVisibility?.dealsCreatedByUserId,
+        includeSubscriptionDeletedAt: mineVisibility?.dealSubscriptionsDeletedAt,
       })
     );
   } else if (filters?.scope === "team") {
@@ -2015,7 +2040,7 @@ export async function listDealStagePage(tenantDb: TenantDb, input: DealStagePage
       coalesce(sum(coalesce(d.awarded_amount, d.bid_estimate, d.dd_estimate, 0)), 0)::numeric as total_value,
       round(avg(extract(day from now() - d.stage_entered_at)))::int as average_days_in_stage
     from deals d
-    join users u on u.id = d.assigned_rep_id
+    left join users u on u.id = d.assigned_rep_id
     where ${where}
   `);
 
@@ -2040,7 +2065,7 @@ export async function listDealStagePage(tenantDb: TenantDb, input: DealStagePage
       d.dd_estimate,
       extract(day from now() - d.stage_entered_at)::int as days_in_stage
     from deals d
-    join users u on u.id = d.assigned_rep_id
+    left join users u on u.id = d.assigned_rep_id
     where ${where}
     order by d.stage_entered_at asc, d.updated_at desc
     limit ${pageSize}

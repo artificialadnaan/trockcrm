@@ -208,6 +208,7 @@ function createTenantDb() {
       { id: "lead-created", assignedRepId: "rep-team-1", createdByUserId: "director-1", officeCode: "dfw", isActive: true, status: "open", companyId: null, propertyId: null, projectTypeId: null },
       { id: "lead-activity", assignedRepId: "rep-team-2", createdByUserId: "rep-team-2", officeCode: "dfw", activityPerformedByUserIds: ["director-1"], isActive: true, status: "open", companyId: null, propertyId: null, projectTypeId: null },
       { id: "lead-subscribed", assignedRepId: "rep-team-2", createdByUserId: "rep-team-2", officeCode: "dfw", subscriberUserIds: ["director-1"], isActive: true, status: "open", companyId: null, propertyId: null, projectTypeId: null },
+      { id: "lead-legacy-office-fallback", assignedRepId: "rep-team-1", createdByUserId: "rep-team-1", officeCode: null, isActive: true, status: "open", companyId: null, propertyId: null, projectTypeId: null },
     ],
     userOfficeAccess: [
       { userId: "rep-other-office", officeId: "office-1" },
@@ -258,6 +259,7 @@ describe("listLeads scope filtering", () => {
       "lead-created",
       "lead-activity",
       "lead-subscribed",
+      "lead-legacy-office-fallback",
     ]);
   });
 
@@ -272,6 +274,7 @@ describe("listLeads scope filtering", () => {
       "lead-created",
       "lead-activity",
       "lead-subscribed",
+      "lead-legacy-office-fallback",
     ]);
   });
 
@@ -284,7 +287,7 @@ describe("listLeads scope filtering", () => {
       "director-1"
     );
 
-    expect(rows.map((row) => row.id)).toEqual(["lead-team-1", "lead-created"]);
+    expect(rows.map((row) => row.id)).toEqual(["lead-team-1", "lead-created", "lead-legacy-office-fallback"]);
   });
 
   it("allows reps to request all-office scope explicitly", async () => {
@@ -298,6 +301,7 @@ describe("listLeads scope filtering", () => {
       "lead-created",
       "lead-activity",
       "lead-subscribed",
+      "lead-legacy-office-fallback",
     ]);
   });
 });

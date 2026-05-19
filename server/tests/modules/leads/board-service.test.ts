@@ -1,8 +1,9 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const dbState = vi.hoisted(() => ({
-  responses: [] as any[][],
-  chain: null as any,
+  stageRows: [] as any[],
+  defaultConversionRows: [] as any[],
+  chains: [] as any[],
 }));
 
 function createChainableMock() {
@@ -12,7 +13,9 @@ function createChainableMock() {
     where: vi.fn(),
     orderBy: vi.fn(),
     limit: vi.fn(),
-    then: vi.fn((resolve: (value: any[]) => unknown) => resolve(dbState.responses.shift() ?? [])),
+    then: vi.fn((resolve: (value: any[]) => unknown) =>
+      resolve(chain.limit.mock.calls.length > 0 ? dbState.defaultConversionRows : dbState.stageRows)
+    ),
   };
 
   chain.select.mockReturnValue(chain);
@@ -20,13 +23,15 @@ function createChainableMock() {
   chain.where.mockReturnValue(chain);
   chain.orderBy.mockReturnValue(chain);
   chain.limit.mockReturnValue(chain);
-  dbState.chain = chain;
+  dbState.chains.push(chain);
 
   return chain;
 }
 
 vi.mock("../../../src/db.js", () => ({
-  db: createChainableMock(),
+  db: {
+    select: vi.fn(() => createChainableMock()),
+  },
   pool: {},
 }));
 
@@ -47,26 +52,30 @@ function extractSqlText(value: unknown): string {
   return "";
 }
 
+function createOfficeScopeSelectMock(rows: any[] = [{ id: "rep-1" }]) {
+  return vi.fn(() => ({
+    from: vi.fn().mockReturnThis(),
+    where: vi.fn().mockResolvedValue(rows),
+  }));
+}
+
 describe("listLeadBoard", () => {
   beforeEach(() => {
-    dbState.responses = [];
+    dbState.stageRows = [];
+    dbState.defaultConversionRows = [];
+    dbState.chains = [];
   });
 
   it("returns lead board columns grouped by active office stage with ordered cards", async () => {
-    dbState.responses = [
-      [
-        { id: "stage-new", slug: "new_lead", name: "New Lead", displayOrder: 1, isTerminal: false, isActivePipeline: true },
-        { id: "stage-qualified", slug: "qualified_lead", name: "Qualified Lead", displayOrder: 2, isTerminal: false, isActivePipeline: true },
-        { id: "stage-validation", slug: "sales_validation_stage", name: "Sales Validation Stage", displayOrder: 3, isTerminal: false, isActivePipeline: true },
-      ],
-      [{ id: "deal-stage-1" }],
+    dbState.stageRows = [
+      { id: "stage-new", slug: "new_lead", name: "New Lead", displayOrder: 1, isTerminal: false, isActivePipeline: true },
+      { id: "stage-qualified", slug: "qualified_lead", name: "Qualified Lead", displayOrder: 2, isTerminal: false, isActivePipeline: true },
+      { id: "stage-validation", slug: "sales_validation_stage", name: "Sales Validation Stage", displayOrder: 3, isTerminal: false, isActivePipeline: true },
     ];
+    dbState.defaultConversionRows = [{ id: "deal-stage-1" }];
 
     const tenantDb = {
-      select: vi.fn().mockReturnValue({
-        from: vi.fn().mockReturnThis(),
-        where: vi.fn().mockResolvedValue([{ id: "rep-1" }]),
-      }),
+      select: createOfficeScopeSelectMock(),
       execute: vi.fn().mockResolvedValue({
         rows: [
           {
@@ -113,16 +122,11 @@ describe("listLeadBoard", () => {
   });
 
   it("queries only active lead pipeline stages for board columns", async () => {
-    dbState.responses = [
-      [{ id: "stage-new", slug: "new_lead", name: "New Lead", displayOrder: 1, isTerminal: false, isActivePipeline: true }],
-      [{ id: "deal-stage-1" }],
-    ];
+    dbState.stageRows = [{ id: "stage-new", slug: "new_lead", name: "New Lead", displayOrder: 1, isTerminal: false, isActivePipeline: true }];
+    dbState.defaultConversionRows = [{ id: "deal-stage-1" }];
 
     const tenantDb = {
-      select: vi.fn().mockReturnValue({
-        from: vi.fn().mockReturnThis(),
-        where: vi.fn().mockResolvedValue([{ id: "rep-1" }]),
-      }),
+      select: createOfficeScopeSelectMock(),
       execute: vi.fn().mockResolvedValue({ rows: [] }),
     } as any;
 
@@ -134,23 +138,19 @@ describe("listLeadBoard", () => {
       scope: "team",
     });
 
-    const whereText = extractSqlText(dbState.chain.where.mock.calls[0][0]).toLowerCase();
+    const stageQueryChain = dbState.chains.find((chain) => chain.limit.mock.calls.length === 0) ?? dbState.chains[0];
+    const whereText = extractSqlText(stageQueryChain?.where.mock.calls[0][0]).toLowerCase();
     expect(whereText).toContain("workflow_family");
     expect(whereText).toContain("is_active_pipeline");
-    expect(dbState.chain.orderBy).toHaveBeenCalled();
+    expect(stageQueryChain?.orderBy).toHaveBeenCalled();
   });
 
   it("returns every card in each board column so the rendered cards match the count", async () => {
-    dbState.responses = [
-      [{ id: "stage-new", slug: "new_lead", name: "New Lead", displayOrder: 1, isTerminal: false, isActivePipeline: true }],
-      [{ id: "deal-stage-1" }],
-    ];
+    dbState.stageRows = [{ id: "stage-new", slug: "new_lead", name: "New Lead", displayOrder: 1, isTerminal: false, isActivePipeline: true }];
+    dbState.defaultConversionRows = [{ id: "deal-stage-1" }];
 
     const tenantDb = {
-      select: vi.fn().mockReturnValue({
-        from: vi.fn().mockReturnThis(),
-        where: vi.fn().mockResolvedValue([{ id: "rep-1" }]),
-      }),
+      select: createOfficeScopeSelectMock(),
       execute: vi.fn().mockResolvedValue({
         rows: Array.from({ length: 10 }).map((_, index) => ({
           id: `lead-${index + 1}`,
@@ -180,12 +180,11 @@ describe("listLeadBoard", () => {
   });
 
   it("scopes board queries to the active office even for admin all scope", async () => {
-    dbState.responses = [
-      [{ id: "stage-new", slug: "new_lead", name: "New Lead", displayOrder: 1, isTerminal: false, isActivePipeline: true }],
-      [{ id: "deal-stage-1" }],
-    ];
+    dbState.stageRows = [{ id: "stage-new", slug: "new_lead", name: "New Lead", displayOrder: 1, isTerminal: false, isActivePipeline: true }];
+    dbState.defaultConversionRows = [{ id: "deal-stage-1" }];
 
     const tenantDb = {
+      select: createOfficeScopeSelectMock(),
       execute: vi.fn().mockResolvedValue({ rows: [] }),
     } as any;
 
@@ -198,15 +197,13 @@ describe("listLeadBoard", () => {
     });
 
     const queryText = extractSqlText(tenantDb.execute.mock.calls[0][0]).toLowerCase();
-    expect(queryText).toContain("join users u on u.id = l.assigned_rep_id");
-    expect(queryText).toContain("u.office_id =");
+    expect(queryText).toContain("left join users u on u.id = l.assigned_rep_id");
+    expect(queryText).toContain("assigned_rep_id in");
   });
 
   it("uses direct active reports in the active office for team-scoped board queries", async () => {
-    dbState.responses = [
-      [{ id: "stage-new", slug: "new_lead", name: "New Lead", displayOrder: 1, isTerminal: false, isActivePipeline: true }],
-      [{ id: "deal-stage-1" }],
-    ];
+    dbState.stageRows = [{ id: "stage-new", slug: "new_lead", name: "New Lead", displayOrder: 1, isTerminal: false, isActivePipeline: true }];
+    dbState.defaultConversionRows = [{ id: "deal-stage-1" }];
 
     const teamRows = [{ id: "rep-team-1" }, { id: "rep-team-2" }];
     const teamQuery = {
@@ -231,5 +228,37 @@ describe("listLeadBoard", () => {
     expect(queryText).toContain("assigned_rep_id");
     expect(queryText).toContain("rep-team-1");
     expect(queryText).toContain("rep-team-2");
+  });
+
+  it("keeps mine-scope board queries accessible for unassigned legacy leads", async () => {
+    dbState.stageRows = [{ id: "stage-new", slug: "new_lead", name: "New Lead", displayOrder: 1, isTerminal: false, isActivePipeline: true }];
+    dbState.defaultConversionRows = [{ id: "deal-stage-1" }];
+
+    const tenantDb = {
+      select: createOfficeScopeSelectMock(),
+      execute: vi.fn().mockImplementation((query?: unknown) => {
+        const text = extractSqlText(query).toLowerCase();
+        if (text.includes("to_regclass(current_schema()")) {
+          return Promise.resolve({ rows: [{ relation_name: null }] });
+        }
+        if (text.includes("information_schema.columns")) {
+          return Promise.resolve({ rows: [{ column_exists: false }] });
+        }
+        return Promise.resolve({ rows: [] });
+      }),
+    } as any;
+
+    const { listLeadBoard } = await import("../../../src/modules/leads/service.js");
+    await listLeadBoard(tenantDb, {
+      role: "admin",
+      userId: "admin-1",
+      activeOfficeId: "office-1",
+      scope: "mine",
+    });
+
+    const queryText = tenantDb.execute.mock.calls
+      .map(([query]: [unknown]) => extractSqlText(query).toLowerCase())
+      .find((text: string) => text.includes("from leads l")) ?? "";
+    expect(queryText).toContain("left join users u on u.id = l.assigned_rep_id");
   });
 });

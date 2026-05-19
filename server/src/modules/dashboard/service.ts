@@ -67,12 +67,18 @@ type DashboardScopeOptions = {
   viewerUserId?: string;
   includeDealSubscriptions?: boolean;
   includeLeadSubscriptions?: boolean;
+  includeDealCreatedBy?: boolean;
+  includeLeadCreatedBy?: boolean;
+  includeDealSubscriptionDeletedAt?: boolean;
+  includeLeadSubscriptionDeletedAt?: boolean;
 };
 
 function leadScopeFilterSql(alias: string, options: DashboardScopeOptions) {
   if (options.viewerUserId) {
     return sql`AND ${buildAliasedLeadMineVisibilityCondition(alias, options.viewerUserId, {
       includeSubscriptions: options.includeLeadSubscriptions,
+      includeCreatedBy: options.includeLeadCreatedBy,
+      includeSubscriptionDeletedAt: options.includeLeadSubscriptionDeletedAt,
     })}`;
   }
   if (options.repId) {
@@ -85,6 +91,8 @@ function dealScopeFilterSql(alias: string, options: DashboardScopeOptions) {
   if (options.viewerUserId) {
     return sql`AND ${buildAliasedDealMineVisibilityCondition(alias, options.viewerUserId, {
       includeSubscriptions: options.includeDealSubscriptions,
+      includeCreatedBy: options.includeDealCreatedBy,
+      includeSubscriptionDeletedAt: options.includeDealSubscriptionDeletedAt,
     })}`;
   }
   if (options.repId) {
@@ -1207,6 +1215,8 @@ export async function getRepDashboard(
         AND l.status = 'open'
         AND ${buildAliasedLeadMineVisibilityCondition("l", userId, {
           includeSubscriptions: mineVisibility.leadSubscriptions,
+          includeCreatedBy: mineVisibility.leadsCreatedByUserId,
+          includeSubscriptionDeletedAt: mineVisibility.leadSubscriptionsDeletedAt,
         })}
         AND NOT psc.is_terminal
     `),
@@ -1223,6 +1233,8 @@ export async function getRepDashboard(
       WHERE d.is_active = true
         AND ${buildAliasedDealMineVisibilityCondition("d", userId, {
           includeSubscriptions: mineVisibility.dealSubscriptions,
+          includeCreatedBy: mineVisibility.dealsCreatedByUserId,
+          includeSubscriptionDeletedAt: mineVisibility.dealSubscriptionsDeletedAt,
         })}
         AND ${nonTerminalDealStageSql()}
     `),
@@ -1273,6 +1285,8 @@ export async function getRepDashboard(
       WHERE d.is_active = true
         AND ${buildAliasedDealMineVisibilityCondition("d", userId, {
           includeSubscriptions: mineVisibility.dealSubscriptions,
+          includeCreatedBy: mineVisibility.dealsCreatedByUserId,
+          includeSubscriptionDeletedAt: mineVisibility.dealSubscriptionsDeletedAt,
         })}
         AND ${nonTerminalDealStageSql()}
         AND psc.is_active_pipeline = true
@@ -1284,16 +1298,28 @@ export async function getRepDashboard(
       viewerUserId: userId,
       includeDealSubscriptions: mineVisibility.dealSubscriptions,
       includeLeadSubscriptions: mineVisibility.leadSubscriptions,
+      includeDealCreatedBy: mineVisibility.dealsCreatedByUserId,
+      includeLeadCreatedBy: mineVisibility.leadsCreatedByUserId,
+      includeDealSubscriptionDeletedAt: mineVisibility.dealSubscriptionsDeletedAt,
+      includeLeadSubscriptionDeletedAt: mineVisibility.leadSubscriptionsDeletedAt,
     }),
     getCrmOwnedProgression(tenantDb, {
       viewerUserId: userId,
       includeDealSubscriptions: mineVisibility.dealSubscriptions,
       includeLeadSubscriptions: mineVisibility.leadSubscriptions,
+      includeDealCreatedBy: mineVisibility.dealsCreatedByUserId,
+      includeLeadCreatedBy: mineVisibility.leadsCreatedByUserId,
+      includeDealSubscriptionDeletedAt: mineVisibility.dealSubscriptionsDeletedAt,
+      includeLeadSubscriptionDeletedAt: mineVisibility.leadSubscriptionsDeletedAt,
     }),
     getDownstreamBottlenecks(tenantDb, {
       viewerUserId: userId,
       includeDealSubscriptions: mineVisibility.dealSubscriptions,
       includeLeadSubscriptions: mineVisibility.leadSubscriptions,
+      includeDealCreatedBy: mineVisibility.dealsCreatedByUserId,
+      includeLeadCreatedBy: mineVisibility.leadsCreatedByUserId,
+      includeDealSubscriptionDeletedAt: mineVisibility.dealSubscriptionsDeletedAt,
+      includeLeadSubscriptionDeletedAt: mineVisibility.leadSubscriptionsDeletedAt,
     }),
 
     tenantDb.execute(sql`
@@ -1314,6 +1340,8 @@ export async function getRepDashboard(
         AND l.status = 'open'
         AND ${buildAliasedLeadMineVisibilityCondition("l", userId, {
           includeSubscriptions: mineVisibility.leadSubscriptions,
+          includeCreatedBy: mineVisibility.leadsCreatedByUserId,
+          includeSubscriptionDeletedAt: mineVisibility.leadSubscriptionsDeletedAt,
         })}
         AND NOT psc.is_terminal
       ORDER BY l.updated_at DESC
@@ -1339,6 +1367,8 @@ export async function getRepDashboard(
       WHERE d.is_active = true
         AND ${buildAliasedDealMineVisibilityCondition("d", userId, {
           includeSubscriptions: mineVisibility.dealSubscriptions,
+          includeCreatedBy: mineVisibility.dealsCreatedByUserId,
+          includeSubscriptionDeletedAt: mineVisibility.dealSubscriptionsDeletedAt,
         })}
         AND ${nonTerminalDealStageSql()}
       ORDER BY d.updated_at DESC
@@ -1348,6 +1378,10 @@ export async function getRepDashboard(
       viewerUserId: userId,
       includeDealSubscriptions: mineVisibility.dealSubscriptions,
       includeLeadSubscriptions: mineVisibility.leadSubscriptions,
+      includeDealCreatedBy: mineVisibility.dealsCreatedByUserId,
+      includeLeadCreatedBy: mineVisibility.leadsCreatedByUserId,
+      includeDealSubscriptionDeletedAt: mineVisibility.dealSubscriptionsDeletedAt,
+      includeLeadSubscriptionDeletedAt: mineVisibility.leadSubscriptionsDeletedAt,
     }),
     getMyCleanupQueue(tenantDb, userId),
     getRepCommissionSummary(tenantDb, userId, activityRangeStartDate, today),
@@ -2110,8 +2144,26 @@ async function buildDirectorScopeSummary(
   options: { from: string; to: string } & DashboardScopeOptions
 ) {
   const [pipelineRows, staleDeals, won] = await Promise.all([
-    getScopedPipelineSummary(tenantDb, { includeDd: false, repId: options.repId, viewerUserId: options.viewerUserId }),
-    getDashboardStaleDeals(tenantDb, options.repId || options.viewerUserId ? { repId: options.repId, viewerUserId: options.viewerUserId } : {}),
+    getScopedPipelineSummary(tenantDb, {
+      includeDd: false,
+      repId: options.repId,
+      viewerUserId: options.viewerUserId,
+      includeDealSubscriptions: options.includeDealSubscriptions,
+      includeDealCreatedBy: options.includeDealCreatedBy,
+      includeDealSubscriptionDeletedAt: options.includeDealSubscriptionDeletedAt,
+    }),
+    getDashboardStaleDeals(
+      tenantDb,
+      options.repId || options.viewerUserId
+        ? {
+            repId: options.repId,
+            viewerUserId: options.viewerUserId,
+            includeDealSubscriptions: options.includeDealSubscriptions,
+            includeDealCreatedBy: options.includeDealCreatedBy,
+            includeDealSubscriptionDeletedAt: options.includeDealSubscriptionDeletedAt,
+          }
+        : {}
+    ),
     getWonCloseSummary(tenantDb, options),
   ]);
 
@@ -2258,6 +2310,10 @@ export async function getDirectorDashboard(
       viewerUserId: scopedViewerUserId,
       includeDealSubscriptions: mineVisibility?.dealSubscriptions,
       includeLeadSubscriptions: mineVisibility?.leadSubscriptions,
+      includeDealCreatedBy: mineVisibility?.dealsCreatedByUserId,
+      includeLeadCreatedBy: mineVisibility?.leadsCreatedByUserId,
+      includeDealSubscriptionDeletedAt: mineVisibility?.dealSubscriptionsDeletedAt,
+      includeLeadSubscriptionDeletedAt: mineVisibility?.leadSubscriptionsDeletedAt,
     }),
   ]);
 
