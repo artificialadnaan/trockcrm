@@ -406,4 +406,121 @@ describe("getDealsForPipeline", () => {
     expect(allWhereText).not.toContain("deal_subscriptions");
     expect(allWhereText).not.toContain("created_by_user_id");
   });
+
+  it("serializes per-stage mine-scope queries on a single-client tenantDb", async () => {
+    dbState.responses = [
+      [
+        {
+          id: "stage-estimating",
+          slug: "estimating",
+          name: "Estimating",
+          displayOrder: 1,
+          isTerminal: false,
+          isActivePipeline: true,
+        },
+        {
+          id: "stage-proposal",
+          slug: "proposal",
+          name: "Proposal",
+          displayOrder: 2,
+          isTerminal: false,
+          isActivePipeline: true,
+        },
+      ],
+    ];
+
+    let activeSelects = 0;
+    let maxConcurrentSelects = 0;
+    const tenantDb = {
+      execute: vi.fn(async (query?: unknown) => {
+        const text = extractSqlText(query).toLowerCase();
+        if (text.includes("to_regclass(current_schema()")) {
+          return { rows: [{ relation_name: null }] };
+        }
+        if (text.includes("information_schema.columns")) {
+          return { rows: [{ column_exists: false }] };
+        }
+        return { rows: [] };
+      }),
+      select: vi.fn(() => {
+        const chain = createChainableMock();
+        chain.then.mockImplementation(async (resolve: (value: any[]) => unknown) => {
+          activeSelects += 1;
+          maxConcurrentSelects = Math.max(maxConcurrentSelects, activeSelects);
+          await Promise.resolve();
+          const whereClause = chain.where.mock.calls[0]?.[0];
+          const isEstimatingQuery = containsValue(whereClause, "stage-estimating");
+          const isProposalQuery = containsValue(whereClause, "stage-proposal");
+          const isCardsQuery = chain.leftJoin.mock.calls.length > 0;
+          const response =
+            isEstimatingQuery && isCardsQuery
+              ? [
+                  {
+                    id: "deal-1",
+                    dealNumber: "TR-2026-0001",
+                    name: "Estimating Deal",
+                    stageId: "stage-estimating",
+                    assignedRepId: "rep-1",
+                    officeId: "office-1",
+                    workflowRoute: "normal",
+                    awardedAmount: null,
+                    bidEstimate: "5000",
+                    ddEstimate: null,
+                    propertyCity: "Dallas",
+                    propertyState: "TX",
+                    source: "referral",
+                    lastActivityAt: "2026-04-21T10:00:00.000Z",
+                    stageEnteredAt: "2026-04-20T10:00:00.000Z",
+                    updatedAt: "2026-04-21T10:00:00.000Z",
+                    companyName: null,
+                    assignedRepName: "Rep One",
+                  },
+                ]
+              : isProposalQuery && isCardsQuery
+                ? [
+                    {
+                      id: "deal-2",
+                      dealNumber: "TR-2026-0002",
+                      name: "Proposal Deal",
+                      stageId: "stage-proposal",
+                      assignedRepId: "rep-2",
+                      officeId: "office-1",
+                      workflowRoute: "normal",
+                      awardedAmount: null,
+                      bidEstimate: "10000",
+                      ddEstimate: null,
+                      propertyCity: "Dallas",
+                      propertyState: "TX",
+                      source: "referral",
+                      lastActivityAt: "2026-04-21T10:00:00.000Z",
+                      stageEnteredAt: "2026-04-20T10:00:00.000Z",
+                      updatedAt: "2026-04-21T10:00:00.000Z",
+                      companyName: null,
+                      assignedRepName: "Rep Two",
+                    },
+                  ]
+                : isEstimatingQuery
+                  ? [{ count: 1, totalValue: 5000 }]
+                  : isProposalQuery
+                    ? [{ count: 2, totalValue: 10000 }]
+                    : [];
+          activeSelects -= 1;
+          return resolve(response);
+        });
+        return chain;
+      }),
+    } as any;
+
+    const { getDealsForPipeline } = await import("../../../src/modules/deals/service.js");
+    const result = await getDealsForPipeline(tenantDb, "admin", "admin-1", {
+      activeOfficeId: null,
+      scope: "mine",
+      includeDd: true,
+    });
+
+    expect(result.pipelineColumns).toHaveLength(2);
+    expect(result.pipelineColumns[0]?.deals[0]?.id).toBe("deal-1");
+    expect(result.pipelineColumns[1]?.deals[0]?.id).toBe("deal-2");
+    expect(maxConcurrentSelects).toBe(1);
+  });
 });

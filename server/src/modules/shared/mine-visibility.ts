@@ -87,34 +87,37 @@ async function currentSchemaCapability(
     return existing;
   }
 
-  const promise = (async () => {
-    try {
-      return await loader();
-    } catch {
-      return true;
-    }
-  })();
+  const promise = loader();
 
   entry.set(key, promise);
   return promise;
 }
 
 export async function resolveMineVisibilityFeatures(tenantDb: TenantDbLike) {
-  const [
-    dealSubscriptions,
-    leadSubscriptions,
-    dealSubscriptionsDeletedAt,
-    leadSubscriptionsDeletedAt,
-    dealsCreatedByUserId,
-    leadsCreatedByUserId,
-  ] = await Promise.all([
-    currentSchemaTableExists(tenantDb, "deal_subscriptions"),
-    currentSchemaTableExists(tenantDb, "lead_subscriptions"),
-    currentSchemaColumnExists(tenantDb, "deal_subscriptions", "deleted_at"),
-    currentSchemaColumnExists(tenantDb, "lead_subscriptions", "deleted_at"),
-    currentSchemaColumnExists(tenantDb, "deals", "created_by_user_id"),
-    currentSchemaColumnExists(tenantDb, "leads", "created_by_user_id"),
-  ]);
+  // Sequential probes required: tenantDb uses a single-client transaction.
+  // Parallel queries on that client trigger "client already executing" in production.
+  const dealSubscriptions = await currentSchemaTableExists(tenantDb, "deal_subscriptions");
+  const leadSubscriptions = await currentSchemaTableExists(tenantDb, "lead_subscriptions");
+  const dealSubscriptionsDeletedAt = await currentSchemaColumnExists(
+    tenantDb,
+    "deal_subscriptions",
+    "deleted_at"
+  );
+  const leadSubscriptionsDeletedAt = await currentSchemaColumnExists(
+    tenantDb,
+    "lead_subscriptions",
+    "deleted_at"
+  );
+  const dealsCreatedByUserId = await currentSchemaColumnExists(
+    tenantDb,
+    "deals",
+    "created_by_user_id"
+  );
+  const leadsCreatedByUserId = await currentSchemaColumnExists(
+    tenantDb,
+    "leads",
+    "created_by_user_id"
+  );
 
   return {
     dealSubscriptions,

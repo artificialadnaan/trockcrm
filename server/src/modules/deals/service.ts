@@ -1086,21 +1086,20 @@ export async function getDeals(tenantDb: TenantDb, filters: DealFilters, userRol
   })();
   const sortOrder = filters.sortDir === "asc" ? asc(sortColumn) : desc(sortColumn);
 
-  // Execute count + data queries
-  const [countResult, dealRows] = await Promise.all([
-    tenantDb.select({ count: sql<number>`count(*)` }).from(deals).where(where),
-    tenantDb
-      .select({
-        ...getTableColumns(deals),
-        companyName: companies.name,
-      })
-      .from(deals)
-      .leftJoin(companies, eq(companies.id, deals.companyId))
-      .where(where)
-      .orderBy(sortOrder)
-      .limit(limit)
-      .offset(offset),
-  ]);
+  // Sequential tenant queries required: tenantDb is a single transaction client
+  // in production, so parallel reads can fail with "client already executing".
+  const countResult = await tenantDb.select({ count: sql<number>`count(*)` }).from(deals).where(where);
+  const dealRows = await tenantDb
+    .select({
+      ...getTableColumns(deals),
+      companyName: companies.name,
+    })
+    .from(deals)
+    .leftJoin(companies, eq(companies.id, deals.companyId))
+    .where(where)
+    .orderBy(sortOrder)
+    .limit(limit)
+    .offset(offset);
 
   const total = Number(countResult[0]?.count ?? 0);
 
@@ -1164,23 +1163,23 @@ export async function getDealDetail(tenantDb: TenantDb, dealId: string, userRole
   const dealWithMetadata = detailDeal ?? deal;
   const currentStage = await getStageByIdForWorkflowRoute(dealWithMetadata.stageId, dealWithMetadata.workflowRoute);
 
-  const [stageHistory, approvals, cos] = await Promise.all([
-    tenantDb
-      .select()
-      .from(dealStageHistory)
-      .where(eq(dealStageHistory.dealId, dealId))
-      .orderBy(desc(dealStageHistory.createdAt)),
-    tenantDb
-      .select()
-      .from(dealApprovals)
-      .where(eq(dealApprovals.dealId, dealId))
-      .orderBy(desc(dealApprovals.createdAt)),
-    tenantDb
-      .select()
-      .from(changeOrders)
-      .where(eq(changeOrders.dealId, dealId))
-      .orderBy(asc(changeOrders.coNumber)),
-  ]);
+  // Sequential tenant queries required: tenantDb is a single transaction client
+  // in production, so parallel reads can fail with "client already executing".
+  const stageHistory = await tenantDb
+    .select()
+    .from(dealStageHistory)
+    .where(eq(dealStageHistory.dealId, dealId))
+    .orderBy(desc(dealStageHistory.createdAt));
+  const approvals = await tenantDb
+    .select()
+    .from(dealApprovals)
+    .where(eq(dealApprovals.dealId, dealId))
+    .orderBy(desc(dealApprovals.createdAt));
+  const cos = await tenantDb
+    .select()
+    .from(changeOrders)
+    .where(eq(changeOrders.dealId, dealId))
+    .orderBy(asc(changeOrders.coNumber));
 
   return {
     ...dealWithMetadata,
@@ -1895,7 +1894,9 @@ export async function getDealsForPipeline(
   const countByStage = new Map<string, number>();
   const valueByStage = new Map<string, number>();
 
-  await Promise.all(responseStages.map(async (stage) => {
+  // Sequential per-stage queries required: tenantDb is a single transaction
+  // client, so parallel stage fan-out fails in production.
+  for (const stage of responseStages) {
     const stageConditions: any[] = [];
     const isTerminalStage =
       stage.isTerminal ||
@@ -1959,7 +1960,7 @@ export async function getDealsForPipeline(
 
     countByStage.set(stage.id, Number(summaryRows[0]?.count ?? 0));
     valueByStage.set(stage.id, Number(summaryRows[0]?.totalValue ?? 0));
-  }));
+  }
 
   // Build response: active pipeline stages + date-filtered terminal stages.
   const pipelineColumns = responseStages.map((stage) => ({
