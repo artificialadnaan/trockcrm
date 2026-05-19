@@ -17,6 +17,8 @@ type TenantDb = NodePgDatabase<typeof schema>;
 const IMAGE_CONTENT_TYPES = new Set(["image/jpeg", "image/png", "image/webp", "image/heic", "image/heif"]);
 const PHOTO_CATEGORY_VALUES = new Set(["before", "after", "progress", "site_visit", "damage", "safety", "delivery", "other"]);
 const PHOTO_ADDRESS_SOURCES = new Set(["exif", "live_gps"]);
+const UUID_PATTERN =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
 function extensionForContentType(contentType: string): string {
   switch (contentType) {
@@ -61,6 +63,39 @@ function iso(value: Date | string | null | undefined): string | null {
   return value instanceof Date ? value.toISOString() : new Date(value).toISOString();
 }
 
+function normalizeOptionalId(value: string | undefined): string | undefined {
+  const normalized = value?.trim();
+  return normalized ? normalized : undefined;
+}
+
+function normalizeCaptureTargetIds(input: {
+  dealId?: string;
+  leadId?: string;
+  opportunityId?: string;
+}) {
+  return {
+    dealId: normalizeOptionalId(input.dealId),
+    leadId: normalizeOptionalId(input.leadId),
+    opportunityId: normalizeOptionalId(input.opportunityId),
+  };
+}
+
+function assertValidUuid(value: string, field: string): void {
+  if (!UUID_PATTERN.test(value)) {
+    throw new AppError(400, `Invalid ${field}: must be a UUID.`);
+  }
+}
+
+function assertValidCaptureTargetIds(input: {
+  dealId?: string;
+  leadId?: string;
+  opportunityId?: string;
+}) {
+  if (input.dealId) assertValidUuid(input.dealId, "dealId");
+  if (input.leadId) assertValidUuid(input.leadId, "leadId");
+  if (input.opportunityId) assertValidUuid(input.opportunityId, "opportunityId");
+}
+
 function toFieldUploadedPhoto(file: any, imageUrl: string | null): FieldPhoto {
   return {
     id: file.id,
@@ -96,7 +131,8 @@ function hasSelectedCaptureTarget(input: {
   leadId?: string;
   opportunityId?: string;
 }) {
-  return Boolean(input.dealId || input.leadId || input.opportunityId);
+  const normalized = normalizeCaptureTargetIds(input);
+  return Boolean(normalized.dealId || normalized.leadId || normalized.opportunityId);
 }
 
 export async function requestFieldPhotoUploadUrl(
@@ -115,11 +151,13 @@ export async function requestFieldPhotoUploadUrl(
     tags?: string[];
   }
 ) {
+  const normalizedTarget = normalizeCaptureTargetIds(input);
+  assertValidCaptureTargetIds(normalizedTarget);
   if (hasSelectedCaptureTarget(input)) {
     await assertAccessibleFieldCaptureTarget(tenantDb, {
-      dealId: input.dealId,
-      leadId: input.leadId,
-      opportunityId: input.opportunityId,
+      dealId: normalizedTarget.dealId,
+      leadId: normalizedTarget.leadId,
+      opportunityId: normalizedTarget.opportunityId,
       userId: input.userId,
       userRole: input.userRole,
     });
@@ -133,13 +171,13 @@ export async function requestFieldPhotoUploadUrl(
     mimeType: input.contentType,
     fileSizeBytes: Number(input.sizeBytes),
     category: "photo",
-    dealId: input.dealId ?? input.opportunityId,
-    leadId: input.leadId,
-    opportunityId: input.opportunityId,
+    dealId: normalizedTarget.dealId ?? normalizedTarget.opportunityId,
+    leadId: normalizedTarget.leadId,
+    opportunityId: normalizedTarget.opportunityId,
     description: input.caption ?? undefined,
     photoCategory,
     tags: input.tags,
-    allowUnassigned: !hasSelectedCaptureTarget(input),
+    allowUnassigned: !hasSelectedCaptureTarget(normalizedTarget),
   });
 
   return {
@@ -172,11 +210,13 @@ export async function confirmFieldPhotoUpload(
     auditContext?: UploadAuditContext;
   }
 ) {
+  const normalizedTarget = normalizeCaptureTargetIds(input);
+  assertValidCaptureTargetIds(normalizedTarget);
   if (hasSelectedCaptureTarget(input)) {
     await assertAccessibleFieldCaptureTarget(tenantDb, {
-      dealId: input.dealId,
-      leadId: input.leadId,
-      opportunityId: input.opportunityId,
+      dealId: normalizedTarget.dealId,
+      leadId: normalizedTarget.leadId,
+      opportunityId: normalizedTarget.opportunityId,
       userId: input.userId,
       userRole: input.userRole,
     });
@@ -185,9 +225,9 @@ export async function confirmFieldPhotoUpload(
   if (!pending) throw new AppError(400, "Invalid or expired upload token");
   if (pending.r2Key !== input.objectKey) throw new AppError(400, "objectKey does not match the issued upload.");
   if (
-    pending.dealId !== (input.dealId ?? input.opportunityId ?? undefined) ||
-    pending.leadId !== (input.leadId ?? undefined) ||
-    pending.opportunityId !== (input.opportunityId ?? undefined) ||
+    pending.dealId !== (normalizedTarget.dealId ?? normalizedTarget.opportunityId ?? undefined) ||
+    pending.leadId !== (normalizedTarget.leadId ?? undefined) ||
+    pending.opportunityId !== (normalizedTarget.opportunityId ?? undefined) ||
     pending.category !== "photo"
   ) {
     throw new AppError(400, "Upload token does not match this project photo upload.");
@@ -303,10 +343,13 @@ export async function assignPendingFieldPhotoTarget(
     opportunityId?: string;
   }
 ) {
+  const normalizedTarget = normalizeCaptureTargetIds(input);
+  assertValidUuid(input.photoId, "photoId");
+  assertValidCaptureTargetIds(normalizedTarget);
   const target = await assertAccessibleFieldCaptureTarget(tenantDb, {
-    dealId: input.dealId,
-    leadId: input.leadId,
-    opportunityId: input.opportunityId,
+    dealId: normalizedTarget.dealId,
+    leadId: normalizedTarget.leadId,
+    opportunityId: normalizedTarget.opportunityId,
     userId: access.userId,
     userRole: access.userRole,
   });
