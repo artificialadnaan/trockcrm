@@ -210,6 +210,7 @@ async function resolveActiveOfficeScope(tenantDb: TenantDb, activeOfficeId: stri
   ]);
 
   return {
+    activeOfficeId,
     officeCode: resolveOfficeCodeFromOffice(office),
     officeUserIds,
   };
@@ -217,16 +218,16 @@ async function resolveActiveOfficeScope(tenantDb: TenantDb, activeOfficeId: stri
 
 function buildLeadOfficeScopeCondition(
   alias: string,
-  input: { officeCode: string | null; officeUserIds: string[] }
+  input: { activeOfficeId: string; officeCode: string | null; officeUserIds: string[] }
 ) {
   const leadAlias = sql.raw(alias);
   const assignedRepFallback =
-    input.officeUserIds.length > 0
+    input.activeOfficeId
       ? sql`${leadAlias}.office_code is null and exists (
           select 1
           from ${users} assigned_rep
           where assigned_rep.id = ${leadAlias}.assigned_rep_id
-            and assigned_rep.office_id in (${sql.join(input.officeUserIds.map((id) => sql`${id}`), sql`, `)})
+            and assigned_rep.office_id = ${input.activeOfficeId}
         )`
       : sql`false`;
 
