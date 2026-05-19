@@ -19,6 +19,7 @@ import {
 } from "@/hooks/use-leads";
 import type { PipelineScope } from "@/lib/pipeline-scope";
 import { cn } from "@/lib/utils";
+import { resolvePreferredScope, writeStoredScopePreference } from "@/lib/scope-preferences";
 
 const SCOPE_OPTIONS = [
   { value: "mine", label: "Mine" },
@@ -47,11 +48,9 @@ export function isImmediateNextStageMove(
 }
 
 function getScope(searchParams: URLSearchParams, role: string | undefined): PipelineScope {
-  if (role === "rep") return "mine";
+  void role;
   const scope = searchParams.get("scope");
   if (scope === "mine" || scope === "team" || scope === "all") return scope;
-  if (role === "director") return "team";
-  if (role === "admin") return "all";
   return "mine";
 }
 
@@ -217,13 +216,18 @@ export function LeadListPage() {
     );
   }
 
-  return <LeadListPageContent role={user.role} />;
+  return <LeadListPageContent role={user.role} userId={user.id} />;
 }
 
-function LeadListPageContent({ role }: { role: string }) {
+function LeadListPageContent({ role, userId }: { role: string; userId: string }) {
   const navigate = useNavigate();
   const [searchParams, setSearchParams] = useSearchParams();
-  const scope = getScope(searchParams, role);
+  const scope = resolvePreferredScope({
+    requestedScope: searchParams.get("scope"),
+    userId,
+    fallback: getScope(searchParams, role),
+  });
+  const scopeOptions = SCOPE_OPTIONS;
   const bucket = searchParams.get("bucket");
   const selectedOwnerId = role === "rep" || scope === "mine" ? "" : searchParams.get("assignedRepId") ?? "";
   const { assignees } = useTaskAssignees();
@@ -259,6 +263,7 @@ function LeadListPageContent({ role }: { role: string }) {
   }));
 
   const updateScope = (nextScope: PipelineScope) => {
+    writeStoredScopePreference(userId, nextScope);
     const next = new URLSearchParams(searchParams);
     next.set("scope", nextScope);
     if (nextScope === "mine") next.delete("assignedRepId");
@@ -287,7 +292,7 @@ function LeadListPageContent({ role }: { role: string }) {
           </p>
         </div>
         <div className="flex flex-wrap items-center gap-3">
-          <ScopeToggle options={SCOPE_OPTIONS} value={scope} onChange={updateScope} ariaLabel="Lead scope" />
+          <ScopeToggle options={scopeOptions} value={scope} onChange={updateScope} ariaLabel="Lead scope" />
           {(role === "admin" || role === "director") && scope !== "mine" ? (
             <Select value={selectedOwnerId || "__all__"} onValueChange={updateOwner}>
               <SelectTrigger className="w-44">
@@ -310,6 +315,16 @@ function LeadListPageContent({ role }: { role: string }) {
         </div>
       </section>
 
+      {scope === "team" ? (
+        <section className="rounded-3xl border border-dashed border-slate-300 bg-slate-50 px-8 py-14 text-center">
+          <p className="text-[11px] font-black uppercase tracking-[0.22em] text-slate-500">Team Scope</p>
+          <h2 className="mt-3 text-2xl font-black tracking-tight text-slate-950">Team view is not yet configured.</h2>
+          <p className="mt-2 text-sm font-medium text-slate-500">Contact your admin to set up team groupings.</p>
+        </section>
+      ) : null}
+
+      {scope === "team" ? null : (
+        <>
       <div className="grid gap-4 md:grid-cols-3">
         <MetricCard eyebrow="Active leads" value={String(activeLeadCount)} badge={`${columns.length} stages`} caption="CRM owned" tone="blue" accent="blue" />
         <MetricCard eyebrow="Estimated value" value={USD_COMPACT(estimatedValue)} badge="Open leads" caption="Qualification" tone="green" accent="green" />
@@ -392,6 +407,8 @@ function LeadListPageContent({ role }: { role: string }) {
           ))}
         </div>
       </section>
+        </>
+      )}
     </div>
   );
 }

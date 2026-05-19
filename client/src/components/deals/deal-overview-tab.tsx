@@ -46,10 +46,7 @@ export function DealOverviewTab({ deal, onDealUpdated }: DealOverviewTabProps) {
     null;
   const canEditAssignment =
     Boolean(user) &&
-    (user?.role === "admin" ||
-      user?.role === "director" ||
-      user?.role === "sales_manager" ||
-      (user?.role === "rep" && deal.assignedRepId === user.id));
+    (user?.role === "admin" || deal.assignedRepId === user?.id);
 
   async function handleAssignmentSave(nextRepId: string) {
     if (!nextRepId || nextRepId === deal.assignedRepId) {

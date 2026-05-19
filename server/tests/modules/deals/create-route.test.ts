@@ -9,6 +9,12 @@ const pipelineServiceMocks = vi.hoisted(() => ({
   getStageBySlug: vi.fn(),
   getActiveProjectTypes: vi.fn(),
 }));
+const accessMocks = vi.hoisted(() => ({
+  assertDealCollaboratorAccess: vi.fn(),
+  assertDealOwnerAccess: vi.fn(),
+  getCollaborativeReadRole: vi.fn((role: string) => role),
+  normalizeCollaborativeScope: vi.fn((_role: string, scope: "mine" | "team" | "all" | undefined) => scope ?? "all"),
+}));
 
 vi.mock("../../../src/events/bus.js", () => ({
   eventBus: {
@@ -35,6 +41,13 @@ vi.mock("../../../src/modules/pipeline/service.js", async () => {
     getActiveProjectTypes: pipelineServiceMocks.getActiveProjectTypes,
   };
 });
+
+vi.mock("../../../src/lib/collaboration-access.js", () => ({
+  assertDealCollaboratorAccess: accessMocks.assertDealCollaboratorAccess,
+  assertDealOwnerAccess: accessMocks.assertDealOwnerAccess,
+  getCollaborativeReadRole: accessMocks.getCollaborativeReadRole,
+  normalizeCollaborativeScope: accessMocks.normalizeCollaborativeScope,
+}));
 
 const { dealRoutes } = await import("../../../src/modules/deals/routes.js");
 const { errorHandler } = await import("../../../src/middleware/error-handler.js");
@@ -92,6 +105,16 @@ function validBody(overrides: Record<string, unknown> = {}) {
 describe("POST /api/deals create context", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    accessMocks.assertDealCollaboratorAccess.mockResolvedValue({
+      id: "deal-1",
+      assignedRepId: "rep-1",
+      officeId: "office-dallas",
+    });
+    accessMocks.assertDealOwnerAccess.mockResolvedValue({
+      id: "deal-1",
+      assignedRepId: "rep-1",
+      officeId: "office-dallas",
+    });
     pipelineServiceMocks.getStageBySlug.mockResolvedValue({
       id: "stage-opportunity",
       name: "Opportunity",

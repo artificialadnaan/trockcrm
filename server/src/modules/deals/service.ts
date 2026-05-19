@@ -16,11 +16,13 @@ import {
   tasks,
   jobQueue,
   projectTypeConfig,
+  offices,
 } from "@trock-crm/shared/schema";
 import {
   DOMAIN_EVENTS,
   type DealContractSignedEventPayload,
   type WorkflowRoute,
+  resolveOfficeCodeFromOffice,
 } from "@trock-crm/shared/types";
 import type * as schema from "@trock-crm/shared/schema";
 import { db } from "../../db.js";
@@ -33,6 +35,7 @@ import { createAssignmentTaskIfNeeded } from "../assignment-tasks/service.js";
 import { generateDealNumberForProject } from "../../services/projectNumber.js";
 import { isContractSignedHandoffEnabled } from "../../config/feature-flags.js";
 import { resolveActiveOfficeUserIds, resolveTeamRepIds } from "../shared/team-scope.js";
+import { buildAliasedDealMineVisibilityCondition, buildDealMineVisibilityCondition } from "../shared/mine-visibility.js";
 import { resolveLeadSourceDisplayValue } from "../leads/source-control.js";
 import { resolveDealCreationPolicy, type DealCreationOrigin } from "./direct-create-rules.js";
 import { logActivity, type AuditContext } from "../audit/audit-logger.js";
@@ -52,6 +55,23 @@ function sqlStringList(values: readonly string[]) {
 
 function nonTerminalMirroredStageCondition() {
   return sql`COALESCE(${deals.bidBoardStageSlug}, '') NOT IN (${sqlStringList(TERMINAL_STAGE_SLUGS)})`;
+}
+
+async function resolveActiveOfficeScope(tenantDb: TenantDb, activeOfficeId: string) {
+  const [office, officeUserIds] = await Promise.all([
+    db
+      .select({ slug: offices.slug, name: offices.name })
+      .from(offices)
+      .where(eq(offices.id, activeOfficeId))
+      .limit(1)
+      .then((rows) => rows[0] ?? null),
+    resolveActiveOfficeUserIds(tenantDb, activeOfficeId),
+  ]);
+
+  return {
+    officeCode: resolveOfficeCodeFromOffice(office),
+    officeUserIds,
+  };
 }
 
 export interface DealFilters {
@@ -714,8 +734,8 @@ async function buildDealWorkspaceScope(
     filters.push(...terminalDateConditions);
   }
 
-  if (input.role === "rep" || input.scope === "mine") {
-    filters.push(sql`d.assigned_rep_id = ${input.userId}`);
+  if (input.scope === "mine") {
+    filters.push(buildAliasedDealMineVisibilityCondition("d", input.userId));
   } else if (input.scope === "team") {
     const teamRepIds = await resolveTeamRepIds(tenantDb, input.userId, input.activeOfficeId);
     filters.push(teamRepIds.length > 0 ? sql`d.assigned_rep_id IN (${sqlList(teamRepIds)})` : sql`false`);
@@ -904,7 +924,7 @@ export async function getDeals(tenantDb: TenantDb, filters: DealFilters, userRol
   const page = filters.page ?? 1;
   const limit = filters.limit ?? 50;
   const offset = (page - 1) * limit;
-  const scope = userRole === "rep" ? "mine" : filters.scope ?? "all";
+  const scope = filters.scope ?? "mine";
 
   // Build conditions array
   const conditions: any[] = [];
@@ -934,17 +954,19 @@ export async function getDeals(tenantDb: TenantDb, filters: DealFilters, userRol
     conditions.push(eq(deals.isActive, filters.isActive ?? true));
   }
 
-  if (filters.activeOfficeId) {
-    const officeUserIds = await resolveActiveOfficeUserIds(tenantDb, filters.activeOfficeId);
-    conditions.push(
-      officeUserIds.length > 0
-        ? or(inArray(deals.assignedRepId, officeUserIds), isNull(deals.assignedRepId))
-        : sql`false`
-    );
-  }
+    if (filters.activeOfficeId) {
+      const { officeCode, officeUserIds } = await resolveActiveOfficeScope(tenantDb, filters.activeOfficeId);
+      conditions.push(
+        officeCode && officeUserIds.length > 0
+          ? eq(deals.officeCode, officeCode)
+          : !officeCode && officeUserIds.length > 0
+            ? inArray(deals.assignedRepId, officeUserIds)
+            : sql`false`
+      );
+    }
 
   if (scope === "mine") {
-    conditions.push(eq(deals.assignedRepId, userId));
+    conditions.push(buildDealMineVisibilityCondition(userId));
   } else if (scope === "team") {
     const teamUserIds = await resolveTeamRepIds(tenantDb, userId, filters.activeOfficeId ?? null);
     conditions.push(teamUserIds.length > 0 ? inArray(deals.assignedRepId, teamUserIds) : sql`false`);
@@ -1193,6 +1215,7 @@ export async function createDeal(tenantDb: TenantDb, input: CreateDealInput) {
       projectTypeId: input.projectTypeId ?? null,
       regionId: input.regionId ?? null,
       source: lineage.source,
+      createdByUserId: input.actorUserId ?? null,
       winProbability: input.winProbability ?? null,
       expectedCloseDate: input.expectedCloseDate ?? null,
       workflowRoute,
@@ -1793,11 +1816,8 @@ export async function getDealsForPipeline(
 
   const commonConditions: any[] = [];
 
-  // Reps see only their own deals
-  if (userRole === "rep") {
-    commonConditions.push(eq(deals.assignedRepId, userId));
-  } else if (filters?.scope === "mine") {
-    commonConditions.push(eq(deals.assignedRepId, userId));
+  if (filters?.scope === "mine") {
+    commonConditions.push(buildDealMineVisibilityCondition(userId));
   } else if (filters?.scope === "team") {
     const teamRepIds = await resolveTeamRepIds(tenantDb, userId, filters.activeOfficeId ?? null);
     if (filters.assignedRepId) {

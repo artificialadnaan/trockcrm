@@ -14,7 +14,7 @@ vi.mock("../../../src/modules/pipeline/service.js", () => ({
 }));
 
 vi.mock("@trock-crm/shared/schema", async () => {
-  const [dealsModule, approvalsModule, changeOrdersModule, historyModule, pipelineStageModule, usersModule, companiesModule, projectTypeConfigModule] =
+  const [dealsModule, approvalsModule, changeOrdersModule, historyModule, pipelineStageModule, usersModule, companiesModule, contactsModule, projectTypeConfigModule] =
     await Promise.all([
       import("../../../../shared/src/schema/tenant/deals.js"),
       import("../../../../shared/src/schema/tenant/deal-approvals.js"),
@@ -23,6 +23,7 @@ vi.mock("@trock-crm/shared/schema", async () => {
       import("../../../../shared/src/schema/public/pipeline-stage-config.js"),
       import("../../../../shared/src/schema/public/users.js"),
       import("../../../../shared/src/schema/tenant/companies.js"),
+      import("../../../../shared/src/schema/tenant/contacts.js"),
       import("../../../../shared/src/schema/public/project-type-config.js"),
     ]);
 
@@ -34,6 +35,7 @@ vi.mock("@trock-crm/shared/schema", async () => {
     ...pipelineStageModule,
     ...usersModule,
     ...companiesModule,
+    ...contactsModule,
     ...projectTypeConfigModule,
   };
 });

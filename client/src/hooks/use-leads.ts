@@ -163,6 +163,7 @@ export interface LeadRecord {
   isActive: boolean;
   createdAt: string;
   updatedAt: string;
+  isWatching?: boolean;
   companyName: string | null;
   property: {
     id: string;

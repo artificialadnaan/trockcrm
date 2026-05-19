@@ -16,6 +16,7 @@ const mocks = vi.hoisted(() => ({
   presetToDateRangeMock: vi.fn(),
   dashboardRefetchMock: vi.fn(),
   performanceRefetchMock: vi.fn(),
+  useAuthMock: vi.fn(),
 }));
 
 vi.mock("@/hooks/use-director-dashboard", () => ({
@@ -25,6 +26,10 @@ vi.mock("@/hooks/use-director-dashboard", () => ({
 
 vi.mock("@/hooks/use-rep-performance", () => ({
   useRepPerformance: mocks.useRepPerformanceMock,
+}));
+
+vi.mock("@/lib/auth", () => ({
+  useAuth: mocks.useAuthMock,
 }));
 
 vi.mock("@/components/ai/director-blind-spot-list", () => ({
@@ -75,24 +80,24 @@ function normalize(html: string) {
   return html.replace(/\s+/g, " ").trim();
 }
 
-function renderPageHtml() {
+function renderPageHtml(initialEntry = "/?scope=all") {
   return normalize(
     renderToStaticMarkup(
-      <MemoryRouter>
+      <MemoryRouter initialEntries={[initialEntry]}>
         <DirectorDashboardPage />
       </MemoryRouter>
     )
   );
 }
 
-async function renderPageDom() {
+async function renderPageDom(initialEntry = "/?scope=all") {
   const container = document.createElement("div");
   document.body.appendChild(container);
   let root: Root;
   await act(async () => {
     root = createRoot(container);
     root.render(
-      <MemoryRouter>
+      <MemoryRouter initialEntries={[initialEntry]}>
         <DirectorDashboardPage />
       </MemoryRouter>
     );
@@ -118,6 +123,12 @@ describe("DirectorDashboardPage", () => {
       from: preset === "qtd" ? "2026-04-01" : `2026-${preset}-from`,
       to: preset === "qtd" ? "2026-05-08" : `2026-${preset}-to`,
     }));
+    mocks.useAuthMock.mockReturnValue({
+      user: {
+        id: "director-1",
+        role: "director",
+      },
+    });
     mocks.useRepPerformanceMock.mockReturnValue({
       data: {
         reps: [
@@ -372,6 +383,12 @@ describe("DirectorDashboardPage", () => {
           totalValue: 910000,
           totalCount: 6,
         },
+        scopeSummary: {
+          activePipeline: { count: 4, totalValue: 610000 },
+          won: { count: 1, totalValue: 125000 },
+          atRisk: { count: 1, totalValue: 275000 },
+          stale: { count: 1, totalValue: 275000 },
+        },
         crmOwnedProgression: [
           { workflowBucket: "lead", workflowRoute: "normal", stageName: "Qualified Lead", itemCount: 2, totalValue: 125000 },
           { workflowBucket: "opportunity", workflowRoute: "service", stageName: "Opportunity", itemCount: 3, totalValue: 450000 },
@@ -469,7 +486,7 @@ describe("DirectorDashboardPage", () => {
   it("routes at-risk deal drilldowns to the filtered deals list", () => {
     const html = renderPageHtml();
 
-    expect(html).toContain('href="/deals?filter=at_risk&amp;period=qtd&amp;scope=team"');
+    expect(html).toContain('href="/deals?filter=at_risk&amp;period=qtd&amp;scope=all"');
     expect(html).not.toContain('href="/reports?range=qtd#stale-deals"');
   });
 
@@ -487,9 +504,9 @@ describe("DirectorDashboardPage", () => {
   it("links the summary cards and drill-down badges to their filtered destinations", () => {
     const html = renderPageHtml();
 
-    expect(html).toContain('href="/deals?filter=active_pipeline&amp;period=qtd&amp;scope=team"');
-    expect(html).toContain('href="/deals?filter=won&amp;period=qtd&amp;scope=team"');
-    expect(html).toContain('href="/deals?filter=at_risk&amp;period=qtd&amp;scope=team"');
+    expect(html).toContain('href="/deals?filter=active_pipeline&amp;period=qtd&amp;scope=all"');
+    expect(html).toContain('href="/deals?filter=won&amp;period=qtd&amp;scope=all"');
+    expect(html).toContain('href="/deals?filter=at_risk&amp;period=qtd&amp;scope=all"');
     expect(html).toContain('href="/reports/performance/forecast-accuracy?range=qtd"');
     expect(html).toContain('href="/reports/performance/rep-activity?range=qtd"');
   });
@@ -500,7 +517,19 @@ describe("DirectorDashboardPage", () => {
     expect(html).toContain("Closing");
     expect(html).toContain("1 this quarter");
     expect(html).toContain('aria-label="View recent closed deals"');
-    expect(html).toContain('href="/deals?filter=won&amp;period=qtd&amp;scope=team"');
+    expect(html).toContain('href="/deals?filter=won&amp;period=qtd&amp;scope=all"');
+  });
+
+  it("shows the Team empty state without collapsing request scope", () => {
+    const html = renderPageHtml("/?scope=team");
+
+    expect(mocks.useDirectorDashboardMock).toHaveBeenCalledWith(
+      { from: "2026-04-01", to: "2026-05-08" },
+      "qtd",
+      "team"
+    );
+    expect(html).toContain("Team view is not yet configured.");
+    expect(html).toContain("Contact your admin to set up team groupings.");
   });
 
   it("preserves the selected dashboard period in drill-down links", async () => {
@@ -522,7 +551,7 @@ describe("DirectorDashboardPage", () => {
         link.getAttribute("aria-label")?.includes("View activity report")
       );
 
-      expect(activeLink?.getAttribute("href")).toBe("/deals?filter=active_pipeline&period=ytd&scope=team");
+      expect(activeLink?.getAttribute("href")).toBe("/deals?filter=active_pipeline&period=ytd&scope=all");
       expect(activityLink?.getAttribute("href")).toBe("/reports/performance/rep-activity?range=ytd");
     } finally {
       await cleanup();
@@ -583,7 +612,7 @@ describe("DirectorDashboardPage", () => {
       expect(mocks.useDirectorDashboardMock).toHaveBeenLastCalledWith({
         from: "2026-04-01",
         to: "2026-05-08",
-      }, "qtd");
+      }, "qtd", "all");
 
       await act(async () => {
         container.querySelector<HTMLButtonElement>("[data-testid='preset-mtd']")?.click();
@@ -592,7 +621,7 @@ describe("DirectorDashboardPage", () => {
       expect(mocks.useDirectorDashboardMock).toHaveBeenLastCalledWith({
         from: "2026-mtd-from",
         to: "2026-mtd-to",
-      }, "mtd");
+      }, "mtd", "all");
       expect(mocks.useRepPerformanceMock).toHaveBeenLastCalledWith("mtd");
     } finally {
       await cleanup();
@@ -621,7 +650,7 @@ describe("DirectorDashboardPage", () => {
       expect(mocks.useDirectorDashboardMock).toHaveBeenLastCalledWith({
         from: "2026-last_month-from",
         to: "2026-last_month-to",
-      }, "last_month");
+      }, "last_month", "all");
       expect(mocks.useRepPerformanceMock).toHaveBeenLastCalledWith("last_month");
     } finally {
       await cleanup();
@@ -675,7 +704,7 @@ describe("DirectorDashboardPage", () => {
     const html = renderPageHtml();
 
     expect(html).toContain("2 flagged deals across 2 reps");
-    expect(html).toContain('href="/deals?filter=at_risk&amp;period=qtd&amp;scope=team"');
+    expect(html).toContain('href="/deals?filter=at_risk&amp;period=qtd&amp;scope=all"');
     expect(html).not.toContain('href="/reports#stale-deals"');
   });
 

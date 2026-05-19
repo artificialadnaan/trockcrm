@@ -198,6 +198,20 @@ describe("dashboard routes", () => {
       to: "2026-03-31",
       officeId: "office-1",
       periodKind: "last_quarter",
+      scope: "mine",
+      viewerUserId: "director-1",
     });
+  });
+
+  it("returns a Team placeholder payload without coercing the route to mine", async () => {
+    const getDirectorDashboardMock = (await import("../../../src/modules/dashboard/service.js")).getDirectorDashboard as any;
+
+    const response = await request(buildDirectorApp())
+      .get("/api/dashboard/director?scope=team&periodKind=mtd");
+
+    expect(response.status).toBe(200);
+    expect(response.body).toEqual({ data: null });
+    expect(getDirectorDashboardMock).not.toHaveBeenCalled();
+    expect(commitTransactionMock).toHaveBeenCalledOnce();
   });
 });

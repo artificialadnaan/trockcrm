@@ -189,6 +189,7 @@ export const deals = pgTable(
     isActive: boolean("is_active").default(true).notNull(),
     hubspotDealId: varchar("hubspot_deal_id", { length: 50 }),
     companycamProjectId: varchar("companycam_project_id", { length: 50 }),
+    createdByUserId: uuid("created_by_user_id"),
     propertyLat: numeric("property_lat", { precision: 10, scale: 7 }),
     propertyLng: numeric("property_lng", { precision: 10, scale: 7 }),
     estimatingSubstage: estimatingSubstageEnum("estimating_substage"),

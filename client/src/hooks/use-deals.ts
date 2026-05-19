@@ -194,6 +194,7 @@ export interface Deal {
   isHubspotSourced: boolean;
   createdAt: string;
   updatedAt: string;
+  isWatching?: boolean;
 }
 
 export interface DealDetail extends Deal {

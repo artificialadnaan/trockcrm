@@ -1,4 +1,4 @@
-import { eq, and, sql, gte, lte, inArray } from "drizzle-orm";
+import { eq, and, sql, gte, lte, inArray, asc } from "drizzle-orm";
 import type { NodePgDatabase } from "drizzle-orm/node-postgres";
 import {
   auditLog,
@@ -33,9 +33,15 @@ import {
   getFollowUpCompliance,
   getDdVsPipeline,
   getWinLossRatioByRep,
+  type PipelineSummaryRow,
+  type StaleDealRow,
 } from "../reports/service.js";
 import { getMyCleanupQueue } from "../admin/cleanup-queue-service.js";
 import { getMigrationSummary } from "../migration/service.js";
+import {
+  buildAliasedDealMineVisibilityCondition,
+  buildAliasedLeadMineVisibilityCondition,
+} from "../shared/mine-visibility.js";
 
 type TenantDb = NodePgDatabase<typeof schema>;
 type ExecuteRows<T> = { rows: T[] } | T[];
@@ -53,6 +59,26 @@ function nonTerminalDealStageSql() {
     psc.is_terminal = false
     AND COALESCE(d.bid_board_stage_slug, psc.slug) NOT IN (${sqlSlugList(TERMINAL_STAGE_SLUGS)})
   `;
+}
+
+function leadScopeFilterSql(alias: string, options: { repId?: string; viewerUserId?: string }) {
+  if (options.viewerUserId) {
+    return sql`AND ${buildAliasedLeadMineVisibilityCondition(alias, options.viewerUserId)}`;
+  }
+  if (options.repId) {
+    return sql`AND ${sql.raw(alias)}.assigned_rep_id = ${options.repId}`;
+  }
+  return sql``;
+}
+
+function dealScopeFilterSql(alias: string, options: { repId?: string; viewerUserId?: string }) {
+  if (options.viewerUserId) {
+    return sql`AND ${buildAliasedDealMineVisibilityCondition(alias, options.viewerUserId)}`;
+  }
+  if (options.repId) {
+    return sql`AND ${sql.raw(alias)}.assigned_rep_id = ${options.repId}`;
+  }
+  return sql``;
 }
 // Intentionally includes canonical stage-v2 slugs plus historical aliases so
 // dashboard counts stay accurate while legacy rows still exist during rollout.
@@ -337,13 +363,11 @@ export interface MyCleanupSummary {
 
 async function getStaleLeadWatchlist(
   tenantDb: TenantDb,
-  options: { repId?: string } = {}
+  options: { repId?: string; viewerUserId?: string } = {}
 ): Promise<StaleLeadDashboardRow[]> {
   // Current-state operational watchlist: intentionally anchored to wall-clock NOW(),
   // not the A5a rep-performance snapshot period boundary.
-  const repFilter = options.repId
-    ? sql`AND l.assigned_rep_id = ${options.repId}`
-    : sql``;
+  const repFilter = leadScopeFilterSql("l", options);
 
   const result = await tenantDb.execute<StaleLeadWatchlistSqlRow>(sql`
     SELECT
@@ -396,14 +420,10 @@ async function getStaleLeadWatchlist(
 
 async function getCrmOwnedProgression(
   tenantDb: TenantDb,
-  options: { repId?: string } = {}
+  options: { repId?: string; viewerUserId?: string } = {}
 ): Promise<DashboardCrmOwnedProgressionRow[]> {
-  const leadRepFilter = options.repId
-    ? sql`AND l.assigned_rep_id = ${options.repId}`
-    : sql``;
-  const dealRepFilter = options.repId
-    ? sql`AND d.assigned_rep_id = ${options.repId}`
-    : sql``;
+  const leadRepFilter = leadScopeFilterSql("l", options);
+  const dealRepFilter = dealScopeFilterSql("d", options);
 
   const result = await tenantDb.execute(sql`
     SELECT
@@ -461,13 +481,11 @@ async function getCrmOwnedProgression(
 
 async function getDownstreamBottlenecks(
   tenantDb: TenantDb,
-  options: { repId?: string } = {}
+  options: { repId?: string; viewerUserId?: string } = {}
 ): Promise<DashboardDownstreamBottleneckRow[]> {
   // Current-state operational bottlenecks: intentionally anchored to wall-clock NOW(),
   // not the A5a rep-performance snapshot period boundary.
-  const repFilter = options.repId
-    ? sql`AND d.assigned_rep_id = ${options.repId}`
-    : sql``;
+  const repFilter = dealScopeFilterSql("d", options);
 
   const result = await tenantDb.execute(sql`
     SELECT
@@ -593,7 +611,12 @@ function buildFunnelBuckets(leadRows: any[], dealRows: any[]): FunnelBucketSumma
   ];
 }
 
-async function getRepFunnelBuckets(tenantDb: TenantDb, repId: string): Promise<FunnelBucketSummary[]> {
+async function getRepFunnelBuckets(
+  tenantDb: TenantDb,
+  options: { repId?: string; viewerUserId?: string }
+): Promise<FunnelBucketSummary[]> {
+  const leadRepFilter = leadScopeFilterSql("l", options);
+  const dealRepFilter = dealScopeFilterSql("d", options);
   const [leadResult, dealResult] = await Promise.all([
     tenantDb.execute(sql`
       SELECT
@@ -604,7 +627,7 @@ async function getRepFunnelBuckets(tenantDb: TenantDb, repId: string): Promise<F
       WHERE l.status = 'open'
         AND l.is_active = true
         AND psc.workflow_family = 'lead'
-        AND l.assigned_rep_id = ${repId}
+        ${leadRepFilter}
       GROUP BY psc.slug
     `),
     tenantDb.execute(sql`
@@ -615,7 +638,7 @@ async function getRepFunnelBuckets(tenantDb: TenantDb, repId: string): Promise<F
       FROM deals d
       JOIN pipeline_stage_config psc ON psc.id = d.stage_id
       WHERE d.is_active = true
-        AND d.assigned_rep_id = ${repId}
+        ${dealRepFilter}
         AND psc.slug IN (${sql.join(ESTIMATING_PROGRESS_STAGE_SLUGS.map((slug) => sql`${slug}`), sql`, `)})
       GROUP BY psc.slug
     `),
@@ -1169,7 +1192,7 @@ export async function getRepDashboard(
       JOIN pipeline_stage_config psc ON psc.id = l.stage_id
       WHERE l.is_active = true
         AND l.status = 'open'
-        AND l.assigned_rep_id = ${userId}
+        AND ${buildAliasedLeadMineVisibilityCondition("l", userId)}
         AND NOT psc.is_terminal
     `),
 
@@ -1183,7 +1206,7 @@ export async function getRepDashboard(
       FROM deals d
       JOIN pipeline_stage_config psc ON psc.id = d.stage_id
       WHERE d.is_active = true
-        AND d.assigned_rep_id = ${userId}
+        AND ${buildAliasedDealMineVisibilityCondition("d", userId)}
         AND ${nonTerminalDealStageSql()}
     `),
 
@@ -1231,16 +1254,16 @@ export async function getRepDashboard(
       FROM deals d
       JOIN pipeline_stage_config psc ON psc.id = d.stage_id
       WHERE d.is_active = true
-        AND d.assigned_rep_id = ${userId}
+        AND ${buildAliasedDealMineVisibilityCondition("d", userId)}
         AND ${nonTerminalDealStageSql()}
         AND psc.is_active_pipeline = true
       GROUP BY d.stage_id, psc.name, psc.color, psc.display_order
       ORDER BY psc.display_order ASC
     `),
 
-    getStaleLeadWatchlist(tenantDb, { repId: userId }),
-    getCrmOwnedProgression(tenantDb, { repId: userId }),
-    getDownstreamBottlenecks(tenantDb, { repId: userId }),
+    getStaleLeadWatchlist(tenantDb, { viewerUserId: userId }),
+    getCrmOwnedProgression(tenantDb, { viewerUserId: userId }),
+    getDownstreamBottlenecks(tenantDb, { viewerUserId: userId }),
 
     tenantDb.execute(sql`
       SELECT
@@ -1258,7 +1281,7 @@ export async function getRepDashboard(
       JOIN pipeline_stage_config psc ON psc.id = l.stage_id
       WHERE l.is_active = true
         AND l.status = 'open'
-        AND l.assigned_rep_id = ${userId}
+        AND ${buildAliasedLeadMineVisibilityCondition("l", userId)}
         AND NOT psc.is_terminal
       ORDER BY l.updated_at DESC
       LIMIT 5
@@ -1281,12 +1304,12 @@ export async function getRepDashboard(
       LEFT JOIN properties p ON p.id = d.property_id
       JOIN pipeline_stage_config psc ON psc.id = d.stage_id
       WHERE d.is_active = true
-        AND d.assigned_rep_id = ${userId}
+        AND ${buildAliasedDealMineVisibilityCondition("d", userId)}
         AND ${nonTerminalDealStageSql()}
       ORDER BY d.updated_at DESC
       LIMIT 5
     `),
-    getRepFunnelBuckets(tenantDb, userId),
+    getRepFunnelBuckets(tenantDb, { viewerUserId: userId }),
     getMyCleanupQueue(tenantDb, userId),
     getRepCommissionSummary(tenantDb, userId, activityRangeStartDate, today),
 
@@ -1572,6 +1595,12 @@ export interface DirectorDashboardData {
     pipelineCount: number;
     totalValue: number;
     totalCount: number;
+  };
+  scopeSummary?: {
+    activePipeline: { count: number; totalValue: number };
+    won: { count: number; totalValue: number };
+    atRisk: { count: number; totalValue: number };
+    stale: { count: number; totalValue: number };
   };
 }
 
@@ -1865,8 +1894,9 @@ function buildAiCoachingPrompts(snapshots: RepPerformanceSnapshotRow[]): AiCoach
 
 async function getRecentCloses(
   tenantDb: TenantDb,
-  options: { from: string; to: string }
+  options: { from: string; to: string; repId?: string; viewerUserId?: string }
 ): Promise<RecentClose[]> {
+  const repFilter = dealScopeFilterSql("d", options);
   const result = await tenantDb.execute(sql`
     SELECT
       d.id AS deal_id,
@@ -1887,6 +1917,7 @@ async function getRecentCloses(
       AND psc.slug IN (${sql.join([...WON_STAGE_SLUGS, ...LEGACY_WON_STAGE_SLUGS, ...LOST_STAGE_SLUGS, ...LEGACY_LOST_STAGE_SLUGS].map((slug) => sql`${slug}`), sql`, `)})
       AND COALESCE(d.actual_close_date, d.contract_signed_date, d.contract_signed_at::date, d.lost_at::date, d.updated_at::date) >= ${options.from}::date
       AND COALESCE(d.actual_close_date, d.contract_signed_date, d.contract_signed_at::date, d.lost_at::date, d.updated_at::date) <= ${options.to}::date
+      ${repFilter}
     ORDER BY closed_at DESC NULLS LAST, d.name ASC
     LIMIT 12
   `);
@@ -1901,6 +1932,173 @@ async function getRecentCloses(
     dealValue: Number(row.deal_value ?? 0),
     closedAt: dateOnly(row.closed_at),
   }));
+}
+
+async function getWonCloseSummary(
+  tenantDb: TenantDb,
+  options: { from: string; to: string; repId?: string; viewerUserId?: string }
+): Promise<{ count: number; totalValue: number }> {
+  const repFilter = dealScopeFilterSql("d", options);
+  const result = await tenantDb.execute(sql`
+    SELECT
+      COUNT(*)::int AS won_count,
+      COALESCE(SUM(COALESCE(d.awarded_amount, d.bid_estimate, d.dd_estimate, 0)), 0)::numeric AS won_value
+    FROM ${deals} d
+    JOIN ${pipelineStageConfig} psc ON psc.id = d.stage_id
+    WHERE d.is_active = true
+      AND psc.slug IN (${sql.join([...WON_STAGE_SLUGS, ...LEGACY_WON_STAGE_SLUGS].map((slug) => sql`${slug}`), sql`, `)})
+      AND COALESCE(d.actual_close_date, d.contract_signed_date, d.contract_signed_at::date, d.updated_at::date) >= ${options.from}::date
+      AND COALESCE(d.actual_close_date, d.contract_signed_date, d.contract_signed_at::date, d.updated_at::date) <= ${options.to}::date
+      ${repFilter}
+  `);
+
+  const [row] = rowsFromExecute<any>(result);
+  return {
+    count: Number(row?.won_count ?? 0),
+    totalValue: Number(row?.won_value ?? 0),
+  };
+}
+
+async function getScopedPipelineSummary(
+  tenantDb: TenantDb,
+  options: { includeDd?: boolean; repId?: string; viewerUserId?: string } = {}
+): Promise<PipelineSummaryRow[]> {
+  const includeDd = options.includeDd ?? false;
+  const stages = await db
+    .select()
+    .from(pipelineStageConfig)
+    .where(eq(pipelineStageConfig.isTerminal, false))
+    .orderBy(asc(pipelineStageConfig.displayOrder));
+
+  const filteredStages = includeDd ? stages : stages.filter((s) => s.isActivePipeline);
+  const stageIds = filteredStages.map((s) => s.id);
+  if (stageIds.length === 0) return [];
+
+  const scopeFilter = dealScopeFilterSql("d", options);
+  const result = await tenantDb.execute(sql`
+    SELECT
+      d.stage_id,
+      COUNT(*)::int AS deal_count,
+      COALESCE(SUM(COALESCE(d.awarded_amount, d.bid_estimate, d.dd_estimate, 0)), 0)::numeric AS total_value
+    FROM deals d
+    WHERE d.is_active = true
+      AND COALESCE(d.is_test_data, false) = false
+      AND d.stage_id IN (${sql.join(stageIds.map((id) => sql`${id}`), sql`, `)})
+      AND COALESCE(d.bid_board_stage_slug, '') NOT IN (${sqlSlugList(TERMINAL_STAGE_SLUGS)})
+      ${scopeFilter}
+    GROUP BY d.stage_id
+  `);
+
+  const rows = rowsFromExecute<any>(result);
+  const dataMap = new Map<string, { dealCount: number; totalValue: number }>();
+  for (const row of rows) {
+    dataMap.set(String(row.stage_id), {
+      dealCount: Number(row.deal_count ?? 0),
+      totalValue: Number(row.total_value ?? 0),
+    });
+  }
+
+  return filteredStages.map((stage) => ({
+    stageId: stage.id,
+    stageName: stage.name,
+    stageColor: stage.color,
+    displayOrder: stage.displayOrder,
+    isActivePipeline: stage.isActivePipeline,
+    dealCount: dataMap.get(stage.id)?.dealCount ?? 0,
+    totalValue: dataMap.get(stage.id)?.totalValue ?? 0,
+  }));
+}
+
+async function getDashboardStaleDeals(
+  tenantDb: TenantDb,
+  options: { repId?: string; viewerUserId?: string } = {}
+): Promise<StaleDealRow[]> {
+  const scopeFilter = dealScopeFilterSql("d", options);
+  const result = await tenantDb.execute(sql`
+    SELECT
+      d.id AS deal_id,
+      d.deal_number,
+      d.name AS deal_name,
+      d.stage_id,
+      psc.name AS stage_name,
+      d.assigned_rep_id,
+      u.display_name AS rep_name,
+      COALESCE(d.bid_board_stage_entered_at, d.stage_entered_at) AS stage_entered_at,
+      EXTRACT(DAY FROM NOW() - COALESCE(d.bid_board_stage_entered_at, d.stage_entered_at))::int AS days_in_stage,
+      COALESCE(mirror_psc.stale_threshold_days, psc.stale_threshold_days) AS stale_threshold_days,
+      COALESCE(d.awarded_amount, d.bid_estimate, d.dd_estimate, 0)::numeric AS deal_value,
+      d.workflow_route,
+      d.bid_board_stage_slug,
+      d.bid_board_stage_status,
+      d.region_classification
+    FROM deals d
+    JOIN pipeline_stage_config psc ON psc.id = d.stage_id
+    LEFT JOIN pipeline_stage_config mirror_psc
+      ON mirror_psc.slug = COALESCE(d.bid_board_stage_slug, psc.slug)
+    JOIN users u ON u.id = d.assigned_rep_id
+    WHERE d.is_active = true
+      AND COALESCE(d.is_test_data, false) = false
+      AND ${nonTerminalDealStageSql()}
+      AND COALESCE(mirror_psc.stale_threshold_days, psc.stale_threshold_days) IS NOT NULL
+      AND EXTRACT(DAY FROM NOW() - COALESCE(d.bid_board_stage_entered_at, d.stage_entered_at))
+        > COALESCE(mirror_psc.stale_threshold_days, psc.stale_threshold_days)
+      ${scopeFilter}
+    ORDER BY days_in_stage DESC
+  `);
+
+  const rows = rowsFromExecute<any>(result);
+  return rows.map((r) => ({
+    dealId: r.deal_id,
+    dealNumber: r.deal_number,
+    dealName: r.deal_name,
+    stageId: r.stage_id,
+    stageName: resolveMirroredStageLabel(r.bid_board_stage_slug, r.stage_name),
+    assignedRepId: r.assigned_rep_id,
+    repName: r.rep_name,
+    stageEnteredAt: r.stage_entered_at,
+    daysInStage: Number(r.days_in_stage ?? 0),
+    staleThresholdDays: Number(r.stale_threshold_days ?? 0),
+    dealValue: Number(r.deal_value ?? 0),
+    workflowRoute: r.workflow_route,
+    bidBoardStageSlug: r.bid_board_stage_slug ?? null,
+    bidBoardStageStatus: r.bid_board_stage_status ?? null,
+    regionClassification: r.region_classification ?? null,
+  }));
+}
+
+async function buildDirectorScopeSummary(
+  tenantDb: TenantDb,
+  options: { from: string; to: string; repId?: string; viewerUserId?: string }
+) {
+  const [pipelineRows, staleDeals, won] = await Promise.all([
+    getScopedPipelineSummary(tenantDb, { includeDd: false, repId: options.repId, viewerUserId: options.viewerUserId }),
+    getDashboardStaleDeals(tenantDb, options.repId || options.viewerUserId ? { repId: options.repId, viewerUserId: options.viewerUserId } : {}),
+    getWonCloseSummary(tenantDb, options),
+  ]);
+
+  const activePipeline = pipelineRows.reduce(
+    (acc, row) => ({
+      count: acc.count + row.dealCount,
+      totalValue: acc.totalValue + row.totalValue,
+    }),
+    { count: 0, totalValue: 0 }
+  );
+  const atRisk = staleDeals.reduce(
+    (acc, deal) => ({
+      count: acc.count + 1,
+      totalValue: acc.totalValue + deal.dealValue,
+    }),
+    { count: 0, totalValue: 0 }
+  );
+  const stale = staleDeals.reduce(
+    (acc, deal) => ({
+      count: acc.count + 1,
+      totalValue: acc.totalValue + deal.dealValue,
+    }),
+    { count: 0, totalValue: 0 }
+  );
+
+  return { activePipeline, won, atRisk, stale };
 }
 
 export async function getDirectorCommissionWorkspace(
@@ -1958,11 +2156,19 @@ export async function getDirectorCommissionWorkspace(
  */
 export async function getDirectorDashboard(
   tenantDb: TenantDb,
-  options: { from?: string; to?: string; officeId: string; periodKind?: RepPerformancePeriodKind }
+  options: {
+    from?: string;
+    to?: string;
+    officeId: string;
+    periodKind?: RepPerformancePeriodKind;
+    scope?: "mine" | "all";
+    viewerUserId?: string;
+  }
 ): Promise<DirectorDashboardData> {
   const year = new Date().getFullYear();
   const from = options.from ?? `${year}-01-01`;
   const to = options.to ?? `${year}-12-31`;
+  const scopedViewerUserId = options.scope === "mine" ? options.viewerUserId : undefined;
 
   const [
     repCardsResult,
@@ -1978,6 +2184,7 @@ export async function getDirectorDashboard(
     repCommissionRows,
     repPerformanceSnapshots,
     recentCloses,
+    scopeSummary,
   ] = await Promise.all([
     // 1. Per-rep performance cards
     buildRepPerformanceCards(tenantDb, { from, to }),
@@ -2005,6 +2212,7 @@ export async function getDirectorDashboard(
     getDirectorRepCommissionRows(tenantDb, { from, to }),
     getRepPerformanceSnapshots(tenantDb, options.officeId, options.periodKind ?? "mtd"),
     getRecentCloses(tenantDb, { from, to }),
+    buildDirectorScopeSummary(tenantDb, { from, to, viewerUserId: scopedViewerUserId }),
   ]);
 
   return {
@@ -2060,6 +2268,7 @@ export async function getDirectorDashboard(
     aiCoachingPrompts: buildAiCoachingPrompts(repPerformanceSnapshots.rows),
     recentCloses,
     ddVsPipeline: ddResult,
+    scopeSummary,
   };
 }
 

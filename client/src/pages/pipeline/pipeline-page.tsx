@@ -16,7 +16,9 @@ import { TerminalDateFilterControl } from "@/components/pipeline/terminal-date-f
 import { DealsListSection } from "@/components/deals/deals-list-section";
 import { KanbanScrollColumn } from "@/components/deals/kanban-scroll-column";
 import { KanbanDealCard, getDealDisplayNumber } from "@/components/deals/kanban-deal-card";
+import { ScopeToggle, type ScopeToggleOption } from "@/components/shared/scope-toggle";
 import { api } from "@/lib/api";
+import { useAuth } from "@/lib/auth";
 import { formatCurrencyCompact, daysInStage } from "@/lib/deal-utils";
 import {
   buildDealStageWorkspacePath,
@@ -32,6 +34,8 @@ import {
   type TerminalOutcome,
 } from "@/lib/pipeline-terminal-filters";
 import type { Deal } from "@/hooks/use-deals";
+import type { PipelineScope } from "@/lib/pipeline-scope";
+import { resolvePreferredScope, writeStoredScopePreference } from "@/lib/scope-preferences";
 
 // Re-exports kept for test compatibility (pipeline-page.test.ts imports these
 // helpers; they live in the shared deals-list-section module now).
@@ -45,6 +49,12 @@ export {
   getPipelineListQueryState,
   getVisibleTerminalStageIds,
 } from "@/components/deals/deals-list-section";
+
+const SCOPE_OPTIONS = [
+  { value: "mine", label: "Mine" },
+  { value: "team", label: "Team" },
+  { value: "all", label: "All" },
+] as const satisfies readonly ScopeToggleOption<PipelineScope>[];
 
 interface PipelineColumn {
   stage: {
@@ -213,8 +223,44 @@ function DroppableColumn({
 }
 
 export function PipelinePage() {
-  const navigate = useNavigate();
+  const { user, loading: authLoading } = useAuth();
   const [searchParams, setSearchParams] = useSearchParams();
+  const scope = resolvePreferredScope({
+    requestedScope: searchParams.get("scope"),
+    userId: user?.id,
+    fallback: "mine",
+  });
+  const updateScope = (nextScope: PipelineScope) => {
+    writeStoredScopePreference(user?.id, nextScope);
+    const next = new URLSearchParams(searchParams);
+    next.set("scope", nextScope);
+    setSearchParams(next);
+  };
+
+  if (authLoading || !user) {
+    return <div className="space-y-4 p-6 text-sm font-semibold text-gray-500">Loading pipeline...</div>;
+  }
+
+  if (scope === "team") {
+    return (
+      <div className="-m-4 space-y-5 bg-[#f5f6f8] p-4 md:-m-6 md:p-6">
+        <header className="flex items-center justify-between gap-4 rounded-lg border border-gray-200 bg-white px-6 py-5">
+          <div className="min-w-0">
+            <h1 className="text-2xl font-semibold text-gray-900">Deal Pipeline</h1>
+            <p className="mt-0.5 text-xs text-gray-500">Team view is not yet configured.</p>
+          </div>
+          <ScopeToggle options={SCOPE_OPTIONS} value={scope} onChange={updateScope} ariaLabel="Pipeline scope" />
+        </header>
+        <section className="rounded-3xl border border-dashed border-slate-300 bg-white px-8 py-14 text-center">
+          <p className="text-[11px] font-black uppercase tracking-[0.22em] text-slate-500">Team Scope</p>
+          <h2 className="mt-3 text-2xl font-black tracking-tight text-slate-950">Team view is not yet configured.</h2>
+          <p className="mt-2 text-sm font-medium text-slate-500">Contact your admin to set up team groupings.</p>
+        </section>
+      </div>
+    );
+  }
+
+  const navigate = useNavigate();
   const [columns, setColumns] = useState<PipelineColumn[]>([]);
   const [terminalStages, setTerminalStages] = useState<TerminalStageInfo[]>([]);
   const [loading, setLoading] = useState(true);
@@ -245,7 +291,7 @@ export function PipelinePage() {
       const data = await api<{
         pipelineColumns: PipelineColumn[];
         terminalStages: TerminalStageInfo[];
-      }>(buildPipelineRequestPath(showDd, terminalDateFilters));
+      }>(buildPipelineRequestPath(showDd, terminalDateFilters, scope));
       setColumns(data.pipelineColumns);
       setTerminalStages(data.terminalStages ?? []);
       setLastRefreshed(new Date());
@@ -255,7 +301,7 @@ export function PipelinePage() {
     } finally {
       setLoading(false);
     }
-  }, [showDd, terminalDateFilters]);
+  }, [scope, showDd, terminalDateFilters]);
 
   const updateTerminalDateFilter = useCallback((outcome: TerminalOutcome, filter: TerminalDateFilter) => {
     writeTerminalDateFilter(outcome, filter);
@@ -411,6 +457,7 @@ export function PipelinePage() {
         </div>
 
         <div className="flex items-center gap-4">
+          <ScopeToggle options={SCOPE_OPTIONS} value={scope} onChange={updateScope} ariaLabel="Pipeline scope" />
           <span className="hidden text-xs tabular-nums text-gray-500 md:inline">
             {refreshedLabel}
           </span>

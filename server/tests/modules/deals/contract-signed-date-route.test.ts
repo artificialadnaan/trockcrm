@@ -5,6 +5,12 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 const dealsServiceMocks = vi.hoisted(() => ({
   setDealContractSignedDate: vi.fn(),
 }));
+const accessMocks = vi.hoisted(() => ({
+  assertDealCollaboratorAccess: vi.fn(),
+  assertDealOwnerAccess: vi.fn(),
+  getCollaborativeReadRole: vi.fn((role: string) => role),
+  normalizeCollaborativeScope: vi.fn((_role: string, scope: "mine" | "team" | "all" | undefined) => scope ?? "all"),
+}));
 
 vi.mock("../../../src/events/bus.js", () => ({
   eventBus: {
@@ -22,6 +28,13 @@ vi.mock("../../../src/modules/deals/service.js", async () => {
     setDealContractSignedDate: dealsServiceMocks.setDealContractSignedDate,
   };
 });
+
+vi.mock("../../../src/lib/collaboration-access.js", () => ({
+  assertDealCollaboratorAccess: accessMocks.assertDealCollaboratorAccess,
+  assertDealOwnerAccess: accessMocks.assertDealOwnerAccess,
+  getCollaborativeReadRole: accessMocks.getCollaborativeReadRole,
+  normalizeCollaborativeScope: accessMocks.normalizeCollaborativeScope,
+}));
 
 const { dealRoutes } = await import("../../../src/modules/deals/routes.js");
 const { errorHandler } = await import("../../../src/middleware/error-handler.js");
@@ -62,6 +75,17 @@ function createApp(user: TestUser) {
 
 describe("PATCH /api/deals/:id/contract-signed-date — RBAC", () => {
   beforeEach(() => {
+    vi.clearAllMocks();
+    accessMocks.assertDealCollaboratorAccess.mockResolvedValue({
+      id: "deal-1",
+      assignedRepId: "rep-1",
+      officeId: "office-1",
+    });
+    accessMocks.assertDealOwnerAccess.mockResolvedValue({
+      id: "deal-1",
+      assignedRepId: "rep-1",
+      officeId: "office-1",
+    });
     dealsServiceMocks.setDealContractSignedDate.mockReset();
     dealsServiceMocks.setDealContractSignedDate.mockResolvedValue({
       id: "deal-1",
@@ -77,11 +101,17 @@ describe("PATCH /api/deals/:id/contract-signed-date — RBAC", () => {
     expect(res.status).toBe(200);
     expect(res.body.deal.contractSignedDate).toBe("2026-09-15");
     expect(dealsServiceMocks.setDealContractSignedDate).toHaveBeenCalledWith(
-      expect.anything(),
+      expect.any(Object),
       "deal-1",
       "2026-09-15",
       "admin-1",
-      "office-1"
+      "office-1",
+      expect.objectContaining({
+        actor: expect.objectContaining({
+          userId: "admin-1",
+          role: "admin",
+        }),
+      })
     );
   });
 
@@ -128,11 +158,17 @@ describe("PATCH /api/deals/:id/contract-signed-date — RBAC", () => {
       .send({ date: null });
     expect(res.status).toBe(200);
     expect(dealsServiceMocks.setDealContractSignedDate).toHaveBeenCalledWith(
-      expect.anything(),
+      expect.any(Object),
       "deal-1",
       null,
       "admin-1",
-      "office-1"
+      "office-1",
+      expect.objectContaining({
+        actor: expect.objectContaining({
+          userId: "admin-1",
+          role: "admin",
+        }),
+      })
     );
   });
 });

@@ -761,6 +761,12 @@ describe("DealDetailPage", () => {
   });
 
   it("edit button navigates to edit page", () => {
+    mocks.useAuthMock.mockReturnValueOnce({
+      user: {
+        id: "rep-1",
+        role: "rep",
+      },
+    });
     const html = renderPage();
 
     expect(html).toContain('href="/deals/deal-1/edit"');
@@ -798,6 +804,12 @@ describe("DealDetailPage", () => {
   });
 
   it("shows Bid Board ownership messaging while preserving valid CRM stage controls", () => {
+    mocks.useAuthMock.mockReturnValueOnce({
+      user: {
+        id: "rep-1",
+        role: "rep",
+      },
+    });
     const html = renderPage();
 
     expect(html).toContain("Bid Board now owns downstream progression");
@@ -1313,6 +1325,12 @@ describe("DealDetailPage", () => {
   });
 
   it("keeps estimating manually reachable for owned deals that are still before the boundary", () => {
+    mocks.useAuthMock.mockReturnValueOnce({
+      user: {
+        id: "rep-1",
+        role: "rep",
+      },
+    });
     mocks.useDealDetailMock.mockReturnValueOnce({
       loading: false,
       error: null,
@@ -1379,6 +1397,12 @@ describe("DealDetailPage", () => {
   });
 
   it("treats legacy estimating as the handoff boundary when the server reports a canonical handoff slug", () => {
+    mocks.useAuthMock.mockReturnValueOnce({
+      user: {
+        id: "rep-1",
+        role: "rep",
+      },
+    });
     mocks.useDealDetailMock.mockReturnValueOnce({
       loading: false,
       error: null,

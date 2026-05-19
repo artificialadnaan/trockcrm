@@ -250,8 +250,10 @@ export function DealDetailPage() {
   const [rfpReadinessStatus, setRfpReadinessStatus] = useState<"draft" | "ready" | "activated" | null>(null);
   const [rfpReadinessLoading, setRfpReadinessLoading] = useState(false);
   const [rfpReadinessRefreshKey, setRfpReadinessRefreshKey] = useState(0);
+  const [watchPending, setWatchPending] = useState(false);
   const currentStage = stages.find((s) => s.id === deal?.stageId);
   const isDirectorOrAdmin = user?.role === "director" || user?.role === "admin";
+  const viewerOwnsDeal = deal?.assignedRepId === user?.id;
   const bidBoardOwnership = deal?.bidBoardOwnership;
   const isBidBoardOwned = Boolean(deal?.isBidBoardOwned || bidBoardOwnership?.isOwned);
   const workflowRoute = deal?.workflowRoute ?? "normal";
@@ -672,18 +674,47 @@ export function DealDetailPage() {
           {address}
         </span>
       ) : null}
+      {deal.assignedRepName ? <span>Assigned to {deal.assignedRepName}</span> : null}
       <span>{stageAgeDays == null ? "Stage age unavailable" : `${stageAgeDays}d in stage`}</span>
     </>
   );
+  const handleWatchToggle = async () => {
+    if (!deal?.id || watchPending) return;
+    setWatchPending(true);
+    try {
+      if (deal.isWatching) {
+        await api(`/deals/${deal.id}/watch`, { method: "DELETE" });
+        toast.success("Deal removed from Mine");
+      } else {
+        await api(`/deals/${deal.id}/watch`, { method: "POST" });
+        toast.success("Deal added to Mine");
+      }
+      await refetch();
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Failed to update watch state");
+    } finally {
+      setWatchPending(false);
+    }
+  };
   const actionsSlot = (
     <>
-      <Link
-        to={`/deals/${deal.id}/edit`}
-        className={cn(buttonVariants({ variant: "outline", size: "sm" }))}
-      >
-        <Edit className="h-4 w-4" />
-        Edit
-      </Link>
+      <Button variant="outline" size="sm" onClick={handleWatchToggle} disabled={watchPending}>
+        {deal.isWatching ? "Watching" : "Watch this deal"}
+      </Button>
+      {viewerOwnsDeal ? (
+        <Link
+          to={`/deals/${deal.id}/edit`}
+          className={cn(buttonVariants({ variant: "outline", size: "sm" }))}
+        >
+          <Edit className="h-4 w-4" />
+          Edit
+        </Link>
+      ) : (
+        <Button variant="outline" size="sm" disabled title="Only the assigned rep can edit">
+          <Edit className="h-4 w-4" />
+          Edit
+        </Button>
+      )}
       {procoreProjectUrl ? (
         <a
           href={procoreProjectUrl}
@@ -715,7 +746,7 @@ export function DealDetailPage() {
           ) : null}
         </div>
       ) : null}
-      {!currentStage?.isTerminal && (
+      {!currentStage?.isTerminal && viewerOwnsDeal && (
         <DropdownMenu>
           <DropdownMenuTrigger
             render={<Button>
@@ -769,7 +800,7 @@ export function DealDetailPage() {
           </DropdownMenuContent>
         </DropdownMenu>
       )}
-      {currentStage?.isTerminal && isDirectorOrAdmin && !isBidBoardOwned && (
+      {currentStage?.isTerminal && viewerOwnsDeal && !isBidBoardOwned && (
         <DropdownMenu>
           <DropdownMenuTrigger
             render={<Button variant="outline">Reopen Deal</Button>}
@@ -796,11 +827,18 @@ export function DealDetailPage() {
           </Button>}
         />
         <DropdownMenuContent align="end">
-          <DropdownMenuItem onClick={() => navigate(`/deals/${deal.id}/edit`)}>
-            <Edit className="h-4 w-4 mr-2" />
-            Edit Deal
-          </DropdownMenuItem>
-          {isDirectorOrAdmin && (
+          {viewerOwnsDeal ? (
+            <DropdownMenuItem onClick={() => navigate(`/deals/${deal.id}/edit`)}>
+              <Edit className="h-4 w-4 mr-2" />
+              Edit Deal
+            </DropdownMenuItem>
+          ) : (
+            <DropdownMenuItem disabled title="Only the assigned rep can edit">
+              <Edit className="h-4 w-4 mr-2" />
+              Edit Deal
+            </DropdownMenuItem>
+          )}
+          {(viewerOwnsDeal || user?.role === "admin") && (
             <DropdownMenuItem
               onClick={handleDelete}
               className="text-red-600"
@@ -823,6 +861,11 @@ export function DealDetailPage() {
   );
   const tabContent = (
     <div className="space-y-4">
+      {!viewerOwnsDeal ? (
+        <div className="rounded-lg border border-slate-200 bg-slate-50 px-4 py-3 text-sm font-medium text-slate-600">
+          Assigned to {deal.assignedRepName ?? deal.assignedRepId ?? "another rep"}. You can collaborate with notes, activity, files, photos, and emails, but only the assigned rep can edit.
+        </div>
+      ) : null}
       <DealTimersBanner dealId={deal.id} />
       {isBidBoardOwned && bidBoardOwnership && (
         <BidBoardOwnershipBanner

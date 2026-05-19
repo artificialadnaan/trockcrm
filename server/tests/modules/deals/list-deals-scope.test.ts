@@ -1,4 +1,4 @@
-import { companies, deals, userOfficeAccess, users } from "@trock-crm/shared/schema";
+import { companies, deals, offices, userOfficeAccess, users } from "@trock-crm/shared/schema";
 import { describe, expect, it, vi } from "vitest";
 import { getDeals } from "../../../src/modules/deals/service.js";
 
@@ -14,12 +14,25 @@ vi.mock("@trock-crm/shared/schema", async () => import("../../../../shared/src/s
 vi.mock("@trock-crm/shared/types", async () => import("../../../../shared/src/types/index.js"));
 vi.mock("../../../src/db.js", () => ({
   db: {
-    select: vi.fn(() => ({
-      from: vi.fn().mockReturnThis(),
-      where: vi.fn().mockReturnThis(),
-      orderBy: vi.fn().mockReturnThis(),
-      then: vi.fn((resolve: (value: unknown[]) => unknown) => resolve(dbState.stages)),
-    })),
+    select: vi.fn(() => {
+      let sourceTable: unknown = null;
+      const builder = {
+        from: vi.fn((table: unknown) => {
+          sourceTable = table;
+          return builder;
+        }),
+        where: vi.fn().mockReturnThis(),
+        orderBy: vi.fn().mockReturnThis(),
+        limit: vi.fn().mockReturnThis(),
+        then: vi.fn((resolve: (value: unknown[]) => unknown) => {
+          if (sourceTable === offices) {
+            return resolve([{ slug: "dallas", name: "Dallas" }]);
+          }
+          return resolve(dbState.stages);
+        }),
+      };
+      return builder;
+    }),
   },
   pool: {},
 }));
@@ -50,6 +63,41 @@ function extractValues(chunk: unknown): unknown[] {
   return [];
 }
 
+function flattenText(value: unknown): string {
+  if (typeof value === "string") return value;
+  if (!value || typeof value !== "object") return "";
+  if (Array.isArray(value)) return value.map(flattenText).join("");
+  if (Array.isArray((value as { queryChunks?: unknown[] }).queryChunks)) {
+    return (value as { queryChunks: unknown[] }).queryChunks.map(flattenText).join("");
+  }
+  if ("name" in (value as Record<string, unknown>) && typeof (value as { name?: unknown }).name === "string") {
+    return String((value as { name: string }).name);
+  }
+  if ("value" in (value as Record<string, unknown>)) {
+    return flattenText((value as { value: unknown }).value);
+  }
+  return Object.values(value as Record<string, unknown>).map(flattenText).join("");
+}
+
+function collectScalarValues(value: unknown, into: unknown[] = []): unknown[] {
+  if (Array.isArray(value)) {
+    for (const item of value) collectScalarValues(item, into);
+    return into;
+  }
+  if (!value || typeof value !== "object") {
+    into.push(value);
+    return into;
+  }
+  if (Array.isArray((value as { queryChunks?: unknown[] }).queryChunks)) {
+    for (const item of (value as { queryChunks: unknown[] }).queryChunks) collectScalarValues(item, into);
+    return into;
+  }
+  if ("value" in (value as Record<string, unknown>)) {
+    collectScalarValues((value as { value: unknown }).value, into);
+  }
+  return into;
+}
+
 function extractValuesUntilNextColumn(chunks: unknown[], startIndex: number) {
   const values: unknown[] = [];
   for (let index = startIndex; index < chunks.length; index += 1) {
@@ -73,6 +121,35 @@ function containsValue(value: unknown, expected: string, seen = new Set<unknown>
 
 function applyWhere(rows: Row[], condition: unknown) {
   const chunks = flattenChunks(condition);
+  const conditionText = flattenText(condition).toLowerCase();
+  const hasExpandedMinePredicate =
+    conditionText.includes("created_by_user_id") &&
+    conditionText.includes("performed_by_user_id") &&
+    conditionText.includes("ds.user_id");
+  const candidateUserIds = new Set(
+    rows.flatMap((row) => [
+      row.assignedRepId,
+      row.createdByUserId,
+      ...(Array.isArray(row.activityPerformedByUserIds) ? row.activityPerformedByUserIds : []),
+      ...(Array.isArray(row.subscriberUserIds) ? row.subscriberUserIds : []),
+    ]).filter((value): value is string => typeof value === "string")
+  );
+  const mineScopeUserId = collectScalarValues(condition).find(
+    (value): value is string => typeof value === "string" && candidateUserIds.has(value)
+  );
+  if (hasExpandedMinePredicate && typeof mineScopeUserId === "string") {
+    return rows.filter((row) => {
+      const activityUsers = Array.isArray(row.activityPerformedByUserIds) ? row.activityPerformedByUserIds : [];
+      const subscriberUsers = Array.isArray(row.subscriberUserIds) ? row.subscriberUserIds : [];
+      return (
+        row.assignedRepId === mineScopeUserId ||
+        row.createdByUserId === mineScopeUserId ||
+        activityUsers.includes(mineScopeUserId) ||
+        subscriberUsers.includes(mineScopeUserId)
+      );
+    });
+  }
+
   if (
     chunks.some(
       (chunk) =>
@@ -195,16 +272,21 @@ function createTenantDb() {
       { id: "rep-inactive", reportsTo: "director-1", officeId: "office-1", isActive: false },
     ],
     deals: [
-      { id: "deal-self", assignedRepId: "director-1", isActive: true, updatedAt: new Date("2026-05-07T12:00:00Z") },
-      { id: "deal-team-1", assignedRepId: "rep-team-1", isActive: true, updatedAt: new Date("2026-05-07T12:00:00Z") },
-      { id: "deal-team-2", assignedRepId: "rep-team-2", isActive: true, updatedAt: new Date("2026-05-07T12:00:00Z") },
-      { id: "deal-other-office", assignedRepId: "rep-other-office", isActive: true, updatedAt: new Date("2026-05-07T12:00:00Z") },
-      { id: "deal-unassigned", assignedRepId: null, isActive: true, updatedAt: new Date("2026-05-07T12:00:00Z") },
-      { id: "deal-inactive-rep", assignedRepId: "rep-inactive", isActive: true, updatedAt: new Date("2026-05-07T12:00:00Z") },
-      { id: "deal-rep-self", assignedRepId: "rep-self", isActive: true, updatedAt: new Date("2026-05-07T12:00:00Z") },
+      { id: "deal-self", assignedRepId: "director-1", createdByUserId: "director-1", officeCode: "dfw", isActive: true, updatedAt: new Date("2026-05-07T12:00:00Z") },
+      { id: "deal-team-1", assignedRepId: "rep-team-1", createdByUserId: "rep-team-1", officeCode: "dfw", isActive: true, updatedAt: new Date("2026-05-07T12:00:00Z") },
+      { id: "deal-team-2", assignedRepId: "rep-team-2", createdByUserId: "rep-team-2", officeCode: "dfw", isActive: true, updatedAt: new Date("2026-05-07T12:00:00Z") },
+      { id: "deal-other-office", assignedRepId: "rep-other-office", createdByUserId: "rep-other-office", officeCode: "dfw", isActive: true, updatedAt: new Date("2026-05-07T12:00:00Z") },
+      { id: "deal-unassigned", assignedRepId: null, createdByUserId: "director-1", officeCode: "dfw", isActive: true, updatedAt: new Date("2026-05-07T12:00:00Z") },
+      { id: "deal-inactive-rep", assignedRepId: "rep-inactive", createdByUserId: "rep-inactive", officeCode: "dfw", isActive: true, updatedAt: new Date("2026-05-07T12:00:00Z") },
+      { id: "deal-rep-self", assignedRepId: "rep-self", createdByUserId: "rep-self", officeCode: "dfw", isActive: true, updatedAt: new Date("2026-05-07T12:00:00Z") },
+      { id: "deal-created", assignedRepId: "rep-team-1", createdByUserId: "director-1", officeCode: "dfw", isActive: true, updatedAt: new Date("2026-05-07T12:00:00Z") },
+      { id: "deal-activity", assignedRepId: "rep-team-2", createdByUserId: "rep-team-2", officeCode: "dfw", activityPerformedByUserIds: ["director-1"], isActive: true, updatedAt: new Date("2026-05-07T12:00:00Z") },
+      { id: "deal-subscribed", assignedRepId: "rep-team-2", createdByUserId: "rep-team-2", officeCode: "dfw", subscriberUserIds: ["director-1"], isActive: true, updatedAt: new Date("2026-05-07T12:00:00Z") },
       {
         id: "deal-company",
         assignedRepId: "rep-team-1",
+        createdByUserId: "rep-team-1",
+        officeCode: "dfw",
         companyId: "company-1",
         companyName: "Acme Apartments",
         isActive: true,
@@ -245,6 +327,10 @@ describe("getDeals scope filtering", () => {
   it("returns only the director's own deals for scope=mine", async () => {
     await expect(listIds({ role: "director", userId: "director-1", scope: "mine" })).resolves.toEqual([
       "deal-self",
+      "deal-unassigned",
+      "deal-created",
+      "deal-activity",
+      "deal-subscribed",
     ]);
   });
 
@@ -253,6 +339,9 @@ describe("getDeals scope filtering", () => {
       "deal-team-1",
       "deal-team-2",
       "deal-other-office",
+      "deal-created",
+      "deal-activity",
+      "deal-subscribed",
       "deal-company",
     ]);
   });
@@ -266,6 +355,9 @@ describe("getDeals scope filtering", () => {
       "deal-unassigned",
       "deal-inactive-rep",
       "deal-rep-self",
+      "deal-created",
+      "deal-activity",
+      "deal-subscribed",
       "deal-company",
     ]);
   });
@@ -282,9 +374,19 @@ describe("getDeals scope filtering", () => {
     ).resolves.toEqual([]);
   });
 
-  it("forces reps to their own deals regardless of requested scope", async () => {
+  it("allows reps to request all-office scope explicitly", async () => {
     await expect(listIds({ role: "rep", userId: "rep-self", scope: "all" })).resolves.toEqual([
+      "deal-self",
+      "deal-team-1",
+      "deal-team-2",
+      "deal-other-office",
+      "deal-unassigned",
+      "deal-inactive-rep",
       "deal-rep-self",
+      "deal-created",
+      "deal-activity",
+      "deal-subscribed",
+      "deal-company",
     ]);
   });
 

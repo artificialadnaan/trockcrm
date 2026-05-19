@@ -53,9 +53,17 @@ router.get(
   requireRole("admin", "director"),
   async (req, res, next) => {
     try {
+      const rawScope = req.query.scope;
+      const scope = rawScope === "all" || rawScope === "mine" || rawScope === "team" ? rawScope : "mine";
       const periodKind = (req.query.periodKind ?? "mtd") as string;
       if (!REP_PERFORMANCE_PERIOD_KINDS.includes(periodKind as RepPerformancePeriodKind)) {
         throw new AppError(400, "Invalid rep performance period kind");
+      }
+
+      if (scope === "team") {
+        await req.commitTransaction!();
+        res.json({ data: null });
+        return;
       }
 
       const data = await getDirectorDashboard(req.tenantDb!, {
@@ -63,6 +71,8 @@ router.get(
         to: req.query.to as string | undefined,
         officeId: req.user!.activeOfficeId ?? req.user!.officeId,
         periodKind: periodKind as RepPerformancePeriodKind,
+        scope,
+        viewerUserId: req.user!.id,
       });
       await req.commitTransaction!();
       res.json({ data });

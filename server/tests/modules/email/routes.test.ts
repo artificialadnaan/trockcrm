@@ -38,6 +38,12 @@ const propertyServiceMocks = vi.hoisted(() => ({
   getPropertyDetail: vi.fn(),
 }));
 
+const accessMocks = vi.hoisted(() => ({
+  assertDealCollaboratorAccess: vi.fn(),
+  assertLeadCollaboratorAccess: vi.fn(),
+  getCollaborativeReadRole: vi.fn((role: string) => role),
+}));
+
 vi.mock("../../../src/modules/email/service.js", async () => {
   const actual = await vi.importActual<typeof import("../../../src/modules/email/service.js")>(
     "../../../src/modules/email/service.js"
@@ -117,6 +123,12 @@ vi.mock("../../../src/modules/properties/service.js", async () => {
     getPropertyDetail: propertyServiceMocks.getPropertyDetail,
   };
 });
+
+vi.mock("../../../src/lib/collaboration-access.js", () => ({
+  assertDealCollaboratorAccess: accessMocks.assertDealCollaboratorAccess,
+  assertLeadCollaboratorAccess: accessMocks.assertLeadCollaboratorAccess,
+  getCollaborativeReadRole: accessMocks.getCollaborativeReadRole,
+}));
 
 const { emailRoutes } = await import("../../../src/modules/email/routes.js");
 
@@ -295,6 +307,8 @@ describe("email routes", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     emailServiceMocks.assertCanMutateEmailThread.mockResolvedValue(undefined);
+    accessMocks.assertDealCollaboratorAccess.mockResolvedValue({ id: "deal-1", assignedRepId: "rep-1", sourceLeadId: null });
+    accessMocks.assertLeadCollaboratorAccess.mockResolvedValue({ id: "lead-1", assignedRepId: "rep-1" });
   });
 
   it("rejects invalid assignment queue pagination params with 400s", async () => {
@@ -969,7 +983,6 @@ describe("email routes", () => {
 
   it("routes manual deal association through the generic entity resolver", async () => {
     emailServiceMocks.getEmailById.mockResolvedValue({ id: "email-1", userId: "director-1" });
-    dealServiceMocks.getDealById.mockResolvedValue({ id: "deal-1" });
 
     const { req, res } = await invokeRoute({
       method: "post",
@@ -978,7 +991,7 @@ describe("email routes", () => {
       body: { dealId: "deal-1" },
     });
 
-    expect(dealServiceMocks.getDealById).toHaveBeenCalledWith(expect.any(Object), "deal-1", "director", "director-1");
+    expect(accessMocks.assertDealCollaboratorAccess).toHaveBeenCalledWith(expect.any(Object), "deal-1", expect.objectContaining({ id: "director-1" }));
     expect(emailServiceMocks.associateEmailToEntity).toHaveBeenCalledWith(
       expect.any(Object),
       "email-1",
@@ -1008,12 +1021,11 @@ describe("email routes", () => {
     ).rejects.toThrow("You do not have permission to modify this email");
 
     expect(emailServiceMocks.associateEmailToEntity).not.toHaveBeenCalled();
-    expect(dealServiceMocks.getDealById).not.toHaveBeenCalled();
+    expect(accessMocks.assertDealCollaboratorAccess).not.toHaveBeenCalled();
   });
 
   it("routes manual lead association through the generic entity resolver", async () => {
     emailServiceMocks.getEmailById.mockResolvedValue({ id: "email-1", userId: "director-1" });
-    leadServiceMocks.getLeadById.mockResolvedValue({ id: "lead-1" });
 
     const { req, res } = await invokeRoute({
       method: "post",
@@ -1022,7 +1034,7 @@ describe("email routes", () => {
       body: { assignedEntityType: "lead", assignedEntityId: "lead-1" },
     });
 
-    expect(leadServiceMocks.getLeadById).toHaveBeenCalledWith(expect.any(Object), "lead-1", "director", "director-1");
+    expect(accessMocks.assertLeadCollaboratorAccess).toHaveBeenCalledWith(expect.any(Object), "lead-1", expect.objectContaining({ id: "director-1" }));
     expect(emailServiceMocks.associateEmailToEntity).toHaveBeenCalledWith(
       expect.any(Object),
       "email-1",
@@ -1289,6 +1301,8 @@ describe("email routes", () => {
     emailServiceMocks.getEmailById.mockResolvedValue({ id: "email-1", userId: "rep-1", contactId: null });
     dealServiceMocks.getDealById.mockResolvedValue(null);
     leadServiceMocks.getLeadById.mockResolvedValue(null);
+    accessMocks.assertDealCollaboratorAccess.mockRejectedValueOnce(new Error("Deal not found"));
+    accessMocks.assertLeadCollaboratorAccess.mockRejectedValueOnce(new Error("Lead not found"));
     companyServiceMocks.getCompanyById.mockResolvedValue(null);
     contactServiceMocks.getContactById.mockResolvedValue(null);
     propertyServiceMocks.getPropertyDetail.mockResolvedValue(null);
@@ -1386,7 +1400,7 @@ describe("email routes", () => {
   });
 
   it("treats deal 403s as not-visible when resolving thread access", async () => {
-    dealServiceMocks.getDealById.mockRejectedValueOnce(
+    accessMocks.assertDealCollaboratorAccess.mockRejectedValueOnce(
       Object.assign(new Error("Forbidden"), { statusCode: 403 })
     );
     emailServiceMocks.getEmailThread.mockImplementation(
@@ -1408,7 +1422,7 @@ describe("email routes", () => {
   });
 
   it("still propagates non-403 deal lookup errors during thread access checks", async () => {
-    dealServiceMocks.getDealById.mockRejectedValueOnce(
+    accessMocks.assertDealCollaboratorAccess.mockRejectedValueOnce(
       Object.assign(new Error("Missing"), { statusCode: 404 })
     );
     emailServiceMocks.getEmailThread.mockImplementation(

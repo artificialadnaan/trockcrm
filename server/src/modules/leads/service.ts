@@ -1,4 +1,4 @@
-import { and, asc, desc, eq, ilike, inArray, or, sql } from "drizzle-orm";
+import { and, asc, desc, eq, ilike, inArray, or, sql, isNull } from "drizzle-orm";
 import type { NodePgDatabase } from "drizzle-orm/node-postgres";
 import {
   CANONICAL_LEAD_STAGE_SLUGS,
@@ -12,12 +12,14 @@ import {
   pipelineStageConfig,
   projectTypeConfig,
   properties,
+  offices,
   userOfficeAccess,
   users,
 } from "@trock-crm/shared/schema";
 import type * as schema from "@trock-crm/shared/schema";
 import {
   toCanonicalLeadStageSlug,
+  resolveOfficeCodeFromOffice,
   type WorkflowFamily,
 } from "@trock-crm/shared/types";
 import { db } from "../../db.js";
@@ -43,6 +45,7 @@ import {
 import { isExistingCustomer } from "./verification-service.js";
 import { resolveLeadSourceForWrite } from "./source-control.js";
 import { resolveActiveOfficeUserIds, resolveTeamRepIds } from "../shared/team-scope.js";
+import { buildAliasedLeadMineVisibilityCondition, buildLeadMineVisibilityCondition } from "../shared/mine-visibility.js";
 import {
   LEAD_BUDGET_STATUSES,
   LEAD_POC_ROLES,
@@ -190,6 +193,23 @@ type TransitionSuccessResult = {
 type WorkspaceScope = "mine" | "team" | "all";
 
 const LEAD_BUDGET_STATUS_VALUES = new Set<LeadBudgetStatus>(LEAD_BUDGET_STATUSES);
+
+async function resolveActiveOfficeScope(tenantDb: TenantDb, activeOfficeId: string) {
+  const [office, officeUserIds] = await Promise.all([
+    db
+      .select({ slug: offices.slug, name: offices.name })
+      .from(offices)
+      .where(eq(offices.id, activeOfficeId))
+      .limit(1)
+      .then((rows) => rows[0] ?? null),
+    resolveActiveOfficeUserIds(tenantDb, activeOfficeId),
+  ]);
+
+  return {
+    officeCode: resolveOfficeCodeFromOffice(office),
+    officeUserIds,
+  };
+}
 
 const LEAD_POC_ROLE_VALUES = new Set<LeadPocRole>(LEAD_POC_ROLES);
 
@@ -911,8 +931,8 @@ async function buildLeadWorkspaceScope(tenantDb: TenantDb, input: LeadBoardInput
     sql`u.office_id = ${input.activeOfficeId}`,
   ];
 
-  if (input.role === "rep" || input.scope === "mine") {
-    filters.push(sql`l.assigned_rep_id = ${input.userId}`);
+  if (input.scope === "mine") {
+    filters.push(buildAliasedLeadMineVisibilityCondition("l", input.userId));
   } else if (input.scope === "team") {
     const teamRepIds = await resolveTeamRepIds(tenantDb, input.userId, input.activeOfficeId);
     filters.push(teamRepIds.length > 0 ? sql`l.assigned_rep_id IN (${sql.join(teamRepIds.map((id) => sql`${id}`), sql`, `)})` : sql`false`);
@@ -1169,19 +1189,25 @@ export function createLeadService(
     userId: string
   ) {
     const conditions: any[] = [];
-    const scope = userRole === "rep" ? "mine" : filters.scope ?? "all";
+    const scope = filters.scope ?? "mine";
 
     if (filters.isActive !== "all") {
       conditions.push(eq(leads.isActive, filters.isActive ?? true));
     }
 
     if (filters.activeOfficeId) {
-      const officeUserIds = await resolveActiveOfficeUserIds(tenantDb, filters.activeOfficeId);
-      conditions.push(officeUserIds.length > 0 ? inArray(leads.assignedRepId, officeUserIds) : sql`false`);
+      const { officeCode, officeUserIds } = await resolveActiveOfficeScope(tenantDb, filters.activeOfficeId);
+      conditions.push(
+        officeCode && officeUserIds.length > 0
+          ? eq(leads.officeCode, officeCode)
+          : !officeCode && officeUserIds.length > 0
+            ? inArray(leads.assignedRepId, officeUserIds)
+            : sql`false`
+      );
     }
 
     if (scope === "mine") {
-      conditions.push(eq(leads.assignedRepId, userId));
+      conditions.push(buildLeadMineVisibilityCondition(userId));
     } else if (scope === "team") {
       const teamUserIds = await resolveTeamRepIds(tenantDb, userId, filters.activeOfficeId ?? null);
       conditions.push(teamUserIds.length > 0 ? inArray(leads.assignedRepId, teamUserIds) : sql`false`);
@@ -1298,6 +1324,7 @@ export function createLeadService(
         projectTypeQuestionPayload: v2Enabled
           ? { projectTypeId: input.projectTypeId ?? null, answers: {} }
           : normalizedProjectTypeQuestionPayload,
+        createdByUserId: input.actorUserId ?? null,
         verificationStatus,
         verificationRequiredReason,
         stageEnteredAt: now,
