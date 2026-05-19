@@ -52,5 +52,6 @@ describe("field photo report pdf layout", () => {
     expect(buffer.subarray(0, 4).toString("utf8")).toBe("%PDF");
     expect(buffer.byteLength).toBeGreaterThan(1000);
     expect(buffer.toString("latin1")).toContain("PDFKit");
+    expect(buffer.toString("latin1")).not.toContain("T ROCK");
   });
 });

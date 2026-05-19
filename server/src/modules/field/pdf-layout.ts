@@ -1,5 +1,6 @@
 import fs from "node:fs/promises";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 import PDFDocument from "pdfkit";
 import { getObjectBuffer, isR2Configured } from "../../lib/r2-client.js";
 
@@ -11,7 +12,12 @@ const BRAND_BLACK = "#111111";
 const BRAND_MUTED = "#7589A3";
 const BRAND_BORDER = "#EAECEF";
 const BRAND_PANEL = "#F7F7F8";
-const LOGO_PATH = path.resolve(process.cwd(), "client/public/logo.png");
+const LOGO_PATH_CANDIDATES = [
+  path.resolve(process.cwd(), "client/public/logo.png"),
+  path.resolve(process.cwd(), "client-field/public/logo.png"),
+  fileURLToPath(new URL("../../../../client/public/logo.png", import.meta.url)),
+  fileURLToPath(new URL("../../../../client-field/public/logo.png", import.meta.url)),
+];
 
 export type ReportRenderablePhoto = {
   id: string;
@@ -72,11 +78,14 @@ function formatPhotoDate(value: string | null, fallback: string): string {
 }
 
 async function loadLogoBuffer(): Promise<Buffer | null> {
-  try {
-    return await fs.readFile(LOGO_PATH);
-  } catch {
-    return null;
+  for (const logoPath of LOGO_PATH_CANDIDATES) {
+    try {
+      return await fs.readFile(logoPath);
+    } catch {
+      // Try the next candidate.
+    }
   }
+  return null;
 }
 
 async function fetchExternalImageBuffer(url: string): Promise<Buffer | null> {

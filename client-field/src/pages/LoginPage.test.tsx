@@ -47,6 +47,7 @@ describe("LoginPage", () => {
     const node = renderPage();
     await vi.waitFor(() => expect(node.textContent).toContain("Sign in"));
     expect(node.querySelector('img[alt="T Rock Construction"]')).toBeTruthy();
+    expect(node.querySelector('[data-brand-logo-surface="dark"]')).toBeTruthy();
     node.querySelector("form")?.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
     await vi.waitFor(() => expect(node.textContent).toContain("Email and password are required."));
 

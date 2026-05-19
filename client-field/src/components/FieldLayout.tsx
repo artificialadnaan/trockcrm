@@ -20,7 +20,7 @@ export function FieldLayout() {
         <div className="mx-auto flex max-w-3xl items-center justify-between gap-3">
           <div className="flex min-w-0 items-center gap-3">
             <div className="flex h-12 w-12 items-center justify-center rounded-xl border border-border bg-white shadow-sm">
-              <BrandLogo className="h-9 w-auto" alt="T Rock logo" />
+              <BrandLogo className="h-7 w-auto" alt="T Rock logo" surfaceClassName="rounded-lg px-2 py-1.5" />
             </div>
             <div className="min-w-0">
               <p className="text-xs font-black uppercase tracking-[0.24em] text-primary">Field App</p>
