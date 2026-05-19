@@ -18,6 +18,7 @@ import {
   type DealPhotoRecord,
   type PhotoFilterState,
 } from "@/components/photos/deal-photo-components";
+import { useFiles, useTagSuggestions } from "@/hooks/use-files";
 
 export {
   buildPhotoFilterSearchParams,
@@ -48,6 +49,15 @@ export function DealPhotosTab({ dealId, onCountChange }: { dealId: string; onCou
     restorePhoto,
     downloadPhoto,
   } = useDealPhotosData({ dealId, filters, onCountChange });
+  const { files: reportFiles, loading: reportsLoading } = useFiles({
+    dealId,
+    category: "other",
+    tags: ["photo-report"],
+    sortBy: "created_at",
+    sortDir: "desc",
+    limit: 20,
+  });
+  const { tags: suggestedTags } = useTagSuggestions(dealId);
 
   React.useEffect(() => {
     setFilters(filtersFromSearchParams(searchParams));
@@ -56,11 +66,29 @@ export function DealPhotosTab({ dealId, onCountChange }: { dealId: string; onCou
   const updateFilters = (next: PhotoFilterState) => {
     setFilters(next);
     const nextParams = new URLSearchParams(searchParams);
-    ["category", "uploader", "from", "to", "group", "deleted"].forEach((key) => nextParams.delete(key));
+    ["category", "tags", "uploader", "from", "to", "group", "deleted"].forEach((key) => nextParams.delete(key));
     buildPhotoFilterSearchParams(next).forEach((value, key) => nextParams.set(key, value));
     setSearchParams(nextParams, { replace: true });
   };
 
+  const availableTags = useMemo(() => {
+    const map = new Map<string, string>();
+    suggestedTags.forEach((tag) => {
+      const normalized = tag.trim();
+      if (!normalized) return;
+      const key = normalized.toLowerCase();
+      if (!map.has(key)) map.set(key, normalized);
+    });
+    photos.forEach((photo) => {
+      for (const tag of photo.tags) {
+        const normalized = tag.trim();
+        if (!normalized) continue;
+        const key = normalized.toLowerCase();
+        if (!map.has(key)) map.set(key, normalized);
+      }
+    });
+    return Array.from(map.values()).sort((left, right) => left.localeCompare(right));
+  }, [photos, suggestedTags]);
   const uploaders = useMemo(() => {
     const map = new Map<string, { id: string; name: string; avatarUrl: string | null }>();
     photos.forEach((photo) => map.set(photo.uploadedBy, { id: photo.uploadedBy, name: photo.uploaderName, avatarUrl: photo.uploaderAvatarUrl }));
@@ -85,7 +113,38 @@ export function DealPhotosTab({ dealId, onCountChange }: { dealId: string; onCou
         </div>
       </div>
 
-      <PhotoFilterBar filters={filters} uploaders={uploaders} onChange={updateFilters} />
+      <section className="rounded-lg border bg-background p-4">
+        <div className="mb-3 flex items-center justify-between gap-2">
+          <div>
+            <h4 className="text-sm font-semibold">Generated Reports</h4>
+            <p className="text-xs text-muted-foreground">Branded photo PDFs generated from the field app.</p>
+          </div>
+        </div>
+        {reportsLoading ? (
+          <p className="text-sm text-muted-foreground">Loading reports...</p>
+        ) : reportFiles.length === 0 ? (
+          <p className="text-sm text-muted-foreground">No generated reports yet.</p>
+        ) : (
+          <div className="space-y-2">
+            {reportFiles.map((report) => (
+              <button
+                key={report.id}
+                type="button"
+                className="flex w-full items-center justify-between rounded-md border px-3 py-3 text-left hover:bg-muted/30"
+                onClick={() => void downloadPhoto(report.id)}
+              >
+                <div className="min-w-0">
+                  <p className="truncate text-sm font-semibold">{report.displayName}</p>
+                  <p className="truncate text-xs text-muted-foreground">{new Date(report.createdAt).toLocaleString()}</p>
+                </div>
+                <Upload className="h-4 w-4 rotate-180 text-muted-foreground" />
+              </button>
+            ))}
+          </div>
+        )}
+      </section>
+
+      <PhotoFilterBar filters={filters} availableTags={availableTags} uploaders={uploaders} onChange={updateFilters} />
 
       {!loading && !error && (
         <PhotoPaginationSummary

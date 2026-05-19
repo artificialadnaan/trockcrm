@@ -27,6 +27,7 @@ describe("deal photo timeline filters", () => {
   it("adds category, uploader, and taken-at date filters", async () => {
     const filters = {
       categories: ["damage", "uncategorized"],
+      tags: ["roofing"],
       uploaderIds: ["user-1", "user-2"],
       from: "2026-01-01",
       to: "2026-05-04",
@@ -35,6 +36,7 @@ describe("deal photo timeline filters", () => {
     const keys = describeDealPhotoTimelineFilters(filters);
 
     expect(keys).toContain("photo_category");
+    expect(keys).toContain("tags");
     expect(keys).toContain("uploaded_by");
     expect(keys).toContain("taken_at");
     expect(keys).toContain("created_at");

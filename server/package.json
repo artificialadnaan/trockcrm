@@ -17,6 +17,7 @@
     "@azure/msal-node": "^3.3.0",
     "@googlemaps/google-maps-services-js": "^3.4.2",
     "@trock-crm/shared": "*",
+    "@types/pdfkit": "^0.17.6",
     "compression": "^1.8.1",
     "cookie-parser": "^1.4.7",
     "cors": "^2.8.5",
@@ -26,6 +27,7 @@
     "express-rate-limit": "^7.5.0",
     "helmet": "^8.1.0",
     "jsonwebtoken": "^9.0.2",
+    "pdfkit": "^0.18.0",
     "pg": "^8.13.1",
     "resend": "^6.10.0",
     "swagger-ui-express": "^5.0.1"

@@ -49,10 +49,18 @@ const tagMocks = vi.hoisted(() => ({
   searchFieldProjectTags: vi.fn(),
 }));
 
+const reportMocks = vi.hoisted(() => ({
+  previewFieldPhotoReport: vi.fn(),
+  generateFieldPhotoReport: vi.fn(),
+  listFieldProjectReports: vi.fn(),
+  getFieldProjectReportDownload: vi.fn(),
+}));
+
 vi.mock("../../../src/modules/field/projects-service.js", () => projectMocks);
 vi.mock("../../../src/modules/field/photos-service.js", () => photoMocks);
 vi.mock("../../../src/modules/field/photo-transcription-service.js", () => transcriptionMocks);
 vi.mock("../../../src/modules/field/photo-tags-service.js", () => tagMocks);
+vi.mock("../../../src/modules/field/photo-reports-service.js", () => reportMocks);
 
 const { fieldRoutes } = await import("../../../src/modules/field/routes.js");
 
@@ -79,6 +87,10 @@ describe("field routes", () => {
     tagMocks.replaceFieldPhotoTags.mockResolvedValue({ tags: ["roofing", "urgent"] });
     tagMocks.deleteFieldPhotoTag.mockResolvedValue({ tags: ["urgent"] });
     tagMocks.searchFieldProjectTags.mockResolvedValue({ tags: ["roofing", "urgent"] });
+    reportMocks.previewFieldPhotoReport.mockResolvedValue({ cover: { reportTitle: "Roof Repair Photo Report" }, sections: [] });
+    reportMocks.generateFieldPhotoReport.mockResolvedValue({ report: { id: "report-1", title: "Roof Repair Photo Report" } });
+    reportMocks.listFieldProjectReports.mockResolvedValue({ reports: [{ id: "report-1", title: "Roof Repair Photo Report" }] });
+    reportMocks.getFieldProjectReportDownload.mockResolvedValue({ url: "https://r2.example/report.pdf", filename: "roof-report.pdf" });
   });
 
   it("returns the authenticated field contractor profile", async () => {
@@ -281,6 +293,56 @@ describe("field routes", () => {
       query: "ro",
       limit: 5,
     });
+  });
+
+  it("routes field report preview, generation, listing, and download through the report service", async () => {
+    await invokeRoute("post", "/reports/preview", {
+      body: { projectId: "deal-1", photoIds: ["photo-1", "photo-2"], groupBy: "tag" },
+    });
+    expect(reportMocks.previewFieldPhotoReport).toHaveBeenCalledWith(expect.anything(), {
+      userId: "admin-1",
+      userRole: "admin",
+    }, {
+      projectId: "deal-1",
+      photoIds: ["photo-1", "photo-2"],
+      groupBy: "tag",
+      creatorName: "Admin User",
+    });
+
+    await invokeRoute("post", "/reports/generate", {
+      body: {
+        projectId: "deal-1",
+        reportTitle: "Roof Repair Photo Report",
+        coverData: { creatorName: "Admin User", companyName: "TRock Construction" },
+        sections: [{ title: "Section 1", photoIds: ["photo-1"], photoOverrides: [{ id: "photo-1", description: "North slope" }] }],
+      },
+    });
+    expect(reportMocks.generateFieldPhotoReport).toHaveBeenCalledWith(expect.anything(), {
+      userId: "admin-1",
+      userRole: "admin",
+    }, {
+      officeSlug: "trock",
+      projectId: "deal-1",
+      reportTitle: "Roof Repair Photo Report",
+      coverData: { creatorName: "Admin User", companyName: "TRock Construction", reportDateLabel: null, projectName: null },
+      sections: [{ title: "Section 1", photoIds: ["photo-1"], photoOverrides: [{ id: "photo-1", description: "North slope" }] }],
+    });
+
+    await invokeRoute("get", "/projects/:dealId/reports", {
+      params: { dealId: "deal-1" },
+    });
+    expect(reportMocks.listFieldProjectReports).toHaveBeenCalledWith(expect.anything(), {
+      userId: "admin-1",
+      userRole: "admin",
+    }, "deal-1");
+
+    await invokeRoute("get", "/reports/:reportId/download", {
+      params: { reportId: "report-1" },
+    });
+    expect(reportMocks.getFieldProjectReportDownload).toHaveBeenCalledWith(expect.anything(), {
+      userId: "admin-1",
+      userRole: "admin",
+    }, "report-1");
   });
 });
 

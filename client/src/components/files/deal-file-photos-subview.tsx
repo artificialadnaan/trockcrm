@@ -20,6 +20,7 @@ import {
   type PhotoFilterState,
 } from "@/components/photos/deal-photo-components";
 import { useDealPhotosData } from "@/components/photos/deal-photo-components";
+import { useTagSuggestions } from "@/hooks/use-files";
 import { formatFileSize } from "@/lib/file-utils";
 import { isPhotoImagePreviewable } from "@/lib/photo-url-resolution";
 
@@ -45,7 +46,7 @@ export function sortDealPhotosForFiles(photos: DealPhotoRecord[], sortKey: Photo
 }
 
 function hasActivePhotoFilters(filters: PhotoFilterState) {
-  return filters.categories.length > 0 || filters.uploaderIds.length > 0 || Boolean(filters.from || filters.to || filters.showDeleted);
+  return filters.categories.length > 0 || filters.tags.length > 0 || filters.uploaderIds.length > 0 || Boolean(filters.from || filters.to || filters.showDeleted);
 }
 
 function buildFilesPhotoFilters(params: URLSearchParams): PhotoFilterState {
@@ -76,6 +77,7 @@ export function DealFilePhotosSubview({ dealId }: { dealId: string }) {
     restorePhoto,
     downloadPhoto,
   } = useDealPhotosData({ dealId, filters });
+  const { tags: suggestedTags } = useTagSuggestions(dealId);
 
   React.useEffect(() => {
     setFilters(buildFilesPhotoFilters(searchParams));
@@ -85,11 +87,29 @@ export function DealFilePhotosSubview({ dealId }: { dealId: string }) {
     const normalized: PhotoFilterState = { ...next, group: "none" };
     setFilters(normalized);
     const nextParams = new URLSearchParams(searchParams);
-    ["category", "uploader", "from", "to", "group", "deleted"].forEach((key) => nextParams.delete(key));
+    ["category", "tags", "uploader", "from", "to", "group", "deleted"].forEach((key) => nextParams.delete(key));
     buildPhotoFilterSearchParams(normalized, { includeGroup: false }).forEach((value, key) => nextParams.set(key, value));
     setSearchParams(nextParams, { replace: true });
   };
 
+  const availableTags = useMemo(() => {
+    const map = new Map<string, string>();
+    suggestedTags.forEach((tag) => {
+      const normalized = tag.trim();
+      if (!normalized) return;
+      const key = normalized.toLowerCase();
+      if (!map.has(key)) map.set(key, normalized);
+    });
+    photos.forEach((photo) => {
+      for (const tag of photo.tags) {
+        const normalized = tag.trim();
+        if (!normalized) continue;
+        const key = normalized.toLowerCase();
+        if (!map.has(key)) map.set(key, normalized);
+      }
+    });
+    return Array.from(map.values()).sort((left, right) => left.localeCompare(right));
+  }, [photos, suggestedTags]);
   const uploaders = useMemo(() => {
     const map = new Map<string, { id: string; name: string; avatarUrl: string | null }>();
     photos.forEach((photo) => map.set(photo.uploadedBy, { id: photo.uploadedBy, name: photo.uploaderName, avatarUrl: photo.uploaderAvatarUrl }));
@@ -111,7 +131,7 @@ export function DealFilePhotosSubview({ dealId }: { dealId: string }) {
 
   return (
     <div className="space-y-3">
-      <PhotoFilterBar filters={filters} uploaders={uploaders} onChange={updateFilters} showGrouping={false} />
+      <PhotoFilterBar filters={filters} availableTags={availableTags} uploaders={uploaders} onChange={updateFilters} showGrouping={false} />
 
       {!loading && !error && (
         <PhotoPaginationSummary
@@ -241,6 +261,11 @@ function PhotoFileRow({
       <button type="button" className="min-w-0 text-left" onClick={onOpen}>
         <p className="truncate text-sm font-medium">{primaryLabel}</p>
         <p className="truncate text-xs text-muted-foreground">{photo.displayName}{photo.fileExtension ?? ""}</p>
+        {photo.tags.length > 0 ? (
+          <div className="mt-1 flex flex-wrap gap-1">
+            {photo.tags.slice(0, 2).map((tag) => <Badge key={tag} variant="outline" className="text-[10px]">#{tag}</Badge>)}
+          </div>
+        ) : null}
       </button>
 
       <div>

@@ -71,10 +71,12 @@ export interface DealPhotoRecord {
   procoreSyncStatus: "pending" | "synced" | "failed" | "skipped" | null;
   deletedAt: string | null;
   deletedByUserId: string | null;
+  tags: string[];
 }
 
 export interface PhotoFilterState {
   categories: string[];
+  tags: string[];
   uploaderIds: string[];
   from: string;
   to: string;
@@ -104,6 +106,7 @@ export const DEAL_PHOTO_PAGE_SIZE = 100;
 
 export const defaultPhotoFilters: PhotoFilterState = {
   categories: [],
+  tags: [],
   uploaderIds: [],
   from: "",
   to: "",
@@ -180,6 +183,7 @@ export function buildPhotoFilterSearchParams(filters: PhotoFilterState, options:
   const includeGroup = options.includeGroup ?? true;
   const params = new URLSearchParams();
   if (filters.categories.length > 0) params.set("category", filters.categories.join(","));
+  if (filters.tags.length > 0) params.set("tags", filters.tags.join(","));
   if (filters.uploaderIds.length > 0) params.set("uploader", filters.uploaderIds.join(","));
   if (filters.from) params.set("from", filters.from);
   if (filters.to) params.set("to", filters.to);
@@ -192,6 +196,7 @@ export function filtersFromSearchParams(params: URLSearchParams): PhotoFilterSta
   const group = params.get("group");
   return {
     categories: params.get("category")?.split(",").filter(Boolean) ?? [],
+    tags: params.get("tags")?.split(",").filter(Boolean) ?? [],
     uploaderIds: params.get("uploader")?.split(",").filter(Boolean) ?? [],
     from: params.get("from") ?? "",
     to: params.get("to") ?? "",
@@ -205,6 +210,11 @@ export function matchesPhotoFilters(photo: DealPhotoRecord, filters: PhotoFilter
   if (filters.categories.length > 0) {
     const category = photo.photoCategory ?? (photo.subcategory ? photo.subcategory.toLowerCase().replace(/\s+/g, "_") : "uncategorized");
     if (!filters.categories.includes(category)) return false;
+  }
+  if (filters.tags.length > 0) {
+    const selectedTags = filters.tags.map((tag) => tag.toLowerCase());
+    const photoTags = (Array.isArray(photo.tags) ? photo.tags : []).map((tag) => tag.toLowerCase());
+    if (!photoTags.some((tag) => selectedTags.includes(tag))) return false;
   }
   if (filters.uploaderIds.length > 0 && !filters.uploaderIds.includes(photo.uploadedBy)) return false;
   const day = new Date(photo.takenAt ?? photo.createdAt).toISOString().slice(0, 10);
@@ -470,16 +480,18 @@ export function PhotoPaginationSummary({
 
 export function PhotoFilterBar({
   filters,
+  availableTags,
   uploaders,
   onChange,
   showGrouping = true,
 }: {
   filters: PhotoFilterState;
+  availableTags: string[];
   uploaders: Array<{ id: string; name: string; avatarUrl: string | null }>;
   onChange: (filters: PhotoFilterState) => void;
   showGrouping?: boolean;
 }) {
-  const activeFilters = filters.categories.length + filters.uploaderIds.length + (filters.from ? 1 : 0) + (filters.to ? 1 : 0) + (filters.showDeleted ? 1 : 0);
+  const activeFilters = filters.categories.length + filters.tags.length + filters.uploaderIds.length + (filters.from ? 1 : 0) + (filters.to ? 1 : 0) + (filters.showDeleted ? 1 : 0);
   return (
     <div data-testid="photo-filter-bar" className="flex flex-wrap items-center gap-2 rounded-lg border bg-muted/20 p-2">
       <MultiSelectButton
@@ -489,6 +501,15 @@ export function PhotoFilterBar({
         selected={filters.categories}
         onChange={(categories) => onChange({ ...filters, categories })}
       />
+      {availableTags.length > 0 ? (
+        <MultiSelectButton
+          label="Tags"
+          selectedCount={filters.tags.length}
+          options={availableTags.map((tag) => ({ value: tag, label: `#${tag}` }))}
+          selected={filters.tags}
+          onChange={(tags) => onChange({ ...filters, tags })}
+        />
+      ) : null}
       <MultiSelectButton
         label="Uploader"
         selectedCount={filters.uploaderIds.length}
@@ -689,6 +710,17 @@ export function PhotoViewerModal({
                 </section>
 
                 <section className="space-y-2">
+                  <span className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">Tags</span>
+                  {selectedPhoto.tags.length > 0 ? (
+                    <div className="flex flex-wrap gap-2">
+                      {selectedPhoto.tags.map((tag) => <Badge key={tag} variant="outline">#{tag}</Badge>)}
+                    </div>
+                  ) : (
+                    <p className="text-sm text-muted-foreground">No tags</p>
+                  )}
+                </section>
+
+                <section className="space-y-2">
                   <div className="flex items-center justify-between">
                     <span className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">Category</span>
                     <Popover>
@@ -857,6 +889,12 @@ export function PhotoGridTile({
           </Button>
         )}
       </div>
+      {photo.tags.length > 0 ? (
+        <div className="flex flex-wrap gap-1">
+          {photo.tags.slice(0, 3).map((tag) => <Badge key={tag} variant="outline" className="max-w-[7rem] truncate text-[10px]">#{tag}</Badge>)}
+          {photo.tags.length > 3 ? <Badge variant="outline" className="text-[10px]">+{photo.tags.length - 3}</Badge> : null}
+        </div>
+      ) : null}
     </div>
   );
 }
