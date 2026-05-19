@@ -665,6 +665,7 @@ export function useDealBoard(
         return normalized;
       })
       .catch((err: unknown) => {
+        setBoard(null);
         setError(err instanceof Error ? err.message : "Failed to load deal board");
         throw err;
       })

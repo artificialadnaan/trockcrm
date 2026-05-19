@@ -513,16 +513,19 @@ async function decorateLeads(
   const primaryContactIds = [...new Set(rows.map((lead) => lead.primaryContactId).filter(Boolean))];
   const leadIds = rows.map((lead) => lead.id);
 
-  const [companyRows, propertyRows, projectTypeRows, assignedRepRows, primaryContactRows, convertedDealRows] = await Promise.all([
+  // Sequential tenant queries required: tenantDb is a single transaction client
+  // in production, so parallel reads can fail with "client already executing".
+  const companyRows =
     companyIds.length === 0
       ? []
-      : tenantDb
+      : await tenantDb
           .select({ id: companies.id, name: companies.name })
           .from(companies)
-          .where(inArray(companies.id, companyIds)),
+          .where(inArray(companies.id, companyIds));
+  const propertyRows =
     propertyIds.length === 0
       ? []
-      : tenantDb
+      : await tenantDb
           .select({
             id: properties.id,
             name: properties.name,
@@ -534,29 +537,32 @@ async function decorateLeads(
             unitCount: properties.unitCount,
           })
           .from(properties)
-          .where(inArray(properties.id, propertyIds)),
+          .where(inArray(properties.id, propertyIds));
+  const projectTypeRows =
     projectTypeIds.length === 0
       ? []
-      : tenantDb
+      : await tenantDb
           .select({
             id: projectTypeConfig.id,
             name: projectTypeConfig.name,
             slug: projectTypeConfig.slug,
           })
           .from(projectTypeConfig)
-          .where(inArray(projectTypeConfig.id, projectTypeIds as string[])),
+          .where(inArray(projectTypeConfig.id, projectTypeIds as string[]));
+  const assignedRepRows =
     assignedRepIds.length === 0
       ? []
-      : tenantDb
+      : await tenantDb
           .select({
             id: users.id,
             displayName: users.displayName,
           })
           .from(users)
-          .where(inArray(users.id, assignedRepIds as string[])),
+          .where(inArray(users.id, assignedRepIds as string[]));
+  const primaryContactRows =
     primaryContactIds.length === 0
       ? []
-      : tenantDb
+      : await tenantDb
           .select({
             id: contacts.id,
             firstName: contacts.firstName,
@@ -564,16 +570,15 @@ async function decorateLeads(
             jobTitle: contacts.jobTitle,
           })
           .from(contacts)
-          .where(inArray(contacts.id, primaryContactIds as string[])),
-    tenantDb
-      .select({
-        sourceLeadId: deals.sourceLeadId,
-        id: deals.id,
-        dealNumber: deals.dealNumber,
-      })
-      .from(deals)
-      .where(inArray(deals.sourceLeadId, leadIds)),
-  ]);
+          .where(inArray(contacts.id, primaryContactIds as string[]));
+  const convertedDealRows = await tenantDb
+    .select({
+      sourceLeadId: deals.sourceLeadId,
+      id: deals.id,
+      dealNumber: deals.dealNumber,
+    })
+    .from(deals)
+    .where(inArray(deals.sourceLeadId, leadIds));
 
   const companyMap = new Map(companyRows.map((company) => [company.id, company.name]));
   const propertyMap = new Map(propertyRows.map((property) => [property.id, property]));

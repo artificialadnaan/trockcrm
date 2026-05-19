@@ -28,6 +28,10 @@ function flatten(value: unknown): string {
   return Object.values(value as Record<string, unknown>).map(flatten).join("");
 }
 
+function normalizeSqlText(value: unknown) {
+  return flatten(value).replace(/\s+/g, " ").trim().toLowerCase();
+}
+
 describe("mine visibility predicates", () => {
   const dialect = new PgDialect();
 
@@ -83,16 +87,62 @@ describe("mine visibility predicates", () => {
     expect(leadQuery.sql).toContain("performed_by_user_id");
   });
 
-  it("preserves subscription semantics when tenant table introspection fails unexpectedly", async () => {
-    const features = await resolveMineVisibilityFeatures({
-      execute: vi.fn(async () => {
-        throw new Error("relation check failed");
-      }),
+  it("resolves mine visibility features correctly when tenantDb only allows one query at a time", async () => {
+    let active = false;
+    const execute = vi.fn(async (query: unknown) => {
+      if (active) {
+        throw new Error("client already executing");
+      }
+      active = true;
+      await Promise.resolve();
+      const text = normalizeSqlText(query);
+      active = false;
+
+      if (text.includes("to_regclass") && text.includes("deal_subscriptions")) {
+        return { rows: [{ relation_name: "office_dallas.deal_subscriptions" }] };
+      }
+      if (text.includes("to_regclass") && text.includes("lead_subscriptions")) {
+        return { rows: [{ relation_name: null }] };
+      }
+      if (text.includes("deal_subscriptions") && text.includes("deleted_at")) {
+        return { rows: [{ column_exists: true }] };
+      }
+      if (text.includes("lead_subscriptions") && text.includes("deleted_at")) {
+        return { rows: [{ column_exists: false }] };
+      }
+      if (text.includes("table_name = deals") || text.includes('table_name = "deals"') || text.includes("table_name = $1")) {
+        if (text.includes("created_by_user_id")) {
+          return { rows: [{ column_exists: true }] };
+        }
+      }
+      if (text.includes("table_name = leads") || text.includes('table_name = "leads"') || text.includes("table_name = $1")) {
+        if (text.includes("created_by_user_id")) {
+          return { rows: [{ column_exists: false }] };
+        }
+      }
+
+      throw new Error(`unexpected query: ${text}`);
     });
+
+    const features = await resolveMineVisibilityFeatures({ execute });
 
     expect(features).toEqual({
       dealSubscriptions: true,
-      leadSubscriptions: true,
+      leadSubscriptions: false,
+      dealSubscriptionsDeletedAt: true,
+      leadSubscriptionsDeletedAt: false,
+      dealsCreatedByUserId: true,
+      leadsCreatedByUserId: false,
     });
+  });
+
+  it("does not swallow unexpected probe errors", async () => {
+    await expect(
+      resolveMineVisibilityFeatures({
+        execute: vi.fn(async () => {
+          throw new Error("database unavailable");
+        }),
+      })
+    ).rejects.toThrow("database unavailable");
   });
 });
