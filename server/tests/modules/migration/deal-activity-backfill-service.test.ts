@@ -503,6 +503,7 @@ describe("deal activity backfill service", () => {
       "Hello world & team"
     );
     expect(htmlToPlainText("<div>Broken<p>tag")).toBe("Broken tag");
+    expect(htmlToPlainText("Value: &#9999999999; and &#x110000;")).toBe("Value: &#9999999999; and &#x110000;");
     expect(htmlToPlainText("")).toBe("");
     expect(htmlToPlainText(undefined)).toBe("");
     expect(htmlToPlainText(null)).toBe("");
@@ -543,6 +544,24 @@ describe("deal activity backfill service", () => {
     expect(result.email.direction).toBe("outbound");
     expect(result.email.subject).toBe(longSubject);
     expect(result.activity.subject).toHaveLength(500);
+  });
+
+  it("does not store opaque HubSpot call disposition GUIDs as outcomes", () => {
+    const result = mapCallToActivity({
+      engagement: makeEngagement({
+        objectType: "call",
+        properties: {
+          hs_call_title: "Follow Up",
+          hs_call_body: "Discussed next steps",
+          hs_call_disposition: "f240bbac-87c9-4f6e-bf70-924b57d47db7",
+          hs_call_status: "completed",
+        },
+      }),
+      targetEntity: makeDealTarget(),
+      userId: "user-1",
+    });
+
+    expect(result.outcome).toBe("completed");
   });
 
   it("preserves plain-text email addresses wrapped in angle brackets", () => {

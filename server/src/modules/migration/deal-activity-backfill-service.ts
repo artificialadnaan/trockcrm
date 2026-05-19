@@ -163,13 +163,17 @@ function decodeHtmlEntity(entity: string): string {
   if (HTML_ENTITY_MAP[entity]) return HTML_ENTITY_MAP[entity];
   if (entity.startsWith("#x")) {
     const codePoint = Number.parseInt(entity.slice(2), 16);
-    return Number.isFinite(codePoint) ? String.fromCodePoint(codePoint) : `&${entity};`;
+    return isValidUnicodeScalar(codePoint) ? String.fromCodePoint(codePoint) : `&${entity};`;
   }
   if (entity.startsWith("#")) {
     const codePoint = Number.parseInt(entity.slice(1), 10);
-    return Number.isFinite(codePoint) ? String.fromCodePoint(codePoint) : `&${entity};`;
+    return isValidUnicodeScalar(codePoint) ? String.fromCodePoint(codePoint) : `&${entity};`;
   }
   return `&${entity};`;
+}
+
+function isValidUnicodeScalar(value: number): boolean {
+  return Number.isInteger(value) && value >= 0 && value <= 0x10ffff && !(value >= 0xd800 && value <= 0xdfff);
 }
 
 export function htmlToPlainText(input: string | null | undefined): string {
@@ -240,6 +244,18 @@ function parseDurationMinutes(value: string | undefined): number | null {
   const millis = Number(value);
   if (!Number.isFinite(millis) || millis <= 0) return null;
   return Math.max(1, Math.round(millis / 60_000));
+}
+
+function normalizeCallOutcome(properties: Record<string, string | undefined>): string | null {
+  const outcome = plainTextOrNull(properties.hs_call_outcome);
+  if (outcome) return outcome;
+
+  const disposition = plainTextOrNull(properties.hs_call_disposition);
+  if (disposition && !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(disposition)) {
+    return disposition;
+  }
+
+  return plainTextOrNull(properties.hs_call_status);
 }
 
 function hasHubSpotAttachments(value: string | undefined): boolean {
@@ -389,10 +405,7 @@ export function mapCallToActivity(input: {
       fallback: "HubSpot call imported without a transcript body.",
       attachmentIds: input.engagement.properties.hs_attachment_ids,
     }),
-    outcome:
-      plainTextOrNull(input.engagement.properties.hs_call_outcome) ??
-      plainTextOrNull(input.engagement.properties.hs_call_disposition) ??
-      plainTextOrNull(input.engagement.properties.hs_call_status),
+    outcome: normalizeCallOutcome(input.engagement.properties),
     durationMinutes: parseDurationMinutes(input.engagement.properties.hs_call_duration),
     occurredAt,
     createdAt: parseCreatedAt(input.engagement.properties, occurredAt),
