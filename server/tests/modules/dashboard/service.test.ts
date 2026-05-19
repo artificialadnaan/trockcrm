@@ -45,7 +45,16 @@ vi.mock("../../../src/modules/migration/service.js", () => ({
 function createMockTenantDb(responses: any[][] = []) {
   let callIndex = 0;
   return {
-    execute: vi.fn().mockImplementation(() => {
+    execute: vi.fn().mockImplementation((query?: unknown) => {
+      const text = extractSqlText(query).toLowerCase();
+      if (text.includes("to_regclass(current_schema()")) {
+        const relationName = text.includes("deal_subscriptions")
+          ? "office_test.deal_subscriptions"
+          : text.includes("lead_subscriptions")
+            ? "office_test.lead_subscriptions"
+            : null;
+        return Promise.resolve({ rows: [{ relation_name: relationName }] });
+      }
       const rows = responses[callIndex] ?? [];
       callIndex++;
       return Promise.resolve({ rows });
@@ -77,6 +86,13 @@ function extractSqlText(value: unknown): string {
   }
 
   return "";
+}
+
+function nonIntrospectionExecuteCalls(tenantDb: { execute: { mock: { calls: unknown[][] } } }) {
+  return tenantDb.execute.mock.calls.filter((call) => {
+    const text = extractSqlText(call[0]).toLowerCase();
+    return !text.includes("to_regclass(current_schema()");
+  });
 }
 
 describe("Dashboard Service", () => {
@@ -206,7 +222,7 @@ describe("Dashboard Service", () => {
 
       await getRepDashboard(tenantDb, "user-1");
 
-      const activityQueryText = extractSqlText(tenantDb.execute.mock.calls[3][0]).toLowerCase();
+      const activityQueryText = extractSqlText(nonIntrospectionExecuteCalls(tenantDb)[3][0]).toLowerCase();
       expect(activityQueryText).toContain("responsible_user_id");
       expect(activityQueryText).not.toContain("where user_id =");
     });
@@ -230,7 +246,7 @@ describe("Dashboard Service", () => {
 
         await getRepDashboard(tenantDb, "user-1");
 
-        const activityQueryText = extractSqlText(tenantDb.execute.mock.calls[3][0]).toLowerCase();
+        const activityQueryText = extractSqlText(nonIntrospectionExecuteCalls(tenantDb)[3][0]).toLowerCase();
         expect(activityQueryText).toContain("2026-05-08");
         expect(activityQueryText).toContain("2026-05-15");
       } finally {
@@ -256,7 +272,7 @@ describe("Dashboard Service", () => {
         activityDateRange: { from: "2026-04-01", to: "2026-05-15" },
       });
 
-      const activityQueryText = extractSqlText(tenantDb.execute.mock.calls[3][0]).toLowerCase();
+      const activityQueryText = extractSqlText(nonIntrospectionExecuteCalls(tenantDb)[3][0]).toLowerCase();
       expect(result.activityThisWeek.total).toBe(57);
       expect(activityQueryText).toContain("2026-04-01");
       expect(activityQueryText).toContain("2026-05-15");
@@ -280,7 +296,7 @@ describe("Dashboard Service", () => {
         activityDateRange: { from: "2026-04-15", to: "2026-04-30" },
       });
 
-      const activityQueryText = extractSqlText(tenantDb.execute.mock.calls[3][0]).toLowerCase();
+      const activityQueryText = extractSqlText(nonIntrospectionExecuteCalls(tenantDb)[3][0]).toLowerCase();
       expect(result.activityThisWeek.total).toBe(10);
       expect(activityQueryText).toContain("2026-04-15");
       expect(activityQueryText).toContain("2026-04-30");
@@ -302,8 +318,9 @@ describe("Dashboard Service", () => {
 
       await getRepDashboard(tenantDb, "user-1");
 
-      const activeDealQuery = extractSqlText(tenantDb.execute.mock.calls[1][0]).toLowerCase();
-      const pipelineByStageQuery = extractSqlText(tenantDb.execute.mock.calls[5][0]).toLowerCase();
+      const repExecuteCalls = nonIntrospectionExecuteCalls(tenantDb);
+      const activeDealQuery = extractSqlText(repExecuteCalls[1][0]).toLowerCase();
+      const pipelineByStageQuery = extractSqlText(repExecuteCalls[5][0]).toLowerCase();
       expect(activeDealQuery).toContain("coalesce(d.bid_board_stage_slug, psc.slug)");
       expect(activeDealQuery).toContain("not in");
       expect(activeDealQuery).toContain("closed_won");

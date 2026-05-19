@@ -35,7 +35,11 @@ import { createAssignmentTaskIfNeeded } from "../assignment-tasks/service.js";
 import { generateDealNumberForProject } from "../../services/projectNumber.js";
 import { isContractSignedHandoffEnabled } from "../../config/feature-flags.js";
 import { resolveActiveOfficeUserIds, resolveTeamRepIds } from "../shared/team-scope.js";
-import { buildAliasedDealMineVisibilityCondition, buildDealMineVisibilityCondition } from "../shared/mine-visibility.js";
+import {
+  buildAliasedDealMineVisibilityCondition,
+  buildDealMineVisibilityCondition,
+  resolveMineVisibilityFeatures,
+} from "../shared/mine-visibility.js";
 import { resolveLeadSourceDisplayValue } from "../leads/source-control.js";
 import { resolveDealCreationPolicy, type DealCreationOrigin } from "./direct-create-rules.js";
 import { logActivity, type AuditContext } from "../audit/audit-logger.js";
@@ -734,8 +738,14 @@ async function buildDealWorkspaceScope(
     filters.push(...terminalDateConditions);
   }
 
+  const mineVisibility = input.scope === "mine" ? await resolveMineVisibilityFeatures(tenantDb) : null;
+
   if (input.scope === "mine") {
-    filters.push(buildAliasedDealMineVisibilityCondition("d", input.userId));
+    filters.push(
+      buildAliasedDealMineVisibilityCondition("d", input.userId, {
+        includeSubscriptions: mineVisibility?.dealSubscriptions,
+      })
+    );
   } else if (input.scope === "team") {
     const teamRepIds = await resolveTeamRepIds(tenantDb, input.userId, input.activeOfficeId);
     filters.push(teamRepIds.length > 0 ? sql`d.assigned_rep_id IN (${sqlList(teamRepIds)})` : sql`false`);
@@ -954,7 +964,7 @@ export async function getDeals(tenantDb: TenantDb, filters: DealFilters, userRol
     conditions.push(eq(deals.isActive, filters.isActive ?? true));
   }
 
-    if (filters.activeOfficeId) {
+  if (filters.activeOfficeId) {
       const { officeCode, officeUserIds } = await resolveActiveOfficeScope(tenantDb, filters.activeOfficeId);
       conditions.push(
         officeCode && officeUserIds.length > 0
@@ -963,10 +973,16 @@ export async function getDeals(tenantDb: TenantDb, filters: DealFilters, userRol
             ? inArray(deals.assignedRepId, officeUserIds)
             : sql`false`
       );
-    }
+  }
+
+  const mineVisibility = scope === "mine" ? await resolveMineVisibilityFeatures(tenantDb) : null;
 
   if (scope === "mine") {
-    conditions.push(buildDealMineVisibilityCondition(userId));
+    conditions.push(
+      buildDealMineVisibilityCondition(userId, {
+        includeSubscriptions: mineVisibility?.dealSubscriptions,
+      })
+    );
   } else if (scope === "team") {
     const teamUserIds = await resolveTeamRepIds(tenantDb, userId, filters.activeOfficeId ?? null);
     conditions.push(teamUserIds.length > 0 ? inArray(deals.assignedRepId, teamUserIds) : sql`false`);
@@ -1815,9 +1831,14 @@ export async function getDealsForPipeline(
   );
 
   const commonConditions: any[] = [];
+  const mineVisibility = filters?.scope === "mine" ? await resolveMineVisibilityFeatures(tenantDb) : null;
 
   if (filters?.scope === "mine") {
-    commonConditions.push(buildDealMineVisibilityCondition(userId));
+    commonConditions.push(
+      buildDealMineVisibilityCondition(userId, {
+        includeSubscriptions: mineVisibility?.dealSubscriptions,
+      })
+    );
   } else if (filters?.scope === "team") {
     const teamRepIds = await resolveTeamRepIds(tenantDb, userId, filters.activeOfficeId ?? null);
     if (filters.assignedRepId) {

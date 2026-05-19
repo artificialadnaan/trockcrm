@@ -28,6 +28,7 @@ import {
 import { toJsonSafe } from "../../lib/json-safe.js";
 import { redactDealList, redactDealResponse, shouldIncludeHubspotId, stripPrivateDealFieldsForViewer } from "./redact.js";
 import { activateServiceHandoff, changeDealStage } from "./stage-change.js";
+import { resolveMineVisibilityFeatures } from "../shared/mine-visibility.js";
 import { preflightStageCheck } from "./stage-gate.js";
 import { getContactsForDeal } from "../contacts/association-service.js";
 import {
@@ -178,6 +179,11 @@ async function assertDealOwnerRouteAccess(
 }
 
 async function isDealWatchedByUser(tenantDb: any, dealId: string, userId: string) {
+  const features = await resolveMineVisibilityFeatures(tenantDb);
+  if (!features.dealSubscriptions) {
+    return false;
+  }
+
   const [row] = await tenantDb
     .select({ id: dealSubscriptions.id })
     .from(dealSubscriptions)
@@ -995,6 +1001,10 @@ router.get("/:id/detail", async (req, res, next) => {
 router.post("/:id/watch", async (req, res, next) => {
   try {
     await assertDealCollaboratorAccess(req.tenantDb!, req.params.id, req.user!);
+    const features = await resolveMineVisibilityFeatures(req.tenantDb!);
+    if (!features.dealSubscriptions) {
+      throw new AppError(503, "Deal watching is temporarily unavailable for this office.");
+    }
     await req.tenantDb!
       .insert(dealSubscriptions)
       .values({
@@ -1019,6 +1029,10 @@ router.post("/:id/watch", async (req, res, next) => {
 router.delete("/:id/watch", async (req, res, next) => {
   try {
     await assertDealCollaboratorAccess(req.tenantDb!, req.params.id, req.user!);
+    const features = await resolveMineVisibilityFeatures(req.tenantDb!);
+    if (!features.dealSubscriptions) {
+      throw new AppError(503, "Deal watching is temporarily unavailable for this office.");
+    }
     await req.tenantDb!
       .update(dealSubscriptions)
       .set({ deletedAt: new Date() })
