@@ -1,4 +1,5 @@
 import { and, eq, inArray, or, sql } from "drizzle-orm";
+import { decodeHTML } from "entities";
 import {
   activities,
   companies,
@@ -139,16 +140,6 @@ function normalizeText(value: string | undefined): string | null {
   return trimmed ? trimmed : null;
 }
 
-const HTML_ENTITY_MAP: Record<string, string> = {
-  nbsp: " ",
-  amp: "&",
-  lt: "<",
-  gt: ">",
-  quot: "\"",
-  apos: "'",
-  "#39": "'",
-};
-
 function normalizeEmail(value: string | undefined): string | null {
   const trimmed = value?.trim().toLowerCase();
   return trimmed ? trimmed : null;
@@ -159,43 +150,94 @@ function clampText(value: string | null, maxLength: number): string | null {
   return value.length > maxLength ? value.slice(0, maxLength) : value;
 }
 
-function decodeHtmlEntity(entity: string): string {
-  if (HTML_ENTITY_MAP[entity]) return HTML_ENTITY_MAP[entity];
-  if (entity.startsWith("#x")) {
-    const codePoint = Number.parseInt(entity.slice(2), 16);
-    return isValidUnicodeScalar(codePoint) ? String.fromCodePoint(codePoint) : `&${entity};`;
-  }
-  if (entity.startsWith("#")) {
-    const codePoint = Number.parseInt(entity.slice(1), 10);
-    return isValidUnicodeScalar(codePoint) ? String.fromCodePoint(codePoint) : `&${entity};`;
-  }
-  return `&${entity};`;
-}
+const KNOWN_HTML_TAGS = new Set([
+  "a",
+  "b",
+  "blockquote",
+  "br",
+  "code",
+  "div",
+  "em",
+  "h1",
+  "h2",
+  "h3",
+  "h4",
+  "h5",
+  "h6",
+  "hr",
+  "i",
+  "li",
+  "ol",
+  "p",
+  "pre",
+  "span",
+  "strong",
+  "table",
+  "tbody",
+  "td",
+  "th",
+  "thead",
+  "tr",
+  "u",
+  "ul",
+]);
 
 function isValidUnicodeScalar(value: number): boolean {
   return Number.isInteger(value) && value >= 0 && value <= 0x10ffff && !(value >= 0xd800 && value <= 0xdfff);
 }
 
+function decodeHtmlEntities(input: string): string {
+  const invalidNumericEntities = new Map<string, string>();
+  let nextInvalidIndex = 0;
+  const protectedInput = input.replace(/&#(x?[0-9a-f]+);/gi, (match, numeric: string) => {
+    const parsed = numeric.toLowerCase().startsWith("x")
+      ? Number.parseInt(numeric.slice(1), 16)
+      : Number.parseInt(numeric, 10);
+    if (isValidUnicodeScalar(parsed)) return match;
+    const token = `__INVALID_HTML_ENTITY_${nextInvalidIndex++}__`;
+    invalidNumericEntities.set(token, match);
+    return token;
+  });
+
+  try {
+    const decoded = decodeHTML(protectedInput);
+    let restored = decoded;
+    for (const [token, original] of invalidNumericEntities.entries()) {
+      restored = restored.replaceAll(token, original);
+    }
+    return restored;
+  } catch {
+    return input;
+  }
+}
+
 export function htmlToPlainText(input: string | null | undefined): string {
   if (!input) return "";
 
-  return input
+  const decoded = decodeHtmlEntities(input);
+  const withoutTags = containsKnownHtmlTag(decoded)
+    ? decoded
     .replace(/<\s*br\s*\/?>/gi, " ")
     .replace(/<\/\s*(p|div|li|tr|h[1-6])\s*>/gi, " ")
     .replace(/<[^>]+>/g, " ")
-    .replace(/&([^;\s]+);/g, (_match, entity: string) => decodeHtmlEntity(entity))
-    .replace(/\s+/g, " ")
-    .replace(/\s+([.,!?;:])/g, "$1")
-    .trim();
+    : decoded;
+
+  return withoutTags.replace(/\s+/g, " ").replace(/\s+([.,!?;:])/g, "$1").trim();
 }
 
-function looksLikeHtml(input: string): boolean {
-  return /<\/?[a-z][\w:-]*(?:\s[^>]*)?>/i.test(input) || /&(?:nbsp|amp|lt|gt|quot|apos|#39|#\d+|#x[0-9a-f]+);/i.test(input);
+function containsKnownHtmlTag(input: string): boolean {
+  const matches = input.matchAll(/<\/?([a-z][\w:-]*)(?:\s[^>]*)?>/gi);
+  for (const match of matches) {
+    if (KNOWN_HTML_TAGS.has(match[1].toLowerCase())) return true;
+  }
+  return false;
 }
 
 function plainTextOrNull(input: string | null | undefined): string | null {
   if (!input) return null;
-  if (!looksLikeHtml(input)) return normalizeText(input);
+  const decoded = decodeHtmlEntities(input).trim();
+  if (!decoded) return null;
+  if (!containsKnownHtmlTag(decoded)) return decoded;
   const normalized = htmlToPlainText(input);
   return normalized.length > 0 ? normalized : null;
 }

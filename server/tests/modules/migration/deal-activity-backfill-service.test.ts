@@ -502,6 +502,8 @@ describe("deal activity backfill service", () => {
     expect(htmlToPlainText("<div><p>Hello&nbsp;<strong>world</strong> &amp; team</p></div>")).toBe(
       "Hello world & team"
     );
+    expect(htmlToPlainText("&lt;div&gt;Hello&lt;/div&gt;")).toBe("Hello");
+    expect(htmlToPlainText("Tom&rsquo;s &ldquo;quote&rdquo; &mdash; ok")).toBe("Tom’s “quote” — ok");
     expect(htmlToPlainText("<div>Broken<p>tag")).toBe("Broken tag");
     expect(htmlToPlainText("Value: &#9999999999; and &#x110000;")).toBe("Value: &#9999999999; and &#x110000;");
     expect(htmlToPlainText("")).toBe("");
@@ -581,6 +583,24 @@ describe("deal activity backfill service", () => {
 
     expect(result.activity.body).toBe("From: Jane <jane@example.com>\nTo: Rep <rep@trock.com>");
     expect(result.email.bodyHtml).toContain("&lt;jane@example.com&gt;");
+  });
+
+  it("preserves plain placeholder text that uses angle brackets", () => {
+    const result = mapEmailToRecords({
+      engagement: makeEngagement({
+        id: "hs-email-4",
+        objectType: "email",
+        properties: {
+          hs_email_subject: "Checklist",
+          hs_email_text: "Discuss <materials> with PM",
+          hs_email_direction: "INCOMING_EMAIL",
+        },
+      }),
+      targetEntity: makeDealTarget(),
+      userId: "user-1",
+    });
+
+    expect(result.activity.body).toBe("Discuss <materials> with PM");
   });
 
   it("writes a note activity and company-targeted ledger atomically", async () => {
