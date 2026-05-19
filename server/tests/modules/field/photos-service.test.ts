@@ -46,7 +46,9 @@ vi.mock("../../../src/modules/files/service.js", async () => {
 vi.mock("../../../src/modules/files/upload-workflow.js", () => workflowMocks);
 
 const {
+  assignPendingFieldPhotoTarget,
   confirmFieldPhotoUpload,
+  listPendingFieldPhotos,
   requestFieldPhotoUploadUrl,
 } = await import("../../../src/modules/field/photos-service.js");
 
@@ -147,6 +149,25 @@ describe("field photo upload service", () => {
     expect(fileMocks.requestUploadUrl).not.toHaveBeenCalled();
   });
 
+  it("allows requesting an upload URL without a selected target so field captures can save to pending", async () => {
+    await requestFieldPhotoUploadUrl(db, {
+      officeSlug: "trock",
+      userId: "field-1",
+      userRole: "field_contractor",
+      contentType: "image/jpeg",
+      sizeBytes: 850_000,
+      caption: "Unassigned photo",
+    });
+
+    expect(projectMocks.assertAccessibleFieldCaptureTarget).not.toHaveBeenCalled();
+    expect(fileMocks.requestUploadUrl).toHaveBeenCalledWith(db, "trock", "field-1", expect.objectContaining({
+      dealId: undefined,
+      leadId: undefined,
+      opportunityId: undefined,
+      description: "Unassigned photo",
+    }));
+  });
+
   it("rejects confirm-upload when the object key does not match the issued upload token", async () => {
     await expect(confirmFieldPhotoUpload(db, {
       userId: "field-1",
@@ -204,6 +225,191 @@ describe("field photo upload service", () => {
       addressSource: "live_gps",
     }));
     expect(JSON.stringify(result.photo)).not.toContain("r2Key");
+  });
+
+  it("allows confirming a pending upload without a selected target", async () => {
+    fileMocks.getPendingUploadMetadata.mockReturnValueOnce({
+      r2Key: "office/unassociated/photos/photo.jpg",
+      category: "photo",
+    });
+
+    await confirmFieldPhotoUpload(db, {
+      userId: "field-1",
+      userRole: "field_contractor",
+      officeId: "office-1",
+      uploadToken: "upload-token-1",
+      objectKey: "office/unassociated/photos/photo.jpg",
+      auditContext: {},
+    });
+
+    expect(projectMocks.assertAccessibleFieldCaptureTarget).not.toHaveBeenCalled();
+    expect(fileMocks.confirmUpload).toHaveBeenCalledWith(db, "field-1", expect.objectContaining({
+      uploadToken: "upload-token-1",
+    }));
+  });
+
+  it("lists pending field photos uploaded by the current user", async () => {
+    db.execute.mockResolvedValueOnce({
+      rows: [{
+        id: "photo-1",
+        category: "photo",
+        photo_category: "damage",
+        subcategory: null,
+        display_name: "Pending photo",
+        mime_type: "image/jpeg",
+        file_size_bytes: 850000,
+        file_extension: ".jpg",
+        deal_id: null,
+        lead_id: null,
+        description: null,
+        tags: [],
+        taken_at: new Date("2026-05-05T12:00:00.000Z"),
+        created_at: new Date("2026-05-05T12:01:00.000Z"),
+        uploaded_by: "field-1",
+        uploader_name: "Field User",
+        uploader_avatar_url: null,
+        latitude: null,
+        longitude: null,
+        address: null,
+        address_source: null,
+        geocoded_at: null,
+        procore_sync_status: null,
+        deleted_at: null,
+      }],
+    });
+
+    const result = await listPendingFieldPhotos(db, {
+      userId: "field-1",
+      userRole: "field_contractor",
+    });
+
+    expect(result.photos).toHaveLength(1);
+    expect(result.photos[0]).toEqual(expect.objectContaining({
+      id: "photo-1",
+      displayName: "Pending photo",
+      dealId: null,
+      leadId: null,
+    }));
+  });
+
+  it("assigns a pending field photo to a selected target", async () => {
+    db.execute.mockResolvedValueOnce({
+      rows: [{
+        id: "photo-1",
+        category: "photo",
+        deal_id: null,
+        lead_id: null,
+        uploaded_by: "field-1",
+      }],
+    }).mockResolvedValueOnce({
+      rows: [{
+        id: "photo-1",
+        category: "photo",
+        photo_category: "damage",
+        subcategory: null,
+        display_name: "Pending photo",
+        mime_type: "image/jpeg",
+        file_size_bytes: 850000,
+        file_extension: ".jpg",
+        deal_id: "deal-1",
+        lead_id: null,
+        description: null,
+        tags: [],
+        taken_at: new Date("2026-05-05T12:00:00.000Z"),
+        created_at: new Date("2026-05-05T12:01:00.000Z"),
+        uploaded_by: "field-1",
+        latitude: null,
+        longitude: null,
+        address: null,
+        address_source: null,
+        geocoded_at: null,
+        procore_sync_status: null,
+        deleted_at: null,
+      }],
+    });
+    projectMocks.assertAccessibleFieldCaptureTarget.mockResolvedValueOnce({ id: "deal-1", type: "deal" });
+    fileMocks.getFileDownloadUrl.mockResolvedValueOnce({ url: "https://signed.example/photo.jpg" });
+
+    const result = await assignPendingFieldPhotoTarget(db, {
+      userId: "field-1",
+      userRole: "field_contractor",
+    }, {
+      photoId: "photo-1",
+      dealId: "deal-1",
+    });
+
+    expect(projectMocks.assertAccessibleFieldCaptureTarget).toHaveBeenCalledWith(db, {
+      dealId: "deal-1",
+      leadId: undefined,
+      opportunityId: undefined,
+      userId: "field-1",
+      userRole: "field_contractor",
+    });
+    expect(result.photo).toEqual(expect.objectContaining({
+      id: "photo-1",
+      imageUrl: "https://signed.example/photo.jpg",
+    }));
+  });
+
+  it("assigns a pending field photo to an opportunity target using the same persisted deal linkage as direct uploads", async () => {
+    db.execute.mockResolvedValueOnce({
+      rows: [{
+        id: "photo-1",
+        category: "photo",
+        deal_id: null,
+        lead_id: null,
+        uploaded_by: "field-1",
+      }],
+    }).mockResolvedValueOnce({
+      rows: [{
+        id: "photo-1",
+        category: "photo",
+        photo_category: "damage",
+        subcategory: null,
+        display_name: "Pending photo",
+        mime_type: "image/jpeg",
+        file_size_bytes: 850000,
+        file_extension: ".jpg",
+        deal_id: "deal-2",
+        lead_id: null,
+        description: null,
+        tags: [],
+        taken_at: new Date("2026-05-05T12:00:00.000Z"),
+        created_at: new Date("2026-05-05T12:01:00.000Z"),
+        uploaded_by: "field-1",
+        latitude: null,
+        longitude: null,
+        address: null,
+        address_source: null,
+        geocoded_at: null,
+        procore_sync_status: null,
+        deleted_at: null,
+      }],
+    });
+    projectMocks.assertAccessibleFieldCaptureTarget.mockResolvedValueOnce({ id: "deal-2", type: "opportunity" });
+    fileMocks.getFileDownloadUrl.mockResolvedValueOnce({ url: "https://signed.example/photo.jpg" });
+
+    const result = await assignPendingFieldPhotoTarget(db, {
+      userId: "field-1",
+      userRole: "field_contractor",
+    }, {
+      photoId: "photo-1",
+      opportunityId: "deal-2",
+    });
+
+    expect(projectMocks.assertAccessibleFieldCaptureTarget).toHaveBeenCalledWith(db, {
+      dealId: undefined,
+      leadId: undefined,
+      opportunityId: "deal-2",
+      userId: "field-1",
+      userRole: "field_contractor",
+    });
+    expect(result.photo).toEqual(expect.objectContaining({
+      id: "photo-1",
+      dealId: "deal-2",
+      leadId: null,
+      imageUrl: "https://signed.example/photo.jpg",
+    }));
   });
 
   it("supports lead photo uploads without forcing a deal-backed project", async () => {

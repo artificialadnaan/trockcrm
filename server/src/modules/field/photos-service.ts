@@ -1,3 +1,4 @@
+import { sql } from "drizzle-orm";
 import type { NodePgDatabase } from "drizzle-orm/node-postgres";
 import type * as schema from "@trock-crm/shared/schema";
 import type { PhotoCategory, UserRole } from "@trock-crm/shared/types";
@@ -90,6 +91,14 @@ function toFieldUploadedPhoto(file: any, imageUrl: string | null): FieldPhoto {
   };
 }
 
+function hasSelectedCaptureTarget(input: {
+  dealId?: string;
+  leadId?: string;
+  opportunityId?: string;
+}) {
+  return Boolean(input.dealId || input.leadId || input.opportunityId);
+}
+
 export async function requestFieldPhotoUploadUrl(
   tenantDb: TenantDb,
   input: {
@@ -105,13 +114,15 @@ export async function requestFieldPhotoUploadUrl(
     caption?: string | null;
   }
 ) {
-  await assertAccessibleFieldCaptureTarget(tenantDb, {
-    dealId: input.dealId,
-    leadId: input.leadId,
-    opportunityId: input.opportunityId,
-    userId: input.userId,
-    userRole: input.userRole,
-  });
+  if (hasSelectedCaptureTarget(input)) {
+    await assertAccessibleFieldCaptureTarget(tenantDb, {
+      dealId: input.dealId,
+      leadId: input.leadId,
+      opportunityId: input.opportunityId,
+      userId: input.userId,
+      userRole: input.userRole,
+    });
+  }
   assertImageContentType(input.contentType);
   assertUploadSize(input.sizeBytes);
   const photoCategory = cleanPhotoCategory(input.photoCategory);
@@ -158,13 +169,15 @@ export async function confirmFieldPhotoUpload(
     auditContext?: UploadAuditContext;
   }
 ) {
-  await assertAccessibleFieldCaptureTarget(tenantDb, {
-    dealId: input.dealId,
-    leadId: input.leadId,
-    opportunityId: input.opportunityId,
-    userId: input.userId,
-    userRole: input.userRole,
-  });
+  if (hasSelectedCaptureTarget(input)) {
+    await assertAccessibleFieldCaptureTarget(tenantDb, {
+      dealId: input.dealId,
+      leadId: input.leadId,
+      opportunityId: input.opportunityId,
+      userId: input.userId,
+      userRole: input.userRole,
+    });
+  }
   const pending = getPendingUploadMetadata(input.uploadToken);
   if (!pending) throw new AppError(400, "Invalid or expired upload token");
   if (pending.r2Key !== input.objectKey) throw new AppError(400, "objectKey does not match the issued upload.");
@@ -195,4 +208,210 @@ export async function confirmFieldPhotoUpload(
 
   const imageUrl = (await getFileDownloadUrl(tenantDb, file.id)).url;
   return { photo: toFieldUploadedPhoto(file, imageUrl) };
+}
+
+export async function listPendingFieldPhotos(
+  tenantDb: TenantDb,
+  access: {
+    userId: string;
+    userRole: UserRole;
+  }
+) {
+  const result = await tenantDb.execute(sql`
+    SELECT
+      f.id,
+      f.category,
+      f.photo_category,
+      f.subcategory,
+      f.display_name,
+      f.mime_type,
+      f.file_size_bytes,
+      f.file_extension,
+      f.deal_id,
+      f.lead_id,
+      f.description,
+      f.tags,
+      f.taken_at,
+      f.created_at,
+      f.uploaded_by,
+      f.latitude,
+      f.longitude,
+      f.address,
+      f.address_source,
+      f.geocoded_at,
+      f.procore_sync_status,
+      f.deleted_at
+    FROM files f
+    WHERE f.category = 'photo'
+      AND f.is_active = true
+      AND f.deleted_at IS NULL
+      AND f.uploaded_by = ${access.userId}::uuid
+      AND f.deal_id IS NULL
+      AND f.lead_id IS NULL
+      AND f.contact_id IS NULL
+      AND f.procore_project_id IS NULL
+      AND f.change_order_id IS NULL
+    ORDER BY COALESCE(f.taken_at, f.created_at) DESC
+    LIMIT 50
+  `);
+
+  const rows = (result as any).rows ?? result;
+  const photos = await Promise.all(rows.map(async (row: any) => {
+    const imageUrl = (await getFileDownloadUrl(tenantDb, row.id)).url;
+    return toFieldUploadedPhoto({
+      id: row.id,
+      category: row.category,
+      photoCategory: row.photo_category ?? null,
+      subcategory: row.subcategory ?? null,
+      displayName: row.display_name,
+      mimeType: row.mime_type,
+      fileSizeBytes: row.file_size_bytes ?? null,
+      fileExtension: row.file_extension ?? null,
+      dealId: row.deal_id ?? null,
+      leadId: row.lead_id ?? null,
+      description: row.description ?? null,
+      tags: Array.isArray(row.tags) ? row.tags : [],
+      takenAt: row.taken_at ?? null,
+      createdAt: row.created_at,
+      uploadedBy: row.uploaded_by,
+      latitude: row.latitude ?? null,
+      longitude: row.longitude ?? null,
+      address: row.address ?? null,
+      addressSource: row.address_source ?? null,
+      geocodedAt: row.geocoded_at ?? null,
+      procoreSyncStatus: row.procore_sync_status ?? null,
+      deletedAt: row.deleted_at ?? null,
+    }, imageUrl);
+  }));
+
+  return { photos };
+}
+
+export async function assignPendingFieldPhotoTarget(
+  tenantDb: TenantDb,
+  access: {
+    userId: string;
+    userRole: UserRole;
+  },
+  input: {
+    photoId: string;
+    dealId?: string;
+    leadId?: string;
+    opportunityId?: string;
+  }
+) {
+  const target = await assertAccessibleFieldCaptureTarget(tenantDb, {
+    dealId: input.dealId,
+    leadId: input.leadId,
+    opportunityId: input.opportunityId,
+    userId: access.userId,
+    userRole: access.userRole,
+  });
+
+  const existingResult = await tenantDb.execute(sql`
+    SELECT
+      f.id,
+      f.category,
+      f.photo_category,
+      f.subcategory,
+      f.display_name,
+      f.mime_type,
+      f.file_size_bytes,
+      f.file_extension,
+      f.deal_id,
+      f.lead_id,
+      f.description,
+      f.tags,
+      f.taken_at,
+      f.created_at,
+      f.uploaded_by,
+      f.latitude,
+      f.longitude,
+      f.address,
+      f.address_source,
+      f.geocoded_at,
+      f.procore_sync_status,
+      f.deleted_at
+    FROM files f
+    WHERE f.id = ${input.photoId}::uuid
+      AND f.category = 'photo'
+      AND f.is_active = true
+      AND f.deleted_at IS NULL
+      AND f.uploaded_by = ${access.userId}::uuid
+      AND f.deal_id IS NULL
+      AND f.lead_id IS NULL
+    LIMIT 1
+  `);
+  const existing = ((existingResult as any).rows ?? existingResult)[0];
+  if (!existing) {
+    throw new AppError(404, "Pending photo not found.");
+  }
+
+  const assignResult = await tenantDb.execute(sql`
+    UPDATE files
+    SET
+      deal_id = ${target.type === "lead" ? null : target.id}::uuid,
+      lead_id = ${target.type === "lead" ? target.id : null}::uuid
+    WHERE id = ${input.photoId}::uuid
+      AND category = 'photo'
+      AND is_active = true
+      AND deleted_at IS NULL
+      AND uploaded_by = ${access.userId}::uuid
+      AND deal_id IS NULL
+      AND lead_id IS NULL
+    RETURNING
+      id,
+      category,
+      photo_category,
+      subcategory,
+      display_name,
+      mime_type,
+      file_size_bytes,
+      file_extension,
+      deal_id,
+      lead_id,
+      description,
+      tags,
+      taken_at,
+      created_at,
+      uploaded_by,
+      latitude,
+      longitude,
+      address,
+      address_source,
+      geocoded_at,
+      procore_sync_status,
+      deleted_at
+  `);
+  const assigned = ((assignResult as any)?.rows ?? assignResult)?.[0];
+  if (!assigned) {
+    throw new AppError(409, "Pending photo could not be assigned. Refresh and try again.");
+  }
+  const imageUrl = (await getFileDownloadUrl(tenantDb, assigned.id)).url;
+  return {
+    photo: toFieldUploadedPhoto({
+      id: assigned.id,
+      category: assigned.category,
+      photoCategory: assigned.photo_category ?? null,
+      subcategory: assigned.subcategory ?? null,
+      displayName: assigned.display_name,
+      mimeType: assigned.mime_type,
+      fileSizeBytes: assigned.file_size_bytes ?? null,
+      fileExtension: assigned.file_extension ?? null,
+      dealId: assigned.deal_id ?? null,
+      leadId: assigned.lead_id ?? null,
+      description: assigned.description ?? null,
+      tags: Array.isArray(assigned.tags) ? assigned.tags : [],
+      takenAt: assigned.taken_at ?? null,
+      createdAt: assigned.created_at,
+      uploadedBy: assigned.uploaded_by,
+      latitude: assigned.latitude ?? null,
+      longitude: assigned.longitude ?? null,
+      address: assigned.address ?? null,
+      addressSource: assigned.address_source ?? null,
+      geocodedAt: assigned.geocoded_at ?? null,
+      procoreSyncStatus: assigned.procore_sync_status ?? null,
+      deletedAt: assigned.deleted_at ?? null,
+    }, imageUrl),
+  };
 }

@@ -45,6 +45,7 @@ const db = {
 
 const {
   FIELD_PHOTO_TRANSCRIPTION_MIME_TYPES,
+  getFieldPhotoTranscriptionConfig,
   getAccessibleFieldPhoto,
   transcribeAndPersistFieldPhotoDescription,
   transcribePhotoDescriptionAudio,
@@ -74,6 +75,18 @@ describe("photo transcription service", () => {
       "audio/wav",
       "audio/webm",
     ]));
+  });
+
+  it("reports voice transcription as unconfigured instead of throwing when the OpenAI key is blank", () => {
+    process.env.OPENAI_API_KEY = "   ";
+
+    expect(getFieldPhotoTranscriptionConfig()).toEqual({ configured: false });
+  });
+
+  it("reports voice transcription as configured when the OpenAI key is present", () => {
+    process.env.OPENAI_API_KEY = "test-openai-key";
+
+    expect(getFieldPhotoTranscriptionConfig()).toEqual({ configured: true });
   });
 
   it("rejects unsupported audio mime types before calling OpenAI", async () => {

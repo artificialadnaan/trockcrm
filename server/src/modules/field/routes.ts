@@ -5,9 +5,12 @@ import { tenantMiddleware } from "../../middleware/tenant.js";
 import { toFieldUserResponse } from "../field-users/service.js";
 import {
   confirmFieldPhotoUpload,
+  assignPendingFieldPhotoTarget,
+  listPendingFieldPhotos,
   requestFieldPhotoUploadUrl,
 } from "./photos-service.js";
 import {
+  getFieldPhotoTranscriptionConfig,
   transcribeAndPersistFieldPhotoDescription,
   transcribePhotoDescriptionAudio,
 } from "./photo-transcription-service.js";
@@ -169,6 +172,41 @@ fieldRoutes.post("/photos/confirm-upload", ...fieldProjectMiddleware, async (req
   } catch (err) {
     next(err);
   }
+});
+
+fieldRoutes.get("/photos/pending", ...fieldProjectMiddleware, async (req, res, next) => {
+  try {
+    const result = await listPendingFieldPhotos(req.tenantDb!, {
+      userId: req.fieldUser!.id,
+      userRole: req.fieldUser!.role,
+    });
+    await req.commitTransaction();
+    res.json(result);
+  } catch (err) {
+    next(err);
+  }
+});
+
+fieldRoutes.post("/photos/:photoId/assign-target", ...fieldProjectMiddleware, async (req, res, next) => {
+  try {
+    const result = await assignPendingFieldPhotoTarget(req.tenantDb!, {
+      userId: req.fieldUser!.id,
+      userRole: req.fieldUser!.role,
+    }, {
+      photoId: String(req.params.photoId),
+      dealId: typeof req.body.dealId === "string" ? req.body.dealId : undefined,
+      leadId: typeof req.body.leadId === "string" ? req.body.leadId : undefined,
+      opportunityId: typeof req.body.opportunityId === "string" ? req.body.opportunityId : undefined,
+    });
+    await req.commitTransaction();
+    res.json(result);
+  } catch (err) {
+    next(err);
+  }
+});
+
+fieldRoutes.get("/photos/transcribe-description", requireFieldContractor, (_req, res) => {
+  res.json(getFieldPhotoTranscriptionConfig());
 });
 
 fieldRoutes.post("/photos/transcribe-description", requireFieldContractor, rawAudioBody(), async (req, res, next) => {
