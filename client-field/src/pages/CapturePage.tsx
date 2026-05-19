@@ -18,8 +18,13 @@ import { getVoiceTranscriptionConfig } from "../lib/photo-dictation";
 
 type UploadState = Record<string, { status: "queued" | "uploading" | "complete" | "failed"; error?: string }>;
 
+function getTrimmedParam(params: URLSearchParams, key: string): string | null {
+  const value = params.get(key)?.trim();
+  return value ? value : null;
+}
+
 function initialTargetFromParams(params: URLSearchParams): FieldCaptureTarget | null {
-  const leadId = params.get("leadId");
+  const leadId = getTrimmedParam(params, "leadId");
   if (leadId) {
     return {
       id: leadId,
@@ -32,7 +37,7 @@ function initialTargetFromParams(params: URLSearchParams): FieldCaptureTarget | 
     };
   }
 
-  const opportunityId = params.get("opportunityId");
+  const opportunityId = getTrimmedParam(params, "opportunityId");
   if (opportunityId) {
     return {
       id: opportunityId,
@@ -45,7 +50,7 @@ function initialTargetFromParams(params: URLSearchParams): FieldCaptureTarget | 
     };
   }
 
-  const dealId = params.get("dealId");
+  const dealId = getTrimmedParam(params, "dealId");
   if (!dealId) return null;
   return {
     id: dealId,
@@ -292,6 +297,16 @@ export function CapturePage() {
         metadata: photo.metadata,
       });
       setUploadState((current) => ({ ...current, [photo.id]: { status: "complete" } }));
+
+      if (photo.tags.length > 0 && result?.photo?.id) {
+        api(`/field/photos/${result.photo.id}/tags`, {
+          method: "POST",
+          json: { tags: photo.tags },
+        }).catch((err) => {
+          console.warn("Tag sync failed:", err);
+        });
+      }
+
       return result;
     });
 

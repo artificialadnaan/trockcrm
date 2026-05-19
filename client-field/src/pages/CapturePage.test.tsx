@@ -144,6 +144,14 @@ describe("CapturePage", () => {
     expect(node.querySelector<HTMLButtonElement>('[aria-label="Capture photo"]')?.disabled).toBe(false);
   });
 
+  it("ignores whitespace-only target ids in the URL and treats the session as targetless", async () => {
+    const node = renderPage("/capture?dealId=%20%20%20&targetName=Should%20Be%20Ignored");
+
+    await vi.waitFor(() => expect(node.textContent).toContain("Choose target"));
+    expect(apiMock).not.toHaveBeenCalledWith(expect.stringContaining("/field/photo-targets/validate"));
+    expect(node.textContent).toContain("Pending captures");
+  });
+
   it("keeps deep-linked uploads attached to the initial target while validation is still in flight", async () => {
     apiMock.mockImplementation((path: string) => {
       const url = new URL(path, "https://example.test");
@@ -250,6 +258,77 @@ describe("CapturePage", () => {
     await vi.waitFor(() => expect(node.textContent).toContain("Project detail"));
   });
 
+  it("syncs tags asynchronously after upload completes for targeted photos", async () => {
+    const tagCalls: string[] = [];
+    apiMock.mockImplementation(async (path: string) => {
+      const url = new URL(path, "https://example.test");
+      if (url.pathname === "/field/photos/transcribe-description") return { configured: true };
+      if (url.pathname === "/field/photos/pending") return { photos: [] };
+      if (url.pathname === "/field/photo-targets/validate") return { target: TARGETS[2] };
+      if (url.pathname === "/field/photos/photo-1/tags") {
+        tagCalls.push(url.pathname);
+        return { tags: ["urgent"] };
+      }
+      const search = (url.searchParams.get("search") ?? "").toLowerCase();
+      return { targets: TARGETS.filter((target) => !search || target.name.toLowerCase().includes(search)) };
+    });
+
+    const node = renderPage("/capture?dealId=deal-1&targetName=Roof%20Repair");
+    await vi.waitFor(() => expect(node.textContent).toContain("Roof Repair"));
+
+    const input = node.querySelector<HTMLInputElement>('input[type="file"]')!;
+    Object.defineProperty(input, "files", { value: [new File(["a"], "a.jpg", { type: "image/jpeg" })], configurable: true });
+    input.dispatchEvent(new Event("change", { bubbles: true }));
+    await vi.waitFor(() => expect(node.textContent).toContain("1 photo in this session"));
+
+    const tagInput = node.querySelector<HTMLInputElement>('[aria-label="Photo tags"]')!;
+    const inputValueSetter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")?.set;
+    inputValueSetter?.call(tagInput, "urgent");
+    tagInput.dispatchEvent(new InputEvent("input", { bubbles: true, data: "urgent" }));
+    tagInput.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
+    await vi.waitFor(() => expect(node.textContent).toContain("urgent"));
+
+    Array.from(node.querySelectorAll("button")).find((button) => button.textContent === "Upload")?.click();
+
+    await vi.waitFor(() => expect(node.textContent).toContain("Project detail"));
+    await vi.waitFor(() => expect(tagCalls).toEqual(["/field/photos/photo-1/tags"]));
+  });
+
+  it("keeps upload complete even when background tag sync fails", async () => {
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    apiMock.mockImplementation(async (path: string) => {
+      const url = new URL(path, "https://example.test");
+      if (url.pathname === "/field/photos/transcribe-description") return { configured: true };
+      if (url.pathname === "/field/photos/pending") return { photos: [] };
+      if (url.pathname === "/field/photo-targets/validate") return { target: TARGETS[2] };
+      if (url.pathname === "/field/photos/photo-1/tags") {
+        throw new Error("tag sync broke");
+      }
+      const search = (url.searchParams.get("search") ?? "").toLowerCase();
+      return { targets: TARGETS.filter((target) => !search || target.name.toLowerCase().includes(search)) };
+    });
+
+    const node = renderPage("/capture?dealId=deal-1&targetName=Roof%20Repair");
+    await vi.waitFor(() => expect(node.textContent).toContain("Roof Repair"));
+
+    const input = node.querySelector<HTMLInputElement>('input[type="file"]')!;
+    Object.defineProperty(input, "files", { value: [new File(["a"], "a.jpg", { type: "image/jpeg" })], configurable: true });
+    input.dispatchEvent(new Event("change", { bubbles: true }));
+    await vi.waitFor(() => expect(node.textContent).toContain("1 photo in this session"));
+
+    const tagInput = node.querySelector<HTMLInputElement>('[aria-label="Photo tags"]')!;
+    const inputValueSetter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")?.set;
+    inputValueSetter?.call(tagInput, "urgent");
+    tagInput.dispatchEvent(new InputEvent("input", { bubbles: true, data: "urgent" }));
+    tagInput.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
+    await vi.waitFor(() => expect(node.textContent).toContain("urgent"));
+
+    Array.from(node.querySelectorAll("button")).find((button) => button.textContent === "Upload")?.click();
+
+    await vi.waitFor(() => expect(node.textContent).toContain("Project detail"));
+    await vi.waitFor(() => expect(warnSpy).toHaveBeenCalledWith("Tag sync failed:", expect.any(Error)));
+  });
+
   it("captures a camera frame into the session", async () => {
     HTMLCanvasElement.prototype.getContext = vi.fn(() => ({ drawImage: vi.fn() })) as any;
     HTMLCanvasElement.prototype.toBlob = vi.fn((callback: BlobCallback) => callback(new Blob(["photo"], { type: "image/jpeg" }))) as any;
@@ -318,7 +397,7 @@ describe("CapturePage", () => {
       file,
       tags: ["urgent"],
     })));
-    expect(tagWrites).toEqual([]);
+    await vi.waitFor(() => expect(tagWrites).toEqual(["/field/photos/pending-1/tags"]));
     expect(node.textContent).toContain("Pending captures");
     expect(node.textContent).not.toContain("Projects page");
   });
