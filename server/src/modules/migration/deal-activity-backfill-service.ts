@@ -15,6 +15,7 @@ export type BackfillObjectType = "note" | "call" | "meeting" | "email";
 
 export interface HubSpotActivityLike {
   id: string;
+  createdAt?: string;
   objectType: BackfillObjectType;
   properties: Record<string, string | undefined>;
   associations?: {
@@ -152,34 +153,113 @@ function clampText(value: string | null, maxLength: number): string | null {
 
 const KNOWN_HTML_TAGS = new Set([
   "a",
+  "abbr",
+  "address",
+  "area",
+  "article",
+  "aside",
+  "audio",
   "b",
+  "base",
+  "bdi",
+  "bdo",
+  "body",
   "blockquote",
   "br",
+  "button",
+  "canvas",
+  "caption",
+  "cite",
   "code",
+  "col",
+  "colgroup",
+  "code",
+  "data",
+  "datalist",
+  "dd",
+  "del",
+  "details",
+  "dfn",
+  "dialog",
   "div",
+  "dl",
+  "dt",
   "em",
+  "embed",
+  "fieldset",
+  "figcaption",
+  "figure",
+  "footer",
+  "form",
   "h1",
   "h2",
   "h3",
   "h4",
   "h5",
   "h6",
+  "head",
+  "header",
   "hr",
+  "html",
   "i",
+  "iframe",
+  "img",
+  "input",
+  "ins",
+  "i",
+  "kbd",
+  "label",
+  "legend",
   "li",
+  "link",
+  "li",
+  "main",
+  "mark",
+  "meta",
+  "nav",
   "ol",
+  "option",
+  "output",
   "p",
+  "param",
+  "picture",
   "pre",
+  "q",
+  "rp",
+  "rt",
+  "ruby",
+  "s",
+  "samp",
+  "section",
+  "select",
+  "small",
+  "source",
   "span",
   "strong",
-  "table",
+  "style",
+  "sub",
+  "summary",
+  "sup",
+  "svg",
+  "strong",
   "tbody",
+  "table",
   "td",
+  "template",
+  "textarea",
+  "tfoot",
   "th",
   "thead",
+  "time",
+  "title",
+  "track",
   "tr",
   "u",
   "ul",
+  "var",
+  "video",
+  "wbr",
+  "font",
 ]);
 
 function isValidUnicodeScalar(value: number): boolean {
@@ -211,22 +291,26 @@ function decodeHtmlEntities(input: string): string {
   }
 }
 
+function stripDecodedHtmlTags(input: string): string {
+  return input
+    .replace(/<\s*br\s*\/?>/gi, " ")
+    .replace(/<\/\s*(p|div|li|tr|h[1-6])\s*>/gi, " ")
+    .replace(/<[^>]+>/g, " ");
+}
+
 export function htmlToPlainText(input: string | null | undefined): string {
   if (!input) return "";
 
   const decoded = decodeHtmlEntities(input);
   const withoutTags = containsKnownHtmlTag(decoded)
-    ? decoded
-    .replace(/<\s*br\s*\/?>/gi, " ")
-    .replace(/<\/\s*(p|div|li|tr|h[1-6])\s*>/gi, " ")
-    .replace(/<[^>]+>/g, " ")
+    ? stripDecodedHtmlTags(decoded)
     : decoded;
 
   return withoutTags.replace(/\s+/g, " ").replace(/\s+([.,!?;:])/g, "$1").trim();
 }
 
 function containsKnownHtmlTag(input: string): boolean {
-  const matches = input.matchAll(/<\/?([a-z][\w:-]*)(?:\s[^>]*)?>/gi);
+  const matches = input.matchAll(/<\/?([a-z][\w:-]*)(?:\s[^>]*)?\s*\/?>/gi);
   for (const match of matches) {
     if (KNOWN_HTML_TAGS.has(match[1].toLowerCase())) return true;
   }
@@ -260,8 +344,8 @@ function buildBodyPreview(bodyHtml: string | null, bodyText: string | null) {
   return source.slice(0, 500) || null;
 }
 
-function parseCreatedAt(properties: Record<string, string | undefined>, fallback: Date): Date {
-  const rawValue = properties.createdate ?? properties.hs_timestamp;
+function parseCreatedAt(engagement: HubSpotActivityLike, fallback: Date): Date {
+  const rawValue = engagement.properties.hs_createdate ?? engagement.createdAt ?? engagement.properties.hs_timestamp;
   if (!rawValue) return fallback;
   const parsed = new Date(rawValue);
   if (Number.isNaN(parsed.getTime())) return fallback;
@@ -423,7 +507,7 @@ export function mapNoteToActivity(input: {
       attachmentIds: input.engagement.properties.hs_attachment_ids,
     }),
     occurredAt,
-    createdAt: parseCreatedAt(input.engagement.properties, occurredAt),
+    createdAt: parseCreatedAt(input.engagement, occurredAt),
   };
 }
 
@@ -450,7 +534,7 @@ export function mapCallToActivity(input: {
     outcome: normalizeCallOutcome(input.engagement.properties),
     durationMinutes: parseDurationMinutes(input.engagement.properties.hs_call_duration),
     occurredAt,
-    createdAt: parseCreatedAt(input.engagement.properties, occurredAt),
+    createdAt: parseCreatedAt(input.engagement, occurredAt),
   };
 }
 
@@ -477,7 +561,7 @@ export function mapMeetingToActivity(input: {
       attachmentIds: input.engagement.properties.hs_attachment_ids,
     }),
     occurredAt,
-    createdAt: parseCreatedAt(input.engagement.properties, occurredAt),
+    createdAt: parseCreatedAt(input.engagement, occurredAt),
   };
 }
 
@@ -498,7 +582,7 @@ export function mapEmailToRecords(input: {
   const subject = plainTextOrNull(input.engagement.properties.hs_email_subject) ?? "HubSpot Email";
   const activitySubject = clampText(subject, 500);
   const sentAt = parseDate(input.engagement.properties.hs_timestamp);
-  const createdAt = parseCreatedAt(input.engagement.properties, sentAt);
+  const createdAt = parseCreatedAt(input.engagement, sentAt);
   const links = resolveEntityLinkFields(input.targetEntity);
 
   return {

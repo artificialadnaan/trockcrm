@@ -133,7 +133,7 @@ describe("HubSpot migration client", () => {
     expect(requestUrl).toContain("properties=");
     expect(requestUrl).toContain("hs_note_body");
     expect(requestUrl).toContain("hs_attachment_ids");
-    expect(requestUrl).toContain("createdate");
+    expect(requestUrl).toContain("hs_createdate");
   });
 
   it("requests the full property set for call, meeting, and email backfills", async () => {
@@ -165,6 +165,6 @@ describe("HubSpot migration client", () => {
     expect(emailUrl).toContain("hs_email_html");
     expect(emailUrl).toContain("hs_email_headers");
     expect(emailUrl).toContain("hs_attachment_ids");
-    expect(emailUrl).toContain("createdate");
+    expect(emailUrl).toContain("hs_createdate");
   });
 });

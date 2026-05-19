@@ -136,6 +136,7 @@ export interface HubSpotCompany {
 
 export interface HubSpotActivity {
   id: string;
+  createdAt?: string;
   properties: {
     hs_activity_type?: string;
     hs_call_title?: string;
@@ -169,7 +170,7 @@ export interface HubSpotActivity {
     hs_task_type?: string;
     hs_task_reminders?: string;
     hs_lastmodifieddate?: string;
-    createdate?: string;
+    hs_createdate?: string;
   };
   associations?: {
     deals?: { results: Array<{ id: string }> };
@@ -338,7 +339,7 @@ export async function fetchHubSpotActivitiesByType(type: HubSpotActivityObjectTy
 }
 
 function buildActivityProperties(type: HubSpotActivityObjectType): string {
-  const base = ["hubspot_owner_id", "hs_timestamp", "hs_lastmodifieddate", "createdate"];
+  const base = ["hubspot_owner_id", "hs_timestamp", "hs_lastmodifieddate", "hs_createdate"];
   const typeProps: Record<HubSpotActivityObjectType, string[]> = {
     call: [
       "hs_call_title",

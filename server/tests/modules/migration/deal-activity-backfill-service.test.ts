@@ -383,9 +383,9 @@ describe("deal activity backfill service", () => {
     const note = mapNoteToActivity({
       engagement: makeEngagement({
         objectType: "note",
+        createdAt: "2026-04-30T10:11:12.000Z",
         properties: {
           hs_note_body: "<div><p>HubSpot&nbsp;note <strong>body</strong></p></div>",
-          createdate: "2026-04-30T10:11:12.000Z",
         },
       }),
       targetEntity: makeCompanyTarget(),
@@ -394,12 +394,12 @@ describe("deal activity backfill service", () => {
     const call = mapCallToActivity({
       engagement: makeEngagement({
         objectType: "call",
+        createdAt: "2026-05-01T08:30:00.000Z",
         properties: {
           hs_call_title: "<div>Intro&nbsp;Call</div>",
           hs_call_body: "<div><p>Talked through <em>scope</em></p></div>",
           hs_call_duration: "180000",
           hs_call_outcome: "connected",
-          createdate: "2026-05-01T08:30:00.000Z",
         },
       }),
       targetEntity: makeContactTarget(),
@@ -408,11 +408,11 @@ describe("deal activity backfill service", () => {
     const meeting = mapMeetingToActivity({
       engagement: makeEngagement({
         objectType: "meeting",
+        createdAt: "2026-05-02T08:00:00.000Z",
         properties: {
           hs_meeting_title: "<div>Site Walk</div>",
           hs_meeting_body: "<div><p>Met on <strong>site</strong></p></div>",
           hs_meeting_start_time: "2026-05-10T09:00:00.000Z",
-          createdate: "2026-05-02T08:00:00.000Z",
         },
       }),
       targetEntity: makeDealTarget(),
@@ -458,13 +458,13 @@ describe("deal activity backfill service", () => {
       engagement: makeEngagement({
         id: "hs-email-1",
         objectType: "email",
+        createdAt: "2026-05-03T07:00:00.000Z",
         properties: {
           hs_email_subject: "Proposal Follow Up",
           hs_email_text: "<div><p>Checking in on the proposal.</p></div>",
           hs_email_html: "<div><p>Checking in on the <strong>proposal</strong>.</p></div>",
           hs_email_direction: "INCOMING_EMAIL",
           hs_attachment_ids: "12345;67890",
-          createdate: "2026-05-03T07:00:00.000Z",
           hs_email_headers: JSON.stringify({
             from: { email: "client@example.com" },
             to: [{ email: "rep@trock.com" }],
@@ -502,6 +502,8 @@ describe("deal activity backfill service", () => {
     expect(htmlToPlainText("<div><p>Hello&nbsp;<strong>world</strong> &amp; team</p></div>")).toBe(
       "Hello world & team"
     );
+    expect(htmlToPlainText("<img src=\"https://example.com/x.png\" alt=\"x\">")).toBe("");
+    expect(htmlToPlainText("<br/>Hello")).toBe("Hello");
     expect(htmlToPlainText("&lt;div&gt;Hello&lt;/div&gt;")).toBe("Hello");
     expect(htmlToPlainText("Tom&rsquo;s &ldquo;quote&rdquo; &mdash; ok")).toBe("Tom’s “quote” — ok");
     expect(htmlToPlainText("<div>Broken<p>tag")).toBe("Broken tag");
