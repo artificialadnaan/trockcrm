@@ -19,6 +19,10 @@ import {
   type HubSpotActivityLike,
   type ResolvedTarget,
 } from "../server/src/modules/migration/deal-activity-backfill-service.js";
+import {
+  refreshEmailStatsForEmailRecords,
+  type EmailStatEmailRecord,
+} from "../server/src/modules/email/stats-service.js";
 
 export interface BackfillArgs {
   office: string;
@@ -62,6 +66,7 @@ export interface BackfillReport {
   mode: BackfillArgs["mode"];
   byType: Partial<Record<BackfillObjectType, TypeReport>>;
   topEntities: EntityVolume[];
+  recomputedEmailStatTargets: number;
   durationMs: number;
 }
 
@@ -88,6 +93,7 @@ type RunDeps = {
   mapEmailToRecords: typeof mapEmailToRecords;
   writeAtomic: typeof writeAtomic;
   writeLedgerOnly: typeof writeLedgerOnly;
+  refreshEmailStatsForEmailRecords: typeof refreshEmailStatsForEmailRecords;
   createConnections: (officeSchema: string) => Promise<Connections>;
   validateOffice: (
     publicDb: DefaultDb,
@@ -187,7 +193,9 @@ async function defaultFetchEngagementsByType(
 }
 
 async function defaultCreateConnections(officeSchema: string): Promise<Connections> {
-  const client = new pg.Client({ connectionString: process.env.DATABASE_URL });
+  const connectionString = process.env.DATABASE_URL ?? process.env.DATABASE_PUBLIC_URL;
+  if (!connectionString) throw new Error("DATABASE_URL or DATABASE_PUBLIC_URL is required");
+  const client = new pg.Client({ connectionString });
   await client.connect();
   await client.query("SELECT set_config('search_path', $1, false)", [`${officeSchema},public`]);
   const db = drizzle(client, { schema });
@@ -225,6 +233,7 @@ const defaultDeps: RunDeps = {
   mapEmailToRecords,
   writeAtomic,
   writeLedgerOnly,
+  refreshEmailStatsForEmailRecords,
   createConnections: defaultCreateConnections,
   validateOffice: defaultValidateOffice,
 };
@@ -280,6 +289,8 @@ export async function runBackfill(args: BackfillArgs, deps: RunDeps = defaultDep
   const requestedTypes = args.type === "all" ? [...deps.getAvailableTypes()] : [args.type];
   const byType: Partial<Record<BackfillObjectType, TypeReport>> = {};
   const volumeByEntityId = new Map<string, EntityVolume>();
+  const importedEmailRecords: EmailStatEmailRecord[] = [];
+  let recomputedEmailStatTargets = 0;
 
   const bootstrap = await deps.createConnections(args.office);
   try {
@@ -444,6 +455,7 @@ export async function runBackfill(args: BackfillArgs, deps: RunDeps = defaultDep
               report.alreadyImported += 1;
               continue;
             }
+            importedEmailRecords.push(payload.email);
           } else {
             const activity =
               type === "note"
@@ -505,6 +517,13 @@ export async function runBackfill(args: BackfillArgs, deps: RunDeps = defaultDep
         }
       }
     }
+
+    if (args.mode === "execute" && importedEmailRecords.length > 0) {
+      recomputedEmailStatTargets = await deps.refreshEmailStatsForEmailRecords(
+        bootstrap.tenantDb,
+        importedEmailRecords
+      );
+    }
   } finally {
     await bootstrap.close();
   }
@@ -521,6 +540,7 @@ export async function runBackfill(args: BackfillArgs, deps: RunDeps = defaultDep
         return totalB - totalA;
       })
       .slice(0, 10),
+    recomputedEmailStatTargets,
     durationMs: Date.now() - startedAt,
   };
 }
@@ -572,6 +592,10 @@ export function renderBackfillReport(report: BackfillReport) {
   }
 
   lines.push("");
+  if (report.mode === "execute") {
+    lines.push(`Email stat targets recomputed: ${report.recomputedEmailStatTargets}`);
+    lines.push("");
+  }
   lines.push("Sample orphans (first 10):");
   const orphanSamples = DEFAULT_TYPES.flatMap((type) => report.byType[type]?.orphanSamples ?? []).slice(0, 10);
   lines.push(...(orphanSamples.length > 0 ? orphanSamples : ["None"]));

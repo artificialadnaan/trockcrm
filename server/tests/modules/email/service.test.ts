@@ -964,6 +964,62 @@ describe("email service inbound association", () => {
     expect(updateTables.length).toBeGreaterThan(1);
   });
 
+  it("recomputes linked deal stats when ignoring an email assigned to a lead", async () => {
+    const updatePayloads: Array<{ table: string; payload: any }> = [];
+    const tenantDb = {
+      select: vi.fn((shape?: Record<string, unknown>) => {
+        const chain: any = {
+          from: vi.fn(() => chain),
+          where: vi.fn(() => chain),
+          limit: vi.fn(() => chain),
+          then(resolve: (value: any[]) => void) {
+            const callIndex = (tenantDb.select as any).mock.calls.length;
+            if (callIndex === 1) {
+              resolve([
+                {
+                  id: "email-1",
+                  userId: "rep-1",
+                  assignedEntityType: "lead",
+                  assignedEntityId: "lead-1",
+                  dealId: null,
+                  contactId: null,
+                },
+              ]);
+              return;
+            }
+            if (shape && "id" in shape && !("companyId" in shape)) {
+              resolve([{ id: "deal-1" }]);
+              return;
+            }
+            if (shape && "companyId" in shape) {
+              resolve([{ companyId: "company-1" }]);
+              return;
+            }
+            resolve([]);
+          },
+        };
+        return chain;
+      }),
+      update: vi.fn((table: any) => ({
+        set: vi.fn((payload: any) => {
+          updatePayloads.push({ table: table?.name ?? "unknown", payload });
+          return {
+            where: vi.fn(() => ({
+              returning: vi.fn(async () => []),
+            })),
+          };
+        }),
+      })),
+    };
+
+    await ignoreEmailAssignment(tenantDb as any, "email-1", "rep-1", "rep");
+
+    const dealStatsUpdate = updatePayloads.find((entry) =>
+      hasColumnName(entry.payload?.emailCount, "source_lead_id")
+    );
+    expect(dealStatsUpdate).toBeDefined();
+  });
+
   it("blocks manual association against another user's email for directors", async () => {
     const tenantDb = {
       select: vi.fn(() => {

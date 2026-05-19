@@ -48,7 +48,16 @@ function makeDeps() {
     mapNoteToActivity: vi.fn(() => ({ type: "note" })),
     mapCallToActivity: vi.fn(() => ({ type: "call" })),
     mapMeetingToActivity: vi.fn(() => ({ type: "meeting" })),
-    mapEmailToRecords: vi.fn(() => ({ email: { graphMessageId: "hubspot:1" }, activity: { type: "email" } })),
+    mapEmailToRecords: vi.fn(() => ({
+      email: {
+        graphMessageId: "hubspot:1",
+        assignedEntityType: "deal",
+        assignedEntityId: "deal-1",
+        dealId: "deal-1",
+        contactId: null,
+      },
+      activity: { type: "email" },
+    })),
     writeAtomic: vi.fn(async (_db: unknown, payload: { ledger: { hubspotObjectType: string; hubspotObjectId: string } }) => {
       imported.add(`${payload.ledger.hubspotObjectType}:${payload.ledger.hubspotObjectId}`);
       return {
@@ -60,6 +69,7 @@ function makeDeps() {
     writeLedgerOnly: vi.fn(async (_db: unknown, payload: { hubspotObjectType: string; hubspotObjectId: string }) => {
       imported.add(`${payload.hubspotObjectType}:${payload.hubspotObjectId}`);
     }),
+    refreshEmailStatsForEmailRecords: vi.fn(async (_db: unknown, emails: Array<unknown>) => emails.length),
     createConnections: vi.fn(async () => ({
       publicDb: {},
       tenantDb: {},
@@ -150,6 +160,40 @@ describe("hubspot-deal-activity-backfill script", () => {
     expect(report.byType.meeting?.imported).toBe(1);
     expect(report.byType.email?.imported).toBe(1);
     expect(deps.fetchEngagementsByType).toHaveBeenCalledTimes(4);
+    expect(deps.refreshEmailStatsForEmailRecords).toHaveBeenCalledWith(
+      {},
+      expect.arrayContaining([
+        expect.objectContaining({
+          assignedEntityType: "deal",
+          assignedEntityId: "deal-1",
+          dealId: "deal-1",
+        }),
+      ])
+    );
+    expect(report.recomputedEmailStatTargets).toBe(1);
+  });
+
+  it("does not recompute email stats during dry-run", async () => {
+    const deps = makeDeps();
+
+    const report = await runBackfill(
+      { office: "office_dallas", type: "all", mode: "dry-run", since: null, limit: null, dealId: null },
+      deps as any
+    );
+
+    expect(deps.refreshEmailStatsForEmailRecords).not.toHaveBeenCalled();
+    expect(report.recomputedEmailStatTargets).toBe(0);
+  });
+
+  it("does not recompute email stats when no email rows were imported", async () => {
+    const deps = makeDeps();
+
+    await runBackfill(
+      { office: "office_dallas", type: "note", mode: "execute", since: null, limit: null, dealId: null },
+      deps as any
+    );
+
+    expect(deps.refreshEmailStatsForEmailRecords).not.toHaveBeenCalled();
   });
 
   it("tracks imported entity-type breakdowns in the report", async () => {
