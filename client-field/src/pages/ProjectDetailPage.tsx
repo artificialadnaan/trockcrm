@@ -3,6 +3,7 @@ import { useNavigate, useParams } from "react-router-dom";
 import { ArrowLeft, Camera, ChevronLeft, ChevronRight, Download, FileText, Filter, Star, X } from "lucide-react";
 import { api } from "../lib/api";
 import { useAuth } from "../lib/auth";
+import { BrandLogo } from "../components/BrandLogo";
 import { Button, TextInput } from "../components/ui";
 import { ReportBuilder } from "../components/ReportBuilder";
 import {
@@ -128,9 +129,14 @@ export function ProjectDetailPage() {
 
       <section className="rounded-2xl border border-border bg-white p-4">
         <div className="mb-3 flex items-center justify-between">
-          <div>
+          <div className="flex items-center gap-3">
+            <div className="flex h-11 w-11 items-center justify-center rounded-xl border border-border bg-white shadow-sm">
+              <BrandLogo className="h-8 w-auto" alt="T Rock Construction reports" />
+            </div>
+            <div>
             <h2 className="text-lg font-black">Reports</h2>
             <p className="text-sm text-muted-foreground">Generated photo PDFs for this project.</p>
+            </div>
           </div>
           <Button variant="ghost" onClick={() => setReportBuilderOpen(true)}>
             <FileText className="mr-2 h-4 w-4" />

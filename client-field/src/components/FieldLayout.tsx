@@ -1,6 +1,7 @@
 import { Camera, FolderKanban, UserCircle } from "lucide-react";
 import { NavLink, Outlet } from "react-router-dom";
 import { useAuth } from "@/lib/auth";
+import { BrandLogo } from "./BrandLogo";
 import { Button } from "./ui";
 
 const navItems = [
@@ -17,9 +18,14 @@ export function FieldLayout() {
     <div className="min-h-screen bg-background pb-24">
       <header className="sticky top-0 z-10 border-b border-border bg-white/95 px-4 py-3 backdrop-blur">
         <div className="mx-auto flex max-w-3xl items-center justify-between gap-3">
-          <div>
-            <p className="text-sm font-bold uppercase tracking-wide text-primary">T Rock Field</p>
-            <p className="truncate text-lg font-semibold">{name}</p>
+          <div className="flex min-w-0 items-center gap-3">
+            <div className="flex h-12 w-12 items-center justify-center rounded-xl border border-border bg-white shadow-sm">
+              <BrandLogo className="h-9 w-auto" alt="T Rock logo" />
+            </div>
+            <div className="min-w-0">
+              <p className="text-xs font-black uppercase tracking-[0.24em] text-primary">Field App</p>
+              <p className="truncate text-lg font-semibold">{name}</p>
+            </div>
           </div>
           <Button variant="ghost" onClick={() => void logout()} aria-label="Log out">Log out</Button>
         </div>

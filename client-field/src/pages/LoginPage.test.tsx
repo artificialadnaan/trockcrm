@@ -12,7 +12,7 @@ const authMock = vi.hoisted(() => ({
   login: vi.fn(),
 }));
 
-vi.mock("@/lib/auth", () => ({
+vi.mock("../lib/auth", () => ({
   useAuth: () => authMock,
 }));
 
@@ -45,7 +45,8 @@ describe("LoginPage", () => {
   it("validates and submits field login credentials", async () => {
     authMock.login.mockResolvedValue(undefined);
     const node = renderPage();
-    await vi.waitFor(() => expect(node.textContent).toContain("Field App"));
+    await vi.waitFor(() => expect(node.textContent).toContain("Sign in"));
+    expect(node.querySelector('img[alt="T Rock Construction"]')).toBeTruthy();
     node.querySelector("form")?.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
     await vi.waitFor(() => expect(node.textContent).toContain("Email and password are required."));
 
@@ -59,7 +60,7 @@ describe("LoginPage", () => {
   it("renders inline login errors", async () => {
     authMock.login.mockRejectedValue(new Error("Invalid email or password"));
     const node = renderPage();
-    await vi.waitFor(() => expect(node.textContent).toContain("Field App"));
+    await vi.waitFor(() => expect(node.textContent).toContain("Sign in"));
     changeInput(node.querySelector<HTMLInputElement>('[name="email"]')!, "field@example.com");
     changeInput(node.querySelector<HTMLInputElement>('[name="password"]')!, "bad-password");
     node.querySelector("form")?.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));

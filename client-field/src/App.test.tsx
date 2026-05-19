@@ -7,7 +7,7 @@ import { MemoryRouter } from "react-router-dom";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { App } from "./App";
 
-vi.mock("@/lib/auth", () => ({
+vi.mock("./lib/auth", () => ({
   AuthProvider: ({ children }: { children: React.ReactNode }) => <>{children}</>,
   useAuth: () => ({
     user: {
@@ -24,16 +24,16 @@ vi.mock("@/lib/auth", () => ({
   }),
 }));
 
-vi.mock("@/components/ProtectedRoute", () => ({
+vi.mock("./components/ProtectedRoute", () => ({
   ProtectedRoute: () => <div>Protected shell</div>,
 }));
 
-vi.mock("@/pages/LoginPage", () => ({ LoginPage: () => <div>Login page</div> }));
-vi.mock("@/pages/AcceptInvitePage", () => ({ AcceptInvitePage: () => <div>Accept invite</div> }));
-vi.mock("@/pages/CapturePage", () => ({ CapturePage: () => <div>Capture page</div> }));
-vi.mock("@/pages/HomePage", () => ({ HomePage: () => <div>Home page</div> }));
-vi.mock("@/pages/ProjectDetailPage", () => ({ ProjectDetailPage: () => <div>Project detail</div> }));
-vi.mock("@/pages/ProjectsPage", () => ({ ProjectsPage: () => <div>Projects page</div> }));
+vi.mock("./pages/LoginPage", () => ({ LoginPage: () => <div>Login page</div> }));
+vi.mock("./pages/AcceptInvitePage", () => ({ AcceptInvitePage: () => <div>Accept invite</div> }));
+vi.mock("./pages/CapturePage", () => ({ CapturePage: () => <div>Capture page</div> }));
+vi.mock("./pages/HomePage", () => ({ HomePage: () => <div>Home page</div> }));
+vi.mock("./pages/ProjectDetailPage", () => ({ ProjectDetailPage: () => <div>Project detail</div> }));
+vi.mock("./pages/ProjectsPage", () => ({ ProjectsPage: () => <div>Projects page</div> }));
 
 let root: Root | null = null;
 let container: HTMLDivElement | null = null;

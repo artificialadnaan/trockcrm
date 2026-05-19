@@ -2,6 +2,7 @@ import React, { useEffect, useMemo, useState } from "react";
 import { ArrowLeft, CheckSquare, Download, FileText, Plus, Square, X } from "lucide-react";
 import type { FieldPhoto } from "../lib/field-projects";
 import { api } from "../lib/api";
+import { BrandLogo } from "./BrandLogo";
 import { Button, TextInput } from "./ui";
 
 type ReportBuilderProps = {
@@ -237,9 +238,15 @@ export function ReportBuilder({ isOpen, projectId, projectName, creatorName, pho
     <div className="fixed inset-0 z-[80] bg-black/70 px-3 py-4 text-foreground">
       <div className="mx-auto flex h-full w-full max-w-5xl flex-col overflow-hidden rounded-3xl bg-white shadow-2xl">
         <div className="flex items-center justify-between border-b border-border px-4 py-3">
-          <div>
-            <h2 className="text-xl font-black">{step === "select" ? "Generate Report" : "Edit Report"}</h2>
-            <p className="text-sm text-muted-foreground">{projectName}</p>
+          <div className="flex items-center gap-3">
+            <div className="flex h-12 w-12 items-center justify-center rounded-xl border border-border bg-white shadow-sm">
+              <BrandLogo className="h-9 w-auto" alt="T Rock Construction logo" />
+            </div>
+            <div>
+              <p className="text-[11px] font-black uppercase tracking-[0.24em] text-primary">Reports</p>
+              <h2 className="text-xl font-black">{step === "select" ? "Generate Report" : "Edit Report"}</h2>
+              <p className="text-sm text-muted-foreground">{projectName}</p>
+            </div>
           </div>
           <button type="button" aria-label="Close report builder" className="rounded-full bg-muted p-2" onClick={onClose}>
             <X className="h-5 w-5" />

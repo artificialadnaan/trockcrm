@@ -88,6 +88,7 @@ describe("ProjectDetailPage", () => {
     const node = renderPage();
 
     await vi.waitFor(() => expect(node.textContent).toContain("Roof Repair"));
+    expect(node.querySelector('img[alt="T Rock Construction reports"]')).toBeTruthy();
     expect(node.textContent).toContain("damage caption");
     expect(node.textContent).toContain("safety caption");
     expect(node.textContent).toContain("#roofing");
