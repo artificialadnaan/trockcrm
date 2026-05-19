@@ -3,7 +3,7 @@
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { renderToStaticMarkup } from "react-dom/server";
-import { MemoryRouter, Route, Routes } from "react-router-dom";
+import { MemoryRouter, Route, Routes, useLocation } from "react-router-dom";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { ReactNode } from "react";
 import { CompanyDetailPage } from "./company-detail-page";
@@ -151,13 +151,20 @@ function mountPage() {
   document.body.appendChild(container);
   let root: Root | null = null;
 
+  function LocationProbe() {
+    const location = useLocation();
+    return <div data-testid="location">{`${location.pathname}${location.search}`}</div>;
+  }
+
   act(() => {
     root = createRoot(container);
     root.render(
       <MemoryRouter initialEntries={["/companies/company-1"]}>
         <Routes>
           <Route path="/companies/:id" element={<CompanyDetailPage />} />
+          <Route path="/leads/new" element={<div>Lead New Page</div>} />
         </Routes>
+        <LocationProbe />
       </MemoryRouter>
     );
   });
@@ -300,6 +307,43 @@ describe("CompanyDetailPage", () => {
 
     expect(mounted.container.textContent).toContain("Dallas ISD Roof Replacement");
     expect(mounted.container.textContent).not.toContain("Company Copilot");
+  });
+
+  it("uses a Create Lead empty-state CTA on the deals tab while preserving the header New deal action", () => {
+    mocks.useCompanyDealsMock.mockReturnValueOnce({
+      deals: [],
+      loading: false,
+      error: null,
+    });
+    mounted = mountPage();
+
+    expect(mounted.container.textContent).toContain("New deal");
+
+    const dealsTab = mounted.container.querySelector('button[aria-label="Deals"]');
+    expect(dealsTab).not.toBeNull();
+
+    act(() => {
+      dealsTab?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+
+    expect(mounted.container.textContent).toContain("No deals linked to this company.");
+    expect(mounted.container.textContent).toContain("Create Lead");
+
+    const createLeadButton = Array.from(mounted.container.querySelectorAll("button")).find((element) =>
+      element.textContent?.includes("Create Lead")
+    );
+    expect(createLeadButton).not.toBeUndefined();
+
+    act(() => {
+      createLeadButton?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+
+    const locationText = mounted.container.querySelector('[data-testid="location"]')?.textContent;
+    const location = new URL(`https://example.test${locationText}`);
+
+    expect(location.pathname).toBe("/leads/new");
+    expect(location.searchParams.get("companyId")).toBe("company-1");
+    expect(location.searchParams.get("primaryContactId")).toBeNull();
   });
 
   it("renders the email count badge from the company payload and lazy-loads the tab", () => {

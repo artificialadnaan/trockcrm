@@ -58,9 +58,9 @@ export function ContactDealsTab({ contactId, contact }: ContactDealsTabProps) {
       <div className="text-center py-8 text-muted-foreground">
         <Handshake className="h-10 w-10 mx-auto mb-2 opacity-30" />
         <p>No deals associated with this contact.</p>
-        <Button className="mt-4" onClick={() => navigate(`/deals/new?${params.toString()}`)}>
+        <Button className="mt-4 bg-brand-red text-white hover:bg-brand-red/90" onClick={() => navigate(`/leads/new?${params.toString()}`)}>
           <Plus className="mr-2 h-4 w-4" />
-          Create Deal
+          Create Lead
         </Button>
       </div>
     );

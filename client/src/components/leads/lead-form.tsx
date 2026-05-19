@@ -727,7 +727,7 @@ function EditableLeadForm({
     companyId ? { companyId, limit: 500 } : { limit: 0 },
     { officeId: isCreate ? selectedOffice?.officeId : null }
   );
-  const { contacts, refetch: refetchContacts } = useCompanyContacts(
+  const { contacts, loading: companyContactsLoading, refetch: refetchContacts } = useCompanyContacts(
     companyId ?? undefined,
     { officeId: isCreate ? selectedOffice?.officeId : null }
   );
@@ -825,11 +825,11 @@ function EditableLeadForm({
       companyId: companyId ?? "",
       propertyId: current.propertyId || (properties.length === 1 ? properties[0]?.id ?? "" : ""),
       primaryContactId:
-        current.primaryContactId && contacts.some((contact) => contact.id === current.primaryContactId)
+        current.primaryContactId && (companyContactsLoading || contacts.some((contact) => contact.id === current.primaryContactId))
           ? current.primaryContactId
           : "",
     }));
-  }, [companyId, contacts, isCreate, properties]);
+  }, [companyContactsLoading, companyId, contacts, isCreate, properties]);
 
   useEffect(() => {
     if (!isCreate) {

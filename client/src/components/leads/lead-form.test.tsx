@@ -40,7 +40,8 @@ let properties = [
     ...completeProperty,
   },
 ];
-const contacts = [{ id: "contact-1", firstName: "Ada", lastName: "Lovelace" }];
+let contacts = [{ id: "contact-1", firstName: "Ada", lastName: "Lovelace" }];
+let companyContactsLoading = false;
 let propertyDetail: PropertySurface | null = null;
 const companyContactsRefetch = vi.fn();
 const leadHookMocks = vi.hoisted(() => ({
@@ -120,6 +121,7 @@ vi.mock("@/hooks/use-properties", () => ({
 vi.mock("@/hooks/use-companies", () => ({
   useCompanyContacts: () => ({
     contacts,
+    loading: companyContactsLoading,
     refetch: companyContactsRefetch,
   }),
 }));
@@ -496,6 +498,8 @@ describe("LeadForm", () => {
     vi.clearAllMocks();
     routerMocks.navigate.mockClear();
     properties = [{ ...completeProperty }];
+    contacts = [{ id: "contact-1", firstName: "Ada", lastName: "Lovelace" }];
+    companyContactsLoading = false;
     propertyDetail = null;
     authMocks.user.role = "rep";
     authMocks.user.id = "rep-1";
@@ -717,6 +721,15 @@ describe("LeadForm", () => {
     expect(html).toContain('<span data-select-label="true">Ada Lovelace</span>');
     expect(html).not.toContain("Initial Stage");
     expect(html).toContain('<span data-select-label="true">Multifamily</span>');
+  });
+
+  it("preserves the contact prefill while company contacts are still loading", () => {
+    contacts = [];
+    companyContactsLoading = true;
+
+    renderCreateForm({ propertyId: "" });
+
+    expect(container.innerHTML).toContain('data-select-value="contact-1"');
   });
 
   it("renders editable sales rep assignment on the lead summary card", () => {
