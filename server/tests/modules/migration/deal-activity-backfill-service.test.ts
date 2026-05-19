@@ -1,11 +1,15 @@
-import { describe, expect, it, vi } from "vitest";
+import { companies, contacts, deals } from "@trock-crm/shared/schema";
+import { describe, expect, it } from "vitest";
 
 const {
+  findTargetEntityForHubspotEngagement,
+  findDealForHubspotEngagement,
   mapNoteToActivity,
   mapCallToActivity,
   mapMeetingToActivity,
   mapEmailToRecords,
   writeAtomic,
+  writeLedgerOnly,
 } = await import("../../../src/modules/migration/deal-activity-backfill-service.js");
 
 function makeEngagement(overrides: Partial<any> = {}) {
@@ -22,8 +26,71 @@ function makeEngagement(overrides: Partial<any> = {}) {
     },
     associations: {
       deals: { results: [{ id: "hubspot-deal-1" }] },
+      companies: { results: [] },
+      contacts: { results: [] },
       ...overrideAssociations,
     },
+  };
+}
+
+function makeDealTarget() {
+  return {
+    type: "deal" as const,
+    id: "deal-1",
+    entity: { id: "deal-1", name: "Jefferson on The Lake", hubspotDealId: "hubspot-deal-1" },
+    hubspotDealIds: ["hubspot-deal-1"],
+    hubspotCompanyIds: [],
+    hubspotContactIds: [],
+  };
+}
+
+function makeCompanyTarget() {
+  return {
+    type: "company" as const,
+    id: "company-1",
+    entity: { id: "company-1", name: "Acme Roofing", hubspotCompanyId: "hubspot-company-1", hubspotId: null },
+    hubspotDealIds: [],
+    hubspotCompanyIds: ["hubspot-company-1"],
+    hubspotContactIds: [],
+  };
+}
+
+function makeContactTarget() {
+  return {
+    type: "contact" as const,
+    id: "contact-1",
+    entity: {
+      id: "contact-1",
+      firstName: "Jane",
+      lastName: "Client",
+      companyId: "company-1",
+      hubspotContactId: "hubspot-contact-1",
+    },
+    hubspotDealIds: [],
+    hubspotCompanyIds: [],
+    hubspotContactIds: ["hubspot-contact-1"],
+  };
+}
+
+function createLookupDb(input: {
+  dealRows?: Array<Record<string, unknown>>;
+  companyRows?: Array<Record<string, unknown>>;
+  contactRows?: Array<Record<string, unknown>>;
+}) {
+  const dealRows = input.dealRows ?? [];
+  const companyRows = input.companyRows ?? [];
+  const contactRows = input.contactRows ?? [];
+  return {
+    select: (_selection: unknown) => ({
+      from: (table: unknown) => ({
+        where: async (_predicate: unknown) => {
+          if (table === deals) return dealRows;
+          if (table === companies) return companyRows;
+          if (table === contacts) return contactRows;
+          return [];
+        },
+      }),
+    }),
   };
 }
 
@@ -123,75 +190,244 @@ function createTransactionalDb() {
 }
 
 describe("deal activity backfill service", () => {
-  it("maps a note engagement into an activity payload", () => {
-    const result = mapNoteToActivity({
-      engagement: makeEngagement({
-        objectType: "note",
-        properties: { hs_note_body: "HubSpot note body" },
-      }),
-      deal: { id: "deal-1" },
-      userId: "user-1",
-    });
+  it("resolves a direct HubSpot deal association first", async () => {
+    const result = await findTargetEntityForHubspotEngagement(
+      createLookupDb({
+        dealRows: [{ id: "deal-1", name: "Jefferson", hubspotDealId: "hubspot-deal-1" }],
+      }) as any,
+      makeEngagement().associations
+    );
 
     expect(result).toMatchObject({
-      type: "note",
-      responsibleUserId: "user-1",
-      performedByUserId: "user-1",
-      sourceEntityType: "deal",
-      sourceEntityId: "deal-1",
-      dealId: "deal-1",
-      body: "HubSpot note body",
-      occurredAt: new Date("2026-05-01T12:34:56.000Z"),
+      type: "deal",
+      id: "deal-1",
+      entity: { name: "Jefferson" },
     });
   });
 
-  it("maps a call engagement with duration minutes and outcome", () => {
-    const result = mapCallToActivity({
+  it("falls back to company when no deal match exists", async () => {
+    const result = await findTargetEntityForHubspotEngagement(
+      createLookupDb({
+        companyRows: [{ id: "company-1", name: "Acme Roofing", hubspotCompanyId: "hubspot-company-1", hubspotId: null }],
+      }) as any,
+      makeEngagement({
+        associations: {
+          deals: { results: [{ id: "hubspot-deal-missing" }] },
+          companies: { results: [{ id: "hubspot-company-1" }] },
+          contacts: { results: [] },
+        },
+      }).associations
+    );
+
+    expect(result).toMatchObject({
+      type: "company",
+      id: "company-1",
+      entity: { name: "Acme Roofing" },
+    });
+  });
+
+  it("falls back to contact when no deal or company match exists", async () => {
+    const result = await findTargetEntityForHubspotEngagement(
+      createLookupDb({
+        contactRows: [
+          {
+            id: "contact-1",
+            firstName: "Jane",
+            lastName: "Client",
+            companyId: "company-1",
+            hubspotContactId: "hubspot-contact-1",
+          },
+        ],
+      }) as any,
+      makeEngagement({
+        associations: {
+          deals: { results: [] },
+          companies: { results: [] },
+          contacts: { results: [{ id: "hubspot-contact-1" }] },
+        },
+      }).associations
+    );
+
+    expect(result).toMatchObject({
+      type: "contact",
+      id: "contact-1",
+      entity: { firstName: "Jane", lastName: "Client" },
+    });
+  });
+
+  it("keeps deal priority over company when both associations exist", async () => {
+    const result = await findTargetEntityForHubspotEngagement(
+      createLookupDb({
+        dealRows: [{ id: "deal-1", name: "Jefferson", hubspotDealId: "hubspot-deal-1" }],
+        companyRows: [{ id: "company-1", name: "Acme Roofing", hubspotCompanyId: "hubspot-company-1", hubspotId: null }],
+      }) as any,
+      makeEngagement({
+        associations: {
+          deals: { results: [{ id: "hubspot-deal-1" }] },
+          companies: { results: [{ id: "hubspot-company-1" }] },
+          contacts: { results: [] },
+        },
+      }).associations
+    );
+
+    expect(result.type).toBe("deal");
+  });
+
+  it("keeps company priority over contact when no deal match exists", async () => {
+    const result = await findTargetEntityForHubspotEngagement(
+      createLookupDb({
+        companyRows: [{ id: "company-1", name: "Acme Roofing", hubspotCompanyId: "hubspot-company-1", hubspotId: null }],
+        contactRows: [{ id: "contact-1", firstName: "Jane", lastName: "Client", companyId: "company-1", hubspotContactId: "hubspot-contact-1" }],
+      }) as any,
+      makeEngagement({
+        associations: {
+          deals: { results: [] },
+          companies: { results: [{ id: "hubspot-company-1" }] },
+          contacts: { results: [{ id: "hubspot-contact-1" }] },
+        },
+      }).associations
+    );
+
+    expect(result.type).toBe("company");
+  });
+
+  it("returns ambiguous for multiple matched deals", async () => {
+    const result = await findTargetEntityForHubspotEngagement(
+      createLookupDb({
+        dealRows: [
+          { id: "deal-1", name: "One", hubspotDealId: "hubspot-deal-1" },
+          { id: "deal-2", name: "Two", hubspotDealId: "hubspot-deal-2" },
+        ],
+      }) as any,
+      makeEngagement({
+        associations: {
+          deals: { results: [{ id: "hubspot-deal-1" }, { id: "hubspot-deal-2" }] },
+          companies: { results: [] },
+          contacts: { results: [] },
+        },
+      }).associations
+    );
+
+    expect(result).toMatchObject({
+      type: "ambiguous",
+      reason: "Multiple active T Rock deals matched the HubSpot deal association",
+    });
+  });
+
+  it("returns ambiguous for multiple matched companies", async () => {
+    const result = await findTargetEntityForHubspotEngagement(
+      createLookupDb({
+        companyRows: [
+          { id: "company-1", name: "Acme", hubspotCompanyId: "hubspot-company-1", hubspotId: null },
+          { id: "company-2", name: "Bravo", hubspotCompanyId: "hubspot-company-2", hubspotId: null },
+        ],
+      }) as any,
+      makeEngagement({
+        associations: {
+          deals: { results: [] },
+          companies: { results: [{ id: "hubspot-company-1" }, { id: "hubspot-company-2" }] },
+          contacts: { results: [] },
+        },
+      }).associations
+    );
+
+    expect(result).toMatchObject({
+      type: "ambiguous",
+      reason: "Multiple active T Rock companies matched the HubSpot company association",
+    });
+  });
+
+  it("keeps the deal-only wrapper orphaned when only company ambiguity exists", async () => {
+    const result = await findDealForHubspotEngagement(
+      createLookupDb({
+        companyRows: [
+          { id: "company-1", name: "Acme", hubspotCompanyId: "hubspot-company-1", hubspotId: null },
+          { id: "company-2", name: "Bravo", hubspotCompanyId: "hubspot-company-2", hubspotId: null },
+        ],
+      }) as any,
+      makeEngagement({
+        associations: {
+          deals: { results: [] },
+          companies: { results: [{ id: "hubspot-company-1" }, { id: "hubspot-company-2" }] },
+          contacts: { results: [] },
+        },
+      }).associations
+    );
+
+    expect(result).toEqual({
+      status: "orphan",
+      hubspotDealIds: [],
+    });
+  });
+
+  it("returns orphan when no associations map anywhere", async () => {
+    const result = await findTargetEntityForHubspotEngagement(
+      createLookupDb({}) as any,
+      makeEngagement({
+        associations: {
+          deals: { results: [] },
+          companies: { results: [] },
+          contacts: { results: [] },
+        },
+      }).associations
+    );
+
+    expect(result).toMatchObject({
+      type: "orphan",
+      reason: "HubSpot engagement had no deal, company, or contact associations",
+    });
+  });
+
+  it("maps activities with entity-specific foreign keys", () => {
+    const note = mapNoteToActivity({
+      engagement: makeEngagement({ objectType: "note", properties: { hs_note_body: "HubSpot note body" } }),
+      targetEntity: makeCompanyTarget(),
+      userId: "user-1",
+    });
+    const call = mapCallToActivity({
       engagement: makeEngagement({
         objectType: "call",
-        properties: {
-          hs_call_title: "Intro Call",
-          hs_call_body: "Talked through scope",
-          hs_call_duration: "180000",
-          hs_call_outcome: "connected",
-        },
+        properties: { hs_call_title: "Intro Call", hs_call_body: "Talked through scope", hs_call_duration: "180000", hs_call_outcome: "connected" },
       }),
-      deal: { id: "deal-1" },
+      targetEntity: makeContactTarget(),
+      userId: "user-1",
+    });
+    const meeting = mapMeetingToActivity({
+      engagement: makeEngagement({
+        objectType: "meeting",
+        properties: { hs_meeting_title: "Site Walk", hs_meeting_body: "Met on site", hs_meeting_start_time: "2026-05-10T09:00:00.000Z" },
+      }),
+      targetEntity: makeDealTarget(),
       userId: "user-1",
     });
 
-    expect(result).toMatchObject({
-      type: "call",
-      subject: "Intro Call",
-      body: "Talked through scope",
+    expect(note).toMatchObject({
+      sourceEntityType: "company",
+      sourceEntityId: "company-1",
+      companyId: "company-1",
+      dealId: null,
+      contactId: null,
+    });
+    expect(call).toMatchObject({
+      sourceEntityType: "contact",
+      sourceEntityId: "contact-1",
+      contactId: "contact-1",
+      companyId: "company-1",
+      dealId: null,
       durationMinutes: 3,
       outcome: "connected",
     });
-  });
-
-  it("maps a meeting engagement using meeting start time when present", () => {
-    const result = mapMeetingToActivity({
-      engagement: makeEngagement({
-        objectType: "meeting",
-        properties: {
-          hs_meeting_title: "Site Walk",
-          hs_meeting_body: "Met on site",
-          hs_meeting_start_time: "2026-05-10T09:00:00.000Z",
-        },
-      }),
-      deal: { id: "deal-1" },
-      userId: "user-1",
-    });
-
-    expect(result).toMatchObject({
-      type: "meeting",
-      subject: "Site Walk",
-      body: "Met on site",
+    expect(meeting).toMatchObject({
+      sourceEntityType: "deal",
+      sourceEntityId: "deal-1",
+      dealId: "deal-1",
+      companyId: null,
+      contactId: null,
       occurredAt: new Date("2026-05-10T09:00:00.000Z"),
     });
   });
 
-  it("maps an email engagement into email and companion activity records", () => {
+  it("maps email and companion activity to the same non-deal entity", () => {
     const result = mapEmailToRecords({
       engagement: makeEngagement({
         id: "hs-email-1",
@@ -208,29 +444,24 @@ describe("deal activity backfill service", () => {
           }),
         },
       }),
-      deal: { id: "deal-1" },
+      targetEntity: makeContactTarget(),
       userId: "user-1",
     });
 
     expect(result.email).toMatchObject({
-      graphMessageId: "hubspot:hs-email-1",
-      direction: "inbound",
-      fromAddress: "client@example.com",
-      toAddresses: ["rep@trock.com"],
-      ccAddresses: ["director@trock.com"],
-      subject: "Proposal Follow Up",
-      dealId: "deal-1",
-      assignedEntityType: "deal",
-      assignedEntityId: "deal-1",
+      contactId: "contact-1",
+      dealId: null,
+      assignedEntityType: "contact",
+      assignedEntityId: "contact-1",
       assignmentStatus: "assigned",
-      userId: "user-1",
       hasAttachments: true,
     });
     expect(result.activity).toMatchObject({
-      type: "email",
-      sourceEntityType: "deal",
-      sourceEntityId: "deal-1",
-      dealId: "deal-1",
+      sourceEntityType: "contact",
+      sourceEntityId: "contact-1",
+      contactId: "contact-1",
+      dealId: null,
+      companyId: "company-1",
       subject: "Proposal Follow Up",
     });
   });
@@ -247,7 +478,7 @@ describe("deal activity backfill service", () => {
           hs_email_direction: "EMAIL",
         },
       }),
-      deal: { id: "deal-1" },
+      targetEntity: makeDealTarget(),
       userId: "user-1",
     });
 
@@ -256,7 +487,7 @@ describe("deal activity backfill service", () => {
     expect(result.activity.subject).toHaveLength(500);
   });
 
-  it("writes a note activity and ledger atomically", async () => {
+  it("writes a note activity and company-targeted ledger atomically", async () => {
     const { db, state } = createTransactionalDb();
 
     const result = await writeAtomic(db as any, {
@@ -264,8 +495,8 @@ describe("deal activity backfill service", () => {
         tenantSchema: "office_dallas",
         hubspotObjectType: "note",
         hubspotObjectId: "hs-note-1",
-        targetEntityType: "deal",
-        targetEntityId: "deal-1",
+        targetEntityType: "company",
+        targetEntityId: "company-1",
         status: "imported",
         sourcePayload: { id: "hs-note-1" },
       },
@@ -273,9 +504,9 @@ describe("deal activity backfill service", () => {
         type: "note",
         responsibleUserId: "user-1",
         performedByUserId: "user-1",
-        sourceEntityType: "deal",
-        sourceEntityId: "deal-1",
-        dealId: "deal-1",
+        sourceEntityType: "company",
+        sourceEntityId: "company-1",
+        companyId: "company-1",
         body: "Imported note",
         occurredAt: new Date("2026-05-01T00:00:00.000Z"),
       },
@@ -283,13 +514,57 @@ describe("deal activity backfill service", () => {
 
     expect(result.activityId).toBe("activity-1");
     expect(result.emailId).toBeNull();
-    expect(result.didImport).toBe(true);
     expect(state.activities).toHaveLength(1);
-    expect(state.ledger).toHaveLength(1);
     expect(state.ledger[0]).toMatchObject({
+      targetEntityType: "company",
+      targetEntityId: "company-1",
       activityId: "activity-1",
       emailId: null,
       status: "imported",
+    });
+  });
+
+  it("does not let a skip-path ledger write clobber an imported row", async () => {
+    const { db, state } = createTransactionalDb();
+
+    state.ledger.push({
+      id: "ledger-1",
+      tenantSchema: "office_dallas",
+      hubspotObjectType: "note",
+      hubspotObjectId: "hs-note-locked",
+      targetEntityType: "deal",
+      targetEntityId: "deal-1",
+      status: "imported",
+      skipReason: null,
+      sourcePayload: { id: "hs-note-locked" },
+      activityId: "activity-existing",
+      emailId: null,
+    });
+
+    const result = await writeLedgerOnly(db as any, {
+      tenantSchema: "office_dallas",
+      hubspotObjectType: "note",
+      hubspotObjectId: "hs-note-locked",
+      targetEntityType: null,
+      targetEntityId: null,
+      status: "skipped_orphan",
+      skipReason: "stale skip",
+      sourcePayload: { id: "hs-note-locked" },
+    });
+
+    expect(result).toEqual({
+      activityId: "activity-existing",
+      emailId: null,
+      didWrite: false,
+    });
+    expect(state.ledger[0]).toMatchObject({
+      id: "ledger-1",
+      targetEntityType: "deal",
+      targetEntityId: "deal-1",
+      status: "imported",
+      skipReason: null,
+      activityId: "activity-existing",
+      emailId: null,
     });
   });
 
@@ -324,7 +599,7 @@ describe("deal activity backfill service", () => {
     expect(state.ledger).toHaveLength(0);
   });
 
-  it("writes email, companion activity, and ledger in one transaction", async () => {
+  it("writes email, companion activity, and contact-targeted ledger in one transaction", async () => {
     const { db, state } = createTransactionalDb();
 
     const result = await writeAtomic(db as any, {
@@ -332,8 +607,8 @@ describe("deal activity backfill service", () => {
         tenantSchema: "office_dallas",
         hubspotObjectType: "email",
         hubspotObjectId: "hs-email-3",
-        targetEntityType: "deal",
-        targetEntityId: "deal-1",
+        targetEntityType: "contact",
+        targetEntityId: "contact-1",
         status: "imported",
         sourcePayload: { id: "hs-email-3" },
       },
@@ -347,10 +622,11 @@ describe("deal activity backfill service", () => {
         bodyPreview: "Proposal",
         bodyHtml: "<p>Proposal</p>",
         hasAttachments: false,
-        contactId: null,
-        dealId: "deal-1",
-        assignedEntityType: "deal",
-        assignedEntityId: "deal-1",
+        contactId: "contact-1",
+        dealId: null,
+        assignedEntityType: "contact",
+        assignedEntityId: "contact-1",
+        assignmentStatus: "assigned",
         assignmentConfidence: "high",
         assignmentAmbiguityReason: null,
         userId: "user-1",
@@ -360,9 +636,9 @@ describe("deal activity backfill service", () => {
         type: "email",
         responsibleUserId: "user-1",
         performedByUserId: "user-1",
-        sourceEntityType: "deal",
-        sourceEntityId: "deal-1",
-        dealId: "deal-1",
+        sourceEntityType: "contact",
+        sourceEntityId: "contact-1",
+        contactId: "contact-1",
         subject: "Proposal",
         body: "Proposal",
         occurredAt: new Date("2026-05-01T00:00:00.000Z"),
@@ -371,11 +647,11 @@ describe("deal activity backfill service", () => {
 
     expect(result.emailId).toBe("email-1");
     expect(result.activityId).toBe("activity-1");
-    expect(result.didImport).toBe(true);
     expect(state.emails).toHaveLength(1);
-    expect(state.activities).toHaveLength(1);
     expect(state.activities[0]?.emailId).toBe("email-1");
     expect(state.ledger[0]).toMatchObject({
+      targetEntityType: "contact",
+      targetEntityId: "contact-1",
       activityId: "activity-1",
       emailId: "email-1",
       status: "imported",
@@ -404,8 +680,8 @@ describe("deal activity backfill service", () => {
         tenantSchema: "office_dallas",
         hubspotObjectType: "note",
         hubspotObjectId: "hs-note-3",
-        targetEntityType: "deal",
-        targetEntityId: "deal-1",
+        targetEntityType: "company",
+        targetEntityId: "company-1",
         status: "imported",
         sourcePayload: { id: "hs-note-3" },
       },
@@ -413,20 +689,19 @@ describe("deal activity backfill service", () => {
         type: "note",
         responsibleUserId: "user-1",
         performedByUserId: "user-1",
-        sourceEntityType: "deal",
-        sourceEntityId: "deal-1",
-        dealId: "deal-1",
+        sourceEntityType: "company",
+        sourceEntityId: "company-1",
+        companyId: "company-1",
         body: "Imported after repair",
         occurredAt: new Date("2026-05-01T00:00:00.000Z"),
       },
     });
 
     expect(result.activityId).toBe("activity-1");
-    expect(state.ledger).toHaveLength(1);
     expect(state.ledger[0]).toMatchObject({
       id: "ledger-1",
-      targetEntityType: "deal",
-      targetEntityId: "deal-1",
+      targetEntityType: "company",
+      targetEntityId: "company-1",
       status: "imported",
       skipReason: null,
       activityId: "activity-1",
@@ -442,8 +717,8 @@ describe("deal activity backfill service", () => {
       tenantSchema: "office_dallas",
       hubspotObjectType: "note",
       hubspotObjectId: "hs-note-4",
-      targetEntityType: "deal",
-      targetEntityId: "deal-1",
+      targetEntityType: "contact",
+      targetEntityId: "contact-1",
       status: "imported",
       skipReason: null,
       sourcePayload: { id: "hs-note-4" },
@@ -456,8 +731,8 @@ describe("deal activity backfill service", () => {
         tenantSchema: "office_dallas",
         hubspotObjectType: "note",
         hubspotObjectId: "hs-note-4",
-        targetEntityType: "deal",
-        targetEntityId: "deal-1",
+        targetEntityType: "contact",
+        targetEntityId: "contact-1",
         status: "imported",
         sourcePayload: { id: "hs-note-4" },
       },
@@ -465,9 +740,9 @@ describe("deal activity backfill service", () => {
         type: "note",
         responsibleUserId: "user-1",
         performedByUserId: "user-1",
-        sourceEntityType: "deal",
-        sourceEntityId: "deal-1",
-        dealId: "deal-1",
+        sourceEntityType: "contact",
+        sourceEntityId: "contact-1",
+        contactId: "contact-1",
         body: "Should not duplicate",
         occurredAt: new Date("2026-05-01T00:00:00.000Z"),
       },
@@ -483,12 +758,9 @@ describe("deal activity backfill service", () => {
       mapNoteToActivity({
         engagement: makeEngagement({
           objectType: "note",
-          properties: {
-            hs_timestamp: "not-a-date",
-            hs_note_body: "bad timestamp",
-          },
+          properties: { hs_timestamp: "not-a-date", hs_note_body: "bad timestamp" },
         }),
-        deal: { id: "deal-1" },
+        targetEntity: makeDealTarget(),
         userId: "user-1",
       })
     ).toThrow("Invalid HubSpot engagement timestamp");

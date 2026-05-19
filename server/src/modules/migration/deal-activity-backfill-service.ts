@@ -1,6 +1,8 @@
-import { and, eq, inArray, sql } from "drizzle-orm";
+import { and, eq, inArray, or, sql } from "drizzle-orm";
 import {
   activities,
+  companies,
+  contacts,
   deals,
   emails,
   hubspotOwnerMappings,
@@ -27,36 +29,88 @@ export interface BackfillDealRecord {
   hubspotDealId?: string | null;
 }
 
+export interface BackfillCompanyRecord {
+  id: string;
+  name: string;
+  hubspotCompanyId?: string | null;
+  hubspotId?: string | null;
+}
+
+export interface BackfillContactRecord {
+  id: string;
+  firstName: string;
+  lastName: string;
+  companyId?: string | null;
+  hubspotContactId?: string | null;
+}
+
 export interface BackfillUserRecord {
   id: string;
   email: string;
   displayName?: string | null;
 }
 
-export interface DealResolution {
-  status: "deal";
-  deal: BackfillDealRecord;
-  hubspotDealIds: string[];
-}
-
 export interface OrphanResolution {
-  status: "orphan";
+  type: "orphan";
   hubspotDealIds: string[];
+  hubspotCompanyIds: string[];
+  hubspotContactIds: string[];
+  reason: string;
 }
 
 export interface AmbiguousResolution {
-  status: "ambiguous";
+  type: "ambiguous";
   hubspotDealIds: string[];
-  deals?: BackfillDealRecord[];
+  hubspotCompanyIds: string[];
+  hubspotContactIds: string[];
+  reason: string;
 }
 
-export type DealLookupResult = DealResolution | OrphanResolution | AmbiguousResolution;
+export interface DealResolution {
+  type: "deal";
+  id: string;
+  entity: BackfillDealRecord;
+  hubspotDealIds: string[];
+  hubspotCompanyIds: string[];
+  hubspotContactIds: string[];
+}
+
+export interface CompanyResolution {
+  type: "company";
+  id: string;
+  entity: BackfillCompanyRecord;
+  hubspotDealIds: string[];
+  hubspotCompanyIds: string[];
+  hubspotContactIds: string[];
+}
+
+export interface ContactResolution {
+  type: "contact";
+  id: string;
+  entity: BackfillContactRecord;
+  hubspotDealIds: string[];
+  hubspotCompanyIds: string[];
+  hubspotContactIds: string[];
+}
+
+export type EntityResolution =
+  | DealResolution
+  | CompanyResolution
+  | ContactResolution
+  | OrphanResolution
+  | AmbiguousResolution;
+
+export type ResolvedTarget = DealResolution | CompanyResolution | ContactResolution;
+export type DealLookupResult =
+  | { status: "deal"; deal: BackfillDealRecord; hubspotDealIds: string[] }
+  | { status: "orphan"; hubspotDealIds: string[] }
+  | { status: "ambiguous"; hubspotDealIds: string[] };
 
 export interface LedgerWriteInput {
   tenantSchema: string;
   hubspotObjectType: BackfillObjectType;
   hubspotObjectId: string;
-  targetEntityType: "deal" | null;
+  targetEntityType: "deal" | "company" | "contact" | null;
   targetEntityId: string | null;
   status: "imported" | "skipped_orphan" | "skipped_ambiguous" | "skipped_unmapped_user" | "failed";
   skipReason?: string | null;
@@ -68,6 +122,8 @@ export interface AtomicWriteInput {
   activity: typeof activities.$inferInsert;
   email?: typeof emails.$inferInsert;
 }
+
+type HubSpotAssociations = HubSpotActivityLike["associations"];
 
 function parseDate(value: string | undefined): Date {
   if (!value) throw new Error("HubSpot engagement timestamp is required");
@@ -195,18 +251,44 @@ function mapDirection(value: string | undefined): "inbound" | "outbound" {
   return "inbound";
 }
 
+function resolveEntityLinkFields(target: ResolvedTarget) {
+  return {
+    dealId: target.type === "deal" ? target.entity.id : null,
+    companyId:
+      target.type === "company"
+        ? target.entity.id
+        : target.type === "contact"
+          ? target.entity.companyId ?? null
+          : null,
+    contactId: target.type === "contact" ? target.entity.id : null,
+  };
+}
+
+function uniqueAssociationIds(results: Array<{ id: string }> | undefined) {
+  return Array.from(new Set((results ?? []).map((row) => row.id).filter(Boolean)));
+}
+
+function baseResolutionContext(associations: HubSpotAssociations | undefined) {
+  return {
+    hubspotDealIds: uniqueAssociationIds(associations?.deals?.results),
+    hubspotCompanyIds: uniqueAssociationIds(associations?.companies?.results),
+    hubspotContactIds: uniqueAssociationIds(associations?.contacts?.results),
+  };
+}
+
 export function mapNoteToActivity(input: {
   engagement: HubSpotActivityLike;
-  deal: BackfillDealRecord;
+  targetEntity: ResolvedTarget;
   userId: string;
 }) {
+  const links = resolveEntityLinkFields(input.targetEntity);
   return {
     type: "note" as const,
     responsibleUserId: input.userId,
     performedByUserId: input.userId,
-    sourceEntityType: "deal" as const,
-    sourceEntityId: input.deal.id,
-    dealId: input.deal.id,
+    sourceEntityType: input.targetEntity.type,
+    sourceEntityId: input.targetEntity.id,
+    ...links,
     subject: clampText("HubSpot Note", 500),
     body: normalizeText(input.engagement.properties.hs_note_body),
     occurredAt: parseDate(input.engagement.properties.hs_timestamp),
@@ -215,16 +297,17 @@ export function mapNoteToActivity(input: {
 
 export function mapCallToActivity(input: {
   engagement: HubSpotActivityLike;
-  deal: BackfillDealRecord;
+  targetEntity: ResolvedTarget;
   userId: string;
 }) {
+  const links = resolveEntityLinkFields(input.targetEntity);
   return {
     type: "call" as const,
     responsibleUserId: input.userId,
     performedByUserId: input.userId,
-    sourceEntityType: "deal" as const,
-    sourceEntityId: input.deal.id,
-    dealId: input.deal.id,
+    sourceEntityType: input.targetEntity.type,
+    sourceEntityId: input.targetEntity.id,
+    ...links,
     subject: clampText(normalizeText(input.engagement.properties.hs_call_title) ?? "HubSpot Call", 500),
     body: normalizeText(input.engagement.properties.hs_call_body),
     outcome:
@@ -237,16 +320,17 @@ export function mapCallToActivity(input: {
 
 export function mapMeetingToActivity(input: {
   engagement: HubSpotActivityLike;
-  deal: BackfillDealRecord;
+  targetEntity: ResolvedTarget;
   userId: string;
 }) {
+  const links = resolveEntityLinkFields(input.targetEntity);
   return {
     type: "meeting" as const,
     responsibleUserId: input.userId,
     performedByUserId: input.userId,
-    sourceEntityType: "deal" as const,
-    sourceEntityId: input.deal.id,
-    dealId: input.deal.id,
+    sourceEntityType: input.targetEntity.type,
+    sourceEntityId: input.targetEntity.id,
+    ...links,
     subject: clampText(normalizeText(input.engagement.properties.hs_meeting_title) ?? "HubSpot Meeting", 500),
     body:
       normalizeText(input.engagement.properties.hs_meeting_body) ??
@@ -259,7 +343,7 @@ export function mapMeetingToActivity(input: {
 
 export function mapEmailToRecords(input: {
   engagement: HubSpotActivityLike;
-  deal: BackfillDealRecord;
+  targetEntity: ResolvedTarget;
   userId: string;
 }) {
   const bodyHtml =
@@ -274,6 +358,7 @@ export function mapEmailToRecords(input: {
   const subject = normalizeText(input.engagement.properties.hs_email_subject) ?? "HubSpot Email";
   const activitySubject = clampText(subject, 500);
   const sentAt = parseDate(input.engagement.properties.hs_timestamp);
+  const links = resolveEntityLinkFields(input.targetEntity);
 
   return {
     email: {
@@ -287,10 +372,10 @@ export function mapEmailToRecords(input: {
       bodyPreview: buildBodyPreview(bodyHtml, bodyText),
       bodyHtml,
       hasAttachments: hasHubSpotAttachments(input.engagement.properties.hs_attachment_ids),
-      contactId: null,
-      dealId: input.deal.id,
-      assignedEntityType: "deal",
-      assignedEntityId: input.deal.id,
+      contactId: input.targetEntity.type === "contact" ? input.targetEntity.entity.id : null,
+      dealId: input.targetEntity.type === "deal" ? input.targetEntity.entity.id : null,
+      assignedEntityType: input.targetEntity.type,
+      assignedEntityId: input.targetEntity.id,
       assignmentStatus: "assigned",
       assignmentConfidence: "high",
       assignmentAmbiguityReason: null,
@@ -301,9 +386,9 @@ export function mapEmailToRecords(input: {
       type: "email" as const,
       responsibleUserId: input.userId,
       performedByUserId: input.userId,
-      sourceEntityType: "deal" as const,
-      sourceEntityId: input.deal.id,
-      dealId: input.deal.id,
+      sourceEntityType: input.targetEntity.type,
+      sourceEntityId: input.targetEntity.id,
+      ...links,
       subject: activitySubject,
       body: bodyText?.slice(0, 1000) ?? null,
       occurredAt: sentAt,
@@ -311,36 +396,145 @@ export function mapEmailToRecords(input: {
   };
 }
 
+export async function findTargetEntityForHubspotEngagement(
+  tenantDb: any,
+  associations: HubSpotAssociations | undefined
+): Promise<EntityResolution> {
+  const context = baseResolutionContext(associations);
+
+  if (context.hubspotDealIds.length > 0) {
+    const rows = (await tenantDb
+      .select({
+        id: deals.id,
+        name: deals.name,
+        hubspotDealId: deals.hubspotDealId,
+      })
+      .from(deals)
+      .where(and(eq(deals.isActive, true), inArray(deals.hubspotDealId, context.hubspotDealIds)))) as BackfillDealRecord[];
+
+    const distinctDeals = Array.from(new Map(rows.map((row: BackfillDealRecord) => [row.id, row])).values());
+    if (distinctDeals.length > 1) {
+      return {
+        type: "ambiguous",
+        ...context,
+        reason: "Multiple active T Rock deals matched the HubSpot deal association",
+      };
+    }
+    if (distinctDeals.length === 1) {
+      return {
+        type: "deal",
+        id: distinctDeals[0].id,
+        entity: distinctDeals[0],
+        ...context,
+      };
+    }
+  }
+
+  if (context.hubspotCompanyIds.length > 0) {
+    const rows = (await tenantDb
+      .select({
+        id: companies.id,
+        name: companies.name,
+        hubspotCompanyId: companies.hubspotCompanyId,
+        hubspotId: companies.hubspotId,
+      })
+      .from(companies)
+      .where(
+        and(
+          eq(companies.isActive, true),
+          or(
+            inArray(companies.hubspotCompanyId, context.hubspotCompanyIds),
+            inArray(companies.hubspotId, context.hubspotCompanyIds)
+          )
+        )
+      )) as BackfillCompanyRecord[];
+
+    const distinctCompanies = Array.from(new Map(rows.map((row: BackfillCompanyRecord) => [row.id, row])).values());
+    if (distinctCompanies.length > 1) {
+      return {
+        type: "ambiguous",
+        ...context,
+        reason: "Multiple active T Rock companies matched the HubSpot company association",
+      };
+    }
+    if (distinctCompanies.length === 1) {
+      return {
+        type: "company",
+        id: distinctCompanies[0].id,
+        entity: distinctCompanies[0],
+        ...context,
+      };
+    }
+  }
+
+  if (context.hubspotContactIds.length > 0) {
+    const rows = (await tenantDb
+      .select({
+        id: contacts.id,
+        firstName: contacts.firstName,
+        lastName: contacts.lastName,
+        companyId: contacts.companyId,
+        hubspotContactId: contacts.hubspotContactId,
+      })
+      .from(contacts)
+      .where(
+        and(eq(contacts.isActive, true), inArray(contacts.hubspotContactId, context.hubspotContactIds))
+      )) as BackfillContactRecord[];
+
+    const distinctContacts = Array.from(new Map(rows.map((row: BackfillContactRecord) => [row.id, row])).values());
+    if (distinctContacts.length > 1) {
+      return {
+        type: "ambiguous",
+        ...context,
+        reason: "Multiple active T Rock contacts matched the HubSpot contact association",
+      };
+    }
+    if (distinctContacts.length === 1) {
+      return {
+        type: "contact",
+        id: distinctContacts[0].id,
+        entity: distinctContacts[0],
+        ...context,
+      };
+    }
+  }
+
+  return {
+    type: "orphan",
+    ...context,
+    reason:
+      context.hubspotDealIds.length + context.hubspotCompanyIds.length + context.hubspotContactIds.length > 0
+        ? "No active T Rock deal, company, or contact matched the HubSpot associations"
+        : "HubSpot engagement had no deal, company, or contact associations",
+  };
+}
+
 export async function findDealForHubspotEngagement(
   tenantDb: any,
-  associations: HubSpotActivityLike["associations"] | undefined
+  associations: HubSpotAssociations | undefined
 ): Promise<DealLookupResult> {
-  const hubspotDealIds = Array.from(
-    new Set((associations?.deals?.results ?? []).map((deal) => deal.id).filter(Boolean))
-  );
+  const hubspotDealIds = uniqueAssociationIds(associations?.deals?.results);
+  const resolution = await findTargetEntityForHubspotEngagement(tenantDb, associations);
 
-  if (hubspotDealIds.length === 0) {
-    return { status: "orphan", hubspotDealIds: [] };
+  if (resolution.type === "deal") {
+    return {
+      status: "deal",
+      deal: resolution.entity,
+      hubspotDealIds,
+    };
   }
 
-  const rows = (await tenantDb
-    .select({
-      id: deals.id,
-      name: deals.name,
-      hubspotDealId: deals.hubspotDealId,
-    })
-    .from(deals)
-    .where(and(eq(deals.isActive, true), inArray(deals.hubspotDealId, hubspotDealIds)))) as BackfillDealRecord[];
-
-  const distinctDeals = Array.from(new Map(rows.map((row: BackfillDealRecord) => [row.id, row])).values());
-  if (distinctDeals.length === 0) {
-    return { status: "orphan", hubspotDealIds };
-  }
-  if (distinctDeals.length > 1) {
-    return { status: "ambiguous", hubspotDealIds, deals: distinctDeals };
+  if (resolution.type === "ambiguous" && hubspotDealIds.length > 0) {
+    return {
+      status: "ambiguous",
+      hubspotDealIds,
+    };
   }
 
-  return { status: "deal", hubspotDealIds, deal: distinctDeals[0] };
+  return {
+    status: "orphan",
+    hubspotDealIds,
+  };
 }
 
 export async function findUserForHubspotOwner(
@@ -430,28 +624,45 @@ export async function getExistingLedgerEntry(
 }
 
 export async function writeLedgerOnly(db: any, ledger: LedgerWriteInput) {
-  await db
-    .insert(hubspotActivityBackfillLedger)
-    .values({
-      tenantSchema: ledger.tenantSchema,
-      hubspotObjectType: ledger.hubspotObjectType,
-      hubspotObjectId: ledger.hubspotObjectId,
-      targetEntityType: ledger.targetEntityType,
-      targetEntityId: ledger.targetEntityId,
-      status: ledger.status,
-      skipReason: ledger.skipReason ?? null,
-      sourcePayload: ledger.sourcePayload ?? null,
-      activityId: null,
-      emailId: null,
-      importedAt: new Date(),
-    })
-    .onConflictDoUpdate({
-      target: [
-        hubspotActivityBackfillLedger.tenantSchema,
-        hubspotActivityBackfillLedger.hubspotObjectType,
-        hubspotActivityBackfillLedger.hubspotObjectId,
-      ],
-      set: {
+  return db.transaction(async (tx: any) => {
+    await tx.execute?.(
+      sql`SELECT pg_advisory_xact_lock(
+        hashtext(${`${ledger.tenantSchema}:${ledger.hubspotObjectType}`}),
+        hashtext(${ledger.hubspotObjectId})
+      )`
+    );
+
+    const existingRows = await tx
+      .select({
+        activityId: hubspotActivityBackfillLedger.activityId,
+        emailId: hubspotActivityBackfillLedger.emailId,
+        status: hubspotActivityBackfillLedger.status,
+      })
+      .from(hubspotActivityBackfillLedger)
+      .where(
+        and(
+          eq(hubspotActivityBackfillLedger.tenantSchema, ledger.tenantSchema),
+          eq(hubspotActivityBackfillLedger.hubspotObjectType, ledger.hubspotObjectType),
+          eq(hubspotActivityBackfillLedger.hubspotObjectId, ledger.hubspotObjectId)
+        )
+      )
+      .limit(1);
+
+    const existingLedger = existingRows[0];
+    if (existingLedger?.status === "imported") {
+      return {
+        activityId: existingLedger.activityId as string | null,
+        emailId: (existingLedger.emailId as string | null) ?? null,
+        didWrite: false,
+      };
+    }
+
+    await tx
+      .insert(hubspotActivityBackfillLedger)
+      .values({
+        tenantSchema: ledger.tenantSchema,
+        hubspotObjectType: ledger.hubspotObjectType,
+        hubspotObjectId: ledger.hubspotObjectId,
         targetEntityType: ledger.targetEntityType,
         targetEntityId: ledger.targetEntityId,
         status: ledger.status,
@@ -460,8 +671,31 @@ export async function writeLedgerOnly(db: any, ledger: LedgerWriteInput) {
         activityId: null,
         emailId: null,
         importedAt: new Date(),
-      },
-    });
+      })
+      .onConflictDoUpdate({
+        target: [
+          hubspotActivityBackfillLedger.tenantSchema,
+          hubspotActivityBackfillLedger.hubspotObjectType,
+          hubspotActivityBackfillLedger.hubspotObjectId,
+        ],
+        set: {
+          targetEntityType: ledger.targetEntityType,
+          targetEntityId: ledger.targetEntityId,
+          status: ledger.status,
+          skipReason: ledger.skipReason ?? null,
+          sourcePayload: ledger.sourcePayload ?? null,
+          activityId: null,
+          emailId: null,
+          importedAt: new Date(),
+        },
+      });
+
+    return {
+      activityId: null,
+      emailId: null,
+      didWrite: true,
+    };
+  });
 }
 
 export async function writeAtomic(db: any, input: AtomicWriteInput) {

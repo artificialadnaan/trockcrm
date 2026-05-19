@@ -6,7 +6,7 @@ import * as schema from "@trock-crm/shared/schema";
 import { offices } from "../shared/src/schema/public/offices.js";
 import { fetchAllOwners, fetchHubSpotActivitiesByType, type HubSpotActivityObjectType } from "../server/src/modules/migration/hubspot-client.js";
 import {
-  findDealForHubspotEngagement,
+  findTargetEntityForHubspotEngagement,
   findUserForHubspotOwner,
   getExistingLedgerEntry,
   mapCallToActivity,
@@ -17,6 +17,7 @@ import {
   writeLedgerOnly,
   type BackfillObjectType,
   type HubSpotActivityLike,
+  type ResolvedTarget,
 } from "../server/src/modules/migration/deal-activity-backfill-service.js";
 
 export interface BackfillArgs {
@@ -33,6 +34,12 @@ type TypeReport = {
   wouldImport: number;
   imported: number;
   alreadyImported: number;
+  wouldImportToDeals: number;
+  wouldImportToCompanies: number;
+  wouldImportToContacts: number;
+  importedToDeals: number;
+  importedToCompanies: number;
+  importedToContacts: number;
   skippedOrphan: number;
   skippedAmbiguous: number;
   skippedUnmappedUser: number;
@@ -41,9 +48,10 @@ type TypeReport = {
   unmappedUserSamples: string[];
 };
 
-type DealVolume = {
-  dealId: string;
-  dealName: string;
+type EntityVolume = {
+  entityId: string;
+  entityName: string;
+  entityType: "deal" | "company" | "contact";
   counts: Record<BackfillObjectType, number>;
 };
 
@@ -52,7 +60,7 @@ export interface BackfillReport {
   selectedType: BackfillArgs["type"];
   mode: BackfillArgs["mode"];
   byType: Partial<Record<BackfillObjectType, TypeReport>>;
-  topDeals: DealVolume[];
+  topEntities: EntityVolume[];
   durationMs: number;
 }
 
@@ -71,7 +79,7 @@ type RunDeps = {
     options: Pick<BackfillArgs, "since" | "limit">
   ) => Promise<HubSpotActivityLike[]>;
   getExistingLedgerEntry: typeof getExistingLedgerEntry;
-  findDealForHubspotEngagement: typeof findDealForHubspotEngagement;
+  findTargetEntityForHubspotEngagement: typeof findTargetEntityForHubspotEngagement;
   findUserForHubspotOwner: typeof findUserForHubspotOwner;
   mapNoteToActivity: typeof mapNoteToActivity;
   mapCallToActivity: typeof mapCallToActivity;
@@ -94,6 +102,12 @@ function emptyTypeReport(): TypeReport {
     wouldImport: 0,
     imported: 0,
     alreadyImported: 0,
+    wouldImportToDeals: 0,
+    wouldImportToCompanies: 0,
+    wouldImportToContacts: 0,
+    importedToDeals: 0,
+    importedToCompanies: 0,
+    importedToContacts: 0,
     skippedOrphan: 0,
     skippedAmbiguous: 0,
     skippedUnmappedUser: 0,
@@ -201,7 +215,7 @@ const defaultDeps: RunDeps = {
   fetchOwners: fetchAllOwners,
   fetchEngagementsByType: defaultFetchEngagementsByType,
   getExistingLedgerEntry,
-  findDealForHubspotEngagement,
+  findTargetEntityForHubspotEngagement,
   findUserForHubspotOwner,
   mapNoteToActivity,
   mapCallToActivity,
@@ -213,24 +227,38 @@ const defaultDeps: RunDeps = {
   validateOffice: defaultValidateOffice,
 };
 
-function incrementDealVolume(
-  volumeByDealId: Map<string, DealVolume>,
+function incrementEntityVolume(
+  volumeByEntityId: Map<string, EntityVolume>,
   type: BackfillObjectType,
-  deal: { id: string; name?: string | null }
+  target: ResolvedTarget
 ) {
-  const existing = volumeByDealId.get(deal.id) ?? {
-    dealId: deal.id,
-    dealName: deal.name ?? "Unknown Deal",
+  const key = `${target.type}:${target.id}`;
+  const entityName =
+    target.type === "deal"
+      ? target.entity.name ?? "Unknown Deal"
+      : target.type === "company"
+        ? target.entity.name
+        : `${target.entity.firstName} ${target.entity.lastName}`.trim() || "Unknown Contact";
+  const existing = volumeByEntityId.get(key) ?? {
+    entityId: target.id,
+    entityType: target.type,
+    entityName,
     counts: { note: 0, call: 0, meeting: 0, email: 0 },
   };
   existing.counts[type] += 1;
-  volumeByDealId.set(deal.id, existing);
+  volumeByEntityId.set(key, existing);
 }
 
-function buildOrphanSample(type: BackfillObjectType, engagement: HubSpotActivityLike, hubspotDealIds: string[]) {
+function buildOrphanSample(
+  type: BackfillObjectType,
+  engagement: HubSpotActivityLike,
+  associations: { dealIds: string[]; companyIds: string[]; contactIds: string[] }
+) {
   const created = engagement.properties.hs_timestamp ?? "unknown date";
-  const joined = hubspotDealIds.length > 0 ? hubspotDealIds.join(", ") : "none";
-  return `HubSpot ${type} ${engagement.id} created ${created} — associated to HubSpot deal ${joined}, no T Rock match`;
+  const dealIds = associations.dealIds.length > 0 ? associations.dealIds.join(", ") : "none";
+  const companyIds = associations.companyIds.length > 0 ? associations.companyIds.join(", ") : "none";
+  const contactIds = associations.contactIds.length > 0 ? associations.contactIds.join(", ") : "none";
+  return `HubSpot ${type} ${engagement.id} created ${created} — HubSpot deals ${dealIds}; companies ${companyIds}; contacts ${contactIds}; no T Rock match`;
 }
 
 function buildUnmappedUserSample(
@@ -249,7 +277,7 @@ export async function runBackfill(args: BackfillArgs, deps: RunDeps = defaultDep
   );
   const requestedTypes = args.type === "all" ? [...deps.getAvailableTypes()] : [args.type];
   const byType: Partial<Record<BackfillObjectType, TypeReport>> = {};
-  const volumeByDealId = new Map<string, DealVolume>();
+  const volumeByEntityId = new Map<string, EntityVolume>();
 
   const bootstrap = await deps.createConnections(args.office);
   try {
@@ -274,11 +302,20 @@ export async function runBackfill(args: BackfillArgs, deps: RunDeps = defaultDep
             continue;
           }
 
-          const dealResult = await deps.findDealForHubspotEngagement(bootstrap.tenantDb, engagement.associations);
-          if (dealResult.status === "orphan") {
+          const targetResult = await deps.findTargetEntityForHubspotEngagement(
+            bootstrap.tenantDb,
+            engagement.associations
+          );
+          if (targetResult.type === "orphan") {
             report.skippedOrphan += 1;
             if (report.orphanSamples.length < 10) {
-              report.orphanSamples.push(buildOrphanSample(type, engagement, dealResult.hubspotDealIds));
+              report.orphanSamples.push(
+                buildOrphanSample(type, engagement, {
+                  dealIds: targetResult.hubspotDealIds,
+                  companyIds: targetResult.hubspotCompanyIds,
+                  contactIds: targetResult.hubspotContactIds,
+                })
+              );
             }
             if (args.mode === "execute") {
               await deps.writeLedgerOnly(bootstrap.publicDb, {
@@ -288,14 +325,14 @@ export async function runBackfill(args: BackfillArgs, deps: RunDeps = defaultDep
                 targetEntityType: null,
                 targetEntityId: null,
                 status: "skipped_orphan",
-                skipReason: "No active T Rock deal matched the HubSpot deal association",
+                skipReason: targetResult.reason,
                 sourcePayload: engagement as unknown as Record<string, unknown>,
               });
             }
             continue;
           }
 
-          if (dealResult.status === "ambiguous") {
+          if (targetResult.type === "ambiguous") {
             report.skippedAmbiguous += 1;
             if (args.mode === "execute") {
               await deps.writeLedgerOnly(bootstrap.publicDb, {
@@ -305,14 +342,14 @@ export async function runBackfill(args: BackfillArgs, deps: RunDeps = defaultDep
                 targetEntityType: null,
                 targetEntityId: null,
                 status: "skipped_ambiguous",
-                skipReason: "Multiple active T Rock deals matched the HubSpot deal association",
+                skipReason: targetResult.reason,
                 sourcePayload: engagement as unknown as Record<string, unknown>,
               });
             }
             continue;
           }
 
-          if (args.dealId && dealResult.deal.id !== args.dealId) {
+          if (args.dealId && (targetResult.type !== "deal" || targetResult.id !== args.dealId)) {
             continue;
           }
 
@@ -333,8 +370,8 @@ export async function runBackfill(args: BackfillArgs, deps: RunDeps = defaultDep
                 tenantSchema: args.office,
                 hubspotObjectType: type,
                 hubspotObjectId: engagement.id,
-                targetEntityType: "deal",
-                targetEntityId: dealResult.deal.id,
+                targetEntityType: targetResult.type,
+                targetEntityId: targetResult.id,
                 status: "skipped_unmapped_user",
                 skipReason: "HubSpot owner could not be mapped to an active T Rock user",
                 sourcePayload: engagement as unknown as Record<string, unknown>,
@@ -343,17 +380,19 @@ export async function runBackfill(args: BackfillArgs, deps: RunDeps = defaultDep
             continue;
           }
 
-          incrementDealVolume(volumeByDealId, type, dealResult.deal);
-
           if (args.mode === "dry-run") {
+            incrementEntityVolume(volumeByEntityId, type, targetResult);
             report.wouldImport += 1;
+            if (targetResult.type === "deal") report.wouldImportToDeals += 1;
+            if (targetResult.type === "company") report.wouldImportToCompanies += 1;
+            if (targetResult.type === "contact") report.wouldImportToContacts += 1;
             continue;
           }
 
           if (type === "email") {
             const payload = deps.mapEmailToRecords({
               engagement,
-              deal: dealResult.deal,
+              targetEntity: targetResult,
               userId: user.id,
             });
             const result = await deps.writeAtomic(bootstrap.publicDb, {
@@ -361,8 +400,8 @@ export async function runBackfill(args: BackfillArgs, deps: RunDeps = defaultDep
                 tenantSchema: args.office,
                 hubspotObjectType: type,
                 hubspotObjectId: engagement.id,
-                targetEntityType: "deal",
-                targetEntityId: dealResult.deal.id,
+                targetEntityType: targetResult.type,
+                targetEntityId: targetResult.id,
                 status: "imported",
                 sourcePayload: engagement as unknown as Record<string, unknown>,
               },
@@ -376,17 +415,17 @@ export async function runBackfill(args: BackfillArgs, deps: RunDeps = defaultDep
           } else {
             const activity =
               type === "note"
-                ? deps.mapNoteToActivity({ engagement, deal: dealResult.deal, userId: user.id })
+                ? deps.mapNoteToActivity({ engagement, targetEntity: targetResult, userId: user.id })
                 : type === "call"
-                  ? deps.mapCallToActivity({ engagement, deal: dealResult.deal, userId: user.id })
-                  : deps.mapMeetingToActivity({ engagement, deal: dealResult.deal, userId: user.id });
+                  ? deps.mapCallToActivity({ engagement, targetEntity: targetResult, userId: user.id })
+                  : deps.mapMeetingToActivity({ engagement, targetEntity: targetResult, userId: user.id });
             const result = await deps.writeAtomic(bootstrap.publicDb, {
               ledger: {
                 tenantSchema: args.office,
                 hubspotObjectType: type,
                 hubspotObjectId: engagement.id,
-                targetEntityType: "deal",
-                targetEntityId: dealResult.deal.id,
+                targetEntityType: targetResult.type,
+                targetEntityId: targetResult.id,
                 status: "imported",
                 sourcePayload: engagement as unknown as Record<string, unknown>,
               },
@@ -399,6 +438,10 @@ export async function runBackfill(args: BackfillArgs, deps: RunDeps = defaultDep
           }
 
           report.imported += 1;
+          incrementEntityVolume(volumeByEntityId, type, targetResult);
+          if (targetResult.type === "deal") report.importedToDeals += 1;
+          if (targetResult.type === "company") report.importedToCompanies += 1;
+          if (targetResult.type === "contact") report.importedToContacts += 1;
         } catch (error) {
           report.failed += 1;
           if (args.mode === "execute") {
@@ -425,7 +468,7 @@ export async function runBackfill(args: BackfillArgs, deps: RunDeps = defaultDep
     selectedType: args.type,
     mode: args.mode,
     byType,
-    topDeals: [...volumeByDealId.values()]
+    topEntities: [...volumeByEntityId.values()]
       .sort((a, b) => {
         const totalA = a.counts.note + a.counts.call + a.counts.meeting + a.counts.email;
         const totalB = b.counts.note + b.counts.call + b.counts.meeting + b.counts.email;
@@ -447,21 +490,36 @@ export function renderBackfillReport(report: BackfillReport) {
     lines.push(`${type[0].toUpperCase()}${type.slice(1)}s:`);
     lines.push(`Fetched: ${typeReport.fetched}`);
     lines.push(`Would import / Imported: ${report.mode === "dry-run" ? typeReport.wouldImport : typeReport.imported}`);
+    lines.push(
+      `${report.mode === "dry-run" ? "Would import" : "Imported"} to deals: ${
+        report.mode === "dry-run" ? typeReport.wouldImportToDeals : typeReport.importedToDeals
+      }`
+    );
+    lines.push(
+      `${report.mode === "dry-run" ? "Would import" : "Imported"} to companies: ${
+        report.mode === "dry-run" ? typeReport.wouldImportToCompanies : typeReport.importedToCompanies
+      }`
+    );
+    lines.push(
+      `${report.mode === "dry-run" ? "Would import" : "Imported"} to contacts: ${
+        report.mode === "dry-run" ? typeReport.wouldImportToContacts : typeReport.importedToContacts
+      }`
+    );
     lines.push(`Already imported: ${typeReport.alreadyImported}`);
-    lines.push(`Skipped (orphan, no deal): ${typeReport.skippedOrphan}`);
-    lines.push(`Skipped (ambiguous, multiple deals): ${typeReport.skippedAmbiguous}`);
+    lines.push(`Skipped (orphan, no entity match): ${typeReport.skippedOrphan}`);
+    lines.push(`Skipped (ambiguous, multiple entity matches): ${typeReport.skippedAmbiguous}`);
     lines.push(`Skipped (unmapped user): ${typeReport.skippedUnmappedUser}`);
     lines.push(`Failed: ${typeReport.failed}`);
     lines.push("");
   }
 
-  lines.push("Top deals by activity volume (first 10):");
-  if (report.topDeals.length === 0) {
+  lines.push("Top entities by activity volume (first 10):");
+  if (report.topEntities.length === 0) {
     lines.push("None");
   } else {
-    for (const deal of report.topDeals) {
+    for (const entity of report.topEntities) {
       lines.push(
-        `Deal "${deal.dealName}" (${deal.dealId}): ${deal.counts.note} notes, ${deal.counts.call} calls, ${deal.counts.meeting} meetings, ${deal.counts.email} emails`
+        `${entity.entityType[0].toUpperCase()}${entity.entityType.slice(1)} "${entity.entityName}" (${entity.entityId}): ${entity.counts.note} notes, ${entity.counts.call} calls, ${entity.counts.meeting} meetings, ${entity.counts.email} emails`
       );
     }
   }
