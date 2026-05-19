@@ -63,6 +63,17 @@ describe("mine visibility predicates", () => {
     expect(query.sql).not.toContain('[object Object]');
   });
 
+  it("renders qualified ownership columns for non-aliased deal queries", () => {
+    const query = dialect.sqlToQuery(buildDealMineVisibilityCondition("user-1"));
+
+    expect(query.sql).toContain('"deals"."assigned_rep_id"');
+    expect(query.sql).toContain('"deals"."created_by_user_id"');
+    expect(query.sql).toContain('a.deal_id = "deals"."id"');
+    expect(query.sql).toContain('ds.deal_id = "deals"."id"');
+    expect(query.sql).not.toContain(" created_by_user_id = ");
+    expect(query.sql).not.toContain(" assigned_rep_id = ");
+  });
+
   it("renders valid aliased SQL for leads", () => {
     const query = dialect.sqlToQuery(buildAliasedLeadMineVisibilityCondition("l", "user-1"));
 
