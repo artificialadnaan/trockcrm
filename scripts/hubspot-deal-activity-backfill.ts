@@ -43,6 +43,7 @@ type TypeReport = {
   skippedOrphan: number;
   skippedAmbiguous: number;
   skippedUnmappedUser: number;
+  skippedNoContent: number;
   failed: number;
   orphanSamples: string[];
   unmappedUserSamples: string[];
@@ -111,6 +112,7 @@ function emptyTypeReport(): TypeReport {
     skippedOrphan: 0,
     skippedAmbiguous: 0,
     skippedUnmappedUser: 0,
+    skippedNoContent: 0,
     failed: 0,
     orphanSamples: [],
     unmappedUserSamples: [],
@@ -381,6 +383,22 @@ export async function runBackfill(args: BackfillArgs, deps: RunDeps = defaultDep
           }
 
           if (args.mode === "dry-run") {
+            const dryRunPayload =
+              type === "email"
+                ? deps.mapEmailToRecords({
+                    engagement,
+                    targetEntity: targetResult,
+                    userId: user.id,
+                  })
+                : type === "note"
+                  ? deps.mapNoteToActivity({ engagement, targetEntity: targetResult, userId: user.id })
+                  : type === "call"
+                    ? deps.mapCallToActivity({ engagement, targetEntity: targetResult, userId: user.id })
+                    : deps.mapMeetingToActivity({ engagement, targetEntity: targetResult, userId: user.id });
+            if (!dryRunPayload) {
+              report.skippedNoContent += 1;
+              continue;
+            }
             incrementEntityVolume(volumeByEntityId, type, targetResult);
             report.wouldImport += 1;
             if (targetResult.type === "deal") report.wouldImportToDeals += 1;
@@ -395,6 +413,20 @@ export async function runBackfill(args: BackfillArgs, deps: RunDeps = defaultDep
               targetEntity: targetResult,
               userId: user.id,
             });
+            if (!payload) {
+              report.skippedNoContent += 1;
+              await deps.writeLedgerOnly(bootstrap.publicDb, {
+                tenantSchema: args.office,
+                hubspotObjectType: type,
+                hubspotObjectId: engagement.id,
+                targetEntityType: targetResult.type,
+                targetEntityId: targetResult.id,
+                status: "skipped_no_content",
+                skipReason: "HubSpot engagement had no useful subject or body content after sanitization",
+                sourcePayload: engagement as unknown as Record<string, unknown>,
+              });
+              continue;
+            }
             const result = await deps.writeAtomic(bootstrap.publicDb, {
               ledger: {
                 tenantSchema: args.office,
@@ -419,6 +451,20 @@ export async function runBackfill(args: BackfillArgs, deps: RunDeps = defaultDep
                 : type === "call"
                   ? deps.mapCallToActivity({ engagement, targetEntity: targetResult, userId: user.id })
                   : deps.mapMeetingToActivity({ engagement, targetEntity: targetResult, userId: user.id });
+            if (!activity) {
+              report.skippedNoContent += 1;
+              await deps.writeLedgerOnly(bootstrap.publicDb, {
+                tenantSchema: args.office,
+                hubspotObjectType: type,
+                hubspotObjectId: engagement.id,
+                targetEntityType: targetResult.type,
+                targetEntityId: targetResult.id,
+                status: "skipped_no_content",
+                skipReason: "HubSpot engagement had no useful subject or body content after sanitization",
+                sourcePayload: engagement as unknown as Record<string, unknown>,
+              });
+              continue;
+            }
             const result = await deps.writeAtomic(bootstrap.publicDb, {
               ledger: {
                 tenantSchema: args.office,
@@ -509,6 +555,7 @@ export function renderBackfillReport(report: BackfillReport) {
     lines.push(`Skipped (orphan, no entity match): ${typeReport.skippedOrphan}`);
     lines.push(`Skipped (ambiguous, multiple entity matches): ${typeReport.skippedAmbiguous}`);
     lines.push(`Skipped (unmapped user): ${typeReport.skippedUnmappedUser}`);
+    lines.push(`Skipped (no useful content): ${typeReport.skippedNoContent}`);
     lines.push(`Failed: ${typeReport.failed}`);
     lines.push("");
   }

@@ -296,6 +296,72 @@ describe("hubspot-deal-activity-backfill script", () => {
     expect(deps.writeLedgerOnly).toHaveBeenCalledTimes(3);
   });
 
+  it("counts skipped_no_content and avoids importing empty notes", async () => {
+    const deps = makeDeps();
+    deps.mapNoteToActivity.mockReturnValueOnce(null);
+
+    const report = await runBackfill(
+      { office: "office_dallas", type: "note", mode: "execute", since: null, limit: null, dealId: null },
+      deps as any
+    );
+
+    expect(report.byType.note?.imported).toBe(0);
+    expect(report.byType.note?.skippedNoContent).toBe(1);
+    expect(deps.writeAtomic).not.toHaveBeenCalled();
+    expect(deps.writeLedgerOnly).toHaveBeenCalledWith(
+      {},
+      expect.objectContaining({
+        hubspotObjectType: "note",
+        status: "skipped_no_content",
+      })
+    );
+  });
+
+  it("counts skipped_no_content in dry-run output", async () => {
+    const deps = makeDeps();
+    deps.mapNoteToActivity.mockReturnValueOnce(null);
+
+    const report = await runBackfill(
+      { office: "office_dallas", type: "note", mode: "dry-run", since: null, limit: null, dealId: null },
+      deps as any
+    );
+
+    expect(report.byType.note?.wouldImport).toBe(0);
+    expect(report.byType.note?.skippedNoContent).toBe(1);
+    expect(renderBackfillReport(report)).toContain("Skipped (no useful content): 1");
+  });
+
+  it("keeps reruns idempotent for skipped_no_content engagements", async () => {
+    const deps = makeDeps();
+    const ledgerState = new Map<string, { status: string }>();
+    deps.getExistingLedgerEntry = vi.fn(async (_db: unknown, _schema: string, type: string, id: string) => {
+      return ledgerState.get(`${type}:${id}`) ?? null;
+    });
+    deps.mapNoteToActivity.mockReturnValue(null);
+    deps.writeLedgerOnly = vi.fn(
+      async (_db: unknown, payload: { hubspotObjectType: string; hubspotObjectId: string; status: string }) => {
+        ledgerState.set(`${payload.hubspotObjectType}:${payload.hubspotObjectId}`, { status: payload.status });
+      }
+    );
+
+    const args = {
+      office: "office_dallas",
+      type: "note",
+      mode: "execute" as const,
+      since: null,
+      limit: null,
+      dealId: null,
+    };
+
+    const first = await runBackfill(args, deps as any);
+    const second = await runBackfill(args, deps as any);
+
+    expect(first.byType.note?.skippedNoContent).toBe(1);
+    expect(second.byType.note?.skippedNoContent).toBe(1);
+    expect(second.byType.note?.imported).toBe(0);
+    expect(deps.writeAtomic).not.toHaveBeenCalled();
+  });
+
   it("counts raced idempotent rows as already imported instead of imported", async () => {
     const deps = makeDeps();
     deps.writeAtomic.mockResolvedValueOnce({ activityId: "activity-1", emailId: null, didImport: false });

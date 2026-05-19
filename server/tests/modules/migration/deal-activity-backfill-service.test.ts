@@ -529,7 +529,90 @@ describe("deal activity backfill service", () => {
       userId: "user-1",
     });
 
-    expect(note.body).toBe("HubSpot note imported without a text body. Attachments were present in HubSpot, but no inline text was available.");
+    expect(note).toBeNull();
+  });
+
+  it("skips bodyless HubSpot notes even without attachments", () => {
+    const note = mapNoteToActivity({
+      engagement: makeEngagement({
+        objectType: "note",
+        properties: {
+          hs_note_body: undefined,
+        },
+      }),
+      targetEntity: makeDealTarget(),
+      userId: "user-1",
+    });
+
+    expect(note).toBeNull();
+  });
+
+  it("skips HubSpot notes whose HTML sanitizes to empty", () => {
+    const note = mapNoteToActivity({
+      engagement: makeEngagement({
+        objectType: "note",
+        properties: {
+          hs_note_body: "<div><img src=\"https://example.com/empty.png\" /></div>",
+        },
+      }),
+      targetEntity: makeDealTarget(),
+      userId: "user-1",
+    });
+
+    expect(note).toBeNull();
+  });
+
+  it("skips calls when both title and body are empty after sanitization", () => {
+    const call = mapCallToActivity({
+      engagement: makeEngagement({
+        objectType: "call",
+        properties: {
+          hs_call_title: undefined,
+          hs_call_body: "<div><img src=\"https://example.com/empty.png\" /></div>",
+        },
+      }),
+      targetEntity: makeDealTarget(),
+      userId: "user-1",
+    });
+
+    expect(call).toBeNull();
+  });
+
+  it("skips meetings when title and notes are empty after sanitization", () => {
+    const meeting = mapMeetingToActivity({
+      engagement: makeEngagement({
+        objectType: "meeting",
+        properties: {
+          hs_meeting_title: undefined,
+          hs_meeting_body: "<div><img src=\"https://example.com/empty.png\" /></div>",
+          hs_internal_meeting_notes: undefined,
+          hs_meeting_start_time: "2026-05-10T09:00:00.000Z",
+        },
+      }),
+      targetEntity: makeDealTarget(),
+      userId: "user-1",
+    });
+
+    expect(meeting).toBeNull();
+  });
+
+  it("skips emails when subject and body content are both empty", () => {
+    const result = mapEmailToRecords({
+      engagement: makeEngagement({
+        id: "hs-email-empty",
+        objectType: "email",
+        properties: {
+          hs_email_subject: undefined,
+          hs_email_text: undefined,
+          hs_email_html: "<div><img src=\"https://example.com/empty.png\" /></div>",
+          hs_email_direction: "INCOMING_EMAIL",
+        },
+      }),
+      targetEntity: makeDealTarget(),
+      userId: "user-1",
+    });
+
+    expect(result).toBeNull();
   });
 
   it("maps HubSpot EMAIL direction as outbound and clamps long activity subjects", () => {

@@ -108,13 +108,21 @@ export type DealLookupResult =
   | { status: "orphan"; hubspotDealIds: string[] }
   | { status: "ambiguous"; hubspotDealIds: string[] };
 
+export type LedgerStatus =
+  | "imported"
+  | "skipped_orphan"
+  | "skipped_ambiguous"
+  | "skipped_unmapped_user"
+  | "skipped_no_content"
+  | "failed";
+
 export interface LedgerWriteInput {
   tenantSchema: string;
   hubspotObjectType: BackfillObjectType;
   hubspotObjectId: string;
   targetEntityType: "deal" | "company" | "contact" | null;
   targetEntityId: string | null;
-  status: "imported" | "skipped_orphan" | "skipped_ambiguous" | "skipped_unmapped_user" | "failed";
+  status: LedgerStatus;
   skipReason?: string | null;
   sourcePayload?: Record<string, unknown> | null;
 }
@@ -503,6 +511,8 @@ export function mapNoteToActivity(input: {
   targetEntity: ResolvedTarget;
   userId: string;
 }) {
+  const body = plainTextOrNull(input.engagement.properties.hs_note_body);
+  if (!body) return null;
   const links = resolveEntityLinkFields(input.targetEntity);
   const occurredAt = parseDate(input.engagement.properties.hs_timestamp);
   return {
@@ -513,11 +523,7 @@ export function mapNoteToActivity(input: {
     sourceEntityId: input.targetEntity.id,
     ...links,
     subject: clampText("HubSpot Note", 500),
-    body: buildImportedBody({
-      body: input.engagement.properties.hs_note_body,
-      fallback: "HubSpot note imported without a text body.",
-      attachmentIds: input.engagement.properties.hs_attachment_ids,
-    }),
+    body,
     occurredAt,
     createdAt: parseCreatedAt(input.engagement, occurredAt),
   };
@@ -528,6 +534,9 @@ export function mapCallToActivity(input: {
   targetEntity: ResolvedTarget;
   userId: string;
 }) {
+  const subject = clampText(plainTextOrNull(input.engagement.properties.hs_call_title) ?? "HubSpot Call", 500);
+  const body = plainTextOrNull(input.engagement.properties.hs_call_body);
+  if (!body && subject === "HubSpot Call") return null;
   const links = resolveEntityLinkFields(input.targetEntity);
   const occurredAt = parseDate(input.engagement.properties.hs_timestamp);
   return {
@@ -537,12 +546,8 @@ export function mapCallToActivity(input: {
     sourceEntityType: input.targetEntity.type,
     sourceEntityId: input.targetEntity.id,
     ...links,
-    subject: clampText(plainTextOrNull(input.engagement.properties.hs_call_title) ?? "HubSpot Call", 500),
-    body: buildImportedBody({
-      body: input.engagement.properties.hs_call_body,
-      fallback: "HubSpot call imported without a transcript body.",
-      attachmentIds: input.engagement.properties.hs_attachment_ids,
-    }),
+    subject,
+    body,
     outcome: normalizeCallOutcome(input.engagement.properties),
     durationMinutes: parseDurationMinutes(input.engagement.properties.hs_call_duration),
     occurredAt,
@@ -555,6 +560,11 @@ export function mapMeetingToActivity(input: {
   targetEntity: ResolvedTarget;
   userId: string;
 }) {
+  const subject = clampText(plainTextOrNull(input.engagement.properties.hs_meeting_title) ?? "HubSpot Meeting", 500);
+  const body =
+    plainTextOrNull(input.engagement.properties.hs_meeting_body) ??
+    plainTextOrNull(input.engagement.properties.hs_internal_meeting_notes);
+  if (!body && subject === "HubSpot Meeting") return null;
   const links = resolveEntityLinkFields(input.targetEntity);
   const occurredAt = parseDate(
     input.engagement.properties.hs_meeting_start_time ?? input.engagement.properties.hs_timestamp
@@ -566,15 +576,8 @@ export function mapMeetingToActivity(input: {
     sourceEntityType: input.targetEntity.type,
     sourceEntityId: input.targetEntity.id,
     ...links,
-    subject: clampText(plainTextOrNull(input.engagement.properties.hs_meeting_title) ?? "HubSpot Meeting", 500),
-    body: buildImportedBodyFromCandidates({
-      bodies: [
-        input.engagement.properties.hs_meeting_body,
-        input.engagement.properties.hs_internal_meeting_notes,
-      ],
-      fallback: "HubSpot meeting imported without agenda notes.",
-      attachmentIds: input.engagement.properties.hs_attachment_ids,
-    }),
+    subject,
+    body,
     occurredAt,
     createdAt: parseCreatedAt(input.engagement, occurredAt),
   };
@@ -594,8 +597,10 @@ export function mapEmailToRecords(input: {
     plainTextOrNull(input.engagement.properties.hs_email_text) ??
     (bodyHtml ? stripHtml(bodyHtml) : null);
   const participants = parseEmailHeaders(input.engagement.properties.hs_email_headers);
-  const subject = plainTextOrNull(input.engagement.properties.hs_email_subject) ?? "HubSpot Email";
+  const explicitSubject = plainTextOrNull(input.engagement.properties.hs_email_subject);
+  const subject = explicitSubject ?? "HubSpot Email";
   const activitySubject = clampText(subject, 500);
+  if (!explicitSubject && !bodyText) return null;
   const sentAt = parseDate(input.engagement.properties.hs_timestamp);
   const createdAt = parseCreatedAt(input.engagement, sentAt);
   const links = resolveEntityLinkFields(input.targetEntity);
