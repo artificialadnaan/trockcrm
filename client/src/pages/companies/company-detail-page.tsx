@@ -440,7 +440,7 @@ export function CompanyDetailPage() {
         <CompanyContactsTab key={contactsKey} companyId={company.id} onAddContact={() => setAddContactOpen(true)} />
       )}
       {activeTab === "portfolio" && <CompanyPortfolioTab key={portfolioKey} companyId={company.id} companyName={company.name} />}
-      {activeTab === "deals" && <CompanyDealsTab companyId={company.id} />}
+      {activeTab === "deals" && <CompanyDealsTab companyId={company.id} companyName={company.name} />}
       {activeTab === "files" && <CompanyFilesTab companyId={company.id} />}
       {activeTab === "emails" && <CompanyEmailTab companyId={company.id} />}
       {activeTab === "activity" && <EntityActivityTab entityType="company" entityId={company.id} emptyLabel="company" />}
@@ -718,7 +718,7 @@ function CompanyContactsTab({
 
 // --- Deals Tab ---
 
-function CompanyDealsTab({ companyId }: { companyId: string }) {
+function CompanyDealsTab({ companyId, companyName }: { companyId: string; companyName: string }) {
   const navigate = useNavigate();
   const { deals, loading, error } = useCompanyDeals(companyId);
 
@@ -737,10 +737,18 @@ function CompanyDealsTab({ companyId }: { companyId: string }) {
   }
 
   if (deals.length === 0) {
+    const params = new URLSearchParams();
+    params.set("companyId", companyId);
+    params.set("name", `${companyName} opportunity`);
+
     return (
       <div className="text-center py-12 text-muted-foreground">
         <Handshake className="h-10 w-10 mx-auto mb-3 opacity-20" />
         <p className="text-sm">No deals linked to this company.</p>
+        <Button className="mt-4 bg-brand-red text-white hover:bg-brand-red/90" onClick={() => navigate(`/leads/new?${params.toString()}`)}>
+          <Plus className="mr-2 h-4 w-4" />
+          Create Lead
+        </Button>
       </div>
     );
   }

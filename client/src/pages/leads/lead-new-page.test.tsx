@@ -51,4 +51,21 @@ describe("LeadNewPage", () => {
       })
     );
   });
+
+  it("allows company-only prefills without forcing a contact selection", () => {
+    mocks.leadFormMock.mockReset();
+
+    renderPage("/leads/new?companyId=company-1&name=District%20Opportunity");
+
+    expect(mocks.leadFormMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        mode: "create",
+        initialValues: expect.objectContaining({
+          companyId: "company-1",
+          primaryContactId: "",
+          name: "District Opportunity",
+        }),
+      })
+    );
+  });
 });
