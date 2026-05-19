@@ -110,6 +110,7 @@ export async function uploadSessionPhoto(input: {
   file: File;
   category: string | null;
   caption?: string | null;
+  tags?: string[];
   metadata: PhotoMetadata;
 }): Promise<{ photo: { id: string } & Record<string, unknown> }> {
   const compressed = await compressForUpload(input.file);
@@ -127,6 +128,7 @@ export async function uploadSessionPhoto(input: {
         sizeBytes: compressed.size,
       category: input.category,
       caption: input.caption ?? null,
+      tags: input.tags ?? [],
     },
   });
 

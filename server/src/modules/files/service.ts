@@ -99,6 +99,8 @@ export interface RequestUploadInput {
   photoCategory?: PhotoCategory | null;
   /** Optional tags */
   tags?: string[];
+  /** Allow the upload to remain unassigned until a later field-app step */
+  allowUnassigned?: boolean;
 }
 
 export interface ConfirmUploadInput {
@@ -227,7 +229,11 @@ function validateAssociations(input: {
   contactId?: string;
   procoreProjectId?: number;
   changeOrderId?: string;
+  allowUnassigned?: boolean;
 }): void {
+  if (input.allowUnassigned) {
+    return;
+  }
   if (!input.dealId && !input.leadId && !input.opportunityId && !input.contactId && !input.procoreProjectId && !input.changeOrderId) {
     throw new AppError(400, "File must be associated with at least one entity (lead, deal, contact, Procore project, or change order).");
   }

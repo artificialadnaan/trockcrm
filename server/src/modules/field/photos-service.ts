@@ -112,6 +112,7 @@ export async function requestFieldPhotoUploadUrl(
     sizeBytes: number;
     photoCategory?: string | null;
     caption?: string | null;
+    tags?: string[];
   }
 ) {
   if (hasSelectedCaptureTarget(input)) {
@@ -137,6 +138,8 @@ export async function requestFieldPhotoUploadUrl(
     opportunityId: input.opportunityId,
     description: input.caption ?? undefined,
     photoCategory,
+    tags: input.tags,
+    allowUnassigned: !hasSelectedCaptureTarget(input),
   });
 
   return {
@@ -359,6 +362,9 @@ export async function assignPendingFieldPhotoTarget(
       AND uploaded_by = ${access.userId}::uuid
       AND deal_id IS NULL
       AND lead_id IS NULL
+      AND contact_id IS NULL
+      AND procore_project_id IS NULL
+      AND change_order_id IS NULL
     RETURNING
       id,
       category,

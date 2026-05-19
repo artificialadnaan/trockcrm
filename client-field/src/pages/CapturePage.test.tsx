@@ -316,6 +316,7 @@ describe("CapturePage", () => {
       leadId: undefined,
       opportunityId: undefined,
       file,
+      tags: ["urgent"],
     })));
     expect(tagWrites).toEqual([]);
     expect(node.textContent).toContain("Pending captures");

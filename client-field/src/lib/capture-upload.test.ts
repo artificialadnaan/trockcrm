@@ -166,6 +166,7 @@ describe("capture upload utilities", () => {
       file,
       category: "damage",
       caption: "North slope",
+      tags: ["urgent"],
       metadata: { latitude: 35, longitude: -97, addressSource: "live_gps", takenAt: "2026-05-05T12:00:00.000Z" },
     })).resolves.toEqual({ photo: { id: "photo-1" } });
 
@@ -177,6 +178,7 @@ describe("capture upload utilities", () => {
         sizeBytes: 1,
         category: "damage",
         caption: "North slope",
+        tags: ["urgent"],
       },
     });
     expect(fetchMock).toHaveBeenCalledWith("https://r2.example.com/upload", expect.objectContaining({

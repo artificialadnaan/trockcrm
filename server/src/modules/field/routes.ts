@@ -142,6 +142,7 @@ fieldRoutes.post("/photos/upload-url", ...fieldProjectMiddleware, async (req, re
       sizeBytes: Number(req.body.sizeBytes),
       photoCategory: req.body.category ?? req.body.photoCategory ?? null,
       caption: req.body.caption ?? null,
+      tags: Array.isArray(req.body.tags) ? req.body.tags.map(String) : [],
     });
     await req.commitTransaction();
     res.json(result);

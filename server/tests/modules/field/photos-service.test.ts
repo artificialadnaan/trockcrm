@@ -112,6 +112,7 @@ describe("field photo upload service", () => {
       sizeBytes: 850_000,
       photoCategory: "damage",
       caption: "North slope",
+      tags: ["urgent"],
     });
 
     expect(projectMocks.assertAccessibleFieldCaptureTarget).toHaveBeenCalledWith(db, {
@@ -128,6 +129,7 @@ describe("field photo upload service", () => {
       fileSizeBytes: 850_000,
       photoCategory: "damage",
       description: "North slope",
+      tags: ["urgent"],
     }));
     expect(result).toMatchObject({
       uploadUrl: "https://r2.example/upload",
@@ -157,6 +159,7 @@ describe("field photo upload service", () => {
       contentType: "image/jpeg",
       sizeBytes: 850_000,
       caption: "Unassigned photo",
+      tags: ["pending"],
     });
 
     expect(projectMocks.assertAccessibleFieldCaptureTarget).not.toHaveBeenCalled();
@@ -165,6 +168,8 @@ describe("field photo upload service", () => {
       leadId: undefined,
       opportunityId: undefined,
       description: "Unassigned photo",
+      tags: ["pending"],
+      allowUnassigned: true,
     }));
   });
 

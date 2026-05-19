@@ -288,14 +288,9 @@ export function CapturePage() {
         file: photo.file,
         category,
         caption: photo.description || null,
+        tags: photo.tags,
         metadata: photo.metadata,
       });
-      if (activeTarget && photo.tags.length > 0 && result?.photo?.id) {
-        await api(`/field/photos/${result.photo.id}/tags`, {
-          method: "POST",
-          json: { tags: photo.tags },
-        });
-      }
       setUploadState((current) => ({ ...current, [photo.id]: { status: "complete" } }));
       return result;
     });

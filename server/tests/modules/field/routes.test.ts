@@ -163,7 +163,7 @@ describe("field routes", () => {
 
   it("routes field photo upload URL and confirm requests through field-safe services", async () => {
     await invokeRoute("post", "/photos/upload-url", {
-      body: { opportunityId: "deal-2", contentType: "image/jpeg", sizeBytes: 1000, category: "damage", caption: "North slope" },
+      body: { opportunityId: "deal-2", contentType: "image/jpeg", sizeBytes: 1000, category: "damage", caption: "North slope", tags: ["urgent"] },
     });
     expect(photoMocks.requestFieldPhotoUploadUrl).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({
       officeSlug: "trock",
@@ -174,6 +174,7 @@ describe("field routes", () => {
       sizeBytes: 1000,
       photoCategory: "damage",
       caption: "North slope",
+      tags: ["urgent"],
     }));
 
     await invokeRoute("post", "/photos/confirm-upload", {
