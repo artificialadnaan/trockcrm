@@ -1,4 +1,5 @@
 import { and, eq, inArray, or, sql } from "drizzle-orm";
+import { decodeHTML } from "entities";
 import {
   activities,
   companies,
@@ -14,6 +15,7 @@ export type BackfillObjectType = "note" | "call" | "meeting" | "email";
 
 export interface HubSpotActivityLike {
   id: string;
+  createdAt?: string;
   objectType: BackfillObjectType;
   properties: Record<string, string | undefined>;
   associations?: {
@@ -149,8 +151,179 @@ function clampText(value: string | null, maxLength: number): string | null {
   return value.length > maxLength ? value.slice(0, maxLength) : value;
 }
 
+const KNOWN_HTML_TAGS = new Set([
+  "a",
+  "abbr",
+  "address",
+  "area",
+  "article",
+  "aside",
+  "audio",
+  "b",
+  "base",
+  "bdi",
+  "bdo",
+  "body",
+  "blockquote",
+  "br",
+  "button",
+  "canvas",
+  "caption",
+  "cite",
+  "code",
+  "col",
+  "colgroup",
+  "code",
+  "data",
+  "datalist",
+  "dd",
+  "del",
+  "details",
+  "dfn",
+  "dialog",
+  "div",
+  "dl",
+  "dt",
+  "em",
+  "embed",
+  "fieldset",
+  "figcaption",
+  "figure",
+  "footer",
+  "form",
+  "h1",
+  "h2",
+  "h3",
+  "h4",
+  "h5",
+  "h6",
+  "head",
+  "header",
+  "hr",
+  "html",
+  "i",
+  "iframe",
+  "img",
+  "input",
+  "ins",
+  "i",
+  "kbd",
+  "label",
+  "legend",
+  "li",
+  "link",
+  "li",
+  "main",
+  "mark",
+  "meta",
+  "nav",
+  "ol",
+  "option",
+  "output",
+  "p",
+  "param",
+  "picture",
+  "pre",
+  "q",
+  "rp",
+  "rt",
+  "ruby",
+  "s",
+  "samp",
+  "section",
+  "select",
+  "small",
+  "source",
+  "span",
+  "strong",
+  "style",
+  "sub",
+  "summary",
+  "sup",
+  "svg",
+  "strong",
+  "tbody",
+  "table",
+  "td",
+  "template",
+  "textarea",
+  "tfoot",
+  "th",
+  "thead",
+  "time",
+  "title",
+  "track",
+  "tr",
+  "u",
+  "ul",
+  "var",
+  "video",
+  "wbr",
+  "font",
+]);
+
+function isValidUnicodeScalar(value: number): boolean {
+  return Number.isInteger(value) && value >= 0 && value <= 0x10ffff && !(value >= 0xd800 && value <= 0xdfff);
+}
+
+function decodeHtmlEntities(input: string): string {
+  const invalidNumericEntities = new Map<string, string>();
+  let nextInvalidIndex = 0;
+  const protectedInput = input.replace(/&#(x?[0-9a-f]+);/gi, (match, numeric: string) => {
+    const parsed = numeric.toLowerCase().startsWith("x")
+      ? Number.parseInt(numeric.slice(1), 16)
+      : Number.parseInt(numeric, 10);
+    if (isValidUnicodeScalar(parsed)) return match;
+    const token = `__INVALID_HTML_ENTITY_${nextInvalidIndex++}__`;
+    invalidNumericEntities.set(token, match);
+    return token;
+  });
+
+  try {
+    const decoded = decodeHTML(protectedInput);
+    let restored = decoded;
+    for (const [token, original] of invalidNumericEntities.entries()) {
+      restored = restored.replaceAll(token, original);
+    }
+    return restored;
+  } catch {
+    return input;
+  }
+}
+
+function stripDecodedHtmlTags(input: string): string {
+  return input
+    .replace(/<\s*br\s*\/?\s*>/gi, " ")
+    .replace(/<\/\s*(p|div|li|tr|h[1-6])\s*>/gi, " ")
+    .replace(/<[^>]+>/g, " ");
+}
+
+export function htmlToPlainText(input: string | null | undefined): string {
+  if (!input) return "";
+
+  const decoded = decodeHtmlEntities(input);
+  const withoutTags = containsKnownHtmlTag(decoded)
+    ? stripDecodedHtmlTags(decoded)
+    : decoded;
+
+  return withoutTags.replace(/\s+/g, " ").replace(/\s+([.,!?;:])/g, "$1").trim();
+}
+
+function containsKnownHtmlTag(input: string): boolean {
+  return /<\/?[a-z][\w:-]*(?:\s[^>]*)?\s*\/?>/i.test(input);
+}
+
+function plainTextOrNull(input: string | null | undefined): string | null {
+  if (!input) return null;
+  const decoded = decodeHtmlEntities(input).trim();
+  if (!decoded) return null;
+  if (!containsKnownHtmlTag(decoded)) return decoded;
+  const normalized = htmlToPlainText(input);
+  return normalized.length > 0 ? normalized : null;
+}
+
 function stripHtml(input: string): string {
-  return input.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim();
+  return htmlToPlainText(input);
 }
 
 function escapeHtml(input: string): string {
@@ -167,11 +340,60 @@ function buildBodyPreview(bodyHtml: string | null, bodyText: string | null) {
   return source.slice(0, 500) || null;
 }
 
+function parseCreatedAt(engagement: HubSpotActivityLike, fallback: Date): Date {
+  const rawValue = engagement.properties.hs_createdate ?? engagement.createdAt ?? engagement.properties.hs_timestamp;
+  if (!rawValue) return fallback;
+  const parsed = new Date(rawValue);
+  if (Number.isNaN(parsed.getTime())) return fallback;
+  return parsed;
+}
+
+function buildImportedBody(input: {
+  body: string | undefined;
+  fallback: string;
+  attachmentIds?: string | undefined;
+}) {
+  const textBody = plainTextOrNull(input.body);
+  if (textBody) return textBody;
+  if (hasHubSpotAttachments(input.attachmentIds)) {
+    return `${input.fallback} Attachments were present in HubSpot, but no inline text was available.`;
+  }
+  return `${input.fallback} HubSpot did not provide inline text for this activity.`;
+}
+
+function buildImportedBodyFromCandidates(input: {
+  bodies: Array<string | undefined>;
+  fallback: string;
+  attachmentIds?: string | undefined;
+}) {
+  for (const body of input.bodies) {
+    const textBody = plainTextOrNull(body);
+    if (textBody) return textBody;
+  }
+
+  if (hasHubSpotAttachments(input.attachmentIds)) {
+    return `${input.fallback} Attachments were present in HubSpot, but no inline text was available.`;
+  }
+  return `${input.fallback} HubSpot did not provide inline text for this activity.`;
+}
+
 function parseDurationMinutes(value: string | undefined): number | null {
   if (!value) return null;
   const millis = Number(value);
   if (!Number.isFinite(millis) || millis <= 0) return null;
   return Math.max(1, Math.round(millis / 60_000));
+}
+
+function normalizeCallOutcome(properties: Record<string, string | undefined>): string | null {
+  const outcome = plainTextOrNull(properties.hs_call_outcome);
+  if (outcome) return outcome;
+
+  const disposition = plainTextOrNull(properties.hs_call_disposition);
+  if (disposition && !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(disposition)) {
+    return disposition;
+  }
+
+  return plainTextOrNull(properties.hs_call_status);
 }
 
 function hasHubSpotAttachments(value: string | undefined): boolean {
@@ -282,6 +504,7 @@ export function mapNoteToActivity(input: {
   userId: string;
 }) {
   const links = resolveEntityLinkFields(input.targetEntity);
+  const occurredAt = parseDate(input.engagement.properties.hs_timestamp);
   return {
     type: "note" as const,
     responsibleUserId: input.userId,
@@ -290,8 +513,13 @@ export function mapNoteToActivity(input: {
     sourceEntityId: input.targetEntity.id,
     ...links,
     subject: clampText("HubSpot Note", 500),
-    body: normalizeText(input.engagement.properties.hs_note_body),
-    occurredAt: parseDate(input.engagement.properties.hs_timestamp),
+    body: buildImportedBody({
+      body: input.engagement.properties.hs_note_body,
+      fallback: "HubSpot note imported without a text body.",
+      attachmentIds: input.engagement.properties.hs_attachment_ids,
+    }),
+    occurredAt,
+    createdAt: parseCreatedAt(input.engagement, occurredAt),
   };
 }
 
@@ -301,6 +529,7 @@ export function mapCallToActivity(input: {
   userId: string;
 }) {
   const links = resolveEntityLinkFields(input.targetEntity);
+  const occurredAt = parseDate(input.engagement.properties.hs_timestamp);
   return {
     type: "call" as const,
     responsibleUserId: input.userId,
@@ -308,13 +537,16 @@ export function mapCallToActivity(input: {
     sourceEntityType: input.targetEntity.type,
     sourceEntityId: input.targetEntity.id,
     ...links,
-    subject: clampText(normalizeText(input.engagement.properties.hs_call_title) ?? "HubSpot Call", 500),
-    body: normalizeText(input.engagement.properties.hs_call_body),
-    outcome:
-      normalizeText(input.engagement.properties.hs_call_outcome) ??
-      normalizeText(input.engagement.properties.hs_call_status),
+    subject: clampText(plainTextOrNull(input.engagement.properties.hs_call_title) ?? "HubSpot Call", 500),
+    body: buildImportedBody({
+      body: input.engagement.properties.hs_call_body,
+      fallback: "HubSpot call imported without a transcript body.",
+      attachmentIds: input.engagement.properties.hs_attachment_ids,
+    }),
+    outcome: normalizeCallOutcome(input.engagement.properties),
     durationMinutes: parseDurationMinutes(input.engagement.properties.hs_call_duration),
-    occurredAt: parseDate(input.engagement.properties.hs_timestamp),
+    occurredAt,
+    createdAt: parseCreatedAt(input.engagement, occurredAt),
   };
 }
 
@@ -324,6 +556,9 @@ export function mapMeetingToActivity(input: {
   userId: string;
 }) {
   const links = resolveEntityLinkFields(input.targetEntity);
+  const occurredAt = parseDate(
+    input.engagement.properties.hs_meeting_start_time ?? input.engagement.properties.hs_timestamp
+  );
   return {
     type: "meeting" as const,
     responsibleUserId: input.userId,
@@ -331,13 +566,17 @@ export function mapMeetingToActivity(input: {
     sourceEntityType: input.targetEntity.type,
     sourceEntityId: input.targetEntity.id,
     ...links,
-    subject: clampText(normalizeText(input.engagement.properties.hs_meeting_title) ?? "HubSpot Meeting", 500),
-    body:
-      normalizeText(input.engagement.properties.hs_meeting_body) ??
-      normalizeText(input.engagement.properties.hs_internal_meeting_notes),
-    occurredAt: parseDate(
-      input.engagement.properties.hs_meeting_start_time ?? input.engagement.properties.hs_timestamp
-    ),
+    subject: clampText(plainTextOrNull(input.engagement.properties.hs_meeting_title) ?? "HubSpot Meeting", 500),
+    body: buildImportedBodyFromCandidates({
+      bodies: [
+        input.engagement.properties.hs_meeting_body,
+        input.engagement.properties.hs_internal_meeting_notes,
+      ],
+      fallback: "HubSpot meeting imported without agenda notes.",
+      attachmentIds: input.engagement.properties.hs_attachment_ids,
+    }),
+    occurredAt,
+    createdAt: parseCreatedAt(input.engagement, occurredAt),
   };
 }
 
@@ -352,12 +591,13 @@ export function mapEmailToRecords(input: {
       ? `<pre>${escapeHtml(input.engagement.properties.hs_email_text as string)}</pre>`
       : null);
   const bodyText =
-    normalizeText(input.engagement.properties.hs_email_text) ??
+    plainTextOrNull(input.engagement.properties.hs_email_text) ??
     (bodyHtml ? stripHtml(bodyHtml) : null);
   const participants = parseEmailHeaders(input.engagement.properties.hs_email_headers);
-  const subject = normalizeText(input.engagement.properties.hs_email_subject) ?? "HubSpot Email";
+  const subject = plainTextOrNull(input.engagement.properties.hs_email_subject) ?? "HubSpot Email";
   const activitySubject = clampText(subject, 500);
   const sentAt = parseDate(input.engagement.properties.hs_timestamp);
+  const createdAt = parseCreatedAt(input.engagement, sentAt);
   const links = resolveEntityLinkFields(input.targetEntity);
 
   return {
@@ -392,6 +632,7 @@ export function mapEmailToRecords(input: {
       subject: activitySubject,
       body: bodyText?.slice(0, 1000) ?? null,
       occurredAt: sentAt,
+      createdAt,
     } satisfies typeof activities.$inferInsert,
   };
 }

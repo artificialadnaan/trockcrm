@@ -4,6 +4,7 @@ import { describe, expect, it } from "vitest";
 const {
   findTargetEntityForHubspotEngagement,
   findDealForHubspotEngagement,
+  htmlToPlainText,
   mapNoteToActivity,
   mapCallToActivity,
   mapMeetingToActivity,
@@ -380,14 +381,26 @@ describe("deal activity backfill service", () => {
 
   it("maps activities with entity-specific foreign keys", () => {
     const note = mapNoteToActivity({
-      engagement: makeEngagement({ objectType: "note", properties: { hs_note_body: "HubSpot note body" } }),
+      engagement: makeEngagement({
+        objectType: "note",
+        createdAt: "2026-04-30T10:11:12.000Z",
+        properties: {
+          hs_note_body: "<div><p>HubSpot&nbsp;note <strong>body</strong></p></div>",
+        },
+      }),
       targetEntity: makeCompanyTarget(),
       userId: "user-1",
     });
     const call = mapCallToActivity({
       engagement: makeEngagement({
         objectType: "call",
-        properties: { hs_call_title: "Intro Call", hs_call_body: "Talked through scope", hs_call_duration: "180000", hs_call_outcome: "connected" },
+        createdAt: "2026-05-01T08:30:00.000Z",
+        properties: {
+          hs_call_title: "<div>Intro&nbsp;Call</div>",
+          hs_call_body: "<div><p>Talked through <em>scope</em></p></div>",
+          hs_call_duration: "180000",
+          hs_call_outcome: "connected",
+        },
       }),
       targetEntity: makeContactTarget(),
       userId: "user-1",
@@ -395,7 +408,12 @@ describe("deal activity backfill service", () => {
     const meeting = mapMeetingToActivity({
       engagement: makeEngagement({
         objectType: "meeting",
-        properties: { hs_meeting_title: "Site Walk", hs_meeting_body: "Met on site", hs_meeting_start_time: "2026-05-10T09:00:00.000Z" },
+        createdAt: "2026-05-02T08:00:00.000Z",
+        properties: {
+          hs_meeting_title: "<div>Site Walk</div>",
+          hs_meeting_body: "<div><p>Met on <strong>site</strong></p></div>",
+          hs_meeting_start_time: "2026-05-10T09:00:00.000Z",
+        },
       }),
       targetEntity: makeDealTarget(),
       userId: "user-1",
@@ -407,6 +425,8 @@ describe("deal activity backfill service", () => {
       companyId: "company-1",
       dealId: null,
       contactId: null,
+      body: "HubSpot note body",
+      createdAt: new Date("2026-04-30T10:11:12.000Z"),
     });
     expect(call).toMatchObject({
       sourceEntityType: "contact",
@@ -416,6 +436,9 @@ describe("deal activity backfill service", () => {
       dealId: null,
       durationMinutes: 3,
       outcome: "connected",
+      subject: "Intro Call",
+      body: "Talked through scope",
+      createdAt: new Date("2026-05-01T08:30:00.000Z"),
     });
     expect(meeting).toMatchObject({
       sourceEntityType: "deal",
@@ -423,7 +446,10 @@ describe("deal activity backfill service", () => {
       dealId: "deal-1",
       companyId: null,
       contactId: null,
+      subject: "Site Walk",
+      body: "Met on site",
       occurredAt: new Date("2026-05-10T09:00:00.000Z"),
+      createdAt: new Date("2026-05-02T08:00:00.000Z"),
     });
   });
 
@@ -432,9 +458,11 @@ describe("deal activity backfill service", () => {
       engagement: makeEngagement({
         id: "hs-email-1",
         objectType: "email",
+        createdAt: "2026-05-03T07:00:00.000Z",
         properties: {
           hs_email_subject: "Proposal Follow Up",
-          hs_email_text: "Checking in on the proposal.",
+          hs_email_text: "<div><p>Checking in on the proposal.</p></div>",
+          hs_email_html: "<div><p>Checking in on the <strong>proposal</strong>.</p></div>",
           hs_email_direction: "INCOMING_EMAIL",
           hs_attachment_ids: "12345;67890",
           hs_email_headers: JSON.stringify({
@@ -455,6 +483,8 @@ describe("deal activity backfill service", () => {
       assignedEntityId: "contact-1",
       assignmentStatus: "assigned",
       hasAttachments: true,
+      bodyHtml: "<div><p>Checking in on the <strong>proposal</strong>.</p></div>",
+      bodyPreview: "Checking in on the proposal.",
     });
     expect(result.activity).toMatchObject({
       sourceEntityType: "contact",
@@ -463,7 +493,43 @@ describe("deal activity backfill service", () => {
       dealId: null,
       companyId: "company-1",
       subject: "Proposal Follow Up",
+      body: "Checking in on the proposal.",
+      createdAt: new Date("2026-05-03T07:00:00.000Z"),
     });
+  });
+
+  it("converts common HubSpot HTML payloads to plain text", () => {
+    expect(htmlToPlainText("<div><p>Hello&nbsp;<strong>world</strong> &amp; team</p></div>")).toBe(
+      "Hello world & team"
+    );
+    expect(htmlToPlainText("<img src=\"https://example.com/x.png\" alt=\"x\">")).toBe("");
+    expect(htmlToPlainText("<br/>Hello")).toBe("Hello");
+    expect(htmlToPlainText("&lt;div&gt;Hello&lt;/div&gt;")).toBe("Hello");
+    expect(htmlToPlainText("<o:p>content</o:p>")).toBe("content");
+    expect(htmlToPlainText("<customtag>content</customtag>")).toBe("content");
+    expect(htmlToPlainText("<script>alert(1)</script>content")).toBe("alert(1) content");
+    expect(htmlToPlainText("Tom&rsquo;s &ldquo;quote&rdquo; &mdash; ok")).toBe("Tom’s “quote” — ok");
+    expect(htmlToPlainText("<div>Broken<p>tag")).toBe("Broken tag");
+    expect(htmlToPlainText("Value: &#9999999999; and &#x110000;")).toBe("Value: &#9999999999; and &#x110000;");
+    expect(htmlToPlainText("")).toBe("");
+    expect(htmlToPlainText(undefined)).toBe("");
+    expect(htmlToPlainText(null)).toBe("");
+  });
+
+  it("gives attachment-only HubSpot notes a non-blank fallback body", () => {
+    const note = mapNoteToActivity({
+      engagement: makeEngagement({
+        objectType: "note",
+        properties: {
+          hs_note_body: undefined,
+          hs_attachment_ids: "12345;67890",
+        },
+      }),
+      targetEntity: makeDealTarget(),
+      userId: "user-1",
+    });
+
+    expect(note.body).toBe("HubSpot note imported without a text body. Attachments were present in HubSpot, but no inline text was available.");
   });
 
   it("maps HubSpot EMAIL direction as outbound and clamps long activity subjects", () => {
@@ -485,6 +551,79 @@ describe("deal activity backfill service", () => {
     expect(result.email.direction).toBe("outbound");
     expect(result.email.subject).toBe(longSubject);
     expect(result.activity.subject).toHaveLength(500);
+  });
+
+  it("does not store opaque HubSpot call disposition GUIDs as outcomes", () => {
+    const result = mapCallToActivity({
+      engagement: makeEngagement({
+        objectType: "call",
+        properties: {
+          hs_call_title: "Follow Up",
+          hs_call_body: "Discussed next steps",
+          hs_call_disposition: "f240bbac-87c9-4f6e-bf70-924b57d47db7",
+          hs_call_status: "completed",
+        },
+      }),
+      targetEntity: makeDealTarget(),
+      userId: "user-1",
+    });
+
+    expect(result.outcome).toBe("completed");
+  });
+
+  it("preserves plain-text email addresses wrapped in angle brackets", () => {
+    const result = mapEmailToRecords({
+      engagement: makeEngagement({
+        id: "hs-email-3",
+        objectType: "email",
+        properties: {
+          hs_email_subject: "Forwarded Thread",
+          hs_email_text: "From: Jane <jane@example.com>\nTo: Rep <rep@trock.com>",
+          hs_email_direction: "INCOMING_EMAIL",
+        },
+      }),
+      targetEntity: makeDealTarget(),
+      userId: "user-1",
+    });
+
+    expect(result.activity.body).toBe("From: Jane <jane@example.com>\nTo: Rep <rep@trock.com>");
+    expect(result.email.bodyHtml).toContain("&lt;jane@example.com&gt;");
+  });
+
+  it("strips known tag tokens when plain text looks like HTML", () => {
+    const result = mapEmailToRecords({
+      engagement: makeEngagement({
+        id: "hs-email-4",
+        objectType: "email",
+        properties: {
+          hs_email_subject: "Checklist",
+          hs_email_text: "Use the <div> element",
+          hs_email_direction: "INCOMING_EMAIL",
+        },
+      }),
+      targetEntity: makeDealTarget(),
+      userId: "user-1",
+    });
+
+    expect(result.activity.body).toBe("Use the element");
+  });
+
+  it("falls back to internal meeting notes when the public meeting body sanitizes empty", () => {
+    const result = mapMeetingToActivity({
+      engagement: makeEngagement({
+        objectType: "meeting",
+        properties: {
+          hs_meeting_title: "Internal Notes Check",
+          hs_meeting_body: "<div><img src=\"https://example.com/empty.png\" /></div>",
+          hs_internal_meeting_notes: "Crew discussed staging and access.",
+          hs_meeting_start_time: "2026-05-10T09:00:00.000Z",
+        },
+      }),
+      targetEntity: makeDealTarget(),
+      userId: "user-1",
+    });
+
+    expect(result.body).toBe("Crew discussed staging and access.");
   });
 
   it("writes a note activity and company-targeted ledger atomically", async () => {

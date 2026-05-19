@@ -119,4 +119,52 @@ describe("HubSpot migration client", () => {
     ]);
     expect(fetchMock).toHaveBeenCalledTimes(2);
   });
+
+  it("requests the full property set for note backfills", async () => {
+    const fetchMock = vi.fn().mockResolvedValueOnce(jsonResponse({ results: [], paging: undefined }));
+    vi.stubGlobal("fetch", fetchMock);
+    const { fetchHubSpotActivitiesByType } = await import("../../../src/modules/migration/hubspot-client.js");
+
+    await expect(fetchHubSpotActivitiesByType("note")).resolves.toEqual([]);
+
+    const requestUrl = String(fetchMock.mock.calls[0]?.[0]);
+    expect(requestUrl).toContain("/crm/v3/objects/notes?");
+    expect(requestUrl).toContain("associations=deals%2Ccompanies%2Ccontacts");
+    expect(requestUrl).toContain("properties=");
+    expect(requestUrl).toContain("hs_note_body");
+    expect(requestUrl).toContain("hs_attachment_ids");
+    expect(requestUrl).toContain("hs_createdate");
+  });
+
+  it("requests the full property set for call, meeting, and email backfills", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(jsonResponse({ results: [], paging: undefined }));
+    vi.stubGlobal("fetch", fetchMock);
+    const { fetchHubSpotActivitiesByType } = await import("../../../src/modules/migration/hubspot-client.js");
+
+    await expect(fetchHubSpotActivitiesByType("call")).resolves.toEqual([]);
+    await expect(fetchHubSpotActivitiesByType("meeting")).resolves.toEqual([]);
+    await expect(fetchHubSpotActivitiesByType("email")).resolves.toEqual([]);
+
+    const urls = fetchMock.mock.calls.map((call) => String(call[0]));
+    const callUrl = urls.find((url) => url.includes("/crm/v3/objects/calls?")) ?? "";
+    const meetingUrl = urls.find((url) => url.includes("/crm/v3/objects/meetings?")) ?? "";
+    const emailUrl = urls.find((url) => url.includes("/crm/v3/objects/emails?")) ?? "";
+
+    expect(callUrl).toContain("hs_call_body");
+    expect(callUrl).toContain("hs_call_title");
+    expect(callUrl).toContain("hs_call_direction");
+    expect(callUrl).toContain("hs_call_disposition");
+    expect(callUrl).toContain("hs_attachment_ids");
+    expect(meetingUrl).toContain("hs_meeting_body");
+    expect(meetingUrl).toContain("hs_meeting_title");
+    expect(meetingUrl).toContain("hs_meeting_start_time");
+    expect(meetingUrl).toContain("hs_meeting_end_time");
+    expect(meetingUrl).toContain("hs_attachment_ids");
+    expect(emailUrl).toContain("hs_email_subject");
+    expect(emailUrl).toContain("hs_email_text");
+    expect(emailUrl).toContain("hs_email_html");
+    expect(emailUrl).toContain("hs_email_headers");
+    expect(emailUrl).toContain("hs_attachment_ids");
+    expect(emailUrl).toContain("hs_createdate");
+  });
 });
