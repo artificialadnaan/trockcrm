@@ -859,14 +859,6 @@ router.get("/pipeline", async (req, res, next) => {
         ),
       })),
       terminalStages: result.terminalStages,
-      terminalStages: result.terminalStages.map((column) => ({
-        ...column,
-        deals: redactDealList(column.deals, { includeHubspotId }).map((deal) =>
-          stripPrivateDealFieldsForViewer(deal as Record<string, unknown>, {
-            isOwner: (deal as { assignedRepId?: string | null }).assignedRepId === req.user!.id,
-          })
-        ),
-      })),
     });
   } catch (err) {
     next(err);

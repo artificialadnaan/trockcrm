@@ -827,21 +827,21 @@ describe("DealListPage", () => {
   });
 
   it("renders clickable KPI cards on the deals page", () => {
-    const html = renderPage("/deals?scope=team&period=last_month", "director");
+    const html = renderPage("/deals?scope=all&period=last_month", "director");
 
-    expect(html).toContain('href="/deals?filter=active_pipeline&amp;scope=team"');
-    expect(html).toContain('href="/deals?filter=won&amp;scope=team&amp;period=last_month"');
-    expect(html).toContain('href="/deals?filter=at_risk&amp;scope=team"');
+    expect(html).toContain('href="/deals?filter=active_pipeline&amp;scope=all"');
+    expect(html).toContain('href="/deals?filter=won&amp;scope=all&amp;period=last_month"');
+    expect(html).toContain('href="/deals?filter=at_risk&amp;scope=all"');
     expect(html).toContain("View active pipeline deals");
     expect(html).toContain("View won deals");
     expect(html).toContain("View at-risk deals");
   });
 
   it("preserves won terminal query params on the Won KPI drilldown link", () => {
-    const html = renderPage("/deals?scope=team&period=last_month&won_preset=30&won_since=2026-04-01&won_until=2026-04-30", "director");
+    const html = renderPage("/deals?scope=all&period=last_month&won_preset=30&won_since=2026-04-01&won_until=2026-04-30", "director");
 
     expect(html).toContain(
-      'href="/deals?filter=won&amp;scope=team&amp;period=last_month&amp;won_preset=30&amp;won_since=2026-04-01&amp;won_until=2026-04-30"'
+      'href="/deals?filter=won&amp;scope=all&amp;period=last_month&amp;won_preset=30&amp;won_since=2026-04-01&amp;won_until=2026-04-30"'
     );
   });
 
@@ -869,9 +869,9 @@ describe("DealListPage", () => {
       refetch: vi.fn(),
     });
 
-    const html = renderPage("/deals?scope=team&period=last_month", "director");
+    const html = renderPage("/deals?scope=all&period=last_month", "director");
 
-    expect(html).toContain('href="/deals?filter=won&amp;scope=team&amp;period=last_month"');
+    expect(html).toContain('href="/deals?filter=won&amp;scope=all&amp;period=last_month"');
     expect(html).toContain("$125.0K");
     expect(html).not.toContain("$410.0K");
   });
@@ -900,7 +900,7 @@ describe("DealListPage", () => {
       refetch: vi.fn(),
     });
 
-    const html = renderPage("/deals?scope=team&period=last_month", "director");
+    const html = renderPage("/deals?scope=all&period=last_month", "director");
 
     expect(html).toContain("$125.0K");
     expect(html).not.toContain("$410.0K");
@@ -930,13 +930,13 @@ describe("DealListPage", () => {
       refetch: vi.fn(),
     });
 
-    const html = renderPage("/deals?scope=team&filter=won&period=last_month&won_preset=30", "director");
+    const html = renderPage("/deals?scope=all&filter=won&period=last_month&won_preset=30", "director");
 
     expect(html).toContain("$125.0K");
     expect(html).not.toContain("$410.0K");
     expect(html).not.toContain("$500.0K");
     expect(mocks.useDealBoardMock).toHaveBeenLastCalledWith(
-      "team",
+      "all",
       true,
       {
         won: { preset: "30" },
@@ -956,9 +956,9 @@ describe("DealListPage", () => {
   });
 
   it("uses the Won terminal filter caption ahead of the page period and falls back correctly", () => {
-    const htmlWithTerminalFilter = renderPage("/deals?scope=team&period=last_month&won_preset=30", "director");
-    const htmlWithPeriodOnly = renderPage("/deals?scope=team&period=last_month", "director");
-    const htmlAllTime = renderPage("/deals?scope=team", "director");
+    const htmlWithTerminalFilter = renderPage("/deals?scope=all&period=last_month&won_preset=30", "director");
+    const htmlWithPeriodOnly = renderPage("/deals?scope=all&period=last_month", "director");
+    const htmlAllTime = renderPage("/deals?scope=all", "director");
 
     expect(htmlWithTerminalFilter).toContain("Last 30 days");
     expect(htmlWithPeriodOnly).toContain("Last month");
