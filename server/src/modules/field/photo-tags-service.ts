@@ -1,7 +1,7 @@
 import { and, desc, eq, ilike, sql } from "drizzle-orm";
 import type { NodePgDatabase } from "drizzle-orm/node-postgres";
-import { files, photoTags } from "../../../../shared/src/schema/index.js";
-import type * as schema from "../../../../shared/src/schema/index.js";
+import { files, photoTags } from "@trock-crm/shared/schema";
+import type * as schema from "@trock-crm/shared/schema";
 import type { UserRole } from "@trock-crm/shared/types";
 import { AppError } from "../../middleware/error-handler.js";
 import { updateFile } from "../files/service.js";
