@@ -293,11 +293,9 @@ function decodeHtmlEntities(input: string): string {
 
 function stripDecodedHtmlTags(input: string): string {
   return input
-    .replace(/<\s*br\s*\/?>/gi, " ")
+    .replace(/<\s*br\s*\/?\s*>/gi, " ")
     .replace(/<\/\s*(p|div|li|tr|h[1-6])\s*>/gi, " ")
-    .replace(/<\/?([a-z][\w:-]*)(?:\s[^>]*)?\s*\/?>/gi, (match, tagName: string) =>
-      KNOWN_HTML_TAGS.has(tagName.toLowerCase()) ? " " : match
-    );
+    .replace(/<[^>]+>/g, " ");
 }
 
 export function htmlToPlainText(input: string | null | undefined): string {
@@ -312,11 +310,7 @@ export function htmlToPlainText(input: string | null | undefined): string {
 }
 
 function containsKnownHtmlTag(input: string): boolean {
-  const matches = input.matchAll(/<\/?([a-z][\w:-]*)(?:\s[^>]*)?\s*\/?>/gi);
-  for (const match of matches) {
-    if (KNOWN_HTML_TAGS.has(match[1].toLowerCase())) return true;
-  }
-  return false;
+  return /<\/?[a-z][\w:-]*(?:\s[^>]*)?\s*\/?>/i.test(input);
 }
 
 function plainTextOrNull(input: string | null | undefined): string | null {

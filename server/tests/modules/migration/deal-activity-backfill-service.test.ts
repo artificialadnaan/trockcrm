@@ -505,7 +505,9 @@ describe("deal activity backfill service", () => {
     expect(htmlToPlainText("<img src=\"https://example.com/x.png\" alt=\"x\">")).toBe("");
     expect(htmlToPlainText("<br/>Hello")).toBe("Hello");
     expect(htmlToPlainText("&lt;div&gt;Hello&lt;/div&gt;")).toBe("Hello");
-    expect(htmlToPlainText("<p>Discuss &lt;materials&gt; with PM</p>")).toBe("Discuss <materials> with PM");
+    expect(htmlToPlainText("<o:p>content</o:p>")).toBe("content");
+    expect(htmlToPlainText("<customtag>content</customtag>")).toBe("content");
+    expect(htmlToPlainText("<script>alert(1)</script>content")).toBe("alert(1) content");
     expect(htmlToPlainText("Tom&rsquo;s &ldquo;quote&rdquo; &mdash; ok")).toBe("Tom’s “quote” — ok");
     expect(htmlToPlainText("<div>Broken<p>tag")).toBe("Broken tag");
     expect(htmlToPlainText("Value: &#9999999999; and &#x110000;")).toBe("Value: &#9999999999; and &#x110000;");
@@ -588,14 +590,14 @@ describe("deal activity backfill service", () => {
     expect(result.email.bodyHtml).toContain("&lt;jane@example.com&gt;");
   });
 
-  it("preserves plain placeholder text that uses angle brackets", () => {
+  it("strips known tag tokens when plain text looks like HTML", () => {
     const result = mapEmailToRecords({
       engagement: makeEngagement({
         id: "hs-email-4",
         objectType: "email",
         properties: {
           hs_email_subject: "Checklist",
-          hs_email_text: "Discuss <materials> with PM",
+          hs_email_text: "Use the <div> element",
           hs_email_direction: "INCOMING_EMAIL",
         },
       }),
@@ -603,7 +605,7 @@ describe("deal activity backfill service", () => {
       userId: "user-1",
     });
 
-    expect(result.activity.body).toBe("Discuss <materials> with PM");
+    expect(result.activity.body).toBe("Use the element");
   });
 
   it("falls back to internal meeting notes when the public meeting body sanitizes empty", () => {
