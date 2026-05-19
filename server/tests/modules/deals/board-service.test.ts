@@ -279,4 +279,50 @@ describe("getDealsForPipeline", () => {
     const cardsChain = findStageCardsChain(tenantChains, "stage-estimating");
     expect(cardsChain?.limit).toHaveBeenCalledWith(1000);
   });
+
+  it("falls back to owner-creator-activity Mine scope when subscription tables are unavailable", async () => {
+    dbState.responses = [
+      [
+        {
+          id: "stage-estimating",
+          slug: "estimating",
+          name: "Estimating",
+          displayOrder: 1,
+          isTerminal: false,
+          isActivePipeline: true,
+        },
+      ],
+    ];
+
+    const tenantResponses = [
+      [{ count: 0, totalValue: 0 }],
+      [],
+    ];
+    const tenantChains: any[] = [];
+    const tenantDb = {
+      execute: vi.fn(async () => ({ rows: [{ relation_name: null }] })),
+      select: vi.fn(() => {
+        const chain = createChainableMock();
+        tenantChains.push(chain);
+        chain.then.mockImplementation((resolve: (value: any[]) => unknown) => resolve(tenantResponses.shift() ?? []));
+        return chain;
+      }),
+    } as any;
+
+    const { getDealsForPipeline } = await import("../../../src/modules/deals/service.js");
+    const result = await getDealsForPipeline(tenantDb, "admin", "admin-1", {
+      activeOfficeId: null,
+      scope: "mine",
+      includeDd: true,
+    });
+
+    const cardsChain = findStageCardsChain(tenantChains, "stage-estimating");
+    const cardsWhere = extractSqlText(cardsChain?.where.mock.calls[0][0]).toLowerCase();
+
+    expect(result.pipelineColumns[0]?.deals).toEqual([]);
+    expect(cardsWhere).toContain("assigned_rep_id");
+    expect(cardsWhere).toContain("created_by_user_id");
+    expect(cardsWhere).toContain("performed_by_user_id");
+    expect(cardsWhere).not.toContain("deal_subscriptions");
+  });
 });

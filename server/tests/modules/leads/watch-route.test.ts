@@ -19,6 +19,13 @@ const accessMocks = vi.hoisted(() => ({
   normalizeCollaborativeScope: vi.fn((_role: string, scope: "mine" | "team" | "all" | undefined) => scope ?? "all"),
 }));
 
+const mineVisibilityMocks = vi.hoisted(() => ({
+  resolveMineVisibilityFeatures: vi.fn(async () => ({
+    dealSubscriptions: true,
+    leadSubscriptions: true,
+  })),
+}));
+
 vi.mock("../../../src/modules/leads/service.js", () => ({
   getLeadById: serviceMocks.getLeadById,
   listLeads: vi.fn(),
@@ -56,6 +63,14 @@ vi.mock("../../../src/lib/collaboration-access.js", () => ({
   getCollaborativeReadRole: accessMocks.getCollaborativeReadRole,
   normalizeCollaborativeScope: accessMocks.normalizeCollaborativeScope,
 }));
+
+vi.mock("../../../src/modules/shared/mine-visibility.js", async () => {
+  const actual = await vi.importActual("../../../src/modules/shared/mine-visibility.js");
+  return {
+    ...(actual as Record<string, unknown>),
+    resolveMineVisibilityFeatures: mineVisibilityMocks.resolveMineVisibilityFeatures,
+  };
+});
 
 const { leadRoutes } = await import("../../../src/modules/leads/routes.js");
 
@@ -138,6 +153,10 @@ async function invokeRoute(
 describe("lead watch routes", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    mineVisibilityMocks.resolveMineVisibilityFeatures.mockResolvedValue({
+      dealSubscriptions: true,
+      leadSubscriptions: true,
+    });
     accessMocks.assertLeadCollaboratorAccess.mockResolvedValue({
       id: "lead-1",
       assignedRepId: "rep-1",
@@ -178,5 +197,30 @@ describe("lead watch routes", () => {
     expect(req.tenantDb.update).toHaveBeenCalledTimes(1);
     expect(res.statusCode).toBe(200);
     expect(res.body).toEqual({ watching: false });
+  });
+
+  it("returns not-watching on detail reads when subscriptions are unavailable", async () => {
+    mineVisibilityMocks.resolveMineVisibilityFeatures.mockResolvedValueOnce({
+      dealSubscriptions: true,
+      leadSubscriptions: false,
+    });
+
+    const { res } = await invokeRoute("get", "/:id");
+
+    expect(res.body.lead).toMatchObject({
+      id: "lead-1",
+      isWatching: false,
+    });
+  });
+
+  it("fails watch mutations gracefully when subscriptions are unavailable", async () => {
+    mineVisibilityMocks.resolveMineVisibilityFeatures.mockResolvedValueOnce({
+      dealSubscriptions: true,
+      leadSubscriptions: false,
+    });
+
+    await expect(invokeRoute("post", "/:id/watch")).rejects.toMatchObject({
+      statusCode: 503,
+    });
   });
 });

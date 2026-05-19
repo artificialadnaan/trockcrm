@@ -42,10 +42,16 @@ import {
   getCollaborativeReadRole,
   normalizeCollaborativeScope,
 } from "../../lib/collaboration-access.js";
+import { resolveMineVisibilityFeatures } from "../shared/mine-visibility.js";
 
 const router = Router();
 
 async function isLeadWatchedByUser(tenantDb: any, leadId: string, userId: string) {
+  const features = await resolveMineVisibilityFeatures(tenantDb);
+  if (!features.leadSubscriptions) {
+    return false;
+  }
+
   const [row] = await tenantDb
     .select({ id: leadSubscriptions.id })
     .from(leadSubscriptions)
@@ -264,6 +270,10 @@ router.get("/:id", async (req, res, next) => {
 router.post("/:id/watch", async (req, res, next) => {
   try {
     await assertLeadCollaboratorAccess(req.tenantDb!, req.params.id, req.user!);
+    const features = await resolveMineVisibilityFeatures(req.tenantDb!);
+    if (!features.leadSubscriptions) {
+      throw new AppError(503, "Lead watching is temporarily unavailable for this office.");
+    }
     await req.tenantDb!
       .insert(leadSubscriptions)
       .values({
@@ -288,6 +298,10 @@ router.post("/:id/watch", async (req, res, next) => {
 router.delete("/:id/watch", async (req, res, next) => {
   try {
     await assertLeadCollaboratorAccess(req.tenantDb!, req.params.id, req.user!);
+    const features = await resolveMineVisibilityFeatures(req.tenantDb!);
+    if (!features.leadSubscriptions) {
+      throw new AppError(503, "Lead watching is temporarily unavailable for this office.");
+    }
     await req.tenantDb!
       .update(leadSubscriptions)
       .set({ deletedAt: new Date() })

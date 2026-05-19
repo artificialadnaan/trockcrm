@@ -45,7 +45,11 @@ import {
 import { isExistingCustomer } from "./verification-service.js";
 import { resolveLeadSourceForWrite } from "./source-control.js";
 import { resolveActiveOfficeUserIds, resolveTeamRepIds } from "../shared/team-scope.js";
-import { buildAliasedLeadMineVisibilityCondition, buildLeadMineVisibilityCondition } from "../shared/mine-visibility.js";
+import {
+  buildAliasedLeadMineVisibilityCondition,
+  buildLeadMineVisibilityCondition,
+  resolveMineVisibilityFeatures,
+} from "../shared/mine-visibility.js";
 import {
   LEAD_BUDGET_STATUSES,
   LEAD_POC_ROLES,
@@ -930,9 +934,14 @@ async function buildLeadWorkspaceScope(tenantDb: TenantDb, input: LeadBoardInput
     sql`l.is_active = true`,
     sql`u.office_id = ${input.activeOfficeId}`,
   ];
+  const mineVisibility = input.scope === "mine" ? await resolveMineVisibilityFeatures(tenantDb) : null;
 
   if (input.scope === "mine") {
-    filters.push(buildAliasedLeadMineVisibilityCondition("l", input.userId));
+    filters.push(
+      buildAliasedLeadMineVisibilityCondition("l", input.userId, {
+        includeSubscriptions: mineVisibility?.leadSubscriptions,
+      })
+    );
   } else if (input.scope === "team") {
     const teamRepIds = await resolveTeamRepIds(tenantDb, input.userId, input.activeOfficeId);
     filters.push(teamRepIds.length > 0 ? sql`l.assigned_rep_id IN (${sql.join(teamRepIds.map((id) => sql`${id}`), sql`, `)})` : sql`false`);
@@ -1206,8 +1215,14 @@ export function createLeadService(
       );
     }
 
+    const mineVisibility = scope === "mine" ? await resolveMineVisibilityFeatures(tenantDb) : null;
+
     if (scope === "mine") {
-      conditions.push(buildLeadMineVisibilityCondition(userId));
+      conditions.push(
+        buildLeadMineVisibilityCondition(userId, {
+          includeSubscriptions: mineVisibility?.leadSubscriptions,
+        })
+      );
     } else if (scope === "team") {
       const teamUserIds = await resolveTeamRepIds(tenantDb, userId, filters.activeOfficeId ?? null);
       conditions.push(teamUserIds.length > 0 ? inArray(leads.assignedRepId, teamUserIds) : sql`false`);

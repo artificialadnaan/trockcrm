@@ -14,6 +14,13 @@ const accessMocks = vi.hoisted(() => ({
   assertDealOwnerAccess: vi.fn(),
 }));
 
+const mineVisibilityMocks = vi.hoisted(() => ({
+  resolveMineVisibilityFeatures: vi.fn(async () => ({
+    dealSubscriptions: true,
+    leadSubscriptions: true,
+  })),
+}));
+
 vi.mock("../../../src/events/bus.js", () => ({
   eventBus: {
     emitLocal: vi.fn(),
@@ -37,6 +44,14 @@ vi.mock("../../../src/lib/collaboration-access.js", () => ({
   normalizeCollaborativeScope: accessMocks.normalizeCollaborativeScope,
   assertDealOwnerAccess: accessMocks.assertDealOwnerAccess,
 }));
+
+vi.mock("../../../src/modules/shared/mine-visibility.js", async () => {
+  const actual = await vi.importActual("../../../src/modules/shared/mine-visibility.js");
+  return {
+    ...(actual as Record<string, unknown>),
+    resolveMineVisibilityFeatures: mineVisibilityMocks.resolveMineVisibilityFeatures,
+  };
+});
 
 const { dealRoutes } = await import("../../../src/modules/deals/routes.js");
 
@@ -119,6 +134,10 @@ async function invokeRoute(
 describe("deal watch routes", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    mineVisibilityMocks.resolveMineVisibilityFeatures.mockResolvedValue({
+      dealSubscriptions: true,
+      leadSubscriptions: true,
+    });
     accessMocks.assertDealCollaboratorAccess.mockResolvedValue({
       id: "deal-1",
       assignedRepId: "rep-1",
@@ -157,5 +176,30 @@ describe("deal watch routes", () => {
     expect(req.tenantDb.update).toHaveBeenCalledTimes(1);
     expect(res.statusCode).toBe(200);
     expect(res.body).toEqual({ watching: false });
+  });
+
+  it("returns not-watching on detail reads when subscriptions are unavailable", async () => {
+    mineVisibilityMocks.resolveMineVisibilityFeatures.mockResolvedValueOnce({
+      dealSubscriptions: false,
+      leadSubscriptions: true,
+    });
+
+    const { res } = await invokeRoute("get", "/:id");
+
+    expect(res.body.deal).toMatchObject({
+      id: "deal-1",
+      isWatching: false,
+    });
+  });
+
+  it("fails watch mutations gracefully when subscriptions are unavailable", async () => {
+    mineVisibilityMocks.resolveMineVisibilityFeatures.mockResolvedValueOnce({
+      dealSubscriptions: false,
+      leadSubscriptions: true,
+    });
+
+    await expect(invokeRoute("post", "/:id/watch")).rejects.toMatchObject({
+      statusCode: 503,
+    });
   });
 });
