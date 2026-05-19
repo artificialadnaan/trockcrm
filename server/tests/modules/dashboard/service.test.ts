@@ -629,6 +629,128 @@ describe("Dashboard Service", () => {
       expect(snapshotQuery).not.toContain("where rps.period_kind = mtd");
     });
 
+    it("builds the closed KPI from an uncapped won aggregate instead of the recent-closes feed", async () => {
+      const { getDirectorDashboard } = await import("../../../src/modules/dashboard/service.js");
+      const tenantDb = createMockTenantDb([
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+      ]);
+
+      await getDirectorDashboard(tenantDb, {
+        from: "2026-01-01",
+        to: "2026-03-31",
+        officeId: "office-1",
+        periodKind: "qtd",
+      });
+
+      const aggregateWonQuery = tenantDb.execute.mock.calls
+        .map(([query]: [unknown]) => extractSqlText(query).toLowerCase())
+        .find((text: string) => text.includes("won_count") && text.includes("won_value"));
+      const recentClosesQuery = tenantDb.execute.mock.calls
+        .map(([query]: [unknown]) => extractSqlText(query).toLowerCase())
+        .find((text: string) => text.includes("select") && text.includes("closed_at desc nulls last"));
+
+      expect(aggregateWonQuery).toBeTruthy();
+      expect(aggregateWonQuery).not.toContain("limit 12");
+      expect(recentClosesQuery).toContain("limit 12");
+    });
+
+    it("keeps at-risk scope summary aligned to the stale-deals drilldown population", async () => {
+      const { getDirectorDashboard } = await import("../../../src/modules/dashboard/service.js");
+      const tenantDb = {
+        execute: vi.fn().mockImplementation((query: unknown) => {
+          const text = extractSqlText(query).toLowerCase();
+
+          if (text.includes("mirrored_stage_status")) {
+            return Promise.resolve({
+              rows: [{
+                deal_id: "deal-bottleneck",
+                rep_id: "rep-1",
+                rep_name: "Avery Rep",
+                deal_name: "Blocked Deal",
+                stage_name: "Contract",
+                mirrored_stage_slug: "contract",
+                mirrored_stage_status: "blocked",
+                workflow_route: "service",
+                region_classification: "Dallas, TX",
+                deal_value: "1000",
+                days_in_stage: "22",
+                stale_threshold_days: "14",
+              }],
+            });
+          }
+
+          if (text.includes("days_in_stage") && text.includes("stale_threshold_days")) {
+            return Promise.resolve({
+              rows: [
+                {
+                  deal_id: "deal-stale-1",
+                  deal_number: "DFW-1",
+                  deal_name: "Stale One",
+                  stage_id: "stage-1",
+                  stage_name: "Contract",
+                  assigned_rep_id: "rep-1",
+                  rep_name: "Avery Rep",
+                  stage_entered_at: "2026-01-15",
+                  days_in_stage: "20",
+                  stale_threshold_days: "14",
+                  deal_value: "2500",
+                  workflow_route: "service",
+                  bid_board_stage_slug: "contract",
+                  bid_board_stage_status: "blocked",
+                  region_classification: "Dallas, TX",
+                },
+                {
+                  deal_id: "deal-stale-2",
+                  deal_number: "DFW-2",
+                  deal_name: "Stale Two",
+                  stage_id: "stage-2",
+                  stage_name: "Production",
+                  assigned_rep_id: "rep-2",
+                  rep_name: "Blake Rep",
+                  stage_entered_at: "2026-01-10",
+                  days_in_stage: "27",
+                  stale_threshold_days: "10",
+                  deal_value: "4000",
+                  workflow_route: "normal",
+                  bid_board_stage_slug: "production",
+                  bid_board_stage_status: "at_risk",
+                  region_classification: "Fort Worth, TX",
+                },
+              ],
+            });
+          }
+
+          if (text.includes("won_count") && text.includes("won_value")) {
+            return Promise.resolve({ rows: [{ won_count: "0", won_value: "0" }] });
+          }
+
+          if (text.includes("dd_value") && text.includes("pipeline_value")) {
+            return Promise.resolve({
+              rows: [{ dd_value: "0", dd_count: "0", pipeline_value: "0", pipeline_count: "0", total_value: "0", total_count: "0" }],
+            });
+          }
+
+          return Promise.resolve({ rows: [] });
+        }),
+      } as any;
+
+      const result = await getDirectorDashboard(tenantDb, {
+        from: "2026-01-01",
+        to: "2026-03-31",
+        officeId: "office-1",
+        periodKind: "qtd",
+      });
+
+      expect(result.scopeSummary.atRisk).toEqual({ count: 2, totalValue: 6500 });
+      expect(result.atRiskDeals).toHaveLength(1);
+    });
+
     it("includes rep attribution in downstream at-risk deals", async () => {
       const { getDirectorDashboard } = await import("../../../src/modules/dashboard/service.js");
       const tenantDb = {

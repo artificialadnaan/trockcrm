@@ -80,24 +80,24 @@ function normalize(html: string) {
   return html.replace(/\s+/g, " ").trim();
 }
 
-function renderPageHtml() {
+function renderPageHtml(initialEntry = "/?scope=all") {
   return normalize(
     renderToStaticMarkup(
-      <MemoryRouter initialEntries={["/?scope=all"]}>
+      <MemoryRouter initialEntries={[initialEntry]}>
         <DirectorDashboardPage />
       </MemoryRouter>
     )
   );
 }
 
-async function renderPageDom() {
+async function renderPageDom(initialEntry = "/?scope=all") {
   const container = document.createElement("div");
   document.body.appendChild(container);
   let root: Root;
   await act(async () => {
     root = createRoot(container);
     root.render(
-      <MemoryRouter initialEntries={["/?scope=all"]}>
+      <MemoryRouter initialEntries={[initialEntry]}>
         <DirectorDashboardPage />
       </MemoryRouter>
     );
@@ -518,6 +518,18 @@ describe("DirectorDashboardPage", () => {
     expect(html).toContain("1 this quarter");
     expect(html).toContain('aria-label="View recent closed deals"');
     expect(html).toContain('href="/deals?filter=won&amp;period=qtd&amp;scope=all"');
+  });
+
+  it("shows the Team empty state without collapsing request scope", () => {
+    const html = renderPageHtml("/?scope=team");
+
+    expect(mocks.useDirectorDashboardMock).toHaveBeenCalledWith(
+      { from: "2026-04-01", to: "2026-05-08" },
+      "qtd",
+      "team"
+    );
+    expect(html).toContain("Team view is not yet configured.");
+    expect(html).toContain("Contact your admin to set up team groupings.");
   });
 
   it("preserves the selected dashboard period in drill-down links", async () => {

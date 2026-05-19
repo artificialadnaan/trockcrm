@@ -1934,6 +1934,31 @@ async function getRecentCloses(
   }));
 }
 
+async function getWonCloseSummary(
+  tenantDb: TenantDb,
+  options: { from: string; to: string; repId?: string; viewerUserId?: string }
+): Promise<{ count: number; totalValue: number }> {
+  const repFilter = dealScopeFilterSql("d", options);
+  const result = await tenantDb.execute(sql`
+    SELECT
+      COUNT(*)::int AS won_count,
+      COALESCE(SUM(COALESCE(d.awarded_amount, d.bid_estimate, d.dd_estimate, 0)), 0)::numeric AS won_value
+    FROM ${deals} d
+    JOIN ${pipelineStageConfig} psc ON psc.id = d.stage_id
+    WHERE d.is_active = true
+      AND psc.slug IN (${sql.join([...WON_STAGE_SLUGS, ...LEGACY_WON_STAGE_SLUGS].map((slug) => sql`${slug}`), sql`, `)})
+      AND COALESCE(d.actual_close_date, d.contract_signed_date, d.contract_signed_at::date, d.updated_at::date) >= ${options.from}::date
+      AND COALESCE(d.actual_close_date, d.contract_signed_date, d.contract_signed_at::date, d.updated_at::date) <= ${options.to}::date
+      ${repFilter}
+  `);
+
+  const [row] = rowsFromExecute<any>(result);
+  return {
+    count: Number(row?.won_count ?? 0),
+    totalValue: Number(row?.won_value ?? 0),
+  };
+}
+
 async function getScopedPipelineSummary(
   tenantDb: TenantDb,
   options: { includeDd?: boolean; repId?: string; viewerUserId?: string } = {}
@@ -2045,11 +2070,10 @@ async function buildDirectorScopeSummary(
   tenantDb: TenantDb,
   options: { from: string; to: string; repId?: string; viewerUserId?: string }
 ) {
-  const [pipelineRows, staleDeals, atRiskDeals, closes] = await Promise.all([
+  const [pipelineRows, staleDeals, won] = await Promise.all([
     getScopedPipelineSummary(tenantDb, { includeDd: false, repId: options.repId, viewerUserId: options.viewerUserId }),
     getDashboardStaleDeals(tenantDb, options.repId || options.viewerUserId ? { repId: options.repId, viewerUserId: options.viewerUserId } : {}),
-    getDownstreamBottlenecks(tenantDb, options.repId || options.viewerUserId ? { repId: options.repId, viewerUserId: options.viewerUserId } : {}),
-    getRecentCloses(tenantDb, options),
+    getWonCloseSummary(tenantDb, options),
   ]);
 
   const activePipeline = pipelineRows.reduce(
@@ -2059,16 +2083,7 @@ async function buildDirectorScopeSummary(
     }),
     { count: 0, totalValue: 0 }
   );
-  const won = closes
-    .filter((close) => close.outcome === "won")
-    .reduce(
-      (acc, close) => ({
-        count: acc.count + 1,
-        totalValue: acc.totalValue + close.dealValue,
-      }),
-      { count: 0, totalValue: 0 }
-    );
-  const atRisk = atRiskDeals.reduce(
+  const atRisk = staleDeals.reduce(
     (acc, deal) => ({
       count: acc.count + 1,
       totalValue: acc.totalValue + deal.dealValue,

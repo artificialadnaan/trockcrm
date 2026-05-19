@@ -357,11 +357,7 @@ export function DirectorDashboardPage() {
     next.set("scope", nextScope);
     setSearchParams(next);
   };
-  const { data, loading, error, refetch, lastFetchedAt } = useDirectorDashboard(
-    dateRange,
-    repPerformancePeriod,
-    scope === "all" ? "all" : "mine"
-  );
+  const { data, loading, error, refetch, lastFetchedAt } = useDirectorDashboard(dateRange, repPerformancePeriod, scope);
   const {
     data: perfData,
     loading: perfLoading,
@@ -379,6 +375,30 @@ export function DirectorDashboardPage() {
   const activityDestination = buildReportDrilldownPath("/reports/performance/rep-activity", preset, dateRange);
   const staleDealsDestination = buildDealsDrilldownPath("stale", preset, scope);
   const atRiskDealsDestination = buildDealsDrilldownPath("at_risk", preset, scope);
+
+  if (scope === "team") {
+    return (
+      <div className="min-h-screen space-y-6 bg-[#F5F4F2] p-4 sm:p-6">
+        <header className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
+          <div>
+            <h1 className="text-3xl font-black uppercase tracking-tight text-gray-950 sm:text-4xl">
+              Director Dashboard
+            </h1>
+            <p className="mt-1 text-[11px] font-bold uppercase tracking-widest text-gray-500">
+              Team view is not yet configured
+            </p>
+          </div>
+          <ScopeToggle options={SCOPE_OPTIONS} value={scope} onChange={updateScope} ariaLabel="Dashboard scope" />
+        </header>
+
+        <section className="rounded-3xl border border-dashed border-slate-300 bg-white px-8 py-14 text-center shadow-sm">
+          <p className="text-[11px] font-black uppercase tracking-[0.22em] text-slate-500">Team Scope</p>
+          <h2 className="mt-3 text-2xl font-black tracking-tight text-slate-950">Team view is not yet configured.</h2>
+          <p className="mt-2 text-sm font-medium text-slate-500">Contact your admin to set up team groupings.</p>
+        </section>
+      </div>
+    );
+  }
 
   if (loading) {
     return (
@@ -404,30 +424,6 @@ export function DirectorDashboardPage() {
   }
 
   if (!data) return null;
-
-  if (scope === "team") {
-    return (
-      <div className="min-h-screen space-y-6 bg-[#F5F4F2] p-4 sm:p-6">
-        <header className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
-          <div>
-            <h1 className="text-3xl font-black uppercase tracking-tight text-gray-950 sm:text-4xl">
-              Director Dashboard
-            </h1>
-            <p className="mt-1 text-[11px] font-bold uppercase tracking-widest text-gray-500">
-              Team view is not yet configured
-            </p>
-          </div>
-          <ScopeToggle options={SCOPE_OPTIONS} value={scope} onChange={updateScope} ariaLabel="Dashboard scope" />
-        </header>
-
-        <section className="rounded-3xl border border-dashed border-slate-300 bg-white px-8 py-14 text-center shadow-sm">
-          <p className="text-[11px] font-black uppercase tracking-[0.22em] text-slate-500">Team Scope</p>
-          <h2 className="mt-3 text-2xl font-black tracking-tight text-slate-950">Team view is not yet configured.</h2>
-          <p className="mt-2 text-sm font-medium text-slate-500">Contact your admin to set up team groupings.</p>
-        </section>
-      </div>
-    );
-  }
 
   const opportunityVsPipeline = data.opportunityVsPipeline ?? {
     opportunityValue: data.ddVsPipeline.ddValue,

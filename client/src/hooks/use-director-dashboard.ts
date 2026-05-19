@@ -318,7 +318,7 @@ export function presetToDateRange(preset: DateRangePreset): { from: string; to: 
 export function useDirectorDashboard(
   dateRange?: { from: string; to: string },
   periodKind?: RepPerformancePeriodKind,
-  scope?: "mine" | "all"
+  scope?: "mine" | "team" | "all"
 ) {
   const [data, setData] = useState<DirectorDashboardData | null>(null);
   const [loading, setLoading] = useState(true);
@@ -326,6 +326,14 @@ export function useDirectorDashboard(
   const [lastFetchedAt, setLastFetchedAt] = useState<string | null>(null);
 
   const fetchData = useCallback(async () => {
+    if (scope === "team") {
+      setData(null);
+      setError(null);
+      setLoading(false);
+      setLastFetchedAt(null);
+      return;
+    }
+
     setLoading(true);
     setError(null);
     try {
