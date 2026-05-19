@@ -6,8 +6,16 @@ export type PhotoDictationResult = {
   duration?: number;
 };
 
+export type VoiceTranscriptionConfig = {
+  configured: boolean;
+};
+
 async function sleep(ms: number) {
   await new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+export async function getVoiceTranscriptionConfig(): Promise<VoiceTranscriptionConfig> {
+  return api<VoiceTranscriptionConfig>("/field/photos/transcribe-description");
 }
 
 export async function transcribeDescriptionAudio(input: {

@@ -40,6 +40,12 @@ beforeEach(() => {
   apiMock.mockReset();
   apiMock.mockImplementation(async (path: string) => {
     const url = new URL(path, "https://example.test");
+    if (url.pathname === "/field/photos/transcribe-description") {
+      return { configured: true };
+    }
+    if (url.pathname === "/field/photos/pending") {
+      return { photos: [] };
+    }
     if (url.pathname === "/field/photo-targets/validate") {
       const leadId = url.searchParams.get("leadId");
       const opportunityId = url.searchParams.get("opportunityId");
@@ -117,9 +123,15 @@ describe("CapturePage", () => {
     expect(input.hasAttribute("capture")).toBe(false);
   });
 
-  it("keeps capture disabled while validating a URL-selected target", async () => {
+  it("keeps capture enabled while validating a URL-selected target", async () => {
     apiMock.mockImplementation((path: string) => {
       const url = new URL(path, "https://example.test");
+      if (url.pathname === "/field/photos/transcribe-description") {
+        return Promise.resolve({ configured: true });
+      }
+      if (url.pathname === "/field/photos/pending") {
+        return Promise.resolve({ photos: [] });
+      }
       if (url.pathname === "/field/photo-targets/validate") {
         return new Promise(() => undefined);
       }
@@ -129,7 +141,41 @@ describe("CapturePage", () => {
     const node = renderPage("/capture?dealId=deal-1&targetName=Roof%20Repair");
 
     await vi.waitFor(() => expect(node.textContent).toContain("Validating target..."));
-    expect(node.querySelector<HTMLButtonElement>('[aria-label="Capture photo"]')?.disabled).toBe(true);
+    expect(node.querySelector<HTMLButtonElement>('[aria-label="Capture photo"]')?.disabled).toBe(false);
+  });
+
+  it("keeps deep-linked uploads attached to the initial target while validation is still in flight", async () => {
+    apiMock.mockImplementation((path: string) => {
+      const url = new URL(path, "https://example.test");
+      if (url.pathname === "/field/photos/transcribe-description") {
+        return Promise.resolve({ configured: true });
+      }
+      if (url.pathname === "/field/photos/pending") {
+        return Promise.resolve({ photos: [] });
+      }
+      if (url.pathname === "/field/photo-targets/validate") {
+        return new Promise(() => undefined);
+      }
+      return Promise.resolve({ targets: TARGETS });
+    });
+
+    const node = renderPage("/capture?dealId=deal-1&targetName=Roof%20Repair");
+    await vi.waitFor(() => expect(node.textContent).toContain("Validating target..."));
+
+    const input = node.querySelector<HTMLInputElement>('input[type="file"]')!;
+    const file = new File(["a"], "a.jpg", { type: "image/jpeg" });
+    Object.defineProperty(input, "files", { value: [file], configurable: true });
+    input.dispatchEvent(new Event("change", { bubbles: true }));
+    await vi.waitFor(() => expect(node.textContent).toContain("1 photo in this session"));
+
+    Array.from(node.querySelectorAll("button")).find((button) => button.textContent === "Upload")?.click();
+
+    await vi.waitFor(() => expect(captureMocks.uploadSessionPhoto).toHaveBeenCalledWith(expect.objectContaining({
+      dealId: "deal-1",
+      leadId: undefined,
+      opportunityId: undefined,
+      file,
+    })));
   });
 
   it("opens the target picker, searches, selects a target, and single-selects category", async () => {
@@ -216,7 +262,7 @@ describe("CapturePage", () => {
     expect(captureMocks.fileToDataUrl).toHaveBeenCalledWith(expect.objectContaining({ type: "image/jpeg" }));
   });
 
-  it("keeps upload disabled when no target is selected", async () => {
+  it("enables saving to pending when no target is selected", async () => {
     const node = renderPage();
     await vi.waitFor(() => expect(node.textContent).toContain("Choose target"));
 
@@ -225,7 +271,92 @@ describe("CapturePage", () => {
     input.dispatchEvent(new Event("change", { bubbles: true }));
     await vi.waitFor(() => expect(node.textContent).toContain("1 photo in this session"));
 
-    expect(Array.from(node.querySelectorAll("button")).find((button) => button.textContent === "Upload")?.disabled).toBe(true);
+    const saveToPending = Array.from(node.querySelectorAll("button")).find((button) => button.textContent === "Save to pending");
+    expect(saveToPending?.disabled).toBe(false);
+  });
+
+  it("uploads targetless captures into pending instead of navigating away", async () => {
+    captureMocks.uploadSessionPhoto.mockResolvedValueOnce({ photo: { id: "pending-1" } });
+    const tagWrites: string[] = [];
+    apiMock.mockImplementation(async (path: string) => {
+      const url = new URL(path, "https://example.test");
+      if (url.pathname === "/field/photos/transcribe-description") {
+        return { configured: true };
+      }
+      if (url.pathname === "/field/photos/pending") {
+        return { photos: [{ id: "pending-1", displayName: "Pending photo", description: null }] };
+      }
+      if (url.pathname.startsWith("/field/photos/") && url.pathname.endsWith("/tags")) {
+        tagWrites.push(url.pathname);
+        return { tags: [] };
+      }
+      const search = (url.searchParams.get("search") ?? "").toLowerCase();
+      return { targets: TARGETS.filter((target) => !search || target.name.toLowerCase().includes(search)) };
+    });
+    const node = renderPage();
+    await vi.waitFor(() => expect(node.textContent).toContain("Choose target"));
+
+    const input = node.querySelector<HTMLInputElement>('input[type="file"]')!;
+    const file = new File(["a"], "a.jpg", { type: "image/jpeg" });
+    Object.defineProperty(input, "files", { value: [file], configurable: true });
+    input.dispatchEvent(new Event("change", { bubbles: true }));
+    await vi.waitFor(() => expect(node.textContent).toContain("1 photo in this session"));
+
+    const tagInput = node.querySelector<HTMLInputElement>('[aria-label="Photo tags"]')!;
+    const inputValueSetter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")?.set;
+    inputValueSetter?.call(tagInput, "urgent");
+    tagInput.dispatchEvent(new InputEvent("input", { bubbles: true, data: "urgent" }));
+    tagInput.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
+    await vi.waitFor(() => expect(node.textContent).toContain("urgent"));
+
+    Array.from(node.querySelectorAll("button")).find((button) => button.textContent === "Save to pending")?.click();
+
+    await vi.waitFor(() => expect(captureMocks.uploadSessionPhoto).toHaveBeenCalledWith(expect.objectContaining({
+      dealId: undefined,
+      leadId: undefined,
+      opportunityId: undefined,
+      file,
+      tags: ["urgent"],
+    })));
+    expect(tagWrites).toEqual([]);
+    expect(node.textContent).toContain("Pending captures");
+    expect(node.textContent).not.toContain("Projects page");
+  });
+
+  it("hides voice controls when transcription is not configured", async () => {
+    apiMock.mockImplementation(async (path: string) => {
+      const url = new URL(path, "https://example.test");
+      if (url.pathname === "/field/photos/transcribe-description") {
+        return { configured: false };
+      }
+      if (url.pathname === "/field/photos/pending") {
+        return { photos: [] };
+      }
+      const search = (url.searchParams.get("search") ?? "").toLowerCase();
+      return { targets: TARGETS.filter((target) => !search || target.name.toLowerCase().includes(search)) };
+    });
+
+    const node = renderPage("/capture?dealId=deal-1&targetName=Roof Repair");
+    await vi.waitFor(() => expect(node.textContent).toContain("Roof Repair"));
+
+    const input = node.querySelector<HTMLInputElement>('input[type="file"]')!;
+    Object.defineProperty(input, "files", { value: [new File(["a"], "a.jpg", { type: "image/jpeg" })], configurable: true });
+    input.dispatchEvent(new Event("change", { bubbles: true }));
+    await vi.waitFor(() => expect(node.textContent).toContain("1 photo in this session"));
+
+    expect(Array.from(node.querySelectorAll("button")).find((button) => button.textContent === "Voice")).toBeUndefined();
+  });
+
+  it("shows voice controls when transcription is configured", async () => {
+    const node = renderPage("/capture?dealId=deal-1&targetName=Roof Repair");
+    await vi.waitFor(() => expect(node.textContent).toContain("Roof Repair"));
+
+    const input = node.querySelector<HTMLInputElement>('input[type="file"]')!;
+    Object.defineProperty(input, "files", { value: [new File(["a"], "a.jpg", { type: "image/jpeg" })], configurable: true });
+    input.dispatchEvent(new Event("change", { bubbles: true }));
+    await vi.waitFor(() => expect(node.textContent).toContain("1 photo in this session"));
+
+    expect(Array.from(node.querySelectorAll("button")).find((button) => button.textContent === "Voice")).not.toBeUndefined();
   });
 
   it("renders camera permission denied guidance", async () => {

@@ -36,9 +36,12 @@ const projectMocks = vi.hoisted(() => ({
 const photoMocks = vi.hoisted(() => ({
   requestFieldPhotoUploadUrl: vi.fn(),
   confirmFieldPhotoUpload: vi.fn(),
+  listPendingFieldPhotos: vi.fn(),
+  assignPendingFieldPhotoTarget: vi.fn(),
 }));
 
 const transcriptionMocks = vi.hoisted(() => ({
+  getFieldPhotoTranscriptionConfig: vi.fn(),
   transcribePhotoDescriptionAudio: vi.fn(),
   transcribeAndPersistFieldPhotoDescription: vi.fn(),
 }));
@@ -82,6 +85,9 @@ describe("field routes", () => {
     projectMocks.listFieldProjectPhotos.mockResolvedValue({ photos: [], pagination: { page: 1, limit: 200, total: 0, totalPages: 0 } });
     photoMocks.requestFieldPhotoUploadUrl.mockResolvedValue({ uploadUrl: "https://r2.example/upload", objectKey: "key", uploadToken: "token" });
     photoMocks.confirmFieldPhotoUpload.mockResolvedValue({ photo: { id: "photo-1", category: "photo" } });
+    photoMocks.listPendingFieldPhotos.mockResolvedValue({ photos: [{ id: "pending-1" }] });
+    photoMocks.assignPendingFieldPhotoTarget.mockResolvedValue({ photo: { id: "pending-1", dealId: "deal-1" } });
+    transcriptionMocks.getFieldPhotoTranscriptionConfig.mockReturnValue({ configured: false });
     transcriptionMocks.transcribePhotoDescriptionAudio.mockResolvedValue({ transcript: "North slope detail", language: "en" });
     transcriptionMocks.transcribeAndPersistFieldPhotoDescription.mockResolvedValue({ transcript: "North slope detail", language: "en" });
     tagMocks.replaceFieldPhotoTags.mockResolvedValue({ tags: ["roofing", "urgent"] });
@@ -157,7 +163,7 @@ describe("field routes", () => {
 
   it("routes field photo upload URL and confirm requests through field-safe services", async () => {
     await invokeRoute("post", "/photos/upload-url", {
-      body: { opportunityId: "deal-2", contentType: "image/jpeg", sizeBytes: 1000, category: "damage", caption: "North slope" },
+      body: { opportunityId: "deal-2", contentType: "image/jpeg", sizeBytes: 1000, category: "damage", caption: "North slope", tags: ["urgent"] },
     });
     expect(photoMocks.requestFieldPhotoUploadUrl).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({
       officeSlug: "trock",
@@ -168,6 +174,7 @@ describe("field routes", () => {
       sizeBytes: 1000,
       photoCategory: "damage",
       caption: "North slope",
+      tags: ["urgent"],
     }));
 
     await invokeRoute("post", "/photos/confirm-upload", {
@@ -193,6 +200,28 @@ describe("field routes", () => {
       addressSource: "live_gps",
       auditContext: { ipAddress: "127.0.0.1", userAgent: "vitest" },
     }));
+  });
+
+  it("lists pending field photos and assigns them to a selected target", async () => {
+    await invokeRoute("get", "/photos/pending", {});
+    expect(photoMocks.listPendingFieldPhotos).toHaveBeenCalledWith(expect.anything(), {
+      userId: "admin-1",
+      userRole: "admin",
+    });
+
+    await invokeRoute("post", "/photos/:photoId/assign-target", {
+      params: { photoId: "pending-1" },
+      body: { dealId: "deal-1" },
+    });
+    expect(photoMocks.assignPendingFieldPhotoTarget).toHaveBeenCalledWith(expect.anything(), {
+      userId: "admin-1",
+      userRole: "admin",
+    }, {
+      photoId: "pending-1",
+      dealId: "deal-1",
+      leadId: undefined,
+      opportunityId: undefined,
+    });
   });
 
   it("routes field target search through the field-safe search service", async () => {
@@ -229,6 +258,10 @@ describe("field routes", () => {
   });
 
   it("routes session and persisted photo dictation through the transcription service", async () => {
+    const configResponse = await invokeRoute("get", "/photos/transcribe-description", {});
+    expect(configResponse.body).toEqual({ configured: false });
+    expect(transcriptionMocks.getFieldPhotoTranscriptionConfig).toHaveBeenCalled();
+
     await invokeRoute("post", "/photos/transcribe-description", {
       body: Buffer.from("audio"),
       headers: { "content-type": "audio/webm", "x-file-name": "clip.webm" },

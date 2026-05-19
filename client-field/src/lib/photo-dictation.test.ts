@@ -3,7 +3,7 @@
  */
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { ApiError } from "./api";
-import { transcribeDescriptionAudio } from "./photo-dictation";
+import { getVoiceTranscriptionConfig, transcribeDescriptionAudio } from "./photo-dictation";
 
 const apiMock = vi.hoisted(() => vi.fn());
 
@@ -24,6 +24,15 @@ afterEach(() => {
 });
 
 describe("photo dictation client", () => {
+  it("reads voice transcription availability without raising an error", async () => {
+    apiMock.mockResolvedValue({ configured: false });
+
+    const result = await getVoiceTranscriptionConfig();
+
+    expect(result).toEqual({ configured: false });
+    expect(apiMock).toHaveBeenCalledWith("/field/photos/transcribe-description");
+  });
+
   it("posts raw audio to the field transcription endpoint", async () => {
     apiMock.mockResolvedValue({ transcript: "Sagging stringer" });
 

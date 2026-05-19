@@ -141,8 +141,11 @@ describe("field api client", () => {
     await api("/field/projects/deal-1/photos");
     await api("/field/photo-targets/search?search=roof");
     await api("/field/photo-targets/validate?dealId=deal-1");
+    await api("/field/photos/transcribe-description");
     await api("/field/photos/upload-url", { method: "POST", json: { dealId: "deal-1", contentType: "image/jpeg", sizeBytes: 1024 } });
     await api("/field/photos/confirm-upload", { method: "POST", json: { dealId: "deal-1", uploadToken: "upload-token", objectKey: "photo.jpg" } });
+    await api("/field/photos/pending");
+    await api("/field/photos/photo-1/assign-target", { method: "POST", json: { dealId: "deal-1" } });
     await api("/auth/invite-preview?token=raw-token");
     await api("/auth/accept-invite", { method: "POST", json: { token: "raw-token", password: "password-123" } });
     await api("/auth/field-login", { method: "POST", json: { email: "field@example.com", password: "password-123" } });
@@ -155,8 +158,11 @@ describe("field api client", () => {
       "https://api.example.com/api/field/projects/deal-1/photos",
       "https://api.example.com/api/field/photo-targets/search?search=roof",
       "https://api.example.com/api/field/photo-targets/validate?dealId=deal-1",
+      "https://api.example.com/api/field/photos/transcribe-description",
       "https://api.example.com/api/field/photos/upload-url",
       "https://api.example.com/api/field/photos/confirm-upload",
+      "https://api.example.com/api/field/photos/pending",
+      "https://api.example.com/api/field/photos/photo-1/assign-target",
       "https://api.example.com/api/auth/invite-preview?token=raw-token",
       "https://api.example.com/api/auth/accept-invite",
       "https://api.example.com/api/auth/field-login",

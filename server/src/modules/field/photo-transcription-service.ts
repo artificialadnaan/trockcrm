@@ -42,6 +42,10 @@ export type PhotoTranscriptionResult = {
   duration?: number;
 };
 
+export function getFieldPhotoTranscriptionConfig() {
+  return { configured: Boolean(process.env.OPENAI_API_KEY?.trim()) };
+}
+
 function normalizeMimeType(value: string | undefined) {
   return value?.split(";")[0]?.trim().toLowerCase() ?? "";
 }
