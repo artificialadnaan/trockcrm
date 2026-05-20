@@ -1,5 +1,13 @@
 node_modules
 .git
+.worktrees
+.reviews
+.playwright-cli
+.agents
+.tmp
+tmp
+trock-onboarding-cleanup
+tests
 .omc
 .superpowers
 .DS_Store
