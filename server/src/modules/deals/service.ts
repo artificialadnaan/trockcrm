@@ -440,7 +440,7 @@ function resolveIntendedProjectNumberFromCode(
   );
 }
 
-async function isAtOrBeyondOpportunity(stageId: string | null | undefined) {
+async function isPastOpportunity(stageId: string | null | undefined) {
   if (!stageId) return true;
 
   const [stage, opportunity] = await Promise.all([
@@ -456,7 +456,7 @@ async function isAtOrBeyondOpportunity(stageId: string | null | undefined) {
     return stage.workflowFamily !== "lead";
   }
 
-  return stage.displayOrder >= opportunity.displayOrder;
+  return stage.displayOrder > opportunity.displayOrder;
 }
 
 async function resolveProjectTypeConfigById(projectTypeId: string | null | undefined) {
@@ -489,7 +489,7 @@ export async function applyProjectTypeChange(
   actor: { id: string; role: string },
   options: { projectTypeValue?: string | null } = {}
 ) {
-  if (await isAtOrBeyondOpportunity(deal.stageId)) {
+  if (await isPastOpportunity(deal.stageId)) {
     if (actor.role !== "admin") {
       throw new AppError(403, "Only admins can edit project type after Opportunity");
     }
