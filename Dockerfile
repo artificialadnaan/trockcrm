@@ -16,8 +16,8 @@ COPY shared/package.json ./shared/
 COPY server/package.json ./server/
 COPY client/package.json ./client/
 
-# Install production deps only
-RUN npm ci --omit=dev --workspaces
+# Install only the runtime deps the API container executes.
+RUN npm ci --omit=dev --workspace=shared --workspace=server
 
 # Copy compiled output
 COPY --from=builder /app/shared/dist ./shared/dist
