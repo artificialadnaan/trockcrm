@@ -1406,6 +1406,38 @@ describe("DealScopingWorkspace scoping UX", () => {
     }
   });
 
+  it("keeps the project type control enabled for reps while the deal is still in Opportunity", async () => {
+    mocks.useAuth.mockReturnValue({ user: { id: "rep-1", role: "rep" } });
+    mocks.useProjectTypes.mockReturnValue({
+      projectTypes: [
+        { id: "roofing", name: "Roofing", slug: "roofing" },
+        { id: "parking-lot", name: "Parking Lot", slug: "parking-lot" },
+      ],
+    });
+    mocks.getDealScopingIntake.mockResolvedValueOnce(makeScopingResponse({
+      intake: {
+        projectTypeId: "roofing",
+        sectionData: { scope: { selectedProjectTypeIds: ["roofing"] } },
+      },
+      resolved: { projectTypeId: "roofing" },
+      readiness: { status: "ready" },
+    }));
+
+    const { container, cleanup } = await renderWorkspace(
+      makeDeal({ sourceLeadId: null, projectTypeId: "roofing", stageId: "stage-1" })
+    );
+
+    try {
+      await vi.waitFor(() => expect(container.querySelector("#projectTypeId")).not.toBeNull());
+      const projectTypeTrigger = container.querySelector<HTMLButtonElement>("#projectTypeId");
+      expect(projectTypeTrigger).not.toBeNull();
+      expect(projectTypeTrigger?.disabled).toBe(false);
+      expect(projectTypeTrigger?.getAttribute("aria-disabled")).not.toBe("true");
+    } finally {
+      cleanup();
+    }
+  });
+
   it("preserves multiple selected scope items when a property change reseeds resolved fields", async () => {
     mocks.useProjectTypes.mockReturnValue({
       projectTypes: [

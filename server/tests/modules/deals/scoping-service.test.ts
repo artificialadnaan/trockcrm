@@ -1070,7 +1070,7 @@ describe("Scoping Service", () => {
       )
     ).rejects.toMatchObject<AppError>({
       statusCode: 400,
-      message: "projectType cannot be cleared after Opportunity",
+      message: "Invalid project type",
     });
   });
 

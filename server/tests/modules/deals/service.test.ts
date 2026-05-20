@@ -741,19 +741,20 @@ describe("Deal Service", () => {
       };
     }
 
-    it("rejects non-admin project type PATCH payloads on deals", async () => {
-      await expect(
-        updateDeal(
-          createProjectTypeTenantDb() as never,
-          "deal-1",
-          { projectType: "service" },
-          "director",
-          "director-1"
-        )
-      ).rejects.toMatchObject<AppError>({
-        statusCode: 403,
-        message: "Only admins can edit project type after Opportunity",
-      });
+    it("allows non-admin project type PATCH payloads while the deal is still in Opportunity", async () => {
+      const tenantDb = createProjectTypeTenantDb();
+
+      const updated = await updateDeal(
+        tenantDb as never,
+        "deal-1",
+        { projectType: "service" },
+        "director",
+        "director-1"
+      );
+
+      expect(updated.projectType).toBe("service");
+      expect(updated.intendedProjectNumber).toBe("DFW-4-10626-aa");
+      expect(tenantDb.state.deal.projectType).toBe("service");
     });
 
     it("updates editable fields on legacy direct-created deals without migrationMode", async () => {

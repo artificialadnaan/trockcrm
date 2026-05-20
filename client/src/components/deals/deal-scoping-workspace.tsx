@@ -256,7 +256,7 @@ function getProjectTypeLabel(
   return projectTypes.find((type) => type.id === projectTypeId)?.name ?? "Unassigned";
 }
 
-function isOpportunityOrLater(stageId: string | null | undefined, stages: PipelineStage[]) {
+function isPastOpportunity(stageId: string | null | undefined, stages: PipelineStage[]) {
   const stage = stages.find((entry) => entry.id === stageId);
   const opportunity = stages.find(
     (entry) => entry.slug === "opportunity" && entry.workflowFamily === "standard_deal"
@@ -270,7 +270,7 @@ function isOpportunityOrLater(stageId: string | null | undefined, stages: Pipeli
     return stage.workflowFamily !== "lead";
   }
 
-  return stage.displayOrder >= opportunity.displayOrder;
+  return stage.displayOrder > opportunity.displayOrder;
 }
 
 function getSelectDisplayLabel(
@@ -436,7 +436,7 @@ export function DealScopingWorkspace({
   const activePropertyId = resolvedFields?.propertyId ?? deal.propertyId;
   const hasSourceLead = Boolean(deal.sourceLeadId);
   const projectTypeLabel = getProjectTypeLabel(projectTypes, projectTypeId);
-  const projectTypeLocked = user?.role !== "admin" && isOpportunityOrLater(deal.stageId, stages);
+  const projectTypeLocked = user?.role !== "admin" && isPastOpportunity(deal.stageId, stages);
   const preBidMeetingLabel = getSelectDisplayLabel(
     getSectionValue(sectionData, "opportunity", "preBidMeetingCompleted"),
     { yes: "Completed", scheduled: "Scheduled", reviewing: "Reviewing", completed: "Completed" },
