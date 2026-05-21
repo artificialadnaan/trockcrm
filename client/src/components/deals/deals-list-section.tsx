@@ -45,7 +45,7 @@ const EXPORT_PAGE_SIZE = 500;
 const DEFAULT_SORT_STATE = { key: "updated_at", dir: "desc" } satisfies DealListSortState;
 const EMPTY_STAGE_SLUGS: string[] = [];
 
-type SortKey = "name" | "stage_entered_at" | "awarded_amount" | "updated_at";
+type SortKey = "name" | "created_at" | "stage_entered_at" | "awarded_amount" | "updated_at";
 export type DealListSortState = { key: SortKey | "expected_close_date" | "contract_signed_date"; dir: "asc" | "desc" };
 type DealListActiveFilter = boolean | "all" | "pipeline";
 
@@ -65,6 +65,10 @@ interface DealsListSectionProps {
   baseFilters?: Partial<DealFilters>;
   initialSort?: DealListSortState;
   initialStageSlugs?: string[];
+  lockedOwnerId?: string;
+  hideOwnerFilter?: boolean;
+  dateField?: "updated" | "created";
+  externalDateRange?: { from?: string; to?: string };
 }
 
 interface DealStageFilterOption {
@@ -332,6 +336,8 @@ export function buildDealListParams(input: {
   dateRange: { from?: string; to?: string };
   contractSignedFrom?: string;
   contractSignedTo?: string;
+  createdFrom?: string;
+  createdTo?: string;
   updatedFrom?: string;
   updatedTo?: string;
   isActive: DealListActiveFilter;
@@ -339,16 +345,25 @@ export function buildDealListParams(input: {
   page: number;
   limit: number;
   scope?: "mine" | "team" | "all";
+  dateField?: "updated" | "created";
 }) {
   const params = new URLSearchParams();
   if (input.search) params.set("search", input.search);
   if (input.stageIds.length) params.set("stageIds", input.stageIds.join(","));
   if (input.inactiveStageIds?.length) params.set("inactiveStageIds", input.inactiveStageIds.join(","));
   if (input.assignedRepId) params.set("assignedRepId", input.assignedRepId);
-  const updatedFrom = input.updatedFrom ?? input.dateRange.from;
-  const updatedTo = input.updatedTo ?? input.dateRange.to;
-  if (updatedFrom) params.set("updatedFrom", updatedFrom);
-  if (updatedTo) params.set("updatedTo", updatedTo);
+  const dateField = input.dateField ?? "updated";
+  if (dateField === "created") {
+    const createdFrom = input.createdFrom ?? input.dateRange.from;
+    const createdTo = input.createdTo ?? input.dateRange.to;
+    if (createdFrom) params.set("createdFrom", createdFrom);
+    if (createdTo) params.set("createdTo", createdTo);
+  } else {
+    const updatedFrom = input.updatedFrom ?? input.dateRange.from;
+    const updatedTo = input.updatedTo ?? input.dateRange.to;
+    if (updatedFrom) params.set("updatedFrom", updatedFrom);
+    if (updatedTo) params.set("updatedTo", updatedTo);
+  }
   if (input.contractSignedFrom) params.set("contractSignedFrom", input.contractSignedFrom);
   if (input.contractSignedTo) params.set("contractSignedTo", input.contractSignedTo);
   params.set("isActive", String(input.isActive));
@@ -368,12 +383,15 @@ export async function fetchAllFilteredDeals(input: {
   dateRange: { from?: string; to?: string };
   contractSignedFrom?: string;
   contractSignedTo?: string;
+  createdFrom?: string;
+  createdTo?: string;
   updatedFrom?: string;
   updatedTo?: string;
   isActive: DealListActiveFilter;
   sort: DealListSortState;
   scope?: "mine" | "team" | "all";
   apiClient?: typeof api;
+  dateField?: "updated" | "created";
 }) {
   const apiClient = input.apiClient ?? api;
   const limit = EXPORT_PAGE_SIZE;
@@ -417,11 +435,15 @@ export function DealsListSection({
   baseFilters,
   initialSort = DEFAULT_SORT_STATE,
   initialStageSlugs = EMPTY_STAGE_SLUGS,
+  lockedOwnerId,
+  hideOwnerFilter = false,
+  dateField = "updated",
+  externalDateRange,
 }: DealsListSectionProps) {
   const navigate = useNavigate();
   const [search, setSearch] = useState("");
   const [stageSlugs, setStageSlugs] = useState<string[]>(initialStageSlugs);
-  const [ownerId, setOwnerId] = useState("__all__");
+  const [ownerId, setOwnerId] = useState(lockedOwnerId ?? "__all__");
   const [dateFilter, setDateFilter] = useState<TerminalDateFilter>({ preset: "all" });
   const [page, setPage] = useState(1);
   const [sort, setSort] = useState<DealListSortState>(initialSort);
@@ -438,10 +460,10 @@ export function DealsListSection({
     () => getSelectedDealStageIds(stageSlugs, stageFilterOptions),
     [stageSlugs, stageFilterOptions]
   );
-  const dateRange = useMemo(
-    () => (enableDateFilter ? dateRangeFromTerminalFilter(dateFilter) : {}),
-    [enableDateFilter, dateFilter]
-  );
+  const dateRange = useMemo(() => {
+    if (externalDateRange) return externalDateRange;
+    return enableDateFilter ? dateRangeFromTerminalFilter(dateFilter) : {};
+  }, [enableDateFilter, dateFilter, externalDateRange]);
   const drilldownContextKey = useMemo(
     () =>
       JSON.stringify({
@@ -449,9 +471,12 @@ export function DealsListSection({
         excludeStageSlugs,
         initialSort,
         initialStageSlugs,
+        lockedOwnerId,
+        dateField,
+        externalDateRange,
         visibleStages: visibleStages?.map((stage) => `${stage.id}:${stage.slug}:${stage.name}`) ?? [],
       }),
-    [baseFilters, excludeStageSlugs, initialSort, initialStageSlugs, visibleStages]
+    [baseFilters, dateField, excludeStageSlugs, externalDateRange, initialSort, initialStageSlugs, lockedOwnerId, visibleStages]
   );
 
   const terminalStageIds = useMemo(
@@ -484,6 +509,12 @@ export function DealsListSection({
   }, [initialStageSlugs]);
 
   useEffect(() => {
+    if (lockedOwnerId) {
+      setOwnerId((current) => (current === lockedOwnerId ? current : lockedOwnerId));
+    }
+  }, [lockedOwnerId]);
+
+  useEffect(() => {
     setSort((current) =>
       current.key === initialSort.key && current.dir === initialSort.dir ? current : initialSort
     );
@@ -499,9 +530,11 @@ export function DealsListSection({
     search,
     stageIds: selectedStageIds,
     inactiveStageIds,
-    assignedRepId: ownerId === "__all__" ? undefined : ownerId,
-    updatedFrom: dateRange.from ?? baseFilters?.updatedFrom,
-    updatedTo: dateRange.to ?? baseFilters?.updatedTo,
+    assignedRepId: lockedOwnerId ?? (ownerId === "__all__" ? undefined : ownerId),
+    createdFrom: dateField === "created" ? dateRange.from ?? baseFilters?.createdFrom : baseFilters?.createdFrom,
+    createdTo: dateField === "created" ? dateRange.to ?? baseFilters?.createdTo : baseFilters?.createdTo,
+    updatedFrom: dateField === "updated" ? dateRange.from ?? baseFilters?.updatedFrom : baseFilters?.updatedFrom,
+    updatedTo: dateField === "updated" ? dateRange.to ?? baseFilters?.updatedTo : baseFilters?.updatedTo,
     isActive: isActiveFilter,
     sortBy: sort.key,
     sortDir: sort.dir,
@@ -515,7 +548,8 @@ export function DealsListSection({
     () => new Map(assignees.map((assignee) => [assignee.id, assignee.displayName])),
     [assignees]
   );
-  const selectedOwnerLabel = ownerId === "__all__" ? "All reps" : assigneeNameById.get(ownerId) ?? "Selected rep";
+  const selectedOwnerLabel =
+    ownerId === "__all__" ? "All reps" : assigneeNameById.get(ownerId) ?? "Selected rep";
 
   useEffect(() => {
     setPage(1);
@@ -558,11 +592,14 @@ export function DealsListSection({
       search,
       stageIds: selectedStageIds,
       inactiveStageIds,
-      assignedRepId: ownerId === "__all__" ? undefined : ownerId,
+      assignedRepId: lockedOwnerId ?? (ownerId === "__all__" ? undefined : ownerId),
       dateRange,
       isActive: isActiveFilter,
       sort,
       scope,
+      dateField,
+      createdFrom: baseFilters?.createdFrom,
+      createdTo: baseFilters?.createdTo,
       contractSignedFrom: baseFilters?.contractSignedFrom,
       contractSignedTo: baseFilters?.contractSignedTo,
       updatedFrom: baseFilters?.updatedFrom,
@@ -758,28 +795,30 @@ export function DealsListSection({
           </div>
         </label>
 
-        <label className="space-y-2">
-          <span className="text-[11px] font-black uppercase tracking-[0.16em] text-slate-500">Owner</span>
-          <Select
-            value={ownerId}
-            onValueChange={(value) => {
-              setPage(1);
-              setOwnerId(value ?? "__all__");
-            }}
-          >
-            <SelectTrigger>
-              <SelectValue placeholder="All reps">{selectedOwnerLabel}</SelectValue>
-            </SelectTrigger>
-            <SelectContent>
-              <SelectItem value="__all__">All reps</SelectItem>
-              {assignees.map((assignee) => (
-                <SelectItem key={assignee.id} value={assignee.id}>
-                  {assignee.displayName}
-                </SelectItem>
-              ))}
-            </SelectContent>
-          </Select>
-        </label>
+        {hideOwnerFilter ? null : (
+          <label className="space-y-2">
+            <span className="text-[11px] font-black uppercase tracking-[0.16em] text-slate-500">Owner</span>
+            <Select
+              value={ownerId}
+              onValueChange={(value) => {
+                setPage(1);
+                setOwnerId(value ?? "__all__");
+              }}
+            >
+              <SelectTrigger>
+                <SelectValue placeholder="All reps">{selectedOwnerLabel}</SelectValue>
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="__all__">All reps</SelectItem>
+                {assignees.map((assignee) => (
+                  <SelectItem key={assignee.id} value={assignee.id}>
+                    {assignee.displayName}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          </label>
+        )}
 
         {enableDateFilter ? (
           <label className="space-y-2">

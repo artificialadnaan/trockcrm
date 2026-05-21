@@ -160,9 +160,21 @@ router.get("/", async (req, res, next) => {
         companyId: req.query.companyId as string | undefined,
         propertyId: req.query.propertyId as string | undefined,
         assignedRepId: req.query.assignedRepId as string | undefined,
+        stageIds: req.query.stageIds
+          ? (req.query.stageIds as string).split(",").filter(Boolean)
+          : undefined,
         scope: normalizeCollaborativeScope(req.user!.role, readListScope(req.query.scope)),
         activeOfficeId: req.user!.activeOfficeId ?? req.user!.officeId,
         status: req.query.status as "open" | "converted" | "disqualified" | undefined,
+        createdFrom: req.query.createdFrom as string | undefined,
+        createdTo: req.query.createdTo as string | undefined,
+        sortBy:
+          req.query.sortBy === "created_at" || req.query.sortBy === "updated_at"
+            ? (req.query.sortBy as "created_at" | "updated_at")
+            : undefined,
+        sortDir: req.query.sortDir === "asc" || req.query.sortDir === "desc"
+          ? (req.query.sortDir as "asc" | "desc")
+          : undefined,
         isActive:
           req.query.isActive === "all"
             ? "all"

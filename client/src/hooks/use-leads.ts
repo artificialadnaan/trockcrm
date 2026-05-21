@@ -199,8 +199,13 @@ export interface LeadFilters {
   companyId?: string;
   propertyId?: string;
   assignedRepId?: string;
+  stageIds?: string[];
   status?: "open" | "converted" | "disqualified";
   isActive?: boolean | "all";
+  createdFrom?: string;
+  createdTo?: string;
+  sortBy?: "created_at" | "updated_at";
+  sortDir?: "asc" | "desc";
   scope?: "mine" | "team" | "all";
 }
 
@@ -278,7 +283,12 @@ export function useLeads(filters: LeadFilters = {}) {
       if (filters.companyId) params.set("companyId", filters.companyId);
       if (filters.propertyId) params.set("propertyId", filters.propertyId);
       if (filters.assignedRepId) params.set("assignedRepId", filters.assignedRepId);
+      if (filters.stageIds?.length) params.set("stageIds", filters.stageIds.join(","));
       if (filters.status) params.set("status", filters.status);
+      if (filters.createdFrom) params.set("createdFrom", filters.createdFrom);
+      if (filters.createdTo) params.set("createdTo", filters.createdTo);
+      if (filters.sortBy) params.set("sortBy", filters.sortBy);
+      if (filters.sortDir) params.set("sortDir", filters.sortDir);
       if (filters.scope) params.set("scope", filters.scope);
       if (filters.isActive === "all") params.set("isActive", "all");
       else if (filters.isActive === false) params.set("isActive", "false");
@@ -298,10 +308,15 @@ export function useLeads(filters: LeadFilters = {}) {
   }, [
     filters.assignedRepId,
     filters.companyId,
+    filters.createdFrom,
+    filters.createdTo,
     filters.isActive,
     filters.propertyId,
     filters.search,
     filters.scope,
+    filters.sortBy,
+    filters.sortDir,
+    filters.stageIds?.join(","),
     filters.status,
   ]);
 
