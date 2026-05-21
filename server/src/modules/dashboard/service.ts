@@ -637,8 +637,8 @@ async function getRepFunnelBuckets(
 ): Promise<FunnelBucketSummary[]> {
   const leadRepFilter = leadScopeFilterSql("l", options);
   const dealRepFilter = dealScopeFilterSql("d", options);
-  const [leadResult, dealResult] = await Promise.all([
-    tenantDb.execute(sql`
+  const [leadResult, dealResult] = await runSequential([
+    () => tenantDb.execute(sql`
       SELECT
         psc.slug,
         COUNT(*)::int AS count
@@ -650,7 +650,7 @@ async function getRepFunnelBuckets(
         ${leadRepFilter}
       GROUP BY psc.slug
     `),
-    tenantDb.execute(sql`
+    () => tenantDb.execute(sql`
       SELECT
         psc.slug,
         COUNT(*)::int AS count,
@@ -1138,14 +1138,29 @@ export interface RepDashboardData {
   myCleanup: MyCleanupSummary;
 }
 
+async function runSequential<T extends readonly unknown[]>(
+  steps: { [K in keyof T]: () => Promise<T[K]> }
+): Promise<T> {
+  const results: unknown[] = [];
+  for (const step of steps) {
+    results.push(await step());
+  }
+  return results as unknown as T;
+}
+
 /**
  * Aggregate all data for the per-rep dashboard.
- * Queries run in parallel for performance.
+ * Queries stay sequential because tenantDb is bound to a single client per request.
  */
 export async function getRepDashboard(
   tenantDb: TenantDb,
   userId: string,
-  options: { range?: ActivityRange; activityDateRange?: { from?: string; to?: string } } = {}
+  options: {
+    range?: ActivityRange;
+    activityDateRange?: { from?: string; to?: string };
+    followUpDateRange?: { from?: string; to?: string };
+    commissionDateRange?: { from?: string; to?: string };
+  } = {}
 ): Promise<RepDashboardData> {
   const today = new Date().toLocaleDateString("en-CA", { timeZone: "America/Chicago" }); // YYYY-MM-DD in CT
 
@@ -1188,6 +1203,8 @@ export async function getRepDashboard(
     activityRangeStartDate = `${ref.getUTCFullYear()}-${String(ref.getUTCMonth() + 1).padStart(2, "0")}-${String(ref.getUTCDate()).padStart(2, "0")}`;
   }
   const activityRangeEndDate = explicitActivityDateRange?.to ?? today;
+  const followUpDateRange = options.followUpDateRange ?? { from: yearStart, to: yearEnd };
+  const commissionDateRange = options.commissionDateRange ?? { from: activityRangeStartDate, to: today };
   const mineVisibility = await resolveMineVisibilityFeatures(tenantDb);
 
   const [
@@ -1206,8 +1223,8 @@ export async function getRepDashboard(
     myCleanupResult,
     commissionData,
     contractsSignedResult,
-  ] = await Promise.all([
-    tenantDb.execute(sql`
+  ] = await runSequential([
+    () => tenantDb.execute(sql`
       SELECT COUNT(*)::int AS count
       FROM leads l
       JOIN pipeline_stage_config psc ON psc.id = l.stage_id
@@ -1222,7 +1239,7 @@ export async function getRepDashboard(
     `),
 
     // 1. Active deals count + value for this rep
-    tenantDb.execute(sql`
+    () => tenantDb.execute(sql`
       SELECT
         COUNT(*)::int AS count,
         COALESCE(SUM(
@@ -1240,7 +1257,7 @@ export async function getRepDashboard(
     `),
 
     // 2. Tasks: overdue + today counts
-    tenantDb.execute(sql`
+    () => tenantDb.execute(sql`
       SELECT
         COUNT(*) FILTER (
           WHERE status IN ('pending', 'in_progress') AND due_date < ${today}
@@ -1253,7 +1270,7 @@ export async function getRepDashboard(
     `),
 
     // 3. Activity by type within the selected range (week | month | ytd)
-    tenantDb.execute(sql`
+    () => tenantDb.execute(sql`
       SELECT
         COUNT(*) FILTER (WHERE type = 'call')::int AS calls,
         COUNT(*) FILTER (WHERE type = 'email')::int AS emails,
@@ -1266,11 +1283,11 @@ export async function getRepDashboard(
         AND occurred_at < ((${activityRangeEndDate}::date + INTERVAL '1 day') AT TIME ZONE 'America/Chicago')
     `),
 
-    // 4. Follow-up compliance YTD
-    getFollowUpCompliance(tenantDb, userId, { from: yearStart, to: yearEnd }),
+    // 4. Follow-up compliance
+    () => getFollowUpCompliance(tenantDb, userId, followUpDateRange),
 
     // 5. Pipeline by stage for this rep (active deals only)
-    tenantDb.execute(sql`
+    () => tenantDb.execute(sql`
       SELECT
         d.stage_id,
         psc.name AS stage_name,
@@ -1294,7 +1311,7 @@ export async function getRepDashboard(
       ORDER BY psc.display_order ASC
     `),
 
-    getStaleLeadWatchlist(tenantDb, {
+    () => getStaleLeadWatchlist(tenantDb, {
       viewerUserId: userId,
       includeDealSubscriptions: mineVisibility.dealSubscriptions,
       includeLeadSubscriptions: mineVisibility.leadSubscriptions,
@@ -1303,7 +1320,7 @@ export async function getRepDashboard(
       includeDealSubscriptionDeletedAt: mineVisibility.dealSubscriptionsDeletedAt,
       includeLeadSubscriptionDeletedAt: mineVisibility.leadSubscriptionsDeletedAt,
     }),
-    getCrmOwnedProgression(tenantDb, {
+    () => getCrmOwnedProgression(tenantDb, {
       viewerUserId: userId,
       includeDealSubscriptions: mineVisibility.dealSubscriptions,
       includeLeadSubscriptions: mineVisibility.leadSubscriptions,
@@ -1312,7 +1329,7 @@ export async function getRepDashboard(
       includeDealSubscriptionDeletedAt: mineVisibility.dealSubscriptionsDeletedAt,
       includeLeadSubscriptionDeletedAt: mineVisibility.leadSubscriptionsDeletedAt,
     }),
-    getDownstreamBottlenecks(tenantDb, {
+    () => getDownstreamBottlenecks(tenantDb, {
       viewerUserId: userId,
       includeDealSubscriptions: mineVisibility.dealSubscriptions,
       includeLeadSubscriptions: mineVisibility.leadSubscriptions,
@@ -1322,7 +1339,7 @@ export async function getRepDashboard(
       includeLeadSubscriptionDeletedAt: mineVisibility.leadSubscriptionsDeletedAt,
     }),
 
-    tenantDb.execute(sql`
+    () => tenantDb.execute(sql`
       SELECT
         l.id AS lead_id,
         l.name AS lead_name,
@@ -1348,7 +1365,7 @@ export async function getRepDashboard(
       LIMIT 5
     `),
 
-    tenantDb.execute(sql`
+    () => tenantDb.execute(sql`
       SELECT
         d.id AS deal_id,
         d.name AS deal_name,
@@ -1374,7 +1391,7 @@ export async function getRepDashboard(
       ORDER BY d.updated_at DESC
       LIMIT 5
     `),
-    getRepFunnelBuckets(tenantDb, {
+    () => getRepFunnelBuckets(tenantDb, {
       viewerUserId: userId,
       includeDealSubscriptions: mineVisibility.dealSubscriptions,
       includeLeadSubscriptions: mineVisibility.leadSubscriptions,
@@ -1383,8 +1400,13 @@ export async function getRepDashboard(
       includeDealSubscriptionDeletedAt: mineVisibility.dealSubscriptionsDeletedAt,
       includeLeadSubscriptionDeletedAt: mineVisibility.leadSubscriptionsDeletedAt,
     }),
-    getMyCleanupQueue(tenantDb, userId),
-    getRepCommissionSummary(tenantDb, userId, activityRangeStartDate, today),
+    () => getMyCleanupQueue(tenantDb, userId),
+    () => getRepCommissionSummary(
+      tenantDb,
+      userId,
+      commissionDateRange.from ?? activityRangeStartDate,
+      commissionDateRange.to ?? today
+    ),
 
     // Contracts signed YTD + MTD for this rep. Strict semantics: we count
     // signed contracts (contract_signed_at, falling back to contract_signed_date)
@@ -1393,7 +1415,7 @@ export async function getRepDashboard(
     // data-quality issues rather than blending in bid/dd estimates. The today
     // guard rejects future-dated signing dates so misplaced future dates don't
     // pollute either window.
-    tenantDb.execute(sql`
+    () => tenantDb.execute(sql`
       SELECT
         COUNT(*) FILTER (WHERE COALESCE(contract_signed_at::date, contract_signed_date) >= ${yearStart}::date)::int AS ytd_count,
         COALESCE(SUM(awarded_amount) FILTER (WHERE COALESCE(contract_signed_at::date, contract_signed_date) >= ${yearStart}::date), 0)::numeric AS ytd_value,
@@ -2491,6 +2513,24 @@ async function buildRepPerformanceCards(
 // Director Drill-Down (single rep detail)
 // ---------------------------------------------------------------------------
 
+function formatUtcDate(date: Date): string {
+  return `${date.getUTCFullYear()}-${String(date.getUTCMonth() + 1).padStart(2, "0")}-${String(date.getUTCDate()).padStart(2, "0")}`;
+}
+
+function getRollingCommissionDateRange(anchorDate: string): { from: string; to: string } {
+  const [year, month, day] = anchorDate.split("-").map(Number);
+  const previousYearLastDayOfMonth = new Date(Date.UTC(year! - 1, month!, 0)).getUTCDate();
+  const previousYearSameOrClampedDay = new Date(
+    Date.UTC(year! - 1, month! - 1, Math.min(day!, previousYearLastDayOfMonth))
+  );
+  const rollingStart = new Date(previousYearSameOrClampedDay);
+  rollingStart.setUTCDate(rollingStart.getUTCDate() + 1);
+  return {
+    from: formatUtcDate(rollingStart),
+    to: anchorDate,
+  };
+}
+
 /**
  * Get full dashboard data for a single rep -- used by director drill-down.
  * Returns the same shape as RepDashboardData plus win/loss stats.
@@ -2503,15 +2543,18 @@ export async function getRepDetail(
   const year = new Date().getFullYear();
   const from = options.from ?? `${year}-01-01`;
   const to = options.to ?? `${year}-12-31`;
+  const rollingCommissionDateRange = getRollingCommissionDateRange(to);
 
-  const [dashboard, winLoss, winTrend, staleDeals, staleLeads] = await Promise.all([
-    getRepDashboard(tenantDb, repId, {
+  const [dashboard, winLoss, winTrend, staleDeals, staleLeads] = await runSequential([
+    () => getRepDashboard(tenantDb, repId, {
       activityDateRange: { from, to },
+      followUpDateRange: { from, to },
+      commissionDateRange: rollingCommissionDateRange,
     }),
-    getWinLossRatioByRep(tenantDb, { from, to }),
-    getWinRateTrend(tenantDb, { from, to, repId }),
-    getStaleDeals(tenantDb, { repId }),
-    getStaleLeadWatchlist(tenantDb, { repId }),
+    () => getWinLossRatioByRep(tenantDb, { from, to }),
+    () => getWinRateTrend(tenantDb, { from, to, repId }),
+    () => getStaleDeals(tenantDb, { repId }),
+    () => getStaleLeadWatchlist(tenantDb, { repId }),
   ]);
 
   const repWinLoss = winLoss.find((w) => w.repId === repId) ?? {
