@@ -22,6 +22,7 @@ const UUID_PATTERN =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const LEGACY_PENDING_LINKAGE_COLUMNS = ["contact_id", "procore_project_id", "change_order_id"] as const;
 const LEGACY_LINKAGE_FALLBACK_SAVEPOINT = "field_photo_legacy_linkage_fallback";
+const PENDING_LINKAGE_PROBE_SAVEPOINT = "field_photo_pending_linkage_probe";
 
 function extensionForContentType(contentType: string): string {
   switch (contentType) {
@@ -151,6 +152,10 @@ function createLegacyPendingLinkageExecutor(tenantDb: TenantDb) {
   const detectPendingLinkageMode = async (): Promise<"modern" | "legacy" | null> => {
     if (!linkageModePromise) {
       linkageModePromise = (async () => {
+        // The request uses a single transaction-bound client. If this schema
+        // probe fails, Postgres aborts that transaction unless we isolate it
+        // behind its own savepoint before falling back to the legacy query path.
+        await tenantDb.execute(sql.raw(`SAVEPOINT ${PENDING_LINKAGE_PROBE_SAVEPOINT}`));
         try {
           const result = await tenantDb.execute(sql`
             SELECT COUNT(*)::int AS column_count
@@ -163,9 +168,12 @@ function createLegacyPendingLinkageExecutor(tenantDb: TenantDb) {
                 ${LEGACY_PENDING_LINKAGE_COLUMNS[2]}
               )
           `);
+          await tenantDb.execute(sql.raw(`RELEASE SAVEPOINT ${PENDING_LINKAGE_PROBE_SAVEPOINT}`));
           const row = ((result as any).rows ?? result)?.[0];
           return Number(row?.column_count ?? 0) === LEGACY_PENDING_LINKAGE_COLUMNS.length ? "modern" : "legacy";
         } catch {
+          await tenantDb.execute(sql.raw(`ROLLBACK TO SAVEPOINT ${PENDING_LINKAGE_PROBE_SAVEPOINT}`));
+          await tenantDb.execute(sql.raw(`RELEASE SAVEPOINT ${PENDING_LINKAGE_PROBE_SAVEPOINT}`));
           linkageModePromise = undefined;
           return null;
         }

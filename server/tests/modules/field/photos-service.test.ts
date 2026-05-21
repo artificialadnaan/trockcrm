@@ -65,6 +65,7 @@ const PENDING_PHOTO_ID = "55555555-5555-4555-8555-555555555555";
 const PENDING_OPPORTUNITY_PHOTO_ID = "66666666-6666-4666-8666-666666666666";
 const UUID_V7 = "019e4188-7d1b-7860-a57d-fb59484cd705";
 const LEGACY_FALLBACK_SAVEPOINT = "field_photo_legacy_linkage_fallback";
+const SCHEMA_PROBE_SAVEPOINT = "field_photo_pending_linkage_probe";
 
 const confirmedFile = {
   id: PHOTO_ID,
@@ -331,6 +332,12 @@ describe("field photo upload service", () => {
     localDb.execute.mockImplementation(async (query: unknown) => {
       const sqlText = normalizeSqlText(query);
 
+      if (
+        sqlText === `SAVEPOINT ${SCHEMA_PROBE_SAVEPOINT.toUpperCase()}` ||
+        sqlText === `RELEASE SAVEPOINT ${SCHEMA_PROBE_SAVEPOINT.toUpperCase()}`
+      ) {
+        return { rows: [] };
+      }
       if (sqlText.includes("INFORMATION_SCHEMA.COLUMNS")) {
         return { rows: [{ column_count: "3" }] };
       }
@@ -425,6 +432,12 @@ describe("field photo upload service", () => {
       const sqlText = normalizeSqlText(query);
       executedQueries.push(sqlText);
 
+      if (
+        sqlText === `SAVEPOINT ${SCHEMA_PROBE_SAVEPOINT.toUpperCase()}` ||
+        sqlText === `RELEASE SAVEPOINT ${SCHEMA_PROBE_SAVEPOINT.toUpperCase()}`
+      ) {
+        return { rows: [] };
+      }
       if (sqlText.includes("INFORMATION_SCHEMA.COLUMNS")) {
         return { rows: [{ column_count: "0" }] };
       }
@@ -468,7 +481,9 @@ describe("field photo upload service", () => {
 
     expect(result.photos).toHaveLength(1);
     expect(result.photos[0].id).toBe(PHOTO_ID);
-    expect(executedQueries.some((query) => query.startsWith("SAVEPOINT"))).toBe(false);
+    expect(executedQueries.filter((query) => query.startsWith("SAVEPOINT"))).toEqual([
+      `SAVEPOINT ${SCHEMA_PROBE_SAVEPOINT.toUpperCase()}`,
+    ]);
     expect(executedQueries.some((query) => query.includes("CONTACT_ID IS NULL"))).toBe(false);
   });
 
@@ -476,13 +491,31 @@ describe("field photo upload service", () => {
     const localDb = { execute: vi.fn() } as any;
     let transactionAborted = false;
     let rolledBackToSavepoint = false;
+    let rolledBackProbeSavepoint = false;
     const executedQueries: string[] = [];
 
     localDb.execute.mockImplementation(async (query: unknown) => {
       const sqlText = normalizeSqlText(query);
       executedQueries.push(sqlText);
 
+      if (sqlText === `SAVEPOINT ${SCHEMA_PROBE_SAVEPOINT.toUpperCase()}`) {
+        if (transactionAborted) {
+          throw Object.assign(new Error("current transaction is aborted"), { code: "25P02" });
+        }
+        return { rows: [] };
+      }
+      if (sqlText === `ROLLBACK TO SAVEPOINT ${SCHEMA_PROBE_SAVEPOINT.toUpperCase()}`) {
+        transactionAborted = false;
+        rolledBackProbeSavepoint = true;
+        return { rows: [] };
+      }
+      if (sqlText === `RELEASE SAVEPOINT ${SCHEMA_PROBE_SAVEPOINT.toUpperCase()}`) {
+        return { rows: [] };
+      }
       if (sqlText === `SAVEPOINT ${LEGACY_FALLBACK_SAVEPOINT.toUpperCase()}`) {
+        if (transactionAborted) {
+          throw Object.assign(new Error("current transaction is aborted"), { code: "25P02" });
+        }
         return { rows: [] };
       }
       if (sqlText === `ROLLBACK TO SAVEPOINT ${LEGACY_FALLBACK_SAVEPOINT.toUpperCase()}`) {
@@ -500,6 +533,7 @@ describe("field photo upload service", () => {
         return { rows: [{ "?column?": 1 }] };
       }
       if (sqlText.includes("INFORMATION_SCHEMA.COLUMNS")) {
+        transactionAborted = true;
         throw new Error("metadata lookup unavailable");
       }
       if (sqlText.includes("FROM FILES F") && sqlText.includes("CONTACT_ID IS NULL")) {
@@ -546,10 +580,14 @@ describe("field photo upload service", () => {
       userRole: "field_contractor",
     });
 
+    expect(rolledBackProbeSavepoint).toBe(true);
     expect(rolledBackToSavepoint).toBe(true);
     expect(result.photos).toHaveLength(1);
-    expect(executedQueries.slice(0, 6)).toEqual([
+    expect(executedQueries.slice(0, 9)).toEqual([
+      `SAVEPOINT ${SCHEMA_PROBE_SAVEPOINT.toUpperCase()}`,
       expect.stringContaining("INFORMATION_SCHEMA.COLUMNS"),
+      `ROLLBACK TO SAVEPOINT ${SCHEMA_PROBE_SAVEPOINT.toUpperCase()}`,
+      `RELEASE SAVEPOINT ${SCHEMA_PROBE_SAVEPOINT.toUpperCase()}`,
       `SAVEPOINT ${LEGACY_FALLBACK_SAVEPOINT.toUpperCase()}`,
       expect.stringContaining("CONTACT_ID IS NULL"),
       `ROLLBACK TO SAVEPOINT ${LEGACY_FALLBACK_SAVEPOINT.toUpperCase()}`,
@@ -567,6 +605,12 @@ describe("field photo upload service", () => {
       const sqlText = normalizeSqlText(query);
       executedQueries.push(sqlText);
 
+      if (
+        sqlText === `SAVEPOINT ${SCHEMA_PROBE_SAVEPOINT.toUpperCase()}` ||
+        sqlText === `RELEASE SAVEPOINT ${SCHEMA_PROBE_SAVEPOINT.toUpperCase()}`
+      ) {
+        return { rows: [] };
+      }
       if (sqlText.includes("INFORMATION_SCHEMA.COLUMNS")) {
         return { rows: [{ column_count: "3" }] };
       }
@@ -635,8 +679,12 @@ describe("field photo upload service", () => {
       imageUrl: "https://signed.example/photo.jpg",
     }));
     expect(executedQueries.filter((query) => query.includes("INFORMATION_SCHEMA.COLUMNS"))).toHaveLength(1);
-    expect(executedQueries.some((query) => query.startsWith("SAVEPOINT"))).toBe(false);
-    expect(executedQueries.some((query) => query.startsWith("RELEASE SAVEPOINT"))).toBe(false);
+    expect(executedQueries.filter((query) => query.startsWith("SAVEPOINT"))).toEqual([
+      `SAVEPOINT ${SCHEMA_PROBE_SAVEPOINT.toUpperCase()}`,
+    ]);
+    expect(executedQueries.filter((query) => query.startsWith("RELEASE SAVEPOINT"))).toEqual([
+      `RELEASE SAVEPOINT ${SCHEMA_PROBE_SAVEPOINT.toUpperCase()}`,
+    ]);
   });
 
   it("falls back to the legacy assign-target queries without modern-column probes once schema inspection detects a legacy schema", async () => {
@@ -647,6 +695,12 @@ describe("field photo upload service", () => {
       const sqlText = normalizeSqlText(query);
       executedQueries.push(sqlText);
 
+      if (
+        sqlText === `SAVEPOINT ${SCHEMA_PROBE_SAVEPOINT.toUpperCase()}` ||
+        sqlText === `RELEASE SAVEPOINT ${SCHEMA_PROBE_SAVEPOINT.toUpperCase()}`
+      ) {
+        return { rows: [] };
+      }
       if (sqlText.includes("INFORMATION_SCHEMA.COLUMNS")) {
         return { rows: [{ column_count: "0" }] };
       }
@@ -707,15 +761,29 @@ describe("field photo upload service", () => {
       leadId: null,
     }));
     expect(executedQueries.some((query) => query.includes("CONTACT_ID IS NULL"))).toBe(false);
-    expect(executedQueries.some((query) => query.startsWith("SAVEPOINT"))).toBe(false);
+    expect(executedQueries.filter((query) => query.startsWith("SAVEPOINT"))).toEqual([
+      `SAVEPOINT ${SCHEMA_PROBE_SAVEPOINT.toUpperCase()}`,
+    ]);
   });
 
   it("treats photos linked through newer linkage columns as not pending on modern schemas", async () => {
     const localDb = { execute: vi.fn() } as any;
-    localDb.execute
-      .mockResolvedValueOnce({ rows: [{ column_count: "3" }] })
-      .mockResolvedValueOnce({ rows: [] })
-      .mockResolvedValueOnce({ rows: [] });
+    localDb.execute.mockImplementation(async (query: unknown) => {
+      const sqlText = normalizeSqlText(query);
+      if (
+        sqlText === `SAVEPOINT ${SCHEMA_PROBE_SAVEPOINT.toUpperCase()}` ||
+        sqlText === `RELEASE SAVEPOINT ${SCHEMA_PROBE_SAVEPOINT.toUpperCase()}`
+      ) {
+        return { rows: [] };
+      }
+      if (sqlText.includes("INFORMATION_SCHEMA.COLUMNS")) {
+        return { rows: [{ column_count: "3" }] };
+      }
+      if (sqlText.startsWith("SELECT") && sqlText.includes("FROM FILES F")) {
+        return { rows: [] };
+      }
+      throw new Error(`Unexpected query in modern missing-pending test: ${sqlText}`);
+    });
 
     await expect(assignPendingFieldPhotoTarget(localDb, {
       userId: FIELD_USER_ID,
@@ -725,20 +793,38 @@ describe("field photo upload service", () => {
       dealId: DEAL_ID,
     })).rejects.toEqual(new AppError(404, "Pending photo not found."));
 
-    expect(localDb.execute).toHaveBeenCalledTimes(2);
+    expect(localDb.execute).toHaveBeenCalledTimes(4);
   });
 
   it("recovers the transaction with a savepoint before retrying the assign-target legacy fallback when schema inspection is unavailable", async () => {
     const localDb = { execute: vi.fn() } as any;
     let transactionAborted = false;
     let rolledBackToSavepoint = false;
+    let rolledBackProbeSavepoint = false;
     const executedQueries: string[] = [];
 
     localDb.execute.mockImplementation(async (query: unknown) => {
       const sqlText = normalizeSqlText(query);
       executedQueries.push(sqlText);
 
+      if (sqlText === `SAVEPOINT ${SCHEMA_PROBE_SAVEPOINT.toUpperCase()}`) {
+        if (transactionAborted) {
+          throw Object.assign(new Error("current transaction is aborted"), { code: "25P02" });
+        }
+        return { rows: [] };
+      }
+      if (sqlText === `ROLLBACK TO SAVEPOINT ${SCHEMA_PROBE_SAVEPOINT.toUpperCase()}`) {
+        transactionAborted = false;
+        rolledBackProbeSavepoint = true;
+        return { rows: [] };
+      }
+      if (sqlText === `RELEASE SAVEPOINT ${SCHEMA_PROBE_SAVEPOINT.toUpperCase()}`) {
+        return { rows: [] };
+      }
       if (sqlText === `SAVEPOINT ${LEGACY_FALLBACK_SAVEPOINT.toUpperCase()}`) {
+        if (transactionAborted) {
+          throw Object.assign(new Error("current transaction is aborted"), { code: "25P02" });
+        }
         return { rows: [] };
       }
       if (sqlText === `ROLLBACK TO SAVEPOINT ${LEGACY_FALLBACK_SAVEPOINT.toUpperCase()}`) {
@@ -756,6 +842,7 @@ describe("field photo upload service", () => {
         return { rows: [{ "?column?": 1 }] };
       }
       if (sqlText.includes("INFORMATION_SCHEMA.COLUMNS")) {
+        transactionAborted = true;
         throw new Error("metadata lookup unavailable");
       }
       if (sqlText.startsWith("SELECT") && sqlText.includes("FROM FILES F") && sqlText.includes("CONTACT_ID IS NULL")) {
@@ -820,10 +907,14 @@ describe("field photo upload service", () => {
       dealId: DEAL_ID,
     });
 
+    expect(rolledBackProbeSavepoint).toBe(true);
     expect(rolledBackToSavepoint).toBe(true);
     expect(result.photo.id).toBe(PENDING_PHOTO_ID);
-    expect(executedQueries.slice(0, 7)).toEqual([
+    expect(executedQueries.slice(0, 10)).toEqual([
+      `SAVEPOINT ${SCHEMA_PROBE_SAVEPOINT.toUpperCase()}`,
       expect.stringContaining("INFORMATION_SCHEMA.COLUMNS"),
+      `ROLLBACK TO SAVEPOINT ${SCHEMA_PROBE_SAVEPOINT.toUpperCase()}`,
+      `RELEASE SAVEPOINT ${SCHEMA_PROBE_SAVEPOINT.toUpperCase()}`,
       `SAVEPOINT ${LEGACY_FALLBACK_SAVEPOINT.toUpperCase()}`,
       expect.stringContaining("CONTACT_ID IS NULL"),
       `ROLLBACK TO SAVEPOINT ${LEGACY_FALLBACK_SAVEPOINT.toUpperCase()}`,
@@ -862,43 +953,58 @@ describe("field photo upload service", () => {
 
   it("accepts non-v1-v5 UUIDs that Postgres still treats as valid uuids", async () => {
     const localDb = { execute: vi.fn() } as any;
-    localDb.execute
-      .mockResolvedValueOnce({ rows: [{ column_count: "3" }] })
-      .mockResolvedValueOnce({
-        rows: [{
-          id: UUID_V7,
-          category: "photo",
-          deal_id: null,
-          lead_id: null,
-          uploaded_by: FIELD_USER_ID,
-        }],
-      })
-      .mockResolvedValueOnce({
-        rows: [{
-          id: UUID_V7,
-          category: "photo",
-          photo_category: "damage",
-          subcategory: null,
-          display_name: "Pending photo",
-          mime_type: "image/jpeg",
-          file_size_bytes: 850000,
-          file_extension: ".jpg",
-          deal_id: UUID_V7,
-          lead_id: null,
-          description: null,
-          tags: [],
-          taken_at: new Date("2026-05-05T12:00:00.000Z"),
-          created_at: new Date("2026-05-05T12:01:00.000Z"),
-          uploaded_by: FIELD_USER_ID,
-          latitude: null,
-          longitude: null,
-          address: null,
-          address_source: null,
-          geocoded_at: null,
-          procore_sync_status: null,
-          deleted_at: null,
-        }],
-      });
+    localDb.execute.mockImplementation(async (query: unknown) => {
+      const sqlText = normalizeSqlText(query);
+      if (
+        sqlText === `SAVEPOINT ${SCHEMA_PROBE_SAVEPOINT.toUpperCase()}` ||
+        sqlText === `RELEASE SAVEPOINT ${SCHEMA_PROBE_SAVEPOINT.toUpperCase()}`
+      ) {
+        return { rows: [] };
+      }
+      if (sqlText.includes("INFORMATION_SCHEMA.COLUMNS")) {
+        return { rows: [{ column_count: "3" }] };
+      }
+      if (sqlText.startsWith("SELECT") && sqlText.includes("FROM FILES F")) {
+        return {
+          rows: [{
+            id: UUID_V7,
+            category: "photo",
+            deal_id: null,
+            lead_id: null,
+            uploaded_by: FIELD_USER_ID,
+          }],
+        };
+      }
+      if (sqlText.startsWith("UPDATE FILES")) {
+        return {
+          rows: [{
+            id: UUID_V7,
+            category: "photo",
+            photo_category: "damage",
+            subcategory: null,
+            display_name: "Pending photo",
+            mime_type: "image/jpeg",
+            file_size_bytes: 850000,
+            file_extension: ".jpg",
+            deal_id: UUID_V7,
+            lead_id: null,
+            description: null,
+            tags: [],
+            taken_at: new Date("2026-05-05T12:00:00.000Z"),
+            created_at: new Date("2026-05-05T12:01:00.000Z"),
+            uploaded_by: FIELD_USER_ID,
+            latitude: null,
+            longitude: null,
+            address: null,
+            address_source: null,
+            geocoded_at: null,
+            procore_sync_status: null,
+            deleted_at: null,
+          }],
+        };
+      }
+      throw new Error(`Unexpected query in UUID v7 test: ${sqlText}`);
+    });
     projectMocks.assertAccessibleFieldCaptureTarget.mockResolvedValueOnce({ id: UUID_V7, type: "deal" });
     fileMocks.getFileDownloadUrl.mockResolvedValueOnce({ url: "https://signed.example/photo.jpg" });
 
@@ -922,43 +1028,58 @@ describe("field photo upload service", () => {
 
   it("assigns a pending field photo to an opportunity target using the same persisted deal linkage as direct uploads", async () => {
     const localDb = { execute: vi.fn() } as any;
-    localDb.execute
-      .mockResolvedValueOnce({ rows: [{ column_count: "3" }] })
-      .mockResolvedValueOnce({
-        rows: [{
-          id: PENDING_OPPORTUNITY_PHOTO_ID,
-          category: "photo",
-          deal_id: null,
-          lead_id: null,
-          uploaded_by: FIELD_USER_ID,
-        }],
-      })
-      .mockResolvedValueOnce({
-        rows: [{
-          id: PENDING_OPPORTUNITY_PHOTO_ID,
-          category: "photo",
-          photo_category: "damage",
-          subcategory: null,
-          display_name: "Pending photo",
-          mime_type: "image/jpeg",
-          file_size_bytes: 850000,
-          file_extension: ".jpg",
-          deal_id: DEAL_TWO_ID,
-          lead_id: null,
-          description: null,
-          tags: [],
-          taken_at: new Date("2026-05-05T12:00:00.000Z"),
-          created_at: new Date("2026-05-05T12:01:00.000Z"),
-          uploaded_by: FIELD_USER_ID,
-          latitude: null,
-          longitude: null,
-          address: null,
-          address_source: null,
-          geocoded_at: null,
-          procore_sync_status: null,
-          deleted_at: null,
-        }],
-      });
+    localDb.execute.mockImplementation(async (query: unknown) => {
+      const sqlText = normalizeSqlText(query);
+      if (
+        sqlText === `SAVEPOINT ${SCHEMA_PROBE_SAVEPOINT.toUpperCase()}` ||
+        sqlText === `RELEASE SAVEPOINT ${SCHEMA_PROBE_SAVEPOINT.toUpperCase()}`
+      ) {
+        return { rows: [] };
+      }
+      if (sqlText.includes("INFORMATION_SCHEMA.COLUMNS")) {
+        return { rows: [{ column_count: "3" }] };
+      }
+      if (sqlText.startsWith("SELECT") && sqlText.includes("FROM FILES F")) {
+        return {
+          rows: [{
+            id: PENDING_OPPORTUNITY_PHOTO_ID,
+            category: "photo",
+            deal_id: null,
+            lead_id: null,
+            uploaded_by: FIELD_USER_ID,
+          }],
+        };
+      }
+      if (sqlText.startsWith("UPDATE FILES")) {
+        return {
+          rows: [{
+            id: PENDING_OPPORTUNITY_PHOTO_ID,
+            category: "photo",
+            photo_category: "damage",
+            subcategory: null,
+            display_name: "Pending photo",
+            mime_type: "image/jpeg",
+            file_size_bytes: 850000,
+            file_extension: ".jpg",
+            deal_id: DEAL_TWO_ID,
+            lead_id: null,
+            description: null,
+            tags: [],
+            taken_at: new Date("2026-05-05T12:00:00.000Z"),
+            created_at: new Date("2026-05-05T12:01:00.000Z"),
+            uploaded_by: FIELD_USER_ID,
+            latitude: null,
+            longitude: null,
+            address: null,
+            address_source: null,
+            geocoded_at: null,
+            procore_sync_status: null,
+            deleted_at: null,
+          }],
+        };
+      }
+      throw new Error(`Unexpected query in opportunity target assignment test: ${sqlText}`);
+    });
     projectMocks.assertAccessibleFieldCaptureTarget.mockResolvedValueOnce({ id: DEAL_TWO_ID, type: "opportunity" });
     fileMocks.getFileDownloadUrl.mockResolvedValueOnce({ url: "https://signed.example/photo.jpg" });
 
