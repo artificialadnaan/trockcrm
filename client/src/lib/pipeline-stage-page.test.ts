@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { normalizeStagePageQuery } from "./pipeline-stage-page";
 
 describe("normalizeStagePageQuery", () => {
-  it("normalizes an invalid stage sort back to newest", () => {
+  it("keeps the raw stage sort token so each route can normalize its own sort family", () => {
     expect(
       normalizeStagePageQuery({
         sort: "bad",
@@ -14,7 +14,7 @@ describe("normalizeStagePageQuery", () => {
     ).toEqual({
       page: 1,
       pageSize: 25,
-      sort: "newest",
+      sort: "bad",
       search: "acme",
       filters: {
         assignedRepId: undefined,

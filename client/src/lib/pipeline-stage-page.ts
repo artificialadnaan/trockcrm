@@ -1,5 +1,3 @@
-import { normalizeStagePageSort, type StagePageSort } from "@trock-crm/shared/types";
-
 export interface StagePageFilters {
   assignedRepId?: string;
   staleOnly: boolean;
@@ -22,7 +20,7 @@ export interface StagePageFilters {
 export interface StagePageQuery {
   page: number;
   pageSize: number;
-  sort: StagePageSort;
+  sort: string;
   search: string;
   filters: StagePageFilters;
 }
@@ -36,7 +34,7 @@ export function normalizeStagePageQuery(input: Record<string, string | undefined
   return {
     page: Number.isFinite(parsedPage) && parsedPage > 0 ? parsedPage : 1,
     pageSize: ALLOWED_PAGE_SIZES.has(parsedPageSize) ? parsedPageSize : 25,
-    sort: normalizeStagePageSort(input.sort),
+    sort: input.sort ?? "",
     search: input.search?.trim() ?? "",
     filters: {
       assignedRepId: input.assignedRepId,

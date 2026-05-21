@@ -1,4 +1,5 @@
 import { useSearchParams } from "react-router-dom";
+import { normalizeStagePageSort } from "@trock-crm/shared/types";
 import { useAuth } from "@/lib/auth";
 import { normalizeStagePageQuery } from "./pipeline-stage-page";
 
@@ -21,6 +22,10 @@ const ROLE_ALLOWED_SCOPES: Record<PipelineRole, readonly PipelineScope[]> = {
 function coerceScope(value: string | null): PipelineScope | null {
   if (value === "mine" || value === "team" || value === "all") return value;
   return null;
+}
+
+function normalizeLeadStageRouteSort(value?: string) {
+  return value === "name_asc" || value === "age_desc" ? value : "age_desc";
 }
 
 export function normalizePipelineScope(input: {
@@ -70,6 +75,10 @@ export function useNormalizedStageRoute(entity: PipelineEntity, stageId: string)
   const backParams = new URLSearchParams(searchParams);
   backParams.set("scope", allowedScope);
   backParams.delete("page");
+  const baseQuery = normalizeStagePageQuery(Object.fromEntries(searchParams.entries()));
+  const sort = entity === "deals"
+    ? normalizeStagePageSort(baseQuery.sort)
+    : normalizeLeadStageRouteSort(baseQuery.sort);
 
   return {
     stageId,
@@ -77,7 +86,8 @@ export function useNormalizedStageRoute(entity: PipelineEntity, stageId: string)
     redirectTo: `/${entity}/stages/${stageId}?${nextParams.toString()}`,
     backTo: `/${entity}?${backParams.toString()}`,
     query: {
-      ...normalizeStagePageQuery(Object.fromEntries(searchParams.entries())),
+      ...baseQuery,
+      sort,
       scope: allowedScope,
     },
     onPageChange: (page: number) => {
