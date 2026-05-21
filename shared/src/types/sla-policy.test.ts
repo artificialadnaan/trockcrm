@@ -1,9 +1,17 @@
 import { describe, expect, it } from "vitest";
 import {
+  CANONICAL_DEAL_WORKFLOW_CONTRACTS,
+  CANONICAL_TERMINAL_DEAL_STAGE_SLUGS,
+} from "./workflow.js";
+import {
   getSlaAudienceForRole,
   getSlaPolicy,
   getSlaPolicyForRole,
 } from "./sla-policy.js";
+
+const ACTIVE_SLA_STAGES = CANONICAL_DEAL_WORKFLOW_CONTRACTS
+  .filter((contract) => !contract.isTerminal)
+  .map((contract) => contract.slug);
 
 describe("SLA policy helpers", () => {
   it("returns the expected rep policy for every supported stage", () => {
@@ -30,6 +38,14 @@ describe("SLA policy helpers", () => {
       thresholdDays: 7,
       recurs: true,
       recurrenceDays: 7,
+    });
+    expect(getSlaPolicy("estimate_under_review", "rep")).toMatchObject({
+      stageSlug: "estimate_under_review",
+      audience: "rep",
+      dayCounting: "calendar_days",
+      thresholdDays: 3,
+      recurs: true,
+      recurrenceDays: 3,
     });
     expect(getSlaPolicy("estimate_sent_to_client", "rep")).toMatchObject({
       stageSlug: "estimate_sent_to_client",
@@ -71,6 +87,14 @@ describe("SLA policy helpers", () => {
       audience: "leadership",
       dayCounting: "calendar_days",
       thresholdDays: 14,
+      recurs: false,
+      recurrenceDays: null,
+    });
+    expect(getSlaPolicy("estimate_under_review", "leadership")).toMatchObject({
+      stageSlug: "estimate_under_review",
+      audience: "leadership",
+      dayCounting: "calendar_days",
+      thresholdDays: 7,
       recurs: false,
       recurrenceDays: null,
     });
@@ -124,6 +148,16 @@ describe("SLA policy helpers", () => {
       recurs: true,
       recurrenceDays: 7,
     });
+    expect(getSlaPolicy("estimate_under_review", "rep")).toMatchObject({
+      thresholdDays: 3,
+      recurs: true,
+      recurrenceDays: 3,
+    });
+    expect(getSlaPolicy("estimate_under_review", "leadership")).toMatchObject({
+      thresholdDays: 7,
+      recurs: false,
+      recurrenceDays: null,
+    });
     expect(getSlaPolicy("estimating", "leadership")).toMatchObject({
       thresholdDays: 14,
       recurs: false,
@@ -142,10 +176,44 @@ describe("SLA policy helpers", () => {
   });
 
   it("handles unknown stage or unsupported role gracefully", () => {
-    expect(getSlaPolicy("won", "rep")).toBeNull();
     expect(getSlaPolicy("unknown-stage", "leadership")).toBeNull();
     expect(getSlaPolicy("__proto__", "rep")).toBeNull();
-    expect(getSlaPolicyForRole("won", "rep")).toBeNull();
+    expect(getSlaPolicy("opportunity", "bogus" as "rep")).toBeNull();
+    for (const stageSlug of CANONICAL_TERMINAL_DEAL_STAGE_SLUGS) {
+      expect(getSlaPolicy(stageSlug as never, "rep")).toBeNull();
+      expect(getSlaPolicy(stageSlug as never, "leadership")).toBeNull();
+      expect(getSlaPolicyForRole(stageSlug as never, "rep")).toBeNull();
+    }
     expect(getSlaPolicyForRole("opportunity", "construction")).toBeNull();
+  });
+
+  it("covers every active non-terminal stage for both audiences", () => {
+    expect(ACTIVE_SLA_STAGES).toEqual([
+      "opportunity",
+      "estimating",
+      "service_estimating",
+      "estimate_under_review",
+      "estimate_sent_to_client",
+      "contract",
+    ]);
+
+    for (const stageSlug of ACTIVE_SLA_STAGES) {
+      expect(getSlaPolicy(stageSlug, "rep")).toMatchObject({
+        stageSlug,
+        audience: "rep",
+        dayCounting: "calendar_days",
+      });
+      expect(getSlaPolicy(stageSlug, "leadership")).toMatchObject({
+        stageSlug,
+        audience: "leadership",
+        dayCounting: "calendar_days",
+      });
+    }
+  });
+
+  it("rejects historical or non-SLA stage aliases so the step-1 API stays canonical-only", () => {
+    expect(getSlaPolicy("service_estimate_under_review" as never, "rep")).toBeNull();
+    expect(getSlaPolicy("service_estimate_sent_to_client" as never, "leadership")).toBeNull();
+    expect(getSlaPolicyForRole("contract_signed" as never, "director")).toBeNull();
   });
 });

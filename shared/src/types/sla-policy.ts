@@ -8,6 +8,7 @@ export type SlaPolicyStageSlug =
   | "opportunity"
   | "estimating"
   | "service_estimating"
+  | "estimate_under_review"
   | "estimate_sent_to_client"
   | "contract";
 
@@ -26,6 +27,8 @@ export interface ResolvedSlaPolicy extends SlaPolicyRule {
 type SlaPolicyMatrix = Readonly<
   Record<SlaPolicyStageSlug, Readonly<Record<SlaAudience, Readonly<SlaPolicyRule>>>>
 >;
+
+const SLA_AUDIENCES = ["rep", "leadership"] as const satisfies readonly SlaAudience[];
 
 function freezeSlaPolicy<T extends SlaPolicyMatrix>(policy: T): T {
   for (const stagePolicy of Object.values(policy)) {
@@ -80,6 +83,20 @@ const SLA_POLICY = freezeSlaPolicy({
       recurrenceDays: null,
     },
   },
+  estimate_under_review: {
+    rep: {
+      dayCounting: SLA_POLICY_DAY_COUNTING,
+      thresholdDays: 3,
+      recurs: true,
+      recurrenceDays: 3,
+    },
+    leadership: {
+      dayCounting: SLA_POLICY_DAY_COUNTING,
+      thresholdDays: 7,
+      recurs: false,
+      recurrenceDays: null,
+    },
+  },
   estimate_sent_to_client: {
     rep: {
       dayCounting: SLA_POLICY_DAY_COUNTING,
@@ -114,6 +131,10 @@ function isSlaPolicyStageSlug(value: string): value is SlaPolicyStageSlug {
   return Object.prototype.hasOwnProperty.call(SLA_POLICY, value);
 }
 
+function isSlaAudience(value: string): value is SlaAudience {
+  return SLA_AUDIENCES.includes(value as SlaAudience);
+}
+
 export function getSlaAudienceForRole(role: UserRole | null | undefined): SlaAudience | null {
   if (role === "rep") return "rep";
   if (role === "director" || role === "admin") return "leadership";
@@ -121,14 +142,14 @@ export function getSlaAudienceForRole(role: UserRole | null | undefined): SlaAud
 }
 
 export function getSlaPolicy(
-  stageSlug: string | null | undefined,
+  stageSlug: SlaPolicyStageSlug | null | undefined,
   audience: SlaAudience | null | undefined
 ): ResolvedSlaPolicy | null {
   if (!stageSlug || !isSlaPolicyStageSlug(stageSlug)) {
     return null;
   }
 
-  if (!audience) {
+  if (!audience || !isSlaAudience(audience)) {
     return null;
   }
 
@@ -140,7 +161,7 @@ export function getSlaPolicy(
 }
 
 export function getSlaPolicyForRole(
-  stageSlug: string | null | undefined,
+  stageSlug: SlaPolicyStageSlug | null | undefined,
   role: UserRole | null | undefined
 ): ResolvedSlaPolicy | null {
   const audience = getSlaAudienceForRole(role);
