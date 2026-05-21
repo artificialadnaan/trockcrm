@@ -361,10 +361,11 @@ describe("PropertyDetailPage", () => {
     expect(html).toContain("Edit");
   });
 
-  it("new deal button passes property and company context", () => {
+  it("new lead button passes property and company context into the lead form", () => {
     const html = normalize(renderPage());
 
-    expect(html).toContain('href="/deals/new?propertyId=property-1&amp;companyId=company-1"');
-    expect(html).toContain("New deal");
+    expect(html).toContain('href="/leads/new?propertyId=property-1&amp;companyId=company-1&amp;name=Building+A+-+Main+Campus+opportunity"');
+    expect(html).toContain("New lead");
+    expect(html).not.toContain("New deal");
   });
 });

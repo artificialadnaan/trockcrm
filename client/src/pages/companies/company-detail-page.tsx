@@ -352,9 +352,19 @@ export function CompanyDetailPage() {
       </span>
     </>
   );
+  const newLeadParams = new URLSearchParams();
+  newLeadParams.set("companyId", company.id);
+  newLeadParams.set("name", `${company.name} opportunity`);
 
   const actionsSlot = (
     <>
+      <Link
+        to={`/leads/new?${newLeadParams.toString()}`}
+        className={cn(buttonVariants({ size: "sm" }), "bg-brand-red text-white hover:bg-brand-red/90")}
+      >
+        <Plus className="h-4 w-4" />
+        New lead
+      </Link>
       <Link to={`/companies/${company.id}/edit`} className={cn(buttonVariants({ variant: "outline", size: "sm" }))}>
         <Edit className="h-4 w-4" />
         Edit
@@ -365,13 +375,6 @@ export function CompanyDetailPage() {
           HubSpot
         </a>
       ) : null}
-      <Link
-        to={`/deals/new?companyId=${encodeURIComponent(company.id)}`}
-        className={cn(buttonVariants({ size: "sm" }), "bg-brand-red text-white hover:bg-brand-red/90")}
-      >
-        <Plus className="h-4 w-4" />
-        New deal
-      </Link>
       <PropertyCreateDialog
         initialCompanyId={company.id}
         companyLocked

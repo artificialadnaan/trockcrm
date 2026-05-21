@@ -309,7 +309,15 @@ describe("CompanyDetailPage", () => {
     expect(mounted.container.textContent).not.toContain("Company Copilot");
   });
 
-  it("uses a Create Lead empty-state CTA on the deals tab while preserving the header New deal action", () => {
+  it("routes the header New lead action to a company-seeded lead form", () => {
+    const html = renderPage();
+
+    expect(html).toContain('href="/leads/new?companyId=company-1&amp;name=Dallas+Independent+SD+opportunity"');
+    expect(html).toContain("New lead");
+    expect(html).not.toContain("New deal");
+  });
+
+  it("uses a Create Lead empty-state CTA on the deals tab while preserving the header New lead action", () => {
     mocks.useCompanyDealsMock.mockReturnValueOnce({
       deals: [],
       loading: false,
@@ -317,7 +325,7 @@ describe("CompanyDetailPage", () => {
     });
     mounted = mountPage();
 
-    expect(mounted.container.textContent).toContain("New deal");
+    expect(mounted.container.textContent).toContain("New lead");
 
     const dealsTab = mounted.container.querySelector('button[aria-label="Deals"]');
     expect(dealsTab).not.toBeNull();

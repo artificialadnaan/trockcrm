@@ -845,6 +845,20 @@ function EditableLeadForm({
     (resolvedSelectedProperty?.id === formData.propertyId ? resolvedSelectedProperty : null) ??
     properties.find((property) => property.id === formData.propertyId) ??
     null;
+
+  useEffect(() => {
+    if (!isCreate) {
+      return;
+    }
+
+    const linkedCompanyId = selectedProperty?.companyId ?? null;
+    if (!formData.propertyId || !linkedCompanyId || linkedCompanyId === companyId) {
+      return;
+    }
+
+    setCompanyId(linkedCompanyId);
+  }, [companyId, formData.propertyId, isCreate, selectedProperty?.companyId]);
+
   const maxPropertyBuildYear = new Date().getFullYear() + 2;
   const propertyAddressNeedsRepair =
     isCreate && Boolean(selectedProperty) && !selectedProperty?.address?.trim();
