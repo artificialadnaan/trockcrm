@@ -106,6 +106,35 @@ function makeQuestionNode(
   };
 }
 
+function accessQuestionNodes() {
+  return [
+    makeQuestionNode({
+      id: "site-access",
+      key: "site_access",
+      label: "Access",
+      inputType: "textarea",
+      sectionKey: "property",
+      groupKey: "property",
+      groupLabel: "Property/Building Info",
+      displayOrder: 1300,
+      isRequired: true,
+    }),
+    makeQuestionNode({
+      id: "site-access-other-detail",
+      key: "site_access_other_detail",
+      label: "Type of access detail",
+      inputType: "text",
+      sectionKey: "property",
+      groupKey: "property",
+      groupLabel: "Property/Building Info",
+      displayOrder: 1310,
+      isRequired: true,
+      parentNodeId: "site-access",
+      parentOptionValue: "Other",
+    }),
+  ];
+}
+
 describe("LeadQuestionnaireSections", () => {
   let container: HTMLDivElement;
   let root: Root;
@@ -255,6 +284,27 @@ describe("LeadQuestionnaireSections", () => {
     });
 
     expect(sanitizeQuestionAnswerForSave(node, CLEAR_SELECTION_VALUE)).toBeNull();
+  });
+
+  it("renders Type of access as a dropdown with four options and reveals the detail field for Other", () => {
+    root = createRoot(container);
+    act(() => {
+      root.render(
+        <LeadQuestionnaireSections
+          nodes={accessQuestionNodes()}
+          answers={{ site_access: "Other", site_access_other_detail: "Gate code required" }}
+          onAnswerChange={() => {}}
+        />
+      );
+    });
+
+    const accessQuestion = container.querySelector('[data-question-key="site_access"]');
+    expect(accessQuestion?.textContent).toContain("Type of access");
+    expect(accessQuestion?.textContent).toContain("Gated");
+    expect(accessQuestion?.textContent).toContain("Not Gated");
+    expect(accessQuestion?.textContent).toContain("Bobbed");
+    expect(accessQuestion?.textContent).toContain("Other");
+    expect(container.querySelector<HTMLInputElement>("#site_access_other_detail")?.value).toBe("Gate code required");
   });
 
   it("renders scope groups as selectable cards instead of accordion rows", () => {

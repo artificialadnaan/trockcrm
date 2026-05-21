@@ -77,9 +77,11 @@ import {
 import { LeadQuestionnaireSections } from "./lead-questionnaire-sections";
 import {
   CLEAR_SELECTION_VALUE,
+  getLeadQuestionnaireDisplayLabel,
   normalizeStoredQuestionAnswers,
   sanitizeQuestionAnswerForSave,
   shouldNormalizeUnansweredPlaceholder,
+  TYPE_OF_ACCESS_OTHER_DETAIL_KEY,
 } from "./questionnaire-answer-normalization";
 import { ALLOWED_EXTENSIONS, validateFileForUpload } from "@/lib/file-utils";
 import { CLIENT_PROVIDED_DOCS_TAG } from "@/lib/lead-attachment-routing";
@@ -628,16 +630,20 @@ export function LeadQuestionnaireSummary({ lead }: { lead: LeadFormLead }) {
     () => new Map(questionnaireNodes.map((node) => [node.id, node])),
     [questionnaireNodes]
   );
+  const normalizedQuestionnaireAnswers = useMemo(
+    () => normalizeStoredQuestionAnswers(lead.leadQuestionnaire?.answers ?? {}, questionnaireNodes),
+    [lead.leadQuestionnaire?.answers, questionnaireNodes]
+  );
   const visibleQuestionnaireNodes = useMemo(() => {
     const visibleCache = new Map<string, boolean>();
 
     return questionnaireNodes
       .filter((node) => node.nodeType === "question")
       .filter((node) =>
-        isVisibleQuestionNode(node.id, questionnaireNodeById, lead.leadQuestionnaire?.answers ?? {}, visibleCache)
+        isVisibleQuestionNode(node.id, questionnaireNodeById, normalizedQuestionnaireAnswers, visibleCache)
       )
       .sort((left, right) => left.displayOrder - right.displayOrder);
-  }, [lead.leadQuestionnaire?.answers, questionnaireNodeById, questionnaireNodes]);
+  }, [normalizedQuestionnaireAnswers, questionnaireNodeById, questionnaireNodes]);
   const showV2SummaryQuestions = visibleQuestionnaireNodes.length > 0;
 
   return (
@@ -669,9 +675,9 @@ export function LeadQuestionnaireSummary({ lead }: { lead: LeadFormLead }) {
             {showV2SummaryQuestions
               ? visibleQuestionnaireNodes.map((node) => (
                   <div key={node.id} className="rounded-md border p-3 transition-all duration-150">
-                    <p className="text-muted-foreground">{node.label}</p>
+                    <p className="text-muted-foreground">{getLeadQuestionnaireDisplayLabel(node.key, node.label)}</p>
                     <p className="font-medium">
-                      {renderAnswerValue(lead.leadQuestionnaire?.answers?.[node.key], {
+                      {renderAnswerValue(normalizedQuestionnaireAnswers[node.key], {
                         formatStringEnums: Array.isArray(node.options) && node.options.length > 0,
                         questionNode: node,
                       })}
@@ -1076,8 +1082,20 @@ function EditableLeadForm({
     [existingLeadProjectTypeSlug, selectedProjectType?.slug]
   );
   const gateQuestionLabels = useMemo(
-    () => new Map(gateQuestionSet.questions.map((question) => [question.id, question.label])),
-    [gateQuestionSet.questions]
+    () =>
+      new Map(
+        [
+          ...gateQuestionSet.questions.map((question) => [
+            question.id,
+            getLeadQuestionnaireDisplayLabel(question.id, question.label),
+          ] as const),
+          ...v2QuestionNodes.flatMap((node) => [
+            [node.key, getLeadQuestionnaireDisplayLabel(node.key, node.label)] as const,
+            [node.id, getLeadQuestionnaireDisplayLabel(node.key, node.label)] as const,
+          ]),
+        ]
+      ),
+    [gateQuestionSet.questions, v2QuestionNodes]
   );
 
   const clearCreateGateMissingKeys = (keys: string[]) => {
@@ -1375,11 +1393,24 @@ function EditableLeadForm({
       return;
     }
 
+    const typeOfAccessOtherDetail =
+      typeof formData.projectTypeQuestionAnswers[TYPE_OF_ACCESS_OTHER_DETAIL_KEY] === "string"
+        ? formData.projectTypeQuestionAnswers[TYPE_OF_ACCESS_OTHER_DETAIL_KEY].trim()
+        : "";
+    if (
+      isCreate &&
+      formData.projectTypeQuestionAnswers.site_access === "Other" &&
+      !typeOfAccessOtherDetail
+    ) {
+      setError("Type of access detail is required when Type of access is Other.");
+      return;
+    }
+
     if (isCreate && useV2Questionnaire) {
       const visibleCache = new Map<string, boolean>();
       const missingRequiredQuestions = v2VisibleQuestionNodes
         .filter((node) => node.isRequired && !isAnsweredQuestionValue(formData.projectTypeQuestionAnswers[node.key]))
-        .map((node) => node.label);
+        .map((node) => getLeadQuestionnaireDisplayLabel(node.key, node.label));
       const missingRequiredQualificationQuestions = v2QuestionNodes
         .filter((node) => V2_QUALIFICATION_DUPLICATE_KEYS.has(node.key))
         .filter((node) => node.isRequired)
@@ -1389,7 +1420,7 @@ function EditableLeadForm({
             ? !isAnsweredQuestionValue(formData.qualificationPayload.timeline_status)
             : true
         )
-        .map((node) => V2_QUALIFICATION_DUPLICATE_LABELS.get(node.key) ?? node.label);
+        .map((node) => V2_QUALIFICATION_DUPLICATE_LABELS.get(node.key) ?? getLeadQuestionnaireDisplayLabel(node.key, node.label));
       missingRequiredQuestions.push(...missingRequiredQualificationQuestions);
 
       if (missingRequiredQuestions.length > 0) {
@@ -1616,7 +1647,7 @@ function EditableLeadForm({
                 <p className="mt-1 text-xs text-amber-800">
                   Missing required project questions:{" "}
                   {stageGateError.missingRequirements.projectTypeQuestionIds
-                    .map((questionId) => gateQuestionLabels.get(questionId) ?? questionId)
+                    .map((questionId) => gateQuestionLabels.get(questionId) ?? getLeadQuestionnaireDisplayLabel(questionId, questionId))
                     .join(", ")}
                 </p>
               ) : null}

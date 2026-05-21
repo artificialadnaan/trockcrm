@@ -109,6 +109,35 @@ function node(overrides: Partial<LeadQuestionnaireNode>): LeadQuestionnaireNode 
   };
 }
 
+function accessQuestionNodes(): LeadQuestionnaireNode[] {
+  return [
+    node({
+      id: "site-access",
+      key: "site_access",
+      label: "Access",
+      inputType: "textarea",
+      sectionKey: "property",
+      groupKey: "property",
+      groupLabel: "Property/Building Info",
+      displayOrder: 1300,
+      isRequired: true,
+    }),
+    node({
+      id: "site-access-other-detail",
+      key: "site_access_other_detail",
+      label: "Type of access detail",
+      inputType: "text",
+      sectionKey: "property",
+      groupKey: "property",
+      groupLabel: "Property/Building Info",
+      displayOrder: 1310,
+      isRequired: true,
+      parentNodeId: "site-access",
+      parentOptionValue: "Other",
+    }),
+  ];
+}
+
 const nodes = [
   node({ id: "budget", key: "budget", label: "Budget", inputType: "currency", isRequired: true, displayOrder: 200 }),
   node({
@@ -373,6 +402,63 @@ describe("LeadQuestionnaireEditor universal questionnaire", () => {
       .toHaveLength(1);
     expect(container.textContent).toContain("Timeline Target Date");
     expect(container.textContent).not.toContain("Timeline Notes");
+  });
+
+  it("renders Estimated Value with a dollar prefix in edit mode", async () => {
+    await renderEditor(
+      lead({
+        qualificationPayload: { estimated_value: 125000 },
+      })
+    );
+
+    expect(container.querySelector("#estimated-value")?.parentElement?.textContent).toContain("$");
+  });
+
+  it("maps a legacy access free-text answer to Other with the original text preserved", async () => {
+    const accessNodes = accessQuestionNodes();
+    await renderEditor(
+      lead({
+        leadQuestionnaire: {
+          projectTypeId: "type-1",
+          nodes: [...nodes, ...accessNodes],
+          allNodes: [...nodes, ...accessNodes],
+          answers: {
+            parking_lot_applies: true,
+            parking_surface_type: ["concrete"],
+            site_access: "Gate code required",
+          },
+          legacyAnswers: [],
+        },
+      })
+    );
+
+    expect(container.textContent).toContain("Type of access");
+    expect(container.querySelector<HTMLInputElement>("#site_access_other_detail")?.value).toBe("Gate code required");
+  });
+
+  it("blocks converted leads from saving Type of access Other without detail", async () => {
+    const accessNodes = accessQuestionNodes();
+    await renderEditor(
+      lead({
+        status: "converted",
+        convertedDealId: "deal-1",
+        leadQuestionnaire: {
+          projectTypeId: "type-1",
+          nodes: [...nodes, ...accessNodes],
+          allNodes: [...nodes, ...accessNodes],
+          answers: {
+            site_access: "Other",
+            site_access_other_detail: "",
+          },
+          legacyAnswers: [],
+        },
+      })
+    );
+
+    await submitForm();
+
+    expect(updateLead).not.toHaveBeenCalled();
+    expect(container.textContent).toContain("Type of access detail is required when Type of access is Other.");
   });
 
   it("submits the hidden universal timeline answer from the visible Timeline field", async () => {

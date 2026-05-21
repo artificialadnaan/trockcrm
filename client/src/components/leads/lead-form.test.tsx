@@ -7,7 +7,7 @@ import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { renderToStaticMarkup } from "react-dom/server";
 import { MemoryRouter } from "react-router-dom";
-import { getEditableFormState, LeadForm } from "./lead-form";
+import { getEditableFormState, LeadForm, LeadQuestionnaireSummary } from "./lead-form";
 import type { LeadQuestionnaireNode } from "@/hooks/use-leads";
 import type { PropertySurface } from "@/hooks/use-properties";
 
@@ -456,6 +456,46 @@ function universalCreateQuestionnaireNodes(): LeadQuestionnaireNode[] {
   );
 
   return nodes;
+}
+
+function siteAccessQuestionNodes(): LeadQuestionnaireNode[] {
+  return [
+    makeQuestionNode({
+      id: "site-access",
+      key: "site_access",
+      label: "Access",
+      inputType: "textarea",
+      sectionKey: "property",
+      groupKey: "property",
+      groupLabel: "Property/Building Info",
+      displayOrder: 1300,
+      isRequired: true,
+    }),
+    makeQuestionNode({
+      id: "site-access-other-detail",
+      key: "site_access_other_detail",
+      label: "Type of access detail",
+      inputType: "text",
+      sectionKey: "property",
+      groupKey: "property",
+      groupLabel: "Property/Building Info",
+      displayOrder: 1310,
+      isRequired: true,
+      parentNodeId: "site-access",
+      parentOptionValue: "Other",
+    }),
+    makeQuestionNode({
+      id: "number-of-units",
+      key: "number_of_units",
+      label: "Number of Units",
+      inputType: "number",
+      sectionKey: "property",
+      groupKey: "property",
+      groupLabel: "Property/Building Info",
+      displayOrder: 1400,
+      isRequired: true,
+    }),
+  ];
 }
 
 function mockUniversalCreateQuestionnaire(nodes = universalCreateQuestionnaireNodes()) {
@@ -1169,6 +1209,33 @@ describe("LeadForm", () => {
     const estimatedValue = container.querySelector("#estimated_value")?.parentElement;
     expect(estimatedValue?.textContent).toContain("$");
     expect(container.querySelector('[data-question-key="budget"]')).toBeNull();
+  });
+
+  it("renders Type of access and Number of Units Affected labels in the questionnaire", () => {
+    mockUniversalCreateQuestionnaire([
+      ...universalCreateQuestionnaireNodes(),
+      ...siteAccessQuestionNodes(),
+    ]);
+
+    renderCreateForm();
+
+    expect(container.textContent).toContain("Type of access");
+    expect(container.textContent).toContain("Number of Units Affected");
+  });
+
+  it("does not submit when Type of access is Other and the detail field is blank", async () => {
+    mockUniversalCreateQuestionnaire([
+      ...universalCreateQuestionnaireNodes(),
+      ...siteAccessQuestionNodes().map((node) => ({ ...node, isRequired: false })),
+    ]);
+
+    renderCreateForm();
+
+    await chooseQuestionSelectValue("site_access", "Other");
+    await submitForm();
+
+    expect(leadHookMocks.createLead).not.toHaveBeenCalled();
+    expect(container.textContent).toContain("Type of access detail");
   });
 
   it("renders questionnaire currency and Life Safety fields with production-safe controls", async () => {
@@ -1926,6 +1993,51 @@ describe("LeadForm", () => {
     } as any);
 
     expect(formState.projectTypeQuestionAnswers.permit_question).toBe("yes");
+  });
+
+  it("normalizes legacy Type of access answers in the read-only summary", () => {
+    const html = renderToStaticMarkup(
+      <MemoryRouter>
+        <LeadQuestionnaireSummary
+          lead={{
+            id: "lead-1",
+            name: "Lead One",
+            convertedDealId: null,
+            convertedDealNumber: null,
+            companyId: "company-1",
+            companyName: "Acme",
+            stageId: "stage-new",
+            propertyId: "property-1",
+            propertyName: "Palm Villas",
+            propertyAddress: "123 Main",
+            propertyCity: "Dallas",
+            propertyState: "TX",
+            propertyZip: "75001",
+            source: "Referral",
+            description: "",
+            projectTypeId: "type-1",
+            projectType: null,
+            qualificationPayload: {},
+            projectTypeQuestionPayload: { projectTypeId: "type-1", answers: {} },
+            leadQuestionnaire: {
+              projectTypeId: "type-1",
+              nodes: siteAccessQuestionNodes(),
+              allNodes: siteAccessQuestionNodes(),
+              answers: {
+                site_access: "Gate code required",
+              },
+            } as any,
+            stageEnteredAt: "2026-04-22T00:00:00.000Z",
+          }}
+        />
+      </MemoryRouter>
+    );
+
+    expect(html).toContain("Type of access");
+    expect(html).toContain("Other");
+    expect(html).toContain("Type of access detail");
+    expect(html).toContain("Gate code required");
+    expect(html).not.toContain(">Access<");
   });
 
   it("falls back to legacy payload questionnaire answers when no v2 answer exists", () => {
