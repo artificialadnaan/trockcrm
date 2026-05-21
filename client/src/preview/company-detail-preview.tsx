@@ -210,7 +210,7 @@ export function CompanyDetailPreview() {
           </Button>
           <Button size="sm">
             <Plus className="mr-1 h-4 w-4" />
-            New deal
+            New lead
           </Button>
           <button
             type="button"

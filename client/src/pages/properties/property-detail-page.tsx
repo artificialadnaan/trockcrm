@@ -180,6 +180,12 @@ export function PropertyDetailPage() {
   const cityLine = formatCityLine(property);
   const companyCamUrl = buildCompanyCamUrl(property.companycamProjectId ?? property.companycamId);
   const procorePropertyUrl = buildProcorePropertyUrl(property.procorePropertyId ?? property.procoreId);
+  const newLeadParams = new URLSearchParams();
+  newLeadParams.set("propertyId", property.id);
+  if (property.companyId) {
+    newLeadParams.set("companyId", property.companyId);
+  }
+  newLeadParams.set("name", `${property.name} opportunity`);
   const activePipelineValue =
     formatCurrencyCompact(property.activePipelineValue) ??
     formatCurrencyCompact(activeDeals.reduce((sum, deal) => sum + (bestDealValue(deal) ?? 0), 0));
@@ -295,11 +301,11 @@ export function PropertyDetailPage() {
             </a>
           ) : null}
           <Link
-            to={`/deals/new?propertyId=${property.id}${property.companyId ? `&companyId=${property.companyId}` : ""}`}
+            to={`/leads/new?${newLeadParams.toString()}`}
             className={cn(buttonVariants({ size: "sm" }), "bg-brand-red text-white hover:bg-brand-red/90")}
           >
             <Plus className="h-4 w-4" />
-            New deal
+            New lead
           </Link>
           <DropdownMenu>
             <DropdownMenuTrigger

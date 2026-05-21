@@ -1019,6 +1019,34 @@ describe("LeadForm", () => {
     );
   });
 
+  it("repairs the company prefill from the selected property before submit", async () => {
+    propertyDetail = {
+      ...completeProperty,
+      id: "property-1",
+      companyId: "company-1",
+      companyName: "Acme",
+    };
+
+    renderCreateForm({
+      companyId: "company-stale",
+      propertyId: "property-1",
+    });
+
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    await submitForm();
+
+    expect(leadHookMocks.createLead).toHaveBeenCalledWith(
+      expect.objectContaining({
+        companyId: "company-1",
+        propertyId: "property-1",
+      }),
+      { officeId: "office-dallas" }
+    );
+  });
+
   it("keeps the property requirement satisfied when a property id is selected", () => {
     const html = renderToStaticMarkup(
       <MemoryRouter>

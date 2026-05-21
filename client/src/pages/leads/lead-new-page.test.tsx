@@ -68,4 +68,22 @@ describe("LeadNewPage", () => {
       })
     );
   });
+
+  it("passes property-origin query params into the create form alongside the linked company", () => {
+    mocks.leadFormMock.mockReset();
+
+    renderPage("/leads/new?companyId=company-1&propertyId=property-1&name=Building%20A%20Opportunity");
+
+    expect(mocks.leadFormMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        mode: "create",
+        initialValues: expect.objectContaining({
+          companyId: "company-1",
+          propertyId: "property-1",
+          primaryContactId: "",
+          name: "Building A Opportunity",
+        }),
+      })
+    );
+  });
 });
