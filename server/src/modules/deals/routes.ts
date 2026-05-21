@@ -785,6 +785,8 @@ router.get("/", async (req, res, next) => {
       source: req.query.source as string | undefined,
       contractSignedFrom: req.query.contractSignedFrom as string | undefined,
       contractSignedTo: req.query.contractSignedTo as string | undefined,
+      createdFrom: req.query.createdFrom as string | undefined,
+      createdTo: req.query.createdTo as string | undefined,
       updatedFrom: req.query.updatedFrom as string | undefined,
       updatedTo: req.query.updatedTo as string | undefined,
       isActive: isActiveFilter,
