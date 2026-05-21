@@ -1,9 +1,8 @@
 import PDFDocument from "pdfkit";
-import { createRequire } from "node:module";
+import { existsSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import { getObjectBuffer, isR2Configured } from "../../lib/r2-client.js";
 import { TROCK_LOGO_PNG_BASE64 } from "./pdf-logo.js";
-
-const require = createRequire(import.meta.url);
 
 const PAGE_WIDTH = 612;
 const PAGE_HEIGHT = 792;
@@ -15,8 +14,10 @@ const BRAND_MUTED = "#7589A3";
 const BRAND_BORDER = "#EAECEF";
 const BRAND_PANEL = "#F7F7F8";
 const LOGO_BUFFER = Buffer.from(TROCK_LOGO_PNG_BASE64, "base64");
-const BRAND_FONT_NAME = "Geist Variable";
-const BRAND_FONT_FILE = "@fontsource-variable/geist/files/geist-latin-wght-normal.woff2";
+const BRAND_FONT_REGULAR_NAME = "Geist-Regular";
+const BRAND_FONT_BOLD_NAME = "Geist-Bold";
+const BRAND_FONT_REGULAR_PATH = fileURLToPath(new URL("./assets/fonts/Geist-Regular.otf", import.meta.url));
+const BRAND_FONT_BOLD_PATH = fileURLToPath(new URL("./assets/fonts/Geist-Bold.otf", import.meta.url));
 const COVER_LOGO_PANEL_X = 183;
 const COVER_LOGO_PANEL_Y = 322;
 const COVER_LOGO_PANEL_WIDTH = 246;
@@ -220,31 +221,31 @@ function fallbackReportFonts(): ReportFontSet {
   };
 }
 
-function resolveBrandFontPath(): string | null {
-  try {
-    return require.resolve(BRAND_FONT_FILE);
-  } catch (error) {
-    console.warn("[field-report-pdf] Geist Variable font asset could not be resolved; using Helvetica fallback.", error);
+function resolveBrandFontPaths(): { regular: string; bold: string } | null {
+  if (!existsSync(BRAND_FONT_REGULAR_PATH) || !existsSync(BRAND_FONT_BOLD_PATH)) {
+    console.warn("[field-report-pdf] embedded Geist OTF assets are unavailable; using Helvetica fallback.");
     return null;
   }
+
+  return {
+    regular: BRAND_FONT_REGULAR_PATH,
+    bold: BRAND_FONT_BOLD_PATH,
+  };
 }
 
 function registerReportFonts(doc: PDFKit.PDFDocument): ReportFontSet {
-  const fontPath = resolveBrandFontPath();
-  if (!fontPath) return fallbackReportFonts();
-
-  if (fontPath.endsWith(".woff2")) {
-    return fallbackReportFonts();
-  }
+  const fontPaths = resolveBrandFontPaths();
+  if (!fontPaths) return fallbackReportFonts();
 
   try {
-    doc.registerFont(BRAND_FONT_NAME, fontPath);
+    doc.registerFont(BRAND_FONT_REGULAR_NAME, fontPaths.regular);
+    doc.registerFont(BRAND_FONT_BOLD_NAME, fontPaths.bold);
     return {
-      regular: BRAND_FONT_NAME,
-      bold: BRAND_FONT_NAME,
+      regular: BRAND_FONT_REGULAR_NAME,
+      bold: BRAND_FONT_BOLD_NAME,
     };
   } catch (error) {
-    console.warn("[field-report-pdf] failed to register Geist Variable font with pdfkit; using Helvetica fallback.", error);
+    console.warn("[field-report-pdf] failed to register embedded Geist OTF fonts with pdfkit; using Helvetica fallback.", error);
     return fallbackReportFonts();
   }
 }
@@ -289,7 +290,7 @@ export async function renderFieldPhotoReportPdf(input: {
     doc.image(LOGO_BUFFER, COVER_LOGO_X, COVER_LOGO_Y, { fit: COVER_LOGO_FIT, align: "center", valign: "center" });
   } catch (error) {
     console.error("[field-report-pdf] failed to embed T Rock logo", error);
-    doc.fillColor(BRAND_RED).font("Helvetica-Bold").fontSize(30).text("T ROCK", PAGE_MARGIN, 380, {
+    doc.fillColor(BRAND_RED).font(reportFonts.bold).fontSize(30).text("T ROCK", PAGE_MARGIN, 380, {
       width: PAGE_WIDTH - PAGE_MARGIN * 2,
       align: "center",
     });

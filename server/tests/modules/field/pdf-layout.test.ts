@@ -4,6 +4,7 @@ import PDFDocument from "pdfkit";
 afterEach(() => {
   vi.restoreAllMocks();
   vi.resetModules();
+  vi.doUnmock("node:fs");
   vi.doUnmock("node:module");
 });
 
@@ -113,7 +114,7 @@ describe("field photo report pdf layout", () => {
     );
   });
 
-  it("uses Helvetica fallback fonts across the report when Geist is only available as a web font asset", async () => {
+  it("registers embedded Geist OTF fonts and uses them across the report by default", async () => {
     const renderFieldPhotoReportPdf = await importRenderer();
     const registerFontSpy = vi.spyOn(PDFDocument.prototype, "registerFont");
     const fontSpy = vi.spyOn(PDFDocument.prototype, "font");
@@ -121,22 +122,25 @@ describe("field photo report pdf layout", () => {
 
     await renderFieldPhotoReportPdf(buildSectionedInput());
 
-    expect(registerFontSpy).not.toHaveBeenCalled();
+    expect(registerFontSpy).toHaveBeenCalledWith(
+      "Geist-Regular",
+      expect.stringContaining("server/src/modules/field/assets/fonts/Geist-Regular.otf")
+    );
+    expect(registerFontSpy).toHaveBeenCalledWith(
+      "Geist-Bold",
+      expect.stringContaining("server/src/modules/field/assets/fonts/Geist-Bold.otf")
+    );
     expect(warnSpy).not.toHaveBeenCalled();
-    expect(fontSpy).toHaveBeenCalledWith("Helvetica");
-    expect(fontSpy).toHaveBeenCalledWith("Helvetica-Bold");
+    expect(fontSpy).toHaveBeenCalledWith("Geist-Regular");
+    expect(fontSpy).toHaveBeenCalledWith("Geist-Bold");
   });
 
-  it("falls back to Helvetica if the Geist asset cannot be resolved", async () => {
-    vi.doMock("node:module", async () => {
-      const actual = await vi.importActual<typeof import("node:module")>("node:module");
+  it("falls back to Helvetica if the embedded Geist OTF assets are unavailable", async () => {
+    vi.doMock("node:fs", async () => {
+      const actual = await vi.importActual<typeof import("node:fs")>("node:fs");
       return {
         ...actual,
-        createRequire: () => ({
-          resolve: () => {
-            throw new Error("missing font asset");
-          },
-        }),
+        existsSync: () => false,
       };
     });
 
@@ -148,23 +152,12 @@ describe("field photo report pdf layout", () => {
 
     expect(buffer.subarray(0, 4).toString("utf8")).toBe("%PDF");
     expect(warnSpy).toHaveBeenCalledWith(
-      "[field-report-pdf] Geist Variable font asset could not be resolved; using Helvetica fallback.",
-      expect.any(Error)
+      "[field-report-pdf] embedded Geist OTF assets are unavailable; using Helvetica fallback."
     );
     expect(fontSpy).toHaveBeenCalledWith("Helvetica-Bold");
   });
 
-  it("falls back to Helvetica if pdfkit rejects a PDF-compatible Geist font file", async () => {
-    vi.doMock("node:module", async () => {
-      const actual = await vi.importActual<typeof import("node:module")>("node:module");
-      return {
-        ...actual,
-        createRequire: () => ({
-          resolve: () => "/tmp/Geist.ttf",
-        }),
-      };
-    });
-
+  it("falls back to Helvetica if pdfkit rejects the embedded Geist OTF fonts", async () => {
     const renderFieldPhotoReportPdf = await importRenderer();
     const registerFontSpy = vi.spyOn(PDFDocument.prototype, "registerFont").mockImplementationOnce(() => {
       throw new Error("bad font");
@@ -175,9 +168,12 @@ describe("field photo report pdf layout", () => {
     const buffer = await renderFieldPhotoReportPdf(buildCoverInput());
 
     expect(buffer.subarray(0, 4).toString("utf8")).toBe("%PDF");
-    expect(registerFontSpy).toHaveBeenCalledWith("Geist Variable", "/tmp/Geist.ttf");
+    expect(registerFontSpy).toHaveBeenCalledWith(
+      "Geist-Regular",
+      expect.stringContaining("server/src/modules/field/assets/fonts/Geist-Regular.otf")
+    );
     expect(warnSpy).toHaveBeenCalledWith(
-      "[field-report-pdf] failed to register Geist Variable font with pdfkit; using Helvetica fallback.",
+      "[field-report-pdf] failed to register embedded Geist OTF fonts with pdfkit; using Helvetica fallback.",
       expect.any(Error)
     );
     expect(fontSpy).toHaveBeenCalledWith("Helvetica-Bold");
