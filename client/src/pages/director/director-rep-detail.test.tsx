@@ -5,7 +5,7 @@ import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { renderToStaticMarkup } from "react-dom/server";
 import type { InputHTMLAttributes, ReactNode } from "react";
-import { MemoryRouter, Route, Routes } from "react-router-dom";
+import { BrowserRouter, MemoryRouter, Route, Routes } from "react-router-dom";
 import { DirectorRepDetail } from "./director-rep-detail";
 
 (globalThis as unknown as { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
@@ -51,7 +51,26 @@ vi.mock("@/components/deals/deals-list-section", () => ({
 }));
 
 vi.mock("@/components/dashboard/date-range-toggle", () => ({
-  DateRangeToggle: ({ value }: { value: string }) => <div>Date Range: {value}</div>,
+  DateRangeToggle: ({
+    value,
+    onChange,
+  }: {
+    value: string;
+    onChange: (value: "mtd" | "qtd" | "ytd") => void;
+  }) => (
+    <div>
+      <div>Date Range: {value}</div>
+      <button type="button" onClick={() => onChange("mtd")}>
+        Preset MTD
+      </button>
+      <button type="button" onClick={() => onChange("qtd")}>
+        Preset QTD
+      </button>
+      <button type="button" onClick={() => onChange("ytd")}>
+        Preset YTD
+      </button>
+    </div>
+  ),
 }));
 
 vi.mock("@/components/dashboard/stat-card", () => ({
@@ -256,6 +275,36 @@ async function renderPageDom(initialEntry = "/director/rep/rep-1?preset=qtd") {
   };
 }
 
+async function renderPageWithRouter(initialEntry = "/director/rep/rep-1?preset=qtd") {
+  const container = document.createElement("div");
+  document.body.appendChild(container);
+  let root!: Root;
+  window.history.replaceState({}, "", initialEntry);
+
+  await act(async () => {
+    root = createRoot(container);
+    root.render(
+      <BrowserRouter>
+        <Routes>
+          <Route path="/director" element={<div>Director Home</div>} />
+          <Route path="/director/rep/:repId" element={<DirectorRepDetail />} />
+          <Route path="/leads/:leadId" element={<div data-testid="lead-detail-route">Lead Detail Route</div>} />
+        </Routes>
+      </BrowserRouter>
+    );
+  });
+
+  return {
+    container,
+    cleanup: async () => {
+      await act(async () => {
+        root.unmount();
+      });
+      container.remove();
+    },
+  };
+}
+
 describe("DirectorRepDetail", () => {
   beforeEach(() => {
     vi.useFakeTimers();
@@ -402,6 +451,95 @@ describe("DirectorRepDetail", () => {
     }
   });
 
+  it("shows the real label for leads in non-active-pipeline stages while keeping filter pills limited to active stages", () => {
+    mocks.useLeadsMock.mockReturnValue({
+      leads: [buildLead({ id: "lead-terminal", stageId: "lead-stage-disqualified" })],
+      loading: false,
+      error: null,
+      refetch: vi.fn(),
+    });
+    mocks.usePipelineStagesMock.mockReturnValue({
+      stages: [
+        { id: "lead-stage-new", name: "New Lead", slug: "new_lead", isActivePipeline: true },
+        { id: "lead-stage-qualified", name: "Qualified Lead", slug: "qualified_lead", isActivePipeline: true },
+        {
+          id: "lead-stage-disqualified",
+          name: "Disqualified Lead",
+          slug: "disqualified_lead",
+          isActivePipeline: false,
+        },
+      ],
+      loading: false,
+      error: null,
+    });
+
+    const html = renderPageHtml();
+
+    expect(html).toContain("Disqualified Lead");
+    expect(html).not.toContain(">Stage<");
+    expect(html).toContain("Qualified Lead");
+    expect(html).not.toContain("aria-pressed=\"false\">Disqualified Lead</button>");
+  });
+
+  it("syncs the list-range UI from URL changes while the route stays mounted", async () => {
+    const page = await renderPageWithRouter("/director/rep/rep-1?preset=qtd&listRange=dashboard");
+
+    try {
+      expect(page.container.textContent).toContain("Current list window");
+      expect(page.container.textContent).toContain("2026-04-01 to 2026-05-21");
+      const wtdBefore = Array.from(page.container.querySelectorAll("button")).find((button) =>
+        button.textContent?.includes("WTD")
+      );
+      expect(wtdBefore?.getAttribute("aria-pressed")).toBe("false");
+
+      await act(async () => {
+        window.history.pushState({}, "", "/director/rep/rep-1?preset=qtd&listRange=wtd");
+        window.dispatchEvent(new PopStateEvent("popstate"));
+      });
+
+      const wtdAfter = Array.from(page.container.querySelectorAll("button")).find((button) =>
+        button.textContent?.includes("WTD")
+      );
+      expect(wtdAfter?.getAttribute("aria-pressed")).toBe("true");
+      expect(page.container.textContent).toContain("2026-05-18 to 2026-05-21");
+      expect(mocks.useLeadsMock).toHaveBeenLastCalledWith(
+        expect.objectContaining({
+          createdFrom: "2026-05-18",
+          createdTo: "2026-05-21",
+        })
+      );
+      const lastDealsListCall =
+        mocks.dealsListSectionMock.mock.calls[mocks.dealsListSectionMock.mock.calls.length - 1]?.[0];
+      expect(lastDealsListCall).toEqual(
+        expect.objectContaining({
+          externalDateRange: { from: "2026-05-18", to: "2026-05-21" },
+        })
+      );
+    } finally {
+      await page.cleanup();
+    }
+  });
+
+  it("updates the URL when the user changes the list range in the UI", async () => {
+    const page = await renderPageWithRouter("/director/rep/rep-1?preset=qtd&listRange=dashboard");
+
+    try {
+      const wtdButton = Array.from(page.container.querySelectorAll("button")).find((button) =>
+        button.textContent?.includes("WTD")
+      );
+      expect(wtdButton).not.toBeNull();
+
+      await act(async () => {
+        wtdButton?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+      });
+
+      expect(window.location.search).toContain("listRange=wtd");
+      expect(page.container.textContent).toContain("2026-05-18 to 2026-05-21");
+    } finally {
+      await page.cleanup();
+    }
+  });
+
   it("renders newest leads first and routes rows to the lead detail page", async () => {
     mocks.useLeadsMock.mockReturnValue({
       leads: [
@@ -431,8 +569,10 @@ describe("DirectorRepDetail", () => {
   });
 
   it("renders the charts as the last section of the page", () => {
-    const html = renderPage("/director/rep/rep-1");
-    const headings = Array.from(html.matchAll(/<h2>(.*?)<\/h2>/g)).map((match) => match[1]);
+    const html = renderPageHtml("/director/rep/rep-1");
+    const headings = Array.from(html.matchAll(/<h2>(.*?)<\/h2>/g)).map(
+      (match: RegExpMatchArray) => match[1]
+    );
     const staleDealsIndex = html.indexOf("Stale Deals");
     const staleLeadsIndex = html.indexOf("Stale Leads");
     const pipelineChartIndex = html.indexOf("Pipeline by Stage");
