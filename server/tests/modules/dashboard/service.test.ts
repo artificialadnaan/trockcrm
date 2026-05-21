@@ -455,7 +455,7 @@ describe("Dashboard Service", () => {
             });
           }
 
-          if (text.includes("with lead_counts as") && text.includes("qualified_leads")) {
+          if (text.includes("qualified_leads") && text.includes("deal_owners")) {
             return Promise.resolve({
               rows: [
                 { rep_id: "rep-2", rep_name: "Alex Rep", leads: "2", qualified_leads: "1", opportunities: "1", estimating: "1" },
@@ -477,6 +477,215 @@ describe("Dashboard Service", () => {
         { key: "estimating", label: "Bid Board Pipeline", count: 3, totalValue: 130000, route: "/deals", bucket: "estimating" },
       ]);
       expect(result.repFunnelRows.map((row) => row.repName)).toEqual(["Blair Rep", "Alex Rep"]);
+    });
+
+    it("includes deal-owning directors and admins in the rep-card list while leaving dashboard totals unchanged", async () => {
+      const { getDirectorDashboard } = await import("../../../src/modules/dashboard/service.js");
+      const tenantDb = {
+        execute: vi.fn().mockImplementation((query: unknown) => {
+          const text = extractSqlText(query).toLowerCase();
+
+          if (text.includes("from users u") && text.includes("coalesce(rd.active_deals, 0)::int as active_deals")) {
+            return Promise.resolve({
+              rows: [
+                {
+                  rep_id: "rep-1",
+                  rep_name: "Alex Rep",
+                  active_deals: "4",
+                  pipeline_value: "250000",
+                  wins: "2",
+                  losses: "1",
+                  activity_score: "14",
+                  stale_deals: "1",
+                  stale_leads: "0",
+                },
+                {
+                  rep_id: "director-1",
+                  rep_name: "Brett Bell",
+                  active_deals: "3",
+                  pipeline_value: "180000",
+                  wins: "1",
+                  losses: "0",
+                  activity_score: "9",
+                  stale_deals: "0",
+                  stale_leads: "0",
+                },
+                {
+                  rep_id: "admin-1",
+                  rep_name: "Adnaan Iqbal",
+                  active_deals: "2",
+                  pipeline_value: "95000",
+                  wins: "1",
+                  losses: "1",
+                  activity_score: "7",
+                  stale_deals: "0",
+                  stale_leads: "1",
+                },
+              ],
+            });
+          }
+
+          if (text.includes("scope_summary")) {
+            return Promise.resolve({
+              rows: [
+                {
+                  active_pipeline_count: "4",
+                  active_pipeline_total: "610000",
+                  won_count: "1",
+                  won_total: "125000",
+                  at_risk_count: "1",
+                  at_risk_total: "275000",
+                  stale_count: "1",
+                  stale_total: "275000",
+                },
+              ],
+            });
+          }
+
+          if (text.includes("dd_value") && text.includes("pipeline_value")) {
+            return Promise.resolve({
+              rows: [{ dd_value: "0", dd_count: "0", pipeline_value: "0", pipeline_count: "0", total_value: "0", total_count: "0" }],
+            });
+          }
+
+          return Promise.resolve({ rows: [] });
+        }),
+      } as any;
+
+      const result = await getDirectorDashboard(tenantDb, { from: "2026-01-01", to: "2026-12-31", officeId: "office-1" });
+      const repCardsQueryText = extractSqlText(tenantDb.execute.mock.calls[0][0]).toLowerCase();
+
+      expect(repCardsQueryText).not.toContain("and u.role = 'rep'");
+      expect(repCardsQueryText).toContain("deal_owners");
+      expect(repCardsQueryText).toContain("u.role = 'rep' or owner_rows.rep_id is not null");
+      expect(result.repCards.map((row) => row.repName)).toEqual(["Alex Rep", "Brett Bell", "Adnaan Iqbal"]);
+      expect(result.repCards.find((row) => row.repName === "Brett Bell")).toMatchObject({
+        activeDeals: 3,
+        pipelineValue: 180000,
+        winRate: 100,
+        activityScore: 9,
+      });
+      expect(result.scopeSummary).toMatchObject({
+        activePipeline: { count: expect.any(Number), totalValue: expect.any(Number) },
+        won: { count: expect.any(Number), totalValue: expect.any(Number) },
+        atRisk: { count: expect.any(Number), totalValue: expect.any(Number) },
+        stale: { count: expect.any(Number), totalValue: expect.any(Number) },
+      });
+    });
+
+    it("includes deal-owning directors/admins in funnel rows without widening via lead-only non-reps", async () => {
+      const { getDirectorDashboard } = await import("../../../src/modules/dashboard/service.js");
+      const tenantDb = {
+        execute: vi.fn().mockImplementation((query: unknown) => {
+          const text = extractSqlText(query).toLowerCase();
+
+          if (
+            text.includes("from leads l") &&
+            text.includes("psc.workflow_family = 'lead'") &&
+            text.includes("group by psc.slug")
+          ) {
+            return Promise.resolve({ rows: [] });
+          }
+
+          if (
+            text.includes("from deals d") &&
+            text.includes("estimate_in_progress") &&
+            text.includes("group by psc.slug")
+          ) {
+            return Promise.resolve({ rows: [] });
+          }
+
+          if (text.includes("qualified_leads") && text.includes("deal_owners")) {
+            return Promise.resolve({
+              rows: [
+                { rep_id: "rep-1", rep_name: "Alex Rep", leads: "2", qualified_leads: "1", opportunities: "0", estimating: "1" },
+                { rep_id: "director-1", rep_name: "James Helms", leads: "0", qualified_leads: "0", opportunities: "0", estimating: "3" },
+                { rep_id: "admin-1", rep_name: "Adnaan Iqbal", leads: "0", qualified_leads: "0", opportunities: "0", estimating: "2" },
+              ],
+            });
+          }
+
+          if (text.includes("dd_value") && text.includes("pipeline_value")) {
+            return Promise.resolve({
+              rows: [{ dd_value: "0", dd_count: "0", pipeline_value: "0", pipeline_count: "0", total_value: "0", total_count: "0" }],
+            });
+          }
+
+          return Promise.resolve({ rows: [] });
+        }),
+      } as any;
+
+      const result = await getDirectorDashboard(tenantDb, { from: "2026-01-01", to: "2026-12-31", officeId: "office-1" });
+      const funnelQueryText = tenantDb.execute.mock.calls
+        .map(([query]: [unknown]) => extractSqlText(query).toLowerCase())
+        .find((text: string) => text.includes("qualified_leads") && text.includes("deal_owners"));
+
+      expect(funnelQueryText).not.toContain("and u.role = 'rep'");
+      expect(funnelQueryText).toContain("deal_owners");
+      expect(funnelQueryText).toContain("u.role = 'rep' or owner_rows.rep_id is not null");
+      expect(result.repFunnelRows.map((row) => row.repName)).toEqual([
+        "Alex Rep",
+        "James Helms",
+        "Adnaan Iqbal",
+      ]);
+      expect(result.repFunnelRows.find((row) => row.repName === "James Helms")).toMatchObject({
+        leads: 0,
+        qualifiedLeads: 0,
+        opportunities: 0,
+        estimating: 3,
+      });
+    });
+
+    it("gates non-rep inclusion on deal ownership rather than lead or activity presence", async () => {
+      const { getDirectorDashboard } = await import("../../../src/modules/dashboard/service.js");
+      const tenantDb = createMockTenantDb([
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [{ dd_value: "0", dd_count: "0", pipeline_value: "0", pipeline_count: "0", total_value: "0", total_count: "0" }],
+      ]);
+
+      await getDirectorDashboard(tenantDb, { from: "2026-01-01", to: "2026-12-31", officeId: "office-1" });
+
+      const repCardsQueryText = extractSqlText(tenantDb.execute.mock.calls[0][0]).toLowerCase();
+      const funnelQueryText = tenantDb.execute.mock.calls
+        .map(([query]: [unknown]) => extractSqlText(query).toLowerCase())
+        .find((text: string) => text.includes("qualified_leads") && text.includes("deal_owners"));
+
+      expect(repCardsQueryText).toContain("deal_owners");
+      expect(repCardsQueryText).toContain("from deals d\n      where d.assigned_rep_id is not null");
+      expect(repCardsQueryText).not.toContain("or rd.rep_id is not null");
+      expect(repCardsQueryText).not.toContain("or rw.rep_id is not null");
+      expect(repCardsQueryText).not.toContain("or ra.rep_id is not null");
+      expect(funnelQueryText).toContain("deal_owners");
+      expect(funnelQueryText).toContain("from deals d\n        where d.assigned_rep_id is not null");
+      expect(funnelQueryText).not.toContain("or lc.rep_id is not null");
+      expect(funnelQueryText).not.toContain("or dc.rep_id is not null");
+    });
+
+    it("limits deal-owner widening to the per-rep row queries and leaves aggregate queries untouched", async () => {
+      const { getDirectorDashboard } = await import("../../../src/modules/dashboard/service.js");
+      const tenantDb = createMockTenantDb([
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [{ dd_value: "0", dd_count: "0", pipeline_value: "0", pipeline_count: "0", total_value: "0", total_count: "0" }],
+      ]);
+
+      await getDirectorDashboard(tenantDb, { from: "2026-01-01", to: "2026-12-31", officeId: "office-1" });
+
+      const dealOwnerQueries = tenantDb.execute.mock.calls
+        .map(([query]: [unknown]) => extractSqlText(query).toLowerCase())
+        .filter((text: string) => text.includes("deal_owners"));
+
+      expect(dealOwnerQueries).toHaveLength(2);
+      expect(dealOwnerQueries.every((text: string) => text.includes("from users u"))).toBe(true);
     });
 
     it("manager override applies to commission amount, not full contract value", async () => {

@@ -696,7 +696,14 @@ async function getDirectorFunnelSummary(
       GROUP BY psc.slug
     `),
     tenantDb.execute(sql`
-      WITH lead_counts AS (
+      WITH deal_owners AS (
+        -- Locked requirement: widen the rep workspace for deal-owning non-reps
+        -- without widening it for lead-only directors/admins.
+        SELECT DISTINCT d.assigned_rep_id AS rep_id
+        FROM deals d
+        WHERE d.assigned_rep_id IS NOT NULL
+      ),
+      lead_counts AS (
         SELECT
           l.assigned_rep_id AS rep_id,
           COUNT(*) FILTER (
@@ -735,10 +742,11 @@ async function getDirectorFunnelSummary(
         COALESCE(lc.opportunities, 0)::int AS opportunities,
         COALESCE(dc.estimating, 0)::int AS estimating
       FROM users u
+      LEFT JOIN deal_owners owner_rows ON owner_rows.rep_id = u.id
       LEFT JOIN lead_counts lc ON lc.rep_id = u.id
       LEFT JOIN deal_counts dc ON dc.rep_id = u.id
       WHERE u.is_active = true
-        AND u.role = 'rep'
+        AND (u.role = 'rep' OR owner_rows.rep_id IS NOT NULL)
       ORDER BY
         (
           COALESCE(lc.leads, 0) +
@@ -2407,7 +2415,14 @@ async function buildRepPerformanceCards(
   const { from, to } = options;
 
   const result = await tenantDb.execute(sql`
-    WITH rep_deals AS (
+    WITH deal_owners AS (
+      -- Locked requirement: keep all active reps, and also include non-reps who
+      -- have ever owned at least one deal so their row appears on the dashboard.
+      SELECT DISTINCT d.assigned_rep_id AS rep_id
+      FROM deals d
+      WHERE d.assigned_rep_id IS NOT NULL
+    ),
+    rep_deals AS (
       SELECT
         d.assigned_rep_id AS rep_id,
         COUNT(*) FILTER (WHERE d.is_active AND ${nonTerminalDealStageSql()})::int AS active_deals,
@@ -2481,13 +2496,14 @@ async function buildRepPerformanceCards(
       COALESCE(rs.stale_count, 0)::int AS stale_deals,
       COALESCE(rsl.stale_lead_count, 0)::int AS stale_leads
     FROM users u
+    LEFT JOIN deal_owners owner_rows ON owner_rows.rep_id = u.id
     LEFT JOIN rep_deals rd ON rd.rep_id = u.id
     LEFT JOIN rep_wins rw ON rw.rep_id = u.id
     LEFT JOIN rep_activities ra ON ra.rep_id = u.id
     LEFT JOIN rep_stale rs ON rs.rep_id = u.id
     LEFT JOIN rep_stale_leads rsl ON rsl.rep_id = u.id
     WHERE u.is_active = true
-      AND u.role = 'rep'
+      AND (u.role = 'rep' OR owner_rows.rep_id IS NOT NULL)
     ORDER BY pipeline_value DESC
   `);
 

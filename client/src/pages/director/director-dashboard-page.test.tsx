@@ -501,6 +501,115 @@ describe("DirectorDashboardPage", () => {
     expect(html).toContain("$910,000");
   });
 
+  it("renders a deal-owning director row with populated stats when the API includes it", () => {
+    mocks.useRepPerformanceMock.mockReturnValue({
+      ...mocks.useRepPerformanceMock(),
+      data: {
+        ...mocks.useRepPerformanceMock().data,
+        reps: [
+          ...mocks.useRepPerformanceMock().data.reps,
+          {
+            repId: "director-1",
+            repName: "Brett Bell",
+            current: {
+              dealsWon: 1,
+              dealsLost: 0,
+              totalWonValue: 31071,
+              activitiesLogged: 9,
+              winRate: 100,
+              avgDaysToClose: 12,
+            },
+            previous: null,
+            change: {
+              dealsWon: 0,
+              dealsLost: null,
+              totalWonValue: 0,
+              activitiesLogged: 0,
+              winRate: 0,
+              avgDaysToClose: 0,
+            },
+            percentChange: {
+              dealsWon: 0,
+              dealsLost: null,
+              totalWonValue: 0,
+              activitiesLogged: 0,
+              winRate: 0,
+              avgDaysToClose: 0,
+            },
+          },
+        ],
+        rows: [
+          ...mocks.useRepPerformanceMock().data.rows,
+          {
+            repId: "director-1",
+            repName: "Brett Bell",
+            periodKind: "qtd",
+            periodStart: "2026-04-01",
+            periodEnd: "2026-06-30",
+            pipelineValue: 180000,
+            closedValue: 31071,
+            dealsCount: 3,
+            winsCount: 1,
+            lossesCount: 0,
+            winRate: 100,
+            avgDaysToClose: 12,
+            atRiskCount: 0,
+            activityTotal: 9,
+            calls: 2,
+            emails: 5,
+            meetings: 1,
+            notes: 1,
+            sparkline8w: [0, 0, 0, 1, 1, 1, 1, 1],
+            region: "Dallas Office",
+            computedAt: "2026-05-08T12:00:00Z",
+            forecast: 180000,
+            goal: 500000,
+            goalSource: "manual",
+            percentToGoal: 36,
+            forecastVsGoal: {
+              forecast: 180000,
+              goal: 500000,
+              goalSource: "manual",
+              percentToGoal: 36,
+            },
+            previous: null,
+          },
+        ],
+      },
+    });
+
+    mocks.useDirectorDashboardMock.mockReturnValue({
+      ...mocks.useDirectorDashboardMock(),
+      data: {
+        ...mocks.useDirectorDashboardMock().data,
+        repFunnelRows: [
+          ...mocks.useDirectorDashboardMock().data.repFunnelRows,
+          { repId: "director-1", repName: "Brett Bell", leads: 0, qualifiedLeads: 0, opportunities: 0, estimating: 3 },
+        ],
+        repCards: [
+          ...mocks.useDirectorDashboardMock().data.repCards,
+          {
+            repId: "director-1",
+            repName: "Brett Bell",
+            activeDeals: 3,
+            pipelineValue: 180000,
+            winRate: 100,
+            activityScore: 9,
+            staleDeals: 0,
+            staleLeads: 0,
+          },
+        ],
+      },
+    });
+
+    const html = renderPageHtml();
+
+    expect(html).toContain("Brett Bell");
+    expect(html).toContain("$31,071");
+    expect(html).toContain("$180,000");
+    expect(html).toContain("Dallas Office");
+  });
+
   it("links the summary cards and drill-down badges to their filtered destinations", () => {
     const html = renderPageHtml();
 
