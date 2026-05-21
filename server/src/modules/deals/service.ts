@@ -62,6 +62,29 @@ function nonTerminalMirroredStageCondition() {
   return sql`COALESCE(${deals.bidBoardStageSlug}, '') NOT IN (${sqlStringList(TERMINAL_STAGE_SLUGS)})`;
 }
 
+function normalizeOptionalDealBidDueDate(value: string | null | undefined) {
+  if (value == null || value.trim() === "") {
+    return null;
+  }
+
+  const trimmed = value.trim();
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(trimmed)) {
+    throw new AppError(400, "bidDueDate must be an ISO date in YYYY-MM-DD format");
+  }
+
+  const [year, month, day] = trimmed.split("-").map(Number);
+  const parsed = new Date(Date.UTC(year, month - 1, day));
+  if (
+    parsed.getUTCFullYear() !== year ||
+    parsed.getUTCMonth() !== month - 1 ||
+    parsed.getUTCDate() !== day
+  ) {
+    throw new AppError(400, "bidDueDate must be an ISO date in YYYY-MM-DD format");
+  }
+
+  return trimmed;
+}
+
 async function resolveActiveOfficeScope(tenantDb: TenantDb, activeOfficeId: string) {
   const [office, officeUserIds] = await Promise.all([
     db
@@ -158,6 +181,7 @@ export interface CreateDealInput {
   ddEstimate?: string;
   bidEstimate?: string;
   awardedAmount?: string;
+  bidDueDate?: string | null;
   description?: string;
   propertyAddress?: string;
   propertyCity?: string;
@@ -1279,6 +1303,7 @@ export async function createDeal(tenantDb: TenantDb, input: CreateDealInput) {
 
   const officeCode = assertValidOfficeCode(input.officeCode);
   const projectType = input.projectType ? await assertValidProjectType(input.projectType) : null;
+  const normalizedBidDueDate = normalizeOptionalDealBidDueDate(input.bidDueDate);
   const createdAt = new Date();
   const dealNumber = await generateDealNumberForProject(tenantDb, {
     id: "new",
@@ -1302,6 +1327,7 @@ export async function createDeal(tenantDb: TenantDb, input: CreateDealInput) {
       ddEstimate: input.ddEstimate ?? null,
       bidEstimate: input.bidEstimate ?? null,
       awardedAmount: input.awardedAmount ?? null,
+      bidDueDate: normalizedBidDueDate ? sql`${normalizedBidDueDate}::date` : null,
       description: input.description ?? null,
       propertyAddress: input.propertyAddress ?? null,
       propertyCity: input.propertyCity ?? null,
