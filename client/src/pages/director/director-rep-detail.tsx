@@ -241,6 +241,12 @@ export function DirectorRepDetail() {
         </CardContent>
       </Card>
 
+      {/* Stale Deals */}
+      <StaleDealList deals={data.staleDeals} />
+
+      {/* Stale Leads */}
+      <StaleLeadList leads={data.staleLeads} dateRange={dateRange} />
+
       {/* Charts */}
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
         <Card>
@@ -269,12 +275,6 @@ export function DirectorRepDetail() {
           </CardContent>
         </Card>
       </div>
-
-      {/* Stale Deals */}
-      <StaleDealList deals={data.staleDeals} />
-
-      {/* Stale Leads */}
-      <StaleLeadList leads={data.staleLeads} dateRange={dateRange} />
     </div>
   );
 }

@@ -129,4 +129,17 @@ describe("DirectorRepDetail", () => {
     expect(html).toContain("Logged in this year across calls, emails, meetings, and notes.");
     expect(html).toContain("Calls logged in this year");
   });
+
+  it("renders the charts as the last section of the page", () => {
+    const html = renderPage("/director/rep/rep-1");
+    const headings = Array.from(html.matchAll(/<h2>(.*?)<\/h2>/g)).map((match) => match[1]);
+    const penultimateHeading = headings[headings.length - 2];
+    const lastHeading = headings[headings.length - 1];
+
+    expect(html.indexOf("Stale Deals")).toBeLessThan(html.indexOf("Pipeline by Stage"));
+    expect(html.indexOf("Stale Leads")).toBeLessThan(html.indexOf("Pipeline by Stage"));
+    expect(html.indexOf("Pipeline by Stage")).toBeLessThan(html.indexOf("Win Rate Trend"));
+    expect(penultimateHeading).toBe("Pipeline by Stage");
+    expect(lastHeading).toBe("Win Rate Trend");
+  });
 });
