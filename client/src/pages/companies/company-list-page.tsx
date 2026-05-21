@@ -98,7 +98,7 @@ export function CompanyListPage() {
 
       <div className="grid gap-4 md:grid-cols-3">
         <MetricCard eyebrow="Total accounts" value={String(pagination.total)} badge={`${companies.length} shown`} caption="Directory" tone="green" accent="red" />
-        <MetricCard eyebrow="Active pipeline" value={USD_COMPACT(totals.pipeline)} badge={`${totals.activeDeals} deals`} caption="Open value" tone="blue" accent="blue" />
+        <MetricCard eyebrow="Active pipeline" value={USD_COMPACT(totals.pipeline)} badge={`${totals.activeDeals} active deals`} caption="Open value" tone="blue" accent="blue" />
         <MetricCard eyebrow="Untouched 30d+" value={String(totals.stale)} badge="Review" caption="Needs touch" tone="red" accent="red" />
       </div>
 
@@ -200,7 +200,7 @@ export function CompanyListPage() {
                       <TableCell className="text-right font-black tabular-nums">{company.contactsCount ?? company.contactCount}</TableCell>
                       <TableCell className="text-right">
                         <span className="rounded-full bg-red-50 px-2.5 py-1 text-xs font-black text-brand-red ring-1 ring-red-100">
-                          {company.activeDealsCount ?? company.dealCount}
+                          {(company.activeDealsCount ?? company.dealCount)}/{company.dealCount}
                         </span>
                       </TableCell>
                       <TableCell className="text-right font-black tabular-nums text-slate-950">{USD(numeric(company.pipelineValue))}</TableCell>

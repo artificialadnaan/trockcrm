@@ -245,12 +245,13 @@ export function CompanyDetailPage() {
   const websiteUrl = buildCompanyWebsiteUrl(websiteRaw);
   const propertyCount = company.propertiesCount;
   const contactCount = company.contactsCount ?? company.contactCount;
-  const dealCount = company.activeDealsCount ?? company.dealCount;
+  const dealCount = company.dealCount;
+  const activeDealCount = company.activeDealsCount ?? company.dealCount;
   const pipelineKpiValue =
     company.pipelineValue == null || company.pipelineValue === ""
-      ? dealCount == null
+      ? activeDealCount == null
         ? "Unknown"
-        : String(dealCount)
+        : String(activeDealCount)
       : formatCurrencyCompact(company.pipelineValue);
 
   const handleVerifyCompany = async () => {
@@ -277,7 +278,7 @@ export function CompanyDetailPage() {
     { id: "overview", label: "Overview", icon: <FileText className="h-4 w-4" /> },
     { id: "contacts", label: "Contacts", icon: <Users className="h-4 w-4" />, count: contactCount },
     { id: "portfolio", label: "Portfolio", icon: <Building2 className="h-4 w-4" />, count: propertyCount },
-    { id: "deals", label: "Deals", icon: <Handshake className="h-4 w-4" />, count: dealCount },
+    { id: "deals", label: "Deals", icon: <Handshake className="h-4 w-4" />, count: dealCount ?? activeDealCount },
     { id: "files", label: "Files", icon: <FileText className="h-4 w-4" /> },
     { id: "emails", label: "Emails", icon: <Mail className="h-4 w-4" />, count: company.emailCount ?? 0 },
     { id: "activity", label: "Activity", icon: <ActivityIcon className="h-4 w-4" /> },
@@ -288,7 +289,10 @@ export function CompanyDetailPage() {
     {
       eyebrow: "Active pipeline",
       value: pipelineKpiValue,
-      captionLabel: dealCount == null ? "No data" : `${dealCount} deals`,
+      captionLabel:
+        dealCount == null
+          ? "No data"
+          : `${activeDealCount}/${dealCount} deals`,
       captionContext: company.pipelineValue == null || company.pipelineValue === "" ? "No tracked value" : "open value",
     },
     {

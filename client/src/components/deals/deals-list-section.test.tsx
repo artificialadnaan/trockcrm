@@ -537,6 +537,21 @@ describe("DealsListSection", () => {
     expect(html).toContain("disabled:text-muted-foreground");
   });
 
+  it("renders an active-versus-total pagination summary when provided", () => {
+    mocks.useDealsMock.mockReturnValue({
+      deals: [makeDeal(), makeDeal({ id: "deal-2", name: "Second" })],
+      pagination: { page: 1, limit: 25, total: 60, totalPages: 3 },
+      loading: false,
+      error: null,
+      refetch: vi.fn(),
+    });
+
+    const html = render({ paginationCountSummary: { active: 42, total: 60 } });
+
+    expect(html).toContain("42/60 active records");
+    expect(html).not.toContain("60 total records");
+  });
+
   it("resets pagination when the drill-down context changes", async () => {
     mocks.useDealsMock.mockImplementation((input: { page: number }) => ({
       deals: [makeDeal({ id: `deal-page-${input.page}` })],

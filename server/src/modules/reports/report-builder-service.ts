@@ -4,6 +4,7 @@ import { deals, pipelineStageConfig, users } from "@trock-crm/shared/schema";
 import type * as schema from "@trock-crm/shared/schema";
 import type { UserRole } from "@trock-crm/shared/types";
 import { AppError } from "../../middleware/error-handler.js";
+import { aliasedEffectiveDealValueSql } from "../shared/deal-value-sql.js";
 
 type TenantDb = NodePgDatabase<typeof schema>;
 
@@ -83,7 +84,7 @@ const DATE_FIELDS: Record<ReportDateField, ReturnType<typeof sql>> = {
 };
 
 function dealValueSql() {
-  return sql`COALESCE(d.awarded_amount, d.bid_estimate, d.dd_estimate, 0)::numeric`;
+  return aliasedEffectiveDealValueSql("d");
 }
 
 function dimensionSql(dimension: ReportDimension, dateFieldSql: ReturnType<typeof sql>) {

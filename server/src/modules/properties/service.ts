@@ -8,6 +8,7 @@ import {
 } from "@trock-crm/shared/schema";
 import type * as schema from "@trock-crm/shared/schema";
 import { AppError } from "../../middleware/error-handler.js";
+import { effectiveDealValueSql } from "../shared/deal-value-sql.js";
 
 type TenantDb = NodePgDatabase<typeof schema>;
 
@@ -288,38 +289,36 @@ export async function listProperties(
 
   const where = and(...conditions);
 
-  const [rows, totalResult] = await Promise.all([
-    tenantDb
-      .select({
-        id: properties.id,
-        companyId: properties.companyId,
-        name: properties.name,
-        address: properties.address,
-        city: properties.city,
-        state: properties.state,
-        zip: properties.zip,
-        type: properties.type,
-        buildYear: properties.buildYear,
-        unitCount: properties.unitCount,
-        floors: properties.floors,
-        roofArea: properties.roofArea,
-        notes: properties.notes,
-        lastActivityAt: properties.lastActivityAt,
-        procoreId: properties.procoreId,
-        companycamId: properties.companycamId,
-        isActive: properties.isActive,
-        createdAt: properties.createdAt,
-        updatedAt: properties.updatedAt,
-        companyName: companies.name,
-      })
-      .from(properties)
-      .leftJoin(companies, eq(companies.id, properties.companyId))
-      .where(where)
-      .orderBy(asc(companies.name), asc(properties.name), asc(properties.address))
-      .limit(limit)
-      .offset(offset),
-    tenantDb.select({ count: count() }).from(properties).where(where),
-  ]);
+  const rows = await tenantDb
+    .select({
+      id: properties.id,
+      companyId: properties.companyId,
+      name: properties.name,
+      address: properties.address,
+      city: properties.city,
+      state: properties.state,
+      zip: properties.zip,
+      type: properties.type,
+      buildYear: properties.buildYear,
+      unitCount: properties.unitCount,
+      floors: properties.floors,
+      roofArea: properties.roofArea,
+      notes: properties.notes,
+      lastActivityAt: properties.lastActivityAt,
+      procoreId: properties.procoreId,
+      companycamId: properties.companycamId,
+      isActive: properties.isActive,
+      createdAt: properties.createdAt,
+      updatedAt: properties.updatedAt,
+      companyName: companies.name,
+    })
+    .from(properties)
+    .leftJoin(companies, eq(companies.id, properties.companyId))
+    .where(where)
+    .orderBy(asc(companies.name), asc(properties.name), asc(properties.address))
+    .limit(limit)
+    .offset(offset);
+  const totalResult = await tenantDb.select({ count: count() }).from(properties).where(where);
 
   const propertyIds = rows.map((row) => row.id);
   if (propertyIds.length === 0) {
@@ -331,47 +330,49 @@ export async function listProperties(
     };
   }
 
-  const [leadCounts, dealCounts, convertedCounts, leadActivity, dealActivity, activeDealValues, photoCounts] = await Promise.all([
-    tenantDb
-      .select({ propertyId: leads.propertyId, count: count() })
-      .from(leads)
-      .where(and(inArray(leads.propertyId, propertyIds), eq(leads.isActive, true)))
-      .groupBy(leads.propertyId),
-    tenantDb
-      .select({ propertyId: deals.propertyId, count: count() })
-      .from(deals)
-      .where(and(inArray(deals.propertyId, propertyIds), eq(deals.isActive, true)))
-      .groupBy(deals.propertyId),
-    tenantDb
-      .select({ propertyId: deals.propertyId, count: count() })
-      .from(deals)
-      .where(and(inArray(deals.propertyId, propertyIds), sql`${deals.sourceLeadId} is not null`))
-      .groupBy(deals.propertyId),
-    tenantDb
-      .select({
-        propertyId: leads.propertyId,
-        lastActivityAt: sql<Date | null>`max(${leads.lastActivityAt})`,
-      })
-      .from(leads)
-      .where(inArray(leads.propertyId, propertyIds))
-      .groupBy(leads.propertyId),
-    tenantDb
-      .select({
-        propertyId: deals.propertyId,
-        lastActivityAt: sql<Date | null>`max(${deals.lastActivityAt})`,
-      })
-      .from(deals)
-      .where(inArray(deals.propertyId, propertyIds))
-      .groupBy(deals.propertyId),
-    tenantDb
-      .select({
-        propertyId: deals.propertyId,
-        linkedValue: sql<string>`COALESCE(SUM(COALESCE(${deals.awardedAmount}, ${deals.bidEstimate}, ${deals.ddEstimate}, ${deals.forecastRevenue}, 0)), 0)::text`,
-      })
-      .from(deals)
-      .where(and(inArray(deals.propertyId, propertyIds), eq(deals.isActive, true)))
-      .groupBy(deals.propertyId),
-    tenantDb.execute(sql`
+  const leadCounts = await tenantDb
+    .select({ propertyId: leads.propertyId, count: count() })
+    .from(leads)
+    .where(and(inArray(leads.propertyId, propertyIds), eq(leads.isActive, true)))
+    .groupBy(leads.propertyId);
+  const dealCounts = await tenantDb
+    .select({ propertyId: deals.propertyId, count: count() })
+    .from(deals)
+    .where(and(inArray(deals.propertyId, propertyIds), eq(deals.isActive, true)))
+    .groupBy(deals.propertyId);
+  const convertedCounts = await tenantDb
+    .select({ propertyId: deals.propertyId, count: count() })
+    .from(deals)
+    .where(and(inArray(deals.propertyId, propertyIds), sql`${deals.sourceLeadId} is not null`))
+    .groupBy(deals.propertyId);
+  const leadActivity = await tenantDb
+    .select({
+      propertyId: leads.propertyId,
+      lastActivityAt: sql<Date | null>`max(${leads.lastActivityAt})`,
+    })
+    .from(leads)
+    .where(inArray(leads.propertyId, propertyIds))
+    .groupBy(leads.propertyId);
+  const dealActivity = await tenantDb
+    .select({
+      propertyId: deals.propertyId,
+      lastActivityAt: sql<Date | null>`max(${deals.lastActivityAt})`,
+    })
+    .from(deals)
+    .where(inArray(deals.propertyId, propertyIds))
+    .groupBy(deals.propertyId);
+  const activeDealValues = await tenantDb
+    .select({
+      propertyId: deals.propertyId,
+      linkedValue: sql<string>`COALESCE(SUM(${effectiveDealValueSql(
+        deals,
+        sql`COALESCE(${deals.awardedAmount}, ${deals.bidEstimate}, ${deals.ddEstimate}, ${deals.forecastRevenue}, 0)`
+      )}), 0)::text`,
+    })
+    .from(deals)
+    .where(and(inArray(deals.propertyId, propertyIds), eq(deals.isActive, true)))
+    .groupBy(deals.propertyId);
+  const photoCounts = await tenantDb.execute(sql`
       SELECT linked.property_id, COUNT(DISTINCT linked.file_id)::int AS photos_count
       FROM (
         SELECT d.property_id, f.id AS file_id
@@ -389,8 +390,7 @@ export async function listProperties(
           AND f.is_active = true
       ) linked
       GROUP BY linked.property_id
-    `),
-  ]);
+    `);
 
   const leadCountMap = new Map(leadCounts.map((row) => [row.propertyId, coerceCount(row.count)]));
   const dealCountMap = new Map(dealCounts.map((row) => [row.propertyId, coerceCount(row.count)]));
@@ -547,24 +547,26 @@ export async function getPropertyDetail(tenantDb: TenantDb, propertyId: string) 
     return null;
   }
 
-  const [relatedLeads, relatedDeals, linkedValueRows, photoCounts] = await Promise.all([
-    tenantDb
-      .select()
-      .from(leads)
-      .where(eq(leads.propertyId, propertyId))
-      .orderBy(desc(leads.updatedAt), desc(leads.createdAt)),
-    tenantDb
-      .select()
-      .from(deals)
-      .where(eq(deals.propertyId, propertyId))
-      .orderBy(desc(deals.updatedAt), desc(deals.createdAt)),
-    tenantDb
-      .select({
-        linkedValue: sql<string>`COALESCE(SUM(COALESCE(${deals.awardedAmount}, ${deals.bidEstimate}, ${deals.ddEstimate}, ${deals.forecastRevenue}, 0)), 0)::text`,
-      })
-      .from(deals)
-      .where(and(eq(deals.propertyId, propertyId), eq(deals.isActive, true))),
-    tenantDb.execute(sql`
+  const relatedLeads = await tenantDb
+    .select()
+    .from(leads)
+    .where(eq(leads.propertyId, propertyId))
+    .orderBy(desc(leads.updatedAt), desc(leads.createdAt));
+  const relatedDeals = await tenantDb
+    .select()
+    .from(deals)
+    .where(eq(deals.propertyId, propertyId))
+    .orderBy(desc(deals.updatedAt), desc(deals.createdAt));
+  const linkedValueRows = await tenantDb
+    .select({
+      linkedValue: sql<string>`COALESCE(SUM(${effectiveDealValueSql(
+        deals,
+        sql`COALESCE(${deals.awardedAmount}, ${deals.bidEstimate}, ${deals.ddEstimate}, ${deals.forecastRevenue}, 0)`
+      )}), 0)::text`,
+    })
+    .from(deals)
+    .where(and(eq(deals.propertyId, propertyId), eq(deals.isActive, true)));
+  const photoCounts = await tenantDb.execute(sql`
       SELECT COUNT(DISTINCT linked.file_id)::int AS photos_count
       FROM (
         SELECT f.id AS file_id
@@ -581,8 +583,7 @@ export async function getPropertyDetail(tenantDb: TenantDb, propertyId: string) 
           AND f.category = 'photo'
           AND f.is_active = true
       ) linked
-    `),
-  ]);
+    `);
   const photoCountRows = (photoCounts as any).rows ?? photoCounts;
   const relationshipCounts = buildPropertyRelationshipCounts({
     leads: relatedLeads,

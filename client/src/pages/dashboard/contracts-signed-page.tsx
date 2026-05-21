@@ -7,6 +7,7 @@ import { PageHeader } from "@/components/layout/page-header";
 import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { formatCurrency } from "@/components/charts/chart-colors";
+import { getEffectiveDealValue } from "@trock-crm/shared/types";
 
 type Period = "ytd" | "mtd";
 
@@ -75,7 +76,7 @@ export function ContractsSignedPage() {
   });
 
   const totalValue = useMemo(
-    () => deals.reduce((sum, d) => sum + Number(d.awardedAmount ?? 0), 0),
+    () => deals.reduce((sum, d) => sum + getEffectiveDealValue(d), 0),
     [deals]
   );
 
@@ -171,7 +172,7 @@ export function ContractsSignedPage() {
                 </div>
                 <div className="shrink-0 text-right">
                   <p className="text-sm font-semibold text-slate-900">
-                    {formatCurrency(Number(deal.awardedAmount ?? 0))}
+                    {formatCurrency(getEffectiveDealValue(deal))}
                   </p>
                   <p className="mt-1 text-xs text-slate-500">Open deal</p>
                 </div>

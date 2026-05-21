@@ -146,6 +146,7 @@ describe("buildDealStageSummary", () => {
 
     expect(buildDealStageSummary(data, now)).toEqual({
       totalCount: 3,
+      totalDealCount: 3,
       totalValue: 245000,
       averageAgeDays: 3,
     });

@@ -2,6 +2,11 @@ import { eq, and, ilike, asc, desc, count, sql, getTableColumns } from "drizzle-
 import { companies, contacts, deals, users } from "@trock-crm/shared/schema";
 import type { NodePgDatabase } from "drizzle-orm/node-postgres";
 import { AppError } from "../../middleware/error-handler.js";
+import {
+  aliasedActiveDealCountFilterSql,
+  aliasedDealBestEstimateWithForecastSql,
+  aliasedEffectiveDealValueSql,
+} from "../shared/deal-value-sql.js";
 
 type TenantDb = NodePgDatabase<any>;
 
@@ -47,19 +52,17 @@ export async function listCompanies(
 
   const where = and(...conditions);
 
-  const [rows, totalResult] = await Promise.all([
-    tenantDb
-      .select()
-      .from(companies)
-      .where(where)
-      .orderBy(asc(companies.name))
-      .limit(limit)
-      .offset(offset),
-    tenantDb
-      .select({ count: count() })
-      .from(companies)
-      .where(where),
-  ]);
+  const rows = await tenantDb
+    .select()
+    .from(companies)
+    .where(where)
+    .orderBy(asc(companies.name))
+    .limit(limit)
+    .offset(offset);
+  const totalResult = await tenantDb
+    .select({ count: count() })
+    .from(companies)
+    .where(where);
 
   // Batch-fetch contact and deal counts for the page of companies
   const companyIds = rows.map((r) => r.id);
@@ -78,8 +81,9 @@ export async function listCompanies(
         c.id,
         (SELECT COUNT(*)::int FROM contacts WHERE contacts.company_id = c.id AND contacts.is_active = true) AS contact_count,
         (SELECT COUNT(*)::int FROM deals WHERE deals.company_id = c.id AND deals.is_active = true) AS deal_count,
+        (SELECT COUNT(*)::int FROM deals WHERE deals.company_id = c.id AND deals.is_active = true AND COALESCE(deals.on_hold, false) = false) AS active_deals_count,
         (SELECT COUNT(*)::int FROM properties WHERE properties.company_id = c.id AND properties.is_active = true) AS properties_count,
-        (SELECT COALESCE(SUM(COALESCE(deals.awarded_amount, deals.bid_estimate, deals.dd_estimate, deals.forecast_revenue, 0)), 0)::text
+        (SELECT COALESCE(SUM(CASE WHEN COALESCE(deals.on_hold, false) THEN 0 ELSE COALESCE(deals.awarded_amount, deals.bid_estimate, deals.dd_estimate, deals.forecast_revenue, 0) END), 0)::text
            FROM deals
           WHERE deals.company_id = c.id
             AND deals.is_active = true) AS pipeline_value
@@ -93,7 +97,7 @@ export async function listCompanies(
         dealCount: Number(row.deal_count ?? 0),
         propertiesCount: Number(row.properties_count ?? 0),
         contactsCount: Number(row.contact_count ?? 0),
-        activeDealsCount: Number(row.deal_count ?? 0),
+        activeDealsCount: Number(row.active_deals_count ?? 0),
         pipelineValue: String(row.pipeline_value ?? "0"),
       });
     }
@@ -221,23 +225,29 @@ export async function getCompanyDeals(tenantDb: TenantDb, companyId: string) {
 }
 
 export async function getCompanyStats(tenantDb: TenantDb, companyId: string) {
-  const [contactCount, dealCount, propertiesCount, pipelineValue] = await Promise.all([
-    tenantDb.select({ count: count() }).from(contacts).where(and(eq(contacts.companyId, companyId), eq(contacts.isActive, true))),
-    tenantDb.select({ count: count() }).from(deals).where(and(eq(deals.companyId, companyId), eq(deals.isActive, true))),
-    tenantDb.execute(sql`
-      SELECT COUNT(*)::int AS count
-      FROM properties
-      WHERE company_id = ${companyId}
-        AND is_active = true
-    `),
-    tenantDb.execute(sql`
-      SELECT COALESCE(SUM(COALESCE(awarded_amount, bid_estimate, dd_estimate, forecast_revenue, 0)), 0)::text AS pipeline_value
-      FROM deals
-      WHERE company_id = ${companyId}
-        AND is_active = true
-    `),
-  ]);
+  const contactCount = await tenantDb.select({ count: count() }).from(contacts).where(and(eq(contacts.companyId, companyId), eq(contacts.isActive, true)));
+  const dealCount = await tenantDb.select({ count: count() }).from(deals).where(and(eq(deals.companyId, companyId), eq(deals.isActive, true)));
+  const activeDealsCountResult = await tenantDb.execute(sql`
+    SELECT COUNT(*)::int AS count
+    FROM deals d
+    WHERE d.company_id = ${companyId}
+      AND d.is_active = true
+      AND ${aliasedActiveDealCountFilterSql("d")}
+  `);
+  const propertiesCount = await tenantDb.execute(sql`
+    SELECT COUNT(*)::int AS count
+    FROM properties
+    WHERE company_id = ${companyId}
+      AND is_active = true
+  `);
+  const pipelineValue = await tenantDb.execute(sql`
+    SELECT COALESCE(SUM(${aliasedEffectiveDealValueSql("d", aliasedDealBestEstimateWithForecastSql("d"))}), 0)::text AS pipeline_value
+    FROM deals d
+    WHERE d.company_id = ${companyId}
+      AND d.is_active = true
+  `);
   const propertyCountRows = (propertiesCount as any).rows ?? propertiesCount;
+  const activeDealCountRows = (activeDealsCountResult as any).rows ?? activeDealsCountResult;
   const pipelineValueRows = (pipelineValue as any).rows ?? pipelineValue;
   const activeDealCount = dealCount[0]?.count ?? 0;
   const activeContactCount = contactCount[0]?.count ?? 0;
@@ -247,7 +257,7 @@ export async function getCompanyStats(tenantDb: TenantDb, companyId: string) {
     dealCount: activeDealCount,
     propertiesCount: Number(propertyCountRows[0]?.count ?? 0),
     contactsCount: activeContactCount,
-    activeDealsCount: activeDealCount,
+    activeDealsCount: Number(activeDealCountRows[0]?.count ?? 0),
     pipelineValue: String(pipelineValueRows[0]?.pipeline_value ?? "0"),
   };
 }

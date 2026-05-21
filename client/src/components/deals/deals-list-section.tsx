@@ -19,12 +19,13 @@ import { TerminalDateFilterControl } from "@/components/pipeline/terminal-date-f
 import { useDeals, type Deal, type DealFilters } from "@/hooks/use-deals";
 import { usePipelineStages, type PipelineStage } from "@/hooks/use-pipeline-config";
 import { useTaskAssignees } from "@/hooks/use-task-assignees";
-import { bestEstimate, daysInStage, formatCurrencyCompact } from "@/lib/deal-utils";
+import { daysInStage, formatCurrencyCompact } from "@/lib/deal-utils";
 import {
   daysAgo,
   type TerminalDateFilter,
 } from "@/lib/pipeline-terminal-filters";
 import { api } from "@/lib/api";
+import { getEffectiveDealValue } from "@trock-crm/shared/types";
 import { cn } from "@/lib/utils";
 import { getDealDisplayNumber } from "@/components/deals/kanban-deal-card";
 import { listPaginationIconButtonClassName } from "@/components/shared/list-pagination";
@@ -69,6 +70,7 @@ interface DealsListSectionProps {
   hideOwnerFilter?: boolean;
   dateField?: "updated" | "created";
   externalDateRange?: { from?: string; to?: string };
+  paginationCountSummary?: { active: number; total: number };
 }
 
 interface DealStageFilterOption {
@@ -137,18 +139,20 @@ function DealsListPagination({
   page,
   total,
   totalPages,
+  countSummary,
   onPageChange,
 }: {
   page: number;
   total: number;
   totalPages: number;
+  countSummary?: { active: number; total: number };
   onPageChange: (page: number) => void;
 }) {
   return (
     <div className="flex items-center justify-between gap-4 border-t border-slate-200 pt-4">
       <div>
         <p className="text-[11px] font-black uppercase tracking-[0.18em] text-slate-500">
-          {total} total records
+          {countSummary ? `${countSummary.active}/${countSummary.total} active records` : `${total} total records`}
         </p>
         <p className="text-sm font-medium text-slate-500">
           Page {page} of {totalPages || 1}
@@ -445,6 +449,7 @@ export function DealsListSection({
   hideOwnerFilter = false,
   dateField = "updated",
   externalDateRange,
+  paginationCountSummary,
 }: DealsListSectionProps) {
   const navigate = useNavigate();
   const [search, setSearch] = useState("");
@@ -638,7 +643,7 @@ export function DealsListSection({
           deal.assignedRepName ?? assigneeNameById.get(deal.assignedRepId) ?? "",
           deal.stageName ?? stageNameById.get(deal.stageId) ?? "",
           daysInStage(deal.stageEnteredAt),
-          bestEstimate(deal),
+          getEffectiveDealValue(deal),
           deal.lastActivityAt ?? deal.updatedAt,
         ];
       }),
@@ -751,7 +756,7 @@ export function DealsListSection({
       cellClassName: "md:w-[5.75rem] md:!px-2 md:text-right lg:w-[6rem] lg:!px-3",
       render: (deal) => (
         <span className="inline-flex justify-end whitespace-nowrap font-black tabular-nums text-slate-950">
-          {formatCurrencyCompact(bestEstimate(deal))}
+          {formatCurrencyCompact(getEffectiveDealValue(deal))}
         </span>
       ),
     },
@@ -994,7 +999,7 @@ export function DealsListSection({
                             </span>
                           </div>
                           <span className="whitespace-nowrap text-right text-sm font-black tabular-nums text-slate-950">
-                            {formatCurrencyCompact(bestEstimate(deal))}
+                            {formatCurrencyCompact(getEffectiveDealValue(deal))}
                           </span>
                         </div>
 
@@ -1038,6 +1043,7 @@ export function DealsListSection({
               page={pagination.page}
               total={pagination.total}
               totalPages={pagination.totalPages || 1}
+              countSummary={paginationCountSummary}
               onPageChange={setPage}
             />
           </>

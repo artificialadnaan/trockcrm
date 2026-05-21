@@ -2,6 +2,7 @@ import { sql, type SQL } from "drizzle-orm";
 import type { NodePgDatabase } from "drizzle-orm/node-postgres";
 import type * as schema from "@trock-crm/shared/schema";
 import { buildOfficeExistsMatcher } from "./office-filter.js";
+import { aliasedDealBestEstimateWithForecastSql, aliasedEffectiveDealValueSql } from "../shared/deal-value-sql.js";
 
 type TenantDb = NodePgDatabase<typeof schema>;
 type ExecuteRows<T> = { rows: T[] } | T[];
@@ -250,7 +251,7 @@ export async function getMarketMixReport(
     const verticalExpr = sql`COALESCE(NULLIF(c.industry::text, ''), NULLIF(d.project_type, ''), 'Uncategorized')`;
     const regionExpr = sql`COALESCE(NULLIF(c.region, ''), NULLIF(rc.name, ''), NULLIF(p.city, ''), NULLIF(p.state, ''), NULLIF(d.property_city, ''), NULLIF(d.property_state, ''), 'Uncategorized')`;
     const propertyTypeExpr = sql`COALESCE(NULLIF(p.property_type, ''), NULLIF(p.type::text, ''), 'Uncategorized')`;
-    const valueExpr = sql`COALESCE(d.awarded_amount, d.bid_estimate, d.dd_estimate, 0)`;
+    const valueExpr = aliasedEffectiveDealValueSql("d");
 
     const [kpiRows, verticalRows, propertyRows, regionRows, quarterlyRows, breakdownRows] = await Promise.all([
       tenantDb.execute(sql`
@@ -413,8 +414,8 @@ export async function getCustomerConcentrationReport(
   const filters = normalizeFilters(input);
   return cached(tenantDb, cacheKey("customer-concentration", filters), async () => {
     const where = buildWhere(filters);
-    const valueExpr = sql`COALESCE(d.awarded_amount, d.bid_estimate, d.dd_estimate, 0)`;
-    const openValueExpr = sql`COALESCE(d.forecast_revenue, d.bid_estimate, d.dd_estimate, 0)`;
+    const valueExpr = aliasedEffectiveDealValueSql("d");
+    const openValueExpr = aliasedEffectiveDealValueSql("d", aliasedDealBestEstimateWithForecastSql("d"));
 
     const [kpiRows, customerRows, distributionRows, staleRows] = await Promise.all([
       tenantDb.execute(sql`
@@ -565,8 +566,8 @@ export async function getExecutiveTrendsReport(
   const filters = normalizeFilters(input);
   return cached(tenantDb, cacheKey("executive-trends", filters), async () => {
     const where = buildWhere(filters);
-    const valueExpr = sql`COALESCE(d.awarded_amount, d.bid_estimate, d.dd_estimate, 0)`;
-    const openValueExpr = sql`COALESCE(d.forecast_revenue, d.bid_estimate, d.dd_estimate, 0)`;
+    const valueExpr = aliasedEffectiveDealValueSql("d");
+    const openValueExpr = aliasedEffectiveDealValueSql("d", aliasedDealBestEstimateWithForecastSql("d"));
     const previousPeriod = computePreviousPeriod(filters.from, filters.to);
 
     const [kpiRows, monthlyRows, quarterlyRows, winRateRows, progressionRows] = await Promise.all([

@@ -3,6 +3,7 @@ import type { NodePgDatabase } from "drizzle-orm/node-postgres";
 import type * as schema from "@trock-crm/shared/schema";
 import type { UserRole } from "@trock-crm/shared/types";
 import { buildOfficeMatcher } from "./office-filter.js";
+import { aliasedDealBestEstimateWithForecastSql, aliasedEffectiveDealValueSql } from "../shared/deal-value-sql.js";
 
 type TenantDb = NodePgDatabase<typeof schema>;
 type ExecuteRows = { rows: unknown[] } | unknown[];
@@ -323,10 +324,10 @@ export async function getDirectorScorecard(db: TenantDb, filters: PerformanceRep
           WHERE ${closedDealScope} AND ${wonDate}
         )
         SELECT
-          COALESCE(SUM(COALESCE(awarded_amount, bid_estimate, dd_estimate, 0)), 0)::numeric AS total_pipeline_value,
+          COALESCE(SUM(${aliasedEffectiveDealValueSql("open_deals")}), 0)::numeric AS total_pipeline_value,
           COUNT(*)::int AS open_deal_count,
-          COALESCE(SUM(COALESCE(awarded_amount, bid_estimate, dd_estimate, 0)) FILTER (WHERE slug IN (${sqlStringList(commitSlugs)})), 0)::numeric AS forecast_commit,
-          COALESCE(SUM(COALESCE(awarded_amount, bid_estimate, dd_estimate, 0)) FILTER (WHERE slug IN (${sqlStringList(bestCaseSlugs)})), 0)::numeric AS forecast_best_case,
+          COALESCE(SUM(${aliasedEffectiveDealValueSql("open_deals")}) FILTER (WHERE slug IN (${sqlStringList(commitSlugs)})), 0)::numeric AS forecast_commit,
+          COALESCE(SUM(${aliasedEffectiveDealValueSql("open_deals")}) FILTER (WHERE slug IN (${sqlStringList(bestCaseSlugs)})), 0)::numeric AS forecast_best_case,
           CASE WHEN (SELECT COUNT(*) FROM won_lost WHERE slug IN (${sqlStringList([...WON_STAGE_SLUGS, ...LOST_STAGE_SLUGS])})) = 0 THEN 0
             ELSE ((SELECT COUNT(*) FROM won_lost WHERE slug IN (${sqlStringList([...WON_STAGE_SLUGS])}))::numeric / (SELECT COUNT(*) FROM won_lost WHERE slug IN (${sqlStringList([...WON_STAGE_SLUGS, ...LOST_STAGE_SLUGS])}))::numeric) * 100
           END AS win_rate
@@ -350,7 +351,7 @@ export async function getDirectorScorecard(db: TenantDb, filters: PerformanceRep
         )
         SELECT
           COUNT(*) FILTER (WHERE d.stage_entered_at < now() - INTERVAL '30 days')::int AS deals_at_risk,
-          COALESCE(SUM(COALESCE(d.awarded_amount, d.bid_estimate, d.dd_estimate, 0)) FILTER (WHERE d.stage_entered_at < now() - INTERVAL '30 days'), 0)::numeric AS deals_at_risk_value,
+          COALESCE(SUM(${aliasedEffectiveDealValueSql("d")}) FILTER (WHERE d.stage_entered_at < now() - INTERVAL '30 days'), 0)::numeric AS deals_at_risk_value,
           COUNT(DISTINCT d.company_id) FILTER (WHERE d.last_activity_at IS NULL OR d.last_activity_at < now() - INTERVAL '14 days')::int AS stalled_accounts,
           (
             SELECT COUNT(*)::int
@@ -371,7 +372,7 @@ export async function getDirectorScorecard(db: TenantDb, filters: PerformanceRep
       `),
       db.execute(sql`
         WITH rep_open AS (
-          SELECT u.id, u.display_name, d.id AS deal_id, COALESCE(d.awarded_amount, d.bid_estimate, d.dd_estimate, 0) AS value, psc.slug
+          SELECT u.id, u.display_name, d.id AS deal_id, ${aliasedEffectiveDealValueSql("d")} AS value, psc.slug
           FROM deals d
           JOIN users u ON u.id = d.assigned_rep_id
           JOIN offices o ON o.id = u.office_id
@@ -411,7 +412,7 @@ export async function getDirectorScorecard(db: TenantDb, filters: PerformanceRep
       db.execute(sql`
         WITH office_open AS (
           SELECT o.id AS office_id, o.name AS office_name,
-            COALESCE(SUM(COALESCE(d.awarded_amount, d.bid_estimate, d.dd_estimate, 0)), 0)::numeric AS pipeline_value,
+            COALESCE(SUM(${aliasedEffectiveDealValueSql("d")}), 0)::numeric AS pipeline_value,
             COUNT(*)::int AS open_count
           FROM deals d
           JOIN users u ON u.id = d.assigned_rep_id
@@ -444,7 +445,7 @@ export async function getDirectorScorecard(db: TenantDb, filters: PerformanceRep
       db.execute(sql`
         SELECT d.id AS deal_id, d.name AS deal_name, u.display_name AS owner_name, psc.name AS stage_name,
           EXTRACT(DAY FROM now() - d.stage_entered_at)::int AS days_in_stage,
-          COALESCE(d.awarded_amount, d.bid_estimate, d.dd_estimate, 0)::numeric AS value,
+          ${aliasedEffectiveDealValueSql("d")} AS value,
           d.last_activity_at::text AS last_activity_date
         FROM deals d
         JOIN users u ON u.id = d.assigned_rep_id
@@ -592,7 +593,7 @@ export async function getRepActivityReport(db: TenantDb, filters: PerformanceRep
           MAX(d.last_activity_at)::text AS last_activity_date,
           EXTRACT(DAY FROM now() - MAX(COALESCE(d.last_activity_at, d.created_at)))::int AS days_stalled,
           COUNT(d.id)::int AS open_deals,
-          COALESCE(SUM(COALESCE(d.awarded_amount, d.bid_estimate, d.dd_estimate, 0)), 0)::numeric AS total_open_value
+          COALESCE(SUM(${aliasedEffectiveDealValueSql("d")}), 0)::numeric AS total_open_value
         FROM deals d
         JOIN users u ON u.id = d.assigned_rep_id
           JOIN offices o ON o.id = u.office_id
@@ -731,7 +732,7 @@ export async function getForecastAccuracyReport(db: TenantDb, filters: Performan
     const wonSlugs = [...WON_STAGE_SLUGS];
     const terminalSlugs = [...WON_STAGE_SLUGS, ...LOST_STAGE_SLUGS];
 
-    const forecastValue = sql`COALESCE(d.forecast_revenue, d.awarded_amount, d.bid_estimate, d.dd_estimate, 0)`;
+    const forecastValue = aliasedEffectiveDealValueSql("d", aliasedDealBestEstimateWithForecastSql("d"));
     const weightedValue = sql`(${forecastValue}) * CASE
       WHEN psc.slug = 'opportunity' THEN 0.10
       WHEN psc.slug IN ('estimating', 'estimate_in_progress', 'service_estimating', 'estimate_under_review', 'service_estimate_under_review') THEN 0.25
@@ -743,7 +744,7 @@ export async function getForecastAccuracyReport(db: TenantDb, filters: Performan
     const [summary, monthly, atRisk] = await Promise.all([
       db.execute(sql`
         WITH won_period AS (
-          SELECT COALESCE(SUM(COALESCE(d.awarded_amount, d.bid_estimate, d.dd_estimate, 0)), 0)::numeric AS won_actual
+          SELECT COALESCE(SUM(${aliasedEffectiveDealValueSql("d")}), 0)::numeric AS won_actual
           FROM deals d
           JOIN users u ON u.id = d.assigned_rep_id
           JOIN offices o ON o.id = u.office_id
@@ -773,7 +774,7 @@ export async function getForecastAccuracyReport(db: TenantDb, filters: Performan
           COALESCE(SUM(${forecastValue}) FILTER (WHERE psc.slug IN (${sqlStringList(commitSlugs)})), 0)::numeric AS commit,
           COALESCE(SUM(${forecastValue}) FILTER (WHERE psc.slug IN (${sqlStringList(bestCaseSlugs)})), 0)::numeric AS best_case,
           COALESCE(SUM(${weightedValue}) FILTER (WHERE psc.slug NOT IN (${sqlStringList(terminalSlugs)})), 0)::numeric AS pipeline_weighted,
-          COALESCE(SUM(COALESCE(d.awarded_amount, d.bid_estimate, d.dd_estimate, 0)) FILTER (WHERE psc.slug IN (${sqlStringList(wonSlugs)})), 0)::numeric AS won_actual
+          COALESCE(SUM(${aliasedEffectiveDealValueSql("d")}) FILTER (WHERE psc.slug IN (${sqlStringList(wonSlugs)})), 0)::numeric AS won_actual
         FROM months m
         LEFT JOIN deals d ON COALESCE(d.expected_close_date, d.actual_close_date, d.contract_signed_date, d.updated_at::date) >= m.month_start
           AND COALESCE(d.expected_close_date, d.actual_close_date, d.contract_signed_date, d.updated_at::date) < (m.month_start + INTERVAL '1 month')
@@ -786,7 +787,7 @@ export async function getForecastAccuracyReport(db: TenantDb, filters: Performan
       `),
       db.execute(sql`
         SELECT d.id AS deal_id, d.name AS deal_name, u.display_name AS owner_name, psc.name AS stage_name,
-          COALESCE(d.forecast_revenue, d.awarded_amount, d.bid_estimate, d.dd_estimate, 0)::numeric AS value,
+          ${forecastValue} AS value,
           d.expected_close_date::text AS expected_close_date
         FROM deals d
         JOIN users u ON u.id = d.assigned_rep_id

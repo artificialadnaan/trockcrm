@@ -90,6 +90,7 @@ export interface PropertyDeal {
   regionId: string | null;
   source: string | null;
   winProbability: number | null;
+  onHold?: boolean;
   procoreProjectId: number | null;
   procoreBidId: number | null;
   procoreLastSyncedAt: string | null;

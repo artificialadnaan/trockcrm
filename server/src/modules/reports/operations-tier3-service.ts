@@ -2,6 +2,7 @@ import { sql } from "drizzle-orm";
 import type { NodePgDatabase } from "drizzle-orm/node-postgres";
 import type * as schema from "@trock-crm/shared/schema";
 import { buildOfficeMatcher } from "./office-filter.js";
+import { aliasedDealBestEstimateWithForecastSql, aliasedEffectiveDealValueSql } from "../shared/deal-value-sql.js";
 
 type TenantDb = NodePgDatabase<typeof schema>;
 type ExecuteRows<T> = { rows: T[] } | T[];
@@ -363,7 +364,7 @@ export async function getWorkflowBottlenecksReport(
         psc.slug AS stage_slug,
         EXTRACT(day FROM NOW() - d.stage_entered_at)::int AS days_in_stage,
         CASE WHEN d.last_activity_at IS NULL THEN NULL ELSE EXTRACT(day FROM NOW() - d.last_activity_at)::int END AS days_since_last_activity,
-        COALESCE(d.awarded_amount, d.bid_estimate, d.dd_estimate, d.forecast_revenue, 0)::numeric AS value,
+        ${aliasedEffectiveDealValueSql("d", aliasedDealBestEstimateWithForecastSql("d"))} AS value,
         d.project_number
       FROM deals d
       ${activeDealJoins()}
@@ -382,7 +383,7 @@ export async function getWorkflowBottlenecksReport(
         psc.slug AS stage_slug,
         EXTRACT(day FROM NOW() - d.stage_entered_at)::int AS days_in_stage,
         CASE WHEN d.last_activity_at IS NULL THEN NULL ELSE EXTRACT(day FROM NOW() - d.last_activity_at)::int END AS days_since_last_activity,
-        COALESCE(d.awarded_amount, d.bid_estimate, d.dd_estimate, d.forecast_revenue, 0)::numeric AS value,
+        ${aliasedEffectiveDealValueSql("d", aliasedDealBestEstimateWithForecastSql("d"))} AS value,
         d.project_number
       FROM deals d
       ${activeDealJoins()}
@@ -525,7 +526,7 @@ export async function getProjectReadinessReport(
         psc.slug AS stage_slug,
         EXTRACT(day FROM NOW() - d.stage_entered_at)::int AS days_in_stage,
         CASE WHEN d.last_activity_at IS NULL THEN NULL ELSE EXTRACT(day FROM NOW() - d.last_activity_at)::int END AS days_since_last_activity,
-        COALESCE(d.awarded_amount, d.bid_estimate, d.dd_estimate, d.forecast_revenue, 0)::numeric AS value,
+        ${aliasedEffectiveDealValueSql("d", aliasedDealBestEstimateWithForecastSql("d"))} AS value,
         d.project_number,
         d.proposal_status,
         d.proposal_sent_at,
@@ -634,7 +635,7 @@ export async function getPortfolioLoadReport(
         COALESCE(p.city, c.city, d.property_city) AS city,
         COALESCE(p.state, c.state, d.property_state) AS state,
         COALESCE(c.region, d.region_classification) AS region,
-        COALESCE(d.awarded_amount, d.bid_estimate, d.dd_estimate, d.forecast_revenue, 0)::numeric AS value,
+        ${aliasedEffectiveDealValueSql("d", aliasedDealBestEstimateWithForecastSql("d"))} AS value,
         EXTRACT(day FROM NOW() - d.stage_entered_at)::int AS days_in_stage,
         COALESCE(d.last_activity_at, p.last_activity_at, c.last_activity_at, d.updated_at) AS last_activity_at
       FROM deals d

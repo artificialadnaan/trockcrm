@@ -36,6 +36,7 @@ import { DealsListSection } from "@/components/deals/deals-list-section";
 import type { DealFilters } from "@/hooks/use-deals";
 import type { DealListSortState } from "@/components/deals/deals-list-section";
 import { resolvePreferredScope, writeStoredScopePreference } from "@/lib/scope-preferences";
+import { getEffectiveDealValue } from "@trock-crm/shared/types";
 
 const SCOPE_OPTIONS = [
   { value: "mine", label: "Mine" },
@@ -593,7 +594,7 @@ function DealsBoardColumn({
           {terminalLabel ? <span className="ml-1 text-slate-400">· {terminalLabel}</span> : null}
         </button>
         <span className="rounded-sm bg-gray-200/70 px-1.5 py-0.5 text-xs font-medium tabular-nums text-gray-600">
-          {column.count}
+          {column.count}/{column.totalCount ?? column.count}
         </span>
       </div>
       {terminalOutcome && terminalFilter && onTerminalFilterChange ? (
@@ -755,8 +756,9 @@ function DealListPageContent({ role, userId }: { role: string; userId: string })
                     });
                     return {
                       ...column,
+                      totalCount: cards.length,
+                      count: cards.filter((deal) => !deal.onHold).length,
                       cards,
-                      count: cards.length,
                       totalValue: cards.reduce((sum, deal) => sum + moneyValue(deal), 0),
                     };
                   })
@@ -781,8 +783,9 @@ function DealListPageContent({ role, userId }: { role: string; userId: string })
           });
           return {
             ...column,
+            totalCount: cards.length,
+            count: cards.filter((deal) => !deal.onHold).length,
             cards,
-            count: cards.length,
             totalValue: cards.reduce((sum, deal) => sum + moneyValue(deal), 0),
           };
         });
@@ -810,8 +813,9 @@ function DealListPageContent({ role, userId }: { role: string; userId: string })
           });
           return {
             ...column,
+            totalCount: cards.length,
+            count: cards.filter((deal) => !deal.onHold).length,
             cards,
-            count: cards.length,
             totalValue: cards.reduce((sum, deal) => sum + moneyValue(deal), 0),
           };
         });
@@ -855,6 +859,7 @@ function DealListPageContent({ role, userId }: { role: string; userId: string })
     [selectedPeriodRange, terminalDateFilters.won]
   );
   const totalCount = activePipelineColumns.reduce((sum, column) => sum + column.count, 0);
+  const totalVisibleCount = activePipelineColumns.reduce((sum, column) => sum + (column.totalCount ?? column.count), 0);
   const totalValue = activePipelineColumns.reduce((sum, column) => sum + column.totalValue, 0);
   const wonValue =
     board?.terminalStages
@@ -1030,7 +1035,7 @@ function DealListPageContent({ role, userId }: { role: string; userId: string })
         <MetricCard
           eyebrow="Active pipeline"
           value={USD_COMPACT(totalValue)}
-          badge={`${totalCount} deals`}
+          badge={`${totalCount}/${totalVisibleCount} deals`}
           caption="Open board"
           tone="white"
           accent="red"
@@ -1108,7 +1113,7 @@ function DealListPageContent({ role, userId }: { role: string; userId: string })
               <div className="flex h-full gap-3 p-4" style={{ minWidth: "max-content" }}>
                 {columns.map((column) => (
                   <DealsBoardColumn
-                    key={column.stage.id}
+                    key={`${column.stage.id}-${column.stage.slug}`}
                     column={column}
                     onOpenStage={openStage}
                     onOpenRecord={(id) => navigate(`/deals/${id}`)}
@@ -1209,6 +1214,11 @@ function DealListPageContent({ role, userId }: { role: string; userId: string })
               initialStageSlugs={dashboardView.initialStageSlugs}
               lockedOwnerId={selectedRepFilter}
               hideOwnerFilter
+              paginationCountSummary={
+                dashboardView.filter === "active" || dashboardView.filter === "active_pipeline"
+                  ? { active: totalCount, total: totalVisibleCount }
+                  : undefined
+              }
             />
           )}
         </>

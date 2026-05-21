@@ -163,6 +163,7 @@ describe("buildDealBoardSummary", () => {
 
     expect(buildDealBoardSummary(board, now)).toEqual({
       totalCount: 3,
+      totalDealCount: 3,
       liveStageCount: 2,
       totalValue: 200000,
       averageAgeDays: 3,
@@ -255,6 +256,7 @@ describe("buildDealBoardSummary", () => {
 
     expect(buildDealBoardSummary(board, now)).toEqual({
       totalCount: 30,
+      totalDealCount: 30,
       liveStageCount: 1,
       totalValue: 300000,
       averageAgeDays: 2,

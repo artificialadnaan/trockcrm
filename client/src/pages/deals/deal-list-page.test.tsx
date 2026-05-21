@@ -492,7 +492,7 @@ describe("DealListPage", () => {
     const html = renderPage();
 
     expect(html).toContain("Active pipeline");
-    expect(html).toMatch(/Active pipeline.*\$180\.0K.*1 deals/);
+    expect(html).toMatch(/Active pipeline.*\$180K.*1\/1 deals/);
     expect(html).not.toContain("$1.6M");
     expect(html).not.toContain("4 deals");
   });
@@ -554,7 +554,7 @@ describe("DealListPage", () => {
 
     const html = renderPage();
 
-    expect(html).toMatch(/Active pipeline.*\$1\.6M.*152 deals/);
+    expect(html).toMatch(/Active pipeline.*\$1\.6M.*152\/152 deals/);
     expect(html).not.toContain("101 deals");
   });
 
@@ -584,7 +584,7 @@ describe("DealListPage", () => {
 
     const html = renderPage();
 
-    expect(html).toMatch(/Won.*\$60\.0K/);
+    expect(html).toMatch(/Won.*\$60K/);
   });
 
   it("renders decorated cards with project number fallback, avatar, company, SLA, and location", () => {
@@ -926,8 +926,8 @@ describe("DealListPage", () => {
     const html = renderPage("/deals?scope=all&period=last_month", "director");
 
     expect(html).toContain('href="/deals?filter=won&amp;scope=all&amp;period=last_month"');
-    expect(html).toContain("$125.0K");
-    expect(html).not.toContain("$410.0K");
+    expect(html).toContain("$125K");
+    expect(html).not.toContain("$410K");
   });
 
   it("preserves the aggregate-only terminal response shape for Won KPI rendering", () => {
@@ -956,8 +956,8 @@ describe("DealListPage", () => {
 
     const html = renderPage("/deals?scope=all&period=last_month", "director");
 
-    expect(html).toContain("$125.0K");
-    expect(html).not.toContain("$410.0K");
+    expect(html).toContain("$125K");
+    expect(html).not.toContain("$410K");
   });
 
   it("passes the same effective won date range into the board request and drilldown list", () => {
@@ -986,9 +986,9 @@ describe("DealListPage", () => {
 
     const html = renderPage("/deals?scope=all&filter=won&period=last_month&won_preset=30", "director");
 
-    expect(html).toContain("$125.0K");
-    expect(html).not.toContain("$410.0K");
-    expect(html).not.toContain("$500.0K");
+    expect(html).toContain("$125K");
+    expect(html).not.toContain("$410K");
+    expect(html).not.toContain("$500K");
     expect(mocks.useDealBoardMock).toHaveBeenLastCalledWith(
       "all",
       true,
@@ -1168,6 +1168,7 @@ describe("DealListPage", () => {
         enableExport: true,
         scope: "all",
         initialSort: { key: "updated_at", dir: "desc" },
+        paginationCountSummary: { active: 2, total: 2 },
         baseFilters: expect.objectContaining({
           updatedFrom: "2026-01-01",
           updatedTo: "2026-05-08",
