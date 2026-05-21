@@ -133,12 +133,22 @@ describe("DirectorRepDetail", () => {
   it("renders the charts as the last section of the page", () => {
     const html = renderPage("/director/rep/rep-1");
     const headings = Array.from(html.matchAll(/<h2>(.*?)<\/h2>/g)).map((match) => match[1]);
+    const staleDealsIndex = html.indexOf("Stale Deals");
+    const staleLeadsIndex = html.indexOf("Stale Leads");
+    const pipelineChartIndex = html.indexOf("Pipeline by Stage");
+    const winRateTrendIndex = html.indexOf("Win Rate Trend");
     const penultimateHeading = headings[headings.length - 2];
     const lastHeading = headings[headings.length - 1];
 
-    expect(html.indexOf("Stale Deals")).toBeLessThan(html.indexOf("Pipeline by Stage"));
-    expect(html.indexOf("Stale Leads")).toBeLessThan(html.indexOf("Pipeline by Stage"));
-    expect(html.indexOf("Pipeline by Stage")).toBeLessThan(html.indexOf("Win Rate Trend"));
+    expect(staleDealsIndex).toBeGreaterThanOrEqual(0);
+    expect(staleLeadsIndex).toBeGreaterThanOrEqual(0);
+    expect(pipelineChartIndex).toBeGreaterThanOrEqual(0);
+    expect(winRateTrendIndex).toBeGreaterThanOrEqual(0);
+    expect(headings).toContain("Pipeline by Stage");
+    expect(headings).toContain("Win Rate Trend");
+    expect(staleDealsIndex).toBeLessThan(pipelineChartIndex);
+    expect(staleLeadsIndex).toBeLessThan(pipelineChartIndex);
+    expect(pipelineChartIndex).toBeLessThan(winRateTrendIndex);
     expect(penultimateHeading).toBe("Pipeline by Stage");
     expect(lastHeading).toBe("Win Rate Trend");
   });
