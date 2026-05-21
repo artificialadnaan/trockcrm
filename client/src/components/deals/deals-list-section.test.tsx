@@ -515,6 +515,9 @@ describe("DealsListSection", () => {
     // Page indicator from PipelineStageTable
     expect(html).toContain("Page 1 of 3");
     expect(html).toContain("60 total records");
+    expect(html).toContain("text-primary");
+    expect(html).toContain("disabled:bg-muted");
+    expect(html).toContain("disabled:text-muted-foreground");
   });
 
   it("resets pagination when the drill-down context changes", async () => {
@@ -569,8 +572,14 @@ describe("DealsListSection", () => {
 
     expect(container.textContent).toContain("Page 1 of 3");
     const buttons = Array.from(container.querySelectorAll("button"));
+    const previousButton = buttons.find((button) => button.getAttribute("aria-label") === "Previous page");
     const nextButton = buttons.find((button) => button.getAttribute("aria-label") === "Next page");
+    expect(previousButton?.disabled).toBe(true);
+    expect(previousButton?.className).toContain("text-primary");
+    expect(previousButton?.className).toContain("disabled:bg-muted");
+    expect(previousButton?.className).toContain("disabled:text-muted-foreground");
     expect(nextButton).toBeTruthy();
+    expect(nextButton?.className).toContain("text-primary");
 
     act(() => {
       nextButton!.dispatchEvent(new MouseEvent("click", { bubbles: true }));
@@ -578,6 +587,49 @@ describe("DealsListSection", () => {
 
     const lastCall = mocks.useDealsMock.mock.calls[mocks.useDealsMock.mock.calls.length - 1][0];
     expect(lastCall.page).toBe(2);
+
+    unmount();
+  });
+
+  it("keeps the next button visibly disabled on the last page", () => {
+    mocks.useDealsMock.mockReturnValue({
+      deals: [makeDeal(), makeDeal({ id: "deal-2", name: "Second" })],
+      pagination: { page: 3, limit: 25, total: 60, totalPages: 3 },
+      loading: false,
+      error: null,
+      refetch: vi.fn(),
+    });
+
+    const { container, unmount } = renderInteractive();
+    const buttons = Array.from(container.querySelectorAll("button"));
+    const nextButton = buttons.find((button) => button.getAttribute("aria-label") === "Next page");
+
+    expect(nextButton?.disabled).toBe(true);
+    expect(nextButton?.className).toContain("text-primary");
+    expect(nextButton?.className).toContain("disabled:bg-muted");
+    expect(nextButton?.className).toContain("disabled:text-muted-foreground");
+
+    unmount();
+  });
+
+  it("keeps single-page pagination controls visible and distinctly disabled", () => {
+    mocks.useDealsMock.mockReturnValue({
+      deals: [makeDeal()],
+      pagination: { page: 1, limit: 25, total: 1, totalPages: 1 },
+      loading: false,
+      error: null,
+      refetch: vi.fn(),
+    });
+
+    const { container, unmount } = renderInteractive();
+    const buttons = Array.from(container.querySelectorAll("button"));
+    const previousButton = buttons.find((button) => button.getAttribute("aria-label") === "Previous page");
+    const nextButton = buttons.find((button) => button.getAttribute("aria-label") === "Next page");
+
+    expect(previousButton?.disabled).toBe(true);
+    expect(nextButton?.disabled).toBe(true);
+    expect(previousButton?.className).toContain("disabled:bg-muted");
+    expect(nextButton?.className).toContain("disabled:text-muted-foreground");
 
     unmount();
   });

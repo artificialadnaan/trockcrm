@@ -27,6 +27,7 @@ import {
 import { api } from "@/lib/api";
 import { cn } from "@/lib/utils";
 import { getDealDisplayNumber } from "@/components/deals/kanban-deal-card";
+import { listPaginationIconButtonClassName } from "@/components/shared/list-pagination";
 
 const DEAL_STAGE_ORDER = [
   "opportunity",
@@ -155,7 +156,10 @@ function DealsListPagination({
           aria-label="Previous page"
           disabled={page <= 1}
           onClick={() => onPageChange(page - 1)}
-          className="inline-flex h-9 w-9 items-center justify-center rounded-full border border-slate-200 bg-white text-slate-700 disabled:cursor-not-allowed disabled:opacity-50"
+          className={cn(
+            "inline-flex h-9 w-9 items-center justify-center rounded-full border transition-colors focus-visible:outline-none focus-visible:ring-2 disabled:cursor-not-allowed",
+            listPaginationIconButtonClassName
+          )}
         >
           <span aria-hidden="true">‹</span>
         </button>
@@ -164,7 +168,10 @@ function DealsListPagination({
           aria-label="Next page"
           disabled={page >= totalPages}
           onClick={() => onPageChange(page + 1)}
-          className="inline-flex h-9 w-9 items-center justify-center rounded-full border border-slate-200 bg-white text-slate-700 disabled:cursor-not-allowed disabled:opacity-50"
+          className={cn(
+            "inline-flex h-9 w-9 items-center justify-center rounded-full border transition-colors focus-visible:outline-none focus-visible:ring-2 disabled:cursor-not-allowed",
+            listPaginationIconButtonClassName
+          )}
         >
           <span aria-hidden="true">›</span>
         </button>

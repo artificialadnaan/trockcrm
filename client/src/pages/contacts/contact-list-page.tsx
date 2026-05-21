@@ -2,6 +2,7 @@ import { useMemo } from "react";
 import { useNavigate } from "react-router-dom";
 import { ArrowUpRight, Briefcase, ChevronLeft, ChevronRight, Mail, Phone, Plus, Search, Star, Users } from "lucide-react";
 import { PageHeader } from "@/components/layout/page-header";
+import { listPaginationIconButtonClassName } from "@/components/shared/list-pagination";
 import { MetricCard } from "@/components/shared/metric-card";
 import { ScopeToggle } from "@/components/shared/scope-toggle";
 import { Button } from "@/components/ui/button";
@@ -230,10 +231,24 @@ export function ContactListPage() {
             Page {pagination.page} of {pagination.totalPages}
           </p>
           <div className="flex gap-2">
-            <Button variant="outline" size="icon" disabled={pagination.page <= 1} onClick={() => setFilters({ page: pagination.page - 1 })} aria-label="Previous contacts page">
+            <Button
+              variant="outline"
+              size="icon"
+              className={listPaginationIconButtonClassName}
+              disabled={pagination.page <= 1}
+              onClick={() => setFilters({ page: pagination.page - 1 })}
+              aria-label="Previous contacts page"
+            >
               <ChevronLeft className="h-4 w-4" />
             </Button>
-            <Button variant="outline" size="icon" disabled={pagination.page >= pagination.totalPages} onClick={() => setFilters({ page: pagination.page + 1 })} aria-label="Next contacts page">
+            <Button
+              variant="outline"
+              size="icon"
+              className={listPaginationIconButtonClassName}
+              disabled={pagination.page >= pagination.totalPages}
+              onClick={() => setFilters({ page: pagination.page + 1 })}
+              aria-label="Next contacts page"
+            >
               <ChevronRight className="h-4 w-4" />
             </Button>
           </div>
