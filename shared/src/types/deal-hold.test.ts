@@ -91,6 +91,21 @@ describe("deal hold helpers", () => {
     ).toBe(7);
   });
 
+  it("clamps effective stage age at zero when hold time would exceed raw elapsed time", () => {
+    expect(
+      getEffectiveStageAgeSeconds(
+        {
+          stageEnteredAt: "2026-05-10T12:00:00.000Z",
+          onHold: false,
+          onHoldStartedAt: null,
+          onHoldAccumulatedSeconds: 4 * 60 * 60,
+          onHoldAccumulatedSecondsAtStageEntry: 0,
+        },
+        new Date("2026-05-10T14:00:00.000Z")
+      )
+    ).toBe(0);
+  });
+
   it("snapshots the lifetime accumulator unchanged when entering a stage while active", () => {
     expect(
       getHoldStateAtStageEntry(
@@ -122,6 +137,23 @@ describe("deal hold helpers", () => {
       onHoldStartedAt: new Date("2026-05-02T09:00:00.000Z"),
       onHoldAccumulatedSeconds: 3600 + 13 * 60 * 60,
       onHoldAccumulatedSecondsAtStageEntry: 3600 + 13 * 60 * 60,
+    });
+  });
+
+  it("does not backdate an open hold when the stage entry timestamp predates the real hold start", () => {
+    expect(
+      getHoldStateAtStageEntry(
+        {
+          onHold: true,
+          onHoldStartedAt: "2026-05-02T12:00:00.000Z",
+          onHoldAccumulatedSeconds: 5400,
+        },
+        new Date("2026-05-02T09:00:00.000Z")
+      )
+    ).toEqual({
+      onHoldStartedAt: new Date("2026-05-02T12:00:00.000Z"),
+      onHoldAccumulatedSeconds: 5400,
+      onHoldAccumulatedSecondsAtStageEntry: 5400,
     });
   });
 });

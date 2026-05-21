@@ -534,6 +534,104 @@ describe("bid board mirror service", () => {
     expect(result.history).toBeNull();
   });
 
+  it("preserves the existing stage-entered timestamp on same-stage refreshes even when SyncHub replays a historical stageEnteredAt", () => {
+    const previousStageEnteredAt = new Date("2026-05-10T10:00:00.000Z");
+
+    const result = buildBidBoardMirrorUpdate({
+      now: new Date("2026-05-12T18:00:00.000Z"),
+      deal: {
+        id: "deal-1",
+        stageId: "stage-estimate-sent",
+        stageEnteredAt: previousStageEnteredAt,
+        onHold: true,
+        onHoldStartedAt: new Date("2026-05-11T09:30:00.000Z"),
+        onHoldAccumulatedSeconds: 7200,
+        onHoldAccumulatedSecondsAtStageEntry: 7200,
+        workflowRoute: "normal",
+        isBidBoardOwned: true,
+        proposalStatus: "under_review",
+        estimatingSubstage: "under_review",
+        actualCloseDate: null,
+        lostReasonId: null,
+        lostNotes: null,
+        lostCompetitor: null,
+        lostAt: null,
+      },
+      currentStage: {
+        id: "stage-estimate-sent",
+        slug: "estimate_sent_to_client",
+        displayOrder: 3,
+      },
+      targetStage: {
+        id: "stage-estimate-sent",
+        slug: "estimate_sent_to_client",
+        name: "Estimate Sent to Client",
+        displayOrder: 3,
+        isTerminal: false,
+        workflowFamily: "standard_deal",
+      },
+      payload: {
+        stageSlug: "estimate_sent_to_client",
+        stageStatus: "under_review",
+        proposalStatus: "under_review",
+        stageEnteredAt: "2026-05-11T08:00:00.000Z",
+      },
+    });
+
+    expect(result.stageChanged).toBe(false);
+    expect(result.updates.stageEnteredAt).toEqual(previousStageEnteredAt);
+    expect(result.updates.bidBoardStageEnteredAt).toEqual(previousStageEnteredAt);
+    expect(result.history).toBeNull();
+  });
+
+  it("does not backdate an open hold when SyncHub sends a historical stageEnteredAt earlier than the real hold start", () => {
+    const result = buildBidBoardMirrorUpdate({
+      now: new Date("2026-05-12T18:00:00.000Z"),
+      deal: {
+        id: "deal-1",
+        stageId: "stage-estimating",
+        stageEnteredAt: new Date("2026-05-10T10:00:00.000Z"),
+        onHold: true,
+        onHoldStartedAt: new Date("2026-05-11T09:30:00.000Z"),
+        onHoldAccumulatedSeconds: 7200,
+        onHoldAccumulatedSecondsAtStageEntry: 7200,
+        workflowRoute: "normal",
+        isBidBoardOwned: true,
+        proposalStatus: "drafting",
+        estimatingSubstage: "building_estimate",
+        actualCloseDate: null,
+        lostReasonId: null,
+        lostNotes: null,
+        lostCompetitor: null,
+        lostAt: null,
+      },
+      currentStage: {
+        id: "stage-estimating",
+        slug: "estimating",
+        displayOrder: 2,
+      },
+      targetStage: {
+        id: "stage-estimate-sent",
+        slug: "estimate_sent_to_client",
+        name: "Estimate Sent to Client",
+        displayOrder: 3,
+        isTerminal: false,
+        workflowFamily: "standard_deal",
+      },
+      payload: {
+        stageSlug: "estimate_sent_to_client",
+        stageStatus: "under_review",
+        proposalStatus: "under_review",
+        stageEnteredAt: "2026-05-11T08:00:00.000Z",
+      },
+    });
+
+    expect(result.updates.stageEnteredAt).toEqual(new Date("2026-05-11T08:00:00.000Z"));
+    expect(result.updates.onHoldStartedAt).toEqual(new Date("2026-05-11T09:30:00.000Z"));
+    expect(result.updates.onHoldAccumulatedSeconds).toBe(7200);
+    expect(result.updates.onHoldAccumulatedSecondsAtStageEntry).toBe(7200);
+  });
+
   it("rejects payload stage families that do not match the internal mirror mapping", () => {
     expect(() =>
       buildBidBoardMirrorUpdate({

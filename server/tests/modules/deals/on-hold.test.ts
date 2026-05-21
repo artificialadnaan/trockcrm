@@ -259,4 +259,32 @@ describe("updateDeal on hold foundation", () => {
       "update:end",
     ]);
   });
+
+  it("preserves hold columns on in-stage updates that do not toggle hold", async () => {
+    const tenantDb = createTenantDb(
+      makeDealRow({
+        onHold: true,
+        onHoldStartedAt: new Date("2026-05-21T15:30:00.000Z"),
+        onHoldAccumulatedSeconds: 3600,
+      })
+    );
+
+    const updated = await updateDeal(
+      tenantDb as never,
+      "deal-1",
+      { description: "Updated without touching hold" },
+      "director",
+      "director-1"
+    );
+
+    expect(updated.onHold).toBe(true);
+    expect(updated.onHoldStartedAt).toEqual(new Date("2026-05-21T15:30:00.000Z"));
+    expect(updated.onHoldAccumulatedSeconds).toBe(3600);
+    expect(tenantDb._state.updateCalls[0]).toMatchObject({
+      description: "Updated without touching hold",
+    });
+    expect(tenantDb._state.updateCalls[0]).not.toHaveProperty("onHold");
+    expect(tenantDb._state.updateCalls[0]).not.toHaveProperty("onHoldStartedAt");
+    expect(tenantDb._state.updateCalls[0]).not.toHaveProperty("onHoldAccumulatedSeconds");
+  });
 });

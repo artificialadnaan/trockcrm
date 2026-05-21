@@ -1,3 +1,21 @@
+/*
+Hold-time invariants audited on 2026-05-21 across this file, the deal hold toggle
+path in server/src/modules/deals/service.ts, and the five stage-writer paths:
+1. Effective stage age is never negative.
+2. Prior-stage hold time is never subtracted from the current stage.
+3. An open hold start is never moved earlier than the real hold start.
+4. Releasing hold adds exactly the elapsed open-hold seconds to the accumulator.
+5. Multiple hold cycles within a stage sum through the lifetime accumulator.
+6. Entering a stage while already on hold snapshots prior hold time and keeps the
+   current-stage open hold anchored at max(stageEnteredAt, onHoldStartedAt).
+7. Historical mirrored stageEnteredAt values cannot backdate or double-count hold time.
+8. Non-stage updates preserve existing hold values, and the audited writers keep the
+   NOT NULL hold accumulators populated on every persisted update path.
+9. onHoldAccumulatedSeconds and onHoldAccumulatedSecondsAtStageEntry stay consistent
+   because stage-transition writers derive persisted hold state from
+   getHoldStateAtStageEntry() before writing it.
+*/
+
 type DealValueLike = {
   onHold?: boolean | null;
   awardedAmount?: string | number | null;
@@ -56,6 +74,10 @@ export function getHoldStateAtStageEntry(
   }
 
   const holdStartedAt = toDate(deal.onHoldStartedAt);
+  const effectiveHoldStartAt =
+    holdStartedAt == null
+      ? stageEnteredAt
+      : new Date(Math.max(stageEnteredAt.getTime(), holdStartedAt.getTime()));
   const activeHoldSeconds =
     holdStartedAt == null
       ? 0
@@ -63,7 +85,7 @@ export function getHoldStateAtStageEntry(
   const accumulatedThroughStageExit = currentAccumulatedHoldSeconds + activeHoldSeconds;
 
   return {
-    onHoldStartedAt: stageEnteredAt,
+    onHoldStartedAt: effectiveHoldStartAt,
     onHoldAccumulatedSeconds: accumulatedThroughStageExit,
     onHoldAccumulatedSecondsAtStageEntry: accumulatedThroughStageExit,
   };

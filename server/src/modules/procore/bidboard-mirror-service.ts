@@ -370,7 +370,9 @@ export function buildBidBoardMirrorUpdate(input: {
   const payloadStageEnteredAt = parseOptionalDate(input.payload.stageEnteredAt);
   const stageChanged = input.deal.stageId !== input.targetStage.id;
   const stageEnteredAt =
-    payloadStageEnteredAt ?? (stageChanged ? now : parseOptionalDate(input.deal.stageEnteredAt)) ?? now;
+    stageChanged
+      ? payloadStageEnteredAt ?? now
+      : parseOptionalDate(input.deal.stageEnteredAt) ?? now;
   const stageExitedAt = parseOptionalDate(input.payload.stageExitedAt);
   const mirrorSourceEnteredAt = parseOptionalDate(input.payload.mirrorSourceEnteredAt);
   const mirrorSourceExitedAt = parseOptionalDate(input.payload.mirrorSourceExitedAt);

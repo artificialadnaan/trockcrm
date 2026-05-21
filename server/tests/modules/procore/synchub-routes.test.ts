@@ -310,6 +310,41 @@ describe("syncHubRoutes", () => {
     expect(dateParams.length).toBeGreaterThanOrEqual(4);
   });
 
+  it("does not backdate an open hold when SyncHub replays a historical stageEnteredAt", async () => {
+    const { client, queries } = createClient({
+      existingDealIdByProcoreBid: "deal-1",
+      currentDealOverrides: {
+        on_hold: true,
+        on_hold_started_at: new Date("2026-05-11T09:30:00.000Z"),
+        on_hold_accumulated_seconds: 7200,
+        on_hold_accumulated_seconds_at_stage_entry: 7200,
+      },
+    });
+    dbMocks.connect.mockResolvedValue(client);
+
+    const app = createApp();
+    const response = await request(app)
+      .post("/api/integrations/synchub/opportunities")
+      .set("x-synchub-secret", "test-secret")
+      .send({
+        office_slug: "dallas",
+        bid_board_id: "bb-1",
+        procore_bid_id: 101,
+        name: "Palm Villas",
+        stage_slug: "bid_sent",
+        stage_status: "under_review",
+        proposal_status: "under_review",
+        stage_entered_at: "2026-05-11T08:00:00.000Z",
+      });
+
+    expect(response.status).toBe(200);
+    const updateQuery = queries.find((entry) => entry.sql.includes("UPDATE office_dallas.deals"));
+    expect(updateQuery?.params?.[1]).toEqual(new Date("2026-05-11T08:00:00.000Z"));
+    expect(updateQuery?.params?.[2]).toEqual(new Date("2026-05-11T09:30:00.000Z"));
+    expect(updateQuery?.params?.[3]).toBe(7200);
+    expect(updateQuery?.params?.[4]).toBe(7200);
+  });
+
   it("preserves existing hold accumulators on same-stage SyncHub updates", async () => {
     const { client, queries } = createClient({
       existingDealIdByProcoreBid: "deal-1",
