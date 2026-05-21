@@ -21,9 +21,12 @@ import {
 } from "./questionnaire-display";
 import {
   CLEAR_SELECTION_VALUE,
+  getLeadQuestionnaireDisplayLabel,
   getNormalizedQuestionInputType,
   normalizeBooleanAnswerForDisplay,
   normalizeDropdownAnswerForDisplay,
+  TYPE_OF_ACCESS_OPTIONS,
+  TYPE_OF_ACCESS_OTHER_DETAIL_KEY,
 } from "./questionnaire-answer-normalization";
 import { LeadScopeCardGrid } from "./lead-scope-card-grid";
 
@@ -137,6 +140,10 @@ function CurrencyInput({
       />
     </div>
   );
+}
+
+function getQuestionLabel(node: LeadQuestionnaireNode) {
+  return getLeadQuestionnaireDisplayLabel(node.key, node.label);
 }
 
 export function LeadQuestionnaireSections({
@@ -301,7 +308,10 @@ export function LeadQuestionnaireSections({
 
     const inputType = getNormalizedQuestionInputType(node);
     const currentValue = answers[node.key];
-    const questionOptions = normalizeQuestionOptions(node.options);
+    const questionOptions =
+      node.key === "site_access"
+        ? TYPE_OF_ACCESS_OPTIONS.map((option) => ({ value: option, label: option }))
+        : normalizeQuestionOptions(node.options);
 
     return (
       <div
@@ -310,7 +320,7 @@ export function LeadQuestionnaireSections({
         className={`space-y-2 rounded-md border p-3 ${options?.nested ? "bg-muted/20" : ""}`}
       >
         <QuestionLabel htmlFor={node.key} required={node.isRequired}>
-          {node.label}
+          {getQuestionLabel(node)}
         </QuestionLabel>
         {node.prompt && <p className="text-sm text-muted-foreground">{node.prompt}</p>}
         {inputType === "textarea" ? (
@@ -344,9 +354,13 @@ export function LeadQuestionnaireSections({
         ) : inputType === "select" ? (
           <Select
             value={normalizeDropdownAnswerForDisplay(currentValue)}
-            onValueChange={(value) =>
-              onAnswerChange(node.key, !value || value === CLEAR_SELECTION_VALUE ? null : value)
-            }
+            onValueChange={(value) => {
+              const nextValue = !value || value === CLEAR_SELECTION_VALUE ? null : value;
+              onAnswerChange(node.key, nextValue);
+              if (node.key === "site_access" && nextValue !== "Other") {
+                onAnswerChange(TYPE_OF_ACCESS_OTHER_DETAIL_KEY, null);
+              }
+            }}
           >
             <SelectTrigger id={node.key}>
               <SelectValue placeholder="Select" />
@@ -511,12 +525,12 @@ export function LeadQuestionnaireSections({
 
   return (
     <>
-      {baselineNodes.map((node) => renderQuestion(node))}
+      {baselineNodes.length > 0 ? baselineNodes.filter((node) => !node.parentNodeId).map((node) => renderNodeTree(node)) : null}
 
       {propertyNodes.length > 0 ? (
         <section className="space-y-3">
           <h3 className="text-sm font-semibold">Property/Building Info</h3>
-          {propertyNodes.map((node) => renderQuestion(node))}
+          {propertyNodes.filter((node) => !node.parentNodeId).map((node) => renderNodeTree(node))}
         </section>
       ) : null}
 

@@ -8,6 +8,19 @@ type QuestionNodeShape = Pick<LeadQuestionnaireNode, "key" | "inputType" | "opti
 
 export const UNANSWERED_PLACEHOLDER_VALUE = "__unanswered__";
 export const CLEAR_SELECTION_VALUE = "__clear__";
+export const TYPE_OF_ACCESS_OPTIONS = ["Gated", "Not Gated", "Bobbed", "Other"] as const;
+export const TYPE_OF_ACCESS_OTHER_DETAIL_KEY = "site_access_other_detail";
+
+function isTypeOfAccessOption(value: string) {
+  return TYPE_OF_ACCESS_OPTIONS.includes(value as (typeof TYPE_OF_ACCESS_OPTIONS)[number]);
+}
+
+export function getLeadQuestionnaireDisplayLabel(key: string, fallbackLabel: string) {
+  if (key === "site_access") return "Type of access";
+  if (key === TYPE_OF_ACCESS_OTHER_DETAIL_KEY) return "Type of access detail";
+  if (key === "number_of_units") return "Number of Units Affected";
+  return fallbackLabel;
+}
 
 export function isUnansweredPlaceholderValue(value: unknown): boolean {
   return typeof value === "string" && value.trim() === UNANSWERED_PLACEHOLDER_VALUE;
@@ -15,6 +28,7 @@ export function isUnansweredPlaceholderValue(value: unknown): boolean {
 
 export function getNormalizedQuestionInputType(node: QuestionNodeShape) {
   if (node.key === "life_safety") return "boolean";
+  if (node.key === "site_access") return "select";
   if (node.inputType === "textarea") return "textarea";
   if (node.inputType === "boolean") return "boolean";
   if (node.inputType === "date") return "date";
@@ -107,7 +121,7 @@ export function normalizeStoredQuestionAnswers(
 
   const nodeByKey = new Map((nodes ?? []).map((node) => [node.key, node]));
 
-  return Object.fromEntries(
+  const normalizedAnswers = Object.fromEntries(
     Object.entries(answers).map(([key, value]) => {
       const node = nodeByKey.get(key);
       if (shouldNormalizeUnansweredPlaceholder(node) && isUnansweredPlaceholderValue(value)) {
@@ -116,6 +130,38 @@ export function normalizeStoredQuestionAnswers(
       return [key, value];
     })
   );
+
+  const rawTypeOfAccess = normalizedAnswers.site_access;
+  const rawTypeOfAccessDetail = normalizedAnswers[TYPE_OF_ACCESS_OTHER_DETAIL_KEY];
+  const typeOfAccess =
+    typeof rawTypeOfAccess === "string"
+      ? rawTypeOfAccess.trim()
+      : null;
+  const typeOfAccessDetail =
+    typeof rawTypeOfAccessDetail === "string"
+      ? rawTypeOfAccessDetail.trim()
+      : "";
+
+  if (!typeOfAccess) {
+    return normalizedAnswers;
+  }
+
+  if (typeOfAccess === "Other") {
+    return {
+      ...normalizedAnswers,
+      [TYPE_OF_ACCESS_OTHER_DETAIL_KEY]: typeOfAccessDetail,
+    };
+  }
+
+  if (isTypeOfAccessOption(typeOfAccess)) {
+    return normalizedAnswers;
+  }
+
+  return {
+    ...normalizedAnswers,
+    site_access: "Other",
+    [TYPE_OF_ACCESS_OTHER_DETAIL_KEY]: typeOfAccessDetail || typeOfAccess,
+  };
 }
 
 export function sanitizeQuestionAnswerForSave(

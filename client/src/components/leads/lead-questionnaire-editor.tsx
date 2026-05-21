@@ -25,8 +25,10 @@ import {
 } from "@/components/ui/select";
 import { LeadQuestionnaireSections } from "./lead-questionnaire-sections";
 import {
+  getLeadQuestionnaireDisplayLabel,
   normalizeStoredQuestionAnswers,
   sanitizeQuestionAnswerForSave,
+  TYPE_OF_ACCESS_OTHER_DETAIL_KEY,
 } from "./questionnaire-answer-normalization";
 
 interface LeadQuestionnaireEditorProps {
@@ -127,6 +129,32 @@ function ClientProvidedDocsUploadField({
           ))}
         </div>
       ) : null}
+    </div>
+  );
+}
+
+function CurrencyInput({
+  id,
+  value,
+  onChange,
+}: {
+  id: string;
+  value: string;
+  onChange: (value: string) => void;
+}) {
+  return (
+    <div className="relative">
+      <span className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-sm text-muted-foreground">
+        $
+      </span>
+      <Input
+        id={id}
+        type="number"
+        inputMode="decimal"
+        className="pl-7"
+        value={value}
+        onChange={(event) => onChange(event.target.value)}
+      />
     </div>
   );
 }
@@ -243,8 +271,8 @@ export function LeadQuestionnaireEditor({ lead, onCancel, onSaved }: LeadQuestio
         availableNodes
           .filter((node) => node.nodeType === "question")
           .flatMap((node) => [
-            [node.key, node.label] as const,
-            [node.id, node.label] as const,
+            [node.key, getLeadQuestionnaireDisplayLabel(node.key, node.label)] as const,
+            [node.id, getLeadQuestionnaireDisplayLabel(node.key, node.label)] as const,
           ])
       ),
     [availableNodes]
@@ -366,6 +394,18 @@ export function LeadQuestionnaireEditor({ lead, onCancel, onSaved }: LeadQuestio
         return;
       }
     }
+    const typeOfAccessOtherDetail =
+      typeof formData.leadQuestionAnswers[TYPE_OF_ACCESS_OTHER_DETAIL_KEY] === "string"
+        ? formData.leadQuestionAnswers[TYPE_OF_ACCESS_OTHER_DETAIL_KEY].trim()
+        : "";
+    if (
+      formData.leadQuestionAnswers.site_access === "Other" &&
+      !typeOfAccessOtherDetail
+    ) {
+      setSubmitting(false);
+      setError("Type of access detail is required when Type of access is Other.");
+      return;
+    }
 
     try {
       const leadQuestionAnswers = Object.fromEntries(
@@ -458,7 +498,7 @@ export function LeadQuestionnaireEditor({ lead, onCancel, onSaved }: LeadQuestio
                 <p className="mt-1 text-xs text-amber-800">
                   Missing required project questions:{" "}
                   {stageGateError.missingRequirements.projectTypeQuestionIds
-                    .map((questionId) => gateQuestionLabels.get(questionId) ?? questionId)
+                    .map((questionId) => gateQuestionLabels.get(questionId) ?? getLeadQuestionnaireDisplayLabel(questionId, questionId))
                     .join(", ")}
                 </p>
               ) : null}
@@ -590,16 +630,15 @@ export function LeadQuestionnaireEditor({ lead, onCancel, onSaved }: LeadQuestio
                 </div>
                 <div className="space-y-2">
                   <Label htmlFor="estimated-value">Estimated Value</Label>
-                  <Input
+                  <CurrencyInput
                     id="estimated-value"
-                    type="number"
                     value={formData.qualificationPayload.estimated_value}
-                    onChange={(event) =>
+                    onChange={(value) =>
                       setFormData((current) => ({
                         ...current,
                         qualificationPayload: {
                           ...current.qualificationPayload,
-                          estimated_value: event.target.value,
+                          estimated_value: value,
                         },
                       }))
                     }
