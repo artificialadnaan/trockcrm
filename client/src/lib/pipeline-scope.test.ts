@@ -78,6 +78,16 @@ describe("useNormalizedStageRoute", () => {
     cleanup();
   });
 
+  it("preserves stage search and rep filters on the back-to-board path", () => {
+    const { route, cleanup } = renderStageRoute(
+      "director",
+      "/leads/stages/stage-1?scope=all&assignedRepId=rep-1&search=roof+leak&page=3",
+      "leads"
+    );
+    expect(route.backTo).toBe("/leads?scope=all&assignedRepId=rep-1&search=roof+leak");
+    cleanup();
+  });
+
   it("applies Mine as the default when URL has no scope param", () => {
     const { route, cleanup } = renderStageRoute("director", "/deals/stages/stage-1");
     expect(route.scope).toBe("mine");

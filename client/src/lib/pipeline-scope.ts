@@ -67,12 +67,15 @@ export function useNormalizedStageRoute(entity: PipelineEntity, stageId: string)
   const needsRedirect = searchParams.get("scope") !== allowedScope;
   const nextParams = new URLSearchParams(searchParams);
   nextParams.set("scope", allowedScope);
+  const backParams = new URLSearchParams(searchParams);
+  backParams.set("scope", allowedScope);
+  backParams.delete("page");
 
   return {
     stageId,
     needsRedirect,
     redirectTo: `/${entity}/stages/${stageId}?${nextParams.toString()}`,
-    backTo: `/${entity}?scope=${allowedScope}`,
+    backTo: `/${entity}?${backParams.toString()}`,
     query: {
       ...normalizeStagePageQuery(Object.fromEntries(searchParams.entries())),
       scope: allowedScope,

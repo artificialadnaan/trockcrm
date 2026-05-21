@@ -687,27 +687,37 @@ export async function convertLead(
   });
 }
 
-export function useLeadBoard(scope: "mine" | "team" | "all", assignedRepId?: string) {
+export function useLeadBoard(scope: "mine" | "team" | "all", assignedRepId?: string, search?: string) {
   const [board, setBoard] = useState<LeadBoardResponse | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const requestIdRef = useRef(0);
 
   const refetch = useCallback(() => {
+    const requestId = requestIdRef.current + 1;
+    requestIdRef.current = requestId;
     setLoading(true);
     setError(null);
     const params = new URLSearchParams({ scope });
     if (assignedRepId) params.set("assignedRepId", assignedRepId);
+    if (search) params.set("search", search);
     return api<LeadBoardResponse>(`/leads/board?${params.toString()}`)
       .then((result) => {
+        if (requestId !== requestIdRef.current) return result;
         setBoard(result);
         return result;
       })
       .catch((err: unknown) => {
+        if (requestId !== requestIdRef.current) throw err;
         setError(err instanceof Error ? err.message : "Failed to load lead board");
         throw err;
       })
-      .finally(() => setLoading(false));
-  }, [assignedRepId, scope]);
+      .finally(() => {
+        if (requestId === requestIdRef.current) {
+          setLoading(false);
+        }
+      });
+  }, [assignedRepId, scope, search]);
 
   useEffect(() => {
     void refetch().catch(() => undefined);

@@ -17,6 +17,18 @@ vi.mock("@/components/ui/button", () => ({
   ),
 }));
 
+vi.mock("@/components/ui/input", () => ({
+  Input: ({
+    className,
+    placeholder,
+    value,
+  }: {
+    className?: string;
+    placeholder?: string;
+    value?: string;
+  }) => <input className={className} placeholder={placeholder} value={value} readOnly />,
+}));
+
 vi.mock("@/lib/auth", () => ({
   useAuth: mocks.useAuthMock,
 }));
@@ -230,7 +242,7 @@ describe("LeadListPage", () => {
   it("renders the readonly lead board and excludes legacy opportunity from the board", () => {
     const html = renderPage();
 
-    expect(mocks.useLeadBoardMock).toHaveBeenCalledWith("mine", undefined);
+    expect(mocks.useLeadBoardMock).toHaveBeenCalledWith("mine", undefined, undefined);
     expect(mocks.useLeadsMock).toHaveBeenCalledWith({ status: "open", isActive: true, scope: "mine" });
     expect(html).toContain("Read-only lead board");
     expect(html).toContain("New Lead");
@@ -238,6 +250,14 @@ describe("LeadListPage", () => {
     expect(html).toContain("Sales Validation Stage");
     expect(html).toContain("Fresh Prospect");
     expect(html).not.toContain("Legacy Opportunity Lead");
+  });
+
+  it("renders a search bar with the deals-page placeholder", () => {
+    const html = renderPage();
+
+    expect(html).toContain('placeholder="Search leads"');
+    expect(html).toContain(">Search</span>");
+    expect(html).toContain("pl-9");
   });
 
   it("renders lead descriptions as a muted responsive column with hover title and dash fallback", () => {
@@ -311,18 +331,36 @@ describe("LeadListPage", () => {
     });
   });
 
+  it("layers the search query param on top of scope and rep filters", () => {
+    const html = renderPage("/leads?scope=all&assignedRepId=rep-1&search=roof", "director");
+
+    expect(mocks.useLeadBoardMock).toHaveBeenLastCalledWith("all", "rep-1", "roof");
+    expect(mocks.useLeadsMock).toHaveBeenLastCalledWith({
+      status: "open",
+      isActive: true,
+      scope: "all",
+      assignedRepId: "rep-1",
+      search: "roof",
+    });
+    expect(html).toContain('placeholder="Search leads"');
+    expect(html).toContain('value="roof"');
+  });
+
   it("preserves selected owner filter when building a lead stage navigation path", () => {
     expect(buildLeadStageNavigationPath("stage-new", "team", "rep-1")).toBe(
       "/leads/stages/stage-new?scope=team&assignedRepId=rep-1"
     );
     expect(buildLeadStageNavigationPath("stage-new", "team", "")).toBe("/leads/stages/stage-new?scope=team");
     expect(buildLeadStageNavigationPath("stage-new", "mine", "rep-1")).toBe("/leads/stages/stage-new?scope=mine");
+    expect(buildLeadStageNavigationPath("stage-new", "all", "rep-1", "roof leak")).toBe(
+      "/leads/stages/stage-new?scope=all&assignedRepId=rep-1&search=roof+leak"
+    );
   });
 
   it("ignores stale owner query params when the lead scope is mine", () => {
     const html = renderPage("/leads?scope=mine&assignedRepId=rep-1", "director");
 
-    expect(mocks.useLeadBoardMock).toHaveBeenLastCalledWith("mine", undefined);
+    expect(mocks.useLeadBoardMock).toHaveBeenLastCalledWith("mine", undefined, undefined);
     expect(mocks.useLeadsMock).toHaveBeenLastCalledWith({ status: "open", isActive: true, scope: "mine" });
     expect(html).not.toContain("All reps");
   });
@@ -347,34 +385,34 @@ describe("LeadListPage", () => {
 
     renderPage("/leads", "director");
 
-    expect(mocks.useLeadBoardMock).toHaveBeenCalledWith("mine", undefined);
+    expect(mocks.useLeadBoardMock).toHaveBeenCalledWith("mine", undefined, undefined);
   });
 
   it("shows the deferred Team empty state when team scope is requested", () => {
     renderPage("/leads?scope=team", "rep");
 
-    expect(mocks.useLeadBoardMock).toHaveBeenLastCalledWith("team", undefined);
+    expect(mocks.useLeadBoardMock).toHaveBeenLastCalledWith("team", undefined, undefined);
     expect(mocks.useLeadsMock).toHaveBeenLastCalledWith({ status: "open", isActive: true, scope: "team" });
   });
 
   it("defaults the board scope by role when the query param is absent", () => {
     renderPage("/leads", "rep");
-    expect(mocks.useLeadBoardMock).toHaveBeenLastCalledWith("mine", undefined);
+    expect(mocks.useLeadBoardMock).toHaveBeenLastCalledWith("mine", undefined, undefined);
 
     renderPage("/leads", "director");
-    expect(mocks.useLeadBoardMock).toHaveBeenLastCalledWith("mine", undefined);
+    expect(mocks.useLeadBoardMock).toHaveBeenLastCalledWith("mine", undefined, undefined);
 
     renderPage("/leads", "admin");
-    expect(mocks.useLeadBoardMock).toHaveBeenLastCalledWith("mine", undefined);
+    expect(mocks.useLeadBoardMock).toHaveBeenLastCalledWith("mine", undefined, undefined);
 
     renderPage("/leads?scope=mine", "director");
-    expect(mocks.useLeadBoardMock).toHaveBeenLastCalledWith("mine", undefined);
+    expect(mocks.useLeadBoardMock).toHaveBeenLastCalledWith("mine", undefined, undefined);
   });
 
   it("renders Team as a first-class scope option even before it is configured", () => {
     const html = renderPage("/leads?scope=team", "rep");
 
-    expect(mocks.useLeadBoardMock).toHaveBeenLastCalledWith("team", undefined);
+    expect(mocks.useLeadBoardMock).toHaveBeenLastCalledWith("team", undefined, undefined);
     expect(html).toContain('aria-pressed="true">Team');
     expect(html).toContain("Team view is not yet configured");
   });
@@ -382,7 +420,7 @@ describe("LeadListPage", () => {
   it("allows reps to opt into all-office scope", () => {
     const html = renderPage("/leads?scope=all", "rep");
 
-    expect(mocks.useLeadBoardMock).toHaveBeenLastCalledWith("all", undefined);
+    expect(mocks.useLeadBoardMock).toHaveBeenLastCalledWith("all", undefined, undefined);
     expect(html).toContain('aria-pressed="false">Mine');
     expect(html).toContain('aria-pressed="true">All');
     expect(html).toContain('aria-pressed="false">Team');

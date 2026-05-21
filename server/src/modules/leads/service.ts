@@ -282,6 +282,7 @@ export interface LeadBoardInput {
   activeOfficeId: string;
   scope: WorkspaceScope;
   assignedRepId?: string;
+  search?: string;
 }
 
 export interface LeadStagePageInput extends LeadBoardInput {
@@ -959,6 +960,81 @@ async function getDefaultConversionDealStageId() {
   return stage?.id ?? null;
 }
 
+function escapeLikePattern(value: string) {
+  return value.replace(/[\\%_]/g, "\\$&");
+}
+
+export function buildLeadSearchCondition(search: string) {
+  const searchTerm = `%${escapeLikePattern(search.trim())}%`;
+  return sql`(
+    ${leads.name} ILIKE ${searchTerm} ESCAPE '\\'
+    OR ${leads.source} ILIKE ${searchTerm} ESCAPE '\\'
+    OR ${leads.sourceDetail} ILIKE ${searchTerm} ESCAPE '\\'
+    OR ${leads.description} ILIKE ${searchTerm} ESCAPE '\\'
+    OR EXISTS (
+      SELECT 1
+      FROM ${companies}
+      WHERE ${companies.id} = ${leads.companyId}
+        AND ${companies.name} ILIKE ${searchTerm} ESCAPE '\\'
+    )
+    OR EXISTS (
+      SELECT 1
+      FROM ${properties}
+      WHERE ${properties.id} = ${leads.propertyId}
+        AND (
+          ${properties.name} ILIKE ${searchTerm} ESCAPE '\\'
+          OR ${properties.address} ILIKE ${searchTerm} ESCAPE '\\'
+          OR ${properties.city} ILIKE ${searchTerm} ESCAPE '\\'
+          OR ${properties.state} ILIKE ${searchTerm} ESCAPE '\\'
+        )
+    )
+    OR EXISTS (
+      SELECT 1
+      FROM ${contacts}
+      WHERE ${contacts.id} = ${leads.primaryContactId}
+        AND (
+          ${contacts.firstName} ILIKE ${searchTerm} ESCAPE '\\'
+          OR ${contacts.lastName} ILIKE ${searchTerm} ESCAPE '\\'
+          OR CONCAT(${contacts.firstName}, ' ', ${contacts.lastName}) ILIKE ${searchTerm} ESCAPE '\\'
+        )
+    )
+  )`;
+}
+
+export function buildAliasedLeadSearchCondition(
+  leadAlias: string,
+  search: string,
+  companyAlias = "c",
+  propertyAlias = "p"
+) {
+  const searchTerm = `%${escapeLikePattern(search.trim())}%`;
+  const leadColumn = (column: string) => sql.raw(`${leadAlias}.${column}`);
+  const companyColumn = (column: string) => sql.raw(`${companyAlias}.${column}`);
+  const propertyColumn = (column: string) => sql.raw(`${propertyAlias}.${column}`);
+
+  return sql`(
+    ${leadColumn("name")} ILIKE ${searchTerm} ESCAPE '\\'
+    OR ${leadColumn("source")} ILIKE ${searchTerm} ESCAPE '\\'
+    OR ${leadColumn("source_detail")} ILIKE ${searchTerm} ESCAPE '\\'
+    OR ${leadColumn("description")} ILIKE ${searchTerm} ESCAPE '\\'
+    OR ${companyColumn("name")} ILIKE ${searchTerm} ESCAPE '\\'
+    OR ${propertyColumn("name")} ILIKE ${searchTerm} ESCAPE '\\'
+    OR ${propertyColumn("address")} ILIKE ${searchTerm} ESCAPE '\\'
+    OR ${propertyColumn("city")} ILIKE ${searchTerm} ESCAPE '\\'
+    OR ${propertyColumn("state")} ILIKE ${searchTerm} ESCAPE '\\'
+    OR EXISTS (
+      SELECT 1
+      FROM ${contacts}
+      WHERE ${contacts.id} = ${leadColumn("primary_contact_id")}
+        AND (
+          ${contacts.firstName} ILIKE ${searchTerm} ESCAPE '\\'
+          OR ${contacts.lastName} ILIKE ${searchTerm} ESCAPE '\\'
+          OR CONCAT(${contacts.firstName}, ' ', ${contacts.lastName}) ILIKE ${searchTerm} ESCAPE '\\'
+        )
+    )
+  )`;
+}
+
 async function buildLeadWorkspaceScope(tenantDb: TenantDb, input: LeadBoardInput | LeadStagePageInput) {
   const activeOfficeScope = await resolveActiveOfficeScope(tenantDb, input.activeOfficeId);
   const filters = [
@@ -995,8 +1071,7 @@ async function buildLeadWorkspaceScope(tenantDb: TenantDb, input: LeadBoardInput
   }
 
   if ("search" in input && input.search && input.search.trim().length >= 2) {
-    const term = `%${input.search.trim()}%`;
-    filters.push(sql`(l.name ilike ${term} or c.name ilike ${term} or p.city ilike ${term} or p.state ilike ${term})`);
+    filters.push(buildAliasedLeadSearchCondition("l", input.search));
   }
 
   if ("staleOnly" in input && input.staleOnly) {
@@ -1266,14 +1341,7 @@ export function createLeadService(
     if (filters.status) conditions.push(eq(leads.status, filters.status));
 
     if (filters.search && filters.search.trim().length >= 2) {
-      const searchTerm = `%${filters.search.trim()}%`;
-      conditions.push(
-        or(
-          ilike(leads.name, searchTerm),
-          ilike(leads.source, searchTerm),
-          ilike(leads.description, searchTerm)
-        )
-      );
+      conditions.push(buildLeadSearchCondition(filters.search));
     }
 
     const rows = await tenantDb

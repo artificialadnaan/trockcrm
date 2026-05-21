@@ -138,9 +138,12 @@ function flushEffects() {
 let latestBoardResult: ReturnType<typeof useLeadBoard> | null = null;
 let latestLeadsResult: ReturnType<typeof useLeads> | null = null;
 let hookLeadFilters: Parameters<typeof useLeads>[0] = {};
+let hookBoardScope: "mine" | "team" | "all" = "mine";
+let hookBoardAssignedRepId: string | undefined;
+let hookBoardSearch: string | undefined;
 
 function BoardHookProbe() {
-  latestBoardResult = useLeadBoard("mine");
+  latestBoardResult = useLeadBoard(hookBoardScope, hookBoardAssignedRepId, hookBoardSearch);
   return null;
 }
 
@@ -192,6 +195,9 @@ describe("transitionLeadStage", () => {
     latestBoardResult = null;
     latestLeadsResult = null;
     hookLeadFilters = {};
+    hookBoardScope = "mine";
+    hookBoardAssignedRepId = undefined;
+    hookBoardSearch = undefined;
   });
 
   it("returns missing requirement payloads on 409 responses", async () => {
@@ -309,6 +315,68 @@ describe("transitionLeadStage", () => {
     });
     vi.unstubAllGlobals();
   });
+
+  it("passes search through the board request alongside scope and rep filters", async () => {
+    vi.mocked(api).mockResolvedValue({
+      columns: [],
+      defaultConversionDealStageId: null,
+    });
+
+    hookBoardScope = "all";
+    hookBoardAssignedRepId = "rep-2";
+    hookBoardSearch = "roof";
+
+    const root = await renderBoardHook();
+    await waitForBoardIdle();
+
+    expect(api).toHaveBeenCalledWith("/leads/board?scope=all&assignedRepId=rep-2&search=roof");
+
+    await act(async () => {
+      root.unmount();
+      await flushEffects();
+    });
+    vi.unstubAllGlobals();
+  });
+
+  it("ignores stale board responses when the search term changes rapidly", async () => {
+    const pending = new Map<string, (value: unknown) => void>();
+    vi.mocked(api).mockImplementation((path: string) => {
+      const search = new URLSearchParams(path.split("?")[1] ?? "").get("search") ?? "";
+      return new Promise((resolve) => {
+        pending.set(search, resolve);
+      }) as Promise<unknown>;
+    });
+
+    hookBoardScope = "all";
+    hookBoardSearch = "roof";
+    const root = await renderBoardHook();
+
+    hookBoardSearch = "roof leak";
+    await act(async () => {
+      root.render(createElement(BoardHookProbe));
+      await flushEffects();
+    });
+
+    await act(async () => {
+      pending.get("roof leak")?.({ columns: [{ stage: { id: "stage-2", name: "Stage 2", slug: "qualified_lead" }, count: 1, cards: [] }], defaultConversionDealStageId: null });
+      await flushEffects();
+    });
+
+    expect(latestBoardResult?.board?.columns[0]?.stage.id).toBe("stage-2");
+
+    await act(async () => {
+      pending.get("roof")?.({ columns: [{ stage: { id: "stage-1", name: "Stage 1", slug: "new_lead" }, count: 1, cards: [] }], defaultConversionDealStageId: null });
+      await flushEffects();
+    });
+
+    expect(latestBoardResult?.board?.columns[0]?.stage.id).toBe("stage-2");
+
+    await act(async () => {
+      root.unmount();
+      await flushEffects();
+    });
+    vi.unstubAllGlobals();
+  });
 });
 
 describe("useLeads", () => {
@@ -356,6 +424,31 @@ describe("useLeads", () => {
     });
 
     expect(latestLeadsResult?.leads.map((lead) => lead.id)).toEqual(["lead-all"]);
+
+    await act(async () => {
+      root.unmount();
+      await flushEffects();
+    });
+    vi.unstubAllGlobals();
+  });
+
+  it("passes search through the leads request alongside existing filters", async () => {
+    vi.mocked(api).mockResolvedValue({ leads: [] });
+
+    hookLeadFilters = {
+      scope: "all",
+      assignedRepId: "rep-2",
+      status: "open",
+      isActive: true,
+      search: "roof",
+    };
+
+    const root = await renderLeadsHook();
+    await act(async () => {
+      await flushEffects();
+    });
+
+    expect(api).toHaveBeenCalledWith("/leads?search=roof&assignedRepId=rep-2&status=open&scope=all");
 
     await act(async () => {
       root.unmount();
