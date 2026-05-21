@@ -147,6 +147,48 @@ describe("DealFilePhotosSubview", () => {
     expect(node.textContent).not.toContain("#roofing");
   });
 
+  it("renders without crashing when suggestedTags is undefined", async () => {
+    vi.mocked(api).mockImplementation(async (path: string, options?: { method?: string; json?: Record<string, unknown> }) => {
+      if (path.includes("/download")) return { url: "https://example.test/photo.jpg", filename: "photo.jpg" };
+      if (path.startsWith("/files/tags")) return { tags: undefined };
+      if (options?.method === "PATCH") return { file: { ...mockPhotos[0], ...options.json } };
+      if (options?.method === "DELETE") return { success: true };
+      return { photos: currentPhotos, pagination: { page: 1, limit: 200, total: currentPhotos.length, totalPages: 1 } };
+    });
+
+    const node = renderSubview();
+    await vi.waitFor(() => expect(node.textContent).toContain("Roof corner damage"));
+
+    expect(node.textContent).toContain("Damage");
+    expect(node.querySelector<HTMLButtonElement>('[aria-label="Open photo Damage photo"]')).not.toBeNull();
+  });
+
+  it("renders without crashing when suggestedTags is null", async () => {
+    vi.mocked(api).mockImplementation(async (path: string, options?: { method?: string; json?: Record<string, unknown> }) => {
+      if (path.includes("/download")) return { url: "https://example.test/photo.jpg", filename: "photo.jpg" };
+      if (path.startsWith("/files/tags")) return { tags: null };
+      if (options?.method === "PATCH") return { file: { ...mockPhotos[0], ...options.json } };
+      if (options?.method === "DELETE") return { success: true };
+      return { photos: currentPhotos, pagination: { page: 1, limit: 200, total: currentPhotos.length, totalPages: 1 } };
+    });
+
+    const node = renderSubview();
+    await vi.waitFor(() => expect(node.textContent).toContain("Roof corner damage"));
+
+    expect(node.textContent).toContain("Damage");
+    expect(node.querySelector<HTMLButtonElement>('[aria-label="Open photo Damage photo"]')).not.toBeNull();
+  });
+
+  it("still renders suggestedTags when they are present", async () => {
+    const node = renderSubview();
+    await vi.waitFor(() => expect(node.textContent).toContain("Roof corner damage"));
+
+    node.querySelector<HTMLButtonElement>('[aria-label="Tags filter"]')?.click();
+    await vi.waitFor(() => expect(document.body.textContent).toContain("#urgent"));
+    expect(document.body.textContent).toContain("#roofing");
+    expect(document.body.textContent).toContain("#safety");
+  });
+
   it("filters by category from the shared filter bar", async () => {
     const node = renderSubview();
     await vi.waitFor(() => expect(node.textContent).toContain("Roof corner damage"));

@@ -79,6 +79,7 @@ export function DealFilePhotosSubview({ dealId }: { dealId: string }) {
     downloadPhoto,
   } = useDealPhotosData({ dealId, filters });
   const { tags: suggestedTags } = useTagSuggestions(dealId);
+  const availableSuggestedTags = Array.isArray(suggestedTags) ? suggestedTags : [];
 
   React.useEffect(() => {
     setFilters(buildFilesPhotoFilters(searchParams));
@@ -95,7 +96,7 @@ export function DealFilePhotosSubview({ dealId }: { dealId: string }) {
 
   const availableTags = useMemo(() => {
     const map = new Map<string, string>();
-    suggestedTags.forEach((tag) => {
+    availableSuggestedTags.forEach((tag) => {
       const normalized = tag.trim();
       if (!normalized) return;
       const key = normalized.toLowerCase();
@@ -110,7 +111,7 @@ export function DealFilePhotosSubview({ dealId }: { dealId: string }) {
       }
     });
     return Array.from(map.values()).sort((left, right) => left.localeCompare(right));
-  }, [photos, suggestedTags]);
+  }, [availableSuggestedTags, photos]);
   const uploaders = useMemo(() => {
     const map = new Map<string, { id: string; name: string; avatarUrl: string | null }>();
     photos.forEach((photo) => map.set(photo.uploadedBy, { id: photo.uploadedBy, name: photo.uploaderName, avatarUrl: photo.uploaderAvatarUrl }));

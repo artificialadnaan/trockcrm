@@ -59,6 +59,7 @@ export function DealPhotosTab({ dealId, onCountChange }: { dealId: string; onCou
     limit: 20,
   });
   const { tags: suggestedTags } = useTagSuggestions(dealId);
+  const availableSuggestedTags = Array.isArray(suggestedTags) ? suggestedTags : [];
 
   React.useEffect(() => {
     setFilters(filtersFromSearchParams(searchParams));
@@ -74,7 +75,7 @@ export function DealPhotosTab({ dealId, onCountChange }: { dealId: string; onCou
 
   const availableTags = useMemo(() => {
     const map = new Map<string, string>();
-    suggestedTags.forEach((tag) => {
+    availableSuggestedTags.forEach((tag) => {
       const normalized = tag.trim();
       if (!normalized) return;
       const key = normalized.toLowerCase();
@@ -89,7 +90,7 @@ export function DealPhotosTab({ dealId, onCountChange }: { dealId: string; onCou
       }
     });
     return Array.from(map.values()).sort((left, right) => left.localeCompare(right));
-  }, [photos, suggestedTags]);
+  }, [availableSuggestedTags, photos]);
   const uploaders = useMemo(() => {
     const map = new Map<string, { id: string; name: string; avatarUrl: string | null }>();
     photos.forEach((photo) => map.set(photo.uploadedBy, { id: photo.uploadedBy, name: photo.uploaderName, avatarUrl: photo.uploaderAvatarUrl }));
