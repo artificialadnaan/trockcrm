@@ -38,7 +38,7 @@ BEGIN
     EXECUTE format(
       $sql$
         UPDATE %I.deals d
-           SET bid_due_date = l.bid_due_date
+           SET bid_due_date = (l.bid_due_date::text || 'T00:00:00.000Z')::timestamptz
           FROM %I.leads l
          WHERE l.id = d.source_lead_id
            AND d.source_lead_id IS NOT NULL
@@ -54,24 +54,8 @@ $tenant$;
 
 -- TENANT_SCHEMA_START
 UPDATE office_dallas.deals d
-   SET bid_due_date = l.bid_due_date
+   SET bid_due_date = (l.bid_due_date::text || 'T00:00:00.000Z')::timestamptz
   FROM office_dallas.leads l
- WHERE l.id = d.source_lead_id
-   AND d.source_lead_id IS NOT NULL
-   AND d.bid_due_date IS NULL
-   AND l.bid_due_date IS NOT NULL;
-
-UPDATE office_atlanta.deals d
-   SET bid_due_date = l.bid_due_date
-  FROM office_atlanta.leads l
- WHERE l.id = d.source_lead_id
-   AND d.source_lead_id IS NOT NULL
-   AND d.bid_due_date IS NULL
-   AND l.bid_due_date IS NOT NULL;
-
-UPDATE office_pwauditoffice.deals d
-   SET bid_due_date = l.bid_due_date
-  FROM office_pwauditoffice.leads l
  WHERE l.id = d.source_lead_id
    AND d.source_lead_id IS NOT NULL
    AND d.bid_due_date IS NULL

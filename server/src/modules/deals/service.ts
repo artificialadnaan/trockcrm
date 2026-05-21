@@ -62,8 +62,16 @@ function nonTerminalMirroredStageCondition() {
   return sql`COALESCE(${deals.bidBoardStageSlug}, '') NOT IN (${sqlStringList(TERMINAL_STAGE_SLUGS)})`;
 }
 
-function normalizeOptionalDealBidDueDate(value: string | null | undefined) {
-  if (value == null || value.trim() === "") {
+function normalizeOptionalDealBidDueDate(value: unknown) {
+  if (value == null) {
+    return null;
+  }
+
+  if (typeof value !== "string") {
+    throw new AppError(400, "bidDueDate must be an ISO date in YYYY-MM-DD format");
+  }
+
+  if (value.trim() === "") {
     return null;
   }
 
@@ -82,7 +90,7 @@ function normalizeOptionalDealBidDueDate(value: string | null | undefined) {
     throw new AppError(400, "bidDueDate must be an ISO date in YYYY-MM-DD format");
   }
 
-  return trimmed;
+  return new Date(`${trimmed}T00:00:00.000Z`);
 }
 
 async function resolveActiveOfficeScope(tenantDb: TenantDb, activeOfficeId: string) {
@@ -1327,7 +1335,9 @@ export async function createDeal(tenantDb: TenantDb, input: CreateDealInput) {
       ddEstimate: input.ddEstimate ?? null,
       bidEstimate: input.bidEstimate ?? null,
       awardedAmount: input.awardedAmount ?? null,
-      bidDueDate: normalizedBidDueDate ? sql`${normalizedBidDueDate}::date` : null,
+      // deals.bid_due_date is timestamptz, but the business field is date-only.
+      // Persist UTC midnight so every environment resolves the same calendar day.
+      bidDueDate: normalizedBidDueDate,
       description: input.description ?? null,
       propertyAddress: input.propertyAddress ?? null,
       propertyCity: input.propertyCity ?? null,

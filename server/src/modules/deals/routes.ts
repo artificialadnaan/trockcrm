@@ -1472,6 +1472,26 @@ function validateDealPayload(body: Record<string, unknown>): void {
   if (body.onHold !== undefined && typeof body.onHold !== "boolean") {
     throw new AppError(400, "onHold must be a boolean");
   }
+  if (body.bidDueDate != null && body.bidDueDate !== "") {
+    if (typeof body.bidDueDate !== "string") {
+      throw new AppError(400, "bidDueDate must be an ISO date in YYYY-MM-DD format");
+    }
+
+    const trimmed = body.bidDueDate.trim();
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(trimmed)) {
+      throw new AppError(400, "bidDueDate must be an ISO date in YYYY-MM-DD format");
+    }
+
+    const [year, month, day] = trimmed.split("-").map(Number);
+    const parsed = new Date(Date.UTC(year, month - 1, day));
+    if (
+      parsed.getUTCFullYear() !== year ||
+      parsed.getUTCMonth() !== month - 1 ||
+      parsed.getUTCDate() !== day
+    ) {
+      throw new AppError(400, "bidDueDate must be an ISO date in YYYY-MM-DD format");
+    }
+  }
 }
 
 function normalizeServiceCandidate(value: unknown) {
@@ -1546,6 +1566,7 @@ router.post("/service-opportunity", async (req, res, next) => {
       source,
       winProbability,
       expectedCloseDate,
+      bidDueDate,
       projectTypeId,
       projectType,
       officeCode,
@@ -1596,6 +1617,7 @@ router.post("/service-opportunity", async (req, res, next) => {
       description,
       source,
       winProbability,
+      bidDueDate,
       expectedCloseDate,
       workflowRoute: "service",
       projectType: "service",
