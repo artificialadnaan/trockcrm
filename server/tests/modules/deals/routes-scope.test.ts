@@ -160,4 +160,49 @@ describe("deal routes scope defaults", () => {
       expect.objectContaining({ scope: "mine", includeDd: true })
     );
   });
+
+  it("rejects malformed createdFrom with a 400 before querying deals", async () => {
+    const handler = findRouteHandler("get", "/");
+    const req = {
+      query: { createdFrom: "not-a-date" },
+      tenantDb: {},
+      user: {
+        id: "director-1",
+        role: "director",
+        officeId: "office-1",
+        activeOfficeId: "office-1",
+      },
+      commitTransaction: vi.fn(async () => {}),
+    } as any;
+    const res = {} as any;
+    const next = vi.fn();
+
+    await handler(req, res, next);
+
+    expect(dealServiceMocks.getDeals).not.toHaveBeenCalled();
+    expect(req.commitTransaction).not.toHaveBeenCalled();
+    expect(next).toHaveBeenCalledWith(
+      expect.objectContaining({
+        statusCode: 400,
+        message: "createdFrom must be an ISO date in YYYY-MM-DD format",
+      })
+    );
+  });
+
+  it("passes validated createdFrom and createdTo through to getDeals", async () => {
+    const { req } = await invokeRoute("/", {
+      createdFrom: "2026-05-01",
+      createdTo: "2026-05-31",
+    });
+
+    expect(dealServiceMocks.getDeals).toHaveBeenCalledWith(
+      req.tenantDb,
+      expect.objectContaining({
+        createdFrom: "2026-05-01",
+        createdTo: "2026-05-31",
+      }),
+      "director",
+      "director-1"
+    );
+  });
 });

@@ -91,6 +91,72 @@ function createApp(officeSlug: string | null = "dallas", tenantDb = createTenant
   return app;
 }
 
+function findRouteHandler(routes: unknown, method: "post", path: string) {
+  const layer = (routes as any).stack.find(
+    (entry: any) => entry.route?.path === path && entry.route?.methods?.[method]
+  );
+
+  if (!layer) {
+    throw new Error(`Route ${method.toUpperCase()} ${path} not found`);
+  }
+
+  const routeLayer = layer.route.stack.find((entry: any) => entry.method === method);
+  if (!routeLayer) {
+    throw new Error(`Route handler ${method.toUpperCase()} ${path} not found`);
+  }
+
+  return routeLayer.handle as (req: any, res: any, next: (err?: unknown) => void) => unknown;
+}
+
+async function invokeRoute({
+  path,
+  body,
+  officeSlug = "dallas",
+  tenantDb = createTenantDb(),
+}: {
+  path: string;
+  body: Record<string, unknown>;
+  officeSlug?: string | null;
+  tenantDb?: any;
+}) {
+  const handler = findRouteHandler(dealRoutes, "post", path);
+  const req = {
+    body,
+    params: {},
+    query: {},
+    officeSlug: officeSlug ?? undefined,
+    tenantDb,
+    user: {
+      id: "admin-1",
+      role: "admin",
+      displayName: "Admin",
+      email: "admin@example.com",
+      officeId: "office-dallas",
+      activeOfficeId: "office-dallas",
+    },
+    headers: {},
+    commitTransaction: vi.fn().mockResolvedValue(undefined),
+  } as any;
+  const res = {
+    statusCode: 200,
+    body: undefined as any,
+    status(code: number) {
+      this.statusCode = code;
+      return this;
+    },
+    json(payload: any) {
+      this.body = payload;
+      return this;
+    },
+  } as any;
+  const next = vi.fn((err?: unknown) => {
+    if (err) throw err;
+  });
+
+  await handler(req, res, next);
+  return { req, res, next };
+}
+
 function validBody(overrides: Record<string, unknown> = {}) {
   return {
     name: "SMOKE TEST DELETE direct-create officecode",
@@ -309,5 +375,28 @@ describe("POST /api/deals create context", () => {
       sourceLeadWriteMode: "lead_conversion",
       sourceLeadId: "lead-1",
     });
+  });
+
+  it("forwards bidDueDate through the Service opportunity endpoint", async () => {
+    const { res } = await invokeRoute({
+      path: "/service-opportunity",
+      body: {
+        name: "SMOKE TEST DELETE Service Opportunity",
+        assignedRepId: "rep-1",
+        companyId: "company-1",
+        propertyId: "property-1",
+        projectTypeId: "type-service",
+        bidDueDate: "2026-06-01",
+      },
+    });
+
+    expect(res.statusCode).toBe(201);
+    expect(dealsServiceMocks.createDeal).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({
+        bidDueDate: "2026-06-01",
+        workflowRoute: "service",
+      })
+    );
   });
 });

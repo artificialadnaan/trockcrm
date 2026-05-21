@@ -169,6 +169,118 @@ describe("Deal Service", () => {
       expect(deal.dealNumber).toMatch(/^DFW-3-\d{5}-ab$/);
       expect(deal.bidBoardProjectNumber).toBeNull();
     });
+
+    it("persists bidDueDate when deal creation receives one", async () => {
+      const state = {
+        insertedDeal: null as Record<string, unknown> | null,
+        executeCalls: 0,
+      };
+      const tenantDb = {
+        select() {
+          return {
+            from() {
+              return {
+                where() {
+                  return {
+                    limit() {
+                      return Promise.resolve([{ id: "rep-1", isActive: true, officeId: "office-1" }]);
+                    },
+                  };
+                },
+              };
+            },
+          };
+        },
+        execute() {
+          state.executeCalls += 1;
+          if (state.executeCalls === 1) return Promise.resolve({ rows: [{ deal_number: "dfw-3-11826-aa" }] });
+          if (state.executeCalls === 3) return Promise.resolve({ rows: [{ last_suffix: "aa" }] });
+          return Promise.resolve({ rows: [] });
+        },
+        insert() {
+          return {
+            values(values: Record<string, unknown>) {
+              state.insertedDeal = {
+                id: "deal-1",
+                bidBoardProjectNumber: null,
+                ...values,
+              };
+              return {
+                returning() {
+                  return Promise.resolve([state.insertedDeal]);
+                },
+              };
+            },
+          };
+        },
+      };
+
+      const deal = await createDeal(tenantDb as never, {
+        name: "Direct Deal",
+        stageId: "stage-dd",
+        assignedRepId: "rep-1",
+        officeId: "office-1",
+        migrationMode: true,
+        officeCode: "dfw",
+        projectType: "roofing",
+        bidDueDate: "2026-06-01",
+      });
+
+      expect(deal.bidDueDate).toBeInstanceOf(Date);
+      expect((deal.bidDueDate as Date).toISOString()).toBe("2026-06-01T00:00:00.000Z");
+    });
+
+    it("rejects non-string bidDueDate values with a 4xx validation error", async () => {
+      const state = {
+        executeCalls: 0,
+      };
+      const tenantDb = {
+        select() {
+          return {
+            from() {
+              return {
+                where() {
+                  return {
+                    limit() {
+                      return Promise.resolve([{ id: "rep-1", isActive: true, officeId: "office-1" }]);
+                    },
+                  };
+                },
+              };
+            },
+          };
+        },
+        execute() {
+          state.executeCalls += 1;
+          if (state.executeCalls === 1) return Promise.resolve({ rows: [{ deal_number: "dfw-3-11826-aa" }] });
+          if (state.executeCalls === 3) return Promise.resolve({ rows: [{ last_suffix: "aa" }] });
+          return Promise.resolve({ rows: [] });
+        },
+        insert() {
+          return {
+            values() {
+              throw new Error("insert should not be reached");
+            },
+          };
+        },
+      };
+
+      await expect(
+        createDeal(tenantDb as never, {
+          name: "Direct Deal",
+          stageId: "stage-dd",
+          assignedRepId: "rep-1",
+          officeId: "office-1",
+          migrationMode: true,
+          officeCode: "dfw",
+          projectType: "roofing",
+          bidDueDate: 20260601 as never,
+        })
+      ).rejects.toMatchObject({
+        statusCode: 400,
+        message: "bidDueDate must be an ISO date in YYYY-MM-DD format",
+      });
+    });
   });
 
   describe("DealFilters Logic", () => {

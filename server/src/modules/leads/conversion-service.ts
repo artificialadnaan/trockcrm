@@ -322,6 +322,8 @@ export function createLeadConversionService(
       ddEstimate: input.ddEstimate,
       bidEstimate: input.bidEstimate,
       awardedAmount: input.awardedAmount,
+      // leads.bid_due_date is the authoritative source; the questionnaire answer is only a mirror.
+      bidDueDate: lead.bidDueDate ?? null,
       officeCode: lead.officeCode ?? "dfw",
       projectType: lead.projectType ?? undefined,
       projectTypeId: input.projectTypeId ?? lead.projectTypeId ?? undefined,

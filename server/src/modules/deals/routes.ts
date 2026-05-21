@@ -5,6 +5,7 @@ import { companies, dealApprovals, dealScopingIntake, deals, dealSubscriptions, 
 import { requireRole } from "../../middleware/rbac.js";
 import { AppError } from "../../middleware/error-handler.js";
 import { writeAuditLog } from "../../lib/audit-log.js";
+import { assertOptionalIsoDateQueryParam } from "../../lib/date-query.js";
 import { eventBus } from "../../events/bus.js";
 import { DOMAIN_EVENTS } from "../../events/types.js";
 import {
@@ -763,6 +764,8 @@ function isProposalDraftingEnabled() {
 // GET /api/deals — list deals (paginated, filtered, sorted)
 router.get("/", async (req, res, next) => {
   try {
+    const createdFrom = assertOptionalIsoDateQueryParam(req.query.createdFrom, "createdFrom");
+    const createdTo = assertOptionalIsoDateQueryParam(req.query.createdTo, "createdTo");
     const isActiveFilter =
       req.query.isActive === "all"
         ? ("all" as const)
@@ -785,8 +788,8 @@ router.get("/", async (req, res, next) => {
       source: req.query.source as string | undefined,
       contractSignedFrom: req.query.contractSignedFrom as string | undefined,
       contractSignedTo: req.query.contractSignedTo as string | undefined,
-      createdFrom: req.query.createdFrom as string | undefined,
-      createdTo: req.query.createdTo as string | undefined,
+      createdFrom,
+      createdTo,
       updatedFrom: req.query.updatedFrom as string | undefined,
       updatedTo: req.query.updatedTo as string | undefined,
       isActive: isActiveFilter,
@@ -1472,6 +1475,26 @@ function validateDealPayload(body: Record<string, unknown>): void {
   if (body.onHold !== undefined && typeof body.onHold !== "boolean") {
     throw new AppError(400, "onHold must be a boolean");
   }
+  if (body.bidDueDate != null && body.bidDueDate !== "") {
+    if (typeof body.bidDueDate !== "string") {
+      throw new AppError(400, "bidDueDate must be an ISO date in YYYY-MM-DD format");
+    }
+
+    const trimmed = body.bidDueDate.trim();
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(trimmed)) {
+      throw new AppError(400, "bidDueDate must be an ISO date in YYYY-MM-DD format");
+    }
+
+    const [year, month, day] = trimmed.split("-").map(Number);
+    const parsed = new Date(Date.UTC(year, month - 1, day));
+    if (
+      parsed.getUTCFullYear() !== year ||
+      parsed.getUTCMonth() !== month - 1 ||
+      parsed.getUTCDate() !== day
+    ) {
+      throw new AppError(400, "bidDueDate must be an ISO date in YYYY-MM-DD format");
+    }
+  }
 }
 
 function normalizeServiceCandidate(value: unknown) {
@@ -1546,6 +1569,7 @@ router.post("/service-opportunity", async (req, res, next) => {
       source,
       winProbability,
       expectedCloseDate,
+      bidDueDate,
       projectTypeId,
       projectType,
       officeCode,
@@ -1596,6 +1620,7 @@ router.post("/service-opportunity", async (req, res, next) => {
       description,
       source,
       winProbability,
+      bidDueDate,
       expectedCloseDate,
       workflowRoute: "service",
       projectType: "service",
