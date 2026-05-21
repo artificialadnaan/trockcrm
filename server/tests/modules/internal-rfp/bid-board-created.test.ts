@@ -67,6 +67,10 @@ function mockDeal(
           rfp_approval_request_id: rfpApprovalRequestId,
           workflow_route: workflowRoute,
           stage_entered_at: "2026-05-01T00:00:00.000Z",
+          on_hold: false,
+          on_hold_started_at: null,
+          on_hold_accumulated_seconds: 0,
+          on_hold_accumulated_seconds_at_stage_entry: 0,
           stage_slug: "opportunity",
           stage_display_order: 2,
           stage_is_terminal: false,
@@ -138,6 +142,8 @@ describe("POST /api/internal/bid-board-created", () => {
     const updateValues = updateCall?.[1];
     expect(updateSql).toContain("stage_id");
     expect(updateSql).toContain("stage_entered_at");
+    expect(updateSql).toContain("on_hold_started_at");
+    expect(updateSql).toContain("on_hold_accumulated_seconds_at_stage_entry");
     expect(updateValues).toContain("estimating-stage");
     const historyCall = queryMock.mock.calls.find((call) => String(call[0]).includes("INSERT INTO \"office_dallas\".deal_stage_history"));
     expect(historyCall?.[1]).toEqual([
@@ -168,6 +174,8 @@ describe("POST /api/internal/bid-board-created", () => {
     const updateValues = updateCall?.[1];
     expect(updateSql).toContain("stage_id");
     expect(updateSql).toContain("stage_entered_at");
+    expect(updateSql).toContain("on_hold_started_at");
+    expect(updateSql).toContain("on_hold_accumulated_seconds_at_stage_entry");
     expect(updateValues).toContain("service_estimating-stage");
   });
 

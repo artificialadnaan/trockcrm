@@ -190,6 +190,11 @@ export const deals = pgTable(
     onHoldAccumulatedSeconds: bigint("on_hold_accumulated_seconds", { mode: "number" })
       .default(0)
       .notNull(),
+    onHoldAccumulatedSecondsAtStageEntry: bigint("on_hold_accumulated_seconds_at_stage_entry", {
+      mode: "number",
+    })
+      .default(0)
+      .notNull(),
     stageEnteredAt: timestamp("stage_entered_at", { withTimezone: true }).defaultNow().notNull(),
     isActive: boolean("is_active").default(true).notNull(),
     hubspotDealId: varchar("hubspot_deal_id", { length: 50 }),

@@ -1,6 +1,6 @@
 import crypto from "node:crypto";
 import express, { Router } from "express";
-import { WORKFLOW_ROUTES } from "@trock-crm/shared/types";
+import { getHoldStateAtStageEntry, WORKFLOW_ROUTES } from "@trock-crm/shared/types";
 import { pool } from "../../db.js";
 import { buildAuditActorFromSystem } from "../audit/audit-logger.js";
 import { logActivityWithPgClient } from "../audit/pg-activity-logger.js";
@@ -89,6 +89,10 @@ async function findDeal(sourceDealId: string) {
               d.rfp_approval_request_id,
               d.workflow_route,
               d.stage_entered_at,
+              d.on_hold,
+              d.on_hold_started_at,
+              d.on_hold_accumulated_seconds,
+              d.on_hold_accumulated_seconds_at_stage_entry,
               s.slug AS stage_slug,
               s.display_order AS stage_display_order,
               s.is_terminal AS stage_is_terminal
@@ -558,15 +562,35 @@ internalRfpRoutes.post(
         }
 
         if (canApplyStage) {
+          const stageChangedAt = new Date();
+          const stageEntryHoldState = getHoldStateAtStageEntry(
+            {
+              onHold: Boolean(found.deal.on_hold),
+              onHoldStartedAt: found.deal.on_hold_started_at,
+              onHoldAccumulatedSeconds: Number(found.deal.on_hold_accumulated_seconds ?? 0),
+            },
+            stageChangedAt
+          );
           const stageUpdate = await client.query(
             `UPDATE ${quoteIdent(found.schemaName)}.deals
                 SET stage_id = $1::uuid,
-                    stage_entered_at = NOW(),
+                    stage_entered_at = $2::timestamptz,
+                    on_hold_started_at = $3::timestamptz,
+                    on_hold_accumulated_seconds = $4::bigint,
+                    on_hold_accumulated_seconds_at_stage_entry = $5::bigint,
                     updated_at = NOW()
-              WHERE id = $2
-                AND stage_id = $3::uuid
+              WHERE id = $6
+                AND stage_id = $7::uuid
               RETURNING id`,
-            [targetStage.id, sourceDealId, found.deal.stage_id]
+            [
+              targetStage.id,
+              stageChangedAt,
+              stageEntryHoldState.onHoldStartedAt,
+              stageEntryHoldState.onHoldAccumulatedSeconds,
+              stageEntryHoldState.onHoldAccumulatedSecondsAtStageEntry,
+              sourceDealId,
+              found.deal.stage_id,
+            ]
           );
 
           if ((stageUpdate.rowCount ?? 0) > 0) {

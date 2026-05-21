@@ -23,6 +23,15 @@ describe("on hold deals foundation migration", () => {
     expect(migrationSql).toContain(
       "ADD COLUMN IF NOT EXISTS on_hold_accumulated_seconds bigint NOT NULL DEFAULT 0"
     );
+    expect(migrationSql).toContain(
+      "ADD COLUMN IF NOT EXISTS on_hold_accumulated_seconds_at_stage_entry bigint NOT NULL DEFAULT 0"
+    );
+    expect(migrationSql).toContain(
+      "SET on_hold_accumulated_seconds_at_stage_entry = on_hold_accumulated_seconds"
+    );
+    expect(migrationSql).toContain(
+      "column_name = 'on_hold_accumulated_seconds_at_stage_entry'"
+    );
   });
 
   it("keeps the Drizzle deals schema aligned with the hold columns", () => {
@@ -30,6 +39,9 @@ describe("on hold deals foundation migration", () => {
     expect(dealsSchema).toContain('onHoldStartedAt: timestamp("on_hold_started_at", { withTimezone: true })');
     expect(dealsSchema).toMatch(
       /onHoldAccumulatedSeconds: bigint\("on_hold_accumulated_seconds", \{ mode: "number" \}\)\s+\.default\(0\)\s+\.notNull\(\)/
+    );
+    expect(dealsSchema).toMatch(
+      /onHoldAccumulatedSecondsAtStageEntry: bigint\("on_hold_accumulated_seconds_at_stage_entry", \{[\s\S]*mode: "number"[\s\S]*\}\)\s+\.default\(0\)\s+\.notNull\(\)/
     );
   });
 });

@@ -16,6 +16,10 @@ describe("bid board mirror service", () => {
         id: "deal-1",
         stageId: "stage-estimating",
         stageEnteredAt: new Date("2026-04-20T12:00:00.000Z"),
+        onHold: false,
+        onHoldStartedAt: null,
+        onHoldAccumulatedSeconds: 7200,
+        onHoldAccumulatedSecondsAtStageEntry: 1800,
         workflowRoute: "normal",
         isBidBoardOwned: true,
         proposalStatus: "drafting",
@@ -60,6 +64,9 @@ describe("bid board mirror service", () => {
       estimatingSubstage: "under_review",
     });
     expect(result.updates.stageEnteredAt).toEqual(new Date("2026-04-22T14:30:00.000Z"));
+    expect(result.updates.onHoldStartedAt).toBeNull();
+    expect(result.updates.onHoldAccumulatedSeconds).toBe(7200);
+    expect(result.updates.onHoldAccumulatedSecondsAtStageEntry).toBe(7200);
     expect(result.updates.bidBoardMirrorSourceEnteredAt).toEqual(
       new Date("2026-04-22T14:25:00.000Z")
     );

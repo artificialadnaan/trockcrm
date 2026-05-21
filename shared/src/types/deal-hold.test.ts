@@ -3,6 +3,7 @@ import {
   getEffectiveDealValue,
   getEffectiveStageAgeDays,
   getEffectiveStageAgeSeconds,
+  getHoldStateAtStageEntry,
 } from "./deal-hold.js";
 
 describe("deal hold helpers", () => {
@@ -36,13 +37,29 @@ describe("deal hold helpers", () => {
           onHold: true,
           onHoldStartedAt: "2026-05-09T00:00:00.000Z",
           onHoldAccumulatedSeconds: 2 * 24 * 60 * 60,
+          onHoldAccumulatedSecondsAtStageEntry: 24 * 60 * 60,
         },
         new Date("2026-05-11T00:00:00.000Z")
       )
-    ).toBe(6 * 24 * 60 * 60);
+    ).toBe(7 * 24 * 60 * 60);
   });
 
-  it("keeps effective stage age correct across multiple hold cycles", () => {
+  it("does not subtract hold time from a prior stage after the deal moves forward", () => {
+    expect(
+      getEffectiveStageAgeSeconds(
+        {
+          stageEnteredAt: "2026-05-10T00:00:00.000Z",
+          onHold: false,
+          onHoldStartedAt: null,
+          onHoldAccumulatedSeconds: 2 * 24 * 60 * 60,
+          onHoldAccumulatedSecondsAtStageEntry: 2 * 24 * 60 * 60,
+        },
+        new Date("2026-05-12T00:00:00.000Z")
+      )
+    ).toBe(2 * 24 * 60 * 60);
+  });
+
+  it("keeps effective stage age correct across multiple hold cycles within the same stage", () => {
     const accumulatedSeconds = 2 * 24 * 60 * 60 + 12 * 60 * 60;
 
     expect(
@@ -52,10 +69,11 @@ describe("deal hold helpers", () => {
           onHold: false,
           onHoldStartedAt: null,
           onHoldAccumulatedSeconds: accumulatedSeconds,
+          onHoldAccumulatedSecondsAtStageEntry: 24 * 60 * 60,
         },
         new Date("2026-05-10T00:00:00.000Z")
       )
-    ).toBe(6 * 24 * 60 * 60 + 12 * 60 * 60);
+    ).toBe(7 * 24 * 60 * 60 + 12 * 60 * 60);
   });
 
   it("derives whole stage-age days from the effective paused age", () => {
@@ -66,9 +84,44 @@ describe("deal hold helpers", () => {
           onHold: true,
           onHoldStartedAt: "2026-05-08T12:00:00.000Z",
           onHoldAccumulatedSeconds: 24 * 60 * 60,
+          onHoldAccumulatedSecondsAtStageEntry: 12 * 60 * 60,
         },
         new Date("2026-05-10T12:00:00.000Z")
       )
-    ).toBe(6);
+    ).toBe(7);
+  });
+
+  it("snapshots the lifetime accumulator unchanged when entering a stage while active", () => {
+    expect(
+      getHoldStateAtStageEntry(
+        {
+          onHold: false,
+          onHoldStartedAt: null,
+          onHoldAccumulatedSeconds: 7200,
+        },
+        new Date("2026-05-02T09:00:00.000Z")
+      )
+    ).toEqual({
+      onHoldStartedAt: null,
+      onHoldAccumulatedSeconds: 7200,
+      onHoldAccumulatedSecondsAtStageEntry: 7200,
+    });
+  });
+
+  it("splits an active hold when entering a new stage", () => {
+    expect(
+      getHoldStateAtStageEntry(
+        {
+          onHold: true,
+          onHoldStartedAt: "2026-05-01T20:00:00.000Z",
+          onHoldAccumulatedSeconds: 3600,
+        },
+        new Date("2026-05-02T09:00:00.000Z")
+      )
+    ).toEqual({
+      onHoldStartedAt: new Date("2026-05-02T09:00:00.000Z"),
+      onHoldAccumulatedSeconds: 3600 + 13 * 60 * 60,
+      onHoldAccumulatedSecondsAtStageEntry: 3600 + 13 * 60 * 60,
+    });
   });
 });

@@ -258,7 +258,9 @@ router.post("/opportunities", requireSyncHubSecret, async (req, res, next) => {
       // Fetch current deal state for stage comparison and mirror updates
       const currentDealResult = await client.query(
         `SELECT id, name, deal_number, project_number,
-                stage_id, stage_entered_at, workflow_route, is_bid_board_owned,
+                stage_id, stage_entered_at, on_hold, on_hold_started_at,
+                on_hold_accumulated_seconds, on_hold_accumulated_seconds_at_stage_entry,
+                workflow_route, is_bid_board_owned,
                 proposal_status, estimating_substage, actual_close_date,
                 dd_estimate, bid_estimate, awarded_amount, proposal_notes,
                 bid_board_stage_slug, bid_board_stage_family, bid_board_stage_status,
@@ -328,6 +330,11 @@ router.post("/opportunities", requireSyncHubSecret, async (req, res, next) => {
           id: currentDeal.id,
           stageId: currentDeal.stage_id,
           stageEnteredAt: currentDeal.stage_entered_at,
+          onHold: currentDeal.on_hold,
+          onHoldStartedAt: currentDeal.on_hold_started_at,
+          onHoldAccumulatedSeconds: currentDeal.on_hold_accumulated_seconds,
+          onHoldAccumulatedSecondsAtStageEntry:
+            currentDeal.on_hold_accumulated_seconds_at_stage_entry,
           workflowRoute: effectiveWorkflowRoute,
           isBidBoardOwned: currentDeal.is_bid_board_owned,
           proposalStatus: currentDeal.proposal_status,
@@ -447,6 +454,9 @@ router.post("/opportunities", requireSyncHubSecret, async (req, res, next) => {
         `UPDATE ${schemaName}.deals
          SET stage_id = $1,
              stage_entered_at = $2,
+             on_hold_started_at = $25,
+             on_hold_accumulated_seconds = $26,
+             on_hold_accumulated_seconds_at_stage_entry = $27,
              is_bid_board_owned = true,
              bid_board_stage_slug = $3,
              bid_board_stage_family = $4,
@@ -474,9 +484,9 @@ router.post("/opportunities", requireSyncHubSecret, async (req, res, next) => {
              procore_bid_id = COALESCE($22, procore_bid_id),
              read_only_synced_at = $23,
              updated_at = $24,
-             workflow_route = $26,
-             pipeline_type_snapshot = CASE WHEN $26 = 'service' THEN 'service' ELSE 'normal' END
-         WHERE id = $25`,
+             workflow_route = $29,
+             pipeline_type_snapshot = CASE WHEN $29 = 'service' THEN 'service' ELSE 'normal' END
+         WHERE id = $28`,
         [
           mirrorResult.updates.stageId,
           mirrorResult.updates.stageEnteredAt,
@@ -502,6 +512,9 @@ router.post("/opportunities", requireSyncHubSecret, async (req, res, next) => {
           procore_bid_id ?? null,
           mirrorResult.updates.readOnlySyncedAt,
           mirrorResult.updates.updatedAt,
+          mirrorResult.updates.onHoldStartedAt ?? null,
+          mirrorResult.updates.onHoldAccumulatedSeconds ?? null,
+          mirrorResult.updates.onHoldAccumulatedSecondsAtStageEntry ?? null,
           existingDealId,
           effectiveWorkflowRoute,
         ]

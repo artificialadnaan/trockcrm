@@ -1,5 +1,9 @@
 import crypto from "crypto";
-import { isTerminalWorkflowStage, type WorkflowRoute } from "@trock-crm/shared/types";
+import {
+  getHoldStateAtStageEntry,
+  isTerminalWorkflowStage,
+  type WorkflowRoute,
+} from "@trock-crm/shared/types";
 import { bidBoardStatusToCrmStage, normalizeBidBoardStatus } from "@trock-crm/shared/lib/bidBoardStatusMap";
 import { pool } from "../../db.js";
 import { AppError } from "../../middleware/error-handler.js";
@@ -75,6 +79,10 @@ interface DealMatch {
   stage_display_order: number | null;
   stage_is_terminal: boolean | null;
   stage_entered_at: string | null;
+  on_hold: boolean | null;
+  on_hold_started_at: string | null;
+  on_hold_accumulated_seconds: number | null;
+  on_hold_accumulated_seconds_at_stage_entry: number | null;
   workflow_route: WorkflowRoute | null;
   deal_number: string | null;
   project_number: string | null;
@@ -344,6 +352,10 @@ function dealMatchSelectSql(schemaName: string): string {
            d.name,
            d.stage_id,
            d.stage_entered_at,
+           d.on_hold,
+           d.on_hold_started_at,
+           d.on_hold_accumulated_seconds,
+           d.on_hold_accumulated_seconds_at_stage_entry,
            d.workflow_route,
            d.deal_number,
            d.project_number,
@@ -737,24 +749,47 @@ async function writeStageIfSafe(
 
   const stageFamily = stageFamilyForSlug(targetSlug);
   const status = row.bidBoardStatus ?? targetSlug;
+  const stageChangedAt = new Date();
+  const stageEntryHoldState = getHoldStateAtStageEntry(
+    {
+      onHold: Boolean(deal.on_hold),
+      onHoldStartedAt: deal.on_hold_started_at,
+      onHoldAccumulatedSeconds: Number(deal.on_hold_accumulated_seconds ?? 0),
+    },
+    stageChangedAt
+  );
   const updateResult = await client.query(
     `UPDATE ${schemaName}.deals
         SET stage_id = $1,
-            stage_entered_at = NOW(),
+            stage_entered_at = $2::timestamptz,
+            on_hold_started_at = $3::timestamptz,
+            on_hold_accumulated_seconds = $4::bigint,
+            on_hold_accumulated_seconds_at_stage_entry = $5::bigint,
             is_bid_board_owned = true,
-            bid_board_stage_slug = $2::text,
-            bid_board_stage_family = $3::text,
-            bid_board_stage_status = $4::text,
+            bid_board_stage_slug = $6::text,
+            bid_board_stage_family = $7::text,
+            bid_board_stage_status = $8::text,
             bid_board_stage_entered_at = NOW(),
             read_only_synced_at = NOW(),
-            actual_close_date = CASE WHEN $2::text = 'won' THEN COALESCE(actual_close_date, CURRENT_DATE) ELSE actual_close_date END,
-            lost_at = CASE WHEN $2::text = 'lost' THEN COALESCE(lost_at, NOW()) ELSE lost_at END,
-            bid_board_loss_outcome = CASE WHEN $2::text = 'lost' THEN COALESCE(bid_board_loss_outcome, $4::text) ELSE bid_board_loss_outcome END,
+            actual_close_date = CASE WHEN $6::text = 'won' THEN COALESCE(actual_close_date, CURRENT_DATE) ELSE actual_close_date END,
+            lost_at = CASE WHEN $6::text = 'lost' THEN COALESCE(lost_at, NOW()) ELSE lost_at END,
+            bid_board_loss_outcome = CASE WHEN $6::text = 'lost' THEN COALESCE(bid_board_loss_outcome, $8::text) ELSE bid_board_loss_outcome END,
             updated_at = NOW()
-      WHERE id = $5
-        AND stage_id = $6
+      WHERE id = $9
+        AND stage_id = $10
       RETURNING id`,
-    [targetStage.id, targetSlug, stageFamily, status, deal.id, deal.stage_id]
+    [
+      targetStage.id,
+      stageChangedAt,
+      stageEntryHoldState.onHoldStartedAt,
+      stageEntryHoldState.onHoldAccumulatedSeconds,
+      stageEntryHoldState.onHoldAccumulatedSecondsAtStageEntry,
+      targetSlug,
+      stageFamily,
+      status,
+      deal.id,
+      deal.stage_id,
+    ]
   );
 
   if ((updateResult.rowCount ?? 0) === 0) {
