@@ -301,7 +301,7 @@ describe("getDealsForPipeline team scope", () => {
     );
 
     expect(nonTerminalCardsQuery?.limit.mock.calls.map((call: [number]) => call[0])).toEqual([100]);
-    expect(wonCardsQuery).toBeUndefined();
+    expect(wonCardsQuery?.limit.mock.calls.map((call: [number]) => call[0])).toEqual([100]);
   });
 
   it("queries each active won alias terminal column by its own stage when no canonical won stage exists", async () => {
@@ -353,8 +353,8 @@ describe("getDealsForPipeline team scope", () => {
       .map((call) => call[0])
       .filter((condition) => containsValue(condition, "stage-closed"));
 
-    expect(sentStageConditions).toHaveLength(1);
-    expect(closedStageConditions).toHaveLength(1);
+    expect(sentStageConditions).toHaveLength(2);
+    expect(closedStageConditions).toHaveLength(2);
     expect(sentStageConditions.every((condition) => !containsValue(condition, "stage-closed"))).toBe(true);
     expect(closedStageConditions.every((condition) => !containsValue(condition, "stage-sent"))).toBe(true);
   });
@@ -405,7 +405,7 @@ describe("getDealsForPipeline team scope", () => {
     const canonicalConditions = dealQuery.where.mock.calls
       .map((call) => call[0])
       .filter((condition) => containsValue(condition, "stage-won"));
-    expect(canonicalConditions).toHaveLength(1);
+    expect(canonicalConditions).toHaveLength(2);
     expect(canonicalConditions.every((condition) => containsValue(condition, "stage-sent"))).toBe(true);
   });
 
@@ -450,14 +450,14 @@ describe("getDealsForPipeline team scope", () => {
       .map((call) => call[0])
       .filter((condition) => containsValue(condition, "stage-won"));
 
-    expect(wonConditions).toHaveLength(1);
-    expect(containsValue(wonConditions[0], "2026-04-08")).toBe(true);
-    expect(containsValue(wonConditions[0], "2026-05-08")).toBe(true);
-    expect(containsValue(wonConditions[0], "2026-04-01")).toBe(true);
-    expect(containsValue(wonConditions[0], "2026-04-30")).toBe(true);
-    expect(extractSqlText(wonConditions[0])).toContain("contract_signed_at");
-    expect(extractSqlText(wonConditions[0])).toContain("contract_signed_date");
-    expect(extractSqlText(wonConditions[0])).not.toContain("stage_entered_at");
+    expect(wonConditions).toHaveLength(2);
+    expect(wonConditions.every((condition) => containsValue(condition, "2026-04-08"))).toBe(true);
+    expect(wonConditions.every((condition) => containsValue(condition, "2026-05-08"))).toBe(true);
+    expect(wonConditions.every((condition) => containsValue(condition, "2026-04-01"))).toBe(true);
+    expect(wonConditions.every((condition) => containsValue(condition, "2026-04-30"))).toBe(true);
+    expect(wonConditions.every((condition) => extractSqlText(condition).includes("contract_signed_at"))).toBe(true);
+    expect(wonConditions.every((condition) => extractSqlText(condition).includes("contract_signed_date"))).toBe(true);
+    expect(wonConditions.every((condition) => !extractSqlText(condition).includes("stage_entered_at"))).toBe(true);
   });
 
   it("queries each active lost alias terminal column by its own stage when no canonical lost stage exists", async () => {
@@ -509,8 +509,8 @@ describe("getDealsForPipeline team scope", () => {
       .map((call) => call[0])
       .filter((condition) => containsValue(condition, "stage-closed-lost"));
 
-    expect(productionLostConditions).toHaveLength(1);
-    expect(closedLostConditions).toHaveLength(1);
+    expect(productionLostConditions).toHaveLength(2);
+    expect(closedLostConditions).toHaveLength(2);
     expect(productionLostConditions.every((condition) => !containsValue(condition, "stage-closed-lost"))).toBe(true);
     expect(closedLostConditions.every((condition) => !containsValue(condition, "stage-production-lost"))).toBe(true);
   });
@@ -561,7 +561,7 @@ describe("getDealsForPipeline team scope", () => {
     const canonicalConditions = dealQuery.where.mock.calls
       .map((call) => call[0])
       .filter((condition) => containsValue(condition, "stage-lost"));
-    expect(canonicalConditions).toHaveLength(1);
+    expect(canonicalConditions).toHaveLength(2);
     expect(canonicalConditions.every((condition) => containsValue(condition, "stage-production-lost"))).toBe(true);
   });
 });

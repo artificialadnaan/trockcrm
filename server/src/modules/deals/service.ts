@@ -1941,23 +1941,19 @@ export async function getDealsForPipeline(
       .from(deals)
       .where(where);
 
-    if (!isTerminalStage) {
-      const stageDeals = await tenantDb
-        .select({
-          ...getTableColumns(deals),
-          companyName: companies.name,
-          assignedRepName: users.displayName,
-        })
-        .from(deals)
-        .leftJoin(companies, eq(companies.id, deals.companyId))
-        .leftJoin(users, eq(users.id, deals.assignedRepId))
-        .where(where)
-        .orderBy(desc(deals.updatedAt))
-        .limit(pipelineCardsPerStageLimit);
-      dealsByStage.set(stage.id, stageDeals);
-    } else {
-      dealsByStage.set(stage.id, []);
-    }
+    const stageDeals = await tenantDb
+      .select({
+        ...getTableColumns(deals),
+        companyName: companies.name,
+        assignedRepName: users.displayName,
+      })
+      .from(deals)
+      .leftJoin(companies, eq(companies.id, deals.companyId))
+      .leftJoin(users, eq(users.id, deals.assignedRepId))
+      .where(where)
+      .orderBy(desc(deals.updatedAt))
+      .limit(pipelineCardsPerStageLimit);
+    dealsByStage.set(stage.id, stageDeals);
 
     countByStage.set(stage.id, Number(summaryRows[0]?.count ?? 0));
     valueByStage.set(stage.id, Number(summaryRows[0]?.totalValue ?? 0));

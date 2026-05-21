@@ -63,6 +63,15 @@ function containsValue(value: unknown, expected: string, seen = new Set<unknown>
   return Object.values(value as Record<string, unknown>).some((item) => containsValue(item, expected, seen));
 }
 
+function containsIsoDate(value: unknown, expectedDate: string, seen = new Set<unknown>()): boolean {
+  if (value instanceof Date) return value.toISOString().startsWith(expectedDate);
+  if (!value || typeof value !== "object") return false;
+  if (seen.has(value)) return false;
+  seen.add(value);
+  if (Array.isArray(value)) return value.some((item) => containsIsoDate(item, expectedDate, seen));
+  return Object.values(value as Record<string, unknown>).some((item) => containsIsoDate(item, expectedDate, seen));
+}
+
 vi.mock("../../../src/db.js", () => ({
   db: createChainableMock(),
   pool: {},
@@ -73,7 +82,7 @@ describe("getDealsForPipeline", () => {
     dbState.responses = [];
   });
 
-  it("returns aggregate-only terminal stages while preserving preview limits for active pipeline columns", async () => {
+  it("returns terminal stage deals while preserving aggregates and preview limits", async () => {
     dbState.responses = [
       [
         {
@@ -115,6 +124,26 @@ describe("getDealsForPipeline", () => {
       companyName: null,
       assignedRepName: "Rep One",
     }));
+    const terminalDeals = Array.from({ length: 8 }).map((_, index) => ({
+      id: `deal-won-${index + 1}`,
+      dealNumber: `TR-2026-WON-${String(index + 1).padStart(4, "0")}`,
+      name: `Won Deal ${index + 1}`,
+      stageId: "stage-won",
+      assignedRepId: "rep-2",
+      officeId: "office-1",
+      workflowRoute: "normal",
+      awardedAmount: "5000",
+      bidEstimate: "5000",
+      ddEstimate: null,
+      propertyCity: "Dallas",
+      propertyState: "TX",
+      source: "referral",
+      lastActivityAt: "2026-04-21T10:00:00.000Z",
+      stageEnteredAt: "2026-04-20T10:00:00.000Z",
+      updatedAt: "2026-04-21T10:00:00.000Z",
+      companyName: null,
+      assignedRepName: "Rep Two",
+    }));
     const tenantChains: any[] = [];
     const tenantDb = {
       select: vi.fn(() => {
@@ -128,6 +157,9 @@ describe("getDealsForPipeline", () => {
 
           if (isCardsQuery && isOpportunityQuery) {
             return resolve(nonTerminalDeals);
+          }
+          if (isCardsQuery && isWonQuery) {
+            return resolve(terminalDeals);
           }
           if (isWonQuery) {
             return resolve([{ count: 12, totalValue: 60000 }]);
@@ -147,21 +179,21 @@ describe("getDealsForPipeline", () => {
       activeOfficeId: null,
       scope: "all",
       previewLimit: 8,
-      won_since: "2026-01-01",
+      wonSince: "2026-01-01",
     });
 
     const opportunityCardsChain = findStageCardsChain(tenantChains, "stage-opportunity");
     const wonCardsChain = findStageCardsChain(tenantChains, "stage-won");
 
     expect(result.pipelineColumns.find((column) => column.stage.slug === "opportunity")?.deals).toHaveLength(8);
-    expect(result.pipelineColumns.find((column) => column.stage.slug === "won")?.deals).toEqual([]);
+    expect(result.pipelineColumns.find((column) => column.stage.slug === "won")?.deals).toHaveLength(8);
     expect(result.terminalStages.find((column) => column.stage.slug === "won")).toEqual({
       stage: expect.objectContaining({ id: "stage-won", slug: "won", name: "Won" }),
       count: 12,
       totalValue: 60000,
     });
     expect(opportunityCardsChain?.limit).toHaveBeenCalledWith(8);
-    expect(wonCardsChain).toBeUndefined();
+    expect(wonCardsChain?.limit).toHaveBeenCalledWith(8);
   });
 
   it("uses the requested drill-down preview limit while keeping the full count", async () => {
@@ -278,6 +310,94 @@ describe("getDealsForPipeline", () => {
 
     const cardsChain = findStageCardsChain(tenantChains, "stage-estimating");
     expect(cardsChain?.limit).toHaveBeenCalledWith(1000);
+  });
+
+  it("hydrates lost terminal cards with date filtering and preview limits", async () => {
+    dbState.responses = [
+      [
+        {
+          id: "stage-lost",
+          slug: "lost",
+          name: "Lost",
+          displayOrder: 3,
+          isTerminal: true,
+          isActivePipeline: true,
+        },
+      ],
+    ];
+
+    const lostDeals = Array.from({ length: 3 }).map((_, index) => ({
+      id: `deal-lost-${index + 1}`,
+      dealNumber: `TR-2026-LOST-${String(index + 1).padStart(4, "0")}`,
+      name: `Lost Deal ${index + 1}`,
+      stageId: "stage-lost",
+      assignedRepId: "rep-3",
+      officeId: "office-1",
+      workflowRoute: "normal",
+      awardedAmount: "2500",
+      bidEstimate: "2500",
+      ddEstimate: null,
+      propertyCity: "Dallas",
+      propertyState: "TX",
+      source: "referral",
+      lastActivityAt: "2026-04-21T10:00:00.000Z",
+      stageEnteredAt: "2026-04-20T10:00:00.000Z",
+      updatedAt: "2026-04-21T10:00:00.000Z",
+      companyName: null,
+      assignedRepName: "Rep Three",
+    }));
+    const tenantChains: any[] = [];
+    const tenantDb = {
+      select: vi.fn(() => {
+        const chain = createChainableMock();
+        tenantChains.push(chain);
+        chain.then.mockImplementation((resolve: (value: any[]) => unknown) => {
+          const whereClause = chain.where.mock.calls[0]?.[0];
+          const isLostQuery = containsValue(whereClause, "stage-lost");
+          const isCardsQuery = chain.leftJoin.mock.calls.length > 0;
+
+          if (isCardsQuery && isLostQuery) {
+            return resolve(lostDeals);
+          }
+          if (isLostQuery) {
+            return resolve([{ count: 9, totalValue: 22500 }]);
+          }
+
+          return resolve([]);
+        });
+        return chain;
+      }),
+    } as any;
+
+    const { getDealsForPipeline } = await import("../../../src/modules/deals/service.js");
+    const result = await getDealsForPipeline(tenantDb, "director", "director-1", {
+      activeOfficeId: null,
+      scope: "all",
+      previewLimit: 3,
+      lostSince: "2026-03-01",
+      lostUntil: "2026-03-31",
+    });
+
+    const lostCardsChain = findStageCardsChain(tenantChains, "stage-lost");
+    const lostSummaryChain = tenantChains.find(
+      (chain) =>
+        chain.leftJoin.mock.calls.length === 0 &&
+        containsValue(chain.where.mock.calls[0]?.[0], "stage-lost")
+    );
+
+    expect(result.pipelineColumns.find((column) => column.stage.slug === "lost")?.deals).toHaveLength(3);
+    expect(result.terminalStages.find((column) => column.stage.slug === "lost")).toEqual({
+      stage: expect.objectContaining({ id: "stage-lost", slug: "lost", name: "Lost" }),
+      count: 9,
+      totalValue: 22500,
+    });
+    expect(lostCardsChain?.limit).toHaveBeenCalledWith(3);
+    expect(containsIsoDate(lostCardsChain?.where.mock.calls[0]?.[0], "2026-03-01")).toBe(true);
+    expect(containsIsoDate(lostCardsChain?.where.mock.calls[0]?.[0], "2026-04-01")).toBe(true);
+    expect(containsIsoDate(lostSummaryChain?.where.mock.calls[0]?.[0], "2026-03-01")).toBe(true);
+    expect(containsIsoDate(lostSummaryChain?.where.mock.calls[0]?.[0], "2026-04-01")).toBe(true);
+    expect(extractSqlText(lostCardsChain?.where.mock.calls[0]?.[0])).toContain("lost_at");
+    expect(extractSqlText(lostSummaryChain?.where.mock.calls[0]?.[0])).toContain("lost_at");
   });
 
   it("falls back to owner-creator-activity Mine scope when subscription tables are unavailable", async () => {
