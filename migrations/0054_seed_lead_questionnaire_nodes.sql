@@ -23,7 +23,7 @@ VALUES
   ('40000000-0000-4000-8000-000000000004', NULL, NULL, NULL, 'question', 'client_bid_portal_requirements', 'Client Bid Portal / Bid Format Requirements', NULL, 'textarea', '[]'::jsonb, true, 40, true),
   ('40000000-0000-4000-8000-000000000005', NULL, NULL, NULL, 'question', 'poc', 'POC', NULL, 'text', '[]'::jsonb, true, 50, true),
   ('40000000-0000-4000-8000-000000000006', NULL, NULL, NULL, 'question', 'timeline', 'Timeline', NULL, 'textarea', '[]'::jsonb, true, 60, true),
-  ('40000000-0000-4000-8000-000000000007', NULL, NULL, NULL, 'question', 'client_provided_docs', 'Client Provided Docs (Plans, Scope, Specs)', NULL, 'textarea', '[]'::jsonb, true, 70, true),
+  ('40000000-0000-4000-8000-000000000007', NULL, NULL, NULL, 'question', 'client_provided_docs', 'Client Provided Docs (Plans, Scope, Specs)', NULL, 'textarea', '[]'::jsonb, false, 70, true),
   ('40000000-0000-4000-8000-000000000008', NULL, NULL, NULL, 'question', 'project_permitted', 'Is this project Permitted', NULL, 'boolean', '[]'::jsonb, true, 80, true),
   ('40000000-0000-4000-8000-000000000009', NULL, NULL, NULL, 'question', 'market_type', 'Market Type', NULL, 'select', '[{"value":"market_rate","label":"Market Rate"},{"value":"student_housing","label":"Student Housing"},{"value":"senior_living","label":"Senior Living"},{"value":"lihtc","label":"LIHTC"}]'::jsonb, true, 90, true),
   ('40000000-0000-4000-8000-000000000010', NULL, NULL, NULL, 'question', 'life_safety', 'Life Safety', NULL, 'textarea', '[]'::jsonb, true, 100, true)

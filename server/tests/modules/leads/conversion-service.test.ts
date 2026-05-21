@@ -2696,7 +2696,7 @@ describe("Lead Conversion Service", () => {
     });
   });
 
-  it("does not treat a stale uploaded placeholder as satisfying client provided docs without a file", async () => {
+  it("does not let a stale uploaded placeholder reintroduce an optional client provided docs gate", async () => {
     process.env.ENABLE_LEAD_EDIT_V2 = "true";
 
     const tenantDb = createFakeTenantDb({
@@ -2758,7 +2758,20 @@ describe("Lead Conversion Service", () => {
     const service = createLeadConversionService({
       getStageById: pipelineMocks.getStageById as never,
       now: () => new Date("2026-04-15T15:00:00.000Z"),
-      createDeal: vi.fn(),
+      createDeal: async (_tenantDb, input) =>
+        ({
+          id: "deal-1",
+          dealNumber: "TR-2026-0001",
+          workflowRoute: input.workflowRoute ?? "normal",
+          primaryContactId: input.primaryContactId ?? null,
+          companyId: input.companyId ?? null,
+          propertyId: input.propertyId ?? null,
+          sourceLeadId: input.sourceLeadId ?? null,
+          source: input.source ?? null,
+          assignedRepId: input.assignedRepId,
+          stageId: input.stageId,
+          name: input.name,
+        }) as never,
     });
 
     await expect(
@@ -2768,12 +2781,9 @@ describe("Lead Conversion Service", () => {
         userRole: "rep",
         userId: "rep-1",
       })
-    ).rejects.toMatchObject({
-      code: "LEAD_STAGE_REQUIREMENTS_UNMET",
-      result: expect.objectContaining({
-        missingRequirements: expect.objectContaining({
-          projectTypeQuestionIds: ["client_provided_docs"],
-        }),
+    ).resolves.toMatchObject({
+      deal: expect.objectContaining({
+        id: "deal-1",
       }),
     });
   });
