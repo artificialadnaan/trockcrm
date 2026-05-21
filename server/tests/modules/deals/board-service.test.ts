@@ -400,6 +400,142 @@ describe("getDealsForPipeline", () => {
     expect(extractSqlText(lostSummaryChain?.where.mock.calls[0]?.[0])).toContain("lost_at");
   });
 
+  it("hydrates won terminal cards with a bounded filter that falls back to stage_entered_at", async () => {
+    dbState.responses = [
+      [
+        {
+          id: "stage-won",
+          slug: "won",
+          name: "Won",
+          displayOrder: 3,
+          isTerminal: true,
+          isActivePipeline: true,
+        },
+      ],
+    ];
+
+    const wonDeals = Array.from({ length: 4 }).map((_, index) => ({
+      id: `deal-won-${index + 1}`,
+      dealNumber: `TR-2026-WON-${String(index + 1).padStart(4, "0")}`,
+      name: `Won Deal ${index + 1}`,
+      stageId: "stage-won",
+      assignedRepId: "rep-4",
+      officeId: "office-1",
+      workflowRoute: "normal",
+      awardedAmount: "4000",
+      bidEstimate: "4000",
+      ddEstimate: null,
+      propertyCity: "Dallas",
+      propertyState: "TX",
+      source: "referral",
+      lastActivityAt: "2026-04-21T10:00:00.000Z",
+      stageEnteredAt: "2026-04-20T10:00:00.000Z",
+      updatedAt: "2026-04-21T10:00:00.000Z",
+      companyName: null,
+      assignedRepName: "Rep Four",
+    }));
+    const tenantChains: any[] = [];
+    const tenantDb = {
+      select: vi.fn(() => {
+        const chain = createChainableMock();
+        tenantChains.push(chain);
+        chain.then.mockImplementation((resolve: (value: any[]) => unknown) => {
+          const whereClause = chain.where.mock.calls[0]?.[0];
+          const isWonQuery = containsValue(whereClause, "stage-won");
+          const isCardsQuery = chain.leftJoin.mock.calls.length > 0;
+
+          if (isCardsQuery && isWonQuery) {
+            return resolve(wonDeals);
+          }
+          if (isWonQuery) {
+            return resolve([{ count: 11, totalValue: 44000 }]);
+          }
+
+          return resolve([]);
+        });
+        return chain;
+      }),
+    } as any;
+
+    const { getDealsForPipeline } = await import("../../../src/modules/deals/service.js");
+    const result = await getDealsForPipeline(tenantDb, "director", "director-1", {
+      activeOfficeId: null,
+      scope: "all",
+      previewLimit: 4,
+      wonSince: "2026-03-01",
+      wonUntil: "2026-03-31",
+    });
+
+    const wonCardsChain = findStageCardsChain(tenantChains, "stage-won");
+    const wonSummaryChain = tenantChains.find(
+      (chain) =>
+        chain.leftJoin.mock.calls.length === 0 &&
+        containsValue(chain.where.mock.calls[0]?.[0], "stage-won")
+    );
+
+    expect(result.pipelineColumns.find((column) => column.stage.slug === "won")?.deals).toHaveLength(4);
+    expect(result.terminalStages.find((column) => column.stage.slug === "won")).toEqual({
+      stage: expect.objectContaining({ id: "stage-won", slug: "won", name: "Won" }),
+      count: 11,
+      totalValue: 44000,
+    });
+    expect(wonCardsChain?.limit).toHaveBeenCalledWith(4);
+    expect(containsValue(wonCardsChain?.where.mock.calls[0]?.[0], "2026-03-01")).toBe(true);
+    expect(containsValue(wonCardsChain?.where.mock.calls[0]?.[0], "2026-03-31")).toBe(true);
+    expect(containsValue(wonSummaryChain?.where.mock.calls[0]?.[0], "2026-03-01")).toBe(true);
+    expect(containsValue(wonSummaryChain?.where.mock.calls[0]?.[0], "2026-03-31")).toBe(true);
+    expect(extractSqlText(wonCardsChain?.where.mock.calls[0]?.[0])).toContain("contract_signed_at");
+    expect(extractSqlText(wonCardsChain?.where.mock.calls[0]?.[0])).toContain("contract_signed_date");
+    expect(extractSqlText(wonCardsChain?.where.mock.calls[0]?.[0])).toContain("stage_entered_at");
+    expect(extractSqlText(wonSummaryChain?.where.mock.calls[0]?.[0])).toContain("stage_entered_at");
+  });
+
+  it("keeps won all-time queries free of bounded date predicates", async () => {
+    dbState.responses = [
+      [
+        {
+          id: "stage-won",
+          slug: "won",
+          name: "Won",
+          displayOrder: 3,
+          isTerminal: true,
+          isActivePipeline: true,
+        },
+      ],
+    ];
+
+    const tenantResponses = [
+      [{ count: 2, totalValue: 8000 }],
+      [],
+    ];
+    const tenantChains: any[] = [];
+    const tenantDb = {
+      select: vi.fn(() => {
+        const chain = createChainableMock();
+        tenantChains.push(chain);
+        chain.then.mockImplementation((resolve: (value: any[]) => unknown) => resolve(tenantResponses.shift() ?? []));
+        return chain;
+      }),
+    } as any;
+
+    const { getDealsForPipeline } = await import("../../../src/modules/deals/service.js");
+    await getDealsForPipeline(tenantDb, "director", "director-1", {
+      activeOfficeId: null,
+      scope: "all",
+      previewLimit: 4,
+      wonAllTime: true,
+    });
+
+    const wonWhereText = tenantChains
+      .filter((chain) => containsValue(chain.where.mock.calls[0]?.[0], "stage-won"))
+      .map((chain) => extractSqlText(chain.where.mock.calls[0]?.[0]))
+      .join("\n");
+
+    expect(wonWhereText).not.toContain("contract_signed_at");
+    expect(wonWhereText).not.toContain("contract_signed_date");
+    expect(wonWhereText).not.toContain("stage_entered_at");
+  });
+
   it("falls back to owner-creator-activity Mine scope when subscription tables are unavailable", async () => {
     dbState.responses = [
       [

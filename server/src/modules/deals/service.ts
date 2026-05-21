@@ -709,6 +709,10 @@ function dealTerminalBusinessDateSql(fallbackSql: unknown) {
   return sql`COALESCE(${fallbackSql}, ${deals.stageEnteredAt})`;
 }
 
+function dealWonBoardBusinessDateSql() {
+  return sql`COALESCE(${contractSignedDateForReporting}, ${deals.stageEnteredAt}::date)`;
+}
+
 function terminalWorkspaceDateConditions(stage: PipelineStageRow, input: DealStagePageInput) {
   const terminalFilters = resolvePipelineTerminalDateFilters(input);
   if (WON_TERMINAL_STAGE_SLUGS.includes(stage.slug as (typeof WON_TERMINAL_STAGE_SLUGS)[number])) {
@@ -1844,6 +1848,7 @@ export async function getDealsForPipeline(
   const wonSignedDateUntil = toIsoDateOnly(terminalFilters.won.until);
   const wonPeriodFrom = toIsoDateOnly(wonPeriodRange.from);
   const wonPeriodTo = toIsoDateOnly(wonPeriodRange.to);
+  const wonBoardBusinessDate = dealWonBoardBusinessDateSql();
   const lostEnteredAt = dealTerminalBusinessDateSql(deals.lostAt);
   const pipelineCardsPerStageLimit = Math.max(
     1,
@@ -1906,16 +1911,16 @@ export async function getDealsForPipeline(
     if (WON_TERMINAL_STAGE_SLUGS.includes(stage.slug as (typeof WON_TERMINAL_STAGE_SLUGS)[number])) {
       stageConditions.push(canonicalWonStageId ? inArray(deals.stageId, wonStageIds) : eq(deals.stageId, stage.id));
       if (wonSignedDateSince) {
-        stageConditions.push(sql`${contractSignedDateForReporting} >= ${wonSignedDateSince}::date`);
+        stageConditions.push(sql`${wonBoardBusinessDate} >= ${wonSignedDateSince}::date`);
       }
       if (wonSignedDateUntil) {
-        stageConditions.push(sql`${contractSignedDateForReporting} <= ${wonSignedDateUntil}::date`);
+        stageConditions.push(sql`${wonBoardBusinessDate} <= ${wonSignedDateUntil}::date`);
       }
       if (wonPeriodFrom) {
-        stageConditions.push(sql`${contractSignedDateForReporting} >= ${wonPeriodFrom}::date`);
+        stageConditions.push(sql`${wonBoardBusinessDate} >= ${wonPeriodFrom}::date`);
       }
       if (wonPeriodTo) {
-        stageConditions.push(sql`${contractSignedDateForReporting} <= ${wonPeriodTo}::date`);
+        stageConditions.push(sql`${wonBoardBusinessDate} <= ${wonPeriodTo}::date`);
       }
     } else if (LOST_TERMINAL_STAGE_SLUGS.includes(stage.slug as (typeof LOST_TERMINAL_STAGE_SLUGS)[number])) {
       stageConditions.push(canonicalLostStageId ? inArray(deals.stageId, lostStageIds) : eq(deals.stageId, stage.id));
