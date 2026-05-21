@@ -2,6 +2,7 @@ import { useMemo, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { ArrowUpRight, Building2, Camera, ChevronLeft, ChevronRight, MapPin, Search } from "lucide-react";
 import { PageHeader } from "@/components/layout/page-header";
+import { listPaginationIconButtonClassName } from "@/components/shared/list-pagination";
 import { MetricCard } from "@/components/shared/metric-card";
 import { ScopeToggle } from "@/components/shared/scope-toggle";
 import { NUMBER_COMPACT, USD, USD_COMPACT } from "@/components/shared/formatters";
@@ -231,10 +232,24 @@ export function PropertyListPage() {
             Page {currentPage} of {totalPages}
           </p>
           <div className="flex gap-2">
-            <Button variant="outline" size="icon" disabled={currentPage <= 1} onClick={() => setPage((value) => Math.max(1, value - 1))} aria-label="Previous properties page">
+            <Button
+              variant="outline"
+              size="icon"
+              className={listPaginationIconButtonClassName}
+              disabled={currentPage <= 1}
+              onClick={() => setPage((value) => Math.max(1, value - 1))}
+              aria-label="Previous properties page"
+            >
               <ChevronLeft className="h-4 w-4" />
             </Button>
-            <Button variant="outline" size="icon" disabled={currentPage >= totalPages} onClick={() => setPage((value) => Math.min(totalPages, value + 1))} aria-label="Next properties page">
+            <Button
+              variant="outline"
+              size="icon"
+              className={listPaginationIconButtonClassName}
+              disabled={currentPage >= totalPages}
+              onClick={() => setPage((value) => Math.min(totalPages, value + 1))}
+              aria-label="Next properties page"
+            >
               <ChevronRight className="h-4 w-4" />
             </Button>
           </div>

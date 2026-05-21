@@ -1,5 +1,6 @@
 import type { ReactNode } from "react";
 import { ChevronLeft, ChevronRight } from "lucide-react";
+import { listPaginationIconButtonClassName } from "@/components/shared/list-pagination";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 import {
@@ -104,7 +105,7 @@ export function PipelineStageTable<T>({
             size="sm"
             disabled={pagination.page <= 1}
             onClick={() => onPageChange(pagination.page - 1)}
-            className="rounded-full"
+            className={cn("rounded-full", listPaginationIconButtonClassName)}
           >
             <ChevronLeft className="h-4 w-4" />
           </Button>
@@ -113,7 +114,7 @@ export function PipelineStageTable<T>({
             size="sm"
             disabled={pagination.page >= pagination.totalPages}
             onClick={() => onPageChange(pagination.page + 1)}
-            className="rounded-full"
+            className={cn("rounded-full", listPaginationIconButtonClassName)}
           >
             <ChevronRight className="h-4 w-4" />
           </Button>

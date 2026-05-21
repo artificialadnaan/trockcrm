@@ -2,6 +2,7 @@ import { useMemo, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { ArrowUpRight, Building2, ChevronLeft, ChevronRight, Globe2, Plus, Search } from "lucide-react";
 import { PageHeader } from "@/components/layout/page-header";
+import { listPaginationIconButtonClassName } from "@/components/shared/list-pagination";
 import { MetricCard } from "@/components/shared/metric-card";
 import { ScopeToggle } from "@/components/shared/scope-toggle";
 import { USD, USD_COMPACT } from "@/components/shared/formatters";
@@ -226,10 +227,24 @@ export function CompanyListPage() {
             Page {pagination.page} of {pagination.totalPages}
           </p>
           <div className="flex gap-2">
-            <Button variant="outline" size="icon" disabled={pagination.page <= 1} onClick={() => setPage((value) => Math.max(1, value - 1))} aria-label="Previous companies page">
+            <Button
+              variant="outline"
+              size="icon"
+              className={listPaginationIconButtonClassName}
+              disabled={pagination.page <= 1}
+              onClick={() => setPage((value) => Math.max(1, value - 1))}
+              aria-label="Previous companies page"
+            >
               <ChevronLeft className="h-4 w-4" />
             </Button>
-            <Button variant="outline" size="icon" disabled={pagination.page >= pagination.totalPages} onClick={() => setPage((value) => Math.min(pagination.totalPages, value + 1))} aria-label="Next companies page">
+            <Button
+              variant="outline"
+              size="icon"
+              className={listPaginationIconButtonClassName}
+              disabled={pagination.page >= pagination.totalPages}
+              onClick={() => setPage((value) => Math.min(pagination.totalPages, value + 1))}
+              aria-label="Next companies page"
+            >
               <ChevronRight className="h-4 w-4" />
             </Button>
           </div>
