@@ -41,6 +41,33 @@ function createDb() {
   } as any;
 }
 
+function mockRenderPhotoQueries(
+  db: ReturnType<typeof createDb>,
+  rows: Array<Record<string, unknown>>,
+  sourceLeadId: string | null = null,
+) {
+  const scopeWhere = vi.fn(() => ({
+    limit: vi.fn(async () => [{ sourceLeadId }]),
+  }));
+  const renderWhere = vi.fn(async () => rows);
+
+  db.select
+    .mockImplementationOnce(() => ({
+      from: vi.fn(() => ({
+        where: scopeWhere,
+      })),
+    }))
+    .mockImplementationOnce(() => ({
+      from: vi.fn(() => ({
+        leftJoin: vi.fn(() => ({
+          where: renderWhere,
+        })),
+      })),
+    }));
+
+  return { scopeWhere, renderWhere };
+}
+
 describe("photo reports service", () => {
   beforeEach(() => {
     vi.clearAllMocks();
@@ -96,26 +123,20 @@ describe("photo reports service", () => {
 
   it("stores generated reports as tagged file artifacts", async () => {
     const db = createDb();
-    db.select.mockReturnValue({
-      from: vi.fn(() => ({
-        leftJoin: vi.fn(() => ({
-          where: vi.fn(async () => [
-            {
-              id: "photo-1",
-              displayName: "North slope",
-              description: "North slope detail",
-              takenAt: new Date("2026-05-01T12:00:00.000Z"),
-              createdAt: new Date("2026-05-01T12:00:00.000Z"),
-              uploaderName: "Field User",
-              tags: ["roofing", "urgent"],
-              r2Key: "photos/one.jpg",
-              externalUrl: "https://example.test/photo-1.jpg",
-              externalThumbnailUrl: null,
-            },
-          ]),
-        })),
-      })),
-    });
+    mockRenderPhotoQueries(db, [
+      {
+        id: "photo-1",
+        displayName: "North slope",
+        description: "North slope detail",
+        takenAt: new Date("2026-05-01T12:00:00.000Z"),
+        createdAt: new Date("2026-05-01T12:00:00.000Z"),
+        uploaderName: "Field User",
+        tags: ["roofing", "urgent"],
+        r2Key: "photos/one.jpg",
+        externalUrl: "https://example.test/photo-1.jpg",
+        externalThumbnailUrl: null,
+      },
+    ]);
     db.insert.mockReturnValue({
       values: vi.fn(() => ({
         returning: vi.fn(async () => [{
@@ -151,33 +172,112 @@ describe("photo reports service", () => {
     expect(insertValues.category).toBe("other");
     expect(insertValues.tags).toEqual(expect.arrayContaining(["photo-report"]));
     expect(insertValues.tags.some((tag: string) => tag.startsWith("photo-report-exp:"))).toBe(true);
+    expect(pdfMocks.renderFieldPhotoReportPdf).toHaveBeenCalledWith(expect.objectContaining({
+      sections: [
+        expect.objectContaining({
+          photos: [
+            expect.objectContaining({ id: "photo-1" }),
+          ],
+        }),
+      ],
+    }));
     expect(result.report.id).toBe("report-1");
     expect(result.report.pdfUrl).toBe("https://example.test/report.pdf");
     expect(result.report.expiresAt).toEqual(expect.any(String));
   });
 
-  it("deletes the uploaded object if persisting the report record fails", async () => {
+  it("renders selected lead-origin photos in the final report output", async () => {
     const db = createDb();
-    db.select.mockReturnValue({
-      from: vi.fn(() => ({
-        leftJoin: vi.fn(() => ({
-          where: vi.fn(async () => [
-            {
-              id: "photo-1",
-              displayName: "North slope",
-              description: "North slope detail",
-              takenAt: new Date("2026-05-01T12:00:00.000Z"),
-              createdAt: new Date("2026-05-01T12:00:00.000Z"),
-              uploaderName: "Field User",
-              tags: ["roofing", "urgent"],
-              r2Key: "photos/one.jpg",
-              externalUrl: null,
-              externalThumbnailUrl: null,
-            },
-          ]),
-        })),
+    mockRenderPhotoQueries(db, [
+      {
+        id: "photo-lead-1",
+        displayName: "Lead photo",
+        description: "Captured before conversion",
+        takenAt: new Date("2026-05-04T12:00:00.000Z"),
+        createdAt: new Date("2026-05-04T12:00:00.000Z"),
+        uploaderName: "Field User",
+        tags: ["inspection"],
+        r2Key: "photos/lead-photo.jpg",
+        externalUrl: null,
+        externalThumbnailUrl: null,
+      },
+    ], "lead-1");
+    db.insert.mockReturnValue({
+      values: vi.fn(() => ({
+        returning: vi.fn(async () => [{
+          id: "report-2",
+          createdAt: new Date("2026-05-05T12:00:00.000Z"),
+        }]),
       })),
     });
+
+    await generateFieldPhotoReport(db, access, {
+      officeSlug: "trock",
+      projectId: "deal-1",
+      reportTitle: "Roof Repair Photo Report",
+      coverData: { creatorName: "Field User" },
+      sections: [{ title: "Lead Photos", photoIds: ["photo-lead-1"] }],
+    });
+
+    expect(pdfMocks.renderFieldPhotoReportPdf).toHaveBeenCalledWith(expect.objectContaining({
+      sections: [
+        expect.objectContaining({
+          title: "Lead Photos",
+          photos: [
+            expect.objectContaining({ id: "photo-lead-1" }),
+          ],
+        }),
+      ],
+    }));
+  });
+
+  it("keeps the render photo set aligned with the project timeline selection", async () => {
+    const db = createDb();
+    mockRenderPhotoQueries(db, [
+      {
+        id: "photo-1",
+        displayName: "North slope",
+        description: "North slope detail",
+        takenAt: new Date("2026-05-01T12:00:00.000Z"),
+        createdAt: new Date("2026-05-01T12:00:00.000Z"),
+        uploaderName: "Field User",
+        tags: ["roofing"],
+        r2Key: "photos/one.jpg",
+        externalUrl: null,
+        externalThumbnailUrl: null,
+      },
+    ]);
+
+    const result = generateFieldPhotoReport(db, access, {
+      officeSlug: "trock",
+      projectId: "deal-1",
+      reportTitle: "Roof Repair Photo Report",
+      coverData: { creatorName: "Field User" },
+      sections: [{ title: "Section 1", photoIds: ["photo-1", "photo-2"] }],
+    });
+
+    await expect(result).rejects.toHaveProperty("statusCode", 400);
+    await expect(result).rejects.toThrow("One or more selected photos are unavailable for report generation.");
+
+    expect(pdfMocks.renderFieldPhotoReportPdf).not.toHaveBeenCalled();
+  });
+
+  it("deletes the uploaded object if persisting the report record fails", async () => {
+    const db = createDb();
+    mockRenderPhotoQueries(db, [
+      {
+        id: "photo-1",
+        displayName: "North slope",
+        description: "North slope detail",
+        takenAt: new Date("2026-05-01T12:00:00.000Z"),
+        createdAt: new Date("2026-05-01T12:00:00.000Z"),
+        uploaderName: "Field User",
+        tags: ["roofing", "urgent"],
+        r2Key: "photos/one.jpg",
+        externalUrl: null,
+        externalThumbnailUrl: null,
+      },
+    ]);
     db.insert.mockReturnValue({
       values: vi.fn(() => ({
         returning: vi.fn(async () => {
@@ -237,7 +337,7 @@ describe("photo reports service", () => {
     filesMocks.getFileById.mockResolvedValue({
       id: "report-1",
       category: "other",
-      tags: ["photo-report", "photo-report-exp:2026-05-20T12:00:00.000Z"],
+      tags: ["photo-report", "photo-report-exp:2099-05-20T12:00:00.000Z"],
       dealId: "deal-1",
     });
 
