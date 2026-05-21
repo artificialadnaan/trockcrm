@@ -170,10 +170,15 @@ describe("ContactListPage", () => {
 
       expect(previousButton).not.toBeNull();
       expect(nextButton).not.toBeNull();
-      expect(previousButton?.className).toContain("text-primary");
+      expect(previousButton?.className).toContain("bg-primary");
+      expect(previousButton?.className).toContain("text-primary-foreground");
+      expect(previousButton?.className).not.toContain("bg-background");
+      expect(previousButton?.className).toContain("disabled:border-muted-foreground/20");
       expect(previousButton?.className).toContain("disabled:bg-muted");
       expect(previousButton?.className).toContain("disabled:text-muted-foreground");
-      expect(nextButton?.className).toContain("text-primary");
+      expect(nextButton?.className).toContain("bg-primary");
+      expect(nextButton?.className).toContain("text-primary-foreground");
+      expect(nextButton?.className).not.toContain("bg-background");
     } finally {
       await cleanup();
     }
@@ -232,7 +237,10 @@ describe("ContactListPage", () => {
     try {
       const nextButton = container.querySelector<HTMLButtonElement>('[aria-label="Next contacts page"]');
       expect(nextButton?.disabled).toBe(true);
-      expect(nextButton?.className).toContain("text-primary");
+      expect(nextButton?.className).toContain("bg-primary");
+      expect(nextButton?.className).toContain("text-primary-foreground");
+      expect(nextButton?.className).not.toContain("bg-background");
+      expect(nextButton?.className).toContain("disabled:border-muted-foreground/20");
       expect(nextButton?.className).toContain("disabled:bg-muted");
       expect(nextButton?.className).toContain("disabled:text-muted-foreground");
     } finally {

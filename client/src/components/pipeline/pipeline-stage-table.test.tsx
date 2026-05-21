@@ -54,7 +54,10 @@ describe("PipelineStageTable", () => {
     expect(html).toContain("North Campus");
     expect(html).toContain("Page 2 of 2");
     expect(html).toContain("30 total records");
-    expect(html).toContain("text-primary");
+    expect(html).toContain("bg-primary");
+    expect(html).toContain("text-primary-foreground");
+    expect(html).not.toContain("bg-background");
+    expect(html).toContain("disabled:border-muted-foreground/20");
     expect(html).toContain("disabled:bg-muted");
     expect(html).toContain("disabled:text-muted-foreground");
   });
@@ -67,7 +70,10 @@ describe("PipelineStageTable", () => {
 
       expect(nextButton).toBeDefined();
       expect(nextButton.disabled).toBe(true);
-      expect(nextButton.className).toContain("text-primary");
+      expect(nextButton.className).toContain("bg-primary");
+      expect(nextButton.className).toContain("text-primary-foreground");
+      expect(nextButton.className).not.toContain("bg-background");
+      expect(nextButton.className).toContain("disabled:border-muted-foreground/20");
       expect(nextButton.className).toContain("disabled:bg-muted");
       expect(nextButton.className).toContain("disabled:text-muted-foreground");
     } finally {
