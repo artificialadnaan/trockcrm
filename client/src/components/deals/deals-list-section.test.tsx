@@ -515,7 +515,9 @@ describe("DealsListSection", () => {
     // Page indicator from PipelineStageTable
     expect(html).toContain("Page 1 of 3");
     expect(html).toContain("60 total records");
-    expect(html).toContain("text-primary");
+    expect(html).toContain("bg-primary");
+    expect(html).toContain("text-primary-foreground");
+    expect(html).toContain("disabled:border-muted-foreground/20");
     expect(html).toContain("disabled:bg-muted");
     expect(html).toContain("disabled:text-muted-foreground");
   });
@@ -575,11 +577,14 @@ describe("DealsListSection", () => {
     const previousButton = buttons.find((button) => button.getAttribute("aria-label") === "Previous page");
     const nextButton = buttons.find((button) => button.getAttribute("aria-label") === "Next page");
     expect(previousButton?.disabled).toBe(true);
-    expect(previousButton?.className).toContain("text-primary");
+    expect(previousButton?.className).toContain("bg-primary");
+    expect(previousButton?.className).toContain("text-primary-foreground");
+    expect(previousButton?.className).toContain("disabled:border-muted-foreground/20");
     expect(previousButton?.className).toContain("disabled:bg-muted");
     expect(previousButton?.className).toContain("disabled:text-muted-foreground");
     expect(nextButton).toBeTruthy();
-    expect(nextButton?.className).toContain("text-primary");
+    expect(nextButton?.className).toContain("bg-primary");
+    expect(nextButton?.className).toContain("text-primary-foreground");
 
     act(() => {
       nextButton!.dispatchEvent(new MouseEvent("click", { bubbles: true }));
@@ -605,7 +610,9 @@ describe("DealsListSection", () => {
     const nextButton = buttons.find((button) => button.getAttribute("aria-label") === "Next page");
 
     expect(nextButton?.disabled).toBe(true);
-    expect(nextButton?.className).toContain("text-primary");
+    expect(nextButton?.className).toContain("bg-primary");
+    expect(nextButton?.className).toContain("text-primary-foreground");
+    expect(nextButton?.className).toContain("disabled:border-muted-foreground/20");
     expect(nextButton?.className).toContain("disabled:bg-muted");
     expect(nextButton?.className).toContain("disabled:text-muted-foreground");
 
