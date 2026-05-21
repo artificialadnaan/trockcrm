@@ -4,7 +4,7 @@
 import React from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { PhotoViewerModal, type DealPhotoRecord } from "./deal-photo-components";
+import { PhotoGridTile, PhotoViewerModal, type DealPhotoRecord } from "./deal-photo-components";
 
 const apiMock = vi.hoisted(() => vi.fn());
 
@@ -65,14 +65,14 @@ afterEach(() => {
   apiMock.mockReset();
 });
 
-function renderViewer() {
+function renderViewerWithPhotos(photos: DealPhotoRecord[], selectedId = photos[0]?.id ?? null) {
   container = document.createElement("div");
   document.body.appendChild(container);
   root = createRoot(container);
   root.render(
     <PhotoViewerModal
-      photos={[photo]}
-      selectedId="photo-1"
+      photos={photos}
+      selectedId={selectedId}
       onSelectedIdChange={vi.fn()}
       getPhotoImageUrl={() => "https://example.test/photo.jpg"}
       ensurePhotoImageUrl={vi.fn(async () => "https://example.test/photo.jpg")}
@@ -82,6 +82,10 @@ function renderViewer() {
       downloadPhoto={vi.fn()}
     />
   );
+}
+
+function renderViewer(photoRecord: DealPhotoRecord) {
+  renderViewerWithPhotos([photoRecord], photoRecord.id);
 }
 
 function renderPdfViewer(ensurePhotoImageUrl = vi.fn(async () => "https://example.test/file.pdf")) {
@@ -104,7 +108,43 @@ function renderPdfViewer(ensurePhotoImageUrl = vi.fn(async () => "https://exampl
   return ensurePhotoImageUrl;
 }
 
+function renderTile(photoRecord: DealPhotoRecord) {
+  container = document.createElement("div");
+  document.body.appendChild(container);
+  root = createRoot(container);
+  root.render(
+    <PhotoGridTile
+      photo={photoRecord}
+      imageUrl=""
+      loadImageUrl={vi.fn()}
+      onOpen={vi.fn()}
+      onRestore={vi.fn()}
+    />
+  );
+}
+
 describe("PhotoViewerModal history", () => {
+  it("renders without crashing when tags are undefined", async () => {
+    renderViewer({ ...photo, tags: undefined } as unknown as DealPhotoRecord);
+
+    await vi.waitFor(() => expect(document.body.textContent).toContain("No tags"));
+    expect(document.body.textContent).toContain("Roof corner damage");
+  });
+
+  it("renders without crashing when tags are null", async () => {
+    renderViewer({ ...photo, tags: null } as unknown as DealPhotoRecord);
+
+    await vi.waitFor(() => expect(document.body.textContent).toContain("No tags"));
+    expect(document.body.textContent).toContain("Roof corner damage");
+  });
+
+  it("renders existing tags when present", async () => {
+    renderViewer(photo);
+
+    await vi.waitFor(() => expect(document.body.textContent).toContain("#roofing"));
+    expect(document.body.textContent).toContain("#urgent");
+  });
+
   it("does not render non-image photo records as images", async () => {
     const ensurePhotoImageUrl = renderPdfViewer();
 
@@ -153,7 +193,7 @@ describe("PhotoViewerModal history", () => {
       ],
     });
 
-    renderViewer();
+    renderViewer(photo);
     await vi.waitFor(() => expect(document.body.textContent).toContain("History"));
     document.body.querySelector<HTMLDetailsElement>('[data-testid="photo-history"]')?.setAttribute("open", "");
     document.body.querySelector<HTMLDetailsElement>('[data-testid="photo-history"]')?.dispatchEvent(new Event("toggle", { bubbles: true }));
@@ -170,5 +210,14 @@ describe("PhotoViewerModal history", () => {
     document.body.querySelector<HTMLButtonElement>('[aria-label="Toggle details for category changed"]')?.click();
     await vi.waitFor(() => expect(document.body.textContent).toContain("oldCategory"));
     expect(document.body.textContent).toContain("127.0.0.1");
+  });
+});
+
+describe("PhotoGridTile", () => {
+  it("renders without crashing when tags are undefined", async () => {
+    renderTile({ ...photo, tags: undefined } as unknown as DealPhotoRecord);
+
+    await vi.waitFor(() => expect(document.body.textContent).toContain("Kaleb Martin"));
+    expect(document.body.textContent).not.toContain("#roofing");
   });
 });
