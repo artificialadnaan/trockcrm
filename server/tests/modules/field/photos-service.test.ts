@@ -1,3 +1,4 @@
+import { sql } from "drizzle-orm";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { AppError } from "../../../src/middleware/error-handler.js";
 
@@ -51,6 +52,7 @@ const PHOTO_ID = "44444444-4444-4444-8444-444444444444";
 const PENDING_PHOTO_ID = "55555555-5555-4555-8555-555555555555";
 const PENDING_OPPORTUNITY_PHOTO_ID = "66666666-6666-4666-8666-666666666666";
 const UUID_V7 = "019e4188-7d1b-7860-a57d-fb59484cd705";
+const LEGACY_FALLBACK_SAVEPOINT = "field_photo_legacy_linkage_fallback";
 
 const confirmedFile = {
   id: PHOTO_ID,
@@ -74,6 +76,27 @@ const confirmedFile = {
   procoreSyncStatus: null,
   deletedAt: null,
 };
+
+function flattenQueryChunks(input: unknown, seen = new WeakSet<object>()): unknown[] {
+  if (!input || typeof input !== "object") return [input];
+  if (seen.has(input as object)) return [];
+  seen.add(input as object);
+
+  const queryChunks = (input as { queryChunks?: unknown[] }).queryChunks;
+  if (Array.isArray(queryChunks)) {
+    return queryChunks.flatMap((chunk) => flattenQueryChunks(chunk, seen));
+  }
+
+  if ("value" in (input as Record<string, unknown>)) {
+    return [(input as Record<string, unknown>).value];
+  }
+
+  return Object.values(input as Record<string, unknown>).flatMap((value) => flattenQueryChunks(value, seen));
+}
+
+function normalizeSqlText(value: unknown): string {
+  return flattenQueryChunks(value).join("").replace(/\s+/g, " ").trim().toUpperCase();
+}
 
 describe("field photo upload service", () => {
   beforeEach(() => {
@@ -275,7 +298,9 @@ describe("field photo upload service", () => {
   });
 
   it("lists pending field photos uploaded by the current user", async () => {
-    db.execute.mockResolvedValueOnce({
+    db.execute
+      .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({
       rows: [{
         id: PHOTO_ID,
         category: "photo",
@@ -302,7 +327,8 @@ describe("field photo upload service", () => {
         procore_sync_status: null,
         deleted_at: null,
       }],
-    });
+      })
+      .mockResolvedValueOnce({ rows: [] });
 
     const result = await listPendingFieldPhotos(db, {
       userId: FIELD_USER_ID,
@@ -320,7 +346,10 @@ describe("field photo upload service", () => {
 
   it("falls back to the legacy pending-photo query when extended linkage columns are missing", async () => {
     db.execute
+      .mockResolvedValueOnce({ rows: [] })
       .mockRejectedValueOnce(Object.assign(new Error('column "contact_id" does not exist'), { code: "42703" }))
+      .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({ rows: [] })
       .mockResolvedValueOnce({
         rows: [{
           id: PHOTO_ID,
@@ -353,47 +382,135 @@ describe("field photo upload service", () => {
       userRole: "field_contractor",
     });
 
-    expect(db.execute).toHaveBeenCalledTimes(2);
+    expect(db.execute).toHaveBeenCalledTimes(5);
     expect(result.photos).toHaveLength(1);
     expect(result.photos[0].id).toBe(PHOTO_ID);
     expect(fileMocks.getFileDownloadUrl).toHaveBeenCalledWith(db, PHOTO_ID);
   });
 
-  it("assigns a pending field photo to a selected target", async () => {
-    db.execute.mockResolvedValueOnce({
-      rows: [{
-        id: PENDING_PHOTO_ID,
-        category: "photo",
-        deal_id: null,
-        lead_id: null,
-        uploaded_by: FIELD_USER_ID,
-      }],
-    }).mockResolvedValueOnce({
-      rows: [{
-        id: PENDING_PHOTO_ID,
-        category: "photo",
-        photo_category: "damage",
-        subcategory: null,
-        display_name: "Pending photo",
-        mime_type: "image/jpeg",
-        file_size_bytes: 850000,
-        file_extension: ".jpg",
-        deal_id: DEAL_ID,
-        lead_id: null,
-        description: null,
-        tags: [],
-        taken_at: new Date("2026-05-05T12:00:00.000Z"),
-        created_at: new Date("2026-05-05T12:01:00.000Z"),
-        uploaded_by: FIELD_USER_ID,
-        latitude: null,
-        longitude: null,
-        address: null,
-        address_source: null,
-        geocoded_at: null,
-        procore_sync_status: null,
-        deleted_at: null,
-      }],
+  it("recovers the transaction with a savepoint before retrying the pending-photo legacy fallback", async () => {
+    let transactionAborted = false;
+    let rolledBackToSavepoint = false;
+    const executedQueries: string[] = [];
+
+    db.execute.mockImplementation(async (query: unknown) => {
+      const sqlText = normalizeSqlText(query);
+      executedQueries.push(sqlText);
+
+      if (sqlText === `SAVEPOINT ${LEGACY_FALLBACK_SAVEPOINT.toUpperCase()}`) {
+        return { rows: [] };
+      }
+      if (sqlText === `ROLLBACK TO SAVEPOINT ${LEGACY_FALLBACK_SAVEPOINT.toUpperCase()}`) {
+        transactionAborted = false;
+        rolledBackToSavepoint = true;
+        return { rows: [] };
+      }
+      if (sqlText === `RELEASE SAVEPOINT ${LEGACY_FALLBACK_SAVEPOINT.toUpperCase()}`) {
+        return { rows: [] };
+      }
+      if (sqlText === "SELECT 1") {
+        if (transactionAborted) {
+          throw Object.assign(new Error("current transaction is aborted"), { code: "25P02" });
+        }
+        return { rows: [{ "?column?": 1 }] };
+      }
+      if (sqlText.includes("FROM FILES F") && sqlText.includes("CONTACT_ID IS NULL")) {
+        transactionAborted = true;
+        throw Object.assign(new Error('column "contact_id" does not exist'), { code: "42703" });
+      }
+      if (sqlText.includes("FROM FILES F") && sqlText.includes("UPLOADED_BY") && !sqlText.includes("CONTACT_ID IS NULL")) {
+        if (transactionAborted) {
+          throw Object.assign(new Error("current transaction is aborted"), { code: "25P02" });
+        }
+        return {
+          rows: [{
+            id: PHOTO_ID,
+            category: "photo",
+            photo_category: "damage",
+            subcategory: null,
+            display_name: "Pending photo",
+            mime_type: "image/jpeg",
+            file_size_bytes: 850000,
+            file_extension: ".jpg",
+            deal_id: null,
+            lead_id: null,
+            description: null,
+            tags: [],
+            taken_at: new Date("2026-05-05T12:00:00.000Z"),
+            created_at: new Date("2026-05-05T12:01:00.000Z"),
+            uploaded_by: FIELD_USER_ID,
+            latitude: null,
+            longitude: null,
+            address: null,
+            address_source: null,
+            geocoded_at: null,
+            procore_sync_status: null,
+            deleted_at: null,
+          }],
+        };
+      }
+
+      throw new Error(`Unexpected query in legacy pending-photo fallback test: ${sqlText}`);
     });
+
+    const result = await listPendingFieldPhotos(db, {
+      userId: FIELD_USER_ID,
+      userRole: "field_contractor",
+    });
+
+    expect(rolledBackToSavepoint).toBe(true);
+    expect(result.photos).toHaveLength(1);
+    expect(executedQueries.slice(0, 5)).toEqual([
+      `SAVEPOINT ${LEGACY_FALLBACK_SAVEPOINT.toUpperCase()}`,
+      expect.stringContaining("CONTACT_ID IS NULL"),
+      `ROLLBACK TO SAVEPOINT ${LEGACY_FALLBACK_SAVEPOINT.toUpperCase()}`,
+      `RELEASE SAVEPOINT ${LEGACY_FALLBACK_SAVEPOINT.toUpperCase()}`,
+      expect.not.stringContaining("CONTACT_ID IS NULL"),
+    ]);
+    await expect(db.execute(sql.raw("SELECT 1"))).resolves.toEqual({ rows: [{ "?column?": 1 }] });
+  });
+
+  it("assigns a pending field photo to a selected target", async () => {
+    db.execute
+      .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({
+        rows: [{
+          id: PENDING_PHOTO_ID,
+          category: "photo",
+          deal_id: null,
+          lead_id: null,
+          uploaded_by: FIELD_USER_ID,
+        }],
+      })
+      .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({
+        rows: [{
+          id: PENDING_PHOTO_ID,
+          category: "photo",
+          photo_category: "damage",
+          subcategory: null,
+          display_name: "Pending photo",
+          mime_type: "image/jpeg",
+          file_size_bytes: 850000,
+          file_extension: ".jpg",
+          deal_id: DEAL_ID,
+          lead_id: null,
+          description: null,
+          tags: [],
+          taken_at: new Date("2026-05-05T12:00:00.000Z"),
+          created_at: new Date("2026-05-05T12:01:00.000Z"),
+          uploaded_by: FIELD_USER_ID,
+          latitude: null,
+          longitude: null,
+          address: null,
+          address_source: null,
+          geocoded_at: null,
+          procore_sync_status: null,
+          deleted_at: null,
+        }],
+      })
+      .mockResolvedValueOnce({ rows: [] });
     projectMocks.assertAccessibleFieldCaptureTarget.mockResolvedValueOnce({ id: DEAL_ID, type: "deal" });
     fileMocks.getFileDownloadUrl.mockResolvedValueOnce({ url: "https://signed.example/photo.jpg" });
 
@@ -416,6 +533,203 @@ describe("field photo upload service", () => {
       id: PENDING_PHOTO_ID,
       imageUrl: "https://signed.example/photo.jpg",
     }));
+  });
+
+  it("falls back to the legacy assign-target queries when extended linkage columns are missing", async () => {
+    db.execute.mockImplementation(async (query: unknown) => {
+      const sqlText = normalizeSqlText(query);
+
+      if (
+        sqlText === `SAVEPOINT ${LEGACY_FALLBACK_SAVEPOINT.toUpperCase()}` ||
+        sqlText === `ROLLBACK TO SAVEPOINT ${LEGACY_FALLBACK_SAVEPOINT.toUpperCase()}` ||
+        sqlText === `RELEASE SAVEPOINT ${LEGACY_FALLBACK_SAVEPOINT.toUpperCase()}`
+      ) {
+        return { rows: [] };
+      }
+      if (sqlText.startsWith("SELECT") && sqlText.includes("FROM FILES F") && sqlText.includes("CONTACT_ID IS NULL")) {
+        throw Object.assign(new Error('column "contact_id" does not exist'), { code: "42703" });
+      }
+      if (sqlText.startsWith("SELECT") && sqlText.includes("FROM FILES F") && !sqlText.includes("CONTACT_ID IS NULL")) {
+        return {
+          rows: [{
+            id: PENDING_PHOTO_ID,
+            category: "photo",
+            deal_id: null,
+            lead_id: null,
+            uploaded_by: FIELD_USER_ID,
+          }],
+        };
+      }
+      if (sqlText.startsWith("UPDATE FILES") && sqlText.includes("CONTACT_ID IS NULL")) {
+        throw Object.assign(new Error('column "contact_id" does not exist'), { code: "42703" });
+      }
+      if (sqlText.startsWith("UPDATE FILES") && !sqlText.includes("CONTACT_ID IS NULL")) {
+        return {
+          rows: [{
+            id: PENDING_PHOTO_ID,
+            category: "photo",
+            photo_category: "damage",
+            subcategory: null,
+            display_name: "Pending photo",
+            mime_type: "image/jpeg",
+            file_size_bytes: 850000,
+            file_extension: ".jpg",
+            deal_id: DEAL_ID,
+            lead_id: null,
+            description: null,
+            tags: [],
+            taken_at: new Date("2026-05-05T12:00:00.000Z"),
+            created_at: new Date("2026-05-05T12:01:00.000Z"),
+            uploaded_by: FIELD_USER_ID,
+            latitude: null,
+            longitude: null,
+            address: null,
+            address_source: null,
+            geocoded_at: null,
+            procore_sync_status: null,
+            deleted_at: null,
+          }],
+        };
+      }
+
+      throw new Error(`Unexpected query in legacy assign-target fallback test: ${sqlText}`);
+    });
+
+    const result = await assignPendingFieldPhotoTarget(db, {
+      userId: FIELD_USER_ID,
+      userRole: "field_contractor",
+    }, {
+      photoId: PENDING_PHOTO_ID,
+      dealId: DEAL_ID,
+    });
+
+    expect(result.photo).toEqual(expect.objectContaining({
+      id: PENDING_PHOTO_ID,
+      dealId: DEAL_ID,
+      leadId: null,
+    }));
+  });
+
+  it("treats photos linked through newer linkage columns as not pending on modern schemas", async () => {
+    db.execute
+      .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({ rows: [] });
+
+    await expect(assignPendingFieldPhotoTarget(db, {
+      userId: FIELD_USER_ID,
+      userRole: "field_contractor",
+    }, {
+      photoId: PENDING_PHOTO_ID,
+      dealId: DEAL_ID,
+    })).rejects.toEqual(new AppError(404, "Pending photo not found."));
+
+    expect(db.execute).toHaveBeenCalledTimes(3);
+  });
+
+  it("recovers the transaction with a savepoint before retrying the assign-target legacy fallback", async () => {
+    let transactionAborted = false;
+    let rolledBackToSavepoint = false;
+    const executedQueries: string[] = [];
+
+    db.execute.mockImplementation(async (query: unknown) => {
+      const sqlText = normalizeSqlText(query);
+      executedQueries.push(sqlText);
+
+      if (sqlText === `SAVEPOINT ${LEGACY_FALLBACK_SAVEPOINT.toUpperCase()}`) {
+        return { rows: [] };
+      }
+      if (sqlText === `ROLLBACK TO SAVEPOINT ${LEGACY_FALLBACK_SAVEPOINT.toUpperCase()}`) {
+        transactionAborted = false;
+        rolledBackToSavepoint = true;
+        return { rows: [] };
+      }
+      if (sqlText === `RELEASE SAVEPOINT ${LEGACY_FALLBACK_SAVEPOINT.toUpperCase()}`) {
+        return { rows: [] };
+      }
+      if (sqlText === "SELECT 1") {
+        if (transactionAborted) {
+          throw Object.assign(new Error("current transaction is aborted"), { code: "25P02" });
+        }
+        return { rows: [{ "?column?": 1 }] };
+      }
+      if (sqlText.startsWith("SELECT") && sqlText.includes("FROM FILES F") && sqlText.includes("CONTACT_ID IS NULL")) {
+        transactionAborted = true;
+        throw Object.assign(new Error('column "contact_id" does not exist'), { code: "42703" });
+      }
+      if (sqlText.startsWith("SELECT") && sqlText.includes("FROM FILES F") && sqlText.includes("WHERE F.ID =")) {
+        return {
+          rows: [{
+            id: PENDING_PHOTO_ID,
+            category: "photo",
+            deal_id: null,
+            lead_id: null,
+            uploaded_by: FIELD_USER_ID,
+          }],
+        };
+      }
+      if (sqlText.startsWith("UPDATE FILES") && sqlText.includes("CONTACT_ID IS NULL")) {
+        transactionAborted = true;
+        throw Object.assign(new Error('column "contact_id" does not exist'), { code: "42703" });
+      }
+      if (sqlText.startsWith("UPDATE FILES") && !sqlText.includes("CONTACT_ID IS NULL")) {
+        if (transactionAborted) {
+          throw Object.assign(new Error("current transaction is aborted"), { code: "25P02" });
+        }
+        return {
+          rows: [{
+            id: PENDING_PHOTO_ID,
+            category: "photo",
+            photo_category: "damage",
+            subcategory: null,
+            display_name: "Pending photo",
+            mime_type: "image/jpeg",
+            file_size_bytes: 850000,
+            file_extension: ".jpg",
+            deal_id: DEAL_ID,
+            lead_id: null,
+            description: null,
+            tags: [],
+            taken_at: new Date("2026-05-05T12:00:00.000Z"),
+            created_at: new Date("2026-05-05T12:01:00.000Z"),
+            uploaded_by: FIELD_USER_ID,
+            latitude: null,
+            longitude: null,
+            address: null,
+            address_source: null,
+            geocoded_at: null,
+            procore_sync_status: null,
+            deleted_at: null,
+          }],
+        };
+      }
+
+      throw new Error(`Unexpected query in legacy assign-target fallback test: ${sqlText}`);
+    });
+
+    const result = await assignPendingFieldPhotoTarget(db, {
+      userId: FIELD_USER_ID,
+      userRole: "field_contractor",
+    }, {
+      photoId: PENDING_PHOTO_ID,
+      dealId: DEAL_ID,
+    });
+
+    expect(rolledBackToSavepoint).toBe(true);
+    expect(result.photo.id).toBe(PENDING_PHOTO_ID);
+    expect(executedQueries.slice(0, 10)).toEqual([
+      `SAVEPOINT ${LEGACY_FALLBACK_SAVEPOINT.toUpperCase()}`,
+      expect.stringContaining("CONTACT_ID IS NULL"),
+      `ROLLBACK TO SAVEPOINT ${LEGACY_FALLBACK_SAVEPOINT.toUpperCase()}`,
+      `RELEASE SAVEPOINT ${LEGACY_FALLBACK_SAVEPOINT.toUpperCase()}`,
+      expect.not.stringContaining("CONTACT_ID IS NULL"),
+      `SAVEPOINT ${LEGACY_FALLBACK_SAVEPOINT.toUpperCase()}`,
+      expect.stringContaining("UPDATE FILES"),
+      `ROLLBACK TO SAVEPOINT ${LEGACY_FALLBACK_SAVEPOINT.toUpperCase()}`,
+      `RELEASE SAVEPOINT ${LEGACY_FALLBACK_SAVEPOINT.toUpperCase()}`,
+      expect.stringContaining("UPDATE FILES"),
+    ]);
+    await expect(db.execute(sql.raw("SELECT 1"))).resolves.toEqual({ rows: [{ "?column?": 1 }] });
   });
 
   it("rejects malformed pending photo ids with 400 before any uuid cast reaches postgres", async () => {
@@ -446,40 +760,46 @@ describe("field photo upload service", () => {
 
   it("accepts non-v1-v5 UUIDs that Postgres still treats as valid uuids", async () => {
     const localDb = { execute: vi.fn() } as any;
-    localDb.execute.mockResolvedValueOnce({
-      rows: [{
-        id: UUID_V7,
-        category: "photo",
-        deal_id: null,
-        lead_id: null,
-        uploaded_by: FIELD_USER_ID,
-      }],
-    }).mockResolvedValueOnce({
-      rows: [{
-        id: UUID_V7,
-        category: "photo",
-        photo_category: "damage",
-        subcategory: null,
-        display_name: "Pending photo",
-        mime_type: "image/jpeg",
-        file_size_bytes: 850000,
-        file_extension: ".jpg",
-        deal_id: UUID_V7,
-        lead_id: null,
-        description: null,
-        tags: [],
-        taken_at: new Date("2026-05-05T12:00:00.000Z"),
-        created_at: new Date("2026-05-05T12:01:00.000Z"),
-        uploaded_by: FIELD_USER_ID,
-        latitude: null,
-        longitude: null,
-        address: null,
-        address_source: null,
-        geocoded_at: null,
-        procore_sync_status: null,
-        deleted_at: null,
-      }],
-    });
+    localDb.execute
+      .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({
+        rows: [{
+          id: UUID_V7,
+          category: "photo",
+          deal_id: null,
+          lead_id: null,
+          uploaded_by: FIELD_USER_ID,
+        }],
+      })
+      .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({
+        rows: [{
+          id: UUID_V7,
+          category: "photo",
+          photo_category: "damage",
+          subcategory: null,
+          display_name: "Pending photo",
+          mime_type: "image/jpeg",
+          file_size_bytes: 850000,
+          file_extension: ".jpg",
+          deal_id: UUID_V7,
+          lead_id: null,
+          description: null,
+          tags: [],
+          taken_at: new Date("2026-05-05T12:00:00.000Z"),
+          created_at: new Date("2026-05-05T12:01:00.000Z"),
+          uploaded_by: FIELD_USER_ID,
+          latitude: null,
+          longitude: null,
+          address: null,
+          address_source: null,
+          geocoded_at: null,
+          procore_sync_status: null,
+          deleted_at: null,
+        }],
+      })
+      .mockResolvedValueOnce({ rows: [] });
     projectMocks.assertAccessibleFieldCaptureTarget.mockResolvedValueOnce({ id: UUID_V7, type: "deal" });
     fileMocks.getFileDownloadUrl.mockResolvedValueOnce({ url: "https://signed.example/photo.jpg" });
 
@@ -502,40 +822,46 @@ describe("field photo upload service", () => {
   });
 
   it("assigns a pending field photo to an opportunity target using the same persisted deal linkage as direct uploads", async () => {
-    db.execute.mockResolvedValueOnce({
-      rows: [{
-        id: PENDING_OPPORTUNITY_PHOTO_ID,
-        category: "photo",
-        deal_id: null,
-        lead_id: null,
-        uploaded_by: FIELD_USER_ID,
-      }],
-    }).mockResolvedValueOnce({
-      rows: [{
-        id: PENDING_OPPORTUNITY_PHOTO_ID,
-        category: "photo",
-        photo_category: "damage",
-        subcategory: null,
-        display_name: "Pending photo",
-        mime_type: "image/jpeg",
-        file_size_bytes: 850000,
-        file_extension: ".jpg",
-        deal_id: DEAL_TWO_ID,
-        lead_id: null,
-        description: null,
-        tags: [],
-        taken_at: new Date("2026-05-05T12:00:00.000Z"),
-        created_at: new Date("2026-05-05T12:01:00.000Z"),
-        uploaded_by: FIELD_USER_ID,
-        latitude: null,
-        longitude: null,
-        address: null,
-        address_source: null,
-        geocoded_at: null,
-        procore_sync_status: null,
-        deleted_at: null,
-      }],
-    });
+    db.execute
+      .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({
+        rows: [{
+          id: PENDING_OPPORTUNITY_PHOTO_ID,
+          category: "photo",
+          deal_id: null,
+          lead_id: null,
+          uploaded_by: FIELD_USER_ID,
+        }],
+      })
+      .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({
+        rows: [{
+          id: PENDING_OPPORTUNITY_PHOTO_ID,
+          category: "photo",
+          photo_category: "damage",
+          subcategory: null,
+          display_name: "Pending photo",
+          mime_type: "image/jpeg",
+          file_size_bytes: 850000,
+          file_extension: ".jpg",
+          deal_id: DEAL_TWO_ID,
+          lead_id: null,
+          description: null,
+          tags: [],
+          taken_at: new Date("2026-05-05T12:00:00.000Z"),
+          created_at: new Date("2026-05-05T12:01:00.000Z"),
+          uploaded_by: FIELD_USER_ID,
+          latitude: null,
+          longitude: null,
+          address: null,
+          address_source: null,
+          geocoded_at: null,
+          procore_sync_status: null,
+          deleted_at: null,
+        }],
+      })
+      .mockResolvedValueOnce({ rows: [] });
     projectMocks.assertAccessibleFieldCaptureTarget.mockResolvedValueOnce({ id: DEAL_TWO_ID, type: "opportunity" });
     fileMocks.getFileDownloadUrl.mockResolvedValueOnce({ url: "https://signed.example/photo.jpg" });
 
