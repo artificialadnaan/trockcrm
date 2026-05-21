@@ -311,8 +311,8 @@ export function useTagSuggestions(dealId?: string) {
   const fetchTags = useCallback(async () => {
     try {
       const params = dealId ? `?dealId=${dealId}` : "";
-      const data = await api<{ tags: string[] }>(`/files/tags${params}`);
-      setTags(data.tags);
+      const data = await api<{ tags?: string[] | null }>(`/files/tags${params}`);
+      setTags(Array.isArray(data.tags) ? data.tags : []);
     } catch {
       // Silently fail -- autocomplete is a nice-to-have
     }

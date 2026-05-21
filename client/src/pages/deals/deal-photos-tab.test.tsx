@@ -166,6 +166,44 @@ describe("DealPhotosTab component", () => {
     expect(node.querySelector<HTMLButtonElement>('[aria-label="Open photo Damage photo"]')).not.toBeNull();
   });
 
+  it("renders without crashing when suggestedTags is undefined", async () => {
+    vi.mocked(api).mockImplementation(async (path: string, options?: { method?: string; json?: Record<string, unknown> }) => {
+      if (path.includes("/download")) return { url: "https://example.test/photo.jpg", filename: "photo.jpg" };
+      if (path.startsWith("/files/tags")) return { tags: undefined };
+      if (path.startsWith("/files?")) return { files: [], pagination: { page: 1, limit: 20, total: 0, totalPages: 0 } };
+      if (options?.method === "PATCH") {
+        return { file: { ...mockPhotos[0], ...options.json, addressSource: options.json?.address ? "manual_override" : mockPhotos[0].addressSource } };
+      }
+      if (options?.method === "DELETE") return { success: true };
+      return { photos: currentPhotos, pagination: { page: 1, limit: 100, total: currentPhotos.length, totalPages: 1 } };
+    });
+
+    const node = renderTab();
+    await vi.waitFor(() => expect(node.textContent).toContain("Kaleb Martin"));
+
+    expect(node.textContent).toContain("Damage");
+    expect(node.querySelector<HTMLButtonElement>('[aria-label="Open photo Damage photo"]')).not.toBeNull();
+  });
+
+  it("renders without crashing when suggestedTags is null", async () => {
+    vi.mocked(api).mockImplementation(async (path: string, options?: { method?: string; json?: Record<string, unknown> }) => {
+      if (path.includes("/download")) return { url: "https://example.test/photo.jpg", filename: "photo.jpg" };
+      if (path.startsWith("/files/tags")) return { tags: null };
+      if (path.startsWith("/files?")) return { files: [], pagination: { page: 1, limit: 20, total: 0, totalPages: 0 } };
+      if (options?.method === "PATCH") {
+        return { file: { ...mockPhotos[0], ...options.json, addressSource: options.json?.address ? "manual_override" : mockPhotos[0].addressSource } };
+      }
+      if (options?.method === "DELETE") return { success: true };
+      return { photos: currentPhotos, pagination: { page: 1, limit: 100, total: currentPhotos.length, totalPages: 1 } };
+    });
+
+    const node = renderTab();
+    await vi.waitFor(() => expect(node.textContent).toContain("Kaleb Martin"));
+
+    expect(node.textContent).toContain("Damage");
+    expect(node.querySelector<HTMLButtonElement>('[aria-label="Open photo Damage photo"]')).not.toBeNull();
+  });
+
   it("shows deleted photos only when the toggle is enabled", async () => {
     const node = renderTab();
     await vi.waitFor(() => expect(node.textContent).toContain("Kaleb Martin"));
