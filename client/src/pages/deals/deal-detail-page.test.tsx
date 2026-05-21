@@ -16,6 +16,7 @@ const mocks = vi.hoisted(() => ({
   useAuthMock: vi.fn(),
   useActivitiesMock: vi.fn(),
   createActivityMock: vi.fn(),
+  updateDealMock: vi.fn(),
   apiMock: vi.fn(),
   toastSuccessMock: vi.fn(),
   toastInfoMock: vi.fn(),
@@ -24,6 +25,7 @@ const mocks = vi.hoisted(() => ({
 vi.mock("@/hooks/use-deals", () => ({
   useDealDetail: mocks.useDealDetailMock,
   deleteDeal: vi.fn(),
+  updateDeal: mocks.updateDealMock,
 }));
 
 vi.mock("@/hooks/use-companies", () => ({
@@ -368,6 +370,7 @@ describe("DealDetailPage", () => {
     mocks.useAuthMock.mockReset();
     mocks.useActivitiesMock.mockReset();
     mocks.apiMock.mockReset();
+    mocks.updateDealMock.mockReset();
     mocks.toastSuccessMock.mockReset();
     mocks.toastInfoMock.mockReset();
     mocks.apiMock.mockImplementation((url: string, options?: { method?: string }) => {
@@ -423,6 +426,7 @@ describe("DealDetailPage", () => {
       refetch: vi.fn(),
       deal: makeDealDetail(),
     });
+    mocks.updateDealMock.mockResolvedValue({ deal: makeDealDetail({ onHold: true }) });
   });
 
   it("renders deal hero with name, stage badge, and project number (not raw deal number)", () => {
@@ -523,6 +527,79 @@ describe("DealDetailPage", () => {
 
     expect(html).toContain("Primary Contact");
     expect(html).toContain("No primary contact");
+  });
+
+  it("shows an On Hold indicator and sends a patch when the toggle is used", async () => {
+    mocks.useAuthMock.mockReturnValueOnce({
+      user: {
+        id: "rep-1",
+        role: "rep",
+      },
+    });
+    mocks.useDealDetailMock.mockReturnValueOnce({
+      loading: false,
+      error: null,
+      refetch: vi.fn(),
+      deal: makeDealDetail({
+        isBidBoardOwned: false,
+        bidBoardOwnership: null,
+        onHold: true,
+        onHoldStartedAt: "2026-05-20T12:00:00.000Z",
+        onHoldAccumulatedSeconds: 7200,
+      }),
+    });
+
+    mounted = mountPage();
+
+    expect(mounted.container.textContent).toContain("On Hold");
+
+    const resumeButton = Array.from(mounted.container.querySelectorAll("button")).find((button) =>
+      button.textContent?.includes("Resume deal")
+    );
+    expect(resumeButton).toBeTruthy();
+
+    await act(async () => {
+      resumeButton!.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+
+    expect(mocks.updateDealMock).toHaveBeenCalledWith("deal-1", { onHold: false });
+  });
+
+  it("keeps a successful On Hold toggle distinct from a later refetch failure", async () => {
+    mocks.useAuthMock.mockReturnValueOnce({
+      user: {
+        id: "rep-1",
+        role: "rep",
+      },
+    });
+    const refetch = vi.fn().mockRejectedValue(new Error("refresh failed"));
+    mocks.useDealDetailMock.mockReturnValueOnce({
+      loading: false,
+      error: null,
+      refetch,
+      deal: makeDealDetail({
+        isBidBoardOwned: false,
+        bidBoardOwnership: null,
+        onHold: false,
+      }),
+    });
+
+    mounted = mountPage();
+
+    const holdButton = Array.from(mounted.container.querySelectorAll("button")).find((button) =>
+      button.textContent?.includes("Put on hold")
+    );
+    expect(holdButton).toBeTruthy();
+
+    await act(async () => {
+      holdButton!.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+
+    expect(mocks.updateDealMock).toHaveBeenCalledWith("deal-1", { onHold: true });
+    expect(mocks.toastSuccessMock).toHaveBeenCalledWith("Deal placed on hold");
+    expect(mocks.toastInfoMock).toHaveBeenCalledWith(
+      "On Hold status updated. Refresh the page to see the latest detail state."
+    );
   });
 
   it("renders project number as the primary deal identifier when assigned", () => {

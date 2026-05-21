@@ -163,6 +163,9 @@ export interface Deal {
   lostAt: string | null;
   expectedCloseDate: string | null;
   actualCloseDate: string | null;
+  onHold?: boolean;
+  onHoldStartedAt?: string | null;
+  onHoldAccumulatedSeconds?: number | null;
   contractSignedAt?: string | null;
   contractSignedDate: string | null;
   rfpApprovalRequestedAt?: string | null;

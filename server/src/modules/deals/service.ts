@@ -193,6 +193,7 @@ export interface UpdateDealInput {
   source?: string | null;
   winProbability?: number | null;
   expectedCloseDate?: string | null;
+  onHold?: boolean;
   proposalStatus?: string | null;
   proposalNotes?: string | null;
   estimatingSubstage?: string | null;
@@ -1340,8 +1341,18 @@ export async function updateDeal(
   userId: string,
   officeId?: string,
 ) {
-  // Verify deal exists and user has access
-  const existing = await getDealById(tenantDb, dealId, userRole, userId);
+  // Lock the deal row before deriving hold timing so stage changes and hold
+  // toggles cannot race on a stale snapshot.
+  const lockedDealQuery = tenantDb
+    .select()
+    .from(deals)
+    .where(eq(deals.id, dealId))
+    .limit(1) as any;
+  const lockedDeals =
+    typeof lockedDealQuery.for === "function"
+      ? await lockedDealQuery.for("update")
+      : await lockedDealQuery;
+  const existing = lockedDeals[0] ?? null;
   if (!existing) {
     throw new AppError(404, "Deal not found");
   }
@@ -1410,6 +1421,26 @@ export async function updateDeal(
   if (input.source !== undefined) updates.source = input.source;
   if (input.winProbability !== undefined) updates.winProbability = input.winProbability;
   if (input.expectedCloseDate !== undefined) updates.expectedCloseDate = input.expectedCloseDate;
+  if (input.onHold !== undefined) {
+    if (input.onHold && !existing.onHold) {
+      updates.onHold = true;
+      updates.onHoldStartedAt = new Date();
+    } else if (!input.onHold && existing.onHold) {
+      const holdStartedAt = existing.onHoldStartedAt instanceof Date
+        ? existing.onHoldStartedAt
+        : existing.onHoldStartedAt
+          ? new Date(existing.onHoldStartedAt)
+          : null;
+      const elapsedHoldSeconds =
+        holdStartedAt == null
+          ? 0
+          : Math.max(0, Math.floor((Date.now() - holdStartedAt.getTime()) / 1000));
+      updates.onHold = false;
+      updates.onHoldStartedAt = null;
+      updates.onHoldAccumulatedSeconds =
+        Math.max(0, Number(existing.onHoldAccumulatedSeconds ?? 0)) + elapsedHoldSeconds;
+    }
+  }
   if (input.proposalNotes !== undefined) updates.proposalNotes = input.proposalNotes;
   if (input.workflowRoute !== undefined) {
     if (existing.sourceLeadId) {
@@ -1577,6 +1608,9 @@ export async function updateDeal(
       "source",
       "winProbability",
       "expectedCloseDate",
+      "onHold",
+      "onHoldStartedAt",
+      "onHoldAccumulatedSeconds",
       "proposalStatus",
       "proposalNotes",
       "estimatingSubstage",
