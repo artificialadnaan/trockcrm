@@ -66,6 +66,101 @@ function targetWorkflowFamilyForStage(stageSlug: string, workflowRoute: Workflow
   return workflowFamilyForRoute(workflowRoute);
 }
 
+function buildMirrorDealUpdateQuery(args: {
+  schemaName: string;
+  includeHoldColumns: boolean;
+  updates: {
+    stageId: unknown;
+    stageEnteredAt: unknown;
+    bidBoardStageSlug: unknown;
+    bidBoardStageFamily: unknown;
+    bidBoardStageStatus: unknown;
+    bidBoardStageEnteredAt: unknown;
+    bidBoardStageExitedAt: unknown;
+    bidBoardLossOutcome: unknown;
+    bidBoardMirrorSourceEnteredAt: unknown;
+    bidBoardMirrorSourceExitedAt: unknown;
+    ddEstimate: unknown;
+    bidEstimate: unknown;
+    awardedAmount: unknown;
+    proposalNotes: unknown;
+    estimatingSubstage: unknown;
+    proposalStatus: unknown;
+    actualCloseDate: unknown;
+    lostReasonId: unknown;
+    lostNotes: unknown;
+    lostCompetitor: unknown;
+    lostAt: unknown;
+    procoreBidId: unknown;
+    readOnlySyncedAt: unknown;
+    updatedAt: unknown;
+    onHoldStartedAt?: unknown;
+    onHoldAccumulatedSeconds?: unknown;
+    onHoldAccumulatedSecondsAtStageEntry?: unknown;
+    dealId: unknown;
+    workflowRoute: unknown;
+  };
+}) {
+  const params: unknown[] = [];
+  const bind = (value: unknown) => {
+    params.push(value);
+    return `$${params.length}`;
+  };
+
+  const setClauses = [
+    `stage_id = ${bind(args.updates.stageId)}`,
+    `stage_entered_at = ${bind(args.updates.stageEnteredAt)}`,
+  ];
+
+  if (args.includeHoldColumns) {
+    setClauses.push(
+      `on_hold_started_at = ${bind(args.updates.onHoldStartedAt ?? null)}`,
+      `on_hold_accumulated_seconds = ${bind(args.updates.onHoldAccumulatedSeconds ?? null)}`,
+      `on_hold_accumulated_seconds_at_stage_entry = ${bind(args.updates.onHoldAccumulatedSecondsAtStageEntry ?? null)}`
+    );
+  }
+
+  setClauses.push(
+    "is_bid_board_owned = true",
+    `bid_board_stage_slug = ${bind(args.updates.bidBoardStageSlug)}`,
+    `bid_board_stage_family = ${bind(args.updates.bidBoardStageFamily)}`,
+    `bid_board_stage_status = ${bind(args.updates.bidBoardStageStatus)}`,
+    `bid_board_stage_entered_at = ${bind(args.updates.bidBoardStageEnteredAt)}`,
+    `bid_board_stage_exited_at = ${bind(args.updates.bidBoardStageExitedAt)}`,
+    `bid_board_stage_duration = CASE
+               WHEN ${bind(args.updates.bidBoardStageEnteredAt)}::timestamptz IS NOT NULL AND ${bind(args.updates.bidBoardStageExitedAt)}::timestamptz IS NOT NULL THEN ${bind(args.updates.bidBoardStageExitedAt)}::timestamptz - ${bind(args.updates.bidBoardStageEnteredAt)}::timestamptz
+               ELSE NULL
+             END`,
+    `bid_board_loss_outcome = ${bind(args.updates.bidBoardLossOutcome)}`,
+    `bid_board_mirror_source_entered_at = ${bind(args.updates.bidBoardMirrorSourceEnteredAt)}`,
+    `bid_board_mirror_source_exited_at = ${bind(args.updates.bidBoardMirrorSourceExitedAt)}`,
+    `dd_estimate = COALESCE(${bind(args.updates.ddEstimate)}, dd_estimate)`,
+    `bid_estimate = COALESCE(${bind(args.updates.bidEstimate)}, bid_estimate)`,
+    `awarded_amount = COALESCE(${bind(args.updates.awardedAmount)}, awarded_amount)`,
+    `proposal_notes = COALESCE(${bind(args.updates.proposalNotes)}, proposal_notes)`,
+    `estimating_substage = ${bind(args.updates.estimatingSubstage)}`,
+    `proposal_status = COALESCE(${bind(args.updates.proposalStatus)}, proposal_status)`,
+    `actual_close_date = ${bind(args.updates.actualCloseDate)}`,
+    `lost_reason_id = ${bind(args.updates.lostReasonId)}`,
+    `lost_notes = ${bind(args.updates.lostNotes)}`,
+    `lost_competitor = ${bind(args.updates.lostCompetitor)}`,
+    `lost_at = ${bind(args.updates.lostAt)}`,
+    `procore_bid_id = COALESCE(${bind(args.updates.procoreBidId)}, procore_bid_id)`,
+    `read_only_synced_at = ${bind(args.updates.readOnlySyncedAt)}`,
+    `updated_at = ${bind(args.updates.updatedAt)}`,
+    `workflow_route = ${bind(args.updates.workflowRoute)}`,
+    `pipeline_type_snapshot = CASE WHEN ${bind(args.updates.workflowRoute)} = 'service' THEN 'service' ELSE 'normal' END`
+  );
+
+  const dealIdPlaceholder = bind(args.updates.dealId);
+  return {
+    sql: `UPDATE ${args.schemaName}.deals
+         SET ${setClauses.join(",\n             ")}
+         WHERE id = ${dealIdPlaceholder}`,
+    params,
+  };
+}
+
 async function reserveDealNumberSuffix(
   client: PoolClient,
   schemaName: string,
@@ -283,32 +378,30 @@ router.post("/opportunities", requireSyncHubSecret, async (req, res, next) => {
         normalizedRequestStageSlug,
         effectiveWorkflowRoute
       );
-      const [currentStageResult, targetStageResult] = await Promise.all([
-        client.query(
-          `SELECT id, slug, display_order, workflow_family
-             FROM public.pipeline_stage_config
-            WHERE id = $1
-            LIMIT 1`,
-          [currentDeal.stage_id]
-        ),
-        client.query(
-          `SELECT id, slug, name, display_order, is_terminal, workflow_family,
-                  required_fields, required_documents, required_approvals
-             FROM public.pipeline_stage_config
-            WHERE slug = $1
-              AND (
-                workflow_family = $2
-                OR (
-                  $2 = 'service_deal'
-                  AND workflow_family = 'standard_deal'
-                  AND slug = ANY($3::text[])
-                )
+      const currentStageResult = await client.query(
+        `SELECT id, slug, display_order, workflow_family
+           FROM public.pipeline_stage_config
+          WHERE id = $1
+          LIMIT 1`,
+        [currentDeal.stage_id]
+      );
+      const targetStageResult = await client.query(
+        `SELECT id, slug, name, display_order, is_terminal, workflow_family,
+                required_fields, required_documents, required_approvals
+           FROM public.pipeline_stage_config
+          WHERE slug = $1
+            AND (
+              workflow_family = $2
+              OR (
+                $2 = 'service_deal'
+                AND workflow_family = 'standard_deal'
+                AND slug = ANY($3::text[])
               )
-            ORDER BY CASE WHEN workflow_family = $2 THEN 0 ELSE 1 END
-            LIMIT 1`,
-          [normalizedRequestStageSlug, targetLookupWorkflowFamily, SHARED_CANONICAL_DEAL_STAGE_SLUGS]
-        ),
-      ]);
+            )
+          ORDER BY CASE WHEN workflow_family = $2 THEN 0 ELSE 1 END
+          LIMIT 1`,
+        [normalizedRequestStageSlug, targetLookupWorkflowFamily, SHARED_CANONICAL_DEAL_STAGE_SLUGS]
+      );
 
       if (targetStageResult.rows.length === 0) {
         throw new AppError(400, `Unknown stage slug for ${targetLookupWorkflowFamily}: ${normalizedRequestStageSlug}`);
@@ -450,75 +543,43 @@ router.post("/opportunities", requireSyncHubSecret, async (req, res, next) => {
         );
       }
 
-      await client.query(
-        `UPDATE ${schemaName}.deals
-         SET stage_id = $1,
-             stage_entered_at = $2,
-             on_hold_started_at = $25,
-             on_hold_accumulated_seconds = $26,
-             on_hold_accumulated_seconds_at_stage_entry = $27,
-             is_bid_board_owned = true,
-             bid_board_stage_slug = $3,
-             bid_board_stage_family = $4,
-             bid_board_stage_status = $5,
-             bid_board_stage_entered_at = $6,
-             bid_board_stage_exited_at = $7,
-             bid_board_stage_duration = CASE
-               WHEN $6::timestamptz IS NOT NULL AND $7::timestamptz IS NOT NULL THEN $7::timestamptz - $6::timestamptz
-               ELSE NULL
-             END,
-             bid_board_loss_outcome = $8,
-             bid_board_mirror_source_entered_at = $9,
-             bid_board_mirror_source_exited_at = $10,
-             dd_estimate = COALESCE($11, dd_estimate),
-             bid_estimate = COALESCE($12, bid_estimate),
-             awarded_amount = COALESCE($13, awarded_amount),
-             proposal_notes = COALESCE($14, proposal_notes),
-             estimating_substage = $15,
-             proposal_status = COALESCE($16, proposal_status),
-             actual_close_date = $17,
-             lost_reason_id = $18,
-             lost_notes = $19,
-             lost_competitor = $20,
-             lost_at = $21,
-             procore_bid_id = COALESCE($22, procore_bid_id),
-             read_only_synced_at = $23,
-             updated_at = $24,
-             workflow_route = $29,
-             pipeline_type_snapshot = CASE WHEN $29 = 'service' THEN 'service' ELSE 'normal' END
-         WHERE id = $28`,
-        [
-          mirrorResult.updates.stageId,
-          mirrorResult.updates.stageEnteredAt,
-          mirrorResult.updates.bidBoardStageSlug,
-          mirrorResult.updates.bidBoardStageFamily,
-          mirrorResult.updates.bidBoardStageStatus,
-          mirrorResult.updates.bidBoardStageEnteredAt,
-          mirrorResult.updates.bidBoardStageExitedAt,
-          mirrorResult.updates.bidBoardLossOutcome,
-          mirrorResult.updates.bidBoardMirrorSourceEnteredAt,
-          mirrorResult.updates.bidBoardMirrorSourceExitedAt,
-          mirrorResult.updates.ddEstimate ?? null,
-          mirrorResult.updates.bidEstimate ?? null,
-          mirrorResult.updates.awardedAmount ?? null,
-          mirrorResult.updates.proposalNotes ?? null,
-          mirrorResult.updates.estimatingSubstage ?? null,
-          proposalStatusForUpdate,
-          mirrorResult.updates.actualCloseDate ?? null,
-          mirrorResult.updates.lostReasonId ?? null,
-          mirrorResult.updates.lostNotes ?? null,
-          mirrorResult.updates.lostCompetitor ?? null,
-          mirrorResult.updates.lostAt ?? null,
-          procore_bid_id ?? null,
-          mirrorResult.updates.readOnlySyncedAt,
-          mirrorResult.updates.updatedAt,
-          mirrorResult.updates.onHoldStartedAt ?? null,
-          mirrorResult.updates.onHoldAccumulatedSeconds ?? null,
-          mirrorResult.updates.onHoldAccumulatedSecondsAtStageEntry ?? null,
-          existingDealId,
-          effectiveWorkflowRoute,
-        ]
-      );
+      const mirrorDealUpdate = buildMirrorDealUpdateQuery({
+        schemaName,
+        includeHoldColumns: mirrorResult.stageChanged,
+        updates: {
+          stageId: mirrorResult.updates.stageId,
+          stageEnteredAt: mirrorResult.updates.stageEnteredAt,
+          bidBoardStageSlug: mirrorResult.updates.bidBoardStageSlug,
+          bidBoardStageFamily: mirrorResult.updates.bidBoardStageFamily,
+          bidBoardStageStatus: mirrorResult.updates.bidBoardStageStatus,
+          bidBoardStageEnteredAt: mirrorResult.updates.bidBoardStageEnteredAt,
+          bidBoardStageExitedAt: mirrorResult.updates.bidBoardStageExitedAt,
+          bidBoardLossOutcome: mirrorResult.updates.bidBoardLossOutcome,
+          bidBoardMirrorSourceEnteredAt: mirrorResult.updates.bidBoardMirrorSourceEnteredAt,
+          bidBoardMirrorSourceExitedAt: mirrorResult.updates.bidBoardMirrorSourceExitedAt,
+          ddEstimate: mirrorResult.updates.ddEstimate ?? null,
+          bidEstimate: mirrorResult.updates.bidEstimate ?? null,
+          awardedAmount: mirrorResult.updates.awardedAmount ?? null,
+          proposalNotes: mirrorResult.updates.proposalNotes ?? null,
+          estimatingSubstage: mirrorResult.updates.estimatingSubstage ?? null,
+          proposalStatus: proposalStatusForUpdate,
+          actualCloseDate: mirrorResult.updates.actualCloseDate ?? null,
+          lostReasonId: mirrorResult.updates.lostReasonId ?? null,
+          lostNotes: mirrorResult.updates.lostNotes ?? null,
+          lostCompetitor: mirrorResult.updates.lostCompetitor ?? null,
+          lostAt: mirrorResult.updates.lostAt ?? null,
+          procoreBidId: procore_bid_id ?? null,
+          readOnlySyncedAt: mirrorResult.updates.readOnlySyncedAt,
+          updatedAt: mirrorResult.updates.updatedAt,
+          onHoldStartedAt: mirrorResult.updates.onHoldStartedAt ?? null,
+          onHoldAccumulatedSeconds: mirrorResult.updates.onHoldAccumulatedSeconds ?? null,
+          onHoldAccumulatedSecondsAtStageEntry:
+            mirrorResult.updates.onHoldAccumulatedSecondsAtStageEntry ?? null,
+          dealId: existingDealId,
+          workflowRoute: effectiveWorkflowRoute,
+        },
+      });
+      await client.query(mirrorDealUpdate.sql, mirrorDealUpdate.params);
 
       const webhookFieldChanges: Record<string, { from: unknown; to: unknown }> = {
         stageId: { from: currentDeal.stage_id, to: mirrorResult.updates.stageId },

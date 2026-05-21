@@ -238,6 +238,9 @@ describe("Bid Board sync stage writeback", () => {
       }
       if (normalizedSql.includes("update office_dallas.deals") && normalizedSql.includes("bid_board_stage_slug = $2")) {
         expect(normalizedSql).not.toContain("stage_id = $1");
+        expect(normalizedSql).not.toContain("on_hold_started_at");
+        expect(normalizedSql).not.toContain("on_hold_accumulated_seconds");
+        expect(normalizedSql).not.toContain("on_hold_accumulated_seconds_at_stage_entry");
         expect(params).toEqual(["deal-123", "estimating", "estimating", "Estimate in Progress", "stage-estimating"]);
         return { rows: [], rowCount: 1 };
       }
