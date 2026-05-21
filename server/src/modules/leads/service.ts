@@ -66,8 +66,13 @@ export interface LeadFilters {
   companyId?: string;
   propertyId?: string;
   assignedRepId?: string;
+  stageIds?: string[];
   status?: "open" | "converted" | "disqualified";
   isActive?: boolean | "all";
+  createdFrom?: string;
+  createdTo?: string;
+  sortBy?: "created_at" | "updated_at";
+  sortDir?: "asc" | "desc";
   scope?: WorkspaceScope;
   activeOfficeId?: string;
 }
@@ -1336,19 +1341,32 @@ export function createLeadService(
       conditions.push(eq(leads.assignedRepId, filters.assignedRepId));
     }
 
+    if (filters.stageIds && filters.stageIds.length > 0) {
+      conditions.push(inArray(leads.stageId, filters.stageIds));
+    }
+
     if (filters.companyId) conditions.push(eq(leads.companyId, filters.companyId));
     if (filters.propertyId) conditions.push(eq(leads.propertyId, filters.propertyId));
     if (filters.status) conditions.push(eq(leads.status, filters.status));
+    if (filters.createdFrom) {
+      conditions.push(sql`${leads.createdAt} >= ${filters.createdFrom}::date`);
+    }
+    if (filters.createdTo) {
+      conditions.push(sql`${leads.createdAt} < (${filters.createdTo}::date + interval '1 day')`);
+    }
 
     if (filters.search && filters.search.trim().length >= 2) {
       conditions.push(buildLeadSearchCondition(filters.search));
     }
 
+    const sortColumn = filters.sortBy === "created_at" ? leads.createdAt : leads.updatedAt;
+    const sortOrder = filters.sortDir === "asc" ? asc(sortColumn) : desc(sortColumn);
+
     const rows = await tenantDb
       .select()
       .from(leads)
       .where(and(...conditions))
-      .orderBy(desc(leads.updatedAt), asc(leads.name));
+      .orderBy(sortOrder, asc(leads.name));
 
     return decorateLeads(tenantDb, rows);
   }

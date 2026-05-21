@@ -116,6 +116,8 @@ export interface DealFilters {
   // deals.contract_signed_date as a transition fallback.
   contractSignedFrom?: string;
   contractSignedTo?: string;
+  createdFrom?: string;
+  createdTo?: string;
   updatedFrom?: string;
   updatedTo?: string;
   sortBy?: "name" | "created_at" | "updated_at" | "awarded_amount" | "stage_entered_at" | "expected_close_date" | "contract_signed_date";
@@ -1049,6 +1051,12 @@ export async function getDeals(tenantDb: TenantDb, filters: DealFilters, userRol
   }
   if (filters.contractSignedTo) {
     conditions.push(sql`${contractSignedDateForReporting} <= ${filters.contractSignedTo}::date`);
+  }
+  if (filters.createdFrom) {
+    conditions.push(sql`${deals.createdAt} >= ${filters.createdFrom}::date`);
+  }
+  if (filters.createdTo) {
+    conditions.push(sql`${deals.createdAt} < (${filters.createdTo}::date + interval '1 day')`);
   }
   if (filters.updatedFrom) {
     conditions.push(sql`${deals.updatedAt} >= ${filters.updatedFrom}::date`);
