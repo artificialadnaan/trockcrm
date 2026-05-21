@@ -388,6 +388,117 @@ describe("questionnaire-service universal questionnaire", () => {
     expect(missing.missingScopeSelection).toBe(false);
   });
 
+  it("treats client provided docs as optional even if a stale questionnaire node is marked required", async () => {
+    const tenantDb = createReadDb({
+      nodes: [
+        node({
+          id: "client-provided-docs",
+          key: "client_provided_docs",
+          label: "Client Provided Docs",
+          isRequired: true,
+          sectionKey: "baseline",
+        }),
+        node({
+          id: "roofing-applies",
+          key: "roofing_applies",
+          inputType: "boolean",
+          sectionKey: "scope",
+          groupKey: "roofing",
+          groupOrder: 1,
+          displayOrder: 0,
+        }),
+        node({
+          id: "roof-type",
+          key: "roof_type",
+          isRequired: true,
+          parentNodeId: "roofing-applies",
+          parentOptionValue: "true",
+          sectionKey: "scope",
+          groupKey: "roofing",
+          groupOrder: 1,
+          displayOrder: 1,
+        }),
+      ],
+      answers: [],
+    });
+
+    const missing = await evaluateLeadQuestionGate(tenantDb as never, {
+      leadId: "lead-1",
+      projectTypeId: null,
+      qualificationPayload: {
+        estimated_value: 100000,
+        timeline_status: "2026-08-01",
+      },
+      existingCustomerStatus: "Existing",
+      leadQuestionAnswers: {
+        roofing_applies: true,
+        roof_type: "TPO",
+      },
+    });
+
+    expect(missing.projectTypeQuestionIds).toEqual([]);
+    expect(missing.missingScopeSelection).toBe(false);
+  });
+
+  it("still reports other required questionnaire questions as missing", async () => {
+    const tenantDb = createReadDb({
+      nodes: [
+        node({
+          id: "client-provided-docs",
+          key: "client_provided_docs",
+          label: "Client Provided Docs",
+          isRequired: true,
+          sectionKey: "baseline",
+        }),
+        node({
+          id: "budget",
+          key: "budget",
+          label: "Budget",
+          isRequired: true,
+          sectionKey: "baseline",
+        }),
+        node({
+          id: "roofing-applies",
+          key: "roofing_applies",
+          inputType: "boolean",
+          sectionKey: "scope",
+          groupKey: "roofing",
+          groupOrder: 1,
+          displayOrder: 0,
+        }),
+        node({
+          id: "roof-type",
+          key: "roof_type",
+          isRequired: true,
+          parentNodeId: "roofing-applies",
+          parentOptionValue: "true",
+          sectionKey: "scope",
+          groupKey: "roofing",
+          groupOrder: 1,
+          displayOrder: 1,
+        }),
+      ],
+      answers: [],
+    });
+
+    const missing = await evaluateLeadQuestionGate(tenantDb as never, {
+      leadId: "lead-1",
+      projectTypeId: null,
+      qualificationPayload: {
+        estimated_value: 100000,
+        timeline_status: "2026-08-01",
+      },
+      existingCustomerStatus: "Existing",
+      leadQuestionAnswers: {
+        roofing_applies: true,
+        roof_type: "TPO",
+      },
+    });
+
+    expect(missing.projectTypeQuestionIds).toEqual(["budget"]);
+    expect(missing.projectTypeQuestionIds).not.toContain("client_provided_docs");
+  });
+
   it("saves and loads multi-select array answers through valueJson", async () => {
     const tenantDb = createMutationDb({
       nodes: [

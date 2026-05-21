@@ -157,6 +157,9 @@ const SECTION_ORDER: Record<string, number> = {
   scope: 2,
 };
 const CLIENT_PROVIDED_DOCS_TAG = "client_provided_docs";
+// Belt-and-suspenders for stale questionnaire seeds: these questions remain
+// visible/editable, but must not block Sales Validation advancement.
+const OPTIONAL_STAGE_GATE_QUESTION_KEYS = new Set<string>([CLIENT_PROVIDED_DOCS_TAG]);
 
 function sortQuestionnaireNodes(left: QuestionnaireNode, right: QuestionnaireNode) {
   const leftSection = SECTION_ORDER[left.sectionKey ?? ""] ?? 99;
@@ -374,7 +377,12 @@ export function listMissingRequiredQuestionKeys(
   const visibleCache = new Map<string, boolean>();
 
   return nodes
-    .filter((node) => node.nodeType === "question" && node.isRequired)
+    .filter(
+      (node) =>
+        node.nodeType === "question" &&
+        node.isRequired &&
+        !OPTIONAL_STAGE_GATE_QUESTION_KEYS.has(node.key)
+    )
     .filter((node) => isNodeVisible(node, nodeById, answers, visibleCache))
     .filter((node) => !isAnsweredQuestionValue(answers[node.key]))
     .map((node) => node.key);

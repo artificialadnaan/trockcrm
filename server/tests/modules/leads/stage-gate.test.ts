@@ -634,6 +634,28 @@ describe("Universal questionnaire gate", () => {
     expect(result.missingRequirements.fields).toEqual(["question.budget", "question.building_type"]);
   });
 
+  it("does not surface client provided docs as missing when entering sales_validation_stage", () => {
+    const result = evaluateLeadStageGate({
+      lead: satisfiedQualifiedLead,
+      qualification: { qualificationData: {}, scopingSubsetData: {} },
+      currentStage: qualifiedLeadStage,
+      targetStage: salesValidationStage,
+      questionnaireGate: {
+        qualificationFields: [],
+        projectTypeQuestionIds: [],
+        missingScopeSelection: false,
+      },
+    });
+
+    expect(result.allowed).toBe(true);
+    expect(result.missingRequirements.fields).not.toContain("question.client_provided_docs");
+    expect(
+      result.missingRequirements.effectiveChecklist.fields.some(
+        (field) => field.key === "question.client_provided_docs"
+      )
+    ).toBe(false);
+  });
+
   it("allows sales_validation_stage when required questions and one scope group are satisfied", () => {
     const result = evaluateLeadStageGate({
       lead: satisfiedQualifiedLead,
