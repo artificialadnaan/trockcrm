@@ -6,6 +6,7 @@ import { PublicPhotoTokenPanel } from "@/components/photos/public-photo-token-pa
 import {
   buildPhotoFilterSearchParams,
   filtersFromSearchParams,
+  getPhotoTags,
   groupDealPhotos,
   PhotoEmptyState,
   PhotoFilterBar,
@@ -80,7 +81,7 @@ export function DealPhotosTab({ dealId, onCountChange }: { dealId: string; onCou
       if (!map.has(key)) map.set(key, normalized);
     });
     photos.forEach((photo) => {
-      for (const tag of photo.tags) {
+      for (const tag of getPhotoTags(photo.tags)) {
         const normalized = tag.trim();
         if (!normalized) continue;
         const key = normalized.toLowerCase();

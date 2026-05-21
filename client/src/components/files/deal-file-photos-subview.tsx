@@ -9,6 +9,7 @@ import {
   displayPhotoCategory,
   filtersFromSearchParams,
   formatPhotoTime,
+  getPhotoTags,
   initials,
   matchesPhotoFilters,
   PhotoEmptyState,
@@ -101,7 +102,7 @@ export function DealFilePhotosSubview({ dealId }: { dealId: string }) {
       if (!map.has(key)) map.set(key, normalized);
     });
     photos.forEach((photo) => {
-      for (const tag of photo.tags) {
+      for (const tag of getPhotoTags(photo.tags)) {
         const normalized = tag.trim();
         if (!normalized) continue;
         const key = normalized.toLowerCase();
@@ -238,6 +239,7 @@ function PhotoFileRow({
   const [rowRef, inViewport] = useInViewport<HTMLDivElement>();
   const category = displayPhotoCategory(photo);
   const primaryLabel = photo.description || `${photo.displayName}${photo.fileExtension ?? ""}`;
+  const photoTags = getPhotoTags(photo.tags);
   const uploadedAt = new Date(photo.createdAt).toLocaleDateString();
   const takenAt = photo.takenAt ? new Date(photo.takenAt).toLocaleDateString() : "Same as uploaded";
   const isImage = isPhotoImagePreviewable(photo);
@@ -261,9 +263,9 @@ function PhotoFileRow({
       <button type="button" className="min-w-0 text-left" onClick={onOpen}>
         <p className="truncate text-sm font-medium">{primaryLabel}</p>
         <p className="truncate text-xs text-muted-foreground">{photo.displayName}{photo.fileExtension ?? ""}</p>
-        {photo.tags.length > 0 ? (
+        {photoTags.length > 0 ? (
           <div className="mt-1 flex flex-wrap gap-1">
-            {photo.tags.slice(0, 2).map((tag) => <Badge key={tag} variant="outline" className="text-[10px]">#{tag}</Badge>)}
+            {photoTags.slice(0, 2).map((tag) => <Badge key={tag} variant="outline" className="text-[10px]">#{tag}</Badge>)}
           </div>
         ) : null}
       </button>

@@ -23,7 +23,7 @@ vi.mock("@/lib/api", () => ({
       return { file: { ...mockPhotos[0], ...options.json, addressSource: options.json?.address ? "manual_override" : mockPhotos[0].addressSource } };
     }
     if (options?.method === "DELETE") return { success: true };
-    return { photos: mockPhotos, pagination: { page: 1, limit: 100, total: mockPhotos.length, totalPages: 1 } };
+    return { photos: currentPhotos, pagination: { page: 1, limit: 100, total: currentPhotos.length, totalPages: 1 } };
   }),
 }));
 
@@ -81,6 +81,7 @@ const mockPhotos: DealPhotoRecord[] = [
     deletedByUserId: "admin-1",
   },
 ];
+let currentPhotos: DealPhotoRecord[] = mockPhotos;
 
 let root: Root | null = null;
 let container: HTMLDivElement | null = null;
@@ -90,6 +91,7 @@ afterEach(() => {
   root = null;
   container?.remove();
   container = null;
+  currentPhotos = mockPhotos;
   vi.clearAllMocks();
 });
 
@@ -152,6 +154,16 @@ describe("DealPhotosTab component", () => {
     expect(document.body.textContent).toContain("From photo");
     expect(document.body.textContent).toContain("Procore");
     expect(document.body.textContent).toContain("#urgent");
+  });
+
+  it("renders without crashing when a photo is missing tags", async () => {
+    currentPhotos = [{ ...mockPhotos[0], tags: undefined } as unknown as DealPhotoRecord];
+
+    const node = renderTab();
+    await vi.waitFor(() => expect(node.textContent).toContain("Kaleb Martin"));
+
+    expect(node.textContent).toContain("Damage");
+    expect(node.querySelector<HTMLButtonElement>('[aria-label="Open photo Damage photo"]')).not.toBeNull();
   });
 
   it("shows deleted photos only when the toggle is enabled", async () => {

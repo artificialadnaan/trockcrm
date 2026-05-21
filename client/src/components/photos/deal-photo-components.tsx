@@ -179,6 +179,10 @@ export function photoSortTime(photo: DealPhotoRecord) {
   return new Date(photo.takenAt ?? photo.createdAt).getTime();
 }
 
+export function getPhotoTags(tags: string[] | null | undefined) {
+  return Array.isArray(tags) ? tags : [];
+}
+
 export function buildPhotoFilterSearchParams(filters: PhotoFilterState, options: { includeGroup?: boolean } = {}): URLSearchParams {
   const includeGroup = options.includeGroup ?? true;
   const params = new URLSearchParams();
@@ -213,7 +217,7 @@ export function matchesPhotoFilters(photo: DealPhotoRecord, filters: PhotoFilter
   }
   if (filters.tags.length > 0) {
     const selectedTags = filters.tags.map((tag) => tag.toLowerCase());
-    const photoTags = (Array.isArray(photo.tags) ? photo.tags : []).map((tag) => tag.toLowerCase());
+    const photoTags = getPhotoTags(photo.tags).map((tag) => tag.toLowerCase());
     if (!photoTags.some((tag) => selectedTags.includes(tag))) return false;
   }
   if (filters.uploaderIds.length > 0 && !filters.uploaderIds.includes(photo.uploadedBy)) return false;
@@ -632,6 +636,7 @@ export function PhotoViewerModal({
   const [captionDraft, setCaptionDraft] = useState("");
   const selectedIndex = selectedId ? photos.findIndex((photo) => photo.id === selectedId) : -1;
   const selectedPhoto = selectedIndex >= 0 ? photos[selectedIndex] : null;
+  const selectedPhotoTags = getPhotoTags(selectedPhoto?.tags);
   const selectedUploaderName = selectedPhoto?.uploaderName ?? "Unknown user";
   const selectedPhotoIsImage = selectedPhoto ? isPhotoImagePreviewable(selectedPhoto) : false;
   const selectedPhotoImageUrl = selectedPhoto && selectedPhotoIsImage ? getPhotoImageUrl(selectedPhoto) : "";
@@ -711,9 +716,9 @@ export function PhotoViewerModal({
 
                 <section className="space-y-2">
                   <span className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">Tags</span>
-                  {selectedPhoto.tags.length > 0 ? (
+                  {selectedPhotoTags.length > 0 ? (
                     <div className="flex flex-wrap gap-2">
-                      {selectedPhoto.tags.map((tag) => <Badge key={tag} variant="outline">#{tag}</Badge>)}
+                      {selectedPhotoTags.map((tag) => <Badge key={tag} variant="outline">#{tag}</Badge>)}
                     </div>
                   ) : (
                     <p className="text-sm text-muted-foreground">No tags</p>
@@ -852,6 +857,7 @@ export function PhotoGridTile({
 }) {
   const [tileRef, inViewport] = useInViewport<HTMLDivElement>();
   const category = displayPhotoCategory(photo);
+  const photoTags = getPhotoTags(photo.tags);
   const isImage = isPhotoImagePreviewable(photo);
 
   useEffect(() => {
@@ -889,10 +895,10 @@ export function PhotoGridTile({
           </Button>
         )}
       </div>
-      {photo.tags.length > 0 ? (
+      {photoTags.length > 0 ? (
         <div className="flex flex-wrap gap-1">
-          {photo.tags.slice(0, 3).map((tag) => <Badge key={tag} variant="outline" className="max-w-[7rem] truncate text-[10px]">#{tag}</Badge>)}
-          {photo.tags.length > 3 ? <Badge variant="outline" className="text-[10px]">+{photo.tags.length - 3}</Badge> : null}
+          {photoTags.slice(0, 3).map((tag) => <Badge key={tag} variant="outline" className="max-w-[7rem] truncate text-[10px]">#{tag}</Badge>)}
+          {photoTags.length > 3 ? <Badge variant="outline" className="text-[10px]">+{photoTags.length - 3}</Badge> : null}
         </div>
       ) : null}
     </div>

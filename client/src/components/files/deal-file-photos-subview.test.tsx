@@ -137,6 +137,16 @@ describe("DealFilePhotosSubview", () => {
     expect(document.body.textContent).toContain("#urgent");
   });
 
+  it("renders without crashing when a photo is missing tags", async () => {
+    currentPhotos = [{ ...mockPhotos[0], tags: undefined } as unknown as DealPhotoRecord];
+
+    const node = renderSubview();
+    await vi.waitFor(() => expect(node.textContent).toContain("Roof corner damage"));
+
+    expect(node.textContent).toContain("Damage");
+    expect(node.textContent).not.toContain("#roofing");
+  });
+
   it("filters by category from the shared filter bar", async () => {
     const node = renderSubview();
     await vi.waitFor(() => expect(node.textContent).toContain("Roof corner damage"));
