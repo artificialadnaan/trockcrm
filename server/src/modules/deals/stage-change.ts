@@ -8,6 +8,7 @@ import {
   tasks,
 } from "@trock-crm/shared/schema";
 import type * as schema from "@trock-crm/shared/schema";
+import { getHoldStateAtStageEntry } from "@trock-crm/shared/types";
 import { AppError } from "../../middleware/error-handler.js";
 import { DOMAIN_EVENTS } from "../../events/types.js";
 import {
@@ -252,12 +253,14 @@ export async function changeDealStage(
 
   // Use the already-locked deal row for duration calculation (no redundant fetch)
   const deal = currentDeal[0];
+  const stageChangedAt = new Date();
 
   // Step 5: Build deal update
   const dealUpdates: Record<string, any> = {
     stageId: targetStageId,
-    stageEnteredAt: new Date(),
+    stageEnteredAt: stageChangedAt,
   };
+  Object.assign(dealUpdates, getHoldStateAtStageEntry(deal, stageChangedAt));
   const shouldResetBidBoardOwnership =
     inferredOwnership.isBidBoardOwned &&
     Boolean(estimatingBoundary) &&

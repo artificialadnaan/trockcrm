@@ -40,6 +40,10 @@ function matchedDeal(overrides: Record<string, unknown> = {}) {
     stage_display_order: 1,
     stage_is_terminal: false,
     stage_entered_at: "2026-05-01T00:00:00.000Z",
+    on_hold: false,
+    on_hold_started_at: null,
+    on_hold_accumulated_seconds: 0,
+    on_hold_accumulated_seconds_at_stage_entry: 0,
     workflow_route: "normal",
     deal_number: "DFW-4-11826-ab",
     project_number: null,
@@ -80,8 +84,12 @@ describe("Bid Board sync stage writeback", () => {
         };
       }
       if (normalizedSql.includes("update office_dallas.deals") && normalizedSql.includes("stage_id = $1")) {
-        expect(params.slice(0, 6)).toEqual([
-          "stage-under-review",
+        expect(params[0]).toBe("stage-under-review");
+        expect(params[1]).toBeInstanceOf(Date);
+        expect(params.slice(2, 10)).toEqual([
+          null,
+          0,
+          0,
           "estimate_under_review",
           "estimating",
           "Estimate Under Review",
@@ -174,8 +182,12 @@ describe("Bid Board sync stage writeback", () => {
         };
       }
       if (normalizedSql.includes("update office_dallas.deals") && normalizedSql.includes("stage_id = $1")) {
-        expect(params.slice(0, 4)).toEqual([
-          "stage-service-estimating",
+        expect(params[0]).toBe("stage-service-estimating");
+        expect(params[1]).toBeInstanceOf(Date);
+        expect(params.slice(2, 8)).toEqual([
+          null,
+          0,
+          0,
           "service_estimating",
           "estimating",
           "Service - Estimating",
@@ -226,6 +238,9 @@ describe("Bid Board sync stage writeback", () => {
       }
       if (normalizedSql.includes("update office_dallas.deals") && normalizedSql.includes("bid_board_stage_slug = $2")) {
         expect(normalizedSql).not.toContain("stage_id = $1");
+        expect(normalizedSql).not.toContain("on_hold_started_at");
+        expect(normalizedSql).not.toContain("on_hold_accumulated_seconds");
+        expect(normalizedSql).not.toContain("on_hold_accumulated_seconds_at_stage_entry");
         expect(params).toEqual(["deal-123", "estimating", "estimating", "Estimate in Progress", "stage-estimating"]);
         return { rows: [], rowCount: 1 };
       }
@@ -268,10 +283,12 @@ describe("Bid Board sync stage writeback", () => {
         return { rows: [{ id: "stage-won", slug: "won", display_order: 7, is_terminal: true }], rowCount: 1 };
       }
       if (normalizedSql.includes("update office_dallas.deals") && normalizedSql.includes("stage_id = $1")) {
-        expect(normalizedSql).toContain("bid_board_stage_slug = $2::text");
-        expect(normalizedSql).toContain("case when $2::text = 'won'");
-        expect(normalizedSql).toContain("coalesce(bid_board_loss_outcome, $4::text)");
-        expect(params.slice(0, 4)).toEqual(["stage-won", "won", "terminal_won", "Won"]);
+        expect(normalizedSql).toContain("bid_board_stage_slug = $6::text");
+        expect(normalizedSql).toContain("case when $6::text = 'won'");
+        expect(normalizedSql).toContain("coalesce(bid_board_loss_outcome, $8::text)");
+        expect(params[0]).toBe("stage-won");
+        expect(params[1]).toBeInstanceOf(Date);
+        expect(params.slice(2, 8)).toEqual([null, 0, 0, "won", "terminal_won", "Won"]);
         return { rows: [{ id: "deal-123" }], rowCount: 1 };
       }
       if (normalizedSql.includes("insert into office_dallas.deal_stage_history")) return { rows: [], rowCount: 1 };

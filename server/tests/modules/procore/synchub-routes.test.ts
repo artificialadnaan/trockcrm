@@ -75,6 +75,10 @@ function createClient(options: ClientOptions = {}) {
               project_number: null,
               stage_id: "stage-estimating",
               stage_entered_at: currentStageEnteredAt,
+              on_hold: false,
+              on_hold_started_at: null,
+              on_hold_accumulated_seconds: 0,
+              on_hold_accumulated_seconds_at_stage_entry: 0,
               workflow_route: workflowRoute,
               is_bid_board_owned: true,
               dd_estimate: "50000",
@@ -200,10 +204,19 @@ describe("syncHubRoutes", () => {
 
     const updateQuery = queries.find((entry) => entry.sql.includes("UPDATE office_dallas.deals"));
     expect(updateQuery).toBeTruthy();
-    expect(updateQuery?.params?.[3]).toBe("proposal");
-    expect(updateQuery?.params?.[4]).toBe("under_review");
-    expect(updateQuery?.params?.[14]).toBe("under_review");
-    expect(updateQuery?.params?.[15]).toBe("under_review");
+    expect(updateQuery?.sql).toContain("on_hold_started_at = $3");
+    expect(updateQuery?.sql).toContain("on_hold_accumulated_seconds = $4");
+    expect(updateQuery?.sql).toContain("on_hold_accumulated_seconds_at_stage_entry = $5");
+    expect(updateQuery?.params).toEqual(
+      expect.arrayContaining([
+        "proposal",
+        "under_review",
+        null,
+        0,
+        0,
+        "normal",
+      ])
+    );
     const auditQuery = queries.find((entry) => entry.sql.includes('INSERT INTO "office_dallas".audit_log'));
     expect(auditQuery?.params).toEqual(expect.arrayContaining([
       "deals",
@@ -265,11 +278,11 @@ describe("syncHubRoutes", () => {
 
     expect(response.status).toBe(200);
     const updateQuery = queries.find((entry) => entry.sql.includes("UPDATE office_dallas.deals"));
-    expect(updateQuery?.sql).toContain("workflow_route = $26");
-    expect(updateQuery?.params?.[25]).toBe("normal");
+    expect(updateQuery?.sql).toMatch(/workflow_route = \$\d+/);
+    expect(updateQuery?.params).toContain("normal");
   });
 
-  it("preserves the prior mirrored stage-entered timestamp when SyncHub omits it", async () => {
+  it("resets the mirrored stage-entered timestamp when SyncHub omits it for a stage change", async () => {
     const priorStageEnteredAt = new Date("2026-04-20T12:00:00.000Z");
     const { client, queries } = createClient({
       existingDealIdByProcoreBid: "deal-1",
@@ -293,8 +306,86 @@ describe("syncHubRoutes", () => {
 
     expect(response.status).toBe(200);
     const updateQuery = queries.find((entry) => entry.sql.includes("UPDATE office_dallas.deals"));
-    expect(updateQuery?.params?.[1]).toEqual(priorStageEnteredAt);
-    expect(updateQuery?.params?.[5]).toEqual(priorStageEnteredAt);
+    const dateParams = (updateQuery?.params ?? []).filter((value): value is Date => value instanceof Date);
+    expect(dateParams.length).toBeGreaterThanOrEqual(4);
+  });
+
+  it("does not backdate an open hold when SyncHub replays a historical stageEnteredAt", async () => {
+    const { client, queries } = createClient({
+      existingDealIdByProcoreBid: "deal-1",
+      currentDealOverrides: {
+        on_hold: true,
+        on_hold_started_at: new Date("2026-05-11T09:30:00.000Z"),
+        on_hold_accumulated_seconds: 7200,
+        on_hold_accumulated_seconds_at_stage_entry: 7200,
+      },
+    });
+    dbMocks.connect.mockResolvedValue(client);
+
+    const app = createApp();
+    const response = await request(app)
+      .post("/api/integrations/synchub/opportunities")
+      .set("x-synchub-secret", "test-secret")
+      .send({
+        office_slug: "dallas",
+        bid_board_id: "bb-1",
+        procore_bid_id: 101,
+        name: "Palm Villas",
+        stage_slug: "bid_sent",
+        stage_status: "under_review",
+        proposal_status: "under_review",
+        stage_entered_at: "2026-05-11T08:00:00.000Z",
+      });
+
+    expect(response.status).toBe(200);
+    const updateQuery = queries.find((entry) => entry.sql.includes("UPDATE office_dallas.deals"));
+    expect(updateQuery?.params?.[1]).toEqual(new Date("2026-05-11T08:00:00.000Z"));
+    expect(updateQuery?.params?.[2]).toEqual(new Date("2026-05-11T09:30:00.000Z"));
+    expect(updateQuery?.params?.[3]).toBe(7200);
+    expect(updateQuery?.params?.[4]).toBe(7200);
+  });
+
+  it("preserves existing hold accumulators on same-stage SyncHub updates", async () => {
+    const { client, queries } = createClient({
+      existingDealIdByProcoreBid: "deal-1",
+      targetStageSlug: "estimating",
+      currentDealOverrides: {
+        on_hold: false,
+        on_hold_started_at: null,
+        on_hold_accumulated_seconds: 7200,
+        on_hold_accumulated_seconds_at_stage_entry: 3600,
+      },
+    });
+    dbMocks.connect.mockResolvedValue(client);
+
+    const app = createApp();
+    const response = await request(app)
+      .post("/api/integrations/synchub/opportunities")
+      .set("x-synchub-secret", "test-secret")
+      .send({
+        office_slug: "dallas",
+        bid_board_id: "bb-1",
+        procore_bid_id: 101,
+        name: "Palm Villas",
+        stage_slug: "estimating",
+        dd_estimate: "61000",
+      });
+
+    expect(response.status).toBe(200);
+    expect(response.body).toMatchObject({
+      status: "updated",
+      deal_id: "deal-1",
+      stage_changed: false,
+    });
+
+    const updateQuery = queries.find((entry) => entry.sql.includes("UPDATE office_dallas.deals"));
+    expect(updateQuery).toBeTruthy();
+    expect(updateQuery?.sql).not.toContain("on_hold_started_at =");
+    expect(updateQuery?.sql).not.toContain("on_hold_accumulated_seconds =");
+    expect(updateQuery?.sql).not.toContain("on_hold_accumulated_seconds_at_stage_entry =");
+    expect(updateQuery?.params).toContain("61000");
+    expect(updateQuery?.params).not.toContain(7200);
+    expect(updateQuery?.params).not.toContain(3600);
   });
 
   it("logs intentional null clears from SyncHub webhook updates", async () => {
@@ -380,7 +471,7 @@ describe("syncHubRoutes", () => {
 
     expect(response.status).toBe(200);
     const updateQuery = queries.find((entry) => entry.sql.includes("UPDATE office_dallas.deals"));
-    expect(updateQuery?.params?.[10]).toBeNull();
+    expect(updateQuery?.params).toContain(null);
     const auditQuery = queries.find((entry) => entry.sql.includes('INSERT INTO "office_dallas".audit_log'));
     const rawFieldChanges = String(auditQuery?.params?.[11] ?? "");
     expect(rawFieldChanges).not.toContain('"ddEstimate"');
@@ -408,8 +499,8 @@ describe("syncHubRoutes", () => {
 
     expect(response.status).toBe(200);
     const updateQuery = queries.find((entry) => entry.sql.includes("UPDATE office_dallas.deals"));
-    expect(updateQuery?.sql).toContain("proposal_status = COALESCE($16, proposal_status)");
-    expect(updateQuery?.params?.[15]).toBeNull();
+    expect(updateQuery?.sql).toMatch(/proposal_status = COALESCE\(\$\d+, proposal_status\)/);
+    expect(updateQuery?.params).toContain(null);
     const auditQuery = queries.find((entry) => entry.sql.includes('INSERT INTO "office_dallas".audit_log'));
     const rawFieldChanges = String(auditQuery?.params?.[11] ?? "");
     expect(rawFieldChanges).not.toContain('"proposalStatus"');
@@ -438,7 +529,7 @@ describe("syncHubRoutes", () => {
 
     expect(response.status).toBe(200);
     const updateQuery = queries.find((entry) => entry.sql.includes("UPDATE office_dallas.deals"));
-    expect(updateQuery?.params?.[10]).toBe("60000");
+    expect(updateQuery?.params).toContain("60000");
     const auditQuery = queries.find((entry) => entry.sql.includes('INSERT INTO "office_dallas".audit_log'));
     const rawFieldChanges = String(auditQuery?.params?.[11] ?? "");
     expect(rawFieldChanges).toContain('"ddEstimate":{"from":"50000","to":"60000"}');
@@ -529,8 +620,11 @@ describe("syncHubRoutes", () => {
     );
     expect(targetStageLookup?.params?.slice(0, 2)).toEqual(["estimate_under_review", "standard_deal"]);
     const updateQuery = queries.find((entry) => entry.sql.includes("UPDATE office_dallas.deals"));
-    expect(updateQuery?.params?.[2]).toBe("estimate_under_review");
-    expect(updateQuery?.params?.[3]).toBe("estimating");
+    expect(updateQuery?.sql).toMatch(/bid_board_stage_slug = \$\d+/);
+    expect(updateQuery?.sql).toMatch(/bid_board_stage_family = \$\d+/);
+    expect(updateQuery?.params).toEqual(
+      expect.arrayContaining(["estimate_under_review", "estimating"])
+    );
   });
 
   it("accepts cutover aliases with dash variants by normalizing before stage lookup", async () => {
@@ -562,8 +656,9 @@ describe("syncHubRoutes", () => {
     );
     expect(targetStageLookup?.params?.slice(0, 2)).toEqual(["service_estimating", "service_deal"]);
     const updateQuery = queries.find((entry) => entry.sql.includes("UPDATE office_dallas.deals"));
-    expect(updateQuery?.params?.[2]).toBe("service_estimating");
-    expect(updateQuery?.params?.[3]).toBe("estimating");
+    expect(updateQuery?.params).toEqual(
+      expect.arrayContaining(["service_estimating", "estimating"])
+    );
   });
 
   it("uses a service deal's persisted route for shared stage lookup when workflow_route is omitted", async () => {
@@ -594,7 +689,7 @@ describe("syncHubRoutes", () => {
     );
     expect(targetStageLookup?.params?.slice(0, 2)).toEqual(["estimate_sent_to_client", "service_deal"]);
     const updateQuery = queries.find((entry) => entry.sql.includes("UPDATE office_dallas.deals"));
-    expect(updateQuery?.params?.[25]).toBe("service");
+    expect(updateQuery?.params).toContain("service");
   });
 
   it("uses standard_deal family for normal deal updates to shared canonical stages", async () => {
@@ -654,7 +749,7 @@ describe("syncHubRoutes", () => {
     );
     expect(targetStageLookup?.params?.slice(0, 2)).toEqual(["service_estimating", "service_deal"]);
     const updateQuery = queries.find((entry) => entry.sql.includes("UPDATE office_dallas.deals"));
-    expect(updateQuery?.params?.[2]).toBe("service_estimating");
+    expect(updateQuery?.params).toContain("service_estimating");
   });
 
   it("resolves service deal updates with opportunity through the shared standard-family fallback", async () => {

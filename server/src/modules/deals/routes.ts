@@ -1465,6 +1465,9 @@ function validateDealPayload(body: Record<string, unknown>): void {
       throw new AppError(400, "winProbability must be between 0 and 100");
     }
   }
+  if (body.onHold !== undefined && typeof body.onHold !== "boolean") {
+    throw new AppError(400, "onHold must be a boolean");
+  }
 }
 
 function normalizeServiceCandidate(value: unknown) {

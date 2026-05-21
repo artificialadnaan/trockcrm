@@ -40,6 +40,10 @@ type FakeDeal = {
   dealNumber: string;
   stageId: string;
   stageEnteredAt: Date;
+  onHold: boolean;
+  onHoldStartedAt: Date | null;
+  onHoldAccumulatedSeconds: number;
+  onHoldAccumulatedSecondsAtStageEntry: number;
   workflowRoute: "normal" | "service";
   assignedRepId: string;
   isBidBoardOwned: boolean;
@@ -83,6 +87,10 @@ function createTenantDb(overrides?: Partial<FakeDeal>) {
         dealNumber: "TR-2026-0001",
         stageId: "stage-dd",
         stageEnteredAt: new Date("2026-04-20T10:00:00.000Z"),
+        onHold: false,
+        onHoldStartedAt: null,
+        onHoldAccumulatedSeconds: 0,
+        onHoldAccumulatedSecondsAtStageEntry: 0,
         workflowRoute: "normal" as const,
         assignedRepId: "user-1",
         isBidBoardOwned: false,
@@ -302,6 +310,105 @@ describe("changeDealStage", () => {
         toStageId: "stage-a",
       }),
     ]);
+    vi.useRealTimers();
+  });
+
+  it("snapshots the lifetime hold accumulator at stage entry when moving while active", async () => {
+    vi.useFakeTimers();
+    const tenantDb = createTenantDb({
+      stageId: "stage-a",
+      stageEnteredAt: new Date("2026-05-01T12:00:00.000Z"),
+      onHold: false,
+      onHoldStartedAt: null,
+      onHoldAccumulatedSeconds: 7200,
+      onHoldAccumulatedSecondsAtStageEntry: 1800,
+      ddEstimate: null,
+      bidEstimate: null,
+    });
+    const stageA = {
+      id: "stage-a",
+      name: "Sales Validation",
+      slug: "sales_validation",
+      isTerminal: false,
+      displayOrder: 0,
+    };
+    const stageB = {
+      id: "stage-b",
+      name: "Opportunity",
+      slug: "opportunity",
+      isTerminal: false,
+      displayOrder: 1,
+    };
+
+    vi.mocked(validateStageGate).mockResolvedValue({
+      allowed: true,
+      isBackwardMove: false,
+      requiresOverride: false,
+      targetStage: stageB,
+      currentStage: stageA,
+    } as never);
+
+    vi.setSystemTime(new Date("2026-05-02T09:00:00.000Z"));
+    const result = await changeDealStage(tenantDb as never, {
+      dealId: "deal-1",
+      targetStageId: "stage-b",
+      userId: "user-1",
+      userRole: "director",
+    });
+
+    expect(result.deal.stageEnteredAt).toEqual(new Date("2026-05-02T09:00:00.000Z"));
+    expect(result.deal.onHoldAccumulatedSecondsAtStageEntry).toBe(7200);
+    vi.useRealTimers();
+  });
+
+  it("splits an active hold at the stage boundary so the new stage starts with a clean hold clock", async () => {
+    vi.useFakeTimers();
+    const tenantDb = createTenantDb({
+      stageId: "stage-a",
+      stageEnteredAt: new Date("2026-05-01T12:00:00.000Z"),
+      onHold: true,
+      onHoldStartedAt: new Date("2026-05-01T20:00:00.000Z"),
+      onHoldAccumulatedSeconds: 3600,
+      onHoldAccumulatedSecondsAtStageEntry: 1800,
+      ddEstimate: null,
+      bidEstimate: null,
+    });
+    const stageA = {
+      id: "stage-a",
+      name: "Sales Validation",
+      slug: "sales_validation",
+      isTerminal: false,
+      displayOrder: 0,
+    };
+    const stageB = {
+      id: "stage-b",
+      name: "Opportunity",
+      slug: "opportunity",
+      isTerminal: false,
+      displayOrder: 1,
+    };
+
+    vi.mocked(validateStageGate).mockResolvedValue({
+      allowed: true,
+      isBackwardMove: false,
+      requiresOverride: false,
+      targetStage: stageB,
+      currentStage: stageA,
+    } as never);
+
+    vi.setSystemTime(new Date("2026-05-02T09:00:00.000Z"));
+    const result = await changeDealStage(tenantDb as never, {
+      dealId: "deal-1",
+      targetStageId: "stage-b",
+      userId: "user-1",
+      userRole: "director",
+    });
+
+    expect(result.deal.onHold).toBe(true);
+    expect(result.deal.stageEnteredAt).toEqual(new Date("2026-05-02T09:00:00.000Z"));
+    expect(result.deal.onHoldStartedAt).toEqual(new Date("2026-05-02T09:00:00.000Z"));
+    expect(result.deal.onHoldAccumulatedSeconds).toBe(3600 + 13 * 60 * 60);
+    expect(result.deal.onHoldAccumulatedSecondsAtStageEntry).toBe(3600 + 13 * 60 * 60);
     vi.useRealTimers();
   });
 

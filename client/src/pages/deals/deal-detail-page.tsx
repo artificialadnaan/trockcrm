@@ -61,7 +61,12 @@ import { LeadForm } from "@/components/leads/lead-form";
 import { LeadTimelineTab } from "@/components/leads/lead-timeline-tab";
 import { StageChangeDialog } from "@/components/deals/stage-change-dialog";
 import { TaskCreateDialog } from "@/components/tasks/task-create-dialog";
-import { useDealDetail, deleteDeal as apiDeleteDeal, type DealDetail } from "@/hooks/use-deals";
+import {
+  useDealDetail,
+  deleteDeal as apiDeleteDeal,
+  updateDeal as apiUpdateDeal,
+  type DealDetail,
+} from "@/hooks/use-deals";
 import { useLeadDetail } from "@/hooks/use-leads";
 import { usePipelineStages } from "@/hooks/use-pipeline-config";
 import { useAuth } from "@/lib/auth";
@@ -251,6 +256,7 @@ export function DealDetailPage() {
   const [rfpReadinessLoading, setRfpReadinessLoading] = useState(false);
   const [rfpReadinessRefreshKey, setRfpReadinessRefreshKey] = useState(0);
   const [watchPending, setWatchPending] = useState(false);
+  const [holdTogglePending, setHoldTogglePending] = useState(false);
   const currentStage = stages.find((s) => s.id === deal?.stageId);
   const isDirectorOrAdmin = user?.role === "director" || user?.role === "admin";
   const viewerOwnsDeal = deal?.assignedRepId === user?.id;
@@ -366,6 +372,24 @@ export function DealDetailPage() {
       alert(err instanceof Error ? err.message : "Failed to retry RFP delivery");
     } finally {
       setRfpRetrying(false);
+    }
+  };
+
+  const handleHoldToggle = async () => {
+    if (!deal || holdTogglePending) return;
+    setHoldTogglePending(true);
+    try {
+      await apiUpdateDeal(deal.id, { onHold: !deal.onHold });
+      toast.success(deal.onHold ? "Deal resumed from hold" : "Deal placed on hold");
+      try {
+        await refetch();
+      } catch {
+        toast.info("On Hold status updated. Refresh the page to see the latest detail state.");
+      }
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Failed to update On Hold status");
+    } finally {
+      setHoldTogglePending(false);
     }
   };
 
@@ -639,13 +663,22 @@ export function DealDetailPage() {
       {formatDealType(deal)}
     </span>
   );
-  const statusBadge = isBidBoardOwned ? (
-    <span className="inline-flex items-center gap-1 rounded-full bg-amber-50 px-2 py-1 text-[10px] font-black uppercase tracking-[0.16em] text-amber-700">
-      <Lock className="h-3 w-3" />
-      {bidBoardStageLabel(deal)}
-    </span>
-  ) : (
-    <DealStageBadge stageId={deal.stageId} />
+  const statusBadge = (
+    <>
+      {isBidBoardOwned ? (
+        <span className="inline-flex items-center gap-1 rounded-full bg-amber-50 px-2 py-1 text-[10px] font-black uppercase tracking-[0.16em] text-amber-700">
+          <Lock className="h-3 w-3" />
+          {bidBoardStageLabel(deal)}
+        </span>
+      ) : (
+        <DealStageBadge stageId={deal.stageId} />
+      )}
+      {deal.onHold ? (
+        <span className="inline-flex items-center rounded-full bg-slate-900 px-2 py-1 text-[10px] font-black uppercase tracking-[0.16em] text-white">
+          On Hold
+        </span>
+      ) : null}
+    </>
   );
   const headerDisplayNumber = formatDealDisplayNumber(deal);
   const subtitleSlot = (
@@ -701,6 +734,11 @@ export function DealDetailPage() {
       <Button variant="outline" size="sm" onClick={handleWatchToggle} disabled={watchPending}>
         {deal.isWatching ? "Watching" : "Watch this deal"}
       </Button>
+      {viewerOwnsDeal ? (
+        <Button variant={deal.onHold ? "default" : "outline"} size="sm" onClick={handleHoldToggle} disabled={holdTogglePending}>
+          {deal.onHold ? "Resume deal" : "Put on hold"}
+        </Button>
+      ) : null}
       {viewerOwnsDeal ? (
         <Link
           to={`/deals/${deal.id}/edit`}

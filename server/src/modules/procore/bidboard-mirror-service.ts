@@ -1,4 +1,8 @@
-import type { WorkflowFamily, WorkflowRoute } from "@trock-crm/shared/types";
+import {
+  getHoldStateAtStageEntry,
+  type WorkflowFamily,
+  type WorkflowRoute,
+} from "@trock-crm/shared/types";
 
 import { AppError } from "../../middleware/error-handler.js";
 import {
@@ -91,6 +95,10 @@ type MirrorableDeal = {
   id: string;
   stageId: string;
   stageEnteredAt: Date | string | null;
+  onHold?: boolean | null;
+  onHoldStartedAt?: Date | string | null;
+  onHoldAccumulatedSeconds?: number | null;
+  onHoldAccumulatedSecondsAtStageEntry?: number | null;
   workflowRoute: WorkflowRoute;
   isBidBoardOwned: boolean;
   proposalStatus: string | null;
@@ -362,7 +370,9 @@ export function buildBidBoardMirrorUpdate(input: {
   const payloadStageEnteredAt = parseOptionalDate(input.payload.stageEnteredAt);
   const stageChanged = input.deal.stageId !== input.targetStage.id;
   const stageEnteredAt =
-    payloadStageEnteredAt ?? (stageChanged ? now : parseOptionalDate(input.deal.stageEnteredAt)) ?? now;
+    stageChanged
+      ? payloadStageEnteredAt ?? now
+      : parseOptionalDate(input.deal.stageEnteredAt) ?? now;
   const stageExitedAt = parseOptionalDate(input.payload.stageExitedAt);
   const mirrorSourceEnteredAt = parseOptionalDate(input.payload.mirrorSourceEnteredAt);
   const mirrorSourceExitedAt = parseOptionalDate(input.payload.mirrorSourceExitedAt);
@@ -385,6 +395,9 @@ export function buildBidBoardMirrorUpdate(input: {
     readOnlySyncedAt: now,
     updatedAt: now,
   };
+  if (stageChanged) {
+    Object.assign(updates, getHoldStateAtStageEntry(input.deal, stageEnteredAt));
+  }
 
   if (input.payload.ddEstimate !== undefined) {
     updates.ddEstimate = input.payload.ddEstimate;
