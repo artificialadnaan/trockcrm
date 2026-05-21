@@ -2,6 +2,7 @@ import { useMemo } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import { ArrowRight, Calendar, Mail, Phone, Plus, Search } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { MetricCard } from "@/components/shared/metric-card";
 import { ScopeToggle, type ScopeToggleOption } from "@/components/shared/scope-toggle";
@@ -33,9 +34,15 @@ export function buildLeadIntakePath(leadId: string) {
   return `/leads/${leadId}?focus=qualification`;
 }
 
-export function buildLeadStageNavigationPath(stageId: string, scope: PipelineScope, assignedRepId?: string | null) {
+export function buildLeadStageNavigationPath(
+  stageId: string,
+  scope: PipelineScope,
+  assignedRepId?: string | null,
+  search?: string | null
+) {
   const params = new URLSearchParams({ scope });
   if (scope !== "mine" && assignedRepId) params.set("assignedRepId", assignedRepId);
+  if (search?.trim()) params.set("search", search);
   return `/leads/stages/${stageId}?${params.toString()}`;
 }
 
@@ -229,16 +236,18 @@ function LeadListPageContent({ role, userId }: { role: string; userId: string })
   });
   const scopeOptions = SCOPE_OPTIONS;
   const bucket = searchParams.get("bucket");
+  const search = searchParams.get("search") ?? "";
   const selectedOwnerId = role === "rep" || scope === "mine" ? "" : searchParams.get("assignedRepId") ?? "";
   const { assignees } = useTaskAssignees();
   const selectedOwnerLabel = selectedOwnerId
     ? assignees.find((assignee) => assignee.id === selectedOwnerId)?.displayName ?? "Selected rep"
     : "All reps";
-  const { board, loading, error } = useLeadBoard(scope, selectedOwnerId || undefined);
+  const { board, loading, error } = useLeadBoard(scope, selectedOwnerId || undefined, search || undefined);
   const { leads } = useLeads({
     status: "open",
     isActive: true,
     scope,
+    ...(search ? { search } : {}),
     ...(selectedOwnerId ? { assignedRepId: selectedOwnerId } : {}),
   });
 
@@ -275,6 +284,13 @@ function LeadListPageContent({ role, userId }: { role: string; userId: string })
     if (!ownerId || ownerId === "__all__") next.delete("assignedRepId");
     else next.set("assignedRepId", ownerId);
     setSearchParams(next);
+  };
+
+  const updateSearch = (value: string) => {
+    const next = new URLSearchParams(searchParams);
+    if (value.trim()) next.set("search", value);
+    else next.delete("search");
+    setSearchParams(next, { replace: true });
   };
 
   return (
@@ -331,6 +347,19 @@ function LeadListPageContent({ role, userId }: { role: string; userId: string })
         <MetricCard eyebrow="Stale leads" value={String(staleLeadCount)} badge="10d+" caption="Needs touch" tone={staleLeadCount > 0 ? "red" : "white"} accent="red" />
       </div>
 
+      <label className="block max-w-xl space-y-2">
+        <span className="text-[11px] font-black uppercase tracking-[0.16em] text-slate-500">Search</span>
+        <div className="relative">
+          <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" />
+          <Input
+            value={search}
+            onChange={(event) => updateSearch(event.target.value)}
+            placeholder="Search leads"
+            className="pl-9"
+          />
+        </div>
+      </label>
+
       {error ? (
         <div className="rounded-lg border border-brand-red/20 bg-brand-red/5 p-4 text-sm font-semibold text-brand-red">
           {error}
@@ -362,7 +391,9 @@ function LeadListPageContent({ role, userId }: { role: string; userId: string })
                   stage={column.stage}
                   count={column.count}
                   cards={column.cards}
-                  onOpenStage={(stageId) => navigate(buildLeadStageNavigationPath(stageId, scope, selectedOwnerId))}
+                  onOpenStage={(stageId) =>
+                    navigate(buildLeadStageNavigationPath(stageId, scope, selectedOwnerId, search))
+                  }
                   onOpenRecord={(leadId) => navigate(`/leads/${leadId}`)}
                 />
               ))}

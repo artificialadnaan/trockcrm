@@ -126,6 +126,7 @@ function readBoardInput(req: Parameters<typeof router.get>[1] extends never ? ne
     activeOfficeId: req.user!.activeOfficeId ?? req.user!.officeId,
     scope,
     assignedRepId: req.query.assignedRepId as string | undefined,
+    search: req.query.search as string | undefined,
   };
 }
 
