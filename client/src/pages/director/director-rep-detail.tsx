@@ -155,7 +155,7 @@ export function DirectorRepDetail() {
       {/* KPI Cards */}
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-6 gap-4">
         <StatCard
-          title="Earned Commission (12M)"
+          title="Earned Commission (Rolling 12M)"
           value={formatCurrency(data.commissionSummary.totalEarnedCommission)}
           subtitle={
             data.commissionSummary.overrideEarnedCommission > 0
@@ -165,9 +165,9 @@ export function DirectorRepDetail() {
           icon={<DollarSign className="h-5 w-5" />}
         />
         <StatCard
-          title="Active Deals"
+          title="Active Deals (Current)"
           value={data.activeDeals.count}
-          subtitle={formatCurrency(data.activeDeals.totalValue)}
+          subtitle={`${formatCurrency(data.activeDeals.totalValue)} open now`}
           icon={<Briefcase className="h-5 w-5" />}
         />
         <StatCard
@@ -189,9 +189,9 @@ export function DirectorRepDetail() {
           icon={<Trophy className="h-5 w-5" />}
         />
         <StatCard
-          title="Follow-up Compliance"
+          title={`Follow-up Compliance · ${periodLabel}`}
           value={`${data.followUpCompliance.complianceRate}%`}
-          subtitle={`${data.followUpCompliance.onTime}/${data.followUpCompliance.total}`}
+          subtitle={`${data.followUpCompliance.onTime}/${data.followUpCompliance.total} on time`}
           icon={<Target className="h-5 w-5" />}
         />
       </div>

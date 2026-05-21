@@ -973,6 +973,139 @@ describe("Dashboard Service", () => {
       expect(activityQueryText).toContain("2026-05-08");
       expect(activityQueryText).toContain("2026-05-15");
     });
+
+    it("passes the selected preset range through to follow-up compliance instead of hard-coding ytd", async () => {
+      const { getRepDetail } = await import("../../../src/modules/dashboard/service.js");
+      const tenantDb = createMockTenantDb([
+        [{ count: "0" }],
+        [{ count: "0", total_value: "0" }],
+        [{ overdue: "0", today: "0" }],
+        [{ calls: "0", emails: "0", meetings: "0", notes: "0", total: "0" }],
+        [{ total: "7", on_time: "6" }],
+        [],
+        [],
+        [],
+        [],
+      ]);
+
+      await getRepDetail(tenantDb, "rep-1", { from: "2026-04-01", to: "2026-04-30" });
+
+      const followUpQueryText = tenantDb.execute.mock.calls
+        .map(([query]: [unknown]) => extractSqlText(query).toLowerCase())
+        .find((text: string) => text.includes("from tasks t") && text.includes("t.type = 'follow_up'")) ?? "";
+
+      expect(followUpQueryText).toContain("2026-04-01");
+      expect(followUpQueryText).toContain("2026-04-30");
+    });
+
+    it("anchors earned commission to a rolling 12-month window ending at the selected preset end date", async () => {
+      const { getRepDetail } = await import("../../../src/modules/dashboard/service.js");
+      const tenantDb = createMockTenantDb([
+        [{ count: "0" }],
+        [{ count: "0", total_value: "0" }],
+        [{ overdue: "0", today: "0" }],
+        [{ calls: "0", emails: "0", meetings: "0", notes: "0", total: "0" }],
+        [{ total: "0", on_time: "0" }],
+        [],
+        [],
+        [],
+        [],
+      ]);
+
+      await getRepDetail(tenantDb, "rep-1", { from: "2026-04-01", to: "2026-04-30" });
+
+      const commissionQueryTexts = tenantDb.execute.mock.calls
+        .map(([query]: [unknown]) => extractSqlText(query).toLowerCase())
+        .filter((text: string) =>
+          text.includes("rep_user_id") &&
+          text.includes("source_value_amount") &&
+          text.includes("earned_commission")
+        );
+
+      expect(commissionQueryTexts.length).toBeGreaterThan(0);
+      for (const text of commissionQueryTexts) {
+        expect(text).toContain("2025-05-01");
+        expect(text).toContain("2026-04-30");
+        expect(text).not.toContain("2026-04-01");
+      }
+    });
+
+    it("clamps leap-day rolling commission windows to the previous year's last valid day before adding one day", async () => {
+      const { getRepDetail } = await import("../../../src/modules/dashboard/service.js");
+      vi.useFakeTimers();
+      vi.setSystemTime(new Date("2024-02-29T12:00:00.000Z"));
+      const tenantDb = createMockTenantDb([
+        [{ count: "0" }],
+        [{ count: "0", total_value: "0" }],
+        [{ overdue: "0", today: "0" }],
+        [{ calls: "0", emails: "0", meetings: "0", notes: "0", total: "0" }],
+        [{ total: "0", on_time: "0" }],
+        [],
+        [],
+        [],
+        [],
+      ]);
+
+      try {
+        await getRepDetail(tenantDb, "rep-1", { from: "2024-02-01", to: "2024-02-29" });
+      } finally {
+        vi.useRealTimers();
+      }
+
+      const commissionQueryTexts = tenantDb.execute.mock.calls
+        .map(([query]: [unknown]) => extractSqlText(query).toLowerCase())
+        .filter((text: string) =>
+          text.includes("rep_user_id") &&
+          text.includes("source_value_amount") &&
+          text.includes("earned_commission")
+        );
+
+      expect(commissionQueryTexts.length).toBeGreaterThan(0);
+      for (const text of commissionQueryTexts) {
+        expect(text).toContain("2023-03-01");
+        expect(text).toContain("2024-02-29");
+        expect(text).not.toContain("2023-03-02");
+      }
+    });
+  });
+
+  describe("shared commission semantics", () => {
+    it("preserves the rep self-dashboard commission range semantics outside the director detail override", async () => {
+      const { getRepDashboard } = await import("../../../src/modules/dashboard/service.js");
+      vi.useFakeTimers();
+      vi.setSystemTime(new Date("2026-05-21T12:00:00.000Z"));
+      const tenantDb = createMockTenantDb([
+        [{ count: "0" }],
+        [{ count: "0", total_value: "0" }],
+        [{ overdue: "0", today: "0" }],
+        [{ calls: "0", emails: "0", meetings: "0", notes: "0", total: "0" }],
+        [{ total: "0", on_time: "0" }],
+        [],
+        [],
+        [],
+        [],
+      ]);
+
+      try {
+        await getRepDashboard(tenantDb, "rep-1", { range: "month" });
+      } finally {
+        vi.useRealTimers();
+      }
+
+      const commissionQueryTexts = tenantDb.execute.mock.calls
+        .map(([query]: [unknown]) => extractSqlText(query).toLowerCase())
+        .filter((text: string) =>
+          text.includes("rep_user_id") &&
+          text.includes("source_value_amount") &&
+          text.includes("earned_commission")
+        );
+
+      expect(commissionQueryTexts.length).toBeGreaterThan(0);
+      for (const text of commissionQueryTexts) {
+        expect(text).toContain("2026-05-01");
+        expect(text).toContain("2026-05-21");
+      }
+    });
   });
 
   describe("RepDashboardData shape", () => {

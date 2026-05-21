@@ -116,6 +116,9 @@ describe("DirectorRepDetail", () => {
     expect(html).toContain("Calls logged in this quarter");
     expect(html).toContain("Meetings logged in this quarter");
     expect(html).toContain("Win Rate · QTD");
+    expect(html).toContain("Active Deals (Current)");
+    expect(html).toContain("Earned Commission (Rolling 12M)");
+    expect(html).toContain("Follow-up Compliance · QTD");
   });
 
   it("defaults to ytd labels when no preset query parameter is present", () => {
