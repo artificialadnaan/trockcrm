@@ -1,8 +1,9 @@
-import { sql } from "drizzle-orm";
+import { sql, type SQL } from "drizzle-orm";
 import type { NodePgDatabase } from "drizzle-orm/node-postgres";
 import type * as schema from "@trock-crm/shared/schema";
 import type { PhotoCategory, UserRole } from "@trock-crm/shared/types";
 import { AppError } from "../../middleware/error-handler.js";
+import { generateDownloadUrl, generateMockDownloadUrl, isR2Configured } from "../../lib/r2-client.js";
 import {
   confirmUpload,
   getFileDownloadUrl,
@@ -20,6 +21,8 @@ const PHOTO_ADDRESS_SOURCES = new Set(["exif", "live_gps"]);
 const UUID_PATTERN =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const LEGACY_PENDING_LINKAGE_COLUMNS = ["contact_id", "procore_project_id", "change_order_id"] as const;
+const LEGACY_LINKAGE_FALLBACK_SAVEPOINT = "field_photo_legacy_linkage_fallback";
+const PENDING_LINKAGE_PROBE_SAVEPOINT = "field_photo_pending_linkage_probe";
 
 function extensionForContentType(contentType: string): string {
   switch (contentType) {
@@ -141,6 +144,96 @@ function isMissingLegacyPendingLinkageColumnError(error: unknown): boolean {
   const code = "code" in error ? String((error as { code?: unknown }).code ?? "") : "";
   const message = error instanceof Error ? error.message : String(error);
   return code === "42703" && LEGACY_PENDING_LINKAGE_COLUMNS.some((column) => message.includes(column));
+}
+
+function createLegacyPendingLinkageExecutor(tenantDb: TenantDb) {
+  let linkageModePromise: Promise<"modern" | "legacy" | null> | undefined;
+
+  const detectPendingLinkageMode = async (): Promise<"modern" | "legacy" | null> => {
+    if (!linkageModePromise) {
+      linkageModePromise = (async () => {
+        // The request uses a single transaction-bound client. If this schema
+        // probe fails, Postgres aborts that transaction unless we isolate it
+        // behind its own savepoint before falling back to the legacy query path.
+        await tenantDb.execute(sql.raw(`SAVEPOINT ${PENDING_LINKAGE_PROBE_SAVEPOINT}`));
+        try {
+          const result = await tenantDb.execute(sql`
+            SELECT COUNT(*)::int AS column_count
+            FROM information_schema.columns
+            WHERE table_schema = current_schema()
+              AND table_name = 'files'
+              AND column_name IN (
+                ${LEGACY_PENDING_LINKAGE_COLUMNS[0]},
+                ${LEGACY_PENDING_LINKAGE_COLUMNS[1]},
+                ${LEGACY_PENDING_LINKAGE_COLUMNS[2]}
+              )
+          `);
+          await tenantDb.execute(sql.raw(`RELEASE SAVEPOINT ${PENDING_LINKAGE_PROBE_SAVEPOINT}`));
+          const row = ((result as any).rows ?? result)?.[0];
+          return Number(row?.column_count ?? 0) === LEGACY_PENDING_LINKAGE_COLUMNS.length ? "modern" : "legacy";
+        } catch {
+          await tenantDb.execute(sql.raw(`ROLLBACK TO SAVEPOINT ${PENDING_LINKAGE_PROBE_SAVEPOINT}`));
+          await tenantDb.execute(sql.raw(`RELEASE SAVEPOINT ${PENDING_LINKAGE_PROBE_SAVEPOINT}`));
+          linkageModePromise = undefined;
+          return null;
+        }
+      })();
+    }
+
+    return linkageModePromise;
+  };
+
+  const cachePendingLinkageMode = (mode: "modern" | "legacy"): void => {
+    linkageModePromise = Promise.resolve(mode);
+  };
+
+  return async (
+    // Keep the request transaction usable on legacy schemas by isolating the
+    // probing query that may reference columns this tenant does not yet have.
+    primaryQuery: SQL,
+    fallbackQuery: SQL,
+  ) => {
+    const linkageMode = await detectPendingLinkageMode();
+    if (linkageMode === "modern") {
+      return tenantDb.execute(primaryQuery);
+    }
+    if (linkageMode === "legacy") {
+      return tenantDb.execute(fallbackQuery);
+    }
+
+    await tenantDb.execute(sql.raw(`SAVEPOINT ${LEGACY_LINKAGE_FALLBACK_SAVEPOINT}`));
+
+    try {
+      const result = await tenantDb.execute(primaryQuery);
+      await tenantDb.execute(sql.raw(`RELEASE SAVEPOINT ${LEGACY_LINKAGE_FALLBACK_SAVEPOINT}`));
+      cachePendingLinkageMode("modern");
+      return result;
+    } catch (error) {
+      await tenantDb.execute(sql.raw(`ROLLBACK TO SAVEPOINT ${LEGACY_LINKAGE_FALLBACK_SAVEPOINT}`));
+      await tenantDb.execute(sql.raw(`RELEASE SAVEPOINT ${LEGACY_LINKAGE_FALLBACK_SAVEPOINT}`));
+
+      if (!isMissingLegacyPendingLinkageColumnError(error)) throw error;
+      cachePendingLinkageMode("legacy");
+      return tenantDb.execute(fallbackQuery);
+    }
+  };
+}
+
+async function buildFieldPhotoImageUrl(file: {
+  r2Key: string | null;
+  displayName: string;
+  fileExtension: string | null;
+}): Promise<string | null> {
+  if (!file.r2Key) {
+    return null;
+  }
+
+  const filename = `${file.displayName}${file.fileExtension ?? ""}`;
+  if (isR2Configured()) {
+    return generateDownloadUrl(file.r2Key, 3600, filename);
+  }
+
+  return generateMockDownloadUrl(file.r2Key);
 }
 
 export async function requestFieldPhotoUploadUrl(
@@ -268,9 +361,9 @@ export async function listPendingFieldPhotos(
     userRole: UserRole;
   }
 ) {
-  let result;
-  try {
-    result = await tenantDb.execute(sql`
+  const executeWithLegacyPendingLinkageFallback = createLegacyPendingLinkageExecutor(tenantDb);
+  const result = await executeWithLegacyPendingLinkageFallback(
+    sql`
     SELECT
       f.id,
       f.category,
@@ -280,6 +373,7 @@ export async function listPendingFieldPhotos(
       f.mime_type,
       f.file_size_bytes,
       f.file_extension,
+      f.r2_key,
       f.deal_id,
       f.lead_id,
       f.description,
@@ -306,10 +400,8 @@ export async function listPendingFieldPhotos(
       AND f.change_order_id IS NULL
     ORDER BY COALESCE(f.taken_at, f.created_at) DESC
     LIMIT 50
-  `);
-  } catch (error) {
-    if (!isMissingLegacyPendingLinkageColumnError(error)) throw error;
-    result = await tenantDb.execute(sql`
+  `,
+    sql`
       SELECT
         f.id,
         f.category,
@@ -319,6 +411,7 @@ export async function listPendingFieldPhotos(
         f.mime_type,
         f.file_size_bytes,
         f.file_extension,
+        f.r2_key,
         f.deal_id,
         f.lead_id,
         f.description,
@@ -342,12 +435,18 @@ export async function listPendingFieldPhotos(
         AND f.lead_id IS NULL
       ORDER BY COALESCE(f.taken_at, f.created_at) DESC
       LIMIT 50
-    `);
-  }
+    `,
+  );
 
   const rows = (result as any).rows ?? result;
   const photos = await Promise.all(rows.map(async (row: any) => {
-    const imageUrl = (await getFileDownloadUrl(tenantDb, row.id)).url;
+    // URL signing only touches R2/local helpers, so it is safe to parallelize.
+    // Keep tenantDb queries serialized on the request-bound Postgres client.
+    const imageUrl = await buildFieldPhotoImageUrl({
+      r2Key: row.r2_key ?? null,
+      displayName: row.display_name,
+      fileExtension: row.file_extension ?? null,
+    });
     return toFieldUploadedPhoto({
       id: row.id,
       category: row.category,
@@ -390,6 +489,7 @@ export async function assignPendingFieldPhotoTarget(
     opportunityId?: string;
   }
 ) {
+  const executeWithLegacyPendingLinkageFallback = createLegacyPendingLinkageExecutor(tenantDb);
   const normalizedTarget = normalizeCaptureTargetIds(input);
   assertValidUuid(input.photoId, "photoId");
   assertValidCaptureTargetIds(normalizedTarget);
@@ -401,48 +501,86 @@ export async function assignPendingFieldPhotoTarget(
     userRole: access.userRole,
   });
 
-  const existingResult = await tenantDb.execute(sql`
-    SELECT
-      f.id,
-      f.category,
-      f.photo_category,
-      f.subcategory,
-      f.display_name,
-      f.mime_type,
-      f.file_size_bytes,
-      f.file_extension,
-      f.deal_id,
-      f.lead_id,
-      f.description,
-      f.tags,
-      f.taken_at,
-      f.created_at,
-      f.uploaded_by,
-      f.latitude,
-      f.longitude,
-      f.address,
-      f.address_source,
-      f.geocoded_at,
-      f.procore_sync_status,
-      f.deleted_at
-    FROM files f
-    WHERE f.id = ${input.photoId}::uuid
-      AND f.category = 'photo'
-      AND f.is_active = true
-      AND f.deleted_at IS NULL
-      AND f.uploaded_by = ${access.userId}::uuid
-      AND f.deal_id IS NULL
-      AND f.lead_id IS NULL
-    LIMIT 1
-  `);
+  const existingResult = await executeWithLegacyPendingLinkageFallback(
+    sql`
+      SELECT
+        f.id,
+        f.category,
+        f.photo_category,
+        f.subcategory,
+        f.display_name,
+        f.mime_type,
+        f.file_size_bytes,
+        f.file_extension,
+        f.deal_id,
+        f.lead_id,
+        f.description,
+        f.tags,
+        f.taken_at,
+        f.created_at,
+        f.uploaded_by,
+        f.latitude,
+        f.longitude,
+        f.address,
+        f.address_source,
+        f.geocoded_at,
+        f.procore_sync_status,
+        f.deleted_at
+      FROM files f
+      WHERE f.id = ${input.photoId}::uuid
+        AND f.category = 'photo'
+        AND f.is_active = true
+        AND f.deleted_at IS NULL
+        AND f.uploaded_by = ${access.userId}::uuid
+        AND f.deal_id IS NULL
+        AND f.lead_id IS NULL
+        AND f.contact_id IS NULL
+        AND f.procore_project_id IS NULL
+        AND f.change_order_id IS NULL
+      LIMIT 1
+    `,
+    sql`
+      SELECT
+        f.id,
+        f.category,
+        f.photo_category,
+        f.subcategory,
+        f.display_name,
+        f.mime_type,
+        f.file_size_bytes,
+        f.file_extension,
+        f.deal_id,
+        f.lead_id,
+        f.description,
+        f.tags,
+        f.taken_at,
+        f.created_at,
+        f.uploaded_by,
+        f.latitude,
+        f.longitude,
+        f.address,
+        f.address_source,
+        f.geocoded_at,
+        f.procore_sync_status,
+        f.deleted_at
+      FROM files f
+      WHERE f.id = ${input.photoId}::uuid
+        AND f.category = 'photo'
+        AND f.is_active = true
+        AND f.deleted_at IS NULL
+        AND f.uploaded_by = ${access.userId}::uuid
+        AND f.deal_id IS NULL
+        AND f.lead_id IS NULL
+      LIMIT 1
+    `,
+  );
   const existing = ((existingResult as any).rows ?? existingResult)[0];
   if (!existing) {
     throw new AppError(404, "Pending photo not found.");
   }
 
-  let assignResult;
-  try {
-    assignResult = await tenantDb.execute(sql`
+  const assignResult = await executeWithLegacyPendingLinkageFallback(
+    sql`
     UPDATE files
     SET
       deal_id = ${target.type === "lead" ? null : target.id}::uuid,
@@ -480,10 +618,8 @@ export async function assignPendingFieldPhotoTarget(
       geocoded_at,
       procore_sync_status,
       deleted_at
-  `);
-  } catch (error) {
-    if (!isMissingLegacyPendingLinkageColumnError(error)) throw error;
-    assignResult = await tenantDb.execute(sql`
+  `,
+    sql`
       UPDATE files
       SET
         deal_id = ${target.type === "lead" ? null : target.id}::uuid,
@@ -518,8 +654,8 @@ export async function assignPendingFieldPhotoTarget(
         geocoded_at,
         procore_sync_status,
         deleted_at
-    `);
-  }
+    `,
+  );
   const assigned = ((assignResult as any)?.rows ?? assignResult)?.[0];
   if (!assigned) {
     throw new AppError(409, "Pending photo could not be assigned. Refresh and try again.");
