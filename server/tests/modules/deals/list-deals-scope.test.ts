@@ -264,6 +264,22 @@ function projectRows(rows: Row[], fields?: Record<string, unknown>) {
   });
 }
 
+function extractOrderText(value: unknown): string {
+  if (typeof value === "string") return value;
+  if (!value || typeof value !== "object") return "";
+  if (Array.isArray(value)) return value.map(extractOrderText).join("");
+  if (Array.isArray((value as { queryChunks?: unknown[] }).queryChunks)) {
+    return (value as { queryChunks: unknown[] }).queryChunks.map(extractOrderText).join("");
+  }
+  if ("name" in (value as Record<string, unknown>) && typeof (value as { name?: unknown }).name === "string") {
+    return String((value as { name: string }).name);
+  }
+  if ("value" in (value as Record<string, unknown>)) {
+    return extractOrderText((value as { value: unknown }).value);
+  }
+  return Object.values(value as Record<string, unknown>).map(extractOrderText).join("");
+}
+
 function queryBuilder(rows: Row[], usersState: Row[], fields?: Record<string, unknown>) {
   let filtered = rows;
   let offsetCount = 0;
@@ -526,5 +542,66 @@ describe("getDeals scope filtering", () => {
 
     expect(capturedWheres.some((condition) => containsValue(condition, "stage-won"))).toBe(true);
     expect(capturedWheres.some((condition) => containsValue(condition, "stage-estimating"))).toBe(false);
+  });
+
+  it("defaults to created_at desc with an id desc tiebreaker", async () => {
+    const dataChain: any = {
+      from: vi.fn().mockReturnThis(),
+      leftJoin: vi.fn().mockReturnThis(),
+      where: vi.fn().mockReturnThis(),
+      orderBy: vi.fn().mockReturnThis(),
+      limit: vi.fn().mockReturnThis(),
+      offset: vi.fn().mockResolvedValue([]),
+      then: vi.fn((resolve: (value: Row[]) => unknown) => resolve([{ count: 0 }])),
+    };
+    const tenantDb = {
+      select: vi.fn(() => dataChain),
+    } as any;
+
+    await getDeals(
+      tenantDb,
+      { isActive: true, scope: "all", activeOfficeId: "office-1", limit: 25 } as never,
+      "director",
+      "director-1"
+    );
+
+    const orderByText = dataChain.orderBy.mock.calls.flatMap((call: unknown[]) => call.map(extractOrderText)).join(" ").toLowerCase();
+    expect(orderByText).toContain("created_at");
+    expect(orderByText).toContain("desc");
+    expect(orderByText).toContain("id");
+  });
+
+  it("supports oldest-first created_at asc with an id asc tiebreaker", async () => {
+    const dataChain: any = {
+      from: vi.fn().mockReturnThis(),
+      leftJoin: vi.fn().mockReturnThis(),
+      where: vi.fn().mockReturnThis(),
+      orderBy: vi.fn().mockReturnThis(),
+      limit: vi.fn().mockReturnThis(),
+      offset: vi.fn().mockResolvedValue([]),
+      then: vi.fn((resolve: (value: Row[]) => unknown) => resolve([{ count: 0 }])),
+    };
+    const tenantDb = {
+      select: vi.fn(() => dataChain),
+    } as any;
+
+    await getDeals(
+      tenantDb,
+      {
+        isActive: true,
+        scope: "all",
+        activeOfficeId: "office-1",
+        limit: 25,
+        sortBy: "created_at",
+        sortDir: "asc",
+      } as never,
+      "director",
+      "director-1"
+    );
+
+    const orderByText = dataChain.orderBy.mock.calls.flatMap((call: unknown[]) => call.map(extractOrderText)).join(" ").toLowerCase();
+    expect(orderByText).toContain("created_at");
+    expect(orderByText).toContain("asc");
+    expect(orderByText).toContain("id");
   });
 });

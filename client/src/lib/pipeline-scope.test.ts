@@ -28,6 +28,7 @@ function StageRouteProbe({ entity, role, path }: { entity: PipelineEntity; role:
         redirectTo: route.redirectTo,
         backTo: route.backTo,
         scope: route.query.scope,
+        sort: route.query.sort,
         path,
       })
   );
@@ -48,6 +49,7 @@ function renderStageRoute(role: PipelineRole, path: string, entity: PipelineEnti
     redirectTo: string;
     backTo: string;
     scope: string;
+    sort?: string;
   };
 
   return {
@@ -91,19 +93,39 @@ describe("useNormalizedStageRoute", () => {
   it("applies Mine as the default when URL has no scope param", () => {
     const { route, cleanup } = renderStageRoute("director", "/deals/stages/stage-1");
     expect(route.scope).toBe("mine");
+    expect(route.sort).toBe("newest");
     expect(route.needsRedirect).toBe(true);
     expect(route.redirectTo).toBe("/deals/stages/stage-1?scope=mine");
     cleanup();
 
     const repRoute = renderStageRoute("rep", "/deals/stages/stage-1");
     expect(repRoute.route.scope).toBe("mine");
+    expect(repRoute.route.sort).toBe("newest");
     expect(repRoute.route.redirectTo).toBe("/deals/stages/stage-1?scope=mine");
     repRoute.cleanup();
 
     const adminRoute = renderStageRoute("admin", "/deals/stages/stage-1");
     expect(adminRoute.route.scope).toBe("mine");
+    expect(adminRoute.route.sort).toBe("newest");
     expect(adminRoute.route.redirectTo).toBe("/deals/stages/stage-1?scope=mine");
     adminRoute.cleanup();
+  });
+
+  it("defaults leads stage routes to age_desc when the URL has no sort param", () => {
+    const { route, cleanup } = renderStageRoute("director", "/leads/stages/stage-1", "leads");
+    expect(route.scope).toBe("mine");
+    expect(route.sort).toBe("age_desc");
+    cleanup();
+  });
+
+  it("keeps leads sort tokens inside the lead-supported family", () => {
+    const namedRoute = renderStageRoute("director", "/leads/stages/stage-1?scope=mine&sort=name_asc", "leads");
+    expect(namedRoute.route.sort).toBe("name_asc");
+    namedRoute.cleanup();
+
+    const invalidRoute = renderStageRoute("director", "/leads/stages/stage-1?scope=mine&sort=newest", "leads");
+    expect(invalidRoute.route.sort).toBe("age_desc");
+    invalidRoute.cleanup();
   });
 
   it("preserves explicit scope=all for reps", () => {

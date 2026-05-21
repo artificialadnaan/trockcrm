@@ -272,6 +272,48 @@ describe("getDealsForPipeline", () => {
     expect(cardsWhere).toContain("service_lost");
   });
 
+  it("sorts stage previews by created_at desc with an id tiebreaker before preview limiting", async () => {
+    dbState.responses = [
+      [
+        {
+          id: "stage-estimating",
+          slug: "estimating",
+          name: "Estimating",
+          displayOrder: 1,
+          isTerminal: false,
+          isActivePipeline: true,
+        },
+      ],
+    ];
+
+    const tenantChains: any[] = [];
+    const tenantDb = {
+      select: vi.fn(() => {
+        const chain = createChainableMock();
+        tenantChains.push(chain);
+        chain.then.mockImplementation((resolve: (value: any[]) => unknown) => {
+          const isCardsQuery = chain.leftJoin.mock.calls.length > 0;
+          return resolve(isCardsQuery ? [] : [{ count: 0, totalValue: 0 }]);
+        });
+        return chain;
+      }),
+    } as any;
+
+    const { getDealsForPipeline } = await import("../../../src/modules/deals/service.js");
+    await getDealsForPipeline(tenantDb, "director", "director-1", {
+      activeOfficeId: null,
+      scope: "all",
+      previewLimit: 5,
+    });
+
+    const cardsChain = findStageCardsChain(tenantChains, "stage-estimating");
+    const orderByText = cardsChain?.orderBy.mock.calls.flatMap((call: unknown[]) => call.map(extractSqlText)).join(" ").toLowerCase();
+    expect(orderByText).toContain("created_at");
+    expect(orderByText).toContain("desc");
+    expect(orderByText).toContain("id");
+    expect(cardsChain?.limit).toHaveBeenCalledWith(5);
+  });
+
   it("clamps oversized drill-down preview requests to the server maximum", async () => {
     dbState.responses = [
       [

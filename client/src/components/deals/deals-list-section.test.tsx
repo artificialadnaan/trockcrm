@@ -281,7 +281,7 @@ describe("DealsListSection", () => {
     expect(call).toMatchObject({
       page: 1,
       limit: 25,
-      sortBy: "updated_at",
+      sortBy: "created_at",
       sortDir: "desc",
     });
     // With no stages selected, the section opts into pipeline mode so terminal
@@ -359,7 +359,7 @@ describe("DealsListSection", () => {
     try {
       expect(mocks.useDealsMock.mock.calls.length).toBeLessThan(5);
       const lastCall = mocks.useDealsMock.mock.calls[mocks.useDealsMock.mock.calls.length - 1]?.[0];
-      expect(lastCall).toMatchObject({ sortBy: "updated_at", sortDir: "desc" });
+      expect(lastCall).toMatchObject({ sortBy: "created_at", sortDir: "desc" });
     } finally {
       await cleanup();
     }
@@ -687,21 +687,64 @@ describe("DealsListSection", () => {
     ).toBeNull();
   });
 
-  it("restores updated sort control reachable from the shared list UI", () => {
+  it("defaults the list to newest and lets the user toggle oldest", () => {
     const { container, unmount } = renderInteractive({
       initialSort: { key: "name", dir: "asc" },
     });
 
+    const newestButton = Array.from(container.querySelectorAll("button")).find((button) =>
+      button.textContent?.includes("Newest")
+    );
+    const oldestButton = Array.from(container.querySelectorAll("button")).find((button) =>
+      button.textContent?.includes("Oldest")
+    );
+    expect(newestButton).toBeTruthy();
+    expect(oldestButton).toBeTruthy();
+
+    act(() => {
+      oldestButton!.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+
+    const lastCall = mocks.useDealsMock.mock.calls[mocks.useDealsMock.mock.calls.length - 1][0];
+    expect(lastCall.sortBy).toBe("created_at");
+    expect(lastCall.sortDir).toBe("asc");
+
+    unmount();
+  });
+
+  it("switches to updated sorting and resets pagination when the Updated control is used", () => {
+    mocks.useDealsMock.mockImplementation((input: { page: number; sortBy: string; sortDir: string }) => ({
+      deals: [makeDeal({ id: `deal-${input.page}-${input.sortBy}-${input.sortDir}` })],
+      pagination: { page: input.page, limit: 25, total: 75, totalPages: 3 },
+      loading: false,
+      error: null,
+      refetch: vi.fn(),
+    }));
+
+    const { container, unmount } = renderInteractive();
+    const nextPageButton = Array.from(container.querySelectorAll("button")).find(
+      (button) => button.getAttribute("aria-label") === "Next page"
+    );
     const updatedButton = Array.from(container.querySelectorAll("button")).find((button) =>
       button.textContent?.includes("Updated")
     );
+
+    expect(nextPageButton).toBeTruthy();
     expect(updatedButton).toBeTruthy();
+
+    act(() => {
+      nextPageButton!.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+
+    let lastCall = mocks.useDealsMock.mock.calls[mocks.useDealsMock.mock.calls.length - 1][0];
+    expect(lastCall.page).toBe(2);
 
     act(() => {
       updatedButton!.dispatchEvent(new MouseEvent("click", { bubbles: true }));
     });
 
-    const lastCall = mocks.useDealsMock.mock.calls[mocks.useDealsMock.mock.calls.length - 1][0];
+    lastCall = mocks.useDealsMock.mock.calls[mocks.useDealsMock.mock.calls.length - 1][0];
+    expect(lastCall.page).toBe(1);
     expect(lastCall.sortBy).toBe("updated_at");
     expect(lastCall.sortDir).toBe("desc");
 
