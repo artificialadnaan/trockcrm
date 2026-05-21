@@ -6,6 +6,7 @@ import type * as schema from "@trock-crm/shared/schema";
 import { AppError } from "../../middleware/error-handler.js";
 import { deleteObject, generateDownloadUrl, putObject } from "../../lib/r2-client.js";
 import { getFileById, getFileDownloadUrl } from "../files/service.js";
+import { buildDealPhotoTimelineConditions } from "../files/photo-timeline-filters.js";
 import type { FieldAccessContext, FieldPhoto, FieldProject } from "./projects-service.js";
 import { assertActiveFieldProject, listFieldProjectPhotos } from "./projects-service.js";
 import { renderFieldPhotoReportPdf, type ReportRenderSection } from "./pdf-layout.js";
@@ -178,6 +179,11 @@ async function loadReportRenderPhotos(
   externalUrl: string | null;
   externalThumbnailUrl: string | null;
 }>> {
+  // Keep report rendering aligned with the project timeline scope so converted
+  // lead-origin photos survive final rendering and out-of-scope photos do not.
+  const projectPhotoConditions = await buildDealPhotoTimelineConditions(tenantDb, projectId, {
+    includeDeleted: false,
+  });
   const rows = await tenantDb
     .select({
       id: files.id,
@@ -195,10 +201,7 @@ async function loadReportRenderPhotos(
     .leftJoin(users, eq(users.id, files.uploadedBy))
     .where(and(
       inArray(files.id, photoIds),
-      eq(files.category, "photo"),
-      eq(files.isActive, true),
-      isNull(files.deletedAt),
-      eq(files.dealId, projectId),
+      projectPhotoConditions,
     ));
 
   return new Map(rows.map((row) => [row.id, {
