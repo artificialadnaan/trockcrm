@@ -1,16 +1,35 @@
 import PDFDocument from "pdfkit";
+import { createRequire } from "node:module";
 import { getObjectBuffer, isR2Configured } from "../../lib/r2-client.js";
 import { TROCK_LOGO_PNG_BASE64 } from "./pdf-logo.js";
+
+const require = createRequire(import.meta.url);
 
 const PAGE_WIDTH = 612;
 const PAGE_HEIGHT = 792;
 const PAGE_MARGIN = 32;
 const BRAND_RED = "#DC2626";
 const BRAND_BLACK = "#111111";
+const BRAND_LOGO_SURFACE = BRAND_BLACK;
 const BRAND_MUTED = "#7589A3";
 const BRAND_BORDER = "#EAECEF";
 const BRAND_PANEL = "#F7F7F8";
 const LOGO_BUFFER = Buffer.from(TROCK_LOGO_PNG_BASE64, "base64");
+const BRAND_FONT_NAME = "Geist Variable";
+const BRAND_FONT_FILE = "@fontsource-variable/geist/files/geist-latin-wght-normal.woff2";
+const COVER_LOGO_PANEL_X = 183;
+const COVER_LOGO_PANEL_Y = 322;
+const COVER_LOGO_PANEL_WIDTH = 246;
+const COVER_LOGO_PANEL_HEIGHT = 234;
+const COVER_LOGO_PANEL_RADIUS = 18;
+const COVER_LOGO_X = 201;
+const COVER_LOGO_Y = 334;
+const COVER_LOGO_FIT: [number, number] = [210, 210];
+
+type ReportFontSet = {
+  regular: string;
+  bold: string;
+};
 
 export type ReportRenderablePhoto = {
   id: string;
@@ -96,30 +115,43 @@ async function loadPhotoBuffer(photo: ReportRenderablePhoto): Promise<Buffer | n
   return null;
 }
 
-function drawFooter(doc: PDFKit.PDFDocument, label: string, currentPage: number, totalPages: number, projectName: string) {
+function drawFooter(
+  doc: PDFKit.PDFDocument,
+  fonts: ReportFontSet,
+  label: string,
+  currentPage: number,
+  totalPages: number,
+  projectName: string,
+) {
   const footerY = PAGE_HEIGHT - 44;
   doc.save();
-  doc.font("Helvetica").fontSize(10).fillColor(BRAND_MUTED);
+  doc.font(fonts.regular).fontSize(10).fillColor(BRAND_MUTED);
   doc.text(label, PAGE_MARGIN, footerY, { width: 140, align: "left", lineBreak: false });
   doc.text(`${currentPage} / ${totalPages}`, PAGE_MARGIN, footerY, { width: PAGE_WIDTH - PAGE_MARGIN * 2, align: "center", lineBreak: false });
   doc.text(projectName, PAGE_WIDTH - PAGE_MARGIN - 200, footerY, { width: 200, align: "right", lineBreak: false });
   doc.restore();
 }
 
-function drawSectionHeader(doc: PDFKit.PDFDocument, reportTitle: string, dateLabel: string) {
+function drawSectionHeader(doc: PDFKit.PDFDocument, fonts: ReportFontSet, reportTitle: string, dateLabel: string) {
   doc.save();
-  doc.font("Helvetica").fontSize(11).fillColor(BRAND_MUTED);
+  doc.font(fonts.regular).fontSize(11).fillColor(BRAND_MUTED);
   doc.text(reportTitle, PAGE_MARGIN, 24, { width: PAGE_WIDTH / 2 - PAGE_MARGIN });
-  doc.font("Helvetica").fontSize(10).fillColor(BRAND_MUTED);
+  doc.font(fonts.regular).fontSize(10).fillColor(BRAND_MUTED);
   doc.text(dateLabel, PAGE_WIDTH / 2, 24, { width: PAGE_WIDTH / 2 - PAGE_MARGIN, align: "right" });
   doc.moveTo(PAGE_MARGIN, 44).lineTo(PAGE_WIDTH - PAGE_MARGIN, 44).strokeColor(BRAND_BORDER).lineWidth(1).stroke();
   doc.restore();
 }
 
-function drawSectionTitlePage(doc: PDFKit.PDFDocument, reportTitle: string, dateLabel: string, sectionTitle: string) {
-  drawSectionHeader(doc, reportTitle, dateLabel);
+function drawSectionTitlePage(
+  doc: PDFKit.PDFDocument,
+  fonts: ReportFontSet,
+  reportTitle: string,
+  dateLabel: string,
+  sectionTitle: string,
+) {
+  drawSectionHeader(doc, fonts, reportTitle, dateLabel);
   doc.save();
-  doc.fillColor(BRAND_BLACK).font("Helvetica-Bold").fontSize(26);
+  doc.fillColor(BRAND_BLACK).font(fonts.bold).fontSize(26);
   doc.text(sectionTitle, PAGE_MARGIN, PAGE_HEIGHT / 2 - 22, {
     width: PAGE_WIDTH - PAGE_MARGIN * 2,
     align: "center",
@@ -129,6 +161,7 @@ function drawSectionTitlePage(doc: PDFKit.PDFDocument, reportTitle: string, date
 
 async function drawPhotoEntry(
   doc: PDFKit.PDFDocument,
+  fonts: ReportFontSet,
   photo: ReportRenderSection["photos"][number],
   top: number,
 ) {
@@ -145,7 +178,7 @@ async function drawPhotoEntry(
 
   doc.roundedRect(imageLeft, imageTop, imagePanelWidth, rowHeight, 8).fillColor(BRAND_PANEL).fill();
   doc.roundedRect(imageLeft + 8, imageTop + 8, 32, 32, 6).fillColor("white").fill();
-  doc.fillColor(BRAND_BLACK).font("Helvetica-Bold").fontSize(11).text(String(photo.reportIndex), imageLeft + 8, imageTop + 16, {
+  doc.fillColor(BRAND_BLACK).font(fonts.bold).fontSize(11).text(String(photo.reportIndex), imageLeft + 8, imageTop + 16, {
     width: 32,
     align: "center",
   });
@@ -160,24 +193,60 @@ async function drawPhotoEntry(
       });
     } catch {
       doc.roundedRect(imageLeft + 84, imageTop, imageWidth, imageHeight, 8).fillColor("#F3F4F6").fill();
-      doc.fillColor(BRAND_MUTED).font("Helvetica-Bold").fontSize(12).text("Image unavailable", imageLeft + 116, imageTop + 68, { width: imageWidth - 64, align: "center" });
+      doc.fillColor(BRAND_MUTED).font(fonts.bold).fontSize(12).text("Image unavailable", imageLeft + 116, imageTop + 68, { width: imageWidth - 64, align: "center" });
     }
   } else {
     doc.roundedRect(imageLeft + 84, imageTop, imageWidth, imageHeight, 8).fillColor("#F3F4F6").fill();
-    doc.fillColor(BRAND_MUTED).font("Helvetica-Bold").fontSize(12).text("Image unavailable", imageLeft + 116, imageTop + 68, { width: imageWidth - 64, align: "center" });
+    doc.fillColor(BRAND_MUTED).font(fonts.bold).fontSize(12).text("Image unavailable", imageLeft + 116, imageTop + 68, { width: imageWidth - 64, align: "center" });
   }
 
   const description = clampText(photo.descriptionOverride ?? photo.description ?? "No description", 320);
-  doc.fillColor(BRAND_BLACK).font("Helvetica").fontSize(15).text(description, textLeft, top + 4, {
+  doc.fillColor(BRAND_BLACK).font(fonts.regular).fontSize(15).text(description, textLeft, top + 4, {
     width: textWidth,
     lineGap: 2,
   });
-  doc.fillColor(BRAND_MUTED).font("Helvetica").fontSize(10).text(
+  doc.fillColor(BRAND_MUTED).font(fonts.regular).fontSize(10).text(
     `Project: ${photo.projectName}\nDate: ${formatPhotoDate(photo.takenAt, photo.createdAt)}\nCreator: ${photo.uploaderName}`,
     textLeft,
     top + 92,
     { width: textWidth, align: "left", lineGap: 2 }
   );
+}
+
+function fallbackReportFonts(): ReportFontSet {
+  return {
+    regular: "Helvetica",
+    bold: "Helvetica-Bold",
+  };
+}
+
+function resolveBrandFontPath(): string | null {
+  try {
+    return require.resolve(BRAND_FONT_FILE);
+  } catch (error) {
+    console.warn("[field-report-pdf] Geist Variable font asset could not be resolved; using Helvetica fallback.", error);
+    return null;
+  }
+}
+
+function registerReportFonts(doc: PDFKit.PDFDocument): ReportFontSet {
+  const fontPath = resolveBrandFontPath();
+  if (!fontPath) return fallbackReportFonts();
+
+  if (fontPath.endsWith(".woff2")) {
+    return fallbackReportFonts();
+  }
+
+  try {
+    doc.registerFont(BRAND_FONT_NAME, fontPath);
+    return {
+      regular: BRAND_FONT_NAME,
+      bold: BRAND_FONT_NAME,
+    };
+  } catch (error) {
+    console.warn("[field-report-pdf] failed to register Geist Variable font with pdfkit; using Helvetica fallback.", error);
+    return fallbackReportFonts();
+  }
 }
 
 export async function renderFieldPhotoReportPdf(input: {
@@ -193,23 +262,31 @@ export async function renderFieldPhotoReportPdf(input: {
 
   const chunks: Buffer[] = [];
   const pageMeta: PageMeta[] = [];
+  const reportFonts = registerReportFonts(doc);
   doc.on("data", (chunk) => chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)));
 
   doc.rect(0, 0, PAGE_WIDTH, PAGE_HEIGHT).fill("white");
-  doc.fillColor(BRAND_BLACK).font("Helvetica-Bold").fontSize(18).text(input.cover.creatorName, PAGE_MARGIN, 222, {
+  doc.fillColor(BRAND_BLACK).font(reportFonts.bold).fontSize(18).text(input.cover.creatorName, PAGE_MARGIN, 222, {
     width: PAGE_WIDTH - PAGE_MARGIN * 2,
     align: "center",
   });
-  doc.fillColor(BRAND_RED).font("Helvetica-Bold").fontSize(16).text(input.cover.companyName, PAGE_MARGIN, 256, {
+  doc.fillColor(BRAND_RED).font(reportFonts.bold).fontSize(16).text(input.cover.companyName, PAGE_MARGIN, 256, {
     width: PAGE_WIDTH - PAGE_MARGIN * 2,
     align: "center",
   });
-  doc.font("Helvetica-Bold").fontSize(15).fillColor(BRAND_BLACK).text(`${input.cover.reportDateLabel} | ${input.cover.photoCount} Photos`, PAGE_MARGIN, 288, {
+  doc.font(reportFonts.bold).fontSize(15).fillColor(BRAND_BLACK).text(`${input.cover.reportDateLabel} | ${input.cover.photoCount} Photos`, PAGE_MARGIN, 288, {
     width: PAGE_WIDTH - PAGE_MARGIN * 2,
     align: "center",
   });
+  doc.roundedRect(
+    COVER_LOGO_PANEL_X,
+    COVER_LOGO_PANEL_Y,
+    COVER_LOGO_PANEL_WIDTH,
+    COVER_LOGO_PANEL_HEIGHT,
+    COVER_LOGO_PANEL_RADIUS
+  ).fillColor(BRAND_LOGO_SURFACE).fill();
   try {
-    doc.image(LOGO_BUFFER, PAGE_WIDTH / 2 - 186, 330, { fit: [372, 210], align: "center", valign: "center" });
+    doc.image(LOGO_BUFFER, COVER_LOGO_X, COVER_LOGO_Y, { fit: COVER_LOGO_FIT, align: "center", valign: "center" });
   } catch (error) {
     console.error("[field-report-pdf] failed to embed T Rock logo", error);
     doc.fillColor(BRAND_RED).font("Helvetica-Bold").fontSize(30).text("T ROCK", PAGE_MARGIN, 380, {
@@ -217,7 +294,7 @@ export async function renderFieldPhotoReportPdf(input: {
       align: "center",
     });
   }
-  doc.fillColor(BRAND_BLACK).font("Helvetica-Bold").fontSize(30).text(input.cover.reportTitle, PAGE_MARGIN, 540, {
+  doc.fillColor(BRAND_BLACK).font(reportFonts.bold).fontSize(30).text(input.cover.reportTitle, PAGE_MARGIN, 588, {
     width: PAGE_WIDTH - PAGE_MARGIN * 2,
     align: "center",
   });
@@ -239,7 +316,7 @@ export async function renderFieldPhotoReportPdf(input: {
       reportTitle: input.cover.reportTitle,
       dateLabel: input.cover.reportDateLabel,
     });
-    drawSectionTitlePage(doc, input.cover.reportTitle, input.cover.reportDateLabel, section.title);
+    drawSectionTitlePage(doc, reportFonts, input.cover.reportTitle, input.cover.reportDateLabel, section.title);
 
     for (const photos of pages) {
       doc.addPage();
@@ -250,10 +327,10 @@ export async function renderFieldPhotoReportPdf(input: {
         reportTitle: input.cover.reportTitle,
         dateLabel: input.cover.reportDateLabel,
       });
-      drawSectionHeader(doc, input.cover.reportTitle, input.cover.reportDateLabel);
+      drawSectionHeader(doc, reportFonts, input.cover.reportTitle, input.cover.reportDateLabel);
       const startTop = 66;
       for (const [rowIndex, photo] of photos.entries()) {
-        await drawPhotoEntry(doc, photo, startTop + rowIndex * 178);
+        await drawPhotoEntry(doc, reportFonts, photo, startTop + rowIndex * 178);
       }
     }
   }
@@ -263,7 +340,7 @@ export async function renderFieldPhotoReportPdf(input: {
     doc.switchToPage(pageIndex);
     const meta = pageMeta[pageIndex];
     if (!meta) continue;
-    drawFooter(doc, meta.footerLabel, pageIndex + 1, range.count, meta.projectName);
+    drawFooter(doc, reportFonts, meta.footerLabel, pageIndex + 1, range.count, meta.projectName);
   }
 
   doc.end();
