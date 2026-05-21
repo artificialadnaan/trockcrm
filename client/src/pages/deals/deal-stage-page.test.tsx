@@ -98,7 +98,7 @@ describe("DealStagePage", () => {
         scope: "team",
         page: 1,
         pageSize: 25,
-        sort: "age_desc",
+        sort: "newest",
         search: "",
         filters: { staleOnly: false },
       },

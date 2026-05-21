@@ -93,14 +93,14 @@ describe("listDealStagePage", () => {
       stageId: "stage-estimating",
       page: 2,
       pageSize: 25,
-      sort: "value_desc",
+      sort: "newest",
     } as any);
 
     expect(result.pagination).toMatchObject({ page: 2, pageSize: 25, total: 26, totalPages: 2 });
     expect(result.rows[0]).toMatchObject({ id: "deal-26", stageId: "stage-estimating" });
   });
 
-  it("orders stage rows by awarded amount when value_desc is requested", async () => {
+  it("orders stage rows by newest-first with a deterministic id tiebreaker by default", async () => {
     dbState.responses = [
       [{ id: "stage-estimating", slug: "estimating", name: "Estimating", displayOrder: 4, isTerminal: false }],
     ];
@@ -121,13 +121,73 @@ describe("listDealStagePage", () => {
       stageId: "stage-estimating",
       page: 1,
       pageSize: 25,
-      sort: "value_desc",
+      sort: "newest",
     } as any);
 
     const rowsQueryText = extractSqlText(tenantDb.execute.mock.calls[1][0]).toLowerCase();
     expect(rowsQueryText).toContain("order by");
-    expect(rowsQueryText).toContain("awarded_amount");
+    expect(rowsQueryText).toContain("created_at");
     expect(rowsQueryText).toContain("desc");
+    expect(rowsQueryText).toContain("d.id desc");
+  });
+
+  it("honors oldest sort instead of silently ignoring the query", async () => {
+    dbState.responses = [
+      [{ id: "stage-estimating", slug: "estimating", name: "Estimating", displayOrder: 4, isTerminal: false }],
+    ];
+
+    const tenantDb = {
+      select: createOfficeScopeSelectMock(),
+      execute: vi.fn()
+        .mockResolvedValueOnce({ rows: [{ total: "0", total_value: "0" }] })
+        .mockResolvedValueOnce({ rows: [] }),
+    } as any;
+
+    const { listDealStagePage } = await import("../../../src/modules/deals/service.js");
+    await listDealStagePage(tenantDb, {
+      role: "admin",
+      userId: "admin-1",
+      activeOfficeId: "office-1",
+      scope: "all",
+      stageId: "stage-estimating",
+      page: 1,
+      pageSize: 25,
+      sort: "oldest",
+    } as any);
+
+    const rowsQueryText = extractSqlText(tenantDb.execute.mock.calls[1][0]).toLowerCase();
+    expect(rowsQueryText).toContain("created_at");
+    expect(rowsQueryText).toContain("asc");
+    expect(rowsQueryText).toContain("d.id asc");
+  });
+
+  it("preserves the legacy age_desc token as oldest-in-stage first", async () => {
+    dbState.responses = [
+      [{ id: "stage-estimating", slug: "estimating", name: "Estimating", displayOrder: 4, isTerminal: false }],
+    ];
+
+    const tenantDb = {
+      select: createOfficeScopeSelectMock(),
+      execute: vi.fn()
+        .mockResolvedValueOnce({ rows: [{ total: "0", total_value: "0" }] })
+        .mockResolvedValueOnce({ rows: [] }),
+    } as any;
+
+    const { listDealStagePage } = await import("../../../src/modules/deals/service.js");
+    await listDealStagePage(tenantDb, {
+      role: "admin",
+      userId: "admin-1",
+      activeOfficeId: "office-1",
+      scope: "all",
+      stageId: "stage-estimating",
+      page: 1,
+      pageSize: 25,
+      sort: "age_desc",
+    } as any);
+
+    const rowsQueryText = extractSqlText(tenantDb.execute.mock.calls[1][0]).toLowerCase();
+    expect(rowsQueryText).toContain("stage_entered_at asc");
+    expect(rowsQueryText).toContain("d.id asc");
   });
 
   it("relaxes active-only scope for date-filtered terminal stage drill-downs", async () => {

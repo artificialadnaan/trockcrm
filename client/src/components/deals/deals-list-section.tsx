@@ -42,10 +42,10 @@ const DEAL_STAGE_ORDER = [
 const DEFAULT_PAGE_SIZE = 25;
 export const MAX_EXPORT_PAGES = 50;
 const EXPORT_PAGE_SIZE = 500;
-const DEFAULT_SORT_STATE = { key: "updated_at", dir: "desc" } satisfies DealListSortState;
+const DEFAULT_SORT_STATE = { key: "created_at", dir: "desc" } satisfies DealListSortState;
 const EMPTY_STAGE_SLUGS: string[] = [];
 
-type SortKey = "name" | "stage_entered_at" | "awarded_amount" | "updated_at";
+type SortKey = "name" | "created_at" | "stage_entered_at" | "awarded_amount" | "updated_at";
 export type DealListSortState = { key: SortKey | "expected_close_date" | "contract_signed_date"; dir: "asc" | "desc" };
 type DealListActiveFilter = boolean | "all" | "pipeline";
 
@@ -539,15 +539,23 @@ export function DealsListSection({
     }));
   };
 
+  const setCreatedAtSort = (dir: "asc" | "desc") => {
+    setPage(1);
+    setSort({ key: "created_at", dir });
+  };
+
   const restoreUpdatedSort = () => {
+    setPage(1);
     setSort((current) => (
       current.key === "updated_at"
         ? { key: "updated_at", dir: current.dir === "desc" ? "asc" : "desc" }
-        : DEFAULT_SORT_STATE
+        : { key: "updated_at", dir: "desc" }
     ));
   };
 
   const isUpdatedSortActive = sort.key === "updated_at";
+  const isNewestSortActive = sort.key === "created_at" && sort.dir === "desc";
+  const isOldestSortActive = sort.key === "created_at" && sort.dir === "asc";
 
   const exportCsv = async () => {
     if (!listQueryState.enabled) {
@@ -833,18 +841,44 @@ export function DealsListSection({
             </button>
           );
         })}
-        <button
-          type="button"
-          className={cn(
-            "ml-auto rounded-full border px-3 py-1.5 text-xs font-black uppercase tracking-[0.12em]",
-            isUpdatedSortActive
-              ? "border-brand-red bg-brand-red text-white"
-              : "border-slate-200 bg-white text-slate-600 hover:border-brand-red/40 hover:text-brand-red"
-          )}
-          onClick={restoreUpdatedSort}
-        >
-          Updated {isUpdatedSortActive ? (sort.dir === "asc" ? "↑" : "↓") : null}
-        </button>
+        <div className="ml-auto flex flex-wrap gap-2">
+          <button
+            type="button"
+            className={cn(
+              "rounded-full border px-3 py-1.5 text-xs font-black uppercase tracking-[0.12em]",
+              isNewestSortActive
+                ? "border-brand-red bg-brand-red text-white"
+                : "border-slate-200 bg-white text-slate-600 hover:border-brand-red/40 hover:text-brand-red"
+            )}
+            onClick={() => setCreatedAtSort("desc")}
+          >
+            Newest
+          </button>
+          <button
+            type="button"
+            className={cn(
+              "rounded-full border px-3 py-1.5 text-xs font-black uppercase tracking-[0.12em]",
+              isOldestSortActive
+                ? "border-brand-red bg-brand-red text-white"
+                : "border-slate-200 bg-white text-slate-600 hover:border-brand-red/40 hover:text-brand-red"
+            )}
+            onClick={() => setCreatedAtSort("asc")}
+          >
+            Oldest
+          </button>
+          <button
+            type="button"
+            className={cn(
+              "rounded-full border px-3 py-1.5 text-xs font-black uppercase tracking-[0.12em]",
+              isUpdatedSortActive
+                ? "border-brand-red bg-brand-red text-white"
+                : "border-slate-200 bg-white text-slate-600 hover:border-brand-red/40 hover:text-brand-red"
+            )}
+            onClick={restoreUpdatedSort}
+          >
+            Updated {isUpdatedSortActive ? (sort.dir === "asc" ? "↑" : "↓") : null}
+          </button>
+        </div>
       </div>
 
       <div className="p-4">

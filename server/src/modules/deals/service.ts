@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { eq, and, desc, asc, ilike, inArray, sql, or, isNull, not, getTableColumns } from "drizzle-orm";
+import { eq, and, desc, asc, ilike, inArray, sql, or, isNull, not, getTableColumns, type SQLWrapper } from "drizzle-orm";
 import type { NodePgDatabase } from "drizzle-orm/node-postgres";
 import {
   deals,
@@ -21,6 +21,7 @@ import {
 import {
   DOMAIN_EVENTS,
   type DealContractSignedEventPayload,
+  type StagePageSort,
   type WorkflowRoute,
   resolveOfficeCodeFromOffice,
 } from "@trock-crm/shared/types";
@@ -564,6 +565,7 @@ export interface DealStagePageInput extends DealBoardInput {
   stageId: string;
   page: number;
   pageSize: number;
+  sort?: StagePageSort;
   search?: string;
   assignedRepId?: string;
   regionId?: string;
@@ -600,6 +602,60 @@ type DealStageWorkspaceRow = {
   dd_estimate: string | null;
   days_in_stage: number;
 };
+
+function buildSortWithIdTieBreaker(column: SQLWrapper, dir: "asc" | "desc") {
+  return dir === "asc"
+    ? [asc(column), asc(deals.id)] as const
+    : [desc(column), desc(deals.id)] as const;
+}
+
+function buildDealListOrder(filters: DealFilters) {
+  switch (filters.sortBy) {
+    case "name":
+      return buildSortWithIdTieBreaker(deals.name, filters.sortDir === "asc" ? "asc" : "desc");
+    case "created_at":
+      return buildSortWithIdTieBreaker(deals.createdAt, filters.sortDir === "asc" ? "asc" : "desc");
+    case "awarded_amount":
+      return buildSortWithIdTieBreaker(deals.awardedAmount, filters.sortDir === "asc" ? "asc" : "desc");
+    case "stage_entered_at":
+      return buildSortWithIdTieBreaker(deals.stageEnteredAt, filters.sortDir === "asc" ? "asc" : "desc");
+    case "expected_close_date":
+      return buildSortWithIdTieBreaker(deals.expectedCloseDate, filters.sortDir === "asc" ? "asc" : "desc");
+    case "contract_signed_date":
+      return buildSortWithIdTieBreaker(contractSignedDateForReporting, filters.sortDir === "asc" ? "asc" : "desc");
+    case "updated_at":
+      return buildSortWithIdTieBreaker(deals.updatedAt, filters.sortDir === "asc" ? "asc" : "desc");
+    default:
+      return buildSortWithIdTieBreaker(deals.createdAt, "desc");
+  }
+}
+
+function buildPipelineStageCardsOrder() {
+  // Sort before preview limiting so each column shows the actual newest cards,
+  // not an arbitrary subset from a tied timestamp group.
+  return [desc(deals.createdAt), desc(deals.id)] as const;
+}
+
+function buildStagePageOrder(sort: StagePageSort | undefined) {
+  // The stage workspace previously ignored the incoming sort and silently used
+  // age-based ordering. Default it to the same newest/oldest contract as the
+  // shared list/board, but keep legacy explicit modes working for old links.
+  switch (sort) {
+    case "oldest":
+      return sql`d.created_at asc, d.id asc`;
+    case "age_desc":
+      return sql`d.stage_entered_at asc, d.id asc`;
+    case "updated_desc":
+      return sql`d.updated_at desc, d.id desc`;
+    case "name_asc":
+      return sql`d.name asc, d.id asc`;
+    case "value_desc":
+      return sql`coalesce(d.awarded_amount, d.bid_estimate, d.dd_estimate, 0) desc, d.id desc`;
+    case "newest":
+    default:
+      return sql`d.created_at desc, d.id desc`;
+  }
+}
 
 export interface DealBidBoardOwnershipState {
   isOwned: boolean;
@@ -1079,18 +1135,7 @@ export async function getDeals(tenantDb: TenantDb, filters: DealFilters, userRol
   const where = conditions.length > 0 ? and(...conditions) : undefined;
 
   // Sort
-  const sortColumn = (() => {
-    switch (filters.sortBy) {
-      case "name": return deals.name;
-      case "created_at": return deals.createdAt;
-      case "awarded_amount": return deals.awardedAmount;
-      case "stage_entered_at": return deals.stageEnteredAt;
-      case "expected_close_date": return deals.expectedCloseDate;
-      case "contract_signed_date": return contractSignedDateForReporting;
-      default: return deals.updatedAt;
-    }
-  })();
-  const sortOrder = filters.sortDir === "asc" ? asc(sortColumn) : desc(sortColumn);
+  const sortOrder = buildDealListOrder(filters);
 
   // Sequential tenant queries required: tenantDb is a single transaction client
   // in production, so parallel reads can fail with "client already executing".
@@ -1103,7 +1148,7 @@ export async function getDeals(tenantDb: TenantDb, filters: DealFilters, userRol
     .from(deals)
     .leftJoin(companies, eq(companies.id, deals.companyId))
     .where(where)
-    .orderBy(sortOrder)
+    .orderBy(...sortOrder)
     .limit(limit)
     .offset(offset);
 
@@ -1990,7 +2035,7 @@ export async function getDealsForPipeline(
       .leftJoin(companies, eq(companies.id, deals.companyId))
       .leftJoin(users, eq(users.id, deals.assignedRepId))
       .where(where)
-      .orderBy(desc(deals.updatedAt))
+      .orderBy(...buildPipelineStageCardsOrder())
       .limit(pipelineCardsPerStageLimit);
     dealsByStage.set(stage.id, stageDeals);
 
@@ -2104,7 +2149,7 @@ export async function listDealStagePage(tenantDb: TenantDb, input: DealStagePage
     from deals d
     left join users u on u.id = d.assigned_rep_id
     where ${where}
-    order by d.stage_entered_at asc, d.updated_at desc
+    order by ${buildStagePageOrder(input.sort)}
     limit ${pageSize}
     offset ${offset}
   `);
