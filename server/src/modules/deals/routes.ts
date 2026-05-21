@@ -5,6 +5,7 @@ import { companies, dealApprovals, dealScopingIntake, deals, dealSubscriptions, 
 import { requireRole } from "../../middleware/rbac.js";
 import { AppError } from "../../middleware/error-handler.js";
 import { writeAuditLog } from "../../lib/audit-log.js";
+import { assertOptionalIsoDateQueryParam } from "../../lib/date-query.js";
 import { eventBus } from "../../events/bus.js";
 import { DOMAIN_EVENTS } from "../../events/types.js";
 import {
@@ -763,6 +764,8 @@ function isProposalDraftingEnabled() {
 // GET /api/deals — list deals (paginated, filtered, sorted)
 router.get("/", async (req, res, next) => {
   try {
+    const createdFrom = assertOptionalIsoDateQueryParam(req.query.createdFrom, "createdFrom");
+    const createdTo = assertOptionalIsoDateQueryParam(req.query.createdTo, "createdTo");
     const isActiveFilter =
       req.query.isActive === "all"
         ? ("all" as const)
@@ -785,8 +788,8 @@ router.get("/", async (req, res, next) => {
       source: req.query.source as string | undefined,
       contractSignedFrom: req.query.contractSignedFrom as string | undefined,
       contractSignedTo: req.query.contractSignedTo as string | undefined,
-      createdFrom: req.query.createdFrom as string | undefined,
-      createdTo: req.query.createdTo as string | undefined,
+      createdFrom,
+      createdTo,
       updatedFrom: req.query.updatedFrom as string | undefined,
       updatedTo: req.query.updatedTo as string | undefined,
       isActive: isActiveFilter,

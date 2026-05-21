@@ -881,12 +881,15 @@ describe("lead stage transition route", () => {
 });
 
 describe("lead list route", () => {
-  it("defaults list scope to mine when the query param is missing", async () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  async function invokeListRoute(query: Record<string, unknown>) {
     const routes = await loadLeadRoutes();
-    serviceMocks.listLeads.mockResolvedValueOnce([]);
     const handler = findRouteHandler(routes, "get", "/");
     const req = {
-      query: {},
+      query,
       tenantDb: {},
       user: {
         id: "rep-1",
@@ -908,14 +911,69 @@ describe("lead list route", () => {
         return this;
       },
     } as any;
-
-    await handler(req, res, (err?: unknown) => {
+    const next = vi.fn((err?: unknown) => {
       if (err) throw err;
     });
+
+    await handler(req, res, next);
+    return { req, res, next };
+  }
+
+  it("defaults list scope to mine when the query param is missing", async () => {
+    serviceMocks.listLeads.mockResolvedValueOnce([]);
+    const { req } = await invokeListRoute({});
 
     expect(serviceMocks.listLeads).toHaveBeenCalledWith(
       req.tenantDb,
       expect.objectContaining({ scope: "mine" }),
+      "rep",
+      "rep-1"
+    );
+  });
+
+  it("rejects malformed createdFrom with a 400 before querying leads", async () => {
+    serviceMocks.listLeads.mockResolvedValueOnce([]);
+    const routes = await loadLeadRoutes();
+    const handler = findRouteHandler(routes, "get", "/");
+    const req = {
+      query: { createdFrom: "not-a-date" },
+      tenantDb: {},
+      user: {
+        id: "rep-1",
+        role: "rep",
+        officeId: "office-1",
+        activeOfficeId: "office-1",
+      },
+      commitTransaction: vi.fn(async () => {}),
+    } as any;
+    const res = {} as any;
+    const next = vi.fn();
+
+    await handler(req, res, next);
+
+    expect(serviceMocks.listLeads).not.toHaveBeenCalled();
+    expect(req.commitTransaction).not.toHaveBeenCalled();
+    expect(next).toHaveBeenCalledWith(
+      expect.objectContaining({
+        statusCode: 400,
+        message: "createdFrom must be an ISO date in YYYY-MM-DD format",
+      })
+    );
+  });
+
+  it("passes validated createdFrom and createdTo through to listLeads", async () => {
+    serviceMocks.listLeads.mockResolvedValueOnce([]);
+    const { req } = await invokeListRoute({
+      createdFrom: "2026-05-01",
+      createdTo: "2026-05-31",
+    });
+
+    expect(serviceMocks.listLeads).toHaveBeenCalledWith(
+      req.tenantDb,
+      expect.objectContaining({
+        createdFrom: "2026-05-01",
+        createdTo: "2026-05-31",
+      }),
       "rep",
       "rep-1"
     );

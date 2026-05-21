@@ -7,6 +7,7 @@ import { leadSubscriptions } from "@trock-crm/shared/schema";
 import { pool } from "../../db.js";
 import { AppError } from "../../middleware/error-handler.js";
 import { requireAdmin } from "../../middleware/rbac.js";
+import { assertOptionalIsoDateQueryParam } from "../../lib/date-query.js";
 import { LeadStageTransitionError } from "./stage-transition-service.js";
 import {
   createLead,
@@ -153,6 +154,8 @@ function readListScope(value: unknown): "mine" | "team" | "all" {
 // GET /api/leads
 router.get("/", async (req, res, next) => {
   try {
+    const createdFrom = assertOptionalIsoDateQueryParam(req.query.createdFrom, "createdFrom");
+    const createdTo = assertOptionalIsoDateQueryParam(req.query.createdTo, "createdTo");
     const result = await listLeads(
       req.tenantDb!,
       {
@@ -166,8 +169,8 @@ router.get("/", async (req, res, next) => {
         scope: normalizeCollaborativeScope(req.user!.role, readListScope(req.query.scope)),
         activeOfficeId: req.user!.activeOfficeId ?? req.user!.officeId,
         status: req.query.status as "open" | "converted" | "disqualified" | undefined,
-        createdFrom: req.query.createdFrom as string | undefined,
-        createdTo: req.query.createdTo as string | undefined,
+        createdFrom,
+        createdTo,
         sortBy:
           req.query.sortBy === "created_at" || req.query.sortBy === "updated_at"
             ? (req.query.sortBy as "created_at" | "updated_at")

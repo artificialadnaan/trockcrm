@@ -34,11 +34,12 @@ describe("deal bid due date backfill migration", () => {
 
   it("fills deal bid_due_date only when the deal is null and the source lead has a value", () => {
     expect(migrationSql).toContain("UPDATE %I.deals d");
-    expect(migrationSql).toContain("SET bid_due_date = (l.bid_due_date::text || 'T00:00:00.000Z')::timestamptz");
+    expect(migrationSql).toContain("SET bid_due_date = (l.bid_due_date::timestamp AT TIME ZONE 'UTC')");
     expect(migrationSql).toContain("FROM %I.leads l");
     expect(migrationSql).toContain("l.id = d.source_lead_id");
     expect(migrationSql).toContain("d.bid_due_date IS NULL");
     expect(migrationSql).toContain("l.bid_due_date IS NOT NULL");
+    expect(migrationSql).not.toContain("l.bid_due_date::text || 'T00:00:00.000Z'");
   });
 
   it("never overwrites an existing deal bid_due_date", () => {
@@ -49,12 +50,22 @@ describe("deal bid due date backfill migration", () => {
   it("keeps the tenant replay block placeholder-based for office provisioning", () => {
     const replayBlock = getTenantReplaySection(migrationSql);
 
+    expect(replayBlock).toContain("DO $office_dallas$");
+    expect(replayBlock).toContain("to_regclass('office_dallas.deals') IS NULL");
+    expect(replayBlock).toContain("to_regclass('office_dallas.leads') IS NULL");
+    expect(replayBlock).toContain("table_name = 'deals'");
+    expect(replayBlock).toContain("column_name = 'source_lead_id'");
+    expect(replayBlock).toContain("table_name = 'leads'");
+    expect(replayBlock).toContain("SET bid_due_date = (l.bid_due_date::timestamp AT TIME ZONE 'UTC')");
     expect(replayBlock).toContain("UPDATE office_dallas.deals d");
     expect(replayBlock).toContain("FROM office_dallas.leads l");
     expect(replayBlock).not.toContain("office_atlanta");
     expect(replayBlock).not.toContain("office_pwauditoffice");
 
     const provisioned = replayBlock.replace(/office_dallas/g, "office_testoffice");
+    expect(provisioned).toContain("DO $office_testoffice$");
+    expect(provisioned).toContain("to_regclass('office_testoffice.deals') IS NULL");
+    expect(provisioned).toContain("to_regclass('office_testoffice.leads') IS NULL");
     expect(provisioned).toContain("UPDATE office_testoffice.deals d");
     expect(provisioned).toContain("FROM office_testoffice.leads l");
     expect(provisioned).not.toContain("office_dallas");
