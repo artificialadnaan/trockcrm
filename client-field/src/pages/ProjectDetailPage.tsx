@@ -115,7 +115,10 @@ export function ProjectDetailPage() {
           </button>
         </div>
         {project ? (
-          <p className="mt-2 text-sm font-semibold text-muted-foreground">{project.dealNumber} • <span className="rounded-full bg-muted px-2 py-0.5">{project.stage}</span></p>
+          <div className="mt-2 flex flex-wrap items-center gap-2 text-sm">
+            <p className="font-semibold text-foreground">Deal # {project.dealNumber}</p>
+            <span className="rounded-full bg-muted px-2 py-0.5 font-semibold text-muted-foreground">{project.stage}</span>
+          </div>
         ) : null}
         <div className="mt-3 flex flex-wrap gap-2">
           <Button variant="ghost" onClick={() => setReportBuilderOpen(true)}>

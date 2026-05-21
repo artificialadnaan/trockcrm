@@ -188,4 +188,41 @@ describe("field projects service", () => {
       perPage: 50,
     });
   });
+
+  it("preserves deal identifiers for duplicate-name field projects", async () => {
+    const db = tenantDb([
+      [{ total: 2 }],
+      [
+        {
+          id: "deal-1",
+          name: "Steeplechase",
+          deal_number: "HS-320839598785",
+          property_name: "Steeplechase",
+          property_address: "Knoxville, TN",
+          stage_name: "Estimate Sent to Client",
+          last_activity_at: new Date("2026-05-05T12:00:00.000Z"),
+          photo_count: 54,
+          starred: false,
+        },
+        {
+          id: "deal-2",
+          name: "Steeplechase",
+          deal_number: "HS-324283495135",
+          property_name: "Steeplechase",
+          property_address: null,
+          stage_name: "Due Diligence",
+          last_activity_at: new Date("2026-05-04T12:00:00.000Z"),
+          photo_count: 0,
+          starred: false,
+        },
+      ],
+    ]);
+
+    const result = await listFieldProjects(db, { userId: "field-1", userRole: "field_contractor" });
+
+    expect(result.projects.map((project) => ({ name: project.name, dealNumber: project.dealNumber }))).toEqual([
+      { name: "Steeplechase", dealNumber: "HS-320839598785" },
+      { name: "Steeplechase", dealNumber: "HS-324283495135" },
+    ]);
+  });
 });

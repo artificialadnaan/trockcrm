@@ -10,12 +10,16 @@ function ProjectCard({ project, onToggleStar }: { project: FieldProject; onToggl
     <Link
       to={`/projects/${project.id}`}
       className="block border-b border-border bg-white py-4 active:bg-muted"
-      aria-label={`Open ${project.name}`}
+      aria-label={`Open ${project.name} (${project.dealNumber})`}
     >
       <div className="flex items-start gap-3">
         <div className="min-w-0 flex-1">
           <h2 className="truncate text-lg font-bold">{project.name}</h2>
-          <p className="truncate text-sm text-muted-foreground">{project.propertyAddress || "No address on file"}</p>
+          <div className="mt-1 flex flex-wrap items-start gap-2 text-sm">
+            <p className="font-semibold text-foreground break-all">Deal # {project.dealNumber}</p>
+            <span className="rounded-full bg-muted px-2 py-0.5 text-xs font-bold text-muted-foreground">{project.stage}</span>
+          </div>
+          <p className="mt-1 truncate text-sm text-muted-foreground">{project.propertyAddress || "No address on file"}</p>
           <p className="mt-2 text-sm font-medium text-muted-foreground">
             {project.photoCount} photos • {relativeDate(project.lastActivityAt)}
           </p>
@@ -114,7 +118,7 @@ export function ProjectsPage() {
           autoFocus
           value={search}
           onInput={(event) => setSearch((event.target as HTMLInputElement).value)}
-          placeholder="Search name or address"
+          placeholder="Search name, deal #, or address"
           aria-label="Search projects"
         />
       ) : null}
