@@ -176,8 +176,8 @@ describe("SLA policy helpers", () => {
   });
 
   it("handles unknown stage or unsupported role gracefully", () => {
-    expect(getSlaPolicy("unknown-stage", "leadership")).toBeNull();
-    expect(getSlaPolicy("__proto__", "rep")).toBeNull();
+    expect(getSlaPolicy("unknown-stage" as never, "leadership")).toBeNull();
+    expect(getSlaPolicy("__proto__" as never, "rep")).toBeNull();
     expect(getSlaPolicy("opportunity", "bogus" as "rep")).toBeNull();
     for (const stageSlug of CANONICAL_TERMINAL_DEAL_STAGE_SLUGS) {
       expect(getSlaPolicy(stageSlug as never, "rep")).toBeNull();
