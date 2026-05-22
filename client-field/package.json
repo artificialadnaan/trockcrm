@@ -5,10 +5,11 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "build": "tsc -b --force && vite build",
+    "build": "tsc -b tsconfig.build.json --clean && tsc -b tsconfig.build.json --force && vite build",
     "preview": "vite preview",
     "start": "npx serve dist -s -l 3000",
     "typecheck": "tsc -b --force",
+    "typecheck:tests": "tsc -p tsconfig.json --noEmit",
     "test": "vitest run --coverage"
   },
   "dependencies": {
