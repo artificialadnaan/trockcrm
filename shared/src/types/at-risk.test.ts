@@ -89,6 +89,79 @@ describe("at-risk computation", () => {
     });
   });
 
+  it("clears at risk while a deal is actively on hold even when age exceeds the threshold", () => {
+    const result = getDealAtRiskResult(
+      {
+        stageSlug: "opportunity",
+        stageEnteredAt: "2026-05-01T00:00:00.000Z",
+        onHold: true,
+        onHoldStartedAt: "2026-05-20T00:00:00.000Z",
+        onHoldAccumulatedSeconds: 0,
+        onHoldAccumulatedSecondsAtStageEntry: 0,
+      },
+      "rep",
+      new Date("2026-05-22T00:00:00.000Z")
+    );
+
+    expect(result).toMatchObject({
+      isAtRisk: false,
+      status: "not_at_risk",
+      severity: "none",
+      reason: "on_hold",
+      effectiveStageAgeDays: 19,
+      thresholdDays: 7,
+      secondsUntilThreshold: 0,
+      secondsPastThreshold: 12 * DAY_SECONDS,
+    });
+  });
+
+  it("evaluates a formerly held deal normally after hold is released", () => {
+    const result = getDealAtRiskResult(
+      {
+        stageSlug: "opportunity",
+        stageEnteredAt: "2026-05-01T00:00:00.000Z",
+        onHold: false,
+        onHoldStartedAt: null,
+        onHoldAccumulatedSeconds: 2 * DAY_SECONDS,
+        onHoldAccumulatedSecondsAtStageEntry: 0,
+      },
+      "rep",
+      new Date("2026-05-12T00:00:00.000Z")
+    );
+
+    expect(result).toMatchObject({
+      isAtRisk: true,
+      status: "at_risk",
+      reason: "threshold_reached",
+      effectiveStageAgeDays: 9,
+      thresholdDays: 7,
+      secondsPastThreshold: 2 * DAY_SECONDS,
+    });
+  });
+
+  it("still marks a non-held deal over threshold as at risk", () => {
+    expect(
+      getDealAtRiskResult(
+        {
+          stageSlug: "opportunity",
+          stageEnteredAt: "2026-05-01T00:00:00.000Z",
+          onHold: false,
+          onHoldStartedAt: null,
+          onHoldAccumulatedSeconds: 0,
+          onHoldAccumulatedSecondsAtStageEntry: 0,
+        },
+        "rep",
+        new Date("2026-05-10T00:00:00.000Z")
+      )
+    ).toMatchObject({
+      isAtRisk: true,
+      status: "at_risk",
+      reason: "threshold_reached",
+      effectiveStageAgeDays: 9,
+      thresholdDays: 7,
+    });
+  });
+
   it("exempts terminal stages even when their age exceeds active-stage thresholds", () => {
     for (const stageSlug of ["won", "lost", "closed_won", "production_lost"] as const) {
       const result = getAtRiskResult({
@@ -105,6 +178,29 @@ describe("at-risk computation", () => {
         canonicalStageSlug: stageSlug === "lost" || stageSlug === "production_lost" ? "lost" : "won",
       });
     }
+  });
+
+  it("keeps terminal stages not applicable even when the terminal deal is on hold", () => {
+    const result = getDealAtRiskResult(
+      {
+        stageSlug: "won",
+        workflowRoute: "normal",
+        stageEnteredAt: "2026-05-01T00:00:00.000Z",
+        onHold: true,
+        onHoldStartedAt: "2026-05-20T00:00:00.000Z",
+        onHoldAccumulatedSeconds: 0,
+        onHoldAccumulatedSecondsAtStageEntry: 0,
+      },
+      "rep",
+      new Date("2026-05-22T00:00:00.000Z")
+    );
+
+    expect(result).toMatchObject({
+      isAtRisk: false,
+      status: "not_applicable",
+      reason: "terminal_stage",
+      canonicalStageSlug: "won",
+    });
   });
 
   it("handles zero age, unknown stages, and unsupported viewer roles without risk", () => {
