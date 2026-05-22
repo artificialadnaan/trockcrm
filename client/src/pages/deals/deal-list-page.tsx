@@ -460,6 +460,14 @@ function moneyValue(deal: Deal) {
   return getEffectiveDealValue(deal);
 }
 
+function isEngineAtRiskDeal(deal: Deal) {
+  return deal.atRisk?.isAtRisk === true && deal.atRisk.status === "at_risk";
+}
+
+function stageAgeDaysLabel(deal: Deal) {
+  return `${deal.atRisk?.effectiveStageAgeDays ?? daysInStage(deal.stageEnteredAt)}d`;
+}
+
 function compareDrilldownDeals(left: DrilldownListRow, right: DrilldownListRow, sort: DealListSortState) {
   const direction = sort.dir === "asc" ? 1 : -1;
   const textCompare = (a: string, b: string) => a.localeCompare(b) * direction;
@@ -749,8 +757,7 @@ function DealListPageContent({ role, userId }: { role: string; userId: string })
                   .filter((column) => !isTerminalStage(column.stage.slug))
                   .map((column) => {
                     const cards = column.cards.filter((deal) => {
-                      const sla = STAGE_SLA_DAYS[column.stage.slug] ?? 7;
-                      return sla > 0 && daysInStage(deal.stageEnteredAt) > sla && matchesUpdatedRange(deal, updatedFrom, updatedTo);
+                      return isEngineAtRiskDeal(deal) && matchesUpdatedRange(deal, updatedFrom, updatedTo);
                     });
                     return {
                       ...column,
@@ -806,8 +813,7 @@ function DealListPageContent({ role, userId }: { role: string; userId: string })
         .filter((column) => !isTerminalStage(column.stage.slug))
         .map((column) => {
           const cards = column.cards.filter((deal) => {
-            const sla = STAGE_SLA_DAYS[column.stage.slug] ?? 7;
-            return sla > 0 && daysInStage(deal.stageEnteredAt) > sla && matchesUpdatedRange(deal, updatedFrom, updatedTo);
+            return isEngineAtRiskDeal(deal) && matchesUpdatedRange(deal, updatedFrom, updatedTo);
           });
           return {
             ...column,
@@ -868,10 +874,7 @@ function DealListPageContent({ role, userId }: { role: string; userId: string })
       sum +
       (isTerminalStage(column.stage.slug)
         ? 0
-        : column.cards.filter((deal) => {
-            const sla = STAGE_SLA_DAYS[column.stage.slug] ?? 7;
-            return sla > 0 && daysInStage(deal.stageEnteredAt) > sla;
-          }).length),
+        : column.cards.filter(isEngineAtRiskDeal).length),
     0
   );
   const activePipelineDestination = buildDealsPageKpiDrilldownPath("active_pipeline", scope, undefined, {
@@ -1165,7 +1168,7 @@ function DealListPageContent({ role, userId }: { role: string; userId: string })
                       <p className="truncate text-sm font-black text-slate-950">{deal.name}</p>
                       <p className="mt-1 text-xs font-semibold uppercase tracking-[0.12em] text-slate-500">{deal.boardStageName}</p>
                     </div>
-                    <p className="text-sm font-semibold text-slate-500">{daysInStage(deal.stageEnteredAt)}d in stage</p>
+                    <p className="text-sm font-semibold text-slate-500">{stageAgeDaysLabel(deal)} in stage</p>
                     <p className="text-sm font-semibold text-slate-500">{formatDateInput(new Date(deal.updatedAt))}</p>
                     <p className="text-sm font-black text-slate-950">{USD_COMPACT(moneyValue(deal))}</p>
                   </button>

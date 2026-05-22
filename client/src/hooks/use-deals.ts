@@ -168,6 +168,7 @@ export interface Deal {
   onHold?: boolean;
   onHoldStartedAt?: string | null;
   onHoldAccumulatedSeconds?: number | null;
+  onHoldAccumulatedSecondsAtStageEntry?: number | null;
   contractSignedAt?: string | null;
   contractSignedDate: string | null;
   rfpApprovalRequestedAt?: string | null;
