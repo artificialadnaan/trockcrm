@@ -95,15 +95,13 @@ function normalizeOptionalDealBidDueDate(value: unknown) {
 }
 
 async function resolveActiveOfficeScope(tenantDb: TenantDb, activeOfficeId: string) {
-  const [office, officeUserIds] = await Promise.all([
-    db
-      .select({ slug: offices.slug, name: offices.name })
-      .from(offices)
-      .where(eq(offices.id, activeOfficeId))
-      .limit(1)
-      .then((rows) => rows[0] ?? null),
-    resolveActiveOfficeUserIds(tenantDb, activeOfficeId),
-  ]);
+  const officeRows = await db
+    .select({ slug: offices.slug, name: offices.name })
+    .from(offices)
+    .where(eq(offices.id, activeOfficeId))
+    .limit(1);
+  const office = officeRows[0] ?? null;
+  const officeUserIds = await resolveActiveOfficeUserIds(tenantDb, activeOfficeId);
 
   return {
     activeOfficeId,

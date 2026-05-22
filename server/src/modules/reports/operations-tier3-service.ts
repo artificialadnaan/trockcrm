@@ -549,6 +549,7 @@ export async function getProjectReadinessReport(
       ${activeDealJoins()}
       LEFT JOIN deal_scoping_intake dsi ON dsi.deal_id = d.id
       WHERE ${baseOpenDealWhere(filters)}
+        AND ${aliasedActiveDealCountFilterSql("d")}
       ORDER BY psc.display_order ASC, days_in_stage DESC
     `));
 

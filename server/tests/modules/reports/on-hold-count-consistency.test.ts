@@ -283,6 +283,9 @@ describe("on-hold report count consistency", () => {
     expect(marketMixSql).toContain("deal_count");
     expect(marketMixSql).toContain("wins");
     expect(marketMixSql).toContain("coalesce(d.on_hold, false) = false");
+    expect(marketMixSql).toMatch(
+      /count\(distinct d\.id\) filter \(where coalesce\(d\.on_hold, false\) = false\)::int as total_deal_count/
+    );
 
     const executiveDb = createMockTenantDb([[], [], [], [], []]);
     await getExecutiveTrendsReport(executiveDb, { from: "2026-01-01", to: "2026-12-31" });
@@ -310,7 +313,7 @@ describe("on-hold report count consistency", () => {
     const { getPipelineVelocityReport } = await import("../../../src/modules/reports/sales-tier1-service.js");
     const { getDirectorScorecard, getForecastAccuracyReport } = await import("../../../src/modules/reports/performance-tier2-service.js");
     const { getCustomerConcentrationReport, getExecutiveTrendsReport, getMarketMixReport } = await import("../../../src/modules/reports/analytics-tier4-service.js");
-    const { getWorkflowBottlenecksReport, getPortfolioLoadReport } = await import("../../../src/modules/reports/operations-tier3-service.js");
+    const { getWorkflowBottlenecksReport, getPortfolioLoadReport, getProjectReadinessReport } = await import("../../../src/modules/reports/operations-tier3-service.js");
     const {
       getClosedWonSummary,
       getRegionalOwnershipOverview,
@@ -364,6 +367,9 @@ describe("on-hold report count consistency", () => {
     await getMarketMixReport(marketMixDb, { from: "2026-02-01", to: "2026-02-28" });
     const marketMixSql = compactSql(marketMixDb.execute.mock.calls.map(([query]: [unknown]) => extractSqlText(query)).join("\n"));
     expect(marketMixSql).toMatch(/avg\(case when coalesce\(d\.on_hold, false\).*awarded_amount.*filter \( where psc\.slug in .* and coalesce\(d\.on_hold, false\) = false \)/);
+    expect(marketMixSql).toContain("count(distinct coalesce(nullif(c.industry::text, ''), nullif(d.project_type, ''), 'uncategorized')) filter (where coalesce(d.on_hold, false) = false)::int as active_markets");
+    expect(marketMixSql).toContain("and coalesce(d.on_hold, false) = false group by");
+    expect(marketMixSql).toContain("order by count(*) filter (where coalesce(d.on_hold, false) = false) desc");
 
     const customerDb = createMockTenantDb([[], [], [], []]);
     await getCustomerConcentrationReport(customerDb, { from: "2026-02-01", to: "2026-02-28" });
@@ -426,5 +432,10 @@ describe("on-hold report count consistency", () => {
     await getPortfolioLoadReport(portfolioDb, { from: "2026-02-01", to: "2026-02-28" });
     const portfolioSql = compactSql(extractSqlText(portfolioDb.execute.mock.calls[0][0]));
     expect(portfolioSql).toContain("coalesce(d.on_hold, false) = false");
+
+    const readinessDb = createMockTenantDb([]);
+    await getProjectReadinessReport(readinessDb, { from: "2026-02-01", to: "2026-02-28" });
+    const readinessSql = compactSql(extractSqlText(readinessDb.execute.mock.calls[0][0]));
+    expect(readinessSql).toContain("coalesce(d.on_hold, false) = false");
   });
 });

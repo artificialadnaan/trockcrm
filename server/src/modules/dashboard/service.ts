@@ -43,7 +43,7 @@ import {
   buildAliasedLeadMineVisibilityCondition,
   resolveMineVisibilityFeatures,
 } from "../shared/mine-visibility.js";
-import { aliasedEffectiveDealValueSql } from "../shared/deal-value-sql.js";
+import { aliasedEffectiveAwardedDealValueSql, aliasedEffectiveDealValueSql } from "../shared/deal-value-sql.js";
 
 type TenantDb = NodePgDatabase<typeof schema>;
 type ExecuteRows<T> = { rows: T[] } | T[];
@@ -535,6 +535,7 @@ async function getDownstreamBottlenecks(
     ) latest_current_stage_entered_at ON true
     WHERE d.is_active = true
       AND COALESCE(d.bid_board_stage_slug, psc.slug) IN (${sql.join(MIRRORED_DOWNSTREAM_STAGE_SLUGS.map((slug) => sql`${slug}`), sql`, `)})
+      AND COALESCE(d.on_hold, false) = false
       ${repFilter}
     ORDER BY
       GREATEST(
@@ -2041,8 +2042,8 @@ async function getWonCloseSummary(
   const repFilter = dealScopeFilterSql("d", options);
   const result = await tenantDb.execute(sql`
     SELECT
-      COUNT(*)::int AS won_count,
-      COALESCE(SUM(${dealValueSql()}), 0)::numeric AS won_value
+      COUNT(*) FILTER (WHERE COALESCE(d.on_hold, false) = false)::int AS won_count,
+      COALESCE(SUM(${aliasedEffectiveAwardedDealValueSql("d")}), 0)::numeric AS won_value
     FROM ${deals} d
     JOIN ${pipelineStageConfig} psc ON psc.id = d.stage_id
     WHERE d.is_active = true
@@ -2139,6 +2140,7 @@ async function getDashboardStaleDeals(
     WHERE d.is_active = true
       AND COALESCE(d.is_test_data, false) = false
       AND ${nonTerminalDealStageSql()}
+      AND COALESCE(d.on_hold, false) = false
       AND COALESCE(mirror_psc.stale_threshold_days, psc.stale_threshold_days) IS NOT NULL
       AND EXTRACT(DAY FROM NOW() - COALESCE(d.bid_board_stage_entered_at, d.stage_entered_at))
         > COALESCE(mirror_psc.stale_threshold_days, psc.stale_threshold_days)
@@ -2462,6 +2464,7 @@ async function buildRepPerformanceCards(
       JOIN pipeline_stage_config psc ON psc.id = d.stage_id
       WHERE d.is_active = true
         AND ${nonTerminalDealStageSql()}
+        AND COALESCE(d.on_hold, false) = false
         AND psc.stale_threshold_days IS NOT NULL
         AND EXTRACT(DAY FROM NOW() - d.stage_entered_at) > psc.stale_threshold_days
       GROUP BY d.assigned_rep_id
@@ -2738,14 +2741,14 @@ export async function getAdminDashboardSummary(
   tenantDb: TenantDb,
   activeOfficeId: string
 ): Promise<AdminDashboardSummary> {
-  const [aiActions, interventions, disconnects, mergeQueue, migration, audit, procore] = await Promise.all([
-    readAiActionSummary(tenantDb, activeOfficeId),
-    readInterventionSummary(tenantDb, activeOfficeId),
-    readDisconnectSummary(tenantDb, activeOfficeId),
-    readMergeQueueSummary(tenantDb, activeOfficeId),
-    readMigrationSummary(tenantDb, activeOfficeId),
-    readAuditSummary(tenantDb, activeOfficeId),
-    readProcoreSummary(tenantDb, activeOfficeId),
+  const [aiActions, interventions, disconnects, mergeQueue, migration, audit, procore] = await runSequential([
+    () => readAiActionSummary(tenantDb, activeOfficeId),
+    () => readInterventionSummary(tenantDb, activeOfficeId),
+    () => readDisconnectSummary(tenantDb, activeOfficeId),
+    () => readMergeQueueSummary(tenantDb, activeOfficeId),
+    () => readMigrationSummary(tenantDb, activeOfficeId),
+    () => readAuditSummary(tenantDb, activeOfficeId),
+    () => readProcoreSummary(tenantDb, activeOfficeId),
   ]);
 
   return {

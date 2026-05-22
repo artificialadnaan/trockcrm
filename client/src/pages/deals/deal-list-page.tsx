@@ -36,7 +36,6 @@ import { DealsListSection } from "@/components/deals/deals-list-section";
 import type { DealFilters } from "@/hooks/use-deals";
 import type { DealListSortState } from "@/components/deals/deals-list-section";
 import { resolvePreferredScope, writeStoredScopePreference } from "@/lib/scope-preferences";
-import { getEffectiveDealValue } from "@trock-crm/shared/types";
 
 const SCOPE_OPTIONS = [
   { value: "mine", label: "Mine" },

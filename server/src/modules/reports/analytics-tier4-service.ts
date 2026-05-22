@@ -260,9 +260,9 @@ export async function getMarketMixReport(
 
     const kpiRows = await tenantDb.execute(sql`
         SELECT
-          COUNT(DISTINCT d.id)::int AS total_deal_count,
+          COUNT(DISTINCT d.id) FILTER (WHERE ${aliasedActiveDealCountFilterSql("d")})::int AS total_deal_count,
           COALESCE(SUM(${wonValueExpr}) FILTER (WHERE psc.slug IN (${sqlStringList(WON_STAGE_SLUGS)})), 0)::numeric AS total_won_value,
-          COUNT(DISTINCT ${verticalExpr})::int AS active_markets,
+          COUNT(DISTINCT ${verticalExpr}) FILTER (WHERE ${aliasedActiveDealCountFilterSql("d")})::int AS active_markets,
           COALESCE((
             SELECT ${regionExpr}
             FROM deals d
@@ -271,8 +271,9 @@ export async function getMarketMixReport(
             LEFT JOIN region_config rc ON rc.id = d.region_id
             LEFT JOIN users u ON u.id = d.assigned_rep_id
             WHERE ${where}
+              AND ${aliasedActiveDealCountFilterSql("d")}
             GROUP BY ${regionExpr}
-            ORDER BY COUNT(*) DESC
+            ORDER BY COUNT(*) FILTER (WHERE ${aliasedActiveDealCountFilterSql("d")}) DESC
             LIMIT 1
           ), 'Uncategorized') AS most_active_region
         FROM deals d

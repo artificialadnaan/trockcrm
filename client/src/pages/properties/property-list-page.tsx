@@ -82,7 +82,10 @@ export function PropertyListPage() {
   const pageItems = properties.slice((currentPage - 1) * pageSize, currentPage * pageSize);
 
   const totals = useMemo(() => {
-    const activeOpportunities = properties.reduce((sum, property) => sum + property.leadCount + property.dealCount, 0);
+    const activeOpportunities = properties.reduce(
+      (sum, property) => sum + property.leadCount + (property.activeDealsCount ?? property.dealCount),
+      0
+    );
     const linkedPipeline = properties.reduce((sum, property) => sum + numeric(property.linkedValue ?? property.activePipelineValue), 0);
     const roofArea = properties.reduce((sum, property) => sum + (property.roofArea ?? 0), 0);
     const stale = properties.filter((property) => isStale(property.lastActivityAt)).length;

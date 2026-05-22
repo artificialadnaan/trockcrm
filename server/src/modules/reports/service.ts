@@ -837,6 +837,7 @@ export async function getStaleDeals(
     WHERE d.is_active = true
       AND COALESCE(d.is_test_data, false) = false
       AND ${nonTerminalDealStageSql()}
+      AND ${aliasedActiveDealCountFilterSql("d")}
       AND COALESCE(mirror_psc.stale_threshold_days, psc.stale_threshold_days) IS NOT NULL
       AND EXTRACT(DAY FROM NOW() - COALESCE(d.bid_board_stage_entered_at, d.stage_entered_at))
         > COALESCE(mirror_psc.stale_threshold_days, psc.stale_threshold_days)

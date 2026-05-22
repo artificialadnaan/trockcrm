@@ -248,11 +248,13 @@ export function buildPropertyEngagementStatus(input: {
 
 export function buildPropertyRelationshipCounts(input: {
   leads: Array<{ isActive: boolean }>;
-  deals: Array<{ isActive: boolean; sourceLeadId?: string | null }>;
+  deals: Array<{ isActive: boolean; onHold?: boolean | null; sourceLeadId?: string | null }>;
 }) {
+  const activeDeals = input.deals.filter((deal) => deal.isActive);
   return {
     leadCount: input.leads.filter((lead) => lead.isActive).length,
-    dealCount: input.deals.filter((deal) => deal.isActive).length,
+    dealCount: activeDeals.length,
+    activeDealsCount: activeDeals.filter((deal) => !deal.onHold).length,
     convertedDealCount: input.deals.filter((deal) => Boolean(deal.sourceLeadId)).length,
   };
 }
@@ -340,6 +342,11 @@ export async function listProperties(
     .from(deals)
     .where(and(inArray(deals.propertyId, propertyIds), eq(deals.isActive, true)))
     .groupBy(deals.propertyId);
+  const activeDealCounts = await tenantDb
+    .select({ propertyId: deals.propertyId, count: count() })
+    .from(deals)
+    .where(and(inArray(deals.propertyId, propertyIds), eq(deals.isActive, true), sql`COALESCE(${deals.onHold}, false) = false`))
+    .groupBy(deals.propertyId);
   const convertedCounts = await tenantDb
     .select({ propertyId: deals.propertyId, count: count() })
     .from(deals)
@@ -394,6 +401,7 @@ export async function listProperties(
 
   const leadCountMap = new Map(leadCounts.map((row) => [row.propertyId, coerceCount(row.count)]));
   const dealCountMap = new Map(dealCounts.map((row) => [row.propertyId, coerceCount(row.count)]));
+  const activeDealCountMap = new Map(activeDealCounts.map((row) => [row.propertyId, coerceCount(row.count)]));
   const convertedCountMap = new Map(convertedCounts.map((row) => [row.propertyId, coerceCount(row.count)]));
   const leadActivityMap = new Map(leadActivity.map((row) => [row.propertyId, coerceTimestamp(row.lastActivityAt)]));
   const dealActivityMap = new Map(dealActivity.map((row) => [row.propertyId, coerceTimestamp(row.lastActivityAt)]));
@@ -406,6 +414,7 @@ export async function listProperties(
       ...row,
       leadCount: leadCountMap.get(row.id) ?? 0,
       dealCount: dealCountMap.get(row.id) ?? 0,
+      activeDealsCount: activeDealCountMap.get(row.id) ?? 0,
       convertedDealCount: convertedCountMap.get(row.id) ?? 0,
       lastActivityAt: buildPropertyLastActivityAt({
         persistedLastActivityAt: coerceTimestamp(row.lastActivityAt),
@@ -413,7 +422,7 @@ export async function listProperties(
         dealActivityAt: dealActivityMap.get(row.id) ?? null,
       }),
       engagementStatus: classifyPropertyEngagementStatus({
-        dealCount: dealCountMap.get(row.id) ?? 0,
+        dealCount: activeDealCountMap.get(row.id) ?? 0,
         leadCount: leadCountMap.get(row.id) ?? 0,
         convertedDealCount: convertedCountMap.get(row.id) ?? 0,
       }),

@@ -102,6 +102,45 @@ describe("PropertyListPage", () => {
     expect(html).toContain("Won project");
   });
 
+  it("uses active non-held deal counts for active opportunity totals paired with linked pipeline value", () => {
+    mocks.usePropertiesMock.mockReturnValue({
+      properties: [
+        {
+          id: "property-held",
+          companyId: "company-1",
+          companyName: "Alpha Roofing",
+          name: "Held Mix",
+          address: "123 Main St",
+          city: "Dallas",
+          state: "TX",
+          zip: "75201",
+          notes: null,
+          type: "industrial",
+          roofArea: 125000,
+          linkedValue: "300000",
+          activePipelineValue: "300000",
+          engagementStatus: "active_deal",
+          photosCount: 0,
+          isActive: true,
+          createdAt: "2026-04-10T10:00:00.000Z",
+          updatedAt: "2026-04-11T10:00:00.000Z",
+          leadCount: 2,
+          dealCount: 3,
+          activeDealsCount: 1,
+          convertedDealCount: 0,
+          lastActivityAt: "2026-04-11T09:00:00.000Z",
+        },
+      ],
+      loading: false,
+      error: null,
+    });
+
+    const html = normalize(renderPage());
+
+    expect(html).toMatch(/Active opportunities.*?>3</);
+    expect(html).not.toMatch(/Active opportunities.*?>5</);
+  });
+
   it("renders visible pagination buttons with a distinct disabled state", async () => {
     mocks.usePropertiesMock.mockReturnValue({
       properties: Array.from({ length: 51 }, (_, index) => ({

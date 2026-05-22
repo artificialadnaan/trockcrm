@@ -74,7 +74,7 @@ describe("formatSignedDate", () => {
     expect(formatSignedDate(null)).toBe("—");
   });
 
-  it("keeps total awarded on the awarded-amount basis instead of falling back to bid or DD estimates", () => {
+  it("matches the rep dashboard card raw awarded-amount semantics for signed contracts", () => {
     mocks.useDealsMock.mockReturnValue({
       deals: [
         {
@@ -126,10 +126,16 @@ describe("formatSignedDate", () => {
 
     const html = renderPage();
 
+    expect(mocks.useDealsMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        isActive: "all",
+      })
+    );
+    expect(html).toContain("$1.0M");
     expect(html).toContain("$125K");
+    expect(html).toContain("$900K");
     expect(html).toContain("No Award Yet");
     expect(html).toContain("Held Deal");
     expect(html).not.toContain("$375K");
-    expect(html).not.toContain("$1.03M");
   });
 });

@@ -7,7 +7,6 @@ import { PageHeader } from "@/components/layout/page-header";
 import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { formatCurrency } from "@/components/charts/chart-colors";
-import { getEffectiveAwardedDealValue } from "@trock-crm/shared/types";
 
 type Period = "ytd" | "mtd";
 
@@ -52,6 +51,10 @@ function buildPropertyLine(deal: Deal): string {
   return parts.length > 0 ? parts.join(", ") : "No property address on file";
 }
 
+function awardedDealValue(deal: Deal): number {
+  return Number(deal.awardedAmount ?? 0);
+}
+
 export function ContractsSignedPage() {
   const navigate = useNavigate();
   const { user } = useAuth();
@@ -70,13 +73,14 @@ export function ContractsSignedPage() {
     assignedRepId: user?.id,
     contractSignedFrom,
     contractSignedTo: today,
+    isActive: "all",
     sortBy: "contract_signed_date",
     sortDir: "desc",
     limit: 100,
   });
 
   const totalValue = useMemo(
-    () => deals.reduce((sum, d) => sum + getEffectiveAwardedDealValue(d), 0),
+    () => deals.reduce((sum, d) => sum + awardedDealValue(d), 0),
     [deals]
   );
 
@@ -172,7 +176,7 @@ export function ContractsSignedPage() {
                 </div>
                 <div className="shrink-0 text-right">
                   <p className="text-sm font-semibold text-slate-900">
-                    {formatCurrency(getEffectiveAwardedDealValue(deal))}
+                    {formatCurrency(awardedDealValue(deal))}
                   </p>
                   <p className="mt-1 text-xs text-slate-500">Open deal</p>
                 </div>

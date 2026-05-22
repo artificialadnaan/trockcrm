@@ -30,6 +30,7 @@ export interface PropertySurface {
   updatedAt: string;
   leadCount: number;
   dealCount: number;
+  activeDealsCount?: number;
   convertedDealCount: number;
   lastActivityAt: string | null;
   engagementStatus?: "active_deal" | "active_lead" | "won" | "no_engagement";
