@@ -21,6 +21,8 @@
     "start:client": "npx serve client/dist -s -l 3000",
     "start:field": "npm run start --workspace=client-field",
     "typecheck": "npm run build --workspace=shared && npm run typecheck --workspaces",
+    "typecheck:tests:all": "npm run typecheck:tests --workspaces --if-present",
+    "check:premerge": "npm run build && npm run typecheck:tests:all",
     "test": "npm run test --workspace=server",
     "validate:admin-users-volume": "node scripts/playwright-admin-users-volume-validation.mjs",
     "script": "node --import tsx scripts/run-script.ts",
