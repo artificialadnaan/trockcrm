@@ -1,3 +1,4 @@
+import { sql } from "drizzle-orm";
 import {
   pgTable,
   pgEnum,
@@ -12,6 +13,7 @@ import {
   index,
 } from "drizzle-orm/pg-core";
 import { CONTACT_CATEGORIES, CONTACT_ROLES } from "../../types/enums.js";
+import { users } from "../public/users.js";
 
 export const contactCategoryEnum = pgEnum("contact_category", CONTACT_CATEGORIES);
 export const contactRoleEnum = pgEnum("contact_role", CONTACT_ROLES);
@@ -27,6 +29,7 @@ export const contacts = pgTable(
     mobile: varchar("mobile", { length: 20 }),
     companyName: varchar("company_name", { length: 500 }),
     companyId: uuid("company_id"),
+    ownerId: uuid("owner_id").references(() => users.id, { onDelete: "set null" }),
     jobTitle: varchar("job_title", { length: 255 }),
     category: contactCategoryEnum("category").notNull(),
     role: contactRoleEnum("role"),
@@ -53,5 +56,6 @@ export const contacts = pgTable(
   (table) => [
     index("contacts_name_company_idx").on(table.companyName),
     index("contacts_role_idx").on(table.role),
+    index("contacts_owner_id_idx").on(table.ownerId).where(sql`${table.ownerId} IS NOT NULL`),
   ]
 );

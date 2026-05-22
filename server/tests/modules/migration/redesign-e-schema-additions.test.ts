@@ -41,9 +41,9 @@ describe("redesign E schema additions migration", () => {
   });
 
   it("keeps Drizzle declarations aligned with the migration contract", () => {
-    expect(companiesSchema).toContain('ownerUserId: uuid("owner_user_id").references(() => users.id, { onDelete: "set null" })');
+    expect(companiesSchema).toContain('ownerId: uuid("owner_id").references(() => users.id, { onDelete: "set null" })');
     expect(companiesSchema).toContain('hubspotCompanyId: text("hubspot_company_id")');
-    expect(companiesSchema).toContain('index("companies_owner_user_idx").on(table.ownerUserId).where');
+    expect(companiesSchema).toContain('index("companies_owner_id_idx").on(table.ownerId).where');
     expect(companiesSchema).toContain('index("companies_region_idx").on(table.region).where');
     expect(propertiesSchema).toContain('propertyType: text("property_type")');
     expect(propertiesSchema).toContain('procorePropertyId: text("procore_property_id")');
