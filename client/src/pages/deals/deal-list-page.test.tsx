@@ -1168,13 +1168,13 @@ describe("DealListPage", () => {
         enableExport: true,
         scope: "all",
         initialSort: { key: "updated_at", dir: "desc" },
-        paginationCountSummary: { active: 2, total: 2 },
         baseFilters: expect.objectContaining({
           updatedFrom: "2026-01-01",
           updatedTo: "2026-05-08",
         }),
       })
     );
+    expect(mocks.dealsListSectionMock.mock.calls[0]?.[0]).not.toHaveProperty("paginationCountSummary");
   });
 
   it("treats period as a separate query param in active-pipeline drill-down urls", () => {

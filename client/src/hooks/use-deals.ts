@@ -301,6 +301,7 @@ export interface Pagination {
   page: number;
   limit: number;
   total: number;
+  activeCount?: number;
   totalPages: number;
 }
 

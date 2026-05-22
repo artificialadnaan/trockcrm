@@ -1281,6 +1281,9 @@ export async function getDeals(tenantDb: TenantDb, filters: DealFilters, userRol
   }
 
   const where = conditions.length > 0 ? and(...conditions) : undefined;
+  const activeCountWhere = where
+    ? and(where, sql`coalesce(${deals.onHold}, false) = false`)
+    : sql`coalesce(${deals.onHold}, false) = false`;
 
   // Sort
   const sortOrder = buildDealListOrder(filters);
@@ -1288,6 +1291,10 @@ export async function getDeals(tenantDb: TenantDb, filters: DealFilters, userRol
   // Sequential tenant queries required: tenantDb is a single transaction client
   // in production, so parallel reads can fail with "client already executing".
   const countResult = await tenantDb.select({ count: sql<number>`count(*)` }).from(deals).where(where);
+  const activeCountResult = await tenantDb
+    .select({ count: sql<number>`count(*)` })
+    .from(deals)
+    .where(activeCountWhere);
   const dealRows = await tenantDb
     .select({
       ...getTableColumns(deals),
@@ -1301,6 +1308,7 @@ export async function getDeals(tenantDb: TenantDb, filters: DealFilters, userRol
     .offset(offset);
 
   const total = Number(countResult[0]?.count ?? 0);
+  const activeCount = Number(activeCountResult[0]?.count ?? total);
 
   return {
     deals: dealRows,
@@ -1308,6 +1316,7 @@ export async function getDeals(tenantDb: TenantDb, filters: DealFilters, userRol
       page,
       limit,
       total,
+      activeCount,
       totalPages: Math.ceil(total / limit),
     },
   };

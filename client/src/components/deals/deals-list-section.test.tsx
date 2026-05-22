@@ -552,6 +552,21 @@ describe("DealsListSection", () => {
     expect(html).not.toContain("60 total records");
   });
 
+  it("derives the active-versus-total badge from the filtered list query pagination when available", () => {
+    mocks.useDealsMock.mockReturnValue({
+      deals: [makeDeal(), makeDeal({ id: "deal-2", name: "Second" })],
+      pagination: { page: 1, limit: 25, total: 7, totalPages: 1, activeCount: 3 },
+      loading: false,
+      error: null,
+      refetch: vi.fn(),
+    });
+
+    const html = render();
+
+    expect(html).toContain("3/7 active records");
+    expect(html).not.toContain("7 total records");
+  });
+
   it("resets pagination when the drill-down context changes", async () => {
     mocks.useDealsMock.mockImplementation((input: { page: number }) => ({
       deals: [makeDeal({ id: `deal-page-${input.page}` })],

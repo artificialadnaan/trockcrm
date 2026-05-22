@@ -3,7 +3,11 @@ import type { NodePgDatabase } from "drizzle-orm/node-postgres";
 import type * as schema from "@trock-crm/shared/schema";
 import type { UserRole } from "@trock-crm/shared/types";
 import { buildOfficeMatcher } from "./office-filter.js";
-import { aliasedDealBestEstimateWithForecastSql, aliasedEffectiveDealValueSql } from "../shared/deal-value-sql.js";
+import {
+  aliasedDealBestEstimateWithForecastSql,
+  aliasedEffectiveAwardedDealValueSql,
+  aliasedEffectiveDealValueSql,
+} from "../shared/deal-value-sql.js";
 
 type TenantDb = NodePgDatabase<typeof schema>;
 type ExecuteRows = { rows: unknown[] } | unknown[];
@@ -744,7 +748,7 @@ export async function getForecastAccuracyReport(db: TenantDb, filters: Performan
     const [summary, monthly, atRisk] = await Promise.all([
       db.execute(sql`
         WITH won_period AS (
-          SELECT COALESCE(SUM(${aliasedEffectiveDealValueSql("d")}), 0)::numeric AS won_actual
+          SELECT COALESCE(SUM(${aliasedEffectiveAwardedDealValueSql("d")}), 0)::numeric AS won_actual
           FROM deals d
           JOIN users u ON u.id = d.assigned_rep_id
           JOIN offices o ON o.id = u.office_id
@@ -774,7 +778,7 @@ export async function getForecastAccuracyReport(db: TenantDb, filters: Performan
           COALESCE(SUM(${forecastValue}) FILTER (WHERE psc.slug IN (${sqlStringList(commitSlugs)})), 0)::numeric AS commit,
           COALESCE(SUM(${forecastValue}) FILTER (WHERE psc.slug IN (${sqlStringList(bestCaseSlugs)})), 0)::numeric AS best_case,
           COALESCE(SUM(${weightedValue}) FILTER (WHERE psc.slug NOT IN (${sqlStringList(terminalSlugs)})), 0)::numeric AS pipeline_weighted,
-          COALESCE(SUM(${aliasedEffectiveDealValueSql("d")}) FILTER (WHERE psc.slug IN (${sqlStringList(wonSlugs)})), 0)::numeric AS won_actual
+          COALESCE(SUM(${aliasedEffectiveAwardedDealValueSql("d")}) FILTER (WHERE psc.slug IN (${sqlStringList(wonSlugs)})), 0)::numeric AS won_actual
         FROM months m
         LEFT JOIN deals d ON COALESCE(d.expected_close_date, d.actual_close_date, d.contract_signed_date, d.updated_at::date) >= m.month_start
           AND COALESCE(d.expected_close_date, d.actual_close_date, d.contract_signed_date, d.updated_at::date) < (m.month_start + INTERVAL '1 month')

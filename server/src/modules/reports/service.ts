@@ -16,7 +16,10 @@ import type * as schema from "@trock-crm/shared/schema";
 import type { DealScopingIntakeStatus, WorkflowRoute } from "@trock-crm/shared/types";
 import { db } from "../../db.js";
 import { TERMINAL_STAGE_SLUGS } from "../shared/pipeline-terminal-stages.js";
-import { aliasedEffectiveDealValueSql } from "../shared/deal-value-sql.js";
+import {
+  aliasedEffectiveAwardedDealValueSql,
+  aliasedEffectiveDealValueSql,
+} from "../shared/deal-value-sql.js";
 
 type TenantDb = NodePgDatabase<typeof schema>;
 type ExecuteRows<T> = { rows: T[] } | T[];
@@ -1029,7 +1032,7 @@ export async function getLeadSourceROI(
         ${aliasedEffectiveDealValueSql("d")}
       ) FILTER (WHERE d.is_active = true AND ${nonTerminalDealStageSql()}), 0)::numeric AS active_pipeline_value,
       COALESCE(SUM(
-        ${aliasedEffectiveDealValueSql("d")}
+        ${aliasedEffectiveAwardedDealValueSql("d")}
       ) FILTER (WHERE psc.slug IN (${sqlSlugList(WON_OUTCOME_STAGE_SLUGS)})), 0)::numeric AS won_value
     FROM deals d
     LEFT JOIN deal_scoping_intake dsi ON dsi.deal_id = d.id
@@ -1737,7 +1740,7 @@ export async function getClosedWonSummary(
       SELECT
         COUNT(*)::int AS total_won_deals,
         COALESCE(SUM(
-          ${aliasedEffectiveDealValueSql("d")}
+          ${aliasedEffectiveAwardedDealValueSql("d")}
         ), 0)::numeric AS total_won_value,
         COALESCE(AVG(
           EXTRACT(DAY FROM d.actual_close_date::timestamp - d.created_at)
@@ -1755,7 +1758,7 @@ export async function getClosedWonSummary(
         u.display_name AS rep_name,
         COUNT(*)::int AS deal_count,
         COALESCE(SUM(
-          ${aliasedEffectiveDealValueSql("d")}
+          ${aliasedEffectiveAwardedDealValueSql("d")}
         ), 0)::numeric AS total_value
       FROM deals d
       JOIN pipeline_stage_config psc ON psc.id = d.stage_id
@@ -1773,7 +1776,7 @@ export async function getClosedWonSummary(
         COALESCE(ptc.name, 'Unspecified') AS project_type_name,
         COUNT(*)::int AS deal_count,
         COALESCE(SUM(
-          ${aliasedEffectiveDealValueSql("d")}
+          ${aliasedEffectiveAwardedDealValueSql("d")}
         ), 0)::numeric AS total_value
       FROM deals d
       LEFT JOIN project_type_config ptc ON ptc.id = d.project_type_id
@@ -2641,7 +2644,7 @@ export async function getRepPerformanceComparison(
           AND dsh.created_at <= (${current.to}::date + INTERVAL '1 day')::timestamptz
       )::int AS cur_lost,
       COALESCE(SUM(
-        ${aliasedEffectiveDealValueSql("d")}
+        ${aliasedEffectiveAwardedDealValueSql("d")}
       ) FILTER (
         WHERE psc.slug IN (${sqlSlugList(WON_OUTCOME_STAGE_SLUGS)})
           AND dsh.created_at >= ${current.from}::timestamptz
@@ -2663,7 +2666,7 @@ export async function getRepPerformanceComparison(
           AND dsh.created_at <= (${previous.to}::date + INTERVAL '1 day')::timestamptz
       )::int AS prev_lost,
       COALESCE(SUM(
-        ${aliasedEffectiveDealValueSql("d")}
+        ${aliasedEffectiveAwardedDealValueSql("d")}
       ) FILTER (
         WHERE psc.slug IN (${sqlSlugList(WON_OUTCOME_STAGE_SLUGS)})
           AND dsh.created_at >= ${previous.from}::timestamptz

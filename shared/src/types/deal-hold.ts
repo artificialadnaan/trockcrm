@@ -56,6 +56,10 @@ function getRawDealValue(deal: DealValueLike): number {
   return toNumber(deal.ddEstimate);
 }
 
+function getRawAwardedDealValue(deal: DealValueLike): number {
+  return toNumber(deal.awardedAmount);
+}
+
 export function getHoldStateAtStageEntry(
   deal: DealHoldStageEntryLike,
   stageEnteredAt: Date
@@ -93,6 +97,10 @@ export function getHoldStateAtStageEntry(
 
 export function getEffectiveDealValue(deal: DealValueLike): number {
   return deal.onHold ? 0 : getRawDealValue(deal);
+}
+
+export function getEffectiveAwardedDealValue(deal: DealValueLike): number {
+  return deal.onHold ? 0 : getRawAwardedDealValue(deal);
 }
 
 export function getEffectiveStageAgeSeconds(

@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   aliasedActiveDealCountFilterSql,
+  aliasedEffectiveAwardedDealValueSql,
   aliasedDealBestEstimateSql,
   aliasedDealBestEstimateWithForecastSql,
   aliasedEffectiveDealValueSql,
@@ -28,5 +29,13 @@ describe("deal-value-sql", () => {
 
   it("builds the base best-estimate expression once for raw-value consumers", () => {
     expect(normalize(aliasedDealBestEstimateSql("d"))).toContain("d.awarded_amount");
+  });
+
+  it("exposes an awarded-only on-hold-aware expression for won/booked rollups", () => {
+    const normalized = normalize(aliasedEffectiveAwardedDealValueSql("d"));
+    expect(normalized).toContain("d.on_hold");
+    expect(normalized).toContain("d.awarded_amount");
+    expect(normalized).not.toContain("d.bid_estimate");
+    expect(normalized).not.toContain("d.dd_estimate");
   });
 });

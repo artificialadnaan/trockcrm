@@ -563,6 +563,11 @@ export function DealsListSection({
   );
   const selectedOwnerLabel =
     ownerId === "__all__" ? "All reps" : assigneeNameById.get(ownerId) ?? "Selected rep";
+  const derivedCountSummary =
+    paginationCountSummary ??
+    (typeof pagination.activeCount === "number"
+      ? { active: pagination.activeCount, total: pagination.total }
+      : undefined);
 
   useEffect(() => {
     setPage(1);
@@ -1043,7 +1048,7 @@ export function DealsListSection({
               page={pagination.page}
               total={pagination.total}
               totalPages={pagination.totalPages || 1}
-              countSummary={paginationCountSummary}
+              countSummary={derivedCountSummary}
               onPageChange={setPage}
             />
           </>
