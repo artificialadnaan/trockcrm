@@ -245,6 +245,60 @@ describe("commission reporting service", () => {
     expect(sqlText).not.toContain("date_trunc('year', current_date)");
   });
 
+  it("excludes on-hold deals from every commission value and paired deal count population", async () => {
+    const {
+      getCommissionPotential,
+      getCommissionEarned,
+      getCommissionSummary,
+      getRepCommissionDashboard,
+    } = await import("../../../src/modules/commissions/reporting-service.js");
+    const tenantDb = createMockTenantDb([
+      [],
+      [],
+      [],
+      [{ earned_mtd: "0", earned_ytd: "0", potential_pipeline: "0", paid_ytd: "0" }],
+      [],
+      [],
+    ]);
+    const filters = {
+      role: "admin",
+      userId: "admin-1",
+      from: "2026-01-01",
+      to: "2026-12-31",
+      stages: [],
+    } as const;
+
+    await getCommissionPotential(tenantDb, filters);
+    await getCommissionEarned(tenantDb, filters);
+    await getCommissionSummary(tenantDb, filters);
+    await getRepCommissionDashboard(tenantDb, { ...filters, period: "ytd" });
+
+    const queries = tenantDb.execute.mock.calls.map((call: any[]) =>
+      extractSqlText(call[0]).toLowerCase()
+    );
+    const potentialQuery = queries.find((text: string) =>
+      text.includes("potential_commission") && text.includes("count(*)::int as deal_count")
+    ) ?? "";
+    const earnedMonthQuery = queries.find((text: string) =>
+      text.includes("earned_commission") && text.includes("count(distinct dsc.deal_id)::int as deal_count")
+    ) ?? "";
+    const earnedDealQuery = queries.find((text: string) =>
+      text.includes("dsc.amount as earned_commission") && text.includes("source_value_amount")
+    ) ?? "";
+    const summaryQuery = queries.find((text: string) =>
+      text.includes("earned_mtd") && text.includes("potential_pipeline")
+    ) ?? "";
+    const dashboardQuery = queries.find((text: string) =>
+      text.includes("with commission_rows as")
+    ) ?? "";
+
+    expect(potentialQuery).toContain("coalesce(d.on_hold, false) = false");
+    expect(earnedMonthQuery).toContain("coalesce(d.on_hold, false) = false");
+    expect(earnedDealQuery).toContain("coalesce(d.on_hold, false) = false");
+    expect(summaryQuery.match(/coalesce\(d\.on_hold, false\) = false/g)?.length ?? 0).toBeGreaterThanOrEqual(3);
+    expect(dashboardQuery.match(/coalesce\(d\.on_hold, false\) = false/g)?.length ?? 0).toBeGreaterThanOrEqual(2);
+  });
+
   it("counts historical contract_signed_date rows as earned without requiring won stage", async () => {
     const { getCommissionEarned } = await import("../../../src/modules/commissions/reporting-service.js");
     const tenantDb = createMockTenantDb([

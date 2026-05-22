@@ -744,6 +744,7 @@ describe("Dashboard Service", () => {
         .find((text: string) => text.includes("as override_earned"));
 
       expect(overrideQuery).toContain("sum(dsc.amount *");
+      expect(overrideQuery).toContain("coalesce(d.on_hold, false) = false");
       expect(overrideQuery).not.toContain("sum(dsc.source_value_amount *");
     });
 
@@ -824,6 +825,7 @@ describe("Dashboard Service", () => {
       });
       expect(potentialQuery).toContain("contract_signed_at is null");
       expect(potentialQuery).toContain("contract_signed_date is null");
+      expect(potentialQuery).toContain("coalesce(d.on_hold, false) = false");
       expect(potentialQuery).toContain("opportunity");
       expect(potentialQuery).toContain("contract");
       expect(potentialQuery).toContain("estimate_sent_to_client");
@@ -831,7 +833,73 @@ describe("Dashboard Service", () => {
       expect(potentialQuery).not.toContain("estimated_margin_rate");
       expect(pipelineSummaryQuery).toContain("contract_signed_at is null");
       expect(pipelineSummaryQuery).toContain("contract_signed_date is null");
+      expect(pipelineSummaryQuery.match(/coalesce\(d\.on_hold, false\) = false/g)?.length ?? 0).toBeGreaterThanOrEqual(2);
       expect(pipelineSummaryQuery).not.toContain("is_terminal");
+    });
+
+    it("uses the same on-hold-aware population for dashboard commission values and deal rollups", async () => {
+      const { getDirectorDashboard } = await import("../../../src/modules/dashboard/service.js");
+      const tenantDb = {
+        execute: vi.fn().mockImplementation((query: unknown) => {
+          const text = extractSqlText(query).toLowerCase();
+
+          if (text.includes("select id, display_name") && text.includes("role = 'rep'")) {
+            return Promise.resolve({ rows: [{ id: "rep-1", display_name: "Alex Rep" }] });
+          }
+
+          if (text.includes("left join public.user_commission_settings")) {
+            return Promise.resolve({
+              rows: [
+                {
+                  is_active: true,
+                  commission_rate: "0.05",
+                  rolling_floor: "0",
+                  override_rate: "0",
+                  estimated_margin_rate: "0.30",
+                  min_margin_percent: "0.20",
+                  new_customer_share_floor: "0.10",
+                  new_customer_window_months: "6",
+                },
+              ],
+            });
+          }
+
+          if (text.includes("sum(dsc.source_value_amount)") && text.includes("earned_commission")) {
+            return Promise.resolve({ rows: [{ source_value_amount: "100000", earned_commission: "5000" }] });
+          }
+
+          if (text.includes("dsc.source_value_amount::numeric as paid_revenue")) {
+            return Promise.resolve({ rows: [] });
+          }
+
+          if (text.includes("potential_revenue")) {
+            return Promise.resolve({ rows: [{ potential_revenue: "0" }] });
+          }
+
+          if (text.includes("dd_value") && text.includes("pipeline_value")) {
+            return Promise.resolve({
+              rows: [{ dd_value: "0", dd_count: "0", pipeline_value: "0", pipeline_count: "0", total_value: "0", total_count: "0" }],
+            });
+          }
+
+          return Promise.resolve({ rows: [] });
+        }),
+      } as any;
+
+      await getDirectorDashboard(tenantDb, { from: "2026-01-01", to: "2026-12-31", officeId: "office-1" });
+
+      const queryTexts = tenantDb.execute.mock.calls.map(([query]: [unknown]) =>
+        extractSqlText(query).toLowerCase()
+      );
+      const directQuery = queryTexts.find((text: string) =>
+        text.includes("sum(dsc.source_value_amount)") && text.includes("earned_commission")
+      ) ?? "";
+      const rollupQuery = queryTexts.find((text: string) =>
+        text.includes("dsc.source_value_amount::numeric as paid_revenue")
+      ) ?? "";
+
+      expect(directQuery).toContain("coalesce(d.on_hold, false) = false");
+      expect(rollupQuery).toContain("coalesce(d.on_hold, false) = false");
     });
 
     it("uses the selected rep-performance period for director forecast data", async () => {

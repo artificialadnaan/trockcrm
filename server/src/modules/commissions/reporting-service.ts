@@ -12,6 +12,7 @@ import {
 } from "@trock-crm/shared/schema";
 import type * as schema from "@trock-crm/shared/schema";
 import type { UserRole } from "@trock-crm/shared/types";
+import { aliasedActiveDealCountFilterSql } from "../shared/deal-value-sql.js";
 
 type TenantDb = NodePgDatabase<typeof schema>;
 
@@ -171,6 +172,10 @@ function notLostStageSql() {
   return sql`AND psc.slug NOT IN ('lost', 'production_lost', 'service_lost', 'closed_lost')`;
 }
 
+function notOnHoldDealSql() {
+  return sql`AND ${aliasedActiveDealCountFilterSql("d")}`;
+}
+
 function signedDealSql() {
   return sql`AND COALESCE(d.contract_signed_at::date, d.contract_signed_date, dsc.contract_signed_date_at_signing) IS NOT NULL`;
 }
@@ -193,6 +198,7 @@ export function describeCommissionFormula(): string {
     "Potential commission includes unsigned active deals in Contract, Opportunity, Estimating, Estimate Under Review, or Estimate Sent to Client, including historical aliases during rollout.",
     "Earned commission is recognized when contract_signed_at is set, with contract_signed_date as the historical compatibility fallback.",
     "Won deals remain earned after handoff; Lost deals are excluded from potential and earned commission totals.",
+    "On-hold deals are excluded from potential and earned commission while they remain on hold.",
     "The source value resolves in this order: awarded_amount, then bid_estimate, then dd_estimate.",
     "Commission amount = source_value_amount * user_commission_settings.commission_rate, rounded to cents.",
     "Potential pipeline uses active unsigned deal value plus change orders, multiplied by the rep commission rate.",
@@ -347,6 +353,7 @@ export async function getRepCommissionDashboard(
         AND COALESCE(d.is_test_data, false) = false
         AND COALESCE(d.contract_signed_at::date, d.contract_signed_date, dsc.contract_signed_date_at_signing) IS NOT NULL
         AND psc.slug NOT IN ('lost', 'production_lost', 'service_lost', 'closed_lost')
+        ${notOnHoldDealSql()}
         ${dateRange.from ? sql`AND COALESCE(d.contract_signed_at::date, d.contract_signed_date, dsc.contract_signed_date_at_signing) >= ${dateRange.from}::date` : sql``}
         ${dateRange.to ? sql`AND COALESCE(d.contract_signed_at::date, d.contract_signed_date, dsc.contract_signed_date_at_signing) <= ${dateRange.to}::date` : sql``}
 
@@ -383,6 +390,7 @@ export async function getRepCommissionDashboard(
         AND COALESCE(d.is_test_data, false) = false
         AND d.contract_signed_at IS NULL
         AND d.contract_signed_date IS NULL
+        ${notOnHoldDealSql()}
         AND psc.slug IN (
           'contract',
           'opportunity',
@@ -476,6 +484,7 @@ export async function getCommissionPotential(
       AND COALESCE(d.is_test_data, false) = false
       ${potentialStageSql()}
       ${unsignedDealSql()}
+      ${notOnHoldDealSql()}
       ${repSql(filters)}
       ${stageSql(filters)}
     GROUP BY psc.id, psc.name, psc.slug, psc.display_order
@@ -513,6 +522,7 @@ export async function getCommissionEarned(
     WHERE COALESCE(d.is_test_data, false) = false
       ${signedDealSql()}
       ${notLostStageSql()}
+      ${notOnHoldDealSql()}
       ${commissionRepSql(filters)}
       ${dateSql(filters, "commission")}
       ${stageSql(filters)}
@@ -548,6 +558,7 @@ export async function getCommissionEarned(
     WHERE COALESCE(d.is_test_data, false) = false
       ${signedDealSql()}
       ${notLostStageSql()}
+      ${notOnHoldDealSql()}
       ${commissionRepSql(filters)}
       ${dateSql(filters, "commission")}
       ${stageSql(filters)}
@@ -600,6 +611,7 @@ export async function getCommissionSummary(
       WHERE COALESCE(d.is_test_data, false) = false
         ${signedDealSql()}
         ${notLostStageSql()}
+        ${notOnHoldDealSql()}
         ${commissionRepSql(filters)}
         ${dateSql(filters, "commission")}
         ${stageSql(filters)}
@@ -620,6 +632,7 @@ export async function getCommissionSummary(
         AND COALESCE(d.is_test_data, false) = false
         ${potentialStageSql()}
         ${unsignedDealSql()}
+        ${notOnHoldDealSql()}
         ${repSql(filters)}
         ${stageSql(filters)}
     ),
@@ -633,6 +646,7 @@ export async function getCommissionSummary(
       JOIN ${pipelineStageConfig} psc ON psc.id = d.stage_id
       WHERE pe.paid_at::date >= ${utcBounds.yearStart}::date
         AND COALESCE(d.is_test_data, false) = false
+        ${notOnHoldDealSql()}
         ${repSql(filters)}
         ${stageSql(filters)}
     )
