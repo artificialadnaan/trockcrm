@@ -19,9 +19,10 @@ describe("dashboard At Risk summary", () => {
       {
         dealId: "leadership-only-safe",
         dealValue: 2000,
-        stageSlug: "opportunity",
+        stageName: "Opportunity",
+        stageSlug: "estimate_under_review",
         workflowRoute: "normal",
-        stageEnteredAt: "2026-05-12T12:00:00.000Z",
+        stageEnteredAt: "2026-05-17T12:00:00.000Z",
         onHold: false,
         onHoldStartedAt: null,
         onHoldAccumulatedSeconds: 0,
@@ -63,6 +64,14 @@ describe("dashboard At Risk summary", () => {
       "rep-risk",
       "leadership-only-safe",
     ]);
+    expect(buildDashboardAtRiskDeals(rows, "rep", now)[1]).toMatchObject({
+      dealId: "leadership-only-safe",
+      stageName: "Estimate Under Review",
+      atRisk: {
+        canonicalStageSlug: "estimate_under_review",
+        thresholdDays: 3,
+      },
+    });
     expect(buildDashboardAtRiskDeals(rows, "director", now)).toEqual([]);
   });
 });
