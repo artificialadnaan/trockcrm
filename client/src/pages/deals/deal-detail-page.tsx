@@ -83,6 +83,7 @@ import {
 } from "@/lib/pipeline-ownership";
 import {
   getCanonicalEstimatingBoundaryStageSlug,
+  getOwnerInitialColor,
   toCanonicalDealStageSlug,
 } from "@trock-crm/shared/types";
 
@@ -1044,6 +1045,7 @@ function DealRightRail({
 }) {
   const assignedRep = formatNullable(deal.assignedRepName ?? deal.assignedRepId);
   const assignedRepInitials = initials(deal.assignedRepName ?? deal.assignedRepId ?? "NA");
+  const assignedRepColor = getOwnerInitialColor(deal.assignedRepId ?? deal.assignedRepName);
   const headerDisplayNumber = formatDealDisplayNumber(deal);
   const dealWithOptionalContact = deal as DealDetail & {
     primaryContactName?: string | null;
@@ -1069,7 +1071,10 @@ function DealRightRail({
             label="Assigned rep"
             value={
               <span className="inline-flex items-center gap-2">
-                <span className="grid h-8 w-8 place-items-center rounded-full bg-brand-red text-[10px] font-black uppercase text-white">
+                <span
+                  className="grid h-8 w-8 place-items-center rounded-full text-[10px] font-black uppercase text-white"
+                  style={{ backgroundColor: assignedRepColor.backgroundColor, color: assignedRepColor.textColor }}
+                >
                   {assignedRepInitials}
                 </span>
                 <span>{assignedRep}</span>

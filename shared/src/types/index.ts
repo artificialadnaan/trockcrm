@@ -14,6 +14,7 @@ export * from "./deal-scope-lock.js";
 export * from "./deal-hold.js";
 export * from "./at-risk.js";
 export * from "./deal-sorts.js";
+export * from "./owner-colors.js";
 export * from "./sla-policy.js";
 export * from "./workflow-gates.js";
 export * from "./workflow.js";

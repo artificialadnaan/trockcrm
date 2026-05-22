@@ -3,7 +3,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { renderToStaticMarkup } from "react-dom/server";
 import type { ReactNode } from "react";
-import { getSlaPolicy, type AtRiskResult } from "@trock-crm/shared/types";
+import { getOwnerInitialColor, getSlaPolicy, type AtRiskResult } from "@trock-crm/shared/types";
 import { DecoratedKanbanCard } from "./decorated-kanban-card";
 import type { Deal } from "@/hooks/use-deals";
 
@@ -158,6 +158,15 @@ describe("DecoratedKanbanCard", () => {
 
     expect(html).toContain("At Risk");
     expect(html).toContain('data-at-risk-severity="at_risk"');
+  });
+
+  it("renders the owner initials badge with the shared owner color utility", () => {
+    const expectedColor = getOwnerInitialColor("rep-1");
+    const html = renderDeal(makeDeal({ assignedRepId: "rep-1", assignedRepName: "Brett Jones" }));
+
+    expect(html).toContain("BJ");
+    expect(html).toContain(`background-color:${expectedColor.backgroundColor}`);
+    expect(html).toContain(`color:${expectedColor.textColor}`);
   });
 
   it("does not render an at-risk badge when the API has not supplied the result", () => {
