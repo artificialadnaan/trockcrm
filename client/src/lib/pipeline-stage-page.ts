@@ -1,5 +1,7 @@
 export interface StagePageFilters {
   assignedRepId?: string;
+  estimateSentFrom?: string;
+  estimateSentTo?: string;
   staleOnly: boolean;
   status?: string;
   workflowRoute?: string;
@@ -26,10 +28,28 @@ export interface StagePageQuery {
 }
 
 const ALLOWED_PAGE_SIZES = new Set([25, 50, 100]);
+const ESTIMATE_SENT_PRESETS = new Set(["7", "30", "60", "90"]);
+
+function formatDateParam(date: Date) {
+  return date.toISOString().split("T")[0];
+}
+
+function daysAgo(days: number, now = new Date()) {
+  const date = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()));
+  date.setUTCDate(date.getUTCDate() - days);
+  return formatDateParam(date);
+}
 
 export function normalizeStagePageQuery(input: Record<string, string | undefined>): StagePageQuery {
   const parsedPage = Number(input.page);
   const parsedPageSize = Number(input.pageSize);
+  const estimateSentPreset = input.estimate_sent_preset;
+  const estimateSentFrom =
+    input.estimateSentFrom ??
+    input.estimate_sent_since ??
+    (estimateSentPreset && ESTIMATE_SENT_PRESETS.has(estimateSentPreset)
+      ? daysAgo(Number(estimateSentPreset))
+      : undefined);
 
   return {
     page: Number.isFinite(parsedPage) && parsedPage > 0 ? parsedPage : 1,
@@ -38,6 +58,8 @@ export function normalizeStagePageQuery(input: Record<string, string | undefined
     search: input.search?.trim() ?? "",
     filters: {
       assignedRepId: input.assignedRepId,
+      estimateSentFrom,
+      estimateSentTo: input.estimateSentTo ?? input.estimate_sent_until,
       staleOnly: input.staleOnly === "true",
       status: input.status,
       workflowRoute: input.workflowRoute,

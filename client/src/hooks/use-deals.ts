@@ -284,6 +284,8 @@ export interface DealFilters {
   isActive?: boolean | "all" | "pipeline";
   contractSignedFrom?: string;
   contractSignedTo?: string;
+  estimateSentFrom?: string;
+  estimateSentTo?: string;
   createdFrom?: string;
   createdTo?: string;
   updatedFrom?: string;
@@ -409,6 +411,8 @@ export function useDeals(filters: DealFilters = {}, options: { enabled?: boolean
       if (filters.source) params.set("source", filters.source);
       if (filters.contractSignedFrom) params.set("contractSignedFrom", filters.contractSignedFrom);
       if (filters.contractSignedTo) params.set("contractSignedTo", filters.contractSignedTo);
+      if (filters.estimateSentFrom) params.set("estimateSentFrom", filters.estimateSentFrom);
+      if (filters.estimateSentTo) params.set("estimateSentTo", filters.estimateSentTo);
       if (filters.createdFrom) params.set("createdFrom", filters.createdFrom);
       if (filters.createdTo) params.set("createdTo", filters.createdTo);
       if (filters.updatedFrom) params.set("updatedFrom", filters.updatedFrom);
@@ -445,6 +449,8 @@ export function useDeals(filters: DealFilters = {}, options: { enabled?: boolean
     filters.source,
     filters.contractSignedFrom,
     filters.contractSignedTo,
+    filters.estimateSentFrom,
+    filters.estimateSentTo,
     filters.createdFrom,
     filters.createdTo,
     filters.updatedFrom,
@@ -642,7 +648,9 @@ export function useDealBoard(
   includeDd: boolean,
   terminalDateFilters?: Record<TerminalOutcome, TerminalDateFilter>,
   previewLimit: number | null = 8,
-  wonPeriodRange?: { from?: string; to?: string } | null
+  wonPeriodRange?: { from?: string; to?: string } | null,
+  assignedRepId?: string,
+  estimateSentDateRange?: { from?: string; to?: string }
 ) {
   const [board, setBoard] = useState<DealBoardResponse | null>(null);
   const [loading, setLoading] = useState(true);
@@ -667,6 +675,15 @@ export function useDealBoard(
     if (wonPeriodRange?.to) {
       params.set("won_period_to", wonPeriodRange.to);
     }
+    if (assignedRepId) {
+      params.set("assignedRepId", assignedRepId);
+    }
+    if (estimateSentDateRange?.from) {
+      params.set("estimateSentFrom", estimateSentDateRange.from);
+    }
+    if (estimateSentDateRange?.to) {
+      params.set("estimateSentTo", estimateSentDateRange.to);
+    }
     return api<DealBoardApiResponse>(`/deals/pipeline?${params.toString()}`)
       .then((result) => {
         const normalized = normalizeDealBoardResponse(result);
@@ -679,7 +696,17 @@ export function useDealBoard(
         throw err;
       })
       .finally(() => setLoading(false));
-  }, [includeDd, previewLimit, scope, terminalDateFilters, wonPeriodRange?.from, wonPeriodRange?.to]);
+  }, [
+    assignedRepId,
+    estimateSentDateRange?.from,
+    estimateSentDateRange?.to,
+    includeDd,
+    previewLimit,
+    scope,
+    terminalDateFilters,
+    wonPeriodRange?.from,
+    wonPeriodRange?.to,
+  ]);
 
   useEffect(() => {
     void refetch().catch(() => undefined);
@@ -702,6 +729,8 @@ export function useDealStagePage(input: StagePageQuery & { stageId: string; scop
       sort: input.sort,
       search: input.search,
       ...(input.filters.assignedRepId ? { assignedRepId: input.filters.assignedRepId } : {}),
+      ...(input.filters.estimateSentFrom ? { estimateSentFrom: input.filters.estimateSentFrom } : {}),
+      ...(input.filters.estimateSentTo ? { estimateSentTo: input.filters.estimateSentTo } : {}),
       ...(input.filters.staleOnly ? { staleOnly: "true" } : {}),
       ...(input.filters.status ? { status: input.filters.status } : {}),
       ...(input.filters.workflowRoute ? { workflowRoute: input.filters.workflowRoute } : {}),
@@ -739,6 +768,8 @@ export function useDealStagePage(input: StagePageQuery & { stageId: string; scop
     };
   }, [
     input.filters.assignedRepId,
+    input.filters.estimateSentFrom,
+    input.filters.estimateSentTo,
     input.filters.source,
     input.filters.staleOnly,
     input.filters.status,

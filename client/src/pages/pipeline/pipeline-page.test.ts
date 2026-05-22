@@ -346,8 +346,9 @@ describe("terminal pipeline date filters", () => {
           won: { preset: "30" },
           lost: { preset: "60" },
         },
+        queryParams: new URLSearchParams("assignedRepId=rep-1&estimate_sent_since=2026-04-01&estimate_sent_until=2026-04-30&search=roof"),
       })
-    ).toBe("/deals/stages/stage-estimating?scope=all");
+    ).toBe("/deals/stages/stage-estimating?scope=all&assignedRepId=rep-1&estimate_sent_since=2026-04-01&estimate_sent_until=2026-04-30");
   });
 
   it("clamps future custom dates from URL and API serialization", () => {

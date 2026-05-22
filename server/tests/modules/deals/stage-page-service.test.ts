@@ -42,7 +42,7 @@ function extractSqlText(value: unknown): string {
   if ("name" in (value as Record<string, unknown>) && typeof (value as { name?: unknown }).name === "string") {
     return (value as { name: string }).name;
   }
-  return "";
+  return Object.values(value as Record<string, unknown>).map(extractSqlText).join("");
 }
 
 function createOfficeScopeSelectMock(rows: any[] = [{ id: "rep-1" }]) {
@@ -285,6 +285,43 @@ describe("listDealStagePage", () => {
     expect(countQueryText).toContain("assigned_rep_id");
     expect(countQueryText).toContain("rep-team-1");
     expect(countQueryText).toContain("rep-team-2");
+  });
+
+  it("layers Estimate Sent filters and zeroes on-hold deals in stage summaries", async () => {
+    dbState.responses = [
+      [{ id: "stage-sent", slug: "estimate_sent_to_client", name: "Estimate Sent to Client", displayOrder: 5, isTerminal: false }],
+    ];
+
+    const tenantDb = {
+      select: createOfficeScopeSelectMock(),
+      execute: vi.fn()
+        .mockResolvedValueOnce({ rows: [{ total: "1", total_value: "0" }] })
+        .mockResolvedValueOnce({ rows: [] }),
+    } as any;
+
+    const { listDealStagePage } = await import("../../../src/modules/deals/service.js");
+    await listDealStagePage(tenantDb, {
+      role: "admin",
+      userId: "admin-1",
+      activeOfficeId: "office-1",
+      scope: "all",
+      stageId: "stage-sent",
+      page: 1,
+      pageSize: 25,
+      assignedRepId: "rep-1",
+      estimateSentFrom: "2026-04-01",
+      estimateSentTo: "2026-04-30",
+    } as any);
+
+    const countQueryText = extractSqlText(tenantDb.execute.mock.calls[0][0]).toLowerCase();
+    expect(countQueryText).toContain("assigned_rep_id");
+    expect(countQueryText).toContain("rep-1");
+    expect(countQueryText).toContain("estimate_sent_history_stage");
+    expect(countQueryText).toContain("estimate_sent_to_client");
+    expect(countQueryText).toContain("service_estimate_sent_to_client");
+    expect(countQueryText).toContain("stage_entered_at");
+    expect(countQueryText).toContain("on_hold");
+    expect(countQueryText).toContain("case");
   });
 
   it("keeps mine-scope stage drill-downs accessible for unassigned legacy deals", async () => {

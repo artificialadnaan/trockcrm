@@ -336,6 +336,8 @@ export function buildDealListParams(input: {
   dateRange: { from?: string; to?: string };
   contractSignedFrom?: string;
   contractSignedTo?: string;
+  estimateSentFrom?: string;
+  estimateSentTo?: string;
   createdFrom?: string;
   createdTo?: string;
   updatedFrom?: string;
@@ -366,6 +368,8 @@ export function buildDealListParams(input: {
   }
   if (input.contractSignedFrom) params.set("contractSignedFrom", input.contractSignedFrom);
   if (input.contractSignedTo) params.set("contractSignedTo", input.contractSignedTo);
+  if (input.estimateSentFrom) params.set("estimateSentFrom", input.estimateSentFrom);
+  if (input.estimateSentTo) params.set("estimateSentTo", input.estimateSentTo);
   params.set("isActive", String(input.isActive));
   params.set("sortBy", input.sort.key);
   params.set("sortDir", input.sort.dir);
@@ -383,6 +387,8 @@ export async function fetchAllFilteredDeals(input: {
   dateRange: { from?: string; to?: string };
   contractSignedFrom?: string;
   contractSignedTo?: string;
+  estimateSentFrom?: string;
+  estimateSentTo?: string;
   createdFrom?: string;
   createdTo?: string;
   updatedFrom?: string;
@@ -447,6 +453,7 @@ export function DealsListSection({
   const [dateFilter, setDateFilter] = useState<TerminalDateFilter>({ preset: "all" });
   const [page, setPage] = useState(1);
   const [sort, setSort] = useState<DealListSortState>(initialSort);
+  const effectiveAssignedRepId = lockedOwnerId ?? (hideOwnerFilter ? undefined : ownerId === "__all__" ? undefined : ownerId);
 
   const { stages, loading: stagesLoading, error: stagesError } = usePipelineStages(workflowFamily);
   const { assignees } = useTaskAssignees();
@@ -509,9 +516,8 @@ export function DealsListSection({
   }, [initialStageSlugs]);
 
   useEffect(() => {
-    if (lockedOwnerId) {
-      setOwnerId((current) => (current === lockedOwnerId ? current : lockedOwnerId));
-    }
+    const nextOwnerId = lockedOwnerId ?? "__all__";
+    setOwnerId((current) => (current === nextOwnerId ? current : nextOwnerId));
   }, [lockedOwnerId]);
 
   useEffect(() => {
@@ -530,11 +536,13 @@ export function DealsListSection({
     search,
     stageIds: selectedStageIds,
     inactiveStageIds,
-    assignedRepId: lockedOwnerId ?? (ownerId === "__all__" ? undefined : ownerId),
+    assignedRepId: effectiveAssignedRepId,
     createdFrom: dateField === "created" ? dateRange.from ?? baseFilters?.createdFrom : baseFilters?.createdFrom,
     createdTo: dateField === "created" ? dateRange.to ?? baseFilters?.createdTo : baseFilters?.createdTo,
     updatedFrom: dateField === "updated" ? dateRange.from ?? baseFilters?.updatedFrom : baseFilters?.updatedFrom,
     updatedTo: dateField === "updated" ? dateRange.to ?? baseFilters?.updatedTo : baseFilters?.updatedTo,
+    estimateSentFrom: baseFilters?.estimateSentFrom,
+    estimateSentTo: baseFilters?.estimateSentTo,
     isActive: isActiveFilter,
     sortBy: sort.key,
     sortDir: sort.dir,
@@ -600,7 +608,7 @@ export function DealsListSection({
       search,
       stageIds: selectedStageIds,
       inactiveStageIds,
-      assignedRepId: lockedOwnerId ?? (ownerId === "__all__" ? undefined : ownerId),
+      assignedRepId: effectiveAssignedRepId,
       dateRange,
       isActive: isActiveFilter,
       sort,
@@ -610,6 +618,8 @@ export function DealsListSection({
       createdTo: baseFilters?.createdTo,
       contractSignedFrom: baseFilters?.contractSignedFrom,
       contractSignedTo: baseFilters?.contractSignedTo,
+      estimateSentFrom: baseFilters?.estimateSentFrom,
+      estimateSentTo: baseFilters?.estimateSentTo,
       updatedFrom: baseFilters?.updatedFrom,
       updatedTo: baseFilters?.updatedTo,
     });

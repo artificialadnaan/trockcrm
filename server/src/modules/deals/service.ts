@@ -148,6 +148,8 @@ export interface DealFilters {
   // deals.contract_signed_date as a transition fallback.
   contractSignedFrom?: string;
   contractSignedTo?: string;
+  estimateSentFrom?: string;
+  estimateSentTo?: string;
   createdFrom?: string;
   createdTo?: string;
   updatedFrom?: string;
@@ -321,6 +323,11 @@ const LOST_TERMINAL_STAGE_SLUGS = [
   "production_lost",
   "service_lost",
   "closed_lost",
+] as const;
+const ESTIMATE_SENT_STAGE_SLUGS = [
+  "estimate_sent_to_client",
+  "service_estimate_sent_to_client",
+  "bid_sent",
 ] as const;
 const VALID_PROPOSAL_STATUS_SET = new Set<string>(VALID_PROPOSAL_STATUSES);
 const VALID_ESTIMATING_SUBSTAGE_SET = new Set<string>(VALID_ESTIMATING_SUBSTAGES);
@@ -602,6 +609,8 @@ export interface DealStagePageInput extends DealBoardInput {
   sort?: StagePageSort;
   search?: string;
   assignedRepId?: string;
+  estimateSentFrom?: string;
+  estimateSentTo?: string;
   regionId?: string;
   workflowRoute?: string;
   updatedFrom?: string;
@@ -802,6 +811,101 @@ function dealTerminalBusinessDateSql(fallbackSql: unknown) {
 
 function dealWonBoardBusinessDateSql() {
   return sql`COALESCE(${contractSignedDateForReporting}, ${deals.stageEnteredAt}::date)`;
+}
+
+function dealEstimateSentAtSql() {
+  return sql`
+    COALESCE(
+      (
+        SELECT MAX(${dealStageHistory.createdAt})
+        FROM ${dealStageHistory}
+        JOIN ${pipelineStageConfig} estimate_sent_history_stage
+          ON estimate_sent_history_stage.id = ${dealStageHistory.toStageId}
+        WHERE ${dealStageHistory.dealId} = ${deals.id}
+          AND estimate_sent_history_stage.slug IN (${sqlList(ESTIMATE_SENT_STAGE_SLUGS)})
+      ),
+      (
+        SELECT CASE
+          WHEN estimate_sent_current_stage.slug IN (${sqlList(ESTIMATE_SENT_STAGE_SLUGS)})
+            THEN ${deals.stageEnteredAt}
+          ELSE NULL
+        END
+        FROM ${pipelineStageConfig} estimate_sent_current_stage
+        WHERE estimate_sent_current_stage.id = ${deals.stageId}
+      )
+    )
+  `;
+}
+
+function effectiveDealValueSql(isTerminalStage: boolean) {
+  const rawValue = isTerminalStage
+    ? sql`COALESCE(${deals.awardedAmount}, 0)`
+    : sql`COALESCE(${deals.awardedAmount}, ${deals.bidEstimate}, ${deals.ddEstimate}, 0)`;
+
+  return sql`CASE WHEN ${deals.onHold} THEN 0 ELSE ${rawValue} END`;
+}
+
+function addEstimateSentDateConditions(
+  conditions: any[],
+  input: { estimateSentFrom?: string; estimateSentTo?: string }
+) {
+  if (!input.estimateSentFrom && !input.estimateSentTo) return;
+
+  const estimateSentAt = dealEstimateSentAtSql();
+  if (input.estimateSentFrom) {
+    conditions.push(sql`${estimateSentAt} >= ${input.estimateSentFrom}::date`);
+  }
+  if (input.estimateSentTo) {
+    conditions.push(sql`${estimateSentAt} < (${input.estimateSentTo}::date + interval '1 day')`);
+  }
+}
+
+function workspaceEstimateSentAtSql() {
+  return sql`
+    COALESCE(
+      (
+        SELECT MAX(dsh.created_at)
+        FROM deal_stage_history dsh
+        JOIN public.pipeline_stage_config estimate_sent_history_stage
+          ON estimate_sent_history_stage.id = dsh.to_stage_id
+        WHERE dsh.deal_id = d.id
+          AND estimate_sent_history_stage.slug IN (${sqlList(ESTIMATE_SENT_STAGE_SLUGS)})
+      ),
+      (
+        SELECT CASE
+          WHEN estimate_sent_current_stage.slug IN (${sqlList(ESTIMATE_SENT_STAGE_SLUGS)})
+            THEN d.stage_entered_at
+          ELSE NULL
+        END
+        FROM public.pipeline_stage_config estimate_sent_current_stage
+        WHERE estimate_sent_current_stage.id = d.stage_id
+      )
+    )
+  `;
+}
+
+function addWorkspaceEstimateSentDateConditions(
+  conditions: any[],
+  input: { estimateSentFrom?: string; estimateSentTo?: string }
+) {
+  if (!input.estimateSentFrom && !input.estimateSentTo) return;
+
+  const estimateSentAt = workspaceEstimateSentAtSql();
+  if (input.estimateSentFrom) {
+    conditions.push(sql`${estimateSentAt} >= ${input.estimateSentFrom}::date`);
+  }
+  if (input.estimateSentTo) {
+    conditions.push(sql`${estimateSentAt} < (${input.estimateSentTo}::date + interval '1 day')`);
+  }
+}
+
+function workspaceEffectiveDealValueSql(stage: PipelineStageRow) {
+  const isTerminalStage = stage.isTerminal || stage.slug === "won" || stage.slug === "lost";
+  const rawValue = isTerminalStage
+    ? sql`COALESCE(d.awarded_amount, 0)`
+    : sql`COALESCE(d.awarded_amount, d.bid_estimate, d.dd_estimate, 0)`;
+
+  return sql`CASE WHEN d.on_hold THEN 0 ELSE ${rawValue} END`;
 }
 
 function terminalWorkspaceDateConditions(stage: PipelineStageRow, input: DealStagePageInput) {
@@ -1140,6 +1244,7 @@ export async function getDeals(tenantDb: TenantDb, filters: DealFilters, userRol
   if (filters.contractSignedTo) {
     conditions.push(sql`${contractSignedDateForReporting} <= ${filters.contractSignedTo}::date`);
   }
+  addEstimateSentDateConditions(conditions, filters);
   if (filters.createdFrom) {
     conditions.push(sql`${deals.createdAt} >= ${filters.createdFrom}::date`);
   }
@@ -1938,6 +2043,8 @@ export async function getDealsForPipeline(
   userId: string,
   filters?: {
     assignedRepId?: string;
+    estimateSentFrom?: string;
+    estimateSentTo?: string;
     includeDd?: boolean;
     previewLimit?: number;
     scope?: WorkspaceScope;
@@ -1994,18 +2101,12 @@ export async function getDealsForPipeline(
     );
   } else if (filters?.scope === "team") {
     const teamRepIds = await resolveTeamRepIds(tenantDb, userId, filters.activeOfficeId ?? null);
-    if (filters.assignedRepId) {
-      commonConditions.push(
-        teamRepIds.includes(filters.assignedRepId)
-          ? eq(deals.assignedRepId, filters.assignedRepId)
-          : sql`false`
-      );
-    } else {
-      commonConditions.push(teamRepIds.length > 0 ? inArray(deals.assignedRepId, teamRepIds) : sql`false`);
-    }
-  } else if (filters?.assignedRepId) {
+    commonConditions.push(teamRepIds.length > 0 ? inArray(deals.assignedRepId, teamRepIds) : sql`false`);
+  }
+  if (filters?.assignedRepId) {
     commonConditions.push(eq(deals.assignedRepId, filters.assignedRepId));
   }
+  addEstimateSentDateConditions(commonConditions, filters ?? {});
 
   const responseStages = stages.filter((stage) => {
     if (!stage.isTerminal) return filters?.includeDd || stage.isActivePipeline;
@@ -2062,9 +2163,7 @@ export async function getDealsForPipeline(
     const summaryRows = await tenantDb
       .select({
         count: sql<number>`count(*)`,
-        totalValue: isTerminalStage
-          ? sql<number>`COALESCE(SUM(COALESCE(${deals.awardedAmount}, 0)), 0)`
-          : sql<number>`COALESCE(SUM(COALESCE(${deals.awardedAmount}, ${deals.bidEstimate}, ${deals.ddEstimate}, 0)), 0)`,
+        totalValue: sql<number>`COALESCE(SUM(${effectiveDealValueSql(isTerminalStage)}), 0)`,
       })
       .from(deals)
       .where(where);
@@ -2151,6 +2250,7 @@ export async function listDealStagePage(tenantDb: TenantDb, input: DealStagePage
   if (input.updatedTo) {
     conditions.push(sql`d.updated_at::date <= ${input.updatedTo}::date`);
   }
+  addWorkspaceEstimateSentDateConditions(conditions, input);
   if (typeof input.minAgeDays === "number" && Number.isFinite(input.minAgeDays)) {
     conditions.push(sql`extract(day from now() - d.stage_entered_at) >= ${input.minAgeDays}`);
   }
@@ -2163,7 +2263,7 @@ export async function listDealStagePage(tenantDb: TenantDb, input: DealStagePage
   const countResult = await tenantDb.execute(sql`
     select
       count(*)::int as total,
-      coalesce(sum(coalesce(d.awarded_amount, d.bid_estimate, d.dd_estimate, 0)), 0)::numeric as total_value,
+      coalesce(sum(${workspaceEffectiveDealValueSql(stage)}), 0)::numeric as total_value,
       round(avg(extract(day from now() - d.stage_entered_at)))::int as average_days_in_stage
     from deals d
     left join users u on u.id = d.assigned_rep_id

@@ -43,7 +43,7 @@ function extractSqlText(value: unknown): string {
     return (value as { name: string }).name;
   }
 
-  return "";
+  return Object.values(value as Record<string, unknown>).map(extractSqlText).join("");
 }
 
 function findStageCardsChain(chains: any[], stageId: string) {
@@ -820,5 +820,156 @@ describe("getDealsForPipeline", () => {
     expect(result.pipelineColumns[0]?.deals[0]?.id).toBe("deal-1");
     expect(result.pipelineColumns[1]?.deals[0]?.id).toBe("deal-2");
     expect(maxConcurrentSelects).toBe(1);
+  });
+
+  it("layers rep and Estimate Sent date filters into every board stage query", async () => {
+    dbState.responses = [
+      [
+        {
+          id: "stage-sent",
+          slug: "estimate_sent_to_client",
+          name: "Estimate Sent to Client",
+          displayOrder: 1,
+          isTerminal: false,
+          isActivePipeline: true,
+        },
+        {
+          id: "stage-contract",
+          slug: "contract",
+          name: "Contract",
+          displayOrder: 2,
+          isTerminal: false,
+          isActivePipeline: true,
+        },
+      ],
+    ];
+
+    const tenantChains: any[] = [];
+    const tenantDb = {
+      select: vi.fn(() => {
+        const chain = createChainableMock();
+        tenantChains.push(chain);
+        chain.then.mockImplementation((resolve: (value: any[]) => unknown) => resolve(chain.leftJoin.mock.calls.length > 0 ? [] : [{ count: 0, totalValue: 0 }]));
+        return chain;
+      }),
+    } as any;
+
+    const { getDealsForPipeline } = await import("../../../src/modules/deals/service.js");
+    await getDealsForPipeline(tenantDb, "director", "director-1", {
+      activeOfficeId: null,
+      scope: "all",
+      includeDd: true,
+      assignedRepId: "rep-1",
+      estimateSentFrom: "2026-04-01",
+      estimateSentTo: "2026-04-30",
+    });
+
+    const allWhereText = tenantChains
+      .map((chain) => extractSqlText(chain.where.mock.calls[0]?.[0]).toLowerCase())
+      .join("\n");
+    expect(allWhereText).toContain("assigned_rep_id");
+    expect(allWhereText).toContain("rep-1");
+    expect(allWhereText).toContain("estimate_sent_history_stage");
+    expect(allWhereText).toContain("estimate_sent_to_client");
+    expect(allWhereText).toContain("service_estimate_sent_to_client");
+    expect(allWhereText).toContain("stage_entered_at");
+    expect(containsValue(tenantChains.map((chain) => chain.where.mock.calls[0]?.[0]), "2026-04-01")).toBe(true);
+    expect(containsValue(tenantChains.map((chain) => chain.where.mock.calls[0]?.[0]), "2026-04-30")).toBe(true);
+  });
+
+  it("uses on-hold-aware value SQL for filtered board totals", async () => {
+    dbState.responses = [
+      [
+        {
+          id: "stage-estimating",
+          slug: "estimating",
+          name: "Estimating",
+          displayOrder: 1,
+          isTerminal: false,
+          isActivePipeline: true,
+        },
+      ],
+    ];
+
+    const tenantChains: any[] = [];
+    const tenantDb = {
+      select: vi.fn((...selectArgs: unknown[]) => {
+        const chain = createChainableMock();
+        chain._selectArgs = selectArgs;
+        tenantChains.push(chain);
+        chain.then.mockImplementation((resolve: (value: any[]) => unknown) => {
+          const isCardsQuery = chain.leftJoin.mock.calls.length > 0;
+          return resolve(isCardsQuery ? [] : [{ count: 2, totalValue: 5000 }]);
+        });
+        return chain;
+      }),
+    } as any;
+
+    const { getDealsForPipeline } = await import("../../../src/modules/deals/service.js");
+    await getDealsForPipeline(tenantDb, "director", "director-1", {
+      activeOfficeId: null,
+      scope: "all",
+      includeDd: true,
+      assignedRepId: "rep-1",
+    });
+
+    const summaryChain = tenantChains.find((chain) => chain.leftJoin.mock.calls.length === 0);
+    const summarySelect = summaryChain?._selectArgs?.[0] as { totalValue?: unknown } | undefined;
+    const summarySelectText = extractSqlText(summarySelect?.totalValue).toLowerCase();
+    expect(summarySelectText).toContain("on_hold");
+    expect(summarySelectText).toContain("case");
+    expect(summarySelectText).toContain("awarded_amount");
+    expect(summarySelectText).toContain("bid_estimate");
+    expect(summarySelectText).toContain("dd_estimate");
+  });
+
+  it("applies assignedRepId as an additional filter in mine-scope board queries", async () => {
+    dbState.responses = [
+      [
+        {
+          id: "stage-estimating",
+          slug: "estimating",
+          name: "Estimating",
+          displayOrder: 1,
+          isTerminal: false,
+          isActivePipeline: true,
+        },
+      ],
+    ];
+
+    const tenantChains: any[] = [];
+    const tenantDb = {
+      execute: vi.fn(async (query?: unknown) => {
+        const text = extractSqlText(query).toLowerCase();
+        if (text.includes("to_regclass(current_schema()")) {
+          return { rows: [{ relation_name: null }] };
+        }
+        if (text.includes("information_schema.columns")) {
+          return { rows: [{ column_exists: false }] };
+        }
+        return { rows: [] };
+      }),
+      select: vi.fn(() => {
+        const chain = createChainableMock();
+        tenantChains.push(chain);
+        chain.then.mockImplementation((resolve: (value: any[]) => unknown) => resolve(chain.leftJoin.mock.calls.length > 0 ? [] : [{ count: 0, totalValue: 0 }]));
+        return chain;
+      }),
+    } as any;
+
+    const { getDealsForPipeline } = await import("../../../src/modules/deals/service.js");
+    await getDealsForPipeline(tenantDb, "admin", "admin-1", {
+      activeOfficeId: null,
+      scope: "mine",
+      includeDd: true,
+      assignedRepId: "rep-1",
+    });
+
+    const allWhereText = tenantChains
+      .map((chain) => extractSqlText(chain.where.mock.calls[0]?.[0]).toLowerCase())
+      .join("\n");
+    expect(allWhereText).toContain("performed_by_user_id");
+    expect(allWhereText).toContain("assigned_rep_id");
+    expect(allWhereText).toContain("rep-1");
   });
 });

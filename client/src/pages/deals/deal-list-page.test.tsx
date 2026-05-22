@@ -387,7 +387,7 @@ describe("DealListPage", () => {
     expect(mocks.useDealBoardMock).toHaveBeenCalledWith("all", true, {
       won: { preset: "all" },
       lost: { preset: "all" },
-    }, 8, null);
+    }, 8, null, undefined, {});
     expect(html).toContain("Read-only pipeline board");
     expect(html).toContain('placeholder="Search deals"');
     expect(html).toContain("Opportunity");
@@ -399,6 +399,31 @@ describe("DealListPage", () => {
     expect(html).toContain("Estimate Sent to Client");
     expect(html).toContain("Palm Villas");
     expect(html).toContain("Service Hospital Roof");
+  });
+
+  it("layers the Deals page rep and Estimate Sent filters into the board and embedded list", () => {
+    renderPage("/deals?scope=all&assignedRepId=rep-1&estimate_sent_since=2026-04-01&estimate_sent_until=2026-04-30&filter=bid_board");
+
+    expect(mocks.useDealBoardMock).toHaveBeenCalledWith(
+      "all",
+      true,
+      { won: { preset: "all" }, lost: { preset: "all" } },
+      8,
+      null,
+      "rep-1",
+      { from: "2026-04-01", to: "2026-04-30" }
+    );
+    expect(mocks.dealsListSectionMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        lockedOwnerId: "rep-1",
+        hideOwnerFilter: true,
+        baseFilters: expect.objectContaining({
+          estimateSentFrom: "2026-04-01",
+          estimateSentTo: "2026-04-30",
+        }),
+        initialStageSlugs: ["estimating", "service_estimating"],
+      })
+    );
   });
 
   it("renders the Service-only direct-create button in the Deals header without the old New Deal button", () => {
@@ -696,7 +721,7 @@ describe("DealListPage", () => {
     expect(mocks.useDealBoardMock).toHaveBeenCalledWith("all", true, {
       won: { preset: "30" },
       lost: { preset: "60" },
-    }, 8, null);
+    }, 8, null, undefined, {});
   });
 
   it("requests an expanded preview window for the SLA drill-down board", () => {
@@ -705,7 +730,7 @@ describe("DealListPage", () => {
     expect(mocks.useDealBoardMock).toHaveBeenCalledWith("team", true, {
       won: { preset: "all" },
       lost: { preset: "all" },
-    }, 1000, { from: "2026-05-04", to: "2026-05-08" });
+    }, 1000, { from: "2026-05-04", to: "2026-05-08" }, undefined, {});
   });
 
   it("passes the selected page period to the board request so won aggregates match the drilldown window", () => {
@@ -714,7 +739,7 @@ describe("DealListPage", () => {
     expect(mocks.useDealBoardMock).toHaveBeenCalledWith("team", true, {
       won: { preset: "30" },
       lost: { preset: "all" },
-    }, 8, { from: "2026-04-01", to: "2026-04-30" });
+    }, 8, { from: "2026-04-01", to: "2026-04-30" }, undefined, {});
   });
 
   it("does not fire board fetch before auth resolves", () => {
@@ -737,7 +762,7 @@ describe("DealListPage", () => {
 
     renderPage("/deals", "director");
 
-    expect(mocks.useDealBoardMock).toHaveBeenCalledWith("mine", true, expect.any(Object), 8, null);
+    expect(mocks.useDealBoardMock).toHaveBeenCalledWith("mine", true, expect.any(Object), 8, null, undefined, {});
   });
 
   it("uses the board terminal filters when building terminal stage navigation", () => {
@@ -763,24 +788,48 @@ describe("DealListPage", () => {
     });
   });
 
+  it("preserves rep and Estimate Sent filters when opening a stage", () => {
+    const column = {
+      stage: { id: "stage-sent", name: "Estimate Sent to Client", slug: "estimate_sent_to_client" },
+      count: 0,
+      totalValue: 0,
+      cards: [],
+    };
+
+    buildDealStageNavigationPath(
+      column,
+      "all",
+      { won: { preset: "all" }, lost: { preset: "all" } },
+      new URLSearchParams("assignedRepId=rep-1&estimate_sent_since=2026-04-01&estimate_sent_until=2026-04-30&search=roof")
+    );
+
+    expect(mocks.buildDealStageWorkspacePathMock).toHaveBeenLastCalledWith({
+      stageId: "stage-sent",
+      stageSlug: "estimate_sent_to_client",
+      scope: "all",
+      filters: { won: { preset: "all" }, lost: { preset: "all" } },
+      queryParams: expect.any(URLSearchParams),
+    });
+  });
+
   it("defaults the board scope by role when the query param is absent", () => {
     renderPage("/deals", "rep");
-    expect(mocks.useDealBoardMock).toHaveBeenLastCalledWith("mine", true, expect.any(Object), 8, null);
+    expect(mocks.useDealBoardMock).toHaveBeenLastCalledWith("mine", true, expect.any(Object), 8, null, undefined, {});
 
     renderPage("/deals", "director");
-    expect(mocks.useDealBoardMock).toHaveBeenLastCalledWith("mine", true, expect.any(Object), 8, null);
+    expect(mocks.useDealBoardMock).toHaveBeenLastCalledWith("mine", true, expect.any(Object), 8, null, undefined, {});
 
     renderPage("/deals", "admin");
-    expect(mocks.useDealBoardMock).toHaveBeenLastCalledWith("mine", true, expect.any(Object), 8, null);
+    expect(mocks.useDealBoardMock).toHaveBeenLastCalledWith("mine", true, expect.any(Object), 8, null, undefined, {});
 
     renderPage("/deals?scope=mine", "director");
-    expect(mocks.useDealBoardMock).toHaveBeenLastCalledWith("mine", true, expect.any(Object), 8, null);
+    expect(mocks.useDealBoardMock).toHaveBeenLastCalledWith("mine", true, expect.any(Object), 8, null, undefined, {});
   });
 
   it("shows the deferred Team empty state when team scope is requested", () => {
     const html = renderPage("/deals?scope=team", "rep");
 
-    expect(mocks.useDealBoardMock).toHaveBeenLastCalledWith("team", true, expect.any(Object), 8, null);
+    expect(mocks.useDealBoardMock).toHaveBeenLastCalledWith("team", true, expect.any(Object), 8, null, undefined, {});
     expect(html).toContain('aria-pressed="true">Team');
     expect(html).toContain("Team view is not yet configured");
   });
@@ -788,7 +837,7 @@ describe("DealListPage", () => {
   it("allows reps to opt into all-office scope", () => {
     const html = renderPage("/deals?scope=all", "rep");
 
-    expect(mocks.useDealBoardMock).toHaveBeenLastCalledWith("all", true, expect.any(Object), 8, null);
+    expect(mocks.useDealBoardMock).toHaveBeenLastCalledWith("all", true, expect.any(Object), 8, null, undefined, {});
     expect(html).toContain('aria-pressed="false">Mine');
     expect(html).toContain('aria-pressed="true">All');
     expect(html).toContain('aria-pressed="false">Team');
@@ -821,17 +870,22 @@ describe("DealListPage", () => {
         wonQueryParams: new URLSearchParams("won_preset=30&won_since=2026-04-01&won_until=2026-04-30"),
       })
     ).toBe("/deals?filter=won&scope=team&period=last_month&won_preset=30&won_since=2026-04-01&won_until=2026-04-30");
+    expect(
+      buildDealsPageKpiDrilldownPath("active_pipeline", "all", null, {
+        queryParams: new URLSearchParams("assignedRepId=rep-1&estimate_sent_since=2026-04-01&estimate_sent_until=2026-04-30&search=roof"),
+      })
+    ).toBe("/deals?filter=active_pipeline&scope=all&assignedRepId=rep-1&estimate_sent_since=2026-04-01&estimate_sent_until=2026-04-30");
     expect(buildDealsPageKpiDrilldownPath("at_risk", "mine")).toBe(
       "/deals?filter=at_risk&scope=mine"
     );
   });
 
   it("renders clickable KPI cards on the deals page", () => {
-    const html = renderPage("/deals?scope=all&period=last_month", "director");
+    const html = renderPage("/deals?scope=all&period=last_month&assignedRepId=rep-1&estimate_sent_since=2026-04-01", "director");
 
-    expect(html).toContain('href="/deals?filter=active_pipeline&amp;scope=all"');
-    expect(html).toContain('href="/deals?filter=won&amp;scope=all&amp;period=last_month"');
-    expect(html).toContain('href="/deals?filter=at_risk&amp;scope=all"');
+    expect(html).toContain('href="/deals?filter=active_pipeline&amp;scope=all&amp;assignedRepId=rep-1&amp;estimate_sent_since=2026-04-01"');
+    expect(html).toContain('href="/deals?filter=won&amp;scope=all&amp;period=last_month&amp;assignedRepId=rep-1&amp;estimate_sent_since=2026-04-01"');
+    expect(html).toContain('href="/deals?filter=at_risk&amp;scope=all&amp;assignedRepId=rep-1&amp;estimate_sent_since=2026-04-01"');
     expect(html).toContain("View active pipeline deals");
     expect(html).toContain("View won deals");
     expect(html).toContain("View at-risk deals");
@@ -943,7 +997,9 @@ describe("DealListPage", () => {
         lost: { preset: "all" },
       },
       8,
-      { from: "2026-04-01", to: "2026-04-30" }
+      { from: "2026-04-01", to: "2026-04-30" },
+      undefined,
+      {}
     );
     expect(mocks.dealsListSectionMock).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -1238,7 +1294,9 @@ describe("DealListPage", () => {
       true,
       expect.any(Object),
       1000,
-      { from: "2026-04-01", to: "2026-05-08" }
+      { from: "2026-04-01", to: "2026-05-08" },
+      undefined,
+      {}
     );
     expect(mocks.dealsListSectionMock).not.toHaveBeenCalled();
     expect(html).toContain("Drill-down view: SLA filter applied to list and board.");
@@ -1322,7 +1380,7 @@ describe("DealListPage", () => {
   it("reflects the team scope query param in the scope toggle", () => {
     const html = renderPage("/deals?scope=team", "director");
 
-    expect(mocks.useDealBoardMock).toHaveBeenLastCalledWith("team", true, expect.any(Object), 8, null);
+    expect(mocks.useDealBoardMock).toHaveBeenLastCalledWith("team", true, expect.any(Object), 8, null, undefined, {});
     expect(html).toContain('aria-pressed="true">Team');
     expect(html).toContain('aria-pressed="false">Mine');
     expect(html).toContain('aria-pressed="false">All');
