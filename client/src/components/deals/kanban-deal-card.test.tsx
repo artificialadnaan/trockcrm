@@ -3,10 +3,39 @@
 import { describe, expect, it } from "vitest";
 import { renderToStaticMarkup } from "react-dom/server";
 import { MemoryRouter } from "react-router-dom";
+import type { AtRiskResult } from "@trock-crm/shared/types";
 import { KanbanDealCard, getDealDisplayNumber } from "./kanban-deal-card";
 import type { Deal } from "@/hooks/use-deals";
 
-function makeDeal(overrides: Partial<Deal> = {}): Deal {
+function makeAtRiskResult(overrides: Partial<AtRiskResult> = {}): AtRiskResult {
+  return {
+    isAtRisk: true,
+    status: "at_risk",
+    severity: "at_risk",
+    reason: "threshold_reached",
+    stageSlug: "estimating",
+    canonicalStageSlug: "estimating",
+    viewerRole: "rep",
+    audience: "rep",
+    policy: {
+      audience: "rep",
+      stageSlug: "estimating",
+      dayCounting: "calendar_days",
+      thresholdDays: 7,
+      recurs: true,
+      recurrenceDays: 7,
+    },
+    effectiveStageAgeSeconds: 864_000,
+    effectiveStageAgeDays: 10,
+    thresholdSeconds: 604_800,
+    thresholdDays: 7,
+    secondsUntilThreshold: 0,
+    secondsPastThreshold: 259_200,
+    ...overrides,
+  };
+}
+
+function makeDeal(overrides: Partial<Deal> & { atRisk?: AtRiskResult | null } = {}): Deal {
   return {
     id: "deal-1",
     dealNumber: "HS-321687989951",
@@ -117,6 +146,26 @@ describe("KanbanDealCard", () => {
     const html = render(makeDeal({ name: "Palm Villas", awardedAmount: "250000" }));
     expect(html).toContain("Palm Villas");
     expect(html).toMatch(/\$25\d/);
+  });
+
+  it("renders the shared at-risk badge when the pipeline card receives it", () => {
+    const html = render(makeDeal({ atRisk: makeAtRiskResult() }));
+
+    expect(html).toContain("At Risk");
+    expect(html).toContain('data-at-risk-severity="at_risk"');
+  });
+
+  it("does not render an at-risk badge for a not-at-risk result", () => {
+    const html = render(makeDeal({
+      atRisk: makeAtRiskResult({
+        isAtRisk: false,
+        status: "not_at_risk",
+        severity: "none",
+        reason: "within_sla",
+      }),
+    }));
+
+    expect(html).not.toContain("At Risk");
   });
 });
 

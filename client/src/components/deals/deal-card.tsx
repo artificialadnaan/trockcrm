@@ -11,6 +11,7 @@ import {
 } from "@/lib/deal-utils";
 import type { Deal } from "@/hooks/use-deals";
 import { Clock, MapPin, GripVertical } from "lucide-react";
+import { AtRiskBadge } from "@/components/deals/at-risk-badge";
 
 interface DealCardProps {
   deal: Deal;
@@ -62,6 +63,7 @@ export function DealCard({ deal, isDragging }: DealCardProps) {
             </span>
           </div>
           <p className="text-sm font-medium truncate">{deal.name}</p>
+          <AtRiskBadge atRisk={deal.atRisk} compact className="mt-1" />
           <div className="flex items-center gap-2 mt-1.5 text-[11px] text-muted-foreground">
             <span className="flex items-center gap-0.5">
               <Clock className="h-3 w-3" />

@@ -40,6 +40,7 @@ import {
   type DetailPageShellTab,
 } from "@/components/layout/detail-page-shell";
 import { DealStageBadge } from "@/components/deals/deal-stage-badge";
+import { AtRiskBadge } from "@/components/deals/at-risk-badge";
 import { DealEmailTab } from "@/components/email/deal-email-tab";
 import { EntityActivityTab } from "@/components/activities/entity-activity-tab";
 import { DealOverviewTab } from "@/components/deals/deal-overview-tab";
@@ -678,6 +679,7 @@ export function DealDetailPage() {
           On Hold
         </span>
       ) : null}
+      <AtRiskBadge atRisk={deal.atRisk} />
     </>
   );
   const headerDisplayNumber = formatDealDisplayNumber(deal);

@@ -7,10 +7,12 @@ import {
   type TerminalOutcome,
 } from "@/lib/pipeline-terminal-filters";
 import type { FileRecord } from "./use-files";
-export { getDealStageMetadata, getWorkflowRouteLabel } from "@/lib/pipeline-ownership";
 import type { StagePageQuery } from "@/lib/pipeline-stage-page";
+import type { AtRiskResult } from "@trock-crm/shared/types";
+export { getDealStageMetadata, getWorkflowRouteLabel } from "@/lib/pipeline-ownership";
 
 export type WorkflowRoute = "normal" | "service";
+
 export type DealScopingIntakeStatus = "draft" | "ready" | "activated";
 export type DealPipelineDisposition = "opportunity" | "deals" | "service";
 export type DealDepartment = "sales" | "estimating" | "client_services" | "operations";
@@ -198,6 +200,7 @@ export interface Deal {
   createdAt: string;
   updatedAt: string;
   isWatching?: boolean;
+  atRisk?: AtRiskResult | null;
 }
 
 export interface DealDetail extends Deal {

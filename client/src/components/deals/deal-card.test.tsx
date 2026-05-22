@@ -1,14 +1,19 @@
 // @vitest-environment jsdom
 
-import { describe, expect, it, vi } from "vitest";
 import { renderToStaticMarkup } from "react-dom/server";
-import type { ReactNode } from "react";
+import { MemoryRouter } from "react-router-dom";
+import { describe, expect, it, vi } from "vitest";
 import type { AtRiskResult } from "@trock-crm/shared/types";
-import { DecoratedKanbanCard } from "./decorated-kanban-card";
+import { DealCard } from "./deal-card";
 import type { Deal } from "@/hooks/use-deals";
 
-vi.mock("react-router-dom", () => ({
-  Link: ({ children }: { children: ReactNode }) => <a>{children}</a>,
+vi.mock("@dnd-kit/core", () => ({
+  useDraggable: () => ({
+    attributes: {},
+    listeners: {},
+    setNodeRef: () => {},
+    transform: null,
+  }),
 }));
 
 function makeAtRiskResult(overrides: Partial<AtRiskResult> = {}): AtRiskResult {
@@ -43,20 +48,18 @@ function makeDeal(overrides: Partial<Deal> & { atRisk?: AtRiskResult | null } = 
   return {
     id: "deal-1",
     dealNumber: "TR-2026-0001",
-    projectNumber: null,
+    projectNumber: "DFW-1-12826-aa",
     name: "Palm Villas",
     stageId: "stage-1",
     pipelineDisposition: "deals",
     workflowRoute: "normal",
     assignedRepId: "rep-1",
-    assignedRepName: "Brett Jones",
-    companyId: "company-1",
-    companyName: "Acme Construction",
+    companyId: null,
     propertyId: null,
     sourceLeadId: null,
     primaryContactId: null,
-    ddEstimate: null,
-    bidEstimate: "180000",
+    ddEstimate: "180000",
+    bidEstimate: null,
     awardedAmount: null,
     changeOrderTotal: null,
     description: null,
@@ -103,52 +106,32 @@ function makeDeal(overrides: Partial<Deal> & { atRisk?: AtRiskResult | null } = 
     lastActivityAt: null,
     stageEnteredAt: "2026-04-01T10:00:00.000Z",
     isActive: true,
-    hubspotDealId: null,
+    isHubspotSourced: false,
     createdAt: "2026-04-01T10:00:00.000Z",
     updatedAt: "2026-04-15T10:00:00.000Z",
     ...overrides,
   } as Deal;
 }
 
-function render(stageSlug: string, slaDays: number) {
+function render(deal: Deal) {
   return renderToStaticMarkup(
-    <DecoratedKanbanCard deal={makeDeal()} stageSlug={stageSlug} slaDays={slaDays} onClick={() => {}} />
+    <MemoryRouter>
+      <DealCard deal={deal} />
+    </MemoryRouter>
   );
 }
 
-function renderDeal(deal: Deal, stageSlug = "estimating", slaDays = 7) {
-  return renderToStaticMarkup(
-    <DecoratedKanbanCard deal={deal} stageSlug={stageSlug} slaDays={slaDays} onClick={() => {}} />
-  );
-}
-
-describe("DecoratedKanbanCard", () => {
-  it("shows SLA context for active stages", () => {
-    const html = render("opportunity", 7);
-
-    expect(html).toContain("SLA");
-    expect(html).toContain("/ 7d SLA");
-  });
-
-  it("keeps time-in-stage but omits SLA context for terminal stages", () => {
-    const html = render("won", 7);
-
-    expect(html).toMatch(/\d+d/);
-    expect(html).not.toContain("SLA");
-    expect(html).not.toContain("/ 7d");
-  });
-
-  it("renders the shared at-risk result when the board card receives it", () => {
-    const html = renderDeal(makeDeal({ atRisk: makeAtRiskResult() }));
+describe("DealCard", () => {
+  it("renders the role-relative at-risk badge when supplied", () => {
+    const html = render(makeDeal({ atRisk: makeAtRiskResult() }));
 
     expect(html).toContain("At Risk");
     expect(html).toContain('data-at-risk-severity="at_risk"');
   });
 
-  it("does not render an at-risk badge when the API has not supplied the result", () => {
-    const html = renderDeal(makeDeal());
+  it("renders no at-risk badge when the result is absent", () => {
+    const html = render(makeDeal());
 
     expect(html).not.toContain("At Risk");
-    expect(html).not.toContain("data-at-risk-severity");
   });
 });

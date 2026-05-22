@@ -3,7 +3,8 @@ import { useDraggable } from "@dnd-kit/core";
 import { GripVertical, Clock, MapPin } from "lucide-react";
 import { formatCurrencyCompact, daysInStage } from "@/lib/deal-utils";
 import { cn } from "@/lib/utils";
-import { getEffectiveDealValue } from "@trock-crm/shared/types";
+import { getEffectiveDealValue, type AtRiskResult } from "@trock-crm/shared/types";
+import { AtRiskBadge } from "@/components/deals/at-risk-badge";
 
 export interface PipelineRecordCardData {
   id: string;
@@ -22,6 +23,7 @@ export interface PipelineRecordCardData {
   ddEstimate?: string | null;
   onHold?: boolean | null;
   workflowRoute?: string | null;
+  atRisk?: AtRiskResult | null;
 }
 
 interface PipelineRecordCardProps {
@@ -91,6 +93,7 @@ export function PipelineRecordCard({
                   {record.dealNumber}
                 </span>
               ) : null}
+              {entity === "deal" ? <AtRiskBadge atRisk={record.atRisk} compact /> : null}
               <p className="line-clamp-2 text-[15px] leading-5 font-semibold text-slate-900">{record.name}</p>
             </div>
             {value ? (
