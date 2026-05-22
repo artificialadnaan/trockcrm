@@ -558,6 +558,14 @@ function readStageInput(req: Parameters<typeof router.get>[1] extends never ? ne
     sort: normalizeStagePageSort(req.query.sort as string | undefined),
     search: req.query.search as string | undefined,
     assignedRepId: req.query.assignedRepId as string | undefined,
+    estimateSentFrom: assertOptionalIsoDateQueryParam(
+      (req.query.estimateSentFrom as string | undefined) ?? (req.query.estimate_sent_since as string | undefined),
+      "estimateSentFrom"
+    ),
+    estimateSentTo: assertOptionalIsoDateQueryParam(
+      (req.query.estimateSentTo as string | undefined) ?? (req.query.estimate_sent_until as string | undefined),
+      "estimateSentTo"
+    ),
     regionId: req.query.regionId as string | undefined,
     workflowRoute: req.query.workflowRoute as string | undefined,
     updatedFrom: (req.query.updatedAfter as string | undefined) ?? (req.query.updatedFrom as string | undefined),
@@ -766,6 +774,8 @@ router.get("/", async (req, res, next) => {
   try {
     const createdFrom = assertOptionalIsoDateQueryParam(req.query.createdFrom, "createdFrom");
     const createdTo = assertOptionalIsoDateQueryParam(req.query.createdTo, "createdTo");
+    const estimateSentFrom = assertOptionalIsoDateQueryParam(req.query.estimateSentFrom, "estimateSentFrom");
+    const estimateSentTo = assertOptionalIsoDateQueryParam(req.query.estimateSentTo, "estimateSentTo");
     const isActiveFilter =
       req.query.isActive === "all"
         ? ("all" as const)
@@ -788,6 +798,8 @@ router.get("/", async (req, res, next) => {
       source: req.query.source as string | undefined,
       contractSignedFrom: req.query.contractSignedFrom as string | undefined,
       contractSignedTo: req.query.contractSignedTo as string | undefined,
+      estimateSentFrom,
+      estimateSentTo,
       createdFrom,
       createdTo,
       updatedFrom: req.query.updatedFrom as string | undefined,
@@ -838,12 +850,16 @@ router.get("/pipeline", async (req, res, next) => {
   try {
     const rawPreviewLimit = req.query.previewLimit as string | undefined;
     const parsedPreviewLimit = rawPreviewLimit ? parseInt(rawPreviewLimit, 10) : undefined;
+    const estimateSentFrom = assertOptionalIsoDateQueryParam(req.query.estimateSentFrom, "estimateSentFrom");
+    const estimateSentTo = assertOptionalIsoDateQueryParam(req.query.estimateSentTo, "estimateSentTo");
     const scope = normalizeCollaborativeScope(
       req.user!.role,
       req.query.scope as "mine" | "team" | "all" | undefined
     );
     const filters = {
       assignedRepId: req.query.assignedRepId as string | undefined,
+      estimateSentFrom,
+      estimateSentTo,
       scope,
       activeOfficeId: req.user!.activeOfficeId ?? req.user!.officeId,
       includeDd: req.query.includeDd === "true",

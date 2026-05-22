@@ -205,4 +205,67 @@ describe("deal routes scope defaults", () => {
       "director-1"
     );
   });
+
+  it("passes validated Estimate Sent date filters through to deal list and pipeline routes", async () => {
+    const list = await invokeRoute("/", {
+      assignedRepId: "rep-1",
+      estimateSentFrom: "2026-04-01",
+      estimateSentTo: "2026-04-30",
+      search: "roof",
+    });
+    const pipeline = await invokeRoute("/pipeline", {
+      assignedRepId: "rep-1",
+      estimateSentFrom: "2026-04-01",
+      estimateSentTo: "2026-04-30",
+    });
+
+    expect(dealServiceMocks.getDeals).toHaveBeenCalledWith(
+      list.req.tenantDb,
+      expect.objectContaining({
+        assignedRepId: "rep-1",
+        estimateSentFrom: "2026-04-01",
+        estimateSentTo: "2026-04-30",
+        search: "roof",
+      }),
+      "director",
+      "director-1"
+    );
+    expect(dealServiceMocks.getDealsForPipeline).toHaveBeenCalledWith(
+      pipeline.req.tenantDb,
+      "director",
+      "director-1",
+      expect.objectContaining({
+        assignedRepId: "rep-1",
+        estimateSentFrom: "2026-04-01",
+        estimateSentTo: "2026-04-30",
+      })
+    );
+  });
+
+  it("rejects malformed Estimate Sent date filters before querying deals", async () => {
+    const handler = findRouteHandler("get", "/");
+    const req = {
+      query: { estimateSentFrom: "April 1" },
+      tenantDb: {},
+      user: {
+        id: "director-1",
+        role: "director",
+        officeId: "office-1",
+        activeOfficeId: "office-1",
+      },
+      commitTransaction: vi.fn(async () => {}),
+    } as any;
+    const res = {} as any;
+    const next = vi.fn();
+
+    await handler(req, res, next);
+
+    expect(dealServiceMocks.getDeals).not.toHaveBeenCalled();
+    expect(next).toHaveBeenCalledWith(
+      expect.objectContaining({
+        statusCode: 400,
+        message: "estimateSentFrom must be an ISO date in YYYY-MM-DD format",
+      })
+    );
+  });
 });

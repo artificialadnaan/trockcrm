@@ -225,9 +225,22 @@ export function buildDealStageWorkspacePath(input: {
   stageSlug?: string | null;
   scope?: string;
   filters: Record<TerminalOutcome, TerminalDateFilter>;
+  queryParams?: URLSearchParams | Record<string, string | null | undefined>;
 }) {
   const params = new URLSearchParams();
   if (input.scope) params.set("scope", input.scope);
+  if (input.queryParams) {
+    const entries =
+      input.queryParams instanceof URLSearchParams
+        ? Array.from(input.queryParams.entries())
+        : Object.entries(input.queryParams);
+    for (const [key, value] of entries) {
+      if (!value) continue;
+      if (key === "assignedRepId" || key.startsWith("estimate_sent_")) {
+        params.set(key, value);
+      }
+    }
+  }
   if (input.stageSlug && isTerminalOutcomeSlug(input.stageSlug)) {
     appendTerminalDateParams(params, input.stageSlug, input.filters[input.stageSlug]);
   }

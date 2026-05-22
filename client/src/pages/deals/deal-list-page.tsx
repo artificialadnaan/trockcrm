@@ -3,17 +3,22 @@ import { useNavigate, useSearchParams } from "react-router-dom";
 import { ArrowRight, Briefcase, Plus, Search } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { MetricCard } from "@/components/shared/metric-card";
 import { ScopeToggle, type ScopeToggleOption } from "@/components/shared/scope-toggle";
 import { USD_COMPACT } from "@/components/shared/formatters";
 import { useDealBoard, type Deal, type DealBoardColumn } from "@/hooks/use-deals";
 import { usePipelineStages } from "@/hooks/use-pipeline-config";
+import { useTaskAssignees } from "@/hooks/use-task-assignees";
 import { buildCanonicalDealBoardColumns } from "@/lib/canonical-deal-board";
 import { daysInStage } from "@/lib/deal-utils";
 import { useAuth } from "@/lib/auth";
+import { getEffectiveDealValue } from "@trock-crm/shared/types";
 import { TerminalDateFilterControl } from "@/components/pipeline/terminal-date-filter-control";
 import {
   buildDealStageWorkspacePath,
+  clampDateToToday,
+  daysAgo,
   getActivePipelineColumns,
   getTerminalDateFilterLabel,
   isTerminalStage,
@@ -362,16 +367,59 @@ function readCurrentTerminalDateFilters(): Record<TerminalOutcome, TerminalDateF
   };
 }
 
+function isDealDatePreset(value: string | null): value is Exclude<TerminalDateFilter["preset"], "custom"> {
+  return value === "7" || value === "30" || value === "60" || value === "90" || value === "all";
+}
+
+function readEstimateSentDateFilterFromSearchParams(params: URLSearchParams): TerminalDateFilter {
+  const preset = params.get("estimate_sent_preset");
+  if (isDealDatePreset(preset)) return { preset };
+  if (params.get("estimate_sent_all_time") === "true") return { preset: "all" };
+
+  const since = params.get("estimate_sent_since");
+  const until = params.get("estimate_sent_until");
+  if (since) {
+    return {
+      preset: "custom",
+      customStart: clampDateToToday(since),
+      customEnd: until ? clampDateToToday(until) : undefined,
+    };
+  }
+
+  return { preset: "all" };
+}
+
+function setEstimateSentDateFilterSearchParams(params: URLSearchParams, filter: TerminalDateFilter) {
+  params.delete("estimate_sent_preset");
+  params.delete("estimate_sent_since");
+  params.delete("estimate_sent_until");
+  params.delete("estimate_sent_all_time");
+
+  if (filter.preset === "all") {
+    return;
+  }
+
+  if (filter.preset === "custom") {
+    params.set("estimate_sent_since", clampDateToToday(filter.customStart));
+    if (filter.customEnd) params.set("estimate_sent_until", clampDateToToday(filter.customEnd));
+    return;
+  }
+
+  params.set("estimate_sent_preset", filter.preset);
+}
+
 export function buildDealStageNavigationPath(
   column: DealBoardColumn,
   scope: PipelineScope,
-  filters: Record<TerminalOutcome, TerminalDateFilter> = readCurrentTerminalDateFilters()
+  filters: Record<TerminalOutcome, TerminalDateFilter> = readCurrentTerminalDateFilters(),
+  queryParams?: URLSearchParams | Record<string, string | null | undefined>
 ) {
   return buildDealStageWorkspacePath({
     stageId: column.stage.id,
     stageSlug: column.stage.slug,
     scope,
     filters,
+    queryParams,
   });
 }
 
@@ -380,6 +428,7 @@ export function buildDealsPageKpiDrilldownPath(
   scope: PipelineScope,
   period?: DashboardPeriodSelection,
   options?: {
+    queryParams?: URLSearchParams | Record<string, string | null | undefined>;
     wonQueryParams?: URLSearchParams | Record<string, string | null | undefined>;
   }
 ) {
@@ -387,21 +436,28 @@ export function buildDealsPageKpiDrilldownPath(
   params.set("filter", filter);
   params.set("scope", scope);
   if (period) params.set("period", period);
-  if (filter === "won" && options?.wonQueryParams) {
+  const queryParams = options?.queryParams ?? options?.wonQueryParams;
+  if (queryParams) {
     const entries =
-      options.wonQueryParams instanceof URLSearchParams
-        ? Array.from(options.wonQueryParams.entries())
-        : Object.entries(options.wonQueryParams);
+      queryParams instanceof URLSearchParams
+        ? Array.from(queryParams.entries())
+        : Object.entries(queryParams);
     for (const [key, value] of entries) {
-      if (!key.startsWith("won_") || !value) continue;
-      params.set(key, value);
+      if (!value) continue;
+      if (
+        key === "assignedRepId" ||
+        key.startsWith("estimate_sent_") ||
+        (filter === "won" && key.startsWith("won_"))
+      ) {
+        params.set(key, value);
+      }
     }
   }
   return `/deals?${params.toString()}`;
 }
 
 function moneyValue(deal: Deal) {
-  return Number(deal.awardedAmount ?? deal.bidEstimate ?? deal.ddEstimate ?? 0);
+  return getEffectiveDealValue(deal);
 }
 
 function compareDrilldownDeals(left: DrilldownListRow, right: DrilldownListRow, sort: DealListSortState) {
@@ -467,6 +523,18 @@ function getTerminalDateRange(filter: TerminalDateFilter, now = new Date()): Dat
     from: formatDateInput(start),
     to: today,
   };
+}
+
+function getEstimateSentDateRange(filter: TerminalDateFilter, now = new Date()): DateRange {
+  if (filter.preset === "all") return {};
+  if (filter.preset === "custom") {
+    return {
+      from: filter.customStart,
+      to: filter.customEnd,
+    };
+  }
+
+  return { from: daysAgo(Number(filter.preset), now) };
 }
 
 function intersectDateRanges(...ranges: Array<DateRange | null | undefined>): DateRange {
@@ -587,6 +655,9 @@ function DealListPageContent({ role, userId }: { role: string; userId: string })
   const [terminalDateFilters, setTerminalDateFilters] = useState<Record<TerminalOutcome, TerminalDateFilter>>(() =>
     readTerminalDateFiltersFromSearchParams(searchParams)
   );
+  const [estimateSentDateFilter, setEstimateSentDateFilter] = useState<TerminalDateFilter>(() =>
+    readEstimateSentDateFilterFromSearchParams(searchParams)
+  );
   const scope = resolvePreferredScope({
     requestedScope: searchParams.get("scope"),
     userId,
@@ -596,6 +667,17 @@ function DealListPageContent({ role, userId }: { role: string; userId: string })
   const selectedPeriodRange = useMemo(() => getDashboardPeriodDateRange(selectedPeriod), [selectedPeriod]);
   const scopeOptions = SCOPE_OPTIONS;
   const { stages } = usePipelineStages("deal");
+  const { assignees } = useTaskAssignees();
+  const selectedRepId = searchParams.get("assignedRepId") || "__all__";
+  const selectedRepFilter = selectedRepId === "__all__" ? undefined : selectedRepId;
+  const selectedRepLabel =
+    selectedRepId === "__all__"
+      ? "All reps"
+      : assignees.find((assignee) => assignee.id === selectedRepId)?.displayName ?? "Selected rep";
+  const estimateSentDateRange = useMemo(
+    () => getEstimateSentDateRange(estimateSentDateFilter),
+    [estimateSentDateFilter]
+  );
   const dashboardView = useMemo(
     () =>
       getDashboardDealListView({
@@ -610,11 +692,14 @@ function DealListPageContent({ role, userId }: { role: string; userId: string })
     true,
     terminalDateFilters,
     isAtRiskDrilldown ? SLA_DRILLDOWN_PREVIEW_LIMIT : 8,
-    selectedPeriodRange
+    selectedPeriodRange,
+    selectedRepFilter,
+    estimateSentDateRange
   );
 
   useEffect(() => {
     setTerminalDateFilters(readTerminalDateFiltersFromSearchParams(searchParams));
+    setEstimateSentDateFilter(readEstimateSentDateFilterFromSearchParams(searchParams));
   }, [searchParams]);
 
   const updateTerminalDateFilter = useCallback((outcome: TerminalOutcome, filter: TerminalDateFilter) => {
@@ -623,6 +708,24 @@ function DealListPageContent({ role, userId }: { role: string; userId: string })
     setSearchParams((current) => {
       const next = new URLSearchParams(current);
       setTerminalDateFilterSearchParams(next, outcome, filter);
+      return next;
+    });
+  }, [setSearchParams]);
+
+  const updateSelectedRep = useCallback((repId: string) => {
+    setSearchParams((current) => {
+      const next = new URLSearchParams(current);
+      if (!repId || repId === "__all__") next.delete("assignedRepId");
+      else next.set("assignedRepId", repId);
+      return next;
+    });
+  }, [setSearchParams]);
+
+  const updateEstimateSentDateFilter = useCallback((filter: TerminalDateFilter) => {
+    setEstimateSentDateFilter(filter);
+    setSearchParams((current) => {
+      const next = new URLSearchParams(current);
+      setEstimateSentDateFilterSearchParams(next, filter);
       return next;
     });
   }, [setSearchParams]);
@@ -768,11 +871,15 @@ function DealListPageContent({ role, userId }: { role: string; userId: string })
           }).length),
     0
   );
-  const activePipelineDestination = buildDealsPageKpiDrilldownPath("active_pipeline", scope);
-  const wonDestination = buildDealsPageKpiDrilldownPath("won", scope, selectedPeriod, {
-    wonQueryParams: searchParams,
+  const activePipelineDestination = buildDealsPageKpiDrilldownPath("active_pipeline", scope, undefined, {
+    queryParams: searchParams,
   });
-  const atRiskDestination = buildDealsPageKpiDrilldownPath("at_risk", scope);
+  const wonDestination = buildDealsPageKpiDrilldownPath("won", scope, selectedPeriod, {
+    queryParams: searchParams,
+  });
+  const atRiskDestination = buildDealsPageKpiDrilldownPath("at_risk", scope, undefined, {
+    queryParams: searchParams,
+  });
   const wonCaption =
     terminalDateFilters.won.preset !== "all"
       ? getWonMetricTerminalLabel(terminalDateFilters.won)
@@ -788,6 +895,14 @@ function DealListPageContent({ role, userId }: { role: string; userId: string })
       ...(wonDateRange.to ? { contractSignedTo: wonDateRange.to } : {}),
     };
   }, [dashboardView.filter, dashboardView.listBaseFilters, wonDateRange.from, wonDateRange.to]);
+  const layeredListBaseFilters = useMemo(
+    () => ({
+      ...drilldownBaseFilters,
+      ...(estimateSentDateRange.from ? { estimateSentFrom: estimateSentDateRange.from } : {}),
+      ...(estimateSentDateRange.to ? { estimateSentTo: estimateSentDateRange.to } : {}),
+    }),
+    [drilldownBaseFilters, estimateSentDateRange.from, estimateSentDateRange.to]
+  );
 
   const updateScope = (nextScope: PipelineScope) => {
     writeStoredScopePreference(userId, nextScope);
@@ -797,7 +912,7 @@ function DealListPageContent({ role, userId }: { role: string; userId: string })
   };
 
   const openStage = (column: DealBoardColumn) => {
-    navigate(buildDealStageNavigationPath(column, scope, terminalDateFilters));
+    navigate(buildDealStageNavigationPath(column, scope, terminalDateFilters, searchParams));
   };
 
   useEffect(() => {
@@ -873,6 +988,26 @@ function DealListPageContent({ role, userId }: { role: string; userId: string })
           </p>
         </div>
         <div className="flex flex-wrap items-center gap-3">
+          <Select value={selectedRepId} onValueChange={(value) => updateSelectedRep(value ?? "__all__")}>
+            <SelectTrigger className="h-10 w-[13rem] bg-white">
+              <SelectValue placeholder="All reps">{selectedRepLabel}</SelectValue>
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="__all__">All reps</SelectItem>
+              {assignees.map((assignee) => (
+                <SelectItem key={assignee.id} value={assignee.id}>
+                  {assignee.displayName}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+          <TerminalDateFilterControl
+            stageName="Estimate Sent to Client"
+            filter={estimateSentDateFilter}
+            onFilterChange={updateEstimateSentDateFilter}
+            buttonClassName="h-10 rounded-md"
+            inputClassName="rounded-md"
+          />
           <ScopeToggle options={scopeOptions} value={scope} onChange={updateScope} ariaLabel="Deal scope" />
           <Button onClick={() => navigate("/deals/service-opportunity/new")} className="bg-brand-red text-white hover:bg-brand-red/90">
             <Plus className="mr-2 h-4 w-4" />
@@ -1069,9 +1204,11 @@ function DealListPageContent({ role, userId }: { role: string; userId: string })
               subtitle={dashboardView.subtitle}
               eyebrow={dashboardView.eyebrow}
               visibleStages={drilldownVisibleStages}
-              baseFilters={drilldownBaseFilters}
+              baseFilters={layeredListBaseFilters}
               initialSort={dashboardView.listInitialSort}
               initialStageSlugs={dashboardView.initialStageSlugs}
+              lockedOwnerId={selectedRepFilter}
+              hideOwnerFilter
             />
           )}
         </>

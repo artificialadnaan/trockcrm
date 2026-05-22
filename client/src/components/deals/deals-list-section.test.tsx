@@ -395,6 +395,21 @@ describe("DealsListSection", () => {
     expect(call.scope).toBe("team");
   });
 
+  it("clears the effective owner filter when a hidden locked owner is cleared", async () => {
+    const { rerender, cleanup } = await renderDom({ lockedOwnerId: "rep-1", hideOwnerFilter: true });
+    try {
+      let call = mocks.useDealsMock.mock.calls[mocks.useDealsMock.mock.calls.length - 1][0];
+      expect(call.assignedRepId).toBe("rep-1");
+
+      await rerender({ hideOwnerFilter: true });
+
+      call = mocks.useDealsMock.mock.calls[mocks.useDealsMock.mock.calls.length - 1][0];
+      expect(call.assignedRepId).toBeUndefined();
+    } finally {
+      await cleanup();
+    }
+  });
+
   it("forwards updatedFrom and updatedTo into the CSV export request", async () => {
     const originalCreateObjectURL = URL.createObjectURL;
     const originalRevokeObjectURL = URL.revokeObjectURL;
