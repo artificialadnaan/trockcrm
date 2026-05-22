@@ -20,8 +20,12 @@ import {
 } from "@trock-crm/shared/schema";
 import {
   DOMAIN_EVENTS,
+  getDealAtRiskResult,
+  USER_ROLES,
+  type AtRiskResult,
   type DealContractSignedEventPayload,
   type StagePageSort,
+  type UserRole,
   type WorkflowRoute,
   resolveOfficeCodeFromOffice,
 } from "@trock-crm/shared/types";
@@ -51,6 +55,7 @@ import { aliasedActiveDealCountFilterSql } from "../shared/deal-value-sql.js";
 type TenantDb = NodePgDatabase<typeof schema>;
 type DealRow = typeof deals.$inferSelect;
 type PipelineStageRow = typeof pipelineStageConfig.$inferSelect;
+type DealWithAtRisk<T> = T & { atRisk: AtRiskResult };
 const contractSignedDateForReporting = sql`COALESCE(contract_signed_at::date, contract_signed_date)`;
 const DEFAULT_PIPELINE_CARDS_PER_STAGE_LIMIT = 100;
 const MAX_PIPELINE_CARDS_PER_STAGE_LIMIT = 1000;
@@ -61,6 +66,55 @@ function sqlStringList(values: readonly string[]) {
 
 function nonTerminalMirroredStageCondition() {
   return sql`COALESCE(${deals.bidBoardStageSlug}, '') NOT IN (${sqlStringList(TERMINAL_STAGE_SLUGS)})`;
+}
+
+function normalizeAtRiskViewerRole(role: string | null | undefined): UserRole | null {
+  return USER_ROLES.includes(role as UserRole) ? (role as UserRole) : null;
+}
+
+function attachAtRiskResult<T extends {
+  stageId?: string | null;
+  stageSlug?: string | null;
+  bidBoardStageSlug?: string | null;
+  workflowRoute?: WorkflowRoute | null;
+  stageEnteredAt?: string | Date | null;
+  bidBoardStageEnteredAt?: string | Date | null;
+  onHold?: boolean | null;
+  onHoldStartedAt?: string | Date | null;
+  onHoldAccumulatedSeconds?: number | bigint | null;
+  onHoldAccumulatedSecondsAtStageEntry?: number | bigint | null;
+}>(
+  deal: T,
+  viewerRole: string | null | undefined,
+  fallbackStageSlug?: string | null
+): DealWithAtRisk<T> {
+  const actualStageSlug = deal.stageSlug ?? fallbackStageSlug ?? deal.stageId ?? null;
+  const isTerminalStage =
+    actualStageSlug != null && TERMINAL_STAGE_SLUGS.includes(actualStageSlug);
+  const stageSlug = isTerminalStage
+    ? actualStageSlug
+    : deal.bidBoardStageSlug ?? actualStageSlug;
+
+  return {
+    ...deal,
+    atRisk: getDealAtRiskResult(
+      {
+        stageSlug,
+        workflowRoute: deal.workflowRoute ?? "normal",
+        stageEnteredAt: deal.bidBoardStageEnteredAt ?? deal.stageEnteredAt ?? null,
+        onHold: deal.onHold,
+        onHoldStartedAt: deal.onHoldStartedAt,
+        onHoldAccumulatedSeconds:
+          deal.onHoldAccumulatedSeconds == null ? null : Number(deal.onHoldAccumulatedSeconds),
+        onHoldAccumulatedSecondsAtStageEntry:
+          deal.onHoldAccumulatedSecondsAtStageEntry == null
+            ? null
+            : Number(deal.onHoldAccumulatedSecondsAtStageEntry),
+      },
+      normalizeAtRiskViewerRole(viewerRole),
+      new Date()
+    ),
+  };
 }
 
 function normalizeOptionalDealBidDueDate(value: unknown) {
@@ -485,10 +539,8 @@ function resolveIntendedProjectNumberFromCode(
 async function isPastOpportunity(stageId: string | null | undefined) {
   if (!stageId) return true;
 
-  const [stage, opportunity] = await Promise.all([
-    getStageById(stageId),
-    getStageBySlug("opportunity", "standard_deal"),
-  ]);
+  const stage = await getStageById(stageId);
+  const opportunity = await getStageBySlug("opportunity", "standard_deal");
 
   if (!stage || !opportunity) {
     return true;
@@ -595,6 +647,7 @@ type WorkspaceScope = "mine" | "team" | "all";
 
 export interface DealBoardInput {
   role: string;
+  atRiskViewerRole?: string;
   userId: string;
   activeOfficeId: string;
   scope: WorkspaceScope;
@@ -639,7 +692,12 @@ type DealStageWorkspaceRow = {
   property_state: string | null;
   updated_at: string;
   stage_entered_at: string;
+  bid_board_stage_slug: string | null;
+  bid_board_stage_entered_at: string | null;
   on_hold: boolean;
+  on_hold_started_at: string | null;
+  on_hold_accumulated_seconds: string | number | null;
+  on_hold_accumulated_seconds_at_stage_entry: string | number | null;
   awarded_amount: string | null;
   bid_estimate: string | null;
   dd_estimate: string | null;
@@ -981,8 +1039,12 @@ async function buildDealWorkspaceScope(
   return sql.join(filters, sql` and `);
 }
 
-function mapDealStageWorkspaceRow(row: DealStageWorkspaceRow) {
-  return {
+function mapDealStageWorkspaceRow(
+  row: DealStageWorkspaceRow,
+  viewerRole: string | null | undefined,
+  fallbackStageSlug?: string | null
+) {
+  const deal = {
     id: row.id,
     dealNumber: row.deal_number,
     projectNumber: row.project_number,
@@ -997,12 +1059,21 @@ function mapDealStageWorkspaceRow(row: DealStageWorkspaceRow) {
     propertyState: row.property_state,
     updatedAt: row.updated_at,
     stageEnteredAt: row.stage_entered_at,
+    bidBoardStageSlug: row.bid_board_stage_slug,
+    bidBoardStageEnteredAt: row.bid_board_stage_entered_at,
     onHold: row.on_hold,
+    onHoldStartedAt: row.on_hold_started_at,
+    onHoldAccumulatedSeconds: Number(row.on_hold_accumulated_seconds ?? 0),
+    onHoldAccumulatedSecondsAtStageEntry: Number(
+      row.on_hold_accumulated_seconds_at_stage_entry ?? 0
+    ),
     daysInStage: Number(row.days_in_stage ?? 0),
     awardedAmount: row.awarded_amount,
     bidEstimate: row.bid_estimate,
     ddEstimate: row.dd_estimate,
   };
+
+  return attachAtRiskResult(deal, viewerRole, fallbackStageSlug ?? row.stage_id);
 }
 
 export function buildBidBoardOwnershipState(
@@ -1158,7 +1229,13 @@ async function resolveSourceLeadLineage(
 /**
  * Get a paginated, filtered, sorted list of deals.
  */
-export async function getDeals(tenantDb: TenantDb, filters: DealFilters, userRole: string, userId: string) {
+export async function getDeals(
+  tenantDb: TenantDb,
+  filters: DealFilters,
+  userRole: string,
+  userId: string,
+  atRiskViewerRole: string = userRole
+) {
   const page = filters.page ?? 1;
   const limit = filters.limit ?? 50;
   const offset = (page - 1) * limit;
@@ -1297,9 +1374,11 @@ export async function getDeals(tenantDb: TenantDb, filters: DealFilters, userRol
     .select({
       ...getTableColumns(deals),
       companyName: companies.name,
+      stageSlug: pipelineStageConfig.slug,
     })
     .from(deals)
     .leftJoin(companies, eq(companies.id, deals.companyId))
+    .leftJoin(pipelineStageConfig, eq(pipelineStageConfig.id, deals.stageId))
     .where(where)
     .orderBy(...sortOrder)
     .limit(limit)
@@ -1309,7 +1388,7 @@ export async function getDeals(tenantDb: TenantDb, filters: DealFilters, userRol
   const activeCount = Number(activeCountResult[0]?.count ?? total);
 
   return {
-    deals: dealRows,
+    deals: dealRows.map((deal) => attachAtRiskResult(deal, atRiskViewerRole)),
     pagination: {
       page,
       limit,
@@ -1323,10 +1402,20 @@ export async function getDeals(tenantDb: TenantDb, filters: DealFilters, userRol
 /**
  * Get a single deal by ID.
  */
-export async function getDealById(tenantDb: TenantDb, dealId: string, userRole: string, userId: string) {
+export async function getDealById(
+  tenantDb: TenantDb,
+  dealId: string,
+  userRole: string,
+  userId: string,
+  atRiskViewerRole: string = userRole
+) {
   const result = await tenantDb
-    .select()
+    .select({
+      ...getTableColumns(deals),
+      stageSlug: pipelineStageConfig.slug,
+    })
     .from(deals)
+    .leftJoin(pipelineStageConfig, eq(pipelineStageConfig.id, deals.stageId))
     .where(eq(deals.id, dealId))
     .limit(1);
 
@@ -1338,15 +1427,20 @@ export async function getDealById(tenantDb: TenantDb, dealId: string, userRole: 
     throw new AppError(403, "You can only view your own deals");
   }
 
-  return deal;
+  return attachAtRiskResult(deal, atRiskViewerRole);
 }
 
 /**
  * Get deal with related data for the detail page.
- * Fetches stage history, approvals, change orders in parallel.
  */
-export async function getDealDetail(tenantDb: TenantDb, dealId: string, userRole: string, userId: string) {
-  const deal = await getDealById(tenantDb, dealId, userRole, userId);
+export async function getDealDetail(
+  tenantDb: TenantDb,
+  dealId: string,
+  userRole: string,
+  userId: string,
+  atRiskViewerRole: string = userRole
+) {
+  const deal = await getDealById(tenantDb, dealId, userRole, userId, atRiskViewerRole);
   if (!deal) return null;
 
   const [detailDeal] = await tenantDb
@@ -1389,6 +1483,7 @@ export async function getDealDetail(tenantDb: TenantDb, dealId: string, userRole
 
   return {
     ...dealWithMetadata,
+    atRisk: attachAtRiskResult(dealWithMetadata, atRiskViewerRole, currentStage?.slug ?? null).atRisk,
     postConversionEnrichment: evaluatePostConversionEnrichment(dealWithMetadata as any, currentStage ?? { isTerminal: true }),
     bidBoardOwnership: buildBidBoardOwnershipState(dealWithMetadata),
     stageHistory,
@@ -2059,7 +2154,8 @@ export async function getDealsForPipeline(
     previewLimit?: number;
     scope?: WorkspaceScope;
     activeOfficeId?: string | null;
-  } & PipelineTerminalDateFilters
+  } & PipelineTerminalDateFilters,
+  atRiskViewerRole: string = userRole
 ) {
   // Get all stages ordered
   const stages = await db
@@ -2100,6 +2196,7 @@ export async function getDealsForPipeline(
 
   const commonConditions: any[] = [];
   const mineVisibility = filters?.scope === "mine" ? await resolveMineVisibilityFeatures(tenantDb) : null;
+  let assignedRepFilterHandled = false;
 
   if (filters?.scope === "mine") {
     commonConditions.push(
@@ -2111,9 +2208,18 @@ export async function getDealsForPipeline(
     );
   } else if (filters?.scope === "team") {
     const teamRepIds = await resolveTeamRepIds(tenantDb, userId, filters.activeOfficeId ?? null);
-    commonConditions.push(teamRepIds.length > 0 ? inArray(deals.assignedRepId, teamRepIds) : sql`false`);
+    if (filters?.assignedRepId) {
+      commonConditions.push(
+        teamRepIds.includes(filters.assignedRepId)
+          ? eq(deals.assignedRepId, filters.assignedRepId)
+          : sql`false`
+      );
+      assignedRepFilterHandled = true;
+    } else {
+      commonConditions.push(teamRepIds.length > 0 ? inArray(deals.assignedRepId, teamRepIds) : sql`false`);
+    }
   }
-  if (filters?.assignedRepId) {
+  if (filters?.assignedRepId && !assignedRepFilterHandled) {
     commonConditions.push(eq(deals.assignedRepId, filters.assignedRepId));
   }
   addEstimateSentDateConditions(commonConditions, filters ?? {});
@@ -2202,7 +2308,9 @@ export async function getDealsForPipeline(
   // Build response: active pipeline stages + date-filtered terminal stages.
   const pipelineColumns = responseStages.map((stage) => ({
     stage,
-    deals: dealsByStage.get(stage.id) ?? [],
+    deals: (dealsByStage.get(stage.id) ?? []).map((deal) =>
+      attachAtRiskResult(deal, atRiskViewerRole, stage.slug)
+    ),
     totalValue: valueByStage.get(stage.id) ?? 0,
     count: activeCountByStage.get(stage.id) ?? 0,
     activeCount: activeCountByStage.get(stage.id) ?? 0,
@@ -2304,7 +2412,12 @@ export async function listDealStagePage(tenantDb: TenantDb, input: DealStagePage
       d.property_state,
       d.updated_at,
       d.stage_entered_at,
+      d.bid_board_stage_slug,
+      d.bid_board_stage_entered_at,
       d.on_hold,
+      d.on_hold_started_at,
+      d.on_hold_accumulated_seconds,
+      d.on_hold_accumulated_seconds_at_stage_entry,
       d.awarded_amount,
       d.bid_estimate,
       d.dd_estimate,
@@ -2346,7 +2459,9 @@ export async function listDealStagePage(tenantDb: TenantDb, input: DealStagePage
       total,
       totalPages: Math.max(1, Math.ceil(total / pageSize)),
     },
-    rows: (rowResult.rows as DealStageWorkspaceRow[]).map(mapDealStageWorkspaceRow),
+    rows: (rowResult.rows as DealStageWorkspaceRow[]).map((row) =>
+      mapDealStageWorkspaceRow(row, input.atRiskViewerRole ?? input.role, stage.slug)
+    ),
   };
 }
 

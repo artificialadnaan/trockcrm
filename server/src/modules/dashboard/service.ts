@@ -20,7 +20,11 @@ import type * as schema from "@trock-crm/shared/schema";
 import {
   CANONICAL_DEAL_STAGE_LABELS,
   DEFAULT_ACTIVITY_RANGE,
+  getDealAtRiskResult,
+  USER_ROLES,
+  type AtRiskResult,
   type ActivityRange,
+  type UserRole,
   type WorkflowRoute,
 } from "@trock-crm/shared/types";
 import { db } from "../../db.js";
@@ -47,6 +51,23 @@ import { aliasedEffectiveAwardedDealValueSql, aliasedEffectiveDealValueSql } fro
 
 type TenantDb = NodePgDatabase<typeof schema>;
 type ExecuteRows<T> = { rows: T[] } | T[];
+export type DashboardAtRiskSummaryRow = {
+  dealId?: string | null;
+  repId?: string | null;
+  repName?: string | null;
+  dealName?: string | null;
+  stageName?: string | null;
+  regionClassification?: string | null;
+  dealValue: number;
+  stageSlug: string | null;
+  mirroredStageStatus?: string | null;
+  workflowRoute?: WorkflowRoute | null;
+  stageEnteredAt?: string | Date | null;
+  onHold?: boolean | null;
+  onHoldStartedAt?: string | Date | null;
+  onHoldAccumulatedSeconds?: number | string | bigint | null;
+  onHoldAccumulatedSecondsAtStageEntry?: number | string | bigint | null;
+};
 
 function rowsFromExecute<T>(result: ExecuteRows<T>): T[] {
   return Array.isArray(result) ? result : result.rows;
@@ -63,9 +84,98 @@ function nonTerminalDealStageSql() {
   `;
 }
 
+function normalizeAtRiskViewerRole(role: string | null | undefined): UserRole | null {
+  return USER_ROLES.includes(role as UserRole) ? (role as UserRole) : null;
+}
+
+export function buildDashboardAtRiskSummary(
+  rows: DashboardAtRiskSummaryRow[],
+  viewerRole: string | null | undefined,
+  now: Date = new Date()
+): { count: number; totalValue: number } {
+  const normalizedViewerRole = normalizeAtRiskViewerRole(viewerRole);
+
+  return rows.reduce(
+    (acc, row) => {
+      const result = getDealAtRiskResult(
+        {
+          stageSlug: row.stageSlug,
+          workflowRoute: row.workflowRoute ?? "normal",
+          stageEnteredAt: row.stageEnteredAt ?? null,
+          onHold: row.onHold,
+          onHoldStartedAt: row.onHoldStartedAt,
+          onHoldAccumulatedSeconds:
+            row.onHoldAccumulatedSeconds == null ? null : Number(row.onHoldAccumulatedSeconds),
+          onHoldAccumulatedSecondsAtStageEntry:
+            row.onHoldAccumulatedSecondsAtStageEntry == null
+              ? null
+              : Number(row.onHoldAccumulatedSecondsAtStageEntry),
+        },
+        normalizedViewerRole,
+        now
+      );
+
+      if (!result.isAtRisk) return acc;
+      return {
+        count: acc.count + 1,
+        totalValue: acc.totalValue + Number(row.dealValue ?? 0),
+      };
+    },
+    { count: 0, totalValue: 0 }
+  );
+}
+
+export function buildDashboardAtRiskDeals(
+  rows: DashboardAtRiskSummaryRow[],
+  viewerRole: string | null | undefined,
+  now: Date = new Date()
+): DashboardAtRiskDealRow[] {
+  const normalizedViewerRole = normalizeAtRiskViewerRole(viewerRole);
+  const atRiskDeals: DashboardAtRiskDealRow[] = [];
+
+  for (const row of rows) {
+    const atRisk = getDealAtRiskResult(
+      {
+        stageSlug: row.stageSlug,
+        workflowRoute: row.workflowRoute ?? "normal",
+        stageEnteredAt: row.stageEnteredAt ?? null,
+        onHold: row.onHold,
+        onHoldStartedAt: row.onHoldStartedAt,
+        onHoldAccumulatedSeconds:
+          row.onHoldAccumulatedSeconds == null ? null : Number(row.onHoldAccumulatedSeconds),
+        onHoldAccumulatedSecondsAtStageEntry:
+          row.onHoldAccumulatedSecondsAtStageEntry == null
+            ? null
+            : Number(row.onHoldAccumulatedSecondsAtStageEntry),
+      },
+      normalizedViewerRole,
+      now
+    );
+    if (!atRisk.isAtRisk) continue;
+
+    atRiskDeals.push({
+      dealId: String(row.dealId ?? ""),
+      repId: row.repId ? String(row.repId) : null,
+      repName: String(row.repName ?? "Unassigned"),
+      dealName: String(row.dealName ?? "Deal"),
+      stageName: resolveMirroredStageLabel(row.stageSlug, row.stageName ?? "Stage"),
+      mirroredStageStatus: row.mirroredStageStatus ?? null,
+      workflowRoute: row.workflowRoute === "service" ? "service" : "normal",
+      regionClassification: String(row.regionClassification ?? "Unassigned region"),
+      dealValue: Number(row.dealValue ?? 0),
+      daysInStage: atRisk.effectiveStageAgeDays,
+      staleThresholdDays: atRisk.thresholdDays ?? 0,
+      atRisk,
+    });
+  }
+
+  return atRiskDeals;
+}
+
 type DashboardScopeOptions = {
   repId?: string;
   viewerUserId?: string;
+  viewerRole?: string;
   includeDealSubscriptions?: boolean;
   includeLeadSubscriptions?: boolean;
   includeDealCreatedBy?: boolean;
@@ -375,6 +485,10 @@ export interface DashboardDownstreamBottleneckRow {
   dealValue: number;
   daysInStage: number;
   staleThresholdDays: number;
+}
+
+export interface DashboardAtRiskDealRow extends DashboardDownstreamBottleneckRow {
+  atRisk: AtRiskResult;
 }
 
 export interface MyCleanupSummary {
@@ -1675,7 +1789,7 @@ export interface DirectorDashboardData {
   staleLeads: StaleLeadDashboardRow[];
   crmOwnedProgression: DashboardCrmOwnedProgressionRow[];
   downstreamBottlenecks: DashboardDownstreamBottleneckRow[];
-  atRiskDeals: DashboardDownstreamBottleneckRow[];
+  atRiskDeals: DashboardAtRiskDealRow[];
   forecastVsGoal: ForecastVsGoal;
   activityPulse: Array<{
     repId: string;
@@ -2168,11 +2282,61 @@ async function getDashboardStaleDeals(
   }));
 }
 
+async function getDashboardAtRiskRows(
+  tenantDb: TenantDb,
+  options: DashboardScopeOptions = {}
+): Promise<DashboardAtRiskSummaryRow[]> {
+  const scopeFilter = dealScopeFilterSql("d", options);
+  const result = await tenantDb.execute(sql`
+    SELECT
+      d.id AS deal_id,
+      d.assigned_rep_id AS rep_id,
+      COALESCE(u.display_name, 'Unassigned') AS rep_name,
+      d.name AS deal_name,
+      ${dealValueSql()}::numeric AS deal_value,
+      COALESCE(d.bid_board_stage_slug, psc.slug) AS stage_slug,
+      psc.name AS stage_name,
+      d.bid_board_stage_status AS mirrored_stage_status,
+      d.workflow_route,
+      COALESCE(NULLIF(TRIM(d.region_classification), ''), TRIM(CONCAT_WS(', ', d.property_city, d.property_state)), 'Unassigned region') AS region_classification,
+      COALESCE(d.bid_board_stage_entered_at, d.stage_entered_at) AS stage_entered_at,
+      d.on_hold,
+      d.on_hold_started_at,
+      d.on_hold_accumulated_seconds,
+      d.on_hold_accumulated_seconds_at_stage_entry
+    FROM deals d
+    JOIN pipeline_stage_config psc ON psc.id = d.stage_id
+    LEFT JOIN users u ON u.id = d.assigned_rep_id
+    WHERE d.is_active = true
+      AND COALESCE(d.is_test_data, false) = false
+      AND ${nonTerminalDealStageSql()}
+      ${scopeFilter}
+  `);
+
+  return rowsFromExecute<any>(result).map((row) => ({
+    dealId: row.deal_id ? String(row.deal_id) : null,
+    repId: row.rep_id ? String(row.rep_id) : null,
+    repName: row.rep_name ? String(row.rep_name) : null,
+    dealName: row.deal_name ? String(row.deal_name) : null,
+    dealValue: Number(row.deal_value ?? 0),
+    stageSlug: row.stage_slug ? String(row.stage_slug) : null,
+    stageName: resolveMirroredStageLabel(row.stage_slug, row.stage_name),
+    mirroredStageStatus: row.mirrored_stage_status ?? null,
+    regionClassification: row.region_classification ?? null,
+    workflowRoute: (row.workflow_route ?? "normal") as WorkflowRoute,
+    stageEnteredAt: row.stage_entered_at ?? null,
+    onHold: Boolean(row.on_hold),
+    onHoldStartedAt: row.on_hold_started_at ?? null,
+    onHoldAccumulatedSeconds: row.on_hold_accumulated_seconds ?? 0,
+    onHoldAccumulatedSecondsAtStageEntry: row.on_hold_accumulated_seconds_at_stage_entry ?? 0,
+  }));
+}
+
 async function buildDirectorScopeSummary(
   tenantDb: TenantDb,
   options: { from: string; to: string } & DashboardScopeOptions
 ) {
-  const [pipelineRows, staleDeals, won] = await runSequential([
+  const [pipelineRows, staleDeals, atRiskRows, won] = await runSequential([
     () => getScopedPipelineSummary(tenantDb, {
       includeDd: false,
       repId: options.repId,
@@ -2182,6 +2346,18 @@ async function buildDirectorScopeSummary(
       includeDealSubscriptionDeletedAt: options.includeDealSubscriptionDeletedAt,
     }),
     () => getDashboardStaleDeals(
+      tenantDb,
+      options.repId || options.viewerUserId
+        ? {
+            repId: options.repId,
+            viewerUserId: options.viewerUserId,
+            includeDealSubscriptions: options.includeDealSubscriptions,
+            includeDealCreatedBy: options.includeDealCreatedBy,
+            includeDealSubscriptionDeletedAt: options.includeDealSubscriptionDeletedAt,
+          }
+        : {}
+    ),
+    () => getDashboardAtRiskRows(
       tenantDb,
       options.repId || options.viewerUserId
         ? {
@@ -2203,13 +2379,7 @@ async function buildDirectorScopeSummary(
     }),
     { count: 0, totalValue: 0 }
   );
-  const atRisk = staleDeals.reduce(
-    (acc, deal) => ({
-      count: acc.count + 1,
-      totalValue: acc.totalValue + deal.dealValue,
-    }),
-    { count: 0, totalValue: 0 }
-  );
+  const atRisk = buildDashboardAtRiskSummary(atRiskRows, options.viewerRole ?? "director");
   const stale = staleDeals.reduce(
     (acc, deal) => ({
       count: acc.count + 1,
@@ -2272,7 +2442,7 @@ export async function getDirectorCommissionWorkspace(
 
 /**
  * Aggregate all data for the director dashboard.
- * All queries run in parallel and use the date range (defaults to current calendar year).
+ * Queries run sequentially because tenantDb is bound to a single client per request.
  */
 export async function getDirectorDashboard(
   tenantDb: TenantDb,
@@ -2283,6 +2453,7 @@ export async function getDirectorDashboard(
     periodKind?: RepPerformancePeriodKind;
     scope?: "mine" | "all";
     viewerUserId?: string;
+    viewerRole?: string;
   }
 ): Promise<DirectorDashboardData> {
   const year = new Date().getFullYear();
@@ -2301,6 +2472,7 @@ export async function getDirectorDashboard(
     ddResult,
     crmOwnedProgression,
     downstreamBottlenecks,
+    atRiskRows,
     funnelSummary,
     repCommissionRows,
     repPerformanceSnapshots,
@@ -2329,6 +2501,7 @@ export async function getDirectorDashboard(
     () => getDdVsPipeline(tenantDb),
     () => getCrmOwnedProgression(tenantDb),
     () => getDownstreamBottlenecks(tenantDb),
+    () => getDashboardAtRiskRows(tenantDb),
     () => getDirectorFunnelSummary(tenantDb),
     () => getDirectorRepCommissionRows(tenantDb, { from, to }),
     () => getRepPerformanceSnapshots(tenantDb, options.officeId, options.periodKind ?? "mtd"),
@@ -2337,6 +2510,7 @@ export async function getDirectorDashboard(
       from,
       to,
       viewerUserId: scopedViewerUserId,
+      viewerRole: options.viewerRole,
       includeDealSubscriptions: mineVisibility?.dealSubscriptions,
       includeLeadSubscriptions: mineVisibility?.leadSubscriptions,
       includeDealCreatedBy: mineVisibility?.dealsCreatedByUserId,
@@ -2384,7 +2558,7 @@ export async function getDirectorDashboard(
     staleLeads: staleLeadResult,
     crmOwnedProgression,
     downstreamBottlenecks,
-    atRiskDeals: downstreamBottlenecks,
+    atRiskDeals: buildDashboardAtRiskDeals(atRiskRows, options.viewerRole ?? "director"),
     forecastVsGoal: repPerformanceSnapshots.forecastVsGoal,
     activityPulse: repPerformanceSnapshots.rows.map((row) => ({
       repId: row.repId,

@@ -73,6 +73,7 @@ router.get(
         periodKind: periodKind as RepPerformancePeriodKind,
         scope,
         viewerUserId: req.user!.id,
+        viewerRole: req.user!.role,
       });
       await req.commitTransaction!();
       res.json({ data });

@@ -354,7 +354,8 @@ describe("Deal Scoping Routes", () => {
         wonSince: "2026-01-01",
         wonPeriodFrom: "2026-04-01",
         wonPeriodTo: "2026-04-30",
-      })
+      }),
+      "director"
     );
   });
 

@@ -930,6 +930,191 @@ describe("getDealsForPipeline", () => {
     expect(summarySelectText).toContain("dd_estimate");
   });
 
+  it("attaches role-relative At Risk results to pipeline deal cards", async () => {
+    dbState.responses = [
+      [
+        {
+          id: "stage-opportunity",
+          slug: "opportunity",
+          name: "Opportunity",
+          displayOrder: 1,
+          isTerminal: false,
+          isActivePipeline: true,
+        },
+      ],
+      [
+        {
+          id: "stage-opportunity",
+          slug: "opportunity",
+          name: "Opportunity",
+          displayOrder: 1,
+          isTerminal: false,
+          isActivePipeline: true,
+        },
+      ],
+    ];
+
+    const tenDaysAgo = new Date(Date.now() - 10 * 24 * 60 * 60 * 1000);
+    const tenantDb = {
+      select: vi.fn(() => {
+        const chain = createChainableMock();
+        chain.then.mockImplementation((resolve: (value: any[]) => unknown) => {
+          const isCardsQuery = chain.leftJoin.mock.calls.length > 0;
+          return resolve(
+            isCardsQuery
+              ? [
+                  {
+                    id: "deal-1",
+                    dealNumber: "TR-2026-0001",
+                    name: "Role Relative Deal",
+                    stageId: "stage-opportunity",
+                    assignedRepId: "rep-1",
+                    workflowRoute: "normal",
+                    stageEnteredAt: tenDaysAgo,
+                    onHold: false,
+                    onHoldStartedAt: null,
+                    onHoldAccumulatedSeconds: 0,
+                    onHoldAccumulatedSecondsAtStageEntry: 0,
+                    companyName: null,
+                    assignedRepName: "Rep One",
+                  },
+                ]
+              : [{ count: 1, totalValue: 1000 }]
+          );
+        });
+        return chain;
+      }),
+    } as any;
+
+    const { getDealsForPipeline } = await import("../../../src/modules/deals/service.js");
+    const repResult = await getDealsForPipeline(tenantDb, "rep", "rep-1", {
+      activeOfficeId: null,
+      scope: "all",
+    });
+    const directorResult = await getDealsForPipeline(tenantDb, "director", "director-1", {
+      activeOfficeId: null,
+      scope: "all",
+    });
+
+    expect(repResult.pipelineColumns[0]?.deals[0]?.atRisk).toMatchObject({
+      isAtRisk: true,
+      viewerRole: "rep",
+      audience: "rep",
+      thresholdDays: 7,
+      reason: "threshold_reached",
+    });
+    expect(directorResult.pipelineColumns[0]?.deals[0]?.atRisk).toMatchObject({
+      isAtRisk: false,
+      viewerRole: "director",
+      audience: "leadership",
+      thresholdDays: 30,
+      reason: "within_sla",
+    });
+  });
+
+  it("uses hold-aware effective age and terminal-stage exclusions for pipeline At Risk results", async () => {
+    dbState.responses = [
+      [
+        {
+          id: "stage-opportunity",
+          slug: "opportunity",
+          name: "Opportunity",
+          displayOrder: 1,
+          isTerminal: false,
+          isActivePipeline: true,
+        },
+        {
+          id: "stage-won",
+          slug: "won",
+          name: "Won",
+          displayOrder: 2,
+          isTerminal: true,
+          isActivePipeline: true,
+        },
+      ],
+    ];
+
+    const twentyDaysAgo = new Date(Date.now() - 20 * 24 * 60 * 60 * 1000);
+    const tenantDb = {
+      select: vi.fn(() => {
+        const chain = createChainableMock();
+        chain.then.mockImplementation((resolve: (value: any[]) => unknown) => {
+          const whereClause = chain.where.mock.calls[0]?.[0];
+          const isOpportunityQuery = containsValue(whereClause, "stage-opportunity");
+          const isWonQuery = containsValue(whereClause, "stage-won");
+          const isCardsQuery = chain.leftJoin.mock.calls.length > 0;
+          if (!isCardsQuery) return resolve([{ count: 1, totalValue: 1000 }]);
+          if (isOpportunityQuery) {
+            return resolve([
+              {
+                id: "deal-hold",
+                dealNumber: "TR-2026-HOLD",
+                name: "Paused Deal",
+                stageId: "stage-opportunity",
+                assignedRepId: "rep-1",
+                workflowRoute: "normal",
+                stageEnteredAt: twentyDaysAgo,
+                onHold: true,
+                onHoldStartedAt: twentyDaysAgo,
+                onHoldAccumulatedSeconds: 0,
+                onHoldAccumulatedSecondsAtStageEntry: 0,
+                companyName: null,
+                assignedRepName: "Rep One",
+              },
+            ]);
+          }
+          if (isWonQuery) {
+            return resolve([
+              {
+                id: "deal-won",
+                dealNumber: "TR-2026-WON",
+                name: "Won Deal",
+                stageId: "stage-won",
+                bidBoardStageSlug: "opportunity",
+                assignedRepId: "rep-1",
+                workflowRoute: "normal",
+                stageEnteredAt: twentyDaysAgo,
+                onHold: false,
+                onHoldStartedAt: null,
+                onHoldAccumulatedSeconds: 0,
+                onHoldAccumulatedSecondsAtStageEntry: 0,
+                companyName: null,
+                assignedRepName: "Rep One",
+              },
+            ]);
+          }
+          return resolve([]);
+        });
+        return chain;
+      }),
+    } as any;
+
+    const { getDealsForPipeline } = await import("../../../src/modules/deals/service.js");
+    const result = await getDealsForPipeline(tenantDb, "rep", "rep-1", {
+      activeOfficeId: null,
+      scope: "all",
+      wonAllTime: true,
+    });
+
+    const holdDeal = result.pipelineColumns
+      .find((column) => column.stage.slug === "opportunity")
+      ?.deals[0];
+    const wonDeal = result.pipelineColumns
+      .find((column) => column.stage.slug === "won")
+      ?.deals[0];
+
+    expect(holdDeal?.atRisk).toMatchObject({
+      isAtRisk: false,
+      reason: "within_sla",
+      effectiveStageAgeDays: 0,
+    });
+    expect(wonDeal?.atRisk).toMatchObject({
+      isAtRisk: false,
+      reason: "terminal_stage",
+      canonicalStageSlug: "won",
+    });
+  });
+
   it("applies assignedRepId as an additional filter in mine-scope board queries", async () => {
     dbState.responses = [
       [

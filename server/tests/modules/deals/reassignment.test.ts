@@ -162,9 +162,9 @@ describe("proposal draft backend wiring", () => {
     const tenantDb = {
       select: vi.fn(() => ({
         from: vi.fn(() => ({
-          where: vi.fn(() => ({
-            limit: vi.fn(async () => [existingDeal]),
-          })),
+          leftJoin: vi.fn().mockReturnThis(),
+          where: vi.fn().mockReturnThis(),
+          limit: vi.fn(async () => [existingDeal]),
         })),
       })),
       update: vi.fn(() => ({
