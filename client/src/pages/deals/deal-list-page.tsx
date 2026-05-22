@@ -620,7 +620,6 @@ function DealsBoardColumn({
             key={deal.id}
             deal={deal}
             stageSlug={column.stage.slug}
-            slaDays={STAGE_SLA_DAYS[column.stage.slug] ?? 7}
             onClick={() => onOpenRecord(deal.id)}
           />
         ))
