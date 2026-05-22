@@ -128,16 +128,22 @@ function measureSql(measure: ReportMeasure) {
     case "win_rate":
       return sql`
         COALESCE(
-          COUNT(*) FILTER (WHERE psc.slug IN ('won', 'sent_to_production', 'service_sent_to_production', 'closed_won'))::numeric
-          / NULLIF(COUNT(*) FILTER (WHERE psc.slug IN ('won', 'lost', 'sent_to_production', 'service_sent_to_production', 'closed_won', 'production_lost', 'service_lost', 'closed_lost')), 0)
+          COUNT(*) FILTER (
+            WHERE psc.slug IN ('won', 'sent_to_production', 'service_sent_to_production', 'closed_won')
+              AND ${aliasedActiveDealCountFilterSql("d")}
+          )::numeric
+          / NULLIF(COUNT(*) FILTER (
+            WHERE psc.slug IN ('won', 'lost', 'sent_to_production', 'service_sent_to_production', 'closed_won', 'production_lost', 'service_lost', 'closed_lost')
+              AND ${aliasedActiveDealCountFilterSql("d")}
+          ), 0)
           * 100,
           0
         )::numeric
       `;
     case "avg_cycle_time":
-      return sql`COALESCE(AVG(d.actual_close_date - d.created_at::date) FILTER (WHERE d.actual_close_date IS NOT NULL), 0)::numeric`;
+      return sql`COALESCE(AVG(d.actual_close_date - d.created_at::date) FILTER (WHERE d.actual_close_date IS NOT NULL AND ${aliasedActiveDealCountFilterSql("d")}), 0)::numeric`;
     case "avg_age_in_stage":
-      return sql`COALESCE(AVG(CURRENT_DATE - d.stage_entered_at::date), 0)::numeric`;
+      return sql`COALESCE(AVG(CURRENT_DATE - d.stage_entered_at::date) FILTER (WHERE ${aliasedActiveDealCountFilterSql("d")}), 0)::numeric`;
   }
 }
 

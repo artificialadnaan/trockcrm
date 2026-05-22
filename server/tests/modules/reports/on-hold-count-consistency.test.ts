@@ -24,6 +24,10 @@ function extractSqlText(value: unknown): string {
   return "";
 }
 
+function compactSql(value: string) {
+  return value.toLowerCase().replace(/\s+/g, " ");
+}
+
 describe("on-hold report count consistency", () => {
   it("excludes on-hold deals from pipeline velocity counts", async () => {
     const { getPipelineVelocityReport } = await import("../../../src/modules/reports/sales-tier1-service.js");
@@ -300,5 +304,127 @@ describe("on-hold report count consistency", () => {
     expect(reportBuilderSql).toContain("count(distinct d.id) filter (where");
     expect(reportBuilderSql).toContain("avg(");
     expect(reportBuilderSql).toContain("coalesce(d.on_hold, false) = false");
+  });
+
+  it("covers all PR 444 audit findings for value basis, sibling aggregates, and generated report measures", async () => {
+    const { getPipelineVelocityReport } = await import("../../../src/modules/reports/sales-tier1-service.js");
+    const { getDirectorScorecard, getForecastAccuracyReport } = await import("../../../src/modules/reports/performance-tier2-service.js");
+    const { getCustomerConcentrationReport, getExecutiveTrendsReport, getMarketMixReport } = await import("../../../src/modules/reports/analytics-tier4-service.js");
+    const { getWorkflowBottlenecksReport, getPortfolioLoadReport } = await import("../../../src/modules/reports/operations-tier3-service.js");
+    const {
+      getClosedWonSummary,
+      getRegionalOwnershipOverview,
+      getUnifiedWorkflowOverview,
+      getLostDealsByReason,
+      getRepPerformanceComparison,
+    } = await import("../../../src/modules/reports/service.js");
+    const { runReportBuilder } = await import("../../../src/modules/reports/report-builder-service.js");
+
+    const velocityDb = createMockTenantDb([[], [], []]);
+    await getPipelineVelocityReport(
+      velocityDb,
+      {
+        dateFrom: "2026-02-01",
+        dateTo: "2026-02-28",
+        officeSlug: undefined,
+        ownerIds: [],
+        ownerNames: [],
+        ownerEmails: [],
+      },
+      "audit-fix-pipeline-velocity"
+    );
+    const velocityQueries = velocityDb.execute.mock.calls.map(([query]: [unknown]) => compactSql(extractSqlText(query)));
+    expect(velocityQueries[0]).toMatch(/avg\(days_in_stage\) filter \(where coalesce\(ranked\.on_hold, false\) = false\)/);
+    expect(velocityQueries[0]).toMatch(/percentile_cont\(0\.5\).*filter \(where coalesce\(ranked\.on_hold, false\) = false\)/);
+    expect(velocityQueries[0]).toMatch(/array_agg\(id::text\) filter \(where rn = 1 and coalesce\(ranked\.on_hold, false\) = false\)/);
+    expect(velocityQueries[2]).toContain("and coalesce(d.on_hold, false) = false");
+
+    const scorecardDb = createMockTenantDb([[], [], [], [], []]);
+    await getDirectorScorecard(
+      scorecardDb,
+      { dateFrom: "2026-02-01", dateTo: "2026-02-28", ownerIds: [], ownerNames: [] },
+      "audit-fix-director-scorecard"
+    );
+    const scorecardQueries = scorecardDb.execute.mock.calls.map(([query]: [unknown]) => compactSql(extractSqlText(query)));
+    expect(scorecardQueries[1]).toMatch(/with scoped_deals as \( select d\.\* .*and coalesce\(d\.on_hold, false\) = false/);
+    expect(scorecardQueries[1]).toMatch(/task_deals as \( select d\.id .*and coalesce\(d\.on_hold, false\) = false/);
+    expect(scorecardQueries[4]).toContain("and coalesce(d.on_hold, false) = false");
+
+    const forecastDb = createMockTenantDb([[], [], []]);
+    await getForecastAccuracyReport(
+      forecastDb,
+      { dateFrom: "2026-02-01", dateTo: "2026-02-28", ownerIds: [], ownerNames: [] },
+      "audit-fix-forecast"
+    );
+    const forecastSql = compactSql(forecastDb.execute.mock.calls.map(([query]: [unknown]) => extractSqlText(query)).join("\n"));
+    expect(forecastSql).toContain("coalesce(d.forecast_revenue, d.awarded_amount, d.bid_estimate, d.dd_estimate, 0)");
+    expect(forecastSql).not.toContain("coalesce(d.awarded_amount, d.bid_estimate, d.dd_estimate, d.forecast_revenue, 0)");
+
+    const marketMixDb = createMockTenantDb([[], [], [], [], [], []]);
+    await getMarketMixReport(marketMixDb, { from: "2026-02-01", to: "2026-02-28" });
+    const marketMixSql = compactSql(marketMixDb.execute.mock.calls.map(([query]: [unknown]) => extractSqlText(query)).join("\n"));
+    expect(marketMixSql).toMatch(/avg\(case when coalesce\(d\.on_hold, false\).*awarded_amount.*filter \( where psc\.slug in .* and coalesce\(d\.on_hold, false\) = false \)/);
+
+    const customerDb = createMockTenantDb([[], [], [], []]);
+    await getCustomerConcentrationReport(customerDb, { from: "2026-02-01", to: "2026-02-28" });
+    const customerSql = compactSql(customerDb.execute.mock.calls.map(([query]: [unknown]) => extractSqlText(query)).join("\n"));
+    expect(customerSql).toContain("coalesce(d.forecast_revenue, d.bid_estimate, d.dd_estimate, 0)");
+    expect(customerSql).not.toContain("coalesce(d.awarded_amount, d.bid_estimate, d.dd_estimate, d.forecast_revenue, 0)");
+
+    const executiveDb = createMockTenantDb([[], [], [], [], []]);
+    await getExecutiveTrendsReport(executiveDb, { from: "2026-02-01", to: "2026-02-28" });
+    const executiveSql = compactSql(executiveDb.execute.mock.calls.map(([query]: [unknown]) => extractSqlText(query)).join("\n"));
+    expect(executiveSql).toContain("coalesce(d.forecast_revenue, d.bid_estimate, d.dd_estimate, 0)");
+    expect(executiveSql).not.toContain("coalesce(d.awarded_amount, d.bid_estimate, d.dd_estimate, d.forecast_revenue, 0)");
+    expect(executiveSql).toMatch(/avg\(case when coalesce\(d\.on_hold, false\).*awarded_amount.*filter \( where psc\.slug in .* and coalesce\(d\.on_hold, false\) = false \)/);
+
+    const closedWonSummaryDb = createMockTenantDb([[], [], []]);
+    await getClosedWonSummary(closedWonSummaryDb, { from: "2026-02-01", to: "2026-02-28" });
+    const closedWonSummarySql = compactSql(closedWonSummaryDb.execute.mock.calls.map(([query]: [unknown]) => extractSqlText(query)).join("\n"));
+    expect(closedWonSummarySql).toMatch(/avg\( extract\(day from d\.actual_close_date::timestamp - d\.created_at\) \) filter \(where coalesce\(d\.on_hold, false\) = false\)/);
+
+    const regionalDb = createMockTenantDb([[], [], [], []]);
+    await getRegionalOwnershipOverview(regionalDb, { from: "2026-02-01", to: "2026-02-28", officeId: "office-1" });
+    const regionalSql = compactSql(regionalDb.execute.mock.calls.map(([query]: [unknown]) => extractSqlText(query)).join("\n"));
+    expect(regionalSql).toMatch(/as stale_deal_count/g);
+    expect((regionalSql.match(/stale_threshold_days is not null .*?coalesce\(d\.on_hold, false\) = false/g) ?? []).length).toBeGreaterThanOrEqual(2);
+
+    const unifiedDb = createMockTenantDb([[], [], [], [], [], [], [], [], []]);
+    await getUnifiedWorkflowOverview(unifiedDb);
+    const unifiedSql = compactSql(unifiedDb.execute.mock.calls.map(([query]: [unknown]) => extractSqlText(query)).join("\n"));
+    expect(unifiedSql).toMatch(/as stale_deal_count/);
+    expect(unifiedSql).toMatch(/stale_threshold_days is not null .*?coalesce\(d\.on_hold, false\) = false/);
+
+    const lostReasonsDb = createMockTenantDb([[], []]);
+    await getLostDealsByReason(lostReasonsDb, { from: "2026-02-01", to: "2026-02-28" });
+    const lostReasonCompetitorSql = compactSql(extractSqlText(lostReasonsDb.execute.mock.calls[1][0]));
+    expect(lostReasonCompetitorSql).toContain("coalesce(d.on_hold, false) = false");
+
+    const repComparisonDb = createMockTenantDb([[], []]);
+    await getRepPerformanceComparison(repComparisonDb, "month");
+    const repComparisonSql = compactSql(extractSqlText(repComparisonDb.execute.mock.calls[0][0]));
+    expect((repComparisonSql.match(/coalesce\(d\.on_hold, false\) = false/g) ?? []).length).toBeGreaterThanOrEqual(6);
+
+    const reportBuilderDb = createMockTenantDb([]);
+    await runReportBuilder(reportBuilderDb, {
+      dimensions: ["stage"],
+      measures: ["win_rate", "avg_cycle_time", "avg_age_in_stage"],
+      filters: { from: "2026-02-01", to: "2026-02-28" },
+      dateField: "created_at",
+      role: "admin",
+      userId: "admin-1",
+    });
+    const reportBuilderSql = compactSql(extractSqlText(reportBuilderDb.execute.mock.calls[0][0]));
+    expect((reportBuilderSql.match(/coalesce\(d\.on_hold, false\) = false/g) ?? []).length).toBeGreaterThanOrEqual(4);
+
+    const bottlenecksDb = createMockTenantDb([[], [], []]);
+    await getWorkflowBottlenecksReport(bottlenecksDb, { from: "2026-02-01", to: "2026-02-28" });
+    const bottleneckSql = compactSql(bottlenecksDb.execute.mock.calls.map(([query]: [unknown]) => extractSqlText(query)).join("\n"));
+    expect((bottleneckSql.match(/coalesce\(d\.on_hold, false\) = false/g) ?? []).length).toBeGreaterThanOrEqual(3);
+
+    const portfolioDb = createMockTenantDb([]);
+    await getPortfolioLoadReport(portfolioDb, { from: "2026-02-01", to: "2026-02-28" });
+    const portfolioSql = compactSql(extractSqlText(portfolioDb.execute.mock.calls[0][0]));
+    expect(portfolioSql).toContain("coalesce(d.on_hold, false) = false");
   });
 });

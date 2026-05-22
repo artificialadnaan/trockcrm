@@ -2,7 +2,11 @@ import { sql } from "drizzle-orm";
 import type { NodePgDatabase } from "drizzle-orm/node-postgres";
 import type * as schema from "@trock-crm/shared/schema";
 import { buildOfficeMatcher } from "./office-filter.js";
-import { aliasedDealBestEstimateWithForecastSql, aliasedEffectiveDealValueSql } from "../shared/deal-value-sql.js";
+import {
+  aliasedActiveDealCountFilterSql,
+  aliasedDealBestEstimateWithForecastSql,
+  aliasedEffectiveDealValueSql,
+} from "../shared/deal-value-sql.js";
 
 type TenantDb = NodePgDatabase<typeof schema>;
 type ExecuteRows<T> = { rows: T[] } | T[];
@@ -351,6 +355,7 @@ export async function getWorkflowBottlenecksReport(
       FROM deals d
       ${activeDealJoins()}
       WHERE ${baseOpenDealWhere(filters)}
+        AND ${aliasedActiveDealCountFilterSql("d")}
       GROUP BY psc.id, psc.name, psc.display_order
       ORDER BY avg_days_in_stage DESC, psc.display_order ASC
     `));
@@ -369,6 +374,7 @@ export async function getWorkflowBottlenecksReport(
       FROM deals d
       ${activeDealJoins()}
       WHERE ${baseOpenDealWhere(filters)}
+        AND ${aliasedActiveDealCountFilterSql("d")}
         AND d.stage_entered_at <= NOW() - INTERVAL '30 days'
       ORDER BY days_in_stage DESC, value DESC
       LIMIT 15
@@ -388,6 +394,7 @@ export async function getWorkflowBottlenecksReport(
       FROM deals d
       ${activeDealJoins()}
       WHERE ${baseOpenDealWhere(filters)}
+        AND ${aliasedActiveDealCountFilterSql("d")}
         AND d.stage_entered_at <= NOW() - INTERVAL '15 days'
         AND (
           psc.slug ILIKE '%scoping%'
@@ -643,6 +650,7 @@ export async function getPortfolioLoadReport(
       LEFT JOIN companies c ON c.id = d.company_id
       LEFT JOIN properties p ON p.id = d.property_id
       WHERE ${baseOpenDealWhere(filters)}
+        AND ${aliasedActiveDealCountFilterSql("d")}
       ORDER BY value DESC, d.updated_at DESC
     `));
 

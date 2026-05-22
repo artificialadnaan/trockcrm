@@ -45,6 +45,16 @@ export function aliasedDealBestEstimateWithForecastSql(alias: string): SQL {
   );
 }
 
+export function aliasedForecastFirstDealValueSql(alias: string): SQL {
+  return sql.raw(
+    `COALESCE(${alias}.forecast_revenue, ${alias}.awarded_amount, ${alias}.bid_estimate, ${alias}.dd_estimate, 0)`
+  );
+}
+
+export function aliasedOpenPipelineForecastFirstDealValueSql(alias: string): SQL {
+  return sql.raw(`COALESCE(${alias}.forecast_revenue, ${alias}.bid_estimate, ${alias}.dd_estimate, 0)`);
+}
+
 export function aliasedEffectiveDealValueSql(
   alias: string,
   rawValueSql: SQL = aliasedDealBestEstimateSql(alias)

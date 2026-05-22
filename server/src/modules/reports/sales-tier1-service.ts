@@ -490,7 +490,15 @@ export async function getPipelineVelocityReport(
           AND p.slug NOT IN (${terminalSlugs})
       ),
       ranked AS (
-        SELECT *, ROW_NUMBER() OVER (PARTITION BY stage_id ORDER BY days_in_stage DESC, name ASC) AS rn
+        SELECT
+          *,
+          ROW_NUMBER() OVER (
+            PARTITION BY stage_id
+            ORDER BY
+              CASE WHEN ${aliasedActiveDealCountFilterSql("open_deals")} THEN 0 ELSE 1 END,
+              days_in_stage DESC,
+              name ASC
+          ) AS rn
         FROM open_deals
       )
       SELECT
@@ -499,11 +507,11 @@ export async function getPipelineVelocityReport(
         MAX(stage_order) AS "stageOrder",
         COUNT(*) FILTER (WHERE ${aliasedActiveDealCountFilterSql("ranked")})::int AS "openDeals",
         COALESCE(SUM(value), 0)::numeric AS "totalValue",
-        COALESCE(AVG(days_in_stage), 0)::numeric AS "avgDaysInStage",
-        COALESCE(PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY days_in_stage), 0)::numeric AS "medianDaysInStage",
-        (array_agg(id::text) FILTER (WHERE rn = 1))[1] AS "oldestDealId",
-        (array_agg(name) FILTER (WHERE rn = 1))[1] AS "oldestDealName",
-        ((array_agg(days_in_stage) FILTER (WHERE rn = 1))[1])::int AS "oldestDealDays"
+        COALESCE(AVG(days_in_stage) FILTER (WHERE ${aliasedActiveDealCountFilterSql("ranked")}), 0)::numeric AS "avgDaysInStage",
+        COALESCE(PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY days_in_stage) FILTER (WHERE ${aliasedActiveDealCountFilterSql("ranked")}), 0)::numeric AS "medianDaysInStage",
+        (array_agg(id::text) FILTER (WHERE rn = 1 AND ${aliasedActiveDealCountFilterSql("ranked")}))[1] AS "oldestDealId",
+        (array_agg(name) FILTER (WHERE rn = 1 AND ${aliasedActiveDealCountFilterSql("ranked")}))[1] AS "oldestDealName",
+        ((array_agg(days_in_stage) FILTER (WHERE rn = 1 AND ${aliasedActiveDealCountFilterSql("ranked")}))[1])::int AS "oldestDealDays"
       FROM ranked
       GROUP BY stage_id
       ORDER BY MAX(stage_order), MAX(stage_name)
@@ -549,6 +557,7 @@ export async function getPipelineVelocityReport(
       WHERE ${whereSql}
         AND p.slug NOT IN (${terminalSlugs})
         AND GREATEST(0, FLOOR(EXTRACT(EPOCH FROM (NOW() - d.stage_entered_at)) / 86400)) > 30
+        AND ${aliasedActiveDealCountFilterSql("d")}
       ORDER BY "daysInStage" DESC, value DESC
       LIMIT 10
     `));
