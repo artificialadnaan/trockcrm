@@ -120,10 +120,11 @@ export async function getCompanyById(tenantDb: TenantDb, id: string) {
   const rows = await tenantDb
     .select({
       ...getTableColumns(companies),
+      ownerUserId: companies.ownerId,
       ownerUserName: users.displayName,
     })
     .from(companies)
-    .leftJoin(users, eq(users.id, companies.ownerUserId))
+    .leftJoin(users, eq(users.id, companies.ownerId))
     .where(eq(companies.id, id))
     .limit(1);
   return rows[0] ?? null;

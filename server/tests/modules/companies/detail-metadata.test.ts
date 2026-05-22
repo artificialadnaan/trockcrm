@@ -6,7 +6,8 @@ const serviceSource = readFileSync(resolve(__dirname, "../../../src/modules/comp
 
 describe("company detail metadata contract", () => {
   it("joins owner users into company detail responses", () => {
+    expect(serviceSource).toContain("ownerUserId: companies.ownerId");
     expect(serviceSource).toContain("ownerUserName: users.displayName");
-    expect(serviceSource).toContain(".leftJoin(users, eq(users.id, companies.ownerUserId))");
+    expect(serviceSource).toContain(".leftJoin(users, eq(users.id, companies.ownerId))");
   });
 });
