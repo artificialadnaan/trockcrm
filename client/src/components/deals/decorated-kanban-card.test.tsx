@@ -3,7 +3,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { renderToStaticMarkup } from "react-dom/server";
 import type { ReactNode } from "react";
-import type { AtRiskResult } from "@trock-crm/shared/types";
+import { getSlaPolicy, type AtRiskResult } from "@trock-crm/shared/types";
 import { DecoratedKanbanCard } from "./decorated-kanban-card";
 import type { Deal } from "@/hooks/use-deals";
 
@@ -110,28 +110,43 @@ function makeDeal(overrides: Partial<Deal> & { atRisk?: AtRiskResult | null } = 
   } as Deal;
 }
 
-function render(stageSlug: string, slaDays: number) {
+function render(stageSlug: string) {
   return renderToStaticMarkup(
-    <DecoratedKanbanCard deal={makeDeal()} stageSlug={stageSlug} slaDays={slaDays} onClick={() => {}} />
+    <DecoratedKanbanCard deal={makeDeal()} stageSlug={stageSlug} onClick={() => {}} />
   );
 }
 
-function renderDeal(deal: Deal, stageSlug = "estimating", slaDays = 7) {
+function renderDeal(deal: Deal, stageSlug = "estimating") {
   return renderToStaticMarkup(
-    <DecoratedKanbanCard deal={deal} stageSlug={stageSlug} slaDays={slaDays} onClick={() => {}} />
+    <DecoratedKanbanCard deal={deal} stageSlug={stageSlug} onClick={() => {}} />
   );
 }
 
 describe("DecoratedKanbanCard", () => {
   it("shows SLA context for active stages", () => {
-    const html = render("opportunity", 7);
+    const html = render("opportunity");
 
     expect(html).toContain("SLA");
     expect(html).toContain("/ 7d SLA");
   });
 
+  it("uses the rep sla-policy threshold for the board-card SLA chip", () => {
+    vi.useFakeTimers();
+    try {
+      vi.setSystemTime(new Date("2026-04-11T10:00:00.000Z"));
+      const policy = getSlaPolicy("estimating", "rep");
+
+      const html = render("estimating");
+
+      expect(policy?.thresholdDays).toBe(14);
+      expect(html).toContain(`10d / ${policy?.thresholdDays}d SLA`);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("keeps time-in-stage but omits SLA context for terminal stages", () => {
-    const html = render("won", 7);
+    const html = render("won");
 
     expect(html).toMatch(/\d+d/);
     expect(html).not.toContain("SLA");

@@ -4,8 +4,19 @@ import type { Deal } from "@/hooks/use-deals";
 import { cn } from "@/lib/utils";
 import { getDealDisplayNumber } from "@/components/deals/kanban-deal-card";
 import { isTerminalStage } from "@/lib/pipeline-terminal-filters";
-import { getEffectiveDealValue } from "@trock-crm/shared/types";
+import {
+  getEffectiveDealValue,
+  getSlaPolicy,
+  type SlaAudience,
+  type SlaPolicyStageSlug,
+} from "@trock-crm/shared/types";
 import { AtRiskBadge } from "@/components/deals/at-risk-badge";
+
+const KANBAN_SLA_AUDIENCE = "rep" satisfies SlaAudience;
+
+export function resolveKanbanSlaThresholdDays(stageSlug: string): number | null {
+  return getSlaPolicy(stageSlug as SlaPolicyStageSlug, KANBAN_SLA_AUDIENCE)?.thresholdDays ?? null;
+}
 
 function getInitials(deal: Deal) {
   if (!deal.assignedRepName) return "TR";
@@ -27,19 +38,18 @@ function locationLine(deal: Deal) {
 interface DecoratedKanbanCardProps {
   deal: Deal;
   stageSlug: string;
-  slaDays: number;
   onClick: () => void;
 }
 
 export function DecoratedKanbanCard({
   deal,
   stageSlug,
-  slaDays,
   onClick,
 }: DecoratedKanbanCardProps) {
   const displayNumber = getDealDisplayNumber(deal);
   const days = daysInStage(deal.stageEnteredAt);
-  const showSla = !isTerminalStage(stageSlug);
+  const slaDays = resolveKanbanSlaThresholdDays(stageSlug);
+  const showSla = !isTerminalStage(stageSlug) && slaDays !== null;
   const isOverSla = showSla && slaDays > 0 && days > slaDays;
   const location = locationLine(deal);
 
