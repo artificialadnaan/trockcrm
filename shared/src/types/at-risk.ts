@@ -24,7 +24,8 @@ export type AtRiskReason =
   | "unknown_stage"
   | "terminal_stage"
   | "unsupported_role"
-  | "missing_policy";
+  | "missing_policy"
+  | "on_hold";
 
 export interface AtRiskInput {
   /** Canonical or legacy deal stage slug. Legacy aliases require workflowRoute unless unambiguous. */
@@ -32,6 +33,8 @@ export interface AtRiskInput {
   workflowRoute?: WorkflowRoute | null;
   /** Hold-aware age for the current stage. Callers should derive this with getEffectiveStageAgeSeconds. */
   effectiveStageAgeSeconds: number | null | undefined;
+  /** Current hold flag. Active hold clears risk; historical hold time is reflected only in effective age. */
+  onHold?: boolean | null;
   viewerRole: UserRole | null | undefined;
 }
 
@@ -163,6 +166,26 @@ export function getAtRiskResult(input: AtRiskInput): AtRiskResult {
   }
 
   const thresholdSeconds = policy.thresholdDays * SECONDS_PER_DAY;
+  if (input.onHold === true) {
+    return {
+      isAtRisk: false,
+      status: "not_at_risk",
+      severity: "none",
+      reason: "on_hold",
+      stageSlug: input.stageSlug,
+      canonicalStageSlug,
+      viewerRole: input.viewerRole ?? null,
+      audience,
+      policy,
+      effectiveStageAgeSeconds,
+      effectiveStageAgeDays: Math.floor(effectiveStageAgeSeconds / SECONDS_PER_DAY),
+      thresholdSeconds,
+      thresholdDays: policy.thresholdDays,
+      secondsUntilThreshold: Math.max(0, thresholdSeconds - effectiveStageAgeSeconds),
+      secondsPastThreshold: Math.max(0, effectiveStageAgeSeconds - thresholdSeconds),
+    };
+  }
+
   const isAtRisk = effectiveStageAgeSeconds >= thresholdSeconds;
 
   return {
@@ -194,5 +217,6 @@ export function getDealAtRiskResult(
     workflowRoute: deal.workflowRoute,
     viewerRole,
     effectiveStageAgeSeconds: getEffectiveStageAgeSeconds(deal, now),
+    onHold: deal.onHold,
   });
 }
