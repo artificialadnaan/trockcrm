@@ -45,6 +45,7 @@ import { resolveLeadSourceDisplayValue } from "../leads/source-control.js";
 import { resolveDealCreationPolicy, type DealCreationOrigin } from "./direct-create-rules.js";
 import { logActivity, type AuditContext } from "../audit/audit-logger.js";
 import { TERMINAL_STAGE_SLUGS } from "../shared/pipeline-terminal-stages.js";
+import { aliasedActiveDealCountFilterSql } from "../shared/deal-value-sql.js";
 
 // Type alias for the tenant-scoped Drizzle instance
 type TenantDb = NodePgDatabase<typeof schema>;
@@ -94,15 +95,13 @@ function normalizeOptionalDealBidDueDate(value: unknown) {
 }
 
 async function resolveActiveOfficeScope(tenantDb: TenantDb, activeOfficeId: string) {
-  const [office, officeUserIds] = await Promise.all([
-    db
-      .select({ slug: offices.slug, name: offices.name })
-      .from(offices)
-      .where(eq(offices.id, activeOfficeId))
-      .limit(1)
-      .then((rows) => rows[0] ?? null),
-    resolveActiveOfficeUserIds(tenantDb, activeOfficeId),
-  ]);
+  const officeRows = await db
+    .select({ slug: offices.slug, name: offices.name })
+    .from(offices)
+    .where(eq(offices.id, activeOfficeId))
+    .limit(1);
+  const office = officeRows[0] ?? null;
+  const officeUserIds = await resolveActiveOfficeUserIds(tenantDb, activeOfficeId);
 
   return {
     activeOfficeId,
@@ -640,6 +639,7 @@ type DealStageWorkspaceRow = {
   property_state: string | null;
   updated_at: string;
   stage_entered_at: string;
+  on_hold: boolean;
   awarded_amount: string | null;
   bid_estimate: string | null;
   dd_estimate: string | null;
@@ -997,6 +997,7 @@ function mapDealStageWorkspaceRow(row: DealStageWorkspaceRow) {
     propertyState: row.property_state,
     updatedAt: row.updated_at,
     stageEnteredAt: row.stage_entered_at,
+    onHold: row.on_hold,
     daysInStage: Number(row.days_in_stage ?? 0),
     awardedAmount: row.awarded_amount,
     bidEstimate: row.bid_estimate,
@@ -1278,6 +1279,9 @@ export async function getDeals(tenantDb: TenantDb, filters: DealFilters, userRol
   }
 
   const where = conditions.length > 0 ? and(...conditions) : undefined;
+  const activeCountWhere = where
+    ? and(where, sql`coalesce(${deals.onHold}, false) = false`)
+    : sql`coalesce(${deals.onHold}, false) = false`;
 
   // Sort
   const sortOrder = buildDealListOrder(filters);
@@ -1285,6 +1289,10 @@ export async function getDeals(tenantDb: TenantDb, filters: DealFilters, userRol
   // Sequential tenant queries required: tenantDb is a single transaction client
   // in production, so parallel reads can fail with "client already executing".
   const countResult = await tenantDb.select({ count: sql<number>`count(*)` }).from(deals).where(where);
+  const activeCountResult = await tenantDb
+    .select({ count: sql<number>`count(*)` })
+    .from(deals)
+    .where(activeCountWhere);
   const dealRows = await tenantDb
     .select({
       ...getTableColumns(deals),
@@ -1298,6 +1306,7 @@ export async function getDeals(tenantDb: TenantDb, filters: DealFilters, userRol
     .offset(offset);
 
   const total = Number(countResult[0]?.count ?? 0);
+  const activeCount = Number(activeCountResult[0]?.count ?? total);
 
   return {
     deals: dealRows,
@@ -1305,6 +1314,7 @@ export async function getDeals(tenantDb: TenantDb, filters: DealFilters, userRol
       page,
       limit,
       total,
+      activeCount,
       totalPages: Math.ceil(total / limit),
     },
   };
@@ -2121,7 +2131,8 @@ export async function getDealsForPipeline(
   });
 
   const dealsByStage = new Map<string, Array<DealRow & { companyName: string | null; assignedRepName: string | null }>>();
-  const countByStage = new Map<string, number>();
+  const activeCountByStage = new Map<string, number>();
+  const totalCountByStage = new Map<string, number>();
   const valueByStage = new Map<string, number>();
 
   // Sequential per-stage queries required: tenantDb is a single transaction
@@ -2162,7 +2173,8 @@ export async function getDealsForPipeline(
     const where = and(...stageConditions, ...commonConditions);
     const summaryRows = await tenantDb
       .select({
-        count: sql<number>`count(*)`,
+        totalCount: sql<number>`count(*)`,
+        activeCount: sql<number>`count(*) filter (where ${aliasedActiveDealCountFilterSql("deals")})`,
         totalValue: sql<number>`COALESCE(SUM(${effectiveDealValueSql(isTerminalStage)}), 0)`,
       })
       .from(deals)
@@ -2182,7 +2194,8 @@ export async function getDealsForPipeline(
       .limit(pipelineCardsPerStageLimit);
     dealsByStage.set(stage.id, stageDeals);
 
-    countByStage.set(stage.id, Number(summaryRows[0]?.count ?? 0));
+    activeCountByStage.set(stage.id, Number(summaryRows[0]?.activeCount ?? 0));
+    totalCountByStage.set(stage.id, Number(summaryRows[0]?.totalCount ?? 0));
     valueByStage.set(stage.id, Number(summaryRows[0]?.totalValue ?? 0));
   }
 
@@ -2191,14 +2204,18 @@ export async function getDealsForPipeline(
     stage,
     deals: dealsByStage.get(stage.id) ?? [],
     totalValue: valueByStage.get(stage.id) ?? 0,
-    count: countByStage.get(stage.id) ?? 0,
+    count: activeCountByStage.get(stage.id) ?? 0,
+    activeCount: activeCountByStage.get(stage.id) ?? 0,
+    totalCount: totalCountByStage.get(stage.id) ?? 0,
   }));
 
   const terminalStages = responseStages
     .filter((s) => s.isTerminal)
     .map((stage) => ({
       stage,
-      count: countByStage.get(stage.id) ?? 0,
+      count: activeCountByStage.get(stage.id) ?? 0,
+      activeCount: activeCountByStage.get(stage.id) ?? 0,
+      totalCount: totalCountByStage.get(stage.id) ?? 0,
       totalValue: valueByStage.get(stage.id) ?? 0,
     }));
 
@@ -2262,9 +2279,10 @@ export async function listDealStagePage(tenantDb: TenantDb, input: DealStagePage
 
   const countResult = await tenantDb.execute(sql`
     select
-      count(*)::int as total,
+      count(*)::int as total_count,
+      count(*) filter (where coalesce(d.on_hold, false) = false)::int as active_count,
       coalesce(sum(${workspaceEffectiveDealValueSql(stage)}), 0)::numeric as total_value,
-      round(avg(extract(day from now() - d.stage_entered_at)))::int as average_days_in_stage
+      round(avg(extract(day from now() - d.stage_entered_at)) filter (where coalesce(d.on_hold, false) = false))::int as average_days_in_stage
     from deals d
     left join users u on u.id = d.assigned_rep_id
     where ${where}
@@ -2286,6 +2304,7 @@ export async function listDealStagePage(tenantDb: TenantDb, input: DealStagePage
       d.property_state,
       d.updated_at,
       d.stage_entered_at,
+      d.on_hold,
       d.awarded_amount,
       d.bid_estimate,
       d.dd_estimate,
@@ -2300,15 +2319,23 @@ export async function listDealStagePage(tenantDb: TenantDb, input: DealStagePage
 
   const summaryRow =
     (countResult.rows[0] as
-      | { total?: string | number; total_value?: string | number; average_days_in_stage?: string | number | null }
+      | {
+          total_count?: string | number;
+          active_count?: string | number;
+          total_value?: string | number;
+          average_days_in_stage?: string | number | null;
+        }
       | undefined) ?? {};
-  const total = Number(summaryRow.total ?? 0);
+  const total = Number(summaryRow.total_count ?? 0);
+  const activeCount = Number(summaryRow.active_count ?? total);
 
   return {
     stage,
     scope: input.scope,
     summary: {
-      count: total,
+      count: activeCount,
+      activeCount,
+      totalCount: total,
       totalValue: Number(summaryRow.total_value ?? 0),
       averageDaysInStage:
         summaryRow.average_days_in_stage == null ? null : Number(summaryRow.average_days_in_stage),

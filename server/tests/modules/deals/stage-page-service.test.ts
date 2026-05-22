@@ -65,7 +65,7 @@ describe("listDealStagePage", () => {
     const tenantDb = {
       select: createOfficeScopeSelectMock(),
       execute: vi.fn()
-        .mockResolvedValueOnce({ rows: [{ total: "26", total_value: "400000" }] })
+        .mockResolvedValueOnce({ rows: [{ total_count: "26", active_count: "21", total_value: "400000" }] })
         .mockResolvedValueOnce({
           rows: [
             {
@@ -73,6 +73,7 @@ describe("listDealStagePage", () => {
               deal_number: "TR-2026-0026",
               name: "North Campus",
               stage_id: "stage-estimating",
+              on_hold: false,
               office_id: "office-1",
               awarded_amount: "15000",
               bid_estimate: "15000",
@@ -98,6 +99,7 @@ describe("listDealStagePage", () => {
 
     expect(result.pagination).toMatchObject({ page: 2, pageSize: 25, total: 26, totalPages: 2 });
     expect(result.rows[0]).toMatchObject({ id: "deal-26", stageId: "stage-estimating" });
+    expect(result.summary).toMatchObject({ count: 21, activeCount: 21, totalCount: 26, totalValue: 400000 });
   });
 
   it("orders stage rows by newest-first with a deterministic id tiebreaker by default", async () => {
@@ -108,7 +110,7 @@ describe("listDealStagePage", () => {
     const tenantDb = {
       select: createOfficeScopeSelectMock(),
       execute: vi.fn()
-        .mockResolvedValueOnce({ rows: [{ total: "0", total_value: "0" }] })
+        .mockResolvedValueOnce({ rows: [{ total_count: "0", active_count: "0", total_value: "0" }] })
         .mockResolvedValueOnce({ rows: [] }),
     } as any;
 

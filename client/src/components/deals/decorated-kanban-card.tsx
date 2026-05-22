@@ -1,9 +1,10 @@
 import { Clock, GripVertical, MapPin } from "lucide-react";
-import { bestEstimate, daysInStage, formatCurrencyCompact } from "@/lib/deal-utils";
+import { daysInStage, formatCurrencyCompact } from "@/lib/deal-utils";
 import type { Deal } from "@/hooks/use-deals";
 import { cn } from "@/lib/utils";
 import { getDealDisplayNumber } from "@/components/deals/kanban-deal-card";
 import { isTerminalStage } from "@/lib/pipeline-terminal-filters";
+import { getEffectiveDealValue } from "@trock-crm/shared/types";
 
 function getInitials(deal: Deal) {
   if (!deal.assignedRepName) return "TR";
@@ -64,7 +65,7 @@ export function DecoratedKanbanCard({
             {displayNumber.label || "--"}
           </p>
           <p className="shrink-0 text-sm font-black tabular-nums text-slate-950">
-            {formatCurrencyCompact(bestEstimate(deal))}
+            {formatCurrencyCompact(getEffectiveDealValue(deal))}
           </p>
         </div>
 

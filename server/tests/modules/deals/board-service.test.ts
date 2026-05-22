@@ -162,10 +162,10 @@ describe("getDealsForPipeline", () => {
             return resolve(terminalDeals);
           }
           if (isWonQuery) {
-            return resolve([{ count: 12, totalValue: 60000 }]);
+            return resolve([{ totalCount: 12, activeCount: 10, totalValue: 60000 }]);
           }
           if (isOpportunityQuery) {
-            return resolve([{ count: 12, totalValue: 12000 }]);
+            return resolve([{ totalCount: 12, activeCount: 9, totalValue: 12000 }]);
           }
 
           return resolve([]);
@@ -189,7 +189,9 @@ describe("getDealsForPipeline", () => {
     expect(result.pipelineColumns.find((column) => column.stage.slug === "won")?.deals).toHaveLength(8);
     expect(result.terminalStages.find((column) => column.stage.slug === "won")).toEqual({
       stage: expect.objectContaining({ id: "stage-won", slug: "won", name: "Won" }),
-      count: 12,
+      count: 10,
+      activeCount: 10,
+      totalCount: 12,
       totalValue: 60000,
     });
     expect(opportunityCardsChain?.limit).toHaveBeenCalledWith(8);
@@ -231,7 +233,7 @@ describe("getDealsForPipeline", () => {
       assignedRepName: "Rep One",
     }));
     const tenantResponses = [
-      [{ count: 110, totalValue: 110000 }],
+      [{ totalCount: 110, activeCount: 100, totalValue: 110000 }],
       stageDeals,
     ];
     const tenantChains: any[] = [];
@@ -259,7 +261,8 @@ describe("getDealsForPipeline", () => {
         containsValue(chain.where.mock.calls[0]?.[0], "stage-estimating")
     );
 
-    expect(result.pipelineColumns[0]?.count).toBe(110);
+    expect(result.pipelineColumns[0]?.count).toBe(100);
+    expect(result.pipelineColumns[0]?.totalCount).toBe(110);
     expect(result.pipelineColumns[0]?.deals).toHaveLength(110);
     expect(cardsChain?.limit).toHaveBeenCalledWith(1000);
     const cardsWhere = extractSqlText(cardsChain?.where.mock.calls[0][0]).toLowerCase();
@@ -402,7 +405,7 @@ describe("getDealsForPipeline", () => {
             return resolve(lostDeals);
           }
           if (isLostQuery) {
-            return resolve([{ count: 9, totalValue: 22500 }]);
+            return resolve([{ totalCount: 9, activeCount: 9, totalValue: 22500 }]);
           }
 
           return resolve([]);
@@ -431,6 +434,8 @@ describe("getDealsForPipeline", () => {
     expect(result.terminalStages.find((column) => column.stage.slug === "lost")).toEqual({
       stage: expect.objectContaining({ id: "stage-lost", slug: "lost", name: "Lost" }),
       count: 9,
+      activeCount: 9,
+      totalCount: 9,
       totalValue: 22500,
     });
     expect(lostCardsChain?.limit).toHaveBeenCalledWith(3);
@@ -490,7 +495,7 @@ describe("getDealsForPipeline", () => {
             return resolve(wonDeals);
           }
           if (isWonQuery) {
-            return resolve([{ count: 11, totalValue: 44000 }]);
+            return resolve([{ totalCount: 11, activeCount: 11, totalValue: 44000 }]);
           }
 
           return resolve([]);
@@ -519,6 +524,8 @@ describe("getDealsForPipeline", () => {
     expect(result.terminalStages.find((column) => column.stage.slug === "won")).toEqual({
       stage: expect.objectContaining({ id: "stage-won", slug: "won", name: "Won" }),
       count: 11,
+      activeCount: 11,
+      totalCount: 11,
       totalValue: 44000,
     });
     expect(wonCardsChain?.limit).toHaveBeenCalledWith(4);

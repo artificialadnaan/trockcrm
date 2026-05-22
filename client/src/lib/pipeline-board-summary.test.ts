@@ -6,6 +6,31 @@ import type { LeadBoardResponse } from "@/hooks/use-leads";
 const now = new Date("2026-04-22T12:00:00.000Z");
 
 describe("buildDealBoardSummary", () => {
+  it("excludes on-hold cards from the average age paired with active counts and value", () => {
+    const board = {
+      columns: [
+        {
+          stage: { id: "stage-est", name: "Estimating", slug: "estimating" },
+          count: 1,
+          totalCount: 2,
+          totalValue: 125000,
+          cards: [
+            { id: "active", stageEnteredAt: "2026-04-20T12:00:00.000Z", onHold: false },
+            { id: "held", stageEnteredAt: "2026-04-10T12:00:00.000Z", onHold: true },
+          ],
+        },
+      ],
+      terminalStages: [],
+    } as unknown as DealBoardResponse;
+
+    expect(buildDealBoardSummary(board, now)).toMatchObject({
+      totalCount: 1,
+      totalDealCount: 2,
+      totalValue: 125000,
+      averageAgeDays: 2,
+    });
+  });
+
   it("derives managed value, active records, live stages, and average age", () => {
     const board: DealBoardResponse = {
       columns: [
@@ -163,6 +188,7 @@ describe("buildDealBoardSummary", () => {
 
     expect(buildDealBoardSummary(board, now)).toEqual({
       totalCount: 3,
+      totalDealCount: 3,
       liveStageCount: 2,
       totalValue: 200000,
       averageAgeDays: 3,
@@ -255,6 +281,7 @@ describe("buildDealBoardSummary", () => {
 
     expect(buildDealBoardSummary(board, now)).toEqual({
       totalCount: 30,
+      totalDealCount: 30,
       liveStageCount: 1,
       totalValue: 300000,
       averageAgeDays: 2,

@@ -43,6 +43,7 @@ import {
   buildAliasedLeadMineVisibilityCondition,
   resolveMineVisibilityFeatures,
 } from "../shared/mine-visibility.js";
+import { aliasedEffectiveAwardedDealValueSql, aliasedEffectiveDealValueSql } from "../shared/deal-value-sql.js";
 
 type TenantDb = NodePgDatabase<typeof schema>;
 type ExecuteRows<T> = { rows: T[] } | T[];
@@ -476,8 +477,8 @@ async function getCrmOwnedProgression(
         d.workflow_route::text AS workflow_route,
         psc.name AS stage_name,
         psc.display_order,
-        COUNT(*)::int AS item_count,
-        COALESCE(SUM(COALESCE(d.awarded_amount, d.bid_estimate, d.dd_estimate, 0)), 0)::numeric AS total_value
+        COUNT(*) FILTER (WHERE COALESCE(d.on_hold, false) = false)::int AS item_count,
+        COALESCE(SUM(${dealValueSql()}), 0)::numeric AS total_value
       FROM deals d
       JOIN pipeline_stage_config psc ON psc.id = d.stage_id
       WHERE d.is_active = true
@@ -518,7 +519,7 @@ async function getDownstreamBottlenecks(
       d.bid_board_stage_status AS mirrored_stage_status,
       d.workflow_route,
       COALESCE(NULLIF(TRIM(d.region_classification), ''), TRIM(CONCAT_WS(', ', d.property_city, d.property_state)), 'Unassigned region') AS region_classification,
-      COALESCE(d.awarded_amount, d.bid_estimate, d.dd_estimate, 0)::numeric AS deal_value,
+      ${dealValueSql()}::numeric AS deal_value,
       EXTRACT(DAY FROM NOW() - COALESCE(d.bid_board_stage_entered_at, d.stage_entered_at, latest_current_stage_entered_at.entered_at))::int AS days_in_stage,
       COALESCE(mirror_psc.stale_threshold_days, psc.stale_threshold_days, 14)::int AS stale_threshold_days
     FROM deals d
@@ -534,6 +535,7 @@ async function getDownstreamBottlenecks(
     ) latest_current_stage_entered_at ON true
     WHERE d.is_active = true
       AND COALESCE(d.bid_board_stage_slug, psc.slug) IN (${sql.join(MIRRORED_DOWNSTREAM_STAGE_SLUGS.map((slug) => sql`${slug}`), sql`, `)})
+      AND COALESCE(d.on_hold, false) = false
       ${repFilter}
     ORDER BY
       GREATEST(
@@ -563,7 +565,7 @@ async function getDownstreamBottlenecks(
 }
 
 function dealValueSql() {
-  return sql`COALESCE(d.awarded_amount, d.bid_estimate, d.dd_estimate, 0)`;
+  return aliasedEffectiveDealValueSql("d");
 }
 
 function toIsoOrNow(value: unknown): string {
@@ -653,7 +655,7 @@ async function getRepFunnelBuckets(
     () => tenantDb.execute(sql`
       SELECT
         psc.slug,
-        COUNT(*)::int AS count,
+        COUNT(*) FILTER (WHERE COALESCE(d.on_hold, false) = false)::int AS count,
         COALESCE(SUM(${dealValueSql()}), 0)::numeric AS total_value
       FROM deals d
       JOIN pipeline_stage_config psc ON psc.id = d.stage_id
@@ -672,8 +674,8 @@ async function getRepFunnelBuckets(
 async function getDirectorFunnelSummary(
   tenantDb: TenantDb
 ): Promise<{ officeFunnelBuckets: FunnelBucketSummary[]; repFunnelRows: DirectorRepFunnelRow[] }> {
-  const [leadResult, dealResult, repRowsResult] = await Promise.all([
-    tenantDb.execute(sql`
+  const [leadResult, dealResult, repRowsResult] = await runSequential([
+    () => tenantDb.execute(sql`
       SELECT
         psc.slug,
         COUNT(*)::int AS count
@@ -684,10 +686,10 @@ async function getDirectorFunnelSummary(
         AND psc.workflow_family = 'lead'
       GROUP BY psc.slug
     `),
-    tenantDb.execute(sql`
+    () => tenantDb.execute(sql`
       SELECT
         psc.slug,
-        COUNT(*)::int AS count,
+        COUNT(*) FILTER (WHERE COALESCE(d.on_hold, false) = false)::int AS count,
         COALESCE(SUM(${dealValueSql()}), 0)::numeric AS total_value
       FROM deals d
       JOIN pipeline_stage_config psc ON psc.id = d.stage_id
@@ -695,7 +697,7 @@ async function getDirectorFunnelSummary(
         AND psc.slug IN (${sql.join(ESTIMATING_PROGRESS_STAGE_SLUGS.map((slug) => sql`${slug}`), sql`, `)})
       GROUP BY psc.slug
     `),
-    tenantDb.execute(sql`
+    () => tenantDb.execute(sql`
       WITH deal_owners AS (
         -- Locked requirement: widen the rep workspace for deal-owning non-reps
         -- without widening it for lead-only directors/admins.
@@ -727,6 +729,7 @@ async function getDirectorFunnelSummary(
           d.assigned_rep_id AS rep_id,
           COUNT(*) FILTER (
             WHERE psc.slug IN (${sql.join(ESTIMATING_PROGRESS_STAGE_SLUGS.map((slug) => sql`${slug}`), sql`, `)})
+              AND COALESCE(d.on_hold, false) = false
           )::int AS estimating
         FROM deals d
         JOIN pipeline_stage_config psc ON psc.id = d.stage_id
@@ -1062,20 +1065,19 @@ async function getDirectorRepCommissionRows(
   const reps = (repsResult as any).rows ?? repsResult;
   if (reps.length === 0) return [];
 
-  const rows = await Promise.all(
-    reps.map(async (rep: any) => {
-      const { summary } = await getRepCommissionSummary(tenantDb, String(rep.id), options.from, options.to);
-      return {
-        repId: String(rep.id),
-        repName: String(rep.display_name ?? "Rep"),
-        totalEarnedCommission: summary.totalEarnedCommission,
-        potentialCommission: summary.potentialCommission,
-        floorRemaining: summary.floorRemaining,
-        newCustomerShare: summary.newCustomerShare,
-        meetsNewCustomerShare: summary.meetsNewCustomerShare,
-      };
-    })
-  );
+  const rows: DirectorRepCommissionRow[] = [];
+  for (const rep of reps) {
+    const { summary } = await getRepCommissionSummary(tenantDb, String(rep.id), options.from, options.to);
+    rows.push({
+      repId: String(rep.id),
+      repName: String(rep.display_name ?? "Rep"),
+      totalEarnedCommission: summary.totalEarnedCommission,
+      potentialCommission: summary.potentialCommission,
+      floorRemaining: summary.floorRemaining,
+      newCustomerShare: summary.newCustomerShare,
+      meetsNewCustomerShare: summary.meetsNewCustomerShare,
+    });
+  }
 
   return rows.sort((a, b) => {
     if (b.totalEarnedCommission !== a.totalEarnedCommission) {
@@ -1249,10 +1251,8 @@ export async function getRepDashboard(
     // 1. Active deals count + value for this rep
     () => tenantDb.execute(sql`
       SELECT
-        COUNT(*)::int AS count,
-        COALESCE(SUM(
-          COALESCE(d.awarded_amount, d.bid_estimate, d.dd_estimate, 0)
-        ), 0)::numeric AS total_value
+        COUNT(*) FILTER (WHERE COALESCE(d.on_hold, false) = false)::int AS count,
+        COALESCE(SUM(${dealValueSql()}), 0)::numeric AS total_value
       FROM deals d
       JOIN pipeline_stage_config psc ON psc.id = d.stage_id
       WHERE d.is_active = true
@@ -1301,10 +1301,8 @@ export async function getRepDashboard(
         psc.name AS stage_name,
         psc.color AS stage_color,
         psc.display_order,
-        COUNT(*)::int AS deal_count,
-        COALESCE(SUM(
-          COALESCE(d.awarded_amount, d.bid_estimate, d.dd_estimate, 0)
-        ), 0)::numeric AS total_value
+        COUNT(*) FILTER (WHERE COALESCE(d.on_hold, false) = false)::int AS deal_count,
+        COALESCE(SUM(${dealValueSql()}), 0)::numeric AS total_value
       FROM deals d
       JOIN pipeline_stage_config psc ON psc.id = d.stage_id
       WHERE d.is_active = true
@@ -1383,7 +1381,7 @@ export async function getRepDashboard(
         COALESCE(d.bid_board_stage_slug, psc.slug) AS mirrored_stage_slug,
         d.workflow_route,
         psc.name AS stage_name,
-        COALESCE(d.awarded_amount, d.bid_estimate, d.dd_estimate, 0)::numeric AS total_value,
+        ${dealValueSql()}::numeric AS total_value,
         d.updated_at
       FROM deals d
       LEFT JOIN companies c ON c.id = d.company_id
@@ -2011,7 +2009,7 @@ async function getRecentCloses(
         WHEN psc.slug IN (${sql.join([...WON_STAGE_SLUGS, ...LEGACY_WON_STAGE_SLUGS].map((slug) => sql`${slug}`), sql`, `)}) THEN 'won'
         ELSE 'lost'
       END AS outcome,
-      COALESCE(d.awarded_amount, d.bid_estimate, d.dd_estimate, 0)::numeric AS deal_value,
+      ${dealValueSql()}::numeric AS deal_value,
       COALESCE(d.actual_close_date, d.contract_signed_date, d.contract_signed_at::date, d.lost_at::date, d.updated_at::date) AS closed_at
     FROM ${deals} d
     JOIN ${pipelineStageConfig} psc ON psc.id = d.stage_id
@@ -2044,8 +2042,8 @@ async function getWonCloseSummary(
   const repFilter = dealScopeFilterSql("d", options);
   const result = await tenantDb.execute(sql`
     SELECT
-      COUNT(*)::int AS won_count,
-      COALESCE(SUM(COALESCE(d.awarded_amount, d.bid_estimate, d.dd_estimate, 0)), 0)::numeric AS won_value
+      COUNT(*) FILTER (WHERE COALESCE(d.on_hold, false) = false)::int AS won_count,
+      COALESCE(SUM(${aliasedEffectiveAwardedDealValueSql("d")}), 0)::numeric AS won_value
     FROM ${deals} d
     JOIN ${pipelineStageConfig} psc ON psc.id = d.stage_id
     WHERE d.is_active = true
@@ -2081,8 +2079,8 @@ async function getScopedPipelineSummary(
   const result = await tenantDb.execute(sql`
     SELECT
       d.stage_id,
-      COUNT(*)::int AS deal_count,
-      COALESCE(SUM(COALESCE(d.awarded_amount, d.bid_estimate, d.dd_estimate, 0)), 0)::numeric AS total_value
+      COUNT(*) FILTER (WHERE COALESCE(d.on_hold, false) = false)::int AS deal_count,
+      COALESCE(SUM(${dealValueSql()}), 0)::numeric AS total_value
     FROM deals d
     WHERE d.is_active = true
       AND COALESCE(d.is_test_data, false) = false
@@ -2129,7 +2127,7 @@ async function getDashboardStaleDeals(
       COALESCE(d.bid_board_stage_entered_at, d.stage_entered_at) AS stage_entered_at,
       EXTRACT(DAY FROM NOW() - COALESCE(d.bid_board_stage_entered_at, d.stage_entered_at))::int AS days_in_stage,
       COALESCE(mirror_psc.stale_threshold_days, psc.stale_threshold_days) AS stale_threshold_days,
-      COALESCE(d.awarded_amount, d.bid_estimate, d.dd_estimate, 0)::numeric AS deal_value,
+      ${dealValueSql()}::numeric AS deal_value,
       d.workflow_route,
       d.bid_board_stage_slug,
       d.bid_board_stage_status,
@@ -2142,6 +2140,7 @@ async function getDashboardStaleDeals(
     WHERE d.is_active = true
       AND COALESCE(d.is_test_data, false) = false
       AND ${nonTerminalDealStageSql()}
+      AND COALESCE(d.on_hold, false) = false
       AND COALESCE(mirror_psc.stale_threshold_days, psc.stale_threshold_days) IS NOT NULL
       AND EXTRACT(DAY FROM NOW() - COALESCE(d.bid_board_stage_entered_at, d.stage_entered_at))
         > COALESCE(mirror_psc.stale_threshold_days, psc.stale_threshold_days)
@@ -2173,8 +2172,8 @@ async function buildDirectorScopeSummary(
   tenantDb: TenantDb,
   options: { from: string; to: string } & DashboardScopeOptions
 ) {
-  const [pipelineRows, staleDeals, won] = await Promise.all([
-    getScopedPipelineSummary(tenantDb, {
+  const [pipelineRows, staleDeals, won] = await runSequential([
+    () => getScopedPipelineSummary(tenantDb, {
       includeDd: false,
       repId: options.repId,
       viewerUserId: options.viewerUserId,
@@ -2182,7 +2181,7 @@ async function buildDirectorScopeSummary(
       includeDealCreatedBy: options.includeDealCreatedBy,
       includeDealSubscriptionDeletedAt: options.includeDealSubscriptionDeletedAt,
     }),
-    getDashboardStaleDeals(
+    () => getDashboardStaleDeals(
       tenantDb,
       options.repId || options.viewerUserId
         ? {
@@ -2194,7 +2193,7 @@ async function buildDirectorScopeSummary(
           }
         : {}
     ),
-    getWonCloseSummary(tenantDb, options),
+    () => getWonCloseSummary(tenantDb, options),
   ]);
 
   const activePipeline = pipelineRows.reduce(
@@ -2230,11 +2229,11 @@ export async function getDirectorCommissionWorkspace(
   const from = options.from ?? `${year}-01-01`;
   const to = options.to ?? `${year}-12-31`;
 
-  const [commissionRows, activityRows, funnelSummary, dealSummaryRows] = await Promise.all([
-    getDirectorRepCommissionRows(tenantDb, { from, to }),
-    getActivitySummaryByRep(tenantDb, { from, to }),
-    getDirectorFunnelSummary(tenantDb),
-    getRepDealPipelineSummary(tenantDb),
+  const [commissionRows, activityRows, funnelSummary, dealSummaryRows] = await runSequential([
+    () => getDirectorRepCommissionRows(tenantDb, { from, to }),
+    () => getActivitySummaryByRep(tenantDb, { from, to }),
+    () => getDirectorFunnelSummary(tenantDb),
+    () => getRepDealPipelineSummary(tenantDb),
   ]);
 
   const activityByRep = new Map(activityRows.map((row) => [row.repId, row]));
@@ -2307,34 +2306,34 @@ export async function getDirectorDashboard(
     repPerformanceSnapshots,
     recentCloses,
     scopeSummary,
-  ] = await Promise.all([
+  ] = await runSequential([
     // 1. Per-rep performance cards
-    buildRepPerformanceCards(tenantDb, { from, to }),
+    () => buildRepPerformanceCards(tenantDb, { from, to }),
 
     // 2. Pipeline by stage (company-wide, excluding DD)
-    getPipelineSummary(tenantDb, { includeDd: false, from, to }),
+    () => getPipelineSummary(tenantDb, { includeDd: false, from, to }),
 
     // 3. Win rate trend
-    getWinRateTrend(tenantDb, { from, to }),
+    () => getWinRateTrend(tenantDb, { from, to }),
 
     // 4. Activity by rep
-    getActivitySummaryByRep(tenantDb, { from, to }),
+    () => getActivitySummaryByRep(tenantDb, { from, to }),
 
     // 5. Stale deals watchlist
-    getStaleDeals(tenantDb),
+    () => getStaleDeals(tenantDb),
 
     // 6. Stale leads watchlist
-    getStaleLeadWatchlist(tenantDb),
+    () => getStaleLeadWatchlist(tenantDb),
 
     // 7. DD vs pipeline
-    getDdVsPipeline(tenantDb),
-    getCrmOwnedProgression(tenantDb),
-    getDownstreamBottlenecks(tenantDb),
-    getDirectorFunnelSummary(tenantDb),
-    getDirectorRepCommissionRows(tenantDb, { from, to }),
-    getRepPerformanceSnapshots(tenantDb, options.officeId, options.periodKind ?? "mtd"),
-    getRecentCloses(tenantDb, { from, to }),
-    buildDirectorScopeSummary(tenantDb, {
+    () => getDdVsPipeline(tenantDb),
+    () => getCrmOwnedProgression(tenantDb),
+    () => getDownstreamBottlenecks(tenantDb),
+    () => getDirectorFunnelSummary(tenantDb),
+    () => getDirectorRepCommissionRows(tenantDb, { from, to }),
+    () => getRepPerformanceSnapshots(tenantDb, options.officeId, options.periodKind ?? "mtd"),
+    () => getRecentCloses(tenantDb, { from, to }),
+    () => buildDirectorScopeSummary(tenantDb, {
       from,
       to,
       viewerUserId: scopedViewerUserId,
@@ -2425,10 +2424,8 @@ async function buildRepPerformanceCards(
     rep_deals AS (
       SELECT
         d.assigned_rep_id AS rep_id,
-        COUNT(*) FILTER (WHERE d.is_active AND ${nonTerminalDealStageSql()})::int AS active_deals,
-        COALESCE(SUM(
-          COALESCE(d.awarded_amount, d.bid_estimate, d.dd_estimate, 0)
-        ) FILTER (WHERE d.is_active AND ${nonTerminalDealStageSql()} AND psc.is_active_pipeline), 0)::numeric AS pipeline_value
+        COUNT(*) FILTER (WHERE d.is_active AND ${nonTerminalDealStageSql()} AND COALESCE(d.on_hold, false) = false)::int AS active_deals,
+        COALESCE(SUM(${dealValueSql()}) FILTER (WHERE d.is_active AND ${nonTerminalDealStageSql()} AND psc.is_active_pipeline), 0)::numeric AS pipeline_value
       FROM deals d
       JOIN pipeline_stage_config psc ON psc.id = d.stage_id
       GROUP BY d.assigned_rep_id
@@ -2467,6 +2464,7 @@ async function buildRepPerformanceCards(
       JOIN pipeline_stage_config psc ON psc.id = d.stage_id
       WHERE d.is_active = true
         AND ${nonTerminalDealStageSql()}
+        AND COALESCE(d.on_hold, false) = false
         AND psc.stale_threshold_days IS NOT NULL
         AND EXTRACT(DAY FROM NOW() - d.stage_entered_at) > psc.stale_threshold_days
       GROUP BY d.assigned_rep_id
@@ -2743,14 +2741,14 @@ export async function getAdminDashboardSummary(
   tenantDb: TenantDb,
   activeOfficeId: string
 ): Promise<AdminDashboardSummary> {
-  const [aiActions, interventions, disconnects, mergeQueue, migration, audit, procore] = await Promise.all([
-    readAiActionSummary(tenantDb, activeOfficeId),
-    readInterventionSummary(tenantDb, activeOfficeId),
-    readDisconnectSummary(tenantDb, activeOfficeId),
-    readMergeQueueSummary(tenantDb, activeOfficeId),
-    readMigrationSummary(tenantDb, activeOfficeId),
-    readAuditSummary(tenantDb, activeOfficeId),
-    readProcoreSummary(tenantDb, activeOfficeId),
+  const [aiActions, interventions, disconnects, mergeQueue, migration, audit, procore] = await runSequential([
+    () => readAiActionSummary(tenantDb, activeOfficeId),
+    () => readInterventionSummary(tenantDb, activeOfficeId),
+    () => readDisconnectSummary(tenantDb, activeOfficeId),
+    () => readMergeQueueSummary(tenantDb, activeOfficeId),
+    () => readMigrationSummary(tenantDb, activeOfficeId),
+    () => readAuditSummary(tenantDb, activeOfficeId),
+    () => readProcoreSummary(tenantDb, activeOfficeId),
   ]);
 
   return {

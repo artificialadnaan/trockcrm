@@ -5,6 +5,7 @@ import {
   toCanonicalDealStageSlug,
   type WorkflowRoute,
 } from "@trock-crm/shared/types";
+import { getEffectiveDealValue } from "@trock-crm/shared/types";
 
 const legacyTerminalStageSlugs = Object.values(LEGACY_DEAL_STAGE_TO_CANONICAL_STAGE).flatMap((stageMap) =>
   Object.entries(stageMap)
@@ -73,6 +74,7 @@ type DealWithValue = DealWithStageSlug & {
   awardedAmount?: string | number | null;
   bidEstimate?: string | number | null;
   ddEstimate?: string | number | null;
+  onHold?: boolean | null;
 };
 
 function hasTerminalDealStage(deal: DealWithStageSlug) {
@@ -94,13 +96,7 @@ export function numericDealValue(value: string | number | null | undefined) {
 }
 
 export function activePipelineDealValue(deal: DealWithValue) {
-  const awarded = numericDealValue(deal.awardedAmount);
-  if (awarded !== null) return awarded;
-
-  const bid = numericDealValue(deal.bidEstimate);
-  if (bid !== null) return bid;
-
-  return numericDealValue(deal.ddEstimate) ?? 0;
+  return getEffectiveDealValue(deal);
 }
 
 export function excludeTerminalDeals<T extends DealWithStageSlug>(deals: T[]) {

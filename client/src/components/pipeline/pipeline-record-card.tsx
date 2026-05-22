@@ -3,6 +3,7 @@ import { useDraggable } from "@dnd-kit/core";
 import { GripVertical, Clock, MapPin } from "lucide-react";
 import { formatCurrencyCompact, daysInStage } from "@/lib/deal-utils";
 import { cn } from "@/lib/utils";
+import { getEffectiveDealValue } from "@trock-crm/shared/types";
 
 export interface PipelineRecordCardData {
   id: string;
@@ -19,6 +20,7 @@ export interface PipelineRecordCardData {
   awardedAmount?: string | null;
   bidEstimate?: string | null;
   ddEstimate?: string | null;
+  onHold?: boolean | null;
   workflowRoute?: string | null;
 }
 
@@ -30,7 +32,7 @@ interface PipelineRecordCardProps {
 }
 
 function formatValue(record: PipelineRecordCardData) {
-  const value = Number(record.awardedAmount ?? record.bidEstimate ?? record.ddEstimate ?? 0);
+  const value = getEffectiveDealValue(record);
   return value > 0 ? formatCurrencyCompact(value) : null;
 }
 

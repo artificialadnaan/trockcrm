@@ -29,6 +29,7 @@ export interface PipelineBoardStage {
 export interface PipelineBoardColumnData {
   stage: PipelineBoardStage;
   count: number;
+  totalCount?: number;
   totalValue?: number;
   cards: PipelineRecordCardData[];
 }
@@ -94,7 +95,7 @@ export function PipelineBoardColumn({
             className="rounded-full px-2.5 py-0.5 text-[11px] font-bold text-white shadow-sm"
             style={{ backgroundColor: accent }}
           >
-            {column.count}
+            {entity === "deal" ? `${column.count}/${column.totalCount ?? column.count}` : column.count}
           </span>
         </div>
         {showTerminalFilter ? (
@@ -112,13 +113,13 @@ export function PipelineBoardColumn({
             </p>
           </div>
         </div>
-        {column.count > column.cards.length ? (
+        {(column.totalCount ?? column.count) > column.cards.length ? (
           <button
             type="button"
             className="text-left text-[11px] font-bold tracking-[0.16em] text-slate-500 uppercase transition-colors hover:text-slate-900"
             onClick={() => onOpenStage(column.stage.id)}
           >
-            View all {column.count}
+            View all {column.totalCount ?? column.count}
           </button>
         ) : null}
       </div>

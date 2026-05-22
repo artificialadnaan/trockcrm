@@ -43,6 +43,7 @@ import {
   type PropertySurface,
 } from "@/hooks/use-properties";
 import { cn } from "@/lib/utils";
+import { getEffectiveDealValue } from "@trock-crm/shared/types";
 
 type PropertyTab = "overview" | "photos" | "contacts" | "deals" | "leads" | "activity" | "files" | "companycam";
 
@@ -121,10 +122,6 @@ function formatCurrencyCompact(value: string | number | null | undefined) {
   }).format(amount);
 }
 
-function bestDealValue(deal: PropertyDeal) {
-  return parseMoney(deal.awardedAmount ?? deal.bidEstimate ?? deal.ddEstimate);
-}
-
 function buildCompanyCamUrl(companycamProjectId: string | null | undefined) {
   if (!companycamProjectId) return null;
   return `https://app.companycam.com/projects/${encodeURIComponent(companycamProjectId)}`;
@@ -174,6 +171,7 @@ export function PropertyDetailPage() {
   const relatedLeads = leads;
   const relatedDeals = deals;
   const activeDeals = relatedDeals.filter((deal) => deal.isActive);
+  const activePipelineDeals = activeDeals.filter((deal) => !deal.onHold);
   const propertyTypeLabel = formatTypeLabel(property.propertyType ?? property.type ?? null);
   const propertyTypeBadge = formatTypeBadge(property.propertyType ?? property.type ?? null);
   const addressLine = formatAddressLine(property);
@@ -188,7 +186,7 @@ export function PropertyDetailPage() {
   newLeadParams.set("name", `${property.name} opportunity`);
   const activePipelineValue =
     formatCurrencyCompact(property.activePipelineValue) ??
-    formatCurrencyCompact(activeDeals.reduce((sum, deal) => sum + (bestDealValue(deal) ?? 0), 0));
+    formatCurrencyCompact(activeDeals.reduce((sum, deal) => sum + getEffectiveDealValue(deal), 0));
 
   const kpis: DetailPageShellKpi[] = [
     {
@@ -221,7 +219,7 @@ export function PropertyDetailPage() {
     {
       eyebrow: "Active pipeline",
       value: activePipelineValue ?? String(activeDeals.length),
-      captionLabel: `${activeDeals.length} ${activeDeals.length === 1 ? "deal" : "deals"}`,
+      captionLabel: `${activePipelineDeals.length}/${activeDeals.length} deals`,
       captionContext: activePipelineValue ? "linked value" : "value unavailable",
       accent: "red",
     },

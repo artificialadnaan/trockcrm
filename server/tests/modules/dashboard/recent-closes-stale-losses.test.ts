@@ -124,4 +124,33 @@ describe("director recent closes stale losses", () => {
       }),
     ]);
   });
+
+  it("excludes held deals from dashboard won, stale, and downstream count populations", async () => {
+    const { getDirectorDashboard } = await import("../../../src/modules/dashboard/service.js");
+    const executedSql: string[] = [];
+    const tenantDb = {
+      execute: vi.fn().mockImplementation((query: unknown) => {
+        const text = extractSqlText(query).toLowerCase();
+        executedSql.push(text);
+        return Promise.resolve({ rows: [] });
+      }),
+    } as any;
+
+    await getDirectorDashboard(tenantDb, {
+      from: "2026-04-07",
+      to: "2026-05-07",
+      officeId: "office-1",
+    });
+
+    const downstreamSql = executedSql.find((text) => text.includes("as mirrored_stage_status") && text.includes("limit 8"));
+    const wonCloseSql = executedSql.find((text) => text.includes("as won_count"));
+    const staleDealsSql = executedSql.find((text) => text.includes("d.bid_board_stage_status") && text.includes("order by days_in_stage desc"));
+
+    expect(downstreamSql).toContain("coalesce(d.on_hold, false) = false");
+    expect(wonCloseSql).toContain("coalesce(d.on_hold, false) = false");
+    expect(wonCloseSql).toContain("coalesce(d.awarded_amount, 0)");
+    expect(wonCloseSql).not.toContain("bid_estimate");
+    expect(wonCloseSql).not.toContain("dd_estimate");
+    expect(staleDealsSql).toContain("coalesce(d.on_hold, false) = false");
+  });
 });

@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  getEffectiveAwardedDealValue,
   getEffectiveDealValue,
   getEffectiveStageAgeDays,
   getEffectiveStageAgeSeconds,
@@ -27,6 +28,28 @@ describe("deal hold helpers", () => {
         ddEstimate: "800000",
       })
     ).toBe(875000);
+  });
+
+  it("keeps awarded-basis value at zero when no awarded amount exists", () => {
+    expect(
+      getEffectiveAwardedDealValue({
+        onHold: false,
+        awardedAmount: null,
+        bidEstimate: "875000",
+        ddEstimate: "800000",
+      })
+    ).toBe(0);
+  });
+
+  it("zeros awarded-basis value while a deal is on hold", () => {
+    expect(
+      getEffectiveAwardedDealValue({
+        onHold: true,
+        awardedAmount: "925000",
+        bidEstimate: "875000",
+        ddEstimate: "800000",
+      })
+    ).toBe(0);
   });
 
   it("subtracts accumulated and currently open hold time from stage age", () => {

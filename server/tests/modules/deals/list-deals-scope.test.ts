@@ -604,4 +604,58 @@ describe("getDeals scope filtering", () => {
     expect(orderByText).toContain("asc");
     expect(orderByText).toContain("id");
   });
+
+  it("builds a valid active-count filter even when no base where clause is present", async () => {
+    const whereCalls: unknown[] = [];
+    const makeChain = () => ({
+      from: vi.fn().mockReturnThis(),
+      leftJoin: vi.fn().mockReturnThis(),
+      where: vi.fn((condition: unknown) => {
+        whereCalls.push(condition);
+        return makeChainResult;
+      }),
+      orderBy: vi.fn().mockReturnThis(),
+      limit: vi.fn().mockReturnThis(),
+      offset: vi.fn().mockResolvedValue([]),
+      then: vi.fn((resolve: (value: Row[]) => unknown) => resolve([{ count: 0 }])),
+    });
+    const makeChainResult: any = {
+      from: vi.fn().mockReturnThis(),
+      leftJoin: vi.fn().mockReturnThis(),
+      where: vi.fn((condition: unknown) => {
+        whereCalls.push(condition);
+        return makeChainResult;
+      }),
+      orderBy: vi.fn().mockReturnThis(),
+      limit: vi.fn().mockReturnThis(),
+      offset: vi.fn().mockResolvedValue([]),
+      then: vi.fn((resolve: (value: Row[]) => unknown) => resolve([{ count: 0 }])),
+    };
+    const tenantDb = {
+      select: vi.fn(() => ({
+        from: vi.fn().mockReturnThis(),
+        leftJoin: vi.fn().mockReturnThis(),
+        where: vi.fn((condition: unknown) => {
+          whereCalls.push(condition);
+          return makeChainResult;
+        }),
+        orderBy: vi.fn().mockReturnThis(),
+        limit: vi.fn().mockReturnThis(),
+        offset: vi.fn().mockResolvedValue([]),
+        then: vi.fn((resolve: (value: Row[]) => unknown) => resolve([{ count: 0 }])),
+      })),
+    } as any;
+
+    await getDeals(
+      tenantDb,
+      { limit: 25 } as never,
+      "admin",
+      "admin-1"
+    );
+
+    const activeWhereText = flattenText(whereCalls[1]).toLowerCase();
+    expect(activeWhereText).toContain("on_hold");
+    expect(activeWhereText).not.toContain("undefined");
+    expect(activeWhereText.trim().startsWith("and")).toBe(false);
+  });
 });

@@ -55,10 +55,10 @@ export function DealStagePage() {
     <PipelineStagePageHeader
       backTo={route.backTo}
       title={data.stage.name}
-      subtitle={`${data.summary.count} deal${data.summary.count === 1 ? "" : "s"} in this stage`}
+      subtitle={`${summary.totalDealCount} total deal${summary.totalDealCount === 1 ? "" : "s"} in this stage · ${summary.totalCount} active`}
       summary={
         <>
-          <SummaryMetric label="Records in stage" value={String(summary.totalCount)} />
+          <SummaryMetric label="Active / total" value={`${summary.totalCount}/${summary.totalDealCount}`} />
           <SummaryMetric label="Stage value" value={formatCompactValue(summary.totalValue)} />
           <SummaryMetric
             label="Avg. visible age"

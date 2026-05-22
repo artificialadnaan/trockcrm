@@ -2,6 +2,12 @@ import { sql, type SQL } from "drizzle-orm";
 import type { NodePgDatabase } from "drizzle-orm/node-postgres";
 import type * as schema from "@trock-crm/shared/schema";
 import { buildOfficeExistsMatcher } from "./office-filter.js";
+import {
+  aliasedActiveDealCountFilterSql,
+  aliasedEffectiveAwardedDealValueSql,
+  aliasedEffectiveDealValueSql,
+  aliasedOpenPipelineForecastFirstDealValueSql,
+} from "../shared/deal-value-sql.js";
 
 type TenantDb = NodePgDatabase<typeof schema>;
 type ExecuteRows<T> = { rows: T[] } | T[];
@@ -250,14 +256,13 @@ export async function getMarketMixReport(
     const verticalExpr = sql`COALESCE(NULLIF(c.industry::text, ''), NULLIF(d.project_type, ''), 'Uncategorized')`;
     const regionExpr = sql`COALESCE(NULLIF(c.region, ''), NULLIF(rc.name, ''), NULLIF(p.city, ''), NULLIF(p.state, ''), NULLIF(d.property_city, ''), NULLIF(d.property_state, ''), 'Uncategorized')`;
     const propertyTypeExpr = sql`COALESCE(NULLIF(p.property_type, ''), NULLIF(p.type::text, ''), 'Uncategorized')`;
-    const valueExpr = sql`COALESCE(d.awarded_amount, d.bid_estimate, d.dd_estimate, 0)`;
+    const wonValueExpr = aliasedEffectiveAwardedDealValueSql("d");
 
-    const [kpiRows, verticalRows, propertyRows, regionRows, quarterlyRows, breakdownRows] = await Promise.all([
-      tenantDb.execute(sql`
+    const kpiRows = await tenantDb.execute(sql`
         SELECT
-          COUNT(DISTINCT d.id)::int AS total_deal_count,
-          COALESCE(SUM(${valueExpr}) FILTER (WHERE psc.slug IN (${sqlStringList(WON_STAGE_SLUGS)})), 0)::numeric AS total_won_value,
-          COUNT(DISTINCT ${verticalExpr})::int AS active_markets,
+          COUNT(DISTINCT d.id) FILTER (WHERE ${aliasedActiveDealCountFilterSql("d")})::int AS total_deal_count,
+          COALESCE(SUM(${wonValueExpr}) FILTER (WHERE psc.slug IN (${sqlStringList(WON_STAGE_SLUGS)})), 0)::numeric AS total_won_value,
+          COUNT(DISTINCT ${verticalExpr}) FILTER (WHERE ${aliasedActiveDealCountFilterSql("d")})::int AS active_markets,
           COALESCE((
             SELECT ${regionExpr}
             FROM deals d
@@ -266,8 +271,9 @@ export async function getMarketMixReport(
             LEFT JOIN region_config rc ON rc.id = d.region_id
             LEFT JOIN users u ON u.id = d.assigned_rep_id
             WHERE ${where}
+              AND ${aliasedActiveDealCountFilterSql("d")}
             GROUP BY ${regionExpr}
-            ORDER BY COUNT(*) DESC
+            ORDER BY COUNT(*) FILTER (WHERE ${aliasedActiveDealCountFilterSql("d")}) DESC
             LIMIT 1
           ), 'Uncategorized') AS most_active_region
         FROM deals d
@@ -277,11 +283,11 @@ export async function getMarketMixReport(
         LEFT JOIN users u ON u.id = d.assigned_rep_id
         LEFT JOIN pipeline_stage_config psc ON psc.id = d.stage_id
         WHERE ${where}
-      `),
-      tenantDb.execute(sql`
+      `);
+    const verticalRows = await tenantDb.execute(sql`
         SELECT ${verticalExpr} AS name,
-          COUNT(DISTINCT d.id)::int AS deal_count,
-          COALESCE(SUM(${valueExpr}) FILTER (WHERE psc.slug IN (${sqlStringList(WON_STAGE_SLUGS)})), 0)::numeric AS won_value
+          COUNT(DISTINCT d.id) FILTER (WHERE ${aliasedActiveDealCountFilterSql("d")})::int AS deal_count,
+          COALESCE(SUM(${wonValueExpr}) FILTER (WHERE psc.slug IN (${sqlStringList(WON_STAGE_SLUGS)})), 0)::numeric AS won_value
         FROM deals d
         LEFT JOIN companies c ON c.id = d.company_id
         LEFT JOIN properties p ON p.id = d.property_id
@@ -292,11 +298,11 @@ export async function getMarketMixReport(
         GROUP BY ${verticalExpr}
         ORDER BY deal_count DESC, won_value DESC
         LIMIT 12
-      `),
-      tenantDb.execute(sql`
+      `);
+    const propertyRows = await tenantDb.execute(sql`
         SELECT ${propertyTypeExpr} AS name,
-          COUNT(DISTINCT d.id)::int AS deal_count,
-          COALESCE(SUM(${valueExpr}) FILTER (WHERE psc.slug IN (${sqlStringList(WON_STAGE_SLUGS)})), 0)::numeric AS won_value
+          COUNT(DISTINCT d.id) FILTER (WHERE ${aliasedActiveDealCountFilterSql("d")})::int AS deal_count,
+          COALESCE(SUM(${wonValueExpr}) FILTER (WHERE psc.slug IN (${sqlStringList(WON_STAGE_SLUGS)})), 0)::numeric AS won_value
         FROM deals d
         LEFT JOIN companies c ON c.id = d.company_id
         LEFT JOIN properties p ON p.id = d.property_id
@@ -307,11 +313,11 @@ export async function getMarketMixReport(
         GROUP BY ${propertyTypeExpr}
         ORDER BY deal_count DESC, won_value DESC
         LIMIT 12
-      `),
-      tenantDb.execute(sql`
+      `);
+    const regionRows = await tenantDb.execute(sql`
         SELECT ${regionExpr} AS name,
-          COUNT(DISTINCT d.id)::int AS deal_count,
-          COALESCE(SUM(${valueExpr}) FILTER (WHERE psc.slug IN (${sqlStringList(WON_STAGE_SLUGS)})), 0)::numeric AS won_value
+          COUNT(DISTINCT d.id) FILTER (WHERE ${aliasedActiveDealCountFilterSql("d")})::int AS deal_count,
+          COALESCE(SUM(${wonValueExpr}) FILTER (WHERE psc.slug IN (${sqlStringList(WON_STAGE_SLUGS)})), 0)::numeric AS won_value
         FROM deals d
         LEFT JOIN companies c ON c.id = d.company_id
         LEFT JOIN properties p ON p.id = d.property_id
@@ -322,12 +328,12 @@ export async function getMarketMixReport(
         GROUP BY ${regionExpr}
         ORDER BY deal_count DESC, won_value DESC
         LIMIT 12
-      `),
-      tenantDb.execute(sql`
+      `);
+    const quarterlyRows = await tenantDb.execute(sql`
         SELECT
           CONCAT(EXTRACT(YEAR FROM COALESCE(d.actual_close_date, d.updated_at) AT TIME ZONE 'UTC')::int, ' Q', EXTRACT(QUARTER FROM COALESCE(d.actual_close_date, d.updated_at) AT TIME ZONE 'UTC')::int) AS quarter,
           ${verticalExpr} AS vertical,
-          COALESCE(SUM(${valueExpr}), 0)::numeric AS won_value
+          COALESCE(SUM(${wonValueExpr}), 0)::numeric AS won_value
         FROM deals d
         LEFT JOIN companies c ON c.id = d.company_id
         LEFT JOIN properties p ON p.id = d.property_id
@@ -338,14 +344,26 @@ export async function getMarketMixReport(
           AND psc.slug IN (${sqlStringList(WON_STAGE_SLUGS)})
         GROUP BY quarter, ${verticalExpr}
         ORDER BY quarter ASC, won_value DESC
-      `),
-      tenantDb.execute(sql`
+      `);
+    const breakdownRows = await tenantDb.execute(sql`
         SELECT ${verticalExpr} AS vertical,
-          COUNT(DISTINCT d.id) FILTER (WHERE psc.is_terminal = false)::int AS active_deals,
-          COALESCE(SUM(${valueExpr}) FILTER (WHERE psc.slug IN (${sqlStringList(WON_STAGE_SLUGS)})), 0)::numeric AS won_last_year,
-          COUNT(DISTINCT d.id) FILTER (WHERE psc.slug IN (${sqlStringList(WON_STAGE_SLUGS)}))::int AS wins,
-          COUNT(DISTINCT d.id) FILTER (WHERE psc.slug IN (${sqlStringList(LOST_STAGE_SLUGS)}))::int AS losses,
-          COALESCE(AVG(${valueExpr}) FILTER (WHERE psc.slug IN (${sqlStringList(WON_STAGE_SLUGS)})), 0)::numeric AS avg_deal_size
+          COUNT(DISTINCT d.id) FILTER (
+            WHERE psc.is_terminal = false
+              AND ${aliasedActiveDealCountFilterSql("d")}
+          )::int AS active_deals,
+          COALESCE(SUM(${wonValueExpr}) FILTER (WHERE psc.slug IN (${sqlStringList(WON_STAGE_SLUGS)})), 0)::numeric AS won_last_year,
+          COUNT(DISTINCT d.id) FILTER (
+            WHERE psc.slug IN (${sqlStringList(WON_STAGE_SLUGS)})
+              AND ${aliasedActiveDealCountFilterSql("d")}
+          )::int AS wins,
+          COUNT(DISTINCT d.id) FILTER (
+            WHERE psc.slug IN (${sqlStringList(LOST_STAGE_SLUGS)})
+              AND ${aliasedActiveDealCountFilterSql("d")}
+          )::int AS losses,
+          COALESCE(AVG(${wonValueExpr}) FILTER (
+            WHERE psc.slug IN (${sqlStringList(WON_STAGE_SLUGS)})
+              AND ${aliasedActiveDealCountFilterSql("d")}
+          ), 0)::numeric AS avg_deal_size
         FROM deals d
         LEFT JOIN companies c ON c.id = d.company_id
         LEFT JOIN properties p ON p.id = d.property_id
@@ -356,8 +374,7 @@ export async function getMarketMixReport(
         GROUP BY ${verticalExpr}
         ORDER BY won_last_year DESC, active_deals DESC
         LIMIT 20
-      `),
-    ]);
+      `);
 
     const kpis = rowsFromExecute<any>(kpiRows)[0] ?? {};
     return {
@@ -413,11 +430,10 @@ export async function getCustomerConcentrationReport(
   const filters = normalizeFilters(input);
   return cached(tenantDb, cacheKey("customer-concentration", filters), async () => {
     const where = buildWhere(filters);
-    const valueExpr = sql`COALESCE(d.awarded_amount, d.bid_estimate, d.dd_estimate, 0)`;
-    const openValueExpr = sql`COALESCE(d.forecast_revenue, d.bid_estimate, d.dd_estimate, 0)`;
+    const wonValueExpr = aliasedEffectiveAwardedDealValueSql("d");
+    const openValueExpr = aliasedEffectiveDealValueSql("d", aliasedOpenPipelineForecastFirstDealValueSql("d"));
 
-    const [kpiRows, customerRows, distributionRows, staleRows] = await Promise.all([
-      tenantDb.execute(sql`
+    const kpiRows = await tenantDb.execute(sql`
         WITH open_customers AS (
           SELECT d.company_id, SUM(${openValueExpr}) AS open_value
           FROM deals d
@@ -425,6 +441,7 @@ export async function getCustomerConcentrationReport(
           JOIN pipeline_stage_config psc ON psc.id = d.stage_id
           WHERE ${where}
             AND psc.is_terminal = false
+            AND ${aliasedActiveDealCountFilterSql("d")}
             AND d.company_id IS NOT NULL
           GROUP BY d.company_id
         )
@@ -433,14 +450,17 @@ export async function getCustomerConcentrationReport(
           COALESCE(SUM(open_value), 0)::numeric AS total_open_value,
           COUNT(*) FILTER (WHERE open_value >= 1000000)::int AS customers_over_one_million_open
         FROM open_customers
-      `),
-      tenantDb.execute(sql`
+      `);
+    const customerRows = await tenantDb.execute(sql`
         SELECT
           d.company_id::text AS company_id,
           COALESCE(c.name, 'Unassigned Account') AS company_name,
-          COUNT(DISTINCT d.id) FILTER (WHERE psc.is_terminal = false)::int AS active_deals,
+          COUNT(DISTINCT d.id) FILTER (
+            WHERE psc.is_terminal = false
+              AND ${aliasedActiveDealCountFilterSql("d")}
+          )::int AS active_deals,
           COALESCE(SUM(${openValueExpr}) FILTER (WHERE psc.is_terminal = false), 0)::numeric AS total_open_value,
-          COALESCE(SUM(${valueExpr}) FILTER (WHERE psc.slug IN (${sqlStringList(WON_STAGE_SLUGS)})), 0)::numeric AS total_won_lifetime,
+          COALESCE(SUM(${wonValueExpr}) FILTER (WHERE psc.slug IN (${sqlStringList(WON_STAGE_SLUGS)})), 0)::numeric AS total_won_lifetime,
           MAX(COALESCE(d.last_activity_at, c.last_activity_at, a.last_activity_at, d.updated_at)) AS last_activity_at,
           COALESCE(STRING_AGG(DISTINCT rep.display_name, ', ' ORDER BY rep.display_name) FILTER (WHERE rep.display_name IS NOT NULL), 'Unassigned') AS account_owners
         FROM deals d
@@ -456,11 +476,14 @@ export async function getCustomerConcentrationReport(
         WHERE ${where}
           AND d.company_id IS NOT NULL
         GROUP BY d.company_id, COALESCE(c.name, 'Unassigned Account')
-        HAVING COUNT(DISTINCT d.id) FILTER (WHERE psc.is_terminal = false) > 0
+        HAVING COUNT(DISTINCT d.id) FILTER (
+          WHERE psc.is_terminal = false
+            AND ${aliasedActiveDealCountFilterSql("d")}
+        ) > 0
         ORDER BY total_open_value DESC
         LIMIT 20
-      `),
-      tenantDb.execute(sql`
+      `);
+    const distributionRows = await tenantDb.execute(sql`
         WITH customer_values AS (
           SELECT d.company_id, SUM(${openValueExpr}) AS open_value
           FROM deals d
@@ -468,6 +491,7 @@ export async function getCustomerConcentrationReport(
           JOIN pipeline_stage_config psc ON psc.id = d.stage_id
           WHERE ${where}
             AND psc.is_terminal = false
+            AND ${aliasedActiveDealCountFilterSql("d")}
             AND d.company_id IS NOT NULL
           GROUP BY d.company_id
         )
@@ -482,8 +506,8 @@ export async function getCustomerConcentrationReport(
         FROM customer_values
         GROUP BY bucket
         ORDER BY MIN(open_value) DESC
-      `),
-      tenantDb.execute(sql`
+      `);
+    const staleRows = await tenantDb.execute(sql`
         SELECT
           d.company_id::text AS company_id,
           COALESCE(c.name, 'Unassigned Account') AS company_name,
@@ -503,13 +527,13 @@ export async function getCustomerConcentrationReport(
         ) a ON a.deal_id = d.id
         WHERE ${where}
           AND psc.is_terminal = false
+          AND ${aliasedActiveDealCountFilterSql("d")}
           AND d.company_id IS NOT NULL
         GROUP BY d.company_id, COALESCE(c.name, 'Unassigned Account')
         HAVING FLOOR(EXTRACT(EPOCH FROM (NOW() - MAX(COALESCE(d.last_activity_at, c.last_activity_at, a.last_activity_at, d.updated_at)))) / 86400)::int >= 60
         ORDER BY days_stale DESC, open_value DESC
         LIMIT 20
-      `),
-    ]);
+      `);
 
     const kpi = rowsFromExecute<any>(kpiRows)[0] ?? {};
     const topCustomers = rowsFromExecute<any>(customerRows).map((row) => ({
@@ -565,12 +589,11 @@ export async function getExecutiveTrendsReport(
   const filters = normalizeFilters(input);
   return cached(tenantDb, cacheKey("executive-trends", filters), async () => {
     const where = buildWhere(filters);
-    const valueExpr = sql`COALESCE(d.awarded_amount, d.bid_estimate, d.dd_estimate, 0)`;
-    const openValueExpr = sql`COALESCE(d.forecast_revenue, d.bid_estimate, d.dd_estimate, 0)`;
+    const wonValueExpr = aliasedEffectiveAwardedDealValueSql("d");
+    const openValueExpr = aliasedEffectiveDealValueSql("d", aliasedOpenPipelineForecastFirstDealValueSql("d"));
     const previousPeriod = computePreviousPeriod(filters.from, filters.to);
 
-    const [kpiRows, monthlyRows, quarterlyRows, winRateRows, progressionRows] = await Promise.all([
-      tenantDb.execute(sql`
+    const kpiRows = await tenantDb.execute(sql`
         WITH periods AS (
           SELECT 'current' AS metric, (${filters.from}::date AT TIME ZONE 'UTC') AS from_date, ((${filters.to}::date + INTERVAL '1 day') AT TIME ZONE 'UTC') AS to_date
           UNION ALL
@@ -579,10 +602,19 @@ export async function getExecutiveTrendsReport(
         SELECT
           p.metric,
           COALESCE(SUM(${openValueExpr}) FILTER (WHERE psc.is_terminal = false), 0)::numeric AS total_pipeline,
-          COALESCE(SUM(${valueExpr}) FILTER (WHERE psc.slug IN (${sqlStringList(WON_STAGE_SLUGS)})), 0)::numeric AS won_revenue,
-          COUNT(*) FILTER (WHERE psc.slug IN (${sqlStringList(WON_STAGE_SLUGS)}))::int AS wins,
-          COUNT(*) FILTER (WHERE psc.slug IN (${sqlStringList(LOST_STAGE_SLUGS)}))::int AS losses,
-          COALESCE(AVG(${valueExpr}) FILTER (WHERE psc.slug IN (${sqlStringList(WON_STAGE_SLUGS)})), 0)::numeric AS avg_deal_size
+          COALESCE(SUM(${wonValueExpr}) FILTER (WHERE psc.slug IN (${sqlStringList(WON_STAGE_SLUGS)})), 0)::numeric AS won_revenue,
+          COUNT(*) FILTER (
+            WHERE psc.slug IN (${sqlStringList(WON_STAGE_SLUGS)})
+              AND ${aliasedActiveDealCountFilterSql("d")}
+          )::int AS wins,
+          COUNT(*) FILTER (
+            WHERE psc.slug IN (${sqlStringList(LOST_STAGE_SLUGS)})
+              AND ${aliasedActiveDealCountFilterSql("d")}
+          )::int AS losses,
+          COALESCE(AVG(${wonValueExpr}) FILTER (
+            WHERE psc.slug IN (${sqlStringList(WON_STAGE_SLUGS)})
+              AND ${aliasedActiveDealCountFilterSql("d")}
+          ), 0)::numeric AS avg_deal_size
         FROM periods p
         LEFT JOIN deals d ON d.created_at >= p.from_date AND d.created_at < p.to_date
         LEFT JOIN users u ON u.id = d.assigned_rep_id
@@ -593,8 +625,8 @@ export async function getExecutiveTrendsReport(
           AND d.created_at < p.to_date
         )
         GROUP BY p.metric
-      `),
-      tenantDb.execute(sql`
+      `);
+    const monthlyRows = await tenantDb.execute(sql`
         WITH months AS (
           SELECT TO_CHAR(month_start, 'YYYY-MM') AS month
           FROM generate_series(
@@ -689,14 +721,23 @@ export async function getExecutiveTrendsReport(
         LEFT JOIN lost_history ON lost_history.month = months.month
         LEFT JOIN lost_fallback ON lost_fallback.month = months.month
         ORDER BY months.month ASC
-      `),
-      tenantDb.execute(sql`
+      `);
+    const quarterlyRows = await tenantDb.execute(sql`
         SELECT
           CONCAT(EXTRACT(YEAR FROM d.created_at AT TIME ZONE 'UTC')::int, ' Q', EXTRACT(QUARTER FROM d.created_at AT TIME ZONE 'UTC')::int) AS quarter,
           COUNT(DISTINCT d.id)::int AS deals_created,
-          COUNT(DISTINCT d.id) FILTER (WHERE psc.slug IN (${sqlStringList(WON_STAGE_SLUGS)}))::int AS won,
-          COUNT(DISTINCT d.id) FILTER (WHERE psc.slug IN (${sqlStringList(LOST_STAGE_SLUGS)}))::int AS lost,
-          COALESCE(AVG(${valueExpr}) FILTER (WHERE psc.slug IN (${sqlStringList(WON_STAGE_SLUGS)})), 0)::numeric AS avg_deal_size,
+          COUNT(DISTINCT d.id) FILTER (
+            WHERE psc.slug IN (${sqlStringList(WON_STAGE_SLUGS)})
+              AND ${aliasedActiveDealCountFilterSql("d")}
+          )::int AS won,
+          COUNT(DISTINCT d.id) FILTER (
+            WHERE psc.slug IN (${sqlStringList(LOST_STAGE_SLUGS)})
+              AND ${aliasedActiveDealCountFilterSql("d")}
+          )::int AS lost,
+          COALESCE(AVG(${wonValueExpr}) FILTER (
+            WHERE psc.slug IN (${sqlStringList(WON_STAGE_SLUGS)})
+              AND ${aliasedActiveDealCountFilterSql("d")}
+          ), 0)::numeric AS avg_deal_size,
           COALESCE(SUM(${openValueExpr}) FILTER (WHERE psc.is_terminal = false), 0)::numeric AS pipeline_end_value
         FROM deals d
         LEFT JOIN users u ON u.id = d.assigned_rep_id
@@ -704,8 +745,8 @@ export async function getExecutiveTrendsReport(
         WHERE ${where}
         GROUP BY quarter
         ORDER BY quarter ASC
-      `),
-      tenantDb.execute(sql`
+      `);
+    const winRateRows = await tenantDb.execute(sql`
         SELECT
           TO_CHAR(dsh.created_at AT TIME ZONE 'UTC', 'YYYY-MM') AS month,
           COUNT(*) FILTER (WHERE psc.slug IN (${sqlStringList(WON_STAGE_SLUGS)}))::int AS wins,
@@ -718,8 +759,8 @@ export async function getExecutiveTrendsReport(
           AND psc.is_terminal = true
         GROUP BY TO_CHAR(dsh.created_at AT TIME ZONE 'UTC', 'YYYY-MM')
         ORDER BY month ASC
-      `),
-      tenantDb.execute(sql`
+      `);
+    const progressionRows = await tenantDb.execute(sql`
         SELECT
           COALESCE(from_stage.name, 'Initial') AS stage_name,
           COUNT(*)::int AS entered_count,
@@ -732,8 +773,7 @@ export async function getExecutiveTrendsReport(
         WHERE ${buildWhere(filters, sql`dsh.created_at`)}
         GROUP BY COALESCE(from_stage.name, 'Initial')
         ORDER BY entered_count DESC
-      `),
-    ]);
+      `);
 
     const periodRows = rowsFromExecute<any>(kpiRows);
     const current = periodRows.find((row) => row.metric === "current") ?? {};

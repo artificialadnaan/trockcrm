@@ -9,6 +9,7 @@ const QUALIFIED_PRESSURE_SLUGS = new Set([
 
 export interface DealStageSummary {
   totalCount: number;
+  totalDealCount: number;
   totalValue: number;
   averageAgeDays: number;
 }
@@ -35,10 +36,13 @@ export function buildDealStageSummary(
   data: DealStagePageResponse | null,
   now = new Date()
 ): DealStageSummary {
+  const activeRows = (data?.rows ?? []).filter((row) => !row.onHold);
+
   return {
-    totalCount: data?.summary.count ?? 0,
+    totalCount: data?.summary.activeCount ?? data?.summary.count ?? 0,
+    totalDealCount: data?.summary.totalCount ?? data?.summary.count ?? 0,
     totalValue: data?.summary.totalValue ?? 0,
-    averageAgeDays: averageDays((data?.rows ?? []).map((row) => row.stageEnteredAt), now),
+    averageAgeDays: averageDays(activeRows.map((row) => row.stageEnteredAt), now),
   };
 }
 

@@ -10,6 +10,7 @@ const QUALIFIED_PRESSURE_SLUGS = new Set([
 
 export interface DealBoardSummary {
   totalCount: number;
+  totalDealCount: number;
   liveStageCount: number;
   totalValue: number;
   averageAgeDays: number;
@@ -36,10 +37,13 @@ function averageDays(values: string[], now: Date) {
 
 export function buildDealBoardSummary(board: DealBoardResponse | null, now = new Date()): DealBoardSummary {
   const columns = getActivePipelineColumns(board?.columns ?? []);
-  const enteredAt = columns.flatMap((column) => column.cards.map((card) => card.stageEnteredAt));
+  const enteredAt = columns.flatMap((column) =>
+    column.cards.filter((card) => !card.onHold).map((card) => card.stageEnteredAt)
+  );
 
   return {
     totalCount: columns.reduce((sum, column) => sum + column.count, 0),
+    totalDealCount: columns.reduce((sum, column) => sum + (column.totalCount ?? column.count), 0),
     liveStageCount: columns.filter((column) => column.count > 0).length,
     totalValue: columns.reduce((sum, column) => sum + (column.totalValue ?? 0), 0),
     averageAgeDays: averageDays(enteredAt, now),

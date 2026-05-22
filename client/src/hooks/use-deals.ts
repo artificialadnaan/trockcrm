@@ -301,6 +301,7 @@ export interface Pagination {
   page: number;
   limit: number;
   total: number;
+  activeCount?: number;
   totalPages: number;
 }
 
@@ -315,6 +316,8 @@ export interface DealBoardColumn {
     isTerminal?: boolean;
   };
   count: number;
+  activeCount?: number;
+  totalCount?: number;
   totalValue: number;
   cards: Deal[];
 }
@@ -324,6 +327,8 @@ export interface DealBoardResponse {
   terminalStages: Array<{
     stage: DealBoardColumn["stage"];
     count: number;
+    activeCount?: number;
+    totalCount?: number;
     totalValue?: number;
     deals?: Deal[];
   }>;
@@ -332,7 +337,13 @@ export interface DealBoardResponse {
 export interface DealStagePageResponse {
   stage: DealBoardColumn["stage"];
   scope: "mine" | "team" | "all";
-  summary: { count: number; totalValue: number; averageDaysInStage: number | null };
+  summary: {
+    count: number;
+    activeCount?: number;
+    totalCount?: number;
+    totalValue: number;
+    averageDaysInStage: number | null;
+  };
   pagination: {
     page: number;
     pageSize: number;
@@ -356,6 +367,8 @@ interface DealBoardApiResponse {
   pipelineColumns: Array<{
     stage: DealBoardColumn["stage"];
     count: number;
+    activeCount?: number;
+    totalCount?: number;
     totalValue: number;
     deals: Deal[];
   }>;
@@ -368,6 +381,8 @@ export function normalizeDealBoardResponse(result: DealBoardApiResponse): DealBo
     const sourceColumn = column as DealBoardApiColumn;
     return {
       ...column,
+      activeCount: sourceColumn.activeCount ?? sourceColumn.count,
+      totalCount: sourceColumn.totalCount ?? sourceColumn.count,
       cards: sourceColumn.cards ?? sourceColumn.deals ?? [],
     };
   });
@@ -376,6 +391,8 @@ export function normalizeDealBoardResponse(result: DealBoardApiResponse): DealBo
     columns: normalizedColumns,
     terminalStages: (result.terminalStages ?? []).map((terminal) => ({
       ...terminal,
+      activeCount: terminal.activeCount ?? terminal.count,
+      totalCount: terminal.totalCount ?? terminal.count,
       totalValue: terminal.totalValue ?? 0,
     })),
   };

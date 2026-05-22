@@ -6,6 +6,26 @@ import type { LeadStagePageResponse } from "@/hooks/use-leads";
 const now = new Date("2026-04-22T12:00:00.000Z");
 
 describe("buildDealStageSummary", () => {
+  it("excludes on-hold rows from the fallback average age paired with active count and value", () => {
+    const data = {
+      stage: { id: "stage-est", name: "Estimating", slug: "estimating" },
+      scope: "team",
+      summary: { count: 1, activeCount: 1, totalCount: 2, totalValue: 125000, averageDaysInStage: null },
+      pagination: { page: 1, pageSize: 25, total: 2, totalPages: 1 },
+      rows: [
+        { id: "active", stageEnteredAt: "2026-04-20T12:00:00.000Z", onHold: false },
+        { id: "held", stageEnteredAt: "2026-04-10T12:00:00.000Z", onHold: true },
+      ],
+    } as unknown as DealStagePageResponse;
+
+    expect(buildDealStageSummary(data, now)).toEqual({
+      totalCount: 1,
+      totalDealCount: 2,
+      totalValue: 125000,
+      averageAgeDays: 2,
+    });
+  });
+
   it("derives count, stage value, and average visible age", () => {
     const data: DealStagePageResponse = {
       stage: { id: "stage-est", name: "Estimating", slug: "estimating" },
@@ -146,6 +166,7 @@ describe("buildDealStageSummary", () => {
 
     expect(buildDealStageSummary(data, now)).toEqual({
       totalCount: 3,
+      totalDealCount: 3,
       totalValue: 245000,
       averageAgeDays: 3,
     });
