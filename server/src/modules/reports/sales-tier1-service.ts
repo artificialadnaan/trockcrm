@@ -695,7 +695,7 @@ export async function getLeadConversionReport(
              OR l.status = 'converted'
         )::int AS qualified,
         COUNT(DISTINCT d.id)::int AS "inDeals",
-        COUNT(DISTINCT d.id) FILTER (WHERE p.slug IN (${wonSlugs}))::int AS won
+        COUNT(DISTINCT d.id) FILTER (WHERE p.slug IN (${wonSlugs}) AND ${aliasedActiveDealCountFilterSql("d")})::int AS won
       FROM leads l
       LEFT JOIN users u ON u.id = l.assigned_rep_id
       LEFT JOIN deals d ON d.source_lead_id = l.id AND d.is_active = true AND COALESCE(d.is_test_data, false) = false

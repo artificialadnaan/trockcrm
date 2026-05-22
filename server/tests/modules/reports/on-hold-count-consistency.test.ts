@@ -81,6 +81,90 @@ describe("on-hold report count consistency", () => {
     expect(leadConversionSql).toContain("coalesce(d.on_hold, false) = false");
   });
 
+  it("keeps lead-conversion headline won count hold-aware and aligned with source breakdown won counts", async () => {
+    const { getLeadConversionReport } = await import("../../../src/modules/reports/sales-tier1-service.js");
+    const tenantDb = {
+      execute: vi.fn().mockImplementation(async (query: unknown) => {
+        const queryText = extractSqlText(query).toLowerCase();
+        const hasHoldAwareWonFilter =
+          queryText.includes("as won") && queryText.includes("coalesce(d.on_hold, false) = false");
+
+        if (queryText.includes('as "totalleads"')) {
+          return {
+            rows: [
+              {
+                totalLeads: 2,
+                qualified: 2,
+                inDeals: 2,
+                won: hasHoldAwareWonFilter ? 1 : 2,
+              },
+            ],
+          };
+        }
+
+        if (queryText.includes('as "convertedtodeal"') && queryText.includes("group by 1")) {
+          return {
+            rows: [
+              {
+                source: "Website",
+                leads: 2,
+                qualified: 2,
+                convertedToDeal: 2,
+                won: hasHoldAwareWonFilter ? 1 : 2,
+                totalRevenue: 1000,
+              },
+            ],
+          };
+        }
+
+        if (queryText.includes("date_trunc('month'")) {
+          return {
+            rows: [
+              {
+                month: "2026-01",
+                leads: 2,
+                convertedToDeal: 2,
+                won: hasHoldAwareWonFilter ? 1 : 2,
+              },
+            ],
+          };
+        }
+
+        return {
+          rows: [
+            {
+              source: "Website",
+              totalRevenue: 1000,
+              won: hasHoldAwareWonFilter ? 1 : 2,
+            },
+          ],
+        };
+      }),
+    } as any;
+
+    const report = await getLeadConversionReport(
+      tenantDb,
+      {
+        dateFrom: "2026-01-01",
+        dateTo: "2026-01-31",
+        officeSlug: undefined,
+        ownerIds: [],
+        ownerNames: [],
+        ownerEmails: [],
+      },
+      "lead-conversion-held-won-regression"
+    );
+
+    const sourceWonTotal = report.bySource.reduce((sum, source) => sum + source.won, 0);
+    const monthlyWonTotal = report.monthlyTrend.reduce((sum, month) => sum + month.won, 0);
+    const revenueWonTotal = report.topRevenueSources.reduce((sum, source) => sum + source.won, 0);
+    expect(report.kpis.won).toBe(1);
+    expect(report.funnel.find((step) => step.key === "won")?.count).toBe(1);
+    expect(report.kpis.won).toBe(sourceWonTotal);
+    expect(report.kpis.won).toBe(monthlyWonTotal);
+    expect(report.kpis.won).toBe(revenueWonTotal);
+  });
+
   it("keeps service report pipeline and awarded rollups count-consistent", async () => {
     const {
       getRevenueByProjectType,
