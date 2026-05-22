@@ -533,6 +533,7 @@ function readBoardInput(req: Parameters<typeof router.get>[1] extends never ? ne
   );
   return {
     role: getCollaborativeReadRole(req.user!.role, scope),
+    atRiskViewerRole: req.user!.role,
     userId: req.user!.id,
     activeOfficeId: req.user!.activeOfficeId ?? req.user!.officeId,
     scope,
@@ -817,7 +818,8 @@ router.get("/", async (req, res, next) => {
       req.tenantDb!,
       filters,
       getCollaborativeReadRole(req.user!.role, filters.scope),
-      req.user!.id
+      req.user!.id,
+      req.user!.role
     );
     await req.commitTransaction!();
     const includeHubspotId = shouldIncludeHubspotId(req.query, req.user!.role);
@@ -877,7 +879,8 @@ router.get("/pipeline", async (req, res, next) => {
       req.tenantDb!,
       getCollaborativeReadRole(req.user!.role, scope),
       req.user!.id,
-      filters
+      filters,
+      req.user!.role
     );
     await req.commitTransaction!();
     const includeHubspotId = shouldIncludeHubspotId(req.query, req.user!.role);
@@ -976,7 +979,8 @@ router.get("/:id", async (req, res, next) => {
       req.tenantDb!,
       req.params.id,
       getCollaborativeReadRole(req.user!.role, dealAccess.assignedRepId === req.user!.id ? "mine" : "all"),
-      req.user!.id
+      req.user!.id,
+      req.user!.role
     );
     if (!deal) throw new AppError(404, "Deal not found");
     const isWatching = await isDealWatchedByUser(req.tenantDb!, req.params.id, req.user!.id);
@@ -1004,7 +1008,8 @@ router.get("/:id/detail", async (req, res, next) => {
       req.tenantDb!,
       req.params.id,
       getCollaborativeReadRole(req.user!.role, dealAccess.assignedRepId === req.user!.id ? "mine" : "all"),
-      req.user!.id
+      req.user!.id,
+      req.user!.role
     );
     if (!detail) throw new AppError(404, "Deal not found");
     const isWatching = await isDealWatchedByUser(req.tenantDb!, req.params.id, req.user!.id);
@@ -1544,18 +1549,16 @@ async function assertServiceOpportunityHierarchy(
   tenantDb: Parameters<typeof createDeal>[0],
   input: { companyId: string; propertyId: string }
 ) {
-  const [companyRows, propertyRows] = await Promise.all([
-    tenantDb
-      .select({ id: companies.id })
-      .from(companies)
-      .where(and(eq(companies.id, input.companyId), eq(companies.isActive, true)))
-      .limit(1),
-    tenantDb
-      .select({ id: properties.id, companyId: properties.companyId })
-      .from(properties)
-      .where(and(eq(properties.id, input.propertyId), eq(properties.isActive, true)))
-      .limit(1),
-  ]);
+  const companyRows = await tenantDb
+    .select({ id: companies.id })
+    .from(companies)
+    .where(and(eq(companies.id, input.companyId), eq(companies.isActive, true)))
+    .limit(1);
+  const propertyRows = await tenantDb
+    .select({ id: properties.id, companyId: properties.companyId })
+    .from(properties)
+    .where(and(eq(properties.id, input.propertyId), eq(properties.isActive, true)))
+    .limit(1);
 
   const company = companyRows[0] ?? null;
   if (!company) {

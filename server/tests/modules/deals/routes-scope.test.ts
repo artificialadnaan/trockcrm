@@ -3,6 +3,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 const dealServiceMocks = vi.hoisted(() => ({
   getDeals: vi.fn(),
   getDealsForPipeline: vi.fn(),
+  listDealStagePage: vi.fn(),
 }));
 
 const accessMocks = vi.hoisted(() => ({
@@ -26,7 +27,7 @@ vi.mock("../../../src/modules/deals/service.js", () => ({
   updateDeal: vi.fn(),
   startProposalDraft: vi.fn(),
   deleteDeal: vi.fn(),
-  listDealStagePage: vi.fn(),
+  listDealStagePage: dealServiceMocks.listDealStagePage,
   getDealSources: vi.fn(),
   setDealContractSignedDate: vi.fn(),
 }));
@@ -95,14 +96,19 @@ function findRouteHandler(method: "get", path: string) {
   return layer.route.stack.find((entry: any) => entry.method === method).handle;
 }
 
-async function invokeRoute(path: string, query: Record<string, string> = {}) {
+async function invokeRoute(
+  path: string,
+  query: Record<string, string> = {},
+  options: { params?: Record<string, string>; user?: Partial<{ id: string; role: string }> } = {}
+) {
   const handler = findRouteHandler("get", path);
   const req = {
+    params: options.params ?? {},
     query,
     tenantDb: {},
     user: {
-      id: "director-1",
-      role: "director",
+      id: options.user?.id ?? "director-1",
+      role: options.user?.role ?? "director",
       officeId: "office-1",
       activeOfficeId: "office-1",
     },
@@ -139,6 +145,11 @@ describe("deal routes scope defaults", () => {
       pipelineColumns: [],
       terminalStages: [],
     });
+    dealServiceMocks.listDealStagePage.mockResolvedValue({
+      rows: [],
+      summary: {},
+      pagination: {},
+    });
   });
 
   it("defaults GET /api/deals to mine scope when scope is missing", async () => {
@@ -147,7 +158,8 @@ describe("deal routes scope defaults", () => {
       req.tenantDb,
       expect.objectContaining({ scope: "mine" }),
       "director",
-      "director-1"
+      "director-1",
+      "director"
     );
   });
 
@@ -157,7 +169,25 @@ describe("deal routes scope defaults", () => {
       req.tenantDb,
       "director",
       "director-1",
-      expect.objectContaining({ scope: "mine", includeDd: true })
+      expect.objectContaining({ scope: "mine", includeDd: true }),
+      "director"
+    );
+  });
+
+  it("passes requester role separately from collaborative read role for stage At Risk results", async () => {
+    accessMocks.getCollaborativeReadRole.mockReturnValueOnce("director");
+    const { req } = await invokeRoute(
+      "/stages/:stageId",
+      { scope: "all" },
+      { params: { stageId: "stage-opportunity" }, user: { id: "rep-1", role: "rep" } }
+    );
+
+    expect(dealServiceMocks.listDealStagePage).toHaveBeenCalledWith(
+      req.tenantDb,
+      expect.objectContaining({
+        role: "director",
+        atRiskViewerRole: "rep",
+      })
     );
   });
 
@@ -202,7 +232,8 @@ describe("deal routes scope defaults", () => {
         createdTo: "2026-05-31",
       }),
       "director",
-      "director-1"
+      "director-1",
+      "director"
     );
   });
 
@@ -228,7 +259,8 @@ describe("deal routes scope defaults", () => {
         search: "roof",
       }),
       "director",
-      "director-1"
+      "director-1",
+      "director"
     );
     expect(dealServiceMocks.getDealsForPipeline).toHaveBeenCalledWith(
       pipeline.req.tenantDb,
@@ -238,7 +270,8 @@ describe("deal routes scope defaults", () => {
         assignedRepId: "rep-1",
         estimateSentFrom: "2026-04-01",
         estimateSentTo: "2026-04-30",
-      })
+      }),
+      "director"
     );
   });
 

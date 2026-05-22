@@ -893,11 +893,52 @@ describe("Dashboard Service", () => {
       expect(recentClosesQuery).toContain("limit 12");
     });
 
-    it("keeps at-risk scope summary aligned to the stale-deals drilldown population", async () => {
+    it("keeps at-risk scope summary aligned to the role-relative engine population", async () => {
       const { getDirectorDashboard } = await import("../../../src/modules/dashboard/service.js");
       const tenantDb = {
         execute: vi.fn().mockImplementation((query: unknown) => {
           const text = extractSqlText(query).toLowerCase();
+
+          if (text.includes("on_hold_accumulated_seconds_at_stage_entry")) {
+            return Promise.resolve({
+              rows: [
+                {
+                  deal_id: "deal-at-risk-1",
+                  rep_id: "rep-1",
+                  rep_name: "Avery Rep",
+                  deal_name: "At Risk One",
+                  stage_name: "Opportunity",
+                  stage_slug: "opportunity",
+                  mirrored_stage_status: "blocked",
+                  workflow_route: "normal",
+                  region_classification: "Dallas, TX",
+                  deal_value: "2500",
+                  stage_entered_at: "2026-01-15",
+                  on_hold: false,
+                  on_hold_started_at: null,
+                  on_hold_accumulated_seconds: "0",
+                  on_hold_accumulated_seconds_at_stage_entry: "0",
+                },
+                {
+                  deal_id: "deal-at-risk-2",
+                  rep_id: "rep-2",
+                  rep_name: "Blake Rep",
+                  deal_name: "At Risk Two",
+                  stage_name: "Contract",
+                  stage_slug: "contract",
+                  mirrored_stage_status: "at_risk",
+                  workflow_route: "normal",
+                  region_classification: "Fort Worth, TX",
+                  deal_value: "4000",
+                  stage_entered_at: "2026-01-10",
+                  on_hold: false,
+                  on_hold_started_at: null,
+                  on_hold_accumulated_seconds: "0",
+                  on_hold_accumulated_seconds_at_stage_entry: "0",
+                },
+              ],
+            });
+          }
 
           if (text.includes("mirrored_stage_status")) {
             return Promise.resolve({
@@ -981,7 +1022,7 @@ describe("Dashboard Service", () => {
       });
 
       expect(result.scopeSummary.atRisk).toEqual({ count: 2, totalValue: 6500 });
-      expect(result.atRiskDeals).toHaveLength(1);
+      expect(result.atRiskDeals).toHaveLength(2);
     });
 
     it("forwards mine fallback flags into director scope subqueries when subscription tables are unavailable", async () => {
@@ -1021,11 +1062,33 @@ describe("Dashboard Service", () => {
       expect(scopeQueries.some((text: string) => text.includes("created_by_user_id"))).toBe(false);
     });
 
-    it("includes rep attribution in downstream at-risk deals", async () => {
+    it("includes rep attribution in dashboard at-risk deals", async () => {
       const { getDirectorDashboard } = await import("../../../src/modules/dashboard/service.js");
       const tenantDb = {
         execute: vi.fn().mockImplementation((query: unknown) => {
           const text = extractSqlText(query).toLowerCase();
+
+          if (text.includes("on_hold_accumulated_seconds_at_stage_entry")) {
+            return Promise.resolve({
+              rows: [{
+                deal_id: "deal-1",
+                rep_id: "rep-1",
+                rep_name: "Avery Rep",
+                deal_name: "Blocked Deal",
+                stage_name: "Opportunity",
+                stage_slug: "opportunity",
+                mirrored_stage_status: "blocked",
+                workflow_route: "normal",
+                region_classification: "Dallas, TX",
+                deal_value: "1000",
+                stage_entered_at: "2026-01-01",
+                on_hold: false,
+                on_hold_started_at: null,
+                on_hold_accumulated_seconds: "0",
+                on_hold_accumulated_seconds_at_stage_entry: "0",
+              }],
+            });
+          }
 
           if (text.includes("downstream") || text.includes("mirrored_stage_status")) {
             return Promise.resolve({
