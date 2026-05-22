@@ -47,7 +47,11 @@ import {
   buildAliasedLeadMineVisibilityCondition,
   resolveMineVisibilityFeatures,
 } from "../shared/mine-visibility.js";
-import { aliasedEffectiveAwardedDealValueSql, aliasedEffectiveDealValueSql } from "../shared/deal-value-sql.js";
+import {
+  aliasedActiveDealCountFilterSql,
+  aliasedEffectiveAwardedDealValueSql,
+  aliasedEffectiveDealValueSql,
+} from "../shared/deal-value-sql.js";
 
 type TenantDb = NodePgDatabase<typeof schema>;
 type ExecuteRows<T> = { rows: T[] } | T[];
@@ -938,6 +942,10 @@ function dashboardEarnedSignedDateSql() {
   return sql`COALESCE(d.contract_signed_at::date, d.contract_signed_date, dsc.contract_signed_date_at_signing)`;
 }
 
+function dashboardNotOnHoldDealSql() {
+  return sql`AND ${aliasedActiveDealCountFilterSql("d")}`;
+}
+
 async function getCommissionConfig(tenantDb: TenantDb, userId: string): Promise<CommissionConfig> {
   const result = await tenantDb.execute(sql`
     SELECT
@@ -986,6 +994,7 @@ async function getDirectCommissionMetrics(
       AND COALESCE(d.is_test_data, false) = false
       AND ${dashboardEarnedSignedDateSql()} IS NOT NULL
       AND psc.slug NOT IN ('lost', 'production_lost', 'service_lost', 'closed_lost')
+      ${dashboardNotOnHoldDealSql()}
       AND ${dashboardEarnedSignedDateSql()} >= ${fromDate}
       AND ${dashboardEarnedSignedDateSql()} <= ${toDate}
   `);
@@ -1037,6 +1046,7 @@ async function getCommissionDealRollups(
       AND COALESCE(d.is_test_data, false) = false
       AND ${dashboardEarnedSignedDateSql()} IS NOT NULL
       AND psc.slug NOT IN ('lost', 'production_lost', 'service_lost', 'closed_lost')
+      ${dashboardNotOnHoldDealSql()}
       AND ${dashboardEarnedSignedDateSql()} >= ${fromDate}
       AND ${dashboardEarnedSignedDateSql()} <= ${toDate}
     ORDER BY ${dashboardEarnedSignedDateSql()} DESC, d.name ASC
@@ -1081,6 +1091,7 @@ async function getRepPotentialRevenue(tenantDb: TenantDb, repId: string): Promis
       AND COALESCE(d.is_test_data, false) = false
       AND d.contract_signed_at IS NULL
       AND d.contract_signed_date IS NULL
+      ${dashboardNotOnHoldDealSql()}
       AND psc.slug IN (${sql.join(COMMISSION_PIPELINE_STAGE_SLUGS.map((slug) => sql`${slug}`), sql`, `)})
   `);
   const rows = (result as any).rows ?? result;
@@ -1108,6 +1119,7 @@ async function getOverrideEarnedCommission(
       AND COALESCE(d.is_test_data, false) = false
       AND ${dashboardEarnedSignedDateSql()} IS NOT NULL
       AND psc.slug NOT IN ('lost', 'production_lost', 'service_lost', 'closed_lost')
+      ${dashboardNotOnHoldDealSql()}
       AND ${dashboardEarnedSignedDateSql()} >= ${fromDate}
       AND ${dashboardEarnedSignedDateSql()} <= ${toDate}
   `);
@@ -1855,6 +1867,7 @@ async function getRepDealPipelineSummary(
           AND COALESCE(d.is_test_data, false) = false
           AND d.contract_signed_at IS NULL
           AND d.contract_signed_date IS NULL
+          AND ${aliasedActiveDealCountFilterSql("d")}
           AND psc.slug IN (${sql.join(COMMISSION_PIPELINE_STAGE_SLUGS.map((slug) => sql`${slug}`), sql`, `)})
       )::int AS active_deals,
       COALESCE(
@@ -1864,6 +1877,7 @@ async function getRepDealPipelineSummary(
               AND COALESCE(d.is_test_data, false) = false
               AND d.contract_signed_at IS NULL
               AND d.contract_signed_date IS NULL
+              AND ${aliasedActiveDealCountFilterSql("d")}
               AND psc.slug IN (${sql.join(COMMISSION_PIPELINE_STAGE_SLUGS.map((slug) => sql`${slug}`), sql`, `)})
           ),
         0

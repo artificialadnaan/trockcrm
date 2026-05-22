@@ -7,6 +7,7 @@ interface FakeDealRow {
   awardedAmount: string | null;
   bidEstimate: string | null;
   ddEstimate: string | null;
+  onHold?: boolean | null;
 }
 
 interface FakeRepSettings {
@@ -287,6 +288,37 @@ describe("calculateCommissionForDeal", () => {
 
     expect(result.status).toBe("skipped_no_value");
     expect(tenantDb._state.commissionInserts).toHaveLength(0);
+  });
+
+  it("creates a commission row for an on-hold deal so releasing hold can surface the earned commission", async () => {
+    const tenantDb = makeTenantDb({
+      deal: {
+        id: "deal-1",
+        assignedRepId: "rep-1",
+        awardedAmount: "100000.00",
+        bidEstimate: null,
+        ddEstimate: null,
+        onHold: true,
+      },
+      settings: { commissionRate: "0.075000", isActive: true },
+    });
+
+    const result = await calculateCommissionForDeal(tenantDb as never, {
+      dealId: "deal-1",
+      contractSignedDate: "2026-09-15",
+      triggeredByUserId: "admin-1",
+    });
+
+    expect(result.status).toBe("created");
+    expect(result.amount).toBe("7500.00");
+    expect(tenantDb._state.commissionInserts).toHaveLength(1);
+    expect(tenantDb._state.commissionInserts[0]).toMatchObject({
+      dealId: "deal-1",
+      repUserId: "rep-1",
+      sourceValueAmount: "100000.00",
+      amount: "7500.00",
+    });
+    expect(tenantDb._state.auditInserts).toHaveLength(1);
   });
 
   it("source value preference: awardedAmount > bidEstimate > ddEstimate", async () => {
