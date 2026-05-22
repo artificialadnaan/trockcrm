@@ -571,6 +571,7 @@ export function PipelinePage() {
       </footer>
 
       <DealsListSection
+        scope={scope}
         enableDateFilter
         enableExport
         excludeStageSlugs={showDd ? [] : ["dd", "due_diligence"]}
