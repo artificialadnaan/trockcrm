@@ -19,6 +19,7 @@ import {
 } from "@/components/ui/select";
 import { Textarea } from "@/components/ui/textarea";
 import { api } from "@/lib/api";
+import { getOwnerInitialColor } from "@trock-crm/shared/types";
 
 type TeamRole =
   | "superintendent"
@@ -84,16 +85,6 @@ const ROLE_BADGE_CLASSES: Record<TeamRole, string> = {
   operations: "bg-violet-100 text-violet-700 border-violet-200",
   foreman: "bg-green-100 text-green-700 border-green-200",
   other: "bg-gray-100 text-gray-700 border-gray-200",
-};
-
-const AVATAR_BG_CLASSES: Record<TeamRole, string> = {
-  superintendent: "bg-red-600",
-  estimator: "bg-blue-600",
-  project_manager: "bg-amber-600",
-  client_services: "bg-emerald-600",
-  operations: "bg-violet-600",
-  foreman: "bg-green-600",
-  other: "bg-gray-600",
 };
 
 interface DealTeamTabProps {
@@ -186,43 +177,47 @@ export function DealTeamTab({ dealId, onCountChange }: DealTeamTabProps) {
         </div>
       ) : (
         <div className="space-y-2">
-          {members.map((member) => (
-            <div
-              key={member.id}
-              className="flex items-center gap-3 px-4 py-3 border rounded-lg bg-card hover:bg-muted/30 transition-colors"
-            >
+          {members.map((member) => {
+            const ownerColor = getOwnerInitialColor(member.userId ?? member.displayName);
+            return (
               <div
-                className={`w-9 h-9 rounded-full flex items-center justify-center text-white text-sm font-bold flex-shrink-0 ${AVATAR_BG_CLASSES[member.role]}`}
+                key={member.id}
+                className="flex items-center gap-3 px-4 py-3 border rounded-lg bg-card hover:bg-muted/30 transition-colors"
               >
-                {member.displayName.charAt(0).toUpperCase()}
+                <div
+                  className="w-9 h-9 rounded-full flex items-center justify-center text-white text-sm font-bold flex-shrink-0"
+                  style={{ backgroundColor: ownerColor.backgroundColor, color: ownerColor.textColor }}
+                >
+                  {member.displayName.charAt(0).toUpperCase()}
+                </div>
+                <div className="flex-1 min-w-0">
+                  <p className="text-sm font-semibold truncate">{member.displayName}</p>
+                  {member.notes && (
+                    <p className="text-xs text-muted-foreground truncate">{member.notes}</p>
+                  )}
+                </div>
+                <Badge
+                  variant="outline"
+                  className={`text-xs flex-shrink-0 ${ROLE_BADGE_CLASSES[member.role]}`}
+                >
+                  {ROLE_LABELS[member.role]}
+                </Badge>
+                <span className="text-xs text-muted-foreground flex-shrink-0">
+                  {new Date(member.createdAt).toLocaleDateString("en-US", {
+                    month: "short",
+                    day: "numeric",
+                  })}
+                </span>
+                <button
+                  onClick={() => handleRemove(member.id, member.displayName)}
+                  className="flex-shrink-0 text-muted-foreground hover:text-red-600 transition-colors p-1 rounded"
+                  aria-label={`Remove ${member.displayName}`}
+                >
+                  <X className="h-4 w-4" />
+                </button>
               </div>
-              <div className="flex-1 min-w-0">
-                <p className="text-sm font-semibold truncate">{member.displayName}</p>
-                {member.notes && (
-                  <p className="text-xs text-muted-foreground truncate">{member.notes}</p>
-                )}
-              </div>
-              <Badge
-                variant="outline"
-                className={`text-xs flex-shrink-0 ${ROLE_BADGE_CLASSES[member.role]}`}
-              >
-                {ROLE_LABELS[member.role]}
-              </Badge>
-              <span className="text-xs text-muted-foreground flex-shrink-0">
-                {new Date(member.createdAt).toLocaleDateString("en-US", {
-                  month: "short",
-                  day: "numeric",
-                })}
-              </span>
-              <button
-                onClick={() => handleRemove(member.id, member.displayName)}
-                className="flex-shrink-0 text-muted-foreground hover:text-red-600 transition-colors p-1 rounded"
-                aria-label={`Remove ${member.displayName}`}
-              >
-                <X className="h-4 w-4" />
-              </button>
-            </div>
-          ))}
+            );
+          })}
         </div>
       )}
     </div>

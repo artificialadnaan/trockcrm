@@ -25,7 +25,7 @@ import {
   type TerminalDateFilter,
 } from "@/lib/pipeline-terminal-filters";
 import { api } from "@/lib/api";
-import { getEffectiveDealValue } from "@trock-crm/shared/types";
+import { getEffectiveDealValue, getOwnerInitialColor } from "@trock-crm/shared/types";
 import { cn } from "@/lib/utils";
 import { getDealDisplayNumber } from "@/components/deals/kanban-deal-card";
 import { listPaginationIconButtonClassName } from "@/components/shared/list-pagination";
@@ -725,10 +725,13 @@ export function DealsListSection({
       cellClassName: "md:w-[4rem] md:!px-2 lg:w-[7.5rem] lg:!px-3",
       render: (deal) => {
         const ownerName = deal.assignedRepName ?? assigneeNameById.get(deal.assignedRepId) ?? "Unassigned";
+        const ownerColor = getOwnerInitialColor(deal.assignedRepId ?? ownerName);
         return (
           <div className="flex items-center gap-2 md:justify-center lg:justify-start" aria-label={ownerName} title={ownerName}>
             <Avatar size="sm" className="bg-slate-100">
-              <AvatarFallback>{initials(ownerName)}</AvatarFallback>
+              <AvatarFallback style={{ backgroundColor: ownerColor.backgroundColor, color: ownerColor.textColor }}>
+                {initials(ownerName)}
+              </AvatarFallback>
             </Avatar>
             <span className="hidden truncate whitespace-nowrap text-sm font-medium text-slate-700 lg:inline">
               {ownerName}
@@ -961,6 +964,7 @@ export function DealsListSection({
               {deals.map((deal) => {
                 const displayNumber = getDealDisplayNumber(deal);
                 const ownerName = deal.assignedRepName ?? assigneeNameById.get(deal.assignedRepId) ?? "Unassigned";
+                const ownerColor = getOwnerInitialColor(deal.assignedRepId ?? ownerName);
                 const propertyLabel = getDealPropertyLabel(deal);
                 const stageLabel = deal.stageName ?? stageNameById.get(deal.stageId) ?? deal.stageSlug ?? "Stage";
                 return (
@@ -999,7 +1003,9 @@ export function DealsListSection({
                         <div className="grid grid-cols-[minmax(0,1fr)_auto] gap-3">
                           <div className="flex min-w-0 items-center gap-2">
                             <Avatar size="sm" className="bg-slate-100">
-                              <AvatarFallback>{initials(ownerName)}</AvatarFallback>
+                              <AvatarFallback style={{ backgroundColor: ownerColor.backgroundColor, color: ownerColor.textColor }}>
+                                {initials(ownerName)}
+                              </AvatarFallback>
                             </Avatar>
                             <span className="truncate text-sm font-medium text-slate-700" aria-label={ownerName} title={ownerName}>
                               {ownerName}

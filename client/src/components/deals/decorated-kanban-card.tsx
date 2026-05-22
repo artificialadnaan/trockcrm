@@ -6,6 +6,7 @@ import { getDealDisplayNumber } from "@/components/deals/kanban-deal-card";
 import { isTerminalStage } from "@/lib/pipeline-terminal-filters";
 import {
   getEffectiveDealValue,
+  getOwnerInitialColor,
   getSlaPolicy,
   type SlaAudience,
   type SlaPolicyStageSlug,
@@ -52,6 +53,7 @@ export function DecoratedKanbanCard({
   const showSla = !isTerminalStage(stageSlug) && slaDays !== null;
   const isOverSla = showSla && slaDays > 0 && days > slaDays;
   const location = locationLine(deal);
+  const ownerColor = getOwnerInitialColor(deal.assignedRepId ?? deal.assignedRepName);
 
   return (
     <button
@@ -85,7 +87,10 @@ export function DecoratedKanbanCard({
         <p className="line-clamp-2 text-sm font-black leading-5 text-slate-950">{deal.name}</p>
 
         <div className="flex items-center gap-2 text-xs text-slate-500">
-          <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-brand-red text-[10px] font-black text-white">
+          <span
+            className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full text-[10px] font-black text-white"
+            style={{ backgroundColor: ownerColor.backgroundColor, color: ownerColor.textColor }}
+          >
             {getInitials(deal)}
           </span>
           <span className="min-w-0 flex-1 truncate">{deal.companyName || "Account pending"}</span>
