@@ -12,6 +12,7 @@ export * from "./project-types.js";
 export * from "./sales-review.js";
 export * from "./deal-scope-lock.js";
 export * from "./deal-hold.js";
+export * from "./at-risk.js";
 export * from "./deal-sorts.js";
 export * from "./sla-policy.js";
 export * from "./workflow-gates.js";
