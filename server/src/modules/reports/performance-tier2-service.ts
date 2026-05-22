@@ -4,6 +4,7 @@ import type * as schema from "@trock-crm/shared/schema";
 import type { UserRole } from "@trock-crm/shared/types";
 import { buildOfficeMatcher } from "./office-filter.js";
 import {
+  aliasedActiveDealCountFilterSql,
   aliasedDealBestEstimateWithForecastSql,
   aliasedEffectiveAwardedDealValueSql,
   aliasedEffectiveDealValueSql,
@@ -317,7 +318,9 @@ export async function getDirectorScorecard(db: TenantDb, filters: PerformanceRep
           JOIN users u ON u.id = d.assigned_rep_id
           JOIN offices o ON o.id = u.office_id
           JOIN pipeline_stage_config psc ON psc.id = d.stage_id
-          WHERE ${dealScope} AND psc.slug NOT IN (${sqlStringList(terminalSlugs)})
+          WHERE ${dealScope}
+            AND psc.slug NOT IN (${sqlStringList(terminalSlugs)})
+            AND ${aliasedActiveDealCountFilterSql("d")}
         ),
         won_lost AS (
           SELECT d.id, psc.slug
@@ -344,7 +347,8 @@ export async function getDirectorScorecard(db: TenantDb, filters: PerformanceRep
           JOIN users u ON u.id = d.assigned_rep_id
           JOIN offices o ON o.id = u.office_id
           JOIN pipeline_stage_config psc ON psc.id = d.stage_id
-          WHERE ${dealScope} AND psc.slug NOT IN (${sqlStringList(terminalSlugs)})
+          WHERE ${dealScope}
+            AND psc.slug NOT IN (${sqlStringList(terminalSlugs)})
         ),
         task_deals AS (
           SELECT d.id
@@ -381,7 +385,9 @@ export async function getDirectorScorecard(db: TenantDb, filters: PerformanceRep
           JOIN users u ON u.id = d.assigned_rep_id
           JOIN offices o ON o.id = u.office_id
           JOIN pipeline_stage_config psc ON psc.id = d.stage_id
-          WHERE ${dealScope} AND psc.slug NOT IN (${sqlStringList(terminalSlugs)})
+          WHERE ${dealScope}
+            AND psc.slug NOT IN (${sqlStringList(terminalSlugs)})
+            AND ${aliasedActiveDealCountFilterSql("d")}
         ),
         rep_won AS (
           SELECT u.id, COUNT(*) FILTER (WHERE psc.slug IN (${sqlStringList([...WON_STAGE_SLUGS])}))::int AS won_count,
@@ -422,7 +428,9 @@ export async function getDirectorScorecard(db: TenantDb, filters: PerformanceRep
           JOIN users u ON u.id = d.assigned_rep_id
           JOIN offices o ON o.id = u.office_id
           JOIN pipeline_stage_config psc ON psc.id = d.stage_id
-          WHERE ${dealScope} AND psc.slug NOT IN (${sqlStringList(terminalSlugs)})
+          WHERE ${dealScope}
+            AND psc.slug NOT IN (${sqlStringList(terminalSlugs)})
+            AND ${aliasedActiveDealCountFilterSql("d")}
           GROUP BY o.id, o.name
         ),
         office_outcomes AS (
@@ -455,7 +463,9 @@ export async function getDirectorScorecard(db: TenantDb, filters: PerformanceRep
         JOIN users u ON u.id = d.assigned_rep_id
           JOIN offices o ON o.id = u.office_id
         JOIN pipeline_stage_config psc ON psc.id = d.stage_id
-        WHERE ${dealScope} AND psc.slug NOT IN (${sqlStringList(terminalSlugs)}) AND d.stage_entered_at < now() - INTERVAL '30 days'
+        WHERE ${dealScope}
+          AND psc.slug NOT IN (${sqlStringList(terminalSlugs)})
+          AND d.stage_entered_at < now() - INTERVAL '30 days'
         ORDER BY d.stage_entered_at ASC
         LIMIT 5
       `),
@@ -605,6 +615,7 @@ export async function getRepActivityReport(db: TenantDb, filters: PerformanceRep
         LEFT JOIN companies c ON c.id = d.company_id
         WHERE ${dealScope}
           AND psc.slug NOT IN (${sqlStringList([...WON_STAGE_SLUGS, ...LOST_STAGE_SLUGS])})
+          AND ${aliasedActiveDealCountFilterSql("d")}
           AND (d.last_activity_at IS NULL OR d.last_activity_at < now() - INTERVAL '14 days')
         GROUP BY COALESCE(c.name, d.name), u.display_name
         ORDER BY days_stalled DESC
@@ -626,7 +637,9 @@ export async function getRepActivityReport(db: TenantDb, filters: PerformanceRep
           JOIN users u ON u.id = d.assigned_rep_id
           JOIN offices o ON o.id = u.office_id
           JOIN pipeline_stage_config psc ON psc.id = d.stage_id
-          WHERE ${dealScope} AND psc.slug NOT IN (${sqlStringList([...WON_STAGE_SLUGS, ...LOST_STAGE_SLUGS])})
+          WHERE ${dealScope}
+            AND psc.slug NOT IN (${sqlStringList([...WON_STAGE_SLUGS, ...LOST_STAGE_SLUGS])})
+            AND ${aliasedActiveDealCountFilterSql("d")}
           GROUP BY d.assigned_rep_id
         )
         SELECT u.display_name AS rep_name, COALESCE(a.touchpoints, 0)::int AS touchpoints,

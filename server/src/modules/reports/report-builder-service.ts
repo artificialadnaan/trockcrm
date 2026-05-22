@@ -4,7 +4,7 @@ import { deals, pipelineStageConfig, users } from "@trock-crm/shared/schema";
 import type * as schema from "@trock-crm/shared/schema";
 import type { UserRole } from "@trock-crm/shared/types";
 import { AppError } from "../../middleware/error-handler.js";
-import { aliasedEffectiveDealValueSql } from "../shared/deal-value-sql.js";
+import { aliasedActiveDealCountFilterSql, aliasedEffectiveDealValueSql } from "../shared/deal-value-sql.js";
 
 type TenantDb = NodePgDatabase<typeof schema>;
 
@@ -120,11 +120,11 @@ function measureSql(measure: ReportMeasure) {
   const value = dealValueSql();
   switch (measure) {
     case "deal_count":
-      return sql`COUNT(DISTINCT d.id)::int`;
+      return sql`COUNT(DISTINCT d.id) FILTER (WHERE ${aliasedActiveDealCountFilterSql("d")})::int`;
     case "total_value":
       return sql`COALESCE(SUM(${value}), 0)::numeric`;
     case "avg_value":
-      return sql`COALESCE(AVG(${value}), 0)::numeric`;
+      return sql`COALESCE(AVG(${value}) FILTER (WHERE ${aliasedActiveDealCountFilterSql("d")}), 0)::numeric`;
     case "win_rate":
       return sql`
         COALESCE(

@@ -1,0 +1,220 @@
+import { describe, expect, it, vi } from "vitest";
+
+function createMockTenantDb(rows: any[] = []) {
+  const queue = Array.isArray(rows[0]) ? [...(rows as any[][])] : [rows];
+  return {
+    execute: vi.fn().mockImplementation(async () => ({ rows: queue.shift() ?? [] })),
+  } as any;
+}
+
+function extractSqlText(value: unknown): string {
+  if (typeof value === "string") return value;
+  if (!value || typeof value !== "object") return "";
+  if (Array.isArray((value as { queryChunks?: unknown[] }).queryChunks)) {
+    return (value as { queryChunks: unknown[] }).queryChunks.map(extractSqlText).join("");
+  }
+  if ("value" in (value as Record<string, unknown>)) {
+    const chunkValue = (value as { value: unknown }).value;
+    if (Array.isArray(chunkValue)) return chunkValue.map(extractSqlText).join("");
+    if (typeof chunkValue === "string") return chunkValue;
+  }
+  if ("name" in (value as Record<string, unknown>) && typeof (value as { name?: unknown }).name === "string") {
+    return (value as { name: string }).name;
+  }
+  return "";
+}
+
+describe("on-hold report count consistency", () => {
+  it("excludes on-hold deals from pipeline velocity counts", async () => {
+    const { getPipelineVelocityReport } = await import("../../../src/modules/reports/sales-tier1-service.js");
+    const tenantDb = createMockTenantDb([[], [], []]);
+
+    await getPipelineVelocityReport(tenantDb, {
+      dateFrom: "2026-01-01",
+      dateTo: "2026-12-31",
+      officeSlug: undefined,
+      ownerIds: [],
+      ownerNames: [],
+      ownerEmails: [],
+    });
+
+    const sqlText = tenantDb.execute.mock.calls.map(([query]: [unknown]) => extractSqlText(query).toLowerCase()).join("\n");
+    expect(sqlText).toContain("coalesce(ranked.on_hold, false) = false");
+    expect(sqlText).toContain("coalesce(open_deals.on_hold, false) = false");
+    expect(sqlText).toContain("open_deals");
+  });
+
+  it("keeps closed-won revenue and lead-conversion won revenue on an awarded-only basis with on-hold counts excluded", async () => {
+    const { getClosedWonRevenueReport, getLeadConversionReport } = await import("../../../src/modules/reports/sales-tier1-service.js");
+
+    const closedWonDb = createMockTenantDb([[], [], [], [], [], []]);
+    await getClosedWonRevenueReport(closedWonDb, {
+      dateFrom: "2026-01-01",
+      dateTo: "2026-12-31",
+      officeSlug: undefined,
+      ownerIds: [],
+      ownerNames: [],
+      ownerEmails: [],
+    });
+    const closedWonSql = closedWonDb.execute.mock.calls.map(([query]: [unknown]) => extractSqlText(query).toLowerCase()).join("\n");
+    expect(closedWonSql).toContain("awarded_amount");
+    expect(closedWonSql).not.toContain("bid_board_total_sales");
+    expect(closedWonSql).not.toContain("bid_estimate");
+    expect(closedWonSql).not.toContain("forecast_revenue");
+    expect(closedWonSql).toContain("coalesce(d.on_hold, false) = false");
+
+    const leadConversionDb = createMockTenantDb([[], [], [], []]);
+    await getLeadConversionReport(leadConversionDb, {
+      dateFrom: "2026-01-01",
+      dateTo: "2026-12-31",
+      officeSlug: undefined,
+      ownerIds: [],
+      ownerNames: [],
+      ownerEmails: [],
+    });
+    const leadConversionSql = leadConversionDb.execute.mock.calls
+      .map(([query]: [unknown]) => extractSqlText(query).toLowerCase())
+      .join("\n");
+    expect(leadConversionSql).toContain("awarded_amount");
+    expect(leadConversionSql).not.toContain("bid_board_total_sales");
+    expect(leadConversionSql).not.toContain("bid_estimate");
+    expect(leadConversionSql).toContain("coalesce(d.on_hold, false) = false");
+  });
+
+  it("keeps service report pipeline and awarded rollups count-consistent", async () => {
+    const {
+      getRevenueByProjectType,
+      getLeadSourceROI,
+      getRegionalOwnershipOverview,
+      getClosedWonSummary,
+      getPipelineByRep,
+      getWinLossRatioByRep,
+      getUnifiedWorkflowOverview,
+    } = await import("../../../src/modules/reports/service.js");
+
+    const revenueDb = createMockTenantDb([]);
+    await getRevenueByProjectType(revenueDb, { from: "2026-01-01", to: "2026-12-31" });
+    const revenueSql = extractSqlText(revenueDb.execute.mock.calls[0][0]).toLowerCase();
+    expect(revenueSql).toContain("awarded_amount");
+    expect(revenueSql).not.toContain("bid_estimate");
+    expect(revenueSql).not.toContain("dd_estimate");
+    expect(revenueSql).toContain("coalesce(d.on_hold, false) = false");
+
+    const roiDb = createMockTenantDb([]);
+    await getLeadSourceROI(roiDb, { from: "2026-01-01", to: "2026-12-31" });
+    const roiSql = extractSqlText(roiDb.execute.mock.calls[0][0]).toLowerCase();
+    expect(roiSql).toContain("active_deals");
+    expect(roiSql).toContain("won_deals");
+    expect(roiSql).toContain("coalesce(d.on_hold, false) = false");
+
+    const regionalDb = createMockTenantDb([[], [], [], []]);
+    await getRegionalOwnershipOverview(regionalDb, {
+      from: "2026-01-01",
+      to: "2026-12-31",
+      officeId: "office-1",
+    });
+    const regionalSql = regionalDb.execute.mock.calls.map(([query]: [unknown]) => extractSqlText(query).toLowerCase()).join("\n");
+    expect(regionalSql).toContain("deal_count");
+    expect(regionalSql).toContain("pipeline_value");
+    expect(regionalSql).toContain("coalesce(d.on_hold, false) = false");
+
+    const closedWonSummaryDb = createMockTenantDb([[], [], []]);
+    await getClosedWonSummary(closedWonSummaryDb, { from: "2026-01-01", to: "2026-12-31" });
+    const closedWonSummarySql = closedWonSummaryDb.execute.mock.calls
+      .map(([query]: [unknown]) => extractSqlText(query).toLowerCase())
+      .join("\n");
+    expect(closedWonSummarySql).toContain("total_won_deals");
+    expect(closedWonSummarySql).toContain("coalesce(d.on_hold, false) = false");
+
+    const pipelineByRepDb = createMockTenantDb([]);
+    await getPipelineByRep(pipelineByRepDb);
+    const pipelineByRepSql = extractSqlText(pipelineByRepDb.execute.mock.calls[0][0]).toLowerCase();
+    expect(pipelineByRepSql).toContain("deal_count");
+    expect(pipelineByRepSql).toContain("coalesce(d.on_hold, false) = false");
+
+    const winLossDb = createMockTenantDb([]);
+    await getWinLossRatioByRep(winLossDb, { from: "2026-01-01", to: "2026-12-31" });
+    const winLossSql = extractSqlText(winLossDb.execute.mock.calls[0][0]).toLowerCase();
+    expect(winLossSql).toContain("coalesce(d.on_hold, false) = false");
+    expect(winLossSql).toContain("awarded_amount");
+    expect(winLossSql).not.toContain("bid_estimate");
+    expect(winLossSql).not.toContain("dd_estimate");
+
+    const unifiedDb = createMockTenantDb([[], [], [], [], [], [], [], [], []]);
+    await getUnifiedWorkflowOverview(unifiedDb);
+    const unifiedSql = unifiedDb.execute.mock.calls.map(([query]: [unknown]) => extractSqlText(query).toLowerCase()).join("\n");
+    expect(unifiedSql).toContain("mirrored_stage_slug");
+    expect(unifiedSql).toContain("coalesce(d.on_hold, false) = false");
+    expect(unifiedSql).toContain("active_deal_count");
+    expect(unifiedSql).toContain("service_deal_count");
+  });
+
+  it("keeps director scorecard, customer concentration, executive trends, and report builder counts aligned with hold-aware values", async () => {
+    const { getDirectorScorecard, getRepActivityReport } = await import("../../../src/modules/reports/performance-tier2-service.js");
+    const { getCustomerConcentrationReport, getExecutiveTrendsReport, getMarketMixReport } = await import("../../../src/modules/reports/analytics-tier4-service.js");
+    const { runReportBuilder } = await import("../../../src/modules/reports/report-builder-service.js");
+
+    const scorecardDb = createMockTenantDb([[], [], [], [], []]);
+    await getDirectorScorecard(scorecardDb, {
+      dateFrom: "2026-01-01",
+      dateTo: "2026-12-31",
+      ownerIds: [],
+      ownerNames: [],
+    }, "tenant-a");
+    const scorecardSql = scorecardDb.execute.mock.calls.map(([query]: [unknown]) => extractSqlText(query).toLowerCase()).join("\n");
+    expect(scorecardSql).toContain("open_deal_count");
+    expect(scorecardSql).toContain("deals_at_risk");
+    expect(scorecardSql).toContain("coalesce(d.on_hold, false) = false");
+
+    const repActivityDb = createMockTenantDb([[], [], [], []]);
+    await getRepActivityReport(
+      repActivityDb,
+      {
+        dateFrom: "2026-01-01",
+        dateTo: "2026-12-31",
+        ownerIds: [],
+        ownerNames: [],
+      },
+      { role: "director", userId: "director-1", displayName: "Director One" },
+      "tenant-b"
+    );
+    const repActivitySql = repActivityDb.execute.mock.calls.map(([query]: [unknown]) => extractSqlText(query).toLowerCase()).join("\n");
+    expect(repActivitySql).toContain("total_open_value");
+    expect(repActivitySql).toContain("coalesce(d.on_hold, false) = false");
+
+    const customerDb = createMockTenantDb([[], [], [], []]);
+    await getCustomerConcentrationReport(customerDb, { from: "2026-01-01", to: "2026-12-31" });
+    const customerSql = customerDb.execute.mock.calls.map(([query]: [unknown]) => extractSqlText(query).toLowerCase()).join("\n");
+    expect(customerSql).toContain("active_deals");
+    expect(customerSql).toContain("open_deals");
+    expect(customerSql).toContain("coalesce(d.on_hold, false) = false");
+
+    const marketMixDb = createMockTenantDb([[], [], [], [], [], []]);
+    await getMarketMixReport(marketMixDb, { from: "2026-01-01", to: "2026-12-31" });
+    const marketMixSql = marketMixDb.execute.mock.calls.map(([query]: [unknown]) => extractSqlText(query).toLowerCase()).join("\n");
+    expect(marketMixSql).toContain("deal_count");
+    expect(marketMixSql).toContain("wins");
+    expect(marketMixSql).toContain("coalesce(d.on_hold, false) = false");
+
+    const executiveDb = createMockTenantDb([[], [], [], [], []]);
+    await getExecutiveTrendsReport(executiveDb, { from: "2026-01-01", to: "2026-12-31" });
+    const executiveSql = executiveDb.execute.mock.calls.map(([query]: [unknown]) => extractSqlText(query).toLowerCase()).join("\n");
+    expect(executiveSql).toContain("won_revenue");
+    expect(executiveSql).toContain("pipeline_end_value");
+    expect(executiveSql).toContain("coalesce(d.on_hold, false) = false");
+
+    const reportBuilderDb = createMockTenantDb([]);
+    await runReportBuilder(reportBuilderDb, {
+      dimensions: ["stage"],
+      measures: ["deal_count", "total_value", "avg_value"],
+      filters: { from: "2026-01-01", to: "2026-12-31" },
+      dateField: "created_at",
+      role: "admin",
+      userId: "admin-1",
+    });
+    const reportBuilderSql = extractSqlText(reportBuilderDb.execute.mock.calls[0][0]).toLowerCase();
+    expect(reportBuilderSql).toContain("count(distinct d.id) filter (where");
+    expect(reportBuilderSql).toContain("avg(");
+    expect(reportBuilderSql).toContain("coalesce(d.on_hold, false) = false");
+  });
+});

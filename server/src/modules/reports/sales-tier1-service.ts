@@ -1,17 +1,15 @@
 import { sql } from "drizzle-orm";
 import type { NodePgDatabase } from "drizzle-orm/node-postgres";
 import type * as schema from "@trock-crm/shared/schema";
-import { aliasedDealBestEstimateWithForecastSql, aliasedEffectiveDealValueSql } from "../shared/deal-value-sql.js";
+import {
+  aliasedActiveDealCountFilterSql,
+  aliasedDealBestEstimateWithForecastSql,
+  aliasedEffectiveAwardedDealValueSql,
+  aliasedEffectiveDealValueSql,
+} from "../shared/deal-value-sql.js";
 
 type TenantDb = NodePgDatabase<typeof schema>;
 type ExecuteRows<T> = { rows: T[] } | T[];
-
-function holdAwareBidBoardValueSql() {
-  return aliasedEffectiveDealValueSql(
-    "d",
-    sql`COALESCE(d.awarded_amount, d.bid_board_total_sales, d.bid_estimate, d.forecast_revenue, 0)`
-  );
-}
 
 const REPORT_CACHE_TTL_MS = 5 * 60 * 1000;
 const WON_STAGE_SLUGS = ["won", "sent_to_production", "service_sent_to_production", "closed_won"] as const;
@@ -480,6 +478,7 @@ export async function getPipelineVelocityReport(
           d.id,
           d.name,
           d.stage_id,
+          d.on_hold,
           ${aliasedEffectiveDealValueSql("d", aliasedDealBestEstimateWithForecastSql("d"))} AS value,
           GREATEST(0, FLOOR(EXTRACT(EPOCH FROM (NOW() - d.stage_entered_at)) / 86400))::int AS days_in_stage,
           p.name AS stage_name,
@@ -498,7 +497,7 @@ export async function getPipelineVelocityReport(
         stage_id AS "stageId",
         MAX(stage_name) AS "stageName",
         MAX(stage_order) AS "stageOrder",
-        COUNT(*)::int AS "openDeals",
+        COUNT(*) FILTER (WHERE ${aliasedActiveDealCountFilterSql("ranked")})::int AS "openDeals",
         COALESCE(SUM(value), 0)::numeric AS "totalValue",
         COALESCE(AVG(days_in_stage), 0)::numeric AS "avgDaysInStage",
         COALESCE(PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY days_in_stage), 0)::numeric AS "medianDaysInStage",
@@ -513,6 +512,7 @@ export async function getPipelineVelocityReport(
     const agingRows = rowsFromExecute<PipelineVelocityAgingRow>(await tenantDb.execute<PipelineVelocityAgingRow>(sql`
       WITH open_deals AS (
         SELECT
+          d.on_hold,
           ${aliasedEffectiveDealValueSql("d", aliasedDealBestEstimateWithForecastSql("d"))} AS value,
           GREATEST(0, FLOOR(EXTRACT(EPOCH FROM (NOW() - d.stage_entered_at)) / 86400))::int AS days_in_stage
         FROM deals d
@@ -528,7 +528,7 @@ export async function getPipelineVelocityReport(
           WHEN days_in_stage <= 60 THEN '31-60'
           ELSE '60+'
         END AS bucket,
-        COUNT(*)::int AS "dealCount",
+        COUNT(*) FILTER (WHERE ${aliasedActiveDealCountFilterSql("open_deals")})::int AS "dealCount",
         COALESCE(SUM(value), 0)::numeric AS "totalValue"
       FROM open_deals
       GROUP BY bucket
@@ -570,9 +570,9 @@ export async function getClosedWonRevenueReport(
 
     const summaryRows = rowsFromExecute<{ wonDeals: number | string; lostDeals: number | string; totalRevenue: number | string | null }>(await tenantDb.execute(sql`
       SELECT
-        COUNT(*) FILTER (WHERE p.slug IN (${wonSlugs}))::int AS "wonDeals",
-        COUNT(*) FILTER (WHERE p.slug IN (${lostSlugs}))::int AS "lostDeals",
-        COALESCE(SUM(${holdAwareBidBoardValueSql()}) FILTER (WHERE p.slug IN (${wonSlugs})), 0)::numeric AS "totalRevenue"
+        COUNT(*) FILTER (WHERE p.slug IN (${wonSlugs}) AND ${aliasedActiveDealCountFilterSql("d")})::int AS "wonDeals",
+        COUNT(*) FILTER (WHERE p.slug IN (${lostSlugs}) AND ${aliasedActiveDealCountFilterSql("d")})::int AS "lostDeals",
+        COALESCE(SUM(${aliasedEffectiveAwardedDealValueSql("d")}) FILTER (WHERE p.slug IN (${wonSlugs})), 0)::numeric AS "totalRevenue"
       FROM deals d
       JOIN pipeline_stage_config p ON p.id = d.stage_id
       LEFT JOIN users u ON u.id = d.assigned_rep_id
@@ -587,13 +587,14 @@ export async function getClosedWonRevenueReport(
           d.name,
           d.assigned_rep_id,
           COALESCE(u.display_name, 'Unassigned') AS owner_name,
-          ${holdAwareBidBoardValueSql()} AS value,
-          ROW_NUMBER() OVER (PARTITION BY d.assigned_rep_id ORDER BY ${holdAwareBidBoardValueSql()} DESC, d.name ASC) AS rn
+          ${aliasedEffectiveAwardedDealValueSql("d")} AS value,
+          ROW_NUMBER() OVER (PARTITION BY d.assigned_rep_id ORDER BY ${aliasedEffectiveAwardedDealValueSql("d")} DESC, d.name ASC) AS rn
         FROM deals d
         JOIN pipeline_stage_config p ON p.id = d.stage_id
         LEFT JOIN users u ON u.id = d.assigned_rep_id
         WHERE ${whereSql}
           AND p.slug IN (${wonSlugs})
+          AND ${aliasedActiveDealCountFilterSql("d")}
       )
       SELECT
         COALESCE(assigned_rep_id::text, 'unassigned') AS "ownerId",
@@ -613,13 +614,14 @@ export async function getClosedWonRevenueReport(
         o.id::text AS "officeId",
         COALESCE(o.name, d.office_code, 'Unassigned Office') AS "officeName",
         COUNT(*)::int AS "wonDeals",
-        COALESCE(SUM(${holdAwareBidBoardValueSql()}), 0)::numeric AS "totalRevenue"
+        COALESCE(SUM(${aliasedEffectiveAwardedDealValueSql("d")}), 0)::numeric AS "totalRevenue"
       FROM deals d
       JOIN pipeline_stage_config p ON p.id = d.stage_id
       LEFT JOIN users u ON u.id = d.assigned_rep_id
       LEFT JOIN offices o ON o.id = u.office_id
       WHERE ${whereSql}
         AND p.slug IN (${wonSlugs})
+        AND ${aliasedActiveDealCountFilterSql("d")}
       GROUP BY o.id, o.name, d.office_code
       ORDER BY "totalRevenue" DESC
     `));
@@ -628,12 +630,13 @@ export async function getClosedWonRevenueReport(
       SELECT
         CASE WHEN d.workflow_route = 'service' THEN 'service_deal' ELSE 'standard_deal' END AS "workflowFamily",
         COUNT(*)::int AS "wonDeals",
-        COALESCE(SUM(${holdAwareBidBoardValueSql()}), 0)::numeric AS "totalRevenue"
+        COALESCE(SUM(${aliasedEffectiveAwardedDealValueSql("d")}), 0)::numeric AS "totalRevenue"
       FROM deals d
       JOIN pipeline_stage_config p ON p.id = d.stage_id
       LEFT JOIN users u ON u.id = d.assigned_rep_id
       WHERE ${whereSql}
         AND p.slug IN (${wonSlugs})
+        AND ${aliasedActiveDealCountFilterSql("d")}
       GROUP BY "workflowFamily"
       ORDER BY "totalRevenue" DESC
     `));
@@ -641,13 +644,14 @@ export async function getClosedWonRevenueReport(
     const monthlyRows = rowsFromExecute<any>(await tenantDb.execute(sql`
       SELECT
         TO_CHAR(DATE_TRUNC('month', ${outcomeDate}), 'YYYY-MM') AS month,
-        COALESCE(SUM(${holdAwareBidBoardValueSql()}), 0)::numeric AS "totalRevenue",
+        COALESCE(SUM(${aliasedEffectiveAwardedDealValueSql("d")}), 0)::numeric AS "totalRevenue",
         COUNT(*)::int AS "wonDeals"
       FROM deals d
       JOIN pipeline_stage_config p ON p.id = d.stage_id
       LEFT JOIN users u ON u.id = d.assigned_rep_id
       WHERE ${whereSql}
         AND p.slug IN (${wonSlugs})
+        AND ${aliasedActiveDealCountFilterSql("d")}
       GROUP BY month
       ORDER BY month
     `));
@@ -657,13 +661,14 @@ export async function getClosedWonRevenueReport(
         d.id::text AS "dealId",
         d.name AS "dealName",
         COALESCE(u.display_name, 'Unassigned') AS "ownerName",
-        ${holdAwareBidBoardValueSql()} AS value,
+        ${aliasedEffectiveAwardedDealValueSql("d")} AS value,
         COALESCE(d.contract_signed_at::date, d.actual_close_date, d.stage_entered_at::date, d.updated_at::date)::text AS "wonAt"
       FROM deals d
       JOIN pipeline_stage_config p ON p.id = d.stage_id
       LEFT JOIN users u ON u.id = d.assigned_rep_id
       WHERE ${whereSql}
         AND p.slug IN (${wonSlugs})
+        AND ${aliasedActiveDealCountFilterSql("d")}
       ORDER BY value DESC, "wonAt" DESC
       LIMIT 10
     `));
@@ -708,8 +713,8 @@ export async function getLeadConversionReport(
              OR l.status = 'converted'
         )::int AS qualified,
         COUNT(DISTINCT d.id)::int AS "convertedToDeal",
-        COUNT(DISTINCT d.id) FILTER (WHERE p.slug IN (${wonSlugs}))::int AS won,
-        COALESCE(SUM(${holdAwareBidBoardValueSql()}) FILTER (WHERE p.slug IN (${wonSlugs})), 0)::numeric AS "totalRevenue"
+        COUNT(DISTINCT d.id) FILTER (WHERE p.slug IN (${wonSlugs}) AND ${aliasedActiveDealCountFilterSql("d")})::int AS won,
+        COALESCE(SUM(${aliasedEffectiveAwardedDealValueSql("d")}) FILTER (WHERE p.slug IN (${wonSlugs})), 0)::numeric AS "totalRevenue"
       FROM leads l
       LEFT JOIN users u ON u.id = l.assigned_rep_id
       LEFT JOIN deals d ON d.source_lead_id = l.id AND d.is_active = true AND COALESCE(d.is_test_data, false) = false
@@ -724,7 +729,7 @@ export async function getLeadConversionReport(
         TO_CHAR(DATE_TRUNC('month', l.created_at), 'YYYY-MM') AS month,
         COUNT(DISTINCT l.id)::int AS leads,
         COUNT(DISTINCT d.id)::int AS "convertedToDeal",
-        COUNT(DISTINCT d.id) FILTER (WHERE p.slug IN (${wonSlugs}))::int AS won
+        COUNT(DISTINCT d.id) FILTER (WHERE p.slug IN (${wonSlugs}) AND ${aliasedActiveDealCountFilterSql("d")})::int AS won
       FROM leads l
       LEFT JOIN users u ON u.id = l.assigned_rep_id
       LEFT JOIN deals d ON d.source_lead_id = l.id AND d.is_active = true AND COALESCE(d.is_test_data, false) = false
@@ -738,8 +743,8 @@ export async function getLeadConversionReport(
     const revenueRows = rowsFromExecute<any>(await tenantDb.execute(sql`
       SELECT
         COALESCE(l.source, l.source_category::text, 'Unknown') AS source,
-        COALESCE(SUM(${holdAwareBidBoardValueSql()}) FILTER (WHERE p.slug IN (${wonSlugs})), 0)::numeric AS "totalRevenue",
-        COUNT(DISTINCT d.id) FILTER (WHERE p.slug IN (${wonSlugs}))::int AS won
+        COALESCE(SUM(${aliasedEffectiveAwardedDealValueSql("d")}) FILTER (WHERE p.slug IN (${wonSlugs})), 0)::numeric AS "totalRevenue",
+        COUNT(DISTINCT d.id) FILTER (WHERE p.slug IN (${wonSlugs}) AND ${aliasedActiveDealCountFilterSql("d")})::int AS won
       FROM leads l
       LEFT JOIN users u ON u.id = l.assigned_rep_id
       LEFT JOIN deals d ON d.source_lead_id = l.id AND d.is_active = true AND COALESCE(d.is_test_data, false) = false
