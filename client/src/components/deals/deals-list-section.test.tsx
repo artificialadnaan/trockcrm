@@ -6,6 +6,7 @@ import { createRoot, type Root } from "react-dom/client";
 import { act } from "react";
 import { MemoryRouter } from "react-router-dom";
 import type { ReactNode } from "react";
+import type { AtRiskResult } from "@trock-crm/shared/types";
 import {
   DealsListSection,
   buildDealStageFilterOptions,
@@ -109,6 +110,34 @@ function makeDeal(overrides: Record<string, unknown> = {}) {
     hubspotDealId: null,
     createdAt: "2026-04-09T10:00:00.000Z",
     updatedAt: "2026-04-20T10:00:00.000Z",
+    ...overrides,
+  };
+}
+
+function makeAtRiskResult(overrides: Partial<AtRiskResult> = {}): AtRiskResult {
+  return {
+    isAtRisk: true,
+    status: "at_risk",
+    severity: "at_risk",
+    reason: "threshold_reached",
+    stageSlug: "opportunity",
+    canonicalStageSlug: "opportunity",
+    viewerRole: "rep",
+    audience: "rep",
+    policy: {
+      audience: "rep",
+      stageSlug: "opportunity",
+      dayCounting: "calendar_days",
+      thresholdDays: 7,
+      recurs: true,
+      recurrenceDays: 7,
+    },
+    effectiveStageAgeSeconds: 864_000,
+    effectiveStageAgeDays: 10,
+    thresholdSeconds: 604_800,
+    thresholdDays: 7,
+    secondsUntilThreshold: 0,
+    secondsPastThreshold: 259_200,
     ...overrides,
   };
 }
@@ -697,6 +726,28 @@ describe("DealsListSection", () => {
     expect(html).toContain("line-clamp-2");
     expect(html).toContain("min-h-11");
     expect(html).toContain("hidden overflow-x-auto md:block");
+  });
+
+  it("renders at-risk badges in list cards and table rows when supplied", () => {
+    mocks.useDealsMock.mockReturnValue({
+      deals: [makeDeal({ atRisk: makeAtRiskResult() })],
+      pagination: { page: 1, limit: 25, total: 1, totalPages: 1 },
+      loading: false,
+      error: null,
+      refetch: vi.fn(),
+    });
+
+    const html = render();
+
+    expect(html).toContain("At Risk");
+    expect(html).toContain('data-at-risk-severity="at_risk"');
+  });
+
+  it("does not render at-risk badges in the list before Slice B supplies the result", () => {
+    const html = render();
+
+    expect(html).not.toContain("At Risk");
+    expect(html).not.toContain("data-at-risk-severity");
   });
 
   it("prefers actual close date over expected close date when both exist", () => {

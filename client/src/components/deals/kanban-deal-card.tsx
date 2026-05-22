@@ -3,6 +3,7 @@ import { useNavigate } from "react-router-dom";
 import { bestEstimate, daysInStage, formatCurrencyCompact, formatDealDisplayNumber } from "@/lib/deal-utils";
 import { cn } from "@/lib/utils";
 import type { Deal } from "@/hooks/use-deals";
+import { AtRiskBadge } from "@/components/deals/at-risk-badge";
 
 export function getDealDisplayNumber(deal: Pick<Deal, "dealNumber" | "projectNumber">) {
   return formatDealDisplayNumber(deal);
@@ -77,6 +78,7 @@ export function KanbanDealCard({
             {formatCurrencyCompact(value)}
           </span>
         </div>
+        <AtRiskBadge atRisk={deal.atRisk} compact className="mt-1" />
         <p className="mt-0.5 truncate text-xs text-gray-500">{metaParts.join(" · ")}</p>
       </div>
     </div>

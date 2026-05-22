@@ -7,6 +7,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { renderToStaticMarkup } from "react-dom/server";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
 import type { ReactNode } from "react";
+import type { AtRiskResult } from "@trock-crm/shared/types";
 import { DealDetailPage, DealScopingReadOnlyPanel } from "./deal-detail-page";
 
 const mocks = vi.hoisted(() => ({
@@ -102,7 +103,7 @@ vi.mock("@/components/ui/button", () => ({
 }));
 
 vi.mock("@/components/ui/badge", () => ({
-  Badge: ({ children }: { children: ReactNode }) => <span>{children}</span>,
+  Badge: ({ children, ...props }: { children: ReactNode } & Record<string, unknown>) => <span {...props}>{children}</span>,
 }));
 
 vi.mock("@/components/ui/dropdown-menu", () => ({
@@ -356,6 +357,34 @@ function makeDealDetail(overrides: Record<string, unknown> = {}) {
   return { ...base, ...overrides, ...(autoSourced ?? {}) } as typeof base;
 }
 
+function makeAtRiskResult(overrides: Partial<AtRiskResult> = {}): AtRiskResult {
+  return {
+    isAtRisk: true,
+    status: "at_risk",
+    severity: "at_risk",
+    reason: "threshold_reached",
+    stageSlug: "estimating",
+    canonicalStageSlug: "estimating",
+    viewerRole: "director",
+    audience: "leadership",
+    policy: {
+      audience: "leadership",
+      stageSlug: "estimating",
+      dayCounting: "calendar_days",
+      thresholdDays: 14,
+      recurs: false,
+      recurrenceDays: null,
+    },
+    effectiveStageAgeSeconds: 1_468_800,
+    effectiveStageAgeDays: 17,
+    thresholdSeconds: 1_209_600,
+    thresholdDays: 14,
+    secondsUntilThreshold: 0,
+    secondsPastThreshold: 259_200,
+    ...overrides,
+  };
+}
+
 describe("DealDetailPage", () => {
   let mounted: ReturnType<typeof mountPage> | null = null;
 
@@ -436,6 +465,27 @@ describe("DealDetailPage", () => {
     expect(html).toContain("Estimate in Progress");
     expect(html).toContain("DFW-1-12826-aa");
     expect(html).toContain("Dallas Independent SD");
+  });
+
+  it("renders the API-supplied at-risk badge in the deal header", () => {
+    mocks.useDealDetailMock.mockReturnValueOnce({
+      loading: false,
+      error: null,
+      refetch: vi.fn(),
+      deal: makeDealDetail({ atRisk: makeAtRiskResult() }),
+    });
+
+    const html = renderPage();
+
+    expect(html).toContain("At Risk");
+    expect(html).toContain('data-at-risk-status="at_risk"');
+  });
+
+  it("renders no at-risk badge when the deal detail response lacks Slice B data", () => {
+    const html = renderPage();
+
+    expect(html).not.toContain("At Risk");
+    expect(html).not.toContain("data-at-risk-status");
   });
 
   it("renders all expected tabs", () => {

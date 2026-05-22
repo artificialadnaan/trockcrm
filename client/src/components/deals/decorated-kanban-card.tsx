@@ -5,6 +5,7 @@ import { cn } from "@/lib/utils";
 import { getDealDisplayNumber } from "@/components/deals/kanban-deal-card";
 import { isTerminalStage } from "@/lib/pipeline-terminal-filters";
 import { getEffectiveDealValue } from "@trock-crm/shared/types";
+import { AtRiskBadge } from "@/components/deals/at-risk-badge";
 
 function getInitials(deal: Deal) {
   if (!deal.assignedRepName) return "TR";
@@ -68,6 +69,8 @@ export function DecoratedKanbanCard({
             {formatCurrencyCompact(getEffectiveDealValue(deal))}
           </p>
         </div>
+
+        <AtRiskBadge atRisk={deal.atRisk} compact />
 
         <p className="line-clamp-2 text-sm font-black leading-5 text-slate-950">{deal.name}</p>
 

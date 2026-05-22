@@ -29,6 +29,7 @@ import { getEffectiveDealValue } from "@trock-crm/shared/types";
 import { cn } from "@/lib/utils";
 import { getDealDisplayNumber } from "@/components/deals/kanban-deal-card";
 import { listPaginationIconButtonClassName } from "@/components/shared/list-pagination";
+import { AtRiskBadge } from "@/components/deals/at-risk-badge";
 
 const DEAL_STAGE_ORDER = [
   "opportunity",
@@ -705,6 +706,7 @@ export function DealsListSection({
             >
               {propertyLabel}
             </p>
+            <AtRiskBadge atRisk={deal.atRisk} compact />
           </div>
         );
       },
@@ -1008,7 +1010,10 @@ export function DealsListSection({
                           </span>
                         </div>
 
-                        <div>{renderStageChip(stageLabel)}</div>
+                        <div className="flex flex-wrap items-center gap-2">
+                          {renderStageChip(stageLabel)}
+                          <AtRiskBadge atRisk={deal.atRisk} compact />
+                        </div>
                       </div>
 
                       <div className="flex items-center justify-between gap-3 border-t border-slate-200 pt-3 text-xs font-medium text-slate-500">
