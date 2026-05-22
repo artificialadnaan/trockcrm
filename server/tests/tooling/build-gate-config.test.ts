@@ -18,14 +18,16 @@ describe("build gate configuration", () => {
     const packageJson = readJson<{ scripts?: Record<string, string> }>("package.json");
 
     expect(packageJson.scripts?.["check:premerge"]).toContain("npm run build");
-    expect(packageJson.scripts?.["check:premerge"]).toContain("npm run typecheck:tests");
-    expect(packageJson.scripts?.["typecheck:tests"]).toContain("--workspaces");
+    expect(packageJson.scripts?.["check:premerge"]).toContain("npm run typecheck:tests:all");
+    expect(packageJson.scripts?.["typecheck:tests:all"]).toContain("--workspaces");
+    expect(packageJson.scripts?.["typecheck:tests"]).toBeUndefined();
   });
 
-  it("runs the pre-merge gate on pull requests", () => {
+  it("runs the pre-merge gate on pull requests and merge queue groups", () => {
     const workflow = readText(".github/workflows/premerge-build-gate.yml");
 
     expect(workflow).toContain("pull_request:");
+    expect(workflow).toContain("merge_group:");
     expect(workflow).toContain("npm run check:premerge");
     expect(workflow).toContain("node-version: 22");
   });
@@ -67,6 +69,15 @@ describe("build gate configuration", () => {
           "src/**/*.spec.tsx",
         ]),
       );
+    }
+  });
+
+  it("points production build project references at shared's build tsconfig", () => {
+    for (const configPath of ["server/tsconfig.build.json", "worker/tsconfig.build.json"]) {
+      const config = readJson<{ references?: Array<{ path: string }> }>(configPath);
+
+      expect(config.references).toContainEqual({ path: "../shared/tsconfig.build.json" });
+      expect(config.references).not.toContainEqual({ path: "../shared" });
     }
   });
 });

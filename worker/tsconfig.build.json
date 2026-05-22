@@ -1,7 +1,7 @@
 {
   "extends": "./tsconfig.json",
   "include": ["src/**/*"],
-  "references": [{ "path": "../shared" }],
+  "references": [{ "path": "../shared/tsconfig.build.json" }],
   "exclude": [
     "src/**/*.test.ts",
     "src/**/*.test.tsx",
