@@ -1,11 +1,12 @@
 import { Clock, GripVertical, MapPin } from "lucide-react";
-import { daysInStage, formatCurrencyCompact } from "@/lib/deal-utils";
+import { formatCurrencyCompact } from "@/lib/deal-utils";
 import type { Deal } from "@/hooks/use-deals";
 import { cn } from "@/lib/utils";
 import { getDealDisplayNumber } from "@/components/deals/kanban-deal-card";
 import { isTerminalStage } from "@/lib/pipeline-terminal-filters";
 import {
   getEffectiveDealValue,
+  getEffectiveStageAgeDays,
   getOwnerInitialColor,
   getSlaPolicy,
   type SlaAudience,
@@ -48,7 +49,7 @@ export function DecoratedKanbanCard({
   onClick,
 }: DecoratedKanbanCardProps) {
   const displayNumber = getDealDisplayNumber(deal);
-  const days = daysInStage(deal.stageEnteredAt);
+  const days = getEffectiveStageAgeDays(deal);
   const slaDays = resolveKanbanSlaThresholdDays(stageSlug);
   const showSla = !isTerminalStage(stageSlug) && slaDays !== null;
   const isOverSla = showSla && slaDays > 0 && days > slaDays;

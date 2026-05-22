@@ -7,6 +7,7 @@ import { MemoryRouter } from "react-router-dom";
 import type { ReactNode } from "react";
 import { act } from "react";
 import type { Deal } from "@/hooks/use-deals";
+import type { AtRiskResult } from "@trock-crm/shared/types";
 import {
   DealListPage,
   buildDealsPageKpiDrilldownPath,
@@ -211,6 +212,34 @@ function makeDeal(overrides: Record<string, unknown> = {}) {
     updatedAt: "2026-04-20T10:00:00.000Z",
     ...overrides,
   } as Deal;
+}
+
+function makeAtRiskResult(overrides: Partial<AtRiskResult> = {}): AtRiskResult {
+  return {
+    isAtRisk: true,
+    status: "at_risk",
+    severity: "at_risk",
+    reason: "threshold_reached",
+    stageSlug: "contract",
+    canonicalStageSlug: "contract",
+    viewerRole: "rep",
+    audience: "rep",
+    policy: {
+      audience: "rep",
+      stageSlug: "contract",
+      dayCounting: "calendar_days",
+      thresholdDays: 2,
+      recurs: false,
+      recurrenceDays: null,
+    },
+    effectiveStageAgeSeconds: 3 * 86_400,
+    effectiveStageAgeDays: 3,
+    thresholdSeconds: 2 * 86_400,
+    thresholdDays: 2,
+    secondsUntilThreshold: 0,
+    secondsPastThreshold: 86_400,
+    ...overrides,
+  };
 }
 
 function renderPage(path = "/deals?scope=all", role = "admin") {
@@ -1243,6 +1272,7 @@ describe("DealListPage", () => {
                 stageEnteredAt: "2026-04-02T10:00:00.000Z",
                 updatedAt: "2026-05-01T10:00:00.000Z",
                 bidEstimate: "200000",
+                atRisk: makeAtRiskResult(),
               }),
               makeDeal({
                 id: "deal-in-period-2",
@@ -1251,6 +1281,7 @@ describe("DealListPage", () => {
                 stageEnteredAt: "2026-04-04T10:00:00.000Z",
                 updatedAt: "2026-04-22T10:00:00.000Z",
                 bidEstimate: "130000",
+                atRisk: makeAtRiskResult(),
               }),
               makeDeal({
                 id: "deal-old-period",
@@ -1259,6 +1290,7 @@ describe("DealListPage", () => {
                 stageEnteredAt: "2026-03-01T10:00:00.000Z",
                 updatedAt: "2026-03-15T10:00:00.000Z",
                 bidEstimate: "100000",
+                atRisk: makeAtRiskResult(),
               }),
               makeDeal({
                 id: "deal-fresh",
@@ -1267,6 +1299,12 @@ describe("DealListPage", () => {
                 stageEnteredAt: "2026-05-06T10:00:00.000Z",
                 updatedAt: "2026-05-07T10:00:00.000Z",
                 bidEstimate: "150000",
+                atRisk: makeAtRiskResult({
+                  isAtRisk: false,
+                  status: "not_at_risk",
+                  severity: "none",
+                  reason: "within_sla",
+                }),
               }),
             ],
           },
@@ -1285,6 +1323,82 @@ describe("DealListPage", () => {
     expect(html).not.toContain("Old Quarter Stale Deal");
     expect(html).not.toContain("Fresh QTD Deal");
     expect(html).toMatch(/Filtered results.*>2</);
+  });
+
+  it("uses engine at-risk results for the KPI count and drilldown population", () => {
+    mocks.useDealBoardMock.mockReturnValue({
+      board: {
+        columns: [
+          {
+            stage: { id: "stage-contract", name: "Contract", slug: "contract" },
+            count: 3,
+            totalValue: 600000,
+            cards: [
+              makeDeal({
+                id: "deal-active-risk",
+                name: "Active Engine At Risk Deal",
+                stageId: "stage-contract",
+                stageEnteredAt: "2026-04-01T10:00:00.000Z",
+                updatedAt: "2026-05-07T10:00:00.000Z",
+                bidEstimate: "250000",
+                onHold: false,
+                atRisk: makeAtRiskResult(),
+              }),
+              makeDeal({
+                id: "deal-held-not-risk",
+                name: "Held Paused Deal",
+                stageId: "stage-contract",
+                stageEnteredAt: "2026-04-01T10:00:00.000Z",
+                updatedAt: "2026-05-07T10:00:00.000Z",
+                bidEstimate: "300000",
+                onHold: true,
+                atRisk: makeAtRiskResult({
+                  isAtRisk: false,
+                  status: "not_at_risk",
+                  severity: "none",
+                  reason: "on_hold",
+                  effectiveStageAgeSeconds: 0,
+                  effectiveStageAgeDays: 0,
+                  secondsUntilThreshold: 2 * 86_400,
+                  secondsPastThreshold: 0,
+                }),
+              }),
+              makeDeal({
+                id: "deal-old-but-engine-safe",
+                name: "Old But Engine Safe Deal",
+                stageId: "stage-contract",
+                stageEnteredAt: "2026-04-01T10:00:00.000Z",
+                updatedAt: "2026-05-07T10:00:00.000Z",
+                bidEstimate: "50000",
+                onHold: false,
+                atRisk: makeAtRiskResult({
+                  isAtRisk: false,
+                  status: "not_at_risk",
+                  severity: "none",
+                  reason: "within_sla",
+                  effectiveStageAgeSeconds: 86_400,
+                  effectiveStageAgeDays: 1,
+                  secondsUntilThreshold: 86_400,
+                  secondsPastThreshold: 0,
+                }),
+              }),
+            ],
+          },
+        ],
+        terminalStages: [],
+      },
+      loading: false,
+      error: null,
+      refetch: vi.fn(),
+    });
+
+    const html = renderPage("/deals?scope=all&filter=at_risk", "director");
+
+    expect(html).toMatch(/At risk.*>1<.*Over SLA/);
+    expect(html).toMatch(/Filtered results.*>1</);
+    expect(html).toContain("Active Engine At Risk Deal");
+    expect(html).not.toContain("Held Paused Deal");
+    expect(html).not.toContain("Old But Engine Safe Deal");
   });
 
   it("keeps the embedded list visible for stale drill-down views", () => {
@@ -1321,6 +1435,7 @@ describe("DealListPage", () => {
                 stageEnteredAt: "2026-04-01T10:00:00.000Z",
                 updatedAt: "2026-05-07T10:00:00.000Z",
                 bidEstimate: "200000",
+                atRisk: makeAtRiskResult(),
               }),
             ],
           },
@@ -1361,6 +1476,7 @@ describe("DealListPage", () => {
                 stageEnteredAt: "2026-04-01T10:00:00.000Z",
                 updatedAt: "2026-05-08T10:00:00.000Z",
                 bidEstimate: "250000",
+                atRisk: makeAtRiskResult(),
               }),
             ],
           },

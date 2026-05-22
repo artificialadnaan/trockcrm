@@ -145,6 +145,29 @@ describe("DecoratedKanbanCard", () => {
     }
   });
 
+  it("uses hold-aware effective stage age for the board-card SLA chip elapsed days", () => {
+    vi.useFakeTimers();
+    try {
+      vi.setSystemTime(new Date("2026-04-11T10:00:00.000Z"));
+
+      const html = renderDeal(
+        makeDeal({
+          stageEnteredAt: "2026-04-01T10:00:00.000Z",
+          onHold: true,
+          onHoldStartedAt: "2026-04-06T10:00:00.000Z",
+          onHoldAccumulatedSeconds: 0,
+          onHoldAccumulatedSecondsAtStageEntry: 0,
+        } as Partial<Deal>),
+        "estimating"
+      );
+
+      expect(html).toContain("5d / 14d SLA");
+      expect(html).not.toContain("10d / 14d SLA");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("keeps time-in-stage but omits SLA context for terminal stages", () => {
     const html = render("won");
 
