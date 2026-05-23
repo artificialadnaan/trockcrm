@@ -160,6 +160,96 @@ describe("performance tier 2 report service helpers", () => {
     expect(JSON.stringify(result)).not.toContain("stage_slug");
   });
 
+  it("computes director scorecard at-risk count, value, and rows from the hold-aware engine", async () => {
+    const db = {
+      execute: vi
+        .fn()
+        .mockResolvedValueOnce({ rows: [] })
+        .mockResolvedValueOnce({
+          rows: [
+            {
+              stalled_accounts: "2",
+              overdue_tasks: "4",
+              missed_follow_ups: "5",
+            },
+          ],
+        })
+        .mockResolvedValueOnce({ rows: [] })
+        .mockResolvedValueOnce({ rows: [] })
+        .mockResolvedValueOnce({
+          rows: [
+            {
+              deal_id: "engine-risk",
+              deal_name: "Engine Risk",
+              owner_name: "A Rep",
+              stage_name: "Opportunity",
+              stage_slug: "opportunity",
+              workflow_route: "normal",
+              stage_entered_at: "2026-04-01T00:00:00.000Z",
+              bid_board_stage_entered_at: null,
+              on_hold: false,
+              on_hold_started_at: null,
+              on_hold_accumulated_seconds: 0,
+              on_hold_accumulated_seconds_at_stage_entry: 0,
+              value: "125000",
+              last_activity_date: null,
+            },
+            {
+              deal_id: "held-risk",
+              deal_name: "Held Risk",
+              owner_name: "A Rep",
+              stage_name: "Opportunity",
+              stage_slug: "opportunity",
+              workflow_route: "normal",
+              stage_entered_at: "2026-04-01T00:00:00.000Z",
+              bid_board_stage_entered_at: null,
+              on_hold: true,
+              on_hold_started_at: "2026-04-02T00:00:00.000Z",
+              on_hold_accumulated_seconds: 0,
+              on_hold_accumulated_seconds_at_stage_entry: 0,
+              value: "250000",
+              last_activity_date: null,
+            },
+            {
+              deal_id: "current",
+              deal_name: "Current Deal",
+              owner_name: "A Rep",
+              stage_name: "Opportunity",
+              stage_slug: "opportunity",
+              workflow_route: "normal",
+              stage_entered_at: new Date().toISOString(),
+              bid_board_stage_entered_at: null,
+              on_hold: false,
+              on_hold_started_at: null,
+              on_hold_accumulated_seconds: 0,
+              on_hold_accumulated_seconds_at_stage_entry: 0,
+              value: "500000",
+              last_activity_date: null,
+            },
+          ],
+        }),
+    } as any;
+
+    const result = await getDirectorScorecard(
+      db,
+      {
+        dateFrom: "2026-02-01",
+        dateTo: "2026-05-01",
+        office: "dallas",
+        ownerIds: [],
+        ownerNames: [],
+      },
+      "tenant-engine-scorecard-at-risk"
+    );
+    const sqlText = executedSql(db).join("\n").toLowerCase();
+
+    expect(result.risks.dealsAtRisk).toBe(1);
+    expect(result.risks.dealsAtRiskValue).toBe(125000);
+    expect(result.topAtRiskDeals.map((deal) => deal.dealId)).toEqual(["engine-risk"]);
+    expect(sqlText).toContain("on_hold_accumulated_seconds");
+    expect(sqlText).not.toContain("stage_entered_at < now() - interval '30 days'");
+  });
+
   it("builds rep activity timeline and type totals", () => {
     const result = buildRepActivityFromRows({
       summaryRows: [{ total_touchpoints: "10", deals_worked: "4", calls: "3", emails: "5", meetings: "1", follow_ups_completed: "1" }],

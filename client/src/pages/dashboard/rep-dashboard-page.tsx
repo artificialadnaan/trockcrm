@@ -33,7 +33,7 @@ interface TopDealRow {
   stage: string;
   stageVariant: StageVariant;
   days: number;
-  sla: number;
+  sla: number | null;
   value: number;
   initials: string;
 }
@@ -124,9 +124,9 @@ function initials(name: string | null | undefined) {
   return parts.slice(0, 2).map((part) => part[0]).join("").toUpperCase();
 }
 
-function stageVariant(stageName: string, days: number, sla: number): StageVariant {
+function stageVariant(stageName: string, days: number, sla: number | null): StageVariant {
   const stage = stageName.toLowerCase();
-  if (days > sla) return "red";
+  if (sla != null && days > sla) return "red";
   if (stage.includes("award") || stage.includes("won") || stage.includes("signed")) return "green";
   if (stage.includes("bid") || stage.includes("qualified")) return "blue";
   return "amber";
@@ -158,9 +158,9 @@ function buildTopDeals(data: RepDashboardData, repName: string): TopDealRow[] {
       id: deal.dealId,
       name: deal.dealName,
       stage: deal.stageName,
-      stageVariant: stageVariant(deal.stageName, 0, 14),
+      stageVariant: stageVariant(deal.stageName, 0, null),
       days: 0,
-      sla: 14,
+      sla: null,
       value: deal.totalValue,
       initials: initials(repName),
     }));
@@ -357,13 +357,15 @@ function TopDealsTable({ deals, onOpen }: { deals: TopDealRow[]; onOpen: (id: st
                 </span>
                 <div className="min-w-0">
                   <p className="truncate text-sm font-bold text-slate-950">{deal.name}</p>
-                  <p className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">SLA {deal.sla}d</p>
+                  {deal.sla == null ? null : (
+                    <p className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">SLA {deal.sla}d</p>
+                  )}
                 </div>
               </div>
               <div className="flex justify-end">
                 <StagePill variant={deal.stageVariant}>{deal.stage.toUpperCase()}</StagePill>
               </div>
-              <p className={cn("text-right text-sm font-black tabular-nums", deal.days > deal.sla ? "text-brand-red" : "text-slate-950")}>
+              <p className={cn("text-right text-sm font-black tabular-nums", deal.sla != null && deal.days > deal.sla ? "text-brand-red" : "text-slate-950")}>
                 {deal.days}d
               </p>
               <p className="text-right text-sm font-black tabular-nums text-slate-950">{formatUsd(deal.value)}</p>

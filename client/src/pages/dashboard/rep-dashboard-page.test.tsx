@@ -242,6 +242,24 @@ describe("RepDashboardPage", () => {
     expect(html).toContain("$275,000");
   });
 
+  it("does not invent a hardcoded SLA threshold for non-bottleneck snapshot deals", () => {
+    mocks.useRepDashboardMock.mockReturnValue({
+      loading: false,
+      error: null,
+      data: {
+        ...dashboardData,
+        downstreamBottlenecks: [],
+      },
+      fetchedAt: new Date("2026-05-08T17:00:00Z"),
+      refetch: vi.fn(),
+    });
+
+    const html = renderDashboard();
+
+    expect(html).toContain("Deal One");
+    expect(html).not.toContain("SLA 14d");
+  });
+
   it("renders strategic alerts panel", () => {
     const html = renderDashboard();
 

@@ -1,9 +1,14 @@
 import { useNavigate } from "react-router-dom";
 import { useDraggable } from "@dnd-kit/core";
 import { GripVertical, Clock, MapPin } from "lucide-react";
-import { formatCurrencyCompact, daysInStage } from "@/lib/deal-utils";
+import { formatCurrencyCompact } from "@/lib/deal-utils";
 import { cn } from "@/lib/utils";
-import { getEffectiveDealValue, type AtRiskResult } from "@trock-crm/shared/types";
+import {
+  getEffectiveDealValue,
+  getEffectiveStageAgeDeal,
+  getEffectiveStageAgeDays,
+  type AtRiskResult,
+} from "@trock-crm/shared/types";
 import { AtRiskBadge } from "@/components/deals/at-risk-badge";
 
 export interface PipelineRecordCardData {
@@ -13,6 +18,8 @@ export interface PipelineRecordCardData {
   stageEnteredAt: string;
   updatedAt: string;
   status?: string | null;
+  isBidBoardOwned?: boolean | null;
+  bidBoardStageEnteredAt?: string | null;
   propertyCity?: string | null;
   propertyState?: string | null;
   companyName?: string | null;
@@ -22,6 +29,9 @@ export interface PipelineRecordCardData {
   bidEstimate?: string | null;
   ddEstimate?: string | null;
   onHold?: boolean | null;
+  onHoldStartedAt?: string | null;
+  onHoldAccumulatedSeconds?: number | null;
+  onHoldAccumulatedSecondsAtStageEntry?: number | null;
   workflowRoute?: string | null;
   atRisk?: AtRiskResult | null;
 }
@@ -55,7 +65,7 @@ export function PipelineRecordCard({
   const value = formatValue(record);
   const location = [record.propertyCity, record.propertyState].filter(Boolean).join(", ");
   const contextLine = record.companyName ?? record.source ?? null;
-  const ageLabel = `${daysInStage(record.stageEnteredAt)}d in stage`;
+  const ageLabel = `${record.atRisk?.effectiveStageAgeDays ?? getEffectiveStageAgeDays(getEffectiveStageAgeDeal(record))}d in stage`;
 
   const openRecord = () => {
     if (onOpenRecord) {

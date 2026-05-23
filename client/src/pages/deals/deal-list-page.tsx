@@ -11,7 +11,6 @@ import { useDealBoard, type Deal, type DealBoardColumn } from "@/hooks/use-deals
 import { usePipelineStages } from "@/hooks/use-pipeline-config";
 import { useTaskAssignees } from "@/hooks/use-task-assignees";
 import { buildCanonicalDealBoardColumns } from "@/lib/canonical-deal-board";
-import { daysInStage } from "@/lib/deal-utils";
 import { useAuth } from "@/lib/auth";
 import { getEffectiveDealValue } from "@trock-crm/shared/types";
 import { TerminalDateFilterControl } from "@/components/pipeline/terminal-date-filter-control";
@@ -454,7 +453,7 @@ function isEngineAtRiskDeal(deal: Deal) {
 }
 
 function stageAgeDaysLabel(deal: Deal) {
-  return `${deal.atRisk?.effectiveStageAgeDays ?? daysInStage(deal.stageEnteredAt)}d`;
+  return deal.atRisk ? `${deal.atRisk.effectiveStageAgeDays}d` : "N/A";
 }
 
 function compareDrilldownDeals(left: DrilldownListRow, right: DrilldownListRow, sort: DealListSortState) {
@@ -470,6 +469,12 @@ function compareDrilldownDeals(left: DrilldownListRow, right: DrilldownListRow, 
     case "awarded_amount":
       return numberCompare(moneyValue(left), moneyValue(right));
     case "stage_entered_at":
+      if (left.atRisk && right.atRisk) {
+        return numberCompare(
+          right.atRisk.effectiveStageAgeSeconds,
+          left.atRisk.effectiveStageAgeSeconds
+        );
+      }
       return dateCompare(left.stageEnteredAt, right.stageEnteredAt);
     case "expected_close_date":
       return dateCompare(left.expectedCloseDate, right.expectedCloseDate);

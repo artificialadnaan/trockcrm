@@ -82,9 +82,13 @@ import {
   normalizeDealStageSlug,
 } from "@/lib/pipeline-ownership";
 import {
+  getDealAtRiskResult,
   getCanonicalEstimatingBoundaryStageSlug,
   getOwnerInitialColor,
+  resolveEffectiveStageEnteredAt,
   toCanonicalDealStageSlug,
+  type AtRiskResult,
+  type UserRole,
 } from "@trock-crm/shared/types";
 
 function bidBoardSyncTimeAgo(date: string | null | undefined) {
@@ -160,13 +164,6 @@ function formatDate(value: string | null | undefined) {
   return date.toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" });
 }
 
-function daysSince(value: string | null | undefined) {
-  if (!value) return null;
-  const time = new Date(value).getTime();
-  if (!Number.isFinite(time)) return null;
-  return Math.max(0, Math.floor((Date.now() - time) / 86_400_000));
-}
-
 function formatDealAddress(deal: DealDetail) {
   return [deal.propertyAddress, deal.propertyCity, deal.propertyState, deal.propertyZip]
     .filter(Boolean)
@@ -180,6 +177,64 @@ function formatDealType(deal: DealDetail) {
 function buildProcoreProjectUrl(procoreProjectId: number | null | undefined) {
   if (!procoreProjectId) return null;
   return `https://app.procore.com/projects/${procoreProjectId}`;
+}
+
+function normalizeUserRole(role: string | null | undefined): UserRole | null {
+  if (role === "rep" || role === "director" || role === "admin") return role;
+  return null;
+}
+
+function resolveDetailSlaStageSlug(
+  deal: DealDetail,
+  currentStage: { slug?: string | null; isTerminal?: boolean | null } | undefined
+) {
+  const actualStageSlug = deal.stageSlug ?? currentStage?.slug ?? deal.stageId ?? null;
+  if (currentStage?.isTerminal) return actualStageSlug;
+  return deal.bidBoardStageSlug ?? actualStageSlug;
+}
+
+function getDealDetailSlaResult(
+  deal: DealDetail,
+  currentStage: { slug?: string | null; isTerminal?: boolean | null } | undefined,
+  userRole: string | null | undefined
+): AtRiskResult | null {
+  if (deal.atRisk) return deal.atRisk;
+
+  const stageEnteredAt = resolveEffectiveStageEnteredAt(deal);
+  if (!stageEnteredAt) return null;
+
+  return getDealAtRiskResult(
+    {
+      stageSlug: resolveDetailSlaStageSlug(deal, currentStage),
+      workflowRoute: deal.workflowRoute ?? "normal",
+      stageEnteredAt,
+      onHold: deal.onHold,
+      onHoldStartedAt: deal.onHoldStartedAt,
+      onHoldAccumulatedSeconds: deal.onHoldAccumulatedSeconds,
+      onHoldAccumulatedSecondsAtStageEntry: deal.onHoldAccumulatedSecondsAtStageEntry,
+    },
+    normalizeUserRole(userRole),
+    new Date()
+  );
+}
+
+function getSlaCaptionLabel(atRisk: AtRiskResult | null) {
+  if (!atRisk) return "No data";
+  if (atRisk.reason === "on_hold") return "Paused";
+  if (atRisk.status === "not_applicable") return "Not applicable";
+  return atRisk.isAtRisk ? "Over SLA" : "On track";
+}
+
+function getSlaStatusValue(atRisk: AtRiskResult | null) {
+  if (!atRisk) return "Unknown";
+  if (atRisk.reason === "on_hold") return "On Hold";
+  if (atRisk.status === "not_applicable") return "Not applicable";
+  return atRisk.isAtRisk ? "Overdue" : "Current";
+}
+
+function getSlaCaptionContext(atRisk: AtRiskResult | null) {
+  if (!atRisk) return "SLA unavailable";
+  return atRisk.thresholdDays == null ? "No SLA threshold" : `SLA ${atRisk.thresholdDays} days`;
 }
 
 function getTabIcon(tab: Tab) {
@@ -562,9 +617,12 @@ export function DealDetailPage() {
     setRfpReadinessRefreshKey((key) => key + 1);
   };
 
-  const stageAgeDays = daysSince(deal.stageEnteredAt);
-  const stageSlaDays = 14;
-  const isSlaBreached = stageAgeDays != null && stageAgeDays > stageSlaDays;
+  const slaResult = getDealDetailSlaResult(deal, currentStage, user?.role);
+  const stageAgeDays = slaResult?.effectiveStageAgeDays ?? null;
+  const slaCaptionLabel = getSlaCaptionLabel(slaResult);
+  const slaStatusValue = getSlaStatusValue(slaResult);
+  const slaCaptionContext = getSlaCaptionContext(slaResult);
+  const isSlaBreached = slaResult?.isAtRisk === true;
   const dealValue = bestEstimate(deal);
   const address = formatDealAddress(deal);
   const procoreProjectUrl = buildProcoreProjectUrl(deal.procoreProjectId);
@@ -594,14 +652,14 @@ export function DealDetailPage() {
     {
       eyebrow: "Days in stage",
       value: stageAgeDays == null ? "N/A" : `${stageAgeDays}`,
-      captionLabel: stageAgeDays == null ? "No data" : isSlaBreached ? "Over SLA" : "On track",
-      captionContext: `SLA ${stageSlaDays} days`,
+      captionLabel: slaCaptionLabel,
+      captionContext: slaCaptionContext,
     },
     {
       eyebrow: "SLA status",
-      value: stageAgeDays == null ? "Unknown" : isSlaBreached ? "Overdue" : "Current",
-      captionLabel: stageAgeDays == null ? "No data" : isSlaBreached ? "Over SLA" : "On track",
-      captionContext: `SLA ${stageSlaDays} days`,
+      value: slaStatusValue,
+      captionLabel: slaCaptionLabel,
+      captionContext: slaCaptionContext,
       accent: isSlaBreached ? "red" : "default",
     },
   ];
