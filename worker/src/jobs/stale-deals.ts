@@ -47,7 +47,7 @@ interface StaleDealCandidateRow {
 }
 
 type StaleDealRow = StaleDealCandidateRow & {
-  stale_threshold_days: number;
+  threshold_days: number;
   days_in_stage: number;
 };
 
@@ -85,7 +85,7 @@ function toStaleDealRows(rows: StaleDealCandidateRow[], now: Date): StaleDealRow
 
     staleDeals.push({
       ...row,
-      stale_threshold_days: atRisk.thresholdDays,
+      threshold_days: atRisk.thresholdDays,
       days_in_stage: atRisk.effectiveStageAgeDays,
     });
   }
@@ -232,7 +232,7 @@ export async function runStaleDealScan(): Promise<void> {
         const severityLabel = severity.charAt(0).toUpperCase() + severity.slice(1);
 
         const title = `[${severityLabel}] Stale Deal: ${staleDeal.deal_name}`;
-        const body = `${staleDeal.deal_number} has been in "${staleDeal.stage_name}" for ${daysInStage} days (threshold: ${staleDeal.stale_threshold_days} days)`;
+        const body = `${staleDeal.deal_number} has been in "${staleDeal.stage_name}" for ${daysInStage} days (threshold: ${staleDeal.threshold_days} days)`;
         const link = `/deals/${staleDeal.deal_id}`;
 
         // Always notify the assigned rep
