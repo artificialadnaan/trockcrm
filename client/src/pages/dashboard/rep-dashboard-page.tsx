@@ -195,7 +195,6 @@ function buildStrategicAlerts(data: RepDashboardData): StrategicAlert[] {
 
 function buildBlindSpots(data: RepDashboardData): BlindSpot[] {
   const staleDealItems = (data.downstreamBottlenecks ?? [])
-    .filter((deal) => deal.daysInStage > deal.staleThresholdDays)
     .map((deal) => ({
       id: deal.dealId,
       type: "deal" as const,

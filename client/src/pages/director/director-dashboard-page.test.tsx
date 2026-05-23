@@ -486,7 +486,8 @@ describe("DirectorDashboardPage", () => {
   it("routes at-risk deal drilldowns to the filtered deals list", () => {
     const html = renderPageHtml();
 
-    expect(html).toContain('href="/deals?filter=at_risk&amp;period=qtd&amp;scope=all"');
+    expect(html).toContain('href="/deals?filter=at_risk&amp;scope=all"');
+    expect(html).not.toContain('href="/deals?filter=at_risk&amp;period=qtd&amp;scope=all"');
     expect(html).not.toContain('href="/reports?range=qtd#stale-deals"');
   });
 
@@ -615,7 +616,7 @@ describe("DirectorDashboardPage", () => {
 
     expect(html).toContain('href="/deals?filter=active_pipeline&amp;period=qtd&amp;scope=all"');
     expect(html).toContain('href="/deals?filter=won&amp;period=qtd&amp;scope=all"');
-    expect(html).toContain('href="/deals?filter=at_risk&amp;period=qtd&amp;scope=all"');
+    expect(html).toContain('href="/deals?filter=at_risk&amp;scope=all"');
     expect(html).toContain('href="/reports/performance/forecast-accuracy?range=qtd"');
     expect(html).toContain('href="/reports/performance/rep-activity?range=qtd"');
   });
@@ -813,8 +814,51 @@ describe("DirectorDashboardPage", () => {
     const html = renderPageHtml();
 
     expect(html).toContain("2 flagged deals across 2 reps");
-    expect(html).toContain('href="/deals?filter=at_risk&amp;period=qtd&amp;scope=all"');
+    expect(html).toContain('href="/deals?filter=at_risk&amp;scope=all"');
     expect(html).not.toContain('href="/reports#stale-deals"');
+  });
+
+  it("uses engine-backed at-risk deal rows instead of stale snapshot counts in the rep leaderboard", () => {
+    mocks.useRepPerformanceMock.mockReturnValue({
+      ...mocks.useRepPerformanceMock(),
+      data: {
+        ...mocks.useRepPerformanceMock().data,
+        rows: [
+          {
+            ...mocks.useRepPerformanceMock().data.rows[0],
+            repId: "rep-1",
+            atRiskCount: 12,
+          },
+        ],
+      },
+    });
+    mocks.useDirectorDashboardMock.mockReturnValue({
+      ...mocks.useDirectorDashboardMock(),
+      data: {
+        ...mocks.useDirectorDashboardMock().data,
+        atRiskDeals: [
+          {
+            dealId: "risk-1",
+            repId: "rep-1",
+            repName: "Avery Rep",
+            dealName: "Risk One",
+            stageName: "Contract",
+            mirroredStageStatus: "blocked",
+            workflowRoute: "service",
+            regionClassification: "Dallas, TX",
+            dealValue: 100,
+            daysInStage: 15,
+            staleThresholdDays: 10,
+          },
+        ],
+      },
+    });
+
+    const html = renderPageHtml();
+
+    expect(html).toContain("Avery Rep");
+    expect(html).not.toContain(">12<");
+    expect(html).toContain(">1<");
   });
 
   it("refreshes both dashboard and rep performance data", async () => {
@@ -1058,7 +1102,7 @@ describe("DirectorDashboardPage", () => {
       expect(csv).not.toContain("777777");
       expect(csv).not.toContain("Stale Region");
       expect(csv).not.toContain(",12,");
-      expect(csv).toContain("Avery Rep,,0,0,910000,6,67,3,Moderate");
+      expect(csv).toContain("Avery Rep,,0,0,910000,6,67,1,Moderate");
     } finally {
       await cleanup();
       Object.defineProperty(URL, "createObjectURL", { value: originalCreateObjectUrl, configurable: true });
@@ -1096,7 +1140,7 @@ describe("DirectorDashboardPage", () => {
       expect(createObjectURLMock).toHaveBeenCalledOnce();
       const csvBlob = createObjectURLMock.mock.calls[0]?.[0] as Blob;
       await expect(csvBlob.text()).resolves.toContain("Rep,Region,Closed Value,Closed Deals,Pipeline Value,Active Deals,Win Rate,At Risk,Activity");
-      await expect(csvBlob.text()).resolves.toContain("Avery Rep,North DFW,240000,4,910000,6,67,3,Moderate");
+      await expect(csvBlob.text()).resolves.toContain("Avery Rep,North DFW,240000,4,910000,6,67,1,Moderate");
       expect(clickMock).toHaveBeenCalledOnce();
       expect(revokeObjectURLMock).toHaveBeenCalledWith("blob:director-csv");
     } finally {

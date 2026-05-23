@@ -319,6 +319,9 @@ function buildDealsDrilldownPath(
   preset: DateRangePreset,
   scope: PipelineScope
 ) {
+  if (filter === "stale" || filter === "at_risk") {
+    return `/deals?filter=${filter}&scope=${scope}`;
+  }
   return `/deals?filter=${filter}&period=${preset}&scope=${scope}`;
 }
 
@@ -447,6 +450,11 @@ export function DirectorDashboardPage() {
   const atRiskDestination = atRiskDealsDestination;
   const totalAtRiskValue = atRiskDeals.reduce((sum, deal) => sum + deal.dealValue, 0);
   const atRiskRepCount = new Set(atRiskDeals.map((deal) => deal.repName).filter(Boolean)).size;
+  const engineAtRiskCountByRep = new Map<string, number>();
+  for (const deal of data.atRiskDeals ?? []) {
+    if (!deal.repId) continue;
+    engineAtRiskCountByRep.set(deal.repId, (engineAtRiskCountByRep.get(deal.repId) ?? 0) + 1);
+  }
   const closedValue = usablePerfData ? usablePerfData.reps.reduce((sum, row) => sum + row.current.totalWonValue, 0) : null;
   const closedCount = usablePerfData ? usablePerfData.reps.reduce((sum, row) => sum + row.current.dealsWon, 0) : null;
   const forecastVsGoal = usablePerfData ? usablePerfData.forecastVsGoal : null;
@@ -481,7 +489,7 @@ export function DirectorDashboardPage() {
       const perfRep = perfRepsByRep.get(rep.repId);
       const closed = snapshot?.closedValue ?? perfRep?.current.totalWonValue ?? 0;
       const closedDeals = snapshot?.winsCount ?? perfRep?.current.dealsWon ?? 0;
-      const atRisk = snapshot?.atRiskCount ?? rep.staleDeals + rep.staleLeads;
+      const atRisk = engineAtRiskCountByRep.get(rep.repId) ?? 0;
       const activity = getActivityLevel(rep.activityScore);
       return [
         rep.repName,
@@ -731,7 +739,7 @@ export function DirectorDashboardPage() {
                   const winDelta = hasPerformanceData && winRate !== null
                     ? snapshot?.previous ? winRate - snapshot.previous.winRate : perfRep?.change.winRate ?? null
                     : null;
-                  const atRisk = snapshot?.atRiskCount ?? rep.staleDeals + rep.staleLeads;
+                  const atRisk = engineAtRiskCountByRep.get(rep.repId) ?? 0;
                   const activity = getActivityLevel(rep.activityScore);
                   const needsHelp = atRisk > 0 || activity.label === "Low";
 

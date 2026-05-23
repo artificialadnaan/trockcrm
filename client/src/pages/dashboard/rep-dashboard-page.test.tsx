@@ -259,6 +259,40 @@ describe("RepDashboardPage", () => {
     expect(html).toContain("Lead One");
   });
 
+  it("trusts engine-filtered downstream bottlenecks at the exact SLA threshold", () => {
+    mocks.useRepDashboardMock.mockReturnValue({
+      loading: false,
+      error: null,
+      data: {
+        ...dashboardData,
+        downstreamBottlenecks: [
+          {
+            dealId: "deal-threshold",
+            dealName: "Exact Threshold Deal",
+            stageName: "Estimate Sent",
+            mirroredStageStatus: "blocked",
+            workflowRoute: "normal",
+            regionClassification: "Dallas, TX",
+            dealValue: 125000,
+            daysInStage: 7,
+            staleThresholdDays: 7,
+          },
+        ],
+        staleLeads: {
+          ...dashboardData.staleLeads,
+          leads: [],
+        },
+      },
+      fetchedAt: new Date("2026-05-08T17:00:00Z"),
+      refetch: vi.fn(),
+    });
+
+    const html = renderDashboard();
+
+    expect(html).toContain("Exact Threshold Deal");
+    expect(html).toContain("7 days in Estimate Sent; SLA 7 days");
+  });
+
   it("links AI blind spot rows to the affected record", () => {
     const html = renderDashboard();
 

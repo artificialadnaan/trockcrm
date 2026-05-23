@@ -33,7 +33,6 @@ import {
   getPipelineSummary,
   getWinRateTrend,
   getActivitySummaryByRep,
-  getStaleDeals,
   getFollowUpCompliance,
   getDdVsPipeline,
   getWinLossRatioByRep,
@@ -57,6 +56,8 @@ type TenantDb = NodePgDatabase<typeof schema>;
 type ExecuteRows<T> = { rows: T[] } | T[];
 export type DashboardAtRiskSummaryRow = {
   dealId?: string | null;
+  dealNumber?: string | null;
+  stageId?: string | null;
   repId?: string | null;
   repName?: string | null;
   dealName?: string | null;
@@ -71,6 +72,11 @@ export type DashboardAtRiskSummaryRow = {
   onHoldStartedAt?: string | Date | null;
   onHoldAccumulatedSeconds?: number | string | bigint | null;
   onHoldAccumulatedSecondsAtStageEntry?: number | string | bigint | null;
+};
+
+type DashboardAtRiskEvaluation = {
+  row: DashboardAtRiskSummaryRow;
+  atRisk: AtRiskResult;
 };
 
 function rowsFromExecute<T>(result: ExecuteRows<T>): T[] {
@@ -97,48 +103,27 @@ export function buildDashboardAtRiskSummary(
   viewerRole: string | null | undefined,
   now: Date = new Date()
 ): { count: number; totalValue: number } {
-  const normalizedViewerRole = normalizeAtRiskViewerRole(viewerRole);
-
-  return rows.reduce(
+  return buildDashboardAtRiskEvaluations(rows, viewerRole, now).reduce(
     (acc, row) => {
-      const result = getDealAtRiskResult(
-        {
-          stageSlug: row.stageSlug,
-          workflowRoute: row.workflowRoute ?? "normal",
-          stageEnteredAt: row.stageEnteredAt ?? null,
-          onHold: row.onHold,
-          onHoldStartedAt: row.onHoldStartedAt,
-          onHoldAccumulatedSeconds:
-            row.onHoldAccumulatedSeconds == null ? null : Number(row.onHoldAccumulatedSeconds),
-          onHoldAccumulatedSecondsAtStageEntry:
-            row.onHoldAccumulatedSecondsAtStageEntry == null
-              ? null
-              : Number(row.onHoldAccumulatedSecondsAtStageEntry),
-        },
-        normalizedViewerRole,
-        now
-      );
-
-      if (!result.isAtRisk) return acc;
+      if (!row.atRisk.isAtRisk) return acc;
       return {
         count: acc.count + 1,
-        totalValue: acc.totalValue + Number(row.dealValue ?? 0),
+        totalValue: acc.totalValue + Number(row.row.dealValue ?? 0),
       };
     },
     { count: 0, totalValue: 0 }
   );
 }
 
-export function buildDashboardAtRiskDeals(
+function buildDashboardAtRiskEvaluations(
   rows: DashboardAtRiskSummaryRow[],
   viewerRole: string | null | undefined,
   now: Date = new Date()
-): DashboardAtRiskDealRow[] {
+): DashboardAtRiskEvaluation[] {
   const normalizedViewerRole = normalizeAtRiskViewerRole(viewerRole);
-  const atRiskDeals: DashboardAtRiskDealRow[] = [];
-
-  for (const row of rows) {
-    const atRisk = getDealAtRiskResult(
+  return rows.map((row) => ({
+    row,
+    atRisk: getDealAtRiskResult(
       {
         stageSlug: row.stageSlug,
         workflowRoute: row.workflowRoute ?? "normal",
@@ -154,7 +139,18 @@ export function buildDashboardAtRiskDeals(
       },
       normalizedViewerRole,
       now
-    );
+    ),
+  }));
+}
+
+export function buildDashboardAtRiskDeals(
+  rows: DashboardAtRiskSummaryRow[],
+  viewerRole: string | null | undefined,
+  now: Date = new Date()
+): DashboardAtRiskDealRow[] {
+  const atRiskDeals: DashboardAtRiskDealRow[] = [];
+
+  for (const { row, atRisk } of buildDashboardAtRiskEvaluations(rows, viewerRole, now)) {
     if (!atRisk.isAtRisk) continue;
 
     atRiskDeals.push({
@@ -174,6 +170,76 @@ export function buildDashboardAtRiskDeals(
   }
 
   return atRiskDeals;
+}
+
+export function buildDashboardAtRiskStaleDeals(
+  rows: DashboardAtRiskSummaryRow[],
+  viewerRole: string | null | undefined,
+  now: Date = new Date()
+): StaleDealRow[] {
+  return buildDashboardAtRiskEvaluations(rows, viewerRole, now)
+    .filter(({ atRisk }) => atRisk.isAtRisk)
+    .sort((a, b) => {
+      if (b.atRisk.effectiveStageAgeDays !== a.atRisk.effectiveStageAgeDays) {
+        return b.atRisk.effectiveStageAgeDays - a.atRisk.effectiveStageAgeDays;
+      }
+      return String(a.row.dealName ?? "").localeCompare(String(b.row.dealName ?? ""));
+    })
+    .map(({ row, atRisk }) => ({
+      dealId: String(row.dealId ?? ""),
+      dealNumber: String(row.dealNumber ?? ""),
+      dealName: String(row.dealName ?? "Deal"),
+      stageId: String(row.stageId ?? ""),
+      stageName: resolveMirroredStageLabel(row.stageSlug, row.stageName ?? "Stage"),
+      assignedRepId: String(row.repId ?? ""),
+      repName: String(row.repName ?? "Unassigned"),
+      stageEnteredAt: row.stageEnteredAt ? String(row.stageEnteredAt) : "",
+      daysInStage: atRisk.effectiveStageAgeDays,
+      staleThresholdDays: atRisk.thresholdDays ?? 0,
+      dealValue: Number(row.dealValue ?? 0),
+      workflowRoute: row.workflowRoute === "service" ? "service" : "normal",
+      bidBoardStageSlug: row.stageSlug ?? null,
+      bidBoardStageStatus: row.mirroredStageStatus ?? null,
+      regionClassification: row.regionClassification ?? null,
+    }));
+}
+
+export function buildDashboardDownstreamBottlenecks(
+  rows: DashboardAtRiskSummaryRow[],
+  viewerRole: string | null | undefined,
+  now: Date = new Date()
+): DashboardDownstreamBottleneckRow[] {
+  return buildDashboardAtRiskEvaluations(rows, viewerRole, now)
+    .filter(
+      ({ row, atRisk }) =>
+        atRisk.isAtRisk &&
+        atRisk.canonicalStageSlug != null &&
+        (MIRRORED_DOWNSTREAM_STAGE_SLUGS as readonly string[]).includes(
+          atRisk.canonicalStageSlug
+        )
+    )
+    .sort((a, b) => {
+      const pastDelta = (b.atRisk.secondsPastThreshold ?? 0) - (a.atRisk.secondsPastThreshold ?? 0);
+      if (pastDelta !== 0) return pastDelta;
+      const valueDelta = Number(b.row.dealValue ?? 0) - Number(a.row.dealValue ?? 0);
+      if (valueDelta !== 0) return valueDelta;
+      return String(a.row.dealName ?? "").localeCompare(String(b.row.dealName ?? ""));
+    })
+    .slice(0, 8)
+    .map(({ row, atRisk }) => ({
+      dealId: String(row.dealId ?? ""),
+      repId: row.repId ? String(row.repId) : null,
+      repName: String(row.repName ?? "Unassigned"),
+      dealName: String(row.dealName ?? "Deal"),
+      stageName: resolveMirroredStageLabel(row.stageSlug, row.stageName ?? "Stage"),
+      mirroredStageStatus: row.mirroredStageStatus ?? null,
+      workflowRoute: row.workflowRoute === "service" ? "service" : "normal",
+      regionClassification: String(row.regionClassification ?? "Unassigned region"),
+      dealValue: Number(row.dealValue ?? 0),
+      daysInStage: atRisk.effectiveStageAgeDays,
+      staleThresholdDays: atRisk.thresholdDays ?? 0,
+      atRisk,
+    }));
 }
 
 type DashboardScopeOptions = {
@@ -489,6 +555,7 @@ export interface DashboardDownstreamBottleneckRow {
   dealValue: number;
   daysInStage: number;
   staleThresholdDays: number;
+  atRisk?: AtRiskResult;
 }
 
 export interface DashboardAtRiskDealRow extends DashboardDownstreamBottleneckRow {
@@ -622,64 +689,8 @@ async function getDownstreamBottlenecks(
   tenantDb: TenantDb,
   options: DashboardScopeOptions = {}
 ): Promise<DashboardDownstreamBottleneckRow[]> {
-  // Current-state operational bottlenecks: intentionally anchored to wall-clock NOW(),
-  // not the A5a rep-performance snapshot period boundary.
-  const repFilter = dealScopeFilterSql("d", options);
-
-  const result = await tenantDb.execute(sql`
-    SELECT
-      d.id AS deal_id,
-      d.assigned_rep_id AS rep_id,
-      COALESCE(u.display_name, 'Unassigned') AS rep_name,
-      d.name AS deal_name,
-      psc.name AS stage_name,
-      COALESCE(d.bid_board_stage_slug, psc.slug) AS mirrored_stage_slug,
-      d.bid_board_stage_status AS mirrored_stage_status,
-      d.workflow_route,
-      COALESCE(NULLIF(TRIM(d.region_classification), ''), TRIM(CONCAT_WS(', ', d.property_city, d.property_state)), 'Unassigned region') AS region_classification,
-      ${dealValueSql()}::numeric AS deal_value,
-      EXTRACT(DAY FROM NOW() - COALESCE(d.bid_board_stage_entered_at, d.stage_entered_at, latest_current_stage_entered_at.entered_at))::int AS days_in_stage,
-      COALESCE(mirror_psc.stale_threshold_days, psc.stale_threshold_days, 14)::int AS stale_threshold_days
-    FROM deals d
-    JOIN pipeline_stage_config psc ON psc.id = d.stage_id
-    LEFT JOIN users u ON u.id = d.assigned_rep_id
-    LEFT JOIN pipeline_stage_config mirror_psc
-      ON mirror_psc.slug = COALESCE(d.bid_board_stage_slug, psc.slug)
-    LEFT JOIN LATERAL (
-      SELECT MAX(dsh.created_at) AS entered_at
-      FROM deal_stage_history dsh
-      WHERE dsh.deal_id = d.id
-        AND dsh.to_stage_id = d.stage_id
-    ) latest_current_stage_entered_at ON true
-    WHERE d.is_active = true
-      AND COALESCE(d.bid_board_stage_slug, psc.slug) IN (${sql.join(MIRRORED_DOWNSTREAM_STAGE_SLUGS.map((slug) => sql`${slug}`), sql`, `)})
-      AND COALESCE(d.on_hold, false) = false
-      ${repFilter}
-    ORDER BY
-      GREATEST(
-        EXTRACT(DAY FROM NOW() - COALESCE(d.bid_board_stage_entered_at, d.stage_entered_at, latest_current_stage_entered_at.entered_at))::int
-        - COALESCE(mirror_psc.stale_threshold_days, psc.stale_threshold_days, 14),
-        0
-      ) DESC,
-      deal_value DESC,
-      deal_name ASC
-    LIMIT 8
-  `);
-
-  const rows = (result as any).rows ?? result;
-  return rows.map((row: any) => ({
-    dealId: row.deal_id,
-    repId: row.rep_id ? String(row.rep_id) : null,
-    repName: String(row.rep_name ?? "Unassigned"),
-    dealName: row.deal_name,
-    stageName: resolveMirroredStageLabel(row.mirrored_stage_slug, row.stage_name),
-    mirroredStageStatus: row.mirrored_stage_status ?? null,
-    workflowRoute: row.workflow_route,
-    regionClassification: row.region_classification,
-    dealValue: Number(row.deal_value ?? 0),
-    daysInStage: Number(row.days_in_stage ?? 0),
-    staleThresholdDays: Number(row.stale_threshold_days ?? 14),
-  }));
+  const rows = await getDashboardAtRiskRows(tenantDb, options);
+  return buildDashboardDownstreamBottlenecks(rows, options.viewerRole ?? "rep");
 }
 
 function dealValueSql() {
@@ -1463,6 +1474,7 @@ export async function getRepDashboard(
     }),
     () => getDownstreamBottlenecks(tenantDb, {
       viewerUserId: userId,
+      viewerRole: "rep",
       includeDealSubscriptions: mineVisibility.dealSubscriptions,
       includeLeadSubscriptions: mineVisibility.leadSubscriptions,
       includeDealCreatedBy: mineVisibility.dealsCreatedByUserId,
@@ -2065,17 +2077,19 @@ export async function getRepPerformanceSnapshots(
 
 function buildStrategicAlerts(
   snapshots: RepPerformanceSnapshotRow[],
-  bottlenecks: DashboardDownstreamBottleneckRow[]
+  bottlenecks: DashboardDownstreamBottleneckRow[],
+  atRiskCountsByRep: Map<string, number> = new Map()
 ): StrategicAlert[] {
   const alerts: StrategicAlert[] = [];
 
   for (const row of snapshots) {
-    if (row.atRiskCount > 0) {
+    const atRiskCount = atRiskCountsByRep.get(row.repId) ?? 0;
+    if (atRiskCount > 0) {
       alerts.push({
         id: `at-risk-${row.repId}`,
-        severity: row.atRiskCount >= 3 ? "critical" : "warning",
+        severity: atRiskCount >= 3 ? "critical" : "warning",
         title: "At-risk pipeline",
-        detail: `${row.repName} has ${row.atRiskCount} at-risk deal${row.atRiskCount === 1 ? "" : "s"}.`,
+        detail: `${row.repName} has ${atRiskCount} at-risk deal${atRiskCount === 1 ? "" : "s"}.`,
         repId: row.repId,
       });
     }
@@ -2119,6 +2133,15 @@ function buildAiCoachingPrompts(snapshots: RepPerformanceSnapshotRow[]): AiCoach
             ? "Win rate is below the director review threshold."
             : "Activity volume is below the expected review threshold.",
     }));
+}
+
+function buildAtRiskCountsByRep(deals: DashboardAtRiskDealRow[]): Map<string, number> {
+  const counts = new Map<string, number>();
+  for (const deal of deals) {
+    if (!deal.repId) continue;
+    counts.set(deal.repId, (counts.get(deal.repId) ?? 0) + 1);
+  }
+  return counts;
 }
 
 async function getRecentCloses(
@@ -2242,58 +2265,8 @@ async function getDashboardStaleDeals(
   tenantDb: TenantDb,
   options: DashboardScopeOptions = {}
 ): Promise<StaleDealRow[]> {
-  const scopeFilter = dealScopeFilterSql("d", options);
-  const result = await tenantDb.execute(sql`
-    SELECT
-      d.id AS deal_id,
-      d.deal_number,
-      d.name AS deal_name,
-      d.stage_id,
-      psc.name AS stage_name,
-      d.assigned_rep_id,
-      u.display_name AS rep_name,
-      COALESCE(d.bid_board_stage_entered_at, d.stage_entered_at) AS stage_entered_at,
-      EXTRACT(DAY FROM NOW() - COALESCE(d.bid_board_stage_entered_at, d.stage_entered_at))::int AS days_in_stage,
-      COALESCE(mirror_psc.stale_threshold_days, psc.stale_threshold_days) AS stale_threshold_days,
-      ${dealValueSql()}::numeric AS deal_value,
-      d.workflow_route,
-      d.bid_board_stage_slug,
-      d.bid_board_stage_status,
-      d.region_classification
-    FROM deals d
-    JOIN pipeline_stage_config psc ON psc.id = d.stage_id
-    LEFT JOIN pipeline_stage_config mirror_psc
-      ON mirror_psc.slug = COALESCE(d.bid_board_stage_slug, psc.slug)
-    JOIN users u ON u.id = d.assigned_rep_id
-    WHERE d.is_active = true
-      AND COALESCE(d.is_test_data, false) = false
-      AND ${nonTerminalDealStageSql()}
-      AND COALESCE(d.on_hold, false) = false
-      AND COALESCE(mirror_psc.stale_threshold_days, psc.stale_threshold_days) IS NOT NULL
-      AND EXTRACT(DAY FROM NOW() - COALESCE(d.bid_board_stage_entered_at, d.stage_entered_at))
-        > COALESCE(mirror_psc.stale_threshold_days, psc.stale_threshold_days)
-      ${scopeFilter}
-    ORDER BY days_in_stage DESC
-  `);
-
-  const rows = rowsFromExecute<any>(result);
-  return rows.map((r) => ({
-    dealId: r.deal_id,
-    dealNumber: r.deal_number,
-    dealName: r.deal_name,
-    stageId: r.stage_id,
-    stageName: resolveMirroredStageLabel(r.bid_board_stage_slug, r.stage_name),
-    assignedRepId: r.assigned_rep_id,
-    repName: r.rep_name,
-    stageEnteredAt: r.stage_entered_at,
-    daysInStage: Number(r.days_in_stage ?? 0),
-    staleThresholdDays: Number(r.stale_threshold_days ?? 0),
-    dealValue: Number(r.deal_value ?? 0),
-    workflowRoute: r.workflow_route,
-    bidBoardStageSlug: r.bid_board_stage_slug ?? null,
-    bidBoardStageStatus: r.bid_board_stage_status ?? null,
-    regionClassification: r.region_classification ?? null,
-  }));
+  const rows = await getDashboardAtRiskRows(tenantDb, options);
+  return buildDashboardAtRiskStaleDeals(rows, options.viewerRole ?? "rep");
 }
 
 async function getDashboardAtRiskRows(
@@ -2304,6 +2277,8 @@ async function getDashboardAtRiskRows(
   const result = await tenantDb.execute(sql`
     SELECT
       d.id AS deal_id,
+      d.deal_number,
+      d.stage_id,
       d.assigned_rep_id AS rep_id,
       COALESCE(u.display_name, 'Unassigned') AS rep_name,
       d.name AS deal_name,
@@ -2313,7 +2288,7 @@ async function getDashboardAtRiskRows(
       d.bid_board_stage_status AS mirrored_stage_status,
       d.workflow_route,
       COALESCE(NULLIF(TRIM(d.region_classification), ''), TRIM(CONCAT_WS(', ', d.property_city, d.property_state)), 'Unassigned region') AS region_classification,
-      COALESCE(d.bid_board_stage_entered_at, d.stage_entered_at) AS stage_entered_at,
+      COALESCE(d.bid_board_stage_entered_at, d.stage_entered_at, latest_current_stage_entered_at.entered_at) AS stage_entered_at,
       d.on_hold,
       d.on_hold_started_at,
       d.on_hold_accumulated_seconds,
@@ -2321,6 +2296,12 @@ async function getDashboardAtRiskRows(
     FROM deals d
     JOIN pipeline_stage_config psc ON psc.id = d.stage_id
     LEFT JOIN users u ON u.id = d.assigned_rep_id
+    LEFT JOIN LATERAL (
+      SELECT MAX(dsh.created_at) AS entered_at
+      FROM deal_stage_history dsh
+      WHERE dsh.deal_id = d.id
+        AND dsh.to_stage_id = d.stage_id
+    ) latest_current_stage_entered_at ON true
     WHERE d.is_active = true
       AND COALESCE(d.is_test_data, false) = false
       AND ${nonTerminalDealStageSql()}
@@ -2329,6 +2310,8 @@ async function getDashboardAtRiskRows(
 
   return rowsFromExecute<any>(result).map((row) => ({
     dealId: row.deal_id ? String(row.deal_id) : null,
+    dealNumber: row.deal_number ? String(row.deal_number) : null,
+    stageId: row.stage_id ? String(row.stage_id) : null,
     repId: row.rep_id ? String(row.rep_id) : null,
     repName: row.rep_name ? String(row.rep_name) : null,
     dealName: row.deal_name ? String(row.deal_name) : null,
@@ -2473,6 +2456,7 @@ export async function getDirectorDashboard(
   const year = new Date().getFullYear();
   const from = options.from ?? `${year}-01-01`;
   const to = options.to ?? `${year}-12-31`;
+  const now = new Date();
   const scopedViewerUserId = options.scope === "mine" ? options.viewerUserId : undefined;
   const mineVisibility = scopedViewerUserId ? await resolveMineVisibilityFeatures(tenantDb) : null;
 
@@ -2481,11 +2465,9 @@ export async function getDirectorDashboard(
     pipelineResult,
     winRateTrendResult,
     activityResult,
-    staleResult,
     staleLeadResult,
     ddResult,
     crmOwnedProgression,
-    downstreamBottlenecks,
     atRiskRows,
     funnelSummary,
     repCommissionRows,
@@ -2505,17 +2487,19 @@ export async function getDirectorDashboard(
     // 4. Activity by rep
     () => getActivitySummaryByRep(tenantDb, { from, to }),
 
-    // 5. Stale deals watchlist
-    () => getStaleDeals(tenantDb),
-
-    // 6. Stale leads watchlist
+    // 5. Stale leads watchlist
     () => getStaleLeadWatchlist(tenantDb),
 
-    // 7. DD vs pipeline
+    // 6. DD vs pipeline
     () => getDdVsPipeline(tenantDb),
     () => getCrmOwnedProgression(tenantDb),
-    () => getDownstreamBottlenecks(tenantDb),
-    () => getDashboardAtRiskRows(tenantDb),
+    () => getDashboardAtRiskRows(tenantDb, {
+      viewerUserId: scopedViewerUserId,
+      viewerRole: options.viewerRole ?? "director",
+      includeDealSubscriptions: mineVisibility?.dealSubscriptions,
+      includeDealCreatedBy: mineVisibility?.dealsCreatedByUserId,
+      includeDealSubscriptionDeletedAt: mineVisibility?.dealSubscriptionsDeletedAt,
+    }),
     () => getDirectorFunnelSummary(tenantDb),
     () => getDirectorRepCommissionRows(tenantDb, { from, to }),
     () => getRepPerformanceSnapshots(tenantDb, options.officeId, options.periodKind ?? "mtd"),
@@ -2534,11 +2518,37 @@ export async function getDirectorDashboard(
     }),
   ]);
 
+  const dashboardStaleDeals = buildDashboardAtRiskStaleDeals(
+    atRiskRows,
+    options.viewerRole ?? "director",
+    now
+  );
+  const dashboardAtRiskDeals = buildDashboardAtRiskDeals(
+    atRiskRows,
+    options.viewerRole ?? "director",
+    now
+  );
+  const dashboardDownstreamBottlenecks = buildDashboardDownstreamBottlenecks(
+    atRiskRows,
+    options.viewerRole ?? "director",
+    now
+  );
+  const atRiskScopeSummary = buildDashboardAtRiskSummary(
+    atRiskRows,
+    options.viewerRole ?? "director",
+    now
+  );
+  const atRiskCountsByRep = buildAtRiskCountsByRep(dashboardAtRiskDeals);
+  const repCards = repCardsResult.map((rep) => ({
+    ...rep,
+    staleDeals: atRiskCountsByRep.get(rep.repId) ?? 0,
+  }));
+
   return {
     officeFunnelBuckets: funnelSummary.officeFunnelBuckets,
     repFunnelRows: funnelSummary.repFunnelRows,
     repCommissionRows,
-    repCards: repCardsResult,
+    repCards,
     pipelineByStage: pipelineResult.map((s) => ({
       stageId: s.stageId,
       stageName: s.stageName,
@@ -2556,7 +2566,7 @@ export async function getDirectorDashboard(
       notes: a.notes,
       total: a.total,
     })),
-    staleDeals: staleResult.map((s) => ({
+    staleDeals: dashboardStaleDeals.map((s) => ({
       dealId: s.dealId,
       dealNumber: s.dealNumber,
       dealName: s.dealName,
@@ -2571,8 +2581,8 @@ export async function getDirectorDashboard(
     })),
     staleLeads: staleLeadResult,
     crmOwnedProgression,
-    downstreamBottlenecks,
-    atRiskDeals: buildDashboardAtRiskDeals(atRiskRows, options.viewerRole ?? "director"),
+    downstreamBottlenecks: dashboardDownstreamBottlenecks,
+    atRiskDeals: dashboardAtRiskDeals,
     forecastVsGoal: repPerformanceSnapshots.forecastVsGoal,
     activityPulse: repPerformanceSnapshots.rows.map((row) => ({
       repId: row.repId,
@@ -2583,11 +2593,19 @@ export async function getDirectorDashboard(
       notes: row.notes,
       total: row.activityTotal,
     })),
-    strategicAlerts: buildStrategicAlerts(repPerformanceSnapshots.rows, downstreamBottlenecks),
+    strategicAlerts: buildStrategicAlerts(
+      repPerformanceSnapshots.rows,
+      dashboardDownstreamBottlenecks,
+      atRiskCountsByRep
+    ),
     aiCoachingPrompts: buildAiCoachingPrompts(repPerformanceSnapshots.rows),
     recentCloses,
     ddVsPipeline: ddResult,
-    scopeSummary,
+    scopeSummary: {
+      ...scopeSummary,
+      atRisk: atRiskScopeSummary,
+      stale: atRiskScopeSummary,
+    },
   };
 }
 
@@ -2644,19 +2662,6 @@ async function buildRepPerformanceCards(
         AND a.occurred_at <= (${to}::date + INTERVAL '1 day')::timestamptz
       GROUP BY a.responsible_user_id
     ),
-    rep_stale AS (
-      SELECT
-        d.assigned_rep_id AS rep_id,
-        COUNT(*)::int AS stale_count
-      FROM deals d
-      JOIN pipeline_stage_config psc ON psc.id = d.stage_id
-      WHERE d.is_active = true
-        AND ${nonTerminalDealStageSql()}
-        AND COALESCE(d.on_hold, false) = false
-        AND psc.stale_threshold_days IS NOT NULL
-        AND EXTRACT(DAY FROM NOW() - d.stage_entered_at) > psc.stale_threshold_days
-      GROUP BY d.assigned_rep_id
-    ),
     rep_stale_leads AS (
       SELECT
         l.assigned_rep_id AS rep_id,
@@ -2679,14 +2684,12 @@ async function buildRepPerformanceCards(
       COALESCE(rw.wins, 0)::int AS wins,
       COALESCE(rw.losses, 0)::int AS losses,
       COALESCE(ra.total, 0)::int AS activity_score,
-      COALESCE(rs.stale_count, 0)::int AS stale_deals,
       COALESCE(rsl.stale_lead_count, 0)::int AS stale_leads
     FROM users u
     LEFT JOIN deal_owners owner_rows ON owner_rows.rep_id = u.id
     LEFT JOIN rep_deals rd ON rd.rep_id = u.id
     LEFT JOIN rep_wins rw ON rw.rep_id = u.id
     LEFT JOIN rep_activities ra ON ra.rep_id = u.id
-    LEFT JOIN rep_stale rs ON rs.rep_id = u.id
     LEFT JOIN rep_stale_leads rsl ON rsl.rep_id = u.id
     WHERE u.is_active = true
       AND (u.role = 'rep' OR owner_rows.rep_id IS NOT NULL)
@@ -2705,7 +2708,7 @@ async function buildRepPerformanceCards(
       pipelineValue: Number(r.pipeline_value ?? 0),
       winRate: total > 0 ? Math.round((wins / total) * 100) : 0,
       activityScore: Number(r.activity_score ?? 0),
-      staleDeals: Number(r.stale_deals ?? 0),
+      staleDeals: 0,
       staleLeads: Number(r.stale_leads ?? 0),
     };
   });
@@ -2755,7 +2758,7 @@ export async function getRepDetail(
     }),
     () => getWinLossRatioByRep(tenantDb, { from, to }),
     () => getWinRateTrend(tenantDb, { from, to, repId }),
-    () => getStaleDeals(tenantDb, { repId }),
+    () => getDashboardStaleDeals(tenantDb, { repId, viewerRole: "rep" }),
     () => getStaleLeadWatchlist(tenantDb, { repId }),
   ]);
 
