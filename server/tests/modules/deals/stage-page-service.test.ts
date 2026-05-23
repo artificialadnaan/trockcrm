@@ -287,6 +287,42 @@ describe("listDealStagePage", () => {
     expect(countQueryText).not.toContain("d.is_active = true");
     expect(countQueryText).toContain("contract_signed_at");
     expect(countQueryText).toContain("contract_signed_date");
+    expect(countQueryText).toContain("bid_board_last_updated_at");
+    expect(countQueryText).not.toContain("coalesce(d.contract_signed_at, d.contract_signed_date::timestamptz), d.stage_entered_at");
+    expect(countQueryText).toContain(">=");
+    expect(countQueryText).toContain("<");
+  });
+
+  it("requires real lost_at for bounded lost terminal stage drill-downs", async () => {
+    dbState.responses = [
+      [{ id: "stage-lost", slug: "lost", name: "Lost", displayOrder: 8, isTerminal: true }],
+    ];
+
+    const tenantDb = {
+      select: createOfficeScopeSelectMock(),
+      execute: vi.fn()
+        .mockResolvedValueOnce({ rows: [{ total: "1", total_value: "100000" }] })
+        .mockResolvedValueOnce({ rows: [] }),
+    } as any;
+
+    const { listDealStagePage } = await import("../../../src/modules/deals/service.js");
+    await listDealStagePage(tenantDb, {
+      role: "admin",
+      userId: "admin-1",
+      activeOfficeId: "office-1",
+      scope: "all",
+      stageId: "stage-lost",
+      page: 1,
+      pageSize: 25,
+      lostSince: "2026-04-01",
+      lostUntil: "2026-04-30",
+    } as any);
+
+    const countQueryText = extractSqlText(tenantDb.execute.mock.calls[0][0]).toLowerCase();
+    expect(countQueryText).not.toContain("d.is_active = true");
+    expect(countQueryText).toContain("lost_at");
+    expect(countQueryText).toContain("bid_board_last_updated_at");
+    expect(countQueryText).not.toContain("coalesce(d.lost_at, d.stage_entered_at)");
     expect(countQueryText).toContain(">=");
     expect(countQueryText).toContain("<");
   });
@@ -318,6 +354,7 @@ describe("listDealStagePage", () => {
     const countQueryText = extractSqlText(tenantDb.execute.mock.calls[0][0]).toLowerCase();
     expect(countQueryText).not.toContain("d.is_active = true");
     expect(countQueryText).toContain("d.stage_id in");
+    expect(countQueryText).not.toContain("bid_board_last_updated_at");
   });
 
   it("uses direct active reports in the active office for team-scoped stage drill-downs", async () => {

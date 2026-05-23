@@ -447,7 +447,7 @@ describe("getDealsForPipeline", () => {
     expect(extractSqlText(lostSummaryChain?.where.mock.calls[0]?.[0])).toContain("lost_at");
   });
 
-  it("hydrates won terminal cards with a bounded filter that falls back to stage_entered_at", async () => {
+  it("hydrates won terminal cards with a bounded filter that requires a real signed date", async () => {
     dbState.responses = [
       [
         {
@@ -535,8 +535,50 @@ describe("getDealsForPipeline", () => {
     expect(containsValue(wonSummaryChain?.where.mock.calls[0]?.[0], "2026-03-31")).toBe(true);
     expect(extractSqlText(wonCardsChain?.where.mock.calls[0]?.[0])).toContain("contract_signed_at");
     expect(extractSqlText(wonCardsChain?.where.mock.calls[0]?.[0])).toContain("contract_signed_date");
-    expect(extractSqlText(wonCardsChain?.where.mock.calls[0]?.[0])).toContain("stage_entered_at");
-    expect(extractSqlText(wonSummaryChain?.where.mock.calls[0]?.[0])).toContain("stage_entered_at");
+    expect(extractSqlText(wonCardsChain?.where.mock.calls[0]?.[0])).toContain("bid_board_last_updated_at");
+    expect(extractSqlText(wonCardsChain?.where.mock.calls[0]?.[0])).not.toContain("stage_entered_at");
+    expect(extractSqlText(wonSummaryChain?.where.mock.calls[0]?.[0])).not.toContain("stage_entered_at");
+  });
+
+  it("hydrates lost terminal cards with a bounded filter that requires a real lost date", async () => {
+    dbState.responses = [
+      [
+        {
+          id: "stage-lost",
+          slug: "lost",
+          name: "Lost",
+          displayOrder: 4,
+          isTerminal: true,
+          isActivePipeline: true,
+        },
+      ],
+    ];
+
+    const tenantChains: any[] = [];
+    const tenantDb = {
+      select: vi.fn(() => {
+        const chain = createChainableMock();
+        tenantChains.push(chain);
+        chain.then.mockImplementation((resolve: (value: any[]) => unknown) => resolve(chain.leftJoin.mock.calls.length > 0 ? [] : [{ totalCount: 1, activeCount: 1, totalValue: 5000 }]));
+        return chain;
+      }),
+    } as any;
+
+    const { getDealsForPipeline } = await import("../../../src/modules/deals/service.js");
+    await getDealsForPipeline(tenantDb, "director", "director-1", {
+      activeOfficeId: null,
+      scope: "all",
+      lostSince: "2026-03-01",
+      lostUntil: "2026-03-31",
+    });
+
+    const lostWhereText = tenantChains
+      .filter((chain) => containsValue(chain.where.mock.calls[0]?.[0], "stage-lost"))
+      .map((chain) => extractSqlText(chain.where.mock.calls[0]?.[0]))
+      .join("\n");
+    expect(lostWhereText).toContain("lost_at");
+    expect(lostWhereText).toContain("bid_board_last_updated_at");
+    expect(lostWhereText).not.toContain("stage_entered_at");
   });
 
   it("keeps won all-time queries free of bounded date predicates", async () => {
@@ -582,6 +624,7 @@ describe("getDealsForPipeline", () => {
 
     expect(wonWhereText).not.toContain("contract_signed_at");
     expect(wonWhereText).not.toContain("contract_signed_date");
+    expect(wonWhereText).not.toContain("bid_board_last_updated_at");
     expect(wonWhereText).not.toContain("stage_entered_at");
   });
 
@@ -1105,7 +1148,7 @@ describe("getDealsForPipeline", () => {
 
     expect(holdDeal?.atRisk).toMatchObject({
       isAtRisk: false,
-      reason: "within_sla",
+      reason: "on_hold",
       effectiveStageAgeDays: 0,
     });
     expect(wonDeal?.atRisk).toMatchObject({
