@@ -1,3 +1,4 @@
+import { getDealAtRiskResult, type WorkflowRoute } from "@trock-crm/shared/types";
 import { pool } from "../db.js";
 
 const SERVER_MODULE_ROOT =
@@ -16,6 +17,52 @@ async function loadTaskRuleDependencies() {
   return { evaluateTaskRules, TASK_RULES, createTenantTaskRulePersistence };
 }
 
+interface DigestAtRiskDealRow {
+  stage_slug: string | null;
+  workflow_route: string | null;
+  stage_entered_at: string | Date | null;
+  on_hold: boolean | null;
+  on_hold_started_at: string | Date | null;
+  on_hold_accumulated_seconds: string | number | bigint | null;
+  on_hold_accumulated_seconds_at_stage_entry: string | number | bigint | null;
+}
+
+function normalizeWorkflowRoute(value: string | null | undefined): WorkflowRoute {
+  return value === "service" ? "service" : "normal";
+}
+
+function numberOrNull(value: string | number | bigint | null | undefined) {
+  if (value == null) return null;
+  const numeric = Number(value);
+  return Number.isFinite(numeric) ? numeric : null;
+}
+
+function countDigestAtRiskDeals(rows: DigestAtRiskDealRow[], now: Date): number {
+  let count = 0;
+
+  for (const row of rows) {
+    const atRisk = getDealAtRiskResult(
+      {
+        stageSlug: row.stage_slug,
+        workflowRoute: normalizeWorkflowRoute(row.workflow_route),
+        stageEnteredAt: row.stage_entered_at,
+        onHold: row.on_hold,
+        onHoldStartedAt: row.on_hold_started_at,
+        onHoldAccumulatedSeconds: numberOrNull(row.on_hold_accumulated_seconds),
+        onHoldAccumulatedSecondsAtStageEntry: numberOrNull(
+          row.on_hold_accumulated_seconds_at_stage_entry
+        ),
+      },
+      "rep",
+      now
+    );
+
+    if (atRisk.isAtRisk) count += 1;
+  }
+
+  return count;
+}
+
 /**
  * Generates a weekly digest task for each director/admin in every active office.
  *
@@ -23,7 +70,7 @@ async function loadTaskRuleDependencies() {
  * duplicate runs in multi-worker deployments.
  *
  * Stats included:
- * - Stale deals (stage_entered_at + stale_threshold_days < NOW(), non-terminal)
+ * - Stale deals (shared hold-aware At Risk engine, rep audience)
  * - Deals approaching deadline (expected_close_date within next 7 days)
  * - New deals this week (created_at >= NOW() - 7 days)
  * - Total active pipeline value (SUM of awarded_amount or bid_estimate, non-terminal)
@@ -62,17 +109,35 @@ export async function runWeeklyDigest(): Promise<void> {
       try {
         await client.query("BEGIN");
 
-        // 1. Stale deals count
-        const staleRes = await client.query(
-          `SELECT COUNT(*) AS count
+        // 1. Stale deals count, using the shared hold-aware At Risk engine.
+        const atRiskDealRows = await client.query(
+          `SELECT
+             COALESCE(d.bid_board_stage_slug, psc.slug) AS stage_slug,
+             d.workflow_route,
+             COALESCE(
+               d.bid_board_stage_entered_at,
+               d.stage_entered_at,
+               latest_current_stage_entered_at.entered_at
+             ) AS stage_entered_at,
+             d.on_hold,
+             d.on_hold_started_at,
+             d.on_hold_accumulated_seconds,
+             d.on_hold_accumulated_seconds_at_stage_entry
            FROM ${schemaName}.deals d
            JOIN public.pipeline_stage_config psc ON psc.id = d.stage_id
+           LEFT JOIN LATERAL (
+             SELECT dsh.entered_at
+             FROM ${schemaName}.deal_stage_history dsh
+             WHERE dsh.deal_id = d.id
+               AND dsh.to_stage_id = d.stage_id
+             ORDER BY dsh.entered_at DESC NULLS LAST, dsh.created_at DESC
+             LIMIT 1
+           ) latest_current_stage_entered_at ON true
            WHERE d.is_active = true
              AND psc.is_terminal = false
-             AND psc.stale_threshold_days IS NOT NULL
-             AND d.stage_entered_at < NOW() - (psc.stale_threshold_days || ' days')::interval`
+             AND COALESCE(d.is_test_data, false) = false`
         );
-        const staleCount = Number(staleRes.rows[0]?.count ?? 0);
+        const staleCount = countDigestAtRiskDeals(atRiskDealRows.rows, new Date());
 
         // 2. Deals approaching deadline (expected_close_date within next 7 days)
         const approachingRes = await client.query(

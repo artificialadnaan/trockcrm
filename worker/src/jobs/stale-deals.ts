@@ -1,3 +1,4 @@
+import { getDealAtRiskResult, type WorkflowRoute } from "@trock-crm/shared/types";
 import { pool } from "../db.js";
 
 const SERVER_MODULE_ROOT =
@@ -9,10 +10,8 @@ const SERVER_TASK_PERSISTENCE_MODULE = `${SERVER_MODULE_ROOT}/tasks/rules/persis
 /**
  * Scans all active deals across all offices for stale deals.
  *
- * A deal is "stale" when:
- * - It's in a non-terminal stage
- * - The stage has a stale_threshold_days configured
- * - stage_entered_at is older than NOW() - threshold days
+ * A deal is "stale" when the shared hold-aware At Risk engine flags it for
+ * the rep audience.
  *
  * Tiered escalation based on stale_escalation_tiers JSONB on pipeline_stage_config:
  * - warning tier:    notify assigned rep only
@@ -29,6 +28,69 @@ const SERVER_TASK_PERSISTENCE_MODULE = `${SERVER_MODULE_ROOT}/tasks/rules/persis
 interface EscalationTier {
   days: number;
   severity: "warning" | "escalation" | "critical";
+}
+
+interface StaleDealCandidateRow {
+  deal_id: string;
+  deal_name: string;
+  deal_number: string | null;
+  assigned_rep_id: string | null;
+  stage_slug: string | null;
+  workflow_route: string | null;
+  stage_entered_at: string | Date | null;
+  on_hold: boolean | null;
+  on_hold_started_at: string | Date | null;
+  on_hold_accumulated_seconds: string | number | bigint | null;
+  on_hold_accumulated_seconds_at_stage_entry: string | number | bigint | null;
+  stage_name: string;
+  stale_escalation_tiers: EscalationTier[] | null;
+}
+
+type StaleDealRow = StaleDealCandidateRow & {
+  stale_threshold_days: number;
+  days_in_stage: number;
+};
+
+function normalizeWorkflowRoute(value: string | null | undefined): WorkflowRoute {
+  return value === "service" ? "service" : "normal";
+}
+
+function numberOrNull(value: string | number | bigint | null | undefined) {
+  if (value == null) return null;
+  const numeric = Number(value);
+  return Number.isFinite(numeric) ? numeric : null;
+}
+
+function toStaleDealRows(rows: StaleDealCandidateRow[], now: Date): StaleDealRow[] {
+  const staleDeals: StaleDealRow[] = [];
+
+  for (const row of rows) {
+    const atRisk = getDealAtRiskResult(
+      {
+        stageSlug: row.stage_slug,
+        workflowRoute: normalizeWorkflowRoute(row.workflow_route),
+        stageEnteredAt: row.stage_entered_at,
+        onHold: row.on_hold,
+        onHoldStartedAt: row.on_hold_started_at,
+        onHoldAccumulatedSeconds: numberOrNull(row.on_hold_accumulated_seconds),
+        onHoldAccumulatedSecondsAtStageEntry: numberOrNull(
+          row.on_hold_accumulated_seconds_at_stage_entry
+        ),
+      },
+      "rep",
+      now
+    );
+
+    if (!atRisk.isAtRisk || atRisk.thresholdDays == null) continue;
+
+    staleDeals.push({
+      ...row,
+      stale_threshold_days: atRisk.thresholdDays,
+      days_in_stage: atRisk.effectiveStageAgeDays,
+    });
+  }
+
+  return staleDeals;
 }
 
 function determineTier(daysInStage: number, tiers: EscalationTier[]): EscalationTier | null {
@@ -92,26 +154,42 @@ export async function runStaleDealScan(): Promise<void> {
         [lockKey]
       );
 
-      // Find stale deals: join deals with pipeline config, check threshold.
-      // Also fetch stale_escalation_tiers for tier logic.
-      const staleDeals = await client.query(
+      // Fetch active deal SLA inputs, then apply the shared hold-aware At Risk engine.
+      // Escalation tiers remain config-driven; the stale threshold comes from SLA policy.
+      const staleDealCandidates = await client.query(
         `SELECT
            d.id AS deal_id,
            d.name AS deal_name,
            d.deal_number,
            d.assigned_rep_id,
-           d.stage_entered_at,
+           COALESCE(d.bid_board_stage_slug, psc.slug) AS stage_slug,
+           d.workflow_route,
+           COALESCE(
+             d.bid_board_stage_entered_at,
+             d.stage_entered_at,
+             latest_current_stage_entered_at.entered_at
+           ) AS stage_entered_at,
+           d.on_hold,
+           d.on_hold_started_at,
+           d.on_hold_accumulated_seconds,
+           d.on_hold_accumulated_seconds_at_stage_entry,
            psc.name AS stage_name,
-           psc.stale_threshold_days,
-           psc.stale_escalation_tiers,
-           EXTRACT(DAY FROM NOW() - d.stage_entered_at)::int AS days_in_stage
+           psc.stale_escalation_tiers
          FROM ${schemaName}.deals d
          JOIN public.pipeline_stage_config psc ON psc.id = d.stage_id
+         LEFT JOIN LATERAL (
+           SELECT dsh.entered_at
+           FROM ${schemaName}.deal_stage_history dsh
+           WHERE dsh.deal_id = d.id
+             AND dsh.to_stage_id = d.stage_id
+           ORDER BY dsh.entered_at DESC NULLS LAST, dsh.created_at DESC
+           LIMIT 1
+         ) latest_current_stage_entered_at ON true
          WHERE d.is_active = true
            AND psc.is_terminal = false
-           AND psc.stale_threshold_days IS NOT NULL
-           AND d.stage_entered_at < NOW() - (psc.stale_threshold_days || ' days')::interval`
+           AND COALESCE(d.is_test_data, false) = false`
       );
+      const staleDeals = { rows: toStaleDealRows(staleDealCandidates.rows, new Date()) };
 
       if (staleDeals.rows.length === 0) {
         await client.query("COMMIT");

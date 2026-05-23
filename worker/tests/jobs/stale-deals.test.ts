@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const queryMock = vi.fn();
 const evaluateTaskRulesMock = vi.fn();
@@ -34,7 +34,14 @@ describe("stale deal worker", () => {
     createTenantTaskRulePersistenceMock.mockReset();
   });
 
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
   it("delegates stale deal task generation to the rule evaluator without issuing a raw task insert", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-04-01T12:00:00.000Z"));
+
     const taskPersistence = { marker: "task-persistence" };
     createTenantTaskRulePersistenceMock.mockReturnValue(taskPersistence);
     evaluateTaskRulesMock.mockResolvedValue([{ ruleId: "stale_deal", action: "created" }]);
@@ -60,11 +67,15 @@ describe("stale deal worker", () => {
               deal_name: "Alpha Roof",
               deal_number: "D-1001",
               assigned_rep_id: "user-1",
+              stage_slug: "estimating",
+              workflow_route: "normal",
               stage_entered_at: new Date("2026-03-01T12:00:00.000Z"),
+              on_hold: false,
+              on_hold_started_at: null,
+              on_hold_accumulated_seconds: 0,
+              on_hold_accumulated_seconds_at_stage_entry: 0,
               stage_name: "Proposal",
-              stale_threshold_days: 15,
               stale_escalation_tiers: [],
-              days_in_stage: 31,
             },
           ],
         };
@@ -87,6 +98,10 @@ describe("stale deal worker", () => {
 
     await runStaleDealScan();
 
+    const staleDealSql = queryMock.mock.calls
+      .map(([sql]) => sql)
+      .find((sql) => typeof sql === "string" && sql.includes("FROM office_beta.deals"));
+    expect(staleDealSql).toContain("COALESCE(d.is_test_data, false) = false");
     expect(createTenantTaskRulePersistenceMock).toHaveBeenCalledWith(expect.any(Object), "office_beta");
     expect(evaluateTaskRulesMock).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -106,7 +121,97 @@ describe("stale deal worker", () => {
     ).toBe(false);
   });
 
+  it("uses the shared At Risk engine so active on-hold deals do not generate stale deal tasks", async () => {
+    const taskPersistence = { marker: "task-persistence" };
+    createTenantTaskRulePersistenceMock.mockReturnValue(taskPersistence);
+    evaluateTaskRulesMock.mockResolvedValue([{ ruleId: "stale_deal", action: "created" }]);
+
+    queryMock.mockImplementation(async (sql: string) => {
+      if (sql.includes("FROM public.offices")) {
+        return { rows: [{ id: "office-1", slug: "beta" }] };
+      }
+
+      if (sql === "BEGIN" || sql === "COMMIT" || sql === "ROLLBACK") {
+        return { rows: [] };
+      }
+
+      if (sql.includes("pg_advisory_xact_lock")) {
+        return { rows: [] };
+      }
+
+      if (sql.includes("FROM office_beta.deals")) {
+        return {
+          rows: [
+            {
+              deal_id: "deal-held",
+              deal_name: "Held Roof",
+              deal_number: "D-HELD",
+              assigned_rep_id: "user-1",
+              stage_slug: "estimating",
+              workflow_route: "normal",
+              stage_entered_at: new Date(Date.now() - 45 * 24 * 60 * 60 * 1000),
+              on_hold: true,
+              on_hold_started_at: new Date(Date.now() - 2 * 24 * 60 * 60 * 1000),
+              on_hold_accumulated_seconds: 0,
+              on_hold_accumulated_seconds_at_stage_entry: 0,
+              stage_name: "Estimating",
+              stale_escalation_tiers: [],
+            },
+            {
+              deal_id: "deal-active",
+              deal_name: "Active Roof",
+              deal_number: "D-ACTIVE",
+              assigned_rep_id: "user-1",
+              stage_slug: "estimating",
+              workflow_route: "normal",
+              stage_entered_at: new Date(Date.now() - 15 * 24 * 60 * 60 * 1000),
+              on_hold: false,
+              on_hold_started_at: null,
+              on_hold_accumulated_seconds: 0,
+              on_hold_accumulated_seconds_at_stage_entry: 0,
+              stage_name: "Estimating",
+              stale_escalation_tiers: [],
+            },
+          ],
+        };
+      }
+
+      if (sql.includes("FROM office_beta.notifications")) {
+        return { rows: [] };
+      }
+
+      if (sql.includes("INSERT INTO office_beta.notifications")) {
+        return { rows: [{ id: "notification-1" }] };
+      }
+
+      if (sql.includes("SELECT pg_notify")) {
+        return { rows: [] };
+      }
+
+      throw new Error(`Unexpected SQL: ${sql}`);
+    });
+
+    await runStaleDealScan();
+
+    const staleDealSql = queryMock.mock.calls
+      .map(([sql]) => sql)
+      .find((sql) => typeof sql === "string" && sql.includes("FROM office_beta.deals"));
+    expect(staleDealSql).toContain("COALESCE(d.is_test_data, false) = false");
+    expect(evaluateTaskRulesMock).toHaveBeenCalledTimes(1);
+    expect(evaluateTaskRulesMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        dealId: "deal-active",
+        staleAge: 15,
+      }),
+      taskPersistence,
+      expect.any(Array)
+    );
+  });
+
   it("rolls back the office transaction when notification fan-out fails mid-deal", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-04-01T12:00:00.000Z"));
+
     queryMock.mockImplementation(async (sql: string, params?: unknown[]) => {
       if (sql.includes("FROM public.offices")) {
         return { rows: [{ id: "office-1", slug: "beta" }] };
@@ -124,11 +229,15 @@ describe("stale deal worker", () => {
               deal_name: "Alpha Roof",
               deal_number: "D-1001",
               assigned_rep_id: "user-1",
+              stage_slug: "estimating",
+              workflow_route: "normal",
               stage_entered_at: new Date("2026-03-01T12:00:00.000Z"),
+              on_hold: false,
+              on_hold_started_at: null,
+              on_hold_accumulated_seconds: 0,
+              on_hold_accumulated_seconds_at_stage_entry: 0,
               stage_name: "Proposal",
-              stale_threshold_days: 15,
               stale_escalation_tiers: [{ days: 20, severity: "critical" }],
-              days_in_stage: 31,
             },
           ],
         };

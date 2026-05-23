@@ -1,3 +1,4 @@
+import { getDealAtRiskResult, type WorkflowRoute } from "@trock-crm/shared/types";
 import { pool } from "../db.js";
 
 export const STALE_ACCOUNT_THRESHOLD_DAYS = 30;
@@ -18,6 +19,22 @@ interface PeriodRange {
   kind: PeriodKind;
   start: string;
   end: string;
+}
+
+interface RepAtRiskInputRow {
+  rep_id: string | null;
+  stage_slug: string | null;
+  workflow_route: string | null;
+  stage_entered_at: string | Date | null;
+  on_hold: boolean | null;
+  on_hold_started_at: string | Date | null;
+  on_hold_accumulated_seconds: string | number | bigint | null;
+  on_hold_accumulated_seconds_at_stage_entry: string | number | bigint | null;
+}
+
+interface RepAtRiskCount {
+  repId: string;
+  atRiskCount: number;
 }
 
 export function toDateString(date: Date) {
@@ -63,6 +80,103 @@ export function buildRepPerformancePeriodRanges(now = new Date()): PeriodRange[]
   ];
 }
 
+function periodEndAsOfDate(period: PeriodRange) {
+  const [year, month, day] = period.end.split("-").map((part) => Number(part));
+  if (!year || !month || !day) {
+    throw new Error(`Invalid rollup period end date: ${period.end}`);
+  }
+
+  return new Date(Date.UTC(year, month - 1, day));
+}
+
+function normalizeWorkflowRoute(value: string | null | undefined): WorkflowRoute {
+  return value === "service" ? "service" : "normal";
+}
+
+function numberOrNull(value: string | number | bigint | null | undefined) {
+  if (value == null) return null;
+  const numeric = Number(value);
+  return Number.isFinite(numeric) ? numeric : null;
+}
+
+export function computeRepAtRiskCountsFromRows(
+  rows: RepAtRiskInputRow[],
+  asOf: Date
+): RepAtRiskCount[] {
+  const countsByRep = new Map<string, number>();
+
+  for (const row of rows) {
+    if (!row.rep_id) continue;
+
+    const atRisk = getDealAtRiskResult(
+      {
+        stageSlug: row.stage_slug,
+        workflowRoute: normalizeWorkflowRoute(row.workflow_route),
+        stageEnteredAt: row.stage_entered_at,
+        onHold: row.on_hold,
+        onHoldStartedAt: row.on_hold_started_at,
+        onHoldAccumulatedSeconds: numberOrNull(row.on_hold_accumulated_seconds),
+        onHoldAccumulatedSecondsAtStageEntry: numberOrNull(
+          row.on_hold_accumulated_seconds_at_stage_entry
+        ),
+      },
+      "rep",
+      asOf
+    );
+
+    if (atRisk.isAtRisk) {
+      countsByRep.set(row.rep_id, (countsByRep.get(row.rep_id) ?? 0) + 1);
+    }
+  }
+
+  return Array.from(countsByRep.entries())
+    .map(([repId, atRiskCount]) => ({ repId, atRiskCount }))
+    .sort((a, b) => a.repId.localeCompare(b.repId));
+}
+
+async function getRepAtRiskCountsForPeriod(
+  client: { query: (sql: string, params?: unknown[]) => Promise<{ rows: any[]; rowCount: number | null }> },
+  schemaName: string,
+  period: PeriodRange
+): Promise<RepAtRiskCount[]> {
+  const result = await client.query(
+    `SELECT
+       d.assigned_rep_id AS rep_id,
+       COALESCE(d.bid_board_stage_slug, psc.slug) AS stage_slug,
+       d.workflow_route,
+       COALESCE(
+         d.bid_board_stage_entered_at,
+         d.stage_entered_at,
+         latest_current_stage_entered_at.entered_at
+       ) AS stage_entered_at,
+       d.on_hold,
+       d.on_hold_started_at,
+       d.on_hold_accumulated_seconds,
+       d.on_hold_accumulated_seconds_at_stage_entry
+     FROM ${schemaName}.deals d
+     JOIN public.pipeline_stage_config psc ON psc.id = d.stage_id
+     LEFT JOIN LATERAL (
+       SELECT dsh.entered_at
+       FROM ${schemaName}.deal_stage_history dsh
+       WHERE dsh.deal_id = d.id
+         AND dsh.to_stage_id = d.stage_id
+       ORDER BY dsh.entered_at DESC NULLS LAST, dsh.created_at DESC
+       LIMIT 1
+     ) latest_current_stage_entered_at ON true
+     WHERE d.assigned_rep_id IS NOT NULL
+       AND d.is_active = true
+       AND NOT psc.is_terminal
+       AND COALESCE(d.is_test_data, false) = false
+       AND d.created_at::date <= $1::date`,
+    [period.end]
+  );
+
+  return computeRepAtRiskCountsFromRows(
+    result.rows as RepAtRiskInputRow[],
+    periodEndAsOfDate(period)
+  );
+}
+
 async function refreshOfficePeriod(
   client: { query: (sql: string, params?: unknown[]) => Promise<{ rows: any[]; rowCount: number | null }> },
   schemaName: string,
@@ -78,6 +192,8 @@ async function refreshOfficePeriod(
        AND rep_id IN (SELECT id FROM public.users WHERE office_id = $4)`,
     [period.kind, period.start, period.end, officeId]
   );
+
+  const atRiskCounts = await getRepAtRiskCountsForPeriod(client, schemaName, period);
 
   const insertResult = await client.query(
     `WITH rep_deals AS (
@@ -154,15 +270,16 @@ async function refreshOfficePeriod(
              AND COALESCE(d.actual_close_date, d.contract_signed_date, d.contract_signed_at::date, d.lost_at::date) >= $2::date
              AND COALESCE(d.actual_close_date, d.contract_signed_date, d.contract_signed_at::date, d.lost_at::date) <= $3::date
          ), 2), 0)::numeric AS avg_days_to_close,
-         COUNT(*) FILTER (
-           WHERE d.is_active = true
-             AND NOT psc.is_terminal
-             AND psc.stale_threshold_days IS NOT NULL
-             AND d.stage_entered_at < $3::timestamptz - (psc.stale_threshold_days || ' days')::interval
-         )::int AS at_risk_count
+         0::int AS legacy_at_risk_count
        FROM ${schemaName}.deals d
        JOIN public.pipeline_stage_config psc ON psc.id = d.stage_id
        GROUP BY d.assigned_rep_id
+     ),
+     at_risk_counts AS (
+       SELECT
+         "repId"::uuid AS rep_id,
+         "atRiskCount"::int AS at_risk_count
+       FROM jsonb_to_recordset($7::jsonb) AS counts("repId" text, "atRiskCount" int)
      ),
      -- stale_accounts deliberately does NOT filter on companies.is_active or
      -- properties.is_active. There is no deactivated_at timestamp on those tables,
@@ -265,7 +382,7 @@ async function refreshOfficePeriod(
          ELSE ROUND((COALESCE(rd.wins_count, 0)::numeric / (COALESCE(rd.wins_count, 0) + COALESCE(rd.losses_count, 0))::numeric) * 100, 2)
        END,
        COALESCE(rd.avg_days_to_close, 0),
-       COALESCE(rd.at_risk_count, 0),
+       COALESCE(arc.at_risk_count, 0),
        COALESCE(sa.stale_account_count, 0),
        COALESCE(a.activity_total, 0),
        COALESCE(a.calls, 0),
@@ -278,12 +395,21 @@ async function refreshOfficePeriod(
        NOW()
      FROM public.users u
      LEFT JOIN rep_deals rd ON rd.rep_id = u.id
+     LEFT JOIN at_risk_counts arc ON arc.rep_id = u.id
      LEFT JOIN stale_accounts sa ON sa.rep_id = u.id
      LEFT JOIN activity a ON a.rep_id = u.id
      WHERE u.office_id = $4
        AND u.is_active = true
        AND u.role = 'rep'`,
-    [period.kind, period.start, period.end, officeId, officeName, STALE_ACCOUNT_THRESHOLD_DAYS]
+    [
+      period.kind,
+      period.start,
+      period.end,
+      officeId,
+      officeName,
+      STALE_ACCOUNT_THRESHOLD_DAYS,
+      JSON.stringify(atRiskCounts),
+    ]
   );
 
   return insertResult.rowCount ?? 0;
