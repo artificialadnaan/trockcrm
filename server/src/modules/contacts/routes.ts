@@ -303,6 +303,8 @@ router.post("/:id/assign-to-me", async (req, res, next) => {
     const contact = await assignContactOwnerToSelf(req.tenantDb!, req.params.id, {
       id: req.user!.id,
       role: req.user!.role,
+      activeOfficeId: req.user!.activeOfficeId,
+      officeId: req.user!.officeId,
     });
     await req.commitTransaction!();
     res.json({ contact });
@@ -325,6 +327,8 @@ router.patch("/:id/owner", async (req, res, next) => {
     const contact = await reassignContactOwner(req.tenantDb!, req.params.id, ownerUserId, {
       id: req.user!.id,
       role: req.user!.role,
+      activeOfficeId: req.user!.activeOfficeId,
+      officeId: req.user!.officeId,
     });
     await req.commitTransaction!();
     res.json({ contact });

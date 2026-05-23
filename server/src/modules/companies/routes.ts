@@ -85,6 +85,8 @@ router.post("/:id/assign-to-me", async (req, res, next) => {
     const company = await assignCompanyOwnerToSelf(req.tenantDb!, req.params.id, {
       id: req.user!.id,
       role: req.user!.role,
+      activeOfficeId: req.user!.activeOfficeId,
+      officeId: req.user!.officeId,
     });
     await req.commitTransaction!();
     res.json({ company });
@@ -105,6 +107,8 @@ router.patch("/:id/owner", async (req, res, next) => {
     const company = await reassignCompanyOwner(req.tenantDb!, req.params.id, ownerUserId, {
       id: req.user!.id,
       role: req.user!.role,
+      activeOfficeId: req.user!.activeOfficeId,
+      officeId: req.user!.officeId,
     });
     await req.commitTransaction!();
     res.json({ company });
