@@ -12,12 +12,33 @@ import { ContactListPage } from "./contact-list-page";
 
 const mocks = vi.hoisted(() => ({
   useContactsMock: vi.fn(),
+  assignContactOwnerToMeMock: vi.fn(),
+  reassignContactOwnerMock: vi.fn(),
   setFiltersMock: vi.fn(),
   resetFiltersMock: vi.fn(),
+  useAuthMock: vi.fn(),
+  useTaskAssigneesMock: vi.fn(),
 }));
 
 vi.mock("@/hooks/use-contacts", () => ({
   useContacts: mocks.useContactsMock,
+  assignContactOwnerToMe: mocks.assignContactOwnerToMeMock,
+  reassignContactOwner: mocks.reassignContactOwnerMock,
+}));
+
+vi.mock("@/hooks/use-task-assignees", () => ({
+  useTaskAssignees: mocks.useTaskAssigneesMock,
+}));
+
+vi.mock("@/lib/auth", () => ({
+  useAuth: mocks.useAuthMock,
+}));
+
+vi.mock("sonner", () => ({
+  toast: {
+    success: vi.fn(),
+    error: vi.fn(),
+  },
 }));
 
 vi.mock("@/hooks/use-contact-filters", () => ({
@@ -66,8 +87,32 @@ async function renderPageDom() {
 describe("ContactListPage", () => {
   beforeEach(() => {
     mocks.useContactsMock.mockReset();
+    mocks.assignContactOwnerToMeMock.mockReset();
+    mocks.reassignContactOwnerMock.mockReset();
     mocks.setFiltersMock.mockReset();
     mocks.resetFiltersMock.mockReset();
+    mocks.useAuthMock.mockReset();
+    mocks.useTaskAssigneesMock.mockReset();
+    mocks.useAuthMock.mockReturnValue({
+      user: {
+        id: "rep-1",
+        displayName: "Riley Rep",
+        email: "rep@example.com",
+        role: "rep",
+        officeId: "office-1",
+      },
+      loading: false,
+    });
+    mocks.useTaskAssigneesMock.mockReturnValue({
+      assignees: [
+        { id: "rep-1", displayName: "Riley Rep" },
+        { id: "director-1", displayName: "Dana Director" },
+      ],
+      loading: false,
+      error: null,
+    });
+    mocks.assignContactOwnerToMeMock.mockResolvedValue({ contact: { id: "contact-2", ownerId: "rep-1" } });
+    mocks.reassignContactOwnerMock.mockResolvedValue({ contact: { id: "contact-1", ownerId: "director-1" } });
     mocks.useContactsMock.mockReturnValue({
       contacts: [
         {
@@ -107,6 +152,7 @@ describe("ContactListPage", () => {
       pagination: { page: 1, limit: 50, total: 1, totalPages: 1 },
       loading: false,
       error: null,
+      refetch: vi.fn(),
     });
   });
 
@@ -175,6 +221,87 @@ describe("ContactListPage", () => {
     });
 
     expect(normalize(renderPage())).toContain("Unassigned");
+  });
+
+  it("shows assign to me for an unassigned contact and refreshes after claiming it", async () => {
+    const refetch = vi.fn();
+    mocks.useContactsMock.mockReturnValue({
+      contacts: [
+        {
+          id: "contact-2",
+          firstName: "No",
+          lastName: "Owner",
+          email: null,
+          phone: null,
+          mobile: null,
+          companyName: "T Rock Owner Group",
+          companyId: "company-1",
+          ownerUserId: null,
+          ownerUserName: null,
+          jobTitle: null,
+          category: "client",
+          role: null,
+          isPrimary: false,
+          linkedinUrl: null,
+          address: null,
+          city: null,
+          state: null,
+          zip: null,
+          notes: null,
+          touchpointCount: 0,
+          lastContactedAt: null,
+          firstOutreachCompleted: false,
+          procoreContactId: null,
+          hubspotContactId: null,
+          linkedDealsCount: 0,
+          lastTouchAt: null,
+          normalizedPhone: null,
+          isActive: true,
+          createdAt: "2026-04-10T10:00:00.000Z",
+          updatedAt: "2026-04-11T10:00:00.000Z",
+        },
+      ],
+      pagination: { page: 1, limit: 50, total: 1, totalPages: 1 },
+      loading: false,
+      error: null,
+      refetch,
+    });
+
+    const { container, cleanup } = await renderPageDom();
+    try {
+      const assignButton = Array.from(container.querySelectorAll("button")).find(
+        (button) => button.textContent?.trim() === "Assign to me"
+      );
+      expect(assignButton).toBeTruthy();
+
+      await act(async () => {
+        assignButton?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+      });
+
+      expect(mocks.assignContactOwnerToMeMock).toHaveBeenCalledWith("contact-2");
+      expect(refetch).toHaveBeenCalled();
+    } finally {
+      await cleanup();
+    }
+  });
+
+  it("does not show assign to me on an already-owned contact for a rep", () => {
+    expect(normalize(renderPage())).not.toContain("Assign to me");
+  });
+
+  it("shows a reassign owner affordance for admins", () => {
+    mocks.useAuthMock.mockReturnValue({
+      user: {
+        id: "admin-1",
+        displayName: "Ada Admin",
+        email: "admin@example.com",
+        role: "admin",
+        officeId: "office-1",
+      },
+      loading: false,
+    });
+
+    expect(normalize(renderPage())).toContain("Reassign owner");
   });
 
   it("filters contacts between All and Mine ownership scopes", async () => {

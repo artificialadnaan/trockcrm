@@ -186,9 +186,25 @@ export async function updateCompany(
     notes: string;
   }>
 ) {
-  const updates: any = { ...data };
+  if ("ownerId" in data || "ownerUserId" in data || "ownerUserName" in data) {
+    throw new AppError(403, "Use the ownership reassignment endpoint to change company owner");
+  }
+
+  const updates: any = {};
+  if (data.name !== undefined) updates.name = data.name;
+  if (data.category !== undefined) updates.category = data.category as any;
+  if (data.address !== undefined) updates.address = data.address;
+  if (data.city !== undefined) updates.city = data.city;
+  if (data.state !== undefined) updates.state = data.state;
+  if (data.zip !== undefined) updates.zip = data.zip;
+  if (data.phone !== undefined) updates.phone = data.phone;
+  if (data.website !== undefined) updates.website = data.website;
+  if (data.notes !== undefined) updates.notes = data.notes;
   if (data.name) updates.slug = await uniqueSlug(tenantDb, slugify(data.name), id);
-  if (data.category) updates.category = data.category as any;
+
+  if (Object.keys(updates).length === 0) {
+    return getCompanyById(tenantDb, id);
+  }
 
   const rows = await tenantDb
     .update(companies)

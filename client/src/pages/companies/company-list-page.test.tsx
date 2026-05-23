@@ -12,10 +12,31 @@ import { CompanyListPage } from "./company-list-page";
 
 const mocks = vi.hoisted(() => ({
   useCompaniesMock: vi.fn(),
+  assignCompanyOwnerToMeMock: vi.fn(),
+  reassignCompanyOwnerMock: vi.fn(),
+  useAuthMock: vi.fn(),
+  useTaskAssigneesMock: vi.fn(),
 }));
 
 vi.mock("@/hooks/use-companies", () => ({
   useCompanies: mocks.useCompaniesMock,
+  assignCompanyOwnerToMe: mocks.assignCompanyOwnerToMeMock,
+  reassignCompanyOwner: mocks.reassignCompanyOwnerMock,
+}));
+
+vi.mock("@/hooks/use-task-assignees", () => ({
+  useTaskAssignees: mocks.useTaskAssigneesMock,
+}));
+
+vi.mock("@/lib/auth", () => ({
+  useAuth: mocks.useAuthMock,
+}));
+
+vi.mock("sonner", () => ({
+  toast: {
+    success: vi.fn(),
+    error: vi.fn(),
+  },
 }));
 
 function normalize(html: string) {
@@ -56,6 +77,30 @@ async function renderPageDom() {
 describe("CompanyListPage", () => {
   beforeEach(() => {
     mocks.useCompaniesMock.mockReset();
+    mocks.assignCompanyOwnerToMeMock.mockReset();
+    mocks.reassignCompanyOwnerMock.mockReset();
+    mocks.useAuthMock.mockReset();
+    mocks.useTaskAssigneesMock.mockReset();
+    mocks.useAuthMock.mockReturnValue({
+      user: {
+        id: "rep-1",
+        displayName: "Riley Rep",
+        email: "rep@example.com",
+        role: "rep",
+        officeId: "office-1",
+      },
+      loading: false,
+    });
+    mocks.useTaskAssigneesMock.mockReturnValue({
+      assignees: [
+        { id: "rep-1", displayName: "Riley Rep" },
+        { id: "director-1", displayName: "Dana Director" },
+      ],
+      loading: false,
+      error: null,
+    });
+    mocks.assignCompanyOwnerToMeMock.mockResolvedValue({ company: { id: "company-2", ownerId: "rep-1" } });
+    mocks.reassignCompanyOwnerMock.mockResolvedValue({ company: { id: "company-1", ownerId: "director-1" } });
     mocks.useCompaniesMock.mockReturnValue({
       companies: [
         {
@@ -95,6 +140,7 @@ describe("CompanyListPage", () => {
       pagination: { page: 1, limit: 50, total: 1, totalPages: 1 },
       loading: false,
       error: null,
+      refetch: vi.fn(),
     });
   });
 
@@ -162,6 +208,87 @@ describe("CompanyListPage", () => {
     });
 
     expect(normalize(renderPage())).toContain("Unassigned");
+  });
+
+  it("shows assign to me for an unassigned company and refreshes after claiming it", async () => {
+    const refetch = vi.fn();
+    mocks.useCompaniesMock.mockReturnValue({
+      companies: [
+        {
+          id: "company-2",
+          name: "Unowned Account",
+          category: "client",
+          address: null,
+          city: "Dallas",
+          state: "TX",
+          zip: null,
+          phone: null,
+          website: null,
+          ownerUserId: null,
+          ownerUserName: null,
+          industry: null,
+          region: null,
+          domain: null,
+          lastActivityAt: null,
+          hubspotId: null,
+          procoreId: null,
+          notes: null,
+          companyVerificationStatus: null,
+          companyVerificationRequestedAt: null,
+          companyVerificationEmailSentAt: null,
+          companyVerifiedAt: null,
+          companyVerifiedBy: null,
+          contactCount: 0,
+          dealCount: 0,
+          contactsCount: 0,
+          propertiesCount: 0,
+          activeDealsCount: 0,
+          pipelineValue: "0",
+          createdAt: "2026-04-10T10:00:00.000Z",
+          updatedAt: "2026-04-11T10:00:00.000Z",
+        },
+      ],
+      pagination: { page: 1, limit: 50, total: 1, totalPages: 1 },
+      loading: false,
+      error: null,
+      refetch,
+    });
+
+    const { container, cleanup } = await renderPageDom();
+    try {
+      const assignButton = Array.from(container.querySelectorAll("button")).find(
+        (button) => button.textContent?.trim() === "Assign to me"
+      );
+      expect(assignButton).toBeTruthy();
+
+      await act(async () => {
+        assignButton?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+      });
+
+      expect(mocks.assignCompanyOwnerToMeMock).toHaveBeenCalledWith("company-2");
+      expect(refetch).toHaveBeenCalled();
+    } finally {
+      await cleanup();
+    }
+  });
+
+  it("does not show assign to me on an already-owned company for a rep", () => {
+    expect(normalize(renderPage())).not.toContain("Assign to me");
+  });
+
+  it("shows a reassign owner affordance for directors", () => {
+    mocks.useAuthMock.mockReturnValue({
+      user: {
+        id: "director-1",
+        displayName: "Dana Director",
+        email: "director@example.com",
+        role: "director",
+        officeId: "office-1",
+      },
+      loading: false,
+    });
+
+    expect(normalize(renderPage())).toContain("Reassign owner");
   });
 
   it("filters companies between All and Mine ownership scopes", async () => {

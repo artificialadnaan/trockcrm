@@ -14,6 +14,7 @@ import { AppError } from "../../middleware/error-handler.js";
 import { requireAdmin } from "../../middleware/rbac.js";
 import { requestAuditContext, writeSoftDeleteAuditLog } from "../../lib/soft-delete-audit.js";
 import { markCompanyRejected, markCompanyVerified } from "./customer-status-service.js";
+import { assignCompanyOwnerToSelf, reassignCompanyOwner } from "../ownership/assignment-service.js";
 
 const router = Router();
 
@@ -73,6 +74,38 @@ router.patch("/:id", async (req, res, next) => {
   try {
     const company = await updateCompany(req.tenantDb!, req.params.id, req.body);
     if (!company) throw new AppError(404, "Company not found");
+    await req.commitTransaction!();
+    res.json({ company });
+  } catch (err) { next(err); }
+});
+
+// POST /companies/:id/assign-to-me — any CRM user may claim an unassigned company
+router.post("/:id/assign-to-me", async (req, res, next) => {
+  try {
+    const company = await assignCompanyOwnerToSelf(req.tenantDb!, req.params.id, {
+      id: req.user!.id,
+      role: req.user!.role,
+    });
+    await req.commitTransaction!();
+    res.json({ company });
+  } catch (err) { next(err); }
+});
+
+// PATCH /companies/:id/owner — admin/director reassignment, including clearing owner
+router.patch("/:id/owner", async (req, res, next) => {
+  try {
+    if (!Object.prototype.hasOwnProperty.call(req.body ?? {}, "ownerUserId")) {
+      throw new AppError(400, "ownerUserId is required");
+    }
+    const ownerUserId = req.body.ownerUserId;
+    if (ownerUserId !== null && typeof ownerUserId !== "string") {
+      throw new AppError(400, "ownerUserId must be a user id or null");
+    }
+
+    const company = await reassignCompanyOwner(req.tenantDb!, req.params.id, ownerUserId, {
+      id: req.user!.id,
+      role: req.user!.role,
+    });
     await req.commitTransaction!();
     res.json({ company });
   } catch (err) { next(err); }
