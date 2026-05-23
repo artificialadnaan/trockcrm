@@ -228,7 +228,7 @@ vi.mock("@/components/deals/stage-change-dialog", () => ({
 }));
 
 vi.mock("@/components/tasks/task-create-dialog", () => ({
-  TaskCreateDialog: () => <div>Task Create</div>,
+  TaskCreateDialog: () => <div>New Task</div>,
 }));
 
 vi.mock("@/components/call-recordings/recording-list", () => ({
@@ -900,6 +900,36 @@ describe("DealDetailPage", () => {
     expect(html).toContain("Edit");
   });
 
+  it("removes the deal-detail Move Stage header action while preserving other header actions", () => {
+    mocks.useAuthMock.mockReturnValueOnce({
+      user: {
+        id: "rep-1",
+        role: "rep",
+      },
+    });
+    mocks.useDealDetailMock.mockReturnValueOnce({
+      loading: false,
+      error: null,
+      refetch: vi.fn(),
+      deal: makeDealDetail({
+        stageId: "stage-opportunity",
+        isBidBoardOwned: false,
+        bidBoardStageSlug: null,
+        readOnlySyncedAt: null,
+        bidBoardOwnership: null,
+        rfpApprovalStatus: null,
+        rfpApprovalRequestedAt: null,
+      }),
+    });
+
+    const html = renderPage();
+
+    expect(html).not.toContain("Move Stage");
+    expect(html).toContain("Trigger RFP");
+    expect(html).toContain("Edit");
+    expect(html).toContain("New Task");
+  });
+
   it("shows unknown SLA state when stage age is unavailable", () => {
     mocks.useDealDetailMock.mockReturnValueOnce({
       loading: false,
@@ -930,7 +960,7 @@ describe("DealDetailPage", () => {
     expect(html).toContain("text-brand-red");
   });
 
-  it("shows Bid Board ownership messaging while preserving valid CRM stage controls", () => {
+  it("shows Bid Board ownership messaging while preserving valid progress-strip stage controls", () => {
     mocks.useAuthMock.mockReturnValueOnce({
       user: {
         id: "rep-1",
@@ -941,8 +971,7 @@ describe("DealDetailPage", () => {
 
     expect(html).toContain("Bid Board now owns downstream progression");
     expect(html).toContain("Bid Board is now the source of truth once this deal entered estimating.");
-    expect(html).toContain("Move Stage");
-    expect(html).toContain("Bid Board managed");
+    expect(html).toContain('data-disabled-reason="bid-board-managed"');
   });
 
   it("renders the Bid Board summary panel only for BidBoard-owned deals", () => {
@@ -1472,14 +1501,13 @@ describe("DealDetailPage", () => {
     });
 
     const html = renderPage();
-    const managedCount = (html.match(/Bid Board managed/g) ?? []).length;
+    const managedCount = (html.match(/data-disabled-reason="bid-board-managed"/g) ?? []).length;
 
-    expect(html).toContain("Move Stage");
-    expect(html).toContain('data-disabled="false">Estimating');
+    expect(html).toContain('data-stage-slug="estimating"');
     expect(managedCount).toBe(0);
   });
 
-  it("hides legacy stage labels from the move-stage menu when mixed stage config still exists", () => {
+  it("hides legacy stage labels from pipeline progress when mixed stage config still exists", () => {
     mocks.usePipelineStagesMock.mockReturnValueOnce({
       stages: [
         { id: "stage-opportunity", name: "Opportunity", slug: "opportunity", workflowFamily: "standard_deal", displayOrder: 0, isTerminal: false },
@@ -1543,9 +1571,8 @@ describe("DealDetailPage", () => {
     });
 
     const html = renderPage();
-    const managedCount = (html.match(/Bid Board managed/g) ?? []).length;
+    const managedCount = (html.match(/data-disabled-reason="bid-board-managed"/g) ?? []).length;
 
-    expect(html).toContain("Move Stage");
     expect(managedCount).toBe(5);
   });
 
