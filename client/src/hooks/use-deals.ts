@@ -99,11 +99,15 @@ export interface Deal {
   assignedRepName?: string | null;
   companyId: string | null;
   companyName?: string | null;
+  companyOwnerUserId?: string | null;
+  companyOwnerUserName?: string | null;
   propertyId: string | null;
   sourceLeadId: string | null;
   primaryContactId: string | null;
   primaryContactName?: string | null;
   primaryContactTitle?: string | null;
+  primaryContactOwnerUserId?: string | null;
+  primaryContactOwnerUserName?: string | null;
   ddEstimate: string | null;
   bidEstimate: string | null;
   awardedAmount: string | null;

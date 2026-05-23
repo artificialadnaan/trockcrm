@@ -1448,8 +1448,12 @@ export async function getDealDetail(
       ...getTableColumns(deals),
       assignedRepName: users.displayName,
       companyName: companies.name,
+      companyOwnerUserId: companies.ownerId,
+      companyOwnerUserName: sql<string | null>`(SELECT display_name FROM public.users WHERE id = ${companies.ownerId})`,
       primaryContactName: sql<string | null>`NULLIF(TRIM(CONCAT_WS(' ', ${contacts.firstName}, ${contacts.lastName})), '')`,
       primaryContactTitle: contacts.jobTitle,
+      primaryContactOwnerUserId: contacts.ownerId,
+      primaryContactOwnerUserName: sql<string | null>`(SELECT display_name FROM public.users WHERE id = ${contacts.ownerId})`,
       projectType: sql<string | null>`COALESCE(${projectTypeConfig.name}, ${deals.projectType})`,
     })
     .from(deals)

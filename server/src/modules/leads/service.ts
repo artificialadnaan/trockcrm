@@ -526,8 +526,14 @@ async function decorateLeads(
     companyIds.length === 0
       ? []
       : await tenantDb
-          .select({ id: companies.id, name: companies.name })
+          .select({
+            id: companies.id,
+            name: companies.name,
+            ownerUserId: companies.ownerId,
+            ownerUserName: users.displayName,
+          })
           .from(companies)
+          .leftJoin(users, eq(users.id, companies.ownerId))
           .where(inArray(companies.id, companyIds));
   const propertyRows =
     propertyIds.length === 0
@@ -575,19 +581,25 @@ async function decorateLeads(
             firstName: contacts.firstName,
             lastName: contacts.lastName,
             jobTitle: contacts.jobTitle,
+            ownerUserId: contacts.ownerId,
+            ownerUserName: users.displayName,
           })
           .from(contacts)
+          .leftJoin(users, eq(users.id, contacts.ownerId))
           .where(inArray(contacts.id, primaryContactIds as string[]));
-  const convertedDealRows = await tenantDb
-    .select({
-      sourceLeadId: deals.sourceLeadId,
-      id: deals.id,
-      dealNumber: deals.dealNumber,
-    })
-    .from(deals)
-    .where(inArray(deals.sourceLeadId, leadIds));
+  const convertedDealRows =
+    leadIds.length === 0
+      ? []
+      : await tenantDb
+          .select({
+            sourceLeadId: deals.sourceLeadId,
+            id: deals.id,
+            dealNumber: deals.dealNumber,
+          })
+          .from(deals)
+          .where(inArray(deals.sourceLeadId, leadIds));
 
-  const companyMap = new Map(companyRows.map((company) => [company.id, company.name]));
+  const companyMap = new Map(companyRows.map((company) => [company.id, company]));
   const propertyMap = new Map(propertyRows.map((property) => [property.id, property]));
   const projectTypeMap = new Map(projectTypeRows.map((projectType) => [projectType.id, projectType]));
   const assignedRepMap = new Map(assignedRepRows.map((rep) => [rep.id, rep.displayName]));
@@ -597,6 +609,8 @@ async function decorateLeads(
       {
         name: [contact.firstName, contact.lastName].filter(Boolean).join(" ").trim() || null,
         title: contact.jobTitle ?? null,
+        ownerUserId: contact.ownerUserId ?? null,
+        ownerUserName: contact.ownerUserName ?? null,
       },
     ])
   );
@@ -627,12 +641,20 @@ async function decorateLeads(
   return rows.map((lead) => ({
     ...lead,
     assignedRepName: assignedRepMap.get(lead.assignedRepId) ?? null,
-    companyName: companyMap.get(lead.companyId) ?? null,
+    companyName: companyMap.get(lead.companyId)?.name ?? null,
+    companyOwnerUserId: companyMap.get(lead.companyId)?.ownerUserId ?? null,
+    companyOwnerUserName: companyMap.get(lead.companyId)?.ownerUserName ?? null,
     primaryContactName: lead.primaryContactId
       ? primaryContactMap.get(lead.primaryContactId)?.name ?? null
       : null,
     primaryContactTitle: lead.primaryContactId
       ? primaryContactMap.get(lead.primaryContactId)?.title ?? null
+      : null,
+    primaryContactOwnerUserId: lead.primaryContactId
+      ? primaryContactMap.get(lead.primaryContactId)?.ownerUserId ?? null
+      : null,
+    primaryContactOwnerUserName: lead.primaryContactId
+      ? primaryContactMap.get(lead.primaryContactId)?.ownerUserName ?? null
       : null,
     property: propertyMap.get(lead.propertyId) ?? null,
     projectType: lead.projectTypeId ? projectTypeMap.get(lead.projectTypeId) ?? null : null,

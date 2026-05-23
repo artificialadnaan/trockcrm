@@ -572,6 +572,50 @@ describe("DealDetailPage", () => {
     expect(html).toContain("DFW-3-12826-aa");
   });
 
+  it("shows owner badges for the associated company and primary contact", () => {
+    mocks.useDealDetailMock.mockReturnValueOnce({
+      loading: false,
+      error: null,
+      refetch: vi.fn(),
+      deal: makeDealDetail({
+        companyOwnerUserId: "company-owner-1",
+        companyOwnerUserName: "Alicia Adams",
+        primaryContactId: "contact-1",
+        primaryContactName: "Morgan Carter",
+        primaryContactOwnerUserId: "contact-owner-1",
+        primaryContactOwnerUserName: "Kai Morgan",
+      }),
+    });
+
+    const html = renderPage();
+
+    expect(html).toContain("Alicia Adams");
+    expect(html).toContain("Kai Morgan");
+    expect(html).toContain(">AA<");
+    expect(html).toContain(">KM<");
+  });
+
+  it("shows Unassigned owner state for an unowned associated company and primary contact", () => {
+    mocks.useDealDetailMock.mockReturnValueOnce({
+      loading: false,
+      error: null,
+      refetch: vi.fn(),
+      deal: makeDealDetail({
+        companyOwnerUserId: null,
+        companyOwnerUserName: null,
+        primaryContactId: "contact-1",
+        primaryContactName: "Morgan Carter",
+        primaryContactOwnerUserId: null,
+        primaryContactOwnerUserName: null,
+      }),
+    });
+
+    const html = renderPage();
+
+    expect(html.match(/Unassigned/g)?.length ?? 0).toBeGreaterThanOrEqual(2);
+    expect(html).toContain(">UA<");
+  });
+
   it("renders muted primary contact empty state when no primary contact is assigned", () => {
     const html = renderPage();
 
