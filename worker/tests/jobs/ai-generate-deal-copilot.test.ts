@@ -72,15 +72,13 @@ describe("ai generate deal copilot job", () => {
       "office-1"
     );
 
-    expect(generateDealCopilotPacketMock).toHaveBeenCalledWith(
-      expect.anything(),
-      expect.objectContaining({
-        dealId: "deal-1",
-        forceRegenerate: true,
-        viewerUserId: "user-7",
-        viewerRole: "director",
-      })
-    );
+    const [, input] = generateDealCopilotPacketMock.mock.calls[0] ?? [];
+    expect(input).toMatchObject({
+      dealId: "deal-1",
+      forceRegenerate: true,
+      viewerUserId: "user-7",
+    });
+    expect(input).not.toHaveProperty("viewerRole");
     expect(client.release).toHaveBeenCalledTimes(1);
   });
 });

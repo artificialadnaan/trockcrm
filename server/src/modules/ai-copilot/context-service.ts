@@ -62,7 +62,8 @@ export async function getDealCopilotContext(
   viewerUserId: string,
   options: { viewerRole?: UserRole; now?: Date } = {}
 ): Promise<DealCopilotContext> {
-  const dealResult = await tenantDb.execute(sql`
+  const [dealResult, activitiesResult, emailsResult, taskSummaryResult] = await Promise.all([
+    tenantDb.execute(sql`
       SELECT
         d.id,
         d.deal_number,
@@ -101,16 +102,16 @@ export async function getDealCopilotContext(
       ) latest_current_stage_entered_at ON TRUE
       WHERE d.id = ${dealId}
       LIMIT 1
-    `);
-  const activitiesResult = await tenantDb.execute(sql`
+    `),
+    tenantDb.execute(sql`
       SELECT id, type, subject, body, occurred_at
       FROM activities
       WHERE deal_id = ${dealId}
         AND (type <> 'email' OR responsible_user_id = ${viewerUserId})
       ORDER BY occurred_at DESC
       LIMIT 10
-    `);
-  const emailsResult = await tenantDb.execute(sql`
+    `),
+    tenantDb.execute(sql`
       SELECT id, subject, body_preview, direction, sent_at, from_address, to_addresses
       FROM emails
       WHERE ${buildDealEmailLinkCondition("emails", sql`${dealId}`)}
@@ -119,14 +120,15 @@ export async function getDealCopilotContext(
         AND assignment_status <> 'ignored'
       ORDER BY sent_at DESC
       LIMIT 10
-    `);
-  const taskSummaryResult = await tenantDb.execute(sql`
+    `),
+    tenantDb.execute(sql`
       SELECT
         COUNT(*) FILTER (WHERE status IN ('pending', 'in_progress', 'waiting_on', 'blocked'))::int AS open_task_count,
         COUNT(*) FILTER (WHERE status IN ('pending', 'in_progress', 'waiting_on', 'blocked') AND due_date < CURRENT_DATE)::int AS overdue_task_count
       FROM tasks
       WHERE deal_id = ${dealId}
-    `);
+    `),
+  ]);
 
   const dealRow = getRows(dealResult)[0];
   if (!dealRow) {

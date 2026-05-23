@@ -131,6 +131,8 @@ export async function runAiDisconnectDigest(): Promise<void> {
 
       try {
         await client.query("BEGIN");
+        const clockResult = await client.query("SELECT NOW() AS digest_now");
+        const digestNow = new Date(clockResult.rows[0]?.digest_now ?? Date.now());
 
         const atRiskCandidateRes = await client.query(
           `
@@ -165,7 +167,7 @@ export async function runAiDisconnectDigest(): Promise<void> {
               AND COALESCE(d.is_test_data, false) = false
           `
         );
-        const staleStageRows = getDigestAtRiskRows(atRiskCandidateRes.rows, new Date());
+        const staleStageRows = getDigestAtRiskRows(atRiskCandidateRes.rows, digestNow);
         const staleStageCount = staleStageRows.length;
 
         const summaryRes = await client.query(

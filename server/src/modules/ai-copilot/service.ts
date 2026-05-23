@@ -33,6 +33,7 @@ import type { DealCopilotPromptOutput } from "./prompt-contract.js";
 
 type TenantDb = NodePgDatabase<typeof schema>;
 const PACKET_TTL_MS = 30 * 60 * 1000;
+const SHARED_COPILOT_RISK_ROLE: UserRole = "director";
 
 export interface GenerateDealCopilotPacketInput {
   dealId: string;
@@ -704,10 +705,12 @@ function parseTriageMetadata(commentText: string | null | undefined) {
 }
 
 async function getCurrentDisconnectMetadataForDeal(tenantDb: TenantDb, dealId: string) {
-  const rows = await listCurrentSalesProcessDisconnectRows(tenantDb, { limit: null });
-  const disconnectTypes = rows
-    .filter((row) => row.id === dealId)
-    .map((row) => row.disconnectType);
+  const rows = await listCurrentSalesProcessDisconnectRows(tenantDb, {
+    dealId,
+    limit: null,
+    viewerRole: SHARED_COPILOT_RISK_ROLE,
+  });
+  const disconnectTypes = rows.map((row) => row.disconnectType);
   const clusterKeys = Array.from(new Set(disconnectTypes.map((disconnectType) => getDisconnectClusterKey(disconnectType))));
   return { disconnectTypes, clusterKeys };
 }
@@ -1098,7 +1101,7 @@ function buildDisconnectRowsFromBaseRows(
 
 export async function listCurrentSalesProcessDisconnectRows(
   tenantDb: TenantDb,
-  input: { limit?: number | null; now?: Date; viewerRole?: UserRole } = {}
+  input: { dealId?: string; limit?: number | null; now?: Date; viewerRole?: UserRole } = {}
 ): Promise<SalesProcessDisconnectRow[]> {
   const limit = input.limit == null ? null : Math.max(1, Math.min(input.limit, 5000));
   const now = input.now ?? new Date();
@@ -1205,6 +1208,7 @@ export async function listCurrentSalesProcessDisconnectRows(
     WHERE d.is_active = TRUE
       AND psc.is_terminal = FALSE
       AND COALESCE(d.is_test_data, false) = false
+      ${input.dealId ? sql`AND d.id = ${input.dealId}` : sql``}
   `);
   const disconnectRows = buildDisconnectRowsFromBaseRows(
     getRows(baseResult) as SalesProcessDisconnectBaseRow[],
@@ -1224,12 +1228,14 @@ export async function generateDealCopilotPacket(
     throw new AppError(400, "viewerUserId required to generate copilot packet");
   }
   const now = deps.now ?? new Date();
-  const viewerRole = input.viewerRole ?? "rep";
   const context = await deps.getDealCopilotContext(tenantDb, input.dealId, input.viewerUserId, {
-    viewerRole,
+    viewerRole: SHARED_COPILOT_RISK_ROLE,
     now,
   });
-  const signals = await deps.getDealBlindSpotSignals(tenantDb, input.dealId, { viewerRole, now });
+  const signals = await deps.getDealBlindSpotSignals(tenantDb, input.dealId, {
+    viewerRole: SHARED_COPILOT_RISK_ROLE,
+    now,
+  });
   const snapshotHash = createSnapshotHash({ context, signals });
 
   if (!input.forceRegenerate) {

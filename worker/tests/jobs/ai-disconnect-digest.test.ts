@@ -34,6 +34,9 @@ describe("ai disconnect digest worker", () => {
       if (sql === "BEGIN" || sql === "COMMIT") {
         return { rows: [] };
       }
+      if (sql === "SELECT NOW() AS digest_now") {
+        return { rows: [{ digest_now: "2026-04-15T00:00:00.000Z" }] };
+      }
 
       if (sql.includes("AS stage_slug") && sql.includes("on_hold_accumulated_seconds")) {
         return { rows: [] };
@@ -117,6 +120,7 @@ describe("ai disconnect digest worker", () => {
       if (sql.includes("FROM information_schema.schemata")) return { rows: [{ schema_name: "office_beta" }] };
       if (sql.includes("SELECT pg_try_advisory_lock")) return { rows: [{ acquired: true }] };
       if (sql === "BEGIN" || sql === "COMMIT") return { rows: [] };
+      if (sql === "SELECT NOW() AS digest_now") return { rows: [{ digest_now: "2026-04-15T00:00:00.000Z" }] };
       if (sql.includes("AS stage_slug") && sql.includes("on_hold_accumulated_seconds")) return { rows: [] };
       if (sql.includes("AS total_disconnects")) {
         return { rows: [{ total_disconnects: 7, critical_disconnects: 3, bid_board_sync_drifts: 2, follow_through_gaps: 1 }] };
@@ -151,6 +155,7 @@ describe("ai disconnect digest worker", () => {
       if (sql.includes("FROM information_schema.schemata")) return { rows: [{ schema_name: "office_beta" }] };
       if (sql.includes("SELECT pg_try_advisory_lock")) return { rows: [{ acquired: true }] };
       if (sql === "BEGIN" || sql === "COMMIT") return { rows: [] };
+      if (sql === "SELECT NOW() AS digest_now") return { rows: [{ digest_now: "2026-04-15T00:00:00.000Z" }] };
       if (sql.includes("AS stage_slug") && sql.includes("on_hold_accumulated_seconds")) {
         return {
           rows: [
@@ -229,6 +234,69 @@ describe("ai disconnect digest worker", () => {
     vi.useRealTimers();
   });
 
+  it("uses the transaction DB clock for stale-stage calculations", async () => {
+    queryMock.mockImplementation(async (sql: string) => {
+      if (sql.includes("FROM public.offices WHERE is_active = true")) {
+        return { rows: [{ id: "office-1", slug: "beta", name: "Beta" }] };
+      }
+      if (sql.includes("FROM information_schema.schemata")) return { rows: [{ schema_name: "office_beta" }] };
+      if (sql.includes("SELECT pg_try_advisory_lock")) return { rows: [{ acquired: true }] };
+      if (sql === "BEGIN" || sql === "COMMIT") return { rows: [] };
+      if (sql === "SELECT NOW() AS digest_now") return { rows: [{ digest_now: "2026-04-15T00:00:00.000Z" }] };
+      if (sql.includes("AS stage_slug") && sql.includes("on_hold_accumulated_seconds")) {
+        return {
+          rows: [
+            {
+              id: "deal-not-yet-risk-by-db-clock",
+              assigned_rep_name: "Morgan Rep",
+              stage_slug: "estimating",
+              workflow_route: "normal",
+              stage_entered_at: "2026-04-05T00:00:00.000Z",
+              on_hold: false,
+              on_hold_started_at: null,
+              on_hold_accumulated_seconds: 0,
+              on_hold_accumulated_seconds_at_stage_entry: 0,
+            },
+          ],
+        };
+      }
+      if (sql.includes("AS total_disconnects")) {
+        return {
+          rows: [
+            {
+              total_disconnects: 0,
+              critical_disconnects: 0,
+              bid_board_sync_drifts: 0,
+              follow_through_gaps: 0,
+            },
+          ],
+        };
+      }
+      if (sql.includes("SELECT pg_advisory_unlock")) return { rows: [] };
+      if (sql.includes("INSERT INTO office_beta.notifications")) {
+        throw new Error("should not count stale-stage rows using app wall clock");
+      }
+      throw new Error(`Unexpected SQL: ${sql}`);
+    });
+
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-05-15T00:00:00.000Z"));
+
+    await runAiDisconnectDigest();
+
+    const clockCallIndex = queryMock.mock.calls.findIndex(([sql]) => sql === "SELECT NOW() AS digest_now");
+    const atRiskCallIndex = queryMock.mock.calls.findIndex(
+      ([sql]) => typeof sql === "string" && sql.includes("AS stage_slug")
+    );
+    expect(clockCallIndex).toBeGreaterThan(-1);
+    expect(atRiskCallIndex).toBeGreaterThan(clockCallIndex);
+    expect(
+      queryMock.mock.calls.some(([sql]) => typeof sql === "string" && sql.includes("INSERT INTO office_beta.notifications"))
+    ).toBe(false);
+
+    vi.useRealTimers();
+  });
+
   it("ranks engine stale-stage clusters and SQL hotspots together", async () => {
     queryMock.mockImplementation(async (sql: string) => {
       if (sql.includes("FROM public.offices WHERE is_active = true")) {
@@ -237,6 +305,7 @@ describe("ai disconnect digest worker", () => {
       if (sql.includes("FROM information_schema.schemata")) return { rows: [{ schema_name: "office_beta" }] };
       if (sql.includes("SELECT pg_try_advisory_lock")) return { rows: [{ acquired: true }] };
       if (sql === "BEGIN" || sql === "COMMIT") return { rows: [] };
+      if (sql === "SELECT NOW() AS digest_now") return { rows: [{ digest_now: "2026-04-15T00:00:00.000Z" }] };
       if (sql.includes("AS stage_slug") && sql.includes("on_hold_accumulated_seconds")) {
         return {
           rows: Array.from({ length: 4 }, (_, index) => ({
