@@ -2,7 +2,7 @@ import { useState } from "react";
 import { toast } from "sonner";
 import type { TaskAssignee } from "@/hooks/use-task-assignees";
 import { Button } from "@/components/ui/button";
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { Select, SelectContent, SelectItem, SelectTrigger } from "@/components/ui/select";
 
 const UNASSIGNED_OWNER_VALUE = "__unassigned__";
 
@@ -39,6 +39,13 @@ export function OwnerAssignmentControl({
   const [saving, setSaving] = useState(false);
   const isManager = canReassign(currentUser);
   const ownerValue = ownerUserId ?? UNASSIGNED_OWNER_VALUE;
+  const currentOwnerAssignee = ownerUserId ? assignees.find((assignee) => assignee.id === ownerUserId) : undefined;
+  const hasInactiveOrUnknownOwner = Boolean(ownerUserId && !currentOwnerAssignee);
+  const currentOwnerLabel = assigneesLoading
+    ? "Loading owners..."
+    : ownerUserId
+      ? currentOwnerAssignee?.displayName ?? "Inactive or unknown owner"
+      : "Unassigned";
 
   async function runMutation(action: () => Promise<unknown>, successMessage: string) {
     setSaving(true);
@@ -73,10 +80,13 @@ export function OwnerAssignmentControl({
           }}
         >
           <SelectTrigger className="h-8 border-slate-200 bg-slate-50 text-xs" aria-label="Reassign owner">
-            <SelectValue placeholder={assigneesLoading ? "Loading owners..." : "Reassign owner"} />
+            <span className="truncate">{currentOwnerLabel}</span>
           </SelectTrigger>
           <SelectContent>
             <SelectItem value={UNASSIGNED_OWNER_VALUE}>Unassigned</SelectItem>
+            {hasInactiveOrUnknownOwner ? (
+              <SelectItem value={ownerUserId!}>Inactive or unknown owner</SelectItem>
+            ) : null}
             {assignees.map((assignee) => (
               <SelectItem key={assignee.id} value={assignee.id}>
                 {assignee.displayName}

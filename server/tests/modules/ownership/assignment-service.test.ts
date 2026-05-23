@@ -10,6 +10,7 @@ const ADMIN_ID = "00000000-0000-4000-8000-000000000001";
 const DIRECTOR_ID = "00000000-0000-4000-8000-000000000002";
 const REP_1_ID = "00000000-0000-4000-8000-000000000011";
 const REP_2_ID = "00000000-0000-4000-8000-000000000012";
+const FIELD_CONTRACTOR_ID = "00000000-0000-4000-8000-000000000021";
 
 function createTenantDb(options: {
   updateRows?: Array<Record<string, unknown>>;
@@ -86,7 +87,7 @@ describe("company/contact owner assignment", () => {
 
   it("lets an admin reassign an owned company and clear it back to unassigned", async () => {
     const assignDb = createTenantDb({
-      selectRows: [[{ id: DIRECTOR_ID, isActive: true }]],
+      selectRows: [[{ id: DIRECTOR_ID, isActive: true, role: "director" }]],
       updateRows: [[{ id: "company-1", ownerId: DIRECTOR_ID }]],
     });
 
@@ -107,6 +108,21 @@ describe("company/contact owner assignment", () => {
         role: "admin",
       })
     ).resolves.toMatchObject({ ownerId: null });
+  });
+
+  it("rejects reassignment to an active non-CRM user", async () => {
+    const tenantDb = createTenantDb({
+      selectRows: [[{ id: FIELD_CONTRACTOR_ID, isActive: true, role: "field_contractor" }]],
+    });
+
+    await expect(
+      reassignCompanyOwner(tenantDb as never, "company-1", FIELD_CONTRACTOR_ID, {
+        id: ADMIN_ID,
+        role: "admin",
+      })
+    ).rejects.toMatchObject({ statusCode: 400 });
+
+    expect(tenantDb.update).not.toHaveBeenCalled();
   });
 
   it("rejects malformed reassignment owner ids before querying users", async () => {
@@ -169,7 +185,7 @@ describe("company/contact owner assignment", () => {
 
   it("lets a director reassign contacts but rejects inactive target users", async () => {
     const assignDb = createTenantDb({
-      selectRows: [[{ id: REP_2_ID, isActive: true }]],
+      selectRows: [[{ id: REP_2_ID, isActive: true, role: "rep" }]],
       updateRows: [[{ id: "contact-1", ownerId: REP_2_ID }]],
     });
 
@@ -181,7 +197,7 @@ describe("company/contact owner assignment", () => {
     ).resolves.toMatchObject({ ownerId: REP_2_ID });
 
     const inactiveDb = createTenantDb({
-      selectRows: [[{ id: REP_2_ID, isActive: false }]],
+      selectRows: [[{ id: REP_2_ID, isActive: false, role: "rep" }]],
     });
 
     await expect(

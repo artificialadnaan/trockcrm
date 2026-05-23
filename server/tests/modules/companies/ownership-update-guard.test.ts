@@ -15,4 +15,24 @@ describe("company generic update ownership guard", () => {
 
     expect(tenantDb.update).not.toHaveBeenCalled();
   });
+
+  it("rejects malformed patch payloads with a controlled 4xx instead of throwing TypeError", async () => {
+    const tenantDb = {
+      update: vi.fn(),
+    };
+
+    await expect(updateCompany(tenantDb as never, "company-1", null as never)).rejects.toMatchObject({
+      statusCode: 400,
+    });
+
+    await expect(updateCompany(tenantDb as never, "company-1", "not-an-object" as never)).rejects.toMatchObject({
+      statusCode: 400,
+    });
+
+    await expect(updateCompany(tenantDb as never, "company-1", [] as never)).rejects.toMatchObject({
+      statusCode: 400,
+    });
+
+    expect(tenantDb.update).not.toHaveBeenCalled();
+  });
 });

@@ -186,6 +186,10 @@ export async function updateCompany(
     notes: string;
   }>
 ) {
+  if (!data || typeof data !== "object" || Array.isArray(data)) {
+    throw new AppError(400, "Company update payload must be an object");
+  }
+
   if ("ownerId" in data || "ownerUserId" in data || "ownerUserName" in data) {
     throw new AppError(403, "Use the ownership reassignment endpoint to change company owner");
   }

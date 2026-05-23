@@ -3,6 +3,7 @@ import type { NodePgDatabase } from "drizzle-orm/node-postgres";
 import { companies, contacts, users } from "@trock-crm/shared/schema";
 import type * as schema from "@trock-crm/shared/schema";
 import { AppError } from "../../middleware/error-handler.js";
+import { isCrmUserRole } from "../../middleware/field-auth.js";
 
 type TenantDb = NodePgDatabase<typeof schema>;
 type OwnershipActor = { id: string; role: string };
@@ -21,12 +22,12 @@ async function assertActiveOwner(tenantDb: TenantDb, ownerUserId: string) {
   }
 
   const [targetUser] = await tenantDb
-    .select({ id: users.id, isActive: users.isActive })
+    .select({ id: users.id, isActive: users.isActive, role: users.role })
     .from(users)
     .where(eq(users.id, ownerUserId))
     .limit(1);
 
-  if (!targetUser || !targetUser.isActive) {
+  if (!targetUser || !targetUser.isActive || !isCrmUserRole(targetUser.role)) {
     throw new AppError(400, "Owner must be an active CRM user");
   }
 }
