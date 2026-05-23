@@ -13,6 +13,7 @@ import { Card, CardContent } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { useAuth } from "@/lib/auth";
+import { useOwnerAssignees } from "@/hooks/use-owner-assignees";
 import { useTaskAssignees } from "@/hooks/use-task-assignees";
 import { assignCompanyOwnerToMe, reassignCompanyOwner, useCompanies, type Company } from "@/hooks/use-companies";
 import { cn } from "@/lib/utils";
@@ -61,6 +62,7 @@ export function CompanyListPage() {
   const navigate = useNavigate();
   const { user } = useAuth();
   const { assignees, loading: assigneesLoading } = useTaskAssignees();
+  const { assignees: ownerAssignees, loading: ownerAssigneesLoading } = useOwnerAssignees();
   const [search, setSearch] = useState("");
   const [industry, setIndustry] = useState<(typeof INDUSTRY_OPTIONS)[number]["value"]>("all");
   const [ownerScope, setOwnerScope] = useState<(typeof OWNER_SCOPE_OPTIONS)[number]["value"]>("all");
@@ -208,7 +210,9 @@ export function CompanyListPage() {
                             ownerUserId={company.ownerUserId}
                             currentUser={user}
                             assignees={assignees}
+                            ownerReassignAssignees={ownerAssignees}
                             assigneesLoading={assigneesLoading}
+                            ownerReassignAssigneesLoading={ownerAssigneesLoading}
                             entityLabel="company"
                             onAssignToMe={() => assignCompanyOwnerToMe(company.id)}
                             onReassign={(ownerUserId) => reassignCompanyOwner(company.id, ownerUserId)}

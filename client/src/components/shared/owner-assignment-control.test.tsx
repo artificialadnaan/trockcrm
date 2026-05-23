@@ -74,4 +74,53 @@ describe("OwnerAssignmentControl", () => {
       await cleanup();
     }
   });
+
+  it("shows the reassign control to a non-manager who currently owns the item", async () => {
+    const { container, cleanup } = await renderControl({
+      ownerUserId: "rep-1",
+      currentUser: { id: "rep-1", role: "rep" },
+      assignees: [
+        { id: "rep-1", displayName: "Riley Rep" },
+      ],
+      ownerReassignAssignees: [
+        { id: "rep-1", displayName: "Riley Rep" },
+        { id: "rep-2", displayName: "Riley Cross Office" },
+      ],
+    });
+    try {
+      expect(container.querySelector('[aria-label="Reassign owner"]')).not.toBeNull();
+      expect(container.textContent).toContain("Riley Rep");
+    } finally {
+      await cleanup();
+    }
+  });
+
+  it("hides reassignment from a non-manager who does not own the item", async () => {
+    const { container, cleanup } = await renderControl({
+      ownerUserId: "rep-2",
+      currentUser: { id: "rep-1", role: "rep" },
+      assignees: [
+        { id: "rep-2", displayName: "Riley Cross Office" },
+      ],
+    });
+    try {
+      expect(container.querySelector('[aria-label="Reassign owner"]')).toBeNull();
+      expect(container.textContent).not.toContain("Assign to me");
+    } finally {
+      await cleanup();
+    }
+  });
+
+  it("keeps assign-to-me visible only for unassigned items", async () => {
+    const { container, cleanup } = await renderControl({
+      ownerUserId: null,
+      currentUser: { id: "rep-1", role: "rep" },
+    });
+    try {
+      expect(container.textContent).toContain("Assign to me");
+      expect(container.querySelector('[aria-label="Reassign owner"]')).toBeNull();
+    } finally {
+      await cleanup();
+    }
+  });
 });

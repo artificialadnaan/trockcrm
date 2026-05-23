@@ -2,8 +2,36 @@ import { Router } from "express";
 import { AppError } from "../../middleware/error-handler.js";
 import { getAccessibleOffices } from "../auth/service.js";
 import { listUsers } from "../admin/users-service.js";
+import { isCrmUserRole } from "../../middleware/field-auth.js";
 
 const router = Router();
+
+router.get("/crm-owners", async (req, res, next) => {
+  try {
+    const rows = (await listUsers()) as Array<{
+      id: string;
+      email: string;
+      displayName: string;
+      role: string;
+      officeId: string | null;
+      isActive: boolean;
+    }>;
+
+    await req.commitTransaction!();
+    res.json({
+      users: rows
+        .filter((user) => user.isActive && isCrmUserRole(user.role))
+        .map((user) => ({
+          id: user.id,
+          displayName: user.displayName,
+          email: user.email,
+          officeId: user.officeId,
+        })),
+    });
+  } catch (err) {
+    next(err);
+  }
+});
 
 router.get("/sales-reps", async (req, res, next) => {
   try {

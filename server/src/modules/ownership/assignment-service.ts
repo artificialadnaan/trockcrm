@@ -17,10 +17,8 @@ function assertUuid(value: string, fieldName: string) {
   }
 }
 
-function assertDirectorOrAdmin(actor: OwnershipActor) {
-  if (actor.role !== "admin" && actor.role !== "director") {
-    throw new AppError(403, "Only directors and admins can reassign ownership");
-  }
+function isDirectorOrAdmin(actor: OwnershipActor) {
+  return actor.role === "admin" || actor.role === "director";
 }
 
 function getActorOfficeId(actor: OwnershipActor) {
@@ -31,7 +29,7 @@ function getActorOfficeId(actor: OwnershipActor) {
   return officeId;
 }
 
-async function assertActiveOwner(tenantDb: TenantDb, ownerUserId: string, officeId: string) {
+async function assertActiveCrmOwner(tenantDb: TenantDb, ownerUserId: string) {
   assertUuid(ownerUserId, "ownerUserId");
 
   const [targetUser] = await tenantDb
@@ -43,6 +41,10 @@ async function assertActiveOwner(tenantDb: TenantDb, ownerUserId: string, office
   if (!targetUser || !targetUser.isActive || !isCrmUserRole(targetUser.role)) {
     throw new AppError(400, "Owner must be an active CRM user");
   }
+}
+
+async function assertActiveOwnerInOffice(tenantDb: TenantDb, ownerUserId: string, officeId: string) {
+  await assertActiveCrmOwner(tenantDb, ownerUserId);
 
   const assignableUsers = await listUsers(officeId);
   if (!assignableUsers.some((user: { id: string; isActive: boolean }) => user.id === ownerUserId && user.isActive)) {
@@ -82,20 +84,55 @@ async function reassignOwner(
   actor: OwnershipActor
 ) {
   assertUuid(recordId, "recordId");
-  assertDirectorOrAdmin(actor);
 
-  if (ownerUserId !== null) {
-    await assertActiveOwner(tenantDb, ownerUserId, getActorOfficeId(actor));
+  if (isDirectorOrAdmin(actor)) {
+    if (ownerUserId !== null) {
+      await assertActiveOwnerInOffice(tenantDb, ownerUserId, getActorOfficeId(actor));
+    }
+
+    const [updated] = await tenantDb
+      .update(table)
+      .set({ ownerId: ownerUserId, updatedAt: new Date() })
+      .where(and(eq(table.id, recordId), eq(table.isActive, true)))
+      .returning();
+
+    if (!updated) {
+      throw new AppError(404, "Record not found");
+    }
+
+    return updated;
   }
+
+  if (ownerUserId === null) {
+    throw new AppError(400, "Owner-initiated reassignment requires an active owner");
+  }
+
+  const [existing] = await tenantDb
+    .select({ id: table.id, ownerId: table.ownerId, isActive: table.isActive })
+    .from(table)
+    .where(eq(table.id, recordId))
+    .limit(1);
+
+  if (!existing || !existing.isActive) {
+    throw new AppError(404, "Record not found");
+  }
+
+  if (existing.ownerId !== actor.id) {
+    throw new AppError(403, "Only the current owner can reassign this record");
+  }
+
+  // Owner-initiated handoff intentionally allows cross-office targets. This is
+  // separate from the admin/director path above, which remains office-scoped.
+  await assertActiveCrmOwner(tenantDb, ownerUserId);
 
   const [updated] = await tenantDb
     .update(table)
     .set({ ownerId: ownerUserId, updatedAt: new Date() })
-    .where(and(eq(table.id, recordId), eq(table.isActive, true)))
+    .where(and(eq(table.id, recordId), eq(table.isActive, true), eq(table.ownerId, actor.id)))
     .returning();
 
   if (!updated) {
-    throw new AppError(404, "Record not found");
+    throw new AppError(409, "Record ownership changed; refresh before reassigning");
   }
 
   return updated;
