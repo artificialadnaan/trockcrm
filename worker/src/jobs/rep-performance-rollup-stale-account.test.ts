@@ -41,7 +41,7 @@ describe("rep performance rollup stale account count", () => {
     expect(insertSql).not.toContain("last_activity_at < NOW()");
     expect(insertSql).toContain("stale_account_count");
     expect(insertSql).toContain("COALESCE(sa.stale_account_count, 0)");
-    expect(insertParams).toEqual(["mtd", "2026-05-01", "2026-05-07", "office-1", "North", 30]);
+    expect(insertParams).toEqual(["mtd", "2026-05-01", "2026-05-07", "office-1", "North", 30, "[]"]);
   });
 
   it("scopes deals join to period_end so future deals do not backfill past snapshots", async () => {
