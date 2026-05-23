@@ -146,10 +146,8 @@ describe("rep performance rollup at-risk count", () => {
     expect(insertSql).toContain("jsonb_to_recordset($7::jsonb)");
     expect(insertSql).toContain("COALESCE(arc.at_risk_count, 0)");
     expect(insertParams?.[6]).toBe(JSON.stringify([{ repId: "rep-1", atRiskCount: 1 }]));
-    expect(insertSql).not.toContain("psc.stale_threshold_days IS NOT NULL");
-    expect(insertSql).not.toContain(
-      "d.stage_entered_at < NOW() - (psc.stale_threshold_days || ' days')::interval"
-    );
+    expect(insertSql).not.toMatch(/stale_threshold_days/);
+    expect(insertSql).not.toMatch(/stage_entered_at < now\(\)/i);
   });
 
   it("evaluates persisted at_risk_count at period_end midnight, not the following day", async () => {

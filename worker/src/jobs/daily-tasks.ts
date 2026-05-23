@@ -1,3 +1,4 @@
+import { getDealAtRiskResult, type WorkflowRoute } from "@trock-crm/shared/types";
 import { pool } from "../db.js";
 
 const SERVER_MODULE_ROOT =
@@ -15,7 +16,7 @@ const SERVER_STALE_LEAD_KEY_MODULE = `${SERVER_MODULE_ROOT}/tasks/rules/stale-le
  * 2. Create follow-up tasks for deals with upcoming expected_close_date (7 days out)
  * 3. Create touchpoint tasks for contacts with first_outreach_completed = false (older than 3 days)
  * 4. Create follow-up tasks for contacts overdue on their stage's touchpoint_cadence_days
- * 5. Create follow-up tasks for leads stuck past their configured stage stale threshold
+ * 5. Create follow-up tasks for leads stuck past the shared SLA policy threshold
  *
  * Stale deal tasks and inbound email tasks are already created by their respective
  * workers (stale-deals.ts and email-sync.ts). This job handles the remaining
@@ -33,6 +34,25 @@ async function loadTaskRuleDependencies() {
 
 function countGeneratedTasks(outcomes: Array<{ action: string }>) {
   return outcomes.filter((outcome) => outcome.action === "created").length;
+}
+
+function normalizeWorkflowRoute(value: string | null | undefined): WorkflowRoute {
+  return value === "service" ? "service" : "normal";
+}
+
+function getStaleLeadAtRisk(
+  lead: { pipeline_type?: string | null; stage_entered_at?: string | Date | null },
+  now: Date
+) {
+  return getDealAtRiskResult(
+    {
+      stageSlug: "opportunity",
+      workflowRoute: normalizeWorkflowRoute(lead.pipeline_type),
+      stageEnteredAt: lead.stage_entered_at,
+    },
+    "rep",
+    now
+  );
 }
 
 type Queryable = {
@@ -338,30 +358,33 @@ export async function runDailyTaskGeneration(): Promise<void> {
                   l.name AS lead_name,
                   l.assigned_rep_id,
                   l.stage_entered_at,
-                  psc.name AS stage_name,
-                  psc.stale_threshold_days,
-                  EXTRACT(DAY FROM NOW() - l.stage_entered_at)::int AS days_in_stage
+                  l.pipeline_type,
+                  psc.name AS stage_name
            FROM ${schemaName}.leads l
            JOIN public.pipeline_stage_config psc ON psc.id = l.stage_id
            WHERE l.is_active = true
              AND l.status = 'open'
              AND psc.workflow_family = 'lead'
-             AND psc.is_terminal = false
-             AND psc.stale_threshold_days IS NOT NULL
-             AND l.stage_entered_at < NOW() - (psc.stale_threshold_days || ' days')::interval`
+             AND psc.is_terminal = false`
         );
         const { buildStaleLeadDedupeKey } = (await import(SERVER_STALE_LEAD_KEY_MODULE)) as any;
+        const staleLeadRows = staleLeads.rows
+          .map((lead) => ({
+            lead,
+            atRisk: getStaleLeadAtRisk(lead, new Date()),
+          }))
+          .filter(({ atRisk }) => atRisk.isAtRisk);
 
         await dismissResolvedStaleLeadTasks(
           client,
           schemaName,
           office.id,
-          staleLeads.rows
-            .map((lead) => buildStaleLeadDedupeKey(lead.lead_id, lead.stage_entered_at))
+          staleLeadRows
+            .map(({ lead }) => buildStaleLeadDedupeKey(lead.lead_id, lead.stage_entered_at))
             .filter((dedupeKey): dedupeKey is string => typeof dedupeKey === "string" && dedupeKey.length > 0)
         );
 
-        for (const lead of staleLeads.rows) {
+        for (const { lead, atRisk } of staleLeadRows) {
           const outcomes = await evaluateTaskRules(
             {
               now: new Date(),
@@ -372,7 +395,7 @@ export async function runDailyTaskGeneration(): Promise<void> {
               leadName: lead.lead_name,
               stageEnteredAt: lead.stage_entered_at,
               stage: lead.stage_name,
-              staleAge: lead.days_in_stage,
+              staleAge: atRisk.effectiveStageAgeDays,
               taskAssigneeId: lead.assigned_rep_id,
             },
             taskPersistence,

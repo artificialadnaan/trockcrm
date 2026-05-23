@@ -147,7 +147,6 @@ export function PipelineConfigPage() {
     setEditValues({
       name: stage.name,
       color: stage.color ?? "#6B7280",
-      staleThresholdDays: stage.staleThresholdDays,
       procoreStageMapping: stage.procoreStageMapping ?? "",
       requiredFields: stage.requiredFields,
       requiredDocuments: stage.requiredDocuments,
@@ -166,7 +165,6 @@ export function PipelineConfigPage() {
     const payload: Partial<PipelineStageAdmin> = {
       name: editValues.name,
       color: editValues.color,
-      staleThresholdDays: editValues.staleThresholdDays ?? null,
       procoreStageMapping: editValues.procoreStageMapping || null,
     };
 
@@ -209,7 +207,7 @@ export function PipelineConfigPage() {
         <div>
           <h1 className="text-2xl font-semibold text-gray-900">Pipeline Configuration</h1>
           <p className="text-sm text-gray-500 mt-1">
-            Family-aware stage order, stale thresholds, stage gates, and Procore mappings
+            Family-aware stage order, stage gates, and Procore mappings
           </p>
         </div>
         <Button variant="outline" size="sm" onClick={refetch} disabled={loading}>
@@ -242,7 +240,6 @@ export function PipelineConfigPage() {
               <TableHead>Stage</TableHead>
               <TableHead>Type</TableHead>
               <TableHead>Color</TableHead>
-              <TableHead>Stale After (days)</TableHead>
               <TableHead>Procore Mapping</TableHead>
               <TableHead>Stage Gates</TableHead>
               <TableHead>Actions</TableHead>
@@ -308,27 +305,6 @@ export function PipelineConfigPage() {
                           />
                           <span className="text-xs text-gray-500 font-mono">{stage.color ?? "\u2014"}</span>
                         </div>
-                      )}
-                    </TableCell>
-                    <TableCell>
-                      {isEditing ? (
-                        <Input
-                          type="number"
-                          min={0}
-                          placeholder="e.g. 14"
-                          value={editValues.staleThresholdDays ?? ""}
-                          onChange={(e) =>
-                            setEditValues((v) => ({
-                              ...v,
-                              staleThresholdDays: e.target.value ? parseInt(e.target.value, 10) : null,
-                            }))
-                          }
-                          className="h-8 w-24"
-                        />
-                      ) : (
-                        <span className="text-sm text-gray-600">
-                          {stage.staleThresholdDays != null ? `${stage.staleThresholdDays}d` : "\u2014"}
-                        </span>
                       )}
                     </TableCell>
                     <TableCell>

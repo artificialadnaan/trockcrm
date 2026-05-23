@@ -8,7 +8,6 @@ const baseStage: Omit<PipelineStage, "id" | "name" | "slug" | "displayOrder" | "
   requiredFields: [],
   requiredDocuments: [],
   requiredApprovals: [],
-  staleThresholdDays: null,
   procoreStageMapping: null,
   color: null,
 };

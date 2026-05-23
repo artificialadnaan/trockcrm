@@ -143,6 +143,25 @@ function buildDashboardAtRiskEvaluations(
   }));
 }
 
+const LEAD_STALE_ENGINE_STAGE_SLUG = "opportunity";
+const LEAD_STALE_VIEWER_ROLE: UserRole = "rep";
+
+function getLeadStaleAtRiskResult(
+  stageEnteredAt: string | Date | null | undefined,
+  workflowRoute: string | null | undefined,
+  now: Date
+): AtRiskResult {
+  return getDealAtRiskResult(
+    {
+      stageSlug: LEAD_STALE_ENGINE_STAGE_SLUG,
+      workflowRoute: workflowRoute === "service" ? "service" : "normal",
+      stageEnteredAt,
+    },
+    LEAD_STALE_VIEWER_ROLE,
+    now
+  );
+}
+
 export function buildDashboardAtRiskDeals(
   rows: DashboardAtRiskSummaryRow[],
   viewerRole: string | null | undefined,
@@ -527,12 +546,10 @@ interface StaleLeadWatchlistSqlRow extends Record<string, unknown> {
   property_name: string;
   stage_name: string;
   rep_name: string;
-  days_in_stage: number | string | null;
+  stage_entered_at: string | Date | null;
   pipeline_type: "normal" | "service" | null;
   location_label: string | null;
   estimated_value: number | string | null;
-  stale_threshold_days: number | string | null;
-  days_past_due: number | string | null;
 }
 
 export interface DashboardCrmOwnedProgressionRow {
@@ -583,15 +600,10 @@ async function getStaleLeadWatchlist(
       p.name AS property_name,
       psc.name AS stage_name,
       u.display_name AS rep_name,
-      EXTRACT(DAY FROM NOW() - l.stage_entered_at)::int AS days_in_stage,
+      l.stage_entered_at,
       l.pipeline_type,
       TRIM(CONCAT_WS(', ', p.city, p.state)) AS location_label,
-      COALESCE(l.pre_qual_value, 0)::numeric AS estimated_value,
-      psc.stale_threshold_days,
-      GREATEST(
-        EXTRACT(DAY FROM NOW() - l.stage_entered_at)::int - COALESCE(psc.stale_threshold_days, 0),
-        0
-      )::int AS days_past_due
+      COALESCE(l.pre_qual_value, 0)::numeric AS estimated_value
     FROM leads l
     JOIN companies c ON c.id = l.company_id
     JOIN properties p ON p.id = l.property_id
@@ -601,27 +613,32 @@ async function getStaleLeadWatchlist(
       AND l.status = 'open'
       AND psc.workflow_family = 'lead'
       AND psc.is_terminal = false
-      AND psc.stale_threshold_days IS NOT NULL
-      AND l.stage_entered_at < NOW() - (psc.stale_threshold_days || ' days')::interval
       ${repFilter}
-    ORDER BY days_in_stage DESC, l.updated_at ASC
+    ORDER BY l.stage_entered_at ASC, l.updated_at ASC
   `);
 
   const rows = rowsFromExecute(result);
-  return rows.map((row) => ({
-    leadId: row.lead_id,
-    leadName: row.lead_name,
-    companyName: row.company_name,
-    propertyName: row.property_name,
-    stageName: row.stage_name,
-    repName: row.rep_name,
-    daysInStage: Number(row.days_in_stage ?? 0),
-    pipelineType: row.pipeline_type ?? "normal",
-    locationLabel: row.location_label || null,
-    estimatedValue: Number(row.estimated_value ?? 0),
-    staleThresholdDays: Number(row.stale_threshold_days ?? 0),
-    daysPastDue: Number(row.days_past_due ?? 0),
-  }));
+  const now = new Date();
+  return rows
+    .map((row) => {
+      const atRisk = getLeadStaleAtRiskResult(row.stage_entered_at, row.pipeline_type, now);
+      return { row, atRisk };
+    })
+    .filter(({ atRisk }) => atRisk.isAtRisk)
+    .map(({ row, atRisk }) => ({
+      leadId: row.lead_id,
+      leadName: row.lead_name,
+      companyName: row.company_name,
+      propertyName: row.property_name,
+      stageName: row.stage_name,
+      repName: row.rep_name,
+      daysInStage: atRisk.effectiveStageAgeDays,
+      pipelineType: row.pipeline_type ?? "normal",
+      locationLabel: row.location_label || null,
+      estimatedValue: Number(row.estimated_value ?? 0),
+      staleThresholdDays: atRisk.thresholdDays ?? 0,
+      daysPastDue: Math.max(0, atRisk.effectiveStageAgeDays - (atRisk.thresholdDays ?? 0)),
+    }));
 }
 
 async function getCrmOwnedProgression(
@@ -2661,20 +2678,6 @@ async function buildRepPerformanceCards(
       WHERE a.occurred_at >= ${from}::timestamptz
         AND a.occurred_at <= (${to}::date + INTERVAL '1 day')::timestamptz
       GROUP BY a.responsible_user_id
-    ),
-    rep_stale_leads AS (
-      SELECT
-        l.assigned_rep_id AS rep_id,
-        COUNT(*)::int AS stale_lead_count
-      FROM leads l
-      JOIN pipeline_stage_config psc ON psc.id = l.stage_id
-      WHERE l.is_active = true
-        AND l.status = 'open'
-        AND psc.workflow_family = 'lead'
-        AND psc.is_terminal = false
-        AND psc.stale_threshold_days IS NOT NULL
-        AND EXTRACT(DAY FROM NOW() - l.stage_entered_at) > psc.stale_threshold_days
-      GROUP BY l.assigned_rep_id
     )
     SELECT
       u.id AS rep_id,
@@ -2683,18 +2686,17 @@ async function buildRepPerformanceCards(
       COALESCE(rd.pipeline_value, 0)::numeric AS pipeline_value,
       COALESCE(rw.wins, 0)::int AS wins,
       COALESCE(rw.losses, 0)::int AS losses,
-      COALESCE(ra.total, 0)::int AS activity_score,
-      COALESCE(rsl.stale_lead_count, 0)::int AS stale_leads
+      COALESCE(ra.total, 0)::int AS activity_score
     FROM users u
     LEFT JOIN deal_owners owner_rows ON owner_rows.rep_id = u.id
     LEFT JOIN rep_deals rd ON rd.rep_id = u.id
     LEFT JOIN rep_wins rw ON rw.rep_id = u.id
     LEFT JOIN rep_activities ra ON ra.rep_id = u.id
-    LEFT JOIN rep_stale_leads rsl ON rsl.rep_id = u.id
     WHERE u.is_active = true
       AND (u.role = 'rep' OR owner_rows.rep_id IS NOT NULL)
     ORDER BY pipeline_value DESC
   `);
+  const staleLeadCounts = await getStaleLeadCountsByRep(tenantDb);
 
   const rows = (result as any).rows ?? result;
   return rows.map((r: any) => {
@@ -2709,9 +2711,39 @@ async function buildRepPerformanceCards(
       winRate: total > 0 ? Math.round((wins / total) * 100) : 0,
       activityScore: Number(r.activity_score ?? 0),
       staleDeals: 0,
-      staleLeads: Number(r.stale_leads ?? 0),
+      staleLeads: staleLeadCounts.get(r.rep_id) ?? 0,
     };
   });
+}
+
+async function getStaleLeadCountsByRep(tenantDb: TenantDb): Promise<Map<string, number>> {
+  const result = await tenantDb.execute<{
+    rep_id: string | null;
+    stage_entered_at: string | Date | null;
+    pipeline_type: "normal" | "service" | null;
+  }>(sql`
+    SELECT
+      l.assigned_rep_id AS rep_id,
+      l.stage_entered_at,
+      l.pipeline_type
+    FROM leads l
+    JOIN pipeline_stage_config psc ON psc.id = l.stage_id
+    JOIN companies c ON c.id = l.company_id
+    JOIN properties p ON p.id = l.property_id
+    JOIN users u ON u.id = l.assigned_rep_id
+    WHERE l.is_active = true
+      AND l.status = 'open'
+      AND psc.workflow_family = 'lead'
+      AND psc.is_terminal = false
+  `);
+  const counts = new Map<string, number>();
+  const now = new Date();
+  for (const row of rowsFromExecute(result)) {
+    if (!row.rep_id) continue;
+    if (!getLeadStaleAtRiskResult(row.stage_entered_at, row.pipeline_type, now).isAtRisk) continue;
+    counts.set(row.rep_id, (counts.get(row.rep_id) ?? 0) + 1);
+  }
+  return counts;
 }
 
 // ---------------------------------------------------------------------------

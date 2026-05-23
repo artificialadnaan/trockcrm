@@ -27,11 +27,11 @@ function extractSqlText(value: unknown): string {
   return "";
 }
 
-// Promise.all order in getUnifiedWorkflowOverview:
+// Sequential query order in getUnifiedWorkflowOverview:
 // 0=leadPipeline, 1=routeRollup, 2=companyRollup, 3=repActivity,
-// 4=staleLead, 5=staleDeal, 6=crmOwnedProgression, 7=mirroredDownstream,
-// 8=disqualifications.
-const CRM_OWNED_PROGRESSION_INDEX = 6;
+// 4=staleLead, 5=staleDeal, 6=staleRouteCandidates, 7=crmOwnedProgression,
+// 8=mirroredDownstream, 9=disqualifications.
+const CRM_OWNED_PROGRESSION_INDEX = 7;
 const STALE_LEAD_INDEX = 4;
 
 function makeTenantDb(progressionRows: unknown[] = []) {
@@ -44,9 +44,10 @@ function makeTenantDb(progressionRows: unknown[] = []) {
       .mockResolvedValueOnce({ rows: [] }) // 3 repActivity
       .mockResolvedValueOnce({ rows: [] }) // 4 staleLead
       .mockResolvedValueOnce({ rows: [] }) // 5 staleDeal
-      .mockResolvedValueOnce({ rows: progressionRows }) // 6 crmOwnedProgression
-      .mockResolvedValueOnce({ rows: [] }) // 7 mirroredDownstream
-      .mockResolvedValueOnce({ rows: [] }), // 8 disqualifications
+      .mockResolvedValueOnce({ rows: [] }) // 6 staleRouteCandidates
+      .mockResolvedValueOnce({ rows: progressionRows }) // 7 crmOwnedProgression
+      .mockResolvedValueOnce({ rows: [] }) // 8 mirroredDownstream
+      .mockResolvedValueOnce({ rows: [] }), // 9 disqualifications
   } as any;
 }
 

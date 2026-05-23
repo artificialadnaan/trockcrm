@@ -4056,7 +4056,6 @@ export const apiSpec = {
                 properties: {
                   name: { type: "string" },
                   color: { type: "string", description: "Hex color used in badges and pipeline UI." },
-                  staleThresholdDays: { type: "integer", minimum: 0, nullable: true },
                   procoreStageMapping: { type: "string" },
                   requiredFields: {
                     type: "array",

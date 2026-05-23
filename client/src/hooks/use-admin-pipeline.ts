@@ -13,7 +13,6 @@ export interface PipelineStageAdmin {
   requiredFields: string[];
   requiredDocuments: string[];
   requiredApprovals: string[];
-  staleThresholdDays: number | null;
   procoreStageMapping: string | null;
   color: string | null;
 }

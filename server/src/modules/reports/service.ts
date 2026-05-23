@@ -13,7 +13,12 @@ import {
   projectTypeConfig,
 } from "@trock-crm/shared/schema";
 import type * as schema from "@trock-crm/shared/schema";
-import type { DealScopingIntakeStatus, WorkflowRoute } from "@trock-crm/shared/types";
+import {
+  getDealAtRiskResult,
+  type DealScopingIntakeStatus,
+  type UserRole,
+  type WorkflowRoute,
+} from "@trock-crm/shared/types";
 import { db } from "../../db.js";
 import { TERMINAL_STAGE_SLUGS } from "../shared/pipeline-terminal-stages.js";
 import {
@@ -39,7 +44,9 @@ function defaultDateRange(from?: string, to?: string): { from: string; to: strin
   };
 }
 
-const LEAD_STALE_THRESHOLD_DAYS = 14;
+const DEAL_STALE_VIEWER_ROLE: UserRole = "director";
+const LEAD_STALE_VIEWER_ROLE: UserRole = "rep";
+const LEAD_STALE_ENGINE_STAGE_SLUG = "opportunity";
 const CANONICAL_MIRRORED_DOWNSTREAM_STAGE_SLUGS = [
   "estimating",
   "service_estimating",
@@ -126,6 +133,110 @@ function resolveMirroredStageLabel(
   }
 
   return fallbackStageName ?? "Unknown";
+}
+
+function normalizeWorkflowRoute(value: string | null | undefined): WorkflowRoute {
+  return value === "service" ? "service" : "normal";
+}
+
+function numberOrNull(value: string | number | bigint | null | undefined): number | null {
+  if (value == null) return null;
+  const numeric = Number(value);
+  return Number.isFinite(numeric) ? numeric : null;
+}
+
+function normalizeNow(value: Date | string | undefined): Date {
+  if (value instanceof Date) return value;
+  if (typeof value === "string") {
+    const parsed = new Date(value);
+    if (!Number.isNaN(parsed.getTime())) return parsed;
+  }
+  return new Date();
+}
+
+type StaleDealCandidateRow = {
+  deal_id: string;
+  deal_number: string | null;
+  deal_name: string;
+  stage_id?: string | null;
+  stage_name: string | null;
+  assigned_rep_id?: string | null;
+  rep_name?: string | null;
+  stage_slug: string | null;
+  stage_entered_at: string | Date | null;
+  workflow_route: string | null;
+  on_hold?: boolean | null;
+  on_hold_started_at?: string | Date | null;
+  on_hold_accumulated_seconds?: string | number | bigint | null;
+  on_hold_accumulated_seconds_at_stage_entry?: string | number | bigint | null;
+  deal_value?: string | number | null;
+  region_id?: string | null;
+  bid_board_stage_slug?: string | null;
+  bid_board_stage_status?: string | null;
+  region_classification?: string | null;
+};
+
+function getDealStaleAtRisk(row: StaleDealCandidateRow, now: Date) {
+  return getDealAtRiskResult(
+    {
+      stageSlug: row.stage_slug,
+      workflowRoute: normalizeWorkflowRoute(row.workflow_route),
+      stageEnteredAt: row.stage_entered_at,
+      onHold: row.on_hold,
+      onHoldStartedAt: row.on_hold_started_at,
+      onHoldAccumulatedSeconds: numberOrNull(row.on_hold_accumulated_seconds),
+      onHoldAccumulatedSecondsAtStageEntry: numberOrNull(
+        row.on_hold_accumulated_seconds_at_stage_entry
+      ),
+    },
+    DEAL_STALE_VIEWER_ROLE,
+    now
+  );
+}
+
+function staleDealRowsFromEngine(rows: StaleDealCandidateRow[], now: Date): StaleDealRow[] {
+  const staleRows: StaleDealRow[] = [];
+  for (const row of rows) {
+    const atRisk = getDealStaleAtRisk(row, now);
+    if (!atRisk.isAtRisk) continue;
+    staleRows.push({
+      dealId: row.deal_id,
+      dealNumber: row.deal_number ?? "",
+      dealName: row.deal_name,
+      stageId: row.stage_id ?? "",
+      stageName: resolveMirroredStageLabel(row.stage_slug, row.stage_name, normalizeWorkflowRoute(row.workflow_route)),
+      assignedRepId: row.assigned_rep_id ?? "",
+      repName: row.rep_name ?? "Unassigned",
+      stageEnteredAt: row.stage_entered_at ? String(row.stage_entered_at) : "",
+      daysInStage: atRisk.effectiveStageAgeDays,
+      staleThresholdDays: atRisk.thresholdDays ?? 0,
+      dealValue: Number(row.deal_value ?? 0),
+      workflowRoute: normalizeWorkflowRoute(row.workflow_route),
+      bidBoardStageSlug: row.bid_board_stage_slug ?? null,
+      bidBoardStageStatus: row.bid_board_stage_status ?? null,
+      regionClassification: row.region_classification ?? null,
+    });
+  }
+  return staleRows.sort((a, b) => {
+    if (b.daysInStage !== a.daysInStage) return b.daysInStage - a.daysInStage;
+    return a.dealName.localeCompare(b.dealName);
+  });
+}
+
+function isLeadStaleByEngine(
+  stageEnteredAt: string | Date | null | undefined,
+  workflowRoute: string | null | undefined,
+  now: Date
+) {
+  return getDealAtRiskResult(
+    {
+      stageSlug: LEAD_STALE_ENGINE_STAGE_SLUG,
+      workflowRoute: normalizeWorkflowRoute(workflowRoute),
+      stageEnteredAt,
+    },
+    LEAD_STALE_VIEWER_ROLE,
+    now
+  );
 }
 
 export interface AnalyticsFilterInput {
@@ -802,17 +913,18 @@ export interface StaleDealRow {
 }
 
 /**
- * Deals that have exceeded their stage's stale_threshold_days.
+ * Deals that the shared hold-aware At Risk engine flags as stale.
  */
 export async function getStaleDeals(
   tenantDb: TenantDb,
-  options: { repId?: string } = {}
+  options: { repId?: string; now?: Date | string } = {}
 ): Promise<StaleDealRow[]> {
   const repFilter = options.repId
     ? sql`AND d.assigned_rep_id = ${options.repId}`
     : sql``;
+  const now = normalizeNow(options.now);
 
-  const result = await tenantDb.execute(sql`
+  const result = await tenantDb.execute<StaleDealCandidateRow>(sql`
     SELECT
       d.id AS deal_id,
       d.deal_number,
@@ -821,9 +933,12 @@ export async function getStaleDeals(
       psc.name AS stage_name,
       d.assigned_rep_id,
       u.display_name AS rep_name,
+      COALESCE(d.bid_board_stage_slug, psc.slug) AS stage_slug,
       COALESCE(d.bid_board_stage_entered_at, d.stage_entered_at) AS stage_entered_at,
-      EXTRACT(DAY FROM NOW() - COALESCE(d.bid_board_stage_entered_at, d.stage_entered_at))::int AS days_in_stage,
-      COALESCE(mirror_psc.stale_threshold_days, psc.stale_threshold_days) AS stale_threshold_days,
+      d.on_hold,
+      d.on_hold_started_at,
+      d.on_hold_accumulated_seconds,
+      d.on_hold_accumulated_seconds_at_stage_entry,
       ${aliasedEffectiveDealValueSql("d")} AS deal_value,
       d.workflow_route,
       d.bid_board_stage_slug,
@@ -831,38 +946,15 @@ export async function getStaleDeals(
       d.region_classification
     FROM deals d
     JOIN pipeline_stage_config psc ON psc.id = d.stage_id
-    LEFT JOIN pipeline_stage_config mirror_psc
-      ON mirror_psc.slug = COALESCE(d.bid_board_stage_slug, psc.slug)
     JOIN users u ON u.id = d.assigned_rep_id
     WHERE d.is_active = true
       AND COALESCE(d.is_test_data, false) = false
       AND ${nonTerminalDealStageSql()}
-      AND ${aliasedActiveDealCountFilterSql("d")}
-      AND COALESCE(mirror_psc.stale_threshold_days, psc.stale_threshold_days) IS NOT NULL
-      AND EXTRACT(DAY FROM NOW() - COALESCE(d.bid_board_stage_entered_at, d.stage_entered_at))
-        > COALESCE(mirror_psc.stale_threshold_days, psc.stale_threshold_days)
       ${repFilter}
-    ORDER BY days_in_stage DESC
+    ORDER BY d.updated_at ASC
   `);
 
-  const rows = (result as any).rows ?? result;
-  return rows.map((r: any) => ({
-    dealId: r.deal_id,
-    dealNumber: r.deal_number,
-    dealName: r.deal_name,
-    stageId: r.stage_id,
-    stageName: resolveMirroredStageLabel(r.bid_board_stage_slug, r.stage_name, r.workflow_route),
-    assignedRepId: r.assigned_rep_id,
-    repName: r.rep_name,
-    stageEnteredAt: r.stage_entered_at,
-    daysInStage: Number(r.days_in_stage ?? 0),
-    staleThresholdDays: Number(r.stale_threshold_days ?? 0),
-    dealValue: Number(r.deal_value ?? 0),
-    workflowRoute: r.workflow_route,
-    bidBoardStageSlug: r.bid_board_stage_slug ?? null,
-    bidBoardStageStatus: r.bid_board_stage_status ?? null,
-    regionClassification: r.region_classification ?? null,
-  }));
+  return staleDealRowsFromEngine(rowsFromExecute(result), now);
 }
 
 // ---------------------------------------------------------------------------
@@ -1481,6 +1573,7 @@ export async function getRegionalOwnershipOverview(
     AND d.created_at >= ${filters.from}::timestamptz
     AND d.created_at <= (${filters.to}::date + INTERVAL '1 day')::timestamptz
   `;
+  const now = new Date();
 
   const regionResult = await tenantDb.execute(sql`
       SELECT
@@ -1493,15 +1586,7 @@ export async function getRegionalOwnershipOverview(
         )::int AS deal_count,
         COALESCE(SUM(
           ${aliasedEffectiveDealValueSql("d")}
-        ) FILTER (WHERE d.is_active = true AND ${nonTerminalDealStageSql()}), 0)::numeric AS pipeline_value,
-        COUNT(*) FILTER (
-          WHERE d.is_active = true
-      AND COALESCE(d.is_test_data, false) = false
-            AND ${nonTerminalDealStageSql()}
-            AND psc.stale_threshold_days IS NOT NULL
-            AND EXTRACT(DAY FROM NOW() - d.stage_entered_at) > psc.stale_threshold_days
-            AND ${aliasedActiveDealCountFilterSql("d")}
-        )::int AS stale_deal_count
+        ) FILTER (WHERE d.is_active = true AND ${nonTerminalDealStageSql()}), 0)::numeric AS pipeline_value
       FROM deals d
       LEFT JOIN deal_scoping_intake dsi ON dsi.deal_id = d.id
       LEFT JOIN region_config rc ON rc.id = d.region_id
@@ -1526,15 +1611,7 @@ export async function getRegionalOwnershipOverview(
         )::int AS deal_count,
         COALESCE(SUM(
           ${aliasedEffectiveDealValueSql("d")}
-        ) FILTER (WHERE d.is_active = true AND ${nonTerminalDealStageSql()}), 0)::numeric AS pipeline_value,
-        COUNT(*) FILTER (
-          WHERE d.is_active = true
-      AND COALESCE(d.is_test_data, false) = false
-            AND ${nonTerminalDealStageSql()}
-            AND psc.stale_threshold_days IS NOT NULL
-            AND EXTRACT(DAY FROM NOW() - d.stage_entered_at) > psc.stale_threshold_days
-            AND ${aliasedActiveDealCountFilterSql("d")}
-        )::int AS stale_deal_count
+        ) FILTER (WHERE d.is_active = true AND ${nonTerminalDealStageSql()}), 0)::numeric AS pipeline_value
       FROM deals d
       LEFT JOIN deal_scoping_intake dsi ON dsi.deal_id = d.id
       LEFT JOIN users u ON u.id = d.assigned_rep_id
@@ -1591,11 +1668,48 @@ export async function getRegionalOwnershipOverview(
       GROUP BY gap_type
       ORDER BY gap_type ASC
     `);
+  const staleCandidateResult = await tenantDb.execute<StaleDealCandidateRow>(sql`
+      SELECT
+        d.id AS deal_id,
+        d.deal_number,
+        d.name AS deal_name,
+        d.region_id,
+        d.assigned_rep_id,
+        COALESCE(d.bid_board_stage_slug, psc.slug) AS stage_slug,
+        COALESCE(d.bid_board_stage_entered_at, d.stage_entered_at) AS stage_entered_at,
+        d.workflow_route,
+        d.on_hold,
+        d.on_hold_started_at,
+        d.on_hold_accumulated_seconds,
+        d.on_hold_accumulated_seconds_at_stage_entry
+      FROM deals d
+      LEFT JOIN deal_scoping_intake dsi ON dsi.deal_id = d.id
+      JOIN pipeline_stage_config psc ON psc.id = d.stage_id
+      WHERE d.is_active = true
+        AND COALESCE(d.is_test_data, false) = false
+        AND ${nonTerminalDealStageSql()}
+        ${dateFilter}
+        ${officeFilter}
+        ${regionFilter}
+        ${repFilter}
+        ${sourceFilter}
+    `);
 
   const regionRows = (regionResult as any).rows ?? regionResult;
   const repDealRows = (repDealResult as any).rows ?? repDealResult;
   const repActivityRows = (repActivityResult as any).rows ?? repActivityResult;
   const gapRows = (gapResult as any).rows ?? gapResult;
+  const staleRows = rowsFromExecute(staleCandidateResult);
+  const staleCountByRegion = new Map<string, number>();
+  const staleCountByRep = new Map<string, number>();
+  for (const row of staleRows) {
+    if (!getDealStaleAtRisk(row, now).isAtRisk) continue;
+    const regionKey = row.region_id ?? "__NULL__";
+    staleCountByRegion.set(regionKey, (staleCountByRegion.get(regionKey) ?? 0) + 1);
+    if (row.assigned_rep_id) {
+      staleCountByRep.set(row.assigned_rep_id, (staleCountByRep.get(row.assigned_rep_id) ?? 0) + 1);
+    }
+  }
   const activityCountByRep = new Map<string, number>();
   for (const row of repActivityRows as any[]) {
     if (row.rep_id) {
@@ -1609,7 +1723,7 @@ export async function getRegionalOwnershipOverview(
       regionName: row.region_name,
       dealCount: Number(row.deal_count ?? 0),
       pipelineValue: Number(row.pipeline_value ?? 0),
-      staleDealCount: Number(row.stale_deal_count ?? 0),
+      staleDealCount: staleCountByRegion.get(row.region_id ?? "__NULL__") ?? 0,
     })),
     repRollups: repDealRows
       .filter((row: any) => row.rep_id)
@@ -1619,7 +1733,7 @@ export async function getRegionalOwnershipOverview(
         dealCount: Number(row.deal_count ?? 0),
         pipelineValue: Number(row.pipeline_value ?? 0),
         activityCount: activityCountByRep.get(row.rep_id) ?? 0,
-        staleDealCount: Number(row.stale_deal_count ?? 0),
+        staleDealCount: staleCountByRep.get(row.rep_id) ?? 0,
       })),
     ownershipGaps: gapRows.map((row: any) => ({
       gapType: row.gap_type,
@@ -2018,6 +2132,7 @@ export async function getUnifiedWorkflowOverview(
   tenantDb: TenantDb,
   options: { repId?: string } = {}
 ): Promise<UnifiedWorkflowOverview> {
+  const now = new Date();
   const leadRepFilter = options.repId
     ? sql`AND (dsi.created_by = ${options.repId} OR dsi.last_edited_by = ${options.repId})`
     : sql``;
@@ -2054,15 +2169,7 @@ export async function getUnifiedWorkflowOverview(
         )::int AS deal_count,
         COALESCE(SUM(
           ${aliasedEffectiveDealValueSql("d")}
-        ) FILTER (WHERE d.is_active = true AND ${nonTerminalDealStageSql()}), 0)::numeric AS total_value,
-        COUNT(*) FILTER (
-          WHERE d.is_active = true
-      AND COALESCE(d.is_test_data, false) = false
-            AND ${nonTerminalDealStageSql()}
-            AND psc.stale_threshold_days IS NOT NULL
-            AND EXTRACT(DAY FROM NOW() - d.stage_entered_at) > psc.stale_threshold_days
-            AND ${aliasedActiveDealCountFilterSql("d")}
-        )::int AS stale_deal_count
+        ) FILTER (WHERE d.is_active = true AND ${nonTerminalDealStageSql()}), 0)::numeric AS total_value
       FROM deals d
       JOIN pipeline_stage_config psc ON psc.id = d.stage_id
       WHERE COALESCE(d.is_test_data, false) = false
@@ -2155,44 +2262,60 @@ export async function getUnifiedWorkflowOverview(
         COALESCE(c.name, 'Unassigned') AS company_name,
         dsi.workflow_route_snapshot AS workflow_route,
         dsi.status AS validation_status,
-        EXTRACT(DAY FROM NOW() - COALESCE(dsi.first_ready_at, dsi.last_autosaved_at, dsi.created_at))::int AS age_in_days,
-        ${LEAD_STALE_THRESHOLD_DAYS}::int AS stale_threshold_days
+        COALESCE(dsi.first_ready_at, dsi.last_autosaved_at, dsi.created_at) AS stage_entered_at
       FROM deal_scoping_intake dsi
       JOIN deals d ON d.id = dsi.deal_id
       LEFT JOIN companies c ON c.id = d.company_id
       WHERE dsi.status IN ('draft', 'ready')
-        AND EXTRACT(DAY FROM NOW() - COALESCE(dsi.first_ready_at, dsi.last_autosaved_at, dsi.created_at)) > ${LEAD_STALE_THRESHOLD_DAYS}
         ${leadRepFilter}
-      ORDER BY age_in_days DESC, lead_name ASC
+      ORDER BY stage_entered_at ASC, lead_name ASC
     `);
-  const staleDealResult = await tenantDb.execute(sql`
+  const staleDealResult = await tenantDb.execute<StaleDealCandidateRow>(sql`
       SELECT
         d.id AS deal_id,
         d.deal_number,
         d.name AS deal_name,
         psc.name AS stage_name,
+        COALESCE(d.bid_board_stage_slug, psc.slug) AS stage_slug,
         d.workflow_route,
         u.display_name AS rep_name,
-        EXTRACT(DAY FROM NOW() - COALESCE(d.bid_board_stage_entered_at, d.stage_entered_at))::int AS days_in_stage,
-        COALESCE(mirror_psc.stale_threshold_days, psc.stale_threshold_days) AS stale_threshold_days,
+        COALESCE(d.bid_board_stage_entered_at, d.stage_entered_at) AS stage_entered_at,
+        d.on_hold,
+        d.on_hold_started_at,
+        d.on_hold_accumulated_seconds,
+        d.on_hold_accumulated_seconds_at_stage_entry,
         ${aliasedEffectiveDealValueSql("d")} AS deal_value,
         d.bid_board_stage_slug,
         d.bid_board_stage_status,
         d.region_classification
       FROM deals d
       JOIN pipeline_stage_config psc ON psc.id = d.stage_id
-      LEFT JOIN pipeline_stage_config mirror_psc
-        ON mirror_psc.slug = COALESCE(d.bid_board_stage_slug, psc.slug)
-      JOIN users u ON u.id = d.assigned_rep_id
+      LEFT JOIN users u ON u.id = d.assigned_rep_id
       WHERE d.is_active = true
       AND COALESCE(d.is_test_data, false) = false
         AND ${nonTerminalDealStageSql()}
-        AND ${aliasedActiveDealCountFilterSql("d")}
-        AND COALESCE(mirror_psc.stale_threshold_days, psc.stale_threshold_days) IS NOT NULL
-        AND EXTRACT(DAY FROM NOW() - COALESCE(d.bid_board_stage_entered_at, d.stage_entered_at))
-          > COALESCE(mirror_psc.stale_threshold_days, psc.stale_threshold_days)
         ${dealRepFilter}
-      ORDER BY days_in_stage DESC, deal_name ASC
+      ORDER BY stage_entered_at ASC, deal_name ASC
+    `);
+  const staleRouteCandidateResult = await tenantDb.execute<StaleDealCandidateRow>(sql`
+      SELECT
+        d.id AS deal_id,
+        d.deal_number,
+        d.name AS deal_name,
+        d.workflow_route,
+        COALESCE(d.bid_board_stage_slug, psc.slug) AS stage_slug,
+        COALESCE(d.bid_board_stage_entered_at, d.stage_entered_at) AS stage_entered_at,
+        d.on_hold,
+        d.on_hold_started_at,
+        d.on_hold_accumulated_seconds,
+        d.on_hold_accumulated_seconds_at_stage_entry
+      FROM deals d
+      JOIN pipeline_stage_config psc ON psc.id = d.stage_id
+      WHERE d.is_active = true
+        AND COALESCE(d.is_test_data, false) = false
+        AND d.workflow_route IN ('normal', 'service')
+        AND ${nonTerminalDealStageSql()}
+        ${dealRepFilter}
     `);
   const crmOwnedProgressionResult = await tenantDb.execute(sql`
       SELECT
@@ -2276,7 +2399,13 @@ export async function getUnifiedWorkflowOverview(
   const companyRows = (companyRollupResult as any).rows ?? companyRollupResult;
   const activityRows = (repActivityResult as any).rows ?? repActivityResult;
   const staleLeadRows = (staleLeadResult as any).rows ?? staleLeadResult;
-  const staleDealRows = (staleDealResult as any).rows ?? staleDealResult;
+  const staleDealRows = staleDealRowsFromEngine(rowsFromExecute(staleDealResult), now);
+  const staleDealCountByRoute = new Map<string, number>();
+  for (const row of rowsFromExecute(staleRouteCandidateResult)) {
+    if (!getDealStaleAtRisk(row, now).isAtRisk) continue;
+    const route = normalizeWorkflowRoute(row.workflow_route);
+    staleDealCountByRoute.set(route, (staleDealCountByRoute.get(route) ?? 0) + 1);
+  }
   const crmOwnedProgressionRows =
     (crmOwnedProgressionResult as any).rows ?? crmOwnedProgressionResult;
   const mirroredDownstreamRows =
@@ -2294,7 +2423,7 @@ export async function getUnifiedWorkflowOverview(
       workflowRoute: row.workflow_route,
       dealCount: Number(row.deal_count ?? 0),
       totalValue: Number(row.total_value ?? 0),
-      staleDealCount: Number(row.stale_deal_count ?? 0),
+      staleDealCount: staleDealCountByRoute.get(row.workflow_route) ?? 0,
     })),
     companyRollups: companyRows.map((row: any) => ({
       companyId: row.company_id ?? null,
@@ -2321,28 +2450,34 @@ export async function getUnifiedWorkflowOverview(
       totalLeadStageActivities: Number(row.total_lead_stage_activities ?? 0),
       totalDealStageActivities: Number(row.total_deal_stage_activities ?? 0),
     })),
-    staleLeads: staleLeadRows.map((row: any) => ({
-      leadId: row.lead_id,
-      leadName: row.lead_name,
-      companyName: row.company_name,
-      workflowRoute: row.workflow_route,
-      validationStatus: row.validation_status,
-      ageInDays: Number(row.age_in_days ?? 0),
-      staleThresholdDays: Number(row.stale_threshold_days ?? LEAD_STALE_THRESHOLD_DAYS),
-    })),
-    staleDeals: staleDealRows.map((row: any) => ({
-      dealId: row.deal_id,
-      dealNumber: row.deal_number,
-      dealName: row.deal_name,
-      stageName: resolveMirroredStageLabel(row.bid_board_stage_slug, row.stage_name, row.workflow_route),
-      workflowRoute: row.workflow_route,
-      repName: row.rep_name,
-      daysInStage: Number(row.days_in_stage ?? 0),
-      staleThresholdDays: Number(row.stale_threshold_days ?? 0),
-      dealValue: Number(row.deal_value ?? 0),
-      bidBoardStageSlug: row.bid_board_stage_slug ?? null,
-      bidBoardStageStatus: row.bid_board_stage_status ?? null,
-      regionClassification: row.region_classification ?? null,
+    staleLeads: staleLeadRows
+      .map((row: any) => {
+        const atRisk = isLeadStaleByEngine(row.stage_entered_at, row.workflow_route, now);
+        return { row, atRisk };
+      })
+      .filter(({ atRisk }: any) => atRisk.isAtRisk)
+      .map(({ row, atRisk }: any) => ({
+        leadId: row.lead_id,
+        leadName: row.lead_name,
+        companyName: row.company_name,
+        workflowRoute: row.workflow_route,
+        validationStatus: row.validation_status,
+        ageInDays: atRisk.effectiveStageAgeDays,
+        staleThresholdDays: atRisk.thresholdDays ?? 0,
+      })),
+    staleDeals: staleDealRows.map((row) => ({
+      dealId: row.dealId,
+      dealNumber: row.dealNumber,
+      dealName: row.dealName,
+      stageName: row.stageName,
+      workflowRoute: row.workflowRoute ?? "normal",
+      repName: row.repName,
+      daysInStage: row.daysInStage,
+      staleThresholdDays: row.staleThresholdDays,
+      dealValue: row.dealValue,
+      bidBoardStageSlug: row.bidBoardStageSlug ?? null,
+      bidBoardStageStatus: row.bidBoardStageStatus ?? null,
+      regionClassification: row.regionClassification ?? null,
     })),
     crmOwnedProgression: crmOwnedProgressionRows.map((row: any) => ({
       workflowBucket: row.workflow_bucket,

@@ -392,14 +392,14 @@ describe("on-hold report count consistency", () => {
     const regionalDb = createMockTenantDb([[], [], [], []]);
     await getRegionalOwnershipOverview(regionalDb, { from: "2026-02-01", to: "2026-02-28", officeId: "office-1" });
     const regionalSql = compactSql(regionalDb.execute.mock.calls.map(([query]: [unknown]) => extractSqlText(query)).join("\n"));
-    expect(regionalSql).toMatch(/as stale_deal_count/g);
-    expect((regionalSql.match(/stale_threshold_days is not null .*?coalesce\(d\.on_hold, false\) = false/g) ?? []).length).toBeGreaterThanOrEqual(2);
+    expect(regionalSql).not.toContain("stale_threshold_days");
+    expect(regionalSql).toContain("on_hold_accumulated_seconds");
 
-    const unifiedDb = createMockTenantDb([[], [], [], [], [], [], [], [], []]);
+    const unifiedDb = createMockTenantDb([[], [], [], [], [], [], [], [], [], []]);
     await getUnifiedWorkflowOverview(unifiedDb);
     const unifiedSql = compactSql(unifiedDb.execute.mock.calls.map(([query]: [unknown]) => extractSqlText(query)).join("\n"));
-    expect(unifiedSql).toMatch(/as stale_deal_count/);
-    expect(unifiedSql).toMatch(/stale_threshold_days is not null .*?coalesce\(d\.on_hold, false\) = false/);
+    expect(unifiedSql).not.toContain("stale_threshold_days");
+    expect(unifiedSql).toContain("on_hold_accumulated_seconds");
 
     const lostReasonsDb = createMockTenantDb([[], []]);
     await getLostDealsByReason(lostReasonsDb, { from: "2026-02-01", to: "2026-02-28" });
