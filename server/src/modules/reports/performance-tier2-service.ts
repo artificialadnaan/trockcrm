@@ -1,7 +1,7 @@
 import { sql } from "drizzle-orm";
 import type { NodePgDatabase } from "drizzle-orm/node-postgres";
 import type * as schema from "@trock-crm/shared/schema";
-import type { UserRole } from "@trock-crm/shared/types";
+import { getDealAtRiskResult, type UserRole, type WorkflowRoute } from "@trock-crm/shared/types";
 import { buildOfficeMatcher } from "./office-filter.js";
 import {
   aliasedActiveDealCountFilterSql,
@@ -211,6 +211,18 @@ interface AtRiskDealRow {
   last_activity_date: string | null;
 }
 
+interface AtRiskDealCandidateRow extends AtRiskDealRow {
+  [key: string]: unknown;
+  stage_slug: string | null;
+  workflow_route: WorkflowRoute | null;
+  stage_entered_at: string | Date | null;
+  bid_board_stage_entered_at: string | Date | null;
+  on_hold: boolean | null;
+  on_hold_started_at: string | Date | null;
+  on_hold_accumulated_seconds: string | number | bigint | null;
+  on_hold_accumulated_seconds_at_stage_entry: string | number | bigint | null;
+}
+
 export interface DirectorScorecardReport {
   kpis: {
     totalPipelineValue: number;
@@ -301,6 +313,51 @@ export function buildDirectorScorecardFromRows(input: {
   };
 }
 
+function buildDirectorScorecardAtRiskRows(
+  rows: AtRiskDealCandidateRow[],
+  now: Date
+): AtRiskDealRow[] {
+  return rows
+    .map((row) => {
+      const atRisk = getDealAtRiskResult(
+        {
+          stageSlug: row.stage_slug,
+          workflowRoute: row.workflow_route ?? "normal",
+          stageEnteredAt: row.bid_board_stage_entered_at ?? row.stage_entered_at,
+          onHold: row.on_hold,
+          onHoldStartedAt: row.on_hold_started_at,
+          onHoldAccumulatedSeconds:
+            row.on_hold_accumulated_seconds == null
+              ? null
+              : Number(row.on_hold_accumulated_seconds),
+          onHoldAccumulatedSecondsAtStageEntry:
+            row.on_hold_accumulated_seconds_at_stage_entry == null
+              ? null
+              : Number(row.on_hold_accumulated_seconds_at_stage_entry),
+        },
+        "director",
+        now
+      );
+      return { row, atRisk };
+    })
+    .filter(({ atRisk }) => atRisk.isAtRisk)
+    .sort((left, right) => {
+      if (right.atRisk.effectiveStageAgeDays !== left.atRisk.effectiveStageAgeDays) {
+        return right.atRisk.effectiveStageAgeDays - left.atRisk.effectiveStageAgeDays;
+      }
+      return numberValue(right.row.value) - numberValue(left.row.value);
+    })
+    .map(({ row, atRisk }) => ({
+      deal_id: row.deal_id,
+      deal_name: row.deal_name,
+      owner_name: row.owner_name,
+      stage_name: row.stage_name,
+      days_in_stage: atRisk.effectiveStageAgeDays,
+      value: row.value,
+      last_activity_date: row.last_activity_date,
+    }));
+}
+
 export async function getDirectorScorecard(db: TenantDb, filters: PerformanceReportFilters, tenantKey: string) {
   return withReportCache(cacheKey("director-scorecard", tenantKey, "director", filters), async () => {
     const dealScope = buildDealScopeSql(filters);
@@ -359,8 +416,8 @@ export async function getDirectorScorecard(db: TenantDb, filters: PerformanceRep
             AND ${aliasedActiveDealCountFilterSql("d")}
         )
         SELECT
-          COUNT(*) FILTER (WHERE d.stage_entered_at < now() - INTERVAL '30 days')::int AS deals_at_risk,
-          COALESCE(SUM(${aliasedEffectiveDealValueSql("d")}) FILTER (WHERE d.stage_entered_at < now() - INTERVAL '30 days'), 0)::numeric AS deals_at_risk_value,
+          0::int AS deals_at_risk,
+          0::numeric AS deals_at_risk_value,
           COUNT(DISTINCT d.company_id) FILTER (WHERE d.last_activity_at IS NULL OR d.last_activity_at < now() - INTERVAL '14 days')::int AS stalled_accounts,
           (
             SELECT COUNT(*)::int
@@ -455,9 +512,16 @@ export async function getDirectorScorecard(db: TenantDb, filters: PerformanceRep
         LEFT JOIN office_outcomes outcomes ON outcomes.office_id = oo.office_id
         ORDER BY oo.office_name ASC
       `);
-    const atRisk = await db.execute(sql`
+    const atRiskCandidates = await db.execute<AtRiskDealCandidateRow>(sql`
         SELECT d.id AS deal_id, d.name AS deal_name, u.display_name AS owner_name, psc.name AS stage_name,
-          EXTRACT(DAY FROM now() - d.stage_entered_at)::int AS days_in_stage,
+          COALESCE(d.bid_board_stage_slug, psc.slug) AS stage_slug,
+          d.workflow_route,
+          d.stage_entered_at,
+          d.bid_board_stage_entered_at,
+          d.on_hold,
+          d.on_hold_started_at,
+          d.on_hold_accumulated_seconds,
+          d.on_hold_accumulated_seconds_at_stage_entry,
           ${aliasedEffectiveDealValueSql("d")} AS value,
           d.last_activity_at::text AS last_activity_date
         FROM deals d
@@ -466,18 +530,31 @@ export async function getDirectorScorecard(db: TenantDb, filters: PerformanceRep
         JOIN pipeline_stage_config psc ON psc.id = d.stage_id
         WHERE ${dealScope}
           AND psc.slug NOT IN (${sqlStringList(terminalSlugs)})
-          AND d.stage_entered_at < now() - INTERVAL '30 days'
           AND ${aliasedActiveDealCountFilterSql("d")}
         ORDER BY d.stage_entered_at ASC
-        LIMIT 5
       `);
+    const atRiskRows = buildDirectorScorecardAtRiskRows(
+      rowsFromExecute<AtRiskDealCandidateRow>(atRiskCandidates),
+      new Date()
+    );
+    const riskRows = rowsFromExecute<DirectorRiskRow>(risks);
+    const riskBase = riskRows[0];
+    const riskRowsWithEngineAtRisk: DirectorRiskRow[] = [
+      {
+        deals_at_risk: atRiskRows.length,
+        deals_at_risk_value: atRiskRows.reduce((sum, row) => sum + numberValue(row.value), 0),
+        stalled_accounts: riskBase?.stalled_accounts ?? 0,
+        overdue_tasks: riskBase?.overdue_tasks ?? 0,
+        missed_follow_ups: riskBase?.missed_follow_ups ?? 0,
+      },
+    ];
 
     return buildDirectorScorecardFromRows({
       kpiRows: rowsFromExecute<DirectorKpiRow>(kpis),
-      riskRows: rowsFromExecute<DirectorRiskRow>(risks),
+      riskRows: riskRowsWithEngineAtRisk,
       repRows: rowsFromExecute<DirectorRepRow>(reps),
       officeRows: rowsFromExecute<DirectorOfficeRow>(offices),
-      atRiskRows: rowsFromExecute<AtRiskDealRow>(atRisk),
+      atRiskRows: atRiskRows.slice(0, 5),
     });
   });
 }

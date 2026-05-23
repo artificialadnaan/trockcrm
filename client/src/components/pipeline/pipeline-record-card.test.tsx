@@ -2,7 +2,7 @@
 
 import { renderToStaticMarkup } from "react-dom/server";
 import { MemoryRouter } from "react-router-dom";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import type { AtRiskResult } from "@trock-crm/shared/types";
 import { PipelineRecordCard, type PipelineRecordCardData } from "./pipeline-record-card";
 
@@ -66,6 +66,10 @@ function render(record: PipelineRecordCardData) {
 }
 
 describe("PipelineRecordCard", () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
   it("renders the shared at-risk badge for deal board records", () => {
     const html = render(makeRecord({ atRisk: makeAtRiskResult() }));
 
@@ -78,5 +82,46 @@ describe("PipelineRecordCard", () => {
 
     expect(html).toContain("Palm Villas");
     expect(html).not.toContain("At Risk");
+  });
+
+  it("uses the engine effective stage age for the record age label when supplied", () => {
+    const html = render(
+      makeRecord({
+        atRisk: makeAtRiskResult({
+          isAtRisk: false,
+          status: "not_at_risk",
+          severity: "none",
+          reason: "within_sla",
+          effectiveStageAgeDays: 5,
+          effectiveStageAgeSeconds: 5 * 86_400,
+          secondsUntilThreshold: 9 * 86_400,
+          secondsPastThreshold: 0,
+        }),
+      })
+    );
+
+    expect(html).toContain("5d in stage");
+  });
+
+  it("falls back to shared effective stage age for Bid Board-owned records without engine data", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-05-10T00:00:00.000Z"));
+
+    const html = render(
+      makeRecord({
+        atRisk: null,
+        isBidBoardOwned: true,
+        stageEnteredAt: "2026-05-10T00:00:00.000Z",
+        bidBoardStageEnteredAt: "2026-05-01T00:00:00.000Z",
+        onHold: true,
+        onHoldStartedAt: "2026-05-06T00:00:00.000Z",
+        onHoldAccumulatedSeconds: 0,
+        onHoldAccumulatedSecondsAtStageEntry: 0,
+      })
+    );
+
+    expect(html).toContain("5d in stage");
+    expect(html).not.toContain("9d in stage");
+    expect(html).not.toContain("0d in stage");
   });
 });

@@ -8,12 +8,13 @@ import { DealCopilotPanel } from "@/components/ai/deal-copilot-panel";
 import { DealEstimatesCard } from "./deal-estimates-card";
 import { DealStageBadge } from "./deal-stage-badge";
 import { RecordAssignmentCard } from "@/components/assignment/record-assignment-card";
-import { formatDate, daysInStage, winProbabilityColor, formatCurrency, formatDealDisplayNumber } from "@/lib/deal-utils";
+import { formatDate, winProbabilityColor, formatCurrency, formatDealDisplayNumber } from "@/lib/deal-utils";
 import { useProjectTypes, useRegions } from "@/hooks/use-pipeline-config";
 import { updateDeal, type DealDetail } from "@/hooks/use-deals";
 import { useTaskAssignees } from "@/hooks/use-task-assignees";
 import { useSalesReps } from "@/hooks/use-sales-reps";
 import { useAuth } from "@/lib/auth";
+import { getEffectiveStageAgeDeal, getEffectiveStageAgeDays } from "@trock-crm/shared/types";
 import {
   MapPin,
   Calendar,
@@ -25,6 +26,10 @@ import {
 interface DealOverviewTabProps {
   deal: DealDetail;
   onDealUpdated?: () => void;
+}
+
+function effectiveStageAgeDays(deal: DealDetail) {
+  return deal.atRisk?.effectiveStageAgeDays ?? getEffectiveStageAgeDays(getEffectiveStageAgeDeal(deal));
 }
 
 export function DealOverviewTab({ deal, onDealUpdated }: DealOverviewTabProps) {
@@ -81,7 +86,7 @@ export function DealOverviewTab({ deal, onDealUpdated }: DealOverviewTabProps) {
               <DealStageBadge stageId={deal.stageId} className="text-sm px-3 py-1" />
               <span className="text-sm text-muted-foreground flex items-center gap-1">
                 <Clock className="h-3.5 w-3.5" />
-                {daysInStage(deal.stageEnteredAt)} days in stage
+                {effectiveStageAgeDays(deal)} days in stage
               </span>
               {deal.winProbability != null && (
                 <Badge

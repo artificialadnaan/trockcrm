@@ -3,7 +3,7 @@
 import { act } from "react";
 import { cloneElement, isValidElement } from "react";
 import { createRoot, type Root } from "react-dom/client";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { renderToStaticMarkup } from "react-dom/server";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
 import type { ReactNode } from "react";
@@ -458,6 +458,10 @@ describe("DealDetailPage", () => {
     mocks.updateDealMock.mockResolvedValue({ deal: makeDealDetail({ onHold: true }) });
   });
 
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
   it("renders deal hero with name, stage badge, and project number (not raw deal number)", () => {
     const html = renderPage();
 
@@ -486,6 +490,118 @@ describe("DealDetailPage", () => {
 
     expect(html).not.toContain("At Risk");
     expect(html).not.toContain("data-at-risk-status");
+  });
+
+  it("uses the engine at-risk result for deal-detail SLA status instead of the raw hardcoded threshold", () => {
+    mocks.useDealDetailMock.mockReturnValueOnce({
+      loading: false,
+      error: null,
+      refetch: vi.fn(),
+      deal: makeDealDetail({
+        stageId: "stage-opportunity",
+        stageSlug: "opportunity",
+        bidBoardStageSlug: null,
+        isBidBoardOwned: false,
+        stageEnteredAt: "2026-04-01T10:00:00.000Z",
+        atRisk: makeAtRiskResult({
+          isAtRisk: false,
+          status: "not_at_risk",
+          severity: "none",
+          reason: "within_sla",
+          stageSlug: "opportunity",
+          canonicalStageSlug: "opportunity",
+          policy: {
+            audience: "leadership",
+            stageSlug: "opportunity",
+            dayCounting: "calendar_days",
+            thresholdDays: 30,
+            recurs: false,
+            recurrenceDays: null,
+          },
+          effectiveStageAgeSeconds: 20 * 86_400,
+          effectiveStageAgeDays: 20,
+          thresholdSeconds: 30 * 86_400,
+          thresholdDays: 30,
+          secondsUntilThreshold: 10 * 86_400,
+          secondsPastThreshold: 0,
+        }),
+      }),
+    });
+
+    const html = renderPage();
+
+    expect(html).toContain("Days in stage");
+    expect(html).toContain(">20<");
+    expect(html).toContain("SLA 30 days");
+    expect(html).toContain("Current");
+    expect(html).toContain("On track");
+    expect(html).not.toContain("SLA 14 days");
+    expect(html).not.toContain("Overdue");
+  });
+
+  it("shows an active on-hold deal as not breaching SLA even when its effective age is past threshold", () => {
+    mocks.useDealDetailMock.mockReturnValueOnce({
+      loading: false,
+      error: null,
+      refetch: vi.fn(),
+      deal: makeDealDetail({
+        onHold: true,
+        atRisk: makeAtRiskResult({
+          isAtRisk: false,
+          status: "not_at_risk",
+          severity: "none",
+          reason: "on_hold",
+          effectiveStageAgeSeconds: 45 * 86_400,
+          effectiveStageAgeDays: 45,
+          thresholdSeconds: 14 * 86_400,
+          thresholdDays: 14,
+          secondsUntilThreshold: 0,
+          secondsPastThreshold: 31 * 86_400,
+        }),
+      }),
+    });
+
+    const html = renderPage();
+
+    expect(html).toContain("Days in stage");
+    expect(html).toContain(">45<");
+    expect(html).toContain("SLA 14 days");
+    expect(html).toContain("On Hold");
+    expect(html).toContain("Paused");
+    expect(html).not.toContain("Overdue");
+    expect(html).not.toContain("Over SLA");
+  });
+
+  it("falls back to the shared effective stage-entered helper for Bid Board-owned deal SLA status", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-05-10T00:00:00.000Z"));
+    mocks.useDealDetailMock.mockReturnValueOnce({
+      loading: false,
+      error: null,
+      refetch: vi.fn(),
+      deal: makeDealDetail({
+        atRisk: null,
+        isBidBoardOwned: true,
+        stageId: "stage-under-review",
+        stageSlug: "estimate_under_review",
+        bidBoardStageSlug: "estimate_under_review",
+        workflowRoute: "normal",
+        stageEnteredAt: "2026-05-10T00:00:00.000Z",
+        bidBoardStageEnteredAt: "2026-05-01T00:00:00.000Z",
+        onHold: false,
+        onHoldStartedAt: null,
+        onHoldAccumulatedSeconds: 0,
+        onHoldAccumulatedSecondsAtStageEntry: 0,
+      }),
+    });
+
+    const html = renderPage();
+
+    expect(html).toContain("Days in stage");
+    expect(html).toContain(">9<");
+    expect(html).toContain("SLA 7 days");
+    expect(html).toContain("Overdue");
+    expect(html).toContain("Over SLA");
   });
 
   it("renders all expected tabs", () => {

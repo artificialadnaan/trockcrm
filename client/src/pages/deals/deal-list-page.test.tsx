@@ -1401,6 +1401,59 @@ describe("DealListPage", () => {
     expect(html).not.toContain("Old But Engine Safe Deal");
   });
 
+  it("orders SLA drilldown rows by engine effective age instead of raw stage-entered date", () => {
+    mocks.useDealBoardMock.mockReturnValue({
+      board: {
+        columns: [
+          {
+            stage: { id: "stage-contract", name: "Contract", slug: "contract" },
+            count: 2,
+            totalValue: 300000,
+            cards: [
+              makeDeal({
+                id: "deal-raw-old",
+                name: "Raw Old Short Effective",
+                stageId: "stage-contract",
+                stageEnteredAt: "2026-04-01T10:00:00.000Z",
+                updatedAt: "2026-05-07T10:00:00.000Z",
+                bidEstimate: "100000",
+                atRisk: makeAtRiskResult({
+                  effectiveStageAgeSeconds: 3 * 86_400,
+                  effectiveStageAgeDays: 3,
+                }),
+              }),
+              makeDeal({
+                id: "deal-raw-new",
+                name: "Raw New Long Effective",
+                stageId: "stage-contract",
+                stageEnteredAt: "2026-05-01T10:00:00.000Z",
+                updatedAt: "2026-05-07T10:00:00.000Z",
+                bidEstimate: "200000",
+                atRisk: makeAtRiskResult({
+                  effectiveStageAgeSeconds: 10 * 86_400,
+                  effectiveStageAgeDays: 10,
+                }),
+              }),
+            ],
+          },
+        ],
+        terminalStages: [],
+      },
+      loading: false,
+      error: null,
+      refetch: vi.fn(),
+    });
+
+    const html = renderPage("/deals?scope=all&filter=at_risk", "director");
+
+    const drilldownHtml = html.slice(html.indexOf("Filtered results"));
+    expect(drilldownHtml.indexOf("Raw New Long Effective")).toBeLessThan(
+      drilldownHtml.indexOf("Raw Old Short Effective")
+    );
+    expect(html).toContain("10d in stage");
+    expect(html).toContain("3d in stage");
+  });
+
   it("keeps the embedded list visible for stale drill-down views", () => {
     const html = renderPage("/deals?scope=all&filter=stale&period=qtd", "director");
 
