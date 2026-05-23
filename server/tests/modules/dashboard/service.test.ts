@@ -1227,7 +1227,7 @@ describe("Dashboard Service", () => {
       expect(downstreamQuery).toContain("from deal_stage_history");
       expect(downstreamQuery).toContain("max(dsh.created_at)");
       expect(downstreamQuery).toContain("dsh.to_stage_id = d.stage_id");
-      expect(downstreamQuery).toContain("coalesce(d.bid_board_stage_entered_at, d.stage_entered_at, latest_current_stage_entered_at.entered_at)");
+      expect(downstreamQuery).toContain("coalesce(d.bid_board_stage_entered_at, d.stage_entered_at, latest_current_stage_entered_at.entered_at) as stage_entered_at");
       expect(downstreamQuery).not.toContain("coalesce(latest_current_stage_entered_at.entered_at, d.bid_board_stage_entered_at, d.stage_entered_at)");
     });
 
@@ -1255,8 +1255,7 @@ describe("Dashboard Service", () => {
         .find((text: string) => text.includes("mirrored_stage_status"));
 
       const stageClockExpression = "coalesce(d.bid_board_stage_entered_at, d.stage_entered_at, latest_current_stage_entered_at.entered_at)";
-      expect(downstreamQuery).toContain(`extract(day from now() - ${stageClockExpression})::int as days_in_stage`);
-      expect(downstreamQuery).toContain(`extract(day from now() - ${stageClockExpression})::int`);
+      expect(downstreamQuery).toContain(`${stageClockExpression} as stage_entered_at`);
     });
   });
 
