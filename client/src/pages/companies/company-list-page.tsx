@@ -4,6 +4,7 @@ import { ArrowUpRight, Building2, ChevronLeft, ChevronRight, Globe2, Plus, Searc
 import { PageHeader } from "@/components/layout/page-header";
 import { listPaginationIconButtonClassName } from "@/components/shared/list-pagination";
 import { MetricCard } from "@/components/shared/metric-card";
+import { OwnerLabel } from "@/components/shared/owner-label";
 import { ScopeToggle } from "@/components/shared/scope-toggle";
 import { USD, USD_COMPACT } from "@/components/shared/formatters";
 import { Button } from "@/components/ui/button";
@@ -13,24 +14,17 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@
 import { useCompanies, type Company } from "@/hooks/use-companies";
 import { cn } from "@/lib/utils";
 
-const INDUSTRY_LABELS: Record<string, string> = {
-  general_contractor: "General contractor",
-  construction_manager: "Construction manager",
-  property_owner: "Property owner",
-  property_management: "Property management",
-  reit: "REIT",
-  architecture_engineering: "Architecture / engineering",
-  consultant: "Consultant",
-  insurance_restoration: "Insurance restoration",
-  other: "Other",
-};
-
 const INDUSTRY_OPTIONS = [
   { value: "all", label: "All" },
   { value: "general_contractor", label: "GC" },
   { value: "property_owner", label: "Owner" },
   { value: "property_management", label: "Mgmt" },
   { value: "insurance_restoration", label: "Restoration" },
+] as const;
+
+const OWNER_SCOPE_OPTIONS = [
+  { value: "all", label: "All" },
+  { value: "mine", label: "Mine" },
 ] as const;
 
 function numeric(value: string | number | null | undefined) {
@@ -64,11 +58,13 @@ export function CompanyListPage() {
   const navigate = useNavigate();
   const [search, setSearch] = useState("");
   const [industry, setIndustry] = useState<(typeof INDUSTRY_OPTIONS)[number]["value"]>("all");
+  const [ownerScope, setOwnerScope] = useState<(typeof OWNER_SCOPE_OPTIONS)[number]["value"]>("all");
   const [page, setPage] = useState(1);
 
   const { companies, pagination, loading, error } = useCompanies({
     search: search || undefined,
     industry: industry === "all" ? undefined : industry,
+    ownerScope: ownerScope === "mine" ? "mine" : undefined,
     page,
     limit: 50,
   });
@@ -127,6 +123,15 @@ export function CompanyListPage() {
                 }}
                 ariaLabel="Industry filter"
               />
+              <ScopeToggle
+                options={OWNER_SCOPE_OPTIONS}
+                value={ownerScope}
+                onChange={(value) => {
+                  setOwnerScope(value);
+                  setPage(1);
+                }}
+                ariaLabel="Ownership filter"
+              />
             </div>
             <p className="text-[11px] font-bold uppercase tracking-[0.16em] text-slate-500">
               {loading ? "Loading accounts" : `${pagination.total} results`}
@@ -147,14 +152,14 @@ export function CompanyListPage() {
             <div className="rounded-xl border border-dashed border-slate-300 px-6 py-14 text-center">
               <Building2 className="mx-auto h-10 w-10 text-slate-300" />
               <p className="mt-3 text-base font-black uppercase text-slate-950">No companies match this view</p>
-              <p className="mt-1 text-sm text-slate-500">Clear the search or switch the industry filter.</p>
+              <p className="mt-1 text-sm text-slate-500">Clear the search or switch the filters.</p>
             </div>
           ) : (
             <Table>
               <TableHeader>
                 <TableRow className="hover:bg-transparent">
                   <TableHead className="text-[11px] font-black uppercase tracking-[0.16em] text-slate-500">Company</TableHead>
-                  <TableHead className="text-[11px] font-black uppercase tracking-[0.16em] text-slate-500">Industry</TableHead>
+                  <TableHead className="text-[11px] font-black uppercase tracking-[0.16em] text-slate-500">Owner</TableHead>
                   <TableHead className="text-right text-[11px] font-black uppercase tracking-[0.16em] text-slate-500">Properties</TableHead>
                   <TableHead className="text-right text-[11px] font-black uppercase tracking-[0.16em] text-slate-500">Contacts</TableHead>
                   <TableHead className="text-right text-[11px] font-black uppercase tracking-[0.16em] text-slate-500">Active deals</TableHead>
@@ -192,9 +197,7 @@ export function CompanyListPage() {
                         </div>
                       </TableCell>
                       <TableCell>
-                        <span className="rounded-full bg-slate-100 px-2.5 py-1 text-xs font-bold text-slate-700">
-                          {company.industry ? INDUSTRY_LABELS[company.industry] ?? company.industry : "Unclassified"}
-                        </span>
+                        <OwnerLabel ownerId={company.ownerUserId} ownerName={company.ownerUserName} />
                       </TableCell>
                       <TableCell className="text-right font-black tabular-nums">{company.propertiesCount ?? 0}</TableCell>
                       <TableCell className="text-right font-black tabular-nums">{company.contactsCount ?? company.contactCount}</TableCell>

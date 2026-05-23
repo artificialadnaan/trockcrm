@@ -1,7 +1,7 @@
 import { eq, and, desc, asc, ilike, sql, or, not, isNull, inArray } from "drizzle-orm";
 import type { SQL } from "drizzle-orm";
 import type { NodePgDatabase } from "drizzle-orm/node-postgres";
-import { activities, contacts, contactDealAssociations, deals, emails, tasks } from "@trock-crm/shared/schema";
+import { activities, contacts, contactDealAssociations, deals, emails, tasks, users } from "@trock-crm/shared/schema";
 import type * as schema from "@trock-crm/shared/schema";
 import { AppError } from "../../middleware/error-handler.js";
 
@@ -24,6 +24,7 @@ export interface ContactFilters {
   dealStageId?: string;
   isActive?: boolean;
   hasOutreach?: boolean; // filter by first_outreach_completed
+  ownerUserId?: string;
   sortBy?: "name" | "company_name" | "created_at" | "updated_at" | "last_contacted_at" | "touchpoint_count" | "last_touch_at";
   sortDir?: "asc" | "desc";
   page?: number;
@@ -348,6 +349,9 @@ export async function getContacts(tenantDb: TenantDb, filters: ContactFilters) {
   if (filters.role) {
     conditions.push(eq(contacts.role, filters.role as any));
   }
+  if (filters.ownerUserId) {
+    conditions.push(eq(contacts.ownerId, filters.ownerUserId));
+  }
 
   // City filter
   if (filters.city) {
@@ -408,48 +412,49 @@ export async function getContacts(tenantDb: TenantDb, filters: ContactFilters) {
   // Sort
   const sortOrder = buildContactSortOrder(filters.sortBy, filters.sortDir);
 
-  const [countResult, contactRows] = await Promise.all([
-    tenantDb.select({ count: sql<number>`count(*)` }).from(contacts).where(where),
-    tenantDb
-      .select({
-        id: contacts.id,
-        firstName: contacts.firstName,
-        lastName: contacts.lastName,
-        email: contacts.email,
-        phone: contacts.phone,
-        mobile: contacts.mobile,
-        companyName: contacts.companyName,
-        companyId: contacts.companyId,
-        jobTitle: contacts.jobTitle,
-        category: contacts.category,
-        role: contacts.role,
-        linkedinUrl: contacts.linkedinUrl,
-        address: contacts.address,
-        city: contacts.city,
-        state: contacts.state,
-        zip: contacts.zip,
-        notes: contacts.notes,
-        touchpointCount: contacts.touchpointCount,
-        lastContactedAt: contacts.lastContactedAt,
-        firstOutreachCompleted: contacts.firstOutreachCompleted,
-        procoreContactId: contacts.procoreContactId,
-        hubspotContactId: contacts.hubspotContactId,
-        sourceRefs: contacts.sourceRefs,
-        normalizedPhone: contacts.normalizedPhone,
-        isTestData: contacts.isTestData,
-        isActive: contacts.isActive,
-        createdAt: contacts.createdAt,
-        updatedAt: contacts.updatedAt,
-        isPrimary: buildContactIsPrimarySql(),
-        linkedDealsCount: buildContactLinkedDealsCountSql(),
-        lastTouchAt: buildContactLastTouchAtSql(),
-      })
-      .from(contacts)
-      .where(where)
-      .orderBy(sortOrder)
-      .limit(limit)
-      .offset(offset),
-  ]);
+  const countResult = await tenantDb.select({ count: sql<number>`count(*)` }).from(contacts).where(where);
+  const contactRows = await tenantDb
+    .select({
+      id: contacts.id,
+      firstName: contacts.firstName,
+      lastName: contacts.lastName,
+      email: contacts.email,
+      phone: contacts.phone,
+      mobile: contacts.mobile,
+      companyName: contacts.companyName,
+      companyId: contacts.companyId,
+      ownerUserId: contacts.ownerId,
+      ownerUserName: users.displayName,
+      jobTitle: contacts.jobTitle,
+      category: contacts.category,
+      role: contacts.role,
+      linkedinUrl: contacts.linkedinUrl,
+      address: contacts.address,
+      city: contacts.city,
+      state: contacts.state,
+      zip: contacts.zip,
+      notes: contacts.notes,
+      touchpointCount: contacts.touchpointCount,
+      lastContactedAt: contacts.lastContactedAt,
+      firstOutreachCompleted: contacts.firstOutreachCompleted,
+      procoreContactId: contacts.procoreContactId,
+      hubspotContactId: contacts.hubspotContactId,
+      sourceRefs: contacts.sourceRefs,
+      normalizedPhone: contacts.normalizedPhone,
+      isTestData: contacts.isTestData,
+      isActive: contacts.isActive,
+      createdAt: contacts.createdAt,
+      updatedAt: contacts.updatedAt,
+      isPrimary: buildContactIsPrimarySql(),
+      linkedDealsCount: buildContactLinkedDealsCountSql(),
+      lastTouchAt: buildContactLastTouchAtSql(),
+    })
+    .from(contacts)
+    .leftJoin(users, eq(users.id, contacts.ownerId))
+    .where(where)
+    .orderBy(sortOrder)
+    .limit(limit)
+    .offset(offset);
 
   const total = Number(countResult[0]?.count ?? 0);
 
