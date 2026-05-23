@@ -457,7 +457,8 @@ describe("getDealsForPipeline team scope", () => {
     expect(wonConditions.every((condition) => containsValue(condition, "2026-04-30"))).toBe(true);
     expect(wonConditions.every((condition) => extractSqlText(condition).includes("contract_signed_at"))).toBe(true);
     expect(wonConditions.every((condition) => extractSqlText(condition).includes("contract_signed_date"))).toBe(true);
-    expect(wonConditions.every((condition) => extractSqlText(condition).includes("stage_entered_at"))).toBe(true);
+    expect(wonConditions.every((condition) => extractSqlText(condition).includes("bid_board_last_updated_at"))).toBe(true);
+    expect(wonConditions.every((condition) => extractSqlText(condition).includes("stage_entered_at"))).toBe(false);
   });
 
   it("queries each active lost alias terminal column by its own stage when no canonical lost stage exists", async () => {

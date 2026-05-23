@@ -828,50 +828,64 @@ async function listDealStages() {
 
 const sqlList = (values: readonly string[]) => sql.join(values.map((value) => sql`${value}`), sql`, `);
 
-function dealTerminalEnteredAtSql(stageSlugs: readonly string[], fallback: unknown) {
+function workspaceWonWindowDateSql() {
+  return sql`COALESCE(d.contract_signed_at, d.contract_signed_date::timestamptz)`;
+}
+
+function workspaceWonWindowEligibilitySql() {
+  const date = workspaceWonWindowDateSql();
   return sql`
-    COALESCE(
-      (
-        SELECT MAX(${dealStageHistory.createdAt})
-        FROM ${dealStageHistory}
-        JOIN ${pipelineStageConfig} terminal_history_stage
-          ON terminal_history_stage.id = ${dealStageHistory.toStageId}
-        WHERE ${dealStageHistory.dealId} = ${deals.id}
-          AND terminal_history_stage.slug IN (${sqlList(stageSlugs)})
-      ),
-      ${fallback},
-      ${deals.stageEnteredAt}
+    ${date} IS NOT NULL
+    AND NOT (
+      d.bid_board_last_updated_at IS NOT NULL
+      AND ${date}::date = d.bid_board_last_updated_at::date
     )
   `;
 }
 
-function workspaceTerminalEnteredAtSql(stageSlugs: readonly string[], fallbackSql: unknown) {
+function workspaceLostWindowDateSql() {
+  return sql`d.lost_at`;
+}
+
+function workspaceLostWindowEligibilitySql() {
+  const date = workspaceLostWindowDateSql();
   return sql`
-    COALESCE(
-      (
-        SELECT MAX(dsh.created_at)
-        FROM deal_stage_history dsh
-        JOIN public.pipeline_stage_config terminal_history_stage
-          ON terminal_history_stage.id = dsh.to_stage_id
-        WHERE dsh.deal_id = d.id
-          AND terminal_history_stage.slug IN (${sqlList(stageSlugs)})
-      ),
-      ${fallbackSql},
-      d.stage_entered_at
+    ${date} IS NOT NULL
+    AND NOT (
+      d.bid_board_last_updated_at IS NOT NULL
+      AND ${date}::date = d.bid_board_last_updated_at::date
     )
   `;
 }
 
-function workspaceTerminalBusinessDateSql(fallbackSql: unknown) {
-  return sql`COALESCE(${fallbackSql}, d.stage_entered_at)`;
+function dealWonWindowDateSql() {
+  return contractSignedDateForReporting;
 }
 
-function dealTerminalBusinessDateSql(fallbackSql: unknown) {
-  return sql`COALESCE(${fallbackSql}, ${deals.stageEnteredAt})`;
+function dealWonWindowEligibilitySql() {
+  const date = dealWonWindowDateSql();
+  return sql`
+    ${date} IS NOT NULL
+    AND NOT (
+      ${deals.bidBoardLastUpdatedAt} IS NOT NULL
+      AND ${date}::date = ${deals.bidBoardLastUpdatedAt}::date
+    )
+  `;
 }
 
-function dealWonBoardBusinessDateSql() {
-  return sql`COALESCE(${contractSignedDateForReporting}, ${deals.stageEnteredAt}::date)`;
+function dealLostWindowDateSql() {
+  return deals.lostAt;
+}
+
+function dealLostWindowEligibilitySql() {
+  const date = dealLostWindowDateSql();
+  return sql`
+    ${date} IS NOT NULL
+    AND NOT (
+      ${deals.bidBoardLastUpdatedAt} IS NOT NULL
+      AND ${date}::date = ${deals.bidBoardLastUpdatedAt}::date
+    )
+  `;
 }
 
 function dealEstimateSentAtSql() {
@@ -972,10 +986,11 @@ function workspaceEffectiveDealValueSql(stage: PipelineStageRow) {
 function terminalWorkspaceDateConditions(stage: PipelineStageRow, input: DealStagePageInput) {
   const terminalFilters = resolvePipelineTerminalDateFilters(input);
   if (WON_TERMINAL_STAGE_SLUGS.includes(stage.slug as (typeof WON_TERMINAL_STAGE_SLUGS)[number])) {
-    const enteredAt = workspaceTerminalBusinessDateSql(
-      sql`COALESCE(d.contract_signed_at, d.contract_signed_date::timestamptz)`
-    );
+    const enteredAt = workspaceWonWindowDateSql();
     const conditions: any[] = [];
+    if (terminalFilters.won.since || terminalFilters.won.until) {
+      conditions.push(workspaceWonWindowEligibilitySql());
+    }
     if (terminalFilters.won.since) {
       conditions.push(sql`${enteredAt} >= ${terminalFilters.won.since}`);
     }
@@ -985,8 +1000,11 @@ function terminalWorkspaceDateConditions(stage: PipelineStageRow, input: DealSta
     return conditions;
   }
   if (LOST_TERMINAL_STAGE_SLUGS.includes(stage.slug as (typeof LOST_TERMINAL_STAGE_SLUGS)[number])) {
-    const enteredAt = workspaceTerminalBusinessDateSql(sql`d.lost_at`);
+    const enteredAt = workspaceLostWindowDateSql();
     const conditions: any[] = [];
+    if (terminalFilters.lost.since || terminalFilters.lost.until) {
+      conditions.push(workspaceLostWindowEligibilitySql());
+    }
     if (terminalFilters.lost.since) {
       conditions.push(sql`${enteredAt} >= ${terminalFilters.lost.since}`);
     }
@@ -2192,8 +2210,8 @@ export async function getDealsForPipeline(
   const wonSignedDateUntil = toIsoDateOnly(terminalFilters.won.until);
   const wonPeriodFrom = toIsoDateOnly(wonPeriodRange.from);
   const wonPeriodTo = toIsoDateOnly(wonPeriodRange.to);
-  const wonBoardBusinessDate = dealWonBoardBusinessDateSql();
-  const lostEnteredAt = dealTerminalBusinessDateSql(deals.lostAt);
+  const wonWindowDate = dealWonWindowDateSql();
+  const lostWindowDate = dealLostWindowDateSql();
   const pipelineCardsPerStageLimit = Math.max(
     1,
     Math.min(
@@ -2259,25 +2277,31 @@ export async function getDealsForPipeline(
       stage.slug === "lost";
     if (WON_TERMINAL_STAGE_SLUGS.includes(stage.slug as (typeof WON_TERMINAL_STAGE_SLUGS)[number])) {
       stageConditions.push(canonicalWonStageId ? inArray(deals.stageId, wonStageIds) : eq(deals.stageId, stage.id));
+      if (wonSignedDateSince || wonSignedDateUntil || wonPeriodFrom || wonPeriodTo) {
+        stageConditions.push(dealWonWindowEligibilitySql());
+      }
       if (wonSignedDateSince) {
-        stageConditions.push(sql`${wonBoardBusinessDate} >= ${wonSignedDateSince}::date`);
+        stageConditions.push(sql`${wonWindowDate} >= ${wonSignedDateSince}::date`);
       }
       if (wonSignedDateUntil) {
-        stageConditions.push(sql`${wonBoardBusinessDate} <= ${wonSignedDateUntil}::date`);
+        stageConditions.push(sql`${wonWindowDate} <= ${wonSignedDateUntil}::date`);
       }
       if (wonPeriodFrom) {
-        stageConditions.push(sql`${wonBoardBusinessDate} >= ${wonPeriodFrom}::date`);
+        stageConditions.push(sql`${wonWindowDate} >= ${wonPeriodFrom}::date`);
       }
       if (wonPeriodTo) {
-        stageConditions.push(sql`${wonBoardBusinessDate} <= ${wonPeriodTo}::date`);
+        stageConditions.push(sql`${wonWindowDate} <= ${wonPeriodTo}::date`);
       }
     } else if (LOST_TERMINAL_STAGE_SLUGS.includes(stage.slug as (typeof LOST_TERMINAL_STAGE_SLUGS)[number])) {
       stageConditions.push(canonicalLostStageId ? inArray(deals.stageId, lostStageIds) : eq(deals.stageId, stage.id));
+      if (terminalFilters.lost.since || terminalFilters.lost.until) {
+        stageConditions.push(dealLostWindowEligibilitySql());
+      }
       if (terminalFilters.lost.since) {
-        stageConditions.push(sql`${lostEnteredAt} >= ${terminalFilters.lost.since}`);
+        stageConditions.push(sql`${lostWindowDate} >= ${terminalFilters.lost.since}`);
       }
       if (terminalFilters.lost.until) {
-        stageConditions.push(sql`${lostEnteredAt} < ${addUtcDays(terminalFilters.lost.until, 1)}`);
+        stageConditions.push(sql`${lostWindowDate} < ${addUtcDays(terminalFilters.lost.until, 1)}`);
       }
     } else {
       stageConditions.push(eq(deals.isActive, true), eq(deals.stageId, stage.id));
