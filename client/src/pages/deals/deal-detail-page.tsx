@@ -14,7 +14,6 @@ import {
   MapPin,
   ReceiptText,
   Trash2,
-  ChevronRight,
   Info,
   MoreHorizontal,
   Lock,
@@ -216,28 +215,6 @@ function getTabIcon(tab: Tab) {
   }
 }
 
-function isBidBoardManagedStage(
-  stage: { slug: string; displayOrder: number },
-  options: {
-    isBidBoardOwned: boolean;
-    workflowRoute: "normal" | "service";
-    handoffStageDisplayOrder: number | null;
-  }
-) {
-  if (!options.isBidBoardOwned) {
-    return false;
-  }
-
-  if (options.handoffStageDisplayOrder == null) {
-    return !isEstimatingBoundaryStageSlug(stage.slug, options.workflowRoute);
-  }
-
-  return (
-    !isEstimatingBoundaryStageSlug(stage.slug, options.workflowRoute) &&
-    stage.displayOrder > options.handoffStageDisplayOrder
-  );
-}
-
 export function DealDetailPage() {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
@@ -272,9 +249,6 @@ export function DealDetailPage() {
       toCanonicalDealStageSlug(stage.slug, workflowRoute) != null
   );
   const canonicalStageSlugs = getCanonicalDealStageSlugs(workflowRoute) as string[];
-  const canonicalStageOrder = new Map(
-    canonicalStageSlugs.map((slug, index) => [slug, index] as const)
-  );
   const canonicalOrderedStages = canonicalStageSlugs
     .map((slug) => {
       const exactFamilyMatch = dealStages.find(
@@ -300,43 +274,13 @@ export function DealDetailPage() {
     })
     .filter((stage): stage is NonNullable<typeof stage> => stage != null);
 
-  // Build stage advancement options
   const canonicalCurrentStageSlug =
     currentStage == null ? null : toCanonicalDealStageSlug(currentStage.slug, workflowRoute);
-  const currentCanonicalIndex =
-    canonicalCurrentStageSlug == null ? -1 : (canonicalStageOrder.get(canonicalCurrentStageSlug) ?? -1);
-  const forwardStages =
-    currentCanonicalIndex === -1
-      ? []
-      : canonicalOrderedStages.filter(
-          (stage) => (canonicalStageOrder.get(stage.slug) ?? -1) > currentCanonicalIndex
-        );
-  const backwardStages =
-    currentCanonicalIndex <= 0
-      ? []
-      : canonicalOrderedStages.filter((stage) => {
-          const stageIndex = canonicalStageOrder.get(stage.slug) ?? -1;
-          return stageIndex > -1 && stageIndex < currentCanonicalIndex && !stage.isTerminal;
-        });
   const handoffStageSlug =
     bidBoardOwnership?.handoffStageSlug ?? getCanonicalEstimatingBoundaryStageSlug(workflowRoute);
   const handoffStage =
     canonicalOrderedStages.find((s) => s.slug === handoffStageSlug) ??
     canonicalOrderedStages.find((s) => isEstimatingBoundaryStageSlug(s.slug, workflowRoute));
-  const readonlyForwardStages = forwardStages.filter((stage) =>
-    isBidBoardManagedStage(stage, {
-      isBidBoardOwned,
-      workflowRoute,
-      handoffStageDisplayOrder: handoffStage?.displayOrder ?? null,
-    })
-  );
-  const manualForwardStages = forwardStages.filter((stage) =>
-    !isBidBoardManagedStage(stage, {
-      isBidBoardOwned,
-      workflowRoute,
-      handoffStageDisplayOrder: handoffStage?.displayOrder ?? null,
-    })
-  );
 
   const handleStageChange = (stageId: string) => {
     setTargetStageId(stageId);
@@ -787,60 +731,6 @@ export function DealDetailPage() {
           ) : null}
         </div>
       ) : null}
-      {!currentStage?.isTerminal && viewerOwnsDeal && (
-        <DropdownMenu>
-          <DropdownMenuTrigger
-            render={<Button>
-              Move Stage
-              <ChevronRight className="h-4 w-4 ml-1" />
-            </Button>}
-          />
-          <DropdownMenuContent align="end">
-            {manualForwardStages.map((s) => (
-              <DropdownMenuItem
-                key={s.id}
-                onClick={() => handleStageChange(s.id)}
-              >
-                {s.name}
-                {s.isTerminal && (
-                  <Badge variant="outline" className="ml-2 text-xs">
-                    Terminal
-                  </Badge>
-                )}
-              </DropdownMenuItem>
-            ))}
-            {readonlyForwardStages.map((s) => (
-              <DropdownMenuItem
-                key={s.id}
-                disabled
-              >
-                <div className="flex w-full items-center justify-between gap-2">
-                  <span>{s.name}</span>
-                  <Badge variant="outline" className="text-xs">
-                    Bid Board managed
-                  </Badge>
-                </div>
-              </DropdownMenuItem>
-            ))}
-            {isDirectorOrAdmin && backwardStages.length > 0 && (
-              <>
-                <div className="px-2 py-1.5 text-xs text-muted-foreground border-t mt-1 pt-1">
-                  Move Backward (Director)
-                </div>
-                {backwardStages.map((s) => (
-                  <DropdownMenuItem
-                    key={s.id}
-                    onClick={() => handleStageChange(s.id)}
-                    className="text-orange-600"
-                  >
-                    {s.name}
-                  </DropdownMenuItem>
-                ))}
-              </>
-            )}
-          </DropdownMenuContent>
-        </DropdownMenu>
-      )}
       {currentStage?.isTerminal && viewerOwnsDeal && !isBidBoardOwned && (
         <DropdownMenu>
           <DropdownMenuTrigger
