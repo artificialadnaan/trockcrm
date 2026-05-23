@@ -43,4 +43,15 @@ describe("Sidebar navigation metadata", () => {
     expect(mobileSource).toContain("function getNavItemKey");
     expect(mobileSource).toContain("key={getNavItemKey(item)}");
   });
+
+  it("defines Capture as an external trockcam link rather than an internal route", () => {
+    expect(source).toContain(
+      '{ to: "https://trockcam.com", icon: Camera, label: "Capture", roles: ["admin", "director", "rep", "construction"], external: true, ariaLabel: "Open Capture in a new tab", }',
+    );
+    expect(mobileSource).toContain(
+      '{ to: "https://trockcam.com", icon: Camera, label: "Capture", external: true, ariaLabel: "Open Capture in a new tab" }',
+    );
+    expect(source).not.toContain('to: "/photos/capture", icon: Camera, label: "Capture"');
+    expect(mobileSource).not.toContain('to: "/photos/capture", icon: Camera, label: "Capture"');
+  });
 });
