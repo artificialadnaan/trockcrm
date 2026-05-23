@@ -6,6 +6,7 @@ import { getDealDisplayNumber } from "@/components/deals/kanban-deal-card";
 import { isTerminalStage } from "@/lib/pipeline-terminal-filters";
 import {
   getEffectiveDealValue,
+  getEffectiveStageAgeDeal,
   getEffectiveStageAgeDays,
   getOwnerInitialColor,
   getSlaPolicy,
@@ -49,7 +50,7 @@ export function DecoratedKanbanCard({
   onClick,
 }: DecoratedKanbanCardProps) {
   const displayNumber = getDealDisplayNumber(deal);
-  const days = getEffectiveStageAgeDays(deal);
+  const days = getEffectiveStageAgeDays(getEffectiveStageAgeDeal(deal));
   const slaDays = resolveKanbanSlaThresholdDays(stageSlug);
   const showSla = !isTerminalStage(stageSlug) && slaDays !== null;
   const isOverSla = showSla && slaDays > 0 && days > slaDays;

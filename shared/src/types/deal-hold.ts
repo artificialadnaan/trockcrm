@@ -31,6 +31,12 @@ type DealHoldTimingLike = {
   onHoldAccumulatedSecondsAtStageEntry?: number | null;
 };
 
+type DealStageAgeSourceLike = {
+  stageEnteredAt?: string | Date | null;
+  isBidBoardOwned?: boolean | null;
+  bidBoardStageEnteredAt?: string | Date | null;
+};
+
 type DealHoldStageEntryLike = Pick<
   DealHoldTimingLike,
   "onHold" | "onHoldStartedAt" | "onHoldAccumulatedSeconds"
@@ -101,6 +107,25 @@ export function getEffectiveDealValue(deal: DealValueLike): number {
 
 export function getEffectiveAwardedDealValue(deal: DealValueLike): number {
   return deal.onHold ? 0 : getRawAwardedDealValue(deal);
+}
+
+export function resolveEffectiveStageEnteredAt(
+  deal: DealStageAgeSourceLike
+): string | Date | null {
+  if (deal.isBidBoardOwned === true && deal.bidBoardStageEnteredAt) {
+    return deal.bidBoardStageEnteredAt;
+  }
+
+  return deal.stageEnteredAt ?? null;
+}
+
+export function getEffectiveStageAgeDeal<T extends DealStageAgeSourceLike>(
+  deal: T
+): T & { stageEnteredAt: string | Date | null } {
+  return {
+    ...deal,
+    stageEnteredAt: resolveEffectiveStageEnteredAt(deal),
+  };
 }
 
 export function getEffectiveStageAgeSeconds(

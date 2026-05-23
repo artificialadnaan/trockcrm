@@ -21,6 +21,7 @@ import {
 import {
   DOMAIN_EVENTS,
   getDealAtRiskResult,
+  resolveEffectiveStageEnteredAt,
   USER_ROLES,
   type AtRiskResult,
   type DealContractSignedEventPayload,
@@ -76,6 +77,7 @@ function attachAtRiskResult<T extends {
   stageId?: string | null;
   stageSlug?: string | null;
   bidBoardStageSlug?: string | null;
+  isBidBoardOwned?: boolean | null;
   workflowRoute?: WorkflowRoute | null;
   stageEnteredAt?: string | Date | null;
   bidBoardStageEnteredAt?: string | Date | null;
@@ -101,7 +103,7 @@ function attachAtRiskResult<T extends {
       {
         stageSlug,
         workflowRoute: deal.workflowRoute ?? "normal",
-        stageEnteredAt: deal.bidBoardStageEnteredAt ?? deal.stageEnteredAt ?? null,
+        stageEnteredAt: resolveEffectiveStageEnteredAt(deal),
         onHold: deal.onHold,
         onHoldStartedAt: deal.onHoldStartedAt,
         onHoldAccumulatedSeconds:
@@ -692,6 +694,7 @@ type DealStageWorkspaceRow = {
   property_state: string | null;
   updated_at: string;
   stage_entered_at: string;
+  is_bid_board_owned: boolean;
   bid_board_stage_slug: string | null;
   bid_board_stage_entered_at: string | null;
   on_hold: boolean;
@@ -1059,6 +1062,7 @@ function mapDealStageWorkspaceRow(
     propertyState: row.property_state,
     updatedAt: row.updated_at,
     stageEnteredAt: row.stage_entered_at,
+    isBidBoardOwned: row.is_bid_board_owned,
     bidBoardStageSlug: row.bid_board_stage_slug,
     bidBoardStageEnteredAt: row.bid_board_stage_entered_at,
     onHold: row.on_hold,
@@ -2416,6 +2420,7 @@ export async function listDealStagePage(tenantDb: TenantDb, input: DealStagePage
       d.property_state,
       d.updated_at,
       d.stage_entered_at,
+      d.is_bid_board_owned,
       d.bid_board_stage_slug,
       d.bid_board_stage_entered_at,
       d.on_hold,

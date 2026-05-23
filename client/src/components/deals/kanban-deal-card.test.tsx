@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { renderToStaticMarkup } from "react-dom/server";
 import { MemoryRouter } from "react-router-dom";
 import type { AtRiskResult } from "@trock-crm/shared/types";
@@ -140,6 +140,28 @@ describe("KanbanDealCard", () => {
     const html = render(makeDeal({ propertyCity: "Dallas" }));
     expect(html).toContain("Dallas");
     expect(html).toMatch(/\d+d in stage/);
+  });
+
+  it("uses Bid Board stage age for Bid Board-owned days-in-stage meta", () => {
+    vi.useFakeTimers();
+    try {
+      vi.setSystemTime(new Date("2026-05-10T00:00:00.000Z"));
+
+      const html = render(
+        makeDeal({
+          isBidBoardOwned: true,
+          stageEnteredAt: "2026-05-10T00:00:00.000Z",
+          bidBoardStageEnteredAt: "2026-05-01T00:00:00.000Z",
+          atRisk: makeAtRiskResult({ effectiveStageAgeDays: 9 }),
+        })
+      );
+
+      expect(html).toContain("9d in stage");
+      expect(html).not.toContain("0d in stage");
+      expect(html).toContain("At Risk");
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("renders deal name and currency value", () => {

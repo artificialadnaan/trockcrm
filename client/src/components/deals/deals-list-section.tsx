@@ -19,13 +19,18 @@ import { TerminalDateFilterControl } from "@/components/pipeline/terminal-date-f
 import { useDeals, type Deal, type DealFilters } from "@/hooks/use-deals";
 import { usePipelineStages, type PipelineStage } from "@/hooks/use-pipeline-config";
 import { useTaskAssignees } from "@/hooks/use-task-assignees";
-import { daysInStage, formatCurrencyCompact } from "@/lib/deal-utils";
+import { formatCurrencyCompact } from "@/lib/deal-utils";
 import {
   daysAgo,
   type TerminalDateFilter,
 } from "@/lib/pipeline-terminal-filters";
 import { api } from "@/lib/api";
-import { getEffectiveDealValue, getOwnerInitialColor } from "@trock-crm/shared/types";
+import {
+  getEffectiveDealValue,
+  getEffectiveStageAgeDeal,
+  getEffectiveStageAgeDays,
+  getOwnerInitialColor,
+} from "@trock-crm/shared/types";
 import { cn } from "@/lib/utils";
 import { getDealDisplayNumber } from "@/components/deals/kanban-deal-card";
 import { listPaginationIconButtonClassName } from "@/components/shared/list-pagination";
@@ -208,6 +213,10 @@ function renderDescriptionPreview(description: string | null | undefined) {
       </span>
     </span>
   );
+}
+
+function effectiveStageAgeDays(deal: Deal) {
+  return getEffectiveStageAgeDays(getEffectiveStageAgeDeal(deal));
 }
 
 /**
@@ -648,7 +657,7 @@ export function DealsListSection({
           displayNumber.label,
           deal.assignedRepName ?? assigneeNameById.get(deal.assignedRepId) ?? "",
           deal.stageName ?? stageNameById.get(deal.stageId) ?? "",
-          daysInStage(deal.stageEnteredAt),
+          effectiveStageAgeDays(deal),
           getEffectiveDealValue(deal),
           deal.lastActivityAt ?? deal.updatedAt,
         ];
@@ -755,7 +764,7 @@ export function DealsListSection({
       cellClassName: "hidden lg:table-cell lg:w-[3rem] lg:!px-3 lg:text-right",
       render: (deal) => (
         <span className="inline-flex justify-end whitespace-nowrap font-medium tabular-nums text-slate-500">
-          {daysInStage(deal.stageEnteredAt)}d
+          {effectiveStageAgeDays(deal)}d
         </span>
       ),
     },
@@ -1029,7 +1038,7 @@ export function DealsListSection({
                         </span>
                         <span className="inline-flex items-center gap-1 whitespace-nowrap text-right">
                           <Clock3 className="h-3.5 w-3.5 text-slate-400" />
-                          {daysInStage(deal.stageEnteredAt)}d SLA
+                          {effectiveStageAgeDays(deal)}d SLA
                         </span>
                       </div>
                     </div>

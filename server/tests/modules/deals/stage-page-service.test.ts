@@ -102,6 +102,72 @@ describe("listDealStagePage", () => {
     expect(result.summary).toMatchObject({ count: 21, activeCount: 21, totalCount: 26, totalValue: 400000 });
   });
 
+  it("hydrates stage-page At Risk age from Bid Board stage-entered timestamp for Bid Board-owned rows", async () => {
+    vi.useFakeTimers();
+    try {
+      vi.setSystemTime(new Date("2026-05-10T00:00:00.000Z"));
+      dbState.responses = [
+        [{ id: "stage-estimating", slug: "estimating", name: "Estimating", displayOrder: 4, isTerminal: false }],
+      ];
+
+      const tenantDb = {
+        select: createOfficeScopeSelectMock(),
+        execute: vi.fn()
+          .mockResolvedValueOnce({ rows: [{ total_count: "1", active_count: "1", total_value: "400000" }] })
+          .mockResolvedValueOnce({
+            rows: [
+              {
+                id: "deal-bid-board",
+                deal_number: "TR-2026-BB",
+                project_number: "ATL-1-11726-ab",
+                name: "Bid Board Deal",
+                stage_id: "stage-estimating",
+                workflow_route: "normal",
+                assigned_rep_id: "rep-1",
+                assigned_rep_name: "Brett Jones",
+                region_id: null,
+                source: null,
+                property_city: null,
+                property_state: null,
+                updated_at: "2026-05-10T00:00:00.000Z",
+                stage_entered_at: "2026-05-10T00:00:00.000Z",
+                is_bid_board_owned: true,
+                bid_board_stage_slug: "estimating",
+                bid_board_stage_entered_at: "2026-05-01T00:00:00.000Z",
+                on_hold: false,
+                on_hold_started_at: null,
+                on_hold_accumulated_seconds: 0,
+                on_hold_accumulated_seconds_at_stage_entry: 0,
+                awarded_amount: null,
+                bid_estimate: "15000",
+                dd_estimate: null,
+                days_in_stage: 0,
+              },
+            ],
+          }),
+      } as any;
+
+      const { listDealStagePage } = await import("../../../src/modules/deals/service.js");
+      const result = await listDealStagePage(tenantDb, {
+        role: "admin",
+        userId: "admin-1",
+        activeOfficeId: "office-1",
+        scope: "all",
+        stageId: "stage-estimating",
+        page: 1,
+        pageSize: 25,
+      } as any);
+
+      expect(result.rows[0]?.atRisk).toMatchObject({
+        effectiveStageAgeDays: 9,
+        thresholdDays: 14,
+        reason: "within_sla",
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("orders stage rows by newest-first with a deterministic id tiebreaker by default", async () => {
     dbState.responses = [
       [{ id: "stage-estimating", slug: "estimating", name: "Estimating", displayOrder: 4, isTerminal: false }],
