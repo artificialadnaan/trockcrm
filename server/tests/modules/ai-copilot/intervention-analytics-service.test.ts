@@ -431,6 +431,7 @@ describe("intervention analytics service", () => {
 
     const dashboard = await getInterventionAnalyticsDashboard(tenantDb as any, {
       officeId: "office-1",
+      now: new Date("2026-04-16T12:00:00.000Z"),
     });
 
     expect(dashboard.outcomeEffectiveness.reopenRateByConclusionFamily.resolve).toBe(0.5);

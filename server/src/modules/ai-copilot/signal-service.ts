@@ -1,6 +1,8 @@
 import { sql } from "drizzle-orm";
 import type { NodePgDatabase } from "drizzle-orm/node-postgres";
 import type * as schema from "@trock-crm/shared/schema";
+import type { UserRole } from "@trock-crm/shared/types";
+import { getAiDealAtRiskResult } from "./at-risk-utils.js";
 import { buildDealEmailFollowupGapCondition, buildDealEmailLinkCondition } from "./email-linking.js";
 
 type TenantDb = NodePgDatabase<typeof schema>;
@@ -23,25 +25,55 @@ export interface DealBlindSpotSignal {
   isBlocking: boolean;
 }
 
-const MS_PER_DAY = 24 * 60 * 60 * 1000;
+type DealBlindSpotOptions = Date | { now?: Date; viewerRole?: UserRole };
+
+function normalizeOptions(options: DealBlindSpotOptions | undefined) {
+  if (options instanceof Date) {
+    return { now: options, viewerRole: "rep" as UserRole };
+  }
+  return {
+    now: options?.now ?? new Date(),
+    viewerRole: options?.viewerRole ?? ("rep" as UserRole),
+  };
+}
 
 export async function getDealBlindSpotSignals(
   tenantDb: TenantDb,
   dealId: string,
-  now = new Date()
+  options?: DealBlindSpotOptions
 ): Promise<DealBlindSpotSignal[]> {
+  const { now, viewerRole } = normalizeOptions(options);
   const [dealResult, openTaskResult, inboundResult, revisionResult, gateGapResult] = await Promise.all([
     tenantDb.execute(sql`
       SELECT
         d.id AS deal_id,
         d.stage_id,
-        psc.name AS stage_name,
-        d.stage_entered_at,
-        psc.stale_threshold_days,
+        COALESCE(d.bid_board_stage_slug, psc.slug) AS stage_slug,
+        d.workflow_route,
+        COALESCE(mirror_psc.name, psc.name) AS stage_name,
+        COALESCE(
+          d.bid_board_stage_entered_at,
+          d.stage_entered_at,
+          latest_current_stage_entered_at.entered_at
+        ) AS stage_entered_at,
+        d.on_hold,
+        d.on_hold_started_at,
+        d.on_hold_accumulated_seconds,
+        d.on_hold_accumulated_seconds_at_stage_entry,
         d.proposal_status,
         psc.required_documents
       FROM deals d
       JOIN pipeline_stage_config psc ON psc.id = d.stage_id
+      LEFT JOIN pipeline_stage_config mirror_psc ON mirror_psc.slug = d.bid_board_stage_slug
+      LEFT JOIN LATERAL (
+        SELECT entered_at
+        FROM deal_stage_history dsh
+        WHERE dsh.deal_id = d.id
+          AND dsh.stage_id = d.stage_id
+          AND dsh.exited_at IS NULL
+        ORDER BY dsh.entered_at DESC
+        LIMIT 1
+      ) latest_current_stage_entered_at ON TRUE
       WHERE d.id = ${dealId}
       LIMIT 1
     `),
@@ -87,16 +119,22 @@ export async function getDealBlindSpotSignals(
   if (!dealRow) return [];
 
   const signals: DealBlindSpotSignal[] = [];
-  const stageEnteredAt = dealRow.stage_entered_at ? new Date(dealRow.stage_entered_at) : null;
-  const staleThresholdDays = Number(dealRow.stale_threshold_days ?? 0);
-  const daysInStage = stageEnteredAt ? Math.floor((now.getTime() - stageEnteredAt.getTime()) / MS_PER_DAY) : 0;
+  const atRisk = getAiDealAtRiskResult(dealRow, viewerRole, now);
 
-  if (staleThresholdDays > 0 && daysInStage > staleThresholdDays) {
+  if (atRisk.isAtRisk) {
     signals.push({
       signalType: "stale_stage",
       severity: "warning",
-      summary: `${dealRow.stage_name} has exceeded its stale threshold`,
-      evidence: [{ dealId, stageName: dealRow.stage_name, daysInStage, staleThresholdDays }],
+      summary: `${dealRow.stage_name} has exceeded its SLA threshold`,
+      evidence: [
+        {
+          dealId,
+          stageName: dealRow.stage_name,
+          daysInStage: atRisk.effectiveStageAgeDays,
+          staleThresholdDays: atRisk.thresholdDays,
+          atRisk,
+        },
+      ],
       isBlocking: false,
     });
   }

@@ -5,6 +5,7 @@ export async function runAiRefreshCopilot(payload: {
   dealId: string;
   reason?: string;
   requestedBy: string;
+  requestedByRole?: string;
 }, officeId: string | null) {
   if (!payload?.requestedBy) {
     const error = `[Worker:ai-refresh-copilot] Missing requestedBy for dealId=${payload?.dealId ?? "unknown"}`;
@@ -24,6 +25,7 @@ export async function runAiRefreshCopilot(payload: {
         dealId: payload.dealId,
         reason: payload.reason ?? "refresh",
         requestedBy: payload.requestedBy,
+        requestedByRole: payload.requestedByRole,
       }),
       officeId,
     ]

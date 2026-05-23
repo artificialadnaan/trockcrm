@@ -63,7 +63,13 @@ describe("AI copilot schema exports", () => {
             proposal_status: "revision_requested",
             last_activity_at: "2026-04-14T12:00:00.000Z",
             expected_close_date: "2026-04-30",
-            stale_threshold_days: 14,
+            stage_slug: "estimating",
+            workflow_route: "normal",
+            stage_entered_at: "2026-04-01T00:00:00.000Z",
+            on_hold: false,
+            on_hold_started_at: null,
+            on_hold_accumulated_seconds: 0,
+            on_hold_accumulated_seconds_at_stage_entry: 0,
           }],
         })
         .mockResolvedValueOnce({
@@ -88,6 +94,11 @@ describe("AI copilot schema exports", () => {
     expect(context.deal.id).toBe("deal-1");
     expect(context.deal.stageName).toBe("Estimating");
     expect(context.deal.proposalStatus).toBe("revision_requested");
+    expect(context.deal.atRisk).toMatchObject({
+      isAtRisk: true,
+      reason: "threshold_reached",
+      thresholdDays: 14,
+    });
     expect(context.recentActivities.map((activity) => activity.id)).toEqual(["activity-2", "activity-1"]);
     expect(context.recentEmails[0]?.bodyPreview).toBe("Please revise the estimate");
     expect(context.taskSummary).toEqual({ openTaskCount: 1, overdueTaskCount: 0 });
@@ -100,5 +111,104 @@ describe("AI copilot schema exports", () => {
     expect(emailQuerySql).toContain("assigned_entity_id");
     expect(emailQuerySql).toContain("deal");
     expect(emailQuerySql).not.toContain("user_id =");
+  });
+
+  it("runs independent context reads in parallel", async () => {
+    const deferreds = [
+      { rows: [{
+        id: "deal-1",
+        deal_number: "TR-2026-0001",
+        name: "Alpha Plaza",
+        stage_id: "stage-1",
+        stage_name: "Estimating",
+        assigned_rep_id: "user-1",
+        dd_estimate: null,
+        bid_estimate: null,
+        awarded_amount: null,
+        proposal_status: null,
+        last_activity_at: null,
+        expected_close_date: null,
+        stage_slug: "estimating",
+        workflow_route: "normal",
+        stage_entered_at: "2026-04-01T00:00:00.000Z",
+        on_hold: false,
+        on_hold_started_at: null,
+        on_hold_accumulated_seconds: 0,
+        on_hold_accumulated_seconds_at_stage_entry: 0,
+      }] },
+      { rows: [] },
+      { rows: [] },
+      { rows: [{ open_task_count: 0, overdue_task_count: 0 }] },
+    ].map((value) => {
+      let resolve!: (result: typeof value) => void;
+      const promise = new Promise<typeof value>((done) => {
+        resolve = done;
+      });
+      return { promise, resolve, value };
+    });
+    let executeCallIndex = 0;
+    const tenantDb = {
+      execute: vi.fn(() => deferreds[executeCallIndex++]?.promise),
+    };
+
+    const contextPromise = getDealCopilotContext(tenantDb as any, "deal-1", "user-1");
+    await Promise.resolve();
+
+    expect(tenantDb.execute).toHaveBeenCalledTimes(4);
+
+    for (const deferred of deferreds) {
+      deferred.resolve(deferred.value);
+    }
+
+    await expect(contextPromise).resolves.toMatchObject({
+      deal: { id: "deal-1" },
+      taskSummary: { openTaskCount: 0, overdueTaskCount: 0 },
+    });
+  });
+
+  it("sends an on-hold deal to the copilot as not at risk", async () => {
+    const tenantDb = {
+      execute: vi
+        .fn()
+        .mockResolvedValueOnce({
+          rows: [{
+            id: "deal-1",
+            deal_number: "TR-2026-0001",
+            name: "Alpha Plaza",
+            stage_id: "stage-1",
+            stage_name: "Estimating",
+            assigned_rep_id: "user-1",
+            dd_estimate: null,
+            bid_estimate: null,
+            awarded_amount: null,
+            proposal_status: null,
+            last_activity_at: null,
+            expected_close_date: null,
+            stage_slug: "estimating",
+            workflow_route: "normal",
+            stage_entered_at: "2026-03-01T00:00:00.000Z",
+            on_hold: true,
+            on_hold_started_at: "2026-04-10T00:00:00.000Z",
+            on_hold_accumulated_seconds: 0,
+            on_hold_accumulated_seconds_at_stage_entry: 0,
+          }],
+        })
+        .mockResolvedValueOnce({ rows: [] })
+        .mockResolvedValueOnce({ rows: [] })
+        .mockResolvedValueOnce({ rows: [{ open_task_count: 1, overdue_task_count: 0 }] }),
+    };
+
+    const context = await getDealCopilotContext(tenantDb as any, "deal-1", "user-1");
+
+    expect(context.deal.atRisk).toMatchObject({
+      isAtRisk: false,
+      reason: "on_hold",
+      thresholdDays: 14,
+    });
+    const dealQuerySql = flattenQueryChunks(tenantDb.execute.mock.calls[0]?.[0]).map((chunk) => String(chunk)).join(" ");
+    expect(dealQuerySql).toContain("on_hold");
+    expect(dealQuerySql).toContain("bid_board_stage_slug");
+    expect(dealQuerySql).toContain("mirror_psc.name");
+    expect(dealQuerySql).not.toContain("stale_threshold_days");
   });
 });

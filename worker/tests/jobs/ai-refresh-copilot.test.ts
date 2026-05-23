@@ -40,11 +40,13 @@ describe("ai refresh copilot job", () => {
         dealId: "deal-1",
         reason: "manual_regenerate",
         requestedBy: "user-7",
+        requestedByRole: "director",
       },
       "office-1"
     );
 
     expect(queryMock).toHaveBeenCalledTimes(1);
     expect(String(queryMock.mock.calls[0]?.[1]?.[0] ?? "")).toContain("\"requestedBy\":\"user-7\"");
+    expect(String(queryMock.mock.calls[0]?.[1]?.[0] ?? "")).toContain("\"requestedByRole\":\"director\"");
   });
 });

@@ -1,7 +1,14 @@
 import { describe, expect, it, vi } from "vitest";
 import { AppError } from "../../../src/middleware/error-handler.js";
 
-const { generateDealCopilotPacket, getDealCopilotView, regenerateDealCopilot } = await import(
+const {
+  generateDealCopilotPacket,
+  getDealCopilotView,
+  getSalesProcessDisconnectDashboard,
+  listCurrentSalesProcessDisconnectRows,
+  regenerateDealCopilot,
+  triageAiActionQueueEntry,
+} = await import(
   "../../../src/modules/ai-copilot/service.js"
 );
 
@@ -311,20 +318,22 @@ describe("AI copilot service", () => {
     } satisfies Partial<AppError>);
   });
 
-  it("threads viewerUserId through forced regeneration", async () => {
+  it("uses director-threshold risk for shared packets regardless of triggerer role", async () => {
     const getDealCopilotContext = vi.fn(async () => ({
       deal: { id: "deal-1", name: "Alpha Plaza", stageName: "Estimating", proposalStatus: "drafting" },
       recentActivities: [],
       recentEmails: [],
       taskSummary: { openTaskCount: 0, overdueTaskCount: 0 },
     }));
+    const getDealBlindSpotSignals = vi.fn(async () => []);
+    const now = new Date("2026-04-15T12:00:00.000Z");
 
     await regenerateDealCopilot(
       {} as any,
-      { dealId: "deal-1", viewerUserId: "user-99" },
+      { dealId: "deal-1", viewerUserId: "user-99", viewerRole: "field_contractor" },
       {
         getDealCopilotContext,
-        getDealBlindSpotSignals: vi.fn(async () => []),
+        getDealBlindSpotSignals,
         searchDealKnowledge: vi.fn(async () => []),
         provider: {
           generateCopilotPacket: vi.fn(async () => ({
@@ -356,11 +365,79 @@ describe("AI copilot service", () => {
           packetId: "packet-1",
           generatedAt: "2026-04-15T12:00:00.000Z",
         })),
-        now: new Date("2026-04-15T12:00:00.000Z"),
+        now,
       }
     );
 
-    expect(getDealCopilotContext).toHaveBeenCalledWith(expect.anything(), "deal-1", "user-99");
+    expect(getDealCopilotContext).toHaveBeenCalledWith(expect.anything(), "deal-1", "user-99", {
+      viewerRole: "director",
+      now,
+    });
+    expect(getDealBlindSpotSignals).toHaveBeenCalledWith(expect.anything(), "deal-1", {
+      viewerRole: "director",
+      now,
+    });
+  });
+
+  it("keeps shared packet risk role-neutral when a rep triggers generation", async () => {
+    const getDealCopilotContext = vi.fn(async () => ({
+      deal: { id: "deal-1", name: "Alpha Plaza", stageName: "Estimating", proposalStatus: "drafting" },
+      recentActivities: [],
+      recentEmails: [],
+      taskSummary: { openTaskCount: 0, overdueTaskCount: 0 },
+    }));
+    const getDealBlindSpotSignals = vi.fn(async () => []);
+    const now = new Date("2026-04-15T12:00:00.000Z");
+
+    await generateDealCopilotPacket(
+      {} as any,
+      { dealId: "deal-1", forceRegenerate: true, viewerUserId: "rep-1", viewerRole: "rep" },
+      {
+        getDealCopilotContext,
+        getDealBlindSpotSignals,
+        searchDealKnowledge: vi.fn(async () => []),
+        provider: {
+          generateCopilotPacket: vi.fn(async () => ({
+            summary: "Summary",
+            recommendedNextStep: { action: "Action", ownerId: null, dueLabel: null, rationale: "Why" },
+            suggestedTasks: [],
+            blindSpotFlags: [],
+            confidence: 0.5,
+            evidence: [],
+          })),
+          generateInterventionCopilotPacket: vi.fn(async () => ({
+            summary: "Intervention summary",
+            recommendedAction: {
+              action: "investigate",
+              rationale: "Review the case context.",
+              suggestedOwner: null,
+              suggestedOwnerId: null,
+            },
+            rootCause: null,
+            blockerOwner: null,
+            reopenRisk: null,
+            blindSpotFlags: [],
+            evidence: [],
+            confidence: 0.5,
+          })),
+        },
+        getExistingFreshPacket: vi.fn(async () => null),
+        persistPacketBundle: vi.fn(async () => ({
+          packetId: "packet-1",
+          generatedAt: "2026-04-15T12:00:00.000Z",
+        })),
+        now,
+      }
+    );
+
+    expect(getDealCopilotContext).toHaveBeenCalledWith(expect.anything(), "deal-1", "rep-1", {
+      viewerRole: "director",
+      now,
+    });
+    expect(getDealBlindSpotSignals).toHaveBeenCalledWith(expect.anything(), "deal-1", {
+      viewerRole: "director",
+      now,
+    });
   });
 
   it("does not hide the deal copilot packet when the deal includes another user's assigned emails", async () => {
@@ -394,5 +471,317 @@ describe("AI copilot service", () => {
     expect(guardQuerySql).toContain("assigned_entity_id");
     expect(guardQuerySql).toContain("ignored");
     expect(guardQuerySql).not.toContain("user_id <>");
+  });
+
+  it("builds stale-stage disconnect rows from the hold-aware At Risk engine", async () => {
+    const now = new Date("2026-04-15T00:00:00.000Z");
+    const tenantDb = {
+      execute: vi.fn(async () => ({
+        rows: [
+          {
+            id: "deal-held",
+            deal_number: "D-1001",
+            deal_name: "Held Plaza",
+            company_id: "company-1",
+            company_name: "Acme",
+            stage_key: "estimating",
+            stage_slug: "estimating",
+            workflow_route: "normal",
+            stage_name: "Estimating",
+            estimating_substage: null,
+            assigned_rep_id: "rep-1",
+            assigned_rep_name: "Rep One",
+            stage_entered_at: "2026-03-01T00:00:00.000Z",
+            on_hold: true,
+            on_hold_started_at: "2026-04-10T00:00:00.000Z",
+            on_hold_accumulated_seconds: 0,
+            on_hold_accumulated_seconds_at_stage_entry: 0,
+            last_activity_at: null,
+            proposal_status: null,
+            procore_project_id: null,
+            procore_last_synced_at: null,
+            open_task_count: 1,
+            inbound_without_followup_count: 0,
+            latest_customer_email_at: null,
+            required_document_count: 0,
+            present_document_count: 0,
+            procore_sync_status: null,
+            procore_sync_direction: null,
+            procore_sync_updated_at: null,
+            procore_drift_reason: null,
+          },
+          {
+            id: "deal-risk",
+            deal_number: "D-1002",
+            deal_name: "Risk Tower",
+            company_id: "company-1",
+            company_name: "Acme",
+            stage_key: "estimating",
+            stage_slug: "estimating",
+            workflow_route: "normal",
+            stage_name: "Estimating",
+            estimating_substage: null,
+            assigned_rep_id: "rep-1",
+            assigned_rep_name: "Rep One",
+            stage_entered_at: "2026-03-01T00:00:00.000Z",
+            on_hold: false,
+            on_hold_started_at: null,
+            on_hold_accumulated_seconds: 0,
+            on_hold_accumulated_seconds_at_stage_entry: 0,
+            last_activity_at: null,
+            proposal_status: null,
+            procore_project_id: null,
+            procore_last_synced_at: null,
+            open_task_count: 1,
+            inbound_without_followup_count: 0,
+            latest_customer_email_at: null,
+            required_document_count: 0,
+            present_document_count: 0,
+            procore_sync_status: null,
+            procore_sync_direction: null,
+            procore_sync_updated_at: null,
+            procore_drift_reason: null,
+          },
+        ],
+      })),
+    };
+
+    const rows = await listCurrentSalesProcessDisconnectRows(tenantDb as any, { now } as any);
+
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({
+      id: "deal-risk",
+      disconnectType: "stale_stage",
+      ageDays: 45,
+    });
+    const querySql = flattenQueryChunks(tenantDb.execute.mock.calls[0]?.[0]).map((chunk) => String(chunk)).join(" ");
+    expect(querySql).toContain("on_hold");
+    expect(querySql).toContain("bid_board_stage_slug");
+    expect(querySql).not.toContain("stale_threshold_days");
+  });
+
+  it("pushes the disconnect-row page limit into the SQL query", async () => {
+    const tenantDb = {
+      execute: vi.fn(async () => ({ rows: [] })),
+    };
+
+    await listCurrentSalesProcessDisconnectRows(tenantDb as any, { limit: 2 });
+
+    const querySql = flattenQueryChunks(tenantDb.execute.mock.calls[0]?.[0]).map((chunk) => String(chunk)).join(" ");
+    expect(querySql).toContain("LIMIT");
+    expect(flattenQueryChunks(tenantDb.execute.mock.calls[0]?.[0])).toContain(100);
+    expect(querySql).toContain("ORDER BY severity_rank ASC, age_rank DESC");
+  });
+
+  it("derives revision-loop age from last activity, not latest customer email", async () => {
+    const now = new Date("2026-04-15T00:00:00.000Z");
+    const tenantDb = {
+      execute: vi.fn(async () => ({
+        rows: [
+          {
+            id: "deal-revision",
+            deal_number: "D-1003",
+            deal_name: "Revision Plaza",
+            company_id: null,
+            company_name: null,
+            stage_key: "estimating",
+            stage_slug: "estimating",
+            workflow_route: "normal",
+            stage_name: "Estimating",
+            estimating_substage: null,
+            assigned_rep_id: "rep-1",
+            assigned_rep_name: "Rep One",
+            stage_entered_at: "2026-04-14T00:00:00.000Z",
+            on_hold: false,
+            on_hold_started_at: null,
+            on_hold_accumulated_seconds: 0,
+            on_hold_accumulated_seconds_at_stage_entry: 0,
+            last_activity_at: "2026-04-10T00:00:00.000Z",
+            proposal_status: "revision_requested",
+            procore_project_id: null,
+            procore_last_synced_at: null,
+            open_task_count: 1,
+            inbound_without_followup_count: 0,
+            latest_customer_email_at: "2026-04-01T00:00:00.000Z",
+            required_document_count: 0,
+            present_document_count: 0,
+            procore_sync_status: null,
+            procore_sync_direction: null,
+            procore_sync_updated_at: null,
+            procore_drift_reason: null,
+          },
+        ],
+      })),
+    };
+
+    const rows = await listCurrentSalesProcessDisconnectRows(tenantDb as any, { now } as any);
+
+    expect(rows).toEqual([
+      expect.objectContaining({
+        id: "deal-revision",
+        disconnectType: "revision_loop",
+        ageDays: 5,
+      }),
+    ]);
+  });
+
+  it("scopes triage disconnect metadata to the single deal", async () => {
+    const tenantDb = {
+      select: vi.fn(() => {
+        const chain: any = {
+          from: vi.fn(() => chain),
+          where: vi.fn(() => chain),
+          limit: vi.fn(async () => [{ dealId: "deal-1" }]),
+        };
+        return chain;
+      }),
+      execute: vi.fn(async () => ({
+        rows: [
+          {
+            id: "deal-1",
+            deal_number: "D-1002",
+            deal_name: "Risk Tower",
+            company_id: null,
+            company_name: null,
+            stage_key: "estimating",
+            stage_slug: "estimating",
+            workflow_route: "normal",
+            stage_name: "Estimating",
+            estimating_substage: null,
+            assigned_rep_id: "rep-1",
+            assigned_rep_name: "Rep One",
+            stage_entered_at: "2026-03-01T00:00:00.000Z",
+            on_hold: false,
+            on_hold_started_at: null,
+            on_hold_accumulated_seconds: 0,
+            on_hold_accumulated_seconds_at_stage_entry: 0,
+            last_activity_at: null,
+            proposal_status: null,
+            procore_project_id: null,
+            procore_last_synced_at: null,
+            open_task_count: 1,
+            inbound_without_followup_count: 0,
+            latest_customer_email_at: null,
+            required_document_count: 0,
+            present_document_count: 0,
+            procore_sync_status: null,
+            procore_sync_direction: null,
+            procore_sync_updated_at: null,
+            procore_drift_reason: null,
+          },
+        ],
+      })),
+      insert: vi.fn(() => {
+        const chain: any = {
+          values: vi.fn(() => chain),
+          returning: vi.fn(async () => [{ id: "feedback-1" }]),
+        };
+        return chain;
+      }),
+    };
+
+    await triageAiActionQueueEntry(tenantDb as any, {
+      entryType: "blind_spot",
+      id: "flag-1",
+      action: "mark_reviewed",
+      userId: "director-1",
+    });
+
+    const querySql = flattenQueryChunks(tenantDb.execute.mock.calls[0]?.[0]).map((chunk) => String(chunk)).join(" ");
+    expect(querySql).toContain("d.id");
+    expect(flattenQueryChunks(tenantDb.execute.mock.calls[0]?.[0])).toContain("deal-1");
+    const feedbackPayload = tenantDb.insert.mock.results[0]?.value.values.mock.calls[0]?.[0];
+    const feedbackComment = JSON.parse(feedbackPayload.comment);
+    expect(feedbackComment.disconnectTypes).toEqual(["stale_stage"]);
+    expect(feedbackComment.clusterKeys).toEqual(["execution_stall"]);
+  });
+
+  it("uses the same engine-driven disconnect population for dashboard counts and rows", async () => {
+    const now = new Date("2026-04-15T00:00:00.000Z");
+    const tenantDb = {
+      execute: vi
+        .fn()
+        .mockResolvedValueOnce({ rows: [{ active_deals: 2 }] })
+        .mockResolvedValueOnce({
+          rows: [
+            {
+              id: "deal-held",
+              deal_number: "D-1001",
+              deal_name: "Held Plaza",
+              company_id: null,
+              company_name: null,
+              stage_key: "estimating",
+              stage_slug: "estimating",
+              workflow_route: "normal",
+              stage_name: "Estimating",
+              estimating_substage: null,
+              assigned_rep_id: "rep-1",
+              assigned_rep_name: "Rep One",
+              stage_entered_at: "2026-03-01T00:00:00.000Z",
+              on_hold: true,
+              on_hold_started_at: "2026-04-10T00:00:00.000Z",
+              on_hold_accumulated_seconds: 0,
+              on_hold_accumulated_seconds_at_stage_entry: 0,
+              last_activity_at: null,
+              proposal_status: null,
+              procore_project_id: null,
+              procore_last_synced_at: null,
+              open_task_count: 1,
+              inbound_without_followup_count: 0,
+              latest_customer_email_at: null,
+              required_document_count: 0,
+              present_document_count: 0,
+              procore_sync_status: null,
+              procore_sync_direction: null,
+              procore_sync_updated_at: null,
+              procore_drift_reason: null,
+            },
+            {
+              id: "deal-risk",
+              deal_number: "D-1002",
+              deal_name: "Risk Tower",
+              company_id: null,
+              company_name: null,
+              stage_key: "estimating",
+              stage_slug: "estimating",
+              workflow_route: "normal",
+              stage_name: "Estimating",
+              estimating_substage: null,
+              assigned_rep_id: "rep-1",
+              assigned_rep_name: "Rep One",
+              stage_entered_at: "2026-03-01T00:00:00.000Z",
+              on_hold: false,
+              on_hold_started_at: null,
+              on_hold_accumulated_seconds: 0,
+              on_hold_accumulated_seconds_at_stage_entry: 0,
+              last_activity_at: null,
+              proposal_status: null,
+              procore_project_id: null,
+              procore_last_synced_at: null,
+              open_task_count: 1,
+              inbound_without_followup_count: 0,
+              latest_customer_email_at: null,
+              required_document_count: 0,
+              present_document_count: 0,
+              procore_sync_status: null,
+              procore_sync_direction: null,
+              procore_sync_updated_at: null,
+              procore_drift_reason: null,
+            },
+          ],
+        })
+        .mockResolvedValueOnce({ rows: [] })
+        .mockResolvedValueOnce({ rows: [] })
+        .mockResolvedValueOnce({ rows: [{ digest_notifications_7d: 0, escalation_notifications_7d: 0, admin_tasks_created_7d: 0, admin_tasks_open: 0 }] }),
+    };
+
+    const dashboard = await getSalesProcessDisconnectDashboard(tenantDb as any, { now } as any);
+
+    expect(dashboard.summary.activeDeals).toBe(2);
+    expect(dashboard.summary.staleStageCount).toBe(1);
+    expect(dashboard.byType).toEqual([
+      { disconnectType: "stale_stage", label: "Stalled in stage", count: 1 },
+    ]);
+    expect(dashboard.rows.map((row) => row.id)).toEqual(["deal-risk"]);
   });
 });

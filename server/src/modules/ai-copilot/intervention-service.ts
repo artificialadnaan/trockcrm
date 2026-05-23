@@ -428,7 +428,7 @@ export async function materializeDisconnectCases(
   input: { officeId: string; now?: Date }
 ) {
   const now = input.now ?? new Date();
-  const rows = await listCurrentSalesProcessDisconnectRows(tenantDb as never, { limit: 500 });
+  const rows = await listCurrentSalesProcessDisconnectRows(tenantDb as never, { limit: 500, now });
   const uniqueRows = Array.from(
     rows.reduce((map, row) => map.set(buildBusinessKey(input.officeId, row), row), new Map<string, SalesProcessDisconnectRow>()).values()
   );
@@ -783,7 +783,9 @@ async function loadInterventionAnalyticsData(
   const [dealRows, companyRows, userRows, historyRows] = await Promise.all([
     dealIds.length ? tenantDb.select().from(deals).where(inArray(deals.id, dealIds)) : Promise.resolve([]),
     companyIds.length ? tenantDb.select().from(companies).where(inArray(companies.id, companyIds)) : Promise.resolve([]),
-    assigneeIds.length ? tenantDb.select({ id: users.id, displayName: users.displayName }).from(users).where(inArray(users.id, assigneeIds)) : Promise.resolve([]),
+    assigneeIds.length
+      ? tenantDb.select({ id: users.id, displayName: users.displayName }).from(users).where(inArray(users.id, assigneeIds))
+      : Promise.resolve([]),
     persistedCaseIds.length
       ? tenantDb.select().from(aiDisconnectCaseHistory).where(inArray(aiDisconnectCaseHistory.disconnectCaseId, persistedCaseIds))
       : Promise.resolve([]),
@@ -805,7 +807,7 @@ async function buildAnalyticsPreviewCases(
   const [existingCases, currentRows] = await Promise.all([
     getCasesByOffice(tenantDb, input.officeId),
     // `tenantDb` is already scoped to the active office schema by tenant middleware.
-    listCurrentSalesProcessDisconnectRows(tenantDb, { limit: null }),
+    listCurrentSalesProcessDisconnectRows(tenantDb, { limit: null, now: input.now }),
   ]);
   const existingByBusinessKey = new Map(existingCases.map((row) => [row.businessKey, row]));
   const previewCases: DisconnectCaseRow[] = [...existingCases];

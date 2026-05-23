@@ -14,6 +14,10 @@ vi.mock("../../../server/src/modules/ai-copilot/service.js", () => ({
   generateDealCopilotPacket: generateDealCopilotPacketMock,
 }));
 
+vi.mock("../../../server/dist/modules/ai-copilot/service.js", () => ({
+  generateDealCopilotPacket: generateDealCopilotPacketMock,
+}));
+
 const { runAiGenerateDealCopilot } = await import("../../src/jobs/ai-generate-deal-copilot.js");
 
 function createClient(queryImpl: (sql: string, params?: unknown[]) => Promise<{ rows: any[] }>) {
@@ -63,18 +67,18 @@ describe("ai generate deal copilot job", () => {
         dealId: "deal-1",
         reason: "manual_regenerate",
         requestedBy: "user-7",
+        requestedByRole: "director",
       },
       "office-1"
     );
 
-    expect(generateDealCopilotPacketMock).toHaveBeenCalledWith(
-      expect.anything(),
-      expect.objectContaining({
-        dealId: "deal-1",
-        forceRegenerate: true,
-        viewerUserId: "user-7",
-      })
-    );
+    const [, input] = generateDealCopilotPacketMock.mock.calls[0] ?? [];
+    expect(input).toMatchObject({
+      dealId: "deal-1",
+      forceRegenerate: true,
+      viewerUserId: "user-7",
+    });
+    expect(input).not.toHaveProperty("viewerRole");
     expect(client.release).toHaveBeenCalledTimes(1);
   });
 });

@@ -26,6 +26,7 @@ export async function runAiGenerateDealCopilot(payload: {
   dealId: string;
   reason?: string;
   requestedBy: string;
+  requestedByRole?: string;
 }, officeId: string | null) {
   if (!payload?.requestedBy) {
     const error = `[Worker:ai-generate-deal-copilot] Missing requestedBy for dealId=${payload?.dealId ?? "unknown"}`;
