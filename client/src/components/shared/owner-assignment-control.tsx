@@ -15,7 +15,9 @@ interface OwnerAssignmentControlProps {
   ownerUserId?: string | null;
   currentUser: OwnerAssignmentUser | null;
   assignees: TaskAssignee[];
+  ownerReassignAssignees?: TaskAssignee[];
   assigneesLoading?: boolean;
+  ownerReassignAssigneesLoading?: boolean;
   entityLabel: "company" | "contact";
   onAssignToMe: () => Promise<unknown>;
   onReassign: (ownerUserId: string | null) => Promise<unknown>;
@@ -30,7 +32,9 @@ export function OwnerAssignmentControl({
   ownerUserId,
   currentUser,
   assignees,
+  ownerReassignAssignees,
   assigneesLoading = false,
+  ownerReassignAssigneesLoading,
   entityLabel,
   onAssignToMe,
   onReassign,
@@ -38,10 +42,14 @@ export function OwnerAssignmentControl({
 }: OwnerAssignmentControlProps) {
   const [saving, setSaving] = useState(false);
   const isManager = canReassign(currentUser);
+  const isCurrentOwner = Boolean(currentUser?.id && ownerUserId && currentUser.id === ownerUserId);
+  const canUseReassignControl = isManager || isCurrentOwner;
+  const reassignAssignees = isManager ? assignees : ownerReassignAssignees ?? assignees;
+  const reassignAssigneesLoading = isManager ? assigneesLoading : ownerReassignAssigneesLoading ?? assigneesLoading;
   const ownerValue = ownerUserId ?? UNASSIGNED_OWNER_VALUE;
-  const currentOwnerAssignee = ownerUserId ? assignees.find((assignee) => assignee.id === ownerUserId) : undefined;
+  const currentOwnerAssignee = ownerUserId ? reassignAssignees.find((assignee) => assignee.id === ownerUserId) : undefined;
   const hasInactiveOrUnknownOwner = Boolean(ownerUserId && !currentOwnerAssignee);
-  const currentOwnerLabel = assigneesLoading
+  const currentOwnerLabel = reassignAssigneesLoading
     ? "Loading owners..."
     : ownerUserId
       ? currentOwnerAssignee?.displayName ?? "Inactive or unknown owner"
@@ -60,7 +68,7 @@ export function OwnerAssignmentControl({
     }
   }
 
-  if (isManager) {
+  if (canUseReassignControl) {
     return (
       <div
         className="w-44"
@@ -69,7 +77,7 @@ export function OwnerAssignmentControl({
       >
         <Select
           value={ownerValue}
-          disabled={saving || assigneesLoading}
+          disabled={saving || reassignAssigneesLoading}
           onValueChange={(value) => {
             const nextOwnerId = value === UNASSIGNED_OWNER_VALUE ? null : value;
             if ((nextOwnerId ?? UNASSIGNED_OWNER_VALUE) === ownerValue) return;
@@ -83,11 +91,11 @@ export function OwnerAssignmentControl({
             <span className="truncate">{currentOwnerLabel}</span>
           </SelectTrigger>
           <SelectContent>
-            <SelectItem value={UNASSIGNED_OWNER_VALUE}>Unassigned</SelectItem>
+            {isManager ? <SelectItem value={UNASSIGNED_OWNER_VALUE}>Unassigned</SelectItem> : null}
             {hasInactiveOrUnknownOwner ? (
               <SelectItem value={ownerUserId!}>Inactive or unknown owner</SelectItem>
             ) : null}
-            {assignees.map((assignee) => (
+            {reassignAssignees.map((assignee) => (
               <SelectItem key={assignee.id} value={assignee.id}>
                 {assignee.displayName}
               </SelectItem>

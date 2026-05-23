@@ -16,6 +16,7 @@ const mocks = vi.hoisted(() => ({
   reassignCompanyOwnerMock: vi.fn(),
   useAuthMock: vi.fn(),
   useTaskAssigneesMock: vi.fn(),
+  useOwnerAssigneesMock: vi.fn(),
 }));
 
 vi.mock("@/hooks/use-companies", () => ({
@@ -26,6 +27,10 @@ vi.mock("@/hooks/use-companies", () => ({
 
 vi.mock("@/hooks/use-task-assignees", () => ({
   useTaskAssignees: mocks.useTaskAssigneesMock,
+}));
+
+vi.mock("@/hooks/use-owner-assignees", () => ({
+  useOwnerAssignees: mocks.useOwnerAssigneesMock,
 }));
 
 vi.mock("@/lib/auth", () => ({
@@ -81,6 +86,7 @@ describe("CompanyListPage", () => {
     mocks.reassignCompanyOwnerMock.mockReset();
     mocks.useAuthMock.mockReset();
     mocks.useTaskAssigneesMock.mockReset();
+    mocks.useOwnerAssigneesMock.mockReset();
     mocks.useAuthMock.mockReturnValue({
       user: {
         id: "rep-1",
@@ -92,6 +98,14 @@ describe("CompanyListPage", () => {
       loading: false,
     });
     mocks.useTaskAssigneesMock.mockReturnValue({
+      assignees: [
+        { id: "rep-1", displayName: "Riley Rep" },
+        { id: "director-1", displayName: "Dana Director" },
+      ],
+      loading: false,
+      error: null,
+    });
+    mocks.useOwnerAssigneesMock.mockReturnValue({
       assignees: [
         { id: "rep-1", displayName: "Riley Rep" },
         { id: "director-1", displayName: "Dana Director" },

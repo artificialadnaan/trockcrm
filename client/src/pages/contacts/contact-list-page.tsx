@@ -11,6 +11,7 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
+import { useOwnerAssignees } from "@/hooks/use-owner-assignees";
 import { useTaskAssignees } from "@/hooks/use-task-assignees";
 import { assignContactOwnerToMe, reassignContactOwner, useContacts, type Contact } from "@/hooks/use-contacts";
 import { useContactFilters } from "@/hooks/use-contact-filters";
@@ -60,6 +61,7 @@ export function ContactListPage() {
   const navigate = useNavigate();
   const { user } = useAuth();
   const { assignees, loading: assigneesLoading } = useTaskAssignees();
+  const { assignees: ownerAssignees, loading: ownerAssigneesLoading } = useOwnerAssignees();
   const { filters, setFilters, resetFilters } = useContactFilters();
   const { contacts, pagination, loading, error, refetch } = useContacts(filters);
 
@@ -195,7 +197,9 @@ export function ContactListPage() {
                                 ownerUserId={contact.ownerUserId}
                                 currentUser={user}
                                 assignees={assignees}
+                                ownerReassignAssignees={ownerAssignees}
                                 assigneesLoading={assigneesLoading}
+                                ownerReassignAssigneesLoading={ownerAssigneesLoading}
                                 entityLabel="contact"
                                 onAssignToMe={() => assignContactOwnerToMe(contact.id)}
                                 onReassign={(ownerUserId) => reassignContactOwner(contact.id, ownerUserId)}

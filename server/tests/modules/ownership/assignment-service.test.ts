@@ -17,6 +17,7 @@ const ADMIN_ID = "00000000-0000-4000-8000-000000000001";
 const DIRECTOR_ID = "00000000-0000-4000-8000-000000000002";
 const REP_1_ID = "00000000-0000-4000-8000-000000000011";
 const REP_2_ID = "00000000-0000-4000-8000-000000000012";
+const REP_3_ID = "00000000-0000-4000-8000-000000000013";
 const FIELD_CONTRACTOR_ID = "00000000-0000-4000-8000-000000000021";
 const UUID_V7_OWNER_ID = "00000000-0000-7000-8000-000000000022";
 const UUID_V7_COMPANY_ID = "00000000-0000-7000-8000-000000000101";
@@ -62,6 +63,7 @@ describe("company/contact owner assignment", () => {
       { id: DIRECTOR_ID, displayName: "Director User", isActive: true },
       { id: REP_1_ID, displayName: "Rep One", isActive: true },
       { id: REP_2_ID, displayName: "Rep Two", isActive: true },
+      { id: REP_3_ID, displayName: "Rep Three", isActive: true },
       { id: UUID_V7_OWNER_ID, displayName: "Version Seven", isActive: true },
     ]);
   });
@@ -211,8 +213,10 @@ describe("company/contact owner assignment", () => {
     expect(contactDb.update).not.toHaveBeenCalled();
   });
 
-  it("rejects rep reassignment to another user", async () => {
-    const tenantDb = createTenantDb({});
+  it("rejects rep reassignment of a company they do not own", async () => {
+    const tenantDb = createTenantDb({
+      selectRows: [[{ id: COMPANY_ID, ownerId: REP_2_ID, isActive: true }]],
+    });
 
     await expect(
       reassignCompanyOwner(tenantDb as never, COMPANY_ID, REP_2_ID, {
@@ -221,6 +225,100 @@ describe("company/contact owner assignment", () => {
         activeOfficeId: OFFICE_ID,
       })
     ).rejects.toMatchObject({ statusCode: 403 });
+  });
+
+  it("lets a non-manager reassign a company they currently own to any active CRM user, including a cross-office target", async () => {
+    listUsersMock.mockResolvedValue([{ id: REP_1_ID, displayName: "Rep One", isActive: true }]);
+    const tenantDb = createTenantDb({
+      selectRows: [
+        [{ id: COMPANY_ID, ownerId: REP_1_ID, isActive: true }],
+        [{ id: REP_3_ID, isActive: true, role: "rep" }],
+      ],
+      updateRows: [[{ id: COMPANY_ID, ownerId: REP_3_ID }]],
+    });
+
+    await expect(
+      reassignCompanyOwner(tenantDb as never, COMPANY_ID, REP_3_ID, {
+        id: REP_1_ID,
+        role: "rep",
+        activeOfficeId: OFFICE_ID,
+      })
+    ).resolves.toMatchObject({ ownerId: REP_3_ID });
+
+    expect(listUsersMock).not.toHaveBeenCalled();
+    expect(tenantDb.updateSets[0]).toMatchObject({ ownerId: REP_3_ID });
+  });
+
+  it("rejects a non-manager crafted reassignment request for a company they do not own", async () => {
+    const tenantDb = createTenantDb({
+      selectRows: [
+        [{ id: COMPANY_ID, ownerId: REP_2_ID, isActive: true }],
+        [{ id: REP_3_ID, isActive: true, role: "rep" }],
+      ],
+    });
+
+    await expect(
+      reassignCompanyOwner(tenantDb as never, COMPANY_ID, REP_3_ID, {
+        id: REP_1_ID,
+        role: "rep",
+        activeOfficeId: OFFICE_ID,
+      })
+    ).rejects.toMatchObject({ statusCode: 403 });
+
+    expect(tenantDb.update).not.toHaveBeenCalled();
+  });
+
+  it("rejects a non-manager owner-initiated reassignment on unassigned records", async () => {
+    const tenantDb = createTenantDb({
+      selectRows: [
+        [{ id: COMPANY_ID, ownerId: null, isActive: true }],
+        [{ id: REP_3_ID, isActive: true, role: "rep" }],
+      ],
+    });
+
+    await expect(
+      reassignCompanyOwner(tenantDb as never, COMPANY_ID, REP_3_ID, {
+        id: REP_1_ID,
+        role: "rep",
+        activeOfficeId: OFFICE_ID,
+      })
+    ).rejects.toMatchObject({ statusCode: 403 });
+
+    expect(tenantDb.update).not.toHaveBeenCalled();
+  });
+
+  it("keeps admin/director reassignment office-scoped while owner-initiated reassignment is not office-scoped", async () => {
+    listUsersMock.mockResolvedValue([{ id: REP_1_ID, displayName: "Rep One", isActive: true }]);
+    const adminDb = createTenantDb({
+      selectRows: [[{ id: REP_3_ID, isActive: true, role: "rep" }]],
+    });
+
+    await expect(
+      reassignCompanyOwner(adminDb as never, COMPANY_ID, REP_3_ID, {
+        id: ADMIN_ID,
+        role: "admin",
+        activeOfficeId: OFFICE_ID,
+      })
+    ).rejects.toMatchObject({ statusCode: 400 });
+    expect(listUsersMock).toHaveBeenCalledWith(OFFICE_ID);
+
+    listUsersMock.mockClear();
+    const ownerDb = createTenantDb({
+      selectRows: [
+        [{ id: COMPANY_ID, ownerId: REP_1_ID, isActive: true }],
+        [{ id: REP_3_ID, isActive: true, role: "rep" }],
+      ],
+      updateRows: [[{ id: COMPANY_ID, ownerId: REP_3_ID }]],
+    });
+
+    await expect(
+      reassignCompanyOwner(ownerDb as never, COMPANY_ID, REP_3_ID, {
+        id: REP_1_ID,
+        role: "rep",
+        activeOfficeId: OFFICE_ID,
+      })
+    ).resolves.toMatchObject({ ownerId: REP_3_ID });
+    expect(listUsersMock).not.toHaveBeenCalled();
   });
 
   it("lets a rep assign an unassigned contact to themselves and blocks already-owned contacts", async () => {
@@ -273,6 +371,23 @@ describe("company/contact owner assignment", () => {
         activeOfficeId: OFFICE_ID,
       })
     ).rejects.toMatchObject({ statusCode: 400 });
+  });
+
+  it("lets a non-manager reassign a contact they currently own", async () => {
+    const tenantDb = createTenantDb({
+      selectRows: [
+        [{ id: CONTACT_ID, ownerId: REP_1_ID, isActive: true }],
+        [{ id: REP_2_ID, isActive: true, role: "rep" }],
+      ],
+      updateRows: [[{ id: CONTACT_ID, ownerId: REP_2_ID }]],
+    });
+
+    await expect(
+      reassignContactOwner(tenantDb as never, CONTACT_ID, REP_2_ID, {
+        id: REP_1_ID,
+        role: "rep",
+      })
+    ).resolves.toMatchObject({ ownerId: REP_2_ID });
   });
 
   it("rejects malformed record ids before touching UUID columns", async () => {
