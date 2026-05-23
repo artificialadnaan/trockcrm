@@ -167,6 +167,8 @@ export interface CompanyContact {
   phone: string | null;
   jobTitle: string | null;
   category: string;
+  ownerUserId?: string | null;
+  ownerUserName?: string | null;
 }
 
 export function useCompanyContacts(companyId: string | undefined, options: OfficeRequestOptions = {}) {
@@ -286,7 +288,7 @@ export async function verifyCompany(companyId: string) {
 }
 
 export async function searchCompanies(query: string, options: OfficeRequestOptions = {}) {
-  return api<{ companies: Array<{ id: string; name: string; category: string | null }> }>(
+  return api<{ companies: Array<{ id: string; name: string; category: string | null; ownerUserId: string | null; ownerUserName: string | null }> }>(
     `/companies/search?q=${encodeURIComponent(query)}`,
     getOfficeRequestOptions(options.officeId)
   );

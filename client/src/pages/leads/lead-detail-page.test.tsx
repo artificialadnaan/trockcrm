@@ -359,6 +359,50 @@ describe("LeadDetailPage", () => {
     expect(html).not.toContain("Primary contact linked");
   });
 
+  it("shows owner badges for the associated company and primary contact", () => {
+    mocks.useLeadDetailMock.mockReturnValue({
+      lead: makeLead({
+        companyOwnerUserId: "company-owner-1",
+        companyOwnerUserName: "Alicia Adams",
+        primaryContactId: "contact-1",
+        primaryContactName: "Morgan Carter",
+        primaryContactOwnerUserId: "contact-owner-1",
+        primaryContactOwnerUserName: "Kai Morgan",
+      }),
+      loading: false,
+      error: null,
+      refetch: vi.fn(),
+    });
+
+    const html = renderLeadDetail();
+
+    expect(html).toContain("Alicia Adams");
+    expect(html).toContain("Kai Morgan");
+    expect(html).toContain(">AA<");
+    expect(html).toContain(">KM<");
+  });
+
+  it("shows Unassigned owner state for unowned associated company and primary contact", () => {
+    mocks.useLeadDetailMock.mockReturnValue({
+      lead: makeLead({
+        companyOwnerUserId: null,
+        companyOwnerUserName: null,
+        primaryContactId: "contact-1",
+        primaryContactName: "Morgan Carter",
+        primaryContactOwnerUserId: null,
+        primaryContactOwnerUserName: null,
+      }),
+      loading: false,
+      error: null,
+      refetch: vi.fn(),
+    });
+
+    const html = renderLeadDetail();
+
+    expect(html.match(/Unassigned/g)?.length ?? 0).toBeGreaterThanOrEqual(2);
+    expect(html).toContain(">UA<");
+  });
+
   it("tab change updates active tab", () => {
     mounted = mountLeadDetail();
 

@@ -35,6 +35,7 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { CompanySelector } from "@/components/companies/company-selector";
+import { OwnerLabel } from "@/components/shared/owner-label";
 import { PropertySelector } from "@/components/properties/property-selector";
 import { RecordAssignmentCard } from "@/components/assignment/record-assignment-card";
 import { LeadStageBadge } from "./lead-stage-badge";
@@ -100,6 +101,8 @@ export interface LeadFormLead {
   assignedRepName?: string | null;
   companyId: string | null;
   companyName: string | null;
+  companyOwnerUserId?: string | null;
+  companyOwnerUserName?: string | null;
   stageId: string;
   propertyId: string | null;
   propertyName: string | null;
@@ -108,6 +111,9 @@ export interface LeadFormLead {
   propertyState: string | null;
   propertyZip: string | null;
   primaryContactId?: string | null;
+  primaryContactName?: string | null;
+  primaryContactOwnerUserId?: string | null;
+  primaryContactOwnerUserName?: string | null;
   primaryContactRole?: LeadPocRole | null;
   primaryContactRoleOtherLabel?: string | null;
   source: string | null;
@@ -544,7 +550,13 @@ function SummaryLeadForm({
           </div>
           <div>
             <p className="text-muted-foreground">Company</p>
-            <p className="font-medium">{lead.companyName ?? "Unassigned"}</p>
+            <div className="flex flex-wrap items-center gap-2 font-medium">
+              <span>{lead.companyName ?? "Unassigned"}</span>
+              <OwnerLabel
+                ownerId={lead.companyOwnerUserId ?? null}
+                ownerName={lead.companyOwnerUserName ?? null}
+              />
+            </div>
           </div>
           <div>
             <p className="text-muted-foreground">Project Type</p>
@@ -898,6 +910,7 @@ function EditableLeadForm({
     ],
     [contacts]
   );
+  const selectedPrimaryContact = contacts.find((contact) => contact.id === formData.primaryContactId) ?? null;
   const pocRoleSelectItems = useMemo(
     () => [
       { value: "__none__", label: "Select POC role" },
@@ -1662,6 +1675,7 @@ function EditableLeadForm({
                   value={companyId}
                   onChange={setCompanyId}
                   officeId={selectedOffice?.officeId}
+                  showOwnerLabel
                   required
                 />
               </div>
@@ -1810,13 +1824,35 @@ function EditableLeadForm({
                     }
                   >
                     <SelectTrigger id="primaryContactId">
-                      <SelectValue>{selectedPrimaryContactLabel}</SelectValue>
+                      <SelectValue>
+                        {selectedPrimaryContact ? (
+                          <span className="flex min-w-0 items-center gap-2">
+                            <span className="truncate">{selectedPrimaryContactLabel}</span>
+                            <OwnerLabel
+                              ownerId={selectedPrimaryContact.ownerUserId ?? null}
+                              ownerName={selectedPrimaryContact.ownerUserName ?? null}
+                              className="max-w-[10rem] shrink-0"
+                            />
+                          </span>
+                        ) : (
+                          selectedPrimaryContactLabel
+                        )}
+                      </SelectValue>
                     </SelectTrigger>
                     <SelectContent>
                       <SelectItem value="__none__">No primary contact</SelectItem>
                       {contacts.map((contact) => (
                         <SelectItem key={contact.id} value={contact.id}>
-                          {contact.firstName} {contact.lastName}
+                          <span className="flex min-w-0 items-center gap-2">
+                            <span>
+                              {contact.firstName} {contact.lastName}
+                            </span>
+                            <OwnerLabel
+                              ownerId={contact.ownerUserId ?? null}
+                              ownerName={contact.ownerUserName ?? null}
+                              className="max-w-[12rem]"
+                            />
+                          </span>
                         </SelectItem>
                       ))}
                     </SelectContent>
@@ -2188,7 +2224,13 @@ function EditableLeadForm({
               </div>
               <div>
                 <p className="text-muted-foreground">Company</p>
-                <p className="font-medium">{lead?.companyName ?? "--"}</p>
+                <div className="flex flex-wrap items-center gap-2 font-medium">
+                  <span>{lead?.companyName ?? "--"}</span>
+                  <OwnerLabel
+                    ownerId={lead?.companyOwnerUserId ?? null}
+                    ownerName={lead?.companyOwnerUserName ?? null}
+                  />
+                </div>
               </div>
               <div>
                 <p className="text-muted-foreground">Property</p>

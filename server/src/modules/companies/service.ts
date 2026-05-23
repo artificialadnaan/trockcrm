@@ -239,8 +239,13 @@ export async function deleteCompany(tenantDb: TenantDb, companyId: string) {
 
 export async function getCompanyContacts(tenantDb: TenantDb, companyId: string) {
   return tenantDb
-    .select()
+    .select({
+      ...getTableColumns(contacts),
+      ownerUserId: contacts.ownerId,
+      ownerUserName: users.displayName,
+    })
     .from(contacts)
+    .leftJoin(users, eq(users.id, contacts.ownerId))
     .where(and(eq(contacts.companyId, companyId), eq(contacts.isActive, true)))
     .orderBy(asc(contacts.lastName), asc(contacts.firstName));
 }
@@ -293,8 +298,15 @@ export async function getCompanyStats(tenantDb: TenantDb, companyId: string) {
 
 export async function searchCompanies(tenantDb: TenantDb, query: string, limit = 10) {
   return tenantDb
-    .select({ id: companies.id, name: companies.name, category: companies.category })
+    .select({
+      id: companies.id,
+      name: companies.name,
+      category: companies.category,
+      ownerUserId: companies.ownerId,
+      ownerUserName: users.displayName,
+    })
     .from(companies)
+    .leftJoin(users, eq(users.id, companies.ownerId))
     .where(and(ilike(companies.name, `%${query}%`), eq(companies.isActive, true)))
     .orderBy(asc(companies.name))
     .limit(limit);

@@ -165,6 +165,10 @@ export interface LeadRecord {
   updatedAt: string;
   isWatching?: boolean;
   companyName: string | null;
+  companyOwnerUserId?: string | null;
+  companyOwnerUserName?: string | null;
+  primaryContactOwnerUserId?: string | null;
+  primaryContactOwnerUserName?: string | null;
   property: {
     id: string;
     name: string;

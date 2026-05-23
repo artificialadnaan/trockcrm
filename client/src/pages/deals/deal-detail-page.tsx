@@ -40,6 +40,7 @@ import {
 } from "@/components/layout/detail-page-shell";
 import { DealStageBadge } from "@/components/deals/deal-stage-badge";
 import { AtRiskBadge } from "@/components/deals/at-risk-badge";
+import { OwnerLabel } from "@/components/shared/owner-label";
 import { DealEmailTab } from "@/components/email/deal-email-tab";
 import { EntityActivityTab } from "@/components/activities/entity-activity-tab";
 import { DealOverviewTab } from "@/components/deals/deal-overview-tab";
@@ -643,10 +644,13 @@ export function DealDetailPage() {
         </span>
       ) : null}
       {deal.companyId && deal.companyName ? (
-        <Link to={`/companies/${deal.companyId}`} className="inline-flex items-center gap-1 font-semibold text-slate-700 hover:text-brand-red">
-          <Building2 className="h-4 w-4" />
-          {deal.companyName}
-        </Link>
+        <span className="inline-flex items-center gap-2">
+          <Link to={`/companies/${deal.companyId}`} className="inline-flex items-center gap-1 font-semibold text-slate-700 hover:text-brand-red">
+            <Building2 className="h-4 w-4" />
+            {deal.companyName}
+          </Link>
+          <OwnerLabel ownerId={deal.companyOwnerUserId ?? null} ownerName={deal.companyOwnerUserName ?? null} />
+        </span>
       ) : null}
       {address ? (
         <span className="inline-flex items-center gap-1">
@@ -978,9 +982,12 @@ function DealRightRail({
             label="Company"
             value={
               deal.companyId && deal.companyName ? (
-                <Link to={`/companies/${deal.companyId}`} className="text-brand-red hover:underline">
-                  {deal.companyName}
-                </Link>
+                <span className="inline-flex flex-wrap items-center gap-2">
+                  <Link to={`/companies/${deal.companyId}`} className="text-brand-red hover:underline">
+                    {deal.companyName}
+                  </Link>
+                  <OwnerLabel ownerId={deal.companyOwnerUserId ?? null} ownerName={deal.companyOwnerUserName ?? null} />
+                </span>
               ) : (
                 <span className="text-slate-500">Unassigned</span>
               )
@@ -1009,9 +1016,15 @@ function DealRightRail({
             label="Contact"
             value={
               deal.primaryContactId ? (
-                <Link to={`/contacts/${deal.primaryContactId}`} className="text-brand-red hover:underline">
-                  {primaryContactName ?? "Unknown contact"}
-                </Link>
+                <span className="inline-flex flex-wrap items-center gap-2">
+                  <Link to={`/contacts/${deal.primaryContactId}`} className="text-brand-red hover:underline">
+                    {primaryContactName ?? "Unknown contact"}
+                  </Link>
+                  <OwnerLabel
+                    ownerId={deal.primaryContactOwnerUserId ?? null}
+                    ownerName={deal.primaryContactOwnerUserName ?? null}
+                  />
+                </span>
               ) : (
                 <span className="text-slate-500">No primary contact</span>
               )

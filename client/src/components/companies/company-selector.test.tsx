@@ -26,4 +26,23 @@ describe("CompanySelector inline create", () => {
     expect(source).toContain("}, SEARCH_DEBOUNCE_MS);");
     expect(source).not.toContain("}, 300);");
   });
+
+  it("renders owner labels next to company search results and the selected company without replacing the category label", () => {
+    const source = normalize(companySelectorSource);
+
+    expect(source).toContain('import { OwnerLabel } from "@/components/shared/owner-label";');
+    expect(source).toContain("ownerUserId: string | null;");
+    expect(source).toContain("ownerUserName: string | null;");
+    expect(source).toContain("showOwnerLabel?: boolean;");
+    expect(source).toContain("showOwnerLabel = false");
+    expect(source).toContain("selectedOwner");
+    expect(source).toContain("selectedCompanyId !== value");
+    expect(source).toContain("showOwnerLabel && selectedName");
+    expect(source).toContain("ownerId={selectedOwner?.ownerUserId ?? null}");
+    expect(source).toContain("ownerName={selectedOwner?.ownerUserName ?? null}");
+    expect(source).toContain("showOwnerLabel ? ( <OwnerLabel ownerId={company.ownerUserId}");
+    expect(source).toContain("<OwnerLabel ownerId={company.ownerUserId} ownerName={company.ownerUserName}");
+    expect(source).toContain('className="ml-2 text-xs text-muted-foreground"');
+    expect(source).toContain("COMPANY_CATEGORY_LABELS[company.category] ?? company.category");
+  });
 });

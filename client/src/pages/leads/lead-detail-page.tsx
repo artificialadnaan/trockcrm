@@ -27,6 +27,7 @@ import {
   type DetailPageShellTab,
 } from "@/components/layout/detail-page-shell";
 import { LeadForm, LeadQuestionnaireSummary } from "@/components/leads/lead-form";
+import { OwnerLabel } from "@/components/shared/owner-label";
 import { LeadConvertDialog } from "@/components/leads/lead-convert-dialog";
 import { LeadStageChangeDialog } from "@/components/leads/lead-stage-change-dialog";
 import { LeadStageBadge } from "@/components/leads/lead-stage-badge";
@@ -274,10 +275,13 @@ export function LeadDetailPage() {
               {lead.convertedDealNumber ?? "Lead"}
             </span>
             {lead.companyId && leadCompanyName ? (
-              <Link to={`/companies/${lead.companyId}`} className="inline-flex items-center gap-1 font-semibold text-slate-700 hover:text-brand-red">
-                <Building2 className="h-4 w-4" />
-                {leadCompanyName}
-              </Link>
+              <span className="inline-flex items-center gap-2">
+                <Link to={`/companies/${lead.companyId}`} className="inline-flex items-center gap-1 font-semibold text-slate-700 hover:text-brand-red">
+                  <Building2 className="h-4 w-4" />
+                  {leadCompanyName}
+                </Link>
+                <OwnerLabel ownerId={lead.companyOwnerUserId ?? null} ownerName={lead.companyOwnerUserName ?? null} />
+              </span>
             ) : (
               <span className="inline-flex items-center gap-1">
                 <Building2 className="h-4 w-4" />
@@ -478,6 +482,8 @@ function toLeadFormShape(lead: LeadRecord, leadCompanyName: string | null) {
     convertedDealNumber: lead.convertedDealNumber,
     companyId: lead.companyId ?? null,
     companyName: leadCompanyName,
+    companyOwnerUserId: lead.companyOwnerUserId ?? null,
+    companyOwnerUserName: lead.companyOwnerUserName ?? null,
     stageId: lead.stageId,
     assignedRepId: lead.assignedRepId,
     salesRepId: lead.salesRepId,
@@ -488,6 +494,10 @@ function toLeadFormShape(lead: LeadRecord, leadCompanyName: string | null) {
     propertyCity: lead.property?.city ?? null,
     propertyState: lead.property?.state ?? null,
     propertyZip: lead.property?.zip ?? null,
+    primaryContactId: lead.primaryContactId,
+    primaryContactName: lead.primaryContactName,
+    primaryContactOwnerUserId: lead.primaryContactOwnerUserId ?? null,
+    primaryContactOwnerUserName: lead.primaryContactOwnerUserName ?? null,
     source: lead.source,
     sourceCategory: lead.sourceCategory,
     sourceDetail: lead.sourceDetail,
@@ -540,9 +550,12 @@ function LeadRightRail({
               label="Account"
               value={
                 lead.companyId && leadCompanyName ? (
-                  <Link to={`/companies/${lead.companyId}`} className="text-brand-red hover:underline">
-                    {leadCompanyName}
-                  </Link>
+                  <span className="inline-flex flex-wrap items-center gap-2">
+                    <Link to={`/companies/${lead.companyId}`} className="text-brand-red hover:underline">
+                      {leadCompanyName}
+                    </Link>
+                    <OwnerLabel ownerId={lead.companyOwnerUserId ?? null} ownerName={lead.companyOwnerUserName ?? null} />
+                  </span>
                 ) : (
                   "Unassigned"
                 )
@@ -555,9 +568,15 @@ function LeadRightRail({
               label="Contact"
               value={
                 lead.primaryContactId ? (
-                  <Link to={`/contacts/${lead.primaryContactId}`} className="text-brand-red hover:underline">
-                    {lead.primaryContactName ?? "Unknown contact"}
-                  </Link>
+                  <span className="inline-flex flex-wrap items-center gap-2">
+                    <Link to={`/contacts/${lead.primaryContactId}`} className="text-brand-red hover:underline">
+                      {lead.primaryContactName ?? "Unknown contact"}
+                    </Link>
+                    <OwnerLabel
+                      ownerId={lead.primaryContactOwnerUserId ?? null}
+                      ownerName={lead.primaryContactOwnerUserName ?? null}
+                    />
+                  </span>
                 ) : (
                   "No primary contact"
                 )
@@ -615,7 +634,22 @@ function LeadRightRail({
 
           <DetailRailSection title="Status">
             <DetailRailItem label="Lead status" value={titleCase(lead.status)} />
-            <DetailRailItem label="Primary contact" value={lead.primaryContactId ? lead.primaryContactName ?? "Unknown contact" : "No primary contact yet"} />
+            <DetailRailItem
+              label="Primary contact"
+              value={
+                lead.primaryContactId ? (
+                  <span className="inline-flex flex-wrap items-center gap-2">
+                    <span>{lead.primaryContactName ?? "Unknown contact"}</span>
+                    <OwnerLabel
+                      ownerId={lead.primaryContactOwnerUserId ?? null}
+                      ownerName={lead.primaryContactOwnerUserName ?? null}
+                    />
+                  </span>
+                ) : (
+                  "No primary contact yet"
+                )
+              }
+            />
             <DetailRailItem label="Activity" value={lead.lastActivityAt ? "Activity recorded" : "No activity yet"} />
           </DetailRailSection>
 
@@ -655,7 +689,17 @@ function LeadRightRail({
           {contextFootnote ? <p className="text-xs text-muted-foreground">{contextFootnote}</p> : null}
           <div className="flex items-center gap-2 text-sm text-muted-foreground">
             <User className="h-4 w-4" />
-            <span>{lead.primaryContactId ? lead.primaryContactName ?? "Unknown contact" : "No primary contact yet"}</span>
+            {lead.primaryContactId ? (
+              <span className="inline-flex flex-wrap items-center gap-2">
+                <span>{lead.primaryContactName ?? "Unknown contact"}</span>
+                <OwnerLabel
+                  ownerId={lead.primaryContactOwnerUserId ?? null}
+                  ownerName={lead.primaryContactOwnerUserName ?? null}
+                />
+              </span>
+            ) : (
+              <span>No primary contact yet</span>
+            )}
           </div>
           <div className="flex items-center gap-2 text-sm text-muted-foreground">
             <Phone className="h-4 w-4" />

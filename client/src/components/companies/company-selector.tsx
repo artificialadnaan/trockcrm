@@ -10,6 +10,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
+import { OwnerLabel } from "@/components/shared/owner-label";
 import { createCompany, searchCompanies } from "@/hooks/use-companies";
 
 const COMPANY_CATEGORY_LABELS: Record<string, string> = {
@@ -29,12 +30,15 @@ interface CompanySelectorProps {
   onChange: (companyId: string) => void;
   required?: boolean;
   officeId?: string | null;
+  showOwnerLabel?: boolean;
 }
 
 interface CompanyOption {
   id: string;
   name: string;
   category: string | null;
+  ownerUserId: string | null;
+  ownerUserName: string | null;
 }
 
 async function submitInlineCompanyCreate(input: {
@@ -68,12 +72,14 @@ async function submitInlineCompanyCreate(input: {
   }
 }
 
-export function CompanySelector({ value, onChange, required, officeId }: CompanySelectorProps) {
+export function CompanySelector({ value, onChange, required, officeId, showOwnerLabel = false }: CompanySelectorProps) {
   const [query, setQuery] = useState("");
   const [results, setResults] = useState<CompanyOption[]>([]);
   const [searching, setSearching] = useState(false);
   const [open, setOpen] = useState(false);
+  const [selectedCompanyId, setSelectedCompanyId] = useState<string | null>(null);
   const [selectedName, setSelectedName] = useState<string | null>(null);
+  const [selectedOwner, setSelectedOwner] = useState<{ ownerUserId: string | null; ownerUserName: string | null } | null>(null);
   const [showInlineForm, setShowInlineForm] = useState(false);
   const [newName, setNewName] = useState("");
   const [newCategory, setNewCategory] = useState("");
@@ -85,21 +91,28 @@ export function CompanySelector({ value, onChange, required, officeId }: Company
   useEffect(() => {
     let cancelled = false;
     if (!value) {
+      setSelectedCompanyId(null);
       setSelectedName(null);
+      setSelectedOwner(null);
       return () => {
         cancelled = true;
       };
     }
-    if (value && !selectedName) {
-      // Fetch the company name for the current value
+    if (value && selectedCompanyId !== value) {
+      // Fetch the company name and owner for the current value
       import("@/lib/api").then(({ api }) => {
-        api<{ company: { name: string } }>(
+        api<{ company: { name: string; ownerUserId: string | null; ownerUserName: string | null } }>(
           `/companies/${value}`,
           officeId ? { headers: { "x-office-id": officeId } } : {}
         )
           .then((data) => {
             if (!cancelled) {
+              setSelectedCompanyId(value);
               setSelectedName(data.company.name);
+              setSelectedOwner({
+                ownerUserId: data.company.ownerUserId ?? null,
+                ownerUserName: data.company.ownerUserName ?? null,
+              });
             }
           })
           .catch(() => {});
@@ -108,7 +121,7 @@ export function CompanySelector({ value, onChange, required, officeId }: Company
     return () => {
       cancelled = true;
     };
-  }, [officeId, value, selectedName]);
+  }, [officeId, selectedCompanyId, value]);
 
   // Close dropdown on outside click
   useEffect(() => {
@@ -155,7 +168,12 @@ export function CompanySelector({ value, onChange, required, officeId }: Company
   }, [officeId, query, open]);
 
   const handleSelect = (company: CompanyOption) => {
+    setSelectedCompanyId(company.id);
     setSelectedName(company.name);
+    setSelectedOwner({
+      ownerUserId: company.ownerUserId ?? null,
+      ownerUserName: company.ownerUserName ?? null,
+    });
     setQuery("");
     setOpen(false);
     onChange(company.id);
@@ -169,7 +187,9 @@ export function CompanySelector({ value, onChange, required, officeId }: Company
       onError: setCreateError,
       onCreating: setCreating,
       onCreated: (company) => {
+        setSelectedCompanyId(company.id);
         setSelectedName(company.name);
+        setSelectedOwner(null);
         setShowInlineForm(false);
         setNewName("");
         setNewCategory("");
@@ -200,8 +220,15 @@ export function CompanySelector({ value, onChange, required, officeId }: Company
           setShowInlineForm(false);
         }}
       >
-        <span className={selectedName ? "text-foreground" : "text-muted-foreground"}>
-          {selectedName ?? (required ? "Select company *" : "Select company")}
+        <span className={selectedName ? "flex min-w-0 items-center gap-2 text-foreground" : "text-muted-foreground"}>
+          <span className="truncate">{selectedName ?? (required ? "Select company *" : "Select company")}</span>
+          {showOwnerLabel && selectedName ? (
+            <OwnerLabel
+              ownerId={selectedOwner?.ownerUserId ?? null}
+              ownerName={selectedOwner?.ownerUserName ?? null}
+              className="max-w-[10rem] shrink-0"
+            />
+          ) : null}
         </span>
         <ChevronsUpDown className="h-4 w-4 opacity-50" />
       </Button>
@@ -235,12 +262,17 @@ export function CompanySelector({ value, onChange, required, officeId }: Company
                 className="w-full text-left px-3 py-2 text-sm hover:bg-muted transition-colors"
                 onClick={() => handleSelect(company)}
               >
-                <span className="font-medium">{company.name}</span>
-                {company.category && (
-                  <span className="ml-2 text-xs text-muted-foreground">
-                    {COMPANY_CATEGORY_LABELS[company.category] ?? company.category}
-                  </span>
-                )}
+                <span className="flex min-w-0 flex-wrap items-center gap-2">
+                  <span className="font-medium">{company.name}</span>
+                  {company.category && (
+                    <span className="ml-2 text-xs text-muted-foreground">
+                      {COMPANY_CATEGORY_LABELS[company.category] ?? company.category}
+                    </span>
+                  )}
+                  {showOwnerLabel ? (
+                    <OwnerLabel ownerId={company.ownerUserId} ownerName={company.ownerUserName} className="max-w-[12rem]" />
+                  ) : null}
+                </span>
               </button>
             ))}
           </div>
