@@ -560,6 +560,71 @@ describe("AI copilot service", () => {
     expect(querySql).not.toContain("stale_threshold_days");
   });
 
+  it("pushes the disconnect-row page limit into the SQL query", async () => {
+    const tenantDb = {
+      execute: vi.fn(async () => ({ rows: [] })),
+    };
+
+    await listCurrentSalesProcessDisconnectRows(tenantDb as any, { limit: 2 });
+
+    const querySql = flattenQueryChunks(tenantDb.execute.mock.calls[0]?.[0]).map((chunk) => String(chunk)).join(" ");
+    expect(querySql).toContain("LIMIT");
+    expect(flattenQueryChunks(tenantDb.execute.mock.calls[0]?.[0])).toContain(100);
+    expect(querySql).toContain("ORDER BY severity_rank ASC, age_rank DESC");
+  });
+
+  it("derives revision-loop age from last activity, not latest customer email", async () => {
+    const now = new Date("2026-04-15T00:00:00.000Z");
+    const tenantDb = {
+      execute: vi.fn(async () => ({
+        rows: [
+          {
+            id: "deal-revision",
+            deal_number: "D-1003",
+            deal_name: "Revision Plaza",
+            company_id: null,
+            company_name: null,
+            stage_key: "estimating",
+            stage_slug: "estimating",
+            workflow_route: "normal",
+            stage_name: "Estimating",
+            estimating_substage: null,
+            assigned_rep_id: "rep-1",
+            assigned_rep_name: "Rep One",
+            stage_entered_at: "2026-04-14T00:00:00.000Z",
+            on_hold: false,
+            on_hold_started_at: null,
+            on_hold_accumulated_seconds: 0,
+            on_hold_accumulated_seconds_at_stage_entry: 0,
+            last_activity_at: "2026-04-10T00:00:00.000Z",
+            proposal_status: "revision_requested",
+            procore_project_id: null,
+            procore_last_synced_at: null,
+            open_task_count: 1,
+            inbound_without_followup_count: 0,
+            latest_customer_email_at: "2026-04-01T00:00:00.000Z",
+            required_document_count: 0,
+            present_document_count: 0,
+            procore_sync_status: null,
+            procore_sync_direction: null,
+            procore_sync_updated_at: null,
+            procore_drift_reason: null,
+          },
+        ],
+      })),
+    };
+
+    const rows = await listCurrentSalesProcessDisconnectRows(tenantDb as any, { now } as any);
+
+    expect(rows).toEqual([
+      expect.objectContaining({
+        id: "deal-revision",
+        disconnectType: "revision_loop",
+        ageDays: 5,
+      }),
+    ]);
+  });
+
   it("scopes triage disconnect metadata to the single deal", async () => {
     const tenantDb = {
       select: vi.fn(() => {

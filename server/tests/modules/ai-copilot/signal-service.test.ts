@@ -24,6 +24,45 @@ describe("AI copilot signal service", () => {
     vi.restoreAllMocks();
   });
 
+  it("issues independent blind-spot reads concurrently", async () => {
+    const queryResults = [
+      {
+        rows: [{
+          deal_id: "deal-1",
+          stage_id: "stage-1",
+          stage_slug: "estimating",
+          workflow_route: "normal",
+          stage_name: "Estimating",
+          stage_entered_at: "2026-04-10T00:00:00.000Z",
+          on_hold: false,
+          on_hold_started_at: null,
+          on_hold_accumulated_seconds: 0,
+          on_hold_accumulated_seconds_at_stage_entry: 0,
+          proposal_status: "drafting",
+          required_documents: [],
+        }],
+      },
+      { rows: [{ open_task_count: 1 }] },
+      { rows: [{ inbound_without_followup_count: 0 }] },
+      { rows: [{ revision_owner_movement_count: 1 }] },
+      { rows: [{ missing_required_document_count: 0 }] },
+    ];
+    const resolvers: Array<(value: unknown) => void> = [];
+    const tenantDb = {
+      execute: vi.fn(() => new Promise((resolve) => resolvers.push(resolve))),
+    };
+
+    const pendingSignals = getDealBlindSpotSignals(
+      tenantDb as any,
+      "deal-1",
+      new Date("2026-04-15T00:00:00.000Z")
+    );
+
+    expect(tenantDb.execute).toHaveBeenCalledTimes(5);
+    queryResults.forEach((result, index) => resolvers[index](result));
+    await expect(pendingSignals).resolves.toEqual([]);
+  });
+
   it("returns deterministic blind-spot signals from deal workflow state", async () => {
     const tenantDb = {
       execute: vi

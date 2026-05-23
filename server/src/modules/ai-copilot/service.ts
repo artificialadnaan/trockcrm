@@ -1061,7 +1061,7 @@ function buildDisconnectRowsFromBaseRows(
           disconnectSummary: "Proposal revision requested with no clear closed-loop ownership.",
           disconnectDetails:
             "The deal remains in revision_requested, which often signals a stalled handoff between sales and estimating.",
-          ageDays: ageDaysFrom(row.latest_customer_email_at ?? row.last_activity_at, now),
+          ageDays: ageDaysFrom(row.last_activity_at, now),
         })
       );
     }
@@ -1106,7 +1106,151 @@ export async function listCurrentSalesProcessDisconnectRows(
   const limit = input.limit == null ? null : Math.max(1, Math.min(input.limit, 5000));
   const now = input.now ?? new Date();
   const viewerRole = input.viewerRole ?? "director";
+  const candidateLimit = limit == null || input.dealId ? null : Math.min(5000, Math.max(100, limit * 10));
+  const candidateLimitClause = candidateLimit == null ? sql`` : sql`LIMIT ${candidateLimit}`;
+  const leadershipRiskRole = viewerRole === "director" || viewerRole === "admin";
+  const staleCandidateThreshold = sql`
+    CASE
+      WHEN COALESCE(d.bid_board_stage_slug, psc.slug) IN ('opportunity', 'dd') THEN ${leadershipRiskRole ? 30 : 7}
+      WHEN COALESCE(d.bid_board_stage_slug, psc.slug) IN ('estimating', 'estimate_in_progress')
+        THEN CASE WHEN d.workflow_route = 'service' THEN ${leadershipRiskRole ? 14 : 7} ELSE 14 END
+      WHEN COALESCE(d.bid_board_stage_slug, psc.slug) = 'service_estimating' THEN ${leadershipRiskRole ? 14 : 7}
+      WHEN COALESCE(d.bid_board_stage_slug, psc.slug) IN ('estimate_under_review', 'service_estimate_under_review')
+        THEN ${leadershipRiskRole ? 7 : 3}
+      WHEN COALESCE(d.bid_board_stage_slug, psc.slug) IN ('estimate_sent_to_client', 'bid_sent', 'service_estimate_sent_to_client')
+        THEN ${leadershipRiskRole ? 30 : 7}
+      WHEN COALESCE(d.bid_board_stage_slug, psc.slug) IN ('contract', 'contract_signed', 'service_contract_signed') THEN 2
+      ELSE NULL
+    END
+  `;
+  const effectiveStageAgeDays = sql`
+    FLOOR(
+      GREATEST(
+        0,
+        EXTRACT(EPOCH FROM (${now}::timestamptz - COALESCE(
+          d.bid_board_stage_entered_at,
+          d.stage_entered_at,
+          latest_current_stage_entered_at.entered_at
+        ))) -
+        GREATEST(
+          0,
+          COALESCE(d.on_hold_accumulated_seconds, 0) -
+          COALESCE(d.on_hold_accumulated_seconds_at_stage_entry, 0)
+        )
+      ) / 86400
+    )
+  `;
   const baseResult = await tenantDb.execute(sql`
+    WITH candidate_deals AS (
+      SELECT
+        d.id,
+        d.deal_number,
+        CASE
+          WHEN d.proposal_status = 'revision_requested'
+            OR COALESCE((
+              SELECT COUNT(*)::int
+              FROM tasks t
+              WHERE t.deal_id = d.id
+                AND t.status IN ('pending', 'in_progress', 'waiting_on', 'blocked')
+            ), 0) = 0
+            OR COALESCE((
+              SELECT COUNT(*)::int
+              FROM emails e
+              WHERE ${buildDealEmailLinkCondition("e", "d.id")}
+                AND e.direction = 'inbound'
+                AND ${buildDealEmailFollowupGapCondition("a", "e", "d.id")}
+            ), 0) > 0
+            OR COALESCE(jsonb_array_length(psc.required_documents), 0) > COALESCE((
+              SELECT COUNT(DISTINCT f.category)::int
+              FROM files f
+              WHERE f.deal_id = d.id
+                AND f.is_active = TRUE
+            ), 0)
+            OR (
+              d.procore_project_id IS NOT NULL
+              AND
+              pss.sync_status IS NOT NULL
+              AND pss.sync_status <> 'synced'
+            )
+          THEN 0
+          ELSE 1
+        END AS severity_rank,
+        GREATEST(
+          COALESCE(EXTRACT(EPOCH FROM (${now}::timestamptz - d.last_activity_at)) / 86400, -1),
+          COALESCE(EXTRACT(EPOCH FROM (${now}::timestamptz - COALESCE(
+            d.bid_board_stage_entered_at,
+            d.stage_entered_at,
+            latest_current_stage_entered_at.entered_at
+          ))) / 86400, -1),
+          COALESCE(EXTRACT(EPOCH FROM (${now}::timestamptz - pss.updated_at)) / 86400, -1)
+        ) AS age_rank
+      FROM deals d
+      JOIN pipeline_stage_config psc ON psc.id = d.stage_id
+      LEFT JOIN LATERAL (
+        SELECT entered_at
+        FROM deal_stage_history dsh
+        WHERE dsh.deal_id = d.id
+          AND dsh.stage_id = d.stage_id
+          AND dsh.exited_at IS NULL
+        ORDER BY dsh.entered_at DESC
+        LIMIT 1
+      ) latest_current_stage_entered_at ON TRUE
+      LEFT JOIN LATERAL (
+        SELECT
+          sync_status,
+          updated_at
+        FROM public.procore_sync_state
+        WHERE crm_entity_type = 'deal'
+          AND crm_entity_id = d.id
+          AND entity_type IN ('project', 'bid')
+        ORDER BY updated_at DESC
+        LIMIT 1
+      ) pss ON TRUE
+      WHERE d.is_active = TRUE
+        AND psc.is_terminal = FALSE
+        AND COALESCE(d.is_test_data, false) = false
+        ${input.dealId ? sql`AND d.id = ${input.dealId}` : sql``}
+        AND (
+          COALESCE((
+            SELECT COUNT(*)::int
+            FROM tasks t
+            WHERE t.deal_id = d.id
+              AND t.status IN ('pending', 'in_progress', 'waiting_on', 'blocked')
+          ), 0) = 0
+          OR COALESCE((
+            SELECT COUNT(*)::int
+            FROM emails e
+            WHERE ${buildDealEmailLinkCondition("e", "d.id")}
+              AND e.direction = 'inbound'
+              AND ${buildDealEmailFollowupGapCondition("a", "e", "d.id")}
+          ), 0) > 0
+          OR d.proposal_status = 'revision_requested'
+          OR COALESCE(jsonb_array_length(psc.required_documents), 0) > COALESCE((
+            SELECT COUNT(DISTINCT f.category)::int
+            FROM files f
+            WHERE f.deal_id = d.id
+              AND f.is_active = TRUE
+          ), 0)
+          OR (
+            d.procore_project_id IS NOT NULL
+            AND
+            pss.sync_status IS NOT NULL
+            AND pss.sync_status <> 'synced'
+          )
+          OR (
+            ${staleCandidateThreshold} IS NOT NULL
+            AND COALESCE(d.on_hold, false) = false
+            AND COALESCE(
+              d.bid_board_stage_entered_at,
+              d.stage_entered_at,
+              latest_current_stage_entered_at.entered_at
+            ) IS NOT NULL
+            AND ${effectiveStageAgeDays} >= ${staleCandidateThreshold}
+          )
+        )
+      ORDER BY severity_rank ASC, age_rank DESC, d.deal_number ASC
+      ${candidateLimitClause}
+    )
     SELECT
       d.id,
       d.deal_number,
@@ -1174,7 +1318,8 @@ export async function listCurrentSalesProcessDisconnectRows(
           THEN 'Procore reported a newer update than the CRM stage map.'
         ELSE NULL
       END AS procore_drift_reason
-    FROM deals d
+    FROM candidate_deals cd
+    JOIN deals d ON d.id = cd.id
     JOIN pipeline_stage_config psc ON psc.id = d.stage_id
     LEFT JOIN pipeline_stage_config mirror_psc ON mirror_psc.slug = d.bid_board_stage_slug
     LEFT JOIN companies c ON c.id = d.company_id
@@ -1215,6 +1360,7 @@ export async function listCurrentSalesProcessDisconnectRows(
     now,
     viewerRole
   );
+  // The SQL candidate limit bounds the deal scan; this cap handles deals that expand into multiple disconnect rows.
   return limit == null ? disconnectRows : disconnectRows.slice(0, limit);
 }
 
@@ -1352,22 +1498,24 @@ export async function getCompanyCopilotView(
   tenantDb: TenantDb,
   company: { id: string; name: string }
 ): Promise<CompanyCopilotView> {
-  const contactCountResult = await tenantDb
-    .select({ count: sql<number>`count(*)::int` })
-    .from(contacts)
-    .where(and(eq(contacts.companyId, company.id), eq(contacts.isActive, true)));
-  const companyDeals = await tenantDb
-    .select({
-      id: deals.id,
-      dealNumber: deals.dealNumber,
-      name: deals.name,
-      lastActivityAt: deals.lastActivityAt,
-      updatedAt: deals.updatedAt,
-    })
-    .from(deals)
-    .where(and(eq(deals.companyId, company.id), eq(deals.isActive, true)))
-    .orderBy(desc(deals.updatedAt))
-    .limit(10);
+  const [contactCountResult, companyDeals] = await Promise.all([
+    tenantDb
+      .select({ count: sql<number>`count(*)::int` })
+      .from(contacts)
+      .where(and(eq(contacts.companyId, company.id), eq(contacts.isActive, true))),
+    tenantDb
+      .select({
+        id: deals.id,
+        dealNumber: deals.dealNumber,
+        name: deals.name,
+        lastActivityAt: deals.lastActivityAt,
+        updatedAt: deals.updatedAt,
+      })
+      .from(deals)
+      .where(and(eq(deals.companyId, company.id), eq(deals.isActive, true)))
+      .orderBy(desc(deals.updatedAt))
+      .limit(10),
+  ]);
 
   const dealIds = companyDeals.map((deal) => deal.id);
   const latestPacketRows = dealIds.length
@@ -1393,33 +1541,35 @@ export async function getCompanyCopilotView(
     });
   }
 
-  const suggestedTasks = dealIds.length
-    ? await tenantDb
-        .select()
-        .from(aiTaskSuggestions)
-        .where(
-          and(
-            eq(aiTaskSuggestions.scopeType, "deal"),
-            sql`${aiTaskSuggestions.scopeId} IN (${sql.join(dealIds.map((id) => sql`${id}`), sql`, `)})`,
-            eq(aiTaskSuggestions.status, "suggested")
+  const [suggestedTasks, blindSpotFlags] = await Promise.all([
+    dealIds.length
+      ? tenantDb
+          .select()
+          .from(aiTaskSuggestions)
+          .where(
+            and(
+              eq(aiTaskSuggestions.scopeType, "deal"),
+              sql`${aiTaskSuggestions.scopeId} IN (${sql.join(dealIds.map((id) => sql`${id}`), sql`, `)})`,
+              eq(aiTaskSuggestions.status, "suggested")
+            )
           )
-        )
-        .orderBy(desc(aiTaskSuggestions.createdAt))
-        .limit(8)
-    : [];
-  const blindSpotFlags = dealIds.length
-    ? await tenantDb
-        .select()
-        .from(aiRiskFlags)
-        .where(
-          and(
-            sql`${aiRiskFlags.dealId} IN (${sql.join(dealIds.map((id) => sql`${id}`), sql`, `)})`,
-            eq(aiRiskFlags.status, "open")
+          .orderBy(desc(aiTaskSuggestions.createdAt))
+          .limit(8)
+      : Promise.resolve([]),
+    dealIds.length
+      ? tenantDb
+          .select()
+          .from(aiRiskFlags)
+          .where(
+            and(
+              sql`${aiRiskFlags.dealId} IN (${sql.join(dealIds.map((id) => sql`${id}`), sql`, `)})`,
+              eq(aiRiskFlags.status, "open")
+            )
           )
-        )
-        .orderBy(desc(aiRiskFlags.createdAt))
-        .limit(8)
-    : [];
+          .orderBy(desc(aiRiskFlags.createdAt))
+          .limit(8)
+      : Promise.resolve([]),
+  ]);
 
   const relatedDeals = companyDeals.map((deal) => ({
     ...deal,
@@ -1668,124 +1818,126 @@ export async function getSalesProcessDisconnectDashboard(
   const limit = Math.max(1, Math.min(input.limit ?? 50, 200));
   const now = input.now ?? new Date();
   const viewerRole = input.viewerRole ?? "director";
-  const activeDealsResult = await tenantDb.execute(sql`
-    SELECT COUNT(*)::int AS active_deals
-    FROM deals d
-    JOIN pipeline_stage_config psc ON psc.id = d.stage_id
-    WHERE d.is_active = TRUE
-      AND psc.is_terminal = FALSE
-      AND COALESCE(d.is_test_data, false) = false
-  `);
-  const allRows = await listCurrentSalesProcessDisconnectRows(tenantDb, { limit: null, now, viewerRole });
+  const [activeDealsResult, allRows, interventionsResult, interventionEventsResult, automationResult] = await Promise.all([
+    tenantDb.execute(sql`
+      SELECT COUNT(*)::int AS active_deals
+      FROM deals d
+      JOIN pipeline_stage_config psc ON psc.id = d.stage_id
+      WHERE d.is_active = TRUE
+        AND psc.is_terminal = FALSE
+        AND COALESCE(d.is_test_data, false) = false
+    `),
+    listCurrentSalesProcessDisconnectRows(tenantDb, { limit: null, now, viewerRole }),
+    tenantDb.execute(sql`
+      WITH triage_feedback AS (
+        SELECT
+          rf.deal_id AS deal_id,
+          f.feedback_value,
+          f.created_at
+        FROM ai_feedback f
+        JOIN ai_risk_flags rf
+          ON f.target_type = 'risk_flag'
+         AND f.target_id = rf.id
+        WHERE f.feedback_type = 'triage_action'
+          AND f.created_at >= NOW() - INTERVAL '30 days'
+          AND rf.deal_id IS NOT NULL
+
+        UNION ALL
+
+        SELECT
+          ts.scope_id AS deal_id,
+          f.feedback_value,
+          f.created_at
+        FROM ai_feedback f
+        JOIN ai_task_suggestions ts
+          ON f.target_type = 'task_suggestion'
+         AND f.target_id = ts.id
+        WHERE f.feedback_type = 'triage_action'
+          AND f.created_at >= NOW() - INTERVAL '30 days'
+          AND ts.scope_type = 'deal'
+          AND ts.scope_id IS NOT NULL
+      )
+      SELECT
+        deal_id,
+        COUNT(*)::int AS intervention_count_30d,
+        MAX(created_at) AS latest_intervention_at,
+        (
+          ARRAY_AGG(feedback_value ORDER BY created_at DESC)
+        )[1]::text AS latest_action
+      FROM triage_feedback
+      GROUP BY deal_id
+    `),
+    tenantDb.execute(sql`
+      WITH triage_feedback AS (
+        SELECT
+          rf.deal_id AS deal_id,
+          f.feedback_value AS action,
+          f.created_at,
+          f.comment AS comment_text
+        FROM ai_feedback f
+        JOIN ai_risk_flags rf
+          ON f.target_type = 'risk_flag'
+         AND f.target_id = rf.id
+        WHERE f.feedback_type = 'triage_action'
+          AND f.created_at >= NOW() - INTERVAL '30 days'
+          AND rf.deal_id IS NOT NULL
+
+        UNION ALL
+
+        SELECT
+          ts.scope_id AS deal_id,
+          f.feedback_value AS action,
+          f.created_at,
+          f.comment AS comment_text
+        FROM ai_feedback f
+        JOIN ai_task_suggestions ts
+          ON f.target_type = 'task_suggestion'
+         AND f.target_id = ts.id
+        WHERE f.feedback_type = 'triage_action'
+          AND f.created_at >= NOW() - INTERVAL '30 days'
+          AND ts.scope_type = 'deal'
+          AND ts.scope_id IS NOT NULL
+      )
+      SELECT
+        deal_id,
+        action,
+        created_at,
+        comment_text
+      FROM triage_feedback
+    `),
+    tenantDb.execute(sql`
+      SELECT
+        COUNT(*) FILTER (
+          WHERE title LIKE 'AI Disconnect Digest:%'
+            AND created_at >= NOW() - INTERVAL '7 days'
+        )::int AS digest_notifications_7d,
+        COUNT(*) FILTER (
+          WHERE title LIKE 'AI Escalation:%'
+            AND created_at >= NOW() - INTERVAL '7 days'
+        )::int AS escalation_notifications_7d,
+        MAX(created_at) FILTER (WHERE title LIKE 'AI Disconnect Digest:%') AS latest_digest_at,
+        MAX(created_at) FILTER (WHERE title LIKE 'AI Escalation:%') AS latest_escalation_at,
+        (
+          SELECT COUNT(*)::int
+          FROM tasks t
+          WHERE t.origin_rule = 'ai_disconnect_admin_task'
+            AND t.created_at >= NOW() - INTERVAL '7 days'
+        ) AS admin_tasks_created_7d,
+        (
+          SELECT COUNT(*)::int
+          FROM tasks t
+          WHERE t.origin_rule = 'ai_disconnect_admin_task'
+            AND t.status IN ('pending', 'in_progress', 'waiting_on', 'blocked')
+        ) AS admin_tasks_open,
+        (
+          SELECT MAX(t.created_at)
+          FROM tasks t
+          WHERE t.origin_rule = 'ai_disconnect_admin_task'
+        ) AS latest_admin_task_created_at
+      FROM notifications
+    `),
+  ]);
   const rows = allRows.slice(0, limit);
-  const interventionsResult = await tenantDb.execute(sql`
-    WITH triage_feedback AS (
-      SELECT
-        rf.deal_id AS deal_id,
-        f.feedback_value,
-        f.created_at
-      FROM ai_feedback f
-      JOIN ai_risk_flags rf
-        ON f.target_type = 'risk_flag'
-       AND f.target_id = rf.id
-      WHERE f.feedback_type = 'triage_action'
-        AND f.created_at >= NOW() - INTERVAL '30 days'
-        AND rf.deal_id IS NOT NULL
-
-      UNION ALL
-
-      SELECT
-        ts.scope_id AS deal_id,
-        f.feedback_value,
-        f.created_at
-      FROM ai_feedback f
-      JOIN ai_task_suggestions ts
-        ON f.target_type = 'task_suggestion'
-       AND f.target_id = ts.id
-      WHERE f.feedback_type = 'triage_action'
-        AND f.created_at >= NOW() - INTERVAL '30 days'
-        AND ts.scope_type = 'deal'
-        AND ts.scope_id IS NOT NULL
-    )
-    SELECT
-      deal_id,
-      COUNT(*)::int AS intervention_count_30d,
-      MAX(created_at) AS latest_intervention_at,
-      (
-        ARRAY_AGG(feedback_value ORDER BY created_at DESC)
-      )[1]::text AS latest_action
-    FROM triage_feedback
-    GROUP BY deal_id
-  `);
-  const interventionEventsResult = await tenantDb.execute(sql`
-    WITH triage_feedback AS (
-      SELECT
-        rf.deal_id AS deal_id,
-        f.feedback_value AS action,
-        f.created_at,
-        f.comment AS comment_text
-      FROM ai_feedback f
-      JOIN ai_risk_flags rf
-        ON f.target_type = 'risk_flag'
-       AND f.target_id = rf.id
-      WHERE f.feedback_type = 'triage_action'
-        AND f.created_at >= NOW() - INTERVAL '30 days'
-        AND rf.deal_id IS NOT NULL
-
-      UNION ALL
-
-      SELECT
-        ts.scope_id AS deal_id,
-        f.feedback_value AS action,
-        f.created_at,
-        f.comment AS comment_text
-      FROM ai_feedback f
-      JOIN ai_task_suggestions ts
-        ON f.target_type = 'task_suggestion'
-       AND f.target_id = ts.id
-      WHERE f.feedback_type = 'triage_action'
-        AND f.created_at >= NOW() - INTERVAL '30 days'
-        AND ts.scope_type = 'deal'
-        AND ts.scope_id IS NOT NULL
-    )
-    SELECT
-      deal_id,
-      action,
-      created_at,
-      comment_text
-    FROM triage_feedback
-  `);
-  const automationResult = await tenantDb.execute(sql`
-    SELECT
-      COUNT(*) FILTER (
-        WHERE title LIKE 'AI Disconnect Digest:%'
-          AND created_at >= NOW() - INTERVAL '7 days'
-      )::int AS digest_notifications_7d,
-      COUNT(*) FILTER (
-        WHERE title LIKE 'AI Escalation:%'
-          AND created_at >= NOW() - INTERVAL '7 days'
-      )::int AS escalation_notifications_7d,
-      MAX(created_at) FILTER (WHERE title LIKE 'AI Disconnect Digest:%') AS latest_digest_at,
-      MAX(created_at) FILTER (WHERE title LIKE 'AI Escalation:%') AS latest_escalation_at,
-      (
-        SELECT COUNT(*)::int
-        FROM tasks t
-        WHERE t.origin_rule = 'ai_disconnect_admin_task'
-          AND t.created_at >= NOW() - INTERVAL '7 days'
-      ) AS admin_tasks_created_7d,
-      (
-        SELECT COUNT(*)::int
-        FROM tasks t
-        WHERE t.origin_rule = 'ai_disconnect_admin_task'
-          AND t.status IN ('pending', 'in_progress', 'waiting_on', 'blocked')
-      ) AS admin_tasks_open,
-      (
-        SELECT MAX(t.created_at)
-        FROM tasks t
-        WHERE t.origin_rule = 'ai_disconnect_admin_task'
-      ) AS latest_admin_task_created_at
-    FROM notifications
-  `);
   const countType = (disconnectType: string) =>
     allRows.filter((row) => row.disconnectType === disconnectType).length;
   const summary: SalesProcessDisconnectSummary = {
@@ -1993,7 +2145,8 @@ export async function triageAiActionQueueEntry(
 }
 
 export async function getAiOpsMetrics(tenantDb: TenantDb): Promise<AiOpsMetrics> {
-  const summaryResult = await tenantDb.execute(sql`
+  const [summaryResult, documentResult] = await Promise.all([
+    tenantDb.execute(sql`
       WITH packet_counts AS (
         SELECT
           COUNT(*) FILTER (WHERE generated_at >= NOW() - INTERVAL '24 hours')::int AS packets_generated_24h,
@@ -2135,8 +2288,8 @@ export async function getAiOpsMetrics(tenantDb: TenantDb): Promise<AiOpsMetrics>
         document_counts.documents_indexed,
         document_counts.documents_pending
       FROM packet_counts, risk_counts, suggestion_counts, triage_counts, search_interaction_counts, risk_resolution_counts, recurring_suggestion_counts, feedback_counts, document_counts
-    `);
-  const documentResult = await tenantDb.execute(sql`
+    `),
+    tenantDb.execute(sql`
       SELECT
         source_type,
         COUNT(*) FILTER (WHERE index_status = 'indexed')::int AS indexed,
@@ -2144,7 +2297,8 @@ export async function getAiOpsMetrics(tenantDb: TenantDb): Promise<AiOpsMetrics>
       FROM ai_document_index
       GROUP BY source_type
       ORDER BY source_type ASC
-    `);
+    `),
+  ]);
 
   const summaryRow = getRows(summaryResult)[0] ?? {};
 
@@ -2236,7 +2390,8 @@ export async function getAiReviewPacketDetail(
   tenantDb: TenantDb,
   packetId: string
 ): Promise<AiReviewPacketDetail> {
-  const packetResult = await tenantDb.execute(sql`
+  const [packetResult, suggestedTasks, blindSpotFlags, feedback] = await Promise.all([
+    tenantDb.execute(sql`
       SELECT
         p.*,
         d.name AS deal_name,
@@ -2245,22 +2400,23 @@ export async function getAiReviewPacketDetail(
       LEFT JOIN deals d ON d.id = p.deal_id
       WHERE p.id = ${packetId}
       LIMIT 1
-    `);
-  const suggestedTasks = await tenantDb
-    .select()
-    .from(aiTaskSuggestions)
-    .where(eq(aiTaskSuggestions.packetId, packetId))
-    .orderBy(desc(aiTaskSuggestions.createdAt));
-  const blindSpotFlags = await tenantDb
-    .select()
-    .from(aiRiskFlags)
-    .where(eq(aiRiskFlags.packetId, packetId))
-    .orderBy(desc(aiRiskFlags.createdAt));
-  const feedback = await tenantDb
-    .select()
-    .from(aiFeedback)
-    .where(and(eq(aiFeedback.targetType, "packet"), eq(aiFeedback.targetId, packetId)))
-    .orderBy(desc(aiFeedback.createdAt));
+    `),
+    tenantDb
+      .select()
+      .from(aiTaskSuggestions)
+      .where(eq(aiTaskSuggestions.packetId, packetId))
+      .orderBy(desc(aiTaskSuggestions.createdAt)),
+    tenantDb
+      .select()
+      .from(aiRiskFlags)
+      .where(eq(aiRiskFlags.packetId, packetId))
+      .orderBy(desc(aiRiskFlags.createdAt)),
+    tenantDb
+      .select()
+      .from(aiFeedback)
+      .where(and(eq(aiFeedback.targetType, "packet"), eq(aiFeedback.targetId, packetId)))
+      .orderBy(desc(aiFeedback.createdAt)),
+  ]);
 
   const packetRow = getRows(packetResult)[0];
 
