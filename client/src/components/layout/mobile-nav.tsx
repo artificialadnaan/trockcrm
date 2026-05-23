@@ -10,7 +10,6 @@ import {
   type LucideIcon,
 } from "lucide-react";
 import { useAuth } from "@/lib/auth";
-import { buildFieldCaptureUrl } from "@/lib/field-app";
 
 type MobileNavItem = {
   to: string;
@@ -23,7 +22,7 @@ type MobileNavItem = {
 const mobileNavItems: MobileNavItem[] = [
   { to: "/", icon: LayoutDashboard, label: "Home" },
   { to: "/pipeline", icon: Kanban, label: "Pipeline" },
-  { to: "/photos/capture", icon: Camera, label: "Capture" },
+  { to: "https://trockcam.com", icon: Camera, label: "Capture", external: true, ariaLabel: "Open Capture in a new tab" },
   { to: "/contacts", icon: Users, label: "Contacts" },
   { to: "/tasks", icon: CheckSquare, label: "Tasks" },
   {
@@ -44,24 +43,12 @@ export function MobileNav() {
   const navItems = user?.role === "rep"
     ? [...mobileNavItems, { to: "/commissions", icon: DollarSign, label: "Commissions" } satisfies MobileNavItem]
     : mobileNavItems;
-  const captureSearch = user?.activeOfficeId ? `?${new URLSearchParams({ officeId: user.activeOfficeId }).toString()}` : "";
-  const captureHref = buildFieldCaptureUrl(captureSearch);
 
   return (
     <nav className="md:hidden fixed bottom-0 left-0 right-0 bg-white border-t z-50">
       <div className="flex items-center justify-around h-16">
         {navItems.map((item) => (
-          item.to === "/photos/capture" && captureHref ? (
-            <a
-              key={getNavItemKey(item)}
-              href={captureHref}
-              className="flex flex-col items-center justify-center gap-1 min-w-[3rem] min-h-[2.75rem] rounded-md transition-colors text-muted-foreground"
-              data-capture-nav="field-app"
-            >
-              <item.icon className="h-5 w-5" />
-              <span className="text-[10px] font-medium">{item.label}</span>
-            </a>
-          ) : item.external ? (
+          item.external ? (
             <a
               key={getNavItemKey(item)}
               href={item.to}
@@ -78,7 +65,6 @@ export function MobileNav() {
               key={getNavItemKey(item)}
               to={item.to}
               end={item.to === "/"}
-              data-capture-nav={item.to === "/photos/capture" ? "crm-fallback" : undefined}
               className={({ isActive }) =>
                 `flex flex-col items-center justify-center gap-1 min-w-[3rem] min-h-[2.75rem] rounded-md transition-colors ${
                   isActive

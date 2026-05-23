@@ -24,10 +24,6 @@ vi.mock("@/lib/auth", () => ({
   useAuth: () => authMock,
 }));
 
-vi.mock("@/lib/field-app", () => ({
-  buildFieldCaptureUrl: () => "https://field.example.com/capture",
-}));
-
 let root: Root | null = null;
 let container: HTMLDivElement | null = null;
 
@@ -48,20 +44,26 @@ function renderNode(node: React.ReactElement) {
 }
 
 describe("capture navigation", () => {
-  it("links sidebar Capture to the field app when configured", async () => {
+  it("renders sidebar Capture as an external trockcam link", async () => {
     const node = renderNode(<Sidebar />);
-    await vi.waitFor(() => expect(node.querySelector('[data-capture-nav="field-app"]')).toBeTruthy());
+    await vi.waitFor(() => expect(node.querySelector("aside")).toBeTruthy());
 
     const captureLink = Array.from(node.querySelectorAll("a")).find((anchor) => anchor.textContent?.includes("Capture"));
-    expect(captureLink?.getAttribute("href")).toBe("https://field.example.com/capture");
+    expect(captureLink?.getAttribute("href")).toBe("https://trockcam.com");
+    expect(captureLink?.getAttribute("target")).toBe("_blank");
+    expect(captureLink?.getAttribute("rel")).toBe("noopener noreferrer");
+    expect(captureLink?.getAttribute("aria-label")).toBe("Open Capture in a new tab");
   });
 
-  it("links mobile Capture to the field app when configured", async () => {
+  it("renders mobile Capture as an external trockcam link", async () => {
     const node = renderNode(<MobileNav />);
-    await vi.waitFor(() => expect(node.querySelector('[data-capture-nav="field-app"]')).toBeTruthy());
+    await vi.waitFor(() => expect(node.querySelector("nav")).toBeTruthy());
 
     const captureLink = Array.from(node.querySelectorAll("a")).find((anchor) => anchor.textContent?.includes("Capture"));
-    expect(captureLink?.getAttribute("href")).toBe("https://field.example.com/capture");
+    expect(captureLink?.getAttribute("href")).toBe("https://trockcam.com");
+    expect(captureLink?.getAttribute("target")).toBe("_blank");
+    expect(captureLink?.getAttribute("rel")).toBe("noopener noreferrer");
+    expect(captureLink?.getAttribute("aria-label")).toBe("Open Capture in a new tab");
   });
 });
 
