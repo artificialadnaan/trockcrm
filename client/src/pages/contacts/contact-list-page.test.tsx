@@ -5,6 +5,7 @@ import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { renderToStaticMarkup } from "react-dom/server";
 import { MemoryRouter } from "react-router-dom";
+import { getOwnerInitialColor } from "@trock-crm/shared/types";
 import { ContactListPage } from "./contact-list-page";
 
 (globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
@@ -78,6 +79,8 @@ describe("ContactListPage", () => {
           mobile: null,
           companyName: "T Rock Owner Group",
           companyId: "company-1",
+          ownerUserId: "user-1",
+          ownerUserName: "Alicia Adams",
           jobTitle: "Facilities Director",
           category: "client",
           role: "facilities_director",
@@ -109,6 +112,7 @@ describe("ContactListPage", () => {
 
   it("renders A1 contact role, primary state, linked deals, and last touch", () => {
     const html = normalize(renderPage());
+    const ownerColor = getOwnerInitialColor("user-1");
 
     expect(mocks.useContactsMock).toHaveBeenCalledWith({
       isActive: true,
@@ -118,10 +122,82 @@ describe("ContactListPage", () => {
       limit: 50,
     });
     expect(html).toContain("Maria Caldwell");
+    expect(html).toContain("Alicia Adams");
+    expect(html).toContain("AA");
+    expect(html).toContain(`background-color:${ownerColor.backgroundColor}`);
+    expect(html).toContain(`color:${ownerColor.textColor}`);
     expect(html).toContain("Facilities director");
     expect(html).toContain("T Rock Owner Group");
     expect(html).toContain("Primary contacts");
     expect(html).toContain("Apr 11, 2026");
+  });
+
+  it("shows Unassigned when a contact has no owner", () => {
+    mocks.useContactsMock.mockReturnValue({
+      contacts: [
+        {
+          id: "contact-2",
+          firstName: "No",
+          lastName: "Owner",
+          email: null,
+          phone: null,
+          mobile: null,
+          companyName: "T Rock Owner Group",
+          companyId: "company-1",
+          ownerUserId: null,
+          ownerUserName: null,
+          jobTitle: null,
+          category: "client",
+          role: null,
+          isPrimary: false,
+          linkedinUrl: null,
+          address: null,
+          city: null,
+          state: null,
+          zip: null,
+          notes: null,
+          touchpointCount: 0,
+          lastContactedAt: null,
+          firstOutreachCompleted: false,
+          procoreContactId: null,
+          hubspotContactId: null,
+          linkedDealsCount: 0,
+          lastTouchAt: null,
+          normalizedPhone: null,
+          isActive: true,
+          createdAt: "2026-04-10T10:00:00.000Z",
+          updatedAt: "2026-04-11T10:00:00.000Z",
+        },
+      ],
+      pagination: { page: 1, limit: 50, total: 1, totalPages: 1 },
+      loading: false,
+      error: null,
+    });
+
+    expect(normalize(renderPage())).toContain("Unassigned");
+  });
+
+  it("filters contacts between All and Mine ownership scopes", async () => {
+    const { container, cleanup } = await renderPageDom();
+    try {
+      const ownershipFilter = container.querySelector('[aria-label="Ownership filter"]');
+      const buttons = [...(ownershipFilter?.querySelectorAll("button") ?? [])];
+      const mineButton = buttons.find((button) => button.textContent?.trim() === "Mine");
+      const allButton = buttons.find((button) => button.textContent?.trim() === "All");
+
+      expect(ownershipFilter).not.toBeNull();
+      expect(mineButton).not.toBeUndefined();
+      expect(allButton).not.toBeUndefined();
+      expect(allButton?.getAttribute("aria-pressed")).toBe("true");
+
+      await act(async () => {
+        mineButton?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+      });
+
+      expect(mocks.setFiltersMock).toHaveBeenCalledWith({ ownerScope: "mine" });
+    } finally {
+      await cleanup();
+    }
   });
 
   it("renders visible pagination buttons with a distinct disabled state", async () => {
@@ -136,6 +212,8 @@ describe("ContactListPage", () => {
           mobile: null,
           companyName: "T Rock Owner Group",
           companyId: "company-1",
+          ownerUserId: "user-1",
+          ownerUserName: "Alicia Adams",
           jobTitle: "Facilities Director",
           category: "client",
           role: "facilities_director",
@@ -206,6 +284,8 @@ describe("ContactListPage", () => {
           mobile: null,
           companyName: "T Rock Owner Group",
           companyId: "company-1",
+          ownerUserId: "user-1",
+          ownerUserName: "Alicia Adams",
           jobTitle: "Facilities Director",
           category: "client",
           role: "facilities_director",

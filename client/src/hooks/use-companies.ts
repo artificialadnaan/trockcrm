@@ -43,6 +43,7 @@ export interface CompanyFilters {
   search?: string;
   category?: string;
   industry?: string;
+  ownerScope?: "mine";
   page?: number;
   limit?: number;
 }
@@ -73,6 +74,7 @@ export function useCompanies(filters: CompanyFilters = {}) {
       if (filters.search) params.set("search", filters.search);
       if (filters.category) params.set("category", filters.category);
       if (filters.industry) params.set("industry", filters.industry);
+      if (filters.ownerScope === "mine") params.set("ownerScope", "mine");
       if (filters.page) params.set("page", String(filters.page));
       if (filters.limit) params.set("limit", String(filters.limit));
 
@@ -95,7 +97,7 @@ export function useCompanies(filters: CompanyFilters = {}) {
     } finally {
       setLoading(false);
     }
-  }, [filters.search, filters.category, filters.industry, filters.page, filters.limit]);
+  }, [filters.search, filters.category, filters.industry, filters.ownerScope, filters.page, filters.limit]);
 
   useEffect(() => {
     fetchCompanies();

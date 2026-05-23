@@ -11,6 +11,8 @@ export interface Contact {
   mobile: string | null;
   companyName: string | null;
   companyId: string | null;
+  ownerUserId?: string | null;
+  ownerUserName?: string | null;
   jobTitle: string | null;
   category: string;
   role?: string | null;
@@ -47,6 +49,7 @@ export interface ContactFilters {
   dealStageId?: string;
   isActive?: boolean;
   hasOutreach?: boolean;
+  ownerScope?: "mine";
   sortBy?: string;
   sortDir?: "asc" | "desc";
   page?: number;
@@ -77,6 +80,7 @@ export function useContacts(filters: ContactFilters = {}) {
       if (filters.companyId) params.set("companyId", filters.companyId);
       if (filters.jobTitle) params.set("jobTitle", filters.jobTitle);
       if (filters.role) params.set("role", filters.role);
+      if (filters.ownerScope === "mine") params.set("ownerScope", "mine");
       if (filters.city) params.set("city", filters.city);
       if (filters.state) params.set("state", filters.state);
       if (filters.regionId) params.set("regionId", filters.regionId);
@@ -107,6 +111,7 @@ export function useContacts(filters: ContactFilters = {}) {
     filters.companyId,
     filters.jobTitle,
     filters.role,
+    filters.ownerScope,
     filters.city,
     filters.state,
     filters.regionId,

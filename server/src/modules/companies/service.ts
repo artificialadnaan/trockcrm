@@ -33,7 +33,7 @@ async function uniqueSlug(tenantDb: TenantDb, base: string, excludeId?: string):
 
 export async function listCompanies(
   tenantDb: TenantDb,
-  options: { search?: string; category?: string; industry?: string; page?: number; limit?: number } = {}
+  options: { search?: string; category?: string; industry?: string; ownerUserId?: string; page?: number; limit?: number } = {}
 ) {
   const page = options.page ?? 1;
   const limit = options.limit ?? 50;
@@ -49,12 +49,20 @@ export async function listCompanies(
   if (options.industry) {
     conditions.push(eq(companies.industry, options.industry as any));
   }
+  if (options.ownerUserId) {
+    conditions.push(eq(companies.ownerId, options.ownerUserId));
+  }
 
   const where = and(...conditions);
 
   const rows = await tenantDb
-    .select()
+    .select({
+      ...getTableColumns(companies),
+      ownerUserId: companies.ownerId,
+      ownerUserName: users.displayName,
+    })
     .from(companies)
+    .leftJoin(users, eq(users.id, companies.ownerId))
     .where(where)
     .orderBy(asc(companies.name))
     .limit(limit)

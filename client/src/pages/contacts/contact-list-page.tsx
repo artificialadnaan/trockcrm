@@ -4,6 +4,7 @@ import { ArrowUpRight, Briefcase, ChevronLeft, ChevronRight, Mail, Phone, Plus, 
 import { PageHeader } from "@/components/layout/page-header";
 import { listPaginationIconButtonClassName } from "@/components/shared/list-pagination";
 import { MetricCard } from "@/components/shared/metric-card";
+import { OwnerLabel } from "@/components/shared/owner-label";
 import { ScopeToggle } from "@/components/shared/scope-toggle";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
@@ -33,6 +34,11 @@ const ROLE_OPTIONS = [
   { value: "procurement", label: "Procurement" },
 ] as const;
 
+const OWNER_SCOPE_OPTIONS = [
+  { value: "all", label: "All" },
+  { value: "mine", label: "Mine" },
+] as const;
+
 function initials(contact: Contact) {
   return [contact.firstName?.[0], contact.lastName?.[0]].filter(Boolean).join("").toUpperCase() || "?";
 }
@@ -53,6 +59,7 @@ export function ContactListPage() {
   const { contacts, pagination, loading, error } = useContacts(filters);
 
   const activeRole = (filters.role ?? "all") as (typeof ROLE_OPTIONS)[number]["value"];
+  const activeOwnerScope = (filters.ownerScope ?? "all") as (typeof OWNER_SCOPE_OPTIONS)[number]["value"];
   const totals = useMemo(() => {
     const primary = contacts.filter((contact) => contact.isPrimary).length;
     const untouched = contacts.filter((contact) => isUntouched(contact.lastTouchAt)).length;
@@ -101,6 +108,12 @@ export function ContactListPage() {
                 onChange={(value) => setFilters({ role: value === "all" ? undefined : value })}
                 ariaLabel="Contact role filter"
               />
+              <ScopeToggle
+                options={OWNER_SCOPE_OPTIONS}
+                value={activeOwnerScope}
+                onChange={(value) => setFilters({ ownerScope: value === "mine" ? "mine" : undefined })}
+                ariaLabel="Ownership filter"
+              />
             </div>
             <div className="flex items-center gap-2">
               <Button
@@ -130,7 +143,7 @@ export function ContactListPage() {
             <div className="rounded-xl border border-dashed border-slate-300 px-6 py-14 text-center">
               <Users className="mx-auto h-10 w-10 text-slate-300" />
               <p className="mt-3 text-base font-black uppercase text-slate-950">No contacts match this view</p>
-              <p className="mt-1 text-sm text-slate-500">Clear the search or switch the role filter.</p>
+              <p className="mt-1 text-sm text-slate-500">Clear the search or switch the filters.</p>
             </div>
           ) : (
             <Table>
@@ -167,6 +180,11 @@ export function ContactListPage() {
                             <p className="mt-1 truncate text-xs text-slate-500">
                               {[contact.jobTitle, contactLocation(contact)].filter(Boolean).join(" • ") || "No title recorded"}
                             </p>
+                            <OwnerLabel
+                              ownerId={contact.ownerUserId}
+                              ownerName={contact.ownerUserName}
+                              className="mt-2 max-w-full"
+                            />
                           </div>
                         </div>
                       </TableCell>
