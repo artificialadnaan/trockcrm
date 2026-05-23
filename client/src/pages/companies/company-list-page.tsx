@@ -4,6 +4,7 @@ import { ArrowUpRight, Building2, ChevronLeft, ChevronRight, Globe2, Plus, Searc
 import { PageHeader } from "@/components/layout/page-header";
 import { listPaginationIconButtonClassName } from "@/components/shared/list-pagination";
 import { MetricCard } from "@/components/shared/metric-card";
+import { OwnerAssignmentControl } from "@/components/shared/owner-assignment-control";
 import { OwnerLabel } from "@/components/shared/owner-label";
 import { ScopeToggle } from "@/components/shared/scope-toggle";
 import { USD, USD_COMPACT } from "@/components/shared/formatters";
@@ -11,7 +12,9 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
-import { useCompanies, type Company } from "@/hooks/use-companies";
+import { useAuth } from "@/lib/auth";
+import { useTaskAssignees } from "@/hooks/use-task-assignees";
+import { assignCompanyOwnerToMe, reassignCompanyOwner, useCompanies, type Company } from "@/hooks/use-companies";
 import { cn } from "@/lib/utils";
 
 const INDUSTRY_OPTIONS = [
@@ -56,12 +59,14 @@ function companyLocation(company: Company) {
 
 export function CompanyListPage() {
   const navigate = useNavigate();
+  const { user } = useAuth();
+  const { assignees, loading: assigneesLoading } = useTaskAssignees();
   const [search, setSearch] = useState("");
   const [industry, setIndustry] = useState<(typeof INDUSTRY_OPTIONS)[number]["value"]>("all");
   const [ownerScope, setOwnerScope] = useState<(typeof OWNER_SCOPE_OPTIONS)[number]["value"]>("all");
   const [page, setPage] = useState(1);
 
-  const { companies, pagination, loading, error } = useCompanies({
+  const { companies, pagination, loading, error, refetch } = useCompanies({
     search: search || undefined,
     industry: industry === "all" ? undefined : industry,
     ownerScope: ownerScope === "mine" ? "mine" : undefined,
@@ -197,7 +202,19 @@ export function CompanyListPage() {
                         </div>
                       </TableCell>
                       <TableCell>
-                        <OwnerLabel ownerId={company.ownerUserId} ownerName={company.ownerUserName} />
+                        <div className="flex flex-col gap-2">
+                          <OwnerLabel ownerId={company.ownerUserId} ownerName={company.ownerUserName} />
+                          <OwnerAssignmentControl
+                            ownerUserId={company.ownerUserId}
+                            currentUser={user}
+                            assignees={assignees}
+                            assigneesLoading={assigneesLoading}
+                            entityLabel="company"
+                            onAssignToMe={() => assignCompanyOwnerToMe(company.id)}
+                            onReassign={(ownerUserId) => reassignCompanyOwner(company.id, ownerUserId)}
+                            onAssigned={refetch}
+                          />
+                        </div>
                       </TableCell>
                       <TableCell className="text-right font-black tabular-nums">{company.propertiesCount ?? 0}</TableCell>
                       <TableCell className="text-right font-black tabular-nums">{company.contactsCount ?? company.contactCount}</TableCell>

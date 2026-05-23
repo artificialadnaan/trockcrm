@@ -30,6 +30,7 @@ import {
 } from "./merge-service.js";
 import { redactDealResponse, shouldIncludeHubspotId } from "../deals/redact.js";
 import { getDealById } from "../deals/service.js";
+import { assignContactOwnerToSelf, reassignContactOwner } from "../ownership/assignment-service.js";
 
 const router = Router();
 
@@ -289,6 +290,46 @@ router.patch("/:id", async (req, res, next) => {
   try {
     validateEmailIfPresent(req.body.email);
     const contact = await updateContact(req.tenantDb!, req.params.id, req.body);
+    await req.commitTransaction!();
+    res.json({ contact });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// POST /api/contacts/:id/assign-to-me — any CRM user may claim an unassigned contact
+router.post("/:id/assign-to-me", async (req, res, next) => {
+  try {
+    const contact = await assignContactOwnerToSelf(req.tenantDb!, req.params.id, {
+      id: req.user!.id,
+      role: req.user!.role,
+      activeOfficeId: req.user!.activeOfficeId,
+      officeId: req.user!.officeId,
+    });
+    await req.commitTransaction!();
+    res.json({ contact });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// PATCH /api/contacts/:id/owner — admin/director reassignment, including clearing owner
+router.patch("/:id/owner", async (req, res, next) => {
+  try {
+    if (!Object.prototype.hasOwnProperty.call(req.body ?? {}, "ownerUserId")) {
+      throw new AppError(400, "ownerUserId is required");
+    }
+    const ownerUserId = req.body.ownerUserId;
+    if (ownerUserId !== null && typeof ownerUserId !== "string") {
+      throw new AppError(400, "ownerUserId must be a user id or null");
+    }
+
+    const contact = await reassignContactOwner(req.tenantDb!, req.params.id, ownerUserId, {
+      id: req.user!.id,
+      role: req.user!.role,
+      activeOfficeId: req.user!.activeOfficeId,
+      officeId: req.user!.officeId,
+    });
     await req.commitTransaction!();
     res.json({ contact });
   } catch (err) {

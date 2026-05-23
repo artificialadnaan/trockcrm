@@ -4,14 +4,17 @@ import { ArrowUpRight, Briefcase, ChevronLeft, ChevronRight, Mail, Phone, Plus, 
 import { PageHeader } from "@/components/layout/page-header";
 import { listPaginationIconButtonClassName } from "@/components/shared/list-pagination";
 import { MetricCard } from "@/components/shared/metric-card";
+import { OwnerAssignmentControl } from "@/components/shared/owner-assignment-control";
 import { OwnerLabel } from "@/components/shared/owner-label";
 import { ScopeToggle } from "@/components/shared/scope-toggle";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
-import { useContacts, type Contact } from "@/hooks/use-contacts";
+import { useTaskAssignees } from "@/hooks/use-task-assignees";
+import { assignContactOwnerToMe, reassignContactOwner, useContacts, type Contact } from "@/hooks/use-contacts";
 import { useContactFilters } from "@/hooks/use-contact-filters";
+import { useAuth } from "@/lib/auth";
 import { contactLocation, formatPhone, fullName } from "@/lib/contact-utils";
 import { cn } from "@/lib/utils";
 
@@ -55,8 +58,10 @@ function isUntouched(value: string | null | undefined) {
 
 export function ContactListPage() {
   const navigate = useNavigate();
+  const { user } = useAuth();
+  const { assignees, loading: assigneesLoading } = useTaskAssignees();
   const { filters, setFilters, resetFilters } = useContactFilters();
-  const { contacts, pagination, loading, error } = useContacts(filters);
+  const { contacts, pagination, loading, error, refetch } = useContacts(filters);
 
   const activeRole = (filters.role ?? "all") as (typeof ROLE_OPTIONS)[number]["value"];
   const activeOwnerScope = (filters.ownerScope ?? "all") as (typeof OWNER_SCOPE_OPTIONS)[number]["value"];
@@ -185,6 +190,18 @@ export function ContactListPage() {
                               ownerName={contact.ownerUserName}
                               className="mt-2 max-w-full"
                             />
+                            <div className="mt-2">
+                              <OwnerAssignmentControl
+                                ownerUserId={contact.ownerUserId}
+                                currentUser={user}
+                                assignees={assignees}
+                                assigneesLoading={assigneesLoading}
+                                entityLabel="contact"
+                                onAssignToMe={() => assignContactOwnerToMe(contact.id)}
+                                onReassign={(ownerUserId) => reassignContactOwner(contact.id, ownerUserId)}
+                                onAssigned={refetch}
+                              />
+                            </div>
                           </div>
                         </div>
                       </TableCell>

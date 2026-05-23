@@ -106,6 +106,19 @@ export function useCompanies(filters: CompanyFilters = {}) {
   return { companies, pagination, loading, error, refetch: fetchCompanies };
 }
 
+export function assignCompanyOwnerToMe(companyId: string) {
+  return api<{ company: Company }>(`/companies/${companyId}/assign-to-me`, {
+    method: "POST",
+  });
+}
+
+export function reassignCompanyOwner(companyId: string, ownerUserId: string | null) {
+  return api<{ company: Company }>(`/companies/${companyId}/owner`, {
+    method: "PATCH",
+    json: { ownerUserId },
+  });
+}
+
 export function useCompanyDetail(companyId: string | undefined, options: OfficeRequestOptions = {}) {
   const [company, setCompany] = useState<Company | null>(null);
   const [loading, setLoading] = useState(true);

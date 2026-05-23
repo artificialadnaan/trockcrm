@@ -116,12 +116,16 @@ export async function requireFieldContractor(req: Request, _res: Response, next:
   }
 }
 
+export function isCrmUserRole(role: UserRole | string | null | undefined) {
+  return typeof role === "string" && role !== "field_contractor";
+}
+
 export function requireCrmUser(req: Request, _res: Response, next: NextFunction) {
   if (!req.user) {
     next(new AppError(401, "Authentication required"));
     return;
   }
-  if ((req.user.role as UserRole) === "field_contractor") {
+  if (!isCrmUserRole(req.user.role as UserRole)) {
     next(new AppError(403, "CRM access required"));
     return;
   }

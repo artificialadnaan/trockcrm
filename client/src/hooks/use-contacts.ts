@@ -131,6 +131,19 @@ export function useContacts(filters: ContactFilters = {}) {
   return { contacts, pagination, loading, error, refetch: fetchContacts };
 }
 
+export function assignContactOwnerToMe(contactId: string) {
+  return api<{ contact: Contact }>(`/contacts/${contactId}/assign-to-me`, {
+    method: "POST",
+  });
+}
+
+export function reassignContactOwner(contactId: string, ownerUserId: string | null) {
+  return api<{ contact: Contact }>(`/contacts/${contactId}/owner`, {
+    method: "PATCH",
+    json: { ownerUserId },
+  });
+}
+
 export function useContactDetail(contactId: string | undefined) {
   const [contact, setContact] = useState<Contact | null>(null);
   const [loading, setLoading] = useState(true);
