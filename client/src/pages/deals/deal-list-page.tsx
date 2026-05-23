@@ -43,17 +43,6 @@ const SCOPE_OPTIONS = [
   { value: "all", label: "All" },
 ] as const satisfies readonly ScopeToggleOption<PipelineScope>[];
 
-const STAGE_SLA_DAYS: Record<string, number> = {
-  opportunity: 7,
-  estimating: 10,
-  service_estimating: 10,
-  estimate_under_review: 4,
-  estimate_sent_to_client: 7,
-  contract: 10,
-  won: 0,
-  lost: 0,
-};
-
 const SLA_DRILLDOWN_PREVIEW_LIMIT = 1000;
 
 export type DashboardDealListFilter =

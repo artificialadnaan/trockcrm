@@ -25,7 +25,6 @@ describe("pipeline config loaders", () => {
           requiredFields: [],
           requiredDocuments: [],
           requiredApprovals: [],
-          staleThresholdDays: null,
           procoreStageMapping: null,
           color: null,
         },

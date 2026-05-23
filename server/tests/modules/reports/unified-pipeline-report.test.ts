@@ -75,6 +75,44 @@ describe("getUnifiedWorkflowOverview", () => {
         { workflow_route: "normal", deal_count: "6", total_value: "600000", stale_deal_count: "1" },
         { workflow_route: "service", deal_count: "4", total_value: "240000", stale_deal_count: "2" },
       ],
+      6: [
+        {
+          deal_id: "normal-stale",
+          deal_number: "TR-1",
+          deal_name: "Normal Stale",
+          workflow_route: "normal",
+          stage_slug: "estimating",
+          stage_entered_at: "2026-01-01T00:00:00.000Z",
+          on_hold: false,
+          on_hold_started_at: null,
+          on_hold_accumulated_seconds: "0",
+          on_hold_accumulated_seconds_at_stage_entry: "0",
+        },
+        {
+          deal_id: "service-stale-1",
+          deal_number: "TR-2",
+          deal_name: "Service Stale 1",
+          workflow_route: "service",
+          stage_slug: "service_estimating",
+          stage_entered_at: "2026-01-01T00:00:00.000Z",
+          on_hold: false,
+          on_hold_started_at: null,
+          on_hold_accumulated_seconds: "0",
+          on_hold_accumulated_seconds_at_stage_entry: "0",
+        },
+        {
+          deal_id: "service-stale-2",
+          deal_number: "TR-3",
+          deal_name: "Service Stale 2",
+          workflow_route: "service",
+          stage_slug: "service_estimating",
+          stage_entered_at: "2026-01-01T00:00:00.000Z",
+          on_hold: false,
+          on_hold_started_at: null,
+          on_hold_accumulated_seconds: "0",
+          on_hold_accumulated_seconds_at_stage_entry: "0",
+        },
+      ],
     });
 
     const result = await getUnifiedWorkflowOverview(tenantDb);
@@ -185,8 +223,7 @@ describe("getUnifiedWorkflowOverview", () => {
           company_name: "Alpha Roofing",
           workflow_route: "normal",
           validation_status: "ready",
-          age_in_days: "21",
-          stale_threshold_days: "14",
+          stage_entered_at: "2026-01-01T00:00:00.000Z",
         },
       ],
       5: [
@@ -197,8 +234,12 @@ describe("getUnifiedWorkflowOverview", () => {
           stage_name: "Opportunity",
           workflow_route: "normal",
           rep_name: "Jordan",
-          days_in_stage: "18",
-          stale_threshold_days: "14",
+          stage_slug: "bid_sent",
+          stage_entered_at: "2026-01-01T00:00:00.000Z",
+          on_hold: false,
+          on_hold_started_at: null,
+          on_hold_accumulated_seconds: "0",
+          on_hold_accumulated_seconds_at_stage_entry: "0",
           deal_value: "250000",
           bid_board_stage_slug: "bid_sent",
           bid_board_stage_status: "stalled",
@@ -216,8 +257,8 @@ describe("getUnifiedWorkflowOverview", () => {
         companyName: "Alpha Roofing",
         workflowRoute: "normal",
         validationStatus: "ready",
-        ageInDays: 21,
-        staleThresholdDays: 14,
+        ageInDays: expect.any(Number),
+        staleThresholdDays: 7,
       },
     ]);
     expect(result.staleDeals).toEqual([
@@ -228,8 +269,8 @@ describe("getUnifiedWorkflowOverview", () => {
         stageName: "Estimate Sent to Client",
         workflowRoute: "normal",
         repName: "Jordan",
-        daysInStage: 18,
-        staleThresholdDays: 14,
+        daysInStage: expect.any(Number),
+        staleThresholdDays: 30,
         dealValue: 250000,
         bidBoardStageSlug: "bid_sent",
         bidBoardStageStatus: "stalled",
@@ -245,12 +286,11 @@ describe("getUnifiedWorkflowOverview", () => {
     await getUnifiedWorkflowOverview(tenantDb);
 
     const staleDealsQuery = flattenSqlQuery(tenantDb.execute.mock.calls[5]?.[0]).toLowerCase();
-    const progressionQuery = flattenSqlQuery(tenantDb.execute.mock.calls[6]?.[0]).toLowerCase();
-    const disqualificationQuery = flattenSqlQuery(tenantDb.execute.mock.calls[8]?.[0]).toLowerCase();
+    const progressionQuery = flattenSqlQuery(tenantDb.execute.mock.calls[7]?.[0]).toLowerCase();
+    const disqualificationQuery = flattenSqlQuery(tenantDb.execute.mock.calls[9]?.[0]).toLowerCase();
 
-    expect(staleDealsQuery).toContain("left join pipeline_stage_config mirror_psc");
     expect(staleDealsQuery).toContain("coalesce(d.bid_board_stage_entered_at, d.stage_entered_at)");
-    expect(staleDealsQuery).toContain("coalesce(mirror_psc.stale_threshold_days, psc.stale_threshold_days)");
+    expect(staleDealsQuery).not.toContain("stale_threshold_days");
     expect(progressionQuery).toContain("min(display_order)");
     expect(progressionQuery).toContain("order by display_order asc");
     expect(disqualificationQuery).toContain("coalesce(l.disqualification_reason, 'other')");

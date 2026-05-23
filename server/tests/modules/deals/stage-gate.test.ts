@@ -38,7 +38,6 @@ interface MockStage {
   requiredFields: string[];
   requiredDocuments: string[];
   requiredApprovals: string[];
-  staleThresholdDays: number | null;
   procoreStageMapping: string | null;
   color: string | null;
 }
@@ -53,7 +52,6 @@ function makeStage(overrides: Partial<MockStage> & { slug: string }): MockStage 
     requiredFields: overrides.requiredFields ?? [],
     requiredDocuments: overrides.requiredDocuments ?? [],
     requiredApprovals: overrides.requiredApprovals ?? [],
-    staleThresholdDays: overrides.staleThresholdDays ?? null,
     procoreStageMapping: overrides.procoreStageMapping ?? null,
     color: overrides.color ?? null,
     ...overrides,

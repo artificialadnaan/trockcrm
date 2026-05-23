@@ -272,21 +272,35 @@ describe("Reports Service", () => {
   });
 
   describe("getStaleDeals", () => {
-    it("should return stale deal rows with numeric coercion", async () => {
+    it("returns only deals flagged by the hold-aware At Risk engine", async () => {
       const { getStaleDeals } = await import("../../../src/modules/reports/service.js");
       const tenantDb = createMockTenantDb([
         {
           deal_id: "d1", deal_number: "TR-2026-0001", deal_name: "Test Deal",
           stage_id: "s1", stage_name: "Estimating", assigned_rep_id: "r1",
-          rep_name: "Alice", stage_entered_at: "2026-01-01", days_in_stage: "45",
-          stale_threshold_days: "30", deal_value: "250000",
+          rep_name: "Alice", stage_entered_at: "2026-01-01",
+          deal_value: "250000", stage_slug: "estimating", workflow_route: "normal",
+          on_hold: false, on_hold_started_at: null,
+          on_hold_accumulated_seconds: "0", on_hold_accumulated_seconds_at_stage_entry: "0",
+        },
+        {
+          deal_id: "d2", deal_number: "TR-2026-0002", deal_name: "Held Deal",
+          stage_id: "s2", stage_name: "Estimating", assigned_rep_id: "r2",
+          rep_name: "Blake", stage_entered_at: "2026-01-01",
+          deal_value: "500000", stage_slug: "estimating", workflow_route: "normal",
+          on_hold: true, on_hold_started_at: "2026-01-02",
+          on_hold_accumulated_seconds: "0", on_hold_accumulated_seconds_at_stage_entry: "0",
         },
       ]);
-      const result = await getStaleDeals(tenantDb);
+      const result = await getStaleDeals(tenantDb, { now: "2026-02-01T00:00:00.000Z" });
       expect(result).toHaveLength(1);
-      expect(result[0].daysInStage).toBe(45);
-      expect(result[0].staleThresholdDays).toBe(30);
+      expect(result[0].dealId).toBe("d1");
+      expect(result[0].daysInStage).toBe(31);
+      expect(result[0].staleThresholdDays).toBe(14);
       expect(result[0].dealValue).toBe(250000);
+
+      const queryText = extractSqlText(tenantDb.execute.mock.calls[0][0]).toLowerCase();
+      expect(queryText).not.toContain("stale_threshold_days");
     });
 
     it("uses mirrored stage joins and Bid Board timing when a mirrored downstream slug is present", async () => {
@@ -301,9 +315,12 @@ describe("Reports Service", () => {
           assigned_rep_id: "r1",
           rep_name: "Alice",
           stage_entered_at: "2026-01-01",
-          days_in_stage: "45",
-          stale_threshold_days: "10",
           deal_value: "250000",
+          stage_slug: "bid_sent",
+          on_hold: false,
+          on_hold_started_at: null,
+          on_hold_accumulated_seconds: "0",
+          on_hold_accumulated_seconds_at_stage_entry: "0",
           workflow_route: "service",
           bid_board_stage_slug: "bid_sent",
           bid_board_stage_status: "stalled",
@@ -311,14 +328,13 @@ describe("Reports Service", () => {
         },
       ]);
 
-      const result = await getStaleDeals(tenantDb);
+      const result = await getStaleDeals(tenantDb, { now: "2026-02-01T00:00:00.000Z" });
 
       expect(result[0].stageName).toBe("Estimate Sent to Client");
 
       const queryText = extractSqlText(tenantDb.execute.mock.calls[0][0]).toLowerCase();
-      expect(queryText).toContain("left join pipeline_stage_config mirror_psc");
       expect(queryText).toContain("coalesce(d.bid_board_stage_entered_at, d.stage_entered_at)");
-      expect(queryText).toContain("coalesce(mirror_psc.stale_threshold_days, psc.stale_threshold_days)");
+      expect(queryText).not.toContain("stale_threshold_days");
     });
 
     it("filters mirrored terminal stage slugs out of stale deal results", async () => {
@@ -394,8 +410,7 @@ describe("Reports Service", () => {
               company_name: "North Star",
               workflow_route: "normal",
               validation_status: "ready",
-              age_in_days: "19",
-              stale_threshold_days: "14",
+              stage_entered_at: "2026-01-01T00:00:00.000Z",
             }],
           })
           .mockResolvedValueOnce({
@@ -404,16 +419,21 @@ describe("Reports Service", () => {
               deal_number: "TR-1001",
               deal_name: "Bid Board Mirror",
               stage_name: "Opportunity",
+              stage_slug: "estimating",
+              stage_entered_at: "2026-01-01T00:00:00.000Z",
               workflow_route: "service",
               rep_name: "Avery Rep",
-              days_in_stage: "22",
-              stale_threshold_days: "14",
+              on_hold: false,
+              on_hold_started_at: null,
+              on_hold_accumulated_seconds: "0",
+              on_hold_accumulated_seconds_at_stage_entry: "0",
               deal_value: "275000",
               bid_board_stage_slug: "estimating",
               bid_board_stage_status: "blocked",
               region_classification: "Texas / Southwest",
             }],
           })
+          .mockResolvedValueOnce({ rows: [] })
           .mockResolvedValueOnce({
             rows: [{
               workflow_bucket: "crm_owned",
@@ -478,9 +498,9 @@ describe("Reports Service", () => {
         regionClassification: "Texas / Southwest",
       });
 
-      const progressionQuery = extractSqlText(tenantDb.execute.mock.calls[6][0]).toLowerCase();
-      const mirrorQuery = extractSqlText(tenantDb.execute.mock.calls[7][0]).toLowerCase();
-      const disqualificationQuery = extractSqlText(tenantDb.execute.mock.calls[8][0]).toLowerCase();
+      const progressionQuery = extractSqlText(tenantDb.execute.mock.calls[7][0]).toLowerCase();
+      const mirrorQuery = extractSqlText(tenantDb.execute.mock.calls[8][0]).toLowerCase();
+      const disqualificationQuery = extractSqlText(tenantDb.execute.mock.calls[9][0]).toLowerCase();
 
       expect(progressionQuery).toContain("workflow_bucket");
       expect(progressionQuery).toContain("opportunity");
@@ -492,9 +512,8 @@ describe("Reports Service", () => {
       expect(disqualificationQuery).toContain("disqualification_reason");
       expect(disqualificationQuery).toContain("pipeline_type");
       const staleDealQuery = extractSqlText(tenantDb.execute.mock.calls[5][0]).toLowerCase();
-      expect(staleDealQuery).toContain("left join pipeline_stage_config mirror_psc");
       expect(staleDealQuery).toContain("coalesce(d.bid_board_stage_entered_at, d.stage_entered_at)");
-      expect(staleDealQuery).toContain("coalesce(mirror_psc.stale_threshold_days, psc.stale_threshold_days)");
+      expect(staleDealQuery).not.toContain("stale_threshold_days");
       expect(staleDealQuery).toContain("coalesce(d.bid_board_stage_slug, psc.slug)");
       expect(staleDealQuery).toContain("not in");
       expect(staleDealQuery).toContain("closed_won");
@@ -505,6 +524,7 @@ describe("Reports Service", () => {
       const { getUnifiedWorkflowOverview } = await import("../../../src/modules/reports/service.js");
       const tenantDb = {
         execute: vi.fn()
+          .mockResolvedValueOnce({ rows: [] })
           .mockResolvedValueOnce({ rows: [] })
           .mockResolvedValueOnce({ rows: [] })
           .mockResolvedValueOnce({ rows: [] })
@@ -524,7 +544,7 @@ describe("Reports Service", () => {
 
       await getUnifiedWorkflowOverview(tenantDb);
 
-      const progressionQuery = extractSqlText(tenantDb.execute.mock.calls[6][0]).toLowerCase();
+      const progressionQuery = extractSqlText(tenantDb.execute.mock.calls[7][0]).toLowerCase();
       expect(progressionQuery).toContain("min(display_order)");
       expect(progressionQuery).toContain("order by display_order asc");
     });

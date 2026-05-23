@@ -112,7 +112,8 @@ describe("daily task generation worker", () => {
         };
       }
 
-      if (sql.includes("FROM office_beta.leads l") && sql.includes("psc.stale_threshold_days")) {
+      if (sql.includes("FROM office_beta.leads l") && sql.includes("psc.workflow_family = 'lead'")) {
+        expect(sql).not.toContain("stale_threshold_days");
         return {
           rows: [
             {
@@ -120,9 +121,8 @@ describe("daily task generation worker", () => {
               lead_name: "Duncanville Opportunity",
               assigned_rep_id: "user-1",
               stage_entered_at: "2026-03-15T00:00:00.000Z",
+              stage_slug: "qualified_lead",
               stage_name: "Qualified",
-              stale_threshold_days: 10,
-              days_in_stage: 20,
             },
           ],
         };

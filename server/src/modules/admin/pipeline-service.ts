@@ -94,7 +94,6 @@ export async function updatePipelineStage(
   input: Partial<{
     name: string;
     color: string;
-    staleThresholdDays: number | null;
     procoreStageMapping: string | null;
     requiredFields: string[];
     requiredDocuments: string[];
@@ -113,7 +112,6 @@ export async function updatePipelineStage(
   const updates: Record<string, unknown> = {};
   if (input.name !== undefined) updates.name = input.name;
   if (input.color !== undefined) updates.color = input.color;
-  if (input.staleThresholdDays !== undefined) updates.staleThresholdDays = input.staleThresholdDays;
   if (input.procoreStageMapping !== undefined) updates.procoreStageMapping = input.procoreStageMapping;
   if (input.requiredFields !== undefined) {
     updates.requiredFields = normalizeStageGateValues(

@@ -16,7 +16,6 @@ vi.mock("@/hooks/use-admin-pipeline", () => ({
         requiredFields: ["estimatedOpportunityValue", "qualification.stakeholderRole"],
         requiredDocuments: [],
         requiredApprovals: [],
-        staleThresholdDays: 3,
         procoreStageMapping: null,
         color: "#b45309",
       },
@@ -53,5 +52,7 @@ describe("PipelineConfigPage", () => {
     expect(html).toContain("Lead");
     expect(html).toContain("Estimated Opportunity Value");
     expect(html).toContain("Stakeholder Role");
+    expect(html).not.toContain("Stale Threshold");
+    expect(html).not.toContain("Stale After");
   });
 });
