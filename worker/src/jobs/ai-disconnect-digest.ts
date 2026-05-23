@@ -1,4 +1,106 @@
+import { getDealAtRiskResult, type WorkflowRoute } from "@trock-crm/shared/types";
 import { pool } from "../db.js";
+
+type AiDigestAtRiskRow = {
+  id: string;
+  assigned_rep_name: string | null;
+  stage_slug: string | null;
+  workflow_route: string | null;
+  stage_entered_at: string | Date | null;
+  on_hold: boolean | null;
+  on_hold_started_at: string | Date | null;
+  on_hold_accumulated_seconds: string | number | bigint | null;
+  on_hold_accumulated_seconds_at_stage_entry: string | number | bigint | null;
+};
+
+type DigestClusterRow = {
+  cluster_key?: string | null;
+  title: string;
+  deal_count: string | number | null;
+};
+
+type DigestHotspotRow = {
+  hotspot_key?: string | null;
+  hotspot_label: string;
+  disconnect_count: string | number | null;
+  critical_count: string | number | null;
+};
+
+function normalizeWorkflowRoute(value: string | null | undefined): WorkflowRoute {
+  return value === "service" ? "service" : "normal";
+}
+
+function numberOrNull(value: string | number | bigint | null | undefined): number | null {
+  if (value == null) return null;
+  const numericValue = Number(value);
+  return Number.isFinite(numericValue) ? numericValue : null;
+}
+
+function numberValue(value: string | number | bigint | null | undefined): number {
+  return numberOrNull(value) ?? 0;
+}
+
+function getDigestAtRiskRows(rows: AiDigestAtRiskRow[], now: Date): AiDigestAtRiskRow[] {
+  return rows.filter((row) =>
+    getDealAtRiskResult(
+      {
+        stageSlug: row.stage_slug,
+        workflowRoute: normalizeWorkflowRoute(row.workflow_route),
+        stageEnteredAt: row.stage_entered_at,
+        onHold: row.on_hold,
+        onHoldStartedAt: row.on_hold_started_at,
+        onHoldAccumulatedSeconds: numberOrNull(row.on_hold_accumulated_seconds),
+        onHoldAccumulatedSecondsAtStageEntry: numberOrNull(
+          row.on_hold_accumulated_seconds_at_stage_entry
+        ),
+      },
+      "director",
+      now
+    ).isAtRisk
+  );
+}
+
+function getStaleStageCluster(rows: AiDigestAtRiskRow[]): DigestClusterRow | null {
+  return rows.length > 0
+    ? { cluster_key: "execution_stall", title: "SLA / stage momentum", deal_count: rows.length }
+    : null;
+}
+
+function getTopCluster(rows: Array<DigestClusterRow | null | undefined>): DigestClusterRow | null {
+  return (
+    rows
+      .filter((row): row is DigestClusterRow => Boolean(row))
+      .sort(
+        (left, right) =>
+          numberValue(right.deal_count) - numberValue(left.deal_count) ||
+          left.title.localeCompare(right.title)
+      )[0] ?? null
+  );
+}
+
+function getTopAtRiskHotspot(rows: AiDigestAtRiskRow[]): DigestHotspotRow | null {
+  const counts = new Map<string, number>();
+  for (const row of rows) {
+    const label = row.assigned_rep_name ?? "Unassigned";
+    counts.set(label, (counts.get(label) ?? 0) + 1);
+  }
+  const [label, count] =
+    Array.from(counts.entries()).sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))[0] ?? [];
+  return label ? { hotspot_label: label, disconnect_count: count, critical_count: 0 } : null;
+}
+
+function getTopHotspot(rows: Array<DigestHotspotRow | null | undefined>): DigestHotspotRow | null {
+  return (
+    rows
+      .filter((row): row is DigestHotspotRow => Boolean(row))
+      .sort(
+        (left, right) =>
+          numberValue(right.critical_count) - numberValue(left.critical_count) ||
+          numberValue(right.disconnect_count) - numberValue(left.disconnect_count) ||
+          left.hotspot_label.localeCompare(right.hotspot_label)
+      )[0] ?? null
+  );
+}
 
 export async function runAiDisconnectDigest(): Promise<void> {
   console.log("[Worker:ai-disconnect-digest] Starting digest generation...");
@@ -30,6 +132,42 @@ export async function runAiDisconnectDigest(): Promise<void> {
       try {
         await client.query("BEGIN");
 
+        const atRiskCandidateRes = await client.query(
+          `
+            SELECT
+              d.id,
+              COALESCE(u.display_name, 'Unassigned')::text AS assigned_rep_name,
+              COALESCE(d.bid_board_stage_slug, psc.slug) AS stage_slug,
+              d.workflow_route,
+              COALESCE(
+                d.bid_board_stage_entered_at,
+                d.stage_entered_at,
+                latest_current_stage_entered_at.entered_at
+              ) AS stage_entered_at,
+              d.on_hold,
+              d.on_hold_started_at,
+              d.on_hold_accumulated_seconds,
+              d.on_hold_accumulated_seconds_at_stage_entry
+            FROM ${schemaName}.deals d
+            JOIN public.pipeline_stage_config psc ON psc.id = d.stage_id
+            LEFT JOIN public.users u ON u.id = d.assigned_rep_id
+            LEFT JOIN LATERAL (
+              SELECT entered_at
+              FROM ${schemaName}.deal_stage_history dsh
+              WHERE dsh.deal_id = d.id
+                AND dsh.stage_id = d.stage_id
+                AND dsh.exited_at IS NULL
+              ORDER BY dsh.entered_at DESC
+              LIMIT 1
+            ) latest_current_stage_entered_at ON TRUE
+            WHERE d.is_active = TRUE
+              AND psc.is_terminal = FALSE
+              AND COALESCE(d.is_test_data, false) = false
+          `
+        );
+        const staleStageRows = getDigestAtRiskRows(atRiskCandidateRes.rows, new Date());
+        const staleStageCount = staleStageRows.length;
+
         const summaryRes = await client.query(
           `
             WITH latest_procore_sync AS (
@@ -44,9 +182,7 @@ export async function runAiDisconnectDigest(): Promise<void> {
             base AS (
               SELECT
                 d.id,
-                d.stage_entered_at,
                 d.proposal_status,
-                psc.stale_threshold_days,
                 COALESCE(jsonb_array_length(psc.required_documents), 0) AS required_document_count,
                 COALESCE((
                   SELECT COUNT(DISTINCT f.category)::int
@@ -81,11 +217,6 @@ export async function runAiDisconnectDigest(): Promise<void> {
             )
             SELECT
               (
-                COUNT(*) FILTER (
-                  WHERE stale_threshold_days > 0
-                    AND stage_entered_at IS NOT NULL
-                    AND EXTRACT(EPOCH FROM (NOW() - stage_entered_at)) / 86400 > stale_threshold_days
-                ) +
                 COUNT(*) FILTER (WHERE open_task_count = 0) +
                 COUNT(*) FILTER (WHERE inbound_without_followup_count > 0) +
                 COUNT(*) FILTER (WHERE proposal_status = 'revision_requested') +
@@ -105,7 +236,8 @@ export async function runAiDisconnectDigest(): Promise<void> {
         );
 
         const summary = summaryRes.rows[0];
-        if (!summary || Number(summary.total_disconnects ?? 0) === 0) {
+        const totalDisconnects = Number(summary?.total_disconnects ?? 0) + staleStageCount;
+        if (!summary || totalDisconnects === 0) {
           await client.query("COMMIT");
           continue;
         }
@@ -175,47 +307,65 @@ export async function runAiDisconnectDigest(): Promise<void> {
                 AND pss.entity_type IN ('project', 'bid')
               ORDER BY pss.crm_entity_id, pss.updated_at DESC
             ),
-            disconnect_rows AS (
+            base AS (
               SELECT
                 COALESCE(u.display_name, 'Unassigned')::text AS hotspot_key,
                 COALESCE(u.display_name, 'Unassigned')::text AS hotspot_label,
-                CASE
-                  WHEN psc.stale_threshold_days > 0
-                    AND d.stage_entered_at IS NOT NULL
-                    AND EXTRACT(EPOCH FROM (NOW() - d.stage_entered_at)) / 86400 > psc.stale_threshold_days
-                  THEN 1 ELSE 0
-                END::int AS disconnect_count,
-                CASE
-                  WHEN d.proposal_status = 'revision_requested'
-                    OR COALESCE((
-                      SELECT COUNT(*)::int
-                      FROM ${schemaName}.emails e
-                      WHERE e.deal_id = d.id
-                        AND e.direction = 'inbound'
-                        AND NOT EXISTS (
-                          SELECT 1
-                          FROM ${schemaName}.activities a
-                          WHERE a.deal_id = e.deal_id
-                            AND a.occurred_at >= e.sent_at
-                            AND a.type IN ('call', 'email', 'meeting', 'note')
-                        )
-                    ), 0) > 0
-                    OR (
-                      COALESCE(jsonb_array_length(psc.required_documents), 0) > (
-                        SELECT COUNT(DISTINCT f.category)::int
-                        FROM ${schemaName}.files f
-                        WHERE f.deal_id = d.id
-                          AND f.is_active = TRUE
-                      )
+                d.proposal_status,
+                COALESCE((
+                  SELECT COUNT(*)::int
+                  FROM ${schemaName}.tasks t
+                  WHERE t.deal_id = d.id
+                    AND t.status IN ('pending', 'in_progress', 'waiting_on', 'blocked')
+                ), 0) AS open_task_count,
+                COALESCE((
+                  SELECT COUNT(*)::int
+                  FROM ${schemaName}.emails e
+                  WHERE e.deal_id = d.id
+                    AND e.direction = 'inbound'
+                    AND NOT EXISTS (
+                      SELECT 1
+                      FROM ${schemaName}.activities a
+                      WHERE a.deal_id = e.deal_id
+                        AND a.occurred_at >= e.sent_at
+                        AND a.type IN ('call', 'email', 'meeting', 'note')
                     )
-                    OR COALESCE(lps.sync_status, 'synced') != 'synced'
-                  THEN 1 ELSE 0
-                END::int AS critical_count
+                ), 0) AS inbound_without_followup_count,
+                COALESCE(jsonb_array_length(psc.required_documents), 0) AS required_document_count,
+                COALESCE((
+                  SELECT COUNT(DISTINCT f.category)::int
+                  FROM ${schemaName}.files f
+                  WHERE f.deal_id = d.id
+                    AND f.is_active = TRUE
+                ), 0) AS present_document_count,
+                lps.sync_status AS procore_sync_status
               FROM ${schemaName}.deals d
               JOIN public.pipeline_stage_config psc ON psc.id = d.stage_id
               LEFT JOIN public.users u ON u.id = d.assigned_rep_id
               LEFT JOIN latest_procore_sync lps ON lps.deal_id = d.id
               WHERE d.is_active = TRUE
+            ),
+            disconnect_rows AS (
+              SELECT
+                hotspot_key,
+                hotspot_label,
+                (
+                  CASE WHEN open_task_count = 0 THEN 1 ELSE 0 END +
+                  CASE WHEN inbound_without_followup_count > 0 THEN 1 ELSE 0 END +
+                  CASE WHEN proposal_status = 'revision_requested' THEN 1 ELSE 0 END +
+                  CASE WHEN required_document_count > present_document_count THEN 1 ELSE 0 END +
+                  CASE WHEN COALESCE(procore_sync_status, 'synced') != 'synced' THEN 1 ELSE 0 END
+                )::int AS disconnect_count,
+                (
+                  CASE
+                    WHEN proposal_status = 'revision_requested'
+                      OR inbound_without_followup_count > 0
+                      OR required_document_count > present_document_count
+                      OR COALESCE(procore_sync_status, 'synced') != 'synced'
+                    THEN 1 ELSE 0
+                  END
+                )::int AS critical_count
+              FROM base
             )
             SELECT
               hotspot_key,
@@ -229,14 +379,21 @@ export async function runAiDisconnectDigest(): Promise<void> {
           `
         );
 
-        const topCluster = clusterRes.rows[0];
-        const hotspot = hotspotRes.rows[0];
+        const topCluster = getTopCluster([
+          clusterRes.rows[0] as DigestClusterRow | undefined,
+          getStaleStageCluster(staleStageRows),
+        ]);
+        const engineHotspot = getTopAtRiskHotspot(staleStageRows);
+        const hotspot = getTopHotspot([
+          hotspotRes.rows[0] as DigestHotspotRow | undefined,
+          engineHotspot,
+        ]);
         const recipients = await client.query(
           "SELECT id FROM public.users WHERE office_id = $1 AND role IN ('director', 'admin') AND is_active = true",
           [office.id]
         );
 
-        const title = `AI Disconnect Digest: ${Number(summary.total_disconnects)} open issues in ${office.name}`;
+        const title = `AI Disconnect Digest: ${totalDisconnects} open issues in ${office.name}`;
         const focus =
           Number(summary.bid_board_sync_drifts ?? 0) > 0
             ? "prioritize bid board reconciliation before follow-through gaps spread"

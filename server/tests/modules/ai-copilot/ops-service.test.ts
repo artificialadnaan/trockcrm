@@ -262,41 +262,12 @@ describe("AI ops service", () => {
   });
 
   it("returns a sales process disconnect dashboard", async () => {
+    const now = new Date("2026-04-16T12:00:00.000Z");
     const tenantDb = {
       execute: vi
         .fn()
         .mockResolvedValueOnce({
-          rows: [
-            {
-              active_deals: 18,
-              total_disconnects: 9,
-              stale_stage_count: 3,
-              missing_next_task_count: 2,
-              inbound_without_followup_count: 1,
-              revision_loop_count: 2,
-              estimating_gate_gap_count: 1,
-              procore_bid_board_drift_count: 2,
-            },
-          ],
-        })
-        .mockResolvedValueOnce({
-          rows: [
-            {
-              disconnect_type: "stale_stage",
-              disconnect_label: "Stalled in stage",
-              disconnect_count: 3,
-            },
-            {
-              disconnect_type: "revision_loop",
-              disconnect_label: "Revision loop",
-              disconnect_count: 2,
-            },
-            {
-              disconnect_type: "procore_bid_board_drift",
-              disconnect_label: "Bid board sync drift",
-              disconnect_count: 2,
-            },
-          ],
+          rows: [{ active_deals: 18 }],
         })
         .mockResolvedValueOnce({
           rows: [
@@ -304,20 +275,28 @@ describe("AI ops service", () => {
               id: "deal-1",
               deal_number: "D-1001",
               deal_name: "Alpha Plaza",
+              company_id: "company-1",
+              company_name: "Acme Property Group",
+              stage_key: "estimating",
+              stage_slug: "estimating",
+              workflow_route: "normal",
               stage_name: "Estimating",
               estimating_substage: "under_review",
+              assigned_rep_id: "rep-1",
               assigned_rep_name: "Morgan Rep",
-              disconnect_type: "stale_stage",
-              disconnect_label: "Stalled in stage",
-              disconnect_severity: "high",
-              disconnect_summary: "Estimating has exceeded its stale threshold.",
-              disconnect_details: "Deal has been in Estimating for 16 days with no closed-loop movement.",
-              age_days: 16,
+              stage_entered_at: "2026-03-01T12:00:00.000Z",
+              on_hold: false,
+              on_hold_started_at: null,
+              on_hold_accumulated_seconds: 0,
+              on_hold_accumulated_seconds_at_stage_entry: 0,
               open_task_count: 0,
               inbound_without_followup_count: 1,
               last_activity_at: "2026-04-10T10:00:00.000Z",
               latest_customer_email_at: "2026-04-12T12:00:00.000Z",
+              required_document_count: 2,
+              present_document_count: 1,
               proposal_status: "revision_requested",
+              procore_project_id: "procore-1",
               procore_sync_status: "conflict",
               procore_sync_direction: "bidirectional",
               procore_last_synced_at: "2026-04-09T10:00:00.000Z",
@@ -328,27 +307,33 @@ describe("AI ops service", () => {
               id: "deal-2",
               deal_number: "D-1002",
               deal_name: "Beta Tower",
+              company_id: "company-2",
+              company_name: "Beta Holdings",
+              stage_key: "bid-sent",
+              stage_slug: "bid-sent",
+              workflow_route: "normal",
               stage_name: "Bid Sent",
               estimating_substage: "sent_to_client",
+              assigned_rep_id: "rep-2",
               assigned_rep_name: "Jordan Rep",
-              disconnect_type: "procore_bid_board_drift",
-              disconnect_label: "Bid board sync drift",
-              disconnect_severity: "critical",
-              disconnect_summary: "Procore bid board and CRM stage state are out of sync.",
-              disconnect_details: "Bid board recorded a newer project/bid state than CRM currently reflects.",
-              age_days: 3,
+              stage_entered_at: "2026-04-15T12:00:00.000Z",
+              on_hold: false,
+              on_hold_started_at: null,
+              on_hold_accumulated_seconds: 0,
+              on_hold_accumulated_seconds_at_stage_entry: 0,
               open_task_count: 1,
               inbound_without_followup_count: 0,
               last_activity_at: "2026-04-13T11:00:00.000Z",
               latest_customer_email_at: null,
+              required_document_count: 1,
+              present_document_count: 1,
               proposal_status: "sent",
+              procore_project_id: "procore-2",
               procore_sync_status: "conflict",
               procore_sync_direction: "bidirectional",
               procore_last_synced_at: "2026-04-11T11:00:00.000Z",
               procore_sync_updated_at: "2026-04-14T08:00:00.000Z",
               procore_drift_reason: "Procore reported a newer update than the CRM stage map.",
-              company_id: "company-2",
-              company_name: "Beta Holdings",
             },
           ],
         })
@@ -414,15 +399,15 @@ describe("AI ops service", () => {
         }),
     };
 
-    const result = await getSalesProcessDisconnectDashboard(tenantDb as any, { limit: 25 });
+    const result = await getSalesProcessDisconnectDashboard(tenantDb as any, { limit: 25, now });
 
     expect(result.summary).toEqual({
       activeDeals: 18,
-      totalDisconnects: 11,
-      staleStageCount: 3,
-      missingNextTaskCount: 2,
+      totalDisconnects: 7,
+      staleStageCount: 1,
+      missingNextTaskCount: 1,
       inboundWithoutFollowupCount: 1,
-      revisionLoopCount: 2,
+      revisionLoopCount: 1,
       estimatingGateGapCount: 1,
       procoreBidBoardDriftCount: 2,
     });
@@ -437,19 +422,34 @@ describe("AI ops service", () => {
     });
     expect(result.byType).toEqual([
       {
-        disconnectType: "stale_stage",
-        label: "Stalled in stage",
-        count: 3,
+        disconnectType: "procore_bid_board_drift",
+        label: "Bid board sync drift",
+        count: 2,
+      },
+      {
+        disconnectType: "estimating_gate_gap",
+        label: "Estimating gate gap",
+        count: 1,
+      },
+      {
+        disconnectType: "inbound_without_followup",
+        label: "Inbound with no follow-up",
+        count: 1,
+      },
+      {
+        disconnectType: "missing_next_task",
+        label: "Missing next task",
+        count: 1,
       },
       {
         disconnectType: "revision_loop",
         label: "Revision loop",
-        count: 2,
+        count: 1,
       },
       {
-        disconnectType: "procore_bid_board_drift",
-        label: "Bid board sync drift",
-        count: 2,
+        disconnectType: "stale_stage",
+        label: "Stalled in stage",
+        count: 1,
       },
     ]);
     expect(result.rows[0]).toMatchObject({
@@ -457,14 +457,26 @@ describe("AI ops service", () => {
       dealNumber: "D-1001",
       dealName: "Alpha Plaza",
       stageName: "Estimating",
-      disconnectType: "stale_stage",
-      disconnectSeverity: "high",
+      disconnectType: "estimating_gate_gap",
+      disconnectSeverity: "critical",
       openTaskCount: 0,
       inboundWithoutFollowupCount: 1,
-      procoreSyncStatus: "conflict",
-      procoreDriftReason: "Bid board stage changed without CRM reconciliation.",
     });
-    expect(result.rows[1]).toMatchObject({
+    expect(result.rows).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        id: "deal-2",
+        disconnectType: "procore_bid_board_drift",
+        procoreSyncStatus: "conflict",
+        procoreSyncDirection: "bidirectional",
+        companyName: "Beta Holdings",
+      }),
+      expect.objectContaining({
+        id: "deal-1",
+        disconnectType: "stale_stage",
+        ageDays: 46,
+      }),
+    ]));
+    expect(result.rows.find((row) => row.id === "deal-2")).toMatchObject({
       disconnectType: "procore_bid_board_drift",
       procoreSyncStatus: "conflict",
       procoreSyncDirection: "bidirectional",
@@ -472,23 +484,23 @@ describe("AI ops service", () => {
     });
     const executedSql = tenantDb.execute.mock.calls.map(([query]: [unknown]) => extractSqlText(query)).join("\n");
     expect(executedSql).toContain("psc.is_terminal = FALSE");
-    expect(result.clusters).toEqual([
+    expect(result.clusters).toEqual(expect.arrayContaining([
       expect.objectContaining({
         clusterKey: "bid_board_sync_break",
         title: "Bid board / CRM stage drift",
-        dealCount: 1,
-        disconnectCount: 1,
+        dealCount: 2,
+        disconnectCount: 2,
         includesProcoreBidBoard: true,
       }),
       expect.objectContaining({
         clusterKey: "execution_stall",
         dealCount: 1,
       }),
-    ]);
+    ]));
     expect(result.trends.reps).toEqual(expect.arrayContaining([
       expect.objectContaining({
         key: "Morgan Rep",
-        disconnectCount: 1,
+        disconnectCount: 6,
         recentInterventionCount: 1,
       }),
       expect.objectContaining({
@@ -497,6 +509,11 @@ describe("AI ops service", () => {
       }),
     ]));
     expect(result.trends.companies).toEqual([
+      expect.objectContaining({
+        key: "company-1",
+        label: "Acme Property Group",
+        disconnectCount: 6,
+      }),
       expect.objectContaining({
         key: "company-2",
         label: "Beta Holdings",
@@ -508,8 +525,8 @@ describe("AI ops service", () => {
       clearedAfterIntervention30d: 1,
       stillOpenAfterIntervention30d: 1,
       unresolvedEscalationsOpen: 0,
-      repeatIssueDealsOpen: 0,
-      repeatClusterDealsOpen: 0,
+      repeatIssueDealsOpen: 1,
+      repeatClusterDealsOpen: 1,
       interventionCoverageRate: 0.5,
       clearanceRate30d: 0.5,
     });
@@ -521,7 +538,7 @@ describe("AI ops service", () => {
       bestOverallAction: "resolve",
       bestOverallClearanceRate: 1,
     });
-    expect(result.playbooks).toEqual([
+    expect(result.playbooks).toEqual(expect.arrayContaining([
       expect.objectContaining({
         clusterKey: "bid_board_sync_break",
         bestAction: "escalate",
@@ -532,16 +549,16 @@ describe("AI ops service", () => {
         bestAction: "resolve",
         recommendedAction: "resolve",
       }),
-    ]);
+    ]));
     expect(result.narrative).toEqual({
       headline: "Bid board / CRM stage drift is the dominant disconnect this week.",
-      summary: "11 disconnects are open across 18 active deals. Critical gaps are concentrated in bid board drift, revision loops, missing estimating artifacts, inbound follow-through gaps.",
-      whatChanged: "Beta Holdings and the Bid Sent stage are showing the heaviest concentration of current disconnects, with Jordan Rep carrying the most urgent open issue load.",
+      summary: "7 disconnects are open across 18 active deals. Critical gaps are concentrated in bid board drift, revision loops, missing estimating artifacts, inbound follow-through gaps.",
+      whatChanged: "Acme Property Group and the Estimating stage are showing the heaviest concentration of current disconnects, with Morgan Rep carrying the most urgent open issue load.",
       adminFocus: "Prioritize bid board reconciliation and unresolved estimating handoffs before follow-through gaps spread into more active deals.",
       recommendedActions: [
         "Escalate Bid board / CRM stage drift cases first, because they are both critical and concentrated.",
         "Resolve execution stall issues next, especially where no next task exists on active estimating deals.",
-        "Use the action queue to clear repeated disconnects on Beta Holdings before they reopen.",
+        "Use the action queue to clear repeated disconnects on Acme Property Group before they reopen.",
       ],
     });
   });

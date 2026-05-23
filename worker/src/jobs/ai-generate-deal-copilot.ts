@@ -1,4 +1,5 @@
 import { drizzle } from "drizzle-orm/node-postgres";
+import type { UserRole } from "@trock-crm/shared/types";
 import * as schema from "@trock-crm/shared/schema";
 import { pool } from "../db.js";
 import { deadJob } from "../queue.js";
@@ -7,6 +8,16 @@ const SERVER_AI_COPILOT_SERVICE_MODULES = [
   "../../../server/dist/modules/ai-copilot/service.js",
   "../../../server/src/modules/ai-copilot/service.js",
 ] as const;
+
+function isUserRole(value: string | undefined): value is UserRole {
+  return (
+    value === "admin" ||
+    value === "director" ||
+    value === "rep" ||
+    value === "construction" ||
+    value === "field_contractor"
+  );
+}
 
 async function importFirstAvailable<T>(paths: readonly string[]): Promise<T> {
   let lastError: unknown;
@@ -26,6 +37,7 @@ export async function runAiGenerateDealCopilot(payload: {
   dealId: string;
   reason?: string;
   requestedBy: string;
+  requestedByRole?: string;
 }, officeId: string | null) {
   if (!payload?.requestedBy) {
     const error = `[Worker:ai-generate-deal-copilot] Missing requestedBy for dealId=${payload?.dealId ?? "unknown"}`;
@@ -59,18 +71,19 @@ export async function runAiGenerateDealCopilot(payload: {
     const module = await importFirstAvailable<{
       generateDealCopilotPacket: (
         tenantDb: unknown,
-        input: { dealId: string; forceRegenerate?: boolean; viewerUserId: string }
+        input: { dealId: string; forceRegenerate?: boolean; viewerUserId: string; viewerRole?: UserRole }
       ) => Promise<unknown>;
     }>(SERVER_AI_COPILOT_SERVICE_MODULES);
     const generateDealCopilotPacket = module.generateDealCopilotPacket as (
       tenantDb: unknown,
-      input: { dealId: string; forceRegenerate?: boolean; viewerUserId: string }
+      input: { dealId: string; forceRegenerate?: boolean; viewerUserId: string; viewerRole?: UserRole }
     ) => Promise<unknown>;
 
     await generateDealCopilotPacket(tenantDb, {
       dealId: payload.dealId,
       forceRegenerate: true,
       viewerUserId: payload.requestedBy,
+      viewerRole: isUserRole(payload.requestedByRole) ? payload.requestedByRole : "rep",
     });
 
     await client.query("COMMIT");

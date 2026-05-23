@@ -14,6 +14,10 @@ vi.mock("../../../server/src/modules/ai-copilot/service.js", () => ({
   generateDealCopilotPacket: generateDealCopilotPacketMock,
 }));
 
+vi.mock("../../../server/dist/modules/ai-copilot/service.js", () => ({
+  generateDealCopilotPacket: generateDealCopilotPacketMock,
+}));
+
 const { runAiGenerateDealCopilot } = await import("../../src/jobs/ai-generate-deal-copilot.js");
 
 function createClient(queryImpl: (sql: string, params?: unknown[]) => Promise<{ rows: any[] }>) {
@@ -63,6 +67,7 @@ describe("ai generate deal copilot job", () => {
         dealId: "deal-1",
         reason: "manual_regenerate",
         requestedBy: "user-7",
+        requestedByRole: "director",
       },
       "office-1"
     );
@@ -73,6 +78,7 @@ describe("ai generate deal copilot job", () => {
         dealId: "deal-1",
         forceRegenerate: true,
         viewerUserId: "user-7",
+        viewerRole: "director",
       })
     );
     expect(client.release).toHaveBeenCalledTimes(1);

@@ -345,6 +345,7 @@ describe("ai copilot routes", () => {
           dealId: "deal-1",
           reason: "manual_regenerate",
           requestedBy: "rep-1",
+          requestedByRole: "rep",
         }),
       })
     );
@@ -1827,7 +1828,10 @@ describe("ai copilot routes", () => {
     const res = await request(app).get("/api/ai/ops/process-disconnects?limit=25");
 
     expect(res.status).toBe(200);
-    expect(serviceMocks.getSalesProcessDisconnectDashboard).toHaveBeenCalledWith(expect.anything(), { limit: 25 });
+    expect(serviceMocks.getSalesProcessDisconnectDashboard).toHaveBeenCalledWith(expect.anything(), {
+      limit: 25,
+      viewerRole: "director",
+    });
     expect(res.body.summary.totalDisconnects).toBe(11);
     expect(res.body.summary.procoreBidBoardDriftCount).toBe(2);
     expect(res.body.clusters[0].clusterKey).toBe("bid_board_sync_break");

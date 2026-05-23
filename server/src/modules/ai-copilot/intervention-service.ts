@@ -428,7 +428,7 @@ export async function materializeDisconnectCases(
   input: { officeId: string; now?: Date }
 ) {
   const now = input.now ?? new Date();
-  const rows = await listCurrentSalesProcessDisconnectRows(tenantDb as never, { limit: 500 });
+  const rows = await listCurrentSalesProcessDisconnectRows(tenantDb as never, { limit: 500, now });
   const uniqueRows = Array.from(
     rows.reduce((map, row) => map.set(buildBusinessKey(input.officeId, row), row), new Map<string, SalesProcessDisconnectRow>()).values()
   );
@@ -604,18 +604,16 @@ export async function listInterventionCases(
   const dealIds = cases.map((row) => row.dealId).filter((value): value is string => Boolean(value));
   const companyIds = cases.map((row) => row.companyId).filter((value): value is string => Boolean(value));
   const assigneeIds = [...new Set(cases.map((row) => row.assignedTo).filter((value): value is string => Boolean(value)))];
-  const [taskRows, dealRows, companyRows, historyRows] = await Promise.all([
-    taskIds.length ? tenantDb.select().from(tasks).where(inArray(tasks.id, taskIds)) : Promise.resolve([]),
-    dealIds.length ? tenantDb.select().from(deals).where(inArray(deals.id, dealIds)) : Promise.resolve([]),
-    companyIds.length ? tenantDb.select().from(companies).where(inArray(companies.id, companyIds)) : Promise.resolve([]),
-    cases.length
-      ? tenantDb
-          .select()
-          .from(aiDisconnectCaseHistory)
-          .where(inArray(aiDisconnectCaseHistory.disconnectCaseId, cases.map((row) => row.id)))
-          .orderBy(desc(aiDisconnectCaseHistory.actedAt))
-      : Promise.resolve([]),
-  ]);
+  const taskRows = taskIds.length ? await tenantDb.select().from(tasks).where(inArray(tasks.id, taskIds)) : [];
+  const dealRows = dealIds.length ? await tenantDb.select().from(deals).where(inArray(deals.id, dealIds)) : [];
+  const companyRows = companyIds.length ? await tenantDb.select().from(companies).where(inArray(companies.id, companyIds)) : [];
+  const historyRows = cases.length
+    ? await tenantDb
+        .select()
+        .from(aiDisconnectCaseHistory)
+        .where(inArray(aiDisconnectCaseHistory.disconnectCaseId, cases.map((row) => row.id)))
+        .orderBy(desc(aiDisconnectCaseHistory.actedAt))
+    : [];
   const taskAssigneeIds = taskRows.map((row) => row.assignedTo).filter((value): value is string => Boolean(value));
   const userIds = [...new Set([...assigneeIds, ...taskAssigneeIds])];
   const userRows = userIds.length
@@ -780,14 +778,14 @@ async function loadInterventionAnalyticsData(
   const dealIds = cases.map((row) => row.dealId).filter((value): value is string => Boolean(value));
   const companyIds = cases.map((row) => row.companyId).filter((value): value is string => Boolean(value));
   const assigneeIds = [...new Set(cases.map((row) => row.assignedTo).filter((value): value is string => Boolean(value)))];
-  const [dealRows, companyRows, userRows, historyRows] = await Promise.all([
-    dealIds.length ? tenantDb.select().from(deals).where(inArray(deals.id, dealIds)) : Promise.resolve([]),
-    companyIds.length ? tenantDb.select().from(companies).where(inArray(companies.id, companyIds)) : Promise.resolve([]),
-    assigneeIds.length ? tenantDb.select({ id: users.id, displayName: users.displayName }).from(users).where(inArray(users.id, assigneeIds)) : Promise.resolve([]),
-    persistedCaseIds.length
-      ? tenantDb.select().from(aiDisconnectCaseHistory).where(inArray(aiDisconnectCaseHistory.disconnectCaseId, persistedCaseIds))
-      : Promise.resolve([]),
-  ]);
+  const dealRows = dealIds.length ? await tenantDb.select().from(deals).where(inArray(deals.id, dealIds)) : [];
+  const companyRows = companyIds.length ? await tenantDb.select().from(companies).where(inArray(companies.id, companyIds)) : [];
+  const userRows = assigneeIds.length
+    ? await tenantDb.select({ id: users.id, displayName: users.displayName }).from(users).where(inArray(users.id, assigneeIds))
+    : [];
+  const historyRows = persistedCaseIds.length
+    ? await tenantDb.select().from(aiDisconnectCaseHistory).where(inArray(aiDisconnectCaseHistory.disconnectCaseId, persistedCaseIds))
+    : [];
 
   return {
     cases,
@@ -802,11 +800,9 @@ async function buildAnalyticsPreviewCases(
   tenantDb: TenantDb,
   input: { officeId: string; now: Date }
 ) {
-  const [existingCases, currentRows] = await Promise.all([
-    getCasesByOffice(tenantDb, input.officeId),
-    // `tenantDb` is already scoped to the active office schema by tenant middleware.
-    listCurrentSalesProcessDisconnectRows(tenantDb, { limit: null }),
-  ]);
+  const existingCases = await getCasesByOffice(tenantDb, input.officeId);
+  // `tenantDb` is already scoped to the active office schema by tenant middleware.
+  const currentRows = await listCurrentSalesProcessDisconnectRows(tenantDb, { limit: null, now: input.now });
   const existingByBusinessKey = new Map(existingCases.map((row) => [row.businessKey, row]));
   const previewCases: DisconnectCaseRow[] = [...existingCases];
 

@@ -208,6 +208,7 @@ router.post("/deals/:id/regenerate", async (req, res, next) => {
         dealId: req.params.id,
         reason: "manual_regenerate",
         requestedBy: req.user!.id,
+        requestedByRole: req.user!.role,
       },
       officeId: req.user!.activeOfficeId ?? req.user!.officeId,
       status: "pending",
@@ -924,7 +925,10 @@ router.post("/ops/interventions/:id/escalate", requireRole("admin", "director"),
 router.get("/ops/process-disconnects", requireRole("admin", "director"), async (req, res, next) => {
   try {
     const limit = req.query.limit ? Number(req.query.limit) : undefined;
-    const dashboard = await getSalesProcessDisconnectDashboard(req.tenantDb!, { limit });
+    const dashboard = await getSalesProcessDisconnectDashboard(req.tenantDb!, {
+      limit,
+      viewerRole: req.user!.role,
+    });
     await req.commitTransaction!();
     res.json(dashboard);
   } catch (err) {

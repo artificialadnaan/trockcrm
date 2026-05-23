@@ -3,6 +3,7 @@ import type { NodePgDatabase } from "drizzle-orm/node-postgres";
 import { sql } from "drizzle-orm";
 import { and, desc, eq } from "drizzle-orm";
 import type * as schema from "@trock-crm/shared/schema";
+import type { UserRole } from "@trock-crm/shared/types";
 import {
   aiCopilotPackets,
   aiFeedback,
@@ -15,6 +16,7 @@ import {
 import { AppError } from "../../middleware/error-handler.js";
 import { getDealCopilotContext } from "./context-service.js";
 import { getDealBlindSpotSignals } from "./signal-service.js";
+import { getAiDealAtRiskResult } from "./at-risk-utils.js";
 import { searchDealKnowledge } from "./retrieval-service.js";
 import { buildDealRetrievalQuery } from "./document-service.js";
 import {
@@ -36,6 +38,7 @@ export interface GenerateDealCopilotPacketInput {
   dealId: string;
   forceRegenerate?: boolean;
   viewerUserId?: string;
+  viewerRole?: UserRole;
 }
 
 export interface PersistedPacketBundleResult {
@@ -326,13 +329,51 @@ export interface SalesProcessDisconnectDashboard {
   rows: SalesProcessDisconnectRow[];
 }
 
+type SalesProcessDisconnectBaseRow = {
+  id: string;
+  deal_number: string;
+  deal_name: string;
+  company_id: string | null;
+  company_name: string | null;
+  stage_key: string | null;
+  stage_slug: string | null;
+  workflow_route: string | null;
+  stage_name: string | null;
+  estimating_substage: string | null;
+  assigned_rep_id: string | null;
+  assigned_rep_name: string | null;
+  stage_entered_at: string | Date | null;
+  on_hold: boolean | null;
+  on_hold_started_at: string | Date | null;
+  on_hold_accumulated_seconds: string | number | bigint | null;
+  on_hold_accumulated_seconds_at_stage_entry: string | number | bigint | null;
+  last_activity_at: string | Date | null;
+  latest_customer_email_at: string | Date | null;
+  proposal_status: string | null;
+  procore_project_id: string | null;
+  procore_last_synced_at: string | Date | null;
+  open_task_count: string | number | null;
+  inbound_without_followup_count: string | number | null;
+  required_document_count: string | number | null;
+  present_document_count: string | number | null;
+  procore_sync_status: string | null;
+  procore_sync_direction: string | null;
+  procore_sync_updated_at: string | Date | null;
+  procore_drift_reason: string | null;
+};
+
 interface GenerateDealCopilotPacketDeps {
   getDealCopilotContext: (
     tenantDb: TenantDb,
     dealId: string,
-    viewerUserId: string
+    viewerUserId: string,
+    options?: { viewerRole?: UserRole; now?: Date }
   ) => Promise<DealCopilotContext>;
-  getDealBlindSpotSignals: (tenantDb: TenantDb, dealId: string, now?: Date) => Promise<DealBlindSpotSignal[]>;
+  getDealBlindSpotSignals: (
+    tenantDb: TenantDb,
+    dealId: string,
+    options?: Date | { now?: Date; viewerRole?: UserRole }
+  ) => Promise<DealBlindSpotSignal[]>;
   searchDealKnowledge: (
     tenantDb: TenantDb,
     input: { dealId: string; embedding: number[]; queryText?: string; limit?: number }
@@ -355,7 +396,7 @@ interface GenerateDealCopilotPacketDeps {
     blindSpotFlags: DealCopilotPromptOutput["blindSpotFlags"];
   }) => Promise<PersistedPacketBundleResult>;
   getExistingFreshPacket: (input: { dealId: string; snapshotHash: string; now: Date }) => Promise<ExistingFreshPacket | null>;
-  now: Date;
+  now?: Date;
 }
 
 type QueryResultRow = Record<string, any>;
@@ -663,95 +704,10 @@ function parseTriageMetadata(commentText: string | null | undefined) {
 }
 
 async function getCurrentDisconnectMetadataForDeal(tenantDb: TenantDb, dealId: string) {
-  const rows = getRows(await tenantDb.execute(sql`
-    WITH base AS (
-      SELECT
-        d.id,
-        d.procore_project_id,
-        d.stage_entered_at,
-        d.last_activity_at,
-        d.proposal_status,
-        psc.stale_threshold_days,
-        COALESCE(jsonb_array_length(psc.required_documents), 0) AS required_document_count,
-        COALESCE((
-          SELECT COUNT(DISTINCT f.category)::int
-          FROM files f
-          WHERE f.deal_id = d.id
-            AND f.is_active = TRUE
-        ), 0) AS present_document_count,
-        COALESCE((
-          SELECT COUNT(*)::int
-          FROM tasks t
-          WHERE t.deal_id = d.id
-            AND t.status IN ('pending', 'in_progress', 'waiting_on', 'blocked')
-        ), 0) AS open_task_count,
-        COALESCE((
-          SELECT COUNT(*)::int
-          FROM emails e
-          WHERE ${buildDealEmailLinkCondition("e", "d.id")}
-            AND e.direction = 'inbound'
-            AND ${buildDealEmailFollowupGapCondition("a", "e", "d.id")}
-        ), 0) AS inbound_without_followup_count,
-        pss.sync_status AS procore_sync_status
-      FROM deals d
-      JOIN pipeline_stage_config psc ON psc.id = d.stage_id
-      LEFT JOIN LATERAL (
-        SELECT sync_status
-        FROM public.procore_sync_state
-        WHERE crm_entity_type = 'deal'
-          AND crm_entity_id = d.id
-          AND entity_type IN ('project', 'bid')
-        ORDER BY updated_at DESC
-        LIMIT 1
-      ) pss ON TRUE
-      WHERE d.id = ${dealId}
-        AND d.is_active = TRUE
-        AND psc.is_terminal = FALSE
-    ),
-    disconnect_rows AS (
-      SELECT 'stale_stage'::text AS disconnect_type
-      FROM base
-      WHERE stale_threshold_days > 0
-        AND stage_entered_at IS NOT NULL
-        AND EXTRACT(EPOCH FROM (NOW() - stage_entered_at)) / 86400 > stale_threshold_days
-
-      UNION ALL
-
-      SELECT 'missing_next_task'::text AS disconnect_type
-      FROM base
-      WHERE open_task_count = 0
-
-      UNION ALL
-
-      SELECT 'inbound_without_followup'::text AS disconnect_type
-      FROM base
-      WHERE inbound_without_followup_count > 0
-
-      UNION ALL
-
-      SELECT 'revision_loop'::text AS disconnect_type
-      FROM base
-      WHERE proposal_status = 'revision_requested'
-
-      UNION ALL
-
-      SELECT 'estimating_gate_gap'::text AS disconnect_type
-      FROM base
-      WHERE required_document_count > present_document_count
-
-      UNION ALL
-
-      SELECT 'procore_bid_board_drift'::text AS disconnect_type
-      FROM base
-      WHERE procore_project_id IS NOT NULL
-        AND procore_sync_status IS NOT NULL
-        AND procore_sync_status != 'synced'
-    )
-    SELECT disconnect_type
-    FROM disconnect_rows
-  `));
-
-  const disconnectTypes = rows.map((row) => String(row.disconnect_type));
+  const rows = await listCurrentSalesProcessDisconnectRows(tenantDb, { limit: null });
+  const disconnectTypes = rows
+    .filter((row) => row.id === dealId)
+    .map((row) => row.disconnectType);
   const clusterKeys = Array.from(new Set(disconnectTypes.map((disconnectType) => getDisconnectClusterKey(disconnectType))));
   return { disconnectTypes, clusterKeys };
 }
@@ -969,292 +925,41 @@ const DEFAULT_DEPS: GenerateDealCopilotPacketDeps = {
     throw new Error("Packet persistence is not configured yet");
   },
   getExistingFreshPacket: async () => null,
-  now: new Date(),
 };
 
-export async function listCurrentSalesProcessDisconnectRows(
-  tenantDb: TenantDb,
-  input: { limit?: number | null } = {}
-): Promise<SalesProcessDisconnectRow[]> {
-  const limit = input.limit == null ? null : Math.max(1, Math.min(input.limit, 5000));
-  const limitClause = limit == null ? sql`` : sql`LIMIT ${limit}`;
-  const rowsResult = await tenantDb.execute(sql`
-    WITH base AS (
-      SELECT
-        d.id,
-        d.deal_number,
-        d.name AS deal_name,
-        c.id AS company_id,
-        c.name AS company_name,
-        psc.slug AS stage_key,
-        psc.name AS stage_name,
-        d.estimating_substage,
-        d.assigned_rep_id,
-        u.display_name AS assigned_rep_name,
-        d.stage_entered_at,
-        d.last_activity_at,
-        d.proposal_status,
-        d.procore_project_id,
-        d.procore_last_synced_at,
-        COALESCE((
-          SELECT COUNT(*)::int
-          FROM tasks t
-          WHERE t.deal_id = d.id
-            AND t.status IN ('pending', 'in_progress', 'waiting_on', 'blocked')
-        ), 0) AS open_task_count,
-        COALESCE((
-          SELECT COUNT(*)::int
-          FROM emails e
-          WHERE ${buildDealEmailLinkCondition("e", "d.id")}
-            AND e.direction = 'inbound'
-            AND ${buildDealEmailFollowupGapCondition("a", "e", "d.id")}
-        ), 0) AS inbound_without_followup_count,
-        (
-          SELECT MAX(e.sent_at)
-          FROM emails e
-          WHERE ${buildDealEmailLinkCondition("e", "d.id")}
-            AND e.direction = 'inbound'
-        ) AS latest_customer_email_at,
-        lps.sync_status AS procore_sync_status,
-        lps.sync_direction AS procore_sync_direction,
-        lps.updated_at AS procore_sync_updated_at,
-        CASE
-          WHEN lps.sync_status IS NULL THEN NULL
-          WHEN lps.sync_status = 'synced' THEN NULL
-          ELSE CONCAT('Latest Procore sync status is ', lps.sync_status, '.')
-        END AS procore_drift_reason
-      FROM deals d
-      LEFT JOIN companies c ON c.id = d.company_id
-      LEFT JOIN pipeline_stage_config psc ON psc.id = d.stage_id
-      LEFT JOIN public.users u ON u.id = d.assigned_rep_id
-      LEFT JOIN LATERAL (
-        SELECT
-          pss.sync_status,
-          pss.sync_direction,
-          pss.updated_at
-        FROM public.procore_sync_state pss
-        WHERE pss.crm_entity_type = 'deal'
-          AND pss.crm_entity_id = d.id
-          AND pss.entity_type IN ('project', 'bid')
-        ORDER BY pss.updated_at DESC
-        LIMIT 1
-      ) lps ON TRUE
-      WHERE d.is_active = TRUE
-        AND psc.is_terminal = FALSE
-    ),
-    disconnect_rows AS (
-      SELECT
-        id,
-        deal_number,
-        deal_name,
-        company_id,
-        company_name,
-        stage_name,
-        estimating_substage,
-        assigned_rep_name,
-        'stale_stage'::text AS disconnect_type,
-        'Stalled in stage'::text AS disconnect_label,
-        'high'::text AS disconnect_severity,
-        'Deal has exceeded its configured stale threshold.'::text AS disconnect_summary,
-        CONCAT(stage_name, ' has been inactive for ', FLOOR(EXTRACT(EPOCH FROM (NOW() - stage_entered_at)) / 86400), ' days.')::text AS disconnect_details,
-        FLOOR(EXTRACT(EPOCH FROM (NOW() - stage_entered_at)) / 86400)::int AS age_days,
-        open_task_count,
-        inbound_without_followup_count,
-        last_activity_at,
-        latest_customer_email_at,
-        proposal_status,
-        procore_sync_status,
-        procore_sync_direction,
-        procore_last_synced_at,
-        procore_sync_updated_at,
-        procore_drift_reason
-      FROM base
-      WHERE stage_entered_at IS NOT NULL
-        AND EXISTS (
-          SELECT 1
-          FROM pipeline_stage_config psc
-          WHERE psc.name = base.stage_name
-            AND psc.stale_threshold_days > 0
-            AND EXTRACT(EPOCH FROM (NOW() - stage_entered_at)) / 86400 > psc.stale_threshold_days
-        )
+function numberValue(value: string | number | null | undefined): number {
+  const numericValue = Number(value ?? 0);
+  return Number.isFinite(numericValue) ? numericValue : 0;
+}
 
-      UNION ALL
+function toIsoString(value: string | Date | null | undefined): string | null {
+  if (!value) return null;
+  return value instanceof Date ? value.toISOString() : String(value);
+}
 
-      SELECT
-        id,
-        deal_number,
-        deal_name,
-        company_id,
-        company_name,
-        stage_name,
-        estimating_substage,
-        assigned_rep_name,
-        'missing_next_task'::text AS disconnect_type,
-        'Missing next task'::text AS disconnect_label,
-        'high'::text AS disconnect_severity,
-        'Deal has no open next-step task.'::text AS disconnect_summary,
-        'No pending or in-progress task exists to drive the next customer or internal step.'::text AS disconnect_details,
-        FLOOR(EXTRACT(EPOCH FROM (NOW() - COALESCE(last_activity_at, NOW() - INTERVAL '1 day'))) / 86400)::int AS age_days,
-        open_task_count,
-        inbound_without_followup_count,
-        last_activity_at,
-        latest_customer_email_at,
-        proposal_status,
-        procore_sync_status,
-        procore_sync_direction,
-        procore_last_synced_at,
-        procore_sync_updated_at,
-        procore_drift_reason
-      FROM base
-      WHERE open_task_count = 0
+function ageDaysFrom(value: string | Date | null | undefined, now: Date): number | null {
+  if (!value) return null;
+  const date = value instanceof Date ? value : new Date(value);
+  if (Number.isNaN(date.getTime())) return null;
+  return Math.max(0, Math.floor((now.getTime() - date.getTime()) / (24 * 60 * 60 * 1000)));
+}
 
-      UNION ALL
-
-      SELECT
-        id,
-        deal_number,
-        deal_name,
-        company_id,
-        company_name,
-        stage_name,
-        estimating_substage,
-        assigned_rep_name,
-        'inbound_without_followup'::text AS disconnect_type,
-        'Inbound with no follow-up'::text AS disconnect_label,
-        'critical'::text AS disconnect_severity,
-        'Customer emailed without a recorded follow-up.'::text AS disconnect_summary,
-        'Inbound customer communication exists with no later call, email, meeting, or note logged.'::text AS disconnect_details,
-        FLOOR(EXTRACT(EPOCH FROM (NOW() - latest_customer_email_at)) / 86400)::int AS age_days,
-        open_task_count,
-        inbound_without_followup_count,
-        last_activity_at,
-        latest_customer_email_at,
-        proposal_status,
-        procore_sync_status,
-        procore_sync_direction,
-        procore_last_synced_at,
-        procore_sync_updated_at,
-        procore_drift_reason
-      FROM base
-      WHERE inbound_without_followup_count > 0
-
-      UNION ALL
-
-      SELECT
-        id,
-        deal_number,
-        deal_name,
-        company_id,
-        company_name,
-        stage_name,
-        estimating_substage,
-        assigned_rep_name,
-        'revision_loop'::text AS disconnect_type,
-        'Revision loop'::text AS disconnect_label,
-        'critical'::text AS disconnect_severity,
-        'Proposal revision requested with no clear closed-loop ownership.'::text AS disconnect_summary,
-        'The deal remains in revision_requested, which often signals a stalled handoff between sales and estimating.'::text AS disconnect_details,
-        FLOOR(EXTRACT(EPOCH FROM (NOW() - COALESCE(last_activity_at, NOW() - INTERVAL '1 day'))) / 86400)::int AS age_days,
-        open_task_count,
-        inbound_without_followup_count,
-        last_activity_at,
-        latest_customer_email_at,
-        proposal_status,
-        procore_sync_status,
-        procore_sync_direction,
-        procore_last_synced_at,
-        procore_sync_updated_at,
-        procore_drift_reason
-      FROM base
-      WHERE proposal_status = 'revision_requested'
-
-      UNION ALL
-
-      SELECT
-        b.id,
-        b.deal_number,
-        b.deal_name,
-        b.company_id,
-        b.company_name,
-        b.stage_name,
-        b.estimating_substage,
-        b.assigned_rep_name,
-        'estimating_gate_gap'::text AS disconnect_type,
-        'Estimating gate gap'::text AS disconnect_label,
-        'critical'::text AS disconnect_severity,
-        'Required estimating artifacts are missing.'::text AS disconnect_summary,
-        'Stage requirements indicate missing supporting documents or files for the current phase.'::text AS disconnect_details,
-        FLOOR(EXTRACT(EPOCH FROM (NOW() - COALESCE(b.last_activity_at, NOW() - INTERVAL '1 day'))) / 86400)::int AS age_days,
-        b.open_task_count,
-        b.inbound_without_followup_count,
-        b.last_activity_at,
-        b.latest_customer_email_at,
-        b.proposal_status,
-        b.procore_sync_status,
-        b.procore_sync_direction,
-        b.procore_last_synced_at,
-        b.procore_sync_updated_at,
-        b.procore_drift_reason
-      FROM base b
-      JOIN pipeline_stage_config psc ON psc.name = b.stage_name
-      WHERE COALESCE(jsonb_array_length(psc.required_documents), 0) > (
-        SELECT COUNT(DISTINCT f.category)::int
-        FROM files f
-        WHERE f.deal_id = b.id
-          AND f.is_active = TRUE
-      )
-
-      UNION ALL
-
-      SELECT
-        id,
-        deal_number,
-        deal_name,
-        company_id,
-        company_name,
-        stage_name,
-        estimating_substage,
-        assigned_rep_name,
-        'procore_bid_board_drift'::text AS disconnect_type,
-        'Bid board sync drift'::text AS disconnect_label,
-        'critical'::text AS disconnect_severity,
-        'Procore bid board and CRM stage state are out of sync.'::text AS disconnect_summary,
-        COALESCE(procore_drift_reason, 'The latest Procore sync record is not marked synced.')::text AS disconnect_details,
-        FLOOR(EXTRACT(EPOCH FROM (NOW() - COALESCE(procore_sync_updated_at, NOW() - INTERVAL '1 day'))) / 86400)::int AS age_days,
-        open_task_count,
-        inbound_without_followup_count,
-        last_activity_at,
-        latest_customer_email_at,
-        proposal_status,
-        procore_sync_status,
-        procore_sync_direction,
-        procore_last_synced_at,
-        procore_sync_updated_at,
-        procore_drift_reason
-      FROM base
-      WHERE procore_project_id IS NOT NULL
-        AND procore_sync_status IS NOT NULL
-        AND procore_sync_status != 'synced'
-    )
-    SELECT *
-    FROM disconnect_rows
-    ORDER BY
-      CASE disconnect_severity
-        WHEN 'critical' THEN 0
-        WHEN 'high' THEN 1
-        WHEN 'medium' THEN 2
-        ELSE 3
-      END,
-      age_days DESC NULLS LAST,
-      deal_number ASC
-    ${limitClause}
-  `);
-
-  return getRows(rowsResult).map((row) => ({
+function buildSalesProcessDisconnectRow(
+  row: SalesProcessDisconnectBaseRow,
+  input: {
+    disconnectType: string;
+    disconnectLabel: string;
+    disconnectSeverity: string;
+    disconnectSummary: string;
+    disconnectDetails: string | null;
+    ageDays: number | null;
+  }
+): SalesProcessDisconnectRow {
+  return {
     id: row.id,
     ...getDisconnectCaseIdentity({
       id: row.id,
-      disconnectType: row.disconnect_type,
+      disconnectType: input.disconnectType,
     }),
     dealNumber: row.deal_number,
     dealName: row.deal_name,
@@ -1265,23 +970,248 @@ export async function listCurrentSalesProcessDisconnectRows(
     estimatingSubstage: row.estimating_substage ?? null,
     assignedRepId: row.assigned_rep_id ?? null,
     assignedRepName: row.assigned_rep_name ?? null,
-    disconnectType: row.disconnect_type,
-    disconnectLabel: row.disconnect_label,
-    disconnectSeverity: row.disconnect_severity,
-    disconnectSummary: row.disconnect_summary,
-    disconnectDetails: row.disconnect_details ?? null,
-    ageDays: row.age_days == null ? null : Number(row.age_days),
-    openTaskCount: Number(row.open_task_count ?? 0),
-    inboundWithoutFollowupCount: Number(row.inbound_without_followup_count ?? 0),
-    lastActivityAt: row.last_activity_at ?? null,
-    latestCustomerEmailAt: row.latest_customer_email_at ?? null,
+    disconnectType: input.disconnectType,
+    disconnectLabel: input.disconnectLabel,
+    disconnectSeverity: input.disconnectSeverity,
+    disconnectSummary: input.disconnectSummary,
+    disconnectDetails: input.disconnectDetails,
+    ageDays: input.ageDays,
+    openTaskCount: numberValue(row.open_task_count),
+    inboundWithoutFollowupCount: numberValue(row.inbound_without_followup_count),
+    lastActivityAt: toIsoString(row.last_activity_at),
+    latestCustomerEmailAt: toIsoString(row.latest_customer_email_at),
     proposalStatus: row.proposal_status ?? null,
     procoreSyncStatus: row.procore_sync_status ?? null,
     procoreSyncDirection: row.procore_sync_direction ?? null,
-    procoreLastSyncedAt: row.procore_last_synced_at ?? null,
-    procoreSyncUpdatedAt: row.procore_sync_updated_at ?? null,
+    procoreLastSyncedAt: toIsoString(row.procore_last_synced_at),
+    procoreSyncUpdatedAt: toIsoString(row.procore_sync_updated_at),
     procoreDriftReason: row.procore_drift_reason ?? null,
-  }));
+  };
+}
+
+function compareDisconnectRows(a: SalesProcessDisconnectRow, b: SalesProcessDisconnectRow): number {
+  const severityRank = (severity: string) =>
+    severity === "critical" ? 0 : severity === "high" ? 1 : severity === "medium" ? 2 : 3;
+  const severityDelta = severityRank(a.disconnectSeverity) - severityRank(b.disconnectSeverity);
+  if (severityDelta !== 0) return severityDelta;
+  const ageDelta = (b.ageDays ?? -1) - (a.ageDays ?? -1);
+  if (ageDelta !== 0) return ageDelta;
+  return a.dealNumber.localeCompare(b.dealNumber);
+}
+
+function buildDisconnectRowsFromBaseRows(
+  baseRows: SalesProcessDisconnectBaseRow[],
+  now: Date,
+  viewerRole: UserRole
+): SalesProcessDisconnectRow[] {
+  const rows: SalesProcessDisconnectRow[] = [];
+
+  for (const row of baseRows) {
+    const atRisk = getAiDealAtRiskResult(row, viewerRole, now);
+    if (atRisk.isAtRisk) {
+      rows.push(
+        buildSalesProcessDisconnectRow(row, {
+          disconnectType: "stale_stage",
+          disconnectLabel: "Stalled in stage",
+          disconnectSeverity: "high",
+          disconnectSummary: "Deal has exceeded its SLA threshold.",
+          disconnectDetails: `${row.stage_name ?? "Current stage"} has been inactive for ${atRisk.effectiveStageAgeDays} days.`,
+          ageDays: atRisk.effectiveStageAgeDays,
+        })
+      );
+    }
+
+    if (numberValue(row.open_task_count) === 0) {
+      rows.push(
+        buildSalesProcessDisconnectRow(row, {
+          disconnectType: "missing_next_task",
+          disconnectLabel: "Missing next task",
+          disconnectSeverity: "high",
+          disconnectSummary: "Deal has no open next-step task.",
+          disconnectDetails:
+            "No pending or in-progress task exists to drive the next customer or internal step.",
+          ageDays: ageDaysFrom(row.last_activity_at, now),
+        })
+      );
+    }
+
+    if (numberValue(row.inbound_without_followup_count) > 0) {
+      rows.push(
+        buildSalesProcessDisconnectRow(row, {
+          disconnectType: "inbound_without_followup",
+          disconnectLabel: "Inbound with no follow-up",
+          disconnectSeverity: "critical",
+          disconnectSummary: "Customer emailed without a recorded follow-up.",
+          disconnectDetails:
+            "Inbound customer communication exists with no later call, email, meeting, or note logged.",
+          ageDays: ageDaysFrom(row.latest_customer_email_at, now),
+        })
+      );
+    }
+
+    if (row.proposal_status === "revision_requested") {
+      rows.push(
+        buildSalesProcessDisconnectRow(row, {
+          disconnectType: "revision_loop",
+          disconnectLabel: "Revision loop",
+          disconnectSeverity: "critical",
+          disconnectSummary: "Proposal revision requested with no clear closed-loop ownership.",
+          disconnectDetails:
+            "The deal remains in revision_requested, which often signals a stalled handoff between sales and estimating.",
+          ageDays: ageDaysFrom(row.latest_customer_email_at ?? row.last_activity_at, now),
+        })
+      );
+    }
+
+    if (numberValue(row.required_document_count) > numberValue(row.present_document_count)) {
+      rows.push(
+        buildSalesProcessDisconnectRow(row, {
+          disconnectType: "estimating_gate_gap",
+          disconnectLabel: "Estimating gate gap",
+          disconnectSeverity: "critical",
+          disconnectSummary: "Required estimating artifacts are missing.",
+          disconnectDetails:
+            "Stage requirements indicate missing supporting documents or files for the current phase.",
+          ageDays: ageDaysFrom(row.stage_entered_at, now),
+        })
+      );
+    }
+
+    if (row.procore_project_id && row.procore_sync_status && row.procore_sync_status !== "synced") {
+      rows.push(
+        buildSalesProcessDisconnectRow(row, {
+          disconnectType: "procore_bid_board_drift",
+          disconnectLabel: "Bid board sync drift",
+          disconnectSeverity: "critical",
+          disconnectSummary: "Procore bid board and CRM stage state are out of sync.",
+          disconnectDetails:
+            row.procore_drift_reason ??
+            "Bid board recorded a newer or conflicting update than the CRM currently reflects.",
+          ageDays: ageDaysFrom(row.procore_sync_updated_at, now),
+        })
+      );
+    }
+  }
+
+  return rows.sort(compareDisconnectRows);
+}
+
+export async function listCurrentSalesProcessDisconnectRows(
+  tenantDb: TenantDb,
+  input: { limit?: number | null; now?: Date; viewerRole?: UserRole } = {}
+): Promise<SalesProcessDisconnectRow[]> {
+  const limit = input.limit == null ? null : Math.max(1, Math.min(input.limit, 5000));
+  const now = input.now ?? new Date();
+  const viewerRole = input.viewerRole ?? "director";
+  const baseResult = await tenantDb.execute(sql`
+    SELECT
+      d.id,
+      d.deal_number,
+      d.name AS deal_name,
+      c.id AS company_id,
+      c.name AS company_name,
+      COALESCE(d.bid_board_stage_slug, psc.slug) AS stage_key,
+      COALESCE(d.bid_board_stage_slug, psc.slug) AS stage_slug,
+      d.workflow_route,
+      COALESCE(mirror_psc.name, psc.name) AS stage_name,
+      d.estimating_substage,
+      d.assigned_rep_id,
+      u.display_name AS assigned_rep_name,
+      COALESCE(
+        d.bid_board_stage_entered_at,
+        d.stage_entered_at,
+        latest_current_stage_entered_at.entered_at
+      ) AS stage_entered_at,
+      d.on_hold,
+      d.on_hold_started_at,
+      d.on_hold_accumulated_seconds,
+      d.on_hold_accumulated_seconds_at_stage_entry,
+      d.last_activity_at,
+      d.proposal_status,
+      d.procore_project_id,
+      d.procore_last_synced_at,
+      COALESCE((
+        SELECT COUNT(*)::int
+        FROM tasks t
+        WHERE t.deal_id = d.id
+          AND t.status IN ('pending', 'in_progress', 'waiting_on', 'blocked')
+      ), 0) AS open_task_count,
+      COALESCE((
+        SELECT COUNT(*)::int
+        FROM emails e
+        WHERE ${buildDealEmailLinkCondition("e", "d.id")}
+          AND e.direction = 'inbound'
+          AND ${buildDealEmailFollowupGapCondition("a", "e", "d.id")}
+      ), 0) AS inbound_without_followup_count,
+      (
+        SELECT MAX(e.sent_at)
+        FROM emails e
+        WHERE ${buildDealEmailLinkCondition("e", "d.id")}
+          AND e.direction = 'inbound'
+      ) AS latest_customer_email_at,
+      COALESCE(jsonb_array_length(psc.required_documents), 0) AS required_document_count,
+      COALESCE((
+        SELECT COUNT(DISTINCT f.category)::int
+        FROM files f
+        WHERE f.deal_id = d.id
+          AND f.is_active = TRUE
+      ), 0) AS present_document_count,
+      pss.sync_status AS procore_sync_status,
+      pss.sync_direction AS procore_sync_direction,
+      pss.updated_at AS procore_sync_updated_at,
+      CASE
+        WHEN pss.sync_status = 'conflict' THEN COALESCE(pss.conflict_data ->> 'summary', pss.error_message, 'Procore sync conflict requires reconciliation.')
+        WHEN pss.sync_status = 'error' THEN COALESCE(pss.error_message, 'Procore sync error blocked CRM reconciliation.')
+        WHEN pss.sync_status = 'pending' THEN 'Bid board update is pending sync into CRM.'
+        WHEN pss.last_procore_updated_at IS NOT NULL
+          AND (
+            pss.last_crm_updated_at IS NULL
+            OR pss.last_procore_updated_at > pss.last_crm_updated_at
+          )
+          THEN 'Procore reported a newer update than the CRM stage map.'
+        ELSE NULL
+      END AS procore_drift_reason
+    FROM deals d
+    JOIN pipeline_stage_config psc ON psc.id = d.stage_id
+    LEFT JOIN pipeline_stage_config mirror_psc ON mirror_psc.slug = d.bid_board_stage_slug
+    LEFT JOIN companies c ON c.id = d.company_id
+    LEFT JOIN public.users u ON u.id = d.assigned_rep_id
+    LEFT JOIN LATERAL (
+      SELECT entered_at
+      FROM deal_stage_history dsh
+      WHERE dsh.deal_id = d.id
+        AND dsh.stage_id = d.stage_id
+        AND dsh.exited_at IS NULL
+      ORDER BY dsh.entered_at DESC
+      LIMIT 1
+    ) latest_current_stage_entered_at ON TRUE
+    LEFT JOIN LATERAL (
+      SELECT
+        sync_status,
+        sync_direction,
+        last_synced_at,
+        last_procore_updated_at,
+        last_crm_updated_at,
+        updated_at,
+        conflict_data,
+        error_message
+      FROM public.procore_sync_state
+      WHERE crm_entity_type = 'deal'
+        AND crm_entity_id = d.id
+        AND entity_type IN ('project', 'bid')
+      ORDER BY updated_at DESC
+      LIMIT 1
+    ) pss ON TRUE
+    WHERE d.is_active = TRUE
+      AND psc.is_terminal = FALSE
+      AND COALESCE(d.is_test_data, false) = false
+  `);
+  const disconnectRows = buildDisconnectRowsFromBaseRows(
+    getRows(baseResult) as SalesProcessDisconnectBaseRow[],
+    now,
+    viewerRole
+  );
+  return limit == null ? disconnectRows : disconnectRows.slice(0, limit);
 }
 
 export async function generateDealCopilotPacket(
@@ -1293,8 +1223,13 @@ export async function generateDealCopilotPacket(
   if (!input.viewerUserId) {
     throw new AppError(400, "viewerUserId required to generate copilot packet");
   }
-  const context = await deps.getDealCopilotContext(tenantDb, input.dealId, input.viewerUserId);
-  const signals = await deps.getDealBlindSpotSignals(tenantDb, input.dealId, deps.now);
+  const now = deps.now ?? new Date();
+  const viewerRole = input.viewerRole ?? "rep";
+  const context = await deps.getDealCopilotContext(tenantDb, input.dealId, input.viewerUserId, {
+    viewerRole,
+    now,
+  });
+  const signals = await deps.getDealBlindSpotSignals(tenantDb, input.dealId, { viewerRole, now });
   const snapshotHash = createSnapshotHash({ context, signals });
 
   if (!input.forceRegenerate) {
@@ -1302,13 +1237,13 @@ export async function generateDealCopilotPacket(
       ? await deps.getExistingFreshPacket({
           dealId: input.dealId,
           snapshotHash,
-          now: deps.now,
+          now,
         })
       : await getExistingFreshPacket({
           tenantDb,
           dealId: input.dealId,
           snapshotHash,
-          now: deps.now,
+          now,
         });
     if (existing) {
       return existing;
@@ -1338,8 +1273,8 @@ export async function generateDealCopilotPacket(
       summary: generated.summary,
       confidence: generated.confidence,
       evidence: generated.evidence,
-      generatedAt: deps.now.toISOString(),
-      expiresAt: new Date(deps.now.getTime() + PACKET_TTL_MS).toISOString(),
+      generatedAt: now.toISOString(),
+      expiresAt: new Date(now.getTime() + PACKET_TTL_MS).toISOString(),
     },
     suggestedTasks: generated.suggestedTasks,
     blindSpotFlags: generated.blindSpotFlags,
@@ -1411,24 +1346,22 @@ export async function getCompanyCopilotView(
   tenantDb: TenantDb,
   company: { id: string; name: string }
 ): Promise<CompanyCopilotView> {
-  const [contactCountResult, companyDeals] = await Promise.all([
-    tenantDb
-      .select({ count: sql<number>`count(*)::int` })
-      .from(contacts)
-      .where(and(eq(contacts.companyId, company.id), eq(contacts.isActive, true))),
-    tenantDb
-      .select({
-        id: deals.id,
-        dealNumber: deals.dealNumber,
-        name: deals.name,
-        lastActivityAt: deals.lastActivityAt,
-        updatedAt: deals.updatedAt,
-      })
-      .from(deals)
-      .where(and(eq(deals.companyId, company.id), eq(deals.isActive, true)))
-      .orderBy(desc(deals.updatedAt))
-      .limit(10),
-  ]);
+  const contactCountResult = await tenantDb
+    .select({ count: sql<number>`count(*)::int` })
+    .from(contacts)
+    .where(and(eq(contacts.companyId, company.id), eq(contacts.isActive, true)));
+  const companyDeals = await tenantDb
+    .select({
+      id: deals.id,
+      dealNumber: deals.dealNumber,
+      name: deals.name,
+      lastActivityAt: deals.lastActivityAt,
+      updatedAt: deals.updatedAt,
+    })
+    .from(deals)
+    .where(and(eq(deals.companyId, company.id), eq(deals.isActive, true)))
+    .orderBy(desc(deals.updatedAt))
+    .limit(10);
 
   const dealIds = companyDeals.map((deal) => deal.id);
   const latestPacketRows = dealIds.length
@@ -1454,35 +1387,33 @@ export async function getCompanyCopilotView(
     });
   }
 
-  const [suggestedTasks, blindSpotFlags] = await Promise.all([
-    dealIds.length
-      ? tenantDb
-          .select()
-          .from(aiTaskSuggestions)
-          .where(
-            and(
-              eq(aiTaskSuggestions.scopeType, "deal"),
-              sql`${aiTaskSuggestions.scopeId} IN (${sql.join(dealIds.map((id) => sql`${id}`), sql`, `)})`,
-              eq(aiTaskSuggestions.status, "suggested")
-            )
+  const suggestedTasks = dealIds.length
+    ? await tenantDb
+        .select()
+        .from(aiTaskSuggestions)
+        .where(
+          and(
+            eq(aiTaskSuggestions.scopeType, "deal"),
+            sql`${aiTaskSuggestions.scopeId} IN (${sql.join(dealIds.map((id) => sql`${id}`), sql`, `)})`,
+            eq(aiTaskSuggestions.status, "suggested")
           )
-          .orderBy(desc(aiTaskSuggestions.createdAt))
-          .limit(8)
-      : Promise.resolve([]),
-    dealIds.length
-      ? tenantDb
-          .select()
-          .from(aiRiskFlags)
-          .where(
-            and(
-              sql`${aiRiskFlags.dealId} IN (${sql.join(dealIds.map((id) => sql`${id}`), sql`, `)})`,
-              eq(aiRiskFlags.status, "open")
-            )
+        )
+        .orderBy(desc(aiTaskSuggestions.createdAt))
+        .limit(8)
+    : [];
+  const blindSpotFlags = dealIds.length
+    ? await tenantDb
+        .select()
+        .from(aiRiskFlags)
+        .where(
+          and(
+            sql`${aiRiskFlags.dealId} IN (${sql.join(dealIds.map((id) => sql`${id}`), sql`, `)})`,
+            eq(aiRiskFlags.status, "open")
           )
-          .orderBy(desc(aiRiskFlags.createdAt))
-          .limit(8)
-      : Promise.resolve([]),
-  ]);
+        )
+        .orderBy(desc(aiRiskFlags.createdAt))
+        .limit(8)
+    : [];
 
   const relatedDeals = companyDeals.map((deal) => ({
     ...deal,
@@ -1516,12 +1447,17 @@ export async function getCompanyCopilotView(
 
 export async function regenerateDealCopilot(
   tenantDb: TenantDb,
-  input: { dealId: string; viewerUserId: string },
+  input: { dealId: string; viewerUserId: string; viewerRole?: UserRole },
   overrides: Partial<GenerateDealCopilotPacketDeps> = {}
 ) {
   return generateDealCopilotPacket(
     tenantDb,
-    { dealId: input.dealId, forceRegenerate: true, viewerUserId: input.viewerUserId },
+    {
+      dealId: input.dealId,
+      forceRegenerate: true,
+      viewerUserId: input.viewerUserId,
+      viewerRole: input.viewerRole,
+    },
     overrides
   );
 }
@@ -1721,598 +1657,140 @@ export async function getAiActionQueue(
 
 export async function getSalesProcessDisconnectDashboard(
   tenantDb: TenantDb,
-  input: { limit?: number } = {}
+  input: { limit?: number; now?: Date; viewerRole?: UserRole } = {}
 ): Promise<SalesProcessDisconnectDashboard> {
   const limit = Math.max(1, Math.min(input.limit ?? 50, 200));
+  const now = input.now ?? new Date();
+  const viewerRole = input.viewerRole ?? "director";
+  const activeDealsResult = await tenantDb.execute(sql`
+    SELECT COUNT(*)::int AS active_deals
+    FROM deals d
+    JOIN pipeline_stage_config psc ON psc.id = d.stage_id
+    WHERE d.is_active = TRUE
+      AND psc.is_terminal = FALSE
+      AND COALESCE(d.is_test_data, false) = false
+  `);
+  const allRows = await listCurrentSalesProcessDisconnectRows(tenantDb, { limit: null, now, viewerRole });
+  const rows = allRows.slice(0, limit);
+  const interventionsResult = await tenantDb.execute(sql`
+    WITH triage_feedback AS (
+      SELECT
+        rf.deal_id AS deal_id,
+        f.feedback_value,
+        f.created_at
+      FROM ai_feedback f
+      JOIN ai_risk_flags rf
+        ON f.target_type = 'risk_flag'
+       AND f.target_id = rf.id
+      WHERE f.feedback_type = 'triage_action'
+        AND f.created_at >= NOW() - INTERVAL '30 days'
+        AND rf.deal_id IS NOT NULL
 
-  const [summaryResult, byTypeResult, rowsResult, interventionsResult, interventionEventsResult, automationResult] = await Promise.all([
-    tenantDb.execute(sql`
-      WITH scoped_deals AS (
-        SELECT
-          d.id,
-          d.stage_entered_at,
-          d.proposal_status,
-          psc.stale_threshold_days,
-          COALESCE(jsonb_array_length(psc.required_documents), 0) AS required_document_count
-        FROM deals d
-        JOIN pipeline_stage_config psc ON psc.id = d.stage_id
-        WHERE d.is_active = TRUE
-          AND psc.is_terminal = FALSE
-      ),
-      deal_task_counts AS (
-        SELECT
-          t.deal_id,
-          COUNT(*) FILTER (WHERE t.status IN ('pending', 'in_progress', 'waiting_on', 'blocked'))::int AS open_task_count
+      UNION ALL
+
+      SELECT
+        ts.scope_id AS deal_id,
+        f.feedback_value,
+        f.created_at
+      FROM ai_feedback f
+      JOIN ai_task_suggestions ts
+        ON f.target_type = 'task_suggestion'
+       AND f.target_id = ts.id
+      WHERE f.feedback_type = 'triage_action'
+        AND f.created_at >= NOW() - INTERVAL '30 days'
+        AND ts.scope_type = 'deal'
+        AND ts.scope_id IS NOT NULL
+    )
+    SELECT
+      deal_id,
+      COUNT(*)::int AS intervention_count_30d,
+      MAX(created_at) AS latest_intervention_at,
+      (
+        ARRAY_AGG(feedback_value ORDER BY created_at DESC)
+      )[1]::text AS latest_action
+    FROM triage_feedback
+    GROUP BY deal_id
+  `);
+  const interventionEventsResult = await tenantDb.execute(sql`
+    WITH triage_feedback AS (
+      SELECT
+        rf.deal_id AS deal_id,
+        f.feedback_value AS action,
+        f.created_at,
+        f.comment AS comment_text
+      FROM ai_feedback f
+      JOIN ai_risk_flags rf
+        ON f.target_type = 'risk_flag'
+       AND f.target_id = rf.id
+      WHERE f.feedback_type = 'triage_action'
+        AND f.created_at >= NOW() - INTERVAL '30 days'
+        AND rf.deal_id IS NOT NULL
+
+      UNION ALL
+
+      SELECT
+        ts.scope_id AS deal_id,
+        f.feedback_value AS action,
+        f.created_at,
+        f.comment AS comment_text
+      FROM ai_feedback f
+      JOIN ai_task_suggestions ts
+        ON f.target_type = 'task_suggestion'
+       AND f.target_id = ts.id
+      WHERE f.feedback_type = 'triage_action'
+        AND f.created_at >= NOW() - INTERVAL '30 days'
+        AND ts.scope_type = 'deal'
+        AND ts.scope_id IS NOT NULL
+    )
+    SELECT
+      deal_id,
+      action,
+      created_at,
+      comment_text
+    FROM triage_feedback
+  `);
+  const automationResult = await tenantDb.execute(sql`
+    SELECT
+      COUNT(*) FILTER (
+        WHERE title LIKE 'AI Disconnect Digest:%'
+          AND created_at >= NOW() - INTERVAL '7 days'
+      )::int AS digest_notifications_7d,
+      COUNT(*) FILTER (
+        WHERE title LIKE 'AI Escalation:%'
+          AND created_at >= NOW() - INTERVAL '7 days'
+      )::int AS escalation_notifications_7d,
+      MAX(created_at) FILTER (WHERE title LIKE 'AI Disconnect Digest:%') AS latest_digest_at,
+      MAX(created_at) FILTER (WHERE title LIKE 'AI Escalation:%') AS latest_escalation_at,
+      (
+        SELECT COUNT(*)::int
         FROM tasks t
-        WHERE t.deal_id IS NOT NULL
-        GROUP BY t.deal_id
-      ),
-      deal_inbound_counts AS (
-        SELECT
-          ${buildCanonicalDealIdExpression("e")} AS deal_id,
-          COUNT(*) FILTER (
-            WHERE e.direction = 'inbound'
-              AND ${buildDealEmailFollowupGapCondition("a", "e", buildCanonicalDealIdExpression("e"))}
-          )::int AS inbound_without_followup_count
-        FROM emails e
-        WHERE ${buildCanonicalDealIdExpression("e")} IS NOT NULL
-        GROUP BY ${buildCanonicalDealIdExpression("e")}
-      ),
-      deal_file_counts AS (
-        SELECT
-          f.deal_id,
-          COUNT(DISTINCT f.category)::int AS present_document_count
-        FROM files f
-        WHERE f.deal_id IS NOT NULL
-          AND f.is_active = TRUE
-        GROUP BY f.deal_id
-      ),
-      latest_procore_sync AS (
-        SELECT DISTINCT ON (pss.crm_entity_id)
-          pss.crm_entity_id AS deal_id,
-          pss.sync_status
-        FROM public.procore_sync_state pss
-        WHERE pss.crm_entity_type = 'deal'
-          AND pss.entity_type IN ('project', 'bid')
-        ORDER BY pss.crm_entity_id, pss.updated_at DESC
-      ),
-      deal_procore_drift AS (
-        SELECT
-          lps.deal_id,
-          CASE WHEN lps.sync_status != 'synced' THEN 1 ELSE 0 END::int AS procore_bid_board_drift_count
-        FROM latest_procore_sync lps
-      )
-      SELECT
-        COUNT(*)::int AS active_deals,
-        COUNT(*) FILTER (
-          WHERE stale_threshold_days > 0
-            AND stage_entered_at IS NOT NULL
-            AND EXTRACT(EPOCH FROM (NOW() - stage_entered_at)) / 86400 > stale_threshold_days
-        )::int AS stale_stage_count,
-        COUNT(*) FILTER (WHERE COALESCE(open_task_count, 0) = 0)::int AS missing_next_task_count,
-        COUNT(*) FILTER (WHERE COALESCE(inbound_without_followup_count, 0) > 0)::int AS inbound_without_followup_count,
-        COUNT(*) FILTER (WHERE proposal_status = 'revision_requested')::int AS revision_loop_count,
-        COUNT(*) FILTER (
-          WHERE required_document_count > COALESCE(present_document_count, 0)
-        )::int AS estimating_gate_gap_count,
-        COUNT(*) FILTER (
-          WHERE COALESCE(procore_bid_board_drift_count, 0) > 0
-        )::int AS procore_bid_board_drift_count
-      FROM scoped_deals sd
-      LEFT JOIN deal_task_counts dtc ON dtc.deal_id = sd.id
-      LEFT JOIN deal_inbound_counts dic ON dic.deal_id = sd.id
-      LEFT JOIN deal_file_counts dfc ON dfc.deal_id = sd.id
-      LEFT JOIN deal_procore_drift dpd ON dpd.deal_id = sd.id
-    `),
-    tenantDb.execute(sql`
-      WITH latest_procore_sync AS (
-        SELECT DISTINCT ON (pss.crm_entity_id)
-          pss.crm_entity_id AS deal_id,
-          pss.sync_status
-        FROM public.procore_sync_state pss
-        WHERE pss.crm_entity_type = 'deal'
-          AND pss.entity_type IN ('project', 'bid')
-        ORDER BY pss.crm_entity_id, pss.updated_at DESC
-      ),
-      disconnect_rows AS (
-        SELECT
-          d.id AS deal_id,
-          'stale_stage'::text AS disconnect_type,
-          'Stalled in stage'::text AS disconnect_label
-        FROM deals d
-        JOIN pipeline_stage_config psc ON psc.id = d.stage_id
-        WHERE d.is_active = TRUE
-          AND psc.stale_threshold_days > 0
-          AND d.stage_entered_at IS NOT NULL
-          AND EXTRACT(EPOCH FROM (NOW() - d.stage_entered_at)) / 86400 > psc.stale_threshold_days
-
-        UNION ALL
-
-        SELECT
-          d.id AS deal_id,
-          'missing_next_task'::text AS disconnect_type,
-          'Missing next task'::text AS disconnect_label
-        FROM deals d
-        WHERE d.is_active = TRUE
-          AND NOT EXISTS (
-            SELECT 1
-            FROM tasks t
-            WHERE t.deal_id = d.id
-              AND t.status IN ('pending', 'in_progress', 'waiting_on', 'blocked')
-          )
-
-        UNION ALL
-
-        SELECT
-          d.id AS deal_id,
-          'inbound_without_followup'::text AS disconnect_type,
-          'Inbound with no follow-up'::text AS disconnect_label
-        FROM deals d
-        WHERE d.is_active = TRUE
-          AND EXISTS (
-            SELECT 1
-            FROM emails e
-            WHERE ${buildDealEmailLinkCondition("e", "d.id")}
-              AND e.direction = 'inbound'
-              AND ${buildDealEmailFollowupGapCondition("a", "e", "d.id")}
-          )
-
-        UNION ALL
-
-        SELECT
-          d.id AS deal_id,
-          'revision_loop'::text AS disconnect_type,
-          'Revision loop'::text AS disconnect_label
-        FROM deals d
-        WHERE d.is_active = TRUE
-          AND d.proposal_status = 'revision_requested'
-
-        UNION ALL
-
-        SELECT
-          d.id AS deal_id,
-          'estimating_gate_gap'::text AS disconnect_type,
-          'Estimating gate gap'::text AS disconnect_label
-        FROM deals d
-        JOIN pipeline_stage_config psc ON psc.id = d.stage_id
-        WHERE d.is_active = TRUE
-          AND COALESCE(jsonb_array_length(psc.required_documents), 0) > (
-            SELECT COUNT(DISTINCT f.category)::int
-            FROM files f
-            WHERE f.deal_id = d.id
-              AND f.is_active = TRUE
-          )
-
-        UNION ALL
-
-        SELECT
-          d.id AS deal_id,
-          'procore_bid_board_drift'::text AS disconnect_type,
-          'Bid board sync drift'::text AS disconnect_label
-        FROM deals d
-        JOIN latest_procore_sync lps ON lps.deal_id = d.id
-        WHERE d.is_active = TRUE
-          AND d.procore_project_id IS NOT NULL
-          AND lps.sync_status != 'synced'
-      )
-      SELECT
-        disconnect_type,
-        disconnect_label,
-        COUNT(*)::int AS disconnect_count
-      FROM disconnect_rows
-      GROUP BY disconnect_type, disconnect_label
-      ORDER BY disconnect_count DESC, disconnect_label ASC
-    `),
-    tenantDb.execute(sql`
-      WITH base AS (
-        SELECT
-          d.id,
-          d.deal_number,
-          d.name AS deal_name,
-          c.id AS company_id,
-          c.name AS company_name,
-          psc.name AS stage_name,
-          d.estimating_substage,
-          u.display_name AS assigned_rep_name,
-          d.stage_entered_at,
-          d.last_activity_at,
-          d.proposal_status,
-          d.procore_project_id,
-          d.procore_last_synced_at,
-          COALESCE((
-            SELECT COUNT(*)::int
-            FROM tasks t
-            WHERE t.deal_id = d.id
-              AND t.status IN ('pending', 'in_progress', 'waiting_on', 'blocked')
-          ), 0) AS open_task_count,
-          COALESCE((
-            SELECT COUNT(*)::int
-            FROM emails e
-            WHERE ${buildDealEmailLinkCondition("e", "d.id")}
-              AND e.direction = 'inbound'
-              AND ${buildDealEmailFollowupGapCondition("a", "e", "d.id")}
-          ), 0) AS inbound_without_followup_count,
-          (
-            SELECT MAX(e.sent_at)
-            FROM emails e
-            WHERE ${buildDealEmailLinkCondition("e", "d.id")}
-              AND e.direction = 'inbound'
-          ) AS latest_customer_email_at,
-          COALESCE(jsonb_array_length(psc.required_documents), 0) AS required_document_count,
-          COALESCE((
-            SELECT COUNT(DISTINCT f.category)::int
-            FROM files f
-            WHERE f.deal_id = d.id
-              AND f.is_active = TRUE
-          ), 0) AS present_document_count,
-          psc.stale_threshold_days,
-          pss.sync_status AS procore_sync_status,
-          pss.sync_direction AS procore_sync_direction,
-          pss.updated_at AS procore_sync_updated_at,
-          CASE
-            WHEN pss.sync_status = 'conflict' THEN COALESCE(pss.conflict_data ->> 'summary', pss.error_message, 'Procore sync conflict requires reconciliation.')
-            WHEN pss.sync_status = 'error' THEN COALESCE(pss.error_message, 'Procore sync error blocked CRM reconciliation.')
-            WHEN pss.sync_status = 'pending' THEN 'Bid board update is pending sync into CRM.'
-            WHEN pss.last_procore_updated_at IS NOT NULL
-              AND (
-                pss.last_crm_updated_at IS NULL
-                OR pss.last_procore_updated_at > pss.last_crm_updated_at
-              )
-              THEN 'Procore reported a newer update than the CRM stage map.'
-            ELSE NULL
-          END AS procore_drift_reason
-        FROM deals d
-        JOIN pipeline_stage_config psc ON psc.id = d.stage_id
-        LEFT JOIN companies c ON c.id = d.company_id
-        LEFT JOIN public.users u ON u.id = d.assigned_rep_id
-        LEFT JOIN LATERAL (
-          SELECT
-            sync_status,
-            sync_direction,
-            last_synced_at,
-            last_procore_updated_at,
-            last_crm_updated_at,
-            updated_at,
-            conflict_data,
-            error_message
-          FROM public.procore_sync_state
-          WHERE crm_entity_type = 'deal'
-            AND crm_entity_id = d.id
-            AND entity_type IN ('project', 'bid')
-          ORDER BY updated_at DESC
-          LIMIT 1
-        ) pss ON TRUE
-        WHERE d.is_active = TRUE
-          AND psc.is_terminal = FALSE
-      ),
-      disconnect_rows AS (
-        SELECT
-          id,
-          deal_number,
-          deal_name,
-          stage_name,
-          estimating_substage,
-          assigned_rep_name,
-          'stale_stage'::text AS disconnect_type,
-          'Stalled in stage'::text AS disconnect_label,
-          'high'::text AS disconnect_severity,
-          'Deal has exceeded its configured stale threshold.'::text AS disconnect_summary,
-          CONCAT(stage_name, ' has been inactive for ', FLOOR(EXTRACT(EPOCH FROM (NOW() - stage_entered_at)) / 86400), ' days.')::text AS disconnect_details,
-          FLOOR(EXTRACT(EPOCH FROM (NOW() - stage_entered_at)) / 86400)::int AS age_days,
-          open_task_count,
-          inbound_without_followup_count,
-          last_activity_at,
-          latest_customer_email_at,
-          proposal_status,
-          procore_sync_status,
-          procore_sync_direction,
-          procore_last_synced_at,
-          procore_sync_updated_at,
-          procore_drift_reason
-        FROM base
-        WHERE stale_threshold_days > 0
-          AND stage_entered_at IS NOT NULL
-          AND EXTRACT(EPOCH FROM (NOW() - stage_entered_at)) / 86400 > stale_threshold_days
-
-        UNION ALL
-
-        SELECT
-          id,
-          deal_number,
-          deal_name,
-          stage_name,
-          estimating_substage,
-          assigned_rep_name,
-          'missing_next_task'::text AS disconnect_type,
-          'Missing next task'::text AS disconnect_label,
-          'high'::text AS disconnect_severity,
-          'Deal has no open next-step task.'::text AS disconnect_summary,
-          'No pending or in-progress task exists to drive the next customer or internal step.'::text AS disconnect_details,
-          CASE
-            WHEN last_activity_at IS NULL THEN NULL
-            ELSE FLOOR(EXTRACT(EPOCH FROM (NOW() - last_activity_at)) / 86400)::int
-          END AS age_days,
-          open_task_count,
-          inbound_without_followup_count,
-          last_activity_at,
-          latest_customer_email_at,
-          proposal_status,
-          procore_sync_status,
-          procore_sync_direction,
-          procore_last_synced_at,
-          procore_sync_updated_at,
-          procore_drift_reason
-        FROM base
-        WHERE open_task_count = 0
-
-        UNION ALL
-
-        SELECT
-          id,
-          deal_number,
-          deal_name,
-          stage_name,
-          estimating_substage,
-          assigned_rep_name,
-          'inbound_without_followup'::text AS disconnect_type,
-          'Inbound with no follow-up'::text AS disconnect_label,
-          'critical'::text AS disconnect_severity,
-          'Customer emailed without a recorded follow-up.'::text AS disconnect_summary,
-          'Inbound customer communication exists with no later call, email, meeting, or note logged.'::text AS disconnect_details,
-          CASE
-            WHEN latest_customer_email_at IS NULL THEN NULL
-            ELSE FLOOR(EXTRACT(EPOCH FROM (NOW() - latest_customer_email_at)) / 86400)::int
-          END AS age_days,
-          open_task_count,
-          inbound_without_followup_count,
-          last_activity_at,
-          latest_customer_email_at,
-          proposal_status,
-          procore_sync_status,
-          procore_sync_direction,
-          procore_last_synced_at,
-          procore_sync_updated_at,
-          procore_drift_reason
-        FROM base
-        WHERE inbound_without_followup_count > 0
-
-        UNION ALL
-
-        SELECT
-          id,
-          deal_number,
-          deal_name,
-          stage_name,
-          estimating_substage,
-          assigned_rep_name,
-          'revision_loop'::text AS disconnect_type,
-          'Revision loop'::text AS disconnect_label,
-          'critical'::text AS disconnect_severity,
-          'Proposal revision requested with no clear closed-loop ownership.'::text AS disconnect_summary,
-          'The deal remains in revision_requested, which often signals a stalled handoff between sales and estimating.'::text AS disconnect_details,
-          CASE
-            WHEN latest_customer_email_at IS NULL THEN NULL
-            ELSE FLOOR(EXTRACT(EPOCH FROM (NOW() - latest_customer_email_at)) / 86400)::int
-          END AS age_days,
-          open_task_count,
-          inbound_without_followup_count,
-          last_activity_at,
-          latest_customer_email_at,
-          proposal_status,
-          procore_sync_status,
-          procore_sync_direction,
-          procore_last_synced_at,
-          procore_sync_updated_at,
-          procore_drift_reason
-        FROM base
-        WHERE proposal_status = 'revision_requested'
-
-        UNION ALL
-
-        SELECT
-          id,
-          deal_number,
-          deal_name,
-          stage_name,
-          estimating_substage,
-          assigned_rep_name,
-          'estimating_gate_gap'::text AS disconnect_type,
-          'Estimating gate gap'::text AS disconnect_label,
-          'critical'::text AS disconnect_severity,
-          'Required estimating artifacts are missing.'::text AS disconnect_summary,
-          'Stage requirements indicate missing supporting documents or files for the current phase.'::text AS disconnect_details,
-          CASE
-            WHEN stage_entered_at IS NULL THEN NULL
-            ELSE FLOOR(EXTRACT(EPOCH FROM (NOW() - stage_entered_at)) / 86400)::int
-          END AS age_days,
-          open_task_count,
-          inbound_without_followup_count,
-          last_activity_at,
-          latest_customer_email_at,
-          proposal_status,
-          procore_sync_status,
-          procore_sync_direction,
-          procore_last_synced_at,
-          procore_sync_updated_at,
-          procore_drift_reason
-        FROM base
-        WHERE required_document_count > present_document_count
-
-        UNION ALL
-
-        SELECT
-          id,
-          deal_number,
-          deal_name,
-          stage_name,
-          estimating_substage,
-          assigned_rep_name,
-          'procore_bid_board_drift'::text AS disconnect_type,
-          'Bid board sync drift'::text AS disconnect_label,
-          'critical'::text AS disconnect_severity,
-          'Procore bid board and CRM stage state are out of sync.'::text AS disconnect_summary,
-          COALESCE(
-            procore_drift_reason,
-            'Bid board recorded a newer or conflicting update than the CRM currently reflects.'
-          )::text AS disconnect_details,
-          CASE
-            WHEN procore_sync_updated_at IS NULL THEN NULL
-            ELSE FLOOR(EXTRACT(EPOCH FROM (NOW() - procore_sync_updated_at)) / 86400)::int
-          END AS age_days,
-          open_task_count,
-          inbound_without_followup_count,
-          last_activity_at,
-          latest_customer_email_at,
-          proposal_status,
-          procore_sync_status,
-          procore_sync_direction,
-          procore_last_synced_at,
-          procore_sync_updated_at,
-          procore_drift_reason
-        FROM base
-        WHERE procore_project_id IS NOT NULL
-          AND procore_sync_status IS NOT NULL
-          AND procore_sync_status != 'synced'
-      )
-      SELECT *
-      FROM disconnect_rows
-      ORDER BY
-        CASE disconnect_severity
-          WHEN 'critical' THEN 0
-          WHEN 'high' THEN 1
-          WHEN 'medium' THEN 2
-          ELSE 3
-        END ASC,
-        COALESCE(age_days, 0) DESC,
-        deal_number ASC
-      LIMIT ${limit}
-    `),
-    tenantDb.execute(sql`
-      WITH triage_feedback AS (
-        SELECT
-          rf.deal_id AS deal_id,
-          f.feedback_value,
-          f.created_at
-        FROM ai_feedback f
-        JOIN ai_risk_flags rf
-          ON f.target_type = 'risk_flag'
-         AND f.target_id = rf.id
-        WHERE f.feedback_type = 'triage_action'
-          AND f.created_at >= NOW() - INTERVAL '30 days'
-          AND rf.deal_id IS NOT NULL
-
-        UNION ALL
-
-        SELECT
-          ts.scope_id AS deal_id,
-          f.feedback_value,
-          f.created_at
-        FROM ai_feedback f
-        JOIN ai_task_suggestions ts
-          ON f.target_type = 'task_suggestion'
-         AND f.target_id = ts.id
-        WHERE f.feedback_type = 'triage_action'
-          AND f.created_at >= NOW() - INTERVAL '30 days'
-          AND ts.scope_type = 'deal'
-          AND ts.scope_id IS NOT NULL
-      )
-      SELECT
-        deal_id,
-        COUNT(*)::int AS intervention_count_30d,
-        MAX(created_at) AS latest_intervention_at,
-        (
-          ARRAY_AGG(feedback_value ORDER BY created_at DESC)
-        )[1]::text AS latest_action
-      FROM triage_feedback
-      GROUP BY deal_id
-    `),
-    tenantDb.execute(sql`
-      WITH triage_feedback AS (
-        SELECT
-          rf.deal_id AS deal_id,
-          f.feedback_value AS action,
-          f.created_at,
-          f.comment AS comment_text
-        FROM ai_feedback f
-        JOIN ai_risk_flags rf
-          ON f.target_type = 'risk_flag'
-         AND f.target_id = rf.id
-        WHERE f.feedback_type = 'triage_action'
-          AND f.created_at >= NOW() - INTERVAL '30 days'
-          AND rf.deal_id IS NOT NULL
-
-        UNION ALL
-
-        SELECT
-          ts.scope_id AS deal_id,
-          f.feedback_value AS action,
-          f.created_at,
-          f.comment AS comment_text
-        FROM ai_feedback f
-        JOIN ai_task_suggestions ts
-          ON f.target_type = 'task_suggestion'
-         AND f.target_id = ts.id
-        WHERE f.feedback_type = 'triage_action'
-          AND f.created_at >= NOW() - INTERVAL '30 days'
-          AND ts.scope_type = 'deal'
-          AND ts.scope_id IS NOT NULL
-      )
-      SELECT
-        deal_id,
-        action,
-        created_at,
-        comment_text
-      FROM triage_feedback
-    `),
-    tenantDb.execute(sql`
-      SELECT
-        COUNT(*) FILTER (
-          WHERE title LIKE 'AI Disconnect Digest:%'
-            AND created_at >= NOW() - INTERVAL '7 days'
-        )::int AS digest_notifications_7d,
-        COUNT(*) FILTER (
-          WHERE title LIKE 'AI Escalation:%'
-            AND created_at >= NOW() - INTERVAL '7 days'
-        )::int AS escalation_notifications_7d,
-        MAX(created_at) FILTER (WHERE title LIKE 'AI Disconnect Digest:%') AS latest_digest_at,
-        MAX(created_at) FILTER (WHERE title LIKE 'AI Escalation:%') AS latest_escalation_at,
-        (
-          SELECT COUNT(*)::int
-          FROM tasks t
-          WHERE t.origin_rule = 'ai_disconnect_admin_task'
-            AND t.created_at >= NOW() - INTERVAL '7 days'
-        ) AS admin_tasks_created_7d,
-        (
-          SELECT COUNT(*)::int
-          FROM tasks t
-          WHERE t.origin_rule = 'ai_disconnect_admin_task'
-            AND t.status IN ('pending', 'in_progress', 'waiting_on', 'blocked')
-        ) AS admin_tasks_open,
-        (
-          SELECT MAX(t.created_at)
-          FROM tasks t
-          WHERE t.origin_rule = 'ai_disconnect_admin_task'
-        ) AS latest_admin_task_created_at
-      FROM notifications
-    `),
-  ]);
-
-  const summaryRow = getRows(summaryResult)[0] ?? {};
+        WHERE t.origin_rule = 'ai_disconnect_admin_task'
+          AND t.created_at >= NOW() - INTERVAL '7 days'
+      ) AS admin_tasks_created_7d,
+      (
+        SELECT COUNT(*)::int
+        FROM tasks t
+        WHERE t.origin_rule = 'ai_disconnect_admin_task'
+          AND t.status IN ('pending', 'in_progress', 'waiting_on', 'blocked')
+      ) AS admin_tasks_open,
+      (
+        SELECT MAX(t.created_at)
+        FROM tasks t
+        WHERE t.origin_rule = 'ai_disconnect_admin_task'
+      ) AS latest_admin_task_created_at
+    FROM notifications
+  `);
+  const countType = (disconnectType: string) =>
+    allRows.filter((row) => row.disconnectType === disconnectType).length;
   const summary: SalesProcessDisconnectSummary = {
-    activeDeals: Number(summaryRow.active_deals ?? 0),
-    staleStageCount: Number(summaryRow.stale_stage_count ?? 0),
-    missingNextTaskCount: Number(summaryRow.missing_next_task_count ?? 0),
-    inboundWithoutFollowupCount: Number(summaryRow.inbound_without_followup_count ?? 0),
-    revisionLoopCount: Number(summaryRow.revision_loop_count ?? 0),
-    estimatingGateGapCount: Number(summaryRow.estimating_gate_gap_count ?? 0),
-    procoreBidBoardDriftCount: Number(summaryRow.procore_bid_board_drift_count ?? 0),
-    totalDisconnects:
-      Number(summaryRow.stale_stage_count ?? 0) +
-      Number(summaryRow.missing_next_task_count ?? 0) +
-      Number(summaryRow.inbound_without_followup_count ?? 0) +
-      Number(summaryRow.revision_loop_count ?? 0) +
-      Number(summaryRow.estimating_gate_gap_count ?? 0) +
-      Number(summaryRow.procore_bid_board_drift_count ?? 0),
+    activeDeals: Number(getRows(activeDealsResult)[0]?.active_deals ?? 0),
+    staleStageCount: countType("stale_stage"),
+    missingNextTaskCount: countType("missing_next_task"),
+    inboundWithoutFollowupCount: countType("inbound_without_followup"),
+    revisionLoopCount: countType("revision_loop"),
+    estimatingGateGapCount: countType("estimating_gate_gap"),
+    procoreBidBoardDriftCount: countType("procore_bid_board_drift"),
+    totalDisconnects: allRows.length,
   };
   const automationRow = getRows(automationResult)[0] ?? {};
   const automation: SalesProcessDisconnectAutomationStatus = {
@@ -2339,34 +1817,6 @@ export async function getSalesProcessDisconnectDashboard(
           ? String(automationRow.latest_admin_task_created_at)
           : null,
   };
-
-  const rows: SalesProcessDisconnectRow[] = getRows(rowsResult).map((row) => ({
-    id: row.id,
-    dealNumber: row.deal_number,
-    dealName: row.deal_name,
-    companyId: row.company_id ?? null,
-    companyName: row.company_name ?? null,
-    stageName: row.stage_name ?? null,
-    estimatingSubstage: row.estimating_substage ?? null,
-    assignedRepName: row.assigned_rep_name ?? null,
-    disconnectType: row.disconnect_type,
-    disconnectLabel: row.disconnect_label,
-    disconnectSeverity: row.disconnect_severity,
-    disconnectSummary: row.disconnect_summary,
-    disconnectDetails: row.disconnect_details ?? null,
-    ageDays: row.age_days == null ? null : Number(row.age_days),
-    openTaskCount: Number(row.open_task_count ?? 0),
-    inboundWithoutFollowupCount: Number(row.inbound_without_followup_count ?? 0),
-    lastActivityAt: row.last_activity_at ?? null,
-    latestCustomerEmailAt: row.latest_customer_email_at ?? null,
-    proposalStatus: row.proposal_status ?? null,
-    procoreSyncStatus: row.procore_sync_status ?? null,
-    procoreSyncDirection: row.procore_sync_direction ?? null,
-    procoreLastSyncedAt: row.procore_last_synced_at ?? null,
-    procoreSyncUpdatedAt: row.procore_sync_updated_at ?? null,
-    procoreDriftReason: row.procore_drift_reason ?? null,
-  }));
-
   const interventionsByDeal = new Map(
     getRows(interventionsResult).map((row) => [
       String(row.deal_id),
@@ -2419,16 +1869,18 @@ export async function getSalesProcessDisconnectDashboard(
     trends,
     actionSummary,
   });
+  const labelsByType = new Map<string, string>();
+  for (const row of allRows) labelsByType.set(row.disconnectType, row.disconnectLabel);
 
   return {
     summary,
     automation,
     narrative,
-    byType: getRows(byTypeResult).map((row) => ({
-      disconnectType: row.disconnect_type,
-      label: row.disconnect_label,
-      count: Number(row.disconnect_count ?? 0),
-    })),
+    byType: Array.from(labelsByType, ([disconnectType, label]) => ({
+      disconnectType,
+      label,
+      count: countType(disconnectType),
+    })).sort((a, b) => b.count - a.count || a.label.localeCompare(b.label)),
     clusters,
     trends,
     outcomes,
@@ -2535,8 +1987,7 @@ export async function triageAiActionQueueEntry(
 }
 
 export async function getAiOpsMetrics(tenantDb: TenantDb): Promise<AiOpsMetrics> {
-  const [summaryResult, documentResult] = await Promise.all([
-    tenantDb.execute(sql`
+  const summaryResult = await tenantDb.execute(sql`
       WITH packet_counts AS (
         SELECT
           COUNT(*) FILTER (WHERE generated_at >= NOW() - INTERVAL '24 hours')::int AS packets_generated_24h,
@@ -2678,8 +2129,8 @@ export async function getAiOpsMetrics(tenantDb: TenantDb): Promise<AiOpsMetrics>
         document_counts.documents_indexed,
         document_counts.documents_pending
       FROM packet_counts, risk_counts, suggestion_counts, triage_counts, search_interaction_counts, risk_resolution_counts, recurring_suggestion_counts, feedback_counts, document_counts
-    `),
-    tenantDb.execute(sql`
+    `);
+  const documentResult = await tenantDb.execute(sql`
       SELECT
         source_type,
         COUNT(*) FILTER (WHERE index_status = 'indexed')::int AS indexed,
@@ -2687,8 +2138,7 @@ export async function getAiOpsMetrics(tenantDb: TenantDb): Promise<AiOpsMetrics>
       FROM ai_document_index
       GROUP BY source_type
       ORDER BY source_type ASC
-    `),
-  ]);
+    `);
 
   const summaryRow = getRows(summaryResult)[0] ?? {};
 
@@ -2780,8 +2230,7 @@ export async function getAiReviewPacketDetail(
   tenantDb: TenantDb,
   packetId: string
 ): Promise<AiReviewPacketDetail> {
-  const [packetResult, suggestedTasks, blindSpotFlags, feedback] = await Promise.all([
-    tenantDb.execute(sql`
+  const packetResult = await tenantDb.execute(sql`
       SELECT
         p.*,
         d.name AS deal_name,
@@ -2790,23 +2239,22 @@ export async function getAiReviewPacketDetail(
       LEFT JOIN deals d ON d.id = p.deal_id
       WHERE p.id = ${packetId}
       LIMIT 1
-    `),
-    tenantDb
-      .select()
-      .from(aiTaskSuggestions)
-      .where(eq(aiTaskSuggestions.packetId, packetId))
-      .orderBy(desc(aiTaskSuggestions.createdAt)),
-    tenantDb
-      .select()
-      .from(aiRiskFlags)
-      .where(eq(aiRiskFlags.packetId, packetId))
-      .orderBy(desc(aiRiskFlags.createdAt)),
-    tenantDb
-      .select()
-      .from(aiFeedback)
-      .where(and(eq(aiFeedback.targetType, "packet"), eq(aiFeedback.targetId, packetId)))
-      .orderBy(desc(aiFeedback.createdAt)),
-  ]);
+    `);
+  const suggestedTasks = await tenantDb
+    .select()
+    .from(aiTaskSuggestions)
+    .where(eq(aiTaskSuggestions.packetId, packetId))
+    .orderBy(desc(aiTaskSuggestions.createdAt));
+  const blindSpotFlags = await tenantDb
+    .select()
+    .from(aiRiskFlags)
+    .where(eq(aiRiskFlags.packetId, packetId))
+    .orderBy(desc(aiRiskFlags.createdAt));
+  const feedback = await tenantDb
+    .select()
+    .from(aiFeedback)
+    .where(and(eq(aiFeedback.targetType, "packet"), eq(aiFeedback.targetId, packetId)))
+    .orderBy(desc(aiFeedback.createdAt));
 
   const packetRow = getRows(packetResult)[0];
 

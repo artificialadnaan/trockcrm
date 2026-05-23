@@ -252,6 +252,7 @@ describe("intervention policy recommendations service", () => {
     const evaluation = await getInterventionPolicyRecommendationEvaluationSummary(tenantDb as any, {
       officeId: "office-1",
       window: "last_30_days",
+      now: new Date("2026-04-19T14:15:00.000Z"),
     });
 
     expect(evaluation.totals.qualifiedRendered).toBeGreaterThanOrEqual(1);
@@ -957,6 +958,7 @@ describe("intervention policy recommendations service", () => {
       viewerUserId: "admin-1",
       window: "last_30_days",
       decision: "all",
+      now: new Date("2026-04-19T14:00:00.000Z"),
     });
 
     expect(review.recentHistory).toHaveLength(20);
