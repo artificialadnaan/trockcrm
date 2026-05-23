@@ -1,9 +1,10 @@
 import type { CSSProperties, ReactNode } from "react";
 import { useNavigate } from "react-router-dom";
-import { bestEstimate, daysInStage, formatCurrencyCompact, formatDealDisplayNumber } from "@/lib/deal-utils";
+import { bestEstimate, formatCurrencyCompact, formatDealDisplayNumber } from "@/lib/deal-utils";
 import { cn } from "@/lib/utils";
 import type { Deal } from "@/hooks/use-deals";
 import { AtRiskBadge } from "@/components/deals/at-risk-badge";
+import { getEffectiveStageAgeDeal, getEffectiveStageAgeDays } from "@trock-crm/shared/types";
 
 export function getDealDisplayNumber(deal: Pick<Deal, "dealNumber" | "projectNumber">) {
   return formatDealDisplayNumber(deal);
@@ -31,7 +32,7 @@ export function KanbanDealCard({
   const navigate = useNavigate();
   const handleClick = onClick ?? (() => navigate(`/deals/${deal.id}`));
 
-  const days = daysInStage(deal.stageEnteredAt);
+  const days = getEffectiveStageAgeDays(getEffectiveStageAgeDeal(deal));
   const value = bestEstimate(deal);
   const displayNumber = getDealDisplayNumber(deal);
 

@@ -743,6 +743,35 @@ describe("DealsListSection", () => {
     expect(html).toContain('data-at-risk-severity="at_risk"');
   });
 
+  it("uses Bid Board stage age for list card SLA labels next to At Risk badges", () => {
+    vi.useFakeTimers();
+    try {
+      vi.setSystemTime(new Date("2026-05-10T00:00:00.000Z"));
+      mocks.useDealsMock.mockReturnValue({
+        deals: [
+          makeDeal({
+            isBidBoardOwned: true,
+            stageEnteredAt: "2026-05-10T00:00:00.000Z",
+            bidBoardStageEnteredAt: "2026-05-01T00:00:00.000Z",
+            atRisk: makeAtRiskResult({ effectiveStageAgeDays: 9 }),
+          }),
+        ],
+        pagination: { page: 1, limit: 25, total: 1, totalPages: 1 },
+        loading: false,
+        error: null,
+        refetch: vi.fn(),
+      });
+
+      const html = render();
+
+      expect(html).toContain("At Risk");
+      expect(html).toContain("9d SLA");
+      expect(html).not.toContain("0d SLA");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("does not render at-risk badges in the list before Slice B supplies the result", () => {
     const html = render();
 

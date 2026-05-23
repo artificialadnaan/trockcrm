@@ -168,6 +168,100 @@ describe("DecoratedKanbanCard", () => {
     }
   });
 
+  it("uses Bid Board stage age for Bid Board-owned deal SLA chips", () => {
+    vi.useFakeTimers();
+    try {
+      vi.setSystemTime(new Date("2026-05-10T00:00:00.000Z"));
+
+      const html = renderDeal(
+        makeDeal({
+          isBidBoardOwned: true,
+          stageEnteredAt: "2026-05-10T00:00:00.000Z",
+          bidBoardStageEnteredAt: "2026-05-01T00:00:00.000Z",
+          atRisk: makeAtRiskResult({
+            stageSlug: "estimate_under_review",
+            canonicalStageSlug: "estimate_under_review",
+            effectiveStageAgeDays: 9,
+            thresholdDays: 3,
+          }),
+        }),
+        "estimate_under_review"
+      );
+
+      expect(html).toContain("9d / 3d SLA");
+      expect(html).not.toContain("0d / 3d SLA");
+      expect(html).toContain("At Risk");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("keeps non-Bid-Board-owned deal SLA chips on CRM stage age", () => {
+    vi.useFakeTimers();
+    try {
+      vi.setSystemTime(new Date("2026-05-10T00:00:00.000Z"));
+
+      const html = renderDeal(
+        makeDeal({
+          isBidBoardOwned: false,
+          stageEnteredAt: "2026-05-10T00:00:00.000Z",
+          bidBoardStageEnteredAt: "2026-05-01T00:00:00.000Z",
+        }),
+        "estimate_under_review"
+      );
+
+      expect(html).toContain("0d / 3d SLA");
+      expect(html).not.toContain("9d / 3d SLA");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("falls back to CRM stage age when a Bid Board-owned deal has no Bid Board stage timestamp", () => {
+    vi.useFakeTimers();
+    try {
+      vi.setSystemTime(new Date("2026-05-10T00:00:00.000Z"));
+
+      const html = renderDeal(
+        makeDeal({
+          isBidBoardOwned: true,
+          stageEnteredAt: "2026-05-10T00:00:00.000Z",
+          bidBoardStageEnteredAt: null,
+        }),
+        "estimate_under_review"
+      );
+
+      expect(html).toContain("0d / 3d SLA");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("preserves hold-aware Bid Board stage age for SLA chips", () => {
+    vi.useFakeTimers();
+    try {
+      vi.setSystemTime(new Date("2026-05-10T00:00:00.000Z"));
+
+      const html = renderDeal(
+        makeDeal({
+          isBidBoardOwned: true,
+          stageEnteredAt: "2026-05-10T00:00:00.000Z",
+          bidBoardStageEnteredAt: "2026-05-01T00:00:00.000Z",
+          onHold: true,
+          onHoldStartedAt: "2026-05-06T00:00:00.000Z",
+          onHoldAccumulatedSeconds: 0,
+          onHoldAccumulatedSecondsAtStageEntry: 0,
+        }),
+        "estimating"
+      );
+
+      expect(html).toContain("5d / 14d SLA");
+      expect(html).not.toContain("9d / 14d SLA");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("keeps time-in-stage but omits SLA context for terminal stages", () => {
     const html = render("won");
 

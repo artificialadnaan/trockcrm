@@ -2,9 +2,11 @@ import { describe, expect, it } from "vitest";
 import {
   getEffectiveAwardedDealValue,
   getEffectiveDealValue,
+  getEffectiveStageAgeDeal,
   getEffectiveStageAgeDays,
   getEffectiveStageAgeSeconds,
   getHoldStateAtStageEntry,
+  resolveEffectiveStageEnteredAt,
 } from "./deal-hold.js";
 
 describe("deal hold helpers", () => {
@@ -112,6 +114,69 @@ describe("deal hold helpers", () => {
         new Date("2026-05-10T12:00:00.000Z")
       )
     ).toBe(7);
+  });
+
+  it("uses the Bid Board stage-entered timestamp for Bid Board-owned effective age", () => {
+    expect(
+      getEffectiveStageAgeDays(
+        getEffectiveStageAgeDeal({
+          isBidBoardOwned: true,
+          stageEnteredAt: "2026-05-10T00:00:00.000Z",
+          bidBoardStageEnteredAt: "2026-05-01T00:00:00.000Z",
+          onHold: false,
+          onHoldStartedAt: null,
+          onHoldAccumulatedSeconds: 0,
+          onHoldAccumulatedSecondsAtStageEntry: 0,
+        }),
+        new Date("2026-05-10T00:00:00.000Z")
+      )
+    ).toBe(9);
+  });
+
+  it("keeps non-Bid-Board-owned effective age on the CRM stage-entered timestamp", () => {
+    expect(
+      resolveEffectiveStageEnteredAt({
+        isBidBoardOwned: false,
+        stageEnteredAt: "2026-05-10T00:00:00.000Z",
+        bidBoardStageEnteredAt: "2026-05-01T00:00:00.000Z",
+      })
+    ).toBe("2026-05-10T00:00:00.000Z");
+  });
+
+  it("keeps rows with omitted Bid Board ownership on the CRM stage-entered timestamp", () => {
+    expect(
+      resolveEffectiveStageEnteredAt({
+        stageEnteredAt: "2026-05-10T00:00:00.000Z",
+        bidBoardStageEnteredAt: "2026-05-01T00:00:00.000Z",
+      })
+    ).toBe("2026-05-10T00:00:00.000Z");
+  });
+
+  it("falls back to the CRM stage-entered timestamp for Bid Board-owned rows without a Bid Board timestamp", () => {
+    expect(
+      resolveEffectiveStageEnteredAt({
+        isBidBoardOwned: true,
+        stageEnteredAt: "2026-05-10T00:00:00.000Z",
+        bidBoardStageEnteredAt: null,
+      })
+    ).toBe("2026-05-10T00:00:00.000Z");
+  });
+
+  it("keeps Bid Board-owned effective age hold-aware from the Bid Board stage-entered timestamp", () => {
+    expect(
+      getEffectiveStageAgeDays(
+        getEffectiveStageAgeDeal({
+          isBidBoardOwned: true,
+          stageEnteredAt: "2026-05-10T00:00:00.000Z",
+          bidBoardStageEnteredAt: "2026-05-01T00:00:00.000Z",
+          onHold: true,
+          onHoldStartedAt: "2026-05-06T00:00:00.000Z",
+          onHoldAccumulatedSeconds: 0,
+          onHoldAccumulatedSecondsAtStageEntry: 0,
+        }),
+        new Date("2026-05-10T00:00:00.000Z")
+      )
+    ).toBe(5);
   });
 
   it("clamps effective stage age at zero when hold time would exceed raw elapsed time", () => {
