@@ -25,6 +25,8 @@ import {
   aliasedActiveDealCountFilterSql,
   aliasedEffectiveAwardedDealValueSql,
   aliasedEffectiveDealValueSql,
+  aliasedReportableDealFilterSql,
+  reportableDealFilterSql,
 } from "../shared/deal-value-sql.js";
 
 type TenantDb = NodePgDatabase<typeof schema>;
@@ -361,6 +363,7 @@ interface ForecastVarianceDealSqlRow extends Record<string, unknown> {
 function buildForecastVarianceFilterSql(filters: NormalizedAnalyticsFilters) {
   const clauses = [
     sql`COALESCE(d.is_test_data, false) = false`,
+    aliasedReportableDealFilterSql("d"),
     sql`cw.captured_at >= ${filters.from}::timestamptz`,
     sql`cw.captured_at < (${filters.to}::date + INTERVAL '1 day')::timestamptz`,
   ];
@@ -625,7 +628,7 @@ export async function getPipelineSummary(
   const result = await tenantDb.execute(sql`
     SELECT
       d.stage_id,
-      COUNT(*) FILTER (WHERE COALESCE(d.on_hold, false) = false)::int AS deal_count,
+      COUNT(*) FILTER (WHERE ${aliasedReportableDealFilterSql("d")})::int AS deal_count,
       COALESCE(SUM(${aliasedEffectiveDealValueSql("d")}), 0)::numeric AS total_value
     FROM deals d
     WHERE d.is_active = true
@@ -685,7 +688,7 @@ export async function getWeightedPipelineForecast(
   const result = await tenantDb.execute(sql`
     SELECT
       TO_CHAR(d.expected_close_date, 'YYYY-MM') AS month,
-      COUNT(*) FILTER (WHERE COALESCE(d.on_hold, false) = false)::int AS deal_count,
+      COUNT(*) FILTER (WHERE ${aliasedReportableDealFilterSql("d")})::int AS deal_count,
       COALESCE(SUM(${aliasedEffectiveDealValueSql("d")}), 0)::numeric AS raw_value,
       COALESCE(SUM(
         ${aliasedEffectiveDealValueSql("d")}
@@ -814,6 +817,7 @@ export async function getWinRateTrend(
     JOIN deals d ON d.id = dsh.deal_id
     JOIN pipeline_stage_config psc ON psc.id = dsh.to_stage_id
     WHERE psc.is_terminal = true
+      AND ${aliasedReportableDealFilterSql("d")}
       AND dsh.created_at >= ${from}::timestamptz
       AND dsh.created_at <= (${to}::date + INTERVAL '1 day')::timestamptz
       ${repFilter}
@@ -949,6 +953,7 @@ export async function getStaleDeals(
     JOIN users u ON u.id = d.assigned_rep_id
     WHERE d.is_active = true
       AND COALESCE(d.is_test_data, false) = false
+      AND ${aliasedReportableDealFilterSql("d")}
       AND ${nonTerminalDealStageSql()}
       ${repFilter}
     ORDER BY d.updated_at ASC
@@ -1126,7 +1131,7 @@ export async function getLeadSourceROI(
     SELECT
       COALESCE(NULLIF(TRIM(d.source), ''), 'Unknown') AS source,
       COUNT(DISTINCT dsi.id)::int AS lead_count,
-      COUNT(DISTINCT d.id)::int AS deal_count,
+      COUNT(DISTINCT d.id) FILTER (WHERE ${aliasedReportableDealFilterSql("d")})::int AS deal_count,
       COUNT(DISTINCT d.id) FILTER (
         WHERE d.is_active = true
           AND ${nonTerminalDealStageSql()}
@@ -1142,10 +1147,17 @@ export async function getLeadSourceROI(
       )::int AS lost_deals,
       COALESCE(SUM(
         ${aliasedEffectiveDealValueSql("d")}
-      ) FILTER (WHERE d.is_active = true AND ${nonTerminalDealStageSql()}), 0)::numeric AS active_pipeline_value,
+      ) FILTER (
+        WHERE d.is_active = true
+          AND ${nonTerminalDealStageSql()}
+          AND ${aliasedReportableDealFilterSql("d")}
+      ), 0)::numeric AS active_pipeline_value,
       COALESCE(SUM(
         ${aliasedEffectiveAwardedDealValueSql("d")}
-      ) FILTER (WHERE psc.slug IN (${sqlSlugList(WON_OUTCOME_STAGE_SLUGS)})), 0)::numeric AS won_value
+      ) FILTER (
+        WHERE psc.slug IN (${sqlSlugList(WON_OUTCOME_STAGE_SLUGS)})
+          AND ${aliasedReportableDealFilterSql("d")}
+      ), 0)::numeric AS won_value
     FROM deals d
     LEFT JOIN deal_scoping_intake dsi ON dsi.deal_id = d.id
     JOIN pipeline_stage_config psc ON psc.id = d.stage_id
@@ -1240,6 +1252,7 @@ export async function getDataMiningOverview(
       LEFT JOIN deal_scoping_intake dsi ON dsi.deal_id = d.id
       JOIN pipeline_stage_config psc ON psc.id = d.stage_id
       WHERE COALESCE(d.is_test_data, false) = false
+        AND ${aliasedReportableDealFilterSql("d")}
         ${filters.officeId ? sql`AND dsi.office_id = ${filters.officeId}` : sql``}
         ${filters.regionId ? sql`AND d.region_id = ${filters.regionId}` : sql``}
         ${filters.repId ? sql`AND d.assigned_rep_id = ${filters.repId}` : sql``}
@@ -1687,6 +1700,7 @@ export async function getRegionalOwnershipOverview(
       JOIN pipeline_stage_config psc ON psc.id = d.stage_id
       WHERE d.is_active = true
         AND COALESCE(d.is_test_data, false) = false
+        AND ${aliasedReportableDealFilterSql("d")}
         AND ${nonTerminalDealStageSql()}
         ${dateFilter}
         ${officeFilter}
@@ -1809,11 +1823,11 @@ export async function getDdVsPipeline(
       COALESCE(SUM(
         ${aliasedEffectiveDealValueSql("d")}
       ) FILTER (WHERE NOT psc.is_active_pipeline AND ${nonTerminalDealStageSql()}), 0)::numeric AS dd_value,
-      COUNT(*) FILTER (WHERE NOT psc.is_active_pipeline AND ${nonTerminalDealStageSql()} AND COALESCE(d.on_hold, false) = false)::int AS dd_count,
+      COUNT(*) FILTER (WHERE NOT psc.is_active_pipeline AND ${nonTerminalDealStageSql()} AND ${aliasedReportableDealFilterSql("d")})::int AS dd_count,
       COALESCE(SUM(
         ${aliasedEffectiveDealValueSql("d")}
       ) FILTER (WHERE psc.is_active_pipeline AND ${nonTerminalDealStageSql()}), 0)::numeric AS pipeline_value,
-      COUNT(*) FILTER (WHERE psc.is_active_pipeline AND ${nonTerminalDealStageSql()} AND COALESCE(d.on_hold, false) = false)::int AS pipeline_count
+      COUNT(*) FILTER (WHERE psc.is_active_pipeline AND ${nonTerminalDealStageSql()} AND ${aliasedReportableDealFilterSql("d")})::int AS pipeline_count
     FROM deals d
     JOIN pipeline_stage_config psc ON psc.id = d.stage_id
     WHERE d.is_active = true
@@ -2267,6 +2281,7 @@ export async function getUnifiedWorkflowOverview(
       JOIN deals d ON d.id = dsi.deal_id
       LEFT JOIN companies c ON c.id = d.company_id
       WHERE dsi.status IN ('draft', 'ready')
+        AND ${aliasedReportableDealFilterSql("d")}
         ${leadRepFilter}
       ORDER BY stage_entered_at ASC, lead_name ASC
     `);
@@ -2293,6 +2308,7 @@ export async function getUnifiedWorkflowOverview(
       LEFT JOIN users u ON u.id = d.assigned_rep_id
       WHERE d.is_active = true
       AND COALESCE(d.is_test_data, false) = false
+        AND ${aliasedReportableDealFilterSql("d")}
         AND ${nonTerminalDealStageSql()}
         ${dealRepFilter}
       ORDER BY stage_entered_at ASC, deal_name ASC
@@ -2313,6 +2329,7 @@ export async function getUnifiedWorkflowOverview(
       JOIN pipeline_stage_config psc ON psc.id = d.stage_id
       WHERE d.is_active = true
         AND COALESCE(d.is_test_data, false) = false
+        AND ${aliasedReportableDealFilterSql("d")}
         AND d.workflow_route IN ('normal', 'service')
         AND ${nonTerminalDealStageSql()}
         ${dealRepFilter}
@@ -2581,6 +2598,9 @@ export async function executeCustomReport(
 
   // Build WHERE clause from filters using parameter binding for all values.
   const whereClauses: ReturnType<typeof sql>[] = [];
+  if (entityTable === "deals") {
+    whereClauses.push(reportableDealFilterSql());
+  }
   for (const filter of config.filters) {
     const field = normalizeReportField(entityTable, filter.field);
     if (!allowed.includes(field)) continue; // skip unknown fields

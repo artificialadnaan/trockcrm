@@ -119,6 +119,19 @@ describe("Reports Service", () => {
     });
   });
 
+  describe("getWinRateTrend", () => {
+    it("excludes active on-hold deals from win/loss trend counts", async () => {
+      const { getWinRateTrend } = await import("../../../src/modules/reports/service.js");
+      const tenantDb = createMockTenantDb([]);
+
+      await getWinRateTrend(tenantDb, { from: "2026-01-01", to: "2026-12-31" });
+
+      const queryText = extractSqlText(tenantDb.execute.mock.calls[0][0]).toLowerCase();
+      expect(queryText).toContain("join deals d on d.id = dsh.deal_id");
+      expect(queryText).toContain("coalesce(d.on_hold, false) = false");
+    });
+  });
+
   describe("getActivitySummaryByRep", () => {
     it("should return activity breakdown by type", async () => {
       const { getActivitySummaryByRep } = await import("../../../src/modules/reports/service.js");
@@ -175,6 +188,39 @@ describe("Reports Service", () => {
       const result = await getLeadSourceROI(tenantDb);
       expect(result[0].source).toBe("Referral");
       expect(result[0].winRate).toBe(60);
+    });
+
+    it("uses the shared reportable-deal predicate for every deal-derived Lead Source ROI metric", async () => {
+      const { getLeadSourceROI } = await import("../../../src/modules/reports/service.js");
+      const tenantDb = createMockTenantDb([]);
+
+      await getLeadSourceROI(tenantDb);
+
+      const queryText = extractSqlText(tenantDb.execute.mock.calls[0][0]).toLowerCase();
+      expect(queryText).toContain("count(distinct d.id) filter (where coalesce(d.on_hold, false) = false)::int as deal_count");
+      expect(queryText.match(/coalesce\(d\.on_hold, false\) = false/g)?.length).toBeGreaterThanOrEqual(5);
+    });
+  });
+
+  describe("executeCustomReport", () => {
+    it("excludes active on-hold deals from custom report row populations", async () => {
+      const { executeCustomReport } = await import("../../../src/modules/reports/service.js");
+      const tenantDb = createMockTenantDb([{ total: "0" }]);
+
+      await executeCustomReport(
+        tenantDb,
+        {
+          entity: "deals",
+          columns: ["id", "name"],
+          filters: [],
+        } as any,
+        { page: 1, limit: 25 }
+      );
+
+      const queryText = tenantDb.execute.mock.calls
+        .map(([query]: [unknown]) => extractSqlText(query).toLowerCase())
+        .join("\n");
+      expect(queryText).toContain("coalesce(on_hold, false) = false");
     });
   });
 

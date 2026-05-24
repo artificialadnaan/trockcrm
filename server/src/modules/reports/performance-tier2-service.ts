@@ -116,6 +116,7 @@ function dealScopeFull(filters: PerformanceReportFilters, alias: DealScopeAlias 
   if (options.includeArchivedWinsMarker) clauses.push(sql.raw("/* include_archived_wins */ true"));
   if (options.requireActive !== false) clauses.push(sql.raw(`${alias}.is_active = true`));
   clauses.push(sql.raw(`COALESCE(${alias}.is_test_data, false) = false`));
+  clauses.push(aliasedActiveDealCountFilterSql(alias));
   const officeClause = buildOfficeMatcher(filters.office, {
     officeId: sql`o.id`,
     officeSlug: sql`o.slug`,

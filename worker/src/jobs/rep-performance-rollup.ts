@@ -1,7 +1,13 @@
-import { getDealAtRiskResult, type WorkflowRoute } from "@trock-crm/shared/types";
+import {
+  getDealAtRiskResult,
+  isReportableDeal,
+  reportableDealSqlPredicate,
+  type WorkflowRoute,
+} from "@trock-crm/shared/types";
 import { pool } from "../db.js";
 
 export const STALE_ACCOUNT_THRESHOLD_DAYS = 30;
+const REPORTABLE_DEAL_SQL = reportableDealSqlPredicate("d");
 
 const PERIOD_KINDS = [
   "mtd",
@@ -107,6 +113,7 @@ export function computeRepAtRiskCountsFromRows(
 
   for (const row of rows) {
     if (!row.rep_id) continue;
+    if (!isReportableDeal({ onHold: row.on_hold })) continue;
 
     const atRisk = getDealAtRiskResult(
       {
@@ -167,6 +174,7 @@ async function getRepAtRiskCountsForPeriod(
        AND d.is_active = true
        AND NOT psc.is_terminal
        AND COALESCE(d.is_test_data, false) = false
+       AND ${REPORTABLE_DEAL_SQL}
        AND d.created_at::date <= $1::date`,
     [period.end]
   );
@@ -215,13 +223,14 @@ async function refreshOfficePeriod(
                -- as of NOW, not as of period_end. A deal open during the period
                -- but now terminal would otherwise be retroactively excluded from
                -- historical snapshots. See: PR #160, Codex review on 3dab1ef212.
-               d.created_at::date <= $3::date
-               AND (
+                ${REPORTABLE_DEAL_SQL}
+                AND d.created_at::date <= $3::date
+                AND (
                   COALESCE(d.actual_close_date, d.contract_signed_date, d.contract_signed_at::date, d.lost_at::date) IS NULL
                   OR COALESCE(d.actual_close_date, d.contract_signed_date, d.contract_signed_at::date, d.lost_at::date) >= $2::date
                )
-             ELSE d.is_active = true AND NOT psc.is_terminal
-           END
+              ELSE d.is_active = true AND NOT psc.is_terminal AND ${REPORTABLE_DEAL_SQL}
+            END
          )::int AS deals_count,
          COALESCE(SUM(COALESCE(d.awarded_amount, d.bid_estimate, d.dd_estimate, 0))
            FILTER (
@@ -229,35 +238,39 @@ async function refreshOfficePeriod(
                -- Historical pipeline_value follows the same deterministic
                -- lifecycle-only rule as historical deals_count above.
                WHEN $1::text IN ('last_month', 'last_quarter', 'last_year') THEN
-                 d.created_at::date <= $3::date
-                 AND (
+                  ${REPORTABLE_DEAL_SQL}
+                  AND d.created_at::date <= $3::date
+                  AND (
                    COALESCE(d.actual_close_date, d.contract_signed_date, d.contract_signed_at::date, d.lost_at::date) IS NULL
                    OR COALESCE(d.actual_close_date, d.contract_signed_date, d.contract_signed_at::date, d.lost_at::date) >= $2::date
                  )
-               ELSE d.is_active = true AND NOT psc.is_terminal AND psc.is_active_pipeline
-             END
+                ELSE d.is_active = true AND NOT psc.is_terminal AND psc.is_active_pipeline AND ${REPORTABLE_DEAL_SQL}
+              END
            ), 0)::numeric AS pipeline_value,
          COUNT(*) FILTER (
-           WHERE psc.slug IN ('won', 'sent_to_production', 'service_sent_to_production', 'closed_won')
-             AND COALESCE(d.actual_close_date, d.contract_signed_date, d.contract_signed_at::date, d.updated_at::date) >= $2::date
+         WHERE psc.slug IN ('won', 'sent_to_production', 'service_sent_to_production', 'closed_won')
+              AND ${REPORTABLE_DEAL_SQL}
+              AND COALESCE(d.actual_close_date, d.contract_signed_date, d.contract_signed_at::date, d.updated_at::date) >= $2::date
              AND COALESCE(d.actual_close_date, d.contract_signed_date, d.contract_signed_at::date, d.updated_at::date) <= $3::date
          )::int AS wins_count,
          COUNT(*) FILTER (
-           WHERE psc.slug IN ('lost', 'production_lost', 'service_lost', 'closed_lost')
-             AND COALESCE(d.actual_close_date, d.lost_at::date, d.updated_at::date) >= $2::date
+         WHERE psc.slug IN ('lost', 'production_lost', 'service_lost', 'closed_lost')
+              AND ${REPORTABLE_DEAL_SQL}
+              AND COALESCE(d.actual_close_date, d.lost_at::date, d.updated_at::date) >= $2::date
              AND COALESCE(d.actual_close_date, d.lost_at::date, d.updated_at::date) <= $3::date
          )::int AS losses_count,
          COALESCE(SUM(COALESCE(d.awarded_amount, d.bid_estimate, d.dd_estimate, 0))
            FILTER (
              WHERE psc.slug IN ('won', 'sent_to_production', 'service_sent_to_production', 'closed_won')
-               AND COALESCE(d.actual_close_date, d.contract_signed_date, d.contract_signed_at::date, d.updated_at::date) >= $2::date
+                AND ${REPORTABLE_DEAL_SQL}
+                AND COALESCE(d.actual_close_date, d.contract_signed_date, d.contract_signed_at::date, d.updated_at::date) >= $2::date
                AND COALESCE(d.actual_close_date, d.contract_signed_date, d.contract_signed_at::date, d.updated_at::date) <= $3::date
            ), 0)::numeric AS closed_value,
          COALESCE(ROUND(AVG(
            COALESCE(d.actual_close_date, d.contract_signed_date, d.contract_signed_at::date, d.lost_at::date)
              - d.created_at::date
          ) FILTER (
-           WHERE psc.slug IN (
+          WHERE psc.slug IN (
                'won',
                'sent_to_production',
                'service_sent_to_production',
@@ -267,7 +280,8 @@ async function refreshOfficePeriod(
                'service_lost',
                'closed_lost'
              )
-             AND COALESCE(d.actual_close_date, d.contract_signed_date, d.contract_signed_at::date, d.lost_at::date) >= $2::date
+              AND ${REPORTABLE_DEAL_SQL}
+              AND COALESCE(d.actual_close_date, d.contract_signed_date, d.contract_signed_at::date, d.lost_at::date) >= $2::date
              AND COALESCE(d.actual_close_date, d.contract_signed_date, d.contract_signed_at::date, d.lost_at::date) <= $3::date
          ), 2), 0)::numeric AS avg_days_to_close,
          0::int AS legacy_at_risk_count
@@ -304,6 +318,7 @@ async function refreshOfficePeriod(
          JOIN ${schemaName}.companies c
            ON c.id = d.company_id
          WHERE d.assigned_rep_id IS NOT NULL
+           AND ${REPORTABLE_DEAL_SQL}
            AND d.created_at::date <= $3::date
            AND c.last_activity_at IS NOT NULL
            -- Treat period_end as inclusive end-of-day before subtracting the
@@ -322,6 +337,7 @@ async function refreshOfficePeriod(
          JOIN ${schemaName}.properties p
            ON p.id = d.property_id
          WHERE d.assigned_rep_id IS NOT NULL
+           AND ${REPORTABLE_DEAL_SQL}
            AND d.created_at::date <= $3::date
            AND p.last_activity_at IS NOT NULL
            -- Treat period_end as inclusive end-of-day before subtracting the

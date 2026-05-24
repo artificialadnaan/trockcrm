@@ -1,4 +1,5 @@
 import { sql, type SQL } from "drizzle-orm";
+import { reportableDealSqlPredicate } from "@trock-crm/shared/types";
 
 type DealValueTable = {
   onHold: unknown;
@@ -69,6 +70,14 @@ export function aliasedEffectiveAwardedDealValueSql(
   return aliasedEffectiveDealValueSql(alias, rawValueSql);
 }
 
+export function reportableDealFilterSql(identifierPath?: string): SQL {
+  return sql.raw(reportableDealSqlPredicate(identifierPath));
+}
+
+export function aliasedReportableDealFilterSql(alias: string): SQL {
+  return reportableDealFilterSql(alias);
+}
+
 export function aliasedActiveDealCountFilterSql(alias: string): SQL {
-  return sql`COALESCE(${sql.raw(`${alias}.on_hold`)}, false) = false`;
+  return aliasedReportableDealFilterSql(alias);
 }

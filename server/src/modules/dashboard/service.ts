@@ -679,11 +679,12 @@ async function getCrmOwnedProgression(
         d.workflow_route::text AS workflow_route,
         psc.name AS stage_name,
         psc.display_order,
-        COUNT(*) FILTER (WHERE COALESCE(d.on_hold, false) = false)::int AS item_count,
+        COUNT(*) FILTER (WHERE ${aliasedActiveDealCountFilterSql("d")})::int AS item_count,
         COALESCE(SUM(${dealValueSql()}), 0)::numeric AS total_value
       FROM deals d
       JOIN pipeline_stage_config psc ON psc.id = d.stage_id
       WHERE d.is_active = true
+        AND ${aliasedActiveDealCountFilterSql("d")}
         AND psc.slug = 'opportunity'
         ${dealRepFilter}
       GROUP BY d.workflow_route, psc.name, psc.display_order
@@ -801,11 +802,12 @@ async function getRepFunnelBuckets(
     () => tenantDb.execute(sql`
       SELECT
         psc.slug,
-        COUNT(*) FILTER (WHERE COALESCE(d.on_hold, false) = false)::int AS count,
+        COUNT(*) FILTER (WHERE ${aliasedActiveDealCountFilterSql("d")})::int AS count,
         COALESCE(SUM(${dealValueSql()}), 0)::numeric AS total_value
       FROM deals d
       JOIN pipeline_stage_config psc ON psc.id = d.stage_id
       WHERE d.is_active = true
+        AND ${aliasedActiveDealCountFilterSql("d")}
         ${dealRepFilter}
         AND psc.slug IN (${sql.join(ESTIMATING_PROGRESS_STAGE_SLUGS.map((slug) => sql`${slug}`), sql`, `)})
       GROUP BY psc.slug
@@ -835,11 +837,12 @@ async function getDirectorFunnelSummary(
     () => tenantDb.execute(sql`
       SELECT
         psc.slug,
-        COUNT(*) FILTER (WHERE COALESCE(d.on_hold, false) = false)::int AS count,
+        COUNT(*) FILTER (WHERE ${aliasedActiveDealCountFilterSql("d")})::int AS count,
         COALESCE(SUM(${dealValueSql()}), 0)::numeric AS total_value
       FROM deals d
       JOIN pipeline_stage_config psc ON psc.id = d.stage_id
       WHERE d.is_active = true
+        AND ${aliasedActiveDealCountFilterSql("d")}
         AND psc.slug IN (${sql.join(ESTIMATING_PROGRESS_STAGE_SLUGS.map((slug) => sql`${slug}`), sql`, `)})
       GROUP BY psc.slug
     `),
@@ -875,7 +878,7 @@ async function getDirectorFunnelSummary(
           d.assigned_rep_id AS rep_id,
           COUNT(*) FILTER (
             WHERE psc.slug IN (${sql.join(ESTIMATING_PROGRESS_STAGE_SLUGS.map((slug) => sql`${slug}`), sql`, `)})
-              AND COALESCE(d.on_hold, false) = false
+              AND ${aliasedActiveDealCountFilterSql("d")}
           )::int AS estimating
         FROM deals d
         JOIN pipeline_stage_config psc ON psc.id = d.stage_id
@@ -1405,11 +1408,12 @@ export async function getRepDashboard(
     // 1. Active deals count + value for this rep
     () => tenantDb.execute(sql`
       SELECT
-        COUNT(*) FILTER (WHERE COALESCE(d.on_hold, false) = false)::int AS count,
+        COUNT(*) FILTER (WHERE ${aliasedActiveDealCountFilterSql("d")})::int AS count,
         COALESCE(SUM(${dealValueSql()}), 0)::numeric AS total_value
       FROM deals d
       JOIN pipeline_stage_config psc ON psc.id = d.stage_id
       WHERE d.is_active = true
+        AND ${aliasedActiveDealCountFilterSql("d")}
         AND ${buildAliasedDealMineVisibilityCondition("d", userId, {
           includeSubscriptions: mineVisibility.dealSubscriptions,
           includeCreatedBy: mineVisibility.dealsCreatedByUserId,
@@ -1455,11 +1459,12 @@ export async function getRepDashboard(
         psc.name AS stage_name,
         psc.color AS stage_color,
         psc.display_order,
-        COUNT(*) FILTER (WHERE COALESCE(d.on_hold, false) = false)::int AS deal_count,
+        COUNT(*) FILTER (WHERE ${aliasedActiveDealCountFilterSql("d")})::int AS deal_count,
         COALESCE(SUM(${dealValueSql()}), 0)::numeric AS total_value
       FROM deals d
       JOIN pipeline_stage_config psc ON psc.id = d.stage_id
       WHERE d.is_active = true
+        AND ${aliasedActiveDealCountFilterSql("d")}
         AND ${buildAliasedDealMineVisibilityCondition("d", userId, {
           includeSubscriptions: mineVisibility.dealSubscriptions,
           includeCreatedBy: mineVisibility.dealsCreatedByUserId,
@@ -1549,6 +1554,7 @@ export async function getRepDashboard(
           includeSubscriptionDeletedAt: mineVisibility.dealSubscriptionsDeletedAt,
         })}
         AND ${nonTerminalDealStageSql()}
+        AND ${aliasedActiveDealCountFilterSql("d")}
       ORDER BY d.updated_at DESC
       LIMIT 5
     `),
@@ -2183,6 +2189,7 @@ async function getRecentCloses(
     JOIN ${pipelineStageConfig} psc ON psc.id = d.stage_id
     LEFT JOIN ${users} u ON u.id = d.assigned_rep_id
     WHERE d.is_active = true
+      AND ${aliasedActiveDealCountFilterSql("d")}
       AND psc.slug IN (${sql.join([...WON_STAGE_SLUGS, ...LEGACY_WON_STAGE_SLUGS, ...LOST_STAGE_SLUGS, ...LEGACY_LOST_STAGE_SLUGS].map((slug) => sql`${slug}`), sql`, `)})
       AND COALESCE(d.actual_close_date, d.contract_signed_date, d.contract_signed_at::date, d.lost_at::date, d.updated_at::date) >= ${options.from}::date
       AND COALESCE(d.actual_close_date, d.contract_signed_date, d.contract_signed_at::date, d.lost_at::date, d.updated_at::date) <= ${options.to}::date
@@ -2210,11 +2217,12 @@ async function getWonCloseSummary(
   const repFilter = dealScopeFilterSql("d", options);
   const result = await tenantDb.execute(sql`
     SELECT
-      COUNT(*) FILTER (WHERE COALESCE(d.on_hold, false) = false)::int AS won_count,
+      COUNT(*) FILTER (WHERE ${aliasedActiveDealCountFilterSql("d")})::int AS won_count,
       COALESCE(SUM(${aliasedEffectiveAwardedDealValueSql("d")}), 0)::numeric AS won_value
     FROM ${deals} d
     JOIN ${pipelineStageConfig} psc ON psc.id = d.stage_id
     WHERE d.is_active = true
+      AND ${aliasedActiveDealCountFilterSql("d")}
       AND psc.slug IN (${sql.join([...WON_STAGE_SLUGS, ...LEGACY_WON_STAGE_SLUGS].map((slug) => sql`${slug}`), sql`, `)})
       AND COALESCE(d.actual_close_date, d.contract_signed_date, d.contract_signed_at::date, d.updated_at::date) >= ${options.from}::date
       AND COALESCE(d.actual_close_date, d.contract_signed_date, d.contract_signed_at::date, d.updated_at::date) <= ${options.to}::date
@@ -2247,11 +2255,12 @@ async function getScopedPipelineSummary(
   const result = await tenantDb.execute(sql`
     SELECT
       d.stage_id,
-      COUNT(*) FILTER (WHERE COALESCE(d.on_hold, false) = false)::int AS deal_count,
+      COUNT(*) FILTER (WHERE ${aliasedActiveDealCountFilterSql("d")})::int AS deal_count,
       COALESCE(SUM(${dealValueSql()}), 0)::numeric AS total_value
     FROM deals d
     WHERE d.is_active = true
       AND COALESCE(d.is_test_data, false) = false
+      AND ${aliasedActiveDealCountFilterSql("d")}
       AND d.stage_id IN (${sql.join(stageIds.map((id) => sql`${id}`), sql`, `)})
       AND COALESCE(d.bid_board_stage_slug, '') NOT IN (${sqlSlugList(TERMINAL_STAGE_SLUGS)})
       ${scopeFilter}
@@ -2321,6 +2330,7 @@ async function getDashboardAtRiskRows(
     ) latest_current_stage_entered_at ON true
     WHERE d.is_active = true
       AND COALESCE(d.is_test_data, false) = false
+      AND ${aliasedActiveDealCountFilterSql("d")}
       AND ${nonTerminalDealStageSql()}
       ${scopeFilter}
   `);
@@ -2647,8 +2657,8 @@ async function buildRepPerformanceCards(
     rep_deals AS (
       SELECT
         d.assigned_rep_id AS rep_id,
-        COUNT(*) FILTER (WHERE d.is_active AND ${nonTerminalDealStageSql()} AND COALESCE(d.on_hold, false) = false)::int AS active_deals,
-        COALESCE(SUM(${dealValueSql()}) FILTER (WHERE d.is_active AND ${nonTerminalDealStageSql()} AND psc.is_active_pipeline), 0)::numeric AS pipeline_value
+        COUNT(*) FILTER (WHERE d.is_active AND ${nonTerminalDealStageSql()} AND ${aliasedActiveDealCountFilterSql("d")})::int AS active_deals,
+        COALESCE(SUM(${dealValueSql()}) FILTER (WHERE d.is_active AND ${nonTerminalDealStageSql()} AND psc.is_active_pipeline AND ${aliasedActiveDealCountFilterSql("d")}), 0)::numeric AS pipeline_value
       FROM deals d
       JOIN pipeline_stage_config psc ON psc.id = d.stage_id
       GROUP BY d.assigned_rep_id
@@ -2658,9 +2668,11 @@ async function buildRepPerformanceCards(
         d.assigned_rep_id AS rep_id,
         COUNT(*) FILTER (
           WHERE psc.slug IN (${sql.join([...WON_STAGE_SLUGS, ...LEGACY_WON_STAGE_SLUGS].map((slug) => sql`${slug}`), sql`, `)})
+            AND ${aliasedActiveDealCountFilterSql("d")}
         )::int AS wins,
         COUNT(*) FILTER (
           WHERE psc.slug IN (${sql.join([...LOST_STAGE_SLUGS, ...LEGACY_LOST_STAGE_SLUGS].map((slug) => sql`${slug}`), sql`, `)})
+            AND ${aliasedActiveDealCountFilterSql("d")}
         )::int AS losses
       FROM deal_stage_history dsh
       JOIN deals d ON d.id = dsh.deal_id

@@ -101,6 +101,24 @@ describe("runReportBuilder", () => {
     expect(extractSqlText(tenantDb.execute.mock.calls[0][0]).toLowerCase()).toContain("d.assigned_rep_id =");
   });
 
+  it("excludes active on-hold deals from generated report row populations", async () => {
+    const { runReportBuilder } = await import("../../../src/modules/reports/report-builder-service.js");
+    const tenantDb = createMockTenantDb([]);
+
+    await runReportBuilder(tenantDb, {
+      dimensions: ["stage"],
+      measures: ["deal_count", "total_value"],
+      filters: {},
+      dateField: "created_at",
+      role: "admin",
+      userId: "admin-1",
+    });
+
+    const queryText = extractSqlText(tenantDb.execute.mock.calls[0][0]).toLowerCase();
+    expect(queryText).toContain("where");
+    expect(queryText).toContain("coalesce(d.on_hold, false) = false");
+  });
+
   it("uses won/lost canonical slugs plus historical aliases for win rate", async () => {
     const { runReportBuilder } = await import("../../../src/modules/reports/report-builder-service.js");
     const tenantDb = createMockTenantDb([]);

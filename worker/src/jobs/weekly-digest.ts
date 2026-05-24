@@ -1,4 +1,4 @@
-import { getDealAtRiskResult, type WorkflowRoute } from "@trock-crm/shared/types";
+import { getDealAtRiskResult, reportableDealSqlPredicate, type WorkflowRoute } from "@trock-crm/shared/types";
 import { pool } from "../db.js";
 
 const SERVER_MODULE_ROOT =
@@ -6,6 +6,7 @@ const SERVER_MODULE_ROOT =
 const SERVER_EVALUATOR_MODULE = `${SERVER_MODULE_ROOT}/tasks/rules/evaluator.js` as string;
 const SERVER_TASK_RULES_MODULE = `${SERVER_MODULE_ROOT}/tasks/rules/config.js` as string;
 const SERVER_TASK_PERSISTENCE_MODULE = `${SERVER_MODULE_ROOT}/tasks/rules/persistence.js` as string;
+const REPORTABLE_DEAL_SQL = reportableDealSqlPredicate("d");
 
 async function loadTaskRuleDependencies() {
   const [{ evaluateTaskRules }, { TASK_RULES }, { createTenantTaskRulePersistence }] = (await Promise.all([
@@ -135,6 +136,7 @@ export async function runWeeklyDigest(): Promise<void> {
            ) latest_current_stage_entered_at ON true
            WHERE d.is_active = true
              AND psc.is_terminal = false
+             AND ${REPORTABLE_DEAL_SQL}
              AND COALESCE(d.is_test_data, false) = false`
         );
         const staleCount = countDigestAtRiskDeals(atRiskDealRows.rows, new Date());
@@ -147,6 +149,7 @@ export async function runWeeklyDigest(): Promise<void> {
            WHERE d.is_active = true
              AND psc.is_terminal = false
              AND d.expected_close_date IS NOT NULL
+             AND ${REPORTABLE_DEAL_SQL}
              AND d.expected_close_date BETWEEN CURRENT_DATE AND CURRENT_DATE + interval '7 days'`
         );
         const approachingCount = Number(approachingRes.rows[0]?.count ?? 0);
@@ -156,6 +159,7 @@ export async function runWeeklyDigest(): Promise<void> {
           `SELECT COUNT(*) AS count
            FROM ${schemaName}.deals d
            WHERE d.is_active = true
+             AND ${REPORTABLE_DEAL_SQL}
              AND d.created_at >= NOW() - interval '7 days'`
         );
         const newDealsCount = Number(newDealsRes.rows[0]?.count ?? 0);
@@ -166,6 +170,7 @@ export async function runWeeklyDigest(): Promise<void> {
            FROM ${schemaName}.deals d
            JOIN public.pipeline_stage_config psc ON psc.id = d.stage_id
            WHERE d.is_active = true
+             AND ${REPORTABLE_DEAL_SQL}
              AND psc.is_terminal = false`
         );
         const totalValue = Number(valueRes.rows[0]?.total_value ?? 0);

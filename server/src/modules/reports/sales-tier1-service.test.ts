@@ -279,7 +279,7 @@ describe("sales tier 1 report services", () => {
     }, "pv-uuid-regression");
 
     const [stageSql] = executedSql(db);
-    expect(stageSql).toMatch(/array_agg\(\s*id::text\s*\)\s*FILTER\s*\(WHERE rn = 1\)/);
+    expect(stageSql).toMatch(/array_agg\(\s*id::text\s*\)\s*FILTER\s*\(WHERE rn = 1/);
     expect(stageSql).not.toMatch(/MAX\(id\)\s+FILTER\s*\(WHERE rn = 1\)/);
   });
 

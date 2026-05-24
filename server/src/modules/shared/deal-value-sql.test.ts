@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   aliasedActiveDealCountFilterSql,
+  aliasedReportableDealFilterSql,
   aliasedEffectiveAwardedDealValueSql,
   aliasedDealBestEstimateSql,
   aliasedDealBestEstimateWithForecastSql,
@@ -25,6 +26,15 @@ describe("deal-value-sql", () => {
 
   it("exposes the active-count filter for active-vs-total badge rollups", () => {
     expect(normalize(aliasedActiveDealCountFilterSql("d"))).toContain("d.on_hold");
+  });
+
+  it("exposes one reportable-deal SQL predicate for report populations", () => {
+    expect(normalize(aliasedReportableDealFilterSql("d"))).toContain(
+      "COALESCE(d.on_hold, false) = false"
+    );
+    expect(normalize(aliasedActiveDealCountFilterSql("d"))).toEqual(
+      normalize(aliasedReportableDealFilterSql("d"))
+    );
   });
 
   it("builds the base best-estimate expression once for raw-value consumers", () => {
