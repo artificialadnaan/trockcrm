@@ -1555,6 +1555,43 @@ describe("Deal Scoping Routes", () => {
     );
   });
 
+  it("preserves the orphan-prevention block reason when Bid Board read-only overlay also applies", async () => {
+    const orphanBlockReason =
+      "This stage is managed by Bid Board. Send the deal to Bid Board and wait for its Bid Board project to be linked before moving it into downstream stages.";
+    const preflight = await import("../../../src/modules/deals/stage-gate.js");
+    vi.mocked(preflight.preflightStageCheck).mockResolvedValueOnce({
+      allowed: false,
+      blockReason: orphanBlockReason,
+      currentStage: {
+        id: "stage-estimate-in-progress",
+        name: "Estimate in Progress",
+        slug: "estimate_in_progress",
+        isTerminal: false,
+        displayOrder: 1,
+      },
+      targetStage: {
+        id: "stage-bid-sent",
+        name: "Estimate Sent to Client",
+        slug: "estimate_sent_to_client",
+        isTerminal: false,
+        displayOrder: 2,
+      },
+    } as never);
+    vi.mocked(workflowBackfill.inferDealBidBoardOwnership).mockReturnValueOnce({
+      isBidBoardOwned: false,
+    } as never);
+
+    const { res } = await invokeRoute("post", "/:id/stage/preflight", {
+      params: { id: "deal-1" },
+      body: { targetStageId: "stage-bid-sent" },
+    });
+
+    expect(res.statusCode).toBe(200);
+    expect(res.body.allowed).toBe(false);
+    expect(res.body.bidBoardLocked).toBe(true);
+    expect(res.body.blockReason).toBe(orphanBlockReason);
+  });
+
   it("allows the CRM-owned handoff move into estimate in progress", async () => {
     const preflight = await import("../../../src/modules/deals/stage-gate.js");
     vi.mocked(preflight.preflightStageCheck).mockResolvedValueOnce({

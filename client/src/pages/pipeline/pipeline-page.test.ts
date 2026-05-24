@@ -81,6 +81,12 @@ describe("pipeline DD toggle label", () => {
     expect(pipelinePageSource).not.toContain('navigate("/deals/new")');
     expect(pipelinePageSource).not.toContain("New Deal");
   });
+
+  it("routes drag-drop stage moves through the StageChangeDialog preflight flow", () => {
+    expect(pipelinePageSource).toContain("setPendingMove({ deal, targetStageId })");
+    expect(pipelinePageSource).toContain("<StageChangeDialog");
+    expect(pipelinePageSource).not.toContain("changeDealStage(");
+  });
 });
 
 describe("summarizeActivePipelineColumns", () => {

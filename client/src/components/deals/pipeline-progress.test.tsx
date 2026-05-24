@@ -287,4 +287,32 @@ describe("PipelineProgress", () => {
     expect(onStageClick).toHaveBeenCalledWith("stage-contract");
     rendered.unmount();
   });
+
+  it("routes CRM-owned downstream clicks through the stage-change flow for server preflight", () => {
+    const onStageClick = vi.fn();
+    const rendered = mount(
+      <PipelineProgress
+        stages={standardStages}
+        currentSlug="opportunity"
+        workflowRoute="normal"
+        isBidBoardOwned={false}
+        handoffStageDisplayOrder={1}
+        canMoveBackward
+        onStageClick={onStageClick}
+      />
+    );
+
+    const downstreamButton = rendered.container.querySelector<HTMLButtonElement>(
+      '[data-stage-slug="estimate_under_review"]'
+    );
+    expect(downstreamButton).not.toBeNull();
+    expect(downstreamButton?.disabled).toBe(false);
+
+    act(() => {
+      downstreamButton?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+
+    expect(onStageClick).toHaveBeenCalledWith("stage-under-review");
+    rendered.unmount();
+  });
 });

@@ -1,4 +1,4 @@
-import { eq, and } from "drizzle-orm";
+import { eq, and, inArray } from "drizzle-orm";
 import type { NodePgDatabase } from "drizzle-orm/node-postgres";
 import {
   pipelineStageConfig,
@@ -18,6 +18,9 @@ import { getResolvedDeal, type ResolvedDealView } from "./lineage-resolver.js";
 type TenantDb = NodePgDatabase<typeof schema>;
 
 type StageGateChecklistSource = "stage" | "scoping" | "combined";
+
+export const BID_BOARD_PROJECT_REQUIRED_FOR_DOWNSTREAM_STAGE_MESSAGE =
+  "This stage is managed by Bid Board. Send the deal to Bid Board and wait for its Bid Board project to be linked before moving it into downstream stages.";
 
 export interface StageGateChecklistItem {
   key: string;
@@ -206,6 +209,83 @@ function isEstimatingBoundaryStageSlug(stageSlug: string, workflowRoute: "normal
   );
 }
 
+function estimatingBoundarySlugCandidates(workflowRoute: "normal" | "service") {
+  return workflowRoute === "service"
+    ? ["service_estimating", "estimating"]
+    : ["estimate_in_progress", "estimating"];
+}
+
+function hasBidBoardProjectLink(
+  deal: Pick<
+    typeof deals.$inferSelect,
+    "procoreBidId" | "bidBoardLinkedAt" | "bidBoardProjectNumber"
+  >
+) {
+  return (
+    deal.procoreBidId != null ||
+    deal.bidBoardLinkedAt != null ||
+    (typeof deal.bidBoardProjectNumber === "string" && deal.bidBoardProjectNumber.trim().length > 0)
+  );
+}
+
+async function getEstimatingBoundaryStageForGate(
+  workflowRoute: "normal" | "service",
+  currentStage: { slug: string; displayOrder: number },
+  targetStage: { slug: string; displayOrder: number }
+) {
+  const candidates = estimatingBoundarySlugCandidates(workflowRoute);
+  const localBoundary = [currentStage, targetStage].find((stage) => candidates.includes(stage.slug));
+  if (localBoundary) {
+    return localBoundary;
+  }
+
+  const boundaryStages = await db
+    .select()
+    .from(pipelineStageConfig)
+    .where(
+      and(
+        inArray(pipelineStageConfig.slug, candidates),
+        eq(pipelineStageConfig.workflowFamily, workflowFamilyForRoute(workflowRoute))
+      )
+    )
+    .limit(candidates.length);
+
+  return (
+    candidates
+      .map((slug) => boundaryStages.find((stage) => stage.slug === slug))
+      .find((stage): stage is NonNullable<typeof boundaryStages[number]> => stage != null) ?? null
+  );
+}
+
+async function wouldOrphanBidBoardDownstreamMove(
+  deal: typeof deals.$inferSelect,
+  currentStage: { slug: string; displayOrder: number },
+  targetStage: { slug: string; displayOrder: number; isTerminal: boolean }
+) {
+  if (hasBidBoardProjectLink(deal)) {
+    return false;
+  }
+
+  if (targetStage.isTerminal) {
+    return false;
+  }
+
+  if (isEstimatingBoundaryStageSlug(targetStage.slug, deal.workflowRoute)) {
+    return false;
+  }
+
+  const estimatingBoundary = await getEstimatingBoundaryStageForGate(
+    deal.workflowRoute,
+    currentStage,
+    targetStage
+  );
+  if (!estimatingBoundary) {
+    return false;
+  }
+
+  return targetStage.displayOrder > estimatingBoundary.displayOrder;
+}
+
 /**
  * Validate whether a deal can move to the target stage.
  *
@@ -282,6 +362,38 @@ export async function validateStageGate(
       requiresOverride: false,
       overrideType: null,
       blockReason: null,
+    };
+  }
+
+  if (await wouldOrphanBidBoardDownstreamMove(deal, currentStage, targetStage)) {
+    return {
+      allowed: false,
+      isBackwardMove: targetStage.displayOrder < currentStage.displayOrder,
+      isTerminal: targetStage.isTerminal,
+      targetStage: {
+        id: targetStage.id,
+        name: targetStage.name,
+        slug: targetStage.slug,
+        isTerminal: targetStage.isTerminal,
+        displayOrder: targetStage.displayOrder,
+      },
+      currentStage: {
+        id: currentStage.id,
+        name: currentStage.name,
+        slug: currentStage.slug,
+        isTerminal: currentStage.isTerminal,
+        displayOrder: currentStage.displayOrder,
+      },
+      missingRequirements: {
+        fields: [],
+        documents: [],
+        approvals: [],
+        effectiveChecklist: { fields: [], attachments: [], approvals: [] },
+      },
+      effectiveChecklist: { fields: [], attachments: [], approvals: [] },
+      requiresOverride: false,
+      overrideType: null,
+      blockReason: BID_BOARD_PROJECT_REQUIRED_FOR_DOWNSTREAM_STAGE_MESSAGE,
     };
   }
 

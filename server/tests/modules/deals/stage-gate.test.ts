@@ -101,6 +101,10 @@ type FakeDealRow = {
   stageId: string;
   workflowRoute: WorkflowRoute;
   assignedRepId: string;
+  procoreBidId?: number | null;
+  procoreProjectId?: number | null;
+  bidBoardLinkedAt?: Date | null;
+  bidBoardProjectNumber?: string | null;
   projectTypeId: string | null;
   propertyAddress: string | null;
   propertyCity: string | null;
@@ -216,6 +220,10 @@ function createHardeningTenantDb(initialState?: Partial<FakeTenantState>) {
         stageId: STAGES.dd.id,
         workflowRoute: "normal",
         assignedRepId: "rep-1",
+        procoreBidId: 123456,
+        procoreProjectId: null,
+        bidBoardLinkedAt: now,
+        bidBoardProjectNumber: "DFW-1-10526-aa",
         projectTypeId: "pt-1",
         propertyAddress: "123 Palm Way",
         propertyCity: "Miami",
@@ -267,6 +275,16 @@ function createHardeningTenantDb(initialState?: Partial<FakeTenantState>) {
     closeoutChecklistItems: [],
     ...initialState,
   };
+
+  if (initialState?.deals) {
+    state.deals = state.deals.map((deal) => ({
+      procoreBidId: 123456,
+      procoreProjectId: null,
+      bidBoardLinkedAt: now,
+      bidBoardProjectNumber: "DFW-1-10526-aa",
+      ...deal,
+    }));
+  }
 
   function getRows(table: unknown) {
     const tableName = String((table as Record<PropertyKey, unknown> | undefined)?.[Symbol.for("drizzle:Name")] ?? "");
@@ -1454,6 +1472,287 @@ describe("Canonical Closeout Gate", () => {
 
     expect(result.allowed).toBe(false);
     expect(result.blockReason).toContain("Close-out checklist has not been initialized");
+  });
+});
+
+describe("Bid Board downstream orphan prevention", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    vi.resetModules();
+    vi.unmock("../../../src/modules/deals/scoping-service.js");
+    mockedStageLookups.queue.length = 0;
+  });
+
+  it("blocks a CRM stage move into a Bid Board downstream stage when no Bid Board project exists", async () => {
+    const { validateStageGate } = await import("../../../src/modules/deals/stage-gate.js");
+    const tenantDb = createHardeningTenantDb({
+      deals: [
+        {
+          id: "deal-1",
+          name: "Palm Villas",
+          stageId: STAGES.estimating.id,
+          workflowRoute: "normal",
+          assignedRepId: "rep-1",
+          procoreBidId: null,
+          procoreProjectId: null,
+          bidBoardLinkedAt: null,
+          bidBoardProjectNumber: null,
+          projectTypeId: "pt-1",
+          propertyAddress: "123 Palm Way",
+          propertyCity: "Miami",
+          propertyState: "FL",
+          propertyZip: "33101",
+          description: "Exterior refresh",
+        },
+      ],
+    });
+
+    mockedStageLookups.queue.push(
+      {
+        id: STAGES.estimating.id,
+        name: STAGES.estimating.name,
+        slug: STAGES.estimating.slug,
+        workflowFamily: "standard_deal",
+        isTerminal: STAGES.estimating.isTerminal,
+        displayOrder: STAGES.estimating.displayOrder,
+        requiredFields: [],
+        requiredDocuments: [],
+        requiredApprovals: [],
+      },
+      {
+        id: STAGES.bid_sent.id,
+        name: STAGES.bid_sent.name,
+        slug: STAGES.bid_sent.slug,
+        workflowFamily: "standard_deal",
+        isTerminal: STAGES.bid_sent.isTerminal,
+        displayOrder: STAGES.bid_sent.displayOrder,
+        requiredFields: [],
+        requiredDocuments: [],
+        requiredApprovals: [],
+      },
+      {
+        id: STAGES.estimating.id,
+        name: STAGES.estimating.name,
+        slug: STAGES.estimating.slug,
+        workflowFamily: "standard_deal",
+        isTerminal: STAGES.estimating.isTerminal,
+        displayOrder: STAGES.estimating.displayOrder,
+      }
+    );
+
+    const result = await validateStageGate(
+      tenantDb as never,
+      "deal-1",
+      STAGES.bid_sent.id,
+      "director",
+      "director-1"
+    );
+
+    expect(result.allowed).toBe(false);
+    expect(result.requiresOverride).toBe(false);
+    expect(result.blockReason).toContain("Bid Board project");
+  });
+
+  it("blocks an Opportunity-to-downstream move by resolving the estimating boundary from stage config", async () => {
+    const { validateStageGate } = await import("../../../src/modules/deals/stage-gate.js");
+    const opportunityStage = makeStage({ slug: "opportunity", displayOrder: 0 });
+    const tenantDb = createHardeningTenantDb({
+      deals: [
+        {
+          id: "deal-1",
+          name: "Palm Villas",
+          stageId: opportunityStage.id,
+          workflowRoute: "normal",
+          assignedRepId: "rep-1",
+          procoreBidId: null,
+          procoreProjectId: null,
+          bidBoardLinkedAt: null,
+          bidBoardProjectNumber: null,
+          projectTypeId: "pt-1",
+          propertyAddress: "123 Palm Way",
+          propertyCity: "Miami",
+          propertyState: "FL",
+          propertyZip: "33101",
+          description: "Exterior refresh",
+        },
+      ],
+    });
+
+    mockedStageLookups.queue.push(
+      {
+        id: opportunityStage.id,
+        name: opportunityStage.name,
+        slug: opportunityStage.slug,
+        workflowFamily: "standard_deal",
+        isTerminal: opportunityStage.isTerminal,
+        displayOrder: opportunityStage.displayOrder,
+        requiredFields: [],
+        requiredDocuments: [],
+        requiredApprovals: [],
+      },
+      {
+        id: STAGES.bid_sent.id,
+        name: STAGES.bid_sent.name,
+        slug: STAGES.bid_sent.slug,
+        workflowFamily: "standard_deal",
+        isTerminal: STAGES.bid_sent.isTerminal,
+        displayOrder: STAGES.bid_sent.displayOrder,
+        requiredFields: [],
+        requiredDocuments: [],
+        requiredApprovals: [],
+      },
+      {
+        id: STAGES.estimating.id,
+        name: STAGES.estimating.name,
+        slug: STAGES.estimating.slug,
+        workflowFamily: "standard_deal",
+        isTerminal: STAGES.estimating.isTerminal,
+        displayOrder: STAGES.estimating.displayOrder,
+      }
+    );
+
+    const result = await validateStageGate(
+      tenantDb as never,
+      "deal-1",
+      STAGES.bid_sent.id,
+      "director",
+      "director-1"
+    );
+
+    expect(result.allowed).toBe(false);
+    expect(result.blockReason).toContain("Bid Board project");
+  });
+
+  it("allows a non-orphaning Opportunity-to-downstream move after a Bid Board project is linked", async () => {
+    const { validateStageGate } = await import("../../../src/modules/deals/stage-gate.js");
+    const opportunityStage = makeStage({ slug: "opportunity", displayOrder: 0 });
+    const tenantDb = createHardeningTenantDb({
+      deals: [
+        {
+          id: "deal-1",
+          name: "Palm Villas",
+          stageId: opportunityStage.id,
+          workflowRoute: "normal",
+          assignedRepId: "rep-1",
+          procoreBidId: 123456,
+          procoreProjectId: null,
+          bidBoardLinkedAt: new Date("2026-04-15T15:00:00.000Z"),
+          bidBoardProjectNumber: null,
+          projectTypeId: "pt-1",
+          propertyAddress: "123 Palm Way",
+          propertyCity: "Miami",
+          propertyState: "FL",
+          propertyZip: "33101",
+          description: "Exterior refresh",
+        },
+      ],
+    });
+
+    mockedStageLookups.queue.push(
+      {
+        id: opportunityStage.id,
+        name: opportunityStage.name,
+        slug: opportunityStage.slug,
+        workflowFamily: "standard_deal",
+        isTerminal: opportunityStage.isTerminal,
+        displayOrder: opportunityStage.displayOrder,
+        requiredFields: [],
+        requiredDocuments: [],
+        requiredApprovals: [],
+      },
+      {
+        id: STAGES.bid_sent.id,
+        name: STAGES.bid_sent.name,
+        slug: STAGES.bid_sent.slug,
+        workflowFamily: "standard_deal",
+        isTerminal: STAGES.bid_sent.isTerminal,
+        displayOrder: STAGES.bid_sent.displayOrder,
+        requiredFields: [],
+        requiredDocuments: [],
+        requiredApprovals: [],
+      },
+      {
+        id: STAGES.estimating.id,
+        name: STAGES.estimating.name,
+        slug: STAGES.estimating.slug,
+        workflowFamily: "standard_deal",
+        isTerminal: STAGES.estimating.isTerminal,
+        displayOrder: STAGES.estimating.displayOrder,
+      }
+    );
+
+    const result = await validateStageGate(
+      tenantDb as never,
+      "deal-1",
+      STAGES.bid_sent.id,
+      "director",
+      "director-1"
+    );
+
+    expect(result.allowed).toBe(true);
+    expect(result.blockReason).toBeNull();
+  });
+
+  it("does not block terminal lost moves that do not create a Bid Board orphan", async () => {
+    const { validateStageGate } = await import("../../../src/modules/deals/stage-gate.js");
+    const opportunityStage = makeStage({ slug: "opportunity", displayOrder: 0 });
+    const tenantDb = createHardeningTenantDb({
+      deals: [
+        {
+          id: "deal-1",
+          name: "Palm Villas",
+          stageId: opportunityStage.id,
+          workflowRoute: "normal",
+          assignedRepId: "rep-1",
+          procoreBidId: null,
+          procoreProjectId: null,
+          bidBoardLinkedAt: null,
+          bidBoardProjectNumber: null,
+          projectTypeId: "pt-1",
+          propertyAddress: "123 Palm Way",
+          propertyCity: "Miami",
+          propertyState: "FL",
+          propertyZip: "33101",
+          description: "Exterior refresh",
+        },
+      ],
+    });
+
+    mockedStageLookups.queue.push(
+      {
+        id: opportunityStage.id,
+        name: opportunityStage.name,
+        slug: opportunityStage.slug,
+        workflowFamily: "standard_deal",
+        isTerminal: opportunityStage.isTerminal,
+        displayOrder: opportunityStage.displayOrder,
+        requiredFields: [],
+        requiredDocuments: [],
+        requiredApprovals: [],
+      },
+      {
+        id: STAGES.closed_lost.id,
+        name: STAGES.closed_lost.name,
+        slug: STAGES.closed_lost.slug,
+        workflowFamily: "standard_deal",
+        isTerminal: STAGES.closed_lost.isTerminal,
+        displayOrder: STAGES.closed_lost.displayOrder,
+        requiredFields: [],
+        requiredDocuments: [],
+        requiredApprovals: [],
+      }
+    );
+
+    const result = await validateStageGate(
+      tenantDb as never,
+      "deal-1",
+      STAGES.closed_lost.id,
+      "director",
+      "director-1"
+    );
+
+    expect(result.allowed).toBe(true);
+    expect(result.blockReason).toBeNull();
   });
 });
 

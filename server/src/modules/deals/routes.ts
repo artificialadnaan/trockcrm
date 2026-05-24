@@ -2603,12 +2603,13 @@ router.post("/:id/stage/preflight", async (req, res, next) => {
       ((Boolean(inferredOwnership?.isBidBoardOwned) || currentIsBidBoardBoundaryOrDownstream) &&
         (currentIsBidBoardBoundaryOrDownstream || targetIsBidBoardDownstream) &&
         !targetIsReopenIntoCrmOwnedFlow);
+    const shouldApplyBidBoardReadOnlyOverlay = result.allowed && isBidBoardLocked;
 
     await req.commitTransaction!();
     res.json({
       ...result,
-      allowed: isBidBoardLocked ? false : result.allowed,
-      blockReason: isBidBoardLocked
+      allowed: shouldApplyBidBoardReadOnlyOverlay ? false : result.allowed,
+      blockReason: shouldApplyBidBoardReadOnlyOverlay
         ? BID_BOARD_STAGE_READ_ONLY_MESSAGE
         : result.blockReason,
       bidBoardLocked: isBidBoardLocked,
