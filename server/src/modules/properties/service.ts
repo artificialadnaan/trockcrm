@@ -373,7 +373,7 @@ export async function listProperties(
       propertyId: deals.propertyId,
       linkedValue: sql<string>`COALESCE(SUM(${effectiveDealValueSql(
         deals,
-        sql`COALESCE(${deals.awardedAmount}, ${deals.bidEstimate}, ${deals.ddEstimate}, ${deals.forecastRevenue}, 0)`
+        sql`COALESCE(NULLIF(${deals.bidBoardTotalSales}, 0), NULLIF(${deals.bidEstimate}, 0), NULLIF(${deals.ddEstimate}, 0), NULLIF(${deals.forecastRevenue}, 0), ${deals.awardedAmount}, 0)`
       )}), 0)::text`,
     })
     .from(deals)
@@ -570,7 +570,7 @@ export async function getPropertyDetail(tenantDb: TenantDb, propertyId: string) 
     .select({
       linkedValue: sql<string>`COALESCE(SUM(${effectiveDealValueSql(
         deals,
-        sql`COALESCE(${deals.awardedAmount}, ${deals.bidEstimate}, ${deals.ddEstimate}, ${deals.forecastRevenue}, 0)`
+        sql`COALESCE(NULLIF(${deals.bidBoardTotalSales}, 0), NULLIF(${deals.bidEstimate}, 0), NULLIF(${deals.ddEstimate}, 0), NULLIF(${deals.forecastRevenue}, 0), ${deals.awardedAmount}, 0)`
       )}), 0)::text`,
     })
     .from(deals)

@@ -702,6 +702,7 @@ type DealStageWorkspaceRow = {
   on_hold_accumulated_seconds: string | number | null;
   on_hold_accumulated_seconds_at_stage_entry: string | number | null;
   awarded_amount: string | null;
+  bid_board_total_sales: string | null;
   bid_estimate: string | null;
   dd_estimate: string | null;
   days_in_stage: number;
@@ -740,7 +741,7 @@ function buildPipelineStageCardsOrder() {
   return [desc(deals.createdAt), desc(deals.id)] as const;
 }
 
-function buildStagePageOrder(sort: StagePageSort | undefined) {
+function buildStagePageOrder(sort: StagePageSort | undefined, stage: PipelineStageRow) {
   // The stage workspace previously ignored the incoming sort and silently used
   // age-based ordering. Default it to the same newest/oldest contract as the
   // shared list/board, but keep legacy explicit modes working for old links.
@@ -754,7 +755,9 @@ function buildStagePageOrder(sort: StagePageSort | undefined) {
     case "name_asc":
       return sql`d.name asc, d.id asc`;
     case "value_desc":
-      return sql`coalesce(d.awarded_amount, d.bid_estimate, d.dd_estimate, 0) desc, d.id desc`;
+      return stage.isTerminal || stage.slug === "won" || stage.slug === "lost"
+        ? sql`coalesce(d.awarded_amount, d.bid_estimate, d.dd_estimate, 0) desc, d.id desc`
+        : sql`coalesce(nullif(d.bid_board_total_sales, 0), nullif(d.bid_estimate, 0), nullif(d.dd_estimate, 0), d.awarded_amount, 0) desc, d.id desc`;
     case "newest":
     default:
       return sql`d.created_at desc, d.id desc`;
@@ -914,8 +917,8 @@ function dealEstimateSentAtSql() {
 
 function effectiveDealValueSql(isTerminalStage: boolean) {
   const rawValue = isTerminalStage
-    ? sql`COALESCE(${deals.awardedAmount}, 0)`
-    : sql`COALESCE(${deals.awardedAmount}, ${deals.bidEstimate}, ${deals.ddEstimate}, 0)`;
+    ? sql`COALESCE(${deals.awardedAmount}, ${deals.bidEstimate}, ${deals.ddEstimate}, 0)`
+    : sql`COALESCE(NULLIF(${deals.bidBoardTotalSales}, 0), NULLIF(${deals.bidEstimate}, 0), NULLIF(${deals.ddEstimate}, 0), ${deals.awardedAmount}, 0)`;
 
   return sql`CASE WHEN ${deals.onHold} THEN 0 ELSE ${rawValue} END`;
 }
@@ -977,8 +980,8 @@ function addWorkspaceEstimateSentDateConditions(
 function workspaceEffectiveDealValueSql(stage: PipelineStageRow) {
   const isTerminalStage = stage.isTerminal || stage.slug === "won" || stage.slug === "lost";
   const rawValue = isTerminalStage
-    ? sql`COALESCE(d.awarded_amount, 0)`
-    : sql`COALESCE(d.awarded_amount, d.bid_estimate, d.dd_estimate, 0)`;
+    ? sql`COALESCE(d.awarded_amount, d.bid_estimate, d.dd_estimate, 0)`
+    : sql`COALESCE(NULLIF(d.bid_board_total_sales, 0), NULLIF(d.bid_estimate, 0), NULLIF(d.dd_estimate, 0), d.awarded_amount, 0)`;
 
   return sql`CASE WHEN d.on_hold THEN 0 ELSE ${rawValue} END`;
 }
@@ -1071,6 +1074,7 @@ function mapDealStageWorkspaceRow(
     projectNumber: row.project_number,
     name: row.name,
     stageId: row.stage_id,
+    stageSlug: fallbackStageSlug ?? null,
     workflowRoute: row.workflow_route,
     assignedRepId: row.assigned_rep_id,
     assignedRepName: row.assigned_rep_name,
@@ -1091,6 +1095,7 @@ function mapDealStageWorkspaceRow(
     ),
     daysInStage: Number(row.days_in_stage ?? 0),
     awardedAmount: row.awarded_amount,
+    bidBoardTotalSales: row.bid_board_total_sales,
     bidEstimate: row.bid_estimate,
     ddEstimate: row.dd_estimate,
   };
@@ -2452,13 +2457,14 @@ export async function listDealStagePage(tenantDb: TenantDb, input: DealStagePage
       d.on_hold_accumulated_seconds,
       d.on_hold_accumulated_seconds_at_stage_entry,
       d.awarded_amount,
+      d.bid_board_total_sales,
       d.bid_estimate,
       d.dd_estimate,
       extract(day from now() - d.stage_entered_at)::int as days_in_stage
     from deals d
     left join users u on u.id = d.assigned_rep_id
     where ${where}
-    order by ${buildStagePageOrder(input.sort)}
+    order by ${buildStagePageOrder(input.sort, stage)}
     limit ${pageSize}
     offset ${offset}
   `);

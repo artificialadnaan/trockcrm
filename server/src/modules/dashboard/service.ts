@@ -715,6 +715,19 @@ function dealValueSql() {
   return aliasedEffectiveDealValueSql("d");
 }
 
+function recentCloseDealValueSql() {
+  return sql`
+    CASE
+      WHEN psc.slug IN (${sql.join([...WON_STAGE_SLUGS, ...LEGACY_WON_STAGE_SLUGS].map((slug) => sql`${slug}`), sql`, `)})
+        THEN ${aliasedEffectiveDealValueSql(
+          "d",
+          sql`COALESCE(d.awarded_amount, d.bid_estimate, d.dd_estimate, 0)`
+        )}
+      ELSE ${dealValueSql()}
+    END
+  `;
+}
+
 function toIsoOrNow(value: unknown): string {
   if (!value) {
     return new Date(0).toISOString();
@@ -1111,7 +1124,7 @@ async function getRepPotentialRevenue(tenantDb: TenantDb, repId: string): Promis
     SELECT
       COALESCE(
         SUM(
-          COALESCE(d.awarded_amount, d.bid_estimate, d.dd_estimate, 0) + COALESCE(d.change_order_total, 0)
+          COALESCE(NULLIF(d.bid_board_total_sales, 0), NULLIF(d.bid_estimate, 0), NULLIF(d.dd_estimate, 0), d.awarded_amount, 0) + COALESCE(d.change_order_total, 0)
         ),
         0
       )::numeric AS potential_revenue
@@ -1906,7 +1919,7 @@ async function getRepDealPipelineSummary(
           AND psc.slug IN (${sql.join(COMMISSION_PIPELINE_STAGE_SLUGS.map((slug) => sql`${slug}`), sql`, `)})
       )::int AS active_deals,
       COALESCE(
-        SUM(COALESCE(d.awarded_amount, d.bid_estimate, d.dd_estimate, 0) + COALESCE(d.change_order_total, 0))
+        SUM(COALESCE(NULLIF(d.bid_board_total_sales, 0), NULLIF(d.bid_estimate, 0), NULLIF(d.dd_estimate, 0), d.awarded_amount, 0) + COALESCE(d.change_order_total, 0))
           FILTER (
             WHERE d.is_active = true
               AND COALESCE(d.is_test_data, false) = false
@@ -2183,7 +2196,7 @@ async function getRecentCloses(
         WHEN psc.slug IN (${sql.join([...WON_STAGE_SLUGS, ...LEGACY_WON_STAGE_SLUGS].map((slug) => sql`${slug}`), sql`, `)}) THEN 'won'
         ELSE 'lost'
       END AS outcome,
-      ${dealValueSql()}::numeric AS deal_value,
+      ${recentCloseDealValueSql()}::numeric AS deal_value,
       COALESCE(d.actual_close_date, d.contract_signed_date, d.contract_signed_at::date, d.lost_at::date, d.updated_at::date) AS closed_at
     FROM ${deals} d
     JOIN ${pipelineStageConfig} psc ON psc.id = d.stage_id

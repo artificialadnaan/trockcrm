@@ -74,7 +74,7 @@ function countDigestAtRiskDeals(rows: DigestAtRiskDealRow[], now: Date): number 
  * - Stale deals (shared hold-aware At Risk engine, rep audience)
  * - Deals approaching deadline (expected_close_date within next 7 days)
  * - New deals this week (created_at >= NOW() - 7 days)
- * - Total active pipeline value (SUM of awarded_amount or bid_estimate, non-terminal)
+ * - Total active pipeline value (SUM of current deal value, non-terminal)
  */
 export async function runWeeklyDigest(): Promise<void> {
   console.log("[Worker:weekly-digest] Starting weekly digest generation...");
@@ -166,7 +166,7 @@ export async function runWeeklyDigest(): Promise<void> {
 
         // 4. Total active pipeline value
         const valueRes = await client.query(
-          `SELECT COALESCE(SUM(COALESCE(d.awarded_amount, d.bid_estimate, 0)), 0) AS total_value
+          `SELECT COALESCE(SUM(COALESCE(NULLIF(d.bid_board_total_sales, 0), NULLIF(d.bid_estimate, 0), NULLIF(d.dd_estimate, 0), d.awarded_amount, 0)), 0) AS total_value
            FROM ${schemaName}.deals d
            JOIN public.pipeline_stage_config psc ON psc.id = d.stage_id
            WHERE d.is_active = true

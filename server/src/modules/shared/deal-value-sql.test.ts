@@ -15,6 +15,7 @@ function normalize(sqlValue: unknown) {
 describe("deal-value-sql", () => {
   it("wraps aliased best-estimate value in an on-hold zeroing case expression", () => {
     expect(normalize(aliasedEffectiveDealValueSql("d"))).toContain("d.on_hold");
+    expect(normalize(aliasedEffectiveDealValueSql("d"))).toContain("d.bid_board_total_sales");
     expect(normalize(aliasedEffectiveDealValueSql("d"))).toContain("d.awarded_amount");
     expect(normalize(aliasedEffectiveDealValueSql("d"))).toContain("d.bid_estimate");
     expect(normalize(aliasedEffectiveDealValueSql("d"))).toContain("d.dd_estimate");
@@ -38,7 +39,10 @@ describe("deal-value-sql", () => {
   });
 
   it("builds the base best-estimate expression once for raw-value consumers", () => {
-    expect(normalize(aliasedDealBestEstimateSql("d"))).toContain("d.awarded_amount");
+    const normalized = normalize(aliasedDealBestEstimateSql("d"));
+    expect(normalized).toContain("d.bid_board_total_sales");
+    expect(normalized).toContain("NULLIF");
+    expect(normalized.indexOf("d.bid_estimate")).toBeLessThan(normalized.indexOf("d.awarded_amount"));
   });
 
   it("exposes an awarded-only on-hold-aware expression for won/booked rollups", () => {

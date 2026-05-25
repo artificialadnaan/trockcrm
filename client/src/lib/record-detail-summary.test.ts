@@ -24,6 +24,38 @@ describe("buildDealDetailSummary", () => {
       hasOwner: true,
     });
   });
+
+  it("does not let awarded_amount override the current bid value", () => {
+    expect(
+      buildDealDetailSummary(
+        {
+          stageEnteredAt: "2026-04-18T12:00:00.000Z",
+          updatedAt: "2026-04-21T12:00:00.000Z",
+          ddEstimate: "3.00",
+          bidEstimate: "16137.14",
+          awardedAmount: "2.97",
+          nextStep: null,
+          assignedRepId: null,
+        },
+        new Date("2026-04-22T12:00:00.000Z")
+      ).bestValue
+    ).toBe(16137.14);
+  });
+
+  it("keeps awarded value for won-stage summaries", () => {
+    expect(
+      buildDealDetailSummary(
+        {
+          stageEnteredAt: "2026-04-18T12:00:00.000Z",
+          updatedAt: "2026-04-21T12:00:00.000Z",
+          stageSlug: "won",
+          bidEstimate: "875000",
+          awardedAmount: "925000",
+        },
+        new Date("2026-04-22T12:00:00.000Z")
+      ).bestValue
+    ).toBe(925000);
+  });
 });
 
 describe("buildLeadDetailSummary", () => {

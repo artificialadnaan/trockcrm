@@ -32,6 +32,27 @@ describe("deal hold helpers", () => {
     ).toBe(875000);
   });
 
+  it("prefers the synced Bid Board or bid value over awarded amount for generic open-deal value", () => {
+    expect(
+      getEffectiveDealValue({
+        onHold: false,
+        bidBoardTotalSales: "16137.14",
+        bidEstimate: "16137.14",
+        awardedAmount: "2.97",
+        ddEstimate: "3.00",
+      })
+    ).toBe(16137.14);
+
+    expect(
+      getEffectiveDealValue({
+        onHold: false,
+        bidEstimate: "16137.14",
+        awardedAmount: "2.97",
+        ddEstimate: "3.00",
+      })
+    ).toBe(16137.14);
+  });
+
   it("keeps awarded-basis value at zero when no awarded amount exists", () => {
     expect(
       getEffectiveAwardedDealValue({
@@ -52,6 +73,43 @@ describe("deal hold helpers", () => {
         ddEstimate: "800000",
       })
     ).toBe(0);
+  });
+
+  it("preserves awarded value precedence for won-stage deal value", () => {
+    expect(
+      getEffectiveDealValue({
+        onHold: false,
+        stageSlug: "won",
+        awardedAmount: "925000",
+        bidEstimate: "875000",
+        ddEstimate: "800000",
+      })
+    ).toBe(925000);
+  });
+
+  it("uses current stage before a won-like Bid Board stage when choosing generic deal value", () => {
+    expect(
+      getEffectiveDealValue({
+        onHold: false,
+        stageSlug: "opportunity",
+        bidBoardStageSlug: "sent_to_production",
+        bidEstimate: "16137.14",
+        awardedAmount: "2.97",
+        ddEstimate: "3.00",
+      })
+    ).toBe(16137.14);
+  });
+
+  it("does not use a won-like Bid Board stage to force awarded value when current stage is unknown", () => {
+    expect(
+      getEffectiveDealValue({
+        onHold: false,
+        bidBoardStageSlug: "sent_to_production",
+        bidEstimate: "16137.14",
+        awardedAmount: "2.97",
+        ddEstimate: "3.00",
+      })
+    ).toBe(16137.14);
   });
 
   it("subtracts accumulated and currently open hold time from stage age", () => {

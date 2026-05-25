@@ -1,3 +1,5 @@
+import { resolveBestEstimate } from "./deal-utils";
+
 export interface DealDetailSummary {
   ageDays: number;
   freshnessDays: number;
@@ -20,11 +22,6 @@ function diffDays(from: string | null | undefined, now: Date) {
   return Math.floor((now.getTime() - date.getTime()) / (1000 * 60 * 60 * 24));
 }
 
-function toNumber(value: string | null | undefined) {
-  const parsed = Number(value ?? 0);
-  return Number.isFinite(parsed) ? parsed : 0;
-}
-
 export function buildDealDetailSummary(
   deal: {
     stageEnteredAt: string;
@@ -32,6 +29,9 @@ export function buildDealDetailSummary(
     ddEstimate?: string | null;
     bidEstimate?: string | null;
     awardedAmount?: string | null;
+    bidBoardTotalSales?: string | null;
+    stageSlug?: string | null;
+    workflowRoute?: "normal" | "service" | null;
     nextStep?: string | null;
     assignedRepId?: string | null;
   },
@@ -40,8 +40,7 @@ export function buildDealDetailSummary(
   return {
     ageDays: diffDays(deal.stageEnteredAt, now),
     freshnessDays: diffDays(deal.updatedAt, now),
-    bestValue:
-      toNumber(deal.awardedAmount) || toNumber(deal.bidEstimate) || toNumber(deal.ddEstimate),
+    bestValue: resolveBestEstimate(deal).value,
     hasNextStep: Boolean(deal.nextStep),
     hasOwner: Boolean(deal.assignedRepId),
   };

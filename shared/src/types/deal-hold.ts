@@ -1,3 +1,5 @@
+import { toCanonicalDealStageSlug } from "./workflow.js";
+
 /*
 Hold-time invariants audited on 2026-05-21 across this file, the deal hold toggle
 path in server/src/modules/deals/service.ts, and the five stage-writer paths:
@@ -19,8 +21,13 @@ path in server/src/modules/deals/service.ts, and the five stage-writer paths:
 type DealValueLike = {
   onHold?: boolean | null;
   awardedAmount?: string | number | null;
+  bidBoardTotalSales?: string | number | null;
   bidEstimate?: string | number | null;
   ddEstimate?: string | number | null;
+  stageSlug?: string | null;
+  bidBoardStageSlug?: string | null;
+  workflowRoute?: string | null;
+  stage?: { slug?: string | null; isTerminal?: boolean | null } | null;
 };
 
 type DealHoldTimingLike = {
@@ -54,12 +61,33 @@ function toDate(value: string | Date | null | undefined): Date | null {
   return Number.isNaN(date.getTime()) ? null : date;
 }
 
+const LEGACY_WON_VALUE_STAGE_SLUGS = new Set([
+  "sent_to_production",
+  "service_sent_to_production",
+  "closed_won",
+  "service_scheduled",
+  "service_complete",
+]);
+
+function shouldUseAwardedDealValue(deal: DealValueLike): boolean {
+  const stageSlug = deal.stageSlug ?? deal.stage?.slug ?? null;
+  if (!stageSlug) return false;
+  if (LEGACY_WON_VALUE_STAGE_SLUGS.has(stageSlug)) return true;
+  const workflowRoute =
+    deal.workflowRoute === "normal" || deal.workflowRoute === "service" ? deal.workflowRoute : null;
+  return toCanonicalDealStageSlug(stageSlug, workflowRoute) === "won";
+}
+
 function getRawDealValue(deal: DealValueLike): number {
-  const awarded = toNumber(deal.awardedAmount);
-  if (awarded > 0) return awarded;
+  if (shouldUseAwardedDealValue(deal)) return getRawAwardedDealValue(deal);
+
+  const bidBoard = toNumber(deal.bidBoardTotalSales);
+  if (bidBoard > 0) return bidBoard;
   const bid = toNumber(deal.bidEstimate);
   if (bid > 0) return bid;
-  return toNumber(deal.ddEstimate);
+  const dd = toNumber(deal.ddEstimate);
+  if (dd > 0) return dd;
+  return toNumber(deal.awardedAmount);
 }
 
 function getRawAwardedDealValue(deal: DealValueLike): number {

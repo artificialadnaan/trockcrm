@@ -4,13 +4,14 @@ import { reportableDealSqlPredicate } from "@trock-crm/shared/types";
 type DealValueTable = {
   onHold: unknown;
   awardedAmount: unknown;
+  bidBoardTotalSales?: unknown;
   bidEstimate: unknown;
   ddEstimate: unknown;
   forecastRevenue?: unknown;
 };
 
 export function dealBestEstimateSql(table: DealValueTable): SQL {
-  return sql`COALESCE(${table.awardedAmount}, ${table.bidEstimate}, ${table.ddEstimate}, 0)`;
+  return sql`COALESCE(NULLIF(${table.bidBoardTotalSales ?? sql`NULL`}, 0), NULLIF(${table.bidEstimate}, 0), NULLIF(${table.ddEstimate}, 0), ${table.awardedAmount}, 0)`;
 }
 
 export function dealAwardedAmountSql(table: DealValueTable): SQL {
@@ -18,7 +19,7 @@ export function dealAwardedAmountSql(table: DealValueTable): SQL {
 }
 
 export function dealBestEstimateWithForecastSql(table: DealValueTable): SQL {
-  return sql`COALESCE(${table.awardedAmount}, ${table.bidEstimate}, ${table.ddEstimate}, ${table.forecastRevenue ?? null}, 0)`;
+  return sql`COALESCE(NULLIF(${table.bidBoardTotalSales ?? sql`NULL`}, 0), NULLIF(${table.bidEstimate}, 0), NULLIF(${table.ddEstimate}, 0), NULLIF(${table.forecastRevenue ?? sql`NULL`}, 0), ${table.awardedAmount}, 0)`;
 }
 
 export function effectiveDealValueSql(table: DealValueTable, rawValueSql: SQL = dealBestEstimateSql(table)): SQL {
@@ -33,7 +34,9 @@ export function effectiveAwardedDealValueSql(
 }
 
 export function aliasedDealBestEstimateSql(alias: string): SQL {
-  return sql.raw(`COALESCE(${alias}.awarded_amount, ${alias}.bid_estimate, ${alias}.dd_estimate, 0)`);
+  return sql.raw(
+    `COALESCE(NULLIF(${alias}.bid_board_total_sales, 0), NULLIF(${alias}.bid_estimate, 0), NULLIF(${alias}.dd_estimate, 0), ${alias}.awarded_amount, 0)`
+  );
 }
 
 export function aliasedDealAwardedAmountSql(alias: string): SQL {
@@ -42,13 +45,13 @@ export function aliasedDealAwardedAmountSql(alias: string): SQL {
 
 export function aliasedDealBestEstimateWithForecastSql(alias: string): SQL {
   return sql.raw(
-    `COALESCE(${alias}.awarded_amount, ${alias}.bid_estimate, ${alias}.dd_estimate, ${alias}.forecast_revenue, 0)`
+    `COALESCE(NULLIF(${alias}.bid_board_total_sales, 0), NULLIF(${alias}.bid_estimate, 0), NULLIF(${alias}.dd_estimate, 0), NULLIF(${alias}.forecast_revenue, 0), ${alias}.awarded_amount, 0)`
   );
 }
 
 export function aliasedForecastFirstDealValueSql(alias: string): SQL {
   return sql.raw(
-    `COALESCE(${alias}.forecast_revenue, ${alias}.awarded_amount, ${alias}.bid_estimate, ${alias}.dd_estimate, 0)`
+    `COALESCE(NULLIF(${alias}.forecast_revenue, 0), NULLIF(${alias}.bid_board_total_sales, 0), NULLIF(${alias}.bid_estimate, 0), NULLIF(${alias}.dd_estimate, 0), ${alias}.awarded_amount, 0)`
   );
 }
 

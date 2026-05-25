@@ -73,7 +73,7 @@ import { usePipelineStages } from "@/hooks/use-pipeline-config";
 import { useAuth } from "@/lib/auth";
 import { api } from "@/lib/api";
 import { cn } from "@/lib/utils";
-import { formatCurrency, bestEstimate, formatDealDisplayNumber } from "@/lib/deal-utils";
+import { formatCurrency, bestEstimateCaptionLabel, formatDealDisplayNumber, resolveBestEstimate } from "@/lib/deal-utils";
 import {
   getCanonicalDealStageSlugs,
   getDealStageLabelBySlug,
@@ -623,7 +623,7 @@ export function DealDetailPage() {
   const slaStatusValue = getSlaStatusValue(slaResult);
   const slaCaptionContext = getSlaCaptionContext(slaResult);
   const isSlaBreached = slaResult?.isAtRisk === true;
-  const dealValue = bestEstimate(deal);
+  const dealValue = resolveBestEstimate(deal);
   const address = formatDealAddress(deal);
   const procoreProjectUrl = buildProcoreProjectUrl(deal.procoreProjectId);
   const shellTabs: DetailPageShellTab[] = tabs.map((tab) => ({
@@ -642,8 +642,8 @@ export function DealDetailPage() {
   const kpis: DetailPageShellKpi[] = [
     {
       eyebrow: "Deal value",
-      value: formatCurrency(dealValue),
-      captionLabel: deal.awardedAmount ? "Awarded" : deal.bidEstimate ? "Bid" : "Estimate",
+      value: formatCurrency(dealValue.value),
+      captionLabel: bestEstimateCaptionLabel(dealValue.source),
       captionContext:
         deal.changeOrderTotal && Number(deal.changeOrderTotal) > 0
           ? `${formatCurrency(Number(deal.changeOrderTotal))} in change orders`

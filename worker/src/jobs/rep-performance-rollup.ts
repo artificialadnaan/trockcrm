@@ -232,7 +232,7 @@ async function refreshOfficePeriod(
               ELSE d.is_active = true AND NOT psc.is_terminal AND ${REPORTABLE_DEAL_SQL}
             END
          )::int AS deals_count,
-         COALESCE(SUM(COALESCE(d.awarded_amount, d.bid_estimate, d.dd_estimate, 0))
+         COALESCE(SUM(COALESCE(NULLIF(d.bid_board_total_sales, 0), NULLIF(d.bid_estimate, 0), NULLIF(d.dd_estimate, 0), d.awarded_amount, 0))
            FILTER (
              WHERE CASE
                -- Historical pipeline_value follows the same deterministic

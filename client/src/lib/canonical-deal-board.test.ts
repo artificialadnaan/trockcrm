@@ -2,6 +2,53 @@ import { describe, expect, it } from "vitest";
 import { buildCanonicalDealBoardColumns } from "./canonical-deal-board";
 
 describe("buildCanonicalDealBoardColumns", () => {
+  it("uses current bid value instead of awarded_amount when deriving a missing backend aggregate", () => {
+    const columns = buildCanonicalDealBoardColumns(
+      [
+        {
+          stage: { id: "raw-stage", name: "Raw Stage", slug: "raw_stage", isTerminal: false },
+          cards: [
+            {
+              id: "deal-dfw-shape",
+              stageId: "stage-opportunity",
+              workflowRoute: "normal",
+              bidBoardTotalSales: "16137.14",
+              bidEstimate: "16137.14",
+              ddEstimate: "3.00",
+              awardedAmount: "2.97",
+            },
+          ],
+        },
+      ] as any,
+      [{ id: "stage-opportunity", name: "Opportunity", slug: "opportunity", isTerminal: false }] as any
+    );
+
+    expect(columns.find((column) => column.stage.slug === "opportunity")?.totalValue).toBe(16137.14);
+  });
+
+  it("uses awarded amount for won fallback totals when backend aggregate is missing", () => {
+    const columns = buildCanonicalDealBoardColumns(
+      [
+        {
+          stage: { id: "raw-stage", name: "Raw Stage", slug: "raw_stage", isTerminal: false },
+          cards: [
+            {
+              id: "deal-won-shape",
+              stageId: "stage-won",
+              workflowRoute: "normal",
+              bidEstimate: "875000",
+              ddEstimate: "800000",
+              awardedAmount: "925000",
+            },
+          ],
+        },
+      ] as any,
+      [{ id: "stage-won", name: "Won", slug: "won", isTerminal: true }] as any
+    );
+
+    expect(columns.find((column) => column.stage.slug === "won")?.totalValue).toBe(925000);
+  });
+
   it("projects legacy and mirrored deal stages into the final canonical dashboard columns", () => {
     const columns = buildCanonicalDealBoardColumns(
       [

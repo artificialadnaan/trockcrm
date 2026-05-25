@@ -1,5 +1,12 @@
 import { describe, expect, it } from "vitest";
-import { formatDealDisplayNumber, isHubspotImportedDealNumber, sanitizeHubspotDealIdentifiers } from "./deal-utils";
+import {
+  bestEstimate,
+  bestEstimateCaptionLabel,
+  formatDealDisplayNumber,
+  isHubspotImportedDealNumber,
+  resolveBestEstimate,
+  sanitizeHubspotDealIdentifiers,
+} from "./deal-utils";
 
 describe("isHubspotImportedDealNumber", () => {
   it("flags HS- prefixed dealNumbers as HubSpot-imported", () => {
@@ -69,5 +76,64 @@ describe("sanitizeHubspotDealIdentifiers", () => {
     expect(sanitizeHubspotDealIdentifiers("HS-319925219003 Photo 2026-05-10 001 dad87234.jpg", "Imported deal")).toBe(
       "Imported deal Photo 2026-05-10 001 dad87234.jpg"
     );
+  });
+});
+
+describe("deal value precedence", () => {
+  it("uses the synced Bid Board/bid amount instead of awarded_amount for generic open-deal value", () => {
+    const deal = {
+      bidBoardTotalSales: "16137.14",
+      bidEstimate: "16137.14",
+      awardedAmount: "2.97",
+      ddEstimate: "3.00",
+    };
+
+    expect(bestEstimate(deal)).toBe(16137.14);
+    expect(resolveBestEstimate(deal)).toEqual({ value: 16137.14, source: "bid_board" });
+    expect(bestEstimateCaptionLabel(resolveBestEstimate(deal).source)).toBe("Bid Board");
+  });
+
+  it("falls back to awarded_amount only after current estimate fields are missing", () => {
+    expect(bestEstimate({ awardedAmount: "42000", bidEstimate: null, ddEstimate: null })).toBe(42000);
+    expect(resolveBestEstimate({ awardedAmount: "42000", bidEstimate: null, ddEstimate: null }).source).toBe(
+      "awarded"
+    );
+  });
+
+  it("keeps awarded_amount first for won-stage deal value displays", () => {
+    const deal = {
+      stageSlug: "won",
+      awardedAmount: "925000",
+      bidEstimate: "875000",
+      ddEstimate: "800000",
+    };
+
+    expect(bestEstimate(deal)).toBe(925000);
+    expect(resolveBestEstimate(deal)).toEqual({ value: 925000, source: "awarded" });
+  });
+
+  it("uses current stage before a won-like Bid Board stage when choosing generic deal value", () => {
+    const deal = {
+      stageSlug: "opportunity",
+      bidBoardStageSlug: "sent_to_production",
+      bidEstimate: "16137.14",
+      awardedAmount: "2.97",
+      ddEstimate: "3.00",
+    };
+
+    expect(bestEstimate(deal)).toBe(16137.14);
+    expect(resolveBestEstimate(deal)).toEqual({ value: 16137.14, source: "bid" });
+  });
+
+  it("does not use a won-like Bid Board stage to force awarded value when current stage is unknown", () => {
+    const deal = {
+      bidBoardStageSlug: "sent_to_production",
+      bidEstimate: "16137.14",
+      awardedAmount: "2.97",
+      ddEstimate: "3.00",
+    };
+
+    expect(bestEstimate(deal)).toBe(16137.14);
+    expect(resolveBestEstimate(deal)).toEqual({ value: 16137.14, source: "bid" });
   });
 });

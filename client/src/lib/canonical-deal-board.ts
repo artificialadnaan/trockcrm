@@ -1,4 +1,5 @@
 import type { Deal, DealBoardColumn } from "@/hooks/use-deals";
+import { getEffectiveDealValue } from "@trock-crm/shared/types";
 import {
   getDealBoardStageSlugs,
   getDealStageLabelBySlug,
@@ -91,20 +92,15 @@ export function buildCanonicalDealBoardColumns(
         : cards.length,
       totalValue: hasBackendAggregate
         ? matchingRawColumns.reduce((sum, column) => sum + column.totalValue, 0)
-        : cards.reduce((sum, deal) => sum + getDealValue(deal), 0),
+        : cards.reduce((sum, deal) => sum + getDealValue(deal, slug), 0),
       cards,
     };
   });
 }
 
-function getDealValue(deal: Deal) {
-  const candidates = [deal.awardedAmount, deal.bidEstimate, deal.ddEstimate];
-  for (const candidate of candidates) {
-    if (candidate == null) continue;
-    const value = Number(candidate);
-    if (Number.isFinite(value)) {
-      return value;
-    }
-  }
-  return 0;
+function getDealValue(deal: Deal, canonicalStageSlug: string) {
+  return getEffectiveDealValue({
+    ...deal,
+    stageSlug: deal.stageSlug ?? canonicalStageSlug,
+  });
 }

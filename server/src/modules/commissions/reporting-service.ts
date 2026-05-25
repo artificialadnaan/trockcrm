@@ -199,7 +199,8 @@ export function describeCommissionFormula(): string {
     "Earned commission is recognized when contract_signed_at is set, with contract_signed_date as the historical compatibility fallback.",
     "Won deals remain earned after handoff; Lost deals are excluded from potential and earned commission totals.",
     "On-hold deals are excluded from potential and earned commission while they remain on hold.",
-    "The source value resolves in this order: awarded_amount, then bid_estimate, then dd_estimate.",
+    "Earned commission source value resolves in this order: awarded_amount, then bid_estimate, then dd_estimate.",
+    "Potential commission uses the current unsigned deal value: bid_board_total_sales, then bid_estimate, then dd_estimate, with awarded_amount only as a fallback.",
     "Commission amount = source_value_amount * user_commission_settings.commission_rate, rounded to cents.",
     "Potential pipeline uses active unsigned deal value plus change orders, multiplied by the rep commission rate.",
   ].join(" ");
@@ -368,10 +369,10 @@ export async function getRepCommissionDashboard(
         p.name AS property_name,
         COALESCE(p.address, d.property_address) AS property_address,
         psc.slug AS stage_slug,
-        (COALESCE(d.awarded_amount, d.bid_estimate, d.dd_estimate, 0) + COALESCE(d.change_order_total, 0))::numeric AS deal_value,
+        (COALESCE(NULLIF(d.bid_board_total_sales, 0), NULLIF(d.bid_estimate, 0), NULLIF(d.dd_estimate, 0), d.awarded_amount, 0) + COALESCE(d.change_order_total, 0))::numeric AS deal_value,
         COALESCE(cs.commission_rate, 0)::numeric AS commission_rate,
         ROUND(
-          ((COALESCE(d.awarded_amount, d.bid_estimate, d.dd_estimate, 0) + COALESCE(d.change_order_total, 0)) * COALESCE(cs.commission_rate, 0))::numeric,
+          ((COALESCE(NULLIF(d.bid_board_total_sales, 0), NULLIF(d.bid_estimate, 0), NULLIF(d.dd_estimate, 0), d.awarded_amount, 0) + COALESCE(d.change_order_total, 0)) * COALESCE(cs.commission_rate, 0))::numeric,
           2
         )::numeric AS commission,
         NULL::date AS contract_signed_date,
@@ -469,10 +470,10 @@ export async function getCommissionPotential(
       psc.slug AS stage_slug,
       psc.display_order,
       COUNT(*)::int AS deal_count,
-      COALESCE(SUM(COALESCE(d.awarded_amount, d.bid_estimate, d.dd_estimate, 0) + COALESCE(d.change_order_total, 0)), 0)::numeric AS total_deal_value,
+      COALESCE(SUM(COALESCE(NULLIF(d.bid_board_total_sales, 0), NULLIF(d.bid_estimate, 0), NULLIF(d.dd_estimate, 0), d.awarded_amount, 0) + COALESCE(d.change_order_total, 0)), 0)::numeric AS total_deal_value,
       COALESCE(
         SUM(
-          (COALESCE(d.awarded_amount, d.bid_estimate, d.dd_estimate, 0) + COALESCE(d.change_order_total, 0))
+          (COALESCE(NULLIF(d.bid_board_total_sales, 0), NULLIF(d.bid_estimate, 0), NULLIF(d.dd_estimate, 0), d.awarded_amount, 0) + COALESCE(d.change_order_total, 0))
           * COALESCE(cs.commission_rate, 0)
         ),
         0
@@ -620,7 +621,7 @@ export async function getCommissionSummary(
       SELECT
         COALESCE(
           SUM(
-            (COALESCE(d.awarded_amount, d.bid_estimate, d.dd_estimate, 0) + COALESCE(d.change_order_total, 0))
+            (COALESCE(NULLIF(d.bid_board_total_sales, 0), NULLIF(d.bid_estimate, 0), NULLIF(d.dd_estimate, 0), d.awarded_amount, 0) + COALESCE(d.change_order_total, 0))
             * COALESCE(cs.commission_rate, 0)
           ),
           0

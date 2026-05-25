@@ -70,7 +70,7 @@ describe("rep performance rollup period scoping", () => {
 
     const insertSql = queries.find((query) => query.includes("INSERT INTO public.rep_performance_snapshots"));
     const pipelineValueSql =
-      /COALESCE\(SUM\(COALESCE\(d\.awarded_amount, d\.bid_estimate, d\.dd_estimate, 0\)\)([\s\S]*?)\), 0\)::numeric AS pipeline_value/.exec(
+      /COALESCE\(SUM\(COALESCE\(NULLIF\(d\.bid_board_total_sales, 0\), NULLIF\(d\.bid_estimate, 0\), NULLIF\(d\.dd_estimate, 0\), d\.awarded_amount, 0\)\)([\s\S]*?)\), 0\)::numeric AS pipeline_value/.exec(
         insertSql ?? ""
       )?.[1];
     const historicalPipelineValueBranch =
@@ -89,5 +89,28 @@ describe("rep performance rollup period scoping", () => {
       .join("\n");
     expect(historicalPipelineValuePredicates).not.toContain("psc.is_terminal");
     expect(historicalPipelineValuePredicates).not.toContain("psc.is_active_pipeline");
+  });
+
+  it("keeps closed_value awarded-only while pipeline_value uses current deal value precedence", async () => {
+    const queries: string[] = [];
+    const client = {
+      query: vi.fn(async (sql: string, params?: unknown[]) => {
+        queries.push(`${sql}\n-- params: ${JSON.stringify(params ?? [])}`);
+        if (sql.includes("SELECT id, slug, name FROM public.offices")) {
+          return { rows: [{ id: "office-1", slug: "north", name: "North" }], rowCount: 1 };
+        }
+        return { rows: [], rowCount: sql.includes("INSERT INTO public.rep_performance_snapshots") ? 1 : 0 };
+      }),
+      release: vi.fn(),
+    };
+    connectMock.mockResolvedValue(client);
+
+    await runRepPerformanceRollup(new Date("2026-05-07T12:00:00.000Z"));
+
+    const insertSql = queries.find((query) => query.includes("INSERT INTO public.rep_performance_snapshots")) ?? "";
+    expect(insertSql).toContain(
+      "COALESCE(SUM(COALESCE(NULLIF(d.bid_board_total_sales, 0), NULLIF(d.bid_estimate, 0), NULLIF(d.dd_estimate, 0), d.awarded_amount, 0))"
+    );
+    expect(insertSql).toContain("COALESCE(SUM(COALESCE(d.awarded_amount, d.bid_estimate, d.dd_estimate, 0))");
   });
 });
