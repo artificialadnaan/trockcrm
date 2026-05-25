@@ -13,7 +13,11 @@ function isReceiverEnabled(): boolean {
   return process.env.SYNCHUB_RELAY_RECEIVER_ENABLED !== "false";
 }
 
-function verifyAndParsePayload(rawBody: Buffer, signature: string | undefined): unknown {
+function verifyAndParsePayload(rawBody: unknown, signature: string | undefined): unknown {
+  if (!Buffer.isBuffer(rawBody)) {
+    throw new AppError(400, "Expected application/json request body");
+  }
+
   const signatureResult = verifySyncHubRelaySignature(
     rawBody,
     signature,
@@ -45,7 +49,7 @@ syncHubProcoreRelayRoutes.post(
         return;
       }
 
-      const rawBody = req.body as Buffer;
+      const rawBody = req.body;
       const signature = req.get(SYNCHUB_RELAY_SIGNATURE_HEADER) ?? undefined;
       const payload = verifyAndParsePayload(rawBody, signature);
 
@@ -67,7 +71,7 @@ syncHubProcoreRelayRoutes.post(
         return;
       }
 
-      const rawBody = req.body as Buffer;
+      const rawBody = req.body;
       const signature = req.get(SYNCHUB_RELAY_SIGNATURE_HEADER) ?? undefined;
       const payload = verifyAndParsePayload(rawBody, signature);
 

@@ -13,6 +13,7 @@ type TenantMatch = {
   officeSlug: string;
   schemaName: string;
   dealId: string | null;
+  procoreProjectId: number | null;
 };
 
 type ServiceDeps = {
@@ -144,11 +145,21 @@ function eventKeyForPayload(payload: SyncHubProjectStageChangedPayload): string 
 
   const digest = createHash("sha256")
     .update(JSON.stringify({
+      source: payload.source ?? null,
       companyId: payload.procore.companyId,
       portfolioProjectId: payload.procore.portfolioProjectId,
+      projectNumber: payload.procore.projectNumber,
+      projectName: payload.procore.projectName,
+      previousStage: payload.stage.previous.normalized,
       stage: payload.stage.current.normalized,
       detectedAt: payload.stageChange.detectedAt,
       webhookTimestamp: payload.stageChange.webhookTimestamp,
+      synchubReceivedAt: optionalString(payload.synchub?.receivedAt),
+      synchubEnrichedAt: optionalString(payload.synchub?.enrichedAt),
+      syncMappingId: optionalString(payload.synchub?.syncMappingId),
+      bidboardProjectId: optionalString(payload.synchub?.bidboardProjectId),
+      hubspotDealId: optionalString(payload.synchub?.hubspotDealId),
+      rawProcoreWebhook: payload.rawProcoreWebhook ?? null,
     }))
     .digest("hex")
     .slice(0, 32);
@@ -235,6 +246,7 @@ function mapTenantMatch(row: any): TenantMatch {
     officeSlug: row.office_slug,
     schemaName: row.schema_name,
     dealId: row.deal_id ?? null,
+    procoreProjectId: row.procore_project_id == null ? null : Number(row.procore_project_id),
   };
 }
 
@@ -252,7 +264,8 @@ async function findMatchesByProcoreProjectId(
       `SELECT $2::uuid AS office_id,
               $3::text AS office_slug,
               $4::text AS schema_name,
-              id AS deal_id
+              id AS deal_id,
+              procore_project_id
        FROM ${quoteIdent(schemaName)}.deals
         WHERE procore_project_id = $1
           AND procore_company_id = $5
@@ -281,7 +294,8 @@ async function findMatchesByProjectNumber(
       `SELECT $2::uuid AS office_id,
               $3::text AS office_slug,
               $4::text AS schema_name,
-              id AS deal_id
+              id AS deal_id,
+              procore_project_id
        FROM ${quoteIdent(schemaName)}.deals
         WHERE (deal_number = $1 OR project_number = $1)
           AND procore_company_id = $5
@@ -316,8 +330,16 @@ async function resolveTenantMatch(
     payload.procore.projectNumber,
     payload.procore.companyId
   );
-  if (projectNumberMatches.length === 1) return projectNumberMatches[0];
-  if (projectNumberMatches.length > 1) return "multiple_tenant_matches";
+  if (projectNumberMatches.some((match) =>
+    match.procoreProjectId != null && match.procoreProjectId !== procoreProjectId
+  )) {
+    return "multiple_tenant_matches";
+  }
+  const validProjectNumberMatches = projectNumberMatches.filter((match) =>
+    match.procoreProjectId == null || match.procoreProjectId === procoreProjectId
+  );
+  if (validProjectNumberMatches.length === 1) return validProjectNumberMatches[0];
+  if (validProjectNumberMatches.length > 1) return "multiple_tenant_matches";
   return "no_tenant_match";
 }
 
@@ -434,7 +456,9 @@ async function recordResolvedEvent(
   const schemaName = quoteIdent(match.schemaName);
   const portfolioProjectsTable = `${schemaName}.portfolio_projects`;
   const timestamps = eventTimestamp(payload, receivedAt);
-  const projectName = payload.procore.projectName ?? payload.procore.projectNumber ?? payload.procore.portfolioProjectId;
+  const projectNameForInsert = payload.procore.projectName
+    ?? payload.procore.projectNumber
+    ?? payload.procore.portfolioProjectId;
 
   await client.query("BEGIN");
   try {
@@ -459,7 +483,11 @@ async function recordResolvedEvent(
        VALUES ($1, $2, $3, $4, $5, $6, $7::timestamptz, $8, $9::timestamptz, $10, $11::jsonb, NOW(), NOW())
        ON CONFLICT (procore_company_id, procore_project_id) DO UPDATE SET
          project_number = COALESCE(EXCLUDED.project_number, ${portfolioProjectsTable}.project_number),
-         name = COALESCE(EXCLUDED.name, ${portfolioProjectsTable}.name),
+         name = CASE
+           WHEN $12::text IS NOT NULL THEN EXCLUDED.name
+           WHEN NULLIF(${portfolioProjectsTable}.name, '') IS NULL THEN EXCLUDED.name
+           ELSE ${portfolioProjectsTable}.name
+         END,
          current_stage = CASE
            WHEN ${portfolioProjectsTable}.current_stage_entered_at IS NULL
              OR EXCLUDED.current_stage_entered_at >= ${portfolioProjectsTable}.current_stage_entered_at
@@ -500,7 +528,7 @@ async function recordResolvedEvent(
         payload.procore.companyId,
         payload.procore.portfolioProjectId,
         payload.procore.projectNumber,
-        projectName,
+        projectNameForInsert,
         payload.stage.current.raw,
         payload.stage.current.normalized,
         timestamps.enteredAt,
@@ -513,6 +541,7 @@ async function recordResolvedEvent(
           stageChange: payload.stageChange,
           rawProcoreWebhook: payload.rawProcoreWebhook ?? null,
         }),
+        payload.procore.projectName,
       ]
     );
     const projectId = projectResult.rows[0]?.id;

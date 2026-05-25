@@ -124,4 +124,31 @@ describe("SyncHub Procore project stage-change relay route", () => {
     expect(response.status).toBe(400);
     expect(mocks.processStageChanged).not.toHaveBeenCalled();
   });
+
+  it("returns a controlled 400 when the request body is not parsed as JSON", async () => {
+    const raw = JSON.stringify(body());
+
+    const response = await request(createApp())
+      .post("/api/webhooks/synchub/procore-project-stage-changed")
+      .set("Content-Type", "text/plain")
+      .set("X-SyncHub-Signature", signed(raw))
+      .send(raw);
+
+    expect(response.status).toBe(400);
+    expect(response.body.error.message).toBe("Expected application/json request body");
+    expect(mocks.processStageChanged).not.toHaveBeenCalled();
+  });
+
+  it("returns a controlled 400 when Content-Type is missing", async () => {
+    const raw = JSON.stringify(body());
+
+    const response = await request(createApp())
+      .post("/api/webhooks/synchub/procore-project-stage-changed")
+      .set("X-SyncHub-Signature", signed(raw))
+      .send(raw);
+
+    expect(response.status).toBe(400);
+    expect(response.body.error.message).toBe("Expected application/json request body");
+    expect(mocks.processStageChanged).not.toHaveBeenCalled();
+  });
 });
