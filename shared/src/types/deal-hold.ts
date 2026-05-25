@@ -1,4 +1,4 @@
-import { toCanonicalDealStageSlug } from "./workflow.js";
+import { toCanonicalDealStageSlug, WON_DEAL_STAGE_SLUGS } from "./workflow.js";
 
 /*
 Hold-time invariants audited on 2026-05-21 across this file, the deal hold toggle
@@ -61,37 +61,33 @@ function toDate(value: string | Date | null | undefined): Date | null {
   return Number.isNaN(date.getTime()) ? null : date;
 }
 
-const LEGACY_WON_VALUE_STAGE_SLUGS = new Set([
-  "sent_to_production",
-  "service_sent_to_production",
-  "closed_won",
-  "service_scheduled",
-  "service_complete",
-]);
+const WON_VALUE_STAGE_SLUGS = new Set(WON_DEAL_STAGE_SLUGS);
 
 function shouldUseAwardedDealValue(deal: DealValueLike): boolean {
   const stageSlug = deal.stageSlug ?? deal.stage?.slug ?? null;
   if (!stageSlug) return false;
-  if (LEGACY_WON_VALUE_STAGE_SLUGS.has(stageSlug)) return true;
+  if (WON_VALUE_STAGE_SLUGS.has(stageSlug)) return true;
   const workflowRoute =
     deal.workflowRoute === "normal" || deal.workflowRoute === "service" ? deal.workflowRoute : null;
   return toCanonicalDealStageSlug(stageSlug, workflowRoute) === "won";
 }
 
 function getRawDealValue(deal: DealValueLike): number {
-  if (shouldUseAwardedDealValue(deal)) return getRawAwardedDealValue(deal);
+  const candidates = shouldUseAwardedDealValue(deal)
+    ? [deal.awardedAmount, deal.bidBoardTotalSales, deal.bidEstimate, deal.ddEstimate]
+    : [deal.bidBoardTotalSales, deal.bidEstimate, deal.ddEstimate, deal.awardedAmount];
 
-  const bidBoard = toNumber(deal.bidBoardTotalSales);
-  if (bidBoard > 0) return bidBoard;
-  const bid = toNumber(deal.bidEstimate);
-  if (bid > 0) return bid;
-  const dd = toNumber(deal.ddEstimate);
-  if (dd > 0) return dd;
-  return toNumber(deal.awardedAmount);
+  for (const candidate of candidates) {
+    const value = toNumber(candidate);
+    if (value > 0) return value;
+  }
+
+  return 0;
 }
 
 function getRawAwardedDealValue(deal: DealValueLike): number {
-  return toNumber(deal.awardedAmount);
+  const awarded = toNumber(deal.awardedAmount);
+  return awarded > 0 ? awarded : 0;
 }
 
 export function getHoldStateAtStageEntry(

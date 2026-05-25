@@ -7,6 +7,13 @@ const SERVER_EVALUATOR_MODULE = `${SERVER_MODULE_ROOT}/tasks/rules/evaluator.js`
 const SERVER_TASK_RULES_MODULE = `${SERVER_MODULE_ROOT}/tasks/rules/config.js` as string;
 const SERVER_TASK_PERSISTENCE_MODULE = `${SERVER_MODULE_ROOT}/tasks/rules/persistence.js` as string;
 const REPORTABLE_DEAL_SQL = reportableDealSqlPredicate("d");
+const currentDealValueSql = `COALESCE(
+  CASE WHEN d.bid_board_total_sales > 0 THEN d.bid_board_total_sales END,
+  CASE WHEN d.bid_estimate > 0 THEN d.bid_estimate END,
+  CASE WHEN d.dd_estimate > 0 THEN d.dd_estimate END,
+  CASE WHEN d.awarded_amount > 0 THEN d.awarded_amount END,
+  0
+)`;
 
 async function loadTaskRuleDependencies() {
   const [{ evaluateTaskRules }, { TASK_RULES }, { createTenantTaskRulePersistence }] = (await Promise.all([
@@ -166,7 +173,7 @@ export async function runWeeklyDigest(): Promise<void> {
 
         // 4. Total active pipeline value
         const valueRes = await client.query(
-          `SELECT COALESCE(SUM(COALESCE(NULLIF(d.bid_board_total_sales, 0), NULLIF(d.bid_estimate, 0), NULLIF(d.dd_estimate, 0), d.awarded_amount, 0)), 0) AS total_value
+          `SELECT COALESCE(SUM(${currentDealValueSql}), 0) AS total_value
            FROM ${schemaName}.deals d
            JOIN public.pipeline_stage_config psc ON psc.id = d.stage_id
            WHERE d.is_active = true

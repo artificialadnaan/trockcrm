@@ -1,6 +1,7 @@
 import { sql } from "drizzle-orm";
 import type { NodePgDatabase } from "drizzle-orm/node-postgres";
 import type * as schema from "@trock-crm/shared/schema";
+import { WON_STAGE_SLUGS } from "../shared/pipeline-terminal-stages.js";
 
 type TenantDb = NodePgDatabase<typeof schema>;
 
@@ -21,12 +22,7 @@ const ESTIMATING_STAGE_SLUGS = new Set([
   "bid_sent",
 ]);
 
-const WON_STAGE_SLUGS = new Set([
-  "won",
-  "closed_won",
-  "sent_to_production",
-  "service_sent_to_production",
-]);
+const WON_MILESTONE_STAGE_SLUGS = new Set(WON_STAGE_SLUGS);
 
 interface ForecastSnapshot {
   assignedRepId: string | null;
@@ -279,7 +275,7 @@ function milestoneKeyForTransition(
     return null;
   }
 
-  if (WON_STAGE_SLUGS.has(targetStageSlug)) return "closed_won";
+  if (WON_MILESTONE_STAGE_SLUGS.has(targetStageSlug)) return "closed_won";
   if (ESTIMATING_STAGE_SLUGS.has(targetStageSlug)) return "estimating";
   if (QUALIFIED_STAGE_SLUGS.has(targetStageSlug)) return "qualified";
   return null;

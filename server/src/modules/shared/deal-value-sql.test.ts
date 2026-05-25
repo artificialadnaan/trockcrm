@@ -3,6 +3,7 @@ import {
   aliasedActiveDealCountFilterSql,
   aliasedReportableDealFilterSql,
   aliasedEffectiveAwardedDealValueSql,
+  aliasedDealAwardedFirstWithFallbackSql,
   aliasedDealBestEstimateSql,
   aliasedDealBestEstimateWithForecastSql,
   aliasedEffectiveDealValueSql,
@@ -41,8 +42,17 @@ describe("deal-value-sql", () => {
   it("builds the base best-estimate expression once for raw-value consumers", () => {
     const normalized = normalize(aliasedDealBestEstimateSql("d"));
     expect(normalized).toContain("d.bid_board_total_sales");
-    expect(normalized).toContain("NULLIF");
+    expect(normalized).toContain("CASE WHEN d.bid_board_total_sales > 0 THEN d.bid_board_total_sales END");
+    expect(normalized).not.toContain("NULLIF");
     expect(normalized.indexOf("d.bid_estimate")).toBeLessThan(normalized.indexOf("d.awarded_amount"));
+  });
+
+  it("builds awarded-first fallback values with the same positive-value guard", () => {
+    const normalized = normalize(aliasedDealAwardedFirstWithFallbackSql("d"));
+    expect(normalized).toContain("CASE WHEN d.awarded_amount > 0 THEN d.awarded_amount END");
+    expect(normalized).toContain("CASE WHEN d.bid_estimate > 0 THEN d.bid_estimate END");
+    expect(normalized).not.toContain("NULLIF");
+    expect(normalized.indexOf("d.awarded_amount")).toBeLessThan(normalized.indexOf("d.bid_estimate"));
   });
 
   it("exposes an awarded-only on-hold-aware expression for won/booked rollups", () => {

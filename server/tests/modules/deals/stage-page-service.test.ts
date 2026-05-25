@@ -102,6 +102,39 @@ describe("listDealStagePage", () => {
     expect(result.summary).toMatchObject({ count: 21, activeCount: 21, totalCount: 26, totalValue: 400000 });
   });
 
+  it("uses positive awarded-first fallback for terminal stage totals and value sorting", async () => {
+    dbState.responses = [
+      [{ id: "stage-won", slug: "service_complete", name: "Service Complete", displayOrder: 8, isTerminal: true }],
+    ];
+
+    const tenantDb = {
+      select: createOfficeScopeSelectMock(),
+      execute: vi.fn()
+        .mockResolvedValueOnce({ rows: [{ total_count: "1", active_count: "1", total_value: "875000" }] })
+        .mockResolvedValueOnce({ rows: [] }),
+    } as any;
+
+    const { listDealStagePage } = await import("../../../src/modules/deals/service.js");
+    await listDealStagePage(tenantDb, {
+      role: "admin",
+      userId: "admin-1",
+      activeOfficeId: "office-1",
+      scope: "all",
+      stageId: "stage-won",
+      page: 1,
+      pageSize: 25,
+      sort: "value_desc",
+    } as any);
+
+    const executedSql = tenantDb.execute.mock.calls
+      .map(([query]: [unknown]) => extractSqlText(query).toLowerCase())
+      .join("\n");
+
+    expect(executedSql).toContain("case when d.awarded_amount > 0 then d.awarded_amount end");
+    expect(executedSql).toContain("case when d.bid_estimate > 0 then d.bid_estimate end");
+    expect(executedSql).not.toContain("coalesce(d.awarded_amount, d.bid_estimate");
+  });
+
   it("hydrates stage-page At Risk age from Bid Board stage-entered timestamp for Bid Board-owned rows", async () => {
     vi.useFakeTimers();
     try {

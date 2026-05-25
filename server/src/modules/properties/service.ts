@@ -8,7 +8,7 @@ import {
 } from "@trock-crm/shared/schema";
 import type * as schema from "@trock-crm/shared/schema";
 import { AppError } from "../../middleware/error-handler.js";
-import { effectiveDealValueSql } from "../shared/deal-value-sql.js";
+import { dealBestEstimateWithForecastSql, effectiveDealValueSql } from "../shared/deal-value-sql.js";
 
 type TenantDb = NodePgDatabase<typeof schema>;
 
@@ -373,7 +373,7 @@ export async function listProperties(
       propertyId: deals.propertyId,
       linkedValue: sql<string>`COALESCE(SUM(${effectiveDealValueSql(
         deals,
-        sql`COALESCE(NULLIF(${deals.bidBoardTotalSales}, 0), NULLIF(${deals.bidEstimate}, 0), NULLIF(${deals.ddEstimate}, 0), NULLIF(${deals.forecastRevenue}, 0), ${deals.awardedAmount}, 0)`
+        dealBestEstimateWithForecastSql(deals)
       )}), 0)::text`,
     })
     .from(deals)
@@ -570,7 +570,7 @@ export async function getPropertyDetail(tenantDb: TenantDb, propertyId: string) 
     .select({
       linkedValue: sql<string>`COALESCE(SUM(${effectiveDealValueSql(
         deals,
-        sql`COALESCE(NULLIF(${deals.bidBoardTotalSales}, 0), NULLIF(${deals.bidEstimate}, 0), NULLIF(${deals.ddEstimate}, 0), NULLIF(${deals.forecastRevenue}, 0), ${deals.awardedAmount}, 0)`
+        dealBestEstimateWithForecastSql(deals)
       )}), 0)::text`,
     })
     .from(deals)

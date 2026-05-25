@@ -53,6 +53,18 @@ describe("deal hold helpers", () => {
     ).toBe(16137.14);
   });
 
+  it("skips zero and negative current values before falling through", () => {
+    expect(
+      getEffectiveDealValue({
+        onHold: false,
+        bidBoardTotalSales: "-100",
+        bidEstimate: "0",
+        ddEstimate: "42000",
+        awardedAmount: "2.97",
+      })
+    ).toBe(42000);
+  });
+
   it("keeps awarded-basis value at zero when no awarded amount exists", () => {
     expect(
       getEffectiveAwardedDealValue({
@@ -85,6 +97,19 @@ describe("deal hold helpers", () => {
         ddEstimate: "800000",
       })
     ).toBe(925000);
+  });
+
+  it("falls back to positive current values for won-stage deal value when awarded is missing or zero", () => {
+    expect(
+      getEffectiveDealValue({
+        onHold: false,
+        stageSlug: "service_complete",
+        awardedAmount: "0",
+        bidBoardTotalSales: "-10",
+        bidEstimate: "875000",
+        ddEstimate: "800000",
+      })
+    ).toBe(875000);
   });
 
   it("uses current stage before a won-like Bid Board stage when choosing generic deal value", () => {

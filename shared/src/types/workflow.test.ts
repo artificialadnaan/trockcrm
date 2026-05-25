@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { toCanonicalDealStageSlug } from "./workflow.js";
+import { toCanonicalDealStageSlug, WON_DEAL_STAGE_SLUGS } from "./workflow.js";
 
 describe("workflow stage canonicalization", () => {
   it("preserves service-route estimating fallback from the bare estimating slug", () => {
@@ -13,5 +13,11 @@ describe("workflow stage canonicalization", () => {
       expect(toCanonicalDealStageSlug(slug, "normal")).toBe(slug);
       expect(toCanonicalDealStageSlug(slug, "service")).toBe(slug);
     }
+  });
+
+  it("exports the complete won-stage slug set including historical service aliases", () => {
+    expect(WON_DEAL_STAGE_SLUGS).toEqual(
+      expect.arrayContaining(["won", "service_scheduled", "service_complete", "sent_to_production", "closed_won"])
+    );
   });
 });

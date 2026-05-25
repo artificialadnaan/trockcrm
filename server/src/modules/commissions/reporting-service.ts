@@ -12,7 +12,7 @@ import {
 } from "@trock-crm/shared/schema";
 import type * as schema from "@trock-crm/shared/schema";
 import type { UserRole } from "@trock-crm/shared/types";
-import { aliasedActiveDealCountFilterSql } from "../shared/deal-value-sql.js";
+import { aliasedActiveDealCountFilterSql, aliasedDealBestEstimateSql } from "../shared/deal-value-sql.js";
 
 type TenantDb = NodePgDatabase<typeof schema>;
 
@@ -369,10 +369,10 @@ export async function getRepCommissionDashboard(
         p.name AS property_name,
         COALESCE(p.address, d.property_address) AS property_address,
         psc.slug AS stage_slug,
-        (COALESCE(NULLIF(d.bid_board_total_sales, 0), NULLIF(d.bid_estimate, 0), NULLIF(d.dd_estimate, 0), d.awarded_amount, 0) + COALESCE(d.change_order_total, 0))::numeric AS deal_value,
+        (${aliasedDealBestEstimateSql("d")} + COALESCE(d.change_order_total, 0))::numeric AS deal_value,
         COALESCE(cs.commission_rate, 0)::numeric AS commission_rate,
         ROUND(
-          ((COALESCE(NULLIF(d.bid_board_total_sales, 0), NULLIF(d.bid_estimate, 0), NULLIF(d.dd_estimate, 0), d.awarded_amount, 0) + COALESCE(d.change_order_total, 0)) * COALESCE(cs.commission_rate, 0))::numeric,
+          ((${aliasedDealBestEstimateSql("d")} + COALESCE(d.change_order_total, 0)) * COALESCE(cs.commission_rate, 0))::numeric,
           2
         )::numeric AS commission,
         NULL::date AS contract_signed_date,
@@ -470,10 +470,10 @@ export async function getCommissionPotential(
       psc.slug AS stage_slug,
       psc.display_order,
       COUNT(*)::int AS deal_count,
-      COALESCE(SUM(COALESCE(NULLIF(d.bid_board_total_sales, 0), NULLIF(d.bid_estimate, 0), NULLIF(d.dd_estimate, 0), d.awarded_amount, 0) + COALESCE(d.change_order_total, 0)), 0)::numeric AS total_deal_value,
+      COALESCE(SUM(${aliasedDealBestEstimateSql("d")} + COALESCE(d.change_order_total, 0)), 0)::numeric AS total_deal_value,
       COALESCE(
         SUM(
-          (COALESCE(NULLIF(d.bid_board_total_sales, 0), NULLIF(d.bid_estimate, 0), NULLIF(d.dd_estimate, 0), d.awarded_amount, 0) + COALESCE(d.change_order_total, 0))
+          (${aliasedDealBestEstimateSql("d")} + COALESCE(d.change_order_total, 0))
           * COALESCE(cs.commission_rate, 0)
         ),
         0
@@ -621,7 +621,7 @@ export async function getCommissionSummary(
       SELECT
         COALESCE(
           SUM(
-            (COALESCE(NULLIF(d.bid_board_total_sales, 0), NULLIF(d.bid_estimate, 0), NULLIF(d.dd_estimate, 0), d.awarded_amount, 0) + COALESCE(d.change_order_total, 0))
+            (${aliasedDealBestEstimateSql("d")} + COALESCE(d.change_order_total, 0))
             * COALESCE(cs.commission_rate, 0)
           ),
           0

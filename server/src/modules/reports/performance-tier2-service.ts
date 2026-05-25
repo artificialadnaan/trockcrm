@@ -9,13 +9,12 @@ import {
   aliasedEffectiveDealValueSql,
   aliasedForecastFirstDealValueSql,
 } from "../shared/deal-value-sql.js";
+import { LOST_STAGE_SLUGS, WON_STAGE_SLUGS } from "../shared/pipeline-terminal-stages.js";
 
 type TenantDb = NodePgDatabase<typeof schema>;
 type ExecuteRows = { rows: unknown[] } | unknown[];
 
 const REPORT_CACHE_TTL_MS = 5 * 60 * 1000;
-const WON_STAGE_SLUGS = ["won", "sent_to_production", "service_sent_to_production", "closed_won"] as const;
-const LOST_STAGE_SLUGS = ["lost", "production_lost", "service_lost", "closed_lost"] as const;
 const COMMIT_STAGE_SLUGS = ["contract", "contract_signed", "service_contract_signed", "estimate_sent_to_client", "service_estimate_sent_to_client"] as const;
 const BEST_CASE_STAGE_SLUGS = ["estimating", "estimate_in_progress", "service_estimating", "estimate_under_review", "service_estimate_under_review"] as const;
 

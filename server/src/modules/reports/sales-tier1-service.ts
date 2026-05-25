@@ -7,13 +7,12 @@ import {
   aliasedEffectiveAwardedDealValueSql,
   aliasedEffectiveDealValueSql,
 } from "../shared/deal-value-sql.js";
+import { LOST_STAGE_SLUGS, WON_STAGE_SLUGS } from "../shared/pipeline-terminal-stages.js";
 
 type TenantDb = NodePgDatabase<typeof schema>;
 type ExecuteRows<T> = { rows: T[] } | T[];
 
 const REPORT_CACHE_TTL_MS = 5 * 60 * 1000;
-const WON_STAGE_SLUGS = ["won", "sent_to_production", "service_sent_to_production", "closed_won"] as const;
-const LOST_STAGE_SLUGS = ["lost", "production_lost", "service_lost", "closed_lost"] as const;
 const TERMINAL_STAGE_SLUGS = [...WON_STAGE_SLUGS, ...LOST_STAGE_SLUGS] as const;
 
 interface CacheEntry<T> {

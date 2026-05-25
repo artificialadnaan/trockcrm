@@ -70,7 +70,7 @@ describe("rep performance rollup period scoping", () => {
 
     const insertSql = queries.find((query) => query.includes("INSERT INTO public.rep_performance_snapshots"));
     const pipelineValueSql =
-      /COALESCE\(SUM\(COALESCE\(NULLIF\(d\.bid_board_total_sales, 0\), NULLIF\(d\.bid_estimate, 0\), NULLIF\(d\.dd_estimate, 0\), d\.awarded_amount, 0\)\)([\s\S]*?)\), 0\)::numeric AS pipeline_value/.exec(
+      /COALESCE\(SUM\(COALESCE\([\s\S]*?CASE WHEN d\.awarded_amount > 0 THEN d\.awarded_amount END,[\s\S]*?0[\s\S]*?\)([\s\S]*?)\), 0\)::numeric AS pipeline_value/.exec(
         insertSql ?? ""
       )?.[1];
     const historicalPipelineValueBranch =
@@ -91,7 +91,7 @@ describe("rep performance rollup period scoping", () => {
     expect(historicalPipelineValuePredicates).not.toContain("psc.is_active_pipeline");
   });
 
-  it("keeps closed_value awarded-only while pipeline_value uses current deal value precedence", async () => {
+  it("keeps closed_value awarded-first while pipeline_value uses current deal value precedence", async () => {
     const queries: string[] = [];
     const client = {
       query: vi.fn(async (sql: string, params?: unknown[]) => {
@@ -108,9 +108,10 @@ describe("rep performance rollup period scoping", () => {
     await runRepPerformanceRollup(new Date("2026-05-07T12:00:00.000Z"));
 
     const insertSql = queries.find((query) => query.includes("INSERT INTO public.rep_performance_snapshots")) ?? "";
-    expect(insertSql).toContain(
-      "COALESCE(SUM(COALESCE(NULLIF(d.bid_board_total_sales, 0), NULLIF(d.bid_estimate, 0), NULLIF(d.dd_estimate, 0), d.awarded_amount, 0))"
-    );
-    expect(insertSql).toContain("COALESCE(SUM(COALESCE(d.awarded_amount, d.bid_estimate, d.dd_estimate, 0))");
+    expect(insertSql).toContain("CASE WHEN d.bid_board_total_sales > 0 THEN d.bid_board_total_sales END");
+    expect(insertSql).toContain("CASE WHEN d.awarded_amount > 0 THEN d.awarded_amount END");
+    expect(insertSql).not.toContain("NULLIF(d.bid_board_total_sales, 0)");
+    expect(insertSql).toContain("'service_scheduled'");
+    expect(insertSql).toContain("'service_complete'");
   });
 });

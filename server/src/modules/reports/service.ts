@@ -20,7 +20,7 @@ import {
   type WorkflowRoute,
 } from "@trock-crm/shared/types";
 import { db } from "../../db.js";
-import { TERMINAL_STAGE_SLUGS } from "../shared/pipeline-terminal-stages.js";
+import { LOST_STAGE_SLUGS, TERMINAL_STAGE_SLUGS, WON_STAGE_SLUGS } from "../shared/pipeline-terminal-stages.js";
 import {
   aliasedActiveDealCountFilterSql,
   aliasedEffectiveAwardedDealValueSql,
@@ -77,18 +77,8 @@ const MIRRORED_DOWNSTREAM_STAGE_SLUGS = [
   ...CANONICAL_MIRRORED_DOWNSTREAM_STAGE_SLUGS,
   ...LEGACY_MIRRORED_DOWNSTREAM_STAGE_SLUGS,
 ] as const;
-const WON_OUTCOME_STAGE_SLUGS = [
-  "won",
-  "sent_to_production",
-  "service_sent_to_production",
-  "closed_won",
-] as const;
-const LOST_OUTCOME_STAGE_SLUGS = [
-  "lost",
-  "production_lost",
-  "service_lost",
-  "closed_lost",
-] as const;
+const WON_OUTCOME_STAGE_SLUGS = WON_STAGE_SLUGS;
+const LOST_OUTCOME_STAGE_SLUGS = LOST_STAGE_SLUGS;
 const MIRRORED_DOWNSTREAM_STAGE_LABELS: Record<string, string> = {
   estimating: "Estimating",
   estimate_in_progress: "Estimating",

@@ -190,6 +190,16 @@ export type CanonicalTerminalDealStageSlug = Extract<
   { isTerminal: true }
 >["slug"];
 
+export type CanonicalWonDealStageSlug = Extract<
+  CanonicalDealWorkflowContractRecord,
+  { outcomeCategory: "won" }
+>["slug"];
+
+export type CanonicalLostDealStageSlug = Extract<
+  CanonicalDealWorkflowContractRecord,
+  { outcomeCategory: "lost" }
+>["slug"];
+
 export type CrmOwnedCanonicalDealStageSlug = Extract<
   CanonicalDealWorkflowContractRecord,
   { systemOfRecord: "crm" }
@@ -203,6 +213,14 @@ export type BidBoardOwnedCanonicalDealStageSlug = Extract<
 export const CANONICAL_TERMINAL_DEAL_STAGE_SLUGS = CANONICAL_DEAL_WORKFLOW_CONTRACTS
   .filter((contract) => contract.isTerminal)
   .map((contract) => contract.slug) as readonly CanonicalTerminalDealStageSlug[];
+
+export const CANONICAL_WON_DEAL_STAGE_SLUGS = CANONICAL_DEAL_WORKFLOW_CONTRACTS
+  .filter((contract) => contract.outcomeCategory === "won")
+  .map((contract) => contract.slug) as readonly CanonicalWonDealStageSlug[];
+
+export const CANONICAL_LOST_DEAL_STAGE_SLUGS = CANONICAL_DEAL_WORKFLOW_CONTRACTS
+  .filter((contract) => contract.outcomeCategory === "lost")
+  .map((contract) => contract.slug) as readonly CanonicalLostDealStageSlug[];
 
 export const CRM_OWNED_CANONICAL_DEAL_STAGE_SLUGS = CANONICAL_DEAL_WORKFLOW_CONTRACTS
   .filter((contract) => contract.systemOfRecord === "crm")
@@ -267,6 +285,26 @@ export const LEGACY_DEAL_STAGE_TO_CANONICAL_STAGE = {
 export type LegacyDealStageSlug =
   | keyof (typeof LEGACY_DEAL_STAGE_TO_CANONICAL_STAGE)["normal"]
   | keyof (typeof LEGACY_DEAL_STAGE_TO_CANONICAL_STAGE)["service"];
+
+function legacyDealStageSlugsForCanonicalStage(canonicalStageSlug: CanonicalDealStageSlug): readonly string[] {
+  return [
+    ...new Set(
+      Object.values(LEGACY_DEAL_STAGE_TO_CANONICAL_STAGE).flatMap((stageMap) =>
+        Object.entries(stageMap)
+          .filter(([, mappedSlug]) => mappedSlug === canonicalStageSlug)
+          .map(([stageSlug]) => stageSlug)
+      )
+    ),
+  ];
+}
+
+export const WON_DEAL_STAGE_SLUGS = [
+  ...new Set([...CANONICAL_WON_DEAL_STAGE_SLUGS, ...legacyDealStageSlugsForCanonicalStage("won")]),
+] as readonly string[];
+
+export const LOST_DEAL_STAGE_SLUGS = [
+  ...new Set([...CANONICAL_LOST_DEAL_STAGE_SLUGS, ...legacyDealStageSlugsForCanonicalStage("lost")]),
+] as readonly string[];
 
 export type LegacyWorkflowStageSlug = LegacyLeadStageSlug | LegacyDealStageSlug;
 

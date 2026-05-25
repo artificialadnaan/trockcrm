@@ -2,12 +2,33 @@ import {
   getDealAtRiskResult,
   isReportableDeal,
   reportableDealSqlPredicate,
+  LOST_DEAL_STAGE_SLUGS,
   type WorkflowRoute,
+  WON_DEAL_STAGE_SLUGS,
 } from "@trock-crm/shared/types";
 import { pool } from "../db.js";
 
 export const STALE_ACCOUNT_THRESHOLD_DAYS = 30;
 const REPORTABLE_DEAL_SQL = reportableDealSqlPredicate("d");
+const currentDealValueSql = `COALESCE(
+  CASE WHEN d.bid_board_total_sales > 0 THEN d.bid_board_total_sales END,
+  CASE WHEN d.bid_estimate > 0 THEN d.bid_estimate END,
+  CASE WHEN d.dd_estimate > 0 THEN d.dd_estimate END,
+  CASE WHEN d.awarded_amount > 0 THEN d.awarded_amount END,
+  0
+)`;
+const awardedFirstDealValueSql = `COALESCE(
+  CASE WHEN d.awarded_amount > 0 THEN d.awarded_amount END,
+  CASE WHEN d.bid_board_total_sales > 0 THEN d.bid_board_total_sales END,
+  CASE WHEN d.bid_estimate > 0 THEN d.bid_estimate END,
+  CASE WHEN d.dd_estimate > 0 THEN d.dd_estimate END,
+  0
+)`;
+const wonStageSqlList = WON_DEAL_STAGE_SLUGS.map((slug) => `'${slug}'`).join(", ");
+const lostStageSqlList = LOST_DEAL_STAGE_SLUGS.map((slug) => `'${slug}'`).join(", ");
+const terminalStageSqlList = [...WON_DEAL_STAGE_SLUGS, ...LOST_DEAL_STAGE_SLUGS]
+  .map((slug) => `'${slug}'`)
+  .join(", ");
 
 const PERIOD_KINDS = [
   "mtd",
@@ -232,7 +253,7 @@ async function refreshOfficePeriod(
               ELSE d.is_active = true AND NOT psc.is_terminal AND ${REPORTABLE_DEAL_SQL}
             END
          )::int AS deals_count,
-         COALESCE(SUM(COALESCE(NULLIF(d.bid_board_total_sales, 0), NULLIF(d.bid_estimate, 0), NULLIF(d.dd_estimate, 0), d.awarded_amount, 0))
+         COALESCE(SUM(${currentDealValueSql})
            FILTER (
              WHERE CASE
                -- Historical pipeline_value follows the same deterministic
@@ -248,20 +269,20 @@ async function refreshOfficePeriod(
               END
            ), 0)::numeric AS pipeline_value,
          COUNT(*) FILTER (
-         WHERE psc.slug IN ('won', 'sent_to_production', 'service_sent_to_production', 'closed_won')
+         WHERE psc.slug IN (${wonStageSqlList})
               AND ${REPORTABLE_DEAL_SQL}
               AND COALESCE(d.actual_close_date, d.contract_signed_date, d.contract_signed_at::date, d.updated_at::date) >= $2::date
              AND COALESCE(d.actual_close_date, d.contract_signed_date, d.contract_signed_at::date, d.updated_at::date) <= $3::date
          )::int AS wins_count,
          COUNT(*) FILTER (
-         WHERE psc.slug IN ('lost', 'production_lost', 'service_lost', 'closed_lost')
+         WHERE psc.slug IN (${lostStageSqlList})
               AND ${REPORTABLE_DEAL_SQL}
               AND COALESCE(d.actual_close_date, d.lost_at::date, d.updated_at::date) >= $2::date
              AND COALESCE(d.actual_close_date, d.lost_at::date, d.updated_at::date) <= $3::date
          )::int AS losses_count,
-         COALESCE(SUM(COALESCE(d.awarded_amount, d.bid_estimate, d.dd_estimate, 0))
+         COALESCE(SUM(${awardedFirstDealValueSql})
            FILTER (
-             WHERE psc.slug IN ('won', 'sent_to_production', 'service_sent_to_production', 'closed_won')
+             WHERE psc.slug IN (${wonStageSqlList})
                 AND ${REPORTABLE_DEAL_SQL}
                 AND COALESCE(d.actual_close_date, d.contract_signed_date, d.contract_signed_at::date, d.updated_at::date) >= $2::date
                AND COALESCE(d.actual_close_date, d.contract_signed_date, d.contract_signed_at::date, d.updated_at::date) <= $3::date
@@ -270,16 +291,7 @@ async function refreshOfficePeriod(
            COALESCE(d.actual_close_date, d.contract_signed_date, d.contract_signed_at::date, d.lost_at::date)
              - d.created_at::date
          ) FILTER (
-          WHERE psc.slug IN (
-               'won',
-               'sent_to_production',
-               'service_sent_to_production',
-               'closed_won',
-               'lost',
-               'production_lost',
-               'service_lost',
-               'closed_lost'
-             )
+          WHERE psc.slug IN (${terminalStageSqlList})
               AND ${REPORTABLE_DEAL_SQL}
               AND COALESCE(d.actual_close_date, d.contract_signed_date, d.contract_signed_at::date, d.lost_at::date) >= $2::date
              AND COALESCE(d.actual_close_date, d.contract_signed_date, d.contract_signed_at::date, d.lost_at::date) <= $3::date

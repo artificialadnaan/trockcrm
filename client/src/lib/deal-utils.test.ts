@@ -100,6 +100,17 @@ describe("deal value precedence", () => {
     );
   });
 
+  it("skips zero and negative current values before falling through", () => {
+    expect(
+      resolveBestEstimate({
+        bidBoardTotalSales: "-100",
+        bidEstimate: "0",
+        ddEstimate: "42000",
+        awardedAmount: "2.97",
+      })
+    ).toEqual({ value: 42000, source: "estimate" });
+  });
+
   it("keeps awarded_amount first for won-stage deal value displays", () => {
     const deal = {
       stageSlug: "won",
@@ -110,6 +121,19 @@ describe("deal value precedence", () => {
 
     expect(bestEstimate(deal)).toBe(925000);
     expect(resolveBestEstimate(deal)).toEqual({ value: 925000, source: "awarded" });
+  });
+
+  it("falls back to positive bid value for won-stage deal value when awarded is zero", () => {
+    const deal = {
+      stageSlug: "service_scheduled",
+      awardedAmount: "0",
+      bidBoardTotalSales: "-10",
+      bidEstimate: "875000",
+      ddEstimate: "800000",
+    };
+
+    expect(bestEstimate(deal)).toBe(875000);
+    expect(resolveBestEstimate(deal)).toEqual({ value: 875000, source: "bid" });
   });
 
   it("uses current stage before a won-like Bid Board stage when choosing generic deal value", () => {
