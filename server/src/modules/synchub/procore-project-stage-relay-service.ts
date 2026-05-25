@@ -21,6 +21,37 @@ type ServiceDeps = {
   receivedAt?: Date;
 };
 
+type ProcoreCompanyOfficeMapping = {
+  procoreCompanyId: string;
+  officeSchema: string;
+};
+
+export type ReplayUnresolvedStageReceiptsOptions = {
+  client?: QueryClient;
+  commit?: boolean;
+  limit?: number;
+};
+
+export type ReplayUnresolvedStageReceiptsResult = {
+  mode: "dry-run" | "commit";
+  scanned: number;
+  replayed: number;
+  wouldReplay: number;
+  stillUnresolved: number;
+  duplicates: number;
+  failed: number;
+  results: Array<{
+    receiptId: string;
+    eventKey: string;
+    procoreCompanyId: string;
+    procoreProjectId: string;
+    projectNumber: string | null;
+    outcome: SyncHubProjectStageChangedResult["status"] | "would_record" | "failed";
+    reason?: string;
+    officeSlug?: string;
+  }>;
+};
+
 export type SyncHubProjectStageChangedPayload = {
   eventType: "procore.project.stage_changed";
   source?: string;
@@ -66,6 +97,16 @@ export type SyncHubProjectStageChangedResult =
   | { status: "unresolved"; reason: "no_tenant_match" | "multiple_tenant_matches"; eventKey: string };
 
 const OFFICE_SLUG_PATTERN = /^[a-z][a-z0-9_]*$/;
+export const PROCORE_COMPANY_OFFICE_MAP_ENV = "PROCORE_COMPANY_OFFICE_MAP";
+
+// Explicit bootstrap mapping for the current production Procore Portfolio company.
+// Deployments can extend or replace this with PROCORE_COMPANY_OFFICE_MAP.
+const DEFAULT_PROCORE_COMPANY_OFFICE_MAPPINGS: ProcoreCompanyOfficeMapping[] = [
+  {
+    procoreCompanyId: "598134325683880",
+    officeSchema: "office_dallas",
+  },
+];
 
 function quoteIdent(identifier: string): string {
   if (!/^[a-zA-Z_][a-zA-Z0-9_]*$/.test(identifier)) {
@@ -77,6 +118,59 @@ function quoteIdent(identifier: string): string {
 function schemaNameForOffice(slug: string): string | null {
   if (!OFFICE_SLUG_PATTERN.test(slug)) return null;
   return `office_${slug}`;
+}
+
+function officeSlugForSchemaName(schemaName: string): string | null {
+  if (!schemaName.startsWith("office_")) return null;
+  const slug = schemaName.slice("office_".length);
+  return OFFICE_SLUG_PATTERN.test(slug) ? slug : null;
+}
+
+function normalizeOfficeMappingTarget(value: string): string | null {
+  const trimmed = value.trim();
+  if (!trimmed) return null;
+  const schemaName = trimmed.startsWith("office_") ? trimmed : schemaNameForOffice(trimmed);
+  if (!schemaName) return null;
+  return officeSlugForSchemaName(schemaName) ? schemaName : null;
+}
+
+function parseProcoreCompanyOfficeMappings(raw: string | undefined): ProcoreCompanyOfficeMapping[] {
+  if (!raw?.trim()) return DEFAULT_PROCORE_COMPANY_OFFICE_MAPPINGS;
+
+  const trimmed = raw.trim();
+  const entries: Array<[string, unknown]> = [];
+  if (trimmed.startsWith("{")) {
+    const parsed = JSON.parse(trimmed);
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+      throw new AppError(500, `${PROCORE_COMPANY_OFFICE_MAP_ENV} must be a JSON object or comma-separated map`);
+    }
+    entries.push(...Object.entries(parsed));
+  } else {
+    for (const pair of trimmed.split(",")) {
+      const [companyId, officeSchema] = pair.split("=").map((part) => part?.trim());
+      if (companyId && officeSchema) {
+        entries.push([companyId, officeSchema]);
+      }
+    }
+  }
+
+  const mappings = entries.flatMap(([companyId, officeSchema]) => {
+    const procoreCompanyId = String(companyId).trim();
+    const normalizedSchema = typeof officeSchema === "string"
+      ? normalizeOfficeMappingTarget(officeSchema)
+      : null;
+    if (!procoreCompanyId || !normalizedSchema) return [];
+    return [{ procoreCompanyId, officeSchema: normalizedSchema }];
+  });
+
+  if (mappings.length === 0) {
+    throw new AppError(500, `${PROCORE_COMPANY_OFFICE_MAP_ENV} has no valid Procore company office mappings`);
+  }
+  return mappings;
+}
+
+export function getProcoreCompanyOfficeMappings(): ProcoreCompanyOfficeMapping[] {
+  return parseProcoreCompanyOfficeMappings(process.env[PROCORE_COMPANY_OFFICE_MAP_ENV]);
 }
 
 function asObject(value: unknown): Record<string, unknown> {
@@ -250,6 +344,31 @@ function mapTenantMatch(row: any): TenantMatch {
   };
 }
 
+function findMappedOfficeForCompanyId(
+  offices: OfficeRow[],
+  procoreCompanyId: string
+): TenantMatch | "no_tenant_match" | "multiple_tenant_matches" {
+  const configuredSchemas = getProcoreCompanyOfficeMappings()
+    .filter((mapping) => mapping.procoreCompanyId === procoreCompanyId)
+    .map((mapping) => mapping.officeSchema);
+  const uniqueSchemas = [...new Set(configuredSchemas)];
+  if (uniqueSchemas.length === 0) return "no_tenant_match";
+  if (uniqueSchemas.length > 1) return "multiple_tenant_matches";
+
+  const officeSlug = officeSlugForSchemaName(uniqueSchemas[0]);
+  if (!officeSlug) return "no_tenant_match";
+  const office = offices.find((row) => row.slug === officeSlug);
+  if (!office) return "no_tenant_match";
+
+  return {
+    officeId: office.id,
+    officeSlug: office.slug,
+    schemaName: uniqueSchemas[0],
+    dealId: null,
+    procoreProjectId: null,
+  };
+}
+
 async function findMatchesByProcoreProjectId(
   client: QueryClient,
   offices: OfficeRow[],
@@ -315,9 +434,15 @@ async function resolveTenantMatch(
 ): Promise<TenantMatch | "no_tenant_match" | "multiple_tenant_matches"> {
   const offices = await getActiveOffices(client);
   const procoreProjectId = parseSafeProcoreId(payload.procore.portfolioProjectId);
+  const mappedOffice = findMappedOfficeForCompanyId(offices, payload.procore.companyId);
+  if (mappedOffice === "no_tenant_match" || mappedOffice === "multiple_tenant_matches") {
+    return mappedOffice;
+  }
+  const mappedOfficeRows = [{ id: mappedOffice.officeId, slug: mappedOffice.officeSlug }];
+
   const linkedMatches = await findMatchesByProcoreProjectId(
     client,
-    offices,
+    mappedOfficeRows,
     procoreProjectId,
     payload.procore.companyId
   );
@@ -326,7 +451,7 @@ async function resolveTenantMatch(
 
   const projectNumberMatches = await findMatchesByProjectNumber(
     client,
-    offices,
+    mappedOfficeRows,
     payload.procore.projectNumber,
     payload.procore.companyId
   );
@@ -340,35 +465,48 @@ async function resolveTenantMatch(
   );
   if (validProjectNumberMatches.length === 1) return validProjectNumberMatches[0];
   if (validProjectNumberMatches.length > 1) return "multiple_tenant_matches";
-  return "no_tenant_match";
+  return mappedOffice;
 }
 
-async function insertReceipt(input: {
+async function insertUnresolvedReceipt(input: {
   client: QueryClient;
   payload: SyncHubProjectStageChangedPayload;
   eventKey: string;
-  status: "processed" | "unresolved";
-  match?: TenantMatch;
   reason?: string;
   receivedAt: Date;
 }) {
   const result = await input.client.query(
-    `INSERT INTO public.portfolio_project_stage_event_receipts
+    `INSERT INTO public.portfolio_project_stage_event_receipts AS receipts
        (event_key, status, office_id, office_slug, procore_company_id,
         procore_portfolio_project_id, project_number, project_name, previous_stage,
         current_stage, current_stage_normalized, is_board_relevant,
         synchub_webhook_log_id, synchub_sync_mapping_id, error_reason,
-        raw_payload, received_at, processed_at)
+       raw_payload, received_at, processed_at)
      VALUES
-       ($1, $2, $3::uuid, $4, $5, $6, $7, $8, $9, $10, $11, $12,
-        $13, $14, $15, $16::jsonb, $17::timestamptz, $18::timestamptz)
-     ON CONFLICT (event_key) DO NOTHING
+       ($1, 'unresolved', NULL::uuid, NULL, $2, $3, $4, $5, $6, $7, $8, $9,
+        $10, $11, $12, $13::jsonb, $14::timestamptz, NULL::timestamptz)
+     ON CONFLICT (event_key) DO UPDATE SET
+       status = 'unresolved',
+       office_id = NULL,
+       office_slug = NULL,
+       procore_company_id = EXCLUDED.procore_company_id,
+       procore_portfolio_project_id = EXCLUDED.procore_portfolio_project_id,
+       project_number = EXCLUDED.project_number,
+       project_name = EXCLUDED.project_name,
+       previous_stage = EXCLUDED.previous_stage,
+       current_stage = EXCLUDED.current_stage,
+       current_stage_normalized = EXCLUDED.current_stage_normalized,
+       is_board_relevant = EXCLUDED.is_board_relevant,
+       synchub_webhook_log_id = EXCLUDED.synchub_webhook_log_id,
+       synchub_sync_mapping_id = EXCLUDED.synchub_sync_mapping_id,
+       error_reason = EXCLUDED.error_reason,
+       raw_payload = EXCLUDED.raw_payload,
+       processed_at = NULL,
+       updated_at = NOW()
+     WHERE receipts.status = 'unresolved'
      RETURNING id`,
     [
       input.eventKey,
-      input.status,
-      input.match?.officeId ?? null,
-      input.match?.officeSlug ?? null,
       input.payload.procore.companyId,
       input.payload.procore.portfolioProjectId,
       input.payload.procore.projectNumber,
@@ -382,7 +520,6 @@ async function insertReceipt(input: {
       input.reason ?? null,
       JSON.stringify(input.payload),
       input.receivedAt.toISOString(),
-      input.status === "processed" ? input.receivedAt.toISOString() : null,
     ]
   );
   return result.rows[0]?.id ?? null;
@@ -591,11 +728,10 @@ async function recordUnresolvedEvent(
 ) {
   await client.query("BEGIN");
   try {
-    const receiptId = await insertReceipt({
+    const receiptId = await insertUnresolvedReceipt({
       client,
       payload,
       eventKey,
-      status: "unresolved",
       reason,
       receivedAt,
     });
@@ -631,6 +767,137 @@ export async function processSyncHubProcoreProjectStageChanged(
     }
 
     return await recordResolvedEvent(client, payload, match, eventKey, receivedAt);
+  } finally {
+    if (ownsClient) client.release?.();
+  }
+}
+
+type UnresolvedReceiptRow = {
+  id: string;
+  event_key: string;
+  procore_company_id: string;
+  procore_portfolio_project_id: string;
+  project_number: string | null;
+  raw_payload: unknown;
+};
+
+async function unresolvedStageReceipts(client: QueryClient, limit: number): Promise<UnresolvedReceiptRow[]> {
+  const result = await client.query(
+    `SELECT id, event_key, procore_company_id, procore_portfolio_project_id, project_number, raw_payload
+       FROM public.portfolio_project_stage_event_receipts
+      WHERE status = 'unresolved'
+        AND event_key LIKE 'synchub-stage:%'
+      ORDER BY received_at ASC, id ASC
+      LIMIT $1`,
+    [limit]
+  );
+  return result.rows;
+}
+
+export async function replayUnresolvedSyncHubProcoreProjectStageReceipts(
+  options: ReplayUnresolvedStageReceiptsOptions = {}
+): Promise<ReplayUnresolvedStageReceiptsResult> {
+  const commit = options.commit === true;
+  const limit = options.limit ?? 100;
+  if (!Number.isInteger(limit) || limit <= 0 || limit > 1000) {
+    throw new AppError(400, "limit must be an integer between 1 and 1000");
+  }
+
+  const ownsClient = !options.client;
+  const client = options.client ?? await pool.connect();
+  const summary: ReplayUnresolvedStageReceiptsResult = {
+    mode: commit ? "commit" : "dry-run",
+    scanned: 0,
+    replayed: 0,
+    wouldReplay: 0,
+    stillUnresolved: 0,
+    duplicates: 0,
+    failed: 0,
+    results: [],
+  };
+
+  try {
+    const rows = await unresolvedStageReceipts(client, limit);
+    summary.scanned = rows.length;
+    for (const row of rows) {
+      try {
+        const payload = validateSyncHubProjectStageChangedPayload(row.raw_payload);
+        if (!commit) {
+          const match = await resolveTenantMatch(client, payload);
+          if (match === "no_tenant_match" || match === "multiple_tenant_matches") {
+            summary.stillUnresolved += 1;
+            summary.results.push({
+              receiptId: row.id,
+              eventKey: row.event_key,
+              procoreCompanyId: row.procore_company_id,
+              procoreProjectId: row.procore_portfolio_project_id,
+              projectNumber: row.project_number,
+              outcome: "unresolved",
+              reason: match,
+            });
+          } else {
+            summary.wouldReplay += 1;
+            summary.results.push({
+              receiptId: row.id,
+              eventKey: row.event_key,
+              procoreCompanyId: row.procore_company_id,
+              procoreProjectId: row.procore_portfolio_project_id,
+              projectNumber: row.project_number,
+              outcome: "would_record",
+              officeSlug: match.officeSlug,
+            });
+          }
+          continue;
+        }
+
+        const result = await processSyncHubProcoreProjectStageChanged(payload, { client });
+        if (result.status === "recorded") {
+          summary.replayed += 1;
+          summary.results.push({
+            receiptId: row.id,
+            eventKey: row.event_key,
+            procoreCompanyId: row.procore_company_id,
+            procoreProjectId: row.procore_portfolio_project_id,
+            projectNumber: row.project_number,
+            outcome: "recorded",
+            officeSlug: result.officeSlug,
+          });
+        } else if (result.status === "duplicate") {
+          summary.duplicates += 1;
+          summary.results.push({
+            receiptId: row.id,
+            eventKey: row.event_key,
+            procoreCompanyId: row.procore_company_id,
+            procoreProjectId: row.procore_portfolio_project_id,
+            projectNumber: row.project_number,
+            outcome: "duplicate",
+          });
+        } else {
+          summary.stillUnresolved += 1;
+          summary.results.push({
+            receiptId: row.id,
+            eventKey: row.event_key,
+            procoreCompanyId: row.procore_company_id,
+            procoreProjectId: row.procore_portfolio_project_id,
+            projectNumber: row.project_number,
+            outcome: "unresolved",
+            reason: result.reason,
+          });
+        }
+      } catch (error) {
+        summary.failed += 1;
+        summary.results.push({
+          receiptId: row.id,
+          eventKey: row.event_key,
+          procoreCompanyId: row.procore_company_id,
+          procoreProjectId: row.procore_portfolio_project_id,
+          projectNumber: row.project_number,
+          outcome: "failed",
+          reason: error instanceof Error ? error.message : String(error),
+        });
+      }
+    }
+    return summary;
   } finally {
     if (ownsClient) client.release?.();
   }

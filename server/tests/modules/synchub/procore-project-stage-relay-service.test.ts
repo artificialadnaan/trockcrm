@@ -1,6 +1,8 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
+  PROCORE_COMPANY_OFFICE_MAP_ENV,
   processSyncHubProcoreProjectStageChanged,
+  replayUnresolvedSyncHubProcoreProjectStageReceipts,
   validateSyncHubProjectStageChangedPayload,
 } from "../../../src/modules/synchub/procore-project-stage-relay-service.js";
 
@@ -101,10 +103,12 @@ function createRecordingClient(options: {
     if (sql.includes("INSERT INTO public.portfolio_project_stage_event_receipts")) {
       return { rows: [{ id: "receipt-1" }] };
     }
-    if (sql.includes("INSERT INTO \"office_main\".portfolio_projects")) {
+    if (sql.includes("INSERT INTO \"office_main\".portfolio_projects")
+      || sql.includes("INSERT INTO \"office_dallas\".portfolio_projects")) {
       return { rows: [{ id: "portfolio-project-1" }] };
     }
-    if (sql.includes("INSERT INTO \"office_main\".portfolio_project_stage_entries")) {
+    if (sql.includes("INSERT INTO \"office_main\".portfolio_project_stage_entries")
+      || sql.includes("INSERT INTO \"office_dallas\".portfolio_project_stage_entries")) {
       return { rows: [{ id: options.stageEntryId ?? "stage-entry-1" }] };
     }
     return { rows: [] };
@@ -164,6 +168,7 @@ function createStatefulRecordingClient() {
 describe("SyncHub Procore project stage-change relay service", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    process.env[PROCORE_COMPANY_OFFICE_MAP_ENV] = "598134325683880=office_main";
   });
 
   it("validates and normalizes the supported stage-change event shape", () => {
@@ -202,6 +207,54 @@ describe("SyncHub Procore project stage-change relay service", () => {
     expect(sqlText).not.toContain(".projects");
     expect(sqlText).not.toContain(" project_phase_history");
     expect(query.mock.calls.map((call) => String(call[0]))).toEqual(expect.arrayContaining(["BEGIN", "COMMIT"]));
+  });
+
+  it("resolves a known Procore company id without requiring a Procore-linked deal", async () => {
+    const { client, query } = createRecordingClient({
+      linkedMatchRows: [],
+      projectNumberMatchRows: [],
+    });
+
+    const result = await processSyncHubProcoreProjectStageChanged(validPayload(), {
+      client: client as any,
+    });
+
+    expect(result).toEqual({
+      status: "recorded",
+      officeId: "office-1",
+      officeSlug: "main",
+      projectId: "portfolio-project-1",
+      stageEntryId: "stage-entry-1",
+      isBoardRelevant: true,
+    });
+    const sqlText = query.mock.calls.map((call) => String(call[0])).join("\n");
+    expect(sqlText).toContain("INSERT INTO \"office_main\".portfolio_projects");
+    expect(sqlText).toContain("INSERT INTO \"office_main\".portfolio_project_stage_entries");
+  });
+
+  it("defaults the known production Procore company id to office_dallas without a Procore-linked deal", async () => {
+    delete process.env[PROCORE_COMPANY_OFFICE_MAP_ENV];
+    const { client, query } = createRecordingClient({
+      officeRows: [{ id: "office-dallas", slug: "dallas" }],
+      linkedMatchRows: [],
+      projectNumberMatchRows: [],
+    });
+
+    const result = await processSyncHubProcoreProjectStageChanged(validPayload(), {
+      client: client as any,
+    });
+
+    expect(result).toEqual({
+      status: "recorded",
+      officeId: "office-dallas",
+      officeSlug: "dallas",
+      projectId: "portfolio-project-1",
+      stageEntryId: "stage-entry-1",
+      isBoardRelevant: true,
+    });
+    const sqlText = query.mock.calls.map((call) => String(call[0])).join("\n");
+    expect(sqlText).toContain("INSERT INTO \"office_dallas\".portfolio_projects");
+    expect(sqlText).toContain("INSERT INTO \"office_dallas\".portfolio_project_stage_entries");
   });
 
   it("is idempotent when SyncHub retries a fully processed event", async () => {
@@ -347,9 +400,19 @@ describe("SyncHub Procore project stage-change relay service", () => {
   it("flags events that cannot be resolved to exactly one tenant instead of guessing", async () => {
     const { client, query } = createRecordingClient({ linkedMatchRows: [], projectNumberMatchRows: [] });
 
-    const result = await processSyncHubProcoreProjectStageChanged(validPayload(), {
-      client: client as any,
-    });
+    const result = await processSyncHubProcoreProjectStageChanged(
+      validPayload({
+        procore: {
+          companyId: "999999999",
+          portfolioProjectId: "987654321",
+          projectNumber: "DFW-1-02326-ad",
+          projectName: "T Rock Portfolio Project",
+          previousStage: "Bidding",
+          currentStage: "Buy Out",
+        },
+      }),
+      { client: client as any }
+    );
 
     expect(result).toEqual({
       status: "unresolved",
@@ -359,6 +422,7 @@ describe("SyncHub Procore project stage-change relay service", () => {
     const sqlText = query.mock.calls.map((call) => String(call[0])).join("\n");
     expect(sqlText).toContain("INSERT INTO public.portfolio_project_stage_event_receipts");
     expect(sqlText).not.toContain("portfolio_project_stage_entries");
+    expect(sqlText).not.toContain(".deals");
   });
 
   it("does not resolve project-number fallback to a deal linked to a different Procore project", async () => {
@@ -404,6 +468,172 @@ describe("SyncHub Procore project stage-change relay service", () => {
     expect(matchSql).toContain("procore_company_id = $5");
     expect(matchSql).not.toContain("procore_company_id IS NULL");
     expect(matchParams).toContain("598134325683880");
+  });
+
+  it("dry-runs replay of previously unresolved receipts before writing portfolio rows", async () => {
+    const { client, query } = createClient((sql) => {
+      if (sql.includes("FROM public.portfolio_project_stage_event_receipts") && sql.includes("status = 'unresolved'")) {
+        return {
+          rows: [{
+            id: "receipt-unresolved-1",
+            event_key: "synchub-stage:webhook-123:598134325683880:987654321:buyout:2026-05-20T14:15:00.000Z",
+            procore_company_id: "598134325683880",
+            procore_portfolio_project_id: "987654321",
+            project_number: "DFW-1-02326-ad",
+            raw_payload: validPayload(),
+          }],
+        };
+      }
+      if (sql.includes("FROM public.offices")) {
+        return { rows: [{ id: "office-1", slug: "main" }] };
+      }
+      if (sql.includes(".deals")) {
+        return { rows: [] };
+      }
+      return { rows: [] };
+    });
+
+    const result = await replayUnresolvedSyncHubProcoreProjectStageReceipts({
+      client: client as any,
+      commit: false,
+    });
+
+    expect(result).toMatchObject({
+      mode: "dry-run",
+      scanned: 1,
+      wouldReplay: 1,
+      replayed: 0,
+      stillUnresolved: 0,
+      failed: 0,
+    });
+    const sqlText = query.mock.calls.map((call) => String(call[0])).join("\n");
+    expect(sqlText).not.toContain("INSERT INTO \"office_main\".portfolio_projects");
+    expect(sqlText).not.toContain("INSERT INTO public.portfolio_project_stage_event_receipts");
+  });
+
+  it("commits replay of a previously unresolved receipt into portfolio rows", async () => {
+    const { client, query } = createClient((sql) => {
+      if (sql.includes("FROM public.portfolio_project_stage_event_receipts") && sql.includes("status = 'unresolved'")) {
+        return {
+          rows: [{
+            id: "receipt-unresolved-1",
+            event_key: "synchub-stage:webhook-123:598134325683880:987654321:buyout:2026-05-20T14:15:00.000Z",
+            procore_company_id: "598134325683880",
+            procore_portfolio_project_id: "987654321",
+            project_number: "DFW-1-02326-ad",
+            raw_payload: validPayload(),
+          }],
+        };
+      }
+      if (sql.includes("FROM public.portfolio_project_stage_event_receipts") && sql.includes("WHERE event_key = $1")) {
+        return {
+          rows: [{
+            id: "receipt-1",
+            event_key: "synchub-stage:webhook-123:598134325683880:987654321:buyout:2026-05-20T14:15:00.000Z",
+            status: "unresolved",
+            processed_at: null,
+          }],
+        };
+      }
+      if (sql.includes("FROM public.offices")) {
+        return { rows: [{ id: "office-1", slug: "main" }] };
+      }
+      if (sql.includes(".deals")) {
+        return { rows: [] };
+      }
+      if (sql.includes("INSERT INTO public.portfolio_project_stage_event_receipts")) {
+        return { rows: [{ id: "receipt-1" }] };
+      }
+      if (sql.includes("INSERT INTO \"office_main\".portfolio_projects")) {
+        return { rows: [{ id: "portfolio-project-1" }] };
+      }
+      if (sql.includes("INSERT INTO \"office_main\".portfolio_project_stage_entries")) {
+        return { rows: [{ id: "stage-entry-1" }] };
+      }
+      return { rows: [] };
+    });
+
+    const result = await replayUnresolvedSyncHubProcoreProjectStageReceipts({
+      client: client as any,
+      commit: true,
+    });
+
+    expect(result).toMatchObject({
+      mode: "commit",
+      scanned: 1,
+      replayed: 1,
+      stillUnresolved: 0,
+      failed: 0,
+    });
+    const sqlText = query.mock.calls.map((call) => String(call[0])).join("\n");
+    expect(sqlText).toContain("INSERT INTO \"office_main\".portfolio_projects");
+    expect(sqlText).toContain("INSERT INTO \"office_main\".portfolio_project_stage_entries");
+  });
+
+  it("keeps replayed unknown-company receipts in the unresolved bucket instead of duplicate", async () => {
+    const unresolvedPayload = validPayload({
+      procore: {
+        companyId: "999999999",
+        portfolioProjectId: "987654321",
+        projectNumber: "DFW-1-02326-ad",
+        projectName: "T Rock Portfolio Project",
+        previousStage: "Bidding",
+        currentStage: "Buy Out",
+      },
+    });
+    const { client, query } = createClient((sql) => {
+      if (sql.includes("FROM public.portfolio_project_stage_event_receipts") && sql.includes("status = 'unresolved'")) {
+        return {
+          rows: [{
+            id: "receipt-unresolved-1",
+            event_key: "synchub-stage:webhook-unknown:999999999:987654321:buyout:2026-05-20T14:15:00.000Z",
+            procore_company_id: "999999999",
+            procore_portfolio_project_id: "987654321",
+            project_number: "DFW-1-02326-ad",
+            raw_payload: unresolvedPayload,
+          }],
+        };
+      }
+      if (sql.includes("FROM public.portfolio_project_stage_event_receipts") && sql.includes("WHERE event_key = $1")) {
+        return {
+          rows: [{
+            id: "receipt-1",
+            event_key: "synchub-stage:webhook-unknown:999999999:987654321:buyout:2026-05-20T14:15:00.000Z",
+            status: "unresolved",
+            processed_at: null,
+          }],
+        };
+      }
+      if (sql.includes("FROM public.offices")) {
+        return { rows: [{ id: "office-1", slug: "main" }] };
+      }
+      if (sql.includes("INSERT INTO public.portfolio_project_stage_event_receipts")) {
+        return { rows: [{ id: "receipt-1" }] };
+      }
+      return { rows: [] };
+    });
+
+    const result = await replayUnresolvedSyncHubProcoreProjectStageReceipts({
+      client: client as any,
+      commit: true,
+    });
+
+    expect(result).toMatchObject({
+      mode: "commit",
+      scanned: 1,
+      replayed: 0,
+      duplicates: 0,
+      stillUnresolved: 1,
+      failed: 0,
+    });
+    expect(result.results[0]).toMatchObject({
+      outcome: "unresolved",
+      reason: "no_tenant_match",
+    });
+    const sqlText = query.mock.calls.map((call) => String(call[0])).join("\n");
+    expect(sqlText).toContain("ON CONFLICT (event_key) DO UPDATE SET");
+    expect(sqlText).toContain("WHERE receipts.status = 'unresolved'");
+    expect(sqlText).not.toContain("portfolio_project_stage_entries");
   });
 
   it("does not let late older events regress the current project snapshot", async () => {
