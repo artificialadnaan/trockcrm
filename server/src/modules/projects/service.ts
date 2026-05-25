@@ -1,4 +1,9 @@
 import type { PoolClient } from "pg";
+import {
+  PORTFOLIO_PROJECT_BOARD_STAGES,
+  normalizePortfolioProjectStage,
+  type PortfolioProjectBoardStage,
+} from "@trock-crm/shared/types";
 
 export type QueryExecutor = Pick<PoolClient, "query">;
 
@@ -74,6 +79,45 @@ export interface ExistingProjectSyncRow {
   procoreUpdatedAt: string | null;
 }
 
+export interface PortfolioProjectSummary {
+  id: string;
+  procoreProjectId: string;
+  procoreCompanyId: string;
+  projectNumber: string | null;
+  name: string;
+  currentStage: string;
+  currentStageNormalized: PortfolioProjectBoardStage;
+  currentStageEnteredAt: string | null;
+  firstSeenAt: string;
+  updatedAt: string;
+}
+
+export interface PortfolioProjectStageEntry {
+  id: string;
+  eventKey: string;
+  previousStage: string | null;
+  previousStageNormalized: string | null;
+  stage: string;
+  stageNormalized: string;
+  isBoardRelevant: boolean;
+  enteredAt: string;
+  relayDetectedAt: string | null;
+  webhookTimestamp: string | null;
+  createdAt: string;
+}
+
+export interface PortfolioProjectBoardColumn {
+  stage: PortfolioProjectBoardStage;
+  label: string;
+  projects: PortfolioProjectSummary[];
+}
+
+export interface PortfolioProjectDetail extends PortfolioProjectSummary {
+  lastStageEventKey: string | null;
+  rawSnapshot: Record<string, unknown>;
+  stageHistory: PortfolioProjectStageEntry[];
+}
+
 const IDENTIFIER_PATTERN = /^[a-zA-Z_][a-zA-Z0-9_]*$/;
 const SORT_COLUMNS: Record<string, string> = {
   projectNumber: "p.procore_project_number",
@@ -85,6 +129,17 @@ const SORT_COLUMNS: Record<string, string> = {
   completionDate: "p.completion_date",
   lastSyncedAt: "p.last_synced_at",
 };
+
+function stageLabel(stage: PortfolioProjectBoardStage): string {
+  return stage.replace(/\b\w/g, (char) => char.toUpperCase());
+}
+
+function normalizeBoardStage(value: string | null | undefined): PortfolioProjectBoardStage | null {
+  const normalized = normalizePortfolioProjectStage(value);
+  return PORTFOLIO_PROJECT_BOARD_STAGES.includes(normalized as PortfolioProjectBoardStage)
+    ? normalized as PortfolioProjectBoardStage
+    : null;
+}
 
 export function quoteIdent(identifier: string): string {
   if (!IDENTIFIER_PATTERN.test(identifier)) {
@@ -542,6 +597,106 @@ function toApiProject(row: any) {
     projectOwnerName: row.project_owner_name,
     lastSyncedAt: row.last_synced_at,
     syncSource: row.sync_source,
+  };
+}
+
+function toPortfolioProjectSummary(row: any): PortfolioProjectSummary | null {
+  const stage = normalizeBoardStage(row.current_stage_normalized ?? row.current_stage);
+  if (!stage) return null;
+  return {
+    id: row.id,
+    procoreProjectId: row.procore_project_id,
+    procoreCompanyId: row.procore_company_id,
+    projectNumber: row.project_number,
+    name: row.name ?? "Unnamed project",
+    currentStage: row.current_stage ?? stage,
+    currentStageNormalized: stage,
+    currentStageEnteredAt: row.current_stage_entered_at ? new Date(row.current_stage_entered_at).toISOString() : null,
+    firstSeenAt: new Date(row.first_seen_at).toISOString(),
+    updatedAt: new Date(row.updated_at).toISOString(),
+  };
+}
+
+function toPortfolioStageEntry(row: any): PortfolioProjectStageEntry {
+  return {
+    id: row.id,
+    eventKey: row.event_key,
+    previousStage: row.previous_stage,
+    previousStageNormalized: row.previous_stage_normalized,
+    stage: row.stage,
+    stageNormalized: row.stage_normalized,
+    isBoardRelevant: row.is_board_relevant,
+    enteredAt: new Date(row.entered_at).toISOString(),
+    relayDetectedAt: row.relay_detected_at ? new Date(row.relay_detected_at).toISOString() : null,
+    webhookTimestamp: row.webhook_timestamp ? new Date(row.webhook_timestamp).toISOString() : null,
+    createdAt: new Date(row.created_at).toISOString(),
+  };
+}
+
+export function groupPortfolioProjectsForBoard(rows: any[]) {
+  const columns: PortfolioProjectBoardColumn[] = PORTFOLIO_PROJECT_BOARD_STAGES.map((stage) => ({
+    stage,
+    label: stageLabel(stage),
+    projects: [],
+  }));
+  const columnByStage = new Map(columns.map((column) => [column.stage, column]));
+  const projects: PortfolioProjectSummary[] = [];
+
+  for (const row of rows) {
+    const project = toPortfolioProjectSummary(row);
+    if (!project) continue;
+    projects.push(project);
+    columnByStage.get(project.currentStageNormalized)?.projects.push(project);
+  }
+
+  return { stages: columns, projects };
+}
+
+export async function listPortfolioProjectBoard(client: QueryExecutor) {
+  const result = await client.query(
+    `SELECT id, procore_company_id, procore_project_id, project_number, name,
+            current_stage, current_stage_normalized, current_stage_entered_at,
+            first_seen_at, updated_at
+       FROM portfolio_projects
+      WHERE is_board_relevant = true
+      ORDER BY current_stage_entered_at DESC NULLS LAST, name ASC`
+  );
+  return groupPortfolioProjectsForBoard(result.rows);
+}
+
+export async function getPortfolioProjectDetail(client: QueryExecutor, projectId: string): Promise<PortfolioProjectDetail | null> {
+  const projectResult = await client.query(
+    `SELECT id, procore_company_id, procore_project_id, project_number, name,
+            current_stage, current_stage_normalized, current_stage_entered_at,
+            is_board_relevant, first_seen_at, last_stage_event_key, raw_snapshot,
+            created_at, updated_at
+       FROM portfolio_projects
+      WHERE id = $1::uuid
+        AND is_board_relevant = true
+      LIMIT 1`,
+    [projectId]
+  );
+  const row = projectResult.rows[0];
+  if (!row) return null;
+
+  const summary = toPortfolioProjectSummary(row);
+  if (!summary) return null;
+
+  const historyResult = await client.query(
+    `SELECT id, event_key, previous_stage, previous_stage_normalized,
+            stage, stage_normalized, is_board_relevant, entered_at,
+            relay_detected_at, webhook_timestamp, created_at
+       FROM portfolio_project_stage_entries
+      WHERE portfolio_project_id = $1::uuid
+      ORDER BY entered_at DESC, created_at DESC`,
+    [projectId]
+  );
+
+  return {
+    ...summary,
+    lastStageEventKey: row.last_stage_event_key ?? null,
+    rawSnapshot: row.raw_snapshot ?? {},
+    stageHistory: historyResult.rows.map(toPortfolioStageEntry),
   };
 }
 
