@@ -136,6 +136,29 @@ describe("deal value precedence", () => {
     expect(resolveBestEstimate(deal)).toEqual({ value: 875000, source: "bid" });
   });
 
+  it("does not use awarded-first precedence for pre-close won-mapped stages", () => {
+    expect(
+      resolveBestEstimate({
+        stageSlug: "in_production",
+        workflowRoute: "normal",
+        awardedAmount: "925000",
+        bidBoardTotalSales: "950000",
+        bidEstimate: "875000",
+        ddEstimate: "800000",
+      })
+    ).toEqual({ value: 950000, source: "bid_board" });
+    expect(
+      resolveBestEstimate({
+        stageSlug: "close_out",
+        workflowRoute: "normal",
+        awardedAmount: "925000",
+        bidBoardTotalSales: "0",
+        bidEstimate: "875000",
+        ddEstimate: "800000",
+      })
+    ).toEqual({ value: 875000, source: "bid" });
+  });
+
   it("uses current stage before a won-like Bid Board stage when choosing generic deal value", () => {
     const deal = {
       stageSlug: "opportunity",

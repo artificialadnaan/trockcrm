@@ -111,7 +111,13 @@ describe("rep performance rollup period scoping", () => {
     expect(insertSql).toContain("CASE WHEN d.bid_board_total_sales > 0 THEN d.bid_board_total_sales END");
     expect(insertSql).toContain("CASE WHEN d.awarded_amount > 0 THEN d.awarded_amount END");
     expect(insertSql).not.toContain("NULLIF(d.bid_board_total_sales, 0)");
+    expect(insertSql).toContain("'won'");
+    expect(insertSql).toContain("'sent_to_production'");
+    expect(insertSql).toContain("'service_sent_to_production'");
     expect(insertSql).toContain("'service_scheduled'");
     expect(insertSql).toContain("'service_complete'");
+    expect(insertSql).toContain("'closed_won'");
+    expect(insertSql).not.toContain("'in_production'");
+    expect(insertSql).not.toContain("'close_out'");
   });
 });

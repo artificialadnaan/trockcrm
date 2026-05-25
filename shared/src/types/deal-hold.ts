@@ -1,4 +1,4 @@
-import { toCanonicalDealStageSlug, WON_DEAL_STAGE_SLUGS } from "./workflow.js";
+import { isGenuineWonDealStageSlug } from "./workflow.js";
 
 /*
 Hold-time invariants audited on 2026-05-21 across this file, the deal hold toggle
@@ -61,15 +61,11 @@ function toDate(value: string | Date | null | undefined): Date | null {
   return Number.isNaN(date.getTime()) ? null : date;
 }
 
-const WON_VALUE_STAGE_SLUGS = new Set(WON_DEAL_STAGE_SLUGS);
-
 function shouldUseAwardedDealValue(deal: DealValueLike): boolean {
   const stageSlug = deal.stageSlug ?? deal.stage?.slug ?? null;
-  if (!stageSlug) return false;
-  if (WON_VALUE_STAGE_SLUGS.has(stageSlug)) return true;
   const workflowRoute =
     deal.workflowRoute === "normal" || deal.workflowRoute === "service" ? deal.workflowRoute : null;
-  return toCanonicalDealStageSlug(stageSlug, workflowRoute) === "won";
+  return isGenuineWonDealStageSlug(stageSlug, workflowRoute);
 }
 
 function getRawDealValue(deal: DealValueLike): number {

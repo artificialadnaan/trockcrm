@@ -112,6 +112,31 @@ describe("deal hold helpers", () => {
     ).toBe(875000);
   });
 
+  it("does not use awarded-first precedence for pre-close won-mapped stages", () => {
+    expect(
+      getEffectiveDealValue({
+        onHold: false,
+        stageSlug: "in_production",
+        workflowRoute: "normal",
+        awardedAmount: "925000",
+        bidBoardTotalSales: "950000",
+        bidEstimate: "875000",
+        ddEstimate: "800000",
+      })
+    ).toBe(950000);
+    expect(
+      getEffectiveDealValue({
+        onHold: false,
+        stageSlug: "close_out",
+        workflowRoute: "normal",
+        awardedAmount: "925000",
+        bidBoardTotalSales: "0",
+        bidEstimate: "875000",
+        ddEstimate: "800000",
+      })
+    ).toBe(875000);
+  });
+
   it("uses current stage before a won-like Bid Board stage when choosing generic deal value", () => {
     expect(
       getEffectiveDealValue({

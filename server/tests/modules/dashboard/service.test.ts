@@ -1002,8 +1002,14 @@ describe("Dashboard Service", () => {
       const sqlText = queries.join("\n");
       const recentClosesQuery = queries.find((text) => text.includes("closed_at desc nulls last"));
       expect(recentClosesQuery).toContain("coalesce(d.on_hold, false) = false");
+      expect(recentClosesQuery).toContain("won");
+      expect(recentClosesQuery).toContain("sent_to_production");
+      expect(recentClosesQuery).toContain("service_sent_to_production");
       expect(recentClosesQuery).toContain("service_scheduled");
       expect(recentClosesQuery).toContain("service_complete");
+      expect(recentClosesQuery).toContain("closed_won");
+      expect(recentClosesQuery).not.toContain("in_production");
+      expect(recentClosesQuery).not.toContain("close_out");
       expect(recentClosesQuery).toContain("case when d.awarded_amount > 0 then d.awarded_amount end");
       expect(sqlText).toMatch(/rep_wins[\s\S]*coalesce\(d\.on_hold, false\) = false/);
     });

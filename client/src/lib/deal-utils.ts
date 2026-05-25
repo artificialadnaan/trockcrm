@@ -1,4 +1,4 @@
-import { toCanonicalDealStageSlug, WON_DEAL_STAGE_SLUGS } from "@trock-crm/shared/types";
+import { isGenuineWonDealStageSlug } from "@trock-crm/shared/types";
 
 const HUBSPOT_DEAL_NUMBER_PATTERN = /^HS[-_ ]?\d+/i;
 const VISIBLE_HUBSPOT_DEAL_NUMBER_PATTERN = /\bHS[-_ ]?\d{6,}\b/gi;
@@ -116,19 +116,15 @@ export function resolveBestEstimate(deal: {
   return { value: 0, source: "none" };
 }
 
-const WON_VALUE_STAGE_SLUGS = new Set(WON_DEAL_STAGE_SLUGS);
-
 function shouldUseAwardedEstimate(deal: {
   stageSlug?: string | null;
   bidBoardStageSlug?: string | null;
   workflowRoute?: string | null;
 }) {
   const stageSlug = deal.stageSlug ?? null;
-  if (!stageSlug) return false;
-  if (WON_VALUE_STAGE_SLUGS.has(stageSlug)) return true;
   const workflowRoute =
     deal.workflowRoute === "normal" || deal.workflowRoute === "service" ? deal.workflowRoute : null;
-  return toCanonicalDealStageSlug(stageSlug, workflowRoute) === "won";
+  return isGenuineWonDealStageSlug(stageSlug, workflowRoute);
 }
 
 /**
