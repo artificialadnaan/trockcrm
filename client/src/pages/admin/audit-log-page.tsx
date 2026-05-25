@@ -20,6 +20,7 @@ export function AuditLogPage() {
     totalLoading,
     totalError,
     hasMore,
+    canGoNext,
     page,
     setPage,
     loading,
@@ -149,7 +150,12 @@ export function AuditLogPage() {
           <Button variant="outline" size="sm" onClick={() => setPage(page - 1)} disabled={page <= 1}>
             <ChevronLeft className="h-4 w-4" />
           </Button>
-          <Button variant="outline" size="sm" onClick={() => setPage(page + 1)} disabled={totalPages == null ? !hasMore : page >= totalPages}>
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={() => setPage(page + 1)}
+            disabled={totalPages == null ? !canGoNext : page >= totalPages || !canGoNext}
+          >
             <ChevronRight className="h-4 w-4" />
           </Button>
         </div>

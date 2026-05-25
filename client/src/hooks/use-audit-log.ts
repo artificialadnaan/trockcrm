@@ -23,6 +23,7 @@ export function useAuditLog() {
   const [filter, setFilter] = useState<AuditLogFilter>({});
   const [entityTypes, setEntityTypes] = useState<string[]>([]);
   const currentCursor = cursorByPage[page];
+  const canGoNext = hasMore && !loading && Boolean(cursorByPage[page + 1]);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -41,11 +42,13 @@ export function useAuditLog() {
       setRows(data.rows);
       setHasMore(data.hasMore);
       setCursorByPage((current) => {
-        if (!data.nextCursor) {
-          const { [page + 1]: _removed, ...rest } = current;
-          return rest;
+        const next = Object.fromEntries(
+          Object.entries(current).filter(([pageNumber]) => Number(pageNumber) <= page)
+        );
+        if (data.nextCursor) {
+          next[page + 1] = data.nextCursor;
         }
-        return { ...current, [page + 1]: data.nextCursor };
+        return next;
       });
     } finally {
       setLoading(false);
@@ -73,9 +76,13 @@ export function useAuditLog() {
   const goToPage = useCallback<Dispatch<SetStateAction<number>>>((nextPage) => {
     setPage((currentPage) => {
       const resolvedPage = typeof nextPage === "function" ? nextPage(currentPage) : nextPage;
-      return Math.max(1, resolvedPage);
+      const targetPage = Math.max(1, resolvedPage);
+      if (targetPage > currentPage && (loading || !hasMore || !cursorByPage[targetPage])) {
+        return currentPage;
+      }
+      return targetPage;
     });
-  }, []);
+  }, [cursorByPage, hasMore, loading]);
 
   const loadGroupChildren = useCallback(async (groupId: string, page = 1, limit = 100) => {
     const params = new URLSearchParams({ expand: groupId, page: String(page), limit: String(limit) });
@@ -94,6 +101,7 @@ export function useAuditLog() {
     totalLoading,
     totalError,
     hasMore,
+    canGoNext,
     page,
     setPage: goToPage,
     loading,
