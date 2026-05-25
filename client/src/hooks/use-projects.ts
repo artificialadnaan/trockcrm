@@ -1,103 +1,88 @@
 import { useCallback, useEffect, useState } from "react";
 import { api } from "@/lib/api";
 
-export interface ProjectAddress {
-  line1: string | null;
-  line2: string | null;
-  city: string | null;
-  state: string | null;
-  postalCode: string | null;
-  country: string | null;
-}
-
-export interface ProjectSummary {
+export interface PortfolioProjectSummary {
   id: string;
   procoreProjectId: string;
-  procoreProjectNumber: string | null;
+  procoreCompanyId: string;
+  projectNumber: string | null;
   name: string;
-  isActive: boolean;
-  currentPhaseId: string | null;
-  currentPhaseName: string | null;
-  currentPhaseSortOrder: number | null;
-  startDate: string | null;
-  completionDate: string | null;
-  projectedFinishDate: string | null;
-  contractValue: string | null;
-  estimatedValue: string | null;
-  actualCost: string | null;
-  sourceDealId: string | null;
-  sourceDealNumber: string | null;
-  address: ProjectAddress;
-  projectOwnerName: string | null;
-  lastSyncedAt: string | null;
-  syncSource: string | null;
+  currentStage: string;
+  currentStageNormalized: string;
+  currentStageEnteredAt: string | null;
+  firstSeenAt: string;
+  updatedAt: string;
 }
 
-export interface ProjectDetail extends ProjectSummary {
-  description: string | null;
-  warrantyEndDate: string | null;
-  projectOwnerId: string | null;
-  procoreCreatedAt: string | null;
-  procoreUpdatedAt: string | null;
+export interface PortfolioProjectBoardColumn {
+  stage: string;
+  label: string;
+  projects: PortfolioProjectSummary[];
+}
+
+export interface PortfolioProjectBoardResponse {
+  stages: PortfolioProjectBoardColumn[];
+  projects: PortfolioProjectSummary[];
+}
+
+export interface PortfolioProjectStageEntry {
+  id: string;
+  eventKey: string;
+  previousStage: string | null;
+  previousStageNormalized: string | null;
+  stage: string;
+  stageNormalized: string;
+  isBoardRelevant: boolean;
+  enteredAt: string;
+  relayDetectedAt: string | null;
+  webhookTimestamp: string | null;
+  createdAt: string;
+}
+
+export interface PortfolioProjectDetail extends PortfolioProjectSummary {
+  lastStageEventKey: string | null;
   rawSnapshot: Record<string, unknown>;
-  sourceDeal: {
-    id: string;
-    dealNumber: string | null;
-    name: string | null;
-  } | null;
+  stageHistory: PortfolioProjectStageEntry[];
 }
 
-export interface ProjectTeamMember {
-  id: string;
-  procore_user_id: string | null;
-  procore_user_name: string | null;
-  procore_user_email: string | null;
-  role_name: string | null;
-  is_active: boolean | null;
-  assigned_at: string | null;
-  last_synced_at: string | null;
+export interface PortfolioProjectDetailResponse {
+  project: PortfolioProjectDetail;
 }
 
-export interface ProjectDocument {
-  id: string;
-  procore_document_id: string | null;
-  name: string;
-  file_url: string | null;
-  file_size: string | number | null;
-  mime_type: string | null;
-  folder_path: string | null;
-  uploaded_by_procore_user_name: string | null;
-  uploaded_at: string | null;
-  last_synced_at: string | null;
-}
+export function usePortfolioProjectBoard() {
+  const [data, setData] = useState<PortfolioProjectBoardResponse | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
 
-export interface ProjectPhaseHistoryItem {
-  id: string;
-  from_phase_name: string | null;
-  to_phase_name: string;
-  changed_at: string;
-  changed_by_procore_user_name: string | null;
-  sync_source: string | null;
-}
+  const fetchBoard = useCallback(async () => {
+    setLoading(true);
+    setError(null);
+    try {
+      const response = await api<PortfolioProjectBoardResponse>("/projects/board");
+      setData(response);
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : "Failed to load projects");
+      setData(null);
+    } finally {
+      setLoading(false);
+    }
+  }, []);
 
-export interface ProjectDetailResponse {
-  project: ProjectDetail;
-  team: ProjectTeamMember[];
-  documents: ProjectDocument[];
-  phaseHistory: ProjectPhaseHistoryItem[];
-}
+  useEffect(() => {
+    fetchBoard();
+  }, [fetchBoard]);
 
-export interface ProjectPhaseGroup {
-  phaseId: string;
-  phaseName: string;
-  sortOrder: number;
-  count: number;
-  overflowCount: number;
-  projects: ProjectSummary[];
+  return {
+    stages: data?.stages ?? [],
+    projects: data?.projects ?? [],
+    loading,
+    error,
+    refetch: fetchBoard,
+  };
 }
 
 export function useProjectDetail(projectId: string | undefined) {
-  const [data, setData] = useState<ProjectDetailResponse | null>(null);
+  const [data, setData] = useState<PortfolioProjectDetailResponse | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
@@ -110,10 +95,11 @@ export function useProjectDetail(projectId: string | undefined) {
     setLoading(true);
     setError(null);
     try {
-      const response = await api<ProjectDetailResponse>(`/projects/${projectId}`);
+      const response = await api<PortfolioProjectDetailResponse>(`/projects/${projectId}`);
       setData(response);
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : "Failed to load project");
+      setData(null);
     } finally {
       setLoading(false);
     }
@@ -125,9 +111,6 @@ export function useProjectDetail(projectId: string | undefined) {
 
   return {
     project: data?.project ?? null,
-    team: data?.team ?? [],
-    documents: data?.documents ?? [],
-    phaseHistory: data?.phaseHistory ?? [],
     loading,
     error,
     refetch: fetchProject,

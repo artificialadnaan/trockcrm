@@ -8,16 +8,15 @@ function normalize(source: string) {
 describe("ProjectDetailPage shell", () => {
   const source = normalize(projectDetailSource);
 
-  it("includes the loading, not-found, back navigation, and tab shell states", () => {
+  it("includes loading, not-found, back navigation, and read-only portfolio details", () => {
     expect(source).toContain("Projects");
     expect(source).toContain("Back to Projects");
     expect(source).toContain("Project not found");
-    expect(source).toContain('role="tablist"');
-    expect(source).toContain('role="tab"');
-    expect(source).toContain("aria-selected={activeTab === tab.id}");
-    expect(source).toContain('aria-label="Project detail tabs"');
-    expect(source).toContain('"overview" | "team" | "documents" | "phase-history" | "source-deal"');
-    expect(source).toContain("Display-only mirror");
-    expect(source).not.toContain("Procore project id");
+    expect(source).toContain("Project References");
+    expect(source).toContain("Stage History");
+    expect(source).toContain("Procore Project ID");
+    expect(source).not.toContain('role="tab"');
+    expect(source).not.toContain("method: \"PATCH\"");
+    expect(source).not.toContain("method: \"POST\"");
   });
 });

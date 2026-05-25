@@ -9,6 +9,8 @@ import {
   getProjectDocuments,
   getProjectPhaseHistory,
   getProjectTeam,
+  getPortfolioProjectDetail,
+  listPortfolioProjectBoard,
   listProjects,
   listProjectsByPhase,
 } from "./service.js";
@@ -89,6 +91,16 @@ router.get("/by-phase", async (req, res, next) => {
   }
 });
 
+router.get("/board", async (req, res, next) => {
+  try {
+    const data = await listPortfolioProjectBoard(req.tenantClient!);
+    await req.commitTransaction!();
+    res.json(data);
+  } catch (error) {
+    next(error);
+  }
+});
+
 router.post("/backfill", requireRole("admin"), async (req, res, next) => {
   try {
     const schemaName = currentSchema(req);
@@ -108,18 +120,28 @@ router.post("/backfill", requireRole("admin"), async (req, res, next) => {
   }
 });
 
-router.get("/:id", async (req, res, next) => {
+router.get("/legacy/:id", async (req, res, next) => {
   try {
     const projectId = requireUuid(req.params.id, "Project id");
     const project = await getProjectDetail(req.tenantClient!, projectId);
     if (!project) throw new AppError(404, "Project not found");
-    const [team, documents, phaseHistory] = await Promise.all([
-      getProjectTeam(req.tenantClient!, projectId),
-      getProjectDocuments(req.tenantClient!, projectId),
-      getProjectPhaseHistory(req.tenantClient!, projectId),
-    ]);
+    const team = await getProjectTeam(req.tenantClient!, projectId);
+    const documents = await getProjectDocuments(req.tenantClient!, projectId);
+    const phaseHistory = await getProjectPhaseHistory(req.tenantClient!, projectId);
     await req.commitTransaction!();
     res.json({ project, ...team, ...documents, ...phaseHistory });
+  } catch (error) {
+    next(error);
+  }
+});
+
+router.get("/:id", async (req, res, next) => {
+  try {
+    const projectId = requireUuid(req.params.id, "Project id");
+    const project = await getPortfolioProjectDetail(req.tenantClient!, projectId);
+    if (!project) throw new AppError(404, "Project not found");
+    await req.commitTransaction!();
+    res.json({ project });
   } catch (error) {
     next(error);
   }

@@ -6,39 +6,36 @@ const projectsPageSource = fs.readFileSync(path.resolve(import.meta.dirname, "./
 const detailPageSource = fs.readFileSync(path.resolve(import.meta.dirname, "./project-detail-page.tsx"), "utf8");
 
 describe("projects UI source", () => {
-  it("loads the Procore mirror Kanban and paginated list APIs and the counts endpoint", () => {
-    expect(projectsPageSource).toContain("api<{ phases: ProjectPhaseGroup[] }>(`/projects/by-phase?");
-    expect(projectsPageSource).toContain("api<ProjectsListResponse>(`/projects?");
-    expect(projectsPageSource).toContain("api<ProjectCounts>(`/projects/counts`)");
-    expect(projectsPageSource).toContain("overflow-y-auto");
-    expect(projectsPageSource).toMatch(/Project list/i);
+  it("loads the portfolio board endpoint instead of the legacy Projects mirror APIs", () => {
+    expect(projectsPageSource).toContain("usePortfolioProjectBoard");
+    expect(projectsPageSource).not.toContain("/projects/by-phase");
+    expect(projectsPageSource).not.toContain("/projects/counts");
+    expect(projectsPageSource).not.toContain("include_inactive");
+    expect(projectsPageSource).toContain("Projects kanban board");
   });
 
-  it("provides an include-inactive toggle backed by URL state and propagates it to the API", () => {
-    expect(projectsPageSource).toContain('searchParams.get("include_inactive")');
-    expect(projectsPageSource).toContain('params.set("include_inactive", "true")');
-    expect(projectsPageSource).toMatch(/aria-pressed=\{!includeInactive\}/);
-    expect(projectsPageSource).toMatch(/aria-pressed=\{includeInactive\}/);
+  it("keeps the board read-only with no drag/drop or mutation calls", () => {
+    expect(projectsPageSource).not.toContain("draggable");
+    expect(projectsPageSource).not.toContain("onDrag");
+    expect(projectsPageSource).not.toContain("method: \"PATCH\"");
+    expect(projectsPageSource).not.toContain("method: \"POST\"");
   });
 
-  it("renders inactive projects with a distinct visual treatment in both kanban cards and the list", () => {
-    // Inactive cards lose color emphasis; rows get a strike-through.
-    expect(projectsPageSource).toContain("opacity-75");
-    expect(projectsPageSource).toContain("line-through");
-    expect(projectsPageSource).toMatch(/Inactive/);
-    expect(projectsPageSource).toMatch(/Active/);
+  it("keeps cards lean with project name and project number only", () => {
+    expect(projectsPageSource).toContain("project.projectNumber");
+    expect(projectsPageSource).toContain("project.name");
+    expect(projectsPageSource).not.toMatch(/amount|change order|DOA/i);
   });
 
   it("uses the bold uppercase header pattern shared with Leads and Deals", () => {
     expect(projectsPageSource).toContain('font-black uppercase');
     expect(projectsPageSource).toContain('tracking-[0.2em]');
     expect(projectsPageSource).toContain('text-brand-red');
-    expect(projectsPageSource).toContain("MetricCard");
   });
 
-  it("keeps the detail page display-only with expected tabs", () => {
-    expect(detailPageSource).toContain('"overview" | "team" | "documents" | "phase-history" | "source-deal"');
-    expect(detailPageSource).toContain("Display-only mirror");
+  it("keeps the detail page display-only with stage history", () => {
+    expect(detailPageSource).toContain("Stage History");
+    expect(detailPageSource).toContain("Project References");
     expect(detailPageSource).not.toContain("method: \"PATCH\"");
     expect(detailPageSource).not.toContain("method: \"POST\"");
   });
