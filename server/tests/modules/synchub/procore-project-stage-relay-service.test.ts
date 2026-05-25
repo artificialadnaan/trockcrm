@@ -51,7 +51,7 @@ function createClient(responder: (sql: string, params: unknown[] | undefined) =>
 }
 
 function createRecordingClient(options: {
-  existingReceipt?: boolean;
+  existingReceiptStatus?: "processed" | "unresolved";
   officeRows?: Array<{ id: string; slug: string }>;
   matchRows?: any[];
   stageEntryId?: string;
@@ -59,8 +59,13 @@ function createRecordingClient(options: {
   return createClient((sql) => {
     if (sql.includes("FROM public.portfolio_project_stage_event_receipts")) {
       return {
-        rows: options.existingReceipt
-          ? [{ id: "receipt-1", event_key: "event-key", status: "processed" }]
+        rows: options.existingReceiptStatus
+          ? [{
+              id: "receipt-1",
+              event_key: "event-key",
+              status: options.existingReceiptStatus,
+              processed_at: options.existingReceiptStatus === "processed" ? "2026-05-20T14:15:05.000Z" : null,
+            }]
           : [],
       };
     }
@@ -135,8 +140,8 @@ describe("SyncHub Procore project stage-change relay service", () => {
     expect(query.mock.calls.map((call) => String(call[0]))).toEqual(expect.arrayContaining(["BEGIN", "COMMIT"]));
   });
 
-  it("is idempotent when SyncHub retries the same event", async () => {
-    const { client, query } = createRecordingClient({ existingReceipt: true });
+  it("is idempotent when SyncHub retries a fully processed event", async () => {
+    const { client, query } = createRecordingClient({ existingReceiptStatus: "processed" });
 
     const result = await processSyncHubProcoreProjectStageChanged(validPayload(), {
       client: client as any,
@@ -146,6 +151,29 @@ describe("SyncHub Procore project stage-change relay service", () => {
     const sqlText = query.mock.calls.map((call) => String(call[0])).join("\n");
     expect(sqlText).not.toContain("portfolio_project_stage_entries");
     expect(sqlText).not.toContain("portfolio_projects");
+  });
+
+  it("reprocesses an unresolved receipt when the tenant mapping becomes available", async () => {
+    const { client, query } = createRecordingClient({ existingReceiptStatus: "unresolved" });
+
+    const result = await processSyncHubProcoreProjectStageChanged(validPayload(), {
+      client: client as any,
+      receivedAt: new Date("2026-05-20T15:00:00.000Z"),
+    });
+
+    expect(result).toEqual({
+      status: "recorded",
+      officeId: "office-1",
+      officeSlug: "main",
+      projectId: "portfolio-project-1",
+      stageEntryId: "stage-entry-1",
+      isBoardRelevant: true,
+    });
+    const sqlText = query.mock.calls.map((call) => String(call[0])).join("\n");
+    expect(sqlText).toContain("ON CONFLICT (event_key) DO UPDATE SET");
+    expect(sqlText).toContain("WHERE receipts.status = 'unresolved'");
+    expect(sqlText).toContain("INSERT INTO \"office_main\".portfolio_projects");
+    expect(sqlText).toContain("INSERT INTO \"office_main\".portfolio_project_stage_entries");
   });
 
   it("records non-relevant stages without crashing or dropping the event", async () => {

@@ -6,7 +6,6 @@ import {
   text,
   timestamp,
   unique,
-  uniqueIndex,
   uuid,
 } from "drizzle-orm/pg-core";
 
@@ -53,7 +52,7 @@ export const portfolioProjectStageEntries = pgTable(
     createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
   },
   (table) => [
-    uniqueIndex("portfolio_project_stage_entries_event_key_uidx").on(table.eventKey),
+    unique("portfolio_project_stage_entries_event_key_key").on(table.eventKey),
     index("portfolio_project_stage_entries_project_idx").on(table.portfolioProjectId, table.enteredAt),
   ]
 );

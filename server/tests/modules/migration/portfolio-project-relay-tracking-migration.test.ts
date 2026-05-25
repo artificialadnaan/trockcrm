@@ -26,6 +26,8 @@ describe("0135 portfolio project relay tracking migration", () => {
 
   it("encodes idempotency for SyncHub outbox retries", () => {
     expect(migrationSql).toContain("UNIQUE (event_key)");
-    expect(migrationSql).toContain("portfolio_project_stage_entries_event_key_uidx");
+    expect(migrationSql).not.toContain("CREATE UNIQUE INDEX IF NOT EXISTS portfolio_project_stage_entries_event_key_uidx");
+    expect(migrationSql).toContain("DROP INDEX IF EXISTS");
+    expect(migrationSql).toContain("portfolio_project_stage_entries_project_idx");
   });
 });

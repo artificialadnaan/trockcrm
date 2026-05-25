@@ -213,7 +213,7 @@ export function validateSyncHubProjectStageChangedPayload(input: unknown): SyncH
 
 async function existingReceipt(client: QueryClient, eventKey: string) {
   const result = await client.query(
-    `SELECT id, event_key, status
+    `SELECT id, event_key, status, processed_at
        FROM public.portfolio_project_stage_event_receipts
       WHERE event_key = $1
       LIMIT 1`,
@@ -366,6 +366,64 @@ async function insertReceipt(input: {
   return result.rows[0]?.id ?? null;
 }
 
+async function upsertProcessedReceipt(input: {
+  client: QueryClient;
+  payload: SyncHubProjectStageChangedPayload;
+  eventKey: string;
+  match: TenantMatch;
+  receivedAt: Date;
+}) {
+  const result = await input.client.query(
+    `INSERT INTO public.portfolio_project_stage_event_receipts AS receipts
+       (event_key, status, office_id, office_slug, procore_company_id,
+        procore_portfolio_project_id, project_number, project_name, previous_stage,
+        current_stage, current_stage_normalized, is_board_relevant,
+        synchub_webhook_log_id, synchub_sync_mapping_id, error_reason,
+        raw_payload, received_at, processed_at)
+     VALUES
+       ($1, 'processed', $2::uuid, $3, $4, $5, $6, $7, $8, $9, $10, $11,
+        $12, $13, NULL, $14::jsonb, $15::timestamptz, $15::timestamptz)
+     ON CONFLICT (event_key) DO UPDATE SET
+       status = 'processed',
+       office_id = EXCLUDED.office_id,
+       office_slug = EXCLUDED.office_slug,
+       procore_company_id = EXCLUDED.procore_company_id,
+       procore_portfolio_project_id = EXCLUDED.procore_portfolio_project_id,
+       project_number = EXCLUDED.project_number,
+       project_name = EXCLUDED.project_name,
+       previous_stage = EXCLUDED.previous_stage,
+       current_stage = EXCLUDED.current_stage,
+       current_stage_normalized = EXCLUDED.current_stage_normalized,
+       is_board_relevant = EXCLUDED.is_board_relevant,
+       synchub_webhook_log_id = EXCLUDED.synchub_webhook_log_id,
+       synchub_sync_mapping_id = EXCLUDED.synchub_sync_mapping_id,
+       error_reason = NULL,
+       raw_payload = EXCLUDED.raw_payload,
+       processed_at = EXCLUDED.processed_at,
+       updated_at = NOW()
+     WHERE receipts.status = 'unresolved'
+     RETURNING id`,
+    [
+      input.eventKey,
+      input.match.officeId,
+      input.match.officeSlug,
+      input.payload.procore.companyId,
+      input.payload.procore.portfolioProjectId,
+      input.payload.procore.projectNumber,
+      input.payload.procore.projectName,
+      input.payload.stage.previous.raw,
+      input.payload.stage.current.raw,
+      input.payload.stage.current.normalized,
+      input.payload.stage.current.isBoardRelevant,
+      optionalString(input.payload.synchub?.webhookLogId),
+      optionalString(input.payload.synchub?.syncMappingId),
+      JSON.stringify(input.payload),
+      input.receivedAt.toISOString(),
+    ]
+  );
+  return result.rows[0]?.id ?? null;
+}
+
 async function recordResolvedEvent(
   client: QueryClient,
   payload: SyncHubProjectStageChangedPayload,
@@ -380,11 +438,10 @@ async function recordResolvedEvent(
 
   await client.query("BEGIN");
   try {
-    const receiptId = await insertReceipt({
+    const receiptId = await upsertProcessedReceipt({
       client,
       payload,
       eventKey,
-      status: "processed",
       match,
       receivedAt,
     });
@@ -535,7 +592,9 @@ export async function processSyncHubProcoreProjectStageChanged(
 
   try {
     const duplicate = await existingReceipt(client, eventKey);
-    if (duplicate) return { status: "duplicate", eventKey };
+    if (duplicate && duplicate.status !== "unresolved") {
+      return { status: "duplicate", eventKey };
+    }
 
     const match = await resolveTenantMatch(client, payload);
     if (match === "no_tenant_match" || match === "multiple_tenant_matches") {

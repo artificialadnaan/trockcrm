@@ -38,7 +38,13 @@ export function normalizePortfolioProjectStage(stage: string | null | undefined)
     .replace(/\s*-\s*/g, " - ")
     .replace(/\s+/g, " ");
 
-  return STAGE_ALIASES[normalized] ?? normalized;
+  const hyphenAsSpace = normalized.replace(/\s*-\s*/g, " ").replace(/\s+/g, " ");
+  const compactHyphen = normalized.replace(/\s*-\s*/g, "-");
+
+  return STAGE_ALIASES[normalized]
+    ?? STAGE_ALIASES[hyphenAsSpace]
+    ?? STAGE_ALIASES[compactHyphen]
+    ?? normalized;
 }
 
 export function isPortfolioProjectBoardStage(stage: string | null | undefined): stage is PortfolioProjectBoardStage {

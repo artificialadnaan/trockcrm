@@ -96,8 +96,9 @@ BEGIN
       tenant_schema
     );
     EXECUTE format(
-      'CREATE UNIQUE INDEX IF NOT EXISTS portfolio_project_stage_entries_event_key_uidx ON %I.portfolio_project_stage_entries(event_key)',
-      tenant_schema
+      'DROP INDEX IF EXISTS %I.%I',
+      tenant_schema,
+      'portfolio_project_stage_entries_event_key_uidx'
     );
   END LOOP;
 END
@@ -148,6 +149,5 @@ CREATE TABLE IF NOT EXISTS office_dallas.portfolio_project_stage_entries (
 CREATE INDEX IF NOT EXISTS portfolio_project_stage_entries_project_idx
   ON office_dallas.portfolio_project_stage_entries(portfolio_project_id, entered_at DESC);
 
-CREATE UNIQUE INDEX IF NOT EXISTS portfolio_project_stage_entries_event_key_uidx
-  ON office_dallas.portfolio_project_stage_entries(event_key);
+DROP INDEX IF EXISTS office_dallas.portfolio_project_stage_entries_event_key_uidx;
 -- TENANT_SCHEMA_END
