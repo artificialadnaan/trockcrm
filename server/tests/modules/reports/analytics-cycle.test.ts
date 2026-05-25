@@ -134,7 +134,7 @@ describe("analytics cycle shared filters", () => {
     expect(queryText).toContain("d.assigned_rep_id");
     expect(queryText).toContain("coalesce(nullif(trim(d.source), ''), 'unknown')");
     expect(queryText).toContain("count(distinct dsi.id)::int as lead_count");
-    expect(queryText).toContain("count(distinct d.id)::int as deal_count");
+    expect(queryText).toContain("count(distinct d.id) filter (where coalesce(d.on_hold, false) = false)::int as deal_count");
     expect(result[0]).toMatchObject({
       source: "Trade Show",
       leadCount: 4,
@@ -207,16 +207,16 @@ describe("analytics cycle shared filters", () => {
       ],
       [
         {
+          dormant_company_90_count: "3",
+        },
+      ],
+      [
+        {
           contact_id: "contact-1",
           contact_name: "Jordan Client",
           company_name: "Acme Roofing",
           last_touch_at: "2026-02-01T00:00:00.000Z",
           days_since_touch: "63",
-        },
-      ],
-      [
-        {
-          dormant_company_90_count: "3",
         },
       ],
       [
@@ -249,6 +249,7 @@ describe("analytics cycle shared filters", () => {
 
     expect(firstQueryText).toContain("from contacts c");
     expect(firstQueryText).toContain("office_deals as");
+    expect(firstQueryText).toContain("coalesce(d.on_hold, false) = false");
     expect(firstQueryText).toContain("office_contact_context");
     expect(thirdQueryText).toContain("office_company_context");
     expect(firstCompanyContextIndex).toBeGreaterThanOrEqual(0);
@@ -286,6 +287,7 @@ describe("analytics cycle shared filters", () => {
     const { getDataMiningOverview } = await import("../../../src/modules/reports/service.js");
     const tenantDb = createMockTenantDb([
       [{ untouched_contact_30_count: "1", untouched_contact_60_count: "1", untouched_contact_90_count: "0" }],
+      [{ dormant_company_90_count: "1" }],
       [
         {
           contact_id: "contact-1",
@@ -295,7 +297,6 @@ describe("analytics cycle shared filters", () => {
           days_since_touch: "48",
         },
       ],
-      [{ dormant_company_90_count: "1" }],
       [
         {
           company_id: "company-1",
@@ -402,6 +403,9 @@ describe("analytics cycle shared filters", () => {
             { gap_type: "missing_assigned_rep", count: "2" },
             { gap_type: "missing_region", count: "1" },
           ],
+        })
+        .mockResolvedValueOnce({
+          rows: [],
         }),
     } as any;
 

@@ -83,6 +83,8 @@ describe("on-hold report count consistency", () => {
     expect(leadConversionSql).not.toContain("bid_board_total_sales");
     expect(leadConversionSql).not.toContain("bid_estimate");
     expect(leadConversionSql).toContain("coalesce(d.on_hold, false) = false");
+    expect(leadConversionSql.match(/left join deals d on/g)?.length).toBe(4);
+    expect(leadConversionSql.match(/coalesce\(d\.on_hold, false\) = false/g)?.length).toBeGreaterThanOrEqual(4);
   });
 
   it("keeps lead-conversion headline won count hold-aware and aligned with source breakdown won counts", async () => {

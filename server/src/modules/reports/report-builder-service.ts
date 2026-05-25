@@ -4,7 +4,11 @@ import { deals, pipelineStageConfig, users } from "@trock-crm/shared/schema";
 import type * as schema from "@trock-crm/shared/schema";
 import type { UserRole } from "@trock-crm/shared/types";
 import { AppError } from "../../middleware/error-handler.js";
-import { aliasedActiveDealCountFilterSql, aliasedEffectiveDealValueSql } from "../shared/deal-value-sql.js";
+import {
+  aliasedActiveDealCountFilterSql,
+  aliasedEffectiveDealValueSql,
+  aliasedReportableDealFilterSql,
+} from "../shared/deal-value-sql.js";
 
 type TenantDb = NodePgDatabase<typeof schema>;
 
@@ -175,7 +179,10 @@ function textArrayFilter(values: string[]) {
 
 function buildFilters(input: ReportBuilderInput, dateFieldSql: ReturnType<typeof sql>) {
   const filters = input.filters ?? {};
-  const clauses: ReturnType<typeof sql>[] = [sql`COALESCE(d.is_test_data, false) = false`];
+  const clauses: ReturnType<typeof sql>[] = [
+    sql`COALESCE(d.is_test_data, false) = false`,
+    aliasedReportableDealFilterSql("d"),
+  ];
   const repId = effectiveReportRepId(input);
   if (repId) clauses.push(sql`d.assigned_rep_id = ${repId}`);
 

@@ -208,6 +208,21 @@ describe("forecast variance reporting", () => {
     expect(queryText).toContain("d.source");
   });
 
+  it("excludes active on-hold deals from every forecast variance population", async () => {
+    const { getForecastVarianceOverview } = await import("../../../src/modules/reports/service.js");
+    const tenantDb = createMockTenantDb([[], [], []]);
+
+    await getForecastVarianceOverview(tenantDb, {});
+
+    const queries = tenantDb.execute.mock.calls.map(([query]: [unknown]) =>
+      extractSqlText(query).toLowerCase()
+    );
+    expect(queries).toHaveLength(3);
+    for (const query of queries) {
+      expect(query).toContain("coalesce(d.on_hold, false) = false");
+    }
+  });
+
   it("counts only comparable rows and keeps legacy closed-won deals in scope", async () => {
     const { getForecastVarianceOverview } = await import("../../../src/modules/reports/service.js");
     const tenantDb = createMockTenantDb([[], [], []]);

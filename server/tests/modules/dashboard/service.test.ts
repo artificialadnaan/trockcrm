@@ -234,6 +234,30 @@ describe("Dashboard Service", () => {
       expect(activityQueryText).not.toContain("where user_id =");
     });
 
+    it("excludes active on-hold deals from the rep recent active-deal snapshot", async () => {
+      const { getRepDashboard } = await import("../../../src/modules/dashboard/service.js");
+      const tenantDb = createMockTenantDb([
+        [{ count: "0" }],
+        [{ count: "0", total_value: "0" }],
+        [{ overdue: "0", today: "0" }],
+        [{ calls: "0", emails: "0", meetings: "0", notes: "0", total: "0" }],
+        [{ total: "0", on_time: "0" }],
+        [],
+        [],
+        [],
+        [],
+      ]);
+
+      await getRepDashboard(tenantDb, "user-1");
+
+      const dealSnapshotQueryText =
+        nonIntrospectionExecuteCalls(tenantDb)
+          .map(([query]) => extractSqlText(query).toLowerCase())
+          .find((queryText) => queryText.includes("from deals d") && queryText.includes("limit 5")) ?? "";
+      expect(dealSnapshotQueryText).toContain("from deals d");
+      expect(dealSnapshotQueryText).toContain("coalesce(d.on_hold, false) = false");
+    });
+
     it("defaults activity counts to the weekly window when no explicit date range is passed", async () => {
       vi.useFakeTimers();
       vi.setSystemTime(new Date("2026-05-15T12:00:00Z"));
@@ -959,6 +983,26 @@ describe("Dashboard Service", () => {
       expect(aggregateWonQuery).toBeTruthy();
       expect(aggregateWonQuery).not.toContain("limit 12");
       expect(recentClosesQuery).toContain("limit 12");
+    });
+
+    it("excludes active on-hold deals from recent closes and rep-card outcome populations", async () => {
+      const { getDirectorDashboard } = await import("../../../src/modules/dashboard/service.js");
+      const tenantDb = createMockTenantDb([[], [], [], [], [], [], []]);
+
+      await getDirectorDashboard(tenantDb, {
+        from: "2026-01-01",
+        to: "2026-03-31",
+        officeId: "office-1",
+        periodKind: "qtd",
+      });
+
+      const queries = tenantDb.execute.mock.calls.map(([query]: [unknown]) =>
+        extractSqlText(query).toLowerCase()
+      );
+      const sqlText = queries.join("\n");
+      const recentClosesQuery = queries.find((text) => text.includes("closed_at desc nulls last"));
+      expect(recentClosesQuery).toContain("coalesce(d.on_hold, false) = false");
+      expect(sqlText).toMatch(/rep_wins[\s\S]*coalesce\(d\.on_hold, false\) = false/);
     });
 
     it("keeps at-risk scope summary aligned to the role-relative engine population", async () => {

@@ -12,6 +12,23 @@ function tenantDbWithRows(rowSets: unknown[][]) {
   } as any;
 }
 
+function extractSqlText(value: unknown): string {
+  if (typeof value === "string") return value;
+  if (!value || typeof value !== "object") return "";
+  if (Array.isArray((value as { queryChunks?: unknown[] }).queryChunks)) {
+    return (value as { queryChunks: unknown[] }).queryChunks.map(extractSqlText).join("");
+  }
+  if ("value" in (value as Record<string, unknown>)) {
+    const chunkValue = (value as { value: unknown }).value;
+    if (Array.isArray(chunkValue)) return chunkValue.map(extractSqlText).join("");
+    if (typeof chunkValue === "string") return chunkValue;
+  }
+  if ("name" in (value as Record<string, unknown>) && typeof (value as { name?: unknown }).name === "string") {
+    return (value as { name: string }).name;
+  }
+  return "";
+}
+
 describe("analytics tier 4 service", () => {
   it("builds Market Mix from industry, property type, region, quarterly, and breakdown rows", async () => {
     const tenantDb = tenantDbWithRows([
@@ -174,6 +191,23 @@ describe("analytics tier 4 service", () => {
     expect(report.monthlyTrends.find((row) => row.month === "2026-05")).toMatchObject({ newDeals: 0, wonDeals: 1 });
   });
 
+  it("excludes active on-hold deals from every Executive Trends population query", async () => {
+    const seenQueries: unknown[] = [];
+    const tenantDb = {
+      execute: vi.fn().mockImplementation((query: unknown) => {
+        seenQueries.push(query);
+        return Promise.resolve({ rows: [] });
+      }),
+    } as any;
+
+    await getExecutiveTrendsReport(tenantDb, { from: "2026-01-01", to: "2026-03-31" });
+
+    expect(seenQueries).toHaveLength(5);
+    for (const query of seenQueries) {
+      expect(extractSqlText(query)).toContain("COALESCE(d.on_hold, false) = false");
+    }
+  });
+
   it("computes inclusive current period days for previous-period comparison", () => {
     expect(computePreviousPeriod("2026-01-01", "2026-01-31")).toEqual({
       previousFrom: "2025-12-01",
@@ -195,23 +229,6 @@ describe("analytics tier 4 service", () => {
     } as any;
 
     await getMarketMixReport(tenantDb, { from: "2026-03-01", to: "2026-03-31" });
-
-    function extractSqlText(value: unknown): string {
-      if (typeof value === "string") return value;
-      if (!value || typeof value !== "object") return "";
-      if (Array.isArray((value as { queryChunks?: unknown[] }).queryChunks)) {
-        return (value as { queryChunks: unknown[] }).queryChunks.map(extractSqlText).join("");
-      }
-      if ("value" in (value as Record<string, unknown>)) {
-        const chunkValue = (value as { value: unknown }).value;
-        if (Array.isArray(chunkValue)) return chunkValue.map(extractSqlText).join("");
-        if (typeof chunkValue === "string") return chunkValue;
-      }
-      if ("name" in (value as Record<string, unknown>) && typeof (value as { name?: unknown }).name === "string") {
-        return (value as { name: string }).name;
-      }
-      return "";
-    }
 
     const fullSql = seenQueries.map(extractSqlText).join("\n");
     expect(fullSql).toMatch(/AT TIME ZONE 'UTC'/);

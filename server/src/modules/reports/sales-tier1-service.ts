@@ -707,7 +707,10 @@ export async function getLeadConversionReport(
         COUNT(DISTINCT d.id) FILTER (WHERE p.slug IN (${wonSlugs}) AND ${aliasedActiveDealCountFilterSql("d")})::int AS won
       FROM leads l
       LEFT JOIN users u ON u.id = l.assigned_rep_id
-      LEFT JOIN deals d ON d.source_lead_id = l.id AND d.is_active = true AND COALESCE(d.is_test_data, false) = false
+      LEFT JOIN deals d ON d.source_lead_id = l.id
+        AND d.is_active = true
+        AND COALESCE(d.is_test_data, false) = false
+        AND ${aliasedActiveDealCountFilterSql("d")}
       LEFT JOIN pipeline_stage_config p ON p.id = d.stage_id
       WHERE ${leadWhereSql}
     `));
@@ -726,7 +729,10 @@ export async function getLeadConversionReport(
         COALESCE(SUM(${aliasedEffectiveAwardedDealValueSql("d")}) FILTER (WHERE p.slug IN (${wonSlugs})), 0)::numeric AS "totalRevenue"
       FROM leads l
       LEFT JOIN users u ON u.id = l.assigned_rep_id
-      LEFT JOIN deals d ON d.source_lead_id = l.id AND d.is_active = true AND COALESCE(d.is_test_data, false) = false
+      LEFT JOIN deals d ON d.source_lead_id = l.id
+        AND d.is_active = true
+        AND COALESCE(d.is_test_data, false) = false
+        AND ${aliasedActiveDealCountFilterSql("d")}
       LEFT JOIN pipeline_stage_config p ON p.id = d.stage_id
       WHERE ${leadWhereSql}
       GROUP BY 1
@@ -741,7 +747,10 @@ export async function getLeadConversionReport(
         COUNT(DISTINCT d.id) FILTER (WHERE p.slug IN (${wonSlugs}) AND ${aliasedActiveDealCountFilterSql("d")})::int AS won
       FROM leads l
       LEFT JOIN users u ON u.id = l.assigned_rep_id
-      LEFT JOIN deals d ON d.source_lead_id = l.id AND d.is_active = true AND COALESCE(d.is_test_data, false) = false
+      LEFT JOIN deals d ON d.source_lead_id = l.id
+        AND d.is_active = true
+        AND COALESCE(d.is_test_data, false) = false
+        AND ${aliasedActiveDealCountFilterSql("d")}
       LEFT JOIN pipeline_stage_config p ON p.id = d.stage_id
       WHERE ${leadWhereSql}
       GROUP BY month
@@ -756,7 +765,10 @@ export async function getLeadConversionReport(
         COUNT(DISTINCT d.id) FILTER (WHERE p.slug IN (${wonSlugs}) AND ${aliasedActiveDealCountFilterSql("d")})::int AS won
       FROM leads l
       LEFT JOIN users u ON u.id = l.assigned_rep_id
-      LEFT JOIN deals d ON d.source_lead_id = l.id AND d.is_active = true AND COALESCE(d.is_test_data, false) = false
+      LEFT JOIN deals d ON d.source_lead_id = l.id
+        AND d.is_active = true
+        AND COALESCE(d.is_test_data, false) = false
+        AND ${aliasedActiveDealCountFilterSql("d")}
       LEFT JOIN pipeline_stage_config p ON p.id = d.stage_id
       WHERE ${leadWhereSql}
       GROUP BY 1

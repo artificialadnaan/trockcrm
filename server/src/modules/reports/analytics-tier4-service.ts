@@ -7,6 +7,7 @@ import {
   aliasedEffectiveAwardedDealValueSql,
   aliasedEffectiveDealValueSql,
   aliasedOpenPipelineForecastFirstDealValueSql,
+  aliasedReportableDealFilterSql,
 } from "../shared/deal-value-sql.js";
 
 type TenantDb = NodePgDatabase<typeof schema>;
@@ -162,6 +163,7 @@ function buildScopeWhere(filters: ReturnType<typeof normalizeFilters>) {
 
   return sql`
     COALESCE(d.is_test_data, false) = false
+    AND ${aliasedReportableDealFilterSql("d")}
     ${ownerFilter}
     ${officeFilter}
   `;
