@@ -16,6 +16,7 @@ export * from "./deal-reporting.js";
 export * from "./at-risk.js";
 export * from "./deal-sorts.js";
 export * from "./owner-colors.js";
+export * from "./portfolio-project-stages.js";
 export * from "./sla-policy.js";
 export * from "./workflow-gates.js";
 export * from "./workflow.js";

@@ -18,6 +18,7 @@ export { procoreSyncState, procoreEntityTypeEnum, syncDirectionEnum, syncStatusE
 export { procoreOauthTokens } from "./procore-oauth-tokens.js";
 export { procoreWebhookLog } from "./procore-webhook-log.js";
 export { syncHubWebhookOrphans } from "./synchub-webhook-orphans.js";
+export { portfolioProjectStageEventReceipts } from "./portfolio-project-stage-event-receipts.js";
 export { hubspotOwnerMappings } from "./hubspot-owner-mappings.js";
 export { hubspotActivityBackfillLedger } from "./hubspot-activity-backfill-ledger.js";
 export { userGraphTokens, graphTokenStatusEnum } from "./user-graph-tokens.js";
