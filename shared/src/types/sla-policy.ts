@@ -114,13 +114,13 @@ const SLA_POLICY = freezeSlaPolicy({
   contract: {
     rep: {
       dayCounting: SLA_POLICY_DAY_COUNTING,
-      thresholdDays: 2,
+      thresholdDays: 7,
       recurs: false,
       recurrenceDays: null,
     },
     leadership: {
       dayCounting: SLA_POLICY_DAY_COUNTING,
-      thresholdDays: 2,
+      thresholdDays: 7,
       recurs: false,
       recurrenceDays: null,
     },

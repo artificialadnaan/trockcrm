@@ -213,7 +213,7 @@ describe("at-risk computation", () => {
     ).toMatchObject({
       isAtRisk: false,
       status: "not_at_risk",
-      secondsUntilThreshold: 2 * DAY_SECONDS,
+      secondsUntilThreshold: 7 * DAY_SECONDS,
     });
 
     expect(
@@ -254,7 +254,39 @@ describe("at-risk computation", () => {
       isAtRisk: false,
       effectiveStageAgeSeconds: 0,
       effectiveStageAgeDays: 0,
-      secondsUntilThreshold: 2 * DAY_SECONDS,
+      secondsUntilThreshold: 7 * DAY_SECONDS,
+    });
+  });
+
+  it("uses a seven-day SLA threshold for the Contract deal stage", () => {
+    expect(
+      getAtRiskResult({
+        stageSlug: "contract",
+        viewerRole: "rep",
+        effectiveStageAgeSeconds: 2 * DAY_SECONDS,
+      })
+    ).toMatchObject({
+      isAtRisk: false,
+      status: "not_at_risk",
+      reason: "within_sla",
+      canonicalStageSlug: "contract",
+      thresholdDays: 7,
+      secondsUntilThreshold: 5 * DAY_SECONDS,
+    });
+
+    expect(
+      getAtRiskResult({
+        stageSlug: "contract",
+        viewerRole: "rep",
+        effectiveStageAgeSeconds: 7 * DAY_SECONDS,
+      })
+    ).toMatchObject({
+      isAtRisk: true,
+      status: "at_risk",
+      reason: "threshold_reached",
+      canonicalStageSlug: "contract",
+      thresholdDays: 7,
+      secondsPastThreshold: 0,
     });
   });
 });

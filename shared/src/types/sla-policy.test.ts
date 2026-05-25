@@ -59,7 +59,7 @@ describe("SLA policy helpers", () => {
       stageSlug: "contract",
       audience: "rep",
       dayCounting: "calendar_days",
-      thresholdDays: 2,
+      thresholdDays: 7,
       recurs: false,
       recurrenceDays: null,
     });
@@ -110,7 +110,7 @@ describe("SLA policy helpers", () => {
       stageSlug: "contract",
       audience: "leadership",
       dayCounting: "calendar_days",
-      thresholdDays: 2,
+      thresholdDays: 7,
       recurs: false,
       recurrenceDays: null,
     });
@@ -169,7 +169,7 @@ describe("SLA policy helpers", () => {
       recurrenceDays: 30,
     });
     expect(getSlaPolicy("contract", "rep")).toMatchObject({
-      thresholdDays: 2,
+      thresholdDays: 7,
       recurs: false,
       recurrenceDays: null,
     });

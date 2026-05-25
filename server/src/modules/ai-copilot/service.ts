@@ -1119,7 +1119,7 @@ export async function listCurrentSalesProcessDisconnectRows(
         THEN ${leadershipRiskRole ? 7 : 3}
       WHEN COALESCE(d.bid_board_stage_slug, psc.slug) IN ('estimate_sent_to_client', 'bid_sent', 'service_estimate_sent_to_client')
         THEN ${leadershipRiskRole ? 30 : 7}
-      WHEN COALESCE(d.bid_board_stage_slug, psc.slug) IN ('contract', 'contract_signed', 'service_contract_signed') THEN 2
+      WHEN COALESCE(d.bid_board_stage_slug, psc.slug) IN ('contract', 'contract_signed', 'service_contract_signed') THEN 7
       ELSE NULL
     END
   `;
