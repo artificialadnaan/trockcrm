@@ -33,7 +33,9 @@ export function AuditLogPage() {
     ? "Loading total..."
     : totalError
       ? "Total unavailable"
-      : `${(total ?? 0).toLocaleString()} entries`;
+      : total == null
+        ? "Recent activity"
+        : `${total.toLocaleString()} entries`;
 
   return (
     <div className="mx-auto max-w-5xl space-y-4 p-6">

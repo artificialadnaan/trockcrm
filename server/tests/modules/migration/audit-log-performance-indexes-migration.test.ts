@@ -22,7 +22,7 @@ describe("audit log performance index migration", () => {
   it("builds concurrent per-tenant audit index statements", () => {
     const statements = buildAuditLogPerformanceIndexStatements("office_dallas");
 
-    expect(statements).toHaveLength(6);
+    expect(statements).toHaveLength(8);
     expect(statements[0]).toContain("DROP INDEX CONCURRENTLY IF EXISTS \"office_dallas\".audit_log_dedup_rich_lookup_idx");
     expect(statements[1]).toContain("CREATE INDEX CONCURRENTLY IF NOT EXISTS audit_log_dedup_rich_lookup_idx");
     expect(statements[1]).toContain("ON \"office_dallas\".audit_log (table_name, record_id, action, created_at DESC)");
@@ -33,6 +33,9 @@ describe("audit log performance index migration", () => {
     expect(statements[4]).toContain("DROP INDEX CONCURRENTLY IF EXISTS \"office_dallas\".audit_log_entity_or_table_created_at_idx");
     expect(statements[5]).toContain("CREATE INDEX CONCURRENTLY IF NOT EXISTS audit_log_entity_or_table_created_at_idx");
     expect(statements[5]).toContain("COALESCE(entity_type, table_name)");
+    expect(statements[6]).toContain("DROP INDEX CONCURRENTLY IF EXISTS \"office_dallas\".audit_log_created_at_id_idx");
+    expect(statements[7]).toContain("CREATE INDEX CONCURRENTLY IF NOT EXISTS audit_log_created_at_id_idx");
+    expect(statements[7]).toContain("(created_at DESC, id DESC)");
   });
 
   it("drops and recreates invalid indexes before relying on them", async () => {
@@ -44,8 +47,10 @@ describe("audit log performance index migration", () => {
           { index_name: AUDIT_LOG_INDEX_SPECS[0].name, is_valid: false },
           { index_name: AUDIT_LOG_INDEX_SPECS[1].name, is_valid: true },
           { index_name: AUDIT_LOG_INDEX_SPECS[2].name, is_valid: true },
+          { index_name: AUDIT_LOG_INDEX_SPECS[3].name, is_valid: true },
         ],
       })
+      .mockResolvedValue(undefined)
       .mockResolvedValue(undefined)
       .mockResolvedValue(undefined)
       .mockResolvedValue(undefined)
@@ -53,11 +58,12 @@ describe("audit log performance index migration", () => {
 
     await runAuditLogPerformanceIndexMigration({ query } as never);
 
-    expect(query).toHaveBeenCalledTimes(6);
+    expect(query).toHaveBeenCalledTimes(7);
     expect(query.mock.calls[2]?.[0]).toContain("DROP INDEX CONCURRENTLY IF EXISTS \"office_dallas\".audit_log_dedup_rich_lookup_idx");
     expect(query.mock.calls[3]?.[0]).toContain("CREATE INDEX CONCURRENTLY IF NOT EXISTS audit_log_dedup_rich_lookup_idx");
     expect(query.mock.calls[4]?.[0]).toContain("CREATE INDEX CONCURRENTLY IF NOT EXISTS audit_log_actor_system_process_created_at_idx");
     expect(query.mock.calls[5]?.[0]).toContain("CREATE INDEX CONCURRENTLY IF NOT EXISTS audit_log_entity_or_table_created_at_idx");
+    expect(query.mock.calls[6]?.[0]).toContain("CREATE INDEX CONCURRENTLY IF NOT EXISTS audit_log_created_at_id_idx");
   });
 
   it("does not drop a valid index before recreating safeguards", async () => {
@@ -69,6 +75,7 @@ describe("audit log performance index migration", () => {
       })
       .mockResolvedValue(undefined)
       .mockResolvedValue(undefined)
+      .mockResolvedValue(undefined)
       .mockResolvedValue(undefined);
 
     await runAuditLogPerformanceIndexMigration({ query } as never);
@@ -76,7 +83,7 @@ describe("audit log performance index migration", () => {
     const sqlCalls = query.mock.calls.map((call) => String(call[0]));
 
     expect(sqlCalls.some((statement) => statement.includes("DROP INDEX CONCURRENTLY"))).toBe(false);
-    expect(sqlCalls.filter((statement) => statement.includes("CREATE INDEX CONCURRENTLY IF NOT EXISTS"))).toHaveLength(3);
+    expect(sqlCalls.filter((statement) => statement.includes("CREATE INDEX CONCURRENTLY IF NOT EXISTS"))).toHaveLength(4);
   });
 
   it("creates missing indexes for discovered office schemas", async () => {
@@ -86,13 +93,14 @@ describe("audit log performance index migration", () => {
       .mockResolvedValueOnce({ rows: [] })
       .mockResolvedValue(undefined)
       .mockResolvedValue(undefined)
+      .mockResolvedValue(undefined)
       .mockResolvedValue(undefined);
 
     await runAuditLogPerformanceIndexMigration({ query } as never);
 
     const sqlCalls = query.mock.calls.map((call) => String(call[0]));
 
-    expect(sqlCalls.filter((statement) => statement.includes("CREATE INDEX CONCURRENTLY IF NOT EXISTS"))).toHaveLength(3);
+    expect(sqlCalls.filter((statement) => statement.includes("CREATE INDEX CONCURRENTLY IF NOT EXISTS"))).toHaveLength(4);
     expect(sqlCalls.some((statement) => statement.includes("DROP INDEX CONCURRENTLY"))).toBe(false);
   });
 
@@ -104,6 +112,7 @@ describe("audit log performance index migration", () => {
     expect(sql).toContain("CREATE INDEX IF NOT EXISTS audit_log_dedup_rich_lookup_idx");
     expect(sql).toContain("CREATE INDEX IF NOT EXISTS audit_log_actor_system_process_created_at_idx");
     expect(sql).toContain("CREATE INDEX IF NOT EXISTS audit_log_entity_or_table_created_at_idx");
+    expect(sql).toContain("CREATE INDEX IF NOT EXISTS audit_log_created_at_id_idx");
     expect(sql).toContain("server/src/migrations/runner.ts");
   });
 });

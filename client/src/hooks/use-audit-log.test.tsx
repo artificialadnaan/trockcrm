@@ -12,14 +12,6 @@ vi.mock("@/lib/api", () => ({
 
 vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
 
-function deferred<T>() {
-  let resolve!: (value: T) => void;
-  const promise = new Promise<T>((innerResolve) => {
-    resolve = innerResolve;
-  });
-  return { promise, resolve };
-}
-
 function flushEffects() {
   return new Promise((resolve) => setTimeout(resolve, 0));
 }
@@ -34,13 +26,27 @@ function HookProbe({
   return null;
 }
 
+function feedRow(id: number) {
+  return {
+    type: "single" as const,
+    id,
+    actorLabel: "Kevin Scott",
+    actorType: "user" as const,
+    action: "update",
+    entityType: "deals",
+    entityName: `Deal ${id}`,
+    occurredAt: "2026-05-15T18:00:00.000Z",
+    fieldChanges: [],
+    visibilityScope: "internal" as const,
+  };
+}
+
 describe("useAuditLog", () => {
   beforeEach(() => {
     apiMock.mockReset();
   });
 
-  it("loads rows before the async total count finishes", async () => {
-    const countRequest = deferred<{ total: number }>();
+  it("loads the first bounded audit page without requesting an exact total count", async () => {
     const snapshots: Array<ReturnType<typeof useAuditLog>> = [];
 
     apiMock.mockImplementation((path: string) => {
@@ -48,23 +54,13 @@ describe("useAuditLog", () => {
         return Promise.resolve({ entityTypes: ["deals"] });
       }
       if (path.startsWith("/admin/audit/count")) {
-        return countRequest.promise;
+        throw new Error("count endpoint should not be used");
       }
       if (path.startsWith("/admin/audit?")) {
         return Promise.resolve({
-          rows: [{
-            type: "single",
-            id: 1,
-            actorLabel: "Kevin Scott",
-            actorType: "user",
-            action: "update",
-            entityType: "deals",
-            entityName: "Legacy Deal",
-            occurredAt: "2026-05-15T18:00:00.000Z",
-            fieldChanges: [],
-            visibilityScope: "internal",
-          }],
+          rows: [feedRow(1)],
           hasMore: true,
+          nextCursor: "cursor-page-2",
         });
       }
       throw new Error(`Unexpected path ${path}`);
@@ -78,132 +74,13 @@ describe("useAuditLog", () => {
       await flushEffects();
     });
 
-    const preCountSnapshot = snapshots[snapshots.length - 1];
-    expect(preCountSnapshot?.loading).toBe(false);
-    expect(preCountSnapshot?.rows).toHaveLength(1);
-    expect(preCountSnapshot?.total).toBeNull();
-    expect(preCountSnapshot?.totalLoading).toBe(true);
-
-    await act(async () => {
-      countRequest.resolve({ total: 105244 });
-      await flushEffects();
-    });
-
-    const postCountSnapshot = snapshots[snapshots.length - 1];
-    expect(postCountSnapshot?.total).toBe(105244);
-    expect(postCountSnapshot?.totalLoading).toBe(false);
-
-    await act(async () => {
-      root.unmount();
-      await flushEffects();
-    });
-  });
-
-  it("ignores stale total-count responses after the filter changes", async () => {
-    const firstCountRequest = deferred<{ total: number }>();
-    const secondCountRequest = deferred<{ total: number }>();
-    const snapshots: Array<ReturnType<typeof useAuditLog>> = [];
-
-    apiMock.mockImplementation((path: string) => {
-      if (path.startsWith("/admin/audit/entity-types")) {
-        return Promise.resolve({ entityTypes: ["deals", "tasks"] });
-      }
-      if (path === "/admin/audit/count?") {
-        return firstCountRequest.promise;
-      }
-      if (path === "/admin/audit/count?entityType=tasks") {
-        return secondCountRequest.promise;
-      }
-      if (path.startsWith("/admin/audit?entityType=tasks")) {
-        return Promise.resolve({ rows: [], hasMore: false });
-      }
-      if (path.startsWith("/admin/audit?")) {
-        return Promise.resolve({
-          rows: [{
-            type: "single",
-            id: 1,
-            actorLabel: "Kevin Scott",
-            actorType: "user",
-            action: "update",
-            entityType: "deals",
-            entityName: "Legacy Deal",
-            occurredAt: "2026-05-15T18:00:00.000Z",
-            fieldChanges: [],
-            visibilityScope: "internal",
-          }],
-          hasMore: true,
-        });
-      }
-      throw new Error(`Unexpected path ${path}`);
-    });
-
-    let latestState: ReturnType<typeof useAuditLog> | null = null;
-
-    const container = document.createElement("div");
-    const root = createRoot(container);
-
-    await act(async () => {
-      root.render(<HookProbe onSnapshot={(snapshot) => {
-        latestState = snapshot;
-        snapshots.push(snapshot);
-      }} />);
-      await flushEffects();
-    });
-
-    await act(async () => {
-      latestState?.setFilter((current) => ({ ...current, entityType: "tasks" }));
-      await flushEffects();
-    });
-
-    await act(async () => {
-      secondCountRequest.resolve({ total: 7 });
-      await flushEffects();
-    });
-
-    await act(async () => {
-      firstCountRequest.resolve({ total: 105244 });
-      await flushEffects();
-    });
-
     const finalSnapshot = snapshots[snapshots.length - 1];
-    expect(finalSnapshot?.filter.entityType).toBe("tasks");
-    expect(finalSnapshot?.total).toBe(7);
-    expect(finalSnapshot?.totalLoading).toBe(false);
-
-    await act(async () => {
-      root.unmount();
-      await flushEffects();
-    });
-  });
-
-  it("marks the total as unavailable when the async count request fails", async () => {
-    const snapshots: Array<ReturnType<typeof useAuditLog>> = [];
-
-    apiMock.mockImplementation((path: string) => {
-      if (path.startsWith("/admin/audit/entity-types")) {
-        return Promise.resolve({ entityTypes: ["deals"] });
-      }
-      if (path.startsWith("/admin/audit/count")) {
-        return Promise.reject(new Error("count failed"));
-      }
-      if (path.startsWith("/admin/audit?")) {
-        return Promise.resolve({ rows: [], hasMore: false });
-      }
-      throw new Error(`Unexpected path ${path}`);
-    });
-
-    const container = document.createElement("div");
-    const root = createRoot(container);
-
-    await act(async () => {
-      root.render(<HookProbe onSnapshot={(snapshot) => snapshots.push(snapshot)} />);
-      await flushEffects();
-    });
-
-    const finalSnapshot = snapshots[snapshots.length - 1];
+    expect(finalSnapshot?.loading).toBe(false);
+    expect(finalSnapshot?.rows).toHaveLength(1);
+    expect(finalSnapshot?.hasMore).toBe(true);
     expect(finalSnapshot?.total).toBeNull();
     expect(finalSnapshot?.totalLoading).toBe(false);
-    expect(finalSnapshot?.totalError).toBe(true);
+    expect(apiMock.mock.calls.some(([path]) => String(path).startsWith("/admin/audit/count"))).toBe(false);
 
     await act(async () => {
       root.unmount();
@@ -211,27 +88,19 @@ describe("useAuditLog", () => {
     });
   });
 
-  it("clears totalError on a user-initiated retry and shows the new total", async () => {
-    const firstCountRequest = deferred<{ total: number }>();
-    const secondCountRequest = deferred<{ total: number }>();
+  it("uses the returned cursor when moving to the next page", async () => {
     const snapshots: Array<ReturnType<typeof useAuditLog>> = [];
     let latestState: ReturnType<typeof useAuditLog> | null = null;
 
     apiMock.mockImplementation((path: string) => {
       if (path.startsWith("/admin/audit/entity-types")) {
-        return Promise.resolve({ entityTypes: ["deals", "tasks"] });
+        return Promise.resolve({ entityTypes: ["deals"] });
       }
-      if (path === "/admin/audit/count?") {
-        return Promise.reject(new Error("count failed"));
+      if (path === "/admin/audit?page=1&limit=50") {
+        return Promise.resolve({ rows: [feedRow(1)], hasMore: true, nextCursor: "cursor-page-2" });
       }
-      if (path === "/admin/audit/count?entityType=tasks") {
-        return secondCountRequest.promise;
-      }
-      if (path.startsWith("/admin/audit?entityType=tasks")) {
-        return Promise.resolve({ rows: [], hasMore: false });
-      }
-      if (path.startsWith("/admin/audit?")) {
-        return Promise.resolve({ rows: [], hasMore: false });
+      if (path === "/admin/audit?page=2&limit=50&cursor=cursor-page-2") {
+        return Promise.resolve({ rows: [feedRow(2)], hasMore: false, nextCursor: null });
       }
       throw new Error(`Unexpected path ${path}`);
     });
@@ -247,25 +116,67 @@ describe("useAuditLog", () => {
       await flushEffects();
     });
 
-    expect(snapshots[snapshots.length - 1]?.totalError).toBe(true);
+    await act(async () => {
+      latestState?.setPage(2);
+      await flushEffects();
+    });
+
+    const finalSnapshot = snapshots[snapshots.length - 1];
+    expect(finalSnapshot?.page).toBe(2);
+    expect(finalSnapshot?.rows[0]?.id).toBe(2);
+    expect(apiMock).toHaveBeenCalledWith("/admin/audit?page=2&limit=50&cursor=cursor-page-2");
+
+    await act(async () => {
+      root.unmount();
+      await flushEffects();
+    });
+  });
+
+  it("resets to the first cursor window when filters change", async () => {
+    const snapshots: Array<ReturnType<typeof useAuditLog>> = [];
+    let latestState: ReturnType<typeof useAuditLog> | null = null;
+
+    apiMock.mockImplementation((path: string) => {
+      if (path.startsWith("/admin/audit/entity-types")) {
+        return Promise.resolve({ entityTypes: ["deals", "tasks"] });
+      }
+      if (path === "/admin/audit?page=1&limit=50") {
+        return Promise.resolve({ rows: [feedRow(1)], hasMore: true, nextCursor: "cursor-page-2" });
+      }
+      if (path === "/admin/audit?page=2&limit=50&cursor=cursor-page-2") {
+        return Promise.resolve({ rows: [feedRow(2)], hasMore: true, nextCursor: "cursor-page-3" });
+      }
+      if (path === "/admin/audit?page=1&limit=50&entityType=tasks") {
+        return Promise.resolve({ rows: [], hasMore: false, nextCursor: null });
+      }
+      throw new Error(`Unexpected path ${path}`);
+    });
+
+    const container = document.createElement("div");
+    const root = createRoot(container);
+
+    await act(async () => {
+      root.render(<HookProbe onSnapshot={(snapshot) => {
+        latestState = snapshot;
+        snapshots.push(snapshot);
+      }} />);
+      await flushEffects();
+    });
+
+    await act(async () => {
+      latestState?.setPage(2);
+      await flushEffects();
+    });
 
     await act(async () => {
       latestState?.setFilter((current) => ({ ...current, entityType: "tasks" }));
       await flushEffects();
     });
 
-    expect(snapshots[snapshots.length - 1]?.totalError).toBe(false);
-    expect(snapshots[snapshots.length - 1]?.totalLoading).toBe(true);
-
-    await act(async () => {
-      secondCountRequest.resolve({ total: 1000 });
-      await flushEffects();
-    });
-
     const finalSnapshot = snapshots[snapshots.length - 1];
-    expect(finalSnapshot?.totalError).toBe(false);
-    expect(finalSnapshot?.totalLoading).toBe(false);
-    expect(finalSnapshot?.total).toBe(1000);
+    expect(finalSnapshot?.page).toBe(1);
+    expect(finalSnapshot?.filter.entityType).toBe("tasks");
+    expect(apiMock).toHaveBeenCalledWith("/admin/audit?page=1&limit=50&entityType=tasks");
 
     await act(async () => {
       root.unmount();
