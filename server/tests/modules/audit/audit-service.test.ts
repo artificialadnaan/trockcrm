@@ -55,9 +55,8 @@ describe("audit activity feed dedup", () => {
     expect(sqlText).toContain("al.actor_name IS NULL");
   });
 
-  it("uses the coalesced entity filter and avoids the blocking count query on main feed loads", async () => {
+  it("uses a bounded keyset-ready query and avoids the whole-feed CTE on main feed loads", async () => {
     const rows = Array.from({ length: 51 }, (_, index) => ({
-      item_type: "single",
       id: index + 1,
       action: "update",
       entity_type: "deals",
@@ -88,22 +87,73 @@ describe("audit activity feed dedup", () => {
 
     expect(execute).toHaveBeenCalledTimes(1);
     expect(sqlText).toContain("COALESCE(al.entity_type, al.table_name) =");
+    expect(sqlText).toContain("WITH raw AS MATERIALIZED");
+    expect(sqlText).toContain("FROM raw al");
+    expect(sqlText).toContain("ORDER BY al.created_at DESC, al.id DESC");
     expect(sqlText).toContain("LIMIT ");
+    expect(sqlText).not.toContain("WITH base AS");
+    expect(sqlText).not.toContain("feed_items");
+    expect(sqlText).not.toContain("OFFSET");
+    expect(sqlText.indexOf("WITH raw AS MATERIALIZED")).toBeLessThan(sqlText.indexOf("AS is_duplicate"));
     expect(result.rows).toHaveLength(50);
     expect(result.hasMore).toBe(true);
+    expect(result.nextCursor).toEqual(expect.any(String));
   });
 
-  it("builds the count query with the coalesced entity filter so legacy rows are included", async () => {
-    const execute = vi.fn().mockResolvedValueOnce({ rows: [{ total: 105244 }] });
+  it("does not run an exact grouped count query", async () => {
+    const execute = vi.fn();
 
     const result = await getAuditLogCount({ execute } as never, {
       entityType: "deals",
     });
-    const sqlText = extractSqlText(execute.mock.calls[0]?.[0]);
 
-    expect(result.total).toBe(105244);
-    expect(sqlText).toContain("COALESCE(al.entity_type, al.table_name) =");
-    expect(sqlText).toContain("SELECT COUNT(*)::int AS total FROM feed_items");
+    expect(result.total).toBeNull();
+    expect(execute).not.toHaveBeenCalled();
+  });
+
+  it("applies the keyset cursor when loading the next audit window", async () => {
+    const firstExecute = vi.fn().mockResolvedValueOnce({
+      rows: [{
+        id: 101,
+        action: "update",
+        entity_type: "deals",
+        entity_name: "Deal 101",
+        entity_secondary_id_snapshot: "DFW-101",
+        actor_system_process: null,
+        record_id: "deal-101",
+        actor_label: "Kevin Scott",
+        actor_type: "user",
+        field_changes_jsonb: [],
+        visibility_scope: "internal",
+        created_at: "2026-05-15T10:00:00.000Z",
+      }, {
+        id: 100,
+        action: "update",
+        entity_type: "deals",
+        entity_name: "Deal 100",
+        entity_secondary_id_snapshot: "DFW-100",
+        actor_system_process: null,
+        record_id: "deal-100",
+        actor_label: "Kevin Scott",
+        actor_type: "user",
+        field_changes_jsonb: [],
+        visibility_scope: "internal",
+        created_at: "2026-05-15T09:59:00.000Z",
+      }],
+    });
+
+    const firstPage = await getAuditLog({ execute: firstExecute } as never, "admin", { limit: 1 });
+
+    const secondExecute = vi.fn().mockResolvedValueOnce({ rows: [] });
+    await getAuditLog({ execute: secondExecute } as never, "admin", {
+      limit: 1,
+      cursor: firstPage.nextCursor ?? undefined,
+    });
+    const sqlText = extractSqlText(secondExecute.mock.calls[0]?.[0]);
+
+    expect(firstPage.nextCursor).toEqual(expect.any(String));
+    expect(sqlText).toContain("WITH raw AS MATERIALIZED");
+    expect(sqlText).toContain("ORDER BY al.created_at DESC, al.id DESC");
   });
 });
 

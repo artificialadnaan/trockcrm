@@ -29,6 +29,11 @@ export const AUDIT_LOG_INDEX_SPECS = [
     createSql: (safeSchemaName: string) => `CREATE INDEX CONCURRENTLY IF NOT EXISTS audit_log_entity_or_table_created_at_idx
       ON ${safeSchemaName}.audit_log ((COALESCE(entity_type, table_name)), created_at DESC)`,
   },
+  {
+    name: "audit_log_created_at_id_idx",
+    createSql: (safeSchemaName: string) => `CREATE INDEX CONCURRENTLY IF NOT EXISTS audit_log_created_at_id_idx
+      ON ${safeSchemaName}.audit_log (created_at DESC, id DESC)`,
+  },
 ] as const;
 
 function quoteIdentifier(identifier: string): string {

@@ -13,6 +13,7 @@ export interface AuditLogFilter {
   fromDate?: string;
   toDate?: string;
   expand?: string;
+  cursor?: string;
   page?: number;
   limit?: number;
 }
@@ -56,11 +57,12 @@ export type AuditLogFeedItem = AuditLogSingleEntry | AuditLogGroupEntry;
 export interface AuditLogFeedResult {
   rows: AuditLogFeedItem[];
   hasMore: boolean;
+  nextCursor?: string | null;
   total?: number;
 }
 
 export interface AuditLogCountResult {
-  total: number;
+  total: number | null;
 }
 
 interface GroupAuditOptions {
@@ -72,6 +74,7 @@ interface GroupAuditOptions {
 const DEFAULT_BATCH_GROUP_MIN_SIZE = 5;
 const DEFAULT_BATCH_GROUP_GAP_SECONDS = Number(process.env.AUDIT_BATCH_GROUP_GAP_SECONDS ?? 120);
 const DEFAULT_BATCH_GROUP_CHILD_PREVIEW_LIMIT = 10;
+const MAX_AUDIT_LOG_RAW_WINDOW = 1000;
 
 interface AuditGroupToken {
   processName: string;
@@ -79,6 +82,28 @@ interface AuditGroupToken {
   action: string;
   startTime: string;
   endTime: string;
+}
+
+interface AuditCursor {
+  createdAt: string;
+  id: number;
+}
+
+function encodeAuditCursor(cursor: AuditCursor): string {
+  return Buffer.from(JSON.stringify(cursor), "utf8").toString("base64url");
+}
+
+function decodeAuditCursor(cursor: string | undefined): AuditCursor | null {
+  if (!cursor) return null;
+  try {
+    const parsed = JSON.parse(Buffer.from(cursor, "base64url").toString("utf8")) as Partial<AuditCursor>;
+    if (!parsed.createdAt || typeof parsed.id !== "number" || !Number.isFinite(parsed.id)) return null;
+    const date = new Date(parsed.createdAt);
+    if (Number.isNaN(date.getTime())) return null;
+    return { createdAt: date.toISOString(), id: parsed.id };
+  } catch {
+    return null;
+  }
 }
 
 function encodeAuditGroupId(token: AuditGroupToken): string {
@@ -190,30 +215,47 @@ export async function getAuditLog(
     };
   }
 
-  const limit = Math.min(filter.limit ?? 50, 200);
-  const page = Math.max(filter.page ?? 1, 1);
-  const offset = (page - 1) * limit;
-  const where = buildAuditLogWhere(filter);
-  const dataResult = await tenantDb.execute(buildGroupedFeedDataSql(where, limit + 1, offset));
+  const limit = Math.max(1, Math.min(filter.limit ?? 50, 200));
+  // Fetch a bounded raw window, then apply duplicate suppression and system-batch
+  // grouping inside that window. This keeps each page off the full audit table.
+  const rawWindowLimit = Math.min(Math.max(limit * 25, limit + 1), MAX_AUDIT_LOG_RAW_WINDOW);
+  const cursor = decodeAuditCursor(filter.cursor);
+  const where = buildAuditLogWhere(filter, { includeDedup: false });
+  const dataResult = await tenantDb.execute(buildBoundedFeedDataSql(where, rawWindowLimit + 1, cursor));
 
   const dataRows = ((dataResult as unknown) as { rows?: Array<Record<string, unknown>> }).rows ?? [];
-  const hasMore = dataRows.length > limit;
+  const boundedRows = dataRows.slice(0, rawWindowLimit);
+  const visibleRows = boundedRows
+    .filter((row) => !isDuplicateRawAuditRow(row))
+    .map((row) => ({ raw: row, entry: mapAuditRow(row, userRole) }));
+  const feedRows = groupAuditLogRows(visibleRows.map((row) => row.entry)).slice(0, limit);
+  const consumedVisibleCount = feedRows.reduce(
+    (count, row) => count + (row.type === "group" ? row.totalCount : 1),
+    0
+  );
+  const cursorRawRow = consumedVisibleCount < visibleRows.length
+    ? visibleRows[Math.max(consumedVisibleCount - 1, 0)]?.raw
+    : boundedRows[boundedRows.length - 1];
+  const hasMore = consumedVisibleCount < visibleRows.length || dataRows.length > rawWindowLimit;
+
   return {
-    rows: dataRows.slice(0, limit).map((row) => mapFeedItem(row, userRole)),
+    rows: feedRows,
     hasMore,
+    nextCursor: hasMore && cursorRawRow
+      ? encodeAuditCursor({
+          createdAt: cursorRawRow.created_at instanceof Date ? cursorRawRow.created_at.toISOString() : String(cursorRawRow.created_at),
+          id: Number(cursorRawRow.id),
+        })
+      : null,
   };
 }
 
 export async function getAuditLogCount(
-  tenantDb: TenantDb,
+  _tenantDb: TenantDb,
   filter: AuditLogFilter = {}
 ): Promise<AuditLogCountResult> {
-  const where = buildAuditLogWhere(filter);
-  const countResult = await tenantDb.execute(buildGroupedFeedCountSql(where));
-  const countRows = ((countResult as unknown) as { rows?: Array<{ total: number }> }).rows ?? [];
-  return {
-    total: Number(countRows[0]?.total ?? 0),
-  };
+  void filter;
+  return { total: null };
 }
 
 async function getAuditLogGroupChildren(
@@ -279,122 +321,8 @@ async function getAuditLogGroupChildren(
   return { rows, total };
 }
 
-function buildGroupedFeedCte(where: SQL): SQL {
-  return sql`
-    WITH base AS (
-      SELECT
-        al.id,
-        al.action,
-        COALESCE(al.entity_type, al.table_name) AS entity_type,
-        COALESCE(al.entity_name_snapshot, al.table_name || ':' || al.record_id) AS entity_name,
-        al.entity_secondary_id_snapshot,
-        al.actor_system_process,
-        al.record_id,
-        COALESCE(al.actor_name, u.display_name, CASE WHEN al.actor_system_process IS NOT NULL THEN al.actor_system_process ELSE 'System' END) AS actor_label,
-        CASE WHEN al.actor_system_process IS NOT NULL THEN 'system' ELSE 'user' END AS actor_type,
-        al.field_changes_jsonb,
-        al.visibility_scope,
-        al.created_at
-      FROM audit_log al
-      LEFT JOIN public.users u ON u.id = al.changed_by
-      WHERE ${where}
-    ),
-    lagged AS (
-      SELECT
-        base.*,
-        LAG(actor_system_process) OVER (ORDER BY created_at DESC, id DESC) AS previous_actor_system_process,
-        LAG(entity_type) OVER (ORDER BY created_at DESC, id DESC) AS previous_entity_type,
-        LAG(action) OVER (ORDER BY created_at DESC, id DESC) AS previous_action,
-        LAG(created_at) OVER (ORDER BY created_at DESC, id DESC) AS previous_created_at
-      FROM base
-    ),
-    keyed AS (
-      SELECT
-        lagged.*,
-        SUM(
-          CASE
-            WHEN actor_system_process IS NULL THEN 1
-            WHEN previous_actor_system_process IS DISTINCT FROM actor_system_process THEN 1
-            WHEN previous_entity_type IS DISTINCT FROM entity_type THEN 1
-            WHEN previous_action IS DISTINCT FROM action THEN 1
-            WHEN ABS(EXTRACT(EPOCH FROM (created_at - previous_created_at))) > ${DEFAULT_BATCH_GROUP_GAP_SECONDS} THEN 1
-            ELSE 0
-          END
-        ) OVER (ORDER BY created_at DESC, id DESC) AS group_key
-      FROM lagged
-    ),
-    group_stats AS (
-      SELECT
-        group_key,
-        actor_system_process,
-        entity_type,
-        action,
-        MIN(created_at) AS start_time,
-        MAX(created_at) AS end_time,
-        MAX(created_at) AS sort_at,
-        COUNT(*)::int AS total_count,
-        COUNT(DISTINCT record_id)::int AS distinct_entity_count,
-        to_jsonb((array_agg(jsonb_build_object('name', entity_name, 'snapshot', entity_secondary_id_snapshot) ORDER BY created_at DESC, id DESC))[1:5]) AS preview_entities,
-        to_jsonb((array_agg(to_jsonb(keyed) ORDER BY created_at DESC, id DESC))[1:${DEFAULT_BATCH_GROUP_CHILD_PREVIEW_LIMIT}]) AS child_entries
-      FROM keyed
-      WHERE actor_system_process IS NOT NULL
-      GROUP BY group_key, actor_system_process, entity_type, action
-      HAVING COUNT(*) >= ${DEFAULT_BATCH_GROUP_MIN_SIZE}
-    ),
-    feed_items AS (
-      SELECT
-        'group' AS item_type,
-        NULL::int AS id,
-        group_stats.action,
-        group_stats.entity_type,
-        NULL::text AS entity_name,
-        NULL::text AS entity_secondary_id_snapshot,
-        group_stats.actor_system_process,
-        NULL::text AS record_id,
-        NULL::text AS actor_label,
-        'system' AS actor_type,
-        NULL::jsonb AS field_changes_jsonb,
-        NULL::text AS visibility_scope,
-        group_stats.sort_at AS created_at,
-        group_stats.start_time,
-        group_stats.end_time,
-        group_stats.total_count,
-        group_stats.distinct_entity_count,
-        group_stats.preview_entities,
-        group_stats.child_entries
-      FROM group_stats
-
-      UNION ALL
-
-      SELECT
-        'single' AS item_type,
-        keyed.id,
-        keyed.action,
-        keyed.entity_type,
-        keyed.entity_name,
-        keyed.entity_secondary_id_snapshot::text,
-        keyed.actor_system_process,
-        keyed.record_id::text,
-        keyed.actor_label,
-        keyed.actor_type,
-        keyed.field_changes_jsonb,
-        keyed.visibility_scope,
-        keyed.created_at,
-        NULL::timestamptz AS start_time,
-        NULL::timestamptz AS end_time,
-        NULL::int AS total_count,
-        NULL::int AS distinct_entity_count,
-        NULL::jsonb AS preview_entities,
-        NULL::jsonb AS child_entries
-      FROM keyed
-      LEFT JOIN group_stats ON group_stats.group_key = keyed.group_key
-      WHERE group_stats.group_key IS NULL
-    )
-  `;
-}
-
-function buildAuditLogWhere(filter: AuditLogFilter): SQL {
-  const conditions: SQL[] = [buildDedupCondition()];
+function buildAuditLogWhere(filter: AuditLogFilter, options: { includeDedup?: boolean } = {}): SQL {
+  const conditions: SQL[] = options.includeDedup === false ? [sql`TRUE`] : [buildDedupCondition()];
 
   if (filter.entityType) {
     conditions.push(sql`COALESCE(al.entity_type, al.table_name) = ${filter.entityType}`);
@@ -416,26 +344,51 @@ function buildAuditLogWhere(filter: AuditLogFilter): SQL {
   return conditions.reduce((acc, cond) => sql`${acc} AND ${cond}`);
 }
 
-function buildGroupedFeedCountSql(where: SQL): SQL {
-  return sql`
-    ${buildGroupedFeedCte(where)}
-    SELECT COUNT(*)::int AS total FROM feed_items
-  `;
-}
+function buildBoundedFeedDataSql(where: SQL, limit: number, cursor: AuditCursor | null): SQL {
+  const keyset = cursor
+    ? sql`AND (al.created_at, al.id) < (${cursor.createdAt}::timestamptz, ${cursor.id})`
+    : sql``;
 
-function buildGroupedFeedDataSql(where: SQL, limit: number, offset: number): SQL {
   return sql`
-    ${buildGroupedFeedCte(where)}
-    SELECT *
-    FROM feed_items
-    ORDER BY created_at DESC, id DESC NULLS LAST
-    LIMIT ${limit} OFFSET ${offset}
+    WITH raw AS MATERIALIZED (
+      SELECT
+        al.id,
+        al.action,
+        al.table_name,
+        COALESCE(al.entity_type, al.table_name) AS entity_type,
+        al.entity_name_snapshot,
+        COALESCE(al.entity_name_snapshot, al.table_name || ':' || al.record_id) AS entity_name,
+        al.entity_secondary_id_snapshot,
+        al.actor_system_process,
+        al.actor_name,
+        al.record_id,
+        COALESCE(al.actor_name, u.display_name, CASE WHEN al.actor_system_process IS NOT NULL THEN al.actor_system_process ELSE 'System' END) AS actor_label,
+        CASE WHEN al.actor_system_process IS NOT NULL THEN 'system' ELSE 'user' END AS actor_type,
+        al.field_changes_jsonb,
+        al.visibility_scope,
+        al.created_at
+      FROM audit_log al
+      LEFT JOIN public.users u ON u.id = al.changed_by
+      WHERE ${where}
+        ${keyset}
+      ORDER BY al.created_at DESC, al.id DESC
+      LIMIT ${limit}
+    )
+    SELECT
+      al.*,
+      ${buildDuplicateExistsCondition()} AS is_duplicate
+    FROM raw al
+    ORDER BY al.created_at DESC, al.id DESC
   `;
 }
 
 function buildDedupCondition(): SQL {
+  return sql`NOT (${buildDuplicateExistsCondition()})`;
+}
+
+function buildDuplicateExistsCondition(): SQL {
   return sql`
-    NOT (
+    (
       al.actor_name IS NULL
       AND al.actor_system_process IS NULL
       AND al.entity_name_snapshot IS NULL
@@ -465,6 +418,10 @@ function buildDedupCondition(): SQL {
   `;
 }
 
+function isDuplicateRawAuditRow(row: Record<string, unknown>): boolean {
+  return row.is_duplicate === true || row.is_duplicate === "true" || row.is_duplicate === "t";
+}
+
 function mapAuditRow(row: Record<string, unknown>, userRole: UserRole): AuditLogSingleEntry {
   const createdAt = row.created_at instanceof Date ? row.created_at.toISOString() : String(row.created_at);
   return {
@@ -486,40 +443,6 @@ function mapAuditRow(row: Record<string, unknown>, userRole: UserRole): AuditLog
     ),
     visibilityScope: (row.visibility_scope as AuditLogRow["visibilityScope"]) ?? "internal",
   };
-}
-
-function mapFeedItem(row: Record<string, unknown>, userRole: UserRole): AuditLogFeedItem {
-  if (row.item_type === "group") {
-    const processName = String(row.actor_system_process ?? "System Process");
-    const startTime = row.start_time instanceof Date ? row.start_time.toISOString() : String(row.start_time);
-    const endTime = row.end_time instanceof Date ? row.end_time.toISOString() : String(row.end_time);
-    const entityType = String(row.entity_type ?? "record");
-    const action = String(row.action ?? "update");
-    const previewEntities = Array.isArray(row.preview_entities)
-      ? (row.preview_entities as Array<{ name: string; snapshot: string | null }>)
-      : [];
-    const childRows = Array.isArray(row.child_entries) ? (row.child_entries as Array<Record<string, unknown>>) : [];
-
-    return {
-      type: "group",
-      id: encodeAuditGroupId({ processName, entityType, action, startTime, endTime }),
-      processName,
-      startTime,
-      endTime,
-      totalCount: Number(row.total_count ?? 0),
-      distinctEntityCount: Number(row.distinct_entity_count ?? 0),
-      entityType,
-      action,
-      previewEntities,
-      childEntries: childRows.map((childRow) => mapAuditRow({
-        ...childRow,
-        actor_label: childRow.actor_label ?? processName,
-        actor_type: "system",
-      }, userRole)),
-    };
-  }
-
-  return mapAuditRow(row, userRole);
 }
 
 export async function getAuditLogEntityTypes(tenantDb: TenantDb): Promise<string[]> {

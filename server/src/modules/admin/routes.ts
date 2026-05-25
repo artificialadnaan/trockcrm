@@ -802,7 +802,7 @@ router.get(
   async (req: Request, res: Response, next: NextFunction) => {
     try {
       const {
-        entityType, actorQuery, action, fromDate, toDate, expand, page, limit,
+        entityType, actorQuery, action, fromDate, toDate, expand, cursor, page, limit,
       } = req.query as Record<string, string>;
 
       const result = await getAuditLog(req.tenantDb!, req.user!.role, {
@@ -812,6 +812,7 @@ router.get(
         fromDate: fromDate || undefined,
         toDate: toDate || undefined,
         expand: expand || undefined,
+        cursor: cursor || undefined,
         page: page ? parseInt(page, 10) : 1,
         limit: limit ? parseInt(limit, 10) : 50,
       });

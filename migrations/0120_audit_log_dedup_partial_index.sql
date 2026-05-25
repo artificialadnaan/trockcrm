@@ -19,4 +19,7 @@ CREATE INDEX IF NOT EXISTS audit_log_actor_system_process_created_at_idx
 
 CREATE INDEX IF NOT EXISTS audit_log_entity_or_table_created_at_idx
   ON office_dallas.audit_log ((COALESCE(entity_type, table_name)), created_at DESC);
+
+CREATE INDEX IF NOT EXISTS audit_log_created_at_id_idx
+  ON office_dallas.audit_log (created_at DESC, id DESC);
 -- TENANT_SCHEMA_END
