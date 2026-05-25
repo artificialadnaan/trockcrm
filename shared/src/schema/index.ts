@@ -20,6 +20,7 @@ export { procoreSyncState, procoreEntityTypeEnum, syncDirectionEnum, syncStatusE
 export { procoreOauthTokens } from "./public/procore-oauth-tokens.js";
 export { procoreWebhookLog } from "./public/procore-webhook-log.js";
 export { syncHubWebhookOrphans } from "./public/synchub-webhook-orphans.js";
+export { portfolioProjectStageEventReceipts } from "./public/portfolio-project-stage-event-receipts.js";
 export { publicPhotoTokens } from "./public/public-photo-tokens.js";
 export { hubspotOwnerMappings } from "./public/hubspot-owner-mappings.js";
 export { hubspotActivityBackfillLedger } from "./public/hubspot-activity-backfill-ledger.js";
@@ -161,6 +162,10 @@ export {
   projectDocuments,
   projectSyncState,
 } from "./tenant/projects.js";
+export {
+  portfolioProjects,
+  portfolioProjectStageEntries,
+} from "./tenant/portfolio-projects.js";
 export { aiDocumentIndex } from "./tenant/ai-document-index.js";
 export { aiEmbeddingChunks } from "./tenant/ai-embedding-chunks.js";
 export { aiCopilotPackets } from "./tenant/ai-copilot-packets.js";
