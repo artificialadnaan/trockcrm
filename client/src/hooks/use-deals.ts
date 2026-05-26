@@ -190,6 +190,8 @@ export interface Deal {
   rfpConflictReason?: string | null;
   rfpConflictWith?: Record<string, unknown> | null;
   rfpLastAttemptError?: string | null;
+  rfpDeclinedReason?: string | null;
+  rfpDeclinedAt?: string | null;
   isRfpTriggerEnabled?: boolean;
   lastActivityAt: string | null;
   stageEnteredAt: string;

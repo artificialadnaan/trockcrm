@@ -5,6 +5,7 @@ import { pool } from "../../db.js";
 import { buildAuditActorFromSystem } from "../audit/audit-logger.js";
 import { logActivityWithPgClient } from "../audit/pg-activity-logger.js";
 import { INTERNAL_RFP_RECEIVER } from "../audit/system-processes.js";
+import { applyRfpDeclineToDeal } from "../deals/rfp-decline-service.js";
 
 export const internalRfpRoutes = Router();
 
@@ -83,6 +84,8 @@ async function findDeal(sourceDealId: string) {
               d.procore_company_id,
               d.is_bid_board_owned,
               d.rfp_approval_status,
+              d.rfp_declined_reason,
+              d.rfp_declined_at,
               d.bid_board_linked_at,
               d.assigned_rep_id,
               d.rfp_approval_requested_by,
@@ -141,6 +144,10 @@ function asDateOrNull(value: unknown) {
   return Number.isFinite(parsed.getTime()) ? parsed.toISOString() : null;
 }
 
+function isUuid(value: string | null): boolean {
+  return Boolean(value && /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value));
+}
+
 function auditFieldKeyForInternalRfpColumn(column: string): string {
   if (column === "deal_number") return "projectNumber";
   if (column === "project_type") return "projectType";
@@ -175,6 +182,10 @@ function shouldApplyBidBoardCreatedStage(currentDeal: any, targetStage: any): bo
   const currentOrder = numericStageOrder(currentDeal.stage_display_order);
   const targetOrder = numericStageOrder(targetStage.display_order);
   return currentOrder == null || targetOrder == null || targetOrder >= currentOrder;
+}
+
+function isPendingRfpApprovalStatus(value: unknown): boolean {
+  return value === "pending_outbox" || value === "pending";
 }
 
 function isDealNumberUniqueViolation(error: unknown): boolean {
@@ -215,6 +226,10 @@ internalRfpRoutes.post(
         payload = parseBody(rawBody);
       } catch {
         res.status(400).json({ success: false, error: "invalid_json" });
+        return;
+      }
+      if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
+        res.status(422).json({ success: false, error: "invalid_payload" });
         return;
       }
 
@@ -427,6 +442,153 @@ internalRfpRoutes.post(
         exists: true,
         stage: found.deal.stage_slug ?? null,
         dealId: found.deal.id,
+      });
+    } catch (err) {
+      next(err);
+    }
+  }
+);
+
+internalRfpRoutes.post(
+  "/rfp-declined",
+  express.raw({ type: "application/json", limit: "128kb" }),
+  async (req, res, next) => {
+    try {
+      const rawBody = req.body as Buffer;
+      const signature = req.headers["x-rfp-request-signature"] as string | undefined;
+      if (!verifySignature(rawBody, signature)) {
+        res.status(401).json({ success: false, error: "invalid_signature" });
+        return;
+      }
+
+      let payload: any;
+      try {
+        payload = parseBody(rawBody);
+      } catch {
+        res.status(400).json({ success: false, error: "invalid_json" });
+        return;
+      }
+      if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
+        res.status(422).json({ success: false, error: "invalid_payload" });
+        return;
+      }
+
+      const sourceDealId = asStringOrNull(payload.sourceDealId);
+      const denialReason = asStringOrNull(payload.denialReason ?? payload.reason);
+      const declinedAt = payload.declinedAt == null ? new Date().toISOString() : asDateOrNull(payload.declinedAt);
+      if (!sourceDealId || !isUuid(sourceDealId) || typeof payload.rfpApprovalRequestId !== "number" || !declinedAt) {
+        res.status(422).json({ success: false, error: "invalid_payload" });
+        return;
+      }
+
+      const found = await findDeal(sourceDealId);
+      if (!found) {
+        res.status(404).json({ success: false, error: "deal_not_found" });
+        return;
+      }
+
+      const currentRequestId =
+        found.deal.rfp_approval_request_id == null ? null : Number(found.deal.rfp_approval_request_id);
+      if ((currentRequestId == null || !Number.isFinite(currentRequestId)) && found.deal.rfp_approval_status !== "declined") {
+        res.status(409).json({
+          success: false,
+          error: "rfp_decline_invalid_state",
+          reason: "no_pending_rfp",
+        });
+        return;
+      }
+
+      if (currentRequestId == null || !Number.isFinite(currentRequestId) || payload.rfpApprovalRequestId !== currentRequestId) {
+        console.warn(
+          `[RFP declined callback] stale callback ignored for sourceDealId=${sourceDealId}; incoming rfpApprovalRequestId=${payload.rfpApprovalRequestId}; current rfpApprovalRequestId=${found.deal.rfp_approval_request_id ?? "null"}`
+        );
+        res.json({ success: true, idempotent: true, reason: "stale_callback_ignored" });
+        return;
+      }
+
+      if (found.deal.rfp_approval_status === "declined") {
+        res.json({
+          success: true,
+          idempotent: true,
+          dealId: sourceDealId,
+          status: "declined",
+          pending: false,
+        });
+        return;
+      }
+
+      if (!isPendingRfpApprovalStatus(found.deal.rfp_approval_status)) {
+        res.status(409).json({
+          success: false,
+          error: "rfp_decline_invalid_state",
+          reason: "no_pending_rfp",
+        });
+        return;
+      }
+
+      const changedByUserId = found.deal.rfp_approval_requested_by ?? found.deal.assigned_rep_id ?? null;
+      if (!changedByUserId) {
+        res.status(409).json({
+          success: false,
+          error: "rfp_decline_invalid_state",
+          reason: "missing_audit_actor",
+        });
+        return;
+      }
+
+      const client = await pool.connect();
+      try {
+        await client.query("BEGIN");
+        const declineResult = await applyRfpDeclineToDeal({
+          client,
+          schemaName: found.schemaName,
+          deal: found.deal,
+          sourceDealId,
+          rfpApprovalRequestId: payload.rfpApprovalRequestId,
+          denialReason,
+          declinedAt,
+          changedByUserId,
+        });
+
+        if (!declineResult.applied) {
+          const refreshed = await findDeal(sourceDealId);
+          if (
+            refreshed?.deal.rfp_approval_status === "declined" &&
+            Number(refreshed.deal.rfp_approval_request_id) === payload.rfpApprovalRequestId
+          ) {
+            await client.query("ROLLBACK");
+            res.json({
+              success: true,
+              idempotent: true,
+              dealId: sourceDealId,
+              status: "declined",
+              pending: false,
+            });
+            return;
+          }
+
+          await client.query("ROLLBACK");
+          res.status(409).json({
+            success: false,
+            error: "rfp_decline_invalid_state",
+            reason: "state_changed_during_callback",
+          });
+          return;
+        }
+
+        await client.query("COMMIT");
+      } catch (err) {
+        await client.query("ROLLBACK").catch(() => {});
+        throw err;
+      } finally {
+        client.release();
+      }
+
+      res.json({
+        success: true,
+        dealId: sourceDealId,
+        status: "declined",
+        pending: false,
       });
     } catch (err) {
       next(err);
