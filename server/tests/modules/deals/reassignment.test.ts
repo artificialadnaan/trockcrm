@@ -3,13 +3,21 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 vi.mock("../../../src/modules/assignment-tasks/service.js", () => ({
   createAssignmentTaskIfNeeded: vi.fn(),
 }));
+vi.mock("../../../src/modules/audit/audit-logger.js", () => ({
+  logActivity: vi.fn(),
+}));
 
 const { createAssignmentTaskIfNeeded } = await import(
   "../../../src/modules/assignment-tasks/service.js"
 );
+const { logActivity } = await import("../../../src/modules/audit/audit-logger.js");
 const { startProposalDraft, updateDeal } = await import("../../../src/modules/deals/service.js");
 
-function createDealDb() {
+function createDealDb(options: {
+  targetRepOfficeId?: string;
+  targetOfficeSlug?: string;
+  targetRepHasAccessToOffice?: boolean;
+} = {}) {
   const insertedValues: unknown[] = [];
   const queue: unknown[] = [
     [
@@ -23,12 +31,18 @@ function createDealDb() {
         primaryContactId: null,
         stageId: "stage-estimating",
         workflowRoute: "estimating",
+        officeCode: "dfw",
         createdAt: new Date("2026-04-01T00:00:00.000Z"),
         updatedAt: new Date("2026-04-20T00:00:00.000Z"),
       },
     ],
-    [{ id: "rep-new", isActive: true, officeId: "office-1" }],
+    [{ id: "rep-new", isActive: true, officeId: options.targetRepOfficeId ?? "office-1" }],
+    [{ slug: options.targetOfficeSlug ?? "dallas", name: options.targetOfficeSlug === "atlanta" ? "Atlanta" : "Dallas" }],
+    [{ id: "rep-old", isActive: true, officeId: "office-1" }],
   ];
+  if (options.targetRepHasAccessToOffice) {
+    queue.push([{ userId: "rep-new", officeId: "office-1" }]);
+  }
 
   const select = vi.fn(() => ({
     from: vi.fn(() => ({
@@ -53,6 +67,7 @@ function createDealDb() {
       primaryContactId: null,
       stageId: "stage-estimating",
       workflowRoute: "estimating",
+      officeCode: "dfw",
       createdAt: new Date("2026-04-01T00:00:00.000Z"),
       updatedAt: new Date("2026-04-20T00:00:00.000Z"),
     },
@@ -131,6 +146,89 @@ describe("deal reassignment tasking", () => {
           }),
         }),
       ])
+    );
+  });
+
+  it("rejects reassignment to an active user from a different office even when they have office access", async () => {
+    const tenantDb = createDealDb({
+      targetRepOfficeId: "office-2",
+      targetOfficeSlug: "atlanta",
+      targetRepHasAccessToOffice: true,
+    });
+
+    await expect(
+      updateDeal(
+        tenantDb as any,
+        "deal-1",
+        {
+          assignedRepId: "rep-new",
+        },
+        "director",
+        "director-1",
+        "office-1"
+      )
+    ).rejects.toMatchObject({
+      statusCode: 400,
+      code: "DEAL_REASSIGNMENT_OFFICE_MISMATCH",
+      message: "Deals can only be reassigned to users in the same office",
+    });
+  });
+
+  it("rejects a non-owner non-admin before validating or writing reassignment", async () => {
+    const tenantDb = createDealDb();
+
+    await expect(
+      updateDeal(
+        tenantDb as any,
+        "deal-1",
+        {
+          assignedRepId: "rep-new",
+        },
+        "rep",
+        "rep-other",
+        "office-1"
+      )
+    ).rejects.toMatchObject({
+      statusCode: 403,
+      code: "DEAL_REASSIGNMENT_FORBIDDEN",
+      message: "Only the assigned rep, a director, or an admin can reassign this deal",
+    });
+    expect(tenantDb.update).not.toHaveBeenCalled();
+    expect(createAssignmentTaskIfNeeded).not.toHaveBeenCalled();
+  });
+
+  it("writes an activity audit entry when reassignment includes route audit context", async () => {
+    const tenantDb = createDealDb();
+
+    await updateDeal(
+      tenantDb as any,
+      "deal-1",
+      {
+        assignedRepId: "rep-new",
+        auditContext: {
+          actor: {
+            userId: "director-1",
+            name: "Director One",
+            role: "director",
+          },
+          ipAddress: "127.0.0.1",
+          userAgent: "vitest",
+        },
+      },
+      "director",
+      "director-1",
+      "office-1"
+    );
+
+    expect(logActivity).toHaveBeenCalledWith(
+      expect.objectContaining({
+        tenantDb,
+        action: "update",
+        fieldChanges: {
+          assignedRepId: { from: "rep-old", to: "rep-new" },
+        },
+        actor: expect.objectContaining({ userId: "director-1" }),
+      })
     );
   });
 });

@@ -15,10 +15,11 @@ export interface UseSalesRepsOptions {
    * Defaults to `true`.
    */
   enabled?: boolean;
+  purpose?: "deal-reassignment";
 }
 
 export function useSalesReps(officeId?: string, options: UseSalesRepsOptions = {}) {
-  const { enabled = true } = options;
+  const { enabled = true, purpose } = options;
   const [salesReps, setSalesReps] = useState<SalesRepOption[]>([]);
   const [loading, setLoading] = useState(enabled);
   const [error, setError] = useState<string | null>(null);
@@ -42,8 +43,11 @@ export function useSalesReps(officeId?: string, options: UseSalesRepsOptions = {
       const headers = officeId && officeId !== "all"
         ? { "x-office-id": officeId }
         : undefined;
+      const path = purpose === "deal-reassignment"
+        ? "/users/sales-reps?purpose=deal-reassignment"
+        : "/users/sales-reps";
       const data = await api<{ users: SalesRepOption[] }>(
-        "/users/sales-reps",
+        path,
         { ...(headers ? { headers } : {}), signal: controller.signal },
       );
       if (controller.signal.aborted) return;
@@ -54,7 +58,7 @@ export function useSalesReps(officeId?: string, options: UseSalesRepsOptions = {
     } finally {
       if (!controller.signal.aborted) setLoading(false);
     }
-  }, [officeId, enabled]);
+  }, [officeId, enabled, purpose]);
 
   useEffect(() => {
     load();

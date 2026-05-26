@@ -36,7 +36,13 @@ export function DealOverviewTab({ deal, onDealUpdated }: DealOverviewTabProps) {
   const navigate = useNavigate();
   const { user } = useAuth();
   const { assignees } = useTaskAssignees();
-  const { salesReps } = useSalesReps();
+  const canEditAssignment =
+    Boolean(user) &&
+    (user?.role === "admin" || user?.role === "director" || deal.assignedRepId === user?.id);
+  const { salesReps } = useSalesReps(
+    user?.activeOfficeId ?? user?.officeId ?? undefined,
+    { purpose: "deal-reassignment", enabled: canEditAssignment }
+  );
   const { projectTypes } = useProjectTypes();
   const { regions } = useRegions();
   const [assignmentSaving, setAssignmentSaving] = useState(false);
@@ -49,10 +55,6 @@ export function DealOverviewTab({ deal, onDealUpdated }: DealOverviewTabProps) {
     salesReps.find((assignee) => assignee.id === deal.assignedRepId)?.displayName ??
     assignees.find((assignee) => assignee.id === deal.assignedRepId)?.displayName ??
     null;
-  const canEditAssignment =
-    Boolean(user) &&
-    (user?.role === "admin" || deal.assignedRepId === user?.id);
-
   async function handleAssignmentSave(nextRepId: string) {
     if (!nextRepId || nextRepId === deal.assignedRepId) {
       return;
@@ -281,7 +283,7 @@ export function DealOverviewTab({ deal, onDealUpdated }: DealOverviewTabProps) {
           label="Sales Rep"
           assignedRepId={deal.assignedRepId}
           assignedRepName={assignedRepName}
-          reps={salesReps.length > 0 ? salesReps : assignees}
+          reps={canEditAssignment ? salesReps : assignees}
           canEdit={canEditAssignment}
           saving={assignmentSaving}
           onSave={handleAssignmentSave}

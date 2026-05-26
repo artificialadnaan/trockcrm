@@ -35,7 +35,10 @@ router.get("/crm-owners", async (req, res, next) => {
 
 router.get("/sales-reps", async (req, res, next) => {
   try {
-    if (req.user!.role === "rep") {
+    const purpose = typeof req.query.purpose === "string" ? req.query.purpose : undefined;
+    const isDealReassignmentPicker = purpose === "deal-reassignment";
+
+    if (req.user!.role === "rep" && !isDealReassignmentPicker) {
       await req.commitTransaction!();
       res.json({ users: [{ id: req.user!.id, displayName: req.user!.displayName, email: req.user!.email }] });
       return;
@@ -57,11 +60,24 @@ router.get("/sales-reps", async (req, res, next) => {
       id: string;
       email: string;
       displayName: string;
+      role?: string;
+      officeId: string | null;
       isActive: boolean;
     }>;
+    await req.commitTransaction!();
     res.json({
       users: rows
         .filter((user) => user.isActive)
+        .filter((user) =>
+          isDealReassignmentPicker && "role" in user && typeof user.role === "string"
+            ? isCrmUserRole(user.role)
+            : true
+        )
+        .filter((user) =>
+          isDealReassignmentPicker && officeId
+            ? user.officeId === officeId
+            : true
+        )
         .map((user) => ({ id: user.id, displayName: user.displayName, email: user.email })),
     });
   } catch (err) {

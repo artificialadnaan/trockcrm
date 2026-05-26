@@ -786,6 +786,57 @@ async function validateAssignee(tenantDb: TenantDb, assigneeId: string, officeId
   }
 }
 
+async function validateDealReassignmentAssignee(
+  tenantDb: TenantDb,
+  assigneeId: string,
+  dealOfficeCode: string | null | undefined,
+  currentAssignedRepId: string | null,
+  fallbackOfficeId?: string,
+): Promise<void> {
+  const [targetUser] = await tenantDb
+    .select()
+    .from(users)
+    .where(and(eq(users.id, assigneeId), eq(users.isActive, true)))
+    .limit(1);
+  if (!targetUser) throw new AppError(400, "Assigned user not found or inactive");
+
+  const normalizedDealOfficeCode = resolveOfficeCodeFromOffice(dealOfficeCode ?? null);
+  if (normalizedDealOfficeCode) {
+    const [targetOffice] = await tenantDb
+      .select({ slug: offices.slug, name: offices.name })
+      .from(offices)
+      .where(eq(offices.id, targetUser.officeId))
+      .limit(1);
+    const normalizedTargetOfficeCode = resolveOfficeCodeFromOffice(targetOffice ?? null);
+    if (normalizedTargetOfficeCode !== normalizedDealOfficeCode) {
+      throw new AppError(
+        400,
+        "Deals can only be reassigned to users in the same office",
+        "DEAL_REASSIGNMENT_OFFICE_MISMATCH"
+      );
+    }
+    return;
+  }
+
+  let dealOfficeId = fallbackOfficeId ?? null;
+  if (currentAssignedRepId) {
+    const [currentOwner] = await tenantDb
+      .select()
+      .from(users)
+      .where(eq(users.id, currentAssignedRepId))
+      .limit(1);
+    dealOfficeId = currentOwner?.officeId ?? dealOfficeId;
+  }
+
+  if (dealOfficeId && targetUser.officeId !== dealOfficeId) {
+    throw new AppError(
+      400,
+      "Deals can only be reassigned to users in the same office",
+      "DEAL_REASSIGNMENT_OFFICE_MISMATCH"
+    );
+  }
+}
+
 export function workflowFamilyForRoute(workflowRoute: WorkflowRoute) {
   return workflowRoute === "service" ? "service_deal" : "standard_deal";
 }
@@ -1688,6 +1739,17 @@ export async function updateDeal(
     throw new AppError(404, "Deal not found");
   }
 
+  if (input.assignedRepId !== undefined && input.assignedRepId !== existing.assignedRepId) {
+    const isDirectorOrAdmin = userRole === "admin" || userRole === "director";
+    if (!isDirectorOrAdmin && existing.assignedRepId !== userId) {
+      throw new AppError(
+        403,
+        "Only the assigned rep, a director, or an admin can reassign this deal",
+        "DEAL_REASSIGNMENT_FORBIDDEN"
+      );
+    }
+  }
+
   // Reps can only edit their own deals
   if (userRole === "rep" && existing.assignedRepId !== userId) {
     throw new AppError(403, "You can only edit your own deals");
@@ -1695,7 +1757,13 @@ export async function updateDeal(
 
   // Validate assignee if being changed
   if (input.assignedRepId !== undefined) {
-    await validateAssignee(tenantDb, input.assignedRepId, officeId);
+    await validateDealReassignmentAssignee(
+      tenantDb,
+      input.assignedRepId,
+      existing.officeCode,
+      existing.assignedRepId ?? null,
+      officeId
+    );
   }
 
   assertDealUpdateLineagePolicy(existing, input);
