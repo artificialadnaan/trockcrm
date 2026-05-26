@@ -770,3 +770,68 @@ describe("PATCH /api/deals/:id cleanup legacy handling", () => {
     expect(auditMocks.writeAuditLog).not.toHaveBeenCalled();
   });
 });
+
+describe("PATCH /api/deals/:id reassignment authorization", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    accessMocks.assertDealCollaboratorAccess.mockResolvedValue({ id: "deal-1", assignedRepId: "rep-1", officeId: "office-1" });
+    accessMocks.assertDealOwnerAccess.mockResolvedValue({ id: "deal-1", assignedRepId: "rep-1", officeId: "office-1" });
+    scopingServiceMocks.assertDealScopingWriteAllowed.mockResolvedValue({
+      adminOverride: false,
+      lockState: { locked: false, submittedAt: null, reason: null },
+    });
+    dealsServiceMocks.updateDeal.mockImplementation(async (_tenantDb, dealId, input) => ({
+      id: dealId,
+      ...baseDeal(),
+      ...input,
+    }));
+  });
+
+  it("lets directors reassign any deal through the full updateDeal path", async () => {
+    const { req, error } = await invokePatch({ assignedRepId: "rep-2" }, createUser("director"));
+
+    expect(error).toBeNull();
+    expect(accessMocks.assertDealOwnerAccess).not.toHaveBeenCalled();
+    expect(dealsServiceMocks.updateDeal).toHaveBeenCalledWith(
+      req.tenantDb,
+      "deal-1",
+      expect.objectContaining({ assignedRepId: "rep-2" }),
+      "director",
+      "director-1",
+      "office-1"
+    );
+  });
+
+  it("lets the current assigned rep reassign their own deal through updateDeal", async () => {
+    const { req, error } = await invokePatch({ assignedRepId: "rep-2" }, createUser("rep"));
+
+    expect(error).toBeNull();
+    expect(accessMocks.assertDealOwnerAccess).not.toHaveBeenCalled();
+    expect(dealsServiceMocks.updateDeal).toHaveBeenCalledWith(
+      req.tenantDb,
+      "deal-1",
+      expect.objectContaining({ assignedRepId: "rep-2" }),
+      "rep",
+      "rep-1",
+      "office-1"
+    );
+  });
+
+  it("rejects a non-owner rep reassignment with a typed authorization error", async () => {
+    accessMocks.assertDealCollaboratorAccess.mockResolvedValueOnce({
+      id: "deal-1",
+      assignedRepId: "rep-owner",
+      officeId: "office-1",
+    });
+
+    const { error } = await invokePatch({ assignedRepId: "rep-2" }, createUser("rep"));
+
+    expect(error).toMatchObject({
+      statusCode: 403,
+      code: "DEAL_REASSIGNMENT_FORBIDDEN",
+      message: "Only the assigned rep, a director, or an admin can reassign this deal",
+    });
+    expect(accessMocks.assertDealOwnerAccess).not.toHaveBeenCalled();
+    expect(dealsServiceMocks.updateDeal).not.toHaveBeenCalled();
+  });
+});

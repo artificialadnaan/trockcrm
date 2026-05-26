@@ -1777,8 +1777,13 @@ router.patch("/:id", async (req, res, next) => {
     const patchKeys = Object.keys(body);
     const isAssignmentTransferOnly = patchKeys.length > 0 && patchKeys.every((field) => field === "assignedRepId");
     if (isAssignmentTransferOnly) {
-      if (req.user!.role !== "admin" && dealAccess.assignedRepId !== req.user!.id) {
-        throw new AppError(403, "Only the assigned rep or an admin can transfer this deal");
+      const isDirectorOrAdmin = req.user!.role === "admin" || req.user!.role === "director";
+      if (!isDirectorOrAdmin && dealAccess.assignedRepId !== req.user!.id) {
+        throw new AppError(
+          403,
+          "Only the assigned rep, a director, or an admin can reassign this deal",
+          "DEAL_REASSIGNMENT_FORBIDDEN"
+        );
       }
     } else {
       await assertDealOwnerRouteAccess(req, req.params.id, {

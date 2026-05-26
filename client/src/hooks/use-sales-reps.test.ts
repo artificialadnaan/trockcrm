@@ -65,6 +65,20 @@ describe("useSalesReps", () => {
     expect(init?.signal).toBeInstanceOf(AbortSignal);
   });
 
+  it("adds the reassignment purpose query only for deal reassignment pickers", async () => {
+    apiMock.mockResolvedValue({ users: [{ id: "u1", displayName: "Rep One" }] });
+    function Probe() {
+      useSalesReps("office-a", { purpose: "deal-reassignment" });
+      return null;
+    }
+    mount(createElement(Probe));
+    await vi.waitFor(() => expect(apiMock).toHaveBeenCalled());
+    const [path, init] = apiMock.mock.calls[0];
+    expect(path).toBe("/users/sales-reps?purpose=deal-reassignment");
+    expect(init?.headers).toEqual({ "x-office-id": "office-a" });
+    expect(init?.signal).toBeInstanceOf(AbortSignal);
+  });
+
   it("aborts the in-flight fetch when officeId changes so a stale response cannot win", async () => {
     const signals: AbortSignal[] = [];
     apiMock.mockImplementation((_path: string, init: any) => {

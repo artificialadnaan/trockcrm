@@ -70,6 +70,7 @@ import {
 } from "@/hooks/use-deals";
 import { useLeadDetail } from "@/hooks/use-leads";
 import { usePipelineStages } from "@/hooks/use-pipeline-config";
+import { useSalesReps } from "@/hooks/use-sales-reps";
 import { useAuth } from "@/lib/auth";
 import { api } from "@/lib/api";
 import { cn } from "@/lib/utils";
@@ -850,6 +851,8 @@ export function DealDetailPage() {
       address={address}
       procoreProjectUrl={procoreProjectUrl}
       bidBoardUrl={buildBidBoardProjectUrl(deal)}
+      currentUser={user}
+      onReassigned={refetch}
     />
   );
   const tabContent = (
@@ -989,15 +992,53 @@ function DealRightRail({
   address,
   procoreProjectUrl,
   bidBoardUrl,
+  currentUser,
+  onReassigned,
 }: {
   deal: DealDetail;
   address: string;
   procoreProjectUrl: string | null;
   bidBoardUrl: string | null;
+  currentUser: { id?: string | null; role?: string | null; activeOfficeId?: string | null; officeId?: string | null } | null | undefined;
+  onReassigned: () => void | Promise<void>;
 }) {
+  const canReassignDeal =
+    currentUser?.role === "admin" ||
+    currentUser?.role === "director" ||
+    (Boolean(currentUser?.id) && currentUser?.id === deal.assignedRepId);
+  const { salesReps, loading: salesRepsLoading } = useSalesReps(
+    currentUser?.activeOfficeId ?? currentUser?.officeId ?? undefined,
+    { purpose: "deal-reassignment", enabled: canReassignDeal }
+  );
+  const [reassigning, setReassigning] = useState(false);
+  const [reassignError, setReassignError] = useState<string | null>(null);
   const assignedRep = formatNullable(deal.assignedRepName ?? deal.assignedRepId);
   const assignedRepInitials = initials(deal.assignedRepName ?? deal.assignedRepId ?? "NA");
   const assignedRepColor = getOwnerInitialColor(deal.assignedRepId ?? deal.assignedRepName);
+  const ownerOptions = [...salesReps];
+  if (deal.assignedRepId && !ownerOptions.some((rep) => rep.id === deal.assignedRepId)) {
+    ownerOptions.unshift({
+      id: deal.assignedRepId,
+      displayName: deal.assignedRepName ?? "Current assigned rep",
+    });
+  }
+
+  async function handleReassign(nextRepId: string) {
+    if (!nextRepId || nextRepId === deal.assignedRepId || reassigning) return;
+    setReassigning(true);
+    setReassignError(null);
+    try {
+      await apiUpdateDeal(deal.id, { assignedRepId: nextRepId });
+      toast.success("Deal owner updated");
+      await onReassigned();
+    } catch (err) {
+      const message = err instanceof Error ? err.message : "Failed to reassign deal";
+      setReassignError(message);
+      toast.error(message);
+    } finally {
+      setReassigning(false);
+    }
+  }
   const headerDisplayNumber = formatDealDisplayNumber(deal);
   const dealWithOptionalContact = deal as DealDetail & {
     primaryContactName?: string | null;
@@ -1022,15 +1063,43 @@ function DealRightRail({
           <DetailRailItem
             label="Assigned rep"
             value={
-              <span className="inline-flex items-center gap-2">
-                <span
-                  className="grid h-8 w-8 place-items-center rounded-full text-[10px] font-black uppercase text-white"
-                  style={{ backgroundColor: assignedRepColor.backgroundColor, color: assignedRepColor.textColor }}
-                >
-                  {assignedRepInitials}
+              <div className="space-y-2">
+                <span className="inline-flex items-center gap-2">
+                  <span
+                    className="grid h-8 w-8 place-items-center rounded-full text-[10px] font-black uppercase text-white"
+                    style={{ backgroundColor: assignedRepColor.backgroundColor, color: assignedRepColor.textColor }}
+                  >
+                    {assignedRepInitials}
+                  </span>
+                  <span>{assignedRep}</span>
                 </span>
-                <span>{assignedRep}</span>
-              </span>
+                {canReassignDeal ? (
+                  <div className="space-y-1">
+                    <select
+                      aria-label="Reassign deal owner"
+                      className="h-8 w-full rounded-md border border-slate-200 bg-slate-50 px-2 text-xs font-semibold text-slate-900"
+                      disabled={salesRepsLoading || reassigning || ownerOptions.length === 0}
+                      value={deal.assignedRepId ?? ""}
+                      onChange={(event) => {
+                        void handleReassign(event.currentTarget.value);
+                      }}
+                    >
+                      {ownerOptions.length === 0 ? (
+                        <option value={deal.assignedRepId ?? ""}>
+                          {salesRepsLoading ? "Loading reps..." : assignedRep}
+                        </option>
+                      ) : (
+                        ownerOptions.map((rep) => (
+                          <option key={rep.id} value={rep.id}>
+                            {rep.displayName}
+                          </option>
+                        ))
+                      )}
+                    </select>
+                    {reassignError ? <p className="text-xs font-medium text-red-600">{reassignError}</p> : null}
+                  </div>
+                ) : null}
+              </div>
             }
           />
         </DetailRailSection>

@@ -21,6 +21,8 @@ const mocks = vi.hoisted(() => ({
   apiMock: vi.fn(),
   toastSuccessMock: vi.fn(),
   toastInfoMock: vi.fn(),
+  toastErrorMock: vi.fn(),
+  useSalesRepsMock: vi.fn(),
 }));
 
 vi.mock("@/hooks/use-deals", () => ({
@@ -46,10 +48,15 @@ vi.mock("@/lib/api", () => ({
   resolveApiBase: vi.fn(() => "/api"),
 }));
 
+vi.mock("@/hooks/use-sales-reps", () => ({
+  useSalesReps: mocks.useSalesRepsMock,
+}));
+
 vi.mock("sonner", () => ({
   toast: {
     success: mocks.toastSuccessMock,
     info: mocks.toastInfoMock,
+    error: mocks.toastErrorMock,
   },
 }));
 
@@ -402,6 +409,8 @@ describe("DealDetailPage", () => {
     mocks.updateDealMock.mockReset();
     mocks.toastSuccessMock.mockReset();
     mocks.toastInfoMock.mockReset();
+    mocks.toastErrorMock.mockReset();
+    mocks.useSalesRepsMock.mockReset();
     mocks.apiMock.mockImplementation((url: string, options?: { method?: string }) => {
       if (url.includes("/photos")) {
         return Promise.resolve({ pagination: { total: 0 } });
@@ -454,6 +463,15 @@ describe("DealDetailPage", () => {
       error: null,
       refetch: vi.fn(),
       deal: makeDealDetail(),
+    });
+    mocks.useSalesRepsMock.mockReturnValue({
+      salesReps: [
+        { id: "rep-1", displayName: "Brett Rios", email: "brett@example.com" },
+        { id: "rep-2", displayName: "Jordan Lee", email: "jordan@example.com" },
+      ],
+      loading: false,
+      error: null,
+      refetch: vi.fn(),
     });
     mocks.updateDealMock.mockResolvedValue({ deal: makeDealDetail({ onHold: true }) });
   });
@@ -709,6 +727,88 @@ describe("DealDetailPage", () => {
     expect(html).toContain("Kai Morgan");
     expect(html).toContain(">AA<");
     expect(html).toContain(">KM<");
+  });
+
+  it("shows a deal reassignment control to owners and saves through the deal PATCH path", async () => {
+    const refetch = vi.fn();
+    mocks.useAuthMock.mockReturnValueOnce({
+      user: {
+        id: "rep-1",
+        role: "rep",
+        activeOfficeId: "office-1",
+      },
+    });
+    mocks.useDealDetailMock.mockReturnValueOnce({
+      loading: false,
+      error: null,
+      refetch,
+      deal: makeDealDetail({ isBidBoardOwned: false, bidBoardOwnership: null }),
+    });
+
+    mounted = mountPage();
+
+    const select = mounted.container.querySelector('select[aria-label="Reassign deal owner"]') as HTMLSelectElement | null;
+    expect(select).toBeTruthy();
+    expect(mocks.useSalesRepsMock).toHaveBeenCalledWith("office-1", {
+      purpose: "deal-reassignment",
+      enabled: true,
+    });
+
+    await act(async () => {
+      select!.value = "rep-2";
+      select!.dispatchEvent(new Event("change", { bubbles: true }));
+    });
+
+    expect(mocks.updateDealMock).toHaveBeenCalledWith("deal-1", { assignedRepId: "rep-2" });
+    expect(refetch).toHaveBeenCalled();
+  });
+
+  it("does not show an actionable deal reassignment control to a non-owner rep", () => {
+    mocks.useAuthMock.mockReturnValueOnce({
+      user: {
+        id: "rep-2",
+        role: "rep",
+        activeOfficeId: "office-1",
+      },
+    });
+    mocks.useDealDetailMock.mockReturnValueOnce({
+      loading: false,
+      error: null,
+      refetch: vi.fn(),
+      deal: makeDealDetail({ assignedRepId: "rep-1" }),
+    });
+
+    const html = renderPage();
+
+    expect(html).not.toContain("Reassign deal owner");
+    expect(mocks.useSalesRepsMock).toHaveBeenCalledWith("office-1", {
+      purpose: "deal-reassignment",
+      enabled: false,
+    });
+  });
+
+  it("shows a deal reassignment control to directors", () => {
+    mocks.useAuthMock.mockReturnValueOnce({
+      user: {
+        id: "director-1",
+        role: "director",
+        activeOfficeId: "office-1",
+      },
+    });
+    mocks.useDealDetailMock.mockReturnValueOnce({
+      loading: false,
+      error: null,
+      refetch: vi.fn(),
+      deal: makeDealDetail({ assignedRepId: "rep-1" }),
+    });
+
+    const html = renderPage();
+
+    expect(html).toContain("Reassign deal owner");
+    expect(mocks.useSalesRepsMock).toHaveBeenCalledWith("office-1", {
+      purpose: "deal-reassignment",
+      enabled: true,
+    });
   });
 
   it("shows Unassigned owner state for an unowned associated company and primary contact", () => {
