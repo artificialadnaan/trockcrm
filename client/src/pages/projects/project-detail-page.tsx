@@ -1,9 +1,10 @@
 import { useNavigate, useParams } from "react-router-dom";
-import { ArrowLeft, Building2, Clock3, History } from "lucide-react";
+import { ArrowLeft, Building2, Clock3, ExternalLink, History } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
-import { Button } from "@/components/ui/button";
+import { Button, buttonVariants } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { useProjectDetail } from "@/hooks/use-projects";
+import { cn } from "@/lib/utils";
 
 function formatDateTime(value: string | null | undefined) {
   if (!value) return "Not synced";
@@ -14,6 +15,24 @@ function formatDateTime(value: string | null | undefined) {
     hour: "numeric",
     minute: "2-digit",
   }).format(new Date(value));
+}
+
+function formatStageLabel(value: string | null | undefined) {
+  return String(value ?? "Unknown stage")
+    .split(" ")
+    .map((part) => part ? part.charAt(0).toUpperCase() + part.slice(1) : part)
+    .join(" ");
+}
+
+function formatStageEnteredSummary(stage: string, enteredAt: string | null | undefined) {
+  const stageLabel = formatStageLabel(stage);
+  if (!enteredAt) return `Entered ${stageLabel}; date not synced`;
+  return `Entered ${stageLabel} on ${formatDateTime(enteredAt)}`;
+}
+
+function buildProcoreProjectUrl(companyId: string | null | undefined, projectId: string | null | undefined) {
+  if (!companyId || !projectId) return null;
+  return `https://us02.procore.com/webclients/host/companies/${companyId}/projects/${projectId}/tools/projecthome`;
 }
 
 function DetailItem({ label, value }: { label: string; value: string | number | null | undefined }) {
@@ -55,6 +74,8 @@ export function ProjectDetailPage() {
     );
   }
 
+  const procoreProjectUrl = buildProcoreProjectUrl(project.procoreCompanyId, project.procoreProjectId);
+
   return (
     <div className="space-y-6">
       <Button variant="ghost" size="sm" className="-ml-2 w-fit" onClick={() => navigate("/projects")}>
@@ -77,6 +98,17 @@ export function ProjectDetailPage() {
             <span>Procore Portfolio</span>
           </div>
         </div>
+        {procoreProjectUrl ? (
+          <a
+            href={procoreProjectUrl}
+            target="_blank"
+            rel="noopener noreferrer"
+            className={cn(buttonVariants({ variant: "outline" }), "w-fit")}
+          >
+            <ExternalLink className="mr-2 h-4 w-4" />
+            View in Procore
+          </a>
+        ) : null}
       </section>
 
       <div className="grid gap-6 lg:grid-cols-[minmax(0,1fr)_24rem]">
@@ -109,7 +141,10 @@ export function ProjectDetailPage() {
           <CardContent>
             <dl className="grid gap-5">
               <DetailItem label="Stage Entered" value={formatDateTime(project.currentStageEnteredAt)} />
-              <DetailItem label="Last Stage Event" value={project.lastStageEventKey} />
+              <DetailItem
+                label="Latest Stage Change"
+                value={formatStageEnteredSummary(project.currentStage, project.currentStageEnteredAt)}
+              />
             </dl>
           </CardContent>
         </Card>
