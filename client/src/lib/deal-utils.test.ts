@@ -1,5 +1,12 @@
 import { describe, expect, it } from "vitest";
-import { formatDealDisplayNumber, isHubspotImportedDealNumber, sanitizeHubspotDealIdentifiers } from "./deal-utils";
+import {
+  bestEstimate,
+  bestEstimateCaptionLabel,
+  formatDealDisplayNumber,
+  isHubspotImportedDealNumber,
+  resolveBestEstimate,
+  sanitizeHubspotDealIdentifiers,
+} from "./deal-utils";
 
 describe("isHubspotImportedDealNumber", () => {
   it("flags HS- prefixed dealNumbers as HubSpot-imported", () => {
@@ -69,5 +76,111 @@ describe("sanitizeHubspotDealIdentifiers", () => {
     expect(sanitizeHubspotDealIdentifiers("HS-319925219003 Photo 2026-05-10 001 dad87234.jpg", "Imported deal")).toBe(
       "Imported deal Photo 2026-05-10 001 dad87234.jpg"
     );
+  });
+});
+
+describe("deal value precedence", () => {
+  it("uses the synced Bid Board/bid amount instead of awarded_amount for generic open-deal value", () => {
+    const deal = {
+      bidBoardTotalSales: "16137.14",
+      bidEstimate: "16137.14",
+      awardedAmount: "2.97",
+      ddEstimate: "3.00",
+    };
+
+    expect(bestEstimate(deal)).toBe(16137.14);
+    expect(resolveBestEstimate(deal)).toEqual({ value: 16137.14, source: "bid_board" });
+    expect(bestEstimateCaptionLabel(resolveBestEstimate(deal).source)).toBe("Bid Board");
+  });
+
+  it("falls back to awarded_amount only after current estimate fields are missing", () => {
+    expect(bestEstimate({ awardedAmount: "42000", bidEstimate: null, ddEstimate: null })).toBe(42000);
+    expect(resolveBestEstimate({ awardedAmount: "42000", bidEstimate: null, ddEstimate: null }).source).toBe(
+      "awarded"
+    );
+  });
+
+  it("skips zero and negative current values before falling through", () => {
+    expect(
+      resolveBestEstimate({
+        bidBoardTotalSales: "-100",
+        bidEstimate: "0",
+        ddEstimate: "42000",
+        awardedAmount: "2.97",
+      })
+    ).toEqual({ value: 42000, source: "estimate" });
+  });
+
+  it("keeps awarded_amount first for won-stage deal value displays", () => {
+    const deal = {
+      stageSlug: "won",
+      awardedAmount: "925000",
+      bidEstimate: "875000",
+      ddEstimate: "800000",
+    };
+
+    expect(bestEstimate(deal)).toBe(925000);
+    expect(resolveBestEstimate(deal)).toEqual({ value: 925000, source: "awarded" });
+  });
+
+  it("falls back to positive bid value for won-stage deal value when awarded is zero", () => {
+    const deal = {
+      stageSlug: "service_scheduled",
+      awardedAmount: "0",
+      bidBoardTotalSales: "-10",
+      bidEstimate: "875000",
+      ddEstimate: "800000",
+    };
+
+    expect(bestEstimate(deal)).toBe(875000);
+    expect(resolveBestEstimate(deal)).toEqual({ value: 875000, source: "bid" });
+  });
+
+  it("does not use awarded-first precedence for pre-close won-mapped stages", () => {
+    expect(
+      resolveBestEstimate({
+        stageSlug: "in_production",
+        workflowRoute: "normal",
+        awardedAmount: "925000",
+        bidBoardTotalSales: "950000",
+        bidEstimate: "875000",
+        ddEstimate: "800000",
+      })
+    ).toEqual({ value: 950000, source: "bid_board" });
+    expect(
+      resolveBestEstimate({
+        stageSlug: "close_out",
+        workflowRoute: "normal",
+        awardedAmount: "925000",
+        bidBoardTotalSales: "0",
+        bidEstimate: "875000",
+        ddEstimate: "800000",
+      })
+    ).toEqual({ value: 875000, source: "bid" });
+  });
+
+  it("uses current stage before a won-like Bid Board stage when choosing generic deal value", () => {
+    const deal = {
+      stageSlug: "opportunity",
+      bidBoardStageSlug: "sent_to_production",
+      bidEstimate: "16137.14",
+      awardedAmount: "2.97",
+      ddEstimate: "3.00",
+    };
+
+    expect(bestEstimate(deal)).toBe(16137.14);
+    expect(resolveBestEstimate(deal)).toEqual({ value: 16137.14, source: "bid" });
+  });
+
+  it("does not use a won-like Bid Board stage to force awarded value when current stage is unknown", () => {
+    const deal = {
+      bidBoardStageSlug: "sent_to_production",
+      bidEstimate: "16137.14",
+      awardedAmount: "2.97",
+      ddEstimate: "3.00",
+    };
+
+    expect(bestEstimate(deal)).toBe(16137.14);
+    expect(resolveBestEstimate(deal)).toEqual({ value: 16137.14, source: "bid" });
   });
 });

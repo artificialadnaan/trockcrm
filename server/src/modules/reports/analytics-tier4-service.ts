@@ -4,18 +4,17 @@ import type * as schema from "@trock-crm/shared/schema";
 import { buildOfficeExistsMatcher } from "./office-filter.js";
 import {
   aliasedActiveDealCountFilterSql,
-  aliasedEffectiveAwardedDealValueSql,
   aliasedEffectiveDealValueSql,
+  aliasedEffectiveWonDealValueSql,
   aliasedOpenPipelineForecastFirstDealValueSql,
   aliasedReportableDealFilterSql,
 } from "../shared/deal-value-sql.js";
+import { LOST_STAGE_SLUGS, WON_STAGE_SLUGS } from "../shared/pipeline-terminal-stages.js";
 
 type TenantDb = NodePgDatabase<typeof schema>;
 type ExecuteRows<T> = { rows: T[] } | T[];
 
 const CACHE_TTL_MS = 5 * 60 * 1000;
-const WON_STAGE_SLUGS = ["won", "sent_to_production", "service_sent_to_production", "closed_won"];
-const LOST_STAGE_SLUGS = ["lost", "production_lost", "service_lost", "closed_lost"];
 
 const cacheByTenantDb = new WeakMap<object, Map<string, { expiresAt: number; value: unknown }>>();
 
@@ -258,7 +257,7 @@ export async function getMarketMixReport(
     const verticalExpr = sql`COALESCE(NULLIF(c.industry::text, ''), NULLIF(d.project_type, ''), 'Uncategorized')`;
     const regionExpr = sql`COALESCE(NULLIF(c.region, ''), NULLIF(rc.name, ''), NULLIF(p.city, ''), NULLIF(p.state, ''), NULLIF(d.property_city, ''), NULLIF(d.property_state, ''), 'Uncategorized')`;
     const propertyTypeExpr = sql`COALESCE(NULLIF(p.property_type, ''), NULLIF(p.type::text, ''), 'Uncategorized')`;
-    const wonValueExpr = aliasedEffectiveAwardedDealValueSql("d");
+    const wonValueExpr = aliasedEffectiveWonDealValueSql("d");
 
     const kpiRows = await tenantDb.execute(sql`
         SELECT
@@ -432,7 +431,7 @@ export async function getCustomerConcentrationReport(
   const filters = normalizeFilters(input);
   return cached(tenantDb, cacheKey("customer-concentration", filters), async () => {
     const where = buildWhere(filters);
-    const wonValueExpr = aliasedEffectiveAwardedDealValueSql("d");
+    const wonValueExpr = aliasedEffectiveWonDealValueSql("d");
     const openValueExpr = aliasedEffectiveDealValueSql("d", aliasedOpenPipelineForecastFirstDealValueSql("d"));
 
     const kpiRows = await tenantDb.execute(sql`
@@ -591,7 +590,7 @@ export async function getExecutiveTrendsReport(
   const filters = normalizeFilters(input);
   return cached(tenantDb, cacheKey("executive-trends", filters), async () => {
     const where = buildWhere(filters);
-    const wonValueExpr = aliasedEffectiveAwardedDealValueSql("d");
+    const wonValueExpr = aliasedEffectiveWonDealValueSql("d");
     const openValueExpr = aliasedEffectiveDealValueSql("d", aliasedOpenPipelineForecastFirstDealValueSql("d"));
     const previousPeriod = computePreviousPeriod(filters.from, filters.to);
 

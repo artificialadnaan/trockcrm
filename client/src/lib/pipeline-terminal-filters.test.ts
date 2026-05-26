@@ -11,21 +11,19 @@ import {
 
 describe("pipeline terminal filters", () => {
   it("identifies canonical and historical terminal stage slugs", () => {
-    expect(TERMINAL_STAGE_SLUGS).toEqual(
-      expect.arrayContaining([
-        "won",
-        "lost",
-        "sent_to_production",
-        "service_sent_to_production",
-        "closed_won",
-        "service_scheduled",
-        "service_complete",
-        "deal_canceled",
-        "production_lost",
-        "service_lost",
-        "closed_lost",
-      ])
-    );
+    expect(TERMINAL_STAGE_SLUGS).toEqual([
+      "won",
+      "lost",
+      "sent_to_production",
+      "service_sent_to_production",
+      "service_scheduled",
+      "service_complete",
+      "closed_won",
+      "deal_canceled",
+      "production_lost",
+      "service_lost",
+      "closed_lost",
+    ]);
 
     for (const slug of TERMINAL_STAGE_SLUGS) {
       expect(isTerminalStage(slug)).toBe(true);
@@ -34,11 +32,15 @@ describe("pipeline terminal filters", () => {
     expect(isTerminalStage("opportunity")).toBe(false);
     expect(isTerminalStage("estimating")).toBe(false);
     expect(isTerminalStage("service_estimating")).toBe(false);
+    expect(isTerminalStage("in_production", "normal")).toBe(false);
+    expect(isTerminalStage("close_out", "normal")).toBe(false);
     expect(isTerminalStage("service_scheduled")).toBe(true);
     expect(isTerminalStage("service_complete")).toBe(true);
     expect(getTerminalStageOutcome("service_sent_to_production")).toBe("won");
     expect(getTerminalStageOutcome("service_scheduled")).toBe("won");
     expect(getTerminalStageOutcome("service_complete")).toBe("won");
+    expect(getTerminalStageOutcome("in_production", "normal")).toBe(null);
+    expect(getTerminalStageOutcome("close_out", "normal")).toBe(null);
     expect(getTerminalStageOutcome("deal_canceled")).toBe("lost");
     expect(getTerminalStageOutcome("service_lost")).toBe("lost");
     expect(getTerminalStageOutcome("opportunity")).toBe(null);
@@ -49,10 +51,17 @@ describe("pipeline terminal filters", () => {
       { id: "active-1", stageSlug: "opportunity", value: 100_000 },
       { id: "won-1", stageSlug: "won", value: 400_000 },
       { id: "lost-1", stageSlug: "service_lost", value: 50_000 },
+      { id: "transition-1", stageSlug: "in_production", value: 125_000 },
+      { id: "transition-2", stageSlug: "close_out", value: 135_000 },
       { id: "active-2", stageSlug: "estimate_sent_to_client", value: 75_000 },
     ];
 
-    expect(excludeTerminalDeals(deals).map((deal) => deal.id)).toEqual(["active-1", "active-2"]);
+    expect(excludeTerminalDeals(deals).map((deal) => deal.id)).toEqual([
+      "active-1",
+      "transition-1",
+      "transition-2",
+      "active-2",
+    ]);
   });
 
   it("calculates active pipeline amount and count without terminal deals", () => {
@@ -67,8 +76,9 @@ describe("pipeline terminal filters", () => {
     expect(calculateActivePipelineTotal(deals)).toEqual({ amount: 180_000, count: 2 });
   });
 
-  it("uses zero as the selected active pipeline value instead of falling through", () => {
-    expect(activePipelineDealValue({ awardedAmount: 0, bidEstimate: 50_000, ddEstimate: 30_000 })).toBe(0);
+  it("uses the current bid value before awarded amount for active pipeline value", () => {
+    expect(activePipelineDealValue({ awardedAmount: 0, bidEstimate: 50_000, ddEstimate: 30_000 })).toBe(50_000);
+    expect(activePipelineDealValue({ awardedAmount: 2.97, bidEstimate: 16_137.14, ddEstimate: 3 })).toBe(16_137.14);
     expect(activePipelineDealValue({ awardedAmount: null, bidEstimate: 50_000, ddEstimate: 30_000 })).toBe(50_000);
     expect(activePipelineDealValue({ awardedAmount: null, bidEstimate: null, ddEstimate: 30_000 })).toBe(30_000);
     expect(activePipelineDealValue({ awardedAmount: null, bidEstimate: null, ddEstimate: null })).toBe(0);

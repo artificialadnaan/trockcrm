@@ -115,6 +115,122 @@ describe("forecast milestone helpers", () => {
     expect(tenantDb.execute).toHaveBeenCalledTimes(4);
   });
 
+  it("captures closed_won milestone on the genuine win transition without replace overwrite", async () => {
+    const { captureStageDrivenForecastMilestone } = await import("../../../src/modules/reports/forecast-milestones-service.js");
+    const tenantDb = createMockTenantDb([[], []]);
+
+    await captureStageDrivenForecastMilestone(tenantDb, {
+      deal: {
+        id: "deal-1",
+        assignedRepId: "rep-1",
+        workflowRoute: "normal",
+        ddEstimate: "100000",
+        bidEstimate: "120000",
+        awardedAmount: "130000",
+        stageId: "stage-sent-to-production",
+        expectedCloseDate: "2026-05-01",
+        source: "Trade Show",
+      },
+      currentStage: { slug: "estimate_sent_to_client" },
+      targetStage: { slug: "sent_to_production" },
+      userId: "user-1",
+    });
+
+    const insertSql = extractSqlText(tenantDb.execute.mock.calls[1]?.[0]).toLowerCase();
+    expect(insertSql).toContain("milestone_key");
+    expect(insertSql).toContain("on conflict (deal_id, milestone_key) do nothing");
+    expect(insertSql).not.toContain("do update");
+  });
+
+  it("captures closed_won milestone when first entering service scheduled or complete", async () => {
+    const { captureStageDrivenForecastMilestone } = await import("../../../src/modules/reports/forecast-milestones-service.js");
+    const tenantDb = createMockTenantDb([[], [], [], []]);
+
+    for (const targetSlug of ["service_scheduled", "service_complete"]) {
+      await captureStageDrivenForecastMilestone(tenantDb, {
+        deal: {
+          id: "deal-1",
+          assignedRepId: "rep-1",
+          workflowRoute: "service",
+          ddEstimate: "100000",
+          bidEstimate: "120000",
+          awardedAmount: "130000",
+          stageId: `stage-${targetSlug}`,
+          expectedCloseDate: "2026-05-01",
+          source: "Trade Show",
+        },
+        currentStage: { slug: "estimate_sent_to_client" },
+        targetStage: { slug: targetSlug },
+        userId: "user-1",
+      });
+    }
+
+    expect(tenantDb.execute).toHaveBeenCalledTimes(4);
+    const firstInsertSql = extractSqlText(tenantDb.execute.mock.calls[1]?.[0]).toLowerCase();
+    const secondInsertSql = extractSqlText(tenantDb.execute.mock.calls[3]?.[0]).toLowerCase();
+    for (const insertSql of [firstInsertSql, secondInsertSql]) {
+      expect(insertSql).toContain("milestone_key");
+      expect(insertSql).toContain("on conflict (deal_id, milestone_key) do nothing");
+      expect(insertSql).not.toContain("do update");
+    }
+  });
+
+  it("does not overwrite closed_won milestone when a won deal moves into post-win service stages", async () => {
+    const { captureStageDrivenForecastMilestone } = await import("../../../src/modules/reports/forecast-milestones-service.js");
+    const tenantDb = createMockTenantDb([]);
+
+    for (const targetSlug of ["service_scheduled", "service_complete"]) {
+      await captureStageDrivenForecastMilestone(tenantDb, {
+        deal: {
+          id: "deal-1",
+          assignedRepId: "rep-1",
+          workflowRoute: "service",
+          ddEstimate: "100000",
+          bidEstimate: "120000",
+          awardedAmount: "130000",
+          stageId: `stage-${targetSlug}`,
+          expectedCloseDate: "2026-05-01",
+          source: "Trade Show",
+        },
+        currentStage: { slug: "service_sent_to_production" },
+        targetStage: { slug: targetSlug },
+        userId: "user-1",
+      });
+    }
+
+    expect(tenantDb.execute).not.toHaveBeenCalled();
+  });
+
+  it("does not backfill a late closed_won milestone when moving from post-win service stages back to win aliases", async () => {
+    const { captureStageDrivenForecastMilestone } = await import("../../../src/modules/reports/forecast-milestones-service.js");
+    const tenantDb = createMockTenantDb([]);
+
+    for (const [currentSlug, targetSlug] of [
+      ["service_scheduled", "service_sent_to_production"],
+      ["service_complete", "won"],
+      ["service_complete", "closed_won"],
+    ] as const) {
+      await captureStageDrivenForecastMilestone(tenantDb, {
+        deal: {
+          id: "deal-1",
+          assignedRepId: "rep-1",
+          workflowRoute: "service",
+          ddEstimate: "100000",
+          bidEstimate: "120000",
+          awardedAmount: "130000",
+          stageId: `stage-${targetSlug}`,
+          expectedCloseDate: "2026-05-01",
+          source: "Trade Show",
+        },
+        currentStage: { slug: currentSlug },
+        targetStage: { slug: targetSlug },
+        userId: "user-1",
+      });
+    }
+
+    expect(tenantDb.execute).not.toHaveBeenCalled();
+  });
+
   it("does not capture closed_won milestone on contract stage entry", async () => {
     const { captureStageDrivenForecastMilestone } = await import("../../../src/modules/reports/forecast-milestones-service.js");
     const tenantDb = createMockTenantDb([]);

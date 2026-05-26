@@ -9,6 +9,7 @@ import {
   aliasedEffectiveDealValueSql,
   aliasedReportableDealFilterSql,
 } from "../shared/deal-value-sql.js";
+import { LOST_STAGE_SLUGS, WON_STAGE_SLUGS } from "../shared/pipeline-terminal-stages.js";
 
 type TenantDb = NodePgDatabase<typeof schema>;
 
@@ -133,11 +134,11 @@ function measureSql(measure: ReportMeasure) {
       return sql`
         COALESCE(
           COUNT(*) FILTER (
-            WHERE psc.slug IN ('won', 'sent_to_production', 'service_sent_to_production', 'closed_won')
+            WHERE psc.slug IN (${sql.join(WON_STAGE_SLUGS.map((slug) => sql`${slug}`), sql`, `)})
               AND ${aliasedActiveDealCountFilterSql("d")}
           )::numeric
           / NULLIF(COUNT(*) FILTER (
-            WHERE psc.slug IN ('won', 'lost', 'sent_to_production', 'service_sent_to_production', 'closed_won', 'production_lost', 'service_lost', 'closed_lost')
+            WHERE psc.slug IN (${sql.join([...WON_STAGE_SLUGS, ...LOST_STAGE_SLUGS].map((slug) => sql`${slug}`), sql`, `)})
               AND ${aliasedActiveDealCountFilterSql("d")}
           ), 0)
           * 100,

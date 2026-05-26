@@ -1065,8 +1065,14 @@ router.get(
             `SELECT
                COUNT(*) AS total_deals,
                COUNT(*) FILTER (WHERE is_active = true) AS active_deals,
-               COALESCE(SUM(CASE WHEN is_active = true THEN COALESCE(bid_estimate, dd_estimate, 0) ELSE 0 END), 0) AS total_pipeline_value,
-               COALESCE(SUM(COALESCE(awarded_amount, 0)), 0) AS total_awarded_value
+               COALESCE(SUM(CASE WHEN is_active = true THEN COALESCE(
+                 CASE WHEN bid_board_total_sales > 0 THEN bid_board_total_sales END,
+                 CASE WHEN bid_estimate > 0 THEN bid_estimate END,
+                 CASE WHEN dd_estimate > 0 THEN dd_estimate END,
+                 CASE WHEN awarded_amount > 0 THEN awarded_amount END,
+                 0
+               ) ELSE 0 END), 0) AS total_pipeline_value,
+               COALESCE(SUM(CASE WHEN awarded_amount > 0 THEN awarded_amount ELSE 0 END), 0) AS total_awarded_value
              FROM deals`
           );
           await client.query("COMMIT");

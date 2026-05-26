@@ -1,6 +1,11 @@
 import { sql } from "drizzle-orm";
 import type { NodePgDatabase } from "drizzle-orm/node-postgres";
 import type * as schema from "@trock-crm/shared/schema";
+import {
+  WON_DEAL_STAGE_SLUGS,
+  isGenuineWonDealStageSlug,
+  type WorkflowRoute,
+} from "@trock-crm/shared/types";
 
 type TenantDb = NodePgDatabase<typeof schema>;
 
@@ -21,12 +26,7 @@ const ESTIMATING_STAGE_SLUGS = new Set([
   "bid_sent",
 ]);
 
-const WON_STAGE_SLUGS = new Set([
-  "won",
-  "closed_won",
-  "sent_to_production",
-  "service_sent_to_production",
-]);
+const CLOSED_WON_MILESTONE_ENTRY_STAGE_SLUGS = new Set(WON_DEAL_STAGE_SLUGS);
 
 interface ForecastSnapshot {
   assignedRepId: string | null;
@@ -273,13 +273,21 @@ export async function captureInitialForecastMilestone(
 
 function milestoneKeyForTransition(
   currentStageSlug?: string | null,
-  targetStageSlug?: string | null
+  targetStageSlug?: string | null,
+  workflowRoute?: string | null
 ): ForecastMilestoneKey | null {
   if (!targetStageSlug || currentStageSlug === targetStageSlug) {
     return null;
   }
 
-  if (WON_STAGE_SLUGS.has(targetStageSlug)) return "closed_won";
+  const normalizedWorkflowRoute: WorkflowRoute | null =
+    workflowRoute === "normal" || workflowRoute === "service" ? workflowRoute : null;
+  if (
+    CLOSED_WON_MILESTONE_ENTRY_STAGE_SLUGS.has(targetStageSlug)
+    && !isGenuineWonDealStageSlug(currentStageSlug, normalizedWorkflowRoute)
+  ) {
+    return "closed_won";
+  }
   if (ESTIMATING_STAGE_SLUGS.has(targetStageSlug)) return "estimating";
   if (QUALIFIED_STAGE_SLUGS.has(targetStageSlug)) return "qualified";
   return null;
@@ -289,7 +297,11 @@ export async function captureStageDrivenForecastMilestone(
   tenantDb: TenantDb,
   input: StageDrivenCaptureInput
 ): Promise<void> {
-  const milestoneKey = milestoneKeyForTransition(input.currentStage.slug, input.targetStage.slug);
+  const milestoneKey = milestoneKeyForTransition(
+    input.currentStage.slug,
+    input.targetStage.slug,
+    input.deal.workflowRoute
+  );
   if (!milestoneKey) {
     return;
   }
@@ -318,7 +330,7 @@ export async function captureStageDrivenForecastMilestone(
       source: input.deal.source,
       captureSource: "live",
     }),
-    { replaceExisting: milestoneKey === "closed_won" }
+    { replaceExisting: false }
   );
 }
 

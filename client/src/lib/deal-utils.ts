@@ -1,3 +1,5 @@
+import { isGenuineWonDealStageSlug } from "@trock-crm/shared/types";
+
 const HUBSPOT_DEAL_NUMBER_PATTERN = /^HS[-_ ]?\d+/i;
 const VISIBLE_HUBSPOT_DEAL_NUMBER_PATTERN = /\bHS[-_ ]?\d{6,}\b/gi;
 
@@ -81,19 +83,70 @@ export function currentContractValue(deal: {
   return awarded + coTotal;
 }
 
-/**
- * Get the "best estimate" for a deal -- awarded > bid > dd.
- */
-export function bestEstimate(deal: {
+export type DealEstimateSource = "bid_board" | "bid" | "estimate" | "awarded" | "none";
+
+export function resolveBestEstimate(deal: {
   awardedAmount?: string | null;
+  bidBoardTotalSales?: string | null;
   bidEstimate?: string | null;
   ddEstimate?: string | null;
-}): number {
-  const awarded = parseFloat(deal.awardedAmount ?? "0");
-  if (awarded > 0) return awarded;
-  const bid = parseFloat(deal.bidEstimate ?? "0");
-  if (bid > 0) return bid;
-  return parseFloat(deal.ddEstimate ?? "0") || 0;
+  stageSlug?: string | null;
+  bidBoardStageSlug?: string | null;
+  workflowRoute?: string | null;
+}): { value: number; source: DealEstimateSource } {
+  const candidates: Array<[DealEstimateSource, string | null | undefined]> = shouldUseAwardedEstimate(deal)
+    ? [
+        ["awarded", deal.awardedAmount],
+        ["bid_board", deal.bidBoardTotalSales],
+        ["bid", deal.bidEstimate],
+        ["estimate", deal.ddEstimate],
+      ]
+    : [
+        ["bid_board", deal.bidBoardTotalSales],
+        ["bid", deal.bidEstimate],
+        ["estimate", deal.ddEstimate],
+        ["awarded", deal.awardedAmount],
+      ];
+
+  for (const [source, rawValue] of candidates) {
+    const value = parseFloat(rawValue ?? "0");
+    if (value > 0) return { value, source };
+  }
+
+  return { value: 0, source: "none" };
+}
+
+function shouldUseAwardedEstimate(deal: {
+  stageSlug?: string | null;
+  bidBoardStageSlug?: string | null;
+  workflowRoute?: string | null;
+}) {
+  const stageSlug = deal.stageSlug ?? null;
+  const workflowRoute =
+    deal.workflowRoute === "normal" || deal.workflowRoute === "service" ? deal.workflowRoute : null;
+  return isGenuineWonDealStageSlug(stageSlug, workflowRoute);
+}
+
+/**
+ * Get the generic/current deal value -- Bid Board total/bid > DD > awarded fallback.
+ */
+export function bestEstimate(deal: Parameters<typeof resolveBestEstimate>[0]): number {
+  return resolveBestEstimate(deal).value;
+}
+
+export function bestEstimateCaptionLabel(source: DealEstimateSource): string {
+  switch (source) {
+    case "bid_board":
+      return "Bid Board";
+    case "bid":
+      return "Bid";
+    case "estimate":
+      return "Estimate";
+    case "awarded":
+      return "Awarded";
+    case "none":
+      return "Value";
+  }
 }
 
 /**

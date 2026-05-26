@@ -48,7 +48,7 @@ describe("on-hold report count consistency", () => {
     expect(sqlText).toContain("open_deals");
   });
 
-  it("keeps closed-won revenue and lead-conversion won revenue on an awarded-only basis with on-hold counts excluded", async () => {
+  it("keeps closed-won revenue and lead-conversion won revenue on an awarded-first fallback basis with on-hold counts excluded", async () => {
     const { getClosedWonRevenueReport, getLeadConversionReport } = await import("../../../src/modules/reports/sales-tier1-service.js");
 
     const closedWonDb = createMockTenantDb([[], [], [], [], [], []]);
@@ -62,8 +62,9 @@ describe("on-hold report count consistency", () => {
     });
     const closedWonSql = closedWonDb.execute.mock.calls.map(([query]: [unknown]) => extractSqlText(query).toLowerCase()).join("\n");
     expect(closedWonSql).toContain("awarded_amount");
-    expect(closedWonSql).not.toContain("bid_board_total_sales");
-    expect(closedWonSql).not.toContain("bid_estimate");
+    expect(closedWonSql).toContain("bid_board_total_sales");
+    expect(closedWonSql).toContain("bid_estimate");
+    expect(closedWonSql).toContain("dd_estimate");
     expect(closedWonSql).not.toContain("forecast_revenue");
     expect(closedWonSql).toContain("coalesce(d.on_hold, false) = false");
 
@@ -80,8 +81,9 @@ describe("on-hold report count consistency", () => {
       .map(([query]: [unknown]) => extractSqlText(query).toLowerCase())
       .join("\n");
     expect(leadConversionSql).toContain("awarded_amount");
-    expect(leadConversionSql).not.toContain("bid_board_total_sales");
-    expect(leadConversionSql).not.toContain("bid_estimate");
+    expect(leadConversionSql).toContain("bid_board_total_sales");
+    expect(leadConversionSql).toContain("bid_estimate");
+    expect(leadConversionSql).toContain("dd_estimate");
     expect(leadConversionSql).toContain("coalesce(d.on_hold, false) = false");
     expect(leadConversionSql.match(/left join deals d on/g)?.length).toBe(4);
     expect(leadConversionSql.match(/coalesce\(d\.on_hold, false\) = false/g)?.length).toBeGreaterThanOrEqual(4);
@@ -186,8 +188,9 @@ describe("on-hold report count consistency", () => {
     await getRevenueByProjectType(revenueDb, { from: "2026-01-01", to: "2026-12-31" });
     const revenueSql = extractSqlText(revenueDb.execute.mock.calls[0][0]).toLowerCase();
     expect(revenueSql).toContain("awarded_amount");
-    expect(revenueSql).not.toContain("bid_estimate");
-    expect(revenueSql).not.toContain("dd_estimate");
+    expect(revenueSql).toContain("bid_board_total_sales");
+    expect(revenueSql).toContain("bid_estimate");
+    expect(revenueSql).toContain("dd_estimate");
     expect(revenueSql).toContain("coalesce(d.on_hold, false) = false");
 
     const roiDb = createMockTenantDb([]);
@@ -227,8 +230,9 @@ describe("on-hold report count consistency", () => {
     const winLossSql = extractSqlText(winLossDb.execute.mock.calls[0][0]).toLowerCase();
     expect(winLossSql).toContain("coalesce(d.on_hold, false) = false");
     expect(winLossSql).toContain("awarded_amount");
-    expect(winLossSql).not.toContain("bid_estimate");
-    expect(winLossSql).not.toContain("dd_estimate");
+    expect(winLossSql).toContain("bid_board_total_sales");
+    expect(winLossSql).toContain("bid_estimate");
+    expect(winLossSql).toContain("dd_estimate");
 
     const unifiedDb = createMockTenantDb([[], [], [], [], [], [], [], [], []]);
     await getUnifiedWorkflowOverview(unifiedDb);
@@ -362,8 +366,9 @@ describe("on-hold report count consistency", () => {
       "audit-fix-forecast"
     );
     const forecastSql = compactSql(forecastDb.execute.mock.calls.map(([query]: [unknown]) => extractSqlText(query)).join("\n"));
-    expect(forecastSql).toContain("coalesce(d.forecast_revenue, d.awarded_amount, d.bid_estimate, d.dd_estimate, 0)");
-    expect(forecastSql).not.toContain("coalesce(d.awarded_amount, d.bid_estimate, d.dd_estimate, d.forecast_revenue, 0)");
+    expect(forecastSql).toContain("case when d.forecast_revenue > 0 then d.forecast_revenue end");
+    expect(forecastSql).toContain("case when d.bid_board_total_sales > 0 then d.bid_board_total_sales end");
+    expect(forecastSql).toContain("case when d.awarded_amount > 0 then d.awarded_amount end");
 
     const marketMixDb = createMockTenantDb([[], [], [], [], [], []]);
     await getMarketMixReport(marketMixDb, { from: "2026-02-01", to: "2026-02-28" });
@@ -376,14 +381,18 @@ describe("on-hold report count consistency", () => {
     const customerDb = createMockTenantDb([[], [], [], []]);
     await getCustomerConcentrationReport(customerDb, { from: "2026-02-01", to: "2026-02-28" });
     const customerSql = compactSql(customerDb.execute.mock.calls.map(([query]: [unknown]) => extractSqlText(query)).join("\n"));
-    expect(customerSql).toContain("coalesce(d.forecast_revenue, d.bid_estimate, d.dd_estimate, 0)");
-    expect(customerSql).not.toContain("coalesce(d.awarded_amount, d.bid_estimate, d.dd_estimate, d.forecast_revenue, 0)");
+    expect(customerSql).toContain("case when d.forecast_revenue > 0 then d.forecast_revenue end");
+    expect(customerSql).toContain("case when d.bid_board_total_sales > 0 then d.bid_board_total_sales end");
+    expect(customerSql).toContain("case when d.awarded_amount > 0 then d.awarded_amount end");
+    expect(customerSql).not.toContain("nullif");
 
     const executiveDb = createMockTenantDb([[], [], [], [], []]);
     await getExecutiveTrendsReport(executiveDb, { from: "2026-02-01", to: "2026-02-28" });
     const executiveSql = compactSql(executiveDb.execute.mock.calls.map(([query]: [unknown]) => extractSqlText(query)).join("\n"));
-    expect(executiveSql).toContain("coalesce(d.forecast_revenue, d.bid_estimate, d.dd_estimate, 0)");
-    expect(executiveSql).not.toContain("coalesce(d.awarded_amount, d.bid_estimate, d.dd_estimate, d.forecast_revenue, 0)");
+    expect(executiveSql).toContain("case when d.forecast_revenue > 0 then d.forecast_revenue end");
+    expect(executiveSql).toContain("case when d.bid_board_total_sales > 0 then d.bid_board_total_sales end");
+    expect(executiveSql).toContain("case when d.awarded_amount > 0 then d.awarded_amount end");
+    expect(executiveSql).not.toContain("nullif");
     expect(executiveSql).toMatch(/avg\(case when coalesce\(d\.on_hold, false\).*awarded_amount.*filter \( where psc\.slug in .* and coalesce\(d\.on_hold, false\) = false \)/);
 
     const closedWonSummaryDb = createMockTenantDb([[], [], []]);

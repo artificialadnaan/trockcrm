@@ -1,3 +1,5 @@
+import { isGenuineWonDealStageSlug } from "./workflow.js";
+
 /*
 Hold-time invariants audited on 2026-05-21 across this file, the deal hold toggle
 path in server/src/modules/deals/service.ts, and the five stage-writer paths:
@@ -19,8 +21,13 @@ path in server/src/modules/deals/service.ts, and the five stage-writer paths:
 type DealValueLike = {
   onHold?: boolean | null;
   awardedAmount?: string | number | null;
+  bidBoardTotalSales?: string | number | null;
   bidEstimate?: string | number | null;
   ddEstimate?: string | number | null;
+  stageSlug?: string | null;
+  bidBoardStageSlug?: string | null;
+  workflowRoute?: string | null;
+  stage?: { slug?: string | null; isTerminal?: boolean | null } | null;
 };
 
 type DealHoldTimingLike = {
@@ -54,16 +61,29 @@ function toDate(value: string | Date | null | undefined): Date | null {
   return Number.isNaN(date.getTime()) ? null : date;
 }
 
+function shouldUseAwardedDealValue(deal: DealValueLike): boolean {
+  const stageSlug = deal.stageSlug ?? deal.stage?.slug ?? null;
+  const workflowRoute =
+    deal.workflowRoute === "normal" || deal.workflowRoute === "service" ? deal.workflowRoute : null;
+  return isGenuineWonDealStageSlug(stageSlug, workflowRoute);
+}
+
 function getRawDealValue(deal: DealValueLike): number {
-  const awarded = toNumber(deal.awardedAmount);
-  if (awarded > 0) return awarded;
-  const bid = toNumber(deal.bidEstimate);
-  if (bid > 0) return bid;
-  return toNumber(deal.ddEstimate);
+  const candidates = shouldUseAwardedDealValue(deal)
+    ? [deal.awardedAmount, deal.bidBoardTotalSales, deal.bidEstimate, deal.ddEstimate]
+    : [deal.bidBoardTotalSales, deal.bidEstimate, deal.ddEstimate, deal.awardedAmount];
+
+  for (const candidate of candidates) {
+    const value = toNumber(candidate);
+    if (value > 0) return value;
+  }
+
+  return 0;
 }
 
 function getRawAwardedDealValue(deal: DealValueLike): number {
-  return toNumber(deal.awardedAmount);
+  const awarded = toNumber(deal.awardedAmount);
+  return awarded > 0 ? awarded : 0;
 }
 
 export function getHoldStateAtStageEntry(

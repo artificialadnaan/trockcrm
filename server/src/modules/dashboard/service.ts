@@ -28,7 +28,7 @@ import {
   type WorkflowRoute,
 } from "@trock-crm/shared/types";
 import { db } from "../../db.js";
-import { TERMINAL_STAGE_SLUGS } from "../shared/pipeline-terminal-stages.js";
+import { LOST_STAGE_SLUGS, TERMINAL_STAGE_SLUGS, WON_STAGE_SLUGS } from "../shared/pipeline-terminal-stages.js";
 import {
   getPipelineSummary,
   getWinRateTrend,
@@ -48,8 +48,9 @@ import {
 } from "../shared/mine-visibility.js";
 import {
   aliasedActiveDealCountFilterSql,
-  aliasedEffectiveAwardedDealValueSql,
+  aliasedDealBestEstimateSql,
   aliasedEffectiveDealValueSql,
+  aliasedEffectiveWonDealValueSql,
 } from "../shared/deal-value-sql.js";
 
 type TenantDb = NodePgDatabase<typeof schema>;
@@ -313,10 +314,6 @@ const ESTIMATING_PROGRESS_STAGE_SLUGS = [
   "service_estimate_sent_to_client",
 ] as const;
 const COMMISSION_PIPELINE_STAGE_SLUGS = ["opportunity", ...ESTIMATING_PROGRESS_STAGE_SLUGS] as const;
-const WON_STAGE_SLUGS = ["won"] as const;
-const LOST_STAGE_SLUGS = ["lost"] as const;
-const LEGACY_WON_STAGE_SLUGS = ["sent_to_production", "service_sent_to_production", "closed_won"] as const;
-const LEGACY_LOST_STAGE_SLUGS = ["production_lost", "service_lost", "closed_lost"] as const;
 const MIRRORED_DOWNSTREAM_STAGE_SLUGS = ESTIMATING_PROGRESS_STAGE_SLUGS;
 const MIRRORED_DOWNSTREAM_STAGE_LABELS: Record<(typeof MIRRORED_DOWNSTREAM_STAGE_SLUGS)[number], string> = {
   estimating: "Estimating",
@@ -715,6 +712,16 @@ function dealValueSql() {
   return aliasedEffectiveDealValueSql("d");
 }
 
+function recentCloseDealValueSql() {
+  return sql`
+    CASE
+      WHEN psc.slug IN (${sql.join(WON_STAGE_SLUGS.map((slug) => sql`${slug}`), sql`, `)})
+        THEN ${aliasedEffectiveWonDealValueSql("d")}
+      ELSE ${dealValueSql()}
+    END
+  `;
+}
+
 function toIsoOrNow(value: unknown): string {
   if (!value) {
     return new Date(0).toISOString();
@@ -1111,7 +1118,7 @@ async function getRepPotentialRevenue(tenantDb: TenantDb, repId: string): Promis
     SELECT
       COALESCE(
         SUM(
-          COALESCE(d.awarded_amount, d.bid_estimate, d.dd_estimate, 0) + COALESCE(d.change_order_total, 0)
+          ${aliasedDealBestEstimateSql("d")} + COALESCE(d.change_order_total, 0)
         ),
         0
       )::numeric AS potential_revenue
@@ -1906,7 +1913,7 @@ async function getRepDealPipelineSummary(
           AND psc.slug IN (${sql.join(COMMISSION_PIPELINE_STAGE_SLUGS.map((slug) => sql`${slug}`), sql`, `)})
       )::int AS active_deals,
       COALESCE(
-        SUM(COALESCE(d.awarded_amount, d.bid_estimate, d.dd_estimate, 0) + COALESCE(d.change_order_total, 0))
+        SUM(${aliasedDealBestEstimateSql("d")} + COALESCE(d.change_order_total, 0))
           FILTER (
             WHERE d.is_active = true
               AND COALESCE(d.is_test_data, false) = false
@@ -2180,17 +2187,17 @@ async function getRecentCloses(
       d.assigned_rep_id AS rep_id,
       COALESCE(u.display_name, 'Unassigned') AS rep_name,
       CASE
-        WHEN psc.slug IN (${sql.join([...WON_STAGE_SLUGS, ...LEGACY_WON_STAGE_SLUGS].map((slug) => sql`${slug}`), sql`, `)}) THEN 'won'
+        WHEN psc.slug IN (${sql.join(WON_STAGE_SLUGS.map((slug) => sql`${slug}`), sql`, `)}) THEN 'won'
         ELSE 'lost'
       END AS outcome,
-      ${dealValueSql()}::numeric AS deal_value,
+      ${recentCloseDealValueSql()}::numeric AS deal_value,
       COALESCE(d.actual_close_date, d.contract_signed_date, d.contract_signed_at::date, d.lost_at::date, d.updated_at::date) AS closed_at
     FROM ${deals} d
     JOIN ${pipelineStageConfig} psc ON psc.id = d.stage_id
     LEFT JOIN ${users} u ON u.id = d.assigned_rep_id
     WHERE d.is_active = true
       AND ${aliasedActiveDealCountFilterSql("d")}
-      AND psc.slug IN (${sql.join([...WON_STAGE_SLUGS, ...LEGACY_WON_STAGE_SLUGS, ...LOST_STAGE_SLUGS, ...LEGACY_LOST_STAGE_SLUGS].map((slug) => sql`${slug}`), sql`, `)})
+      AND psc.slug IN (${sql.join([...WON_STAGE_SLUGS, ...LOST_STAGE_SLUGS].map((slug) => sql`${slug}`), sql`, `)})
       AND COALESCE(d.actual_close_date, d.contract_signed_date, d.contract_signed_at::date, d.lost_at::date, d.updated_at::date) >= ${options.from}::date
       AND COALESCE(d.actual_close_date, d.contract_signed_date, d.contract_signed_at::date, d.lost_at::date, d.updated_at::date) <= ${options.to}::date
       ${repFilter}
@@ -2218,12 +2225,12 @@ async function getWonCloseSummary(
   const result = await tenantDb.execute(sql`
     SELECT
       COUNT(*) FILTER (WHERE ${aliasedActiveDealCountFilterSql("d")})::int AS won_count,
-      COALESCE(SUM(${aliasedEffectiveAwardedDealValueSql("d")}), 0)::numeric AS won_value
+      COALESCE(SUM(${aliasedEffectiveWonDealValueSql("d")}), 0)::numeric AS won_value
     FROM ${deals} d
     JOIN ${pipelineStageConfig} psc ON psc.id = d.stage_id
     WHERE d.is_active = true
       AND ${aliasedActiveDealCountFilterSql("d")}
-      AND psc.slug IN (${sql.join([...WON_STAGE_SLUGS, ...LEGACY_WON_STAGE_SLUGS].map((slug) => sql`${slug}`), sql`, `)})
+      AND psc.slug IN (${sql.join(WON_STAGE_SLUGS.map((slug) => sql`${slug}`), sql`, `)})
       AND COALESCE(d.actual_close_date, d.contract_signed_date, d.contract_signed_at::date, d.updated_at::date) >= ${options.from}::date
       AND COALESCE(d.actual_close_date, d.contract_signed_date, d.contract_signed_at::date, d.updated_at::date) <= ${options.to}::date
       ${repFilter}
@@ -2667,11 +2674,11 @@ async function buildRepPerformanceCards(
       SELECT
         d.assigned_rep_id AS rep_id,
         COUNT(*) FILTER (
-          WHERE psc.slug IN (${sql.join([...WON_STAGE_SLUGS, ...LEGACY_WON_STAGE_SLUGS].map((slug) => sql`${slug}`), sql`, `)})
+          WHERE psc.slug IN (${sql.join(WON_STAGE_SLUGS.map((slug) => sql`${slug}`), sql`, `)})
             AND ${aliasedActiveDealCountFilterSql("d")}
         )::int AS wins,
         COUNT(*) FILTER (
-          WHERE psc.slug IN (${sql.join([...LOST_STAGE_SLUGS, ...LEGACY_LOST_STAGE_SLUGS].map((slug) => sql`${slug}`), sql`, `)})
+          WHERE psc.slug IN (${sql.join(LOST_STAGE_SLUGS.map((slug) => sql`${slug}`), sql`, `)})
             AND ${aliasedActiveDealCountFilterSql("d")}
         )::int AS losses
       FROM deal_stage_history dsh

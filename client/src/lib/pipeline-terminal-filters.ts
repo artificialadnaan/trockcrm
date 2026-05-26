@@ -1,27 +1,23 @@
 import {
   CANONICAL_TERMINAL_DEAL_STAGE_SLUGS,
-  LEGACY_DEAL_STAGE_TO_CANONICAL_STAGE,
-  isTerminalWorkflowStage,
-  toCanonicalDealStageSlug,
+  LOST_DEAL_STAGE_SLUGS,
+  WON_DEAL_STAGE_SLUGS,
   type WorkflowRoute,
 } from "@trock-crm/shared/types";
 import { getEffectiveDealValue } from "@trock-crm/shared/types";
 
-const legacyTerminalStageSlugs = Object.values(LEGACY_DEAL_STAGE_TO_CANONICAL_STAGE).flatMap((stageMap) =>
-  Object.entries(stageMap)
-    .filter(([, canonicalSlug]) => isTerminalWorkflowStage(canonicalSlug))
-    .map(([slug]) => slug)
-);
-
 export const TERMINAL_STAGE_SLUGS = [
-  ...new Set([...CANONICAL_TERMINAL_DEAL_STAGE_SLUGS, ...legacyTerminalStageSlugs]),
+  ...new Set([...CANONICAL_TERMINAL_DEAL_STAGE_SLUGS, ...WON_DEAL_STAGE_SLUGS, ...LOST_DEAL_STAGE_SLUGS]),
 ] as readonly string[];
 
 const TERMINAL_STAGE_SLUG_SET = new Set<string>(TERMINAL_STAGE_SLUGS);
+const WON_STAGE_SLUG_SET = new Set<string>(WON_DEAL_STAGE_SLUGS);
+const LOST_STAGE_SLUG_SET = new Set<string>(LOST_DEAL_STAGE_SLUGS);
 
 export function isTerminalStage(stageSlug: string | null | undefined, workflowRoute?: WorkflowRoute | null) {
   if (!stageSlug) return false;
-  return TERMINAL_STAGE_SLUG_SET.has(stageSlug) || isTerminalWorkflowStage(stageSlug, workflowRoute);
+  void workflowRoute;
+  return TERMINAL_STAGE_SLUG_SET.has(stageSlug);
 }
 
 export function getTerminalStageOutcome(
@@ -29,16 +25,10 @@ export function getTerminalStageOutcome(
   workflowRoute?: WorkflowRoute | null
 ): TerminalOutcome | null {
   if (!stageSlug) return null;
-  const canonicalSlug =
-    toCanonicalDealStageSlug(stageSlug, workflowRoute) ??
-    LEGACY_DEAL_STAGE_TO_CANONICAL_STAGE.normal[
-      stageSlug as keyof typeof LEGACY_DEAL_STAGE_TO_CANONICAL_STAGE.normal
-    ] ??
-    LEGACY_DEAL_STAGE_TO_CANONICAL_STAGE.service[
-      stageSlug as keyof typeof LEGACY_DEAL_STAGE_TO_CANONICAL_STAGE.service
-    ] ??
-    null;
-  return canonicalSlug === "won" || canonicalSlug === "lost" ? canonicalSlug : null;
+  void workflowRoute;
+  if (WON_STAGE_SLUG_SET.has(stageSlug)) return "won";
+  if (LOST_STAGE_SLUG_SET.has(stageSlug)) return "lost";
+  return null;
 }
 
 export type TerminalOutcome = "won" | "lost";

@@ -70,7 +70,7 @@ describe("rep performance rollup period scoping", () => {
 
     const insertSql = queries.find((query) => query.includes("INSERT INTO public.rep_performance_snapshots"));
     const pipelineValueSql =
-      /COALESCE\(SUM\(COALESCE\(d\.awarded_amount, d\.bid_estimate, d\.dd_estimate, 0\)\)([\s\S]*?)\), 0\)::numeric AS pipeline_value/.exec(
+      /COALESCE\(SUM\(COALESCE\([\s\S]*?CASE WHEN d\.awarded_amount > 0 THEN d\.awarded_amount END,[\s\S]*?0[\s\S]*?\)([\s\S]*?)\), 0\)::numeric AS pipeline_value/.exec(
         insertSql ?? ""
       )?.[1];
     const historicalPipelineValueBranch =
@@ -89,5 +89,35 @@ describe("rep performance rollup period scoping", () => {
       .join("\n");
     expect(historicalPipelineValuePredicates).not.toContain("psc.is_terminal");
     expect(historicalPipelineValuePredicates).not.toContain("psc.is_active_pipeline");
+  });
+
+  it("keeps closed_value awarded-first while pipeline_value uses current deal value precedence", async () => {
+    const queries: string[] = [];
+    const client = {
+      query: vi.fn(async (sql: string, params?: unknown[]) => {
+        queries.push(`${sql}\n-- params: ${JSON.stringify(params ?? [])}`);
+        if (sql.includes("SELECT id, slug, name FROM public.offices")) {
+          return { rows: [{ id: "office-1", slug: "north", name: "North" }], rowCount: 1 };
+        }
+        return { rows: [], rowCount: sql.includes("INSERT INTO public.rep_performance_snapshots") ? 1 : 0 };
+      }),
+      release: vi.fn(),
+    };
+    connectMock.mockResolvedValue(client);
+
+    await runRepPerformanceRollup(new Date("2026-05-07T12:00:00.000Z"));
+
+    const insertSql = queries.find((query) => query.includes("INSERT INTO public.rep_performance_snapshots")) ?? "";
+    expect(insertSql).toContain("CASE WHEN d.bid_board_total_sales > 0 THEN d.bid_board_total_sales END");
+    expect(insertSql).toContain("CASE WHEN d.awarded_amount > 0 THEN d.awarded_amount END");
+    expect(insertSql).not.toContain("NULLIF(d.bid_board_total_sales, 0)");
+    expect(insertSql).toContain("'won'");
+    expect(insertSql).toContain("'sent_to_production'");
+    expect(insertSql).toContain("'service_sent_to_production'");
+    expect(insertSql).toContain("'service_scheduled'");
+    expect(insertSql).toContain("'service_complete'");
+    expect(insertSql).toContain("'closed_won'");
+    expect(insertSql).not.toContain("'in_production'");
+    expect(insertSql).not.toContain("'close_out'");
   });
 });

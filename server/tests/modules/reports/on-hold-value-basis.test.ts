@@ -25,7 +25,7 @@ function extractSqlText(value: unknown): string {
 }
 
 describe("on-hold value basis regressions", () => {
-  it("keeps closed-won summary on an awarded-only basis", async () => {
+  it("keeps closed-won summary on an awarded-first fallback basis", async () => {
     const { getClosedWonSummary } = await import("../../../src/modules/reports/service.js");
     const tenantDb = createMockTenantDb([[], [], []]);
 
@@ -33,11 +33,12 @@ describe("on-hold value basis regressions", () => {
 
     const queryText = extractSqlText(tenantDb.execute.mock.calls[0][0]).toLowerCase();
     expect(queryText).toContain("awarded_amount");
-    expect(queryText).not.toContain("bid_estimate");
-    expect(queryText).not.toContain("dd_estimate");
+    expect(queryText).toContain("bid_board_total_sales");
+    expect(queryText).toContain("bid_estimate");
+    expect(queryText).toContain("dd_estimate");
   });
 
-  it("keeps market-mix won value on an awarded-only basis", async () => {
+  it("keeps market-mix won value on an awarded-first fallback basis", async () => {
     const { getMarketMixReport } = await import("../../../src/modules/reports/analytics-tier4-service.js");
     const tenantDb = createMockTenantDb([[], [], [], [], [], []]);
 
@@ -46,7 +47,8 @@ describe("on-hold value basis regressions", () => {
     const queryText = extractSqlText(tenantDb.execute.mock.calls[0][0]).toLowerCase();
     expect(queryText).toContain("total_won_value");
     expect(queryText).toContain("awarded_amount");
-    expect(queryText).not.toContain("bid_estimate");
-    expect(queryText).not.toContain("dd_estimate");
+    expect(queryText).toContain("bid_board_total_sales");
+    expect(queryText).toContain("bid_estimate");
+    expect(queryText).toContain("dd_estimate");
   });
 });

@@ -190,6 +190,16 @@ export type CanonicalTerminalDealStageSlug = Extract<
   { isTerminal: true }
 >["slug"];
 
+export type CanonicalWonDealStageSlug = Extract<
+  CanonicalDealWorkflowContractRecord,
+  { outcomeCategory: "won" }
+>["slug"];
+
+export type CanonicalLostDealStageSlug = Extract<
+  CanonicalDealWorkflowContractRecord,
+  { outcomeCategory: "lost" }
+>["slug"];
+
 export type CrmOwnedCanonicalDealStageSlug = Extract<
   CanonicalDealWorkflowContractRecord,
   { systemOfRecord: "crm" }
@@ -203,6 +213,14 @@ export type BidBoardOwnedCanonicalDealStageSlug = Extract<
 export const CANONICAL_TERMINAL_DEAL_STAGE_SLUGS = CANONICAL_DEAL_WORKFLOW_CONTRACTS
   .filter((contract) => contract.isTerminal)
   .map((contract) => contract.slug) as readonly CanonicalTerminalDealStageSlug[];
+
+export const CANONICAL_WON_DEAL_STAGE_SLUGS = CANONICAL_DEAL_WORKFLOW_CONTRACTS
+  .filter((contract) => contract.outcomeCategory === "won")
+  .map((contract) => contract.slug) as readonly CanonicalWonDealStageSlug[];
+
+export const CANONICAL_LOST_DEAL_STAGE_SLUGS = CANONICAL_DEAL_WORKFLOW_CONTRACTS
+  .filter((contract) => contract.outcomeCategory === "lost")
+  .map((contract) => contract.slug) as readonly CanonicalLostDealStageSlug[];
 
 export const CRM_OWNED_CANONICAL_DEAL_STAGE_SLUGS = CANONICAL_DEAL_WORKFLOW_CONTRACTS
   .filter((contract) => contract.systemOfRecord === "crm")
@@ -267,6 +285,39 @@ export const LEGACY_DEAL_STAGE_TO_CANONICAL_STAGE = {
 export type LegacyDealStageSlug =
   | keyof (typeof LEGACY_DEAL_STAGE_TO_CANONICAL_STAGE)["normal"]
   | keyof (typeof LEGACY_DEAL_STAGE_TO_CANONICAL_STAGE)["service"];
+
+export const GENUINE_WON_DEAL_STAGE_ALIAS_SLUGS = [
+  "sent_to_production",
+  "service_sent_to_production",
+  "service_scheduled",
+  "service_complete",
+  "closed_won",
+] as const satisfies readonly LegacyDealStageSlug[];
+
+export const GENUINE_LOST_DEAL_STAGE_ALIAS_SLUGS = [
+  "deal_canceled",
+  "production_lost",
+  "service_lost",
+  "closed_lost",
+] as const satisfies readonly LegacyDealStageSlug[];
+
+export const TRANSITIONAL_WON_MAPPED_DEAL_STAGE_SLUGS = [
+  "in_production",
+  "close_out",
+] as const satisfies readonly LegacyDealStageSlug[];
+
+export const WON_DEAL_STAGE_SLUGS = [
+  ...new Set([...CANONICAL_WON_DEAL_STAGE_SLUGS, ...GENUINE_WON_DEAL_STAGE_ALIAS_SLUGS]),
+] as readonly string[];
+
+export const LOST_DEAL_STAGE_SLUGS = [
+  ...new Set([...CANONICAL_LOST_DEAL_STAGE_SLUGS, ...GENUINE_LOST_DEAL_STAGE_ALIAS_SLUGS]),
+] as readonly string[];
+
+const GENUINE_WON_DEAL_STAGE_SLUG_SET = new Set<string>(WON_DEAL_STAGE_SLUGS);
+const TRANSITIONAL_WON_MAPPED_DEAL_STAGE_SLUG_SET = new Set<string>(
+  TRANSITIONAL_WON_MAPPED_DEAL_STAGE_SLUGS
+);
 
 export type LegacyWorkflowStageSlug = LegacyLeadStageSlug | LegacyDealStageSlug;
 
@@ -359,6 +410,16 @@ export function toCanonicalWorkflowStageSlug(
   workflowRoute?: WorkflowRoute | null
 ): CanonicalLeadStageSlug | DealStageSlugWithHistoricalAliases | null {
   return toCanonicalLeadStageSlug(stageSlug) ?? toCanonicalDealStageSlug(stageSlug, workflowRoute);
+}
+
+export function isGenuineWonDealStageSlug(
+  stageSlug: string | null | undefined,
+  workflowRoute?: WorkflowRoute | null
+): boolean {
+  if (!stageSlug) return false;
+  if (TRANSITIONAL_WON_MAPPED_DEAL_STAGE_SLUG_SET.has(stageSlug)) return false;
+  if (GENUINE_WON_DEAL_STAGE_SLUG_SET.has(stageSlug)) return true;
+  return toCanonicalDealStageSlug(stageSlug, workflowRoute) === "won";
 }
 
 export function getWorkflowFamilyForStage(

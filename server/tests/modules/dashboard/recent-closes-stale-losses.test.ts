@@ -142,15 +142,15 @@ describe("director recent closes stale losses", () => {
       officeId: "office-1",
     });
 
-    const downstreamSql = executedSql.find((text) => text.includes("as mirrored_stage_status") && text.includes("limit 8"));
+    const atRiskPopulationSql = executedSql.find((text) => text.includes("as mirrored_stage_status"));
     const wonCloseSql = executedSql.find((text) => text.includes("as won_count"));
-    const staleDealsSql = executedSql.find((text) => text.includes("d.bid_board_stage_status") && text.includes("order by days_in_stage desc"));
 
-    expect(downstreamSql).toContain("coalesce(d.on_hold, false) = false");
+    expect(atRiskPopulationSql).toContain("coalesce(d.on_hold, false) = false");
     expect(wonCloseSql).toContain("coalesce(d.on_hold, false) = false");
-    expect(wonCloseSql).toContain("coalesce(d.awarded_amount, 0)");
-    expect(wonCloseSql).not.toContain("bid_estimate");
-    expect(wonCloseSql).not.toContain("dd_estimate");
-    expect(staleDealsSql).toContain("coalesce(d.on_hold, false) = false");
+    expect(wonCloseSql).toContain("case when d.awarded_amount > 0 then d.awarded_amount end");
+    expect(wonCloseSql).toContain("case when d.bid_board_total_sales > 0 then d.bid_board_total_sales end");
+    expect(wonCloseSql).toContain("case when d.bid_estimate > 0 then d.bid_estimate end");
+    expect(wonCloseSql).toContain("case when d.dd_estimate > 0 then d.dd_estimate end");
+    expect(atRiskPopulationSql).toContain("coalesce(d.on_hold, false) = false");
   });
 });

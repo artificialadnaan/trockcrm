@@ -434,9 +434,15 @@ export function registerAllJobs() {
           if (slugRegex.test(slug)) {
             const schemaName = `office_${slug}`;
 
-            // Look up deal value (awarded_amount or bid_estimate)
+            // Look up terminal deal value with positive awarded-first fallback.
             const dealRes = await lossPool.query(
-              `SELECT COALESCE(awarded_amount, bid_estimate, 0)::numeric AS deal_value,
+              `SELECT COALESCE(
+                        CASE WHEN awarded_amount > 0 THEN awarded_amount END,
+                        CASE WHEN bid_board_total_sales > 0 THEN bid_board_total_sales END,
+                        CASE WHEN bid_estimate > 0 THEN bid_estimate END,
+                        CASE WHEN dd_estimate > 0 THEN dd_estimate END,
+                        0
+                      )::numeric AS deal_value,
                       lost_notes
                FROM ${schemaName}.deals WHERE id = $1`,
               [payload.dealId]

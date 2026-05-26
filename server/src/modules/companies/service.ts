@@ -91,7 +91,7 @@ export async function listCompanies(
         (SELECT COUNT(*)::int FROM deals WHERE deals.company_id = c.id AND deals.is_active = true) AS deal_count,
         (SELECT COUNT(*)::int FROM deals WHERE deals.company_id = c.id AND deals.is_active = true AND COALESCE(deals.on_hold, false) = false) AS active_deals_count,
         (SELECT COUNT(*)::int FROM properties WHERE properties.company_id = c.id AND properties.is_active = true) AS properties_count,
-        (SELECT COALESCE(SUM(CASE WHEN COALESCE(deals.on_hold, false) THEN 0 ELSE COALESCE(deals.awarded_amount, deals.bid_estimate, deals.dd_estimate, deals.forecast_revenue, 0) END), 0)::text
+        (SELECT COALESCE(SUM(CASE WHEN COALESCE(deals.on_hold, false) THEN 0 ELSE ${aliasedDealBestEstimateWithForecastSql("deals")} END), 0)::text
            FROM deals
           WHERE deals.company_id = c.id
             AND deals.is_active = true) AS pipeline_value

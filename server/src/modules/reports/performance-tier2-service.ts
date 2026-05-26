@@ -5,17 +5,16 @@ import { getDealAtRiskResult, type UserRole, type WorkflowRoute } from "@trock-c
 import { buildOfficeMatcher } from "./office-filter.js";
 import {
   aliasedActiveDealCountFilterSql,
-  aliasedEffectiveAwardedDealValueSql,
   aliasedEffectiveDealValueSql,
+  aliasedEffectiveWonDealValueSql,
   aliasedForecastFirstDealValueSql,
 } from "../shared/deal-value-sql.js";
+import { LOST_STAGE_SLUGS, WON_STAGE_SLUGS } from "../shared/pipeline-terminal-stages.js";
 
 type TenantDb = NodePgDatabase<typeof schema>;
 type ExecuteRows = { rows: unknown[] } | unknown[];
 
 const REPORT_CACHE_TTL_MS = 5 * 60 * 1000;
-const WON_STAGE_SLUGS = ["won", "sent_to_production", "service_sent_to_production", "closed_won"] as const;
-const LOST_STAGE_SLUGS = ["lost", "production_lost", "service_lost", "closed_lost"] as const;
 const COMMIT_STAGE_SLUGS = ["contract", "contract_signed", "service_contract_signed", "estimate_sent_to_client", "service_estimate_sent_to_client"] as const;
 const BEST_CASE_STAGE_SLUGS = ["estimating", "estimate_in_progress", "service_estimating", "estimate_under_review", "service_estimate_under_review"] as const;
 
@@ -837,7 +836,7 @@ export async function getForecastAccuracyReport(db: TenantDb, filters: Performan
 
     const summary = await db.execute(sql`
         WITH won_period AS (
-          SELECT COALESCE(SUM(${aliasedEffectiveAwardedDealValueSql("d")}), 0)::numeric AS won_actual
+          SELECT COALESCE(SUM(${aliasedEffectiveWonDealValueSql("d")}), 0)::numeric AS won_actual
           FROM deals d
           JOIN users u ON u.id = d.assigned_rep_id
           JOIN offices o ON o.id = u.office_id
@@ -867,7 +866,7 @@ export async function getForecastAccuracyReport(db: TenantDb, filters: Performan
           COALESCE(SUM(${forecastValue}) FILTER (WHERE psc.slug IN (${sqlStringList(commitSlugs)})), 0)::numeric AS commit,
           COALESCE(SUM(${forecastValue}) FILTER (WHERE psc.slug IN (${sqlStringList(bestCaseSlugs)})), 0)::numeric AS best_case,
           COALESCE(SUM(${weightedValue}) FILTER (WHERE psc.slug NOT IN (${sqlStringList(terminalSlugs)})), 0)::numeric AS pipeline_weighted,
-          COALESCE(SUM(${aliasedEffectiveAwardedDealValueSql("d")}) FILTER (WHERE psc.slug IN (${sqlStringList(wonSlugs)})), 0)::numeric AS won_actual
+          COALESCE(SUM(${aliasedEffectiveWonDealValueSql("d")}) FILTER (WHERE psc.slug IN (${sqlStringList(wonSlugs)})), 0)::numeric AS won_actual
         FROM months m
         LEFT JOIN deals d ON COALESCE(d.expected_close_date, d.actual_close_date, d.contract_signed_date, d.updated_at::date) >= m.month_start
           AND COALESCE(d.expected_close_date, d.actual_close_date, d.contract_signed_date, d.updated_at::date) < (m.month_start + INTERVAL '1 month')
