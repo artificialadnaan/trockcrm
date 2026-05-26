@@ -266,6 +266,51 @@ describe("DealForm direct-create context", () => {
     );
   }, 30000);
 
+  it("auto-selects deal region from the selected property state", async () => {
+    mocks.useAccessibleOffices.mockReturnValue({
+      offices: [
+        { id: "office-dallas", name: "Dallas", slug: "dallas" },
+      ],
+      loading: false,
+      error: null,
+    });
+    mocks.useRegions.mockReturnValue({
+      regions: [
+        { id: "region-west", name: "West Coast", slug: "west_coast", states: [], displayOrder: 1, isActive: true },
+        { id: "region-central", name: "Central", slug: "central", states: [], displayOrder: 2, isActive: true },
+        { id: "region-east", name: "East Coast", slug: "east_coast", states: [], displayOrder: 3, isActive: true },
+      ],
+    });
+
+    const { container, root } = await renderForm({
+      name: "SMOKE TEST DELETE region auto-select",
+      companyId: "company-1",
+      projectTypeId: "type-roofing",
+    });
+    containers.push(container);
+    roots.push(root);
+
+    await act(async () => {
+      mocks.propertySelectorProps?.onPropertySelected?.({
+        id: "property-1",
+        address: "5000 Triangle Pkwy",
+        city: "Peachtree Corners",
+        state: "GA",
+        zip: "30092",
+      });
+      mocks.propertySelectorProps?.onChange("property-1");
+    });
+    await submit(container);
+
+    expect(mocks.createDeal).toHaveBeenCalledWith(
+      expect.objectContaining({
+        propertyState: "GA",
+        regionId: "region-east",
+      }),
+      { officeId: "office-dallas" }
+    );
+  }, 30000);
+
   it("blocks frontend create while selected-office tenant metadata is unresolved", async () => {
     mocks.useAccessibleOffices.mockReturnValue({
       offices: [],

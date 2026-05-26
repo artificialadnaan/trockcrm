@@ -1055,10 +1055,10 @@ FROM project_type_config WHERE slug = 'commercial'
 ON CONFLICT (slug) DO NOTHING;
 
 -- Regions
-INSERT INTO region_config (name, slug, states, display_order) VALUES
-  ('Texas', 'texas', ARRAY['TX'], 1),
-  ('East Coast', 'east_coast', ARRAY['NY', 'NJ', 'CT', 'PA', 'MA', 'VA', 'MD', 'DC'], 2),
-  ('Southeast', 'southeast', ARRAY['FL', 'GA', 'NC', 'SC', 'TN', 'AL'], 3)
+INSERT INTO region_config (id, name, slug, states, display_order, is_active) VALUES
+  ('22222222-2222-4222-8222-222222222222', 'West Coast', 'west_coast', ARRAY['WA', 'OR', 'CA', 'NV', 'ID', 'MT', 'WY', 'UT', 'CO', 'AZ', 'NM', 'AK', 'HI'], 1, true),
+  ('11111111-1111-4111-8111-111111111111', 'Central', 'central', ARRAY['ND', 'SD', 'NE', 'KS', 'OK', 'TX', 'MN', 'IA', 'MO', 'AR', 'LA'], 2, true),
+  ('33333333-3333-4333-8333-333333333333', 'East Coast', 'east_coast', ARRAY['WI', 'IL', 'MI', 'IN', 'OH', 'KY', 'TN', 'MS', 'AL', 'GA', 'FL', 'WV', 'VA', 'NC', 'SC', 'PA', 'NY', 'ME', 'VT', 'NH', 'MA', 'RI', 'CT', 'NJ', 'DE', 'MD'], 3, true)
 ON CONFLICT (slug) DO NOTHING;
 
 -- Lost deal reasons
