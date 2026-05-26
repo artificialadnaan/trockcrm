@@ -10,6 +10,32 @@ type DealValueTable = {
   forecastRevenue?: unknown;
 };
 
+type DealValueColumn =
+  | "forecast_revenue"
+  | "bid_board_total_sales"
+  | "bid_estimate"
+  | "dd_estimate"
+  | "awarded_amount";
+
+const OPEN_CURRENT_VALUE_CHAIN = [
+  "bid_board_total_sales",
+  "bid_estimate",
+  "dd_estimate",
+  "awarded_amount",
+] as const satisfies readonly DealValueColumn[];
+
+const FORECAST_FIRST_VALUE_CHAIN = [
+  "forecast_revenue",
+  ...OPEN_CURRENT_VALUE_CHAIN,
+] as const satisfies readonly DealValueColumn[];
+
+const AWARDED_FIRST_VALUE_CHAIN = [
+  "awarded_amount",
+  "bid_board_total_sales",
+  "bid_estimate",
+  "dd_estimate",
+] as const satisfies readonly DealValueColumn[];
+
 export function positiveDealValueCandidateSql(value: unknown): SQL {
   return sql`CASE WHEN ${value} > 0 THEN ${value} END`;
 }
@@ -18,8 +44,38 @@ function aliasedPositiveDealValueCandidateSql(alias: string, column: string): st
   return `CASE WHEN ${alias}.${column} > 0 THEN ${alias}.${column} END`;
 }
 
+function tableColumnSql(table: DealValueTable, column: DealValueColumn): unknown {
+  switch (column) {
+    case "forecast_revenue":
+      return table.forecastRevenue ?? sql`NULL`;
+    case "bid_board_total_sales":
+      return table.bidBoardTotalSales ?? sql`NULL`;
+    case "bid_estimate":
+      return table.bidEstimate;
+    case "dd_estimate":
+      return table.ddEstimate;
+    case "awarded_amount":
+      return table.awardedAmount;
+  }
+}
+
+function dealValueChainSql(table: DealValueTable, columns: readonly DealValueColumn[]): SQL {
+  return sql`COALESCE(${sql.join(
+    columns.map((column) => positiveDealValueCandidateSql(tableColumnSql(table, column))),
+    sql`, `
+  )}, 0)`;
+}
+
+function aliasedDealValueChainSql(alias: string, columns: readonly DealValueColumn[]): SQL {
+  return sql.raw(
+    `COALESCE(${columns
+      .map((column) => aliasedPositiveDealValueCandidateSql(alias, column))
+      .join(", ")}, 0)`
+  );
+}
+
 export function dealBestEstimateSql(table: DealValueTable): SQL {
-  return sql`COALESCE(${positiveDealValueCandidateSql(table.bidBoardTotalSales ?? sql`NULL`)}, ${positiveDealValueCandidateSql(table.bidEstimate)}, ${positiveDealValueCandidateSql(table.ddEstimate)}, ${positiveDealValueCandidateSql(table.awardedAmount)}, 0)`;
+  return dealValueChainSql(table, OPEN_CURRENT_VALUE_CHAIN);
 }
 
 export function dealAwardedAmountSql(table: DealValueTable): SQL {
@@ -27,11 +83,11 @@ export function dealAwardedAmountSql(table: DealValueTable): SQL {
 }
 
 export function dealAwardedFirstWithFallbackSql(table: DealValueTable): SQL {
-  return sql`COALESCE(${positiveDealValueCandidateSql(table.awardedAmount)}, ${positiveDealValueCandidateSql(table.bidBoardTotalSales ?? sql`NULL`)}, ${positiveDealValueCandidateSql(table.bidEstimate)}, ${positiveDealValueCandidateSql(table.ddEstimate)}, 0)`;
+  return dealValueChainSql(table, AWARDED_FIRST_VALUE_CHAIN);
 }
 
 export function dealBestEstimateWithForecastSql(table: DealValueTable): SQL {
-  return sql`COALESCE(${positiveDealValueCandidateSql(table.bidBoardTotalSales ?? sql`NULL`)}, ${positiveDealValueCandidateSql(table.bidEstimate)}, ${positiveDealValueCandidateSql(table.ddEstimate)}, ${positiveDealValueCandidateSql(table.forecastRevenue ?? sql`NULL`)}, ${positiveDealValueCandidateSql(table.awardedAmount)}, 0)`;
+  return dealValueChainSql(table, FORECAST_FIRST_VALUE_CHAIN);
 }
 
 export function effectiveDealValueSql(table: DealValueTable, rawValueSql: SQL = dealBestEstimateSql(table)): SQL {
@@ -45,10 +101,12 @@ export function effectiveAwardedDealValueSql(
   return effectiveDealValueSql(table, rawValueSql);
 }
 
+export function effectiveWonDealValueSql(table: DealValueTable): SQL {
+  return effectiveDealValueSql(table, dealAwardedFirstWithFallbackSql(table));
+}
+
 export function aliasedDealBestEstimateSql(alias: string): SQL {
-  return sql.raw(
-    `COALESCE(${aliasedPositiveDealValueCandidateSql(alias, "bid_board_total_sales")}, ${aliasedPositiveDealValueCandidateSql(alias, "bid_estimate")}, ${aliasedPositiveDealValueCandidateSql(alias, "dd_estimate")}, ${aliasedPositiveDealValueCandidateSql(alias, "awarded_amount")}, 0)`
-  );
+  return aliasedDealValueChainSql(alias, OPEN_CURRENT_VALUE_CHAIN);
 }
 
 export function aliasedDealAwardedAmountSql(alias: string): SQL {
@@ -56,27 +114,19 @@ export function aliasedDealAwardedAmountSql(alias: string): SQL {
 }
 
 export function aliasedDealAwardedFirstWithFallbackSql(alias: string): SQL {
-  return sql.raw(
-    `COALESCE(${aliasedPositiveDealValueCandidateSql(alias, "awarded_amount")}, ${aliasedPositiveDealValueCandidateSql(alias, "bid_board_total_sales")}, ${aliasedPositiveDealValueCandidateSql(alias, "bid_estimate")}, ${aliasedPositiveDealValueCandidateSql(alias, "dd_estimate")}, 0)`
-  );
+  return aliasedDealValueChainSql(alias, AWARDED_FIRST_VALUE_CHAIN);
 }
 
 export function aliasedDealBestEstimateWithForecastSql(alias: string): SQL {
-  return sql.raw(
-    `COALESCE(${aliasedPositiveDealValueCandidateSql(alias, "bid_board_total_sales")}, ${aliasedPositiveDealValueCandidateSql(alias, "bid_estimate")}, ${aliasedPositiveDealValueCandidateSql(alias, "dd_estimate")}, ${aliasedPositiveDealValueCandidateSql(alias, "forecast_revenue")}, ${aliasedPositiveDealValueCandidateSql(alias, "awarded_amount")}, 0)`
-  );
+  return aliasedDealValueChainSql(alias, FORECAST_FIRST_VALUE_CHAIN);
 }
 
 export function aliasedForecastFirstDealValueSql(alias: string): SQL {
-  return sql.raw(
-    `COALESCE(${aliasedPositiveDealValueCandidateSql(alias, "forecast_revenue")}, ${aliasedPositiveDealValueCandidateSql(alias, "bid_board_total_sales")}, ${aliasedPositiveDealValueCandidateSql(alias, "bid_estimate")}, ${aliasedPositiveDealValueCandidateSql(alias, "dd_estimate")}, ${aliasedPositiveDealValueCandidateSql(alias, "awarded_amount")}, 0)`
-  );
+  return aliasedDealValueChainSql(alias, FORECAST_FIRST_VALUE_CHAIN);
 }
 
 export function aliasedOpenPipelineForecastFirstDealValueSql(alias: string): SQL {
-  return sql.raw(
-    `COALESCE(${aliasedPositiveDealValueCandidateSql(alias, "forecast_revenue")}, ${aliasedPositiveDealValueCandidateSql(alias, "bid_estimate")}, ${aliasedPositiveDealValueCandidateSql(alias, "dd_estimate")}, 0)`
-  );
+  return aliasedDealValueChainSql(alias, FORECAST_FIRST_VALUE_CHAIN);
 }
 
 export function aliasedEffectiveDealValueSql(
@@ -91,6 +141,10 @@ export function aliasedEffectiveAwardedDealValueSql(
   rawValueSql: SQL = aliasedDealAwardedAmountSql(alias)
 ): SQL {
   return aliasedEffectiveDealValueSql(alias, rawValueSql);
+}
+
+export function aliasedEffectiveWonDealValueSql(alias: string): SQL {
+  return aliasedEffectiveDealValueSql(alias, aliasedDealAwardedFirstWithFallbackSql(alias));
 }
 
 export function reportableDealFilterSql(identifierPath?: string): SQL {

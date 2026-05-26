@@ -4,8 +4,8 @@ import type * as schema from "@trock-crm/shared/schema";
 import {
   aliasedActiveDealCountFilterSql,
   aliasedDealBestEstimateWithForecastSql,
-  aliasedEffectiveAwardedDealValueSql,
   aliasedEffectiveDealValueSql,
+  aliasedEffectiveWonDealValueSql,
 } from "../shared/deal-value-sql.js";
 import { LOST_STAGE_SLUGS, WON_STAGE_SLUGS } from "../shared/pipeline-terminal-stages.js";
 
@@ -580,7 +580,7 @@ export async function getClosedWonRevenueReport(
       SELECT
         COUNT(*) FILTER (WHERE p.slug IN (${wonSlugs}) AND ${aliasedActiveDealCountFilterSql("d")})::int AS "wonDeals",
         COUNT(*) FILTER (WHERE p.slug IN (${lostSlugs}) AND ${aliasedActiveDealCountFilterSql("d")})::int AS "lostDeals",
-        COALESCE(SUM(${aliasedEffectiveAwardedDealValueSql("d")}) FILTER (WHERE p.slug IN (${wonSlugs})), 0)::numeric AS "totalRevenue"
+        COALESCE(SUM(${aliasedEffectiveWonDealValueSql("d")}) FILTER (WHERE p.slug IN (${wonSlugs})), 0)::numeric AS "totalRevenue"
       FROM deals d
       JOIN pipeline_stage_config p ON p.id = d.stage_id
       LEFT JOIN users u ON u.id = d.assigned_rep_id
@@ -595,8 +595,8 @@ export async function getClosedWonRevenueReport(
           d.name,
           d.assigned_rep_id,
           COALESCE(u.display_name, 'Unassigned') AS owner_name,
-          ${aliasedEffectiveAwardedDealValueSql("d")} AS value,
-          ROW_NUMBER() OVER (PARTITION BY d.assigned_rep_id ORDER BY ${aliasedEffectiveAwardedDealValueSql("d")} DESC, d.name ASC) AS rn
+          ${aliasedEffectiveWonDealValueSql("d")} AS value,
+          ROW_NUMBER() OVER (PARTITION BY d.assigned_rep_id ORDER BY ${aliasedEffectiveWonDealValueSql("d")} DESC, d.name ASC) AS rn
         FROM deals d
         JOIN pipeline_stage_config p ON p.id = d.stage_id
         LEFT JOIN users u ON u.id = d.assigned_rep_id
@@ -622,7 +622,7 @@ export async function getClosedWonRevenueReport(
         o.id::text AS "officeId",
         COALESCE(o.name, d.office_code, 'Unassigned Office') AS "officeName",
         COUNT(*)::int AS "wonDeals",
-        COALESCE(SUM(${aliasedEffectiveAwardedDealValueSql("d")}), 0)::numeric AS "totalRevenue"
+        COALESCE(SUM(${aliasedEffectiveWonDealValueSql("d")}), 0)::numeric AS "totalRevenue"
       FROM deals d
       JOIN pipeline_stage_config p ON p.id = d.stage_id
       LEFT JOIN users u ON u.id = d.assigned_rep_id
@@ -638,7 +638,7 @@ export async function getClosedWonRevenueReport(
       SELECT
         CASE WHEN d.workflow_route = 'service' THEN 'service_deal' ELSE 'standard_deal' END AS "workflowFamily",
         COUNT(*)::int AS "wonDeals",
-        COALESCE(SUM(${aliasedEffectiveAwardedDealValueSql("d")}), 0)::numeric AS "totalRevenue"
+        COALESCE(SUM(${aliasedEffectiveWonDealValueSql("d")}), 0)::numeric AS "totalRevenue"
       FROM deals d
       JOIN pipeline_stage_config p ON p.id = d.stage_id
       LEFT JOIN users u ON u.id = d.assigned_rep_id
@@ -652,7 +652,7 @@ export async function getClosedWonRevenueReport(
     const monthlyRows = rowsFromExecute<any>(await tenantDb.execute(sql`
       SELECT
         TO_CHAR(DATE_TRUNC('month', ${outcomeDate}), 'YYYY-MM') AS month,
-        COALESCE(SUM(${aliasedEffectiveAwardedDealValueSql("d")}), 0)::numeric AS "totalRevenue",
+        COALESCE(SUM(${aliasedEffectiveWonDealValueSql("d")}), 0)::numeric AS "totalRevenue",
         COUNT(*)::int AS "wonDeals"
       FROM deals d
       JOIN pipeline_stage_config p ON p.id = d.stage_id
@@ -669,7 +669,7 @@ export async function getClosedWonRevenueReport(
         d.id::text AS "dealId",
         d.name AS "dealName",
         COALESCE(u.display_name, 'Unassigned') AS "ownerName",
-        ${aliasedEffectiveAwardedDealValueSql("d")} AS value,
+        ${aliasedEffectiveWonDealValueSql("d")} AS value,
         COALESCE(d.contract_signed_at::date, d.actual_close_date, d.stage_entered_at::date, d.updated_at::date)::text AS "wonAt"
       FROM deals d
       JOIN pipeline_stage_config p ON p.id = d.stage_id
@@ -725,7 +725,7 @@ export async function getLeadConversionReport(
         )::int AS qualified,
         COUNT(DISTINCT d.id)::int AS "convertedToDeal",
         COUNT(DISTINCT d.id) FILTER (WHERE p.slug IN (${wonSlugs}) AND ${aliasedActiveDealCountFilterSql("d")})::int AS won,
-        COALESCE(SUM(${aliasedEffectiveAwardedDealValueSql("d")}) FILTER (WHERE p.slug IN (${wonSlugs})), 0)::numeric AS "totalRevenue"
+        COALESCE(SUM(${aliasedEffectiveWonDealValueSql("d")}) FILTER (WHERE p.slug IN (${wonSlugs})), 0)::numeric AS "totalRevenue"
       FROM leads l
       LEFT JOIN users u ON u.id = l.assigned_rep_id
       LEFT JOIN deals d ON d.source_lead_id = l.id
@@ -760,7 +760,7 @@ export async function getLeadConversionReport(
     const revenueRows = rowsFromExecute<any>(await tenantDb.execute(sql`
       SELECT
         COALESCE(l.source, l.source_category::text, 'Unknown') AS source,
-        COALESCE(SUM(${aliasedEffectiveAwardedDealValueSql("d")}) FILTER (WHERE p.slug IN (${wonSlugs})), 0)::numeric AS "totalRevenue",
+        COALESCE(SUM(${aliasedEffectiveWonDealValueSql("d")}) FILTER (WHERE p.slug IN (${wonSlugs})), 0)::numeric AS "totalRevenue",
         COUNT(DISTINCT d.id) FILTER (WHERE p.slug IN (${wonSlugs}) AND ${aliasedActiveDealCountFilterSql("d")})::int AS won
       FROM leads l
       LEFT JOIN users u ON u.id = l.assigned_rep_id

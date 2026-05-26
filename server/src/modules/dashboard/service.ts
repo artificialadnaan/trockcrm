@@ -48,10 +48,9 @@ import {
 } from "../shared/mine-visibility.js";
 import {
   aliasedActiveDealCountFilterSql,
-  aliasedDealAwardedFirstWithFallbackSql,
   aliasedDealBestEstimateSql,
-  aliasedEffectiveAwardedDealValueSql,
   aliasedEffectiveDealValueSql,
+  aliasedEffectiveWonDealValueSql,
 } from "../shared/deal-value-sql.js";
 
 type TenantDb = NodePgDatabase<typeof schema>;
@@ -717,10 +716,7 @@ function recentCloseDealValueSql() {
   return sql`
     CASE
       WHEN psc.slug IN (${sql.join(WON_STAGE_SLUGS.map((slug) => sql`${slug}`), sql`, `)})
-        THEN ${aliasedEffectiveDealValueSql(
-          "d",
-          aliasedDealAwardedFirstWithFallbackSql("d")
-        )}
+        THEN ${aliasedEffectiveWonDealValueSql("d")}
       ELSE ${dealValueSql()}
     END
   `;
@@ -2229,7 +2225,7 @@ async function getWonCloseSummary(
   const result = await tenantDb.execute(sql`
     SELECT
       COUNT(*) FILTER (WHERE ${aliasedActiveDealCountFilterSql("d")})::int AS won_count,
-      COALESCE(SUM(${aliasedEffectiveDealValueSql("d", aliasedDealAwardedFirstWithFallbackSql("d"))}), 0)::numeric AS won_value
+      COALESCE(SUM(${aliasedEffectiveWonDealValueSql("d")}), 0)::numeric AS won_value
     FROM ${deals} d
     JOIN ${pipelineStageConfig} psc ON psc.id = d.stage_id
     WHERE d.is_active = true
