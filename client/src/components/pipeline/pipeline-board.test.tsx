@@ -176,6 +176,38 @@ describe("PipelineBoard", () => {
     });
   });
 
+  it("does not resolve deal drag moves into inactive stage columns", () => {
+    const move = resolvePipelineBoardMove(
+      [
+        ...columns,
+        {
+          stage: {
+            id: "stage-dd",
+            name: "Due Diligence",
+            slug: "dd",
+            isActivePipeline: false,
+          },
+          count: 1,
+          totalValue: 0,
+          cards: [],
+        },
+      ],
+      {
+        active: {
+          id: "deal-1",
+          data: { current: { record: { id: "deal-1" } } },
+        },
+        over: {
+          id: "stage-dd",
+          data: { current: { stageId: "stage-dd", stageSlug: "dd" } },
+        },
+      } as any,
+      { entity: "deal" }
+    );
+
+    expect(move).toBeNull();
+  });
+
   it("falls back to active and over ids when drag payload metadata is missing", () => {
     const move = resolvePipelineBoardMove(
       columns,

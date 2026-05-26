@@ -587,8 +587,8 @@ export async function preflightStageCheck(dealId: string, targetStageId: string)
     allowed: boolean;
     isBackwardMove: boolean;
     isTerminal: boolean;
-    targetStage: { id: string; name: string; slug: string; isTerminal: boolean };
-    currentStage: { id: string; name: string; slug: string; isTerminal: boolean };
+    targetStage: { id: string; name: string; slug: string; isTerminal: boolean; isActivePipeline: boolean };
+    currentStage: { id: string; name: string; slug: string; isTerminal: boolean; isActivePipeline: boolean };
     missingRequirements: {
       fields: string[];
       documents: string[];

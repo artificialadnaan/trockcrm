@@ -50,6 +50,7 @@ import { resolveLeadSourceDisplayValue } from "../leads/source-control.js";
 import { resolveDealCreationPolicy, type DealCreationOrigin } from "./direct-create-rules.js";
 import { logActivity, type AuditContext } from "../audit/audit-logger.js";
 import { LOST_STAGE_SLUGS, TERMINAL_STAGE_SLUGS, WON_STAGE_SLUGS } from "../shared/pipeline-terminal-stages.js";
+import { assertActiveDealStageWriteTarget } from "./stage-write-guard.js";
 import {
   aliasedActiveDealCountFilterSql,
   aliasedDealAwardedFirstWithFallbackSql,
@@ -1529,12 +1530,16 @@ export async function createDeal(tenantDb: TenantDb, input: CreateDealInput) {
     throw new AppError(400, "Invalid stage ID for workflow route");
   }
 
+  const creationPolicy = resolveDealCreationPolicy(input);
+  if (creationPolicy.origin !== "migration") {
+    assertActiveDealStageWriteTarget(stage);
+  }
+
   // Terminal stages cannot be initial stage
   if (stage.isTerminal) {
     throw new AppError(400, "Cannot create a deal in a terminal stage");
   }
 
-  const creationPolicy = resolveDealCreationPolicy(input);
   if (!creationPolicy.allowed) {
     throw new AppError(400, creationPolicy.reason ?? "Deal creation is not allowed");
   }

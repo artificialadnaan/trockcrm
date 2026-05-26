@@ -17,6 +17,7 @@ import {
   getPipelineListIsActiveFilter,
   getPipelineListQueryState,
   getVisibleTerminalStageIds,
+  resolvePipelinePageMove,
   summarizeActivePipelineColumns,
   summarizeTerminalStageCounts,
 } from "./pipeline-page";
@@ -133,6 +134,50 @@ describe("summarizeActivePipelineColumns", () => {
 
     expect(summary.totalDeals).toBe(152);
     expect(summary.totalValue).toBe(1550000);
+  });
+});
+
+describe("resolvePipelinePageMove", () => {
+  it("blocks moves into inactive DD columns while allowing moves off inactive stages", () => {
+    const columns = [
+      {
+        stage: {
+          id: "stage-dd",
+          name: "Due Diligence",
+          slug: "dd",
+          color: null,
+          displayOrder: 0,
+          isActivePipeline: false,
+        },
+        deals: [],
+        count: 0,
+        totalValue: 0,
+      },
+      {
+        stage: {
+          id: "stage-estimating",
+          name: "Estimating",
+          slug: "estimating",
+          color: null,
+          displayOrder: 1,
+          isActivePipeline: true,
+        },
+        deals: [],
+        count: 0,
+        totalValue: 0,
+      },
+    ];
+
+    expect(
+      resolvePipelinePageMove(columns as any, { id: "deal-1", stageId: "stage-estimating" } as any, "stage-dd")
+    ).toBeNull();
+
+    expect(
+      resolvePipelinePageMove(columns as any, { id: "deal-1", stageId: "stage-dd" } as any, "stage-estimating")
+    ).toEqual({
+      deal: { id: "deal-1", stageId: "stage-dd" },
+      targetStageId: "stage-estimating",
+    });
   });
 });
 
