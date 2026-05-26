@@ -1,7 +1,11 @@
 import { sql } from "drizzle-orm";
 import type { NodePgDatabase } from "drizzle-orm/node-postgres";
 import type * as schema from "@trock-crm/shared/schema";
-import { isGenuineWonDealStageSlug, type WorkflowRoute } from "@trock-crm/shared/types";
+import {
+  WON_DEAL_STAGE_SLUGS,
+  isGenuineWonDealStageSlug,
+  type WorkflowRoute,
+} from "@trock-crm/shared/types";
 
 type TenantDb = NodePgDatabase<typeof schema>;
 
@@ -22,12 +26,7 @@ const ESTIMATING_STAGE_SLUGS = new Set([
   "bid_sent",
 ]);
 
-const CLOSED_WON_MILESTONE_ENTRY_STAGE_SLUGS = new Set([
-  "won",
-  "closed_won",
-  "sent_to_production",
-  "service_sent_to_production",
-]);
+const CLOSED_WON_MILESTONE_ENTRY_STAGE_SLUGS = new Set(WON_DEAL_STAGE_SLUGS);
 
 interface ForecastSnapshot {
   assignedRepId: string | null;
