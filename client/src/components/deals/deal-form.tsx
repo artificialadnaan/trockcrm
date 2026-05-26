@@ -27,6 +27,7 @@ import {
   resolveDefaultOfficeCode,
   type OfficeSelectionOption,
 } from "@/lib/office-selection";
+import { applyDealRegionAutoSelection } from "./deal-region-auto-select";
 
 interface DealFormProps {
   deal?: Deal; // If provided, we're editing; otherwise creating
@@ -94,6 +95,7 @@ export function DealForm({ deal, onSuccess, initialValues }: DealFormProps) {
   const [error, setError] = useState<string | null>(null);
   const [fieldErrors, setFieldErrors] = useState<Record<string, string>>({});
   const [closeDateWarning, setCloseDateWarning] = useState<string | null>(null);
+  const [regionManuallyOverridden, setRegionManuallyOverridden] = useState(() => Boolean(deal?.regionId));
   const isPropertyAddressManaged = Boolean(formData.propertyId);
   const selectedOffice = officeOptions.find((office) => office.code === formData.officeCode) ?? null;
   const { assignees, loading: assigneesLoading } = useTaskAssignees({ officeId: !isEdit ? selectedOffice?.officeId : null });
@@ -138,6 +140,23 @@ export function DealForm({ deal, onSuccess, initialValues }: DealFormProps) {
       setFieldErrors((prev) => { const next = { ...prev }; delete next[field]; return next; });
     }
   };
+
+  const handleRegionChange = (value: string) => {
+    setRegionManuallyOverridden(true);
+    handleChange("regionId", value);
+  };
+
+  useEffect(() => {
+    setFormData((prev) => {
+      const nextRegionId = applyDealRegionAutoSelection({
+        regions,
+        propertyState: prev.propertyState,
+        currentRegionId: prev.regionId,
+        manualOverride: regionManuallyOverridden,
+      });
+      return nextRegionId === prev.regionId ? prev : { ...prev, regionId: nextRegionId };
+    });
+  }, [regions, formData.propertyState, regionManuallyOverridden]);
 
   const validateDealForm = (): boolean => {
     const errs: Record<string, string> = {};
@@ -524,7 +543,7 @@ export function DealForm({ deal, onSuccess, initialValues }: DealFormProps) {
               <Label htmlFor="region">Region</Label>
               <Select
                 value={formData.regionId}
-                onValueChange={(val) => handleChange("regionId", val ?? "")}
+                onValueChange={(val) => handleRegionChange(val ?? "")}
               >
                 <SelectTrigger>
                   <SelectValue placeholder="Select region">
