@@ -15,6 +15,8 @@ const boardRows = [
     current_stage: "closed",
     current_stage_normalized: "closed",
     current_stage_entered_at: "2026-05-20T12:00:00.000Z",
+    total_value: "9716.67",
+    value_synced_at: "2026-05-25T09:34:15.318Z",
     first_seen_at: "2026-05-18T12:00:00.000Z",
     updated_at: "2026-05-21T12:00:00.000Z",
   },
@@ -27,6 +29,8 @@ const boardRows = [
     current_stage: "hold (legacy)",
     current_stage_normalized: "hold (legacy)",
     current_stage_entered_at: "2026-05-20T12:00:00.000Z",
+    total_value: null,
+    value_synced_at: null,
     first_seen_at: "2026-05-18T12:00:00.000Z",
     updated_at: "2026-05-21T12:00:00.000Z",
   },
@@ -52,6 +56,8 @@ describe("portfolio project board service", () => {
         name: "Portfolio Roof Replacement",
         projectNumber: "DFW-4-07826-ac",
         currentStageNormalized: "closed",
+        totalValue: 9716.67,
+        valueSyncedAt: "2026-05-25T09:34:15.318Z",
       }),
     ]);
     expect(board.stages.find((stage) => stage.stage === "bidding")?.projects).toEqual([]);
@@ -64,6 +70,8 @@ describe("portfolio project board service", () => {
 
     const sql = String(query.mock.calls[0]?.[0] ?? "");
     expect(sql).toContain("FROM portfolio_projects");
+    expect(sql).toContain("total_value");
+    expect(sql).toContain("value_synced_at");
     expect(sql).toContain("WHERE is_board_relevant = true");
     expect(sql).toContain("ORDER BY current_stage_entered_at DESC");
     expect(sql).not.toContain("office_dallas.portfolio_projects");
@@ -122,6 +130,8 @@ describe("portfolio project board service", () => {
         id: "00000000-0000-4000-8000-000000000001",
         lastStageEventKey: "receipt-closed",
         rawSnapshot: { id: 598134326469086 },
+        totalValue: 9716.67,
+        valueSyncedAt: "2026-05-25T09:34:15.318Z",
         stageHistory: [
           expect.objectContaining({
             stage: "closed",

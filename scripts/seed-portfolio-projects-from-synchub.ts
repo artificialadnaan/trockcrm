@@ -12,11 +12,13 @@ import {
 } from "../server/src/modules/synchub/procore-project-stage-relay-service.js";
 
 type Mode = "dry-run" | "commit";
+type Action = "seed" | "refresh-values";
 
 type QueryClient = Pick<Client, "query">;
 
 type Args = {
   mode: Mode;
+  action: Action;
   limit: number | null;
 };
 
@@ -76,12 +78,30 @@ type ExistingRow = {
   schemaName: string;
 };
 
+type ExistingValueRow = ExistingRow & {
+  totalValue: string | null;
+  valueSyncedAt: string | null;
+};
+
 type InsertedRow = {
   procoreProjectId: string;
   projectNumber: string | null;
   name: string;
   currentStageNormalized: string;
   schemaName: string;
+};
+
+export type SyncHubValueFreshnessSummary = {
+  totalRows: number;
+  withTotalValue: number;
+  withEstimatedValue: number;
+  minLastSyncedAt: string | null;
+  maxLastSyncedAt: string | null;
+  within1Day: number;
+  within7Days: number;
+  within30Days: number;
+  olderThan30Days: number;
+  nullLastSyncedAt: number;
 };
 
 export type PortfolioSeedResult = {
@@ -91,6 +111,10 @@ export type PortfolioSeedResult = {
     activeRowsRead: number;
     boardRelevantCandidates: number;
     excludedRows: number;
+    freshness: {
+      activeRows: SyncHubValueFreshnessSummary;
+      boardRelevantRows: SyncHubValueFreshnessSummary;
+    };
   };
   crm: {
     existingSkipped: number;
@@ -108,9 +132,48 @@ export type PortfolioSeedResult = {
   };
 };
 
+export type PortfolioProjectValueRefreshResult = {
+  mode: Mode;
+  refreshedAt: string;
+  source: {
+    activeRowsRead: number;
+    boardRelevantCandidates: number;
+    excludedRows: number;
+    freshness: {
+      activeRows: SyncHubValueFreshnessSummary;
+      boardRelevantRows: SyncHubValueFreshnessSummary;
+    };
+  };
+  crm: {
+    matched: number;
+    alreadyCurrent: number;
+    wouldUpdate: number;
+    updated: number;
+    missingOfficeSkipped: number;
+    missingPortfolioProjectSkipped: number;
+  };
+  byOffice: Record<string, { matched: number; alreadyCurrent: number; wouldUpdate: number; updated: number }>;
+  samples: {
+    updates: Array<{
+      procoreProjectId: string;
+      projectNumber: string | null;
+      name: string;
+      schemaName: string;
+      previousTotalValue: string | null;
+      nextTotalValue: string | null;
+      previousValueSyncedAt: string | null;
+      nextValueSyncedAt: string | null;
+    }>;
+    missingPortfolioProjects: InsertedRow[];
+    excluded: SkippedSourceRow[];
+  };
+};
+
 const USAGE = `Usage:
   node --import tsx scripts/seed-portfolio-projects-from-synchub.ts --dry-run [--limit=1000]
   node --import tsx scripts/seed-portfolio-projects-from-synchub.ts --commit [--limit=1000]
+  node --import tsx scripts/seed-portfolio-projects-from-synchub.ts --refresh-values --dry-run [--limit=1000]
+  node --import tsx scripts/seed-portfolio-projects-from-synchub.ts --refresh-values --commit [--limit=1000]
 
 Exactly one mode flag is required.
 
@@ -125,6 +188,7 @@ function parseArgs(argv: string[]): Args {
   if ([hasDryRun, hasCommit].filter(Boolean).length !== 1) {
     throw new Error(`Specify exactly one of --dry-run or --commit.\n${USAGE}`);
   }
+  const action: Action = argv.includes("--refresh-values") ? "refresh-values" : "seed";
 
   const limitArg = argv.find((arg) => arg.startsWith("--limit="));
   const limit = limitArg ? Number(limitArg.slice("--limit=".length)) : null;
@@ -134,6 +198,7 @@ function parseArgs(argv: string[]): Args {
 
   return {
     mode: hasCommit ? "commit" : "dry-run",
+    action,
     limit,
   };
 }
@@ -297,7 +362,7 @@ function resolveOfficeSchema(input: {
   return office ? { schemaName, office } : null;
 }
 
-async function fetchSyncHubActiveProjects(client: QueryClient, limit: number | null): Promise<SyncHubProcoreProjectRow[]> {
+export async function fetchSyncHubActiveProjects(client: QueryClient, limit: number | null): Promise<SyncHubProcoreProjectRow[]> {
   const limitSql = limit == null ? "" : " LIMIT $1";
   const result = await client.query(
     `SELECT procore_id, project_number, name, display_name, stage, project_stage_name,
@@ -346,6 +411,51 @@ async function findExistingPortfolioProject(input: {
   };
 }
 
+async function findExistingPortfolioProjectValue(input: {
+  client: QueryClient;
+  schemaName: string;
+  candidate: PortfolioSeedCandidate;
+  valueColumnsReady: boolean;
+}): Promise<ExistingValueRow | null> {
+  const tableName = `${quoteIdent(input.schemaName)}.portfolio_projects`;
+  const result = await input.client.query(
+    `SELECT procore_project_id, project_number, name, current_stage, current_stage_entered_at
+            ${input.valueColumnsReady ? ", total_value, value_synced_at" : ""}
+       FROM ${tableName}
+      WHERE procore_company_id = $1
+        AND procore_project_id = $2
+      LIMIT 1`,
+    [input.candidate.procoreCompanyId, input.candidate.procoreProjectId]
+  );
+  const row = result.rows[0];
+  if (!row) return null;
+  return {
+    procoreProjectId: row.procore_project_id,
+    projectNumber: row.project_number ?? null,
+    name: row.name,
+    currentStage: row.current_stage,
+    currentStageEnteredAt: row.current_stage_entered_at
+      ? new Date(row.current_stage_entered_at).toISOString()
+      : null,
+    schemaName: input.schemaName,
+    totalValue: input.valueColumnsReady ? normalizeMoney(row.total_value) : null,
+    valueSyncedAt: input.valueColumnsReady && row.value_synced_at ? new Date(row.value_synced_at).toISOString() : null,
+  };
+}
+
+async function portfolioProjectValueColumnsReady(client: QueryClient, schemaName: string) {
+  const result = await client.query(
+    `SELECT column_name
+       FROM information_schema.columns
+      WHERE table_schema = $1
+        AND table_name = 'portfolio_projects'
+        AND column_name IN ('total_value', 'value_synced_at')`,
+    [schemaName]
+  );
+  const columns = new Set(result.rows.map((row: any) => row.column_name));
+  return columns.has("total_value") && columns.has("value_synced_at");
+}
+
 function rawSnapshot(candidate: PortfolioSeedCandidate, seedTime: Date) {
   return {
     source: "synchub_procore_projects_seed",
@@ -369,6 +479,69 @@ function rawSnapshot(candidate: PortfolioSeedCandidate, seedTime: Date) {
   };
 }
 
+function normalizeMoney(value: unknown): string | null {
+  if (value == null) return null;
+  const text = String(value).trim();
+  if (!text) return null;
+  const parsed = Number(text);
+  if (!Number.isFinite(parsed)) return null;
+  return parsed.toFixed(2);
+}
+
+function normalizeTimestamp(value: unknown): string | null {
+  if (value == null) return null;
+  const parsed = new Date(value as string | Date);
+  return Number.isNaN(parsed.getTime()) ? null : parsed.toISOString();
+}
+
+function candidateValueSyncedAt(candidate: PortfolioSeedCandidate): string | null {
+  return normalizeTimestamp(candidate.source.last_synced_at ?? candidate.source.updated_at);
+}
+
+function candidateTotalValue(candidate: PortfolioSeedCandidate): string | null {
+  return normalizeMoney(candidate.source.total_value);
+}
+
+function valueNeedsRefresh(existing: ExistingValueRow, candidate: PortfolioSeedCandidate) {
+  return existing.totalValue !== candidateTotalValue(candidate)
+    || existing.valueSyncedAt !== candidateValueSyncedAt(candidate);
+}
+
+export function summarizeSyncHubValueFreshness(
+  rows: SyncHubProcoreProjectRow[],
+  now = new Date()
+): SyncHubValueFreshnessSummary {
+  const timestamps = rows
+    .map((row) => normalizeTimestamp(row.last_synced_at))
+    .filter((value): value is string => Boolean(value));
+  const sortedTimestamps = [...timestamps].sort();
+  const nowMs = now.getTime();
+  const within = (days: number) => timestamps.filter((value) => {
+    const timestamp = new Date(value).getTime();
+    return Number.isFinite(timestamp) && nowMs - timestamp <= days * 24 * 60 * 60 * 1000;
+  }).length;
+
+  return {
+    totalRows: rows.length,
+    withTotalValue: rows.filter((row) => normalizeMoney(row.total_value) != null).length,
+    withEstimatedValue: rows.filter((row) => normalizeMoney(row.estimated_value) != null).length,
+    minLastSyncedAt: sortedTimestamps[0] ?? null,
+    maxLastSyncedAt: sortedTimestamps.at(-1) ?? null,
+    within1Day: within(1),
+    within7Days: within(7),
+    within30Days: within(30),
+    olderThan30Days: timestamps.length - within(30),
+    nullLastSyncedAt: rows.length - timestamps.length,
+  };
+}
+
+function sourceFreshness(sourceRows: SyncHubProcoreProjectRow[], candidates: PortfolioSeedCandidate[]) {
+  return {
+    activeRows: summarizeSyncHubValueFreshness(sourceRows),
+    boardRelevantRows: summarizeSyncHubValueFreshness(candidates.map((candidate) => candidate.source)),
+  };
+}
+
 async function insertPortfolioProject(input: {
   client: QueryClient;
   schemaName: string;
@@ -385,13 +558,13 @@ async function insertPortfolioProject(input: {
 
   const result = await input.client.query(
     `INSERT INTO ${tableName}
-       (procore_company_id, procore_project_id, project_number, name,
+     (procore_company_id, procore_project_id, project_number, name,
         current_stage, current_stage_normalized, current_stage_entered_at,
-        is_board_relevant, first_seen_at, last_stage_event_key, raw_snapshot,
+        is_board_relevant, total_value, value_synced_at, first_seen_at, last_stage_event_key, raw_snapshot,
         created_at, updated_at)
      VALUES
-       ($1, $2, $3, $4, $5, $6, $7::timestamptz, true,
-        $7::timestamptz, $8, $9::jsonb, $7::timestamptz, $7::timestamptz)
+       ($1, $2, $3, $4, $5, $6, $7::timestamptz, true, $8::numeric, $9::timestamptz,
+        $7::timestamptz, $10, $11::jsonb, $7::timestamptz, $7::timestamptz)
      ON CONFLICT (procore_company_id, procore_project_id) DO NOTHING
      RETURNING id`,
     [
@@ -402,6 +575,8 @@ async function insertPortfolioProject(input: {
       input.candidate.currentStage,
       input.candidate.currentStageNormalized,
       input.seedTime.toISOString(),
+      candidateTotalValue(input.candidate),
+      candidateValueSyncedAt(input.candidate),
       eventKey,
       JSON.stringify(rawSnapshot(input.candidate, input.seedTime)),
     ]
@@ -443,6 +618,7 @@ export async function runPortfolioProjectsSeed(input: {
       activeRowsRead: sourceRows.length,
       boardRelevantCandidates: candidates.length,
       excludedRows: excluded.length,
+      freshness: sourceFreshness(sourceRows, candidates),
     },
     crm: {
       existingSkipped: 0,
@@ -533,6 +709,179 @@ export async function runPortfolioProjectsSeed(input: {
   return result;
 }
 
+function ensureRefreshOfficeBucket(result: PortfolioProjectValueRefreshResult, schemaName: string) {
+  result.byOffice[schemaName] ??= { matched: 0, alreadyCurrent: 0, wouldUpdate: 0, updated: 0 };
+  return result.byOffice[schemaName];
+}
+
+async function updatePortfolioProjectValue(input: {
+  client: QueryClient;
+  schemaName: string;
+  candidate: PortfolioSeedCandidate;
+}) {
+  const tableName = `${quoteIdent(input.schemaName)}.portfolio_projects`;
+  const result = await input.client.query(
+    `UPDATE ${tableName}
+        SET total_value = $3::numeric,
+            value_synced_at = $4::timestamptz,
+            updated_at = NOW()
+      WHERE procore_company_id = $1
+        AND procore_project_id = $2
+        AND (
+          total_value IS DISTINCT FROM $3::numeric
+          OR value_synced_at IS DISTINCT FROM $4::timestamptz
+        )
+      RETURNING id`,
+    [
+      input.candidate.procoreCompanyId,
+      input.candidate.procoreProjectId,
+      candidateTotalValue(input.candidate),
+      candidateValueSyncedAt(input.candidate),
+    ]
+  );
+  return result.rows.length;
+}
+
+export async function runPortfolioProjectValueRefresh(input: {
+  mode: Mode;
+  crmClient: QueryClient;
+  syncHubClient: QueryClient;
+  refreshedAt?: Date;
+  limit?: number | null;
+  mappings?: ProcoreCompanyOfficeMapping[];
+}): Promise<PortfolioProjectValueRefreshResult> {
+  const refreshedAt = input.refreshedAt ?? new Date();
+  const sourceRows = await fetchSyncHubActiveProjects(input.syncHubClient, input.limit ?? null);
+  const { candidates, excluded } = splitSeedCandidates(sourceRows);
+  const offices = await fetchActiveOffices(input.crmClient);
+  const mappings = input.mappings ?? getProcoreCompanyOfficeMappings();
+  const valueColumnsReadyBySchema = new Map<string, boolean>();
+
+  const result: PortfolioProjectValueRefreshResult = {
+    mode: input.mode,
+    refreshedAt: refreshedAt.toISOString(),
+    source: {
+      activeRowsRead: sourceRows.length,
+      boardRelevantCandidates: candidates.length,
+      excludedRows: excluded.length,
+      freshness: sourceFreshness(sourceRows, candidates),
+    },
+    crm: {
+      matched: 0,
+      alreadyCurrent: 0,
+      wouldUpdate: 0,
+      updated: 0,
+      missingOfficeSkipped: 0,
+      missingPortfolioProjectSkipped: 0,
+    },
+    byOffice: {},
+    samples: {
+      updates: [],
+      missingPortfolioProjects: [],
+      excluded: excluded.slice(0, 20),
+    },
+  };
+
+  if (input.mode === "commit") {
+    await input.crmClient.query("BEGIN");
+  }
+
+  try {
+    for (const candidate of candidates) {
+      const officeResolution = resolveOfficeSchema({
+        procoreCompanyId: candidate.procoreCompanyId,
+        offices,
+        mappings,
+      });
+      if (!officeResolution) {
+        result.crm.missingOfficeSkipped += 1;
+        continue;
+      }
+
+      const officeBucket = ensureRefreshOfficeBucket(result, officeResolution.schemaName);
+      let valueColumnsReady = valueColumnsReadyBySchema.get(officeResolution.schemaName);
+      if (valueColumnsReady == null) {
+        valueColumnsReady = await portfolioProjectValueColumnsReady(input.crmClient, officeResolution.schemaName);
+        valueColumnsReadyBySchema.set(officeResolution.schemaName, valueColumnsReady);
+      }
+      if (input.mode === "commit" && !valueColumnsReady) {
+        throw new Error(
+          `Missing total_value/value_synced_at on ${officeResolution.schemaName}.portfolio_projects; run migration 0136 before commit.`
+        );
+      }
+      const existing = await findExistingPortfolioProjectValue({
+        client: input.crmClient,
+        schemaName: officeResolution.schemaName,
+        candidate,
+        valueColumnsReady,
+      });
+      if (!existing) {
+        result.crm.missingPortfolioProjectSkipped += 1;
+        samplePush(result.samples.missingPortfolioProjects, {
+          procoreProjectId: candidate.procoreProjectId,
+          projectNumber: candidate.projectNumber,
+          name: candidate.name,
+          currentStageNormalized: candidate.currentStageNormalized,
+          schemaName: officeResolution.schemaName,
+        });
+        continue;
+      }
+
+      result.crm.matched += 1;
+      officeBucket.matched += 1;
+
+      if (!valueNeedsRefresh(existing, candidate)) {
+        result.crm.alreadyCurrent += 1;
+        officeBucket.alreadyCurrent += 1;
+        continue;
+      }
+
+      const updateSample = {
+        procoreProjectId: candidate.procoreProjectId,
+        projectNumber: candidate.projectNumber,
+        name: candidate.name,
+        schemaName: officeResolution.schemaName,
+        previousTotalValue: existing.totalValue,
+        nextTotalValue: candidateTotalValue(candidate),
+        previousValueSyncedAt: existing.valueSyncedAt,
+        nextValueSyncedAt: candidateValueSyncedAt(candidate),
+      };
+
+      if (input.mode === "dry-run") {
+        result.crm.wouldUpdate += 1;
+        officeBucket.wouldUpdate += 1;
+        samplePush(result.samples.updates, updateSample);
+        continue;
+      }
+
+      const updated = await updatePortfolioProjectValue({
+        client: input.crmClient,
+        schemaName: officeResolution.schemaName,
+        candidate,
+      });
+      result.crm.updated += updated;
+      officeBucket.updated += updated;
+      if (updated > 0) {
+        samplePush(result.samples.updates, updateSample);
+      } else {
+        result.crm.alreadyCurrent += 1;
+        officeBucket.alreadyCurrent += 1;
+      }
+    }
+
+    if (input.mode === "commit") {
+      await input.crmClient.query("COMMIT");
+    }
+  } catch (error) {
+    if (input.mode === "commit") {
+      await input.crmClient.query("ROLLBACK").catch(() => undefined);
+    }
+    throw error;
+  }
+
+  return result;
+}
+
 async function main(argv = process.argv.slice(2)) {
   const args = parseArgs(argv);
   const crmEnv = readCrmEnvFile();
@@ -550,12 +899,19 @@ async function main(argv = process.argv.slice(2)) {
   await syncHubClient.connect();
   await crmClient.connect();
   try {
-    const result = await runPortfolioProjectsSeed({
-      mode: args.mode,
-      limit: args.limit,
-      crmClient,
-      syncHubClient,
-    });
+    const result = args.action === "refresh-values"
+      ? await runPortfolioProjectValueRefresh({
+        mode: args.mode,
+        limit: args.limit,
+        crmClient,
+        syncHubClient,
+      })
+      : await runPortfolioProjectsSeed({
+        mode: args.mode,
+        limit: args.limit,
+        crmClient,
+        syncHubClient,
+      });
     console.log(JSON.stringify(result, null, 2));
   } finally {
     await crmClient.end();

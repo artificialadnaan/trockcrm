@@ -88,6 +88,8 @@ export interface PortfolioProjectSummary {
   currentStage: string;
   currentStageNormalized: PortfolioProjectBoardStage;
   currentStageEnteredAt: string | null;
+  totalValue: number | null;
+  valueSyncedAt: string | null;
   firstSeenAt: string;
   updatedAt: string;
 }
@@ -568,6 +570,12 @@ function readPositiveInt(value: unknown, fallback: number, max: number) {
   return Math.min(parsed, max);
 }
 
+function toMoneyNumber(value: unknown): number | null {
+  if (value == null) return null;
+  const parsed = typeof value === "number" ? value : Number(value);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
 function toApiProject(row: any) {
   return {
     id: row.id,
@@ -612,6 +620,8 @@ function toPortfolioProjectSummary(row: any): PortfolioProjectSummary | null {
     currentStage: row.current_stage ?? stage,
     currentStageNormalized: stage,
     currentStageEnteredAt: row.current_stage_entered_at ? new Date(row.current_stage_entered_at).toISOString() : null,
+    totalValue: toMoneyNumber(row.total_value),
+    valueSyncedAt: row.value_synced_at ? new Date(row.value_synced_at).toISOString() : null,
     firstSeenAt: new Date(row.first_seen_at).toISOString(),
     updatedAt: new Date(row.updated_at).toISOString(),
   };
@@ -656,7 +666,7 @@ export async function listPortfolioProjectBoard(client: QueryExecutor) {
   const result = await client.query(
     `SELECT id, procore_company_id, procore_project_id, project_number, name,
             current_stage, current_stage_normalized, current_stage_entered_at,
-            first_seen_at, updated_at
+            total_value, value_synced_at, first_seen_at, updated_at
        FROM portfolio_projects
       WHERE is_board_relevant = true
       ORDER BY current_stage_entered_at DESC NULLS LAST, name ASC`
@@ -668,7 +678,7 @@ export async function getPortfolioProjectDetail(client: QueryExecutor, projectId
   const projectResult = await client.query(
     `SELECT id, procore_company_id, procore_project_id, project_number, name,
             current_stage, current_stage_normalized, current_stage_entered_at,
-            is_board_relevant, first_seen_at, last_stage_event_key, raw_snapshot,
+            total_value, value_synced_at, is_board_relevant, first_seen_at, last_stage_event_key, raw_snapshot,
             created_at, updated_at
        FROM portfolio_projects
       WHERE id = $1::uuid
