@@ -10,6 +10,8 @@ export interface PortfolioProjectSummary {
   currentStage: string;
   currentStageNormalized: string;
   currentStageEnteredAt: string | null;
+  totalValue: number | null;
+  valueSyncedAt: string | null;
   firstSeenAt: string;
   updatedAt: string;
 }

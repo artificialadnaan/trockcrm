@@ -8,7 +8,36 @@ import {
   type PortfolioProjectSummary,
 } from "@/hooks/use-projects";
 
+function formatCurrency(value: number | null | undefined) {
+  if (value == null) return null;
+  return new Intl.NumberFormat("en-US", {
+    style: "currency",
+    currency: "USD",
+    maximumFractionDigits: 0,
+  }).format(value);
+}
+
+function formatSyncDate(value: string | null | undefined) {
+  if (!value) return null;
+  return new Intl.DateTimeFormat("en-US", {
+    month: "short",
+    day: "numeric",
+    year: "numeric",
+  }).format(new Date(value));
+}
+
+function isStaleValueSync(value: string | null | undefined) {
+  if (!value) return false;
+  const timestamp = new Date(value).getTime();
+  if (Number.isNaN(timestamp)) return false;
+  return Date.now() - timestamp > 7 * 24 * 60 * 60 * 1000;
+}
+
 function ProjectCard({ project }: { project: PortfolioProjectSummary }) {
+  const formattedValue = formatCurrency(project.totalValue);
+  const syncDate = formatSyncDate(project.valueSyncedAt);
+  const stale = isStaleValueSync(project.valueSyncedAt);
+
   return (
     <Link
       to={`/projects/${project.id}`}
@@ -20,6 +49,25 @@ function ProjectCard({ project }: { project: PortfolioProjectSummary }) {
       <h3 className="mt-1 line-clamp-2 text-sm font-black leading-5 text-slate-950">
         {project.name}
       </h3>
+      <div className="mt-3 border-t border-slate-100 pt-3">
+        <p className="text-[10px] font-black uppercase tracking-[0.14em] text-slate-500">
+          Contract Value
+        </p>
+        <p className="mt-1 text-sm font-black tabular-nums text-slate-950">
+          {formattedValue ?? "--"}
+        </p>
+        {syncDate ? (
+          <p className={cn(
+            "mt-1 text-[11px] font-bold",
+            stale ? "text-amber-700" : "text-slate-500"
+          )}>
+            {stale ? "Stale value as of " : "As of "}
+            {syncDate}
+          </p>
+        ) : (
+          <p className="mt-1 text-[11px] font-bold text-slate-500">Value not synced</p>
+        )}
+      </div>
     </Link>
   );
 }

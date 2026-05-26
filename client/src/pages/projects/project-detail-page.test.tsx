@@ -29,6 +29,8 @@ const baseProject = {
   currentStage: "close out",
   currentStageNormalized: "close out",
   currentStageEnteredAt: "2026-05-12T12:00:00.000Z",
+  totalValue: 125000.75,
+  valueSyncedAt: "2026-05-25T09:34:15.318Z",
   firstSeenAt: "2026-05-11T12:00:00.000Z",
   updatedAt: "2026-05-13T12:00:00.000Z",
   lastStageEventKey: "portfolio-seed:598134325683880:598134326521913:close out",
@@ -36,7 +38,7 @@ const baseProject = {
   stageHistory: [],
 };
 
-function detailResponse(project: typeof baseProject) {
+function detailResponse(project: Record<string, unknown>) {
   return { project };
 }
 
@@ -58,7 +60,7 @@ describe("ProjectDetailPage shell", () => {
     container.remove();
   });
 
-  async function renderDetail(project = baseProject) {
+  async function renderDetail(project: Record<string, unknown> = baseProject) {
     mocks.api.mockResolvedValue(detailResponse(project));
 
     await act(async () => {
@@ -81,6 +83,8 @@ describe("ProjectDetailPage shell", () => {
     expect(source).toContain("Project not found");
     expect(source).toContain("Project References");
     expect(source).toContain("Stage History");
+    expect(source).toContain("Contract Value");
+    expect(source).toContain("Value Freshness");
     expect(source).toContain("Procore Project ID");
     expect(source).not.toContain('role="tab"');
     expect(source).not.toContain("method: \"PATCH\"");
@@ -92,6 +96,8 @@ describe("ProjectDetailPage shell", () => {
 
     expect(container.textContent).toContain("Latest Stage Change");
     expect(container.textContent).toContain("Entered Close Out on May 12, 2026");
+    expect(container.textContent).toContain("$125,001");
+    expect(container.textContent).toContain("As of May 25, 2026");
     expect(container.textContent).not.toContain(baseProject.lastStageEventKey);
     expect(source).not.toContain("Last Stage Event");
     expect(source).not.toContain("lastStageEventKey");
@@ -116,5 +122,12 @@ describe("ProjectDetailPage shell", () => {
 
     expect(container.textContent).not.toContain("View in Procore");
     expect(container.querySelector('a[href*="procore.com"]')).toBeNull();
+  });
+
+  it("shows absent contract value without rendering a fake zero", async () => {
+    await renderDetail({ ...baseProject, totalValue: null, valueSyncedAt: null });
+
+    expect(container.textContent).toContain("Value not synced");
+    expect(container.textContent).not.toContain("$0");
   });
 });

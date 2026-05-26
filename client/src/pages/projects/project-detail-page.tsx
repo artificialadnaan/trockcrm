@@ -17,6 +17,31 @@ function formatDateTime(value: string | null | undefined) {
   }).format(new Date(value));
 }
 
+function formatDate(value: string | null | undefined) {
+  if (!value) return null;
+  return new Intl.DateTimeFormat("en-US", {
+    month: "short",
+    day: "numeric",
+    year: "numeric",
+  }).format(new Date(value));
+}
+
+function formatCurrency(value: number | null | undefined) {
+  if (value == null) return null;
+  return new Intl.NumberFormat("en-US", {
+    style: "currency",
+    currency: "USD",
+    maximumFractionDigits: 0,
+  }).format(value);
+}
+
+function isStaleValueSync(value: string | null | undefined) {
+  if (!value) return false;
+  const timestamp = new Date(value).getTime();
+  if (Number.isNaN(timestamp)) return false;
+  return Date.now() - timestamp > 7 * 24 * 60 * 60 * 1000;
+}
+
 function formatStageLabel(value: string | null | undefined) {
   return String(value ?? "Unknown stage")
     .split(" ")
@@ -75,6 +100,9 @@ export function ProjectDetailPage() {
   }
 
   const procoreProjectUrl = buildProcoreProjectUrl(project.procoreCompanyId, project.procoreProjectId);
+  const contractValue = formatCurrency(project.totalValue);
+  const valueSyncedDate = formatDate(project.valueSyncedAt);
+  const valueSyncIsStale = isStaleValueSync(project.valueSyncedAt);
 
   return (
     <div className="space-y-6">
@@ -123,6 +151,20 @@ export function ProjectDetailPage() {
             <dl className="grid gap-5 sm:grid-cols-2">
               <DetailItem label="Project Number" value={project.projectNumber} />
               <DetailItem label="Current Stage" value={project.currentStage} />
+              <DetailItem label="Contract Value" value={contractValue ?? "--"} />
+              <div>
+                <dt className="text-xs font-black uppercase tracking-[0.14em] text-slate-500">
+                  Value Freshness
+                </dt>
+                <dd className={cn(
+                  "mt-1 text-sm font-semibold",
+                  valueSyncIsStale ? "text-amber-700" : "text-slate-950"
+                )}>
+                  {valueSyncedDate
+                    ? `${valueSyncIsStale ? "Stale value as of" : "As of"} ${valueSyncedDate}`
+                    : "Value not synced"}
+                </dd>
+              </div>
               <DetailItem label="Procore Project ID" value={project.procoreProjectId} />
               <DetailItem label="Procore Company ID" value={project.procoreCompanyId} />
               <DetailItem label="First Seen" value={formatDateTime(project.firstSeenAt)} />
