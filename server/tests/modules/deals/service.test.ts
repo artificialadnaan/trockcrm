@@ -58,6 +58,7 @@ const { AppError } = await import("../../../src/middleware/error-handler.js");
 const pipelineService = await import("../../../src/modules/pipeline/service.js");
 const {
   createDeal,
+  getDealById,
   resolveIntendedProjectNumberFromParts,
   updateDeal,
   resolvePipelineTerminalDateFilters,
@@ -560,6 +561,90 @@ describe("Deal Service", () => {
       expect(getStageById).toHaveBeenNthCalledWith(2, `stage-${slug}`, "standard_deal");
     });
 
+    it("allows creating a deal in an active canonical stage", async () => {
+      const getStageById = vi.mocked(pipelineService.getStageById);
+      getStageById.mockResolvedValueOnce({
+        id: "stage-opportunity",
+        slug: "opportunity",
+        name: "Opportunity",
+        isTerminal: false,
+        isActivePipeline: true,
+        displayOrder: 1,
+        workflowFamily: "standard_deal",
+      } as never);
+
+      const deal = await createDeal(createDealCreationTenantDb() as never, {
+        name: "Active Stage Deal",
+        stageId: "stage-opportunity",
+        assignedRepId: "rep-1",
+        officeId: "office-1",
+        companyId: "company-1",
+        propertyId: "property-1",
+        officeCode: "dfw",
+        workflowRoute: "normal",
+        projectType: "roofing",
+      });
+
+      expect(deal.stageId).toBe("stage-opportunity");
+    });
+
+    it("rejects creating a deal in an inactive stage with a typed validation error", async () => {
+      const getStageById = vi.mocked(pipelineService.getStageById);
+      getStageById.mockResolvedValueOnce({
+        id: "stage-dd",
+        slug: "dd",
+        name: "Due Diligence",
+        isTerminal: false,
+        isActivePipeline: false,
+        displayOrder: 0,
+        workflowFamily: "standard_deal",
+      } as never);
+
+      await expect(
+        createDeal(createDealCreationTenantDb() as never, {
+          name: "Inactive Stage Deal",
+          stageId: "stage-dd",
+          assignedRepId: "rep-1",
+          officeId: "office-1",
+          companyId: "company-1",
+          propertyId: "property-1",
+          officeCode: "dfw",
+          workflowRoute: "normal",
+          projectType: "roofing",
+        })
+      ).rejects.toMatchObject<AppError>({
+        statusCode: 400,
+        code: "INACTIVE_DEAL_STAGE",
+        message: "Cannot set deal stage to inactive pipeline stage.",
+      });
+    });
+
+    it("allows migration-origin deal creation to preserve an inactive historical stage", async () => {
+      const getStageById = vi.mocked(pipelineService.getStageById);
+      getStageById.mockResolvedValueOnce({
+        id: "stage-dd",
+        slug: "dd",
+        name: "Due Diligence",
+        isTerminal: false,
+        isActivePipeline: false,
+        displayOrder: 0,
+        workflowFamily: "standard_deal",
+      } as never);
+
+      const deal = await createDeal(createDealCreationTenantDb() as never, {
+        name: "Migrated Inactive Stage Deal",
+        stageId: "stage-dd",
+        assignedRepId: "rep-1",
+        officeId: "office-1",
+        migrationMode: true,
+        officeCode: "dfw",
+        workflowRoute: "normal",
+        projectType: "roofing",
+      });
+
+      expect(deal.stageId).toBe("stage-dd");
+    });
+
     it("continues rejecting normal-only estimating for service-route deals", async () => {
       const getStageById = vi.mocked(pipelineService.getStageById);
       getStageById
@@ -607,6 +692,56 @@ describe("Deal Service", () => {
       ).rejects.toMatchObject<AppError>({
         statusCode: 400,
         message: "Invalid stage ID for workflow route",
+      });
+    });
+  });
+
+  describe("Stage display reads", () => {
+    it("reads a deal already assigned to an inactive legacy stage", async () => {
+      const legacyDeal = {
+        id: "deal-legacy",
+        name: "Legacy DD Deal",
+        dealNumber: "TR-2026-0009",
+        stageId: "stage-dd",
+        stageSlug: "dd",
+        assignedRepId: "rep-1",
+        workflowRoute: "normal",
+        stageEnteredAt: new Date("2026-05-12T12:00:00.000Z"),
+        isBidBoardOwned: false,
+        bidBoardStageSlug: null,
+        bidBoardStageEnteredAt: null,
+        onHold: false,
+        onHoldStartedAt: null,
+        onHoldAccumulatedSeconds: 0,
+        onHoldAccumulatedSecondsAtStageEntry: 0,
+      };
+      const tenantDb = {
+        select() {
+          return {
+            from() {
+              return {
+                leftJoin() {
+                  return this;
+                },
+                where() {
+                  return {
+                    limit() {
+                      return Promise.resolve([legacyDeal]);
+                    },
+                  };
+                },
+              };
+            },
+          };
+        },
+      };
+
+      const result = await getDealById(tenantDb as never, "deal-legacy", "admin", "admin-1");
+
+      expect(result).toMatchObject({
+        id: "deal-legacy",
+        stageId: "stage-dd",
+        stageSlug: "dd",
       });
     });
   });

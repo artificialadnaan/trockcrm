@@ -77,6 +77,11 @@ interface TerminalStageInfo {
   totalValue?: number;
 }
 
+interface PendingPipelineMove {
+  deal: Deal;
+  targetStageId: string;
+}
+
 export function summarizeTerminalStageCounts(terminalStages: TerminalStageInfo[]) {
   const won = terminalStages
     .filter((ts) => getTerminalStageOutcome(ts.stage.slug) === "won")
@@ -106,6 +111,19 @@ export function summarizeActivePipelineColumns(columns: PipelineColumn[]) {
     totalValue,
     averageVelocity,
   };
+}
+
+export function resolvePipelinePageMove(
+  columns: PipelineColumn[],
+  deal: Deal,
+  targetStageId: string
+): PendingPipelineMove | null {
+  if (deal.stageId === targetStageId) return null;
+
+  const targetColumn = columns.find((column) => column.stage.id === targetStageId);
+  if (!targetColumn || targetColumn.stage.isActivePipeline === false) return null;
+
+  return { deal, targetStageId };
 }
 
 function formatRefreshedLabel(date: Date, now: Date): string {
@@ -167,7 +185,11 @@ function DroppableColumn({
   terminalFilter?: TerminalDateFilter;
   onTerminalFilterChange?: (filter: TerminalDateFilter) => void;
 }) {
-  const { isOver, setNodeRef } = useDroppable({ id: column.stage.id });
+  const isInactiveDealStage = column.stage.isActivePipeline === false;
+  const { isOver, setNodeRef } = useDroppable({
+    id: column.stage.id,
+    disabled: isInactiveDealStage,
+  });
   const terminalOutcome = isTerminalOutcomeSlug(column.stage.slug) ? column.stage.slug : null;
   const terminalLabel = terminalFilter ? getTerminalDateFilterLabel(terminalFilter) : null;
 
@@ -268,7 +290,7 @@ export function PipelinePage() {
   const [showDd, setShowDd] = useState(searchParams.get("showDd") === "1");
   const [activeDeal, setActiveDeal] = useState<Deal | null>(null);
   const [stageChangeOpen, setStageChangeOpen] = useState(false);
-  const [pendingMove, setPendingMove] = useState<{ deal: Deal; targetStageId: string } | null>(null);
+  const [pendingMove, setPendingMove] = useState<PendingPipelineMove | null>(null);
   const [lastRefreshed, setLastRefreshed] = useState<Date>(new Date());
   const [now, setNow] = useState<Date>(new Date());
   const [terminalDateFilters, setTerminalDateFilters] = useState<Record<TerminalOutcome, TerminalDateFilter>>(() =>
@@ -388,11 +410,10 @@ export function PipelinePage() {
     if (!over) return;
 
     const deal = active.data.current?.deal as Deal;
-    const targetStageId = over.id as string;
+    const pendingMove = resolvePipelinePageMove(columns, deal, over.id as string);
+    if (!pendingMove) return;
 
-    if (deal.stageId === targetStageId) return;
-
-    setPendingMove({ deal, targetStageId });
+    setPendingMove(pendingMove);
     setStageChangeOpen(true);
   };
 

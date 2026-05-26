@@ -30,7 +30,8 @@ export interface PipelineBoardProps {
 
 export function resolvePipelineBoardMove(
   columns: PipelineBoardColumnData[],
-  event: Pick<DragEndEvent, "active" | "over">
+  event: Pick<DragEndEvent, "active" | "over">,
+  options: { entity?: "lead" | "deal" } = {}
 ) {
   if (!event.over) return null;
 
@@ -51,6 +52,7 @@ export function resolvePipelineBoardMove(
     columns.find((column) => column.stage.slug === rawTargetStageId);
 
   if (!targetColumn) return null;
+  if (options.entity === "deal" && targetColumn.stage.isActivePipeline === false) return null;
 
   return {
     activeId,
@@ -94,7 +96,7 @@ export function PipelineBoard({
     setActiveRecordId(null);
     if (!onMove) return;
 
-    const move = resolvePipelineBoardMove(columns, event);
+    const move = resolvePipelineBoardMove(columns, event, { entity });
     if (!move) return;
 
     onMove(move);

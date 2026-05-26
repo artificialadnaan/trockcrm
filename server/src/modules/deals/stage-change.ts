@@ -26,6 +26,7 @@ import {
 } from "./service.js";
 import { inferDealBidBoardOwnership } from "./workflow-backfill.js";
 import { logActivity, type AuditContext } from "../audit/audit-logger.js";
+import { assertActiveDealStageWriteTarget } from "./stage-write-guard.js";
 
 type TenantDb = NodePgDatabase<typeof schema>;
 
@@ -159,6 +160,7 @@ export async function changeDealStage(
 
   // Step 1: Validate stage gate (includes rep ownership check)
   const gateResult = await validateStageGate(tenantDb, dealId, targetStageId, userRole, userId);
+  assertActiveDealStageWriteTarget(gateResult.targetStage);
 
   // Step 2: Enforce rules
   if (!gateResult.allowed) {

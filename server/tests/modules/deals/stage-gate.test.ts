@@ -366,7 +366,7 @@ vi.mock("../../../src/db.js", () => ({
         where: () => ({
           limit: async () => {
             const next = mockedStageLookups.queue.shift();
-            return next ? [next] : [];
+            return next ? [{ isActivePipeline: true, ...next }] : [];
           },
         }),
       }),

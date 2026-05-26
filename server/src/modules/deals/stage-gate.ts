@@ -14,6 +14,7 @@ import { AppError } from "../../middleware/error-handler.js";
 import type { UserRole } from "@trock-crm/shared/types";
 import { evaluateDealScopingReadiness } from "./scoping-service.js";
 import { getResolvedDeal, type ResolvedDealView } from "./lineage-resolver.js";
+import { assertActiveDealStageWriteTarget } from "./stage-write-guard.js";
 
 type TenantDb = NodePgDatabase<typeof schema>;
 
@@ -35,6 +36,7 @@ export interface StageGateResult {
     name: string;
     slug: string;
     isTerminal: boolean;
+    isActivePipeline: boolean;
     displayOrder: number;
   };
   currentStage: {
@@ -42,6 +44,7 @@ export interface StageGateResult {
     name: string;
     slug: string;
     isTerminal: boolean;
+    isActivePipeline: boolean;
     displayOrder: number;
   };
   missingRequirements: {
@@ -263,6 +266,7 @@ export async function validateStageGate(
         name: targetStage.name,
         slug: targetStage.slug,
         isTerminal: targetStage.isTerminal,
+        isActivePipeline: targetStage.isActivePipeline,
         displayOrder: targetStage.displayOrder,
       },
       currentStage: {
@@ -270,6 +274,7 @@ export async function validateStageGate(
         name: currentStage.name,
         slug: currentStage.slug,
         isTerminal: currentStage.isTerminal,
+        isActivePipeline: currentStage.isActivePipeline,
         displayOrder: currentStage.displayOrder,
       },
       missingRequirements: {
@@ -284,6 +289,8 @@ export async function validateStageGate(
       blockReason: null,
     };
   }
+
+  assertActiveDealStageWriteTarget(targetStage);
 
   // Detect backward move
   const isBackwardMove = targetStage.displayOrder < currentStage.displayOrder;
@@ -496,6 +503,7 @@ export async function validateStageGate(
       name: targetStage.name,
       slug: targetStage.slug,
       isTerminal: targetStage.isTerminal,
+      isActivePipeline: targetStage.isActivePipeline,
       displayOrder: targetStage.displayOrder,
     },
     currentStage: {
@@ -503,6 +511,7 @@ export async function validateStageGate(
       name: currentStage.name,
       slug: currentStage.slug,
       isTerminal: currentStage.isTerminal,
+      isActivePipeline: currentStage.isActivePipeline,
       displayOrder: currentStage.displayOrder,
     },
     missingRequirements: {

@@ -20,6 +20,7 @@ vi.mock("../../../src/modules/pipeline/service.js", () => ({
     name: "Estimate in Progress",
     slug: "estimate_in_progress",
     isTerminal: false,
+    isActivePipeline: true,
     displayOrder: 2,
   })),
   getStageById: vi.fn(),
@@ -251,6 +252,52 @@ describe("changeDealStage", () => {
     vi.mocked(createStageTimers).mockResolvedValue(undefined as never);
   });
 
+  it("rejects moving a deal into an inactive target stage with a typed validation error", async () => {
+    const tenantDb = createTenantDb({
+      stageId: "stage-opportunity",
+      ddEstimate: null,
+      bidEstimate: null,
+    });
+
+    vi.mocked(validateStageGate).mockResolvedValue({
+      allowed: true,
+      isBackwardMove: false,
+      requiresOverride: false,
+      targetStage: {
+        id: "stage-dd",
+        name: "Due Diligence",
+        slug: "dd",
+        isTerminal: false,
+        isActivePipeline: false,
+        displayOrder: 0,
+      },
+      currentStage: {
+        id: "stage-opportunity",
+        name: "Opportunity",
+        slug: "opportunity",
+        isTerminal: false,
+        isActivePipeline: true,
+        displayOrder: 1,
+      },
+    } as never);
+
+    await expect(
+      changeDealStage(tenantDb as never, {
+        dealId: "deal-1",
+        targetStageId: "stage-dd",
+        userId: "user-1",
+        userRole: "director",
+      })
+    ).rejects.toMatchObject<AppError>({
+      statusCode: 400,
+      code: "INACTIVE_DEAL_STAGE",
+      message: "Cannot set deal stage to inactive pipeline stage.",
+    });
+
+    expect(tenantDb.state.deals[0]?.stageId).toBe("stage-opportunity");
+    expect(tenantDb.state.stageHistory).toHaveLength(0);
+  });
+
   it("resets stageEnteredAt on every transition including re-entry to a previous stage", async () => {
     vi.useFakeTimers();
     const tenantDb = createTenantDb({
@@ -264,6 +311,7 @@ describe("changeDealStage", () => {
       name: "Sales Validation",
       slug: "sales_validation",
       isTerminal: false,
+      isActivePipeline: true,
       displayOrder: 0,
     };
     const stageB = {
@@ -271,6 +319,7 @@ describe("changeDealStage", () => {
       name: "Opportunity",
       slug: "opportunity",
       isTerminal: false,
+      isActivePipeline: true,
       displayOrder: 1,
     };
 
@@ -330,6 +379,7 @@ describe("changeDealStage", () => {
       name: "Sales Validation",
       slug: "sales_validation",
       isTerminal: false,
+      isActivePipeline: true,
       displayOrder: 0,
     };
     const stageB = {
@@ -337,6 +387,7 @@ describe("changeDealStage", () => {
       name: "Opportunity",
       slug: "opportunity",
       isTerminal: false,
+      isActivePipeline: true,
       displayOrder: 1,
     };
 
@@ -378,6 +429,7 @@ describe("changeDealStage", () => {
       name: "Sales Validation",
       slug: "sales_validation",
       isTerminal: false,
+      isActivePipeline: true,
       displayOrder: 0,
     };
     const stageB = {
@@ -385,6 +437,7 @@ describe("changeDealStage", () => {
       name: "Opportunity",
       slug: "opportunity",
       isTerminal: false,
+      isActivePipeline: true,
       displayOrder: 1,
     };
 
@@ -423,6 +476,7 @@ describe("changeDealStage", () => {
         name: "Estimate in Progress",
         slug: "estimate_in_progress",
         isTerminal: false,
+        isActivePipeline: true,
         displayOrder: 2,
       },
       currentStage: {
@@ -430,6 +484,7 @@ describe("changeDealStage", () => {
         name: "DD",
         slug: "dd",
         isTerminal: false,
+        isActivePipeline: true,
         displayOrder: 0,
       },
     } as never);
@@ -459,6 +514,7 @@ describe("changeDealStage", () => {
         name: "Opportunity",
         slug: "opportunity",
         isTerminal: false,
+        isActivePipeline: true,
         displayOrder: 1,
       },
       currentStage: {
@@ -466,6 +522,7 @@ describe("changeDealStage", () => {
         name: "Sales Validation Stage",
         slug: "sales_validation_stage",
         isTerminal: false,
+        isActivePipeline: true,
         displayOrder: 0,
       },
     } as never);
@@ -496,6 +553,7 @@ describe("changeDealStage", () => {
         name: "Opportunity",
         slug: "opportunity",
         isTerminal: false,
+        isActivePipeline: true,
         displayOrder: 1,
       },
       currentStage: {
@@ -503,6 +561,7 @@ describe("changeDealStage", () => {
         name: "Sales Validation",
         slug: "sales_validation",
         isTerminal: false,
+        isActivePipeline: true,
         displayOrder: 0,
       },
     } as never);
@@ -547,6 +606,7 @@ describe("changeDealStage", () => {
         name: "Opportunity",
         slug: "opportunity",
         isTerminal: false,
+        isActivePipeline: true,
         displayOrder: 1,
       },
       currentStage: {
@@ -554,6 +614,7 @@ describe("changeDealStage", () => {
         name: "Estimating",
         slug: "estimating",
         isTerminal: false,
+        isActivePipeline: true,
         displayOrder: 2,
       },
     } as never);
@@ -589,6 +650,7 @@ describe("changeDealStage", () => {
         name: "Opportunity",
         slug: "opportunity",
         isTerminal: false,
+        isActivePipeline: true,
         displayOrder: 1,
       },
       currentStage: {
@@ -596,6 +658,7 @@ describe("changeDealStage", () => {
         name: "Sales Validation",
         slug: "sales_validation",
         isTerminal: false,
+        isActivePipeline: true,
         displayOrder: 0,
       },
     } as never);
@@ -626,6 +689,7 @@ describe("changeDealStage", () => {
         name: "Sales Validation",
         slug: "sales_validation",
         isTerminal: false,
+        isActivePipeline: true,
         displayOrder: 0,
       },
       currentStage: {
@@ -633,6 +697,7 @@ describe("changeDealStage", () => {
         name: "Opportunity",
         slug: "opportunity",
         isTerminal: false,
+        isActivePipeline: true,
         displayOrder: 1,
       },
     } as never);
@@ -661,6 +726,7 @@ describe("changeDealStage", () => {
         name: "Contract",
         slug: "contract",
         isTerminal: false,
+        isActivePipeline: true,
         displayOrder: 5,
       },
       currentStage: {
@@ -668,6 +734,7 @@ describe("changeDealStage", () => {
         name: "Opportunity",
         slug: "opportunity",
         isTerminal: false,
+        isActivePipeline: true,
         displayOrder: 1,
       },
     } as never);
@@ -702,6 +769,7 @@ describe("changeDealStage", () => {
         name: "Contract",
         slug: "contract",
         isTerminal: false,
+        isActivePipeline: true,
         displayOrder: 5,
       },
       currentStage: {
@@ -709,6 +777,7 @@ describe("changeDealStage", () => {
         name: "Opportunity",
         slug: "opportunity",
         isTerminal: false,
+        isActivePipeline: true,
         displayOrder: 1,
       },
     } as never);
@@ -737,6 +806,7 @@ describe("changeDealStage", () => {
         name: "Service Estimating",
         slug: "service_estimating",
         isTerminal: false,
+        isActivePipeline: true,
         displayOrder: 1,
       },
       currentStage: {
@@ -744,6 +814,7 @@ describe("changeDealStage", () => {
         name: "DD",
         slug: "dd",
         isTerminal: false,
+        isActivePipeline: true,
         displayOrder: 0,
       },
     } as never);
@@ -778,6 +849,7 @@ describe("changeDealStage", () => {
         name: "Estimate Under Review",
         slug: "estimate_under_review",
         isTerminal: false,
+        isActivePipeline: true,
         displayOrder: 3,
       },
       currentStage: {
@@ -785,6 +857,7 @@ describe("changeDealStage", () => {
         name: "Estimate in Progress",
         slug: "estimate_in_progress",
         isTerminal: false,
+        isActivePipeline: true,
         displayOrder: 2,
       },
     } as never);
@@ -793,6 +866,7 @@ describe("changeDealStage", () => {
       name: "Estimate in Progress",
       slug: "estimate_in_progress",
       isTerminal: false,
+      isActivePipeline: true,
       displayOrder: 1,
     } as never);
 
@@ -832,6 +906,7 @@ describe("changeDealStage", () => {
         name: "Service Estimating",
         slug: "estimating",
         isTerminal: false,
+        isActivePipeline: true,
         displayOrder: 1,
       },
       currentStage: {
@@ -839,6 +914,7 @@ describe("changeDealStage", () => {
         name: "Service Estimating",
         slug: "estimating",
         isTerminal: false,
+        isActivePipeline: true,
         displayOrder: 1,
       },
     } as never);
@@ -873,6 +949,7 @@ describe("changeDealStage", () => {
       name: "Estimate in Progress",
       slug: "estimate_in_progress",
       isTerminal: false,
+      isActivePipeline: true,
       displayOrder: 1,
     } as never);
 
@@ -885,6 +962,7 @@ describe("changeDealStage", () => {
         name: "Estimate in Progress",
         slug: "estimate_in_progress",
         isTerminal: false,
+        isActivePipeline: true,
         displayOrder: 2,
       },
       currentStage: {
@@ -892,6 +970,7 @@ describe("changeDealStage", () => {
         name: "Opportunity",
         slug: "opportunity",
         isTerminal: false,
+        isActivePipeline: true,
         displayOrder: 1,
       },
     } as never);
@@ -919,6 +998,7 @@ describe("changeDealStage", () => {
       name: "Estimate in Progress",
       slug: "estimate_in_progress",
       isTerminal: false,
+      isActivePipeline: true,
       displayOrder: 1,
     } as never);
     vi.mocked(validateStageGate).mockResolvedValue({
@@ -930,6 +1010,7 @@ describe("changeDealStage", () => {
         name: "Estimate in Progress",
         slug: "estimate_in_progress",
         isTerminal: false,
+        isActivePipeline: true,
         displayOrder: 2,
       },
       currentStage: {
@@ -937,6 +1018,7 @@ describe("changeDealStage", () => {
         name: "Opportunity",
         slug: "opportunity",
         isTerminal: false,
+        isActivePipeline: true,
         displayOrder: 1,
       },
     } as never);
@@ -975,6 +1057,7 @@ describe("changeDealStage", () => {
         name: "Sent to Production",
         slug: "sent_to_production",
         isTerminal: true,
+        isActivePipeline: true,
         displayOrder: 5,
       },
       currentStage: {
@@ -982,6 +1065,7 @@ describe("changeDealStage", () => {
         name: "Estimate Under Review",
         slug: "estimate_under_review",
         isTerminal: false,
+        isActivePipeline: true,
         displayOrder: 3,
       },
     } as never);
@@ -1021,6 +1105,7 @@ describe("changeDealStage", () => {
         name: "In Production",
         slug: "in_production",
         isTerminal: true,
+        isActivePipeline: true,
         displayOrder: 4,
       },
       currentStage: {
@@ -1028,6 +1113,7 @@ describe("changeDealStage", () => {
         name: "Bid Sent",
         slug: "bid_sent",
         isTerminal: false,
+        isActivePipeline: true,
         displayOrder: 3,
       },
     } as never);
@@ -1068,6 +1154,7 @@ describe("changeDealStage", () => {
         name: "Opportunity",
         slug: "opportunity",
         isTerminal: false,
+        isActivePipeline: true,
         displayOrder: 0,
       },
       currentStage: {
@@ -1075,6 +1162,7 @@ describe("changeDealStage", () => {
         name: "Sent to Production",
         slug: "sent_to_production",
         isTerminal: true,
+        isActivePipeline: true,
         displayOrder: 10,
       },
     } as never);
@@ -1133,6 +1221,7 @@ describe("changeDealStage", () => {
         name: "Estimate Under Review",
         slug: "estimate_under_review",
         isTerminal: false,
+        isActivePipeline: true,
         displayOrder: 3,
       },
       currentStage: {
@@ -1140,6 +1229,7 @@ describe("changeDealStage", () => {
         name: "Estimate in Progress",
         slug: "estimate_in_progress",
         isTerminal: false,
+        isActivePipeline: true,
         displayOrder: 2,
       },
     } as never);
@@ -1169,6 +1259,7 @@ describe("changeDealStage", () => {
         name: "Opportunity",
         slug: "opportunity",
         isTerminal: false,
+        isActivePipeline: true,
         displayOrder: 3,
       },
       currentStage: {
@@ -1176,6 +1267,7 @@ describe("changeDealStage", () => {
         name: "Discovery",
         slug: "discovery",
         isTerminal: false,
+        isActivePipeline: true,
         displayOrder: 2,
       },
     } as never);

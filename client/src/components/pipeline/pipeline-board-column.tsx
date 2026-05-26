@@ -55,6 +55,7 @@ export function PipelineBoardColumn({
 }: PipelineBoardColumnProps) {
   const { isOver, setNodeRef } = useDroppable({
     id: column.stage.id,
+    disabled: entity === "deal" && column.stage.isActivePipeline === false,
     data: {
       stageId: column.stage.id,
       stageSlug: column.stage.slug,
