@@ -144,6 +144,13 @@ function asDateOrNull(value: unknown) {
   return Number.isFinite(parsed.getTime()) ? parsed.toISOString() : null;
 }
 
+function normalizeOptionalString(value: unknown): { valid: true; value: string | null } | { valid: false } {
+  if (value == null) return { valid: true, value: null };
+  if (typeof value !== "string") return { valid: false };
+  const text = value.trim();
+  return { valid: true, value: text.length > 0 ? text : null };
+}
+
 function isUuid(value: string | null): boolean {
   return Boolean(value && /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value));
 }
@@ -454,7 +461,11 @@ internalRfpRoutes.post(
   express.raw({ type: "application/json", limit: "128kb" }),
   async (req, res, next) => {
     try {
-      const rawBody = req.body as Buffer;
+      const rawBody = req.body;
+      if (!Buffer.isBuffer(rawBody)) {
+        res.status(422).json({ success: false, error: "invalid_payload" });
+        return;
+      }
       const signature = req.headers["x-rfp-request-signature"] as string | undefined;
       if (!verifySignature(rawBody, signature)) {
         res.status(401).json({ success: false, error: "invalid_signature" });
@@ -474,12 +485,23 @@ internalRfpRoutes.post(
       }
 
       const sourceDealId = asStringOrNull(payload.sourceDealId);
-      const denialReason = asStringOrNull(payload.denialReason ?? payload.reason);
+      const denialReasonInput = normalizeOptionalString(payload.denialReason);
+      const fallbackReasonInput = normalizeOptionalString(payload.reason);
       const declinedAt = payload.declinedAt == null ? new Date().toISOString() : asDateOrNull(payload.declinedAt);
-      if (!sourceDealId || !isUuid(sourceDealId) || typeof payload.rfpApprovalRequestId !== "number" || !declinedAt) {
+      if (
+        !sourceDealId ||
+        !isUuid(sourceDealId) ||
+        typeof payload.rfpApprovalRequestId !== "number" ||
+        !Number.isFinite(payload.rfpApprovalRequestId) ||
+        !Number.isInteger(payload.rfpApprovalRequestId) ||
+        !denialReasonInput.valid ||
+        !fallbackReasonInput.valid ||
+        !declinedAt
+      ) {
         res.status(422).json({ success: false, error: "invalid_payload" });
         return;
       }
+      const denialReason = denialReasonInput.value ?? fallbackReasonInput.value;
 
       const found = await findDeal(sourceDealId);
       if (!found) {

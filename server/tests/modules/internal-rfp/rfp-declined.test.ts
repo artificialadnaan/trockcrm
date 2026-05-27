@@ -40,8 +40,12 @@ function makeRes() {
 }
 
 async function callDeclineRoute(raw: string, signature?: string) {
+  return callDeclineRouteWithBody(Buffer.from(raw), signature);
+}
+
+async function callDeclineRouteWithBody(body: unknown, signature?: string) {
   const req = {
-    body: Buffer.from(raw),
+    body,
     headers: signature ? { "x-rfp-request-signature": signature } : {},
   } as any;
   const res = makeRes();
@@ -85,7 +89,7 @@ function mockDeal(options: {
   } = options;
   let dealLookupCount = 0;
 
-  queryMock.mockImplementation(async (sql: string) => {
+  queryMock.mockImplementation(async (sql: string, values?: unknown[]) => {
     if (sql.includes("FROM pg_namespace")) return { rows: [{ nspname: "office_dallas" }] };
     if (sql.includes("FROM \"office_dallas\".deals") && sql.includes("LEFT JOIN")) {
       dealLookupCount += 1;
@@ -129,8 +133,8 @@ function mockDeal(options: {
           deal_number: "DFW-4-12345-aa",
           project_number: null,
           rfp_approval_status: "declined",
-          rfp_declined_reason: "Pricing was too high",
-          rfp_declined_at: "2026-05-26T15:30:00.000Z",
+          rfp_declined_reason: values?.[0] ?? "Pricing was too high",
+          rfp_declined_at: values?.[1] ?? "2026-05-26T15:30:00.000Z",
         }],
         rowCount: updateRowCount ?? (rfpApprovalStatus === "declined" ? 0 : 1),
       };
@@ -271,6 +275,63 @@ describe("POST /api/internal/rfp-declined", () => {
 
     expect(res.statusCode).toBe(422);
     expect(res.body).toEqual({ success: false, error: "invalid_payload" });
+  });
+
+  it("returns a typed error instead of a 500 when the raw body is not a Buffer", async () => {
+    const res = await callDeclineRouteWithBody(undefined, "sha256=bad");
+
+    expect(res.statusCode).toBe(422);
+    expect(res.body).toEqual({ success: false, error: "invalid_payload" });
+    expect(queryMock).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["non-finite", `{"sourceDealId":"${DEAL_ID}","rfpApprovalRequestId":1e999,"denialReason":"No","declinedAt":"2026-05-26T15:30:00.000Z"}`],
+    ["non-integer", `{"sourceDealId":"${DEAL_ID}","rfpApprovalRequestId":77.5,"denialReason":"No","declinedAt":"2026-05-26T15:30:00.000Z"}`],
+  ])("returns invalid-payload for a %s request id", async (_label, raw) => {
+    const signature = `sha256=${crypto.createHmac("sha256", "secret").update(raw).digest("hex")}`;
+
+    const res = await callDeclineRoute(raw, signature);
+
+    expect(res.statusCode).toBe(422);
+    expect(res.body).toEqual({ success: false, error: "invalid_payload" });
+    expect(queryMock).not.toHaveBeenCalled();
+  });
+
+  it("falls back to reason when denialReason is blank", async () => {
+    mockDeal();
+    const { raw, signature } = sign(body({ denialReason: "   ", reason: "Approver declined: missing scope" }));
+
+    const res = await callDeclineRoute(raw, signature);
+
+    expect(res.statusCode).toBe(200);
+    const updateCall = queryMock.mock.calls.find((call) =>
+      String(call[0]).includes("UPDATE \"office_dallas\".deals") &&
+      String(call[0]).includes("rfp_approval_status = 'declined'")
+    );
+    expect(updateCall?.[1]?.[0]).toBe("Approver declined: missing scope");
+    const historyCall = queryMock.mock.calls.find((call) => String(call[0]).includes("INSERT INTO \"office_dallas\".deal_history"));
+    expect(historyCall?.[1]?.[6]).toBe("Approver declined: missing scope");
+  });
+
+  it("rejects non-string denial reasons instead of stringifying them", async () => {
+    const { raw, signature } = sign(body({ denialReason: { nested: "nope" } }));
+
+    const res = await callDeclineRoute(raw, signature);
+
+    expect(res.statusCode).toBe(422);
+    expect(res.body).toEqual({ success: false, error: "invalid_payload" });
+    expect(queryMock).not.toHaveBeenCalled();
+  });
+
+  it("rejects non-string fallback reasons instead of stringifying them", async () => {
+    const { raw, signature } = sign(body({ denialReason: "", reason: { nested: "nope" } }));
+
+    const res = await callDeclineRoute(raw, signature);
+
+    expect(res.statusCode).toBe(422);
+    expect(res.body).toEqual({ success: false, error: "invalid_payload" });
+    expect(queryMock).not.toHaveBeenCalled();
   });
 
   it("does not treat a declined deal with a different request id as a duplicate", async () => {

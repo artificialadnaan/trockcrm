@@ -57,3 +57,21 @@ Round 1, Mendel: found malformed `sourceDealId` could become a Postgres UUID err
 Round 2, Cicero: found concurrent duplicate callbacks could return 409 if both read pending and one lost the conditional update. Fix applied: zero-row updates now re-read the deal and return idempotent success when it is already declined for the same request id, with a regression test.
 
 Round 3, Pasteur: found signed JSON `null` parsed successfully and could throw before typed validation. Fix applied: non-object payload guard with a regression test.
+
+## PR #490 Follow-Up Fixes
+
+Addressed Codex review findings on commit `3094f600`:
+
+- Added a `Buffer.isBuffer(req.body)` guard on `POST /api/internal/rfp-declined` before HMAC verification. Non-raw bodies now return typed `422 invalid_payload` instead of reaching `crypto.createHmac().update()`.
+- Tightened `rfpApprovalRequestId` validation to require a finite integer. Non-finite and fractional numeric ids now return typed `422 invalid_payload` instead of being acknowledged as stale callbacks.
+- Replaced string coercion for decline reasons with trim-first string validation. Blank `denialReason` now falls back to `reason`, while non-string `denialReason` and non-string fallback `reason` values are rejected as `invalid_payload`.
+
+Additional tests were added in `server/tests/modules/internal-rfp/rfp-declined.test.ts` for non-Buffer bodies, non-finite and non-integer request ids, blank denial reason fallback, non-string denial reason rejection, and non-string fallback reason rejection.
+
+Follow-up review round, Godel: found no route behavior issues and flagged one test gap for non-string fallback `reason`. Fix applied with an explicit regression test.
+
+Follow-up verification:
+
+- `TMPDIR=/private/tmp npx vitest run server/tests/modules/internal-rfp/rfp-declined.test.ts --testTimeout=15000 --exclude '.worktrees/**'`: passed, 16 tests.
+- `TMPDIR=/private/tmp npx vitest run server/tests/modules/internal-rfp/ --testTimeout=15000 --exclude '.worktrees/**'` outside sandbox for Supertest listener binding: passed, 34 tests.
+- Required full-suite command outside sandbox: failed with existing unrelated failures. Final summary: 23 failed files, 504 passed files, 84 failed tests, 3944 passed tests. Observed buckets remained outside the RFP decline fix, including `detail-page-shell.test.tsx`, `kanban-deal-card.test.tsx`, `deal-list-page.test.tsx`, deal detail KPI visual assertions, lead form/service mock failures, property consistency tests, report-builder SQL quoting expectations, and sales-review service expectations.
