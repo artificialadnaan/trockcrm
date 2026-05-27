@@ -963,12 +963,10 @@ function dealEstimateSentAtSql() {
   `;
 }
 
-function effectiveDealValueSql(isTerminalStage: boolean) {
-  const rawValue = isTerminalStage
+function dealPipelineValueSql(isTerminalStage: boolean) {
+  return isTerminalStage
     ? dealAwardedFirstWithFallbackSql(deals)
     : dealBestEstimateSql(deals);
-
-  return sql`CASE WHEN ${deals.onHold} THEN 0 ELSE ${rawValue} END`;
 }
 
 function addEstimateSentDateConditions(
@@ -2383,11 +2381,12 @@ export async function getDealsForPipeline(
     }
 
     const where = and(...stageConditions, ...commonConditions);
+    const countedDealFilter = aliasedActiveDealCountFilterSql("deals");
     const summaryRows = await tenantDb
       .select({
         totalCount: sql<number>`count(*)`,
-        activeCount: sql<number>`count(*) filter (where ${aliasedActiveDealCountFilterSql("deals")})`,
-        totalValue: sql<number>`COALESCE(SUM(${effectiveDealValueSql(isTerminalStage)}), 0)`,
+        activeCount: sql<number>`count(*) filter (where ${countedDealFilter})`,
+        totalValue: sql<number>`COALESCE(SUM(${dealPipelineValueSql(isTerminalStage)}) FILTER (WHERE ${countedDealFilter}), 0)`,
       })
       .from(deals)
       .where(where);
