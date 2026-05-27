@@ -176,6 +176,8 @@ export const deals = pgTable(
     rfpApprovalRequestId: integer("rfp_approval_request_id"),
     rfpApprovalToken: text("rfp_approval_token"),
     rfpApprovalStatus: text("rfp_approval_status"),
+    rfpDeclinedReason: text("rfp_declined_reason"),
+    rfpDeclinedAt: timestamp("rfp_declined_at", { withTimezone: true }),
     rfpConflictReason: text("rfp_conflict_reason"),
     rfpConflictWith: jsonb("rfp_conflict_with"),
     rfpLastAttemptError: text("rfp_last_attempt_error"),

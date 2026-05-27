@@ -1325,6 +1325,12 @@ function RfpApprovalStatusBlock({
           {deal.rfpApprovalStatus === "pending" && deal.rfpApprovalRequestId && (
             <p className="mt-1 text-sm">Request #{deal.rfpApprovalRequestId}</p>
           )}
+          {deal.rfpApprovalStatus === "declined" && deal.rfpDeclinedReason && (
+            <p className="mt-1 text-sm">{deal.rfpDeclinedReason}</p>
+          )}
+          {deal.rfpApprovalStatus === "declined" && deal.rfpDeclinedAt && (
+            <p className="mt-1 text-sm">Declined {formatDate(deal.rfpDeclinedAt)}</p>
+          )}
         </div>
         {deal.rfpApprovalStatus === "send_failed" && (
           <Button type="button" size="sm" variant="outline" onClick={onRetry} disabled={retrying}>
