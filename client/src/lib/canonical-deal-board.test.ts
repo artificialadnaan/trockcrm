@@ -490,4 +490,421 @@ describe("buildCanonicalDealBoardColumns", () => {
       "deal-canceled-1",
     ]);
   });
+
+  it("returns the canonical Won aggregate unchanged when only a single Won row is present", () => {
+    // Sanity check: a single canonical Won row should pass through untouched.
+    const columns = buildCanonicalDealBoardColumns(
+      [
+        {
+          stage: {
+            id: "stage-won-1",
+            name: "Won",
+            slug: "won",
+            workflowFamily: "standard_deal",
+            isActivePipeline: true,
+            isTerminal: true,
+          },
+          count: 294,
+          totalValue: 21690316.66,
+          cards: [],
+        },
+      ] as never,
+      [
+        {
+          id: "stage-won-1",
+          name: "Won",
+          slug: "won",
+          workflowFamily: "standard_deal",
+          isTerminal: true,
+        },
+      ]
+    );
+
+    expect(columns.find((column) => column.stage.slug === "won")).toMatchObject({
+      count: 294,
+      totalValue: 21690316.66,
+    });
+  });
+
+  it("does not triple-count the canonical Won aggregate when the server emits multiple Won-family rows", () => {
+    // Repro of the production /deals bug: getDealsForPipeline emits one row per
+    // Won-family stage (won, closed_won, sent_to_production), each carrying the
+    // SAME inArray(deals.stageId, wonStageIds) aggregate. The client previously
+    // summed all three, yielding $65.07M / 882 deals instead of $21.69M / 294.
+    const sharedCount = 294;
+    const sharedTotal = 21690316.66;
+    const columns = buildCanonicalDealBoardColumns(
+      [
+        {
+          stage: {
+            id: "stage-won-1",
+            name: "Won",
+            slug: "won",
+            workflowFamily: "standard_deal",
+            isActivePipeline: true,
+            isTerminal: true,
+          },
+          count: sharedCount,
+          totalValue: sharedTotal,
+          cards: [],
+        },
+        {
+          stage: {
+            id: "stage-won-2",
+            name: "Closed Won",
+            slug: "closed_won",
+            workflowFamily: "standard_deal",
+            isActivePipeline: false,
+            isTerminal: true,
+          },
+          count: sharedCount,
+          totalValue: sharedTotal,
+          cards: [],
+        },
+        {
+          stage: {
+            id: "stage-won-3",
+            name: "Sent to Production",
+            slug: "sent_to_production",
+            workflowFamily: "standard_deal",
+            isActivePipeline: false,
+            isTerminal: false,
+          },
+          count: sharedCount,
+          totalValue: sharedTotal,
+          cards: [],
+        },
+      ] as never,
+      [
+        {
+          id: "stage-won-1",
+          name: "Won",
+          slug: "won",
+          workflowFamily: "standard_deal",
+          isTerminal: true,
+        },
+      ]
+    );
+
+    const wonColumn = columns.find((column) => column.stage.slug === "won");
+    expect(wonColumn?.count).toBe(sharedCount);
+    expect(wonColumn?.totalValue).toBe(sharedTotal);
+    // Guards against regression to the tripled values seen in production.
+    expect(wonColumn?.count).not.toBe(sharedCount * 3);
+    expect(wonColumn?.totalValue).not.toBe(sharedTotal * 3);
+  });
+
+  it("does not quadruple-count the canonical Lost aggregate when the server emits multiple Lost-family rows", () => {
+    // Symmetric to the Won bug: Lost-family stages (lost, closed_lost,
+    // production_lost, service_lost) each carry the SAME canonical aggregate.
+    const sharedCount = 270;
+    const sharedTotal = 81450000;
+    const columns = buildCanonicalDealBoardColumns(
+      [
+        {
+          stage: {
+            id: "stage-lost-1",
+            name: "Lost",
+            slug: "lost",
+            workflowFamily: "standard_deal",
+            isActivePipeline: true,
+            isTerminal: true,
+          },
+          count: sharedCount,
+          totalValue: sharedTotal,
+          cards: [],
+        },
+        {
+          stage: {
+            id: "stage-lost-2",
+            name: "Closed Lost",
+            slug: "closed_lost",
+            workflowFamily: "standard_deal",
+            isActivePipeline: false,
+            isTerminal: true,
+          },
+          count: sharedCount,
+          totalValue: sharedTotal,
+          cards: [],
+        },
+        {
+          stage: {
+            id: "stage-lost-3",
+            name: "Production Lost",
+            slug: "production_lost",
+            workflowFamily: "standard_deal",
+            isActivePipeline: false,
+            isTerminal: true,
+          },
+          count: sharedCount,
+          totalValue: sharedTotal,
+          cards: [],
+        },
+        {
+          stage: {
+            id: "stage-lost-4",
+            name: "Service Lost",
+            slug: "service_lost",
+            workflowFamily: "service_deal",
+            isActivePipeline: false,
+            isTerminal: true,
+          },
+          count: sharedCount,
+          totalValue: sharedTotal,
+          cards: [],
+        },
+      ] as never,
+      [
+        {
+          id: "stage-lost-1",
+          name: "Lost",
+          slug: "lost",
+          workflowFamily: "standard_deal",
+          isTerminal: true,
+        },
+      ]
+    );
+
+    const lostColumn = columns.find((column) => column.stage.slug === "lost");
+    expect(lostColumn?.count).toBe(sharedCount);
+    expect(lostColumn?.totalValue).toBe(sharedTotal);
+    expect(lostColumn?.count).not.toBe(sharedCount * 4);
+    expect(lostColumn?.totalValue).not.toBe(sharedTotal * 4);
+  });
+
+  it("still sums aliased non-terminal raw columns into a canonical pipeline stage", () => {
+    // Non-terminal canonical slugs (e.g. estimating) DO NOT have the
+    // duplicate-aggregate problem on the server — each raw stage's aggregate
+    // counts distinct deals — so summing across aliases must still work. Here
+    // estimating + estimate_in_progress both canonicalize to "estimating" and
+    // their counts/values are independent and should sum.
+    const columns = buildCanonicalDealBoardColumns(
+      [
+        {
+          stage: {
+            id: "stage-est-1",
+            name: "Estimating",
+            slug: "estimating",
+            workflowFamily: "standard_deal",
+            isActivePipeline: true,
+          },
+          count: 7,
+          totalValue: 100_000,
+          cards: [],
+        },
+        {
+          stage: {
+            id: "stage-est-2",
+            name: "Estimate In Progress",
+            slug: "estimate_in_progress",
+            workflowFamily: "standard_deal",
+            isActivePipeline: false,
+          },
+          count: 3,
+          totalValue: 45_000,
+          cards: [],
+        },
+      ] as never,
+      [
+        {
+          id: "stage-est-1",
+          name: "Estimating",
+          slug: "estimating",
+          workflowFamily: "standard_deal",
+        },
+      ]
+    );
+
+    expect(columns.find((column) => column.stage.slug === "estimating")).toMatchObject({
+      count: 10,
+      totalValue: 145_000,
+    });
+  });
+
+  it("prefers the exact canonical Won row regardless of array order", () => {
+    // The "won" row appears last in the array; the picker must still pick it
+    // because its slug is exactly "won". Distinct values per row make it
+    // unambiguous which row was selected.
+    const columns = buildCanonicalDealBoardColumns(
+      [
+        {
+          stage: {
+            id: "stage-won-2",
+            name: "Closed Won",
+            slug: "closed_won",
+            workflowFamily: "standard_deal",
+            isActivePipeline: true,
+            isTerminal: true,
+          },
+          count: 100,
+          totalValue: 100_000,
+          cards: [],
+        },
+        {
+          stage: {
+            id: "stage-won-3",
+            name: "Sent to Production",
+            slug: "sent_to_production",
+            workflowFamily: "standard_deal",
+            isActivePipeline: false,
+            isTerminal: false,
+          },
+          count: 200,
+          totalValue: 200_000,
+          cards: [],
+        },
+        {
+          stage: {
+            id: "stage-won-1",
+            name: "Won",
+            slug: "won",
+            workflowFamily: "standard_deal",
+            isActivePipeline: false,
+            isTerminal: true,
+          },
+          count: 294,
+          totalValue: 21690316.66,
+          cards: [],
+        },
+      ] as never,
+      [
+        {
+          id: "stage-won-1",
+          name: "Won",
+          slug: "won",
+          workflowFamily: "standard_deal",
+          isTerminal: true,
+        },
+      ]
+    );
+
+    expect(columns.find((column) => column.stage.slug === "won")).toMatchObject({
+      count: 294,
+      totalValue: 21690316.66,
+    });
+  });
+
+  it("falls back to the isActivePipeline Won row when no exact-slug row is present", () => {
+    // Only legacy Won-family rows are emitted; the picker must pick the row
+    // marked isActivePipeline === true (not the first row).
+    const columns = buildCanonicalDealBoardColumns(
+      [
+        {
+          stage: {
+            id: "stage-won-2",
+            name: "Closed Won",
+            slug: "closed_won",
+            workflowFamily: "standard_deal",
+            isActivePipeline: false,
+            isTerminal: true,
+          },
+          count: 100,
+          totalValue: 100_000,
+          cards: [],
+        },
+        {
+          stage: {
+            id: "stage-won-3",
+            name: "Sent to Production",
+            slug: "sent_to_production",
+            workflowFamily: "standard_deal",
+            isActivePipeline: true,
+            isTerminal: false,
+          },
+          count: 294,
+          totalValue: 21690316.66,
+          cards: [],
+        },
+        {
+          stage: {
+            id: "stage-won-4",
+            name: "Service Complete",
+            slug: "service_complete",
+            workflowFamily: "service_deal",
+            isActivePipeline: false,
+            isTerminal: true,
+          },
+          count: 50,
+          totalValue: 5_000,
+          cards: [],
+        },
+      ] as never,
+      [
+        {
+          id: "stage-won-2",
+          name: "Closed Won",
+          slug: "closed_won",
+          workflowFamily: "standard_deal",
+          isTerminal: true,
+        },
+      ]
+    );
+
+    expect(columns.find((column) => column.stage.slug === "won")).toMatchObject({
+      count: 294,
+      totalValue: 21690316.66,
+    });
+  });
+
+  it("falls back to the first Won-family row when no exact match and no isActivePipeline row exist", () => {
+    // All three legacy rows lack isActivePipeline; the picker must return the
+    // first row in the array.
+    const columns = buildCanonicalDealBoardColumns(
+      [
+        {
+          stage: {
+            id: "stage-won-2",
+            name: "Closed Won",
+            slug: "closed_won",
+            workflowFamily: "standard_deal",
+            isActivePipeline: false,
+            isTerminal: true,
+          },
+          count: 111,
+          totalValue: 11_111,
+          cards: [],
+        },
+        {
+          stage: {
+            id: "stage-won-3",
+            name: "Sent to Production",
+            slug: "sent_to_production",
+            workflowFamily: "standard_deal",
+            isActivePipeline: false,
+            isTerminal: false,
+          },
+          count: 222,
+          totalValue: 22_222,
+          cards: [],
+        },
+        {
+          stage: {
+            id: "stage-won-4",
+            name: "Service Complete",
+            slug: "service_complete",
+            workflowFamily: "service_deal",
+            isActivePipeline: false,
+            isTerminal: true,
+          },
+          count: 333,
+          totalValue: 33_333,
+          cards: [],
+        },
+      ] as never,
+      [
+        {
+          id: "stage-won-2",
+          name: "Closed Won",
+          slug: "closed_won",
+          workflowFamily: "standard_deal",
+          isTerminal: true,
+        },
+      ]
+    );
+
+    expect(columns.find((column) => column.stage.slug === "won")).toMatchObject({
+      count: 111,
+      totalValue: 11_111,
+    });
+  });
 });

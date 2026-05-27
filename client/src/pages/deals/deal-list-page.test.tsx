@@ -1269,6 +1269,56 @@ describe("DealListPage", () => {
     expect(html).not.toContain("$410K");
   });
 
+  it("renders a single Won KPI value when the server emits duplicate Won-family pipelineColumns rows", () => {
+    // Production server (getDealsForPipeline) emits one pipelineColumns row per
+    // Won-family stage (won, closed_won, sent_to_production), each carrying the
+    // SAME canonical aggregate. The client must NOT triple-count those rows
+    // when computing the Won KPI value.
+    const sharedCount = 294;
+    const sharedTotal = 21690316.66;
+    mocks.useDealBoardMock.mockReturnValue({
+      board: {
+        columns: [
+          {
+            stage: { id: "stage-opportunity", name: "Opportunity", slug: "opportunity" },
+            count: 1,
+            totalValue: 180000,
+            cards: [makeDeal()],
+          },
+          {
+            stage: { id: "stage-won-1", name: "Won", slug: "won" },
+            count: sharedCount,
+            totalValue: sharedTotal,
+            cards: [],
+          },
+          {
+            stage: { id: "stage-won-2", name: "Closed Won", slug: "closed_won" },
+            count: sharedCount,
+            totalValue: sharedTotal,
+            cards: [],
+          },
+          {
+            stage: { id: "stage-won-3", name: "Sent to Production", slug: "sent_to_production" },
+            count: sharedCount,
+            totalValue: sharedTotal,
+            cards: [],
+          },
+        ],
+        terminalStages: [],
+      },
+      loading: false,
+      error: null,
+      refetch: vi.fn(),
+    });
+
+    const html = renderPage();
+
+    // Single canonical Won aggregate ($21.7M compact-formatted), NOT $65.1M
+    // (which would be the tripled value).
+    expect(html).toMatch(/Won.*\$21\.7M/);
+    expect(html).not.toContain("$65.1M");
+  });
+
   it("passes the same effective won date range into the board request and drilldown list", () => {
     mocks.useDealBoardMock.mockReturnValue({
       board: {
