@@ -45,6 +45,57 @@ function extractSqlText(value: unknown): string {
   return Object.values(value as Record<string, unknown>).map(extractSqlText).join("");
 }
 
+function expectSqlTermsInOrder(sqlText: string, terms: string[]) {
+  let cursor = -1;
+  for (const term of terms) {
+    const index = sqlText.indexOf(term);
+    expect(index).toBeGreaterThan(cursor);
+    cursor = index;
+  }
+}
+
+function orderBySql(sqlText: string) {
+  const index = sqlText.lastIndexOf("order by");
+  return index >= 0 ? sqlText.slice(index) : sqlText;
+}
+
+function currentValueForRow(row: {
+  on_hold?: boolean | null;
+  bid_board_total_sales?: string | number | null;
+  bid_estimate?: string | number | null;
+  dd_estimate?: string | number | null;
+  awarded_amount?: string | number | null;
+}) {
+  if (row.on_hold) return 0;
+  const value = [
+    row.bid_board_total_sales,
+    row.bid_estimate,
+    row.dd_estimate,
+    row.awarded_amount,
+  ]
+    .map((candidate) => Number(candidate ?? 0))
+    .find((candidate) => Number.isFinite(candidate) && candidate > 0);
+  return value ?? 0;
+}
+
+function awardedFirstValueForRow(row: {
+  on_hold?: boolean | null;
+  awarded_amount?: string | number | null;
+  bid_board_total_sales?: string | number | null;
+  bid_estimate?: string | number | null;
+  dd_estimate?: string | number | null;
+}) {
+  const value = [
+    row.awarded_amount,
+    row.bid_board_total_sales,
+    row.bid_estimate,
+    row.dd_estimate,
+  ]
+    .map((candidate) => Number(candidate ?? 0))
+    .find((candidate) => Number.isFinite(candidate) && candidate > 0);
+  return value ?? 0;
+}
+
 function createOfficeScopeSelectMock(rows: any[] = [{ id: "rep-1" }]) {
   return vi.fn(() => ({
     from: vi.fn().mockReturnThis(),
@@ -102,7 +153,7 @@ describe("listDealStagePage", () => {
     expect(result.summary).toMatchObject({ count: 21, activeCount: 21, totalCount: 26, totalValue: 400000 });
   });
 
-  it("uses positive awarded-first fallback for terminal stage totals and value sorting", async () => {
+  it("uses positive awarded-first fallback for won terminal stage totals and value sorting", async () => {
     dbState.responses = [
       [{ id: "stage-won", slug: "service_complete", name: "Service Complete", displayOrder: 8, isTerminal: true }],
     ];
@@ -132,7 +183,182 @@ describe("listDealStagePage", () => {
 
     expect(executedSql).toContain("case when d.awarded_amount > 0 then d.awarded_amount end");
     expect(executedSql).toContain("case when d.bid_estimate > 0 then d.bid_estimate end");
-    expect(executedSql).not.toContain("coalesce(d.awarded_amount, d.bid_estimate");
+    const rowSql = extractSqlText(tenantDb.execute.mock.calls[1]?.[0]).toLowerCase();
+    const rowOrderSql = orderBySql(rowSql);
+    expectSqlTermsInOrder(rowOrderSql, [
+      "awarded_amount",
+      "bid_board_total_sales",
+      "bid_estimate",
+      "dd_estimate",
+    ]);
+    expect(rowOrderSql).toContain("order by");
+    expect(rowOrderSql).not.toContain("case when d.on_hold then 0");
+    expect(rowOrderSql).not.toContain("coalesce(d.awarded_amount, d.bid_estimate");
+  });
+
+  it("uses active-pipeline current value source for lost terminal stage totals", async () => {
+    dbState.responses = [
+      [{ id: "stage-lost", slug: "lost", name: "Lost", displayOrder: 8, isTerminal: true }],
+    ];
+
+    const tenantDb = {
+      select: createOfficeScopeSelectMock(),
+      execute: vi.fn()
+        .mockResolvedValueOnce({ rows: [{ total_count: "4", active_count: "3", total_value: "6000" }] })
+        .mockResolvedValueOnce({ rows: [] }),
+    } as any;
+
+    const { listDealStagePage } = await import("../../../src/modules/deals/service.js");
+    const result = await listDealStagePage(tenantDb, {
+      role: "admin",
+      userId: "admin-1",
+      activeOfficeId: "office-1",
+      scope: "all",
+      stageId: "stage-lost",
+      page: 1,
+      pageSize: 25,
+      sort: "value_desc",
+      lostAllTime: true,
+    } as any);
+
+    expect(result.summary).toMatchObject({ count: 3, activeCount: 3, totalCount: 4, totalValue: 6000 });
+    const countSql = extractSqlText(tenantDb.execute.mock.calls[0]?.[0]).toLowerCase();
+    const rowSql = extractSqlText(tenantDb.execute.mock.calls[1]?.[0]).toLowerCase();
+    const rowOrderSql = orderBySql(rowSql);
+    for (const sqlText of [countSql, rowOrderSql]) {
+      expectSqlTermsInOrder(sqlText, [
+        "bid_board_total_sales",
+        "bid_estimate",
+        "dd_estimate",
+        "awarded_amount",
+      ]);
+      expect(sqlText).toContain("case when d.on_hold then 0");
+    }
+    expect(rowOrderSql).toContain("order by");
+    expect(rowOrderSql).not.toContain("coalesce(d.awarded_amount, d.bid_estimate");
+  });
+
+  it("sorts lost value_desc by the current-value contribution rather than awarded amount", async () => {
+    dbState.responses = [
+      [{ id: "stage-lost", slug: "lost", name: "Lost", displayOrder: 8, isTerminal: true }],
+    ];
+
+    const lostRows = [
+      {
+        id: "deal-high-awarded-low-current",
+        deal_number: "TR-LOW-CURRENT",
+        name: "High Awarded Low Current",
+        stage_id: "stage-lost",
+        on_hold: false,
+        awarded_amount: "9000",
+        bid_board_total_sales: "100",
+        bid_estimate: null,
+        dd_estimate: null,
+      },
+      {
+        id: "deal-high-current",
+        deal_number: "TR-HIGH-CURRENT",
+        name: "High Current",
+        stage_id: "stage-lost",
+        on_hold: false,
+        awarded_amount: "50",
+        bid_board_total_sales: "5000",
+        bid_estimate: null,
+        dd_estimate: null,
+      },
+      {
+        id: "deal-dd-current",
+        deal_number: "TR-DD-CURRENT",
+        name: "DD Current",
+        stage_id: "stage-lost",
+        on_hold: false,
+        awarded_amount: "300",
+        bid_board_total_sales: null,
+        bid_estimate: null,
+        dd_estimate: "3500",
+      },
+      {
+        id: "deal-awarded-fallback",
+        deal_number: "TR-AWARDED-FALLBACK",
+        name: "Awarded Fallback",
+        stage_id: "stage-lost",
+        on_hold: false,
+        awarded_amount: "2500",
+        bid_board_total_sales: null,
+        bid_estimate: null,
+        dd_estimate: null,
+      },
+      {
+        id: "deal-null-value",
+        deal_number: "TR-NULL-VALUE",
+        name: "Null Value",
+        stage_id: "stage-lost",
+        on_hold: false,
+        awarded_amount: null,
+        bid_board_total_sales: null,
+        bid_estimate: null,
+        dd_estimate: null,
+      },
+    ];
+    const expectedCurrentOrder = [...lostRows]
+      .sort((a, b) => currentValueForRow(b) - currentValueForRow(a))
+      .map((row) => row.id);
+    const awardedOrder = [...lostRows]
+      .sort((a, b) => awardedFirstValueForRow(b) - awardedFirstValueForRow(a))
+      .map((row) => row.id);
+    expect(expectedCurrentOrder).not.toEqual(awardedOrder);
+
+    const tenantDb = {
+      select: createOfficeScopeSelectMock(),
+      execute: vi.fn((query: unknown) => {
+        const queryText = extractSqlText(query).toLowerCase();
+        if (!queryText.includes("order by")) {
+          return Promise.resolve({
+            rows: [
+              {
+                total_count: String(lostRows.length),
+                active_count: String(lostRows.length),
+                total_value: String(lostRows.reduce((sum, row) => sum + currentValueForRow(row), 0)),
+              },
+            ],
+          });
+        }
+        const orderSql = orderBySql(queryText);
+        const currentPrecedenceSort =
+          orderSql.indexOf("bid_board_total_sales") < orderSql.indexOf("awarded_amount");
+        const sortedRows = [...lostRows].sort((a, b) =>
+          currentPrecedenceSort
+            ? currentValueForRow(b) - currentValueForRow(a)
+            : awardedFirstValueForRow(b) - awardedFirstValueForRow(a)
+        );
+        return Promise.resolve({ rows: sortedRows });
+      }),
+    } as any;
+
+    const { listDealStagePage } = await import("../../../src/modules/deals/service.js");
+    const result = await listDealStagePage(tenantDb, {
+      role: "admin",
+      userId: "admin-1",
+      activeOfficeId: "office-1",
+      scope: "all",
+      stageId: "stage-lost",
+      page: 1,
+      pageSize: 25,
+      sort: "value_desc",
+      lostAllTime: true,
+    } as any);
+
+    const rowSql = extractSqlText(tenantDb.execute.mock.calls[1]?.[0]).toLowerCase();
+    const rowOrderSql = orderBySql(rowSql);
+    expectSqlTermsInOrder(rowOrderSql, [
+      "bid_board_total_sales",
+      "bid_estimate",
+      "dd_estimate",
+      "awarded_amount",
+    ]);
+    expect(rowOrderSql).toContain("order by");
+    expect(result.rows.map((row: any) => row.id)).toEqual(expectedCurrentOrder);
+    expect(result.rows[0]?.id).toBe("deal-high-current");
   });
 
   it("hydrates stage-page At Risk age from Bid Board stage-entered timestamp for Bid Board-owned rows", async () => {

@@ -66,6 +66,51 @@ function selectedSqlText(chain: any, key: string) {
   return extractSqlText(chain?._selectArgs?.[0]?.[key]).toLowerCase();
 }
 
+function expectSqlTermsInOrder(sqlText: string, terms: string[]) {
+  let cursor = -1;
+  for (const term of terms) {
+    const index = sqlText.indexOf(term);
+    expect(index).toBeGreaterThan(cursor);
+    cursor = index;
+  }
+}
+
+function orderBySql(sqlText: string) {
+  const index = sqlText.lastIndexOf("order by");
+  return index >= 0 ? sqlText.slice(index) : sqlText;
+}
+
+function currentValueTotal(
+  rows: Array<{
+    onHold?: boolean | null;
+    bidBoardTotalSales?: string | number | null;
+    bidEstimate?: string | number | null;
+    ddEstimate?: string | number | null;
+    awardedAmount?: string | number | null;
+  }>
+) {
+  return rows.reduce((sum, row) => sum + currentValueForRow(row), 0);
+}
+
+function currentValueForRow(row: {
+  onHold?: boolean | null;
+  bidBoardTotalSales?: string | number | null;
+  bidEstimate?: string | number | null;
+  ddEstimate?: string | number | null;
+  awardedAmount?: string | number | null;
+}) {
+  if (row.onHold) return 0;
+  const value = [
+    row.bidBoardTotalSales,
+    row.bidEstimate,
+    row.ddEstimate,
+    row.awardedAmount,
+  ]
+    .map((candidate) => Number(candidate ?? 0))
+    .find((candidate) => Number.isFinite(candidate) && candidate > 0);
+  return value ?? 0;
+}
+
 function containsValue(value: unknown, expected: string, seen = new Set<unknown>()): boolean {
   if (value === expected) return true;
   if (!value || typeof value !== "object") return false;
@@ -457,6 +502,295 @@ describe("getDealsForPipeline", () => {
     expect(selectedSqlText(lostSummaryChain, "activeCount")).toContain("on_hold");
     expect(selectedSqlText(lostSummaryChain, "totalValue")).toContain("filter");
     expect(selectedSqlText(lostSummaryChain, "totalValue")).toContain("on_hold");
+    expectSqlTermsInOrder(selectedSqlText(lostSummaryChain, "totalValue"), [
+      "bid_board_total_sales",
+      "bid_estimate",
+      "dd_estimate",
+      "awarded_amount",
+    ]);
+  });
+
+  it("uses active-pipeline current value source for lost terminal totals without changing the counted row set", async () => {
+    dbState.responses = [
+      [
+        {
+          id: "stage-lost",
+          slug: "lost",
+          name: "Lost",
+          displayOrder: 3,
+          isTerminal: true,
+          isActivePipeline: true,
+        },
+      ],
+    ];
+
+    const lostDeals = [
+      {
+        id: "deal-lost-bid-board",
+        onHold: false,
+        awardedAmount: "100",
+        bidBoardTotalSales: "1000",
+        bidEstimate: "900",
+        ddEstimate: "800",
+      },
+      {
+        id: "deal-lost-bid-estimate",
+        onHold: false,
+        awardedAmount: "200",
+        bidBoardTotalSales: null,
+        bidEstimate: "2000",
+        ddEstimate: "1800",
+      },
+      {
+        id: "deal-lost-zero",
+        onHold: false,
+        awardedAmount: null,
+        bidBoardTotalSales: "0",
+        bidEstimate: null,
+        ddEstimate: "0",
+      },
+      {
+        id: "deal-lost-on-hold",
+        onHold: true,
+        awardedAmount: "300",
+        bidBoardTotalSales: "3000",
+        bidEstimate: "2500",
+        ddEstimate: "2000",
+      },
+    ];
+    const activeLostCount = lostDeals.filter((deal) => !deal.onHold).length;
+    const currentValueTotal = 1000 + 2000 + 0;
+    const tenantChains: any[] = [];
+    const tenantDb = {
+      select: vi.fn((...selectArgs: unknown[]) => {
+        const chain = createChainableMock();
+        chain._selectArgs = selectArgs;
+        tenantChains.push(chain);
+        chain.then.mockImplementation((resolve: (value: any[]) => unknown) => {
+          const isCardsQuery = chain.leftJoin.mock.calls.length > 0;
+          return resolve(
+            isCardsQuery
+              ? []
+              : [
+                  {
+                    totalCount: lostDeals.length,
+                    activeCount: activeLostCount,
+                    totalValue: currentValueTotal,
+                  },
+                ]
+          );
+        });
+        return chain;
+      }),
+    } as any;
+
+    const { getDealsForPipeline } = await import("../../../src/modules/deals/service.js");
+    const result = await getDealsForPipeline(tenantDb, "director", "director-1", {
+      activeOfficeId: null,
+      scope: "all",
+      lostAllTime: true,
+    });
+
+    const lostSummaryChain = findStageSummaryChain(tenantChains, "stage-lost");
+    const lostTotalValueSql = selectedSqlText(lostSummaryChain, "totalValue");
+    expectSqlTermsInOrder(lostTotalValueSql, [
+      "bid_board_total_sales",
+      "bid_estimate",
+      "dd_estimate",
+      "awarded_amount",
+    ]);
+    expect(lostTotalValueSql).toContain("filter");
+    expect(lostTotalValueSql).toContain("on_hold");
+    expect(result.terminalStages.find((column) => column.stage.slug === "lost")).toEqual({
+      stage: expect.objectContaining({ id: "stage-lost", slug: "lost", name: "Lost" }),
+      count: activeLostCount,
+      activeCount: activeLostCount,
+      totalCount: lostDeals.length,
+      totalValue: currentValueTotal,
+    });
+  });
+
+  it("keeps lost board and stage drill-down totals aligned on the current value source", async () => {
+    const stageRows = [
+      {
+        id: "stage-lost",
+        slug: "lost",
+        name: "Lost",
+        displayOrder: 3,
+        isTerminal: true,
+        isActivePipeline: true,
+      },
+    ];
+    dbState.responses = [stageRows, stageRows];
+
+    const lostDeals = [
+      {
+        id: "deal-lost-bid-board",
+        onHold: false,
+        awardedAmount: "100",
+        bidBoardTotalSales: "1000",
+        bidEstimate: "900",
+        ddEstimate: "800",
+      },
+      {
+        id: "deal-lost-bid-estimate",
+        onHold: false,
+        awardedAmount: "200",
+        bidBoardTotalSales: null,
+        bidEstimate: "2000",
+        ddEstimate: "1800",
+      },
+      {
+        id: "deal-lost-awarded-fallback",
+        onHold: false,
+        awardedAmount: "3000",
+        bidBoardTotalSales: null,
+        bidEstimate: null,
+        ddEstimate: null,
+      },
+      {
+        id: "deal-lost-null-zero",
+        onHold: false,
+        awardedAmount: null,
+        bidBoardTotalSales: "0",
+        bidEstimate: null,
+        ddEstimate: "0",
+      },
+      {
+        id: "deal-lost-on-hold",
+        onHold: true,
+        awardedAmount: "400",
+        bidBoardTotalSales: "4000",
+        bidEstimate: "3500",
+        ddEstimate: "3000",
+      },
+    ];
+    const activeLostCount = lostDeals.filter((deal) => !deal.onHold).length;
+    const alignedTotalValue = currentValueTotal(lostDeals);
+    const sortedLostDeals = [...lostDeals].sort((a, b) => currentValueForRow(b) - currentValueForRow(a));
+    const sortedLostRows = sortedLostDeals.map((deal) => ({
+      id: deal.id,
+      deal_number: deal.id,
+      project_number: null,
+      name: deal.id,
+      stage_id: "stage-lost",
+      workflow_route: "normal",
+      assigned_rep_id: "rep-1",
+      assigned_rep_name: "Rep One",
+      region_id: null,
+      source: null,
+      property_city: null,
+      property_state: null,
+      updated_at: "2026-05-01T00:00:00.000Z",
+      stage_entered_at: "2026-05-01T00:00:00.000Z",
+      is_bid_board_owned: false,
+      bid_board_stage_slug: null,
+      bid_board_stage_entered_at: null,
+      on_hold: deal.onHold,
+      on_hold_started_at: null,
+      on_hold_accumulated_seconds: 0,
+      on_hold_accumulated_seconds_at_stage_entry: 0,
+      awarded_amount: deal.awardedAmount,
+      bid_board_total_sales: deal.bidBoardTotalSales,
+      bid_estimate: deal.bidEstimate,
+      dd_estimate: deal.ddEstimate,
+      days_in_stage: 1,
+    }));
+    const tenantChains: any[] = [];
+    const executedSql: string[] = [];
+    const tenantDb = {
+      select: vi.fn((...selectArgs: unknown[]) => {
+        const chain = createChainableMock();
+        chain._selectArgs = selectArgs;
+        tenantChains.push(chain);
+        chain.then.mockImplementation((resolve: (value: any[]) => unknown) => {
+          const whereClause = chain.where.mock.calls[0]?.[0];
+          if (!containsValue(whereClause, "stage-lost")) {
+            return resolve([{ id: "rep-1", userId: "rep-1" }]);
+          }
+          const isCardsQuery = chain.leftJoin.mock.calls.length > 0;
+          return resolve(
+            isCardsQuery
+              ? []
+              : [
+                  {
+                    totalCount: lostDeals.length,
+                    activeCount: activeLostCount,
+                    totalValue: alignedTotalValue,
+                  },
+                ]
+          );
+        });
+        return chain;
+      }),
+      execute: vi.fn((query: unknown) => {
+        executedSql.push(extractSqlText(query).toLowerCase());
+        return executedSql.length === 1
+          ? Promise.resolve({
+              rows: [
+                {
+                  total_count: String(lostDeals.length),
+                  active_count: String(activeLostCount),
+                  total_value: String(alignedTotalValue),
+                },
+              ],
+            })
+          : Promise.resolve({ rows: sortedLostRows });
+      }),
+    } as any;
+
+    const { getDealsForPipeline, listDealStagePage } = await import("../../../src/modules/deals/service.js");
+    const boardResult = await getDealsForPipeline(tenantDb, "director", "director-1", {
+      activeOfficeId: null,
+      scope: "all",
+      lostAllTime: true,
+    });
+    const stageResult = await listDealStagePage(tenantDb, {
+      role: "admin",
+      userId: "admin-1",
+      activeOfficeId: "office-1",
+      scope: "all",
+      stageId: "stage-lost",
+      page: 1,
+      pageSize: 25,
+      sort: "value_desc",
+      lostAllTime: true,
+    } as any);
+
+    const lostSummaryChain = findStageSummaryChain(tenantChains, "stage-lost");
+    const boardTotalValueSql = selectedSqlText(lostSummaryChain, "totalValue");
+    const stageCountSql = executedSql[0] ?? "";
+    const stageRowsSql = executedSql[1] ?? "";
+    for (const sqlText of [boardTotalValueSql, stageCountSql]) {
+      expectSqlTermsInOrder(sqlText, [
+        "bid_board_total_sales",
+        "bid_estimate",
+        "dd_estimate",
+        "awarded_amount",
+      ]);
+      expect(sqlText).toContain("on_hold");
+    }
+    const stageRowsOrderSql = orderBySql(stageRowsSql);
+    expectSqlTermsInOrder(stageRowsOrderSql, [
+      "bid_board_total_sales",
+      "bid_estimate",
+      "dd_estimate",
+      "awarded_amount",
+    ]);
+    expect(stageRowsOrderSql).toContain("case when d.on_hold then 0");
+    expect(stageRowsOrderSql).toContain("order by");
+    expect(boardResult.terminalStages.find((column) => column.stage.slug === "lost")?.totalValue).toBe(
+      alignedTotalValue
+    );
+    expect(stageResult.summary.totalValue).toBe(alignedTotalValue);
+    expect(boardResult.terminalStages.find((column) => column.stage.slug === "lost")?.count).toBe(
+      activeLostCount
+    );
+    expect(stageResult.summary.count).toBe(activeLostCount);
+    expect(stageResult.rows.map((row: any) => row.id)).toEqual(sortedLostDeals.map((deal) => deal.id));
+    expect(
+      stageResult.rows.reduce((sum: number, row: any) => sum + currentValueForRow(row), 0)
+    ).toBe(alignedTotalValue);
   });
 
   it("hydrates won terminal cards with a bounded filter that requires a real signed date", async () => {
@@ -550,6 +884,12 @@ describe("getDealsForPipeline", () => {
     expect(selectedSqlText(wonSummaryChain, "activeCount")).toContain("on_hold");
     expect(selectedSqlText(wonSummaryChain, "totalValue")).toContain("filter");
     expect(selectedSqlText(wonSummaryChain, "totalValue")).toContain("on_hold");
+    expectSqlTermsInOrder(selectedSqlText(wonSummaryChain, "totalValue"), [
+      "awarded_amount",
+      "bid_board_total_sales",
+      "bid_estimate",
+      "dd_estimate",
+    ]);
   });
 
   it("changes terminal totalValue when the terminal date range changes", async () => {
