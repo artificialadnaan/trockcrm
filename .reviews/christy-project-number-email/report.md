@@ -79,6 +79,12 @@ The SyncHub/procore project relay paths use project-number values for matching a
   - `CHRISTY_PROJECT_NUMBER_EMAIL`
   - non-production fallback: `kscheidegger@trockgc.com`
   - production missing recipient is treated as a retryable worker failure, not a completed lost notification.
+- Visible CC:
+  - `PROJECT_NUMBER_EMAIL_CC`
+  - non-production fallback: `adnaan.iqbal@gmail.com`
+  - production missing/empty CC is logged and omitted; the email still sends to Christy.
+  - single-address shape only, no CSV/list parsing.
+  - sent in the same Resend call via the existing `cc` option, not as a second email.
 
 ## Idempotency
 
@@ -89,6 +95,7 @@ The SyncHub/procore project relay paths use project-number values for matching a
   - worker checks this receipt before sending.
   - worker records the receipt after successful send.
   - Resend is called with idempotency key `project-number-first-set-{auditLogId}` to protect the crash-after-send/before-receipt edge as much as the provider supports.
+- Adding the CC does not alter audit/idempotency behavior: one first-set audit event still maps to one worker email job and one provider send call.
 
 ## Bulk Script Skip Mechanism
 
@@ -113,6 +120,11 @@ The SyncHub/procore project relay paths use project-number values for matching a
   - worker retry could duplicate-send after a successful provider call; added receipt ledger and Resend idempotency key.
   - `create-bidboard-excluded-real-projects.js` could bulk-create project numbers without the skip flag; it now opts out.
   - production missing `CHRISTY_PROJECT_NUMBER_EMAIL` could have become a completed/lost notification; it now retries instead of completing.
+- CC follow-up review found no issues:
+  - `PROJECT_NUMBER_EMAIL_CC` follows the same env/default shape as Christy's recipient.
+  - unset production CC does not block the To send.
+  - Resend receives one send call with `cc` when configured.
+  - trigger, audit, migration, bulk skip, and idempotency behavior remain unchanged.
 
 ## Verification
 
@@ -128,6 +140,23 @@ Passed:
 - `npm run build --workspace=worker`
 - `npm run typecheck --workspace=client`
 - `npm run build --workspace=client`
+- CC follow-up:
+  - `npm run build --workspace=shared`
+  - `TMPDIR=/private/tmp npx vitest run server/tests/modules/deals/project-number-first-set-email.test.ts --testTimeout=15000 --exclude '.worktrees/**'`
+  - `TMPDIR=/private/tmp npx vitest run server/tests/modules/deals/project-number-first-set-email.test.ts server/tests/scripts/project-number-notification-skip.test.ts --testTimeout=15000 --exclude '.worktrees/**'`
+  - `npm run typecheck --workspace=worker`
+  - `npm run typecheck --workspace=server`
+  - `npm run typecheck --workspace=shared`
+  - `npm run build --workspace=shared`
+  - `npm run build --workspace=worker`
+  - `npm run build --workspace=server`
+
+CC tests cover:
+
+- configured `PROJECT_NUMBER_EMAIL_CC` is passed as a visible `cc` option.
+- unset production `PROJECT_NUMBER_EMAIL_CC` logs and sends to Christy without CC.
+- the CC comes from the env var, with non-production default `adnaan.iqbal@gmail.com`.
+- duplicate prevention remains one email send for the audit event, not one send per recipient.
 
 Requested broad test sweep:
 

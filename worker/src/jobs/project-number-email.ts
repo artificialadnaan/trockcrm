@@ -4,6 +4,7 @@ import { sendSystemEmailWithMetadata, type SendSystemEmailResult } from "../lib/
 export const PROJECT_NUMBER_FIRST_SET_JOB = "project_number_first_set_email";
 export const PROJECT_NUMBER_FIRST_SET_AUDIT_PROCESS = "project_number_first_set";
 export const DEFAULT_NON_PROD_CHRISTY_PROJECT_NUMBER_EMAIL = "kscheidegger@trockgc.com";
+export const DEFAULT_NON_PROD_PROJECT_NUMBER_EMAIL_CC = "adnaan.iqbal@gmail.com";
 
 interface ProjectNumberFirstSetPayload {
   tenantSchema?: string;
@@ -27,7 +28,7 @@ interface HandlerDeps {
     to: string,
     subject: string,
     html: string,
-    options: { text: string; idempotencyKey: string }
+    options: { text: string; idempotencyKey: string; cc?: string }
   ) => Promise<SendSystemEmailResult>;
   env?: NodeJS.ProcessEnv;
   logger?: Pick<Console, "log" | "warn" | "error">;
@@ -56,6 +57,13 @@ export async function handleProjectNumberFirstSetEmail(
       projectNumber,
     });
     throw error;
+  }
+  const ccRecipient = resolveProjectNumberEmailCcRecipient(deps.env ?? process.env);
+  if (!ccRecipient) {
+    logger.warn("[ProjectNumberEmail] PROJECT_NUMBER_EMAIL_CC is not configured - sending without CC", {
+      dealId,
+      projectNumber,
+    });
   }
 
   const query = deps.query ?? pool.query.bind(pool);
@@ -114,6 +122,7 @@ export async function handleProjectNumberFirstSetEmail(
     const sendResult = await sendEmail(recipient, email.subject, email.html, {
       text: email.text,
       idempotencyKey: `project-number-first-set-${auditLogId}`,
+      ...(ccRecipient ? { cc: ccRecipient } : {}),
     });
     if (!sendResult.success) {
       throw new Error("Email provider returned unsuccessful result");
@@ -157,6 +166,12 @@ export function resolveChristyProjectNumberRecipient(env: NodeJS.ProcessEnv): st
   const configured = normalizeText(env.CHRISTY_PROJECT_NUMBER_EMAIL);
   if (configured) return configured;
   return env.NODE_ENV === "production" ? null : DEFAULT_NON_PROD_CHRISTY_PROJECT_NUMBER_EMAIL;
+}
+
+export function resolveProjectNumberEmailCcRecipient(env: NodeJS.ProcessEnv): string | null {
+  const configured = normalizeText(env.PROJECT_NUMBER_EMAIL_CC);
+  if (configured) return configured;
+  return env.NODE_ENV === "production" ? null : DEFAULT_NON_PROD_PROJECT_NUMBER_EMAIL_CC;
 }
 
 export function resolveFrontendUrl(env: NodeJS.ProcessEnv): string {

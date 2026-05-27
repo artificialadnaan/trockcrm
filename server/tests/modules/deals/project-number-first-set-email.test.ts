@@ -7,6 +7,7 @@ import {
   formatCurrency,
   handleProjectNumberFirstSetEmail,
   resolveChristyProjectNumberRecipient,
+  resolveProjectNumberEmailCcRecipient,
 } from "../../../../worker/src/jobs/project-number-email.js";
 import { sendSystemEmailWithMetadata } from "../../../../worker/src/lib/system-email.js";
 
@@ -62,6 +63,15 @@ describe("project number first-set notification email", () => {
     } as NodeJS.ProcessEnv)).toBe("christy@example.com");
     expect(resolveChristyProjectNumberRecipient({ NODE_ENV: "test" } as NodeJS.ProcessEnv)).toBe("kscheidegger@trockgc.com");
     expect(resolveChristyProjectNumberRecipient({ NODE_ENV: "production" } as NodeJS.ProcessEnv)).toBeNull();
+  });
+
+  it("resolves the configured CC and defaults only outside production", () => {
+    expect(resolveProjectNumberEmailCcRecipient({
+      PROJECT_NUMBER_EMAIL_CC: " adnaan@example.com ",
+      NODE_ENV: "production",
+    } as NodeJS.ProcessEnv)).toBe("adnaan@example.com");
+    expect(resolveProjectNumberEmailCcRecipient({ NODE_ENV: "test" } as NodeJS.ProcessEnv)).toBe("adnaan.iqbal@gmail.com");
+    expect(resolveProjectNumberEmailCcRecipient({ NODE_ENV: "production" } as NodeJS.ProcessEnv)).toBeNull();
   });
 
   it("builds an email with the required fields and awarded_amount currency", () => {
@@ -144,6 +154,7 @@ describe("project number first-set notification email", () => {
         env: {
           NODE_ENV: "production",
           CHRISTY_PROJECT_NUMBER_EMAIL: "christy@example.com",
+          PROJECT_NUMBER_EMAIL_CC: "adnaan@example.com",
           FRONTEND_URL: "https://crm.example.com",
         } as NodeJS.ProcessEnv,
         query,
@@ -162,6 +173,7 @@ describe("project number first-set notification email", () => {
       {
         text: expect.stringContaining("Awarded amount: $50.00"),
         idempotencyKey: "project-number-first-set-123",
+        cc: "adnaan@example.com",
       }
     );
     expect(logger.error).toHaveBeenCalledWith(
@@ -198,6 +210,7 @@ describe("project number first-set notification email", () => {
       env: {
         NODE_ENV: "production",
         CHRISTY_PROJECT_NUMBER_EMAIL: "christy@example.com",
+        PROJECT_NUMBER_EMAIL_CC: "adnaan@example.com",
         FRONTEND_URL: "https://crm.example.com",
       } as NodeJS.ProcessEnv,
       query,
@@ -220,6 +233,60 @@ describe("project number first-set notification email", () => {
     expect(logger.log).toHaveBeenCalledWith(
       "[ProjectNumberEmail] Notification already sent - skipping duplicate job",
       expect.objectContaining({ auditLogId: 123 })
+    );
+  });
+
+  it("sends to Christy without CC when PROJECT_NUMBER_EMAIL_CC is unset in production", async () => {
+    const dealId = "00000000-0000-0000-0000-000000000001";
+    const query = vi
+      .fn()
+      .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({
+        rows: [{
+          id: dealId,
+          name: "Noble",
+          project_number: "DFW-1-12345-aa",
+          deal_number: "HS-1",
+          awarded_amount: "50",
+          sales_rep_name: "Avery Rep",
+        }],
+      })
+      .mockResolvedValueOnce({ rows: [] });
+    const sendEmail = vi.fn().mockResolvedValue({ success: true, messageId: "resend-1" });
+    const logger = { log: vi.fn(), warn: vi.fn(), error: vi.fn() };
+
+    await handleProjectNumberFirstSetEmail(
+      {
+        tenantSchema: "office_dallas",
+        dealId,
+        projectNumber: "DFW-1-12345-aa",
+        auditLogId: 123,
+      },
+      null,
+      {
+        env: {
+          NODE_ENV: "production",
+          CHRISTY_PROJECT_NUMBER_EMAIL: "christy@example.com",
+          FRONTEND_URL: "https://crm.example.com",
+        } as NodeJS.ProcessEnv,
+        query,
+        sendEmail,
+        logger,
+      }
+    );
+
+    expect(sendEmail).toHaveBeenCalledWith(
+      "christy@example.com",
+      "New project number assigned: DFW-1-12345-aa (Noble)",
+      expect.any(String),
+      {
+        text: expect.stringContaining("Awarded amount: $50.00"),
+        idempotencyKey: "project-number-first-set-123",
+      }
+    );
+    expect(logger.warn).toHaveBeenCalledWith(
+      "[ProjectNumberEmail] PROJECT_NUMBER_EMAIL_CC is not configured - sending without CC",
+      expect.objectContaining({ projectNumber: "DFW-1-12345-aa" })
     );
   });
 
