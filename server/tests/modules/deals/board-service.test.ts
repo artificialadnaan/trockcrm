@@ -54,6 +54,18 @@ function findStageCardsChain(chains: any[], stageId: string) {
   );
 }
 
+function findStageSummaryChain(chains: any[], stageId: string) {
+  return chains.find(
+    (chain) =>
+      chain.leftJoin.mock.calls.length === 0 &&
+      containsValue(chain.where.mock.calls[0]?.[0], stageId)
+  );
+}
+
+function selectedSqlText(chain: any, key: string) {
+  return extractSqlText(chain?._selectArgs?.[0]?.[key]).toLowerCase();
+}
+
 function containsValue(value: unknown, expected: string, seen = new Set<unknown>()): boolean {
   if (value === expected) return true;
   if (!value || typeof value !== "object") return false;
@@ -146,8 +158,9 @@ describe("getDealsForPipeline", () => {
     }));
     const tenantChains: any[] = [];
     const tenantDb = {
-      select: vi.fn(() => {
+      select: vi.fn((...selectArgs: unknown[]) => {
         const chain = createChainableMock();
+        chain._selectArgs = selectArgs;
         tenantChains.push(chain);
         chain.then.mockImplementation((resolve: (value: any[]) => unknown) => {
           const whereClause = chain.where.mock.calls[0]?.[0];
@@ -238,8 +251,9 @@ describe("getDealsForPipeline", () => {
     ];
     const tenantChains: any[] = [];
     const tenantDb = {
-      select: vi.fn(() => {
+      select: vi.fn((...selectArgs: unknown[]) => {
         const chain = createChainableMock();
+        chain._selectArgs = selectArgs;
         tenantChains.push(chain);
         chain.then.mockImplementation((resolve: (value: any[]) => unknown) => resolve(tenantResponses.shift() ?? []));
         return chain;
@@ -255,11 +269,7 @@ describe("getDealsForPipeline", () => {
     });
 
     const cardsChain = findStageCardsChain(tenantChains, "stage-estimating");
-    const summaryChain = tenantChains.find(
-      (chain) =>
-        chain.leftJoin.mock.calls.length === 0 &&
-        containsValue(chain.where.mock.calls[0]?.[0], "stage-estimating")
-    );
+    const summaryChain = findStageSummaryChain(tenantChains, "stage-estimating");
 
     expect(result.pipelineColumns[0]?.count).toBe(100);
     expect(result.pipelineColumns[0]?.totalCount).toBe(110);
@@ -291,8 +301,9 @@ describe("getDealsForPipeline", () => {
 
     const tenantChains: any[] = [];
     const tenantDb = {
-      select: vi.fn(() => {
+      select: vi.fn((...selectArgs: unknown[]) => {
         const chain = createChainableMock();
+        chain._selectArgs = selectArgs;
         tenantChains.push(chain);
         chain.then.mockImplementation((resolve: (value: any[]) => unknown) => {
           const isCardsQuery = chain.leftJoin.mock.calls.length > 0;
@@ -337,8 +348,9 @@ describe("getDealsForPipeline", () => {
     ];
     const tenantChains: any[] = [];
     const tenantDb = {
-      select: vi.fn(() => {
+      select: vi.fn((...selectArgs: unknown[]) => {
         const chain = createChainableMock();
+        chain._selectArgs = selectArgs;
         tenantChains.push(chain);
         chain.then.mockImplementation((resolve: (value: any[]) => unknown) => resolve(tenantResponses.shift() ?? []));
         return chain;
@@ -393,8 +405,9 @@ describe("getDealsForPipeline", () => {
     }));
     const tenantChains: any[] = [];
     const tenantDb = {
-      select: vi.fn(() => {
+      select: vi.fn((...selectArgs: unknown[]) => {
         const chain = createChainableMock();
+        chain._selectArgs = selectArgs;
         tenantChains.push(chain);
         chain.then.mockImplementation((resolve: (value: any[]) => unknown) => {
           const whereClause = chain.where.mock.calls[0]?.[0];
@@ -424,11 +437,7 @@ describe("getDealsForPipeline", () => {
     });
 
     const lostCardsChain = findStageCardsChain(tenantChains, "stage-lost");
-    const lostSummaryChain = tenantChains.find(
-      (chain) =>
-        chain.leftJoin.mock.calls.length === 0 &&
-        containsValue(chain.where.mock.calls[0]?.[0], "stage-lost")
-    );
+    const lostSummaryChain = findStageSummaryChain(tenantChains, "stage-lost");
 
     expect(result.pipelineColumns.find((column) => column.stage.slug === "lost")?.deals).toHaveLength(3);
     expect(result.terminalStages.find((column) => column.stage.slug === "lost")).toEqual({
@@ -445,6 +454,9 @@ describe("getDealsForPipeline", () => {
     expect(containsIsoDate(lostSummaryChain?.where.mock.calls[0]?.[0], "2026-04-01")).toBe(true);
     expect(extractSqlText(lostCardsChain?.where.mock.calls[0]?.[0])).toContain("lost_at");
     expect(extractSqlText(lostSummaryChain?.where.mock.calls[0]?.[0])).toContain("lost_at");
+    expect(selectedSqlText(lostSummaryChain, "activeCount")).toContain("on_hold");
+    expect(selectedSqlText(lostSummaryChain, "totalValue")).toContain("filter");
+    expect(selectedSqlText(lostSummaryChain, "totalValue")).toContain("on_hold");
   });
 
   it("hydrates won terminal cards with a bounded filter that requires a real signed date", async () => {
@@ -483,8 +495,9 @@ describe("getDealsForPipeline", () => {
     }));
     const tenantChains: any[] = [];
     const tenantDb = {
-      select: vi.fn(() => {
+      select: vi.fn((...selectArgs: unknown[]) => {
         const chain = createChainableMock();
+        chain._selectArgs = selectArgs;
         tenantChains.push(chain);
         chain.then.mockImplementation((resolve: (value: any[]) => unknown) => {
           const whereClause = chain.where.mock.calls[0]?.[0];
@@ -514,11 +527,7 @@ describe("getDealsForPipeline", () => {
     });
 
     const wonCardsChain = findStageCardsChain(tenantChains, "stage-won");
-    const wonSummaryChain = tenantChains.find(
-      (chain) =>
-        chain.leftJoin.mock.calls.length === 0 &&
-        containsValue(chain.where.mock.calls[0]?.[0], "stage-won")
-    );
+    const wonSummaryChain = findStageSummaryChain(tenantChains, "stage-won");
 
     expect(result.pipelineColumns.find((column) => column.stage.slug === "won")?.deals).toHaveLength(4);
     expect(result.terminalStages.find((column) => column.stage.slug === "won")).toEqual({
@@ -538,6 +547,58 @@ describe("getDealsForPipeline", () => {
     expect(extractSqlText(wonCardsChain?.where.mock.calls[0]?.[0])).toContain("bid_board_last_updated_at");
     expect(extractSqlText(wonCardsChain?.where.mock.calls[0]?.[0])).not.toContain("stage_entered_at");
     expect(extractSqlText(wonSummaryChain?.where.mock.calls[0]?.[0])).not.toContain("stage_entered_at");
+    expect(selectedSqlText(wonSummaryChain, "activeCount")).toContain("on_hold");
+    expect(selectedSqlText(wonSummaryChain, "totalValue")).toContain("filter");
+    expect(selectedSqlText(wonSummaryChain, "totalValue")).toContain("on_hold");
+  });
+
+  it("changes terminal totalValue when the terminal date range changes", async () => {
+    const stageRows = [
+      {
+        id: "stage-lost",
+        slug: "lost",
+        name: "Lost",
+        displayOrder: 3,
+        isTerminal: true,
+        isActivePipeline: true,
+      },
+    ];
+    dbState.responses = [stageRows, stageRows];
+
+    const tenantDb = {
+      select: vi.fn((...selectArgs: unknown[]) => {
+        const chain = createChainableMock();
+        chain._selectArgs = selectArgs;
+        chain.then.mockImplementation((resolve: (value: any[]) => unknown) => {
+          if (chain.leftJoin.mock.calls.length > 0) return resolve([]);
+
+          const whereClause = chain.where.mock.calls[0]?.[0];
+          const bounded = containsIsoDate(whereClause, "2026-03-01");
+          return resolve([
+            bounded
+              ? { totalCount: 2, activeCount: 1, totalValue: 1000 }
+              : { totalCount: 4, activeCount: 3, totalValue: 3000 },
+          ]);
+        });
+        return chain;
+      }),
+    } as any;
+
+    const { getDealsForPipeline } = await import("../../../src/modules/deals/service.js");
+    const allTime = await getDealsForPipeline(tenantDb, "director", "director-1", {
+      activeOfficeId: null,
+      scope: "all",
+      lostAllTime: true,
+    });
+    const bounded = await getDealsForPipeline(tenantDb, "director", "director-1", {
+      activeOfficeId: null,
+      scope: "all",
+      lostSince: "2026-03-01",
+      lostUntil: "2026-03-31",
+    });
+
+    expect(allTime.terminalStages.find((column) => column.stage.slug === "lost")?.totalValue).toBe(3000);
+    expect(bounded.terminalStages.find((column) => column.stage.slug === "lost")?.totalValue).toBe(1000);
   });
 
   it("hydrates lost terminal cards with a bounded filter that requires a real lost date", async () => {
@@ -967,7 +1028,7 @@ describe("getDealsForPipeline", () => {
     const summarySelect = summaryChain?._selectArgs?.[0] as { totalValue?: unknown } | undefined;
     const summarySelectText = extractSqlText(summarySelect?.totalValue).toLowerCase();
     expect(summarySelectText).toContain("on_hold");
-    expect(summarySelectText).toContain("case");
+    expect(summarySelectText).toContain("filter");
     expect(summarySelectText).toContain("awarded_amount");
     expect(summarySelectText).toContain("bid_estimate");
     expect(summarySelectText).toContain("dd_estimate");
