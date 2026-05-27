@@ -82,11 +82,9 @@ function findContractsSignedSql(executeMock: any): string {
   const allSqlTexts: string[] = executeMock.mock.calls.map((c: any[]) =>
     extractSqlText(c[0]).toLowerCase()
   );
-  const match = allSqlTexts.find((s) => s.includes("contract_signed_at"));
+  const match = allSqlTexts.find((s) => s.includes("ytd_count") && s.includes("mtd_count"));
   if (!match) {
-    throw new Error(
-      "No tenantDb.execute call matched contract_signed_at — PR 7 query is missing or the column was renamed"
-    );
+    throw new Error("No tenantDb.execute call matched contracts-signed YTD/MTD query");
   }
   return match;
 }
@@ -114,15 +112,22 @@ describe("getRepDashboard contracts-signed YTD/MTD cards (Commit 7)", () => {
 
   it("response shape threads csRows fields correctly when query returns data", async () => {
     const { getRepDashboard } = await import("../src/modules/dashboard/service.js");
-    // Position the contracts-signed fixture at index 14 — the last execute()
-    // call in getRepDashboard's Promise.all body. If insertion order changes
-    // upstream this assertion will surface it via wrong values rather than
-    // silent failure.
-    const responses: any[][] = new Array(14).fill([]);
-    responses[14] = [
-      { ytd_count: "7", ytd_value: "525000.00", mtd_count: "2", mtd_value: "150000.00" },
-    ];
-    const tenantDb = createMockTenantDb(responses);
+    const tenantDb = {
+      execute: vi.fn().mockImplementation((query: unknown) => {
+        const queryText = extractSqlText(query).toLowerCase();
+        if (queryText.includes("ytd_count") && queryText.includes("mtd_count")) {
+          return Promise.resolve({
+            rows: [{ ytd_count: "7", ytd_value: "525000.00", mtd_count: "2", mtd_value: "150000.00" }],
+          });
+        }
+        return Promise.resolve({ rows: [] });
+      }),
+      select: vi.fn().mockReturnThis(),
+      from: vi.fn().mockReturnThis(),
+      where: vi.fn().mockReturnThis(),
+      orderBy: vi.fn().mockReturnThis(),
+      limit: vi.fn().mockReturnValue([]),
+    } as any;
 
     const result = await getRepDashboard(tenantDb, "rep-1");
 
@@ -197,5 +202,18 @@ describe("getRepDashboard contracts-signed YTD/MTD cards (Commit 7)", () => {
     const upperBoundPresent = /coalesce\(.*contract_signed_at.*::date.*contract_signed_date.*\)\s*<=/s.test(sql);
     expect(lowerBoundOnly).toBe(true);
     expect(upperBoundPresent).toBe(true);
+  });
+
+  it("SQL on-hold policy: signed contract cards exclude on-hold deals", async () => {
+    const { getRepDashboard } = await import("../src/modules/dashboard/service.js");
+    const tenantDb = createMockTenantDb([]);
+
+    await getRepDashboard(tenantDb, "rep-1");
+
+    const sql = findContractsSignedSql(tenantDb.execute);
+
+    expect(sql).toContain("is_active = true");
+    expect(sql).toContain("coalesce(is_test_data, false) = false");
+    expect(sql).toContain("coalesce(deals.on_hold, false) = false");
   });
 });

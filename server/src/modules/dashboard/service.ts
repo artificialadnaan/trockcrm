@@ -1597,8 +1597,11 @@ export async function getRepDashboard(
         COALESCE(SUM(awarded_amount) FILTER (WHERE COALESCE(contract_signed_at::date, contract_signed_date) >= ${monthStart}::date), 0)::numeric AS mtd_value
       FROM deals
       WHERE assigned_rep_id = ${userId}
+        AND is_active = true
+        AND COALESCE(is_test_data, false) = false
         AND (contract_signed_at IS NOT NULL OR contract_signed_date IS NOT NULL)
         AND COALESCE(contract_signed_at::date, contract_signed_date) <= ${today}::date
+        AND ${aliasedActiveDealCountFilterSql("deals")}
     `),
   ]);
 

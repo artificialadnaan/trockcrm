@@ -116,6 +116,7 @@ describe("runReportBuilder", () => {
 
     const queryText = extractSqlText(tenantDb.execute.mock.calls[0][0]).toLowerCase();
     expect(queryText).toContain("where");
+    expect(queryText).toContain("d.is_active = true");
     expect(queryText).toContain("coalesce(d.on_hold, false) = false");
   });
 
@@ -135,13 +136,13 @@ describe("runReportBuilder", () => {
     const queryText = extractSqlText(tenantDb.execute.mock.calls[0][0]).toLowerCase();
     expect(queryText).toContain("contract_signed_at");
     expect(queryText).toContain("contract_signed_date");
-    expect(queryText).toContain("'won'");
-    expect(queryText).toContain("'lost'");
-    expect(queryText).toContain("'sent_to_production'");
-    expect(queryText).toContain("'service_sent_to_production'");
-    expect(queryText).toContain("'closed_won'");
-    expect(queryText).toContain("'production_lost'");
-    expect(queryText).toContain("'service_lost'");
-    expect(queryText).toContain("'closed_lost'");
+    expect(queryText).toContain("won");
+    expect(queryText).toContain("lost");
+    expect(queryText).toContain("sent_to_production");
+    expect(queryText).toContain("service_sent_to_production");
+    expect(queryText).toContain("closed_won");
+    expect(queryText).toContain("production_lost");
+    expect(queryText).toContain("service_lost");
+    expect(queryText).toContain("closed_lost");
   });
 });

@@ -2589,6 +2589,8 @@ export async function executeCustomReport(
   // Build WHERE clause from filters using parameter binding for all values.
   const whereClauses: ReturnType<typeof sql>[] = [];
   if (entityTable === "deals") {
+    whereClauses.push(sql`is_active = true`);
+    whereClauses.push(sql`COALESCE(is_test_data, false) = false`);
     whereClauses.push(reportableDealFilterSql());
   }
   for (const filter of config.filters) {
