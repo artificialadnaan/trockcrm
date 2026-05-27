@@ -498,7 +498,7 @@ export function useDeals(filters: DealFilters = {}, options: { enabled?: boolean
   return { deals, pagination, loading, error, refetch: fetchDeals };
 }
 
-export function useDealDetail(dealId: string | undefined) {
+export function useDealDetail(dealId: string | undefined, options: OfficeRequestOptions = {}) {
   const [deal, setDeal] = useState<DealDetail | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -511,14 +511,16 @@ export function useDealDetail(dealId: string | undefined) {
     setLoading(true);
     setError(null);
     try {
-      const data = await api<{ deal: DealDetail }>(`/deals/${dealId}/detail`);
+      const data = await api<{ deal: DealDetail }>(`/deals/${dealId}/detail`, {
+        ...getOfficeRequestOptions(options.officeId),
+      });
       setDeal(data.deal);
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : "Failed to load deal");
     } finally {
       setLoading(false);
     }
-  }, [dealId]);
+  }, [dealId, options.officeId]);
 
   useEffect(() => {
     fetchDeal();

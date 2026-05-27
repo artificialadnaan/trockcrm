@@ -3,7 +3,14 @@ import { createRoot } from "react-dom/client";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { api } from "@/lib/api";
 import type { TerminalDateFilter, TerminalOutcome } from "@/lib/pipeline-terminal-filters";
-import { normalizeDealBoardResponse, useDealBoard, useDealStagePage, useDeals, type DealFilters } from "./use-deals";
+import {
+  normalizeDealBoardResponse,
+  useDealBoard,
+  useDealDetail,
+  useDealStagePage,
+  useDeals,
+  type DealFilters,
+} from "./use-deals";
 
 vi.mock("@/lib/api", () => ({
   api: vi.fn(),
@@ -139,6 +146,7 @@ let hookTerminalDateFilters: Record<TerminalOutcome, TerminalDateFilter> | undef
 let hookPreviewLimit: number | null | undefined;
 let hookWonPeriodRange: { from?: string; to?: string } | null | undefined;
 let hookDealFilters: DealFilters = {};
+let hookDealDetailOfficeId: string | null | undefined;
 
 function HookProbe() {
   latestResult = useDealBoard("mine", false, hookTerminalDateFilters, hookPreviewLimit, hookWonPeriodRange);
@@ -164,6 +172,11 @@ function StageHookProbe() {
 
 function DealsHookProbe() {
   latestDealsResult = useDeals(hookDealFilters);
+  return null;
+}
+
+function DealDetailHookProbe() {
+  useDealDetail("deal-1", { officeId: hookDealDetailOfficeId });
   return null;
 }
 
@@ -209,6 +222,20 @@ async function renderDealsHook() {
   return root;
 }
 
+async function renderDealDetailHook() {
+  const { document } = installFakeDom();
+  const container = document.createElement("div");
+  document.body.appendChild(container);
+  const root = createRoot(container as unknown as Element);
+
+  await act(async () => {
+    root.render(createElement(DealDetailHookProbe));
+    await flushEffects();
+  });
+
+  return root;
+}
+
 async function waitForIdle() {
   for (let attempt = 0; attempt < 10; attempt += 1) {
     if (latestResult && !latestResult.loading) return;
@@ -226,6 +253,7 @@ describe("normalizeDealBoardResponse", () => {
     hookPreviewLimit = undefined;
     hookWonPeriodRange = undefined;
     hookDealFilters = {};
+    hookDealDetailOfficeId = undefined;
     vi.clearAllMocks();
   });
 
@@ -382,6 +410,24 @@ describe("normalizeDealBoardResponse", () => {
 
     expect(result.columns[0].cards).toHaveLength(1);
     expect(result.columns[0].cards[0].id).toBe("deal-1");
+  });
+
+  it("loads deal detail with x-office-id when an office context is provided", async () => {
+    const apiMock = vi.mocked(api);
+    apiMock.mockResolvedValueOnce({ deal: { id: "deal-1" } });
+    hookDealDetailOfficeId = "office-atlanta";
+
+    const root = await renderDealDetailHook();
+
+    expect(apiMock).toHaveBeenCalledWith("/deals/deal-1/detail", {
+      headers: { "x-office-id": "office-atlanta" },
+    });
+
+    await act(async () => {
+      root.unmount();
+      await flushEffects();
+    });
+    vi.unstubAllGlobals();
   });
 
   it("captures board load errors on mount while preserving manual refetch failures", async () => {

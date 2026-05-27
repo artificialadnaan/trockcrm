@@ -244,6 +244,72 @@ describe("PATCH /api/deals/:id cleanup legacy handling", () => {
     );
   });
 
+  it("rejects projectNumber updates from reps before calling updateDeal", async () => {
+    const { error } = await invokePatch(
+      { projectNumber: "DFW-1-12345-aa" },
+      createUser("rep")
+    );
+
+    expect(error).toBeInstanceOf(AppError);
+    expect((error as InstanceType<typeof AppError>).statusCode).toBe(403);
+    expect((error as InstanceType<typeof AppError>).code).toBe("PROJECT_NUMBER_UPDATE_FORBIDDEN");
+    expect(dealsServiceMocks.updateDeal).not.toHaveBeenCalled();
+  });
+
+  it("rejects projectNumber clears from reps before calling updateDeal", async () => {
+    const { error } = await invokePatch(
+      { projectNumber: null },
+      createUser("rep")
+    );
+
+    expect(error).toBeInstanceOf(AppError);
+    expect((error as InstanceType<typeof AppError>).statusCode).toBe(403);
+    expect((error as InstanceType<typeof AppError>).code).toBe("PROJECT_NUMBER_UPDATE_FORBIDDEN");
+    expect(dealsServiceMocks.updateDeal).not.toHaveBeenCalled();
+  });
+
+  it("allows admin projectNumber updates through the audited updateDeal path", async () => {
+    const { res, error } = await invokePatch(
+      { projectNumber: "DFW-1-12345-aa" },
+      createUser("admin")
+    );
+
+    expect(error).toBeNull();
+    expect(res.statusCode).toBe(200);
+    expect(dealsServiceMocks.updateDeal).toHaveBeenCalledWith(
+      expect.anything(),
+      "deal-1",
+      expect.objectContaining({
+        projectNumber: "DFW-1-12345-aa",
+        auditContext: expect.any(Object),
+      }),
+      "admin",
+      "admin-1",
+      "office-1",
+    );
+  });
+
+  it("allows director projectNumber updates through the audited updateDeal path", async () => {
+    const { res, error } = await invokePatch(
+      { projectNumber: "DFW-1-54321-aa" },
+      createUser("director")
+    );
+
+    expect(error).toBeNull();
+    expect(res.statusCode).toBe(200);
+    expect(dealsServiceMocks.updateDeal).toHaveBeenCalledWith(
+      expect.anything(),
+      "deal-1",
+      expect.objectContaining({
+        projectNumber: "DFW-1-54321-aa",
+        auditContext: expect.any(Object),
+      }),
+      "director",
+      "director-1",
+      "office-1",
+    );
+  });
+
   it("ignores client-supplied migrationMode on normal deals with source lead lineage", async () => {
     dealsServiceMocks.getDealById.mockResolvedValue(baseDeal({
       sourceLeadId: "lead-1",

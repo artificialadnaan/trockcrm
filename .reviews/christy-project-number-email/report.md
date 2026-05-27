@@ -57,7 +57,9 @@ The SyncHub/procore project relay paths use project-number values for matching a
 - The trigger inserts one tenant `audit_log` event with `actor_system_process = 'project_number_first_set'`.
 - A partial unique index on tenant `audit_log(record_id)` for that system process prevents a second first-set event for the same deal.
 - If the audit row is newly inserted, the trigger enqueues a `public.job_queue` job: `project_number_first_set_email`.
-- The trigger catches/logs its own failures so the deal write itself is not rolled back by email/audit enqueue failures.
+- The trigger now lets audit-log and job-queue failures raise normally. That rolls back the deal write, so a later API/script retry still has a blank-to-set transition and can enqueue the notification correctly.
+- Operator-visible behavior: a transient audit/enqueue failure can surface as a failed deal write/API 500. This is intentional for this feature; it avoids silently committing the project number without a retryable notification path.
+- Normal API deal writes now gate `projectNumber` mutations to admins/directors. Ordinary reps cannot set or clear `projectNumber` through `POST /deals`, `POST /deals/service-opportunity`, or `PATCH /deals/:id`, so ordinary deal edits cannot trigger Christy's email.
 
 ## Worker Email
 
@@ -74,7 +76,12 @@ The SyncHub/procore project relay paths use project-number values for matching a
   - Project number
   - Sales rep
   - Awarded amount formatted as USD
-  - CRM deal link (`FRONTEND_URL` or production CRM fallback plus `/deals/{dealId}`)
+  - CRM deal link (`FRONTEND_URL` or production CRM fallback plus `/deals/{dealId}?officeId={officeId}`)
+- Office context:
+  - The worker resolves the tenant schema to the existing `public.offices.id`.
+  - The email link includes that office id as `officeId`.
+  - `DealDetailPage` reads `officeId` and passes it to `useDealDetail`.
+  - `useDealDetail` uses the existing `getOfficeRequestOptions` / `x-office-id` convention, so the detail request resolves against the originating office instead of the viewer's default office.
 - Recipient:
   - `CHRISTY_PROJECT_NUMBER_EMAIL`
   - non-production fallback: `kscheidegger@trockgc.com`
@@ -91,10 +98,11 @@ The SyncHub/procore project relay paths use project-number values for matching a
 - First-set idempotency source: tenant `audit_log` row with `actor_system_process = 'project_number_first_set'`.
 - Duplicate job enqueue is prevented by the audit-log partial unique index plus `ON CONFLICT DO NOTHING`.
 - Worker retry duplicate-send protection:
-  - added `public.project_number_first_set_email_receipts`, keyed by `audit_log_id`.
-  - worker checks this receipt before sending.
-  - worker records the receipt after successful send.
-  - Resend is called with idempotency key `project-number-first-set-{auditLogId}` to protect the crash-after-send/before-receipt edge as much as the provider supports.
+  - added `public.project_number_first_set_email_receipts`, keyed by `(tenant_schema, audit_log_id)`.
+  - worker checks this receipt using both tenant schema and audit log id before sending.
+  - worker records the receipt after successful send using the composite conflict target.
+  - Resend is called with idempotency key `project-number-first-set-{tenant_schema}-{auditLogId}` to protect the crash-after-send/before-receipt edge as much as the provider supports.
+- The receipt migration drops the old single-column primary key and recreates the composite key. The feature has not deployed, so this is a clean correction before production receipts exist.
 - Adding the CC does not alter audit/idempotency behavior: one first-set audit event still maps to one worker email job and one provider send call.
 
 ## Bulk Script Skip Mechanism
@@ -114,7 +122,7 @@ The SyncHub/procore project relay paths use project-number values for matching a
 - Round 1 found and fixed:
   - production worker missing `RESEND_API_KEY` could have completed jobs as "success"; now it returns unsuccessful and the job retries/fails rather than silently completing.
   - future office schemas needed trigger/index provisioning; the migration now includes tenant provisioning markers.
-  - trigger-side enqueue/audit failures needed to be nonblocking; the trigger catches and warns.
+  - trigger-side enqueue/audit failures were initially made nonblocking, then superseded by the Codex fix round: they now raise and roll back the deal write to avoid silent notification loss.
   - rich audit shape was improved to use `field_changes_jsonb` plus `changes.projectNumber`.
 - Round 2 found and fixed:
   - worker retry could duplicate-send after a successful provider call; added receipt ledger and Resend idempotency key.
@@ -125,6 +133,12 @@ The SyncHub/procore project relay paths use project-number values for matching a
   - unset production CC does not block the To send.
   - Resend receives one send call with `cc` when configured.
   - trigger, audit, migration, bulk skip, and idempotency behavior remain unchanged.
+- Codex fix review for commit `59f1020207` found no remaining code issues after the four fixes below:
+  - receipt dedupe is tenant-aware.
+  - trigger failures are no longer swallowed.
+  - project-number API writes are restricted to admin/director requests.
+  - email links carry existing office context through `officeId` and `x-office-id`.
+  - Practical test gaps from review were addressed with additional route and hook tests; there is no live Postgres trigger harness in the repo, so the trigger rollback behavior is covered by migration assertions that the swallowing exception handler was removed.
 
 ## Verification
 
@@ -150,6 +164,17 @@ Passed:
   - `npm run build --workspace=shared`
   - `npm run build --workspace=worker`
   - `npm run build --workspace=server`
+- Codex fix round for PR #498:
+  - `npm run build --workspace=shared`
+  - `TMPDIR=/private/tmp npx vitest run server/tests/modules/deals/project-number-first-set-email.test.ts server/tests/modules/deals/patch-route.test.ts client/src/hooks/use-deals.test.ts --testTimeout=15000 --exclude '.worktrees/**'`
+  - `npm run typecheck --workspace=client`
+  - `npm run typecheck --workspace=server`
+  - `npm run typecheck --workspace=worker`
+  - `npm run typecheck --workspace=shared`
+  - `npm run build --workspace=shared`
+  - `npm run build --workspace=server`
+  - `npm run build --workspace=worker`
+  - `npm run build --workspace=client`
 
 CC tests cover:
 
@@ -157,6 +182,15 @@ CC tests cover:
 - unset production `PROJECT_NUMBER_EMAIL_CC` logs and sends to Christy without CC.
 - the CC comes from the env var, with non-production default `adnaan.iqbal@gmail.com`.
 - duplicate prevention remains one email send for the audit event, not one send per recipient.
+
+Codex fix tests cover:
+
+- two tenants with the same `audit_log_id` both send because receipts and idempotency keys include `tenant_schema`.
+- migration no longer swallows trigger audit/job failures with `EXCEPTION WHEN OTHERS`.
+- reps cannot set or clear `projectNumber` through the standard deal API.
+- admins/directors can still mutate `projectNumber` through the standard deal API.
+- project-number email links include `officeId`.
+- `useDealDetail` turns `officeId` into the existing `x-office-id` request header.
 
 Requested broad test sweep:
 

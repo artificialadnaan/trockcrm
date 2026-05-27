@@ -33,12 +33,15 @@ describe("project number first-set notification migration", () => {
     expect(migrationSql).toContain("jsonb_build_array(jsonb_build_object");
     expect(migrationSql).toContain("'key', 'projectNumber'");
     expect(migrationSql).toContain("jsonb_build_object('projectNumber', jsonb_build_object('from', NULL, 'to', $4))");
-    expect(migrationSql).toContain("RAISE WARNING 'Failed to enqueue project_number_first_set_email");
+    expect(migrationSql).not.toContain("Failed to enqueue project_number_first_set_email");
+    expect(migrationSql).not.toContain("EXCEPTION WHEN OTHERS");
   });
 
   it("creates a sent-email receipt table for worker retry idempotency", () => {
     expect(migrationSql).toContain("CREATE TABLE IF NOT EXISTS public.project_number_first_set_email_receipts");
-    expect(migrationSql).toContain("audit_log_id bigint PRIMARY KEY");
+    expect(migrationSql).toContain("audit_log_id bigint NOT NULL");
+    expect(migrationSql).toContain("DROP CONSTRAINT IF EXISTS project_number_first_set_email_receipts_pkey");
+    expect(migrationSql).toContain("PRIMARY KEY (tenant_schema, audit_log_id)");
     expect(migrationSql).toContain("resend_message_id text");
   });
 
@@ -81,6 +84,7 @@ describe("project number first-set notification email", () => {
       projectNumber: "DFW-1-12345-aa",
       salesRepName: "Avery Rep",
       awardedAmount: "123456.78",
+      officeId: "office-dallas",
       frontendUrl: "https://crm.example.com/",
     });
 
@@ -89,7 +93,7 @@ describe("project number first-set notification email", () => {
     expect(email.html).toContain("DFW-1-12345-aa");
     expect(email.html).toContain("Avery Rep");
     expect(email.html).toContain("$123,456.78");
-    expect(email.html).toContain("https://crm.example.com/deals/deal-1");
+    expect(email.html).toContain("https://crm.example.com/deals/deal-1?officeId=office-dallas");
     expect(email.text).toContain("Awarded amount: $123,456.78");
   });
 
@@ -138,7 +142,8 @@ describe("project number first-set notification email", () => {
           awarded_amount: "50",
           sales_rep_name: "Avery Rep",
         }],
-      });
+      })
+      .mockResolvedValueOnce({ rows: [{ id: "office-dallas" }] });
     const sendEmail = vi.fn().mockResolvedValue({ success: false, messageId: null });
     const logger = { log: vi.fn(), warn: vi.fn(), error: vi.fn() };
 
@@ -172,7 +177,7 @@ describe("project number first-set notification email", () => {
       expect.stringContaining("Avery Rep"),
       {
         text: expect.stringContaining("Awarded amount: $50.00"),
-        idempotencyKey: "project-number-first-set-123",
+        idempotencyKey: "project-number-first-set-office_dallas-123",
         cc: "adnaan@example.com",
       }
     );
@@ -196,6 +201,7 @@ describe("project number first-set notification email", () => {
       .fn()
       .mockResolvedValueOnce({ rows: [] })
       .mockResolvedValueOnce({ rows: [dealRow] })
+      .mockResolvedValueOnce({ rows: [{ id: "office-dallas" }] })
       .mockResolvedValueOnce({ rows: [] })
       .mockResolvedValueOnce({ rows: [{ resend_message_id: "resend-1", sent_at: new Date().toISOString() }] });
     const sendEmail = vi.fn().mockResolvedValue({ success: true, messageId: "resend-1" });
@@ -222,6 +228,12 @@ describe("project number first-set notification email", () => {
     await handleProjectNumberFirstSetEmail(payload, null, deps);
 
     expect(sendEmail).toHaveBeenCalledTimes(1);
+    expect(sendEmail).toHaveBeenCalledWith(
+      "christy@example.com",
+      "New project number assigned: DFW-1-12345-aa (Noble)",
+      expect.stringContaining("https://crm.example.com/deals/00000000-0000-0000-0000-000000000001?officeId=office-dallas"),
+      expect.objectContaining({ idempotencyKey: "project-number-first-set-office_dallas-123" })
+    );
     expect(query).toHaveBeenCalledWith(expect.stringContaining("INSERT INTO public.project_number_first_set_email_receipts"), [
       123,
       "office_dallas",
@@ -233,6 +245,69 @@ describe("project number first-set notification email", () => {
     expect(logger.log).toHaveBeenCalledWith(
       "[ProjectNumberEmail] Notification already sent - skipping duplicate job",
       expect.objectContaining({ auditLogId: 123 })
+    );
+  });
+
+  it("does not collapse different tenants that share the same audit log id", async () => {
+    const dealId = "00000000-0000-0000-0000-000000000001";
+    const dealRow = {
+      id: dealId,
+      name: "Noble",
+      project_number: "DFW-1-12345-aa",
+      deal_number: "HS-1",
+      awarded_amount: "50",
+      sales_rep_name: "Avery Rep",
+    };
+    const query = vi
+      .fn()
+      .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({ rows: [dealRow] })
+      .mockResolvedValueOnce({ rows: [{ id: "office-dallas" }] })
+      .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({ rows: [dealRow] })
+      .mockResolvedValueOnce({ rows: [{ id: "office-atlanta" }] })
+      .mockResolvedValueOnce({ rows: [] });
+    const sendEmail = vi.fn().mockResolvedValue({ success: true, messageId: "resend-1" });
+    const deps = {
+      env: {
+        NODE_ENV: "production",
+        CHRISTY_PROJECT_NUMBER_EMAIL: "christy@example.com",
+        PROJECT_NUMBER_EMAIL_CC: "adnaan@example.com",
+        FRONTEND_URL: "https://crm.example.com",
+      } as NodeJS.ProcessEnv,
+      query,
+      sendEmail,
+      logger: { log: vi.fn(), warn: vi.fn(), error: vi.fn() },
+    };
+
+    await handleProjectNumberFirstSetEmail(
+      { tenantSchema: "office_dallas", dealId, projectNumber: "DFW-1-12345-aa", auditLogId: 123 },
+      null,
+      deps
+    );
+    await handleProjectNumberFirstSetEmail(
+      { tenantSchema: "office_atlanta", dealId, projectNumber: "DFW-1-12345-aa", auditLogId: 123 },
+      null,
+      deps
+    );
+
+    expect(sendEmail).toHaveBeenCalledTimes(2);
+    expect(sendEmail.mock.calls[0]?.[3]).toEqual(expect.objectContaining({
+      idempotencyKey: "project-number-first-set-office_dallas-123",
+    }));
+    expect(sendEmail.mock.calls[1]?.[3]).toEqual(expect.objectContaining({
+      idempotencyKey: "project-number-first-set-office_atlanta-123",
+    }));
+    expect(query).toHaveBeenNthCalledWith(
+      1,
+      expect.stringContaining("WHERE tenant_schema = $1"),
+      ["office_dallas", 123]
+    );
+    expect(query).toHaveBeenNthCalledWith(
+      5,
+      expect.stringContaining("WHERE tenant_schema = $1"),
+      ["office_atlanta", 123]
     );
   });
 
@@ -251,6 +326,7 @@ describe("project number first-set notification email", () => {
           sales_rep_name: "Avery Rep",
         }],
       })
+      .mockResolvedValueOnce({ rows: [{ id: "office-dallas" }] })
       .mockResolvedValueOnce({ rows: [] });
     const sendEmail = vi.fn().mockResolvedValue({ success: true, messageId: "resend-1" });
     const logger = { log: vi.fn(), warn: vi.fn(), error: vi.fn() };
@@ -281,7 +357,7 @@ describe("project number first-set notification email", () => {
       expect.any(String),
       {
         text: expect.stringContaining("Awarded amount: $50.00"),
-        idempotencyKey: "project-number-first-set-123",
+        idempotencyKey: "project-number-first-set-office_dallas-123",
       }
     );
     expect(logger.warn).toHaveBeenCalledWith(

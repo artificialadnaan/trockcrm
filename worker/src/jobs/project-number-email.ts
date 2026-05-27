@@ -22,6 +22,10 @@ interface ProjectNumberEmailDeal {
   sales_rep_name: string | null;
 }
 
+interface ProjectNumberEmailOffice {
+  id: string;
+}
+
 interface HandlerDeps {
   query?: typeof pool.query;
   sendEmail?: (
@@ -70,9 +74,10 @@ export async function handleProjectNumberFirstSetEmail(
   const receiptResult = await query(
     `SELECT resend_message_id, sent_at
        FROM public.project_number_first_set_email_receipts
-      WHERE audit_log_id = $1
+      WHERE tenant_schema = $1
+        AND audit_log_id = $2
       LIMIT 1`,
-    [auditLogId]
+    [tenantSchema, auditLogId]
   );
   if (receiptResult.rows.length > 0) {
     logger.log("[ProjectNumberEmail] Notification already sent - skipping duplicate job", {
@@ -107,6 +112,15 @@ export async function handleProjectNumberFirstSetEmail(
     logger.warn("[ProjectNumberEmail] Deal not found - skipping", { tenantSchema, dealId, projectNumber });
     return;
   }
+  const officeResult = await query(
+    `SELECT id
+       FROM public.offices
+      WHERE ('office_' || slug) = $1
+        AND is_active = true
+      LIMIT 1`,
+    [tenantSchema]
+  );
+  const office = officeResult.rows[0] as ProjectNumberEmailOffice | undefined;
 
   const email = buildProjectNumberFirstSetEmail({
     dealId,
@@ -114,6 +128,7 @@ export async function handleProjectNumberFirstSetEmail(
     projectNumber,
     salesRepName: deal.sales_rep_name ?? "Unassigned",
     awardedAmount: deal.awarded_amount,
+    officeId: office?.id ?? null,
     frontendUrl: resolveFrontendUrl(deps.env ?? process.env),
   });
 
@@ -121,7 +136,7 @@ export async function handleProjectNumberFirstSetEmail(
     const sendEmail = deps.sendEmail ?? sendSystemEmailWithMetadata;
     const sendResult = await sendEmail(recipient, email.subject, email.html, {
       text: email.text,
-      idempotencyKey: `project-number-first-set-${auditLogId}`,
+      idempotencyKey: `project-number-first-set-${tenantSchema}-${auditLogId}`,
       ...(ccRecipient ? { cc: ccRecipient } : {}),
     });
     if (!sendResult.success) {
@@ -139,7 +154,7 @@ export async function handleProjectNumberFirstSetEmail(
           updated_at
         )
         VALUES ($1, $2, $3::uuid, $4, $5, $6, NOW(), NOW())
-        ON CONFLICT (audit_log_id) DO UPDATE
+        ON CONFLICT (tenant_schema, audit_log_id) DO UPDATE
           SET recipient_email = EXCLUDED.recipient_email,
               resend_message_id = EXCLUDED.resend_message_id,
               sent_at = EXCLUDED.sent_at,
@@ -184,9 +199,11 @@ export function buildProjectNumberFirstSetEmail(input: {
   projectNumber: string;
   salesRepName: string;
   awardedAmount: string | number | null;
+  officeId?: string | null;
   frontendUrl: string;
 }) {
-  const dealUrl = `${input.frontendUrl.replace(/\/+$/, "")}/deals/${encodeURIComponent(input.dealId)}`;
+  const officeParam = input.officeId ? `?officeId=${encodeURIComponent(input.officeId)}` : "";
+  const dealUrl = `${input.frontendUrl.replace(/\/+$/, "")}/deals/${encodeURIComponent(input.dealId)}${officeParam}`;
   const awardedAmount = formatCurrency(input.awardedAmount);
   const subject = `New project number assigned: ${input.projectNumber} (${input.dealName})`;
   const rows = [

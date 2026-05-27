@@ -30,81 +30,76 @@ BEGIN
     actor_user_id := NULL;
   END;
 
-  BEGIN
-    EXECUTE format(
-      $sql$
-        INSERT INTO %I.audit_log (
-          table_name,
-          record_id,
-          action,
-          changed_by,
-          actor_system_process,
-          entity_type,
-          entity_name_snapshot,
-          entity_secondary_id_snapshot,
-          field_changes_jsonb,
-          changes,
-          visibility_scope
-        )
-        VALUES (
-          'deals',
-          $1,
-          'update'::public.audit_action,
-          $2,
-          'project_number_first_set',
-          'deal',
-          $3,
-          $4,
-          jsonb_build_array(jsonb_build_object(
-            'key', 'projectNumber',
-            'label', 'Project Number',
-            'fromDisplay', NULL,
-            'toDisplay', $4,
-            'fromFull', NULL,
-            'toFull', $4,
-            'transition', 'set',
-            'masked', false
-          )),
-          jsonb_build_object('projectNumber', jsonb_build_object('from', NULL, 'to', $4)),
-          'internal'
-        )
-        ON CONFLICT DO NOTHING
-        RETURNING id
-      $sql$,
-      TG_TABLE_SCHEMA
-    )
-    INTO inserted_audit_id
-    USING NEW.id, actor_user_id, NEW.name, new_project_number;
+  EXECUTE format(
+    $sql$
+      INSERT INTO %I.audit_log (
+        table_name,
+        record_id,
+        action,
+        changed_by,
+        actor_system_process,
+        entity_type,
+        entity_name_snapshot,
+        entity_secondary_id_snapshot,
+        field_changes_jsonb,
+        changes,
+        visibility_scope
+      )
+      VALUES (
+        'deals',
+        $1,
+        'update'::public.audit_action,
+        $2,
+        'project_number_first_set',
+        'deal',
+        $3,
+        $4,
+        jsonb_build_array(jsonb_build_object(
+          'key', 'projectNumber',
+          'label', 'Project Number',
+          'fromDisplay', NULL,
+          'toDisplay', $4,
+          'fromFull', NULL,
+          'toFull', $4,
+          'transition', 'set',
+          'masked', false
+        )),
+        jsonb_build_object('projectNumber', jsonb_build_object('from', NULL, 'to', $4)),
+        'internal'
+      )
+      ON CONFLICT DO NOTHING
+      RETURNING id
+    $sql$,
+    TG_TABLE_SCHEMA
+  )
+  INTO inserted_audit_id
+  USING NEW.id, actor_user_id, NEW.name, new_project_number;
 
-    IF inserted_audit_id IS NULL THEN
-      RETURN NEW;
-    END IF;
+  IF inserted_audit_id IS NULL THEN
+    RETURN NEW;
+  END IF;
 
-    INSERT INTO public.job_queue (job_type, payload, office_id, status, run_after)
-    VALUES (
-      'project_number_first_set_email',
-      jsonb_build_object(
-        'tenantSchema', TG_TABLE_SCHEMA,
-        'dealId', NEW.id,
-        'projectNumber', new_project_number,
-        'auditLogId', inserted_audit_id
-      ),
-      NULL,
-      'pending',
-      NOW()
-    );
-  EXCEPTION WHEN OTHERS THEN
-    RAISE WARNING 'Failed to enqueue project_number_first_set_email for %.% deal % project_number %: %',
-      TG_TABLE_SCHEMA, TG_TABLE_NAME, NEW.id, new_project_number, SQLERRM;
-  END;
+  INSERT INTO public.job_queue (job_type, payload, office_id, status, run_after)
+  VALUES (
+    'project_number_first_set_email',
+    jsonb_build_object(
+      'tenantSchema', TG_TABLE_SCHEMA,
+      'dealId', NEW.id,
+      'projectNumber', new_project_number,
+      'auditLogId', inserted_audit_id
+    ),
+    NULL,
+    'pending',
+    NOW()
+  );
 
   RETURN NEW;
 END;
 $$;
 
 CREATE TABLE IF NOT EXISTS public.project_number_first_set_email_receipts (
-  audit_log_id bigint PRIMARY KEY,
   tenant_schema text NOT NULL,
+  audit_log_id bigint NOT NULL,
   deal_id uuid NOT NULL,
   project_number text NOT NULL,
   recipient_email text,
@@ -113,6 +108,23 @@ CREATE TABLE IF NOT EXISTS public.project_number_first_set_email_receipts (
   created_at timestamptz NOT NULL DEFAULT NOW(),
   updated_at timestamptz NOT NULL DEFAULT NOW()
 );
+
+ALTER TABLE public.project_number_first_set_email_receipts
+  DROP CONSTRAINT IF EXISTS project_number_first_set_email_receipts_pkey;
+
+DO $receipt_pk$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1
+    FROM pg_constraint
+    WHERE conrelid = 'public.project_number_first_set_email_receipts'::regclass
+      AND conname = 'project_number_first_set_email_receipts_pkey'
+  ) THEN
+    ALTER TABLE public.project_number_first_set_email_receipts
+      ADD CONSTRAINT project_number_first_set_email_receipts_pkey PRIMARY KEY (tenant_schema, audit_log_id);
+  END IF;
+END
+$receipt_pk$;
 
 CREATE INDEX IF NOT EXISTS project_number_first_set_email_receipts_deal_idx
   ON public.project_number_first_set_email_receipts (tenant_schema, deal_id);

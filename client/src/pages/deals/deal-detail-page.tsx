@@ -278,7 +278,8 @@ export function DealDetailPage() {
   const location = useLocation();
   const [searchParams, setSearchParams] = useSearchParams();
   const { user } = useAuth();
-  const { deal, loading, error, refetch } = useDealDetail(id);
+  const detailOfficeId = searchParams.get("officeId");
+  const { deal, loading, error, refetch } = useDealDetail(id, { officeId: detailOfficeId });
   const { stages } = usePipelineStages();
   const [activeTab, setActiveTab] = useState<Tab>("overview");
   const [stageChangeOpen, setStageChangeOpen] = useState(false);

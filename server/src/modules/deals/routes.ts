@@ -1518,6 +1518,16 @@ function validateDealPayload(body: Record<string, unknown>): void {
   }
 }
 
+function assertProjectNumberMutationAllowed(body: Record<string, unknown>, role: string): void {
+  if (!Object.prototype.hasOwnProperty.call(body, "projectNumber")) return;
+  if (role === "admin" || role === "director") return;
+  throw new AppError(
+    403,
+    "Only admins or directors can set or clear project numbers.",
+    "PROJECT_NUMBER_UPDATE_FORBIDDEN"
+  );
+}
+
 function normalizeServiceCandidate(value: unknown) {
   return String(value ?? "").trim().toLowerCase().replace(/[-_]+/g, " ").replace(/\s+/g, " ");
 }
@@ -1600,6 +1610,7 @@ router.post("/service-opportunity", async (req, res, next) => {
       throw new AppError(400, "Company and property are required");
     }
     validateDealPayload(req.body);
+    assertProjectNumberMutationAllowed(req.body, req.user!.role);
     await assertServiceOpportunityHierarchy(req.tenantDb!, { companyId, propertyId });
 
     const serviceProjectType = await resolveServiceProjectType(projectTypeId, projectType);
@@ -1671,6 +1682,7 @@ router.post("/", async (req, res, next) => {
       throw new AppError(400, "Name and stageId are required");
     }
     validateDealPayload(req.body);
+    assertProjectNumberMutationAllowed(req.body, req.user!.role);
 
     // Rep ownership enforcement:
     // - Reps: force assignedRepId to their own ID (ignore request body value)
@@ -1769,6 +1781,7 @@ router.patch("/:id", async (req, res, next) => {
     const dealAccess = await assertDealCollaboratorAccess(req.tenantDb!, req.params.id, req.user!);
     const body = { ...req.body };
     validateDealPayload(body);
+    assertProjectNumberMutationAllowed(body, req.user!.role);
     const forceEditAfterRfp = body.forceEditAfterRfp === true;
     const clientRequestedMigrationMode = body.migrationMode === true;
     delete body.forceEditAfterRfp;
