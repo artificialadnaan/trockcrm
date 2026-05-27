@@ -28,7 +28,7 @@ export interface StagePageQuery {
 }
 
 const ALLOWED_PAGE_SIZES = new Set([25, 50, 100]);
-const ESTIMATE_SENT_PRESETS = new Set(["7", "30", "60", "90"]);
+const ESTIMATE_SENT_PRESETS = new Set(["7", "30", "60", "90", "mtd", "qtd", "ytd"]);
 
 function formatDateParam(date: Date) {
   return date.toISOString().split("T")[0];
@@ -40,16 +40,47 @@ function daysAgo(days: number, now = new Date()) {
   return formatDateParam(date);
 }
 
+function formatLocalDateParam(date: Date) {
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  const day = String(date.getDate()).padStart(2, "0");
+  return `${year}-${month}-${day}`;
+}
+
+function estimateSentPresetRange(preset: string, now = new Date()) {
+  if (preset === "mtd") {
+    return {
+      from: formatLocalDateParam(new Date(now.getFullYear(), now.getMonth(), 1)),
+      to: formatLocalDateParam(now),
+    };
+  }
+  if (preset === "qtd") {
+    return {
+      from: formatLocalDateParam(new Date(now.getFullYear(), Math.floor(now.getMonth() / 3) * 3, 1)),
+      to: formatLocalDateParam(now),
+    };
+  }
+  if (preset === "ytd") {
+    return {
+      from: formatLocalDateParam(new Date(now.getFullYear(), 0, 1)),
+      to: formatLocalDateParam(now),
+    };
+  }
+  return { from: daysAgo(Number(preset), now), to: undefined };
+}
+
 export function normalizeStagePageQuery(input: Record<string, string | undefined>): StagePageQuery {
   const parsedPage = Number(input.page);
   const parsedPageSize = Number(input.pageSize);
   const estimateSentPreset = input.estimate_sent_preset;
+  const estimateSentPresetRangeValue =
+    estimateSentPreset && ESTIMATE_SENT_PRESETS.has(estimateSentPreset)
+      ? estimateSentPresetRange(estimateSentPreset)
+      : null;
   const estimateSentFrom =
     input.estimateSentFrom ??
     input.estimate_sent_since ??
-    (estimateSentPreset && ESTIMATE_SENT_PRESETS.has(estimateSentPreset)
-      ? daysAgo(Number(estimateSentPreset))
-      : undefined);
+    estimateSentPresetRangeValue?.from;
 
   return {
     page: Number.isFinite(parsedPage) && parsedPage > 0 ? parsedPage : 1,
@@ -59,7 +90,7 @@ export function normalizeStagePageQuery(input: Record<string, string | undefined
     filters: {
       assignedRepId: input.assignedRepId,
       estimateSentFrom,
-      estimateSentTo: input.estimateSentTo ?? input.estimate_sent_until,
+      estimateSentTo: input.estimateSentTo ?? input.estimate_sent_until ?? estimateSentPresetRangeValue?.to,
       staleOnly: input.staleOnly === "true",
       status: input.status,
       workflowRoute: input.workflowRoute,

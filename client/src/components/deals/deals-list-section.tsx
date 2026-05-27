@@ -22,6 +22,7 @@ import { useTaskAssignees } from "@/hooks/use-task-assignees";
 import { formatCurrencyCompact } from "@/lib/deal-utils";
 import {
   daysAgo,
+  toDatePresetRange,
   type TerminalDateFilter,
 } from "@/lib/pipeline-terminal-filters";
 import { api } from "@/lib/api";
@@ -90,6 +91,9 @@ function dateRangeFromTerminalFilter(filter: TerminalDateFilter) {
   if (filter.preset === "all") return {};
   if (filter.preset === "custom") {
     return { from: filter.customStart || undefined, to: filter.customEnd || undefined };
+  }
+  if (filter.preset === "mtd" || filter.preset === "qtd" || filter.preset === "ytd") {
+    return toDatePresetRange(filter.preset);
   }
   return { from: daysAgo(Number(filter.preset)) };
 }
