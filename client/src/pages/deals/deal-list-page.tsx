@@ -591,6 +591,16 @@ export function matchesUpdatedRange(deal: Deal, updatedFrom?: string, updatedTo?
   return true;
 }
 
+export function getCanonicalTerminalMetric(columns: DealBoardColumn[], stageSlug: TerminalOutcome) {
+  const column = columns.find((item) => item.stage.slug === stageSlug);
+
+  return {
+    count: column?.count ?? 0,
+    totalCount: column?.totalCount ?? column?.count ?? 0,
+    totalValue: column?.totalValue ?? 0,
+  };
+}
+
 function DealsBoardColumn({
   column,
   onOpenStage,
@@ -886,10 +896,8 @@ function DealListPageContent({ role, userId }: { role: string; userId: string })
   const totalCount = activePipelineColumns.reduce((sum, column) => sum + column.count, 0);
   const totalVisibleCount = activePipelineColumns.reduce((sum, column) => sum + (column.totalCount ?? column.count), 0);
   const totalValue = activePipelineColumns.reduce((sum, column) => sum + column.totalValue, 0);
-  const wonValue =
-    board?.terminalStages
-      ?.filter((terminal) => terminal.stage.slug === "won")
-      .reduce((sum, terminal) => sum + (terminal.totalValue ?? 0), 0) ?? 0;
+  const wonMetric = getCanonicalTerminalMetric(boardColumns, "won");
+  const wonValue = wonMetric.totalValue;
   const unsearchedOverSlaCount = unsearchedColumns.reduce(
     (sum, column) =>
       sum +
