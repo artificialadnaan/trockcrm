@@ -13,6 +13,7 @@ import {
   buildDealsPageKpiDrilldownPath,
   buildDealStageNavigationPath,
   formatDateInput,
+  getCanonicalTerminalMetric,
   getDashboardDealListView,
   matchesUpdatedRange,
   sumNonOnHoldDealValues,
@@ -646,7 +647,7 @@ describe("DealListPage", () => {
     expect(html).not.toContain("101 deals");
   });
 
-  it("renders the Won KPI from terminal-stage aggregates returned by the board", () => {
+  it("renders the Won KPI from the canonical Won column and ignores duplicated terminal-stage aggregates", () => {
     mocks.useDealBoardMock.mockReturnValue({
       board: {
         columns: [
@@ -656,12 +657,29 @@ describe("DealListPage", () => {
             totalValue: 180000,
             cards: [makeDeal({ id: "deal-open", bidEstimate: "180000", awardedAmount: null })],
           },
+          {
+            stage: { id: "stage-won", name: "Won", slug: "won" },
+            count: 294,
+            totalCount: 344,
+            totalValue: 21690316.66,
+            cards: [],
+          },
         ],
         terminalStages: [
           {
             stage: { id: "stage-won", name: "Won", slug: "won" },
-            count: 12,
-            totalValue: 60000,
+            count: 294,
+            totalValue: 21690316.66,
+          },
+          {
+            stage: { id: "stage-won-copy-1", name: "Won", slug: "won" },
+            count: 294,
+            totalValue: 21690316.66,
+          },
+          {
+            stage: { id: "stage-won-copy-2", name: "Won", slug: "won" },
+            count: 294,
+            totalValue: 21690316.66,
           },
         ],
       },
@@ -672,7 +690,39 @@ describe("DealListPage", () => {
 
     const html = renderPage();
 
-    expect(html).toMatch(/Won.*\$60K/);
+    expect(html).toMatch(/Won.*\$21\.7M/);
+    expect((html.match(/\$21\.7M/g) ?? []).length).toBeGreaterThanOrEqual(2);
+    expect(html).not.toContain("$65.1M");
+  });
+
+  it("maps Won and Lost summary metrics from canonical columns", () => {
+    const metrics = [
+      {
+        stage: { id: "stage-won", name: "Won", slug: "won" },
+        count: 294,
+        totalCount: 344,
+        totalValue: 21690316.66,
+        cards: [],
+      },
+      {
+        stage: { id: "stage-lost", name: "Lost", slug: "lost" },
+        count: 12,
+        totalCount: 17,
+        totalValue: 430000,
+        cards: [],
+      },
+    ];
+
+    expect(getCanonicalTerminalMetric(metrics, "won")).toEqual({
+      count: 294,
+      totalCount: 344,
+      totalValue: 21690316.66,
+    });
+    expect(getCanonicalTerminalMetric(metrics, "lost")).toEqual({
+      count: 12,
+      totalCount: 17,
+      totalValue: 430000,
+    });
   });
 
   it("renders decorated cards with project number fallback, avatar, company, SLA, and location", () => {
@@ -1145,7 +1195,7 @@ describe("DealListPage", () => {
     );
   });
 
-  it("renders the Won KPI from the backend aggregate when the request preserves the page period", () => {
+  it("renders the Won KPI from the canonical backend column when the request preserves the page period", () => {
     mocks.useDealBoardMock.mockReturnValue({
       board: {
         columns: [
@@ -1154,6 +1204,12 @@ describe("DealListPage", () => {
             count: 1,
             totalValue: 180000,
             cards: [makeDeal()],
+          },
+          {
+            stage: { id: "stage-won", name: "Won", slug: "won" },
+            count: 2,
+            totalValue: 125000,
+            cards: [],
           },
         ],
         terminalStages: [
@@ -1172,11 +1228,11 @@ describe("DealListPage", () => {
     const html = renderPage("/deals?scope=all&period=last_month", "director");
 
     expect(html).toContain('href="/deals?filter=won&amp;scope=all&amp;period=last_month"');
-    expect(html).toContain("$125K");
+    expect(html).toContain("$125.0K");
     expect(html).not.toContain("$410K");
   });
 
-  it("preserves the aggregate-only terminal response shape for Won KPI rendering", () => {
+  it("does not use aggregate-only terminal response shape for Won KPI rendering", () => {
     mocks.useDealBoardMock.mockReturnValue({
       board: {
         columns: [
@@ -1186,12 +1242,18 @@ describe("DealListPage", () => {
             totalValue: 180000,
             cards: [makeDeal()],
           },
+          {
+            stage: { id: "stage-won", name: "Won", slug: "won" },
+            count: 3,
+            totalValue: 125000,
+            cards: [],
+          },
         ],
         terminalStages: [
           {
             stage: { id: "stage-won", name: "Won", slug: "won" },
             count: 3,
-            totalValue: 125000,
+            totalValue: 375000,
           },
         ],
       },
@@ -1202,7 +1264,8 @@ describe("DealListPage", () => {
 
     const html = renderPage("/deals?scope=all&period=last_month", "director");
 
-    expect(html).toContain("$125K");
+    expect(html).toContain("$125.0K");
+    expect(html).not.toContain("$375.0K");
     expect(html).not.toContain("$410K");
   });
 
@@ -1215,6 +1278,12 @@ describe("DealListPage", () => {
             count: 1,
             totalValue: 180000,
             cards: [makeDeal()],
+          },
+          {
+            stage: { id: "stage-won", name: "Won", slug: "won" },
+            count: 3,
+            totalValue: 125000,
+            cards: [],
           },
         ],
         terminalStages: [
@@ -1232,7 +1301,7 @@ describe("DealListPage", () => {
 
     const html = renderPage("/deals?scope=all&filter=won&period=last_month&won_preset=30", "director");
 
-    expect(html).toContain("$125K");
+    expect(html).toContain("$125.0K");
     expect(html).not.toContain("$410K");
     expect(html).not.toContain("$500K");
     expect(mocks.useDealBoardMock).toHaveBeenLastCalledWith(
