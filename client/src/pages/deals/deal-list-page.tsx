@@ -24,6 +24,7 @@ import {
   isTerminalOutcomeSlug,
   readTerminalDateFiltersFromSearchParams,
   setTerminalDateFilterSearchParams,
+  toDatePresetRange,
   writeTerminalDateFilter,
   type TerminalDateFilter,
   type TerminalOutcome,
@@ -356,7 +357,16 @@ function readCurrentTerminalDateFilters(): Record<TerminalOutcome, TerminalDateF
 }
 
 function isDealDatePreset(value: string | null): value is Exclude<TerminalDateFilter["preset"], "custom"> {
-  return value === "7" || value === "30" || value === "60" || value === "90" || value === "all";
+  return (
+    value === "7" ||
+    value === "30" ||
+    value === "60" ||
+    value === "90" ||
+    value === "mtd" ||
+    value === "qtd" ||
+    value === "ytd" ||
+    value === "all"
+  );
 }
 
 function readEstimateSentDateFilterFromSearchParams(params: URLSearchParams): TerminalDateFilter {
@@ -510,6 +520,9 @@ function parseDayStart(value: string) {
 function getWonMetricTerminalLabel(filter: TerminalDateFilter) {
   if (filter.preset === "custom") return "Custom";
   if (filter.preset === "all") return "All time";
+  if (filter.preset === "mtd") return "MTD";
+  if (filter.preset === "qtd") return "QTD";
+  if (filter.preset === "ytd") return "YTD";
   return `Last ${filter.preset} days`;
 }
 
@@ -522,6 +535,10 @@ function getTerminalDateRange(filter: TerminalDateFilter, now = new Date()): Dat
       from: filter.customStart,
       to: filter.customEnd ?? today,
     };
+  }
+
+  if (filter.preset === "mtd" || filter.preset === "qtd" || filter.preset === "ytd") {
+    return toDatePresetRange(filter.preset, now);
   }
 
   const start = new Date(now);
@@ -540,6 +557,10 @@ function getEstimateSentDateRange(filter: TerminalDateFilter, now = new Date()):
       from: filter.customStart,
       to: filter.customEnd,
     };
+  }
+
+  if (filter.preset === "mtd" || filter.preset === "qtd" || filter.preset === "ytd") {
+    return toDatePresetRange(filter.preset, now);
   }
 
   return { from: daysAgo(Number(filter.preset), now) };

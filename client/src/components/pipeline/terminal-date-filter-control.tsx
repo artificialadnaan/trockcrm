@@ -10,6 +10,9 @@ const PRESETS = [
   { value: "30", label: "Last 30 days", chip: "Last 30d", aria: "from the last 30 days" },
   { value: "60", label: "Last 60 days", chip: "Last 60d", aria: "from the last 60 days" },
   { value: "90", label: "Last 90 days", chip: "Last 90d", aria: "from the last 90 days" },
+  { value: "mtd", label: "MTD", chip: "MTD", aria: "month to date" },
+  { value: "qtd", label: "QTD", chip: "QTD", aria: "quarter to date" },
+  { value: "ytd", label: "YTD", chip: "YTD", aria: "year to date" },
   { value: "all", label: "All time", chip: "All time", aria: "from all time" },
   { value: "custom", label: "Custom range", aria: "from a custom date range" },
 ] as const;

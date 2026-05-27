@@ -6,6 +6,8 @@ import {
   getTerminalDateFilterLabel,
   readTerminalDateFilter,
   readTerminalDateFiltersFromSearchParams,
+  setTerminalDateFilterSearchParams,
+  toDatePresetRange,
   writeTerminalDateFilter,
 } from "@/lib/pipeline-terminal-filters";
 import {
@@ -366,6 +368,21 @@ describe("terminal pipeline date filters", () => {
     ).toBe("/deals/pipeline?includeDd=false&won_since=2026-01-31&lost_since=2026-01-31");
   });
 
+  it("serializes month-, quarter-, and year-to-date terminal windows with bounded date pairs", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-05-15T16:00:00Z"));
+
+    expect(toDatePresetRange("mtd")).toEqual({ from: "2026-05-01", to: "2026-05-15" });
+    expect(toDatePresetRange("qtd")).toEqual({ from: "2026-04-01", to: "2026-05-15" });
+    expect(toDatePresetRange("ytd")).toEqual({ from: "2026-01-01", to: "2026-05-15" });
+    expect(
+      buildPipelineRequestPath(false, {
+        won: { preset: "mtd" },
+        lost: { preset: "qtd" },
+      })
+    ).toBe("/deals/pipeline?includeDd=false&won_since=2026-05-01&won_until=2026-05-15&lost_since=2026-04-01&lost_until=2026-05-15");
+  });
+
   it("carries terminal date filters into stage drill-down links", () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-05-01T16:00:00Z"));
@@ -438,6 +455,15 @@ describe("terminal pipeline date filters", () => {
     ).toEqual({
       won: { preset: "90" },
       lost: { preset: "7" },
+    });
+
+    const params = new URLSearchParams();
+    setTerminalDateFilterSearchParams(params, "won", { preset: "mtd" });
+    setTerminalDateFilterSearchParams(params, "lost", { preset: "ytd" });
+    expect(params.toString()).toBe("won_preset=mtd&lost_preset=ytd");
+    expect(readTerminalDateFiltersFromSearchParams(params)).toEqual({
+      won: { preset: "mtd" },
+      lost: { preset: "ytd" },
     });
   });
 

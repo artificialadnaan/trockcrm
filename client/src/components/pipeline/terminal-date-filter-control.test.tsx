@@ -67,6 +67,36 @@ describe("TerminalDateFilterControl", () => {
     expect(onFilterChange).toHaveBeenCalledWith({ preset: "90" });
   });
 
+  it("commits MTD, QTD, and YTD presets immediately", () => {
+    const onFilterChange = vi.fn();
+
+    act(() => {
+      root?.render(
+        <TerminalDateFilterControl
+          stageName="Won"
+          filter={{ preset: "30" }}
+          onFilterChange={onFilterChange}
+        />
+      );
+    });
+
+    act(() => {
+      container.querySelector<HTMLButtonElement>('button[aria-label="Won date filter"]')?.click();
+    });
+
+    for (const [label, preset] of [
+      ["Show Won deals month to date", "mtd"],
+      ["Show Won deals quarter to date", "qtd"],
+      ["Show Won deals year to date", "ytd"],
+    ] as const) {
+      act(() => {
+        document.body.querySelector<HTMLButtonElement>(`button[aria-label="${label}"]`)?.click();
+      });
+
+      expect(onFilterChange).toHaveBeenLastCalledWith({ preset });
+    }
+  });
+
   // Future dates should never be selectable for custom terminal ranges.
   it("caps custom date inputs at today", () => {
     vi.useFakeTimers();

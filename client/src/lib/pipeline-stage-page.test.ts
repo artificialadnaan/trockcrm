@@ -74,4 +74,22 @@ describe("normalizeStagePageQuery", () => {
       estimateSentTo: undefined,
     });
   });
+
+  it("materializes Estimate Sent MTD, QTD, and YTD presets into concrete stage-page date filters", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-05-22T16:00:00Z"));
+
+    expect(normalizeStagePageQuery({ estimate_sent_preset: "mtd" }).filters).toMatchObject({
+      estimateSentFrom: "2026-05-01",
+      estimateSentTo: "2026-05-22",
+    });
+    expect(normalizeStagePageQuery({ estimate_sent_preset: "qtd" }).filters).toMatchObject({
+      estimateSentFrom: "2026-04-01",
+      estimateSentTo: "2026-05-22",
+    });
+    expect(normalizeStagePageQuery({ estimate_sent_preset: "ytd" }).filters).toMatchObject({
+      estimateSentFrom: "2026-01-01",
+      estimateSentTo: "2026-05-22",
+    });
+  });
 });

@@ -33,7 +33,7 @@ export function getTerminalStageOutcome(
 
 export type TerminalOutcome = "won" | "lost";
 export type TerminalDateFilter =
-  | { preset: "7" | "30" | "60" | "90" | "all"; customStart?: undefined; customEnd?: undefined }
+  | { preset: "7" | "30" | "60" | "90" | "mtd" | "qtd" | "ytd" | "all"; customStart?: undefined; customEnd?: undefined }
   | { preset: "custom"; customStart: string; customEnd?: string };
 
 const TERMINAL_FILTER_STORAGE_KEYS: Record<TerminalOutcome, string> = {
@@ -105,6 +105,13 @@ function formatDateParam(date: Date) {
   return date.toISOString().split("T")[0];
 }
 
+function formatLocalDateParam(date: Date) {
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  const day = String(date.getDate()).padStart(2, "0");
+  return `${year}-${month}-${day}`;
+}
+
 function isIsoDate(value: string) {
   return /^\d{4}-\d{2}-\d{2}$/.test(value);
 }
@@ -121,6 +128,23 @@ export function daysAgo(days: number, now = new Date()) {
   return formatDateParam(date);
 }
 
+export function toDatePresetRange(
+  preset: Extract<TerminalDateFilter["preset"], "mtd" | "qtd" | "ytd">,
+  now = new Date()
+) {
+  const today = formatLocalDateParam(now);
+  if (preset === "mtd") {
+    return { from: formatLocalDateParam(new Date(now.getFullYear(), now.getMonth(), 1)), to: today };
+  }
+  if (preset === "qtd") {
+    return {
+      from: formatLocalDateParam(new Date(now.getFullYear(), Math.floor(now.getMonth() / 3) * 3, 1)),
+      to: today,
+    };
+  }
+  return { from: formatLocalDateParam(new Date(now.getFullYear(), 0, 1)), to: today };
+}
+
 export function readTerminalDateFilter(outcome: TerminalOutcome): TerminalDateFilter {
   if (typeof window === "undefined") return DEFAULT_TERMINAL_DATE_FILTER;
   const raw =
@@ -135,6 +159,9 @@ export function readTerminalDateFilter(outcome: TerminalOutcome): TerminalDateFi
       parsed.preset === "30" ||
       parsed.preset === "60" ||
       parsed.preset === "90" ||
+      parsed.preset === "mtd" ||
+      parsed.preset === "qtd" ||
+      parsed.preset === "ytd" ||
       parsed.preset === "all"
     ) {
       return { preset: parsed.preset };
@@ -165,6 +192,9 @@ export function getTodayDateParam(now = new Date()) {
 export function getTerminalDateFilterLabel(filter: TerminalDateFilter) {
   if (filter.preset === "custom") return "Custom";
   if (filter.preset === "all") return "All time";
+  if (filter.preset === "mtd") return "MTD";
+  if (filter.preset === "qtd") return "QTD";
+  if (filter.preset === "ytd") return "YTD";
   return `Last ${filter.preset}d`;
 }
 
@@ -181,6 +211,13 @@ function appendTerminalDateParams(
   if (filter.preset === "custom") {
     params.set(`${prefix}_since`, clampDateToToday(filter.customStart));
     if (filter.customEnd) params.set(`${prefix}_until`, clampDateToToday(filter.customEnd));
+    return;
+  }
+
+  if (filter.preset === "mtd" || filter.preset === "qtd" || filter.preset === "ytd") {
+    const range = toDatePresetRange(filter.preset);
+    params.set(`${prefix}_since`, range.from);
+    params.set(`${prefix}_until`, range.to);
     return;
   }
 
@@ -240,7 +277,16 @@ export function getActivePipelineColumns<T extends { stage: { slug: string } }>(
 }
 
 function isTerminalPreset(value: string | null): value is Exclude<TerminalDateFilter["preset"], "custom"> {
-  return value === "7" || value === "30" || value === "60" || value === "90" || value === "all";
+  return (
+    value === "7" ||
+    value === "30" ||
+    value === "60" ||
+    value === "90" ||
+    value === "mtd" ||
+    value === "qtd" ||
+    value === "ytd" ||
+    value === "all"
+  );
 }
 
 function readTerminalDateFilterFromSearchParams(
