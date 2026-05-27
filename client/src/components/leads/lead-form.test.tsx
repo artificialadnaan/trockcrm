@@ -757,10 +757,55 @@ describe("LeadForm", () => {
     expect(html).toContain("Property Selector");
     expect(html).toContain("Add New Property");
     expect(html).toContain("Sales Rep");
+    expect(html).toContain('data-select-value="rep-1"');
     expect(html).toContain('<span data-select-label="true">Rep One</span>');
-    expect(html).toContain('<span data-select-label="true">Ada Lovelace</span>');
+    expect(html).toContain("Ada Lovelace");
     expect(html).not.toContain("Initial Stage");
     expect(html).toContain('<span data-select-label="true">Multifamily</span>');
+  });
+
+  it("defaults create-mode sales rep assignment to the logged-in rep id", async () => {
+    renderCreateForm();
+
+    const salesRepSelect = container.querySelector("#assignedRepId")?.parentElement;
+    expect(salesRepSelect?.getAttribute("data-select-value")).toBe("rep-1");
+
+    await submitForm();
+
+    expect(leadHookMocks.createLead).toHaveBeenCalledWith(
+      expect.objectContaining({
+        assignedRepId: "rep-1",
+        salesRepId: "rep-1",
+      }),
+      { officeId: "office-dallas" }
+    );
+    expect(container.textContent).not.toContain("Sales rep is required.");
+  });
+
+  it("uses an explicitly selected sales rep when creating a lead", async () => {
+    authMocks.user.role = "admin";
+    renderCreateForm();
+
+    await clickButton(findButton("Rep Two")!);
+    await submitForm();
+
+    expect(leadHookMocks.createLead).toHaveBeenCalledWith(
+      expect.objectContaining({
+        assignedRepId: "rep-2",
+        salesRepId: "rep-2",
+      }),
+      { officeId: "office-dallas" }
+    );
+  });
+
+  it("requires a stored sales rep id when no assignment is selected", async () => {
+    authMocks.user.role = "admin";
+    renderCreateForm();
+
+    await submitForm();
+
+    expect(leadHookMocks.createLead).not.toHaveBeenCalled();
+    expect(container.textContent).toContain("Sales rep is required.");
   });
 
   it("preserves the contact prefill while company contacts are still loading", () => {
@@ -1048,7 +1093,7 @@ describe("LeadForm", () => {
     await clickButton(findButton("ATL (Atlanta)")!);
     await clickButton(findButton("Select Acme")!);
     await clickButton(findButton("Select Palm Villas")!);
-    await clickButton(findButton("Ada Lovelace")!);
+    await clickButton(container.querySelector<HTMLButtonElement>('button[data-value="contact-1"]')!);
     await submitForm();
 
     expect(leadHookMocks.createLead).toHaveBeenCalledWith(

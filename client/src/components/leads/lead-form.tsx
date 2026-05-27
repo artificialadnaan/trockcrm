@@ -280,6 +280,18 @@ export function getEditableFormState(
   };
 }
 
+function applyCreateRepDefault<T extends { assignedRepId: string }>(
+  formState: T,
+  isCreate: boolean,
+  user?: { id?: string; role?: string } | null
+) {
+  if (!isCreate || user?.role !== "rep" || !user.id || formState.assignedRepId) {
+    return formState;
+  }
+
+  return { ...formState, assignedRepId: user.id };
+}
+
 function renderAnswerValue(
   value: LeadAnswerValue | undefined,
   options: {
@@ -738,7 +750,13 @@ function EditableLeadForm({
   const [companyId, setCompanyId] = useState<string | null>(lead?.companyId ?? initialValues?.companyId ?? null);
   const leadStages = getLeadCreationStages(stages);
 
-  const [formData, setFormData] = useState(() => getEditableFormState(lead, initialValues, initialOfficeCode));
+  const [formData, setFormData] = useState(() =>
+    applyCreateRepDefault(
+      getEditableFormState(lead, initialValues, initialOfficeCode),
+      isCreate,
+      user
+    )
+  );
   const selectedOffice = officeOptions.find((office) => office.code === formData.officeCode) ?? null;
   const { assignees } = useTaskAssignees({ officeId: isCreate ? selectedOffice?.officeId : null });
   const { properties } = useProperties(
@@ -791,7 +809,13 @@ function EditableLeadForm({
   const [createdLeadAfterAttachmentFailureId, setCreatedLeadAfterAttachmentFailureId] = useState<string | null>(null);
 
   useEffect(() => {
-    setFormData(getEditableFormState(lead, initialValues, initialOfficeCode));
+    setFormData(
+      applyCreateRepDefault(
+        getEditableFormState(lead, initialValues, initialOfficeCode),
+        isCreate,
+        user
+      )
+    );
     setCompanyId(lead?.companyId ?? initialValues?.companyId ?? null);
   }, [initialValues, lead]);
 
@@ -811,13 +835,7 @@ function EditableLeadForm({
   }, [activeOfficeId, isCreate, offices]);
 
   useEffect(() => {
-    if (!isCreate || user?.role !== "rep") {
-      return;
-    }
-
-    setFormData((current) =>
-      current.assignedRepId ? current : { ...current, assignedRepId: user.id }
-    );
+    setFormData((current) => applyCreateRepDefault(current, isCreate, user));
   }, [isCreate, user?.id, user?.role]);
 
   useEffect(() => {
@@ -1084,7 +1102,9 @@ function EditableLeadForm({
     officeOptions.find((item) => item.code === formData.officeCode)?.label ?? "Select office";
   const selectedRepLabel =
     repSelectItems.find((item) => item.value === formData.assignedRepId)?.label ??
-    (user?.role === "rep" ? user.displayName : "Select sales rep");
+    (formData.assignedRepId && formData.assignedRepId === user?.id && user?.role === "rep"
+      ? user.displayName
+      : "Select sales rep");
   const selectedProjectTypeLabel =
     projectTypeSelectItems.find((item) => item.value === (formData.projectTypeId || "__none__"))?.label ??
     selectedProjectType?.name ??
