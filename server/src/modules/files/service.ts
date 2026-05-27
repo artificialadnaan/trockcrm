@@ -800,16 +800,14 @@ export async function getFiles(tenantDb: TenantDb, filters: FileFilters) {
   })();
   const sortOrder = filters.sortDir === "asc" ? asc(sortColumn) : desc(sortColumn);
 
-  const [countResult, fileRows] = await Promise.all([
-    tenantDb.select({ count: sql<number>`count(*)` }).from(files).where(where),
-    tenantDb
-      .select()
-      .from(files)
-      .where(where)
-      .orderBy(sortOrder)
-      .limit(limit)
-      .offset(offset),
-  ]);
+  const countResult = await tenantDb.select({ count: sql<number>`count(*)` }).from(files).where(where);
+  const fileRows = await tenantDb
+    .select()
+    .from(files)
+    .where(where)
+    .orderBy(sortOrder)
+    .limit(limit)
+    .offset(offset);
 
   const total = Number(countResult[0]?.count ?? 0);
 
@@ -877,38 +875,36 @@ export async function searchPhotoUploadTargets(
     );
   }
 
-  const [leadRows, dealRows] = await Promise.all([
-    tenantDb
-      .select({
-        id: leads.id,
-        name: leads.name,
-        stageName: pipelineStageConfig.name,
-        companyName: companies.name,
-        lastUpdatedAt: leads.updatedAt,
-      })
-      .from(leads)
-      .leftJoin(companies, eq(companies.id, leads.companyId))
-      .leftJoin(pipelineStageConfig, eq(pipelineStageConfig.id, leads.stageId))
-      .where(leadConditions.length > 0 ? and(...leadConditions) : sql`true`)
-      .orderBy(desc(leads.updatedAt))
-      .limit(limit),
-    tenantDb
-      .select({
-        id: deals.id,
-        name: deals.name,
-        dealNumber: deals.dealNumber,
-        pipelineDisposition: deals.pipelineDisposition,
-        stageName: pipelineStageConfig.name,
-        companyName: companies.name,
-        lastUpdatedAt: deals.updatedAt,
-      })
-      .from(deals)
-      .leftJoin(companies, eq(companies.id, deals.companyId))
-      .leftJoin(pipelineStageConfig, eq(pipelineStageConfig.id, deals.stageId))
-      .where(dealConditions.length > 0 ? and(...dealConditions) : sql`true`)
-      .orderBy(desc(deals.updatedAt))
-      .limit(limit),
-  ]);
+  const leadRows = await tenantDb
+    .select({
+      id: leads.id,
+      name: leads.name,
+      stageName: pipelineStageConfig.name,
+      companyName: companies.name,
+      lastUpdatedAt: leads.updatedAt,
+    })
+    .from(leads)
+    .leftJoin(companies, eq(companies.id, leads.companyId))
+    .leftJoin(pipelineStageConfig, eq(pipelineStageConfig.id, leads.stageId))
+    .where(leadConditions.length > 0 ? and(...leadConditions) : sql`true`)
+    .orderBy(desc(leads.updatedAt))
+    .limit(limit);
+  const dealRows = await tenantDb
+    .select({
+      id: deals.id,
+      name: deals.name,
+      dealNumber: deals.dealNumber,
+      pipelineDisposition: deals.pipelineDisposition,
+      stageName: pipelineStageConfig.name,
+      companyName: companies.name,
+      lastUpdatedAt: deals.updatedAt,
+    })
+    .from(deals)
+    .leftJoin(companies, eq(companies.id, deals.companyId))
+    .leftJoin(pipelineStageConfig, eq(pipelineStageConfig.id, deals.stageId))
+    .where(dealConditions.length > 0 ? and(...dealConditions) : sql`true`)
+    .orderBy(desc(deals.updatedAt))
+    .limit(limit);
 
   const targets: PhotoUploadTarget[] = [
     ...leadRows.map((row) => ({
@@ -1239,65 +1235,63 @@ export async function getDealPhotoTimeline(
   const offset = (page - 1) * limit;
   const conditions = await buildDealPhotoTimelineConditions(tenantDb, dealId, filters);
 
-  const [countResult, photoRows] = await Promise.all([
-    tenantDb.select({ count: sql<number>`count(*)` }).from(files).where(conditions),
-    tenantDb
-      .select({
-        id: files.id,
-        category: files.category,
-        subcategory: files.subcategory,
-        folderPath: files.folderPath,
-        tags: files.tags,
-        displayName: files.displayName,
-        systemFilename: files.systemFilename,
-        originalFilename: files.originalFilename,
-        mimeType: files.mimeType,
-        fileSizeBytes: files.fileSizeBytes,
-        fileExtension: files.fileExtension,
-        r2Key: files.r2Key,
-        r2Bucket: files.r2Bucket,
-        dealId: files.dealId,
-        leadId: files.leadId,
-        intakeSection: files.intakeSection,
-        intakeRequirementKey: files.intakeRequirementKey,
-        intakeSource: files.intakeSource,
-        contactId: files.contactId,
-        procoreProjectId: files.procoreProjectId,
-        changeOrderId: files.changeOrderId,
-        externalUrl: files.externalUrl,
-        externalThumbnailUrl: files.externalThumbnailUrl,
-        companycamPhotoId: files.companycamPhotoId,
-        description: files.description,
-        notes: files.notes,
-        version: files.version,
-        parentFileId: files.parentFileId,
-        takenAt: files.takenAt,
-        geoLat: files.geoLat,
-        geoLng: files.geoLng,
-        latitude: files.latitude,
-        longitude: files.longitude,
-        address: files.address,
-        addressSource: files.addressSource,
-        geocodedAt: files.geocodedAt,
-        photoCategory: files.photoCategory,
-        deletedAt: files.deletedAt,
-        deletedByUserId: files.deletedByUserId,
-        procoreSyncStatus: files.procoreSyncStatus,
-        procorePhotoId: files.procorePhotoId,
-        uploadedBy: files.uploadedBy,
-        isActive: files.isActive,
-        createdAt: files.createdAt,
-        updatedAt: files.updatedAt,
-        uploaderName: sql<string>`COALESCE(${users.displayName}, 'Unknown')`.as("uploader_name"),
-        uploaderAvatarUrl: users.avatarUrl,
-      })
-      .from(files)
-      .leftJoin(users, eq(users.id, files.uploadedBy))
-      .where(conditions)
-      .orderBy(desc(sql`COALESCE(${files.takenAt}, ${files.createdAt})`))
-      .limit(limit)
-      .offset(offset),
-  ]);
+  const countResult = await tenantDb.select({ count: sql<number>`count(*)` }).from(files).where(conditions);
+  const photoRows = await tenantDb
+    .select({
+      id: files.id,
+      category: files.category,
+      subcategory: files.subcategory,
+      folderPath: files.folderPath,
+      tags: files.tags,
+      displayName: files.displayName,
+      systemFilename: files.systemFilename,
+      originalFilename: files.originalFilename,
+      mimeType: files.mimeType,
+      fileSizeBytes: files.fileSizeBytes,
+      fileExtension: files.fileExtension,
+      r2Key: files.r2Key,
+      r2Bucket: files.r2Bucket,
+      dealId: files.dealId,
+      leadId: files.leadId,
+      intakeSection: files.intakeSection,
+      intakeRequirementKey: files.intakeRequirementKey,
+      intakeSource: files.intakeSource,
+      contactId: files.contactId,
+      procoreProjectId: files.procoreProjectId,
+      changeOrderId: files.changeOrderId,
+      externalUrl: files.externalUrl,
+      externalThumbnailUrl: files.externalThumbnailUrl,
+      companycamPhotoId: files.companycamPhotoId,
+      description: files.description,
+      notes: files.notes,
+      version: files.version,
+      parentFileId: files.parentFileId,
+      takenAt: files.takenAt,
+      geoLat: files.geoLat,
+      geoLng: files.geoLng,
+      latitude: files.latitude,
+      longitude: files.longitude,
+      address: files.address,
+      addressSource: files.addressSource,
+      geocodedAt: files.geocodedAt,
+      photoCategory: files.photoCategory,
+      deletedAt: files.deletedAt,
+      deletedByUserId: files.deletedByUserId,
+      procoreSyncStatus: files.procoreSyncStatus,
+      procorePhotoId: files.procorePhotoId,
+      uploadedBy: files.uploadedBy,
+      isActive: files.isActive,
+      createdAt: files.createdAt,
+      updatedAt: files.updatedAt,
+      uploaderName: sql<string>`COALESCE(${users.displayName}, 'Unknown')`.as("uploader_name"),
+      uploaderAvatarUrl: users.avatarUrl,
+    })
+    .from(files)
+    .leftJoin(users, eq(users.id, files.uploadedBy))
+    .where(conditions)
+    .orderBy(desc(sql`COALESCE(${files.takenAt}, ${files.createdAt})`))
+    .limit(limit)
+    .offset(offset);
 
   const total = Number(countResult[0]?.count ?? 0);
 

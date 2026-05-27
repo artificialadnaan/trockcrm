@@ -8,13 +8,13 @@ import {
   estimateGenerationRuns,
   estimateMarkets,
   estimateMarketZipMappings,
+  estimatePricingRecommendationOptions,
   estimatePricingRecommendations,
   estimateReviewEvents,
   estimateSourceDocuments,
   jobQueue,
   properties,
 } from "@trock-crm/shared/schema";
-import { estimatePricingRecommendationOptions } from "../../../../shared/src/schema/tenant/estimate-pricing-recommendation-options.js";
 
 const dealMarketOverrideServiceMocks = vi.hoisted(() => ({
   getDealEffectiveMarketContext: vi.fn(),
@@ -265,7 +265,7 @@ describe("buildEstimatingWorkbenchState", () => {
     expect(state.extractionRows).toHaveLength(3);
     expect(state.matchRows).toHaveLength(2);
     expect(state.pricingRows).toHaveLength(2);
-    expect(state.pricingRows[0]?.recommendationOptions).toEqual([
+    expect(state.pricingRows.find((row) => row.id === "rec-1")?.recommendationOptions).toEqual([
       expect.objectContaining({
         id: "option-1",
         recommendationId: "rec-1",

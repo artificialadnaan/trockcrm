@@ -293,12 +293,10 @@ export async function getLeadQuestionnaireSnapshot(
     projectTypeId: string | null;
   }
 ) {
-  const [nodes, allNodes, answers, legacyAnswers] = await Promise.all([
-    listQuestionnaireNodes(tenantDb),
-    listAllQuestionnaireNodes(tenantDb),
-    listLeadQuestionAnswers(tenantDb, input.leadId),
-    listLegacyLeadQuestionAnswers(tenantDb, input.leadId),
-  ]);
+  const nodes = await listQuestionnaireNodes(tenantDb);
+  const allNodes = await listAllQuestionnaireNodes(tenantDb);
+  const answers = await listLeadQuestionAnswers(tenantDb, input.leadId);
+  const legacyAnswers = await listLegacyLeadQuestionAnswers(tenantDb, input.leadId);
 
   return {
     projectTypeId: input.projectTypeId,
@@ -313,10 +311,8 @@ export async function getQuestionnaireTemplateSnapshot(
   tenantDb: TenantDb,
   projectTypeId: string | null
 ) {
-  const [nodes, allNodes] = await Promise.all([
-    listQuestionnaireNodes(tenantDb),
-    listAllQuestionnaireNodes(tenantDb),
-  ]);
+  const nodes = await listQuestionnaireNodes(tenantDb);
+  const allNodes = await listAllQuestionnaireNodes(tenantDb);
 
   const normalizeCreateModeNode = (node: QuestionnaireNode): QuestionnaireNode | null => {
     // First-class create-gate fields are collected above the V2 questionnaire.
@@ -472,10 +468,8 @@ export async function evaluateLeadQuestionGate(
     existingCustomerStatus: string | null;
   }
 ): Promise<LeadQuestionGateMissing> {
-  const [storedAnswers, nodes] = await Promise.all([
-    listLeadQuestionAnswers(tenantDb, input.leadId),
-    listQuestionnaireNodes(tenantDb),
-  ]);
+  const storedAnswers = await listLeadQuestionAnswers(tenantDb, input.leadId);
+  const nodes = await listQuestionnaireNodes(tenantDb);
   const mergedAnswers = await applyLeadAttachmentAnswers(tenantDb, input.leadId, {
     ...storedAnswers,
     ...(input.leadQuestionAnswers ?? {}),
@@ -513,10 +507,8 @@ export async function upsertLeadQuestionAnswerSet(
     return false;
   }
 
-  const [nodes, existingRows] = await Promise.all([
-    listQuestionnaireNodes(tenantDb),
-    tenantDb.select().from(leadQuestionAnswers).where(eq(leadQuestionAnswers.leadId, leadId)),
-  ]);
+  const nodes = await listQuestionnaireNodes(tenantDb);
+  const existingRows = await tenantDb.select().from(leadQuestionAnswers).where(eq(leadQuestionAnswers.leadId, leadId));
 
   const nodeByKey = new Map(nodes.map((node) => [node.key, node]));
   const existingByQuestionId = new Map(existingRows.map((row) => [row.questionId, row]));

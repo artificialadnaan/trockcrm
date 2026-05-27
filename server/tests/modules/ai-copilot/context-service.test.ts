@@ -113,7 +113,7 @@ describe("AI copilot schema exports", () => {
     expect(emailQuerySql).not.toContain("user_id =");
   });
 
-  it("runs independent context reads in parallel", async () => {
+  it("serializes independent context reads on request-scoped tenantDb", async () => {
     const deferreds = [
       { rows: [{
         id: "deal-1",
@@ -154,10 +154,10 @@ describe("AI copilot schema exports", () => {
     const contextPromise = getDealCopilotContext(tenantDb as any, "deal-1", "user-1");
     await Promise.resolve();
 
-    expect(tenantDb.execute).toHaveBeenCalledTimes(4);
-
-    for (const deferred of deferreds) {
+    for (const [index, deferred] of deferreds.entries()) {
+      expect(tenantDb.execute).toHaveBeenCalledTimes(index + 1);
       deferred.resolve(deferred.value);
+      await Promise.resolve();
     }
 
     await expect(contextPromise).resolves.toMatchObject({

@@ -648,10 +648,8 @@ export function createProcoreReconciliationService(
         page += 1;
       }
 
-      const [dealRows, ignoredRows] = await Promise.all([
-        deps.listActiveDeals(input.tenantDb),
-        deps.listIgnoredRows(input.tenantDb, input.officeId),
-      ]);
+      const dealRows = await deps.listActiveDeals(input.tenantDb);
+      const ignoredRows = await deps.listIgnoredRows(input.tenantDb, input.officeId);
 
       const ignoredKeys = new Set(
         ignoredRows
@@ -705,10 +703,8 @@ export function createProcoreReconciliationService(
       await deps.lockProjectScope(input.tenantDb, input.officeId, input.procoreProjectId);
       await deps.lockDealScope(input.tenantDb, input.officeId, input.dealId);
 
-      const [deal, existingProjectLink] = await Promise.all([
-        deps.findDealById(input.tenantDb, input.dealId),
-        deps.findDealByProjectId(input.tenantDb, input.procoreProjectId),
-      ]);
+      const deal = await deps.findDealById(input.tenantDb, input.dealId);
+      const existingProjectLink = await deps.findDealByProjectId(input.tenantDb, input.procoreProjectId);
 
       if (!deal) {
         throw new AppError(404, "Deal not found");

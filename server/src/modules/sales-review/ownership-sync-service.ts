@@ -280,20 +280,20 @@ async function listActiveHubspotIdentities(tenantDb: TenantDb, officeId: string)
 }
 
 export async function previewOwnershipSync(tenantDb: TenantDb, officeId: string) {
-  const [crmDeals, hubspotDeals, hubspotOwners, { identityRows }] = await Promise.all([
-    tenantDb
-      .select({
-        id: deals.id,
-        name: deals.name,
-        hubspotDealId: deals.hubspotDealId,
-        assignedRepId: deals.assignedRepId,
-        ownershipSyncStatus: deals.ownershipSyncStatus,
-      })
-      .from(deals)
-      .where(and(eq(deals.isActive, true), isNotNull(deals.hubspotDealId))),
+  const crmDeals = await tenantDb
+    .select({
+      id: deals.id,
+      name: deals.name,
+      hubspotDealId: deals.hubspotDealId,
+      assignedRepId: deals.assignedRepId,
+      ownershipSyncStatus: deals.ownershipSyncStatus,
+    })
+    .from(deals)
+    .where(and(eq(deals.isActive, true), isNotNull(deals.hubspotDealId)));
+  const { identityRows } = await listActiveHubspotIdentities(tenantDb, officeId);
+  const [hubspotDeals, hubspotOwners] = await Promise.all([
     fetchAllDeals(),
     fetchAllOwners(),
-    listActiveHubspotIdentities(tenantDb, officeId),
   ]);
 
   return summarizeOwnershipSyncPlan({

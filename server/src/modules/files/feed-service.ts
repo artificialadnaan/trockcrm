@@ -75,35 +75,33 @@ export async function getPhotoFeed(
 
   const where = and(...conditions);
 
-  const [countResult, photoRows] = await Promise.all([
-    tenantDb.select({ count: sql<number>`count(*)` }).from(files).where(where),
-    tenantDb
-      .select({
-        id: files.id,
-        displayName: files.displayName,
-        mimeType: files.mimeType,
-        subcategory: files.subcategory,
-        dealId: files.dealId,
-        externalUrl: files.externalUrl,
-        externalThumbnailUrl: files.externalThumbnailUrl,
-        r2Key: files.r2Key,
-        takenAt: files.takenAt,
-        createdAt: files.createdAt,
-        geoLat: files.geoLat,
-        geoLng: files.geoLng,
-        uploadedBy: files.uploadedBy,
-        dealNumber: deals.dealNumber,
-        dealName: deals.name,
-        uploaderName: sql<string>`COALESCE(${users.displayName}, 'Unknown')`.as("uploader_name"),
-      })
-      .from(files)
-      .leftJoin(deals, eq(deals.id, files.dealId))
-      .leftJoin(users, eq(users.id, files.uploadedBy))
-      .where(where)
-      .orderBy(desc(sql`COALESCE(${files.takenAt}, ${files.createdAt})`))
-      .limit(limit)
-      .offset(offset),
-  ]);
+  const countResult = await tenantDb.select({ count: sql<number>`count(*)` }).from(files).where(where);
+  const photoRows = await tenantDb
+    .select({
+      id: files.id,
+      displayName: files.displayName,
+      mimeType: files.mimeType,
+      subcategory: files.subcategory,
+      dealId: files.dealId,
+      externalUrl: files.externalUrl,
+      externalThumbnailUrl: files.externalThumbnailUrl,
+      r2Key: files.r2Key,
+      takenAt: files.takenAt,
+      createdAt: files.createdAt,
+      geoLat: files.geoLat,
+      geoLng: files.geoLng,
+      uploadedBy: files.uploadedBy,
+      dealNumber: deals.dealNumber,
+      dealName: deals.name,
+      uploaderName: sql<string>`COALESCE(${users.displayName}, 'Unknown')`.as("uploader_name"),
+    })
+    .from(files)
+    .leftJoin(deals, eq(deals.id, files.dealId))
+    .leftJoin(users, eq(users.id, files.uploadedBy))
+    .where(where)
+    .orderBy(desc(sql`COALESCE(${files.takenAt}, ${files.createdAt})`))
+    .limit(limit)
+    .offset(offset);
 
   const total = Number(countResult[0]?.count ?? 0);
 

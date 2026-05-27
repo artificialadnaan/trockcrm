@@ -81,10 +81,8 @@ export async function getLeadScopingSnapshot(
   intake: Awaited<ReturnType<typeof getLeadScopingIntakeByLeadId>>;
   readiness: LeadScopingReadiness;
 }> {
-  const [intake, linkedAttachmentKeys] = await Promise.all([
-    getLeadScopingIntakeByLeadId(tenantDb, leadId),
-    listLinkedAttachmentKeys(tenantDb, leadId),
-  ]);
+  const intake = await getLeadScopingIntakeByLeadId(tenantDb, leadId);
+  const linkedAttachmentKeys = await listLinkedAttachmentKeys(tenantDb, leadId);
 
   const readiness = evaluateLeadScopingReadiness({
     sectionData: normalizeSectionData(intake?.sectionData),

@@ -776,9 +776,10 @@ async function backAssociateStoredMessagesForBinding(
       )
     );
 
-  const previousStatTargets = (
-    await Promise.all(messageRows.map((email) => collectEmailStatTargetsForEmail(tenantDb, email)))
-  ).flat();
+  const previousStatTargets = [];
+  for (const email of messageRows) {
+    previousStatTargets.push(...await collectEmailStatTargetsForEmail(tenantDb, email));
+  }
 
   await tenantDb
     .update(emails)
@@ -978,67 +979,63 @@ export async function getEmailAssignmentQueue(
 
   const where = and(...conditions);
 
-  const [countResult, emailRows] = await Promise.all([
-    tenantDb.select({ count: sql<number>`count(*)` }).from(emails).where(where),
-    tenantDb
-      .select()
-      .from(emails)
-      .where(where)
-      .orderBy(
-        desc(sql`GREATEST(${emails.sentAt}, ${emails.syncedAt})`),
-        desc(emails.sentAt)
-      )
-      .limit(limit)
-      .offset(offset),
-  ]);
+  const countResult = await tenantDb.select({ count: sql<number>`count(*)` }).from(emails).where(where);
+  const emailRows = await tenantDb
+    .select()
+    .from(emails)
+    .where(where)
+    .orderBy(
+      desc(sql`GREATEST(${emails.sentAt}, ${emails.syncedAt})`),
+      desc(emails.sentAt)
+    )
+    .limit(limit)
+    .offset(offset);
 
-  const items = await Promise.all(
-    emailRows
-      .filter((emailRow) =>
-        (filters.status ?? "unassigned") === "ignored" ? emailRow.assignmentStatus === "ignored" : isEmailAssignmentQueueCandidate(emailRow)
-      )
-      .map(async (emailRow) => {
-      const [contactRow] = emailRow.contactId
-        ? await tenantDb
-            .select({
-              firstName: contacts.firstName,
-              lastName: contacts.lastName,
-              companyId: contacts.companyId,
-              companyName: contacts.companyName,
-            })
-            .from(contacts)
-            .where(eq(contacts.id, emailRow.contactId))
-            .limit(1)
-        : [null];
+  const items: EmailAssignmentQueueItem[] = [];
+  for (const emailRow of emailRows.filter((row) =>
+    (filters.status ?? "unassigned") === "ignored" ? row.assignmentStatus === "ignored" : isEmailAssignmentQueueCandidate(row)
+  )) {
+    const [contactRow] = emailRow.contactId
+      ? await tenantDb
+          .select({
+            firstName: contacts.firstName,
+            lastName: contacts.lastName,
+            companyId: contacts.companyId,
+            companyName: contacts.companyName,
+          })
+          .from(contacts)
+          .where(eq(contacts.id, emailRow.contactId))
+          .limit(1)
+      : [null];
 
-      const { companyId, companyName, dealCandidates, leadCandidates, propertyCandidates } = await getEmailCandidateDeals(
-        tenantDb,
-        emailRow.contactId
-      );
-      const mailboxAccountId = await resolveMailboxAccountIdForCrmUser(tenantDb, emailRow.userId);
-      const suggestedAssignment = resolveEmailAssignment({
-        subject: emailRow.subject,
-        bodyPreview: emailRow.bodyPreview,
-        bodyHtml: emailRow.bodyHtml,
-        priorThreadAssignment: await getThreadAssignment(tenantDb, mailboxAccountId, emailRow.graphConversationId),
-        contactCompanyId: contactRow?.companyId ?? companyId,
-        dealCandidates,
-        leadCandidates,
-        propertyCandidates,
-      });
+    const { companyId, companyName, dealCandidates, leadCandidates, propertyCandidates } = await getEmailCandidateDeals(
+      tenantDb,
+      emailRow.contactId
+    );
+    const mailboxAccountId = await resolveMailboxAccountIdForCrmUser(tenantDb, emailRow.userId);
+    const suggestedAssignment = resolveEmailAssignment({
+      subject: emailRow.subject,
+      bodyPreview: emailRow.bodyPreview,
+      bodyHtml: emailRow.bodyHtml,
+      priorThreadAssignment: await getThreadAssignment(tenantDb, mailboxAccountId, emailRow.graphConversationId),
+      contactCompanyId: contactRow?.companyId ?? companyId,
+      dealCandidates,
+      leadCandidates,
+      propertyCandidates,
+    });
 
-      return {
-        email: emailRow,
-        companyId: contactRow?.companyId ?? companyId,
-        contactName: contactRow ? `${contactRow.firstName} ${contactRow.lastName}`.trim() : null,
-        companyName: contactRow?.companyName ?? companyName,
-        candidateDeals: dealCandidates,
-        candidateLeads: leadCandidates,
-        candidateProperties: propertyCandidates,
-        suggestedAssignment,
-      } satisfies EmailAssignmentQueueItem;
-    })
-  );
+    const item = {
+      email: emailRow,
+      companyId: contactRow?.companyId ?? companyId,
+      contactName: contactRow ? `${contactRow.firstName} ${contactRow.lastName}`.trim() : null,
+      companyName: contactRow?.companyName ?? companyName,
+      candidateDeals: dealCandidates,
+      candidateLeads: leadCandidates,
+      candidateProperties: propertyCandidates,
+      suggestedAssignment,
+    } satisfies EmailAssignmentQueueItem;
+    items.push(item);
+  }
 
   return {
     items,
@@ -1342,19 +1339,17 @@ export async function getEmails(
 
   const where = conditions.length > 0 ? and(...conditions) : undefined;
 
-  const [countResult, emailRows] = await Promise.all([
-    tenantDb.select({ count: sql<number>`count(*)` }).from(emails).where(where),
-    tenantDb
-      .select()
-      .from(emails)
-      .where(where)
-      .orderBy(
-        desc(sql`GREATEST(${emails.sentAt}, ${emails.syncedAt})`),
-        desc(emails.sentAt)
-      )
-      .limit(limit)
-      .offset(offset),
-  ]);
+  const countResult = await tenantDb.select({ count: sql<number>`count(*)` }).from(emails).where(where);
+  const emailRows = await tenantDb
+    .select()
+    .from(emails)
+    .where(where)
+    .orderBy(
+      desc(sql`GREATEST(${emails.sentAt}, ${emails.syncedAt})`),
+      desc(emails.sentAt)
+    )
+    .limit(limit)
+    .offset(offset);
 
   const total = Number(countResult[0]?.count ?? 0);
 
@@ -1488,30 +1483,28 @@ export async function getUserEmails(tenantDb: TenantDb, userId: string, filters:
   const countWhere = and(...baseConditions);
   const where = and(...filteredConditions);
 
-  const [countResult, countsResult, emailRows] = await Promise.all([
-    tenantDb.select({ count: sql<number>`count(*)` }).from(emails).where(where),
-    tenantDb
-      .select({
-        all: sql<number>`count(*)`,
-        unread: sql<number>`count(*) FILTER (WHERE ${emailIsUnassignedCondition()})`,
-        unassigned: sql<number>`count(*) FILTER (WHERE ${emailIsUnassignedCondition()})`,
-        sent: sql<number>`count(*) FILTER (WHERE ${emails.direction} = 'outbound')`,
-        linked: sql<number>`count(*) FILTER (WHERE ${emails.assignedEntityId} IS NOT NULL OR ${emails.dealId} IS NOT NULL OR ${emails.contactId} IS NOT NULL)`,
-        today: sql<number>`count(*) FILTER (WHERE ${emails.sentAt} >= now() - interval '24 hours')`,
-      })
-      .from(emails)
-      .where(countWhere),
-    tenantDb
-      .select()
-      .from(emails)
-      .where(where)
-      .orderBy(
-        desc(sql`GREATEST(${emails.sentAt}, ${emails.syncedAt})`),
-        desc(emails.sentAt)
-      )
-      .limit(limit)
-      .offset(offset),
-  ]);
+  const countResult = await tenantDb.select({ count: sql<number>`count(*)` }).from(emails).where(where);
+  const countsResult = await tenantDb
+    .select({
+      all: sql<number>`count(*)`,
+      unread: sql<number>`count(*) FILTER (WHERE ${emailIsUnassignedCondition()})`,
+      unassigned: sql<number>`count(*) FILTER (WHERE ${emailIsUnassignedCondition()})`,
+      sent: sql<number>`count(*) FILTER (WHERE ${emails.direction} = 'outbound')`,
+      linked: sql<number>`count(*) FILTER (WHERE ${emails.assignedEntityId} IS NOT NULL OR ${emails.dealId} IS NOT NULL OR ${emails.contactId} IS NOT NULL)`,
+      today: sql<number>`count(*) FILTER (WHERE ${emails.sentAt} >= now() - interval '24 hours')`,
+    })
+    .from(emails)
+    .where(countWhere);
+  const emailRows = await tenantDb
+    .select()
+    .from(emails)
+    .where(where)
+    .orderBy(
+      desc(sql`GREATEST(${emails.sentAt}, ${emails.syncedAt})`),
+      desc(emails.sentAt)
+    )
+    .limit(limit)
+    .offset(offset);
 
   const total = Number(countResult[0]?.count ?? 0);
 

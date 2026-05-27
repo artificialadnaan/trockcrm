@@ -269,14 +269,15 @@ export async function getPublicPhotoViewer(rawToken: string, filters: DealPhotoT
       ...filters,
       includeDeleted: false,
     });
-    const photos = await Promise.all(timeline.photos.map(async (photo) => {
+    const photos = [];
+    for (const photo of timeline.photos) {
       const imageUrl = isPublicPhotoImagePreviewable(photo)
         ? photo.r2Key
           ? (await getFileDownloadUrl(tenantDb, photo.id)).url
           : photo.externalThumbnailUrl ?? photo.externalUrl ?? (await getFileDownloadUrl(tenantDb, photo.id)).url
         : null;
-      return publicPhotoShape(photo, imageUrl);
-    }));
+      photos.push(publicPhotoShape(photo, imageUrl));
+    }
 
     return {
       tokenId: token.tokenId,

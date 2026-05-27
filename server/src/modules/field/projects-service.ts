@@ -121,43 +121,41 @@ export async function listFieldProjects(
   const offset = (page - 1) * perPage;
   const where = activeProjectWhere(input.search);
 
-  const [countResult, rowsResult] = await Promise.all([
-    tenantDb.execute(sql`
-      SELECT count(*)::int AS total
-      FROM deals d
-      LEFT JOIN public.pipeline_stage_config psc ON psc.id = d.stage_id
-      WHERE ${where}
-      ${repDealVisibilityClause(access)}
-    `),
-    tenantDb.execute(sql`
-      SELECT
-        d.id,
-        d.name,
-        d.deal_number,
-        d.name AS property_name,
-        NULLIF(CONCAT_WS(', ', NULLIF(d.property_address, ''), NULLIF(d.property_city, ''), NULLIF(d.property_state, ''), NULLIF(d.property_zip, '')), '') AS property_address,
-        COALESCE(psc.name, d.bid_board_stage_slug, 'Active') AS stage_name,
-        COALESCE(photo_stats.last_photo_at, d.last_activity_at, d.updated_at, d.created_at) AS last_activity_at,
-        COALESCE(photo_stats.photo_count, 0)::int AS photo_count,
-        (fsp.user_id IS NOT NULL) AS starred
-      FROM deals d
-      LEFT JOIN public.pipeline_stage_config psc ON psc.id = d.stage_id
-      LEFT JOIN field_user_starred_projects fsp ON fsp.deal_id = d.id AND fsp.user_id = ${access.userId}::uuid
-      LEFT JOIN LATERAL (
-        SELECT count(*) AS photo_count, max(COALESCE(f.taken_at, f.created_at)) AS last_photo_at
-        FROM files f
-        WHERE f.deal_id = d.id
-          AND f.category = 'photo'
-          AND f.is_active = true
-          AND f.deleted_at IS NULL
-      ) photo_stats ON true
-      WHERE ${where}
-      ${repDealVisibilityClause(access)}
-      ORDER BY COALESCE(photo_stats.last_photo_at, d.last_activity_at, d.updated_at, d.created_at) DESC NULLS LAST
-      LIMIT ${perPage}
-      OFFSET ${offset}
-    `),
-  ]);
+  const countResult = await tenantDb.execute(sql`
+    SELECT count(*)::int AS total
+    FROM deals d
+    LEFT JOIN public.pipeline_stage_config psc ON psc.id = d.stage_id
+    WHERE ${where}
+    ${repDealVisibilityClause(access)}
+  `);
+  const rowsResult = await tenantDb.execute(sql`
+    SELECT
+      d.id,
+      d.name,
+      d.deal_number,
+      d.name AS property_name,
+      NULLIF(CONCAT_WS(', ', NULLIF(d.property_address, ''), NULLIF(d.property_city, ''), NULLIF(d.property_state, ''), NULLIF(d.property_zip, '')), '') AS property_address,
+      COALESCE(psc.name, d.bid_board_stage_slug, 'Active') AS stage_name,
+      COALESCE(photo_stats.last_photo_at, d.last_activity_at, d.updated_at, d.created_at) AS last_activity_at,
+      COALESCE(photo_stats.photo_count, 0)::int AS photo_count,
+      (fsp.user_id IS NOT NULL) AS starred
+    FROM deals d
+    LEFT JOIN public.pipeline_stage_config psc ON psc.id = d.stage_id
+    LEFT JOIN field_user_starred_projects fsp ON fsp.deal_id = d.id AND fsp.user_id = ${access.userId}::uuid
+    LEFT JOIN LATERAL (
+      SELECT count(*) AS photo_count, max(COALESCE(f.taken_at, f.created_at)) AS last_photo_at
+      FROM files f
+      WHERE f.deal_id = d.id
+        AND f.category = 'photo'
+        AND f.is_active = true
+        AND f.deleted_at IS NULL
+    ) photo_stats ON true
+    WHERE ${where}
+    ${repDealVisibilityClause(access)}
+    ORDER BY COALESCE(photo_stats.last_photo_at, d.last_activity_at, d.updated_at, d.created_at) DESC NULLS LAST
+    LIMIT ${perPage}
+    OFFSET ${offset}
+  `);
 
   const total = Number((((countResult as any).rows ?? countResult)[0]?.total) ?? 0);
   const projects = ((rowsResult as any).rows ?? rowsResult).map(mapFieldProject);
@@ -311,10 +309,11 @@ export async function listFieldProjectPhotos(
 ) {
   await assertActiveFieldProject(tenantDb, access, dealId);
   const result = await getDealPhotoTimeline(tenantDb, dealId, 1, 200, filters);
-  const photos = await Promise.all(result.photos.map(async (photo) => {
+  const photos = [];
+  for (const photo of result.photos) {
     const imageUrl = photo.externalThumbnailUrl ?? photo.externalUrl ?? (await getFileDownloadUrl(tenantDb, photo.id)).url;
-    return safePhoto(photo, imageUrl);
-  }));
+    photos.push(safePhoto(photo, imageUrl));
+  }
   return { photos, pagination: result.pagination };
 }
 

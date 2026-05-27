@@ -540,14 +540,7 @@ router.get("/admin/lead-dd-debug", requireAdmin, (req: Request, res: Response, n
        ORDER BY occurred_at DESC, source ASC, type ASC
     `));
 
-    const [
-      leadsOnCompany,
-      dealsOnCompany,
-      leadsOnContact,
-      activitiesOnCompany,
-      emailsOnContact,
-    ] = await Promise.all([
-      req.tenantDb!.execute(sql`
+    const leadsOnCompany = await req.tenantDb!.execute(sql`
         SELECT l.id, l.name, l.created_at, psc.slug AS stage_slug
           FROM leads l
           LEFT JOIN public.pipeline_stage_config psc ON psc.id = l.stage_id
@@ -555,15 +548,15 @@ router.get("/admin/lead-dd-debug", requireAdmin, (req: Request, res: Response, n
            AND l.id <> ${leadId}::uuid
          ORDER BY l.created_at DESC
          LIMIT 5
-      `),
-      req.tenantDb!.execute(sql`
+      `);
+    const dealsOnCompany = await req.tenantDb!.execute(sql`
         SELECT id, name, created_at
           FROM deals
          WHERE company_id = ${lead.company_id}::uuid
          ORDER BY created_at DESC
          LIMIT 5
-      `),
-      req.tenantDb!.execute(sql`
+      `);
+    const leadsOnContact = await req.tenantDb!.execute(sql`
         SELECT l.id, l.name, l.created_at, psc.slug AS stage_slug
           FROM leads l
           LEFT JOIN public.pipeline_stage_config psc ON psc.id = l.stage_id
@@ -572,23 +565,22 @@ router.get("/admin/lead-dd-debug", requireAdmin, (req: Request, res: Response, n
            AND l.id <> ${leadId}::uuid
          ORDER BY l.created_at DESC
          LIMIT 5
-      `),
-      req.tenantDb!.execute(sql`
+      `);
+    const activitiesOnCompany = await req.tenantDb!.execute(sql`
         SELECT id, occurred_at, subject
           FROM activities
          WHERE company_id = ${lead.company_id}::uuid
          ORDER BY occurred_at DESC
          LIMIT 5
-      `),
-      req.tenantDb!.execute(sql`
+      `);
+    const emailsOnContact = await req.tenantDb!.execute(sql`
         SELECT id, sent_at, subject, direction
           FROM emails
          WHERE ${lead.primary_contact_id}::uuid IS NOT NULL
            AND (contact_id = ${lead.primary_contact_id}::uuid OR (assigned_entity_type = 'contact' AND assigned_entity_id = ${lead.primary_contact_id}::uuid))
          ORDER BY sent_at DESC
          LIMIT 5
-      `),
-    ]);
+      `);
 
     await req.commitTransaction!();
 

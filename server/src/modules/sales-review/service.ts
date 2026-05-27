@@ -326,23 +326,21 @@ export async function getSalesReviewOverview(
   const repIds = actor.role === "rep" ? [actor.userId] : filters.repId ? [filters.repId] : [];
   const dateRange = normalizeDateRange(filters);
 
-  const [leadRows, dealRows, activityRows, userRows, companyRows, propertyRows] = await Promise.all([
-    tenantDb.select().from(leads).where(repIds.length > 0 ? inArray(leads.assignedRepId, repIds) : undefined),
-    tenantDb.select().from(deals).where(repIds.length > 0 ? inArray(deals.assignedRepId, repIds) : undefined),
-    tenantDb
-      .select()
-      .from(activities)
-      .where(
-        and(
-          repIds.length > 0 ? inArray(activities.responsibleUserId, repIds) : undefined,
-          gte(activities.occurredAt, subtractDays(dateRange.to, 30))
-        )
+  const leadRows = await tenantDb.select().from(leads).where(repIds.length > 0 ? inArray(leads.assignedRepId, repIds) : undefined);
+  const dealRows = await tenantDb.select().from(deals).where(repIds.length > 0 ? inArray(deals.assignedRepId, repIds) : undefined);
+  const activityRows = await tenantDb
+    .select()
+    .from(activities)
+    .where(
+      and(
+        repIds.length > 0 ? inArray(activities.responsibleUserId, repIds) : undefined,
+        gte(activities.occurredAt, subtractDays(dateRange.to, 30))
       )
-      .orderBy(desc(activities.occurredAt)),
-    tenantDb.select({ id: users.id, displayName: users.displayName }).from(users),
-    tenantDb.select({ id: companies.id, name: companies.name }).from(companies),
-    tenantDb.select({ id: properties.id, name: properties.name }).from(properties),
-  ]);
+    )
+    .orderBy(desc(activities.occurredAt));
+  const userRows = await tenantDb.select({ id: users.id, displayName: users.displayName }).from(users);
+  const companyRows = await tenantDb.select({ id: companies.id, name: companies.name }).from(companies);
+  const propertyRows = await tenantDb.select({ id: properties.id, name: properties.name }).from(properties);
 
   return buildSalesReviewOverview({
     actor,

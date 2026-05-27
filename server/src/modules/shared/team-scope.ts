@@ -9,16 +9,14 @@ export async function resolveActiveOfficeUserIds(
   tenantDb: TenantDb,
   activeOfficeId: string
 ): Promise<string[]> {
-  const [primaryRows, accessRows] = await Promise.all([
-    tenantDb
-      .select({ id: users.id })
-      .from(users)
-      .where(eq(users.officeId, activeOfficeId)),
-    tenantDb
-      .select({ userId: userOfficeAccess.userId })
-      .from(userOfficeAccess)
-      .where(eq(userOfficeAccess.officeId, activeOfficeId)),
-  ]);
+  const primaryRows = await tenantDb
+    .select({ id: users.id })
+    .from(users)
+    .where(eq(users.officeId, activeOfficeId));
+  const accessRows = await tenantDb
+    .select({ userId: userOfficeAccess.userId })
+    .from(userOfficeAccess)
+    .where(eq(userOfficeAccess.officeId, activeOfficeId));
 
   return Array.from(new Set([
     ...primaryRows.map((user) => user.id),

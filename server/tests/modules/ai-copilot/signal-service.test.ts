@@ -24,7 +24,7 @@ describe("AI copilot signal service", () => {
     vi.restoreAllMocks();
   });
 
-  it("issues independent blind-spot reads concurrently", async () => {
+  it("serializes independent blind-spot reads on request-scoped tenantDb", async () => {
     const queryResults = [
       {
         rows: [{
@@ -58,8 +58,11 @@ describe("AI copilot signal service", () => {
       new Date("2026-04-15T00:00:00.000Z")
     );
 
-    expect(tenantDb.execute).toHaveBeenCalledTimes(5);
-    queryResults.forEach((result, index) => resolvers[index](result));
+    for (const [index, result] of queryResults.entries()) {
+      expect(tenantDb.execute).toHaveBeenCalledTimes(index + 1);
+      resolvers[index](result);
+      await Promise.resolve();
+    }
     await expect(pendingSignals).resolves.toEqual([]);
   });
 

@@ -90,26 +90,6 @@ function extFromMime(contentType: string): string {
 /**
  * Run async tasks with a concurrency limit.
  */
-async function mapWithConcurrency<T, R>(
-  items: T[],
-  concurrency: number,
-  fn: (item: T) => Promise<R>
-): Promise<R[]> {
-  const results: R[] = [];
-  let index = 0;
-
-  async function worker() {
-    while (index < items.length) {
-      const i = index++;
-      results[i] = await fn(items[i]);
-    }
-  }
-
-  const workers = Array.from({ length: Math.min(concurrency, items.length) }, () => worker());
-  await Promise.all(workers);
-  return results;
-}
-
 // ─── Service Functions ───────────────────────────────────────────────────────
 
 /**
@@ -287,13 +267,12 @@ export async function syncProjectPhotos(
 
   onProgress?.(`${deal.name}: ${newPhotos.length} new photos to import (${skipped} already synced)`);
 
-  // Process with concurrency limit
-  await mapWithConcurrency(newPhotos, 5, async (photo) => {
+  for (const photo of newPhotos) {
     try {
       const { original, thumbnail } = extractUrls(photo);
       if (!original) {
         errors.push(`Photo ${photo.id}: no original URL found`);
-        return;
+        continue;
       }
 
       const capturedAt = photo.captured_at
@@ -388,7 +367,7 @@ export async function syncProjectPhotos(
       const msg = err instanceof Error ? err.message : String(err);
       errors.push(`Photo ${photo.id}: ${msg}`);
     }
-  });
+  }
 
   onProgress?.(`${deal.name}: Done — ${imported} imported, ${skipped} skipped`);
 
