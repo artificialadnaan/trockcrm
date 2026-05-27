@@ -1,4 +1,4 @@
-import type { MouseEvent } from "react";
+import { useEffect, useState, type KeyboardEvent, type MouseEvent } from "react";
 import { ChevronDown } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
@@ -36,6 +36,11 @@ export function TerminalDateFilterControl({
   inputClassName?: string;
 }) {
   const maxDate = getTodayDateParam();
+  const [draftFilter, setDraftFilter] = useState<TerminalDateFilter>(filter);
+
+  useEffect(() => {
+    setDraftFilter(filter);
+  }, [filter]);
 
   const handleClick = (
     event: MouseEvent<HTMLButtonElement>,
@@ -43,7 +48,31 @@ export function TerminalDateFilterControl({
   ) => {
     event.preventDefault();
     event.stopPropagation();
-    onFilterChange(value === "custom" ? { preset: "custom", customStart: daysAgo(30) } : { preset: value });
+    if (value === "custom") {
+      setDraftFilter((current) =>
+        current.preset === "custom" ? current : { preset: "custom", customStart: daysAgo(30) }
+      );
+      return;
+    }
+    const nextFilter = { preset: value };
+    setDraftFilter(nextFilter);
+    onFilterChange(nextFilter);
+  };
+
+  const commitCustomFilter = () => {
+    if (draftFilter.preset !== "custom" || !draftFilter.customStart) return;
+    onFilterChange({
+      preset: "custom",
+      customStart: clampDateToToday(draftFilter.customStart),
+      customEnd: draftFilter.customEnd ? clampDateToToday(draftFilter.customEnd) : undefined,
+    });
+  };
+
+  const handleCustomKeyDown = (event: KeyboardEvent<HTMLInputElement>) => {
+    if (event.key !== "Enter") return;
+    event.preventDefault();
+    event.stopPropagation();
+    commitCustomFilter();
   };
 
   return (
@@ -72,18 +101,18 @@ export function TerminalDateFilterControl({
               key={preset.value}
               type="button"
               aria-label={`Show ${stageName} deals ${preset.aria}`}
-              aria-pressed={filter.preset === preset.value}
+              aria-pressed={draftFilter.preset === preset.value}
               className={cn(
                 "flex w-full items-center justify-between rounded-md px-2.5 py-2 text-left text-sm font-semibold transition-colors hover:bg-slate-100",
-                filter.preset === preset.value ? "bg-brand-red/10 text-brand-red" : "text-slate-700"
+                draftFilter.preset === preset.value ? "bg-brand-red/10 text-brand-red" : "text-slate-700"
               )}
               onClick={(event) => handleClick(event, preset.value)}
             >
               <span>{preset.label}</span>
-              {filter.preset === preset.value ? <span className="h-2 w-2 rounded-full bg-brand-red" /> : null}
+              {draftFilter.preset === preset.value ? <span className="h-2 w-2 rounded-full bg-brand-red" /> : null}
             </button>
           ))}
-          {filter.preset === "custom" ? (
+          {draftFilter.preset === "custom" ? (
             <div className="grid gap-2 border-t border-slate-200 pt-2">
               <input
                 aria-label={`${stageName} start date`}
@@ -92,10 +121,17 @@ export function TerminalDateFilterControl({
                   "h-8 min-w-0 rounded-md border border-slate-200 bg-white px-2 text-xs font-medium text-slate-700",
                   inputClassName
                 )}
-                value={filter.customStart}
+                value={draftFilter.customStart}
                 max={maxDate}
                 onClick={(event) => event.stopPropagation()}
-                onChange={(event) => onFilterChange({ ...filter, customStart: clampDateToToday(event.target.value) })}
+                onKeyDown={handleCustomKeyDown}
+                onChange={(event) =>
+                  setDraftFilter((current) => ({
+                    preset: "custom",
+                    customStart: clampDateToToday(event.target.value),
+                    customEnd: current.preset === "custom" ? current.customEnd : undefined,
+                  }))
+                }
               />
               <input
                 aria-label={`${stageName} end date`}
@@ -104,16 +140,32 @@ export function TerminalDateFilterControl({
                   "h-8 min-w-0 rounded-md border border-slate-200 bg-white px-2 text-xs font-medium text-slate-700",
                   inputClassName
                 )}
-                value={filter.customEnd ?? ""}
+                value={draftFilter.customEnd ?? ""}
                 max={maxDate}
                 onClick={(event) => event.stopPropagation()}
+                onKeyDown={handleCustomKeyDown}
                 onChange={(event) =>
-                  onFilterChange({
-                    ...filter,
+                  setDraftFilter((current) => ({
+                    preset: "custom",
+                    customStart: current.preset === "custom" ? current.customStart : daysAgo(30),
                     customEnd: event.target.value ? clampDateToToday(event.target.value) : undefined,
-                  })
+                  }))
                 }
               />
+              <Button
+                type="button"
+                size="sm"
+                className="h-8 justify-center rounded-md bg-brand-red text-xs font-black text-white hover:bg-brand-red/90"
+                aria-label={`Apply ${stageName} custom date range`}
+                disabled={!draftFilter.customStart}
+                onClick={(event) => {
+                  event.preventDefault();
+                  event.stopPropagation();
+                  commitCustomFilter();
+                }}
+              >
+                Apply
+              </Button>
             </div>
           ) : null}
         </PopoverContent>

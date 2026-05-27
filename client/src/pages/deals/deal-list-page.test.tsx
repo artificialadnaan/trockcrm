@@ -3,9 +3,9 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { renderToStaticMarkup } from "react-dom/server";
 import { createRoot, type Root } from "react-dom/client";
-import { MemoryRouter } from "react-router-dom";
-import type { ReactNode } from "react";
-import { act } from "react";
+import { MemoryRouter, useLocation } from "react-router-dom";
+import type { ButtonHTMLAttributes, ReactNode } from "react";
+import { act, useEffect } from "react";
 import type { Deal } from "@/hooks/use-deals";
 import type { AtRiskResult } from "@trock-crm/shared/types";
 import {
@@ -130,8 +130,8 @@ vi.mock("@/lib/auth", () => ({
 }));
 
 vi.mock("@/components/ui/button", () => ({
-  Button: ({ children, className }: { children: ReactNode; className?: string }) => (
-    <button className={className}>{children}</button>
+  Button: ({ children, className, ...props }: { children: ReactNode; className?: string } & ButtonHTMLAttributes<HTMLButtonElement>) => (
+    <button className={className} {...props}>{children}</button>
   ),
 }));
 
@@ -163,6 +163,16 @@ vi.mock("@/lib/pipeline-terminal-filters", async (importOriginal) => {
 
 function normalize(html: string) {
   return html.replace(/\s+/g, " ").trim();
+}
+
+function changeInputValue(input: HTMLInputElement, value: string) {
+  const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")?.set;
+  setter?.call(input, value);
+  input.dispatchEvent(new Event("input", { bubbles: true }));
+}
+
+function lastSearch(searches: string[]) {
+  return searches[searches.length - 1];
 }
 
 function makeDeal(overrides: Record<string, unknown> = {}) {
@@ -313,6 +323,54 @@ async function renderPageDom(path = "/deals?scope=all", role = "admin") {
         );
       });
     },
+    cleanup: async () => {
+      await act(async () => {
+        root?.unmount();
+      });
+      container.remove();
+    },
+  };
+}
+
+async function renderPageDomWithLocation(path = "/deals?scope=all", role = "admin") {
+  const searches: string[] = [];
+
+  function PageWithLocationProbe() {
+    const location = useLocation();
+    useEffect(() => {
+      searches.push(location.search);
+    }, [location.search]);
+    return <DealListPage />;
+  }
+
+  mocks.useAuthMock.mockReturnValue({
+    user: {
+      id: "user-1",
+      email: `${role}@example.test`,
+      displayName: "Test User",
+      role,
+      officeId: "office-1",
+      activeOfficeId: "office-1",
+    },
+    loading: false,
+  });
+
+  const container = document.createElement("div");
+  document.body.appendChild(container);
+  let root: Root | null = null;
+
+  await act(async () => {
+    root = createRoot(container);
+    root.render(
+      <MemoryRouter initialEntries={[path]}>
+        <PageWithLocationProbe />
+      </MemoryRouter>
+    );
+  });
+
+  return {
+    container,
+    searches,
     cleanup: async () => {
       await act(async () => {
         root?.unmount();
@@ -751,6 +809,164 @@ describe("DealListPage", () => {
       won: { preset: "30" },
       lost: { preset: "60" },
     }, 8, null, undefined, {});
+  });
+
+  it("does not refetch or update URL params while editing a custom terminal date until Enter commits it", async () => {
+    const view = await renderPageDomWithLocation("/deals?scope=all&won_since=2026-04-01");
+    const initialBoardCalls = mocks.useDealBoardMock.mock.calls.length;
+
+    await act(async () => {
+      view.container.querySelector<HTMLButtonElement>('button[aria-label="Won date filter"]')?.click();
+    });
+
+    const startInput = document.body.querySelector<HTMLInputElement>('input[aria-label="Won start date"]');
+    expect(startInput?.value).toBe("2026-04-01");
+
+    await act(async () => {
+      if (!startInput) return;
+      changeInputValue(startInput, "2026-04-15");
+    });
+
+    expect(mocks.useDealBoardMock.mock.calls).toHaveLength(initialBoardCalls);
+    expect(lastSearch(view.searches)).toBe("?scope=all&won_since=2026-04-01");
+
+    await act(async () => {
+      startInput?.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
+    });
+
+    expect(mocks.useDealBoardMock.mock.calls.length).toBeGreaterThan(initialBoardCalls);
+    expect(mocks.useDealBoardMock).toHaveBeenLastCalledWith(
+      "all",
+      true,
+      {
+        won: { preset: "custom", customStart: "2026-04-15" },
+        lost: { preset: "all" },
+      },
+      8,
+      null,
+      undefined,
+      {}
+    );
+    expect(lastSearch(view.searches)).toContain("won_since=2026-04-15");
+
+    await view.cleanup();
+  });
+
+  it("does not refetch or update URL params while editing a custom lost date until Apply commits it", async () => {
+    const view = await renderPageDomWithLocation("/deals?scope=all&lost_since=2026-03-01");
+    const initialBoardCalls = mocks.useDealBoardMock.mock.calls.length;
+
+    await act(async () => {
+      view.container.querySelector<HTMLButtonElement>('button[aria-label="Lost date filter"]')?.click();
+    });
+
+    const startInput = document.body.querySelector<HTMLInputElement>('input[aria-label="Lost start date"]');
+    expect(startInput?.value).toBe("2026-03-01");
+
+    await act(async () => {
+      if (!startInput) return;
+      changeInputValue(startInput, "2026-03-12");
+    });
+
+    expect(mocks.useDealBoardMock.mock.calls).toHaveLength(initialBoardCalls);
+    expect(lastSearch(view.searches)).toBe("?scope=all&lost_since=2026-03-01");
+
+    await act(async () => {
+      document.body.querySelector<HTMLButtonElement>('button[aria-label="Apply Lost custom date range"]')?.click();
+    });
+
+    expect(mocks.useDealBoardMock.mock.calls.length).toBeGreaterThan(initialBoardCalls);
+    expect(mocks.useDealBoardMock).toHaveBeenLastCalledWith(
+      "all",
+      true,
+      {
+        won: { preset: "all" },
+        lost: { preset: "custom", customStart: "2026-03-12" },
+      },
+      8,
+      null,
+      undefined,
+      {}
+    );
+    expect(lastSearch(view.searches)).toContain("lost_since=2026-03-12");
+
+    await view.cleanup();
+  });
+
+  it("commits a terminal preset immediately to URL params and the board request", async () => {
+    const view = await renderPageDomWithLocation("/deals?scope=all&won_since=2026-04-01");
+    const initialBoardCalls = mocks.useDealBoardMock.mock.calls.length;
+
+    await act(async () => {
+      view.container.querySelector<HTMLButtonElement>('button[aria-label="Won date filter"]')?.click();
+    });
+
+    await act(async () => {
+      document.body.querySelector<HTMLButtonElement>('button[aria-label="Show Won deals from the last 7 days"]')?.click();
+    });
+
+    expect(mocks.useDealBoardMock.mock.calls.length).toBeGreaterThan(initialBoardCalls);
+    expect(mocks.useDealBoardMock).toHaveBeenLastCalledWith(
+      "all",
+      true,
+      {
+        won: { preset: "7" },
+        lost: { preset: "all" },
+      },
+      8,
+      null,
+      undefined,
+      {}
+    );
+    expect(lastSearch(view.searches)).toContain("won_preset=7");
+    expect(lastSearch(view.searches)).not.toContain("won_since=2026-04-01");
+
+    await view.cleanup();
+  });
+
+  it("does not refetch the board while editing the Estimate Sent date filter until Apply commits it", async () => {
+    const view = await renderPageDomWithLocation("/deals?scope=all&estimate_sent_since=2026-04-01");
+    const initialBoardCalls = mocks.useDealBoardMock.mock.calls.length;
+
+    await act(async () => {
+      view.container.querySelector<HTMLButtonElement>('button[aria-label="Estimate Sent to Client date filter"]')?.click();
+    });
+
+    const startInput = document.body.querySelector<HTMLInputElement>(
+      'input[aria-label="Estimate Sent to Client start date"]'
+    );
+    expect(startInput?.value).toBe("2026-04-01");
+
+    await act(async () => {
+      if (!startInput) return;
+      changeInputValue(startInput, "2026-04-16");
+    });
+
+    expect(mocks.useDealBoardMock.mock.calls).toHaveLength(initialBoardCalls);
+    expect(lastSearch(view.searches)).toBe("?scope=all&estimate_sent_since=2026-04-01");
+
+    await act(async () => {
+      document.body
+        .querySelector<HTMLButtonElement>('button[aria-label="Apply Estimate Sent to Client custom date range"]')
+        ?.click();
+    });
+
+    expect(mocks.useDealBoardMock.mock.calls.length).toBeGreaterThan(initialBoardCalls);
+    expect(mocks.useDealBoardMock).toHaveBeenLastCalledWith(
+      "all",
+      true,
+      {
+        won: { preset: "all" },
+        lost: { preset: "all" },
+      },
+      8,
+      null,
+      undefined,
+      { from: "2026-04-16" }
+    );
+    expect(lastSearch(view.searches)).toContain("estimate_sent_since=2026-04-16");
+
+    await view.cleanup();
   });
 
   it("requests an expanded preview window for the SLA drill-down board", () => {
