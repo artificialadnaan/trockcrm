@@ -206,6 +206,48 @@ describe("deal-value-sql", () => {
 
     expect(
       getEffectiveDealValue({
+        stageSlug: "lost",
+        bidBoardStageSlug: "lost",
+        awardedAmount: "1000",
+        bidBoardTotalSales: "700",
+        bidEstimate: "800",
+        ddEstimate: "900",
+      })
+    ).toBe(700);
+
+    expect(
+      getEffectiveDealValue({
+        stageSlug: "lost",
+        awardedAmount: "1000",
+        bidBoardTotalSales: "0",
+        bidEstimate: null,
+        ddEstimate: "0",
+      })
+    ).toBe(1000);
+
+    expect(
+      getEffectiveDealValue({
+        stageSlug: "lost",
+        awardedAmount: null,
+        bidBoardTotalSales: "0",
+        bidEstimate: null,
+        ddEstimate: "0",
+      })
+    ).toBe(0);
+
+    expect(
+      getEffectiveDealValue({
+        stageSlug: "lost",
+        onHold: true,
+        awardedAmount: "1000",
+        bidBoardTotalSales: "700",
+        bidEstimate: "800",
+        ddEstimate: "900",
+      })
+    ).toBe(0);
+
+    expect(
+      getEffectiveDealValue({
         stageSlug: "won",
         awardedAmount: "0",
         bidBoardTotalSales: "700",

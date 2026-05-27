@@ -752,9 +752,9 @@ function buildStagePageOrder(sort: StagePageSort | undefined, stage: PipelineSta
     case "name_asc":
       return sql`d.name asc, d.id asc`;
     case "value_desc":
-      return stage.isTerminal || stage.slug === "won" || stage.slug === "lost"
-        ? sql`${aliasedDealAwardedFirstWithFallbackSql("d")} desc, d.id desc`
-        : sql`${aliasedDealBestEstimateSql("d")} desc, d.id desc`;
+      return LOST_TERMINAL_STAGE_SLUGS.includes(stage.slug as (typeof LOST_TERMINAL_STAGE_SLUGS)[number])
+        ? sql`${workspaceEffectiveDealValueSql(stage)} desc, d.id desc`
+        : sql`${aliasedPipelineValueSql("d", pipelineValueSourceForStageSlug(stage.slug))} desc, d.id desc`;
     case "newest":
     default:
       return sql`d.created_at desc, d.id desc`;
@@ -963,10 +963,24 @@ function dealEstimateSentAtSql() {
   `;
 }
 
-function dealPipelineValueSql(isTerminalStage: boolean) {
-  return isTerminalStage
+type PipelineValueSource = "won" | "current";
+
+function pipelineValueSourceForStageSlug(stageSlug: string): PipelineValueSource {
+  return WON_TERMINAL_STAGE_SLUGS.includes(stageSlug as (typeof WON_TERMINAL_STAGE_SLUGS)[number])
+    ? "won"
+    : "current";
+}
+
+function dealPipelineValueSql(valueSource: PipelineValueSource) {
+  return valueSource === "won"
     ? dealAwardedFirstWithFallbackSql(deals)
     : dealBestEstimateSql(deals);
+}
+
+function aliasedPipelineValueSql(alias: string, valueSource: PipelineValueSource) {
+  return valueSource === "won"
+    ? aliasedDealAwardedFirstWithFallbackSql(alias)
+    : aliasedDealBestEstimateSql(alias);
 }
 
 function addEstimateSentDateConditions(
@@ -1024,10 +1038,7 @@ function addWorkspaceEstimateSentDateConditions(
 }
 
 function workspaceEffectiveDealValueSql(stage: PipelineStageRow) {
-  const isTerminalStage = stage.isTerminal || stage.slug === "won" || stage.slug === "lost";
-  const rawValue = isTerminalStage
-    ? aliasedDealAwardedFirstWithFallbackSql("d")
-    : aliasedDealBestEstimateSql("d");
+  const rawValue = aliasedPipelineValueSql("d", pipelineValueSourceForStageSlug(stage.slug));
 
   return sql`CASE WHEN d.on_hold THEN 0 ELSE ${rawValue} END`;
 }
@@ -2343,11 +2354,13 @@ export async function getDealsForPipeline(
   // client, so parallel stage fan-out fails in production.
   for (const stage of responseStages) {
     const stageConditions: any[] = [];
-    const isTerminalStage =
-      stage.isTerminal ||
-      stage.slug === "won" ||
-      stage.slug === "lost";
-    if (WON_TERMINAL_STAGE_SLUGS.includes(stage.slug as (typeof WON_TERMINAL_STAGE_SLUGS)[number])) {
+    const isWonTerminalStage = WON_TERMINAL_STAGE_SLUGS.includes(
+      stage.slug as (typeof WON_TERMINAL_STAGE_SLUGS)[number]
+    );
+    const isLostTerminalStage = LOST_TERMINAL_STAGE_SLUGS.includes(
+      stage.slug as (typeof LOST_TERMINAL_STAGE_SLUGS)[number]
+    );
+    if (isWonTerminalStage) {
       stageConditions.push(canonicalWonStageId ? inArray(deals.stageId, wonStageIds) : eq(deals.stageId, stage.id));
       if (wonSignedDateSince || wonSignedDateUntil || wonPeriodFrom || wonPeriodTo) {
         stageConditions.push(dealWonWindowEligibilitySql());
@@ -2364,7 +2377,7 @@ export async function getDealsForPipeline(
       if (wonPeriodTo) {
         stageConditions.push(sql`${wonWindowDate} <= ${wonPeriodTo}::date`);
       }
-    } else if (LOST_TERMINAL_STAGE_SLUGS.includes(stage.slug as (typeof LOST_TERMINAL_STAGE_SLUGS)[number])) {
+    } else if (isLostTerminalStage) {
       stageConditions.push(canonicalLostStageId ? inArray(deals.stageId, lostStageIds) : eq(deals.stageId, stage.id));
       if (terminalFilters.lost.since || terminalFilters.lost.until) {
         stageConditions.push(dealLostWindowEligibilitySql());
@@ -2382,11 +2395,12 @@ export async function getDealsForPipeline(
 
     const where = and(...stageConditions, ...commonConditions);
     const countedDealFilter = aliasedActiveDealCountFilterSql("deals");
+    const valueSource = pipelineValueSourceForStageSlug(stage.slug);
     const summaryRows = await tenantDb
       .select({
         totalCount: sql<number>`count(*)`,
         activeCount: sql<number>`count(*) filter (where ${countedDealFilter})`,
-        totalValue: sql<number>`COALESCE(SUM(${dealPipelineValueSql(isTerminalStage)}) FILTER (WHERE ${countedDealFilter}), 0)`,
+        totalValue: sql<number>`COALESCE(SUM(${dealPipelineValueSql(valueSource)}) FILTER (WHERE ${countedDealFilter}), 0)`,
       })
       .from(deals)
       .where(where);
