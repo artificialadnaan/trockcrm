@@ -448,6 +448,12 @@ function moneyValue(deal: Deal) {
   return getEffectiveDealValue(deal);
 }
 
+export function sumNonOnHoldDealValues(deals: Deal[]) {
+  return deals
+    .filter((deal) => !deal.onHold)
+    .reduce((sum, deal) => sum + moneyValue(deal), 0);
+}
+
 function isEngineAtRiskDeal(deal: Deal) {
   return deal.atRisk?.isAtRisk === true && deal.atRisk.status === "at_risk";
 }
@@ -578,7 +584,7 @@ function DealsBoardColumn({
   onTerminalFilterChange?: (filter: TerminalDateFilter) => void;
 }) {
   const totalValue =
-    column.totalValue ?? column.cards.reduce((sum, deal) => sum + moneyValue(deal), 0);
+    column.totalValue ?? sumNonOnHoldDealValues(column.cards);
   const terminalOutcome = isTerminalOutcomeSlug(column.stage.slug) ? column.stage.slug : null;
   const terminalLabel = terminalFilter ? getTerminalDateFilterLabel(terminalFilter) : null;
   const emptyText = terminalOutcome && terminalFilter?.preset !== "all" ? "No deals in selected range" : "No deals";
@@ -758,7 +764,7 @@ function DealListPageContent({ role, userId }: { role: string; userId: string })
                       totalCount: cards.length,
                       count: cards.filter((deal) => !deal.onHold).length,
                       cards,
-                      totalValue: cards.reduce((sum, deal) => sum + moneyValue(deal), 0),
+                      totalValue: sumNonOnHoldDealValues(cards),
                     };
                   })
           : boardColumns;
@@ -785,7 +791,7 @@ function DealListPageContent({ role, userId }: { role: string; userId: string })
             totalCount: cards.length,
             count: cards.filter((deal) => !deal.onHold).length,
             cards,
-            totalValue: cards.reduce((sum, deal) => sum + moneyValue(deal), 0),
+            totalValue: sumNonOnHoldDealValues(cards),
           };
         });
     },
@@ -814,7 +820,7 @@ function DealListPageContent({ role, userId }: { role: string; userId: string })
             totalCount: cards.length,
             count: cards.filter((deal) => !deal.onHold).length,
             cards,
-            totalValue: cards.reduce((sum, deal) => sum + moneyValue(deal), 0),
+            totalValue: sumNonOnHoldDealValues(cards),
           };
         });
     }

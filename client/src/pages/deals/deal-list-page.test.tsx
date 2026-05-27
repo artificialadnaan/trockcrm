@@ -15,6 +15,7 @@ import {
   formatDateInput,
   getDashboardDealListView,
   matchesUpdatedRange,
+  sumNonOnHoldDealValues,
 } from "./deal-list-page";
 
 (globalThis as unknown as { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
@@ -1615,6 +1616,113 @@ describe("DealListPage", () => {
     expect(html).toContain("Active Engine At Risk Deal");
     expect(html).not.toContain("Held Paused Deal");
     expect(html).not.toContain("Old But Engine Safe Deal");
+  });
+
+  it("sums only non-on-hold deal values for board fallback totals", () => {
+    expect(
+      sumNonOnHoldDealValues([
+        makeDeal({ id: "deal-active", bidEstimate: "250000", ddEstimate: null, onHold: false }),
+        makeDeal({ id: "deal-on-hold", bidEstimate: "300000", ddEstimate: null, onHold: true }),
+      ])
+    ).toBe(250000);
+  });
+
+  it("excludes on-hold cards from at-risk drilldown column fallback totals", () => {
+    mocks.useDealBoardMock.mockReturnValue({
+      board: {
+        columns: [
+          {
+            stage: { id: "stage-contract", name: "Contract", slug: "contract" },
+            count: 2,
+            totalValue: 550000,
+            cards: [
+              makeDeal({
+                id: "deal-active-risk",
+                name: "Active Engine At Risk Deal",
+                stageId: "stage-contract",
+                bidEstimate: "250000",
+                onHold: false,
+                atRisk: makeAtRiskResult(),
+              }),
+              makeDeal({
+                id: "deal-on-hold-risk",
+                name: "On Hold Engine At Risk Deal",
+                stageId: "stage-contract",
+                bidEstimate: "300000",
+                onHold: true,
+                atRisk: makeAtRiskResult({
+                  reason: "threshold_reached",
+                  effectiveStageAgeSeconds: 12 * 86_400,
+                  effectiveStageAgeDays: 12,
+                }),
+              }),
+            ],
+          },
+        ],
+        terminalStages: [],
+      },
+      loading: false,
+      error: null,
+      refetch: vi.fn(),
+    });
+
+    const html = renderPage("/deals?scope=all&filter=at_risk", "director");
+
+    expect(html).toMatch(/Contract.*1\/2.*\$250\.0K/);
+    expect(html).not.toMatch(/Contract.*1\/2.*\$550\.0K/);
+  });
+
+  it("excludes on-hold cards from search-filtered column totals", async () => {
+    mocks.useDealBoardMock.mockReturnValue({
+      board: {
+        columns: [
+          {
+            stage: { id: "stage-contract", name: "Contract", slug: "contract" },
+            count: 2,
+            totalValue: 550000,
+            cards: [
+              makeDeal({
+                id: "deal-active-search",
+                name: "Roof Search Active",
+                stageId: "stage-contract",
+                bidEstimate: "250000",
+                onHold: false,
+              }),
+              makeDeal({
+                id: "deal-on-hold-search",
+                name: "Roof Search Held",
+                stageId: "stage-contract",
+                bidEstimate: "300000",
+                onHold: true,
+              }),
+            ],
+          },
+        ],
+        terminalStages: [],
+      },
+      loading: false,
+      error: null,
+      refetch: vi.fn(),
+    });
+
+    const view = await renderPageDom("/deals?scope=all", "director");
+
+    try {
+      const input = view.container.querySelector<HTMLInputElement>('input[placeholder="Search deals"]');
+      expect(input).not.toBeNull();
+
+      await act(async () => {
+        const valueSetter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")?.set;
+        valueSetter?.call(input, "Roof Search");
+        input!.dispatchEvent(new Event("input", { bubbles: true }));
+      });
+
+      const html = normalize(view.container.innerHTML);
+      expect(html).toMatch(/Contract.*1\/2.*\$250\.0K/);
+      expect(html).not.toMatch(/Contract.*1\/2.*\$550\.0K/);
+    } finally {
+      await view.cleanup();
+    }
   });
 
   it("orders SLA drilldown rows by engine effective age instead of raw stage-entered date", () => {

@@ -92,7 +92,9 @@ export function buildCanonicalDealBoardColumns(
         : cards.length,
       totalValue: hasBackendAggregate
         ? matchingRawColumns.reduce((sum, column) => sum + column.totalValue, 0)
-        : cards.reduce((sum, deal) => sum + getDealValue(deal, slug), 0),
+        : cards
+            .filter((deal) => !deal.onHold)
+            .reduce((sum, deal) => sum + getDealValue(deal, slug), 0),
       cards,
     };
   });
