@@ -4,6 +4,7 @@ import path from "node:path";
 import readline from "node:readline/promises";
 import { pathToFileURL } from "node:url";
 import pg from "pg";
+import { applyProjectNumberEmailSkipSetting } from "./lib/project-number-notification.js";
 
 const ALLOWED_TENANTS = ["office_dallas", "office_atlanta"] as const;
 const NORMALIZABLE_PREFIX_REGEX = /^(dfw|atl)-/i;
@@ -219,6 +220,7 @@ export async function executePlan(client: pg.Client, plan: TenantNormalizationPl
     let batchUpdated = 0;
     await client.query("BEGIN");
     try {
+      await applyProjectNumberEmailSkipSetting(client);
       for (const row of batch) {
         const result = await client.query(
           `UPDATE ${quotedTenant}.deals

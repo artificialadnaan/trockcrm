@@ -25,6 +25,7 @@ import { runAiInterventionManagerAlerts } from "./ai-intervention-manager-alerts
 import { handleRfpRequestDelivery } from "./rfp-request-delivery.js";
 import { runReportsExecutionTick } from "./reports-execution.js";
 import { runRepPerformanceRollup } from "./rep-performance-rollup.js";
+import { handleProjectNumberFirstSetEmail, PROJECT_NUMBER_FIRST_SET_JOB } from "./project-number-email.js";
 
 const SERVER_MODULE_ROOT =
   process.env.NODE_ENV === "production" ? "../../../server/dist/modules" : "../../../server/src/modules";
@@ -114,6 +115,7 @@ export function registerAllJobs() {
   registerJobHandler("rfp_request_delivery", async (payload, officeId) => {
     await handleRfpRequestDelivery(payload, officeId);
   });
+  registerJobHandler(PROJECT_NUMBER_FIRST_SET_JOB, handleProjectNumberFirstSetEmail);
 
   registerJobHandler("reports_execution", async () => {
     await runReportsExecutionTick();

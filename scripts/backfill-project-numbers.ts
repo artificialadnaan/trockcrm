@@ -4,6 +4,7 @@ import path from "node:path";
 import readline from "node:readline/promises";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import pg from "pg";
+import { applyProjectNumberEmailSkipSetting } from "./lib/project-number-notification.js";
 
 export const CANONICAL_PROJECT_NUMBER_REGEX = /^(DFW|ATL)-[0-9]+-[0-9]{5}-[a-z]{2}$/;
 const ALLOWED_TENANTS = ["office_dallas", "office_atlanta"] as const;
@@ -365,6 +366,7 @@ export async function executePlan(client: pg.Client, plan: TenantBackfillPlan): 
     let batchUpdated = 0;
     await client.query("BEGIN");
     try {
+      await applyProjectNumberEmailSkipSetting(client);
       for (const row of batch) {
         const result = await client.query(
           `UPDATE ${quotedTenant}.deals

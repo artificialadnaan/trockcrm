@@ -16,6 +16,7 @@ import { isProjectTypeValue, normalizeProjectType } from "../shared/src/types/pr
 import { buildAuditActorFromSystem } from "../server/src/modules/audit/audit-logger.js";
 import { logActivityWithPgClient } from "../server/src/modules/audit/pg-activity-logger.js";
 import { HUBSPOT_REIMPORT } from "../server/src/modules/audit/system-processes.js";
+import { applyProjectNumberEmailSkipSetting } from "./lib/project-number-notification.js";
 
 /**
  * HubSpot deals re-import assumptions:
@@ -1093,6 +1094,7 @@ export async function applyPlan(client: pg.PoolClient, tenant: string, plan: Rei
   const stageLookup = await fetchStageLookup(client);
   await client.query("BEGIN");
   try {
+    await applyProjectNumberEmailSkipSetting(client);
     for (const entry of plan.entries) {
       try {
         if (entry.skippedFieldClears.length > 0) {
