@@ -493,10 +493,8 @@ async function buildReadOnlyScopingIntakeSnapshot(input: {
   resolvedDeal: ResolvedDealView;
   userId: string;
 }): Promise<DealScopingServiceResult> {
-  const [user, attachments] = await Promise.all([
-    getUserOrThrow(input.tenantDb, input.userId),
-    listLinkedScopingAttachments(input.tenantDb, input.resolvedDeal.deal.id),
-  ]);
+  const user = await getUserOrThrow(input.tenantDb, input.userId);
+  const attachments = await listLinkedScopingAttachments(input.tenantDb, input.resolvedDeal.deal.id);
   const sectionData = buildSeedSectionDataFromResolvedDeal(input.resolvedDeal);
   const projectTypeId = input.resolvedDeal.resolved.projectTypeId ?? null;
   const workflowRoute = resolveScopingWorkflowRoute(input.resolvedDeal.resolved.workflowRoute);
@@ -716,10 +714,8 @@ export async function linkDealFileToScopingRequirement(
   input: LinkScopingFileInput,
   userId: string
 ) {
-  const [deal, user] = await Promise.all([
-    getDealOrThrow(tenantDb, dealId),
-    getUserOrThrow(tenantDb, userId),
-  ]);
+  const deal = await getDealOrThrow(tenantDb, dealId);
+  const user = await getUserOrThrow(tenantDb, userId);
   const writePolicy = isScopeLockedAttachmentKey(input.intakeRequirementKey)
     ? await assertDealScopingWriteAllowedForDeal(deal, {
         role: user.role,
@@ -927,11 +923,9 @@ export async function upsertDealScopingIntake(
   delete sanitizedPatch.workflowRoute;
   delete sanitizedPatch.forceEditAfterRfp;
 
-  const [resolvedDeal, editor, existingIntake] = await Promise.all([
-    getResolvedDeal(tenantDb, dealId),
-    getUserOrThrow(tenantDb, userId),
-    getExistingIntake(tenantDb, dealId),
-  ]);
+  const resolvedDeal = await getResolvedDeal(tenantDb, dealId);
+  const editor = await getUserOrThrow(tenantDb, userId);
+  const existingIntake = await getExistingIntake(tenantDb, dealId);
   const deal = resolvedDeal.deal;
   const baseSectionData = buildBaseSectionData(existingIntake, resolvedDeal);
   const sectionPatch = stripLineageOwnedScopingFields(
@@ -1103,10 +1097,8 @@ export async function routeRevisionToEstimating(
   userId: string,
   context?: DealRevisionRoutingContext
 ): Promise<DealRevisionRoutingResult> {
-  const [deal, editor] = await Promise.all([
-    getDealOrThrow(tenantDb, dealId),
-    getUserOrThrow(tenantDb, userId),
-  ]);
+  const deal = await getDealOrThrow(tenantDb, dealId);
+  const editor = await getUserOrThrow(tenantDb, userId);
   const targetProposalStatus = context?.proposalStatus ?? deal.proposalStatus;
   const routingSubstage =
     context?.previousEstimatingSubstage ?? deal.estimatingSubstage;

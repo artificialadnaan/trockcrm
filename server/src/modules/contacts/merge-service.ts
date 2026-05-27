@@ -43,20 +43,18 @@ export async function getDuplicateQueue(
     .from(duplicateQueue)
     .where(eq(duplicateQueue.status, status as any));
 
-  // Enrich with contact data
-  const enriched = await Promise.all(
-    queueEntries.map(async (entry) => {
-      const [contactA, contactB] = await Promise.all([
-        tenantDb.select().from(contacts).where(eq(contacts.id, entry.contactAId)).limit(1),
-        tenantDb.select().from(contacts).where(eq(contacts.id, entry.contactBId)).limit(1),
-      ]);
-      return {
-        ...entry,
-        contactA: contactA[0] ?? null,
-        contactB: contactB[0] ?? null,
-      };
-    })
-  );
+  // Enrich with contact data. Keep tenantDb reads serialized because request
+  // transactions share one client connection.
+  const enriched = [];
+  for (const entry of queueEntries) {
+    const contactA = await tenantDb.select().from(contacts).where(eq(contacts.id, entry.contactAId)).limit(1);
+    const contactB = await tenantDb.select().from(contacts).where(eq(contacts.id, entry.contactBId)).limit(1);
+    enriched.push({
+      ...entry,
+      contactA: contactA[0] ?? null,
+      contactB: contactB[0] ?? null,
+    });
+  }
 
   return {
     entries: enriched,

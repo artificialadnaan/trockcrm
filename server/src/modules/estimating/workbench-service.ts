@@ -624,86 +624,83 @@ export async function buildEstimatingWorkbenchState(
   dealId: string,
   options: BuildEstimatingWorkbenchStateOptions = {}
 ) {
-  const [
-    documents,
-    extractionRows,
-    matchRows,
-    pricingRows,
-    reviewEvents,
-    generationRuns,
-    marketContext,
-    queuedRerunJobs,
-  ] = await Promise.all([
-    tenantDb
-      .select()
-      .from(estimateSourceDocuments)
-      .where(eq(estimateSourceDocuments.dealId, dealId))
-      .orderBy(desc(estimateSourceDocuments.createdAt)),
-    tenantDb
-      .select()
-      .from(estimateExtractions)
-      .where(eq(estimateExtractions.dealId, dealId))
-      .orderBy(desc(estimateExtractions.createdAt)),
-    tenantDb
-      .select({
-        id: estimateExtractionMatches.id,
-        extractionId: estimateExtractionMatches.extractionId,
-        catalogItemId: estimateExtractionMatches.catalogItemId,
-        catalogCodeId: estimateExtractionMatches.catalogCodeId,
-        historicalLineItemId: estimateExtractionMatches.historicalLineItemId,
-        matchType: estimateExtractionMatches.matchType,
-        matchScore: estimateExtractionMatches.matchScore,
-        status: estimateExtractionMatches.status,
-        reasonJson: estimateExtractionMatches.reasonJson,
-        evidenceJson: estimateExtractionMatches.evidenceJson,
-        createdAt: estimateExtractionMatches.createdAt,
-      })
-      .from(estimateExtractionMatches)
-      .innerJoin(
-        estimateExtractions,
-        eq(estimateExtractionMatches.extractionId, estimateExtractions.id)
-      )
-      .where(eq(estimateExtractions.dealId, dealId))
-      .orderBy(desc(estimateExtractionMatches.createdAt)),
-    tenantDb
-      .select()
-      .from(estimatePricingRecommendations)
-      .where(eq(estimatePricingRecommendations.dealId, dealId))
-      .orderBy(desc(estimatePricingRecommendations.createdAt)),
-    tenantDb
-      .select()
-      .from(estimateReviewEvents)
-      .where(eq(estimateReviewEvents.dealId, dealId))
-      .orderBy(desc(estimateReviewEvents.createdAt)),
-    tenantDb
-      .select({
-        id: estimateGenerationRuns.id,
-        status: estimateGenerationRuns.status,
-        inputSnapshotJson: estimateGenerationRuns.inputSnapshotJson,
-        startedAt: estimateGenerationRuns.startedAt,
-        completedAt: estimateGenerationRuns.completedAt,
-        errorSummary: estimateGenerationRuns.errorSummary,
-      })
-      .from(estimateGenerationRuns)
-      .where(eq(estimateGenerationRuns.dealId, dealId))
-      .orderBy(desc(estimateGenerationRuns.startedAt)),
-    getDealEffectiveMarketContext(tenantDb, dealId),
-    options.appDb && options.officeId
-      ? options.appDb
-          .select({
-            id: jobQueue.id,
-            status: jobQueue.status,
-            payload: jobQueue.payload,
-            createdAt: jobQueue.createdAt,
-            startedProcessingAt: jobQueue.startedProcessingAt,
-            completedAt: jobQueue.completedAt,
-            lastError: jobQueue.lastError,
-          })
-          .from(jobQueue)
-          .where(and(eq(jobQueue.officeId, options.officeId), eq(jobQueue.jobType, "estimate_generation")))
-          .orderBy(desc(jobQueue.createdAt))
-      : Promise.resolve([]),
-  ]);
+  let queuedRerunJobsError: unknown;
+  const queuedRerunJobsPromise = (options.appDb && options.officeId
+    ? Promise.resolve(options.appDb
+        .select({
+          id: jobQueue.id,
+          status: jobQueue.status,
+          payload: jobQueue.payload,
+          createdAt: jobQueue.createdAt,
+          startedProcessingAt: jobQueue.startedProcessingAt,
+          completedAt: jobQueue.completedAt,
+          lastError: jobQueue.lastError,
+        })
+        .from(jobQueue)
+        .where(and(eq(jobQueue.officeId, options.officeId), eq(jobQueue.jobType, "estimate_generation")))
+        .orderBy(desc(jobQueue.createdAt)))
+    : Promise.resolve([])
+  ).catch((error) => {
+    queuedRerunJobsError = error;
+    return [];
+  });
+
+  const documents = await tenantDb
+    .select()
+    .from(estimateSourceDocuments)
+    .where(eq(estimateSourceDocuments.dealId, dealId))
+    .orderBy(desc(estimateSourceDocuments.createdAt));
+  const extractionRows = await tenantDb
+    .select()
+    .from(estimateExtractions)
+    .where(eq(estimateExtractions.dealId, dealId))
+    .orderBy(desc(estimateExtractions.createdAt));
+  const matchRows = await tenantDb
+    .select({
+      id: estimateExtractionMatches.id,
+      extractionId: estimateExtractionMatches.extractionId,
+      catalogItemId: estimateExtractionMatches.catalogItemId,
+      catalogCodeId: estimateExtractionMatches.catalogCodeId,
+      historicalLineItemId: estimateExtractionMatches.historicalLineItemId,
+      matchType: estimateExtractionMatches.matchType,
+      matchScore: estimateExtractionMatches.matchScore,
+      status: estimateExtractionMatches.status,
+      reasonJson: estimateExtractionMatches.reasonJson,
+      evidenceJson: estimateExtractionMatches.evidenceJson,
+      createdAt: estimateExtractionMatches.createdAt,
+    })
+    .from(estimateExtractionMatches)
+    .innerJoin(
+      estimateExtractions,
+      eq(estimateExtractionMatches.extractionId, estimateExtractions.id)
+    )
+    .where(eq(estimateExtractions.dealId, dealId))
+    .orderBy(desc(estimateExtractionMatches.createdAt));
+  const pricingRows = await tenantDb
+    .select()
+    .from(estimatePricingRecommendations)
+    .where(eq(estimatePricingRecommendations.dealId, dealId))
+    .orderBy(desc(estimatePricingRecommendations.createdAt));
+  const reviewEvents = await tenantDb
+    .select()
+    .from(estimateReviewEvents)
+    .where(eq(estimateReviewEvents.dealId, dealId))
+    .orderBy(desc(estimateReviewEvents.createdAt));
+  const generationRuns = await tenantDb
+    .select({
+      id: estimateGenerationRuns.id,
+      status: estimateGenerationRuns.status,
+      inputSnapshotJson: estimateGenerationRuns.inputSnapshotJson,
+      startedAt: estimateGenerationRuns.startedAt,
+      completedAt: estimateGenerationRuns.completedAt,
+      errorSummary: estimateGenerationRuns.errorSummary,
+    })
+    .from(estimateGenerationRuns)
+    .where(eq(estimateGenerationRuns.dealId, dealId))
+    .orderBy(desc(estimateGenerationRuns.startedAt));
+  const marketContext = await getDealEffectiveMarketContext(tenantDb, dealId);
+  const queuedRerunJobs = await queuedRerunJobsPromise;
+  if (queuedRerunJobsError) throw queuedRerunJobsError;
   const matchingQueuedRerunJobs = queuedRerunJobs.filter(
     (row) =>
       row.status !== "completed" &&

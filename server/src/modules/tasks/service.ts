@@ -326,53 +326,51 @@ export async function getTasks(
   // Subquery to resolve assignee display name from public.users
   const assignedToName = sql<string | null>`(SELECT display_name FROM public.users WHERE id = ${tasks.assignedTo})`.as("assignedToName");
 
-  const [countResult, taskRows] = await Promise.all([
-    tenantDb.select({ count: sql<number>`count(*)` }).from(tasks).where(where),
-    tenantDb
-      .select({
-        id: tasks.id,
-        title: tasks.title,
-        description: tasks.description,
-        type: tasks.type,
-        priority: tasks.priority,
-        status: tasks.status,
-        assignedTo: tasks.assignedTo,
-        assignedToName,
-        createdBy: tasks.createdBy,
-        dealId: tasks.dealId,
-        dealName: deals.name,
-        dealNumber: deals.dealNumber,
-        projectNumber: deals.projectNumber,
-        contactId: tasks.contactId,
-        emailId: tasks.emailId,
-        dueDate: tasks.dueDate,
-        dueTime: tasks.dueTime,
-        remindAt: tasks.remindAt,
-        scheduledFor: taskColumns.scheduledFor,
-        waitingOn: taskColumns.waitingOn,
-        blockedBy: taskColumns.blockedBy,
-        startedAt: taskColumns.startedAt,
-        completedAt: tasks.completedAt,
-        isOverdue: tasks.isOverdue,
-        createdAt: tasks.createdAt,
-        updatedAt: tasks.updatedAt,
-      })
-      .from(tasks)
-      .leftJoin(deals, eq(tasks.dealId, deals.id))
-      .where(where)
-      .orderBy(
-        // Priority-sectioned ordering per spec:
-        // Overdue first (is_overdue DESC), then by priority rank ASC, then by due_date ASC.
-        // Completed section: order by completedAt DESC instead.
-        ...(filters.section === "completed"
-          ? [desc(tasks.completedAt)]
-          : filters.status === "scheduled"
-            ? [asc(taskColumns.scheduledFor), asc(priorityRank), asc(tasks.title)]
-            : [desc(tasks.isOverdue), asc(priorityRank), asc(tasks.dueDate)])
-      )
-      .limit(limit)
-      .offset(offset),
-  ]);
+  const countResult = await tenantDb.select({ count: sql<number>`count(*)` }).from(tasks).where(where);
+  const taskRows = await tenantDb
+    .select({
+      id: tasks.id,
+      title: tasks.title,
+      description: tasks.description,
+      type: tasks.type,
+      priority: tasks.priority,
+      status: tasks.status,
+      assignedTo: tasks.assignedTo,
+      assignedToName,
+      createdBy: tasks.createdBy,
+      dealId: tasks.dealId,
+      dealName: deals.name,
+      dealNumber: deals.dealNumber,
+      projectNumber: deals.projectNumber,
+      contactId: tasks.contactId,
+      emailId: tasks.emailId,
+      dueDate: tasks.dueDate,
+      dueTime: tasks.dueTime,
+      remindAt: tasks.remindAt,
+      scheduledFor: taskColumns.scheduledFor,
+      waitingOn: taskColumns.waitingOn,
+      blockedBy: taskColumns.blockedBy,
+      startedAt: taskColumns.startedAt,
+      completedAt: tasks.completedAt,
+      isOverdue: tasks.isOverdue,
+      createdAt: tasks.createdAt,
+      updatedAt: tasks.updatedAt,
+    })
+    .from(tasks)
+    .leftJoin(deals, eq(tasks.dealId, deals.id))
+    .where(where)
+    .orderBy(
+      // Priority-sectioned ordering per spec:
+      // Overdue first (is_overdue DESC), then by priority rank ASC, then by due_date ASC.
+      // Completed section: order by completedAt DESC instead.
+      ...(filters.section === "completed"
+        ? [desc(tasks.completedAt)]
+        : filters.status === "scheduled"
+          ? [asc(taskColumns.scheduledFor), asc(priorityRank), asc(tasks.title)]
+          : [desc(tasks.isOverdue), asc(priorityRank), asc(tasks.dueDate)])
+    )
+    .limit(limit)
+    .offset(offset);
 
   const total = Number(countResult[0]?.count ?? 0);
 

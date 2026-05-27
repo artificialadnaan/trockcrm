@@ -171,16 +171,14 @@ export async function getActivities(
 
   const where = conditions.length > 0 ? and(...conditions) : undefined;
 
-  const [countResult, rows] = await Promise.all([
-    tenantDb.select({ count: sql<number>`count(*)` }).from(activities).where(where),
-    tenantDb
-      .select()
-      .from(activities)
-      .where(where)
-      .orderBy(desc(activities.occurredAt), desc(activities.createdAt))
-      .limit(limit)
-      .offset(offset),
-  ]);
+  const countResult = await tenantDb.select({ count: sql<number>`count(*)` }).from(activities).where(where);
+  const rows = await tenantDb
+    .select()
+    .from(activities)
+    .where(where)
+    .orderBy(desc(activities.occurredAt), desc(activities.createdAt))
+    .limit(limit)
+    .offset(offset);
 
   const total = Number(countResult[0]?.count ?? 0);
   const enrichedRows = await addUserMetadata(tenantDb, rows);

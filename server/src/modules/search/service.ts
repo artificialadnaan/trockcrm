@@ -81,6 +81,14 @@ export interface AiSearchResponse {
 const MAX_RESULTS_PER_TYPE = 5;
 const MAX_AI_EVIDENCE = 5;
 
+async function settleSequential<T>(operation: () => Promise<T>): Promise<PromiseSettledResult<T>> {
+  try {
+    return { status: "fulfilled", value: await operation() };
+  } catch (reason) {
+    return { status: "rejected", reason };
+  }
+}
+
 /**
  * Search across deals, contacts, and files using PostgreSQL full-text search.
  * Requires minimum 2-character query (enforced at route level).
@@ -119,10 +127,8 @@ export async function naturalLanguageSearch(
 ): Promise<AiSearchResponse> {
   const structured = await globalSearch(tenantDb, query, types, userRole, userId);
   const intent = classifySearchIntent(structured.query);
-  const [evidence, interactionScores] = await Promise.all([
-    searchAiEvidence(tenantDb, structured.query),
-    getSearchInteractionScores(tenantDb),
-  ]);
+  const evidence = await searchAiEvidence(tenantDb, structured.query);
+  const interactionScores = await getSearchInteractionScores(tenantDb);
   const rankedEvidence = rankEvidenceByInteractions(evidence, interactionScores);
   const rankedTopEntities = buildTopEntityAnchors(structured, interactionScores);
   const rankedActions = buildRecommendedActions(structured, rankedEvidence, interactionScores, intent);
@@ -144,11 +150,11 @@ async function singleOfficeSearch(
   sanitized: string,
   types: Array<"deals" | "contacts" | "files">,
 ): Promise<SearchResponse> {
-  const results = await Promise.allSettled([
-    types.includes("deals") ? searchDeals(tenantDb, sanitized) : Promise.resolve([]),
-    types.includes("contacts") ? searchContacts(tenantDb, sanitized) : Promise.resolve([]),
-    types.includes("files") ? searchFiles(tenantDb, sanitized) : Promise.resolve([]),
-  ]);
+  const results = [
+    types.includes("deals") ? await settleSequential(() => searchDeals(tenantDb, sanitized)) : { status: "fulfilled" as const, value: [] },
+    types.includes("contacts") ? await settleSequential(() => searchContacts(tenantDb, sanitized)) : { status: "fulfilled" as const, value: [] },
+    types.includes("files") ? await settleSequential(() => searchFiles(tenantDb, sanitized)) : { status: "fulfilled" as const, value: [] },
+  ];
 
   const deals = results[0].status === "fulfilled" ? results[0].value : [];
   const contacts = results[1].status === "fulfilled" ? results[1].value : [];
@@ -213,11 +219,11 @@ async function crossOfficeSearch(
       await client.query("SELECT set_config('search_path', $1, false)", [`${schemaName},public`]);
       const officeDb = drizzle(client, { schema: undefined as any });
 
-      const results = await Promise.allSettled([
-        types.includes("deals") ? searchDeals(officeDb as any, sanitized) : Promise.resolve([]),
-        types.includes("contacts") ? searchContacts(officeDb as any, sanitized) : Promise.resolve([]),
-        types.includes("files") ? searchFiles(officeDb as any, sanitized) : Promise.resolve([]),
-      ]);
+      const results = [
+        types.includes("deals") ? await settleSequential(() => searchDeals(officeDb as any, sanitized)) : { status: "fulfilled" as const, value: [] },
+        types.includes("contacts") ? await settleSequential(() => searchContacts(officeDb as any, sanitized)) : { status: "fulfilled" as const, value: [] },
+        types.includes("files") ? await settleSequential(() => searchFiles(officeDb as any, sanitized)) : { status: "fulfilled" as const, value: [] },
+      ];
 
       const tag = (items: SearchResult[]) =>
         items.map((item) => ({ ...item, officeSlug: office.slug }));

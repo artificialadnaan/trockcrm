@@ -5,7 +5,7 @@ import type { NodePgDatabase } from "drizzle-orm/node-postgres";
 import * as schema from "@trock-crm/shared/schema";
 import { db, pool } from "../../db.js";
 import { AppError } from "../../middleware/error-handler.js";
-import { getFileDownloadUrl, getDealPhotoTimeline } from "../files/service.js";
+import { buildFileDownloadUrlFromRecord, getFileDownloadUrl, getDealPhotoTimeline } from "../files/service.js";
 import { logPhotoEvent } from "../files/audit-log-service.js";
 import type { DealPhotoTimelineFilters } from "../files/photo-timeline-filters.js";
 
@@ -249,6 +249,12 @@ function publicPhotoShape(photo: any, imageUrl: string | null) {
   };
 }
 
+async function publicPhotoImageUrl(photo: any): Promise<string | null> {
+  if (!isPublicPhotoImagePreviewable(photo)) return null;
+  if (photo.r2Key) return (await buildFileDownloadUrlFromRecord(photo)).url;
+  return photo.externalThumbnailUrl ?? photo.externalUrl ?? null;
+}
+
 export async function getPublicPhotoViewer(rawToken: string, filters: DealPhotoTimelineFilters = {}) {
   const token = await verifyAndConsumeToken(rawToken);
   return withPublicPhotoTenant(token.tenantId, async (tenantDb) => {
@@ -269,14 +275,9 @@ export async function getPublicPhotoViewer(rawToken: string, filters: DealPhotoT
       ...filters,
       includeDeleted: false,
     });
-    const photos = await Promise.all(timeline.photos.map(async (photo) => {
-      const imageUrl = isPublicPhotoImagePreviewable(photo)
-        ? photo.r2Key
-          ? (await getFileDownloadUrl(tenantDb, photo.id)).url
-          : photo.externalThumbnailUrl ?? photo.externalUrl ?? (await getFileDownloadUrl(tenantDb, photo.id)).url
-        : null;
-      return publicPhotoShape(photo, imageUrl);
-    }));
+    const photos = await Promise.all(timeline.photos.map(async (photo) =>
+      publicPhotoShape(photo, await publicPhotoImageUrl(photo))
+    ));
 
     return {
       tokenId: token.tokenId,

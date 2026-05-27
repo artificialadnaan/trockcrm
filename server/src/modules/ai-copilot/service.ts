@@ -1498,24 +1498,22 @@ export async function getCompanyCopilotView(
   tenantDb: TenantDb,
   company: { id: string; name: string }
 ): Promise<CompanyCopilotView> {
-  const [contactCountResult, companyDeals] = await Promise.all([
-    tenantDb
-      .select({ count: sql<number>`count(*)::int` })
-      .from(contacts)
-      .where(and(eq(contacts.companyId, company.id), eq(contacts.isActive, true))),
-    tenantDb
-      .select({
-        id: deals.id,
-        dealNumber: deals.dealNumber,
-        name: deals.name,
-        lastActivityAt: deals.lastActivityAt,
-        updatedAt: deals.updatedAt,
-      })
-      .from(deals)
-      .where(and(eq(deals.companyId, company.id), eq(deals.isActive, true)))
-      .orderBy(desc(deals.updatedAt))
-      .limit(10),
-  ]);
+  const contactCountResult = await tenantDb
+    .select({ count: sql<number>`count(*)::int` })
+    .from(contacts)
+    .where(and(eq(contacts.companyId, company.id), eq(contacts.isActive, true)));
+  const companyDeals = await tenantDb
+    .select({
+      id: deals.id,
+      dealNumber: deals.dealNumber,
+      name: deals.name,
+      lastActivityAt: deals.lastActivityAt,
+      updatedAt: deals.updatedAt,
+    })
+    .from(deals)
+    .where(and(eq(deals.companyId, company.id), eq(deals.isActive, true)))
+    .orderBy(desc(deals.updatedAt))
+    .limit(10);
 
   const dealIds = companyDeals.map((deal) => deal.id);
   const latestPacketRows = dealIds.length
@@ -1541,35 +1539,33 @@ export async function getCompanyCopilotView(
     });
   }
 
-  const [suggestedTasks, blindSpotFlags] = await Promise.all([
-    dealIds.length
-      ? tenantDb
-          .select()
-          .from(aiTaskSuggestions)
-          .where(
-            and(
-              eq(aiTaskSuggestions.scopeType, "deal"),
-              sql`${aiTaskSuggestions.scopeId} IN (${sql.join(dealIds.map((id) => sql`${id}`), sql`, `)})`,
-              eq(aiTaskSuggestions.status, "suggested")
-            )
+  const suggestedTasks = dealIds.length
+    ? await tenantDb
+        .select()
+        .from(aiTaskSuggestions)
+        .where(
+          and(
+            eq(aiTaskSuggestions.scopeType, "deal"),
+            sql`${aiTaskSuggestions.scopeId} IN (${sql.join(dealIds.map((id) => sql`${id}`), sql`, `)})`,
+            eq(aiTaskSuggestions.status, "suggested")
           )
-          .orderBy(desc(aiTaskSuggestions.createdAt))
-          .limit(8)
-      : Promise.resolve([]),
-    dealIds.length
-      ? tenantDb
-          .select()
-          .from(aiRiskFlags)
-          .where(
-            and(
-              sql`${aiRiskFlags.dealId} IN (${sql.join(dealIds.map((id) => sql`${id}`), sql`, `)})`,
-              eq(aiRiskFlags.status, "open")
-            )
+        )
+        .orderBy(desc(aiTaskSuggestions.createdAt))
+        .limit(8)
+    : [];
+  const blindSpotFlags = dealIds.length
+    ? await tenantDb
+        .select()
+        .from(aiRiskFlags)
+        .where(
+          and(
+            sql`${aiRiskFlags.dealId} IN (${sql.join(dealIds.map((id) => sql`${id}`), sql`, `)})`,
+            eq(aiRiskFlags.status, "open")
           )
-          .orderBy(desc(aiRiskFlags.createdAt))
-          .limit(8)
-      : Promise.resolve([]),
-  ]);
+        )
+        .orderBy(desc(aiRiskFlags.createdAt))
+        .limit(8)
+    : [];
 
   const relatedDeals = companyDeals.map((deal) => ({
     ...deal,
@@ -1818,17 +1814,16 @@ export async function getSalesProcessDisconnectDashboard(
   const limit = Math.max(1, Math.min(input.limit ?? 50, 200));
   const now = input.now ?? new Date();
   const viewerRole = input.viewerRole ?? "director";
-  const [activeDealsResult, allRows, interventionsResult, interventionEventsResult, automationResult] = await Promise.all([
-    tenantDb.execute(sql`
+  const activeDealsResult = await tenantDb.execute(sql`
       SELECT COUNT(*)::int AS active_deals
       FROM deals d
       JOIN pipeline_stage_config psc ON psc.id = d.stage_id
       WHERE d.is_active = TRUE
         AND psc.is_terminal = FALSE
         AND COALESCE(d.is_test_data, false) = false
-    `),
-    listCurrentSalesProcessDisconnectRows(tenantDb, { limit: null, now, viewerRole }),
-    tenantDb.execute(sql`
+    `);
+  const allRows = await listCurrentSalesProcessDisconnectRows(tenantDb, { limit: null, now, viewerRole });
+  const interventionsResult = await tenantDb.execute(sql`
       WITH triage_feedback AS (
         SELECT
           rf.deal_id AS deal_id,
@@ -1866,8 +1861,8 @@ export async function getSalesProcessDisconnectDashboard(
         )[1]::text AS latest_action
       FROM triage_feedback
       GROUP BY deal_id
-    `),
-    tenantDb.execute(sql`
+    `);
+  const interventionEventsResult = await tenantDb.execute(sql`
       WITH triage_feedback AS (
         SELECT
           rf.deal_id AS deal_id,
@@ -1904,8 +1899,8 @@ export async function getSalesProcessDisconnectDashboard(
         created_at,
         comment_text
       FROM triage_feedback
-    `),
-    tenantDb.execute(sql`
+    `);
+  const automationResult = await tenantDb.execute(sql`
       SELECT
         COUNT(*) FILTER (
           WHERE title LIKE 'AI Disconnect Digest:%'
@@ -1935,8 +1930,7 @@ export async function getSalesProcessDisconnectDashboard(
           WHERE t.origin_rule = 'ai_disconnect_admin_task'
         ) AS latest_admin_task_created_at
       FROM notifications
-    `),
-  ]);
+    `);
   const rows = allRows.slice(0, limit);
   const countType = (disconnectType: string) =>
     allRows.filter((row) => row.disconnectType === disconnectType).length;
@@ -2145,8 +2139,7 @@ export async function triageAiActionQueueEntry(
 }
 
 export async function getAiOpsMetrics(tenantDb: TenantDb): Promise<AiOpsMetrics> {
-  const [summaryResult, documentResult] = await Promise.all([
-    tenantDb.execute(sql`
+  const summaryResult = await tenantDb.execute(sql`
       WITH packet_counts AS (
         SELECT
           COUNT(*) FILTER (WHERE generated_at >= NOW() - INTERVAL '24 hours')::int AS packets_generated_24h,
@@ -2288,8 +2281,8 @@ export async function getAiOpsMetrics(tenantDb: TenantDb): Promise<AiOpsMetrics>
         document_counts.documents_indexed,
         document_counts.documents_pending
       FROM packet_counts, risk_counts, suggestion_counts, triage_counts, search_interaction_counts, risk_resolution_counts, recurring_suggestion_counts, feedback_counts, document_counts
-    `),
-    tenantDb.execute(sql`
+    `);
+  const documentResult = await tenantDb.execute(sql`
       SELECT
         source_type,
         COUNT(*) FILTER (WHERE index_status = 'indexed')::int AS indexed,
@@ -2297,8 +2290,7 @@ export async function getAiOpsMetrics(tenantDb: TenantDb): Promise<AiOpsMetrics>
       FROM ai_document_index
       GROUP BY source_type
       ORDER BY source_type ASC
-    `),
-  ]);
+    `);
 
   const summaryRow = getRows(summaryResult)[0] ?? {};
 
@@ -2390,8 +2382,7 @@ export async function getAiReviewPacketDetail(
   tenantDb: TenantDb,
   packetId: string
 ): Promise<AiReviewPacketDetail> {
-  const [packetResult, suggestedTasks, blindSpotFlags, feedback] = await Promise.all([
-    tenantDb.execute(sql`
+  const packetResult = await tenantDb.execute(sql`
       SELECT
         p.*,
         d.name AS deal_name,
@@ -2400,23 +2391,22 @@ export async function getAiReviewPacketDetail(
       LEFT JOIN deals d ON d.id = p.deal_id
       WHERE p.id = ${packetId}
       LIMIT 1
-    `),
-    tenantDb
-      .select()
-      .from(aiTaskSuggestions)
-      .where(eq(aiTaskSuggestions.packetId, packetId))
-      .orderBy(desc(aiTaskSuggestions.createdAt)),
-    tenantDb
-      .select()
-      .from(aiRiskFlags)
-      .where(eq(aiRiskFlags.packetId, packetId))
-      .orderBy(desc(aiRiskFlags.createdAt)),
-    tenantDb
-      .select()
-      .from(aiFeedback)
-      .where(and(eq(aiFeedback.targetType, "packet"), eq(aiFeedback.targetId, packetId)))
-      .orderBy(desc(aiFeedback.createdAt)),
-  ]);
+    `);
+  const suggestedTasks = await tenantDb
+    .select()
+    .from(aiTaskSuggestions)
+    .where(eq(aiTaskSuggestions.packetId, packetId))
+    .orderBy(desc(aiTaskSuggestions.createdAt));
+  const blindSpotFlags = await tenantDb
+    .select()
+    .from(aiRiskFlags)
+    .where(eq(aiRiskFlags.packetId, packetId))
+    .orderBy(desc(aiRiskFlags.createdAt));
+  const feedback = await tenantDb
+    .select()
+    .from(aiFeedback)
+    .where(and(eq(aiFeedback.targetType, "packet"), eq(aiFeedback.targetId, packetId)))
+    .orderBy(desc(aiFeedback.createdAt));
 
   const packetRow = getRows(packetResult)[0];
 

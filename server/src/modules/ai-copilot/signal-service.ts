@@ -43,8 +43,7 @@ export async function getDealBlindSpotSignals(
   options?: DealBlindSpotOptions
 ): Promise<DealBlindSpotSignal[]> {
   const { now, viewerRole } = normalizeOptions(options);
-  const [dealResult, openTaskResult, inboundResult, revisionResult, gateGapResult] = await Promise.all([
-    tenantDb.execute(sql`
+  const dealResult = await tenantDb.execute(sql`
       SELECT
         d.id AS deal_id,
         d.stage_id,
@@ -76,29 +75,29 @@ export async function getDealBlindSpotSignals(
       ) latest_current_stage_entered_at ON TRUE
       WHERE d.id = ${dealId}
       LIMIT 1
-    `),
-    tenantDb.execute(sql`
+    `);
+  const openTaskResult = await tenantDb.execute(sql`
       SELECT COUNT(*)::int AS open_task_count
       FROM tasks
       WHERE deal_id = ${dealId}
         AND status IN ('pending', 'in_progress', 'waiting_on', 'blocked')
-    `),
-    tenantDb.execute(sql`
+    `);
+  const inboundResult = await tenantDb.execute(sql`
       SELECT COUNT(*)::int AS inbound_without_followup_count
       FROM emails e
       WHERE ${buildDealEmailLinkCondition("e", sql`${dealId}`)}
         AND e.direction = 'inbound'
         AND ${buildDealEmailFollowupGapCondition("a", "e", sql`${dealId}`)}
-    `),
-    tenantDb.execute(sql`
+    `);
+  const revisionResult = await tenantDb.execute(sql`
       SELECT COUNT(*)::int AS revision_owner_movement_count
       FROM deal_stage_history dsh
       JOIN deals d ON d.id = dsh.deal_id
       WHERE dsh.deal_id = ${dealId}
         AND d.proposal_status = 'revision_requested'
         AND dsh.created_at >= NOW() - INTERVAL '30 days'
-    `),
-    tenantDb.execute(sql`
+    `);
+  const gateGapResult = await tenantDb.execute(sql`
       SELECT COUNT(*)::int AS missing_required_document_count
       FROM (
         SELECT jsonb_array_length(COALESCE(psc.required_documents, '[]'::jsonb)) AS required_count
@@ -112,8 +111,7 @@ export async function getDealBlindSpotSignals(
         WHERE deal_id = ${dealId}
           AND is_active = TRUE
       ) present_docs ON TRUE
-    `),
-  ]);
+    `);
 
   const dealRow = getRows(dealResult)[0];
   if (!dealRow) return [];

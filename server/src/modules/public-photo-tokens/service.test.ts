@@ -6,6 +6,7 @@ const tenantQueryMock = vi.hoisted(() => vi.fn());
 const releaseMock = vi.hoisted(() => vi.fn());
 const connectMock = vi.hoisted(() => vi.fn(() => ({ query: tenantQueryMock, release: releaseMock })));
 const getDealPhotoTimelineMock = vi.hoisted(() => vi.fn());
+const buildFileDownloadUrlFromRecordMock = vi.hoisted(() => vi.fn());
 const getFileDownloadUrlMock = vi.hoisted(() => vi.fn());
 const logPhotoEventMock = vi.hoisted(() => vi.fn());
 
@@ -19,6 +20,7 @@ vi.mock("drizzle-orm/node-postgres", () => ({
 }));
 
 vi.mock("../files/service.js", () => ({
+  buildFileDownloadUrlFromRecord: buildFileDownloadUrlFromRecordMock,
   getDealPhotoTimeline: getDealPhotoTimelineMock,
   getFileDownloadUrl: getFileDownloadUrlMock,
 }));
@@ -35,6 +37,7 @@ describe("public photo token service", () => {
     releaseMock.mockReset();
     connectMock.mockClear();
     getDealPhotoTimelineMock.mockReset();
+    buildFileDownloadUrlFromRecordMock.mockReset();
     getFileDownloadUrlMock.mockReset();
     logPhotoEventMock.mockReset();
   });
@@ -192,15 +195,18 @@ describe("public photo token service", () => {
         procoreSyncStatus: "pending",
         externalThumbnailUrl: null,
         externalUrl: null,
+        r2Key: "office_dallas/deals/TR-1/photos/roof-damage.jpg",
       }],
     });
-    getFileDownloadUrlMock.mockResolvedValue({ url: "https://r2.test/photo.jpg" });
+    buildFileDownloadUrlFromRecordMock.mockResolvedValue({ url: "https://r2.test/photo.jpg" });
 
     const result = await getPublicPhotoViewer("raw-token");
 
     expect(result.deal).toEqual({ id: "deal-1", name: "Public Deal", dealNumber: "TR-1", propertyAddress: "100 Main St, Dallas, TX" });
     expect(result).not.toHaveProperty("contractAmount");
     expect(result.photos[0]).toMatchObject({ id: "photo-1", imageUrl: "https://r2.test/photo.jpg", procoreSyncStatus: "pending" });
+    expect(buildFileDownloadUrlFromRecordMock).toHaveBeenCalledWith(expect.objectContaining({ id: "photo-1" }));
+    expect(getFileDownloadUrlMock).not.toHaveBeenCalled();
     expect(tenantQueryMock).toHaveBeenCalledWith("COMMIT");
     expect(releaseMock).toHaveBeenCalled();
   });
@@ -282,12 +288,13 @@ describe("public photo token service", () => {
         r2Key: "office_dallas/deals/TR-1/photos/companycam_123.jpg",
       }],
     });
-    getFileDownloadUrlMock.mockResolvedValue({ url: "https://r2.test/companycam_123.jpg" });
+    buildFileDownloadUrlFromRecordMock.mockResolvedValue({ url: "https://r2.test/companycam_123.jpg" });
 
     const result = await getPublicPhotoViewer("raw-token");
 
     expect(result.photos[0]).toMatchObject({ id: "photo-1", imageUrl: "https://r2.test/companycam_123.jpg" });
-    expect(getFileDownloadUrlMock).toHaveBeenCalledWith(expect.anything(), "photo-1");
+    expect(buildFileDownloadUrlFromRecordMock).toHaveBeenCalledWith(expect.objectContaining({ id: "photo-1" }));
+    expect(getFileDownloadUrlMock).not.toHaveBeenCalled();
   });
 
   it("uses storage key extensions before renamed display names for public image URLs", async () => {
@@ -325,12 +332,13 @@ describe("public photo token service", () => {
         r2Key: "office_dallas/deals/TR-1/photos/companycam_renamed.jpg",
       }],
     });
-    getFileDownloadUrlMock.mockResolvedValue({ url: "https://r2.test/companycam_renamed.jpg" });
+    buildFileDownloadUrlFromRecordMock.mockResolvedValue({ url: "https://r2.test/companycam_renamed.jpg" });
 
     const result = await getPublicPhotoViewer("raw-token");
 
     expect(result.photos[0]).toMatchObject({ id: "photo-renamed", imageUrl: "https://r2.test/companycam_renamed.jpg" });
-    expect(getFileDownloadUrlMock).toHaveBeenCalledWith(expect.anything(), "photo-renamed");
+    expect(buildFileDownloadUrlFromRecordMock).toHaveBeenCalledWith(expect.objectContaining({ id: "photo-renamed" }));
+    expect(getFileDownloadUrlMock).not.toHaveBeenCalled();
   });
 
   it("does not let image-looking display names override public non-image storage keys", async () => {

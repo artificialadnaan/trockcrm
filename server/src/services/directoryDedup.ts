@@ -259,16 +259,14 @@ export async function listDirectoryMergeQueue(tenantDb: TenantDb, status = "pend
     .orderBy(sql`${directoryMergeQueue.confidenceScore} DESC`, directoryMergeQueue.createdAt)
     .limit(100);
 
-  return Promise.all(
-    entries.map(async (entry) => {
-      const table = entry.entityType === "company" ? companies : contacts;
-      const [entityA, entityB] = await Promise.all([
-        tenantDb.select().from(table as any).where(eq((table as any).id, entry.entityAId)).limit(1),
-        tenantDb.select().from(table as any).where(eq((table as any).id, entry.entityBId)).limit(1),
-      ]);
-      return { ...entry, entityA: entityA[0] ?? null, entityB: entityB[0] ?? null };
-    })
-  );
+  const result = [];
+  for (const entry of entries) {
+    const table = entry.entityType === "company" ? companies : contacts;
+    const entityA = await tenantDb.select().from(table as any).where(eq((table as any).id, entry.entityAId)).limit(1);
+    const entityB = await tenantDb.select().from(table as any).where(eq((table as any).id, entry.entityBId)).limit(1);
+    result.push({ ...entry, entityA: entityA[0] ?? null, entityB: entityB[0] ?? null });
+  }
+  return result;
 }
 
 export async function mergeDirectoryEntities(

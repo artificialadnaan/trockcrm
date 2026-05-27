@@ -74,6 +74,25 @@ function createSelectChain(rows: unknown[], options?: { resolveOnWhere?: boolean
   return builder;
 }
 
+function createSingleClientGuard() {
+  let active = false;
+
+  return {
+    finish<T>(rows: T[]) {
+      if (active) {
+        throw new Error("concurrent tenantDb query");
+      }
+      active = true;
+      return new Promise<T[]>((resolve) => {
+        queueMicrotask(() => {
+          active = false;
+          resolve(rows);
+        });
+      });
+    },
+  };
+}
+
 describe("activities service", () => {
   beforeEach(() => {
     vi.restoreAllMocks();
@@ -271,6 +290,29 @@ describe("activities service", () => {
       performedByUserAvatarUrl: "https://example.test/avatar.png",
     });
     expect(tenantDb.select).toHaveBeenCalledTimes(3);
+  });
+
+  it("serializes list count and row queries on request-scoped tenantDb", async () => {
+    const guard = createSingleClientGuard();
+    const countQuery = createSelectChain([{ count: 1 }]);
+    const rowsQuery = createSelectChain([{ id: "activity-1", responsibleUserId: null, performedByUserId: null }]);
+
+    countQuery.where = vi.fn(() => guard.finish([{ count: 1 }]));
+    rowsQuery.offset = vi.fn(() =>
+      guard.finish([{ id: "activity-1", responsibleUserId: null, performedByUserId: null }])
+    );
+
+    const tenantDb = {
+      select: vi
+        .fn()
+        .mockReturnValueOnce(countQuery)
+        .mockReturnValueOnce(rowsQuery),
+    } as any;
+
+    const result = await getActivities(tenantDb, { leadId: "lead-1", limit: 100 });
+
+    expect(result.pagination.total).toBe(1);
+    expect(result.activities).toHaveLength(1);
   });
 
   it("filters email activities to the current mailbox owner while leaving non-email activity visible", async () => {

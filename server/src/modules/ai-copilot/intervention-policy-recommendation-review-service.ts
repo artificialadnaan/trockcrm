@@ -783,32 +783,29 @@ async function fetchRecentHistory(
       })
     );
 
-  const applyEntries = await Promise.all(
-    applyRows
-      .filter((row) => new Date(toIso(row.created_at) ?? 0).getTime() >= cutoff)
-      .map(async (row): Promise<InterventionPolicyRecommendationHistoryEntry> => {
-        const actorName =
-          row.actor_display_name ?? (await fetchActorDisplayName(tenantDb, row.actor_user_id));
-        const title =
-          row.title ??
-          titleByRecommendation.get(`${row.recommendation_id}:${row.snapshot_id}`) ??
-          row.recommendation_id;
-        return {
-          recommendationId: row.recommendation_id,
-          snapshotId: row.snapshot_id,
-          taxonomy: row.taxonomy,
-          title,
-          eventType: row.status as InterventionPolicyRecommendationHistoryEntry["eventType"],
-          actorName,
-          summary: historySummaryForEvent({
-            eventType: row.status,
-            title,
-            rejectionReason: row.rejection_reason,
-          }),
-          occurredAt: toIso(row.created_at) ?? new Date().toISOString(),
-        };
-      })
-  );
+  const applyEntries: InterventionPolicyRecommendationHistoryEntry[] = [];
+  for (const row of applyRows.filter((row) => new Date(toIso(row.created_at) ?? 0).getTime() >= cutoff)) {
+    const actorName =
+      row.actor_display_name ?? (await fetchActorDisplayName(tenantDb, row.actor_user_id));
+    const title =
+      row.title ??
+      titleByRecommendation.get(`${row.recommendation_id}:${row.snapshot_id}`) ??
+      row.recommendation_id;
+    applyEntries.push({
+      recommendationId: row.recommendation_id,
+      snapshotId: row.snapshot_id,
+      taxonomy: row.taxonomy,
+      title,
+      eventType: row.status as InterventionPolicyRecommendationHistoryEntry["eventType"],
+      actorName,
+      summary: historySummaryForEvent({
+        eventType: row.status,
+        title,
+        rejectionReason: row.rejection_reason,
+      }),
+      occurredAt: toIso(row.created_at) ?? new Date().toISOString(),
+    });
+  }
 
   const newestLifecycleByRecommendation = new Map<string, number>();
   for (const entry of applyEntries) {
@@ -842,25 +839,15 @@ export async function getInterventionPolicyRecommendationReview(
 ): Promise<InterventionPolicyRecommendationReviewModel> {
   const window = input.window ?? "last_30_days";
   const snapshot = await fetchLatestRenderablePolicySnapshot(tenantDb, input.officeId);
-  const [, summary] = await Promise.all([
-    getInterventionPolicyRecommendationEvaluationSummary(tenantDb, {
-      officeId: input.officeId,
-      window,
-      decision: input.decision === "all" ? null : input.decision ?? null,
-      now: input.now,
-    }),
-    getInterventionPolicyRecommendationEvaluationSummary(tenantDb, {
-      officeId: input.officeId,
-      window,
-      decision: null,
-      now: input.now,
-    }),
-  ]);
+  const summary = await getInterventionPolicyRecommendationEvaluationSummary(tenantDb, {
+    officeId: input.officeId,
+    window,
+    decision: null,
+    now: input.now,
+  });
   const reviewNow = input.now ?? new Date();
-  const [windowDecisionRows, globalWindowDecisionRows] = await Promise.all([
-    fetchWindowDecisionRows(tenantDb, input.officeId, window, reviewNow),
-    fetchGlobalWindowDecisionRows(tenantDb, window, reviewNow),
-  ]);
+  const windowDecisionRows = await fetchWindowDecisionRows(tenantDb, input.officeId, window, reviewNow);
+  const globalWindowDecisionRows = await fetchGlobalWindowDecisionRows(tenantDb, window, reviewNow);
   const recentHistory = await fetchRecentHistory(tenantDb, input.officeId, window, reviewNow);
 
   if (!snapshot) {

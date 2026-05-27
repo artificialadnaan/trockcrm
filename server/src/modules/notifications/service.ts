@@ -29,16 +29,14 @@ export async function getNotifications(tenantDb: TenantDb, filters: Notification
 
   const where = and(...conditions);
 
-  const [countResult, rows] = await Promise.all([
-    tenantDb.select({ count: sql<number>`count(*)` }).from(notifications).where(where),
-    tenantDb
-      .select()
-      .from(notifications)
-      .where(where)
-      .orderBy(desc(notifications.createdAt))
-      .limit(limit)
-      .offset(offset),
-  ]);
+  const countResult = await tenantDb.select({ count: sql<number>`count(*)` }).from(notifications).where(where);
+  const rows = await tenantDb
+    .select()
+    .from(notifications)
+    .where(where)
+    .orderBy(desc(notifications.createdAt))
+    .limit(limit)
+    .offset(offset);
 
   const total = Number(countResult[0]?.count ?? 0);
 
