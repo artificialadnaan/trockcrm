@@ -220,6 +220,8 @@ describe("Reports Service", () => {
       const queryText = tenantDb.execute.mock.calls
         .map(([query]: [unknown]) => extractSqlText(query).toLowerCase())
         .join("\n");
+      expect(queryText).toContain("is_active = true");
+      expect(queryText).toContain("coalesce(is_test_data, false) = false");
       expect(queryText).toContain("coalesce(on_hold, false) = false");
     });
   });

@@ -181,6 +181,7 @@ function textArrayFilter(values: string[]) {
 function buildFilters(input: ReportBuilderInput, dateFieldSql: ReturnType<typeof sql>) {
   const filters = input.filters ?? {};
   const clauses: ReturnType<typeof sql>[] = [
+    sql`d.is_active = true`,
     sql`COALESCE(d.is_test_data, false) = false`,
     aliasedReportableDealFilterSql("d"),
   ];
