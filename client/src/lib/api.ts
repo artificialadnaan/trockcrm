@@ -66,6 +66,16 @@ export function clearCsrfTokenOverrideForTests() {
   clearCsrfTokenOverride();
 }
 
+function readOfficeIdFromLocation(): string | null {
+  if (typeof window === "undefined") return null;
+  const officeId = new URLSearchParams(window.location.search).get("officeId")?.trim();
+  return officeId || null;
+}
+
+function hasOfficeHeader(headers: Record<string, string>) {
+  return Object.keys(headers).some((key) => key.toLowerCase() === "x-office-id");
+}
+
 function isUnsafeMethod(method: string | undefined): boolean {
   return ["POST", "PUT", "PATCH", "DELETE"].includes((method ?? "GET").toUpperCase());
 }
@@ -98,6 +108,10 @@ export async function api<T = unknown>(path: string, options: ApiOptions = {}): 
   const headers: Record<string, string> = {
     ...(fetchOptions.headers as Record<string, string>),
   };
+  const officeId = readOfficeIdFromLocation();
+  if (officeId && !hasOfficeHeader(headers)) {
+    headers["x-office-id"] = officeId;
+  }
 
   if (json) {
     headers["Content-Type"] = "application/json";

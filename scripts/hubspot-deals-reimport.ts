@@ -16,6 +16,10 @@ import { isProjectTypeValue, normalizeProjectType } from "../shared/src/types/pr
 import { buildAuditActorFromSystem } from "../server/src/modules/audit/audit-logger.js";
 import { logActivityWithPgClient } from "../server/src/modules/audit/pg-activity-logger.js";
 import { HUBSPOT_REIMPORT } from "../server/src/modules/audit/system-processes.js";
+import {
+  normalizeProjectNumberInput,
+  ProjectNumberValidationError,
+} from "../server/src/modules/deals/project-number-validation.js";
 import { applyProjectNumberEmailSkipSetting } from "./lib/project-number-notification.js";
 
 /**
@@ -234,6 +238,17 @@ function normalizeText(value: string | null | undefined): string | null {
   return text ? text : null;
 }
 
+function normalizeHubSpotProjectNumber(value: string | null | undefined, hubspotRecordId: string): string | null {
+  try {
+    return normalizeProjectNumberInput(value);
+  } catch (error) {
+    if (error instanceof ProjectNumberValidationError) {
+      throw new Error(`Invalid Project Number for HubSpot record ${hubspotRecordId}: ${error.message}`);
+    }
+    throw error;
+  }
+}
+
 function normalizeComparableText(value: string | null | undefined): string | null {
   const text = normalizeText(value);
   return text ? text.toLowerCase() : null;
@@ -398,7 +413,7 @@ export function parseHubSpotDealsCsv(text: string): CsvDealRow[] {
         lastModifiedDate: formatIso(parseDate(first(row, ["Last Modified Date"]))),
         dealStage: normalizeText(first(row, ["Deal Stage"])),
         pipeline: normalizeText(first(row, ["Pipeline"])),
-        projectNumber: normalizeText(first(row, ["Project Number"])),
+        projectNumber: normalizeHubSpotProjectNumber(first(row, ["Project Number"]), hubspotRecordId),
         projectType: normalizeText(first(row, ["Project Type"])),
         associatedCompany: normalizeText(first(row, ["Associated Company"])),
       };

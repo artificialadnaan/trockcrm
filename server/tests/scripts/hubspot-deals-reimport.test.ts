@@ -6,6 +6,7 @@ import {
   applyPlan,
   buildReimportPlan,
   diffSafeUpdateFields,
+  parseHubSpotDealsCsv,
   parseReimportArgs,
   readEnvValueFromFile,
   validateAmount,
@@ -63,6 +64,29 @@ describe("hubspot-deals-reimport", () => {
     expect(validateAmount(42)).toBe(42);
     expect(() => validateAmount("N/A")).toThrow("Invalid amount");
     expect(() => validateAmount({ value: 12 })).toThrow("Invalid amount type 'object'");
+  });
+
+  it("trims canonical project numbers while parsing the HubSpot CSV", () => {
+    const rows = parseHubSpotDealsCsv([
+      "Record ID,Deal Name,Project Number",
+      "hs-1,Noble,  DFW-1-12345-aa  ",
+    ].join("\n"));
+
+    expect(rows).toEqual([
+      expect.objectContaining({
+        hubspotRecordId: "hs-1",
+        projectNumber: "DFW-1-12345-aa",
+      }),
+    ]);
+  });
+
+  it("rejects non-canonical project numbers from the HubSpot CSV before inserts or updates", () => {
+    expect(() => parseHubSpotDealsCsv([
+      "Record ID,Deal Name,Project Number",
+      "hs-1,Noble,DFW-1-1234-aa",
+    ].join("\n"))).toThrow(
+      "Invalid Project Number for HubSpot record hs-1: projectNumber must match canonical format"
+    );
   });
 
   it("classifies unchanged, newer, missing, ambiguous, and soft-deleted rows", () => {

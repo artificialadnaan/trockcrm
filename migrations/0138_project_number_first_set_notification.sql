@@ -146,6 +146,44 @@ BEGIN
           WHERE table_name = 'deals'
             AND actor_system_process = 'project_number_first_set';
 
+        INSERT INTO %I.audit_log (
+          table_name,
+          record_id,
+          action,
+          changed_by,
+          actor_system_process,
+          entity_type,
+          entity_name_snapshot,
+          entity_secondary_id_snapshot,
+          field_changes_jsonb,
+          changes,
+          visibility_scope
+        )
+        SELECT
+          'deals',
+          d.id,
+          'update'::public.audit_action,
+          NULL,
+          'project_number_first_set',
+          'deal',
+          d.name,
+          NULLIF(BTRIM(d.project_number), ''),
+          jsonb_build_array(jsonb_build_object(
+            'key', 'projectNumber',
+            'label', 'Project Number',
+            'fromDisplay', NULL,
+            'toDisplay', NULLIF(BTRIM(d.project_number), ''),
+            'fromFull', NULL,
+            'toFull', NULLIF(BTRIM(d.project_number), ''),
+            'transition', 'existing',
+            'masked', false
+          )),
+          jsonb_build_object('projectNumber', jsonb_build_object('from', NULL, 'to', NULLIF(BTRIM(d.project_number), ''))),
+          'internal'
+        FROM %I.deals d
+        WHERE NULLIF(BTRIM(d.project_number), '') IS NOT NULL
+        ON CONFLICT DO NOTHING;
+
         DROP TRIGGER IF EXISTS deals_project_number_first_set_email_trg ON %I.deals;
 
         CREATE TRIGGER deals_project_number_first_set_email_trg
@@ -153,6 +191,8 @@ BEGIN
           FOR EACH ROW
           EXECUTE FUNCTION public.enqueue_project_number_first_set_email();
       $sql$,
+      tenant_schema,
+      tenant_schema,
       tenant_schema,
       tenant_schema,
       tenant_schema
@@ -166,6 +206,44 @@ CREATE UNIQUE INDEX IF NOT EXISTS audit_log_project_number_first_set_uidx
   ON office_dallas.audit_log (record_id)
   WHERE table_name = 'deals'
     AND actor_system_process = 'project_number_first_set';
+
+INSERT INTO office_dallas.audit_log (
+  table_name,
+  record_id,
+  action,
+  changed_by,
+  actor_system_process,
+  entity_type,
+  entity_name_snapshot,
+  entity_secondary_id_snapshot,
+  field_changes_jsonb,
+  changes,
+  visibility_scope
+)
+SELECT
+  'deals',
+  d.id,
+  'update'::public.audit_action,
+  NULL,
+  'project_number_first_set',
+  'deal',
+  d.name,
+  NULLIF(BTRIM(d.project_number), ''),
+  jsonb_build_array(jsonb_build_object(
+    'key', 'projectNumber',
+    'label', 'Project Number',
+    'fromDisplay', NULL,
+    'toDisplay', NULLIF(BTRIM(d.project_number), ''),
+    'fromFull', NULL,
+    'toFull', NULLIF(BTRIM(d.project_number), ''),
+    'transition', 'existing',
+    'masked', false
+  )),
+  jsonb_build_object('projectNumber', jsonb_build_object('from', NULL, 'to', NULLIF(BTRIM(d.project_number), ''))),
+  'internal'
+FROM office_dallas.deals d
+WHERE NULLIF(BTRIM(d.project_number), '') IS NOT NULL
+ON CONFLICT DO NOTHING;
 
 DROP TRIGGER IF EXISTS deals_project_number_first_set_email_trg ON office_dallas.deals;
 

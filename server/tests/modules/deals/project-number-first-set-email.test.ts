@@ -37,6 +37,20 @@ describe("project number first-set notification migration", () => {
     expect(migrationSql).not.toContain("EXCEPTION WHEN OTHERS");
   });
 
+  it("seeds first-set audit markers for existing project-numbered deals before enabling the trigger", () => {
+    expect(migrationSql).toContain("INSERT INTO %I.audit_log");
+    expect(migrationSql).toContain("FROM %I.deals d");
+    expect(migrationSql).toContain("WHERE NULLIF(BTRIM(d.project_number), '') IS NOT NULL");
+    expect(migrationSql).toContain("'transition', 'existing'");
+    expect(migrationSql).toContain("ON CONFLICT DO NOTHING");
+
+    const seedIndex = migrationSql.indexOf("'transition', 'existing'");
+    const triggerIndex = migrationSql.indexOf("CREATE TRIGGER deals_project_number_first_set_email_trg");
+    expect(seedIndex).toBeGreaterThan(-1);
+    expect(triggerIndex).toBeGreaterThan(-1);
+    expect(seedIndex).toBeLessThan(triggerIndex);
+  });
+
   it("creates a sent-email receipt table for worker retry idempotency", () => {
     expect(migrationSql).toContain("CREATE TABLE IF NOT EXISTS public.project_number_first_set_email_receipts");
     expect(migrationSql).toContain("audit_log_id bigint NOT NULL");

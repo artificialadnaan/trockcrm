@@ -140,6 +140,128 @@ The SyncHub/procore project relay paths use project-number values for matching a
   - email links carry existing office context through `officeId` and `x-office-id`.
   - Practical test gaps from review were addressed with additional route and hook tests; there is no live Postgres trigger harness in the repo, so the trigger rollback behavior is covered by migration assertions that the swallowing exception handler was removed.
 
+## Codex Third Review Fix Round (`4cb7fb18a5` follow-up)
+
+### Trace 1: standard `POST /api/deals` trim flow
+
+Request flow after the fix:
+
+- HTTP body is cloned into `body` at the top of `POST /api/deals`.
+- `validateDealPayload(body)` calls `validateProjectNumberPayload(body)`.
+- `validateProjectNumberPayload` delegates to shared server helper `normalizeProjectNumberInput`.
+- `normalizeProjectNumberInput` trims the value, validates canonical `DFW|ATL-N-NNNNN-aa` format, rejects blank/oversized/non-string/non-canonical values, and returns the trimmed canonical string.
+- `assertProjectNumberMutationAllowed(body, req.user.role)` then permits only admin/director API callers to create with `projectNumber`.
+- The route destructures `...rest` from the already-normalized `body`, not the original `req.body`.
+- `createDeal` receives `projectNumber` from `rest` and persists it to `deals.project_number`.
+- Because the insert writes a nonblank `project_number`, the migration trigger fires normally and enqueues the email unless `app.skip_project_number_email` is set.
+
+Coverage:
+
+- `server/tests/modules/deals/patch-route.test.ts` asserts `POST /api/deals` with `"  DFW-1-12345-aa  "` passes `"DFW-1-12345-aa"` into `createDeal`.
+
+### Trace 2: deal create-path audit
+
+Create paths audited:
+
+- `POST /api/deals`
+  - Uses `projectNumber`: yes.
+  - Validates: yes, through `validateDealPayload` -> `normalizeProjectNumberInput`.
+  - Authorizes: yes, admin/director only through `assertProjectNumberMutationAllowed`.
+  - Forwards: yes, trimmed value reaches `createDeal`.
+- `POST /api/deals/service-opportunity`
+  - Uses `projectNumber`: yes.
+  - Validates: yes, same validator as standard create.
+  - Authorizes: yes, same admin/director gate as standard create.
+  - Forwards: yes, `projectNumber` is now in the create payload whitelist.
+- `POST /api/leads/:id/convert`
+  - Uses `projectNumber`: no.
+  - Validates/authorizes: not applicable because conversion maps an explicit known field set and does not accept or forward `projectNumber`.
+  - Trigger: cannot fire from client-supplied project number on this path.
+- SyncHub Procore created-project receiver (`server/src/modules/procore/synchub-routes.ts`)
+  - Uses `projectNumber`: no for `deals.project_number`.
+  - Validates/authorizes: shared-secret system route; direct insert omits `project_number`.
+  - Trigger: cannot fire because deal `project_number` is not inserted.
+- `server/src/modules/auth/service.ts` seed/demo insert
+  - Uses `projectNumber`: no.
+  - Validates/authorizes: not applicable; insert omits `project_number`.
+- `scripts/hubspot-deals-reimport.ts`
+  - Uses `projectNumber`: yes for direct create/update maintenance script.
+  - Validates: yes now, via `normalizeProjectNumberInput` before the import plan can insert or update `project_number`.
+  - Authorizes: operator-run production script, not a user route; it requires explicit apply/production flags and already uses the skip flag to avoid bulk Christy emails.
+- `scripts/backfill-project-numbers.ts`
+  - Uses `projectNumber`: yes.
+  - Validates: yes, only canonical values are eligible; legacy/non-canonical preserved values are skipped.
+  - Authorizes: operator-run production script with explicit execution flags and skip flag.
+- `scripts/normalize-project-number-case.ts`
+  - Uses `projectNumber`: yes, but only normalizes existing `dfw|atl` prefix case.
+  - Validates/authorizes: operator-run production script; skip flag supported.
+- `scripts/create-bidboard-excluded-real-projects.js`
+  - Uses `projectNumber`: yes, from an in-script approved project-number list.
+  - Validates/authorizes: operator-run script; skip flag now set transaction-locally before bulk inserts.
+- Other direct deal insert scripts (`migration-promote`, smoke/test seed scripts)
+  - Uses `projectNumber`: no current accepted user/API value for `deals.project_number`; no Christy-email user route exposure.
+
+Coverage:
+
+- Route tests cover standard create trimming, service-opportunity forwarding, invalid service-opportunity project number rejection, and rep rejection on standard create.
+- HubSpot reimport tests cover trimming canonical CSV project numbers and rejecting non-canonical CSV project numbers before inserts or updates.
+
+### Trace 3: deal-detail page office-context inventory
+
+Office context convention:
+
+- The email link carries `?officeId={public.offices.id}`.
+- `DealDetailPage` reads the query param and passes it explicitly to `useDealDetail`.
+- `client/src/lib/api.ts` now also reads the current URL `officeId` and injects `x-office-id` into every API request unless the caller already supplied that header. This uses the existing backend office-selection mechanism and avoids inventing a new routing convention.
+
+Deal-detail page API inventory:
+
+- Initial detail load: `/deals/{id}/detail`; explicit `useDealDetail(id, { officeId })`.
+- RFP retry: `/deals/{id}/rfp-retry`; inherits URL `officeId` through `api()`.
+- Photo count: `/files/deal/{id}/photos?page=1&limit=1`; inherits through `api()`.
+- RFP readiness: `/deals/{id}/scoping-intake/readiness`; inherits through `api()`.
+- Trigger RFP: `/deals/{id}/trigger-rfp`; inherits through `api()`.
+- Watch/unwatch: `/deals/{id}/watch`; inherits through `api()`.
+- Stage preflight/change: `/deals/{id}/stage/preflight` and `/deals/{id}/stage`; inherit through `api()`. Stage requirement navigation links now preserve `officeId`.
+- Owner reassignment picker in right rail: `/users/sales-reps?purpose=deal-reassignment`; explicit `officeId` is passed to `useSalesReps`.
+- Owner reassignment update: `PATCH /deals/{id}`; inherits through `api()`.
+- Overview tab sales-rep picker/update: explicit `officeId` for `useSalesReps`; `PATCH /deals/{id}` inherits through `api()`.
+- Proposal card, contract signed card, estimating substage, timers, files, photos, email, activity/recordings, timeline, team, estimates, punch list, closeout, and public-photo-token components all use the shared `api()` helper for tenant API calls; they now inherit the URL `officeId`.
+- Photos tab navigation preserves the `officeId` query parameter when moving between `/deals/{id}` and `/deals/{id}/photos`.
+- External/non-tenant calls such as signed R2 upload/download URLs are not routed through tenant middleware and do not need `x-office-id`.
+
+Coverage:
+
+- `client/src/lib/api.test.ts` asserts URL `officeId` is automatically threaded into `x-office-id`, and that an explicit caller-supplied `x-office-id` is not overwritten.
+- `client/src/hooks/use-deals.test.ts` still covers explicit `useDealDetail(..., { officeId })` header threading.
+
+### Trace 4: migration seed for pre-existing project numbers
+
+Migration strategy:
+
+- `0138_project_number_first_set_notification.sql` iterates every `office_%` schema.
+- For each tenant, it first creates the partial unique audit index for `table_name = 'deals' AND actor_system_process = 'project_number_first_set'`.
+- It then inserts one tenant `audit_log` marker for every deal whose `project_number` is nonblank, using `actor_system_process = 'project_number_first_set'` and `transition = 'existing'`.
+- The seed runs before the trigger is created in each tenant block, so it does not enqueue emails for old data.
+- The seed is tenant-scoped through tenant-qualified `%I.audit_log` and `%I.deals`.
+- The seed is idempotent through the tenant partial unique index plus `ON CONFLICT DO NOTHING`; re-running does not duplicate markers.
+- The static `TENANT_SCHEMA_START` / `office_dallas` template mirrors the same seed for future inline tenant provisioning conventions.
+
+Coverage:
+
+- Migration tests assert the seed exists, uses tenant-qualified tables, covers nonblank `project_number`, uses `transition = 'existing'`, has `ON CONFLICT DO NOTHING`, and appears before trigger creation.
+
+### Subagent review trace
+
+Required review pass completed by subagent `019e6b39-93ee-72d2-a0d3-74d084bd8a33`:
+
+- Confirmed standard `POST /api/deals` now destructures from the validated/trimmed body and sends the trimmed project number into `createDeal`.
+- Confirmed service-opportunity create now validates/authorizes/forwards `projectNumber`.
+- Confirmed lead conversion and SyncHub direct inserts do not accept or forward deal `project_number`.
+- Confirmed deal-detail composed requests use the shared `api()` helper and therefore inherit URL `officeId` as `x-office-id`.
+- Confirmed migration 0138 seeds tenant audit markers idempotently before trigger creation.
+- Found one adjacent script gap: `scripts/hubspot-deals-reimport.ts` could still create/update direct `project_number` values from CSV without canonical validation. Fixed by moving route and script validation to shared server helper `normalizeProjectNumberInput` and adding HubSpot reimport tests.
+
 ## Verification
 
 ## Codex Re-Review Fix Round (`f2555621a9` follow-up)
@@ -242,12 +364,22 @@ Passed:
   - `npm run build --workspace=client`
 - Codex re-review follow-up:
   - `npm run build --workspace=shared`
-  - `TMPDIR=/private/tmp npx vitest run server/tests/modules/deals/project-number-first-set-email.test.ts server/tests/modules/deals/patch-route.test.ts client/src/hooks/use-deals.test.ts client/src/pages/deals/deal-detail-page.test.tsx --testTimeout=15000 --exclude '.worktrees/**'`
+  - `TMPDIR=/private/tmp npx vitest run server/tests/modules/deals/project-number-first-set-email.test.ts server/tests/modules/deals/patch-route.test.ts client/src/hooks/use-deals.test.ts --testTimeout=15000 --exclude '.worktrees/**'`
   - `npm run typecheck --workspace=server`
   - `npm run typecheck --workspace=client`
   - `npm run typecheck --workspace=shared`
   - `npm run build --workspace=shared`
   - `npm run build --workspace=server`
+  - `npm run build --workspace=client`
+- Codex third-review follow-up:
+  - `TMPDIR=/private/tmp npx vitest run server/tests/modules/deals/project-number-first-set-email.test.ts server/tests/modules/deals/patch-route.test.ts server/tests/scripts/hubspot-deals-reimport.test.ts client/src/lib/api.test.ts client/src/hooks/use-deals.test.ts --testTimeout=15000 --exclude '.worktrees/**'`
+  - `npm run typecheck --workspace=client`
+  - `npm run typecheck --workspace=server`
+  - `npm run typecheck --workspace=worker`
+  - `npm run typecheck --workspace=shared`
+  - `npm run build --workspace=shared`
+  - `npm run build --workspace=server`
+  - `npm run build --workspace=worker`
   - `npm run build --workspace=client`
 
 CC tests cover:
@@ -269,7 +401,7 @@ Codex fix tests cover:
 Requested broad test sweep:
 
 - `TMPDIR=/private/tmp npx vitest run server/tests/ client/src/ shared/ --testTimeout=15000 --exclude '.worktrees/**'`
-- Current result: `48` failed files, `327` failed tests, `251` uncaught errors. The failures are still dominated by the known sandbox `listen EPERM` auth/supertest failure plus existing stale UI expectations. This is below the previously accepted triage baseline of `54` failed files / `342` failed tests, so the broad-suite failure count did not grow from the prior known rot profile.
+- Current result: `48` failed files, `327` failed tests, `251` uncaught errors. The tail shows `server/tests/modules/deals/contract-signed-date-route.test.ts` failing at `request(app).patch(...)` with `listen EPERM: operation not permitted 0.0.0.0`. The failures are still dominated by the known sandbox `listen EPERM` supertest class plus existing stale UI expectations. This is below the previously accepted triage baseline of `54` failed files / `342` failed tests, so the broad-suite failure count did not grow from the prior known rot profile.
 
 ## Deployment Note
 

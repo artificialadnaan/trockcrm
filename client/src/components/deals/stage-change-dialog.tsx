@@ -42,8 +42,14 @@ interface StageRequirementAction {
 
 export function getStageRequirementAction(
   dealId: string,
-  missingRequirements: StageRequirementState | null | undefined
+  missingRequirements: StageRequirementState | null | undefined,
+  officeId?: string | null
 ): StageRequirementAction | null {
+  const appendOfficeId = (path: string) => {
+    if (!officeId) return path;
+    return `${path}${path.includes("?") ? "&" : "?"}officeId=${encodeURIComponent(officeId)}`;
+  };
+
   if (!missingRequirements) {
     return null;
   }
@@ -51,21 +57,21 @@ export function getStageRequirementAction(
   if (missingRequirements.fields.some((field) => field.includes("."))) {
     return {
       label: "Open Scoping Workspace",
-      to: `/deals/${dealId}?tab=scoping`,
+      to: appendOfficeId(`/deals/${dealId}?tab=scoping`),
     };
   }
 
   if (missingRequirements.documents.length > 0) {
     return {
       label: "Open Files",
-      to: `/deals/${dealId}?tab=files`,
+      to: appendOfficeId(`/deals/${dealId}?tab=files`),
     };
   }
 
   if (missingRequirements.fields.length > 0) {
     return {
       label: "Open Overview",
-      to: `/deals/${dealId}?tab=overview`,
+      to: appendOfficeId(`/deals/${dealId}?tab=overview`),
     };
   }
 
@@ -80,6 +86,7 @@ interface StageChangeDialogProps {
     workflowRoute?: "normal" | "service" | null;
   };
   targetStageId: string;
+  officeId?: string | null;
   open: boolean;
   onOpenChange: (open: boolean) => void;
   onSuccess: () => void;
@@ -110,6 +117,7 @@ export function getStageChangeDialogSemantics(
 export function StageChangeDialog({
   deal,
   targetStageId,
+  officeId,
   open,
   onOpenChange,
   onSuccess,
@@ -220,7 +228,7 @@ export function StageChangeDialog({
         );
 
   const handleOpenChange = shouldForceCompletion ? () => {} : onOpenChange;
-  const requirementAction = getStageRequirementAction(deal.id, preflight?.missingRequirements);
+  const requirementAction = getStageRequirementAction(deal.id, preflight?.missingRequirements, officeId);
 
   return (
     <Dialog open={open} onOpenChange={handleOpenChange}>

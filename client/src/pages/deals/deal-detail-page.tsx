@@ -238,6 +238,12 @@ function getSlaCaptionContext(atRisk: AtRiskResult | null) {
   return atRisk.thresholdDays == null ? "No SLA threshold" : `SLA ${atRisk.thresholdDays} days`;
 }
 
+function appendOfficeIdSearch(path: string, officeId?: string | null) {
+  if (!officeId) return path;
+  const separator = path.includes("?") ? "&" : "?";
+  return `${path}${separator}officeId=${encodeURIComponent(officeId)}`;
+}
+
 function getTabIcon(tab: Tab) {
   const iconClassName = "h-4 w-4";
   switch (tab) {
@@ -567,11 +573,11 @@ export function DealDetailPage() {
   const handleTabSelect = (tab: Tab) => {
     setActiveTab(tab);
     if (tab === "photos") {
-      navigate(`/deals/${deal.id}/photos`);
+      navigate(appendOfficeIdSearch(`/deals/${deal.id}/photos`, detailOfficeId));
       return;
     }
     if (location.pathname.endsWith("/photos")) {
-      navigate(`/deals/${deal.id}?tab=${tab}`);
+      navigate(appendOfficeIdSearch(`/deals/${deal.id}?tab=${tab}`, detailOfficeId));
       return;
     }
     const nextParams = new URLSearchParams(searchParams);
@@ -853,6 +859,7 @@ export function DealDetailPage() {
       procoreProjectUrl={procoreProjectUrl}
       bidBoardUrl={buildBidBoardProjectUrl(deal)}
       currentUser={user}
+      officeId={detailOfficeId}
       onReassigned={refetch}
     />
   );
@@ -895,7 +902,7 @@ export function DealDetailPage() {
           {isBidBoardOwned && bidBoardOwnership && (
             <BidBoardReadOnlySummary ownership={bidBoardOwnership} />
           )}
-          <DealOverviewTab deal={deal} onDealUpdated={refetch} />
+          <DealOverviewTab deal={deal} officeId={detailOfficeId} onDealUpdated={refetch} />
         </div>
       )}
       {activeTab === "lead" && (
@@ -976,6 +983,7 @@ export function DealDetailPage() {
         <StageChangeDialog
           deal={deal}
           targetStageId={targetStageId}
+          officeId={detailOfficeId}
           open={stageChangeOpen}
           onOpenChange={(open) => {
             setStageChangeOpen(open);
@@ -994,6 +1002,7 @@ function DealRightRail({
   procoreProjectUrl,
   bidBoardUrl,
   currentUser,
+  officeId,
   onReassigned,
 }: {
   deal: DealDetail;
@@ -1001,6 +1010,7 @@ function DealRightRail({
   procoreProjectUrl: string | null;
   bidBoardUrl: string | null;
   currentUser: { id?: string | null; role?: string | null; activeOfficeId?: string | null; officeId?: string | null } | null | undefined;
+  officeId?: string | null;
   onReassigned: () => void | Promise<void>;
 }) {
   const canReassignDeal =
@@ -1008,7 +1018,7 @@ function DealRightRail({
     currentUser?.role === "director" ||
     (Boolean(currentUser?.id) && currentUser?.id === deal.assignedRepId);
   const { salesReps, loading: salesRepsLoading } = useSalesReps(
-    currentUser?.activeOfficeId ?? currentUser?.officeId ?? undefined,
+    officeId ?? currentUser?.activeOfficeId ?? currentUser?.officeId ?? undefined,
     { purpose: "deal-reassignment", enabled: canReassignDeal }
   );
   const [reassigning, setReassigning] = useState(false);

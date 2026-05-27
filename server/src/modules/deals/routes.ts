@@ -160,6 +160,10 @@ import { isOpportunityRfpEventEnabled } from "../../config/feature-flags.js";
 import { getActiveProjectTypes, getAllStages, getStageBySlug } from "../pipeline/service.js";
 import { resolveDealCreateOfficeCode } from "./create-context.js";
 import {
+  normalizeProjectNumberInput,
+  ProjectNumberValidationError,
+} from "./project-number-validation.js";
+import {
   assertDealCollaboratorAccess,
   assertDealOwnerAccess,
   getCollaborativeReadRole,
@@ -167,10 +171,6 @@ import {
 } from "../../lib/collaboration-access.js";
 
 const router = Router();
-
-const CANONICAL_PROJECT_NUMBER_REGEX = /^(DFW|ATL)-[0-9]+-[0-9]{5}-[a-z]{2}$/;
-// deals.project_number is text; keep API writes within the import/staging column size.
-const PROJECT_NUMBER_MAX_LENGTH = 100;
 
 async function assertDealRouteAccess(req: any, dealId: string) {
   return assertDealCollaboratorAccess(req.tenantDb!, dealId, req.user!);
@@ -1526,32 +1526,14 @@ function validateDealPayload(body: Record<string, unknown>): void {
 function validateProjectNumberPayload(body: Record<string, unknown>): void {
   if (!Object.prototype.hasOwnProperty.call(body, "projectNumber")) return;
 
-  const value = body.projectNumber;
-  if (value == null) return;
-  if (typeof value !== "string") {
-    throw new AppError(400, "projectNumber must be a string", "PROJECT_NUMBER_INVALID");
+  try {
+    body.projectNumber = normalizeProjectNumberInput(body.projectNumber);
+  } catch (err) {
+    if (err instanceof ProjectNumberValidationError) {
+      throw new AppError(400, err.message, err.code);
+    }
+    throw err;
   }
-
-  const trimmed = value.trim();
-  if (!trimmed) {
-    throw new AppError(400, "projectNumber cannot be blank", "PROJECT_NUMBER_INVALID");
-  }
-  if (trimmed.length > PROJECT_NUMBER_MAX_LENGTH) {
-    throw new AppError(
-      400,
-      `projectNumber must not exceed ${PROJECT_NUMBER_MAX_LENGTH} characters`,
-      "PROJECT_NUMBER_INVALID"
-    );
-  }
-  if (!CANONICAL_PROJECT_NUMBER_REGEX.test(trimmed)) {
-    throw new AppError(
-      400,
-      "projectNumber must match canonical format DFW-1-12345-aa or ATL-1-12345-aa",
-      "PROJECT_NUMBER_INVALID"
-    );
-  }
-
-  body.projectNumber = trimmed;
 }
 
 function assertProjectNumberMutationAllowed(body: Record<string, unknown>, role: string): void {
@@ -1624,6 +1606,10 @@ async function assertServiceOpportunityHierarchy(
 // POST /api/deals/service-opportunity — direct-create a Service-only Opportunity.
 router.post("/service-opportunity", async (req, res, next) => {
   try {
+    const body = { ...req.body };
+    validateDealPayload(body);
+    assertProjectNumberMutationAllowed(body, req.user!.role);
+
     const {
       name,
       assignedRepId,
@@ -1638,15 +1624,14 @@ router.post("/service-opportunity", async (req, res, next) => {
       projectTypeId,
       projectType,
       officeCode,
-    } = req.body;
+      projectNumber,
+    } = body;
     if (!name) {
       throw new AppError(400, "Name is required");
     }
     if (!companyId || !propertyId) {
       throw new AppError(400, "Company and property are required");
     }
-    validateDealPayload(req.body);
-    assertProjectNumberMutationAllowed(req.body, req.user!.role);
     await assertServiceOpportunityHierarchy(req.tenantDb!, { companyId, propertyId });
 
     const serviceProjectType = await resolveServiceProjectType(projectTypeId, projectType);
@@ -1691,6 +1676,7 @@ router.post("/service-opportunity", async (req, res, next) => {
       workflowRoute: "service",
       projectType: "service",
       projectTypeId: serviceProjectType.id,
+      projectNumber,
       officeCode: officeCodeResolution.officeCode,
       auditContext: buildRouteAuditContext(req),
     });
@@ -1705,6 +1691,10 @@ router.post("/service-opportunity", async (req, res, next) => {
 // POST /api/deals — create a new deal
 router.post("/", async (req, res, next) => {
   try {
+    const body = { ...req.body };
+    validateDealPayload(body);
+    assertProjectNumberMutationAllowed(body, req.user!.role);
+
     const {
       name,
       stageId,
@@ -1713,12 +1703,10 @@ router.post("/", async (req, res, next) => {
       sourceLeadWriteMode: _sourceLeadWriteMode,
       migrationMode: _migrationMode,
       ...rest
-    } = req.body;
+    } = body;
     if (!name || !stageId) {
       throw new AppError(400, "Name and stageId are required");
     }
-    validateDealPayload(req.body);
-    assertProjectNumberMutationAllowed(req.body, req.user!.role);
 
     // Rep ownership enforcement:
     // - Reps: force assignedRepId to their own ID (ignore request body value)
