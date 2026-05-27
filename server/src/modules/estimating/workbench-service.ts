@@ -624,6 +624,27 @@ export async function buildEstimatingWorkbenchState(
   dealId: string,
   options: BuildEstimatingWorkbenchStateOptions = {}
 ) {
+  let queuedRerunJobsError: unknown;
+  const queuedRerunJobsPromise = (options.appDb && options.officeId
+    ? Promise.resolve(options.appDb
+        .select({
+          id: jobQueue.id,
+          status: jobQueue.status,
+          payload: jobQueue.payload,
+          createdAt: jobQueue.createdAt,
+          startedProcessingAt: jobQueue.startedProcessingAt,
+          completedAt: jobQueue.completedAt,
+          lastError: jobQueue.lastError,
+        })
+        .from(jobQueue)
+        .where(and(eq(jobQueue.officeId, options.officeId), eq(jobQueue.jobType, "estimate_generation")))
+        .orderBy(desc(jobQueue.createdAt)))
+    : Promise.resolve([])
+  ).catch((error) => {
+    queuedRerunJobsError = error;
+    return [];
+  });
+
   const documents = await tenantDb
     .select()
     .from(estimateSourceDocuments)
@@ -678,21 +699,8 @@ export async function buildEstimatingWorkbenchState(
     .where(eq(estimateGenerationRuns.dealId, dealId))
     .orderBy(desc(estimateGenerationRuns.startedAt));
   const marketContext = await getDealEffectiveMarketContext(tenantDb, dealId);
-  const queuedRerunJobs = options.appDb && options.officeId
-    ? await options.appDb
-        .select({
-          id: jobQueue.id,
-          status: jobQueue.status,
-          payload: jobQueue.payload,
-          createdAt: jobQueue.createdAt,
-          startedProcessingAt: jobQueue.startedProcessingAt,
-          completedAt: jobQueue.completedAt,
-          lastError: jobQueue.lastError,
-        })
-        .from(jobQueue)
-        .where(and(eq(jobQueue.officeId, options.officeId), eq(jobQueue.jobType, "estimate_generation")))
-        .orderBy(desc(jobQueue.createdAt))
-    : [];
+  const queuedRerunJobs = await queuedRerunJobsPromise;
+  if (queuedRerunJobsError) throw queuedRerunJobsError;
   const matchingQueuedRerunJobs = queuedRerunJobs.filter(
     (row) =>
       row.status !== "completed" &&

@@ -90,6 +90,31 @@ function extFromMime(contentType: string): string {
 /**
  * Run async tasks with a concurrency limit.
  */
+async function mapWithConcurrency<T, R>(
+  items: T[],
+  concurrency: number,
+  fn: (item: T) => Promise<R>
+): Promise<R[]> {
+  const results: R[] = [];
+  let index = 0;
+
+  async function worker() {
+    while (index < items.length) {
+      const i = index++;
+      results[i] = await fn(items[i]);
+    }
+  }
+
+  const workers = Array.from({ length: Math.min(concurrency, items.length) }, () => worker());
+  await Promise.all(workers);
+  return results;
+}
+
+type PreparedCompanyCamPhoto = {
+  photoId: string;
+  values: typeof files.$inferInsert;
+};
+
 // ─── Service Functions ───────────────────────────────────────────────────────
 
 /**
@@ -267,12 +292,12 @@ export async function syncProjectPhotos(
 
   onProgress?.(`${deal.name}: ${newPhotos.length} new photos to import (${skipped} already synced)`);
 
-  for (const photo of newPhotos) {
+  const preparedPhotos = await mapWithConcurrency(newPhotos, 5, async (photo): Promise<PreparedCompanyCamPhoto | null> => {
     try {
       const { original, thumbnail } = extractUrls(photo);
       if (!original) {
         errors.push(`Photo ${photo.id}: no original URL found`);
-        continue;
+        return null;
       }
 
       const capturedAt = photo.captured_at
@@ -300,29 +325,32 @@ export async function syncProjectPhotos(
 
         const displayName = `${deal.dealNumber} CompanyCam ${dateStr} ${photo.id.slice(-6)}`;
 
-        await tenantDb.insert(files).values({
-          category: "photo",
-          subcategory: "CompanyCam",
-          folderPath: `Photos/CompanyCam/${yearMonth}`,
-          tags: ["companycam"],
-          displayName,
-          systemFilename,
-          originalFilename: `companycam_${photo.id}${ext}`,
-          mimeType,
-          fileSizeBytes,
-          fileExtension: ext,
-          r2Key,
-          r2Bucket: bucketName,
-          externalUrl: original,
-          externalThumbnailUrl: thumbnail,
-          companycamPhotoId: photo.id,
-          dealId: deal.id,
-          description: photo.description,
-          takenAt: capturedAt,
-          geoLat: photo.coordinates.lat !== 0 ? String(photo.coordinates.lat) : null,
-          geoLng: photo.coordinates.lon !== 0 ? String(photo.coordinates.lon) : null,
-          uploadedBy: systemUserId,
-        });
+        return {
+          photoId: photo.id,
+          values: {
+            category: "photo",
+            subcategory: "CompanyCam",
+            folderPath: `Photos/CompanyCam/${yearMonth}`,
+            tags: ["companycam"],
+            displayName,
+            systemFilename,
+            originalFilename: `companycam_${photo.id}${ext}`,
+            mimeType,
+            fileSizeBytes,
+            fileExtension: ext,
+            r2Key,
+            r2Bucket: bucketName,
+            externalUrl: original,
+            externalThumbnailUrl: thumbnail,
+            companycamPhotoId: photo.id,
+            dealId: deal.id,
+            description: photo.description,
+            takenAt: capturedAt,
+            geoLat: photo.coordinates.lat !== 0 ? String(photo.coordinates.lat) : null,
+            geoLng: photo.coordinates.lon !== 0 ? String(photo.coordinates.lon) : null,
+            uploadedBy: systemUserId,
+          },
+        };
       } else {
         // Dev mode — store reference only, no R2 upload
         const yearMonth = capturedAt.toISOString().slice(0, 7);
@@ -332,31 +360,44 @@ export async function syncProjectPhotos(
         const r2Key = `dev/companycam/${photo.id}.jpg`;
         const displayName = `${deal.dealNumber} CompanyCam ${dateStr} ${photo.id.slice(-6)}`;
 
-        await tenantDb.insert(files).values({
-          category: "photo",
-          subcategory: "CompanyCam",
-          folderPath: `Photos/CompanyCam/${yearMonth}`,
-          tags: ["companycam"],
-          displayName,
-          systemFilename,
-          originalFilename: `companycam_${photo.id}.jpg`,
-          mimeType: "image/jpeg",
-          fileSizeBytes: 0,
-          fileExtension: ".jpg",
-          r2Key,
-          r2Bucket: "dev",
-          externalUrl: original,
-          externalThumbnailUrl: thumbnail,
-          companycamPhotoId: photo.id,
-          dealId: deal.id,
-          description: photo.description,
-          takenAt: capturedAt,
-          geoLat: photo.coordinates.lat !== 0 ? String(photo.coordinates.lat) : null,
-          geoLng: photo.coordinates.lon !== 0 ? String(photo.coordinates.lon) : null,
-          uploadedBy: systemUserId,
-        });
+        return {
+          photoId: photo.id,
+          values: {
+            category: "photo",
+            subcategory: "CompanyCam",
+            folderPath: `Photos/CompanyCam/${yearMonth}`,
+            tags: ["companycam"],
+            displayName,
+            systemFilename,
+            originalFilename: `companycam_${photo.id}.jpg`,
+            mimeType: "image/jpeg",
+            fileSizeBytes: 0,
+            fileExtension: ".jpg",
+            r2Key,
+            r2Bucket: "dev",
+            externalUrl: original,
+            externalThumbnailUrl: thumbnail,
+            companycamPhotoId: photo.id,
+            dealId: deal.id,
+            description: photo.description,
+            takenAt: capturedAt,
+            geoLat: photo.coordinates.lat !== 0 ? String(photo.coordinates.lat) : null,
+            geoLng: photo.coordinates.lon !== 0 ? String(photo.coordinates.lon) : null,
+            uploadedBy: systemUserId,
+          },
+        };
       }
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      errors.push(`Photo ${photo.id}: ${msg}`);
+      return null;
+    }
+  });
 
+  for (const prepared of preparedPhotos) {
+    if (!prepared) continue;
+    try {
+      await tenantDb.insert(files).values(prepared.values);
       imported++;
 
       // Progress update every 10 photos
@@ -365,7 +406,7 @@ export async function syncProjectPhotos(
       }
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
-      errors.push(`Photo ${photo.id}: ${msg}`);
+      errors.push(`Photo ${prepared.photoId}: ${msg}`);
     }
   }
 

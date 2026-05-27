@@ -963,6 +963,19 @@ export async function getFileByIdIncludingDeleted(
 /**
  * Get a presigned download URL for a file.
  */
+export async function buildFileDownloadUrlFromRecord(file: {
+  r2Key: string;
+  displayName: string;
+  fileExtension?: string | null;
+}): Promise<{ url: string; filename: string }> {
+  const filename = file.displayName + (file.fileExtension ?? "");
+  const url = isR2Configured()
+    ? await generateDownloadUrl(file.r2Key, 3600, filename)
+    : generateMockDownloadUrl(file.r2Key);
+
+  return { url, filename };
+}
+
 export async function getFileDownloadUrl(
   tenantDb: TenantDb,
   fileId: string
@@ -970,14 +983,7 @@ export async function getFileDownloadUrl(
   const file = await getFileById(tenantDb, fileId);
   if (!file) throw new AppError(404, "File not found");
 
-  let url: string;
-  if (isR2Configured()) {
-    url = await generateDownloadUrl(file.r2Key, 3600, file.displayName + file.fileExtension);
-  } else {
-    url = generateMockDownloadUrl(file.r2Key);
-  }
-
-  return { url, filename: file.displayName + file.fileExtension };
+  return buildFileDownloadUrlFromRecord(file);
 }
 
 export function shouldServeExternalFileUrl(file: {

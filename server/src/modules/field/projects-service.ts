@@ -3,7 +3,7 @@ import type { NodePgDatabase } from "drizzle-orm/node-postgres";
 import type * as schema from "@trock-crm/shared/schema";
 import type { UserRole } from "@trock-crm/shared/types";
 import { AppError } from "../../middleware/error-handler.js";
-import { getDealPhotoTimeline, getFileDownloadUrl, searchPhotoUploadTargets } from "../files/service.js";
+import { buildFileDownloadUrlFromRecord, getDealPhotoTimeline, searchPhotoUploadTargets } from "../files/service.js";
 import type { DealPhotoTimelineFilters } from "../files/photo-timeline-filters.js";
 import { getDealById } from "../deals/service.js";
 import { getLeadById } from "../leads/service.js";
@@ -309,11 +309,12 @@ export async function listFieldProjectPhotos(
 ) {
   await assertActiveFieldProject(tenantDb, access, dealId);
   const result = await getDealPhotoTimeline(tenantDb, dealId, 1, 200, filters);
-  const photos = [];
-  for (const photo of result.photos) {
-    const imageUrl = photo.externalThumbnailUrl ?? photo.externalUrl ?? (await getFileDownloadUrl(tenantDb, photo.id)).url;
-    photos.push(safePhoto(photo, imageUrl));
-  }
+  const photos = await Promise.all(result.photos.map(async (photo) => {
+    const imageUrl = photo.externalThumbnailUrl
+      ?? photo.externalUrl
+      ?? (photo.r2Key ? (await buildFileDownloadUrlFromRecord(photo)).url : null);
+    return safePhoto(photo, imageUrl);
+  }));
   return { photos, pagination: result.pagination };
 }
 

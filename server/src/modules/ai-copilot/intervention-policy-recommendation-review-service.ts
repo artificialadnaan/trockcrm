@@ -839,12 +839,6 @@ export async function getInterventionPolicyRecommendationReview(
 ): Promise<InterventionPolicyRecommendationReviewModel> {
   const window = input.window ?? "last_30_days";
   const snapshot = await fetchLatestRenderablePolicySnapshot(tenantDb, input.officeId);
-  await getInterventionPolicyRecommendationEvaluationSummary(tenantDb, {
-    officeId: input.officeId,
-    window,
-    decision: input.decision === "all" ? null : input.decision ?? null,
-    now: input.now,
-  });
   const summary = await getInterventionPolicyRecommendationEvaluationSummary(tenantDb, {
     officeId: input.officeId,
     window,

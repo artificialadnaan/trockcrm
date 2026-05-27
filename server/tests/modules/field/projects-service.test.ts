@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const fileServiceMocks = vi.hoisted(() => ({
+  buildFileDownloadUrlFromRecord: vi.fn(),
   getDealPhotoTimeline: vi.fn(),
   getFileDownloadUrl: vi.fn(),
 }));
@@ -28,6 +29,7 @@ function tenantDb(rows: unknown[][]) {
 describe("field projects service", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    fileServiceMocks.buildFileDownloadUrlFromRecord.mockResolvedValue({ url: "https://signed.example/photo.jpg" });
     fileServiceMocks.getFileDownloadUrl.mockResolvedValue({ url: "https://signed.example/photo.jpg" });
     dealServiceMocks.getDealById.mockResolvedValue({
       id: "deal-1",
@@ -171,6 +173,8 @@ describe("field projects service", () => {
       photoCategory: "damage",
       address: "123 Main St",
     }));
+    expect(fileServiceMocks.buildFileDownloadUrlFromRecord).toHaveBeenCalledWith(expect.objectContaining({ id: "photo-1" }));
+    expect(fileServiceMocks.getFileDownloadUrl).not.toHaveBeenCalled();
     expect(JSON.stringify(result.photos[0])).not.toContain("r2Key");
     expect(JSON.stringify(result.photos[0])).not.toContain("r2Bucket");
   });
