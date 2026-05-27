@@ -40,6 +40,7 @@ describe("project number first-set notification migration", () => {
   it("creates a sent-email receipt table for worker retry idempotency", () => {
     expect(migrationSql).toContain("CREATE TABLE IF NOT EXISTS public.project_number_first_set_email_receipts");
     expect(migrationSql).toContain("audit_log_id bigint NOT NULL");
+    expect(migrationSql).not.toContain("audit_log_id bigint PRIMARY KEY");
     expect(migrationSql).toContain("DROP CONSTRAINT IF EXISTS project_number_first_set_email_receipts_pkey");
     expect(migrationSql).toContain("PRIMARY KEY (tenant_schema, audit_log_id)");
     expect(migrationSql).toContain("resend_message_id text");
@@ -309,6 +310,26 @@ describe("project number first-set notification email", () => {
       expect.stringContaining("WHERE tenant_schema = $1"),
       ["office_atlanta", 123]
     );
+    const receiptInsertCalls = query.mock.calls.filter(([sql]) =>
+      String(sql).includes("INSERT INTO public.project_number_first_set_email_receipts")
+    );
+    expect(receiptInsertCalls).toHaveLength(2);
+    expect(receiptInsertCalls[0]?.[1]).toEqual([
+      123,
+      "office_dallas",
+      dealId,
+      "DFW-1-12345-aa",
+      "christy@example.com",
+      "resend-1",
+    ]);
+    expect(receiptInsertCalls[1]?.[1]).toEqual([
+      123,
+      "office_atlanta",
+      dealId,
+      "DFW-1-12345-aa",
+      "christy@example.com",
+      "resend-1",
+    ]);
   });
 
   it("sends to Christy without CC when PROJECT_NUMBER_EMAIL_CC is unset in production", async () => {

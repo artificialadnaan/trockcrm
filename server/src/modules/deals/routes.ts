@@ -168,6 +168,10 @@ import {
 
 const router = Router();
 
+const CANONICAL_PROJECT_NUMBER_REGEX = /^(DFW|ATL)-[0-9]+-[0-9]{5}-[a-z]{2}$/;
+// deals.project_number is text; keep API writes within the import/staging column size.
+const PROJECT_NUMBER_MAX_LENGTH = 100;
+
 async function assertDealRouteAccess(req: any, dealId: string) {
   return assertDealCollaboratorAccess(req.tenantDb!, dealId, req.user!);
 }
@@ -1516,6 +1520,38 @@ function validateDealPayload(body: Record<string, unknown>): void {
       throw new AppError(400, "bidDueDate must be an ISO date in YYYY-MM-DD format");
     }
   }
+  validateProjectNumberPayload(body);
+}
+
+function validateProjectNumberPayload(body: Record<string, unknown>): void {
+  if (!Object.prototype.hasOwnProperty.call(body, "projectNumber")) return;
+
+  const value = body.projectNumber;
+  if (value == null) return;
+  if (typeof value !== "string") {
+    throw new AppError(400, "projectNumber must be a string", "PROJECT_NUMBER_INVALID");
+  }
+
+  const trimmed = value.trim();
+  if (!trimmed) {
+    throw new AppError(400, "projectNumber cannot be blank", "PROJECT_NUMBER_INVALID");
+  }
+  if (trimmed.length > PROJECT_NUMBER_MAX_LENGTH) {
+    throw new AppError(
+      400,
+      `projectNumber must not exceed ${PROJECT_NUMBER_MAX_LENGTH} characters`,
+      "PROJECT_NUMBER_INVALID"
+    );
+  }
+  if (!CANONICAL_PROJECT_NUMBER_REGEX.test(trimmed)) {
+    throw new AppError(
+      400,
+      "projectNumber must match canonical format DFW-1-12345-aa or ATL-1-12345-aa",
+      "PROJECT_NUMBER_INVALID"
+    );
+  }
+
+  body.projectNumber = trimmed;
 }
 
 function assertProjectNumberMutationAllowed(body: Record<string, unknown>, role: string): void {

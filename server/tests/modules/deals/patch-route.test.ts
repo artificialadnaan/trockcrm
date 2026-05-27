@@ -310,6 +310,45 @@ describe("PATCH /api/deals/:id cleanup legacy handling", () => {
     );
   });
 
+  it.each([
+    ["empty string", ""],
+    ["whitespace-only string", "   "],
+    ["oversized string", `DFW-${"1".repeat(101)}-12345-aa`],
+    ["lowercase office prefix", "dfw-1-12345-aa"],
+    ["legacy/non-canonical format", "DFW-1-1234-aa"],
+  ])("rejects invalid projectNumber payloads before calling updateDeal: %s", async (_label, projectNumber) => {
+    const { error } = await invokePatch(
+      { projectNumber },
+      createUser("admin")
+    );
+
+    expect(error).toBeInstanceOf(AppError);
+    expect((error as InstanceType<typeof AppError>).statusCode).toBe(400);
+    expect((error as InstanceType<typeof AppError>).code).toBe("PROJECT_NUMBER_INVALID");
+    expect(dealsServiceMocks.updateDeal).not.toHaveBeenCalled();
+  });
+
+  it("trims canonical projectNumber values before the audited updateDeal path", async () => {
+    const { res, error } = await invokePatch(
+      { projectNumber: "  ATL-2-54321-ab  " },
+      createUser("admin")
+    );
+
+    expect(error).toBeNull();
+    expect(res.statusCode).toBe(200);
+    expect(dealsServiceMocks.updateDeal).toHaveBeenCalledWith(
+      expect.anything(),
+      "deal-1",
+      expect.objectContaining({
+        projectNumber: "ATL-2-54321-ab",
+        auditContext: expect.any(Object),
+      }),
+      "admin",
+      "admin-1",
+      "office-1",
+    );
+  });
+
   it("ignores client-supplied migrationMode on normal deals with source lead lineage", async () => {
     dealsServiceMocks.getDealById.mockResolvedValue(baseDeal({
       sourceLeadId: "lead-1",

@@ -142,6 +142,71 @@ The SyncHub/procore project relay paths use project-number values for matching a
 
 ## Verification
 
+## Codex Re-Review Fix Round (`f2555621a9` follow-up)
+
+### Finding 1: tenant-scoped receipts and provider idempotency
+
+End-to-end trace verified:
+
+- Trigger/job payload: `migrations/0138_project_number_first_set_notification.sql` enqueues `project_number_first_set_email` with `tenantSchema = TG_TABLE_SCHEMA`, `dealId`, `projectNumber`, and `auditLogId`.
+- Receipt schema: `public.project_number_first_set_email_receipts` has `tenant_schema text NOT NULL`, `audit_log_id bigint NOT NULL`, and a composite `PRIMARY KEY (tenant_schema, audit_log_id)`. The migration explicitly drops the prior receipt primary key before adding the composite key.
+- Worker lookup: `worker/src/jobs/project-number-email.ts` checks for a sent receipt with `WHERE tenant_schema = $1 AND audit_log_id = $2`.
+- Worker insert: successful sends insert both `tenant_schema` and `audit_log_id`, using `ON CONFLICT (tenant_schema, audit_log_id) DO UPDATE`.
+- Provider idempotency: Resend receives `project-number-first-set-{tenantSchema}-{auditLogId}`, so two offices with the same tenant-local audit id do not share a provider idempotency key.
+
+Test coverage added/confirmed:
+
+- The migration test now explicitly rejects a single-column `audit_log_id bigint PRIMARY KEY` receipt shape and asserts `PRIMARY KEY (tenant_schema, audit_log_id)`.
+- The worker collision test sends two jobs with `auditLogId = 123`, one for `office_dallas` and one for `office_atlanta`; both emails send, their Resend idempotency keys differ, and the mocked receipt inserts contain two rows with distinct `tenant_schema` values.
+- Trigger enqueue failure remains covered by migration assertions that the swallowing `EXCEPTION WHEN OTHERS` path is absent; an insert failure into `public.job_queue` now propagates and rolls back the deal write rather than silently committing a non-retryable project-number update.
+
+### Finding 2: office context in the email deal link
+
+End-to-end trace verified:
+
+- Worker link builder resolves `tenant_schema` to `public.offices.id` and emits `FRONTEND_URL/deals/{dealId}?officeId={officeId}`.
+- `DealDetailPage` reads `officeId` from the URL query string before calling `useDealDetail`.
+- `useDealDetail` passes the office id through `getOfficeRequestOptions`, which sends `x-office-id` on the initial `/deals/{id}/detail` request.
+- `server/src/middleware/auth.ts` validates that `x-office-id` is an accessible office and sets `req.user.activeOfficeId` to that requested office before `server/src/middleware/tenant.ts` resolves the tenant search path. This is the existing cross-office request mechanism; there is no separate persisted active-office switch endpoint for a detail URL.
+
+Architectural decision:
+
+- I kept the smallest route-safe mechanism: `?officeId=` on the deal URL plus the existing `x-office-id` API header. That loads the notified deal from the originating tenant without requiring the recipient to manually switch offices first, and it avoids a broader route/refetch/active-office state refactor.
+
+Test coverage added/confirmed:
+
+- The email body test asserts the deal URL contains `?officeId=office-dallas`.
+- `useDealDetail` test asserts the hook sends `x-office-id` when office context is supplied.
+- `DealDetailPage` test now asserts a URL like `/deals/deal-1?officeId=office-atlanta` passes `office-atlanta` into the initial detail hook call.
+
+### Finding 3: project-number format validation
+
+End-to-end trace verified:
+
+- `scripts/backfill-project-numbers.ts` only backfills canonical values matching `/^(DFW|ATL)-[0-9]+-[0-9]{5}-[a-z]{2}$/`; non-canonical preserved values are skipped as `legacy format`.
+- `scripts/normalize-project-number-case.ts` only normalizes an existing `dfw|atl` prefix to uppercase; it is not a broad acceptance path for arbitrary project-number text.
+- `server/src/modules/deals/routes.ts` now applies the same canonical regex before `createDeal` / `updateDeal` writes can persist `projectNumber`.
+- The API validator rejects non-string values, empty strings, whitespace-only strings, values over the app write cap, lowercase-prefix values such as `dfw-1-12345-aa`, and legacy/non-canonical strings. Valid values are trimmed before being passed to `updateDeal`.
+- Admin/director authorization is unchanged; reps still cannot set or clear project numbers through normal deal APIs.
+
+Column-size note:
+
+- The tenant `deals.project_number` column is `text`, not `varchar`, so there is no database column max to reuse. The API uses `100`, matching the staging/import project-number field size, as the practical oversized-input guard.
+
+Test coverage added:
+
+- `PATCH /api/deals/:id` rejects `projectNumber: ""`, `"   "`, an oversized canonical-looking value, `dfw-1-12345-aa`, and `DFW-1-1234-aa` with `PROJECT_NUMBER_INVALID` before calling `updateDeal`.
+- A trimmed valid value still reaches the audited admin update path as canonical text.
+- Existing tests still cover rep denial and admin/director allow paths.
+
+### Subagent review trace
+
+Required review pass completed by subagent `019e6ab8-d975-7920-bc6d-fdc04ea1a818`:
+
+- Tenant receipts: reviewer read the migration and worker, confirmed `(tenant_schema, audit_log_id)` is used for receipt schema, lookup, insert/upsert, and Resend idempotency, and found no remaining gap.
+- Office link: reviewer read the worker builder, page, hook, and auth/tenant path, confirmed `officeId` is encoded in the email URL and turned into `x-office-id` for the first deal-detail fetch, and noted this uses per-request office context rather than a persisted active-office switch.
+- Project-number validation: reviewer read the scripts and route validation, confirmed the API now rejects blank/oversized/lowercase-prefix/non-canonical values while keeping valid admin/director writes, and found no remaining gap.
+
 Passed:
 
 - `npm run build --workspace=shared`
@@ -175,6 +240,15 @@ Passed:
   - `npm run build --workspace=server`
   - `npm run build --workspace=worker`
   - `npm run build --workspace=client`
+- Codex re-review follow-up:
+  - `npm run build --workspace=shared`
+  - `TMPDIR=/private/tmp npx vitest run server/tests/modules/deals/project-number-first-set-email.test.ts server/tests/modules/deals/patch-route.test.ts client/src/hooks/use-deals.test.ts client/src/pages/deals/deal-detail-page.test.tsx --testTimeout=15000 --exclude '.worktrees/**'`
+  - `npm run typecheck --workspace=server`
+  - `npm run typecheck --workspace=client`
+  - `npm run typecheck --workspace=shared`
+  - `npm run build --workspace=shared`
+  - `npm run build --workspace=server`
+  - `npm run build --workspace=client`
 
 CC tests cover:
 
@@ -195,7 +269,7 @@ Codex fix tests cover:
 Requested broad test sweep:
 
 - `TMPDIR=/private/tmp npx vitest run server/tests/ client/src/ shared/ --testTimeout=15000 --exclude '.worktrees/**'`
-- Result: failed on the known sandbox `listen EPERM` auth/supertest failure, with broad cascade. This matches the documented unrelated pre-existing failure class and is not tied to this change.
+- Current result: `48` failed files, `327` failed tests, `251` uncaught errors. The failures are still dominated by the known sandbox `listen EPERM` auth/supertest failure plus existing stale UI expectations. This is below the previously accepted triage baseline of `54` failed files / `342` failed tests, so the broad-suite failure count did not grow from the prior known rot profile.
 
 ## Deployment Note
 
