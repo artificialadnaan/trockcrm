@@ -1,4 +1,0 @@
-id,name,stage_slug,awarded_amount,deal_number,project_number,created_at,updated_at
-70adce31-9bc3-5ef1-a98e-c06e1d39aa7c,SMOKE TEST DELETE - Missing Company,opportunity,,SMOKE-TEST-003,,2026-05-08T04:16:31.797Z,2026-05-18T20:25:03.013Z
-e34757d0-3657-5506-a0da-e2af16fb2829,SMOKE TEST DELETE - Missing Contact,opportunity,,SMOKE-TEST-002,,2026-05-08T04:16:31.797Z,2026-05-18T20:25:03.013Z
-51efa4f6-833c-5b52-8abe-83a75c39c601,SMOKE TEST DELETE - Missing Amount,estimating,10000.00,SMOKE-TEST-001,,2026-05-08T04:16:31.797Z,2026-05-26T13:50:08.337Z
