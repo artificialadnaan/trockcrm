@@ -153,6 +153,98 @@ describe("listDealStagePage", () => {
     expect(result.summary).toMatchObject({ count: 21, activeCount: 21, totalCount: 26, totalValue: 400000 });
   });
 
+  it("applies the source filter only when a source is provided", async () => {
+    const run = async (source?: string) => {
+      dbState.responses = [
+        [{ id: "stage-estimating", slug: "estimating", name: "Estimating", displayOrder: 4, isTerminal: false }],
+      ];
+      const tenantDb = {
+        select: createOfficeScopeSelectMock(),
+        execute: vi.fn()
+          .mockResolvedValueOnce({ rows: [{ total_count: "0", active_count: "0", total_value: "0" }] })
+          .mockResolvedValueOnce({ rows: [] }),
+      } as any;
+      const { listDealStagePage } = await import("../../../src/modules/deals/service.js");
+      await listDealStagePage(tenantDb, {
+        role: "admin",
+        userId: "admin-1",
+        activeOfficeId: "office-1",
+        scope: "all",
+        stageId: "stage-estimating",
+        page: 1,
+        pageSize: 25,
+        sort: "newest",
+        source,
+      } as any);
+      return tenantDb.execute.mock.calls
+        .map(([query]: [unknown]) => extractSqlText(query).toLowerCase())
+        .join("\n");
+    };
+
+    expect(await run("referral")).toContain("d.source =");
+    expect(await run(undefined)).not.toContain("d.source =");
+  });
+
+  it("applies the stale-only filter as a parenthesized 14-day last-activity window", async () => {
+    dbState.responses = [
+      [{ id: "stage-estimating", slug: "estimating", name: "Estimating", displayOrder: 4, isTerminal: false }],
+    ];
+    const tenantDb = {
+      select: createOfficeScopeSelectMock(),
+      execute: vi.fn()
+        .mockResolvedValueOnce({ rows: [{ total_count: "0", active_count: "0", total_value: "0" }] })
+        .mockResolvedValueOnce({ rows: [] }),
+    } as any;
+
+    const { listDealStagePage } = await import("../../../src/modules/deals/service.js");
+    await listDealStagePage(tenantDb, {
+      role: "admin",
+      userId: "admin-1",
+      activeOfficeId: "office-1",
+      scope: "all",
+      stageId: "stage-estimating",
+      page: 1,
+      pageSize: 25,
+      sort: "newest",
+      staleOnly: true,
+    } as any);
+
+    const executedSql = tenantDb.execute.mock.calls
+      .map(([query]: [unknown]) => extractSqlText(query).toLowerCase())
+      .join("\n");
+    // Parentheses matter: without them, AND/OR precedence would broaden the result set.
+    expect(executedSql).toContain("(d.last_activity_at is null or d.last_activity_at < now() - interval '14 days')");
+  });
+
+  it("excludes test-data deals from the count and row queries", async () => {
+    dbState.responses = [
+      [{ id: "stage-estimating", slug: "estimating", name: "Estimating", displayOrder: 4, isTerminal: false }],
+    ];
+    const tenantDb = {
+      select: createOfficeScopeSelectMock(),
+      execute: vi.fn()
+        .mockResolvedValueOnce({ rows: [{ total_count: "0", active_count: "0", total_value: "0" }] })
+        .mockResolvedValueOnce({ rows: [] }),
+    } as any;
+
+    const { listDealStagePage } = await import("../../../src/modules/deals/service.js");
+    await listDealStagePage(tenantDb, {
+      role: "admin",
+      userId: "admin-1",
+      activeOfficeId: "office-1",
+      scope: "all",
+      stageId: "stage-estimating",
+      page: 1,
+      pageSize: 25,
+      sort: "newest",
+    } as any);
+
+    const countSql = extractSqlText(tenantDb.execute.mock.calls[0]?.[0]).toLowerCase();
+    const rowSql = extractSqlText(tenantDb.execute.mock.calls[1]?.[0]).toLowerCase();
+    expect(countSql).toContain("coalesce(d.is_test_data, false) = false");
+    expect(rowSql).toContain("coalesce(d.is_test_data, false) = false");
+  });
+
   it("uses positive awarded-first fallback for won terminal stage totals and value sorting", async () => {
     dbState.responses = [
       [{ id: "stage-won", slug: "service_complete", name: "Service Complete", displayOrder: 8, isTerminal: true }],

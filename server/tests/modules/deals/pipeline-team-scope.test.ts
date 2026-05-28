@@ -18,12 +18,23 @@ vi.mock("@trock-crm/shared/schema", async () => import("../../../../shared/src/s
 vi.mock("@trock-crm/shared/types", async () => import("../../../../shared/src/types/index.js"));
 vi.mock("../../../src/db.js", () => ({
   db: {
-    select: vi.fn(() => ({
-      from: vi.fn().mockReturnThis(),
-      where: vi.fn().mockReturnThis(),
-      orderBy: vi.fn().mockReturnThis(),
-      then: vi.fn((resolve: (value: unknown[]) => unknown) => resolve(dbState.stages)),
-    })),
+    select: vi.fn(() => {
+      // The offices lookup in resolveActiveOfficeScope calls .limit(1); the stage
+      // query uses .orderBy. Discriminate on that so the office resolves to a code.
+      let limited = false;
+      const chain: any = {
+        from: vi.fn(() => chain),
+        where: vi.fn(() => chain),
+        orderBy: vi.fn(() => chain),
+        limit: vi.fn(() => {
+          limited = true;
+          return chain;
+        }),
+        then: (resolve: (value: unknown[]) => unknown) =>
+          resolve(limited ? [{ slug: "dallas", name: "Dallas" }] : dbState.stages),
+      };
+      return chain;
+    }),
   },
   pool: {},
 }));
@@ -55,6 +66,23 @@ function containsValue(value: unknown, expected: string, seen = new Set<unknown>
   seen.add(value);
   if (Array.isArray(value)) return value.some((item) => containsValue(item, expected, seen));
   return Object.values(value as Record<string, unknown>).some((item) => containsValue(item, expected, seen));
+}
+
+// resolveActiveOfficeScope (the office-scope predicate added to getDealsForPipeline)
+// queries users + userOfficeAccess on the tenant client and awaits .where() directly.
+// These tests don't assert on office-user resolution — the office resolves to a code
+// via the db mock, so the office_code branch is used — so the stub just resolves empty.
+function officeScopeStub() {
+  return { from: vi.fn().mockReturnThis(), where: vi.fn().mockResolvedValue([]) };
+}
+function officeScopedTenantDb(dealQuery: any) {
+  return {
+    select: vi.fn(() => ({
+      from: vi.fn((table: unknown) =>
+        table === users || table === userOfficeAccess ? officeScopeStub() : dealQuery
+      ),
+    })),
+  } as any;
 }
 
 describe("getDealsForPipeline team scope", () => {
@@ -135,6 +163,7 @@ describe("getDealsForPipeline team scope", () => {
         selectedDealFields = fields;
         return {
           from: vi.fn((table: unknown) => {
+            if (table === users || table === userOfficeAccess) return officeScopeStub();
             if (table === deals) return dealQuery;
             return dealQuery;
           }),
@@ -215,14 +244,7 @@ describe("getDealsForPipeline team scope", () => {
       orderBy: vi.fn().mockReturnThis(),
       limit: vi.fn().mockResolvedValue([]),
     };
-    const tenantDb = {
-      select: vi.fn(() => ({
-        from: vi.fn((table: unknown) => {
-          if (table === deals) return dealQuery;
-          return dealQuery;
-        }),
-      })),
-    } as any;
+    const tenantDb = officeScopedTenantDb(dealQuery);
 
     const { getDealsForPipeline } = await import("../../../src/modules/deals/service.js");
     await getDealsForPipeline(tenantDb, "admin", "admin-1", {
@@ -262,6 +284,7 @@ describe("getDealsForPipeline team scope", () => {
     const tenantDb = {
       select: vi.fn(() => ({
         from: vi.fn((table: unknown) => {
+          if (table === users || table === userOfficeAccess) return officeScopeStub();
           if (table === deals) {
             const dealQuery = {
               leftJoin: vi.fn().mockReturnThis(),
@@ -329,14 +352,7 @@ describe("getDealsForPipeline team scope", () => {
       orderBy: vi.fn().mockReturnThis(),
       limit: vi.fn().mockResolvedValue([]),
     };
-    const tenantDb = {
-      select: vi.fn(() => ({
-        from: vi.fn((table: unknown) => {
-          if (table === deals) return dealQuery;
-          return dealQuery;
-        }),
-      })),
-    } as any;
+    const tenantDb = officeScopedTenantDb(dealQuery);
 
     const { getDealsForPipeline } = await import("../../../src/modules/deals/service.js");
     await getDealsForPipeline(tenantDb, "admin", "admin-1", {
@@ -384,14 +400,7 @@ describe("getDealsForPipeline team scope", () => {
       orderBy: vi.fn().mockReturnThis(),
       limit: vi.fn().mockResolvedValue([]),
     };
-    const tenantDb = {
-      select: vi.fn(() => ({
-        from: vi.fn((table: unknown) => {
-          if (table === deals) return dealQuery;
-          return dealQuery;
-        }),
-      })),
-    } as any;
+    const tenantDb = officeScopedTenantDb(dealQuery);
 
     const { getDealsForPipeline } = await import("../../../src/modules/deals/service.js");
     const result = await getDealsForPipeline(tenantDb, "admin", "admin-1", {
@@ -426,14 +435,7 @@ describe("getDealsForPipeline team scope", () => {
       orderBy: vi.fn().mockReturnThis(),
       limit: vi.fn().mockResolvedValue([]),
     };
-    const tenantDb = {
-      select: vi.fn(() => ({
-        from: vi.fn((table: unknown) => {
-          if (table === deals) return dealQuery;
-          return dealQuery;
-        }),
-      })),
-    } as any;
+    const tenantDb = officeScopedTenantDb(dealQuery);
 
     const { getDealsForPipeline } = await import("../../../src/modules/deals/service.js");
     await getDealsForPipeline(tenantDb, "admin", "admin-1", {
@@ -486,14 +488,7 @@ describe("getDealsForPipeline team scope", () => {
       orderBy: vi.fn().mockReturnThis(),
       limit: vi.fn().mockResolvedValue([]),
     };
-    const tenantDb = {
-      select: vi.fn(() => ({
-        from: vi.fn((table: unknown) => {
-          if (table === deals) return dealQuery;
-          return dealQuery;
-        }),
-      })),
-    } as any;
+    const tenantDb = officeScopedTenantDb(dealQuery);
 
     const { getDealsForPipeline } = await import("../../../src/modules/deals/service.js");
     await getDealsForPipeline(tenantDb, "admin", "admin-1", {
@@ -541,14 +536,7 @@ describe("getDealsForPipeline team scope", () => {
       orderBy: vi.fn().mockReturnThis(),
       limit: vi.fn().mockResolvedValue([]),
     };
-    const tenantDb = {
-      select: vi.fn(() => ({
-        from: vi.fn((table: unknown) => {
-          if (table === deals) return dealQuery;
-          return dealQuery;
-        }),
-      })),
-    } as any;
+    const tenantDb = officeScopedTenantDb(dealQuery);
 
     const { getDealsForPipeline } = await import("../../../src/modules/deals/service.js");
     const result = await getDealsForPipeline(tenantDb, "admin", "admin-1", {
