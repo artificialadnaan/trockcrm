@@ -758,7 +758,7 @@ export function DealDetailPage() {
       ) : null}
       {viewerOwnsDeal ? (
         <Link
-          to={`/deals/${deal.id}/edit`}
+          to={appendOfficeIdSearch(`/deals/${deal.id}/edit`, detailOfficeId)}
           className={cn(buttonVariants({ variant: "outline", size: "sm" }))}
         >
           <Edit className="h-4 w-4" />
@@ -829,7 +829,7 @@ export function DealDetailPage() {
         />
         <DropdownMenuContent align="end">
           {viewerOwnsDeal ? (
-            <DropdownMenuItem onClick={() => navigate(`/deals/${deal.id}/edit`)}>
+            <DropdownMenuItem onClick={() => navigate(appendOfficeIdSearch(`/deals/${deal.id}/edit`, detailOfficeId))}>
               <Edit className="h-4 w-4 mr-2" />
               Edit Deal
             </DropdownMenuItem>

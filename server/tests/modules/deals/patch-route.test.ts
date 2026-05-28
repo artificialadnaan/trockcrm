@@ -488,6 +488,134 @@ describe("PATCH /api/deals/:id cleanup legacy handling", () => {
     );
   });
 
+  it("allows an admin who does not own the deal to set projectNumber without the owner-only 403", async () => {
+    // Deal is owned by a different rep; mock assertDealOwnerAccess to reject so we
+    // verify the route bypasses the owner check for projectNumber-only admin patches.
+    accessMocks.assertDealCollaboratorAccess.mockResolvedValueOnce({
+      id: "deal-1",
+      assignedRepId: "other-rep",
+      officeId: "office-1",
+    });
+    accessMocks.assertDealOwnerAccess.mockRejectedValue(
+      new AppError(403, "Only the assigned rep can modify this deal")
+    );
+
+    const { res, error } = await invokePatch(
+      { projectNumber: "DFW-1-12345-aa" },
+      createUser("admin")
+    );
+
+    expect(error).toBeNull();
+    expect(res.statusCode).toBe(200);
+    expect(accessMocks.assertDealOwnerAccess).not.toHaveBeenCalled();
+    expect(dealsServiceMocks.updateDeal).toHaveBeenCalledWith(
+      expect.anything(),
+      "deal-1",
+      expect.objectContaining({ projectNumber: "DFW-1-12345-aa" }),
+      "admin",
+      "admin-1",
+      "office-1",
+    );
+  });
+
+  it("allows an admin who does not own the deal to clear projectNumber (null) via the override", async () => {
+    accessMocks.assertDealCollaboratorAccess.mockResolvedValueOnce({
+      id: "deal-1",
+      assignedRepId: "other-rep",
+      officeId: "office-1",
+    });
+    accessMocks.assertDealOwnerAccess.mockRejectedValue(
+      new AppError(403, "Only the assigned rep can modify this deal")
+    );
+
+    const { res, error } = await invokePatch(
+      { projectNumber: null },
+      createUser("admin")
+    );
+
+    expect(error).toBeNull();
+    expect(res.statusCode).toBe(200);
+    expect(accessMocks.assertDealOwnerAccess).not.toHaveBeenCalled();
+    expect(dealsServiceMocks.updateDeal).toHaveBeenCalledWith(
+      expect.anything(),
+      "deal-1",
+      expect.objectContaining({ projectNumber: null }),
+      "admin",
+      "admin-1",
+      "office-1",
+    );
+  });
+
+  it("allows a director who does not own the deal to set projectNumber without the owner-only 403", async () => {
+    accessMocks.assertDealCollaboratorAccess.mockResolvedValueOnce({
+      id: "deal-1",
+      assignedRepId: "other-rep",
+      officeId: "office-1",
+    });
+    accessMocks.assertDealOwnerAccess.mockRejectedValue(
+      new AppError(403, "Only the assigned rep can modify this deal")
+    );
+
+    const { res, error } = await invokePatch(
+      { projectNumber: "ATL-2-54321-ab" },
+      createUser("director")
+    );
+
+    expect(error).toBeNull();
+    expect(res.statusCode).toBe(200);
+    expect(accessMocks.assertDealOwnerAccess).not.toHaveBeenCalled();
+  });
+
+  it("still enforces the owner check when an admin patches projectNumber alongside other fields", async () => {
+    // Broader PATCH must still respect the ownership check — narrow override is
+    // only for projectNumber-only payloads.
+    accessMocks.assertDealCollaboratorAccess.mockResolvedValueOnce({
+      id: "deal-1",
+      assignedRepId: "other-rep",
+      officeId: "office-1",
+    });
+    accessMocks.assertDealOwnerAccess.mockRejectedValue(
+      new AppError(403, "Only the assigned rep can modify this deal")
+    );
+
+    const { error } = await invokePatch(
+      {
+        projectNumber: "DFW-1-12345-aa",
+        description: "Admin also editing other fields",
+      },
+      createUser("admin")
+    );
+
+    expect(error).toMatchObject({
+      statusCode: 403,
+      message: "Only the assigned rep can modify this deal",
+    });
+    expect(accessMocks.assertDealOwnerAccess).toHaveBeenCalled();
+    expect(dealsServiceMocks.updateDeal).not.toHaveBeenCalled();
+  });
+
+  it("still enforces the owner check when an admin patches other fields without projectNumber", async () => {
+    accessMocks.assertDealCollaboratorAccess.mockResolvedValueOnce({
+      id: "deal-1",
+      assignedRepId: "other-rep",
+      officeId: "office-1",
+    });
+    accessMocks.assertDealOwnerAccess.mockRejectedValue(
+      new AppError(403, "Only the assigned rep can modify this deal")
+    );
+
+    const { error } = await invokePatch(
+      { description: "Admin trying to edit description on a rep's deal" },
+      createUser("admin")
+    );
+
+    expect(error).toMatchObject({
+      statusCode: 403,
+      message: "Only the assigned rep can modify this deal",
+    });
+    expect(dealsServiceMocks.updateDeal).not.toHaveBeenCalled();
+  });
+
   it.each([
     ["empty string", ""],
     ["whitespace-only string", "   "],
@@ -505,6 +633,28 @@ describe("PATCH /api/deals/:id cleanup legacy handling", () => {
     expect((error as InstanceType<typeof AppError>).code).toBe("PROJECT_NUMBER_INVALID");
     expect(dealsServiceMocks.updateDeal).not.toHaveBeenCalled();
   });
+
+  it.each([
+    ["custom rep-prefix code", "KMPWINTERS"],
+    ["legacy import date-suffix", "1-TLV.1-091625"],
+    ["legacy canonical with single-letter type code", "DFW-a-05826-ad"],
+  ])(
+    "accepts operator-confirmed legacy projectNumber formats on admin PATCH: %s",
+    async (_label, projectNumber) => {
+      const { res, error } = await invokePatch({ projectNumber }, createUser("admin"));
+
+      expect(error).toBeNull();
+      expect(res.statusCode).toBe(200);
+      expect(dealsServiceMocks.updateDeal).toHaveBeenCalledWith(
+        expect.anything(),
+        "deal-1",
+        expect.objectContaining({ projectNumber }),
+        "admin",
+        "admin-1",
+        "office-1",
+      );
+    }
+  );
 
   it("trims canonical projectNumber values before the audited updateDeal path", async () => {
     const { res, error } = await invokePatch(

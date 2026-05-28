@@ -238,7 +238,15 @@ function normalizeText(value: string | null | undefined): string | null {
   return text ? text : null;
 }
 
-function normalizeHubSpotProjectNumber(value: string | null | undefined, hubspotRecordId: string): string | null {
+export function normalizeHubSpotProjectNumber(
+  value: string | null | undefined,
+  hubspotRecordId: string
+): string | null {
+  // HubSpot CSV cells are commonly blank or whitespace-only. Treat those as "no
+  // project number" instead of forwarding to normalizeProjectNumberInput, which
+  // raises ProjectNumberValidationError on blank input.
+  if (value == null) return null;
+  if (typeof value === "string" && value.trim().length === 0) return null;
   try {
     return normalizeProjectNumberInput(value);
   } catch (error) {

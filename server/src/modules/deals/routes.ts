@@ -1813,6 +1813,15 @@ router.patch("/:id", async (req, res, next) => {
 
     const patchKeys = Object.keys(body);
     const isAssignmentTransferOnly = patchKeys.length > 0 && patchKeys.every((field) => field === "assignedRepId");
+    // Admins and directors set project numbers on deals they don't own — this is the
+    // primary use case for the projectNumber field. The collaborator access check above
+    // already enforced the office boundary; only the rep-ownership check needs to be
+    // skipped. Narrowly scoped: role must be admin/director AND the patch must touch
+    // only projectNumber.
+    const isProjectNumberOnlyAdminPatch =
+      (req.user!.role === "admin" || req.user!.role === "director") &&
+      patchKeys.length > 0 &&
+      patchKeys.every((field) => field === "projectNumber");
     if (isAssignmentTransferOnly) {
       const isDirectorOrAdmin = req.user!.role === "admin" || req.user!.role === "director";
       if (!isDirectorOrAdmin && dealAccess.assignedRepId !== req.user!.id) {
@@ -1822,7 +1831,7 @@ router.patch("/:id", async (req, res, next) => {
           "DEAL_REASSIGNMENT_FORBIDDEN"
         );
       }
-    } else {
+    } else if (!isProjectNumberOnlyAdminPatch) {
       await assertDealOwnerRouteAccess(req, req.params.id, {
         message: "Only the assigned rep can modify this deal",
       });

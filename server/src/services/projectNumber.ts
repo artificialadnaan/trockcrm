@@ -4,6 +4,7 @@ import {
   isProjectTypeValue,
   normalizeProjectType,
 } from "@trock-crm/shared/types";
+import { isStrictCanonicalProjectNumber } from "../modules/deals/project-number-validation.js";
 
 type WorkflowRoute = "normal" | "service";
 export type ProjectNumberOfficeCode = "DFW" | "ATL" | "dfw" | "atl";
@@ -96,7 +97,14 @@ export function getNextSuffix(existingSuffix: string | null | undefined): string
 }
 
 export function buildProjectNumber(input: ProjectNumberBuildInput): string {
-  return `${formatProjectNumberOfficePrefix(input.officeCode)}-${input.projectTypeCode}-${generateJulianDate(input.createdAt)}-${input.suffix.toLowerCase()}`;
+  const result = `${formatProjectNumberOfficePrefix(input.officeCode)}-${input.projectTypeCode}-${generateJulianDate(input.createdAt)}-${input.suffix.toLowerCase()}`;
+  // Defensive: newly-generated project numbers must satisfy the strict canonical
+  // form. If the inputs ever drift (e.g., a malformed projectTypeCode), surface it
+  // here instead of leaking a non-canonical value into the DB.
+  if (!isStrictCanonicalProjectNumber(result)) {
+    throw new Error(`buildProjectNumber produced non-canonical project number: ${result}`);
+  }
+  return result;
 }
 
 export function parseProjectNumberSuffix(projectNumber: string | null | undefined, julianDate: string): string | null {

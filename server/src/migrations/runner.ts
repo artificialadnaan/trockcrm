@@ -7,6 +7,10 @@ import {
   AUDIT_LOG_PERFORMANCE_MIGRATION,
   runAuditLogPerformanceIndexMigration,
 } from "./audit-log-performance-indexes.js";
+import {
+  PROJECT_NUMBER_FIRST_SET_MIGRATION,
+  runProjectNumberFirstSetIndexMigration,
+} from "./project-number-first-set-index.js";
 
 dotenv.config({
   path: join(dirname(fileURLToPath(import.meta.url)), "../../../.env"),
@@ -48,6 +52,13 @@ async function runMigrations(): Promise<void> {
       console.log(`Running ${file}...`);
       if (file === AUDIT_LOG_PERFORMANCE_MIGRATION) {
         await runAuditLogPerformanceIndexMigration(client);
+      } else if (file === PROJECT_NUMBER_FIRST_SET_MIGRATION) {
+        // CREATE UNIQUE INDEX CONCURRENTLY cannot run inside the DO block in the
+        // SQL file, so build the per-tenant index here first; then the SQL file's
+        // `CREATE UNIQUE INDEX IF NOT EXISTS` becomes a no-op on existing tenants.
+        await runProjectNumberFirstSetIndexMigration(client);
+        const sql = readFileSync(join(MIGRATIONS_DIR, file), "utf-8");
+        await client.query(sql);
       } else {
         const sql = readFileSync(join(MIGRATIONS_DIR, file), "utf-8");
         await client.query(sql);

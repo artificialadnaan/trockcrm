@@ -1169,6 +1169,18 @@ describe("DealDetailPage", () => {
     expect(html).toContain("Edit");
   });
 
+  it("preserves officeId on the Edit link when the deal detail page is loaded with a cross-office query param", () => {
+    mocks.useAuthMock.mockReturnValueOnce({
+      user: {
+        id: "rep-1",
+        role: "rep",
+      },
+    });
+    const html = renderPage("/deals/deal-1?officeId=office-atlanta");
+
+    expect(html).toContain('href="/deals/deal-1/edit?officeId=office-atlanta"');
+  });
+
   it("removes the deal-detail Move Stage header action while preserving other header actions", () => {
     mocks.useAuthMock.mockReturnValueOnce({
       user: {

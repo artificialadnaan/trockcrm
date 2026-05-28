@@ -1,3 +1,11 @@
+-- 0138_project_number_first_set_notification.sql
+-- For existing tenants, server/src/migrations/runner.ts pre-creates the
+-- audit_log_project_number_first_set_uidx index CONCURRENTLY before executing
+-- this file, so the `CREATE UNIQUE INDEX IF NOT EXISTS` statements below become
+-- no-ops on existing tenants (the audit_log scan happens once, without holding a
+-- write lock). For newly-provisioned tenants the audit_log is empty, so the plain
+-- CREATE UNIQUE INDEX inside the DO block / TENANT_SCHEMA_START block is safe.
+
 CREATE OR REPLACE FUNCTION public.enqueue_project_number_first_set_email()
 RETURNS trigger
 LANGUAGE plpgsql

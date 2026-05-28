@@ -53,6 +53,21 @@ describe("projectNumber service", () => {
     ).toBe("ATL-4-13026-ba");
   });
 
+  it("throws if buildProjectNumber would produce a non-canonical value", () => {
+    // Defensive invariant: if a malformed projectTypeCode ever leaks through, the
+    // generator must surface the bug rather than write a non-canonical number to
+    // the DB. "0" is rejected by the strict canonical regex (project-type code
+    // must be 1-9).
+    expect(() =>
+      buildProjectNumber({
+        officeCode: "DFW",
+        projectTypeCode: "0",
+        createdAt: new Date("2026-04-16T15:00:00.000Z"),
+        suffix: "aa",
+      })
+    ).toThrow(/non-canonical project number/);
+  });
+
   it("rejects malformed office prefixes at compile time", () => {
     buildProjectNumber({
       // @ts-expect-error Project number formatting only accepts DFW/ATL office codes.
