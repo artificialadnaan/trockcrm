@@ -12,6 +12,14 @@ railway run --service=Postgres npx tsx scripts/<script-name>.ts
 
 Do **not** prefix the command with `DATABASE_PUBLIC_URL='postgresql://...' npx tsx ...` — that leaks the credential into shell history and any logged terminal session. If you need the URL for an external tool (Drizzle Studio, pgAdmin), use `railway variables --service=Postgres --kv | grep "^DATABASE_PUBLIC_URL="` and copy from there.
 
+### Ad-hoc read-only verification queries
+
+For one-off read-only checks, use the permanent runner. It reads `DATABASE_PUBLIC_URL` (preferred) or `CRM_DATABASE_URL` from `.env`, never `DATABASE_URL`, and sets `default_transaction_read_only = on` before running your SQL — there is no write mode by design:
+
+```bash
+node scripts/run-sql.cjs "SELECT count(*) FROM office_dallas.deals;"
+```
+
 ## Go-live cleanup scripts
 
 Duplicate company detection is dry-run by default and writes a CSV:
