@@ -181,12 +181,111 @@ function maskSqlLiteralsAndComments(sql) {
   return out;
 }
 
+function maskSqlLiteralsAndCommentsNormalizeIdentifiers(sql) {
+  let out = '';
+  for (let i = 0; i < sql.length; i += 1) {
+    const ch = sql[i];
+    const next = sql[i + 1];
+
+    if (ch === "'") {
+      out += ' ';
+      i += 1;
+      while (i < sql.length) {
+        out += ' ';
+        if (sql[i] === "'") {
+          if (sql[i + 1] === "'") {
+            i += 2;
+            out += ' ';
+            continue;
+          }
+          break;
+        }
+        i += 1;
+      }
+      continue;
+    }
+
+    if (ch === '"') {
+      i += 1;
+      while (i < sql.length) {
+        if (sql[i] === '"') {
+          if (sql[i + 1] === '"') {
+            out += '"';
+            i += 2;
+            continue;
+          }
+          break;
+        }
+        out += sql[i];
+        i += 1;
+      }
+      continue;
+    }
+
+    if (ch === '-' && next === '-') {
+      out += '  ';
+      i += 2;
+      while (i < sql.length && sql[i] !== '\n') {
+        out += ' ';
+        i += 1;
+      }
+      if (i < sql.length) out += '\n';
+      continue;
+    }
+
+    if (ch === '/' && next === '*') {
+      out += '  ';
+      i += 2;
+      while (i < sql.length) {
+        out += ' ';
+        if (sql[i] === '*' && sql[i + 1] === '/') {
+          out += ' ';
+          i += 1;
+          break;
+        }
+        i += 1;
+      }
+      continue;
+    }
+
+    if (ch === '$') {
+      const rest = sql.slice(i);
+      const match = rest.match(/^\$[A-Za-z_][A-Za-z0-9_]*\$|^\$\$/);
+      if (match) {
+        const tag = match[0];
+        const end = sql.indexOf(tag, i + tag.length);
+        if (end !== -1) {
+          const length = end + tag.length - i;
+          out += ' '.repeat(length);
+          i += length - 1;
+          continue;
+        }
+      }
+    }
+
+    out += ch;
+  }
+  return out;
+}
+
 // Split SQL into normalized, lower-cased statements with string literals and
 // comments already blanked out (see maskSqlLiteralsAndComments). Shared by the
-// transaction-boundary check and the side-effecting-statement check so both see
-// only real tokens — never text that merely appears inside a string or comment.
+// transaction-boundary check so it sees only real statement-leading tokens —
+// never text that merely appears inside a string, comment, or quoted identifier.
 function maskedStatements(sql) {
   return maskSqlLiteralsAndComments(sql)
+    .split(';')
+    .map((statement) => statement.trim().replace(/\s+/g, ' ').toLowerCase())
+    .filter(Boolean);
+}
+
+// Split SQL for side-effecting function/statement scans. String literals and
+// comments stay blanked to avoid false positives from data, but double-quoted
+// identifiers are normalized by removing the quotes. That is intentional:
+// "pg_notify" is an identifier that PostgreSQL resolves to the same function
+// name as pg_notify, so blanking it would hide a real side-effecting call.
+function sideEffectScanStatements(sql) {
+  return maskSqlLiteralsAndCommentsNormalizeIdentifiers(sql)
     .split(';')
     .map((statement) => statement.trim().replace(/\s+/g, ' ').toLowerCase())
     .filter(Boolean);
@@ -220,9 +319,10 @@ function assertNoTransactionBoundaryStatements(sql) {
 //   - pg_notify() is a function call inside another statement (typically
 //     SELECT pg_notify(...)), so the statement still starts with "select" and
 //     the prefix match cannot see it. It is caught by a separate scan for the
-//     pg_notify( call token. Masking runs first (via maskedStatements), so the
-//     literal text 'pg_notify(' inside a string or a comment is blanked out and
-//     does not trigger a false positive.
+//     pg_notify( call token after normalizing identifiers. This catches
+//     pg_notify(...), pg_catalog.pg_notify(...), pg_catalog."pg_notify"(...),
+//     and "pg_notify"(...), while leaving string literals and comments blanked
+//     so 'pg_notify(' as data does not trigger a false positive.
 //
 // Defensive sweep: pg_notify is the only side-effecting function with a live
 // consumer in this codebase, so it is the one we explicitly block. Functions
@@ -232,9 +332,9 @@ function assertNoTransactionBoundaryStatements(sql) {
 // allowed (revisit if a consumer is added). The structural fix that retires all
 // of these string checks is a SELECT-only database role (tracked separately).
 function assertNoSideEffectingStatements(sql) {
-  const statements = maskedStatements(sql);
+  const statements = sideEffectScanStatements(sql);
   const forbiddenStatement = /^notify\b/; // NOTIFY channel [, payload]
-  const forbiddenCall = /pg_notify\s*\(/; // SELECT ... pg_notify(...) ...
+  const forbiddenCall = /(^|[^a-z0-9_$])pg_notify\s*\(/; // SELECT ... [schema.]pg_notify (...) ...
   if (statements.some((statement) => forbiddenStatement.test(statement) || forbiddenCall.test(statement))) {
     throw new Error(
       'NOTIFY and pg_notify() are not allowed in read-only SQL: read-only transactions do not block notifications and a worker consumes the crm_events channel.',

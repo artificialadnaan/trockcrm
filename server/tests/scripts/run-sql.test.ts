@@ -432,7 +432,12 @@ describe("run-sql.cjs", () => {
     const payloads = [
       "NOTIFY crm_events, 'evt'; SELECT count(*) FROM placeholder.widgets;",
       "NOTIFY crm_events;",
+      'NOTIFY "crm_events", \'evt\';',
       "SELECT pg_notify('crm_events', 'evt');",
+      "SELECT pg_catalog.pg_notify('crm_events', 'evt');",
+      'SELECT pg_catalog."pg_notify"(\'crm_events\', \'evt\');',
+      'SELECT "pg_notify"(\'crm_events\', \'evt\');',
+      "SELECT pg_notify ('crm_events', 'evt');",
     ];
     for (const payload of payloads) {
       const client = makeFakeClient({
@@ -466,7 +471,9 @@ describe("run-sql.cjs", () => {
       "SELECT 'pg_notify(' AS x;", // call token only inside a string literal
       "SELECT count(*) FROM placeholder.widgets /* pg_notify( */;", // call token only inside a comment
       "SELECT 'NOTIFY crm_events' AS x;", // NOTIFY keyword only inside a string literal
-      "SELECT notify_column FROM placeholder.widgets;", // identifier merely containing "notify"
+      "SELECT notify_log FROM placeholder.widgets;", // identifier merely containing "notify"
+      "SELECT * FROM notifications;", // table name merely containing "notif"
+      'SELECT "commit" FROM placeholder.widgets;', // quoted boundary-keyword identifier is still safe
     ];
     for (const payload of payloads) {
       const client = makeFakeClient({
