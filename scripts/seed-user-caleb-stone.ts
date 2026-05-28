@@ -3,10 +3,12 @@
  *
  * This script inserts ONLY the rows the in-app admin UI cannot create:
  *   - public.users               (the global user record; role=rep, primary office=Dallas)
- *   - public.user_office_access  (one row PER office — the primary Dallas office AND the Atlanta
- *                                 grant — matching the seed-new-real-users.ts convention, which
- *                                 writes an access row for the primary office in addition to
- *                                 setting users.office_id).
+ *   - public.user_office_access  (ONE row — the Atlanta extra-access grant only. The primary
+ *                                 Dallas office is represented by users.office_id and must NOT
+ *                                 also appear here: the admin overview counts every
+ *                                 user_office_access row as extra_office_count and the UI renders
+ *                                 it as "+N offices", so a primary-office row would be both
+ *                                 functionally redundant and semantically wrong in the UI.)
  *
  * It deliberately does NOT touch:
  *   - public.user_local_auth         <- the operator does this via /admin/users -> Send Invite,
@@ -22,7 +24,7 @@
  * Safety:
  *   - Startup checks refuse to proceed unless the Dallas office matches the expected UUID,
  *     Atlanta exists & is active, the user_role enum has 'rep', and no cstone user exists yet.
- *   - --commit wraps all three INSERTs (users + Dallas + Atlanta office access) in a single
+ *   - --commit wraps both INSERTs (users + the single Atlanta office-access grant) in a single
  *     transaction on a single client, serialized (no Promise.all).
  *   - A rollback snapshot is written to <os-tmpdir>/seed-user-cstone-<ts>.json BEFORE COMMIT;
  *     if the snapshot write fails the transaction is rolled back (never commit unsnapshotted).
@@ -38,8 +40,6 @@ import { Client } from "pg";
 // Resolve the nearest .env by walking up from the script directory. This makes the script work
 // whether it is run from the main checkout (scripts/../.env) or from a nested git worktree
 // (whose own .env is gitignored/absent) — in the worktree case it finds the parent repo's .env.
-// An ambient DATABASE_PUBLIC_URL/DATABASE_URL (e.g. via `railway run`) still takes precedence,
-// because dotenv does not override values already present in process.env.
 function findEnvFile(startDir: string): string | null {
   let dir = startDir;
   for (let depth = 0; depth < 8; depth += 1) {
@@ -52,9 +52,15 @@ function findEnvFile(startDir: string): string | null {
   return null;
 }
 
-const ENV_FILE = findEnvFile(path.dirname(fileURLToPath(import.meta.url)));
-if (ENV_FILE) {
-  dotenv.config({ path: ENV_FILE });
+// Loads the nearest .env into process.env. This runs ONLY on the CLI entry path (from main());
+// importing this module MUST stay side-effect-free so unit tests don't get the repo .env loaded
+// into the shared Vitest process. An ambient DATABASE_PUBLIC_URL/DATABASE_URL (e.g. via
+// `railway run`) still wins, because dotenv does not override values already present in process.env.
+function loadEnvFromNearestFile(): void {
+  const envFile = findEnvFile(path.dirname(fileURLToPath(import.meta.url)));
+  if (envFile) {
+    dotenv.config({ path: envFile });
+  }
 }
 
 // The Dallas office is the ACTIVE "Dallas Office" (slug=dallas). The inactive "DFW Office"
@@ -267,9 +273,9 @@ export function buildUsersInsert(input: {
 }
 
 /**
- * Builds one user_office_access grant row (role_override always NULL), matching the
- * seed-new-real-users.ts convention of one access row per office (primary office included).
- * Called once for Dallas (primary) and once for Atlanta.
+ * Builds one user_office_access grant row (role_override always NULL). Called ONCE, for the
+ * Atlanta extra-access office only. The primary Dallas office is carried by users.office_id and
+ * is intentionally NOT inserted here (see header note on extra_office_count / "+N offices").
  */
 export function buildOfficeAccessInsert(input: {
   userId: string;
@@ -337,11 +343,7 @@ const VERIFY_SQL = `
     EXISTS (
       SELECT 1 FROM public.user_office_access uoa
       WHERE uoa.user_id = u.id AND uoa.office_id = $2::uuid
-    ) AS has_atlanta_access,
-    EXISTS (
-      SELECT 1 FROM public.user_office_access uoa
-      WHERE uoa.user_id = u.id AND uoa.office_id = $3::uuid
-    ) AS has_dallas_access
+    ) AS has_atlanta_access
   FROM public.users u
   WHERE u.id = $1::uuid
 `;
@@ -434,11 +436,8 @@ export async function runSeedCalebStone(deps: SeedCalebDeps): Promise<SeedCalebR
     dallasOfficeId: dallas.id,
     createdByUserId,
   });
-  // One access row per office, matching seed-new-real-users.ts: primary Dallas first, then Atlanta.
-  const dallasAccessInsert = buildOfficeAccessInsert({
-    userId: plannedUserId,
-    officeId: dallas.id,
-  });
+  // A SINGLE access row, for Atlanta only. Dallas (the primary office) is carried by
+  // users.office_id and must not be duplicated here (see header note on extra_office_count).
   const atlantaAccessInsert = buildOfficeAccessInsert({
     userId: plannedUserId,
     officeId: atlanta.id,
@@ -450,8 +449,7 @@ export async function runSeedCalebStone(deps: SeedCalebDeps): Promise<SeedCalebR
     `        email=${usersInsert.values[1]} display_name="${TARGET_USER.displayName}" ` +
       `role=rep office_id=${dallas.id} is_active=true created_by_user_id=${createdByUserId ?? "NULL"}`
   );
-  logger.log(`  2a) INSERT public.user_office_access  user_id=${plannedUserId} office_id=${dallas.id} (Dallas, primary) role_override=NULL`);
-  logger.log(`  2b) INSERT public.user_office_access  user_id=${plannedUserId} office_id=${atlanta.id} (Atlanta) role_override=NULL`);
+  logger.log(`  2)  INSERT public.user_office_access  user_id=${plannedUserId} office_id=${atlanta.id} (Atlanta, extra access) role_override=NULL`);
 
   const result: SeedCalebResult = {
     mode,
@@ -473,28 +471,26 @@ export async function runSeedCalebStone(deps: SeedCalebDeps): Promise<SeedCalebR
   // ---- Commit path -----------------------------------------------------------------------
   await client.query("BEGIN");
   try {
-    // Serialized on the single client (never Promise.all): users, then Dallas (primary)
-    // access, then Atlanta access — matching the seed-new-real-users.ts ordering.
+    // Serialized on the single client (never Promise.all): users, then the single Atlanta
+    // office-access grant. Dallas is the primary office (users.office_id) and is NOT inserted here.
     const insertedUser = (await client.query(usersInsert.text, usersInsert.values)).rows[0] ?? null;
-    const insertedDallasAccess = (await client.query(dallasAccessInsert.text, dallasAccessInsert.values)).rows[0] ?? null;
     const insertedAtlantaAccess = (await client.query(atlantaAccessInsert.text, atlantaAccessInsert.values)).rows[0] ?? null;
-    if (!insertedUser || !insertedDallasAccess || !insertedAtlantaAccess) {
+    if (!insertedUser || !insertedAtlantaAccess) {
       throw new Error("INSERT did not return a row — rolling back to avoid a half-provisioned state.");
     }
 
-    const verifyRow = (await client.query(VERIFY_SQL, [plannedUserId, atlanta.id, dallas.id])).rows[0] ?? null;
+    const verifyRow = (await client.query(VERIFY_SQL, [plannedUserId, atlanta.id])).rows[0] ?? null;
     logger.log("Inserted (verified inside transaction):");
     logger.log(JSON.stringify(verifyRow, null, 2));
-    // Expect exactly two office-access rows: the primary Dallas grant and the Atlanta grant
-    // (matching seed-new-real-users.ts). Anything else is unexpected state.
+    // Expect exactly ONE office-access row: the Atlanta grant. The primary Dallas office lives in
+    // users.office_id, not user_office_access, so a count other than 1 is unexpected state.
     if (
       !verifyRow ||
-      verifyRow.has_dallas_access !== true ||
       verifyRow.has_atlanta_access !== true ||
-      Number(verifyRow.office_access_count) !== 2
+      Number(verifyRow.office_access_count) !== 1
     ) {
       throw new Error(
-        "Post-insert verification failed (expected exactly two office-access rows: Dallas primary + Atlanta) — rolling back."
+        "Post-insert verification failed (expected exactly one office-access row: Atlanta) — rolling back."
       );
     }
 
@@ -512,7 +508,7 @@ export async function runSeedCalebStone(deps: SeedCalebDeps): Promise<SeedCalebR
           dallasOfficeId: dallas.id,
           atlantaOfficeId: atlanta.id,
           insertedUser,
-          insertedOfficeAccess: [insertedDallasAccess, insertedAtlantaAccess],
+          insertedOfficeAccess: [insertedAtlantaAccess],
         },
         null,
         2
@@ -524,15 +520,20 @@ export async function runSeedCalebStone(deps: SeedCalebDeps): Promise<SeedCalebR
     result.committed = true;
     result.snapshotPath = snapshotPath;
     result.insertedUser = insertedUser;
-    result.insertedOfficeAccess = [insertedDallasAccess, insertedAtlantaAccess];
+    result.insertedOfficeAccess = [insertedAtlantaAccess];
 
     logger.log(`\nCOMMIT complete. Provisioned ${TARGET_USER.email} (id=${plannedUserId}).`);
     logger.log(`Rollback snapshot: ${snapshotPath}`);
     logger.log(
       "\nNEXT STEP (operator): open the CRM, go to /admin/users, find " +
-        `${TARGET_USER.email} in the list, and click "Send Invite". That provisions the ` +
-        "user_local_auth row (temp password) and emails the invite. If Resend is misconfigured, " +
-        'use "Preview Invite" to read the temp password and hand it over manually.'
+        `${TARGET_USER.email} in the list, and click "Send invite". That provisions the ` +
+        "user_local_auth row (a freshly generated temp password) and emails the invite.\n" +
+        "IF THE INVITE EMAIL FAILS (e.g. Resend misconfigured): the temp password is NOT viewable " +
+        'in the UI — "Preview invite" deliberately renders the email without the password ' +
+        "(previewUserInvite passes temporaryPassword: null). The recovery path is to fix the email/" +
+        'Resend configuration and click "Resend invite" on the same row: sendUserInvite regenerates ' +
+        "a brand-new temp password and re-sends the email (it is idempotent via onConflictDoUpdate). " +
+        "There is no way to recover the original temp password; only re-issuing a new one works."
     );
     return result;
   } catch (error) {
@@ -563,6 +564,7 @@ function connectionString(): string {
 }
 
 export async function main(argv: string[] = process.argv.slice(2)): Promise<void> {
+  loadEnvFromNearestFile();
   const client = new Client({
     connectionString: connectionString(),
     ssl: { rejectUnauthorized: false },

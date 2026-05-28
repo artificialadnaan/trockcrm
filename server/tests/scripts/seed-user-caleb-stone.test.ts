@@ -1,4 +1,10 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import dotenv from "dotenv";
+
+// Mock dotenv so we can assert the script never calls dotenv.config() at import time (Finding 3).
+// vi.mock is hoisted above the script import below, so importing the script picks up this mock.
+vi.mock("dotenv", () => ({ default: { config: vi.fn() } }));
+
 import {
   assertNoExistingUser,
   assertUserRoleEnumHasRep,
@@ -63,9 +69,8 @@ function makeClient(opts: MockOpts = {}) {
         rows: [
           opts.verifyRow ?? {
             id: values?.[0],
-            has_dallas_access: true,
             has_atlanta_access: true,
-            office_access_count: 2,
+            office_access_count: 1,
           },
         ],
       };
@@ -283,7 +288,7 @@ describe("seed-user-caleb-stone — orchestrator", () => {
     expect(hasBegin(calls)).toBe(false);
   });
 
-  it("commit path inserts users + BOTH office-access rows (Dallas primary + Atlanta), snapshots BEFORE commit, never touches user_local_auth", async () => {
+  it("commit path inserts users + the SINGLE Atlanta office-access row, snapshots BEFORE commit, never touches user_local_auth", async () => {
     const { client, query, calls } = makeClient();
     const writeSnapshot = vi.fn();
     const result = await runSeedCalebStone({
@@ -305,12 +310,13 @@ describe("seed-user-caleb-stone — orchestrator", () => {
     expect(usersInsert!.values?.[1]).toBe("cstone@trockgc.com"); // lowercased target
     expect(usersInsert!.values?.[5]).toBe(DALLAS_ID);
 
-    // TWO office-access INSERTs, serialized, Dallas (primary) first then Atlanta.
+    // EXACTLY ONE office-access INSERT: Atlanta only. Dallas (primary) is carried by
+    // users.office_id and must NOT appear as a user_office_access row.
     const accessInserts = calls.filter((c) => /INSERT INTO public\.user_office_access/.test(c.text));
-    expect(accessInserts).toHaveLength(2);
-    expect(accessInserts[0]!.values?.[1]).toBe(DALLAS_ID);
-    expect(accessInserts[1]!.values?.[1]).toBe(ATLANTA_ID);
-    expect(result.insertedOfficeAccess).toHaveLength(2);
+    expect(accessInserts).toHaveLength(1);
+    expect(accessInserts[0]!.values?.[1]).toBe(ATLANTA_ID);
+    expect(accessInserts.some((c) => c.values?.[1] === DALLAS_ID)).toBe(false);
+    expect(result.insertedOfficeAccess).toHaveLength(1);
 
     // snapshot must be written before COMMIT
     const commitCallIdx = calls.findIndex((c) => c.text.trim() === "COMMIT");
@@ -320,7 +326,7 @@ describe("seed-user-caleb-stone — orchestrator", () => {
     expect(snapshotOrder).toBeLessThan(commitOrder);
   });
 
-  it("uses the active Dallas office_id for the primary access row, never the inactive DFW office", async () => {
+  it("uses the active Atlanta office for the single access row; Dallas stays the primary (users.office_id), never DFW", async () => {
     const { client, calls } = makeClient();
     await runSeedCalebStone({
       client,
@@ -334,12 +340,36 @@ describe("seed-user-caleb-stone — orchestrator", () => {
     const officeIds = calls
       .filter((c) => /INSERT INTO public\.user_office_access/.test(c.text))
       .map((c) => c.values?.[1]);
-    expect(officeIds).toEqual([DALLAS_ID, ATLANTA_ID]);
+    expect(officeIds).toEqual([ATLANTA_ID]); // Atlanta only
+    expect(officeIds).not.toContain(DALLAS_ID); // primary office is NOT an access row
     expect(officeIds).not.toContain(DFW_ID); // never the inactive DFW office
 
-    // The primary access row office matches users.office_id (also Dallas).
+    // users.office_id is the active Dallas office.
     const usersInsert = calls.find((c) => /INSERT INTO public\.users/.test(c.text));
     expect(usersInsert!.values?.[5]).toBe(DALLAS_ID);
+  });
+
+  it("logs invite-failure recovery via Resend invite, not the (impossible) 'read the temp password' path (Finding 2)", async () => {
+    const { client } = makeClient();
+    const logs: string[] = [];
+    const logger = { log: (m?: unknown) => logs.push(String(m)), warn: vi.fn(), error: vi.fn() };
+    await runSeedCalebStone({
+      client,
+      argv: ["--commit"],
+      logger,
+      now: () => new Date("2026-05-28T12:00:00.000Z"),
+      tmpDir: "/tmp/fake-tmp",
+      writeSnapshot: vi.fn(),
+    });
+
+    const out = logs.join("\n");
+    // The corrected, code-grounded recovery path.
+    expect(out).toContain("Resend invite");
+    expect(out).toContain("temporaryPassword: null");
+    expect(out).toContain("regenerates");
+    // The old misleading instruction (read the temp password from the UI) must be gone.
+    expect(out).not.toMatch(/read the temp password/i);
+    expect(out).not.toMatch(/hand it over manually/i);
   });
 
   it("rolls back (no COMMIT) when an INSERT returns no row", async () => {
@@ -354,10 +384,10 @@ describe("seed-user-caleb-stone — orchestrator", () => {
     expect(writeSnapshot).not.toHaveBeenCalled();
   });
 
-  it("rolls back (no COMMIT) when in-transaction verification finds fewer than two office-access rows", async () => {
-    // Both EXISTS flags true but count=1 (e.g. a row went missing) must still fail the count===2 check.
+  it("rolls back (no COMMIT) when in-transaction verification finds more than one office-access row", async () => {
+    // A stray second access row (e.g. a leftover primary-office row) must fail the count===1 check.
     const { client, calls } = makeClient({
-      verifyRow: { id: "u", has_dallas_access: true, has_atlanta_access: true, office_access_count: 1 },
+      verifyRow: { id: "u", has_atlanta_access: true, office_access_count: 2 },
     });
     const writeSnapshot = vi.fn();
     await expect(
@@ -369,9 +399,9 @@ describe("seed-user-caleb-stone — orchestrator", () => {
     expect(writeSnapshot).not.toHaveBeenCalled(); // verification aborts before the snapshot write
   });
 
-  it("rolls back (no COMMIT) when in-transaction verification finds the Dallas access row missing", async () => {
+  it("rolls back (no COMMIT) when in-transaction verification finds the Atlanta access row missing", async () => {
     const { client, calls } = makeClient({
-      verifyRow: { id: "u", has_dallas_access: false, has_atlanta_access: true, office_access_count: 1 },
+      verifyRow: { id: "u", has_atlanta_access: false, office_access_count: 0 },
     });
     const writeSnapshot = vi.fn();
     await expect(
@@ -394,5 +424,13 @@ describe("seed-user-caleb-stone — orchestrator", () => {
 
     expect(calls.some((c) => c.text.trim() === "ROLLBACK")).toBe(true);
     expect(calls.some((c) => c.text.trim() === "COMMIT")).toBe(false);
+  });
+});
+
+describe("seed-user-caleb-stone — module import is side-effect free (Finding 3)", () => {
+  it("does NOT call dotenv.config() at import time (no env mutation of the shared Vitest process)", () => {
+    // Importing the script (done at the top of this file) must not load any .env. dotenv.config
+    // now lives in loadEnvFromNearestFile(), which only runs on the CLI entry path via main().
+    expect(dotenv.config).not.toHaveBeenCalled();
   });
 });
