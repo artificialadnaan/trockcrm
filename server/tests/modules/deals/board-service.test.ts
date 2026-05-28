@@ -955,6 +955,7 @@ describe("getDealsForPipeline", () => {
     // §6.8 bid_board_last_updated_at de-dup clause.
     const wonCardsWhereText = extractSqlText(wonCardsChain?.where.mock.calls[0]?.[0]).toLowerCase();
     expect(wonCardsWhereText).toContain("hs_closed_won_date");
+    expect(wonCardsWhereText).toContain("deals.hubspot_extra_properties");
     expect(wonCardsWhereText).toContain("is not null");
     expect(wonCardsWhereText).not.toContain("contract_signed");
     expect(wonCardsWhereText).not.toContain("bid_board_last_updated_at");
@@ -969,6 +970,52 @@ describe("getDealsForPipeline", () => {
       "bid_estimate",
       "dd_estimate",
     ]);
+  });
+
+  it("keeps won terminal totals independent of previewLimit", async () => {
+    const stageRows = [
+      {
+        id: "stage-won",
+        slug: "won",
+        name: "Won",
+        displayOrder: 3,
+        isTerminal: true,
+        isActivePipeline: true,
+      },
+    ];
+    dbState.responses = [stageRows, stageRows];
+
+    const tenantDb = {
+      select: vi.fn(() => {
+        const chain = createChainableMock();
+        chain.then.mockImplementation((resolve: (value: any[]) => unknown) => {
+          if (chain.leftJoin.mock.calls.length > 0) return resolve([]);
+          return resolve([{ totalCount: 296, activeCount: 296, totalValue: 21708049.04 }]);
+        });
+        return chain;
+      }),
+    } as any;
+
+    const { getDealsForPipeline } = await import("../../../src/modules/deals/service.js");
+    const previewEight = await getDealsForPipeline(tenantDb, "director", "director-1", {
+      activeOfficeId: null,
+      scope: "all",
+      previewLimit: 8,
+      wonAllTime: true,
+    });
+    const previewThousand = await getDealsForPipeline(tenantDb, "director", "director-1", {
+      activeOfficeId: null,
+      scope: "all",
+      previewLimit: 1000,
+      wonAllTime: true,
+    });
+
+    const compactWon = previewEight.pipelineColumns.find((column) => column.stage.slug === "won");
+    const expandedWon = previewThousand.pipelineColumns.find((column) => column.stage.slug === "won");
+    expect(compactWon?.count).toBe(296);
+    expect(expandedWon?.count).toBe(296);
+    expect(compactWon?.totalValue).toBe(21708049.04);
+    expect(expandedWon?.totalValue).toBe(21708049.04);
   });
 
   it("changes terminal totalValue when the terminal date range changes", async () => {
@@ -1352,7 +1399,7 @@ describe("getDealsForPipeline", () => {
     expect(maxConcurrentSelects).toBe(1);
   });
 
-  it("layers rep and Estimate Sent date filters into every board stage query", async () => {
+  it("keeps Estimate Sent date filters local to the Estimate Sent board column", async () => {
     dbState.responses = [
       [
         {
@@ -1394,17 +1441,24 @@ describe("getDealsForPipeline", () => {
       estimateSentTo: "2026-04-30",
     });
 
-    const allWhereText = tenantChains
-      .map((chain) => extractSqlText(chain.where.mock.calls[0]?.[0]).toLowerCase())
-      .join("\n");
+    const sentWhereTexts = tenantChains
+      .filter((chain) => containsValue(chain.where.mock.calls[0]?.[0], "stage-sent"))
+      .map((chain) => extractSqlText(chain.where.mock.calls[0]?.[0]).toLowerCase());
+    const contractWhereTexts = tenantChains
+      .filter((chain) => containsValue(chain.where.mock.calls[0]?.[0], "stage-contract"))
+      .map((chain) => extractSqlText(chain.where.mock.calls[0]?.[0]).toLowerCase());
+    const allWhereText = [...sentWhereTexts, ...contractWhereTexts].join("\n");
     expect(allWhereText).toContain("assigned_rep_id");
     expect(allWhereText).toContain("rep-1");
-    expect(allWhereText).toContain("estimate_sent_history_stage");
-    expect(allWhereText).toContain("estimate_sent_to_client");
-    expect(allWhereText).toContain("service_estimate_sent_to_client");
-    expect(allWhereText).toContain("stage_entered_at");
-    expect(containsValue(tenantChains.map((chain) => chain.where.mock.calls[0]?.[0]), "2026-04-01")).toBe(true);
-    expect(containsValue(tenantChains.map((chain) => chain.where.mock.calls[0]?.[0]), "2026-04-30")).toBe(true);
+    expect(sentWhereTexts.join("\n")).toContain("estimate_sent_history_stage");
+    expect(sentWhereTexts.join("\n")).toContain("estimate_sent_to_client");
+    expect(sentWhereTexts.join("\n")).toContain("service_estimate_sent_to_client");
+    expect(sentWhereTexts.join("\n")).toContain("stage_entered_at");
+    expect(sentWhereTexts.join("\n")).toContain("2026-04-01");
+    expect(sentWhereTexts.join("\n")).toContain("2026-04-30");
+    expect(contractWhereTexts.join("\n")).not.toContain("estimate_sent_history_stage");
+    expect(contractWhereTexts.join("\n")).not.toContain("2026-04-01");
+    expect(contractWhereTexts.join("\n")).not.toContain("2026-04-30");
   });
 
   it("uses on-hold-aware value SQL for filtered board totals", async () => {

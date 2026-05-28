@@ -155,6 +155,7 @@ describe("getDealsForPipeline Won branch (CHANGE 2 + 5)", () => {
 
     const where = wonSummaryWhereSql(chains);
     expect(where).toContain("hs_closed_won_date");
+    expect(where).toContain("deals.hubspot_extra_properties");
     expect(where).toContain("is not null"); // usable-date guard (period only)
     expect(where).toContain("on_hold"); // §6.3 on-hold exclusion in the count too
     // Old basis must be gone, and the narrowed carve-out no longer references bblua.
@@ -190,6 +191,7 @@ describe("getDealsForPipeline Won branch (CHANGE 2 + 5)", () => {
     // calls. A single shared fragment collapses to two.
     const guardRenders = (where.match(/public\.try_parse_hs_close_date\(/g) ?? []).length;
     expect(guardRenders).toBe(3);
+    expect(where).toContain("deals.hubspot_extra_properties");
     // Each date bound's left operand is a COMPLETE function call: the closing paren
     // of try_parse_hs_close_date(...) immediately precedes the comparison operator.
     // A dropped/reused fragment would leave a dangling operator (e.g. "and  <= ...").

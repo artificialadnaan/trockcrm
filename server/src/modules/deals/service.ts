@@ -977,10 +977,6 @@ export function aliasedWonHsClosedWonDateSql(alias: string) {
 // non-"0"). Period-bounded Won queries (YTD/MTD/any date window) require this so
 // deals without a trustworthy close date are excluded from period totals; all-time
 // queries omit the guard so those deals still count in the all-time number (§6.1).
-function dealHasUsableWonDateSql() {
-  return sql`${dealWonHsClosedWonDateSql()} IS NOT NULL`;
-}
-
 export function aliasedHasUsableWonDateSql(alias: string) {
   return sql`${aliasedWonHsClosedWonDateSql(alias)} IS NOT NULL`;
 }
@@ -993,8 +989,8 @@ export function aliasedHasUsableWonDateSql(alias: string) {
 // or hubspot_deal_ids among usable-won-date rows (both verified via read-only SQL
 // against office_dallas), so it could only over-drop. Eligibility is therefore
 // simply "has a usable won date".
-function dealWonWindowEligibilitySql() {
-  return dealHasUsableWonDateSql();
+function aliasedDealWonWindowEligibilitySql(alias: string) {
+  return aliasedHasUsableWonDateSql(alias);
 }
 
 function dealLostWindowDateSql() {
@@ -1522,13 +1518,13 @@ export async function getDeals(
     // above, so an explicit non-Won stageIds + wonClosedFrom/To intersects to none.
     const wonStageIds = await resolveWonClosedStageIds();
     conditions.push(wonStageIds.length > 0 ? inArray(deals.stageId, wonStageIds) : sql`false`);
-    conditions.push(dealHasUsableWonDateSql());
+    conditions.push(aliasedHasUsableWonDateSql("deals"));
     conditions.push(aliasedActiveDealCountFilterSql("deals"));
     if (filters.wonClosedFrom) {
-      conditions.push(sql`${dealWonHsClosedWonDateSql()} >= ${filters.wonClosedFrom}::date`);
+      conditions.push(sql`${aliasedWonHsClosedWonDateSql("deals")} >= ${filters.wonClosedFrom}::date`);
     }
     if (filters.wonClosedTo) {
-      conditions.push(sql`${dealWonHsClosedWonDateSql()} <= ${filters.wonClosedTo}::date`);
+      conditions.push(sql`${aliasedWonHsClosedWonDateSql("deals")} <= ${filters.wonClosedTo}::date`);
     }
   }
   addEstimateSentDateConditions(conditions, filters);
@@ -2470,7 +2466,6 @@ export async function getDealsForPipeline(
   }
 
   commonConditions.push(excludeTestDataCondition("deals"));
-  addEstimateSentDateConditions(commonConditions, filters ?? {});
 
   const responseStages = stages.filter((stage) => {
     if (!stage.isTerminal) return filters?.includeDd || stage.isActivePipeline;
@@ -2499,6 +2494,9 @@ export async function getDealsForPipeline(
     const isLostTerminalStage = LOST_TERMINAL_STAGE_SLUGS.includes(
       stage.slug as (typeof LOST_TERMINAL_STAGE_SLUGS)[number]
     );
+    const isEstimateSentStage = ESTIMATE_SENT_STAGE_SLUGS.includes(
+      stage.slug as (typeof ESTIMATE_SENT_STAGE_SLUGS)[number]
+    );
     if (isWonTerminalStage) {
       stageConditions.push(canonicalWonStageId ? inArray(deals.stageId, wonStageIds) : eq(deals.stageId, stage.id));
       // §6.3: exclude on-hold deals entirely from the Won column — count, value,
@@ -2512,19 +2510,19 @@ export async function getDealsForPipeline(
       // (this is what dealWonWindowEligibilitySql now returns). All-time (no window)
       // omits the guard, so null-date Won deals remain in the all-time total.
       if (wonSignedDateSince || wonSignedDateUntil || wonPeriodFrom || wonPeriodTo) {
-        stageConditions.push(dealWonWindowEligibilitySql());
+        stageConditions.push(aliasedDealWonWindowEligibilitySql("deals"));
       }
       if (wonSignedDateSince) {
-        stageConditions.push(sql`${dealWonHsClosedWonDateSql()} >= ${wonSignedDateSince}::date`);
+        stageConditions.push(sql`${aliasedWonHsClosedWonDateSql("deals")} >= ${wonSignedDateSince}::date`);
       }
       if (wonSignedDateUntil) {
-        stageConditions.push(sql`${dealWonHsClosedWonDateSql()} <= ${wonSignedDateUntil}::date`);
+        stageConditions.push(sql`${aliasedWonHsClosedWonDateSql("deals")} <= ${wonSignedDateUntil}::date`);
       }
       if (wonPeriodFrom) {
-        stageConditions.push(sql`${dealWonHsClosedWonDateSql()} >= ${wonPeriodFrom}::date`);
+        stageConditions.push(sql`${aliasedWonHsClosedWonDateSql("deals")} >= ${wonPeriodFrom}::date`);
       }
       if (wonPeriodTo) {
-        stageConditions.push(sql`${dealWonHsClosedWonDateSql()} <= ${wonPeriodTo}::date`);
+        stageConditions.push(sql`${aliasedWonHsClosedWonDateSql("deals")} <= ${wonPeriodTo}::date`);
       }
     } else if (isLostTerminalStage) {
       stageConditions.push(canonicalLostStageId ? inArray(deals.stageId, lostStageIds) : eq(deals.stageId, stage.id));
@@ -2540,6 +2538,11 @@ export async function getDealsForPipeline(
     } else {
       stageConditions.push(eq(deals.isActive, true), eq(deals.stageId, stage.id));
       stageConditions.push(nonTerminalMirroredStageCondition());
+    }
+    if (isEstimateSentStage) {
+      // Estimate Sent has its own column date window. Keep that filter local to
+      // the Estimate Sent column so selecting it cannot shrink Won/Lost totals.
+      addEstimateSentDateConditions(stageConditions, filters ?? {});
     }
 
     const where = and(...stageConditions, ...commonConditions);
