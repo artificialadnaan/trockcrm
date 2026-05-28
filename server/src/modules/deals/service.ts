@@ -915,12 +915,14 @@ function workspaceLostWindowDateSql() {
 }
 
 function workspaceLostWindowEligibilitySql() {
-  const date = workspaceLostWindowDateSql();
+  // Build a fresh window-date fragment at each interpolation rather than caching
+  // and reusing one sql`` instance (same composition-safety rule as the won-date
+  // guard; see getDealsForPipeline). Identical SQL, no semantic change.
   return sql`
-    ${date} IS NOT NULL
+    ${workspaceLostWindowDateSql()} IS NOT NULL
     AND NOT (
       d.bid_board_last_updated_at IS NOT NULL
-      AND ${date}::date = d.bid_board_last_updated_at::date
+      AND ${workspaceLostWindowDateSql()}::date = d.bid_board_last_updated_at::date
     )
   `;
 }
@@ -1143,31 +1145,32 @@ function workspaceEffectiveDealValueSql(stage: PipelineStageRow) {
 
 function terminalWorkspaceDateConditions(stage: PipelineStageRow, input: DealStagePageInput) {
   const terminalFilters = resolvePipelineTerminalDateFilters(input);
+  // Build a FRESH window-date fragment at each comparison site. Reusing one
+  // sql`` fragment instance across the >= and < positions corrupts the composed
+  // SQL (the production YTD 500). See getDealsForPipeline for the full note.
   if (WON_TERMINAL_STAGE_SLUGS.includes(stage.slug as (typeof WON_TERMINAL_STAGE_SLUGS)[number])) {
-    const enteredAt = workspaceWonWindowDateSql();
     const conditions: any[] = [];
     if (terminalFilters.won.since || terminalFilters.won.until) {
       conditions.push(workspaceWonWindowEligibilitySql());
     }
     if (terminalFilters.won.since) {
-      conditions.push(sql`${enteredAt} >= ${terminalFilters.won.since}`);
+      conditions.push(sql`${workspaceWonWindowDateSql()} >= ${terminalFilters.won.since}`);
     }
     if (terminalFilters.won.until) {
-      conditions.push(sql`${enteredAt} < ${addUtcDays(terminalFilters.won.until, 1)}`);
+      conditions.push(sql`${workspaceWonWindowDateSql()} < ${addUtcDays(terminalFilters.won.until, 1)}`);
     }
     return conditions;
   }
   if (LOST_TERMINAL_STAGE_SLUGS.includes(stage.slug as (typeof LOST_TERMINAL_STAGE_SLUGS)[number])) {
-    const enteredAt = workspaceLostWindowDateSql();
     const conditions: any[] = [];
     if (terminalFilters.lost.since || terminalFilters.lost.until) {
       conditions.push(workspaceLostWindowEligibilitySql());
     }
     if (terminalFilters.lost.since) {
-      conditions.push(sql`${enteredAt} >= ${terminalFilters.lost.since}`);
+      conditions.push(sql`${workspaceLostWindowDateSql()} >= ${terminalFilters.lost.since}`);
     }
     if (terminalFilters.lost.until) {
-      conditions.push(sql`${enteredAt} < ${addUtcDays(terminalFilters.lost.until, 1)}`);
+      conditions.push(sql`${workspaceLostWindowDateSql()} < ${addUtcDays(terminalFilters.lost.until, 1)}`);
     }
     return conditions;
   }
@@ -2445,8 +2448,12 @@ export async function getDealsForPipeline(
   const wonSignedDateUntil = toIsoDateOnly(terminalFilters.won.until);
   const wonPeriodFrom = toIsoDateOnly(wonPeriodRange.from);
   const wonPeriodTo = toIsoDateOnly(wonPeriodRange.to);
-  const wonWindowDate = dealWonHsClosedWonDateSql();
-  const lostWindowDate = dealLostWindowDateSql();
+  // Do NOT cache the won-date guard in a variable and reuse it across the >=, <=,
+  // and IS NOT NULL predicates: a single Drizzle sql`` fragment instance reused
+  // across multiple interpolation sites in one query produces malformed SQL
+  // (the reused instance is dropped on its later occurrences, leaving a
+  // comparison with no left-hand operand) — this was the production 500 on the
+  // YTD card. Build a FRESH dealWonHsClosedWonDateSql() at every use site below.
   const pipelineCardsPerStageLimit = Math.max(
     1,
     Math.min(
@@ -2537,16 +2544,16 @@ export async function getDealsForPipeline(
         stageConditions.push(dealWonWindowEligibilitySql());
       }
       if (wonSignedDateSince) {
-        stageConditions.push(sql`${wonWindowDate} >= ${wonSignedDateSince}::date`);
+        stageConditions.push(sql`${dealWonHsClosedWonDateSql()} >= ${wonSignedDateSince}::date`);
       }
       if (wonSignedDateUntil) {
-        stageConditions.push(sql`${wonWindowDate} <= ${wonSignedDateUntil}::date`);
+        stageConditions.push(sql`${dealWonHsClosedWonDateSql()} <= ${wonSignedDateUntil}::date`);
       }
       if (wonPeriodFrom) {
-        stageConditions.push(sql`${wonWindowDate} >= ${wonPeriodFrom}::date`);
+        stageConditions.push(sql`${dealWonHsClosedWonDateSql()} >= ${wonPeriodFrom}::date`);
       }
       if (wonPeriodTo) {
-        stageConditions.push(sql`${wonWindowDate} <= ${wonPeriodTo}::date`);
+        stageConditions.push(sql`${dealWonHsClosedWonDateSql()} <= ${wonPeriodTo}::date`);
       }
     } else if (isLostTerminalStage) {
       stageConditions.push(canonicalLostStageId ? inArray(deals.stageId, lostStageIds) : eq(deals.stageId, stage.id));
@@ -2554,10 +2561,10 @@ export async function getDealsForPipeline(
         stageConditions.push(dealLostWindowEligibilitySql());
       }
       if (terminalFilters.lost.since) {
-        stageConditions.push(sql`${lostWindowDate} >= ${terminalFilters.lost.since}`);
+        stageConditions.push(sql`${dealLostWindowDateSql()} >= ${terminalFilters.lost.since}`);
       }
       if (terminalFilters.lost.until) {
-        stageConditions.push(sql`${lostWindowDate} < ${addUtcDays(terminalFilters.lost.until, 1)}`);
+        stageConditions.push(sql`${dealLostWindowDateSql()} < ${addUtcDays(terminalFilters.lost.until, 1)}`);
       }
     } else {
       stageConditions.push(eq(deals.isActive, true), eq(deals.stageId, stage.id));

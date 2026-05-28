@@ -2234,7 +2234,10 @@ export async function getWonCloseSummary(
   // updated_at fallback counted any deal "touched in-period" as "won in-period".
   // (Office-scope parity with the drill-down is a no-op in the only populated
   // tenant — office_dallas captures all Won rows — and is deferred; see PR notes.)
-  const wonDate = aliasedWonHsClosedWonDateSql("d");
+  // Build a FRESH aliasedWonHsClosedWonDateSql("d") at each comparison site.
+  // Reusing one sql`` fragment instance across the >= and <= positions corrupts
+  // the composed SQL (the same class of bug as the production YTD 500 in
+  // getDealsForPipeline): a reused fragment is dropped on its later occurrence.
   const result = await tenantDb.execute(sql`
     SELECT
       COUNT(*) FILTER (WHERE ${aliasedActiveDealCountFilterSql("d")})::int AS won_count,
@@ -2245,8 +2248,8 @@ export async function getWonCloseSummary(
       AND ${aliasedActiveDealCountFilterSql("d")}
       AND psc.slug IN (${sql.join(WON_STAGE_SLUGS.map((slug) => sql`${slug}`), sql`, `)})
       AND ${aliasedHasUsableWonDateSql("d")}
-      AND ${wonDate} >= ${options.from}::date
-      AND ${wonDate} <= ${options.to}::date
+      AND ${aliasedWonHsClosedWonDateSql("d")} >= ${options.from}::date
+      AND ${aliasedWonHsClosedWonDateSql("d")} <= ${options.to}::date
       ${repFilter}
   `);
 
