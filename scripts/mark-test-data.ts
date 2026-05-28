@@ -14,11 +14,12 @@
  *   - Only rows whose primary matched pattern is in the auto-mark safe list are eligible
  *     (the broad `template` pattern is never auto-marked).
  *   - --commit wraps all writes in a single transaction on a single client (no Promise.all).
- *   - Every committed write is snapshotted to /private/tmp/test-data-cleanup-<ts>.json with
+ *   - Every committed write is snapshotted to <os-tmpdir>/test-data-cleanup-<ts>.json with
  *     before/after values for rollback.
  */
 import dotenv from "dotenv";
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import pg from "pg";
@@ -193,7 +194,7 @@ async function main() {
 
     const snapshot: Array<{ id: string; name: string; pattern: string; before: boolean; after: boolean }> = [];
     const ts = new Date().toISOString().replace(/[:.]/g, "-");
-    const backupPath = `/private/tmp/test-data-cleanup-${ts}.json`;
+    const backupPath = path.join(os.tmpdir(), `test-data-cleanup-${ts}.json`);
     await client.query("BEGIN");
     try {
       for (const p of planned) {
