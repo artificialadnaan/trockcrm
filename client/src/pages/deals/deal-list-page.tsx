@@ -240,8 +240,8 @@ export function getDashboardDealListView(input: {
       boardMode: "won",
       listBaseFilters: periodRange
         ? {
-            contractSignedFrom: periodRange.from,
-            contractSignedTo: periodRange.to,
+            wonClosedFrom: periodRange.from,
+            wonClosedTo: periodRange.to,
           }
         : {},
       listInitialSort: { key: "contract_signed_date", dir: "desc" },
@@ -926,8 +926,8 @@ function DealListPageContent({ role, userId }: { role: string; userId: string })
 
     return {
       ...dashboardView.listBaseFilters,
-      ...(wonDateRange.from ? { contractSignedFrom: wonDateRange.from } : {}),
-      ...(wonDateRange.to ? { contractSignedTo: wonDateRange.to } : {}),
+      ...(wonDateRange.from ? { wonClosedFrom: wonDateRange.from } : {}),
+      ...(wonDateRange.to ? { wonClosedTo: wonDateRange.to } : {}),
     };
   }, [dashboardView.filter, dashboardView.listBaseFilters, wonDateRange.from, wonDateRange.to]);
   const layeredListBaseFilters = useMemo(

@@ -294,6 +294,8 @@ export interface DealFilters {
   isActive?: boolean | "all" | "pipeline";
   contractSignedFrom?: string;
   contractSignedTo?: string;
+  wonClosedFrom?: string;
+  wonClosedTo?: string;
   estimateSentFrom?: string;
   estimateSentTo?: string;
   createdFrom?: string;
@@ -438,6 +440,8 @@ export function useDeals(filters: DealFilters = {}, options: { enabled?: boolean
       if (filters.source) params.set("source", filters.source);
       if (filters.contractSignedFrom) params.set("contractSignedFrom", filters.contractSignedFrom);
       if (filters.contractSignedTo) params.set("contractSignedTo", filters.contractSignedTo);
+      if (filters.wonClosedFrom) params.set("wonClosedFrom", filters.wonClosedFrom);
+      if (filters.wonClosedTo) params.set("wonClosedTo", filters.wonClosedTo);
       if (filters.estimateSentFrom) params.set("estimateSentFrom", filters.estimateSentFrom);
       if (filters.estimateSentTo) params.set("estimateSentTo", filters.estimateSentTo);
       if (filters.createdFrom) params.set("createdFrom", filters.createdFrom);
@@ -476,6 +480,8 @@ export function useDeals(filters: DealFilters = {}, options: { enabled?: boolean
     filters.source,
     filters.contractSignedFrom,
     filters.contractSignedTo,
+    filters.wonClosedFrom,
+    filters.wonClosedTo,
     filters.estimateSentFrom,
     filters.estimateSentTo,
     filters.createdFrom,

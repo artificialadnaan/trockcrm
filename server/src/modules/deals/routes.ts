@@ -816,6 +816,8 @@ router.get("/", async (req, res, next) => {
       source: req.query.source as string | undefined,
       contractSignedFrom: req.query.contractSignedFrom as string | undefined,
       contractSignedTo: req.query.contractSignedTo as string | undefined,
+      wonClosedFrom: req.query.wonClosedFrom as string | undefined,
+      wonClosedTo: req.query.wonClosedTo as string | undefined,
       estimateSentFrom,
       estimateSentTo,
       createdFrom,

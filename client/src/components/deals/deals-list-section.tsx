@@ -354,6 +354,8 @@ export function buildDealListParams(input: {
   dateRange: { from?: string; to?: string };
   contractSignedFrom?: string;
   contractSignedTo?: string;
+  wonClosedFrom?: string;
+  wonClosedTo?: string;
   estimateSentFrom?: string;
   estimateSentTo?: string;
   createdFrom?: string;
@@ -386,6 +388,8 @@ export function buildDealListParams(input: {
   }
   if (input.contractSignedFrom) params.set("contractSignedFrom", input.contractSignedFrom);
   if (input.contractSignedTo) params.set("contractSignedTo", input.contractSignedTo);
+  if (input.wonClosedFrom) params.set("wonClosedFrom", input.wonClosedFrom);
+  if (input.wonClosedTo) params.set("wonClosedTo", input.wonClosedTo);
   if (input.estimateSentFrom) params.set("estimateSentFrom", input.estimateSentFrom);
   if (input.estimateSentTo) params.set("estimateSentTo", input.estimateSentTo);
   params.set("isActive", String(input.isActive));
@@ -405,6 +409,8 @@ export async function fetchAllFilteredDeals(input: {
   dateRange: { from?: string; to?: string };
   contractSignedFrom?: string;
   contractSignedTo?: string;
+  wonClosedFrom?: string;
+  wonClosedTo?: string;
   estimateSentFrom?: string;
   estimateSentTo?: string;
   createdFrom?: string;
@@ -642,6 +648,8 @@ export function DealsListSection({
       createdTo: baseFilters?.createdTo,
       contractSignedFrom: baseFilters?.contractSignedFrom,
       contractSignedTo: baseFilters?.contractSignedTo,
+      wonClosedFrom: baseFilters?.wonClosedFrom,
+      wonClosedTo: baseFilters?.wonClosedTo,
       estimateSentFrom: baseFilters?.estimateSentFrom,
       estimateSentTo: baseFilters?.estimateSentTo,
       updatedFrom: baseFilters?.updatedFrom,

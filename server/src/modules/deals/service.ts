@@ -220,9 +220,15 @@ export interface DealFilters {
   source?: string;
   isActive?: boolean | "all" | "pipeline";
   // Inclusive YYYY-MM-DD bounds against deals.contract_signed_at::date, with
-  // deals.contract_signed_date as a transition fallback.
+  // deals.contract_signed_date as a transition fallback. RESERVED for the
+  // commissions / contracts-signed surfaces (§6.5) — do NOT use for Won-period.
   contractSignedFrom?: string;
   contractSignedTo?: string;
+  // Inclusive YYYY-MM-DD bounds for the /deals?filter=won drill-down, gated on the
+  // true HubSpot close-won date (hs_closed_won_date, §6.1). When set, on-hold and
+  // null-close-date deals are excluded so this drill-down matches the Won card.
+  wonClosedFrom?: string;
+  wonClosedTo?: string;
   estimateSentFrom?: string;
   estimateSentTo?: string;
   createdFrom?: string;
@@ -926,19 +932,68 @@ function workspaceLostWindowEligibilitySql() {
   `;
 }
 
-function dealWonWindowDateSql() {
-  return contractSignedDateForReporting;
+// Casts a HubSpot close-won date text value to `date`, but ONLY when it looks like
+// a date (starts with YYYY-MM-DD). NOTE: `hubspot_extra_properties` is a DB-only
+// JSONB column — it is intentionally NOT mapped in the Drizzle schema and is
+// addressed here via raw SQL; it is confirmed present in production (office_dallas)
+// where hs_closed_won_date is populated on 268/332 active Won deals. It is a
+// free-form JSON blob with no schema guarantee: production values are ISO-8601 UTC
+// strings today (e.g.
+// 2025-01-01T17:10:09.826Z, which `::date` reads as the as-written calendar date —
+// session is UTC and a `date` cast does not rotate by zone), but a stray non-date
+// value (or a future epoch-ms sync) must yield NULL — excluded from period reporting
+// — rather than throw and break the ENTIRE Won query. The regex bounds month (01-12)
+// and day (01-31) — not just the YYYY-MM-DD shape — so range-garbage like 2025-13-45,
+// 0000-00-00, or an epoch-ms string never reaches the throwing `::date` cast. (Uses
+// [0-9], not \d: drizzle's tagged template would strip the backslash.)
+function castHsClosedWonDateSql(rawValue: SQLWrapper) {
+  return sql`CASE WHEN ${rawValue} ~ '^[0-9]{4}-(0[1-9]|1[0-2])-(0[1-9]|[12][0-9]|3[01])' THEN (${rawValue})::date END`;
 }
 
+// Won-period membership date (locked decision §6.1): gate on the true HubSpot
+// close-won date ALONE — hubspot_extra_properties->>'hs_closed_won_date'. No
+// COALESCE fallback. actual_close_date is reseed-contaminated (it was stamped
+// en masse by a Bid-Board reseed) and must never be used for period gating;
+// contract_signed_at is reserved for the commissions page (§6.5). The two NULLIF
+// guards strip the empty-string and the HubSpot "0" unset sentinel before the cast.
+// Matches the forensics anchor (YTD = 175 deals / $7.82M).
+function dealWonHsClosedWonDateSql() {
+  return castHsClosedWonDateSql(
+    sql`NULLIF(NULLIF(hubspot_extra_properties->>'hs_closed_won_date', ''), '0')`
+  );
+}
+
+// `alias` is always a trusted developer-supplied literal (e.g. "d"), never user
+// input — consistent with buildDealOfficeScopeCondition's sql.raw(alias) usage.
+export function aliasedWonHsClosedWonDateSql(alias: string) {
+  const dealAlias = sql.raw(alias);
+  return castHsClosedWonDateSql(
+    sql`NULLIF(NULLIF(${dealAlias}.hubspot_extra_properties->>'hs_closed_won_date', ''), '0')`
+  );
+}
+
+// True iff the deal carries a usable HubSpot close-won date (non-null, non-empty,
+// non-"0"). Period-bounded Won queries (YTD/MTD/any date window) require this so
+// deals without a trustworthy close date are excluded from period totals; all-time
+// queries omit the guard so those deals still count in the all-time number (§6.1).
+function dealHasUsableWonDateSql() {
+  return sql`${dealWonHsClosedWonDateSql()} IS NOT NULL`;
+}
+
+export function aliasedHasUsableWonDateSql(alias: string) {
+  return sql`${aliasedWonHsClosedWonDateSql(alias)} IS NOT NULL`;
+}
+
+// §6.8 eligibility carve-out, narrowed. The original heuristic also dropped rows
+// where the win-date equalled bid_board_last_updated_at::date (a brittle de-dup
+// against bid-board mirror writes). On the hs_closed_won_date basis that
+// coincidence fires on 0 rows (hs dates ≤ 2026-05-07; bid_board_last_updated_at
+// sits at the reseed tail 2026-05-28) and there are 0 duplicate project_numbers
+// or hubspot_deal_ids among usable-won-date rows (both verified via read-only SQL
+// against office_dallas), so it could only over-drop. Eligibility is therefore
+// simply "has a usable won date".
 function dealWonWindowEligibilitySql() {
-  const date = dealWonWindowDateSql();
-  return sql`
-    ${date} IS NOT NULL
-    AND NOT (
-      ${deals.bidBoardLastUpdatedAt} IS NOT NULL
-      AND ${date}::date = ${deals.bidBoardLastUpdatedAt}::date
-    )
-  `;
+  return dealHasUsableWonDateSql();
 }
 
 function dealLostWindowDateSql() {
@@ -1424,6 +1479,19 @@ export async function getDeals(
   }
   if (filters.contractSignedTo) {
     conditions.push(sql`${contractSignedDateForReporting} <= ${filters.contractSignedTo}::date`);
+  }
+  // Won-period drill-down (§6.1/§6.3). Gate on the true HubSpot close-won date and,
+  // for this drill-down only, exclude on-hold + null-close-date deals so the list
+  // mirrors the Won card and the Director closed-period card for the same window.
+  if (filters.wonClosedFrom || filters.wonClosedTo) {
+    conditions.push(dealHasUsableWonDateSql());
+    conditions.push(aliasedActiveDealCountFilterSql("deals"));
+    if (filters.wonClosedFrom) {
+      conditions.push(sql`${dealWonHsClosedWonDateSql()} >= ${filters.wonClosedFrom}::date`);
+    }
+    if (filters.wonClosedTo) {
+      conditions.push(sql`${dealWonHsClosedWonDateSql()} <= ${filters.wonClosedTo}::date`);
+    }
   }
   addEstimateSentDateConditions(conditions, filters);
   if (filters.createdFrom) {
@@ -2315,7 +2383,7 @@ export async function getDealsForPipeline(
   const wonSignedDateUntil = toIsoDateOnly(terminalFilters.won.until);
   const wonPeriodFrom = toIsoDateOnly(wonPeriodRange.from);
   const wonPeriodTo = toIsoDateOnly(wonPeriodRange.to);
-  const wonWindowDate = dealWonWindowDateSql();
+  const wonWindowDate = dealWonHsClosedWonDateSql();
   const lostWindowDate = dealLostWindowDateSql();
   const pipelineCardsPerStageLimit = Math.max(
     1,
@@ -2393,6 +2461,16 @@ export async function getDealsForPipeline(
     );
     if (isWonTerminalStage) {
       stageConditions.push(canonicalWonStageId ? inArray(deals.stageId, wonStageIds) : eq(deals.stageId, stage.id));
+      // §6.3: exclude on-hold deals entirely from the Won column — count, value,
+      // AND the returned cards. (The summary value/activeCount already filter
+      // on-hold via FILTER; adding it to the WHERE also drops on-hold from
+      // totalCount and the card list, so on-hold is excluded everywhere.) Note
+      // is_active is intentionally NOT required here: terminal Won deals are
+      // legitimately inactive and stay counted (§6.7).
+      stageConditions.push(aliasedActiveDealCountFilterSql("deals"));
+      // §6.1: when a period window is requested, require a usable hs_closed_won_date
+      // (this is what dealWonWindowEligibilitySql now returns). All-time (no window)
+      // omits the guard, so null-date Won deals remain in the all-time total.
       if (wonSignedDateSince || wonSignedDateUntil || wonPeriodFrom || wonPeriodTo) {
         stageConditions.push(dealWonWindowEligibilitySql());
       }

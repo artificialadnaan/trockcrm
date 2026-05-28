@@ -52,6 +52,10 @@ import {
   aliasedEffectiveDealValueSql,
   aliasedEffectiveWonDealValueSql,
 } from "../shared/deal-value-sql.js";
+import {
+  aliasedWonHsClosedWonDateSql,
+  aliasedHasUsableWonDateSql,
+} from "../deals/service.js";
 
 type TenantDb = NodePgDatabase<typeof schema>;
 type ExecuteRows<T> = { rows: T[] } | T[];
@@ -2220,22 +2224,29 @@ async function getRecentCloses(
   }));
 }
 
-async function getWonCloseSummary(
+export async function getWonCloseSummary(
   tenantDb: TenantDb,
   options: { from: string; to: string } & DashboardScopeOptions
 ): Promise<{ count: number; totalValue: number }> {
   const repFilter = dealScopeFilterSql("d", options);
+  // §6.1: gate the period on the true HubSpot close-won date alone. The previous
+  // COALESCE(actual_close_date, ..., updated_at::date) inflated the card — the
+  // updated_at fallback counted any deal "touched in-period" as "won in-period".
+  // (Office-scope parity with the drill-down is a no-op in the only populated
+  // tenant — office_dallas captures all Won rows — and is deferred; see PR notes.)
+  const wonDate = aliasedWonHsClosedWonDateSql("d");
   const result = await tenantDb.execute(sql`
     SELECT
       COUNT(*) FILTER (WHERE ${aliasedActiveDealCountFilterSql("d")})::int AS won_count,
       COALESCE(SUM(${aliasedEffectiveWonDealValueSql("d")}), 0)::numeric AS won_value
     FROM ${deals} d
     JOIN ${pipelineStageConfig} psc ON psc.id = d.stage_id
-    WHERE d.is_active = true
+    WHERE COALESCE(d.is_test_data, false) = false
       AND ${aliasedActiveDealCountFilterSql("d")}
       AND psc.slug IN (${sql.join(WON_STAGE_SLUGS.map((slug) => sql`${slug}`), sql`, `)})
-      AND COALESCE(d.actual_close_date, d.contract_signed_date, d.contract_signed_at::date, d.updated_at::date) >= ${options.from}::date
-      AND COALESCE(d.actual_close_date, d.contract_signed_date, d.contract_signed_at::date, d.updated_at::date) <= ${options.to}::date
+      AND ${aliasedHasUsableWonDateSql("d")}
+      AND ${wonDate} >= ${options.from}::date
+      AND ${wonDate} <= ${options.to}::date
       ${repFilter}
   `);
 
