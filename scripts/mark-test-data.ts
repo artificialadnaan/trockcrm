@@ -204,8 +204,9 @@ async function main() {
         );
         snapshot.push({ id: p.id, name: p.name, pattern: p.pattern, before: p.before, after: res.rows[0].is_test_data });
       }
-      // Persist the rollback snapshot before COMMIT: if the write fails we ROLLBACK,
-      // so we never end up with a committed change and no rollback record.
+      // Persist the rollback snapshot before COMMIT so a write failure triggers ROLLBACK
+      // (we never commit a change without a rollback record). If COMMIT itself then fails,
+      // the file is an orphan describing changes that were rolled back — harmless.
       fs.writeFileSync(backupPath, JSON.stringify({ tenant, ranAt: new Date().toISOString(), updates: snapshot }, null, 2));
       await client.query("COMMIT");
     } catch (error) {
