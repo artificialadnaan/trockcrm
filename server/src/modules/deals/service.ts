@@ -928,21 +928,25 @@ function workspaceLostWindowEligibilitySql() {
 // Casts a HubSpot close-won date text value to `date`, yielding NULL (never
 // throwing) for any value that is not a real calendar date. NOTE:
 // `hubspot_extra_properties` is a DB-only JSONB column — intentionally NOT mapped
-// in the Drizzle schema and addressed here via raw SQL; confirmed present in
-// production (office_dallas), where hs_closed_won_date is populated on 268/332
-// active Won deals. It is a free-form JSON blob with no schema guarantee:
+// in the Drizzle schema because this feature only reads free-form HubSpot JSON via
+// raw SQL helpers. Migration 0139 is the schema source of truth for the column
+// across current and future tenant schemas. The hs_closed_won_date key is populated
+// in production (office_dallas) on most active Won deals, but the blob has no
+// schema guarantee:
 // production values are ISO-8601 UTC strings today (e.g. 2025-01-01T17:10:09.826Z),
 // but a stray non-date value (or a future epoch-ms sync) must yield NULL — excluded
 // from period reporting — rather than throw and break the ENTIRE Won card / drill-down.
 //
 // A value passes ONLY when ALL hold:
-//   1. The leading 10 chars match YYYY-MM-DD with month 01-12 and day 01-31 (regex
-//      prefix; this also guarantees the substr extractions below are digit strings,
-//      so the ::int casts cannot throw). Uses [0-9] not \d — drizzle's tagged
-//      template would strip the backslash.
+//   1. The leading 10 chars match YYYY-MM-DD with month 01-12 and day 01-31. Uses
+//      [0-9] not \d — drizzle's tagged template would strip the backslash.
 //   2. The year is >= 1. PostgreSQL dates have no year 0000; admitting it would
 //      still throw on ::date even though it passes the regex/month-day checks.
 //   3. The day is within the actual length of that month, accounting for leap years.
+// The regex is in an OUTER CASE, and all ::int / ::date casts live inside its THEN
+// branch. Do not collapse this into a boolean AND chain: PostgreSQL does not
+// guarantee left-to-right AND evaluation, so malformed text like "N/A" could hit
+// substr(...)::int before the regex rejects it.
 // A regex/range guard ALONE is insufficient: Postgres `::date` (and `to_date`/
 // `to_timestamp`) THROW on 2026-02-31 / 2026-04-31 / 2026-02-29-in-a-non-leap-year,
 // which a YYYY-MM-DD + bounded-month/day regex still admits. So we validate the
@@ -952,21 +956,23 @@ function workspaceLostWindowEligibilitySql() {
 function castHsClosedWonDateSql(rawValue: SQLWrapper) {
   return sql`CASE
     WHEN ${rawValue} ~ '^[0-9]{4}-(0[1-9]|1[0-2])-(0[1-9]|[12][0-9]|3[01])'
-      AND substr(${rawValue}, 1, 4)::int >= 1
-      AND substr(${rawValue}, 9, 2)::int <= (
-        CASE substr(${rawValue}, 6, 2)::int
-          WHEN 2 THEN CASE
-            WHEN substr(${rawValue}, 1, 4)::int % 4 = 0
-              AND (substr(${rawValue}, 1, 4)::int % 100 <> 0 OR substr(${rawValue}, 1, 4)::int % 400 = 0)
-            THEN 29 ELSE 28 END
-          WHEN 4 THEN 30
-          WHEN 6 THEN 30
-          WHEN 9 THEN 30
-          WHEN 11 THEN 30
-          ELSE 31
-        END
-      )
-    THEN substr(${rawValue}, 1, 10)::date
+    THEN CASE
+      WHEN substr(${rawValue}, 1, 4)::int >= 1
+        AND substr(${rawValue}, 9, 2)::int <= (
+          CASE substr(${rawValue}, 6, 2)::int
+            WHEN 2 THEN CASE
+              WHEN substr(${rawValue}, 1, 4)::int % 4 = 0
+                AND (substr(${rawValue}, 1, 4)::int % 100 <> 0 OR substr(${rawValue}, 1, 4)::int % 400 = 0)
+              THEN 29 ELSE 28 END
+            WHEN 4 THEN 30
+            WHEN 6 THEN 30
+            WHEN 9 THEN 30
+            WHEN 11 THEN 30
+            ELSE 31
+          END
+        )
+      THEN substr(${rawValue}, 1, 10)::date
+    END
   END`;
 }
 
@@ -1431,21 +1437,28 @@ export async function getDeals(
     return wonClosedStageIds;
   };
 
+  const hasWonClosedFilter = Boolean(filters.wonClosedFrom || filters.wonClosedTo);
+
   // Active filter defaults to true. Pipeline list/export can request mixed
   // visibility: active rows everywhere plus inactive rows only for terminal
-  // stage ids in scope, matching kanban semantics. Client-supplied
-  // inactiveStageIds are intersected with the server's terminal stage set
-  // so a crafted request cannot widen visibility to inactive non-terminal
-  // rows.
-  if (filters.isActive === "pipeline") {
+  // stage ids in scope, matching kanban semantics. Won-period drill-downs use
+  // the same mixed visibility regardless of the incoming isActive mode so the
+  // API path cannot silently drop inactive historical Won aliases counted by the
+  // card (§6.7). Client-supplied inactiveStageIds are intersected with the
+  // server's terminal stage set so a crafted request cannot widen visibility to
+  // inactive non-terminal rows.
+  if (filters.isActive === "pipeline" || (hasWonClosedFilter && filters.isActive !== "all")) {
     let terminalInactiveStageIds: string[] = [];
-    if (filters.inactiveStageIds?.length || filters.wonClosedFrom || filters.wonClosedTo) {
+    if (filters.inactiveStageIds?.length || hasWonClosedFilter) {
       const allStages = await listDealStages();
       const terminalStageIds = new Set(
         allStages.filter((stage) => isTerminalWorkspaceStage(stage)).map((stage) => stage.id)
       );
-      terminalInactiveStageIds = (filters.inactiveStageIds ?? []).filter((id) => terminalStageIds.has(id));
-      if (filters.wonClosedFrom || filters.wonClosedTo) {
+      terminalInactiveStageIds =
+        filters.isActive === "pipeline"
+          ? (filters.inactiveStageIds ?? []).filter((id) => terminalStageIds.has(id))
+          : [];
+      if (hasWonClosedFilter) {
         // Won-period drill-down must share the same row set as the Won card:
         // active Won rows plus inactive historical Won aliases. Keep this
         // aligned here so the generic pipeline visibility guard cannot drop an

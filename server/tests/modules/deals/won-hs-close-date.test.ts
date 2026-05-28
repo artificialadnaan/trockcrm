@@ -129,6 +129,20 @@ describe("won-period hs_closed_won_date SQL helpers", () => {
     expect(text).toContain("% 400"); // leap-year century rule
   });
 
+  it("guards casts behind a nested regex CASE so malformed text never reaches ::int or ::date", async () => {
+    const { aliasedWonHsClosedWonDateSql } = await import("../../../src/modules/deals/service.js");
+    const text = extractSqlText(aliasedWonHsClosedWonDateSql("d")).toLowerCase();
+    const regexIndex = text.indexOf("~ '^[0-9]{4}");
+    const nestedCaseIndex = text.indexOf("then case", regexIndex);
+    const firstIntCastIndex = text.indexOf("::int");
+    const dateCastIndex = text.indexOf("::date");
+
+    expect(regexIndex).toBeGreaterThanOrEqual(0);
+    expect(nestedCaseIndex).toBeGreaterThan(regexIndex);
+    expect(firstIntCastIndex).toBeGreaterThan(nestedCaseIndex);
+    expect(dateCastIndex).toBeGreaterThan(nestedCaseIndex);
+  });
+
   it("rejects year zero before casting so 0000-01-01 yields NULL instead of a PostgreSQL cast error", async () => {
     const { aliasedWonHsClosedWonDateSql } = await import("../../../src/modules/deals/service.js");
     const text = extractSqlText(aliasedWonHsClosedWonDateSql("d")).toLowerCase();
@@ -255,6 +269,28 @@ describe("getDeals won drill-down (CHANGE 3)", () => {
     expect(where).toContain("is_active");
     expect(where).toContain("stage-won");
     expect(where).toContain("stage-closed-won");
+  });
+
+  it("opts inactive Won-family aliases into wonClosedFrom/To even when isActive defaults to true", async () => {
+    const { tenantDb, chains } = buildListTenantDb();
+    const { getDeals } = await import("../../../src/modules/deals/service.js");
+
+    await getDeals(
+      tenantDb,
+      {
+        scope: "all",
+        wonClosedFrom: "2026-01-01",
+        wonClosedTo: "2026-05-31",
+      },
+      "director",
+      "director-1"
+    );
+
+    const where = rowsWhereSql(chains);
+    expect(where).toContain("is_active");
+    expect(where).toContain("stage-won");
+    expect(where).toContain("stage-closed-won");
+    expect(where).toContain("hs_closed_won_date");
   });
 
   it("constrains the won drill-down to Won stages and intersects with caller-supplied stageIds (Codex finding 2)", async () => {
