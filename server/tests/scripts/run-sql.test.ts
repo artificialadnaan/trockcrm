@@ -422,4 +422,75 @@ describe("run-sql.cjs", () => {
     expect(code).toBe(3);
     expect(createClient).not.toHaveBeenCalled();
   });
+
+  // Read-only transactions do NOT block NOTIFY / pg_notify(); a worker LISTENs on
+  // crm_events, so these must be rejected before execution (Codex round-5).
+  const NOTIFY_ERROR =
+    "SQL ERROR: NOTIFY and pg_notify() are not allowed in read-only SQL: read-only transactions do not block notifications and a worker consumes the crm_events channel.";
+
+  it("(o) rejects NOTIFY (with and without payload) and pg_notify() before running caller SQL", async () => {
+    const payloads = [
+      "NOTIFY crm_events, 'evt'; SELECT count(*) FROM placeholder.widgets;",
+      "NOTIFY crm_events;",
+      "SELECT pg_notify('crm_events', 'evt');",
+    ];
+    for (const payload of payloads) {
+      const client = makeFakeClient({
+        onQuery: (sql) => {
+          if (sql === payload) return Promise.reject(new Error("caller SQL should not be executed"));
+          if (sql === "BEGIN TRANSACTION READ ONLY") return { command: "BEGIN", rowCount: null, fields: [], rows: [] };
+          if (sql === "SELECT 1") return { command: "SELECT", rowCount: 1, fields: [{ name: "?column?" }], rows: [{ "?column?": 1 }] };
+          if (sql === "ROLLBACK") return { command: "ROLLBACK", rowCount: null, fields: [], rows: [] };
+          return { command: "SELECT", rowCount: 0, fields: [], rows: [] };
+        },
+      });
+      const { deps, error } = makeDeps({ argv: ["node", "scripts/run-sql.cjs", payload], client });
+
+      const code = await runSql.main(deps);
+
+      expect(code).toBe(1);
+      expect(error).toHaveBeenCalledWith(NOTIFY_ERROR);
+      // Caller SQL is never executed: it is blocked between SELECT 1 and ROLLBACK.
+      expect(client.calls).toEqual([
+        { method: "connect" },
+        { method: "query", sql: "BEGIN TRANSACTION READ ONLY" },
+        { method: "query", sql: "SELECT 1" },
+        { method: "query", sql: "ROLLBACK" },
+        { method: "end" },
+      ]);
+    }
+  });
+
+  it("(p) does NOT reject pg_notify( / NOTIFY appearing only in a string literal or comment, nor a column named notify_*", async () => {
+    const payloads = [
+      "SELECT 'pg_notify(' AS x;", // call token only inside a string literal
+      "SELECT count(*) FROM placeholder.widgets /* pg_notify( */;", // call token only inside a comment
+      "SELECT 'NOTIFY crm_events' AS x;", // NOTIFY keyword only inside a string literal
+      "SELECT notify_column FROM placeholder.widgets;", // identifier merely containing "notify"
+    ];
+    for (const payload of payloads) {
+      const client = makeFakeClient({
+        onQuery: (sql) => {
+          if (sql === "BEGIN TRANSACTION READ ONLY") return { command: "BEGIN", rowCount: null, fields: [], rows: [] };
+          if (sql === "SELECT 1") return { command: "SELECT", rowCount: 1, fields: [{ name: "?column?" }], rows: [{ "?column?": 1 }] };
+          if (sql === payload) return { command: "SELECT", rowCount: 1, fields: [{ name: "x" }], rows: [{ x: 1 }] };
+          if (sql === "COMMIT") return { command: "COMMIT", rowCount: null, fields: [], rows: [] };
+          return Promise.reject(new Error("unexpected query"));
+        },
+      });
+      const { deps, error } = makeDeps({ argv: ["node", "scripts/run-sql.cjs", payload], client });
+
+      const code = await runSql.main(deps);
+
+      expect(code).toBe(0);
+      expect(error).not.toHaveBeenCalled();
+      // Caller SQL runs and the transaction commits — the false-positive text was masked away.
+      expect(client.calls.filter((c) => c.method === "query").map((c) => c.sql)).toEqual([
+        "BEGIN TRANSACTION READ ONLY",
+        "SELECT 1",
+        payload,
+        "COMMIT",
+      ]);
+    }
+  });
 });

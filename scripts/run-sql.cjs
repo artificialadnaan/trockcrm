@@ -27,6 +27,9 @@
  *   the mode before the first data statement. Transaction-boundary statements
  *   are rejected before execution so user SQL cannot COMMIT/ROLLBACK out of the
  *   wrapper. Any accidental INSERT/UPDATE/DELETE/DDL is rejected by the server.
+ *   NOTIFY and pg_notify() are rejected before execution too: PostgreSQL
+ *   read-only mode does NOT block notifications, and a worker consumes the
+ *   crm_events channel, so they would be real production side effects.
  *
  * EXAMPLE
  *   node scripts/run-sql.cjs "SELECT count(*) FROM office_dallas.deals;"
@@ -178,11 +181,19 @@ function maskSqlLiteralsAndComments(sql) {
   return out;
 }
 
-function assertNoTransactionBoundaryStatements(sql) {
-  const statements = maskSqlLiteralsAndComments(sql)
+// Split SQL into normalized, lower-cased statements with string literals and
+// comments already blanked out (see maskSqlLiteralsAndComments). Shared by the
+// transaction-boundary check and the side-effecting-statement check so both see
+// only real tokens — never text that merely appears inside a string or comment.
+function maskedStatements(sql) {
+  return maskSqlLiteralsAndComments(sql)
     .split(';')
     .map((statement) => statement.trim().replace(/\s+/g, ' ').toLowerCase())
     .filter(Boolean);
+}
+
+function assertNoTransactionBoundaryStatements(sql) {
+  const statements = maskedStatements(sql);
 
   // SAVEPOINT / RELEASE SAVEPOINT / ROLLBACK TO SAVEPOINT do not end the parent
   // READ ONLY transaction, so they are not escape vectors and remain allowed.
@@ -195,16 +206,54 @@ function assertNoTransactionBoundaryStatements(sql) {
   }
 }
 
+// Block NOTIFY and pg_notify() even though the wrapper runs READ ONLY.
+// PostgreSQL read-only mode prevents durable data changes but does NOT block
+// notifications: NOTIFY events are queued and delivered on COMMIT, and a worker
+// LISTENs on the crm_events channel (worker/src/listener.ts), so a payload like
+// `NOTIFY crm_events, '...'` or `SELECT pg_notify('crm_events', '...')` would
+// commit and fire a real production side effect from a tool that claims to be
+// read-only.
+//   - NOTIFY is its own statement -> caught by a prefix-anchored ^notify match.
+//     The anchor means an identifier like notify_col (which has no word boundary
+//     after "notify") and any SELECT that merely references such a column are
+//     NOT flagged.
+//   - pg_notify() is a function call inside another statement (typically
+//     SELECT pg_notify(...)), so the statement still starts with "select" and
+//     the prefix match cannot see it. It is caught by a separate scan for the
+//     pg_notify( call token. Masking runs first (via maskedStatements), so the
+//     literal text 'pg_notify(' inside a string or a comment is blanked out and
+//     does not trigger a false positive.
+//
+// Defensive sweep: pg_notify is the only side-effecting function with a live
+// consumer in this codebase, so it is the one we explicitly block. Functions
+// that write durable data are already rejected by the server inside a READ ONLY
+// transaction. The pg_advisory_lock* family takes session/transaction locks but
+// writes nothing durable and has no listener here, so it is intentionally left
+// allowed (revisit if a consumer is added). The structural fix that retires all
+// of these string checks is a SELECT-only database role (tracked separately).
+function assertNoSideEffectingStatements(sql) {
+  const statements = maskedStatements(sql);
+  const forbiddenStatement = /^notify\b/; // NOTIFY channel [, payload]
+  const forbiddenCall = /pg_notify\s*\(/; // SELECT ... pg_notify(...) ...
+  if (statements.some((statement) => forbiddenStatement.test(statement) || forbiddenCall.test(statement))) {
+    throw new Error(
+      'NOTIFY and pg_notify() are not allowed in read-only SQL: read-only transactions do not block notifications and a worker consumes the crm_events channel.',
+    );
+  }
+}
+
 // BEGIN TRANSACTION READ ONLY is the structural read-only guarantee. The
 // sentinel SELECT is intentionally before user SQL: it freezes transaction
 // characteristics so PostgreSQL rejects SET TRANSACTION READ WRITE attempts.
 // Boundary statements are blocked so user SQL cannot COMMIT out and continue in
-// a new transaction.
+// a new transaction. NOTIFY / pg_notify() are blocked too because read-only mode
+// does not stop them and a worker consumes the crm_events channel.
 async function runQuery(client, sql) {
   await client.query('BEGIN TRANSACTION READ ONLY');
   try {
     await client.query('SELECT 1');
     assertNoTransactionBoundaryStatements(sql);
+    assertNoSideEffectingStatements(sql);
     const result = await client.query(sql);
     await client.query('COMMIT');
     return result;
