@@ -74,13 +74,15 @@ describe("run-sql.cjs", () => {
     expect(createClient).not.toHaveBeenCalled();
   });
 
-  it("(b) issues SET default_transaction_read_only = on BEFORE the caller's SQL", async () => {
+  it("(b) wraps the caller's SQL in a transaction-level READ ONLY transaction", async () => {
     const { deps, client } = makeDeps();
     const code = await runSql.main(deps);
     expect(code).toBe(0);
     const queries = client.calls.filter((c) => c.method === "query").map((c) => c.sql);
-    expect(queries[0]).toBe("SET default_transaction_read_only = on");
-    expect(queries[1]).toBe(FIXTURE_SQL);
+    expect(queries[0]).toBe("BEGIN TRANSACTION READ ONLY");
+    expect(queries[1]).toBe("SELECT 1");
+    expect(queries[2]).toBe(FIXTURE_SQL);
+    expect(queries[3]).toBe("COMMIT");
   });
 
   it("(c) formats output as { command, rowCount, fields, rows } JSON", async () => {
@@ -101,8 +103,8 @@ describe("run-sql.cjs", () => {
     const { deps, log } = makeDeps({
       client: makeFakeClient({
         onQuery: (sql) =>
-          sql.startsWith("SET")
-            ? { command: "SET", rowCount: null, rows: [] }
+          sql === "BEGIN TRANSACTION READ ONLY" || sql === "COMMIT"
+            ? { command: sql.split(" ")[0], rowCount: null, fields: [], rows: [] }
             : { command: "SELECT", rowCount: 1, fields: [{ name: "count" }], rows: [{ count: "1193" }] },
       }),
     });
@@ -115,10 +117,113 @@ describe("run-sql.cjs", () => {
     });
   });
 
-  it("(d) returns exit code 1 and cleans up the connection on a query error", async () => {
+  it("(d) preserves fields for each result in multi-statement output", () => {
+    const out = runSql.formatResult([
+      {
+        command: "SELECT",
+        rowCount: 1,
+        fields: [{ name: "a" }],
+        rows: [{ a: 1 }],
+      },
+      {
+        command: "SELECT",
+        rowCount: 1,
+        fields: [{ name: "b" }],
+        rows: [{ b: 2 }],
+      },
+    ]);
+
+    const entries = out.split("\n").map((line: string) => JSON.parse(line));
+    expect(entries).toEqual([
+      { command: "SELECT", rowCount: 1, fields: ["a"], rows: [{ a: 1 }] },
+      { command: "SELECT", rowCount: 1, fields: ["b"], rows: [{ b: 2 }] },
+    ]);
+    expect(Object.keys(entries[0])).toEqual(["command", "rowCount", "fields", "rows"]);
+    expect(Object.keys(entries[1])).toEqual(["command", "rowCount", "fields", "rows"]);
+  });
+
+  it("(e) rejects SET TRANSACTION READ WRITE bypass attempts and rolls back", async () => {
+    const payload = "SET TRANSACTION READ WRITE; CREATE TABLE test_should_not_exist (id int);";
+    let readOnlyTransactionStarted = false;
+    let transactionCharacteristicsFrozen = false;
     const client = makeFakeClient({
       onQuery: (sql) => {
-        if (sql.startsWith("SET")) return { command: "SET", rowCount: null, rows: [] };
+        if (sql === "BEGIN TRANSACTION READ ONLY") {
+          readOnlyTransactionStarted = true;
+          return { command: "BEGIN", rowCount: null, fields: [], rows: [] };
+        }
+        if (sql === "SELECT 1" && readOnlyTransactionStarted) {
+          transactionCharacteristicsFrozen = true;
+          return { command: "SELECT", rowCount: 1, fields: [{ name: "?column?" }], rows: [{ "?column?": 1 }] };
+        }
+        if (sql === payload && readOnlyTransactionStarted && transactionCharacteristicsFrozen) {
+          return Promise.reject(new Error("cannot set transaction read-write mode inside a read-only transaction"));
+        }
+        if (sql === "ROLLBACK") {
+          readOnlyTransactionStarted = false;
+          transactionCharacteristicsFrozen = false;
+          return { command: "ROLLBACK", rowCount: null, fields: [], rows: [] };
+        }
+        return { command: "SELECT", rowCount: 0, fields: [], rows: [] };
+      },
+    });
+    const { deps, error } = makeDeps({
+      argv: ["node", "scripts/run-sql.cjs", payload],
+      client,
+    });
+
+    const code = await runSql.main(deps);
+
+    expect(code).toBe(1);
+    expect(error).toHaveBeenCalledWith(
+      "SQL ERROR: cannot set transaction read-write mode inside a read-only transaction",
+    );
+    expect(client.calls).toEqual([
+      { method: "connect" },
+      { method: "query", sql: "BEGIN TRANSACTION READ ONLY" },
+      { method: "query", sql: "SELECT 1" },
+      { method: "query", sql: payload },
+      { method: "query", sql: "ROLLBACK" },
+      { method: "end" },
+    ]);
+    expect(client.query).not.toHaveBeenCalledWith("COMMIT");
+  });
+
+  it("(f) rejects COMMIT escape attempts before running caller SQL", async () => {
+    const payload = "COMMIT; CREATE TABLE test_should_not_exist (id int);";
+    const client = makeFakeClient({
+      onQuery: (sql) => {
+        if (sql === payload) return Promise.reject(new Error("caller SQL should not be executed"));
+        if (sql === "BEGIN TRANSACTION READ ONLY") return { command: "BEGIN", rowCount: null, fields: [], rows: [] };
+        if (sql === "SELECT 1") return { command: "SELECT", rowCount: 1, fields: [{ name: "?column?" }], rows: [{ "?column?": 1 }] };
+        if (sql === "ROLLBACK") return { command: "ROLLBACK", rowCount: null, fields: [], rows: [] };
+        return { command: "SELECT", rowCount: 0, fields: [], rows: [] };
+      },
+    });
+    const { deps, error } = makeDeps({
+      argv: ["node", "scripts/run-sql.cjs", payload],
+      client,
+    });
+
+    const code = await runSql.main(deps);
+
+    expect(code).toBe(1);
+    expect(error).toHaveBeenCalledWith("SQL ERROR: Transaction boundary statements are not allowed in read-only SQL.");
+    expect(client.calls).toEqual([
+      { method: "connect" },
+      { method: "query", sql: "BEGIN TRANSACTION READ ONLY" },
+      { method: "query", sql: "SELECT 1" },
+      { method: "query", sql: "ROLLBACK" },
+      { method: "end" },
+    ]);
+  });
+
+  it("(g) returns exit code 1 and cleans up the connection on a query error", async () => {
+    const client = makeFakeClient({
+      onQuery: (sql) => {
+        if (sql === "BEGIN TRANSACTION READ ONLY") return { command: "BEGIN", rowCount: null, fields: [], rows: [] };
+        if (sql === "SELECT 1") return { command: "SELECT", rowCount: 1, fields: [{ name: "?column?" }], rows: [{ "?column?": 1 }] };
+        if (sql === "ROLLBACK") return { command: "ROLLBACK", rowCount: null, fields: [], rows: [] };
         return Promise.reject(new Error("relation does not exist"));
       },
     });
@@ -126,10 +231,16 @@ describe("run-sql.cjs", () => {
     const code = await runSql.main(deps);
     expect(code).toBe(1);
     expect(error).toHaveBeenCalledWith("SQL ERROR: relation does not exist");
+    expect(client.calls.filter((c) => c.method === "query").map((c) => c.sql)).toEqual([
+      "BEGIN TRANSACTION READ ONLY",
+      "SELECT 1",
+      FIXTURE_SQL,
+      "ROLLBACK",
+    ]);
     expect(client.end).toHaveBeenCalledTimes(1);
   });
 
-  it("(e) prefers DATABASE_PUBLIC_URL when both it and CRM_DATABASE_URL are set", () => {
+  it("(h) prefers DATABASE_PUBLIC_URL when both it and CRM_DATABASE_URL are set", () => {
     expect(
       runSql.resolveConnectionString({
         DATABASE_PUBLIC_URL: "postgresql://public/db",
@@ -141,7 +252,7 @@ describe("run-sql.cjs", () => {
     ).toBe("postgresql://crm/db");
   });
 
-  it("(f) never reads DATABASE_URL — even when it is the only variable set", async () => {
+  it("(i) never reads DATABASE_URL — even when it is the only variable set", async () => {
     expect(
       runSql.resolveConnectionString({ DATABASE_URL: "postgresql://internal/db" }),
     ).toBe("");

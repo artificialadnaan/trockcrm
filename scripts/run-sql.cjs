@@ -20,10 +20,13 @@
  *   overrides an exported variable).
  *
  * READ-ONLY GUARANTEE
- *   `SET default_transaction_read_only = on` is issued on the session BEFORE the
- *   caller's SQL runs, so any accidental INSERT/UPDATE/DELETE/DDL is rejected by
- *   the server. This is enforced at the connection level, not by string-matching
- *   the SQL.
+ *   The caller's SQL is wrapped in `BEGIN TRANSACTION READ ONLY` / `COMMIT`.
+ *   After BEGIN, the script issues a harmless sentinel SELECT before user SQL.
+ *   That freezes PostgreSQL transaction characteristics so a later
+ *   `SET TRANSACTION READ WRITE` in user SQL is rejected instead of overriding
+ *   the mode before the first data statement. Transaction-boundary statements
+ *   are rejected before execution so user SQL cannot COMMIT/ROLLBACK out of the
+ *   wrapper. Any accidental INSERT/UPDATE/DELETE/DDL is rejected by the server.
  *
  * EXAMPLE
  *   node scripts/run-sql.cjs "SELECT count(*) FROM office_dallas.deals;"
@@ -82,7 +85,14 @@ function resolveConnectionString(env) {
 function formatResult(res) {
   if (Array.isArray(res)) {
     return res
-      .map((r) => JSON.stringify({ command: r.command, rowCount: r.rowCount, rows: r.rows }))
+      .map((r) =>
+        JSON.stringify({
+          command: r.command,
+          rowCount: r.rowCount,
+          fields: (r.fields || []).map((f) => f.name),
+          rows: r.rows,
+        })
+      )
       .join('\n');
   }
   return JSON.stringify(
@@ -97,10 +107,110 @@ function formatResult(res) {
   );
 }
 
-// Enforce read-only on the session BEFORE running the caller's SQL.
+function maskSqlLiteralsAndComments(sql) {
+  let out = '';
+  for (let i = 0; i < sql.length; i += 1) {
+    const ch = sql[i];
+    const next = sql[i + 1];
+
+    if (ch === "'" || ch === '"') {
+      const quote = ch;
+      out += ' ';
+      i += 1;
+      while (i < sql.length) {
+        out += ' ';
+        if (sql[i] === quote) {
+          if (quote === "'" && sql[i + 1] === "'") {
+            i += 2;
+            out += ' ';
+            continue;
+          }
+          break;
+        }
+        i += 1;
+      }
+      continue;
+    }
+
+    if (ch === '-' && next === '-') {
+      out += '  ';
+      i += 2;
+      while (i < sql.length && sql[i] !== '\n') {
+        out += ' ';
+        i += 1;
+      }
+      if (i < sql.length) out += '\n';
+      continue;
+    }
+
+    if (ch === '/' && next === '*') {
+      out += '  ';
+      i += 2;
+      while (i < sql.length) {
+        out += ' ';
+        if (sql[i] === '*' && sql[i + 1] === '/') {
+          out += ' ';
+          i += 1;
+          break;
+        }
+        i += 1;
+      }
+      continue;
+    }
+
+    if (ch === '$') {
+      const rest = sql.slice(i);
+      const match = rest.match(/^\$[A-Za-z_][A-Za-z0-9_]*\$|^\$\$/);
+      if (match) {
+        const tag = match[0];
+        const end = sql.indexOf(tag, i + tag.length);
+        if (end !== -1) {
+          const length = end + tag.length - i;
+          out += ' '.repeat(length);
+          i += length - 1;
+          continue;
+        }
+      }
+    }
+
+    out += ch;
+  }
+  return out;
+}
+
+function assertNoTransactionBoundaryStatements(sql) {
+  const statements = maskSqlLiteralsAndComments(sql)
+    .split(';')
+    .map((statement) => statement.trim().replace(/\s+/g, ' ').toLowerCase())
+    .filter(Boolean);
+
+  const forbidden = /^(begin\b|start\s+transaction\b|commit\b|rollback\b|end\b)/;
+  if (statements.some((statement) => forbidden.test(statement))) {
+    throw new Error('Transaction boundary statements are not allowed in read-only SQL.');
+  }
+}
+
+// BEGIN TRANSACTION READ ONLY is the structural read-only guarantee. The
+// sentinel SELECT is intentionally before user SQL: it freezes transaction
+// characteristics so PostgreSQL rejects SET TRANSACTION READ WRITE attempts.
+// Boundary statements are blocked so user SQL cannot COMMIT out and continue in
+// a new transaction.
 async function runQuery(client, sql) {
-  await client.query('SET default_transaction_read_only = on');
-  return client.query(sql);
+  await client.query('BEGIN TRANSACTION READ ONLY');
+  try {
+    await client.query('SELECT 1');
+    assertNoTransactionBoundaryStatements(sql);
+    const result = await client.query(sql);
+    await client.query('COMMIT');
+    return result;
+  } catch (err) {
+    try {
+      await client.query('ROLLBACK');
+    } catch (_) {
+      // best-effort rollback; preserve the original query error
+    }
+    throw err;
+  }
 }
 
 // Dependency-injected entry point. Returns the intended process exit code so the
