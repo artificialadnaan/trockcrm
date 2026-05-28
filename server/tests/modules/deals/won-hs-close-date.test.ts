@@ -112,6 +112,21 @@ describe("won-period hs_closed_won_date SQL helpers", () => {
     expect(text).toContain("hs_closed_won_date");
     expect(text).toContain("is not null");
   });
+
+  it("validates the calendar date (days-in-month + leap year) so a value like 2026-02-31 is rejected without throwing (Codex finding 1)", async () => {
+    const { aliasedWonHsClosedWonDateSql } = await import("../../../src/modules/deals/service.js");
+    const text = extractSqlText(aliasedWonHsClosedWonDateSql("d")).toLowerCase();
+    // The day is checked against the month's actual length before any cast: a
+    // YYYY-MM-DD + bounded-month/day regex alone still admits 2026-02-31 / 2026-04-31
+    // / 2026-02-29-in-a-non-leap-year, all of which `::date` THROWS on (and so does
+    // to_date — the round-trip approach is not viable). Behavioural proof
+    // (2026-02-31 & 2025-13-45 -> NULL, 2024-02-29 & ISO -> date) is in the PR's
+    // read-only SELECT-from-VALUES verification; here we assert the guard is wired.
+    expect(text).toContain("substr");
+    expect(text).toContain("when 2 then"); // February branch of the month-length CASE
+    expect(text).toContain("% 4"); // leap-year divisibility test
+    expect(text).toContain("% 400"); // leap-year century rule
+  });
 });
 
 describe("getDealsForPipeline Won branch (CHANGE 2 + 5)", () => {
@@ -159,6 +174,12 @@ describe("getDealsForPipeline Won branch (CHANGE 2 + 5)", () => {
 });
 
 describe("getDeals won drill-down (CHANGE 3)", () => {
+  beforeEach(() => {
+    // listDealStages() (used to resolve the Won-stage constraint, finding 2) reads
+    // the mocked global db; feed it the stage set.
+    dbState.responses = [WON_STAGES];
+  });
+
   function buildListTenantDb() {
     const chains: any[] = [];
     const tenantDb = {
@@ -196,6 +217,28 @@ describe("getDeals won drill-down (CHANGE 3)", () => {
     expect(where).toContain("hs_closed_won_date");
     expect(where).toContain("is not null");
     expect(where).toContain("on_hold");
+    // Finding 2: the drill-down is constrained to the canonical Won-family stages,
+    // so it matches the Won card exactly (a previously-Won deal now in a non-Won
+    // active stage is excluded).
+    expect(where).toContain("stage-won");
+  });
+
+  it("constrains the won drill-down to Won stages and intersects with caller-supplied stageIds (Codex finding 2)", async () => {
+    const { tenantDb, chains } = buildListTenantDb();
+    const { getDeals } = await import("../../../src/modules/deals/service.js");
+
+    await getDeals(
+      tenantDb,
+      { scope: "all", wonClosedFrom: "2026-01-01", stageIds: ["stage-open"] },
+      "director",
+      "director-1"
+    );
+
+    const where = rowsWhereSql(chains);
+    // Both the caller's stage filter AND the Won-stage constraint are present (AND-ed),
+    // so an explicit non-Won stage + won-period window intersects to no rows.
+    expect(where).toContain("stage-open");
+    expect(where).toContain("stage-won");
   });
 
   it("contractSignedFrom/To stays on contract_signed (commissions surface, §6.5) and does not use hs_closed_won_date", async () => {

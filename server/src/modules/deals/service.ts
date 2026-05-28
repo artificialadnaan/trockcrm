@@ -932,22 +932,46 @@ function workspaceLostWindowEligibilitySql() {
   `;
 }
 
-// Casts a HubSpot close-won date text value to `date`, but ONLY when it looks like
-// a date (starts with YYYY-MM-DD). NOTE: `hubspot_extra_properties` is a DB-only
-// JSONB column — it is intentionally NOT mapped in the Drizzle schema and is
-// addressed here via raw SQL; it is confirmed present in production (office_dallas)
-// where hs_closed_won_date is populated on 268/332 active Won deals. It is a
-// free-form JSON blob with no schema guarantee: production values are ISO-8601 UTC
-// strings today (e.g.
-// 2025-01-01T17:10:09.826Z, which `::date` reads as the as-written calendar date —
-// session is UTC and a `date` cast does not rotate by zone), but a stray non-date
-// value (or a future epoch-ms sync) must yield NULL — excluded from period reporting
-// — rather than throw and break the ENTIRE Won query. The regex bounds month (01-12)
-// and day (01-31) — not just the YYYY-MM-DD shape — so range-garbage like 2025-13-45,
-// 0000-00-00, or an epoch-ms string never reaches the throwing `::date` cast. (Uses
-// [0-9], not \d: drizzle's tagged template would strip the backslash.)
+// Casts a HubSpot close-won date text value to `date`, yielding NULL (never
+// throwing) for any value that is not a real calendar date. NOTE:
+// `hubspot_extra_properties` is a DB-only JSONB column — intentionally NOT mapped
+// in the Drizzle schema and addressed here via raw SQL; confirmed present in
+// production (office_dallas), where hs_closed_won_date is populated on 268/332
+// active Won deals. It is a free-form JSON blob with no schema guarantee:
+// production values are ISO-8601 UTC strings today (e.g. 2025-01-01T17:10:09.826Z),
+// but a stray non-date value (or a future epoch-ms sync) must yield NULL — excluded
+// from period reporting — rather than throw and break the ENTIRE Won card / drill-down.
+//
+// A value passes ONLY when BOTH hold:
+//   1. The leading 10 chars match YYYY-MM-DD with month 01-12 and day 01-31 (regex
+//      prefix; this also guarantees the substr extractions below are digit strings,
+//      so the ::int casts cannot throw). Uses [0-9] not \d — drizzle's tagged
+//      template would strip the backslash.
+//   2. The day is within the actual length of that month, accounting for leap years.
+// A regex/range guard ALONE is insufficient: Postgres `::date` (and `to_date`/
+// `to_timestamp`) THROW on 2026-02-31 / 2026-04-31 / 2026-02-29-in-a-non-leap-year,
+// which a YYYY-MM-DD + bounded-month/day regex still admits. So we validate the
+// day against the month length BEFORE the cast; only a genuine calendar date ever
+// reaches `::date`, which then cannot throw. (`to_date`-round-trip is NOT viable —
+// to_date itself raises on 2026-02-31 rather than rolling over in this PG version.)
 function castHsClosedWonDateSql(rawValue: SQLWrapper) {
-  return sql`CASE WHEN ${rawValue} ~ '^[0-9]{4}-(0[1-9]|1[0-2])-(0[1-9]|[12][0-9]|3[01])' THEN (${rawValue})::date END`;
+  return sql`CASE
+    WHEN ${rawValue} ~ '^[0-9]{4}-(0[1-9]|1[0-2])-(0[1-9]|[12][0-9]|3[01])'
+      AND substr(${rawValue}, 9, 2)::int <= (
+        CASE substr(${rawValue}, 6, 2)::int
+          WHEN 2 THEN CASE
+            WHEN substr(${rawValue}, 1, 4)::int % 4 = 0
+              AND (substr(${rawValue}, 1, 4)::int % 100 <> 0 OR substr(${rawValue}, 1, 4)::int % 400 = 0)
+            THEN 29 ELSE 28 END
+          WHEN 4 THEN 30
+          WHEN 6 THEN 30
+          WHEN 9 THEN 30
+          WHEN 11 THEN 30
+          ELSE 31
+        END
+      )
+    THEN substr(${rawValue}, 1, 10)::date
+  END`;
 }
 
 // Won-period membership date (locked decision §6.1): gate on the true HubSpot
@@ -1484,6 +1508,18 @@ export async function getDeals(
   // for this drill-down only, exclude on-hold + null-close-date deals so the list
   // mirrors the Won card and the Director closed-period card for the same window.
   if (filters.wonClosedFrom || filters.wonClosedTo) {
+    // Constrain to the canonical Won-family stages the card aggregates over, so a
+    // deal that was Won (has hs_closed_won_date) but later moved to a non-Won active
+    // stage is NOT counted here. Without this, the drill-down over-counts vs the card
+    // (the 1-deal residual seen in round-1). AND-ed with any caller-supplied stageIds
+    // above, so an explicit non-Won stageIds + wonClosedFrom/To intersects to none.
+    const wonStages = await listDealStages();
+    const wonStageIds = wonStages
+      .filter((stage) =>
+        WON_TERMINAL_STAGE_SLUGS.includes(stage.slug as (typeof WON_TERMINAL_STAGE_SLUGS)[number])
+      )
+      .map((stage) => stage.id);
+    conditions.push(wonStageIds.length > 0 ? inArray(deals.stageId, wonStageIds) : sql`false`);
     conditions.push(dealHasUsableWonDateSql());
     conditions.push(aliasedActiveDealCountFilterSql("deals"));
     if (filters.wonClosedFrom) {
