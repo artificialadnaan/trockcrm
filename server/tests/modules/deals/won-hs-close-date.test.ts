@@ -179,6 +179,47 @@ describe("getDealsForPipeline Won branch (CHANGE 2 + 5)", () => {
     expect(where).not.toContain("bid_board_last_updated_at");
   });
 
+  it("composes a VALID multi-bound Won-period WHERE: the date guard is built fresh in every position (eligibility, >=, <=), never one fragment reused across positions (production-500 regression)", async () => {
+    // YTD path: BOTH a lower and an upper Won-date bound are set, so the date
+    // guard must appear in three positions — IS NOT NULL (eligibility), >= lower,
+    // <= upper. The production 500 came from reusing ONE guard fragment object
+    // across the >= and <= positions; when the same SQL instance is interpolated
+    // more than once the composed SQL is corrupted (the reused instance is dropped
+    // on its later occurrence, leaving a comparison with no left-hand operand).
+    // extractSqlText models this exactly: its `seen` set renders a repeated SQL
+    // instance as "" on the 2nd+ encounter. So a shared fragment yields only TWO
+    // fully-rendered guards (eligibility + first bound); a correctly-fresh-per-site
+    // composition yields THREE. Prior tests only set a single bound, so they never
+    // exercised the reuse — this is the gap they left.
+    dbState.responses = [WON_STAGES];
+    const { tenantDb, chains } = buildPipelineTenantDb();
+    const { getDealsForPipeline } = await import("../../../src/modules/deals/service.js");
+
+    await getDealsForPipeline(tenantDb, "director", "director-1", {
+      activeOfficeId: null,
+      scope: "all",
+      previewLimit: 8,
+      wonSince: "2026-01-01",
+      wonUntil: "2026-05-28",
+    });
+
+    const where = wonSummaryWhereSql(chains);
+    // The full calendar-guard CASE begins with this regex anchor exactly once per
+    // fully-rendered guard. Three positions => three anchors. A single shared
+    // fragment collapses to two.
+    const guardRenders = (where.match(/\^\[0-9\]\{4\}/g) ?? []).length;
+    expect(guardRenders).toBe(3);
+    // Each date bound's left operand is a COMPLETE guard: the closing `END` of the
+    // CASE immediately precedes the comparison operator. A dropped/reused fragment
+    // would leave a dangling operator with no `END` before it (e.g. "... and  <= ...").
+    // (The harness renders bound params inline, so we don't assert a $n placeholder.)
+    expect(where).toMatch(/end\s*>=/);
+    expect(where).toMatch(/end\s*<=/);
+    // No scrambled/duplicated guard from interleaved reuse.
+    expect(where).not.toMatch(/then case\s+then case/);
+    expect(where).toContain("is not null");
+  });
+
   it("all-time (no period window) omits the usable-date guard so null-date Won deals still count, but still excludes on-hold", async () => {
     dbState.responses = [WON_STAGES];
     const { tenantDb, chains } = buildPipelineTenantDb();
