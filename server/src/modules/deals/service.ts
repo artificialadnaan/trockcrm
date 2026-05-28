@@ -2616,7 +2616,10 @@ export async function listDealStagePage(tenantDb: TenantDb, input: DealStagePage
   const pageSize = Math.max(1, Math.min(100, input.pageSize || 25));
   const offset = (page - 1) * pageSize;
   const scope = await buildDealWorkspaceScope(tenantDb, input, stage);
-  const stageSlugs = WON_TERMINAL_STAGE_SLUGS.includes(stage.slug as (typeof WON_TERMINAL_STAGE_SLUGS)[number])
+  const isWonTerminalStage = WON_TERMINAL_STAGE_SLUGS.includes(
+    stage.slug as (typeof WON_TERMINAL_STAGE_SLUGS)[number]
+  );
+  const stageSlugs = isWonTerminalStage
     ? WON_TERMINAL_STAGE_SLUGS
     : LOST_TERMINAL_STAGE_SLUGS.includes(stage.slug as (typeof LOST_TERMINAL_STAGE_SLUGS)[number])
       ? LOST_TERMINAL_STAGE_SLUGS
@@ -2633,6 +2636,12 @@ export async function listDealStagePage(tenantDb: TenantDb, input: DealStagePage
     sql`d.stage_id IN (${sqlList(stageIds)})`,
     excludeTestDataCondition("d"),
   ];
+
+  if (isWonTerminalStage) {
+    // Match the Won board/card row set: on-hold Won deals are excluded from
+    // Won reporting entirely, including the stage-page rows and pagination.
+    conditions.push(aliasedActiveDealCountFilterSql("d"));
+  }
 
   if (input.search?.trim()) {
     const searchTerm = `%${input.search.trim()}%`;

@@ -59,6 +59,11 @@ function orderBySql(sqlText: string) {
   return index >= 0 ? sqlText.slice(index) : sqlText;
 }
 
+function fromDealsWhereSql(sqlText: string) {
+  const index = sqlText.indexOf("from deals d");
+  return index >= 0 ? sqlText.slice(index) : sqlText;
+}
+
 function currentValueForRow(row: {
   on_hold?: boolean | null;
   bid_board_total_sales?: string | number | null;
@@ -323,6 +328,39 @@ describe("listDealStagePage", () => {
     expect(executedSql).not.toContain("contract_signed_at");
     expect(executedSql).not.toContain("contract_signed_date");
     expect(executedSql).not.toContain("bid_board_last_updated_at");
+  });
+
+  it("excludes on-hold Won terminal deals from stage-page rows and pagination totals", async () => {
+    dbState.responses = [
+      [{ id: "stage-won", slug: "won", name: "Won", displayOrder: 8, isTerminal: true }],
+    ];
+
+    const tenantDb = {
+      select: createOfficeScopeSelectMock(),
+      execute: vi.fn()
+        .mockResolvedValueOnce({ rows: [{ total_count: "1", active_count: "1", total_value: "875000" }] })
+        .mockResolvedValueOnce({ rows: [] }),
+    } as any;
+
+    const { listDealStagePage } = await import("../../../src/modules/deals/service.js");
+    await listDealStagePage(tenantDb, {
+      role: "admin",
+      userId: "admin-1",
+      activeOfficeId: "office-1",
+      scope: "all",
+      stageId: "stage-won",
+      page: 1,
+      pageSize: 25,
+      wonSince: "2026-01-01",
+      wonUntil: "2026-12-31",
+    } as any);
+
+    const countWhereSql = fromDealsWhereSql(extractSqlText(tenantDb.execute.mock.calls[0]?.[0]).toLowerCase());
+    const rowWhereSql = fromDealsWhereSql(extractSqlText(tenantDb.execute.mock.calls[1]?.[0]).toLowerCase());
+    for (const sqlText of [countWhereSql, rowWhereSql]) {
+      expect(sqlText).toContain("coalesce(d.on_hold, false) = false");
+      expect(sqlText).toContain("hs_closed_won_date");
+    }
   });
 
   it("uses active-pipeline current value source for lost terminal stage totals", async () => {
@@ -817,6 +855,33 @@ describe("listDealStagePage", () => {
     expect(countQueryText).toContain("stage_entered_at");
     expect(countQueryText).toContain("on_hold");
     expect(countQueryText).toContain("case");
+  });
+
+  it("does not add the Won on-hold row exclusion to non-Won stage page rows", async () => {
+    dbState.responses = [
+      [{ id: "stage-estimating", slug: "estimating", name: "Estimating", displayOrder: 4, isTerminal: false }],
+    ];
+
+    const tenantDb = {
+      select: createOfficeScopeSelectMock(),
+      execute: vi.fn()
+        .mockResolvedValueOnce({ rows: [{ total_count: "2", active_count: "1", total_value: "15000" }] })
+        .mockResolvedValueOnce({ rows: [] }),
+    } as any;
+
+    const { listDealStagePage } = await import("../../../src/modules/deals/service.js");
+    await listDealStagePage(tenantDb, {
+      role: "admin",
+      userId: "admin-1",
+      activeOfficeId: "office-1",
+      scope: "all",
+      stageId: "stage-estimating",
+      page: 1,
+      pageSize: 25,
+    } as any);
+
+    const rowWhereSql = fromDealsWhereSql(extractSqlText(tenantDb.execute.mock.calls[1]?.[0]).toLowerCase());
+    expect(rowWhereSql).not.toContain("coalesce(d.on_hold, false) = false");
   });
 
   it("keeps mine-scope stage drill-downs accessible for unassigned legacy deals", async () => {
