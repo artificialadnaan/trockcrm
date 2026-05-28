@@ -218,7 +218,64 @@ describe("run-sql.cjs", () => {
     ]);
   });
 
-  it("(g) returns exit code 1 and cleans up the connection on a query error", async () => {
+  it("(g) rejects ABORT escape attempts before running caller SQL", async () => {
+    const payload = "ABORT; CREATE TABLE test_should_not_exist_abort (id int);";
+    const client = makeFakeClient({
+      onQuery: (sql) => {
+        if (sql === payload) return Promise.reject(new Error("caller SQL should not be executed"));
+        if (sql === "BEGIN TRANSACTION READ ONLY") return { command: "BEGIN", rowCount: null, fields: [], rows: [] };
+        if (sql === "SELECT 1") return { command: "SELECT", rowCount: 1, fields: [{ name: "?column?" }], rows: [{ "?column?": 1 }] };
+        if (sql === "ROLLBACK") return { command: "ROLLBACK", rowCount: null, fields: [], rows: [] };
+        return { command: "SELECT", rowCount: 0, fields: [], rows: [] };
+      },
+    });
+    const { deps, error } = makeDeps({
+      argv: ["node", "scripts/run-sql.cjs", payload],
+      client,
+    });
+
+    const code = await runSql.main(deps);
+
+    expect(code).toBe(1);
+    expect(error).toHaveBeenCalledWith("SQL ERROR: Transaction boundary statements are not allowed in read-only SQL.");
+    expect(client.calls).toEqual([
+      { method: "connect" },
+      { method: "query", sql: "BEGIN TRANSACTION READ ONLY" },
+      { method: "query", sql: "SELECT 1" },
+      { method: "query", sql: "ROLLBACK" },
+      { method: "end" },
+    ]);
+  });
+
+  it("(h) permits savepoints because they stay inside the read-only transaction", async () => {
+    const payload = "SAVEPOINT s1; SELECT 1; ROLLBACK TO SAVEPOINT s1; RELEASE SAVEPOINT s1;";
+    const client = makeFakeClient({
+      onQuery: (sql) => {
+        if (sql === "BEGIN TRANSACTION READ ONLY") return { command: "BEGIN", rowCount: null, fields: [], rows: [] };
+        if (sql === "SELECT 1") return { command: "SELECT", rowCount: 1, fields: [{ name: "?column?" }], rows: [{ "?column?": 1 }] };
+        if (sql === payload) return { command: "SELECT", rowCount: 1, fields: [{ name: "?column?" }], rows: [{ "?column?": 1 }] };
+        if (sql === "COMMIT") return { command: "COMMIT", rowCount: null, fields: [], rows: [] };
+        return Promise.reject(new Error("unexpected query"));
+      },
+    });
+    const { deps, error } = makeDeps({
+      argv: ["node", "scripts/run-sql.cjs", payload],
+      client,
+    });
+
+    const code = await runSql.main(deps);
+
+    expect(code).toBe(0);
+    expect(error).not.toHaveBeenCalled();
+    expect(client.calls.filter((c) => c.method === "query").map((c) => c.sql)).toEqual([
+      "BEGIN TRANSACTION READ ONLY",
+      "SELECT 1",
+      payload,
+      "COMMIT",
+    ]);
+  });
+
+  it("(i) returns exit code 1 and cleans up the connection on a query error", async () => {
     const client = makeFakeClient({
       onQuery: (sql) => {
         if (sql === "BEGIN TRANSACTION READ ONLY") return { command: "BEGIN", rowCount: null, fields: [], rows: [] };
@@ -240,7 +297,7 @@ describe("run-sql.cjs", () => {
     expect(client.end).toHaveBeenCalledTimes(1);
   });
 
-  it("(h) prefers DATABASE_PUBLIC_URL when both it and CRM_DATABASE_URL are set", () => {
+  it("(j) prefers DATABASE_PUBLIC_URL when both it and CRM_DATABASE_URL are set", () => {
     expect(
       runSql.resolveConnectionString({
         DATABASE_PUBLIC_URL: "postgresql://public/db",
@@ -252,7 +309,7 @@ describe("run-sql.cjs", () => {
     ).toBe("postgresql://crm/db");
   });
 
-  it("(i) never reads DATABASE_URL — even when it is the only variable set", async () => {
+  it("(k) never reads DATABASE_URL — even when it is the only variable set", async () => {
     expect(
       runSql.resolveConnectionString({ DATABASE_URL: "postgresql://internal/db" }),
     ).toBe("");

@@ -184,7 +184,9 @@ function assertNoTransactionBoundaryStatements(sql) {
     .map((statement) => statement.trim().replace(/\s+/g, ' ').toLowerCase())
     .filter(Boolean);
 
-  const forbidden = /^(begin\b|start\s+transaction\b|commit\b|rollback\b|end\b)/;
+  // SAVEPOINT / RELEASE SAVEPOINT / ROLLBACK TO SAVEPOINT do not end the parent
+  // READ ONLY transaction, so they are not escape vectors and remain allowed.
+  const forbidden = /^(begin\b|start\s+transaction\b|commit\b|rollback\b(?!\s+to\b)|end\b|abort\b)/;
   if (statements.some((statement) => forbidden.test(statement))) {
     throw new Error('Transaction boundary statements are not allowed in read-only SQL.');
   }
