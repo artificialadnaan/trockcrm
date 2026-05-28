@@ -794,6 +794,8 @@ router.get("/", async (req, res, next) => {
     const createdTo = assertOptionalIsoDateQueryParam(req.query.createdTo, "createdTo");
     const estimateSentFrom = assertOptionalIsoDateQueryParam(req.query.estimateSentFrom, "estimateSentFrom");
     const estimateSentTo = assertOptionalIsoDateQueryParam(req.query.estimateSentTo, "estimateSentTo");
+    const wonClosedFrom = assertOptionalIsoDateQueryParam(req.query.wonClosedFrom, "wonClosedFrom");
+    const wonClosedTo = assertOptionalIsoDateQueryParam(req.query.wonClosedTo, "wonClosedTo");
     const isActiveFilter =
       req.query.isActive === "all"
         ? ("all" as const)
@@ -816,6 +818,8 @@ router.get("/", async (req, res, next) => {
       source: req.query.source as string | undefined,
       contractSignedFrom: req.query.contractSignedFrom as string | undefined,
       contractSignedTo: req.query.contractSignedTo as string | undefined,
+      wonClosedFrom,
+      wonClosedTo,
       estimateSentFrom,
       estimateSentTo,
       createdFrom,

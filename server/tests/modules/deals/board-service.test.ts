@@ -950,10 +950,15 @@ describe("getDealsForPipeline", () => {
     expect(containsValue(wonCardsChain?.where.mock.calls[0]?.[0], "2026-03-31")).toBe(true);
     expect(containsValue(wonSummaryChain?.where.mock.calls[0]?.[0], "2026-03-01")).toBe(true);
     expect(containsValue(wonSummaryChain?.where.mock.calls[0]?.[0], "2026-03-31")).toBe(true);
-    expect(extractSqlText(wonCardsChain?.where.mock.calls[0]?.[0])).toContain("contract_signed_at");
-    expect(extractSqlText(wonCardsChain?.where.mock.calls[0]?.[0])).toContain("contract_signed_date");
-    expect(extractSqlText(wonCardsChain?.where.mock.calls[0]?.[0])).toContain("bid_board_last_updated_at");
-    expect(extractSqlText(wonCardsChain?.where.mock.calls[0]?.[0])).not.toContain("stage_entered_at");
+    // Won-period now gates on the true HubSpot close-won date (§6.1), requires a
+    // usable (non-null) value, and no longer references contract_signed_* or the
+    // §6.8 bid_board_last_updated_at de-dup clause.
+    const wonCardsWhereText = extractSqlText(wonCardsChain?.where.mock.calls[0]?.[0]).toLowerCase();
+    expect(wonCardsWhereText).toContain("hs_closed_won_date");
+    expect(wonCardsWhereText).toContain("is not null");
+    expect(wonCardsWhereText).not.toContain("contract_signed");
+    expect(wonCardsWhereText).not.toContain("bid_board_last_updated_at");
+    expect(wonCardsWhereText).not.toContain("stage_entered_at");
     expect(extractSqlText(wonSummaryChain?.where.mock.calls[0]?.[0])).not.toContain("stage_entered_at");
     expect(selectedSqlText(wonSummaryChain, "activeCount")).toContain("on_hold");
     expect(selectedSqlText(wonSummaryChain, "totalValue")).toContain("filter");

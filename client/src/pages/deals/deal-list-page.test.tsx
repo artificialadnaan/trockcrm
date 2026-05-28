@@ -1369,8 +1369,10 @@ describe("DealListPage", () => {
     expect(mocks.dealsListSectionMock).toHaveBeenCalledWith(
       expect.objectContaining({
         baseFilters: expect.objectContaining({
-          contractSignedFrom: "2026-04-08",
-          contractSignedTo: "2026-04-30",
+          // Won drill-down now gates on the true HubSpot close-won date (§6.1),
+          // not contract_signed (which is reserved for the commissions surface).
+          wonClosedFrom: "2026-04-08",
+          wonClosedTo: "2026-04-30",
         }),
       })
     );
@@ -1495,7 +1497,7 @@ describe("DealListPage", () => {
     expect(bidBoardView.boardStageSlugs).toEqual(["estimating", "service_estimating"]);
   });
 
-  it("builds the closed won drill-down view with contract-signed date filters", () => {
+  it("builds the closed won drill-down view with hs-close-date period filters", () => {
     const view = getDashboardDealListView({
       filterParam: "won",
       periodParam: "qtd",
@@ -1505,9 +1507,11 @@ describe("DealListPage", () => {
     expect(view.filter).toBe("won");
     expect(view.title).toBe("Closed Won");
     expect(view.boardMode).toBe("won");
+    // §6.1: the Won drill-down period is gated on the true HubSpot close-won date,
+    // not contract_signed (reserved for the commissions surface, §6.5).
     expect(view.listBaseFilters).toMatchObject({
-      contractSignedFrom: "2026-04-01",
-      contractSignedTo: "2026-05-08",
+      wonClosedFrom: "2026-04-01",
+      wonClosedTo: "2026-05-08",
     });
     expect(view.listInitialSort).toEqual({ key: "contract_signed_date", dir: "desc" });
   });
@@ -1585,8 +1589,8 @@ describe("DealListPage", () => {
         scope: "all",
         initialSort: { key: "contract_signed_date", dir: "desc" },
         baseFilters: expect.objectContaining({
-          contractSignedFrom: "2026-04-01",
-          contractSignedTo: "2026-05-08",
+          wonClosedFrom: "2026-04-01",
+          wonClosedTo: "2026-05-08",
         }),
       })
     );
