@@ -545,6 +545,17 @@ function readListScope(value: unknown, role: string): "mine" | "team" | "all" {
   return value === "mine" || value === "team" || value === "all" ? value : "mine";
 }
 
+// Query params arrive as `string | string[] | undefined`. Reject the array form
+// (e.g. `?source=a&source=b`) with a 400 so a malformed request never reaches the
+// parameterized SQL and surfaces as a 500.
+function readOptionalStringParam(value: unknown, fieldName: string): string | undefined {
+  if (value == null || value === "") return undefined;
+  if (typeof value !== "string") {
+    throw new AppError(400, `${fieldName} must be a single value`);
+  }
+  return value;
+}
+
 function readStageInput(req: Parameters<typeof router.get>[1] extends never ? never : any) {
   const parseNumber = (value: unknown) => {
     const parsed = Number(value);
@@ -568,6 +579,8 @@ function readStageInput(req: Parameters<typeof router.get>[1] extends never ? ne
       "estimateSentTo"
     ),
     regionId: req.query.regionId as string | undefined,
+    source: readOptionalStringParam(req.query.source, "source"),
+    staleOnly: req.query.staleOnly === "true",
     workflowRoute: req.query.workflowRoute as string | undefined,
     updatedFrom: (req.query.updatedAfter as string | undefined) ?? (req.query.updatedFrom as string | undefined),
     updatedTo: (req.query.updatedBefore as string | undefined) ?? (req.query.updatedTo as string | undefined),

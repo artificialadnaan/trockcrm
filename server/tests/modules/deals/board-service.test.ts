@@ -256,6 +256,80 @@ describe("getDealsForPipeline", () => {
     expect(wonCardsChain?.limit).toHaveBeenCalledWith(8);
   });
 
+  it("applies office scope to every stage query when an active office is set", async () => {
+    dbState.responses = [
+      [
+        { id: "stage-estimating", slug: "estimating", name: "Estimating", displayOrder: 1, isTerminal: false, isActivePipeline: true },
+        { id: "stage-won", slug: "won", name: "Won", displayOrder: 2, isTerminal: true, isActivePipeline: true },
+      ],
+      // resolveActiveOfficeScope offices lookup (slug "dallas" => office code "dfw")
+      [{ slug: "dallas", name: "Dallas" }],
+    ];
+
+    const tenantChains: any[] = [];
+    const tenantDb = {
+      select: vi.fn((...selectArgs: unknown[]) => {
+        const chain = createChainableMock();
+        chain._selectArgs = selectArgs;
+        tenantChains.push(chain);
+        chain.then.mockImplementation((resolve: (value: any[]) => unknown) => resolve([]));
+        return chain;
+      }),
+    } as any;
+
+    const { getDealsForPipeline } = await import("../../../src/modules/deals/service.js");
+    await getDealsForPipeline(tenantDb, "director", "director-1", {
+      activeOfficeId: "office-1",
+      scope: "all",
+      previewLimit: 8,
+      wonSince: "2026-01-01",
+    });
+
+    const stageWhereSql = tenantChains
+      .map((chain) => extractSqlText(chain.where.mock.calls[0]?.[0]).toLowerCase())
+      .filter((text) => text.includes("stage_id"));
+    expect(stageWhereSql.length).toBeGreaterThan(0);
+    for (const sqlText of stageWhereSql) {
+      expect(sqlText).toContain("office_code");
+    }
+  });
+
+  it("excludes test-data deals from every stage query", async () => {
+    dbState.responses = [
+      [
+        { id: "stage-estimating", slug: "estimating", name: "Estimating", displayOrder: 1, isTerminal: false, isActivePipeline: true },
+        { id: "stage-won", slug: "won", name: "Won", displayOrder: 2, isTerminal: true, isActivePipeline: true },
+      ],
+    ];
+
+    const tenantChains: any[] = [];
+    const tenantDb = {
+      select: vi.fn((...selectArgs: unknown[]) => {
+        const chain = createChainableMock();
+        chain._selectArgs = selectArgs;
+        tenantChains.push(chain);
+        chain.then.mockImplementation((resolve: (value: any[]) => unknown) => resolve([]));
+        return chain;
+      }),
+    } as any;
+
+    const { getDealsForPipeline } = await import("../../../src/modules/deals/service.js");
+    await getDealsForPipeline(tenantDb, "director", "director-1", {
+      activeOfficeId: null,
+      scope: "all",
+      previewLimit: 8,
+      wonSince: "2026-01-01",
+    });
+
+    const stageWhereSql = tenantChains
+      .map((chain) => extractSqlText(chain.where.mock.calls[0]?.[0]).toLowerCase())
+      .filter((text) => text.includes("stage_id"));
+    expect(stageWhereSql.length).toBeGreaterThan(0);
+    for (const sqlText of stageWhereSql) {
+      expect(sqlText).toContain("is_test_data");
+    }
+  });
+
   it("uses the requested drill-down preview limit while keeping the full count", async () => {
     dbState.responses = [
       [

@@ -171,6 +171,9 @@ function applyWhere(rows: Row[], condition: unknown, usersState: Row[]) {
   }
 
   let filtered = rows;
+  if (conditionText.includes("is_test_data")) {
+    filtered = filtered.filter((row) => row.isTestData !== true);
+  }
   const hasLegacyOfficeFallback =
     conditionText.includes("office_code") &&
     conditionText.includes("assigned_rep") &&
@@ -348,6 +351,9 @@ function createTenantDb() {
         isActive: true,
         updatedAt: new Date("2026-05-07T12:00:00Z"),
       },
+      // Identical to deal-team-1 except for the test-data flag — proves the
+      // exclusion is what removes it, not scope/office filtering.
+      { id: "deal-test-data", assignedRepId: "rep-team-1", createdByUserId: "rep-team-1", officeCode: "dfw", isActive: true, isTestData: true, updatedAt: new Date("2026-05-07T12:00:00Z") },
     ],
     userOfficeAccess: [
       { userId: "rep-other-office", officeId: "office-1" },
@@ -418,6 +424,12 @@ describe("getDeals scope filtering", () => {
       "deal-legacy-office-fallback",
       "deal-company",
     ]);
+  });
+
+  it("excludes deals flagged as test data while keeping their non-test sibling", async () => {
+    const ids = await listIds({ role: "director", userId: "director-1", scope: "all" });
+    expect(ids).toContain("deal-team-1");
+    expect(ids).not.toContain("deal-test-data");
   });
 
   it("scope=all excludes legacy null-office deals assigned to a rep in a different office", async () => {

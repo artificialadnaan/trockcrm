@@ -197,6 +197,19 @@ function buildDealOfficeScopeCondition(
     : sql`false`;
 }
 
+// Excludes seeded/demo rows from production-facing deal reads. Matches the
+// `COALESCE(is_test_data, false) = false` pattern already used across the
+// reports and dashboard modules.
+//
+// NOTE: `is_active` is deliberately NOT bundled here. Terminal (Won/Lost) stage
+// queries intentionally include inactive deals, so forcing `is_active = true`
+// would drop closed deals from those aggregates. Each caller keeps its own
+// `is_active` handling; this only adds the uniformly-safe test-data exclusion.
+function excludeTestDataCondition(alias: string) {
+  const dealAlias = sql.raw(alias);
+  return sql`coalesce(${dealAlias}.is_test_data, false) = false`;
+}
+
 export interface DealFilters {
   search?: string;
   stageIds?: string[];
@@ -663,6 +676,8 @@ export interface DealStagePageInput extends DealBoardInput {
   estimateSentFrom?: string;
   estimateSentTo?: string;
   regionId?: string;
+  source?: string;
+  staleOnly?: boolean;
   workflowRoute?: string;
   updatedFrom?: string;
   updatedTo?: string;
@@ -1357,6 +1372,8 @@ export async function getDeals(
       const officeScope = await resolveActiveOfficeScope(tenantDb, filters.activeOfficeId);
       conditions.push(buildDealOfficeScopeCondition("deals", officeScope));
   }
+
+  conditions.push(excludeTestDataCondition("deals"));
 
   const mineVisibility = scope === "mine" ? await resolveMineVisibilityFeatures(tenantDb) : null;
 
@@ -2331,6 +2348,15 @@ export async function getDealsForPipeline(
   if (filters?.assignedRepId && !assignedRepFilterHandled) {
     commonConditions.push(eq(deals.assignedRepId, filters.assignedRepId));
   }
+
+  // Office scope: mirror getDeals so the kanban board and the drill-down list
+  // resolve the same set of deals for a multi-office viewer.
+  if (filters?.activeOfficeId) {
+    const officeScope = await resolveActiveOfficeScope(tenantDb, filters.activeOfficeId);
+    commonConditions.push(buildDealOfficeScopeCondition("deals", officeScope));
+  }
+
+  commonConditions.push(excludeTestDataCondition("deals"));
   addEstimateSentDateConditions(commonConditions, filters ?? {});
 
   const responseStages = stages.filter((stage) => {
@@ -2473,6 +2499,7 @@ export async function listDealStagePage(tenantDb: TenantDb, input: DealStagePage
   const conditions = [
     scope,
     sql`d.stage_id IN (${sqlList(stageIds)})`,
+    excludeTestDataCondition("d"),
   ];
 
   if (input.search?.trim()) {
@@ -2485,8 +2512,16 @@ export async function listDealStagePage(tenantDb: TenantDb, input: DealStagePage
   if (input.regionId) {
     conditions.push(sql`d.region_id = ${input.regionId}`);
   }
+  if (input.source) {
+    conditions.push(sql`d.source = ${input.source}`);
+  }
   if (input.workflowRoute === "normal" || input.workflowRoute === "service") {
     conditions.push(sql`d.workflow_route = ${input.workflowRoute}`);
+  }
+  if (input.staleOnly) {
+    conditions.push(
+      sql`(d.last_activity_at is null or d.last_activity_at < now() - interval '14 days')`
+    );
   }
   if (input.updatedFrom) {
     conditions.push(sql`d.updated_at::date >= ${input.updatedFrom}::date`);

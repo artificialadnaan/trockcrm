@@ -1,0 +1,4 @@
+[DRY-RUN] mark-test-data — tenant=office_dallas pattern=(all auto-safe)
+CSV rows: 8 | eligible candidates: 0
+Skipped: 8 (REVIEW_REQUIRED=8, not-auto-safe=8)
+Nothing to do — no eligible candidates.
