@@ -915,9 +915,8 @@ function workspaceLostWindowDateSql() {
 }
 
 function workspaceLostWindowEligibilitySql() {
-  // Build a fresh window-date fragment at each interpolation rather than caching
-  // and reusing one sql`` instance (same composition-safety rule as the won-date
-  // guard; see getDealsForPipeline). Identical SQL, no semantic change.
+  // Lost-window date is the plain d.lost_at timestamp column (no calendar guard),
+  // so each interpolation just emits the column reference.
   return sql`
     ${workspaceLostWindowDateSql()} IS NOT NULL
     AND NOT (
@@ -934,48 +933,22 @@ function workspaceLostWindowEligibilitySql() {
 // raw SQL helpers. Migration 0139 is the schema source of truth for the column
 // across current and future tenant schemas. The hs_closed_won_date key is populated
 // in production (office_dallas) on most active Won deals, but the blob has no
-// schema guarantee:
-// production values are ISO-8601 UTC strings today (e.g. 2025-01-01T17:10:09.826Z),
-// but a stray non-date value (or a future epoch-ms sync) must yield NULL — excluded
-// from period reporting — rather than throw and break the ENTIRE Won card / drill-down.
+// schema guarantee: production values are ISO-8601 UTC strings today (e.g.
+// 2025-01-01T17:10:09.826Z), but a stray non-date value (or a future epoch-ms sync)
+// must yield NULL — excluded from period reporting — rather than throw and break the
+// ENTIRE Won card / drill-down.
 //
-// A value passes ONLY when ALL hold:
-//   1. The leading 10 chars match YYYY-MM-DD with month 01-12 and day 01-31. Uses
-//      [0-9] not \d — drizzle's tagged template would strip the backslash.
-//   2. The year is >= 1. PostgreSQL dates have no year 0000; admitting it would
-//      still throw on ::date even though it passes the regex/month-day checks.
-//   3. The day is within the actual length of that month, accounting for leap years.
-// The regex is in an OUTER CASE, and all ::int / ::date casts live inside its THEN
-// branch. Do not collapse this into a boolean AND chain: PostgreSQL does not
-// guarantee left-to-right AND evaluation, so malformed text like "N/A" could hit
-// substr(...)::int before the regex rejects it.
-// A regex/range guard ALONE is insufficient: Postgres `::date` (and `to_date`/
-// `to_timestamp`) THROW on 2026-02-31 / 2026-04-31 / 2026-02-29-in-a-non-leap-year,
-// which a YYYY-MM-DD + bounded-month/day regex still admits. So we validate the
-// day against the month length BEFORE the cast; only a genuine calendar date ever
-// reaches `::date`, which then cannot throw. (`to_date`-round-trip is NOT viable —
-// to_date itself raises on 2026-02-31 rather than rolling over in this PG version.)
+// The validation itself lives in the IMMUTABLE public.try_parse_hs_close_date()
+// function (migration 0140); this helper emits a single call to it. Collapsing the
+// guard to one function-call token (instead of a ~40-line inline CASE that was
+// interpolated into the >=, <=, and IS NOT NULL positions of one query) keeps the
+// composed SQL small and unambiguous. The function's semantics are identical to the
+// prior inline guard: leading-10-char YYYY-MM-DD (month 01-12, day 01-31, dashes
+// required), then a trapped ::date cast that rejects impossible calendar dates
+// (2026-02-31, 2026-02-29 in a non-leap year, 0000-01-01). Qualified as `public.`
+// so every office_* tenant schema resolves it regardless of search_path.
 function castHsClosedWonDateSql(rawValue: SQLWrapper) {
-  return sql`CASE
-    WHEN ${rawValue} ~ '^[0-9]{4}-(0[1-9]|1[0-2])-(0[1-9]|[12][0-9]|3[01])'
-    THEN CASE
-      WHEN substr(${rawValue}, 1, 4)::int >= 1
-        AND substr(${rawValue}, 9, 2)::int <= (
-          CASE substr(${rawValue}, 6, 2)::int
-            WHEN 2 THEN CASE
-              WHEN substr(${rawValue}, 1, 4)::int % 4 = 0
-                AND (substr(${rawValue}, 1, 4)::int % 100 <> 0 OR substr(${rawValue}, 1, 4)::int % 400 = 0)
-              THEN 29 ELSE 28 END
-            WHEN 4 THEN 30
-            WHEN 6 THEN 30
-            WHEN 9 THEN 30
-            WHEN 11 THEN 30
-            ELSE 31
-          END
-        )
-      THEN substr(${rawValue}, 1, 10)::date
-    END
-  END`;
+  return sql`public.try_parse_hs_close_date(${rawValue})`;
 }
 
 // Won-period membership date (locked decision §6.1): gate on the true HubSpot
@@ -2448,12 +2421,10 @@ export async function getDealsForPipeline(
   const wonSignedDateUntil = toIsoDateOnly(terminalFilters.won.until);
   const wonPeriodFrom = toIsoDateOnly(wonPeriodRange.from);
   const wonPeriodTo = toIsoDateOnly(wonPeriodRange.to);
-  // Do NOT cache the won-date guard in a variable and reuse it across the >=, <=,
-  // and IS NOT NULL predicates: a single Drizzle sql`` fragment instance reused
-  // across multiple interpolation sites in one query produces malformed SQL
-  // (the reused instance is dropped on its later occurrences, leaving a
-  // comparison with no left-hand operand) — this was the production 500 on the
-  // YTD card. Build a FRESH dealWonHsClosedWonDateSql() at every use site below.
+  // The won-date guard below is a single public.try_parse_hs_close_date() call
+  // (see castHsClosedWonDateSql), so interpolating it into the >=, <=, and
+  // IS NOT NULL predicates composes to small, unambiguous SQL. Each site still
+  // builds its own fragment via the helper (cheap; no shared mutable state).
   const pipelineCardsPerStageLimit = Math.max(
     1,
     Math.min(

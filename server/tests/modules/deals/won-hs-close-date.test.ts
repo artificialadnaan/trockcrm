@@ -91,13 +91,16 @@ function wonSummaryWhereSql(chains: any[]): string {
 }
 
 describe("won-period hs_closed_won_date SQL helpers", () => {
-  it("aliasedWonHsClosedWonDateSql extracts and casts the hs_closed_won_date JSON key with NULLIF guards", async () => {
+  it("aliasedWonHsClosedWonDateSql reads the hs_closed_won_date JSON key with NULLIF guards and hands it to the parse function", async () => {
     const { aliasedWonHsClosedWonDateSql } = await import("../../../src/modules/deals/service.js");
     const text = extractSqlText(aliasedWonHsClosedWonDateSql("d")).toLowerCase();
     expect(text).toContain("hubspot_extra_properties");
     expect(text).toContain("hs_closed_won_date");
     expect(text).toContain("nullif");
-    expect(text).toContain("::date");
+    // The calendar validation + ::date cast now live inside the IMMUTABLE
+    // public.try_parse_hs_close_date() function (migration 0140); the helper emits
+    // a single call to it rather than an inline CASE.
+    expect(text).toContain("try_parse_hs_close_date");
     // Empty-string and the HubSpot "0" unset sentinel are both stripped.
     expect(text).toContain("''");
     expect(text).toContain("'0'");
@@ -107,49 +110,29 @@ describe("won-period hs_closed_won_date SQL helpers", () => {
     expect(text).not.toContain("updated_at");
   });
 
-  it("aliasedHasUsableWonDateSql guards on a non-null hs close date", async () => {
+  it("aliasedHasUsableWonDateSql guards on a non-null parsed hs close date", async () => {
     const { aliasedHasUsableWonDateSql } = await import("../../../src/modules/deals/service.js");
     const text = extractSqlText(aliasedHasUsableWonDateSql("d")).toLowerCase();
+    expect(text).toContain("try_parse_hs_close_date");
     expect(text).toContain("hs_closed_won_date");
     expect(text).toContain("is not null");
   });
 
-  it("validates the calendar date (days-in-month + leap year) so a value like 2026-02-31 is rejected without throwing (Codex finding 1)", async () => {
+  it("emits a single public.try_parse_hs_close_date() call, NOT an inline calendar CASE", async () => {
     const { aliasedWonHsClosedWonDateSql } = await import("../../../src/modules/deals/service.js");
     const text = extractSqlText(aliasedWonHsClosedWonDateSql("d")).toLowerCase();
-    // The day is checked against the month's actual length before any cast: a
-    // YYYY-MM-DD + bounded-month/day regex alone still admits 2026-02-31 / 2026-04-31
-    // / 2026-02-29-in-a-non-leap-year, all of which `::date` THROWS on (and so does
-    // to_date — the round-trip approach is not viable). Behavioural proof
-    // (2026-02-31 & 2025-13-45 -> NULL, 2024-02-29 & ISO -> date) is in the PR's
-    // read-only SELECT-from-VALUES verification; here we assert the guard is wired.
-    expect(text).toContain("substr");
-    expect(text).toContain("when 2 then"); // February branch of the month-length CASE
-    expect(text).toContain("% 4"); // leap-year divisibility test
-    expect(text).toContain("% 400"); // leap-year century rule
-  });
-
-  it("guards casts behind a nested regex CASE so malformed text never reaches ::int or ::date", async () => {
-    const { aliasedWonHsClosedWonDateSql } = await import("../../../src/modules/deals/service.js");
-    const text = extractSqlText(aliasedWonHsClosedWonDateSql("d")).toLowerCase();
-    const regexIndex = text.indexOf("~ '^[0-9]{4}");
-    const nestedCaseIndex = text.indexOf("then case", regexIndex);
-    const firstIntCastIndex = text.indexOf("::int");
-    const dateCastIndex = text.indexOf("::date");
-
-    expect(regexIndex).toBeGreaterThanOrEqual(0);
-    expect(nestedCaseIndex).toBeGreaterThan(regexIndex);
-    expect(firstIntCastIndex).toBeGreaterThan(nestedCaseIndex);
-    expect(dateCastIndex).toBeGreaterThan(nestedCaseIndex);
-  });
-
-  it("rejects year zero before casting so 0000-01-01 yields NULL instead of a PostgreSQL cast error", async () => {
-    const { aliasedWonHsClosedWonDateSql } = await import("../../../src/modules/deals/service.js");
-    const text = extractSqlText(aliasedWonHsClosedWonDateSql("d")).toLowerCase();
-    expect(text).toContain("substr");
-    expect(text).toContain("1, 4");
-    expect(text).toContain(">= 1");
-    expect(text).toContain("::date");
+    // The whole ~40-line nested-CASE calendar guard (days-in-month, leap year,
+    // year>=1, the bounded YYYY-MM-DD regex, the ::int/::date casts) was moved into
+    // the migration-0140 DB function so the WHERE position carries one compact,
+    // composition-safe token. Behavioural proof (2026-02-31 / 0000-01-01 / N/A ->
+    // NULL, ISO + 2024-02-29 -> date, none throw) is in the PR's read-only
+    // SELECT-from-VALUES verification against the function.
+    expect(text).toContain("public.try_parse_hs_close_date(");
+    expect(text).not.toContain("case"); // no inline CASE
+    expect(text).not.toContain("substr");
+    expect(text).not.toContain("::int");
+    expect(text).not.toContain("% 4"); // no leap-year arithmetic inlined
+    expect(text).not.toContain("~ '^[0-9]"); // no inlined regex
   });
 });
 
@@ -179,18 +162,17 @@ describe("getDealsForPipeline Won branch (CHANGE 2 + 5)", () => {
     expect(where).not.toContain("bid_board_last_updated_at");
   });
 
-  it("composes a VALID multi-bound Won-period WHERE: the date guard is built fresh in every position (eligibility, >=, <=), never one fragment reused across positions (production-500 regression)", async () => {
+  it("composes a VALID multi-bound Won-period WHERE: the date guard appears as a complete public.try_parse_hs_close_date() call in every position (eligibility, >=, <=), built fresh per site", async () => {
     // YTD path: BOTH a lower and an upper Won-date bound are set, so the date
     // guard must appear in three positions — IS NOT NULL (eligibility), >= lower,
-    // <= upper. The production 500 came from reusing ONE guard fragment object
-    // across the >= and <= positions; when the same SQL instance is interpolated
-    // more than once the composed SQL is corrupted (the reused instance is dropped
-    // on its later occurrence, leaving a comparison with no left-hand operand).
-    // extractSqlText models this exactly: its `seen` set renders a repeated SQL
-    // instance as "" on the 2nd+ encounter. So a shared fragment yields only TWO
-    // fully-rendered guards (eligibility + first bound); a correctly-fresh-per-site
-    // composition yields THREE. Prior tests only set a single bound, so they never
-    // exercised the reuse — this is the gap they left.
+    // <= upper. The guard is now a single public.try_parse_hs_close_date() function
+    // call, so each position carries one compact, composition-safe token (no
+    // multi-line inline CASE to mis-compose). The helper still builds a fresh
+    // fragment per site; extractSqlText's `seen` set renders a *reused* SQL instance
+    // as "" on its 2nd+ encounter, so a shared fragment would collapse to TWO
+    // fully-rendered calls (eligibility + first bound) while a correctly-fresh-per-
+    // site composition yields THREE. Prior tests only set a single bound, so they
+    // never exercised the multi-position composition — this is the gap they left.
     dbState.responses = [WON_STAGES];
     const { tenantDb, chains } = buildPipelineTenantDb();
     const { getDealsForPipeline } = await import("../../../src/modules/deals/service.js");
@@ -204,19 +186,18 @@ describe("getDealsForPipeline Won branch (CHANGE 2 + 5)", () => {
     });
 
     const where = wonSummaryWhereSql(chains);
-    // The full calendar-guard CASE begins with this regex anchor exactly once per
-    // fully-rendered guard. Three positions => three anchors. A single shared
-    // fragment collapses to two.
-    const guardRenders = (where.match(/\^\[0-9\]\{4\}/g) ?? []).length;
+    // One fully-rendered guard per position. Three positions => three function
+    // calls. A single shared fragment collapses to two.
+    const guardRenders = (where.match(/public\.try_parse_hs_close_date\(/g) ?? []).length;
     expect(guardRenders).toBe(3);
-    // Each date bound's left operand is a COMPLETE guard: the closing `END` of the
-    // CASE immediately precedes the comparison operator. A dropped/reused fragment
-    // would leave a dangling operator with no `END` before it (e.g. "... and  <= ...").
+    // Each date bound's left operand is a COMPLETE function call: the closing paren
+    // of try_parse_hs_close_date(...) immediately precedes the comparison operator.
+    // A dropped/reused fragment would leave a dangling operator (e.g. "and  <= ...").
     // (The harness renders bound params inline, so we don't assert a $n placeholder.)
-    expect(where).toMatch(/end\s*>=/);
-    expect(where).toMatch(/end\s*<=/);
-    // No scrambled/duplicated guard from interleaved reuse.
-    expect(where).not.toMatch(/then case\s+then case/);
+    expect(where).toMatch(/\)\s*>=/);
+    expect(where).toMatch(/\)\s*<=/);
+    // The inline calendar CASE is gone entirely.
+    expect(where).not.toContain("case");
     expect(where).toContain("is not null");
   });
 
