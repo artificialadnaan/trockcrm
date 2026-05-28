@@ -3,7 +3,10 @@
  *
  * This script inserts ONLY the rows the in-app admin UI cannot create:
  *   - public.users               (the global user record; role=rep, primary office=Dallas)
- *   - public.user_office_access  (the Atlanta access grant; Dallas is covered by users.office_id)
+ *   - public.user_office_access  (one row PER office — the primary Dallas office AND the Atlanta
+ *                                 grant — matching the seed-new-real-users.ts convention, which
+ *                                 writes an access row for the primary office in addition to
+ *                                 setting users.office_id).
  *
  * It deliberately does NOT touch:
  *   - public.user_local_auth         <- the operator does this via /admin/users -> Send Invite,
@@ -19,7 +22,8 @@
  * Safety:
  *   - Startup checks refuse to proceed unless the Dallas office matches the expected UUID,
  *     Atlanta exists & is active, the user_role enum has 'rep', and no cstone user exists yet.
- *   - --commit wraps both INSERTs in a single transaction on a single client (no Promise.all).
+ *   - --commit wraps all three INSERTs (users + Dallas + Atlanta office access) in a single
+ *     transaction on a single client, serialized (no Promise.all).
  *   - A rollback snapshot is written to <os-tmpdir>/seed-user-cstone-<ts>.json BEFORE COMMIT;
  *     if the snapshot write fails the transaction is rolled back (never commit unsnapshotted).
  */
@@ -262,10 +266,14 @@ export function buildUsersInsert(input: {
   };
 }
 
-/** Builds the single Atlanta access grant. Dallas access is covered by users.office_id. */
+/**
+ * Builds one user_office_access grant row (role_override always NULL), matching the
+ * seed-new-real-users.ts convention of one access row per office (primary office included).
+ * Called once for Dallas (primary) and once for Atlanta.
+ */
 export function buildOfficeAccessInsert(input: {
   userId: string;
-  atlantaOfficeId: string;
+  officeId: string;
 }): SqlStatement {
   return {
     text: `
@@ -277,7 +285,7 @@ export function buildOfficeAccessInsert(input: {
         office_id::text AS office_id,
         role_override
     `,
-    values: [input.userId, input.atlantaOfficeId],
+    values: [input.userId, input.officeId],
   };
 }
 
@@ -329,7 +337,11 @@ const VERIFY_SQL = `
     EXISTS (
       SELECT 1 FROM public.user_office_access uoa
       WHERE uoa.user_id = u.id AND uoa.office_id = $2::uuid
-    ) AS has_atlanta_access
+    ) AS has_atlanta_access,
+    EXISTS (
+      SELECT 1 FROM public.user_office_access uoa
+      WHERE uoa.user_id = u.id AND uoa.office_id = $3::uuid
+    ) AS has_dallas_access
   FROM public.users u
   WHERE u.id = $1::uuid
 `;
@@ -358,7 +370,7 @@ export interface SeedCalebResult {
   committed: boolean;
   snapshotPath: string | null;
   insertedUser: Record<string, unknown> | null;
-  insertedOfficeAccess: Record<string, unknown> | null;
+  insertedOfficeAccess: Record<string, unknown>[];
 }
 
 function defaultWriteSnapshot(filePath: string, contents: string): void {
@@ -422,18 +434,24 @@ export async function runSeedCalebStone(deps: SeedCalebDeps): Promise<SeedCalebR
     dallasOfficeId: dallas.id,
     createdByUserId,
   });
-  const officeAccessInsert = buildOfficeAccessInsert({
+  // One access row per office, matching seed-new-real-users.ts: primary Dallas first, then Atlanta.
+  const dallasAccessInsert = buildOfficeAccessInsert({
     userId: plannedUserId,
-    atlantaOfficeId: atlanta.id,
+    officeId: dallas.id,
+  });
+  const atlantaAccessInsert = buildOfficeAccessInsert({
+    userId: plannedUserId,
+    officeId: atlanta.id,
   });
 
   logger.log("Planned operations:");
-  logger.log(`  1) INSERT public.users  id=${plannedUserId}`);
+  logger.log(`  1)  INSERT public.users  id=${plannedUserId}`);
   logger.log(
-    `       email=${usersInsert.values[1]} display_name="${TARGET_USER.displayName}" ` +
+    `        email=${usersInsert.values[1]} display_name="${TARGET_USER.displayName}" ` +
       `role=rep office_id=${dallas.id} is_active=true created_by_user_id=${createdByUserId ?? "NULL"}`
   );
-  logger.log(`  2) INSERT public.user_office_access  user_id=${plannedUserId} office_id=${atlanta.id} (Atlanta) role_override=NULL`);
+  logger.log(`  2a) INSERT public.user_office_access  user_id=${plannedUserId} office_id=${dallas.id} (Dallas, primary) role_override=NULL`);
+  logger.log(`  2b) INSERT public.user_office_access  user_id=${plannedUserId} office_id=${atlanta.id} (Atlanta) role_override=NULL`);
 
   const result: SeedCalebResult = {
     mode,
@@ -444,7 +462,7 @@ export async function runSeedCalebStone(deps: SeedCalebDeps): Promise<SeedCalebR
     committed: false,
     snapshotPath: null,
     insertedUser: null,
-    insertedOfficeAccess: null,
+    insertedOfficeAccess: [],
   };
 
   if (!commit) {
@@ -455,20 +473,28 @@ export async function runSeedCalebStone(deps: SeedCalebDeps): Promise<SeedCalebR
   // ---- Commit path -----------------------------------------------------------------------
   await client.query("BEGIN");
   try {
+    // Serialized on the single client (never Promise.all): users, then Dallas (primary)
+    // access, then Atlanta access — matching the seed-new-real-users.ts ordering.
     const insertedUser = (await client.query(usersInsert.text, usersInsert.values)).rows[0] ?? null;
-    const insertedOfficeAccess = (await client.query(officeAccessInsert.text, officeAccessInsert.values)).rows[0] ?? null;
-    if (!insertedUser || !insertedOfficeAccess) {
+    const insertedDallasAccess = (await client.query(dallasAccessInsert.text, dallasAccessInsert.values)).rows[0] ?? null;
+    const insertedAtlantaAccess = (await client.query(atlantaAccessInsert.text, atlantaAccessInsert.values)).rows[0] ?? null;
+    if (!insertedUser || !insertedDallasAccess || !insertedAtlantaAccess) {
       throw new Error("INSERT did not return a row — rolling back to avoid a half-provisioned state.");
     }
 
-    const verifyRow = (await client.query(VERIFY_SQL, [plannedUserId, atlanta.id])).rows[0] ?? null;
+    const verifyRow = (await client.query(VERIFY_SQL, [plannedUserId, atlanta.id, dallas.id])).rows[0] ?? null;
     logger.log("Inserted (verified inside transaction):");
     logger.log(JSON.stringify(verifyRow, null, 2));
-    // Expect exactly one office-access row (the Atlanta grant); Dallas is the primary
-    // office_id and is intentionally NOT an access row. Anything else is unexpected state.
-    if (!verifyRow || verifyRow.has_atlanta_access !== true || Number(verifyRow.office_access_count) !== 1) {
+    // Expect exactly two office-access rows: the primary Dallas grant and the Atlanta grant
+    // (matching seed-new-real-users.ts). Anything else is unexpected state.
+    if (
+      !verifyRow ||
+      verifyRow.has_dallas_access !== true ||
+      verifyRow.has_atlanta_access !== true ||
+      Number(verifyRow.office_access_count) !== 2
+    ) {
       throw new Error(
-        "Post-insert verification failed (expected exactly one office-access row, the Atlanta grant) — rolling back."
+        "Post-insert verification failed (expected exactly two office-access rows: Dallas primary + Atlanta) — rolling back."
       );
     }
 
@@ -486,7 +512,7 @@ export async function runSeedCalebStone(deps: SeedCalebDeps): Promise<SeedCalebR
           dallasOfficeId: dallas.id,
           atlantaOfficeId: atlanta.id,
           insertedUser,
-          insertedOfficeAccess,
+          insertedOfficeAccess: [insertedDallasAccess, insertedAtlantaAccess],
         },
         null,
         2
@@ -498,7 +524,7 @@ export async function runSeedCalebStone(deps: SeedCalebDeps): Promise<SeedCalebR
     result.committed = true;
     result.snapshotPath = snapshotPath;
     result.insertedUser = insertedUser;
-    result.insertedOfficeAccess = insertedOfficeAccess;
+    result.insertedOfficeAccess = [insertedDallasAccess, insertedAtlantaAccess];
 
     logger.log(`\nCOMMIT complete. Provisioned ${TARGET_USER.email} (id=${plannedUserId}).`);
     logger.log(`Rollback snapshot: ${snapshotPath}`);

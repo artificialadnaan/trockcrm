@@ -59,7 +59,16 @@ function makeClient(opts: MockOpts = {}) {
       return { rows: [{ id: "access-1", user_id: values?.[0], office_id: values?.[1], role_override: null }] };
     }
     if (text.includes("has_atlanta_access")) {
-      return { rows: [opts.verifyRow ?? { id: values?.[0], has_atlanta_access: true, office_access_count: 1 }] };
+      return {
+        rows: [
+          opts.verifyRow ?? {
+            id: values?.[0],
+            has_dallas_access: true,
+            has_atlanta_access: true,
+            office_access_count: 2,
+          },
+        ],
+      };
     }
     return { rows: [] }; // BEGIN / COMMIT / ROLLBACK / anything else
   });
@@ -183,11 +192,15 @@ describe("seed-user-caleb-stone — SQL builders", () => {
     expect(stmt.values[6]).toBeNull(); // created_by_user_id passthrough
   });
 
-  it("builds a single Atlanta office-access INSERT and nothing else", () => {
-    const stmt = buildOfficeAccessInsert({ userId: "u-1", atlantaOfficeId: ATLANTA_ID });
-    expect(stmt.text).toContain("INSERT INTO public.user_office_access");
-    expect(stmt.text).not.toContain("user_local_auth");
-    expect(stmt.values).toEqual(["u-1", ATLANTA_ID]);
+  it("builds a user_office_access INSERT (role_override NULL) for any given office", () => {
+    const dallas = buildOfficeAccessInsert({ userId: "u-1", officeId: DALLAS_ID });
+    expect(dallas.text).toContain("INSERT INTO public.user_office_access");
+    expect(dallas.text).toContain("role_override");
+    expect(dallas.text).not.toContain("user_local_auth");
+    expect(dallas.values).toEqual(["u-1", DALLAS_ID]);
+
+    const atlanta = buildOfficeAccessInsert({ userId: "u-1", officeId: ATLANTA_ID });
+    expect(atlanta.values).toEqual(["u-1", ATLANTA_ID]);
   });
 });
 
@@ -270,7 +283,7 @@ describe("seed-user-caleb-stone — orchestrator", () => {
     expect(hasBegin(calls)).toBe(false);
   });
 
-  it("commit path inserts users + Atlanta access, snapshots BEFORE commit, never touches user_local_auth", async () => {
+  it("commit path inserts users + BOTH office-access rows (Dallas primary + Atlanta), snapshots BEFORE commit, never touches user_local_auth", async () => {
     const { client, query, calls } = makeClient();
     const writeSnapshot = vi.fn();
     const result = await runSeedCalebStone({
@@ -292,9 +305,12 @@ describe("seed-user-caleb-stone — orchestrator", () => {
     expect(usersInsert!.values?.[1]).toBe("cstone@trockgc.com"); // lowercased target
     expect(usersInsert!.values?.[5]).toBe(DALLAS_ID);
 
-    const accessInsert = calls.find((c) => /INSERT INTO public\.user_office_access/.test(c.text));
-    expect(accessInsert).toBeDefined();
-    expect(accessInsert!.values?.[1]).toBe(ATLANTA_ID);
+    // TWO office-access INSERTs, serialized, Dallas (primary) first then Atlanta.
+    const accessInserts = calls.filter((c) => /INSERT INTO public\.user_office_access/.test(c.text));
+    expect(accessInserts).toHaveLength(2);
+    expect(accessInserts[0]!.values?.[1]).toBe(DALLAS_ID);
+    expect(accessInserts[1]!.values?.[1]).toBe(ATLANTA_ID);
+    expect(result.insertedOfficeAccess).toHaveLength(2);
 
     // snapshot must be written before COMMIT
     const commitCallIdx = calls.findIndex((c) => c.text.trim() === "COMMIT");
@@ -302,6 +318,28 @@ describe("seed-user-caleb-stone — orchestrator", () => {
     const commitOrder = query.mock.invocationCallOrder[commitCallIdx]!;
     const snapshotOrder = writeSnapshot.mock.invocationCallOrder[0]!;
     expect(snapshotOrder).toBeLessThan(commitOrder);
+  });
+
+  it("uses the active Dallas office_id for the primary access row, never the inactive DFW office", async () => {
+    const { client, calls } = makeClient();
+    await runSeedCalebStone({
+      client,
+      argv: ["--commit"],
+      logger: silentLogger(),
+      now: () => new Date("2026-05-28T12:00:00.000Z"),
+      tmpDir: "/tmp/fake-tmp",
+      writeSnapshot: vi.fn(),
+    });
+
+    const officeIds = calls
+      .filter((c) => /INSERT INTO public\.user_office_access/.test(c.text))
+      .map((c) => c.values?.[1]);
+    expect(officeIds).toEqual([DALLAS_ID, ATLANTA_ID]);
+    expect(officeIds).not.toContain(DFW_ID); // never the inactive DFW office
+
+    // The primary access row office matches users.office_id (also Dallas).
+    const usersInsert = calls.find((c) => /INSERT INTO public\.users/.test(c.text));
+    expect(usersInsert!.values?.[5]).toBe(DALLAS_ID);
   });
 
   it("rolls back (no COMMIT) when an INSERT returns no row", async () => {
@@ -316,9 +354,10 @@ describe("seed-user-caleb-stone — orchestrator", () => {
     expect(writeSnapshot).not.toHaveBeenCalled();
   });
 
-  it("rolls back (no COMMIT) when in-transaction verification finds no Atlanta access", async () => {
+  it("rolls back (no COMMIT) when in-transaction verification finds fewer than two office-access rows", async () => {
+    // Both EXISTS flags true but count=1 (e.g. a row went missing) must still fail the count===2 check.
     const { client, calls } = makeClient({
-      verifyRow: { id: "u", has_atlanta_access: false, office_access_count: 0 },
+      verifyRow: { id: "u", has_dallas_access: true, has_atlanta_access: true, office_access_count: 1 },
     });
     const writeSnapshot = vi.fn();
     await expect(
@@ -328,6 +367,20 @@ describe("seed-user-caleb-stone — orchestrator", () => {
     expect(calls.some((c) => c.text.trim() === "ROLLBACK")).toBe(true);
     expect(calls.some((c) => c.text.trim() === "COMMIT")).toBe(false);
     expect(writeSnapshot).not.toHaveBeenCalled(); // verification aborts before the snapshot write
+  });
+
+  it("rolls back (no COMMIT) when in-transaction verification finds the Dallas access row missing", async () => {
+    const { client, calls } = makeClient({
+      verifyRow: { id: "u", has_dallas_access: false, has_atlanta_access: true, office_access_count: 1 },
+    });
+    const writeSnapshot = vi.fn();
+    await expect(
+      runSeedCalebStone({ client, argv: ["--commit"], logger: silentLogger(), writeSnapshot })
+    ).rejects.toThrow(/verification failed/i);
+
+    expect(calls.some((c) => c.text.trim() === "ROLLBACK")).toBe(true);
+    expect(calls.some((c) => c.text.trim() === "COMMIT")).toBe(false);
+    expect(writeSnapshot).not.toHaveBeenCalled();
   });
 
   it("rolls back (no COMMIT) when the snapshot write fails", async () => {
