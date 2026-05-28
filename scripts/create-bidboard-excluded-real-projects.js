@@ -429,6 +429,7 @@ async function main() {
     const operationTimestamp = new Date().toISOString();
 
     await client.query("BEGIN");
+    await client.query("SELECT set_config('app.skip_project_number_email', 'true', true)");
     const created = [];
     for (const plan of plans) {
       created.push(await insertDeal(client, plan, operationTimestamp));

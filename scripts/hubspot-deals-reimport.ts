@@ -16,6 +16,11 @@ import { isProjectTypeValue, normalizeProjectType } from "../shared/src/types/pr
 import { buildAuditActorFromSystem } from "../server/src/modules/audit/audit-logger.js";
 import { logActivityWithPgClient } from "../server/src/modules/audit/pg-activity-logger.js";
 import { HUBSPOT_REIMPORT } from "../server/src/modules/audit/system-processes.js";
+import {
+  normalizeProjectNumberInput,
+  ProjectNumberValidationError,
+} from "../server/src/modules/deals/project-number-validation.js";
+import { applyProjectNumberEmailSkipSetting } from "./lib/project-number-notification.js";
 
 /**
  * HubSpot deals re-import assumptions:
@@ -233,6 +238,25 @@ function normalizeText(value: string | null | undefined): string | null {
   return text ? text : null;
 }
 
+export function normalizeHubSpotProjectNumber(
+  value: string | null | undefined,
+  hubspotRecordId: string
+): string | null {
+  // HubSpot CSV cells are commonly blank or whitespace-only. Treat those as "no
+  // project number" instead of forwarding to normalizeProjectNumberInput, which
+  // raises ProjectNumberValidationError on blank input.
+  if (value == null) return null;
+  if (typeof value === "string" && value.trim().length === 0) return null;
+  try {
+    return normalizeProjectNumberInput(value);
+  } catch (error) {
+    if (error instanceof ProjectNumberValidationError) {
+      throw new Error(`Invalid Project Number for HubSpot record ${hubspotRecordId}: ${error.message}`);
+    }
+    throw error;
+  }
+}
+
 function normalizeComparableText(value: string | null | undefined): string | null {
   const text = normalizeText(value);
   return text ? text.toLowerCase() : null;
@@ -397,7 +421,7 @@ export function parseHubSpotDealsCsv(text: string): CsvDealRow[] {
         lastModifiedDate: formatIso(parseDate(first(row, ["Last Modified Date"]))),
         dealStage: normalizeText(first(row, ["Deal Stage"])),
         pipeline: normalizeText(first(row, ["Pipeline"])),
-        projectNumber: normalizeText(first(row, ["Project Number"])),
+        projectNumber: normalizeHubSpotProjectNumber(first(row, ["Project Number"]), hubspotRecordId),
         projectType: normalizeText(first(row, ["Project Type"])),
         associatedCompany: normalizeText(first(row, ["Associated Company"])),
       };
@@ -1093,6 +1117,7 @@ export async function applyPlan(client: pg.PoolClient, tenant: string, plan: Rei
   const stageLookup = await fetchStageLookup(client);
   await client.query("BEGIN");
   try {
+    await applyProjectNumberEmailSkipSetting(client);
     for (const entry of plan.entries) {
       try {
         if (entry.skippedFieldClears.length > 0) {

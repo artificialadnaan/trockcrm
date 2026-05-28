@@ -39,6 +39,7 @@ describe("api CSRF handling", () => {
   beforeEach(() => {
     clearCsrfTokenOverrideForTests();
     document.cookie = "csrf_token=; Max-Age=0; path=/";
+    window.history.replaceState(null, "", "/");
     vi.restoreAllMocks();
   });
 
@@ -145,6 +146,52 @@ describe("api CSRF handling", () => {
       expect.objectContaining({
         headers: expect.objectContaining({
           "X-CSRF-Token": "stale-cookie-token",
+        }),
+      })
+    );
+  });
+
+  it("threads officeId query context through the existing x-office-id header", async () => {
+    window.history.replaceState(null, "", "/deals/deal-1?officeId=office-atlanta");
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(JSON.stringify({ ok: true }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      })
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    await api("/deals/deal-1/detail");
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      expect.any(String),
+      expect.objectContaining({
+        headers: expect.objectContaining({
+          "x-office-id": "office-atlanta",
+        }),
+      })
+    );
+  });
+
+  it("does not override an explicit x-office-id header", async () => {
+    window.history.replaceState(null, "", "/deals/deal-1?officeId=office-atlanta");
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(JSON.stringify({ ok: true }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      })
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    await api("/deals/deal-1/detail", {
+      headers: { "x-office-id": "office-dallas" },
+    });
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      expect.any(String),
+      expect.objectContaining({
+        headers: expect.objectContaining({
+          "x-office-id": "office-dallas",
         }),
       })
     );

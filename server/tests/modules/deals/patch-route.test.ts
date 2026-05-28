@@ -1,8 +1,13 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const dealsServiceMocks = vi.hoisted(() => ({
+  createDeal: vi.fn(),
   getDealById: vi.fn(),
   updateDeal: vi.fn(),
+}));
+const pipelineServiceMocks = vi.hoisted(() => ({
+  getActiveProjectTypes: vi.fn(),
+  getStageBySlug: vi.fn(),
 }));
 const scopingServiceMocks = vi.hoisted(() => ({
   assertDealScopingWriteAllowed: vi.fn(),
@@ -30,8 +35,18 @@ vi.mock("../../../src/modules/deals/service.js", async () => {
   const actual = await vi.importActual("../../../src/modules/deals/service.js");
   return {
     ...(actual as Record<string, unknown>),
+    createDeal: dealsServiceMocks.createDeal,
     getDealById: dealsServiceMocks.getDealById,
     updateDeal: dealsServiceMocks.updateDeal,
+  };
+});
+
+vi.mock("../../../src/modules/pipeline/service.js", async () => {
+  const actual = await vi.importActual("../../../src/modules/pipeline/service.js");
+  return {
+    ...(actual as Record<string, unknown>),
+    getActiveProjectTypes: pipelineServiceMocks.getActiveProjectTypes,
+    getStageBySlug: pipelineServiceMocks.getStageBySlug,
   };
 });
 
@@ -121,6 +136,71 @@ function findPatchHandler() {
   return routeLayer.handle;
 }
 
+function findPostHandler(path: string) {
+  const layer = (dealRoutes as any).stack.find(
+    (entry: any) => entry.route?.path === path && entry.route?.methods?.post
+  );
+  if (!layer) {
+    throw new Error(`POST ${path} route not found`);
+  }
+
+  const routeLayer = layer.route.stack.find((entry: any) => entry.method === "post");
+  if (!routeLayer) {
+    throw new Error(`POST ${path} handler not found`);
+  }
+
+  return routeLayer.handle;
+}
+
+async function invokePost(path: string, body: Record<string, unknown>, user: TestUser) {
+  const handler = findPostHandler(path);
+  let selectCount = 0;
+  const req = {
+    params: {},
+    query: {},
+    body,
+    user,
+    officeSlug: "dallas",
+    tenantDb: {
+      execute: vi.fn(async () => ({ rows: [] })),
+      select: vi.fn(() => ({
+        from: vi.fn(() => ({
+          where: vi.fn(() => ({
+            limit: vi.fn(async () => {
+              selectCount += 1;
+              if (selectCount === 1) return [{ id: "company-1" }];
+              return [{ id: "property-1", companyId: "company-1" }];
+            }),
+          })),
+        })),
+      })),
+      insert: vi.fn(() => ({
+        values: vi.fn(async () => ({})),
+      })),
+    },
+    commitTransaction: vi.fn(async () => {}),
+  } as any;
+  const res = {
+    statusCode: 200,
+    body: undefined as any,
+    status(code: number) {
+      this.statusCode = code;
+      return this;
+    },
+    json(payload: any) {
+      this.body = payload;
+      return this;
+    },
+  } as any;
+  const error = { current: null as unknown };
+  const next = vi.fn((err?: unknown) => {
+    error.current = err ?? null;
+  });
+
+  await handler(req, res, next);
+  return { req, res, next, error: error.current };
+}
+
 async function invokePatch(
   body: Record<string, unknown>,
   user: TestUser,
@@ -200,6 +280,22 @@ describe("PATCH /api/deals/:id cleanup legacy handling", () => {
       adminOverride: false,
       lockState: { locked: false, submittedAt: null, reason: null },
     });
+    pipelineServiceMocks.getActiveProjectTypes.mockResolvedValue([
+      { id: "project-type-service", name: "Service", slug: "service" },
+    ]);
+    pipelineServiceMocks.getStageBySlug.mockResolvedValue({
+      id: "stage-opportunity",
+      name: "Opportunity",
+      slug: "opportunity",
+      isTerminal: false,
+      isActivePipeline: true,
+      workflowFamily: "standard_deal",
+    });
+    dealsServiceMocks.createDeal.mockImplementation(async (_tenantDb, input) => ({
+      id: "deal-created",
+      ...baseDeal(),
+      ...input,
+    }));
     dealsServiceMocks.updateDeal.mockImplementation(async (_tenantDb, dealId, input) => ({
       id: dealId,
       ...baseDeal(),
@@ -241,6 +337,406 @@ describe("PATCH /api/deals/:id cleanup legacy handling", () => {
         action: "update",
         changedBy: "rep-1",
       })
+    );
+  });
+
+  it("rejects projectNumber updates from reps before calling updateDeal", async () => {
+    const { error } = await invokePatch(
+      { projectNumber: "DFW-1-12345-aa" },
+      createUser("rep")
+    );
+
+    expect(error).toBeInstanceOf(AppError);
+    expect((error as InstanceType<typeof AppError>).statusCode).toBe(403);
+    expect((error as InstanceType<typeof AppError>).code).toBe("PROJECT_NUMBER_UPDATE_FORBIDDEN");
+    expect(dealsServiceMocks.updateDeal).not.toHaveBeenCalled();
+  });
+
+  it("trims projectNumber before the standard create path reaches createDeal", async () => {
+    const { req, res, error } = await invokePost(
+      "/",
+      {
+        name: "New project-number deal",
+        stageId: "stage-opportunity",
+        projectNumber: "  DFW-1-12345-aa  ",
+      },
+      createUser("admin")
+    );
+
+    expect(error).toBeNull();
+    expect(res.statusCode).toBe(201);
+    expect(dealsServiceMocks.createDeal).toHaveBeenCalledWith(
+      req.tenantDb,
+      expect.objectContaining({
+        name: "New project-number deal",
+        projectNumber: "DFW-1-12345-aa",
+        auditContext: expect.any(Object),
+      })
+    );
+  });
+
+  it("forwards a trimmed projectNumber through service-opportunity create", async () => {
+    const { req, res, error } = await invokePost(
+      "/service-opportunity",
+      {
+        name: "Service opportunity",
+        companyId: "company-1",
+        propertyId: "property-1",
+        projectNumber: "  ATL-2-54321-ab  ",
+      },
+      createUser("director")
+    );
+
+    expect(error).toBeNull();
+    expect(res.statusCode).toBe(201);
+    expect(dealsServiceMocks.createDeal).toHaveBeenCalledWith(
+      req.tenantDb,
+      expect.objectContaining({
+        workflowRoute: "service",
+        projectNumber: "ATL-2-54321-ab",
+        auditContext: expect.any(Object),
+      })
+    );
+  });
+
+  it("coerces a whitespace-only projectNumber to null on service-opportunity create", async () => {
+    // Blank/whitespace clears the field rather than throwing (operator decision).
+    const { req, res, error } = await invokePost(
+      "/service-opportunity",
+      {
+        name: "Service opportunity",
+        companyId: "company-1",
+        propertyId: "property-1",
+        projectNumber: "   ",
+      },
+      createUser("admin")
+    );
+
+    expect(error).toBeNull();
+    expect(res.statusCode).toBe(201);
+    expect(dealsServiceMocks.createDeal).toHaveBeenCalledWith(
+      req.tenantDb,
+      expect.objectContaining({ projectNumber: null })
+    );
+  });
+
+  it("rejects an over-length projectNumber on service-opportunity create", async () => {
+    const { error } = await invokePost(
+      "/service-opportunity",
+      {
+        name: "Service opportunity",
+        companyId: "company-1",
+        propertyId: "property-1",
+        projectNumber: "a".repeat(101),
+      },
+      createUser("admin")
+    );
+
+    expect(error).toBeInstanceOf(AppError);
+    expect((error as InstanceType<typeof AppError>).statusCode).toBe(400);
+    expect((error as InstanceType<typeof AppError>).code).toBe("PROJECT_NUMBER_INVALID");
+    expect(dealsServiceMocks.createDeal).not.toHaveBeenCalled();
+  });
+
+  it("rejects projectNumber on standard create for reps", async () => {
+    const { error } = await invokePost(
+      "/",
+      {
+        name: "Rep project-number deal",
+        stageId: "stage-opportunity",
+        projectNumber: "DFW-1-12345-aa",
+      },
+      createUser("rep")
+    );
+
+    expect(error).toBeInstanceOf(AppError);
+    expect((error as InstanceType<typeof AppError>).statusCode).toBe(403);
+    expect((error as InstanceType<typeof AppError>).code).toBe("PROJECT_NUMBER_UPDATE_FORBIDDEN");
+    expect(dealsServiceMocks.createDeal).not.toHaveBeenCalled();
+  });
+
+  it("rejects projectNumber clears from reps before calling updateDeal", async () => {
+    const { error } = await invokePatch(
+      { projectNumber: null },
+      createUser("rep")
+    );
+
+    expect(error).toBeInstanceOf(AppError);
+    expect((error as InstanceType<typeof AppError>).statusCode).toBe(403);
+    expect((error as InstanceType<typeof AppError>).code).toBe("PROJECT_NUMBER_UPDATE_FORBIDDEN");
+    expect(dealsServiceMocks.updateDeal).not.toHaveBeenCalled();
+  });
+
+  it("allows admin projectNumber updates through the audited updateDeal path", async () => {
+    const { res, error } = await invokePatch(
+      { projectNumber: "DFW-1-12345-aa" },
+      createUser("admin")
+    );
+
+    expect(error).toBeNull();
+    expect(res.statusCode).toBe(200);
+    expect(dealsServiceMocks.updateDeal).toHaveBeenCalledWith(
+      expect.anything(),
+      "deal-1",
+      expect.objectContaining({
+        projectNumber: "DFW-1-12345-aa",
+        auditContext: expect.any(Object),
+      }),
+      "admin",
+      "admin-1",
+      "office-1",
+    );
+  });
+
+  it("allows director projectNumber updates through the audited updateDeal path", async () => {
+    const { res, error } = await invokePatch(
+      { projectNumber: "DFW-1-54321-aa" },
+      createUser("director")
+    );
+
+    expect(error).toBeNull();
+    expect(res.statusCode).toBe(200);
+    expect(dealsServiceMocks.updateDeal).toHaveBeenCalledWith(
+      expect.anything(),
+      "deal-1",
+      expect.objectContaining({
+        projectNumber: "DFW-1-54321-aa",
+        auditContext: expect.any(Object),
+      }),
+      "director",
+      "director-1",
+      "office-1",
+    );
+  });
+
+  it("allows an admin who does not own the deal to set projectNumber without the owner-only 403", async () => {
+    // Deal is owned by a different rep; mock assertDealOwnerAccess to reject so we
+    // verify the route bypasses the owner check for projectNumber-only admin patches.
+    accessMocks.assertDealCollaboratorAccess.mockResolvedValueOnce({
+      id: "deal-1",
+      assignedRepId: "other-rep",
+      officeId: "office-1",
+    });
+    accessMocks.assertDealOwnerAccess.mockRejectedValue(
+      new AppError(403, "Only the assigned rep can modify this deal")
+    );
+
+    const { res, error } = await invokePatch(
+      { projectNumber: "DFW-1-12345-aa" },
+      createUser("admin")
+    );
+
+    expect(error).toBeNull();
+    expect(res.statusCode).toBe(200);
+    expect(accessMocks.assertDealOwnerAccess).not.toHaveBeenCalled();
+    expect(dealsServiceMocks.updateDeal).toHaveBeenCalledWith(
+      expect.anything(),
+      "deal-1",
+      expect.objectContaining({ projectNumber: "DFW-1-12345-aa" }),
+      "admin",
+      "admin-1",
+      "office-1",
+    );
+  });
+
+  it("allows an admin who does not own the deal to clear projectNumber (null) via the override", async () => {
+    accessMocks.assertDealCollaboratorAccess.mockResolvedValueOnce({
+      id: "deal-1",
+      assignedRepId: "other-rep",
+      officeId: "office-1",
+    });
+    accessMocks.assertDealOwnerAccess.mockRejectedValue(
+      new AppError(403, "Only the assigned rep can modify this deal")
+    );
+
+    const { res, error } = await invokePatch(
+      { projectNumber: null },
+      createUser("admin")
+    );
+
+    expect(error).toBeNull();
+    expect(res.statusCode).toBe(200);
+    expect(accessMocks.assertDealOwnerAccess).not.toHaveBeenCalled();
+    expect(dealsServiceMocks.updateDeal).toHaveBeenCalledWith(
+      expect.anything(),
+      "deal-1",
+      expect.objectContaining({ projectNumber: null }),
+      "admin",
+      "admin-1",
+      "office-1",
+    );
+  });
+
+  it("allows a director who does not own the deal to set projectNumber without the owner-only 403", async () => {
+    accessMocks.assertDealCollaboratorAccess.mockResolvedValueOnce({
+      id: "deal-1",
+      assignedRepId: "other-rep",
+      officeId: "office-1",
+    });
+    accessMocks.assertDealOwnerAccess.mockRejectedValue(
+      new AppError(403, "Only the assigned rep can modify this deal")
+    );
+
+    const { res, error } = await invokePatch(
+      { projectNumber: "ATL-2-54321-ab" },
+      createUser("director")
+    );
+
+    expect(error).toBeNull();
+    expect(res.statusCode).toBe(200);
+    expect(accessMocks.assertDealOwnerAccess).not.toHaveBeenCalled();
+  });
+
+  it("still enforces the owner check when an admin patches projectNumber alongside other fields", async () => {
+    // Broader PATCH must still respect the ownership check — narrow override is
+    // only for projectNumber-only payloads.
+    accessMocks.assertDealCollaboratorAccess.mockResolvedValueOnce({
+      id: "deal-1",
+      assignedRepId: "other-rep",
+      officeId: "office-1",
+    });
+    accessMocks.assertDealOwnerAccess.mockRejectedValue(
+      new AppError(403, "Only the assigned rep can modify this deal")
+    );
+
+    const { error } = await invokePatch(
+      {
+        projectNumber: "DFW-1-12345-aa",
+        description: "Admin also editing other fields",
+      },
+      createUser("admin")
+    );
+
+    expect(error).toMatchObject({
+      statusCode: 403,
+      message: "Only the assigned rep can modify this deal",
+    });
+    expect(accessMocks.assertDealOwnerAccess).toHaveBeenCalled();
+    expect(dealsServiceMocks.updateDeal).not.toHaveBeenCalled();
+  });
+
+  it("still enforces the owner check when an admin patches other fields without projectNumber", async () => {
+    accessMocks.assertDealCollaboratorAccess.mockResolvedValueOnce({
+      id: "deal-1",
+      assignedRepId: "other-rep",
+      officeId: "office-1",
+    });
+    accessMocks.assertDealOwnerAccess.mockRejectedValue(
+      new AppError(403, "Only the assigned rep can modify this deal")
+    );
+
+    const { error } = await invokePatch(
+      { description: "Admin trying to edit description on a rep's deal" },
+      createUser("admin")
+    );
+
+    expect(error).toMatchObject({
+      statusCode: 403,
+      message: "Only the assigned rep can modify this deal",
+    });
+    expect(dealsServiceMocks.updateDeal).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["oversized string", "a".repeat(101)],
+  ])("rejects invalid projectNumber payloads before calling updateDeal: %s", async (_label, projectNumber) => {
+    const { error } = await invokePatch(
+      { projectNumber },
+      createUser("admin")
+    );
+
+    expect(error).toBeInstanceOf(AppError);
+    expect((error as InstanceType<typeof AppError>).statusCode).toBe(400);
+    expect((error as InstanceType<typeof AppError>).code).toBe("PROJECT_NUMBER_INVALID");
+    expect(dealsServiceMocks.updateDeal).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["empty string", ""],
+    ["whitespace-only string", "   "],
+  ])("coerces a blank projectNumber to null instead of rejecting: %s", async (_label, projectNumber) => {
+    // Per operator decision, blank/whitespace clears the field (parity with the
+    // HubSpot import path) rather than throwing a 400.
+    const { res, error } = await invokePatch(
+      { projectNumber },
+      createUser("admin")
+    );
+
+    expect(error).toBeNull();
+    expect(res.statusCode).toBe(200);
+    expect(dealsServiceMocks.updateDeal).toHaveBeenCalledWith(
+      expect.anything(),
+      "deal-1",
+      expect.objectContaining({ projectNumber: null }),
+      "admin",
+      "admin-1",
+      "office-1",
+    );
+  });
+
+  it.each([
+    ["lowercase office prefix", "dfw-3-12626-ab"],
+    ["short legacy code", "KMH"],
+    ["rep code with at-sign", "2-R@37-011426"],
+  ])("accepts historical non-canonical projectNumber formats: %s", async (_label, projectNumber) => {
+    // The ACCEPTED validator must never reject a value that exists in production.
+    const { res, error } = await invokePatch(
+      { projectNumber },
+      createUser("admin")
+    );
+
+    expect(error).toBeNull();
+    expect(res.statusCode).toBe(200);
+    expect(dealsServiceMocks.updateDeal).toHaveBeenCalledWith(
+      expect.anything(),
+      "deal-1",
+      expect.objectContaining({ projectNumber }),
+      "admin",
+      "admin-1",
+      "office-1",
+    );
+  });
+
+  it.each([
+    ["custom rep-prefix code", "KMPWINTERS"],
+    ["legacy import date-suffix", "1-TLV.1-091625"],
+    ["legacy canonical with single-letter type code", "DFW-a-05826-ad"],
+  ])(
+    "accepts operator-confirmed legacy projectNumber formats on admin PATCH: %s",
+    async (_label, projectNumber) => {
+      const { res, error } = await invokePatch({ projectNumber }, createUser("admin"));
+
+      expect(error).toBeNull();
+      expect(res.statusCode).toBe(200);
+      expect(dealsServiceMocks.updateDeal).toHaveBeenCalledWith(
+        expect.anything(),
+        "deal-1",
+        expect.objectContaining({ projectNumber }),
+        "admin",
+        "admin-1",
+        "office-1",
+      );
+    }
+  );
+
+  it("trims canonical projectNumber values before the audited updateDeal path", async () => {
+    const { res, error } = await invokePatch(
+      { projectNumber: "  ATL-2-54321-ab  " },
+      createUser("admin")
+    );
+
+    expect(error).toBeNull();
+    expect(res.statusCode).toBe(200);
+    expect(dealsServiceMocks.updateDeal).toHaveBeenCalledWith(
+      expect.anything(),
+      "deal-1",
+      expect.objectContaining({
+        projectNumber: "ATL-2-54321-ab",
+        auditContext: expect.any(Object),
+      }),
+      "admin",
+      "admin-1",
+      "office-1",
     );
   });
 

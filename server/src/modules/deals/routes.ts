@@ -160,6 +160,10 @@ import { isOpportunityRfpEventEnabled } from "../../config/feature-flags.js";
 import { getActiveProjectTypes, getAllStages, getStageBySlug } from "../pipeline/service.js";
 import { resolveDealCreateOfficeCode } from "./create-context.js";
 import {
+  normalizeProjectNumberInput,
+  ProjectNumberValidationError,
+} from "./project-number-validation.js";
+import {
   assertDealCollaboratorAccess,
   assertDealOwnerAccess,
   getCollaborativeReadRole,
@@ -1516,6 +1520,30 @@ function validateDealPayload(body: Record<string, unknown>): void {
       throw new AppError(400, "bidDueDate must be an ISO date in YYYY-MM-DD format");
     }
   }
+  validateProjectNumberPayload(body);
+}
+
+function validateProjectNumberPayload(body: Record<string, unknown>): void {
+  if (!Object.prototype.hasOwnProperty.call(body, "projectNumber")) return;
+
+  try {
+    body.projectNumber = normalizeProjectNumberInput(body.projectNumber);
+  } catch (err) {
+    if (err instanceof ProjectNumberValidationError) {
+      throw new AppError(400, err.message, err.code);
+    }
+    throw err;
+  }
+}
+
+function assertProjectNumberMutationAllowed(body: Record<string, unknown>, role: string): void {
+  if (!Object.prototype.hasOwnProperty.call(body, "projectNumber")) return;
+  if (role === "admin" || role === "director") return;
+  throw new AppError(
+    403,
+    "Only admins or directors can set or clear project numbers.",
+    "PROJECT_NUMBER_UPDATE_FORBIDDEN"
+  );
 }
 
 function normalizeServiceCandidate(value: unknown) {
@@ -1578,6 +1606,10 @@ async function assertServiceOpportunityHierarchy(
 // POST /api/deals/service-opportunity — direct-create a Service-only Opportunity.
 router.post("/service-opportunity", async (req, res, next) => {
   try {
+    const body = { ...req.body };
+    validateDealPayload(body);
+    assertProjectNumberMutationAllowed(body, req.user!.role);
+
     const {
       name,
       assignedRepId,
@@ -1592,14 +1624,14 @@ router.post("/service-opportunity", async (req, res, next) => {
       projectTypeId,
       projectType,
       officeCode,
-    } = req.body;
+      projectNumber,
+    } = body;
     if (!name) {
       throw new AppError(400, "Name is required");
     }
     if (!companyId || !propertyId) {
       throw new AppError(400, "Company and property are required");
     }
-    validateDealPayload(req.body);
     await assertServiceOpportunityHierarchy(req.tenantDb!, { companyId, propertyId });
 
     const serviceProjectType = await resolveServiceProjectType(projectTypeId, projectType);
@@ -1644,6 +1676,7 @@ router.post("/service-opportunity", async (req, res, next) => {
       workflowRoute: "service",
       projectType: "service",
       projectTypeId: serviceProjectType.id,
+      projectNumber,
       officeCode: officeCodeResolution.officeCode,
       auditContext: buildRouteAuditContext(req),
     });
@@ -1658,6 +1691,10 @@ router.post("/service-opportunity", async (req, res, next) => {
 // POST /api/deals — create a new deal
 router.post("/", async (req, res, next) => {
   try {
+    const body = { ...req.body };
+    validateDealPayload(body);
+    assertProjectNumberMutationAllowed(body, req.user!.role);
+
     const {
       name,
       stageId,
@@ -1666,11 +1703,10 @@ router.post("/", async (req, res, next) => {
       sourceLeadWriteMode: _sourceLeadWriteMode,
       migrationMode: _migrationMode,
       ...rest
-    } = req.body;
+    } = body;
     if (!name || !stageId) {
       throw new AppError(400, "Name and stageId are required");
     }
-    validateDealPayload(req.body);
 
     // Rep ownership enforcement:
     // - Reps: force assignedRepId to their own ID (ignore request body value)
@@ -1769,6 +1805,7 @@ router.patch("/:id", async (req, res, next) => {
     const dealAccess = await assertDealCollaboratorAccess(req.tenantDb!, req.params.id, req.user!);
     const body = { ...req.body };
     validateDealPayload(body);
+    assertProjectNumberMutationAllowed(body, req.user!.role);
     const forceEditAfterRfp = body.forceEditAfterRfp === true;
     const clientRequestedMigrationMode = body.migrationMode === true;
     delete body.forceEditAfterRfp;
@@ -1776,6 +1813,15 @@ router.patch("/:id", async (req, res, next) => {
 
     const patchKeys = Object.keys(body);
     const isAssignmentTransferOnly = patchKeys.length > 0 && patchKeys.every((field) => field === "assignedRepId");
+    // Admins and directors set project numbers on deals they don't own — this is the
+    // primary use case for the projectNumber field. The collaborator access check above
+    // already enforced the office boundary; only the rep-ownership check needs to be
+    // skipped. Narrowly scoped: role must be admin/director AND the patch must touch
+    // only projectNumber.
+    const isProjectNumberOnlyAdminPatch =
+      (req.user!.role === "admin" || req.user!.role === "director") &&
+      patchKeys.length > 0 &&
+      patchKeys.every((field) => field === "projectNumber");
     if (isAssignmentTransferOnly) {
       const isDirectorOrAdmin = req.user!.role === "admin" || req.user!.role === "director";
       if (!isDirectorOrAdmin && dealAccess.assignedRepId !== req.user!.id) {
@@ -1785,7 +1831,7 @@ router.patch("/:id", async (req, res, next) => {
           "DEAL_REASSIGNMENT_FORBIDDEN"
         );
       }
-    } else {
+    } else if (!isProjectNumberOnlyAdminPatch) {
       await assertDealOwnerRouteAccess(req, req.params.id, {
         message: "Only the assigned rep can modify this deal",
       });

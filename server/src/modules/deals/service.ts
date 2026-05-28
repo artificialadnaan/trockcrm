@@ -260,6 +260,7 @@ export interface CreateDealInput {
   propertyState?: string;
   propertyZip?: string;
   officeCode: string;
+  projectNumber?: string | null;
   projectType?: string;
   projectTypeId?: string;
   regionId?: string;
@@ -286,6 +287,7 @@ export interface UpdateDealInput {
   propertyCity?: string | null;
   propertyState?: string | null;
   propertyZip?: string | null;
+  projectNumber?: string | null;
   projectType?: string | null;
   projectTypeId?: string | null;
   regionId?: string | null;
@@ -1646,6 +1648,7 @@ export async function createDeal(tenantDb: TenantDb, input: CreateDealInput) {
       propertyState: input.propertyState ?? null,
       propertyZip: input.propertyZip ?? null,
       officeCode,
+      projectNumber: input.projectNumber ?? null,
       projectType,
       projectTypeId: input.projectTypeId ?? null,
       regionId: input.regionId ?? null,
@@ -1824,6 +1827,7 @@ export async function updateDeal(
   if (input.propertyCity !== undefined) updates.propertyCity = input.propertyCity;
   if (input.propertyState !== undefined) updates.propertyState = input.propertyState;
   if (input.propertyZip !== undefined) updates.propertyZip = input.propertyZip;
+  if (input.projectNumber !== undefined) updates.projectNumber = input.projectNumber;
   if (input.projectTypeId !== undefined) updates.projectTypeId = input.projectTypeId;
   if (input.regionId !== undefined) updates.regionId = input.regionId;
   if (input.source !== undefined) updates.source = input.source;
@@ -2010,6 +2014,7 @@ export async function updateDeal(
       "propertyCity",
       "propertyState",
       "propertyZip",
+      "projectNumber",
       "projectType",
       "projectTypeId",
       "regionId",

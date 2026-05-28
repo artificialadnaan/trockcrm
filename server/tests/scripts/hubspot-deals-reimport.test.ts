@@ -6,6 +6,8 @@ import {
   applyPlan,
   buildReimportPlan,
   diffSafeUpdateFields,
+  normalizeHubSpotProjectNumber,
+  parseHubSpotDealsCsv,
   parseReimportArgs,
   readEnvValueFromFile,
   validateAmount,
@@ -63,6 +65,80 @@ describe("hubspot-deals-reimport", () => {
     expect(validateAmount(42)).toBe(42);
     expect(() => validateAmount("N/A")).toThrow("Invalid amount");
     expect(() => validateAmount({ value: 12 })).toThrow("Invalid amount type 'object'");
+  });
+
+  it("trims canonical project numbers while parsing the HubSpot CSV", () => {
+    const rows = parseHubSpotDealsCsv([
+      "Record ID,Deal Name,Project Number",
+      "hs-1,Noble,  DFW-1-12345-aa  ",
+    ].join("\n"));
+
+    expect(rows).toEqual([
+      expect.objectContaining({
+        hubspotRecordId: "hs-1",
+        projectNumber: "DFW-1-12345-aa",
+      }),
+    ]);
+  });
+
+  it("accepts historical non-canonical project numbers from the HubSpot CSV", () => {
+    // These are real production formats; the ACCEPTED validator must never reject them.
+    const rows = parseHubSpotDealsCsv([
+      "Record ID,Deal Name,Project Number",
+      "hs-1,Noble,DFW-1-1234-aa",
+      "hs-2,Acme,KMH",
+      "hs-3,Vista,2-R@37-011426",
+    ].join("\n"));
+
+    expect(rows).toEqual([
+      expect.objectContaining({ hubspotRecordId: "hs-1", projectNumber: "DFW-1-1234-aa" }),
+      expect.objectContaining({ hubspotRecordId: "hs-2", projectNumber: "KMH" }),
+      expect.objectContaining({ hubspotRecordId: "hs-3", projectNumber: "2-R@37-011426" }),
+    ]);
+  });
+
+  it("rejects an over-length project number from the HubSpot CSV before inserts or updates", () => {
+    const oversized = "a".repeat(101);
+    expect(() => parseHubSpotDealsCsv([
+      "Record ID,Deal Name,Project Number",
+      `hs-1,Noble,${oversized}`,
+    ].join("\n"))).toThrow(
+      "Invalid Project Number for HubSpot record hs-1: projectNumber must not exceed 100 characters"
+    );
+  });
+
+  it("returns null for blank/whitespace HubSpot project number cells instead of throwing", () => {
+    expect(normalizeHubSpotProjectNumber("", "hs-blank")).toBeNull();
+    expect(normalizeHubSpotProjectNumber("   ", "hs-whitespace")).toBeNull();
+    expect(normalizeHubSpotProjectNumber("\t\n", "hs-tab-newline")).toBeNull();
+    expect(normalizeHubSpotProjectNumber(null, "hs-null")).toBeNull();
+    expect(normalizeHubSpotProjectNumber(undefined, "hs-undef")).toBeNull();
+  });
+
+  it("normalizes valid HubSpot project numbers through the shared validator", () => {
+    expect(normalizeHubSpotProjectNumber("  DFW-1-12345-aa  ", "hs-valid")).toBe(
+      "DFW-1-12345-aa"
+    );
+  });
+
+  it("still raises a wrapped error when HubSpot supplies a non-blank invalid project number", () => {
+    // An over-length value exceeds the sanity bound and must still raise.
+    expect(() => normalizeHubSpotProjectNumber("a".repeat(101), "hs-bad")).toThrow(
+      "Invalid Project Number for HubSpot record hs-bad"
+    );
+  });
+
+  it("treats a blank HubSpot project number cell as no value when parsing the CSV", () => {
+    const rows = parseHubSpotDealsCsv([
+      "Record ID,Deal Name,Project Number",
+      "hs-blank,Noble,",
+      "hs-spaces,Bravo,   ",
+    ].join("\n"));
+
+    expect(rows).toEqual([
+      expect.objectContaining({ hubspotRecordId: "hs-blank", projectNumber: null }),
+      expect.objectContaining({ hubspotRecordId: "hs-spaces", projectNumber: null }),
+    ]);
   });
 
   it("classifies unchanged, newer, missing, ambiguous, and soft-deleted rows", () => {

@@ -25,6 +25,7 @@ import {
 
 interface DealOverviewTabProps {
   deal: DealDetail;
+  officeId?: string | null;
   onDealUpdated?: () => void;
 }
 
@@ -32,7 +33,7 @@ function effectiveStageAgeDays(deal: DealDetail) {
   return deal.atRisk?.effectiveStageAgeDays ?? getEffectiveStageAgeDays(getEffectiveStageAgeDeal(deal));
 }
 
-export function DealOverviewTab({ deal, onDealUpdated }: DealOverviewTabProps) {
+export function DealOverviewTab({ deal, officeId, onDealUpdated }: DealOverviewTabProps) {
   const navigate = useNavigate();
   const { user } = useAuth();
   const { assignees } = useTaskAssignees();
@@ -40,7 +41,7 @@ export function DealOverviewTab({ deal, onDealUpdated }: DealOverviewTabProps) {
     Boolean(user) &&
     (user?.role === "admin" || user?.role === "director" || deal.assignedRepId === user?.id);
   const { salesReps } = useSalesReps(
-    user?.activeOfficeId ?? user?.officeId ?? undefined,
+    officeId ?? user?.activeOfficeId ?? user?.officeId ?? undefined,
     { purpose: "deal-reassignment", enabled: canEditAssignment }
   );
   const { projectTypes } = useProjectTypes();

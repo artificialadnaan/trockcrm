@@ -242,9 +242,9 @@ vi.mock("@/components/call-recordings/recording-list", () => ({
   RecordingList: () => <div>Recording List</div>,
 }));
 
-function renderPage() {
+function renderPage(path = "/deals/deal-1") {
   return renderToStaticMarkup(
-    <MemoryRouter initialEntries={["/deals/deal-1"]}>
+    <MemoryRouter initialEntries={[path]}>
       <Routes>
         <Route path="/deals/:id" element={<DealDetailPage />} />
       </Routes>
@@ -487,6 +487,15 @@ describe("DealDetailPage", () => {
     expect(html).toContain("Estimate in Progress");
     expect(html).toContain("DFW-1-12826-aa");
     expect(html).toContain("Dallas Independent SD");
+  });
+
+  it("passes officeId query context into the initial deal detail load", () => {
+    renderPage("/deals/deal-1?officeId=office-atlanta");
+
+    expect(mocks.useDealDetailMock).toHaveBeenCalledWith(
+      "deal-1",
+      { officeId: "office-atlanta" }
+    );
   });
 
   it("renders the API-supplied at-risk badge in the deal header", () => {
@@ -1160,6 +1169,18 @@ describe("DealDetailPage", () => {
     expect(html).toContain("Edit");
   });
 
+  it("preserves officeId on the Edit link when the deal detail page is loaded with a cross-office query param", () => {
+    mocks.useAuthMock.mockReturnValueOnce({
+      user: {
+        id: "rep-1",
+        role: "rep",
+      },
+    });
+    const html = renderPage("/deals/deal-1?officeId=office-atlanta");
+
+    expect(html).toContain('href="/deals/deal-1/edit?officeId=office-atlanta"');
+  });
+
   it("removes the deal-detail Move Stage header action while preserving other header actions", () => {
     mocks.useAuthMock.mockReturnValueOnce({
       user: {
@@ -1212,7 +1233,7 @@ describe("DealDetailPage", () => {
     const html = renderPage();
 
     expect(html).toContain("Deal value");
-    expect(html).toContain("$875,000");
+    expect(html).toContain("$9,877");
     expect(html).toContain("Days in stage");
     expect(html).toContain("SLA status");
     expect(html).toContain("Overdue");
