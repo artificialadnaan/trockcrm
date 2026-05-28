@@ -399,14 +399,35 @@ describe("PATCH /api/deals/:id cleanup legacy handling", () => {
     );
   });
 
-  it("rejects invalid projectNumber payloads on service-opportunity create", async () => {
-    const { error } = await invokePost(
+  it("coerces a whitespace-only projectNumber to null on service-opportunity create", async () => {
+    // Blank/whitespace clears the field rather than throwing (operator decision).
+    const { req, res, error } = await invokePost(
       "/service-opportunity",
       {
         name: "Service opportunity",
         companyId: "company-1",
         propertyId: "property-1",
         projectNumber: "   ",
+      },
+      createUser("admin")
+    );
+
+    expect(error).toBeNull();
+    expect(res.statusCode).toBe(201);
+    expect(dealsServiceMocks.createDeal).toHaveBeenCalledWith(
+      req.tenantDb,
+      expect.objectContaining({ projectNumber: null })
+    );
+  });
+
+  it("rejects an over-length projectNumber on service-opportunity create", async () => {
+    const { error } = await invokePost(
+      "/service-opportunity",
+      {
+        name: "Service opportunity",
+        companyId: "company-1",
+        propertyId: "property-1",
+        projectNumber: "a".repeat(101),
       },
       createUser("admin")
     );
@@ -617,11 +638,7 @@ describe("PATCH /api/deals/:id cleanup legacy handling", () => {
   });
 
   it.each([
-    ["empty string", ""],
-    ["whitespace-only string", "   "],
-    ["oversized string", `DFW-${"1".repeat(101)}-12345-aa`],
-    ["lowercase office prefix", "dfw-1-12345-aa"],
-    ["legacy/non-canonical format", "DFW-1-1234-aa"],
+    ["oversized string", "a".repeat(101)],
   ])("rejects invalid projectNumber payloads before calling updateDeal: %s", async (_label, projectNumber) => {
     const { error } = await invokePatch(
       { projectNumber },
@@ -632,6 +649,52 @@ describe("PATCH /api/deals/:id cleanup legacy handling", () => {
     expect((error as InstanceType<typeof AppError>).statusCode).toBe(400);
     expect((error as InstanceType<typeof AppError>).code).toBe("PROJECT_NUMBER_INVALID");
     expect(dealsServiceMocks.updateDeal).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["empty string", ""],
+    ["whitespace-only string", "   "],
+  ])("coerces a blank projectNumber to null instead of rejecting: %s", async (_label, projectNumber) => {
+    // Per operator decision, blank/whitespace clears the field (parity with the
+    // HubSpot import path) rather than throwing a 400.
+    const { res, error } = await invokePatch(
+      { projectNumber },
+      createUser("admin")
+    );
+
+    expect(error).toBeNull();
+    expect(res.statusCode).toBe(200);
+    expect(dealsServiceMocks.updateDeal).toHaveBeenCalledWith(
+      expect.anything(),
+      "deal-1",
+      expect.objectContaining({ projectNumber: null }),
+      "admin",
+      "admin-1",
+      "office-1",
+    );
+  });
+
+  it.each([
+    ["lowercase office prefix", "dfw-3-12626-ab"],
+    ["short legacy code", "KMH"],
+    ["rep code with at-sign", "2-R@37-011426"],
+  ])("accepts historical non-canonical projectNumber formats: %s", async (_label, projectNumber) => {
+    // The ACCEPTED validator must never reject a value that exists in production.
+    const { res, error } = await invokePatch(
+      { projectNumber },
+      createUser("admin")
+    );
+
+    expect(error).toBeNull();
+    expect(res.statusCode).toBe(200);
+    expect(dealsServiceMocks.updateDeal).toHaveBeenCalledWith(
+      expect.anything(),
+      "deal-1",
+      expect.objectContaining({ projectNumber }),
+      "admin",
+      "admin-1",
+      "office-1",
+    );
   });
 
   it.each([

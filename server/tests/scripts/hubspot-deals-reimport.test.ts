@@ -81,12 +81,29 @@ describe("hubspot-deals-reimport", () => {
     ]);
   });
 
-  it("rejects non-canonical project numbers from the HubSpot CSV before inserts or updates", () => {
-    expect(() => parseHubSpotDealsCsv([
+  it("accepts historical non-canonical project numbers from the HubSpot CSV", () => {
+    // These are real production formats; the ACCEPTED validator must never reject them.
+    const rows = parseHubSpotDealsCsv([
       "Record ID,Deal Name,Project Number",
       "hs-1,Noble,DFW-1-1234-aa",
+      "hs-2,Acme,KMH",
+      "hs-3,Vista,2-R@37-011426",
+    ].join("\n"));
+
+    expect(rows).toEqual([
+      expect.objectContaining({ hubspotRecordId: "hs-1", projectNumber: "DFW-1-1234-aa" }),
+      expect.objectContaining({ hubspotRecordId: "hs-2", projectNumber: "KMH" }),
+      expect.objectContaining({ hubspotRecordId: "hs-3", projectNumber: "2-R@37-011426" }),
+    ]);
+  });
+
+  it("rejects an over-length project number from the HubSpot CSV before inserts or updates", () => {
+    const oversized = "a".repeat(101);
+    expect(() => parseHubSpotDealsCsv([
+      "Record ID,Deal Name,Project Number",
+      `hs-1,Noble,${oversized}`,
     ].join("\n"))).toThrow(
-      "Invalid Project Number for HubSpot record hs-1: projectNumber must match canonical format"
+      "Invalid Project Number for HubSpot record hs-1: projectNumber must not exceed 100 characters"
     );
   });
 
@@ -105,7 +122,8 @@ describe("hubspot-deals-reimport", () => {
   });
 
   it("still raises a wrapped error when HubSpot supplies a non-blank invalid project number", () => {
-    expect(() => normalizeHubSpotProjectNumber("DFW-1-1234-aa", "hs-bad")).toThrow(
+    // An over-length value exceeds the sanity bound and must still raise.
+    expect(() => normalizeHubSpotProjectNumber("a".repeat(101), "hs-bad")).toThrow(
       "Invalid Project Number for HubSpot record hs-bad"
     );
   });
