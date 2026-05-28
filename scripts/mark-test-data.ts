@@ -192,6 +192,8 @@ async function main() {
     }
 
     const snapshot: Array<{ id: string; name: string; pattern: string; before: boolean; after: boolean }> = [];
+    const ts = new Date().toISOString().replace(/[:.]/g, "-");
+    const backupPath = `/private/tmp/test-data-cleanup-${ts}.json`;
     await client.query("BEGIN");
     try {
       for (const p of planned) {
@@ -202,15 +204,15 @@ async function main() {
         );
         snapshot.push({ id: p.id, name: p.name, pattern: p.pattern, before: p.before, after: res.rows[0].is_test_data });
       }
+      // Persist the rollback snapshot before COMMIT: if the write fails we ROLLBACK,
+      // so we never end up with a committed change and no rollback record.
+      fs.writeFileSync(backupPath, JSON.stringify({ tenant, ranAt: new Date().toISOString(), updates: snapshot }, null, 2));
       await client.query("COMMIT");
     } catch (error) {
       await client.query("ROLLBACK");
       throw error;
     }
 
-    const ts = new Date().toISOString().replace(/[:.]/g, "-");
-    const backupPath = `/private/tmp/test-data-cleanup-${ts}.json`;
-    fs.writeFileSync(backupPath, JSON.stringify({ tenant, ranAt: new Date().toISOString(), updates: snapshot }, null, 2));
     console.log(`\nCOMMIT complete. ${snapshot.length} row(s) updated.`);
     console.log(`Rollback snapshot: ${backupPath}`);
   } finally {
