@@ -903,18 +903,11 @@ async function listDealStages() {
 const sqlList = (values: readonly string[]) => sql.join(values.map((value) => sql`${value}`), sql`, `);
 
 function workspaceWonWindowDateSql() {
-  return sql`COALESCE(d.contract_signed_at, d.contract_signed_date::timestamptz)`;
+  return aliasedWonHsClosedWonDateSql("d");
 }
 
 function workspaceWonWindowEligibilitySql() {
-  const date = workspaceWonWindowDateSql();
-  return sql`
-    ${date} IS NOT NULL
-    AND NOT (
-      d.bid_board_last_updated_at IS NOT NULL
-      AND ${date}::date = d.bid_board_last_updated_at::date
-    )
-  `;
+  return aliasedHasUsableWonDateSql("d");
 }
 
 function workspaceLostWindowDateSql() {
@@ -942,12 +935,14 @@ function workspaceLostWindowEligibilitySql() {
 // but a stray non-date value (or a future epoch-ms sync) must yield NULL — excluded
 // from period reporting — rather than throw and break the ENTIRE Won card / drill-down.
 //
-// A value passes ONLY when BOTH hold:
+// A value passes ONLY when ALL hold:
 //   1. The leading 10 chars match YYYY-MM-DD with month 01-12 and day 01-31 (regex
 //      prefix; this also guarantees the substr extractions below are digit strings,
 //      so the ::int casts cannot throw). Uses [0-9] not \d — drizzle's tagged
 //      template would strip the backslash.
-//   2. The day is within the actual length of that month, accounting for leap years.
+//   2. The year is >= 1. PostgreSQL dates have no year 0000; admitting it would
+//      still throw on ::date even though it passes the regex/month-day checks.
+//   3. The day is within the actual length of that month, accounting for leap years.
 // A regex/range guard ALONE is insufficient: Postgres `::date` (and `to_date`/
 // `to_timestamp`) THROW on 2026-02-31 / 2026-04-31 / 2026-02-29-in-a-non-leap-year,
 // which a YYYY-MM-DD + bounded-month/day regex still admits. So we validate the
@@ -957,6 +952,7 @@ function workspaceLostWindowEligibilitySql() {
 function castHsClosedWonDateSql(rawValue: SQLWrapper) {
   return sql`CASE
     WHEN ${rawValue} ~ '^[0-9]{4}-(0[1-9]|1[0-2])-(0[1-9]|[12][0-9]|3[01])'
+      AND substr(${rawValue}, 1, 4)::int >= 1
       AND substr(${rawValue}, 9, 2)::int <= (
         CASE substr(${rawValue}, 6, 2)::int
           WHEN 2 THEN CASE
@@ -1423,6 +1419,17 @@ export async function getDeals(
 
   // Build conditions array
   const conditions: any[] = [];
+  let wonClosedStageIds: string[] | null = null;
+  const resolveWonClosedStageIds = async (stages?: Awaited<ReturnType<typeof listDealStages>>) => {
+    if (wonClosedStageIds) return wonClosedStageIds;
+    const wonStages = stages ?? await listDealStages();
+    wonClosedStageIds = wonStages
+      .filter((stage) =>
+        WON_TERMINAL_STAGE_SLUGS.includes(stage.slug as (typeof WON_TERMINAL_STAGE_SLUGS)[number])
+      )
+      .map((stage) => stage.id);
+    return wonClosedStageIds;
+  };
 
   // Active filter defaults to true. Pipeline list/export can request mixed
   // visibility: active rows everywhere plus inactive rows only for terminal
@@ -1432,12 +1439,23 @@ export async function getDeals(
   // rows.
   if (filters.isActive === "pipeline") {
     let terminalInactiveStageIds: string[] = [];
-    if (filters.inactiveStageIds?.length) {
+    if (filters.inactiveStageIds?.length || filters.wonClosedFrom || filters.wonClosedTo) {
       const allStages = await listDealStages();
       const terminalStageIds = new Set(
         allStages.filter((stage) => isTerminalWorkspaceStage(stage)).map((stage) => stage.id)
       );
-      terminalInactiveStageIds = filters.inactiveStageIds.filter((id) => terminalStageIds.has(id));
+      terminalInactiveStageIds = (filters.inactiveStageIds ?? []).filter((id) => terminalStageIds.has(id));
+      if (filters.wonClosedFrom || filters.wonClosedTo) {
+        // Won-period drill-down must share the same row set as the Won card:
+        // active Won rows plus inactive historical Won aliases. Keep this
+        // aligned here so the generic pipeline visibility guard cannot drop an
+        // inactive Won-family row before the hs_closed_won_date filter runs.
+        for (const wonStageId of await resolveWonClosedStageIds(allStages)) {
+          if (terminalStageIds.has(wonStageId) && !terminalInactiveStageIds.includes(wonStageId)) {
+            terminalInactiveStageIds.push(wonStageId);
+          }
+        }
+      }
     }
     conditions.push(
       or(
@@ -1513,12 +1531,7 @@ export async function getDeals(
     // stage is NOT counted here. Without this, the drill-down over-counts vs the card
     // (the 1-deal residual seen in round-1). AND-ed with any caller-supplied stageIds
     // above, so an explicit non-Won stageIds + wonClosedFrom/To intersects to none.
-    const wonStages = await listDealStages();
-    const wonStageIds = wonStages
-      .filter((stage) =>
-        WON_TERMINAL_STAGE_SLUGS.includes(stage.slug as (typeof WON_TERMINAL_STAGE_SLUGS)[number])
-      )
-      .map((stage) => stage.id);
+    const wonStageIds = await resolveWonClosedStageIds();
     conditions.push(wonStageIds.length > 0 ? inArray(deals.stageId, wonStageIds) : sql`false`);
     conditions.push(dealHasUsableWonDateSql());
     conditions.push(aliasedActiveDealCountFilterSql("deals"));

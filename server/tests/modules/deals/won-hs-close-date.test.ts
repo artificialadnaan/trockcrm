@@ -60,6 +60,7 @@ vi.mock("../../../src/db.js", () => ({ db: createChainableMock(), pool: {} }));
 const WON_STAGES = [
   { id: "stage-open", slug: "opportunity", name: "Opportunity", displayOrder: 1, isTerminal: false, isActivePipeline: true },
   { id: "stage-won", slug: "won", name: "Won", displayOrder: 2, isTerminal: true, isActivePipeline: true },
+  { id: "stage-closed-won", slug: "closed_won", name: "Closed Won", displayOrder: 3, isTerminal: true, isActivePipeline: false },
 ];
 
 function buildPipelineTenantDb() {
@@ -126,6 +127,15 @@ describe("won-period hs_closed_won_date SQL helpers", () => {
     expect(text).toContain("when 2 then"); // February branch of the month-length CASE
     expect(text).toContain("% 4"); // leap-year divisibility test
     expect(text).toContain("% 400"); // leap-year century rule
+  });
+
+  it("rejects year zero before casting so 0000-01-01 yields NULL instead of a PostgreSQL cast error", async () => {
+    const { aliasedWonHsClosedWonDateSql } = await import("../../../src/modules/deals/service.js");
+    const text = extractSqlText(aliasedWonHsClosedWonDateSql("d")).toLowerCase();
+    expect(text).toContain("substr");
+    expect(text).toContain("1, 4");
+    expect(text).toContain(">= 1");
+    expect(text).toContain("::date");
   });
 });
 
@@ -221,6 +231,30 @@ describe("getDeals won drill-down (CHANGE 3)", () => {
     // so it matches the Won card exactly (a previously-Won deal now in a non-Won
     // active stage is excluded).
     expect(where).toContain("stage-won");
+    expect(where).toContain("stage-closed-won");
+  });
+
+  it("allows inactive Won-family aliases through pipeline visibility for wonClosedFrom/To", async () => {
+    const { tenantDb, chains } = buildListTenantDb();
+    const { getDeals } = await import("../../../src/modules/deals/service.js");
+
+    await getDeals(
+      tenantDb,
+      {
+        scope: "all",
+        isActive: "pipeline",
+        inactiveStageIds: ["stage-won"],
+        wonClosedFrom: "2026-01-01",
+        wonClosedTo: "2026-05-31",
+      },
+      "director",
+      "director-1"
+    );
+
+    const where = rowsWhereSql(chains);
+    expect(where).toContain("is_active");
+    expect(where).toContain("stage-won");
+    expect(where).toContain("stage-closed-won");
   });
 
   it("constrains the won drill-down to Won stages and intersects with caller-supplied stageIds (Codex finding 2)", async () => {

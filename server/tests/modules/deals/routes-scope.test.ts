@@ -237,6 +237,80 @@ describe("deal routes scope defaults", () => {
     );
   });
 
+  it("passes validated wonClosedFrom and wonClosedTo through to getDeals", async () => {
+    const { req } = await invokeRoute("/", {
+      wonClosedFrom: "2026-01-01",
+      wonClosedTo: "2026-12-31",
+    });
+
+    expect(dealServiceMocks.getDeals).toHaveBeenCalledWith(
+      req.tenantDb,
+      expect.objectContaining({
+        wonClosedFrom: "2026-01-01",
+        wonClosedTo: "2026-12-31",
+      }),
+      "director",
+      "director-1",
+      "director"
+    );
+  });
+
+  it("rejects malformed wonClosedFrom with a 400 before querying deals", async () => {
+    const handler = findRouteHandler("get", "/");
+    const req = {
+      query: { wonClosedFrom: "2026-99-99" },
+      tenantDb: {},
+      user: {
+        id: "director-1",
+        role: "director",
+        officeId: "office-1",
+        activeOfficeId: "office-1",
+      },
+      commitTransaction: vi.fn(async () => {}),
+    } as any;
+    const res = {} as any;
+    const next = vi.fn();
+
+    await handler(req, res, next);
+
+    expect(dealServiceMocks.getDeals).not.toHaveBeenCalled();
+    expect(req.commitTransaction).not.toHaveBeenCalled();
+    expect(next).toHaveBeenCalledWith(
+      expect.objectContaining({
+        statusCode: 400,
+        message: "wonClosedFrom must be an ISO date in YYYY-MM-DD format",
+      })
+    );
+  });
+
+  it("rejects malformed wonClosedTo with a 400 before querying deals", async () => {
+    const handler = findRouteHandler("get", "/");
+    const req = {
+      query: { wonClosedTo: "January 31" },
+      tenantDb: {},
+      user: {
+        id: "director-1",
+        role: "director",
+        officeId: "office-1",
+        activeOfficeId: "office-1",
+      },
+      commitTransaction: vi.fn(async () => {}),
+    } as any;
+    const res = {} as any;
+    const next = vi.fn();
+
+    await handler(req, res, next);
+
+    expect(dealServiceMocks.getDeals).not.toHaveBeenCalled();
+    expect(req.commitTransaction).not.toHaveBeenCalled();
+    expect(next).toHaveBeenCalledWith(
+      expect.objectContaining({
+        statusCode: 400,
+        message: "wonClosedTo must be an ISO date in YYYY-MM-DD format",
+      })
+    );
+  });
+
   it("passes validated Estimate Sent date filters through to deal list and pipeline routes", async () => {
     const list = await invokeRoute("/", {
       assignedRepId: "rep-1",
