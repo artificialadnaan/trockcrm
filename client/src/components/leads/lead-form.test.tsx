@@ -1246,6 +1246,30 @@ describe("LeadForm", () => {
     expect(container.textContent).toContain("Lead name is required.");
   });
 
+  it("shows the required asterisk upfront on a fresh form for qualification and legacy intake fields", () => {
+    renderCreateForm();
+
+    const labelFor = (id: string) =>
+      Array.from(container.querySelectorAll("label")).find(
+        (label) => label.getAttribute("for") === id
+      );
+
+    // Qualification block (lead-form.tsx:2385): required editable fields are
+    // starred from the first render -- no submit / gate round-trip needed.
+    expect(labelFor("estimated_value")?.textContent).toContain("*");
+    expect(labelFor("timeline_status")?.textContent).toContain("*");
+
+    // Legacy non-V2 intake questions (lead-form.tsx:2436): required questions
+    // are starred from the first render.
+    expect(labelFor("project_scope")?.textContent).toContain("*");
+    expect(labelFor("decision_maker")?.textContent).toContain("*");
+    expect(labelFor("budget_status")?.textContent).toContain("*");
+
+    // The bug was reps not seeing required fields until a failed submit; assert
+    // the asterisks are present without ever calling create.
+    expect(leadHookMocks.createLead).not.toHaveBeenCalled();
+  });
+
   it("uses the retained Estimated Value field with a currency prefix and hides the redundant Budget question", () => {
     mockUniversalCreateQuestionnaire();
 
