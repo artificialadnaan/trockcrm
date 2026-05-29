@@ -87,6 +87,7 @@ function buildMirrorDealUpdateQuery(args: {
     estimatingSubstage: unknown;
     proposalStatus: unknown;
     actualCloseDate: unknown;
+    wonClosedDate: unknown;
     lostReasonId: unknown;
     lostNotes: unknown;
     lostCompetitor: unknown;
@@ -141,6 +142,7 @@ function buildMirrorDealUpdateQuery(args: {
     `estimating_substage = ${bind(args.updates.estimatingSubstage)}`,
     `proposal_status = COALESCE(${bind(args.updates.proposalStatus)}, proposal_status)`,
     `actual_close_date = ${bind(args.updates.actualCloseDate)}`,
+    `won_closed_date = ${bind(args.updates.wonClosedDate)}`,
     `lost_reason_id = ${bind(args.updates.lostReasonId)}`,
     `lost_notes = ${bind(args.updates.lostNotes)}`,
     `lost_competitor = ${bind(args.updates.lostCompetitor)}`,
@@ -356,7 +358,7 @@ router.post("/opportunities", requireSyncHubSecret, async (req, res, next) => {
                 stage_id, stage_entered_at, on_hold, on_hold_started_at,
                 on_hold_accumulated_seconds, on_hold_accumulated_seconds_at_stage_entry,
                 workflow_route, is_bid_board_owned,
-                proposal_status, estimating_substage, actual_close_date,
+                proposal_status, estimating_substage, actual_close_date, won_closed_date,
                 dd_estimate, bid_estimate, awarded_amount, proposal_notes,
                 bid_board_stage_slug, bid_board_stage_family, bid_board_stage_status,
                 lost_reason_id, lost_notes, lost_competitor, lost_at
@@ -596,6 +598,7 @@ router.post("/opportunities", requireSyncHubSecret, async (req, res, next) => {
         { key: "estimatingSubstage", column: "estimating_substage", value: mirrorResult.updates.estimatingSubstage },
         { key: "proposalStatus", column: "proposal_status", value: mirrorResult.updates.proposalStatus },
         { key: "actualCloseDate", column: "actual_close_date", value: mirrorResult.updates.actualCloseDate },
+        { key: "wonClosedDate", column: "won_closed_date", value: mirrorResult.updates.wonClosedDate },
       ] as const;
       for (const { key, column, value } of optionalWebhookFields) {
         if (value === undefined) continue;
@@ -724,7 +727,7 @@ router.post("/opportunities", requireSyncHubSecret, async (req, res, next) => {
         bid_board_loss_outcome, bid_board_mirror_source_entered_at, bid_board_mirror_source_exited_at,
         read_only_synced_at, stage_entered_at, estimating_substage, proposal_status, proposal_notes,
         actual_close_date, lost_reason_id, lost_notes, lost_competitor, lost_at,
-        created_at, updated_at)
+        created_at, updated_at, won_closed_date)
        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, true, $15,
                CASE WHEN $15 = 'service' THEN 'service' ELSE 'normal' END,
                true, $16, $17, $18, $19, $20,
@@ -733,7 +736,7 @@ router.post("/opportunities", requireSyncHubSecret, async (req, res, next) => {
                  ELSE NULL
                END,
                $21, $22, $23, $24, $25, $26, $27, $28, $29, $30, $31, $32, $33,
-               $34, $35)
+               $34, $35, $36)
        RETURNING id, name, deal_number, project_number`,
       [
         dealNumber,
@@ -771,6 +774,7 @@ router.post("/opportunities", requireSyncHubSecret, async (req, res, next) => {
         mirrorResult.updates.lostAt ?? null,
         createdAt,
         createdAt,
+        mirrorResult.updates.wonClosedDate ?? null,
       ]
     );
 
