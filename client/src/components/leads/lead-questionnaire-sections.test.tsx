@@ -302,7 +302,12 @@ describe("LeadQuestionnaireSections", () => {
     expect(accessQuestion?.textContent).toContain("Type of access");
     expect(accessQuestion?.textContent).toContain("Gated");
     expect(accessQuestion?.textContent).toContain("Not Gated");
-    expect(accessQuestion?.textContent).toContain("Bobbed");
+    // Label-only relabel (#5): the option DISPLAYS "Fobbed" but still STORES the
+    // value "Bobbed". Migration 0130 and isTypeOfAccessOption continue to key off
+    // "Bobbed", so existing leads with site_access == "Bobbed" must be unaffected.
+    expect(accessQuestion?.textContent).toContain("Fobbed");
+    expect(accessQuestion?.textContent).not.toContain("Bobbed");
+    expect(accessQuestion?.querySelector('button[data-value="Bobbed"]')?.textContent).toBe("Fobbed");
     expect(accessQuestion?.textContent).toContain("Other");
     expect(container.querySelector<HTMLInputElement>("#site_access_other_detail")?.value).toBe("Gate code required");
   });

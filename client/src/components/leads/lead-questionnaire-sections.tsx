@@ -310,7 +310,12 @@ export function LeadQuestionnaireSections({
     const currentValue = answers[node.key];
     const questionOptions =
       node.key === "site_access"
-        ? TYPE_OF_ACCESS_OPTIONS.map((option) => ({ value: option, label: option }))
+        ? TYPE_OF_ACCESS_OPTIONS.map((option) => ({
+            value: option,
+            // Label-only relabel: the stored value stays "Bobbed" (migration 0130 /
+            // isTypeOfAccessOption are untouched); only the displayed label is "Fobbed".
+            label: option === "Bobbed" ? "Fobbed" : option,
+          }))
         : normalizeQuestionOptions(node.options);
 
     return (
