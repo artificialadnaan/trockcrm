@@ -45,3 +45,12 @@ BEGIN
   END LOOP;
 END
 $tenant$;
+
+-- TENANT_SCHEMA_START
+-- Replayed verbatim by the office provisioner for any tenant created AFTER this
+-- migration (server/src/modules/office/service.ts substitutes the new schema name
+-- for office_dallas). Without this block a new office would lack won_closed_date and
+-- changeDealStage / the bid-board mirror dual-write would fail. Mirrors 0136.
+ALTER TABLE office_dallas.deals
+  ADD COLUMN IF NOT EXISTS won_closed_date date;
+-- TENANT_SCHEMA_END

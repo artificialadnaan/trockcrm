@@ -1,17 +1,23 @@
 /**
  * READ-ONLY parity gate for the Won-period reporting basis change (migration 0141
- * + dual-write + backfill). Proves, PER OFFICE, that the new won_closed_date column
- * reproduces the current hs_closed_won_date Won total before the read helpers are
- * flipped. See .reviews/trockcrm-date-field-decision/plan.md section 6.
+ * + dual-write + backfill). Proves, PER OFFICE, that won_closed_date can safely
+ * become the Won-period basis before the read helpers are flipped.
+ * See .reviews/trockcrm-date-field-decision/plan.md section 6.
  *
- * Sets the transaction read-only; it never writes. Run it:
- *   - NOW (pre-migration): the column is absent, so it proves the hs-basis card and
- *     notes that won_closed_date will equal hs by construction (backfill := hs).
- *   - After the backfill: it compares hs vs the real column and asserts parity.
+ * Sets the transaction read-only; it never writes. Run AFTER the backfill.
  *
- * GATE PASSES when, for EVERY office: hs-basis count/value == column-basis
- * count/value, 0 presence-mismatch rows, 0 value-mismatch rows, and 0 bid-board
- * same-day collisions. If any office fails, DO NOT flip the read helpers.
+ * GATE INVARIANT (the safety property the flip depends on): no deal that counts
+ * TODAY on the hs basis may drop after the flip. Concretely, per office:
+ *   - backfill_gap = 0  : every Won row with a usable hs date has won_closed_date
+ *                         present AND equal to it. (If > 0 the flip would LOSE rows.)
+ *   - bid_board_collisions = 0 : won_closed_date never equals bid_board_last_updated_at
+ *                         (the reseed-contamination signature; 7 for actual_close_date).
+ *   - column present    : a MISSING column FAILS the gate (never a false green).
+ * rollout_wins (hs NULL but won_closed_date present) are EXPECTED and NOT a failure:
+ * they are deals won via the dual-write after deploy; the flip legitimately ADDS them.
+ *
+ * On failure the process exits non-zero so CI / Railway cannot proceed on a false
+ * PASS. If ANY office fails, DO NOT flip the read helpers.
  *
  * Usage:
  *   railway run --service=Postgres npx tsx scripts/verify-won-closed-date-parity.ts
@@ -102,28 +108,23 @@ async function run(): Promise<void> {
     console.log(`Parity gate | window ${from}..${to} (read-only)\n`);
     for (const { nspname: schema } of schemas) {
       const s = quoteIdent(schema);
-      const hs = await cardSummary(client, schema, HS_EXPR, from, to);
-      const hasCol = await columnExists(client, schema);
 
-      if (!hasCol) {
-        console.log(
-          `  ${schema}: hs-basis card = ${hs.count} / $${hs.value.toLocaleString("en-US", { minimumFractionDigits: 2 })}` +
-            `  | won_closed_date column ABSENT - will equal hs by construction (backfill := hs). Run 0141 + backfill, then re-run.`
-        );
-        // bid-board collision regression on the hs basis (must be 0; cf. 7 for actual_close_date).
-        const { rows: bb } = await client.query(
-          `SELECT COUNT(*)::int AS c FROM ${s}.deals d JOIN public.pipeline_stage_config psc ON psc.id=d.stage_id
-            WHERE psc.slug IN (${stages}) AND ${HS_EXPR} = d.bid_board_last_updated_at::date`
-        );
-        console.log(`           bid-board same-day collisions (hs basis): ${bb[0].c} (must be 0)`);
+      // A missing column FAILS the gate -- never continue past it on a false green.
+      if (!(await columnExists(client, schema))) {
+        allPass = false;
+        console.log(`  ${schema}: FAIL - won_closed_date column ABSENT (run migration 0141 + backfill first).`);
         continue;
       }
 
+      const hs = await cardSummary(client, schema, HS_EXPR, from, to);
       const col = await cardSummary(client, schema, "d.won_closed_date", from, to);
       const { rows: par } = await client.query(
         `SELECT
-           COUNT(*) FILTER (WHERE (${HS_EXPR} IS NOT NULL) <> (d.won_closed_date IS NOT NULL))::int AS presence_mismatch,
-           COUNT(*) FILTER (WHERE ${HS_EXPR} IS NOT NULL AND d.won_closed_date IS NOT NULL AND ${HS_EXPR} <> d.won_closed_date)::int AS value_mismatch
+           -- the real failure: a hs-dated Won row the backfill missed or mismatched
+           COUNT(*) FILTER (WHERE ${HS_EXPR} IS NOT NULL
+                              AND (d.won_closed_date IS NULL OR d.won_closed_date <> ${HS_EXPR}))::int AS backfill_gap,
+           -- expected / not a failure: deals won via the dual-write after deploy (hs NULL)
+           COUNT(*) FILTER (WHERE ${HS_EXPR} IS NULL AND d.won_closed_date IS NOT NULL)::int AS rollout_wins
          FROM ${s}.deals d JOIN public.pipeline_stage_config psc ON psc.id=d.stage_id
          WHERE psc.slug IN (${stages}) AND COALESCE(d.is_test_data,false)=false`
       );
@@ -131,24 +132,24 @@ async function run(): Promise<void> {
         `SELECT COUNT(*)::int AS c FROM ${s}.deals d JOIN public.pipeline_stage_config psc ON psc.id=d.stage_id
           WHERE psc.slug IN (${stages}) AND d.won_closed_date = d.bid_board_last_updated_at::date`
       );
-      const pass =
-        hs.count === col.count &&
-        hs.value === col.value &&
-        par[0].presence_mismatch === 0 &&
-        par[0].value_mismatch === 0 &&
-        bb[0].c === 0;
+      const backfillGap = par[0].backfill_gap;
+      const rolloutWins = par[0].rollout_wins;
+      const collisions = bb[0].c;
+      const pass = backfillGap === 0 && collisions === 0;
       allPass = allPass && pass;
+      const fmt = (v: number) => "$" + v.toLocaleString("en-US", { minimumFractionDigits: 2 });
       console.log(
         `  ${schema}: ${pass ? "PASS" : "FAIL"}\n` +
-          `    hs   = ${hs.count} / $${hs.value.toLocaleString("en-US", { minimumFractionDigits: 2 })}\n` +
-          `    col  = ${col.count} / $${col.value.toLocaleString("en-US", { minimumFractionDigits: 2 })}\n` +
-          `    presence_mismatch=${par[0].presence_mismatch} value_mismatch=${par[0].value_mismatch} bid_board_collisions=${bb[0].c}`
+          `    hs-basis card  = ${hs.count} / ${fmt(hs.value)}\n` +
+          `    col-basis card = ${col.count} / ${fmt(col.value)}  (delta ${col.count - hs.count} = expected in-window rollout wins)\n` +
+          `    backfill_gap=${backfillGap} (MUST be 0)  rollout_wins=${rolloutWins} (expected, ok)  bid_board_collisions=${collisions} (MUST be 0)`
       );
     }
     console.log(`\nGATE: ${allPass ? "PASS (safe to flip)" : "FAIL - DO NOT flip the read helpers"}`);
   } finally {
     await client.end();
   }
+  process.exitCode = allPass ? 0 : 1;
 }
 
 run();

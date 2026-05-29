@@ -426,6 +426,7 @@ export function buildBidBoardMirrorUpdate(input: {
   }
 
   updates.actualCloseDate = null;
+  updates.wonClosedDate = null; // app-owned Won-period reporting basis (0141): track actual_close_date
   updates.lostReasonId = null;
   updates.lostNotes = null;
   updates.lostCompetitor = null;
@@ -434,6 +435,11 @@ export function buildBidBoardMirrorUpdate(input: {
 
   if (canonicalTargetStageSlug === "won") {
     updates.actualCloseDate = now.toISOString().split("T")[0] ?? null;
+    // Dual-write the app-owned Won-period reporting basis (0141), tracking
+    // actual_close_date. The Bid-Board mirror is the dominant won-path; after the
+    // read flip, a bid-board-won deal with NULL won_closed_date would silently drop
+    // from the Won card/pipeline. Cleared above (line ~428) on any non-won update.
+    updates.wonClosedDate = now.toISOString().split("T")[0] ?? null;
   }
 
   if (canonicalTargetStageSlug === "lost") {
