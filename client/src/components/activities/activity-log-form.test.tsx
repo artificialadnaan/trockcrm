@@ -176,3 +176,99 @@ describe("ActivityLogForm responsible owner display", () => {
     unmount();
   });
 });
+
+describe("ActivityLogForm call outcome display", () => {
+  beforeEach(() => {
+    // This dropdown is exercised by opening a real Base UI Select popup, which
+    // touches DOM APIs jsdom does not implement. Real timers + these stubs let
+    // the popup mount so an item can be selected.
+    vi.useRealTimers();
+
+    const proto = window.HTMLElement.prototype as unknown as Record<string, unknown>;
+    if (typeof proto.scrollIntoView !== "function") proto.scrollIntoView = vi.fn();
+    if (typeof proto.hasPointerCapture !== "function") proto.hasPointerCapture = vi.fn(() => false);
+    if (typeof proto.setPointerCapture !== "function") proto.setPointerCapture = vi.fn();
+    if (typeof proto.releasePointerCapture !== "function") proto.releasePointerCapture = vi.fn();
+    const globals = globalThis as { ResizeObserver?: unknown };
+    if (typeof globals.ResizeObserver !== "function") {
+      globals.ResizeObserver = class {
+        observe() {}
+        unobserve() {}
+        disconnect() {}
+      };
+    }
+
+    mocks.useAuthMock.mockReturnValue({
+      user: { id: "rep-1", displayName: "Sales Rep" },
+    });
+    mocks.apiMock.mockResolvedValue({
+      users: [{ id: "rep-1", displayName: "Sales Rep" }],
+    });
+  });
+
+  it("shows the chosen outcome's label, not its raw enum value", async () => {
+    const { container, unmount } = mountActivityLogForm();
+
+    // Let the assignees fetch settle so no state updates escape act().
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    // The Outcome <Select> only renders for calls.
+    const logCall = [...container.querySelectorAll("button")].find((button) =>
+      button.textContent?.includes("Log Call")
+    );
+    click(logCall ?? null);
+
+    const outcomeLabel = [...container.querySelectorAll("label")].find(
+      (label) => label.textContent === "Outcome"
+    );
+    expect(outcomeLabel, "Outcome field should render for a call").toBeTruthy();
+
+    const outcomeTrigger = outcomeLabel!.parentElement?.querySelector(
+      "[data-slot='select-trigger']"
+    );
+    expect(outcomeTrigger, "outcome select trigger should render").toBeTruthy();
+
+    // Open the dropdown.
+    (outcomeTrigger as HTMLElement).focus();
+    await act(async () => {
+      outcomeTrigger!.dispatchEvent(new MouseEvent("mousedown", { bubbles: true }));
+      outcomeTrigger!.dispatchEvent(new MouseEvent("mouseup", { bubbles: true }));
+      outcomeTrigger!.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+
+    // Pick "Left Voicemail" (raw value "left_voicemail").
+    const voicemailOption = [
+      ...document.querySelectorAll("[data-slot='select-item']"),
+    ].find((item) => item.textContent?.includes("Left Voicemail"));
+    expect(
+      voicemailOption,
+      "Left Voicemail option should render once the dropdown is open"
+    ).toBeTruthy();
+
+    // Base UI only commits a mouse click on the "highlighted" (active) item.
+    // Hover + focus the item to highlight it, then click to commit.
+    await act(async () => {
+      voicemailOption!.dispatchEvent(new MouseEvent("mouseover", { bubbles: true }));
+      voicemailOption!.dispatchEvent(new MouseEvent("mousemove", { bubbles: true }));
+      (voicemailOption as HTMLElement).focus();
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    await act(async () => {
+      voicemailOption!.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+
+    // The trigger must display the human-readable label, never the raw value.
+    const triggerAfter = outcomeLabel!.parentElement?.querySelector(
+      "[data-slot='select-trigger']"
+    );
+    expect(triggerAfter!.textContent).toContain("Left Voicemail");
+    expect(triggerAfter!.textContent).not.toContain("left_voicemail");
+
+    unmount();
+  });
+});
