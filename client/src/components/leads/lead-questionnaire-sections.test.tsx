@@ -69,9 +69,19 @@ vi.mock("@/components/ui/select", () => ({
     </SelectContext.Provider>
   ),
   SelectTrigger: ({ children, id }: { children: React.ReactNode; id?: string }) => <div id={id}>{children}</div>,
-  SelectValue: ({ placeholder }: { children?: React.ReactNode; placeholder?: string }) => {
+  SelectValue: ({
+    children,
+    placeholder,
+  }: {
+    children?: React.ReactNode | ((value: string | null) => React.ReactNode);
+    placeholder?: string;
+  }) => {
     const { value } = React.useContext(SelectContext);
-    return <span data-select-label="true">{value ?? placeholder}</span>;
+    // Mirror Base UI Select.Value: a function child formats the selected value;
+    // a node child overrides it; otherwise the raw value (or placeholder) shows.
+    const content =
+      typeof children === "function" ? children(value ?? null) : (children ?? value ?? placeholder);
+    return <span data-select-label="true">{content}</span>;
   },
   SelectContent: ({ children }: { children: React.ReactNode }) => <div>{children}</div>,
   SelectItem: ({ children, value }: { children: React.ReactNode; value: string }) => {
@@ -310,6 +320,28 @@ describe("LeadQuestionnaireSections", () => {
     expect(accessQuestion?.querySelector('button[data-value="Bobbed"]')?.textContent).toBe("Fobbed");
     expect(accessQuestion?.textContent).toContain("Other");
     expect(container.querySelector<HTMLInputElement>("#site_access_other_detail")?.value).toBe("Gate code required");
+  });
+
+  it("relabels the selected trigger from Bobbed to Fobbed while keeping the stored value Bobbed", () => {
+    root = createRoot(container);
+    act(() => {
+      root.render(
+        <LeadQuestionnaireSections
+          nodes={accessQuestionNodes()}
+          answers={{ site_access: "Bobbed" }}
+          onAnswerChange={() => {}}
+        />
+      );
+    });
+
+    // Collapsed/selected trigger displays the label "Fobbed"...
+    const trigger = container.querySelector("#site_access");
+    expect(trigger?.textContent).toContain("Fobbed");
+    expect(trigger?.textContent).not.toContain("Bobbed");
+    // ...while the Select's underlying (stored) value stays "Bobbed".
+    expect(
+      container.querySelector("[data-select-value]")?.getAttribute("data-select-value")
+    ).toBe("Bobbed");
   });
 
   it("renders scope groups as selectable cards instead of accordion rows", () => {
