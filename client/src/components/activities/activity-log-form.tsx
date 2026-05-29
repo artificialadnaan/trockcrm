@@ -316,7 +316,11 @@ export function ActivityLogForm({
                 {assignees.length > 1 && (
                   <div>
                     <label className="text-xs text-muted-foreground mb-1 block">Responsible owner</label>
-                    <Select value={responsibleUserId} onValueChange={(value) => setResponsibleUserId(value ?? "")}>
+                    <Select
+                      items={assignees.map((assignee) => ({ value: assignee.id, label: assignee.displayName }))}
+                      value={responsibleUserId}
+                      onValueChange={(value) => setResponsibleUserId(value ?? "")}
+                    >
                       <SelectTrigger>
                         <SelectValue placeholder="Choose owner" />
                       </SelectTrigger>

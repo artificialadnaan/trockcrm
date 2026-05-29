@@ -127,3 +127,52 @@ describe("ActivityLogForm email logging", () => {
     unmount();
   });
 });
+
+describe("ActivityLogForm responsible owner display", () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-05-18T15:30:00.000Z"));
+  });
+
+  it("shows the responsible owner's name, not their raw user id, when multiple assignees exist", async () => {
+    const ownerId = "5687a3c6-1556-4dd6-a3d6-b26fbc22f471";
+    mocks.useAuthMock.mockReturnValue({
+      user: { id: ownerId, displayName: "Jordan Rivera" },
+    });
+    mocks.apiMock.mockResolvedValue({
+      users: [
+        { id: ownerId, displayName: "Jordan Rivera" },
+        { id: "casey-2", displayName: "Casey Lee" },
+      ],
+    });
+
+    const { container, unmount } = mountActivityLogForm();
+
+    // Let GET /tasks/assignees resolve so the multi-owner dropdown renders.
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    const logCall = [...container.querySelectorAll("button")].find((button) =>
+      button.textContent?.includes("Log Call")
+    );
+    click(logCall ?? null);
+
+    const ownerLabel = [...container.querySelectorAll("label")].find(
+      (label) => label.textContent === "Responsible owner"
+    );
+    expect(ownerLabel, "Responsible owner field should render with >1 assignee").toBeTruthy();
+
+    const ownerTrigger = ownerLabel!.parentElement?.querySelector(
+      "[data-slot='select-trigger']"
+    );
+    expect(ownerTrigger, "owner select trigger should render").toBeTruthy();
+
+    // The trigger must display the human name, never the raw user UUID.
+    expect(ownerTrigger!.textContent).toContain("Jordan Rivera");
+    expect(ownerTrigger!.textContent).not.toContain(ownerId);
+
+    unmount();
+  });
+});
