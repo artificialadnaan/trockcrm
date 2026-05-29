@@ -566,6 +566,7 @@ router.post("/opportunities", requireSyncHubSecret, async (req, res, next) => {
           estimatingSubstage: mirrorResult.updates.estimatingSubstage ?? null,
           proposalStatus: proposalStatusForUpdate,
           actualCloseDate: mirrorResult.updates.actualCloseDate ?? null,
+          wonClosedDate: mirrorResult.updates.wonClosedDate ?? null,
           lostReasonId: mirrorResult.updates.lostReasonId ?? null,
           lostNotes: mirrorResult.updates.lostNotes ?? null,
           lostCompetitor: mirrorResult.updates.lostCompetitor ?? null,

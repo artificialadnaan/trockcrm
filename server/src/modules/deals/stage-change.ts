@@ -313,9 +313,18 @@ export async function changeDealStage(
   // Then set the fields specific to the target terminal stage
   if (isWonOutcomeStage(targetStage.slug, currentDeal[0].workflowRoute)) {
     dealUpdates.actualCloseDate = new Date().toISOString().split("T")[0]; // DATE only
-    // Dual-write the app-owned Won-period reporting basis (0141). Same value, but a
-    // dedicated column that the sync/reseed paths never touch (cf. actual_close_date).
-    dealUpdates.wonClosedDate = new Date().toISOString().split("T")[0]; // DATE only
+    // Dual-write the app-owned Won-period reporting basis (0141) -- a dedicated column
+    // the sync/reseed paths never mass-stamp. PRESERVE the original won date on a move
+    // BETWEEN Won outcomes (e.g. won -> sent_to_production cleanup): stamp today ONLY
+    // when entering Won from a non-Won stage. Re-stamping on an intra-Won move would
+    // wrongly shift an already-won deal into the current reporting period.
+    const enteringWonFresh = !isWonOutcomeStage(
+      gateResult.currentStage.slug,
+      currentDeal[0].workflowRoute
+    );
+    dealUpdates.wonClosedDate = enteringWonFresh
+      ? new Date().toISOString().split("T")[0]
+      : currentDeal[0].wonClosedDate ?? new Date().toISOString().split("T")[0];
   }
 
   if (isLostOutcomeStage(targetStage.slug, currentDeal[0].workflowRoute)) {

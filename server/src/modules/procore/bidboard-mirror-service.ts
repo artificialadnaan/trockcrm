@@ -435,11 +435,15 @@ export function buildBidBoardMirrorUpdate(input: {
 
   if (canonicalTargetStageSlug === "won") {
     updates.actualCloseDate = now.toISOString().split("T")[0] ?? null;
-    // Dual-write the app-owned Won-period reporting basis (0141), tracking
-    // actual_close_date. The Bid-Board mirror is the dominant won-path; after the
-    // read flip, a bid-board-won deal with NULL won_closed_date would silently drop
-    // from the Won card/pipeline. Cleared above (line ~428) on any non-won update.
-    updates.wonClosedDate = now.toISOString().split("T")[0] ?? null;
+    // Dual-write the app-owned Won-period reporting basis (0141). The Bid-Board mirror
+    // is the dominant won-path; after the read flip a bid-board-won deal with NULL
+    // won_closed_date would silently drop from the Won card. Gate the period on the
+    // SOURCE won-entry date (stageEnteredAt, parsed from the Bid-Board payload) rather
+    // than the processing time `now`, so a late or replayed webhook is counted in the
+    // period the deal actually entered Won -- and so this contamination-free column
+    // never inherits the reseed-style "stamped today" drift that disqualified
+    // actual_close_date. Cleared above (~428) on any non-won update.
+    updates.wonClosedDate = stageEnteredAt.toISOString().split("T")[0] ?? null;
   }
 
   if (canonicalTargetStageSlug === "lost") {
