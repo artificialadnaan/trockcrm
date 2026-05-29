@@ -2376,13 +2376,13 @@ function EditableLeadForm({
             </div>
           </div>
           {EDITABLE_QUALIFICATION_FIELDS.map(
-            (field: { id: LeadQualificationFieldId; label: string; input: string }) => {
+            (field: { id: LeadQualificationFieldId; label: string; input: string; required: boolean }) => {
               const currentValue = formData.qualificationPayload[field.id] ?? "";
               const showLegacyHint =
                 field.id === "timeline_status" && isLegacyTimelineStatusValue(currentValue);
               return (
                 <div key={field.id} className="space-y-2">
-                  <QuestionLabel htmlFor={field.id} required={createRequirementErrors.has(field.id)}>
+                  <QuestionLabel htmlFor={field.id} required={field.required}>
                     {field.label}
                   </QuestionLabel>
                   {field.input === "date" ? (
@@ -2435,7 +2435,7 @@ function EditableLeadForm({
             const currentValue = formData.projectTypeQuestionAnswers[question.id];
             return (
               <div key={question.id} className="space-y-2">
-                <QuestionLabel htmlFor={question.id} required={createRequirementErrors.has(question.id)}>
+                <QuestionLabel htmlFor={question.id} required={question.required}>
                   {question.label}
                 </QuestionLabel>
                 <p className="text-sm text-muted-foreground">{question.prompt}</p>

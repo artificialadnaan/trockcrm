@@ -10,7 +10,6 @@ import { MemoryRouter } from "react-router-dom";
 import { getEditableFormState, LeadForm, LeadQuestionnaireSummary } from "./lead-form";
 import type { LeadQuestionnaireNode } from "@/hooks/use-leads";
 import type { PropertySurface } from "@/hooks/use-properties";
-import { ApiError } from "@/lib/api";
 
 (globalThis as unknown as { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -1247,54 +1246,28 @@ describe("LeadForm", () => {
     expect(container.textContent).toContain("Lead name is required.");
   });
 
-  it("drives the required asterisk on qualification and legacy intake fields from the create-gate validator", async () => {
-    // The create gate's missing-required keys arrive from the server
-    // (LEAD_CREATE_REQUIREMENTS_UNMET) and feed createRequirementErrors. The
-    // qualification block and the legacy (non-V2) intake questions must read
-    // that same validator so their asterisk cannot drift from required-ness.
-    leadHookMocks.createLead.mockRejectedValueOnce(
-      new ApiError(400, {
-        message: "Some required fields are missing.",
-        code: "LEAD_CREATE_REQUIREMENTS_UNMET",
-        missingRequirements: {
-          fields: [{ key: "estimated_value" }, { key: "project_scope" }],
-        },
-      })
-    );
-
+  it("shows the required asterisk upfront on a fresh form for qualification and legacy intake fields", () => {
     renderCreateForm();
-    await clickButton(findButton("ATL (Atlanta)")!);
-    await clickButton(findButton("Select Acme")!);
-    await clickButton(findButton("Select Palm Villas")!);
-    await clickButton(
-      container.querySelector<HTMLButtonElement>('button[data-value="contact-1"]')!
-    );
-    await submitForm();
-    await act(async () => {
-      await Promise.resolve();
-    });
-
-    // Precondition: the gate rejection actually ran (submit was not blocked).
-    expect(leadHookMocks.createLead).toHaveBeenCalledTimes(1);
 
     const labelFor = (id: string) =>
       Array.from(container.querySelectorAll("label")).find(
         (label) => label.getAttribute("for") === id
       );
 
-    // Qualification block (lead-form.tsx:2385): a gate-flagged field is starred.
-    expect(labelFor("estimated_value")).toBeTruthy();
+    // Qualification block (lead-form.tsx:2385): required editable fields are
+    // starred from the first render -- no submit / gate round-trip needed.
     expect(labelFor("estimated_value")?.textContent).toContain("*");
-    // A qualification field the gate did not flag stays asterisk-free.
-    expect(labelFor("timeline_status")).toBeTruthy();
-    expect(labelFor("timeline_status")?.textContent ?? "").not.toContain("*");
+    expect(labelFor("timeline_status")?.textContent).toContain("*");
 
-    // Legacy non-V2 intake question (lead-form.tsx:2436): flagged question starred.
-    expect(labelFor("project_scope")).toBeTruthy();
+    // Legacy non-V2 intake questions (lead-form.tsx:2436): required questions
+    // are starred from the first render.
     expect(labelFor("project_scope")?.textContent).toContain("*");
-    // A legacy question the gate did not flag stays asterisk-free.
-    expect(labelFor("decision_maker")).toBeTruthy();
-    expect(labelFor("decision_maker")?.textContent ?? "").not.toContain("*");
+    expect(labelFor("decision_maker")?.textContent).toContain("*");
+    expect(labelFor("budget_status")?.textContent).toContain("*");
+
+    // The bug was reps not seeing required fields until a failed submit; assert
+    // the asterisks are present without ever calling create.
+    expect(leadHookMocks.createLead).not.toHaveBeenCalled();
   });
 
   it("uses the retained Estimated Value field with a currency prefix and hides the redundant Budget question", () => {

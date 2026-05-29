@@ -6,6 +6,13 @@ export interface LeadValidationQuestionDefinition {
   label: string;
   prompt: string;
   input: "text" | "textarea" | "number" | "boolean";
+  /**
+   * True when the lead create/stage gate treats this question as required.
+   * The QuestionLabel asterisk is driven from this flag so the UI cannot drift
+   * from the gate (see server validation-question-service.listRequiredLeadQuestionIds,
+   * which feeds the stage-transition requirement check).
+   */
+  required: boolean;
 }
 
 export interface LeadValidationQuestionSet {
@@ -29,30 +36,35 @@ export const LEAD_VALIDATION_QUESTION_SETS: Record<
         label: "Service Line",
         prompt: "What service line is this request tied to?",
         input: "text",
+        required: true,
       },
       {
         id: "service_urgency",
         label: "Urgency",
         prompt: "How urgent is the service request?",
         input: "text",
+        required: true,
       },
       {
         id: "site_contact_available",
         label: "Site Contact Available",
         prompt: "Is there an on-site contact available for dispatch?",
         input: "boolean",
+        required: true,
       },
       {
         id: "active_issue_summary",
         label: "Active Issue",
         prompt: "What issue needs to be solved right now?",
         input: "textarea",
+        required: true,
       },
       {
         id: "service_request_value",
         label: "Service Request Value",
         prompt: "What is the expected value of this service request?",
         input: "number",
+        required: true,
       },
     ],
   },
@@ -65,30 +77,35 @@ export const LEAD_VALIDATION_QUESTION_SETS: Record<
         label: "Project Scope",
         prompt: "What work is the customer expecting us to deliver?",
         input: "textarea",
+        required: true,
       },
       {
         id: "decision_maker",
         label: "Decision Maker",
         prompt: "Who is the decision maker for this opportunity?",
         input: "text",
+        required: true,
       },
       {
         id: "budget_status",
         label: "Budget Status",
         prompt: "What is the current budget status?",
         input: "text",
+        required: true,
       },
       {
         id: "timeline_target",
         label: "Timeline Notes",
         prompt: "When does the customer need this project to move?",
         input: "text",
+        required: true,
       },
       {
         id: "incumbent_vendor",
         label: "Incumbent Vendor",
         prompt: "Is an incumbent vendor involved?",
         input: "text",
+        required: true,
       },
     ],
   },
@@ -114,16 +131,21 @@ export const LEAD_QUALIFICATION_FIELDS = [
     id: "existing_customer_status",
     label: "Existing Customer Status",
     input: "text",
+    // Gate-required, but computed on save and rendered read-only (excluded from
+    // EDITABLE_QUALIFICATION_FIELDS), so it never receives a QuestionLabel asterisk.
+    required: true,
   },
   {
     id: "estimated_value",
     label: "Estimated Value",
     input: "number",
+    required: true,
   },
   {
     id: "timeline_status",
     label: "Timeline Target Date",
     input: "date",
+    required: true,
   },
 ] as const;
 
