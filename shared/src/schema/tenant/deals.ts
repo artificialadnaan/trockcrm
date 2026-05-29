@@ -168,6 +168,12 @@ export const deals = pgTable(
     lostAt: timestamp("lost_at", { withTimezone: true }),
     expectedCloseDate: date("expected_close_date"),
     actualCloseDate: date("actual_close_date"),
+    // App-owned Won-period reporting date (migration 0141). Set ONLY by
+    // changeDealStage on Won-outcome entry; cleared on reopen / Lost. The reporting
+    // helpers gate Won YTD/MTD windows on this column once flipped -- decoupled from
+    // the HubSpot JSON blob and contamination-free vs actual_close_date. See
+    // .reviews/trockcrm-date-field-decision/plan.md.
+    wonClosedDate: date("won_closed_date"),
     contractSignedDate: date("contract_signed_date"),
     contractSignedAt: timestamp("contract_signed_at", { withTimezone: true }),
     rfpApprovalRequestedAt: timestamp("rfp_approval_requested_at", { withTimezone: true }),

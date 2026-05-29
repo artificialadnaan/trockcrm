@@ -304,6 +304,7 @@ export async function changeDealStage(
   // This prevents stale data when moving between terminal stages
   // (e.g., Closed Won -> Closed Lost) or reopening.
   dealUpdates.actualCloseDate = null;
+  dealUpdates.wonClosedDate = null; // app-owned Won-period reporting date (0141): cleared on any terminal change / reopen
   dealUpdates.lostReasonId = null;
   dealUpdates.lostNotes = null;
   dealUpdates.lostCompetitor = null;
@@ -312,6 +313,9 @@ export async function changeDealStage(
   // Then set the fields specific to the target terminal stage
   if (isWonOutcomeStage(targetStage.slug, currentDeal[0].workflowRoute)) {
     dealUpdates.actualCloseDate = new Date().toISOString().split("T")[0]; // DATE only
+    // Dual-write the app-owned Won-period reporting basis (0141). Same value, but a
+    // dedicated column that the sync/reseed paths never touch (cf. actual_close_date).
+    dealUpdates.wonClosedDate = new Date().toISOString().split("T")[0]; // DATE only
   }
 
   if (isLostOutcomeStage(targetStage.slug, currentDeal[0].workflowRoute)) {
