@@ -104,6 +104,7 @@ type MirrorableDeal = {
   proposalStatus: string | null;
   estimatingSubstage: string | null;
   actualCloseDate: string | null;
+  wonClosedDate?: string | null;
   lostReasonId: string | null;
   lostNotes: string | null;
   lostCompetitor: string | null;
@@ -437,13 +438,16 @@ export function buildBidBoardMirrorUpdate(input: {
     updates.actualCloseDate = now.toISOString().split("T")[0] ?? null;
     // Dual-write the app-owned Won-period reporting basis (0141). The Bid-Board mirror
     // is the dominant won-path; after the read flip a bid-board-won deal with NULL
-    // won_closed_date would silently drop from the Won card. Gate the period on the
-    // SOURCE won-entry date (stageEnteredAt, parsed from the Bid-Board payload) rather
-    // than the processing time `now`, so a late or replayed webhook is counted in the
-    // period the deal actually entered Won -- and so this contamination-free column
-    // never inherits the reseed-style "stamped today" drift that disqualified
-    // actual_close_date. Cleared above (~428) on any non-won update.
-    updates.wonClosedDate = stageEnteredAt.toISOString().split("T")[0] ?? null;
+    // won_closed_date would silently drop from the Won card. PRESERVE an existing
+    // won_closed_date (the backfilled hs basis, or a prior fresh-win stamp): a same-stage
+    // Won status/replay webhook did NOT newly enter Won, so it must not shift the
+    // reporting date. Stamp the SOURCE won-entry date (stageEnteredAt) ONLY on a genuine
+    // fresh entry, i.e. when there is no existing value. This keeps the contamination-free
+    // column free of BOTH processing-time `now` drift and same-stage re-sync clobber.
+    // The clear above (~428) nulls it on any non-won update, so reopen -> re-win correctly
+    // re-stamps.
+    const sourceWonDate = stageEnteredAt.toISOString().split("T")[0] ?? null;
+    updates.wonClosedDate = input.deal.wonClosedDate ?? sourceWonDate;
   }
 
   if (canonicalTargetStageSlug === "lost") {
