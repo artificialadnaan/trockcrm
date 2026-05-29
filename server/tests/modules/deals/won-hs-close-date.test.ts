@@ -1,13 +1,14 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-// Stage-1 YTD reporting fix: Won-period membership is gated on the true HubSpot
-// close-won date (hubspot_extra_properties->>'hs_closed_won_date'), never on the
-// reseed-contaminated actual_close_date or on contract_signed_at (commissions-only).
-// These tests assert the *generated SQL* uses the new date, applies the on-hold
-// and usable-date guards on period queries, and that the §6.8 carve-out's brittle
-// bid_board_last_updated_at clause is gone. (Mocked tenantDb — same harness as
-// board-service.test.ts. Row-level number correctness is covered by the PR's
-// production verification SQL.)
+// Won-period reporting basis = the app-owned deals.won_closed_date column (flipped
+// in step D of the expand/migrate/contract; migration 0141 + dual-write + backfill).
+// Before the flip the helpers gated on the HubSpot JSON close-won date
+// (hubspot_extra_properties->>'hs_closed_won_date' via public.try_parse_hs_close_date);
+// that parse now survives only in the backfill/reseed path. These tests assert the
+// *generated SQL* reads won_closed_date, applies the on-hold and usable-date guards
+// on period queries, and that the old HubSpot-JSON / try_parse read and the §6.8
+// bid_board_last_updated_at carve-out are gone from the read path. (Mocked tenantDb;
+// row-level correctness is covered by the PR's read-only parity verification SQL.)
 
 const dbState = vi.hoisted(() => ({ responses: [] as any[][] }));
 
@@ -90,49 +91,41 @@ function wonSummaryWhereSql(chains: any[]): string {
   return extractSqlText(chain?.where.mock.calls[0]?.[0]).toLowerCase();
 }
 
-describe("won-period hs_closed_won_date SQL helpers", () => {
-  it("aliasedWonHsClosedWonDateSql reads the hs_closed_won_date JSON key with NULLIF guards and hands it to the parse function", async () => {
+describe("won-period won_closed_date SQL helpers", () => {
+  it("aliasedWonHsClosedWonDateSql reads the app-owned won_closed_date column (flipped off the HubSpot JSON)", async () => {
     const { aliasedWonHsClosedWonDateSql } = await import("../../../src/modules/deals/service.js");
     const text = extractSqlText(aliasedWonHsClosedWonDateSql("d")).toLowerCase();
-    expect(text).toContain("hubspot_extra_properties");
-    expect(text).toContain("hs_closed_won_date");
-    expect(text).toContain("nullif");
-    // The calendar validation + ::date cast now live inside the IMMUTABLE
-    // public.try_parse_hs_close_date() function (migration 0140); the helper emits
-    // a single call to it rather than an inline CASE.
-    expect(text).toContain("try_parse_hs_close_date");
-    // Empty-string and the HubSpot "0" unset sentinel are both stripped.
-    expect(text).toContain("''");
-    expect(text).toContain("'0'");
+    // FLIPPED (step D): the helper is now `<alias>.won_closed_date`.
+    expect(text).toContain("won_closed_date");
+    // No longer reads the HubSpot JSON blob or the migration-0140 parse function
+    // (those survive only in the backfill/reseed path).
+    expect(text).not.toContain("hubspot_extra_properties");
+    expect(text).not.toContain("try_parse_hs_close_date");
     // Never falls back to the reseed-contaminated / commissions-only fields.
     expect(text).not.toContain("actual_close_date");
     expect(text).not.toContain("contract_signed");
     expect(text).not.toContain("updated_at");
   });
 
-  it("aliasedHasUsableWonDateSql guards on a non-null parsed hs close date", async () => {
+  it("aliasedHasUsableWonDateSql guards on a non-null won_closed_date", async () => {
     const { aliasedHasUsableWonDateSql } = await import("../../../src/modules/deals/service.js");
     const text = extractSqlText(aliasedHasUsableWonDateSql("d")).toLowerCase();
-    expect(text).toContain("try_parse_hs_close_date");
-    expect(text).toContain("hs_closed_won_date");
+    expect(text).toContain("won_closed_date");
     expect(text).toContain("is not null");
+    expect(text).not.toContain("try_parse_hs_close_date");
   });
 
-  it("emits a single public.try_parse_hs_close_date() call, NOT an inline calendar CASE", async () => {
+  it("emits the bare app-owned won_closed_date column, NOT a parse call or inline CASE", async () => {
     const { aliasedWonHsClosedWonDateSql } = await import("../../../src/modules/deals/service.js");
     const text = extractSqlText(aliasedWonHsClosedWonDateSql("d")).toLowerCase();
-    // The whole ~40-line nested-CASE calendar guard (days-in-month, leap year,
-    // year>=1, the bounded YYYY-MM-DD regex, the ::int/::date casts) was moved into
-    // the migration-0140 DB function so the WHERE position carries one compact,
-    // composition-safe token. Behavioural proof (2026-02-31 / 0000-01-01 / N/A ->
-    // NULL, ISO + 2024-02-29 -> date, none throw) is in the PR's read-only
-    // SELECT-from-VALUES verification against the function.
-    expect(text).toContain("public.try_parse_hs_close_date(");
+    // Post-flip the read path carries one compact column reference. The HubSpot
+    // parse (public.try_parse_hs_close_date) and the old inline calendar CASE are
+    // gone from the read path entirely.
+    expect(text).toContain("won_closed_date");
+    expect(text).not.toContain("public.try_parse_hs_close_date(");
     expect(text).not.toContain("case"); // no inline CASE
     expect(text).not.toContain("substr");
     expect(text).not.toContain("::int");
-    expect(text).not.toContain("% 4"); // no leap-year arithmetic inlined
-    expect(text).not.toContain("~ '^[0-9]"); // no inlined regex
   });
 });
 
@@ -141,7 +134,7 @@ describe("getDealsForPipeline Won branch (CHANGE 2 + 5)", () => {
     dbState.responses = [];
   });
 
-  it("gates the period on hs_closed_won_date, requires a usable date, excludes on-hold, and drops the bid_board carve-out", async () => {
+  it("gates the period on won_closed_date, requires a usable date, excludes on-hold, and drops the bid_board carve-out", async () => {
     dbState.responses = [WON_STAGES];
     const { tenantDb, chains } = buildPipelineTenantDb();
     const { getDealsForPipeline } = await import("../../../src/modules/deals/service.js");
@@ -154,26 +147,23 @@ describe("getDealsForPipeline Won branch (CHANGE 2 + 5)", () => {
     });
 
     const where = wonSummaryWhereSql(chains);
-    expect(where).toContain("hs_closed_won_date");
-    expect(where).toContain("deals.hubspot_extra_properties");
+    expect(where).toContain("won_closed_date");
+    expect(where).toContain("deals.won_closed_date");
     expect(where).toContain("is not null"); // usable-date guard (period only)
     expect(where).toContain("on_hold"); // §6.3 on-hold exclusion in the count too
-    // Old basis must be gone, and the narrowed carve-out no longer references bblua.
+    // Old bases must be gone, and the narrowed carve-out no longer references bblua.
+    expect(where).not.toContain("hubspot_extra_properties");
     expect(where).not.toContain("contract_signed");
     expect(where).not.toContain("bid_board_last_updated_at");
   });
 
-  it("composes a VALID multi-bound Won-period WHERE: the date guard appears as a complete public.try_parse_hs_close_date() call in every position (eligibility, >=, <=), built fresh per site", async () => {
-    // YTD path: BOTH a lower and an upper Won-date bound are set, so the date
-    // guard must appear in three positions — IS NOT NULL (eligibility), >= lower,
-    // <= upper. The guard is now a single public.try_parse_hs_close_date() function
-    // call, so each position carries one compact, composition-safe token (no
-    // multi-line inline CASE to mis-compose). The helper still builds a fresh
-    // fragment per site; extractSqlText's `seen` set renders a *reused* SQL instance
-    // as "" on its 2nd+ encounter, so a shared fragment would collapse to TWO
-    // fully-rendered calls (eligibility + first bound) while a correctly-fresh-per-
-    // site composition yields THREE. Prior tests only set a single bound, so they
-    // never exercised the multi-position composition — this is the gap they left.
+  it("composes a VALID multi-bound Won-period WHERE: the won_closed_date column appears in every position (eligibility, >=, <=), built fresh per site", async () => {
+    // YTD path: BOTH a lower and an upper Won-date bound are set, so the date guard
+    // must appear in three positions -- IS NOT NULL (eligibility), >= lower, <= upper.
+    // The helper builds a fresh fragment per site; extractSqlText's `seen` set renders
+    // a *reused* SQL instance as "" on its 2nd+ encounter, so a shared fragment would
+    // collapse to TWO fully-rendered column references while a correctly-fresh-per-site
+    // composition yields THREE. Prior single-bound tests never exercised this.
     dbState.responses = [WON_STAGES];
     const { tenantDb, chains } = buildPipelineTenantDb();
     const { getDealsForPipeline } = await import("../../../src/modules/deals/service.js");
@@ -187,19 +177,18 @@ describe("getDealsForPipeline Won branch (CHANGE 2 + 5)", () => {
     });
 
     const where = wonSummaryWhereSql(chains);
-    // One fully-rendered guard per position. Three positions => three function
-    // calls. A single shared fragment collapses to two.
-    const guardRenders = (where.match(/public\.try_parse_hs_close_date\(/g) ?? []).length;
+    // One fully-rendered guard per position. Three positions => three column refs.
+    // A single shared/reused fragment collapses to two under the `seen` dedup.
+    const guardRenders = (where.match(/won_closed_date/g) ?? []).length;
     expect(guardRenders).toBe(3);
-    expect(where).toContain("deals.hubspot_extra_properties");
-    // Each date bound's left operand is a COMPLETE function call: the closing paren
-    // of try_parse_hs_close_date(...) immediately precedes the comparison operator.
-    // A dropped/reused fragment would leave a dangling operator (e.g. "and  <= ...").
-    // (The harness renders bound params inline, so we don't assert a $n placeholder.)
-    expect(where).toMatch(/\)\s*>=/);
-    expect(where).toMatch(/\)\s*<=/);
-    // The inline calendar CASE is gone entirely.
+    expect(where).toContain("deals.won_closed_date");
+    // Each date bound's left operand is the column, immediately preceding the
+    // comparison operator; a dropped/reused fragment would leave a dangling operator.
+    expect(where).toMatch(/won_closed_date\s*>=/);
+    expect(where).toMatch(/won_closed_date\s*<=/);
+    // The inline calendar CASE and the HubSpot parse are gone entirely.
     expect(where).not.toContain("case");
+    expect(where).not.toContain("try_parse_hs_close_date");
     expect(where).toContain("is not null");
   });
 
@@ -216,7 +205,7 @@ describe("getDealsForPipeline Won branch (CHANGE 2 + 5)", () => {
     });
 
     const where = wonSummaryWhereSql(chains);
-    expect(where).not.toContain("hs_closed_won_date"); // no period gate / guard
+    expect(where).not.toContain("won_closed_date"); // no period gate / guard
     expect(where).toContain("on_hold"); // on-hold still excluded all-time
   });
 });
@@ -250,7 +239,7 @@ describe("getDeals won drill-down (CHANGE 3)", () => {
     return extractSqlText(chain?.where.mock.calls[0]?.[0]).toLowerCase();
   }
 
-  it("wonClosedFrom/To filter gates on hs_closed_won_date + usable guard + on-hold exclusion", async () => {
+  it("wonClosedFrom/To filter gates on won_closed_date + usable guard + on-hold exclusion", async () => {
     const { tenantDb, chains } = buildListTenantDb();
     const { getDeals } = await import("../../../src/modules/deals/service.js");
 
@@ -262,7 +251,7 @@ describe("getDeals won drill-down (CHANGE 3)", () => {
     );
 
     const where = rowsWhereSql(chains);
-    expect(where).toContain("hs_closed_won_date");
+    expect(where).toContain("won_closed_date");
     expect(where).toContain("is not null");
     expect(where).toContain("on_hold");
     // Finding 2: the drill-down is constrained to the canonical Won-family stages,
@@ -314,7 +303,7 @@ describe("getDeals won drill-down (CHANGE 3)", () => {
     expect(where).toContain("is_active");
     expect(where).toContain("stage-won");
     expect(where).toContain("stage-closed-won");
-    expect(where).toContain("hs_closed_won_date");
+    expect(where).toContain("won_closed_date");
   });
 
   it("constrains the won drill-down to Won stages and intersects with caller-supplied stageIds (Codex finding 2)", async () => {
@@ -335,7 +324,7 @@ describe("getDeals won drill-down (CHANGE 3)", () => {
     expect(where).toContain("stage-won");
   });
 
-  it("contractSignedFrom/To stays on contract_signed (commissions surface, §6.5) and does not use hs_closed_won_date", async () => {
+  it("contractSignedFrom/To stays on contract_signed (commissions surface, §6.5) and does not use the won-period column", async () => {
     const { tenantDb, chains } = buildListTenantDb();
     const { getDeals } = await import("../../../src/modules/deals/service.js");
 
@@ -348,6 +337,7 @@ describe("getDeals won drill-down (CHANGE 3)", () => {
 
     const where = rowsWhereSql(chains);
     expect(where).toContain("contract_signed");
+    expect(where).not.toContain("won_closed_date");
     expect(where).not.toContain("hs_closed_won_date");
   });
 });
