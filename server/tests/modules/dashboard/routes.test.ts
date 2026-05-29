@@ -203,15 +203,20 @@ describe("dashboard routes", () => {
     });
   });
 
-  it("returns a Team placeholder payload without coercing the route to mine", async () => {
+  it("passes Team scope through to the director service without coercing it to mine", async () => {
     const getDirectorDashboardMock = (await import("../../../src/modules/dashboard/service.js")).getDirectorDashboard as any;
+    getDirectorDashboardMock.mockResolvedValue({ repCards: [] });
 
     const response = await request(buildDirectorApp())
       .get("/api/dashboard/director?scope=team&periodKind=mtd");
 
     expect(response.status).toBe(200);
-    expect(response.body).toEqual({ data: null });
-    expect(getDirectorDashboardMock).not.toHaveBeenCalled();
+    expect(response.body).toEqual({ data: { repCards: [] } });
+    // Team must reach the service as scope:"team" — not coerced to mine, not a null stub.
+    expect(getDirectorDashboardMock).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ scope: "team" })
+    );
     expect(commitTransactionMock).toHaveBeenCalledOnce();
   });
 });

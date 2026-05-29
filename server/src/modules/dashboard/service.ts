@@ -46,6 +46,7 @@ import {
   buildAliasedLeadMineVisibilityCondition,
   resolveMineVisibilityFeatures,
 } from "../shared/mine-visibility.js";
+import { resolveTeamRepIds } from "../shared/team-scope.js";
 import {
   aliasedActiveDealCountFilterSql,
   aliasedDealBestEstimateSql,
@@ -268,6 +269,10 @@ export function buildDashboardDownstreamBottlenecks(
 
 type DashboardScopeOptions = {
   repId?: string;
+  // Team scope: explicit list of the viewer's team rep ids. Distinct from a
+  // single repId drill-down and from All (no rep filter). An empty array means
+  // "the team has no reps" -> match no rows (mirrors the deals-page team path).
+  repIds?: string[];
   viewerUserId?: string;
   viewerRole?: string;
   includeDealSubscriptions?: boolean;
@@ -278,7 +283,7 @@ type DashboardScopeOptions = {
   includeLeadSubscriptionDeletedAt?: boolean;
 };
 
-function leadScopeFilterSql(alias: string, options: DashboardScopeOptions) {
+export function leadScopeFilterSql(alias: string, options: DashboardScopeOptions) {
   if (options.viewerUserId) {
     return sql`AND ${buildAliasedLeadMineVisibilityCondition(alias, options.viewerUserId, {
       includeSubscriptions: options.includeLeadSubscriptions,
@@ -286,19 +291,29 @@ function leadScopeFilterSql(alias: string, options: DashboardScopeOptions) {
       includeSubscriptionDeletedAt: options.includeLeadSubscriptionDeletedAt,
     })}`;
   }
+  if (options.repIds) {
+    return options.repIds.length > 0
+      ? sql`AND ${sql.raw(alias)}.assigned_rep_id IN (${sql.join(options.repIds.map((id) => sql`${id}`), sql`, `)})`
+      : sql`AND false`;
+  }
   if (options.repId) {
     return sql`AND ${sql.raw(alias)}.assigned_rep_id = ${options.repId}`;
   }
   return sql``;
 }
 
-function dealScopeFilterSql(alias: string, options: DashboardScopeOptions) {
+export function dealScopeFilterSql(alias: string, options: DashboardScopeOptions) {
   if (options.viewerUserId) {
     return sql`AND ${buildAliasedDealMineVisibilityCondition(alias, options.viewerUserId, {
       includeSubscriptions: options.includeDealSubscriptions,
       includeCreatedBy: options.includeDealCreatedBy,
       includeSubscriptionDeletedAt: options.includeDealSubscriptionDeletedAt,
     })}`;
+  }
+  if (options.repIds) {
+    return options.repIds.length > 0
+      ? sql`AND ${sql.raw(alias)}.assigned_rep_id IN (${sql.join(options.repIds.map((id) => sql`${id}`), sql`, `)})`
+      : sql`AND false`;
   }
   if (options.repId) {
     return sql`AND ${sql.raw(alias)}.assigned_rep_id = ${options.repId}`;
@@ -2388,16 +2403,18 @@ async function buildDirectorScopeSummary(
       includeDd: false,
       repId: options.repId,
       viewerUserId: options.viewerUserId,
+      repIds: options.repIds,
       includeDealSubscriptions: options.includeDealSubscriptions,
       includeDealCreatedBy: options.includeDealCreatedBy,
       includeDealSubscriptionDeletedAt: options.includeDealSubscriptionDeletedAt,
     }),
     () => getDashboardStaleDeals(
       tenantDb,
-      options.repId || options.viewerUserId
+      options.repId || options.viewerUserId || options.repIds !== undefined
         ? {
             repId: options.repId,
             viewerUserId: options.viewerUserId,
+            repIds: options.repIds,
             includeDealSubscriptions: options.includeDealSubscriptions,
             includeDealCreatedBy: options.includeDealCreatedBy,
             includeDealSubscriptionDeletedAt: options.includeDealSubscriptionDeletedAt,
@@ -2406,10 +2423,11 @@ async function buildDirectorScopeSummary(
     ),
     () => getDashboardAtRiskRows(
       tenantDb,
-      options.repId || options.viewerUserId
+      options.repId || options.viewerUserId || options.repIds !== undefined
         ? {
             repId: options.repId,
             viewerUserId: options.viewerUserId,
+            repIds: options.repIds,
             includeDealSubscriptions: options.includeDealSubscriptions,
             includeDealCreatedBy: options.includeDealCreatedBy,
             includeDealSubscriptionDeletedAt: options.includeDealSubscriptionDeletedAt,
@@ -2498,7 +2516,7 @@ export async function getDirectorDashboard(
     to?: string;
     officeId: string;
     periodKind?: RepPerformancePeriodKind;
-    scope?: "mine" | "all";
+    scope?: "mine" | "team" | "all";
     viewerUserId?: string;
     viewerRole?: string;
   }
@@ -2509,6 +2527,13 @@ export async function getDirectorDashboard(
   const now = new Date();
   const scopedViewerUserId = options.scope === "mine" ? options.viewerUserId : undefined;
   const mineVisibility = scopedViewerUserId ? await resolveMineVisibilityFeatures(tenantDb) : null;
+  // Team scope: filter the scope-sensitive surfaces to the viewer's team reps
+  // (same resolution the deals page uses). An empty team -> no-rows filter in the
+  // scope-filter helpers. Mine and All resolve repIds to undefined (unchanged).
+  const teamRepIds =
+    options.scope === "team" && options.viewerUserId
+      ? await resolveTeamRepIds(tenantDb, options.viewerUserId, options.officeId ?? null)
+      : undefined;
 
   const [
     repCardsResult,
@@ -2545,6 +2570,7 @@ export async function getDirectorDashboard(
     () => getCrmOwnedProgression(tenantDb),
     () => getDashboardAtRiskRows(tenantDb, {
       viewerUserId: scopedViewerUserId,
+      repIds: teamRepIds,
       viewerRole: options.viewerRole ?? "director",
       includeDealSubscriptions: mineVisibility?.dealSubscriptions,
       includeDealCreatedBy: mineVisibility?.dealsCreatedByUserId,
@@ -2558,6 +2584,7 @@ export async function getDirectorDashboard(
       from,
       to,
       viewerUserId: scopedViewerUserId,
+      repIds: teamRepIds,
       viewerRole: options.viewerRole,
       includeDealSubscriptions: mineVisibility?.dealSubscriptions,
       includeLeadSubscriptions: mineVisibility?.leadSubscriptions,

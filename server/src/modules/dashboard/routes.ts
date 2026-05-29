@@ -60,12 +60,6 @@ router.get(
         throw new AppError(400, "Invalid rep performance period kind");
       }
 
-      if (scope === "team") {
-        await req.commitTransaction!();
-        res.json({ data: null });
-        return;
-      }
-
       const data = await getDirectorDashboard(req.tenantDb!, {
         from: req.query.from as string | undefined,
         to: req.query.to as string | undefined,
