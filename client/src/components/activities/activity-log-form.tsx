@@ -86,6 +86,13 @@ function getFormLabel(type: LogType) {
   return type.replace(/_/g, " ");
 }
 
+const CALL_OUTCOME_OPTIONS: Array<{ value: string; label: string }> = [
+  { value: "connected", label: "Connected" },
+  { value: "left_voicemail", label: "Left Voicemail" },
+  { value: "no_answer", label: "No Answer" },
+  { value: "scheduled_meeting", label: "Scheduled Meeting" },
+];
+
 export function ActivityLogForm({
   onSubmit,
   targetOptions = [],
@@ -316,7 +323,11 @@ export function ActivityLogForm({
                 {assignees.length > 1 && (
                   <div>
                     <label className="text-xs text-muted-foreground mb-1 block">Responsible owner</label>
-                    <Select value={responsibleUserId} onValueChange={(value) => setResponsibleUserId(value ?? "")}>
+                    <Select
+                      items={assignees.map((assignee) => ({ value: assignee.id, label: assignee.displayName }))}
+                      value={responsibleUserId}
+                      onValueChange={(value) => setResponsibleUserId(value ?? "")}
+                    >
                       <SelectTrigger>
                         <SelectValue placeholder="Choose owner" />
                       </SelectTrigger>
@@ -396,15 +407,20 @@ export function ActivityLogForm({
               <div className="grid grid-cols-2 gap-3">
                 <div>
                   <label className="text-xs text-muted-foreground mb-1 block">Outcome</label>
-                  <Select value={outcome} onValueChange={(v) => setOutcome(v ?? "")}>
+                  <Select
+                    items={CALL_OUTCOME_OPTIONS}
+                    value={outcome}
+                    onValueChange={(v) => setOutcome(v ?? "")}
+                  >
                     <SelectTrigger>
                       <SelectValue placeholder="Select outcome" />
                     </SelectTrigger>
                     <SelectContent>
-                      <SelectItem value="connected">Connected</SelectItem>
-                      <SelectItem value="left_voicemail">Left Voicemail</SelectItem>
-                      <SelectItem value="no_answer">No Answer</SelectItem>
-                      <SelectItem value="scheduled_meeting">Scheduled Meeting</SelectItem>
+                      {CALL_OUTCOME_OPTIONS.map((option) => (
+                        <SelectItem key={option.value} value={option.value}>
+                          {option.label}
+                        </SelectItem>
+                      ))}
                     </SelectContent>
                   </Select>
                 </div>
