@@ -1881,7 +1881,6 @@ export interface DirectorDashboardData {
     activePipeline: { count: number; totalValue: number };
     won: { count: number; totalValue: number };
     atRisk: { count: number; totalValue: number };
-    stale: { count: number; totalValue: number };
   };
 }
 
@@ -2431,7 +2430,7 @@ async function buildDirectorScopeSummary(
   tenantDb: TenantDb,
   options: { from: string; to: string } & DashboardScopeOptions
 ) {
-  const [pipelineRows, staleDeals, atRiskRows, won] = await runSequential([
+  const [pipelineRows, atRiskRows, won] = await runSequential([
     () => getScopedPipelineSummary(tenantDb, {
       includeDd: false,
       repId: options.repId,
@@ -2440,18 +2439,6 @@ async function buildDirectorScopeSummary(
       includeDealCreatedBy: options.includeDealCreatedBy,
       includeDealSubscriptionDeletedAt: options.includeDealSubscriptionDeletedAt,
     }),
-    () => getDashboardStaleDeals(
-      tenantDb,
-      options.repId || options.viewerUserId
-        ? {
-            repId: options.repId,
-            viewerUserId: options.viewerUserId,
-            includeDealSubscriptions: options.includeDealSubscriptions,
-            includeDealCreatedBy: options.includeDealCreatedBy,
-            includeDealSubscriptionDeletedAt: options.includeDealSubscriptionDeletedAt,
-          }
-        : {}
-    ),
     () => getDashboardAtRiskRows(
       tenantDb,
       options.repId || options.viewerUserId
@@ -2475,15 +2462,11 @@ async function buildDirectorScopeSummary(
     { count: 0, totalValue: 0 }
   );
   const atRisk = buildDashboardAtRiskSummary(atRiskRows, options.viewerRole ?? "director");
-  const stale = staleDeals.reduce(
-    (acc, deal) => ({
-      count: acc.count + 1,
-      totalValue: acc.totalValue + deal.dealValue,
-    }),
-    { count: 0, totalValue: 0 }
-  );
 
-  return { activePipeline, won, atRisk, stale };
+  // P2-9: 'stale' was an alias of at-risk (same isAtRisk predicate) and rendered nowhere --
+  // a dead duplicate, now removed. A genuine stale-accounts metric (activity recency; see the
+  // worker rep-performance rollup's stale_account_count) is deferred as separate, sourced work.
+  return { activePipeline, won, atRisk };
 }
 
 export async function getDirectorCommissionWorkspace(
@@ -2752,7 +2735,6 @@ export async function getDirectorDashboard(
     scopeSummary: {
       ...scopeSummary,
       atRisk: atRiskScopeSummary,
-      stale: atRiskScopeSummary,
     },
   };
 }

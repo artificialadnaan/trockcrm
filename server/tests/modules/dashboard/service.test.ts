@@ -593,7 +593,7 @@ describe("Dashboard Service", () => {
         activePipeline: { count: expect.any(Number), totalValue: expect.any(Number) },
         won: { count: expect.any(Number), totalValue: expect.any(Number) },
         atRisk: { count: expect.any(Number), totalValue: expect.any(Number) },
-        stale: { count: expect.any(Number), totalValue: expect.any(Number) },
+        // P2-9: 'stale' removed (was a dead alias of at-risk).
       });
     });
 
@@ -1070,6 +1070,23 @@ describe("Dashboard Service", () => {
       ]);
       // All scope (no viewer): office-wide, unchanged.
       expect(scopeActivityPulseRowsToViewer(rows, undefined)).toBe(rows);
+    });
+
+    it("does not expose a duplicate 'stale' metric alongside at-risk (P2-9)", async () => {
+      const { getDirectorDashboard } = await import("../../../src/modules/dashboard/service.js");
+      const tenantDb = createMockTenantDb([]);
+
+      const result = await getDirectorDashboard(tenantDb, {
+        from: "2026-01-01",
+        to: "2026-12-31",
+        officeId: "office-1",
+      });
+
+      // P2-9: scopeSummary.stale was an alias of at-risk (the SAME isAtRisk predicate) and
+      // was rendered nowhere -- a dead duplicate. Removed so the payload no longer claims a
+      // distinct metric it doesn't have.
+      expect(result.scopeSummary).toHaveProperty("atRisk");
+      expect(result.scopeSummary).not.toHaveProperty("stale");
     });
 
     it("keeps at-risk scope summary aligned to the role-relative engine population", async () => {
