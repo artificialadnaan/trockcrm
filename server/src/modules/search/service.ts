@@ -1,19 +1,33 @@
-import { sql, eq, and, gte } from "drizzle-orm";
+import { sql, eq, and, gte, desc } from "drizzle-orm";
 import crypto from "crypto";
 import type { NodePgDatabase } from "drizzle-orm/node-postgres";
 import type * as schema from "@trock-crm/shared/schema";
-import { aiFeedback, userOfficeAccess, offices, users } from "@trock-crm/shared/schema";
+import { aiFeedback, userOfficeAccess, offices, users, deals, contacts, companies, leads, properties } from "@trock-crm/shared/schema";
 import { db, pool } from "../../db.js";
 import { drizzle } from "drizzle-orm/node-postgres";
+import {
+  buildDealSearchCondition,
+  buildContactSearchCondition,
+  buildCompanySearchCondition,
+  buildLeadSearchCondition,
+  buildPropertySearchCondition,
+} from "./unified-search.js";
+import { capPerOffice, deriveDealStatus, mergeAndLimit, scoreMatch, type DealLifecycle } from "./global-search-helpers.js";
 
 type TenantDb = NodePgDatabase<typeof schema>;
 
+export type SearchType = "deals" | "contacts" | "files" | "companies" | "leads" | "properties";
+
+const DEFAULT_SEARCH_TYPES: SearchType[] = ["deals", "contacts", "files", "companies", "leads", "properties"];
+const PER_ENTITY_LIMIT = 25;
+
 export interface SearchResult {
-  entityType: "deal" | "contact" | "file";
+  entityType: "deal" | "contact" | "file" | "company" | "lead" | "property";
   id: string;
   primaryLabel: string;
   secondaryLabel: string;
   tertiaryLabel?: string;
+  status?: DealLifecycle | null;
   officeSlug?: string;
   deepLink: string;
   rank: number;
@@ -23,6 +37,9 @@ export interface SearchResponse {
   deals: SearchResult[];
   contacts: SearchResult[];
   files: SearchResult[];
+  companies: SearchResult[];
+  leads: SearchResult[];
+  properties: SearchResult[];
   total: number;
   query: string;
 }
@@ -78,7 +95,6 @@ export interface AiSearchResponse {
   evidence: AiSearchEvidence[];
 }
 
-const MAX_RESULTS_PER_TYPE = 5;
 const MAX_AI_EVIDENCE = 5;
 
 async function settleSequential<T>(operation: () => Promise<T>): Promise<PromiseSettledResult<T>> {
@@ -100,13 +116,13 @@ async function settleSequential<T>(operation: () => Promise<T>): Promise<Promise
 export async function globalSearch(
   tenantDb: TenantDb,
   query: string,
-  types: Array<"deals" | "contacts" | "files"> = ["deals", "contacts", "files"],
+  types: SearchType[] = DEFAULT_SEARCH_TYPES,
   userRole?: string,
   userId?: string,
 ): Promise<SearchResponse> {
   const sanitized = query.trim().replace(/[^\w\s-]/g, "").trim();
   if (sanitized.length < 2) {
-    return { deals: [], contacts: [], files: [], total: 0, query };
+    return emptyResponse(query);
   }
 
   // For directors/admins, search across all accessible offices
@@ -116,6 +132,10 @@ export async function globalSearch(
 
   // Default: single-office search (reps)
   return singleOfficeSearch(tenantDb, sanitized, types);
+}
+
+function emptyResponse(query: string): SearchResponse {
+  return { deals: [], contacts: [], files: [], companies: [], leads: [], properties: [], total: 0, query };
 }
 
 export async function naturalLanguageSearch(
@@ -145,36 +165,68 @@ export async function naturalLanguageSearch(
   };
 }
 
+async function runEntitySearches(
+  searchDb: TenantDb,
+  sanitized: string,
+  types: SearchType[],
+  limit: number,
+): Promise<Record<SearchType, SearchResult[]>> {
+  // Sequential on purpose: the cross-office path runs these on a SINGLE pooled pg client (one
+  // search_path), which cannot multiplex concurrent queries. settleSequential keeps one failing
+  // entity from sinking the rest.
+  const runOne = async (include: boolean, fn: () => Promise<SearchResult[]>): Promise<SearchResult[]> => {
+    if (!include) return [];
+    const settled = await settleSequential(fn);
+    return settled.status === "fulfilled" ? settled.value : [];
+  };
+
+  const dealHits = await runOne(types.includes("deals"), () => searchDeals(searchDb, sanitized, limit));
+  const contactHits = await runOne(types.includes("contacts"), () => searchContacts(searchDb, sanitized, limit));
+  const fileHits = await runOne(types.includes("files"), () => searchFiles(searchDb, sanitized, limit));
+  const companyHits = await runOne(types.includes("companies"), () => searchCompanies(searchDb, sanitized, limit));
+  const leadHits = await runOne(types.includes("leads"), () => searchLeads(searchDb, sanitized, limit));
+  const propertyHits = await runOne(types.includes("properties"), () => searchProperties(searchDb, sanitized, limit));
+
+  return { deals: dealHits, contacts: contactHits, files: fileHits, companies: companyHits, leads: leadHits, properties: propertyHits };
+}
+
+function assembleResponse(query: string, groups: Record<SearchType, SearchResult[]>, limit: number): SearchResponse {
+  const dealHits = mergeAndLimit(groups.deals, limit).hits;
+  const contactHits = mergeAndLimit(groups.contacts, limit).hits;
+  const fileHits = mergeAndLimit(groups.files, limit).hits;
+  const companyHits = mergeAndLimit(groups.companies, limit).hits;
+  const leadHits = mergeAndLimit(groups.leads, limit).hits;
+  const propertyHits = mergeAndLimit(groups.properties, limit).hits;
+  return {
+    deals: dealHits,
+    contacts: contactHits,
+    files: fileHits,
+    companies: companyHits,
+    leads: leadHits,
+    properties: propertyHits,
+    total:
+      dealHits.length + contactHits.length + fileHits.length +
+      companyHits.length + leadHits.length + propertyHits.length,
+    query,
+  };
+}
+
 async function singleOfficeSearch(
   tenantDb: TenantDb,
   sanitized: string,
-  types: Array<"deals" | "contacts" | "files">,
+  types: SearchType[],
 ): Promise<SearchResponse> {
-  const results = [
-    types.includes("deals") ? await settleSequential(() => searchDeals(tenantDb, sanitized)) : { status: "fulfilled" as const, value: [] },
-    types.includes("contacts") ? await settleSequential(() => searchContacts(tenantDb, sanitized)) : { status: "fulfilled" as const, value: [] },
-    types.includes("files") ? await settleSequential(() => searchFiles(tenantDb, sanitized)) : { status: "fulfilled" as const, value: [] },
-  ];
-
-  const deals = results[0].status === "fulfilled" ? results[0].value : [];
-  const contacts = results[1].status === "fulfilled" ? results[1].value : [];
-  const files = results[2].status === "fulfilled" ? results[2].value : [];
-
-  return {
-    deals,
-    contacts,
-    files,
-    total: deals.length + contacts.length + files.length,
-    query: sanitized,
-  };
+  const groups = await runEntitySearches(tenantDb, sanitized, types, PER_ENTITY_LIMIT);
+  return assembleResponse(sanitized, groups, PER_ENTITY_LIMIT);
 }
 
 async function crossOfficeSearch(
   sanitized: string,
-  types: Array<"deals" | "contacts" | "files">,
+  types: SearchType[],
   userId: string,
 ): Promise<SearchResponse> {
-  // Include both explicit cross-office access and the user's primary office.
+  // Include both explicit cross-office access and the user's primary office. (Scope/visibility
+  // resolution preserved verbatim -- this PR widens nothing.)
   const [accessRows, userRows] = await Promise.all([
     db
       .select({ officeId: userOfficeAccess.officeId })
@@ -198,106 +250,67 @@ async function crossOfficeSearch(
     .from(offices)
     .where(eq(offices.isActive, true));
 
-  const accessibleOffices = officeRows.filter(
-    (o) => officeIds.has(o.id)
-  );
-
-  // If no accessible offices, return empty
+  const accessibleOffices = officeRows.filter((o) => officeIds.has(o.id));
   if (accessibleOffices.length === 0) {
-    return { deals: [], contacts: [], files: [], total: 0, query: sanitized };
+    return emptyResponse(sanitized);
   }
 
-  // Search each office schema in parallel
-  const allDeals: SearchResult[] = [];
-  const allContacts: SearchResult[] = [];
-  const allFiles: SearchResult[] = [];
-
-  const searchPromises = accessibleOffices.map(async (office) => {
-    const client = await pool.connect();
-    try {
-      const schemaName = `office_${office.slug}`;
-      await client.query("SELECT set_config('search_path', $1, false)", [`${schemaName},public`]);
-      const officeDb = drizzle(client, { schema: undefined as any });
-
-      const results = [
-        types.includes("deals") ? await settleSequential(() => searchDeals(officeDb as any, sanitized)) : { status: "fulfilled" as const, value: [] },
-        types.includes("contacts") ? await settleSequential(() => searchContacts(officeDb as any, sanitized)) : { status: "fulfilled" as const, value: [] },
-        types.includes("files") ? await settleSequential(() => searchFiles(officeDb as any, sanitized)) : { status: "fulfilled" as const, value: [] },
-      ];
-
-      const tag = (items: SearchResult[]) =>
-        items.map((item) => ({ ...item, officeSlug: office.slug }));
-
-      if (results[0].status === "fulfilled") allDeals.push(...tag(results[0].value));
-      if (results[1].status === "fulfilled") allContacts.push(...tag(results[1].value));
-      if (results[2].status === "fulfilled") allFiles.push(...tag(results[2].value));
-    } finally {
-      await client.query("SELECT set_config('search_path', 'public', false)");
-      client.release();
-    }
-  });
-
-  await Promise.allSettled(searchPromises);
-
-  // Re-rank: sort by rank descending, take top N
-  const sortAndLimit = (items: SearchResult[]) =>
-    items.sort((a, b) => b.rank - a.rank).slice(0, MAX_RESULTS_PER_TYPE);
-
-  const deals = sortAndLimit(allDeals);
-  const contacts = sortAndLimit(allContacts);
-  const files = sortAndLimit(allFiles);
-
-  return {
-    deals,
-    contacts,
-    files,
-    total: deals.length + contacts.length + files.length,
-    query: sanitized,
+  // Anti-crowd-out: take only the top capPerOffice rows per office BEFORE merging, so a big
+  // office cannot starve a small one; then merge + re-rank globally to the per-entity limit.
+  const perOfficeCap = capPerOffice(PER_ENTITY_LIMIT, accessibleOffices.length);
+  const merged: Record<SearchType, SearchResult[]> = {
+    deals: [], contacts: [], files: [], companies: [], leads: [], properties: [],
   };
+
+  await Promise.allSettled(
+    accessibleOffices.map(async (office) => {
+      const client = await pool.connect();
+      try {
+        const schemaName = `office_${office.slug}`;
+        await client.query("SELECT set_config('search_path', $1, false)", [`${schemaName},public`]);
+        const officeDb = drizzle(client, { schema: undefined as any });
+        const groups = await runEntitySearches(officeDb as any, sanitized, types, perOfficeCap);
+        for (const key of Object.keys(merged) as SearchType[]) {
+          merged[key].push(...groups[key].map((item) => ({ ...item, officeSlug: office.slug })));
+        }
+      } finally {
+        await client.query("SELECT set_config('search_path', 'public', false)");
+        client.release();
+      }
+    }),
+  );
+
+  return assembleResponse(sanitized, merged, PER_ENTITY_LIMIT);
 }
 
-async function searchDeals(tenantDb: TenantDb, query: string): Promise<SearchResult[]> {
-  const result = await tenantDb.execute(sql`
-    SELECT
-      d.id,
-      d.deal_number,
-      d.project_number,
-      d.name,
-      d.property_address,
-      d.property_city,
-      d.property_state,
-      ts_rank(
-        to_tsvector('english',
-          COALESCE(d.deal_number, '') || ' ' ||
-          COALESCE(d.project_number, '') || ' ' ||
-          COALESCE(d.name, '') || ' ' ||
-          COALESCE(d.description, '') || ' ' ||
-          COALESCE(d.property_address, '')
-        ),
-        plainto_tsquery('english', ${query})
-      ) AS rank
-    FROM deals d
-    WHERE d.is_active = true
-      AND to_tsvector('english',
-        COALESCE(d.deal_number, '') || ' ' ||
-        COALESCE(d.project_number, '') || ' ' ||
-        COALESCE(d.name, '') || ' ' ||
-        COALESCE(d.description, '') || ' ' ||
-        COALESCE(d.property_address, '')
-      ) @@ plainto_tsquery('english', ${query})
-    ORDER BY rank DESC
-    LIMIT ${MAX_RESULTS_PER_TYPE}
-  `);
+async function searchDeals(tenantDb: TenantDb, query: string, limit: number): Promise<SearchResult[]> {
+  // Unified substring field set (name/number/project/address/owner/company/contact via the
+  // shared builder). No is_active filter: terminal (won/lost) deals are FINDABLE and MARKED.
+  const rows = await tenantDb
+    .select({
+      id: deals.id,
+      name: deals.name,
+      dealNumber: deals.dealNumber,
+      projectNumber: deals.projectNumber,
+      propertyCity: deals.propertyCity,
+      propertyState: deals.propertyState,
+      stageSlug: deals.bidBoardStageSlug,
+      onHold: deals.onHold,
+    })
+    .from(deals)
+    .where(buildDealSearchCondition(query))
+    .orderBy(desc(deals.updatedAt))
+    .limit(limit);
 
-  const rows = (result as any).rows ?? result;
-  return rows.map((r: any): SearchResult => ({
+  return rows.map((r): SearchResult => ({
     entityType: "deal",
     id: r.id,
     primaryLabel: r.name ?? "Unnamed Deal",
-    secondaryLabel: pickDealSecondaryLabel(r.project_number, r.deal_number),
-    tertiaryLabel: [r.property_city, r.property_state].filter(Boolean).join(", ") || undefined,
+    secondaryLabel: pickDealSecondaryLabel(r.projectNumber, r.dealNumber),
+    tertiaryLabel: [r.propertyCity, r.propertyState].filter(Boolean).join(", ") || undefined,
+    status: deriveDealStatus(r.stageSlug, r.onHold),
     deepLink: `/deals/${r.id}`,
-    rank: Number(r.rank ?? 0),
+    rank: scoreMatch(query, r.name, r.projectNumber, r.dealNumber, r.propertyCity),
   }));
 }
 
@@ -311,51 +324,99 @@ export function pickDealSecondaryLabel(projectNumber: string | null, dealNumber:
   return "";
 }
 
-async function searchContacts(tenantDb: TenantDb, query: string): Promise<SearchResult[]> {
-  const result = await tenantDb.execute(sql`
-    SELECT
-      c.id,
-      c.first_name,
-      c.last_name,
-      c.email,
-      c.company_name,
-      c.phone,
-      ts_rank(
-        to_tsvector('english',
-          COALESCE(c.first_name, '') || ' ' ||
-          COALESCE(c.last_name, '') || ' ' ||
-          COALESCE(c.email, '') || ' ' ||
-          COALESCE(c.company_name, '') || ' ' ||
-          COALESCE(c.phone, '')
-        ),
-        plainto_tsquery('english', ${query})
-      ) AS rank
-    FROM contacts c
-    WHERE c.is_active = true
-      AND to_tsvector('english',
-        COALESCE(c.first_name, '') || ' ' ||
-        COALESCE(c.last_name, '') || ' ' ||
-        COALESCE(c.email, '') || ' ' ||
-        COALESCE(c.company_name, '') || ' ' ||
-        COALESCE(c.phone, '')
-      ) @@ plainto_tsquery('english', ${query})
-    ORDER BY rank DESC
-    LIMIT ${MAX_RESULTS_PER_TYPE}
-  `);
+async function searchContacts(tenantDb: TenantDb, query: string, limit: number): Promise<SearchResult[]> {
+  const rows = await tenantDb
+    .select({
+      id: contacts.id,
+      firstName: contacts.firstName,
+      lastName: contacts.lastName,
+      email: contacts.email,
+      phone: contacts.phone,
+      companyName: contacts.companyName,
+    })
+    .from(contacts)
+    .where(and(buildContactSearchCondition(query), eq(contacts.isActive, true)))
+    .orderBy(desc(contacts.updatedAt))
+    .limit(limit);
 
-  const rows = (result as any).rows ?? result;
-  return rows.map((r: any): SearchResult => ({
-    entityType: "contact",
+  return rows.map((r): SearchResult => {
+    const name = [r.firstName, r.lastName].filter(Boolean).join(" ") || "Unknown Contact";
+    return {
+      entityType: "contact",
+      id: r.id,
+      primaryLabel: name,
+      secondaryLabel: r.email ?? r.phone ?? "",
+      tertiaryLabel: r.companyName ?? undefined,
+      deepLink: `/contacts/${r.id}`,
+      rank: scoreMatch(query, name, r.email, r.companyName),
+    };
+  });
+}
+
+async function searchCompanies(tenantDb: TenantDb, query: string, limit: number): Promise<SearchResult[]> {
+  const rows = await tenantDb
+    .select({ id: companies.id, name: companies.name, city: companies.city, state: companies.state })
+    .from(companies)
+    .where(and(buildCompanySearchCondition(query), eq(companies.isActive, true)))
+    .orderBy(desc(companies.updatedAt))
+    .limit(limit);
+
+  return rows.map((r): SearchResult => ({
+    entityType: "company",
     id: r.id,
-    primaryLabel: [r.first_name, r.last_name].filter(Boolean).join(" ") || "Unknown Contact",
-    secondaryLabel: r.email ?? r.phone ?? "",
-    tertiaryLabel: r.company_name ?? undefined,
-    deepLink: `/contacts/${r.id}`,
-    rank: Number(r.rank ?? 0),
+    primaryLabel: r.name ?? "Unnamed Account",
+    secondaryLabel: [r.city, r.state].filter(Boolean).join(", ") || "",
+    deepLink: `/companies/${r.id}`,
+    rank: scoreMatch(query, r.name, r.city),
   }));
 }
 
-async function searchFiles(tenantDb: TenantDb, query: string): Promise<SearchResult[]> {
+async function searchLeads(tenantDb: TenantDb, query: string, limit: number): Promise<SearchResult[]> {
+  const rows = await tenantDb
+    .select({ id: leads.id, name: leads.name, status: leads.status })
+    .from(leads)
+    .where(and(buildLeadSearchCondition(query), eq(leads.isActive, true)))
+    .orderBy(desc(leads.updatedAt))
+    .limit(limit);
+
+  return rows.map((r): SearchResult => ({
+    entityType: "lead",
+    id: r.id,
+    primaryLabel: r.name ?? "Unnamed Lead",
+    secondaryLabel: r.status ? `Lead · ${r.status}` : "Lead",
+    deepLink: `/leads/${r.id}`,
+    rank: scoreMatch(query, r.name),
+  }));
+}
+
+async function searchProperties(tenantDb: TenantDb, query: string, limit: number): Promise<SearchResult[]> {
+  const rows = await tenantDb
+    .select({
+      id: properties.id,
+      name: properties.name,
+      address: properties.address,
+      city: properties.city,
+      state: properties.state,
+    })
+    .from(properties)
+    .where(and(buildPropertySearchCondition(query), eq(properties.isActive, true)))
+    .orderBy(desc(properties.updatedAt))
+    .limit(limit);
+
+  return rows.map((r): SearchResult => {
+    const locality = [r.city, r.state].filter(Boolean).join(", ");
+    return {
+      entityType: "property",
+      id: r.id,
+      primaryLabel: r.name || r.address || "Property",
+      secondaryLabel: [r.address, locality].filter(Boolean).join(" · ") || "",
+      deepLink: `/properties/${r.id}`,
+      rank: scoreMatch(query, r.name, r.address, r.city),
+    };
+  });
+}
+
+async function searchFiles(tenantDb: TenantDb, query: string, limit: number): Promise<SearchResult[]> {
   const result = await tenantDb.execute(sql`
     SELECT
       f.id,
@@ -368,7 +429,7 @@ async function searchFiles(tenantDb: TenantDb, query: string): Promise<SearchRes
     WHERE f.is_active = true
       AND f.search_vector @@ plainto_tsquery('english', ${query})
     ORDER BY rank DESC
-    LIMIT ${MAX_RESULTS_PER_TYPE}
+    LIMIT ${limit}
   `);
 
   const rows = (result as any).rows ?? result;
@@ -522,7 +583,8 @@ function buildTopEntityAnchors(
   return [...structured.deals, ...structured.contacts, ...structured.files]
     .map((result, index) => ({
       anchor: {
-        entityType: result.entityType,
+        // deals/contacts/files arrays only ever carry these three narrow entity types.
+        entityType: result.entityType as AiSearchEntityAnchor["entityType"],
         id: result.id,
         label: result.primaryLabel,
         deepLink: result.deepLink,

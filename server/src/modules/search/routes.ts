@@ -1,5 +1,5 @@
 import { Router, type Request, type Response } from "express";
-import { globalSearch, naturalLanguageSearch } from "./service.js";
+import { globalSearch, naturalLanguageSearch, type SearchType } from "./service.js";
 import { recordAiFeedback } from "../ai-copilot/service.js";
 
 const router = Router();
@@ -20,16 +20,15 @@ router.get("/", async (req: Request, res: Response) => {
     const q = (req.query.q as string ?? "").trim();
     if (q.length < 2) {
       return res.status(200).json({
-        deals: [], contacts: [], files: [], total: 0, query: q,
+        deals: [], contacts: [], files: [], companies: [], leads: [], properties: [], total: 0, query: q,
       });
     }
 
+    const ALL_SEARCH_TYPES = ["deals", "contacts", "files", "companies", "leads", "properties"] as const;
     const typesParam = req.query.types as string | undefined;
-    const types = typesParam
-      ? (typesParam.split(",").filter((t) =>
-          ["deals", "contacts", "files"].includes(t)
-        ) as Array<"deals" | "contacts" | "files">)
-      : (["deals", "contacts", "files"] as Array<"deals" | "contacts" | "files">);
+    const types = (typesParam
+      ? typesParam.split(",").filter((t) => (ALL_SEARCH_TYPES as readonly string[]).includes(t))
+      : [...ALL_SEARCH_TYPES]) as SearchType[];
 
     const results = await globalSearch(
       req.tenantDb!,

@@ -1,6 +1,6 @@
 import { useEffect, useRef } from "react";
 import { useSearchParams, Link, useNavigate } from "react-router-dom";
-import { Search, Building2, User, FileText, Sparkles } from "lucide-react";
+import { Search, Building2, User, FileText, Target, MapPin, Sparkles } from "lucide-react";
 import { toast } from "sonner";
 import { Badge } from "@/components/ui/badge";
 import {
@@ -15,10 +15,13 @@ import {
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 
-const ENTITY_ICONS = { deal: Building2, contact: User, file: FileText } as const;
+const ENTITY_ICONS = { deal: Building2, company: Building2, contact: User, lead: Target, property: MapPin, file: FileText } as const;
 const ENTITY_COLORS = {
   deal: "bg-blue-100 text-blue-800",
+  company: "bg-purple-100 text-purple-800",
   contact: "bg-green-100 text-green-800",
+  lead: "bg-orange-100 text-orange-800",
+  property: "bg-teal-100 text-teal-800",
   file: "bg-red-100 text-red-800",
 } as const;
 

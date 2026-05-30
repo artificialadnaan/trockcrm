@@ -1,12 +1,16 @@
 import { useState, useEffect, useRef, useCallback } from "react";
 import { api } from "@/lib/api";
 
+export type SearchEntityType = "deal" | "contact" | "file" | "company" | "lead" | "property";
+export type DealLifecycle = "active" | "on_hold" | "won" | "lost";
+
 export interface SearchResult {
-  entityType: "deal" | "contact" | "file";
+  entityType: SearchEntityType;
   id: string;
   primaryLabel: string;
   secondaryLabel: string;
   tertiaryLabel?: string;
+  status?: DealLifecycle | null;
   deepLink: string;
   rank: number;
 }
@@ -15,6 +19,9 @@ export interface SearchResponse {
   deals: SearchResult[];
   contacts: SearchResult[];
   files: SearchResult[];
+  companies: SearchResult[];
+  leads: SearchResult[];
+  properties: SearchResult[];
   total: number;
   query: string;
 }
@@ -106,10 +113,15 @@ export function useSearch() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // Last-write-wins: only the latest request may write results, so a slow earlier-keystroke
+  // response can never overwrite a later one (debounce reduces but does not eliminate this).
+  const requestIdRef = useRef(0);
 
   const search = useCallback(async (q: string) => {
+    const requestId = ++requestIdRef.current;
     if (q.trim().length < 2) {
       setResults(null);
+      setLoading(false);
       return;
     }
     setLoading(true);
@@ -118,12 +130,14 @@ export function useSearch() {
       const data = await api<SearchResponse>(
         `/search?q=${encodeURIComponent(q.trim())}`
       );
+      if (requestId !== requestIdRef.current) return; // superseded by a newer query
       setResults(data);
     } catch {
+      if (requestId !== requestIdRef.current) return;
       setError("Search failed");
       setResults(null);
     } finally {
-      setLoading(false);
+      if (requestId === requestIdRef.current) setLoading(false);
     }
   }, []);
 
