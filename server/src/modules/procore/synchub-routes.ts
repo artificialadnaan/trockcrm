@@ -667,7 +667,13 @@ router.post("/opportunities", requireSyncHubSecret, async (req, res, next) => {
       deal: {
         id: "new",
         stageId: targetStage.id,
-        stageEnteredAt: null,
+        // Carry the Procore-reported stage-entry date so an INSERT of an
+        // already-Won deal derives won_closed_date (and stage_entered_at) from the
+        // real source date, not processing-time now. On insert stageChanged is
+        // structurally false (deal.stageId === targetStage.id), so the mirror's
+        // stageEnteredAt resolver reads input.deal.stageEnteredAt; null falls back
+        // to now (no regression when SyncHub omits the field).
+        stageEnteredAt: stage_entered_at ?? null,
         workflowRoute: workflow_route,
         isBidBoardOwned: false,
         proposalStatus: null,

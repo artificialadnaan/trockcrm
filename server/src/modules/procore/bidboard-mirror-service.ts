@@ -438,16 +438,26 @@ export function buildBidBoardMirrorUpdate(input: {
     updates.actualCloseDate = now.toISOString().split("T")[0] ?? null;
     // Dual-write the app-owned Won-period reporting basis (0141). The Bid-Board mirror
     // is the dominant won-path; after the read flip a bid-board-won deal with NULL
-    // won_closed_date would silently drop from the Won card. PRESERVE an existing
-    // won_closed_date (the backfilled hs basis, or a prior fresh-win stamp): a same-stage
-    // Won status/replay webhook did NOT newly enter Won, so it must not shift the
-    // reporting date. Stamp the SOURCE won-entry date (stageEnteredAt) ONLY on a genuine
-    // fresh entry, i.e. when there is no existing value. This keeps the contamination-free
-    // column free of BOTH processing-time `now` drift and same-stage re-sync clobber.
-    // The clear above (~428) nulls it on any non-won update, so reopen -> re-win correctly
-    // re-stamps.
+    // won_closed_date would silently drop from the Won card. INITIALIZE the column ONLY
+    // on a genuine fresh Won entry; otherwise PRESERVE the existing value (incl. NULL,
+    // which the backfill later fills from the hs basis -- a safer source than the
+    // internal stage_entered_at, which migration 0074 may have repaired to a 2026
+    // timestamp). A genuine fresh entry is: (a) a brand-new insert (deal.id === "new",
+    // which is structurally stageChanged === false because the synthetic deal seeds
+    // stageId = targetStage.id), or (b) a real transition INTO won from a non-won stage.
+    // A same-stage Won status/replay webhook (stageChanged false, previous stage won)
+    // is NEITHER, so it must not re-stamp. The clear above (~428) nulls it on any
+    // non-won update, so reopen -> re-win re-stamps correctly.
+    const previousCanonicalStageSlug = input.currentStage
+      ? toCanonicalMirroredDealStageSlug(input.currentStage.slug, input.deal.workflowRoute)
+      : null;
+    const enteringWonFresh =
+      input.deal.id === "new" ||
+      (stageChanged && previousCanonicalStageSlug !== "won");
     const sourceWonDate = stageEnteredAt.toISOString().split("T")[0] ?? null;
-    updates.wonClosedDate = input.deal.wonClosedDate ?? sourceWonDate;
+    updates.wonClosedDate = enteringWonFresh
+      ? input.deal.wonClosedDate ?? sourceWonDate
+      : input.deal.wonClosedDate ?? null;
   }
 
   if (canonicalTargetStageSlug === "lost") {

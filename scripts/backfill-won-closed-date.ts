@@ -10,13 +10,22 @@
  *   3. verify-won-closed-date-parity.ts must PASS per office.
  *   4. Only then flip the read helpers.
  *
- * Normalize semantics (idempotent): for every Won-stage deal,
- *   won_closed_date := COALESCE(hs_close_won_date, won_closed_date)
- * i.e. prefer the historical HubSpot close-won date; where hs is NULL, KEEP the
- * existing value. This deliberately PRESERVES rollout wins -- deals won between the
- * dual-write deploy and this backfill already carry a dual-written won_closed_date
- * with a NULL hs, and must NOT be nulled. A no-hs / no-existing-date Won deal stays
- * NULL (excluded from windowed totals, same as today's hs-IS-NOT-NULL behavior).
+ * Normalize semantics (idempotent, fill-only-where-null): for every Won-stage deal,
+ *   won_closed_date := COALESCE(won_closed_date, hs_close_won_date)
+ * i.e. PREFER the app-owned value and fall back to hs only where the column is NULL.
+ * The app-owned value wins on purpose: a deal RE-won after the dual-write deploy but
+ * before this backfill carries the real fresh date, while its hs may be a STALE frozen
+ * value from a prior win (HubSpot is seed-only / disconnected since 2026-05-07) -- the
+ * old COALESCE(hs, col) would clobber the fresh date with stale hs. This order also
+ * PRESERVES rollout wins (col set, hs NULL) and fills genuine historical NULLs from hs.
+ * A no-hs / no-existing-date Won deal stays NULL (excluded from windowed totals, same
+ * as today's hs-IS-NOT-NULL behavior).
+ *
+ * PAIRED with the parity gate (verify-won-closed-date-parity.ts): because the app-owned
+ * value can legitimately DIFFER from a stale hs after this backfill, the gate's hard
+ * failure is `hs NOT NULL AND col IS NULL` (a genuinely missed fill); a col<>hs row
+ * where both are present is reported INFORMATIONALLY (a fresh-win divergence), not a
+ * FAIL. Ship this COALESCE order and that gate definition together.
  *
  * Dry-run by DEFAULT; pass --execute to write. The live Won total is unchanged by
  * this backfill (reads are still on hs until the later flip).
@@ -41,8 +50,9 @@ const WON_STAGE_SLUGS = [
 // Matches aliasedWonHsClosedWonDateSql / the reporting basis.
 const HS_EXPR =
   "public.try_parse_hs_close_date(NULLIF(NULLIF(d.hubspot_extra_properties->>'hs_closed_won_date',''),'0'))";
-// Target value: prefer hs, else keep the existing (dual-written) won_closed_date.
-const TARGET_EXPR = `COALESCE(${HS_EXPR}, d.won_closed_date)`;
+// Target value: PREFER the existing app-owned (dual-written) value; fall back to hs
+// only where the column is NULL. Never let stale hs overwrite a fresh dual-write.
+const TARGET_EXPR = `COALESCE(d.won_closed_date, ${HS_EXPR})`;
 
 function quoteIdent(value: string): string {
   return `"${value.replace(/"/g, '""')}"`;
