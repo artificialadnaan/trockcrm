@@ -1,6 +1,6 @@
-import { eq, and, desc, asc, ilike, sql, or, arrayContains, isNull, isNotNull, type SQL } from "drizzle-orm";
+import { eq, and, desc, asc, ilike, sql, or, arrayContains, isNull, isNotNull, type SQL, type AnyColumn } from "drizzle-orm";
 import type { NodePgDatabase } from "drizzle-orm/node-postgres";
-import { companies, deals, files, leads, pipelineStageConfig, users } from "@trock-crm/shared/schema";
+import { companies, contacts, deals, files, leads, pipelineStageConfig, properties, users } from "@trock-crm/shared/schema";
 import type * as schema from "@trock-crm/shared/schema";
 import type { FileCategory, PhotoCategory } from "@trock-crm/shared/types";
 import { AppError } from "../../middleware/error-handler.js";
@@ -843,37 +843,168 @@ export async function getFileStats(tenantDb: TenantDb, _filters: Record<string, 
   };
 }
 
+/** Escape LIKE/ILIKE wildcards in user input so '%' and '_' match literally. */
+function escapeLikePattern(value: string): string {
+  return value.replace(/[\\%_]/g, (char) => `\\${char}`);
+}
+
+/**
+ * Search columns for the LEAD side of the photo picker. Mirrors the main leads
+ * search (buildAliasedLeadSearchCondition) so a lead found in the regular leads
+ * list — by site/property address, on-site contact, or source — is also findable
+ * here. Previously only name/company/stage were searched, which hid leads when a
+ * user searched by the natural "where is the job" fields. See
+ * .audit/trockcam-leads-photos.md (root cause G2).
+ *
+ * Requires the picker query to leftJoin companies, properties, contacts and
+ * pipelineStageConfig.
+ */
+export function buildPhotoTargetLeadSearchCondition(search: string): SQL {
+  const term = `%${escapeLikePattern(search.trim())}%`;
+  return or(
+    sql`${leads.name} ILIKE ${term} ESCAPE '\\'`,
+    sql`${leads.source} ILIKE ${term} ESCAPE '\\'`,
+    sql`${leads.sourceDetail} ILIKE ${term} ESCAPE '\\'`,
+    sql`${leads.description} ILIKE ${term} ESCAPE '\\'`,
+    sql`${companies.name} ILIKE ${term} ESCAPE '\\'`,
+    sql`${properties.name} ILIKE ${term} ESCAPE '\\'`,
+    sql`${properties.address} ILIKE ${term} ESCAPE '\\'`,
+    sql`${properties.city} ILIKE ${term} ESCAPE '\\'`,
+    sql`${properties.state} ILIKE ${term} ESCAPE '\\'`,
+    sql`${contacts.firstName} ILIKE ${term} ESCAPE '\\'`,
+    sql`${contacts.lastName} ILIKE ${term} ESCAPE '\\'`,
+    sql`CONCAT(${contacts.firstName}, ' ', ${contacts.lastName}) ILIKE ${term} ESCAPE '\\'`,
+    sql`${pipelineStageConfig.name} ILIKE ${term} ESCAPE '\\'`
+  )!;
+}
+
+/**
+ * Search columns for the DEAL side of the photo picker. Mirrors
+ * buildDealSearchCondition (deal number, name, description, source, company,
+ * property address/city/state, primary contact name).
+ *
+ * Requires the picker query to leftJoin companies, properties, contacts and
+ * pipelineStageConfig.
+ */
+export function buildPhotoTargetDealSearchCondition(search: string): SQL {
+  const term = `%${escapeLikePattern(search.trim())}%`;
+  return or(
+    sql`${deals.name} ILIKE ${term} ESCAPE '\\'`,
+    sql`${deals.dealNumber} ILIKE ${term} ESCAPE '\\'`,
+    sql`${deals.description} ILIKE ${term} ESCAPE '\\'`,
+    sql`${deals.source} ILIKE ${term} ESCAPE '\\'`,
+    sql`${companies.name} ILIKE ${term} ESCAPE '\\'`,
+    sql`${properties.name} ILIKE ${term} ESCAPE '\\'`,
+    sql`${properties.address} ILIKE ${term} ESCAPE '\\'`,
+    sql`${properties.city} ILIKE ${term} ESCAPE '\\'`,
+    sql`${properties.state} ILIKE ${term} ESCAPE '\\'`,
+    sql`${contacts.firstName} ILIKE ${term} ESCAPE '\\'`,
+    sql`${contacts.lastName} ILIKE ${term} ESCAPE '\\'`,
+    sql`CONCAT(${contacts.firstName}, ' ', ${contacts.lastName}) ILIKE ${term} ESCAPE '\\'`,
+    sql`${pipelineStageConfig.name} ILIKE ${term} ESCAPE '\\'`
+  )!;
+}
+
+/** Rank a single value against the search term: exact=3, prefix=2, substring=1, else 0. */
+function photoTargetMatchRank(value: string | null | undefined, needle: string): number {
+  const haystack = (value ?? "").trim().toLowerCase();
+  const term = needle.trim().toLowerCase();
+  if (!haystack || !term) return 0;
+  if (haystack === term) return 3;
+  if (haystack.startsWith(term)) return 2;
+  if (haystack.includes(term)) return 1;
+  return 0;
+}
+
+/**
+ * Relevance of a target to the search term, based on its display name and
+ * record number. Used to keep precise matches ahead of merely more-recent ones.
+ */
+export function photoTargetRelevanceScore(
+  target: Pick<PhotoUploadTarget, "name" | "recordNumber">,
+  search: string
+): number {
+  if (!search.trim()) return 0;
+  return Math.max(photoTargetMatchRank(target.name, search), photoTargetMatchRank(target.recordNumber, search));
+}
+
+/**
+ * Order targets by relevance (exact > prefix > substring), then by recency. This
+ * replaces the old pure-recency ordering so a strong match is not truncated by
+ * the result cap just because other records were updated more recently. See
+ * .audit/trockcam-leads-photos.md (root cause G3). Returns a new array.
+ */
+export function sortPhotoTargetsByRelevance<
+  T extends Pick<PhotoUploadTarget, "name" | "recordNumber" | "lastUpdatedAt">
+>(targets: T[], search: string): T[] {
+  return [...targets].sort((left, right) => {
+    const scoreDelta = photoTargetRelevanceScore(right, search) - photoTargetRelevanceScore(left, search);
+    if (scoreDelta !== 0) return scoreDelta;
+    return right.lastUpdatedAt.getTime() - left.lastUpdatedAt.getTime();
+  });
+}
+
+/**
+ * SQL relevance expression mirroring photoTargetMatchRank, taking the GREATEST
+ * rank across the given columns (e.g. deal name + deal number). Used in ORDER BY
+ * so the per-type LIMIT keeps the most relevant rows, not just the most recent.
+ */
+function photoTargetSqlRelevance(columns: AnyColumn[], search: string): SQL<number> {
+  const trimmed = search.trim();
+  if (!trimmed || columns.length === 0) return sql<number>`0`;
+  const escaped = escapeLikePattern(trimmed);
+  const exact = escaped;
+  const prefix = `${escaped}%`;
+  const substring = `%${escaped}%`;
+  const ranks = columns.map(
+    (column) => sql`(CASE
+      WHEN ${column} ILIKE ${exact} ESCAPE '\\' THEN 3
+      WHEN ${column} ILIKE ${prefix} ESCAPE '\\' THEN 2
+      WHEN ${column} ILIKE ${substring} ESCAPE '\\' THEN 1
+      ELSE 0 END)`
+  );
+  if (ranks.length === 1) return sql<number>`${ranks[0]}`;
+  return sql<number>`GREATEST(${sql.join(ranks, sql`, `)})`;
+}
+
 export async function searchPhotoUploadTargets(
   tenantDb: TenantDb,
   input: { search?: string; limit?: number; userRole?: string; userId?: string }
 ): Promise<{ targets: PhotoUploadTarget[] }> {
   const limit = Math.min(Math.max(input.limit ?? 30, 1), 60);
   const trimmed = input.search?.trim() ?? "";
-  const term = `%${trimmed}%`;
+  const hasSearch = trimmed.length > 0;
 
   const leadConditions: SQL[] = [];
   const dealConditions: SQL[] = [];
+  // The WEB photo picker route intentionally does NOT pass userId/userRole, so
+  // this rep-scoping branch stays dead on web: anyone in the company must be able
+  // to find ANY lead/deal to attach photos (creator-agnostic by design — see
+  // .audit/trockcam-leads-photos.md Q5). Do NOT wire user context into the web
+  // route. The field app DOES pass them, so the field picker stays rep-scoped.
+  //
+  // KNOWN FOLLOW-UP (not in this change): this query runs on a single office's
+  // schema (search_path = office_<slug>,public), so it cannot find leads/deals in
+  // OTHER offices. Cross-office search is a separate structural item (G1).
   if (input.userRole === "rep" && input.userId) {
     leadConditions.push(eq(leads.assignedRepId, input.userId));
     dealConditions.push(eq(deals.assignedRepId, input.userId));
   }
-  if (trimmed.length > 0) {
-    leadConditions.push(
-      or(
-        ilike(leads.name, term),
-        ilike(companies.name, term),
-        ilike(pipelineStageConfig.name, term)
-      )!
-    );
-    dealConditions.push(
-      or(
-        ilike(deals.name, term),
-        ilike(deals.dealNumber, term),
-        ilike(companies.name, term),
-        ilike(pipelineStageConfig.name, term)
-      )!
-    );
+  if (hasSearch) {
+    leadConditions.push(buildPhotoTargetLeadSearchCondition(trimmed));
+    dealConditions.push(buildPhotoTargetDealSearchCondition(trimmed));
   }
+
+  // Order by relevance first, then recency — but ONLY when there is a search
+  // term. With no term the relevance expression is a constant, and Postgres reads
+  // a constant integer in ORDER BY as a (out-of-range) column ordinal and errors,
+  // so the browse-all case orders by recency alone.
+  const leadOrder = hasSearch
+    ? [desc(photoTargetSqlRelevance([leads.name], trimmed)), desc(leads.updatedAt)]
+    : [desc(leads.updatedAt)];
+  const dealOrder = hasSearch
+    ? [desc(photoTargetSqlRelevance([deals.name, deals.dealNumber], trimmed)), desc(deals.updatedAt)]
+    : [desc(deals.updatedAt)];
 
   const leadRows = await tenantDb
     .select({
@@ -885,9 +1016,11 @@ export async function searchPhotoUploadTargets(
     })
     .from(leads)
     .leftJoin(companies, eq(companies.id, leads.companyId))
+    .leftJoin(properties, eq(properties.id, leads.propertyId))
+    .leftJoin(contacts, eq(contacts.id, leads.primaryContactId))
     .leftJoin(pipelineStageConfig, eq(pipelineStageConfig.id, leads.stageId))
     .where(leadConditions.length > 0 ? and(...leadConditions) : sql`true`)
-    .orderBy(desc(leads.updatedAt))
+    .orderBy(...leadOrder)
     .limit(limit);
   const dealRows = await tenantDb
     .select({
@@ -901,9 +1034,11 @@ export async function searchPhotoUploadTargets(
     })
     .from(deals)
     .leftJoin(companies, eq(companies.id, deals.companyId))
+    .leftJoin(properties, eq(properties.id, deals.propertyId))
+    .leftJoin(contacts, eq(contacts.id, deals.primaryContactId))
     .leftJoin(pipelineStageConfig, eq(pipelineStageConfig.id, deals.stageId))
     .where(dealConditions.length > 0 ? and(...dealConditions) : sql`true`)
-    .orderBy(desc(deals.updatedAt))
+    .orderBy(...dealOrder)
     .limit(limit);
 
   const targets: PhotoUploadTarget[] = [
@@ -927,8 +1062,7 @@ export async function searchPhotoUploadTargets(
     })),
   ];
 
-  targets.sort((left, right) => right.lastUpdatedAt.getTime() - left.lastUpdatedAt.getTime());
-  return { targets: targets.slice(0, limit) };
+  return { targets: sortPhotoTargetsByRelevance(targets, trimmed).slice(0, limit) };
 }
 
 /**
