@@ -690,6 +690,48 @@ describe("DirectorDashboardPage", () => {
     expect(html).toContain("Pipe");
   });
 
+  it("renders an honest no-goal state instead of a contradictory pace when no goal is configured", () => {
+    // P0-3 (folded into Wave 1): goal is null in prod (no goal source). The block must not
+    // show "Behind" pace above a "Goal met or ahead" sub-line; it shows a single honest state.
+    mocks.useDirectorDashboardMock.mockReturnValue({
+      ...mocks.useDirectorDashboardMock(),
+      data: {
+        ...mocks.useDirectorDashboardMock().data,
+        forecastVsGoal: { forecast: 610000, goal: null, goalSource: "none", percentToGoal: null },
+      },
+    });
+
+    const html = renderPageHtml();
+
+    expect(html).toContain("No goal set");
+    expect(html).toContain("Goal not configured · current period");
+    expect(html).not.toContain("Goal met or ahead");
+    expect(html).not.toContain("behind goal");
+    expect(html).not.toContain(">Behind<");
+  });
+
+  it("surfaces an Unassigned row so the Sales Force Closed column sums to the Closed card", () => {
+    // The Closed card (scopeSummary.won) exceeds the sum of per-rep closed (240k + 120k =
+    // 360k) by $50,000 / 2 wins -> the remainder must appear as an Unassigned row so the
+    // table reconciles to the card by construction (Codex P2 / P2-8 reconciliation).
+    mocks.useDirectorDashboardMock.mockReturnValue({
+      ...mocks.useDirectorDashboardMock(),
+      data: {
+        ...mocks.useDirectorDashboardMock().data,
+        scopeSummary: {
+          ...mocks.useDirectorDashboardMock().data.scopeSummary,
+          won: { count: 8, totalValue: 410000 },
+        },
+      },
+    });
+
+    const html = renderPageHtml();
+
+    expect(html).toContain('data-testid="rep-row-unassigned"');
+    expect(html).toContain("Unassigned");
+    expect(html).toContain("$50,000");
+  });
+
   it("renders sales force performance table with spec columns and rep links", () => {
     const html = renderPageHtml();
 
@@ -917,7 +959,7 @@ describe("DirectorDashboardPage", () => {
     expect(html).not.toContain("width:4%");
   });
 
-  it("shows rep performance loading and error states instead of zeroed metrics", () => {
+  it("renders live closed totals (not stale snapshot values) while the rep-performance snapshot is loading or errored", () => {
     const stalePerformanceData = {
       rows: [
         {
@@ -1005,13 +1047,16 @@ describe("DirectorDashboardPage", () => {
       refetch: mocks.performanceRefetchMock,
     });
 
+    // Finding D (Wave 1): the live Closed (scopeSummary.won) + dashboard goal come from the
+    // director payload, so they render even while the rep-performance snapshot is loading,
+    // and the stale snapshot values ($777,777 / 99% / Stale Region / 12) never leak. The
+    // forecast block is no longer coupled to the snapshot load state; only snapshot-only
+    // columns (region) stay gated.
     const loadingHtml = renderPageHtml();
-    expect(loadingHtml).toContain("Loading performance metrics");
-    expect(loadingHtml).toContain("Performance metrics pending");
+    expect(loadingHtml).toContain("$360,000 / $500,000");
     expect(loadingHtml).toContain("Performance pending");
-    expect(loadingHtml).not.toContain("$500,000 behind goal");
-    expect(loadingHtml).not.toContain("$0 / $500,000");
-    expect(loadingHtml).not.toContain("0% to goal");
+    expect(loadingHtml).not.toContain("Loading performance metrics");
+    expect(loadingHtml).not.toContain("Performance metrics pending");
     expect(loadingHtml).not.toContain("$777,777");
     expect(loadingHtml).not.toContain("Stale Region");
     expect(loadingHtml).not.toContain("99%");
@@ -1025,12 +1070,10 @@ describe("DirectorDashboardPage", () => {
     });
 
     const errorHtml = renderPageHtml();
-    expect(errorHtml).toContain("Snapshot unavailable");
-    expect(errorHtml).toContain("Performance metrics pending");
+    expect(errorHtml).toContain("$360,000 / $500,000");
     expect(errorHtml).toContain("Performance pending");
-    expect(errorHtml).not.toContain("$500,000 behind goal");
-    expect(errorHtml).not.toContain("$0 / $500,000");
-    expect(errorHtml).not.toContain("0% to goal");
+    expect(errorHtml).not.toContain("Loading performance metrics");
+    expect(errorHtml).not.toContain("Performance metrics pending");
     expect(errorHtml).not.toContain("$777,777");
     expect(errorHtml).not.toContain("Stale Region");
     expect(errorHtml).not.toContain("99%");
