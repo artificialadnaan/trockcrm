@@ -290,10 +290,6 @@ export async function ensureDevDemoWorkspace(
     await client.query("BEGIN");
     await client.query("SELECT set_config('search_path', $1, true)", [`${schemaName},public`]);
     await client.query("SELECT set_config('app.current_user_id', $1, true)", [adminUser.id]);
-    // This seed records demo stage history explicitly (below). Suppress the
-    // deal_stage_history backstop trigger (migration 0143) for this transaction so seeded
-    // deals are not double-recorded with an extra trigger-generated "Created in" row.
-    await client.query("SELECT set_config('app.skip_stage_history_trigger', $1, true)", ["1"]);
 
     const stageResult = await client.query(
       `
@@ -590,32 +586,10 @@ export async function ensureDevDemoWorkspace(
       ]
     );
 
-    await client.query(
-      `
-        INSERT INTO deal_stage_history (
-          id, deal_id, from_stage_id, to_stage_id, changed_by, is_backward_move, is_director_override, created_at
-        )
-        VALUES
-          ($1, $2, NULL, $3, $4, false, false, $5),
-          ($6, $7, NULL, $8, $4, false, false, $9)
-        ON CONFLICT (id) DO UPDATE
-        SET to_stage_id = EXCLUDED.to_stage_id,
-            changed_by = EXCLUDED.changed_by,
-            created_at = EXCLUDED.created_at
-      `,
-      [
-        deterministicUuid(`${schemaName}:demo-history-won`),
-        wonDealId,
-        closedWonStageId,
-        directorUser.id,
-        lastMonthIso,
-        deterministicUuid(`${schemaName}:demo-history-lost`),
-        lostDealId,
-        closedLostStageId,
-        lastMonthIso,
-      ]
-    );
-
+    // Deal creation stage history is recorded for every seeded deal by the
+    // deal_stage_history backstop trigger (migration 0143), dated at each deal's
+    // stage_entered_at -- so no explicit demo deal_stage_history insert is needed here.
+    // (Leads have no such trigger, so lead_stage_history is still seeded explicitly.)
     await client.query(
       `
         INSERT INTO lead_stage_history (id, lead_id, from_stage_id, to_stage_id, changed_by, created_at)

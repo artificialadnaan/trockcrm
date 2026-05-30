@@ -888,6 +888,10 @@ export async function ingestBidBoardRows(payload: BidBoardSyncPayload) {
   let runId: string | null = null;
   try {
     await client.query("BEGIN");
+    // This sync writes deal_stage_history explicitly on every stage writeback (below), so
+    // suppress the deal_stage_history backstop trigger (migration 0143) for this transaction
+    // to avoid double-recording. Transaction-local; auto-clears at COMMIT/ROLLBACK.
+    await client.query("SELECT set_config('app.skip_stage_history_trigger', '1', true)");
 
     const runResult = await client.query(
       `INSERT INTO ${schemaName}.bid_board_sync_runs

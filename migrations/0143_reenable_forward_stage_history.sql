@@ -54,21 +54,27 @@ BEGIN
       NEW.assigned_rep_id,
       NEW.created_by_user_id
     );
+    -- created_at mirrors deals.stage_entered_at (NOT now()) so the row reflects the actual
+    -- stage-entry time. For normal transitions the reset trigger already set
+    -- stage_entered_at = now(); for creation paths that supply a backdated stage_entered_at
+    -- (e.g. the SyncHub mirror create) the history is dated correctly, and created_at ==
+    -- stage_entered_at holds by construction.
     IF v_actor IS NOT NULL THEN
       IF TG_OP = 'INSERT' THEN
         EXECUTE format(
           'INSERT INTO %I.deal_stage_history '
           || '(deal_id, from_stage_id, to_stage_id, changed_by, duration_in_previous_stage, created_at) '
-          || 'VALUES ($1, NULL, $2, $3, NULL, now())',
+          || 'VALUES ($1, NULL, $2, $3, NULL, $4)',
           TG_TABLE_SCHEMA
-        ) USING NEW.id, NEW.stage_id, v_actor;
+        ) USING NEW.id, NEW.stage_id, v_actor, NEW.stage_entered_at;
       ELSE
         EXECUTE format(
           'INSERT INTO %I.deal_stage_history '
           || '(deal_id, from_stage_id, to_stage_id, changed_by, duration_in_previous_stage, created_at) '
-          || 'VALUES ($1, $2, $3, $4, $5, now())',
+          || 'VALUES ($1, $2, $3, $4, $5, $6)',
           TG_TABLE_SCHEMA
-        ) USING NEW.id, OLD.stage_id, NEW.stage_id, v_actor, now() - OLD.stage_entered_at;
+        ) USING NEW.id, OLD.stage_id, NEW.stage_id, v_actor,
+                NEW.stage_entered_at - OLD.stage_entered_at, NEW.stage_entered_at;
       END IF;
     END IF;
   EXCEPTION WHEN others THEN

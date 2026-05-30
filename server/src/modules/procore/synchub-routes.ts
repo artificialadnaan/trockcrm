@@ -352,6 +352,11 @@ router.post("/opportunities", requireSyncHubSecret, async (req, res, next) => {
     }
 
     if (existingDealId) {
+      // Mirror (update) path writes deal_stage_history explicitly below, so suppress the
+      // backstop trigger (migration 0143) for this branch to avoid double-recording.
+      // Scoped to the mirror branch only -- the create branch relies on the trigger for its
+      // "Created in" row. Transaction-local; clears at COMMIT/ROLLBACK.
+      await client.query("SELECT set_config('app.skip_stage_history_trigger', '1', true)");
       // Fetch current deal state for stage comparison and mirror updates
       const currentDealResult = await client.query(
         `SELECT id, name, deal_number, project_number,

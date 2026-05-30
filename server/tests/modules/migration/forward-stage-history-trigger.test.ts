@@ -34,6 +34,13 @@ describe("0143 forward stage-history backstop trigger", () => {
     expect(sql).toMatch(/values \(\$1, null, \$2/);
   });
 
+  it("dates history at stage_entered_at (not now()), so created_at == stage_entered_at", () => {
+    // creation row's created_at is bound to NEW.stage_entered_at (handles backdated imports)
+    expect(sql).toMatch(/using new\.id, new\.stage_id, v_actor, new\.stage_entered_at/);
+    // transition row uses stage_entered_at for both duration and created_at
+    expect(sql).toMatch(/new\.stage_entered_at - old\.stage_entered_at, new\.stage_entered_at/);
+  });
+
   it("is schema-safe regardless of the caller's search_path (uses TG_TABLE_SCHEMA)", () => {
     expect(sql).toContain("tg_table_schema");
     expect(sql).toMatch(/format\(\s*'insert into %i\.deal_stage_history/);
