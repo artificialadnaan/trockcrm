@@ -297,6 +297,12 @@ export function PipelinePage() {
   const hasLoadedRef = useRef(false);
   const loadedScopeRef = useRef<PipelineScope | null>(null);
   const loadedShowDdRef = useRef<boolean | null>(null);
+  // Monotonic request token: a scope/Show-DD/date change can leave an earlier request in
+  // flight, and responses may arrive out of order. Only the latest request may mutate the
+  // board + loaded identity; a superseded (stale) completion is ignored, so it can never set
+  // loadedShowDd/loadedScope back to a value that no longer matches the live selection (which
+  // would strand the page on a skeleton with no fetch in flight).
+  const requestIdRef = useRef(0);
   const [showDd, setShowDd] = useState(searchParams.get("showDd") === "1");
   // See derivePipelineBoardView: the skeleton is keyed on the request identity (NOT on
   // `loading`) so the pre-loading render right after a scope/Show-DD change shows the skeleton
@@ -329,6 +335,8 @@ export function PipelinePage() {
   const isSyncingScrollRef = useRef(false);
 
   const fetchPipeline = useCallback(async () => {
+    const requestId = ++requestIdRef.current;
+    const isStale = () => requestIdRef.current !== requestId;
     setLoading(true);
     setError(null);
     try {
@@ -336,6 +344,7 @@ export function PipelinePage() {
         pipelineColumns: PipelineColumn[];
         terminalStages: TerminalStageInfo[];
       }>(buildPipelineRequestPath(showDd, terminalDateFilters, scope));
+      if (isStale()) return; // a newer request superseded this one -> drop its result
       setColumns(data.pipelineColumns);
       setTerminalStages(data.terminalStages ?? []);
       setLastRefreshed(new Date());
@@ -343,10 +352,13 @@ export function PipelinePage() {
       loadedScopeRef.current = scope; // the scope these columns were fetched for
       loadedShowDdRef.current = showDd; // ...and the Show-DD state (affects the column set)
     } catch (err) {
+      if (isStale()) return; // a newer request is in flight -> let it own the outcome
       console.error("Failed to load pipeline:", err);
       setError("Failed to load pipeline data. Please try again.");
     } finally {
-      setLoading(false);
+      // Only the latest request clears loading; a stale completion must not flip the page out
+      // of the in-flight state the current request is still in.
+      if (!isStale()) setLoading(false);
     }
   }, [scope, showDd, terminalDateFilters]);
 
