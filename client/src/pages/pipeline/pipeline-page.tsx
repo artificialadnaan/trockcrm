@@ -303,7 +303,12 @@ export function PipelinePage() {
   // loadedShowDd/loadedScope back to a value that no longer matches the live selection (which
   // would strand the page on a skeleton with no fetch in flight).
   const requestIdRef = useRef(0);
-  const [showDd, setShowDd] = useState(searchParams.get("showDd") === "1");
+  // Derive Show-DD straight from the URL (like `scope` above), NOT a local state synced by a
+  // passive effect. Otherwise, on the render right after setSearchParams (switch click, browser
+  // back/forward, any navigation) searchParams is already new while a synced state would still
+  // hold the old value -- so loadedShowDd === showDd would look current and the stale board
+  // would paint for one frame before the effect caught up.
+  const showDd = searchParams.get("showDd") === "1";
   // See derivePipelineBoardView: the skeleton is keyed on the request identity (NOT on
   // `loading`) so the pre-loading render right after a scope/Show-DD change shows the skeleton
   // instead of flashing the stale previous-identity board for one frame.
@@ -377,7 +382,8 @@ export function PipelinePage() {
   }, [fetchPipeline]);
 
   useEffect(() => {
-    setShowDd(searchParams.get("showDd") === "1");
+    // showDd is derived from searchParams directly (above); only the terminal date filters need
+    // syncing back into state on a browser back/forward.
     setTerminalDateFilters(readTerminalDateFiltersFromSearchParams(searchParams));
   }, [searchParams]);
 

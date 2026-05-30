@@ -1,8 +1,8 @@
 // @vitest-environment jsdom
 
-import { act } from "react";
+import { act, useLayoutEffect } from "react";
 import { createRoot, type Root } from "react-dom/client";
-import { MemoryRouter, useNavigate } from "react-router-dom";
+import { MemoryRouter, useNavigate, useSearchParams } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { PipelinePage } from "./pipeline-page";
 
@@ -34,12 +34,16 @@ type Deferred = { path: string; settled: boolean; resolve: (v: unknown) => void 
 let pending: Deferred[] = [];
 let root: Root | null = null;
 let container: HTMLDivElement | null = null;
+// Records, for each commit caused by a searchParams change, whether the board (vs skeleton) was
+// on screen at that commit and what the URL said -- captured by a layout-effect spy.
+let navFrames: { url: string; boardShown: boolean }[] = [];
 
 const BOARD = { pipelineColumns: [], terminalStages: [] };
 
 beforeEach(() => {
   (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
   pending = [];
+  navFrames = [];
   mocks.apiMock.mockReset();
   mocks.dealsListSectionMock.mockReset();
   mocks.useAuthMock.mockReset();
@@ -132,5 +136,55 @@ describe("PipelinePage out-of-order pipeline responses", () => {
     await resolveRequest("true");
     await flush();
     expect(isBoardShown()).toBe(true);
+  });
+});
+
+// A layout-effect spy that snapshots the board-vs-skeleton DOM at the commit caused by each
+// searchParams change. Layout effects flush after that commit but BEFORE PipelinePage's passive
+// effects, so this captures the exact post-navigation render that a URL/local-state lag would
+// stale-frame on.
+function SpyHarness() {
+  const navigate = useNavigate();
+  const [params] = useSearchParams();
+  useLayoutEffect(() => {
+    navFrames.push({ url: params.toString(), boardShown: isBoardShown() });
+  }, [params]);
+  return (
+    <div>
+      <button data-testid="nav-on" onClick={() => navigate("/pipeline?showDd=1")} />
+      <PipelinePage />
+    </div>
+  );
+}
+
+describe("PipelinePage Show-DD board identity follows the URL immediately", () => {
+  it("shows the skeleton on the very render after navigating Show-DD on (no stale-board frame)", async () => {
+    await act(async () => {
+      root?.render(
+        <MemoryRouter initialEntries={["/pipeline"]}>
+          <SpyHarness />
+        </MemoryRouter>
+      );
+    });
+
+    // Initial load (Show-DD off) settles -> board on screen.
+    await vi.waitFor(() => expect(pending.some((d) => d.path.includes("includeDd=false"))).toBe(true));
+    await resolveRequest("false");
+    await flush();
+    expect(isBoardShown()).toBe(true);
+
+    navFrames = []; // only the frames from the navigation below matter
+
+    // Navigate Show-DD ON via setSearchParams (same path as the switch / browser back-forward).
+    await act(async () => {
+      (container?.querySelector('[data-testid="nav-on"]') as HTMLButtonElement)?.click();
+    });
+
+    // The commit triggered by that navigation must ALREADY reflect the new identity (skeleton),
+    // not the stale Show-DD=off board. If showDd lagged the URL via a passive-effect-synced
+    // local state, this frame would still show the board (boardShown === true).
+    const navOnFrame = navFrames.find((f) => f.url.includes("showDd=1"));
+    expect(navOnFrame).toBeDefined();
+    expect(navOnFrame?.boardShown).toBe(false);
   });
 });
