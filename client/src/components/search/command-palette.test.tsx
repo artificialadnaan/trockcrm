@@ -101,6 +101,22 @@ describe("CommandPalette — unified grouped, no-blank search UX", () => {
     expect(text).toContain("Won");
   });
 
+  it("preserves the backend's active-before-terminal deal order (does not re-sort by rank)", () => {
+    const results = {
+      ...fullResults(),
+      // Backend order: active first, then the (higher-ranked) won deal. A rank-only re-sort
+      // would flip these and mix the closed deal in as if it were live.
+      deals: [
+        r("deal", "active1", "Active Deal", "/deals/active1", { status: "active", rank: 1 }),
+        r("deal", "won1", "Won Deal", "/deals/won1", { status: "won", rank: 5 }),
+      ],
+    };
+    setSearchState({ results, loading: false });
+    render();
+    const text = container!.textContent ?? "";
+    expect(text.indexOf("Active Deal")).toBeLessThan(text.indexOf("Won Deal"));
+  });
+
   it("keeps the previous results mounted during a refetch (no blank/flash)", () => {
     setSearchState({ results: fullResults(), loading: true }); // refetch in flight, prior results present
     render();

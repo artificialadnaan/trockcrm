@@ -111,6 +111,11 @@ export function SearchPage() {
     { key: "contacts", label: "Contacts" },
     { key: "files", label: "Files" },
   ];
+  // This page renders deals/contacts/files only (companies/leads/properties surface in the
+  // command palette). Gate the empty/results state on what is actually rendered, NOT results.total
+  // (which now also counts the new entity types) -- otherwise a new-entity-only match would
+  // suppress "No results" yet render nothing.
+  const renderedTotal = sections.reduce((sum, { key }) => sum + (results?.[key]?.length ?? 0), 0);
   const intentLabel = aiResults?.intent ? aiResults.intent.replace(/_/g, " ") : null;
 
   const trackInteraction = (
@@ -272,13 +277,13 @@ export function SearchPage() {
         </Card>
       )}
 
-      {!loading && results && results.total === 0 && query.length >= 2 && (
+      {!loading && results && renderedTotal === 0 && query.length >= 2 && (
         <div className="text-center text-gray-400 py-12">
           No results found for &ldquo;{query}&rdquo;
         </div>
       )}
 
-      {!loading && results && results.total > 0 && (
+      {!loading && results && renderedTotal > 0 && (
         <div className="space-y-6">
           {sections.map(({ key, label }) => {
             const items = results[key] as SearchResult[];

@@ -1,8 +1,8 @@
-import { sql, eq, and, gte, desc } from "drizzle-orm";
+import { sql, eq, and, or, inArray, gte, desc } from "drizzle-orm";
 import crypto from "crypto";
 import type { NodePgDatabase } from "drizzle-orm/node-postgres";
 import type * as schema from "@trock-crm/shared/schema";
-import { aiFeedback, userOfficeAccess, offices, users, deals, contacts, companies, leads, properties } from "@trock-crm/shared/schema";
+import { aiFeedback, userOfficeAccess, offices, users, deals, contacts, companies, leads, properties, pipelineStageConfig } from "@trock-crm/shared/schema";
 import { db, pool } from "../../db.js";
 import { drizzle } from "drizzle-orm/node-postgres";
 import {
@@ -11,7 +11,9 @@ import {
   buildCompanySearchCondition,
   buildLeadSearchCondition,
   buildPropertySearchCondition,
+  escapeLikePattern,
 } from "./unified-search.js";
+import { TERMINAL_STAGE_SLUGS } from "../shared/pipeline-terminal-stages.js";
 import { capPerOffice, deriveDealStatus, mergeAndLimit, scoreMatch, type DealLifecycle } from "./global-search-helpers.js";
 
 type TenantDb = NodePgDatabase<typeof schema>;
@@ -271,7 +273,15 @@ async function crossOfficeSearch(
         const officeDb = drizzle(client, { schema: undefined as any });
         const groups = await runEntitySearches(officeDb as any, sanitized, types, perOfficeCap);
         for (const key of Object.keys(merged) as SearchType[]) {
-          merged[key].push(...groups[key].map((item) => ({ ...item, officeSlug: office.slug })));
+          merged[key].push(
+            ...groups[key].map((item) => ({
+              ...item,
+              officeSlug: office.slug,
+              // Cross-office hit: carry the originating office so the detail fetch targets that
+              // office schema (api.ts reads ?officeId -> x-office-id header), not the active one.
+              deepLink: `${item.deepLink}?officeId=${office.id}`,
+            })),
+          );
         }
       } finally {
         await client.query("SELECT set_config('search_path', 'public', false)");
@@ -285,7 +295,17 @@ async function crossOfficeSearch(
 
 async function searchDeals(tenantDb: TenantDb, query: string, limit: number): Promise<SearchResult[]> {
   // Unified substring field set (name/number/project/address/owner/company/contact via the
-  // shared builder). No is_active filter: terminal (won/lost) deals are FINDABLE and MARKED.
+  // shared builder). The REAL stage slug comes from pipeline_stage_config via stageId -- the
+  // denormalized bid-board slug is only set at the estimating boundary, so it would miss
+  // CRM-owned Won/Lost. Findable set = active OR a terminal (won/lost) stage: terminal deals are
+  // FINDABLE + MARKED, while soft-deleted (inactive, non-terminal) deals stay hidden.
+  const prefix = `${escapeLikePattern(query.trim())}%`;
+  const exact = query.trim().toLowerCase();
+  // Relevance order BEFORE the cap so a strong older match is not dropped for newer weak ones.
+  const relevance = sql<number>`CASE
+    WHEN lower(${deals.name}) = ${exact} OR lower(${deals.dealNumber}) = ${exact} OR lower(coalesce(${deals.projectNumber}, '')) = ${exact} THEN 3
+    WHEN ${deals.name} ILIKE ${prefix} ESCAPE '\\' OR ${deals.dealNumber} ILIKE ${prefix} ESCAPE '\\' OR ${deals.projectNumber} ILIKE ${prefix} ESCAPE '\\' THEN 2
+    ELSE 1 END`;
   const rows = await tenantDb
     .select({
       id: deals.id,
@@ -294,12 +314,18 @@ async function searchDeals(tenantDb: TenantDb, query: string, limit: number): Pr
       projectNumber: deals.projectNumber,
       propertyCity: deals.propertyCity,
       propertyState: deals.propertyState,
-      stageSlug: deals.bidBoardStageSlug,
       onHold: deals.onHold,
+      stageSlug: pipelineStageConfig.slug,
     })
     .from(deals)
-    .where(buildDealSearchCondition(query))
-    .orderBy(desc(deals.updatedAt))
+    .leftJoin(pipelineStageConfig, eq(pipelineStageConfig.id, deals.stageId))
+    .where(
+      and(
+        buildDealSearchCondition(query),
+        or(eq(deals.isActive, true), inArray(pipelineStageConfig.slug, [...TERMINAL_STAGE_SLUGS])),
+      ),
+    )
+    .orderBy(desc(relevance), desc(deals.updatedAt))
     .limit(limit);
 
   return rows.map((r): SearchResult => ({

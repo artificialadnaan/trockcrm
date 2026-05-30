@@ -209,7 +209,9 @@ export function CommandPalette({ open, onClose }: CommandPaletteProps) {
                 <div className="px-4 py-1.5 text-right text-[11px] text-gray-400">Updating&hellip;</div>
               )}
               {GROUP_ORDER.map((group) => {
-                const items = [...groups[group.key]].sort((a, b) => b.rank - a.rank);
+                // Preserve the backend ordering (active-first, then rank) -- re-sorting by rank
+                // alone would mix terminal won/lost deals in as if they were active.
+                const items = groups[group.key];
                 if (items.length === 0) return null;
                 return (
                   <div key={group.key}>
