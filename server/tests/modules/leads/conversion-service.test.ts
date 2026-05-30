@@ -2170,6 +2170,126 @@ describe("Lead Conversion Service", () => {
     expect(result.deal.projectTypeId).toBe("project-type-lead");
   });
 
+  it("backfills the lead's estimated_value onto the successor deal's ddEstimate (never awardedAmount)", async () => {
+    const tenantDb = createFakeTenantDb({
+      leads: [
+        {
+          id: "lead-1",
+          companyId: "company-1",
+          propertyId: "property-1",
+          primaryContactId: null,
+          name: "Palm Villas repaint",
+          stageId: "lead-stage-sales-validation",
+          assignedRepId: "rep-1",
+          status: "open",
+          pipelineType: "normal",
+          officeCode: "dfw",
+          projectType: "exterior renovation",
+          projectTypeId: "project-type-lead",
+          qualificationPayload: { estimated_value: 125000 },
+          source: "Referral",
+          description: "Property manager requested pre-bid walk",
+          stageEnteredAt: new Date("2026-04-12T15:00:00.000Z"),
+          convertedAt: null,
+          isActive: true,
+          createdAt: new Date("2026-04-12T15:00:00.000Z"),
+          updatedAt: new Date("2026-04-12T15:00:00.000Z"),
+        } as never,
+      ],
+    });
+    const createDealInputs: Array<{ ddEstimate?: string | null; awardedAmount?: string | null }> = [];
+    const service = createLeadConversionService({
+      getStageById: pipelineMocks.getStageById as never,
+      getStageBySlug: pipelineMocks.getStageBySlug as never,
+      now: () => new Date("2026-04-15T15:00:00.000Z"),
+      createDeal: async (_tenantDb, input) => {
+        createDealInputs.push({
+          ddEstimate: input.ddEstimate ?? null,
+          awardedAmount: input.awardedAmount ?? null,
+        });
+        const deal = {
+          id: "deal-1",
+          dealNumber: "DFW-1-10526-aa",
+          workflowRoute: input.workflowRoute ?? "normal",
+          sourceLeadId: input.sourceLeadId ?? null,
+          assignedRepId: input.assignedRepId,
+          stageId: input.stageId,
+          name: input.name,
+        };
+        tenantDb.state.deals.push(deal);
+        return deal as never;
+      },
+    });
+
+    await service.convertLead(tenantDb as never, {
+      leadId: "lead-1",
+      userRole: "rep",
+      userId: "rep-1",
+    });
+
+    // The rep's gated estimated_value must land on the deal's pipeline estimate...
+    expect(createDealInputs[0]?.ddEstimate).toBe("125000");
+    // ...and NEVER on awardedAmount (that is the Won amount; protects Won reporting).
+    expect(createDealInputs[0]?.awardedAmount).toBeNull();
+  });
+
+  it("lets conversion input ddEstimate take precedence over the lead's estimated_value", async () => {
+    const tenantDb = createFakeTenantDb({
+      leads: [
+        {
+          id: "lead-1",
+          companyId: "company-1",
+          propertyId: "property-1",
+          primaryContactId: null,
+          name: "Palm Villas repaint",
+          stageId: "lead-stage-sales-validation",
+          assignedRepId: "rep-1",
+          status: "open",
+          pipelineType: "normal",
+          officeCode: "dfw",
+          projectTypeId: "project-type-lead",
+          qualificationPayload: { estimated_value: 125000 },
+          source: "Referral",
+          description: null,
+          stageEnteredAt: new Date("2026-04-12T15:00:00.000Z"),
+          convertedAt: null,
+          isActive: true,
+          createdAt: new Date("2026-04-12T15:00:00.000Z"),
+          updatedAt: new Date("2026-04-12T15:00:00.000Z"),
+        } as never,
+      ],
+    });
+    const createDealInputs: Array<{ ddEstimate?: string | null }> = [];
+    const service = createLeadConversionService({
+      getStageById: pipelineMocks.getStageById as never,
+      getStageBySlug: pipelineMocks.getStageBySlug as never,
+      now: () => new Date("2026-04-15T15:00:00.000Z"),
+      createDeal: async (_tenantDb, input) => {
+        createDealInputs.push({ ddEstimate: input.ddEstimate ?? null });
+        const deal = {
+          id: "deal-1",
+          dealNumber: "DFW-1-10526-aa",
+          workflowRoute: input.workflowRoute ?? "normal",
+          sourceLeadId: input.sourceLeadId ?? null,
+          assignedRepId: input.assignedRepId,
+          stageId: input.stageId,
+          name: input.name,
+        };
+        tenantDb.state.deals.push(deal);
+        return deal as never;
+      },
+    });
+
+    await service.convertLead(tenantDb as never, {
+      leadId: "lead-1",
+      userRole: "rep",
+      userId: "rep-1",
+      ddEstimate: "90000",
+    });
+
+    expect(createDealInputs[0]?.ddEstimate).toBe("90000");
+  });
+
   it("lets conversion input override lead projectTypeId when a different value is provided", async () => {
     const tenantDb = createFakeTenantDb({
       leads: [
