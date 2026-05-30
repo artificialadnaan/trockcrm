@@ -455,12 +455,13 @@ export function DirectorDashboardPage() {
     if (!deal.repId) continue;
     engineAtRiskCountByRep.set(deal.repId, (engineAtRiskCountByRep.get(deal.repId) ?? 0) + 1);
   }
-  // Wave 1 (P0-1): closed totals are the canonical per-rep Won sums from the director
-  // payload (same won_closed_date basis as the Closed card), so they reconcile with the
-  // card instead of the stale rep_performance_snapshots reps. Typed nullable to preserve
-  // the downstream goal/pace guards unchanged.
-  const closedValue: number | null = data.repCards.reduce((sum, rep) => sum + (rep.closedValue ?? 0), 0);
-  const closedCount: number | null = data.repCards.reduce((sum, rep) => sum + (rep.winsCount ?? 0), 0);
+  // Wave 1 (P0-1): page-level closed totals come from the AUTHORITATIVE Closed-card
+  // aggregate (scopeSummary.won), so the forecast section's Closed exactly equals the
+  // Closed KPI card and drilldown even when a Won deal's rep is unassigned or absent from
+  // repCards. Per-rep rows still use the canonical repCards.closedValue decomposition.
+  // Typed nullable to preserve the downstream goal/pace guards unchanged.
+  const closedValue: number | null = data.scopeSummary?.won.totalValue ?? 0;
+  const closedCount: number | null = data.scopeSummary?.won.count ?? 0;
   const forecastVsGoal = usablePerfData ? usablePerfData.forecastVsGoal : null;
   const goal = forecastVsGoal?.goal ?? 0;
   const forecast = forecastVsGoal?.forecast ?? 0;

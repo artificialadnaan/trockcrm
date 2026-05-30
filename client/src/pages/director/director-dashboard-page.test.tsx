@@ -389,7 +389,9 @@ describe("DirectorDashboardPage", () => {
         },
         scopeSummary: {
           activePipeline: { count: 4, totalValue: 610000 },
-          won: { count: 1, totalValue: 125000 },
+          // Won card aggregate == the canonical per-rep closed sum (rep-1 $240k/4 +
+          // rep-2 $120k/2). The page-level Closed total reads this authoritative value.
+          won: { count: 6, totalValue: 360000 },
           atRisk: { count: 1, totalValue: 275000 },
           stale: { count: 1, totalValue: 275000 },
         },
