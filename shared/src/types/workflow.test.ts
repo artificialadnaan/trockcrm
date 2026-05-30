@@ -5,6 +5,7 @@ import {
   LOST_DEAL_STAGE_SLUGS,
   TRANSITIONAL_WON_MAPPED_DEAL_STAGE_SLUGS,
   WON_DEAL_STAGE_SLUGS,
+  isGenuineLostDealStageSlug,
   isGenuineWonDealStageSlug,
   toCanonicalDealStageSlug,
 } from "./workflow.js";
@@ -73,5 +74,21 @@ describe("workflow stage canonicalization", () => {
     ]);
     expect(LOST_DEAL_STAGE_SLUGS).not.toContain("in_production");
     expect(LOST_DEAL_STAGE_SLUGS).not.toContain("close_out");
+  });
+
+  it("classifies genuine lost deal stages with isGenuineLostDealStageSlug", () => {
+    expect(isGenuineLostDealStageSlug("lost")).toBe(true);
+    expect(isGenuineLostDealStageSlug("closed_lost")).toBe(true);
+    expect(isGenuineLostDealStageSlug("production_lost")).toBe(true);
+    expect(isGenuineLostDealStageSlug("service_lost")).toBe(true);
+    expect(isGenuineLostDealStageSlug("deal_canceled")).toBe(true);
+
+    // Won + open stages are not lost; nullish is not lost.
+    expect(isGenuineLostDealStageSlug("won")).toBe(false);
+    expect(isGenuineLostDealStageSlug("closed_won")).toBe(false);
+    expect(isGenuineLostDealStageSlug("opportunity")).toBe(false);
+    expect(isGenuineLostDealStageSlug("estimating")).toBe(false);
+    expect(isGenuineLostDealStageSlug(null)).toBe(false);
+    expect(isGenuineLostDealStageSlug(undefined)).toBe(false);
   });
 });

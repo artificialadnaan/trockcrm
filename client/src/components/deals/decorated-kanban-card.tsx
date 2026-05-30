@@ -1,5 +1,5 @@
 import { Clock, GripVertical, MapPin } from "lucide-react";
-import { formatCurrencyCompact } from "@/lib/deal-utils";
+import { DealValue } from "@/components/deals/deal-value";
 import type { Deal } from "@/hooks/use-deals";
 import { cn } from "@/lib/utils";
 import { getDealDisplayNumber } from "@/components/deals/kanban-deal-card";
@@ -79,9 +79,12 @@ export function DecoratedKanbanCard({
           >
             {displayNumber.label || "--"}
           </p>
-          <p className="shrink-0 text-sm font-black tabular-nums text-slate-950">
-            {formatCurrencyCompact(getEffectiveDealValue(deal))}
-          </p>
+          <DealValue
+            deal={{ ...deal, stageSlug: deal.stageSlug ?? stageSlug }}
+            value={getEffectiveDealValue(deal)}
+            compact
+            className="shrink-0 text-sm font-black tabular-nums text-slate-950"
+          />
         </div>
 
         <AtRiskBadge atRisk={deal.atRisk} compact />

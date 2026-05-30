@@ -4,7 +4,9 @@ import {
   bestEstimateCaptionLabel,
   formatDealDisplayNumber,
   isHubspotImportedDealNumber,
+  isLostBidDeal,
   resolveBestEstimate,
+  resolveDealValueKind,
   sanitizeHubspotDealIdentifiers,
 } from "./deal-utils";
 
@@ -182,5 +184,37 @@ describe("deal value precedence", () => {
 
     expect(bestEstimate(deal)).toBe(16137.14);
     expect(resolveBestEstimate(deal)).toEqual({ value: 16137.14, source: "bid" });
+  });
+});
+
+describe("resolveDealValueKind / isLostBidDeal", () => {
+  it("classifies a lost deal as 'lost' while preserving its bid value", () => {
+    const lost = { bidEstimate: "65600", stageSlug: "lost", workflowRoute: "normal" };
+    expect(resolveDealValueKind(lost)).toBe("lost");
+    expect(isLostBidDeal(lost)).toBe(true);
+    // Fix C guard: the preserved bid is STILL returned -- the UI greys it, never clears it.
+    expect(resolveBestEstimate(lost).value).toBe(65600);
+  });
+
+  it("classifies lost-stage aliases (closed_lost / production_lost / service_lost) as lost", () => {
+    expect(resolveDealValueKind({ stageSlug: "closed_lost" })).toBe("lost");
+    expect(resolveDealValueKind({ stageSlug: "production_lost" })).toBe("lost");
+    expect(resolveDealValueKind({ stageSlug: "service_lost", workflowRoute: "service" })).toBe("lost");
+  });
+
+  it("classifies won and active/open deals, and treats missing stage as active", () => {
+    expect(resolveDealValueKind({ stageSlug: "won", workflowRoute: "normal" })).toBe("won");
+    expect(isLostBidDeal({ stageSlug: "won" })).toBe(false);
+    expect(resolveDealValueKind({ stageSlug: "estimating" })).toBe("active");
+    expect(resolveDealValueKind({})).toBe("active");
+    expect(isLostBidDeal({})).toBe(false);
+  });
+
+  it("detects the terminal stage via bidBoardStageSlug when the CRM stageSlug is still open", () => {
+    // Bid Board-owned/mirrored deals carry their terminal stage on bidBoardStageSlug while
+    // the CRM stageSlug can lag on an open stage -- mirror pipeline-terminal-filters precedence.
+    expect(resolveDealValueKind({ stageSlug: "estimating", bidBoardStageSlug: "closed_lost" })).toBe("lost");
+    expect(isLostBidDeal({ stageSlug: "estimating", bidBoardStageSlug: "closed_lost" })).toBe(true);
+    expect(resolveDealValueKind({ stageSlug: "estimating", bidBoardStageSlug: "closed_won" })).toBe("won");
   });
 });

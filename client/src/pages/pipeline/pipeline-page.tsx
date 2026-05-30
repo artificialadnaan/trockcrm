@@ -137,9 +137,11 @@ function formatRefreshedLabel(date: Date, now: Date): string {
 
 function PipelineCard({
   deal,
+  stageSlug,
   isDragging,
 }: {
   deal: Deal;
+  stageSlug?: string;
   isDragging?: boolean;
 }) {
   const { attributes, listeners, setNodeRef, transform } = useDraggable({
@@ -154,6 +156,7 @@ function PipelineCard({
   return (
     <KanbanDealCard
       deal={deal}
+      stageSlug={stageSlug}
       isDragging={isDragging}
       containerRef={setNodeRef}
       containerStyle={style}
@@ -232,7 +235,7 @@ function DroppableColumn({
       childCount={column.deals.length}
     >
       {column.deals.map((deal) => (
-        <PipelineCard key={deal.id} deal={deal} isDragging={activeDealId === deal.id} />
+        <PipelineCard key={deal.id} deal={deal} stageSlug={column.stage.slug} isDragging={activeDealId === deal.id} />
       ))}
 
       {column.deals.length === 0 && (

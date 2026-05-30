@@ -74,7 +74,7 @@ import { useSalesReps } from "@/hooks/use-sales-reps";
 import { useAuth } from "@/lib/auth";
 import { api } from "@/lib/api";
 import { cn } from "@/lib/utils";
-import { formatCurrency, bestEstimateCaptionLabel, formatDealDisplayNumber, resolveBestEstimate } from "@/lib/deal-utils";
+import { formatCurrency, bestEstimateCaptionLabel, formatDealDisplayNumber, resolveBestEstimate, resolveDealValueKind, LOST_BID_VALUE_LABEL } from "@/lib/deal-utils";
 import {
   getCanonicalDealStageSlugs,
   getDealStageLabelBySlug,
@@ -632,6 +632,7 @@ export function DealDetailPage() {
   const slaCaptionContext = getSlaCaptionContext(slaResult);
   const isSlaBreached = slaResult?.isAtRisk === true;
   const dealValue = resolveBestEstimate(deal);
+  const dealValueIsLost = resolveDealValueKind(deal) === "lost";
   const address = formatDealAddress(deal);
   const procoreProjectUrl = buildProcoreProjectUrl(deal.procoreProjectId);
   const shellTabs: DetailPageShellTab[] = tabs.map((tab) => ({
@@ -651,9 +652,10 @@ export function DealDetailPage() {
     {
       eyebrow: "Deal value",
       value: formatCurrency(dealValue.value),
-      captionLabel: bestEstimateCaptionLabel(dealValue.source),
-      captionContext:
-        deal.changeOrderTotal && Number(deal.changeOrderTotal) > 0
+      captionLabel: dealValueIsLost ? LOST_BID_VALUE_LABEL : bestEstimateCaptionLabel(dealValue.source),
+      captionContext: dealValueIsLost
+        ? "preserved bid -- deal was lost"
+        : deal.changeOrderTotal && Number(deal.changeOrderTotal) > 0
           ? `${formatCurrency(Number(deal.changeOrderTotal))} in change orders`
           : "latest tracked value",
     },

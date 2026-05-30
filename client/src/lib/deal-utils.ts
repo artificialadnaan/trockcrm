@@ -1,4 +1,4 @@
-import { isGenuineWonDealStageSlug } from "@trock-crm/shared/types";
+import { isGenuineLostDealStageSlug, isGenuineWonDealStageSlug } from "@trock-crm/shared/types";
 
 const HUBSPOT_DEAL_NUMBER_PATTERN = /^HS[-_ ]?\d+/i;
 const VISIBLE_HUBSPOT_DEAL_NUMBER_PATTERN = /\bHS[-_ ]?\d{6,}\b/gi;
@@ -132,6 +132,40 @@ function shouldUseAwardedEstimate(deal: {
  */
 export function bestEstimate(deal: Parameters<typeof resolveBestEstimate>[0]): number {
   return resolveBestEstimate(deal).value;
+}
+
+export type DealValueKind = "active" | "won" | "lost";
+
+/** Label shown next to a lost deal's preserved bid so it never reads as live/won value. */
+export const LOST_BID_VALUE_LABEL = "Lost bid";
+
+/**
+ * Classify a deal's value for DISPLAY only. This never changes the numeric value:
+ * a lost deal keeps its preserved bid (Loss Analysis deliberately sums lost-deal
+ * value). The UI uses "lost" to grey + label the amount instead of clearing it.
+ */
+export function resolveDealValueKind(deal: {
+  stageSlug?: string | null;
+  bidBoardStageSlug?: string | null;
+  workflowRoute?: string | null;
+}): DealValueKind {
+  const workflowRoute =
+    deal.workflowRoute === "normal" || deal.workflowRoute === "service" ? deal.workflowRoute : null;
+  // A Bid Board-owned/mirrored deal carries its terminal stage on bidBoardStageSlug while
+  // the CRM stageSlug can still read as open -- mirror pipeline-terminal-filters and prefer it.
+  const stageSlugs = [deal.bidBoardStageSlug ?? null, deal.stageSlug ?? null];
+  if (stageSlugs.some((slug) => isGenuineLostDealStageSlug(slug, workflowRoute))) return "lost";
+  if (stageSlugs.some((slug) => isGenuineWonDealStageSlug(slug, workflowRoute))) return "won";
+  return "active";
+}
+
+/** True when a deal sits in a genuine lost stage -- its value is a historical bid, not live value. */
+export function isLostBidDeal(deal: {
+  stageSlug?: string | null;
+  bidBoardStageSlug?: string | null;
+  workflowRoute?: string | null;
+}): boolean {
+  return resolveDealValueKind(deal) === "lost";
 }
 
 export function bestEstimateCaptionLabel(source: DealEstimateSource): string {
