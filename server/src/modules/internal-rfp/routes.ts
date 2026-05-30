@@ -701,6 +701,10 @@ internalRfpRoutes.post(
       const client = await pool.connect();
       try {
         await client.query("BEGIN");
+        // This callback writes deal_stage_history explicitly on the stage move (below), so
+        // suppress the deal_stage_history backstop trigger (migration 0143) for this
+        // transaction to avoid double-recording. Transaction-local; clears at COMMIT/ROLLBACK.
+        await client.query("SELECT set_config('app.skip_stage_history_trigger', '1', true)");
         const linkageUpdate = await client.query(
           `UPDATE ${quoteIdent(found.schemaName)}.deals
               SET procore_bid_id = $1::bigint,

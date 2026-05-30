@@ -127,6 +127,9 @@ describe("Bid Board sync stage writeback", () => {
       if (normalizedSql.includes("insert into office_dallas.job_queue")) {
         throw new Error("Bid Board sync must not enqueue rep stage-change notifications");
       }
+      if (String(sql).toLowerCase().includes("app.skip_stage_history_trigger")) {
+        return { rows: [] };
+      }
       throw new Error(`Unexpected SQL: ${sql}`);
     });
 
@@ -200,6 +203,9 @@ describe("Bid Board sync stage writeback", () => {
       if (normalizedSql.includes("update office_dallas.deals") && normalizedSql.includes("bid_board_project_number")) {
         return { rows: [], rowCount: 1 };
       }
+      if (String(sql).toLowerCase().includes("app.skip_stage_history_trigger")) {
+        return { rows: [] };
+      }
       throw new Error(`Unexpected SQL: ${sql}`);
     });
 
@@ -250,6 +256,9 @@ describe("Bid Board sync stage writeback", () => {
       if (normalizedSql.includes("insert into office_dallas.deal_stage_history")) {
         throw new Error("same-stage Bid Board sync must not write stage history");
       }
+      if (String(sql).toLowerCase().includes("app.skip_stage_history_trigger")) {
+        return { rows: [] };
+      }
       throw new Error(`Unexpected SQL: ${sql}`);
     });
 
@@ -293,6 +302,9 @@ describe("Bid Board sync stage writeback", () => {
       }
       if (normalizedSql.includes("insert into office_dallas.deal_stage_history")) return { rows: [], rowCount: 1 };
       if (normalizedSql.includes("update office_dallas.deals") && normalizedSql.includes("bid_board_project_number")) return { rows: [], rowCount: 1 };
+      if (String(sql).toLowerCase().includes("app.skip_stage_history_trigger")) {
+        return { rows: [] };
+      }
       throw new Error(`Unexpected SQL: ${sql}`);
     });
 
@@ -339,6 +351,9 @@ describe("Bid Board sync stage writeback", () => {
       }
       if (normalizedSql.includes("insert into office_dallas.deal_stage_history")) {
         throw new Error("backward Bid Board sync must not write stage history");
+      }
+      if (String(sql).toLowerCase().includes("app.skip_stage_history_trigger")) {
+        return { rows: [] };
       }
       throw new Error(`Unexpected SQL: ${sql}`);
     });
@@ -404,6 +419,9 @@ describe("Bid Board sync stage writeback", () => {
       if (normalizedSql.includes("insert into office_dallas.deal_stage_history")) {
         throw new Error("terminal downgrade skips must not write stage history");
       }
+      if (String(sql).toLowerCase().includes("app.skip_stage_history_trigger")) {
+        return { rows: [] };
+      }
       throw new Error(`Unexpected SQL: ${sql}`);
     });
 
@@ -463,6 +481,9 @@ describe("Bid Board sync stage writeback", () => {
       }
       if (normalizedSql.includes("from public.pipeline_stage_config")) {
         return { rows: [{ id: "stage-estimating", slug: "estimating", display_order: 3, is_terminal: false }], rowCount: 1 };
+      }
+      if (String(sql).toLowerCase().includes("app.skip_stage_history_trigger")) {
+        return { rows: [] };
       }
       throw new Error(`Unexpected SQL: ${sql}`);
     });
@@ -533,6 +554,9 @@ describe("Bid Board sync stage writeback", () => {
       }
       if (normalizedSql.includes("insert into office_dallas.job_queue")) {
         throw new Error("Bid Board estimate sync must not enqueue rep notifications");
+      }
+      if (String(sql).toLowerCase().includes("app.skip_stage_history_trigger")) {
+        return { rows: [] };
       }
       throw new Error(`Unexpected SQL: ${sql}`);
     });
@@ -609,6 +633,9 @@ describe("Bid Board sync stage writeback", () => {
       }
       if (normalizedSql.includes("insert into office_dallas.deal_history")) {
         throw new Error("zero and same-value estimate rows must not write deal history");
+      }
+      if (String(sql).toLowerCase().includes("app.skip_stage_history_trigger")) {
+        return { rows: [] };
       }
       throw new Error(`Unexpected SQL: ${sql}`);
     });

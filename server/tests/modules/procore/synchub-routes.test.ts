@@ -157,6 +157,9 @@ function createClient(options: ClientOptions = {}) {
       if (sql.includes("UPDATE office_dallas.deals")) {
         return { rows: [] };
       }
+      if (sql.includes("app.skip_stage_history_trigger")) {
+        return { rows: [] };
+      }
 
       throw new Error(`Unexpected SQL: ${sql}`);
     }),

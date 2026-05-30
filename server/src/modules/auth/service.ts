@@ -586,30 +586,21 @@ export async function ensureDevDemoWorkspace(
       ]
     );
 
+    // Deal creation stage history is recorded for FRESH seeds by the deal_stage_history
+    // backstop trigger (migration 0143), dated at each deal's stage_entered_at. Workspaces
+    // seeded BEFORE that trigger existed are re-seeded via ON CONFLICT DO UPDATE -- a no-op
+    // stage change that does not fire the creation path -- so backfill a "Created in" row for
+    // any demo deal still missing history. Scoped to TR-DEMO deals + NOT EXISTS, so it is
+    // idempotent and never fabricates history for real deals.
     await client.query(
       `
-        INSERT INTO deal_stage_history (
-          id, deal_id, from_stage_id, to_stage_id, changed_by, is_backward_move, is_director_override, created_at
-        )
-        VALUES
-          ($1, $2, NULL, $3, $4, false, false, $5),
-          ($6, $7, NULL, $8, $4, false, false, $9)
-        ON CONFLICT (id) DO UPDATE
-        SET to_stage_id = EXCLUDED.to_stage_id,
-            changed_by = EXCLUDED.changed_by,
-            created_at = EXCLUDED.created_at
+        INSERT INTO deal_stage_history (deal_id, from_stage_id, to_stage_id, changed_by, created_at)
+        SELECT d.id, NULL, d.stage_id, $1, d.stage_entered_at
+        FROM deals d
+        WHERE d.deal_number LIKE 'TR-DEMO-%'
+          AND NOT EXISTS (SELECT 1 FROM deal_stage_history h WHERE h.deal_id = d.id)
       `,
-      [
-        deterministicUuid(`${schemaName}:demo-history-won`),
-        wonDealId,
-        closedWonStageId,
-        directorUser.id,
-        lastMonthIso,
-        deterministicUuid(`${schemaName}:demo-history-lost`),
-        lostDealId,
-        closedLostStageId,
-        lastMonthIso,
-      ]
+      [directorUser.id]
     );
 
     await client.query(

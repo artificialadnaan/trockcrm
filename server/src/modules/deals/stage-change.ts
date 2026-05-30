@@ -1,4 +1,4 @@
-import { eq, and, inArray } from "drizzle-orm";
+import { eq, and, inArray, sql } from "drizzle-orm";
 import type { NodePgDatabase } from "drizzle-orm/node-postgres";
 import {
   deals,
@@ -345,6 +345,11 @@ export async function changeDealStage(
       .where(and(eq(dealApprovals.dealId, dealId), eq(dealApprovals.status, "approved")));
   }
 
+  // Tell the deal_stage_history backstop trigger (migration 0143) to stand down for this
+  // transaction: we record a richer history row explicitly below, so the trigger must not
+  // also record one. Transaction-local (set_config local=true); cleared after the insert.
+  await tenantDb.execute(sql`select set_config('app.skip_stage_history_trigger', '1', true)`);
+
   // Apply update
   const updatedDealResult = await tenantDb
     .update(deals)
@@ -416,6 +421,9 @@ export async function changeDealStage(
   }).returning();
 
   const stageHistoryRecord = historyInsertResult[0] ?? null;
+
+  // Re-arm the backstop trigger for any later stage write in this same transaction.
+  await tenantDb.execute(sql`select set_config('app.skip_stage_history_trigger', '', true)`);
 
   // Step 7: Outbox pattern -- insert durable jobs into job_queue INSIDE the
   // transaction so they are committed atomically with the deal update +

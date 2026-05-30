@@ -568,6 +568,11 @@ async function syncProjectStatusToCrm(
             ]
           );
         }
+        // We just recorded history explicitly, so suppress the 0143 backstop trigger for
+        // this transaction to avoid double-recording. Set it ONLY here -- NOT for the
+        // no-admin branch above, which skips the explicit insert -- so the backstop still
+        // records the stage move via its assigned-rep/creator fallback when we could not.
+        await client.query("SELECT set_config('app.skip_stage_history_trigger', '1', true)");
       }
 
       // Update deal stage and stage_entered_at
