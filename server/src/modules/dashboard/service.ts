@@ -2535,6 +2535,18 @@ export async function getDirectorCommissionWorkspace(
   return { rows };
 }
 
+// P1-7: Activity Pulse is sourced from the office-wide rep_performance_snapshots roster.
+// In mine scope it must show only the viewer's own activity row (matching the scoped KPI
+// cards); in all scope it stays office-wide. Kept as a tiny pure helper so the scope rule
+// is unit-tested independently of the full dashboard assembly.
+export function scopeActivityPulseRowsToViewer<T extends { repId: string }>(
+  rows: T[],
+  viewerUserId: string | undefined
+): T[] {
+  if (!viewerUserId) return rows;
+  return rows.filter((row) => row.repId === viewerUserId);
+}
+
 /**
  * Aggregate all data for the director dashboard.
  * Queries run sequentially because tenantDb is bound to a single client per request.
@@ -2602,7 +2614,18 @@ export async function getDirectorDashboard(
     () => getDirectorFunnelSummary(tenantDb),
     () => getDirectorRepCommissionRows(tenantDb, { from, to }),
     () => getRepPerformanceSnapshots(tenantDb, options.officeId, options.periodKind ?? "mtd"),
-    () => getRecentCloses(tenantDb, { from, to }),
+    // P1-7: in mine scope, narrow Recent Closes to the viewer's deals using the SAME
+    // visibility options the KPI cards / canonical Won decomposition use, instead of
+    // listing office-wide closes. getRecentCloses already supports scope; the caller
+    // previously dropped it.
+    () => getRecentCloses(tenantDb, {
+      from,
+      to,
+      viewerUserId: scopedViewerUserId,
+      includeDealSubscriptions: mineVisibility?.dealSubscriptions,
+      includeDealCreatedBy: mineVisibility?.dealsCreatedByUserId,
+      includeDealSubscriptionDeletedAt: mineVisibility?.dealSubscriptionsDeletedAt,
+    }),
     () => buildDirectorScopeSummary(tenantDb, {
       from,
       to,
@@ -2704,7 +2727,12 @@ export async function getDirectorDashboard(
     // KPI, scopeSummary.activePipeline), not the stale snapshot pipeline sum that inflated
     // it ~2.4x ($93.8M vs $38.8M). goal stays null (no goal source; see P0-3/Wave 2).
     forecastVsGoal: buildGoalNullForecast(scopeSummary.activePipeline.totalValue),
-    activityPulse: repPerformanceSnapshots.rows.map((row) => ({
+    // P1-7: in mine scope, the Activity Pulse must show only the viewer's row (matching the
+    // scoped KPI cards); in all scope it stays office-wide.
+    activityPulse: scopeActivityPulseRowsToViewer(
+      repPerformanceSnapshots.rows,
+      scopedViewerUserId
+    ).map((row) => ({
       repId: row.repId,
       repName: row.repName,
       calls: row.calls,
