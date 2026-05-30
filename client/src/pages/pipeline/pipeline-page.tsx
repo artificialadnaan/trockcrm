@@ -36,6 +36,7 @@ import {
 import type { Deal } from "@/hooks/use-deals";
 import type { PipelineScope } from "@/lib/pipeline-scope";
 import { resolvePreferredScope, writeStoredScopePreference } from "@/lib/scope-preferences";
+import { derivePipelineBoardView } from "./pipeline-board-view";
 
 // Re-exports kept for test compatibility (pipeline-page.test.ts imports these
 // helpers; they live in the shared deals-list-section module now).
@@ -297,10 +298,18 @@ export function PipelinePage() {
   const loadedScopeRef = useRef<PipelineScope | null>(null);
   const loadedShowDdRef = useRef<boolean | null>(null);
   const [showDd, setShowDd] = useState(searchParams.get("showDd") === "1");
-  const hasCurrentBoard =
-    hasLoadedRef.current && loadedScopeRef.current === scope && loadedShowDdRef.current === showDd;
-  const isInitialLoading = loading && !hasCurrentBoard;
-  const isRefreshing = loading && hasCurrentBoard;
+  // See derivePipelineBoardView: the skeleton is keyed on the request identity (NOT on
+  // `loading`) so the pre-loading render right after a scope/Show-DD change shows the skeleton
+  // instead of flashing the stale previous-identity board for one frame.
+  const { showSkeleton, isRefreshing } = derivePipelineBoardView({
+    hasLoaded: hasLoadedRef.current,
+    loadedScope: loadedScopeRef.current,
+    loadedShowDd: loadedShowDdRef.current,
+    scope,
+    showDd,
+    loading,
+    error,
+  });
   const [activeDeal, setActiveDeal] = useState<Deal | null>(null);
   const [stageChangeOpen, setStageChangeOpen] = useState(false);
   const [pendingMove, setPendingMove] = useState<PendingPipelineMove | null>(null);
@@ -452,7 +461,7 @@ export function PipelinePage() {
     return Math.round((won / total) * 100);
   })();
 
-  if (isInitialLoading) {
+  if (showSkeleton) {
     return (
       <div className="space-y-4 p-6">
         <div className="h-8 w-48 animate-pulse rounded bg-gray-100" />
