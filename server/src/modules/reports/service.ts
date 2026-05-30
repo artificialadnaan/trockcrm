@@ -865,6 +865,7 @@ export async function getActivitySummaryByRep(
       COUNT(*)::int AS total
     FROM activities a
     JOIN users u ON u.id = a.responsible_user_id
+      AND COALESCE(u.is_test_data, false) = false
     WHERE a.occurred_at >= ${from}::timestamptz
       AND a.occurred_at <= (${to}::date + INTERVAL '1 day')::timestamptz
     GROUP BY a.responsible_user_id, u.display_name

@@ -27,6 +27,10 @@ export const users = pgTable("users", {
     .references(() => offices.id)
     .notNull(),
   isActive: boolean("is_active").default(true).notNull(),
+  // P2-8 (migration 0142): roster-hygiene flag. Excludes smoke-test accounts + a flagged
+  // duplicate human row from the director dashboard rosters. Does NOT affect any financial
+  // total -- Won filters test DEALS (deals.is_test_data), not users.
+  isTestData: boolean("is_test_data").default(false).notNull(),
   notificationPrefs: jsonb("notification_prefs").default({}).notNull(),
   reportsTo: uuid("reports_to"),
   createdByUserId: uuid("created_by_user_id"),

@@ -1089,6 +1089,37 @@ describe("Dashboard Service", () => {
       expect(result.scopeSummary).not.toHaveProperty("stale");
     });
 
+    it("excludes is_test_data users from the rep, snapshot, and activity rosters (P2-8)", async () => {
+      const { getDirectorDashboard } = await import("../../../src/modules/dashboard/service.js");
+      const tenantDb = createMockTenantDb([]);
+
+      await getDirectorDashboard(tenantDb, {
+        from: "2026-01-01",
+        to: "2026-12-31",
+        officeId: "office-1",
+      });
+
+      const queries = tenantDb.execute.mock.calls.map(([query]: [unknown]) =>
+        extractSqlText(query).toLowerCase()
+      );
+      const filter = "coalesce(u.is_test_data, false) = false";
+
+      // Rep roster (buildRepPerformanceCards): the WHERE that admits active reps + deal owners.
+      const repRosterQuery = queries.find((t) => t.includes("owner_rows.rep_id is not null"));
+      expect(repRosterQuery).toBeTruthy();
+      expect(repRosterQuery).toContain(filter);
+
+      // Snapshot roster (getRepPerformanceSnapshots) -> drives Activity Pulse / alerts / AI.
+      const snapshotQuery = queries.find((t) => t.includes("rep_performance_snapshots"));
+      expect(snapshotQuery).toBeTruthy();
+      expect(snapshotQuery).toContain(filter);
+
+      // Activity roster (getActivitySummaryByRep, reports module).
+      const activityQuery = queries.find((t) => t.includes("a.type = 'call'"));
+      expect(activityQuery).toBeTruthy();
+      expect(activityQuery).toContain(filter);
+    });
+
     it("keeps at-risk scope summary aligned to the role-relative engine population", async () => {
       const { getDirectorDashboard } = await import("../../../src/modules/dashboard/service.js");
       const tenantDb = {

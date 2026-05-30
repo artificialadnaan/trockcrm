@@ -1984,6 +1984,7 @@ export async function getRepPerformanceSnapshots(
       JOIN public.users u
         ON u.id = rps.rep_id
        AND u.is_active = true
+       AND COALESCE(u.is_test_data, false) = false
        AND u.office_id = ${officeId}
       WHERE rps.period_kind = ${periodKind}
       ORDER BY rps.rep_id, rps.period_kind, rps.computed_at DESC NULLS LAST, rps.period_start DESC
@@ -2808,6 +2809,10 @@ async function buildRepPerformanceCards(
     LEFT JOIN rep_wins rw ON rw.rep_id = u.id
     LEFT JOIN rep_activities ra ON ra.rep_id = u.id
     WHERE u.is_active = true
+      -- P2-8: exclude smoke-test accounts + the flagged duplicate human row from the rep
+      -- roster. Test DEALS are already excluded from Won (deals.is_test_data), so this
+      -- changes only WHO appears, never the Won total.
+      AND COALESCE(u.is_test_data, false) = false
       AND (u.role = 'rep' OR owner_rows.rep_id IS NOT NULL)
     ORDER BY pipeline_value DESC
   `);
