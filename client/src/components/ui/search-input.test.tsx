@@ -22,7 +22,14 @@ function typeInto(input: HTMLInputElement, value: string) {
   input.dispatchEvent(new Event("input", { bubbles: true }));
 }
 
-async function renderSearch(props: {
+interface Props {
+  value: string;
+  onChange: (value: string) => void;
+  debounceMs?: number;
+  placeholder: string;
+}
+
+async function renderSearch(initial: {
   value?: string;
   onChange: (value: string) => void;
   debounceMs?: number;
@@ -31,26 +38,34 @@ async function renderSearch(props: {
   const container = document.createElement("div");
   document.body.appendChild(container);
   const root = createRoot(container);
+  const props: Props = {
+    value: initial.value ?? "",
+    onChange: initial.onChange,
+    debounceMs: initial.debounceMs,
+    placeholder: initial.placeholder ?? "Search",
+  };
 
-  await act(async () => {
-    root.render(
-      createElement(SearchInput, {
-        value: props.value ?? "",
-        onChange: props.onChange,
-        debounceMs: props.debounceMs,
-        placeholder: props.placeholder ?? "Search",
-      })
-    );
-  });
-
-  const input = container.querySelector("input") as HTMLInputElement;
+  async function renderNow() {
+    await act(async () => {
+      root.render(createElement(SearchInput, { ...props }));
+    });
+  }
+  await renderNow();
 
   return {
-    input,
-    clearButton: () => container.querySelector('[aria-label="Clear search"]') as HTMLButtonElement | null,
+    get input() {
+      return container.querySelector("input") as HTMLInputElement;
+    },
+    clearButton() {
+      return container.querySelector('[aria-label="Clear search"]') as HTMLButtonElement | null;
+    },
+    async rerender(next: Partial<Props>) {
+      Object.assign(props, next);
+      await renderNow();
+    },
     async type(value: string) {
       await act(async () => {
-        typeInto(input, value);
+        typeInto(container.querySelector("input") as HTMLInputElement, value);
       });
     },
     async advance(ms: number) {
@@ -60,9 +75,9 @@ async function renderSearch(props: {
     },
     async clickClear() {
       await act(async () => {
-        container.querySelector('[aria-label="Clear search"]')?.dispatchEvent(
-          new MouseEvent("click", { bubbles: true })
-        );
+        container
+          .querySelector('[aria-label="Clear search"]')
+          ?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
       });
     },
     unmount() {
@@ -111,6 +126,23 @@ describe("SearchInput", () => {
     expect(ui.input.value).toBe(""); // cleared instantly
     await ui.advance(300);
     expect(onChange).toHaveBeenLastCalledWith("");
+    ui.unmount();
+  });
+
+  it("does not re-emit stale text when the value is cleared externally with a fresh inline callback", async () => {
+    const onChange1 = vi.fn();
+    const ui = await renderSearch({ value: "abc", onChange: onChange1 });
+    expect(ui.input.value).toBe("abc");
+
+    // Parent programmatically clears the value AND passes a new onChange identity (the
+    // inline-callback URL/filter adoption pattern). This must NOT revert the clear by
+    // re-emitting the previous text.
+    const onChange2 = vi.fn();
+    await ui.rerender({ value: "", onChange: onChange2 });
+    await ui.advance(300);
+
+    expect(onChange2).not.toHaveBeenCalled();
+    expect(ui.input.value).toBe("");
     ui.unmount();
   });
 });

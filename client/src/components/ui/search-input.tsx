@@ -41,6 +41,16 @@ export function SearchInput({
 }: SearchInputProps) {
   const [draft, setDraft] = useState(value);
   const lastEmittedRef = useRef(value);
+  const onChangeRef = useRef(onChange);
+
+  // Hold the latest onChange in a ref so the emit effect below depends ONLY on the
+  // debounced value -- never on the callback's identity. An inline parent callback
+  // (the URL/filter adoption pattern) changes identity every render; if the emit effect
+  // depended on it, it would re-fire with stale text and revert programmatic clears /
+  // URL navigation.
+  useEffect(() => {
+    onChangeRef.current = onChange;
+  });
 
   // Sync the local field when the controlled value changes from outside (programmatic
   // clear / URL navigation). Mark it as already-emitted so we don't echo it back.
@@ -51,13 +61,14 @@ export function SearchInput({
 
   const debounced = useDebouncedValue(draft, debounceMs);
 
-  // Emit debounced changes upward, but never re-emit a value we already reported.
+  // Emit ONLY when the debounced value actually changes, and never re-emit a value we
+  // already reported.
   useEffect(() => {
     if (debounced !== lastEmittedRef.current) {
       lastEmittedRef.current = debounced;
-      onChange(debounced);
+      onChangeRef.current(debounced);
     }
-  }, [debounced, onChange]);
+  }, [debounced]);
 
   return (
     <div className={cn("relative", className)}>
