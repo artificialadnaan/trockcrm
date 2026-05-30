@@ -775,7 +775,19 @@ describe("DirectorDashboardPage", () => {
     }
   });
 
-  it("uses period-aware rep forecast instead of fixed dashboard forecast", () => {
+  it("reads the live director forecast/closed totals, not the stale rep-performance snapshot", () => {
+    // Wave 1 (P1-6): the snapshot (useRepPerformance) is intentionally inflated here; the
+    // forecast header must ignore it and read the director payload — canonical Closed card
+    // (scopeSummary.won = $360,000) over the dashboard goal ($500,000), never the stale
+    // snapshot forecast ($910,000).
+    mocks.useRepPerformanceMock.mockReturnValue({
+      ...mocks.useRepPerformanceMock(),
+      data: {
+        ...mocks.useRepPerformanceMock().data,
+        forecastVsGoal: { forecast: 910000, goal: 500000, goalSource: "manual", percentToGoal: 182 },
+      },
+    });
+
     const html = renderPageHtml();
 
     expect(html).toContain("$360,000 / $500,000");

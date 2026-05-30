@@ -462,7 +462,10 @@ export function DirectorDashboardPage() {
   // Typed nullable to preserve the downstream goal/pace guards unchanged.
   const closedValue: number | null = data.scopeSummary?.won.totalValue ?? 0;
   const closedCount: number | null = data.scopeSummary?.won.count ?? 0;
-  const forecastVsGoal = usablePerfData ? usablePerfData.forecastVsGoal : null;
+  // Wave 1 (P1-6): the forecast reads the director payload's live forecastVsGoal (active-
+  // pipeline total), NOT the stale rep_performance_snapshots forecast. (The visible
+  // forecast/pace UI is still goal-gated and goal is null in prod -> P0-3 reworks that.)
+  const forecastVsGoal = data.forecastVsGoal ?? null;
   const goal = forecastVsGoal?.goal ?? 0;
   const forecast = forecastVsGoal?.forecast ?? 0;
   const wonPercent = goal > 0 && closedValue !== null ? clampPercent((closedValue / goal) * 100) : null;
