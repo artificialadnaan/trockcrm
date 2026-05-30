@@ -1,5 +1,5 @@
 import { sql, type SQL } from "drizzle-orm";
-import { deals, companies, contacts } from "@trock-crm/shared/schema";
+import { deals, companies, contacts, leads, properties } from "@trock-crm/shared/schema";
 
 /**
  * Unified search backend (PR1: Deals — the proving ground).
@@ -85,6 +85,91 @@ export function buildDealSearchCondition(search: string): SQL {
       FROM public.users owner_user
       WHERE owner_user.id = ${deals.assignedRepId}
         AND owner_user.display_name ILIKE ${searchTerm} ESCAPE '\\'
+    )
+  )`;
+}
+
+/**
+ * The columns the unified lead search matches (PR2). Superset of the legacy leads search
+ * (name, source, source_detail, description, company.name, property name/address/city/state,
+ * primary contact first/last); owner (assigned rep) display_name and the converted deal's
+ * deal_number/project_number are the intended additions, mirroring the deal field set.
+ */
+export const LEAD_SEARCH_FIELDS = [
+  "leads.name",
+  "leads.source",
+  "leads.source_detail",
+  "leads.description",
+  "companies.name",
+  "properties.name",
+  "properties.address",
+  "properties.city",
+  "properties.state",
+  "contacts.first_name",
+  "contacts.last_name",
+  "users.display_name",
+  "deals.deal_number",
+  "deals.project_number",
+] as const;
+
+/**
+ * Build the WHERE predicate that matches a lead by its own text fields plus its company
+ * (account), property (incl. city/state for the cascade), primary contact (customer/POC),
+ * owner (assigned rep) name, and -- where the lead has been converted -- the resulting
+ * deal's deal/project number (deals.source_lead_id = leads.id, unique).
+ *
+ * Same contract as buildDealSearchCondition: lifecycle-agnostic (never references
+ * status / is_active / office / scope -- the caller keeps those), read-only, widens no
+ * visibility. Caller must guard min length (>= 2 chars); the term is trimmed + escaped here.
+ */
+export function buildLeadSearchCondition(search: string): SQL {
+  const searchTerm = `%${escapeLikePattern(search.trim())}%`;
+  return sql`(
+    ${leads.name} ILIKE ${searchTerm} ESCAPE '\\'
+    OR ${leads.source} ILIKE ${searchTerm} ESCAPE '\\'
+    OR ${leads.sourceDetail} ILIKE ${searchTerm} ESCAPE '\\'
+    OR ${leads.description} ILIKE ${searchTerm} ESCAPE '\\'
+    OR EXISTS (
+      SELECT 1
+      FROM ${companies}
+      WHERE ${companies.id} = ${leads.companyId}
+        AND ${companies.name} ILIKE ${searchTerm} ESCAPE '\\'
+    )
+    OR EXISTS (
+      SELECT 1
+      FROM ${properties}
+      WHERE ${properties.id} = ${leads.propertyId}
+        AND (
+          ${properties.name} ILIKE ${searchTerm} ESCAPE '\\'
+          OR ${properties.address} ILIKE ${searchTerm} ESCAPE '\\'
+          OR ${properties.city} ILIKE ${searchTerm} ESCAPE '\\'
+          OR ${properties.state} ILIKE ${searchTerm} ESCAPE '\\'
+        )
+    )
+    OR EXISTS (
+      SELECT 1
+      FROM ${contacts}
+      WHERE ${contacts.id} = ${leads.primaryContactId}
+        AND (
+          ${contacts.firstName} ILIKE ${searchTerm} ESCAPE '\\'
+          OR ${contacts.lastName} ILIKE ${searchTerm} ESCAPE '\\'
+          OR CONCAT(${contacts.firstName}, ' ', ${contacts.lastName}) ILIKE ${searchTerm} ESCAPE '\\'
+        )
+    )
+    OR EXISTS (
+      SELECT 1
+      FROM public.users owner_user
+      WHERE owner_user.id = ${leads.assignedRepId}
+        AND owner_user.display_name ILIKE ${searchTerm} ESCAPE '\\'
+    )
+    OR EXISTS (
+      SELECT 1
+      FROM ${deals}
+      WHERE ${deals.sourceLeadId} = ${leads.id}
+        AND (
+          ${deals.dealNumber} ILIKE ${searchTerm} ESCAPE '\\'
+          OR ${deals.projectNumber} ILIKE ${searchTerm} ESCAPE '\\'
+        )
     )
   )`;
 }

@@ -257,7 +257,9 @@ describe("LeadListPage", () => {
 
     expect(html).toContain('placeholder="Search leads"');
     expect(html).toContain(">Search</span>");
-    expect(html).toContain("pl-9");
+    // The shared SearchInput renders its field with pl-8 (icon gutter); the bespoke pl-9
+    // input it replaced is gone.
+    expect(html).toContain("pl-8");
   });
 
   it("renders lead descriptions as a muted responsive column with hover title and dash fallback", () => {
