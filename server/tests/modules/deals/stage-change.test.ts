@@ -128,6 +128,7 @@ function createTenantDb(overrides?: Partial<FakeDeal>) {
     stageHistory: [] as Array<Record<string, unknown>>,
     auditLog: [] as Array<Record<string, unknown>>,
     jobs: [] as Array<Record<string, unknown>>,
+    ops: [] as string[],
   };
 
   function tableName(table: unknown) {
@@ -181,6 +182,7 @@ function createTenantDb(overrides?: Partial<FakeDeal>) {
               return {
                 returning() {
                   if (name === "deals") {
+                    state.ops.push("update:deals");
                     state.deals[0] = {
                       ...state.deals[0],
                       ...values,
@@ -206,6 +208,7 @@ function createTenantDb(overrides?: Partial<FakeDeal>) {
         values(values: Record<string, unknown>) {
           const row = { id: `${name}-${state.jobs.length + state.stageHistory.length + 1}`, ...values };
           if (name === tableName(dealStageHistory)) {
+            state.ops.push("insert:deal_stage_history");
             state.stageHistory.push(row);
             return {
               returning() {
@@ -235,10 +238,25 @@ function createTenantDb(overrides?: Partial<FakeDeal>) {
         },
       };
     },
-    execute() {
+    execute(query: unknown) {
+      state.ops.push("execute:" + sqlText(query));
       return Promise.resolve({ rows: [] });
     },
   };
+}
+
+// Recover the static text of a drizzle `sql` template (no interpolated params in the
+// statements under test) so a test can assert which set_config call ran and in what order.
+function sqlText(query: unknown): string {
+  const chunks = (query as { queryChunks?: unknown[] } | undefined)?.queryChunks ?? [];
+  return chunks
+    .map((chunk) => {
+      const value = (chunk as { value?: unknown }).value;
+      if (Array.isArray(value)) return value.join("");
+      if (typeof value === "string") return value;
+      return "";
+    })
+    .join("");
 }
 
 describe("changeDealStage", () => {
@@ -296,6 +314,43 @@ describe("changeDealStage", () => {
 
     expect(tenantDb.state.deals[0]?.stageId).toBe("stage-opportunity");
     expect(tenantDb.state.stageHistory).toHaveLength(0);
+  });
+
+  it("sets the skip flag before the stage UPDATE and clears it after the history insert (de-dupes the DB backstop trigger)", async () => {
+    const tenantDb = createTenantDb({
+      stageId: "stage-a",
+      ddEstimate: null,
+      bidEstimate: null,
+    });
+    vi.mocked(validateStageGate).mockResolvedValue({
+      allowed: true,
+      isBackwardMove: false,
+      requiresOverride: false,
+      targetStage: { id: "stage-b", name: "Opportunity", slug: "opportunity", isTerminal: false, isActivePipeline: true, displayOrder: 1 },
+      currentStage: { id: "stage-a", name: "Sales Validation", slug: "sales_validation", isTerminal: false, isActivePipeline: true, displayOrder: 0 },
+    } as never);
+
+    await changeDealStage(tenantDb as never, {
+      dealId: "deal-1",
+      targetStageId: "stage-b",
+      userId: "user-1",
+      userRole: "director",
+    });
+
+    const ops = tenantDb.state.ops;
+    const setIdx = ops.findIndex((o) => o.includes("set_config") && o.includes("skip_stage_history_trigger") && o.includes("'1', true"));
+    const updIdx = ops.indexOf("update:deals");
+    const insIdx = ops.indexOf("insert:deal_stage_history");
+    const resetIdx = ops.findIndex((o) => o.includes("set_config") && o.includes("skip_stage_history_trigger") && o.includes("'', true"));
+
+    // Exactly one app-level history row (the rich insert); the backstop trigger must not also record.
+    expect(ops.filter((o) => o === "insert:deal_stage_history")).toHaveLength(1);
+    // Flag set BEFORE the stage UPDATE (which fires the AFTER-UPDATE backstop trigger) ...
+    expect(setIdx).toBeGreaterThanOrEqual(0);
+    expect(updIdx).toBeGreaterThan(setIdx);
+    // ... and cleared AFTER the explicit insert so it cannot leak to later updates in the same txn.
+    expect(insIdx).toBeGreaterThan(updIdx);
+    expect(resetIdx).toBeGreaterThan(insIdx);
   });
 
   it("resets stageEnteredAt on every transition including re-entry to a previous stage", async () => {

@@ -290,6 +290,10 @@ export async function ensureDevDemoWorkspace(
     await client.query("BEGIN");
     await client.query("SELECT set_config('search_path', $1, true)", [`${schemaName},public`]);
     await client.query("SELECT set_config('app.current_user_id', $1, true)", [adminUser.id]);
+    // This seed records demo stage history explicitly (below). Suppress the
+    // deal_stage_history backstop trigger (migration 0143) for this transaction so seeded
+    // deals are not double-recorded with an extra trigger-generated "Created in" row.
+    await client.query("SELECT set_config('app.skip_stage_history_trigger', $1, true)", ["1"]);
 
     const stageResult = await client.query(
       `
