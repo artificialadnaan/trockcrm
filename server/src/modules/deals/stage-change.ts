@@ -8,7 +8,7 @@ import {
   tasks,
 } from "@trock-crm/shared/schema";
 import type * as schema from "@trock-crm/shared/schema";
-import { getHoldStateAtStageEntry } from "@trock-crm/shared/types";
+import { getHoldStateAtStageEntry, isGenuineWonDealStageSlug } from "@trock-crm/shared/types";
 import { AppError } from "../../middleware/error-handler.js";
 import { DOMAIN_EVENTS } from "../../events/types.js";
 import {
@@ -304,6 +304,7 @@ export async function changeDealStage(
   // This prevents stale data when moving between terminal stages
   // (e.g., Closed Won -> Closed Lost) or reopening.
   dealUpdates.actualCloseDate = null;
+  dealUpdates.wonClosedDate = null; // app-owned Won-period reporting date (0141): cleared on any terminal change / reopen
   dealUpdates.lostReasonId = null;
   dealUpdates.lostNotes = null;
   dealUpdates.lostCompetitor = null;
@@ -312,6 +313,22 @@ export async function changeDealStage(
   // Then set the fields specific to the target terminal stage
   if (isWonOutcomeStage(targetStage.slug, currentDeal[0].workflowRoute)) {
     dealUpdates.actualCloseDate = new Date().toISOString().split("T")[0]; // DATE only
+    // Dual-write the app-owned Won-period reporting basis (0141) -- a dedicated column
+    // the sync/reseed paths never mass-stamp. Stamp today ONLY when entering Won from a
+    // non-Won stage; on a move BETWEEN Won stages PRESERVE the existing value verbatim,
+    // including NULL (a NULL means "no usable date -> excluded"; the backfill fills it
+    // from the hs basis later -- never fabricate today, which would shift an already-won
+    // deal into the current reporting period). The "already won" test uses the
+    // reporting-aligned isGenuineWonDealStageSlug (which recognizes the legacy service
+    // Won stages service_scheduled / service_complete that toCanonicalTerminalOutcomeSlug
+    // -- still used for the target / event gating above -- does not).
+    const alreadyWon = isGenuineWonDealStageSlug(
+      gateResult.currentStage.slug,
+      currentDeal[0].workflowRoute
+    );
+    dealUpdates.wonClosedDate = alreadyWon
+      ? currentDeal[0].wonClosedDate
+      : new Date().toISOString().split("T")[0];
   }
 
   if (isLostOutcomeStage(targetStage.slug, currentDeal[0].workflowRoute)) {
