@@ -326,6 +326,8 @@ describe("DirectorDashboardPage", () => {
             activityScore: 49,
             staleDeals: 1,
             staleLeads: 2,
+            closedValue: 240000,
+            winsCount: 4,
           },
           {
             repId: "rep-2",
@@ -336,6 +338,8 @@ describe("DirectorDashboardPage", () => {
             activityScore: 74,
             staleDeals: 0,
             staleLeads: 1,
+            closedValue: 120000,
+            winsCount: 2,
           },
         ],
         pipelineByStage: [{ stageId: "opportunity", stageName: "Opportunity", stageColor: null, dealCount: 3, totalValue: 450000 }],
@@ -385,7 +389,9 @@ describe("DirectorDashboardPage", () => {
         },
         scopeSummary: {
           activePipeline: { count: 4, totalValue: 610000 },
-          won: { count: 1, totalValue: 125000 },
+          // Won card aggregate == the canonical per-rep closed sum (rep-1 $240k/4 +
+          // rep-2 $120k/2). The page-level Closed total reads this authoritative value.
+          won: { count: 6, totalValue: 360000 },
           atRisk: { count: 1, totalValue: 275000 },
           stale: { count: 1, totalValue: 275000 },
         },
@@ -607,6 +613,8 @@ describe("DirectorDashboardPage", () => {
             activityScore: 9,
             staleDeals: 0,
             staleLeads: 0,
+            closedValue: 31071,
+            winsCount: 1,
           },
         ],
       },
@@ -691,6 +699,48 @@ describe("DirectorDashboardPage", () => {
     expect(html).toContain("121 this quarter");
     expect(html).toContain("Won");
     expect(html).toContain("Pipe");
+  });
+
+  it("renders an honest no-goal state instead of a contradictory pace when no goal is configured", () => {
+    // P0-3 (folded into Wave 1): goal is null in prod (no goal source). The block must not
+    // show "Behind" pace above a "Goal met or ahead" sub-line; it shows a single honest state.
+    mocks.useDirectorDashboardMock.mockReturnValue({
+      ...mocks.useDirectorDashboardMock(),
+      data: {
+        ...mocks.useDirectorDashboardMock().data,
+        forecastVsGoal: { forecast: 610000, goal: null, goalSource: "none", percentToGoal: null },
+      },
+    });
+
+    const html = renderPageHtml();
+
+    expect(html).toContain("No goal set");
+    expect(html).toContain("Goal not configured · current period");
+    expect(html).not.toContain("Goal met or ahead");
+    expect(html).not.toContain("behind goal");
+    expect(html).not.toContain(">Behind<");
+  });
+
+  it("surfaces an Unassigned row so the Sales Force Closed column sums to the Closed card", () => {
+    // The Closed card (scopeSummary.won) exceeds the sum of per-rep closed (240k + 120k =
+    // 360k) by $50,000 / 2 wins -> the remainder must appear as an Unassigned row so the
+    // table reconciles to the card by construction (Codex P2 / P2-8 reconciliation).
+    mocks.useDirectorDashboardMock.mockReturnValue({
+      ...mocks.useDirectorDashboardMock(),
+      data: {
+        ...mocks.useDirectorDashboardMock().data,
+        scopeSummary: {
+          ...mocks.useDirectorDashboardMock().data.scopeSummary,
+          won: { count: 8, totalValue: 410000 },
+        },
+      },
+    });
+
+    const html = renderPageHtml();
+
+    expect(html).toContain('data-testid="rep-row-unassigned"');
+    expect(html).toContain("Unassigned");
+    expect(html).toContain("$50,000");
   });
 
   it("renders sales force performance table with spec columns and rep links", () => {
@@ -778,7 +828,19 @@ describe("DirectorDashboardPage", () => {
     }
   });
 
-  it("uses period-aware rep forecast instead of fixed dashboard forecast", () => {
+  it("reads the live director forecast/closed totals, not the stale rep-performance snapshot", () => {
+    // Wave 1 (P1-6): the snapshot (useRepPerformance) is intentionally inflated here; the
+    // forecast header must ignore it and read the director payload — canonical Closed card
+    // (scopeSummary.won = $360,000) over the dashboard goal ($500,000), never the stale
+    // snapshot forecast ($910,000).
+    mocks.useRepPerformanceMock.mockReturnValue({
+      ...mocks.useRepPerformanceMock(),
+      data: {
+        ...mocks.useRepPerformanceMock().data,
+        forecastVsGoal: { forecast: 910000, goal: 500000, goalSource: "manual", percentToGoal: 182 },
+      },
+    });
+
     const html = renderPageHtml();
 
     expect(html).toContain("$360,000 / $500,000");
@@ -908,7 +970,7 @@ describe("DirectorDashboardPage", () => {
     expect(html).not.toContain("width:4%");
   });
 
-  it("shows rep performance loading and error states instead of zeroed metrics", () => {
+  it("renders live closed totals (not stale snapshot values) while the rep-performance snapshot is loading or errored", () => {
     const stalePerformanceData = {
       rows: [
         {
@@ -996,13 +1058,16 @@ describe("DirectorDashboardPage", () => {
       refetch: mocks.performanceRefetchMock,
     });
 
+    // Finding D (Wave 1): the live Closed (scopeSummary.won) + dashboard goal come from the
+    // director payload, so they render even while the rep-performance snapshot is loading,
+    // and the stale snapshot values ($777,777 / 99% / Stale Region / 12) never leak. The
+    // forecast block is no longer coupled to the snapshot load state; only snapshot-only
+    // columns (region) stay gated.
     const loadingHtml = renderPageHtml();
-    expect(loadingHtml).toContain("Loading performance metrics");
-    expect(loadingHtml).toContain("Performance metrics pending");
+    expect(loadingHtml).toContain("$360,000 / $500,000");
     expect(loadingHtml).toContain("Performance pending");
-    expect(loadingHtml).not.toContain("$500,000 behind goal");
-    expect(loadingHtml).not.toContain("$0 / $500,000");
-    expect(loadingHtml).not.toContain("0% to goal");
+    expect(loadingHtml).not.toContain("Loading performance metrics");
+    expect(loadingHtml).not.toContain("Performance metrics pending");
     expect(loadingHtml).not.toContain("$777,777");
     expect(loadingHtml).not.toContain("Stale Region");
     expect(loadingHtml).not.toContain("99%");
@@ -1016,12 +1081,10 @@ describe("DirectorDashboardPage", () => {
     });
 
     const errorHtml = renderPageHtml();
-    expect(errorHtml).toContain("Snapshot unavailable");
-    expect(errorHtml).toContain("Performance metrics pending");
+    expect(errorHtml).toContain("$360,000 / $500,000");
     expect(errorHtml).toContain("Performance pending");
-    expect(errorHtml).not.toContain("$500,000 behind goal");
-    expect(errorHtml).not.toContain("$0 / $500,000");
-    expect(errorHtml).not.toContain("0% to goal");
+    expect(errorHtml).not.toContain("Loading performance metrics");
+    expect(errorHtml).not.toContain("Performance metrics pending");
     expect(errorHtml).not.toContain("$777,777");
     expect(errorHtml).not.toContain("Stale Region");
     expect(errorHtml).not.toContain("99%");
@@ -1110,10 +1173,15 @@ describe("DirectorDashboardPage", () => {
 
       const csvBlob = createObjectURLMock.mock.calls[0]?.[0] as Blob;
       const csv = await csvBlob.text();
+      // Wave 1 (P0-1): the rep-table Closed column now reads the canonical per-rep Won
+      // from the director payload (always live), NOT the rep_performance snapshot. So the
+      // STALE snapshot values must still never leak (777777 / Stale Region / atRisk 12),
+      // but the canonical closed ($240,000 / 4) IS exported even while the snapshot endpoint
+      // is unavailable -- it is not stale.
       expect(csv).not.toContain("777777");
       expect(csv).not.toContain("Stale Region");
       expect(csv).not.toContain(",12,");
-      expect(csv).toContain("Avery Rep,,0,0,910000,6,67,1,Moderate");
+      expect(csv).toContain("Avery Rep,,240000,4,910000,6,67,1,Moderate");
     } finally {
       await cleanup();
       Object.defineProperty(URL, "createObjectURL", { value: originalCreateObjectUrl, configurable: true });

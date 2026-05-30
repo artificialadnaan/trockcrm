@@ -12,6 +12,10 @@ export interface RepPerformanceCard {
   activityScore: number;
   staleDeals: number;
   staleLeads: number;
+  // Wave 1 (P0-1): canonical per-rep Won (same won_closed_date basis as the Closed
+  // card). SUM over repCards === the Closed card, replacing the stale snapshot.
+  closedValue: number;
+  winsCount: number;
 }
 
 export interface DirectorDashboardData {

@@ -438,16 +438,36 @@ export function DirectorDashboardPage() {
     if (!deal.repId) continue;
     engineAtRiskCountByRep.set(deal.repId, (engineAtRiskCountByRep.get(deal.repId) ?? 0) + 1);
   }
-  const closedValue = usablePerfData ? usablePerfData.reps.reduce((sum, row) => sum + row.current.totalWonValue, 0) : null;
-  const closedCount = usablePerfData ? usablePerfData.reps.reduce((sum, row) => sum + row.current.dealsWon, 0) : null;
-  const forecastVsGoal = usablePerfData ? usablePerfData.forecastVsGoal : null;
+  // Wave 1 (P0-1): page-level closed totals come from the AUTHORITATIVE Closed-card
+  // aggregate (scopeSummary.won), so the forecast section's Closed exactly equals the
+  // Closed KPI card and drilldown even when a Won deal's rep is unassigned or absent from
+  // repCards. Per-rep rows still use the canonical repCards.closedValue decomposition.
+  // Typed nullable to preserve the downstream goal/pace guards unchanged.
+  const closedValue: number | null = data.scopeSummary?.won.totalValue ?? 0;
+  const closedCount: number | null = data.scopeSummary?.won.count ?? 0;
+  // Wave 1 (P0-1 reconciliation): canonical Won not attributed to a displayed rep card
+  // (unassigned / inactive / non-roster owner) is surfaced as a single "Unassigned" row so
+  // the Sales Force table + CSV sum to the Closed card (scopeSummary.won) BY CONSTRUCTION.
+  // Live data currently has 0 such deals, so the row is hidden in practice.
+  const repCardsClosedTotal = data.repCards.reduce((sum, rep) => sum + (rep.closedValue ?? 0), 0);
+  const repCardsWinsTotal = data.repCards.reduce((sum, rep) => sum + (rep.winsCount ?? 0), 0);
+  const unassignedClosedValue = Math.max(0, (closedValue ?? 0) - repCardsClosedTotal);
+  const unassignedWins = Math.max(0, (closedCount ?? 0) - repCardsWinsTotal);
+  const hasUnassignedWon = unassignedClosedValue > 0 || unassignedWins > 0;
+  // Wave 1 (P1-6): the forecast reads the director payload's live forecastVsGoal (active-
+  // pipeline total), NOT the stale rep_performance_snapshots forecast. (The visible
+  // forecast/pace UI is still goal-gated and goal is null in prod -> P0-3 reworks that.)
+  const forecastVsGoal = data.forecastVsGoal ?? null;
   const goal = forecastVsGoal?.goal ?? 0;
   const forecast = forecastVsGoal?.forecast ?? 0;
   const wonPercent = goal > 0 && closedValue !== null ? clampPercent((closedValue / goal) * 100) : null;
-  const pipePercent = hasPerformanceData && goal > 0 ? clampPercent((forecast / goal) * 100) : null;
+  // P0-3 + Codex (Wave 1 PR): forecast/pace derive from the director payload (live), so they
+  // do NOT depend on the snapshot's hasPerformanceData. With no goal configured (goal is null
+  // in prod) the block renders an honest "no goal" state rather than a false "Behind".
+  const pipePercent = goal > 0 ? clampPercent((forecast / goal) * 100) : null;
   const goalGap = goal > 0 && closedValue !== null && goal > closedValue ? goal - closedValue : 0;
   const remainingWeeks = weeksRemaining(periodEndForPreset(preset, dateRange));
-  const paceLabel = !hasPerformanceData ? "--" : goal > 0 && closedValue !== null && closedValue >= goal ? "Ahead" : (pipePercent ?? 0) >= 75 ? "On pace" : "Behind";
+  const paceLabel = goal <= 0 ? "No goal set" : closedValue !== null && closedValue >= goal ? "Ahead" : (pipePercent ?? 0) >= 75 ? "On pace" : "Behind";
   const totalActivity = activityPulse.reduce((sum, row) => sum + row.total, 0);
   const strategicAlerts = data.strategicAlerts ?? [];
   const aiPrompts = data.aiCoachingPrompts ?? [];
@@ -457,7 +477,6 @@ export function DirectorDashboardPage() {
   const repRows = [...data.repCards].sort((a, b) => b.pipelineValue - a.pipelineValue);
   const periodLabel = PERIOD_LABELS[preset];
   const activityPeriodLabel = PERIOD_ACTIVITY_LABELS[preset];
-  const performanceUnavailable = perfLoading || Boolean(perfError);
   const scopeSummary = data.scopeSummary ?? {
     activePipeline: { count: 0, totalValue: 0 },
     won: { count: 0, totalValue: 0 },
@@ -469,9 +488,8 @@ export function DirectorDashboardPage() {
     const header = ["Rep", "Region", "Closed Value", "Closed Deals", "Pipeline Value", "Active Deals", "Win Rate", "At Risk", "Activity"];
     const rows = repRows.map((rep) => {
       const snapshot = perfRowsByRep.get(rep.repId);
-      const perfRep = perfRepsByRep.get(rep.repId);
-      const closed = snapshot?.closedValue ?? perfRep?.current.totalWonValue ?? 0;
-      const closedDeals = snapshot?.winsCount ?? perfRep?.current.dealsWon ?? 0;
+      const closed = rep.closedValue ?? 0; // Wave 1: canonical per-rep Won (reconciles with the card)
+      const closedDeals = rep.winsCount ?? 0;
       const atRisk = engineAtRiskCountByRep.get(rep.repId) ?? 0;
       const activity = getActivityLevel(rep.activityScore);
       return [
@@ -486,6 +504,10 @@ export function DirectorDashboardPage() {
         activity.label,
       ];
     });
+    if (hasUnassignedWon) {
+      // Reconcile the CSV Closed column to the Closed card (scopeSummary.won).
+      rows.push(["Unassigned", "", unassignedClosedValue, unassignedWins, 0, 0, "", 0, ""]);
+    }
     const csv = [header, ...rows].map((row) => row.map(csvCell).join(",")).join("\n");
     const blob = new Blob([csv], { type: "text/csv;charset=utf-8" });
     const url = URL.createObjectURL(blob);
@@ -605,17 +627,14 @@ export function DirectorDashboardPage() {
             title={goal > 0 ? "Open forecast accuracy report" : "Goal not configured. Open forecast accuracy report."}
           >
             <p className="text-[10px] font-black uppercase tracking-widest text-gray-400">Forecast vs goal</p>
-            {performanceUnavailable && (
-              <p className={`mt-2 rounded-lg border px-3 py-2 text-sm font-semibold ${perfError ? "border-red-200 bg-red-50 text-red-700" : "border-gray-200 bg-gray-50 text-gray-500"}`}>
-                {perfError ?? "Loading performance metrics"}
-              </p>
-            )}
+            {/* Closed (scopeSummary.won) + forecast come from the director payload, so they
+                render regardless of the snapshot's load state. */}
             <p className="mt-2 text-4xl font-black tracking-tight text-gray-950">
-              {hasPerformanceData && closedValue !== null ? formatCurrency(closedValue) : "--"} / {goal > 0 ? formatCurrency(goal) : "--"}
+              {closedValue !== null ? formatCurrency(closedValue) : "--"} / {goal > 0 ? formatCurrency(goal) : "--"}
             </p>
-            <p className={`mt-1 text-sm font-semibold ${goalGap > 0 ? "text-[#CC0000]" : "text-emerald-600"}`}>
-              {!hasPerformanceData
-                ? "Performance metrics pending"
+            <p className={`mt-1 text-sm font-semibold ${goal > 0 && goalGap > 0 ? "text-[#CC0000]" : "text-gray-500"}`}>
+              {goal <= 0
+                ? "Goal not configured · current period"
                 : goalGap > 0
                 ? `${formatCurrency(goalGap)} behind goal · ${remainingWeeks ?? "--"} weeks remaining`
                 : "Goal met or ahead · current period"}
@@ -716,8 +735,10 @@ export function DirectorDashboardPage() {
                 {repRows.map((rep) => {
                   const snapshot = perfRowsByRep.get(rep.repId);
                   const perfRep = perfRepsByRep.get(rep.repId);
-                  const closed = hasPerformanceData ? snapshot?.closedValue ?? perfRep?.current.totalWonValue ?? null : null;
-                  const closedDeals = hasPerformanceData ? snapshot?.winsCount ?? perfRep?.current.dealsWon ?? null : null;
+                  // Wave 1 (P0-1): canonical per-rep Won from the director payload
+                  // (reconciles with the Closed card); replaces the stale snapshot value.
+                  const closed: number | null = rep.closedValue ?? null;
+                  const closedDeals: number | null = rep.winsCount ?? null;
                   const winRate = hasPerformanceData ? snapshot?.winRate ?? rep.winRate : null;
                   const winDelta = hasPerformanceData && winRate !== null
                     ? snapshot?.previous ? winRate - snapshot.previous.winRate : perfRep?.change.winRate ?? null
@@ -791,6 +812,29 @@ export function DirectorDashboardPage() {
                     </tr>
                   );
                 })}
+                {hasUnassignedWon && (
+                  <tr className="border-t border-gray-100 bg-gray-50/60" data-testid="rep-row-unassigned">
+                    <td className="px-5 py-4">
+                      <div className="flex items-center gap-3">
+                        <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-gray-300 text-[11px] font-black text-gray-700">--</div>
+                        <div className="min-w-0">
+                          <p className="font-bold text-gray-600">Unassigned</p>
+                          <p className="text-xs text-gray-400">Won without a rostered rep</p>
+                        </div>
+                      </div>
+                    </td>
+                    <td className="px-4 py-4 text-right">
+                      <p className="font-black text-gray-950">{formatCurrency(unassignedClosedValue)}</p>
+                      <p className="text-xs text-gray-500">{unassignedWins} won</p>
+                    </td>
+                    <td className="px-4 py-4 text-right text-gray-400">--</td>
+                    <td className="px-4 py-4 text-gray-400">--</td>
+                    <td className="px-4 py-4 text-right text-gray-400">--</td>
+                    <td className="px-4 py-4 text-center text-gray-400">--</td>
+                    <td className="px-4 py-4 text-gray-400">--</td>
+                    <td className="px-5 py-4 text-center text-gray-400">--</td>
+                  </tr>
+                )}
               </tbody>
             </table>
           </div>
