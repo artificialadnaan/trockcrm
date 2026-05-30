@@ -907,4 +907,97 @@ describe("buildCanonicalDealBoardColumns", () => {
       totalValue: 11_111,
     });
   });
+
+  it("renders a deal exactly once when the server emits its card in multiple overlapping Won-family columns", () => {
+    // Repro of the production React duplicate-key warnings on /deals:
+    // getDealsForPipeline emits one raw column per Won-family stage (won,
+    // sent_to_production, ...) and the SAME deal record rides along in more than
+    // one of those columns' `cards`. Flattening across raw columns without
+    // deduping by id makes the deal land in its canonical column twice, so the
+    // board renders two <Card key={deal.id}> with an identical key. Each deal must
+    // render exactly once, in its actual current column only.
+    const wonDeal = {
+      id: "deal-won-dup",
+      stageId: "stage-won",
+      workflowRoute: "normal",
+      bidEstimate: "500000",
+      ddEstimate: null,
+      awardedAmount: "500000",
+    };
+    const columns = buildCanonicalDealBoardColumns(
+      [
+        {
+          stage: { id: "stage-won", name: "Won", slug: "won", isTerminal: true },
+          cards: [{ ...wonDeal }],
+        },
+        {
+          stage: {
+            id: "stage-stp",
+            name: "Sent to Production",
+            slug: "sent_to_production",
+            isTerminal: false,
+          },
+          cards: [{ ...wonDeal }],
+        },
+      ] as any,
+      [{ id: "stage-won", name: "Won", slug: "won", isTerminal: true }] as any
+    );
+
+    // Board-wide: the deal appears exactly once across every column's cards (no
+    // duplicate React keys, and it lands in its single current column).
+    const renders = columns
+      .flatMap((column) => column.cards)
+      .filter((deal) => deal.id === "deal-won-dup");
+    expect(renders).toHaveLength(1);
+    expect(columns.find((column) => column.stage.slug === "won")?.cards).toHaveLength(1);
+  });
+
+  it("never renders the same deal id twice within any canonical column", () => {
+    // Generalized invariant guarding against duplicate React keys for any family
+    // whose cards the server duplicates across overlapping raw columns (Lost too).
+    const lostDeal = {
+      id: "deal-lost-dup",
+      stageId: "stage-lost",
+      workflowRoute: "normal",
+      bidEstimate: "250000",
+      ddEstimate: null,
+      awardedAmount: null,
+    };
+    const columns = buildCanonicalDealBoardColumns(
+      [
+        {
+          stage: { id: "stage-lost", name: "Lost", slug: "lost", isTerminal: true },
+          cards: [{ ...lostDeal }],
+        },
+        {
+          stage: {
+            id: "stage-closed-lost",
+            name: "Closed Lost",
+            slug: "closed_lost",
+            isTerminal: true,
+          },
+          cards: [{ ...lostDeal }],
+        },
+        {
+          stage: {
+            id: "stage-production-lost",
+            name: "Production Lost",
+            slug: "production_lost",
+            isTerminal: true,
+          },
+          cards: [{ ...lostDeal }],
+        },
+      ] as any,
+      [{ id: "stage-lost", name: "Lost", slug: "lost", isTerminal: true }] as any
+    );
+
+    for (const column of columns) {
+      const ids = column.cards.map((deal) => deal.id);
+      expect(new Set(ids).size).toBe(ids.length);
+    }
+    const renders = columns
+      .flatMap((column) => column.cards)
+      .filter((deal) => deal.id === "deal-lost-dup");
+    expect(renders).toHaveLength(1);
+  });
 });

@@ -65,11 +65,31 @@ function selectCanonicalRawColumn<T extends { stage: DealStageLike }>(
   return matchingRawColumns[0]!;
 }
 
+// A single deal record can ride along in more than one raw column's `cards`: the
+// server emits one pipelineColumns row per Won-/Lost-family stage and repeats the
+// same canonical deal set in each. Flattening across raw columns therefore yields
+// the same deal id multiple times, and because each copy resolves to the same
+// current-stage slug it lands in its canonical column more than once — React then
+// renders duplicate <Card key={deal.id}>. Dedupe by id (first occurrence wins) so
+// every deal renders exactly once, in its single current-stage column. Header
+// counts/totals are computed from the raw-column aggregates, not from `cards`, so
+// this does not affect any column's count or value (incl. the Won basis).
+function dedupeDealsById<T extends { id: string }>(deals: T[]): T[] {
+  const seen = new Set<string>();
+  const result: T[] = [];
+  for (const deal of deals) {
+    if (seen.has(deal.id)) continue;
+    seen.add(deal.id);
+    result.push(deal);
+  }
+  return result;
+}
+
 export function buildCanonicalDealBoardColumns(
   rawColumns: DealBoardColumn[] | null | undefined,
   stages: DealStageLike[]
 ): DealBoardColumn[] {
-  const deals = (rawColumns ?? []).flatMap((column) => column.cards);
+  const deals = dedupeDealsById((rawColumns ?? []).flatMap((column) => column.cards));
 
   return getDealBoardStageSlugs().map((slug) => {
     const matchingRawColumns = (rawColumns ?? []).filter((column) => {
