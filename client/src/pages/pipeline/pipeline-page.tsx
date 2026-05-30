@@ -36,6 +36,7 @@ import {
 import type { Deal } from "@/hooks/use-deals";
 import type { PipelineScope } from "@/lib/pipeline-scope";
 import { resolvePreferredScope, writeStoredScopePreference } from "@/lib/scope-preferences";
+import { derivePipelineBoardView } from "./pipeline-board-view";
 
 // Re-exports kept for test compatibility (pipeline-page.test.ts imports these
 // helpers; they live in the shared deals-list-section module now).
@@ -290,18 +291,39 @@ export function PipelinePage() {
   const [terminalStages, setTerminalStages] = useState<TerminalStageInfo[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  // No-blank: track whether we have a SUCCESSFULLY-loaded board and the scope it was
-  // loaded for (columns is seeded to [], so it cannot itself signal "loaded"). Keep the
-  // current board visible with an "Updating..." hint on a SAME-SCOPE refetch (Won/Lost
-  // date-filter); show the skeleton on first load, after a failed load, AND on a scope
-  // change -- the board's deal set changes and it is interactive, so never leave a stale
-  // cross-scope board live.
+  // No-blank: track whether we have a SUCCESSFULLY-loaded board and the request identity
+  // (scope + Show-DD) it was loaded for (columns is seeded to [], so it cannot itself
+  // signal "loaded"). Keep the current board visible with an "Updating..." hint on a
+  // SAME-IDENTITY refetch (Won/Lost date-filter); show the skeleton on first load, after a
+  // failed load, AND on a scope or Show-DD change -- both change which columns the API
+  // returns and the board is interactive, so never leave a stale cross-identity board live.
   const hasLoadedRef = useRef(false);
   const loadedScopeRef = useRef<PipelineScope | null>(null);
-  const hasCurrentScopeBoard = hasLoadedRef.current && loadedScopeRef.current === scope;
-  const isInitialLoading = loading && !hasCurrentScopeBoard;
-  const isRefreshing = loading && hasCurrentScopeBoard;
-  const [showDd, setShowDd] = useState(searchParams.get("showDd") === "1");
+  const loadedShowDdRef = useRef<boolean | null>(null);
+  // Monotonic request token: a scope/Show-DD/date change can leave an earlier request in
+  // flight, and responses may arrive out of order. Only the latest request may mutate the
+  // board + loaded identity; a superseded (stale) completion is ignored, so it can never set
+  // loadedShowDd/loadedScope back to a value that no longer matches the live selection (which
+  // would strand the page on a skeleton with no fetch in flight).
+  const requestIdRef = useRef(0);
+  // Derive Show-DD straight from the URL (like `scope` above), NOT a local state synced by a
+  // passive effect. Otherwise, on the render right after setSearchParams (switch click, browser
+  // back/forward, any navigation) searchParams is already new while a synced state would still
+  // hold the old value -- so loadedShowDd === showDd would look current and the stale board
+  // would paint for one frame before the effect caught up.
+  const showDd = searchParams.get("showDd") === "1";
+  // See derivePipelineBoardView: the skeleton is keyed on the request identity (NOT on
+  // `loading`) so the pre-loading render right after a scope/Show-DD change shows the skeleton
+  // instead of flashing the stale previous-identity board for one frame.
+  const { showSkeleton, isRefreshing } = derivePipelineBoardView({
+    hasLoaded: hasLoadedRef.current,
+    loadedScope: loadedScopeRef.current,
+    loadedShowDd: loadedShowDdRef.current,
+    scope,
+    showDd,
+    loading,
+    error,
+  });
   const [activeDeal, setActiveDeal] = useState<Deal | null>(null);
   const [stageChangeOpen, setStageChangeOpen] = useState(false);
   const [pendingMove, setPendingMove] = useState<PendingPipelineMove | null>(null);
@@ -321,6 +343,8 @@ export function PipelinePage() {
   const isSyncingScrollRef = useRef(false);
 
   const fetchPipeline = useCallback(async () => {
+    const requestId = ++requestIdRef.current;
+    const isStale = () => requestIdRef.current !== requestId;
     setLoading(true);
     setError(null);
     try {
@@ -328,16 +352,21 @@ export function PipelinePage() {
         pipelineColumns: PipelineColumn[];
         terminalStages: TerminalStageInfo[];
       }>(buildPipelineRequestPath(showDd, terminalDateFilters, scope));
+      if (isStale()) return; // a newer request superseded this one -> drop its result
       setColumns(data.pipelineColumns);
       setTerminalStages(data.terminalStages ?? []);
       setLastRefreshed(new Date());
       hasLoadedRef.current = true;
       loadedScopeRef.current = scope; // the scope these columns were fetched for
+      loadedShowDdRef.current = showDd; // ...and the Show-DD state (affects the column set)
     } catch (err) {
+      if (isStale()) return; // a newer request is in flight -> let it own the outcome
       console.error("Failed to load pipeline:", err);
       setError("Failed to load pipeline data. Please try again.");
     } finally {
-      setLoading(false);
+      // Only the latest request clears loading; a stale completion must not flip the page out
+      // of the in-flight state the current request is still in.
+      if (!isStale()) setLoading(false);
     }
   }, [scope, showDd, terminalDateFilters]);
 
@@ -356,7 +385,8 @@ export function PipelinePage() {
   }, [fetchPipeline]);
 
   useEffect(() => {
-    setShowDd(searchParams.get("showDd") === "1");
+    // showDd is derived from searchParams directly (above); only the terminal date filters need
+    // syncing back into state on a browser back/forward.
     setTerminalDateFilters(readTerminalDateFiltersFromSearchParams(searchParams));
   }, [searchParams]);
 
@@ -452,7 +482,7 @@ export function PipelinePage() {
     return Math.round((won / total) * 100);
   })();
 
-  if (isInitialLoading) {
+  if (showSkeleton) {
     return (
       <div className="space-y-4 p-6">
         <div className="h-8 w-48 animate-pulse rounded bg-gray-100" />
