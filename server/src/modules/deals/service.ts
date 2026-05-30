@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { eq, and, desc, asc, ilike, inArray, sql, or, isNull, not, getTableColumns, type SQLWrapper } from "drizzle-orm";
+import { eq, and, desc, asc, inArray, sql, or, isNull, not, getTableColumns, type SQLWrapper } from "drizzle-orm";
 import type { NodePgDatabase } from "drizzle-orm/node-postgres";
 import {
   deals,
@@ -58,6 +58,7 @@ import {
   dealAwardedFirstWithFallbackSql,
   dealBestEstimateSql,
 } from "../shared/deal-value-sql.js";
+import { buildDealSearchCondition } from "../search/unified-search.js";
 
 // Type alias for the tenant-scoped Drizzle instance
 type TenantDb = NodePgDatabase<typeof schema>;
@@ -1547,23 +1548,13 @@ export async function getDeals(
     conditions.push(sql`${deals.updatedAt} < (${filters.updatedTo}::date + interval '1 day')`);
   }
 
-  // Search across name, deal_number, description, property_address
+  // Substring search across the deal's text fields plus its company (account),
+  // primary contact (customer), and owner (assigned rep). Single source of truth:
+  // search/unified-search.buildDealSearchCondition (see .audit/unified-search-design.md).
+  // Scope/pagination/office visibility below are unchanged — this only widens which
+  // FIELDS a term matches, not which deals the caller may see.
   if (filters.search && filters.search.trim().length >= 2) {
-    const searchTerm = `%${filters.search.trim()}%`;
-    conditions.push(
-      or(
-        ilike(deals.name, searchTerm),
-        ilike(deals.dealNumber, searchTerm),
-        ilike(deals.description, searchTerm),
-        ilike(deals.propertyAddress, searchTerm),
-        sql`EXISTS (
-          SELECT 1
-          FROM ${companies}
-          WHERE ${companies.id} = ${deals.companyId}
-            AND ${companies.name} ILIKE ${searchTerm}
-        )`
-      )
-    );
+    conditions.push(buildDealSearchCondition(filters.search));
   }
 
   const where = conditions.length > 0 ? and(...conditions) : undefined;

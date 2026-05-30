@@ -129,6 +129,26 @@ describe("SearchInput", () => {
     ui.unmount();
   });
 
+  it("clears immediately, even when a blur flushed the pre-clear term first (no stale committed value)", async () => {
+    const onChange = vi.fn();
+    const ui = await renderSearch({ onChange, debounceMs: 300, placeholder: "Search" });
+
+    await ui.type("acme");
+    // Real browsers blur the input when the clear button is pressed; the blur flush would
+    // otherwise commit "acme" right before the clear.
+    await act(async () => {
+      ui.input.dispatchEvent(new FocusEvent("focusout", { bubbles: true }));
+    });
+
+    await ui.clickClear();
+
+    // The committed value must be "" immediately — a one-shot read (e.g. Export) right after
+    // clearing must NOT see the pre-clear term, and must not wait for the debounce.
+    expect(ui.input.value).toBe("");
+    expect(onChange).toHaveBeenLastCalledWith("");
+    ui.unmount();
+  });
+
   it("does not re-emit stale text when the value is cleared externally with a fresh inline callback", async () => {
     const onChange1 = vi.fn();
     const ui = await renderSearch({ value: "abc", onChange: onChange1 });

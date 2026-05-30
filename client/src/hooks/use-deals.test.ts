@@ -737,4 +737,61 @@ describe("useDeals", () => {
       root.unmount();
     });
   });
+
+  // Proving-ground guarantee for the unified search rollout: debounce reduces but does not
+  // eliminate out-of-order responses on fast typing, so the deals search must be last-write-
+  // wins. A slow response for an EARLIER keystroke must not overwrite the results of a LATER
+  // one. (Backed by useDeals' requestIdRef sequencing, which is dependency-agnostic.)
+  it("ignores a stale earlier-keystroke search response so it cannot overwrite a later one", async () => {
+    const pending = new Map<string, (value: unknown) => void>();
+    vi.mocked(api).mockImplementation((path: string) => {
+      const term = new URLSearchParams(path.split("?")[1] ?? "").get("search") ?? "none";
+      return new Promise((resolve) => {
+        pending.set(term, resolve);
+      }) as Promise<unknown>;
+    });
+
+    hookDealFilters = { search: "ac" };
+    const root = await renderDealsHook();
+
+    hookDealFilters = { search: "acm" };
+    await act(async () => {
+      root.render(createElement(DealsHookProbe));
+      await flushEffects();
+    });
+
+    hookDealFilters = { search: "acme" };
+    await act(async () => {
+      root.render(createElement(DealsHookProbe));
+      await flushEffects();
+    });
+
+    // The latest keystroke ("acme") resolves first.
+    await act(async () => {
+      pending.get("acme")?.({
+        deals: [{ id: "deal-acme", name: "Acme deal" }],
+        pagination: { page: 1, limit: 50, total: 1, totalPages: 1 },
+      });
+      await flushEffects();
+    });
+    expect(latestDealsResult?.deals.map((deal) => deal.id)).toEqual(["deal-acme"]);
+
+    // The slow earlier-keystroke responses arrive LATE and must NOT overwrite "acme".
+    await act(async () => {
+      pending.get("ac")?.({
+        deals: [{ id: "deal-ac", name: "Earlier ac" }],
+        pagination: { page: 1, limit: 50, total: 1, totalPages: 1 },
+      });
+      pending.get("acm")?.({
+        deals: [{ id: "deal-acm", name: "Earlier acm" }],
+        pagination: { page: 1, limit: 50, total: 1, totalPages: 1 },
+      });
+      await flushEffects();
+    });
+    expect(latestDealsResult?.deals.map((deal) => deal.id)).toEqual(["deal-acme"]);
+
+    await act(async () => {
+      root.unmount();
+    });
+  });
 });
