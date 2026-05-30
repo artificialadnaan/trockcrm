@@ -2,7 +2,7 @@ import { useMemo } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import { ArrowRight, Calendar, Mail, Phone, Plus, Search } from "lucide-react";
 import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
+import { SearchInput } from "@/components/ui/search-input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { MetricCard } from "@/components/shared/metric-card";
 import { ScopeToggle, type ScopeToggleOption } from "@/components/shared/scope-toggle";
@@ -18,6 +18,7 @@ import {
   useLeadBoard,
   useLeads,
 } from "@/hooks/use-leads";
+import { useKeepPreviousData } from "@/hooks/use-keep-previous-data";
 import type { PipelineScope } from "@/lib/pipeline-scope";
 import { cn } from "@/lib/utils";
 import { resolvePreferredScope, writeStoredScopePreference } from "@/lib/scope-preferences";
@@ -242,7 +243,11 @@ function LeadListPageContent({ role, userId }: { role: string; userId: string })
   const selectedOwnerLabel = selectedOwnerId
     ? assignees.find((assignee) => assignee.id === selectedOwnerId)?.displayName ?? "Selected rep"
     : "All reps";
-  const { board, loading, error } = useLeadBoard(scope, selectedOwnerId || undefined, search || undefined);
+  // No-blank: keep the previously-loaded board visible during a search/scope refetch (the
+  // hook already retains data + sequences responses via its requestId guard; this gates the
+  // skeleton to the FIRST load only and surfaces an "Updating..." hint on a refresh).
+  const { board: rawBoard, loading, error } = useLeadBoard(scope, selectedOwnerId || undefined, search || undefined);
+  const { data: board, isInitialLoading, isRefreshing } = useKeepPreviousData(rawBoard, loading, error);
   const { leads } = useLeads({
     status: "open",
     isActive: true,
@@ -349,15 +354,7 @@ function LeadListPageContent({ role, userId }: { role: string; userId: string })
 
       <label className="block max-w-xl space-y-2">
         <span className="text-[11px] font-black uppercase tracking-[0.16em] text-slate-500">Search</span>
-        <div className="relative">
-          <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" />
-          <Input
-            value={search}
-            onChange={(event) => updateSearch(event.target.value)}
-            placeholder="Search leads"
-            className="pl-9"
-          />
-        </div>
+        <SearchInput value={search} onChange={updateSearch} placeholder="Search leads" aria-label="Search leads" />
       </label>
 
       {error ? (
@@ -371,6 +368,7 @@ function LeadListPageContent({ role, userId }: { role: string; userId: string })
           <div className="flex items-center gap-2 text-[11px] font-black uppercase tracking-[0.18em] text-slate-500">
             <Search className="h-4 w-4 text-brand-red" />
             Source mix
+            {isRefreshing ? <span className="font-bold normal-case tracking-normal text-slate-400">· Updating...</span> : null}
           </div>
           <div className="flex flex-wrap gap-2">
             {sourceCounts.map((item) => (
@@ -380,7 +378,7 @@ function LeadListPageContent({ role, userId }: { role: string; userId: string })
             ))}
           </div>
         </div>
-        {loading ? (
+        {isInitialLoading ? (
           <div className="p-6 text-sm font-semibold text-slate-500">Loading lead board...</div>
         ) : (
           <div className="overflow-x-auto p-4">

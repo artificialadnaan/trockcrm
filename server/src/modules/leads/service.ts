@@ -23,6 +23,7 @@ import {
   type WorkflowFamily,
 } from "@trock-crm/shared/types";
 import { db } from "../../db.js";
+import { buildLeadSearchCondition, escapeLikePattern } from "../search/unified-search.js";
 import { AppError } from "../../middleware/error-handler.js";
 import { createAssignmentTaskIfNeeded } from "../assignment-tasks/service.js";
 import { getActiveProjectTypes, getAllStages, getStageById, getStageBySlug } from "../pipeline/service.js";
@@ -987,46 +988,10 @@ async function getDefaultConversionDealStageId() {
   return stage?.id ?? null;
 }
 
-function escapeLikePattern(value: string) {
-  return value.replace(/[\\%_]/g, "\\$&");
-}
-
-export function buildLeadSearchCondition(search: string) {
-  const searchTerm = `%${escapeLikePattern(search.trim())}%`;
-  return sql`(
-    ${leads.name} ILIKE ${searchTerm} ESCAPE '\\'
-    OR ${leads.source} ILIKE ${searchTerm} ESCAPE '\\'
-    OR ${leads.sourceDetail} ILIKE ${searchTerm} ESCAPE '\\'
-    OR ${leads.description} ILIKE ${searchTerm} ESCAPE '\\'
-    OR EXISTS (
-      SELECT 1
-      FROM ${companies}
-      WHERE ${companies.id} = ${leads.companyId}
-        AND ${companies.name} ILIKE ${searchTerm} ESCAPE '\\'
-    )
-    OR EXISTS (
-      SELECT 1
-      FROM ${properties}
-      WHERE ${properties.id} = ${leads.propertyId}
-        AND (
-          ${properties.name} ILIKE ${searchTerm} ESCAPE '\\'
-          OR ${properties.address} ILIKE ${searchTerm} ESCAPE '\\'
-          OR ${properties.city} ILIKE ${searchTerm} ESCAPE '\\'
-          OR ${properties.state} ILIKE ${searchTerm} ESCAPE '\\'
-        )
-    )
-    OR EXISTS (
-      SELECT 1
-      FROM ${contacts}
-      WHERE ${contacts.id} = ${leads.primaryContactId}
-        AND (
-          ${contacts.firstName} ILIKE ${searchTerm} ESCAPE '\\'
-          OR ${contacts.lastName} ILIKE ${searchTerm} ESCAPE '\\'
-          OR CONCAT(${contacts.firstName}, ' ', ${contacts.lastName}) ILIKE ${searchTerm} ESCAPE '\\'
-        )
-    )
-  )`;
-}
+// The unaliased lead search builder (used by listLeads below) now lives in the shared
+// unified-search module, so the lead field set is a single source of truth (mirrors deals).
+// Re-exported here for existing importers; escapeLikePattern is imported from there as well.
+export { buildLeadSearchCondition };
 
 export function buildAliasedLeadSearchCondition(
   leadAlias: string,
@@ -1057,6 +1022,21 @@ export function buildAliasedLeadSearchCondition(
           ${contacts.firstName} ILIKE ${searchTerm} ESCAPE '\\'
           OR ${contacts.lastName} ILIKE ${searchTerm} ESCAPE '\\'
           OR CONCAT(${contacts.firstName}, ' ', ${contacts.lastName}) ILIKE ${searchTerm} ESCAPE '\\'
+        )
+    )
+    OR EXISTS (
+      SELECT 1
+      FROM public.users owner_user
+      WHERE owner_user.id = ${leadColumn("assigned_rep_id")}
+        AND owner_user.display_name ILIKE ${searchTerm} ESCAPE '\\'
+    )
+    OR EXISTS (
+      SELECT 1
+      FROM ${deals}
+      WHERE ${deals.sourceLeadId} = ${leadColumn("id")}
+        AND (
+          ${deals.dealNumber} ILIKE ${searchTerm} ESCAPE '\\'
+          OR ${deals.projectNumber} ILIKE ${searchTerm} ESCAPE '\\'
         )
     )
   )`;

@@ -52,6 +52,12 @@ describe("lead search SQL helpers", () => {
     expect(queryText).toContain("first_name ilike");
     expect(queryText).toContain("last_name ilike");
     expect(queryText).toContain("concat(first_name, ' ', last_name) ilike");
+    // PR2 additions (superset, no regression): owner display name + the converted deal's
+    // deal_number/project_number (deals.source_lead_id = leads.id).
+    expect(queryText).toContain("display_name ilike");
+    expect(queryText).toContain("source_lead_id");
+    expect(queryText).toContain("deal_number ilike");
+    expect(queryText).toContain("project_number ilike");
   });
 
   it("matches lead, company, property, and primary-contact fields for board queries", async () => {
@@ -73,5 +79,12 @@ describe("lead search SQL helpers", () => {
     expect(queryText).toContain("last_name ilike");
     expect(queryText).toContain("primary_contact_id");
     expect(queryText).toContain("concat(first_name, ' ', last_name) ilike");
+    // PR2 additions (superset, no regression): owner display name + converted-deal number,
+    // matched independently of the board query's own joins via EXISTS on the lead alias.
+    expect(queryText).toContain("display_name ilike");
+    expect(queryText).toContain("l.assigned_rep_id");
+    expect(queryText).toContain("source_lead_id");
+    expect(queryText).toContain("deal_number ilike");
+    expect(queryText).toContain("project_number ilike");
   });
 });
