@@ -32,6 +32,7 @@ CREATE OR REPLACE FUNCTION public.record_stage_history()
 RETURNS trigger AS $body$
 DECLARE
   v_actor uuid;
+  v_backward boolean;
 BEGIN
   -- The app (changeDealStage) and the demo seed record history explicitly and set this
   -- transaction-local flag so this backstop does not duplicate their rows.
@@ -68,12 +69,19 @@ BEGIN
           TG_TABLE_SCHEMA
         ) USING NEW.id, NEW.stage_id, v_actor, NEW.stage_entered_at;
       ELSE
+        -- Mark backward moves so the History/Timeline UI does not render a backstop-recorded
+        -- reversal as a forward change. Best-effort by pipeline display_order (the same
+        -- definition the worker reverse-sync uses); unknown orders fall back to false.
+        SELECT nps.display_order < ops.display_order
+          INTO v_backward
+          FROM public.pipeline_stage_config ops, public.pipeline_stage_config nps
+          WHERE ops.id = OLD.stage_id AND nps.id = NEW.stage_id;
         EXECUTE format(
           'INSERT INTO %I.deal_stage_history '
-          || '(deal_id, from_stage_id, to_stage_id, changed_by, duration_in_previous_stage, created_at) '
-          || 'VALUES ($1, $2, $3, $4, $5, $6)',
+          || '(deal_id, from_stage_id, to_stage_id, changed_by, is_backward_move, duration_in_previous_stage, created_at) '
+          || 'VALUES ($1, $2, $3, $4, $5, $6, $7)',
           TG_TABLE_SCHEMA
-        ) USING NEW.id, OLD.stage_id, NEW.stage_id, v_actor,
+        ) USING NEW.id, OLD.stage_id, NEW.stage_id, v_actor, coalesce(v_backward, false),
                 NEW.stage_entered_at - OLD.stage_entered_at, NEW.stage_entered_at;
       END IF;
     END IF;

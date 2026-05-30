@@ -41,6 +41,12 @@ describe("0143 forward stage-history backstop trigger", () => {
     expect(sql).toMatch(/new\.stage_entered_at - old\.stage_entered_at, new\.stage_entered_at/);
   });
 
+  it("marks backward moves on trigger-recorded transitions (via pipeline display_order)", () => {
+    expect(sql).toContain("is_backward_move");
+    expect(sql).toContain("display_order");
+    expect(sql).toContain("coalesce(v_backward, false)");
+  });
+
   it("is schema-safe regardless of the caller's search_path (uses TG_TABLE_SCHEMA)", () => {
     expect(sql).toContain("tg_table_schema");
     expect(sql).toMatch(/format\(\s*'insert into %i\.deal_stage_history/);
