@@ -1026,7 +1026,7 @@ describe("DealListPage", () => {
     expect(mocks.useDealBoardMock).toHaveBeenCalledWith("team", true, {
       won: { preset: "all" },
       lost: { preset: "all" },
-    }, 1000, { from: "2026-05-04", to: "2026-05-08" }, undefined, {});
+    }, 1000, { from: "2026-05-03", to: "2026-05-08" }, undefined, {});
   });
 
   it("passes the selected page period to the board request so won aggregates match the drilldown window", () => {
@@ -1438,7 +1438,7 @@ describe("DealListPage", () => {
       });
       expect(weekView.subtitle).toBe("Open-stage deals for Week.");
       expect(weekView.listBaseFilters).toMatchObject({
-        updatedFrom: "2026-05-04",
+        updatedFrom: "2026-05-10",
         updatedTo: "2026-05-10",
       });
     });

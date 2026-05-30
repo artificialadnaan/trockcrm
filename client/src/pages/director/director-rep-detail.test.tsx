@@ -407,7 +407,7 @@ describe("DirectorRepDetail", () => {
       expect(mocks.useLeadsMock).toHaveBeenLastCalledWith(
         expect.objectContaining({
           assignedRepId: "rep-1",
-          createdFrom: "2026-05-18",
+          createdFrom: "2026-05-17",
           createdTo: "2026-05-21",
           stageIds: ["lead-stage-qualified"],
           status: undefined,
@@ -418,7 +418,7 @@ describe("DirectorRepDetail", () => {
       expect(lastDealsListCall).toEqual(
         expect.objectContaining({
           lockedOwnerId: "rep-1",
-          externalDateRange: { from: "2026-05-18", to: "2026-05-21" },
+          externalDateRange: { from: "2026-05-17", to: "2026-05-21" },
         })
       );
     } finally {
@@ -501,10 +501,10 @@ describe("DirectorRepDetail", () => {
         button.textContent?.includes("WTD")
       );
       expect(wtdAfter?.getAttribute("aria-pressed")).toBe("true");
-      expect(page.container.textContent).toContain("2026-05-18 to 2026-05-21");
+      expect(page.container.textContent).toContain("2026-05-17 to 2026-05-21");
       expect(mocks.useLeadsMock).toHaveBeenLastCalledWith(
         expect.objectContaining({
-          createdFrom: "2026-05-18",
+          createdFrom: "2026-05-17",
           createdTo: "2026-05-21",
         })
       );
@@ -512,7 +512,7 @@ describe("DirectorRepDetail", () => {
         mocks.dealsListSectionMock.mock.calls[mocks.dealsListSectionMock.mock.calls.length - 1]?.[0];
       expect(lastDealsListCall).toEqual(
         expect.objectContaining({
-          externalDateRange: { from: "2026-05-18", to: "2026-05-21" },
+          externalDateRange: { from: "2026-05-17", to: "2026-05-21" },
         })
       );
     } finally {
@@ -534,7 +534,7 @@ describe("DirectorRepDetail", () => {
       });
 
       expect(window.location.search).toContain("listRange=wtd");
-      expect(page.container.textContent).toContain("2026-05-18 to 2026-05-21");
+      expect(page.container.textContent).toContain("2026-05-17 to 2026-05-21");
     } finally {
       await page.cleanup();
     }

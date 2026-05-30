@@ -73,11 +73,12 @@ function isRepDetailListRange(value: string | null): value is RepDetailListRange
   return value !== null && LIST_RANGE_OPTIONS.includes(value as RepDetailListRange);
 }
 
-function startOfWeekToDate(referenceDate: Date) {
+export function startOfWeekToDate(referenceDate: Date) {
+  // D-7: one platform-wide week definition = Sunday->Saturday. getUTCDay(): Sunday = 0,
+  // so subtracting it walks back to the most recent Sunday.
   const result = new Date(referenceDate);
-  const day = result.getUTCDay();
-  const daysFromMonday = (day + 6) % 7;
-  result.setUTCDate(result.getUTCDate() - daysFromMonday);
+  const daysFromSunday = result.getUTCDay();
+  result.setUTCDate(result.getUTCDate() - daysFromSunday);
   return formatUtcDateInput(result);
 }
 

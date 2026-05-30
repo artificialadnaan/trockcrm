@@ -138,17 +138,18 @@ function getDashboardPeriodLabel(period: DashboardPeriodSelection) {
   }
 }
 
-function getDashboardPeriodDateRange(period: DashboardPeriodSelection, now = new Date()) {
+export function getDashboardPeriodDateRange(period: DashboardPeriodSelection, now = new Date()) {
   if (!period) return null;
   const today = new Date(now);
   if (period === "today") {
     return { from: formatDateInput(today), to: formatDateInput(today) };
   }
   if (period === "week") {
+    // D-7: one platform-wide week definition = Sunday->Saturday. getDay(): Sunday = 0,
+    // so subtracting it walks back to the most recent Sunday.
     const start = new Date(today);
-    const dayOfWeek = start.getDay();
-    const diffToMonday = (dayOfWeek + 6) % 7;
-    start.setDate(start.getDate() - diffToMonday);
+    const diffToSunday = start.getDay();
+    start.setDate(start.getDate() - diffToSunday);
     return { from: formatDateInput(start), to: formatDateInput(today) };
   }
   if (period === "mtd") {
