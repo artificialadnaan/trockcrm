@@ -19,6 +19,17 @@ import { computeExistingCustomerStatus } from "../companies/customer-status-serv
 import { resolveLeadSourceDisplayValue } from "./source-control.js";
 import { logActivity, type AuditContext } from "../audit/audit-logger.js";
 
+// The rep's gated lead estimate (leads.qualification_payload.estimated_value) is stored
+// as free-form JSON (number on save, but treat as unknown). Coerce it to a positive
+// numeric string suitable for a deal estimate column, or undefined when absent/invalid.
+// Maps to a pipeline estimate (dd/bid) only -- NEVER awarded_amount (the Won amount).
+function normalizeLeadEstimatedValue(raw: unknown): string | undefined {
+  if (raw === null || raw === undefined) return undefined;
+  const numeric = typeof raw === "number" ? raw : Number(String(raw).replace(/[$,\s]/g, ""));
+  if (!Number.isFinite(numeric) || numeric <= 0) return undefined;
+  return String(numeric);
+}
+
 type TenantDb = NodePgDatabase<typeof schema>;
 
 const CLIENT_PROVIDED_DOCS_TAG = "client_provided_docs";
@@ -319,7 +330,15 @@ export function createLeadConversionService(
       sourceLeadWriteMode: "lead_conversion",
       source: input.source ?? resolveLeadSourceDisplayValue(lead) ?? undefined,
       description: input.description ?? lead.description ?? undefined,
-      ddEstimate: input.ddEstimate,
+      // Carry the rep's gated lead estimate onto the Opportunity as a pipeline
+      // estimate when conversion input does not supply one, so the value the rep
+      // entered survives conversion (and shows on the dashboard). Pipeline estimate
+      // only -- awardedAmount stays untouched to protect Won reporting.
+      ddEstimate:
+        input.ddEstimate ??
+        normalizeLeadEstimatedValue(
+          (lead.qualificationPayload as Record<string, unknown> | null | undefined)?.estimated_value
+        ),
       bidEstimate: input.bidEstimate,
       awardedAmount: input.awardedAmount,
       // leads.bid_due_date is the authoritative source; the questionnaire answer is only a mirror.
