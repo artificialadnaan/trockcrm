@@ -582,7 +582,15 @@ export function DealsListSection({
   // with the debounced SearchInput below). isInitialLoading is gated on whether a fetch
   // has settled yet — not on data presence — so the []-seeded hook still shows the first
   // skeleton instead of flashing empty.
-  const { data: deals, isInitialLoading, isRefreshing } = useKeepPreviousData(rawDeals, loading);
+  //
+  // While the query is disabled (stages still loading) useDeals reports loading=false with
+  // an empty []; treat that as "not settled yet" (OR in !enabled) so the empty idle array
+  // is not mistaken for a settled fetch — otherwise the FIRST real fetch after stages load
+  // would skip the skeleton and flash an empty list.
+  const { data: deals, isInitialLoading, isRefreshing } = useKeepPreviousData(
+    rawDeals,
+    loading || !listQueryState.enabled
+  );
 
   const stageNameById = useMemo(() => buildStageNameById(stages), [stages]);
   const assigneeNameById = useMemo(

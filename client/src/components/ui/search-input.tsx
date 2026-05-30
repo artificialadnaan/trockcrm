@@ -70,6 +70,17 @@ export function SearchInput({
     }
   }, [debounced]);
 
+  // Commit the pending value immediately when the field loses focus. A one-shot action
+  // that reads the committed value (e.g. clicking an Export button, which blurs the input
+  // first) must see the latest term, not one still inside the debounce window. The
+  // lastEmittedRef guard makes this idempotent with the debounced emit above (no double-fire).
+  const flushPending = () => {
+    if (draft !== lastEmittedRef.current) {
+      lastEmittedRef.current = draft;
+      onChangeRef.current(draft);
+    }
+  };
+
   return (
     <div className={cn("relative", className)}>
       <Search
@@ -80,6 +91,7 @@ export function SearchInput({
         type="search"
         value={draft}
         onChange={(event) => setDraft(event.target.value)}
+        onBlur={flushPending}
         placeholder={placeholder}
         aria-label={ariaLabel ?? placeholder}
         autoFocus={autoFocus}

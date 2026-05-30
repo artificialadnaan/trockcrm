@@ -93,29 +93,25 @@ function LocationProbe() {
   return null;
 }
 
-function mountSection(initialEntry = "/deals") {
+function mountSection(initialEntry = "/deals", extraProps: Record<string, unknown> = {}) {
   const container = document.createElement("div");
   document.body.appendChild(container);
   let root!: Root;
+  const tree = () => (
+    <MemoryRouter initialEntries={[initialEntry]}>
+      <LocationProbe />
+      <DealsListSection searchPlaceholder={SEARCH_PLACEHOLDER} pageSize={25} {...extraProps} />
+    </MemoryRouter>
+  );
   act(() => {
     root = createRoot(container);
-    root.render(
-      <MemoryRouter initialEntries={[initialEntry]}>
-        <LocationProbe />
-        <DealsListSection searchPlaceholder={SEARCH_PLACEHOLDER} pageSize={25} />
-      </MemoryRouter>
-    );
+    root.render(tree());
   });
   return {
     container,
     rerender: () => {
       act(() => {
-        root.render(
-          <MemoryRouter initialEntries={[initialEntry]}>
-            <LocationProbe />
-            <DealsListSection searchPlaceholder={SEARCH_PLACEHOLDER} pageSize={25} />
-          </MemoryRouter>
-        );
+        root.render(tree());
       });
     },
     unmount: () => {
@@ -220,6 +216,65 @@ describe("DealsListSection — debounced, no-blank search UX (hard frontend requ
 
       expect(capturedLocation).toBe(before); // search stays in local state, never the URL
     } finally {
+      unmount();
+    }
+  });
+
+  // Regression guard (Codex P2): a list that mounts while its query is disabled (stages
+  // still loading, no stage selected) must still show the skeleton through the FIRST real
+  // fetch — the empty []-seeded idle result must not be treated as "settled".
+  it("keeps the skeleton through the first real fetch even when the query started disabled", () => {
+    // Phase 1: stages loading -> listQueryState.enabled = false, useDeals idle ([], not loading).
+    mocks.usePipelineStagesMock.mockReturnValue({ loading: true, error: null, stages: [] });
+    mocks.useDealsMock.mockReturnValue({
+      deals: [], pagination: { page: 1, limit: 25, total: 0, totalPages: 0 }, loading: false, error: null, refetch: vi.fn(),
+    });
+    const { container, rerender, unmount } = mountSection();
+    try {
+      expect(container.textContent).toContain("Loading deals...");
+
+      // Phase 2: stages loaded -> query enabled, FIRST real fetch in flight (loading, still empty).
+      mocks.usePipelineStagesMock.mockReturnValue({
+        loading: false, error: null,
+        stages: [{ id: "stage-opportunity", name: "Opportunity", slug: "opportunity", displayOrder: 1, isTerminal: false }],
+      });
+      mocks.useDealsMock.mockReturnValue({
+        deals: [], pagination: { page: 1, limit: 25, total: 0, totalPages: 0 }, loading: true, error: null, refetch: vi.fn(),
+      });
+      rerender();
+
+      // The first fetch must show the skeleton, NOT an empty table.
+      expect(container.textContent).toContain("Loading deals...");
+    } finally {
+      unmount();
+    }
+  });
+
+  // Regression guard (Codex P2): a one-shot action (CSV export) must use the freshly typed
+  // term, not a value still sitting in the debounce window. SearchInput flushes on blur, so
+  // leaving the field (which a click on Export does) commits the term before the export runs.
+  it("exports with the freshly typed search term even before the debounce fires", async () => {
+    const createObjectURL = URL.createObjectURL;
+    const revokeObjectURL = URL.revokeObjectURL;
+    Object.assign(URL, { createObjectURL: vi.fn(() => "blob:test"), revokeObjectURL: vi.fn() });
+    mocks.apiMock.mockResolvedValue({ deals: [], pagination: { totalPages: 1 } });
+    const { container, unmount } = mountSection("/deals", { enableExport: true });
+    try {
+      const input = searchInput(container);
+      act(() => setNativeInputValue(input, "acme")); // typed; debounce NOT advanced
+      // focusout is what React delegates onBlur to; a real Export click blurs the input the same way.
+      act(() => input.dispatchEvent(new FocusEvent("focusout", { bubbles: true }))); // focus leaves -> flush
+
+      const exportButton = Array.from(container.querySelectorAll("button")).find((b) => b.textContent?.includes("Export"));
+      expect(exportButton).toBeTruthy();
+      await act(async () => {
+        exportButton!.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+      });
+
+      const requestUrl = String(mocks.apiMock.mock.calls[0]?.[0] ?? "");
+      expect(requestUrl).toContain("search=acme");
+    } finally {
+      Object.assign(URL, { createObjectURL, revokeObjectURL });
       unmount();
     }
   });
