@@ -3,12 +3,12 @@ import { useDraggable } from "@dnd-kit/core";
 import { Card } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import {
-  formatCurrencyCompact,
   bestEstimate,
   daysInStage,
   winProbabilityColor,
   formatDealDisplayNumber,
 } from "@/lib/deal-utils";
+import { DealValue } from "@/components/deals/deal-value";
 import type { Deal } from "@/hooks/use-deals";
 import { Clock, MapPin, GripVertical } from "lucide-react";
 import { AtRiskBadge } from "@/components/deals/at-risk-badge";
@@ -58,9 +58,12 @@ export function DealCard({ deal, isDragging }: DealCardProps) {
             <span className="text-[10px] text-muted-foreground font-mono">
               {formatDealDisplayNumber(deal).label}
             </span>
-            <span className="text-sm font-semibold">
-              {formatCurrencyCompact(bestEstimate(deal))}
-            </span>
+            <DealValue
+              deal={deal}
+              value={bestEstimate(deal)}
+              compact
+              className="text-sm font-semibold"
+            />
           </div>
           <p className="text-sm font-medium truncate">{deal.name}</p>
           <AtRiskBadge atRisk={deal.atRisk} compact className="mt-1" />

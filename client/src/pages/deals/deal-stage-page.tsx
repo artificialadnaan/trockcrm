@@ -1,7 +1,8 @@
 import { Navigate, useNavigate, useParams, useSearchParams } from "react-router-dom";
 import { getEffectiveDealValue } from "@trock-crm/shared/types";
 import { useDealStagePage } from "@/hooks/use-deals";
-import { formatCurrency, formatCurrencyCompact, formatDealDisplayNumber } from "@/lib/deal-utils";
+import { formatCurrencyCompact, formatDealDisplayNumber } from "@/lib/deal-utils";
+import { DealValue } from "@/components/deals/deal-value";
 import { buildDealStageSummary } from "@/lib/pipeline-stage-summary";
 import { useNormalizedStageRoute } from "@/lib/pipeline-scope";
 import { PipelineStagePageHeader } from "@/components/pipeline/pipeline-stage-page-header";
@@ -198,7 +199,7 @@ export function DealStagePage() {
             header: "Amount",
             headClassName: "text-right",
             cellClassName: "text-right font-semibold tabular-nums text-slate-950",
-            render: (row) => formatCurrency(getEffectiveDealValue(row)),
+            render: (row) => <DealValue deal={row} value={getEffectiveDealValue(row)} />,
           },
           {
             key: "daysInStage",

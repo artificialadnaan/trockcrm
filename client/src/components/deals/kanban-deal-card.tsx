@@ -1,6 +1,7 @@
 import type { CSSProperties, ReactNode } from "react";
 import { useNavigate } from "react-router-dom";
-import { bestEstimate, formatCurrencyCompact, formatDealDisplayNumber } from "@/lib/deal-utils";
+import { bestEstimate, formatDealDisplayNumber } from "@/lib/deal-utils";
+import { DealValue } from "@/components/deals/deal-value";
 import { cn } from "@/lib/utils";
 import type { Deal } from "@/hooks/use-deals";
 import { AtRiskBadge } from "@/components/deals/at-risk-badge";
@@ -75,9 +76,12 @@ export function KanbanDealCard({
         ) : null}
         <div className="flex items-start justify-between gap-2">
           <p className="truncate text-sm font-medium text-gray-900">{deal.name}</p>
-          <span className="whitespace-nowrap text-sm font-semibold tabular-nums text-gray-900">
-            {formatCurrencyCompact(value)}
-          </span>
+          <DealValue
+            deal={deal}
+            value={value}
+            compact
+            className="whitespace-nowrap text-sm font-semibold tabular-nums text-gray-900"
+          />
         </div>
         <AtRiskBadge atRisk={deal.atRisk} compact className="mt-1" />
         <p className="mt-0.5 truncate text-xs text-gray-500">{metaParts.join(" · ")}</p>

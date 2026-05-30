@@ -315,6 +315,7 @@ export const LOST_DEAL_STAGE_SLUGS = [
 ] as readonly string[];
 
 const GENUINE_WON_DEAL_STAGE_SLUG_SET = new Set<string>(WON_DEAL_STAGE_SLUGS);
+const GENUINE_LOST_DEAL_STAGE_SLUG_SET = new Set<string>(LOST_DEAL_STAGE_SLUGS);
 const TRANSITIONAL_WON_MAPPED_DEAL_STAGE_SLUG_SET = new Set<string>(
   TRANSITIONAL_WON_MAPPED_DEAL_STAGE_SLUGS
 );
@@ -420,6 +421,15 @@ export function isGenuineWonDealStageSlug(
   if (TRANSITIONAL_WON_MAPPED_DEAL_STAGE_SLUG_SET.has(stageSlug)) return false;
   if (GENUINE_WON_DEAL_STAGE_SLUG_SET.has(stageSlug)) return true;
   return toCanonicalDealStageSlug(stageSlug, workflowRoute) === "won";
+}
+
+export function isGenuineLostDealStageSlug(
+  stageSlug: string | null | undefined,
+  workflowRoute?: WorkflowRoute | null
+): boolean {
+  if (!stageSlug) return false;
+  if (GENUINE_LOST_DEAL_STAGE_SLUG_SET.has(stageSlug)) return true;
+  return toCanonicalDealStageSlug(stageSlug, workflowRoute) === "lost";
 }
 
 export function getWorkflowFamilyForStage(

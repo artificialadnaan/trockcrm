@@ -19,7 +19,7 @@ import { TerminalDateFilterControl } from "@/components/pipeline/terminal-date-f
 import { useDeals, type Deal, type DealFilters } from "@/hooks/use-deals";
 import { usePipelineStages, type PipelineStage } from "@/hooks/use-pipeline-config";
 import { useTaskAssignees } from "@/hooks/use-task-assignees";
-import { formatCurrencyCompact } from "@/lib/deal-utils";
+import { DealValue } from "@/components/deals/deal-value";
 import {
   daysAgo,
   toDatePresetRange,
@@ -786,9 +786,12 @@ export function DealsListSection({
       headClassName: "md:w-[5.75rem] md:!px-2 md:text-right lg:w-[6rem] lg:!px-3",
       cellClassName: "md:w-[5.75rem] md:!px-2 md:text-right lg:w-[6rem] lg:!px-3",
       render: (deal) => (
-        <span className="inline-flex justify-end whitespace-nowrap font-black tabular-nums text-slate-950">
-          {formatCurrencyCompact(getEffectiveDealValue(deal))}
-        </span>
+        <DealValue
+          deal={deal}
+          value={getEffectiveDealValue(deal)}
+          compact
+          className="inline-flex justify-end whitespace-nowrap font-black tabular-nums text-slate-950"
+        />
       ),
     },
     {
@@ -1032,9 +1035,12 @@ export function DealsListSection({
                               {ownerName}
                             </span>
                           </div>
-                          <span className="whitespace-nowrap text-right text-sm font-black tabular-nums text-slate-950">
-                            {formatCurrencyCompact(getEffectiveDealValue(deal))}
-                          </span>
+                          <DealValue
+                            deal={deal}
+                            value={getEffectiveDealValue(deal)}
+                            compact
+                            className="whitespace-nowrap text-right text-sm font-black tabular-nums text-slate-950"
+                          />
                         </div>
 
                         <div className="flex flex-wrap items-center gap-2">
