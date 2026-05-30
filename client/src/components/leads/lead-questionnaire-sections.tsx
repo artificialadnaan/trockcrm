@@ -23,6 +23,7 @@ import {
   CLEAR_SELECTION_VALUE,
   getLeadQuestionnaireDisplayLabel,
   getNormalizedQuestionInputType,
+  getTypeOfAccessDisplayLabel,
   normalizeBooleanAnswerForDisplay,
   normalizeDropdownAnswerForDisplay,
   TYPE_OF_ACCESS_OPTIONS,
@@ -310,7 +311,13 @@ export function LeadQuestionnaireSections({
     const currentValue = answers[node.key];
     const questionOptions =
       node.key === "site_access"
-        ? TYPE_OF_ACCESS_OPTIONS.map((option) => ({ value: option, label: option }))
+        ? TYPE_OF_ACCESS_OPTIONS.map((option) => ({
+            value: option,
+            // Display-only relabel via the shared helper (e.g. "Bobbed" -> "Fobbed").
+            // The stored value stays the option string; migration 0130 /
+            // isTypeOfAccessOption are untouched.
+            label: getTypeOfAccessDisplayLabel(option),
+          }))
         : normalizeQuestionOptions(node.options);
 
     return (
@@ -363,7 +370,12 @@ export function LeadQuestionnaireSections({
             }}
           >
             <SelectTrigger id={node.key}>
-              <SelectValue placeholder="Select" />
+              <SelectValue placeholder="Select">
+                {node.key === "site_access"
+                  ? (value: string | null) =>
+                      value ? getTypeOfAccessDisplayLabel(value) : "Select"
+                  : undefined}
+              </SelectValue>
             </SelectTrigger>
             <SelectContent>
               {!node.isRequired ? (

@@ -255,10 +255,19 @@ vi.mock("@/components/ui/select", () => ({
     </SelectContext.Provider>
   ),
   SelectTrigger: ({ children, id }: { children: React.ReactNode; id?: string }) => <div id={id}>{children}</div>,
-  SelectValue: ({ children, placeholder }: { children?: React.ReactNode; placeholder?: string }) => {
+  SelectValue: ({
+    children,
+    placeholder,
+  }: {
+    children?: React.ReactNode | ((value: string | null) => React.ReactNode);
+    placeholder?: string;
+  }) => {
     const { items, value } = React.useContext(SelectContext);
+    // Mirror Base UI Select.Value: a function child formats the selected value.
     const label =
-      children ?? items?.find((item) => item.value === (value ?? null))?.label ?? placeholder;
+      typeof children === "function"
+        ? children(value ?? null)
+        : (children ?? items?.find((item) => item.value === (value ?? null))?.label ?? placeholder);
     return <span data-select-label="true">{label}</span>;
   },
   SelectContent: ({ children }: { children: React.ReactNode }) => <div>{children}</div>,
@@ -2107,6 +2116,50 @@ describe("LeadForm", () => {
     expect(html).toContain("Type of access detail");
     expect(html).toContain("Gate code required");
     expect(html).not.toContain(">Access<");
+  });
+
+  it("relabels a stored site_access value of Bobbed to Fobbed in the read-only summary", () => {
+    const html = renderToStaticMarkup(
+      <MemoryRouter>
+        <LeadQuestionnaireSummary
+          lead={{
+            id: "lead-1",
+            name: "Lead One",
+            convertedDealId: null,
+            convertedDealNumber: null,
+            companyId: "company-1",
+            companyName: "Acme",
+            stageId: "stage-new",
+            propertyId: "property-1",
+            propertyName: "Palm Villas",
+            propertyAddress: "123 Main",
+            propertyCity: "Dallas",
+            propertyState: "TX",
+            propertyZip: "75001",
+            source: "Referral",
+            description: "",
+            projectTypeId: "type-1",
+            projectType: null,
+            qualificationPayload: {},
+            projectTypeQuestionPayload: { projectTypeId: "type-1", answers: {} },
+            leadQuestionnaire: {
+              projectTypeId: "type-1",
+              nodes: siteAccessQuestionNodes(),
+              allNodes: siteAccessQuestionNodes(),
+              answers: {
+                site_access: "Bobbed",
+              },
+            } as any,
+            stageEnteredAt: "2026-04-22T00:00:00.000Z",
+          }}
+        />
+      </MemoryRouter>
+    );
+
+    // Display-only relabel: the stored value "Bobbed" renders as "Fobbed".
+    expect(html).toContain("Type of access");
+    expect(html).toContain("Fobbed");
+    expect(html).not.toContain("Bobbed");
   });
 
   it("falls back to legacy payload questionnaire answers when no v2 answer exists", () => {

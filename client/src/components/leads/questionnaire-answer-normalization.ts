@@ -15,6 +15,16 @@ function isTypeOfAccessOption(value: string) {
   return TYPE_OF_ACCESS_OPTIONS.includes(value as (typeof TYPE_OF_ACCESS_OPTIONS)[number]);
 }
 
+// Display-only label overrides for Type of Access. The STORED values
+// (TYPE_OF_ACCESS_OPTIONS, migration 0130, isTypeOfAccessOption) are unchanged;
+// only what the UI shows differs. Use this at every site_access display surface
+// (option list, selected trigger, read-only summary) so they cannot diverge.
+const TYPE_OF_ACCESS_DISPLAY_LABELS: Record<string, string> = { Bobbed: "Fobbed" };
+
+export function getTypeOfAccessDisplayLabel(value: string): string {
+  return TYPE_OF_ACCESS_DISPLAY_LABELS[value] ?? value;
+}
+
 export function getLeadQuestionnaireDisplayLabel(key: string, fallbackLabel: string) {
   if (key === "site_access") return "Type of access";
   if (key === TYPE_OF_ACCESS_OTHER_DETAIL_KEY) return "Type of access detail";

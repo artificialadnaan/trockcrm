@@ -79,6 +79,7 @@ import { LeadQuestionnaireSections } from "./lead-questionnaire-sections";
 import {
   CLEAR_SELECTION_VALUE,
   getLeadQuestionnaireDisplayLabel,
+  getTypeOfAccessDisplayLabel,
   normalizeStoredQuestionAnswers,
   sanitizeQuestionAnswerForSave,
   shouldNormalizeUnansweredPlaceholder,
@@ -299,6 +300,16 @@ function renderAnswerValue(
     questionNode?: { key: string; inputType: string | null; options?: unknown } | null;
   } = {}
 ) {
+  // Display-only relabel of the Type of Access value (e.g. stored "Bobbed" ->
+  // "Fobbed"). The stored value is unchanged; only the summary display differs.
+  if (
+    options.questionNode?.key === "site_access" &&
+    typeof value === "string" &&
+    value.trim().length > 0 &&
+    value.trim() !== "__unanswered__"
+  ) {
+    return getTypeOfAccessDisplayLabel(value.trim());
+  }
   const formatted = formatQuestionAnswerValue(
     shouldNormalizeUnansweredPlaceholder(options.questionNode) &&
       typeof value === "string" &&
