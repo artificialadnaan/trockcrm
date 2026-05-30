@@ -1,6 +1,6 @@
 import { useMemo } from "react";
 import { useNavigate } from "react-router-dom";
-import { ArrowUpRight, Briefcase, ChevronLeft, ChevronRight, Mail, Phone, Plus, Search, Star, Users } from "lucide-react";
+import { ArrowUpRight, Briefcase, ChevronLeft, ChevronRight, Mail, Phone, Plus, Star, Users } from "lucide-react";
 import { PageHeader } from "@/components/layout/page-header";
 import { listPaginationIconButtonClassName } from "@/components/shared/list-pagination";
 import { MetricCard } from "@/components/shared/metric-card";
@@ -9,12 +9,13 @@ import { OwnerLabel } from "@/components/shared/owner-label";
 import { ScopeToggle } from "@/components/shared/scope-toggle";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
-import { Input } from "@/components/ui/input";
+import { SearchInput } from "@/components/ui/search-input";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { useOwnerAssignees } from "@/hooks/use-owner-assignees";
 import { useTaskAssignees } from "@/hooks/use-task-assignees";
 import { assignContactOwnerToMe, reassignContactOwner, useContacts, type Contact } from "@/hooks/use-contacts";
 import { useContactFilters } from "@/hooks/use-contact-filters";
+import { useKeepPreviousData } from "@/hooks/use-keep-previous-data";
 import { useAuth } from "@/lib/auth";
 import { contactLocation, formatPhone, fullName } from "@/lib/contact-utils";
 import { cn } from "@/lib/utils";
@@ -63,7 +64,10 @@ export function ContactListPage() {
   const { assignees, loading: assigneesLoading } = useTaskAssignees();
   const { assignees: ownerAssignees, loading: ownerAssigneesLoading } = useOwnerAssignees();
   const { filters, setFilters, resetFilters } = useContactFilters();
-  const { contacts, pagination, loading, error, refetch } = useContacts(filters);
+  const { contacts: rawContacts, pagination, loading, error, refetch } = useContacts(filters);
+  // No-blank: keep the prior page of contacts visible during a search/filter/page refetch; gate
+  // the skeleton to the FIRST load only and show an "Updating..." hint on a refresh.
+  const { data: contacts, isInitialLoading, isRefreshing } = useKeepPreviousData(rawContacts, loading, error);
 
   const activeRole = (filters.role ?? "all") as (typeof ROLE_OPTIONS)[number]["value"];
   const activeOwnerScope = (filters.ownerScope ?? "all") as (typeof OWNER_SCOPE_OPTIONS)[number]["value"];
@@ -100,15 +104,14 @@ export function ContactListPage() {
         <CardContent className="space-y-4 p-4">
           <div className="flex flex-col gap-3 xl:flex-row xl:items-center xl:justify-between">
             <div className="flex flex-1 flex-col gap-3 lg:flex-row lg:items-center">
-              <div className="relative min-w-[240px] flex-1">
-                <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" />
-                <Input
-                  value={filters.search ?? ""}
-                  onChange={(event) => setFilters({ search: event.target.value || undefined })}
-                  placeholder="Search contacts, companies, email..."
-                  className="h-9 border-slate-200 pl-9"
-                />
-              </div>
+              <SearchInput
+                value={filters.search ?? ""}
+                onChange={(value) => setFilters({ search: value || undefined })}
+                placeholder="Search contacts, companies, email..."
+                aria-label="Search contacts"
+                className="min-w-[240px] flex-1"
+                inputClassName="h-9 border-slate-200"
+              />
               <ScopeToggle
                 options={ROLE_OPTIONS}
                 value={activeRole}
@@ -123,6 +126,9 @@ export function ContactListPage() {
               />
             </div>
             <div className="flex items-center gap-2">
+              {isRefreshing ? (
+                <span className="text-[11px] font-bold uppercase tracking-[0.16em] text-slate-400">Updating...</span>
+              ) : null}
               <Button
                 variant="outline"
                 size="sm"
@@ -140,7 +146,7 @@ export function ContactListPage() {
             <div className="rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm font-medium text-red-700">{error}</div>
           ) : null}
 
-          {loading ? (
+          {isInitialLoading ? (
             <div className="space-y-2">
               {Array.from({ length: 6 }).map((_, index) => (
                 <div key={index} className="h-16 animate-pulse rounded-lg bg-slate-100" />
