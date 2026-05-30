@@ -117,11 +117,10 @@ export function useSearch() {
   // response can never overwrite a later one (debounce reduces but does not eliminate this).
   const requestIdRef = useRef(0);
 
-  const search = useCallback(async (q: string) => {
-    const requestId = ++requestIdRef.current;
+  const search = useCallback(async (q: string, requestId: number) => {
     if (q.trim().length < 2) {
       setResults(null);
-      setLoading(false);
+      if (requestId === requestIdRef.current) setLoading(false);
       return;
     }
     setLoading(true);
@@ -142,9 +141,13 @@ export function useSearch() {
   }, []);
 
   useEffect(() => {
+    // Advance the generation on EVERY query change (not only when the debounced fetch fires), so
+    // a response for a now-stale query is rejected even if it returns inside the debounce window
+    // before the next request starts.
+    const requestId = ++requestIdRef.current;
     if (debounceRef.current) clearTimeout(debounceRef.current);
     debounceRef.current = setTimeout(() => {
-      search(query);
+      search(query, requestId);
     }, DEBOUNCE_MS);
 
     return () => {
@@ -161,29 +164,36 @@ export function useAiSearch() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // Last-write-wins (same as useSearch): generation advances on every query change so a slow
+  // earlier-keystroke AI response cannot overwrite a later one.
+  const requestIdRef = useRef(0);
 
-  const search = useCallback(async (q: string) => {
+  const search = useCallback(async (q: string, requestId: number) => {
     if (q.trim().length < 2) {
       setResults(null);
+      if (requestId === requestIdRef.current) setLoading(false);
       return;
     }
     setLoading(true);
     setError(null);
     try {
       const data = await api<AiSearchResponse>(`/search/ai?q=${encodeURIComponent(q.trim())}`);
+      if (requestId !== requestIdRef.current) return;
       setResults(data);
     } catch {
+      if (requestId !== requestIdRef.current) return;
       setError("AI search failed");
       setResults(null);
     } finally {
-      setLoading(false);
+      if (requestId === requestIdRef.current) setLoading(false);
     }
   }, []);
 
   useEffect(() => {
+    const requestId = ++requestIdRef.current;
     if (debounceRef.current) clearTimeout(debounceRef.current);
     debounceRef.current = setTimeout(() => {
-      search(query);
+      search(query, requestId);
     }, DEBOUNCE_MS);
 
     return () => {

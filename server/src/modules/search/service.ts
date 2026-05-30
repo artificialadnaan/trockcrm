@@ -1,4 +1,4 @@
-import { sql, eq, and, or, inArray, gte, desc } from "drizzle-orm";
+import { sql, eq, and, or, inArray, gte, desc, type Column, type SQL } from "drizzle-orm";
 import crypto from "crypto";
 import type { NodePgDatabase } from "drizzle-orm/node-postgres";
 import type * as schema from "@trock-crm/shared/schema";
@@ -122,7 +122,10 @@ export async function globalSearch(
   userRole?: string,
   userId?: string,
 ): Promise<SearchResponse> {
-  const sanitized = query.trim().replace(/[^\w\s-]/g, "").trim();
+  // Trim only -- the ILIKE builders escape LIKE metacharacters, so punctuation-bearing terms
+  // (deal numbers like D-1001, emails, phones with +, names with & or #) must reach the query
+  // literally. (The old full-text path needed the strip; the substring path does not.)
+  const sanitized = query.trim();
   if (sanitized.length < 2) {
     return emptyResponse(query);
   }
@@ -279,7 +282,7 @@ async function crossOfficeSearch(
               officeSlug: office.slug,
               // Cross-office hit: carry the originating office so the detail fetch targets that
               // office schema (api.ts reads ?officeId -> x-office-id header), not the active one.
-              deepLink: `${item.deepLink}?officeId=${office.id}`,
+              deepLink: appendQuery(item.deepLink, { officeId: office.id }),
             })),
           );
         }
@@ -293,19 +296,30 @@ async function crossOfficeSearch(
   return assembleResponse(sanitized, merged, PER_ENTITY_LIMIT);
 }
 
+// Relevance score for ORDER BY: exact match on any column (3) > prefix (2) > other/related (1).
+// Applied BEFORE the per-entity LIMIT so a strong older match is never dropped for newer weak ones.
+function relevanceOrder(query: string, columns: Column[]): SQL<number> {
+  const prefix = `${escapeLikePattern(query.trim())}%`;
+  const exact = query.trim().toLowerCase();
+  const exactChecks = sql.join(columns.map((c) => sql`lower(coalesce(${c}, '')) = ${exact}`), sql` OR `);
+  const prefixChecks = sql.join(columns.map((c) => sql`${c} ILIKE ${prefix} ESCAPE '\\'`), sql` OR `);
+  return sql<number>`CASE WHEN ${exactChecks} THEN 3 WHEN ${prefixChecks} THEN 2 ELSE 1 END`;
+}
+
+// Append query params safely whether or not the URL already has a query string (so a
+// cross-office deepLink carrying ?officeId doesn't collide with later ?tab=... appends).
+function appendQuery(url: string, params: Record<string, string>): string {
+  const qs = new URLSearchParams(params).toString();
+  if (!qs) return url;
+  return `${url}${url.includes("?") ? "&" : "?"}${qs}`;
+}
+
 async function searchDeals(tenantDb: TenantDb, query: string, limit: number): Promise<SearchResult[]> {
   // Unified substring field set (name/number/project/address/owner/company/contact via the
   // shared builder). The REAL stage slug comes from pipeline_stage_config via stageId -- the
   // denormalized bid-board slug is only set at the estimating boundary, so it would miss
   // CRM-owned Won/Lost. Findable set = active OR a terminal (won/lost) stage: terminal deals are
   // FINDABLE + MARKED, while soft-deleted (inactive, non-terminal) deals stay hidden.
-  const prefix = `${escapeLikePattern(query.trim())}%`;
-  const exact = query.trim().toLowerCase();
-  // Relevance order BEFORE the cap so a strong older match is not dropped for newer weak ones.
-  const relevance = sql<number>`CASE
-    WHEN lower(${deals.name}) = ${exact} OR lower(${deals.dealNumber}) = ${exact} OR lower(coalesce(${deals.projectNumber}, '')) = ${exact} THEN 3
-    WHEN ${deals.name} ILIKE ${prefix} ESCAPE '\\' OR ${deals.dealNumber} ILIKE ${prefix} ESCAPE '\\' OR ${deals.projectNumber} ILIKE ${prefix} ESCAPE '\\' THEN 2
-    ELSE 1 END`;
   const rows = await tenantDb
     .select({
       id: deals.id,
@@ -325,7 +339,7 @@ async function searchDeals(tenantDb: TenantDb, query: string, limit: number): Pr
         or(eq(deals.isActive, true), inArray(pipelineStageConfig.slug, [...TERMINAL_STAGE_SLUGS])),
       ),
     )
-    .orderBy(desc(relevance), desc(deals.updatedAt))
+    .orderBy(desc(relevanceOrder(query, [deals.name, deals.dealNumber, deals.projectNumber])), desc(deals.updatedAt))
     .limit(limit);
 
   return rows.map((r): SearchResult => ({
@@ -362,7 +376,7 @@ async function searchContacts(tenantDb: TenantDb, query: string, limit: number):
     })
     .from(contacts)
     .where(and(buildContactSearchCondition(query), eq(contacts.isActive, true)))
-    .orderBy(desc(contacts.updatedAt))
+    .orderBy(desc(relevanceOrder(query, [contacts.firstName, contacts.lastName, contacts.email, contacts.companyName])), desc(contacts.updatedAt))
     .limit(limit);
 
   return rows.map((r): SearchResult => {
@@ -384,7 +398,7 @@ async function searchCompanies(tenantDb: TenantDb, query: string, limit: number)
     .select({ id: companies.id, name: companies.name, city: companies.city, state: companies.state })
     .from(companies)
     .where(and(buildCompanySearchCondition(query), eq(companies.isActive, true)))
-    .orderBy(desc(companies.updatedAt))
+    .orderBy(desc(relevanceOrder(query, [companies.name])), desc(companies.updatedAt))
     .limit(limit);
 
   return rows.map((r): SearchResult => ({
@@ -402,7 +416,7 @@ async function searchLeads(tenantDb: TenantDb, query: string, limit: number): Pr
     .select({ id: leads.id, name: leads.name, status: leads.status })
     .from(leads)
     .where(and(buildLeadSearchCondition(query), eq(leads.isActive, true)))
-    .orderBy(desc(leads.updatedAt))
+    .orderBy(desc(relevanceOrder(query, [leads.name])), desc(leads.updatedAt))
     .limit(limit);
 
   return rows.map((r): SearchResult => ({
@@ -426,7 +440,7 @@ async function searchProperties(tenantDb: TenantDb, query: string, limit: number
     })
     .from(properties)
     .where(and(buildPropertySearchCondition(query), eq(properties.isActive, true)))
-    .orderBy(desc(properties.updatedAt))
+    .orderBy(desc(relevanceOrder(query, [properties.name, properties.address, properties.city])), desc(properties.updatedAt))
     .limit(limit);
 
   return rows.map((r): SearchResult => {
@@ -649,36 +663,36 @@ function buildRecommendedActions(
       actionType: "open_deal_copilot",
       label: "Open Deal Copilot",
       rationale: `Jump straight into ${topDeal.primaryLabel} and review the AI copilot context.`,
-      deepLink: `${topDeal.deepLink}?tab=overview&focus=copilot`,
+      deepLink: appendQuery(topDeal.deepLink, { tab: "overview", focus: "copilot" }),
       executionMode: "navigate",
-      interactionScore: scoreAction("open_deal_copilot", `${topDeal.deepLink}?tab=overview&focus=copilot`, interactionScores, currentIntent),
+      interactionScore: scoreAction("open_deal_copilot", appendQuery(topDeal.deepLink, { tab: "overview", focus: "copilot" }), interactionScores, currentIntent),
     });
     push({
       actionType: "review_deal_emails",
       label: "Review Deal Emails",
       rationale: `Open the email tab for ${topDeal.primaryLabel} to verify the communications behind this answer.`,
-      deepLink: `${topDeal.deepLink}?tab=email`,
+      deepLink: appendQuery(topDeal.deepLink, { tab: "email" }),
       executionMode: "navigate",
-      interactionScore: scoreAction("review_deal_emails", `${topDeal.deepLink}?tab=email`, interactionScores, currentIntent),
+      interactionScore: scoreAction("review_deal_emails", appendQuery(topDeal.deepLink, { tab: "email" }), interactionScores, currentIntent),
     });
     push({
       actionType: "refresh_deal_copilot",
       label: "Refresh Deal Copilot",
       rationale: `Queue a fresh AI read on ${topDeal.primaryLabel} before you act on this search result.`,
-      deepLink: `${topDeal.deepLink}?tab=overview&focus=copilot`,
+      deepLink: appendQuery(topDeal.deepLink, { tab: "overview", focus: "copilot" }),
       executionMode: "api_then_navigate",
       apiEndpoint: `/ai/deals/${topDeal.id}/regenerate`,
       apiMethod: "POST",
       successMessage: "Deal copilot refresh queued",
-      interactionScore: scoreAction("refresh_deal_copilot", `${topDeal.deepLink}?tab=overview&focus=copilot`, interactionScores, currentIntent),
+      interactionScore: scoreAction("refresh_deal_copilot", appendQuery(topDeal.deepLink, { tab: "overview", focus: "copilot" }), interactionScores, currentIntent),
     });
     push({
       actionType: "open_best_match",
       label: "Open Best Deal Match",
       rationale: `Jump to ${topDeal.primaryLabel} to inspect the strongest structured deal result.`,
-      deepLink: `${topDeal.deepLink}?tab=overview`,
+      deepLink: appendQuery(topDeal.deepLink, { tab: "overview" }),
       executionMode: "navigate",
-      interactionScore: scoreAction("open_best_match", `${topDeal.deepLink}?tab=overview`, interactionScores, currentIntent),
+      interactionScore: scoreAction("open_best_match", appendQuery(topDeal.deepLink, { tab: "overview" }), interactionScores, currentIntent),
     });
   }
 

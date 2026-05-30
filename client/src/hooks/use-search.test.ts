@@ -12,15 +12,35 @@ vi.mock("@/lib/api", () => ({
 
 import { api } from "@/lib/api";
 
-const { useSearch } = await import("./use-search");
+const { useSearch, useAiSearch } = await import("./use-search");
 
 type SearchHook = ReturnType<typeof useSearch>;
+type AiSearchHook = ReturnType<typeof useAiSearch>;
 
 let latest: SearchHook | null = null;
 
 function Probe() {
   latest = useSearch();
   return null;
+}
+
+let latestAi: AiSearchHook | null = null;
+function AiProbe() {
+  latestAi = useAiSearch();
+  return null;
+}
+
+function aiResponse(query: string) {
+  return {
+    queryId: "q-1",
+    query,
+    intent: "general_search" as const,
+    summary: "",
+    structured: emptyResponse(query),
+    topEntities: [],
+    recommendedActions: [],
+    evidence: [],
+  };
 }
 
 async function mount() {
@@ -99,5 +119,48 @@ describe("useSearch", () => {
     });
     expect(latest!.results?.query).toBe("acme");
     unmount();
+  });
+});
+
+describe("useAiSearch", () => {
+  beforeEach(() => {
+    latestAi = null;
+    vi.mocked(api).mockReset();
+    vi.useFakeTimers();
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("ignores a stale earlier-keystroke AI response so it cannot overwrite a later one", async () => {
+    const resolvers = new Map<string, (value: unknown) => void>();
+    vi.mocked(api).mockImplementation(
+      (path: string) => new Promise((resolve) => resolvers.set(qOf(path as string), resolve)),
+    );
+    const container = document.createElement("div");
+    const root = createRoot(container);
+    await act(async () => {
+      root.render(createElement(AiProbe));
+    });
+
+    act(() => latestAi!.setQuery("ac"));
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(300);
+    });
+    act(() => latestAi!.setQuery("acme"));
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(300);
+    });
+
+    await act(async () => {
+      resolvers.get("acme")?.(aiResponse("acme"));
+    });
+    expect(latestAi!.results?.query).toBe("acme");
+
+    await act(async () => {
+      resolvers.get("ac")?.(aiResponse("ac"));
+    });
+    expect(latestAi!.results?.query).toBe("acme");
+    act(() => root.unmount());
   });
 });

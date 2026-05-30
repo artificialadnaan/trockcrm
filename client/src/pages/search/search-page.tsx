@@ -25,6 +25,13 @@ const ENTITY_COLORS = {
   file: "bg-red-100 text-red-800",
 } as const;
 
+// Won/Lost/On-hold lifecycle markers for deal results (findable + MARKED, mirrors the palette).
+const STATUS_BADGES: Record<string, { label: string; className: string }> = {
+  won: { label: "Won", className: "bg-emerald-100 text-emerald-800" },
+  lost: { label: "Lost", className: "bg-rose-100 text-rose-800" },
+  on_hold: { label: "On hold", className: "bg-amber-100 text-amber-800" },
+};
+
 function PopularityBadge({ score }: { score?: number }) {
   if (!score || score < 1) return null;
   return (
@@ -51,6 +58,11 @@ function ResultCard({ result }: { result: SearchResult }) {
           </div>
         )}
       </div>
+      {result.status && STATUS_BADGES[result.status] ? (
+        <Badge className={`text-xs ${STATUS_BADGES[result.status].className}`}>
+          {STATUS_BADGES[result.status].label}
+        </Badge>
+      ) : null}
       <Badge className={`text-xs ${ENTITY_COLORS[result.entityType]}`}>
         {result.entityType}
       </Badge>
