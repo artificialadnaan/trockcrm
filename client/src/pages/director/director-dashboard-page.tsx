@@ -376,7 +376,7 @@ export function DirectorDashboardPage() {
   const { data: rawDashboardData, loading, error, refetch, lastFetchedAt } = useDirectorDashboard(dateRange, repPerformancePeriod, scope);
   // Keep the prior dashboard rendered during a same-scope background refetch (date
   // pinch) instead of blanking; the skeleton shows on first load (see showSkeleton).
-  const { data, isInitialLoading, isRefreshing } = useKeepPreviousData(rawDashboardData, loading);
+  const { data, isInitialLoading, isRefreshing } = useKeepPreviousData(rawDashboardData, loading, error);
   // Track the period AND scope the CURRENTLY-RENDERED data was fetched for, synced to
   // data arrival (NOT to the live preset/scope). The labels use renderedPreset so a slow
   // preset change never relabels old totals; renderedScope drives the scope-change guard.
@@ -451,6 +451,11 @@ export function DirectorDashboardPage() {
     totalCount: data.ddVsPipeline.totalCount,
   };
 
+  // NOTE: rep-performance snapshot values (win rate / region / sparkline) are intentionally
+  // gated on a FRESH snapshot (Wave-1 Finding D: never leak stale snapshot values; the live
+  // Closed totals come from the authoritative director payload instead). So a brief
+  // "Performance pending" on those snapshot-only cells during a preset refetch is BY DESIGN
+  // -- not wrapped in keep-previous. (Codex fast-follow #4 was declined for this reason.)
   const hasPerformanceData = Boolean(perfData) && !perfLoading && !perfError;
   const usablePerfData = hasPerformanceData ? perfData : null;
   const perfRowsByRep = new Map<string, RepPerformanceSnapshotRow>(

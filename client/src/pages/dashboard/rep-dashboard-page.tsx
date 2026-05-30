@@ -503,7 +503,7 @@ export function RepDashboardPage() {
   const { data: rawDashboardData, loading, error, fetchedAt, refetch } = useRepDashboard({ range: dashboardRange });
   // Keep the prior dashboard rendered during a background refetch (period change)
   // instead of blanking to a skeleton; the skeleton shows only on first load.
-  const { data, isInitialLoading, isRefreshing } = useKeepPreviousData(rawDashboardData, loading);
+  const { data, isInitialLoading, isRefreshing } = useKeepPreviousData(rawDashboardData, loading, error);
   // NOTE: rep period (Today/Week/MTD/QTD/YTD) maps MANY-TO-ONE onto the coarse dashboard
   // range (e.g. QTD and YTD both -> "ytd"), so a "rendered period synced to data arrival"
   // gets STUCK when two periods share a range (no refetch fires). The Commission label and

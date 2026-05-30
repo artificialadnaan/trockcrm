@@ -287,18 +287,20 @@ export function PipelinePage() {
   const [terminalStages, setTerminalStages] = useState<TerminalStageInfo[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  // No-blank: track whether we have a SUCCESSFULLY-loaded board and the scope it was
-  // loaded for (columns is seeded to [], so it cannot itself signal "loaded"). Keep the
-  // current board visible with an "Updating..." hint on a SAME-SCOPE refetch (Won/Lost
-  // date-filter); show the skeleton on first load, after a failed load, AND on a scope
-  // change -- the board's deal set changes and it is interactive, so never leave a stale
-  // cross-scope board live.
+  // No-blank: track whether we have a SUCCESSFULLY-loaded board and the request identity
+  // (scope + Show-DD) it was loaded for (columns is seeded to [], so it cannot itself
+  // signal "loaded"). Keep the current board visible with an "Updating..." hint on a
+  // SAME-IDENTITY refetch (Won/Lost date-filter); show the skeleton on first load, after a
+  // failed load, AND on a scope or Show-DD change -- both change which columns the API
+  // returns and the board is interactive, so never leave a stale cross-identity board live.
   const hasLoadedRef = useRef(false);
   const loadedScopeRef = useRef<PipelineScope | null>(null);
-  const hasCurrentScopeBoard = hasLoadedRef.current && loadedScopeRef.current === scope;
-  const isInitialLoading = loading && !hasCurrentScopeBoard;
-  const isRefreshing = loading && hasCurrentScopeBoard;
+  const loadedShowDdRef = useRef<boolean | null>(null);
   const [showDd, setShowDd] = useState(searchParams.get("showDd") === "1");
+  const hasCurrentBoard =
+    hasLoadedRef.current && loadedScopeRef.current === scope && loadedShowDdRef.current === showDd;
+  const isInitialLoading = loading && !hasCurrentBoard;
+  const isRefreshing = loading && hasCurrentBoard;
   const [activeDeal, setActiveDeal] = useState<Deal | null>(null);
   const [stageChangeOpen, setStageChangeOpen] = useState(false);
   const [pendingMove, setPendingMove] = useState<PendingPipelineMove | null>(null);
@@ -330,6 +332,7 @@ export function PipelinePage() {
       setLastRefreshed(new Date());
       hasLoadedRef.current = true;
       loadedScopeRef.current = scope; // the scope these columns were fetched for
+      loadedShowDdRef.current = showDd; // ...and the Show-DD state (affects the column set)
     } catch (err) {
       console.error("Failed to load pipeline:", err);
       setError("Failed to load pipeline data. Please try again.");

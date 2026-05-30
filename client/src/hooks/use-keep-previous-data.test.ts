@@ -6,14 +6,18 @@ import { describe, expect, it } from "vitest";
 import { type KeepPreviousDataResult, useKeepPreviousData } from "./use-keep-previous-data";
 
 // Repo convention (see use-deals.test.ts): hand-rolled renderHook via createRoot + act.
-async function renderKeep<V>(initial: { value: V; loading: boolean }) {
+async function renderKeep<V>(initial: { value: V; loading: boolean; error?: unknown }) {
   const container = document.createElement("div");
   const root = createRoot(container);
-  const state = { value: initial.value, loading: initial.loading };
+  const state: { value: V; loading: boolean; error?: unknown } = {
+    value: initial.value,
+    loading: initial.loading,
+    error: initial.error,
+  };
   let latest: KeepPreviousDataResult<V> | null = null;
 
   function Probe() {
-    latest = useKeepPreviousData<V>(state.value, state.loading);
+    latest = useKeepPreviousData<V>(state.value, state.loading, state.error);
     return null;
   }
 
@@ -26,9 +30,10 @@ async function renderKeep<V>(initial: { value: V; loading: boolean }) {
       if (!latest) throw new Error("hook did not render");
       return latest;
     },
-    async set(next: { value: V; loading: boolean }) {
+    async set(next: { value: V; loading: boolean; error?: unknown }) {
       state.value = next.value;
       state.loading = next.loading;
+      state.error = next.error;
       await act(async () => {
         root.render(createElement(Probe));
       });
@@ -122,19 +127,32 @@ describe("useKeepPreviousData", () => {
     hook.unmount();
   });
 
-  it("stays in initial-loading on a retry after the FIRST fetch failed with no data", async () => {
+  it("stays in initial-loading on a retry after the FIRST fetch ERRORED", async () => {
     const hook = await renderKeep<Obj>({ value: null, loading: true });
     expect(hook.current.isInitialLoading).toBe(true); // first fetch in flight
-    await hook.set({ value: null, loading: false }); // first fetch FAILED -> no data
-    expect(hook.current.isInitialLoading).toBe(false); // settled (page shows its error)
-    await hook.set({ value: null, loading: true }); // user hits Retry
-    // A failed completion did not produce data, so this is still effectively the first
-    // load -> show the skeleton, NOT a blank.
+    await hook.set({ value: null, loading: false, error: "boom" }); // first fetch FAILED (error)
+    expect(hook.current.isInitialLoading).toBe(false); // settled-by-loading=false; page shows its error
+    await hook.set({ value: null, loading: true }); // user hits Retry (error cleared)
+    // The first completion ERRORED (never settled), so a retry is still effectively the
+    // first load -> show the skeleton, NOT a blank.
     expect(hook.current.isInitialLoading).toBe(true);
     expect(hook.current.isRefreshing).toBe(false);
     await hook.set({ value: { n: 1 }, loading: false }); // retry succeeds
     expect(hook.current.isInitialLoading).toBe(false);
     expect(hook.current.data).toEqual({ n: 1 });
+    hook.unmount();
+  });
+
+  it("treats a SUCCESSFUL null/empty first result as settled (later refetch is a refresh, not a first load)", async () => {
+    const hook = await renderKeep<Obj>({ value: null, loading: true });
+    await hook.set({ value: null, loading: false }); // SUCCESS with no record (no error)
+    expect(hook.current.isInitialLoading).toBe(false); // settled
+    expect(hook.current.hasData).toBe(false);
+    await hook.set({ value: null, loading: true }); // a later refetch
+    // Distinct from the errored case above: a successful null DID settle, so this is a
+    // refresh of the empty state (keep it + show the updating affordance), not a skeleton.
+    expect(hook.current.isInitialLoading).toBe(false);
+    expect(hook.current.isRefreshing).toBe(true);
     hook.unmount();
   });
 });
