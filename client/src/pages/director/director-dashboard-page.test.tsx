@@ -393,7 +393,6 @@ describe("DirectorDashboardPage", () => {
           // rep-2 $120k/2). The page-level Closed total reads this authoritative value.
           won: { count: 6, totalValue: 360000 },
           atRisk: { count: 1, totalValue: 275000 },
-          stale: { count: 1, totalValue: 275000 },
         },
         crmOwnedProgression: [
           { workflowBucket: "lead", workflowRoute: "normal", stageName: "Qualified Lead", itemCount: 2, totalValue: 125000 },

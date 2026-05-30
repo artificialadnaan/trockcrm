@@ -482,7 +482,6 @@ export function DirectorDashboardPage() {
     activePipeline: { count: 0, totalValue: 0 },
     won: { count: 0, totalValue: 0 },
     atRisk: { count: 0, totalValue: 0 },
-    stale: { count: 0, totalValue: 0 },
   };
 
   function exportSalesForceCsv() {

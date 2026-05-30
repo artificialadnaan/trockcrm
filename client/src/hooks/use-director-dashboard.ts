@@ -165,7 +165,6 @@ export interface DirectorDashboardData {
     activePipeline: { count: number; totalValue: number };
     won: { count: number; totalValue: number };
     atRisk: { count: number; totalValue: number };
-    stale: { count: number; totalValue: number };
   };
 }
 
