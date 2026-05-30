@@ -1,9 +1,8 @@
 import { useEffect, useMemo, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { toast } from "sonner";
-import { CalendarDays, Clock3, Download, MapPin, Search } from "lucide-react";
+import { CalendarDays, Clock3, Download, MapPin } from "lucide-react";
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
-import { Input } from "@/components/ui/input";
 import {
   Select,
   SelectContent,
@@ -17,6 +16,8 @@ import {
 } from "@/components/pipeline/pipeline-stage-table";
 import { TerminalDateFilterControl } from "@/components/pipeline/terminal-date-filter-control";
 import { useDeals, type Deal, type DealFilters } from "@/hooks/use-deals";
+import { SearchInput } from "@/components/ui/search-input";
+import { useKeepPreviousData } from "@/hooks/use-keep-previous-data";
 import { usePipelineStages, type PipelineStage } from "@/hooks/use-pipeline-config";
 import { useTaskAssignees } from "@/hooks/use-task-assignees";
 import { formatCurrencyCompact } from "@/lib/deal-utils";
@@ -552,7 +553,7 @@ export function DealsListSection({
   }, [initialSort]);
 
   const {
-    deals,
+    deals: rawDeals,
     pagination,
     loading,
     error,
@@ -575,6 +576,13 @@ export function DealsListSection({
     limit: pageSize,
     scope,
   }, { enabled: listQueryState.enabled });
+
+  // Keep the prior rows visible while a refetch is in flight so a search keystroke or
+  // filter change never blanks/flashes the list (the hard no-blank requirement, paired
+  // with the debounced SearchInput below). isInitialLoading is gated on whether a fetch
+  // has settled yet — not on data presence — so the []-seeded hook still shows the first
+  // skeleton instead of flashing empty.
+  const { data: deals, isInitialLoading, isRefreshing } = useKeepPreviousData(rawDeals, loading);
 
   const stageNameById = useMemo(() => buildStageNameById(stages), [stages]);
   const assigneeNameById = useMemo(
@@ -835,18 +843,15 @@ export function DealsListSection({
       <div className={cn("grid gap-3 border-b border-gray-200 bg-[#f7f8fb] p-4", filterGridClass)}>
         <label className="space-y-2">
           <span className="text-[11px] font-black uppercase tracking-[0.16em] text-slate-500">Search</span>
-          <div className="relative">
-            <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" />
-            <Input
-              value={search}
-              onChange={(event) => {
-                setPage(1);
-                setSearch(event.target.value);
-              }}
-              placeholder={searchPlaceholder}
-              className="pl-9"
-            />
-          </div>
+          <SearchInput
+            value={search}
+            onChange={(value) => {
+              setPage(1);
+              setSearch(value);
+            }}
+            placeholder={searchPlaceholder}
+            aria-label={searchPlaceholder}
+          />
         </label>
 
         {hideOwnerFilter ? null : (
@@ -966,7 +971,7 @@ export function DealsListSection({
         </div>
       </div>
 
-      <div className="p-4">
+      <div className="p-4" aria-busy={isRefreshing}>
         {error ? (
           <div className="rounded-lg border border-brand-red/20 bg-brand-red/5 p-4 text-sm font-semibold text-brand-red">
             {error}
@@ -975,7 +980,7 @@ export function DealsListSection({
           <div className="rounded-lg border border-brand-red/20 bg-brand-red/5 p-4 text-sm font-semibold text-brand-red">
             Pipeline stage metadata failed to load.
           </div>
-        ) : !listQueryState.enabled || loading ? (
+        ) : !listQueryState.enabled || isInitialLoading ? (
           <div className="rounded-lg border border-slate-200 bg-white p-6 text-sm font-semibold text-slate-500">
             Loading deals...
           </div>
