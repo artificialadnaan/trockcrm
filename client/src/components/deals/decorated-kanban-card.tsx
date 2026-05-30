@@ -80,7 +80,7 @@ export function DecoratedKanbanCard({
             {displayNumber.label || "--"}
           </p>
           <DealValue
-            deal={deal}
+            deal={{ ...deal, stageSlug: deal.stageSlug ?? stageSlug }}
             value={getEffectiveDealValue(deal)}
             compact
             className="shrink-0 text-sm font-black tabular-nums text-slate-950"

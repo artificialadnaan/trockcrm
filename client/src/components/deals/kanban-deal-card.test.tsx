@@ -129,6 +129,18 @@ describe("KanbanDealCard", () => {
     expect(html).toContain("text-gray-400");
   });
 
+  it("greys + tags a Lost-column card whose pipeline row omits stageSlug (column slug fallback)", () => {
+    // Legacy pipeline deals (getDealsForPipeline) arrive without stageSlug; the column slug
+    // is authoritative, so a card in the Lost column must still render the "Lost bid" treatment.
+    const deal = makeDeal({ stageSlug: undefined, bidBoardStageSlug: null });
+    const html = renderToStaticMarkup(
+      <MemoryRouter>
+        <KanbanDealCard deal={deal} stageSlug="lost" />
+      </MemoryRouter>
+    );
+    expect(html).toContain("Lost bid");
+  });
+
   it("never surfaces the HubSpot ID even when project number is whitespace-only", () => {
     const html = render(makeDeal({ projectNumber: "   ", dealNumber: "HS-321687989951" }));
     expect(html).not.toContain("HS-321687989951");

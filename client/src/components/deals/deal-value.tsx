@@ -8,7 +8,7 @@ import {
 
 interface DealValueProps {
   /** Only the stage fields are read; pass the deal/row as-is. */
-  deal: { stageSlug?: string | null; workflowRoute?: string | null };
+  deal: { stageSlug?: string | null; bidBoardStageSlug?: string | null; workflowRoute?: string | null };
   /** The already-resolved numeric value (e.g. getEffectiveDealValue / bestEstimate). */
   value: number;
   compact?: boolean;

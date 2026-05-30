@@ -146,19 +146,23 @@ export const LOST_BID_VALUE_LABEL = "Lost bid";
  */
 export function resolveDealValueKind(deal: {
   stageSlug?: string | null;
+  bidBoardStageSlug?: string | null;
   workflowRoute?: string | null;
 }): DealValueKind {
-  const stageSlug = deal.stageSlug ?? null;
   const workflowRoute =
     deal.workflowRoute === "normal" || deal.workflowRoute === "service" ? deal.workflowRoute : null;
-  if (isGenuineLostDealStageSlug(stageSlug, workflowRoute)) return "lost";
-  if (isGenuineWonDealStageSlug(stageSlug, workflowRoute)) return "won";
+  // A Bid Board-owned/mirrored deal carries its terminal stage on bidBoardStageSlug while
+  // the CRM stageSlug can still read as open -- mirror pipeline-terminal-filters and prefer it.
+  const stageSlugs = [deal.bidBoardStageSlug ?? null, deal.stageSlug ?? null];
+  if (stageSlugs.some((slug) => isGenuineLostDealStageSlug(slug, workflowRoute))) return "lost";
+  if (stageSlugs.some((slug) => isGenuineWonDealStageSlug(slug, workflowRoute))) return "won";
   return "active";
 }
 
 /** True when a deal sits in a genuine lost stage -- its value is a historical bid, not live value. */
 export function isLostBidDeal(deal: {
   stageSlug?: string | null;
+  bidBoardStageSlug?: string | null;
   workflowRoute?: string | null;
 }): boolean {
   return resolveDealValueKind(deal) === "lost";

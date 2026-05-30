@@ -209,4 +209,12 @@ describe("resolveDealValueKind / isLostBidDeal", () => {
     expect(resolveDealValueKind({})).toBe("active");
     expect(isLostBidDeal({})).toBe(false);
   });
+
+  it("detects the terminal stage via bidBoardStageSlug when the CRM stageSlug is still open", () => {
+    // Bid Board-owned/mirrored deals carry their terminal stage on bidBoardStageSlug while
+    // the CRM stageSlug can lag on an open stage -- mirror pipeline-terminal-filters precedence.
+    expect(resolveDealValueKind({ stageSlug: "estimating", bidBoardStageSlug: "closed_lost" })).toBe("lost");
+    expect(isLostBidDeal({ stageSlug: "estimating", bidBoardStageSlug: "closed_lost" })).toBe(true);
+    expect(resolveDealValueKind({ stageSlug: "estimating", bidBoardStageSlug: "closed_won" })).toBe("won");
+  });
 });

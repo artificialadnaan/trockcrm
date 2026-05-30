@@ -13,6 +13,8 @@ export function getDealDisplayNumber(deal: Pick<Deal, "dealNumber" | "projectNum
 
 interface KanbanDealCardProps {
   deal: Deal;
+  /** Column stage slug -- authoritative when the pipeline deal row omits stageSlug. */
+  stageSlug?: string;
   onClick?: () => void;
   isDragging?: boolean;
   containerRef?: (node: HTMLElement | null) => void;
@@ -23,6 +25,7 @@ interface KanbanDealCardProps {
 
 export function KanbanDealCard({
   deal,
+  stageSlug,
   onClick,
   isDragging,
   containerRef,
@@ -77,7 +80,7 @@ export function KanbanDealCard({
         <div className="flex items-start justify-between gap-2">
           <p className="truncate text-sm font-medium text-gray-900">{deal.name}</p>
           <DealValue
-            deal={deal}
+            deal={{ ...deal, stageSlug: deal.stageSlug ?? stageSlug }}
             value={value}
             compact
             className="whitespace-nowrap text-sm font-semibold tabular-nums text-gray-900"
