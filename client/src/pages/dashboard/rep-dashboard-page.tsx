@@ -2,6 +2,7 @@ import { useRepDashboard, type RepDashboardData } from "@/hooks/use-dashboard";
 import { useAuth } from "@/lib/auth";
 import { Link, useNavigate } from "react-router-dom";
 import { useTasks } from "@/hooks/use-tasks";
+import { useKeepPreviousData } from "@/hooks/use-keep-previous-data";
 import { ActivityRangeSelect } from "@/components/dashboard/activity-range-select";
 import { type ActivityRange } from "@trock-crm/shared/types";
 import { cn } from "@/lib/utils";
@@ -499,7 +500,17 @@ export function RepDashboardPage() {
   const [period, setPeriod] = useState<Period>("YTD");
   const [numbersRange, setNumbersRange] = useState<ActivityRange>("week");
   const dashboardRange = periodToActivityRange(period);
-  const { data, loading, error, fetchedAt, refetch } = useRepDashboard({ range: dashboardRange });
+  const { data: rawDashboardData, loading, error, fetchedAt, refetch } = useRepDashboard({ range: dashboardRange });
+  // Keep the prior dashboard rendered during a background refetch (period change)
+  // instead of blanking to a skeleton; the skeleton shows only on first load.
+  const { data, isInitialLoading, isRefreshing } = useKeepPreviousData(rawDashboardData, loading);
+  // Label/drilldown the period the CURRENTLY-RENDERED data was fetched for (synced to
+  // data arrival, not to `period`), so a slow period change never relabels old numbers.
+  const [renderedPeriod, setRenderedPeriod] = useState<Period>(period);
+  useEffect(() => {
+    if (rawDashboardData) setRenderedPeriod(period);
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- sync on data arrival, not on period change
+  }, [rawDashboardData]);
   const freshness = useFreshness(fetchedAt);
   const { tasks: overdueTasks, refetch: refetchOverdue } = useTasks({ section: "overdue", limit: 50 });
   const { tasks: todayTasks, refetch: refetchToday } = useTasks({ section: "today", limit: 50 });
@@ -536,7 +547,7 @@ export function RepDashboardPage() {
     return { topDeals, alerts, blindSpots, ownershipGaps };
   }, [data, displayName, overdueTasks.length, todayTasks.length]);
 
-  if (loading) {
+  if (isInitialLoading) {
     return (
       <div className="space-y-6">
         <section className="flex flex-col gap-4 lg:flex-row lg:items-end lg:justify-between">
@@ -590,9 +601,9 @@ export function RepDashboardPage() {
   const bidBoardCount = bucketCount(data, "estimating");
   const bidBoardValue = bucketValue(data, "estimating");
   const staleAge = Math.round(data.staleLeads.averageDaysInStage ?? 14);
-  const activeDealsPath = buildRepDealsDrilldownPath("active_pipeline", period);
-  const opportunitiesPath = buildRepDealsDrilldownPath("opportunities", period);
-  const bidBoardPath = buildRepDealsDrilldownPath("bid_board", period);
+  const activeDealsPath = buildRepDealsDrilldownPath("active_pipeline", renderedPeriod);
+  const opportunitiesPath = buildRepDealsDrilldownPath("opportunities", renderedPeriod);
+  const bidBoardPath = buildRepDealsDrilldownPath("bid_board", renderedPeriod);
 
   return (
     <div className="space-y-6">
@@ -602,7 +613,7 @@ export function RepDashboardPage() {
             WELCOME, {firstName}
           </h1>
           <p className="mt-2 text-[11px] font-bold uppercase tracking-[0.24em] text-slate-500">
-            TODAY&apos;S WORK · SYNCED {freshness.toUpperCase()}
+            TODAY&apos;S WORK · SYNCED {freshness.toUpperCase()}{isRefreshing ? " · UPDATING..." : ""}
           </p>
         </div>
         <div className="flex flex-wrap items-center gap-3">
@@ -660,7 +671,7 @@ export function RepDashboardPage() {
           ariaLabel="View active leads"
         />
         <KpiCard
-          eyebrow={`Commission ${period}`}
+          eyebrow={`Commission ${renderedPeriod}`}
           value={formatCompactUsd(data.commissionSummary.totalEarnedCommission)}
           badge={`${formatCompactUsd(data.commissionSummary.directEarnedCommission)} direct`}
           caption="Your earnings"

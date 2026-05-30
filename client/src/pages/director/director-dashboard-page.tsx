@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useEffect, useState } from "react";
 import { Link, useNavigate, useSearchParams } from "react-router-dom";
 import {
   useDirectorDashboard,
@@ -7,6 +7,7 @@ import {
   type RepPerformanceCard,
 } from "@/hooks/use-director-dashboard";
 import { useRepPerformance, type RepPerformancePeriodKind, type RepPerformanceSnapshotRow } from "@/hooks/use-rep-performance";
+import { useKeepPreviousData } from "@/hooks/use-keep-previous-data";
 import { formatCurrency } from "@/components/charts/chart-colors";
 import {
   Activity,
@@ -351,6 +352,10 @@ export function DirectorDashboardPage() {
   const navigate = useNavigate();
   const [searchParams, setSearchParams] = useSearchParams();
   const [preset, setPreset] = useState<DateRangePreset>("qtd");
+  // Recompute every render: presetToDateRange derives `to` from new Date(), and
+  // useDirectorDashboard's fetch is value-guarded on the from/to STRINGS (not the
+  // object), so an unchanged-day re-render does NOT refetch -- yet `to` still rolls over
+  // at midnight (a useMemo on [preset] would freeze yesterday's date for an open tab).
   const dateRange = presetToDateRange(preset);
   const repPerformancePeriod = preset as RepPerformancePeriodKind;
   const requestedScope = resolvePreferredScope({
@@ -368,7 +373,28 @@ export function DirectorDashboardPage() {
     next.set("scope", nextScope);
     setSearchParams(next);
   };
-  const { data, loading, error, refetch, lastFetchedAt } = useDirectorDashboard(dateRange, repPerformancePeriod, scope);
+  const { data: rawDashboardData, loading, error, refetch, lastFetchedAt } = useDirectorDashboard(dateRange, repPerformancePeriod, scope);
+  // Keep the prior dashboard rendered during a same-scope background refetch (date
+  // pinch) instead of blanking; the skeleton shows on first load (see showSkeleton).
+  const { data, isInitialLoading, isRefreshing } = useKeepPreviousData(rawDashboardData, loading);
+  // Track the period AND scope the CURRENTLY-RENDERED data was fetched for, synced to
+  // data arrival (NOT to the live preset/scope). The labels use renderedPreset so a slow
+  // preset change never relabels old totals; renderedScope drives the scope-change guard.
+  const [renderedPreset, setRenderedPreset] = useState<DateRangePreset>(preset);
+  const [renderedScope, setRenderedScope] = useState<PipelineScope>(scope);
+  useEffect(() => {
+    if (rawDashboardData) {
+      setRenderedPreset(preset);
+      setRenderedScope(scope);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- sync on data arrival, not on preset/scope change
+  }, [rawDashboardData]);
+  const renderedDateRange = presetToDateRange(renderedPreset);
+  // A scope toggle (Mine/All) changes WHICH deals belong, so never show the previous
+  // scope's totals under the new scope's chrome -- fall back to the skeleton until the
+  // new-scope data lands. A date pinch keeps the prior data (same scope).
+  const scopeChanged = renderedScope !== scope;
+  const showSkeleton = isInitialLoading || (loading && scopeChanged);
   const {
     data: perfData,
     loading: perfLoading,
@@ -376,7 +402,11 @@ export function DirectorDashboardPage() {
     refetch: refetchPerformance,
   } = useRepPerformance(repPerformancePeriod);
 
-  const selectedPreset = PRESETS.find((p) => p.value === preset) ?? PRESETS[1];
+  // LABEL reflects the period of the data CURRENTLY on screen (renderedPreset), so a
+  // slow preset change never shows old totals under the new period's label.
+  const selectedPreset = PRESETS.find((p) => p.value === renderedPreset) ?? PRESETS[1];
+  // DRILL-DOWN LINKS follow the SELECTED period (live preset) -- clicking navigates to
+  // the period the user just chose, matching the highlighted button.
   const activeDealsDestination = buildDealsDrilldownPath("active_pipeline", preset, scope);
   const wonDealsDestination = buildDealsDrilldownPath("won", preset, scope);
   // This KPI is sourced from recent period closes, so it should drill into the
@@ -387,7 +417,7 @@ export function DirectorDashboardPage() {
   const staleDealsDestination = buildDealsDrilldownPath("stale", preset, scope);
   const atRiskDealsDestination = buildDealsDrilldownPath("at_risk", preset, scope);
 
-  if (loading) {
+  if (showSkeleton) {
     return (
       <div className="min-h-screen space-y-5 bg-[#F5F4F2] p-6">
         <div className="h-28 rounded-xl bg-white shadow-sm animate-pulse" />
@@ -463,11 +493,14 @@ export function DirectorDashboardPage() {
   // denominator is the period's FULL target; PACE compares Closed -- the canonical Won card
   // (closedValue = scopeSummary.won, unchanged here) -- against the day-prorated
   // expected-to-date. We only add the goal comparison around the Closed figure.
-  const goal = periodRevenueTarget(preset);
-  const expectedToDate = periodExpectedToDate(preset, new Date());
+  // No-blank (#521): drive goal/pace off the RENDERED period so the Closed figure, its
+  // percentage, and the pace all reflect the SAME period during a keep-previous refetch
+  // (not the in-flight live preset). Same #522 formulas; only the period input changes.
+  const goal = periodRevenueTarget(renderedPreset);
+  const expectedToDate = periodExpectedToDate(renderedPreset, new Date());
   const wonPercent = closedValue !== null ? clampPercent((closedValue / goal) * 100) : null;
   const pipePercent = clampPercent((forecast / goal) * 100);
-  const remainingWeeks = weeksRemaining(periodEndForPreset(preset, dateRange));
+  const remainingWeeks = weeksRemaining(periodEndForPreset(renderedPreset, renderedDateRange));
   const paceLabel = closedValue === null ? "--" : derivePace(closedValue, expectedToDate);
   const totalActivity = activityPulse.reduce((sum, row) => sum + row.total, 0);
   const strategicAlerts = data.strategicAlerts ?? [];
@@ -476,8 +509,8 @@ export function DirectorDashboardPage() {
   const wonCloses = recentCloses.filter((close) => close.outcome === "won").length;
   const lostCloses = recentCloses.filter((close) => close.outcome === "lost").length;
   const repRows = [...data.repCards].sort((a, b) => b.pipelineValue - a.pipelineValue);
-  const periodLabel = PERIOD_LABELS[preset];
-  const activityPeriodLabel = PERIOD_ACTIVITY_LABELS[preset];
+  const periodLabel = PERIOD_LABELS[renderedPreset];
+  const activityPeriodLabel = PERIOD_ACTIVITY_LABELS[renderedPreset];
   const scopeSummary = data.scopeSummary ?? {
     activePipeline: { count: 0, totalValue: 0 },
     won: { count: 0, totalValue: 0 },
@@ -513,7 +546,7 @@ export function DirectorDashboardPage() {
     const url = URL.createObjectURL(blob);
     const link = document.createElement("a");
     link.href = url;
-    link.download = `director-sales-force-${preset}.csv`;
+    link.download = `director-sales-force-${renderedPreset}.csv`;
     link.click();
     URL.revokeObjectURL(url);
   }
@@ -526,7 +559,7 @@ export function DirectorDashboardPage() {
             Director Dashboard
           </h1>
           <p className="mt-1 text-[11px] font-bold uppercase tracking-widest text-gray-500">
-            Strategic performance overview · {formatFreshness(lastFetchedAt)}
+            Strategic performance overview · {formatFreshness(lastFetchedAt)}{isRefreshing ? " · Updating..." : ""}
           </p>
         </div>
 
@@ -557,7 +590,7 @@ export function DirectorDashboardPage() {
             }}
             className="inline-flex h-9 w-9 items-center justify-center rounded-full border border-gray-200 bg-white text-gray-500 shadow-sm hover:text-gray-950"
           >
-            <RefreshCw className="h-4 w-4" />
+            <RefreshCw className={`h-4 w-4 ${isRefreshing ? "animate-spin" : ""}`} />
           </button>
           {DIRECTOR_DASHBOARD_ACTIONS.map((action) => {
             const Icon = action.key === "alerts" ? Bell : Activity;

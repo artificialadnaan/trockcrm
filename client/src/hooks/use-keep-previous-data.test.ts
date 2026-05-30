@@ -121,4 +121,20 @@ describe("useKeepPreviousData", () => {
     expect(hook.current.data).toEqual([]);
     hook.unmount();
   });
+
+  it("stays in initial-loading on a retry after the FIRST fetch failed with no data", async () => {
+    const hook = await renderKeep<Obj>({ value: null, loading: true });
+    expect(hook.current.isInitialLoading).toBe(true); // first fetch in flight
+    await hook.set({ value: null, loading: false }); // first fetch FAILED -> no data
+    expect(hook.current.isInitialLoading).toBe(false); // settled (page shows its error)
+    await hook.set({ value: null, loading: true }); // user hits Retry
+    // A failed completion did not produce data, so this is still effectively the first
+    // load -> show the skeleton, NOT a blank.
+    expect(hook.current.isInitialLoading).toBe(true);
+    expect(hook.current.isRefreshing).toBe(false);
+    await hook.set({ value: { n: 1 }, loading: false }); // retry succeeds
+    expect(hook.current.isInitialLoading).toBe(false);
+    expect(hook.current.data).toEqual({ n: 1 });
+    hook.unmount();
+  });
 });
