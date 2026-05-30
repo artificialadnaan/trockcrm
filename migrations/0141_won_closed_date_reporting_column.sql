@@ -11,13 +11,16 @@
 --     gating.
 --   - contract_signed_date: NULL on all Won deals; reserved for the commissions
 --     page.
--- won_closed_date is purpose-built, written ONLY by changeDealStage on Won-outcome
--- entry (and cleared on reopen / Lost), so it is contamination-free and decoupled
--- from the HubSpot blob.
+-- won_closed_date is purpose-built, written by the two app-owned Won-entry paths
+-- (changeDealStage and the Procore/Bid-Board mirror via synchub-routes) on Won-outcome
+-- entry, and cleared on reopen / Lost, so it is contamination-free and decoupled from
+-- the HubSpot blob. Both paths stamp the real Won-entry date (the mirror uses the
+-- Procore-reported stage-entry date) and preserve the existing value on same-stage
+-- replays / moves between Won stages -- they never mass-stamp today's date.
 --
 -- SAFETY: this migration is purely ADDITIVE. Reads and writes are UNCHANGED by it.
--- The dual-write (changeDealStage) ships in the SAME release so new wins populate
--- the column. The read helpers are flipped to this column only in a LATER,
+-- The dual-write (changeDealStage + the bid-board mirror) ships in the SAME release so
+-- new wins populate the column. The read helpers are flipped to this column only in a LATER,
 -- separately-gated change, and only AFTER a per-office parity backfill proves
 -- won_closed_date reproduces each office's current Won total. The live Won number
 -- is therefore unchanged by this migration. Idempotent via IF NOT EXISTS.

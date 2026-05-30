@@ -120,9 +120,13 @@ async function run(): Promise<void> {
       const col = await cardSummary(client, schema, "d.won_closed_date", from, to);
       const { rows: par } = await client.query(
         `SELECT
-           -- the real failure: a hs-dated Won row the backfill missed or mismatched
-           COUNT(*) FILTER (WHERE ${HS_EXPR} IS NOT NULL
-                              AND (d.won_closed_date IS NULL OR d.won_closed_date <> ${HS_EXPR}))::int AS backfill_gap,
+           -- HARD FAIL: a hs-dated Won row the backfill genuinely MISSED (col still NULL).
+           COUNT(*) FILTER (WHERE ${HS_EXPR} IS NOT NULL AND d.won_closed_date IS NULL)::int AS backfill_gap,
+           -- INFORMATIONAL (not a failure): col set AND differs from a (possibly stale)
+           -- hs. After the fill-only-where-null backfill this is a legitimate fresh-win
+           -- divergence -- the app-owned value intentionally wins over a frozen hs.
+           COUNT(*) FILTER (WHERE ${HS_EXPR} IS NOT NULL AND d.won_closed_date IS NOT NULL
+                              AND d.won_closed_date <> ${HS_EXPR})::int AS fresh_win_divergence,
            -- expected / not a failure: deals won via the dual-write after deploy (hs NULL)
            COUNT(*) FILTER (WHERE ${HS_EXPR} IS NULL AND d.won_closed_date IS NOT NULL)::int AS rollout_wins
          FROM ${s}.deals d JOIN public.pipeline_stage_config psc ON psc.id=d.stage_id
@@ -133,16 +137,20 @@ async function run(): Promise<void> {
           WHERE psc.slug IN (${stages}) AND d.won_closed_date = d.bid_board_last_updated_at::date`
       );
       const backfillGap = par[0].backfill_gap;
+      const freshWinDivergence = par[0].fresh_win_divergence;
       const rolloutWins = par[0].rollout_wins;
       const collisions = bb[0].c;
+      // PASS = no genuinely-missed fill and no bid-board reseed collision. A
+      // fresh_win_divergence (col<>hs, both present) is informational, NOT a fail --
+      // it is the app-owned value legitimately overriding a stale frozen hs.
       const pass = backfillGap === 0 && collisions === 0;
       allPass = allPass && pass;
       const fmt = (v: number) => "$" + v.toLocaleString("en-US", { minimumFractionDigits: 2 });
       console.log(
         `  ${schema}: ${pass ? "PASS" : "FAIL"}\n` +
           `    hs-basis card  = ${hs.count} / ${fmt(hs.value)}\n` +
-          `    col-basis card = ${col.count} / ${fmt(col.value)}  (delta ${col.count - hs.count} = expected in-window rollout wins)\n` +
-          `    backfill_gap=${backfillGap} (MUST be 0)  rollout_wins=${rolloutWins} (expected, ok)  bid_board_collisions=${collisions} (MUST be 0)`
+          `    col-basis card = ${col.count} / ${fmt(col.value)}  (delta ${col.count - hs.count} = rollout wins + fresh-win divergences)\n` +
+          `    backfill_gap=${backfillGap} (MUST be 0)  rollout_wins=${rolloutWins} (expected)  fresh_win_divergence=${freshWinDivergence} (informational)  bid_board_collisions=${collisions} (MUST be 0)`
       );
     }
     console.log(`\nGATE: ${allPass ? "PASS (safe to flip)" : "FAIL - DO NOT flip the read helpers"}`);
