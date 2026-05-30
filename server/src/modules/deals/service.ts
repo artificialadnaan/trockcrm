@@ -967,10 +967,16 @@ function dealWonHsClosedWonDateSql() {
 // `alias` is always a trusted developer-supplied literal (e.g. "d"), never user
 // input — consistent with buildDealOfficeScopeCondition's sql.raw(alias) usage.
 export function aliasedWonHsClosedWonDateSql(alias: string) {
-  const dealAlias = sql.raw(alias);
-  return castHsClosedWonDateSql(
-    sql`NULLIF(NULLIF(${dealAlias}.hubspot_extra_properties->>'hs_closed_won_date', ''), '0')`
-  );
+  // FLIPPED (expand/migrate/contract step D): Won-period reporting now reads the
+  // app-owned deals.won_closed_date column -- populated by changeDealStage and
+  // backfilled from hs (migration 0141 + backfill-won-closed-date.ts). All three
+  // read-sites (getWonCloseSummary dashboard card, getDealsForPipeline Won column,
+  // /deals?filter=won drill-down) flip atomically through this one body. The
+  // HubSpot JSON read is retained in dealWonHsClosedWonDateSql / castHsClosedWonDateSql
+  // for the backfill/reseed path only. Revert = restore the castHsClosedWonDateSql(...)
+  // body below. MERGE ONLY AFTER the per-office parity gate passes
+  // (verify-won-closed-date-parity.ts). See .reviews/trockcrm-date-field-decision/plan.md.
+  return sql`${sql.raw(alias)}.won_closed_date`;
 }
 
 // True iff the deal carries a usable HubSpot close-won date (non-null, non-empty,
