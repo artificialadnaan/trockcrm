@@ -23,6 +23,7 @@ import {
   Phone,
   RefreshCw,
   Sparkles,
+  StickyNote,
   Target,
   Trophy,
   User,
@@ -65,9 +66,11 @@ const PERIOD_ACTIVITY_LABELS: Record<DateRangePreset, string> = {
   custom: "selected period",
 };
 
+// Team view is intentionally NOT surfaced on the director dashboard (PR #512 parked).
+// Only Mine | All are offered here. The shared PipelineScope union still includes
+// "team" for deals/leads/pipeline; do not change it.
 const SCOPE_OPTIONS = [
   { value: "mine", label: "Mine" },
-  { value: "team", label: "Team" },
   { value: "all", label: "All" },
 ] as const satisfies readonly ScopeToggleOption<PipelineScope>[];
 
@@ -349,11 +352,15 @@ export function DirectorDashboardPage() {
   const [preset, setPreset] = useState<DateRangePreset>("qtd");
   const dateRange = presetToDateRange(preset);
   const repPerformancePeriod = preset as RepPerformancePeriodKind;
-  const scope = resolvePreferredScope({
+  const requestedScope = resolvePreferredScope({
     requestedScope: searchParams.get("scope"),
     userId: user?.id,
     fallback: "mine",
   });
+  // resolvePreferredScope validates against the shared PipelineScope union (which
+  // still includes "team"), so a stored or URL ?scope=team can slip through. Team
+  // is not offered on this dashboard -> coerce it to a scope we actually render.
+  const scope: PipelineScope = requestedScope === "team" ? "mine" : requestedScope;
   const updateScope = (nextScope: PipelineScope) => {
     writeStoredScopePreference(user?.id, nextScope);
     const next = new URLSearchParams(searchParams);
@@ -378,30 +385,6 @@ export function DirectorDashboardPage() {
   const activityDestination = buildReportDrilldownPath("/reports/performance/rep-activity", preset, dateRange);
   const staleDealsDestination = buildDealsDrilldownPath("stale", preset, scope);
   const atRiskDealsDestination = buildDealsDrilldownPath("at_risk", preset, scope);
-
-  if (scope === "team") {
-    return (
-      <div className="min-h-screen space-y-6 bg-[#F5F4F2] p-4 sm:p-6">
-        <header className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
-          <div>
-            <h1 className="text-3xl font-black uppercase tracking-tight text-gray-950 sm:text-4xl">
-              Director Dashboard
-            </h1>
-            <p className="mt-1 text-[11px] font-bold uppercase tracking-widest text-gray-500">
-              Team view is not yet configured
-            </p>
-          </div>
-          <ScopeToggle options={SCOPE_OPTIONS} value={scope} onChange={updateScope} ariaLabel="Dashboard scope" />
-        </header>
-
-        <section className="rounded-3xl border border-dashed border-slate-300 bg-white px-8 py-14 text-center shadow-sm">
-          <p className="text-[11px] font-black uppercase tracking-[0.22em] text-slate-500">Team Scope</p>
-          <h2 className="mt-3 text-2xl font-black tracking-tight text-slate-950">Team view is not yet configured.</h2>
-          <p className="mt-2 text-sm font-medium text-slate-500">Contact your admin to set up team groupings.</p>
-        </section>
-      </div>
-    );
-  }
 
   if (loading) {
     return (
@@ -950,6 +933,7 @@ export function DirectorDashboardPage() {
                 const callWidth = row.total > 0 ? (row.calls / row.total) * 100 : 0;
                 const emailWidth = row.total > 0 ? (row.emails / row.total) * 100 : 0;
                 const meetingWidth = row.total > 0 ? (row.meetings / row.total) * 100 : 0;
+                const notesWidth = row.total > 0 ? (row.notes / row.total) * 100 : 0;
                 return (
                   <div key={row.repId}>
                     <div className="mb-2 flex items-center justify-between">
@@ -966,12 +950,14 @@ export function DirectorDashboardPage() {
                         <div className="bg-emerald-500" style={{ width: `${callWidth}%` }} />
                         <div className="bg-blue-500" style={{ width: `${emailWidth}%` }} />
                         <div className="bg-purple-500" style={{ width: `${meetingWidth}%` }} />
+                        <div className="bg-gray-400" style={{ width: `${notesWidth}%` }} />
                       </div>
                     </div>
                     <div className="mt-2 flex flex-wrap gap-3 text-[10px] font-bold uppercase tracking-wide text-gray-500">
                       <span className="inline-flex items-center gap-1"><Phone className="h-3 w-3 text-emerald-500" />{row.calls} calls</span>
                       <span className="inline-flex items-center gap-1"><Mail className="h-3 w-3 text-blue-500" />{row.emails} emails</span>
                       <span className="inline-flex items-center gap-1"><CalendarClock className="h-3 w-3 text-purple-500" />{row.meetings} meetings</span>
+                      <span className="inline-flex items-center gap-1"><StickyNote className="h-3 w-3 text-gray-400" />{row.notes} notes</span>
                     </div>
                   </div>
                 );
