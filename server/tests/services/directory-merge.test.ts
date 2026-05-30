@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
   activities,
   aiDisconnectCases,
@@ -9,10 +9,18 @@ import {
   deals,
   directoryMergeAudit,
   directoryMergeQueue,
+  emailLinks,
   emails,
+  fileLinks,
   leads,
   properties,
 } from "@trock-crm/shared/schema";
+
+// The merge refreshes denormalized email stats via raw SQL; stub it for unit tests.
+vi.mock("../../src/modules/email/stats-service.js", () => ({
+  refreshEntityEmailStats: vi.fn().mockResolvedValue(undefined),
+}));
+
 import {
   COMPANY_REPOINT_TARGETS,
   selectMergeWinner,
@@ -36,6 +44,8 @@ const TABLE_NAME = new Map<unknown, string>([
   [aiDisconnectCases, "ai_disconnect_cases"],
   [emails, "emails"],
   [callRecordings, "call_recordings"],
+  [emailLinks, "email_links"],
+  [fileLinks, "file_links"],
   [directoryMergeAudit, "directory_merge_audit"],
   [directoryMergeQueue, "directory_merge_queue"],
 ]);
@@ -73,7 +83,12 @@ function recordingDb(
       set: (values: Record<string, unknown>) => ({
         where: (_cond: unknown) => {
           updates.push({ table: TABLE_NAME.get(table) ?? "unknown", values });
-          return Promise.resolve(undefined);
+          // Re-point UPDATEs capture moved ids via .returning(); plain updates await directly.
+          const result = Promise.resolve(undefined) as Promise<undefined> & {
+            returning?: (cols?: unknown) => Promise<Array<{ id: string }>>;
+          };
+          result.returning = () => Promise.resolve(captureRows(table) as Array<{ id: string }>);
+          return result;
         },
       }),
     }),
@@ -151,12 +166,14 @@ describe("COMPANY_REPOINT_TARGETS (the complete re-point map)", () => {
     );
   });
 
-  it("marks the three polymorphic targets with a discriminator", () => {
+  it("marks every polymorphic target with a 'company' discriminator", () => {
     const poly = COMPANY_REPOINT_TARGETS.filter((t) => t.discriminatorColumn);
     expect(poly.map((t) => t.key).sort()).toEqual([
       "activities_source_entity",
       "call_recordings_entity",
+      "email_links_entity",
       "emails_assigned_entity",
+      "file_links_entity",
     ]);
     for (const t of poly) expect(t.discriminatorValue).toBe("company");
   });
@@ -323,6 +340,8 @@ describe("mergeDirectoryEntities (company) -- full re-point + audit capture", ()
       "ai_disconnect_cases",
       "emails",
       "call_recordings",
+      "email_links",
+      "file_links",
     ]) {
       expect(updated).toContain(t);
     }
@@ -416,7 +435,7 @@ describe("unmergeDirectoryEntities -- exact reversal", () => {
   const auditRow = {
     id: "audit-1",
     entityType: "company",
-    mode: "merge",
+    mode: "manual",
     winnerId: "W",
     loserId: "L",
     confidenceScore: "1.000",
@@ -436,6 +455,8 @@ describe("unmergeDirectoryEntities -- exact reversal", () => {
         ai_disconnect_cases: [],
         emails_assigned_entity: ["e1"],
         call_recordings_entity: [],
+        email_links_entity: [],
+        file_links_entity: [],
       },
       reconciled: { address: "60 Columbus Circle" },
       winnerBefore: { address: null },

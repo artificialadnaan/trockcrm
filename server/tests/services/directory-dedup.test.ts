@@ -1,5 +1,11 @@
 import { describe, expect, it, vi } from "vitest";
 import { companies } from "@trock-crm/shared/schema";
+
+// Neutralize the denormalized email-stats refresh (it issues raw SQL via execute,
+// which would otherwise consume the advisory-lock mock's queue in the scan test).
+vi.mock("../../src/modules/email/stats-service.js", () => ({
+  refreshEntityEmailStats: vi.fn().mockResolvedValue(undefined),
+}));
 import {
   classifyDirectoryMatch,
   normalizeDirectoryName,
@@ -91,7 +97,12 @@ function createTenantDbForScan(companyRows: any[], lockResults: Array<{ rows: Ar
   let companyByIdFetches = 0;
   const update = vi.fn(() => ({
     set: vi.fn(() => ({
-      where: vi.fn().mockResolvedValue(undefined),
+      where: vi.fn(() => {
+        // Re-point UPDATEs use .returning() to capture moved ids; plain updates await directly.
+        const result: any = Promise.resolve(undefined);
+        result.returning = vi.fn().mockResolvedValue([]);
+        return result;
+      }),
     })),
   }));
   const insert = vi.fn(() => ({

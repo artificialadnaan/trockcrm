@@ -10,12 +10,15 @@ import {
   deals,
   directoryMergeAudit,
   directoryMergeQueue,
+  emailLinks,
   emails,
+  fileLinks,
   leads,
   properties,
 } from "@trock-crm/shared/schema";
 import type * as schema from "@trock-crm/shared/schema";
 import { AppError } from "../middleware/error-handler.js";
+import { refreshEntityEmailStats } from "../modules/email/stats-service.js";
 
 type TenantDb = NodePgDatabase<typeof schema>;
 
@@ -122,6 +125,20 @@ export const COMPANY_REPOINT_TARGETS: readonly CompanyRepointTarget[] = [
   {
     key: "call_recordings_entity",
     table: "call_recordings",
+    column: "entity_id",
+    discriminatorColumn: "entity_type",
+    discriminatorValue: "company",
+  },
+  {
+    key: "email_links_entity",
+    table: "email_links",
+    column: "entity_id",
+    discriminatorColumn: "entity_type",
+    discriminatorValue: "company",
+  },
+  {
+    key: "file_links_entity",
+    table: "file_links",
     column: "entity_id",
     discriminatorColumn: "entity_type",
     discriminatorValue: "company",
@@ -599,13 +616,24 @@ function toMergeMember(row: Record<string, any>): CompanyMergeMember {
   };
 }
 
-async function captureLoserRefIds(
+// Re-point loser -> winner for one target via UPDATE ... RETURNING, so the
+// captured ids are EXACTLY the rows moved (no select-then-update race where a
+// concurrently-inserted loser row would be moved but missing from the audit).
+// Extra set columns (e.g. contacts.company_name) are applied in the same write.
+async function moveRef(
   tenantDb: TenantDb,
   table: any,
   idColumn: any,
-  whereCond: any
+  refColumnName: string,
+  winnerId: string,
+  whereCond: any,
+  extraSet: Record<string, unknown> = {}
 ): Promise<string[]> {
-  const rows = await (tenantDb as any).select({ id: idColumn }).from(table).where(whereCond);
+  const rows = await (tenantDb as any)
+    .update(table)
+    .set({ [refColumnName]: winnerId, ...extraSet })
+    .where(whereCond)
+    .returning({ id: idColumn });
   return rows.map((r: any) => String(r.id));
 }
 
@@ -622,64 +650,62 @@ async function repointCompanyReferences(
 ): Promise<Record<string, string[]>> {
   const moved: Record<string, string[]> = {};
 
-  moved.deals = await captureLoserRefIds(tenantDb, deals, deals.id, eq(deals.companyId, loserId));
-  await tenantDb.update(deals).set({ companyId: winnerId }).where(eq(deals.companyId, loserId));
-
+  moved.deals = await moveRef(tenantDb, deals, deals.id, "companyId", winnerId, eq(deals.companyId, loserId));
   // contacts: re-point + refresh the denormalized company_name snapshot.
-  moved.contacts = await captureLoserRefIds(tenantDb, contacts, contacts.id, eq(contacts.companyId, loserId));
-  await tenantDb
-    .update(contacts)
-    .set({ companyId: winnerId, companyName: winnerName })
-    .where(eq(contacts.companyId, loserId));
-
-  moved.leads = await captureLoserRefIds(tenantDb, leads, leads.id, eq(leads.companyId, loserId));
-  await tenantDb.update(leads).set({ companyId: winnerId }).where(eq(leads.companyId, loserId));
-
-  moved.properties = await captureLoserRefIds(tenantDb, properties, properties.id, eq(properties.companyId, loserId));
-  await tenantDb.update(properties).set({ companyId: winnerId }).where(eq(properties.companyId, loserId));
-
-  moved.activities = await captureLoserRefIds(tenantDb, activities, activities.id, eq(activities.companyId, loserId));
-  await tenantDb.update(activities).set({ companyId: winnerId }).where(eq(activities.companyId, loserId));
-
+  moved.contacts = await moveRef(tenantDb, contacts, contacts.id, "companyId", winnerId, eq(contacts.companyId, loserId), {
+    companyName: winnerName,
+  });
+  moved.leads = await moveRef(tenantDb, leads, leads.id, "companyId", winnerId, eq(leads.companyId, loserId));
+  moved.properties = await moveRef(tenantDb, properties, properties.id, "companyId", winnerId, eq(properties.companyId, loserId));
+  moved.activities = await moveRef(tenantDb, activities, activities.id, "companyId", winnerId, eq(activities.companyId, loserId));
   // Polymorphic: activities.source_entity_id is a SEPARATE column from company_id.
-  const activitySourceWhere = and(
-    eq(activities.sourceEntityType, "company"),
-    eq(activities.sourceEntityId, loserId)
-  );
-  moved.activities_source_entity = await captureLoserRefIds(
+  moved.activities_source_entity = await moveRef(
     tenantDb,
     activities,
     activities.id,
-    activitySourceWhere
+    "sourceEntityId",
+    winnerId,
+    and(eq(activities.sourceEntityType, "company"), eq(activities.sourceEntityId, loserId))
   );
-  await tenantDb.update(activities).set({ sourceEntityId: winnerId }).where(activitySourceWhere);
-
-  moved.ai_document_index = await captureLoserRefIds(
+  moved.ai_document_index = await moveRef(tenantDb, aiDocumentIndex, aiDocumentIndex.id, "companyId", winnerId, eq(aiDocumentIndex.companyId, loserId));
+  moved.ai_disconnect_cases = await moveRef(tenantDb, aiDisconnectCases, aiDisconnectCases.id, "companyId", winnerId, eq(aiDisconnectCases.companyId, loserId));
+  moved.emails_assigned_entity = await moveRef(
     tenantDb,
-    aiDocumentIndex,
-    aiDocumentIndex.id,
-    eq(aiDocumentIndex.companyId, loserId)
+    emails,
+    emails.id,
+    "assignedEntityId",
+    winnerId,
+    and(eq(emails.assignedEntityType, "company"), eq(emails.assignedEntityId, loserId))
   );
-  await tenantDb.update(aiDocumentIndex).set({ companyId: winnerId }).where(eq(aiDocumentIndex.companyId, loserId));
-
-  moved.ai_disconnect_cases = await captureLoserRefIds(
+  moved.call_recordings_entity = await moveRef(
     tenantDb,
-    aiDisconnectCases,
-    aiDisconnectCases.id,
-    eq(aiDisconnectCases.companyId, loserId)
+    callRecordings,
+    callRecordings.id,
+    "entityId",
+    winnerId,
+    and(eq(callRecordings.entityType, "company"), eq(callRecordings.entityId, loserId))
   );
-  await tenantDb
-    .update(aiDisconnectCases)
-    .set({ companyId: winnerId })
-    .where(eq(aiDisconnectCases.companyId, loserId));
-
-  const emailWhere = and(eq(emails.assignedEntityType, "company"), eq(emails.assignedEntityId, loserId));
-  moved.emails_assigned_entity = await captureLoserRefIds(tenantDb, emails, emails.id, emailWhere);
-  await tenantDb.update(emails).set({ assignedEntityId: winnerId }).where(emailWhere);
-
-  const callWhere = and(eq(callRecordings.entityType, "company"), eq(callRecordings.entityId, loserId));
-  moved.call_recordings_entity = await captureLoserRefIds(tenantDb, callRecordings, callRecordings.id, callWhere);
-  await tenantDb.update(callRecordings).set({ entityId: winnerId }).where(callWhere);
+  // Polymorphic association tables. NOTE: these carry UNIQUE(parent, entity_type,
+  // entity_id), so if the SAME file/email were linked to BOTH the winner and loser
+  // company, re-pointing would violate it and the whole merge aborts (fail-safe --
+  // no corruption). Not reachable today (zero company-typed rows in prod); full
+  // de-duplicating conflict handling is a documented follow-up if they ever appear.
+  moved.email_links_entity = await moveRef(
+    tenantDb,
+    emailLinks,
+    emailLinks.id,
+    "entityId",
+    winnerId,
+    and(eq(emailLinks.entityType, "company"), eq(emailLinks.entityId, loserId))
+  );
+  moved.file_links_entity = await moveRef(
+    tenantDb,
+    fileLinks,
+    fileLinks.id,
+    "entityId",
+    winnerId,
+    and(eq(fileLinks.entityType, "company"), eq(fileLinks.entityId, loserId))
+  );
 
   return moved;
 }
@@ -734,6 +760,11 @@ export async function mergeDirectoryEntities(
         sourceRefs: sql`COALESCE(source_refs, '{}'::jsonb) || jsonb_build_object('merged_into', ${winnerId})`,
       } as any)
       .where(eq(companies.id, loserId));
+
+    // The emails just moved to the winner -- refresh the denormalized
+    // companies.email_count / last_email_at for both so the company UI is accurate.
+    await refreshEntityEmailStats(tenantDb, "company", winnerId);
+    await refreshEntityEmailStats(tenantDb, "company", loserId);
 
     auditFieldChanges = {
       loserIsActive: false,
@@ -821,8 +852,10 @@ export async function unmergeDirectoryEntities(tenantDb: TenantDb, auditId: stri
   if ((audit as any).entityType !== "company") {
     throw new AppError(400, "Un-merge is only supported for company merges");
   }
-  // Only a forward merge is reversible -- never a reversal row or any other mode.
-  if ((audit as any).mode !== "merge") {
+  // Only a forward merge is reversible. Real merges are written with mode 'auto'
+  // or 'manual' (the values mergeDirectoryEntities' callers pass); a reversal row
+  // has mode 'unmerge' and must never be reversed again.
+  if ((audit as any).mode !== "auto" && (audit as any).mode !== "manual") {
     throw new AppError(400, "Audit row is not a reversible company merge");
   }
 
@@ -904,6 +937,28 @@ export async function unmergeDirectoryEntities(tenantDb: TenantDb, auditId: stri
     loserId,
     { column: callRecordings.entityType, value: "company" }
   );
+  await restoreLoserRefIds(
+    tenantDb,
+    emailLinks,
+    emailLinks.id,
+    emailLinks.entityId,
+    "entityId",
+    movedRows.email_links_entity,
+    winnerId,
+    loserId,
+    { column: emailLinks.entityType, value: "company" }
+  );
+  await restoreLoserRefIds(
+    tenantDb,
+    fileLinks,
+    fileLinks.id,
+    fileLinks.entityId,
+    "entityId",
+    movedRows.file_links_entity,
+    winnerId,
+    loserId,
+    { column: fileLinks.entityType, value: "company" }
+  );
 
   // Restore the winner's reconciled fields, but only where the winner's current
   // value still equals what the merge set (compare-and-swap) -- a field edited
@@ -929,6 +984,10 @@ export async function unmergeDirectoryEntities(tenantDb: TenantDb, auditId: stri
       sourceRefs: sql`COALESCE(source_refs, '{}'::jsonb) - 'merged_into'`,
     } as any)
     .where(eq(companies.id, loserId));
+
+  // Emails moved back to the loser -- refresh both denormalized email counters.
+  await refreshEntityEmailStats(tenantDb, "company", winnerId);
+  await refreshEntityEmailStats(tenantDb, "company", loserId);
 
   await tenantDb.insert(directoryMergeAudit).values({
     queueEntryId: (audit as any).queueEntryId ?? null,
