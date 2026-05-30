@@ -1014,6 +1014,64 @@ describe("Dashboard Service", () => {
       expect(sqlText).toMatch(/rep_wins[\s\S]*coalesce\(d\.on_hold, false\) = false/);
     });
 
+    it("scopes the recent-closes feed to the viewer in mine scope (P1-7)", async () => {
+      const { getDirectorDashboard } = await import("../../../src/modules/dashboard/service.js");
+      const tenantDb = createMockTenantDb([]);
+
+      await getDirectorDashboard(tenantDb, {
+        from: "2026-01-01",
+        to: "2026-03-31",
+        officeId: "office-1",
+        scope: "mine",
+        viewerUserId: "viewer-1",
+      });
+
+      const recentClosesQuery = tenantDb.execute.mock.calls
+        .map(([query]: [unknown]) => extractSqlText(query).toLowerCase())
+        .find((text: string) => text.includes("closed_at desc nulls last"));
+
+      // P1-7: in mine scope, Recent Closes must narrow to the viewer's deals (matching the
+      // KPI cards), not list office-wide closes. The caller previously omitted scope.
+      expect(recentClosesQuery).toBeTruthy();
+      expect(recentClosesQuery).toContain("assigned_rep_id = ");
+    });
+
+    it("leaves the recent-closes feed office-wide in all scope (P1-7 control)", async () => {
+      const { getDirectorDashboard } = await import("../../../src/modules/dashboard/service.js");
+      const tenantDb = createMockTenantDb([]);
+
+      await getDirectorDashboard(tenantDb, {
+        from: "2026-01-01",
+        to: "2026-03-31",
+        officeId: "office-1",
+        scope: "all",
+      });
+
+      const recentClosesQuery = tenantDb.execute.mock.calls
+        .map(([query]: [unknown]) => extractSqlText(query).toLowerCase())
+        .find((text: string) => text.includes("closed_at desc nulls last"));
+
+      expect(recentClosesQuery).toBeTruthy();
+      expect(recentClosesQuery).not.toContain("assigned_rep_id = ");
+    });
+
+    it("scopes the activity-pulse rows to the viewer only when a viewer is set (P1-7)", async () => {
+      const { scopeActivityPulseRowsToViewer } = await import(
+        "../../../src/modules/dashboard/service.js"
+      );
+      const rows = [
+        { repId: "viewer-1", activityTotal: 10 },
+        { repId: "other-2", activityTotal: 99 },
+      ];
+
+      // Mine scope: only the viewer's activity row survives.
+      expect(scopeActivityPulseRowsToViewer(rows, "viewer-1")).toEqual([
+        { repId: "viewer-1", activityTotal: 10 },
+      ]);
+      // All scope (no viewer): office-wide, unchanged.
+      expect(scopeActivityPulseRowsToViewer(rows, undefined)).toBe(rows);
+    });
+
     it("keeps at-risk scope summary aligned to the role-relative engine population", async () => {
       const { getDirectorDashboard } = await import("../../../src/modules/dashboard/service.js");
       const tenantDb = {
