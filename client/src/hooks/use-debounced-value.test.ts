@@ -1,5 +1,6 @@
-import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
-import { act, renderHook } from "@testing-library/react";
+import { act, createElement } from "react";
+import { createRoot } from "react-dom/client";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { DEFAULT_SEARCH_DEBOUNCE_MS, useDebouncedValue } from "./use-debounced-value";
 
@@ -11,72 +12,91 @@ afterEach(() => {
   vi.useRealTimers();
 });
 
+// Repo convention (see use-deals.test.ts): hand-rolled renderHook via createRoot + act,
+// no @testing-library. The component lives only to run the hook and capture its return.
+async function renderDebounced(initialValue: string, delayMs?: number) {
+  const container = document.createElement("div");
+  const root = createRoot(container);
+  const state = { value: initialValue, delayMs };
+  let latest = "";
+
+  function Probe() {
+    latest = useDebouncedValue(state.value, state.delayMs);
+    return null;
+  }
+
+  await act(async () => {
+    root.render(createElement(Probe));
+  });
+
+  return {
+    get current() {
+      return latest;
+    },
+    async setValue(value: string) {
+      state.value = value;
+      await act(async () => {
+        root.render(createElement(Probe));
+      });
+    },
+    async advance(ms: number) {
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(ms);
+      });
+    },
+    unmount() {
+      root.unmount();
+    },
+  };
+}
+
 describe("useDebouncedValue", () => {
-  it("returns the initial value immediately", () => {
-    const { result } = renderHook(() => useDebouncedValue("a", 300));
-    expect(result.current).toBe("a");
+  it("returns the initial value immediately", async () => {
+    const hook = await renderDebounced("a", 300);
+    expect(hook.current).toBe("a");
+    hook.unmount();
   });
 
-  it("does not update until the delay elapses, then emits the latest value", () => {
-    const { result, rerender } = renderHook(({ v }) => useDebouncedValue(v, 300), {
-      initialProps: { v: "a" },
-    });
+  it("does not update until the delay elapses, then emits the latest value", async () => {
+    const hook = await renderDebounced("a", 300);
+    await hook.setValue("ab");
+    await hook.setValue("abc");
+    expect(hook.current).toBe("a"); // unchanged before the delay
 
-    rerender({ v: "ab" });
-    rerender({ v: "abc" });
-    expect(result.current).toBe("a"); // unchanged before the delay
+    await hook.advance(299);
+    expect(hook.current).toBe("a");
 
-    act(() => {
-      vi.advanceTimersByTime(299);
-    });
-    expect(result.current).toBe("a");
-
-    act(() => {
-      vi.advanceTimersByTime(1);
-    });
-    expect(result.current).toBe("abc"); // only the final value lands, after 300ms
+    await hook.advance(1);
+    expect(hook.current).toBe("abc"); // only the final value lands, after 300ms
+    hook.unmount();
   });
 
-  it("resets the timer on every change so only the settled value is emitted", () => {
-    const { result, rerender } = renderHook(({ v }) => useDebouncedValue(v, 300), {
-      initialProps: { v: "a" },
-    });
+  it("resets the timer on every change so only the settled value is emitted", async () => {
+    const hook = await renderDebounced("a", 300);
+    await hook.setValue("ab");
+    await hook.advance(200);
+    await hook.setValue("abc"); // resets the timer with 200ms already elapsed
+    await hook.advance(200);
+    expect(hook.current).toBe("a"); // 200ms since last change < 300ms
 
-    rerender({ v: "ab" });
-    act(() => {
-      vi.advanceTimersByTime(200);
-    });
-    rerender({ v: "abc" }); // resets the timer with 200ms already elapsed
-    act(() => {
-      vi.advanceTimersByTime(200);
-    });
-    expect(result.current).toBe("a"); // 200ms since last change < 300ms
-
-    act(() => {
-      vi.advanceTimersByTime(100);
-    });
-    expect(result.current).toBe("abc");
+    await hook.advance(100);
+    expect(hook.current).toBe("abc");
+    hook.unmount();
   });
 
-  it("uses the shared default debounce when the delay is omitted", () => {
+  it("uses the shared default debounce when the delay is omitted", async () => {
     expect(DEFAULT_SEARCH_DEBOUNCE_MS).toBe(300);
-    const { result, rerender } = renderHook(({ v }) => useDebouncedValue(v), {
-      initialProps: { v: "x" },
-    });
-
-    rerender({ v: "xy" });
-    act(() => {
-      vi.advanceTimersByTime(DEFAULT_SEARCH_DEBOUNCE_MS);
-    });
-    expect(result.current).toBe("xy");
+    const hook = await renderDebounced("x");
+    await hook.setValue("xy");
+    await hook.advance(DEFAULT_SEARCH_DEBOUNCE_MS);
+    expect(hook.current).toBe("xy");
+    hook.unmount();
   });
 
-  it("passes the value through immediately when the delay is <= 0", () => {
-    const { result, rerender } = renderHook(({ v }) => useDebouncedValue(v, 0), {
-      initialProps: { v: "a" },
-    });
-
-    rerender({ v: "b" });
-    expect(result.current).toBe("b");
+  it("passes the value through immediately when the delay is <= 0", async () => {
+    const hook = await renderDebounced("a", 0);
+    await hook.setValue("b");
+    expect(hook.current).toBe("b");
+    hook.unmount();
   });
 });
