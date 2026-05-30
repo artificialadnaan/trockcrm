@@ -1,6 +1,6 @@
 import { useMemo, useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { ArrowUpRight, Building2, ChevronLeft, ChevronRight, Globe2, Plus, Search } from "lucide-react";
+import { ArrowUpRight, Building2, ChevronLeft, ChevronRight, Globe2, Plus } from "lucide-react";
 import { PageHeader } from "@/components/layout/page-header";
 import { listPaginationIconButtonClassName } from "@/components/shared/list-pagination";
 import { MetricCard } from "@/components/shared/metric-card";
@@ -10,12 +10,13 @@ import { ScopeToggle } from "@/components/shared/scope-toggle";
 import { USD, USD_COMPACT } from "@/components/shared/formatters";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
-import { Input } from "@/components/ui/input";
+import { SearchInput } from "@/components/ui/search-input";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { useAuth } from "@/lib/auth";
 import { useOwnerAssignees } from "@/hooks/use-owner-assignees";
 import { useTaskAssignees } from "@/hooks/use-task-assignees";
 import { assignCompanyOwnerToMe, reassignCompanyOwner, useCompanies, type Company } from "@/hooks/use-companies";
+import { useKeepPreviousData } from "@/hooks/use-keep-previous-data";
 import { cn } from "@/lib/utils";
 
 const INDUSTRY_OPTIONS = [
@@ -68,13 +69,16 @@ export function CompanyListPage() {
   const [ownerScope, setOwnerScope] = useState<(typeof OWNER_SCOPE_OPTIONS)[number]["value"]>("all");
   const [page, setPage] = useState(1);
 
-  const { companies, pagination, loading, error, refetch } = useCompanies({
+  const { companies: rawCompanies, pagination, loading, error, refetch } = useCompanies({
     search: search || undefined,
     industry: industry === "all" ? undefined : industry,
     ownerScope: ownerScope === "mine" ? "mine" : undefined,
     page,
     limit: 50,
   });
+  // No-blank: keep the prior page of accounts visible during a search/filter/page refetch; gate
+  // the skeleton to the FIRST load only and show an "Updating..." hint on a refresh.
+  const { data: companies, isInitialLoading, isRefreshing } = useKeepPreviousData(rawCompanies, loading, error);
 
   const totals = useMemo(() => {
     const pipeline = companies.reduce((sum, company) => sum + numeric(company.pipelineValue), 0);
@@ -109,18 +113,17 @@ export function CompanyListPage() {
         <CardContent className="space-y-4 p-4">
           <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
             <div className="flex flex-1 flex-col gap-3 sm:flex-row sm:items-center">
-              <div className="relative min-w-[240px] flex-1">
-                <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" />
-                <Input
-                  value={search}
-                  onChange={(event) => {
-                    setSearch(event.target.value);
-                    setPage(1);
-                  }}
-                  placeholder="Search accounts, cities, domains..."
-                  className="h-9 border-slate-200 pl-9"
-                />
-              </div>
+              <SearchInput
+                value={search}
+                onChange={(value) => {
+                  setSearch(value);
+                  setPage(1);
+                }}
+                placeholder="Search accounts, cities, domains..."
+                aria-label="Search accounts"
+                className="min-w-[240px] flex-1"
+                inputClassName="h-9 border-slate-200"
+              />
               <ScopeToggle
                 options={INDUSTRY_OPTIONS}
                 value={industry}
@@ -141,7 +144,7 @@ export function CompanyListPage() {
               />
             </div>
             <p className="text-[11px] font-bold uppercase tracking-[0.16em] text-slate-500">
-              {loading ? "Loading accounts" : `${pagination.total} results`}
+              {isInitialLoading ? "Loading accounts" : `${pagination.total} results${isRefreshing ? " · Updating..." : ""}`}
             </p>
           </div>
 
@@ -149,7 +152,7 @@ export function CompanyListPage() {
             <div className="rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm font-medium text-red-700">{error}</div>
           ) : null}
 
-          {loading ? (
+          {isInitialLoading ? (
             <div className="space-y-2">
               {Array.from({ length: 6 }).map((_, index) => (
                 <div key={index} className="h-16 animate-pulse rounded-lg bg-slate-100" />

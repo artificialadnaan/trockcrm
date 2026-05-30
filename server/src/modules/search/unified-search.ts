@@ -173,3 +173,43 @@ export function buildLeadSearchCondition(search: string): SQL {
     )
   )`;
 }
+
+/**
+ * The columns the unified company (account) search matches (PR3). Superset of the legacy
+ * companies-list search (name only); address, city, state, domain, website, and the owner's
+ * display_name are the intended additions — matching the "accounts, cities, domains" promise.
+ */
+export const COMPANY_SEARCH_FIELDS = [
+  "companies.name",
+  "companies.address",
+  "companies.city",
+  "companies.state",
+  "companies.domain",
+  "companies.website",
+  "users.display_name",
+] as const;
+
+/**
+ * Build the WHERE predicate that matches a company by its own text fields plus its owner's
+ * name. Same contract as the deal/lead builders: lifecycle-agnostic (never references
+ * is_active / scope — the caller keeps those), read-only, widens no visibility. The owner
+ * match is an EXISTS subquery (not a join) so the SAME condition works in both the list query
+ * and the COUNT query, which does not join users. Caller guards min length (>= 2 chars).
+ */
+export function buildCompanySearchCondition(search: string): SQL {
+  const searchTerm = `%${escapeLikePattern(search.trim())}%`;
+  return sql`(
+    ${companies.name} ILIKE ${searchTerm} ESCAPE '\\'
+    OR ${companies.address} ILIKE ${searchTerm} ESCAPE '\\'
+    OR ${companies.city} ILIKE ${searchTerm} ESCAPE '\\'
+    OR ${companies.state} ILIKE ${searchTerm} ESCAPE '\\'
+    OR ${companies.domain} ILIKE ${searchTerm} ESCAPE '\\'
+    OR ${companies.website} ILIKE ${searchTerm} ESCAPE '\\'
+    OR EXISTS (
+      SELECT 1
+      FROM public.users owner_user
+      WHERE owner_user.id = ${companies.ownerId}
+        AND owner_user.display_name ILIKE ${searchTerm} ESCAPE '\\'
+    )
+  )`;
+}

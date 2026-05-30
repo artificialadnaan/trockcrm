@@ -2,6 +2,7 @@ import { eq, and, ilike, asc, desc, count, sql, getTableColumns } from "drizzle-
 import { companies, contacts, deals, users } from "@trock-crm/shared/schema";
 import type { NodePgDatabase } from "drizzle-orm/node-postgres";
 import { AppError } from "../../middleware/error-handler.js";
+import { buildCompanySearchCondition } from "../search/unified-search.js";
 import {
   aliasedActiveDealCountFilterSql,
   aliasedDealBestEstimateWithForecastSql,
@@ -40,8 +41,8 @@ export async function listCompanies(
   const offset = (page - 1) * limit;
 
   const conditions = [eq(companies.isActive, true)];
-  if (options.search) {
-    conditions.push(ilike(companies.name, `%${options.search}%`));
+  if (options.search && options.search.trim().length >= 2) {
+    conditions.push(buildCompanySearchCondition(options.search));
   }
   if (options.category) {
     conditions.push(eq(companies.category, options.category as any));
