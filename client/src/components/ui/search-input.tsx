@@ -70,15 +70,27 @@ export function SearchInput({
     }
   }, [debounced]);
 
+  // Emit `next` upward now, bypassing the debounce, but never re-emit a value we already
+  // reported (idempotent with the debounced emit above).
+  const commit = (next: string) => {
+    if (next !== lastEmittedRef.current) {
+      lastEmittedRef.current = next;
+      onChangeRef.current(next);
+    }
+  };
+
   // Commit the pending value immediately when the field loses focus. A one-shot action
   // that reads the committed value (e.g. clicking an Export button, which blurs the input
-  // first) must see the latest term, not one still inside the debounce window. The
-  // lastEmittedRef guard makes this idempotent with the debounced emit above (no double-fire).
-  const flushPending = () => {
-    if (draft !== lastEmittedRef.current) {
-      lastEmittedRef.current = draft;
-      onChangeRef.current(draft);
-    }
+  // first) must see the latest term, not one still inside the debounce window.
+  const flushPending = () => commit(draft);
+
+  // Clearing must take effect immediately: empty the field AND commit "" now, so a one-shot
+  // read right after clearing sees "" rather than the pre-clear term still in the debounce
+  // window. preventDefault on mousedown keeps focus on the input so the blur-flush above
+  // does not first commit the stale pre-clear draft.
+  const handleClear = () => {
+    setDraft("");
+    commit("");
   };
 
   return (
@@ -103,7 +115,8 @@ export function SearchInput({
           variant="ghost"
           size="icon"
           aria-label="Clear search"
-          onClick={() => setDraft("")}
+          onMouseDown={(event) => event.preventDefault()}
+          onClick={handleClear}
           className="absolute right-1 top-1/2 h-6 w-6 -translate-y-1/2 text-muted-foreground"
         >
           <X className="h-3.5 w-3.5" />
