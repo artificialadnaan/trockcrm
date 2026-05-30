@@ -1089,7 +1089,7 @@ describe("Dashboard Service", () => {
       expect(result.scopeSummary).not.toHaveProperty("stale");
     });
 
-    it("excludes is_test_data users from the rep, snapshot, and activity rosters (P2-8)", async () => {
+    it("excludes is_test_data users from every director-dashboard rep roster (P2-8)", async () => {
       const { getDirectorDashboard } = await import("../../../src/modules/dashboard/service.js");
       const tenantDb = createMockTenantDb([]);
 
@@ -1118,6 +1118,17 @@ describe("Dashboard Service", () => {
       const activityQuery = queries.find((t) => t.includes("a.type = 'call'"));
       expect(activityQuery).toBeTruthy();
       expect(activityQuery).toContain(filter);
+
+      // Commission roster (getDirectorRepCommissionRows) -> dashboard payload + commission
+      // workspace. Bare column (the query has no `u` alias). (Codex round 2)
+      const commissionQuery = queries.find((t) => t.includes("order by display_name asc"));
+      expect(commissionQuery).toBeTruthy();
+      expect(commissionQuery).toContain("coalesce(is_test_data, false) = false");
+
+      // Funnel roster (getDirectorFunnelSummary repFunnelRows). (Codex round 2)
+      const funnelQuery = queries.find((t) => t.includes("qualified_leads"));
+      expect(funnelQuery).toBeTruthy();
+      expect(funnelQuery).toContain(filter);
     });
 
     it("keeps at-risk scope summary aligned to the role-relative engine population", async () => {

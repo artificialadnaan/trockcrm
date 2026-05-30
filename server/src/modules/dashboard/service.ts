@@ -909,6 +909,9 @@ async function getDirectorFunnelSummary(
       LEFT JOIN lead_counts lc ON lc.rep_id = u.id
       LEFT JOIN deal_counts dc ON dc.rep_id = u.id
       WHERE u.is_active = true
+        -- P2-8 (Codex round 2): exclude flagged smoke-test / duplicate accounts from the
+        -- funnel roster too, matching the rep-card roster.
+        AND COALESCE(u.is_test_data, false) = false
         AND (u.role = 'rep' OR owner_rows.rep_id IS NOT NULL)
       ORDER BY
         (
@@ -1227,6 +1230,9 @@ async function getDirectorRepCommissionRows(
     SELECT id, display_name
     FROM ${users}
     WHERE is_active = true
+      -- P2-8 (Codex round 2): exclude flagged smoke-test / duplicate accounts from the
+      -- commission roster (dashboard payload + commission workspace).
+      AND COALESCE(is_test_data, false) = false
       AND role = 'rep'
     ORDER BY display_name ASC
   `);
