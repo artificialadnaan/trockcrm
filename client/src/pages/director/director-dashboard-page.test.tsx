@@ -483,6 +483,15 @@ describe("DirectorDashboardPage", () => {
     expect(html).toContain("Refresh dashboard");
   });
 
+  it("surfaces notes in the activity pulse so the bar reflects the full total", () => {
+    const html = renderPageHtml();
+
+    // activityPulse rows carry notes (Blake/Avery have notes: 7). The bar segments
+    // and labels must include notes, not just calls/emails/meetings, or a rep whose
+    // activity is mostly notes shows an under-filled bar with the count hidden.
+    expect(html).toContain("7 notes");
+  });
+
   it("routes at-risk deal drilldowns to the filtered deals list", () => {
     const html = renderPageHtml();
 
@@ -630,16 +639,18 @@ describe("DirectorDashboardPage", () => {
     expect(html).toContain('href="/deals?filter=won&amp;period=qtd&amp;scope=all"');
   });
 
-  it("shows the Team empty state without collapsing request scope", () => {
+  it("hides the Team scope and coerces a manual ?scope=team URL to a real scope", () => {
     const html = renderPageHtml("/?scope=team");
 
+    // Team is no longer an offered scope: no Team toggle button, no dead placeholder.
+    expect(html).not.toContain(">Team</button>");
+    expect(html).not.toContain("Team view is not yet configured.");
+    // A manual ?scope=team URL coerces to the fallback ("mine"), never requests "team".
     expect(mocks.useDirectorDashboardMock).toHaveBeenCalledWith(
       { from: "2026-04-01", to: "2026-05-08" },
       "qtd",
-      "team"
+      "mine"
     );
-    expect(html).toContain("Team view is not yet configured.");
-    expect(html).toContain("Contact your admin to set up team groupings.");
   });
 
   it("preserves the selected dashboard period in drill-down links", async () => {
