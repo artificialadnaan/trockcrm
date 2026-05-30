@@ -4,6 +4,7 @@ import type { NodePgDatabase } from "drizzle-orm/node-postgres";
 import { activities, contacts, contactDealAssociations, deals, emails, tasks, users } from "@trock-crm/shared/schema";
 import type * as schema from "@trock-crm/shared/schema";
 import { AppError } from "../../middleware/error-handler.js";
+import { buildContactSearchCondition } from "../search/unified-search.js";
 
 type TenantDb = NodePgDatabase<typeof schema>;
 const INVALID_EMAIL_MESSAGE = "Please enter a valid email address.";
@@ -390,21 +391,10 @@ export async function getContacts(tenantDb: TenantDb, filters: ContactFilters) {
     conditions.push(eq(contacts.firstOutreachCompleted, true));
   }
 
-  // Full-text search across name, email, company, phone
+  // Substring search across name, email, company, phone/mobile, job title, city, and owner —
+  // the shared unified field set (single source of truth in modules/search/unified-search).
   if (filters.search && filters.search.trim().length >= 2) {
-    const searchTerm = `%${filters.search.trim()}%`;
-    conditions.push(
-      or(
-        ilike(contacts.firstName, searchTerm),
-        ilike(contacts.lastName, searchTerm),
-        sql`${contacts.firstName} || ' ' || ${contacts.lastName} ILIKE ${searchTerm}`,
-        ilike(contacts.email, searchTerm),
-        ilike(contacts.companyName, searchTerm),
-        ilike(contacts.phone, searchTerm),
-        ilike(contacts.mobile, searchTerm),
-        ilike(contacts.jobTitle, searchTerm)
-      )
-    );
+    conditions.push(buildContactSearchCondition(filters.search));
   }
 
   const where = conditions.length > 0 ? and(...conditions) : undefined;

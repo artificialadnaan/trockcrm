@@ -213,3 +213,49 @@ export function buildCompanySearchCondition(search: string): SQL {
     )
   )`;
 }
+
+/**
+ * The columns the unified contact search matches (PR4). Superset of the legacy contacts-list
+ * search (first/last/full name, email, company_name, phone, mobile, job_title); city and the
+ * owner's display_name are the intended additions, and metacharacters are now escaped (matched
+ * literally) like every other builder.
+ */
+export const CONTACT_SEARCH_FIELDS = [
+  "contacts.first_name",
+  "contacts.last_name",
+  "contacts.email",
+  "contacts.company_name",
+  "contacts.phone",
+  "contacts.mobile",
+  "contacts.job_title",
+  "contacts.city",
+  "users.display_name",
+] as const;
+
+/**
+ * Build the WHERE predicate that matches a contact by its own text fields (name, email,
+ * denormalized company name, phone/mobile, job title, city) plus its owner's name. Same
+ * contract as the other builders: lifecycle-agnostic, read-only, widens no visibility. Owner
+ * is an EXISTS subquery (not a join) so the SAME condition works in the list query AND the
+ * COUNT query (which does not join users). Caller guards min length (>= 2 chars).
+ */
+export function buildContactSearchCondition(search: string): SQL {
+  const searchTerm = `%${escapeLikePattern(search.trim())}%`;
+  return sql`(
+    ${contacts.firstName} ILIKE ${searchTerm} ESCAPE '\\'
+    OR ${contacts.lastName} ILIKE ${searchTerm} ESCAPE '\\'
+    OR CONCAT(${contacts.firstName}, ' ', ${contacts.lastName}) ILIKE ${searchTerm} ESCAPE '\\'
+    OR ${contacts.email} ILIKE ${searchTerm} ESCAPE '\\'
+    OR ${contacts.companyName} ILIKE ${searchTerm} ESCAPE '\\'
+    OR ${contacts.phone} ILIKE ${searchTerm} ESCAPE '\\'
+    OR ${contacts.mobile} ILIKE ${searchTerm} ESCAPE '\\'
+    OR ${contacts.jobTitle} ILIKE ${searchTerm} ESCAPE '\\'
+    OR ${contacts.city} ILIKE ${searchTerm} ESCAPE '\\'
+    OR EXISTS (
+      SELECT 1
+      FROM public.users owner_user
+      WHERE owner_user.id = ${contacts.ownerId}
+        AND owner_user.display_name ILIKE ${searchTerm} ESCAPE '\\'
+    )
+  )`;
+}

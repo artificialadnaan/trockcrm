@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
 import { api } from "@/lib/api";
 import { getOfficeRequestOptions, type OfficeRequestOptions } from "@/lib/office-selection";
 
@@ -68,8 +68,13 @@ export function useContacts(filters: ContactFilters = {}) {
   const [pagination, setPagination] = useState<Pagination>({ page: 1, limit: 50, total: 0, totalPages: 0 });
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  // Last-write-wins: a search/filter/page change can leave an earlier request in flight, and
+  // debounce reduces but does not eliminate out-of-order responses on fast typing. Only the
+  // latest request may write results, so a slow earlier response cannot overwrite a later one.
+  const requestIdRef = useRef(0);
 
   const fetchContacts = useCallback(async () => {
+    const requestId = ++requestIdRef.current;
     setLoading(true);
     setError(null);
     try {
@@ -97,12 +102,16 @@ export function useContacts(filters: ContactFilters = {}) {
       const data = await api<{ contacts: Contact[]; pagination: Pagination }>(
         `/contacts${qs ? `?${qs}` : ""}`
       );
+      if (requestId !== requestIdRef.current) return; // a newer request superseded this one
       setContacts(data.contacts);
       setPagination(data.pagination);
     } catch (err: unknown) {
+      if (requestId !== requestIdRef.current) return;
       setError(err instanceof Error ? err.message : "Failed to load contacts");
     } finally {
-      setLoading(false);
+      if (requestId === requestIdRef.current) {
+        setLoading(false);
+      }
     }
   }, [
     filters.search,
