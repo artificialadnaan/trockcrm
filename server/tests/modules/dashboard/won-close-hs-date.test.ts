@@ -1,10 +1,11 @@
 import { describe, it, expect, vi } from "vitest";
 
-// CHANGE 4: the Director closed-period card (getWonCloseSummary) must gate on the
-// true HubSpot close-won date and drop the updated_at fallback that inflated it by
-// counting "touched in-period" deals as "won in-period". It must also stop forcing
-// is_active=true (terminal Won legitimately includes inactive, §6.7) and exclude
-// test data. Mocked tenantDb — asserts on the generated SQL.
+// CHANGE 4 (post-flip basis): the Director closed-period card (getWonCloseSummary)
+// gates on the app-owned won_closed_date column (flipped off the HubSpot JSON in
+// step D), dropping the updated_at fallback that inflated it by counting "touched
+// in-period" deals as "won in-period". It must also stop forcing is_active=true
+// (terminal Won legitimately includes inactive, §6.7) and exclude test data. Mocked
+// tenantDb — asserts on the generated SQL.
 
 vi.mock("@trock-crm/shared/schema", async () => import("../../../../shared/src/schema/index.js"));
 vi.mock("@trock-crm/shared/types", async () => import("../../../../shared/src/types/index.js"));
@@ -56,14 +57,15 @@ function captureExecuteTenantDb() {
 }
 
 describe("getWonCloseSummary (Director closed-period card)", () => {
-  it("gates on hs_closed_won_date, removes the updated_at/actual_close_date COALESCE, and stops forcing is_active=true", async () => {
+  it("gates on won_closed_date, removes the updated_at/actual_close_date COALESCE, and stops forcing is_active=true", async () => {
     const { tenantDb, executed } = captureExecuteTenantDb();
     const { getWonCloseSummary } = await import("../../../src/modules/dashboard/service.js");
 
     await getWonCloseSummary(tenantDb, { from: "2026-01-01", to: "2026-05-31" });
 
     const sql = executed.find((t) => t.includes("won_count")) ?? "";
-    expect(sql).toContain("hs_closed_won_date");
+    expect(sql).toContain("won_closed_date");
+    expect(sql).not.toContain("hs_closed_won_date"); // flipped off the HubSpot JSON
     expect(sql).toContain("is not null"); // usable-date guard
     expect(sql).toContain("is_test_data"); // test-data exclusion
     // The old COALESCE date fallbacks are gone. (Bare column names still appear in
