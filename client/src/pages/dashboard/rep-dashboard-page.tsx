@@ -2,6 +2,7 @@ import { useRepDashboard, type RepDashboardData } from "@/hooks/use-dashboard";
 import { useAuth } from "@/lib/auth";
 import { Link, useNavigate } from "react-router-dom";
 import { useTasks } from "@/hooks/use-tasks";
+import { useKeepPreviousData } from "@/hooks/use-keep-previous-data";
 import { ActivityRangeSelect } from "@/components/dashboard/activity-range-select";
 import { type ActivityRange } from "@trock-crm/shared/types";
 import { cn } from "@/lib/utils";
@@ -499,7 +500,16 @@ export function RepDashboardPage() {
   const [period, setPeriod] = useState<Period>("YTD");
   const [numbersRange, setNumbersRange] = useState<ActivityRange>("week");
   const dashboardRange = periodToActivityRange(period);
-  const { data, loading, error, fetchedAt, refetch } = useRepDashboard({ range: dashboardRange });
+  const { data: rawDashboardData, loading, error, fetchedAt, refetch } = useRepDashboard({ range: dashboardRange });
+  // Keep the prior dashboard rendered during a background refetch (period change)
+  // instead of blanking to a skeleton; the skeleton shows only on first load.
+  const { data, isInitialLoading, isRefreshing } = useKeepPreviousData(rawDashboardData, loading);
+  // NOTE: rep period (Today/Week/MTD/QTD/YTD) maps MANY-TO-ONE onto the coarse dashboard
+  // range (e.g. QTD and YTD both -> "ytd"), so a "rendered period synced to data arrival"
+  // gets STUCK when two periods share a range (no refetch fires). The Commission label and
+  // drill-down links therefore follow the LIVE selected period -- same as the director
+  // drill-down links. useKeepPreviousData still keeps data visible on a range-CHANGING
+  // refetch; the brief label/data lag on those is the accepted keep-previous transient.
   const freshness = useFreshness(fetchedAt);
   const { tasks: overdueTasks, refetch: refetchOverdue } = useTasks({ section: "overdue", limit: 50 });
   const { tasks: todayTasks, refetch: refetchToday } = useTasks({ section: "today", limit: 50 });
@@ -536,7 +546,7 @@ export function RepDashboardPage() {
     return { topDeals, alerts, blindSpots, ownershipGaps };
   }, [data, displayName, overdueTasks.length, todayTasks.length]);
 
-  if (loading) {
+  if (isInitialLoading) {
     return (
       <div className="space-y-6">
         <section className="flex flex-col gap-4 lg:flex-row lg:items-end lg:justify-between">
@@ -602,7 +612,7 @@ export function RepDashboardPage() {
             WELCOME, {firstName}
           </h1>
           <p className="mt-2 text-[11px] font-bold uppercase tracking-[0.24em] text-slate-500">
-            TODAY&apos;S WORK · SYNCED {freshness.toUpperCase()}
+            TODAY&apos;S WORK · SYNCED {freshness.toUpperCase()}{isRefreshing ? " · UPDATING..." : ""}
           </p>
         </div>
         <div className="flex flex-wrap items-center gap-3">

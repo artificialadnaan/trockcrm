@@ -287,6 +287,17 @@ export function PipelinePage() {
   const [terminalStages, setTerminalStages] = useState<TerminalStageInfo[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  // No-blank: track whether we have a SUCCESSFULLY-loaded board and the scope it was
+  // loaded for (columns is seeded to [], so it cannot itself signal "loaded"). Keep the
+  // current board visible with an "Updating..." hint on a SAME-SCOPE refetch (Won/Lost
+  // date-filter); show the skeleton on first load, after a failed load, AND on a scope
+  // change -- the board's deal set changes and it is interactive, so never leave a stale
+  // cross-scope board live.
+  const hasLoadedRef = useRef(false);
+  const loadedScopeRef = useRef<PipelineScope | null>(null);
+  const hasCurrentScopeBoard = hasLoadedRef.current && loadedScopeRef.current === scope;
+  const isInitialLoading = loading && !hasCurrentScopeBoard;
+  const isRefreshing = loading && hasCurrentScopeBoard;
   const [showDd, setShowDd] = useState(searchParams.get("showDd") === "1");
   const [activeDeal, setActiveDeal] = useState<Deal | null>(null);
   const [stageChangeOpen, setStageChangeOpen] = useState(false);
@@ -317,6 +328,8 @@ export function PipelinePage() {
       setColumns(data.pipelineColumns);
       setTerminalStages(data.terminalStages ?? []);
       setLastRefreshed(new Date());
+      hasLoadedRef.current = true;
+      loadedScopeRef.current = scope; // the scope these columns were fetched for
     } catch (err) {
       console.error("Failed to load pipeline:", err);
       setError("Failed to load pipeline data. Please try again.");
@@ -436,7 +449,7 @@ export function PipelinePage() {
     return Math.round((won / total) * 100);
   })();
 
-  if (loading) {
+  if (isInitialLoading) {
     return (
       <div className="space-y-4 p-6">
         <div className="h-8 w-48 animate-pulse rounded bg-gray-100" />
@@ -480,7 +493,7 @@ export function PipelinePage() {
         <div className="flex items-center gap-4">
           <ScopeToggle options={SCOPE_OPTIONS} value={scope} onChange={updateScope} ariaLabel="Pipeline scope" />
           <span className="hidden text-xs tabular-nums text-gray-500 md:inline">
-            {refreshedLabel}
+            {refreshedLabel}{isRefreshing ? " · Updating..." : ""}
           </span>
 
           <div className="flex items-center gap-2 rounded-sm border border-gray-200 px-3 py-1.5">

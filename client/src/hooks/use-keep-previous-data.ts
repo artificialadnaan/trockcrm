@@ -52,10 +52,14 @@ export function useKeepPreviousData<T>(value: T, loading: boolean): KeepPrevious
   }, [value]);
 
   useEffect(() => {
-    if (!loading) {
+    // "Settled" = a fetch COMPLETED WITH DATA. A completion that produced no data (a
+    // failed first fetch / error) must NOT count -- otherwise a retry after a failed
+    // initial load would skip the skeleton and blank. An empty-but-present result like
+    // [] IS data and correctly settles.
+    if (!loading && !isNullish(value)) {
       hasSettledRef.current = true;
     }
-  }, [loading]);
+  }, [loading, value]);
 
   const data = isNullish(value) && loading ? lastNonNullRef.current : value;
   const hasData = !isNullish(data);
