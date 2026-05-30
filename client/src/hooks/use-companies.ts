@@ -65,8 +65,13 @@ export function useCompanies(filters: CompanyFilters = {}) {
   });
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  // Last-write-wins: a search/filter/page change can leave an earlier request in flight, and
+  // debounce reduces but does not eliminate out-of-order responses on fast typing. Only the
+  // latest request may write results, so a slow earlier response cannot overwrite a later one.
+  const requestIdRef = useRef(0);
 
   const fetchCompanies = useCallback(async () => {
+    const requestId = ++requestIdRef.current;
     setLoading(true);
     setError(null);
     try {
@@ -82,6 +87,7 @@ export function useCompanies(filters: CompanyFilters = {}) {
       const data = await api<{ companies: Company[]; total: number; page: number; limit: number }>(
         `/companies${qs ? `?${qs}` : ""}`
       );
+      if (requestId !== requestIdRef.current) return; // a newer request superseded this one
       setCompanies(data.companies);
       const total = data.total;
       const page = data.page ?? filters.page ?? 1;
@@ -93,9 +99,12 @@ export function useCompanies(filters: CompanyFilters = {}) {
         totalPages: Math.ceil(total / limit),
       });
     } catch (err: unknown) {
+      if (requestId !== requestIdRef.current) return;
       setError(err instanceof Error ? err.message : "Failed to load companies");
     } finally {
-      setLoading(false);
+      if (requestId === requestIdRef.current) {
+        setLoading(false);
+      }
     }
   }, [filters.search, filters.category, filters.industry, filters.ownerScope, filters.page, filters.limit]);
 
