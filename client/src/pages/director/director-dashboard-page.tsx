@@ -36,6 +36,7 @@ import { ScopeToggle, type ScopeToggleOption } from "@/components/shared/scope-t
 import { useAuth } from "@/lib/auth";
 import type { PipelineScope } from "@/lib/pipeline-scope";
 import { resolvePreferredScope, writeStoredScopePreference } from "@/lib/scope-preferences";
+import { periodRevenueTarget, periodExpectedToDate, derivePace } from "@/lib/revenue-goal";
 
 const PRESETS: Array<{ value: DateRangePreset; label: string }> = [
   { value: "mtd", label: "MTD" },
@@ -455,19 +456,19 @@ export function DirectorDashboardPage() {
   const unassignedWins = Math.max(0, (closedCount ?? 0) - repCardsWinsTotal);
   const hasUnassignedWon = unassignedClosedValue > 0 || unassignedWins > 0;
   // Wave 1 (P1-6): the forecast reads the director payload's live forecastVsGoal (active-
-  // pipeline total), NOT the stale rep_performance_snapshots forecast. (The visible
-  // forecast/pace UI is still goal-gated and goal is null in prod -> P0-3 reworks that.)
+  // pipeline total), NOT the stale rep_performance_snapshots forecast.
   const forecastVsGoal = data.forecastVsGoal ?? null;
-  const goal = forecastVsGoal?.goal ?? 0;
   const forecast = forecastVsGoal?.forecast ?? 0;
-  const wonPercent = goal > 0 && closedValue !== null ? clampPercent((closedValue / goal) * 100) : null;
-  // P0-3 + Codex (Wave 1 PR): forecast/pace derive from the director payload (live), so they
-  // do NOT depend on the snapshot's hasPerformanceData. With no goal configured (goal is null
-  // in prod) the block renders an honest "no goal" state rather than a false "Behind".
-  const pipePercent = goal > 0 ? clampPercent((forecast / goal) * 100) : null;
-  const goalGap = goal > 0 && closedValue !== null && goal > closedValue ? goal - closedValue : 0;
+  // Hard-coded revenue goal (no goal store yet, see @/lib/revenue-goal). The displayed
+  // denominator is the period's FULL target; PACE compares Closed -- the canonical Won card
+  // (closedValue = scopeSummary.won, unchanged here) -- against the day-prorated
+  // expected-to-date. We only add the goal comparison around the Closed figure.
+  const goal = periodRevenueTarget(preset);
+  const expectedToDate = periodExpectedToDate(preset, new Date());
+  const wonPercent = closedValue !== null ? clampPercent((closedValue / goal) * 100) : null;
+  const pipePercent = clampPercent((forecast / goal) * 100);
   const remainingWeeks = weeksRemaining(periodEndForPreset(preset, dateRange));
-  const paceLabel = goal <= 0 ? "No goal set" : closedValue !== null && closedValue >= goal ? "Ahead" : (pipePercent ?? 0) >= 75 ? "On pace" : "Behind";
+  const paceLabel = closedValue === null ? "--" : derivePace(closedValue, expectedToDate);
   const totalActivity = activityPulse.reduce((sum, row) => sum + row.total, 0);
   const strategicAlerts = data.strategicAlerts ?? [];
   const aiPrompts = data.aiCoachingPrompts ?? [];
@@ -594,7 +595,13 @@ export function DirectorDashboardPage() {
           label={`Closed ${selectedPreset.label}`}
           value={formatCurrency(scopeSummary.won.totalValue)}
           badge={`${scopeSummary.won.count} won`}
-          caption={perfError ? "Performance unavailable" : goal > 0 ? `Goal ${formatCurrency(goal)} ${selectedPreset.label}` : "Goal not configured"}
+          caption={
+            perfError
+              ? "Performance unavailable"
+              : scope === "all"
+                ? `Goal ${formatCurrency(goal)} ${selectedPreset.label}`
+                : "Your closed revenue"
+          }
           accent="blue"
           to={wonDealsDestination}
           ariaLabel="View closed won deals"
@@ -624,20 +631,16 @@ export function DirectorDashboardPage() {
             to={forecastDestination}
             aria-label="View forecast accuracy report"
             className="block rounded-lg focus:outline-none focus-visible:ring-2 focus-visible:ring-[#CC0000]"
-            title={goal > 0 ? "Open forecast accuracy report" : "Goal not configured. Open forecast accuracy report."}
+            title="Open forecast accuracy report"
           >
             <p className="text-[10px] font-black uppercase tracking-widest text-gray-400">Forecast vs goal</p>
             {/* Closed (scopeSummary.won) + forecast come from the director payload, so they
                 render regardless of the snapshot's load state. */}
             <p className="mt-2 text-4xl font-black tracking-tight text-gray-950">
-              {closedValue !== null ? formatCurrency(closedValue) : "--"} / {goal > 0 ? formatCurrency(goal) : "--"}
+              {closedValue !== null ? formatCurrency(closedValue) : "--"} / {formatCurrency(goal)}
             </p>
-            <p className={`mt-1 text-sm font-semibold ${goal > 0 && goalGap > 0 ? "text-[#CC0000]" : "text-gray-500"}`}>
-              {goal <= 0
-                ? "Goal not configured · current period"
-                : goalGap > 0
-                ? `${formatCurrency(goalGap)} behind goal · ${remainingWeeks ?? "--"} weeks remaining`
-                : "Goal met or ahead · current period"}
+            <p className={`mt-1 text-sm font-semibold ${paceLabel === "Behind" ? "text-[#CC0000]" : "text-gray-500"}`}>
+              {`${paceLabel} pace · ${remainingWeeks ?? "--"} weeks remaining`}
             </p>
           </Link>
 

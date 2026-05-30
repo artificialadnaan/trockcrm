@@ -513,7 +513,7 @@ describe("DirectorDashboardPage", () => {
     expect(html).toContain("Closed QTD");
     expect(html).toContain("At risk");
     expect(html).toContain("Weighted forecast");
-    expect(html).toContain("Goal $500,000 QTD");
+    expect(html).toContain("Goal $8,250,000 QTD");
     expect(html).toContain("$910,000");
   });
 
@@ -691,7 +691,7 @@ describe("DirectorDashboardPage", () => {
     const html = renderPageHtml();
 
     expect(html).toContain("Forecast vs goal");
-    expect(html).toContain("$360,000 / $500,000");
+    expect(html).toContain("$360,000 / $8,250,000");
     expect(html).toContain("8 weeks remaining");
     expect(html).toContain("Pace");
     expect(html).toContain("Closing");
@@ -701,9 +701,10 @@ describe("DirectorDashboardPage", () => {
     expect(html).toContain("Pipe");
   });
 
-  it("renders an honest no-goal state instead of a contradictory pace when no goal is configured", () => {
-    // P0-3 (folded into Wave 1): goal is null in prod (no goal source). The block must not
-    // show "Behind" pace above a "Goal met or ahead" sub-line; it shows a single honest state.
+  it("uses the hard-coded revenue goal (real comparison) even when the payload goal is null", () => {
+    // The goal is now a hard-coded constant (no goal store yet), so a null payload goal no
+    // longer yields a "No goal set" honest state -- the block shows the period's real target
+    // and a coherent pace derived from Closed vs the day-prorated expected-to-date.
     mocks.useDirectorDashboardMock.mockReturnValue({
       ...mocks.useDirectorDashboardMock(),
       data: {
@@ -714,11 +715,24 @@ describe("DirectorDashboardPage", () => {
 
     const html = renderPageHtml();
 
-    expect(html).toContain("No goal set");
-    expect(html).toContain("Goal not configured · current period");
-    expect(html).not.toContain("Goal met or ahead");
-    expect(html).not.toContain("behind goal");
-    expect(html).not.toContain(">Behind<");
+    // Default render is QTD -> quarterly target $8,250,000; the honest no-goal copy is gone.
+    expect(html).toContain("$8,250,000");
+    expect(html).not.toContain("No goal set");
+    expect(html).not.toContain("Goal not configured");
+    // Closed ($360k from scopeSummary.won) is far below the QTD prorated pace -> Behind.
+    expect(html).toContain("Behind pace");
+  });
+
+  it("does not caption the personal Closed card against the company goal in Mine scope", () => {
+    // In Mine scope the Closed value is the viewer's own (scopeSummary.won is viewer-scoped)
+    // and the forecast/goal section is hidden, so the company period goal must NOT label it.
+    const mineHtml = renderPageHtml("/?scope=mine");
+    expect(mineHtml).not.toContain("Goal $8,250,000");
+    expect(mineHtml).toContain("Your closed revenue");
+
+    // All scope still shows the company goal on the Closed card caption.
+    const allHtml = renderPageHtml("/?scope=all");
+    expect(allHtml).toContain("Goal $8,250,000 QTD");
   });
 
   it("surfaces an Unassigned row so the Sales Force Closed column sums to the Closed card", () => {
@@ -843,8 +857,8 @@ describe("DirectorDashboardPage", () => {
 
     const html = renderPageHtml();
 
-    expect(html).toContain("$360,000 / $500,000");
-    expect(html).not.toContain("$910,000 / $500,000");
+    expect(html).toContain("$360,000 / $8,250,000");
+    expect(html).not.toContain("$910,000 / $8,250,000");
   });
 
   it("counts fallback at-risk reps from backend rep attribution and routes open-all to deals", () => {
@@ -967,7 +981,10 @@ describe("DirectorDashboardPage", () => {
     expect(html).toContain("Opportunity: 99");
     expect(html).toContain("width:1%");
     expect(html).not.toContain("Leads: 0");
-    expect(html).not.toContain("width:4%");
+    // Sentinel for "a zero funnel bucket rendered a spurious segment". 4% is avoided
+    // because the forecast Won/Pipe bars legitimately render width:4% here (Closed vs the
+    // quarterly goal); 25% is produced by neither the funnel nor the forecast in this mock.
+    expect(html).not.toContain("width:25%");
   });
 
   it("renders live closed totals (not stale snapshot values) while the rep-performance snapshot is loading or errored", () => {
@@ -1064,7 +1081,7 @@ describe("DirectorDashboardPage", () => {
     // forecast block is no longer coupled to the snapshot load state; only snapshot-only
     // columns (region) stay gated.
     const loadingHtml = renderPageHtml();
-    expect(loadingHtml).toContain("$360,000 / $500,000");
+    expect(loadingHtml).toContain("$360,000 / $8,250,000");
     expect(loadingHtml).toContain("Performance pending");
     expect(loadingHtml).not.toContain("Loading performance metrics");
     expect(loadingHtml).not.toContain("Performance metrics pending");
@@ -1081,7 +1098,7 @@ describe("DirectorDashboardPage", () => {
     });
 
     const errorHtml = renderPageHtml();
-    expect(errorHtml).toContain("$360,000 / $500,000");
+    expect(errorHtml).toContain("$360,000 / $8,250,000");
     expect(errorHtml).toContain("Performance pending");
     expect(errorHtml).not.toContain("Loading performance metrics");
     expect(errorHtml).not.toContain("Performance metrics pending");
