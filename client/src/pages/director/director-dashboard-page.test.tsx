@@ -701,6 +701,16 @@ describe("DirectorDashboardPage", () => {
     expect(html).toContain("Pipe");
   });
 
+  it("surfaces the prorated target-to-date next to the pace so the gap is visible", () => {
+    const html = renderPageHtml();
+
+    // Default render is QTD on 2026-05-08 (day 38 of a 91-day quarter): the $8.25M
+    // quarterly target prorated to date is 8_250_000 * 38/91 = $3,445,055, shown next
+    // to the current Closed ($360,000 from scopeSummary.won) so the gap is explicit.
+    expect(html).toContain("Target to date $3,445,055");
+    expect(html).toContain("at $360,000");
+  });
+
   it("uses the hard-coded revenue goal (real comparison) even when the payload goal is null", () => {
     // The goal is now a hard-coded constant (no goal store yet), so a null payload goal no
     // longer yields a "No goal set" honest state -- the block shows the period's real target

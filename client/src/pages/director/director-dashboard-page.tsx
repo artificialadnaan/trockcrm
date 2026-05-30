@@ -642,6 +642,9 @@ export function DirectorDashboardPage() {
             <p className={`mt-1 text-sm font-semibold ${paceLabel === "Behind" ? "text-[#CC0000]" : "text-gray-500"}`}>
               {`${paceLabel} pace · ${remainingWeeks ?? "--"} weeks remaining`}
             </p>
+            <p className="mt-0.5 text-xs font-medium text-gray-500">
+              {`Target to date ${formatCurrency(Math.round(expectedToDate))} · you're at ${formatCurrency(closedValue ?? 0)}`}
+            </p>
           </Link>
 
           <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
