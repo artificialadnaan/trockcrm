@@ -1711,6 +1711,11 @@ export interface RepPerformanceCard {
   activityScore: number; // total activities in period
   staleDeals: number;
   staleLeads: number;
+  // Wave 1 (P0-1): canonical per-rep Won decomposition of the Closed card. SUM over
+  // cards === getWonCloseSummary total/count for rostered reps (same won_closed_date
+  // basis). Replaces the stale rep_performance_snapshots closed value on the rep table.
+  closedValue: number;
+  winsCount: number;
 }
 
 export const REP_PERFORMANCE_PERIOD_KINDS = [
@@ -2259,6 +2264,49 @@ export async function getWonCloseSummary(
   };
 }
 
+export interface CanonicalRepWonRow {
+  repId: string | null;
+  closedValue: number;
+  winsCount: number;
+}
+
+// Wave 1 (P0-1 reconciliation): LIVE per-rep decomposition of getWonCloseSummary.
+// The WHERE clause is byte-identical to the Closed card above (won_closed_date basis,
+// test-data exclusion, Won stages, usable-won-date guard, period bounds, scope) — the
+// ONLY additions are `assigned_rep_id` in SELECT and a GROUP BY. Therefore
+// SUM(rows.closedValue) === getWonCloseSummary().totalValue and SUM(rows.winsCount) ===
+// .count BY CONSTRUCTION, under every scope/period. This retires the stale
+// rep_performance_snapshots dependency for the rep-table "Closed" column. Null-rep
+// (unassigned) groups are RETAINED so the sum still equals the card exactly.
+export async function getCanonicalRepWonSummary(
+  tenantDb: TenantDb,
+  options: { from: string; to: string } & DashboardScopeOptions
+): Promise<CanonicalRepWonRow[]> {
+  const repFilter = dealScopeFilterSql("d", options);
+  const result = await tenantDb.execute(sql`
+    SELECT
+      d.assigned_rep_id AS rep_id,
+      COUNT(*) FILTER (WHERE ${aliasedActiveDealCountFilterSql("d")})::int AS won_count,
+      COALESCE(SUM(${aliasedEffectiveWonDealValueSql("d")}), 0)::numeric AS won_value
+    FROM ${deals} d
+    JOIN ${pipelineStageConfig} psc ON psc.id = d.stage_id
+    WHERE COALESCE(d.is_test_data, false) = false
+      AND ${aliasedActiveDealCountFilterSql("d")}
+      AND psc.slug IN (${sql.join(WON_STAGE_SLUGS.map((slug) => sql`${slug}`), sql`, `)})
+      AND ${aliasedHasUsableWonDateSql("d")}
+      AND ${aliasedWonHsClosedWonDateSql("d")} >= ${options.from}::date
+      AND ${aliasedWonHsClosedWonDateSql("d")} <= ${options.to}::date
+      ${repFilter}
+    GROUP BY d.assigned_rep_id
+  `);
+
+  return rowsFromExecute<any>(result).map((row) => ({
+    repId: row.rep_id == null ? null : String(row.rep_id),
+    closedValue: Number(row.won_value ?? 0),
+    winsCount: Number(row.won_count ?? 0),
+  }));
+}
+
 async function getScopedPipelineSummary(
   tenantDb: TenantDb,
   options: { includeDd?: boolean } & DashboardScopeOptions = {}
@@ -2524,6 +2572,7 @@ export async function getDirectorDashboard(
     repPerformanceSnapshots,
     recentCloses,
     scopeSummary,
+    canonicalRepWon,
   ] = await runSequential([
     // 1. Per-rep performance cards
     () => buildRepPerformanceCards(tenantDb, { from, to }),
@@ -2566,6 +2615,17 @@ export async function getDirectorDashboard(
       includeDealSubscriptionDeletedAt: mineVisibility?.dealSubscriptionsDeletedAt,
       includeLeadSubscriptionDeletedAt: mineVisibility?.leadSubscriptionsDeletedAt,
     }),
+    // Wave 1 (P0-1): live per-rep Won decomposition of the Closed card, scoped to the
+    // SAME deal-visibility options buildDirectorScopeSummary uses for the card, so the
+    // rep-table Closed column sums to scopeSummary.won by construction under each scope.
+    () => getCanonicalRepWonSummary(tenantDb, {
+      from,
+      to,
+      viewerUserId: scopedViewerUserId,
+      includeDealSubscriptions: mineVisibility?.dealSubscriptions,
+      includeDealCreatedBy: mineVisibility?.dealsCreatedByUserId,
+      includeDealSubscriptionDeletedAt: mineVisibility?.dealSubscriptionsDeletedAt,
+    }),
   ]);
 
   const dashboardStaleDeals = buildDashboardAtRiskStaleDeals(
@@ -2589,9 +2649,16 @@ export async function getDirectorDashboard(
     now
   );
   const atRiskCountsByRep = buildAtRiskCountsByRep(dashboardAtRiskDeals);
+  const canonicalWonByRep = new Map(
+    canonicalRepWon
+      .filter((row): row is CanonicalRepWonRow & { repId: string } => row.repId != null)
+      .map((row) => [row.repId, row])
+  );
   const repCards = repCardsResult.map((rep) => ({
     ...rep,
     staleDeals: atRiskCountsByRep.get(rep.repId) ?? 0,
+    closedValue: canonicalWonByRep.get(rep.repId)?.closedValue ?? 0,
+    winsCount: canonicalWonByRep.get(rep.repId)?.winsCount ?? 0,
   }));
 
   return {
@@ -2633,7 +2700,10 @@ export async function getDirectorDashboard(
     crmOwnedProgression,
     downstreamBottlenecks: dashboardDownstreamBottlenecks,
     atRiskDeals: dashboardAtRiskDeals,
-    forecastVsGoal: repPerformanceSnapshots.forecastVsGoal,
+    // Wave 1 (P1-6): forecast is the LIVE active-pipeline total (=== the Active Pipeline
+    // KPI, scopeSummary.activePipeline), not the stale snapshot pipeline sum that inflated
+    // it ~2.4x ($93.8M vs $38.8M). goal stays null (no goal source; see P0-3/Wave 2).
+    forecastVsGoal: buildGoalNullForecast(scopeSummary.activePipeline.totalValue),
     activityPulse: repPerformanceSnapshots.rows.map((row) => ({
       repId: row.repId,
       repName: row.repName,

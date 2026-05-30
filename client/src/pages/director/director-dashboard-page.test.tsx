@@ -326,6 +326,8 @@ describe("DirectorDashboardPage", () => {
             activityScore: 49,
             staleDeals: 1,
             staleLeads: 2,
+            closedValue: 240000,
+            winsCount: 4,
           },
           {
             repId: "rep-2",
@@ -336,6 +338,8 @@ describe("DirectorDashboardPage", () => {
             activityScore: 74,
             staleDeals: 0,
             staleLeads: 1,
+            closedValue: 120000,
+            winsCount: 2,
           },
         ],
         pipelineByStage: [{ stageId: "opportunity", stageName: "Opportunity", stageColor: null, dealCount: 3, totalValue: 450000 }],
@@ -598,6 +602,8 @@ describe("DirectorDashboardPage", () => {
             activityScore: 9,
             staleDeals: 0,
             staleLeads: 0,
+            closedValue: 31071,
+            winsCount: 1,
           },
         ],
       },
@@ -1099,10 +1105,15 @@ describe("DirectorDashboardPage", () => {
 
       const csvBlob = createObjectURLMock.mock.calls[0]?.[0] as Blob;
       const csv = await csvBlob.text();
+      // Wave 1 (P0-1): the rep-table Closed column now reads the canonical per-rep Won
+      // from the director payload (always live), NOT the rep_performance snapshot. So the
+      // STALE snapshot values must still never leak (777777 / Stale Region / atRisk 12),
+      // but the canonical closed ($240,000 / 4) IS exported even while the snapshot endpoint
+      // is unavailable -- it is not stale.
       expect(csv).not.toContain("777777");
       expect(csv).not.toContain("Stale Region");
       expect(csv).not.toContain(",12,");
-      expect(csv).toContain("Avery Rep,,0,0,910000,6,67,1,Moderate");
+      expect(csv).toContain("Avery Rep,,240000,4,910000,6,67,1,Moderate");
     } finally {
       await cleanup();
       Object.defineProperty(URL, "createObjectURL", { value: originalCreateObjectUrl, configurable: true });

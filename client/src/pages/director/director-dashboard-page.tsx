@@ -455,8 +455,12 @@ export function DirectorDashboardPage() {
     if (!deal.repId) continue;
     engineAtRiskCountByRep.set(deal.repId, (engineAtRiskCountByRep.get(deal.repId) ?? 0) + 1);
   }
-  const closedValue = usablePerfData ? usablePerfData.reps.reduce((sum, row) => sum + row.current.totalWonValue, 0) : null;
-  const closedCount = usablePerfData ? usablePerfData.reps.reduce((sum, row) => sum + row.current.dealsWon, 0) : null;
+  // Wave 1 (P0-1): closed totals are the canonical per-rep Won sums from the director
+  // payload (same won_closed_date basis as the Closed card), so they reconcile with the
+  // card instead of the stale rep_performance_snapshots reps. Typed nullable to preserve
+  // the downstream goal/pace guards unchanged.
+  const closedValue: number | null = data.repCards.reduce((sum, rep) => sum + (rep.closedValue ?? 0), 0);
+  const closedCount: number | null = data.repCards.reduce((sum, rep) => sum + (rep.winsCount ?? 0), 0);
   const forecastVsGoal = usablePerfData ? usablePerfData.forecastVsGoal : null;
   const goal = forecastVsGoal?.goal ?? 0;
   const forecast = forecastVsGoal?.forecast ?? 0;
@@ -486,9 +490,8 @@ export function DirectorDashboardPage() {
     const header = ["Rep", "Region", "Closed Value", "Closed Deals", "Pipeline Value", "Active Deals", "Win Rate", "At Risk", "Activity"];
     const rows = repRows.map((rep) => {
       const snapshot = perfRowsByRep.get(rep.repId);
-      const perfRep = perfRepsByRep.get(rep.repId);
-      const closed = snapshot?.closedValue ?? perfRep?.current.totalWonValue ?? 0;
-      const closedDeals = snapshot?.winsCount ?? perfRep?.current.dealsWon ?? 0;
+      const closed = rep.closedValue ?? 0; // Wave 1: canonical per-rep Won (reconciles with the card)
+      const closedDeals = rep.winsCount ?? 0;
       const atRisk = engineAtRiskCountByRep.get(rep.repId) ?? 0;
       const activity = getActivityLevel(rep.activityScore);
       return [
@@ -733,8 +736,10 @@ export function DirectorDashboardPage() {
                 {repRows.map((rep) => {
                   const snapshot = perfRowsByRep.get(rep.repId);
                   const perfRep = perfRepsByRep.get(rep.repId);
-                  const closed = hasPerformanceData ? snapshot?.closedValue ?? perfRep?.current.totalWonValue ?? null : null;
-                  const closedDeals = hasPerformanceData ? snapshot?.winsCount ?? perfRep?.current.dealsWon ?? null : null;
+                  // Wave 1 (P0-1): canonical per-rep Won from the director payload
+                  // (reconciles with the Closed card); replaces the stale snapshot value.
+                  const closed: number | null = rep.closedValue ?? null;
+                  const closedDeals: number | null = rep.winsCount ?? null;
                   const winRate = hasPerformanceData ? snapshot?.winRate ?? rep.winRate : null;
                   const winDelta = hasPerformanceData && winRate !== null
                     ? snapshot?.previous ? winRate - snapshot.previous.winRate : perfRep?.change.winRate ?? null
