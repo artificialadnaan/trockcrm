@@ -1,35 +1,18 @@
 import { and, or, sql, type SQL } from "drizzle-orm";
 import { deals } from "@trock-crm/shared/schema";
-
-/**
- * Canonical Won-close date — the protected 191 / $9,778,045.90 basis. Prefers the
- * authoritative HubSpot close-won timestamp, falling back to the CRM
- * contract-signed date for deals predating that field. Byte-identical to the
- * wonClosedDateExpr the getDeals Won-period drill-down uses (which self-documents
- * as "Mirrors getWonCloseSummary exactly"). Adopting this date-scope function for
- * Won therefore cannot move the basis (GREY audit §5 / Codex #546). `col` maps a
- * column name to its SQL fragment (aliased or unaliased).
- */
-function canonicalWonCloseDateSql(col: (name: string) => SQL): SQL {
-  return sql`COALESCE(
-    NULLIF(${col("hubspot_extra_properties")}->>'hs_closed_won_date', '')::date,
-    ${col("contract_signed_at")}::date,
-    ${col("contract_signed_date")}
-  )`;
-}
+import { aliasedWonHsClosedWonDateSql } from "./deal-value-sql.js";
 
 /**
  * CANONICAL PLATFORM-WIDE deal date-scoping model.
  *
  * One date window, three outcome axes, classified per row by its stage:
- *   - Won rows  -> the CANONICAL won-close date (canonicalWonCloseDateSql):
- *                  COALESCE(NULLIF(hs_closed_won_date,'')::date,
- *                  contract_signed_at::date, contract_signed_date) — the SAME
- *                  expression getWonCloseSummary / the getDeals Won drill-down use,
- *                  i.e. the protected 191 / $9,778,045.90 basis. The
- *                  hs_closed_won_date primary is what makes it canonical; a plain
- *                  contract_signed COALESCE (the old value here) silently diverged
- *                  from the basis. GREY audit §5 / Codex #546.
+ *   - Won rows  -> the CANONICAL won-close date helper (aliasedWonHsClosedWonDateSql
+ *                  in ../shared/deal-value-sql.ts) = deals.won_closed_date — the
+ *                  EXACT SAME helper getWonCloseSummary / the getDeals Won
+ *                  drill-down use, i.e. the protected 191 / $9,778,045.90 basis.
+ *                  Imported (not reimplemented) so it can never diverge; an earlier
+ *                  hand-rolled contract_signed COALESCE silently moved off the basis
+ *                  (GREY audit §5 / Codex #546).
  *   - Lost rows -> lost_at::date                       (reliable now)
  *   - Open rows -> entered-current-stage date (stage_entered_at::date), applied
  *                  ONLY when the stage-entry date is reliable
@@ -65,10 +48,10 @@ export interface DealDateScopeColumns {
 export function dealDateScopeColumns(): DealDateScopeColumns {
   return {
     stageId: sql`${deals.stageId}`,
-    // Canonical Won-close basis (matches getWonCloseSummary / the getDeals Won
-    // drill-down), NOT a bare contract_signed chain — so adopting this function
-    // for Won never moves the protected 191 / $9,778,045.90 total.
-    wonDate: canonicalWonCloseDateSql((name) => sql.raw(`"deals"."${name}"`)),
+    // Canonical Won-period basis — the SAME helper getWonCloseSummary / the
+    // getDeals Won drill-down use (deals.won_closed_date), so adopting this
+    // date-scope for Won never moves the protected 191 / $9,778,045.90 total.
+    wonDate: aliasedWonHsClosedWonDateSql("deals"),
     lostDate: sql`${deals.lostAt}::date`,
     stageEntryDate: sql`${deals.stageEnteredAt}::date`,
   };
@@ -79,8 +62,8 @@ export function aliasedDealDateScopeColumns(alias: string): DealDateScopeColumns
   const col = (name: string) => sql.raw(`${alias}.${name}`);
   return {
     stageId: sql`${col("stage_id")}`,
-    // Canonical Won-close basis (see dealDateScopeColumns) for the aliased table.
-    wonDate: canonicalWonCloseDateSql((name) => sql.raw(`${alias}.${name}`)),
+    // Canonical Won-period basis (see dealDateScopeColumns) for the aliased table.
+    wonDate: aliasedWonHsClosedWonDateSql(alias),
     lostDate: sql`${col("lost_at")}::date`,
     stageEntryDate: sql`${col("stage_entered_at")}::date`,
   };
@@ -131,17 +114,19 @@ export function buildDealOutcomeDateScope(
   const to = window.to?.trim() || undefined;
   if (!from && !to) return undefined;
 
-  // A date window needs at least one resolved outcome class to classify rows.
-  // If BOTH the Won and Lost stage-id sets are empty (a pipeline_stage_config
-  // misconfiguration — the canonical WON/LOST slug sets resolve in a healthy
-  // install), every row would fall to the open branch and the window would match
-  // ALL rows. Rather than 500 a date-filtered endpoint (Codex #546) or silently
-  // apply a mis-classified window, SKIP the date predicate: return undefined so
-  // the caller omits it and still returns rows (date simply isn't applied —
-  // honest degradation, since the filter can't be correct without classification).
+  // Correct date-scoping needs BOTH outcome classes resolved. The open branch is
+  // openMatch = NOT(wonMatch OR lostMatch); if either set is empty, that side
+  // becomes `false` and rows of the MISSING class fold into "open" — e.g. with
+  // lostStageIds empty, real Lost rows match openMatch and (flag off) get included
+  // regardless of lost_at, WIDENING the result past the window (Codex #546). The
+  // canonical WON/LOST slug sets both resolve in a healthy install; if either is
+  // missing (a pipeline_stage_config misconfig / fixture without terminal stages),
+  // SKIP the date predicate entirely — return undefined so the caller omits it and
+  // still returns rows. Honest degradation that never widens or 500s, never folds
+  // an unclassifiable outcome into open.
   const hasWon = (ctx.wonStageIds?.length ?? 0) > 0;
   const hasLost = (ctx.lostStageIds?.length ?? 0) > 0;
-  if (!hasWon && !hasLost) return undefined;
+  if (!hasWon || !hasLost) return undefined;
 
   const columns = ctx.columns ?? dealDateScopeColumns();
   const wonMatch = stageMembership(columns.stageId, ctx.wonStageIds);

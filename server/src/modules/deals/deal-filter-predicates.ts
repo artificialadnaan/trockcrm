@@ -105,7 +105,11 @@ export function buildStatusPredicate(input: DealFilterBarInput): SQL | undefined
     case "active":
       return and(eq(deals.isActive, true), sql`coalesce(${deals.onHold}, false) = false`);
     case "on_hold":
-      return sql`coalesce(${deals.onHold}, false) = true`;
+      // On-Hold is a CURRENT-deals view (a subset of active, paused), so require
+      // is_active=true too — else a soft-deleted deal (deleteDeal sets is_active
+      // false but leaves on_hold set) would reappear here (Codex #546). A deal
+      // both inactive AND on-hold belongs under Inactive, not On-Hold.
+      return and(eq(deals.isActive, true), sql`coalesce(${deals.onHold}, false) = true`);
     case "inactive":
       return eq(deals.isActive, false);
     default:

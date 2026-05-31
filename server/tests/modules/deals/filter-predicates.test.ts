@@ -88,10 +88,13 @@ describe("status predicate (active / on_hold / inactive / any)", () => {
     expect(sql).toContain("is_active");
     expect(sql).toContain("on_hold");
   });
-  it("On-Hold => on_hold true (does not force is_active)", () => {
+  it("On-Hold => on_hold true AND is_active true (a current-deals view; excludes soft-deleted)", () => {
+    // On-Hold is a subset of active deals (active but paused), so it must also
+    // require is_active=true — else a soft-deleted deal left on_hold reappears
+    // (deleteDeal sets is_active false but leaves on_hold). Codex #546.
     const sql = text(buildStatusPredicate({ status: "on_hold" }));
     expect(sql).toContain("on_hold");
-    expect(sql).not.toContain("is_active");
+    expect(sql).toContain("is_active");
   });
   it("Inactive => is_active false", () => {
     expect(text(buildStatusPredicate({ status: "inactive" }))).toContain("is_active");

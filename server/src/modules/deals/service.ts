@@ -55,6 +55,7 @@ import {
   aliasedActiveDealCountFilterSql,
   aliasedDealAwardedFirstWithFallbackSql,
   aliasedDealBestEstimateSql,
+  aliasedWonHsClosedWonDateSql,
   dealAwardedFirstWithFallbackSql,
   dealBestEstimateSql,
 } from "../shared/deal-value-sql.js";
@@ -994,20 +995,13 @@ function dealWonHsClosedWonDateSql() {
   );
 }
 
-// `alias` is always a trusted developer-supplied literal (e.g. "d"), never user
-// input — consistent with buildDealOfficeScopeCondition's sql.raw(alias) usage.
-export function aliasedWonHsClosedWonDateSql(alias: string) {
-  // FLIPPED (expand/migrate/contract step D): Won-period reporting now reads the
-  // app-owned deals.won_closed_date column -- populated by changeDealStage and
-  // backfilled from hs (migration 0141 + backfill-won-closed-date.ts). All three
-  // read-sites (getWonCloseSummary dashboard card, getDealsForPipeline Won column,
-  // /deals?filter=won drill-down) flip atomically through this one body. The
-  // HubSpot JSON read is retained in dealWonHsClosedWonDateSql / castHsClosedWonDateSql
-  // for the backfill/reseed path only. Revert = restore the castHsClosedWonDateSql(...)
-  // body below. MERGE ONLY AFTER the per-office parity gate passes
-  // (verify-won-closed-date-parity.ts). See .reviews/trockcrm-date-field-decision/plan.md.
-  return sql`${sql.raw(alias)}.won_closed_date`;
-}
+// CANONICAL Won-period date helper now lives in the shared leaf value module
+// (../shared/deal-value-sql.ts) so the deals service and the shared FilterBar
+// date-scope share ONE definition. Re-exported here unchanged so every existing
+// importer of "../deals/service.js" (dashboard card, this module's Won drill-down)
+// keeps resolving it. The HubSpot-JSON backfill/reseed path stays local below
+// (dealWonHsClosedWonDateSql / castHsClosedWonDateSql).
+export { aliasedWonHsClosedWonDateSql };
 
 // True iff the deal carries a usable HubSpot close-won date (non-null, non-empty,
 // non-"0"). Period-bounded Won queries (YTD/MTD/any date window) require this so
