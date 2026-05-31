@@ -116,7 +116,7 @@ function ContactRightRail({ contact }: { contact: Contact }) {
           </DetailRailSection>
         )}
 
-        <DetailRailSection title="System IDs">
+        <DetailRailSection title="System references">
           <DetailRailItem label="Procore" value={contact.procoreContactId ?? "Not linked"} />
           <DetailRailItem label="HubSpot" value={contact.hubspotContactId ?? "Not linked"} />
         </DetailRailSection>
