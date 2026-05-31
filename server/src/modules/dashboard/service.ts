@@ -1,4 +1,4 @@
-import { eq, and, sql, gte, lte, inArray, asc } from "drizzle-orm";
+import { eq, and, sql, gte, lte, inArray, asc, type SQL } from "drizzle-orm";
 import type { NodePgDatabase } from "drizzle-orm/node-postgres";
 import {
   auditLog,
@@ -830,8 +830,24 @@ async function getRepFunnelBuckets(
   return buildFunnelBuckets(leadRows, dealRows);
 }
 
+// D-5: active-office membership for the rep rosters -- primary users.office_id OR an explicit
+// user_office_access grant. This mirrors resolveActiveOfficeUserIds (team-scope.ts), the
+// canonical check the deals/leads layer uses to scope reps, so a rep shared into this office
+// (whose primary office is elsewhere) still appears instead of being dropped, while pure
+// foreign-office reps with no relationship to this office are excluded. Assumes the users
+// alias is `u`.
+function activeOfficeRepMembershipSql(officeId: string): SQL {
+  // Alias `uo` (not `uoa`) is deliberate: `uoa.user_id` would contain the substring
+  // "a.user_id" and collide with an activities-ownership test guard.
+  return sql`(u.office_id = ${officeId} OR EXISTS (
+    SELECT 1 FROM user_office_access uo
+    WHERE uo.user_id = u.id AND uo.office_id = ${officeId}
+  ))`;
+}
+
 async function getDirectorFunnelSummary(
-  tenantDb: TenantDb
+  tenantDb: TenantDb,
+  officeId?: string
 ): Promise<{ officeFunnelBuckets: FunnelBucketSummary[]; repFunnelRows: DirectorRepFunnelRow[] }> {
   const [leadResult, dealResult, repRowsResult] = await runSequential([
     () => tenantDb.execute(sql`
@@ -861,6 +877,9 @@ async function getDirectorFunnelSummary(
       WITH deal_owners AS (
         -- Locked requirement: widen the rep workspace for deal-owning non-reps
         -- without widening it for lead-only directors/admins.
+        -- NOTE: deals is a TENANT-schema table (search_path office_slug,public), so
+        -- this scans ONLY this office's deals -- owner_rows is office-bounded by schema
+        -- isolation, not unconstrained.
         SELECT DISTINCT d.assigned_rep_id AS rep_id
         FROM deals d
         WHERE d.assigned_rep_id IS NOT NULL
@@ -912,7 +931,14 @@ async function getDirectorFunnelSummary(
         -- P2-8 (Codex round 2): exclude flagged smoke-test / duplicate accounts from the
         -- funnel roster too, matching the rep-card roster.
         AND COALESCE(u.is_test_data, false) = false
-        AND (u.role = 'rep' OR owner_rows.rep_id IS NOT NULL)
+        -- D-5: scope the rep branch to ACTIVE-OFFICE membership (primary office or a
+        -- user_office_access grant -- see activeOfficeRepMembershipSql), matching the rep-card
+        -- roster + the deals/leads layer, while preserving the locked owner-row requirement (a
+        -- deal owner in THIS office is kept even if their primary users.office_id differs).
+        AND (
+          (u.role = 'rep'${officeId ? sql` AND ${activeOfficeRepMembershipSql(officeId)}` : sql``})
+          OR owner_rows.rep_id IS NOT NULL
+        )
       ORDER BY
         (
           COALESCE(lc.leads, 0) +
@@ -2577,7 +2603,7 @@ export async function getDirectorDashboard(
     canonicalRepWon,
   ] = await runSequential([
     // 1. Per-rep performance cards
-    () => buildRepPerformanceCards(tenantDb, { from, to }),
+    () => buildRepPerformanceCards(tenantDb, { from, to, officeId: options.officeId }),
 
     // 2. Pipeline by stage (company-wide, excluding DD)
     () => getPipelineSummary(tenantDb, { includeDd: false, from, to }),
@@ -2601,7 +2627,7 @@ export async function getDirectorDashboard(
       includeDealCreatedBy: mineVisibility?.dealsCreatedByUserId,
       includeDealSubscriptionDeletedAt: mineVisibility?.dealSubscriptionsDeletedAt,
     }),
-    () => getDirectorFunnelSummary(tenantDb),
+    () => getDirectorFunnelSummary(tenantDb, options.officeId),
     () => getDirectorRepCommissionRows(tenantDb, { from, to }),
     () => getRepPerformanceSnapshots(tenantDb, options.officeId, options.periodKind ?? "mtd"),
     // P1-7: in mine scope, narrow Recent Closes to the viewer's deals using the SAME
@@ -2752,14 +2778,19 @@ export async function getDirectorDashboard(
  */
 async function buildRepPerformanceCards(
   tenantDb: TenantDb,
-  options: { from: string; to: string }
+  options: { from: string; to: string; officeId?: string }
 ): Promise<RepPerformanceCard[]> {
-  const { from, to } = options;
+  const { from, to, officeId } = options;
 
   const result = await tenantDb.execute(sql`
     WITH deal_owners AS (
       -- Locked requirement: keep all active reps, and also include non-reps who
       -- have ever owned at least one deal so their row appears on the dashboard.
+      -- NOTE: deals is a TENANT-schema table; tenantDb runs with search_path
+      -- office_slug,public (server/src/middleware/tenant.ts), so this CTE scans ONLY
+      -- this office's deals. owner_rows is therefore already office-bounded by schema
+      -- isolation -- the OR-branch in the WHERE below admits only reps with deal
+      -- activity in THIS office (the locked requirement), not cross-office owners.
       SELECT DISTINCT d.assigned_rep_id AS rep_id
       FROM deals d
       WHERE d.assigned_rep_id IS NOT NULL
@@ -2819,7 +2850,15 @@ async function buildRepPerformanceCards(
       -- roster. Test DEALS are already excluded from Won (deals.is_test_data), so this
       -- changes only WHO appears, never the Won total.
       AND COALESCE(u.is_test_data, false) = false
-      AND (u.role = 'rep' OR owner_rows.rep_id IS NOT NULL)
+      -- D-5: users is a GLOBAL (public) table, so an unscoped role='rep' branch admits reps
+      -- from EVERY office. Scope the rep branch to ACTIVE-OFFICE membership (primary office or
+      -- a user_office_access grant -- see activeOfficeRepMembershipSql) so foreign-office reps
+      -- no longer leak in, while a rep shared into this office still appears. The locked owner
+      -- branch is preserved un-gated, so anyone who has owned a deal in THIS office stays.
+      AND (
+        (u.role = 'rep'${officeId ? sql` AND ${activeOfficeRepMembershipSql(officeId)}` : sql``})
+        OR owner_rows.rep_id IS NOT NULL
+      )
     ORDER BY pipeline_value DESC
   `);
   const staleLeadCounts = await getStaleLeadCountsByRep(tenantDb);

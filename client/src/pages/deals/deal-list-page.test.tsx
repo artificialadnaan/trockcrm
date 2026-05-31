@@ -1021,18 +1021,18 @@ describe("DealListPage", () => {
   });
 
   it("requests an expanded preview window for the SLA drill-down board", () => {
-    renderPage("/deals?scope=team&filter=at_risk&period=week", "director");
+    renderPage("/deals?scope=all&filter=at_risk&period=week", "director");
 
-    expect(mocks.useDealBoardMock).toHaveBeenCalledWith("team", true, {
+    expect(mocks.useDealBoardMock).toHaveBeenCalledWith("all", true, {
       won: { preset: "all" },
       lost: { preset: "all" },
     }, 1000, { from: "2026-05-03", to: "2026-05-08" }, undefined, {});
   });
 
   it("passes the selected page period to the board request so won aggregates match the drilldown window", () => {
-    renderPage("/deals?scope=team&period=last_month&won_preset=30", "director");
+    renderPage("/deals?scope=all&period=last_month&won_preset=30", "director");
 
-    expect(mocks.useDealBoardMock).toHaveBeenCalledWith("team", true, {
+    expect(mocks.useDealBoardMock).toHaveBeenCalledWith("all", true, {
       won: { preset: "30" },
       lost: { preset: "all" },
     }, 8, { from: "2026-04-01", to: "2026-04-30" }, undefined, {});
@@ -1122,12 +1122,39 @@ describe("DealListPage", () => {
     expect(mocks.useDealBoardMock).toHaveBeenLastCalledWith("mine", true, expect.any(Object), 8, null, undefined, {});
   });
 
-  it("shows the deferred Team empty state when team scope is requested", () => {
+  it("hides the Team scope and coerces a requested team scope to mine (D-12b)", () => {
     const html = renderPage("/deals?scope=team", "rep");
 
-    expect(mocks.useDealBoardMock).toHaveBeenLastCalledWith("team", true, expect.any(Object), 8, null, undefined, {});
-    expect(html).toContain('aria-pressed="true">Team');
-    expect(html).toContain("Team view is not yet configured");
+    // Team is no longer offered and never reaches the board hook: ?scope=team is
+    // coerced to the rendered fallback ("mine"); no dead placeholder is shown.
+    expect(html).not.toContain(">Team</button>");
+    expect(html).not.toContain("Team view is not yet configured");
+    expect(mocks.useDealBoardMock).toHaveBeenLastCalledWith("mine", true, expect.any(Object), 8, null, undefined, {});
+  });
+
+  it("drops a stale owner filter when a team bookmark is coerced to mine (D-12b)", () => {
+    renderPage("/deals?scope=team&assignedRepId=rep-2", "director");
+
+    // Coerced to mine AND the owner filter cleared (6th arg undefined), so the Mine board is
+    // not intersected with rep-2's deals into an empty result.
+    expect(mocks.useDealBoardMock).toHaveBeenLastCalledWith("mine", true, expect.any(Object), 8, null, undefined, {});
+  });
+
+  it("rewrites a parked team bookmark URL to mine and drops the stale owner param (D-12b)", async () => {
+    const { searches, cleanup } = await renderPageDomWithLocation(
+      "/deals?scope=team&assignedRepId=rep-2",
+      "director"
+    );
+
+    try {
+      // The cleanup effect rewrites the URL so the stale scope/owner params do not persist and
+      // re-apply when the user later switches scope.
+      const finalParams = new URLSearchParams(searches[searches.length - 1] ?? "");
+      expect(finalParams.get("scope")).toBe("mine");
+      expect(finalParams.get("assignedRepId")).toBeNull();
+    } finally {
+      await cleanup();
+    }
   });
 
   it("allows reps to opt into all-office scope", () => {
@@ -1136,7 +1163,8 @@ describe("DealListPage", () => {
     expect(mocks.useDealBoardMock).toHaveBeenLastCalledWith("all", true, expect.any(Object), 8, null, undefined, {});
     expect(html).toContain('aria-pressed="false">Mine');
     expect(html).toContain('aria-pressed="true">All');
-    expect(html).toContain('aria-pressed="false">Team');
+    // Team is not an offered scope (D-12b).
+    expect(html).not.toContain(">Team</button>");
   });
   it("embeds a scoped paginated exportable deal list below the kanban without date filters", () => {
     renderPage("/deals?scope=mine", "director");
@@ -1994,12 +2022,12 @@ describe("DealListPage", () => {
     expect(html).toContain("Updated At Risk Deal");
   });
 
-  it("reflects the team scope query param in the scope toggle", () => {
+  it("coerces a requested team scope to mine in the scope toggle (D-12b)", () => {
     const html = renderPage("/deals?scope=team", "director");
 
-    expect(mocks.useDealBoardMock).toHaveBeenLastCalledWith("team", true, expect.any(Object), 8, null, undefined, {});
-    expect(html).toContain('aria-pressed="true">Team');
-    expect(html).toContain('aria-pressed="false">Mine');
+    expect(mocks.useDealBoardMock).toHaveBeenLastCalledWith("mine", true, expect.any(Object), 8, null, undefined, {});
+    expect(html).not.toContain(">Team</button>");
+    expect(html).toContain('aria-pressed="true">Mine');
     expect(html).toContain('aria-pressed="false">All');
   });
 

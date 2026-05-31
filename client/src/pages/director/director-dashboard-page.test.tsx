@@ -840,6 +840,74 @@ describe("DirectorDashboardPage", () => {
     }
   });
 
+  it("exposes a pressed/selected state on the active period button (D-1)", async () => {
+    const { container, cleanup } = await renderPageDom();
+
+    try {
+      const pressed = (value: string) =>
+        container
+          .querySelector<HTMLButtonElement>(`[data-testid='preset-${value}']`)
+          ?.getAttribute("aria-pressed");
+
+      // Default period is QTD: only QTD is pressed, the rest report false (not null).
+      expect(pressed("qtd")).toBe("true");
+      expect(pressed("mtd")).toBe("false");
+      expect(pressed("ytd")).toBe("false");
+      expect(pressed("last_month")).toBe("false");
+
+      await act(async () => {
+        container.querySelector<HTMLButtonElement>("[data-testid='preset-mtd']")?.click();
+      });
+
+      // Pressed state follows the active period, mirroring the scope pills.
+      expect(pressed("mtd")).toBe("true");
+      expect(pressed("qtd")).toBe("false");
+    } finally {
+      await cleanup();
+    }
+  });
+
+  it("lists every at-risk deal its badge counts -- no 6-row cap (D-6)", () => {
+    const base = mocks.useDirectorDashboardMock().data;
+    const atRiskTemplate = {
+      repId: "rep-1",
+      repName: "Avery Rep",
+      stageName: "Estimating",
+      mirroredStageStatus: "blocked",
+      workflowRoute: "service" as const,
+      regionClassification: "Dallas, TX",
+      dealValue: 100000,
+      daysInStage: 30,
+      staleThresholdDays: 14,
+    };
+    const eightAtRisk = Array.from({ length: 8 }, (_, index) => ({
+      ...atRiskTemplate,
+      dealId: `risk-${index + 1}`,
+      dealName: `AtRisk Deal ${index + 1}`,
+    }));
+    mocks.useDirectorDashboardMock.mockReturnValue({
+      loading: false,
+      error: null,
+      refetch: mocks.dashboardRefetchMock,
+      lastFetchedAt: "2026-05-08T11:57:00Z",
+      data: {
+        ...base,
+        staleDeals: [],
+        atRiskDeals: eightAtRisk,
+        scopeSummary: { ...base.scopeSummary, atRisk: { count: 8, totalValue: 800000 } },
+      },
+    });
+
+    const html = renderPageHtml("/?scope=all");
+
+    // The panel badge counts 8, so all 8 rows must render -- the previous slice(0, 6) hid the
+    // last two and made the header (8) disagree with the visible list (6).
+    expect(html).toContain("AtRisk Deal 7");
+    expect(html).toContain("AtRisk Deal 8");
+    const renderedRiskLinks = (html.match(/href="\/deals\/risk-\d+"/g) ?? []).length;
+    expect(renderedRiskLinks).toBe(8);
+  });
+
   it("renders activity pulse and recent closes panels", () => {
     const html = renderPageHtml();
 

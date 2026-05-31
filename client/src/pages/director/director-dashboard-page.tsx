@@ -693,12 +693,14 @@ export function DirectorDashboardPage() {
 
         <div className="flex flex-wrap items-center gap-3">
           <ScopeToggle options={SCOPE_OPTIONS} value={scope} onChange={updateScope} ariaLabel="Dashboard scope" size="touch" />
-          <div className="flex flex-wrap items-center gap-1 rounded-full bg-gray-200 px-1.5 py-1.5">
+          <div role="group" aria-label="Reporting period" className="flex flex-wrap items-center gap-1 rounded-full bg-gray-200 px-1.5 py-1.5">
+
             {PRESETS.map((item) => (
               <button
                 key={item.value}
                 data-testid={`preset-${item.value}`}
                 type="button"
+                aria-pressed={preset === item.value}
                 onClick={() => setPreset(item.value)}
                 className={`rounded-full font-black transition-colors min-h-[44px] px-4 py-2.5 text-sm md:min-h-0 md:px-3 md:py-1 md:text-xs ${
                   preset === item.value ? "bg-[#CC0000] text-white shadow-sm" : "text-gray-600 hover:text-gray-950"
@@ -1059,7 +1061,7 @@ export function DirectorDashboardPage() {
 
           <div className="divide-y divide-gray-100">
             {atRiskDeals.length > 0 ? (
-              atRiskDeals.slice(0, 6).map((deal) => {
+              atRiskDeals.map((deal) => {
                 const overSla = Math.max(0, deal.daysInStage - (deal.staleThresholdDays ?? deal.daysInStage));
                 const repName = deal.repName;
                 const workflowRoute = deal.workflowRoute ?? "normal";

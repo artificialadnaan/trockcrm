@@ -51,9 +51,11 @@ export {
   getVisibleTerminalStageIds,
 } from "@/components/deals/deals-list-section";
 
+// Team scope is parked (PR #512) and not configured anywhere, so it is not offered here
+// -- only Mine | All (mirrors the director dashboard). The shared PipelineScope union still
+// includes "team" for URL coercion (see PipelinePage); do not change it.
 const SCOPE_OPTIONS = [
   { value: "mine", label: "Mine" },
-  { value: "team", label: "Team" },
   { value: "all", label: "All" },
 ] as const satisfies readonly ScopeToggleOption<PipelineScope>[];
 
@@ -251,11 +253,14 @@ function DroppableColumn({
 export function PipelinePage() {
   const { user, loading: authLoading } = useAuth();
   const [searchParams, setSearchParams] = useSearchParams();
-  const scope = resolvePreferredScope({
+  const requestedScope = resolvePreferredScope({
     requestedScope: searchParams.get("scope"),
     userId: user?.id,
     fallback: "mine",
   });
+  // Team is not offered (see SCOPE_OPTIONS); coerce a stored/URL ?scope=team to a scope we
+  // actually render so the toggle and board never reach the dead "team" placeholder state.
+  const scope: PipelineScope = requestedScope === "team" ? "mine" : requestedScope;
   const updateScope = (nextScope: PipelineScope) => {
     writeStoredScopePreference(user?.id, nextScope);
     const next = new URLSearchParams(searchParams);
@@ -265,25 +270,6 @@ export function PipelinePage() {
 
   if (authLoading || !user) {
     return <div className="space-y-4 p-6 text-sm font-semibold text-gray-500">Loading pipeline...</div>;
-  }
-
-  if (scope === "team") {
-    return (
-      <div className="-m-4 space-y-5 bg-[#f5f6f8] p-4 md:-m-6 md:p-6">
-        <header className="flex items-center justify-between gap-4 rounded-lg border border-gray-200 bg-white px-6 py-5">
-          <div className="min-w-0">
-            <h1 className="text-2xl font-semibold text-gray-900">Deal Pipeline</h1>
-            <p className="mt-0.5 text-xs text-gray-500">Team view is not yet configured.</p>
-          </div>
-          <ScopeToggle options={SCOPE_OPTIONS} value={scope} onChange={updateScope} ariaLabel="Pipeline scope" />
-        </header>
-        <section className="rounded-3xl border border-dashed border-slate-300 bg-white px-8 py-14 text-center">
-          <p className="text-[11px] font-black uppercase tracking-[0.22em] text-slate-500">Team Scope</p>
-          <h2 className="mt-3 text-2xl font-black tracking-tight text-slate-950">Team view is not yet configured.</h2>
-          <p className="mt-2 text-sm font-medium text-slate-500">Contact your admin to set up team groupings.</p>
-        </section>
-      </div>
-    );
   }
 
   const navigate = useNavigate();

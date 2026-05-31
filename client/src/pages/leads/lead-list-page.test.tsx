@@ -316,19 +316,19 @@ describe("LeadListPage", () => {
   });
 
   it("loads summary leads with the active scope when role is director", () => {
-    renderPage("/leads?scope=team", "director");
-    expect(mocks.useLeadsMock).toHaveBeenLastCalledWith({ status: "open", isActive: true, scope: "team" });
+    renderPage("/leads?scope=all", "director");
+    expect(mocks.useLeadsMock).toHaveBeenLastCalledWith({ status: "open", isActive: true, scope: "all" });
   });
 
   it("renders selected owner filter names instead of raw selected owner ids", () => {
-    const html = renderPage("/leads?scope=team&assignedRepId=rep-1", "director");
+    const html = renderPage("/leads?scope=all&assignedRepId=rep-1", "director");
 
     expect(html).toContain("Brett Jones");
     expect(html).not.toContain(">rep-1<");
     expect(mocks.useLeadsMock).toHaveBeenLastCalledWith({
       status: "open",
       isActive: true,
-      scope: "team",
+      scope: "all",
       assignedRepId: "rep-1",
     });
   });
@@ -390,11 +390,15 @@ describe("LeadListPage", () => {
     expect(mocks.useLeadBoardMock).toHaveBeenCalledWith("mine", undefined, undefined);
   });
 
-  it("shows the deferred Team empty state when team scope is requested", () => {
-    renderPage("/leads?scope=team", "rep");
+  it("hides the Team scope and coerces a requested team scope to mine (D-12b)", () => {
+    const html = renderPage("/leads?scope=team", "rep");
 
-    expect(mocks.useLeadBoardMock).toHaveBeenLastCalledWith("team", undefined, undefined);
-    expect(mocks.useLeadsMock).toHaveBeenLastCalledWith({ status: "open", isActive: true, scope: "team" });
+    // Team is no longer offered, and a manual/stored ?scope=team never reaches the
+    // board: it is coerced to the rendered fallback ("mine"), no dead placeholder.
+    expect(html).not.toContain(">Team</button>");
+    expect(html).not.toContain("Team view is not yet configured");
+    expect(mocks.useLeadBoardMock).toHaveBeenLastCalledWith("mine", undefined, undefined);
+    expect(mocks.useLeadsMock).toHaveBeenLastCalledWith({ status: "open", isActive: true, scope: "mine" });
   });
 
   it("defaults the board scope by role when the query param is absent", () => {
@@ -411,21 +415,14 @@ describe("LeadListPage", () => {
     expect(mocks.useLeadBoardMock).toHaveBeenLastCalledWith("mine", undefined, undefined);
   });
 
-  it("renders Team as a first-class scope option even before it is configured", () => {
-    const html = renderPage("/leads?scope=team", "rep");
-
-    expect(mocks.useLeadBoardMock).toHaveBeenLastCalledWith("team", undefined, undefined);
-    expect(html).toContain('aria-pressed="true">Team');
-    expect(html).toContain("Team view is not yet configured");
-  });
-
   it("allows reps to opt into all-office scope", () => {
     const html = renderPage("/leads?scope=all", "rep");
 
     expect(mocks.useLeadBoardMock).toHaveBeenLastCalledWith("all", undefined, undefined);
     expect(html).toContain('aria-pressed="false">Mine');
     expect(html).toContain('aria-pressed="true">All');
-    expect(html).toContain('aria-pressed="false">Team');
+    // Team is not an offered scope (D-12b).
+    expect(html).not.toContain(">Team</button>");
   });
 
   it("filters columns by the dashboard bucket query param", () => {

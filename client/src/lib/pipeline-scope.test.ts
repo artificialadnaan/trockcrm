@@ -136,22 +136,36 @@ describe("useNormalizedStageRoute", () => {
     cleanup();
   });
 
-  it("preserves explicit scope=team for reps", () => {
+  it("coerces a parked scope=team stage bookmark to mine for reps (D-12b)", () => {
     const { route, cleanup } = renderStageRoute("rep", "/deals/stages/stage-1?scope=team");
-    expect(route.scope).toBe("team");
-    expect(route.needsRedirect).toBe(false);
-    expect(route.redirectTo).toBe("/deals/stages/stage-1?scope=team");
+    expect(route.scope).toBe("mine");
+    expect(route.needsRedirect).toBe(true);
+    expect(route.redirectTo).toBe("/deals/stages/stage-1?scope=mine");
+    cleanup();
+  });
+
+  it("drops a stale owner filter when coercing a parked team stage bookmark (D-12b)", () => {
+    const { route, cleanup } = renderStageRoute(
+      "director",
+      "/deals/stages/stage-1?scope=team&assignedRepId=rep-2"
+    );
+    expect(route.scope).toBe("mine");
+    expect(route.needsRedirect).toBe(true);
+    // The coerced Mine redirect/back links drop the stale owner filter so the stage view is
+    // not intersected with rep-2's deals into an empty result.
+    expect(route.redirectTo).toBe("/deals/stages/stage-1?scope=mine");
+    expect(route.backTo).toBe("/deals?scope=mine");
     cleanup();
   });
 
   it.each([
     ["rep", "all", "all", false, "/deals/stages/stage-1?scope=all"],
-    ["rep", "team", "team", false, "/deals/stages/stage-1?scope=team"],
+    ["rep", "team", "mine", true, "/deals/stages/stage-1?scope=mine"],
     ["director", "all", "all", false, "/deals/stages/stage-1?scope=all"],
-    ["director", "team", "team", false, "/deals/stages/stage-1?scope=team"],
+    ["director", "team", "mine", true, "/deals/stages/stage-1?scope=mine"],
     ["director", "mine", "mine", false, "/deals/stages/stage-1?scope=mine"],
     ["admin", "all", "all", false, "/deals/stages/stage-1?scope=all"],
-    ["admin", "team", "team", false, "/deals/stages/stage-1?scope=team"],
+    ["admin", "team", "mine", true, "/deals/stages/stage-1?scope=mine"],
     ["admin", "mine", "mine", false, "/deals/stages/stage-1?scope=mine"],
   ] as const)("resolves /deals explicit scope for %s scope=%s", (role, requestedScope, expectedScope, needsRedirect, redirectTo) => {
     const { route, cleanup } = renderStageRoute(role, `/deals/stages/stage-1?scope=${requestedScope}`, "deals");
@@ -163,12 +177,12 @@ describe("useNormalizedStageRoute", () => {
 
   it.each([
     ["rep", "all", "all", false, "/leads/stages/stage-1?scope=all"],
-    ["rep", "team", "team", false, "/leads/stages/stage-1?scope=team"],
+    ["rep", "team", "mine", true, "/leads/stages/stage-1?scope=mine"],
     ["director", "all", "all", false, "/leads/stages/stage-1?scope=all"],
-    ["director", "team", "team", false, "/leads/stages/stage-1?scope=team"],
+    ["director", "team", "mine", true, "/leads/stages/stage-1?scope=mine"],
     ["director", "mine", "mine", false, "/leads/stages/stage-1?scope=mine"],
     ["admin", "all", "all", false, "/leads/stages/stage-1?scope=all"],
-    ["admin", "team", "team", false, "/leads/stages/stage-1?scope=team"],
+    ["admin", "team", "mine", true, "/leads/stages/stage-1?scope=mine"],
     ["admin", "mine", "mine", false, "/leads/stages/stage-1?scope=mine"],
   ] as const)("resolves /leads explicit scope for %s scope=%s", (role, requestedScope, expectedScope, needsRedirect, redirectTo) => {
     const { route, cleanup } = renderStageRoute(role, `/leads/stages/stage-1?scope=${requestedScope}`, "leads");
@@ -180,7 +194,7 @@ describe("useNormalizedStageRoute", () => {
 });
 
 describe("normalizePipelineScope", () => {
-  it("preserves explicit Team scope for reps", () => {
+  it("coerces parked Team scope to Mine for reps (D-12b)", () => {
     expect(
       normalizePipelineScope({
         role: "rep",
@@ -188,8 +202,8 @@ describe("normalizePipelineScope", () => {
         entity: "deals",
       })
     ).toEqual({
-      allowedScope: "team",
-      redirectTo: "/deals?scope=team",
+      allowedScope: "mine",
+      redirectTo: "/deals?scope=mine",
     });
   });
 
@@ -219,7 +233,7 @@ describe("normalizePipelineScope", () => {
     });
   });
 
-  it("preserves explicit team scope for admins", () => {
+  it("coerces parked team scope to Mine for admins (D-12b)", () => {
     expect(
       normalizePipelineScope({
         role: "admin",
@@ -227,8 +241,8 @@ describe("normalizePipelineScope", () => {
         entity: "leads",
       })
     ).toEqual({
-      allowedScope: "team",
-      redirectTo: "/leads?scope=team",
+      allowedScope: "mine",
+      redirectTo: "/leads?scope=mine",
     });
   });
 });

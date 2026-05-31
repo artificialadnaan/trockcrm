@@ -38,9 +38,11 @@ import type { DealFilters } from "@/hooks/use-deals";
 import type { DealListSortState } from "@/components/deals/deals-list-section";
 import { resolvePreferredScope, writeStoredScopePreference } from "@/lib/scope-preferences";
 
+// Team scope is parked (PR #512) and not configured anywhere, so it is not offered here
+// -- only Mine | All (mirrors the director dashboard). The shared PipelineScope union still
+// includes "team" for URL coercion (see DealListPage); do not change it.
 const SCOPE_OPTIONS = [
   { value: "mine", label: "Mine" },
-  { value: "team", label: "Team" },
   { value: "all", label: "All" },
 ] as const satisfies readonly ScopeToggleOption<PipelineScope>[];
 
@@ -670,17 +672,24 @@ function DealListPageContent({ role, userId }: { role: string; userId: string })
   const [estimateSentDateFilter, setEstimateSentDateFilter] = useState<TerminalDateFilter>(() =>
     readEstimateSentDateFilterFromSearchParams(searchParams)
   );
-  const scope = resolvePreferredScope({
+  const requestedScope = resolvePreferredScope({
     requestedScope: searchParams.get("scope"),
     userId,
     fallback: getScope(searchParams, role),
   });
+  // Team is not offered (see SCOPE_OPTIONS); coerce a stored/URL ?scope=team to a scope we
+  // actually render so the toggle and board never reach the dead "team" placeholder state.
+  const scope: PipelineScope = requestedScope === "team" ? "mine" : requestedScope;
   const selectedPeriod = useMemo(() => normalizeDashboardPeriod(searchParams.get("period")), [searchParams]);
   const selectedPeriodRange = useMemo(() => getDashboardPeriodDateRange(selectedPeriod), [selectedPeriod]);
   const scopeOptions = SCOPE_OPTIONS;
   const { stages } = usePipelineStages("deal");
   const { assignees } = useTaskAssignees();
-  const selectedRepId = searchParams.get("assignedRepId") || "__all__";
+  // When a parked ?scope=team bookmark is coerced to mine, drop any stale owner filter from
+  // the URL too -- otherwise the Mine board (the viewer's deals) is intersected with another
+  // rep's owner filter and renders empty instead of the intended Mine view (D-12b).
+  const selectedRepId =
+    requestedScope === "team" ? "__all__" : searchParams.get("assignedRepId") || "__all__";
   const selectedRepFilter = selectedRepId === "__all__" ? undefined : selectedRepId;
   const selectedRepLabel =
     selectedRepId === "__all__"
@@ -713,6 +722,17 @@ function DealListPageContent({ role, userId }: { role: string; userId: string })
     setTerminalDateFilters(readTerminalDateFiltersFromSearchParams(searchParams));
     setEstimateSentDateFilter(readEstimateSentDateFilterFromSearchParams(searchParams));
   }, [searchParams]);
+
+  // A parked ?scope=team bookmark is coerced to mine for the render above; also rewrite the
+  // URL so the stale scope/owner params do not persist -- otherwise updateScope clones them
+  // and clicking All silently re-applies the old owner filter to the All board (D-12b).
+  useEffect(() => {
+    if (requestedScope !== "team") return;
+    const next = new URLSearchParams(searchParams);
+    next.set("scope", "mine");
+    next.delete("assignedRepId");
+    setSearchParams(next, { replace: true });
+  }, [requestedScope, searchParams, setSearchParams]);
 
   const updateTerminalDateFilter = useCallback((outcome: TerminalOutcome, filter: TerminalDateFilter) => {
     writeTerminalDateFilter(outcome, filter);
@@ -1025,16 +1045,7 @@ function DealListPageContent({ role, userId }: { role: string; userId: string })
         </div>
       </section>
 
-      {scope === "team" ? (
-        <section className="rounded-3xl border border-dashed border-slate-300 bg-slate-50 px-8 py-14 text-center">
-          <p className="text-[11px] font-black uppercase tracking-[0.22em] text-slate-500">Team Scope</p>
-          <h2 className="mt-3 text-2xl font-black tracking-tight text-slate-950">Team view is not yet configured.</h2>
-          <p className="mt-2 text-sm font-medium text-slate-500">Contact your admin to set up team groupings.</p>
-        </section>
-      ) : null}
-
-      {scope === "team" ? null : (
-        <>
+      <>
       <div className="grid gap-4 md:grid-cols-3">
         <MetricCard
           eyebrow="Active pipeline"
@@ -1232,8 +1243,7 @@ function DealListPageContent({ role, userId }: { role: string; userId: string })
           current deal-list API does not expose stale or at-risk filters without changing the protected deals service.
         </section>
       )}
-        </>
-      )}
+      </>
     </div>
   );
 }

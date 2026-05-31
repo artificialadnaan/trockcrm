@@ -13,10 +13,14 @@ const ROLE_DEFAULT_SCOPE: Record<PipelineRole, PipelineScope> = {
   admin: "mine",
 };
 
+// Team scope is parked (PR #512) and not configured anywhere, so it is not an allowed scope
+// -- a stage-route bookmark like /deals/stages/X?scope=team coerces to the role default
+// (mine) and redirects, matching the list/board pages that dropped the Team pill (D-12b).
+// PipelineScope keeps "team" in the union for coercion inputs; do not change the type.
 const ROLE_ALLOWED_SCOPES: Record<PipelineRole, readonly PipelineScope[]> = {
-  rep: ["mine", "team", "all"],
-  director: ["mine", "team", "all"],
-  admin: ["mine", "team", "all"],
+  rep: ["mine", "all"],
+  director: ["mine", "all"],
+  admin: ["mine", "all"],
 };
 
 function coerceScope(value: string | null): PipelineScope | null {
@@ -69,13 +73,21 @@ export function useNormalizedStageRoute(entity: PipelineEntity, stageId: string)
     entity,
   });
   const allowedScope = normalized.allowedScope;
-  const needsRedirect = searchParams.get("scope") !== allowedScope;
-  const nextParams = new URLSearchParams(searchParams);
+  const requestedRawScope = searchParams.get("scope");
+  const needsRedirect = requestedRawScope !== allowedScope;
+  // A parked ?scope=team stage bookmark is coerced to mine; also drop any stale owner filter
+  // so the coerced Mine view (and its redirect/back links) is not intersected with another
+  // rep's deals into an empty result -- parity with the list pages (D-12b).
+  const cleanedParams = new URLSearchParams(searchParams);
+  if (requestedRawScope === "team" && allowedScope !== "team") {
+    cleanedParams.delete("assignedRepId");
+  }
+  const nextParams = new URLSearchParams(cleanedParams);
   nextParams.set("scope", allowedScope);
-  const backParams = new URLSearchParams(searchParams);
+  const backParams = new URLSearchParams(cleanedParams);
   backParams.set("scope", allowedScope);
   backParams.delete("page");
-  const baseQuery = normalizeStagePageQuery(Object.fromEntries(searchParams.entries()));
+  const baseQuery = normalizeStagePageQuery(Object.fromEntries(cleanedParams.entries()));
   const sort = entity === "deals"
     ? normalizeStagePageSort(baseQuery.sort)
     : normalizeLeadStageRouteSort(baseQuery.sort);
