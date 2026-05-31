@@ -907,13 +907,15 @@ export async function getForecastAccuracyReport(db: TenantDb, filters: Performan
         -- row: a months-LEFT-JOIN-deals with a WHERE drops a whole month when its only matching
         -- rows are out-of-scope (the LEFT JOIN stops emitting the null row), and the FIX-3 bucket
         -- move can newly push an out-of-scope won deal into such a month. Open columns are gated by
-        -- dealScope; won_actual by archivedWonDealScope AND a usable won date — so monthly won_actual
-        -- reconciles to the summary's won_period (which also excludes null-won-date wins).
+        -- dealScope; won_actual by archivedWonDealScope AND a usable won date AND the SAME
+        -- [dateFrom, dateTo] won-window as the summary's won_period — so SUM(monthly won_actual)
+        -- equals the summary for ANY window, incl. non-month-aligned ones (a boundary calendar
+        -- month only counts its in-window wins, not the whole month).
         SELECT to_char(m.month_start, 'YYYY-MM') AS month,
           COALESCE(SUM(${forecastValue}) FILTER (WHERE psc.slug IN (${sqlStringList(commitSlugs)}) AND (${dealScope})), 0)::numeric AS commit,
           COALESCE(SUM(${forecastValue}) FILTER (WHERE psc.slug IN (${sqlStringList(bestCaseSlugs)}) AND (${dealScope})), 0)::numeric AS best_case,
           COALESCE(SUM(${weightedValue}) FILTER (WHERE psc.slug NOT IN (${sqlStringList(terminalSlugs)}) AND (${dealScope})), 0)::numeric AS pipeline_weighted,
-          COALESCE(SUM(${aliasedEffectiveWonDealValueSql("d")}) FILTER (WHERE psc.slug IN (${sqlStringList(wonSlugs)}) AND ${aliasedHasUsableWonDateSql("d")} AND (${archivedWonDealScope})), 0)::numeric AS won_actual
+          COALESCE(SUM(${aliasedEffectiveWonDealValueSql("d")}) FILTER (WHERE psc.slug IN (${sqlStringList(wonSlugs)}) AND ${aliasedHasUsableWonDateSql("d")} AND ${aliasedWonHsClosedWonDateSql("d")} >= ${filters.dateFrom}::date AND ${aliasedWonHsClosedWonDateSql("d")} <= ${filters.dateTo}::date AND (${archivedWonDealScope})), 0)::numeric AS won_actual
         FROM months m
         LEFT JOIN deals d ON ${buildForecastMonthBucketDateSql("d")} >= m.month_start
           AND ${buildForecastMonthBucketDateSql("d")} < (m.month_start + INTERVAL '1 month')

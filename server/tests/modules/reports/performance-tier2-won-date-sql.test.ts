@@ -71,6 +71,11 @@ describe("perf-tier2 Won-date basis is wired into the live report queries", () =
     // to the summary's won_period (which excludes null-won-date wins). The guard now appears at least
     // twice — once in the summary won_period, once in the monthly won_actual FILTER.
     expect((text.match(/d\.won_closed_date is not null/g) ?? []).length).toBeGreaterThanOrEqual(2);
+    // Codex P2 #3 (re-review): the monthly won_actual is bound to the SAME [from, to] won-window as the
+    // summary won_period, so SUM(monthly) == summary even for non-month-aligned windows (a boundary
+    // calendar month only counts its in-window wins). >= and <= each now appear in both places.
+    expect((text.match(/d\.won_closed_date >=/g) ?? []).length).toBeGreaterThanOrEqual(2);
+    expect((text.match(/d\.won_closed_date <=/g) ?? []).length).toBeGreaterThanOrEqual(2);
     // Codex P2 #2: the fragile months-LEFT-JOIN-deals WHERE is gone, so scoped forecasts never drop a
     // month; scope moved into per-aggregate FILTERs.
     expect(text).not.toContain("d.id is null or");
