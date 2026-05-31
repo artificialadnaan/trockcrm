@@ -286,6 +286,10 @@ export function PipelinePage() {
     writeStoredScopePreference(user?.id, nextScope);
     const next = new URLSearchParams(searchParams);
     next.set("scope", nextScope);
+    // Changing scope changes the list's result set, so drop the FilterBar list page — otherwise a
+    // user on ?page=4 stays on page 4 for the new scope and sees an empty/misleading list (the
+    // legacy setPage(1) effect no longer drives the URL-backed page in FilterBar mode). Codex r2.
+    next.delete("page");
     setSearchParams(next);
   };
 
