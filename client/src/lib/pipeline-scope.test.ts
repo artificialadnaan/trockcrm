@@ -144,6 +144,20 @@ describe("useNormalizedStageRoute", () => {
     cleanup();
   });
 
+  it("drops a stale owner filter when coercing a parked team stage bookmark (D-12b)", () => {
+    const { route, cleanup } = renderStageRoute(
+      "director",
+      "/deals/stages/stage-1?scope=team&assignedRepId=rep-2"
+    );
+    expect(route.scope).toBe("mine");
+    expect(route.needsRedirect).toBe(true);
+    // The coerced Mine redirect/back links drop the stale owner filter so the stage view is
+    // not intersected with rep-2's deals into an empty result.
+    expect(route.redirectTo).toBe("/deals/stages/stage-1?scope=mine");
+    expect(route.backTo).toBe("/deals?scope=mine");
+    cleanup();
+  });
+
   it.each([
     ["rep", "all", "all", false, "/deals/stages/stage-1?scope=all"],
     ["rep", "team", "mine", true, "/deals/stages/stage-1?scope=mine"],

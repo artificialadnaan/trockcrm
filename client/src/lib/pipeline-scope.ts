@@ -73,13 +73,21 @@ export function useNormalizedStageRoute(entity: PipelineEntity, stageId: string)
     entity,
   });
   const allowedScope = normalized.allowedScope;
-  const needsRedirect = searchParams.get("scope") !== allowedScope;
-  const nextParams = new URLSearchParams(searchParams);
+  const requestedRawScope = searchParams.get("scope");
+  const needsRedirect = requestedRawScope !== allowedScope;
+  // A parked ?scope=team stage bookmark is coerced to mine; also drop any stale owner filter
+  // so the coerced Mine view (and its redirect/back links) is not intersected with another
+  // rep's deals into an empty result -- parity with the list pages (D-12b).
+  const cleanedParams = new URLSearchParams(searchParams);
+  if (requestedRawScope === "team" && allowedScope !== "team") {
+    cleanedParams.delete("assignedRepId");
+  }
+  const nextParams = new URLSearchParams(cleanedParams);
   nextParams.set("scope", allowedScope);
-  const backParams = new URLSearchParams(searchParams);
+  const backParams = new URLSearchParams(cleanedParams);
   backParams.set("scope", allowedScope);
   backParams.delete("page");
-  const baseQuery = normalizeStagePageQuery(Object.fromEntries(searchParams.entries()));
+  const baseQuery = normalizeStagePageQuery(Object.fromEntries(cleanedParams.entries()));
   const sort = entity === "deals"
     ? normalizeStagePageSort(baseQuery.sort)
     : normalizeLeadStageRouteSort(baseQuery.sort);
