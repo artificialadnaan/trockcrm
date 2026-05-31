@@ -144,7 +144,15 @@ export function aliasedStageAwareEffectiveDealValueSql(alias: string, wonStageId
  */
 export function aliasedEffectiveStageAgeDaysSql(alias: string): SQL {
   const col = (name: string) => sql.raw(`${alias}.${name}`);
-  const entered = sql`COALESCE(${col("bid_board_stage_entered_at")}, ${col("stage_entered_at")})`;
+  // Bid-board entry ONLY for Bid Board-owned deals (mirrors
+  // resolveEffectiveStageEnteredAt; Codex #546) — a CRM-owned deal with a stale
+  // non-null bid-board timestamp must still age off stage_entered_at, the same
+  // age the list/at-risk display uses.
+  const entered = sql`CASE
+    WHEN ${col("is_bid_board_owned")} = true AND ${col("bid_board_stage_entered_at")} IS NOT NULL
+      THEN ${col("bid_board_stage_entered_at")}
+    ELSE ${col("stage_entered_at")}
+  END`;
   const elapsed = sql`EXTRACT(EPOCH FROM (now() - ${entered}))`;
   // Completed hold time accrued since this stage was entered (snapshot delta).
   const accumulatedSinceEntry = sql`CASE

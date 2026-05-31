@@ -147,7 +147,8 @@ describe("stalled / days-in-stage predicate (gated on stage-entry reliability)",
   it("filters on the HOLD-AWARE effective stage age when the flag is ON (matches the displayed days)", () => {
     const sql = text(buildStalledPredicate({ minAgeDays: 30 }, { stageEntryDateEnabled: true }));
     expect(sql).toContain("stage_entered_at");
-    expect(sql).toContain("bid_board_stage_entered_at"); // effective entry prefers bid board
+    expect(sql).toContain("bid_board_stage_entered_at"); // effective entry uses bid board...
+    expect(sql).toContain("is_bid_board_owned"); // ...but ONLY for Bid Board-owned deals
     expect(sql).toContain("on_hold_accumulated_seconds"); // subtracts completed hold time
     expect(sql).toContain("on_hold_started_at"); // subtracts the open hold interval
     expect(sql).toContain(">=");

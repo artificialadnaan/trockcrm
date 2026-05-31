@@ -51,26 +51,27 @@ beforeAll(async () => {
       id text PRIMARY KEY,
       stage_id text NOT NULL,
       hubspot_extra_properties jsonb,
-      won_closed_date date,
+      contract_signed_at timestamptz,
+      contract_signed_date date,
       lost_at timestamptz,
       stage_entered_at timestamptz,
       created_at timestamptz
     );
-    INSERT INTO deals (id, stage_id, hubspot_extra_properties, won_closed_date, lost_at, stage_entered_at, created_at) VALUES
+    INSERT INTO deals (id, stage_id, hubspot_extra_properties, contract_signed_at, contract_signed_date, lost_at, stage_entered_at, created_at) VALUES
       -- WON via hs_closed_won_date (jsonb primary), IN window, created OUT -> MATCH
-      ('won_hs_in',       'won',  '{"hs_closed_won_date":"2026-02-15"}'::jsonb, NULL, NULL, NULL, '2025-01-01T00:00:00Z'),
+      ('won_hs_in',       'won',  '{"hs_closed_won_date":"2026-02-15"}'::jsonb, NULL, NULL, NULL, NULL, '2025-01-01T00:00:00Z'),
       -- WON via hs_closed_won_date OUT window, created IN -> NO MATCH (THE bug edge)
-      ('won_hs_out',      'won',  '{"hs_closed_won_date":"2026-05-15"}'::jsonb, NULL, NULL, NULL, '2026-02-10T00:00:00Z'),
-      -- WON via won_closed_date fallback (jsonb empty), IN window -> MATCH (COALESCE/NULLIF path)
-      ('won_fallback_in', 'won',  '{}'::jsonb, '2026-02-20', NULL, NULL, '2020-01-01T00:00:00Z'),
+      ('won_hs_out',      'won',  '{"hs_closed_won_date":"2026-05-15"}'::jsonb, NULL, NULL, NULL, NULL, '2026-02-10T00:00:00Z'),
+      -- WON via contract_signed fallback (jsonb empty), IN window -> MATCH (COALESCE/NULLIF path)
+      ('won_fallback_in', 'won',  '{}'::jsonb, NULL, '2026-02-20', NULL, NULL, '2020-01-01T00:00:00Z'),
       -- LOST, lost_at IN window -> MATCH
-      ('lost_in',         'lost', NULL, NULL, '2026-02-10T12:00:00Z', NULL, '2020-01-01T00:00:00Z'),
+      ('lost_in',         'lost', NULL, NULL, NULL, '2026-02-10T12:00:00Z', NULL, '2020-01-01T00:00:00Z'),
       -- LOST, lost_at OUT window, created IN -> NO MATCH
-      ('lost_out',        'lost', NULL, NULL, '2026-05-10T12:00:00Z', NULL, '2026-02-02T00:00:00Z'),
+      ('lost_out',        'lost', NULL, NULL, NULL, '2026-05-10T12:00:00Z', NULL, '2026-02-02T00:00:00Z'),
       -- OPEN, stage entry IN window
-      ('open_entry_in',   'open', NULL, NULL, NULL, '2026-02-05T12:00:00Z', '2020-01-01T00:00:00Z'),
+      ('open_entry_in',   'open', NULL, NULL, NULL, NULL, '2026-02-05T12:00:00Z', '2020-01-01T00:00:00Z'),
       -- OPEN, stage entry OUT window
-      ('open_entry_out',  'open', NULL, NULL, NULL, '2026-05-01T12:00:00Z', '2026-02-01T00:00:00Z');
+      ('open_entry_out',  'open', NULL, NULL, NULL, NULL, '2026-05-01T12:00:00Z', '2026-02-01T00:00:00Z');
   `);
 });
 
