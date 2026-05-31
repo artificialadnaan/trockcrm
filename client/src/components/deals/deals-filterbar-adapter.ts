@@ -34,7 +34,11 @@ export function filterBarValueToDealFilters(value: FilterBarValue): Partial<Deal
   if (value.regionId) filters.regionId = value.regionId;
   if (value.projectTypeId) filters.projectTypeId = value.projectTypeId;
   if (value.workflowRoute) filters.workflowRoute = value.workflowRoute;
-  if (value.status && value.status !== "any") filters.status = value.status;
+  // Status is multi-domain now; narrow to the DEAL statuses so a stray lead status can't become an
+  // invalid deal filter. The union check also narrows the type for assignment (no cast).
+  if (value.status === "active" || value.status === "on_hold" || value.status === "inactive") {
+    filters.status = value.status;
+  }
   if (value.valueMin !== undefined) filters.valueMin = value.valueMin;
   if (value.valueMax !== undefined) filters.valueMax = value.valueMax;
   if (value.minAgeDays !== undefined) filters.minAgeDays = value.minAgeDays;

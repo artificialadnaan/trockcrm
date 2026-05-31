@@ -37,11 +37,23 @@ export interface FilterBarOptions {
   projectTypes?: FilterSelectOption[];
   stages?: MultiSelectOption[];
   sortOptions?: FilterBarSortOption[];
+  /** Opt-in Status option set for non-deal surfaces (e.g. leads: open/converted/disqualified).
+   *  Defaults to the deal statuses, so existing deals mounts are unchanged. */
+  statusOptions?: FilterSelectOption[];
+  /** Whether the Rep/Region controls offer an "Unassigned" (IS NULL) option. Default true (deals,
+   *  where assigned_rep_id/region_id are nullable). Set false on surfaces with non-null FKs (e.g.
+   *  leads: assignedRepId is a non-null UUID, so the sentinel would error/no-match) — Codex #577 P1. */
+  allowUnassigned?: boolean;
+  /** Label for the Rep dimension. Defaults to "Rep" (deals/pipeline/leads). Surfaces that filter by a
+   *  generic owner_id rather than a sales rep set this (e.g. Companies: "Owner", #582). Drives both the
+   *  control label and its "All …" option, so existing mounts are byte-identical. */
+  repLabel?: string;
 }
 
 type ScopeValue = "mine" | "team" | "all";
 
-const STATUS_OPTIONS: FilterSelectOption[] = [
+/** Default Status options (deals). A surface can override via FilterBarOptions.statusOptions. */
+const DEAL_STATUS_OPTIONS: FilterSelectOption[] = [
   { value: "active", label: "Active" },
   { value: "on_hold", label: "On hold" },
   { value: "inactive", label: "Inactive" },
@@ -113,6 +125,8 @@ export function FilterBar({
 }: FilterBarProps) {
   const has = (dimension: FilterDimension) => dimensions.includes(dimension);
   const sortOptions = options.sortOptions ?? [];
+  // Whether Rep/Region offer the "Unassigned" (IS NULL) option (default yes; off for non-null FKs like leads).
+  const unassignedOption = (options.allowUnassigned ?? true) ? [{ value: UNASSIGNED, label: "Unassigned" }] : [];
 
   // When stage-entry dates are off, the stalled control is hidden — also CLEAR any stale
   // minAgeDays/maxAgeDays from a bookmarked URL so the list isn't filtered by an invisible
@@ -176,10 +190,10 @@ export function FilterBar({
 
       {has("rep") && (
         <FilterSelect
-          label="Rep"
-          allLabel="All reps"
+          label={options.repLabel ?? "Rep"}
+          allLabel={`All ${(options.repLabel ?? "Rep").toLowerCase()}s`}
           value={value.assignedRepId}
-          options={[{ value: UNASSIGNED, label: "Unassigned" }, ...(options.reps ?? [])]}
+          options={[...unassignedOption, ...(options.reps ?? [])]}
           onChange={(assignedRepId) => onChange({ assignedRepId })}
         />
       )}
@@ -189,7 +203,7 @@ export function FilterBar({
           label="Region"
           allLabel="All regions"
           value={value.regionId}
-          options={[{ value: UNASSIGNED, label: "Unassigned" }, ...(options.regions ?? [])]}
+          options={[...unassignedOption, ...(options.regions ?? [])]}
           onChange={(regionId) => onChange({ regionId })}
         />
       )}
@@ -219,7 +233,7 @@ export function FilterBar({
           label="Status"
           allLabel="Any"
           value={value.status === "any" ? undefined : value.status}
-          options={STATUS_OPTIONS}
+          options={options.statusOptions ?? DEAL_STATUS_OPTIONS}
           onChange={(status) => onChange(statusPatch(status))}
         />
       )}

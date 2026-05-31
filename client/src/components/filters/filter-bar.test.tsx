@@ -56,7 +56,7 @@ describe("FilterBar", () => {
 
   function render(
     dimensions: FilterDimension[],
-    extra: Partial<{ value: FilterBarValue; onChange: (p: Partial<FilterBarValue>) => void; onReset: () => void; stageEntryDateEnabled: boolean }> = {}
+    extra: Partial<{ value: FilterBarValue; onChange: (p: Partial<FilterBarValue>) => void; onReset: () => void; stageEntryDateEnabled: boolean; options: FilterBarOptions }> = {}
   ) {
     act(() => {
       root?.render(
@@ -65,12 +65,14 @@ describe("FilterBar", () => {
           value={extra.value ?? {}}
           onChange={extra.onChange ?? (() => {})}
           onReset={extra.onReset ?? (() => {})}
-          options={OPTIONS}
+          options={extra.options ?? OPTIONS}
           stageEntryDateEnabled={extra.stageEntryDateEnabled}
         />
       );
     });
   }
+  const optionLabels = () =>
+    Array.from(document.querySelectorAll('[role="option"]')).map((el) => el.textContent?.trim());
   const q = (sel: string) => container.querySelector<HTMLElement>(sel);
 
   it("renders only the configured dimensions", () => {
@@ -129,6 +131,52 @@ describe("FilterBar", () => {
     const checkbox = document.querySelector<HTMLInputElement>('input[type="checkbox"][value="won"]');
     act(() => checkbox?.click());
     expect(onChange).toHaveBeenCalledWith({ stageIds: ["won"] });
+  });
+
+  it("offers an Unassigned option on Rep by default (deals — nullable FK)", () => {
+    render(["rep"]);
+    act(() => q('button[aria-label="Rep filter"]')?.click());
+    expect(optionLabels()).toContain("Unassigned");
+  });
+
+  it("omits the Unassigned option on Rep when allowUnassigned is false (leads — non-null FK; Codex #577)", () => {
+    render(["rep"], { options: { ...OPTIONS, allowUnassigned: false } });
+    act(() => q('button[aria-label="Rep filter"]')?.click());
+    const labels = optionLabels();
+    expect(labels).not.toContain("Unassigned");
+    expect(labels).toContain("Kevin Scott"); // real reps still offered
+  });
+
+  it("labels the Rep dimension 'Owner' when repLabel is set (Companies owner variant); default stays 'Rep'", () => {
+    // Default: the trigger is "Rep" (byte-identical to today's deals/pipeline/leads mounts).
+    render(["rep"]);
+    expect(q('button[aria-label="Rep filter"]')).not.toBeNull();
+    expect(q('button[aria-label="Owner filter"]')).toBeNull();
+    // Opt-in repLabel relabels the dimension for surfaces that use owner_id (e.g. Companies, #582).
+    render(["rep"], { options: { ...OPTIONS, repLabel: "Owner" } });
+    expect(q('button[aria-label="Owner filter"]')).not.toBeNull();
+    expect(q('button[aria-label="Rep filter"]')).toBeNull();
+  });
+
+  it("derives the Rep 'All' option label from repLabel (All reps -> All owners)", () => {
+    render(["rep"], { options: { ...OPTIONS, repLabel: "Owner" } });
+    act(() => q('button[aria-label="Owner filter"]')?.click());
+    expect(optionLabels()).toContain("All owners");
+  });
+
+  it("renders an arbitrary statusOptions set (Companies verification statuses) and replaces the deal defaults", () => {
+    const COMPANY_STATUS = [
+      { value: "pending", label: "Pending" },
+      { value: "verified", label: "Verified" },
+      { value: "rejected", label: "Rejected" },
+      { value: "not_required", label: "Not required" },
+    ];
+    render(["status"], { options: { ...OPTIONS, statusOptions: COMPANY_STATUS } });
+    act(() => q('button[aria-label="Status filter"]')?.click());
+    const labels = optionLabels();
+    expect(labels).toContain("Verified");
+    expect(labels).toContain("Not required");
+    expect(labels).not.toContain("On hold"); // deal defaults are replaced, not merged in
   });
 
   it("calls onReset from the Clear button", () => {
