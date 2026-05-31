@@ -22,6 +22,7 @@ export function DateRangeToggle({ value, onChange }: DateRangeToggleProps) {
         <Button
           key={preset.value}
           variant={value === preset.value ? "default" : "outline"}
+          aria-pressed={value === preset.value}
           size="sm"
           onClick={() => onChange(preset.value)}
           className="text-xs"

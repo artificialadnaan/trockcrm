@@ -570,12 +570,13 @@ export function DirectorDashboardPage() {
 
         <div className="flex flex-wrap items-center gap-3">
           <ScopeToggle options={SCOPE_OPTIONS} value={scope} onChange={updateScope} ariaLabel="Dashboard scope" />
-          <div className="flex flex-wrap items-center gap-1 rounded-full bg-gray-200 px-1.5 py-1.5">
+          <div role="group" aria-label="Reporting period" className="flex flex-wrap items-center gap-1 rounded-full bg-gray-200 px-1.5 py-1.5">
             {PRESETS.map((item) => (
               <button
                 key={item.value}
                 data-testid={`preset-${item.value}`}
                 type="button"
+                aria-pressed={preset === item.value}
                 onClick={() => setPreset(item.value)}
                 className={`rounded-full px-3 py-1 text-xs font-black transition-colors ${
                   preset === item.value ? "bg-[#CC0000] text-white shadow-sm" : "text-gray-600 hover:text-gray-950"

@@ -822,6 +822,33 @@ describe("DirectorDashboardPage", () => {
     }
   });
 
+  it("exposes a pressed/selected state on the active period button (D-1)", async () => {
+    const { container, cleanup } = await renderPageDom();
+
+    try {
+      const pressed = (value: string) =>
+        container
+          .querySelector<HTMLButtonElement>(`[data-testid='preset-${value}']`)
+          ?.getAttribute("aria-pressed");
+
+      // Default period is QTD: only QTD is pressed, the rest report false (not null).
+      expect(pressed("qtd")).toBe("true");
+      expect(pressed("mtd")).toBe("false");
+      expect(pressed("ytd")).toBe("false");
+      expect(pressed("last_month")).toBe("false");
+
+      await act(async () => {
+        container.querySelector<HTMLButtonElement>("[data-testid='preset-mtd']")?.click();
+      });
+
+      // Pressed state follows the active period, mirroring the scope pills.
+      expect(pressed("mtd")).toBe("true");
+      expect(pressed("qtd")).toBe("false");
+    } finally {
+      await cleanup();
+    }
+  });
+
   it("renders activity pulse and recent closes panels", () => {
     const html = renderPageHtml();
 
