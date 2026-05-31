@@ -68,6 +68,7 @@ type FakeLeadRow = {
   description: string | null;
   stageEnteredAt: Date;
   convertedAt: Date | null;
+  disqualifiedAt?: Date | null;
   isActive: boolean;
   createdAt: Date;
   updatedAt: Date;
@@ -199,6 +200,9 @@ function createFakeTenantDb(lead: FakeLeadRow) {
 
     return {
       innerJoin() {
+        return this;
+      },
+      leftJoin() {
         return this;
       },
       where(condition: unknown) {
