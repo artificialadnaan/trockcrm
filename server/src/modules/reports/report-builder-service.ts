@@ -8,8 +8,25 @@ import {
   aliasedActiveDealCountFilterSql,
   aliasedEffectiveDealValueSql,
   aliasedReportableDealFilterSql,
+  aliasedWonHsClosedWonDateSql,
 } from "../shared/deal-value-sql.js";
+import { aliasedHasUsableWonDateSql } from "../deals/service.js";
 import { LOST_STAGE_SLUGS, WON_STAGE_SLUGS } from "../shared/pipeline-terminal-stages.js";
+
+const WON_STAGE_SLUG_SET = new Set<string>(WON_STAGE_SLUGS);
+
+// Decision 1 (Won-date unification): a custom report whose cohort is filtered to WON stage(s)
+// ONLY is "Won-measuring" — its deal_count / total_value ARE won count / won revenue. For such a
+// report the period axis (the from/to range AND the month/week time-bucket) is FORCED onto the
+// canonical deals.won_closed_date, regardless of the user's selected date field, so a Won total is
+// never reported on a non-Won basis (e.g. updated_at, which counts touched-in-period as won-in-
+// period). "Deals CREATED this period that are now Won" stays a distinct report (a non-Won-only
+// stage filter, or no stage filter, keeps the user's chosen date field). A mixed won+lost/open
+// stage filter is NOT Won-scoped — the cohort isn't a Won total, so the user's axis is preserved.
+function isWonScopedReport(filters: Record<string, unknown>): boolean {
+  const stages = listFilter(filters.stage);
+  return stages.length > 0 && stages.every((slug) => WON_STAGE_SLUG_SET.has(slug));
+}
 
 type TenantDb = NodePgDatabase<typeof schema>;
 
@@ -57,6 +74,7 @@ export interface ReportBuilderColumn {
 export interface ReportBuilderResult {
   columns: ReportBuilderColumn[];
   rows: Record<string, unknown>[];
+  notes?: string[];
 }
 
 const DIMENSION_LABELS: Record<ReportDimension, string> = {
@@ -178,13 +196,16 @@ function textArrayFilter(values: string[]) {
   return sql`ARRAY[${sql.join(values.map((value) => sql`${value}`), sql`, `)}]::text[]`;
 }
 
-function buildFilters(input: ReportBuilderInput, dateFieldSql: ReturnType<typeof sql>) {
+function buildFilters(input: ReportBuilderInput, dateFieldSql: ReturnType<typeof sql>, wonScoped = false) {
   const filters = input.filters ?? {};
   const clauses: ReturnType<typeof sql>[] = [
     sql`d.is_active = true`,
     sql`COALESCE(d.is_test_data, false) = false`,
     aliasedReportableDealFilterSql("d"),
   ];
+  // Won-scoped reports window on won_closed_date; require it usable so the totals reconcile to the
+  // canonical Won card (a Won-stage deal with no usable won date is not won-in-period).
+  if (wonScoped) clauses.push(aliasedHasUsableWonDateSql("d"));
   const repId = effectiveReportRepId(input);
   if (repId) clauses.push(sql`d.assigned_rep_id = ${repId}`);
 
@@ -232,7 +253,10 @@ export async function runReportBuilder(
     throw new AppError(400, `Invalid filter: ${invalidFilters.join(", ")}`);
   }
 
-  const dateFieldSql = DATE_FIELDS[dateField];
+  // Decision 1: a Won-stage-only cohort forces the period axis onto the canonical won_closed_date,
+  // overriding the user's selected date field, so Won count/value are never on a non-Won basis.
+  const wonScoped = isWonScopedReport(filters);
+  const dateFieldSql = wonScoped ? aliasedWonHsClosedWonDateSql("d") : DATE_FIELDS[dateField];
   const dimensionEntries = dimensions.map((dimension) => ({
     key: dimension,
     expression: dimensionSql(dimension, dateFieldSql),
@@ -250,7 +274,7 @@ export async function runReportBuilder(
     sql`, `
   );
   const groupBy = sql.join(dimensionEntries.map((entry) => entry.expression), sql`, `);
-  const whereClause = buildFilters(input, dateFieldSql);
+  const whereClause = buildFilters(input, dateFieldSql, wonScoped);
 
   const result = await tenantDb.execute(sql`
     SELECT ${selectList}
@@ -264,11 +288,19 @@ export async function runReportBuilder(
   `);
 
   const rows = ((result as any).rows ?? result).map((row: Record<string, unknown>) => normalizeRow(row, measures));
+  const notes = wonScoped
+    ? [
+        `Won-scoped report (stage filter is Won-only): the period axis is the canonical won close date (won_closed_date)${
+          dateField ? `, not the selected "${dateField}"` : ""
+        }, so Won count/value reconcile to the Won card.`,
+      ]
+    : [];
   return {
     columns: [
       ...dimensions.map((dimension) => ({ key: dimension, label: DIMENSION_LABELS[dimension], kind: "dimension" as const })),
       ...measures.map((measure) => ({ key: measure, label: MEASURE_LABELS[measure], kind: "measure" as const })),
     ],
     rows,
+    ...(notes.length > 0 ? { notes } : {}),
   };
 }

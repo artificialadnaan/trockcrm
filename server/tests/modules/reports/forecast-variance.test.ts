@@ -339,6 +339,27 @@ describe("forecast variance reporting", () => {
     }
   });
 
+  it("measures variance against the canonical won value, but keeps captured_at as the snapshot/drift date (Decision 2)", async () => {
+    const { getForecastVarianceOverview } = await import("../../../src/modules/reports/service.js");
+    const tenantDb = createMockTenantDb([[], [], []]);
+
+    await getForecastVarianceOverview(tenantDb, {});
+
+    const queries = tenantDb.execute.mock.calls.map(([query]: [unknown]) => extractSqlText(query).toLowerCase());
+    for (const query of queries) {
+      // The won-value ANCHOR is the canonical awarded-first effective won value (deals table),
+      // NOT the closed_won milestone snapshot amount.
+      expect(query).not.toContain("cw.awarded_amount");
+      expect(query).toContain("as awarded_amount");
+      expect(query).toContain("d.awarded_amount > 0");
+      expect(query).toContain("d.bid_board_total_sales > 0");
+      expect(query).toContain("d.bid_estimate > 0");
+      expect(query).toContain("d.dd_estimate > 0");
+      // captured_at is LEFT AS-IS — it is the as-of/snapshot date for the close-drift series.
+      expect(query).toContain("cw.captured_at");
+    }
+  });
+
   it("counts only comparable rows and keeps legacy closed-won deals in scope", async () => {
     const { getForecastVarianceOverview } = await import("../../../src/modules/reports/service.js");
     const tenantDb = createMockTenantDb([[], [], []]);
