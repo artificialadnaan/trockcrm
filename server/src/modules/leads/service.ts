@@ -1795,6 +1795,18 @@ export function createLeadService(
       if (input.status === "open" || input.status === "disqualified") {
         updates.status = input.status;
         updates.isActive = input.status === "open";
+        // Stamp the disqualification moment so date-scoped surfaces (the leads
+        // FilterBar's disqualified axis, lead-date-scope.ts) can window/display on
+        // it. Stamp ONLY on the TRANSITION into disqualified — never re-stamp an
+        // already-disqualified lead, so its date can't jump to a later window.
+        // (In practice a disqualified lead is also inactive and the read-only
+        // guard above blocks any further update, so this transition is the only
+        // reachable write; the status check makes that invariant explicit.)
+        // disqualified_at is the only correct axis here: disqualification does not
+        // change the lead's stage, so stage_entered_at is unrelated to it.
+        if (input.status === "disqualified" && existing.status !== "disqualified") {
+          updates.disqualifiedAt = deps.now();
+        }
       } else {
         throw new AppError(400, "Use the conversion endpoint to convert a lead");
       }
