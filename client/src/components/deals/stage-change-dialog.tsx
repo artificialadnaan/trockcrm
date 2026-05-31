@@ -90,51 +90,56 @@ type StageGateMissing =
   | null
   | undefined;
 
+export interface InlineCloseDateGateInput {
+  missingRequirements: StageGateMissing;
+  isBackwardMove?: boolean | null;
+  currentStageSlug?: string | null;
+  /** preflight.bidBoardLocked -- a read-only Bid Board mirror; the route forces allowed=false for it. */
+  bidBoardLocked?: boolean | null;
+}
+
 /**
- * True when the ONLY thing blocking the gate is a missing `expectedCloseDate` field -- no other
- * missing fields, documents, or approvals, and not a backward move, and not from the `close_out`
- * stage. In that case the inline date prompt alone can clear the gate (the server re-validates with
- * the pending date), so the dialog must not redirect to the overview OR demand a director override
- * reason.
+ * True when the ONLY thing blocking the gate is a missing `expectedCloseDate` field that the inline
+ * date prompt can actually clear -- no other missing fields/documents/approvals, not a backward move,
+ * not from `close_out`, and not a Bid Board read-only lock. In that case the inline date alone can
+ * clear the gate (the server re-validates with the pending date), so the dialog must not redirect to
+ * the overview, must not demand a director override reason, and may unblock the submit button.
  *
- * The `close_out` exclusion is load-bearing: the server stage-gate's close-out-checklist rule
- * (validateStageGate Rule 2) can require a director override on a `close_out -> won` move WITHOUT
- * surfacing anything in `missingRequirements`. That override source is invisible here, and the inline
- * date does NOT clear it -- so skipping the override there would let the dialog send no reason and get
- * a hard 400 (OVERRIDE_REQUIRED) from the server. From `close_out` we conservatively keep requiring
- * the override reason.
+ * The non-field exclusions are load-bearing -- each is a block the inline date does NOT clear, and the
+ * server would reject the submit if we unblocked it here:
+ *   - backward move: override is for the direction, not the field.
+ *   - `close_out`: the close-out-checklist rule (validateStageGate Rule 2) can require an override on a
+ *     `close_out -> won` move WITHOUT any `missingRequirements` footprint -> a 400 OVERRIDE_REQUIRED.
+ *   - `bidBoardLocked`: the preflight route forces `allowed=false` for a read-only Bid Board mirror
+ *     regardless of `missingRequirements` -> the server rejects the stage change as read-only.
  */
-export function isExpectedCloseDateSoleGateBlocker(
-  missingRequirements: StageGateMissing,
-  isBackwardMove: boolean | undefined,
-  currentStageSlug: string | null | undefined
-): boolean {
-  const fields = missingRequirements?.fields ?? [];
+export function isExpectedCloseDateSoleGateBlocker(gate: InlineCloseDateGateInput): boolean {
+  const fields = gate.missingRequirements?.fields ?? [];
   return (
     fields.length === 1 &&
     fields.includes("expectedCloseDate") &&
-    (missingRequirements?.documents?.length ?? 0) === 0 &&
-    (missingRequirements?.approvals?.length ?? 0) === 0 &&
-    !isBackwardMove &&
-    currentStageSlug !== "close_out"
+    (gate.missingRequirements?.documents?.length ?? 0) === 0 &&
+    (gate.missingRequirements?.approvals?.length ?? 0) === 0 &&
+    !gate.isBackwardMove &&
+    gate.currentStageSlug !== "close_out" &&
+    !gate.bidBoardLocked
   );
 }
 
 /**
- * True when the inline expected-close-date alone resolves the gate: it's the sole blocker AND the rep
- * has supplied a usable (today-or-future) value. When true the POST re-validates with the pending date
- * and the server no longer requires an override -- so the override-reason requirement (computed by the
- * preflight before this inline value existed) must be skipped, and the footer button unblocked.
+ * True when the inline expected-close-date alone resolves the gate: it's the sole (clearable) blocker
+ * AND the rep has supplied a usable (today-or-future) value. When true the POST re-validates with the
+ * pending date and the server no longer requires an override -- so the override-reason requirement
+ * (computed by the preflight before this inline value existed) must be skipped, and the footer button
+ * unblocked.
  */
 export function isGateResolvedByInlineCloseDate(
-  missingRequirements: StageGateMissing,
-  isBackwardMove: boolean | undefined,
-  currentStageSlug: string | null | undefined,
+  gate: InlineCloseDateGateInput,
   expectedCloseDate: string,
   today: string
 ): boolean {
   const dateUsable = expectedCloseDate !== "" && expectedCloseDate >= today;
-  return isExpectedCloseDateSoleGateBlocker(missingRequirements, isBackwardMove, currentStageSlug) && dateUsable;
+  return isExpectedCloseDateSoleGateBlocker(gate) && dateUsable;
 }
 
 interface StageChangeDialogProps {
@@ -202,15 +207,15 @@ export function StageChangeDialog({
   // expectedCloseDate, let the rep set a usable (today-or-future) date here and advance in one action.
   const todayDateStr = businessTodayDateStr();
   const needsExpectedCloseDate = (preflight?.missingRequirements?.fields ?? []).includes("expectedCloseDate");
-  const onlyExpectedCloseDateMissing = isExpectedCloseDateSoleGateBlocker(
-    preflight?.missingRequirements,
-    preflight?.isBackwardMove,
-    preflight?.currentStage?.slug
-  );
+  const inlineCloseDateGate: InlineCloseDateGateInput = {
+    missingRequirements: preflight?.missingRequirements,
+    isBackwardMove: preflight?.isBackwardMove,
+    currentStageSlug: preflight?.currentStage?.slug,
+    bidBoardLocked: preflight?.bidBoardLocked,
+  };
+  const onlyExpectedCloseDateMissing = isExpectedCloseDateSoleGateBlocker(inlineCloseDateGate);
   const unblockedByExpectedCloseDate = isGateResolvedByInlineCloseDate(
-    preflight?.missingRequirements,
-    preflight?.isBackwardMove,
-    preflight?.currentStage?.slug,
+    inlineCloseDateGate,
     expectedCloseDate,
     todayDateStr
   );
@@ -418,8 +423,10 @@ export function StageChangeDialog({
             {/* Gate Checklist */}
             <StageGateChecklist missingRequirements={preflight.missingRequirements} />
 
-            {/* Inline Expected Close Date prompt (set + advance in one action) */}
-            {needsExpectedCloseDate && (
+            {/* Inline Expected Close Date prompt (set + advance in one action). Hidden on a read-only Bid
+                Board mirror: the stage move is rejected server-side regardless, so the date is not an
+                advance path there. */}
+            {needsExpectedCloseDate && !isBidBoardLocked && (
               <div className="space-y-2 border-t pt-3">
                 <Label htmlFor="expectedCloseDate">
                   Expected Close Date <span className="text-red-500">*</span>
