@@ -137,12 +137,18 @@ export function getDashboardPeriodDateRange(period: DashboardPeriodSelection, no
 }
 
 // Map an inherited dashboard period to the equivalent Won/Lost column date filter. mtd/qtd/ytd
-// (and week->wtd) line up with the terminal presets directly; last_*/today have no preset, so
-// they become a custom window from the canonical resolver (the chip reads "Custom", never the
-// false "All time").
+// (and week->wtd) line up with the terminal presets directly; last_* become a custom window from
+// the canonical resolver (the chip reads "Custom", never the false "All time").
 function periodToTerminalDateFilter(period: DashboardPeriod, now = new Date()): TerminalDateFilter {
   if (period === "mtd" || period === "qtd" || period === "ytd") return { preset: period };
   if (period === "week") return { preset: "wtd" };
+  // `today` resolves to a to-date window ENDING today. A custom terminal filter's customEnd is
+  // serialized through appendTerminalDateParams' UTC-based clampDateToToday: east of UTC between
+  // local and UTC midnight that clamps won_until back to the PREVIOUS day while the sibling
+  // won_period_to stays the local date — mutually exclusive Won bounds that empty the board
+  // (Codex #566). last_* windows end in the PAST so the clamp is a no-op there; only `today`
+  // collides, so keep it at the default and let won_period (local) window the data on its own.
+  if (period === "today") return { preset: "all" };
   const range = getDashboardPeriodDateRange(period, now);
   if (range?.from) return { preset: "custom", customStart: range.from, customEnd: range.to };
   return { preset: "all" };

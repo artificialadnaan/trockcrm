@@ -1066,6 +1066,14 @@ describe("DealListPage", () => {
       expect(won.preset).toBe("custom");
     });
 
+    it("does NOT route period=today through a custom window (Codex #566: a to-date customEnd=today gets UTC-clamped, contradicting the local won_period and emptying the board)", () => {
+      const won = resolveDrilldownTerminalDateFilters(
+        new URLSearchParams("filter=won&period=today&scope=all"),
+        new Date("2026-05-31T12:00:00.000Z")
+      ).won;
+      expect(won).toEqual({ preset: "all" });
+    });
+
     it("leaves the Won filter at its default when no period is inherited", () => {
       expect(resolveDrilldownTerminalDateFilters(new URLSearchParams("scope=all")).won).toEqual({ preset: "all" });
     });
