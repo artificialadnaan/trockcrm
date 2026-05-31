@@ -136,6 +136,47 @@ export function getDashboardPeriodDateRange(period: DashboardPeriodSelection, no
   return resolveDatePreset(period === "week" ? "wtd" : period, now);
 }
 
+// Map an inherited dashboard period to the equivalent Won/Lost column date filter. mtd/qtd/ytd
+// (and week->wtd) line up with the terminal presets directly; last_* become a custom window from
+// the canonical resolver (the chip reads "Custom", never the false "All time").
+function periodToTerminalDateFilter(period: DashboardPeriod, now = new Date()): TerminalDateFilter {
+  if (period === "mtd" || period === "qtd" || period === "ytd") return { preset: period };
+  if (period === "week") return { preset: "wtd" };
+  // `today` resolves to a to-date window ENDING today. A custom terminal filter's customEnd is
+  // serialized through appendTerminalDateParams' UTC-based clampDateToToday: east of UTC between
+  // local and UTC midnight that clamps won_until back to the PREVIOUS day while the sibling
+  // won_period_to stays the local date — mutually exclusive Won bounds that empty the board
+  // (Codex #566). last_* windows end in the PAST so the clamp is a no-op there; only `today`
+  // collides, so keep it at the default and let won_period (local) window the data on its own.
+  if (period === "today") return { preset: "all" };
+  const range = getDashboardPeriodDateRange(period, now);
+  if (range?.from) return { preset: "custom", customStart: range.from, customEnd: range.to };
+  return { preset: "all" };
+}
+
+// D-7: a Won/period drill-down arrives as ?filter=won&period=qtd with NO explicit won_* param,
+// so the Won terminal filter would default to "all" — the column's date chip then reads "All time"
+// while the data is windowed by won_period (the contradictory all_time+period the audit flagged).
+// Seed the Won filter FROM the inherited period instead, so the chip reads "QTD" and the board
+// request emits won_since/until via the preset (never won_all_time). An explicit won_* in the URL
+// always wins (the user's own choice, e.g. after changing the chip).
+export function resolveDrilldownTerminalDateFilters(
+  params: URLSearchParams,
+  now = new Date()
+): Record<TerminalOutcome, TerminalDateFilter> {
+  const base = readTerminalDateFiltersFromSearchParams(params);
+  const period = normalizeDashboardPeriod(params.get("period"));
+  // Scope to the Won drill-down (the surface D-7 flags): other drill-downs keep the
+  // Won column current-state and let their own caption fall back to the period label.
+  const isWonDrilldown = normalizeDashboardDealFilter(params.get("filter")) === "won";
+  const hasExplicitWon =
+    params.has("won_preset") || params.has("won_all_time") || params.has("won_since");
+  if (period && isWonDrilldown && !hasExplicitWon) {
+    return { ...base, won: periodToTerminalDateFilter(period, now) };
+  }
+  return base;
+}
+
 function normalizeDashboardDealFilter(filterParam: string | null | undefined): DashboardDealListFilter {
   switch (filterParam) {
     case "active":
@@ -667,7 +708,7 @@ function DealListPageContent({ role, userId }: { role: string; userId: string })
   const [search, setSearch] = useState("");
   const [drilldownPage, setDrilldownPage] = useState(1);
   const [terminalDateFilters, setTerminalDateFilters] = useState<Record<TerminalOutcome, TerminalDateFilter>>(() =>
-    readTerminalDateFiltersFromSearchParams(searchParams)
+    resolveDrilldownTerminalDateFilters(searchParams)
   );
   const [estimateSentDateFilter, setEstimateSentDateFilter] = useState<TerminalDateFilter>(() =>
     readEstimateSentDateFilterFromSearchParams(searchParams)
@@ -719,7 +760,7 @@ function DealListPageContent({ role, userId }: { role: string; userId: string })
   );
 
   useEffect(() => {
-    setTerminalDateFilters(readTerminalDateFiltersFromSearchParams(searchParams));
+    setTerminalDateFilters(resolveDrilldownTerminalDateFilters(searchParams));
     setEstimateSentDateFilter(readEstimateSentDateFilterFromSearchParams(searchParams));
   }, [searchParams]);
 
