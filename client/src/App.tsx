@@ -45,6 +45,7 @@ import { RepActivityPage } from "@/pages/reports/rep-activity-page";
 import { PortfolioLoadPage } from "@/pages/reports/portfolio-load-page";
 import { ProjectReadinessPage } from "@/pages/reports/project-readiness-page";
 import { WorkflowBottlenecksPage } from "@/pages/reports/workflow-bottlenecks-page";
+import { MondayShowcasePage } from "@/pages/reports/monday-showcase-page";
 import { SalesReviewPage } from "@/pages/sales-review/sales-review-page";
 import { ProjectsPage } from "@/pages/projects/projects-page";
 import { ProcoreSyncPage } from "@/pages/admin/procore-sync-page";
@@ -236,6 +237,14 @@ export function App() {
               <Route path="/reports/sales/pipeline-velocity" element={<PipelineVelocityPage />} />
               <Route path="/reports/sales/closed-won-revenue" element={<ClosedWonRevenuePage />} />
               <Route path="/reports/sales/lead-conversion" element={<LeadConversionPage />} />
+              <Route
+                path="/reports/monday-showcase"
+                element={(
+                  <RequireRole allowedRoles={["admin", "director"]}>
+                    <MondayShowcasePage />
+                  </RequireRole>
+                )}
+              />
               <Route
                 path="/reports/performance/director-scorecard"
                 element={(

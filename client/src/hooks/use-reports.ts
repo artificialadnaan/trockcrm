@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback } from "react";
 import { api } from "@/lib/api";
+import type { MondayShowcaseData } from "@/pages/reports/monday-showcase/types";
 
 export interface SavedReport {
   id: string;
@@ -1350,4 +1351,31 @@ export async function runReportBuilder(input: ReportBuilderRequest) {
     method: "POST",
     json: input,
   });
+}
+
+// Reports Part 2 -- the Monday showcase. ONE payload feeds all 8 variants (so they reconcile).
+export function useMondayShowcase(mode: "to_date" | "completed" = "to_date") {
+  const [data, setData] = useState<MondayShowcaseData | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+
+  const fetchShowcase = useCallback(async () => {
+    setLoading(true);
+    setError(null);
+    try {
+      const result = await api<{ data: MondayShowcaseData }>(`/reports/monday-showcase?mode=${mode}`);
+      setData(result.data);
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : "Failed to load the Monday showcase");
+      setData(null);
+    } finally {
+      setLoading(false);
+    }
+  }, [mode]);
+
+  useEffect(() => {
+    fetchShowcase();
+  }, [fetchShowcase]);
+
+  return { data, loading, error, refetch: fetchShowcase };
 }

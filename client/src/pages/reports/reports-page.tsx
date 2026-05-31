@@ -31,6 +31,18 @@ type ReportCard = {
 
 const reportCategories: Array<{ category: string; description: string; reports: ReportCard[] }> = [
   {
+    category: "Monday Showcase",
+    description: "Part 2 — many presentations, one source of truth (Won/Sent/Estimated/projection reconcile across every layout).",
+    reports: [
+      {
+        name: "Monday Showcase",
+        description: "8 variants (3 Report A + 4 Report B + exec hero) over identical canonical numbers — switch to compare.",
+        icon: BarChart3,
+        path: "/reports/monday-showcase",
+      },
+    ],
+  },
+  {
     category: "Sales",
     description: "Pipeline, forecasts, close rates, and booked revenue.",
     reports: [
