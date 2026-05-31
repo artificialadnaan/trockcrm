@@ -1,5 +1,4 @@
 import { LOST_DEAL_STAGE_SLUGS, WON_DEAL_STAGE_SLUGS } from "@trock-crm/shared/types";
-import type { DealFilters } from "@/hooks/use-deals";
 
 export interface StagePageFilters {
   assignedRepId?: string;
@@ -148,30 +147,62 @@ export function isWonStagePageStage(stageSlug: string): boolean {
   return WON_DEAL_STAGE_SLUGS.includes(stageSlug);
 }
 
+/** Bare stage-route filter params (set by the legacy grid + dashboard navigation). The A′ bar OWNS the
+ *  list's filter state, so on mount these are translated into the fb_ namespace (where a bar dimension
+ *  exists) and stripped — see getStagePageBarRedirectSearch. */
+const STAGE_ROUTE_FILTER_KEYS = [
+  "assignedRepId",
+  "regionId",
+  "source",
+  "status",
+  "workflowRoute",
+  "search",
+  "updatedAfter",
+  "updatedBefore",
+  "minAgeDays",
+  "maxAgeDays",
+  "won_since",
+  "won_until",
+  "won_all_time",
+  "lost_since",
+  "lost_until",
+  "lost_all_time",
+  "estimate_sent_since",
+  "estimate_sent_until",
+  "estimate_sent_all_time",
+  "estimate_sent_preset",
+  "staleOnly",
+] as const;
+
+/** Bare key -> FilterBarValue key, for the inherited filters the bar can represent. Un-mappable legacy
+ *  params (updated-axis dates, source, won/lost/estimate-sent windows, staleOnly) are stripped without
+ *  translation: the A′ bar is outcome-axis, so they are superseded by its own Date / Stalled controls. */
+const STAGE_ROUTE_FILTER_TO_BAR_KEY: Record<string, string> = {
+  assignedRepId: "assignedRepId",
+  regionId: "regionId",
+  status: "status",
+  workflowRoute: "workflowRoute",
+  search: "search",
+  minAgeDays: "minAgeDays",
+  maxAgeDays: "maxAgeDays",
+};
+
 /**
- * Translate the bare stage-route query (the filters the header summary applies via useDealStagePage)
- * into the DealFilters the A′ list runs through getDeals, so the list defaults to the header's
- * population (the FilterBar then refines it). Fields with no getDeals equivalent — `staleOnly` and the
- * Lost date window — are not mappable here and fall outside the no-bar-filter reconciliation.
+ * Mount redirect for the A′ stage page. If the URL still carries bare stage-route filter params,
+ * returns the new search string with those filters TRANSLATED into the bar's fb_ namespace (where a bar
+ * dimension exists) and ALL bare filter params removed — so the bar shows + can Clear them, and the
+ * header summary reads no filters (whole-stage, the signed-off intent). Returns null when there is
+ * nothing to translate (no redirect). Preserves scope/page/sort and any fb_ the user already set (an
+ * explicit fb_ wins over the inherited bare value).
  */
-export function mapStageRouteFiltersToDealFilters(
-  query: Pick<StagePageQuery, "search" | "filters">
-): Partial<DealFilters> {
-  const f = query.filters;
-  const base: Partial<DealFilters> = {};
-  if (query.search) base.search = query.search;
-  if (f.assignedRepId) base.assignedRepId = f.assignedRepId;
-  if (f.regionId) base.regionId = f.regionId;
-  if (f.source) base.source = f.source;
-  if (f.status === "active" || f.status === "on_hold" || f.status === "inactive") base.status = f.status;
-  if (f.workflowRoute === "normal" || f.workflowRoute === "service") base.workflowRoute = f.workflowRoute;
-  if (f.updatedAfter) base.updatedFrom = f.updatedAfter;
-  if (f.updatedBefore) base.updatedTo = f.updatedBefore;
-  if (f.minAgeDays) base.minAgeDays = Number(f.minAgeDays);
-  if (f.maxAgeDays) base.maxAgeDays = Number(f.maxAgeDays);
-  if (f.estimateSentFrom) base.estimateSentFrom = f.estimateSentFrom;
-  if (f.estimateSentTo) base.estimateSentTo = f.estimateSentTo;
-  if (f.wonSince) base.wonClosedFrom = f.wonSince;
-  if (f.wonUntil) base.wonClosedTo = f.wonUntil;
-  return base;
+export function getStagePageBarRedirectSearch(params: URLSearchParams, prefix = "fb_"): string | null {
+  if (!STAGE_ROUTE_FILTER_KEYS.some((key) => params.has(key))) return null;
+  const next = new URLSearchParams(params);
+  for (const [bareKey, barKey] of Object.entries(STAGE_ROUTE_FILTER_TO_BAR_KEY)) {
+    const value = params.get(bareKey);
+    const fbKey = `${prefix}${barKey}`;
+    if (value && !next.has(fbKey)) next.set(fbKey, value);
+  }
+  for (const key of STAGE_ROUTE_FILTER_KEYS) next.delete(key);
+  return next.toString();
 }

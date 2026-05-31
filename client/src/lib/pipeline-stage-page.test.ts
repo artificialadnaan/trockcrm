@@ -1,9 +1,9 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { WON_DEAL_STAGE_SLUGS } from "@trock-crm/shared/types";
 import {
+  getStagePageBarRedirectSearch,
   getStagePageListStageIds,
   isWonStagePageStage,
-  mapStageRouteFiltersToDealFilters,
   normalizeStagePageQuery,
 } from "./pipeline-stage-page";
 
@@ -151,41 +151,28 @@ describe("isWonStagePageStage (Won-only on-hold exclusion)", () => {
   });
 });
 
-describe("mapStageRouteFiltersToDealFilters (header filters -> list DealFilters, so the list matches the header)", () => {
-  it("maps the population filters the summary applies into getDeals filters", () => {
-    expect(
-      mapStageRouteFiltersToDealFilters({
-        search: "acme",
-        filters: {
-          staleOnly: false,
-          assignedRepId: "rep-1",
-          regionId: "region-1",
-          status: "on_hold",
-          workflowRoute: "service",
-          updatedAfter: "2026-05-01",
-          updatedBefore: "2026-05-31",
-          minAgeDays: "30",
-          wonSince: "2026-04-01",
-          wonUntil: "2026-04-30",
-        },
-      })
-    ).toEqual({
-      search: "acme",
-      assignedRepId: "rep-1",
-      regionId: "region-1",
-      status: "on_hold",
-      workflowRoute: "service",
-      updatedFrom: "2026-05-01",
-      updatedTo: "2026-05-31",
-      minAgeDays: 30,
-      wonClosedFrom: "2026-04-01",
-      wonClosedTo: "2026-04-30",
-    });
+describe("getStagePageBarRedirectSearch (translate inherited bare filters -> fb_ namespace so the bar owns them)", () => {
+  const parse = (s: string) => new URLSearchParams(s);
+
+  it("returns null when there are no bare filter params (no redirect)", () => {
+    expect(getStagePageBarRedirectSearch(parse("scope=team&page=2&fb_search=x"))).toBeNull();
   });
 
-  it("ignores filters with no getDeals equivalent (staleOnly, Lost date window)", () => {
-    expect(
-      mapStageRouteFiltersToDealFilters({ search: "", filters: { staleOnly: true, lostSince: "2026-01-01" } })
-    ).toEqual({});
+  it("translates bar-mappable bare filters to fb_ and strips ALL bare filter params", () => {
+    const result = getStagePageBarRedirectSearch(parse("scope=team&assignedRepId=rep-1&regionId=reg-1&updatedAfter=2026-05-01"));
+    const out = parse(result!);
+    expect(out.get("fb_assignedRepId")).toBe("rep-1"); // translated -> bar shows it, Clear clears it
+    expect(out.get("fb_regionId")).toBe("reg-1");
+    expect(out.get("scope")).toBe("team"); // route param preserved
+    expect(out.has("assignedRepId")).toBe(false); // bare stripped (no invisible floor)
+    expect(out.has("regionId")).toBe(false);
+    expect(out.has("updatedAfter")).toBe(false); // un-mappable legacy (updated-axis) stripped, not translated
+    expect(out.has("fb_updatedAfter")).toBe(false);
+  });
+
+  it("does NOT clobber an fb_ value the user already set (explicit fb_ wins over inherited bare)", () => {
+    const out = parse(getStagePageBarRedirectSearch(parse("assignedRepId=rep-1&fb_assignedRepId=rep-9"))!);
+    expect(out.get("fb_assignedRepId")).toBe("rep-9");
+    expect(out.has("assignedRepId")).toBe(false);
   });
 });

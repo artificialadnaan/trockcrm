@@ -1,4 +1,4 @@
-import { Navigate, useParams } from "react-router-dom";
+import { Navigate, useLocation, useParams, useSearchParams } from "react-router-dom";
 import { useDealStagePage } from "@/hooks/use-deals";
 import { formatCurrencyCompact } from "@/lib/deal-utils";
 import { buildDealStageSummary } from "@/lib/pipeline-stage-summary";
@@ -15,13 +15,15 @@ import { usePipelineStages, useProjectTypes, useRegions } from "@/hooks/use-pipe
 import { useTaskAssignees } from "@/hooks/use-task-assignees";
 import { useAuth } from "@/lib/auth";
 import {
+  getStagePageBarRedirectSearch,
   getStagePageListStageIds,
   isWonStagePageStage,
-  mapStageRouteFiltersToDealFilters,
 } from "@/lib/pipeline-stage-page";
 
 export function DealStagePage() {
   const { stageId } = useParams();
+  const location = useLocation();
+  const [searchParams] = useSearchParams();
   const route = useNormalizedStageRoute("deals", stageId!);
   const { data, loading, error } = useDealStagePage({ stageId: stageId!, ...route.query });
   const { regions } = useRegions();
@@ -32,6 +34,14 @@ export function DealStagePage() {
   const summary = buildDealStageSummary(data);
 
   if (route.needsRedirect) return <Navigate to={route.redirectTo} replace />;
+  // The A′ bar OWNS the list's filter state: if the URL still carries inherited bare filter params
+  // (from the dashboard nav / a legacy bookmark), translate them into the fb_ namespace and strip the
+  // bare ones, so the bar SHOWS them and Clear actually clears them (Codex P2) — and the header summary
+  // reads no filters = whole-stage (signed-off intent). One-time, terminates (the bare trigger is gone).
+  const barRedirect = getStagePageBarRedirectSearch(searchParams, DRILLDOWN_FILTERBAR_PARAM_PREFIX);
+  if (barRedirect !== null) {
+    return <Navigate to={barRedirect ? `${location.pathname}?${barRedirect}` : location.pathname} replace />;
+  }
   if (error) return <div className="text-sm text-rose-600">{error}</div>;
   // Wait while stages are LOADING (the terminal family broadening needs them). If they FAIL,
   // stagesLoading is false and getStagePageListStageIds falls back to the route stage id, so the list
@@ -75,7 +85,6 @@ export function DealStagePage() {
         searchPlaceholder="Deal, number, city, state"
         visibleStages={[stage]}
         baseFilters={{
-          ...mapStageRouteFiltersToDealFilters(route.query),
           stageIds: listStageIds,
           ...(excludeOnHold ? { excludeOnHold: true } : {}),
         }}

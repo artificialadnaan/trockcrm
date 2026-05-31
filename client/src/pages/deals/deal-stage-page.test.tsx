@@ -174,26 +174,17 @@ describe("DealStagePage", () => {
     expect(lastListProps().baseFilters.excludeOnHold).toBeUndefined(); // active stage keeps on-hold deals
   });
 
-  it("carries the inbound stage-route filters into the list so it matches the filtered header", () => {
-    mocks.useNormalizedStageRouteMock.mockReturnValue({
-      needsRedirect: false,
-      redirectTo: "/deals/stages/stage-estimating?scope=team",
-      backTo: "/deals?scope=team",
-      query: {
-        scope: "team",
-        page: 1,
-        pageSize: 25,
-        sort: "",
-        search: "acme",
-        filters: { staleOnly: false, assignedRepId: "rep-1", regionId: "region-1" },
-      },
-      onPageChange: vi.fn(),
-    });
-    renderStage();
-    const props = lastListProps();
-    expect(props.baseFilters.assignedRepId).toBe("rep-1");
-    expect(props.baseFilters.regionId).toBe("region-1");
-    expect(props.baseFilters.search).toBe("acme");
+  it("redirects inherited bare filters into the fb_ namespace (bar owns them, no invisible floor)", () => {
+    // The dashboard nav arrives with a bare ?assignedRepId; the A′ page translates it to fb_ and strips
+    // the bare one, so it returns a redirect (the list is not rendered on this pass) — the bar then shows
+    // it and Clear can clear it. (getStagePageBarRedirectSearch translation is unit-tested separately.)
+    renderStage("/deals/stages/stage-estimating?scope=team&assignedRepId=rep-1");
+    expect(mocks.dealsListSectionMock).not.toHaveBeenCalled();
+  });
+
+  it("does NOT redirect (renders the list) when the URL carries no bare filter params", () => {
+    renderStage("/deals/stages/stage-estimating?scope=team&fb_search=acme");
+    expect(mocks.dealsListSectionMock).toHaveBeenCalled();
   });
 
   it("renders a stage error when the stage query fails", () => {
