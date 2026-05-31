@@ -1,4 +1,4 @@
-import { useMemo } from "react";
+import { useEffect, useMemo } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import { ArrowRight, Calendar, Mail, Phone, Plus, Search } from "lucide-react";
 import { Button } from "@/components/ui/button";
@@ -240,6 +240,15 @@ function LeadListPageContent({ role, userId }: { role: string; userId: string })
   // Team is not offered (see SCOPE_OPTIONS); coerce a stored/URL ?scope=team to a scope we
   // actually render so the toggle and board never reach the dead "team" placeholder state.
   const scope: PipelineScope = requestedScope === "team" ? "mine" : requestedScope;
+  // A parked ?scope=team bookmark is coerced to mine for this render; also rewrite the URL so
+  // the stale scope/owner params do not persist and silently re-apply when switching scope (D-12b).
+  useEffect(() => {
+    if (requestedScope !== "team") return;
+    const next = new URLSearchParams(searchParams);
+    next.set("scope", "mine");
+    next.delete("assignedRepId");
+    setSearchParams(next, { replace: true });
+  }, [requestedScope, searchParams, setSearchParams]);
   const scopeOptions = SCOPE_OPTIONS;
   const bucket = searchParams.get("bucket");
   const search = searchParams.get("search") ?? "";

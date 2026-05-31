@@ -1140,6 +1140,23 @@ describe("DealListPage", () => {
     expect(mocks.useDealBoardMock).toHaveBeenLastCalledWith("mine", true, expect.any(Object), 8, null, undefined, {});
   });
 
+  it("rewrites a parked team bookmark URL to mine and drops the stale owner param (D-12b)", async () => {
+    const { searches, cleanup } = await renderPageDomWithLocation(
+      "/deals?scope=team&assignedRepId=rep-2",
+      "director"
+    );
+
+    try {
+      // The cleanup effect rewrites the URL so the stale scope/owner params do not persist and
+      // re-apply when the user later switches scope.
+      const finalParams = new URLSearchParams(searches[searches.length - 1] ?? "");
+      expect(finalParams.get("scope")).toBe("mine");
+      expect(finalParams.get("assignedRepId")).toBeNull();
+    } finally {
+      await cleanup();
+    }
+  });
+
   it("allows reps to opt into all-office scope", () => {
     const html = renderPage("/deals?scope=all", "rep");
 

@@ -723,6 +723,17 @@ function DealListPageContent({ role, userId }: { role: string; userId: string })
     setEstimateSentDateFilter(readEstimateSentDateFilterFromSearchParams(searchParams));
   }, [searchParams]);
 
+  // A parked ?scope=team bookmark is coerced to mine for the render above; also rewrite the
+  // URL so the stale scope/owner params do not persist -- otherwise updateScope clones them
+  // and clicking All silently re-applies the old owner filter to the All board (D-12b).
+  useEffect(() => {
+    if (requestedScope !== "team") return;
+    const next = new URLSearchParams(searchParams);
+    next.set("scope", "mine");
+    next.delete("assignedRepId");
+    setSearchParams(next, { replace: true });
+  }, [requestedScope, searchParams, setSearchParams]);
+
   const updateTerminalDateFilter = useCallback((outcome: TerminalOutcome, filter: TerminalDateFilter) => {
     writeTerminalDateFilter(outcome, filter);
     setTerminalDateFilters((current) => ({ ...current, [outcome]: filter }));

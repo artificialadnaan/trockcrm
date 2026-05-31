@@ -1,4 +1,4 @@
-import { eq, and, sql, gte, lte, inArray, asc } from "drizzle-orm";
+import { eq, and, sql, gte, lte, inArray, asc, type SQL } from "drizzle-orm";
 import type { NodePgDatabase } from "drizzle-orm/node-postgres";
 import {
   auditLog,
@@ -830,6 +830,21 @@ async function getRepFunnelBuckets(
   return buildFunnelBuckets(leadRows, dealRows);
 }
 
+// D-5: active-office membership for the rep rosters -- primary users.office_id OR an explicit
+// user_office_access grant. This mirrors resolveActiveOfficeUserIds (team-scope.ts), the
+// canonical check the deals/leads layer uses to scope reps, so a rep shared into this office
+// (whose primary office is elsewhere) still appears instead of being dropped, while pure
+// foreign-office reps with no relationship to this office are excluded. Assumes the users
+// alias is `u`.
+function activeOfficeRepMembershipSql(officeId: string): SQL {
+  // Alias `uo` (not `uoa`) is deliberate: `uoa.user_id` would contain the substring
+  // "a.user_id" and collide with an activities-ownership test guard.
+  return sql`(u.office_id = ${officeId} OR EXISTS (
+    SELECT 1 FROM user_office_access uo
+    WHERE uo.user_id = u.id AND uo.office_id = ${officeId}
+  ))`;
+}
+
 async function getDirectorFunnelSummary(
   tenantDb: TenantDb,
   officeId?: string
@@ -913,11 +928,12 @@ async function getDirectorFunnelSummary(
         -- P2-8 (Codex round 2): exclude flagged smoke-test / duplicate accounts from the
         -- funnel roster too, matching the rep-card roster.
         AND COALESCE(u.is_test_data, false) = false
-        -- D-5: office-scope ONLY the rep branch (users is global/public), matching the rep-card
-        -- roster + Source-B read, while preserving the locked owner-row requirement (a deal
-        -- owner in THIS office is kept even if their primary users.office_id differs).
+        -- D-5: scope the rep branch to ACTIVE-OFFICE membership (primary office or a
+        -- user_office_access grant -- see activeOfficeRepMembershipSql), matching the rep-card
+        -- roster + the deals/leads layer, while preserving the locked owner-row requirement (a
+        -- deal owner in THIS office is kept even if their primary users.office_id differs).
         AND (
-          (u.role = 'rep'${officeId ? sql` AND u.office_id = ${officeId}` : sql``})
+          (u.role = 'rep'${officeId ? sql` AND ${activeOfficeRepMembershipSql(officeId)}` : sql``})
           OR owner_rows.rep_id IS NOT NULL
         )
       ORDER BY
@@ -2827,13 +2843,12 @@ async function buildRepPerformanceCards(
       -- changes only WHO appears, never the Won total.
       AND COALESCE(u.is_test_data, false) = false
       -- D-5: users is a GLOBAL (public) table, so an unscoped role='rep' branch admits reps
-      -- from EVERY office. Office-scope ONLY the rep branch (matching the Source-B snapshot
-      -- read + materializer) so foreign-office reps no longer leak in -- without weakening the
-      -- locked requirement to keep anyone who has owned a deal in THIS office. owner_rows is
-      -- built from this tenant's deals, so a multi-office / transferred owner whose primary
-      -- users.office_id differs is still preserved via the owner branch.
+      -- from EVERY office. Scope the rep branch to ACTIVE-OFFICE membership (primary office or
+      -- a user_office_access grant -- see activeOfficeRepMembershipSql) so foreign-office reps
+      -- no longer leak in, while a rep shared into this office still appears. The locked owner
+      -- branch is preserved un-gated, so anyone who has owned a deal in THIS office stays.
       AND (
-        (u.role = 'rep'${officeId ? sql` AND u.office_id = ${officeId}` : sql``})
+        (u.role = 'rep'${officeId ? sql` AND ${activeOfficeRepMembershipSql(officeId)}` : sql``})
         OR owner_rows.rep_id IS NOT NULL
       )
     ORDER BY pipeline_value DESC
