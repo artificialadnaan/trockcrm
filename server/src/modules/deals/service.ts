@@ -59,7 +59,12 @@ import {
   dealAwardedFirstWithFallbackSql,
   dealBestEstimateSql,
 } from "../shared/deal-value-sql.js";
-import { dealDateScopeColumns, dealDisplayDateExpr } from "../shared/deal-date-scope.js";
+import {
+  aliasedDealDateScopeColumns,
+  buildStageEntryDateWindow,
+  dealDateScopeColumns,
+  dealDisplayDateExpr,
+} from "../shared/deal-date-scope.js";
 import { buildDealSearchCondition } from "../search/unified-search.js";
 import { isStageEntryDateFilterEnabled } from "../../config/feature-flags.js";
 import {
@@ -2484,6 +2489,11 @@ export async function getDealsForPipeline(
   const wonSignedDateUntil = toIsoDateOnly(terminalFilters.won.until);
   const wonPeriodFrom = toIsoDateOnly(wonPeriodRange.from);
   const wonPeriodTo = toIsoDateOnly(wonPeriodRange.to);
+  // D-11: gates whether a board-wide dashboard period also bounds the OPEN columns
+  // on the entered-current-stage axis (see the open ELSE branch below). OFF in prod
+  // until stage_entered_at is trusted everywhere (post-#535); OFF => open columns
+  // stay current-state and the drill-down labels them "(now)" honestly.
+  const stageEntryDateEnabled = isStageEntryDateFilterEnabled();
   // The won-date guard below is a single public.try_parse_hs_close_date() call
   // (see castHsClosedWonDateSql), so interpolating it into the >=, <=, and
   // IS NOT NULL predicates composes to small, unambiguous SQL. Each site still
@@ -2605,6 +2615,22 @@ export async function getDealsForPipeline(
     } else {
       stageConditions.push(eq(deals.isActive, true), eq(deals.stageId, stage.id));
       stageConditions.push(nonTerminalMirroredStageCondition());
+      // D-11 / canonical date model (§6 Phase 4): a board-wide dashboard period
+      // (won_period_from/to) must window the OPEN columns on the entered-current-
+      // stage axis, not be a no-op ("Open-stage deals for MTD" showing every open
+      // deal). Flag-gated on stageEntryDateEnabled (reliable stage_entered_at);
+      // when OFF the open columns stay current-state (byte-identical SQL). Mirrors
+      // deal-date-scope's open axis + window convention (>= from::date,
+      // < to::date + 1 day, via the shared buildStageEntryDateWindow). The main
+      // kanban sends no period (won_all_time) so this only affects the dashboard
+      // drill-down. Won/Lost columns are unaffected.
+      if (stageEntryDateEnabled) {
+        const openWindow = buildStageEntryDateWindow(
+          { from: wonPeriodFrom ?? undefined, to: wonPeriodTo ?? undefined },
+          aliasedDealDateScopeColumns("deals")
+        );
+        if (openWindow) stageConditions.push(openWindow);
+      }
     }
     if (isEstimateSentStage) {
       // Estimate Sent has its own column date window. Keep that filter local to
