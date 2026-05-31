@@ -55,13 +55,15 @@ import {
   aliasedActiveDealCountFilterSql,
   aliasedDealAwardedFirstWithFallbackSql,
   aliasedDealBestEstimateSql,
-  aliasedEffectiveDealValueSql,
   dealAwardedFirstWithFallbackSql,
   dealBestEstimateSql,
 } from "../shared/deal-value-sql.js";
 import { buildDealSearchCondition } from "../search/unified-search.js";
 import { isStageEntryDateFilterEnabled } from "../../config/feature-flags.js";
-import { buildDealFilterBarConditions, type DealStatusFilter } from "./deal-filter-predicates.js";
+import {
+  buildDealFilterBarConditions,
+  aliasedStageAwareEffectiveDealValueSql,
+} from "./deal-filter-predicates.js";
 
 // Type alias for the tenant-scoped Drizzle instance
 type TenantDb = NodePgDatabase<typeof schema>;
@@ -224,10 +226,13 @@ export interface DealFilters {
   source?: string;
   isActive?: boolean | "all" | "pipeline";
   // Shared FilterBar dimensions, consumed by the predicate registry
-  // (deal-filter-predicates.ts). assignedRepId/regionId also accept the
+  // (deal-filter-predicates.ts). workflowRoute/status are loosely typed because
+  // the route passes raw query values straight through and the predicate is the
+  // single validation point (recognized -> apply, unrecognized -> no-match,
+  // absent/empty/all/any -> omit). assignedRepId/regionId also accept the
   // UNASSIGNED_FILTER_SENTINEL ("__unassigned__") which maps to IS NULL.
-  workflowRoute?: WorkflowRoute;
-  status?: DealStatusFilter;
+  workflowRoute?: string;
+  status?: string;
   valueMin?: number;
   valueMax?: number;
   minAgeDays?: number;
@@ -1537,7 +1542,15 @@ export async function getDeals(
   const stageEntryDateEnabled = isStageEntryDateFilterEnabled();
   let wonStageIds: string[] = [];
   let lostStageIds: string[] = [];
-  if (filters.dateFrom || filters.dateTo) {
+  // Resolve Won/Lost stage-id sets once when any stage-classified dimension is in
+  // play: the outcome-aware date window (Won+Lost), and the stage-aware value
+  // filter/sort (Won — awarded-first for Won stages). Done here so those
+  // predicates classify rows without a pipeline_stage_config join (the count
+  // queries below select from `deals` alone).
+  const valueFilterRequested = Number.isFinite(filters.valueMin) || Number.isFinite(filters.valueMax);
+  const needsStageClassification =
+    Boolean(filters.dateFrom || filters.dateTo) || valueFilterRequested || filters.sortBy === "awarded_amount";
+  if (needsStageClassification) {
     const stages = await listDealStages();
     const wonSlugs = WON_STAGE_SLUGS as readonly string[];
     const lostSlugs = LOST_STAGE_SLUGS as readonly string[];
@@ -1605,7 +1618,7 @@ export async function getDeals(
     : sql`coalesce(${deals.onHold}, false) = false`;
 
   // Sort
-  const sortOrder = buildDealListOrder(filters);
+  const sortOrder = buildDealListOrder(filters, wonStageIds);
 
   // Sequential tenant queries required: tenantDb is a single transaction client
   // in production, so parallel reads can fail with "client already executing".

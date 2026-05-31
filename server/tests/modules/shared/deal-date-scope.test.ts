@@ -46,10 +46,20 @@ describe("buildDealOutcomeDateScope", () => {
     expect(sql).toContain("stage_entered_at");
   });
 
-  it("degrades to a false sentinel (never IN ()) when stage classification is empty", () => {
-    const sql = render(buildDealOutcomeDateScope({ from: "2026-01-01" }, { wonStageIds: [], lostStageIds: [] }));
+  it("fails loudly when a date window is requested but NO won/lost stages resolve", () => {
+    // Both sets empty would make openMatch = NOT(false OR false) = TRUE, silently
+    // returning every row and ignoring the window (out-of-window Won/Lost rows
+    // leaking in as 'open'). That is a stage-config failure, not user input — so
+    // the canonical function throws rather than silently mis-filtering. (Codex #546.)
+    expect(() =>
+      buildDealOutcomeDateScope({ from: "2026-01-01" }, { wonStageIds: [], lostStageIds: [] })
+    ).toThrow(/won.*lost|stage/i);
+  });
+
+  it("still classifies correctly when only ONE outcome class resolves (partial config)", () => {
+    const sql = render(buildDealOutcomeDateScope({ from: "2026-01-01" }, { wonStageIds: ["won-1"], lostStageIds: [] }));
+    expect(sql).toContain("stage_id");
     expect(sql).not.toContain("in ()");
-    expect(sql).toContain("false");
   });
 
   it("supports an aliased deals table for raw-SQL surfaces (board/reports reuse)", () => {

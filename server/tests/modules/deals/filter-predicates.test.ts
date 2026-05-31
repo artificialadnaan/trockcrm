@@ -106,20 +106,31 @@ describe("status predicate (active / on_hold / inactive / any)", () => {
   });
 });
 
-describe("value-range predicate (effective value chain == the sort chain)", () => {
+describe("value-range predicate (stage-aware effective value == sort == display)", () => {
+  const openCtx = {}; // no won stage ids -> open best-estimate chain
+  const wonCtx = { wonStageIds: ["won-1"] };
+
   it("omits when neither bound is a finite number", () => {
-    expect(buildValueRangePredicate({})).toBeUndefined();
-    expect(buildValueRangePredicate({ valueMin: NaN, valueMax: NaN })).toBeUndefined();
+    expect(buildValueRangePredicate({}, openCtx)).toBeUndefined();
+    expect(buildValueRangePredicate({ valueMin: NaN, valueMax: NaN }, openCtx)).toBeUndefined();
   });
-  it("BETWEEN both bounds, on the on-hold-zeroed best-estimate chain", () => {
-    const sql = text(buildValueRangePredicate({ valueMin: 100000, valueMax: 500000 }));
+  it("BETWEEN both bounds, on the on-hold-zeroed best-estimate chain (no won classification)", () => {
+    const sql = text(buildValueRangePredicate({ valueMin: 100000, valueMax: 500000 }, openCtx));
     expect(sql).toContain("between");
     expect(sql).toContain("on_hold");
     expect(sql).toContain("bid_estimate");
+    expect(sql).not.toContain("case when"); // no stage CASE when no won ids
   });
   it(">= when only a minimum, <= when only a maximum", () => {
-    expect(text(buildValueRangePredicate({ valueMin: 100000 }))).toContain(">=");
-    expect(text(buildValueRangePredicate({ valueMax: 500000 }))).toContain("<=");
+    expect(text(buildValueRangePredicate({ valueMin: 100000 }, openCtx))).toContain(">=");
+    expect(text(buildValueRangePredicate({ valueMax: 500000 }, openCtx))).toContain("<=");
+  });
+  it("emits a stage-aware CASE (awarded-first for Won stage ids) when wonStageIds are provided", () => {
+    const sql = text(buildValueRangePredicate({ valueMin: 750000 }, wonCtx));
+    expect(sql).toContain("case when");
+    expect(sql).toContain("stage_id in"); // classifies by stage id, no join
+    expect(sql).toContain("awarded_amount");
+    expect(sql).toContain("bid_estimate"); // open branch still present
   });
 });
 
@@ -127,9 +138,12 @@ describe("stalled / days-in-stage predicate (gated on stage-entry reliability)",
   it("is OMITTED entirely when the stage-entry flag is OFF (no false stalls off import dates)", () => {
     expect(buildStalledPredicate({ minAgeDays: 30 }, { stageEntryDateEnabled: false })).toBeUndefined();
   });
-  it("filters on age from stage_entered_at when the flag is ON", () => {
+  it("filters on the HOLD-AWARE effective stage age when the flag is ON (matches the displayed days)", () => {
     const sql = text(buildStalledPredicate({ minAgeDays: 30 }, { stageEntryDateEnabled: true }));
     expect(sql).toContain("stage_entered_at");
+    expect(sql).toContain("bid_board_stage_entered_at"); // effective entry prefers bid board
+    expect(sql).toContain("on_hold_accumulated_seconds"); // subtracts completed hold time
+    expect(sql).toContain("on_hold_started_at"); // subtracts the open hold interval
     expect(sql).toContain(">=");
   });
   it("omits when no bucket is selected even with the flag on", () => {

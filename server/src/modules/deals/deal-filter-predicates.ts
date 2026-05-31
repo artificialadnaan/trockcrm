@@ -1,6 +1,6 @@
 import { and, eq, isNull, sql, type SQL } from "drizzle-orm";
 import { deals } from "@trock-crm/shared/schema";
-import { aliasedEffectiveDealValueSql } from "../shared/deal-value-sql.js";
+import { aliasedEffectiveDealValueSql, aliasedEffectiveWonDealValueSql } from "../shared/deal-value-sql.js";
 import {
   buildDealOutcomeDateScope,
   type DealDateScopeContext,
@@ -114,14 +114,62 @@ export function buildStatusPredicate(input: DealFilterBarInput): SQL | undefined
 }
 
 /**
- * value range — BETWEEN on the on-hold-zeroed best-estimate chain, i.e. the SAME
- * expression the list sorts and displays by (sort == filter == display, D-1).
+ * Stage-aware effective deal value, mirroring getEffectiveDealValue
+ * (shared/src/types/deal-hold.ts): Won deals report awarded-first, open deals
+ * report best-estimate-first, both on-hold-zeroed. This is the value the list
+ * DISPLAYS, so the value filter and the value sort use it too (sort == filter ==
+ * display, D-1; Codex #546). Falls back to the open chain when no Won stage ids
+ * are resolved (e.g. value filter without classification) — graceful, never
+ * broken SQL. Won classification is by stage id so no pipeline_stage_config join
+ * is needed (the deals row carries stage_id).
  */
-export function buildValueRangePredicate(input: DealFilterBarInput): SQL | undefined {
+export function aliasedStageAwareEffectiveDealValueSql(alias: string, wonStageIds: string[]): SQL {
+  const openValue = aliasedEffectiveDealValueSql(alias);
+  if (wonStageIds.length === 0) return openValue;
+  const wonValue = aliasedEffectiveWonDealValueSql(alias);
+  const stageId = sql.raw(`${alias}.stage_id`);
+  const ids = sql.join(wonStageIds.map((id) => sql`${id}`), sql`, `);
+  return sql`CASE WHEN ${stageId} IN (${ids}) THEN ${wonValue} ELSE ${openValue} END`;
+}
+
+/**
+ * Hold-aware effective stage age in days, mirroring getEffectiveStageAgeSeconds
+ * (shared/src/types/deal-hold.ts): age since the effective stage-entry date
+ * (bid_board_stage_entered_at when present, else stage_entered_at), minus
+ * completed hold time accumulated in the current stage, minus the currently-open
+ * hold interval. This is the "days in stage" the list DISPLAYS, so the stalled
+ * filter uses it (filter == display; Codex #546). NOTE: the deal-stage-page
+ * stalled filter still uses raw age and should adopt this helper too — tracked
+ * as a follow-up.
+ */
+export function aliasedEffectiveStageAgeDaysSql(alias: string): SQL {
+  const col = (name: string) => sql.raw(`${alias}.${name}`);
+  const entered = sql`COALESCE(${col("bid_board_stage_entered_at")}, ${col("stage_entered_at")})`;
+  const elapsed = sql`EXTRACT(EPOCH FROM (now() - ${entered}))`;
+  // Completed hold time accrued since this stage was entered (snapshot delta).
+  const accumulatedSinceEntry = sql`CASE
+    WHEN ${col("on_hold_accumulated_seconds_at_stage_entry")} IS NULL THEN 0
+    ELSE GREATEST(0, COALESCE(${col("on_hold_accumulated_seconds")}, 0) - ${col("on_hold_accumulated_seconds_at_stage_entry")})
+  END`;
+  // The currently-open hold interval, if the deal is on hold right now.
+  const openHold = sql`CASE
+    WHEN ${col("on_hold")} AND ${col("on_hold_started_at")} IS NOT NULL
+      THEN GREATEST(0, EXTRACT(EPOCH FROM (now() - ${col("on_hold_started_at")})))
+    ELSE 0
+  END`;
+  return sql`FLOOR(GREATEST(0, ${elapsed} - ${accumulatedSinceEntry} - ${openHold}) / 86400)`;
+}
+
+/**
+ * value range — BETWEEN on the STAGE-AWARE effective value (awarded-first for Won
+ * stages, best-estimate otherwise), the same number the list displays and sorts
+ * by (sort == filter == display, D-1). Uses ctx.wonStageIds for classification.
+ */
+export function buildValueRangePredicate(input: DealFilterBarInput, ctx: DealFilterContext): SQL | undefined {
   const min = finiteNumber(input.valueMin);
   const max = finiteNumber(input.valueMax);
   if (min === undefined && max === undefined) return undefined;
-  const value = aliasedEffectiveDealValueSql("deals");
+  const value = aliasedStageAwareEffectiveDealValueSql("deals", ctx.wonStageIds ?? []);
   if (min !== undefined && max !== undefined) return sql`${value} BETWEEN ${min} AND ${max}`;
   if (min !== undefined) return sql`${value} >= ${min}`;
   return sql`${value} <= ${max}`;
@@ -140,7 +188,9 @@ export function buildStalledPredicate(
   const min = finiteNumber(input.minAgeDays);
   const max = finiteNumber(input.maxAgeDays);
   if (min === undefined && max === undefined) return undefined;
-  const age = sql`extract(day from now() - ${deals.stageEnteredAt})`;
+  // Hold-aware effective stage age, matching the "days in stage" the list shows
+  // (Codex #546) — not raw wall-clock since stage_entered_at.
+  const age = aliasedEffectiveStageAgeDaysSql("deals");
   if (min !== undefined && max !== undefined) return sql`${age} BETWEEN ${min} AND ${max}`;
   if (min !== undefined) return sql`${age} >= ${min}`;
   return sql`${age} <= ${max}`;
@@ -171,7 +221,7 @@ export const DEAL_FILTER_PREDICATES: DealFilterPredicate[] = [
   (input) => buildProjectTypePredicate(input),
   (input) => buildWorkflowRoutePredicate(input),
   (input) => buildStatusPredicate(input),
-  (input) => buildValueRangePredicate(input),
+  (input, ctx) => buildValueRangePredicate(input, ctx),
   (input, ctx) => buildStalledPredicate(input, ctx),
   (input, ctx) => buildOutcomeAwareDatePredicate(input, ctx),
 ];
