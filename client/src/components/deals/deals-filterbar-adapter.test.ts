@@ -131,6 +131,42 @@ describe("applyBoardVisibilityDefaults (the under-kanban list mirrors the board 
     expect(result.stageIds).toEqual(["s-dd", "s-est"]);
   });
 
+  it("expands an explicit stage pick to its full sibling workflow-family — a canonical pick must not under-show sibling-family deals (Codex #589 P1)", () => {
+    // The board's stage options carry ONE canonical id per slug, but getDeals matches exact stage ids;
+    // an Opportunity pick must query BOTH the standard- and service-family Opportunity ids.
+    const familyBoard = {
+      defaultStageIds: ["opp-standard", "opp-service", "s-est", "s-won", "s-lost"],
+      terminalStageIds: ["s-won", "s-lost"],
+      stageIdFamilies: [["opp-standard", "opp-service"], ["s-est"], ["s-won"], ["s-lost"]],
+    };
+    const result = applyBoardVisibilityDefaults(
+      filterBarValueToDealFilters({ stageIds: ["opp-standard"] }),
+      familyBoard
+    );
+    expect(result.stageIds).toEqual(["opp-standard", "opp-service"]);
+  });
+
+  it("de-duplicates when two explicit picks resolve to the same sibling family (Codex #589 P1)", () => {
+    const familyBoard = {
+      defaultStageIds: ["opp-standard", "opp-service", "s-won"],
+      terminalStageIds: ["s-won"],
+      stageIdFamilies: [["opp-standard", "opp-service"], ["s-won"]],
+    };
+    const result = applyBoardVisibilityDefaults(
+      filterBarValueToDealFilters({ stageIds: ["opp-standard", "opp-service"] }),
+      familyBoard
+    );
+    expect(result.stageIds).toEqual(["opp-standard", "opp-service"]);
+  });
+
+  it("keeps the explicit pick unexpanded when the mount provides no stageIdFamilies (opt-in; /pipeline stays unchanged)", () => {
+    const result = applyBoardVisibilityDefaults(
+      filterBarValueToDealFilters({ stageIds: ["opp-standard"] }),
+      { defaultStageIds: ["opp-standard", "opp-service"] }
+    );
+    expect(result.stageIds).toEqual(["opp-standard"]);
+  });
+
   it("yields to an explicit Status — it owns is_active/on_hold server-side, so isActive is NOT forced", () => {
     const active = applyBoardVisibilityDefaults(filterBarValueToDealFilters({ status: "active" }), board);
     expect(active.status).toBe("active");

@@ -859,6 +859,9 @@ function DealListPageContent({ role, userId }: { role: string; userId: string })
       terminalStageIds: visibleStageGroups
         .filter((option) => isTerminalOutcomeSlug(option.slug))
         .flatMap((option) => option.ids),
+      // Each slug's full sibling-id set, so an EXPLICIT stage pick (the dropdown offers one canonical id
+      // per slug) expands to every workflow-family id and never under-shows sibling deals (Codex #589 P1).
+      stageIdFamilies: visibleStageGroups.map((option) => option.ids),
     };
   }, [stages]);
   const columns = useMemo(
@@ -1337,15 +1340,18 @@ function DealListPageContent({ role, userId }: { role: string; userId: string })
               // so it still surfaces recently-touched deals first (Codex #589).
               initialSort={dashboardView.listInitialSort}
               filterBar={{
-                dimensions: DEALS_BASE_LIST_FILTERBAR_DIMENSIONS,
+                // Nest the bar Rep within the header Rep: when the header is "All reps" the bar offers the
+                // Rep dimension (narrow the list to one rep within the all-reps cards/board). When the
+                // header PINS a concrete rep, drop the Rep dimension entirely — a bar Rep control could
+                // only re-offer that same rep (a no-op) and would still surface an "Unassigned" option that
+                // reconciliation clamps back to the pinned rep (misleading); the header owns it then
+                // (Codex #589 P2).
+                dimensions: selectedRepFilter
+                  ? DEALS_BASE_LIST_FILTERBAR_DIMENSIONS.filter((dimension) => dimension !== "rep")
+                  : DEALS_BASE_LIST_FILTERBAR_DIMENSIONS,
                 paramPrefix: "dl_",
                 options: {
-                  // Constrain the bar's Rep options to the header scope so the nesting can't conflict:
-                  // when the header picks a rep, the bar offers only that rep (it can't narrow a single
-                  // rep further); when the header is "All reps", the bar offers everyone (Adnaan).
-                  reps: selectedRepFilter
-                    ? [{ value: selectedRepFilter, label: selectedRepLabel }]
-                    : assignees.map((assignee) => ({ value: assignee.id, label: assignee.displayName })),
+                  reps: assignees.map((assignee) => ({ value: assignee.id, label: assignee.displayName })),
                   regions: regions.map((region) => ({ value: region.id, label: region.name })),
                   projectTypes: projectTypes.map((type) => ({ value: type.id, label: type.name })),
                   stages: boardColumns
@@ -1358,6 +1364,8 @@ function DealListPageContent({ role, userId }: { role: string; userId: string })
                 stageEntryDateEnabled: true,
                 defaultStageIds: dealsBaseListStageScope.defaultStageIds,
                 terminalStageIds: dealsBaseListStageScope.terminalStageIds,
+                // Expand an explicit canonical stage pick to its full workflow-family (Codex #589 P1).
+                stageIdFamilies: dealsBaseListStageScope.stageIdFamilies,
               }}
             />
           ) : (

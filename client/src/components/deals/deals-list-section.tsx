@@ -109,6 +109,13 @@ interface DealsListSectionProps {
     defaultStageIds?: string[];
     terminalStageIds?: string[];
     /**
+     * The visible stages grouped into workflow-family sibling-id sets. The stage OPTIONS carry one
+     * canonical id per slug, so an explicit pick is expanded to its full family before the query —
+     * otherwise a single canonical id under-shows sibling-family deals (Codex #589 P1). Opt-in; omit it
+     * and explicit picks pass through unexpanded (mounts with canonical-only defaultStageIds unchanged).
+     */
+    stageIdFamilies?: string[][];
+    /**
      * Namespace this list's FilterBar URL params (e.g. "dl_"). Default "" (bare) — the pipeline mount
      * owns its whole URL. A surface whose list shares a URL with sibling controls (e.g. the /deals base
      * list under the dashboard's bare ?assignedRepId/?scope/?period) passes a prefix so the list's
@@ -698,17 +705,23 @@ export function DealsListSection({
     );
   }, [initialSort]);
 
-  // Reset the namespaced page when an INHERITED header filter (scope) changes in FilterBar mode. The
-  // URL-backed dl_page is not a FilterBar dimension here, and the legacy setPage(1) effect only resets
-  // local page state — so flipping Mine/All in the header would otherwise carry a stale dl_page into the
-  // new scope and render an empty/skipped page even when matching deals exist (Codex #589).
+  // Reset the namespaced page when an INHERITED header filter (scope OR the inherited Rep) changes in
+  // FilterBar mode. The URL-backed dl_page is not a FilterBar dimension here, and the legacy setPage(1)
+  // effect only resets local page state — so flipping Mine/All OR switching the header Rep would otherwise
+  // carry a stale dl_page into the new scope and render an empty/skipped page even when matching deals
+  // exist (the new rep's list may have fewer pages). Both are header-owned, so both reset (Codex #589).
+  const inheritedRep = baseFilters?.assignedRepId;
   const prevScopeRef = useRef(scope);
+  const prevInheritedRepRef = useRef(inheritedRep);
   useEffect(() => {
     if (!filterBarMode) return;
-    if (prevScopeRef.current === scope) return;
+    const scopeChanged = prevScopeRef.current !== scope;
+    const repChanged = prevInheritedRepRef.current !== inheritedRep;
     prevScopeRef.current = scope;
+    prevInheritedRepRef.current = inheritedRep;
+    if (!scopeChanged && !repChanged) return;
     if ((urlFilters.page ?? 1) > 1) setFilters({}); // empty patch page-resets via mergeFilterParams
-  }, [scope, filterBarMode, urlFilters.page, setFilters]);
+  }, [scope, inheritedRep, filterBarMode, urlFilters.page, setFilters]);
 
   // Pagination + query-enable diverge by mode: FilterBar mode reads page from the URL and never gates
   // on stage-slug loading (stageIds arrive directly from the URL); legacy keeps local page + the
@@ -753,10 +766,11 @@ export function DealsListSection({
   //    scope (the header is the broad scope; the bar only refines WITHIN it). A bar Rep equal to the
   //    header rep is a no-op; a bar Rep OUTSIDE the header scope (e.g. a bookmarked dl_assignedRepId)
   //    can't intersect, so clamp to the header scope rather than override it — they nest, never
-  //    conflict-to-error (Adnaan). The mount also constrains the bar's Rep options to the header scope,
-  //    so this clamp only fires for out-of-scope bookmarked URLs.
+  //    conflict-to-error (Adnaan). The /deals mount now DROPS the Rep dimension whenever the header pins a
+  //    concrete rep (Codex #589 P2), so in practice the first branch handles that case; this clamp stays as
+  //    defense-in-depth for any mount that both renders Rep and inherits a header rep.
   const fbFilters = filterBarValueToDealFilters(urlFilters);
-  const inheritedRep = baseFilters?.assignedRepId;
+  // inheritedRep (baseFilters?.assignedRepId) is declared above for the page-reset effect.
   if (!(filterBar?.dimensions.includes("rep") ?? false)) {
     delete fbFilters.assignedRepId;
   } else if (inheritedRep && fbFilters.assignedRepId && fbFilters.assignedRepId !== inheritedRep) {
@@ -767,6 +781,7 @@ export function DealsListSection({
     ...applyBoardVisibilityDefaults(fbFilters, {
       defaultStageIds: filterBar?.defaultStageIds,
       terminalStageIds: filterBar?.terminalStageIds,
+      stageIdFamilies: filterBar?.stageIdFamilies,
     }),
     // Default to the mount's initialSort when the URL carries no explicit dl_sort, so a base list keeps
     // its prior default ordering (e.g. /deals = updated_at desc) instead of the server's created_at

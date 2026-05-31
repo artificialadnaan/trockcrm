@@ -1245,7 +1245,7 @@ describe("DealListPage", () => {
     expect(props.enableDateFilter).toBeUndefined();
   });
 
-  it("constrains the bar's Rep options to the header scope so the nesting can't conflict", () => {
+  it("drops the Rep dimension entirely when the header pins a concrete rep (no no-op single-rep control, no misleading Unassigned) (Codex #589 P2)", () => {
     mocks.useTaskAssigneesMock.mockReturnValue({
       assignees: [
         { id: "rep-1", displayName: "Brett Jones" },
@@ -1254,10 +1254,29 @@ describe("DealListPage", () => {
     });
     renderPage("/deals?scope=all&assignedRepId=rep-2", "director");
     const props = mocks.dealsListSectionMock.mock.calls[mocks.dealsListSectionMock.mock.calls.length - 1][0] as {
-      filterBar: { options?: { reps?: Array<{ value: string }> } };
+      filterBar: { dimensions: string[] };
     };
-    // header pinned to rep-2 → the bar offers only rep-2 (can't narrow a single rep further)
-    expect(props.filterBar.options?.reps?.map((rep) => rep.value)).toEqual(["rep-2"]);
+    // The header already owns rep-2; a bar Rep control could only offer rep-2 (a no-op) and would still
+    // surface an "Unassigned" option that reconciliation clamps back to rep-2 (misleading). Drop it.
+    expect(props.filterBar.dimensions).not.toContain("rep");
+  });
+
+  it("passes the stage sibling families to the base list so an explicit stage pick includes every workflow-family id (Codex #589 P1)", () => {
+    mocks.usePipelineStagesMock.mockReturnValue({
+      loading: false,
+      error: null,
+      stages: [
+        { id: "opp-standard", name: "Opportunity", slug: "opportunity", displayOrder: 1, isTerminal: false },
+        { id: "opp-service", name: "Opportunity", slug: "opportunity", displayOrder: 1, isTerminal: false },
+      ],
+    });
+    renderPage("/deals?scope=mine", "director");
+    const props = mocks.dealsListSectionMock.mock.calls[mocks.dealsListSectionMock.mock.calls.length - 1][0] as {
+      filterBar: { stageIdFamilies?: string[][] };
+    };
+    expect(props.filterBar.stageIdFamilies).toEqual(
+      expect.arrayContaining([expect.arrayContaining(["opp-standard", "opp-service"])])
+    );
   });
 
   it("keeps the LEGACY list (no FilterBar) on drill-down views — those stay YELLOW's surface", () => {

@@ -3,7 +3,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { renderToStaticMarkup } from "react-dom/server";
 import { createRoot, type Root } from "react-dom/client";
-import { act } from "react";
+import { act, useState } from "react";
 import { MemoryRouter } from "react-router-dom";
 import type { ReactNode } from "react";
 import type { AtRiskResult } from "@trock-crm/shared/types";
@@ -471,6 +471,44 @@ describe("DealsListSection", () => {
       filterBar: { dimensions: ["search", "rep", "sort"], paramPrefix: "dl_" },
     });
     expect(call.assignedRepId).toBe("rep-B");
+  });
+
+  it("resets the namespaced page when the INHERITED header Rep changes — a ?dl_page deep link must not query page N of the new rep's shorter list (Codex #589 P2)", async () => {
+    // One persistent router so the ?dl_page survives the props change (renderDom remounts the router).
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    let switchRep!: (rep: string) => void;
+    function Harness() {
+      const [rep, setRep] = useState("rep-A");
+      switchRep = setRep;
+      return (
+        <DealsListSection
+          workflowFamily="deal"
+          baseFilters={{ assignedRepId: rep }}
+          filterBar={{ dimensions: ["search", "sort"], paramPrefix: "dl_" }}
+        />
+      );
+    }
+    await act(async () => {
+      root.render(
+        <MemoryRouter initialEntries={["/deals?dl_page=4"]}>
+          <Harness />
+        </MemoryRouter>
+      );
+    });
+    const initial = mocks.useDealsMock.mock.calls[mocks.useDealsMock.mock.calls.length - 1][0];
+    expect(initial.assignedRepId).toBe("rep-A");
+    expect(initial.page).toBe(4); // deep-linked page preserved on first render
+
+    await act(async () => switchRep("rep-B")); // the header switches the inherited rep
+
+    const afterSwitch = mocks.useDealsMock.mock.calls[mocks.useDealsMock.mock.calls.length - 1][0];
+    expect(afterSwitch.assignedRepId).toBe("rep-B");
+    expect(afterSwitch.page).toBe(1); // page reset so we don't request page 4 of rep-B's list
+
+    await act(async () => root.unmount());
+    container.remove();
   });
 
   it("seeds the query sort from initialSort when no namespaced sort is set, preserving the base default ordering (Codex #589)", async () => {

@@ -70,6 +70,14 @@ export interface BoardVisibility {
    *  default — matching the board, which shows Won/Lost columns. Omit to keep the contract's
    *  active-only default (a generic mount that does not want terminal rows). */
   terminalStageIds?: string[];
+  /** The visible stages grouped into workflow-family sibling-id sets (one inner array per canonical
+   *  slug). The board's stage OPTIONS carry only ONE canonical id per slug, but getDeals matches exact
+   *  stage ids — so an explicit pick of the canonical id would under-show deals sitting in sibling
+   *  workflow-family stages (standard vs service). When provided, an explicit pick is expanded to its
+   *  full family before the query, matching the legacy grouped stage filter (Codex #589 P1). Opt-in:
+   *  omit it and explicit picks pass through unexpanded (mounts whose defaultStageIds are canonical-only,
+   *  e.g. /pipeline, stay byte-identical). */
+  stageIdFamilies?: string[][];
 }
 
 /**
@@ -95,7 +103,14 @@ export function applyBoardVisibilityDefaults(
     // linger in the list query (Q2). With no pick — or once every pick is hidden — mirror the board's
     // full visible column set rather than querying nothing or a hidden stage.
     const explicit = Array.isArray(next.stageIds) ? next.stageIds : [];
-    const intersected = explicit.filter((id) => visible.includes(id));
+    // Expand each explicit canonical pick to its full sibling workflow-family before intersecting, so a
+    // single canonical id (all the board options carry) queries every family stage and never under-shows
+    // sibling-family deals — matching the legacy grouped filter (Codex #589 P1). Opt-in via stageIdFamilies;
+    // unknown ids and family-less mounts pass through unchanged. A Set de-dupes overlapping picks.
+    const expanded = board.stageIdFamilies
+      ? [...new Set(explicit.flatMap((id) => board.stageIdFamilies!.find((family) => family.includes(id)) ?? [id]))]
+      : explicit;
+    const intersected = expanded.filter((id) => visible.includes(id));
     next.stageIds = intersected.length > 0 ? intersected : visible;
   }
   const hasExplicitStatus = next.status !== undefined;
