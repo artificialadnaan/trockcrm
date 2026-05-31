@@ -93,4 +93,33 @@ describe("NumericRangePopover", () => {
     act(() => applyBtn?.click());
     expect(onChange).toHaveBeenCalledWith({ min: 25000, max: undefined });
   });
+
+  // Codex: an emptied Apply must produce {} (no undefined-valued keys) so generic URL/key
+  // serializers omit the filter instead of emitting min=undefined&max=undefined.
+  it("emits {} (no keys) when Apply is clicked with both inputs blank", () => {
+    const onChange = vi.fn();
+    act(() => {
+      root?.render(<NumericRangePopover label="Value" value={{ min: 5 }} onChange={onChange} />);
+    });
+    act(() => container.querySelector<HTMLButtonElement>('button[aria-label="Value filter"]')?.click());
+    const minInput = document.querySelector<HTMLInputElement>('input[aria-label="Value minimum"]');
+    act(() => changeInputValue(minInput!, ""));
+    const applyBtn = Array.from(document.querySelectorAll("button")).find((b) => b.textContent === "Apply");
+    act(() => applyBtn?.click());
+    const emitted = onChange.mock.calls.at(-1)?.[0] as Record<string, unknown>;
+    expect(Object.keys(emitted)).toEqual([]);
+  });
+
+  it("emits only the defined bound for a min-only bucket (no undefined max key)", () => {
+    const onChange = vi.fn();
+    act(() => {
+      root?.render(<NumericRangePopover label="Stalled" value={{}} onChange={onChange} buckets={DAY_BUCKETS} />);
+    });
+    act(() => container.querySelector<HTMLButtonElement>('button[aria-label="Stalled filter"]')?.click());
+    const bucketBtn = Array.from(document.querySelectorAll("button")).find((b) => b.textContent?.includes("> 90 days"));
+    act(() => bucketBtn?.click());
+    const emitted = onChange.mock.calls.at(-1)?.[0] as Record<string, unknown>;
+    expect(emitted).toEqual({ min: 90 });
+    expect("max" in emitted).toBe(false);
+  });
 });

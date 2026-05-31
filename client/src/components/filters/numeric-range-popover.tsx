@@ -32,6 +32,15 @@ function parseNumericInput(raw: string): number | undefined {
   return Number.isFinite(parsed) ? parsed : undefined;
 }
 
+/** Build a range with ONLY defined bounds, so a blank range is {} (no undefined-valued keys) and
+ *  generic URL/key serializers omit the filter rather than emitting min=undefined&max=undefined. */
+function buildRange(min: number | undefined, max: number | undefined): NumericRangeValue {
+  const range: NumericRangeValue = {};
+  if (min !== undefined) range.min = min;
+  if (max !== undefined) range.max = max;
+  return range;
+}
+
 interface NumericRangePopoverProps {
   label: string;
   value: NumericRangeValue;
@@ -71,7 +80,7 @@ export function NumericRangePopover({
     setDraftMax(value.max?.toString() ?? "");
   }, [value.min, value.max]);
 
-  const apply = () => onChange({ min: parseNumericInput(draftMin), max: parseNumericInput(draftMax) });
+  const apply = () => onChange(buildRange(parseNumericInput(draftMin), parseNumericInput(draftMax)));
   const hasValue = value.min !== undefined || value.max !== undefined;
 
   return (
@@ -100,7 +109,7 @@ export function NumericRangePopover({
                   key={bucket.label}
                   type="button"
                   className="rounded-full border border-slate-300 px-2.5 py-1 text-xs font-semibold text-slate-700 hover:border-brand-red/40 hover:text-brand-red"
-                  onClick={() => onChange({ min: bucket.min, max: bucket.max })}
+                  onClick={() => onChange(buildRange(bucket.min, bucket.max))}
                 >
                   {bucket.label}
                 </button>
