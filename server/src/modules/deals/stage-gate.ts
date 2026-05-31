@@ -159,6 +159,13 @@ function dateOnlyString(value: unknown): string | null {
   return /^\d{4}-\d{2}-\d{2}$/.test(text) ? text : null;
 }
 
+// "Today" in the business timezone (America/Chicago), as YYYY-MM-DD. The usable-close-date check
+// anchors here -- not on the process/UTC date -- so a rep advancing in the CT evening (when UTC has
+// already rolled to tomorrow) can still pick CT-today, matching the client dialog's cutoff.
+function businessToday(): string {
+  return new Date().toLocaleDateString("en-CA", { timeZone: "America/Chicago" });
+}
+
 /**
  * Whether a stage-gate required field is satisfied by `value`. Any non-empty value satisfies a
  * normal field; `expectedCloseDate` additionally requires a USABLE (today-or-future) date, so a stale
@@ -168,7 +175,7 @@ function dateOnlyString(value: unknown): string | null {
 export function isStageRequiredFieldSatisfied(
   field: string,
   value: unknown,
-  today: string = new Date().toISOString().slice(0, 10)
+  today: string = businessToday()
 ): boolean {
   if (value == null || value === "") return false;
   if (field === "expectedCloseDate") {

@@ -1,7 +1,10 @@
 import { describe, expect, it, vi, beforeEach } from "vitest";
 import { auditLog, dealApprovals, deals, dealStageHistory, jobQueue, tasks } from "@trock-crm/shared/schema";
 
-vi.mock("../../../src/modules/deals/stage-gate.js", () => ({
+// Stub only the DB-hitting validateStageGate; keep the real (pure) isStageRequiredFieldSatisfied so
+// the persist-scoping logic is exercised against actual usable-date semantics, not a re-implementation.
+vi.mock("../../../src/modules/deals/stage-gate.js", async (importActual) => ({
+  ...(await importActual<typeof import("../../../src/modules/deals/stage-gate.js")>()),
   validateStageGate: vi.fn(),
 }));
 
@@ -325,6 +328,8 @@ describe("changeDealStage", () => {
       requiresOverride: false,
       targetStage: { id: "stage-b", name: "Estimating", slug: "estimating", isTerminal: false, isActivePipeline: true, displayOrder: 3 },
       currentStage: { id: "stage-a", name: "Opportunity", slug: "opportunity", isTerminal: false, isActivePipeline: true, displayOrder: 1 },
+      // target stage requires expectedCloseDate -> the inline date is persistable
+      effectiveChecklist: { fields: [{ key: "expectedCloseDate", label: "Expected Close Date", satisfied: true, source: "stage" }], attachments: [], approvals: [] },
     } as never);
 
     await changeDealStage(tenantDb as never, {
@@ -346,6 +351,30 @@ describe("changeDealStage", () => {
     );
     // and the date is persisted with the move
     expect(tenantDb.state.deals[0]?.expectedCloseDate).toBe("2026-12-01");
+  });
+
+  it("ignores an incoming expectedCloseDate when the target stage does NOT require it (no forecast overwrite)", async () => {
+    const tenantDb = createTenantDb({ stageId: "stage-a", ddEstimate: null, bidEstimate: null, expectedCloseDate: "2027-03-15" });
+    vi.mocked(validateStageGate).mockResolvedValue({
+      allowed: true,
+      isBackwardMove: false,
+      requiresOverride: false,
+      targetStage: { id: "stage-b", name: "Opportunity", slug: "opportunity", isTerminal: false, isActivePipeline: true, displayOrder: 1 },
+      currentStage: { id: "stage-a", name: "Sales Validation", slug: "sales_validation", isTerminal: false, isActivePipeline: true, displayOrder: 0 },
+      // target stage does NOT list expectedCloseDate as required
+      effectiveChecklist: { fields: [], attachments: [], approvals: [] },
+    } as never);
+
+    await changeDealStage(tenantDb as never, {
+      dealId: "deal-1",
+      targetStageId: "stage-b",
+      userId: "user-1",
+      userRole: "director",
+      expectedCloseDate: "2026-12-01",
+    });
+
+    // the existing forecast date is untouched -- a stale/unrelated payload can't overwrite it here
+    expect(tenantDb.state.deals[0]?.expectedCloseDate).toBe("2027-03-15");
   });
 
   it("sets the skip flag before the stage UPDATE and clears it after the history insert (de-dupes the DB backstop trigger)", async () => {

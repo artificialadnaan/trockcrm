@@ -29,6 +29,13 @@ import { AlertTriangle, ArrowRight, ArrowLeft, Shield, Loader2 } from "lucide-re
 import { getDealStageMetadata } from "@/hooks/use-deals";
 import { toCanonicalDealStageSlug } from "@trock-crm/shared/types";
 
+// "Today" in the business timezone (America/Chicago), as YYYY-MM-DD. The expected-close-date cutoff
+// uses this instead of a UTC date so a rep entering CT-today late in the evening (when UTC has already
+// rolled to tomorrow) isn't wrongly blocked -- and so the client cutoff matches the server stage-gate's
+// CT-anchored usable-date check exactly.
+const businessTodayDateStr = (): string =>
+  new Date().toLocaleDateString("en-CA", { timeZone: "America/Chicago" });
+
 interface StageRequirementState {
   fields: string[];
   documents: string[];
@@ -182,7 +189,7 @@ export function StageChangeDialog({
       // Require a usable (today-or-future) expected close date when the gate needs it.
       const needsEcd = (preflight.missingRequirements?.fields ?? []).includes("expectedCloseDate");
       if (needsEcd) {
-        const todayStr = new Date().toISOString().slice(0, 10);
+        const todayStr = businessTodayDateStr();
         if (!expectedCloseDate) {
           setError("Please set an expected close date to advance.");
           setSubmitting(false);
@@ -257,7 +264,7 @@ export function StageChangeDialog({
     (missingReqs?.documents?.length ?? 0) === 0 &&
     (missingReqs?.approvals?.length ?? 0) === 0 &&
     !preflight?.isBackwardMove;
-  const todayDateStr = new Date().toISOString().slice(0, 10);
+  const todayDateStr = businessTodayDateStr();
   const expectedCloseDateValid = expectedCloseDate !== "" && expectedCloseDate >= todayDateStr;
   const unblockedByExpectedCloseDate = onlyExpectedCloseDateMissing && expectedCloseDateValid;
   const effectiveBlocked = isBlocked && !unblockedByExpectedCloseDate;

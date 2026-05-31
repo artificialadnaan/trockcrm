@@ -2557,8 +2557,16 @@ router.post("/:id/stage", async (req, res, next) => {
     if (!targetStageId) {
       throw new AppError(400, "targetStageId is required");
     }
-    if (expectedCloseDate != null && expectedCloseDate !== "" && !/^\d{4}-\d{2}-\d{2}$/.test(expectedCloseDate)) {
-      throw new AppError(400, "expectedCloseDate must be an ISO date (YYYY-MM-DD)");
+    if (expectedCloseDate != null && expectedCloseDate !== "") {
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(expectedCloseDate)) {
+        throw new AppError(400, "expectedCloseDate must be an ISO date (YYYY-MM-DD)");
+      }
+      // Shape alone isn't enough: "2026-99-99" / "2026-02-30" pass the regex but blow up the Postgres
+      // date write with a generic 500. Require the value to round-trip as a real calendar date.
+      const parsed = new Date(`${expectedCloseDate}T00:00:00Z`);
+      if (Number.isNaN(parsed.getTime()) || parsed.toISOString().slice(0, 10) !== expectedCloseDate) {
+        throw new AppError(400, "expectedCloseDate must be a real calendar date (YYYY-MM-DD)");
+      }
     }
 
     const result = await changeDealStage(req.tenantDb!, {

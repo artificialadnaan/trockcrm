@@ -14,7 +14,7 @@ import { DOMAIN_EVENTS } from "../../events/types.js";
 import {
   isContractStageSelectionEnabled,
 } from "../../config/feature-flags.js";
-import { validateStageGate } from "./stage-gate.js";
+import { validateStageGate, isStageRequiredFieldSatisfied } from "./stage-gate.js";
 import type { UserRole } from "@trock-crm/shared/types";
 import { createStageTimers } from "./timer-service.js";
 import { activateDealScopingIntake, evaluateDealScopingReadiness } from "./scoping-service.js";
@@ -271,9 +271,22 @@ export async function changeDealStage(
     stageEnteredAt: stageChangedAt,
   };
   Object.assign(dealUpdates, getHoldStateAtStageEntry(deal, stageChangedAt));
-  if (input.expectedCloseDate !== undefined) {
-    // Persist the date captured by the stage-advance prompt with the move.
-    dealUpdates.expectedCloseDate = input.expectedCloseDate || null;
+  // Conservative guard: only treat expectedCloseDate as persistable when the target stage's gate
+  // checklist actually lists it as a required field. If the requirement can't be confirmed, don't
+  // persist (fail-safe) -- so an unrelated stage move can never overwrite the forecast date.
+  const targetRequiresExpectedCloseDate = (gateResult.effectiveChecklist?.fields ?? []).some(
+    (checklistField) => checklistField.key === "expectedCloseDate"
+  );
+  if (
+    input.expectedCloseDate !== undefined &&
+    targetRequiresExpectedCloseDate &&
+    isStageRequiredFieldSatisfied("expectedCloseDate", input.expectedCloseDate)
+  ) {
+    // Persist the date captured by the inline stage-advance prompt -- but ONLY when the target stage
+    // actually requires expectedCloseDate and the supplied value is itself usable (today-or-future).
+    // This stops an unrelated stage move (or a stale/empty payload) from overwriting or clearing a
+    // deal's forecast date through this path; other forecast edits go via the deal-update endpoint.
+    dealUpdates.expectedCloseDate = input.expectedCloseDate;
   }
   const shouldResetBidBoardOwnership =
     inferredOwnership.isBidBoardOwned &&
