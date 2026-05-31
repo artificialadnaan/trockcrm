@@ -35,7 +35,7 @@ beforeAll(async () => {
     CREATE TABLE deals (
       id uuid PRIMARY KEY, assigned_rep_id uuid, stage_id uuid NOT NULL,
       is_active boolean NOT NULL DEFAULT true, is_test_data boolean NOT NULL DEFAULT false, on_hold boolean NOT NULL DEFAULT false,
-      won_closed_date date, actual_close_date date, created_at timestamptz,
+      won_closed_date date, actual_close_date date, created_at timestamptz, source text DEFAULT 'Website',
       awarded_amount numeric, bid_board_total_sales numeric, bid_estimate numeric, dd_estimate numeric
     );
     INSERT INTO users (id, display_name) VALUES ('${REP}','Alice');
@@ -119,15 +119,17 @@ describe("report-builder Won reports reconcile to the Won card", () => {
     expect(result.notes?.[0]).not.toMatch(/totals reconcile to the won card/i);
   });
 
-  it("full Won scope narrowed by another filter (rep) does not promise card reconciliation", async () => {
-    const result = await runReportBuilder(tdb, {
-      ...admin,
-      dimensions: ["rep"],
-      measures: ["total_value"],
-      filters: { stage: ALL_WON, rep: [REP] }, // all Won stages, but a rep narrowing the card doesn't apply
-    });
-    expect(result.notes?.[0]).toMatch(/narrower|will not match/i);
-    expect(result.notes?.[0]).not.toMatch(/totals reconcile to the won card/i);
+  it("full Won scope narrowed by a card-incompatible filter (rep or source) does not promise reconciliation", async () => {
+    for (const narrowing of [{ rep: [REP] }, { source: ["Website"] }] as const) {
+      const result = await runReportBuilder(tdb, {
+        ...admin,
+        dimensions: ["rep"],
+        measures: ["total_value"],
+        filters: { stage: ALL_WON, ...narrowing }, // all Won stages, but a filter the card doesn't apply
+      });
+      expect(result.notes?.[0]).toMatch(/narrower|will not match/i);
+      expect(result.notes?.[0]).not.toMatch(/totals reconcile to the won card/i);
+    }
   });
 
   it("non-Won report keeps the user's date axis (created_at)", async () => {
