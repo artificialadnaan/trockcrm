@@ -16,6 +16,7 @@ import {
   getCanonicalTerminalMetric,
   getDashboardDealListView,
   matchesUpdatedRange,
+  resolveDrilldownTerminalDateFilters,
   sumNonOnHoldDealValues,
 } from "./deal-list-page";
 
@@ -1036,6 +1037,46 @@ describe("DealListPage", () => {
       won: { preset: "30" },
       lost: { preset: "all" },
     }, 8, { from: "2026-04-01", to: "2026-04-30" }, undefined, {});
+  });
+
+  describe("D-7: Won drill-down chip inherits the page period (no contradictory all_time+period)", () => {
+    it("seeds the Won terminal filter from the inherited period when the URL has no explicit Won filter", () => {
+      const resolved = resolveDrilldownTerminalDateFilters(
+        new URLSearchParams("filter=won&period=qtd&scope=all"),
+        new Date("2026-05-31T12:00:00.000Z")
+      );
+      expect(resolved.won).toEqual({ preset: "qtd" });
+      expect(resolved.lost).toEqual({ preset: "all" });
+    });
+
+    it("respects an explicit Won filter in the URL over the period (the user's choice wins)", () => {
+      expect(
+        resolveDrilldownTerminalDateFilters(new URLSearchParams("filter=won&period=qtd&won_preset=30&scope=all")).won
+      ).toEqual({ preset: "30" });
+      expect(
+        resolveDrilldownTerminalDateFilters(new URLSearchParams("filter=won&period=qtd&won_all_time=true&scope=all")).won
+      ).toEqual({ preset: "all" });
+    });
+
+    it("maps last_* periods to a custom window so the chip never reads the false 'All time'", () => {
+      const won = resolveDrilldownTerminalDateFilters(
+        new URLSearchParams("filter=won&period=last_quarter&scope=all"),
+        new Date("2026-05-31T12:00:00.000Z")
+      ).won;
+      expect(won.preset).toBe("custom");
+    });
+
+    it("leaves the Won filter at its default when no period is inherited", () => {
+      expect(resolveDrilldownTerminalDateFilters(new URLSearchParams("scope=all")).won).toEqual({ preset: "all" });
+    });
+
+    it("sends the period-derived Won terminal filter to the board request (won_since/until via the preset, never won_all_time)", () => {
+      renderPage("/deals?filter=won&period=qtd&scope=all", "director");
+      const lastCall = mocks.useDealBoardMock.mock.calls[mocks.useDealBoardMock.mock.calls.length - 1];
+      // arg[2] is terminalDateFilters -> the Won column chip reads "QTD", and
+      // appendPipelineTerminalDateParams emits won_since/until for a preset (not won_all_time).
+      expect(lastCall[2].won).toEqual({ preset: "qtd" });
+    });
   });
 
   it("does not fire board fetch before auth resolves", () => {
