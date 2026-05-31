@@ -48,8 +48,8 @@ import {
 import type { FilterDimension } from "@/components/filters/filter-bar";
 
 // Slice 7 proving ground: the deals list under the kanban gets the richest shared FilterBar set.
-// (Stalled is gated off until FEATURE_STAGE_ENTRY_DATE; the bar hides it while stageEntryDateEnabled
-// is false. Scope is inherited from the page's scope toggle, not duplicated in the bar.)
+// (Stalled is enabled now that ENABLE_STAGE_ENTRY_DATE_FILTER is on; the bar shows it while
+// stageEntryDateEnabled is true. Scope is inherited from the page's scope toggle, not duplicated.)
 const DEAL_LIST_FILTERBAR_DIMENSIONS: FilterDimension[] = [
   "search",
   "date",
@@ -728,9 +728,9 @@ export function PipelinePage() {
               .map((column) => ({ value: column.stage.id, label: column.stage.name })),
             sortOptions: DEAL_LIST_SORT_OPTIONS,
           },
-          // Open-stage entered date + Stalled stay gated until FEATURE_STAGE_ENTRY_DATE; the bar
-          // labels the date honestly and hides Stalled while this is false.
-          stageEntryDateEnabled: false,
+          // ENABLE_STAGE_ENTRY_DATE_FILTER is on in prod: open rows are date-windowed, so the bar
+          // exposes the Stalled (days-in-stage) control and labels the date axis as outcome-aware.
+          stageEntryDateEnabled: true,
           // Mirror the board: default to its visible columns (Q2 Show-DD) + let terminal deals through
           // (Q1 active+terminal) unless the user picks an explicit Status.
           defaultStageIds: boardStageScope.defaultStageIds,
