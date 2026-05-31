@@ -10,7 +10,7 @@ import { USD_COMPACT } from "@/components/shared/formatters";
 import { useDealBoard, type Deal, type DealBoardColumn } from "@/hooks/use-deals";
 import { usePipelineStages, useRegions, useProjectTypes } from "@/hooks/use-pipeline-config";
 import { useTaskAssignees } from "@/hooks/use-task-assignees";
-import { buildCanonicalDealBoardColumns, buildCanonicalDealStageIdFamilies } from "@/lib/canonical-deal-board";
+import { buildCanonicalDealBoardColumns, buildCanonicalDealStageFamilies } from "@/lib/canonical-deal-board";
 import { isBoardVisibleStage, DEAL_LIST_SORT_OPTIONS } from "@/components/deals/deals-filterbar-adapter";
 import type { FilterDimension } from "@/components/filters/filter-bar";
 import { useAuth } from "@/lib/auth";
@@ -35,7 +35,7 @@ import {
 import type { PipelineScope } from "@/lib/pipeline-scope";
 import { KanbanScrollColumn } from "@/components/deals/kanban-scroll-column";
 import { DecoratedKanbanCard } from "@/components/deals/decorated-kanban-card";
-import { DealsListSection, buildDealStageFilterOptions } from "@/components/deals/deals-list-section";
+import { DealsListSection } from "@/components/deals/deals-list-section";
 import type { DealFilters } from "@/hooks/use-deals";
 import type { DealListSortState } from "@/components/deals/deals-list-section";
 import { resolvePreferredScope, writeStoredScopePreference } from "@/lib/scope-preferences";
@@ -95,6 +95,21 @@ export function formatDateInput(date: Date) {
   const month = String(date.getMonth() + 1).padStart(2, "0");
   const day = String(date.getDate()).padStart(2, "0");
   return `${year}-${month}-${day}`;
+}
+
+/**
+ * A canonical key over only the BOARD-relevant URL params (scope/period/assignedRepId/terminal/estimate).
+ * The kanban + KPI cards read these; the under-kanban FilterBar list owns the dl_*-namespaced params. The
+ * board sync effect keys on this so a list-only (dl_*) filter edit does NOT re-sync the board's terminal/
+ * estimate state and pointlessly refetch the kanban (Codex #589). Sorted so param order never matters.
+ */
+export function boardRelevantParamKey(search: string): string {
+  const params = new URLSearchParams(search);
+  for (const key of [...params.keys()]) {
+    if (key.startsWith("dl_")) params.delete(key);
+  }
+  params.sort();
+  return params.toString();
 }
 
 function normalizeDashboardPeriod(periodParam: string | null | undefined): DashboardPeriodSelection {
@@ -792,10 +807,15 @@ function DealListPageContent({ role, userId }: { role: string; userId: string })
     estimateSentDateRange
   );
 
+  // Sync the board's terminal/estimate date state from the URL — but key on the BOARD params only, so a
+  // dl_*-namespaced list edit (the under-kanban FilterBar) never churns this state and refetches the
+  // kanban above it (Codex #589). searchParams is read live inside; it is current whenever the key changes.
+  const boardParamKey = boardRelevantParamKey(searchParams.toString());
   useEffect(() => {
     setTerminalDateFilters(resolveDrilldownTerminalDateFilters(searchParams));
     setEstimateSentDateFilter(readEstimateSentDateFilterFromSearchParams(searchParams));
-  }, [searchParams]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- intentionally keyed on board params only.
+  }, [boardParamKey]);
 
   // A parked ?scope=team bookmark is coerced to mine for the render above; also rewrite the
   // URL so the stale scope/owner params do not persist -- otherwise updateScope clones them
@@ -844,27 +864,25 @@ function DealListPageContent({ role, userId }: { role: string; userId: string })
   // so showDd=true — the list defaults to the full visible-column set and lets terminal deals through,
   // exactly like the board it sits under (mirrors the /pipeline mount).
   //
-  // Derive the default/terminal stage IDs from the FULL deal stages grouped by slug (each slug → ALL its
-  // workflow-family ids), NOT from the canonicalized board columns: buildCanonicalDealBoardColumns keeps
-  // only ONE id per canonical slug, so passing those as defaultStageIds would make the default list send
-  // an exact stage_id IN (...) that silently drops the other workflow family's deals (e.g. standard vs
-  // service) before the user ever filters by stage (Codex #589). buildDealStageFilterOptions does the
-  // same slug-grouping the legacy list used.
+  // ALL three values flow from ONE CANONICAL grouping — the same normalizeDealStageSlug membership the
+  // board uses — so the list matches the board column-for-column (Codex #589):
+  //  - defaultStageIds: every member id of every visible canonical column (no family dropped);
+  //  - terminalStageIds: members of the canonical WON/LOST columns — classified by CANONICAL slug, so
+  //    Won/Lost ALIASES (closed_won, sent_to_production, service_lost, …) are included and their inactive
+  //    rows survive the active-only default (raw-slug isTerminalOutcomeSlug only matched literal won/lost);
+  //  - stageIdFamilies: the per-column id set, so an explicit canonical pick expands to the board column's
+  //    full membership (contract_signed + service_contract_signed → contract).
+  // isBoardVisibleStage filters DD, which canonicalizes into opportunity, so it is a no-op at showDd=true.
   const dealsBaseListStageScope = useMemo(() => {
-    const visibleStageGroups = buildDealStageFilterOptions(stages).filter((option) =>
-      isBoardVisibleStage(option.slug, true)
+    const families = buildCanonicalDealStageFamilies(stages).filter((family) =>
+      isBoardVisibleStage(family.slug, true)
     );
     return {
-      defaultStageIds: visibleStageGroups.flatMap((option) => option.ids),
-      terminalStageIds: visibleStageGroups
-        .filter((option) => isTerminalOutcomeSlug(option.slug))
-        .flatMap((option) => option.ids),
-      // Sibling-id families for EXPLICIT stage picks, grouped by the board's CANONICAL slug
-      // (normalizeDealStageSlug) — NOT the raw stage slug. The dropdown offers one canonical id per board
-      // column; without canonical grouping a pick of e.g. "Contract" would expand only to its raw-slug
-      // group and miss the alias family (service_contract_signed, Won/Lost aliases), so getDeals' exact
-      // stage_id IN (...) would under-show the deals that board column represents (Codex #589 P1).
-      stageIdFamilies: buildCanonicalDealStageIdFamilies(stages),
+      defaultStageIds: families.flatMap((family) => family.ids),
+      terminalStageIds: families
+        .filter((family) => isTerminalOutcomeSlug(family.slug))
+        .flatMap((family) => family.ids),
+      stageIdFamilies: families.map((family) => family.ids),
     };
   }, [stages]);
   const columns = useMemo(

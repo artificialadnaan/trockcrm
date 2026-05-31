@@ -501,11 +501,21 @@ describe("DealsListSection", () => {
     expect(initial.assignedRepId).toBe("rep-A");
     expect(initial.page).toBe(4); // deep-linked page preserved on first render
 
+    const callsBeforeSwitch = mocks.useDealsMock.mock.calls.length;
     await act(async () => switchRep("rep-B")); // the header switches the inherited rep
 
     const afterSwitch = mocks.useDealsMock.mock.calls[mocks.useDealsMock.mock.calls.length - 1][0];
     expect(afterSwitch.assignedRepId).toBe("rep-B");
     expect(afterSwitch.page).toBe(1); // page reset so we don't request page 4 of rep-B's list
+
+    // The clamp is SYNCHRONOUS: NO query for rep-B was ever fired at the stale page 4 (the passive reset
+    // effect never beats the query) — every call from the switch onward queries page 1 (Codex #589).
+    const callsForRepB = mocks.useDealsMock.mock.calls
+      .slice(callsBeforeSwitch)
+      .map((call) => call[0])
+      .filter((args) => args.assignedRepId === "rep-B");
+    expect(callsForRepB.length).toBeGreaterThan(0);
+    expect(callsForRepB.every((args) => args.page === 1)).toBe(true);
 
     await act(async () => root.unmount());
     container.remove();

@@ -97,9 +97,23 @@ function dedupeDealsById<T extends { id: string }>(deals: T[]): T[] {
  * canonical slugs — only the route-dependent estimating pair — appears in both, so a pick never
  * under-shows).
  */
-export function buildCanonicalDealStageIdFamilies(
+export interface CanonicalDealStageFamily {
+  /** The board's canonical column slug (won/lost/contract/estimating/…). */
+  slug: string;
+  /** Every raw stage id that normalizes to this canonical column (canonical + aliases). */
+  ids: string[];
+}
+
+/**
+ * Group raw stage ids into the canonical board columns they belong to, keyed by canonical slug. Used to
+ * derive the under-kanban list's stage scope so it matches the board EXACTLY (Codex #589): the explicit-
+ * pick family, the default-stage union, AND the terminal classification all flow from the SAME canonical
+ * membership the board uses (normalizeDealStageSlug under either route). So Won/Lost ALIASES (closed_won,
+ * service_lost, …) land in the won/lost columns, and contract_signed + service_contract_signed → contract.
+ */
+export function buildCanonicalDealStageFamilies(
   stages: Array<Pick<DealStageLike, "id" | "slug">>
-): string[][] {
+): CanonicalDealStageFamily[] {
   const byCanonical = new Map<string, string[]>();
   for (const stage of stages) {
     const canonicalSlugs = new Set(
@@ -113,7 +127,17 @@ export function buildCanonicalDealStageIdFamilies(
       byCanonical.set(slug, ids);
     }
   }
-  return [...byCanonical.values()];
+  return [...byCanonical.entries()].map(([slug, ids]) => ({ slug, ids }));
+}
+
+/**
+ * The explicit-pick expansion families (one id-array per canonical column). Thin wrapper over
+ * buildCanonicalDealStageFamilies; see it for the membership rule (Codex #589 P1).
+ */
+export function buildCanonicalDealStageIdFamilies(
+  stages: Array<Pick<DealStageLike, "id" | "slug">>
+): string[][] {
+  return buildCanonicalDealStageFamilies(stages).map((family) => family.ids);
 }
 
 export function buildCanonicalDealBoardColumns(

@@ -713,6 +713,12 @@ export function DealsListSection({
   const inheritedRep = baseFilters?.assignedRepId;
   const prevScopeRef = useRef(scope);
   const prevInheritedRepRef = useRef(inheritedRep);
+  // Detect a header scope/rep change SYNCHRONOUSLY in this render: the refs hold the last COMMITTED values;
+  // the effect below advances them post-commit. The effect persists dl_page=1 to the URL, but that's a
+  // passive post-render effect — the query in THIS render would otherwise fire with the stale dl_page
+  // FIRST (a wasted/empty page-N request) before the URL reset lands. We clamp the effective page below.
+  const headerScopeChangedThisRender =
+    filterBarMode && (prevScopeRef.current !== scope || prevInheritedRepRef.current !== inheritedRep);
   useEffect(() => {
     if (!filterBarMode) return;
     const scopeChanged = prevScopeRef.current !== scope;
@@ -725,8 +731,9 @@ export function DealsListSection({
 
   // Pagination + query-enable diverge by mode: FilterBar mode reads page from the URL and never gates
   // on stage-slug loading (stageIds arrive directly from the URL); legacy keeps local page + the
-  // stage-aware enable gate. goToPage writes wherever the page lives.
-  const currentPage = filterBarMode ? urlFilters.page ?? 1 : page;
+  // stage-aware enable gate. goToPage writes wherever the page lives. On a scope/rep change clamp to page 1
+  // for THIS render so the racing effect's URL reset is never beaten by a stale page-N query (Codex #589).
+  const currentPage = filterBarMode ? (headerScopeChangedThisRender ? 1 : urlFilters.page ?? 1) : page;
   const queryEnabled = filterBarMode ? true : listQueryState.enabled;
   const goToPage = filterBarMode ? (next: number) => setFilters({ page: next }) : setPage;
 

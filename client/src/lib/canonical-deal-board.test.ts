@@ -1,5 +1,34 @@
 import { describe, expect, it } from "vitest";
-import { buildCanonicalDealBoardColumns, buildCanonicalDealStageIdFamilies } from "./canonical-deal-board";
+import {
+  buildCanonicalDealBoardColumns,
+  buildCanonicalDealStageFamilies,
+  buildCanonicalDealStageIdFamilies,
+} from "./canonical-deal-board";
+
+describe("buildCanonicalDealStageFamilies (canonical-slug-keyed membership the list scope is derived from, Codex #589)", () => {
+  it("keys each family by the board's canonical slug and folds Won/Lost ALIASES into the terminal columns", () => {
+    const families = buildCanonicalDealStageFamilies([
+      { id: "won-canonical", slug: "won" },
+      { id: "won-closed", slug: "closed_won" },
+      { id: "won-prod", slug: "sent_to_production" },
+      { id: "lost-service", slug: "service_lost" },
+    ]);
+    const won = families.find((family) => family.slug === "won");
+    const lost = families.find((family) => family.slug === "lost");
+    expect(won?.ids).toEqual(expect.arrayContaining(["won-canonical", "won-closed", "won-prod"]));
+    expect(lost?.ids).toEqual(["lost-service"]); // an alias-only Lost column is still keyed "lost"
+  });
+
+  it("folds the service estimate-under-review alias into the canonical estimate_under_review column (the recurring under-show case, Codex #589 #1)", () => {
+    const families = buildCanonicalDealStageFamilies([
+      { id: "eur-standard", slug: "estimate_under_review" },
+      { id: "eur-service", slug: "service_estimate_under_review" },
+    ]);
+    const eur = families.find((family) => family.slug === "estimate_under_review");
+    // Selecting canonical "Estimate Under Review" must query BOTH ids so the list == the board column.
+    expect(eur?.ids).toEqual(expect.arrayContaining(["eur-standard", "eur-service"]));
+  });
+});
 
 describe("buildCanonicalDealStageIdFamilies (explicit stage pick → board column's full membership, Codex #589 P1)", () => {
   it("groups CROSS-slug aliases that normalize to the same canonical column (contract_signed + service_contract_signed → contract)", () => {

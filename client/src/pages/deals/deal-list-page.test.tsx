@@ -11,6 +11,7 @@ import type { AtRiskResult } from "@trock-crm/shared/types";
 import {
   DealListPage,
   buildDealsPageKpiDrilldownPath,
+  boardRelevantParamKey,
   buildDealStageNavigationPath,
   formatDateInput,
   getCanonicalTerminalMetric,
@@ -387,6 +388,23 @@ async function renderPageDomWithLocation(path = "/deals?scope=all", role = "admi
     },
   };
 }
+
+describe("boardRelevantParamKey (the board sync ignores dl_* list params, Codex #589)", () => {
+  it("yields the SAME key when only dl_* (list) params change — so a list edit doesn't refetch the kanban", () => {
+    expect(boardRelevantParamKey("scope=all&period=qtd&dl_stageIds=x&dl_page=2")).toBe(
+      boardRelevantParamKey("scope=all&period=qtd&dl_stageIds=y&dl_page=5&dl_status=on_hold")
+    );
+  });
+
+  it("yields a DIFFERENT key when a board param changes (the board must re-sync)", () => {
+    expect(boardRelevantParamKey("scope=all&period=qtd")).not.toBe(
+      boardRelevantParamKey("scope=all&period=mtd")
+    );
+    expect(boardRelevantParamKey("scope=all&assignedRepId=rep-1")).not.toBe(
+      boardRelevantParamKey("scope=all&assignedRepId=rep-2")
+    );
+  });
+});
 
 describe("DealListPage", () => {
   beforeEach(() => {
@@ -1279,6 +1297,45 @@ describe("DealListPage", () => {
     };
     const contractFamily = props.filterBar.stageIdFamilies?.find((ids) => ids.includes("contract-standard"));
     expect(contractFamily).toEqual(expect.arrayContaining(["contract-standard", "contract-service"]));
+  });
+
+  it("classifies Won/Lost ALIAS ids as terminal by CANONICAL slug so their inactive rows survive the active-only default (Codex #589)", () => {
+    // closed_won / service_lost are terminal stages whose RAW slug is not literally 'won'/'lost'. A raw-slug
+    // terminal predicate would omit them from terminalStageIds → the active-only default would drop those
+    // inactive deals from the base list, mismatching the board's Won/Lost columns.
+    mocks.usePipelineStagesMock.mockReturnValue({
+      loading: false,
+      error: null,
+      stages: [
+        { id: "won-canonical", name: "Won", slug: "won", displayOrder: 6, isTerminal: true },
+        { id: "won-closed", name: "Closed Won", slug: "closed_won", displayOrder: 6, isTerminal: true },
+        { id: "lost-service", name: "Service Lost", slug: "service_lost", displayOrder: 7, isTerminal: true },
+      ],
+    });
+    renderPage("/deals?scope=mine", "director");
+    const props = mocks.dealsListSectionMock.mock.calls[mocks.dealsListSectionMock.mock.calls.length - 1][0] as {
+      filterBar: { terminalStageIds: string[] };
+    };
+    expect(props.filterBar.terminalStageIds).toEqual(
+      expect.arrayContaining(["won-canonical", "won-closed", "lost-service"])
+    );
+  });
+
+  it("expands a canonical Estimate-Under-Review pick to BOTH the standard and service-alias ids (list == board column, Codex #589 #1)", () => {
+    mocks.usePipelineStagesMock.mockReturnValue({
+      loading: false,
+      error: null,
+      stages: [
+        { id: "eur-standard", name: "Estimate Under Review", slug: "estimate_under_review", displayOrder: 4, isTerminal: false },
+        { id: "eur-service", name: "Estimate Under Review", slug: "service_estimate_under_review", displayOrder: 4, isTerminal: false },
+      ],
+    });
+    renderPage("/deals?scope=mine", "director");
+    const props = mocks.dealsListSectionMock.mock.calls[mocks.dealsListSectionMock.mock.calls.length - 1][0] as {
+      filterBar: { stageIdFamilies?: string[][] };
+    };
+    const eurFamily = props.filterBar.stageIdFamilies?.find((ids) => ids.includes("eur-standard"));
+    expect(eurFamily).toEqual(expect.arrayContaining(["eur-standard", "eur-service"]));
   });
 
   it("keeps the LEGACY list (no FilterBar) on drill-down views — those stay YELLOW's surface", () => {
