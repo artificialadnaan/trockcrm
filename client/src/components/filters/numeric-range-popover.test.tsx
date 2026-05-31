@@ -77,7 +77,7 @@ describe("NumericRangePopover", () => {
       b.textContent?.includes("> 60 days")
     );
     act(() => bucketBtn?.click());
-    expect(onChange).toHaveBeenCalledWith({ min: 60, max: undefined });
+    expect(onChange).toHaveBeenCalledWith({ min: 60 });
   });
 
   it("commits the typed min/max bounds on Apply", () => {
@@ -91,7 +91,7 @@ describe("NumericRangePopover", () => {
     act(() => changeInputValue(minInput!, "25000"));
     const applyBtn = Array.from(document.querySelectorAll("button")).find((b) => b.textContent === "Apply");
     act(() => applyBtn?.click());
-    expect(onChange).toHaveBeenCalledWith({ min: 25000, max: undefined });
+    expect(onChange).toHaveBeenCalledWith({ min: 25000 });
   });
 
   // Codex: an emptied Apply must produce {} (no undefined-valued keys) so generic URL/key
@@ -106,7 +106,8 @@ describe("NumericRangePopover", () => {
     act(() => changeInputValue(minInput!, ""));
     const applyBtn = Array.from(document.querySelectorAll("button")).find((b) => b.textContent === "Apply");
     act(() => applyBtn?.click());
-    const emitted = onChange.mock.calls.at(-1)?.[0] as Record<string, unknown>;
+    const calls = onChange.mock.calls;
+    const emitted = calls[calls.length - 1]?.[0] as Record<string, unknown>;
     expect(Object.keys(emitted)).toEqual([]);
   });
 
@@ -118,7 +119,8 @@ describe("NumericRangePopover", () => {
     act(() => container.querySelector<HTMLButtonElement>('button[aria-label="Stalled filter"]')?.click());
     const bucketBtn = Array.from(document.querySelectorAll("button")).find((b) => b.textContent?.includes("> 90 days"));
     act(() => bucketBtn?.click());
-    const emitted = onChange.mock.calls.at(-1)?.[0] as Record<string, unknown>;
+    const calls = onChange.mock.calls;
+    const emitted = calls[calls.length - 1]?.[0] as Record<string, unknown>;
     expect(emitted).toEqual({ min: 90 });
     expect("max" in emitted).toBe(false);
   });
