@@ -1,3 +1,4 @@
+// @vitest-environment jsdom
 import { describe, expect, it } from "vitest";
 import {
   TERMINAL_STAGE_SLUGS,
@@ -12,6 +13,8 @@ import {
   appendPipelineTerminalDateParams,
   setTerminalDateFilterSearchParams,
   readTerminalDateFiltersFromSearchParams,
+  readTerminalDateFilter,
+  writeTerminalDateFilter,
 } from "./pipeline-terminal-filters";
 
 describe("pipeline terminal filters", () => {
@@ -108,26 +111,39 @@ describe("pipeline terminal filters", () => {
 });
 
 describe("week-to-date (Sunday-anchored) preset", () => {
+  // WTD anchors on UTC day boundaries (tz-independent) to match the reporting/dashboard layer.
   it("spans the most recent Sunday through a midweek reference day", () => {
-    // 2026-05-27 is a Wednesday; the most recent Sunday is 2026-05-24.
-    const now = new Date(2026, 4, 27);
+    // 2026-05-27 is a Wednesday (UTC); the most recent Sunday is 2026-05-24.
+    const now = new Date(Date.UTC(2026, 4, 27, 12));
     expect(toDatePresetRange("wtd", now)).toEqual({ from: "2026-05-24", to: "2026-05-27" });
   });
 
   it("collapses to a single day when the reference day is itself a Sunday", () => {
-    // 2026-05-24 is a Sunday.
-    const now = new Date(2026, 4, 24);
+    // 2026-05-24 is a Sunday (UTC).
+    const now = new Date(Date.UTC(2026, 4, 24, 12));
     expect(toDatePresetRange("wtd", now)).toEqual({ from: "2026-05-24", to: "2026-05-24" });
   });
 
   it("crosses a month boundary back to the prior Sunday", () => {
-    // 2026-03-01 is a Sunday; the Tuesday after is 2026-03-03 -> back to 2026-03-01.
-    const now = new Date(2026, 2, 3);
+    // 2026-03-01 is a Sunday (UTC); the Tuesday after is 2026-03-03 -> back to 2026-03-01.
+    const now = new Date(Date.UTC(2026, 2, 3, 12));
     expect(toDatePresetRange("wtd", now)).toEqual({ from: "2026-03-01", to: "2026-03-03" });
+  });
+
+  it("resolves the WTD window on the UTC Sunday even just after UTC midnight", () => {
+    // 2026-05-24T02:00Z is Sunday in UTC (Saturday evening for viewers west of UTC). The shared
+    // WTD must resolve to the UTC Sunday so it agrees with the reporting layer / rep-detail.
+    const now = new Date("2026-05-24T02:00:00Z");
+    expect(toDatePresetRange("wtd", now)).toEqual({ from: "2026-05-24", to: "2026-05-24" });
   });
 
   it("labels the wtd preset as WTD", () => {
     expect(getTerminalDateFilterLabel({ preset: "wtd" })).toBe("WTD");
+  });
+
+  it("round-trips the wtd preset through localStorage (readTerminalDateFilter parse allow-list)", () => {
+    writeTerminalDateFilter("won", { preset: "wtd" });
+    expect(readTerminalDateFilter("won")).toEqual({ preset: "wtd" });
   });
 
   it("serializes wtd as a since/until window without throwing", () => {

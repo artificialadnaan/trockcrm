@@ -138,11 +138,13 @@ export function toDatePresetRange(
 ) {
   const today = formatLocalDateParam(now);
   if (preset === "wtd") {
-    // Week-to-date, Sunday-anchored (Sun..reference) for the Sunday weekly-won meeting.
-    // getDay(): Sunday = 0, so subtracting it walks back to the most recent Sunday.
-    const start = new Date(now.getFullYear(), now.getMonth(), now.getDate());
-    start.setDate(start.getDate() - start.getDay());
-    return { from: formatLocalDateParam(start), to: today };
+    // Week-to-date, Sunday-anchored, on UTC day boundaries so "WTD" agrees platform-wide with
+    // the reporting/dashboard layer (presetToDateRange, daysAgo) and the rep-detail quick-filters
+    // (Codex review on #539). getUTCDay(): Sunday = 0. MTD/QTD/YTD keep their existing local
+    // boundaries; the broader date-basis reconciliation is tracked in .audit S5.5.
+    const start = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()));
+    start.setUTCDate(start.getUTCDate() - start.getUTCDay());
+    return { from: formatDateParam(start), to: formatDateParam(now) };
   }
   if (preset === "mtd") {
     return { from: formatLocalDateParam(new Date(now.getFullYear(), now.getMonth(), 1)), to: today };
@@ -170,6 +172,7 @@ export function readTerminalDateFilter(outcome: TerminalOutcome): TerminalDateFi
       parsed.preset === "30" ||
       parsed.preset === "60" ||
       parsed.preset === "90" ||
+      parsed.preset === "wtd" ||
       parsed.preset === "mtd" ||
       parsed.preset === "qtd" ||
       parsed.preset === "ytd" ||

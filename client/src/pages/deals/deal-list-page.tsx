@@ -357,12 +357,13 @@ function readCurrentTerminalDateFilters(): Record<TerminalOutcome, TerminalDateF
   };
 }
 
-function isDealDatePreset(value: string | null): value is Exclude<TerminalDateFilter["preset"], "custom"> {
+export function isDealDatePreset(value: string | null): value is Exclude<TerminalDateFilter["preset"], "custom"> {
   return (
     value === "7" ||
     value === "30" ||
     value === "60" ||
     value === "90" ||
+    value === "wtd" ||
     value === "mtd" ||
     value === "qtd" ||
     value === "ytd" ||
@@ -370,7 +371,7 @@ function isDealDatePreset(value: string | null): value is Exclude<TerminalDateFi
   );
 }
 
-function readEstimateSentDateFilterFromSearchParams(params: URLSearchParams): TerminalDateFilter {
+export function readEstimateSentDateFilterFromSearchParams(params: URLSearchParams): TerminalDateFilter {
   const preset = params.get("estimate_sent_preset");
   if (isDealDatePreset(preset)) return { preset };
   if (params.get("estimate_sent_all_time") === "true") return { preset: "all" };
@@ -518,9 +519,10 @@ function parseDayStart(value: string) {
   return parseLocalDay(value).getTime();
 }
 
-function getWonMetricTerminalLabel(filter: TerminalDateFilter) {
+export function getWonMetricTerminalLabel(filter: TerminalDateFilter) {
   if (filter.preset === "custom") return "Custom";
   if (filter.preset === "all") return "All time";
+  if (filter.preset === "wtd") return "WTD";
   if (filter.preset === "mtd") return "MTD";
   if (filter.preset === "qtd") return "QTD";
   if (filter.preset === "ytd") return "YTD";
