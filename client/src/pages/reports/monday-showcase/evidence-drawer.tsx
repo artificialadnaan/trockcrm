@@ -1,21 +1,17 @@
-import { Loader2 } from "lucide-react";
+import { useState, type ReactNode } from "react";
+import { ArrowDown, ArrowUp, ChevronsUpDown, ExternalLink, Loader2 } from "lucide-react";
+import { useNavigate } from "react-router-dom";
 import {
-  Sheet,
-  SheetContent,
-  SheetHeader,
-  SheetTitle,
-  SheetDescription,
-} from "@/components/ui/sheet";
-import {
-  PipelineStageTable,
-  type PipelineStageTableColumn,
-} from "@/components/pipeline/pipeline-stage-table";
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
+import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { useShowcaseEvidence } from "@/hooks/use-reports";
+import { usd, int } from "../format";
 import type { EvidenceRecord, EvidenceRequest, MondayShowcaseEvidence } from "./types";
-
-const usd = (n: number) =>
-  n.toLocaleString("en-US", { style: "currency", currency: "USD", maximumFractionDigits: 0 });
-const int = (n: number) => n.toLocaleString("en-US");
 
 // Literal-day formatting (no UTC-midnight off-by-one), matching the app's date-only rendering (#572).
 function formatCohortDate(iso: string | null): string {
@@ -29,27 +25,113 @@ function formatCohortDate(iso: string | null): string {
   });
 }
 
-function evidenceColumns(ev: MondayShowcaseEvidence): Array<PipelineStageTableColumn<EvidenceRecord>> {
+// ---- sorting (client-side; the records are the full reconciling set, so sorting never drops a row) ----
+type SortKey = "name" | "company" | "owner" | "value" | "date" | "region" | "type" | "stage" | "age";
+interface SortState {
+  key: SortKey;
+  dir: "asc" | "desc";
+}
+const NUMERIC_KEYS: ReadonlySet<SortKey> = new Set(["value", "age"]);
+
+function sortAccessor(r: EvidenceRecord, key: SortKey): string | number {
+  switch (key) {
+    case "name":
+      return r.name?.toLowerCase() ?? "";
+    case "company":
+      return r.companyName?.toLowerCase() ?? "";
+    case "owner":
+      return r.repName?.toLowerCase() ?? "";
+    case "value":
+      return r.value ?? Number.NEGATIVE_INFINITY;
+    case "date":
+      return r.cohortDate ?? "";
+    case "region":
+      return r.region?.toLowerCase() ?? "";
+    case "type":
+      return r.dealType?.toLowerCase() ?? "";
+    case "stage":
+      return r.stageLabel?.toLowerCase() ?? "";
+    case "age":
+      return r.daysInStage ?? Number.NEGATIVE_INFINITY;
+  }
+}
+
+function sortRecords(records: EvidenceRecord[], sort: SortState): EvidenceRecord[] {
+  return [...records].sort((a, b) => {
+    const av = sortAccessor(a, sort.key);
+    const bv = sortAccessor(b, sort.key);
+    const cmp =
+      typeof av === "number" && typeof bv === "number" ? av - bv : String(av).localeCompare(String(bv));
+    return sort.dir === "asc" ? cmp : -cmp;
+  });
+}
+
+interface ColumnDef {
+  key: SortKey;
+  header: string;
+  numeric?: boolean;
+  show: boolean;
+  render: (r: EvidenceRecord) => ReactNode;
+}
+
+function columnsFor(ev: MondayShowcaseEvidence): ColumnDef[] {
   const hasValue = ev.metric !== "leads";
-  const columns: Array<PipelineStageTableColumn<EvidenceRecord>> = [
+  const cols: ColumnDef[] = [
     {
-      key: "deal",
+      key: "name",
       header: ev.metric === "leads" ? "Lead" : "Deal",
+      show: true,
       render: (r) => (
-        <div className="min-w-0">
-          <div className="truncate font-medium text-slate-800">{r.name}</div>
-          {r.dealNumber ? <div className="text-xs text-slate-400">#{r.dealNumber}</div> : null}
+        <div className="flex min-w-0 items-center gap-1.5">
+          <div className="min-w-0">
+            <div className="truncate font-medium text-sky-700 group-hover:underline">{r.name}</div>
+            {r.dealNumber ? <div className="text-xs text-slate-400">#{r.dealNumber}</div> : null}
+          </div>
+          <ExternalLink className="h-3.5 w-3.5 shrink-0 text-slate-300 opacity-0 transition group-hover:opacity-100" />
         </div>
       ),
     },
     {
+      key: "company",
+      header: "Company",
+      show: true,
+      render: (r) => <span className="text-slate-700">{r.companyName ?? "—"}</span>,
+    },
+    {
       key: "owner",
       header: "Owner",
+      show: true,
       render: (r) => <span className="text-slate-600">{r.repName}</span>,
+    },
+    {
+      key: "value",
+      header: "Value",
+      numeric: true,
+      show: hasValue,
+      render: (r) => (r.value == null ? "—" : usd(r.value)),
+    },
+    {
+      key: "date",
+      header: ev.dateAxisLabel,
+      show: true,
+      render: (r) => <span className="whitespace-nowrap text-slate-600">{formatCohortDate(r.cohortDate)}</span>,
+    },
+    {
+      key: "region",
+      header: "Region",
+      show: true,
+      render: (r) => <span className="text-slate-600">{r.region ?? "—"}</span>,
+    },
+    {
+      key: "type",
+      header: "Type",
+      show: true,
+      render: (r) => <span className="text-slate-600">{r.dealType ?? "—"}</span>,
     },
     {
       key: "stage",
       header: "Stage",
+      show: true,
       render: (r) => (
         <span className="inline-block rounded-full bg-slate-100 px-2 py-0.5 text-xs text-slate-600">
           {r.stageLabel || "—"}
@@ -57,30 +139,30 @@ function evidenceColumns(ev: MondayShowcaseEvidence): Array<PipelineStageTableCo
       ),
     },
     {
-      key: "date",
-      header: ev.dateAxisLabel,
-      cellClassName: "whitespace-nowrap text-slate-600",
-      render: (r) => formatCohortDate(r.cohortDate),
+      key: "age",
+      header: "Age",
+      numeric: true,
+      show: true,
+      render: (r) => (r.daysInStage == null ? "—" : `${int(r.daysInStage)}d`),
     },
   ];
-  if (hasValue) {
-    columns.push({
-      key: "value",
-      header: "Value",
-      headClassName: "text-right",
-      cellClassName: "text-right font-semibold tabular-nums text-slate-800",
-      render: (r) => (r.value == null ? "—" : usd(r.value)),
-    });
-  }
-  return columns;
+  return cols.filter((c) => c.show);
+}
+
+function SortIcon({ state, colKey }: { state: SortState; colKey: SortKey }) {
+  if (state.key !== colKey) return <ChevronsUpDown className="h-3 w-3 text-slate-300" />;
+  return state.dir === "asc" ? (
+    <ArrowUp className="h-3 w-3 text-slate-600" />
+  ) : (
+    <ArrowDown className="h-3 w-3 text-slate-600" />
+  );
 }
 
 function ReconciliationBanner({ ev }: { ev: MondayShowcaseEvidence }) {
   const { total } = ev;
   return (
     <div className="rounded-lg border border-emerald-200 bg-emerald-50 px-3 py-2 text-sm text-emerald-900">
-      <span className="font-semibold">{int(total.count)}</span>{" "}
-      {total.count === 1 ? "record" : "records"}
+      <span className="font-semibold">{int(total.count)}</span> {total.count === 1 ? "record" : "records"}
       {total.value != null && (
         <>
           {" · "}
@@ -95,6 +177,64 @@ function ReconciliationBanner({ ev }: { ev: MondayShowcaseEvidence }) {
   );
 }
 
+function EvidenceTable({ ev, onOpenRecord }: { ev: MondayShowcaseEvidence; onOpenRecord: (r: EvidenceRecord) => void }) {
+  const hasValue = ev.metric !== "leads";
+  const [sort, setSort] = useState<SortState>({
+    key: hasValue ? "value" : "age",
+    dir: "desc",
+  });
+  const columns = columnsFor(ev);
+  const rows = sortRecords(ev.records, sort);
+
+  function toggleSort(key: SortKey) {
+    setSort((cur) =>
+      cur.key === key
+        ? { key, dir: cur.dir === "asc" ? "desc" : "asc" }
+        : { key, dir: NUMERIC_KEYS.has(key) ? "desc" : "asc" }
+    );
+  }
+
+  return (
+    <Table>
+      <TableHeader className="sticky top-0 z-10 bg-popover">
+        <TableRow className="hover:bg-transparent">
+          {columns.map((col) => (
+            <TableHead key={col.key} className={col.numeric ? "text-right" : undefined}>
+              <button
+                type="button"
+                onClick={() => toggleSort(col.key)}
+                className={`inline-flex items-center gap-1 text-xs font-semibold uppercase tracking-wide text-slate-500 transition hover:text-slate-800 ${
+                  col.numeric ? "flex-row-reverse" : ""
+                }`}
+                title={`Sort by ${col.header}`}
+              >
+                {col.header}
+                <SortIcon state={sort} colKey={col.key} />
+              </button>
+            </TableHead>
+          ))}
+        </TableRow>
+      </TableHeader>
+      <TableBody>
+        {rows.map((r) => (
+          <TableRow
+            key={r.id}
+            className="group cursor-pointer"
+            onClick={() => onOpenRecord(r)}
+            title={`Open the ${ev.metric === "leads" ? "lead" : "deal"} record`}
+          >
+            {columns.map((col) => (
+              <TableCell key={col.key} className={col.numeric ? "text-right tabular-nums" : undefined}>
+                {col.render(r)}
+              </TableCell>
+            ))}
+          </TableRow>
+        ))}
+      </TableBody>
+    </Table>
+  );
+}
+
 export function EvidenceDrawer({
   request,
   mode,
@@ -104,58 +244,58 @@ export function EvidenceDrawer({
   mode: "to_date" | "completed";
   onClose: () => void;
 }) {
+  const navigate = useNavigate();
   const { data, loading, error } = useShowcaseEvidence(request, mode);
 
+  function openRecord(r: EvidenceRecord) {
+    if (!data) return;
+    navigate(data.metric === "leads" ? `/leads/${r.id}` : `/deals/${r.id}`);
+    onClose();
+  }
+
   return (
-    <Sheet
+    <Dialog
       open={request != null}
       onOpenChange={(open) => {
         if (!open) onClose();
       }}
     >
-      <SheetContent side="right" className="flex w-full flex-col gap-3 sm:max-w-2xl">
-        <SheetHeader className="border-b border-slate-100 pb-3">
-          <SheetTitle>{request?.title ?? "Supporting records"}</SheetTitle>
-          <SheetDescription>
+      <DialogContent className="flex max-h-[85vh] w-[min(96vw,1120px)] flex-col gap-3 sm:max-w-[min(96vw,1120px)]">
+        <DialogHeader className="pr-8">
+          <DialogTitle>{request?.title ?? "Supporting records"}</DialogTitle>
+          <DialogDescription>
             {request?.subtitle ? `${request.subtitle} · ` : ""}
             {data ? data.period.label : ""}
-          </SheetDescription>
-        </SheetHeader>
+          </DialogDescription>
+        </DialogHeader>
 
-        <div className="flex-1 overflow-y-auto px-4 pb-8">
-          {loading ? (
-            <div className="flex items-center justify-center py-16">
-              <Loader2 className="h-6 w-6 animate-spin text-muted-foreground" />
-            </div>
-          ) : error ? (
-            <div className="rounded-lg border border-red-200 bg-red-50 p-3 text-sm text-red-700">{error}</div>
-          ) : data ? (
-            data.records.length === 0 ? (
-              <div className="space-y-3">
-                <ReconciliationBanner ev={data} />
-                <div className="rounded-lg border bg-slate-50 p-6 text-center text-sm text-muted-foreground">
-                  No supporting records for this number in this period.
-                </div>
+        {loading ? (
+          <div className="flex items-center justify-center py-16">
+            <Loader2 className="h-6 w-6 animate-spin text-muted-foreground" />
+          </div>
+        ) : error ? (
+          <div className="rounded-lg border border-red-200 bg-red-50 p-3 text-sm text-red-700">{error}</div>
+        ) : data ? (
+          <div className="flex min-h-0 flex-col gap-3">
+            <ReconciliationBanner ev={data} />
+            {data.records.length === 0 ? (
+              <div className="rounded-lg border bg-slate-50 p-6 text-center text-sm text-muted-foreground">
+                No supporting records for this number in this period.
               </div>
             ) : (
-              <div className="space-y-3">
-                <ReconciliationBanner ev={data} />
-                <PipelineStageTable
-                  rows={data.records}
-                  columns={evidenceColumns(data)}
-                  pagination={{ page: 1, pageSize: data.records.length, total: data.records.length, totalPages: 1 }}
-                  onPageChange={() => {}}
-                  getRowKey={(r) => r.id}
-                  showPagination={false}
-                />
+              <>
+                <div className="min-h-0 flex-1 overflow-auto rounded-lg border border-slate-100">
+                  <EvidenceTable ev={data} onOpenRecord={openRecord} />
+                </div>
                 <p className="px-1 text-xs text-muted-foreground">
                   Shown on the {data.dateAxisLabel.toLowerCase()} axis — the cohort this number is defined on.
+                  Click a column to sort; click a row to open the record.
                 </p>
-              </div>
-            )
-          ) : null}
-        </div>
-      </SheetContent>
-    </Sheet>
+              </>
+            )}
+          </div>
+        ) : null}
+      </DialogContent>
+    </Dialog>
   );
 }

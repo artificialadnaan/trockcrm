@@ -9,6 +9,7 @@ import {
 } from "./monday-showcase/types";
 import { DrillProvider } from "./monday-showcase/drill";
 import { EvidenceDrawer } from "./monday-showcase/evidence-drawer";
+import { DEFAULT_WEEK_MODE, type WeekMode } from "./week-mode";
 import {
   VariantA1Funnel,
   VariantA2Scoreboard,
@@ -32,7 +33,7 @@ const VARIANT_COMPONENT: Record<ShowcaseVariantKey, ComponentType<{ data: Monday
 };
 
 export function MondayShowcasePage() {
-  const [mode, setMode] = useState<"to_date" | "completed">("to_date");
+  const [mode, setMode] = useState<WeekMode>(DEFAULT_WEEK_MODE);
   const [variant, setVariant] = useState<ShowcaseVariantKey>("HERO");
   const [evidence, setEvidence] = useState<EvidenceRequest | null>(null);
   const { data, loading, error, refetch } = useMondayShowcase(mode);
@@ -106,7 +107,8 @@ export function MondayShowcasePage() {
             </div>
           </DrillProvider>
           <p className="text-xs text-muted-foreground">
-            Tip: numbers with a dotted underline are clickable — open the exact records behind any figure.
+            Tip: most figures here are clickable — open the exact records behind a number. Many show a dotted
+            underline; the headline tiles and hero numbers are clickable too.
           </p>
 
           <details className="text-xs text-muted-foreground">

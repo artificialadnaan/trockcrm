@@ -101,4 +101,35 @@ describe("Monday showcase EVIDENCE builders reuse the aggregate cohort predicate
     expect(text).toContain("is_terminal = false");
     expect(text).toContain("l.is_test_data");
   });
+
+  it("deal evidence carries the actionable drill columns (company, region, type, age) via ADDITIVE LEFT JOINs", () => {
+    // The drill-down needs more than name+number: who owns it, how much, where, what type, how long it's
+    // sat. These are SELECT additions + 1:1 LEFT JOINs (companies, region_config) -- the cohort WHERE is
+    // untouched, so the records still reconcile to the number.
+    for (const text of [
+      extractSqlText(buildWonEvidenceSql("2026-05-24", "2026-05-30")),
+      extractSqlText(buildStageEntryEvidenceSql(SENT_STAGE_SLUGS, "2026-05-24", "2026-05-30")),
+      extractSqlText(buildProjectionEvidenceSql()),
+    ]) {
+      expect(text).toContain("company_name");
+      expect(text).toContain("AS region");
+      expect(text).toContain("deal_type");
+      expect(text).toContain("days_in_stage");
+      expect(text).toContain("LEFT JOIN companies c ON c.id = d.company_id");
+      expect(text).toContain("LEFT JOIN region_config rc ON rc.id = d.region_id");
+    }
+    // The Won cohort predicate is unchanged alongside the new columns (still the protected close-date guard).
+    const won = extractSqlText(buildWonEvidenceSql("2026-05-24", "2026-05-30"));
+    expect(won).toContain("won_closed_date");
+  });
+
+  it("lead evidence carries company/type/age too (region via the company; no region_config join)", () => {
+    const text = extractSqlText(buildLeadEvidenceSql());
+    expect(text).toContain("company_name");
+    expect(text).toContain("deal_type");
+    expect(text).toContain("days_in_stage");
+    expect(text).toContain("LEFT JOIN companies c ON c.id = l.company_id");
+    // leads have no region_id -> region comes from the company only, no region_config join
+    expect(text).not.toContain("region_config");
+  });
 });

@@ -4,14 +4,13 @@
 // import. SINGLE source of the semantic palette — keep colors here, not duplicated per view.
 import { TrendingUp, TrendingDown, Minus } from "lucide-react";
 import type { ProjectionBand } from "./monday-showcase/types";
+import { usd, int, signed } from "./format";
 
 export { DrillProvider, DrillNumber, useDrill, DRILL_UNDERLINE } from "./monday-showcase/drill";
 export { EvidenceDrawer } from "./monday-showcase/evidence-drawer";
 
-export const usd = (n: number) =>
-  n.toLocaleString("en-US", { style: "currency", currency: "USD", maximumFractionDigits: 0 });
-export const int = (n: number) => n.toLocaleString("en-US");
-export const signed = (n: number) => (n > 0 ? `+${int(n)}` : int(n));
+// usd/int/signed are the null-guarded primitives from ./format; re-export so report views import them here.
+export { usd, int, signed };
 
 // Literal-day formatting (no UTC-midnight off-by-one), matching the app's date-only rendering (#572).
 export function formatDayShort(iso: string | null): string {
