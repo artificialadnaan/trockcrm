@@ -158,3 +158,23 @@ export function aliasedReportableDealFilterSql(alias: string): SQL {
 export function aliasedActiveDealCountFilterSql(alias: string): SQL {
   return aliasedReportableDealFilterSql(alias);
 }
+
+/**
+ * CANONICAL Won-period date — the single source of truth for "when was this deal
+ * Won", used by every Won read-site (getWonCloseSummary dashboard card,
+ * getDealsForPipeline Won column, /deals?filter=won drill-down) and the shared
+ * FilterBar date-scope. This is the protected 191 / $9,778,045.90 basis.
+ *
+ * FLIPPED (expand/migrate/contract step D): reads the app-owned
+ * deals.won_closed_date column — populated by changeDealStage and backfilled from
+ * HubSpot (migration 0141 + backfill-won-closed-date.ts). The raw-HubSpot-JSON
+ * read (try_parse_hs_close_date over hubspot_extra_properties->>'hs_closed_won_date',
+ * stripping the ''/'0' sentinels) is retained ONLY on the backfill/reseed path
+ * (dealWonHsClosedWonDateSql / castHsClosedWonDateSql in deals/service.ts). Lives
+ * here in the leaf value module so the date-scope and the deals service share ONE
+ * definition (no divergent reimplementation). `alias` is always a trusted
+ * developer literal (e.g. "d"/"deals"), never user input.
+ */
+export function aliasedWonHsClosedWonDateSql(alias: string): SQL {
+  return sql`${sql.raw(alias)}.won_closed_date`;
+}
