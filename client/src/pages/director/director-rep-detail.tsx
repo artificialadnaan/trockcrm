@@ -59,10 +59,10 @@ const PRESET_ACTIVITY_LABELS: Record<DateRangePreset, string> = {
   custom: "the selected period",
 };
 
-// D-15: sort off the flagged created_at axis onto the entered-current-stage axis
-// (the open-deal display date), so the order aligns with the outcome date the list
-// now filters + displays rather than the record-creation date.
-const DEAL_LIST_INITIAL_SORT = { key: "stage_entered_at", dir: "desc" } satisfies DealListSortState;
+// D-15: sort by the outcome DISPLAY date (Won->won-close, Lost->lost, open->stage-entry)
+// — the SAME expression the list filters + displays — so Won/Lost/open rows are each
+// ordered by their shown date, not one raw column (Codex #564: sort == display).
+const DEAL_LIST_INITIAL_SORT = { key: "display_date", dir: "desc" } satisfies DealListSortState;
 const LEAD_STATUS_OPTIONS = ["all", "open", "converted", "disqualified"] as const;
 const LIST_RANGE_OPTIONS = ["dashboard", "7d", "wtd", "mtd", "qtd", "ytd"] as const;
 

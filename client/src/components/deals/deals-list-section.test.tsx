@@ -969,6 +969,9 @@ describe("DealsListSection", () => {
       expect(call.dateTo).toBe("2026-05-31");
       expect(call.createdFrom).toBeUndefined();
       expect(call.updatedFrom).toBeUndefined();
+      // Codex #564: force open rows to be bounded on stage_entered_at regardless of the
+      // server flag, so the window is not silently inert for open deals.
+      expect(call.stageEntryDateWindow).toBe(true);
     });
 
     it("displays the server outcome displayDate, not the close date (filter-axis == display-axis)", async () => {
@@ -998,6 +1001,29 @@ describe("DealsListSection", () => {
       expect(text).not.toContain("Aug 15"); // not the close date
       expect(text).toContain("Date");
       expect(text).not.toContain("Close");
+      await view.cleanup();
+    });
+
+    it("hides the updated_at quick-sort and orders Newest/Oldest by the outcome display date (Codex #564: pills don't revert to created_at)", async () => {
+      const view = await renderDom({
+        dateField: "outcome",
+        externalDateRange: { from: "2026-04-01", to: "2026-05-31" },
+        enableDateFilter: false,
+        lockedOwnerId: "rep-1",
+        initialSort: { key: "display_date", dir: "desc" },
+      });
+      const buttons = () => Array.from(view.container.querySelectorAll("button"));
+      // The updated_at quick-sort is not the outcome axis -> hidden in outcome mode.
+      expect(buttons().some((b) => b.textContent?.trim().startsWith("Updated"))).toBe(false);
+      // Clicking "Newest" orders by the outcome display date, NOT created_at.
+      const newest = buttons().find((b) => b.textContent?.trim() === "Newest");
+      expect(newest).toBeDefined();
+      await act(async () => {
+        newest!.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+      });
+      const call = mocks.useDealsMock.mock.calls[mocks.useDealsMock.mock.calls.length - 1][0];
+      expect(call.sortBy).toBe("display_date");
+      expect(call.sortBy).not.toBe("created_at");
       await view.cleanup();
     });
   });

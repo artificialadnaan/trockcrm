@@ -249,6 +249,11 @@ export interface DealFilters {
   // on the entered-stage date (only when FEATURE_STAGE_ENTRY_DATE is on).
   dateFrom?: string;
   dateTo?: string;
+  // D-15: force the outcome-aware OPEN window (stage_entered_at) regardless of the
+  // global ENABLE_STAGE_ENTRY_DATE_FILTER flag. The rep drill-down sets this so a
+  // window actually bounds open rows (post-#535 stage_entered_at is reliable);
+  // otherwise an explicit outcome window leaves every open deal in (flag OFF default).
+  stageEntryDateWindow?: boolean;
   // Inclusive YYYY-MM-DD bounds against deals.contract_signed_at::date, with
   // deals.contract_signed_date as a transition fallback. RESERVED for the
   // commissions / contracts-signed surfaces (§6.5) — do NOT use for Won-period.
@@ -265,7 +270,7 @@ export interface DealFilters {
   createdTo?: string;
   updatedFrom?: string;
   updatedTo?: string;
-  sortBy?: "name" | "created_at" | "updated_at" | "awarded_amount" | "stage_entered_at" | "expected_close_date" | "contract_signed_date";
+  sortBy?: "name" | "created_at" | "updated_at" | "awarded_amount" | "stage_entered_at" | "expected_close_date" | "contract_signed_date" | "display_date";
   sortDir?: "asc" | "desc";
   page?: number;
   limit?: number;
@@ -764,10 +769,23 @@ function buildSortWithIdTieBreaker(column: SQLWrapper, dir: "asc" | "desc") {
     : [desc(column), desc(deals.id)] as const;
 }
 
-function buildDealListOrder(filters: DealFilters, wonStageIds: string[]) {
+function buildDealListOrder(
+  filters: DealFilters,
+  classification: { wonStageIds: string[]; lostStageIds: string[]; stageEntryDateEnabled: boolean }
+) {
+  const { wonStageIds, lostStageIds, stageEntryDateEnabled } = classification;
   switch (filters.sortBy) {
     case "name":
       return buildSortWithIdTieBreaker(deals.name, filters.sortDir === "asc" ? "asc" : "desc");
+    case "display_date":
+      // D-15: order by the SAME outcome-aware expression the list DISPLAYS (and filters)
+      // — Won -> won_closed_date, Lost -> lost_at, open -> stage_entered_at — so the
+      // mixed-outcome window is ordered by each row's displayed date, not one raw column
+      // (sort == display == filter). Built from the identical Won/Lost classification.
+      return buildSortWithIdTieBreaker(
+        dealDisplayDateExpr({ wonStageIds, lostStageIds, stageEntryDateEnabled, columns: dealDateScopeColumns() }),
+        filters.sortDir === "asc" ? "asc" : "desc"
+      );
     case "created_at":
       return buildSortWithIdTieBreaker(deals.createdAt, filters.sortDir === "asc" ? "asc" : "desc");
     case "awarded_amount":
@@ -1540,7 +1558,11 @@ export async function getDeals(
   // are resolved once (only when a date window is requested) so the date
   // predicate can classify rows without joining pipeline_stage_config — the
   // count queries below select from `deals` alone.
-  const stageEntryDateEnabled = isStageEntryDateFilterEnabled();
+  // D-15: a surface that explicitly asks for the outcome window on open rows
+  // (stageEntryDateWindow — the rep drill-down) forces stage_entered_at bounding even
+  // when the global flag is OFF (its prod default), so the window is not silently inert
+  // for open deals. post-#535 stage_entered_at is reliable.
+  const stageEntryDateEnabled = isStageEntryDateFilterEnabled() || Boolean(filters.stageEntryDateWindow);
   let wonStageIds: string[] = [];
   let lostStageIds: string[] = [];
   // Resolve Won/Lost stage-id sets once when any stage-classified dimension is in
@@ -1550,7 +1572,10 @@ export async function getDeals(
   // queries below select from `deals` alone).
   const valueFilterRequested = Number.isFinite(filters.valueMin) || Number.isFinite(filters.valueMax);
   const needsStageClassification =
-    Boolean(filters.dateFrom || filters.dateTo) || valueFilterRequested || filters.sortBy === "awarded_amount";
+    Boolean(filters.dateFrom || filters.dateTo) ||
+    valueFilterRequested ||
+    filters.sortBy === "awarded_amount" ||
+    filters.sortBy === "display_date";
   if (needsStageClassification) {
     const stages = await listDealStages();
     const wonSlugs = WON_STAGE_SLUGS as readonly string[];
@@ -1619,7 +1644,7 @@ export async function getDeals(
     : sql`coalesce(${deals.onHold}, false) = false`;
 
   // Sort
-  const sortOrder = buildDealListOrder(filters, wonStageIds);
+  const sortOrder = buildDealListOrder(filters, { wonStageIds, lostStageIds, stageEntryDateEnabled });
 
   // Sequential tenant queries required: tenantDb is a single transaction client
   // in production, so parallel reads can fail with "client already executing".

@@ -184,4 +184,42 @@ describe("getDeals — FilterBar wiring", () => {
       else process.env.ENABLE_STAGE_ENTRY_DATE_FILTER = prev;
     }
   });
+
+  // D-15 (Codex #564): the outcome-windowed rep drill-down must bound open rows even
+  // with the flag OFF (its prod default), and sort by the SAME outcome axis it displays.
+  it("stageEntryDateWindow forces open-row stage_entered_at bounding even when the flag is OFF", async () => {
+    const prev = process.env.ENABLE_STAGE_ENTRY_DATE_FILTER;
+    delete process.env.ENABLE_STAGE_ENTRY_DATE_FILTER;
+    try {
+      const { db, capturedWheres } = createTenantDbCapturingWhere();
+      const { getDeals } = await import("../../../src/modules/deals/service.js");
+
+      await getDeals(
+        db,
+        { dateFrom: "2026-01-01", dateTo: "2026-03-31", stageEntryDateWindow: true, scope: "all" },
+        "director",
+        "director-1"
+      );
+
+      // Open rows are bounded by stage_entered_at despite the flag being OFF (no longer
+      // returning EVERY open deal under an outcome-window claim).
+      expect(mainWhere(capturedWheres)).toContain("stage_entered_at");
+    } finally {
+      if (prev === undefined) delete process.env.ENABLE_STAGE_ENTRY_DATE_FILTER;
+      else process.env.ENABLE_STAGE_ENTRY_DATE_FILTER = prev;
+    }
+  });
+
+  it("sortBy=display_date orders by the outcome display CASE (sort == display: Won/Lost/open dates)", async () => {
+    const { db, capturedOrderBys } = createTenantDbCapturingWhere();
+    const { getDeals } = await import("../../../src/modules/deals/service.js");
+
+    await getDeals(db, { sortBy: "display_date", scope: "all" }, "director", "director-1");
+
+    const orderText = capturedOrderBys.flat().map(renderText).join(" ");
+    expect(orderText).toContain("case");
+    expect(orderText).toContain("won_closed_date"); // Won rows sort by the won-close date
+    expect(orderText).toContain("lost_at"); // Lost rows by the lost date
+    expect(orderText).toContain("stage_entered_at"); // open rows by the entered-stage date
+  });
 });

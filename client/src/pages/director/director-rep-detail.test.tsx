@@ -372,6 +372,8 @@ describe("DirectorRepDetail", () => {
         lockedOwnerId: "rep-1",
         dateField: "outcome",
         externalDateRange: { from: "2026-04-01", to: "2026-05-21" },
+        // Codex #564: sort by the outcome display axis (won/lost/stage-entry), not created_at.
+        initialSort: { key: "display_date", dir: "desc" },
       })
     );
     expect(mocks.useLeadsMock).toHaveBeenCalledWith(

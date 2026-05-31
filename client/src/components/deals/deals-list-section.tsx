@@ -58,7 +58,10 @@ const DEFAULT_SORT_STATE = { key: "created_at", dir: "desc" } satisfies DealList
 const EMPTY_STAGE_SLUGS: string[] = [];
 
 type SortKey = "name" | "created_at" | "stage_entered_at" | "awarded_amount" | "updated_at";
-export type DealListSortState = { key: SortKey | "expected_close_date" | "contract_signed_date"; dir: "asc" | "desc" };
+export type DealListSortState = {
+  key: SortKey | "expected_close_date" | "contract_signed_date" | "display_date";
+  dir: "asc" | "desc";
+};
 type DealListActiveFilter = boolean | "all" | "pipeline";
 
 interface DealsListSectionProps {
@@ -412,10 +415,13 @@ export function buildDealListParams(input: {
   if (dateField === "outcome") {
     // D-15: the window narrows the CANONICAL outcome axis (#546 buildDealOutcomeDateScope) —
     // Won on won_closed_date, Lost on lost_at, open on stage_entered_at — never created/updated.
+    // stage_entry_window forces open rows to be bounded regardless of the server flag, so the
+    // CSV export matches the on-screen list (Codex #564).
     const dateFrom = input.dateFrom ?? input.dateRange.from;
     const dateTo = input.dateTo ?? input.dateRange.to;
     if (dateFrom) params.set("dateFrom", dateFrom);
     if (dateTo) params.set("dateTo", dateTo);
+    params.set("stage_entry_window", "true");
   } else if (dateField === "created") {
     const createdFrom = input.createdFrom ?? input.dateRange.from;
     const createdTo = input.createdTo ?? input.dateRange.to;
@@ -628,9 +634,12 @@ export function DealsListSection({
     updatedFrom: dateField === "updated" ? dateRange.from ?? baseFilters?.updatedFrom : baseFilters?.updatedFrom,
     updatedTo: dateField === "updated" ? dateRange.to ?? baseFilters?.updatedTo : baseFilters?.updatedTo,
     // D-15: outcome mode routes the window to the canonical outcome-aware filter
-    // (dateFrom/dateTo -> buildDealOutcomeDateScope) instead of created/updated.
+    // (dateFrom/dateTo -> buildDealOutcomeDateScope) instead of created/updated, and
+    // forces open rows to be bounded on stage_entered_at regardless of the server flag
+    // (Codex #564 — otherwise the window leaves every open deal in).
     dateFrom: outcomeDateAxis ? dateRange.from ?? baseFilters?.dateFrom : baseFilters?.dateFrom,
     dateTo: outcomeDateAxis ? dateRange.to ?? baseFilters?.dateTo : baseFilters?.dateTo,
+    stageEntryDateWindow: outcomeDateAxis ? true : baseFilters?.stageEntryDateWindow,
     estimateSentFrom: baseFilters?.estimateSentFrom,
     estimateSentTo: baseFilters?.estimateSentTo,
     isActive: isActiveFilter,
@@ -721,9 +730,13 @@ export function DealsListSection({
     }));
   };
 
+  // D-15 (Codex #564): in outcome mode the Newest/Oldest pills order by the outcome
+  // DISPLAY date (the axis the list filters + displays), not created_at — clicking them
+  // must NOT revert to the created_at axis and re-introduce the filter!=display mismatch.
+  const recencySortKey: DealListSortState["key"] = outcomeDateAxis ? "display_date" : "created_at";
   const setCreatedAtSort = (dir: "asc" | "desc") => {
     setPage(1);
-    setSort({ key: "created_at", dir });
+    setSort({ key: recencySortKey, dir });
   };
 
   const restoreUpdatedSort = () => {
@@ -736,8 +749,8 @@ export function DealsListSection({
   };
 
   const isUpdatedSortActive = sort.key === "updated_at";
-  const isNewestSortActive = sort.key === "created_at" && sort.dir === "desc";
-  const isOldestSortActive = sort.key === "created_at" && sort.dir === "asc";
+  const isNewestSortActive = sort.key === recencySortKey && sort.dir === "desc";
+  const isOldestSortActive = sort.key === recencySortKey && sort.dir === "asc";
 
   const exportCsv = async () => {
     if (!listQueryState.enabled) {
@@ -1083,18 +1096,22 @@ export function DealsListSection({
           >
             Oldest
           </button>
-          <button
-            type="button"
-            className={cn(
-              "rounded-full border px-3 py-1.5 text-xs font-black uppercase tracking-[0.12em]",
-              isUpdatedSortActive
-                ? "border-brand-red bg-brand-red text-white"
-                : "border-slate-200 bg-white text-slate-600 hover:border-brand-red/40 hover:text-brand-red"
-            )}
-            onClick={restoreUpdatedSort}
-          >
-            Updated {isUpdatedSortActive ? (sort.dir === "asc" ? "↑" : "↓") : null}
-          </button>
+          {/* D-15 (Codex #564): the updated_at quick-sort is not the outcome axis, so
+              it is hidden in outcome mode (Newest/Oldest already order by the outcome date). */}
+          {outcomeDateAxis ? null : (
+            <button
+              type="button"
+              className={cn(
+                "rounded-full border px-3 py-1.5 text-xs font-black uppercase tracking-[0.12em]",
+                isUpdatedSortActive
+                  ? "border-brand-red bg-brand-red text-white"
+                  : "border-slate-200 bg-white text-slate-600 hover:border-brand-red/40 hover:text-brand-red"
+              )}
+              onClick={restoreUpdatedSort}
+            >
+              Updated {isUpdatedSortActive ? (sort.dir === "asc" ? "↑" : "↓") : null}
+            </button>
+          )}
         </div>
       </div>
       </>
