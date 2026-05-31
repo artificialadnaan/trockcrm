@@ -63,15 +63,24 @@ async function loserMoves(
       params.push(target.discriminatorValue);
       discr = ` AND ${q(target.discriminatorColumn)} = $${params.length}`;
     }
-    const sql = `SELECT id::text AS id FROM ${q(schema)}.${q(target.table)} WHERE ${q(target.column)} = $1${discr}`;
-    const res = await client.query(sql, params);
-    const ids = res.rows.map((r) => r.id as string);
-    moves.push({
-      key: target.key,
-      table: target.table,
-      count: ids.length,
-      ids: INCLUDE_IDS ? ids.slice(0, MAX_IDS) : [],
-    });
+    const where = `WHERE ${q(target.column)} = $1${discr}`;
+    // COUNT(*) for the total -- never materialize every id just to size it.
+    const countRes = await client.query(
+      `SELECT count(*)::int AS n FROM ${q(schema)}.${q(target.table)} ${where}`,
+      params
+    );
+    const count = countRes.rows[0].n as number;
+    let ids: string[] = [];
+    if (INCLUDE_IDS && count > 0) {
+      // Capped sample only.
+      const sampleParams = [...params, MAX_IDS];
+      const idRes = await client.query(
+        `SELECT id::text AS id FROM ${q(schema)}.${q(target.table)} ${where} LIMIT $${sampleParams.length}`,
+        sampleParams
+      );
+      ids = idRes.rows.map((r) => r.id as string);
+    }
+    moves.push({ key: target.key, table: target.table, count, ids });
   }
   return moves;
 }
@@ -82,8 +91,8 @@ async function previewSchema(client: pg.Client, schema: string): Promise<Cluster
             hubspot_id AS "hubspotId", hubspot_company_id AS "hubspotCompanyId",
             procore_id AS "procoreId", industry::text AS industry, region, category::text AS category,
             created_at AS "createdAt",
-            (SELECT count(*)::int FROM ${q(schema)}.deals d WHERE d.company_id = c.id) AS "dealCount",
-            (SELECT count(*)::int FROM ${q(schema)}.contacts ct WHERE ct.company_id = c.id) AS "contactCount"
+            (SELECT count(*)::int FROM ${q(schema)}.deals d WHERE d.company_id = c.id AND d.is_test_data = false) AS "dealCount",
+            (SELECT count(*)::int FROM ${q(schema)}.contacts ct WHERE ct.company_id = c.id AND ct.is_test_data = false) AS "contactCount"
      FROM ${q(schema)}.companies c
      WHERE c.is_active = true AND c.is_test_data = false`
   );

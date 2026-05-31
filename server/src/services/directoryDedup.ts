@@ -798,7 +798,8 @@ export async function mergeDirectoryEntities(
       const written = await (tenantDb as any)
         .update(companies)
         .set({ [field]: value })
-        .where(and(eq(companies.id, winnerId), sql`${column} IS NULL`))
+        // Match the planner's emptiness semantics (hasText): NULL or blank/whitespace.
+        .where(and(eq(companies.id, winnerId), sql`(${column} IS NULL OR btrim(${column}::text) = '')`))
         .returning({ id: companies.id });
       if (written.length > 0) {
         appliedReconciled[field] = value;
