@@ -159,6 +159,20 @@ describe("applyBoardVisibilityDefaults (the under-kanban list mirrors the board 
     expect(result.stageIds).toEqual(["opp-standard", "opp-service"]);
   });
 
+  it("unions ALL families that contain the picked id (a stage in two canonical columns expands to both — never under-shows) (Codex #589 P1)", () => {
+    // The route-dependent estimating stage lands in both the standard and service estimating columns.
+    const familyBoard = {
+      defaultStageIds: ["est-shared", "est-service-only", "s-won"],
+      terminalStageIds: ["s-won"],
+      stageIdFamilies: [["est-shared"], ["est-shared", "est-service-only"]],
+    };
+    const result = applyBoardVisibilityDefaults(
+      filterBarValueToDealFilters({ stageIds: ["est-shared"] }),
+      familyBoard
+    );
+    expect(result.stageIds).toEqual(["est-shared", "est-service-only"]);
+  });
+
   it("keeps the explicit pick unexpanded when the mount provides no stageIdFamilies (opt-in; /pipeline stays unchanged)", () => {
     const result = applyBoardVisibilityDefaults(
       filterBarValueToDealFilters({ stageIds: ["opp-standard"] }),

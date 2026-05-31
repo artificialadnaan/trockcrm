@@ -1,5 +1,32 @@
 import { describe, expect, it } from "vitest";
-import { buildCanonicalDealBoardColumns } from "./canonical-deal-board";
+import { buildCanonicalDealBoardColumns, buildCanonicalDealStageIdFamilies } from "./canonical-deal-board";
+
+describe("buildCanonicalDealStageIdFamilies (explicit stage pick → board column's full membership, Codex #589 P1)", () => {
+  it("groups CROSS-slug aliases that normalize to the same canonical column (contract_signed + service_contract_signed → contract)", () => {
+    const families = buildCanonicalDealStageIdFamilies([
+      { id: "contract-standard", slug: "contract_signed" },
+      { id: "contract-service", slug: "service_contract_signed" },
+    ]);
+    const contractFamily = families.find((ids) => ids.includes("contract-standard"));
+    expect(contractFamily).toEqual(expect.arrayContaining(["contract-standard", "contract-service"]));
+    expect(contractFamily).toHaveLength(2);
+  });
+
+  it("groups all Won aliases into one family and all Lost aliases into another (terminal columns)", () => {
+    const families = buildCanonicalDealStageIdFamilies([
+      { id: "won-canonical", slug: "won" },
+      { id: "won-closed", slug: "closed_won" },
+      { id: "won-prod", slug: "sent_to_production" },
+      { id: "lost-canonical", slug: "lost" },
+      { id: "lost-closed", slug: "closed_lost" },
+    ]);
+    const wonFamily = families.find((ids) => ids.includes("won-canonical"));
+    const lostFamily = families.find((ids) => ids.includes("lost-canonical"));
+    expect(wonFamily).toEqual(expect.arrayContaining(["won-canonical", "won-closed", "won-prod"]));
+    expect(lostFamily).toEqual(expect.arrayContaining(["lost-canonical", "lost-closed"]));
+    expect(wonFamily).not.toContain("lost-canonical"); // Won and Lost are distinct columns
+  });
+});
 
 describe("buildCanonicalDealBoardColumns", () => {
   it("uses current bid value instead of awarded_amount when deriving a missing backend aggregate", () => {

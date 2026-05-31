@@ -10,7 +10,7 @@ import { USD_COMPACT } from "@/components/shared/formatters";
 import { useDealBoard, type Deal, type DealBoardColumn } from "@/hooks/use-deals";
 import { usePipelineStages, useRegions, useProjectTypes } from "@/hooks/use-pipeline-config";
 import { useTaskAssignees } from "@/hooks/use-task-assignees";
-import { buildCanonicalDealBoardColumns } from "@/lib/canonical-deal-board";
+import { buildCanonicalDealBoardColumns, buildCanonicalDealStageIdFamilies } from "@/lib/canonical-deal-board";
 import { isBoardVisibleStage, DEAL_LIST_SORT_OPTIONS } from "@/components/deals/deals-filterbar-adapter";
 import type { FilterDimension } from "@/components/filters/filter-bar";
 import { useAuth } from "@/lib/auth";
@@ -859,9 +859,12 @@ function DealListPageContent({ role, userId }: { role: string; userId: string })
       terminalStageIds: visibleStageGroups
         .filter((option) => isTerminalOutcomeSlug(option.slug))
         .flatMap((option) => option.ids),
-      // Each slug's full sibling-id set, so an EXPLICIT stage pick (the dropdown offers one canonical id
-      // per slug) expands to every workflow-family id and never under-shows sibling deals (Codex #589 P1).
-      stageIdFamilies: visibleStageGroups.map((option) => option.ids),
+      // Sibling-id families for EXPLICIT stage picks, grouped by the board's CANONICAL slug
+      // (normalizeDealStageSlug) — NOT the raw stage slug. The dropdown offers one canonical id per board
+      // column; without canonical grouping a pick of e.g. "Contract" would expand only to its raw-slug
+      // group and miss the alias family (service_contract_signed, Won/Lost aliases), so getDeals' exact
+      // stage_id IN (...) would under-show the deals that board column represents (Codex #589 P1).
+      stageIdFamilies: buildCanonicalDealStageIdFamilies(stages),
     };
   }, [stages]);
   const columns = useMemo(

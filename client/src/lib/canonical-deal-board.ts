@@ -85,6 +85,37 @@ function dedupeDealsById<T extends { id: string }>(deals: T[]): T[] {
   return result;
 }
 
+/**
+ * Group raw stage ids into the canonical board columns they belong to (Codex #589 P1). Mirrors
+ * buildCanonicalDealBoardColumns' membership EXACTLY: a stage joins the canonical column its slug
+ * normalizes to under EITHER workflow route (the `|| service` OR above), so cross-slug aliases that
+ * the board collapses into one column share one family — contract_signed + service_contract_signed →
+ * "contract"; every Won/Lost alias → its terminal column. The stage OPTIONS the FilterBar shows carry
+ * only ONE canonical id per column, so the list expands an explicit pick to its full family before
+ * querying — otherwise getDeals' exact `stage_id IN (...)` would under-show the sibling-family deals the
+ * board column represents. Returns one id-array per canonical slug (a stage that normalizes to two
+ * canonical slugs — only the route-dependent estimating pair — appears in both, so a pick never
+ * under-shows).
+ */
+export function buildCanonicalDealStageIdFamilies(
+  stages: Array<Pick<DealStageLike, "id" | "slug">>
+): string[][] {
+  const byCanonical = new Map<string, string[]>();
+  for (const stage of stages) {
+    const canonicalSlugs = new Set(
+      [normalizeDealStageSlug(stage.slug, "normal"), normalizeDealStageSlug(stage.slug, "service")].filter(
+        (value): value is NonNullable<typeof value> => value != null
+      )
+    );
+    for (const slug of canonicalSlugs) {
+      const ids = byCanonical.get(slug) ?? [];
+      if (!ids.includes(stage.id)) ids.push(stage.id);
+      byCanonical.set(slug, ids);
+    }
+  }
+  return [...byCanonical.values()];
+}
+
 export function buildCanonicalDealBoardColumns(
   rawColumns: DealBoardColumn[] | null | undefined,
   stages: DealStageLike[]

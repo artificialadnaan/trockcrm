@@ -1261,22 +1261,24 @@ describe("DealListPage", () => {
     expect(props.filterBar.dimensions).not.toContain("rep");
   });
 
-  it("passes the stage sibling families to the base list so an explicit stage pick includes every workflow-family id (Codex #589 P1)", () => {
+  it("passes CANONICAL stage sibling families (cross-slug aliases grouped by board column) so an explicit pick includes every member id (Codex #589 P1)", () => {
+    // contract_signed + service_contract_signed are DIFFERENT raw slugs the board collapses into the one
+    // canonical "Contract" column. The family must group them together (raw-slug grouping would split
+    // them), or selecting Contract under-shows the service-contract deals.
     mocks.usePipelineStagesMock.mockReturnValue({
       loading: false,
       error: null,
       stages: [
-        { id: "opp-standard", name: "Opportunity", slug: "opportunity", displayOrder: 1, isTerminal: false },
-        { id: "opp-service", name: "Opportunity", slug: "opportunity", displayOrder: 1, isTerminal: false },
+        { id: "contract-standard", name: "Contract", slug: "contract_signed", displayOrder: 5, isTerminal: false },
+        { id: "contract-service", name: "Contract", slug: "service_contract_signed", displayOrder: 5, isTerminal: false },
       ],
     });
     renderPage("/deals?scope=mine", "director");
     const props = mocks.dealsListSectionMock.mock.calls[mocks.dealsListSectionMock.mock.calls.length - 1][0] as {
       filterBar: { stageIdFamilies?: string[][] };
     };
-    expect(props.filterBar.stageIdFamilies).toEqual(
-      expect.arrayContaining([expect.arrayContaining(["opp-standard", "opp-service"])])
-    );
+    const contractFamily = props.filterBar.stageIdFamilies?.find((ids) => ids.includes("contract-standard"));
+    expect(contractFamily).toEqual(expect.arrayContaining(["contract-standard", "contract-service"]));
   });
 
   it("keeps the LEGACY list (no FilterBar) on drill-down views — those stay YELLOW's surface", () => {

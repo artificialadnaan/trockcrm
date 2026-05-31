@@ -105,10 +105,20 @@ export function applyBoardVisibilityDefaults(
     const explicit = Array.isArray(next.stageIds) ? next.stageIds : [];
     // Expand each explicit canonical pick to its full sibling workflow-family before intersecting, so a
     // single canonical id (all the board options carry) queries every family stage and never under-shows
-    // sibling-family deals — matching the legacy grouped filter (Codex #589 P1). Opt-in via stageIdFamilies;
-    // unknown ids and family-less mounts pass through unchanged. A Set de-dupes overlapping picks.
+    // sibling-family deals — matching the board column's membership (Codex #589 P1). The families are keyed
+    // by the board's CANONICAL slug (normalizeDealStageSlug), so cross-slug aliases (contract_signed +
+    // service_contract_signed → contract; Won/Lost aliases) resolve together. Union ALL families that
+    // contain the id — the route-dependent estimating stage lands in two columns, so unioning never
+    // under-shows. Opt-in via stageIdFamilies; unknown ids and family-less mounts pass through unchanged.
     const expanded = board.stageIdFamilies
-      ? [...new Set(explicit.flatMap((id) => board.stageIdFamilies!.find((family) => family.includes(id)) ?? [id]))]
+      ? [
+          ...new Set(
+            explicit.flatMap((id) => {
+              const matches = board.stageIdFamilies!.filter((family) => family.includes(id));
+              return matches.length > 0 ? matches.flat() : [id];
+            })
+          ),
+        ]
       : explicit;
     const intersected = expanded.filter((id) => visible.includes(id));
     next.stageIds = intersected.length > 0 ? intersected : visible;
