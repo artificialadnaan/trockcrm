@@ -369,6 +369,26 @@ describe("RepDashboardPage", () => {
     expect(html).toContain("href=\"/deals?filter=active_pipeline&amp;period=ytd&amp;scope=mine\"");
   });
 
+  it("wires the charts toolbar control to the reports gallery instead of a dead button", () => {
+    const html = renderDashboard();
+
+    // The header chart icon now navigates to the real /reports gallery (a Link),
+    // not an inert button with a lying aria-label.
+    expect(html).toContain('href="/reports"');
+    expect(html).toContain('aria-label="View reports"');
+    expect(html).not.toContain('aria-label="Open charts"');
+  });
+
+  it("drops the notifications bell from the dashboard header (the Topbar owns it)", () => {
+    const html = renderDashboard();
+
+    // The old non-functional bell button (and its fake overdue dot) is gone, and we do
+    // NOT mount a second NotificationCenter here — AppShell's Topbar already provides the
+    // canonical bell on every viewport, so a page-level one would diverge in unread state.
+    expect(html).not.toContain('aria-label="Open notifications"');
+    expect(html).not.toContain('aria-label="Notifications"');
+  });
+
   it("TimeRangeTabs default to YTD", () => {
     const html = renderDashboard();
 
