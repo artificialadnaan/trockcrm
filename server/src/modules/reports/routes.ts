@@ -69,6 +69,8 @@ import {
   type MondayShowcaseEvidenceOptions,
 } from "./monday-showcase-service.js";
 import type { ProjectionBand } from "./foundations.js";
+import { getAtRiskWatchlist } from "./at-risk-service.js";
+import { getRepPackData } from "./rep-pack-service.js";
 
 const router = Router();
 const VALID_REPORT_FREQUENCIES = ["daily", "weekly", "biweekly", "monthly", "quarterly"] as const;
@@ -896,6 +898,38 @@ router.get("/monday-showcase/evidence", requireDirector, async (req, res, next) 
   try {
     const options = parseShowcaseEvidenceParams(req.query as Record<string, unknown>);
     const data = await getMondayShowcaseEvidence(req.tenantDb!, options);
+    await req.commitTransaction!();
+    res.json({ data });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// Reports Part 4 -- A·3 At-Risk & Value-at-Stake Watchlist (the forecast blind spots; M − N).
+router.get("/at-risk", requireDirector, async (req, res, next) => {
+  try {
+    const repIdRaw = pickQueryValue(req.query.repId);
+    let repId: string | null | undefined;
+    if (repIdRaw === undefined) repId = undefined;
+    else if (repIdRaw === UNASSIGNED_SENTINEL) repId = null;
+    else repId = requireUuid(repIdRaw, "repId");
+    const data = await getAtRiskWatchlist(req.tenantDb!, { repId });
+    await req.commitTransaction!();
+    res.json({ data });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// Reports Part 4 -- B·1 Rep 1:1 Pack (one rep's reconciling slice + 8-week trend). repId optional (the
+// service defaults to the top rep by closed value); a 1:1 pack is for a named rep, so no Unassigned bucket.
+router.get("/rep-pack", requireDirector, async (req, res, next) => {
+  try {
+    const repIdRaw = pickQueryValue(req.query.repId);
+    const repId = repIdRaw === undefined ? undefined : requireUuid(repIdRaw, "repId");
+    const modeRaw = pickQueryValue(req.query.mode);
+    const mode = modeRaw === "completed" ? "completed" : "to_date";
+    const data = await getRepPackData(req.tenantDb!, { repId, mode });
     await req.commitTransaction!();
     res.json({ data });
   } catch (err) {

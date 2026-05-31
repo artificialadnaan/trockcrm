@@ -1,5 +1,5 @@
 import { useMemo, useState, type ReactNode } from "react";
-import { TrendingUp, TrendingDown, Minus, ArrowUpRight } from "lucide-react";
+import { ArrowUpRight } from "lucide-react";
 import {
   PROJECTION_BAND_LABEL,
   type MondayShowcaseData,
@@ -7,37 +7,14 @@ import {
   type ProjectionLadder,
   type RepShowcaseRow,
   type EvidenceMetric,
-  type ProjectionBand,
 } from "./types";
 import { DrillNumber, DRILL_UNDERLINE } from "./drill";
+import { usd, int, signed, ACCENT, BAND_BAR, DeltaChip, Sparkline, type AccentKey } from "../evidence-kit";
 
 // Every variant below renders a slice of the SAME payload -- so Won/Sent/Estimated/Projection figures
 // are identical across all of them by construction (locked server-side by the reconciliation test). Every
 // number is wrapped in <DrillNumber> so a click opens the EXACT records behind it (Reports Part 3).
-
-const usd = (n: number) =>
-  n.toLocaleString("en-US", { style: "currency", currency: "USD", maximumFractionDigits: 0 });
-const int = (n: number) => n.toLocaleString("en-US");
-const signed = (n: number) => (n > 0 ? `+${int(n)}` : int(n));
-
-// Semantic palette: one accent per department/metric, reused everywhere so the eye learns the colors.
-// Won = emerald (money in), Sent = sky (in flight), Estimating = violet (upstream), Collected = slate (deferred).
-type AccentKey = "estimating" | "sent" | "won" | "collected" | "leads";
-const ACCENT: Record<AccentKey, { text: string; soft: string; bar: string; ring: string; grad: string }> = {
-  estimating: { text: "text-violet-700", soft: "bg-violet-50", bar: "bg-violet-500", ring: "ring-violet-200", grad: "from-violet-50" },
-  sent: { text: "text-sky-700", soft: "bg-sky-50", bar: "bg-sky-500", ring: "ring-sky-200", grad: "from-sky-50" },
-  won: { text: "text-emerald-700", soft: "bg-emerald-50", bar: "bg-emerald-500", ring: "ring-emerald-200", grad: "from-emerald-50" },
-  collected: { text: "text-slate-400", soft: "bg-slate-50", bar: "bg-slate-300", ring: "ring-slate-200", grad: "from-slate-50" },
-  leads: { text: "text-amber-700", soft: "bg-amber-50", bar: "bg-amber-500", ring: "ring-amber-200", grad: "from-amber-50" },
-};
-
-// Projection horizon colors: near = warm/urgent through far = cool.
-const BAND_BAR: Record<ProjectionBand, string> = {
-  "0_30": "bg-emerald-500",
-  "31_60": "bg-sky-500",
-  "61_90": "bg-amber-500",
-  beyond_90: "bg-slate-400",
-};
+// Palette + formatters + DeltaChip/Sparkline live in ../evidence-kit (shared with the Part-4 views).
 
 // A department key maps to its evidence metric (the "estimating" department is the "estimated" cohort).
 const DEPT_TO_METRIC: Record<"estimating" | "sent" | "won", EvidenceMetric> = {
@@ -45,55 +22,6 @@ const DEPT_TO_METRIC: Record<"estimating" | "sent" | "won", EvidenceMetric> = {
   sent: "sent",
   won: "won",
 };
-
-function DeltaChip({ delta, suffix = "WoW" }: { delta: number | null; suffix?: string }) {
-  if (delta == null) return null;
-  const up = delta > 0;
-  const down = delta < 0;
-  const tone = up
-    ? "bg-emerald-50 text-emerald-700 ring-emerald-200"
-    : down
-      ? "bg-rose-50 text-rose-700 ring-rose-200"
-      : "bg-slate-100 text-slate-500 ring-slate-200";
-  const Icon = up ? TrendingUp : down ? TrendingDown : Minus;
-  return (
-    <span className={`inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[11px] font-semibold ring-1 ${tone}`}>
-      <Icon className="h-3 w-3" />
-      {signed(delta)} {suffix}
-    </span>
-  );
-}
-
-function Sparkline({
-  values,
-  spikeIndex,
-  barClass = "bg-sky-400",
-  highlightLast = false,
-}: {
-  values: number[];
-  spikeIndex?: number;
-  barClass?: string;
-  highlightLast?: boolean;
-}) {
-  const max = Math.max(1, ...values);
-  const lastIdx = values.length - 1;
-  return (
-    <div className="flex h-12 items-end gap-1" aria-hidden>
-      {values.map((v, i) => {
-        const isSpike = spikeIndex === i;
-        const isLast = highlightLast && i === lastIdx;
-        return (
-          <div
-            key={i}
-            title={isSpike ? `${v} (backfill spike — excluded from averages)` : String(v)}
-            className={`w-2.5 rounded-t transition-all ${isSpike ? "bg-amber-400" : barClass} ${isLast ? "opacity-100 ring-2 ring-slate-300 ring-offset-1" : "opacity-80"}`}
-            style={{ height: `${Math.max(3, (v / max) * 48)}px` }}
-          />
-        );
-      })}
-    </div>
-  );
-}
 
 function basisLabel(metric: { value: { basisLabel: string } | null }) {
   return metric.value?.basisLabel ?? "";

@@ -9,7 +9,9 @@ import {
   Gauge,
   LineChart,
   PieChart,
+  ShieldAlert,
   TrendingUp,
+  UserRound,
   Users,
 } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
@@ -31,14 +33,32 @@ type ReportCard = {
 
 const reportCategories: Array<{ category: string; description: string; reports: ReportCard[] }> = [
   {
-    category: "Monday Showcase",
-    description: "Part 2 — many presentations, one source of truth (Won/Sent/Estimated/projection reconcile across every layout).",
+    category: "Showcase & Forecast",
+    description: "Evidence-backed exec views — one source of truth, and every figure drills to the exact records behind it.",
     reports: [
       {
         name: "Monday Showcase",
-        description: "8 variants (3 Report A + 4 Report B + exec hero) over identical canonical numbers — switch to compare.",
+        description: "8 variants (3 Report A + 4 Report B + exec hero) over identical canonical numbers — click any figure for its records.",
         icon: BarChart3,
         path: "/reports/monday-showcase",
+      },
+      {
+        name: "Forecast Confidence Board",
+        description: "The projection ladder made trustworthy — how much of the open book even has a maintained close date.",
+        icon: Gauge,
+        path: "/reports/forecast-confidence",
+      },
+      {
+        name: "At-Risk Watchlist",
+        description: "The forecast's blind spots: open deals with no maintained close date, or one already past.",
+        icon: ShieldAlert,
+        path: "/reports/at-risk",
+      },
+      {
+        name: "Rep 1:1 Pack",
+        description: "One rep across the board — Won/Sent/projection/leads + an 8-week trend, all drillable.",
+        icon: UserRound,
+        path: "/reports/rep-pack",
       },
     ],
   },

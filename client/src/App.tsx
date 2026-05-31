@@ -46,6 +46,9 @@ import { PortfolioLoadPage } from "@/pages/reports/portfolio-load-page";
 import { ProjectReadinessPage } from "@/pages/reports/project-readiness-page";
 import { WorkflowBottlenecksPage } from "@/pages/reports/workflow-bottlenecks-page";
 import { MondayShowcasePage } from "@/pages/reports/monday-showcase-page";
+import { ForecastConfidencePage } from "@/pages/reports/forecast-confidence-page";
+import { AtRiskPage } from "@/pages/reports/at-risk-page";
+import { RepPackPage } from "@/pages/reports/rep-pack-page";
 import { SalesReviewPage } from "@/pages/sales-review/sales-review-page";
 import { ProjectsPage } from "@/pages/projects/projects-page";
 import { ProcoreSyncPage } from "@/pages/admin/procore-sync-page";
@@ -242,6 +245,30 @@ export function App() {
                 element={(
                   <RequireRole allowedRoles={["admin", "director"]}>
                     <MondayShowcasePage />
+                  </RequireRole>
+                )}
+              />
+              <Route
+                path="/reports/forecast-confidence"
+                element={(
+                  <RequireRole allowedRoles={["admin", "director"]}>
+                    <ForecastConfidencePage />
+                  </RequireRole>
+                )}
+              />
+              <Route
+                path="/reports/at-risk"
+                element={(
+                  <RequireRole allowedRoles={["admin", "director"]}>
+                    <AtRiskPage />
+                  </RequireRole>
+                )}
+              />
+              <Route
+                path="/reports/rep-pack"
+                element={(
+                  <RequireRole allowedRoles={["admin", "director"]}>
+                    <RepPackPage />
                   </RequireRole>
                 )}
               />

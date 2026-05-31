@@ -393,8 +393,11 @@ export function buildLeadStatusSql(): SQL {
   `;
 }
 
-/** 8-week Sunday-anchored trend of Est/Sent stage entries (F1 bucket; F5 distinct deal). */
-export function buildWeeklyCohortTrendSql(fromWeekStart: string, toDate: string): SQL {
+/**
+ * 8-week Sunday-anchored trend of Est/Sent stage entries (F1 bucket; F5 distinct deal). An optional repId
+ * scopes the trend to one rep (used by the Rep 1:1 Pack); undefined = office-wide (the showcase).
+ */
+export function buildWeeklyCohortTrendSql(fromWeekStart: string, toDate: string, repId?: string | null): SQL {
   const weekStart = sundayWeekBucketSql("dsh.created_at");
   return sql`
     SELECT ${weekStart} AS week_start,
@@ -405,7 +408,7 @@ export function buildWeeklyCohortTrendSql(fromWeekStart: string, toDate: string)
     JOIN ${deals} d ON d.id = dsh.deal_id
     WHERE COALESCE(d.is_test_data, false) = false
       AND ${aliasedReportableDealFilterSql("d")}
-      AND ${ctDateInWindowSql("dsh.created_at", fromWeekStart, toDate)}
+      AND ${ctDateInWindowSql("dsh.created_at", fromWeekStart, toDate)}${repScopeSql("d", repId)}
     GROUP BY ${weekStart}
     ORDER BY ${weekStart}
   `;
@@ -433,6 +436,40 @@ export function eightWeekStartsEndingAt(sundayFrom: string): string[] {
   return Array.from({ length: 8 }, (_, i) => shiftIsoDays(sundayFrom, -7 * (7 - i)));
 }
 
+/**
+ * The 8-week Sunday-anchored trend (estimating/sent/won counts), zero-filled to exactly 8 buckets ending
+ * at the current week. Shared by the office showcase (repId undefined) and the Rep 1:1 Pack (one rep, B·1).
+ * F4: the backfill-spike week is flagged-but-shown. The CURRENT (in-progress) week's Won is capped at `to`
+ * so it uses the exact same window as the headline Won (otherwise a later-in-week Won would break the tie).
+ */
+export async function computeWeeklyTrend(
+  tenantDb: TenantDb,
+  { from, to, repId }: { from: string; to: string; repId?: string }
+): Promise<ShowcaseWeek[]> {
+  const trendFrom = shiftIsoDays(from, -7 * 7); // 7 prior weeks + the current one
+  const trendRows = await tenantDb.execute(buildWeeklyCohortTrendSql(trendFrom, to, repId));
+  const trendByWeek = new Map<string, { estimating: number; sent: number }>();
+  for (const r of rowsFromExecute<{ week_start: string; estimating: unknown; sent: unknown }>(trendRows)) {
+    trendByWeek.set(String(r.week_start).slice(0, 10), { estimating: num(r.estimating), sent: num(r.sent) });
+  }
+  const weekStarts = eightWeekStartsEndingAt(from);
+  const weeklyTrend: ShowcaseWeek[] = [];
+  for (const weekStart of weekStarts) {
+    const cohort = trendByWeek.get(weekStart) ?? { estimating: 0, sent: 0 };
+    const weekEnd = shiftIsoDays(weekStart, 6);
+    const cappedEnd = weekEnd < to ? weekEnd : to;
+    const wonWeek = await getWonCloseSummary(tenantDb, { from: weekStart, to: cappedEnd, repId });
+    weeklyTrend.push({
+      weekStart,
+      estimating: cohort.estimating,
+      sent: cohort.sent,
+      won: wonWeek.count,
+      spikeExcluded: weekStart === BACKFILL_SPIKE_WEEK_START,
+    });
+  }
+  return weeklyTrend;
+}
+
 function emptyRepProjection(): RepProjection {
   return { bands: projectionBandKeys().map((band) => ({ band, count: 0, value: 0 })), coverage: { n: 0, m: 0 } };
 }
@@ -454,10 +491,8 @@ export async function getMondayShowcaseData(
   // last completed week (for the WoW delta chip)
   const lastWeekFrom = shiftIsoDays(from, -7);
   const lastWeekTo = shiftIsoDays(from, -1);
-  // 8-week trend window: 7 prior weeks + the current one
-  const trendFrom = shiftIsoDays(from, -7 * 7);
 
-  const [wonSummary, repWonRows, lastWonSummary, sentRows, estimatedRows, lastSentRows, lastEstRows, projBandRows, projCovRows, leadRows, trendRows, repNameRows] =
+  const [wonSummary, repWonRows, lastWonSummary, sentRows, estimatedRows, lastSentRows, lastEstRows, projBandRows, projCovRows, leadRows, repNameRows] =
     await Promise.all([
       getWonCloseSummary(tenantDb, { from, to }),
       getCanonicalRepWonSummary(tenantDb, { from, to }),
@@ -469,7 +504,6 @@ export async function getMondayShowcaseData(
       tenantDb.execute(buildProjectionBandsSql()),
       tenantDb.execute(buildProjectionCoverageSql()),
       tenantDb.execute(buildLeadStatusSql()),
-      tenantDb.execute(buildWeeklyCohortTrendSql(trendFrom, to)),
       tenantDb.execute(
         sql`SELECT ${users.id} AS id, ${users.displayName} AS name FROM ${users}`
       ),
@@ -539,34 +573,9 @@ export async function getMondayShowcaseData(
     leadStatus.set(r.rep_id, list);
   }
 
-  // 8-week trend. Generate EVERY Sunday-Saturday week in the window (zero-filled) so weeklyTrend always
-  // has exactly 8 buckets ending at the current week -- a quiet week must read as 0, not be omitted (else
-  // the "current week" bar would point at the last non-empty week). F4: the 2026-05-17 backfill spike
-  // week is flagged-but-shown so downstream averages exclude it.
-  const trendByWeek = new Map<string, { estimating: number; sent: number }>();
-  for (const r of rowsFromExecute<{ week_start: string; estimating: unknown; sent: unknown }>(trendRows)) {
-    trendByWeek.set(String(r.week_start).slice(0, 10), { estimating: num(r.estimating), sent: num(r.sent) });
-  }
-  // 8 Sunday week-starts ending at `from` (this period's Sunday): [from-49 .. from-7, from].
-  const weekStarts = eightWeekStartsEndingAt(from);
-  const weeklyTrend: ShowcaseWeek[] = [];
-  for (const weekStart of weekStarts) {
-    const cohort = trendByWeek.get(weekStart) ?? { estimating: 0, sent: 0 };
-    // Cap the week's Won bucket at the period's `to` so the CURRENT (in-progress) week's Won bar uses the
-    // exact same {from, to} as the exec-hero/department Won -- otherwise a Won deal later in this Sun-Sat
-    // week would show in the A3 "this week" bar but not the headline, breaking reconciliation. (Past
-    // weeks: weekEnd <= to, so unchanged.)
-    const weekEnd = shiftIsoDays(weekStart, 6);
-    const cappedEnd = weekEnd < to ? weekEnd : to;
-    const wonWeek = await getWonCloseSummary(tenantDb, { from: weekStart, to: cappedEnd });
-    weeklyTrend.push({
-      weekStart,
-      estimating: cohort.estimating,
-      sent: cohort.sent,
-      won: wonWeek.count,
-      spikeExcluded: weekStart === BACKFILL_SPIKE_WEEK_START,
-    });
-  }
+  // 8-week office trend (zero-filled to exactly 8 buckets; current week's Won capped at `to`). Shared
+  // helper so the Rep 1:1 Pack computes its per-rep trend the identical way.
+  const weeklyTrend = await computeWeeklyTrend(tenantDb, { from, to });
   const sparklines = {
     estimating: weeklyTrend.map((w) => w.estimating),
     sent: weeklyTrend.map((w) => w.sent),
