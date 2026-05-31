@@ -9,6 +9,7 @@ import {
   getTerminalStageOutcome,
   isTerminalStage,
   numericDealValue,
+  resolveDatePreset,
   toDatePresetRange,
   appendPipelineTerminalDateParams,
   setTerminalDateFilterSearchParams,
@@ -151,5 +152,33 @@ describe("week-to-date (Sunday-anchored) preset", () => {
     setTerminalDateFilterSearchParams(params, "won", { preset: "wtd" });
     expect(params.get("won_preset")).toBe("wtd");
     expect(readTerminalDateFiltersFromSearchParams(params).won).toEqual({ preset: "wtd" });
+  });
+});
+
+describe("resolveDatePreset (canonical platform-wide date-preset resolver)", () => {
+  // Wed 2026-03-18; most recent Sunday is 2026-03-15 (2026-03-01 is a Sunday). All boundaries LOCAL.
+  const now = new Date(2026, 2, 18);
+
+  it("resolves every preset to a LOCAL-calendar window with an inclusive today bound", () => {
+    expect(resolveDatePreset("today", now)).toEqual({ from: "2026-03-18", to: "2026-03-18" });
+    expect(resolveDatePreset("wtd", now)).toEqual({ from: "2026-03-15", to: "2026-03-18" });
+    expect(resolveDatePreset("mtd", now)).toEqual({ from: "2026-03-01", to: "2026-03-18" });
+    expect(resolveDatePreset("qtd", now)).toEqual({ from: "2026-01-01", to: "2026-03-18" });
+    expect(resolveDatePreset("ytd", now)).toEqual({ from: "2026-01-01", to: "2026-03-18" });
+    expect(resolveDatePreset("last_month", now)).toEqual({ from: "2026-02-01", to: "2026-02-28" });
+    expect(resolveDatePreset("last_quarter", now)).toEqual({ from: "2025-10-01", to: "2025-12-31" });
+    expect(resolveDatePreset("last_year", now)).toEqual({ from: "2025-01-01", to: "2025-12-31" });
+  });
+
+  it("uses the user's LOCAL calendar day, not UTC, near a day boundary", () => {
+    // 2026-03-01 23:30 LOCAL: month-to-date must start on the local March 1 regardless of UTC offset.
+    const lateLocal = new Date(2026, 2, 1, 23, 30);
+    expect(resolveDatePreset("mtd", lateLocal)).toEqual({ from: "2026-03-01", to: "2026-03-01" });
+  });
+
+  it("is the single source toDatePresetRange delegates to (identical output)", () => {
+    for (const preset of ["wtd", "mtd", "qtd", "ytd"] as const) {
+      expect(toDatePresetRange(preset, now)).toEqual(resolveDatePreset(preset, now));
+    }
   });
 });
