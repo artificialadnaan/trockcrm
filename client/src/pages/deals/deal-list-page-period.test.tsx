@@ -27,12 +27,12 @@ describe("getDashboardPeriodDateRange week (Sunday-anchored, D-7)", () => {
 // terminal/estimate-sent range mappers must resolve it (not Number("wtd") -> NaN).
 describe("terminal date-range mappers handle the wtd preset (no NaN)", () => {
   it("getTerminalDateRange resolves wtd to the Sunday-anchored window", () => {
-    const now = new Date(Date.UTC(2026, 4, 27, 12)); // Wed (UTC); most recent Sunday = 2026-05-24
+    const now = new Date(2026, 4, 27); // Wednesday; most recent Sunday = 2026-05-24
     expect(getTerminalDateRange({ preset: "wtd" }, now)).toEqual({ from: "2026-05-24", to: "2026-05-27" });
   });
 
   it("getEstimateSentDateRange resolves wtd to the Sunday-anchored window", () => {
-    const now = new Date(Date.UTC(2026, 4, 27, 12));
+    const now = new Date(2026, 4, 27);
     expect(getEstimateSentDateRange({ preset: "wtd" }, now)).toEqual({ from: "2026-05-24", to: "2026-05-27" });
   });
 });

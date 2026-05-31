@@ -92,4 +92,15 @@ describe("normalizeStagePageQuery", () => {
       estimateSentTo: "2026-05-22",
     });
   });
+
+  it("materializes the WTD Estimate Sent preset into a Sunday-anchored stage-page window", () => {
+    vi.useFakeTimers();
+    // 2026-05-22 is a Friday; the most recent Sunday is 2026-05-17.
+    vi.setSystemTime(new Date("2026-05-22T16:00:00Z"));
+
+    expect(normalizeStagePageQuery({ estimate_sent_preset: "wtd" }).filters).toMatchObject({
+      estimateSentFrom: "2026-05-17",
+      estimateSentTo: "2026-05-22",
+    });
+  });
 });

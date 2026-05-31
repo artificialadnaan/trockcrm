@@ -138,13 +138,13 @@ export function toDatePresetRange(
 ) {
   const today = formatLocalDateParam(now);
   if (preset === "wtd") {
-    // Week-to-date, Sunday-anchored, on UTC day boundaries so "WTD" agrees platform-wide with
-    // the reporting/dashboard layer (presetToDateRange, daysAgo) and the rep-detail quick-filters
-    // (Codex review on #539). getUTCDay(): Sunday = 0. MTD/QTD/YTD keep their existing local
-    // boundaries; the broader date-basis reconciliation is tracked in .audit S5.5.
-    const start = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()));
-    start.setUTCDate(start.getUTCDate() - start.getUTCDay());
-    return { from: formatDateParam(start), to: formatDateParam(now) };
+    // Week-to-date, Sunday-anchored on the user's LOCAL calendar (their week for the Sunday
+    // weekly-won meeting), consistent with the dashboard's local period tabs (getDashboardPeriod
+    // DateRange) so all "this week" views agree. getDay(): Sunday = 0. (Decision: WTD is the
+    // user's local week, not UTC -- see PR #539 discussion / .audit S5.5.)
+    const start = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+    start.setDate(start.getDate() - start.getDay());
+    return { from: formatLocalDateParam(start), to: today };
   }
   if (preset === "mtd") {
     return { from: formatLocalDateParam(new Date(now.getFullYear(), now.getMonth(), 1)), to: today };
