@@ -28,6 +28,7 @@ import { searchPhotoUploadTargets } from "../../../src/modules/files/service.js"
 import {
   searchFieldCaptureTargets,
   assertAccessibleFieldCaptureTarget,
+  assertScopedCaptureTargetAccess,
 } from "../../../src/modules/field/projects-service.js";
 
 const T = "office_test";
@@ -43,6 +44,7 @@ const L_ROOF1 = "00000000-0000-0000-0000-0000000010a1";
 const L_ROOF2 = "00000000-0000-0000-0000-0000000010a2";
 const L_BLANK = "00000000-0000-0000-0000-0000000010a3"; // property has blank address
 const L_INACTIVE = "00000000-0000-0000-0000-0000000010a4";
+const OPP_ROOF = "00000000-0000-0000-0000-0000000030a1"; // an OPPORTUNITY (deal-table) matching "roof"
 
 let pg: PGlite;
 let tdb: never;
@@ -100,6 +102,12 @@ beforeAll(async () => {
   await pg.exec(
     `INSERT INTO ${T}.deals (id, name, deal_number, pipeline_disposition, company_id, property_id, primary_contact_id, stage_id, assigned_rep_id, description, updated_at) VALUES ${dealValues};`
   );
+  // One OPPORTUNITY (deal-table) matching "roof", owned by REP_B, OLDER than the deal
+  // flood -> a shared deal/opportunity bucket would evict it before its own UI group.
+  await pg.exec(
+    `INSERT INTO ${T}.deals (id, name, deal_number, pipeline_disposition, company_id, property_id, primary_contact_id, stage_id, assigned_rep_id, description, updated_at) VALUES
+      ('${OPP_ROOF}', 'Roof Opportunity', 'O-1', 'opportunity', '${CO}', '${PROP_ADDR}', '${CT}', '${STAGE}', '${REP_B}', 'roof opportunity', now() - interval '90 days');`
+  );
 
   tdb = drizzle(pg) as never;
 });
@@ -128,6 +136,17 @@ describe("searchPhotoUploadTargets — cross-type cap must not evict leads", () 
     const leads = targets.filter((t) => t.type === "lead");
     expect(deals.length).toBeLessThanOrEqual(30);
     expect(leads.length).toBeGreaterThanOrEqual(3);
+  });
+
+  it("returns a matching OPPORTUNITY even when the deal flood would fill the cap", async () => {
+    const { targets } = await searchPhotoUploadTargets(tdb, { search: "roof", limit: 30 });
+    const opportunityIds = targets.filter((t) => t.type === "opportunity").map((t) => t.id);
+    expect(opportunityIds).toContain(OPP_ROOF);
+  });
+
+  it("excludes INACTIVE records (they can't be attached, so must not appear)", async () => {
+    const { targets } = await searchPhotoUploadTargets(tdb, { search: "roof", limit: 30 });
+    expect(ids(targets).has(L_INACTIVE)).toBe(false);
   });
 });
 
@@ -188,5 +207,47 @@ describe("assertAccessibleFieldCaptureTarget — UNSCOPED attach (any rep attach
         userId: REP_B,
       })
     ).resolves.toEqual({ id: dealId, type: "deal" });
+  });
+});
+
+describe("assertScopedCaptureTargetAccess — SCOPED (existing-photo edits stay rep-owned)", () => {
+  it("rejects a rep accessing a lead they do NOT own (no broad cross-rep photo edits)", async () => {
+    await expect(
+      assertScopedCaptureTargetAccess(tdb, {
+        leadId: L_BLANK, // owned by REP_B
+        userRole: "rep" as never,
+        userId: REP_A,
+      })
+    ).rejects.toThrow();
+  });
+
+  it("accepts the rep who OWNS the lead", async () => {
+    await expect(
+      assertScopedCaptureTargetAccess(tdb, {
+        leadId: L_BLANK,
+        userRole: "rep" as never,
+        userId: REP_B,
+      })
+    ).resolves.toBeUndefined();
+  });
+
+  it("does not rep-gate a non-rep role (e.g. admin/director sees all)", async () => {
+    await expect(
+      assertScopedCaptureTargetAccess(tdb, {
+        leadId: L_BLANK,
+        userRole: "admin" as never,
+        userId: REP_A,
+      })
+    ).resolves.toBeUndefined();
+  });
+
+  it("rejects an inactive lead even for its owner", async () => {
+    await expect(
+      assertScopedCaptureTargetAccess(tdb, {
+        leadId: L_INACTIVE,
+        userRole: "rep" as never,
+        userId: REP_B,
+      })
+    ).rejects.toThrow();
   });
 });

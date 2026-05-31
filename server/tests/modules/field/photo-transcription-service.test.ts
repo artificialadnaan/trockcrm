@@ -7,7 +7,7 @@ const fileMocks = vi.hoisted(() => ({
 }));
 
 const projectMocks = vi.hoisted(() => ({
-  assertAccessibleFieldCaptureTarget: vi.fn(),
+  assertScopedCaptureTargetAccess: vi.fn(),
 }));
 
 const auditMocks = vi.hoisted(() => ({
@@ -31,7 +31,7 @@ vi.mock("../../../src/modules/field/projects-service.js", async () => {
   );
   return {
     ...actual,
-    assertAccessibleFieldCaptureTarget: projectMocks.assertAccessibleFieldCaptureTarget,
+    assertScopedCaptureTargetAccess: projectMocks.assertScopedCaptureTargetAccess,
   };
 });
 
@@ -63,7 +63,7 @@ describe("photo transcription service", () => {
       description: "Old caption",
     });
     fileMocks.updateFile.mockResolvedValue({ id: "photo-1", description: "Sagging stringer" });
-    projectMocks.assertAccessibleFieldCaptureTarget.mockResolvedValue({ id: "deal-1", type: "deal" });
+    projectMocks.assertScopedCaptureTargetAccess.mockResolvedValue(undefined);
     auditMocks.logPhotoEvent.mockResolvedValue(undefined);
   });
 
@@ -103,7 +103,7 @@ describe("photo transcription service", () => {
     }, "photo-1");
 
     expect(photo.id).toBe("photo-1");
-    expect(projectMocks.assertAccessibleFieldCaptureTarget).toHaveBeenCalledWith(db, {
+    expect(projectMocks.assertScopedCaptureTargetAccess).toHaveBeenCalledWith(db, {
       dealId: "deal-1",
       leadId: undefined,
       opportunityId: undefined,
@@ -130,7 +130,7 @@ describe("photo transcription service", () => {
       userRole: "field_contractor",
     }, "photo-1")).rejects.toEqual(new AppError(404, "Photo not found."));
 
-    expect(projectMocks.assertAccessibleFieldCaptureTarget).not.toHaveBeenCalled();
+    expect(projectMocks.assertScopedCaptureTargetAccess).not.toHaveBeenCalled();
   });
 
   it.each([
@@ -152,7 +152,7 @@ describe("photo transcription service", () => {
       userRole: "field_contractor",
     }, "photo-1")).rejects.toEqual(new AppError(404, "Photo not found."));
 
-    expect(projectMocks.assertAccessibleFieldCaptureTarget).not.toHaveBeenCalled();
+    expect(projectMocks.assertScopedCaptureTargetAccess).not.toHaveBeenCalled();
   });
 
   it("transcribes audio, persists the new description, and writes a photo audit event", async () => {

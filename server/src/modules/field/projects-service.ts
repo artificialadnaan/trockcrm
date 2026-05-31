@@ -289,6 +289,64 @@ export async function assertAccessibleFieldCaptureTarget(
   return { id: lead.id, type: "lead" as const };
 }
 
+/**
+ * SCOPED twin of assertAccessibleFieldCaptureTarget. The capture-target PICKER is
+ * company-wide (unscoped), but callers that authorize access to an EXISTING photo's
+ * record — transcription and tag edits via getAccessibleFieldPhoto — must stay
+ * rep-owned, so a rep can't transcribe/retag photos on another rep's record. A rep
+ * may only touch records they own; non-rep roles (admin/director) are unrestricted.
+ * Existence + is_active are still required. See .audit/trockcam-leads-not-returning.md.
+ */
+export async function assertScopedCaptureTargetAccess(
+  tenantDb: TenantDb,
+  input: { dealId?: string; leadId?: string; opportunityId?: string; userRole: UserRole; userId: string }
+): Promise<void> {
+  if ((input.dealId ? 1 : 0) + (input.leadId ? 1 : 0) + (input.opportunityId ? 1 : 0) !== 1) {
+    throw new AppError(400, "Exactly one capture target must be provided.");
+  }
+  const assertOwnedByRep = (assignedRepId: string | null) => {
+    if (input.userRole === "rep" && assignedRepId !== input.userId) {
+      throw new AppError(403, "You can only access your own records");
+    }
+  };
+
+  if (input.opportunityId) {
+    const [opportunity] = await tenantDb
+      .select({ isActive: deals.isActive, disposition: deals.pipelineDisposition, assignedRepId: deals.assignedRepId })
+      .from(deals)
+      .where(eq(deals.id, input.opportunityId))
+      .limit(1);
+    if (!opportunity || !opportunity.isActive || opportunity.disposition !== "opportunity") {
+      throw new AppError(404, "Capture target not found");
+    }
+    assertOwnedByRep(opportunity.assignedRepId);
+    return;
+  }
+
+  if (input.dealId) {
+    const [deal] = await tenantDb
+      .select({ isActive: deals.isActive, assignedRepId: deals.assignedRepId })
+      .from(deals)
+      .where(eq(deals.id, input.dealId))
+      .limit(1);
+    if (!deal || !deal.isActive) {
+      throw new AppError(404, "Capture target not found");
+    }
+    assertOwnedByRep(deal.assignedRepId);
+    return;
+  }
+
+  const [lead] = await tenantDb
+    .select({ isActive: leads.isActive, assignedRepId: leads.assignedRepId })
+    .from(leads)
+    .where(eq(leads.id, input.leadId!))
+    .limit(1);
+  if (!lead || !lead.isActive) {
+    throw new AppError(404, "Capture target not found");
+  }
+  assertOwnedByRep(lead.assignedRepId);
+}
+
 function safePhoto(photo: any, imageUrl: string | null): FieldPhoto {
   return {
     id: photo.id,

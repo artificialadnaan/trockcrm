@@ -986,6 +986,12 @@ export async function searchPhotoUploadTargets(
   // KNOWN FOLLOW-UP (not in this change): this query runs on a single office's
   // schema (search_path = office_<slug>,public), so it cannot find leads/deals in
   // OTHER offices. Cross-office search is a separate structural item (G1).
+  //
+  // Only ACTIVE records: assertAccessibleFieldCaptureTarget rejects inactive
+  // targets at attach time, so surfacing them here would let a user pick a record
+  // that cannot actually receive a photo.
+  leadConditions.push(eq(leads.isActive, true));
+  dealConditions.push(eq(deals.isActive, true));
   if (leadSearch) leadConditions.push(leadSearch);
   if (dealSearch) dealConditions.push(dealSearch);
 
@@ -1041,25 +1047,33 @@ export async function searchPhotoUploadTargets(
     .where(leadConditions.length > 0 ? and(...leadConditions) : sql`true`)
     .orderBy(...leadOrder)
     .limit(limit);
-  const dealRows = await tenantDb
-    .select({
-      id: deals.id,
-      name: deals.name,
-      dealNumber: deals.dealNumber,
-      pipelineDisposition: deals.pipelineDisposition,
-      stageName: pipelineStageConfig.name,
-      companyName: companies.name,
-      lastUpdatedAt: deals.updatedAt,
-      relevance: dealRelevance,
-    })
-    .from(deals)
-    .leftJoin(companies, eq(companies.id, deals.companyId))
-    .leftJoin(properties, eq(properties.id, deals.propertyId))
-    .leftJoin(contacts, eq(contacts.id, deals.primaryContactId))
-    .leftJoin(pipelineStageConfig, eq(pipelineStageConfig.id, deals.stageId))
-    .where(dealConditions.length > 0 ? and(...dealConditions) : sql`true`)
-    .orderBy(...dealOrder)
-    .limit(limit);
+  // Opportunities and deals are both deal-table rows but render as SEPARATE UI
+  // groups, so they get SEPARATE per-type caps below. Fetch them as two queries
+  // (not one shared LIMIT) — otherwise a flood of deals can fill the deal query's
+  // LIMIT and a matching opportunity never comes back from SQL to be shown in its
+  // own group (the same starvation that hid leads).
+  const fetchDeals = (dispositionCond: SQL) =>
+    tenantDb
+      .select({
+        id: deals.id,
+        name: deals.name,
+        dealNumber: deals.dealNumber,
+        pipelineDisposition: deals.pipelineDisposition,
+        stageName: pipelineStageConfig.name,
+        companyName: companies.name,
+        lastUpdatedAt: deals.updatedAt,
+        relevance: dealRelevance,
+      })
+      .from(deals)
+      .leftJoin(companies, eq(companies.id, deals.companyId))
+      .leftJoin(properties, eq(properties.id, deals.propertyId))
+      .leftJoin(contacts, eq(contacts.id, deals.primaryContactId))
+      .leftJoin(pipelineStageConfig, eq(pipelineStageConfig.id, deals.stageId))
+      .where(and(...dealConditions, dispositionCond))
+      .orderBy(...dealOrder)
+      .limit(limit);
+  const opportunityRows = await fetchDeals(eq(deals.pipelineDisposition, "opportunity"));
+  const dealRows = await fetchDeals(sql`${deals.pipelineDisposition} IS DISTINCT FROM 'opportunity'`);
 
   const scoredLeads = leadRows.map((row) => ({
     relevance: Number(row.relevance ?? 0),
@@ -1074,7 +1088,7 @@ export async function searchPhotoUploadTargets(
       lastUpdatedAt: row.lastUpdatedAt,
     } satisfies PhotoUploadTarget,
   }));
-  const scoredDeals = dealRows.map((row) => ({
+  const mapDealRow = (row: (typeof dealRows)[number]) => ({
     relevance: Number(row.relevance ?? 0),
     lastUpdatedAt: row.lastUpdatedAt,
     target: {
@@ -1086,18 +1100,21 @@ export async function searchPhotoUploadTargets(
       companyName: row.companyName ?? null,
       lastUpdatedAt: row.lastUpdatedAt,
     } satisfies PhotoUploadTarget,
-  }));
+  });
+  const scoredOpportunities = opportunityRows.map(mapDealRow);
+  const scoredDeals = dealRows.map(mapDealRow);
 
   // PER-TYPE cap, NOT a single cross-type slice. Deals outnumber leads ~12:1 in
   // prod, so a merged slice(0, limit) sorted by relevance/recency let deals fill
   // every slot and evicted ALL leads (the TrockCam bug — see
-  // .audit/trockcam-leads-not-returning.md). Both client pickers already render
-  // separate Leads / Opportunities / Deals groups, so capping each type to `limit`
-  // independently (leads first) guarantees any matching lead surfaces in its group
-  // regardless of deal volume, while keeping each type's payload bounded.
+  // .audit/trockcam-leads-not-returning.md). Both client pickers render separate
+  // Leads / Opportunities / Deals groups, so each type gets its OWN cap of `limit`
+  // (leads first) — any matching lead/opportunity surfaces in its group regardless
+  // of deal volume, while each type's payload stays bounded.
   const leadTargets = sortPhotoTargetsByRelevance(scoredLeads).slice(0, limit).map((item) => item.target);
+  const opportunityTargets = sortPhotoTargetsByRelevance(scoredOpportunities).slice(0, limit).map((item) => item.target);
   const dealTargets = sortPhotoTargetsByRelevance(scoredDeals).slice(0, limit).map((item) => item.target);
-  return { targets: [...leadTargets, ...dealTargets] };
+  return { targets: [...leadTargets, ...opportunityTargets, ...dealTargets] };
 }
 
 /**
