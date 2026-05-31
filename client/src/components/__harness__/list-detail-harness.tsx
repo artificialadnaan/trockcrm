@@ -1,10 +1,14 @@
-import type { ReactNode } from "react";
+import { useState, type ReactNode } from "react";
 import { ContactCard } from "@/pages/contacts/contact-list-page";
 import type { Contact } from "@/hooks/use-contacts";
 import { CompanyCard } from "@/pages/companies/company-list-page";
 import type { Company } from "@/hooks/use-companies";
 import { PropertyCard } from "@/pages/properties/property-list-page";
 import type { PropertySurface } from "@/hooks/use-properties";
+import {
+  PipelineStageSummary,
+  type PipelineStageSummaryColumn,
+} from "@/components/deals/pipeline-stage-summary";
 
 // Dev-only preview for the Contacts/Companies/Properties list+detail mobile pass.
 // Real presentational components, mock data, no backend / no auth. Served by vite
@@ -198,6 +202,27 @@ const harnessProperties: PropertySurface[] = [
   }),
 ];
 
+const harnessPipelineColumns: PipelineStageSummaryColumn[] = [
+  { stage: { id: "s-opp", name: "Opportunity" }, count: 6, totalValue: 2_100_000 },
+  { stage: { id: "s-est", name: "Estimating" }, count: 4, totalValue: 1_200_000 },
+  { stage: { id: "s-contract", name: "Contract" }, count: 2, totalValue: 880_000 },
+  { stage: { id: "s-won", name: "Won" }, count: 9, totalValue: 4_000_000 },
+  { stage: { id: "s-lost", name: "Lost" }, count: 3, totalValue: 540_000 },
+];
+
+// Interactive stand-in for the page wiring: tapping a chip toggles the highlighted stage, the way
+// the page toggles the FilterBar's `stageIds` URL param.
+function PipelineSummaryDemo() {
+  const [activeStageId, setActiveStageId] = useState<string | null>("s-est");
+  return (
+    <PipelineStageSummary
+      columns={harnessPipelineColumns}
+      activeStageId={activeStageId}
+      onSelectStage={(id) => setActiveStageId((current) => (current === id ? null : id))}
+    />
+  );
+}
+
 export function ListDetailHarness() {
   return (
     <div className="mx-auto max-w-md space-y-8 bg-[#F5F4F2] p-4 pb-12">
@@ -288,6 +313,37 @@ export function ListDetailHarness() {
             {harnessProperties.map((property) => (
               <PropertyCard key={property.id} property={property} />
             ))}
+          </div>
+        </div>
+      </Section>
+
+      <Section title="Pipeline board — collapses to a per-stage summary (<md)">
+        <div>
+          <p className="mb-1 text-[10px] font-black uppercase tracking-widest text-red-600">Before</p>
+          <div className="rounded-xl border border-dashed border-red-200 bg-white p-2">
+            <p className="mb-2 text-xs text-slate-500">
+              5 fixed <code>w-80</code> columns in an overflow-x flex row → horizontal scroll wall + drag-across-stages
+              is unusable at 390px (drag sideways):
+            </p>
+            <div className="overflow-x-auto">
+              <div className="flex w-[1080px] gap-3">
+                {harnessPipelineColumns.map((column) => (
+                  <div key={column.stage.id} className="h-28 w-80 flex-shrink-0 rounded-md border border-slate-200 bg-slate-50/70 p-3">
+                    <p className="text-[11px] font-medium uppercase tracking-wide text-slate-400">{column.stage.name}</p>
+                    <p className="mt-2 text-xl font-semibold tabular-nums text-slate-700">{column.count}</p>
+                  </div>
+                ))}
+              </div>
+            </div>
+          </div>
+        </div>
+        <div>
+          <p className="mb-1 text-[10px] font-black uppercase tracking-widest text-emerald-600">After</p>
+          <div className="rounded-xl border border-emerald-200 bg-white p-2">
+            <p className="mb-2 text-xs text-slate-500">
+              Tappable per-stage chips (name · count · value) → filter the list below; the responsive deal list leads.
+            </p>
+            <PipelineSummaryDemo />
           </div>
         </div>
       </Section>
