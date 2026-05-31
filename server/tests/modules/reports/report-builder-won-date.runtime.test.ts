@@ -132,6 +132,19 @@ describe("report-builder Won reports reconcile to the Won card", () => {
     }
   });
 
+  it("a bucket-only Won report (month dimension, no from/to) does not promise card reconciliation", async () => {
+    // periodBounded is true (so rows bucket) -> the usable-won guard drops null-won-date wins, but
+    // there is no from/to card window to compare against, so the report must NOT claim reconciliation.
+    const result = await runReportBuilder(tdb, {
+      ...admin,
+      dimensions: ["month"],
+      measures: ["total_value"],
+      filters: { stage: ALL_WON }, // full Won stages + month bucket, but NO from/to window
+    });
+    expect(result.notes?.[0]).toMatch(/will not match|no explicit/i);
+    expect(result.notes?.[0]).not.toMatch(/totals reconcile to the won card/i);
+  });
+
   it("non-Won report keeps the user's date axis (created_at)", async () => {
     const result = await runReportBuilder(tdb, {
       ...admin,

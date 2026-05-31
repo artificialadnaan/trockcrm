@@ -289,15 +289,21 @@ export async function runReportBuilder(
   const periodBounded =
     Boolean(filters.from) || Boolean(filters.to) || dimensions.some((d) => d === "month" || d === "week");
   const applyWonGuard = wonScoped && periodBounded;
-  // The report only reconciles to the (unscoped) Won card when its WHOLE scope matches the card's:
-  // every Won slug AND no narrowing the card doesn't apply (source/region/deal_type or a rep scope).
-  // Otherwise it's a legitimate subset and must NOT claim card reconciliation.
+  // The report only reconciles to the Won card (getWonCloseSummary(from, to)) when its WHOLE scope
+  // matches a card call:
+  //  - every Won slug (fullWonScope) AND no narrowing the card doesn't apply (source/region/deal_type
+  //    or a rep scope), AND
+  //  - an explicit from+to window. A bucket-only report (month/week, no from/to) is period-bounded
+  //    only so rows are bucketable — the usable-won guard then drops null-won-date wins, but there is
+  //    no card window to compare against and summing the buckets omits those deals. An all-time
+  //    report has no window either. Neither can promise card reconciliation.
   const otherNarrowing =
     Boolean(effectiveReportRepId(input)) ||
     listFilter(filters.source).length > 0 ||
     listFilter(filters.region).length > 0 ||
     listFilter(filters.deal_type).length > 0;
-  const reconcilesToCard = fullWonScope && !otherNarrowing;
+  const cardWindow = Boolean(filters.from) && Boolean(filters.to);
+  const reconcilesToCard = fullWonScope && !otherNarrowing && cardWindow;
   const dimensionEntries = dimensions.map((dimension) => ({
     key: dimension,
     expression: dimensionSql(dimension, dateFieldSql),
@@ -335,8 +341,8 @@ export async function runReportBuilder(
   const notes = wonScoped
     ? [
         reconcilesToCard
-          ? `${axisNote} Totals reconcile to the Won card.`
-          : `${axisNote} NOTE: this report is narrower than the Won card (a subset of Won stages and/or filters the card doesn't apply, e.g. source/region/deal type/rep), so its totals will NOT match the full Won card.`,
+          ? `${axisNote} Totals reconcile to the Won card for this from/to window.`
+          : `${axisNote} NOTE: this report does not match a full Won card window — it is a subset of Won stages, narrowed by a filter the card doesn't apply (source/region/deal type/rep), or has no explicit from/to period — so its totals will NOT match the Won card.`,
       ]
     : [];
   return {
