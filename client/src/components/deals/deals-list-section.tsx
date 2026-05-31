@@ -873,8 +873,11 @@ export function DealsListSection({
         `Exported first ${exportResult.maxRows.toLocaleString()} rows (${exportResult.pagesFetched} pages). Narrow filters for full export.`
       );
     }
+    // Codex #570: in outcome mode the on-screen Date column is the outcome displayDate,
+    // so the export's date column must match it (not the legacy "Last Touch"/updated axis),
+    // or the CSV won't reconcile with the drill-down it was exported from.
     const rows = [
-      ["Deal", "Project Number", "Owner", "Stage", "Days", "Value", "Last Touch"],
+      ["Deal", "Project Number", "Owner", "Stage", "Days", "Value", showOutcomeDate ? "Date" : "Last Touch"],
       ...exportResult.deals.map((deal) => {
         const displayNumber = getDealDisplayNumber(deal);
         return [
@@ -884,7 +887,7 @@ export function DealsListSection({
           deal.stageName ?? stageNameById.get(deal.stageId) ?? "",
           effectiveStageAgeDays(deal),
           getEffectiveDealValue(deal),
-          deal.lastActivityAt ?? deal.updatedAt,
+          showOutcomeDate ? getDealDisplayDate(deal) ?? "" : deal.lastActivityAt ?? deal.updatedAt,
         ];
       }),
     ];

@@ -1507,11 +1507,15 @@ describe("DealListPage", () => {
     expect(view.title).toBe("Active Pipeline");
     expect(view.subtitle).toContain("YTD");
     expect(view.boardMode).toBe("active");
+    // D-12: the active-pipeline list windows the CANONICAL outcome axis (dateFrom/dateTo
+    // -> open rows bound by stage_entered_at), not updated_at, and sorts/displays that axis.
     expect(view.listBaseFilters).toMatchObject({
-      updatedFrom: "2026-01-01",
-      updatedTo: "2026-05-08",
+      dateFrom: "2026-01-01",
+      dateTo: "2026-05-08",
     });
-    expect(view.listInitialSort).toEqual({ key: "updated_at", dir: "desc" });
+    expect(view.listBaseFilters).not.toHaveProperty("updatedFrom");
+    expect(view.listInitialSort).toEqual({ key: "display_date", dir: "desc" });
+    expect(view.listDateField).toBe("outcome");
   });
 
   it("supports today and week dashboard periods for rep drill-down links", () => {
@@ -1529,13 +1533,13 @@ describe("DealListPage", () => {
 
       expect(todayView.subtitle).toBe("Open-stage deals for Today.");
       expect(todayView.listBaseFilters).toMatchObject({
-        updatedFrom: "2026-05-08",
-        updatedTo: "2026-05-08",
+        dateFrom: "2026-05-08",
+        dateTo: "2026-05-08",
       });
       expect(weekView.subtitle).toBe("Open-stage deals for Week.");
       expect(weekView.listBaseFilters).toMatchObject({
-        updatedFrom: "2026-05-10",
-        updatedTo: "2026-05-10",
+        dateFrom: "2026-05-10",
+        dateTo: "2026-05-10",
       });
     });
   });
@@ -1632,14 +1636,17 @@ describe("DealListPage", () => {
         eyebrow: "Director drill-down",
         enableExport: true,
         scope: "all",
-        initialSort: { key: "updated_at", dir: "desc" },
+        // D-12: the embedded list filters + displays + sorts the outcome axis.
+        dateField: "outcome",
+        initialSort: { key: "display_date", dir: "desc" },
         baseFilters: expect.objectContaining({
-          updatedFrom: "2026-01-01",
-          updatedTo: "2026-05-08",
+          dateFrom: "2026-01-01",
+          dateTo: "2026-05-08",
         }),
       })
     );
-    expect(mocks.dealsListSectionMock.mock.calls[0]?.[0]).not.toHaveProperty("paginationCountSummary");
+    // The active-pipeline drill-down surfaces the active/total count summary.
+    expect(mocks.dealsListSectionMock.mock.calls[0]?.[0]).toHaveProperty("paginationCountSummary");
   });
 
   it("treats period as a separate query param in active-pipeline drill-down urls", () => {
@@ -1649,8 +1656,8 @@ describe("DealListPage", () => {
       expect.objectContaining({
         title: "Active Pipeline",
         baseFilters: expect.objectContaining({
-          updatedFrom: "2026-01-01",
-          updatedTo: "2026-05-08",
+          dateFrom: "2026-01-01",
+          dateTo: "2026-05-08",
         }),
       })
     );
