@@ -11,11 +11,7 @@ import { useDealBoard, type Deal, type DealBoardColumn } from "@/hooks/use-deals
 import { usePipelineStages, useRegions, useProjectTypes } from "@/hooks/use-pipeline-config";
 import { useTaskAssignees } from "@/hooks/use-task-assignees";
 import { buildCanonicalDealBoardColumns } from "@/lib/canonical-deal-board";
-import {
-  getBoardVisibleStageScope,
-  isBoardVisibleStage,
-  DEAL_LIST_SORT_OPTIONS,
-} from "@/components/deals/deals-filterbar-adapter";
+import { isBoardVisibleStage, DEAL_LIST_SORT_OPTIONS } from "@/components/deals/deals-filterbar-adapter";
 import type { FilterDimension } from "@/components/filters/filter-bar";
 import { useAuth } from "@/lib/auth";
 import { getEffectiveDealValue } from "@trock-crm/shared/types";
@@ -39,7 +35,7 @@ import {
 import type { PipelineScope } from "@/lib/pipeline-scope";
 import { KanbanScrollColumn } from "@/components/deals/kanban-scroll-column";
 import { DecoratedKanbanCard } from "@/components/deals/decorated-kanban-card";
-import { DealsListSection } from "@/components/deals/deals-list-section";
+import { DealsListSection, buildDealStageFilterOptions } from "@/components/deals/deals-list-section";
 import type { DealFilters } from "@/hooks/use-deals";
 import type { DealListSortState } from "@/components/deals/deals-list-section";
 import { resolvePreferredScope, writeStoredScopePreference } from "@/lib/scope-preferences";
@@ -846,15 +842,24 @@ function DealListPageContent({ role, userId }: { role: string; userId: string })
   // Base-list board-mirror scope: the /deals board always includes DD (useDealBoard includeDd=true),
   // so showDd=true — the list defaults to the full visible-column set and lets terminal deals through,
   // exactly like the board it sits under (mirrors the /pipeline mount).
-  const dealsBaseListStageScope = useMemo(
-    () =>
-      getBoardVisibleStageScope(
-        boardColumns.map((column) => ({ id: column.stage.id, slug: column.stage.slug })),
-        true,
-        isTerminalOutcomeSlug
-      ),
-    [boardColumns]
-  );
+  //
+  // Derive the default/terminal stage IDs from the FULL deal stages grouped by slug (each slug → ALL its
+  // workflow-family ids), NOT from the canonicalized board columns: buildCanonicalDealBoardColumns keeps
+  // only ONE id per canonical slug, so passing those as defaultStageIds would make the default list send
+  // an exact stage_id IN (...) that silently drops the other workflow family's deals (e.g. standard vs
+  // service) before the user ever filters by stage (Codex #589). buildDealStageFilterOptions does the
+  // same slug-grouping the legacy list used.
+  const dealsBaseListStageScope = useMemo(() => {
+    const visibleStageGroups = buildDealStageFilterOptions(stages).filter((option) =>
+      isBoardVisibleStage(option.slug, true)
+    );
+    return {
+      defaultStageIds: visibleStageGroups.flatMap((option) => option.ids),
+      terminalStageIds: visibleStageGroups
+        .filter((option) => isTerminalOutcomeSlug(option.slug))
+        .flatMap((option) => option.ids),
+    };
+  }, [stages]);
   const columns = useMemo(
     () => {
       const searchTerm = search.trim().toLowerCase();
@@ -1327,6 +1332,9 @@ function DealListPageContent({ role, userId }: { role: string; userId: string })
               subtitle={dashboardView.subtitle}
               eyebrow={dashboardView.eyebrow}
               baseFilters={selectedRepFilter ? { assignedRepId: selectedRepFilter } : undefined}
+              // Preserve the base list's prior default ordering (updated_at desc) when no dl_sort is set,
+              // so it still surfaces recently-touched deals first (Codex #589).
+              initialSort={dashboardView.listInitialSort}
               filterBar={{
                 dimensions: DEALS_BASE_LIST_FILTERBAR_DIMENSIONS,
                 paramPrefix: "dl_",

@@ -418,6 +418,62 @@ describe("DealsListSection", () => {
     container.remove();
   });
 
+  async function renderAt(url: string, props: Parameters<typeof DealsListSection>[0]) {
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    let root!: Root;
+    await act(async () => {
+      root = createRoot(container);
+      root.render(
+        <MemoryRouter initialEntries={[url]}>
+          <DealsListSection {...props} />
+        </MemoryRouter>
+      );
+    });
+    const lastCall = mocks.useDealsMock.mock.calls[mocks.useDealsMock.mock.calls.length - 1][0];
+    await act(async () => root.unmount());
+    container.remove();
+    return lastCall;
+  }
+
+  it("ignores a namespaced rep filter when the Rep dimension is NOT rendered; the header/baseFilters rep wins (Codex #589)", async () => {
+    const call = await renderAt("/deals?dl_assignedRepId=rep-B", {
+      workflowFamily: "deal",
+      baseFilters: { assignedRepId: "rep-A" }, // inherited from the page header
+      filterBar: { dimensions: ["search", "stage", "sort"], paramPrefix: "dl_" }, // no "rep" dim
+    });
+    expect(call.assignedRepId).toBe("rep-A"); // dl_assignedRepId dropped (hidden), baseFilters rep preserved
+  });
+
+  it("applies the namespaced rep filter when the Rep dimension IS rendered (overrides baseFilters)", async () => {
+    const call = await renderAt("/deals?dl_assignedRepId=rep-B", {
+      workflowFamily: "deal",
+      baseFilters: { assignedRepId: "rep-A" },
+      filterBar: { dimensions: ["search", "rep", "sort"], paramPrefix: "dl_" },
+    });
+    expect(call.assignedRepId).toBe("rep-B");
+  });
+
+  it("seeds the query sort from initialSort when no namespaced sort is set, preserving the base default ordering (Codex #589)", async () => {
+    const call = await renderAt("/deals", {
+      workflowFamily: "deal",
+      initialSort: { key: "updated_at", dir: "desc" },
+      filterBar: { dimensions: ["search", "sort"], paramPrefix: "dl_" },
+    });
+    expect(call.sortBy).toBe("updated_at");
+    expect(call.sortDir).toBe("desc");
+  });
+
+  it("uses an explicit namespaced sort over the initialSort default", async () => {
+    const call = await renderAt("/deals?dl_sortBy=created_at&dl_sortDir=asc", {
+      workflowFamily: "deal",
+      initialSort: { key: "updated_at", dir: "desc" },
+      filterBar: { dimensions: ["search", "sort"], paramPrefix: "dl_" },
+    });
+    expect(call.sortBy).toBe("created_at");
+    expect(call.sortDir).toBe("asc");
+  });
+
   it("keeps a user-selected sort across rerenders when drill-down props are omitted", async () => {
     const { container, rerender, cleanup } = await renderDom();
     try {

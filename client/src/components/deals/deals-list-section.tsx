@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { toast } from "sonner";
 import { CalendarDays, Clock3, Download, MapPin } from "lucide-react";
@@ -698,6 +698,18 @@ export function DealsListSection({
     );
   }, [initialSort]);
 
+  // Reset the namespaced page when an INHERITED header filter (scope) changes in FilterBar mode. The
+  // URL-backed dl_page is not a FilterBar dimension here, and the legacy setPage(1) effect only resets
+  // local page state — so flipping Mine/All in the header would otherwise carry a stale dl_page into the
+  // new scope and render an empty/skipped page even when matching deals exist (Codex #589).
+  const prevScopeRef = useRef(scope);
+  useEffect(() => {
+    if (!filterBarMode) return;
+    if (prevScopeRef.current === scope) return;
+    prevScopeRef.current = scope;
+    if ((urlFilters.page ?? 1) > 1) setFilters({}); // empty patch page-resets via mergeFilterParams
+  }, [scope, filterBarMode, urlFilters.page, setFilters]);
+
   // Pagination + query-enable diverge by mode: FilterBar mode reads page from the URL and never gates
   // on stage-slug loading (stageIds arrive directly from the URL); legacy keeps local page + the
   // stage-aware enable gate. goToPage writes wherever the page lives.
@@ -734,12 +746,24 @@ export function DealsListSection({
   // FilterBar mode: URL value -> contract DealFilters (outcome-aware date, status, workflow, value,
   // stalled). baseFilters still layer (parent presets); scope inherits from the page unless the URL
   // sets it; the section owns page/limit. filter-axis == display-axis (displayDate rendered below).
+  // Drop a URL-derived filter whose dimension this mount does NOT render: a namespaced value like
+  // dl_assignedRepId can linger in a shared/bookmarked URL even though the Rep control is hidden (the
+  // /deals base list inherits Rep from the header, so it omits the dimension). Without this the list
+  // would silently query a different rep than the header/board show, with no control to clear it (Codex #589).
+  const fbFilters = filterBarValueToDealFilters(urlFilters);
+  if (!(filterBar?.dimensions.includes("rep") ?? false)) delete fbFilters.assignedRepId;
   const filterBarDealsArgs: DealFilters = {
     ...baseFilters,
-    ...applyBoardVisibilityDefaults(filterBarValueToDealFilters(urlFilters), {
+    ...applyBoardVisibilityDefaults(fbFilters, {
       defaultStageIds: filterBar?.defaultStageIds,
       terminalStageIds: filterBar?.terminalStageIds,
     }),
+    // Default to the mount's initialSort when the URL carries no explicit dl_sort, so a base list keeps
+    // its prior default ordering (e.g. /deals = updated_at desc) instead of the server's created_at
+    // fallback (Codex #589). /pipeline passes no initialSort → DEFAULT_SORT_STATE (created_at desc), which
+    // is the same server default, so its behavior is unchanged.
+    sortBy: fbFilters.sortBy ?? initialSort.key,
+    sortDir: fbFilters.sortDir ?? initialSort.dir,
     // When the bar is outcome-aware (stageEntryDateEnabled — it hides the honest "current state" note and
     // presents Date as outcome-aware + shows Stalled), force the server to bound open rows on
     // stage_entered_at for ANY active date/age filter, regardless of ENABLE_STAGE_ENTRY_DATE_FILTER. The

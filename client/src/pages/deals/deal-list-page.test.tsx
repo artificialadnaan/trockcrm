@@ -140,7 +140,10 @@ vi.mock("@/components/ui/button", () => ({
   ),
 }));
 
-vi.mock("@/components/deals/deals-list-section", () => ({
+vi.mock("@/components/deals/deals-list-section", async (importOriginal) => ({
+  // Keep the real pure helpers (e.g. buildDealStageFilterOptions, used by the base-list stage scope)
+  // while stubbing the component itself to capture props.
+  ...(await importOriginal<typeof import("@/components/deals/deals-list-section")>()),
   DealsListSection: (props: Record<string, unknown>) => {
     mocks.dealsListSectionMock(props);
     return (
@@ -1252,6 +1255,24 @@ describe("DealListPage", () => {
     expect(props.filterBar).toBeUndefined(); // drill-downs render the legacy list, untouched
     expect(props.enableDateFilter).toBe(false);
     expect(props.hideOwnerFilter).toBe(true);
+  });
+
+  it("includes ALL workflow-family stage IDs in the base list's default stage scope — no silent family drop (Codex #589 P1)", () => {
+    // Two stages share the canonical slug 'opportunity' (standard + service families). The default
+    // stage scope must contain BOTH ids, or the default /deals list would drop one family's deals.
+    mocks.usePipelineStagesMock.mockReturnValue({
+      loading: false,
+      error: null,
+      stages: [
+        { id: "opp-standard", name: "Opportunity", slug: "opportunity", displayOrder: 1, isTerminal: false },
+        { id: "opp-service", name: "Opportunity", slug: "opportunity", displayOrder: 1, isTerminal: false },
+      ],
+    });
+    renderPage("/deals?scope=mine", "director");
+    const props = mocks.dealsListSectionMock.mock.calls[mocks.dealsListSectionMock.mock.calls.length - 1][0] as {
+      filterBar: { defaultStageIds: string[] };
+    };
+    expect(props.filterBar.defaultStageIds).toEqual(expect.arrayContaining(["opp-standard", "opp-service"]));
   });
 
   it("builds clickable KPI drilldown paths with preserved scope and period", () => {
