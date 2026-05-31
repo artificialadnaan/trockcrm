@@ -1026,5 +1026,51 @@ describe("DealsListSection", () => {
       expect(call.sortBy).not.toBe("created_at");
       await view.cleanup();
     });
+
+    it("exports the outcome displayDate column, not the legacy Last Touch axis (Codex #570: export matches the on-screen list)", async () => {
+      const csvParts: string[] = [];
+      const OriginalBlob = globalThis.Blob;
+      const originalCreate = URL.createObjectURL;
+      const originalRevoke = URL.revokeObjectURL;
+      Object.assign(URL, { createObjectURL: vi.fn(() => "blob:test"), revokeObjectURL: vi.fn() });
+      globalThis.Blob = class {
+        constructor(parts: unknown[]) {
+          csvParts.push(String((parts as unknown[])?.[0] ?? ""));
+        }
+      } as unknown as typeof Blob;
+      mocks.apiMock.mockResolvedValue({
+        deals: [
+          makeDeal({
+            displayDate: "2026-05-20T00:00:00.000Z",
+            lastActivityAt: "2026-08-15T00:00:00.000Z",
+            updatedAt: "2026-08-15T00:00:00.000Z",
+          }),
+        ],
+        pagination: { totalPages: 1 },
+      });
+      const { container, cleanup } = await renderDom({
+        enableExport: true,
+        dateField: "outcome",
+        externalDateRange: { from: "2026-04-01", to: "2026-05-31" },
+        lockedOwnerId: "rep-1",
+      });
+      try {
+        const exportButton = Array.from(container.querySelectorAll("button")).find((b) =>
+          b.textContent?.includes("Export")
+        );
+        expect(exportButton).toBeDefined();
+        await act(async () => {
+          exportButton?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+        });
+        const csv = csvParts.join("");
+        expect(csv).not.toContain("Last Touch"); // legacy axis header gone
+        expect(csv).toContain("2026-05-20"); // the outcome displayDate
+        expect(csv).not.toContain("2026-08-15"); // not lastActivityAt/updatedAt
+      } finally {
+        globalThis.Blob = OriginalBlob;
+        Object.assign(URL, { createObjectURL: originalCreate, revokeObjectURL: originalRevoke });
+        await cleanup();
+      }
+    });
   });
 });
