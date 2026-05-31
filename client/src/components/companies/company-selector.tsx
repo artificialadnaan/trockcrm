@@ -216,7 +216,10 @@ export function CompanySelector({ value, onChange, required, officeId, showOwner
   };
 
   const handleUseExistingDuplicate = (companyId: string, companyName: string) => {
-    setSelectedCompanyId(companyId);
+    // Show the name immediately, but DON'T pin selectedCompanyId here: a dedup
+    // suggestion carries no owner, so we let the value-sync effect fetch the company
+    // once the parent sets value=companyId — that resolves the owner label. Pinning
+    // the id would make that effect skip (id === value) and render "Unassigned".
     setSelectedName(companyName);
     setSelectedOwner(null);
     setDedupSuggestions(null);

@@ -253,6 +253,14 @@ export async function createCompany(
   skipDedupCheck = false
 ): Promise<{ company: typeof companies.$inferSelect | null; dedupResult?: CompanyDedupResult }> {
   if (!skipDedupCheck) {
+    // Serialize the check+insert for the same normalized name so two concurrent
+    // creates can't both pass the (read-then-write) dedup check and each insert a
+    // duplicate. Transaction-scoped advisory lock keyed on the SAME normalized name
+    // the match uses; auto-released at commit. No-op when the name normalizes to empty.
+    const normalized = normalizeDirectoryName(data.name);
+    if (normalized) {
+      await tenantDb.execute(sql`SELECT pg_advisory_xact_lock(hashtext(${normalized}))`);
+    }
     const dedupResult = await checkCompanyDuplicates(tenantDb, { name: data.name });
     if (dedupResult.suggestions.length > 0) {
       return { company: null, dedupResult };
