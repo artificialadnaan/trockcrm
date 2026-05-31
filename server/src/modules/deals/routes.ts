@@ -29,6 +29,7 @@ import {
 import { toJsonSafe } from "../../lib/json-safe.js";
 import { redactDealList, redactDealResponse, shouldIncludeHubspotId, stripPrivateDealFieldsForViewer } from "./redact.js";
 import { activateServiceHandoff, changeDealStage } from "./stage-change.js";
+import { validateOptionalExpectedCloseDateInput } from "./expected-close-date-input.js";
 import { resolveMineVisibilityFeatures } from "../shared/mine-visibility.js";
 import { preflightStageCheck } from "./stage-gate.js";
 import { getContactsForDeal } from "../contacts/association-service.js";
@@ -2587,10 +2588,13 @@ router.post("/:id/stage", async (req, res, next) => {
     await assertDealOwnerRouteAccess(req, req.params.id, {
       message: "Only the assigned rep can modify this deal",
     });
-    const { targetStageId, overrideReason, lostReasonId, lostNotes, lostCompetitor } = req.body;
+    const { targetStageId, overrideReason, lostReasonId, lostNotes, lostCompetitor, expectedCloseDate } = req.body;
     if (!targetStageId) {
       throw new AppError(400, "targetStageId is required");
     }
+    // Validate the optional inline forecast date up front: reject non-strings / impossible dates with
+    // a clean 400 here, before the value can reach changeDealStage and the Postgres date column.
+    validateOptionalExpectedCloseDateInput(expectedCloseDate);
 
     const result = await changeDealStage(req.tenantDb!, {
       dealId: req.params.id,
@@ -2602,6 +2606,7 @@ router.post("/:id/stage", async (req, res, next) => {
       lostReasonId,
       lostNotes,
       lostCompetitor,
+      expectedCloseDate,
       auditContext: buildRouteAuditContext(req),
     });
 

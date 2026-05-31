@@ -14,7 +14,7 @@ import { DOMAIN_EVENTS } from "../../events/types.js";
 import {
   isContractStageSelectionEnabled,
 } from "../../config/feature-flags.js";
-import { validateStageGate } from "./stage-gate.js";
+import { validateStageGate, isStageRequiredFieldSatisfied } from "./stage-gate.js";
 import type { UserRole } from "@trock-crm/shared/types";
 import { createStageTimers } from "./timer-service.js";
 import { activateDealScopingIntake, evaluateDealScopingReadiness } from "./scoping-service.js";
@@ -94,6 +94,10 @@ export interface StageChangeInput {
   lostReasonId?: string;
   lostNotes?: string;
   lostCompetitor?: string;
+  // Optional expected_close_date set in the same stage-change request (the inline stage-advance
+  // prompt). Applied with the move and considered by the gate as a pending value so the advance
+  // into a stage that requires it succeeds in one action.
+  expectedCloseDate?: string | null;
   auditContext?: AuditContext;
 }
 
@@ -158,8 +162,12 @@ export async function changeDealStage(
     return { deal: currentDeal[0], stageHistory: null, eventsEmitted: [], _eventsToEmit: [] };
   }
 
-  // Step 1: Validate stage gate (includes rep ownership check)
-  const gateResult = await validateStageGate(tenantDb, dealId, targetStageId, userRole, userId);
+  // Step 1: Validate stage gate (includes rep ownership check). If the request carries an
+  // expectedCloseDate (the inline stage-advance prompt), pass it as a pending value so the gate is
+  // satisfied by the date we are about to persist below.
+  const pendingFieldValues =
+    input.expectedCloseDate !== undefined ? { expectedCloseDate: input.expectedCloseDate || null } : {};
+  const gateResult = await validateStageGate(tenantDb, dealId, targetStageId, userRole, userId, pendingFieldValues);
   assertActiveDealStageWriteTarget(gateResult.targetStage);
 
   // Step 2: Enforce rules
@@ -263,6 +271,33 @@ export async function changeDealStage(
     stageEnteredAt: stageChangedAt,
   };
   Object.assign(dealUpdates, getHoldStateAtStageEntry(deal, stageChangedAt));
+  // Conservative guard: only treat expectedCloseDate as persistable when the target stage's gate
+  // checklist actually lists it as a required field. If the requirement can't be confirmed, don't
+  // persist (fail-safe) -- so an unrelated stage move can never overwrite the forecast date.
+  const targetRequiresExpectedCloseDate = (gateResult.effectiveChecklist?.fields ?? []).some(
+    (checklistField) => checklistField.key === "expectedCloseDate"
+  );
+  // Captured only when the inline date is actually persisted below, so the audit trail records the
+  // forecast change next to the stage move (NULL when the inline path doesn't touch the date).
+  let expectedCloseDateAuditChange: { from: string | null; to: string | null } | null = null;
+  if (
+    input.expectedCloseDate !== undefined &&
+    targetRequiresExpectedCloseDate &&
+    isStageRequiredFieldSatisfied("expectedCloseDate", input.expectedCloseDate)
+  ) {
+    // Persist the date captured by the inline stage-advance prompt -- but ONLY when the target stage
+    // actually requires expectedCloseDate and the supplied value is itself usable (today-or-future).
+    // This stops an unrelated stage move (or a stale/empty payload) from overwriting or clearing a
+    // deal's forecast date through this path; other forecast edits go via the deal-update endpoint.
+    dealUpdates.expectedCloseDate = input.expectedCloseDate;
+    const previousExpectedCloseDate = deal.expectedCloseDate ?? null;
+    const nextExpectedCloseDate = input.expectedCloseDate ?? null;
+    // Mirror the normal deal-update audit path, which skips unchanged fields: only record the change
+    // when the value actually moved (never a no-op {from: X, to: X} entry).
+    if (previousExpectedCloseDate !== nextExpectedCloseDate) {
+      expectedCloseDateAuditChange = { from: previousExpectedCloseDate, to: nextExpectedCloseDate };
+    }
+  }
   const shouldResetBidBoardOwnership =
     inferredOwnership.isBidBoardOwned &&
     Boolean(estimatingBoundary) &&
@@ -375,6 +410,9 @@ export async function changeDealStage(
           from: currentStage.name ?? currentStage.slug,
           to: targetStage.name ?? targetStage.slug,
         },
+        // Record the inline forecast-date change too, mirroring the normal deal-update audit path, so a
+        // close-date set/change made during a stage advance isn't invisible in the trail.
+        ...(expectedCloseDateAuditChange ? { expectedCloseDate: expectedCloseDateAuditChange } : {}),
       },
       metadata: {
         overrideReason: overrideReason ?? null,
