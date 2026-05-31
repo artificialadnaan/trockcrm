@@ -115,6 +115,8 @@ describe("Monday showcase EVIDENCE builders reuse the aggregate cohort predicate
       expect(text).toContain("AS region");
       expect(text).toContain("deal_type");
       expect(text).toContain("days_in_stage");
+      // age anchored to the America/Chicago business date (not raw session-TZ CURRENT_DATE)
+      expect(text).toContain("America/Chicago");
       expect(text).toContain("LEFT JOIN companies c ON c.id = d.company_id");
       expect(text).toContain("LEFT JOIN region_config rc ON rc.id = d.region_id");
     }

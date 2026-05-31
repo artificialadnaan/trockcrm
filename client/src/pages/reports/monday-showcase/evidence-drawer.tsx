@@ -1,6 +1,6 @@
 import { useState, type ReactNode } from "react";
 import { ArrowDown, ArrowUp, ChevronsUpDown, ExternalLink, Loader2 } from "lucide-react";
-import { useNavigate } from "react-router-dom";
+import { useLocation, useNavigate } from "react-router-dom";
 import {
   Dialog,
   DialogContent,
@@ -245,11 +245,14 @@ export function EvidenceDrawer({
   onClose: () => void;
 }) {
   const navigate = useNavigate();
+  const { search } = useLocation();
   const { data, loading, error } = useShowcaseEvidence(request, mode);
 
   function openRecord(r: EvidenceRecord) {
     if (!data) return;
-    navigate(data.metric === "leads" ? `/leads/${r.id}` : `/deals/${r.id}`);
+    // Carry the current query string (notably ?officeId=) so the detail page's API calls stay scoped to the
+    // office whose report produced this evidence — matching the at-risk watchlist's row navigation.
+    navigate({ pathname: data.metric === "leads" ? `/leads/${r.id}` : `/deals/${r.id}`, search });
     onClose();
   }
 

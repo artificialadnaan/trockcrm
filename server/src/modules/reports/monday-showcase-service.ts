@@ -688,7 +688,7 @@ function dealEvidenceSelectSql(valueSql: SQL, cohortDateExpr: string): SQL {
     COALESCE(c.name, '') AS company_name,
     COALESCE(NULLIF(c.region, ''), NULLIF(rc.name, ''), '') AS region,
     COALESCE(d.project_type, '') AS deal_type,
-    (CURRENT_DATE - d.stage_entered_at::date)::int AS days_in_stage
+    ((now() AT TIME ZONE 'America/Chicago')::date - (d.stage_entered_at AT TIME ZONE 'America/Chicago')::date)::int AS days_in_stage
   `;
 }
 
@@ -791,7 +791,7 @@ export function buildLeadEvidenceSql(repId?: string | null, leadStage?: string):
            COALESCE(c.name, '') AS company_name,
            COALESCE(NULLIF(c.region, ''), '') AS region,
            COALESCE(l.project_type, '') AS deal_type,
-           (CURRENT_DATE - l.stage_entered_at::date)::int AS days_in_stage
+           ((now() AT TIME ZONE 'America/Chicago')::date - (l.stage_entered_at AT TIME ZONE 'America/Chicago')::date)::int AS days_in_stage
     FROM ${leads} l
     JOIN ${pipelineStageConfig} psc ON psc.id = l.stage_id
     LEFT JOIN ${users} u ON u.id = l.assigned_rep_id
