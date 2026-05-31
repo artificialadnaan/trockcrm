@@ -1,6 +1,8 @@
 // FilterBar value <-> URL query serde. Param names/values match BLUE's backend contract (PR #546)
 // EXACTLY so the deals list emits what getDeals consumes. The URL is the source of truth (Slice 7).
 
+import { withResolvedDateWindow } from "./filterbar-date";
+
 export const UNASSIGNED = "__unassigned__";
 export type DealStatusFilter = "active" | "on_hold" | "inactive" | "any";
 
@@ -84,8 +86,16 @@ const FILTERBAR_PARAM_KEYS = [
 /** Apply a partial patch to the FilterBar params on a URL, preserving any non-FilterBar params.
  *  Page-resets to 1 (omitted) on any change that doesn't explicitly set `page` (mirrors
  *  useContactFilters). Returns a new URLSearchParams. */
-export function mergeFilterParams(prev: URLSearchParams, patch: Partial<FilterBarValue>): URLSearchParams {
-  const next: FilterBarValue = { ...deserializeFilters(prev), ...patch };
+export function mergeFilterParams(
+  prev: URLSearchParams,
+  patch: Partial<FilterBarValue>,
+  now = new Date()
+): URLSearchParams {
+  // Re-resolve the existing params' NAMED date preset before merging, so a relative preset's stale
+  // bounds (from a bookmarked/shared URL saved earlier) self-heal to today's window on ANY edit —
+  // instead of being re-serialized stale on an unrelated change like typing in Search (Codex). The
+  // patch still wins (a date-control change overrides); custom/unknown presets keep their bounds.
+  const next: FilterBarValue = { ...withResolvedDateWindow(deserializeFilters(prev), now), ...patch };
   if (patch.page === undefined) delete next.page;
   const fbParams = serializeFilters(next);
   const result = new URLSearchParams(prev);
@@ -94,10 +104,16 @@ export function mergeFilterParams(prev: URLSearchParams, patch: Partial<FilterBa
   return result;
 }
 
-/** Remove all FilterBar params (reset), preserving non-FilterBar params. */
-export function clearFilterParams(prev: URLSearchParams): URLSearchParams {
+/** Remove all FilterBar params (reset), preserving non-FilterBar params. `preserveKeys` keeps the
+ *  listed FilterBar params too — used when a surface inherits a param it does not render as a
+ *  dimension (e.g. the deals-list-under-kanban inherits the board-owned `scope`, so Clear must not
+ *  reset the whole pipeline). */
+export function clearFilterParams(prev: URLSearchParams, preserveKeys: readonly string[] = []): URLSearchParams {
   const result = new URLSearchParams(prev);
-  for (const key of FILTERBAR_PARAM_KEYS) result.delete(key);
+  for (const key of FILTERBAR_PARAM_KEYS) {
+    if (preserveKeys.includes(key)) continue;
+    result.delete(key);
+  }
   return result;
 }
 

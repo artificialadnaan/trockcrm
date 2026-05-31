@@ -37,6 +37,9 @@ import { cn } from "@/lib/utils";
 import { getDealDisplayNumber } from "@/components/deals/kanban-deal-card";
 import { listPaginationIconButtonClassName } from "@/components/shared/list-pagination";
 import { AtRiskBadge } from "@/components/deals/at-risk-badge";
+import { useFilterState } from "@/components/filters/use-filter-state";
+import { FilterBar, type FilterDimension, type FilterBarOptions } from "@/components/filters/filter-bar";
+import { applyBoardVisibilityDefaults, filterBarValueToDealFilters, getDealDisplayDate } from "./deals-filterbar-adapter";
 
 const DEAL_STAGE_ORDER = [
   "opportunity",
@@ -79,6 +82,29 @@ interface DealsListSectionProps {
   dateField?: "updated" | "created";
   externalDateRange?: { from?: string; to?: string };
   paginationCountSummary?: { active: number; total: number };
+  /**
+   * Opt-in shared FilterBar mode (Slice 7 proving ground). When provided, the section reads/writes
+   * its filter state from the URL (useFilterState) and renders the shared <FilterBar> in place of the
+   * legacy inline controls; the filters map to getDeals via the #546 contract (outcome-aware date,
+   * status, workflow, value, stalled). When ABSENT the legacy local-state controls render byte-for-
+   * byte unchanged, so pipeline-page + rep-drilldown keep today's behavior until their rollout phase.
+   */
+  filterBar?: {
+    dimensions: FilterDimension[];
+    options?: FilterBarOptions;
+    stageEntryDateEnabled?: boolean;
+    /**
+     * Board-mirroring defaults (Slice 7 design sign-off). When this list sits under a kanban, the
+     * mount passes the board's visible column stage ids so the list shows the SAME deals as the board:
+     *  - defaultStageIds: the visible columns (Show-DD-filtered) — used as the list's stageIds when the
+     *    user has selected none, so DD deals hide exactly when the board hides the DD column (Q2);
+     *  - terminalStageIds: the visible terminal subset — sent as inactiveStageIds with isActive
+     *    "pipeline" (unless an explicit Status is chosen) so terminal deals show like the board's
+     *    Won/Lost columns, overriding the contract's active-only default at THIS mount (Q1).
+     */
+    defaultStageIds?: string[];
+    terminalStageIds?: string[];
+  };
 }
 
 interface DealStageFilterOption {
@@ -476,8 +502,18 @@ export function DealsListSection({
   dateField = "updated",
   externalDateRange,
   paginationCountSummary,
+  filterBar,
 }: DealsListSectionProps) {
   const navigate = useNavigate();
+  // Slice 7: opt-in URL-backed filter state. useFilterState is always called (hooks can't be
+  // conditional); its value only drives the query/UI when filterBarMode is on.
+  const { filters: urlFilters, setFilters, resetFilters } = useFilterState();
+  const filterBarMode = Boolean(filterBar);
+  // Scope is read from the URL ONLY when this surface actually renders a scope control (the bar owns
+  // the "scope" dimension). At the pipeline mount the page owns scope (its toggle), so the list must
+  // inherit the page's NORMALIZED scope prop — not a raw, possibly-stale ?scope from the URL (e.g. a
+  // bookmarked ?scope=team the board has coerced to mine). Otherwise the list and board disagree.
+  const filterBarOwnsScope = filterBar?.dimensions.includes("scope") ?? false;
   const [search, setSearch] = useState("");
   const [stageSlugs, setStageSlugs] = useState<string[]>(initialStageSlugs);
   const [ownerId, setOwnerId] = useState(lockedOwnerId ?? "__all__");
@@ -557,12 +593,14 @@ export function DealsListSection({
     );
   }, [initialSort]);
 
-  const {
-    deals: rawDeals,
-    pagination,
-    loading,
-    error,
-  } = useDeals({
+  // Pagination + query-enable diverge by mode: FilterBar mode reads page from the URL and never gates
+  // on stage-slug loading (stageIds arrive directly from the URL); legacy keeps local page + the
+  // stage-aware enable gate. goToPage writes wherever the page lives.
+  const currentPage = filterBarMode ? urlFilters.page ?? 1 : page;
+  const queryEnabled = filterBarMode ? true : listQueryState.enabled;
+  const goToPage = filterBarMode ? (next: number) => setFilters({ page: next }) : setPage;
+
+  const legacyDealsArgs: DealFilters = {
     ...baseFilters,
     search,
     stageIds: selectedStageIds,
@@ -580,7 +618,26 @@ export function DealsListSection({
     page,
     limit: pageSize,
     scope,
-  }, { enabled: listQueryState.enabled });
+  };
+  // FilterBar mode: URL value -> contract DealFilters (outcome-aware date, status, workflow, value,
+  // stalled). baseFilters still layer (parent presets); scope inherits from the page unless the URL
+  // sets it; the section owns page/limit. filter-axis == display-axis (displayDate rendered below).
+  const filterBarDealsArgs: DealFilters = {
+    ...baseFilters,
+    ...applyBoardVisibilityDefaults(filterBarValueToDealFilters(urlFilters), {
+      defaultStageIds: filterBar?.defaultStageIds,
+      terminalStageIds: filterBar?.terminalStageIds,
+    }),
+    scope: filterBarOwnsScope ? urlFilters.scope ?? scope : scope,
+    page: currentPage,
+    limit: pageSize,
+  };
+  const {
+    deals: rawDeals,
+    pagination,
+    loading,
+    error,
+  } = useDeals(filterBarMode ? filterBarDealsArgs : legacyDealsArgs, { enabled: queryEnabled });
 
   // Keep the prior rows visible while a refetch is in flight so a search keystroke or
   // filter change never blanks/flashes the list (the hard no-blank requirement, paired
@@ -594,7 +651,7 @@ export function DealsListSection({
   // would skip the skeleton and flash an empty list.
   const { data: deals, isInitialLoading, isRefreshing } = useKeepPreviousData(
     rawDeals,
-    loading || !listQueryState.enabled
+    loading || !queryEnabled
   );
 
   const stageNameById = useMemo(() => buildStageNameById(stages), [stages]);
@@ -625,7 +682,18 @@ export function DealsListSection({
     );
   };
 
+  // Sort routing: in FilterBar mode the query reads sortBy/sortDir from the URL, so table-header
+  // clicks must write the URL too (otherwise the arrow flips but the rows never re-sort). The bar's
+  // Sort dropdown and the header clicks then stay in sync. Legacy mode keeps local sort state.
+  const activeSort: { key: string | undefined; dir: "asc" | "desc" | undefined } = filterBarMode
+    ? { key: urlFilters.sortBy, dir: urlFilters.sortDir }
+    : { key: sort.key, dir: sort.dir };
   const updateSort = (key: DealListSortState["key"]) => {
+    if (filterBarMode) {
+      const dir = urlFilters.sortBy === key && urlFilters.sortDir === "desc" ? "asc" : "desc";
+      setFilters({ sortBy: key, sortDir: dir });
+      return;
+    }
     setSort((current) => ({
       key,
       dir: current.key === key && current.dir === "desc" ? "asc" : "desc",
@@ -713,7 +781,7 @@ export function DealsListSection({
       onClick={() => updateSort(key)}
     >
       {label}
-      {sort.key === key ? <span>{sort.dir === "asc" ? "↑" : "↓"}</span> : null}
+      {activeSort.key === key ? <span>{activeSort.dir === "asc" ? "↑" : "↓"}</span> : null}
     </button>
   );
 
@@ -817,12 +885,14 @@ export function DealsListSection({
     },
     {
       key: "closeDate",
-      header: "Close",
+      // FilterBar mode shows the outcome-aware date axis (Won->signed, Lost->lost, open->stage-entry)
+      // that it ALSO filters on, so the header is the honest "Date"; legacy stays "Close".
+      header: filterBarMode ? "Date" : "Close",
       headClassName: "md:w-[4.75rem] md:!px-2 md:text-right lg:w-[5rem] lg:!px-3",
       cellClassName: "md:w-[4.75rem] md:!px-2 md:text-right lg:w-[5rem] lg:!px-3",
       render: (deal) => (
         <span className="inline-flex justify-end whitespace-nowrap text-sm font-medium text-slate-600">
-          {formatShortDate(getDealCloseDate(deal))}
+          {formatShortDate(filterBarMode ? getDealDisplayDate(deal) : getDealCloseDate(deal))}
         </span>
       ),
     },
@@ -856,6 +926,23 @@ export function DealsListSection({
         ) : null}
       </div>
 
+      {filterBarMode && filterBar ? (
+        <div className="border-b border-gray-200 bg-[#f7f8fb] p-4">
+          <FilterBar
+            dimensions={filterBar.dimensions}
+            options={filterBar.options}
+            value={urlFilters}
+            onChange={setFilters}
+            // Preserve any param the bar inherits but does not render (e.g. the board-owned `scope`
+            // on the pipeline page) so Clear resets only this list's dimensions, not the kanban.
+            onReset={() => resetFilters(filterBarOwnsScope ? [] : ["scope"])}
+            stageEntryDateEnabled={filterBar.stageEntryDateEnabled}
+          />
+        </div>
+      ) : null}
+
+      {!filterBarMode && (
+      <>
       <div className={cn("grid gap-3 border-b border-gray-200 bg-[#f7f8fb] p-4", filterGridClass)}>
         <label className="space-y-2">
           <span className="text-[11px] font-black uppercase tracking-[0.16em] text-slate-500">Search</span>
@@ -986,17 +1073,19 @@ export function DealsListSection({
           </button>
         </div>
       </div>
+      </>
+      )}
 
       <div className="p-4" aria-busy={isRefreshing}>
         {error ? (
           <div className="rounded-lg border border-brand-red/20 bg-brand-red/5 p-4 text-sm font-semibold text-brand-red">
             {error}
           </div>
-        ) : stagesError && !listQueryState.enabled ? (
+        ) : stagesError && !queryEnabled ? (
           <div className="rounded-lg border border-brand-red/20 bg-brand-red/5 p-4 text-sm font-semibold text-brand-red">
             Pipeline stage metadata failed to load.
           </div>
-        ) : !listQueryState.enabled || isInitialLoading ? (
+        ) : !queryEnabled || isInitialLoading ? (
           <div className="rounded-lg border border-slate-200 bg-white p-6 text-sm font-semibold text-slate-500">
             Loading deals...
           </div>
@@ -1070,7 +1159,7 @@ export function DealsListSection({
                       <div className="flex items-center justify-between gap-3 border-t border-slate-200 pt-3 text-xs font-medium text-slate-500">
                         <span className="inline-flex items-center gap-1 whitespace-nowrap">
                           <CalendarDays className="h-3.5 w-3.5 text-slate-400" />
-                          {formatShortDate(getDealCloseDate(deal))}
+                          {formatShortDate(filterBarMode ? getDealDisplayDate(deal) : getDealCloseDate(deal))}
                         </span>
                         <span className="inline-flex items-center gap-1 whitespace-nowrap text-right">
                           <Clock3 className="h-3.5 w-3.5 text-slate-400" />
@@ -1095,7 +1184,7 @@ export function DealsListSection({
                   total: pagination.total,
                   totalPages: pagination.totalPages,
                 }}
-                onPageChange={setPage}
+                onPageChange={goToPage}
                 onRowClick={(deal) => navigate(`/deals/${deal.id}`)}
                 getRowKey={(deal) => deal.id}
               />
@@ -1105,7 +1194,7 @@ export function DealsListSection({
               total={pagination.total}
               totalPages={pagination.totalPages || 1}
               countSummary={derivedCountSummary}
-              onPageChange={setPage}
+              onPageChange={goToPage}
             />
           </>
         )}

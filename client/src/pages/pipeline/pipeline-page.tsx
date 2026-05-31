@@ -37,6 +37,31 @@ import type { Deal } from "@/hooks/use-deals";
 import type { PipelineScope } from "@/lib/pipeline-scope";
 import { resolvePreferredScope, writeStoredScopePreference } from "@/lib/scope-preferences";
 import { derivePipelineBoardView } from "./pipeline-board-view";
+import { useSalesReps } from "@/hooks/use-sales-reps";
+import { useRegions, useProjectTypes } from "@/hooks/use-pipeline-config";
+import {
+  DEAL_LIST_SORT_OPTIONS,
+  getBoardVisibleStageScope,
+  isBoardVisibleStage,
+} from "@/components/deals/deals-filterbar-adapter";
+import type { FilterDimension } from "@/components/filters/filter-bar";
+
+// Slice 7 proving ground: the deals list under the kanban gets the richest shared FilterBar set.
+// (Stalled is gated off until FEATURE_STAGE_ENTRY_DATE; the bar hides it while stageEntryDateEnabled
+// is false. Scope is inherited from the page's scope toggle, not duplicated in the bar.)
+const DEAL_LIST_FILTERBAR_DIMENSIONS: FilterDimension[] = [
+  "search",
+  "date",
+  "stage",
+  "sort",
+  "rep",
+  "status",
+  "workflow",
+  "region",
+  "projectType",
+  "value",
+  "stalled",
+];
 
 // Re-exports kept for test compatibility (pipeline-page.test.ts imports these
 // helpers; they live in the shared deals-list-section module now).
@@ -265,6 +290,10 @@ export function PipelinePage() {
     writeStoredScopePreference(user?.id, nextScope);
     const next = new URLSearchParams(searchParams);
     next.set("scope", nextScope);
+    // Changing scope changes the list's result set, so drop the FilterBar list page — otherwise a
+    // user on ?page=4 stays on page 4 for the new scope and sees an empty/misleading list (the
+    // legacy setPage(1) effect no longer drives the URL-backed page in FilterBar mode). Codex r2.
+    next.delete("page");
     setSearchParams(next);
   };
 
@@ -315,6 +344,10 @@ export function PipelinePage() {
   const [pendingMove, setPendingMove] = useState<PendingPipelineMove | null>(null);
   const [lastRefreshed, setLastRefreshed] = useState<Date>(new Date());
   const [now, setNow] = useState<Date>(new Date());
+  // Option sources for the shared FilterBar on the deals list below the board (Slice 7).
+  const { salesReps } = useSalesReps();
+  const { regions } = useRegions();
+  const { projectTypes } = useProjectTypes();
   const [terminalDateFilters, setTerminalDateFilters] = useState<Record<TerminalOutcome, TerminalDateFilter>>(() =>
     readTerminalDateFiltersFromSearchParams(searchParams)
   );
@@ -372,8 +405,14 @@ export function PipelinePage() {
 
   useEffect(() => {
     // showDd is derived from searchParams directly (above); only the terminal date filters need
-    // syncing back into state on a browser back/forward.
-    setTerminalDateFilters(readTerminalDateFiltersFromSearchParams(searchParams));
+    // syncing back into state on a browser back/forward. Keep the SAME object reference when the
+    // terminal-date params are unchanged so that list-only FilterBar params (search, stage, status,
+    // …) sharing this URL do not churn this state and needlessly refetch the kanban board
+    // (fetchPipeline depends on terminalDateFilters).
+    const next = readTerminalDateFiltersFromSearchParams(searchParams);
+    setTerminalDateFilters((current) =>
+      JSON.stringify(current) === JSON.stringify(next) ? current : next
+    );
   }, [searchParams]);
 
   useEffect(() => {
@@ -467,6 +506,17 @@ export function PipelinePage() {
     if (total === 0) return null;
     return Math.round((won / total) * 100);
   })();
+
+  // The under-kanban list mirrors the board it sits under (Slice 7 design sign-off): its default stage
+  // scope IS the board's visible columns (Show-DD-filtered), and the visible terminal columns flow
+  // through as inactive stages so the list shows active + terminal deals like the board. isTerminalOutcomeSlug
+  // classifies the Won/Lost columns; isBoardVisibleStage is the single Show-DD predicate (also drives the
+  // stage options below) so the list and the board can never disagree about which stages are on the page.
+  const boardStageScope = getBoardVisibleStageScope(
+    columns.map((column) => ({ id: column.stage.id, slug: column.stage.slug })),
+    showDd,
+    isTerminalOutcomeSlug
+  );
 
   if (showSkeleton) {
     return (
@@ -623,17 +673,32 @@ export function PipelinePage() {
         </dl>
       </footer>
 
+      {/* Slice 7 proving ground: the deals list under the kanban, driven by the shared URL-backed
+          FilterBar. NOTE: CSV export is intentionally omitted here for now — the legacy export path
+          builds its query from the old created/updated axis + local state, so it would not reflect
+          the FilterBar's outcome-aware filters. FilterBar-aware export is a fast-follow (and is also
+          gated on BLUE's #546 backend predicates, like the rest of the new dimensions). */}
       <DealsListSection
         scope={scope}
-        enableDateFilter
-        enableExport
-        excludeStageSlugs={showDd ? [] : ["dd", "due_diligence"]}
-        visibleStages={columns.map((column) => ({
-          id: column.stage.id,
-          slug: column.stage.slug,
-          name: column.stage.name,
-          isTerminal: column.stage.isTerminal,
-        }))}
+        filterBar={{
+          dimensions: DEAL_LIST_FILTERBAR_DIMENSIONS,
+          options: {
+            reps: salesReps.map((rep) => ({ value: rep.id, label: rep.displayName })),
+            regions: regions.map((region) => ({ value: region.id, label: region.name })),
+            projectTypes: projectTypes.map((type) => ({ value: type.id, label: type.name })),
+            stages: columns
+              .filter((column) => isBoardVisibleStage(column.stage.slug, showDd))
+              .map((column) => ({ value: column.stage.id, label: column.stage.name })),
+            sortOptions: DEAL_LIST_SORT_OPTIONS,
+          },
+          // Open-stage entered date + Stalled stay gated until FEATURE_STAGE_ENTRY_DATE; the bar
+          // labels the date honestly and hides Stalled while this is false.
+          stageEntryDateEnabled: false,
+          // Mirror the board: default to its visible columns (Q2 Show-DD) + let terminal deals through
+          // (Q1 active+terminal) unless the user picks an explicit Status.
+          defaultStageIds: boardStageScope.defaultStageIds,
+          terminalStageIds: boardStageScope.terminalStageIds,
+        }}
       />
 
       {stageChangeOpen && pendingMove && (
