@@ -34,15 +34,17 @@ matches the column the card already leads with.)*
 |---|---|---|---|
 | `search` | string | existing company search | **exists** |
 | `dateFrom`/`dateTo` | YYYY-MM-DD | `COALESCE(last_activity_at, created_at)` window | **BLUE: new** (`buildCompanyDateScope`) |
-| `assignedRepId` | uuid \| `__unassigned__` | `eq(companies.owner_id)`, sentinel → IS NULL | predicate **exists** in `listCompanies(ownerUserId)`; **route only passes "mine" today → accept a specific id** |
-| `scope` | mine\|all | existing `ownerScope=mine` (page-inherited, not a bar dimension) | **exists** |
+| `assignedRepId` | uuid \| `__unassigned__` | `eq(companies.owner_id)`; `__unassigned__` → `owner_id IS NULL` | **BLUE**: `listCompanies(ownerUserId)` adds the eq **only for a truthy id** → needs (a) the route to accept a specific id (today only forwards "mine") AND (b) an explicit `IS NULL` branch for `__unassigned__` |
+| `ownerScope` | `mine` (all = omit) | existing page mine/all toggle (page-inherited, NOT a bar param) | **exists** — the adapter maps the page's mine/all → `ownerScope`; the bar does **not** emit `scope` (the endpoint reads `ownerScope`, not `scope`) |
 | `sortBy`/`sortDir` | allow-list: `last_activity_at`\|`created_at`\|`name` | order-by | **BLUE: new** (server hardcodes `name ASC` today) |
-| `status` | `pending`\|`verified`\|`not_required`\|`any` | `companies.company_verification_status` | **BLUE: new** (verification-status filter — shipping v1) |
+| `status` | `pending`\|`verified`\|`rejected`\|`not_required`\|`any` | `companies.company_verification_status` | **BLUE: new** (verification-status filter — shipping v1) |
 
-Dimensions (v1, locked): `["search", "rep" (relabeled Owner — see gaps), "date", "sort", "status"]` +
-`scope` inherited (page-owned mine/all, not a bar dimension). **`allowUnassigned: true`** (companies.
-`owner_id` is nullable → `__unassigned__` → IS NULL is meaningful; this is the deals default, NOT leads'
-false). Status is the opt-in variant — the mount passes `statusOptions` = verification values.
+Dimensions (v1, locked): `["search", "rep" (relabeled Owner — see gaps), "date", "sort", "status"]`.
+Scope (mine/all) stays the **existing page-level owner toggle** emitting `ownerScope` — it is NOT a bar
+dimension and NOT the bar's `scope` param (resolved: the adapter maps the page toggle → `ownerScope`, no
+backend change). **`allowUnassigned: true`** (companies.`owner_id` is nullable → `__unassigned__` → IS NULL
+is meaningful; the deals default, NOT leads' false). Status is the opt-in variant — the mount passes
+`statusOptions` = the **4** verification values; this needs RED's opt-in `statusOptions` capability (gap #3).
 
 ## OMITTED for companies (flag if any should exist)
 - **value** (companies have no deal value), **workflow** (n/a), **stalled** (n/a), **stage** (n/a).
@@ -60,16 +62,24 @@ false). Status is the opt-in variant — the mount passes `statusOptions` = veri
 2. **Generic enum/category dimension — DEFERRED to Wave 2.5** (not blocking v1). Companies `industry` and
    Properties `type` are enum-string filters with no dimension that emits a plain string. Until RED ships an
    opt-in string-select dimension, both stay as **page controls beside the bar**; Wave 2.5 folds them in.
+3. **Opt-in `statusOptions` capability — RED dependency (required for Companies v1 Status).** The shared
+   `status` dimension defaults to the **deal** status values; the Companies mount needs RED's opt-in
+   `statusOptions` prop + the multi-domain `status` param to pass verification values. These exist on RED's
+   `#577` branch but are **not on main yet**, so the Companies Status dimension is gated on them landing
+   (alongside `paramPrefix` + the Owner label). Routed to RED.
 
 ## Backend asks for BLUE (companies)
 1. `buildCompanyDateScope(window, ctx)` + `companyDisplayDateExpr` → SELECT `displayDate =
    COALESCE(last_activity_at, created_at)::date`; the predicate windows the **same** expr.
 2. **Sort allow-list**: accept `sortBy`/`sortDir` over `{last_activity_at, created_at, name}`
    (server currently hardcodes `name ASC`).
-3. **Owner-by-id**: the `listCompanies` `ownerUserId` predicate already exists — have the route accept a
-   specific `assignedRepId` (today it only forwards `req.user.id` when `ownerScope=mine`).
-4. `status` → `company_verification_status` filter param (`pending`|`verified`|`not_required`; `any`/unset
-   → omit). **Shipping in v1.**
+3. **Owner-by-id + unassigned**: the `listCompanies` `ownerUserId` eq predicate exists, but the route only
+   forwards `req.user.id` for `ownerScope=mine`. Needs (a) accept a specific `assignedRepId`, AND (b) an
+   explicit `owner_id IS NULL` branch when `assignedRepId === "__unassigned__"` — today the eq is skipped
+   for a falsy id, so an unassigned filter would silently no-op (return everything).
+4. `status` → `company_verification_status` filter param (`pending`|`verified`|`rejected`|`not_required`;
+   `any`/unset → omit). **Shipping in v1 — MUST include `rejected`** (the reject flow writes it; note the
+   client `Company` type currently omits `rejected` while the DB enum has all four — surface fix for RED/me).
 
 ## Reuse / safety (same invariants as #546/#577)
 - Every predicate returns `undefined` when unset (omit, never broken/empty SQL); `__unassigned__` → IS

@@ -12,28 +12,31 @@ Properties is proved **after** Companies and reuses whatever RED lands for the o
 
 ## Properties have NO Won/Lost AND a DERIVED date — the axis is a single-axis variant with a wrinkle
 
-Properties carry no outcome. The list leads with "last touch" (`lastActivityAt`), but **that value is
-DERIVED in the service** as `max(leads.last_activity_at, deals.last_activity_at)` — it is not a stored
-column. So the date axis is:
+Properties carry no outcome. The list leads with "last touch" (`lastActivityAt`), which `listProperties`
+DERIVES via **`buildPropertyLastActivityAt`** — it folds the property's **own persisted
+`properties.last_activity_at`** together with the related lead/deal activity maxima (NOT just
+`max(leads, deals)`). So the date axis is:
 
 | property state | date axis (filter window + Date-column display) |
 |---|---|
-| (any) | `COALESCE(<derived last_activity>, created_at)` |
+| (any) | `COALESCE(buildPropertyLastActivityAt(...), created_at)` — the SAME derived expr `listProperties` returns |
 
 `filter-axis == display-axis`. BLUE provides **`buildPropertyDateScope(window, ctx)`** +
-**`propertyDisplayDateExpr(ctx)`** SELECTed as **`displayDate`** — but the predicate must window over the
-**same `max(leads, deals)` derivation** the SELECT uses, or the filter and the shown date diverge.
-**BLUE call:** if windowing the derived max is too costly for v1, fall back to **`created_at`** as both
-filter+display axis (stored, simple) and we label the Date column "Added". Frontend `getPropertyDisplayDate`
-reads `displayDate`, falling back to `lastActivityAt ?? createdAt`.
+**`propertyDisplayDateExpr(ctx)`** SELECTed as **`displayDate`** — the predicate MUST window over the
+**exact `buildPropertyLastActivityAt` expression** `listProperties` already builds (which **includes the
+persisted `properties.last_activity_at`**, not only the lead/deal maxima), or filter and display diverge —
+e.g. a property-level touch with no lead/deal activity would be mis-dated. **BLUE call:** if windowing that
+derived expression is too costly for v1, fall back to **`created_at`** as both filter+display axis (stored,
+simple) and we label the Date column "Added". Frontend `getPropertyDisplayDate` reads `displayDate`, falling
+back to `lastActivityAt ?? createdAt`.
 
 ## Params consumed by GET /api/properties (emitted by the properties FilterBar)
 
 | param | values | predicate | backend status |
 |---|---|---|---|
 | `search` | string | existing property search (name/address/city/state/zip) | **exists** |
-| `dateFrom`/`dateTo` | YYYY-MM-DD | derived-last-activity window (or `created_at` fallback) | **BLUE: new** (`buildPropertyDateScope`) |
-| `sortBy`/`sortDir` | allow-list: `last_activity_at`\|`created_at`\|`name` | order-by | **BLUE: new** (server hardcodes `company.name, property.name, address ASC`) |
+| `dateFrom`/`dateTo` | YYYY-MM-DD | window over `buildPropertyLastActivityAt` (incl. persisted `properties.last_activity_at`) — or `created_at` fallback | **BLUE: new** (`buildPropertyDateScope`) |
+| `sortBy`/`sortDir` | allow-list: `last_activity_at`\|`created_at`\|`name` | order-by; **`last_activity_at` sorts on the same `buildPropertyLastActivityAt` expr the Date column shows** (not raw `properties.last_activity_at`) | **BLUE: new** (server hardcodes `company.name, property.name, address ASC`) |
 
 Dimensions (v1, locked): `["search", "date", "sort"]`. **No `scope`** (properties have no owner). **No
 `rep`/owner**, **no `allowUnassigned`** relevance. **`type`** stays the existing page-level ScopeToggle
@@ -60,11 +63,16 @@ Dimensions (v1, locked): `["search", "date", "sort"]`. **No `scope`** (propertie
    from v1**; revisit as a dedicated backend task if wanted.
 
 ## Backend asks for BLUE (properties)
-1. `buildPropertyDateScope(window, ctx)` + `propertyDisplayDateExpr` → `displayDate` = derived
-   `COALESCE(max(leads,deals) last_activity, created_at)::date`, windowed by the **same** expr — **or**
-   the `created_at` fallback if the derived window is too costly for v1 (BLUE's call; tell us which).
+1. `buildPropertyDateScope(window, ctx)` + `propertyDisplayDateExpr` → `displayDate` =
+   `COALESCE(buildPropertyLastActivityAt(...), created_at)::date`, windowed by the **same** expression
+   `listProperties` already returns — which **folds in the persisted `properties.last_activity_at`** plus
+   the lead/deal maxima (do **NOT** window `max(leads,deals)` alone — it would drop property-level touches).
+   **Or** the `created_at` fallback if windowing that derived expr is too costly for v1 (BLUE's call; tell
+   us which).
 2. **Sort allow-list**: `sortBy`/`sortDir` over `{last_activity_at, created_at, name}` (server hardcodes
-   the name chain today).
+   the name chain today). **`last_activity_at` must `ORDER BY` the same `buildPropertyLastActivityAt` expr
+   the Date column displays** — sorting on raw `properties.last_activity_at` would make "Newest" appear
+   out-of-order vs the shown dates.
 3. *(Engagement-Status is omitted v1 — no backend ask. Revisit only if a future wave wants it.)*
 
 ## Reuse / safety (same invariants as #546/#577)
