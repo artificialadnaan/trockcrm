@@ -119,6 +119,9 @@ describe("Monday showcase EVIDENCE builders reuse the aggregate cohort predicate
       expect(text).toContain("America/Chicago");
       expect(text).toContain("LEFT JOIN companies c ON c.id = d.company_id");
       expect(text).toContain("LEFT JOIN region_config rc ON rc.id = d.region_id");
+      // Type prefers the canonical project_type_config name over the legacy project_type text
+      expect(text).toContain("LEFT JOIN public.project_type_config ptc ON ptc.id = d.project_type_id");
+      expect(text).toContain("ptc.name");
     }
     // The Won cohort predicate is unchanged alongside the new columns (still the protected close-date guard).
     const won = extractSqlText(buildWonEvidenceSql("2026-05-24", "2026-05-30"));
@@ -131,6 +134,7 @@ describe("Monday showcase EVIDENCE builders reuse the aggregate cohort predicate
     expect(text).toContain("deal_type");
     expect(text).toContain("days_in_stage");
     expect(text).toContain("LEFT JOIN companies c ON c.id = l.company_id");
+    expect(text).toContain("LEFT JOIN public.project_type_config ptc ON ptc.id = l.project_type_id");
     // leads have no region_id -> region comes from the company only, no region_config join
     expect(text).not.toContain("region_config");
   });

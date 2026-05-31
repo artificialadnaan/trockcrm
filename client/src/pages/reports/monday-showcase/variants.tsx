@@ -98,7 +98,7 @@ export function VariantA1Funnel({ data }: { data: MondayShowcaseData }) {
                 tile
               ) : (
                 <DrillNumber
-                  request={{ metric: DEPT_TO_METRIC[d.key as "estimating" | "sent" | "won"], title: `${d.label} — this week` }}
+                  request={{ metric: DEPT_TO_METRIC[d.key as "estimating" | "sent" | "won"], title: `${d.label} — ${weekWord(data.period.mode)}` }}
                   className="block"
                 >
                   {tile}
@@ -115,6 +115,10 @@ export function VariantA1Funnel({ data }: { data: MondayShowcaseData }) {
     </div>
   );
 }
+
+// First load now defaults to "last full week" (completed), so any "this week" copy must follow the mode —
+// otherwise last week's numbers render labelled "this week" until the user notices the toggle.
+const weekWord = (mode: MondayShowcaseData["period"]["mode"]) => (mode === "to_date" ? "this week" : "last week");
 
 export function VariantA2Scoreboard({ data }: { data: MondayShowcaseData }) {
   const spikeIndex = data.weeklyTrend.slice(-8).findIndex((w) => w.spikeExcluded);
@@ -147,7 +151,7 @@ export function VariantA2Scoreboard({ data }: { data: MondayShowcaseData }) {
         ) : (
           <DrillNumber
             key={d.key}
-            request={{ metric: DEPT_TO_METRIC[d.key as "estimating" | "sent" | "won"], title: `${d.label} — this week` }}
+            request={{ metric: DEPT_TO_METRIC[d.key as "estimating" | "sent" | "won"], title: `${d.label} — ${weekWord(data.period.mode)}` }}
             className="block text-left"
           >
             {inner}
@@ -188,8 +192,8 @@ export function VariantA3Lanes({ data }: { data: MondayShowcaseData }) {
                 <span className="text-sm font-semibold text-slate-700">{lane.label}</span>
               </div>
               <span className="text-xs text-slate-400">
-                this week{" "}
-                <DrillNumber request={{ metric: DEPT_TO_METRIC[lane.key], title: `${lane.label} — this week` }} className={`font-semibold ${accent.text} ${DRILL_UNDERLINE} px-0.5`}>
+                {weekWord(data.period.mode)}{" "}
+                <DrillNumber request={{ metric: DEPT_TO_METRIC[lane.key], title: `${lane.label} — ${weekWord(data.period.mode)}` }} className={`font-semibold ${accent.text} ${DRILL_UNDERLINE} px-0.5`}>
                   {int(current)}
                 </DrillNumber>{" "}
                 · 8wk avg <span className="tabular-nums">{avg.toFixed(1)}</span>{" "}
@@ -223,7 +227,7 @@ export function VariantA3Lanes({ data }: { data: MondayShowcaseData }) {
 // ---------------- Exec hero (split-out tile) ----------------
 
 export function VariantExecHero({ data }: { data: MondayShowcaseData }) {
-  const periodLabel = data.period.mode === "to_date" ? "this week" : "last week";
+  const periodLabel = weekWord(data.period.mode);
   const tiles: Array<{ label: string; metric: EvidenceMetric; accent: AccentKey; value: { count: number; value: { amount: number; basisLabel: string } } }> = [
     { label: "Won", metric: "won", accent: "won", value: data.execHero.won },
     { label: "Sent", metric: "sent", accent: "sent", value: data.execHero.sent },

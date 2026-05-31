@@ -687,7 +687,7 @@ function dealEvidenceSelectSql(valueSql: SQL, cohortDateExpr: string): SQL {
     (${sql.raw(cohortDateExpr)})::date AS cohort_date,
     COALESCE(c.name, '') AS company_name,
     COALESCE(NULLIF(c.region, ''), NULLIF(rc.name, ''), '') AS region,
-    COALESCE(d.project_type, '') AS deal_type,
+    COALESCE(NULLIF(ptc.name, ''), NULLIF(d.project_type, ''), '') AS deal_type,
     ((now() AT TIME ZONE 'America/Chicago')::date - (d.stage_entered_at AT TIME ZONE 'America/Chicago')::date)::int AS days_in_stage
   `;
 }
@@ -705,6 +705,7 @@ export function buildWonEvidenceSql(from: string, to: string, repId?: string | n
     LEFT JOIN ${users} u ON u.id = d.assigned_rep_id
     LEFT JOIN companies c ON c.id = d.company_id
     LEFT JOIN region_config rc ON rc.id = d.region_id
+    LEFT JOIN public.project_type_config ptc ON ptc.id = d.project_type_id
     WHERE COALESCE(d.is_test_data, false) = false
       AND ${aliasedActiveDealCountFilterSql("d")}
       AND psc.slug IN (${slugInList(WON_STAGE_SLUGS)})
@@ -742,6 +743,7 @@ export function buildStageEntryEvidenceSql(
     LEFT JOIN ${users} u ON u.id = d.assigned_rep_id
     LEFT JOIN companies c ON c.id = d.company_id
     LEFT JOIN region_config rc ON rc.id = d.region_id
+    LEFT JOIN public.project_type_config ptc ON ptc.id = d.project_type_id
     WHERE COALESCE(d.is_test_data, false) = false
       AND ${aliasedReportableDealFilterSql("d")}${repScopeSql("d", repId)}
     ORDER BY value DESC, d.name
@@ -764,6 +766,7 @@ export function buildProjectionEvidenceSql(repId?: string | null, band?: Project
     LEFT JOIN ${users} u ON u.id = d.assigned_rep_id
     LEFT JOIN companies c ON c.id = d.company_id
     LEFT JOIN region_config rc ON rc.id = d.region_id
+    LEFT JOIN public.project_type_config ptc ON ptc.id = d.project_type_id
     WHERE COALESCE(d.is_test_data, false) = false
       AND ${aliasedReportableDealFilterSql("d")}
       AND d.is_active = true
@@ -790,12 +793,13 @@ export function buildLeadEvidenceSql(repId?: string | null, leadStage?: string):
            l.created_at::date AS cohort_date,
            COALESCE(c.name, '') AS company_name,
            COALESCE(NULLIF(c.region, ''), '') AS region,
-           COALESCE(l.project_type, '') AS deal_type,
+           COALESCE(NULLIF(ptc.name, ''), NULLIF(l.project_type, ''), '') AS deal_type,
            ((now() AT TIME ZONE 'America/Chicago')::date - (l.stage_entered_at AT TIME ZONE 'America/Chicago')::date)::int AS days_in_stage
     FROM ${leads} l
     JOIN ${pipelineStageConfig} psc ON psc.id = l.stage_id
     LEFT JOIN ${users} u ON u.id = l.assigned_rep_id
     LEFT JOIN companies c ON c.id = l.company_id
+    LEFT JOIN public.project_type_config ptc ON ptc.id = l.project_type_id
     WHERE l.is_active = true
       AND l.status = 'open'
       AND COALESCE(l.is_test_data, false) = false

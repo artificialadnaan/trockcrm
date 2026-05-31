@@ -84,7 +84,7 @@ beforeAll(async () => {
       assigned_rep_id uuid, is_test_data boolean NOT NULL DEFAULT false, on_hold boolean NOT NULL DEFAULT false,
       is_active boolean NOT NULL DEFAULT true, won_closed_date date, expected_close_date date,
       dd_estimate numeric, bid_estimate numeric, awarded_amount numeric, bid_board_total_sales numeric,
-      company_id uuid, region_id uuid, project_type text, stage_entered_at timestamptz
+      company_id uuid, region_id uuid, project_type text, project_type_id uuid, stage_entered_at timestamptz
     );
     CREATE TABLE deal_stage_history (
       id uuid PRIMARY KEY DEFAULT gen_random_uuid(), deal_id uuid NOT NULL, to_stage_id uuid NOT NULL,
@@ -94,12 +94,13 @@ beforeAll(async () => {
       id uuid PRIMARY KEY, name text NOT NULL, stage_id uuid NOT NULL, assigned_rep_id uuid,
       status text NOT NULL DEFAULT 'open', is_active boolean NOT NULL DEFAULT true,
       is_test_data boolean NOT NULL DEFAULT false, created_at timestamptz NOT NULL DEFAULT now(),
-      company_id uuid, project_type text, stage_entered_at timestamptz
+      company_id uuid, project_type text, project_type_id uuid, stage_entered_at timestamptz
     );
-    -- Additive enrichment joins for the drill-down (company/region). Empty here: LEFT JOINs return NULL,
-    -- proving the new columns DON'T change the reconciling cohort (counts/$ below are unaffected).
+    -- Additive enrichment joins for the drill-down (company/region/type). Empty here: LEFT JOINs return
+    -- NULL, proving the new columns DON'T change the reconciling cohort (counts/$ below are unaffected).
     CREATE TABLE companies (id uuid PRIMARY KEY, name text NOT NULL, region text);
     CREATE TABLE region_config (id uuid PRIMARY KEY, name text NOT NULL);
+    CREATE TABLE project_type_config (id uuid PRIMARY KEY, name text NOT NULL);
 
     INSERT INTO users (id, display_name) VALUES
       ('${REP_A}', 'Alice Rep'), ('${REP_B}', 'Bob Rep');

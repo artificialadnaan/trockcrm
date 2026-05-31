@@ -21,6 +21,7 @@ const REP = U("a01");
 const ST = { won: U("57001"), leadNew: U("57005") };
 const CO = { acme: U("c0001"), beta: U("c0002") };
 const RC = { northTx: U("d0001") };
+const PT = { commercial: U("e0001") };
 const D = { won1: U("11001"), won2: U("11002") };
 const L = { l1: U("41001") };
 const NOW = new Date("2026-05-27T18:00:00Z");
@@ -40,18 +41,19 @@ beforeAll(async () => {
     );
     CREATE TABLE companies (id uuid PRIMARY KEY, name text NOT NULL, region text);
     CREATE TABLE region_config (id uuid PRIMARY KEY, name text NOT NULL);
+    CREATE TABLE project_type_config (id uuid PRIMARY KEY, name text NOT NULL);
     CREATE TABLE deals (
       id uuid PRIMARY KEY, deal_number text, name text NOT NULL, stage_id uuid NOT NULL,
       assigned_rep_id uuid, is_test_data boolean NOT NULL DEFAULT false, on_hold boolean NOT NULL DEFAULT false,
       is_active boolean NOT NULL DEFAULT true, won_closed_date date, expected_close_date date,
       dd_estimate numeric, bid_estimate numeric, awarded_amount numeric, bid_board_total_sales numeric,
-      company_id uuid, region_id uuid, project_type text, stage_entered_at timestamptz
+      company_id uuid, region_id uuid, project_type text, project_type_id uuid, stage_entered_at timestamptz
     );
     CREATE TABLE leads (
       id uuid PRIMARY KEY, name text NOT NULL, stage_id uuid NOT NULL, assigned_rep_id uuid,
       status text NOT NULL DEFAULT 'open', is_active boolean NOT NULL DEFAULT true,
       is_test_data boolean NOT NULL DEFAULT false, created_at timestamptz NOT NULL DEFAULT now(),
-      company_id uuid, project_type text, stage_entered_at timestamptz
+      company_id uuid, project_type text, project_type_id uuid, stage_entered_at timestamptz
     );
 
     INSERT INTO users (id, display_name) VALUES ('${REP}', 'Alice Rep');
@@ -62,21 +64,24 @@ beforeAll(async () => {
       ('${CO.acme}', 'Acme Roofing', 'DFW'),       -- has its own region text
       ('${CO.beta}', 'Beta Builders', NULL);       -- no company region -> falls back to region_config
     INSERT INTO region_config (id, name) VALUES ('${RC.northTx}', 'North Texas');
+    INSERT INTO project_type_config (id, name) VALUES ('${PT.commercial}', 'Commercial');
 
-    -- won1: Acme, region from the COMPANY ('DFW'), Commercial, 12 days in stage
+    -- won1: Acme, region from the COMPANY ('DFW'); Type from the CANONICAL project_type_config ('Commercial')
+    -- even though the legacy project_type text is stale; 12 days in stage.
     INSERT INTO deals (id, deal_number, name, stage_id, assigned_rep_id, won_closed_date, awarded_amount,
-                       company_id, region_id, project_type, stage_entered_at) VALUES
+                       company_id, region_id, project_type, project_type_id, stage_entered_at) VALUES
       ('${D.won1}','W-1','Won Acme','${ST.won}','${REP}','2026-05-26', 100000,
-       '${CO.acme}', NULL, 'Commercial', now() - interval '12 days');
-    -- won2: Beta (no company region) but region_id -> region_config 'North Texas' (the FALLBACK), Residential
+       '${CO.acme}', NULL, 'Comm (stale)', '${PT.commercial}', now() - interval '12 days');
+    -- won2: Beta (no company region) but region_id -> region_config 'North Texas' (FALLBACK); Type falls back
+    -- to the legacy text ('Residential') since project_type_id is null.
     INSERT INTO deals (id, deal_number, name, stage_id, assigned_rep_id, won_closed_date, awarded_amount,
-                       company_id, region_id, project_type, stage_entered_at) VALUES
+                       company_id, region_id, project_type, project_type_id, stage_entered_at) VALUES
       ('${D.won2}','W-2','Won Beta','${ST.won}','${REP}','2026-05-25', 50000,
-       '${CO.beta}', '${RC.northTx}', 'Residential', now() - interval '3 days');
+       '${CO.beta}', '${RC.northTx}', 'Residential', NULL, now() - interval '3 days');
 
     -- lead: company Acme -> region 'DFW' via the company, Residential, 5 days in stage
-    INSERT INTO leads (id, name, stage_id, assigned_rep_id, status, is_active, company_id, project_type, stage_entered_at) VALUES
-      ('${L.l1}','Lead Acme','${ST.leadNew}','${REP}','open', true, '${CO.acme}', 'Residential', now() - interval '5 days');
+    INSERT INTO leads (id, name, stage_id, assigned_rep_id, status, is_active, company_id, project_type, project_type_id, stage_entered_at) VALUES
+      ('${L.l1}','Lead Acme','${ST.leadNew}','${REP}','open', true, '${CO.acme}', 'Residential', NULL, now() - interval '5 days');
   `);
   tdb = drizzle(pg);
 });
@@ -100,7 +105,7 @@ describe("enriched drill-down columns populate and stay reconciled", () => {
     const acme = ev.records.find((r) => r.dealNumber === "W-1")!;
     expect(acme.companyName).toBe("Acme Roofing");
     expect(acme.region).toBe("DFW"); // from the company
-    expect(acme.dealType).toBe("Commercial");
+    expect(acme.dealType).toBe("Commercial"); // canonical project_type_config name, NOT the stale "Comm (stale)" legacy text
     expect(acme.daysInStage).toBeGreaterThanOrEqual(11);
     expect(acme.daysInStage).toBeLessThanOrEqual(13);
 
@@ -108,7 +113,7 @@ describe("enriched drill-down columns populate and stay reconciled", () => {
     const beta = ev.records.find((r) => r.dealNumber === "W-2")!;
     expect(beta.companyName).toBe("Beta Builders");
     expect(beta.region).toBe("North Texas");
-    expect(beta.dealType).toBe("Residential");
+    expect(beta.dealType).toBe("Residential"); // legacy fallback: no project_type_id, so the legacy text is used
   });
 
   it("lead evidence carries company/region(via company)/type/age, with no deal value", async () => {
