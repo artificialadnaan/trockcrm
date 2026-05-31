@@ -389,4 +389,33 @@ describe("DealsListSection — FilterBar (URL) mode (Slice 7 proving ground)", (
     (URL as { createObjectURL?: unknown }).createObjectURL = realCreate;
     (URL as { revokeObjectURL?: unknown }).revokeObjectURL = realRevoke;
   });
+
+  // Param namespace (paramPrefix): when the bar mounts on a surface that already owns bare URL params
+  // (the director/stage drill-downs), it reads/writes its keys under a prefix (fb_) so the two URL
+  // spaces stay disjoint. The mount threads filterBar.paramPrefix into useFilterState(prefix).
+  describe("paramPrefix namespace (drill-down mounts share a URL with the host page)", () => {
+    it("reads the bar's NAMESPACED (fb_) params when a paramPrefix is set", async () => {
+      await renderFB(
+        "/deals?fb_dateFrom=2026-05-01&fb_dateTo=2026-05-27&fb_stageIds=stage-opportunity",
+        {},
+        { ...FB_PROP, paramPrefix: "fb_" }
+      );
+      const call = lastDealsCall();
+      expect(call.dateFrom).toBe("2026-05-01");
+      expect(call.dateTo).toBe("2026-05-27");
+      expect(call.stageIds).toEqual(["stage-opportunity"]);
+    });
+
+    it("does NOT read a BARE host param when a paramPrefix is set (namespace isolation)", async () => {
+      // A bare ?dateFrom belongs to the host page's URL space, not the bar's — with the prefix on, the
+      // bar must ignore it (it reads only fb_dateFrom), so a host date can't leak into the bar's query.
+      await renderFB("/deals?dateFrom=2026-05-01", {}, { ...FB_PROP, paramPrefix: "fb_" });
+      expect(lastDealsCall().dateFrom).toBeUndefined();
+    });
+
+    it("still reads BARE params when NO paramPrefix is set (the pipeline/base mount is unchanged)", async () => {
+      await renderFB("/deals?dateFrom=2026-05-01", {}, FB_PROP);
+      expect(lastDealsCall().dateFrom).toBe("2026-05-01");
+    });
+  });
 });

@@ -108,6 +108,14 @@ interface DealsListSectionProps {
      */
     defaultStageIds?: string[];
     terminalStageIds?: string[];
+    /**
+     * URL param namespace for surfaces that already own bare URL params (the director/stage
+     * drill-downs, where scope/period/filter/page live un-prefixed). When set, the bar reads/writes
+     * its keys as `${paramPrefix}${key}` (fb_stageIds, fb_dateFrom, …) via useFilterState(prefix), so a
+     * bar control never clobbers the host's params. Omit (default "") at the pipeline/base mount, where
+     * the bar owns the whole URL — behavior is byte-identical to today.
+     */
+    paramPrefix?: string;
   };
 }
 
@@ -598,8 +606,10 @@ export function DealsListSection({
 }: DealsListSectionProps) {
   const navigate = useNavigate();
   // Slice 7: opt-in URL-backed filter state. useFilterState is always called (hooks can't be
-  // conditional); its value only drives the query/UI when filterBarMode is on.
-  const { filters: urlFilters, setFilters, resetFilters } = useFilterState();
+  // conditional); its value only drives the query/UI when filterBarMode is on. The optional
+  // paramPrefix namespaces the bar's keys (fb_*) on drill-down surfaces that share their URL with a
+  // host page; default "" = bare keys (the pipeline/base mount), so existing callers are unchanged.
+  const { filters: urlFilters, setFilters, resetFilters } = useFilterState(filterBar?.paramPrefix ?? "");
   const filterBarMode = Boolean(filterBar);
   // D-15: legacy "outcome" axis — the rep drill-down feeds an externalDateRange that
   // must narrow the canonical outcome window (dateFrom/dateTo) and DISPLAY the same
