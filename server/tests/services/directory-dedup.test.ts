@@ -1,4 +1,11 @@
 import { describe, expect, it, vi } from "vitest";
+import { companies } from "@trock-crm/shared/schema";
+
+// Neutralize the denormalized email-stats refresh (it issues raw SQL via execute,
+// which would otherwise consume the advisory-lock mock's queue in the scan test).
+vi.mock("../../src/modules/email/stats-service.js", () => ({
+  refreshEntityEmailStats: vi.fn().mockResolvedValue(undefined),
+}));
 import {
   classifyDirectoryMatch,
   normalizeDirectoryName,
@@ -71,35 +78,69 @@ describe("directory dedup matching", () => {
     const first = await scanDirectoryDuplicates(tenantDb as any, { autoMerge: true });
     const second = await scanDirectoryDuplicates(tenantDb as any, { autoMerge: true });
 
+    // Lock acquired on the first scan -> exactly one auto-merge; the second scan
+    // fails to acquire the lock -> zero. (The merge now re-points the full
+    // reference map, so it issues many updates; we assert it ran at all, plus the
+    // two lock attempts.)
     expect(first.autoMerged).toBe(1);
     expect(second.autoMerged).toBe(0);
-    expect(tenantDb.update).toHaveBeenCalledTimes(3);
+    expect(tenantDb.update).toHaveBeenCalled();
     expect(tenantDb.execute).toHaveBeenCalledTimes(2);
   });
 });
 
 function createTenantDbForScan(companyRows: any[], lockResults: Array<{ rows: Array<{ locked: boolean }> }>) {
-  const selectQueue = [companyRows, [], companyRows, []];
+  // The bulk company/contact scans use .limit(); the merge's winner/loser fetch
+  // uses .limit(1); the merge's moved-row captures await .where() directly. The
+  // chain below serves all three: .where() is a thenable (capture -> [] moved
+  // rows) that also exposes .limit().
+  let companyByIdFetches = 0;
   const update = vi.fn(() => ({
     set: vi.fn(() => ({
-      where: vi.fn().mockResolvedValue(undefined),
+      where: vi.fn(() => {
+        // Re-point UPDATEs use .returning() to capture moved ids; plain updates await directly.
+        const result: any = Promise.resolve(undefined);
+        result.returning = vi.fn().mockResolvedValue([]);
+        return result;
+      }),
     })),
   }));
   const insert = vi.fn(() => ({
-    values: vi.fn(() => ({
-      onConflictDoUpdate: vi.fn().mockResolvedValue(undefined),
-    })),
+    values: vi.fn(() => {
+      const result: any = Promise.resolve(undefined);
+      result.onConflictDoUpdate = vi.fn().mockResolvedValue(undefined);
+      return result;
+    }),
   }));
+
+  const select = vi.fn(() => {
+    let currentTable: unknown;
+    const chain: any = {
+      from: vi.fn((table: unknown) => {
+        currentTable = table;
+        return chain;
+      }),
+      where: vi.fn(() => ({
+        then: (resolve: (rows: unknown) => unknown) => resolve([]),
+        limit: vi.fn((n: number) => {
+          if (currentTable === companies) {
+            if (n === 1) {
+              const row = companyRows[companyByIdFetches] ?? companyRows[companyRows.length - 1];
+              companyByIdFetches += 1;
+              return Promise.resolve([row]);
+            }
+            return Promise.resolve(companyRows);
+          }
+          return Promise.resolve([]);
+        }),
+      })),
+    };
+    return chain;
+  });
 
   return {
     execute: vi.fn().mockImplementation(async () => lockResults.shift() ?? { rows: [{ locked: true }] }),
-    select: vi.fn(() => ({
-      from: vi.fn(() => ({
-        where: vi.fn(() => ({
-          limit: vi.fn().mockResolvedValue(selectQueue.shift() ?? []),
-        })),
-      })),
-    })),
+    select,
     update,
     insert,
   };
