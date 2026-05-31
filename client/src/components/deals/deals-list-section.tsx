@@ -15,7 +15,7 @@ import {
   type PipelineStageTableColumn,
 } from "@/components/pipeline/pipeline-stage-table";
 import { TerminalDateFilterControl } from "@/components/pipeline/terminal-date-filter-control";
-import { useDeals, type Deal, type DealFilters } from "@/hooks/use-deals";
+import { buildDealsQueryParams, useDeals, type Deal, type DealFilters } from "@/hooks/use-deals";
 import { SearchInput } from "@/components/ui/search-input";
 import { useKeepPreviousData } from "@/hooks/use-keep-previous-data";
 import { usePipelineStages, type PipelineStage } from "@/hooks/use-pipeline-config";
@@ -175,6 +175,18 @@ function renderStageChip(label: string) {
 function escapeCsvCell(value: string | number | null | undefined) {
   const text = value == null ? "" : String(value);
   return /[",\n]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text;
+}
+
+/** Serialize rows to CSV and trigger a client-side download. Shared by the legacy and FilterBar export paths. */
+function triggerCsvDownload(rows: (string | number | null | undefined)[][], filename: string) {
+  const csv = rows.map((row) => row.map(escapeCsvCell).join(",")).join("\n");
+  const blob = new Blob([csv], { type: "text/csv;charset=utf-8" });
+  const url = URL.createObjectURL(blob);
+  const anchor = document.createElement("a");
+  anchor.href = url;
+  anchor.download = filename;
+  anchor.click();
+  URL.revokeObjectURL(url);
 }
 
 function DealsListPagination({
@@ -482,6 +494,57 @@ export async function fetchAllFilteredDeals(input: {
   };
 }
 
+/**
+ * FilterBar-aware export fetch: paginate /api/deals with the SAME DealFilters the FilterBar list
+ * queries (serialized by buildDealsQueryParams — the canonical #546 axis: outcome-aware dateFrom/dateTo,
+ * status, value, workflow, region, the __unassigned__ sentinel, etc.), so the CSV reflects exactly
+ * what the user is looking at — not the legacy created/updated axis. page/limit are overridden to walk
+ * full pages from 1 (the list's page is ignored). Capped at MAX_EXPORT_PAGES like the legacy export.
+ */
+export async function fetchAllDealsForFilters(input: { filters: DealFilters; apiClient?: typeof api }) {
+  const apiClient = input.apiClient ?? api;
+  const limit = EXPORT_PAGE_SIZE;
+  const query = (page: number) => buildDealsQueryParams({ ...input.filters, page, limit }).toString();
+  const first = await apiClient<{ deals: Deal[]; pagination: { totalPages: number } }>(`/deals?${query(1)}`);
+  const pages = [first.deals];
+  const totalPages = Math.max(1, first.pagination.totalPages || 1);
+  const pagesToFetch = Math.min(totalPages, MAX_EXPORT_PAGES);
+
+  for (let page = 2; page <= pagesToFetch; page += 1) {
+    const next = await apiClient<{ deals: Deal[]; pagination: { totalPages: number } }>(`/deals?${query(page)}`);
+    pages.push(next.deals);
+  }
+
+  return {
+    deals: pages.flat(),
+    totalPages,
+    pagesFetched: pagesToFetch,
+    truncated: totalPages > MAX_EXPORT_PAGES,
+    maxRows: pagesToFetch * limit,
+  };
+}
+
+/** CSV rows for the FilterBar-mode export. The Date column is the canonical outcome-aware
+ *  getDealDisplayDate (filter-axis == display-axis) — matching the list's Date column, not the legacy
+ *  "Last Touch" (lastActivityAt) axis. */
+export function buildFilterBarCsvRows(
+  deals: Deal[],
+  maps: { stageNameById: Map<string, string>; assigneeNameById: Map<string, string> }
+): (string | number)[][] {
+  return [
+    ["Deal", "Project Number", "Owner", "Stage", "Days", "Value", "Date"],
+    ...deals.map((deal) => [
+      deal.name,
+      getDealDisplayNumber(deal).label,
+      deal.assignedRepName ?? (deal.assignedRepId ? maps.assigneeNameById.get(deal.assignedRepId) : undefined) ?? "",
+      deal.stageName ?? maps.stageNameById.get(deal.stageId) ?? "",
+      effectiveStageAgeDays(deal),
+      getEffectiveDealValue(deal),
+      getDealDisplayDate(deal) ?? "",
+    ]),
+  ];
+}
+
 export function DealsListSection({
   scope,
   workflowFamily = "deal",
@@ -719,6 +782,19 @@ export function DealsListSection({
   const isOldestSortActive = sort.key === "created_at" && sort.dir === "asc";
 
   const exportCsv = async () => {
+    // FilterBar mode: export EXACTLY what the list shows — the same #546 filters (outcome-aware date,
+    // status, value, …) via fetchAllDealsForFilters, and the canonical displayDate axis in the Date
+    // column. Mirrors the on-screen list instead of the legacy created/updated export axis.
+    if (filterBarMode) {
+      const result = await fetchAllDealsForFilters({ filters: filterBarDealsArgs });
+      if (result.truncated) {
+        toast.info(
+          `Exported first ${result.maxRows.toLocaleString()} rows (${result.pagesFetched} pages). Narrow filters for full export.`
+        );
+      }
+      triggerCsvDownload(buildFilterBarCsvRows(result.deals, { stageNameById, assigneeNameById }), "deals-list.csv");
+      return;
+    }
     if (!listQueryState.enabled) {
       toast.error(stagesError ? "Pipeline stage metadata failed to load." : "Pipeline stages are still loading.");
       return;
@@ -764,14 +840,7 @@ export function DealsListSection({
         ];
       }),
     ];
-    const csv = rows.map((row) => row.map(escapeCsvCell).join(",")).join("\n");
-    const blob = new Blob([csv], { type: "text/csv;charset=utf-8" });
-    const url = URL.createObjectURL(blob);
-    const anchor = document.createElement("a");
-    anchor.href = url;
-    anchor.download = "deals-list.csv";
-    anchor.click();
-    URL.revokeObjectURL(url);
+    triggerCsvDownload(rows, "deals-list.csv");
   };
 
   const sortHeader = (key: DealListSortState["key"], label: string) => (
