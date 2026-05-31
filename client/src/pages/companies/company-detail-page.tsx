@@ -364,17 +364,17 @@ export function CompanyDetailPage() {
     <>
       <Link
         to={`/leads/new?${newLeadParams.toString()}`}
-        className={cn(buttonVariants({ size: "sm" }), "bg-brand-red text-white hover:bg-brand-red/90")}
+        className={cn(buttonVariants({ size: "sm" }), "min-h-[44px] md:min-h-0 bg-brand-red text-white hover:bg-brand-red/90")}
       >
         <Plus className="h-4 w-4" />
         New lead
       </Link>
-      <Link to={`/companies/${company.id}/edit`} className={cn(buttonVariants({ variant: "outline", size: "sm" }))}>
+      <Link to={`/companies/${company.id}/edit`} className={cn(buttonVariants({ variant: "outline", size: "sm" }), "min-h-[44px] md:min-h-0")}>
         <Edit className="h-4 w-4" />
         Edit
       </Link>
       {hubspotUrl ? (
-        <a href={hubspotUrl} target="_blank" rel="noreferrer" className={cn(buttonVariants({ variant: "outline", size: "sm" }))}>
+        <a href={hubspotUrl} target="_blank" rel="noreferrer" className={cn(buttonVariants({ variant: "outline", size: "sm" }), "min-h-[44px] md:min-h-0")}>
           <ExternalLink className="h-4 w-4" />
           HubSpot
         </a>
@@ -392,7 +392,7 @@ export function CompanyDetailPage() {
       <DropdownMenu>
         <DropdownMenuTrigger
           render={
-            <Button variant="outline" size="icon">
+            <Button variant="outline" size="icon" className="size-11 md:size-8">
               <MoreHorizontal className="h-4 w-4" />
             </Button>
           }

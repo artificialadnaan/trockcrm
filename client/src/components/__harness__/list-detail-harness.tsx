@@ -1,6 +1,8 @@
 import type { ReactNode } from "react";
 import { ContactCard } from "@/pages/contacts/contact-list-page";
 import type { Contact } from "@/hooks/use-contacts";
+import { CompanyCard } from "@/pages/companies/company-list-page";
+import type { Company } from "@/hooks/use-companies";
 
 // Dev-only preview for the Contacts/Companies/Properties list+detail mobile pass.
 // Real presentational components, mock data, no backend / no auth. Served by vite
@@ -86,6 +88,59 @@ const harnessContacts: Contact[] = [
   }),
 ];
 
+function mockCompany(overrides: Partial<Company>): Company {
+  return {
+    id: "co1",
+    name: "T Rock Owner Group",
+    city: "Dallas",
+    state: "TX",
+    domain: "owner.example.com",
+    ownerUserId: "u1",
+    ownerUserName: "Alicia Adams",
+    propertiesCount: 3,
+    contactsCount: 4,
+    contactCount: 4,
+    activeDealsCount: 2,
+    dealCount: 2,
+    pipelineValue: "750000",
+    lastActivityAt: "2026-04-11T09:00:00.000Z",
+    ...overrides,
+  } as unknown as Company;
+}
+
+const harnessCompanies: Company[] = [
+  mockCompany({}),
+  mockCompany({
+    id: "co2",
+    name: "Northgate Facilities",
+    city: "Fort Worth",
+    domain: null,
+    propertiesCount: 1,
+    contactsCount: 2,
+    contactCount: 2,
+    activeDealsCount: 0,
+    dealCount: 1,
+    pipelineValue: "0",
+    lastActivityAt: "2025-12-02T09:00:00.000Z",
+  }),
+  mockCompany({
+    id: "co3",
+    name: "Unowned Account",
+    city: null,
+    state: null,
+    domain: null,
+    ownerUserId: null,
+    ownerUserName: null,
+    propertiesCount: 0,
+    contactsCount: 0,
+    contactCount: 0,
+    activeDealsCount: 0,
+    dealCount: 0,
+    pipelineValue: "0",
+    lastActivityAt: null,
+  }),
+];
+
 export function ListDetailHarness() {
   return (
     <div className="mx-auto max-w-md space-y-8 bg-[#F5F4F2] p-4 pb-12">
@@ -117,6 +172,35 @@ export function ListDetailHarness() {
           <div className="space-y-2 rounded-xl border border-emerald-200 bg-white p-2">
             {harnessContacts.map((contact) => (
               <ContactCard key={contact.id} contact={contact} ownerSlot={<MockOwnerControl />} />
+            ))}
+          </div>
+        </div>
+      </Section>
+
+      <Section title="Companies list — table stacks to cards (<md)">
+        <div>
+          <p className="mb-1 text-[10px] font-black uppercase tracking-widest text-red-600">Before</p>
+          <div className="rounded-xl border border-dashed border-red-200 bg-white p-2">
+            <p className="mb-2 text-xs text-slate-500">8-column table → horizontal scroll wall at 390px (drag sideways):</p>
+            <div className="overflow-x-auto">
+              <div className="flex w-[820px] items-center gap-6 whitespace-nowrap border-b border-slate-200 pb-2 text-[11px] font-black uppercase tracking-[0.16em] text-slate-400">
+                <span>Company</span>
+                <span>Owner</span>
+                <span>Properties</span>
+                <span>Contacts</span>
+                <span>Active deals</span>
+                <span>Pipeline</span>
+                <span>Last activity</span>
+                <span>›</span>
+              </div>
+            </div>
+          </div>
+        </div>
+        <div>
+          <p className="mb-1 text-[10px] font-black uppercase tracking-widest text-emerald-600">After</p>
+          <div className="space-y-2 rounded-xl border border-emerald-200 bg-white p-2">
+            {harnessCompanies.map((company) => (
+              <CompanyCard key={company.id} company={company} ownerSlot={<MockOwnerControl />} />
             ))}
           </div>
         </div>
