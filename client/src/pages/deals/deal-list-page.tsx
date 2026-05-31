@@ -70,6 +70,10 @@ type DashboardDealListView = {
   boardMode: "all" | "active" | "won" | "at_risk";
   listBaseFilters: Partial<DealFilters>;
   listInitialSort: DealListSortState;
+  // D-12: the embedded list's date axis. "outcome" (active-pipeline drill-down) routes
+  // the window to the canonical outcome filter (dateFrom/dateTo) + displayDate display;
+  // other drill-downs keep the default "updated".
+  listDateField?: "updated" | "created" | "outcome";
   showEmbeddedList: boolean;
   initialStageSlugs: string[];
   boardStageSlugs: string[];
@@ -182,13 +186,18 @@ export function getDashboardDealListView(input: {
       title: "Active Pipeline",
       subtitle: period ? `Open-stage deals for ${periodLabel}.` : "Open-stage deals across the current pipeline.",
       boardMode: "active",
+      // D-12: window the embedded list on the CANONICAL outcome axis (dateFrom/dateTo ->
+      // buildDealOutcomeDateScope: open rows bound by stage_entered_at) instead of
+      // updated_at — so a deal's shown date is the axis it filtered on and "Open-stage
+      // deals for MTD" stops leaking Lost/months-old deals merely touched in the window.
       listBaseFilters: periodRange
         ? {
-            updatedFrom: periodRange.from,
-            updatedTo: periodRange.to,
+            dateFrom: periodRange.from,
+            dateTo: periodRange.to,
           }
         : {},
-      listInitialSort: { key: "updated_at", dir: "desc" },
+      listInitialSort: { key: "display_date", dir: "desc" },
+      listDateField: "outcome",
       showEmbeddedList: true,
       initialStageSlugs: [],
       boardStageSlugs: [],
@@ -1236,6 +1245,7 @@ function DealListPageContent({ role, userId }: { role: string; userId: string })
               eyebrow={dashboardView.eyebrow}
               visibleStages={drilldownVisibleStages}
               baseFilters={layeredListBaseFilters}
+              dateField={dashboardView.listDateField}
               initialSort={dashboardView.listInitialSort}
               initialStageSlugs={dashboardView.initialStageSlugs}
               lockedOwnerId={selectedRepFilter}
