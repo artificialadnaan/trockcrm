@@ -1,0 +1,120 @@
+import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { PGlite } from "@electric-sql/pglite";
+import { drizzle } from "drizzle-orm/pglite";
+import { sql, type SQL } from "drizzle-orm";
+import {
+  buildWonDateSql,
+  buildForecastMonthBucketDateSql,
+} from "../../../src/modules/reports/performance-tier2-service.js";
+import { WON_STAGE_SLUGS, LOST_STAGE_SLUGS } from "../../../src/modules/shared/pipeline-terminal-stages.js";
+
+/**
+ * REAL-SQL (PGlite) by-construction proof for the perf-tier2 Won-date migration.
+ *
+ * FIX-1 (buildWonDateSql): the WON cohort is now windowed by the canonical app-owned
+ * column deals.won_closed_date (mirroring dashboard getWonCloseSummary: IS NOT NULL +
+ * >= from + <= to), so a deal merely TOUCHED in-period (updated_at) or reseed-contaminated
+ * (actual_close_date) is no longer counted as won-in-period. The non-WON (lost) branch is
+ * intentionally left on the legacy window so the win-rate DENOMINATOR is unchanged.
+ *
+ * FIX-3 (buildForecastMonthBucketDateSql): a WON deal lands in the month of its canonical
+ * won_closed_date (not its expected/plan close month); OPEN deals fall through to
+ * expected_close_date exactly as before.
+ */
+const U = (s: string) => `00000000-0000-0000-0000-${s.padStart(12, "0")}`;
+const WON_SLUG = WON_STAGE_SLUGS[0];
+const LOST_SLUG = LOST_STAGE_SLUGS[0];
+const OPEN_SLUG = "opportunity";
+const ST = { won: U("57001"), lost: U("57002"), open: U("57003") };
+const D = {
+  wonIn: U("11001"), wonTouched: U("11002"), wonOut: U("11003"),
+  lostIn: U("11004"), lostOut: U("11005"), openIn: U("11006"),
+  bWon: U("12001"), bOpen: U("12002"), bFallback: U("12003"),
+};
+
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+let tdb: any;
+let pg: PGlite;
+function execRows(q: SQL): Promise<Array<Record<string, unknown>>> {
+  return tdb
+    .execute(q)
+    .then((r: unknown) => (Array.isArray(r) ? r : ((r as { rows?: unknown[] })?.rows ?? [])) as Array<Record<string, unknown>>);
+}
+
+const filters = { dateFrom: "2026-03-01", dateTo: "2026-03-31", office: undefined, ownerIds: [], ownerNames: [] };
+
+beforeAll(async () => {
+  pg = new PGlite();
+  await pg.exec(`
+    CREATE TABLE pipeline_stage_config (id uuid PRIMARY KEY, slug text UNIQUE NOT NULL);
+    CREATE TABLE deals (
+      id uuid PRIMARY KEY, stage_id uuid NOT NULL,
+      won_closed_date date, expected_close_date date, actual_close_date date,
+      contract_signed_at timestamptz, contract_signed_date date, updated_at timestamptz
+    );
+    INSERT INTO pipeline_stage_config (id, slug) VALUES
+      ('${ST.won}','${WON_SLUG}'), ('${ST.lost}','${LOST_SLUG}'), ('${ST.open}','${OPEN_SLUG}');
+
+    -- FIX-1 window = 2026-03-01 .. 2026-03-31
+    INSERT INTO deals (id, stage_id, won_closed_date, actual_close_date, contract_signed_at, updated_at) VALUES
+      -- won, canonical date in-window, touched OUTSIDE -> MATCH (canonical won)
+      ('${D.wonIn}','${ST.won}','2026-03-15', NULL, NULL, '2026-01-01T00:00:00Z'),
+      -- won stage but NO canonical date, only touched in-window -> NO MATCH (the fix)
+      ('${D.wonTouched}','${ST.won}', NULL, NULL, NULL, '2026-03-10T00:00:00Z'),
+      -- won, canonical date OUTSIDE window, touched in-window -> NO MATCH
+      ('${D.wonOut}','${ST.won}','2026-02-01', NULL, NULL, '2026-03-10T00:00:00Z'),
+      -- lost, legacy basis (actual_close_date) in-window -> MATCH (denominator preserved)
+      ('${D.lostIn}','${ST.lost}', NULL, '2026-03-12', NULL, '2026-01-01T00:00:00Z'),
+      -- lost, legacy basis out-of-window -> NO MATCH
+      ('${D.lostOut}','${ST.lost}', NULL, '2026-01-05', NULL, '2026-01-05T00:00:00Z'),
+      -- open, touched in-window -> matches non-won branch (filtered by slug in real metrics)
+      ('${D.openIn}','${ST.open}', NULL, NULL, NULL, '2026-03-10T00:00:00Z');
+
+    -- FIX-3 month-bucket cases
+    INSERT INTO deals (id, stage_id, won_closed_date, expected_close_date, updated_at) VALUES
+      ('${D.bWon}','${ST.won}','2026-02-15','2026-03-20','2026-05-01T00:00:00Z'),
+      ('${D.bOpen}','${ST.open}', NULL,'2026-03-20','2026-05-01T00:00:00Z'),
+      ('${D.bFallback}','${ST.open}', NULL, NULL,'2026-04-05T00:00:00Z');
+  `);
+  tdb = drizzle(pg);
+});
+afterAll(async () => {
+  await pg?.close?.();
+});
+
+describe("perf-tier2 FIX-1: buildWonDateSql windows WON by canonical won_closed_date", () => {
+  it("counts won by won_closed_date, excludes touched-but-not-won and out-of-window won", async () => {
+    const rows = await execRows(sql`
+      SELECT d.id::text AS id, psc.slug
+      FROM deals d JOIN pipeline_stage_config psc ON psc.id = d.stage_id
+      WHERE ${buildWonDateSql(filters)}
+    `);
+    const ids = new Set(rows.map((r) => r.id));
+    const wonMatched = new Set(rows.filter((r) => r.slug === WON_SLUG).map((r) => r.id));
+
+    // WON side reconciles to the canonical predicate: ONLY the canonical-in-window won deal.
+    expect(wonMatched).toEqual(new Set([D.wonIn]));
+    // Row-level Won-lock: a deal touched in-period but without a usable won date is NOT won-in-period.
+    expect(ids.has(D.wonTouched)).toBe(false);
+    // A won deal whose canonical date is outside the window is not counted (no updated_at leak).
+    expect(ids.has(D.wonOut)).toBe(false);
+
+    // LOST side is byte-identical to today (denominator preserved): legacy-basis-in-window still matches.
+    expect(ids.has(D.lostIn)).toBe(true);
+    expect(ids.has(D.lostOut)).toBe(false);
+  });
+});
+
+describe("perf-tier2 FIX-3: buildForecastMonthBucketDateSql buckets WON by canonical won month", () => {
+  it("won -> won_closed_date month; open -> expected_close_date; legacy fallback preserved", async () => {
+    const rows = await execRows(sql`
+      SELECT d.id::text AS id, to_char(${buildForecastMonthBucketDateSql("d")}, 'YYYY-MM') AS bucket
+      FROM deals d
+      WHERE d.id IN (${D.bWon}::uuid, ${D.bOpen}::uuid, ${D.bFallback}::uuid)
+    `);
+    const byId = Object.fromEntries(rows.map((r) => [r.id, r.bucket]));
+    expect(byId[D.bWon]).toBe("2026-02"); // canonical won month wins over expected (2026-03)
+    expect(byId[D.bOpen]).toBe("2026-03"); // open deal: expected_close_date, unchanged
+    expect(byId[D.bFallback]).toBe("2026-04"); // legacy fallback chain (updated_at) preserved
+  });
+});
