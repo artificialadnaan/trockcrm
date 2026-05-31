@@ -63,6 +63,25 @@ the other list surfaces (rep drill-down, board, reports) adopt the same function
 in the upcoming platform-wide date-filter audit — it is intentionally NOT a
 getDeals-private helper.
 
+### Displayed date column — `dealDisplayDateExpr` (RED renders this)
+
+The companion `dealDisplayDateExpr(ctx)` in the same module returns the SQL CASE
+that yields, per row, the date the row should DISPLAY — the SAME three axes as the
+filter (Won -> won/signed date, Lost -> lost date, open -> stage-entry date),
+classified by the same Won/Lost stage-id sets. Because both the filter and the
+display read the SAME `DealDateScopeColumns`, the date a surface filters on and
+the date it shows cannot diverge — that is what makes "filter-axis == display-
+axis" structurally true, not just intended.
+
+Contract for RED: the server will SELECT this as a row field (proposed name
+`displayDate`, ISO `YYYY-MM-DD` or null) once GREY's platform date audit wires it
+into each list query; the frontend renders `displayDate` in the date column for
+every surface instead of a per-surface hand-picked column (which is the source of
+the "filtered by created, shown by close" bug). NULL means the row's outcome date
+column is null — render as the surface's empty-date placeholder. (BLUE owns the
+SQL; the SELECT wiring lands with the audit so RED and BLUE agree on the field
+name before it ships.)
+
 ## Graceful-empty guarantee
 
 Every predicate returns `undefined` when its param is unset (omitted, never a

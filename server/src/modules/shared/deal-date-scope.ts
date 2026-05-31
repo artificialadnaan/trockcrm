@@ -140,3 +140,37 @@ export function buildDealOutcomeDateScope(
 
   return or(...clauses);
 }
+
+/**
+ * The DISPLAYED date for a deal row, by outcome — the companion to
+ * {@link buildDealOutcomeDateScope}. Returns ONE CASE expression giving each row
+ * the date the UI should show for it:
+ *   Won rows  -> won/signed date    (columns.wonDate)
+ *   Lost rows -> lost date          (columns.lostDate)
+ *   open rows -> entered-stage date (columns.stageEntryDate)
+ *
+ * This is the load-bearing half of "filter-axis == display-axis": it consumes the
+ * SAME DealDateScopeColumns and the SAME Won/Lost stage-id classification as the
+ * filter, so the date a surface FILTERS on and the date it DISPLAYS can never
+ * diverge — change the column source once (DealDateScopeColumns) and both the
+ * filter and the display move together. Surfaces SELECT this expression (e.g. as
+ * `display_date`) and render it next to the row; GREY's platform date audit wires
+ * it into each list query so every surface shows the column it filtered.
+ *
+ * Unlike the filter, this does NOT throw on empty classification: a display
+ * expression must never crash a list render. With no Won/Lost ids every row
+ * resolves to its stage-entry date (callers always resolve the canonical sets, so
+ * in practice the filter's loud failure fires first). Per row it yields NULL only
+ * when that row's own outcome date column is NULL; the caller decides how to
+ * render NULL.
+ */
+export function dealDisplayDateExpr(ctx: DealDateScopeContext): SQL {
+  const columns = ctx.columns ?? dealDateScopeColumns();
+  const wonMatch = stageMembership(columns.stageId, ctx.wonStageIds);
+  const lostMatch = stageMembership(columns.stageId, ctx.lostStageIds);
+  return sql`CASE
+    WHEN ${wonMatch} THEN ${columns.wonDate}
+    WHEN ${lostMatch} THEN ${columns.lostDate}
+    ELSE ${columns.stageEntryDate}
+  END`;
+}

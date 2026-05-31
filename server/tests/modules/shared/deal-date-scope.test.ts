@@ -9,6 +9,7 @@ import type { SQL } from "drizzle-orm";
 
 import {
   buildDealOutcomeDateScope,
+  dealDisplayDateExpr,
   aliasedDealDateScopeColumns,
 } from "../../../src/modules/shared/deal-date-scope.js";
 
@@ -72,5 +73,38 @@ describe("buildDealOutcomeDateScope", () => {
     expect(sql).toContain("d.stage_id");
     expect(sql).toContain("d.contract_signed_at");
     expect(sql).toContain("d.lost_at");
+  });
+});
+
+describe("dealDisplayDateExpr (display-axis companion to the filter)", () => {
+  it("emits a CASE selecting the won date for Won, lost date for Lost, stage entry otherwise", () => {
+    const sql = render(dealDisplayDateExpr(ctx));
+    expect(sql).toContain("case");
+    expect(sql).toContain("contract_signed_at"); // won axis
+    expect(sql).toContain("lost_at"); // lost axis
+    expect(sql).toContain("stage_entered_at"); // open axis (ELSE)
+    expect(sql).toContain("stage_id"); // classified by the same stage-id sets
+  });
+
+  it("uses the SAME column source as the filter, so display-axis == filter-axis (no divergence)", () => {
+    // Both helpers fed the identical ctx/columns -> they reference the same date
+    // columns. This is the structural guarantee behind filter-axis == display-axis.
+    const display = render(dealDisplayDateExpr(ctx));
+    const filter = render(buildDealOutcomeDateScope({ from: "2026-01-01" }, ctx));
+    for (const axis of ["contract_signed_at", "lost_at", "stage_entered_at"]) {
+      expect(display).toContain(axis);
+      expect(filter).toContain(axis);
+    }
+  });
+
+  it("does NOT throw on empty classification (display must never crash a render)", () => {
+    expect(() => dealDisplayDateExpr({ wonStageIds: [], lostStageIds: [] })).not.toThrow();
+  });
+
+  it("supports an aliased deals table for raw-SQL surfaces", () => {
+    const sql = render(dealDisplayDateExpr({ ...ctx, columns: aliasedDealDateScopeColumns("d") }));
+    expect(sql).toContain("d.contract_signed_at");
+    expect(sql).toContain("d.lost_at");
+    expect(sql).toContain("d.stage_entered_at");
   });
 });

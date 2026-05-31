@@ -1,7 +1,7 @@
 import { PGlite } from "@electric-sql/pglite";
 import { PgDialect } from "drizzle-orm/pg-core";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { buildDealOutcomeDateScope } from "../../../src/modules/shared/deal-date-scope.js";
+import { buildDealOutcomeDateScope, dealDisplayDateExpr } from "../../../src/modules/shared/deal-date-scope.js";
 
 /**
  * RUNTIME coverage for the canonical outcome-aware date model, executed against a
@@ -118,5 +118,32 @@ describe("deal date scope (runtime, PGlite)", () => {
     const ids = await matchedIds({ wonStageIds: ["won"], lostStageIds: [] });
     expect(ids).toContain("won_signed_in");
     expect(ids).not.toContain("won_signed_out");
+  });
+
+  it("dealDisplayDateExpr returns, per row, exactly the date the FILTER windows on (filter-axis == display-axis)", async () => {
+    const expr = dealDisplayDateExpr(CTX);
+    const { sql, params } = dialect.sqlToQuery(expr);
+    const { rows } = await db.query<{ id: string; display_date: string | null }>(
+      `SELECT id, (${sql})::date AS display_date FROM deals ORDER BY id`,
+      params as unknown[]
+    );
+    const byId = Object.fromEntries(rows.map((r) => [r.id, r.display_date && r.display_date.slice(0, 10)]));
+    // Won rows -> won/signed date (incl. the legacy contract_signed_date fallback)
+    expect(byId.won_signed_in).toBe("2026-02-15");
+    expect(byId.won_signed_out).toBe("2026-05-15");
+    expect(byId.won_legacy_in).toBe("2026-02-20");
+    // Lost rows -> lost_at date
+    expect(byId.lost_in).toBe("2026-02-10");
+    expect(byId.lost_out).toBe("2026-05-10");
+    // open rows -> stage entry date
+    expect(byId.open_entry_in).toBe("2026-02-05");
+    expect(byId.open_entry_out).toBe("2026-05-01");
+    // The displayed date for every row IN the filter result must fall inside the
+    // window — the structural proof that the two axes agree.
+    const matched = await matchedIds({ ...CTX, stageEntryDateEnabled: true });
+    for (const id of matched) {
+      const d = byId[id]!;
+      expect(d >= "2026-02-01" && d <= "2026-02-28").toBe(true);
+    }
   });
 });
