@@ -107,6 +107,9 @@ export interface LeadRecord {
   primaryContactTitle?: string | null;
   name: string;
   stageId: string;
+  /** Authoritative display name of the lead's actual (possibly alias) stage, supplied by listLeads so
+   *  alias-stage rows don't render "—" against the canonical-only board options map (Codex #577 P2). */
+  stageName?: string | null;
   assignedRepId: string;
   salesRepId?: string | null;
   assignedRepName?: string | null;
@@ -160,6 +163,10 @@ export interface LeadRecord {
   verificationRequiredReason: "new_company" | "dormant_company" | "active_company" | null;
   stageEnteredAt: string;
   convertedAt: string | null;
+  /** Outcome-aware date the row should DISPLAY (lead-date-scope: converted->converted_at,
+   *  open->stage-entry, disqualified->disqualified-entry). SELECTed by BLUE; null until then,
+   *  client falls back to the lead date chain (getLeadDisplayDate). */
+  displayDate?: string | null;
   isActive: boolean;
   createdAt: string;
   updatedAt: string;
@@ -202,15 +209,22 @@ export interface LeadFilters {
   search?: string;
   companyId?: string;
   propertyId?: string;
-  assignedRepId?: string;
+  assignedRepId?: string; // uuid | "__unassigned__"
+  projectTypeId?: string;
   stageIds?: string[];
   status?: "open" | "converted" | "disqualified";
   isActive?: boolean | "all";
   createdFrom?: string;
   createdTo?: string;
+  // Outcome-aware window (FilterBar / Wave 1): converted->converted_at, open->stage-entry,
+  // disqualified->disqualified-entry — resolved server-side by BLUE's lead-date-scope predicate.
+  dateFrom?: string;
+  dateTo?: string;
   sortBy?: "created_at" | "updated_at";
   sortDir?: "asc" | "desc";
   scope?: "mine" | "team" | "all";
+  page?: number;
+  limit?: number;
 }
 
 export interface LeadBoardStage {
@@ -270,6 +284,35 @@ export function formatLeadPropertyLine(lead: Pick<LeadRecord, "property">) {
     .join(" ");
 }
 
+/**
+ * LeadFilters -> GET /api/leads query string. Pure (no hook state) so it is unit-testable and reused
+ * by the FilterBar leads list. Legacy params are byte-identical; the FilterBar (Wave 1) params
+ * (dateFrom/dateTo, projectTypeId, page/limit) are appended only when set. `__unassigned__` is
+ * forwarded verbatim (BLUE maps it to IS NULL).
+ */
+export function buildLeadsQueryParams(filters: LeadFilters): URLSearchParams {
+  const params = new URLSearchParams();
+  if (filters.search) params.set("search", filters.search);
+  if (filters.companyId) params.set("companyId", filters.companyId);
+  if (filters.propertyId) params.set("propertyId", filters.propertyId);
+  if (filters.assignedRepId) params.set("assignedRepId", filters.assignedRepId);
+  if (filters.projectTypeId) params.set("projectTypeId", filters.projectTypeId);
+  if (filters.stageIds?.length) params.set("stageIds", filters.stageIds.join(","));
+  if (filters.status) params.set("status", filters.status);
+  if (filters.createdFrom) params.set("createdFrom", filters.createdFrom);
+  if (filters.createdTo) params.set("createdTo", filters.createdTo);
+  if (filters.dateFrom) params.set("dateFrom", filters.dateFrom);
+  if (filters.dateTo) params.set("dateTo", filters.dateTo);
+  if (filters.sortBy) params.set("sortBy", filters.sortBy);
+  if (filters.sortDir) params.set("sortDir", filters.sortDir);
+  if (filters.scope) params.set("scope", filters.scope);
+  if (filters.isActive === "all") params.set("isActive", "all");
+  else if (filters.isActive === false) params.set("isActive", "false");
+  if (filters.page) params.set("page", String(filters.page));
+  if (filters.limit) params.set("limit", String(filters.limit));
+  return params;
+}
+
 export function useLeads(filters: LeadFilters = {}) {
   const [leads, setLeads] = useState<LeadRecord[]>([]);
   const [loading, setLoading] = useState(true);
@@ -282,22 +325,7 @@ export function useLeads(filters: LeadFilters = {}) {
     setLoading(true);
     setError(null);
     try {
-      const params = new URLSearchParams();
-      if (filters.search) params.set("search", filters.search);
-      if (filters.companyId) params.set("companyId", filters.companyId);
-      if (filters.propertyId) params.set("propertyId", filters.propertyId);
-      if (filters.assignedRepId) params.set("assignedRepId", filters.assignedRepId);
-      if (filters.stageIds?.length) params.set("stageIds", filters.stageIds.join(","));
-      if (filters.status) params.set("status", filters.status);
-      if (filters.createdFrom) params.set("createdFrom", filters.createdFrom);
-      if (filters.createdTo) params.set("createdTo", filters.createdTo);
-      if (filters.sortBy) params.set("sortBy", filters.sortBy);
-      if (filters.sortDir) params.set("sortDir", filters.sortDir);
-      if (filters.scope) params.set("scope", filters.scope);
-      if (filters.isActive === "all") params.set("isActive", "all");
-      else if (filters.isActive === false) params.set("isActive", "false");
-
-      const qs = params.toString();
+      const qs = buildLeadsQueryParams(filters).toString();
       const data = await api<{ leads: LeadRecord[] }>(`/leads${qs ? `?${qs}` : ""}`);
       if (requestId !== requestIdRef.current) return;
       setLeads(data.leads);
@@ -314,7 +342,12 @@ export function useLeads(filters: LeadFilters = {}) {
     filters.companyId,
     filters.createdFrom,
     filters.createdTo,
+    filters.dateFrom,
+    filters.dateTo,
     filters.isActive,
+    filters.limit,
+    filters.page,
+    filters.projectTypeId,
     filters.propertyId,
     filters.search,
     filters.scope,

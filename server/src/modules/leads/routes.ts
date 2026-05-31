@@ -158,6 +158,10 @@ router.get("/", async (req, res, next) => {
     const createdTo = assertOptionalIsoDateQueryParam(req.query.createdTo, "createdTo");
     const dateFrom = assertOptionalIsoDateQueryParam(req.query.dateFrom, "dateFrom");
     const dateTo = assertOptionalIsoDateQueryParam(req.query.dateTo, "dateTo");
+    // Row cap (Codex #577 P2): listLeads clamps this to [1, LEADS_LIST_MAX_ROWS] and defaults to the max,
+    // so the flat list is bounded even when the client omits it.
+    const parsedLimit = Number.parseInt(req.query.limit as string, 10);
+    const limit = Number.isFinite(parsedLimit) ? parsedLimit : undefined;
     const result = await listLeads(
       req.tenantDb!,
       {
@@ -189,6 +193,7 @@ router.get("/", async (req, res, next) => {
             : req.query.isActive === "false"
               ? false
               : true,
+        limit,
       },
       getCollaborativeReadRole(req.user!.role, normalizeCollaborativeScope(req.user!.role, readListScope(req.query.scope))),
       req.user!.id

@@ -262,32 +262,9 @@ describe("LeadListPage", () => {
     expect(html).toContain("pl-8");
   });
 
-  it("renders lead descriptions as a muted responsive column with hover title and dash fallback", () => {
-    mocks.useLeadsMock.mockReturnValue({
-      leads: [
-        makeLead({
-          description: "Long lead description that should stay available on hover in the recent leads list.",
-        }),
-        makeLead({
-          id: "lead-row-2",
-          name: "No Description Lead",
-          description: null,
-        }),
-      ],
-      loading: false,
-      error: null,
-      refetch: vi.fn(),
-    });
-
-    const html = renderPage();
-
-    expect(html).toContain('aria-label="Long lead description that should stay available on hover in the recent leads list."');
-    expect(html).toContain('title="Long lead description that should stay available on hover in the recent leads list."');
-    expect(html).toContain("Long lead description that should stay available on hover in the recent leads list.");
-    expect(html).toContain("No Description Lead");
-    expect(html).toContain(">—<");
-    expect(html).toContain("hidden min-w-0 md:block");
-  });
+  // The old "Recent open leads" preview (with its description-on-hover column) was superseded by the
+  // shared-FilterBar LeadsListSection (Wave 1). The list's own behavior is covered by
+  // client/src/components/leads/leads-list-section.test.tsx.
 
   it("renders every lead card returned for a busy column inside an internally scrollable body", () => {
     const busyCards = Array.from({ length: 13 }).map((_, index) => ({
@@ -317,7 +294,7 @@ describe("LeadListPage", () => {
 
   it("loads summary leads with the active scope when role is director", () => {
     renderPage("/leads?scope=all", "director");
-    expect(mocks.useLeadsMock).toHaveBeenLastCalledWith({ status: "open", isActive: true, scope: "all" });
+    expect(mocks.useLeadsMock).toHaveBeenCalledWith({ status: "open", isActive: true, scope: "all" });
   });
 
   it("renders selected owner filter names instead of raw selected owner ids", () => {
@@ -325,7 +302,7 @@ describe("LeadListPage", () => {
 
     expect(html).toContain("Brett Jones");
     expect(html).not.toContain(">rep-1<");
-    expect(mocks.useLeadsMock).toHaveBeenLastCalledWith({
+    expect(mocks.useLeadsMock).toHaveBeenCalledWith({
       status: "open",
       isActive: true,
       scope: "all",
@@ -337,7 +314,7 @@ describe("LeadListPage", () => {
     const html = renderPage("/leads?scope=all&assignedRepId=rep-1&search=roof", "director");
 
     expect(mocks.useLeadBoardMock).toHaveBeenLastCalledWith("all", "rep-1", "roof");
-    expect(mocks.useLeadsMock).toHaveBeenLastCalledWith({
+    expect(mocks.useLeadsMock).toHaveBeenCalledWith({
       status: "open",
       isActive: true,
       scope: "all",
@@ -363,7 +340,7 @@ describe("LeadListPage", () => {
     const html = renderPage("/leads?scope=mine&assignedRepId=rep-1", "director");
 
     expect(mocks.useLeadBoardMock).toHaveBeenLastCalledWith("mine", undefined, undefined);
-    expect(mocks.useLeadsMock).toHaveBeenLastCalledWith({ status: "open", isActive: true, scope: "mine" });
+    expect(mocks.useLeadsMock).toHaveBeenCalledWith({ status: "open", isActive: true, scope: "mine" });
     expect(html).not.toContain("All reps");
   });
 
@@ -398,7 +375,7 @@ describe("LeadListPage", () => {
     expect(html).not.toContain(">Team</button>");
     expect(html).not.toContain("Team view is not yet configured");
     expect(mocks.useLeadBoardMock).toHaveBeenLastCalledWith("mine", undefined, undefined);
-    expect(mocks.useLeadsMock).toHaveBeenLastCalledWith({ status: "open", isActive: true, scope: "mine" });
+    expect(mocks.useLeadsMock).toHaveBeenCalledWith({ status: "open", isActive: true, scope: "mine" });
   });
 
   it("defaults the board scope by role when the query param is absent", () => {

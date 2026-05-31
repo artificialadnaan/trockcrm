@@ -35,7 +35,7 @@ describe("Sidebar navigation metadata", () => {
   });
 
   it("renders Deals and Pipeline as distinct nav entries pointing to their own routes", () => {
-    expect(source).toContain('{ to: "/deals", icon: Handshake, label: "Deals", roles: ["admin", "director", "rep"] }');
+    expect(source).toContain('{ to: "/deals", icon: Handshake, label: "Deals Dashboard", roles: ["admin", "director", "rep"] }');
     expect(source).toContain('{ to: "/pipeline", icon: Kanban, label: "Pipeline", roles: ["admin", "director", "rep"] }');
     expect(source).toContain("function getNavItemKey");
     expect(source).toContain("key={getNavItemKey(item)}");

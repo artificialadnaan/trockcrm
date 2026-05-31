@@ -346,8 +346,8 @@ export function getDashboardDealListView(input: {
   return {
     filter,
     eyebrow: "Workflow control",
-    title: "Deals",
-    subtitle: "Read-only pipeline board over the existing deal stages. Open a card or stage for the working surface.",
+    title: "Deals Dashboard",
+    subtitle: "KPIs and drill-downs over your deals. Use Pipeline for the kanban + filterable working list.",
     boardMode: "all",
     listBaseFilters: {},
     listInitialSort: { key: "updated_at", dir: "desc" },
