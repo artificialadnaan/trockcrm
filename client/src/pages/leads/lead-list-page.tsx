@@ -19,9 +19,25 @@ import {
   useLeads,
 } from "@/hooks/use-leads";
 import { useKeepPreviousData } from "@/hooks/use-keep-previous-data";
+import { useProjectTypes } from "@/hooks/use-pipeline-config";
 import type { PipelineScope } from "@/lib/pipeline-scope";
 import { cn } from "@/lib/utils";
 import { resolvePreferredScope, writeStoredScopePreference } from "@/lib/scope-preferences";
+import { LeadsListSection } from "@/components/leads/leads-list-section";
+import { LEAD_LIST_SORT_OPTIONS, LEAD_STATUS_OPTIONS } from "@/components/leads/leads-filterbar-adapter";
+import type { FilterDimension } from "@/components/filters/filter-bar";
+
+// Shared FilterBar dimensions for the leads list (Wave 1). No Value (leads carry no value), no
+// Workflow/Region (leads have neither), no Stalled (flag-gated like deals); Status uses the lead variant.
+const LEAD_LIST_FILTERBAR_DIMENSIONS: FilterDimension[] = [
+  "search",
+  "date",
+  "stage",
+  "sort",
+  "rep",
+  "status",
+  "projectType",
+];
 
 // Team scope is parked (PR #512) and not configured anywhere, so it is not offered here
 // -- only Mine | All (mirrors the director dashboard). The shared PipelineScope union still
@@ -254,6 +270,7 @@ function LeadListPageContent({ role, userId }: { role: string; userId: string })
   const search = searchParams.get("search") ?? "";
   const selectedOwnerId = role === "rep" || scope === "mine" ? "" : searchParams.get("assignedRepId") ?? "";
   const { assignees } = useTaskAssignees();
+  const { projectTypes } = useProjectTypes();
   const selectedOwnerLabel = selectedOwnerId
     ? assignees.find((assignee) => assignee.id === selectedOwnerId)?.displayName ?? "Selected rep"
     : "All reps";
@@ -405,42 +422,31 @@ function LeadListPageContent({ role, userId }: { role: string; userId: string })
         )}
       </section>
 
-      <section className="rounded-lg border border-slate-200 bg-white">
-        <div className="border-b border-slate-200 px-4 py-3">
-          <p className="text-[11px] font-black uppercase tracking-[0.18em] text-slate-500">Recent open leads</p>
-        </div>
-        <div className="divide-y divide-slate-100">
-          {leads.slice(0, 6).map((lead) => (
-            <button
-              type="button"
-              key={lead.id}
-              onClick={() => navigate(`/leads/${lead.id}`)}
-              className="grid w-full gap-3 px-4 py-3 text-left transition-colors hover:bg-slate-50 md:grid-cols-[minmax(0,1fr)_minmax(0,0.9fr)_160px_140px_120px_92px]"
-            >
-              <div className="min-w-0">
-                <p className="truncate text-sm font-black text-slate-950">{lead.name}</p>
-                <p className="mt-1 truncate text-xs font-semibold text-slate-500">{lead.companyName ?? "Company pending"}</p>
-              </div>
-              <div className="hidden min-w-0 md:block">
-                {renderDescriptionPreview(lead.description)}
-              </div>
-              <div className="flex items-center gap-2 text-xs font-semibold text-slate-500">
-                <span className="flex h-7 w-7 items-center justify-center rounded-full bg-brand-red text-[10px] font-black text-white">
-                  {getInitials(lead.assignedRepName)}
-                </span>
-                <span className="truncate">{lead.assignedRepName ?? "Unassigned"}</span>
-              </div>
-              <div className="text-sm font-black tabular-nums text-slate-950">{USD_COMPACT(leadValue(lead))}</div>
-              <div className="text-xs font-bold text-slate-500">{sourceLabel(lead.source)}</div>
-              <div className="flex items-center justify-end gap-1 text-slate-400">
-                <Phone className={cn("h-4 w-4", lead.primaryContactId ? "text-emerald-600" : "")} />
-                <Mail className="h-4 w-4 text-blue-600" />
-                <Calendar className="h-4 w-4 text-violet-600" />
-              </div>
-            </button>
-          ))}
-        </div>
-      </section>
+      {/* Wave 1: the shared FilterBar on the full leads list (supersedes the old "Recent open leads"
+          preview). URL-backed, lead-adapted dimensions; scope is inherited from the page toggle.
+          Filtering/pagination connect when BLUE's lead-date-scope + page/limit land server-side. */}
+      <LeadsListSection
+        scope={scope}
+        filterBar={{
+          // Mirror the page's owner-filter gating: the Rep dimension is only useful to admins/directors
+          // on a non-"mine" scope (a rep viewing "mine" sees only their own leads).
+          dimensions:
+            (role === "admin" || role === "director") && scope !== "mine"
+              ? LEAD_LIST_FILTERBAR_DIMENSIONS
+              : LEAD_LIST_FILTERBAR_DIMENSIONS.filter((dimension) => dimension !== "rep"),
+          options: {
+            reps: assignees.map((assignee) => ({ value: assignee.id, label: assignee.displayName })),
+            projectTypes: projectTypes.map((projectType) => ({ value: projectType.id, label: projectType.name })),
+            stages: (board?.columns ?? [])
+              .filter((column) =>
+                LEAD_BOARD_STAGE_SLUGS.includes(column.stage.slug as (typeof LEAD_BOARD_STAGE_SLUGS)[number])
+              )
+              .map((column) => ({ value: column.stage.id, label: column.stage.name })),
+            sortOptions: LEAD_LIST_SORT_OPTIONS,
+            statusOptions: LEAD_STATUS_OPTIONS,
+          },
+        }}
+      />
       </>
     </div>
   );
