@@ -1,4 +1,4 @@
-import { and, asc, desc, eq, ilike, inArray, or, sql, isNull } from "drizzle-orm";
+import { and, asc, desc, eq, getTableColumns, ilike, inArray, or, sql, isNull } from "drizzle-orm";
 import type { NodePgDatabase } from "drizzle-orm/node-postgres";
 import {
   CANONICAL_LEAD_STAGE_SLUGS,
@@ -47,6 +47,10 @@ import { isExistingCustomer } from "./verification-service.js";
 import { resolveLeadSourceForWrite } from "./source-control.js";
 import { resolveActiveOfficeUserIds, resolveTeamRepIds } from "../shared/team-scope.js";
 import {
+  buildLeadOutcomeDateScope,
+  leadDisplayDateExpr,
+} from "../shared/lead-date-scope.js";
+import {
   buildAliasedLeadMineVisibilityCondition,
   buildLeadMineVisibilityCondition,
   resolveMineVisibilityFeatures,
@@ -67,16 +71,35 @@ export interface LeadFilters {
   companyId?: string;
   propertyId?: string;
   assignedRepId?: string;
+  projectTypeId?: string;
+  /**
+   * Stage filter values. The leads FilterBar emits CANONICAL board-stage ids
+   * (`column.stage.id`), each of which is expanded server-side to its alias-stage
+   * family (resolveLeadStageBucketIds); a non-canonical stage id still matches
+   * itself. Sent as a CSV by the client.
+   */
   stageIds?: string[];
   status?: "open" | "converted" | "disqualified";
   isActive?: boolean | "all";
   createdFrom?: string;
   createdTo?: string;
+  /**
+   * Outcome-aware date window (FilterBar Wave 1): converted -> converted_at,
+   * disqualified -> disqualified_at, open -> stage-entry (fallback created_at),
+   * resolved by the shared lead-date-scope predicate. Distinct from
+   * createdFrom/createdTo, which always window on created_at.
+   */
+  dateFrom?: string;
+  dateTo?: string;
   sortBy?: "created_at" | "updated_at";
   sortDir?: "asc" | "desc";
   scope?: WorkspaceScope;
   activeOfficeId?: string;
 }
+
+/** UUID shape guard — used so a malformed id no-matches instead of erroring a uuid cast. */
+const LEAD_FILTER_UUID_RE =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 export interface CreateLeadInput {
   companyId: string;
@@ -1156,6 +1179,50 @@ function listCanonicalBucketStageSlugs(canonicalStageSlug: string): readonly str
   }
 }
 
+/**
+ * Expand the leads FilterBar's stage selection into the concrete stage ids to
+ * filter `leads.stage_id` against. The bar emits CANONICAL board-stage ids
+ * (`column.stage.id`); each is resolved to its slug, mapped to its canonical
+ * board bucket, and expanded to that bucket's full alias family — the SAME
+ * grouping the kanban board uses (listCanonicalBucketStageSlugs), so the list and
+ * the board agree on what "New Lead" means. A valid stage id that is NOT part of a
+ * canonical family (e.g. an inactive or custom stage) matches itself only, keeping
+ * the legacy exact-id behavior. Malformed (non-uuid) values are dropped — never
+ * widened, never passed into a uuid-cast that would throw. Pure (no DB) so it is
+ * unit-testable; the caller supplies the lead-family stages.
+ */
+export function resolveLeadStageBucketIds(
+  incomingStageIds: string[],
+  leadStages: Array<{ id: string; slug: string }>
+): string[] {
+  const idToSlug = new Map(leadStages.map((stage) => [stage.id, stage.slug]));
+  const slugToIds = new Map<string, string[]>();
+  for (const stage of leadStages) {
+    const ids = slugToIds.get(stage.slug) ?? [];
+    ids.push(stage.id);
+    slugToIds.set(stage.slug, ids);
+  }
+
+  const resolved = new Set<string>();
+  for (const value of incomingStageIds) {
+    const slug = idToSlug.get(value);
+    if (slug) {
+      const canonical = resolveCanonicalLeadBoardStageSlug(slug);
+      const familySlugs = canonical ? listCanonicalBucketStageSlugs(canonical) : [slug];
+      for (const familySlug of familySlugs) {
+        for (const id of slugToIds.get(familySlug) ?? []) {
+          resolved.add(id);
+        }
+      }
+    } else if (LEAD_FILTER_UUID_RE.test(value)) {
+      // Valid uuid but not a known lead stage (inactive/foreign) — exact match only.
+      resolved.add(value);
+    }
+    // Anything else (malformed) is dropped: no-match, never widen.
+  }
+  return [...resolved];
+}
+
 function groupLeadBoardColumns(
   stages: Awaited<ReturnType<typeof listLeadStages>>,
   rows: LeadStageRow[]
@@ -1317,6 +1384,17 @@ export function createLeadService(
 
     if (filters.isActive !== "all") {
       conditions.push(eq(leads.isActive, filters.isActive ?? true));
+    } else {
+      // isActive="all" surfaces active rows AND legitimately-inactive ones (converted leads
+      // are isActive=false+status=converted; disqualified leads are isActive=false+
+      // status=disqualified) — but must STILL hide SOFT-DELETED leads. deleteLead only runs
+      // on an ACTIVE lead (returns early when !isActive), and active leads are always
+      // status=open (converting and disqualifying both set isActive=false), so a soft-deleted
+      // lead is uniquely isActive=false AND status=open. Exclude exactly that combo; keep
+      // every other state (active-open, converted, disqualified).
+      conditions.push(
+        sql`NOT (${leads.isActive} = false AND ${leads.status}::text = 'open')`
+      );
     }
 
     if (filters.activeOfficeId) {
@@ -1344,7 +1422,20 @@ export function createLeadService(
     }
 
     if (filters.stageIds && filters.stageIds.length > 0) {
-      conditions.push(inArray(leads.stageId, filters.stageIds));
+      // The bar sends canonical board-stage ids; expand each to its alias family.
+      const leadStages = await deps.getAllStages("lead");
+      const stageIds = resolveLeadStageBucketIds(filters.stageIds, leadStages);
+      // All values resolved to nothing (malformed/unknown) -> no-match, never widen.
+      conditions.push(stageIds.length > 0 ? inArray(leads.stageId, stageIds) : sql`false`);
+    }
+
+    if (filters.projectTypeId) {
+      // Malformed id no-matches (and never reaches a uuid cast that would throw).
+      conditions.push(
+        LEAD_FILTER_UUID_RE.test(filters.projectTypeId)
+          ? eq(leads.projectTypeId, filters.projectTypeId)
+          : sql`false`
+      );
     }
 
     if (filters.companyId) conditions.push(eq(leads.companyId, filters.companyId));
@@ -1357,6 +1448,17 @@ export function createLeadService(
       conditions.push(sql`${leads.createdAt} < (${filters.createdTo}::date + interval '1 day')`);
     }
 
+    // Outcome-aware date window (FilterBar Wave 1). Distinct from createdFrom/createdTo:
+    // windows converted rows on converted_at, disqualified on disqualified_at, open on
+    // stage-entry (fallback created_at) — the shared lead-date-scope predicate.
+    const leadDateScope = buildLeadOutcomeDateScope(
+      { from: filters.dateFrom, to: filters.dateTo },
+      {}
+    );
+    if (leadDateScope) {
+      conditions.push(leadDateScope);
+    }
+
     if (filters.search && filters.search.trim().length >= 2) {
       conditions.push(buildLeadSearchCondition(filters.search));
     }
@@ -1365,7 +1467,13 @@ export function createLeadService(
     const sortOrder = filters.sortDir === "asc" ? asc(sortColumn) : desc(sortColumn);
 
     const rows = await tenantDb
-      .select()
+      .select({
+        ...getTableColumns(leads),
+        // filter-axis == display-axis: the date the row DISPLAYS is the same outcome-aware
+        // axis buildLeadOutcomeDateScope filters on. ISO YYYY-MM-DD (or null). RED reads it
+        // as `displayDate`, falling back to the lead date chain until selected.
+        displayDate: sql<string | null>`to_char(${leadDisplayDateExpr({})}, 'YYYY-MM-DD')`,
+      })
       .from(leads)
       .where(and(...conditions))
       .orderBy(sortOrder, asc(leads.name));

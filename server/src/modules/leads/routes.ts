@@ -156,6 +156,8 @@ router.get("/", async (req, res, next) => {
   try {
     const createdFrom = assertOptionalIsoDateQueryParam(req.query.createdFrom, "createdFrom");
     const createdTo = assertOptionalIsoDateQueryParam(req.query.createdTo, "createdTo");
+    const dateFrom = assertOptionalIsoDateQueryParam(req.query.dateFrom, "dateFrom");
+    const dateTo = assertOptionalIsoDateQueryParam(req.query.dateTo, "dateTo");
     const result = await listLeads(
       req.tenantDb!,
       {
@@ -163,6 +165,7 @@ router.get("/", async (req, res, next) => {
         companyId: req.query.companyId as string | undefined,
         propertyId: req.query.propertyId as string | undefined,
         assignedRepId: req.query.assignedRepId as string | undefined,
+        projectTypeId: req.query.projectTypeId as string | undefined,
         stageIds: req.query.stageIds
           ? (req.query.stageIds as string).split(",").filter(Boolean)
           : undefined,
@@ -171,6 +174,8 @@ router.get("/", async (req, res, next) => {
         status: req.query.status as "open" | "converted" | "disqualified" | undefined,
         createdFrom,
         createdTo,
+        dateFrom,
+        dateTo,
         sortBy:
           req.query.sortBy === "created_at" || req.query.sortBy === "updated_at"
             ? (req.query.sortBy as "created_at" | "updated_at")
