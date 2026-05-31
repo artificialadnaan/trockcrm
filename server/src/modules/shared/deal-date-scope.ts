@@ -104,6 +104,22 @@ export function buildDealOutcomeDateScope(
   const to = window.to?.trim() || undefined;
   if (!from && !to) return undefined;
 
+  // A date window requires at least one resolved outcome class. If BOTH the Won
+  // and Lost stage-id sets are empty, every row falls to the open branch
+  // (openMatch = NOT(false OR false) = TRUE), so the window would silently match
+  // ALL rows and out-of-window Won/Lost deals would leak in. That is a pipeline
+  // stage-config failure (the canonical WON/LOST slug sets always resolve in a
+  // healthy install), NOT user input — so fail loudly here rather than return a
+  // mis-filtered result. Protects every surface that adopts this function.
+  const hasWon = (ctx.wonStageIds?.length ?? 0) > 0;
+  const hasLost = (ctx.lostStageIds?.length ?? 0) > 0;
+  if (!hasWon && !hasLost) {
+    throw new Error(
+      "buildDealOutcomeDateScope: a date window was requested but no Won or Lost stage ids resolved — " +
+        "cannot classify deal outcomes for date filtering (check pipeline_stage_config)."
+    );
+  }
+
   const columns = ctx.columns ?? dealDateScopeColumns();
   const wonMatch = stageMembership(columns.stageId, ctx.wonStageIds);
   const lostMatch = stageMembership(columns.stageId, ctx.lostStageIds);
