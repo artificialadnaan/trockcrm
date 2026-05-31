@@ -204,14 +204,21 @@ export function buildWonDateSql(filters: PerformanceReportFilters) {
   `;
 }
 
-// Month-bucket date for the forecast accuracy trend. WON deals land in the month of the
-// canonical deals.won_closed_date (so a Jan-won deal with a Feb expected-close reports its
-// won_actual in January, not February — fixing the variance %); OPEN/non-won deals fall
-// through to expected_close_date (their forecast month) exactly as before, because
-// won_closed_date IS NULL for them. Leading the COALESCE with won_closed_date is the only
-// change — the legacy fallback chain is preserved for everything else.
+// Month-bucket date for the forecast accuracy trend, GATED ON CURRENT STAGE (psc.slug):
+//   - WON-stage rows bucket on the canonical deals.won_closed_date, so a Jan-won deal with a
+//     Feb expected-close reports its won_actual in January (the intended FIX-3).
+//   - EVERY non-Won row buckets on the legacy expected-close fallback chain. This is required,
+//     not cosmetic: the app supports a deal that was Won (and KEEPS its won_closed_date) then
+//     moves back to a non-Won active stage (deals/service.ts:1570-1573). Leading the COALESCE
+//     with won_closed_date UNCONDITIONALLY would bucket such a reopened-active commit deal into
+//     its stale historical won month instead of its current expected-close month — dropping it
+//     out of the live forecast while the summary still counts it as open pipeline. Gating on the
+//     current stage keeps reopened-actives in their expected-close month. won_closed_date alone
+//     cannot distinguish a current win from a reopened-active, so the psc.slug gate is essential.
+// The caller MUST have pipeline_stage_config joined as `psc`.
 export function buildForecastMonthBucketDateSql(alias: string) {
-  return sql`COALESCE(${aliasedWonHsClosedWonDateSql(alias)}, ${sql.raw(alias)}.expected_close_date, ${sql.raw(alias)}.actual_close_date, ${sql.raw(alias)}.contract_signed_date, ${sql.raw(alias)}.updated_at::date)`;
+  const a = sql.raw(alias);
+  return sql`CASE WHEN psc.slug IN (${sqlStringList([...WON_STAGE_SLUGS])}) THEN ${aliasedWonHsClosedWonDateSql(alias)} ELSE COALESCE(${a}.expected_close_date, ${a}.actual_close_date, ${a}.contract_signed_date, ${a}.updated_at::date) END`;
 }
 
 interface DirectorKpiRow {
@@ -917,11 +924,13 @@ export async function getForecastAccuracyReport(db: TenantDb, filters: Performan
           COALESCE(SUM(${weightedValue}) FILTER (WHERE psc.slug NOT IN (${sqlStringList(terminalSlugs)}) AND (${dealScope})), 0)::numeric AS pipeline_weighted,
           COALESCE(SUM(${aliasedEffectiveWonDealValueSql("d")}) FILTER (WHERE psc.slug IN (${sqlStringList(wonSlugs)}) AND ${aliasedHasUsableWonDateSql("d")} AND ${aliasedWonHsClosedWonDateSql("d")} >= ${filters.dateFrom}::date AND ${aliasedWonHsClosedWonDateSql("d")} <= ${filters.dateTo}::date AND (${archivedWonDealScope})), 0)::numeric AS won_actual
         FROM months m
-        LEFT JOIN deals d ON ${buildForecastMonthBucketDateSql("d")} >= m.month_start
+        -- psc is joined WITH deals (not as a later LEFT JOIN) so the stage-gated month bucket can
+        -- read psc.slug. Every deal has a non-null stage_id, so the inner join drops nothing.
+        LEFT JOIN (deals d JOIN pipeline_stage_config psc ON psc.id = d.stage_id)
+          ON ${buildForecastMonthBucketDateSql("d")} >= m.month_start
           AND ${buildForecastMonthBucketDateSql("d")} < (m.month_start + INTERVAL '1 month')
         LEFT JOIN users u ON u.id = d.assigned_rep_id
         LEFT JOIN offices o ON o.id = u.office_id
-        LEFT JOIN pipeline_stage_config psc ON psc.id = d.stage_id
         GROUP BY m.month_start
         ORDER BY m.month_start
       `);

@@ -17,9 +17,10 @@ import { WON_STAGE_SLUGS, LOST_STAGE_SLUGS } from "../../../src/modules/shared/p
  * (actual_close_date) is no longer counted as won-in-period. The non-WON (lost) branch is
  * intentionally left on the legacy window so the win-rate DENOMINATOR is unchanged.
  *
- * FIX-3 (buildForecastMonthBucketDateSql): a WON deal lands in the month of its canonical
- * won_closed_date (not its expected/plan close month); OPEN deals fall through to
- * expected_close_date exactly as before.
+ * FIX-3 (buildForecastMonthBucketDateSql): a WON-STAGE deal lands in the month of its canonical
+ * won_closed_date (not its expected/plan close month); every non-Won-stage deal — INCLUDING a
+ * "reopened" deal that was Won, kept its won_closed_date, then moved back to an active stage —
+ * buckets on the expected-close fallback chain (so it stays in its live forecast month).
  */
 const U = (s: string) => `00000000-0000-0000-0000-${s.padStart(12, "0")}`;
 const WON_SLUG = WON_STAGE_SLUGS[0];
@@ -29,7 +30,7 @@ const ST = { won: U("57001"), lost: U("57002"), open: U("57003") };
 const D = {
   wonIn: U("11001"), wonTouched: U("11002"), wonOut: U("11003"),
   lostIn: U("11004"), lostOut: U("11005"), openIn: U("11006"),
-  bWon: U("12001"), bOpen: U("12002"), bFallback: U("12003"),
+  bWon: U("12001"), bOpen: U("12002"), bFallback: U("12003"), bReopened: U("12004"),
 };
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -74,7 +75,10 @@ beforeAll(async () => {
     INSERT INTO deals (id, stage_id, won_closed_date, expected_close_date, updated_at) VALUES
       ('${D.bWon}','${ST.won}','2026-02-15','2026-03-20','2026-05-01T00:00:00Z'),
       ('${D.bOpen}','${ST.open}', NULL,'2026-03-20','2026-05-01T00:00:00Z'),
-      ('${D.bFallback}','${ST.open}', NULL, NULL,'2026-04-05T00:00:00Z');
+      ('${D.bFallback}','${ST.open}', NULL, NULL,'2026-04-05T00:00:00Z'),
+      -- reopened-active: was Won (keeps a stale Feb won_closed_date) but is now in an OPEN stage
+      -- with a March expected-close -> must bucket on expected (March), NOT the stale won month
+      ('${D.bReopened}','${ST.open}','2026-02-15','2026-03-20','2026-05-01T00:00:00Z');
   `);
   tdb = drizzle(pg);
 });
@@ -105,16 +109,20 @@ describe("perf-tier2 FIX-1: buildWonDateSql windows WON by canonical won_closed_
   });
 });
 
-describe("perf-tier2 FIX-3: buildForecastMonthBucketDateSql buckets WON by canonical won month", () => {
-  it("won -> won_closed_date month; open -> expected_close_date; legacy fallback preserved", async () => {
+describe("perf-tier2 FIX-3: buildForecastMonthBucketDateSql buckets WON-STAGE by canonical won month", () => {
+  it("won-stage -> won month; non-won (incl. reopened-active) -> expected_close; fallback preserved", async () => {
     const rows = await execRows(sql`
       SELECT d.id::text AS id, to_char(${buildForecastMonthBucketDateSql("d")}, 'YYYY-MM') AS bucket
-      FROM deals d
-      WHERE d.id IN (${D.bWon}::uuid, ${D.bOpen}::uuid, ${D.bFallback}::uuid)
+      FROM deals d JOIN pipeline_stage_config psc ON psc.id = d.stage_id
+      WHERE d.id IN (${D.bWon}::uuid, ${D.bOpen}::uuid, ${D.bFallback}::uuid, ${D.bReopened}::uuid)
     `);
     const byId = Object.fromEntries(rows.map((r) => [r.id, r.bucket]));
-    expect(byId[D.bWon]).toBe("2026-02"); // canonical won month wins over expected (2026-03)
+    expect(byId[D.bWon]).toBe("2026-02"); // WON-stage: canonical won month wins over expected (2026-03)
     expect(byId[D.bOpen]).toBe("2026-03"); // open deal: expected_close_date, unchanged
     expect(byId[D.bFallback]).toBe("2026-04"); // legacy fallback chain (updated_at) preserved
+    // Reopened-active (GREEN/Codex regression): a non-Won stage with a STALE won_closed_date must
+    // bucket on its expected-close month, NOT the historical won month.
+    expect(byId[D.bReopened]).toBe("2026-03");
+    expect(byId[D.bReopened]).not.toBe("2026-02");
   });
 });

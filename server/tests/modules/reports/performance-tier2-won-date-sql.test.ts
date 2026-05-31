@@ -63,9 +63,12 @@ describe("perf-tier2 Won-date basis is wired into the live report queries", () =
     // FIX-1 at the won-only forecast call site: canonical window.
     expect(text).toContain("d.won_closed_date is not null");
     expect(text).toContain("d.won_closed_date >=");
-    // FIX-3: the monthly trend buckets WON deals by canonical won month (COALESCE leads with it).
+    // FIX-3: the monthly trend buckets WON-STAGE deals by canonical won month, but non-won rows
+    // (incl. reopened-actives carrying a stale won date) bucket on the expected-close fallback —
+    // gated on psc.slug, so the bucket is a stage-conditional CASE, not an unconditional COALESCE.
+    expect(text).toContain("case when psc.slug in");
     expect(text).toContain(
-      "coalesce(d.won_closed_date, d.expected_close_date, d.actual_close_date, d.contract_signed_date, d.updated_at::date)",
+      "then d.won_closed_date else coalesce(d.expected_close_date, d.actual_close_date, d.contract_signed_date, d.updated_at::date) end",
     );
     // Codex P2 #1: monthly won_actual now carries the usable-won-date guard too, so it reconciles
     // to the summary's won_period (which excludes null-won-date wins). The guard now appears at least
