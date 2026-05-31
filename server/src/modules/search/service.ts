@@ -135,8 +135,8 @@ export async function globalSearch(
     return crossOfficeSearch(sanitized, types, userId);
   }
 
-  // Default: single-office search (reps)
-  return singleOfficeSearch(tenantDb, sanitized, types);
+  // Default: single-office search (reps) -- restrict deals + leads to the rep's own records.
+  return singleOfficeSearch(tenantDb, sanitized, types, userId);
 }
 
 function emptyResponse(query: string): SearchResponse {
@@ -175,6 +175,10 @@ async function runEntitySearches(
   sanitized: string,
   types: SearchType[],
   limit: number,
+  // When set (rep, single-office path), restrict deals + leads to this assigned rep -- those two
+  // entities hard-gate detail access to the assigned rep, so global search must not surface
+  // others' (deals/leads detail throw 403 otherwise). null = director/admin (office-wide).
+  repRestrictionId?: string,
 ): Promise<Record<SearchType, SearchResult[]>> {
   // Sequential on purpose: the cross-office path runs these on a SINGLE pooled pg client (one
   // search_path), which cannot multiplex concurrent queries. settleSequential keeps one failing
@@ -185,11 +189,11 @@ async function runEntitySearches(
     return settled.status === "fulfilled" ? settled.value : [];
   };
 
-  const dealHits = await runOne(types.includes("deals"), () => searchDeals(searchDb, sanitized, limit));
+  const dealHits = await runOne(types.includes("deals"), () => searchDeals(searchDb, sanitized, limit, repRestrictionId));
   const contactHits = await runOne(types.includes("contacts"), () => searchContacts(searchDb, sanitized, limit));
   const fileHits = await runOne(types.includes("files"), () => searchFiles(searchDb, sanitized, limit));
   const companyHits = await runOne(types.includes("companies"), () => searchCompanies(searchDb, sanitized, limit));
-  const leadHits = await runOne(types.includes("leads"), () => searchLeads(searchDb, sanitized, limit));
+  const leadHits = await runOne(types.includes("leads"), () => searchLeads(searchDb, sanitized, limit, repRestrictionId));
   const propertyHits = await runOne(types.includes("properties"), () => searchProperties(searchDb, sanitized, limit));
 
   return { deals: dealHits, contacts: contactHits, files: fileHits, companies: companyHits, leads: leadHits, properties: propertyHits };
@@ -220,8 +224,10 @@ async function singleOfficeSearch(
   tenantDb: TenantDb,
   sanitized: string,
   types: SearchType[],
+  // Reps reach this path; restrict deals + leads to their own (matching the detail-access gate).
+  repRestrictionId?: string,
 ): Promise<SearchResponse> {
-  const groups = await runEntitySearches(tenantDb, sanitized, types, PER_ENTITY_LIMIT);
+  const groups = await runEntitySearches(tenantDb, sanitized, types, PER_ENTITY_LIMIT, repRestrictionId);
   return assembleResponse(sanitized, groups, PER_ENTITY_LIMIT);
 }
 
@@ -314,7 +320,7 @@ function appendQuery(url: string, params: Record<string, string>): string {
   return `${url}${url.includes("?") ? "&" : "?"}${qs}`;
 }
 
-async function searchDeals(tenantDb: TenantDb, query: string, limit: number): Promise<SearchResult[]> {
+async function searchDeals(tenantDb: TenantDb, query: string, limit: number, repRestrictionId?: string): Promise<SearchResult[]> {
   // Unified substring field set (name/number/project/address/owner/company/contact via the
   // shared builder). The REAL stage slug comes from pipeline_stage_config via stageId -- the
   // denormalized bid-board slug is only set at the estimating boundary, so it would miss
@@ -337,6 +343,9 @@ async function searchDeals(tenantDb: TenantDb, query: string, limit: number): Pr
       and(
         buildDealSearchCondition(query),
         or(eq(deals.isActive, true), inArray(pipelineStageConfig.slug, [...TERMINAL_STAGE_SLUGS])),
+        // Rep visibility: a rep can only open their own deals (detail throws otherwise), so global
+        // search must not surface others'. Directors/admins (cross-office) pass no restriction.
+        repRestrictionId ? eq(deals.assignedRepId, repRestrictionId) : undefined,
       ),
     )
     .orderBy(desc(relevanceOrder(query, [deals.name, deals.dealNumber, deals.projectNumber])), desc(deals.updatedAt))
@@ -395,10 +404,23 @@ async function searchContacts(tenantDb: TenantDb, query: string, limit: number):
 
 async function searchCompanies(tenantDb: TenantDb, query: string, limit: number): Promise<SearchResult[]> {
   const rows = await tenantDb
-    .select({ id: companies.id, name: companies.name, city: companies.city, state: companies.state })
+    .select({
+      id: companies.id,
+      name: companies.name,
+      city: companies.city,
+      state: companies.state,
+      domain: companies.domain,
+      website: companies.website,
+      address: companies.address,
+    })
     .from(companies)
     .where(and(buildCompanySearchCondition(query), eq(companies.isActive, true)))
-    .orderBy(desc(relevanceOrder(query, [companies.name])), desc(companies.updatedAt))
+    // Rank/order over the SAME fields the builder matches, so an exact domain/address hit isn't
+    // pushed out of the cap by weaker name/city matches.
+    .orderBy(
+      desc(relevanceOrder(query, [companies.name, companies.domain, companies.website, companies.address])),
+      desc(companies.updatedAt),
+    )
     .limit(limit);
 
   return rows.map((r): SearchResult => ({
@@ -407,15 +429,23 @@ async function searchCompanies(tenantDb: TenantDb, query: string, limit: number)
     primaryLabel: r.name ?? "Unnamed Account",
     secondaryLabel: [r.city, r.state].filter(Boolean).join(", ") || "",
     deepLink: `/companies/${r.id}`,
-    rank: scoreMatch(query, r.name, r.city),
+    rank: scoreMatch(query, r.name, r.domain, r.website, r.address, r.city),
   }));
 }
 
-async function searchLeads(tenantDb: TenantDb, query: string, limit: number): Promise<SearchResult[]> {
+async function searchLeads(tenantDb: TenantDb, query: string, limit: number, repRestrictionId?: string): Promise<SearchResult[]> {
   const rows = await tenantDb
     .select({ id: leads.id, name: leads.name, status: leads.status })
     .from(leads)
-    .where(and(buildLeadSearchCondition(query), eq(leads.isActive, true)))
+    .where(
+      and(
+        buildLeadSearchCondition(query),
+        eq(leads.isActive, true),
+        // Rep visibility: leads hard-gate detail access to the assigned rep (detail throws
+        // otherwise), so a rep's global search must only surface their own leads.
+        repRestrictionId ? eq(leads.assignedRepId, repRestrictionId) : undefined,
+      ),
+    )
     .orderBy(desc(relevanceOrder(query, [leads.name])), desc(leads.updatedAt))
     .limit(limit);
 

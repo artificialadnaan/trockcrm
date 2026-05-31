@@ -18,6 +18,43 @@ function chainable(rows: unknown[]) {
 
 const WON_SLUG = WON_STAGE_SLUGS[0];
 
+// Flatten a drizzle SQL/condition object to text so we can assert on the columns a WHERE touches.
+function extractSqlText(value: unknown): string {
+  if (typeof value === "string") return value;
+  if (!value || typeof value !== "object") return "";
+  if (Array.isArray((value as { queryChunks?: unknown[] }).queryChunks)) {
+    return (value as { queryChunks: unknown[] }).queryChunks.map(extractSqlText).join("");
+  }
+  if ("value" in (value as Record<string, unknown>)) {
+    const v = (value as { value: unknown }).value;
+    if (Array.isArray(v)) return v.map(extractSqlText).join("");
+    if (typeof v === "string") return v;
+  }
+  if ("name" in (value as Record<string, unknown>) && typeof (value as { name?: unknown }).name === "string") {
+    return (value as { name: string }).name;
+  }
+  return "";
+}
+
+// A chainable stub that also records every WHERE condition it receives.
+function capturingDb(rowsPerSelect: unknown[][], whereSink: unknown[]) {
+  let call = 0;
+  return {
+    execute: vi.fn().mockResolvedValue({ rows: [] }),
+    select: vi.fn(() => {
+      const rows = rowsPerSelect[call++] ?? [];
+      const builder: Record<string, unknown> = {};
+      for (const m of ["from", "orderBy", "limit", "leftJoin", "innerJoin", "groupBy"]) builder[m] = vi.fn(() => builder);
+      builder.where = vi.fn((cond: unknown) => {
+        whereSink.push(cond);
+        return builder;
+      });
+      (builder as { then: unknown }).then = (resolve: (v: unknown) => unknown) => resolve(rows);
+      return builder;
+    }),
+  };
+}
+
 /**
  * Offline composition proof for the unified global search: the per-entity FIELD sets (the
  * superset over the old FTS columns) are proven by the *-search-field-set tests; here we prove
@@ -63,5 +100,24 @@ describe("globalSearch — unified composition + additions (single office, rep)"
     // Backward-compatible shape: deals/contacts/files groups still exist.
     expect(Array.isArray(result.files)).toBe(true);
     expect(result.total).toBe(result.deals.length + result.companies.length + result.leads.length + result.properties.length);
+  });
+});
+
+describe("globalSearch — rep visibility (no cross-rep leak)", () => {
+  it("restricts a rep's deal + lead search to their own assigned records", async () => {
+    const wheres: unknown[] = [];
+    const db = capturingDb([[], [], [], [], []], wheres); // deals, contacts, companies, leads, properties
+    await globalSearch(db as any, "acme", undefined, "rep", "rep-1");
+    const whereText = wheres.map(extractSqlText).join(" | ");
+    // The rep-restriction param appears only in the deals/leads assigned_rep_id = $rep clause.
+    expect(whereText).toContain("rep-1");
+  });
+
+  it("does NOT add a rep restriction when no user id is in play (e.g. unscoped/privileged path)", async () => {
+    const wheres: unknown[] = [];
+    const db = capturingDb([[], [], [], [], []], wheres);
+    await globalSearch(db as any, "acme"); // no role/user -> single office, no rep filter
+    const whereText = wheres.map(extractSqlText).join(" | ");
+    expect(whereText).not.toContain("rep-1");
   });
 });
