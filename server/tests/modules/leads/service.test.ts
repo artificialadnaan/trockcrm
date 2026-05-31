@@ -850,6 +850,109 @@ describe("lead service canonical progression", () => {
     ]);
   });
 
+  it("stamps disqualifiedAt with the clock on the transition into disqualified", async () => {
+    const FIXED_NOW = new Date("2026-04-15T15:00:00.000Z");
+    const tenantDb = createFakeTenantDb({
+      id: "lead-1",
+      companyId: "company-1",
+      propertyId: "property-1",
+      primaryContactId: null,
+      name: "Palm Villas repaint",
+      stageId: newLeadStage.id,
+      assignedRepId: "rep-1",
+      status: "open",
+      source: "Referral",
+      officeCode: "dfw",
+      office: "dfw",
+      projectTypeId: "project-type-commercial",
+      qualificationPayload: {},
+      description: null,
+      stageEnteredAt: new Date("2026-04-12T15:00:00.000Z"),
+      convertedAt: null,
+      disqualifiedAt: null,
+      isActive: true,
+      createdAt: new Date("2026-04-12T15:00:00.000Z"),
+      updatedAt: new Date("2026-04-12T15:00:00.000Z"),
+    });
+    const service = createLeadService({
+      now: () => FIXED_NOW,
+      getStageById: pipelineMocks.getStageById as never,
+      getActiveProjectTypes: pipelineMocks.getActiveProjectTypes as never,
+    });
+
+    const lead = await service.updateLead(
+      tenantDb as never,
+      "lead-1",
+      { status: "disqualified" },
+      "director",
+      "director-1"
+    );
+
+    expect(lead.status).toBe("disqualified");
+    expect(lead.isActive).toBe(false);
+    expect(lead.disqualifiedAt).toEqual(FIXED_NOW);
+    expect(tenantDb.state.leads[0]?.disqualifiedAt).toEqual(FIXED_NOW);
+  });
+
+  it("never re-stamps disqualifiedAt: a disqualified lead is inactive and read-only, so its date can't jump windows", async () => {
+    // Reachability guard: disqualifying sets isActive=false, and updateLead
+    // rejects inactive non-converted leads with a 409 read-only error BEFORE the
+    // status block. So an already-disqualified lead can never be re-saved through
+    // updateLead — the original disqualified date is permanent (the bug Codex
+    // flagged: a Jan-disqualified lead must not re-stamp to a later month).
+    const DISQUALIFY_NOW = new Date("2026-01-09T10:00:00.000Z");
+    const tenantDb = createFakeTenantDb({
+      id: "lead-1",
+      companyId: "company-1",
+      propertyId: "property-1",
+      primaryContactId: null,
+      name: "Palm Villas repaint",
+      stageId: newLeadStage.id,
+      assignedRepId: "rep-1",
+      status: "open",
+      source: "Referral",
+      officeCode: "dfw",
+      office: "dfw",
+      projectTypeId: "project-type-commercial",
+      qualificationPayload: {},
+      description: null,
+      stageEnteredAt: new Date("2026-01-08T15:00:00.000Z"),
+      convertedAt: null,
+      disqualifiedAt: null,
+      isActive: true,
+      createdAt: new Date("2026-01-08T15:00:00.000Z"),
+      updatedAt: new Date("2026-01-08T15:00:00.000Z"),
+    });
+    const service = createLeadService({
+      now: () => DISQUALIFY_NOW,
+      getStageById: pipelineMocks.getStageById as never,
+      getActiveProjectTypes: pipelineMocks.getActiveProjectTypes as never,
+    });
+
+    await service.updateLead(
+      tenantDb as never,
+      "lead-1",
+      { status: "disqualified" },
+      "director",
+      "director-1"
+    );
+    expect(tenantDb.state.leads[0]?.disqualifiedAt).toEqual(DISQUALIFY_NOW);
+    expect(tenantDb.state.leads[0]?.isActive).toBe(false);
+
+    // A later edit (even one that re-submits status=disqualified) is blocked, so
+    // the original January date stands — it never jumps into a later window.
+    await expect(
+      service.updateLead(
+        tenantDb as never,
+        "lead-1",
+        { status: "disqualified", description: "added a note" },
+        "director",
+        "director-1"
+      )
+    ).rejects.toMatchObject({ statusCode: 409 });
+    expect(tenantDb.state.leads[0]?.disqualifiedAt).toEqual(DISQUALIFY_NOW);
+  });
+
   it("preserves qualification payload when creating a lead with lead edit v2 enabled", async () => {
     const previousFlag = process.env.ENABLE_LEAD_EDIT_V2;
     process.env.ENABLE_LEAD_EDIT_V2 = "true";
