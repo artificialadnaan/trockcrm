@@ -1,124 +1,102 @@
 # Director / stage drill-down FilterBar mount — structural mock (design sign-off)
 
-**Status:** adapter/logic built + TDD'd on `feat/director-drilldown-filterbar`. **Live mounts gated** on the
-`paramPrefix` namespace primitive landing on `main` (see Gate below). **Not merged.** Won basis untouched.
+**Branch:** `feat/director-drilldown-filterbar`. **`paramPrefix` is now on `main` (#584).** Won basis
+untouched. **Not merged** — awaiting your sign-off on Surface A (stage page) below.
 
-Goal (Adnaan): put the full outcome-aware shared `<FilterBar>` (the `/pipeline` row — date is now
-outcome-aware + windows open deals since `ENABLE_STAGE_ENTRY_DATE_FILTER` is on, plus rep, value, status,
-workflow, region, project-type, stalled) on the director/stage drill-downs that today show the legacy
-Updated-After / Min-Age row, and on the `/deals` dashboard drill-downs (Won / Active / At-risk). RED owns
-the base `/deals` list; these surfaces are mine.
-
----
-
-## GATE — `paramPrefix` is NOT on `main`
-
-The namespace primitive is the `prefix` parameter threaded through `useFilterState(prefix)` +
-`serializeFilters` / `deserializeFilters` / `mergeFilterParams` / `clearFilterParams` + a `stripFilterBarPrefix`
-helper. Verified:
-
-- **`main`:** `useFilterState()` takes no args; **zero** `prefix` references in `client/src/components/filters/`.
-- **#577** (`feat/wave1-deals-relabel-leads-filterbar`, OPEN/unmerged): adds the whole `prefix` chain.
-- **#583** (MERGED) landed only the Companies-prep opts (Owner label + `statusOptions`) — **not** the prefix.
-
-So the primitive is gated behind the leads server chain. **Ask:** RED extracts the `prefix` chain standalone
-(it's a pure client-side URL primitive — no leads/server dependency) and lands it on `main`. The mounts below
-flip live the moment it does; nothing here needs the leads work.
+Goal (Adnaan): the full outcome-aware shared `<FilterBar>` (the `/pipeline` row — outcome-aware Date
+that windows open deals now the flag's on, plus rep, value, status, multi-stage, workflow, region,
+project-type, stalled) on the director/stage drill-downs that today show the legacy Updated-After /
+Min-Age row, and on the `/deals` dashboard drill-downs (Won / Active / At-risk). RED owns the base
+`/deals` list (`dashboardView.filter === null`); these drill-down surfaces are mine.
 
 ---
 
-## Built now (fork-independent, gate-green, in this PR)
+## Coordination split (deal-list-page.tsx, same file)
 
-`client/src/components/deals/deals-filterbar-adapter.ts`:
-
-- **`DRILLDOWN_FILTERBAR_PARAM_PREFIX = "fb_"`** — the bar's URL namespace on these surfaces. The host pages
-  carry bare params (`scope`, `period`, `filter`, `page`, `assignedRepId`); the bar serializes as
-  `fb_stageIds`, `fb_dateFrom`, `fb_page`, … so the two URL spaces are disjoint and a bar control can never
-  clobber the host's scope/period/page.
-- **`getDrilldownFilterBarDimensions({ pinnedStage?, ownRep? })`** — per-surface dimension set from the
-  canonical deals row, dropping what the host already owns (details per surface below).
-- Stage-scope split reuses the existing **`getBoardVisibleStageScope(cols, showDd=true, isTerminalSlug)`** — no
-  new helper.
-
-All exercised by `deals-filterbar-adapter.test.ts` (6 new cases, RED→GREEN).
+- **RED:** base-view mount (`dashboardView.filter === null`).
+- **Me:** drill-down mounts (`dashboardView.filter !== null`).
+- Seam: a single `drilldownFilterBar` memo (undefined for base view + at-risk) feeds
+  `filterBar={drilldownFilterBar}`; `baseFilters={drilldownFilterBar ? … : layeredListBaseFilters}`.
+  The base arm is `layeredListBaseFilters` verbatim (RED-safe). Both `<DealsListSection>` mounts
+  consume the shared `paramPrefix` threading below.
 
 ---
 
-## Surface A — `/deals/stages/<id>` (`deal-stage-page.tsx`)
+## SHIPPED LIVE in this PR (TDD'd, gate-green)
 
-Today: bespoke filter grid (Search, Region, Sales rep [admin], Updated-after/before, Min/Max age) +
-`PipelineStageTable`, driven by `useDealStagePage` (a **separate** render path from `/pipeline`).
-
-**FORK A — render path (needs your call):**
-
-- **A′ (recommended):** keep `useDealStagePage` **only** for the `PipelineStagePageHeader` summary
-  (active/total, stage value, avg age — a cheap aggregate). Replace the bespoke filter grid + table with
-  `<DealsListSection filterBar={…} baseFilters={{ stageIds: [routeStageId] }} scope={route.query.scope} … />`.
-  The list now runs through the rich `/api/deals` (getDeals) endpoint that **already** supports every
-  dimension + the outcome-aware date + CSV — no server change. Visual change: the stage table adopts the
-  deals-list row/columns.
-  - `dimensions: getDrilldownFilterBarDimensions({ pinnedStage: true, ownRep: true })`
-    → `[search, date, sort, rep, status, workflow, region, projectType, value, stalled]`
-    (stage pinned by the route; the bespoke admin rep select folds into the bar).
-  - `stageEntryDateEnabled: true`, `paramPrefix: DRILLDOWN_FILTERBAR_PARAM_PREFIX`.
-  - `defaultStageIds: [routeStageId]`; `terminalStageIds: isTerminal(routeStage) ? [routeStageId] : []`.
-- **B (not recommended):** keep `PipelineStageTable`; mount a standalone `<FilterBar prefix=…>` above it and
-  extend the `/deals/stages/:id` endpoint to accept value/status/workflow/outcome-date. Smaller visual change
-  but **requires server work (BLUE)** and maintains a second list path.
-
-## Surface B — `/deals` dashboard drill-downs (`deal-list-page.tsx`)
-
-Two render paths today:
-
-1. **DealsListSection-backed** (Won, active_pipeline, closing_soon, opportunities, bid_board) — already render
-   `<DealsListSection>` (lines ~1276-1300) in legacy mode. **Mount = add `filterBar={…}`** to that element,
-   keeping `baseFilters={layeredListBaseFilters}` as the period **floor**.
-   - `dimensions: getDrilldownFilterBarDimensions()` → no `rep` (the page's rep `<Select>` filters the **board
-     AND** the list together via `selectedRepFilter` + `lockedOwnerId`; folding it into the bar would de-filter
-     the board), no `scope` (page toggle).
-   - `defaultStageIds`/`terminalStageIds` from `getBoardVisibleStageScope(drilldownVisibleStages, true, isTerminalStage)`.
-   - Keep `lockedOwnerId` / `hideOwnerFilter`. `stageEntryDateEnabled: true`, `paramPrefix: "fb_"`.
-2. **Custom client-side SLA list** (at_risk, stale — lines ~1221-1270) — **OUT this round (FORK B).** These
-   filter at-risk **client-side** because the deals list API exposes no at-risk/stale server predicate (the
-   existing banner at line ~1303 says exactly this). The bar drives a **server** getDeals query, so it can't
-   filter at-risk without a new server predicate. Recommend: defer to a follow-up gated on a BLUE at-risk
-   server filter; leave the at-risk/stale list as-is for now.
+1. **Adapter** (`deals-filterbar-adapter.ts`):
+   - `DRILLDOWN_FILTERBAR_PARAM_PREFIX = "fb_"` — bar URL namespace.
+   - `getDrilldownFilterBarDimensions({pinnedStage?, ownRep?})` — per-surface dim set (drops what the
+     host owns: scope always; rep unless the bar owns it; stage when the surface pins one).
+   - `buildDrilldownListFilterBar(...)` — the dashboard drill-down list config (composes the above +
+     `getBoardVisibleStageScope`).
+2. **Shared infra** (`deals-list-section.tsx`): `filterBar.paramPrefix` → `useFilterState(prefix)`, so
+   a mount sharing its URL with a host page reads/writes `fb_*` keys and can't clobber the host's bare
+   `scope`/`period`/`filter`/`page`. Default `""` = bare = byte-identical to today (pipeline, base,
+   rep-drilldown). **RED's base-view mount consumes the same prop.**
+3. **Surface B — `/deals` dashboard drill-downs** (`deal-list-page.tsx`, `filter !== null`): the full
+   bar on every DealsListSection-backed drill-down (Won, Active/active_pipeline, Closing,
+   Opportunities, Bid Board).
+   - dims: `getDrilldownFilterBarDimensions()` — **no rep** (the page's rep select drives the board
+     AND the list together; folding it into the bar would de-filter the board), **no scope** (page
+     toggle). Stage scope = the drill-down's visible stages.
+   - **Rep coupling fix:** FilterBar mode spreads `baseFilters` but ignores `lockedOwnerId`, so the
+     page's selected rep is folded into `baseFilters` (no-op on the legacy/base path).
+   - **Period = floor, bar date = additive:** the drill-down's `?period` stays the `baseFilters` date
+     floor; the bar's date is absent by default, so a drill-down behaves **exactly as today** until the
+     user touches the bar. (Nuance 4 below.)
+   - **At-risk/stale:** OUT — they render a client-side SLA list with **no server predicate**, so the
+     bar (which drives getDeals) can't back them. `drilldownFilterBar` is `undefined` there →
+     unchanged. (Decision 2.)
 
 ---
 
-## The only shared-component change (gated, mine)
+## Surface A — `/deals/stages/<id>` (`deal-stage-page.tsx`) — **NEEDS SIGN-OFF before I build it**
 
-`DealsListSection` calls `useFilterState()` bare today. Threading the namespace is **one optional prop + one
-call-site arg**:
+Today: a bespoke filter grid (Search, Region, Sales rep, Updated-after/before, Min/Max age) +
+`PipelineStageTable`, driven by `useDealStagePage` — a **separate render path** from `/pipeline`, with
+its own 7-test suite. To get the *full* outcome-aware bar here, the stage endpoint would have to learn
+value/status/workflow/outcome-date/stalled (it doesn't support them) — so the only no-server-work path
+routes the list through the rich `/api/deals` (getDeals) that already does:
 
-```ts
-// DealsListSectionProps.filterBar:
-paramPrefix?: string;              // NEW — consumed only by the drill-down/stage mounts
-// inside the component:
-const { value, setFilters, resetFilters } = useFilterState(filterBar?.paramPrefix ?? "");  // gated on #577
-```
+**Recommended — A′:** keep `useDealStagePage` **only** for the summary header (active/total, stage
+value, avg age); replace the filter grid + table with
+`<DealsListSection filterBar={…} baseFilters={{ stageIds:[routeStageId] }} scope={route.query.scope} />`.
+- dims: `getDrilldownFilterBarDimensions({ pinnedStage:true, ownRep:true })` — **already built +
+  tested** → `[search, date, sort, rep, status, workflow, region, projectType, value, stalled]` (stage
+  pinned by the route; the bespoke admin rep select folds into the bar).
+- `paramPrefix:"fb_"`, `stageEntryDateEnabled:true`, `defaultStageIds:[routeStageId]`,
+  `terminalStageIds: isTerminal(routeStage) ? [routeStageId] : []`.
 
-`/pipeline` + rep-drilldown pass no `paramPrefix` → `""` → bare keys, **byte-identical** to today. This is the
-sole edit to a shared component; it's inert until a mount opts in, but flagging since `DealsListSection` is
-shared. Gated on #577 (`useFilterState(prefix)`).
+**Why this is the sign-off gate (not just "do it"):** A′ **replaces a bespoke, separately-tested
+page** with the deals-list rows — a real visual change — and rewrites ~5 of its 7 tests. Two nuances
+to confirm:
+- **Summary header = whole-stage totals.** It keeps reading `useDealStagePage` (bare params), so once
+  the bar (fb_) filters the list, the header shows stage totals while the list shows the filtered
+  subset (like the dashboard board+list). Acceptable? Or should the header track the bar's filters?
+- **Double fetch:** `useDealStagePage` (summary) + getDeals (list). Minor; or drop the rich summary.
+
+**Alt — B (not recommended):** keep `PipelineStageTable`, mount a standalone `<FilterBar prefix>` and
+extend the `/deals/stages/:id` endpoint for the new dims. Smaller visual change but **needs server
+work (BLUE)** + maintains a second list path.
 
 ---
 
 ## Design nuances for sign-off
 
-1. **Stage-page render path:** A′ (reuse DealsListSection, no server work) vs B (keep the table, extend the
-   endpoint). Recommend **A′**.
-2. **At-risk/stale:** OUT this round (no server predicate). Confirm defer.
-3. **Rep ownership:** dashboard drill-downs keep the page rep-select (board+list); the stage page folds rep
+1. **Surface A render path:** A′ (reuse DealsListSection, replaces the bespoke page + ~5 tests) vs B
+   (keep the table, extend the endpoint — server work). **Recommend A′ — say go and I build it.**
+2. **At-risk/stale:** OUT this round (no server predicate). Confirm defer (→ a BLUE at-risk filter).
+3. **Rep ownership:** dashboard keeps the page rep-select (board+list); the stage page (A′) folds rep
    into the bar. Confirm.
-4. **Date floor vs override:** a drill-down's period (`baseFilters.dateFrom/dateTo`) is the floor; the bar's
-   date dimension **overrides** it (existing spread order: `{...baseFilters, ...barValue}`). Acceptable
-   (explicit refine) — or should the bar's date **intersect** the period floor? Flagging.
-5. **Prefix string:** `"fb_"`. Bikeshed welcome.
-
----
+4. **Date floor vs override:** drill-down `?period` is the floor; the bar's date is additive/overrides
+   (same `{...baseFilters, ...barValue}` spread as /pipeline). Default preserves today's behavior; a
+   user-set bar date intersects. Acceptable, or intersect-only?
+5. **Board/list divergence:** on a dashboard drill-down the board above is the drill-down's board
+   (unfiltered by the bar); the list below refines — same pattern as /pipeline. Expected.
+6. **Prefix string:** `"fb_"`. Bikeshed welcome.
 
 ## Won basis
 
-Untouched. This is list-filter wiring over getDeals; no Won aggregate/KPI path touched. The `/deals` "Won" KPI
+Untouched — list-filter wiring over getDeals; no Won aggregate/KPI path touched. The `/deals` "Won" KPI
 card stays on `getCanonicalTerminalMetric` (191 / $9,778,045.90).
