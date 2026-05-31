@@ -877,6 +877,9 @@ async function getDirectorFunnelSummary(
       WITH deal_owners AS (
         -- Locked requirement: widen the rep workspace for deal-owning non-reps
         -- without widening it for lead-only directors/admins.
+        -- NOTE: deals is a TENANT-schema table (search_path office_slug,public), so
+        -- this scans ONLY this office's deals -- owner_rows is office-bounded by schema
+        -- isolation, not unconstrained.
         SELECT DISTINCT d.assigned_rep_id AS rep_id
         FROM deals d
         WHERE d.assigned_rep_id IS NOT NULL
@@ -2783,6 +2786,11 @@ async function buildRepPerformanceCards(
     WITH deal_owners AS (
       -- Locked requirement: keep all active reps, and also include non-reps who
       -- have ever owned at least one deal so their row appears on the dashboard.
+      -- NOTE: deals is a TENANT-schema table; tenantDb runs with search_path
+      -- office_slug,public (server/src/middleware/tenant.ts), so this CTE scans ONLY
+      -- this office's deals. owner_rows is therefore already office-bounded by schema
+      -- isolation -- the OR-branch in the WHERE below admits only reps with deal
+      -- activity in THIS office (the locked requirement), not cross-office owners.
       SELECT DISTINCT d.assigned_rep_id AS rep_id
       FROM deals d
       WHERE d.assigned_rep_id IS NOT NULL
