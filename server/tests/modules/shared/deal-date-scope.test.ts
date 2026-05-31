@@ -47,14 +47,13 @@ describe("buildDealOutcomeDateScope", () => {
     expect(sql).toContain("stage_entered_at");
   });
 
-  it("fails loudly when a date window is requested but NO won/lost stages resolve", () => {
-    // Both sets empty would make openMatch = NOT(false OR false) = TRUE, silently
-    // returning every row and ignoring the window (out-of-window Won/Lost rows
-    // leaking in as 'open'). That is a stage-config failure, not user input — so
-    // the canonical function throws rather than silently mis-filtering. (Codex #546.)
-    expect(() =>
+  it("degrades gracefully (returns undefined, skips the predicate) when NO won/lost stages resolve", () => {
+    // Both sets empty is a pipeline_stage_config misconfig. Rather than 500 a
+    // date-filtered endpoint, the function skips the date predicate so the caller
+    // omits it and still returns rows (Codex #546 — graceful-empty guarantee).
+    expect(
       buildDealOutcomeDateScope({ from: "2026-01-01" }, { wonStageIds: [], lostStageIds: [] })
-    ).toThrow(/won.*lost|stage/i);
+    ).toBeUndefined();
   });
 
   it("still classifies correctly when only ONE outcome class resolves (partial config)", () => {

@@ -123,7 +123,9 @@ describe("value-range predicate (stage-aware effective value == sort == display)
     expect(sql).toContain("between");
     expect(sql).toContain("on_hold");
     expect(sql).toContain("bid_estimate");
-    expect(sql).not.toContain("case when"); // no stage CASE when no won ids
+    // The open best-estimate chain has its own per-candidate CASE WHENs, so the
+    // marker of NO stage-aware switch is the absence of stage classification.
+    expect(sql).not.toContain("stage_id"); // no won-vs-open stage CASE
   });
   it(">= when only a minimum, <= when only a maximum", () => {
     expect(text(buildValueRangePredicate({ valueMin: 100000 }, openCtx))).toContain(">=");

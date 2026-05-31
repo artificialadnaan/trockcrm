@@ -757,18 +757,19 @@ function buildSortWithIdTieBreaker(column: SQLWrapper, dir: "asc" | "desc") {
     : [desc(column), desc(deals.id)] as const;
 }
 
-function buildDealListOrder(filters: DealFilters) {
+function buildDealListOrder(filters: DealFilters, wonStageIds: string[]) {
   switch (filters.sortBy) {
     case "name":
       return buildSortWithIdTieBreaker(deals.name, filters.sortDir === "asc" ? "asc" : "desc");
     case "created_at":
       return buildSortWithIdTieBreaker(deals.createdAt, filters.sortDir === "asc" ? "asc" : "desc");
     case "awarded_amount":
-      // Value sort uses the SAME effective-value chain the FilterBar value range
-      // filters and the list displays on, so sort == filter (D-1). Raw
+      // Stage-aware effective value (awarded-first for Won stage ids,
+      // best-estimate otherwise) — the SAME expression the value FILTER and the
+      // list DISPLAY use, so sort == filter == display (D-1; Codex #546). Raw
       // awarded_amount is null for most open deals and would mis-sort them.
       return buildSortWithIdTieBreaker(
-        aliasedEffectiveDealValueSql("deals"),
+        aliasedStageAwareEffectiveDealValueSql("deals", wonStageIds),
         filters.sortDir === "asc" ? "asc" : "desc"
       );
     case "stage_entered_at":

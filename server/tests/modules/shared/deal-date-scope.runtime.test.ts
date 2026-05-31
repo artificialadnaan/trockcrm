@@ -124,10 +124,11 @@ describe("deal date scope (runtime, PGlite)", () => {
     const expr = dealDisplayDateExpr(CTX);
     const { sql, params } = dialect.sqlToQuery(expr);
     const { rows } = await db.query<{ id: string; display_date: string | null }>(
-      `SELECT id, (${sql})::date AS display_date FROM deals ORDER BY id`,
+      // ::date::text so PGlite returns a 'YYYY-MM-DD' string, not a JS Date object.
+      `SELECT id, to_char((${sql})::date, 'YYYY-MM-DD') AS display_date FROM deals ORDER BY id`,
       params as unknown[]
     );
-    const byId = Object.fromEntries(rows.map((r) => [r.id, r.display_date && r.display_date.slice(0, 10)]));
+    const byId = Object.fromEntries(rows.map((r) => [r.id, r.display_date]));
     // Won rows -> won/signed date (incl. the legacy contract_signed_date fallback)
     expect(byId.won_signed_in).toBe("2026-02-15");
     expect(byId.won_signed_out).toBe("2026-05-15");
