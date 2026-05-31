@@ -1393,6 +1393,33 @@ describe("Dashboard Service", () => {
       expect(downstreamQuery).toContain(`${stageClockExpression} as stage_entered_at`);
     });
 
+    it("scopes the rep-performance and funnel rosters to the active office (D-5)", async () => {
+      const { getDirectorDashboard } = await import("../../../src/modules/dashboard/service.js");
+      const tenantDb = createMockTenantDb([]);
+
+      await getDirectorDashboard(tenantDb, {
+        from: "2026-01-01",
+        to: "2026-03-31",
+        officeId: "office-1",
+        periodKind: "qtd",
+      });
+
+      const queryTexts = tenantDb.execute.mock.calls.map(([query]: [unknown]) =>
+        extractSqlText(query).toLowerCase()
+      );
+      // users is a GLOBAL (public) table, so `FROM users u` returns reps from every office
+      // unless the roster is office-scoped. Both Source-A rosters (the Sales Force rep cards
+      // and the funnel distribution rows) must filter u.office_id, matching the Source-B
+      // snapshot read (getRepPerformanceSnapshots) -- otherwise foreign-office reps leak in.
+      const rosterQuery = queryTexts.find((t) => t.includes("from users u") && t.includes("rep_deals"));
+      const funnelQuery = queryTexts.find((t) => t.includes("from users u") && t.includes("lead_counts"));
+
+      expect(rosterQuery, "rep-performance roster query").toBeDefined();
+      expect(funnelQuery, "director funnel rep-rows query").toBeDefined();
+      expect(rosterQuery).toContain("u.office_id =");
+      expect(funnelQuery).toContain("u.office_id =");
+    });
+
     it("does not read admin-configured stale thresholds for stale lead watchlists", async () => {
       const { getDirectorDashboard } = await import("../../../src/modules/dashboard/service.js");
       const tenantDb = createMockTenantDb([[], [], [], [], [], [], []]);

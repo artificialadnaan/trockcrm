@@ -831,7 +831,8 @@ async function getRepFunnelBuckets(
 }
 
 async function getDirectorFunnelSummary(
-  tenantDb: TenantDb
+  tenantDb: TenantDb,
+  officeId?: string
 ): Promise<{ officeFunnelBuckets: FunnelBucketSummary[]; repFunnelRows: DirectorRepFunnelRow[] }> {
   const [leadResult, dealResult, repRowsResult] = await runSequential([
     () => tenantDb.execute(sql`
@@ -909,6 +910,9 @@ async function getDirectorFunnelSummary(
       LEFT JOIN lead_counts lc ON lc.rep_id = u.id
       LEFT JOIN deal_counts dc ON dc.rep_id = u.id
       WHERE u.is_active = true
+        -- D-5: office-scope the funnel roster (users is global/public), matching the rep-card
+        -- roster and the Source-B snapshot read so foreign-office reps do not leak in.
+        ${officeId ? sql`AND u.office_id = ${officeId}` : sql``}
         -- P2-8 (Codex round 2): exclude flagged smoke-test / duplicate accounts from the
         -- funnel roster too, matching the rep-card roster.
         AND COALESCE(u.is_test_data, false) = false
@@ -2577,7 +2581,7 @@ export async function getDirectorDashboard(
     canonicalRepWon,
   ] = await runSequential([
     // 1. Per-rep performance cards
-    () => buildRepPerformanceCards(tenantDb, { from, to }),
+    () => buildRepPerformanceCards(tenantDb, { from, to, officeId: options.officeId }),
 
     // 2. Pipeline by stage (company-wide, excluding DD)
     () => getPipelineSummary(tenantDb, { includeDd: false, from, to }),
@@ -2601,7 +2605,7 @@ export async function getDirectorDashboard(
       includeDealCreatedBy: mineVisibility?.dealsCreatedByUserId,
       includeDealSubscriptionDeletedAt: mineVisibility?.dealSubscriptionsDeletedAt,
     }),
-    () => getDirectorFunnelSummary(tenantDb),
+    () => getDirectorFunnelSummary(tenantDb, options.officeId),
     () => getDirectorRepCommissionRows(tenantDb, { from, to }),
     () => getRepPerformanceSnapshots(tenantDb, options.officeId, options.periodKind ?? "mtd"),
     // P1-7: in mine scope, narrow Recent Closes to the viewer's deals using the SAME
@@ -2752,9 +2756,9 @@ export async function getDirectorDashboard(
  */
 async function buildRepPerformanceCards(
   tenantDb: TenantDb,
-  options: { from: string; to: string }
+  options: { from: string; to: string; officeId?: string }
 ): Promise<RepPerformanceCard[]> {
-  const { from, to } = options;
+  const { from, to, officeId } = options;
 
   const result = await tenantDb.execute(sql`
     WITH deal_owners AS (
@@ -2815,6 +2819,12 @@ async function buildRepPerformanceCards(
     LEFT JOIN rep_wins rw ON rw.rep_id = u.id
     LEFT JOIN rep_activities ra ON ra.rep_id = u.id
     WHERE u.is_active = true
+      -- D-5: users is a GLOBAL (public) table, so without this predicate the roster admits
+      -- reps from EVERY office. Scope to the active office, matching the Source-B snapshot
+      -- read (getRepPerformanceSnapshots) and materializer, so foreign-office reps no longer
+      -- leak in (Source A drifted by omitting it). The locked owner-row requirement below is
+      -- preserved -- it is now correctly bounded to this office's deal owners.
+      ${officeId ? sql`AND u.office_id = ${officeId}` : sql``}
       -- P2-8: exclude smoke-test accounts + the flagged duplicate human row from the rep
       -- roster. Test DEALS are already excluded from Won (deals.is_test_data), so this
       -- changes only WHO appears, never the Won total.
