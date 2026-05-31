@@ -12,7 +12,7 @@
 import { sql, type SQL } from "drizzle-orm";
 import {
   aliasedEffectiveWonDealValueSql,
-  aliasedDealBestEstimateSql,
+  aliasedEffectiveDealValueSql,
 } from "../shared/deal-value-sql.js";
 
 // CT-anchored "today" as a SQL date -- DST-safe via Postgres, matching F1's America/Chicago anchoring.
@@ -80,9 +80,13 @@ export const DEAL_VALUE_BASIS_LABEL: Record<DealValueBasis, string> = {
 };
 
 export function dealValueSqlForBasis(alias: string, basis: DealValueBasis): SQL {
+  // Both bases go through the EFFECTIVE wrapper (on-hold open value -> 0), so the basis only swaps the
+  // value CHAIN, never the hold treatment -- keeping these foundations consistent with every other
+  // reports/dashboard effective-value read. (aliasedEffectiveDealValueSql defaults to the best-estimate
+  // chain, so the open basis stays best-estimate, just on-hold-zeroed.)
   return basis === "won_awarded_first"
     ? aliasedEffectiveWonDealValueSql(alias)
-    : aliasedDealBestEstimateSql(alias);
+    : aliasedEffectiveDealValueSql(alias);
 }
 
 // ===================== F4: backfill spike exclusion =====================
@@ -112,4 +116,8 @@ export function distinctDealCountSql(dealIdExpr = "deal_id"): SQL {
 // Combine with F1's getWtdPeriod(...) on created_at and F5's distinctDealCountSql for the weekly count.
 
 export const SENT_STAGE_SLUGS = ["estimate_sent_to_client", "service_estimate_sent_to_client"] as const;
-export const ESTIMATED_STAGE_SLUGS = ["estimating", "service_estimating"] as const;
+// `estimate_in_progress` is the legacy pre-0064 slug for the estimating stage (now inactive). Historical
+// deal_stage_history rows from before #549's migration 0064 still point at it (workflow.ts canonicalizes
+// it to `estimating`), so the stage-entry cohort/trend must include it or it undercounts historical
+// estimating entries -- mirroring how SENT carries its service-workflow variant.
+export const ESTIMATED_STAGE_SLUGS = ["estimating", "service_estimating", "estimate_in_progress"] as const;

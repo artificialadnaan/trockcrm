@@ -57,12 +57,23 @@ describe("reconciliation: F1 == canonical #539 Sunday-Saturday WTD", () => {
   });
 });
 
+// sql.raw(...) renders to a single string chunk; pull its text out for assertions.
+function sqlFragmentText(frag: unknown): string {
+  const chunks = (frag as { queryChunks?: Array<{ value?: unknown }> })?.queryChunks ?? [];
+  return chunks
+    .map((c) => (typeof c.value === "string" ? c.value : Array.isArray(c.value) ? c.value.join("") : ""))
+    .join("");
+}
+
 describe("sundayWeekBucketSql -- Sunday-anchored CT week-start for trend grouping", () => {
-  it("shifts around date_trunc('week') and anchors in the business tz", () => {
+  it("returns a Drizzle SQL fragment (NOT a bindable string) so interpolation emits SQL, not a param", () => {
     const frag = sundayWeekBucketSql("h.created_at");
-    expect(frag).toContain(BUSINESS_TIMEZONE);
-    expect(frag).toContain("date_trunc('week'");
-    expect(frag).toContain("interval '1 day'");
-    expect(frag).toContain("h.created_at");
+    // a raw string would be bound as a parameter inside a sql`` template and silently break grouping
+    expect(typeof frag).not.toBe("string");
+    const text = sqlFragmentText(frag);
+    expect(text).toContain(BUSINESS_TIMEZONE);
+    expect(text).toContain("date_trunc('week'");
+    expect(text).toContain("interval '1 day'");
+    expect(text).toContain("h.created_at");
   });
 });

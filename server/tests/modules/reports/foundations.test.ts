@@ -73,6 +73,10 @@ describe("F3 value basis", () => {
     // Open best-estimate is awarded-LAST: bid_board_total_sales appears before awarded_amount.
     expect(open.indexOf("bid_board_total_sales")).toBeLessThan(open.indexOf("awarded_amount"));
     expect(won).not.toBe(open); // the two bases are never the same expression
+    // BOTH bases zero out on-hold open value -- the basis changes the value CHAIN, not hold treatment,
+    // so these foundations match the rest of the reports/dashboard effective-value helpers.
+    expect(won).toContain("on_hold");
+    expect(open).toContain("on_hold");
   });
 
   it("labels every basis", () => {
@@ -103,6 +107,7 @@ describe("F5 distinct counting", () => {
 describe("week stage-entry cohorts", () => {
   it("Sent / Estimated slug sets match the active platform slugs", () => {
     expect(SENT_STAGE_SLUGS).toEqual(["estimate_sent_to_client", "service_estimate_sent_to_client"]);
-    expect(ESTIMATED_STAGE_SLUGS).toEqual(["estimating", "service_estimating"]);
+    // includes the legacy pre-0064 `estimate_in_progress` alias so historical stage-entry rows aren't undercounted
+    expect(ESTIMATED_STAGE_SLUGS).toEqual(["estimating", "service_estimating", "estimate_in_progress"]);
   });
 });

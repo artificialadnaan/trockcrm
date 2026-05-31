@@ -4,6 +4,8 @@
 // recreates the D-17/D-18 dashboard-vs-reports reconcile failure). Matches the client #539 util
 // toDatePresetRange("wtd") (Sunday-anchored, local calendar).
 
+import { sql, type SQL } from "drizzle-orm";
+
 export const BUSINESS_TIMEZONE = "America/Chicago";
 
 export type WeekMode = "to_date" | "completed";
@@ -46,8 +48,12 @@ export function getWtdPeriod(mode: WeekMode, now: Date = new Date()): { from: st
  * SQL fragment that buckets a timestamp expression into its Sunday-anchored week-start DATE, in the
  * business tz -- for the weekly trend surfaces (e.g. the 8-week Momentum Lanes). Postgres
  * date_trunc('week') is Monday-based, so we shift +1 day, truncate, then -1 day to land on Sunday,
- * matching getWtdPeriod's anchor. Use via sql.raw / interpolation. `tsExpr` must be a timestamptz column.
+ * matching getWtdPeriod's anchor. Returns a Drizzle SQL fragment (interpolate directly into a sql``
+ * template -- NOT a string, which would be bound as a parameter and silently break grouping).
+ * `tsExpr` must be a trusted timestamptz column expression (it is emitted as raw SQL).
  */
-export function sundayWeekBucketSql(tsExpr: string): string {
-  return `(date_trunc('week', ((${tsExpr}) AT TIME ZONE '${BUSINESS_TIMEZONE}') + interval '1 day') - interval '1 day')::date`;
+export function sundayWeekBucketSql(tsExpr: string): SQL {
+  return sql.raw(
+    `(date_trunc('week', ((${tsExpr}) AT TIME ZONE '${BUSINESS_TIMEZONE}') + interval '1 day') - interval '1 day')::date`
+  );
 }
