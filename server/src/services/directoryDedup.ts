@@ -266,13 +266,12 @@ export interface ClusterClassification {
 export function classifyNameCluster(members: CompanyMergeMember[]): ClusterClassification {
   const reasons: string[] = [];
 
-  // Web-identity signal = normalized website, falling back to the domain field
-  // (the duplicate detector treats domain ?? website as the company domain), so a
-  // divergent domain is flagged even when neither row has a website.
-  const webIdentities = new Set(
-    members.map((m) => normalizeWebsiteDomain(m.website) ?? normalizeWebsiteDomain(m.domain)).filter(Boolean)
-  );
-  if (webIdentities.size > 1) reasons.push("divergent_website");
+  // Treat website and domain as INDEPENDENT web-identity signals: divergence in
+  // either (across the cluster's members) means the rows may be different entities.
+  // Checking them separately catches "websites match but domains differ" too.
+  const websites = new Set(members.map((m) => normalizeWebsiteDomain(m.website)).filter(Boolean));
+  const domains = new Set(members.map((m) => normalizeWebsiteDomain(m.domain)).filter(Boolean));
+  if (websites.size > 1 || domains.size > 1) reasons.push("divergent_website");
 
   const phones = new Set(members.map((m) => normalizePhoneDigits(m.phone)).filter(Boolean));
   if (phones.size > 1) reasons.push("divergent_phone");
@@ -902,7 +901,17 @@ export async function unmergeDirectoryEntities(tenantDb: TenantDb, auditId: stri
 
   const [winnerRow] = await tenantDb.select().from(companies).where(eq(companies.id, winnerId)).limit(1);
   const [loserRow] = await tenantDb.select().from(companies).where(eq(companies.id, loserId)).limit(1);
+  if (!loserRow) throw new AppError(404, "Merge loser company not found");
   const loserName = (loserRow as any)?.name ?? null;
+
+  // Stale-reversal guard: the loser must still be merged into THIS winner. If it
+  // was since re-merged into a different company (its merged_into points
+  // elsewhere) or already reactivated, reversing this older audit would resurrect
+  // it and clobber the newer state -- refuse.
+  const loserMergedInto = ((loserRow as any)?.sourceRefs ?? {}).merged_into;
+  if (loserMergedInto !== winnerId) {
+    throw new AppError(409, "Loser is no longer merged into this winner (stale un-merge)");
+  }
 
   await restoreLoserRefIds(tenantDb, deals, deals.id, deals.companyId, "companyId", movedRows.deals, winnerId, loserId);
   if (movedRows.contacts && movedRows.contacts.length > 0) {
@@ -990,20 +999,21 @@ export async function unmergeDirectoryEntities(tenantDb: TenantDb, auditId: stri
     { column: fileLinks.entityType, value: "company" }
   );
 
-  // Restore the winner's reconciled fields, but only where the winner's current
-  // value still equals what the merge set (compare-and-swap) -- a field edited
-  // after the merge is left as-is.
-  const restoreWinner: Record<string, string | null> = {};
+  // Restore the winner's reconciled fields, but only where the value still equals
+  // what the merge set -- a field edited after the merge is left as-is. This is a
+  // true compare-and-swap: the read-time check skips obviously-edited fields, and
+  // the per-field WHERE re-asserts the merged value at write time so a concurrent
+  // edit between the read and the write cannot be clobbered.
   for (const field of Object.keys(winnerBefore)) {
     const current = (winnerRow as any)?.[field] ?? null;
     const mergedValue = reconciled[field] ?? null;
-    if (current === mergedValue) restoreWinner[field] = winnerBefore[field];
-  }
-  if (Object.keys(restoreWinner).length > 0) {
+    if (current !== mergedValue) continue;
+    const column = (companies as any)[field];
+    if (!column) continue;
     await tenantDb
       .update(companies)
-      .set(restoreWinner as any)
-      .where(eq(companies.id, winnerId));
+      .set({ [field]: winnerBefore[field] } as any)
+      .where(and(eq(companies.id, winnerId), sql`${column} IS NOT DISTINCT FROM ${mergedValue}`));
   }
 
   // Reactivate the loser and drop merged_into.

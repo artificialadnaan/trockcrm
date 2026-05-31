@@ -489,7 +489,8 @@ describe("unmergeDirectoryEntities -- exact reversal", () => {
   };
   // Winner still holds the address the merge gave it -> compare-and-swap restores it.
   const winnerRow = { id: "W", name: "Mack Real Estate Group", address: "60 Columbus Circle" };
-  const loserRow = { id: "L", name: "Mack Real Estate Group" };
+  // Loser still merged into this winner (passes the stale-reversal guard).
+  const loserRow = { id: "L", name: "Mack Real Estate Group", sourceRefs: { merged_into: "W" } };
 
   it("re-points captured rows back to the loser, restores the winner, reactivates the loser", async () => {
     const { db, updates, inserts } = recordingUnmergeDb(auditRow, winnerRow, loserRow);
@@ -544,6 +545,12 @@ describe("unmergeDirectoryEntities -- exact reversal", () => {
 
   it("rejects reversing a merge that has already been reversed", async () => {
     const { db } = recordingUnmergeDb(auditRow, winnerRow, loserRow, [{ id: "reversal-1" }]);
+    await expect(unmergeDirectoryEntities(db as never, "audit-1")).rejects.toThrow();
+  });
+
+  it("rejects a stale un-merge when the loser was re-merged into a different company", async () => {
+    const reMergedLoser = { id: "L", name: "Mack Real Estate Group", sourceRefs: { merged_into: "OTHER" } };
+    const { db } = recordingUnmergeDb(auditRow, winnerRow, reMergedLoser);
     await expect(unmergeDirectoryEntities(db as never, "audit-1")).rejects.toThrow();
   });
 });
