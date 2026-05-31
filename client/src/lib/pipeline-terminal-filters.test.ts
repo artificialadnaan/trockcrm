@@ -112,19 +112,21 @@ describe("pipeline terminal filters", () => {
 });
 
 describe("week-to-date (Sunday-anchored) preset", () => {
-  // WTD is Sunday-anchored on the user's LOCAL calendar (their week for the Sunday meeting).
+  // WTD is the BUSINESS's Sunday-anchored week in Central time (matching server F1) -- so a rep in any
+  // timezone sees the office's week. Instants are explicit UTC (18:00Z = 13:00 CT, same calendar day) so
+  // the assertions are deterministic regardless of the test runner's local timezone.
   it("spans the most recent Sunday through a midweek reference day", () => {
-    const now = new Date(2026, 4, 27); // Wednesday; the most recent Sunday is 2026-05-24.
+    const now = new Date("2026-05-27T18:00:00Z"); // Wednesday in CT; most recent Sunday is 2026-05-24.
     expect(toDatePresetRange("wtd", now)).toEqual({ from: "2026-05-24", to: "2026-05-27" });
   });
 
   it("collapses to a single day when the reference day is itself a Sunday", () => {
-    const now = new Date(2026, 4, 24); // Sunday.
+    const now = new Date("2026-05-24T18:00:00Z"); // Sunday in CT.
     expect(toDatePresetRange("wtd", now)).toEqual({ from: "2026-05-24", to: "2026-05-24" });
   });
 
   it("crosses a month boundary back to the prior Sunday", () => {
-    const now = new Date(2026, 2, 3); // Tuesday after Sunday 2026-03-01.
+    const now = new Date("2026-03-03T18:00:00Z"); // Tuesday in CT after Sunday 2026-03-01.
     expect(toDatePresetRange("wtd", now)).toEqual({ from: "2026-03-01", to: "2026-03-03" });
   });
 
@@ -156,10 +158,10 @@ describe("week-to-date (Sunday-anchored) preset", () => {
 });
 
 describe("resolveDatePreset (canonical platform-wide date-preset resolver)", () => {
-  // Wed 2026-03-18; most recent Sunday is 2026-03-15 (2026-03-01 is a Sunday). All boundaries LOCAL.
-  const now = new Date(2026, 2, 18);
+  // Wed 2026-03-18 (13:00 CT); most recent Sunday is 2026-03-15. All boundaries are CENTRAL (matching F1).
+  const now = new Date("2026-03-18T18:00:00Z");
 
-  it("resolves every preset to a LOCAL-calendar window with an inclusive today bound", () => {
+  it("resolves every preset to a CENTRAL-calendar window with an inclusive today bound", () => {
     expect(resolveDatePreset("today", now)).toEqual({ from: "2026-03-18", to: "2026-03-18" });
     expect(resolveDatePreset("wtd", now)).toEqual({ from: "2026-03-15", to: "2026-03-18" });
     expect(resolveDatePreset("mtd", now)).toEqual({ from: "2026-03-01", to: "2026-03-18" });
@@ -170,10 +172,23 @@ describe("resolveDatePreset (canonical platform-wide date-preset resolver)", () 
     expect(resolveDatePreset("last_year", now)).toEqual({ from: "2025-01-01", to: "2025-12-31" });
   });
 
-  it("uses the user's LOCAL calendar day, not UTC, near a day boundary", () => {
-    // 2026-03-01 23:30 LOCAL: month-to-date must start on the local March 1 regardless of UTC offset.
-    const lateLocal = new Date(2026, 2, 1, 23, 30);
-    expect(resolveDatePreset("mtd", lateLocal)).toEqual({ from: "2026-03-01", to: "2026-03-01" });
+  it("anchors to the BUSINESS (Central) calendar day, not the runner's local/UTC day", () => {
+    // 2026-03-02 04:30Z = 2026-03-01 22:30 CT: month-to-date is the Central March, not the UTC March 2.
+    const lateCt = new Date("2026-03-02T04:30:00Z");
+    expect(resolveDatePreset("mtd", lateCt)).toEqual({ from: "2026-03-01", to: "2026-03-01" });
+  });
+
+  // RECONCILIATION with server F1 (server/src/lib/period.ts) at the cross-tz boundary -- the case the
+  // platform decision is about: F1 is canonical (Central), the client aligns to it.
+  it("matches F1's Central week at the cross-timezone boundary (Pacific-Saturday but Central-Sunday)", () => {
+    // 2026-05-31T05:30:00Z = 00:30 Sunday CT, but 22:30 Saturday in US/Pacific. The Central week has
+    // already rolled to the new Sunday -- so WTD collapses to 2026-05-31, identical to F1.getWtdPeriod
+    // ("to_date") for the same instant (locked in server/tests/lib/period.test.ts).
+    const ctSundayPacificSaturday = new Date("2026-05-31T05:30:00Z");
+    expect(resolveDatePreset("wtd", ctSundayPacificSaturday)).toEqual({ from: "2026-05-31", to: "2026-05-31" });
+    // and one tick earlier (still Central-Saturday) it stays in the prior week, also matching F1.
+    const stillCtSaturday = new Date("2026-05-31T02:00:00Z"); // 21:00 Saturday CT
+    expect(resolveDatePreset("wtd", stillCtSaturday)).toEqual({ from: "2026-05-24", to: "2026-05-30" });
   });
 
   it("is the single source toDatePresetRange delegates to (identical output)", () => {

@@ -109,13 +109,6 @@ function formatDateParam(date: Date) {
   return date.toISOString().split("T")[0];
 }
 
-function formatLocalDateParam(date: Date) {
-  const year = date.getFullYear();
-  const month = String(date.getMonth() + 1).padStart(2, "0");
-  const day = String(date.getDate()).padStart(2, "0");
-  return `${year}-${month}-${day}`;
-}
-
 function isIsoDate(value: string) {
   return /^\d{4}-\d{2}-\d{2}$/.test(value);
 }
@@ -151,34 +144,50 @@ export type DatePreset =
   | "last_quarter"
   | "last_year";
 
+const BUSINESS_TIMEZONE = "America/Chicago";
+
+// Today's calendar date in the BUSINESS tz (Central) as YYYY-MM-DD. Every preset window anchors to this,
+// so a rep in ANY timezone sees the OFFICE's week/month/quarter -- matching the server's canonical F1
+// definition (server/src/lib/period.ts) at the cross-tz boundary. "This week" is the business's Central
+// Sunday-Saturday week: a Pacific user late Saturday night, while it is already Sunday in CT, is in the
+// new CT week (F1 is canonical; the client aligns to it, not the reverse).
+function businessTodayParam(now: Date): string {
+  return now.toLocaleDateString("en-CA", { timeZone: BUSINESS_TIMEZONE });
+}
+// Parse a YYYY-MM-DD at UTC noon (time-of-day discarded) so day-of-week / day arithmetic never trips a
+// DST or local-midnight boundary -- mirrors F1's shiftDays / dayOfWeek.
+function ymdParts(isoDate: string): { year: number; month: number; day: number; dow: number } {
+  const d = new Date(`${isoDate}T12:00:00Z`);
+  return { year: d.getUTCFullYear(), month: d.getUTCMonth(), day: d.getUTCDate(), dow: d.getUTCDay() };
+}
+function ymdToParam(year: number, month: number, day: number): string {
+  return new Date(Date.UTC(year, month, day, 12)).toISOString().slice(0, 10);
+}
+
 export function resolveDatePreset(preset: DatePreset, now = new Date()): { from: string; to: string } {
-  const today = formatLocalDateParam(now);
-  const year = now.getFullYear();
-  const month = now.getMonth();
+  const today = businessTodayParam(now);
+  const { year, month, day, dow } = ymdParts(today);
   switch (preset) {
     case "today":
       return { from: today, to: today };
-    case "wtd": {
-      // Sunday-anchored local week (getDay(): Sunday = 0 -> walk back to the most recent Sunday).
-      const start = new Date(year, month, now.getDate());
-      start.setDate(start.getDate() - start.getDay());
-      return { from: formatLocalDateParam(start), to: today };
-    }
+    case "wtd":
+      // Sunday-anchored CENTRAL week (dow: Sunday = 0 -> walk back to the most-recent Sunday in CT).
+      return { from: ymdToParam(year, month, day - dow), to: today };
     case "mtd":
-      return { from: formatLocalDateParam(new Date(year, month, 1)), to: today };
+      return { from: ymdToParam(year, month, 1), to: today };
     case "qtd":
-      return { from: formatLocalDateParam(new Date(year, Math.floor(month / 3) * 3, 1)), to: today };
+      return { from: ymdToParam(year, Math.floor(month / 3) * 3, 1), to: today };
     case "ytd":
       return { from: `${year}-01-01`, to: today };
     case "last_month": {
-      const end = new Date(year, month, 0); // day 0 = last day of the previous month
-      return { from: formatLocalDateParam(new Date(end.getFullYear(), end.getMonth(), 1)), to: formatLocalDateParam(end) };
+      const end = ymdParts(ymdToParam(year, month, 0)); // day 0 = last day of the previous month
+      return { from: ymdToParam(end.year, end.month, 1), to: ymdToParam(end.year, end.month, end.day) };
     }
     case "last_quarter": {
-      const end = new Date(year, Math.floor(month / 3) * 3, 0); // last day of the previous quarter
+      const end = ymdParts(ymdToParam(year, Math.floor(month / 3) * 3, 0)); // last day of the previous quarter
       return {
-        from: formatLocalDateParam(new Date(end.getFullYear(), Math.floor(end.getMonth() / 3) * 3, 1)),
-        to: formatLocalDateParam(end),
+        from: ymdToParam(end.year, Math.floor(end.month / 3) * 3, 1),
+        to: ymdToParam(end.year, end.month, end.day),
       };
     }
     case "last_year":
