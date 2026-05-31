@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { presetToDateRange } from "./use-director-dashboard";
+import { normalizeDirectorDashboardData, presetToDateRange } from "./use-director-dashboard";
 import { resolveDatePreset } from "@/lib/pipeline-terminal-filters";
 
 describe("presetToDateRange", () => {
@@ -24,5 +24,40 @@ describe("presetToDateRange", () => {
     expect(presetToDateRange("custom")).toEqual(resolveDatePreset("ytd")); // custom -> ytd fallback
 
     vi.useRealTimers();
+  });
+});
+
+describe("normalizeDirectorDashboardData (deep-default so a partial payload never renders $NaN / crashes)", () => {
+  it("defaults a null payload to zero aggregates + empty lists", () => {
+    const d = normalizeDirectorDashboardData(null);
+    expect(d.scopeSummary?.won).toEqual({ count: 0, totalValue: 0 });
+    expect(d.scopeSummary?.atRisk).toEqual({ count: 0, totalValue: 0 });
+    expect(d.scopeSummary?.activePipeline).toEqual({ count: 0, totalValue: 0 });
+    expect(d.ddVsPipeline.totalValue).toBe(0);
+    expect(d.atRiskDeals).toEqual([]);
+    expect(d.repCards).toEqual([]);
+    expect(d.recentCloses).toEqual([]);
+    expect(d.staleDeals).toEqual([]);
+  });
+
+  it("deep-defaults a partial scopeSummary — a null/omitted nested currency field becomes 0, not NaN", () => {
+    // Simulate the API omitting won.totalValue (the $NaN source GREY found).
+    const d = normalizeDirectorDashboardData({ scopeSummary: { won: { count: 3 } } } as never);
+    expect(d.scopeSummary?.won).toEqual({ count: 3, totalValue: 0 });
+    expect(Number.isNaN(d.scopeSummary?.won.totalValue)).toBe(false);
+    expect(d.scopeSummary?.atRisk).toEqual({ count: 0, totalValue: 0 });
+  });
+
+  it("preserves provided lists + aggregate values", () => {
+    const d = normalizeDirectorDashboardData({
+      atRiskDeals: [{ dealId: "d1", dealValue: 100 }],
+      scopeSummary: {
+        won: { count: 5, totalValue: 9_778_045 },
+        activePipeline: { count: 0, totalValue: 0 },
+        atRisk: { count: 0, totalValue: 0 },
+      },
+    } as never);
+    expect(d.atRiskDeals).toHaveLength(1);
+    expect(d.scopeSummary?.won.totalValue).toBe(9_778_045);
   });
 });

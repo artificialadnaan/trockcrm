@@ -287,6 +287,53 @@ export function presetToDateRange(preset: DateRangePreset): { from: string; to: 
   return resolveDatePreset(preset === "custom" ? "ytd" : preset);
 }
 
+const ZERO_SCOPE_SUMMARY = { count: 0, totalValue: 0 } as const;
+const EMPTY_DD_VS_PIPELINE = {
+  ddValue: 0,
+  ddCount: 0,
+  pipelineValue: 0,
+  pipelineCount: 0,
+  totalValue: 0,
+  totalCount: 0,
+} as const;
+
+/**
+ * Deep-default the director payload so a null/omitted API field renders 0 / "--" instead of $NaN, and
+ * never crashes a `.reduce`/`.map`/`.length` (mirrors the rep dashboard's normalizeRepDashboardData).
+ * Currency/count aggregates default to 0; every list defaults to []. The director hook stored res.data
+ * raw before — the rep hook already normalized, so a partial director payload rendered $NaN.
+ */
+export function normalizeDirectorDashboardData(
+  raw: Partial<DirectorDashboardData> | null | undefined
+): DirectorDashboardData {
+  const d = raw ?? {};
+  return {
+    ...(d as DirectorDashboardData),
+    officeFunnelBuckets: d.officeFunnelBuckets ?? [],
+    repFunnelRows: d.repFunnelRows ?? [],
+    repCommissionRows: d.repCommissionRows ?? [],
+    repCards: d.repCards ?? [],
+    pipelineByStage: d.pipelineByStage ?? [],
+    winRateTrend: d.winRateTrend ?? [],
+    activityByRep: d.activityByRep ?? [],
+    staleDeals: d.staleDeals ?? [],
+    staleLeads: d.staleLeads ?? [],
+    crmOwnedProgression: d.crmOwnedProgression ?? [],
+    downstreamBottlenecks: d.downstreamBottlenecks ?? [],
+    atRiskDeals: d.atRiskDeals ?? [],
+    activityPulse: d.activityPulse ?? [],
+    strategicAlerts: d.strategicAlerts ?? [],
+    aiCoachingPrompts: d.aiCoachingPrompts ?? [],
+    recentCloses: d.recentCloses ?? [],
+    ddVsPipeline: { ...EMPTY_DD_VS_PIPELINE, ...d.ddVsPipeline },
+    scopeSummary: {
+      activePipeline: { ...ZERO_SCOPE_SUMMARY, ...d.scopeSummary?.activePipeline },
+      won: { ...ZERO_SCOPE_SUMMARY, ...d.scopeSummary?.won },
+      atRisk: { ...ZERO_SCOPE_SUMMARY, ...d.scopeSummary?.atRisk },
+    },
+  };
+}
+
 export function useDirectorDashboard(
   dateRange?: { from: string; to: string },
   periodKind?: RepPerformancePeriodKind,
@@ -318,7 +365,7 @@ export function useDirectorDashboard(
       const res = await api<{ data: DirectorDashboardData }>(
         `/dashboard/director${qs ? `?${qs}` : ""}`
       );
-      setData(res.data);
+      setData(normalizeDirectorDashboardData(res.data));
       setLastFetchedAt(new Date().toISOString());
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : "Failed to load director dashboard");

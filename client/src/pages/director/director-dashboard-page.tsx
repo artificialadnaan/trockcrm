@@ -8,7 +8,7 @@ import {
 } from "@/hooks/use-director-dashboard";
 import { useRepPerformance, type RepPerformancePeriodKind, type RepPerformanceSnapshotRow } from "@/hooks/use-rep-performance";
 import { useKeepPreviousData } from "@/hooks/use-keep-previous-data";
-import { formatCurrency } from "@/components/charts/chart-colors";
+import { formatCurrencyCompact } from "@/lib/deal-utils";
 import {
   Activity,
   AlertTriangle,
@@ -310,12 +310,12 @@ export function RepPerfCard({ view }: { view: RepPerfView }) {
       <div className="mt-4 grid grid-cols-2 gap-x-4 gap-y-3">
         <div>
           <p className="text-[10px] font-black uppercase tracking-widest text-gray-400">Closed</p>
-          <p className="font-black text-gray-950">{view.closed === null ? "--" : formatCurrency(view.closed)}</p>
+          <p className="font-black text-gray-950">{view.closed === null ? "--" : formatCurrencyCompact(view.closed)}</p>
           <p className="text-xs text-gray-500">{view.closedDeals === null ? "pending" : `${view.closedDeals} won`}</p>
         </div>
         <div>
           <p className="text-[10px] font-black uppercase tracking-widest text-gray-400">Pipeline</p>
-          <p className="font-black text-gray-950">{formatCurrency(view.pipelineValue)}</p>
+          <p className="font-black text-gray-950">{formatCurrencyCompact(view.pipelineValue)}</p>
           <p className="text-xs text-gray-500">{view.activeDeals} deals</p>
         </div>
         <div>
@@ -746,7 +746,7 @@ export function DirectorDashboardPage() {
       <section className="mt-6 grid grid-cols-1 gap-4 lg:grid-cols-3">
         <KpiCard
           label="Active pipeline"
-          value={formatCurrency(scopeSummary.activePipeline.totalValue)}
+          value={formatCurrencyCompact(scopeSummary.activePipeline.totalValue)}
           badge={`${scopeSummary.activePipeline.count} deals`}
           caption="Weighted forecast"
           accent="red"
@@ -755,13 +755,13 @@ export function DirectorDashboardPage() {
         />
         <KpiCard
           label={`Closed ${selectedPreset.label}`}
-          value={formatCurrency(scopeSummary.won.totalValue)}
+          value={formatCurrencyCompact(scopeSummary.won.totalValue)}
           badge={`${scopeSummary.won.count} won`}
           caption={
             perfError
               ? "Performance unavailable"
               : scope === "all"
-                ? `Goal ${formatCurrency(goal)} ${selectedPreset.label}`
+                ? `Goal ${formatCurrencyCompact(goal)} ${selectedPreset.label}`
                 : "Your closed revenue"
           }
           accent="blue"
@@ -770,8 +770,11 @@ export function DirectorDashboardPage() {
         />
         <KpiCard
           label="At risk"
-          value={String(scopeSummary.atRisk.count)}
-          badge={`${formatCurrency(scopeSummary.atRisk.totalValue)} blocked`}
+          // Number, value, and caption all read the SAME at-risk list (atRiskDeals — the engine list the
+          // dashboard renders and the drill-down opens), so the big number matches the caption and the
+          // deals you see, instead of the scopeSummary.atRisk SQL aggregate that disagreed with them.
+          value={String(atRiskDeals.length)}
+          badge={`${formatCurrencyCompact(totalAtRiskValue)} blocked`}
           caption={scope === "mine" ? "Your stale mirrored deals" : `${atRiskDeals.length} flagged deals across ${atRiskRepCount} reps`}
           accent="red"
           dark
@@ -799,13 +802,13 @@ export function DirectorDashboardPage() {
             {/* Closed (scopeSummary.won) + forecast come from the director payload, so they
                 render regardless of the snapshot's load state. */}
             <p className="mt-2 text-4xl font-black tracking-tight text-gray-950">
-              {closedValue !== null ? formatCurrency(closedValue) : "--"} / {formatCurrency(goal)}
+              {closedValue !== null ? formatCurrencyCompact(closedValue) : "--"} / {formatCurrencyCompact(goal)}
             </p>
             <p className={`mt-1 text-sm font-semibold ${paceLabel === "Behind" ? "text-[#CC0000]" : "text-gray-500"}`}>
               {`${paceLabel} pace · ${remainingWeeks ?? "--"} weeks remaining`}
             </p>
             <p className="mt-0.5 text-xs font-medium text-gray-500">
-              {`Target to date ${formatCurrency(Math.round(expectedToDate))} · you're at ${formatCurrency(closedValue ?? 0)}`}
+              {`Target to date ${formatCurrencyCompact(Math.round(expectedToDate))} · you're at ${formatCurrencyCompact(closedValue ?? 0)}`}
             </p>
           </Link>
 
@@ -825,7 +828,9 @@ export function DirectorDashboardPage() {
               className="rounded-lg border border-gray-200 bg-gray-50 p-3 transition-colors hover:bg-gray-100 focus:outline-none focus-visible:ring-2 focus-visible:ring-[#CC0000]"
             >
               <Trophy className="h-4 w-4 text-emerald-600" />
-              <p className="mt-2 text-[10px] font-black uppercase tracking-widest text-gray-400">Closing</p>
+              {/* Honest label: this tile counts already-WON closes (recentCloses outcome="won") and links
+                  to the Won drill-down — it is NOT a "closing soon" forecast. */}
+              <p className="mt-2 text-[10px] font-black uppercase tracking-widest text-gray-400">Won</p>
               <p className="mt-1 font-black text-gray-950">{wonCloses} {activityPeriodLabel}</p>
             </Link>
             <Link
@@ -923,11 +928,11 @@ export function DirectorDashboardPage() {
                       </div>
                     </td>
                     <td className="px-4 py-4 text-right">
-                      <p className="font-black text-gray-950">{view.closed === null ? "--" : formatCurrency(view.closed)}</p>
+                      <p className="font-black text-gray-950">{view.closed === null ? "--" : formatCurrencyCompact(view.closed)}</p>
                       <p className="text-xs text-gray-500">{view.closedDeals === null ? "pending" : `${view.closedDeals} won`}</p>
                     </td>
                     <td className="px-4 py-4 text-right">
-                      <p className="font-black text-gray-950">{formatCurrency(view.pipelineValue)}</p>
+                      <p className="font-black text-gray-950">{formatCurrencyCompact(view.pipelineValue)}</p>
                       <p className="text-xs text-gray-500">{view.activeDeals} deals</p>
                     </td>
                     <td className="px-4 py-4">
@@ -976,7 +981,7 @@ export function DirectorDashboardPage() {
                       </div>
                     </td>
                     <td className="px-4 py-4 text-right">
-                      <p className="font-black text-gray-950">{formatCurrency(unassignedClosedValue)}</p>
+                      <p className="font-black text-gray-950">{formatCurrencyCompact(unassignedClosedValue)}</p>
                       <p className="text-xs text-gray-500">{unassignedWins} won</p>
                     </td>
                     <td className="px-4 py-4 text-right text-gray-400">--</td>
@@ -1008,7 +1013,7 @@ export function DirectorDashboardPage() {
                 </div>
                 <div className="mt-3">
                   <p className="text-[10px] font-black uppercase tracking-widest text-gray-400">Closed</p>
-                  <p className="font-black text-gray-950">{formatCurrency(unassignedClosedValue)}</p>
+                  <p className="font-black text-gray-950">{formatCurrencyCompact(unassignedClosedValue)}</p>
                   <p className="text-xs text-gray-500">{unassignedWins} won</p>
                 </div>
               </div>
@@ -1082,7 +1087,7 @@ export function DirectorDashboardPage() {
                     <span className="w-fit rounded-full bg-gray-100 px-2.5 py-1 text-[10px] font-black uppercase tracking-wide text-gray-700">
                       {deal.stageName}
                     </span>
-                    <div className="text-sm font-bold text-gray-950">{formatCurrency(deal.dealValue)}</div>
+                    <div className="text-sm font-bold text-gray-950">{formatCurrencyCompact(deal.dealValue)}</div>
                     <div className="flex items-center justify-between gap-3 md:justify-end">
                       <span className={`${overSla > 0 ? "text-[#CC0000]" : "text-gray-500"} text-xs font-black`}>
                         {deal.daysInStage}d in stage
@@ -1211,7 +1216,7 @@ export function DirectorDashboardPage() {
                       <p className="text-xs text-gray-500">{close.repName}</p>
                     </div>
                     <div className="text-right">
-                      <p className="text-sm font-black text-gray-950">{formatCurrency(close.dealValue)}</p>
+                      <p className="text-sm font-black text-gray-950">{formatCurrencyCompact(close.dealValue)}</p>
                       <p className="text-xs text-gray-500">{relativeDate(close.closedAt)}</p>
                     </div>
                   </Link>
