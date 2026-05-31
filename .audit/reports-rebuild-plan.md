@@ -102,9 +102,13 @@ NEXT (when samples land): map each sample metric -> canonical source (flag any d
 of the discovery doc), finalize A/B queries + UI, then deliver this plan for review. Build only on go.
 
 ================================================================================
-## GREY COORDINATION (relay)
-buildDealOutcomeDateScope is not yet a symbol in code. We will build on the existing per-metric seams
-(WON -> aliasedWonHsClosedWonDateSql via getWonCloseSummary/getCanonicalRepWonSummary; SENT/ESTIMATED
--> deal_stage_history.created_at; PROJECTED -> expected_close_date). When GREY's buildDealOutcomeDateScope
-lands, WON MUST delegate to won_closed_date (not redefine it); the reports then swap to it via a 1-line
-change at the date-scope call site. Ask GREY to confirm the WON column contract so the swap is clean.
+## GREY COORDINATION (RESOLVED 2026-05-31)
+WON axis: STAY ON won_closed_date directly -- aliasedWonHsClosedWonDateSql via getWonCloseSummary /
+getCanonicalRepWonSummary. That is the correct 191/$9,778,045.90 axis (GREY verified).
+DO NOT swap to buildDealOutcomeDateScope YET: GREY found buildDealOutcomeDateScope.wonDate currently
+resolves to a DIFFERENT expression (a contract_signed COALESCE), so adopting it now would silently move
+WON reports OFF the protected basis. BLUE is fixing buildDealOutcomeDateScope.wonDate -> won_closed_date
+as part of P0. ONLY after that lands is the swap clean + basis-consistent -- a 1-line change at the
+date-scope call site. Until then, every WON read stays on won_closed_date.
+SENT/ESTIMATED -> deal_stage_history.created_at transitions; PROJECTED -> expected_close_date alone
+(unchanged by the WON fix).
