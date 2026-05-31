@@ -1,4 +1,4 @@
-import { sql, eq, and, or, inArray, gte, desc, type Column, type SQL } from "drizzle-orm";
+import { sql, eq, and, or, inArray, gte, asc, desc, type Column, type SQL } from "drizzle-orm";
 import crypto from "crypto";
 import type { NodePgDatabase } from "drizzle-orm/node-postgres";
 import type * as schema from "@trock-crm/shared/schema";
@@ -342,7 +342,14 @@ async function searchDeals(tenantDb: TenantDb, query: string, limit: number): Pr
         or(eq(deals.isActive, true), inArray(pipelineStageConfig.slug, [...TERMINAL_STAGE_SLUGS])),
       ),
     )
-    .orderBy(desc(relevanceOrder(query, [deals.name, deals.dealNumber, deals.projectNumber])), desc(deals.updatedAt))
+    // Status tier FIRST (active < on_hold < terminal) so the per-entity cap can't fill up with
+    // recently-updated won/lost deals and starve older active ones; then relevance, then recency.
+    // (mergeAndLimit applies the same active-first comparator after merge.)
+    .orderBy(
+      asc(sql<number>`CASE WHEN ${inArray(pipelineStageConfig.slug, [...TERMINAL_STAGE_SLUGS])} THEN 2 WHEN ${deals.onHold} THEN 1 ELSE 0 END`),
+      desc(relevanceOrder(query, [deals.name, deals.dealNumber, deals.projectNumber])),
+      desc(deals.updatedAt),
+    )
     .limit(limit);
 
   return rows.map((r): SearchResult => ({
