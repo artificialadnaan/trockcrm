@@ -56,27 +56,13 @@ describe("filterBarValueToDealFilters (FilterBar URL value -> useDeals DealFilte
     expect("status" in any).toBe(false);
   });
 
-  it("forwards numeric value + stalled-age ranges", () => {
+  it("forwards numeric value + stalled-age ranges (the mount, not this pure mapper, forces stageEntryDateWindow)", () => {
+    // The stage_entry_window override that makes age/date filters bound open rows regardless of the
+    // env flag is applied at the outcome-aware mount (deals-list-section, gated on stageEntryDateEnabled),
+    // NOT here — this mapper stays a pure URL->DealFilters translation. See the FilterBar section tests.
     expect(
       filterBarValueToDealFilters({ valueMin: 1000, valueMax: 50000, minAgeDays: 30, maxAgeDays: 90 })
-    ).toEqual({
-      valueMin: 1000,
-      valueMax: 50000,
-      minAgeDays: 30,
-      maxAgeDays: 90,
-      stageEntryDateWindow: true,
-    });
-  });
-
-  it("forces stageEntryDateWindow when a Stalled bucket is active so the server honors the age params regardless of the env flag", () => {
-    // The server omits the stalled predicate unless stageEntryDateEnabled (= ENABLE_STAGE_ENTRY_DATE_FILTER
-    // || stageEntryDateWindow; service.ts getDeals + deal-filter-predicates.buildStalledPredicate). Sending
-    // the per-request window override makes a SHOWN Stalled control actually filter even if the flag is off
-    // (e.g. a flag rollback), removing the visible-but-inert state (Codex #580).
-    expect(filterBarValueToDealFilters({ minAgeDays: 30 }).stageEntryDateWindow).toBe(true);
-    expect(filterBarValueToDealFilters({ maxAgeDays: 90 }).stageEntryDateWindow).toBe(true);
-    // No stalled bucket -> no override (don't force open-row windowing when the control isn't in play).
-    expect("stageEntryDateWindow" in filterBarValueToDealFilters({ search: "x" })).toBe(false);
+    ).toEqual({ valueMin: 1000, valueMax: 50000, minAgeDays: 30, maxAgeDays: 90 });
   });
 
   it("does NOT carry pagination (page) — the list section owns page/limit, not the filter map", () => {
@@ -96,7 +82,6 @@ describe("filterBarValueToDealFilters (FilterBar URL value -> useDeals DealFilte
       valueMax: 0,
       minAgeDays: 0,
       maxAgeDays: 0,
-      stageEntryDateWindow: true,
     });
   });
 
