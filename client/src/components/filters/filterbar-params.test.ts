@@ -7,6 +7,7 @@ import {
   UNASSIGNED,
   type FilterBarValue,
 } from "./filterbar-params";
+import { resolveDateWindow } from "./filterbar-date";
 
 describe("serializeFilters (FilterBar -> URL query, BLUE #546 param names)", () => {
   it("omits undefined, empty, and default values", () => {
@@ -59,6 +60,11 @@ describe("serializeFilters (FilterBar -> URL query, BLUE #546 param names)", () 
   it("joins stageIds as a CSV and omits an empty selection", () => {
     expect(serializeFilters({ stageIds: ["a", "b"] })).toEqual({ stageIds: "a,b" });
     expect(serializeFilters({ stageIds: [] })).toEqual({});
+  });
+
+  it("emits scope verbatim and omits it when unset (so the server's scope default applies)", () => {
+    expect(serializeFilters({ scope: "mine" })).toEqual({ scope: "mine" });
+    expect("scope" in serializeFilters({})).toBe(false);
   });
 });
 
@@ -116,6 +122,21 @@ describe("mergeFilterParams (URL patch: preserve non-FilterBar params + page-res
     });
     expect(next.get("status")).toBeNull();
     expect(next.get("stageIds")).toBeNull();
+  });
+
+  it("clears a prior date window when the date control switches to All-time (the Slice-7 wire-in bug)", () => {
+    const prev = new URLSearchParams("datePreset=mtd&dateFrom=2026-05-01&dateTo=2026-05-30");
+    const next = mergeFilterParams(prev, resolveDateWindow({ preset: "all" }));
+    expect(next.get("dateFrom")).toBeNull();
+    expect(next.get("dateTo")).toBeNull();
+  });
+
+  it("replaces a prior date window when switching presets (mtd -> custom)", () => {
+    const prev = new URLSearchParams("datePreset=mtd&dateFrom=2026-05-01&dateTo=2026-05-30");
+    const next = mergeFilterParams(prev, resolveDateWindow({ preset: "custom", customStart: "2026-04-01", customEnd: "2026-04-15" }));
+    expect(next.get("dateFrom")).toBe("2026-04-01");
+    expect(next.get("dateTo")).toBe("2026-04-15");
+    expect(next.get("datePreset")).toBe("custom");
   });
 });
 

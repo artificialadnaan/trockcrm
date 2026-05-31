@@ -131,7 +131,9 @@ export function deserializeFilters(params: URLSearchParams): FilterBarValue {
   if (workflowRoute === "normal" || workflowRoute === "service") value.workflowRoute = workflowRoute;
 
   const status = params.get("status");
-  if (status === "active" || status === "on_hold" || status === "inactive" || status === "any") {
+  // "any" is the omitted/default state, so it does not deserialize to a value (keeps serialize and
+  // deserialize symmetric and the value object canonical).
+  if (status === "active" || status === "on_hold" || status === "inactive") {
     value.status = status;
   }
 

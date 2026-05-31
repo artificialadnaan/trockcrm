@@ -5,8 +5,14 @@ import { resolveDateWindow, dateFilterFromValue } from "./filterbar-date";
 const NOW = new Date(Date.UTC(2026, 4, 27, 12));
 
 describe("resolveDateWindow (date control TerminalDateFilter -> contract dateFrom/dateTo/datePreset)", () => {
-  it("all-time emits no window (just the preset, so no date param is sent)", () => {
-    expect(resolveDateWindow({ preset: "all" }, NOW)).toEqual({ datePreset: "all" });
+  it("all-time emits an EXPLICIT empty window so switching clears a prior window", () => {
+    const window = resolveDateWindow({ preset: "all" }, NOW);
+    expect(window.datePreset).toBe("all");
+    // Keys must be PRESENT (undefined), not omitted, or mergeFilterParams' spread keeps stale bounds.
+    expect("dateFrom" in window).toBe(true);
+    expect("dateTo" in window).toBe(true);
+    expect(window.dateFrom).toBeUndefined();
+    expect(window.dateTo).toBeUndefined();
   });
 
   it("wtd resolves to the Sunday-anchored window", () => {
@@ -43,6 +49,26 @@ describe("dateFilterFromValue (FilterBar value -> date control filter)", () => {
   });
   it("reconstructs a custom range from the bounds", () => {
     expect(dateFilterFromValue({ datePreset: "custom", dateFrom: "2026-05-01", dateTo: "2026-05-10" })).toEqual({
+      preset: "custom",
+      customStart: "2026-05-01",
+      customEnd: "2026-05-10",
+    });
+  });
+
+  it("omits customEnd (no undefined-valued key) when the custom range is open-ended", () => {
+    const filter = dateFilterFromValue({ datePreset: "custom", dateFrom: "2026-05-01" });
+    expect(filter).toEqual({ preset: "custom", customStart: "2026-05-01" });
+    expect("customEnd" in filter).toBe(false);
+  });
+
+  it("falls back to all-time when there is no window at all", () => {
+    expect(dateFilterFromValue({ datePreset: "custom" })).toEqual({ preset: "all" });
+    expect(dateFilterFromValue({ datePreset: "bogus" })).toEqual({ preset: "all" });
+    expect(dateFilterFromValue({})).toEqual({ preset: "all" });
+  });
+
+  it("shows a stale/unrecognized preset that still carries bounds as the custom window (not 'all')", () => {
+    expect(dateFilterFromValue({ datePreset: "bogus", dateFrom: "2026-05-01", dateTo: "2026-05-10" })).toEqual({
       preset: "custom",
       customStart: "2026-05-01",
       customEnd: "2026-05-10",

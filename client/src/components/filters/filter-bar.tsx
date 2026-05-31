@@ -1,6 +1,6 @@
 import { X } from "lucide-react";
 import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
+import { SearchInput } from "@/components/ui/search-input";
 import { ScopeToggle, type ScopeToggleOption } from "@/components/shared/scope-toggle";
 import { TerminalDateFilterControl } from "@/components/pipeline/terminal-date-filter-control";
 import { cn } from "@/lib/utils";
@@ -62,6 +62,21 @@ const DEFAULT_SCOPE_OPTIONS: ScopeToggleOption<ScopeValue>[] = [
 const formatDollars = (n: number) => `$${n.toLocaleString()}`;
 const formatDays = (n: number) => `${n}d`;
 
+/** Status select -> patch. "All" (undefined) maps to "any" (the omitted state); a real choice
+ *  passes through verbatim. Never emits isActive — Status owns is_active/on_hold (contract #546). */
+export function statusPatch(selected: string | undefined): Pick<FilterBarValue, "status"> {
+  return { status: (selected as DealStatusFilter | undefined) ?? "any" };
+}
+
+/** Sort select (stores the option index) -> {sortBy, sortDir}. "Default" (undefined) clears both. */
+export function sortPatch(
+  picked: string | undefined,
+  options: FilterBarSortOption[]
+): Pick<FilterBarValue, "sortBy" | "sortDir"> {
+  const option = picked != null ? options[Number(picked)] : undefined;
+  return { sortBy: option?.sortBy, sortDir: option?.sortDir };
+}
+
 interface FilterBarProps {
   /** Which dimensions this surface shows, in render order. */
   dimensions: FilterDimension[];
@@ -104,19 +119,21 @@ export function FilterBar({
   return (
     <div role="group" aria-label="Filters" className={cn("flex flex-wrap items-center gap-2", className)}>
       {has("search") && (
-        <Input
+        <SearchInput
           aria-label="Search"
           placeholder="Search…"
           value={value.search ?? ""}
-          onChange={(event) => onChange({ search: event.target.value || undefined })}
-          className="h-8 w-48"
+          onChange={(next) => onChange({ search: next || undefined })}
+          className="w-48"
         />
       )}
 
       {has("scope") && (
         <ScopeToggle
           options={scopeOptions}
-          value={(value.scope as ScopeValue) ?? "all"}
+          // Default the highlighted scope to the server's getDeals default ("mine") so the active
+          // pill matches the data actually returned when no scope param is set.
+          value={(value.scope as ScopeValue) ?? "mine"}
           onChange={(scope) => onChange({ scope })}
           ariaLabel="Scope"
         />
@@ -193,7 +210,7 @@ export function FilterBar({
           allLabel="Any"
           value={value.status === "any" ? undefined : value.status}
           options={STATUS_OPTIONS}
-          onChange={(status) => onChange({ status: (status as DealStatusFilter | undefined) ?? "any" })}
+          onChange={(status) => onChange(statusPatch(status))}
         />
       )}
 
@@ -207,7 +224,7 @@ export function FilterBar({
         />
       )}
 
-      {has("stalled") && (
+      {has("stalled") && stageEntryDateEnabled && (
         <NumericRangePopover
           label="Stalled"
           emptyLabel="Any"
@@ -224,10 +241,7 @@ export function FilterBar({
           allLabel="Default"
           value={currentSortIndex >= 0 ? String(currentSortIndex) : undefined}
           options={sortOptions.map((option, index) => ({ value: String(index), label: option.label }))}
-          onChange={(picked) => {
-            const option = picked != null ? sortOptions[Number(picked)] : undefined;
-            onChange({ sortBy: option?.sortBy, sortDir: option?.sortDir });
-          }}
+          onChange={(picked) => onChange(sortPatch(picked, sortOptions))}
         />
       )}
 

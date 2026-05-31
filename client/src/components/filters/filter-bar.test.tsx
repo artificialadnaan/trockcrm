@@ -2,8 +2,31 @@
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { FilterBar, type FilterBarOptions, type FilterDimension } from "./filter-bar";
+import { FilterBar, statusPatch, sortPatch, type FilterBarOptions, type FilterDimension } from "./filter-bar";
 import type { FilterBarValue } from "./filterbar-params";
+
+describe("statusPatch", () => {
+  it("maps the All choice (undefined) to the omitted 'any' state, never isActive", () => {
+    expect(statusPatch(undefined)).toEqual({ status: "any" });
+  });
+  it("passes a real status through verbatim", () => {
+    expect(statusPatch("on_hold")).toEqual({ status: "on_hold" });
+    expect(statusPatch("active")).toEqual({ status: "active" });
+  });
+});
+
+describe("sortPatch", () => {
+  const options = [
+    { label: "Newest", sortBy: "created_at", sortDir: "desc" as const },
+    { label: "Value", sortBy: "awarded_amount", sortDir: "desc" as const },
+  ];
+  it("maps the option index to {sortBy, sortDir}", () => {
+    expect(sortPatch("1", options)).toEqual({ sortBy: "awarded_amount", sortDir: "desc" });
+  });
+  it("clears both when Default (undefined) is picked", () => {
+    expect(sortPatch(undefined, options)).toEqual({ sortBy: undefined, sortDir: undefined });
+  });
+});
 
 const OPTIONS: FilterBarOptions = {
   reps: [{ value: "rep-1", label: "Kevin Scott" }],
@@ -74,9 +97,17 @@ describe("FilterBar", () => {
     const onChange = vi.fn();
     render(["date"], { onChange });
     act(() => q('button[aria-label="Date date filter"]')?.click());
-    const mtd = Array.from(document.querySelectorAll("button")).find((b) => b.textContent?.trim() === "MTD");
+    // Select the preset by its stable aria-label (not free text, which also matches the chip).
+    const mtd = document.querySelector<HTMLButtonElement>('button[aria-label="Show Date deals month to date"]');
     act(() => mtd?.click());
     expect(onChange).toHaveBeenCalledWith(expect.objectContaining({ datePreset: "mtd" }));
+  });
+
+  it("gates the stalled (days-in-stage) dimension on stage-entry dates being enabled", () => {
+    render(["stalled"]);
+    expect(q('button[aria-label="Stalled filter"]')).toBeNull();
+    render(["stalled"], { stageEntryDateEnabled: true });
+    expect(q('button[aria-label="Stalled filter"]')).not.toBeNull();
   });
 
   it("toggles a stage selection", () => {
