@@ -62,6 +62,7 @@ import {
   normalizeOperationsReportFilters,
 } from "./operations-tier3-service.js";
 import { pickQueryValue } from "./office-filter.js";
+import { getMondayShowcaseData } from "./monday-showcase-service.js";
 
 const router = Router();
 const VALID_REPORT_FREQUENCIES = ["daily", "weekly", "biweekly", "monthly", "quarterly"] as const;
@@ -827,5 +828,20 @@ router.post(
     }
   }
 );
+
+// Reports Part 2 -- the Monday-showcase single payload. The 8 client variants (3 Report A + 4 Report B +
+// the exec hero tile) render slices of THIS one response, so they reconcile by construction. Director-
+// scoped (it exposes every rep's numbers). ?mode=to_date (live WTD) | completed (prior full Sun-Sat box).
+router.get("/monday-showcase", requireDirector, async (req, res, next) => {
+  try {
+    const modeRaw = pickQueryValue(req.query.mode);
+    const mode = modeRaw === "completed" ? "completed" : "to_date";
+    const data = await getMondayShowcaseData(req.tenantDb!, { mode });
+    await req.commitTransaction!();
+    res.json({ data });
+  } catch (err) {
+    next(err);
+  }
+});
 
 export const reportRoutes = router;
