@@ -95,7 +95,16 @@ export interface LeadFilters {
   sortDir?: "asc" | "desc";
   scope?: WorkspaceScope;
   activeOfficeId?: string;
+  /**
+   * Row cap for the flat list (FilterBar). listLeads is NOT offset-paginated yet, so without a LIMIT the
+   * full-list FilterBar surface would fetch every active+converted+disqualified lead on a large tenant
+   * (Codex #577 P2). Clamped to [1, LEADS_LIST_MAX_ROWS]; defaults to the max when omitted.
+   */
+  limit?: number;
 }
+
+/** Hard ceiling for the flat lead list (mirrors the client's LEADS_LIST_PAGE_SIZE). */
+export const LEADS_LIST_MAX_ROWS = 100;
 
 /** UUID shape guard — used so a malformed id no-matches instead of erroring a uuid cast. */
 const LEAD_FILTER_UUID_RE =
@@ -1466,6 +1475,10 @@ export function createLeadService(
     const sortColumn = filters.sortBy === "created_at" ? leads.createdAt : leads.updatedAt;
     const sortOrder = filters.sortDir === "asc" ? asc(sortColumn) : desc(sortColumn);
 
+    // Bound the result set: this list isn't offset-paginated yet, so cap the rows to keep the
+    // full-list FilterBar query from returning every lead on a large tenant (Codex #577 P2). Honor a
+    // smaller client-requested limit; clamp to [1, LEADS_LIST_MAX_ROWS]; default to the max.
+    const rowLimit = Math.min(Math.max(filters.limit ?? LEADS_LIST_MAX_ROWS, 1), LEADS_LIST_MAX_ROWS);
     const rows = await tenantDb
       .select({
         ...getTableColumns(leads),
@@ -1476,7 +1489,8 @@ export function createLeadService(
       })
       .from(leads)
       .where(and(...conditions))
-      .orderBy(sortOrder, asc(leads.name));
+      .orderBy(sortOrder, asc(leads.name))
+      .limit(rowLimit);
 
     return decorateLeads(tenantDb, rows);
   }

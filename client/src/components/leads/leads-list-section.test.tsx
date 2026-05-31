@@ -4,7 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { MemoryRouter } from "react-router-dom";
-import { LeadsListSection } from "./leads-list-section";
+import { LeadsListSection, LEADS_LIST_PAGE_SIZE } from "./leads-list-section";
 import { LEAD_LIST_SORT_OPTIONS, LEAD_STATUS_OPTIONS } from "./leads-filterbar-adapter";
 import type { FilterDimension, FilterBarOptions } from "@/components/filters/filter-bar";
 
@@ -136,5 +136,30 @@ describe("LeadsListSection — shared FilterBar on the leads list (Wave 1)", () 
     mocks.useLeadsMock.mockReturnValue({ leads: [], loading: false, error: null });
     await render("/leads");
     expect(container.textContent).toContain("No leads match these filters");
+  });
+
+  it("bounds the leads query with a page-size limit so the list is never an unbounded fetch (Codex #577 P2)", async () => {
+    await render("/leads");
+    expect(lastLeadsCall().limit).toBe(LEADS_LIST_PAGE_SIZE);
+  });
+
+  it("surfaces an honest 'first N' note when the returned set hits the cap (no silent truncation) (Codex #577 P2)", async () => {
+    mocks.useLeadsMock.mockReturnValue({
+      leads: Array.from({ length: LEADS_LIST_PAGE_SIZE }, (_unused, index) => makeLead({ id: `lead-${index}` })),
+      loading: false,
+      error: null,
+    });
+    await render("/leads");
+    expect(container.textContent).toContain(`first ${LEADS_LIST_PAGE_SIZE}`);
+  });
+
+  it("does NOT show the cap note when the returned set is below the cap", async () => {
+    mocks.useLeadsMock.mockReturnValue({
+      leads: [makeLead(), makeLead({ id: "lead-2" })],
+      loading: false,
+      error: null,
+    });
+    await render("/leads");
+    expect(container.textContent).not.toContain("first ");
   });
 });

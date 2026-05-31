@@ -28,6 +28,12 @@ const LEAD_STATUS_LABEL: Record<LeadRecord["status"], string> = {
 // FilterBar params so list filtering never mutates the board above it (Codex #577).
 const LEADS_LIST_PARAM_PREFIX = "ll_";
 
+// Bound the list query: this surface replaced a small preview with a full table, and listLeads has no
+// LIMIT — so without a cap every load/filter change would fetch AND render every active+converted+
+// disqualified lead on a large tenant (Codex #577 P2). The client requests at most this many rows and
+// the server enforces the same cap; full offset pagination is the documented BLUE follow-up.
+export const LEADS_LIST_PAGE_SIZE = 100;
+
 export function LeadsListSection({ scope, filterBar }: LeadsListSectionProps) {
   const navigate = useNavigate();
   const { filters: urlFilters, setFilters, resetFilters } = useFilterState(LEADS_LIST_PARAM_PREFIX);
@@ -51,8 +57,14 @@ export function LeadsListSection({ scope, filterBar }: LeadsListSectionProps) {
     scope: filterBarOwnsScope ? urlFilters.scope ?? scope : scope,
     // Show every lifecycle; the Status dimension narrows it (no implicit open-only filter like the board).
     isActive: "all" as const,
+    // Cap the fetch so the full lead table is never an unbounded query (Codex #577 P2). The server
+    // enforces the same ceiling; refine filters to narrow when the cap is hit.
+    limit: LEADS_LIST_PAGE_SIZE,
   };
   const { leads, loading, error } = useLeads(leadArgs);
+  // When the returned set hits the cap there may be more leads than shown — surface that honestly rather
+  // than silently truncating (the count is server-capped; full pagination is the BLUE follow-up).
+  const isCapped = leads.length >= LEADS_LIST_PAGE_SIZE;
 
   const columns: Array<PipelineStageTableColumn<LeadRecord>> = [
     {
@@ -128,17 +140,24 @@ export function LeadsListSection({ scope, filterBar }: LeadsListSectionProps) {
         ) : leads.length === 0 ? (
           <p className="py-8 text-center text-sm font-semibold text-slate-500">No leads match these filters.</p>
         ) : (
-          <PipelineStageTable
-            rows={leads}
-            columns={columns}
-            // Pagination is a BLUE follow-up (the leads endpoint isn't paginated yet); show the
-            // returned set on one page with a record count until page/limit land server-side.
-            pagination={{ page: 1, pageSize: leads.length || 1, total: leads.length, totalPages: 1 }}
-            onPageChange={() => {}}
-            showPagination={false}
-            getRowKey={(lead) => lead.id}
-            onRowClick={(lead) => navigate(`/leads/${lead.id}`)}
-          />
+          <>
+            <PipelineStageTable
+              rows={leads}
+              columns={columns}
+              // Pagination is a BLUE follow-up (the leads endpoint isn't offset-paginated yet); show the
+              // capped set on one page with a record count until page/limit land server-side.
+              pagination={{ page: 1, pageSize: leads.length || 1, total: leads.length, totalPages: 1 }}
+              onPageChange={() => {}}
+              showPagination={false}
+              getRowKey={(lead) => lead.id}
+              onRowClick={(lead) => navigate(`/leads/${lead.id}`)}
+            />
+            {isCapped ? (
+              <p className="mt-3 text-center text-xs font-semibold text-slate-500">
+                Showing the first {LEADS_LIST_PAGE_SIZE} leads. Refine the filters to narrow the list.
+              </p>
+            ) : null}
+          </>
         )}
       </div>
     </section>

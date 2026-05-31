@@ -240,6 +240,10 @@ function queryBuilder(rows: Row[], usersState: Row[], fields?: Record<string, un
     orderBy() {
       return this;
     },
+    limit(count: number) {
+      filtered = filtered.slice(0, count);
+      return this;
+    },
     then(onfulfilled: (value: Row[]) => unknown) {
       return Promise.resolve(projectRows(filtered, fields)).then(onfulfilled);
     },
@@ -375,5 +379,16 @@ describe("listLeads scope filtering", () => {
       "lead-subscribed",
       "lead-legacy-office-fallback",
     ]);
+  });
+
+  it("caps the returned rows at the requested limit so the list is never an unbounded fetch (Codex #577 P2)", async () => {
+    const service = createLeadService();
+    const rows = await service.listLeads(
+      createTenantDb() as never,
+      { isActive: "all", scope: "all", activeOfficeId: "office-1", limit: 2 },
+      "director",
+      "director-1"
+    );
+    expect(rows).toHaveLength(2);
   });
 });
