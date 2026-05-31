@@ -212,16 +212,17 @@ function normalizeDashboardDealFilter(filterParam: string | null | undefined): D
   }
 }
 
-// The /deals BASE-view list mounts the SAME shared FilterBar as /pipeline's working list, MINUS the
-// Rep + Scope dimensions: the dashboard header owns those (they also drive the KPI cards + read-only
-// board), and the list inherits them — Rep via baseFilters, Scope via the page toggle. So the base list
-// becomes identical to /pipeline's, while the cards/board/header stay untouched (Adnaan, signed off).
-// Namespaced `dl_` so the list's params can't collide with the header's bare ?assignedRepId/?scope/etc.
+// The /deals BASE-view list mounts the FULL /pipeline FilterBar (incl. Rep), MINUS only Scope (the page
+// toggle owns scope; the list inherits it). The header's Rep + period also drive the KPI cards + board;
+// the bar's Rep NESTS within the header Rep — the header is the broad scope, the bar refines the list
+// within it (Adnaan). Namespaced `dl_` so the list's params can't collide with the header's bare
+// ?assignedRepId/?scope/?period. Cards + read-only board stay untouched.
 const DEALS_BASE_LIST_FILTERBAR_DIMENSIONS: FilterDimension[] = [
   "search",
   "date",
   "stage",
   "sort",
+  "rep",
   "status",
   "workflow",
   "region",
@@ -1339,6 +1340,12 @@ function DealListPageContent({ role, userId }: { role: string; userId: string })
                 dimensions: DEALS_BASE_LIST_FILTERBAR_DIMENSIONS,
                 paramPrefix: "dl_",
                 options: {
+                  // Constrain the bar's Rep options to the header scope so the nesting can't conflict:
+                  // when the header picks a rep, the bar offers only that rep (it can't narrow a single
+                  // rep further); when the header is "All reps", the bar offers everyone (Adnaan).
+                  reps: selectedRepFilter
+                    ? [{ value: selectedRepFilter, label: selectedRepLabel }]
+                    : assignees.map((assignee) => ({ value: assignee.id, label: assignee.displayName })),
                   regions: regions.map((region) => ({ value: region.id, label: region.name })),
                   projectTypes: projectTypes.map((type) => ({ value: type.id, label: type.name })),
                   stages: boardColumns

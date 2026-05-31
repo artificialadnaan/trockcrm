@@ -746,12 +746,22 @@ export function DealsListSection({
   // FilterBar mode: URL value -> contract DealFilters (outcome-aware date, status, workflow, value,
   // stalled). baseFilters still layer (parent presets); scope inherits from the page unless the URL
   // sets it; the section owns page/limit. filter-axis == display-axis (displayDate rendered below).
-  // Drop a URL-derived filter whose dimension this mount does NOT render: a namespaced value like
-  // dl_assignedRepId can linger in a shared/bookmarked URL even though the Rep control is hidden (the
-  // /deals base list inherits Rep from the header, so it omits the dimension). Without this the list
-  // would silently query a different rep than the header/board show, with no control to clear it (Codex #589).
+  // Rep reconciliation between the inherited (header) Rep scope and the bar's own Rep dimension:
+  //  - Rep dimension NOT rendered: a stale dl_assignedRepId from a shared/bookmarked URL must not
+  //    silently query a different rep than the header/board show — drop it (Codex #589).
+  //  - Rep dimension rendered + a header Rep is inherited (baseFilters): the bar NESTS within the header
+  //    scope (the header is the broad scope; the bar only refines WITHIN it). A bar Rep equal to the
+  //    header rep is a no-op; a bar Rep OUTSIDE the header scope (e.g. a bookmarked dl_assignedRepId)
+  //    can't intersect, so clamp to the header scope rather than override it — they nest, never
+  //    conflict-to-error (Adnaan). The mount also constrains the bar's Rep options to the header scope,
+  //    so this clamp only fires for out-of-scope bookmarked URLs.
   const fbFilters = filterBarValueToDealFilters(urlFilters);
-  if (!(filterBar?.dimensions.includes("rep") ?? false)) delete fbFilters.assignedRepId;
+  const inheritedRep = baseFilters?.assignedRepId;
+  if (!(filterBar?.dimensions.includes("rep") ?? false)) {
+    delete fbFilters.assignedRepId;
+  } else if (inheritedRep && fbFilters.assignedRepId && fbFilters.assignedRepId !== inheritedRep) {
+    delete fbFilters.assignedRepId;
+  }
   const filterBarDealsArgs: DealFilters = {
     ...baseFilters,
     ...applyBoardVisibilityDefaults(fbFilters, {

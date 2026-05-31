@@ -1220,7 +1220,7 @@ describe("DealListPage", () => {
     // Team is not an offered scope (D-12b).
     expect(html).not.toContain(">Team</button>");
   });
-  it("mounts the shared FilterBar (dl_-namespaced) on the BASE deal list, inheriting scope; Rep/Scope omitted", () => {
+  it("mounts the FULL FilterBar (incl. Rep, dl_-namespaced) on the BASE deal list, inheriting scope; Scope omitted", () => {
     renderPage("/deals?scope=mine", "director");
 
     expect(mocks.dealsListSectionMock).toHaveBeenCalledWith(
@@ -1230,7 +1230,7 @@ describe("DealListPage", () => {
         enableExport: true,
         filterBar: expect.objectContaining({
           paramPrefix: "dl_", // namespaced so the list can't collide with the header's bare params
-          dimensions: expect.arrayContaining(["search", "date", "stage", "sort", "status", "value", "stalled"]),
+          dimensions: expect.arrayContaining(["search", "date", "stage", "sort", "rep", "status", "value", "stalled"]),
         }),
       })
     );
@@ -1238,11 +1238,26 @@ describe("DealListPage", () => {
       filterBar: { dimensions: string[] };
       enableDateFilter?: boolean;
     };
-    // Rep + Scope are owned by the header and inherited — NOT rendered in the list's bar.
-    expect(props.filterBar.dimensions).not.toContain("rep");
+    // Rep IS in the bar now (it nests under the header Rep); Scope stays the page toggle's.
+    expect(props.filterBar.dimensions).toContain("rep");
     expect(props.filterBar.dimensions).not.toContain("scope");
     // The legacy inline filter row is gone (FilterBar mode supersedes it).
     expect(props.enableDateFilter).toBeUndefined();
+  });
+
+  it("constrains the bar's Rep options to the header scope so the nesting can't conflict", () => {
+    mocks.useTaskAssigneesMock.mockReturnValue({
+      assignees: [
+        { id: "rep-1", displayName: "Brett Jones" },
+        { id: "rep-2", displayName: "Adam Smith" },
+      ],
+    });
+    renderPage("/deals?scope=all&assignedRepId=rep-2", "director");
+    const props = mocks.dealsListSectionMock.mock.calls[mocks.dealsListSectionMock.mock.calls.length - 1][0] as {
+      filterBar: { options?: { reps?: Array<{ value: string }> } };
+    };
+    // header pinned to rep-2 → the bar offers only rep-2 (can't narrow a single rep further)
+    expect(props.filterBar.options?.reps?.map((rep) => rep.value)).toEqual(["rep-2"]);
   });
 
   it("keeps the LEGACY list (no FilterBar) on drill-down views — those stay YELLOW's surface", () => {

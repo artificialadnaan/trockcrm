@@ -445,10 +445,29 @@ describe("DealsListSection", () => {
     expect(call.assignedRepId).toBe("rep-A"); // dl_assignedRepId dropped (hidden), baseFilters rep preserved
   });
 
-  it("applies the namespaced rep filter when the Rep dimension IS rendered (overrides baseFilters)", async () => {
+  it("NESTS the bar Rep within the inherited header Rep: a same/one-sided rep applies, an OUT-OF-SCOPE bar rep clamps to the header scope (Adnaan)", async () => {
+    // header rep-A + bar rep-A (same) → rep-A
+    expect(
+      (await renderAt("/deals?dl_assignedRepId=rep-A", {
+        workflowFamily: "deal",
+        baseFilters: { assignedRepId: "rep-A" },
+        filterBar: { dimensions: ["search", "rep", "sort"], paramPrefix: "dl_" },
+      })).assignedRepId
+    ).toBe("rep-A");
+    // header rep-A + bar rep-B (out of scope) → CLAMP to the header rep-A (they nest, never error)
+    expect(
+      (await renderAt("/deals?dl_assignedRepId=rep-B", {
+        workflowFamily: "deal",
+        baseFilters: { assignedRepId: "rep-A" },
+        filterBar: { dimensions: ["search", "rep", "sort"], paramPrefix: "dl_" },
+      })).assignedRepId
+    ).toBe("rep-A");
+  });
+
+  it("applies the bar Rep when the header has NO rep scope (header = All reps)", async () => {
     const call = await renderAt("/deals?dl_assignedRepId=rep-B", {
       workflowFamily: "deal",
-      baseFilters: { assignedRepId: "rep-A" },
+      // no baseFilters.assignedRepId → header is "All reps"; the bar narrows the list to rep-B
       filterBar: { dimensions: ["search", "rep", "sort"], paramPrefix: "dl_" },
     });
     expect(call.assignedRepId).toBe("rep-B");
