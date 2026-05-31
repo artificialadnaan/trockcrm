@@ -241,4 +241,27 @@ describe("DealsListSection — FilterBar (URL) mode (Slice 7 proving ground)", (
     await renderFB("/deals", { scope: "team" });
     expect(lastDealsCall().scope).toBe("team");
   });
+
+  it("routes table-header sorts through the URL (not dead local state) in FilterBar mode", async () => {
+    await renderFB("/deals?sortBy=created_at&sortDir=desc");
+    const dealHeader = Array.from(container.querySelectorAll("button")).find((b) => b.textContent?.includes("Deal"));
+    expect(dealHeader).toBeTruthy();
+    await act(async () => {
+      dealHeader?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+    expect(lastDealsCall()).toMatchObject({ sortBy: "name", sortDir: "desc" });
+  });
+
+  it("preserves the page-owned scope param on Clear (scope is inherited, not a list dimension here)", async () => {
+    await renderFB("/deals?scope=all&status=on_hold");
+    expect(lastDealsCall().scope).toBe("all");
+    const clearBtn = container.querySelector<HTMLButtonElement>('button[aria-label="Clear filters"]');
+    expect(clearBtn).toBeTruthy();
+    await act(async () => {
+      clearBtn?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+    const call = lastDealsCall();
+    expect(call.scope).toBe("all"); // board scope survives the list reset
+    expect(call.status).toBeUndefined(); // list dimension cleared
+  });
 });

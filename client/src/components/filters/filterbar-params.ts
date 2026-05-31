@@ -94,10 +94,16 @@ export function mergeFilterParams(prev: URLSearchParams, patch: Partial<FilterBa
   return result;
 }
 
-/** Remove all FilterBar params (reset), preserving non-FilterBar params. */
-export function clearFilterParams(prev: URLSearchParams): URLSearchParams {
+/** Remove all FilterBar params (reset), preserving non-FilterBar params. `preserveKeys` keeps the
+ *  listed FilterBar params too — used when a surface inherits a param it does not render as a
+ *  dimension (e.g. the deals-list-under-kanban inherits the board-owned `scope`, so Clear must not
+ *  reset the whole pipeline). */
+export function clearFilterParams(prev: URLSearchParams, preserveKeys: readonly string[] = []): URLSearchParams {
   const result = new URLSearchParams(prev);
-  for (const key of FILTERBAR_PARAM_KEYS) result.delete(key);
+  for (const key of FILTERBAR_PARAM_KEYS) {
+    if (preserveKeys.includes(key)) continue;
+    result.delete(key);
+  }
   return result;
 }
 

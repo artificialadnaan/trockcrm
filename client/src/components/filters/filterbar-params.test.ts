@@ -149,4 +149,11 @@ describe("clearFilterParams", () => {
     expect(next.get("status")).toBeNull();
     expect(next.get("page")).toBeNull();
   });
+
+  it("keeps explicitly preserved FilterBar keys (e.g. a page-owned scope) while clearing the rest", () => {
+    const next = clearFilterParams(new URLSearchParams("scope=all&search=x&status=active"), ["scope"]);
+    expect(next.get("scope")).toBe("all");
+    expect(next.get("search")).toBeNull();
+    expect(next.get("status")).toBeNull();
+  });
 });

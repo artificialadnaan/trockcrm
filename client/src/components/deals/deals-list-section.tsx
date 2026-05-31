@@ -663,7 +663,18 @@ export function DealsListSection({
     );
   };
 
+  // Sort routing: in FilterBar mode the query reads sortBy/sortDir from the URL, so table-header
+  // clicks must write the URL too (otherwise the arrow flips but the rows never re-sort). The bar's
+  // Sort dropdown and the header clicks then stay in sync. Legacy mode keeps local sort state.
+  const activeSort: { key: string | undefined; dir: "asc" | "desc" | undefined } = filterBarMode
+    ? { key: urlFilters.sortBy, dir: urlFilters.sortDir }
+    : { key: sort.key, dir: sort.dir };
   const updateSort = (key: DealListSortState["key"]) => {
+    if (filterBarMode) {
+      const dir = urlFilters.sortBy === key && urlFilters.sortDir === "desc" ? "asc" : "desc";
+      setFilters({ sortBy: key, sortDir: dir });
+      return;
+    }
     setSort((current) => ({
       key,
       dir: current.key === key && current.dir === "desc" ? "asc" : "desc",
@@ -751,7 +762,7 @@ export function DealsListSection({
       onClick={() => updateSort(key)}
     >
       {label}
-      {sort.key === key ? <span>{sort.dir === "asc" ? "↑" : "↓"}</span> : null}
+      {activeSort.key === key ? <span>{activeSort.dir === "asc" ? "↑" : "↓"}</span> : null}
     </button>
   );
 
@@ -903,7 +914,9 @@ export function DealsListSection({
             options={filterBar.options}
             value={urlFilters}
             onChange={setFilters}
-            onReset={resetFilters}
+            // Preserve any param the bar inherits but does not render (e.g. the board-owned `scope`
+            // on the pipeline page) so Clear resets only this list's dimensions, not the kanban.
+            onReset={() => resetFilters(filterBar.dimensions.includes("scope") ? [] : ["scope"])}
             stageEntryDateEnabled={filterBar.stageEntryDateEnabled}
           />
         </div>

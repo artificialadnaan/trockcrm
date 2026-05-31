@@ -397,8 +397,14 @@ export function PipelinePage() {
 
   useEffect(() => {
     // showDd is derived from searchParams directly (above); only the terminal date filters need
-    // syncing back into state on a browser back/forward.
-    setTerminalDateFilters(readTerminalDateFiltersFromSearchParams(searchParams));
+    // syncing back into state on a browser back/forward. Keep the SAME object reference when the
+    // terminal-date params are unchanged so that list-only FilterBar params (search, stage, status,
+    // …) sharing this URL do not churn this state and needlessly refetch the kanban board
+    // (fetchPipeline depends on terminalDateFilters).
+    const next = readTerminalDateFiltersFromSearchParams(searchParams);
+    setTerminalDateFilters((current) =>
+      JSON.stringify(current) === JSON.stringify(next) ? current : next
+    );
   }, [searchParams]);
 
   useEffect(() => {

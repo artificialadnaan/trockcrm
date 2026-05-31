@@ -11,7 +11,9 @@ import { withResolvedDateWindow } from "./filterbar-date";
 export interface UseFilterStateResult {
   filters: FilterBarValue;
   setFilters: (patch: Partial<FilterBarValue>) => void;
-  resetFilters: () => void;
+  /** Clear the FilterBar params. `preserveKeys` keeps the listed params (e.g. a page-owned `scope`
+   *  that the surface inherits rather than renders). */
+  resetFilters: (preserveKeys?: readonly string[]) => void;
 }
 
 /**
@@ -31,9 +33,12 @@ export function useFilterState(): UseFilterStateResult {
     [setSearchParams]
   );
 
-  const resetFilters = useCallback(() => {
-    setSearchParams((prev) => clearFilterParams(prev), { replace: true });
-  }, [setSearchParams]);
+  const resetFilters = useCallback(
+    (preserveKeys: readonly string[] = []) => {
+      setSearchParams((prev) => clearFilterParams(prev, preserveKeys), { replace: true });
+    },
+    [setSearchParams]
+  );
 
   return { filters, setFilters, resetFilters };
 }
