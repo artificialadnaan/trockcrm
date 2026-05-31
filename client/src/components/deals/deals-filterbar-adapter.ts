@@ -1,6 +1,6 @@
 import type { Deal, DealFilters } from "@/hooks/use-deals";
 import type { FilterBarValue } from "@/components/filters/filterbar-params";
-import type { FilterBarSortOption, FilterDimension } from "@/components/filters/filter-bar";
+import type { FilterBarOptions, FilterBarSortOption, FilterDimension } from "@/components/filters/filter-bar";
 
 /**
  * The deals-list Sort allow-list (contract §4). Shared by every deals FilterBar surface (proving
@@ -61,6 +61,54 @@ export function getDrilldownFilterBarDimensions(
     if (dimension === "stage") return opts.pinnedStage !== true;
     return true;
   });
+}
+
+/** The shared-FilterBar config a drill-down list mount feeds to `<DealsListSection filterBar={…}>`.
+ *  Superset (all required) of the optional `filterBar` prop, so it is assignable verbatim. */
+export interface DrilldownListFilterBar {
+  dimensions: FilterDimension[];
+  options: FilterBarOptions;
+  stageEntryDateEnabled: boolean;
+  defaultStageIds: string[];
+  terminalStageIds: string[];
+  paramPrefix: string;
+}
+
+/**
+ * Build the FilterBar config for a /deals dashboard drill-down's embedded list (Won / Active /
+ * Closing / Opportunities / Bid Board — every drill-down except the base view and the client-side
+ * at-risk/stale list). Composes the tested primitives:
+ *  - dashboard dimension set (no `rep` — the page's rep select already filters the board AND the list;
+ *    no `scope` — the page's scope toggle owns it);
+ *  - the drill-down's visible stages as both the stage multi-select options and the board-mirror scope
+ *    (terminal subset → inactiveStageIds, so terminal columns show like the board);
+ *  - outcome-aware (the prod flag is on) + the fb_ namespace so the bar's keys never collide with the
+ *    page's bare scope/period/filter/page params.
+ */
+export function buildDrilldownListFilterBar(input: {
+  visibleStages: ReadonlyArray<{ id: string; slug: string; name: string }>;
+  isTerminalSlug: (slug: string) => boolean;
+  regions: ReadonlyArray<{ id: string; name: string }>;
+  projectTypes: ReadonlyArray<{ id: string; name: string }>;
+}): DrilldownListFilterBar {
+  const scope = getBoardVisibleStageScope(
+    input.visibleStages.map((stage) => ({ id: stage.id, slug: stage.slug })),
+    true,
+    input.isTerminalSlug
+  );
+  return {
+    dimensions: getDrilldownFilterBarDimensions(),
+    options: {
+      regions: input.regions.map((region) => ({ value: region.id, label: region.name })),
+      projectTypes: input.projectTypes.map((type) => ({ value: type.id, label: type.name })),
+      stages: input.visibleStages.map((stage) => ({ value: stage.id, label: stage.name })),
+      sortOptions: DEAL_LIST_SORT_OPTIONS,
+    },
+    stageEntryDateEnabled: true,
+    defaultStageIds: scope.defaultStageIds,
+    terminalStageIds: scope.terminalStageIds,
+    paramPrefix: DRILLDOWN_FILTERBAR_PARAM_PREFIX,
+  };
 }
 
 /**

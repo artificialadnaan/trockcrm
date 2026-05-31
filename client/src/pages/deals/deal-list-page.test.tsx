@@ -122,6 +122,8 @@ vi.mock("@/hooks/use-deals", () => ({
 
 vi.mock("@/hooks/use-pipeline-config", () => ({
   usePipelineStages: mocks.usePipelineStagesMock,
+  useRegions: () => ({ regions: [{ id: "region-1", name: "DFW" }] }),
+  useProjectTypes: () => ({ projectTypes: [{ id: "type-1", name: "Multifamily" }] }),
 }));
 
 vi.mock("@/hooks/use-task-assignees", () => ({
@@ -1472,6 +1474,30 @@ describe("DealListPage", () => {
         }),
       })
     );
+  });
+
+  it("mounts the shared FilterBar (fb_ namespace, outcome-aware, no rep dim) on a drill-down list", () => {
+    renderPage("/deals?filter=won&scope=all", "director");
+    const props = mocks.dealsListSectionMock.mock.calls[mocks.dealsListSectionMock.mock.calls.length - 1]?.[0] as {
+      filterBar?: { paramPrefix?: string; stageEntryDateEnabled?: boolean; dimensions?: string[] };
+    };
+    expect(props.filterBar).toBeDefined();
+    expect(props.filterBar?.paramPrefix).toBe("fb_");
+    expect(props.filterBar?.stageEntryDateEnabled).toBe(true);
+    // rep is the page-level select (drives board + list), not a bar dimension on the dashboard drill-downs
+    expect(props.filterBar?.dimensions).not.toContain("rep");
+  });
+
+  it("leaves the base view (filter === null) WITHOUT a FilterBar — RED owns that mount", () => {
+    renderPage("/deals?scope=all", "director");
+    const props = mocks.dealsListSectionMock.mock.calls[mocks.dealsListSectionMock.mock.calls.length - 1]?.[0] as { filterBar?: unknown };
+    expect(props.filterBar).toBeUndefined();
+  });
+
+  it("folds the selected rep into the drill-down list baseFilters (FilterBar mode ignores lockedOwnerId)", () => {
+    renderPage("/deals?filter=won&scope=all&assignedRepId=rep-1", "director");
+    const props = mocks.dealsListSectionMock.mock.calls[mocks.dealsListSectionMock.mock.calls.length - 1]?.[0] as { baseFilters?: { assignedRepId?: string } };
+    expect(props.baseFilters?.assignedRepId).toBe("rep-1");
   });
 
   it("uses the Won terminal filter caption ahead of the page period and falls back correctly", () => {

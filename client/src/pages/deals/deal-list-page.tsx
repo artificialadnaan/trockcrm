@@ -8,7 +8,7 @@ import { MetricCard } from "@/components/shared/metric-card";
 import { ScopeToggle, type ScopeToggleOption } from "@/components/shared/scope-toggle";
 import { USD_COMPACT } from "@/components/shared/formatters";
 import { useDealBoard, type Deal, type DealBoardColumn } from "@/hooks/use-deals";
-import { usePipelineStages } from "@/hooks/use-pipeline-config";
+import { usePipelineStages, useProjectTypes, useRegions } from "@/hooks/use-pipeline-config";
 import { useTaskAssignees } from "@/hooks/use-task-assignees";
 import { buildCanonicalDealBoardColumns } from "@/lib/canonical-deal-board";
 import { useAuth } from "@/lib/auth";
@@ -34,6 +34,7 @@ import type { PipelineScope } from "@/lib/pipeline-scope";
 import { KanbanScrollColumn } from "@/components/deals/kanban-scroll-column";
 import { DecoratedKanbanCard } from "@/components/deals/decorated-kanban-card";
 import { DealsListSection } from "@/components/deals/deals-list-section";
+import { buildDrilldownListFilterBar } from "@/components/deals/deals-filterbar-adapter";
 import type { DealFilters } from "@/hooks/use-deals";
 import type { DealListSortState } from "@/components/deals/deals-list-section";
 import { resolvePreferredScope, writeStoredScopePreference } from "@/lib/scope-preferences";
@@ -735,6 +736,10 @@ function DealListPageContent({ role, userId }: { role: string; userId: string })
   const scopeOptions = SCOPE_OPTIONS;
   const { stages } = usePipelineStages("deal");
   const { assignees } = useTaskAssignees();
+  // Option sources for the drill-down FilterBar's region / project-type dimensions (rep stays the
+  // page-level select; scope stays the page toggle — neither is a bar dimension here).
+  const { regions } = useRegions();
+  const { projectTypes } = useProjectTypes();
   // When a parked ?scope=team bookmark is coerced to mine, drop any stale owner filter from
   // the URL too -- otherwise the Mine board (the viewer's deals) is intersected with another
   // rep's owner filter and renders empty instead of the intended Mine view (D-12b).
@@ -990,6 +995,33 @@ function DealListPageContent({ role, userId }: { role: string; userId: string })
       ...(estimateSentDateRange.to ? { estimateSentTo: estimateSentDateRange.to } : {}),
     }),
     [drilldownBaseFilters, estimateSentDateRange.from, estimateSentDateRange.to]
+  );
+  // Shared FilterBar on the DRILL-DOWN list (filter !== null). RED owns the base-view mount
+  // (filter === null); the client-side at-risk/stale SLA list has no server predicate, so the bar
+  // (which drives getDeals) can't back it — both return undefined here and keep today's behavior.
+  const drilldownFilterBar = useMemo(() => {
+    if (dashboardView.filter === null || isAtRiskDrilldown) return undefined;
+    return buildDrilldownListFilterBar({
+      visibleStages: (drilldownVisibleStages ?? []).map((stage) => ({
+        id: stage.id,
+        slug: stage.slug,
+        name: stage.name,
+      })),
+      isTerminalSlug: isTerminalStage,
+      regions,
+      projectTypes,
+    });
+  }, [dashboardView.filter, isAtRiskDrilldown, drilldownVisibleStages, regions, projectTypes]);
+  // In FilterBar mode the list args spread baseFilters then the bar value; they do NOT read
+  // lockedOwnerId (that feeds only the legacy path). So fold the page's rep select into baseFilters,
+  // else the drill-down list would ignore the selected rep and diverge from the board above. The
+  // legacy/base path overrides this with the identical lockedOwnerId value, so it is a no-op there.
+  const drilldownListBaseFilters = useMemo(
+    () => ({
+      ...layeredListBaseFilters,
+      ...(selectedRepFilter ? { assignedRepId: selectedRepFilter } : {}),
+    }),
+    [layeredListBaseFilters, selectedRepFilter]
   );
 
   const updateScope = (nextScope: PipelineScope) => {
@@ -1285,7 +1317,8 @@ function DealListPageContent({ role, userId }: { role: string; userId: string })
               subtitle={dashboardView.subtitle}
               eyebrow={dashboardView.eyebrow}
               visibleStages={drilldownVisibleStages}
-              baseFilters={layeredListBaseFilters}
+              baseFilters={drilldownFilterBar ? drilldownListBaseFilters : layeredListBaseFilters}
+              filterBar={drilldownFilterBar}
               dateField={dashboardView.listDateField}
               initialSort={dashboardView.listInitialSort}
               initialStageSlugs={dashboardView.initialStageSlugs}

@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   applyBoardVisibilityDefaults,
+  buildDrilldownListFilterBar,
   DRILLDOWN_FILTERBAR_PARAM_PREFIX,
   filterBarValueToDealFilters,
   getBoardVisibleStageScope,
@@ -280,5 +281,47 @@ describe("getDrilldownFilterBarDimensions (per-surface dimension set)", () => {
       "value",
       "stalled",
     ]);
+  });
+});
+
+describe("buildDrilldownListFilterBar (the /deals dashboard drill-down list mount config)", () => {
+  const visibleStages = [
+    { id: "stage-opp", slug: "opportunity", name: "Opportunity" },
+    { id: "stage-won", slug: "won", name: "Won" },
+  ];
+  const build = () =>
+    buildDrilldownListFilterBar({
+      visibleStages,
+      isTerminalSlug: (slug) => slug === "won",
+      regions: [{ id: "region-1", name: "DFW" }],
+      projectTypes: [{ id: "type-1", name: "Multifamily" }],
+    });
+
+  it("namespaces the bar (fb_) and marks it outcome-aware (flag is on in prod)", () => {
+    const cfg = build();
+    expect(cfg.paramPrefix).toBe(DRILLDOWN_FILTERBAR_PARAM_PREFIX);
+    expect(cfg.stageEntryDateEnabled).toBe(true);
+  });
+
+  it("uses the dashboard dimension set — no rep (the page's rep select drives board + list)", () => {
+    expect(build().dimensions).not.toContain("rep");
+    expect(build().dimensions).toContain("stage");
+  });
+
+  it("mirrors the drill-down's visible stages as the stage scope + multi-select options", () => {
+    const cfg = build();
+    expect(cfg.defaultStageIds).toEqual(["stage-opp", "stage-won"]);
+    expect(cfg.terminalStageIds).toEqual(["stage-won"]); // terminal subset flows through as inactiveStageIds
+    expect(cfg.options.stages).toEqual([
+      { value: "stage-opp", label: "Opportunity" },
+      { value: "stage-won", label: "Won" },
+    ]);
+  });
+
+  it("maps region + project-type option sources for their dimensions", () => {
+    const cfg = build();
+    expect(cfg.options.regions).toEqual([{ value: "region-1", label: "DFW" }]);
+    expect(cfg.options.projectTypes).toEqual([{ value: "type-1", label: "Multifamily" }]);
+    expect(cfg.options.sortOptions).toBeDefined();
   });
 });
