@@ -527,7 +527,7 @@ function getWonMetricTerminalLabel(filter: TerminalDateFilter) {
   return `Last ${filter.preset} days`;
 }
 
-function getTerminalDateRange(filter: TerminalDateFilter, now = new Date()): DateRange {
+export function getTerminalDateRange(filter: TerminalDateFilter, now = new Date()): DateRange {
   if (filter.preset === "all") return {};
 
   const today = formatDateInput(now);
@@ -538,7 +538,12 @@ function getTerminalDateRange(filter: TerminalDateFilter, now = new Date()): Dat
     };
   }
 
-  if (filter.preset === "mtd" || filter.preset === "qtd" || filter.preset === "ytd") {
+  if (
+    filter.preset === "wtd" ||
+    filter.preset === "mtd" ||
+    filter.preset === "qtd" ||
+    filter.preset === "ytd"
+  ) {
     return toDatePresetRange(filter.preset, now);
   }
 
@@ -551,7 +556,7 @@ function getTerminalDateRange(filter: TerminalDateFilter, now = new Date()): Dat
   };
 }
 
-function getEstimateSentDateRange(filter: TerminalDateFilter, now = new Date()): DateRange {
+export function getEstimateSentDateRange(filter: TerminalDateFilter, now = new Date()): DateRange {
   if (filter.preset === "all") return {};
   if (filter.preset === "custom") {
     return {
@@ -560,7 +565,12 @@ function getEstimateSentDateRange(filter: TerminalDateFilter, now = new Date()):
     };
   }
 
-  if (filter.preset === "mtd" || filter.preset === "qtd" || filter.preset === "ytd") {
+  if (
+    filter.preset === "wtd" ||
+    filter.preset === "mtd" ||
+    filter.preset === "qtd" ||
+    filter.preset === "ytd"
+  ) {
     return toDatePresetRange(filter.preset, now);
   }
 

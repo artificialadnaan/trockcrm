@@ -88,12 +88,17 @@ interface DealStageFilterOption {
   isTerminal?: boolean;
 }
 
-function dateRangeFromTerminalFilter(filter: TerminalDateFilter) {
+export function dateRangeFromTerminalFilter(filter: TerminalDateFilter) {
   if (filter.preset === "all") return {};
   if (filter.preset === "custom") {
     return { from: filter.customStart || undefined, to: filter.customEnd || undefined };
   }
-  if (filter.preset === "mtd" || filter.preset === "qtd" || filter.preset === "ytd") {
+  if (
+    filter.preset === "wtd" ||
+    filter.preset === "mtd" ||
+    filter.preset === "qtd" ||
+    filter.preset === "ytd"
+  ) {
     return toDatePresetRange(filter.preset);
   }
   return { from: daysAgo(Number(filter.preset)) };

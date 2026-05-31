@@ -7,6 +7,7 @@ import {
 } from "@/hooks/use-director-dashboard";
 import { useLeads, formatLeadPropertyLine } from "@/hooks/use-leads";
 import { usePipelineStages } from "@/hooks/use-pipeline-config";
+import { toDatePresetRange } from "@/lib/pipeline-terminal-filters";
 import { DateRangeToggle } from "@/components/dashboard/date-range-toggle";
 import { StatCard } from "@/components/dashboard/stat-card";
 import { StaleDealList } from "@/components/dashboard/stale-deal-list";
@@ -73,15 +74,6 @@ function isRepDetailListRange(value: string | null): value is RepDetailListRange
   return value !== null && LIST_RANGE_OPTIONS.includes(value as RepDetailListRange);
 }
 
-export function startOfWeekToDate(referenceDate: Date) {
-  // D-7: one platform-wide week definition = Sunday->Saturday. getUTCDay(): Sunday = 0,
-  // so subtracting it walks back to the most recent Sunday.
-  const result = new Date(referenceDate);
-  const daysFromSunday = result.getUTCDay();
-  result.setUTCDate(result.getUTCDate() - daysFromSunday);
-  return formatUtcDateInput(result);
-}
-
 function daysBack(referenceDate: Date, days: number) {
   const result = new Date(referenceDate);
   result.setUTCDate(result.getUTCDate() - days);
@@ -100,8 +92,9 @@ function getRepDetailListDateRange(
   preset: DateRangePreset,
   dashboardDateRange: { from: string; to: string }
 ) {
-  // Keep quick-filter windows on the same UTC day boundaries as presetToDateRange()
-  // so the rep-detail lists and the dashboard cards use identical date semantics.
+  // mtd/qtd/ytd keep the same UTC day boundaries as presetToDateRange() so the rep-detail
+  // lists and dashboard cards share semantics; wtd uses the ONE shared platform-wide
+  // (Sunday-anchored) WTD definition (D-7).
   if (range === "dashboard") {
     return dashboardDateRange;
   }
@@ -110,11 +103,12 @@ function getRepDetailListDateRange(
     return presetToDateRange(range);
   }
 
-  const today = formatUtcDateInput(new Date());
   if (range === "wtd") {
-    return { from: startOfWeekToDate(new Date()), to: today };
+    // D-7: use the ONE shared, platform-wide WTD definition (Sunday-anchored).
+    return toDatePresetRange("wtd");
   }
 
+  const today = formatUtcDateInput(new Date());
   return { from: daysBack(new Date(), 6), to: today };
 }
 

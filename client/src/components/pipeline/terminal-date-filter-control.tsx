@@ -2,7 +2,13 @@ import { useEffect, useState, type KeyboardEvent, type MouseEvent } from "react"
 import { ChevronDown } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
-import { clampDateToToday, daysAgo, getTodayDateParam, type TerminalDateFilter } from "@/lib/pipeline-terminal-filters";
+import {
+  clampDateToToday,
+  daysAgo,
+  getTerminalDateFilterLabel,
+  getTodayDateParam,
+  type TerminalDateFilter,
+} from "@/lib/pipeline-terminal-filters";
 import { cn } from "@/lib/utils";
 
 const PRESETS = [
@@ -18,9 +24,8 @@ const PRESETS = [
 ] as const;
 
 function chipLabel(filter: TerminalDateFilter) {
-  if (filter.preset === "custom") return "Custom";
-  const preset = PRESETS.find((item) => item.value === filter.preset);
-  return preset && "chip" in preset ? preset.chip : "Last 30d";
+  // Single source of truth for preset labels (handles wtd -> "WTD" too).
+  return getTerminalDateFilterLabel(filter);
 }
 
 export function TerminalDateFilterControl({
