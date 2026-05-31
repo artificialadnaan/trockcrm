@@ -97,6 +97,16 @@ describe("deserializeFilters (URL query -> FilterBar)", () => {
   it("ignores blank or non-numeric numeric params", () => {
     expect(deserializeFilters(new URLSearchParams("valueMin=&maxAgeDays=abc"))).toEqual({});
   });
+
+  it("accepts a domain status verbatim (deal active|on_hold|inactive AND lead open|converted|disqualified), omitting only 'any'/blank", () => {
+    // Status is multi-domain now (deals + leads share the bar). The URL string round-trips; the
+    // per-surface adapter validates. "any"/blank stays the omitted/default state.
+    expect(deserializeFilters(new URLSearchParams("status=converted")).status).toBe("converted");
+    expect(deserializeFilters(new URLSearchParams("status=disqualified")).status).toBe("disqualified");
+    expect(deserializeFilters(new URLSearchParams("status=on_hold")).status).toBe("on_hold");
+    expect("status" in deserializeFilters(new URLSearchParams("status=any"))).toBe(false);
+    expect("status" in deserializeFilters(new URLSearchParams("status="))).toBe(false);
+  });
 });
 
 describe("mergeFilterParams (URL patch: preserve non-FilterBar params + page-reset)", () => {

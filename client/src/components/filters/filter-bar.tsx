@@ -37,11 +37,15 @@ export interface FilterBarOptions {
   projectTypes?: FilterSelectOption[];
   stages?: MultiSelectOption[];
   sortOptions?: FilterBarSortOption[];
+  /** Opt-in Status option set for non-deal surfaces (e.g. leads: open/converted/disqualified).
+   *  Defaults to the deal statuses, so existing deals mounts are unchanged. */
+  statusOptions?: FilterSelectOption[];
 }
 
 type ScopeValue = "mine" | "team" | "all";
 
-const STATUS_OPTIONS: FilterSelectOption[] = [
+/** Default Status options (deals). A surface can override via FilterBarOptions.statusOptions. */
+const DEAL_STATUS_OPTIONS: FilterSelectOption[] = [
   { value: "active", label: "Active" },
   { value: "on_hold", label: "On hold" },
   { value: "inactive", label: "Inactive" },
@@ -219,7 +223,7 @@ export function FilterBar({
           label="Status"
           allLabel="Any"
           value={value.status === "any" ? undefined : value.status}
-          options={STATUS_OPTIONS}
+          options={options.statusOptions ?? DEAL_STATUS_OPTIONS}
           onChange={(status) => onChange(statusPatch(status))}
         />
       )}

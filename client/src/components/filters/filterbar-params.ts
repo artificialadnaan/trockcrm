@@ -13,7 +13,10 @@ export interface FilterBarValue {
   regionId?: string; // uuid | "__unassigned__"
   projectTypeId?: string;
   workflowRoute?: "normal" | "service";
-  status?: DealStatusFilter;
+  /** Domain status, surface-specific (deals: active|on_hold|inactive; leads: open|converted|disqualified).
+   *  The bar is multi-domain now, so this is a free string validated by each surface's adapter; "any"/
+   *  unset is the omitted/default state. */
+  status?: string;
   valueMin?: number;
   valueMax?: number;
   minAgeDays?: number;
@@ -147,9 +150,10 @@ export function deserializeFilters(params: URLSearchParams): FilterBarValue {
   if (workflowRoute === "normal" || workflowRoute === "service") value.workflowRoute = workflowRoute;
 
   const status = params.get("status");
-  // "any" is the omitted/default state, so it does not deserialize to a value (keeps serialize and
-  // deserialize symmetric and the value object canonical).
-  if (status === "active" || status === "on_hold" || status === "inactive") {
+  // Multi-domain status: accept any value verbatim (deal or lead status); the per-surface adapter
+  // validates it. "any"/blank is the omitted/default state, so it does not deserialize to a value
+  // (keeps serialize/deserialize symmetric and the value object canonical).
+  if (status && status !== "any") {
     value.status = status;
   }
 
