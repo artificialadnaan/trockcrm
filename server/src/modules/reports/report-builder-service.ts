@@ -60,6 +60,7 @@ export type ReportDateField =
   | "updated_at"
   | "expected_close_date"
   | "actual_close_date"
+  | "won_closed_date"
   | "contract_signed_at"
   | "contract_signed_date";
 
@@ -109,6 +110,10 @@ const DATE_FIELDS: Record<ReportDateField, ReturnType<typeof sql>> = {
   updated_at: sql`d.updated_at::date`,
   expected_close_date: sql`d.expected_close_date`,
   actual_close_date: sql`d.actual_close_date`,
+  // The canonical Won close-date axis (deals.won_closed_date, the protected
+  // 191 / $9,778,045.90 basis). A "Closed Won" preset must window on this, not
+  // actual_close_date, to reconcile with the dashboard Won card / reports.
+  won_closed_date: sql`d.won_closed_date`,
   contract_signed_at: sql`COALESCE(d.contract_signed_at::date, d.contract_signed_date)`,
   contract_signed_date: sql`COALESCE(d.contract_signed_at::date, d.contract_signed_date)`,
 };
