@@ -1,6 +1,7 @@
 import { PGlite } from "@electric-sql/pglite";
-import { and, sql, type SQL } from "drizzle-orm";
+import { and, inArray, sql, type SQL } from "drizzle-orm";
 import { PgDialect } from "drizzle-orm/pg-core";
+import { deals } from "@trock-crm/shared/schema";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import {
   buildDealFilterBarConditions,
@@ -60,16 +61,23 @@ beforeAll(async () => {
       on_hold_started_at timestamptz
     );
     INSERT INTO deals (id, stage_id, assigned_rep_id, region_id, project_type_id, workflow_route, is_active, on_hold, dd_estimate) VALUES
-      ('rep_a',      'open', 'rep-a', 'reg-a', 'pt-a', 'normal',  true,  false, 50000),
-      ('rep_b',      'open', 'rep-b', 'reg-b', 'pt-b', 'service', true,  false, 50000),
-      ('unassigned', 'open', NULL,    NULL,    NULL,   'normal',  true,  false, 50000),
-      ('onhold',     'open', 'rep-a', 'reg-a', 'pt-a', 'normal',  true,  true,  50000),
-      ('inactive',   'open', 'rep-a', 'reg-a', 'pt-a', 'normal',  false, false, 50000),
-      ('val_high',   'open', 'rep-a', 'reg-a', 'pt-a', 'normal',  true,  false, 900000);
-    -- date-axis rows (outcome dates); is_active mirrors real terminal rows
-    INSERT INTO deals (id, stage_id, won_closed_date, awarded_amount) VALUES
-      ('won_in',  'won', '2026-02-15', 500000),
-      ('won_out', 'won', '2026-05-15', 500000);
+      ('rep_a',           'open', 'rep-a', 'reg-a', 'pt-a', 'normal',  true,  false, 50000),
+      ('rep_b',           'open', 'rep-b', 'reg-b', 'pt-b', 'service', true,  false, 50000),
+      ('unassigned',      'open', NULL,    NULL,    NULL,   'normal',  true,  false, 50000),
+      ('onhold',          'open', 'rep-a', 'reg-a', 'pt-a', 'normal',  true,  true,  50000),
+      -- soft-deleted on-hold row: inactive AND on_hold. status=on_hold must EXCLUDE it
+      -- (would leak if the predicate regressed to just on_hold=true) — Codex #567.
+      ('onhold_inactive', 'open', 'rep-a', 'reg-a', 'pt-a', 'normal',  false, true,  50000),
+      ('inactive',        'open', 'rep-a', 'reg-a', 'pt-a', 'normal',  false, false, 50000),
+      ('val_high',        'open', 'rep-a', 'reg-a', 'pt-a', 'normal',  true,  false, 900000);
+    -- date-axis rows (outcome dates); is_active mirrors real terminal rows.
+    -- won_in: LOW open best-estimate (dd 10000) but HIGH awarded (500000) — so a value filter only
+    --   includes it if Won awarded-first classification is actually applied (Codex #567).
+    -- won_out: won OUT of window but CREATED IN window — proves won_closed_date governs, not
+    --   created_at (would pass spuriously if created_at were left outside the window) — Codex #567.
+    INSERT INTO deals (id, stage_id, won_closed_date, dd_estimate, awarded_amount, created_at) VALUES
+      ('won_in',  'won', '2026-02-15', 10000, 500000, '2025-01-01T00:00:00Z'),
+      ('won_out', 'won', '2026-05-15', NULL,  500000, '2026-02-10T00:00:00Z');
     INSERT INTO deals (id, stage_id, is_active, lost_at) VALUES
       ('lost_in',  'lost', false, '2026-02-10T12:00:00Z'),
       ('lost_out', 'lost', false, '2026-05-10T12:00:00Z');
@@ -137,8 +145,11 @@ describe("FilterBar backend dimensions — real SQL via the #546 predicate regis
       expect(ids).not.toContain("onhold");
       expect(ids).not.toContain("inactive");
     });
-    it("on_hold = active AND on_hold (a soft-deleted/inactive on-hold row does NOT leak in)", async () => {
-      expect(await matched({ status: "on_hold" })).toEqual(["onhold"]);
+    it("on_hold = active AND on_hold; a soft-deleted (inactive) on-hold row is EXCLUDED (Codex #567)", async () => {
+      const ids = await matched({ status: "on_hold" });
+      expect(ids).toContain("onhold"); // active + on_hold
+      expect(ids).not.toContain("onhold_inactive"); // inactive + on_hold — must NOT leak (would, if predicate were just on_hold=true)
+      expect(ids).not.toContain("rep_a"); // active, not on_hold
     });
     it("inactive = is_active=false", async () => {
       const ids = await matched({ status: "inactive" });
@@ -158,11 +169,18 @@ describe("FilterBar backend dimensions — real SQL via the #546 predicate regis
   });
 
   describe("value range (stage-aware effective value, on-hold-zeroed)", () => {
-    it("valueMin filters on the effective value (Won uses awarded-first; open uses best-estimate)", async () => {
+    it("Won deals are valued awarded-first, NOT the open best-estimate — classification actually matters (Codex #567)", async () => {
+      // won_in: open best-estimate = dd 10000, awarded = 500000. Only awarded-first puts it >= 100000.
+      expect(await matched({ valueMin: 100000 }, WON_LOST_CTX)).toContain("won_in");
+      // Drop Won classification (no wonStageIds): the SAME row falls to the open best-estimate (10000)
+      // and is EXCLUDED — proving the inclusion above depends on awarded-first, not a coincidental
+      // awarded fallback shared by both chains.
+      expect(await matched({ valueMin: 100000 }, {})).not.toContain("won_in");
+    });
+    it("open deals are valued on the best-estimate chain", async () => {
       const ids = await matched({ valueMin: 100000 }, WON_LOST_CTX);
-      expect(ids).toContain("val_high"); // 900000
-      expect(ids).toContain("won_in"); // awarded 500000
-      expect(ids).not.toContain("rep_b"); // 50000
+      expect(ids).toContain("val_high"); // dd 900000
+      expect(ids).not.toContain("rep_b"); // dd 50000
     });
     it("on-hold deals are zeroed, so a positive valueMin excludes them", async () => {
       expect(await matched({ valueMin: 1 }, WON_LOST_CTX)).not.toContain("onhold");
@@ -222,10 +240,16 @@ describe("FilterBar backend dimensions — real SQL via the #546 predicate regis
   });
 });
 
-describe("stageIds (applied in getDeals via inArray — verified by construction)", () => {
-  it("an explicit stage set returns exactly those stages", async () => {
+describe("stageIds", () => {
+  it("drives the production inArray(deals.stageId, ...) construct getDeals uses — not a hand-written SQL literal (Codex #567)", async () => {
+    // getDeals applies the stage filter via inArray(deals.stageId, filters.stageIds). Render THAT
+    // drizzle construct (real column + operator) and run it, so a schema/operator break is caught.
+    // The getDeals WIRING (that the request's stageIds are read + pushed) is guarded separately by
+    // server/tests/modules/deals/filterbar-getdeals.test.ts (asserts the emitted SQL contains stage_id).
+    const { sql: text, params } = dialect.sqlToQuery(inArray(deals.stageId, ["won", "lost"]));
     const { rows } = await db.query<{ id: string }>(
-      `SELECT id FROM deals WHERE stage_id IN ('won','lost') ORDER BY id`
+      `SELECT id FROM deals WHERE ${text} ORDER BY id`,
+      params as unknown[]
     );
     expect(rows.map((r) => r.id)).toEqual(["lost_in", "lost_out", "won_in", "won_out"]);
   });
