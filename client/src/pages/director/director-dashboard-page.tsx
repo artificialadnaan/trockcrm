@@ -929,7 +929,7 @@ export function DirectorDashboardPage() {
 
           <div className="divide-y divide-gray-100">
             {atRiskDeals.length > 0 ? (
-              atRiskDeals.slice(0, 6).map((deal) => {
+              atRiskDeals.map((deal) => {
                 const overSla = Math.max(0, deal.daysInStage - (deal.staleThresholdDays ?? deal.daysInStage));
                 const repName = deal.repName;
                 const workflowRoute = deal.workflowRoute ?? "normal";
