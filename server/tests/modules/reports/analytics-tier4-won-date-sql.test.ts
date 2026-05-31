@@ -42,7 +42,11 @@ describe("analytics-tier4 Won-date basis wired into the live queries", () => {
     expect(text).toContain("extract(year from d.won_closed_date)");
     expect(text).toContain("extract(quarter from d.won_closed_date)");
     expect(text).toContain("d.won_closed_date is not null");
+    // Date-typed window bounds (NOT buildWhere's AT-TIME-ZONE-'UTC' timestamptz bounds), so the
+    // comparison is session-time-zone-independent. The `<=` upper bound only exists in the
+    // date-typed form (buildWhere used `<`).
     expect(text).toContain("d.won_closed_date >=");
+    expect(text).toContain("d.won_closed_date <=");
     // The old contaminated bases are gone.
     expect(text).not.toContain("coalesce(d.actual_close_date, d.lost_at, d.updated_at)");
     expect(text).not.toContain("coalesce(d.actual_close_date, d.updated_at) at time zone");
@@ -54,9 +58,11 @@ describe("analytics-tier4 Won-date basis wired into the live queries", () => {
     await getExecutiveTrendsReport(db, RANGE);
     const text = compact(db.execute.mock.calls.map(([q]: [unknown]) => extractSqlText(q)).join("\n"));
 
-    // won_fallback now buckets/windows by the canonical won date (+ usable-won-date guard).
+    // won_fallback now buckets/windows by the canonical won date (+ usable-won-date guard), with
+    // date-typed bounds (session-TZ-independent; `<=` upper bound only exists in the fixed form).
     expect(text).toContain("to_char(d.won_closed_date, 'yyyy-mm')");
     expect(text).toContain("d.won_closed_date is not null");
+    expect(text).toContain("d.won_closed_date <=");
     // The old won_fallback basis is gone...
     expect(text).not.toContain("coalesce((d.actual_close_date at time zone 'utc'), d.updated_at)");
     // ...but the lost_fallback basis (lost_at) is intentionally preserved.

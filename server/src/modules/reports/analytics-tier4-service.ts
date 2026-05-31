@@ -153,6 +153,21 @@ function buildWhere(filters: ReturnType<typeof normalizeFilters>, dateColumn: SQ
   `;
 }
 
+// Won-period window on the canonical deals.won_closed_date. Uses DATE-typed bounds (no
+// AT TIME ZONE) so the comparison is session-time-zone-independent — matching the other
+// won_closed_date report sites and the dashboard getWonCloseSummary. Routing the date column
+// through buildWhere instead would compare it to `AT TIME ZONE 'UTC'` timestamptz bounds, which
+// for a non-UTC DB session (office_dallas runs Central) shifts boundary dates and can drop/move
+// a win whose canonical won date equals the period edge.
+function buildWonClosedWhere(filters: ReturnType<typeof normalizeFilters>) {
+  const won = aliasedWonHsClosedWonDateSql("d");
+  return sql`
+    ${buildScopeWhere(filters)}
+    AND ${won} >= ${filters.from}::date
+    AND ${won} <= ${filters.to}::date
+  `;
+}
+
 function buildScopeWhere(filters: ReturnType<typeof normalizeFilters>) {
   const ownerFilter = filters.ownerIds.length
     ? sql`AND d.assigned_rep_id IN (${sql.join(filters.ownerIds.map((id) => sql`${id}::uuid`), sql`, `)})`
@@ -258,7 +273,7 @@ export async function getMarketMixReport(
     // Quarterly Won value is won-only (psc.slug IN WON below), so window + bucket by the canonical
     // deals.won_closed_date. The old COALESCE(actual_close_date, lost_at, updated_at) counted
     // reseed-contaminated / touched-in-period wins into the wrong quarter.
-    const outcomeWhere = buildWhere(filters, aliasedWonHsClosedWonDateSql("d"));
+    const outcomeWhere = buildWonClosedWhere(filters);
     const verticalExpr = sql`COALESCE(NULLIF(c.industry::text, ''), NULLIF(d.project_type, ''), 'Uncategorized')`;
     const regionExpr = sql`COALESCE(NULLIF(c.region, ''), NULLIF(rc.name, ''), NULLIF(p.city, ''), NULLIF(p.state, ''), NULLIF(d.property_city, ''), NULLIF(d.property_state, ''), 'Uncategorized')`;
     const propertyTypeExpr = sql`COALESCE(NULLIF(p.property_type, ''), NULLIF(p.type::text, ''), 'Uncategorized')`;
@@ -667,7 +682,7 @@ export async function getExecutiveTrendsReport(
           FROM deals d
           LEFT JOIN users u ON u.id = d.assigned_rep_id
           JOIN pipeline_stage_config psc ON psc.id = d.stage_id
-          WHERE ${buildWhere(filters, aliasedWonHsClosedWonDateSql("d"))}
+          WHERE ${buildWonClosedWhere(filters)}
             AND psc.slug IN (${sqlStringList(WON_STAGE_SLUGS)})
             AND ${aliasedHasUsableWonDateSql("d")}
             AND NOT EXISTS (
