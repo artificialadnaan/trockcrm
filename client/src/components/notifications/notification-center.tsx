@@ -3,6 +3,7 @@ import { useNavigate } from "react-router-dom";
 import { Bell, CheckCheck } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
+import { cn } from "@/lib/utils";
 import {
   Popover,
   PopoverContent,
@@ -31,7 +32,13 @@ function timeAgo(dateStr: string): string {
   return `${Math.floor(seconds / 86400)}d ago`;
 }
 
-export function NotificationCenter() {
+export function NotificationCenter({
+  triggerClassName,
+  triggerAriaLabel,
+}: {
+  triggerClassName?: string;
+  triggerAriaLabel?: string;
+}) {
   const navigate = useNavigate();
   const [open, setOpen] = useState(false);
   const { unreadCount, markAsRead, markAllAsRead } = useNotificationStream(open);
@@ -57,7 +64,12 @@ export function NotificationCenter() {
     <Popover open={open} onOpenChange={setOpen}>
       <PopoverTrigger
         render={
-          <Button variant="ghost" size="icon" className="relative">
+          <Button
+            variant="ghost"
+            size="icon"
+            aria-label={triggerAriaLabel}
+            className={cn("relative", triggerClassName)}
+          >
             <Bell className="h-4 w-4" />
             {unreadCount > 0 && (
               <Badge

@@ -81,6 +81,11 @@ vi.mock("@/components/ui/button", () => ({
 vi.mock("@/components/ui/badge", () => ({
   Badge: ({ children, className }: { children: ReactNode; className?: string }) => <span className={className}>{children}</span>,
 }));
+vi.mock("@/components/notifications/notification-center", () => ({
+  NotificationCenter: ({ triggerClassName }: { triggerClassName?: string }) => (
+    <button type="button" aria-label="Notifications" className={triggerClassName} data-testid="notification-center" />
+  ),
+}));
 
 const dashboardData = {
   activeLeads: { count: 4 },
@@ -367,6 +372,24 @@ describe("RepDashboardPage", () => {
     expect(html).toContain("Open my pipeline");
     expect(html).toContain("href=\"/reports/performance\"");
     expect(html).toContain("href=\"/deals?filter=active_pipeline&amp;period=ytd&amp;scope=mine\"");
+  });
+
+  it("wires the charts toolbar control to the reports gallery instead of a dead button", () => {
+    const html = renderDashboard();
+
+    // The header chart icon now navigates to the real /reports gallery (a Link),
+    // not an inert button with a lying aria-label.
+    expect(html).toContain('href="/reports"');
+    expect(html).toContain('aria-label="View reports"');
+    expect(html).not.toContain('aria-label="Open charts"');
+  });
+
+  it("replaces the inert notifications bell with the real NotificationCenter", () => {
+    const html = renderDashboard();
+
+    expect(html).toContain('data-testid="notification-center"');
+    // The old non-functional bell button (and its fake overdue dot) is gone.
+    expect(html).not.toContain('aria-label="Open notifications"');
   });
 
   it("TimeRangeTabs default to YTD", () => {
