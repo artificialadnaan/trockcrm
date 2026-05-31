@@ -169,6 +169,10 @@ export interface Deal {
   lostAt: string | null;
   expectedCloseDate: string | null;
   actualCloseDate: string | null;
+  // Outcome-aware display date (Won->signed, Lost->lost, open->stage-entry) selected server-side by
+  // P0's dealDisplayDateExpr so the date a surface SHOWS matches the date it FILTERS on. Absent until
+  // the platform date audit wires the SELECT; getDealDisplayDate falls back to the close-date chain.
+  displayDate?: string | null;
   onHold?: boolean;
   onHoldStartedAt?: string | null;
   onHoldAccumulatedSeconds?: number | null;
@@ -302,6 +306,17 @@ export interface DealFilters {
   createdTo?: string;
   updatedFrom?: string;
   updatedTo?: string;
+  // Shared FilterBar (#546) dimensions. dateFrom/dateTo are the outcome-aware window (one window,
+  // three axes server-side); status owns is_active/on_hold (do NOT also send isActive); the rest are
+  // additive predicates BLUE adds to getDeals. Absent key = no filter.
+  dateFrom?: string;
+  dateTo?: string;
+  status?: "active" | "on_hold" | "inactive" | "any";
+  workflowRoute?: "normal" | "service";
+  valueMin?: number;
+  valueMax?: number;
+  minAgeDays?: number;
+  maxAgeDays?: number;
   sortBy?: string;
   sortDir?: "asc" | "desc";
   page?: number;
@@ -410,6 +425,51 @@ export function normalizeDealBoardResponse(result: DealBoardApiResponse): DealBo
   };
 }
 
+/**
+ * DealFilters -> GET /api/deals query string. Pure (no hook state) so it is unit-testable. For
+ * legacy callers (no FilterBar dimensions set) the output is byte-identical to the prior inline
+ * serialization. New FilterBar (#546) params (dateFrom/dateTo/status/workflowRoute/value/age) are
+ * appended only when set; `status` (when not "any") suppresses the legacy `isActive` per contract
+ * §5 — Status owns is_active/on_hold, so we send one or the other, never both.
+ */
+export function buildDealsQueryParams(filters: DealFilters): URLSearchParams {
+  const params = new URLSearchParams();
+  if (filters.search) params.set("search", filters.search);
+  if (filters.stageIds?.length) params.set("stageIds", filters.stageIds.join(","));
+  if (filters.inactiveStageIds?.length) params.set("inactiveStageIds", filters.inactiveStageIds.join(","));
+  if (filters.assignedRepId) params.set("assignedRepId", filters.assignedRepId);
+  if (filters.projectTypeId) params.set("projectTypeId", filters.projectTypeId);
+  if (filters.regionId) params.set("regionId", filters.regionId);
+  if (filters.source) params.set("source", filters.source);
+  if (filters.contractSignedFrom) params.set("contractSignedFrom", filters.contractSignedFrom);
+  if (filters.contractSignedTo) params.set("contractSignedTo", filters.contractSignedTo);
+  if (filters.wonClosedFrom) params.set("wonClosedFrom", filters.wonClosedFrom);
+  if (filters.wonClosedTo) params.set("wonClosedTo", filters.wonClosedTo);
+  if (filters.estimateSentFrom) params.set("estimateSentFrom", filters.estimateSentFrom);
+  if (filters.estimateSentTo) params.set("estimateSentTo", filters.estimateSentTo);
+  if (filters.createdFrom) params.set("createdFrom", filters.createdFrom);
+  if (filters.createdTo) params.set("createdTo", filters.createdTo);
+  if (filters.updatedFrom) params.set("updatedFrom", filters.updatedFrom);
+  if (filters.updatedTo) params.set("updatedTo", filters.updatedTo);
+  const hasStatus = filters.status !== undefined && filters.status !== "any";
+  if (hasStatus) params.set("status", filters.status as string);
+  if (filters.isActive !== undefined && !hasStatus) params.set("isActive", String(filters.isActive));
+  if (filters.sortBy) params.set("sortBy", filters.sortBy);
+  if (filters.sortDir) params.set("sortDir", filters.sortDir);
+  if (filters.page) params.set("page", String(filters.page));
+  if (filters.limit) params.set("limit", String(filters.limit));
+  if (filters.scope) params.set("scope", filters.scope);
+  // FilterBar (#546) dimensions — appended; absent unless set, so legacy callers are unaffected.
+  if (filters.dateFrom) params.set("dateFrom", filters.dateFrom);
+  if (filters.dateTo) params.set("dateTo", filters.dateTo);
+  if (filters.workflowRoute) params.set("workflowRoute", filters.workflowRoute);
+  if (filters.valueMin !== undefined) params.set("valueMin", String(filters.valueMin));
+  if (filters.valueMax !== undefined) params.set("valueMax", String(filters.valueMax));
+  if (filters.minAgeDays !== undefined) params.set("minAgeDays", String(filters.minAgeDays));
+  if (filters.maxAgeDays !== undefined) params.set("maxAgeDays", String(filters.maxAgeDays));
+  return params;
+}
+
 export function useDeals(filters: DealFilters = {}, options: { enabled?: boolean } = {}) {
   const [deals, setDeals] = useState<Deal[]>([]);
   const [pagination, setPagination] = useState<Pagination>({ page: 1, limit: 50, total: 0, totalPages: 0 });
@@ -430,32 +490,7 @@ export function useDeals(filters: DealFilters = {}, options: { enabled?: boolean
     setLoading(true);
     setError(null);
     try {
-      const params = new URLSearchParams();
-      if (filters.search) params.set("search", filters.search);
-      if (filters.stageIds?.length) params.set("stageIds", filters.stageIds.join(","));
-      if (filters.inactiveStageIds?.length) params.set("inactiveStageIds", filters.inactiveStageIds.join(","));
-      if (filters.assignedRepId) params.set("assignedRepId", filters.assignedRepId);
-      if (filters.projectTypeId) params.set("projectTypeId", filters.projectTypeId);
-      if (filters.regionId) params.set("regionId", filters.regionId);
-      if (filters.source) params.set("source", filters.source);
-      if (filters.contractSignedFrom) params.set("contractSignedFrom", filters.contractSignedFrom);
-      if (filters.contractSignedTo) params.set("contractSignedTo", filters.contractSignedTo);
-      if (filters.wonClosedFrom) params.set("wonClosedFrom", filters.wonClosedFrom);
-      if (filters.wonClosedTo) params.set("wonClosedTo", filters.wonClosedTo);
-      if (filters.estimateSentFrom) params.set("estimateSentFrom", filters.estimateSentFrom);
-      if (filters.estimateSentTo) params.set("estimateSentTo", filters.estimateSentTo);
-      if (filters.createdFrom) params.set("createdFrom", filters.createdFrom);
-      if (filters.createdTo) params.set("createdTo", filters.createdTo);
-      if (filters.updatedFrom) params.set("updatedFrom", filters.updatedFrom);
-      if (filters.updatedTo) params.set("updatedTo", filters.updatedTo);
-      if (filters.isActive !== undefined) params.set("isActive", String(filters.isActive));
-      if (filters.sortBy) params.set("sortBy", filters.sortBy);
-      if (filters.sortDir) params.set("sortDir", filters.sortDir);
-      if (filters.page) params.set("page", String(filters.page));
-      if (filters.limit) params.set("limit", String(filters.limit));
-      if (filters.scope) params.set("scope", filters.scope);
-
-      const qs = params.toString();
+      const qs = buildDealsQueryParams(filters).toString();
       const data = await api<{ deals: Deal[]; pagination: Pagination }>(
         `/deals${qs ? `?${qs}` : ""}`
       );
@@ -488,6 +523,14 @@ export function useDeals(filters: DealFilters = {}, options: { enabled?: boolean
     filters.createdTo,
     filters.updatedFrom,
     filters.updatedTo,
+    filters.dateFrom,
+    filters.dateTo,
+    filters.status,
+    filters.workflowRoute,
+    filters.valueMin,
+    filters.valueMax,
+    filters.minAgeDays,
+    filters.maxAgeDays,
     filters.isActive,
     filters.sortBy,
     filters.sortDir,
@@ -585,6 +628,7 @@ export async function changeDealStage(
     lostReasonId?: string;
     lostNotes?: string;
     lostCompetitor?: string;
+    expectedCloseDate?: string;
   }
 ) {
   return api<{ deal: Deal; eventsEmitted: string[] }>(`/deals/${dealId}/stage`, {

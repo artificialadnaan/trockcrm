@@ -29,6 +29,13 @@ import { AlertTriangle, ArrowRight, ArrowLeft, Shield, Loader2 } from "lucide-re
 import { getDealStageMetadata } from "@/hooks/use-deals";
 import { toCanonicalDealStageSlug } from "@trock-crm/shared/types";
 
+// "Today" in the business timezone (America/Chicago), as YYYY-MM-DD. The expected-close-date cutoff
+// uses this instead of a UTC date so a rep entering CT-today late in the evening (when UTC has already
+// rolled to tomorrow) isn't wrongly blocked -- and so the client cutoff matches the server stage-gate's
+// CT-anchored usable-date check exactly.
+const businessTodayDateStr = (): string =>
+  new Date().toLocaleDateString("en-CA", { timeZone: "America/Chicago" });
+
 interface StageRequirementState {
   fields: string[];
   documents: string[];
@@ -76,6 +83,63 @@ export function getStageRequirementAction(
   }
 
   return null;
+}
+
+type StageGateMissing =
+  | { fields?: string[]; documents?: string[]; approvals?: string[] }
+  | null
+  | undefined;
+
+export interface InlineCloseDateGateInput {
+  missingRequirements: StageGateMissing;
+  isBackwardMove?: boolean | null;
+  currentStageSlug?: string | null;
+  /** preflight.bidBoardLocked -- a read-only Bid Board mirror; the route forces allowed=false for it. */
+  bidBoardLocked?: boolean | null;
+}
+
+/**
+ * True when the ONLY thing blocking the gate is a missing `expectedCloseDate` field that the inline
+ * date prompt can actually clear -- no other missing fields/documents/approvals, not a backward move,
+ * not from `close_out`, and not a Bid Board read-only lock. In that case the inline date alone can
+ * clear the gate (the server re-validates with the pending date), so the dialog must not redirect to
+ * the overview, must not demand a director override reason, and may unblock the submit button.
+ *
+ * The non-field exclusions are load-bearing -- each is a block the inline date does NOT clear, and the
+ * server would reject the submit if we unblocked it here:
+ *   - backward move: override is for the direction, not the field.
+ *   - `close_out`: the close-out-checklist rule (validateStageGate Rule 2) can require an override on a
+ *     `close_out -> won` move WITHOUT any `missingRequirements` footprint -> a 400 OVERRIDE_REQUIRED.
+ *   - `bidBoardLocked`: the preflight route forces `allowed=false` for a read-only Bid Board mirror
+ *     regardless of `missingRequirements` -> the server rejects the stage change as read-only.
+ */
+export function isExpectedCloseDateSoleGateBlocker(gate: InlineCloseDateGateInput): boolean {
+  const fields = gate.missingRequirements?.fields ?? [];
+  return (
+    fields.length === 1 &&
+    fields.includes("expectedCloseDate") &&
+    (gate.missingRequirements?.documents?.length ?? 0) === 0 &&
+    (gate.missingRequirements?.approvals?.length ?? 0) === 0 &&
+    !gate.isBackwardMove &&
+    gate.currentStageSlug !== "close_out" &&
+    !gate.bidBoardLocked
+  );
+}
+
+/**
+ * True when the inline expected-close-date alone resolves the gate: it's the sole (clearable) blocker
+ * AND the rep has supplied a usable (today-or-future) value. When true the POST re-validates with the
+ * pending date and the server no longer requires an override -- so the override-reason requirement
+ * (computed by the preflight before this inline value existed) must be skipped, and the footer button
+ * unblocked.
+ */
+export function isGateResolvedByInlineCloseDate(
+  gate: InlineCloseDateGateInput,
+  expectedCloseDate: string,
+  today: string
+): boolean {
+  const dateUsable = expectedCloseDate !== "" && expectedCloseDate >= today;
+  return isExpectedCloseDateSoleGateBlocker(gate) && dateUsable;
 }
 
 interface StageChangeDialogProps {
@@ -136,6 +200,25 @@ export function StageChangeDialog({
   const [lostReasonId, setLostReasonId] = useState("");
   const [lostNotes, setLostNotes] = useState("");
   const [lostCompetitor, setLostCompetitor] = useState("");
+  const [expectedCloseDate, setExpectedCloseDate] = useState("");
+
+  // Derived gate state -- the single source of truth for both submit-time validation and the footer
+  // button. Inline expected-close-date prompt: when the only thing the gate is missing is
+  // expectedCloseDate, let the rep set a usable (today-or-future) date here and advance in one action.
+  const todayDateStr = businessTodayDateStr();
+  const needsExpectedCloseDate = (preflight?.missingRequirements?.fields ?? []).includes("expectedCloseDate");
+  const inlineCloseDateGate: InlineCloseDateGateInput = {
+    missingRequirements: preflight?.missingRequirements,
+    isBackwardMove: preflight?.isBackwardMove,
+    currentStageSlug: preflight?.currentStage?.slug,
+    bidBoardLocked: preflight?.bidBoardLocked,
+  };
+  const onlyExpectedCloseDateMissing = isExpectedCloseDateSoleGateBlocker(inlineCloseDateGate);
+  const unblockedByExpectedCloseDate = isGateResolvedByInlineCloseDate(
+    inlineCloseDateGate,
+    expectedCloseDate,
+    todayDateStr
+  );
 
   // Run preflight check on mount
   useEffect(() => {
@@ -171,18 +254,36 @@ export function StageChangeDialog({
         }
       }
 
-      // Validate override reason
-      if (preflight.requiresOverride && !overrideReason.trim()) {
+      // Validate override reason -- but skip it when the inline expected-close-date alone resolves the
+      // gate: the POST re-validates with that pending date and the server no longer requires an override
+      // (preflight.requiresOverride was computed before this inline value existed).
+      if (preflight.requiresOverride && !unblockedByExpectedCloseDate && !overrideReason.trim()) {
         setError("Please provide a reason for the override.");
         setSubmitting(false);
         return;
       }
 
+      // Require a usable (today-or-future) expected close date when the gate needs it.
+      if (needsExpectedCloseDate) {
+        if (!expectedCloseDate) {
+          setError("Please set an expected close date to advance.");
+          setSubmitting(false);
+          return;
+        }
+        if (expectedCloseDate < todayDateStr) {
+          setError("Expected close date must be today or later.");
+          setSubmitting(false);
+          return;
+        }
+      }
+
       await changeDealStage(deal.id, targetStageId, {
-        overrideReason: preflight.requiresOverride ? overrideReason : undefined,
+        overrideReason:
+          preflight.requiresOverride && !unblockedByExpectedCloseDate ? overrideReason : undefined,
         lostReasonId: isLostTransition ? lostReasonId : undefined,
         lostNotes: isLostTransition ? lostNotes : undefined,
         lostCompetitor: isLostTransition ? lostCompetitor || undefined : undefined,
+        expectedCloseDate: needsExpectedCloseDate ? expectedCloseDate : undefined,
       });
 
       onSuccess();
@@ -228,7 +329,10 @@ export function StageChangeDialog({
         );
 
   const handleOpenChange = shouldForceCompletion ? () => {} : onOpenChange;
-  const requirementAction = getStageRequirementAction(deal.id, preflight?.missingRequirements, officeId);
+  const effectiveBlocked = isBlocked && !unblockedByExpectedCloseDate;
+  const requirementAction = onlyExpectedCloseDateMissing
+    ? null
+    : getStageRequirementAction(deal.id, preflight?.missingRequirements, officeId);
 
   return (
     <Dialog open={open} onOpenChange={handleOpenChange}>
@@ -318,6 +422,28 @@ export function StageChangeDialog({
 
             {/* Gate Checklist */}
             <StageGateChecklist missingRequirements={preflight.missingRequirements} />
+
+            {/* Inline Expected Close Date prompt (set + advance in one action). Hidden on a read-only Bid
+                Board mirror: the stage move is rejected server-side regardless, so the date is not an
+                advance path there. */}
+            {needsExpectedCloseDate && !isBidBoardLocked && (
+              <div className="space-y-2 border-t pt-3">
+                <Label htmlFor="expectedCloseDate">
+                  Expected Close Date <span className="text-red-500">*</span>
+                </Label>
+                <p className="text-xs text-muted-foreground">
+                  Set a target close date (today or later) to advance into Estimating -- this powers the
+                  pipeline forecast.
+                </p>
+                <Input
+                  id="expectedCloseDate"
+                  type="date"
+                  min={todayDateStr}
+                  value={expectedCloseDate}
+                  onChange={(e) => setExpectedCloseDate(e.target.value)}
+                />
+              </div>
+            )}
 
             {/* Override Reason (for directors) */}
             {preflight.requiresOverride && (
@@ -417,11 +543,11 @@ export function StageChangeDialog({
           )}
           <Button
             onClick={handleSubmit}
-            disabled={isBlocked || preflightLoading || submitting}
+            disabled={effectiveBlocked || preflightLoading || submitting}
             variant={isClosedLost ? "destructive" : "default"}
           >
             {submitting && <Loader2 className="h-4 w-4 mr-2 animate-spin" />}
-            {isBlocked
+            {effectiveBlocked
               ? isBidBoardLocked
                 ? "Read-only in CRM"
                 : "Blocked"

@@ -59,6 +59,12 @@ import {
   dealAwardedFirstWithFallbackSql,
   dealBestEstimateSql,
 } from "../shared/deal-value-sql.js";
+import {
+  aliasedDealDateScopeColumns,
+  buildStageEntryDateWindow,
+  dealDateScopeColumns,
+  dealDisplayDateExpr,
+} from "../shared/deal-date-scope.js";
 import { buildDealSearchCondition } from "../search/unified-search.js";
 import { isStageEntryDateFilterEnabled } from "../../config/feature-flags.js";
 import {
@@ -1595,6 +1601,25 @@ export async function getDeals(
       ...getTableColumns(deals),
       companyName: companies.name,
       stageSlug: pipelineStageConfig.slug,
+      // Outcome-aware display date (filter-axis == display-axis): when an
+      // outcome dimension is in play we've already resolved the Won/Lost stage
+      // sets (needsStageClassification above), so each row's displayed date is
+      // the SAME axis the date filter windows on — Won -> won_closed_date,
+      // Lost -> lost_at, open -> stage_entered_at — built from the IDENTICAL
+      // classification, so the displayed and filtered axes cannot diverge.
+      // When no outcome dimension is set the ids are empty, so we emit NULL
+      // rather than a misclassifying CASE (every row would resolve to the open
+      // axis); the client (#554 getDealDisplayDate) then falls back to its
+      // close-date chain. This also keeps a plain list free of the extra
+      // listDealStages() resolution cost.
+      displayDate: needsStageClassification
+        ? dealDisplayDateExpr({
+            wonStageIds,
+            lostStageIds,
+            stageEntryDateEnabled,
+            columns: dealDateScopeColumns(),
+          })
+        : sql<string | null>`NULL`,
     })
     .from(deals)
     .leftJoin(companies, eq(companies.id, deals.companyId))
@@ -2432,6 +2457,11 @@ export async function getDealsForPipeline(
   const wonSignedDateUntil = toIsoDateOnly(terminalFilters.won.until);
   const wonPeriodFrom = toIsoDateOnly(wonPeriodRange.from);
   const wonPeriodTo = toIsoDateOnly(wonPeriodRange.to);
+  // D-11: gates whether a board-wide dashboard period also bounds the OPEN columns
+  // on the entered-current-stage axis (see the open ELSE branch below). OFF in prod
+  // until stage_entered_at is trusted everywhere (post-#535); OFF => open columns
+  // stay current-state and the drill-down labels them "(now)" honestly.
+  const stageEntryDateEnabled = isStageEntryDateFilterEnabled();
   // The won-date guard below reads the app-owned deals.won_closed_date column via
   // aliasedWonHsClosedWonDateSql (a compact IS NOT NULL / >= / <= predicate per
   // site), NOT a try_parse_hs_close_date call. Each site still builds its own
@@ -2554,6 +2584,22 @@ export async function getDealsForPipeline(
     } else {
       stageConditions.push(eq(deals.isActive, true), eq(deals.stageId, stage.id));
       stageConditions.push(nonTerminalMirroredStageCondition());
+      // D-11 / canonical date model (§6 Phase 4): a board-wide dashboard period
+      // (won_period_from/to) must window the OPEN columns on the entered-current-
+      // stage axis, not be a no-op ("Open-stage deals for MTD" showing every open
+      // deal). Flag-gated on stageEntryDateEnabled (reliable stage_entered_at);
+      // when OFF the open columns stay current-state (byte-identical SQL). Mirrors
+      // deal-date-scope's open axis + window convention (>= from::date,
+      // < to::date + 1 day, via the shared buildStageEntryDateWindow). The main
+      // kanban sends no period (won_all_time) so this only affects the dashboard
+      // drill-down. Won/Lost columns are unaffected.
+      if (stageEntryDateEnabled) {
+        const openWindow = buildStageEntryDateWindow(
+          { from: wonPeriodFrom ?? undefined, to: wonPeriodTo ?? undefined },
+          aliasedDealDateScopeColumns("deals")
+        );
+        if (openWindow) stageConditions.push(openWindow);
+      }
     }
     if (isEstimateSentStage) {
       // Estimate Sent has its own column date window. Keep that filter local to

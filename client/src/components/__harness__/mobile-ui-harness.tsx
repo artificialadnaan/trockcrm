@@ -1,11 +1,16 @@
 import {
+  BarChart3,
+  Bell,
   Camera,
   CheckSquare,
   LayoutDashboard,
   Kanban,
+  RefreshCw,
   Ticket,
+  User as UserIcon,
   Users,
 } from "lucide-react";
+import { Link } from "react-router-dom";
 import { MobileNavView } from "@/components/layout/mobile-nav";
 import { RepPerfCard, type RepPerfView } from "@/pages/director/director-dashboard-page";
 import { ScopeToggle } from "@/components/shared/scope-toggle";
@@ -175,6 +180,64 @@ export function MobileUiHarness() {
               />
               <span className="inline-flex min-h-[44px] items-center rounded-full bg-[#CC0000] px-4 py-2.5 text-sm font-black text-white">MTD</span>
               <span className="inline-flex min-h-[44px] items-center rounded-full bg-gray-200 px-4 py-2.5 text-sm font-black text-gray-600">QTD</span>
+            </div>
+          }
+        />
+      </Section>
+
+      <Section id="harness-toolbar-stubs" title="4 · Rep dashboard header — dead controls fixed">
+        <p className="text-xs text-slate-500">
+          The chart &amp; bell icons used to be inert buttons with lying{" "}
+          <code>aria-label</code>s. The chart icon now links to{" "}
+          <code>/reports</code>. The bell is <strong>removed</strong> — the
+          AppShell <code>Topbar</code> already mounts the canonical{" "}
+          <code>NotificationCenter</code> on every viewport, so a second one here
+          would be a redundant, divergent bell. Remaining controls stay ≥44px.
+        </p>
+        <BeforeAfter
+          before={
+            <div className="flex flex-wrap items-center gap-3 p-2">
+              <button
+                type="button"
+                aria-label="Open charts"
+                className="flex size-11 items-center justify-center rounded-full border border-slate-200 bg-white text-slate-600 md:size-10"
+              >
+                <BarChart3 className="h-4 w-4" />
+              </button>
+              <button
+                type="button"
+                aria-label="Open notifications"
+                className="relative flex size-11 items-center justify-center rounded-full border border-slate-200 bg-white text-slate-600 md:size-10"
+              >
+                <Bell className="h-4 w-4" />
+                <span className="absolute right-2 top-2 h-1.5 w-1.5 rounded-full bg-brand-red" />
+              </button>
+              <span className="text-[10px] font-bold uppercase text-red-600">inert · no onClick</span>
+            </div>
+          }
+          after={
+            <div className="flex flex-wrap items-center gap-3 p-2">
+              <Link
+                to="/reports"
+                aria-label="View reports"
+                className="flex size-11 items-center justify-center rounded-full border border-slate-200 bg-white text-slate-600 hover:bg-slate-50 md:size-10"
+              >
+                <BarChart3 className="h-4 w-4" />
+              </Link>
+              <button
+                type="button"
+                aria-label="Refresh dashboard"
+                className="flex size-11 items-center justify-center rounded-full border border-slate-200 bg-white text-slate-600 hover:bg-slate-50 md:size-10"
+              >
+                <RefreshCw className="h-4 w-4" />
+              </button>
+              <button
+                type="button"
+                aria-label="Open profile"
+                className="flex size-11 items-center justify-center rounded-full bg-brand-red text-white md:size-10"
+              >
+                <UserIcon className="h-4 w-4" />
+              </button>
             </div>
           }
         />

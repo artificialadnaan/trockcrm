@@ -14,7 +14,6 @@ import {
   AlertTriangle,
   ArrowUpRight,
   BarChart3,
-  Bell,
   ChevronRight,
   RefreshCw,
   User as UserIcon,
@@ -620,21 +619,16 @@ export function RepDashboardPage() {
         </div>
         <div className="flex flex-wrap items-center gap-3">
           <TimeRangeTabs value={period} onChange={setPeriod} />
-          <button
-            type="button"
-            aria-label="Open charts"
+          <Link
+            to="/reports"
+            aria-label="View reports"
             className="flex h-11 w-11 items-center justify-center rounded-full md:h-10 md:w-10 border border-slate-200 bg-white text-slate-600 hover:bg-slate-50"
           >
             <BarChart3 className="h-4 w-4" />
-          </button>
-          <button
-            type="button"
-            aria-label="Open notifications"
-            className="relative flex h-11 w-11 items-center justify-center rounded-full md:h-10 md:w-10 border border-slate-200 bg-white text-slate-600 hover:bg-slate-50"
-          >
-            <Bell className="h-4 w-4" />
-            {data.tasksToday.overdue > 0 ? <span className="absolute right-2 top-2 h-1.5 w-1.5 rounded-full bg-brand-red" /> : null}
-          </button>
+          </Link>
+          {/* No notifications bell here: AppShell's Topbar already mounts the
+              canonical <NotificationCenter/> on every viewport, so a second one
+              would be a redundant bell with divergent unread state. */}
           <button
             type="button"
             aria-label="Refresh dashboard"

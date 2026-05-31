@@ -157,6 +157,25 @@ export function buildDealOutcomeDateScope(
 }
 
 /**
+ * The OPEN-axis date window in isolation — bounds rows by the entered-current-stage
+ * date (columns.stageEntryDate) using the SAME canonical convention as
+ * {@link buildDealOutcomeDateScope}'s open branch (inclusive `>= from::date`,
+ * exclusive `< to::date + 1 day`). For surfaces that window a SINGLE open-stage
+ * population directly — e.g. the kanban board's open columns (D-11), which run one
+ * query per open stage and so cannot use the mixed Won/Lost/open classifier — while
+ * keeping the off-by-one boundary identical to the platform filter. Returns
+ * undefined when the window is empty (caller omits it).
+ */
+export function buildStageEntryDateWindow(
+  window: DealDateWindow,
+  columns: DealDateScopeColumns = dealDateScopeColumns()
+): SQL | undefined {
+  const from = window.from?.trim() || undefined;
+  const to = window.to?.trim() || undefined;
+  return dateWithinWindow(columns.stageEntryDate, from, to);
+}
+
+/**
  * The DISPLAYED date for a deal row, by outcome — the companion to
  * {@link buildDealOutcomeDateScope}. Returns ONE CASE expression giving each row
  * the date the UI should show for it:
