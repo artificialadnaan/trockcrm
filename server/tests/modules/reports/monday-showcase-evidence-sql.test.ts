@@ -1,0 +1,104 @@
+import { describe, expect, it } from "vitest";
+import {
+  buildWonEvidenceSql,
+  buildStageEntryEvidenceSql,
+  buildProjectionEvidenceSql,
+  buildLeadEvidenceSql,
+} from "../../../src/modules/reports/monday-showcase-service.js";
+import { SENT_STAGE_SLUGS, ESTIMATED_STAGE_SLUGS } from "../../../src/modules/reports/foundations.js";
+import { aliasedReportableDealFilterSql } from "../../../src/modules/shared/deal-value-sql.js";
+
+// Walk a drizzle SQL object to plain text (incl. raw chunks + param values) so we can assert the
+// evidence row-select queries reuse the EXACT canonical cohort predicates of their aggregates -- the
+// records behind a number must be the same set the number aggregates. No DB.
+function extractSqlText(value: unknown): string {
+  if (value == null) return "";
+  if (typeof value === "string") return value;
+  if (typeof value !== "object") return "";
+  const obj = value as Record<string, unknown>;
+  if (Array.isArray(obj.queryChunks)) return obj.queryChunks.map(extractSqlText).join(" ");
+  if ("value" in obj) {
+    const v = obj.value;
+    if (Array.isArray(v)) return v.map(extractSqlText).join(" ");
+    if (typeof v === "string") return v;
+    if (v != null) return String(v);
+  }
+  return "";
+}
+
+describe("Monday showcase EVIDENCE builders reuse the aggregate cohort predicates", () => {
+  it("won evidence: same predicate as getWonCloseSummary (close-date cohort, awarded-first $, on-hold/test filters)", () => {
+    const text = extractSqlText(buildWonEvidenceSql("2026-05-24", "2026-05-30"));
+    // close-date cohort axis (the protected 191/$9.78M basis)
+    expect(text).toContain("won_closed_date");
+    expect(text).toContain("2026-05-24");
+    expect(text).toContain("2026-05-30");
+    // awarded-first value basis (NOT best-estimate) -> awarded_amount appears first in the chain
+    expect(text.toLowerCase()).toContain("awarded_amount");
+    // on-hold zeroing + test-data exclusion (reportable filter)
+    expect(text).toContain("on_hold");
+    expect(text).toContain("is_test_data");
+    // returns deal rows, not an aggregate
+    expect(text).toContain("d.id");
+    expect(text).toContain("d.name");
+    expect(text).toContain("cohort_date");
+  });
+
+  it("won evidence: per-rep scope adds an assigned_rep filter; office scope does not", () => {
+    const office = extractSqlText(buildWonEvidenceSql("2026-05-24", "2026-05-30"));
+    const rep = extractSqlText(buildWonEvidenceSql("2026-05-24", "2026-05-30", "rep-1"));
+    const unassigned = extractSqlText(buildWonEvidenceSql("2026-05-24", "2026-05-30", null));
+    expect(office).not.toContain("assigned_rep_id =");
+    expect(rep).toContain("assigned_rep_id =");
+    expect(rep).toContain("rep-1");
+    expect(unassigned).toContain("assigned_rep_id IS NULL");
+  });
+
+  it("sent evidence: stage-entry cohort on to_stage_id within the CT window, best-estimate $, distinct deal", () => {
+    const text = extractSqlText(buildStageEntryEvidenceSql(SENT_STAGE_SLUGS, "2026-05-24", "2026-05-30"));
+    expect(text).toContain("to_stage_id"); // stage-ENTRY
+    expect(text).toContain("estimate_sent_to_client"); // the sent slugs
+    expect(text).toContain("bid_sent"); // legacy alias swept in
+    expect(text).toContain("America/Chicago"); // F1 CT window on created_at
+    expect(text).toContain("entered.deal_id"); // joins the per-deal entry set
+    expect(text).toContain("GROUP BY dsh.deal_id"); // distinct deals (one row per deal)
+    // open best-estimate $ (bid_board first), NOT awarded-first
+    expect(text.toLowerCase()).toContain("bid_board_total_sales");
+    // same reportable filter as the aggregate
+    const filter = extractSqlText(aliasedReportableDealFilterSql("d"));
+    expect(text).toContain(filter);
+  });
+
+  it("estimated evidence: uses the estimating slugs (incl. legacy estimate_in_progress)", () => {
+    const text = extractSqlText(buildStageEntryEvidenceSql(ESTIMATED_STAGE_SLUGS, "2026-05-24", "2026-05-30"));
+    expect(text).toContain("estimating");
+    expect(text).toContain("estimate_in_progress");
+  });
+
+  it("projection evidence: open + future-dated + non-terminal + active (same as the bands aggregate)", () => {
+    const text = extractSqlText(buildProjectionEvidenceSql());
+    expect(text).toContain("expected_close_date");
+    expect(text).toContain("is_terminal = false");
+    expect(text).toContain("d.is_active = true");
+    // future-dated predicate (N): close date not null and >= today
+    expect(text).toContain("IS NOT NULL");
+    // best-estimate basis
+    expect(text.toLowerCase()).toContain("bid_board_total_sales");
+  });
+
+  it("projection evidence: a band scope narrows to exactly that 30/60/90 rung", () => {
+    const text = extractSqlText(buildProjectionEvidenceSql(undefined, "31_60"));
+    expect(text).toContain("31_60");
+    // the band CASE is reused to filter
+    expect(text).toContain("INTERVAL '60 days'");
+  });
+
+  it("lead evidence: same active-open-lead scope as buildLeadStatusSql (no deal value)", () => {
+    const text = extractSqlText(buildLeadEvidenceSql());
+    expect(text).toContain("l.is_active = true");
+    expect(text).toContain("'open'");
+    expect(text).toContain("workflow_family = 'lead'");
+    expect(text).toContain("is_terminal = false");
+    expect(text).toContain("l.is_test_data");
+  });
+});

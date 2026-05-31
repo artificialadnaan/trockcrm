@@ -62,7 +62,13 @@ import {
   normalizeOperationsReportFilters,
 } from "./operations-tier3-service.js";
 import { pickQueryValue } from "./office-filter.js";
-import { getMondayShowcaseData } from "./monday-showcase-service.js";
+import {
+  getMondayShowcaseData,
+  getMondayShowcaseEvidence,
+  type EvidenceMetric,
+  type MondayShowcaseEvidenceOptions,
+} from "./monday-showcase-service.js";
+import type { ProjectionBand } from "./foundations.js";
 
 const router = Router();
 const VALID_REPORT_FREQUENCIES = ["daily", "weekly", "biweekly", "monthly", "quarterly"] as const;
@@ -837,6 +843,59 @@ router.get("/monday-showcase", requireDirector, async (req, res, next) => {
     const modeRaw = pickQueryValue(req.query.mode);
     const mode = modeRaw === "completed" ? "completed" : "to_date";
     const data = await getMondayShowcaseData(req.tenantDb!, { mode });
+    await req.commitTransaction!();
+    res.json({ data });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// Reports Part 3 -- drill-to-evidence. Returns the supporting records behind ONE showcase number
+// (metric x scope x band/lead-stage), with a total that EQUALS that number (same canonical cohort).
+const EVIDENCE_METRICS = ["won", "sent", "estimated", "projection", "leads"] as const;
+const PROJECTION_BANDS = ["0_30", "31_60", "61_90", "beyond_90"] as const;
+const UNASSIGNED_SENTINEL = "__unassigned__";
+
+export function parseShowcaseEvidenceParams(query: Record<string, unknown>): MondayShowcaseEvidenceOptions {
+  const metricRaw = pickQueryValue(query.metric);
+  if (!metricRaw || !EVIDENCE_METRICS.includes(metricRaw as EvidenceMetric)) {
+    throw new AppError(400, `metric must be one of: ${EVIDENCE_METRICS.join(", ")}`);
+  }
+  const metric = metricRaw as EvidenceMetric;
+
+  const modeRaw = pickQueryValue(query.mode);
+  const mode = modeRaw === "completed" ? "completed" : "to_date";
+
+  // repId: absent -> office-wide (undefined, so it reconciles to the office number); the sentinel ->
+  // the Unassigned (null) bucket; otherwise a real rep UUID.
+  const repIdRaw = pickQueryValue(query.repId);
+  let repId: string | null | undefined;
+  if (repIdRaw === undefined) repId = undefined;
+  else if (repIdRaw === UNASSIGNED_SENTINEL) repId = null;
+  else repId = requireUuid(repIdRaw, "repId");
+
+  const bandRaw = pickQueryValue(query.band);
+  let band: ProjectionBand | undefined;
+  if (bandRaw !== undefined) {
+    if (metric !== "projection") throw new AppError(400, "band is only valid for the projection metric");
+    if (!PROJECTION_BANDS.includes(bandRaw as ProjectionBand)) {
+      throw new AppError(400, `band must be one of: ${PROJECTION_BANDS.join(", ")}`);
+    }
+    band = bandRaw as ProjectionBand;
+  }
+
+  const leadStage = pickQueryValue(query.leadStage);
+  if (leadStage !== undefined && metric !== "leads") {
+    throw new AppError(400, "leadStage is only valid for the leads metric");
+  }
+
+  return { metric, mode, repId, band, leadStage };
+}
+
+router.get("/monday-showcase/evidence", requireDirector, async (req, res, next) => {
+  try {
+    const options = parseShowcaseEvidenceParams(req.query as Record<string, unknown>);
+    const data = await getMondayShowcaseEvidence(req.tenantDb!, options);
     await req.commitTransaction!();
     res.json({ data });
   } catch (err) {
