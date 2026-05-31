@@ -1,62 +1,40 @@
-import { Navigate, useNavigate, useParams, useSearchParams } from "react-router-dom";
-import { getEffectiveDealValue } from "@trock-crm/shared/types";
+import { Navigate, useParams } from "react-router-dom";
 import { useDealStagePage } from "@/hooks/use-deals";
-import { formatCurrencyCompact, formatDealDisplayNumber } from "@/lib/deal-utils";
-import { DealValue } from "@/components/deals/deal-value";
+import { formatCurrencyCompact } from "@/lib/deal-utils";
 import { buildDealStageSummary } from "@/lib/pipeline-stage-summary";
 import { useNormalizedStageRoute } from "@/lib/pipeline-scope";
 import { PipelineStagePageHeader } from "@/components/pipeline/pipeline-stage-page-header";
-import { PipelineStageTable } from "@/components/pipeline/pipeline-stage-table";
-import { Input } from "@/components/ui/input";
+import { DealsListSection } from "@/components/deals/deals-list-section";
 import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from "@/components/ui/select";
-import { useRegions } from "@/hooks/use-pipeline-config";
+  DEAL_LIST_SORT_OPTIONS,
+  DRILLDOWN_FILTERBAR_PARAM_PREFIX,
+  getDrilldownFilterBarDimensions,
+} from "@/components/deals/deals-filterbar-adapter";
+import { isTerminalStage } from "@/lib/pipeline-terminal-filters";
+import { useProjectTypes, useRegions } from "@/hooks/use-pipeline-config";
 import { useTaskAssignees } from "@/hooks/use-task-assignees";
 import { useAuth } from "@/lib/auth";
-import { getWorkflowRouteLabel } from "@/lib/pipeline-ownership";
 
 export function DealStagePage() {
-  const navigate = useNavigate();
   const { stageId } = useParams();
-  const [searchParams, setSearchParams] = useSearchParams();
   const route = useNormalizedStageRoute("deals", stageId!);
   const { data, loading, error } = useDealStagePage({ stageId: stageId!, ...route.query });
   const { regions } = useRegions();
+  const { projectTypes } = useProjectTypes();
   const { assignees } = useTaskAssignees();
   const { user } = useAuth();
   const summary = buildDealStageSummary(data);
-  const selectedRegionId = searchParams.get("regionId") ?? "__all__";
-  const selectedRepId = searchParams.get("assignedRepId") ?? "__all__";
-  const selectedRegionLabel =
-    selectedRegionId === "__all__" ? "All regions" : regions.find((region) => region.id === selectedRegionId)?.name ?? "Selected region";
-  const selectedRepLabel =
-    selectedRepId === "__all__" ? "All reps" : assignees.find((assignee) => assignee.id === selectedRepId)?.displayName ?? "Selected rep";
-
-  const updateFilter = (key: string, value: string) => {
-    const params = new URLSearchParams(searchParams);
-    params.set("scope", route.query.scope);
-    params.set("page", "1");
-    if (!value || value === "__all__") {
-      params.delete(key);
-    } else {
-      params.set(key, value);
-    }
-    setSearchParams(params);
-  };
 
   if (route.needsRedirect) return <Navigate to={route.redirectTo} replace />;
   if (error) return <div className="text-sm text-rose-600">{error}</div>;
   if (loading || !data) return <div className="text-sm text-slate-500">Loading stage...</div>;
 
+  const stage = data.stage;
+
   return (
     <PipelineStagePageHeader
       backTo={route.backTo}
-      title={data.stage.name}
+      title={stage.name}
       subtitle={`${summary.totalDealCount} total deal${summary.totalDealCount === 1 ? "" : "s"} in this stage · ${summary.totalCount} active`}
       summary={
         <>
@@ -69,153 +47,32 @@ export function DealStagePage() {
         </>
       }
     >
-      <div className="grid gap-3 rounded-[1.5rem] border border-slate-200 bg-white/90 p-4 md:grid-cols-2 xl:grid-cols-7">
-        <div className="space-y-2">
-          <label className="text-[11px] font-black tracking-[0.16em] text-slate-500 uppercase">Search</label>
-          <Input
-            value={searchParams.get("search") ?? ""}
-            onChange={(event) => updateFilter("search", event.target.value)}
-            placeholder="Deal, number, city, state"
-          />
-        </div>
-        <div className="space-y-2">
-          <label className="text-[11px] font-black tracking-[0.16em] text-slate-500 uppercase">Region</label>
-          <Select
-            value={selectedRegionId}
-            onValueChange={(value) => updateFilter("regionId", value ?? "__all__")}
-          >
-            <SelectTrigger>
-              <SelectValue placeholder="All regions">{selectedRegionLabel}</SelectValue>
-            </SelectTrigger>
-            <SelectContent>
-              <SelectItem value="__all__">All regions</SelectItem>
-              {regions.map((region) => (
-                <SelectItem key={region.id} value={region.id}>
-                  {region.name}
-                </SelectItem>
-              ))}
-            </SelectContent>
-          </Select>
-        </div>
-        {user?.role === "admin" ? (
-          <div className="space-y-2">
-            <label className="text-[11px] font-black tracking-[0.16em] text-slate-500 uppercase">Sales rep</label>
-            <Select
-              value={selectedRepId}
-              onValueChange={(value) => updateFilter("assignedRepId", value ?? "__all__")}
-            >
-              <SelectTrigger>
-                <SelectValue placeholder="All reps">{selectedRepLabel}</SelectValue>
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value="__all__">All reps</SelectItem>
-                {assignees.map((assignee) => (
-                  <SelectItem key={assignee.id} value={assignee.id}>
-                    {assignee.displayName}
-                  </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
-          </div>
-        ) : null}
-        <div className="space-y-2">
-          <label className="text-[11px] font-black tracking-[0.16em] text-slate-500 uppercase">Updated after</label>
-          <Input
-            type="date"
-            value={searchParams.get("updatedAfter") ?? ""}
-            onChange={(event) => updateFilter("updatedAfter", event.target.value)}
-          />
-        </div>
-        <div className="space-y-2">
-          <label className="text-[11px] font-black tracking-[0.16em] text-slate-500 uppercase">Updated before</label>
-          <Input
-            type="date"
-            value={searchParams.get("updatedBefore") ?? ""}
-            onChange={(event) => updateFilter("updatedBefore", event.target.value)}
-          />
-        </div>
-        <div className="space-y-2">
-          <label className="text-[11px] font-black tracking-[0.16em] text-slate-500 uppercase">Min age</label>
-          <Input
-            type="number"
-            min="0"
-            value={searchParams.get("minAgeDays") ?? ""}
-            onChange={(event) => updateFilter("minAgeDays", event.target.value)}
-            placeholder="Days"
-          />
-        </div>
-        <div className="space-y-2">
-          <label className="text-[11px] font-black tracking-[0.16em] text-slate-500 uppercase">Max age</label>
-          <Input
-            type="number"
-            min="0"
-            value={searchParams.get("maxAgeDays") ?? ""}
-            onChange={(event) => updateFilter("maxAgeDays", event.target.value)}
-            placeholder="Days"
-          />
-        </div>
-      </div>
-
-      <PipelineStageTable
-        rows={data.rows}
-        columns={[
-          {
-            key: "name",
-            header: "Deal",
-            render: (row) => (
-              <div className="space-y-1">
-                <p className="font-semibold text-slate-950">{row.name}</p>
-                <p className="text-xs text-slate-500">
-                  {[row.propertyCity, row.propertyState].filter(Boolean).join(", ") || "--"}
-                </p>
-              </div>
-            ),
+      {/* Fork A′: the full outcome-aware FilterBar replaces the legacy Updated-After / Min-Age grid.
+          The list routes through getDeals (every dimension + outcome-aware Date that windows open rows
+          now the flag is on); useDealStagePage above stays ONLY for the whole-stage summary metrics. The
+          route pins the stage (no stage dimension); the bespoke admin rep select folds into the bar (rep
+          dim, admin-only as before); the fb_ namespace keeps the bar's params off the route's scope/page. */}
+      <DealsListSection
+        workflowFamily="deal"
+        scope={route.query.scope}
+        enableExport
+        pageSize={20}
+        searchPlaceholder="Deal, number, city, state"
+        visibleStages={[stage]}
+        baseFilters={{ stageIds: [stage.id] }}
+        filterBar={{
+          dimensions: getDrilldownFilterBarDimensions({ pinnedStage: true, ownRep: user?.role === "admin" }),
+          options: {
+            reps: assignees.map((assignee) => ({ value: assignee.id, label: assignee.displayName })),
+            regions: regions.map((region) => ({ value: region.id, label: region.name })),
+            projectTypes: projectTypes.map((type) => ({ value: type.id, label: type.name })),
+            sortOptions: DEAL_LIST_SORT_OPTIONS,
           },
-          {
-            key: "dealNumber",
-            header: "Number",
-            render: (row) => (
-              <span className="inline-flex rounded-md bg-slate-100 px-2 py-1 text-[11px] font-black tracking-[0.16em] text-slate-500 uppercase">
-                {formatDealDisplayNumber(row).label}
-              </span>
-            ),
-          },
-          {
-            key: "assignedRepName",
-            header: "Sales rep",
-            render: (row) => row.assignedRepName || "--",
-          },
-          {
-            key: "workflowRoute",
-            header: "Workflow",
-            render: (row) => (
-              <span className="text-xs font-semibold tracking-[0.16em] text-slate-500 uppercase">
-                {row.workflowRoute ? getWorkflowRouteLabel(row.workflowRoute) : "--"}
-              </span>
-            ),
-          },
-          {
-            key: "amount",
-            header: "Amount",
-            headClassName: "text-right",
-            cellClassName: "text-right font-semibold tabular-nums text-slate-950",
-            render: (row) => <DealValue deal={row} value={getEffectiveDealValue(row)} />,
-          },
-          {
-            key: "daysInStage",
-            header: "Age",
-            render: (row) => `${row.daysInStage ?? "--"}${row.daysInStage == null ? "" : "d"}`,
-          },
-          {
-            key: "updatedAt",
-            header: "Updated",
-            render: (row) => new Date(row.updatedAt).toLocaleDateString(),
-          },
-        ]}
-        pagination={data.pagination}
-        onPageChange={route.onPageChange}
-        onRowClick={(row) => navigate(`/deals/${row.id}`)}
-        getRowKey={(row) => row.id}
+          stageEntryDateEnabled: true,
+          defaultStageIds: [stage.id],
+          terminalStageIds: isTerminalStage(stage.slug) ? [stage.id] : [],
+          paramPrefix: DRILLDOWN_FILTERBAR_PARAM_PREFIX,
+        }}
       />
     </PipelineStagePageHeader>
   );
