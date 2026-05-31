@@ -163,13 +163,29 @@ export function aliasedEffectiveStageAgeDaysSql(alias: string): SQL {
     WHEN ${col("on_hold_accumulated_seconds_at_stage_entry")} IS NULL THEN 0
     ELSE GREATEST(0, COALESCE(${col("on_hold_accumulated_seconds")}, 0) - ${col("on_hold_accumulated_seconds_at_stage_entry")})
   END`;
-  // The currently-open hold interval, if the deal is on hold right now.
+  // The currently-open hold interval, if the deal is on hold right now. Anchored
+  // at GREATEST(effective stage entry, hold start) so a hold that began BEFORE the
+  // deal entered this stage (or a legacy on_hold_started_at predating entry) only
+  // subtracts the portion that overlaps the current stage — mirroring the shared
+  // getEffectiveStageAgeSeconds (max(stageEnteredAt, onHoldStartedAt)). Subtracting
+  // from on_hold_started_at directly would understate days-in-stage and could omit
+  // deals the list shows as stalled (Codex #546).
   const openHold = sql`CASE
     WHEN ${col("on_hold")} AND ${col("on_hold_started_at")} IS NOT NULL
-      THEN GREATEST(0, EXTRACT(EPOCH FROM (now() - ${col("on_hold_started_at")})))
+      THEN GREATEST(0, EXTRACT(EPOCH FROM (now() - GREATEST(${entered}, ${col("on_hold_started_at")}))))
     ELSE 0
   END`;
   return sql`FLOOR(GREATEST(0, ${elapsed} - ${accumulatedSinceEntry} - ${openHold}) / 86400)`;
+}
+
+/**
+ * True when a numeric FilterBar bound was supplied but is not a finite number
+ * (e.g. ?valueMin=abc, which arrives as a NaN sentinel from the route). A
+ * malformed bound is no-matched (sql`false`) like an unrecognized enum rather than
+ * treated as unset, so a bad URL never silently widens results (Codex #546).
+ */
+function isMalformedNumber(value: number | undefined): boolean {
+  return value !== undefined && !Number.isFinite(value);
 }
 
 /**
@@ -178,6 +194,7 @@ export function aliasedEffectiveStageAgeDaysSql(alias: string): SQL {
  * by (sort == filter == display, D-1). Uses ctx.wonStageIds for classification.
  */
 export function buildValueRangePredicate(input: DealFilterBarInput, ctx: DealFilterContext = {}): SQL | undefined {
+  if (isMalformedNumber(input.valueMin) || isMalformedNumber(input.valueMax)) return sql`false`;
   const min = finiteNumber(input.valueMin);
   const max = finiteNumber(input.valueMax);
   if (min === undefined && max === undefined) return undefined;
@@ -197,6 +214,7 @@ export function buildStalledPredicate(
   ctx: DealFilterContext = {}
 ): SQL | undefined {
   if (!ctx.stageEntryDateEnabled) return undefined;
+  if (isMalformedNumber(input.minAgeDays) || isMalformedNumber(input.maxAgeDays)) return sql`false`;
   const min = finiteNumber(input.minAgeDays);
   const max = finiteNumber(input.maxAgeDays);
   if (min === undefined && max === undefined) return undefined;

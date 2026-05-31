@@ -809,7 +809,11 @@ router.get("/", async (req, res, next) => {
     const toOptionalNumber = (value: unknown): number | undefined => {
       if (value === undefined || value === null || value === "") return undefined;
       const parsed = Number(value);
-      return Number.isFinite(parsed) ? parsed : undefined;
+      // Present-but-malformed (e.g. ?valueMin=abc / ?minAgeDays=abc) → NaN
+      // sentinel, NOT undefined, so the predicate registry no-matches it instead
+      // of treating a bad URL like an unset filter and silently widening to the
+      // unfiltered active list (Codex #546). Absent/empty stays undefined.
+      return Number.isFinite(parsed) ? parsed : NaN;
     };
     // Pass workflowRoute/status through RAW so the predicate registry is the
     // single validation point: a recognized value applies its predicate, an

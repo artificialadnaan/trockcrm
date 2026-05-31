@@ -114,38 +114,45 @@ export function buildDealOutcomeDateScope(
   const to = window.to?.trim() || undefined;
   if (!from && !to) return undefined;
 
-  // Correct date-scoping needs BOTH outcome classes resolved. The open branch is
-  // openMatch = NOT(wonMatch OR lostMatch); if either set is empty, that side
-  // becomes `false` and rows of the MISSING class fold into "open" — e.g. with
-  // lostStageIds empty, real Lost rows match openMatch and (flag off) get included
-  // regardless of lost_at, WIDENING the result past the window (Codex #546). The
-  // canonical WON/LOST slug sets both resolve in a healthy install; if either is
-  // missing (a pipeline_stage_config misconfig / fixture without terminal stages),
-  // SKIP the date predicate entirely — return undefined so the caller omits it and
-  // still returns rows. Honest degradation that never widens or 500s, never folds
-  // an unclassifiable outcome into open.
+  // Window each outcome class on its OWN axis, but ONLY for classes we can
+  // actually identify from the resolved stage-id sets. Two failure modes to avoid
+  // (Codex #546):
+  //   1. Folding an unidentifiable class into "open": openMatch = NOT(won OR lost);
+  //      if e.g. lostStageIds is empty, real Lost rows satisfy NOT(won) and (flag
+  //      off) get included regardless of lost_at — widening past the window.
+  //   2. Dropping the whole predicate (returning undefined) when one set is
+  //      missing — that makes getDeals omit the date filter and return EVERY row,
+  //      an even larger widening.
+  // So: emit a windowed clause for each RESOLVED terminal class, include the open
+  // branch only when BOTH sets resolve (open = "neither Won nor Lost" is only
+  // well-defined then), and EXCLUDE rows of an unresolved class rather than
+  // misclassify them. Keep filtering, never widen. Only when NEITHER class
+  // resolves is there no date axis at all → return undefined.
   const hasWon = (ctx.wonStageIds?.length ?? 0) > 0;
   const hasLost = (ctx.lostStageIds?.length ?? 0) > 0;
-  if (!hasWon || !hasLost) return undefined;
+  if (!hasWon && !hasLost) return undefined;
 
   const columns = ctx.columns ?? dealDateScopeColumns();
   const wonMatch = stageMembership(columns.stageId, ctx.wonStageIds);
   const lostMatch = stageMembership(columns.stageId, ctx.lostStageIds);
-  const openMatch = sql`NOT (${or(wonMatch, lostMatch)})`;
 
   const wonWindow = dateWithinWindow(columns.wonDate, from, to);
   const lostWindow = dateWithinWindow(columns.lostDate, from, to);
   const openWindow = dateWithinWindow(columns.stageEntryDate, from, to);
 
   const clauses: SQL[] = [];
-  if (wonWindow) clauses.push(and(wonMatch, wonWindow) as SQL);
-  if (lostWindow) clauses.push(and(lostMatch, lostWindow) as SQL);
-  // Flag off: open rows are current-state — included regardless of the window
-  // (honest, never silently dropped). Flag on: bounded by stage-entry date.
-  clauses.push(
-    ctx.stageEntryDateEnabled && openWindow ? (and(openMatch, openWindow) as SQL) : openMatch
-  );
+  if (hasWon && wonWindow) clauses.push(and(wonMatch, wonWindow) as SQL);
+  if (hasLost && lostWindow) clauses.push(and(lostMatch, lostWindow) as SQL);
+  if (hasWon && hasLost) {
+    const openMatch = sql`NOT (${or(wonMatch, lostMatch)})`;
+    // Flag off: open rows are current-state — included regardless of the window
+    // (honest, never silently dropped). Flag on: bounded by stage-entry date.
+    clauses.push(
+      ctx.stageEntryDateEnabled && openWindow ? (and(openMatch, openWindow) as SQL) : openMatch
+    );
+  }
 
+  if (clauses.length === 0) return undefined;
   return or(...clauses);
 }
 

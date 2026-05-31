@@ -113,9 +113,15 @@ describe("value-range predicate (stage-aware effective value == sort == display)
   const openCtx = {}; // no won stage ids -> open best-estimate chain
   const wonCtx = { wonStageIds: ["won-1"] };
 
-  it("omits when neither bound is a finite number", () => {
+  it("omits when no bound is supplied at all (unset filter)", () => {
     expect(buildValueRangePredicate({}, openCtx)).toBeUndefined();
-    expect(buildValueRangePredicate({ valueMin: NaN, valueMax: NaN }, openCtx)).toBeUndefined();
+  });
+  it("no-matches (sql false) a malformed numeric bound rather than omitting/widening (Codex #546)", () => {
+    // NaN is what the route forwards for ?valueMin=abc — a bad URL, not an unset
+    // filter, so it must no-match like a bad enum, never silently widen.
+    expect(text(buildValueRangePredicate({ valueMin: NaN, valueMax: NaN }, openCtx))).toBe("false");
+    expect(text(buildValueRangePredicate({ valueMin: NaN }, openCtx))).toBe("false");
+    expect(text(buildValueRangePredicate({ valueMin: 100000, valueMax: NaN }, openCtx))).toBe("false");
   });
   it("does not throw when called without a ctx (ctx is optional with a safe default — Codex #546)", () => {
     expect(() => buildValueRangePredicate({ valueMin: 100000 })).not.toThrow();
@@ -154,10 +160,27 @@ describe("stalled / days-in-stage predicate (gated on stage-entry reliability)",
     expect(sql).toContain("is_bid_board_owned"); // ...but ONLY for Bid Board-owned deals
     expect(sql).toContain("on_hold_accumulated_seconds"); // subtracts completed hold time
     expect(sql).toContain("on_hold_started_at"); // subtracts the open hold interval
+    // ...anchored at GREATEST(effective stage entry, hold start) so a hold that
+    // began before this stage only subtracts the overlapping portion (Codex #546).
+    expect(sql).toContain("now() - greatest(");
     expect(sql).toContain(">=");
   });
   it("omits when no bucket is selected even with the flag on", () => {
     expect(buildStalledPredicate({}, { stageEntryDateEnabled: true })).toBeUndefined();
+  });
+  it("no-matches (sql false) a malformed age bound when the flag is on (Codex #546)", () => {
+    expect(text(buildStalledPredicate({ minAgeDays: NaN }, { stageEntryDateEnabled: true }))).toBe("false");
+    expect(text(buildStalledPredicate({ maxAgeDays: NaN }, { stageEntryDateEnabled: true }))).toBe("false");
+  });
+  it("still OMITS (not no-match) a malformed age bound when the flag is OFF — the dimension does not exist", () => {
+    expect(buildStalledPredicate({ minAgeDays: NaN }, { stageEntryDateEnabled: false })).toBeUndefined();
+  });
+  it("no-matches (sql false) a malformed age bound when the flag is on (Codex #546)", () => {
+    expect(text(buildStalledPredicate({ minAgeDays: NaN }, { stageEntryDateEnabled: true }))).toBe("false");
+    expect(text(buildStalledPredicate({ maxAgeDays: NaN }, { stageEntryDateEnabled: true }))).toBe("false");
+  });
+  it("still OMITS (not no-match) a malformed age bound when the flag is OFF — the dimension does not exist", () => {
+    expect(buildStalledPredicate({ minAgeDays: NaN }, { stageEntryDateEnabled: false })).toBeUndefined();
   });
 });
 

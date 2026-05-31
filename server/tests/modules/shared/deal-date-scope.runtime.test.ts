@@ -4,19 +4,10 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { buildDealOutcomeDateScope, dealDisplayDateExpr } from "../../../src/modules/shared/deal-date-scope.js";
 
 /**
- * RUNTIME coverage for the canonical outcome-aware date model, executed against a
- * real in-memory Postgres (PGlite) -- not rendered-SQL mocks. Proves the edge that
- * DEFINES the platform-wide bug:
- *
- *   A deal whose CREATED date is in-window but whose WON date is OUT-of-window
- *   must NOT match (created date is irrelevant; the won date governs), and the
- *   converse matches. Lost rows window on lost_at; open rows are current-state
- *   pre-flag and stage-entry-bounded post-flag.
- *
- * The Won axis is the CANONICAL basis: deals.won_closed_date (the SAME helper
- * aliasedWonHsClosedWonDateSql that getWonCloseSummary / the getDeals Won
- * drill-down use -- the protected 191 / $9,778,045.90 basis). Run as the WHERE of
- * a real SELECT so a runtime-only SQL bug (casts, NOT/OR precedence) surfaces here.
+ * RUNTIME coverage for the canonical outcome-aware date model against a real
+ * in-memory Postgres (PGlite). Proves the edge that DEFINES the platform-wide bug:
+ * a deal CREATED in-window but WON out-of-window must NOT match (the won date
+ * governs), and the converse. Won axis = canonical deals.won_closed_date.
  */
 
 const dialect = new PgDialect();
@@ -93,8 +84,11 @@ describe("deal date scope (runtime, PGlite)", () => {
     expect(ids).not.toContain("won_out");
   });
 
-  it("partial classification (only Won stages resolve) SKIPS the date predicate (no widening)", () => {
-    expect(buildDealOutcomeDateScope(WINDOW, { wonStageIds: ["won"], lostStageIds: [] })).toBeUndefined();
+  it("partial classification (only Won stages resolve) keeps windowing Won and excludes the rest", async () => {
+    // Codex #546: Won windowed on won_closed_date; Lost + open rows excluded (not
+    // folded into open, and the predicate is NOT dropped to all-rows).
+    const ids = await matchedIds({ wonStageIds: ["won"], lostStageIds: [] });
+    expect(ids).toEqual(["won_in"]);
   });
 
   it("dealDisplayDateExpr returns, per row, exactly the date the FILTER windows on (filter-axis == display-axis)", async () => {

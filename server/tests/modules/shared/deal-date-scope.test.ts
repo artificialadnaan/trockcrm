@@ -6,7 +6,7 @@ import type { SQL } from "drizzle-orm";
  * The canonical platform-wide deal date-scoping model (shared, adopted by every
  * list surface). Won -> the canonical won_closed_date basis, Lost -> lost_at,
  * open -> stage entry (flag-gated). Won/Lost classification by stage-id set;
- * partial classification (only one set) skips the predicate to avoid widening.
+ * partial classification windows only the resolvable class (never widens).
  */
 
 import {
@@ -27,13 +27,11 @@ describe("buildDealOutcomeDateScope", () => {
 
   it("windows Won rows on the canonical won_closed_date basis, Lost rows on lost_at", () => {
     const sql = render(buildDealOutcomeDateScope({ from: "2026-01-01", to: "2026-03-31" }, ctx));
-    // Won basis = deals.won_closed_date (the SAME helper getWonCloseSummary uses),
-    // NOT the raw hs_closed_won_date JSON or contract_signed_*.
     expect(sql).toContain("won_closed_date");
     expect(sql).not.toContain("hs_closed_won_date");
     expect(sql).not.toContain("contract_signed");
     expect(sql).toContain("lost_at");
-    expect(sql).toContain("stage_id"); // classified by stage-id membership
+    expect(sql).toContain("stage_id");
   });
 
   it("applies inclusive-from and exclusive-next-day-to bounds", () => {
@@ -52,22 +50,30 @@ describe("buildDealOutcomeDateScope", () => {
     expect(sql).toContain("stage_entered_at");
   });
 
-  it("degrades gracefully (returns undefined, skips the predicate) when BOTH won/lost stages are empty", () => {
+  it("degrades gracefully (returns undefined) only when BOTH won/lost stages are empty", () => {
     expect(
       buildDealOutcomeDateScope({ from: "2026-01-01" }, { wonStageIds: [], lostStageIds: [] })
     ).toBeUndefined();
   });
 
-  it("also skips (returns undefined) under PARTIAL classification, so a missing class can't widen via the open branch", () => {
-    // lost empty -> lostMatch=false -> real Lost rows would fold into openMatch and
-    // (flag off) be included regardless of lost_at. Requiring both classes avoids
-    // that widening (Codex #546).
-    expect(
-      buildDealOutcomeDateScope({ from: "2026-01-01" }, { wonStageIds: ["won-1"], lostStageIds: [] })
-    ).toBeUndefined();
-    expect(
-      buildDealOutcomeDateScope({ from: "2026-01-01" }, { wonStageIds: [], lostStageIds: ["lost-1"] })
-    ).toBeUndefined();
+  it("under PARTIAL classification keeps windowing the RESOLVED class and excludes the rest (never widens, never drops the filter)", () => {
+    // Codex #546: only-Won resolved -> window Won on won_closed_date; Lost + open
+    // are EXCLUDED (not folded into open with the flag off, and the whole predicate
+    // is NOT dropped to all-rows). Symmetric for only-Lost.
+    const wonOnly = render(
+      buildDealOutcomeDateScope({ from: "2026-01-01", to: "2026-03-31" }, { wonStageIds: ["won-1"], lostStageIds: [] })
+    );
+    expect(wonOnly).toContain("won_closed_date");
+    expect(wonOnly).not.toContain("lost_at");
+    expect(wonOnly).not.toContain("stage_entered_at"); // open branch omitted (no fold-in)
+    expect(wonOnly).not.toContain("in ()"); // empty set -> `false` sentinel, never IN ()
+
+    const lostOnly = render(
+      buildDealOutcomeDateScope({ from: "2026-01-01", to: "2026-03-31" }, { wonStageIds: [], lostStageIds: ["lost-1"] })
+    );
+    expect(lostOnly).toContain("lost_at");
+    expect(lostOnly).not.toContain("won_closed_date");
+    expect(lostOnly).not.toContain("in ()");
   });
 
   it("supports an aliased deals table for raw-SQL surfaces (board/reports reuse)", () => {
@@ -75,7 +81,7 @@ describe("buildDealOutcomeDateScope", () => {
       buildDealOutcomeDateScope({ from: "2026-01-01" }, { ...ctx, columns: aliasedDealDateScopeColumns("d") })
     );
     expect(sql).toContain("d.stage_id");
-    expect(sql).toContain("d.won_closed_date"); // canonical won axis on the alias
+    expect(sql).toContain("d.won_closed_date");
     expect(sql).toContain("d.lost_at");
   });
 });
@@ -84,10 +90,10 @@ describe("dealDisplayDateExpr (display-axis companion to the filter)", () => {
   it("emits a CASE selecting the canonical won date for Won, lost date for Lost, stage entry otherwise", () => {
     const sql = render(dealDisplayDateExpr(ctx));
     expect(sql).toContain("case");
-    expect(sql).toContain("won_closed_date"); // canonical won axis (basis)
-    expect(sql).toContain("lost_at"); // lost axis
-    expect(sql).toContain("stage_entered_at"); // open axis (ELSE)
-    expect(sql).toContain("stage_id"); // classified by the same stage-id sets
+    expect(sql).toContain("won_closed_date");
+    expect(sql).toContain("lost_at");
+    expect(sql).toContain("stage_entered_at");
+    expect(sql).toContain("stage_id");
   });
 
   it("uses the SAME date columns as the filter, so display-axis == filter-axis (no divergence)", () => {
