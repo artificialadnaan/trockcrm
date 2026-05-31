@@ -152,6 +152,20 @@ function applyWhere(rows: Row[], condition: unknown, usersState: Row[]) {
   }
 
   let filtered = rows;
+  // Soft-delete guard: NOT (is_active = false AND status = 'open'). Apply its real
+  // semantics (drop only soft-deleted = inactive+open) and skip its is_active/status
+  // chunks in the generic inclusion-filter loop below (which would otherwise treat the
+  // `= false` / `= 'open'` as positive inclusion filters and wrongly drop active rows).
+  const hasSoftDeleteGuard =
+    conditionText.includes("not (") &&
+    conditionText.includes("is_active") &&
+    conditionText.includes("status") &&
+    conditionText.includes("open");
+  if (hasSoftDeleteGuard) {
+    filtered = filtered.filter(
+      (row) => !(row.isActive === false && row.status === "open")
+    );
+  }
   const hasLegacyOfficeFallback =
     conditionText.includes("office_code") &&
     conditionText.includes("assigned_rep") &&
@@ -187,10 +201,17 @@ function applyWhere(rows: Row[], condition: unknown, usersState: Row[]) {
       continue;
     }
 
+    const columnName = (chunk as { name: string }).name;
+    // The soft-delete guard's is_active/status chunks are handled above as a NOT(...) unit;
+    // don't let the generic inclusion loop re-process them as positive filters.
+    if (hasSoftDeleteGuard && (columnName === "is_active" || columnName === "status")) {
+      continue;
+    }
+
     const values = extractValuesUntilNextColumn(chunks, index + 1);
     if (values.length === 0) continue;
 
-    const property = camelName((chunk as { name: string }).name);
+    const property = camelName(columnName);
     filtered = filtered.filter((row) => values.includes(row[property]));
   }
 
