@@ -2462,10 +2462,10 @@ export async function getDealsForPipeline(
   // until stage_entered_at is trusted everywhere (post-#535); OFF => open columns
   // stay current-state and the drill-down labels them "(now)" honestly.
   const stageEntryDateEnabled = isStageEntryDateFilterEnabled();
-  // The won-date guard below is a single public.try_parse_hs_close_date() call
-  // (see castHsClosedWonDateSql), so interpolating it into the >=, <=, and
-  // IS NOT NULL predicates composes to small, unambiguous SQL. Each site still
-  // builds its own fragment via the helper (cheap; no shared mutable state).
+  // The won-date guard below reads the app-owned deals.won_closed_date column via
+  // aliasedWonHsClosedWonDateSql (a compact IS NOT NULL / >= / <= predicate per
+  // site), NOT a try_parse_hs_close_date call. Each site still builds its own
+  // fragment via the helper (cheap; no shared mutable state).
   const pipelineCardsPerStageLimit = Math.max(
     1,
     Math.min(
