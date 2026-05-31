@@ -965,7 +965,7 @@ export function sortPhotoTargetsByRelevance<
 
 export async function searchPhotoUploadTargets(
   tenantDb: TenantDb,
-  input: { search?: string; limit?: number; userRole?: string; userId?: string }
+  input: { search?: string; limit?: number }
 ): Promise<{ targets: PhotoUploadTarget[] }> {
   const limit = Math.min(Math.max(input.limit ?? 30, 1), 60);
   const trimmed = input.search?.trim() ?? "";
@@ -976,19 +976,16 @@ export async function searchPhotoUploadTargets(
 
   const leadConditions: SQL[] = [];
   const dealConditions: SQL[] = [];
-  // The WEB photo picker route intentionally does NOT pass userId/userRole, so
-  // this rep-scoping branch stays dead on web: anyone in the company must be able
-  // to find ANY lead/deal to attach photos (creator-agnostic by design — see
-  // .audit/trockcam-leads-photos.md Q5). Do NOT wire user context into the web
-  // route. The field app DOES pass them, so the field picker stays rep-scoped.
+  // The photo picker is intentionally UNSCOPED: anyone in the company (rep or not,
+  // creator or not, web or field/TrockCam) must be able to find ANY lead/deal to
+  // attach photos to. There is deliberately NO rep/assignee filter here — rep-scoping
+  // is what hid every non-owned lead from field reps. See
+  // .audit/trockcam-leads-not-returning.md. (The field PROJECT list stays rep-scoped;
+  // only this capture-target picker is company-wide.)
   //
   // KNOWN FOLLOW-UP (not in this change): this query runs on a single office's
   // schema (search_path = office_<slug>,public), so it cannot find leads/deals in
   // OTHER offices. Cross-office search is a separate structural item (G1).
-  if (input.userRole === "rep" && input.userId) {
-    leadConditions.push(eq(leads.assignedRepId, input.userId));
-    dealConditions.push(eq(deals.assignedRepId, input.userId));
-  }
   if (leadSearch) leadConditions.push(leadSearch);
   if (dealSearch) dealConditions.push(dealSearch);
 
@@ -1064,36 +1061,43 @@ export async function searchPhotoUploadTargets(
     .orderBy(...dealOrder)
     .limit(limit);
 
-  const scored = [
-    ...leadRows.map((row) => ({
-      relevance: Number(row.relevance ?? 0),
+  const scoredLeads = leadRows.map((row) => ({
+    relevance: Number(row.relevance ?? 0),
+    lastUpdatedAt: row.lastUpdatedAt,
+    target: {
+      id: row.id,
+      type: "lead" as const,
+      name: row.name,
+      recordNumber: null,
+      stageName: row.stageName ?? null,
+      companyName: row.companyName ?? null,
       lastUpdatedAt: row.lastUpdatedAt,
-      target: {
-        id: row.id,
-        type: "lead" as const,
-        name: row.name,
-        recordNumber: null,
-        stageName: row.stageName ?? null,
-        companyName: row.companyName ?? null,
-        lastUpdatedAt: row.lastUpdatedAt,
-      } satisfies PhotoUploadTarget,
-    })),
-    ...dealRows.map((row) => ({
-      relevance: Number(row.relevance ?? 0),
+    } satisfies PhotoUploadTarget,
+  }));
+  const scoredDeals = dealRows.map((row) => ({
+    relevance: Number(row.relevance ?? 0),
+    lastUpdatedAt: row.lastUpdatedAt,
+    target: {
+      id: row.id,
+      type: row.pipelineDisposition === "opportunity" ? ("opportunity" as const) : ("deal" as const),
+      name: row.name,
+      recordNumber: row.dealNumber,
+      stageName: row.stageName ?? null,
+      companyName: row.companyName ?? null,
       lastUpdatedAt: row.lastUpdatedAt,
-      target: {
-        id: row.id,
-        type: row.pipelineDisposition === "opportunity" ? ("opportunity" as const) : ("deal" as const),
-        name: row.name,
-        recordNumber: row.dealNumber,
-        stageName: row.stageName ?? null,
-        companyName: row.companyName ?? null,
-        lastUpdatedAt: row.lastUpdatedAt,
-      } satisfies PhotoUploadTarget,
-    })),
-  ];
+    } satisfies PhotoUploadTarget,
+  }));
 
-  return { targets: sortPhotoTargetsByRelevance(scored).slice(0, limit).map((item) => item.target) };
+  // PER-TYPE cap, NOT a single cross-type slice. Deals outnumber leads ~12:1 in
+  // prod, so a merged slice(0, limit) sorted by relevance/recency let deals fill
+  // every slot and evicted ALL leads (the TrockCam bug — see
+  // .audit/trockcam-leads-not-returning.md). Both client pickers already render
+  // separate Leads / Opportunities / Deals groups, so capping each type to `limit`
+  // independently (leads first) guarantees any matching lead surfaces in its group
+  // regardless of deal volume, while keeping each type's payload bounded.
+  const leadTargets = sortPhotoTargetsByRelevance(scoredLeads).slice(0, limit).map((item) => item.target);
+  const dealTargets = sortPhotoTargetsByRelevance(scoredDeals).slice(0, limit).map((item) => item.target);
+  return { targets: [...leadTargets, ...dealTargets] };
 }
 
 /**

@@ -1,12 +1,12 @@
-import { sql } from "drizzle-orm";
+import { eq, sql } from "drizzle-orm";
 import type { NodePgDatabase } from "drizzle-orm/node-postgres";
 import type * as schema from "@trock-crm/shared/schema";
+import { deals, leads } from "@trock-crm/shared/schema";
 import type { UserRole } from "@trock-crm/shared/types";
 import { AppError } from "../../middleware/error-handler.js";
 import { buildFileDownloadUrlFromRecord, getDealPhotoTimeline, searchPhotoUploadTargets } from "../files/service.js";
 import type { DealPhotoTimelineFilters } from "../files/photo-timeline-filters.js";
 import { getDealById } from "../deals/service.js";
-import { getLeadById } from "../leads/service.js";
 
 type TenantDb = NodePgDatabase<typeof schema>;
 
@@ -248,8 +248,18 @@ export async function assertAccessibleFieldCaptureTarget(
     throw new AppError(400, "Exactly one capture target must be provided.");
   }
 
+  // The capture-target picker is intentionally UNSCOPED (see searchPhotoUploadTargets
+  // and .audit/trockcam-leads-not-returning.md): any rep may attach photos to ANY
+  // active lead/deal/opportunity, so this gate checks existence + active only — NOT
+  // ownership. (getDealById/getLeadById 403 a non-owned record for role "rep", which
+  // would let a rep FIND a lead in search but fail to open/attach it.) input.userRole/
+  // input.userId are accepted for signature stability but deliberately NOT used here.
   if (input.opportunityId) {
-    const opportunity = await getDealById(tenantDb, input.opportunityId, input.userRole, input.userId);
+    const [opportunity] = await tenantDb
+      .select({ id: deals.id, isActive: deals.isActive, pipelineDisposition: deals.pipelineDisposition })
+      .from(deals)
+      .where(eq(deals.id, input.opportunityId))
+      .limit(1);
     if (!opportunity || !opportunity.isActive || opportunity.pipelineDisposition !== "opportunity") {
       throw new AppError(404, "Capture target not found");
     }
@@ -257,14 +267,22 @@ export async function assertAccessibleFieldCaptureTarget(
   }
 
   if (input.dealId) {
-    const deal = await getDealById(tenantDb, input.dealId, input.userRole, input.userId);
+    const [deal] = await tenantDb
+      .select({ id: deals.id, isActive: deals.isActive })
+      .from(deals)
+      .where(eq(deals.id, input.dealId))
+      .limit(1);
     if (!deal || !deal.isActive) {
       throw new AppError(404, "Capture target not found");
     }
     return { id: deal.id, type: "deal" as const };
   }
 
-  const lead = await getLeadById(tenantDb, input.leadId!, input.userRole, input.userId);
+  const [lead] = await tenantDb
+    .select({ id: leads.id, isActive: leads.isActive })
+    .from(leads)
+    .where(eq(leads.id, input.leadId!))
+    .limit(1);
   if (!lead || !lead.isActive) {
     throw new AppError(404, "Capture target not found");
   }
@@ -320,13 +338,15 @@ export async function listFieldProjectPhotos(
 
 export async function searchFieldCaptureTargets(
   tenantDb: TenantDb,
-  access: FieldAccessContext,
+  _access: FieldAccessContext,
   input: { search?: string; limit?: number } = {}
 ) {
+  // The field/TrockCam capture-target picker is intentionally UNSCOPED: any rep must
+  // be able to find ANY lead/deal to attach photos to, so we do NOT forward the
+  // rep identity into searchPhotoUploadTargets (forwarding it rep-scoped the search
+  // and hid every non-owned lead). See .audit/trockcam-leads-not-returning.md.
   return searchPhotoUploadTargets(tenantDb, {
     search: input.search,
     limit: input.limit,
-    userId: access.userId,
-    userRole: access.userRole,
   });
 }
