@@ -153,6 +153,31 @@ function getRequiredFieldValue(
   return (deal as Record<string, unknown>)[field];
 }
 
+function dateOnlyString(value: unknown): string | null {
+  if (value == null || value === "") return null;
+  const text = value instanceof Date ? value.toISOString().slice(0, 10) : String(value).slice(0, 10);
+  return /^\d{4}-\d{2}-\d{2}$/.test(text) ? text : null;
+}
+
+/**
+ * Whether a stage-gate required field is satisfied by `value`. Any non-empty value satisfies a
+ * normal field; `expectedCloseDate` additionally requires a USABLE (today-or-future) date, so a stale
+ * past date cannot pass the gate -- otherwise the going-to-close projection keeps reading unusable
+ * past-dated data, the exact production case this enforces.
+ */
+export function isStageRequiredFieldSatisfied(
+  field: string,
+  value: unknown,
+  today: string = new Date().toISOString().slice(0, 10)
+): boolean {
+  if (value == null || value === "") return false;
+  if (field === "expectedCloseDate") {
+    const dateOnly = dateOnlyString(value);
+    return dateOnly != null && dateOnly >= today;
+  }
+  return true;
+}
+
 function isVerifiedLinkedStageDocument(file: {
   category: unknown;
   intakeRequirementKey: unknown;
@@ -220,7 +245,10 @@ export async function validateStageGate(
   dealId: string,
   targetStageId: string,
   userRole: UserRole,
-  userId: string
+  userId: string,
+  // Incoming field values applied in the SAME stage-change request (e.g. expectedCloseDate set in the
+  // stage-change dialog) -- considered satisfied before they are persisted, so the gate passes.
+  pendingFieldValues: Record<string, unknown> = {}
 ): Promise<StageGateResult> {
   const resolvedDeal = await getResolvedDeal(tenantDb, dealId);
   const deal = resolvedDeal.deal;
@@ -299,8 +327,10 @@ export async function validateStageGate(
   const requiredFields = (targetStage.requiredFields as string[]) ?? [];
   const missingFields: string[] = [];
   for (const field of requiredFields) {
-    const value = getRequiredFieldValue(deal, resolvedDeal, field);
-    if (value == null || value === "") {
+    const value = Object.prototype.hasOwnProperty.call(pendingFieldValues, field)
+      ? pendingFieldValues[field]
+      : getRequiredFieldValue(deal, resolvedDeal, field);
+    if (!isStageRequiredFieldSatisfied(field, value)) {
       missingFields.push(field);
     }
   }

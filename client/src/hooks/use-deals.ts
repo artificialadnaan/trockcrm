@@ -585,6 +585,7 @@ export async function changeDealStage(
     lostReasonId?: string;
     lostNotes?: string;
     lostCompetitor?: string;
+    expectedCloseDate?: string;
   }
 ) {
   return api<{ deal: Deal; eventsEmitted: string[] }>(`/deals/${dealId}/stage`, {

@@ -52,6 +52,7 @@ type FakeDeal = {
   readOnlySyncedAt: Date | null;
   bidBoardProjectNumber: string | null;
   actualCloseDate: string | null;
+  expectedCloseDate?: string | null;
   lostReasonId: string | null;
   lostNotes: string | null;
   lostCompetitor: string | null;
@@ -314,6 +315,37 @@ describe("changeDealStage", () => {
 
     expect(tenantDb.state.deals[0]?.stageId).toBe("stage-opportunity");
     expect(tenantDb.state.stageHistory).toHaveLength(0);
+  });
+
+  it("applies an incoming expectedCloseDate: passes it to the gate as a pending value and persists it with the move", async () => {
+    const tenantDb = createTenantDb({ stageId: "stage-a", ddEstimate: null, bidEstimate: null });
+    vi.mocked(validateStageGate).mockResolvedValue({
+      allowed: true,
+      isBackwardMove: false,
+      requiresOverride: false,
+      targetStage: { id: "stage-b", name: "Estimating", slug: "estimating", isTerminal: false, isActivePipeline: true, displayOrder: 3 },
+      currentStage: { id: "stage-a", name: "Opportunity", slug: "opportunity", isTerminal: false, isActivePipeline: true, displayOrder: 1 },
+    } as never);
+
+    await changeDealStage(tenantDb as never, {
+      dealId: "deal-1",
+      targetStageId: "stage-b",
+      userId: "user-1",
+      userRole: "director",
+      expectedCloseDate: "2026-12-01",
+    });
+
+    // the gate considered the about-to-be-persisted date (so the advance succeeds in one action)
+    expect(vi.mocked(validateStageGate)).toHaveBeenCalledWith(
+      tenantDb,
+      "deal-1",
+      "stage-b",
+      "director",
+      "user-1",
+      { expectedCloseDate: "2026-12-01" }
+    );
+    // and the date is persisted with the move
+    expect(tenantDb.state.deals[0]?.expectedCloseDate).toBe("2026-12-01");
   });
 
   it("sets the skip flag before the stage UPDATE and clears it after the history insert (de-dupes the DB backstop trigger)", async () => {

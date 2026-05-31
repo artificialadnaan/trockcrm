@@ -94,6 +94,10 @@ export interface StageChangeInput {
   lostReasonId?: string;
   lostNotes?: string;
   lostCompetitor?: string;
+  // Optional expected_close_date set in the same stage-change request (the inline stage-advance
+  // prompt). Applied with the move and considered by the gate as a pending value so the advance
+  // into a stage that requires it succeeds in one action.
+  expectedCloseDate?: string | null;
   auditContext?: AuditContext;
 }
 
@@ -158,8 +162,12 @@ export async function changeDealStage(
     return { deal: currentDeal[0], stageHistory: null, eventsEmitted: [], _eventsToEmit: [] };
   }
 
-  // Step 1: Validate stage gate (includes rep ownership check)
-  const gateResult = await validateStageGate(tenantDb, dealId, targetStageId, userRole, userId);
+  // Step 1: Validate stage gate (includes rep ownership check). If the request carries an
+  // expectedCloseDate (the inline stage-advance prompt), pass it as a pending value so the gate is
+  // satisfied by the date we are about to persist below.
+  const pendingFieldValues =
+    input.expectedCloseDate !== undefined ? { expectedCloseDate: input.expectedCloseDate || null } : {};
+  const gateResult = await validateStageGate(tenantDb, dealId, targetStageId, userRole, userId, pendingFieldValues);
   assertActiveDealStageWriteTarget(gateResult.targetStage);
 
   // Step 2: Enforce rules
@@ -263,6 +271,10 @@ export async function changeDealStage(
     stageEnteredAt: stageChangedAt,
   };
   Object.assign(dealUpdates, getHoldStateAtStageEntry(deal, stageChangedAt));
+  if (input.expectedCloseDate !== undefined) {
+    // Persist the date captured by the stage-advance prompt with the move.
+    dealUpdates.expectedCloseDate = input.expectedCloseDate || null;
+  }
   const shouldResetBidBoardOwnership =
     inferredOwnership.isBidBoardOwned &&
     Boolean(estimatingBoundary) &&

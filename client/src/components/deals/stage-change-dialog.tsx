@@ -136,6 +136,7 @@ export function StageChangeDialog({
   const [lostReasonId, setLostReasonId] = useState("");
   const [lostNotes, setLostNotes] = useState("");
   const [lostCompetitor, setLostCompetitor] = useState("");
+  const [expectedCloseDate, setExpectedCloseDate] = useState("");
 
   // Run preflight check on mount
   useEffect(() => {
@@ -178,11 +179,28 @@ export function StageChangeDialog({
         return;
       }
 
+      // Require a usable (today-or-future) expected close date when the gate needs it.
+      const needsEcd = (preflight.missingRequirements?.fields ?? []).includes("expectedCloseDate");
+      if (needsEcd) {
+        const todayStr = new Date().toISOString().slice(0, 10);
+        if (!expectedCloseDate) {
+          setError("Please set an expected close date to advance.");
+          setSubmitting(false);
+          return;
+        }
+        if (expectedCloseDate < todayStr) {
+          setError("Expected close date must be today or later.");
+          setSubmitting(false);
+          return;
+        }
+      }
+
       await changeDealStage(deal.id, targetStageId, {
         overrideReason: preflight.requiresOverride ? overrideReason : undefined,
         lostReasonId: isLostTransition ? lostReasonId : undefined,
         lostNotes: isLostTransition ? lostNotes : undefined,
         lostCompetitor: isLostTransition ? lostCompetitor || undefined : undefined,
+        expectedCloseDate: needsEcd ? expectedCloseDate : undefined,
       });
 
       onSuccess();
@@ -228,7 +246,24 @@ export function StageChangeDialog({
         );
 
   const handleOpenChange = shouldForceCompletion ? () => {} : onOpenChange;
-  const requirementAction = getStageRequirementAction(deal.id, preflight?.missingRequirements, officeId);
+  // Inline expected-close-date prompt: when the only thing the gate is missing is expectedCloseDate,
+  // let the rep set a usable (today-or-future) date here and advance in one action instead of being
+  // redirected to the deal overview.
+  const missingReqs = preflight?.missingRequirements;
+  const needsExpectedCloseDate = (missingReqs?.fields ?? []).includes("expectedCloseDate");
+  const onlyExpectedCloseDateMissing =
+    needsExpectedCloseDate &&
+    (missingReqs?.fields?.length ?? 0) === 1 &&
+    (missingReqs?.documents?.length ?? 0) === 0 &&
+    (missingReqs?.approvals?.length ?? 0) === 0 &&
+    !preflight?.isBackwardMove;
+  const todayDateStr = new Date().toISOString().slice(0, 10);
+  const expectedCloseDateValid = expectedCloseDate !== "" && expectedCloseDate >= todayDateStr;
+  const unblockedByExpectedCloseDate = onlyExpectedCloseDateMissing && expectedCloseDateValid;
+  const effectiveBlocked = isBlocked && !unblockedByExpectedCloseDate;
+  const requirementAction = onlyExpectedCloseDateMissing
+    ? null
+    : getStageRequirementAction(deal.id, preflight?.missingRequirements, officeId);
 
   return (
     <Dialog open={open} onOpenChange={handleOpenChange}>
@@ -318,6 +353,26 @@ export function StageChangeDialog({
 
             {/* Gate Checklist */}
             <StageGateChecklist missingRequirements={preflight.missingRequirements} />
+
+            {/* Inline Expected Close Date prompt (set + advance in one action) */}
+            {needsExpectedCloseDate && (
+              <div className="space-y-2 border-t pt-3">
+                <Label htmlFor="expectedCloseDate">
+                  Expected Close Date <span className="text-red-500">*</span>
+                </Label>
+                <p className="text-xs text-muted-foreground">
+                  Set a target close date (today or later) to advance into Estimating -- this powers the
+                  pipeline forecast.
+                </p>
+                <Input
+                  id="expectedCloseDate"
+                  type="date"
+                  min={todayDateStr}
+                  value={expectedCloseDate}
+                  onChange={(e) => setExpectedCloseDate(e.target.value)}
+                />
+              </div>
+            )}
 
             {/* Override Reason (for directors) */}
             {preflight.requiresOverride && (
@@ -417,11 +472,11 @@ export function StageChangeDialog({
           )}
           <Button
             onClick={handleSubmit}
-            disabled={isBlocked || preflightLoading || submitting}
+            disabled={effectiveBlocked || preflightLoading || submitting}
             variant={isClosedLost ? "destructive" : "default"}
           >
             {submitting && <Loader2 className="h-4 w-4 mr-2 animate-spin" />}
-            {isBlocked
+            {effectiveBlocked
               ? isBidBoardLocked
                 ? "Read-only in CRM"
                 : "Blocked"

@@ -2553,9 +2553,12 @@ router.post("/:id/stage", async (req, res, next) => {
     await assertDealOwnerRouteAccess(req, req.params.id, {
       message: "Only the assigned rep can modify this deal",
     });
-    const { targetStageId, overrideReason, lostReasonId, lostNotes, lostCompetitor } = req.body;
+    const { targetStageId, overrideReason, lostReasonId, lostNotes, lostCompetitor, expectedCloseDate } = req.body;
     if (!targetStageId) {
       throw new AppError(400, "targetStageId is required");
+    }
+    if (expectedCloseDate != null && expectedCloseDate !== "" && !/^\d{4}-\d{2}-\d{2}$/.test(expectedCloseDate)) {
+      throw new AppError(400, "expectedCloseDate must be an ISO date (YYYY-MM-DD)");
     }
 
     const result = await changeDealStage(req.tenantDb!, {
@@ -2568,6 +2571,7 @@ router.post("/:id/stage", async (req, res, next) => {
       lostReasonId,
       lostNotes,
       lostCompetitor,
+      expectedCloseDate,
       auditContext: buildRouteAuditContext(req),
     });
 
