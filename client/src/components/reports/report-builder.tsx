@@ -265,6 +265,17 @@ export function ReportBuilder({ savedReports, onSaved }: ReportBuilderProps) {
 
         {error ? <div className="rounded-md border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">{error}</div> : null}
 
+        {result.notes && result.notes.length > 0 ? (
+          <div className="rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-800">
+            {result.notes.map((note, index) => (
+              <p key={index} className="flex items-start gap-1.5">
+                <span aria-hidden>ℹ️</span>
+                <span>{note}</span>
+              </p>
+            ))}
+          </div>
+        ) : null}
+
         {mode === "chart" ? (
           <div className="h-[420px] rounded-lg border border-slate-200 bg-white p-4">
             <ResponsiveContainer width="100%" height="100%">

@@ -1,6 +1,6 @@
 import { leads, offices, userOfficeAccess, users } from "@trock-crm/shared/schema";
 import { describe, expect, it, vi } from "vitest";
-import { createLeadService } from "../../../src/modules/leads/service.js";
+import { createLeadService, LEADS_LIST_MAX_ROWS } from "../../../src/modules/leads/service.js";
 
 vi.mock("@trock-crm/shared/schema", async () => import("../../../../shared/src/schema/index.js"));
 vi.mock("@trock-crm/shared/types", async () => import("../../../../shared/src/types/index.js"));
@@ -152,6 +152,20 @@ function applyWhere(rows: Row[], condition: unknown, usersState: Row[]) {
   }
 
   let filtered = rows;
+  // Soft-delete guard: NOT (is_active = false AND status = 'open'). Apply its real
+  // semantics (drop only soft-deleted = inactive+open) and skip its is_active/status
+  // chunks in the generic inclusion-filter loop below (which would otherwise treat the
+  // `= false` / `= 'open'` as positive inclusion filters and wrongly drop active rows).
+  const hasSoftDeleteGuard =
+    conditionText.includes("not (") &&
+    conditionText.includes("is_active") &&
+    conditionText.includes("status") &&
+    conditionText.includes("open");
+  if (hasSoftDeleteGuard) {
+    filtered = filtered.filter(
+      (row) => !(row.isActive === false && row.status === "open")
+    );
+  }
   const hasLegacyOfficeFallback =
     conditionText.includes("office_code") &&
     conditionText.includes("assigned_rep") &&
@@ -187,10 +201,17 @@ function applyWhere(rows: Row[], condition: unknown, usersState: Row[]) {
       continue;
     }
 
+    const columnName = (chunk as { name: string }).name;
+    // The soft-delete guard's is_active/status chunks are handled above as a NOT(...) unit;
+    // don't let the generic inclusion loop re-process them as positive filters.
+    if (hasSoftDeleteGuard && (columnName === "is_active" || columnName === "status")) {
+      continue;
+    }
+
     const values = extractValuesUntilNextColumn(chunks, index + 1);
     if (values.length === 0) continue;
 
-    const property = camelName((chunk as { name: string }).name);
+    const property = camelName(columnName);
     filtered = filtered.filter((row) => values.includes(row[property]));
   }
 
@@ -209,6 +230,10 @@ function projectRows(rows: Row[], fields?: Record<string, unknown>) {
   });
 }
 
+// Records the LIMIT the leads query applied (null = .limit() never called). Lets a test prove the cap
+// is OPT-IN: aggregate consumers that omit `limit` must run un-capped (Codex #577 P1).
+let lastLeadsLimit: number | null = null;
+
 function queryBuilder(rows: Row[], usersState: Row[], fields?: Record<string, unknown>) {
   let filtered = rows;
   return {
@@ -217,6 +242,11 @@ function queryBuilder(rows: Row[], usersState: Row[], fields?: Record<string, un
       return this;
     },
     orderBy() {
+      return this;
+    },
+    limit(count: number) {
+      lastLeadsLimit = count;
+      filtered = filtered.slice(0, count);
       return this;
     },
     then(onfulfilled: (value: Row[]) => unknown) {
@@ -270,7 +300,7 @@ function createTenantDb() {
 }
 
 async function listIds(input: { role: string; userId: string; scope?: "mine" | "team" | "all" }) {
-  const service = createLeadService();
+  const service = createLeadService({ getAllStages: async () => [] });
   const rows = await service.listLeads(
     createTenantDb() as never,
     { isActive: "all", scope: input.scope, activeOfficeId: "office-1" },
@@ -330,7 +360,7 @@ describe("listLeads scope filtering", () => {
   });
 
   it("narrows team scope to a specific assigned rep when both filters are set", async () => {
-    const service = createLeadService();
+    const service = createLeadService({ getAllStages: async () => [] });
     const rows = await service.listLeads(
       createTenantDb() as never,
       { isActive: "all", scope: "team", activeOfficeId: "office-1", assignedRepId: "rep-team-1" },
@@ -354,5 +384,42 @@ describe("listLeads scope filtering", () => {
       "lead-subscribed",
       "lead-legacy-office-fallback",
     ]);
+  });
+
+  it("caps the returned rows at the requested limit so the FilterBar list is never an unbounded fetch (Codex #577 P2)", async () => {
+    lastLeadsLimit = null;
+    const service = createLeadService({ getAllStages: async () => [] });
+    const rows = await service.listLeads(
+      createTenantDb() as never,
+      { isActive: "all", scope: "all", activeOfficeId: "office-1", limit: 2 },
+      "director",
+      "director-1"
+    );
+    expect(rows).toHaveLength(2);
+    expect(lastLeadsLimit).toBe(2);
+  });
+
+  it("does NOT cap when no limit is requested — legacy aggregate consumers (metrics, rep totals, portfolio) get the FULL set (Codex #577 P1)", async () => {
+    lastLeadsLimit = null;
+    const service = createLeadService({ getAllStages: async () => [] });
+    await service.listLeads(
+      createTenantDb() as never,
+      { isActive: "all", scope: "all", activeOfficeId: "office-1" },
+      "director",
+      "director-1"
+    );
+    expect(lastLeadsLimit).toBeNull(); // .limit() never applied → unbounded full set
+  });
+
+  it("clamps an over-large requested limit to the hard ceiling", async () => {
+    lastLeadsLimit = null;
+    const service = createLeadService({ getAllStages: async () => [] });
+    await service.listLeads(
+      createTenantDb() as never,
+      { isActive: "all", scope: "all", activeOfficeId: "office-1", limit: 100000 },
+      "director",
+      "director-1"
+    );
+    expect(lastLeadsLimit).toBe(LEADS_LIST_MAX_ROWS);
   });
 });

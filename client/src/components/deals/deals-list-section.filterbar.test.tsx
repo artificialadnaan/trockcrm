@@ -4,7 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { MemoryRouter, useSearchParams } from "react-router-dom";
-import { DealsListSection } from "./deals-list-section";
+import { DealsListSection, shouldResetNamespacedPage } from "./deals-list-section";
 import type { FilterDimension, FilterBarOptions } from "@/components/filters/filter-bar";
 
 (globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
@@ -88,6 +88,9 @@ const FB_DIMENSIONS: FilterDimension[] = [
   "projectType",
   "value",
   "sort",
+  // stalled is part of an outcome-aware mount's row (DEAL_LIST_FILTERBAR_DIMENSIONS); include it so the
+  // dimension-scoped param pick honors minAgeDays/maxAgeDays the way the real pipeline/drill-down bars do.
+  "stalled",
 ];
 const FB_OPTIONS: FilterBarOptions = {
   reps: [{ value: "rep-1", label: "Brett Jones" }],
@@ -388,5 +391,94 @@ describe("DealsListSection — FilterBar (URL) mode (Slice 7 proving ground)", (
     clickSpy.mockRestore();
     (URL as { createObjectURL?: unknown }).createObjectURL = realCreate;
     (URL as { revokeObjectURL?: unknown }).revokeObjectURL = realRevoke;
+  });
+
+  // Param namespace (paramPrefix): when the bar mounts on a surface that already owns bare URL params
+  // (the director/stage drill-downs), it reads/writes its keys under a prefix (fb_) so the two URL
+  // spaces stay disjoint. The mount threads filterBar.paramPrefix into useFilterState(prefix).
+  describe("paramPrefix namespace (drill-down mounts share a URL with the host page)", () => {
+    it("reads the bar's NAMESPACED (fb_) params when a paramPrefix is set", async () => {
+      await renderFB(
+        "/deals?fb_dateFrom=2026-05-01&fb_dateTo=2026-05-27&fb_stageIds=stage-opportunity",
+        {},
+        { ...FB_PROP, paramPrefix: "fb_" }
+      );
+      const call = lastDealsCall();
+      expect(call.dateFrom).toBe("2026-05-01");
+      expect(call.dateTo).toBe("2026-05-27");
+      expect(call.stageIds).toEqual(["stage-opportunity"]);
+    });
+
+    it("does NOT read a BARE host param when a paramPrefix is set (namespace isolation)", async () => {
+      // A bare ?dateFrom belongs to the host page's URL space, not the bar's — with the prefix on, the
+      // bar must ignore it (it reads only fb_dateFrom), so a host date can't leak into the bar's query.
+      await renderFB("/deals?dateFrom=2026-05-01", {}, { ...FB_PROP, paramPrefix: "fb_" });
+      expect(lastDealsCall().dateFrom).toBeUndefined();
+    });
+
+    it("still reads BARE params when NO paramPrefix is set (the pipeline/base mount is unchanged)", async () => {
+      await renderFB("/deals?dateFrom=2026-05-01", {}, FB_PROP);
+      expect(lastDealsCall().dateFrom).toBe("2026-05-01");
+    });
+  });
+
+  // Codex P2s: FilterBar mode must preserve two legacy behaviors the drill-down mounts rely on.
+  describe("drill-down defaults (Codex P2)", () => {
+    it("applies filterBar.defaultSort when the URL carries no sort (the view's intended order)", async () => {
+      await renderFB("/deals", {}, { ...FB_PROP, defaultSort: { key: "contract_signed_date", dir: "desc" } });
+      const call = lastDealsCall();
+      expect(call.sortBy).toBe("contract_signed_date");
+      expect(call.sortDir).toBe("desc");
+    });
+
+    it("lets an explicit URL sort override filterBar.defaultSort", async () => {
+      await renderFB("/deals?sortBy=created_at&sortDir=asc", {}, { ...FB_PROP, defaultSort: { key: "contract_signed_date", dir: "desc" } });
+      const call = lastDealsCall();
+      expect(call.sortBy).toBe("created_at");
+      expect(call.sortDir).toBe("asc");
+    });
+
+    it("keeps the baseFilters date window a FLOOR — a broader bar date can't widen past it", async () => {
+      await renderFB(
+        "/deals?dateFrom=2026-04-01&dateTo=2026-06-30",
+        { baseFilters: { dateFrom: "2026-05-01", dateTo: "2026-05-31" } }
+      );
+      const call = lastDealsCall();
+      expect(call.dateFrom).toBe("2026-05-01"); // floor start held (bar's earlier 04-01 clamped up)
+      expect(call.dateTo).toBe("2026-05-31"); // floor end held (bar's later 06-30 clamped down)
+    });
+
+    it("lets a narrower bar date intersect within the floor", async () => {
+      await renderFB(
+        "/deals?dateFrom=2026-05-10&dateTo=2026-05-20",
+        { baseFilters: { dateFrom: "2026-05-01", dateTo: "2026-05-31" } }
+      );
+      const call = lastDealsCall();
+      expect(call.dateFrom).toBe("2026-05-10");
+      expect(call.dateTo).toBe("2026-05-20");
+    });
+
+    it("ignores a URL param for a dimension the mount does not render (hidden-dim leak guard)", async () => {
+      // Rep dimension removed -> a stray ?assignedRepId in the URL has no visible control and must not
+      // reach the query (else it would silently override a host-owned / pinned filter).
+      const noRep = { ...FB_PROP, dimensions: FB_DIMENSIONS.filter((d) => d !== "rep") };
+      await renderFB("/deals?assignedRepId=rep-1", {}, noRep);
+      expect(lastDealsCall().assignedRepId).toBeUndefined();
+    });
+  });
+});
+
+describe("shouldResetNamespacedPage (fb_ page reset on host change — Codex P2)", () => {
+  it("does NOT reset on first observation (a bookmarked fb_page>1 loads intact)", () => {
+    expect(shouldResetNamespacedPage(null, "mine|{}", 5)).toBe(false);
+  });
+  it("does NOT reset when the host key is unchanged", () => {
+    expect(shouldResetNamespacedPage("mine|{}", "mine|{}", 5)).toBe(false);
+  });
+  it("resets when the host key changes and the page is past 1", () => {
+    expect(shouldResetNamespacedPage("mine|{a:1}", "all|{a:1}", 5)).toBe(true);
+  });
+  it("does NOT reset when already on page 1", () => {
+    expect(shouldResetNamespacedPage("mine|{}", "all|{}", 1)).toBe(false);
   });
 });

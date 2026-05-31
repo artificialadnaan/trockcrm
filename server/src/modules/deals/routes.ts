@@ -864,6 +864,7 @@ router.get("/", async (req, res, next) => {
       dateTo,
       stageEntryDateWindow:
         req.query.stage_entry_window === "true" || req.query.stageEntryDateWindow === "true",
+      excludeOnHold: req.query.exclude_on_hold === "true" || req.query.excludeOnHold === "true",
       sortBy: req.query.sortBy as any,
       sortDir: req.query.sortDir as "asc" | "desc" | undefined,
       page: req.query.page ? parseInt(req.query.page as string, 10) : undefined,

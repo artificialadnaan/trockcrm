@@ -445,8 +445,8 @@ describe("DealsListSection", () => {
     expect(call.assignedRepId).toBe("rep-A"); // dl_assignedRepId dropped (hidden), baseFilters rep preserved
   });
 
-  it("NESTS the bar Rep within the inherited header Rep: a same/one-sided rep applies, an OUT-OF-SCOPE bar rep clamps to the header scope (Adnaan)", async () => {
-    // header rep-A + bar rep-A (same) → rep-A
+  it("NESTS the bar Rep within the header Rep via the dimension model (post-#590): the base mount DROPS the Rep dimension when the header pins a rep, so a bar rep never overrides it", async () => {
+    // header rep-A + bar rep-A, Rep rendered (header = a rep but dim kept) → rep-A (no conflict)
     expect(
       (await renderAt("/deals?dl_assignedRepId=rep-A", {
         workflowFamily: "deal",
@@ -454,12 +454,14 @@ describe("DealsListSection", () => {
         filterBar: { dimensions: ["search", "rep", "sort"], paramPrefix: "dl_" },
       })).assignedRepId
     ).toBe("rep-A");
-    // header rep-A + bar rep-B (out of scope) → CLAMP to the header rep-A (they nest, never error)
+    // The real nesting guard is the mount DROPPING the Rep dimension when the header pins a rep: with Rep
+    // NOT a dimension, pickFilterBarValueForDimensions drops the bar's dl_assignedRepId and the header
+    // (baseFilters) rep wins — a bookmarked bar rep can never override the header rep.
     expect(
       (await renderAt("/deals?dl_assignedRepId=rep-B", {
         workflowFamily: "deal",
         baseFilters: { assignedRepId: "rep-A" },
-        filterBar: { dimensions: ["search", "rep", "sort"], paramPrefix: "dl_" },
+        filterBar: { dimensions: ["search", "sort"], paramPrefix: "dl_" }, // Rep dropped (header pins a rep)
       })).assignedRepId
     ).toBe("rep-A");
   });
@@ -521,21 +523,19 @@ describe("DealsListSection", () => {
     container.remove();
   });
 
-  it("seeds the query sort from initialSort when no namespaced sort is set, preserving the base default ordering (Codex #589)", async () => {
+  it("seeds the query sort from filterBar.defaultSort when no namespaced sort is set, preserving the base default ordering (Codex #589 / #590 defaultSort)", async () => {
     const call = await renderAt("/deals", {
       workflowFamily: "deal",
-      initialSort: { key: "updated_at", dir: "desc" },
-      filterBar: { dimensions: ["search", "sort"], paramPrefix: "dl_" },
+      filterBar: { dimensions: ["search", "sort"], paramPrefix: "dl_", defaultSort: { key: "updated_at", dir: "desc" } },
     });
     expect(call.sortBy).toBe("updated_at");
     expect(call.sortDir).toBe("desc");
   });
 
-  it("uses an explicit namespaced sort over the initialSort default", async () => {
+  it("uses an explicit namespaced sort over the filterBar.defaultSort default", async () => {
     const call = await renderAt("/deals?dl_sortBy=created_at&dl_sortDir=asc", {
       workflowFamily: "deal",
-      initialSort: { key: "updated_at", dir: "desc" },
-      filterBar: { dimensions: ["search", "sort"], paramPrefix: "dl_" },
+      filterBar: { dimensions: ["search", "sort"], paramPrefix: "dl_", defaultSort: { key: "updated_at", dir: "desc" } },
     });
     expect(call.sortBy).toBe("created_at");
     expect(call.sortDir).toBe("asc");

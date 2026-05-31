@@ -40,7 +40,12 @@ import { listPaginationIconButtonClassName } from "@/components/shared/list-pagi
 import { AtRiskBadge } from "@/components/deals/at-risk-badge";
 import { useFilterState } from "@/components/filters/use-filter-state";
 import { FilterBar, type FilterDimension, type FilterBarOptions } from "@/components/filters/filter-bar";
-import { applyBoardVisibilityDefaults, filterBarValueToDealFilters, getDealDisplayDate } from "./deals-filterbar-adapter";
+import {
+  applyBoardVisibilityDefaults,
+  filterBarValueToDealFilters,
+  getDealDisplayDate,
+  pickFilterBarValueForDimensions,
+} from "./deals-filterbar-adapter";
 
 const DEAL_STAGE_ORDER = [
   "opportunity",
@@ -116,12 +121,20 @@ interface DealsListSectionProps {
      */
     stageIdFamilies?: string[][];
     /**
-     * Namespace this list's FilterBar URL params (e.g. "dl_"). Default "" (bare) — the pipeline mount
-     * owns its whole URL. A surface whose list shares a URL with sibling controls (e.g. the /deals base
-     * list under the dashboard's bare ?assignedRepId/?scope/?period) passes a prefix so the list's
-     * filters never collide with (or mutate) those page controls — the ll_/dl_ pattern (Codex #577).
+     * URL param namespace for surfaces that already own bare URL params (the /deals base list + the
+     * director/stage drill-downs, where scope/period/filter/page live un-prefixed). When set, the bar
+     * reads/writes its keys as `${paramPrefix}${key}` (dl_stageIds, fb_dateFrom, …) via
+     * useFilterState(prefix), so a bar control never clobbers the host's params. Omit (default "") at the
+     * pipeline mount, where the bar owns the whole URL — byte-identical to today (Codex #577).
      */
     paramPrefix?: string;
+    /**
+     * Default sort for FilterBar mode when the URL carries no sort (no `${prefix}sortBy`). The bar's
+     * sort is URL-backed, so without this a default/bookmarked drill-down would fall to the server
+     * default (created_at desc) instead of the view's intended order (e.g. won → contract_signed_date
+     * desc, active → display_date desc). Opt-in: omit it (pipeline/base) to keep the server default.
+     */
+    defaultSort?: DealListSortState;
   };
 }
 
@@ -178,6 +191,31 @@ function getDealPropertyLabel(deal: Deal) {
 
 export function getDealCloseDate(deal: Deal) {
   return deal.actualCloseDate ?? deal.expectedCloseDate ?? null;
+}
+
+/** Intersect two date bounds (YYYY-MM-DD, lexicographic = chronological). `laterDate` = the max-start
+ *  (window can't begin before the floor); `earlierDate` = the min-end. Either side undefined → the other. */
+export function laterDate(a: string | undefined, b: string | undefined): string | undefined {
+  if (!a) return b;
+  if (!b) return a;
+  return a > b ? a : b;
+}
+export function earlierDate(a: string | undefined, b: string | undefined): string | undefined {
+  if (!a) return b;
+  if (!b) return a;
+  return a < b ? a : b;
+}
+
+/** Should a namespaced (fb_) FilterBar page snap back to 1? Reset only when a HOST-level key actually
+ *  CHANGES (not the first observation, so a bookmarked fb_page>1 loads intact) and we are past page 1. */
+export function shouldResetNamespacedPage(
+  previousKey: string | null,
+  nextKey: string,
+  currentPage: number
+): boolean {
+  if (previousKey === null) return false;
+  if (previousKey === nextKey) return false;
+  return currentPage > 1;
 }
 
 function renderStageChip(label: string) {
@@ -612,7 +650,9 @@ export function DealsListSection({
 }: DealsListSectionProps) {
   const navigate = useNavigate();
   // Slice 7: opt-in URL-backed filter state. useFilterState is always called (hooks can't be
-  // conditional); its value only drives the query/UI when filterBarMode is on.
+  // conditional); its value only drives the query/UI when filterBarMode is on. The optional paramPrefix
+  // namespaces the bar's keys (dl_*/fb_*) on the base list + drill-down surfaces that share their URL with
+  // a host page; default "" = bare keys (the pipeline mount), so existing callers are unchanged.
   const { filters: urlFilters, setFilters, resetFilters } = useFilterState(filterBar?.paramPrefix ?? "");
   const filterBarMode = Boolean(filterBar);
   // D-15: legacy "outcome" axis — the rep drill-down feeds an externalDateRange that
@@ -705,35 +745,37 @@ export function DealsListSection({
     );
   }, [initialSort]);
 
-  // Reset the namespaced page when an INHERITED header filter (scope OR the inherited Rep) changes in
-  // FilterBar mode. The URL-backed dl_page is not a FilterBar dimension here, and the legacy setPage(1)
-  // effect only resets local page state — so flipping Mine/All OR switching the header Rep would otherwise
-  // carry a stale dl_page into the new scope and render an empty/skipped page even when matching deals
-  // exist (the new rep's list may have fewer pages). Both are header-owned, so both reset (Codex #589).
-  const inheritedRep = baseFilters?.assignedRepId;
-  const prevScopeRef = useRef(scope);
-  const prevInheritedRepRef = useRef(inheritedRep);
-  // Detect a header scope/rep change SYNCHRONOUSLY in this render: the refs hold the last COMMITTED values;
-  // the effect below advances them post-commit. The effect persists dl_page=1 to the URL, but that's a
-  // passive post-render effect — the query in THIS render would otherwise fire with the stale dl_page
-  // FIRST (a wasted/empty page-N request) before the URL reset lands. We clamp the effective page below.
-  const headerScopeChangedThisRender =
-    filterBarMode && (prevScopeRef.current !== scope || prevInheritedRepRef.current !== inheritedRep);
+  // FilterBar mode keeps pagination in the URL (e.g. dl_page/fb_page); the legacy setPage(1) resets above
+  // never touch it. When a HOST-level input changes (page scope, OR the host's baseFilters / locked owner /
+  // inherited Rep — all captured by drilldownContextKey, which JSON-stringifies baseFilters), snap the
+  // namespaced page back to 1 so the list never requests an out-of-range page of the new, smaller result
+  // set (Codex P2 / #589). Gated on paramPrefix (the base + drill-down mounts); the prefix-less pipeline
+  // mount resets its page at the page level already. The ref skips the first run so a bookmarked page>1
+  // still loads.
+  const hostPageResetKeyRef = useRef<string | null>(null);
+  const hostPageResetKey =
+    filterBarMode && filterBar?.paramPrefix ? `${scope ?? ""}|${drilldownContextKey}` : null;
+  // SYNCHRONOUS clamp (Codex #589 r3): the reset effect below is passive and runs post-commit, so the query
+  // in THIS render would otherwise fire with the stale namespaced page FIRST (a wasted/empty page-N request)
+  // before the URL reset lands. The ref still holds the last COMMITTED key (the effect advances it
+  // post-commit), so a key change THIS render means a host input just changed — clamp the effective page.
+  const hostKeyChangedThisRender =
+    hostPageResetKey !== null &&
+    hostPageResetKeyRef.current !== null &&
+    hostPageResetKeyRef.current !== hostPageResetKey;
   useEffect(() => {
-    if (!filterBarMode) return;
-    const scopeChanged = prevScopeRef.current !== scope;
-    const repChanged = prevInheritedRepRef.current !== inheritedRep;
-    prevScopeRef.current = scope;
-    prevInheritedRepRef.current = inheritedRep;
-    if (!scopeChanged && !repChanged) return;
-    if ((urlFilters.page ?? 1) > 1) setFilters({}); // empty patch page-resets via mergeFilterParams
-  }, [scope, inheritedRep, filterBarMode, urlFilters.page, setFilters]);
+    if (!filterBarMode || !filterBar?.paramPrefix) return;
+    const key = `${scope ?? ""}|${drilldownContextKey}`;
+    const previous = hostPageResetKeyRef.current;
+    hostPageResetKeyRef.current = key;
+    if (shouldResetNamespacedPage(previous, key, urlFilters.page ?? 1)) setFilters({ page: 1 });
+  }, [filterBarMode, filterBar?.paramPrefix, scope, drilldownContextKey, urlFilters.page, setFilters]);
 
   // Pagination + query-enable diverge by mode: FilterBar mode reads page from the URL and never gates
   // on stage-slug loading (stageIds arrive directly from the URL); legacy keeps local page + the
-  // stage-aware enable gate. goToPage writes wherever the page lives. On a scope/rep change clamp to page 1
-  // for THIS render so the racing effect's URL reset is never beaten by a stale page-N query (Codex #589).
-  const currentPage = filterBarMode ? (headerScopeChangedThisRender ? 1 : urlFilters.page ?? 1) : page;
+  // stage-aware enable gate. goToPage writes wherever the page lives. On a host scope/baseFilters/rep change
+  // clamp to page 1 for THIS render so the racing reset effect is never beaten by a stale page-N query (#589).
+  const currentPage = filterBarMode ? (hostKeyChangedThisRender ? 1 : urlFilters.page ?? 1) : page;
   const queryEnabled = filterBarMode ? true : listQueryState.enabled;
   const goToPage = filterBarMode ? (next: number) => setFilters({ page: next }) : setPage;
 
@@ -766,36 +808,35 @@ export function DealsListSection({
   // FilterBar mode: URL value -> contract DealFilters (outcome-aware date, status, workflow, value,
   // stalled). baseFilters still layer (parent presets); scope inherits from the page unless the URL
   // sets it; the section owns page/limit. filter-axis == display-axis (displayDate rendered below).
-  // Rep reconciliation between the inherited (header) Rep scope and the bar's own Rep dimension:
-  //  - Rep dimension NOT rendered: a stale dl_assignedRepId from a shared/bookmarked URL must not
-  //    silently query a different rep than the header/board show — drop it (Codex #589).
-  //  - Rep dimension rendered + a header Rep is inherited (baseFilters): the bar NESTS within the header
-  //    scope (the header is the broad scope; the bar only refines WITHIN it). A bar Rep equal to the
-  //    header rep is a no-op; a bar Rep OUTSIDE the header scope (e.g. a bookmarked dl_assignedRepId)
-  //    can't intersect, so clamp to the header scope rather than override it — they nest, never
-  //    conflict-to-error (Adnaan). The /deals mount now DROPS the Rep dimension whenever the header pins a
-  //    concrete rep (Codex #589 P2), so in practice the first branch handles that case; this clamp stays as
-  //    defense-in-depth for any mount that both renders Rep and inherits a header rep.
-  const fbFilters = filterBarValueToDealFilters(urlFilters);
-  // inheritedRep (baseFilters?.assignedRepId) is declared above for the page-reset effect.
-  if (!(filterBar?.dimensions.includes("rep") ?? false)) {
-    delete fbFilters.assignedRepId;
-  } else if (inheritedRep && fbFilters.assignedRepId && fbFilters.assignedRepId !== inheritedRep) {
-    delete fbFilters.assignedRepId;
-  }
+  // Drop URL params for dimensions this mount doesn't render before mapping (Codex P2 / #589): a stray
+  // prefixed key (dl_/fb_stageIds on a stage-pinned mount, dl_/fb_assignedRepId where Rep is hidden) must
+  // not override a pinned/host-owned filter with no visible control to clear it. The /deals base mount
+  // drops the Rep dimension when the header pins a concrete rep, so this also enforces the header-Rep
+  // nesting (a bookmarked dl_assignedRepId can't override the header's rep).
+  const visibleUrlFilters = pickFilterBarValueForDimensions(urlFilters, filterBar?.dimensions ?? []);
+  const barFilters = applyBoardVisibilityDefaults(filterBarValueToDealFilters(visibleUrlFilters), {
+    defaultStageIds: filterBar?.defaultStageIds,
+    terminalStageIds: filterBar?.terminalStageIds,
+    // Expand an explicit canonical stage pick to its full workflow-family so the list matches the board
+    // column the option represents (Codex #589 P1). Opt-in; canonical-only mounts pass through unchanged.
+    stageIdFamilies: filterBar?.stageIdFamilies,
+  });
   const filterBarDealsArgs: DealFilters = {
     ...baseFilters,
-    ...applyBoardVisibilityDefaults(fbFilters, {
-      defaultStageIds: filterBar?.defaultStageIds,
-      terminalStageIds: filterBar?.terminalStageIds,
-      stageIdFamilies: filterBar?.stageIdFamilies,
-    }),
-    // Default to the mount's initialSort when the URL carries no explicit dl_sort, so a base list keeps
-    // its prior default ordering (e.g. /deals = updated_at desc) instead of the server's created_at
-    // fallback (Codex #589). /pipeline passes no initialSort → DEFAULT_SORT_STATE (created_at desc), which
-    // is the same server default, so its behavior is unchanged.
-    sortBy: fbFilters.sortBy ?? initialSort.key,
-    sortDir: fbFilters.sortDir ?? initialSort.dir,
+    ...barFilters,
+    // Default the mount's intended sort when the URL carries none (Codex P2 / #589): FilterBar sort is
+    // URL-backed, so a default/bookmarked mount would otherwise drop the view's order (won ->
+    // contract_signed_date desc, active -> display_date desc, /deals base -> updated_at desc) to the
+    // server default created_at desc. Opt-in via filterBar.defaultSort, so pipeline keeps the server default.
+    sortBy: barFilters.sortBy ?? filterBar?.defaultSort?.key,
+    sortDir: barFilters.sortDir ?? filterBar?.defaultSort?.dir,
+    // Keep the host's date window a FLOOR: intersect the bar's outcome-axis date with baseFilters'
+    // dateFrom/dateTo rather than overwriting it, so a drill-down's / the /deals ?period window can't be
+    // widened past what the KPI/board showed (Codex P2). This IS the date nesting for the /deals top period
+    // control — ?period sets baseFilters.dateFrom/To, the bar Date narrows WITHIN it. No-op with no floor
+    // (pipeline) or no bar date; YYYY-MM-DD compares lexicographically (later/earlier = max-start/min-end).
+    dateFrom: laterDate(baseFilters?.dateFrom, barFilters.dateFrom),
+    dateTo: earlierDate(baseFilters?.dateTo, barFilters.dateTo),
     // When the bar is outcome-aware (stageEntryDateEnabled — it hides the honest "current state" note and
     // presents Date as outcome-aware + shows Stalled), force the server to bound open rows on
     // stage_entered_at for ANY active date/age filter, regardless of ENABLE_STAGE_ENTRY_DATE_FILTER. The

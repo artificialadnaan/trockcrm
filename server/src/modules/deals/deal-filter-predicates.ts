@@ -1,6 +1,10 @@
 import { and, eq, isNull, sql, type SQL } from "drizzle-orm";
 import { deals } from "@trock-crm/shared/schema";
-import { aliasedEffectiveDealValueSql, aliasedEffectiveWonDealValueSql } from "../shared/deal-value-sql.js";
+import {
+  aliasedActiveDealCountFilterSql,
+  aliasedEffectiveDealValueSql,
+  aliasedEffectiveWonDealValueSql,
+} from "../shared/deal-value-sql.js";
 import {
   buildDealOutcomeDateScope,
   type DealDateScopeContext,
@@ -49,6 +53,13 @@ export interface DealFilterBarInput {
   maxAgeDays?: number;
   dateFrom?: string;
   dateTo?: string;
+  /**
+   * Non-UI flag: exclude on-hold deals from the row set, matching the Won board/summary's reportable
+   * filter (COALESCE(on_hold,false)=false). On-hold was the HubSpot-migration parking lot (unvalidated
+   * artifacts), so the Won summary excludes it; the Won stage-page/drill-down list opts in here to
+   * reconcile to that count. Opt-in — omit to include on-hold (every non-Won caller, unchanged).
+   */
+  excludeOnHold?: boolean;
 }
 
 /** Context shared by the gated/classified predicates (date + stalled). */
@@ -239,6 +250,12 @@ export function buildOutcomeAwareDatePredicate(
   return buildDealOutcomeDateScope({ from: input.dateFrom, to: input.dateTo }, ctx);
 }
 
+/** Exclude on-hold (migration parking-lot) deals — the SAME predicate the Won board/summary uses
+ *  (reportableDealFilterSql). Opt-in via input.excludeOnHold; undefined → no narrowing. */
+export function buildExcludeOnHoldPredicate(input: DealFilterBarInput): SQL | undefined {
+  return input.excludeOnHold ? aliasedActiveDealCountFilterSql("deals") : undefined;
+}
+
 export type DealFilterPredicate = (
   input: DealFilterBarInput,
   ctx: DealFilterContext
@@ -254,6 +271,7 @@ export const DEAL_FILTER_PREDICATES: DealFilterPredicate[] = [
   (input, ctx) => buildValueRangePredicate(input, ctx),
   (input, ctx) => buildStalledPredicate(input, ctx),
   (input, ctx) => buildOutcomeAwareDatePredicate(input, ctx),
+  (input) => buildExcludeOnHoldPredicate(input),
 ];
 
 /**

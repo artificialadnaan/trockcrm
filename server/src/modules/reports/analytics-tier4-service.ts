@@ -8,7 +8,9 @@ import {
   aliasedEffectiveWonDealValueSql,
   aliasedOpenPipelineForecastFirstDealValueSql,
   aliasedReportableDealFilterSql,
+  aliasedWonHsClosedWonDateSql,
 } from "../shared/deal-value-sql.js";
+import { aliasedHasUsableWonDateSql } from "../deals/service.js";
 import { LOST_STAGE_SLUGS, WON_STAGE_SLUGS } from "../shared/pipeline-terminal-stages.js";
 
 type TenantDb = NodePgDatabase<typeof schema>;
@@ -151,6 +153,21 @@ function buildWhere(filters: ReturnType<typeof normalizeFilters>, dateColumn: SQ
   `;
 }
 
+// Won-period window on the canonical deals.won_closed_date. Uses DATE-typed bounds (no
+// AT TIME ZONE) so the comparison is session-time-zone-independent — matching the other
+// won_closed_date report sites and the dashboard getWonCloseSummary. Routing the date column
+// through buildWhere instead would compare it to `AT TIME ZONE 'UTC'` timestamptz bounds, which
+// for a non-UTC DB session (office_dallas runs Central) shifts boundary dates and can drop/move
+// a win whose canonical won date equals the period edge.
+function buildWonClosedWhere(filters: ReturnType<typeof normalizeFilters>) {
+  const won = aliasedWonHsClosedWonDateSql("d");
+  return sql`
+    ${buildScopeWhere(filters)}
+    AND ${won} >= ${filters.from}::date
+    AND ${won} <= ${filters.to}::date
+  `;
+}
+
 function buildScopeWhere(filters: ReturnType<typeof normalizeFilters>) {
   const ownerFilter = filters.ownerIds.length
     ? sql`AND d.assigned_rep_id IN (${sql.join(filters.ownerIds.map((id) => sql`${id}::uuid`), sql`, `)})`
@@ -253,7 +270,10 @@ export async function getMarketMixReport(
   const filters = normalizeFilters(input);
   return cached(tenantDb, cacheKey("market-mix", filters), async () => {
     const where = buildWhere(filters);
-    const outcomeWhere = buildWhere(filters, sql`COALESCE(d.actual_close_date, d.lost_at, d.updated_at)`);
+    // Quarterly Won value is won-only (psc.slug IN WON below), so window + bucket by the canonical
+    // deals.won_closed_date. The old COALESCE(actual_close_date, lost_at, updated_at) counted
+    // reseed-contaminated / touched-in-period wins into the wrong quarter.
+    const outcomeWhere = buildWonClosedWhere(filters);
     const verticalExpr = sql`COALESCE(NULLIF(c.industry::text, ''), NULLIF(d.project_type, ''), 'Uncategorized')`;
     const regionExpr = sql`COALESCE(NULLIF(c.region, ''), NULLIF(rc.name, ''), NULLIF(p.city, ''), NULLIF(p.state, ''), NULLIF(d.property_city, ''), NULLIF(d.property_state, ''), 'Uncategorized')`;
     const propertyTypeExpr = sql`COALESCE(NULLIF(p.property_type, ''), NULLIF(p.type::text, ''), 'Uncategorized')`;
@@ -332,7 +352,7 @@ export async function getMarketMixReport(
       `);
     const quarterlyRows = await tenantDb.execute(sql`
         SELECT
-          CONCAT(EXTRACT(YEAR FROM COALESCE(d.actual_close_date, d.updated_at) AT TIME ZONE 'UTC')::int, ' Q', EXTRACT(QUARTER FROM COALESCE(d.actual_close_date, d.updated_at) AT TIME ZONE 'UTC')::int) AS quarter,
+          CONCAT(EXTRACT(YEAR FROM ${aliasedWonHsClosedWonDateSql("d")})::int, ' Q', EXTRACT(QUARTER FROM ${aliasedWonHsClosedWonDateSql("d")})::int) AS quarter,
           ${verticalExpr} AS vertical,
           COALESCE(SUM(${wonValueExpr}), 0)::numeric AS won_value
         FROM deals d
@@ -343,6 +363,7 @@ export async function getMarketMixReport(
         JOIN pipeline_stage_config psc ON psc.id = d.stage_id
         WHERE ${outcomeWhere}
           AND psc.slug IN (${sqlStringList(WON_STAGE_SLUGS)})
+          AND ${aliasedHasUsableWonDateSql("d")}
         GROUP BY quarter, ${verticalExpr}
         ORDER BY quarter ASC, won_value DESC
       `);
@@ -656,13 +677,14 @@ export async function getExecutiveTrendsReport(
           GROUP BY TO_CHAR(dsh.created_at AT TIME ZONE 'UTC', 'YYYY-MM')
         ),
         won_fallback AS (
-          SELECT TO_CHAR(COALESCE((d.actual_close_date AT TIME ZONE 'UTC'), d.updated_at) AT TIME ZONE 'UTC', 'YYYY-MM') AS month,
+          SELECT TO_CHAR(${aliasedWonHsClosedWonDateSql("d")}, 'YYYY-MM') AS month,
             COUNT(DISTINCT d.id)::int AS won_deals
           FROM deals d
           LEFT JOIN users u ON u.id = d.assigned_rep_id
           JOIN pipeline_stage_config psc ON psc.id = d.stage_id
-          WHERE ${buildWhere(filters, sql`COALESCE((d.actual_close_date AT TIME ZONE 'UTC'), d.updated_at)`)}
+          WHERE ${buildWonClosedWhere(filters)}
             AND psc.slug IN (${sqlStringList(WON_STAGE_SLUGS)})
+            AND ${aliasedHasUsableWonDateSql("d")}
             AND NOT EXISTS (
               SELECT 1
               FROM deal_stage_history history
@@ -670,7 +692,7 @@ export async function getExecutiveTrendsReport(
               WHERE history.deal_id = d.id
                 AND history_stage.slug IN (${sqlStringList(WON_STAGE_SLUGS)})
             )
-          GROUP BY TO_CHAR(COALESCE((d.actual_close_date AT TIME ZONE 'UTC'), d.updated_at) AT TIME ZONE 'UTC', 'YYYY-MM')
+          GROUP BY TO_CHAR(${aliasedWonHsClosedWonDateSql("d")}, 'YYYY-MM')
         ),
         lost_history AS (
           SELECT TO_CHAR(dsh.created_at AT TIME ZONE 'UTC', 'YYYY-MM') AS month,

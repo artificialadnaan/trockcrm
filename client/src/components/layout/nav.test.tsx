@@ -126,7 +126,7 @@ describe("mobile primary tabs", () => {
     authMock.user.role = "director";
     const node = renderNode(<MobileNav />);
 
-    const dealsTab = findLink(node, "Deals");
+    const dealsTab = findLink(node, "Deals Dashboard");
     const leadsTab = findLink(node, "Leads");
     expect(dealsTab?.getAttribute("href")).toBe("/deals");
     expect(leadsTab?.getAttribute("href")).toBe("/leads");
@@ -136,7 +136,7 @@ describe("mobile primary tabs", () => {
     authMock.user.role = "rep";
     const node = renderNode(<MobileNav />);
 
-    const dealsTab = findLink(node, "Deals");
+    const dealsTab = findLink(node, "Deals Dashboard");
     const leadsTab = findLink(node, "Leads");
     expect(dealsTab?.getAttribute("href")).toBe("/deals");
     expect(leadsTab?.getAttribute("href")).toBe("/leads");
@@ -173,7 +173,7 @@ describe("mobile primary tabs", () => {
     const node = renderNode(<MobileNav />);
 
     // No CRM primary tabs for a field-only role.
-    expect(findLink(node, "Deals")).toBeUndefined();
+    expect(findLink(node, "Deals Dashboard")).toBeUndefined();
     expect(findLink(node, "Leads")).toBeUndefined();
     expect(findLink(node, "Pipeline")).toBeUndefined();
 

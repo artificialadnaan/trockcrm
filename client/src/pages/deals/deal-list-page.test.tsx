@@ -123,8 +123,8 @@ vi.mock("@/hooks/use-deals", () => ({
 
 vi.mock("@/hooks/use-pipeline-config", () => ({
   usePipelineStages: mocks.usePipelineStagesMock,
-  useRegions: () => ({ regions: [] }),
-  useProjectTypes: () => ({ projectTypes: [] }),
+  useRegions: () => ({ regions: [{ id: "region-1", name: "DFW" }] }),
+  useProjectTypes: () => ({ projectTypes: [{ id: "type-1", name: "Multifamily" }] }),
 }));
 
 vi.mock("@/hooks/use-task-assignees", () => ({
@@ -437,6 +437,7 @@ describe("DealListPage", () => {
         { id: "stage-sent", name: "Estimate Sent to Client", slug: "estimate_sent_to_client", displayOrder: 4 },
         { id: "stage-contract", name: "Contract", slug: "contract", displayOrder: 5 },
         { id: "stage-won", name: "Won", slug: "won", displayOrder: 6 },
+        { id: "stage-closed-won", name: "Closed Won", slug: "closed_won", displayOrder: 6 }, // a Won alias
         { id: "stage-lost", name: "Lost", slug: "lost", displayOrder: 7 },
       ],
     });
@@ -501,7 +502,7 @@ describe("DealListPage", () => {
       won: { preset: "all" },
       lost: { preset: "all" },
     }, 8, null, undefined, {});
-    expect(html).toContain("Read-only pipeline board");
+    expect(html).toContain("Deals Dashboard"); // relabeled to distinguish the dashboard from /pipeline
     expect(html).toContain('placeholder="Search deals"');
     expect(html).toContain("Opportunity");
     expect(html).toContain("Estimating");
@@ -1338,16 +1339,15 @@ describe("DealListPage", () => {
     expect(eurFamily).toEqual(expect.arrayContaining(["eur-standard", "eur-service"]));
   });
 
-  it("keeps the LEGACY list (no FilterBar) on drill-down views — those stay YELLOW's surface", () => {
+  it("mounts a drill-down FilterBar on drill-down views (YELLOW's #590 surface), NAMESPACED distinct from the base list's dl_ mount", () => {
+    // Post-#590, drill-downs are no longer the legacy list — they carry their own namespaced FilterBar.
+    // RED's base mount uses dl_; the drill-down must use a DIFFERENT prefix so the two never collide.
     renderPage("/deals?filter=won&scope=mine", "director");
     const props = mocks.dealsListSectionMock.mock.calls[mocks.dealsListSectionMock.mock.calls.length - 1][0] as {
-      filterBar?: unknown;
-      enableDateFilter?: boolean;
-      hideOwnerFilter?: boolean;
+      filterBar?: { paramPrefix?: string };
     };
-    expect(props.filterBar).toBeUndefined(); // drill-downs render the legacy list, untouched
-    expect(props.enableDateFilter).toBe(false);
-    expect(props.hideOwnerFilter).toBe(true);
+    expect(props.filterBar).toBeDefined();
+    expect(props.filterBar?.paramPrefix).not.toBe("dl_");
   });
 
   it("includes ALL workflow-family stage IDs in the base list's default stage scope — no silent family drop (Codex #589 P1)", () => {
@@ -1609,6 +1609,59 @@ describe("DealListPage", () => {
         }),
       })
     );
+  });
+
+  it("mounts the shared FilterBar (fb_ namespace, outcome-aware, no rep dim) on a drill-down list", () => {
+    renderPage("/deals?filter=won&scope=all", "director");
+    const props = mocks.dealsListSectionMock.mock.calls[mocks.dealsListSectionMock.mock.calls.length - 1]?.[0] as {
+      filterBar?: { paramPrefix?: string; stageEntryDateEnabled?: boolean; dimensions?: string[] };
+    };
+    expect(props.filterBar).toBeDefined();
+    expect(props.filterBar?.paramPrefix).toBe("fb_");
+    expect(props.filterBar?.stageEntryDateEnabled).toBe(true);
+    // rep is the page-level select (drives board + list), not a bar dimension on the dashboard drill-downs
+    expect(props.filterBar?.dimensions).not.toContain("rep");
+  });
+
+  it("mounts RED's dl_-namespaced FilterBar on the base view (filter === null) — #589, distinct from the drill-down bar", () => {
+    renderPage("/deals?scope=all", "director");
+    const props = mocks.dealsListSectionMock.mock.calls[mocks.dealsListSectionMock.mock.calls.length - 1]?.[0] as { filterBar?: { paramPrefix?: string } };
+    expect(props.filterBar).toBeDefined();
+    expect(props.filterBar?.paramPrefix).toBe("dl_");
+  });
+
+  it("folds the selected rep into the drill-down list baseFilters (FilterBar mode ignores lockedOwnerId)", () => {
+    renderPage("/deals?filter=won&scope=all&assignedRepId=rep-1", "director");
+    const props = mocks.dealsListSectionMock.mock.calls[mocks.dealsListSectionMock.mock.calls.length - 1]?.[0] as { baseFilters?: { assignedRepId?: string } };
+    expect(props.baseFilters?.assignedRepId).toBe("rep-1");
+  });
+
+  it("waits for stage metadata before mounting the drill-down bar — no all-deals flash (Codex P2)", () => {
+    mocks.usePipelineStagesMock.mockReturnValue({ stages: [] }); // not loaded yet
+    renderPage("/deals?filter=won&scope=all", "director");
+    const props = mocks.dealsListSectionMock.mock.calls[mocks.dealsListSectionMock.mock.calls.length - 1]?.[0] as { filterBar?: unknown };
+    expect(props.filterBar).toBeUndefined(); // legacy mode (which gates the query on stage loading) until stages arrive
+  });
+
+  it("carries the drill-down's intended default sort into the bar (Codex P2)", () => {
+    renderPage("/deals?filter=won&scope=all", "director");
+    const props = mocks.dealsListSectionMock.mock.calls[mocks.dealsListSectionMock.mock.calls.length - 1]?.[0] as {
+      filterBar?: { defaultSort?: { key: string; dir: string } };
+    };
+    expect(props.filterBar?.defaultSort).toEqual({ key: "contract_signed_date", dir: "desc" }); // the Won view's order
+  });
+
+  it("RECONCILES the Won drill-down list to the KPI: full Won alias family + on-hold excluded (Codex P2)", () => {
+    renderPage("/deals?filter=won&scope=all", "director");
+    const props = mocks.dealsListSectionMock.mock.calls[mocks.dealsListSectionMock.mock.calls.length - 1]?.[0] as {
+      filterBar?: { defaultStageIds?: string[]; terminalStageIds?: string[] };
+      baseFilters?: { excludeOnHold?: boolean };
+    };
+    // The Won list scopes to the whole Won family (canonical + alias), matching the KPI / board column.
+    expect(props.filterBar?.defaultStageIds).toContain("stage-won");
+    expect(props.filterBar?.defaultStageIds).toContain("stage-closed-won"); // the alias — would be dropped if canonical-only
+    // ...and excludes on-hold (migration parking-lot) deals, like the Won KPI.
+    expect(props.baseFilters?.excludeOnHold).toBe(true);
   });
 
   it("uses the Won terminal filter caption ahead of the page period and falls back correctly", () => {

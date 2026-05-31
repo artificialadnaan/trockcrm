@@ -26,8 +26,10 @@ import {
   aliasedEffectiveDealValueSql,
   aliasedEffectiveWonDealValueSql,
   aliasedReportableDealFilterSql,
+  aliasedWonHsClosedWonDateSql,
   reportableDealFilterSql,
 } from "../shared/deal-value-sql.js";
+import { aliasedHasUsableWonDateSql } from "../deals/service.js";
 
 type TenantDb = NodePgDatabase<typeof schema>;
 type ExecuteRows<T> = { rows: T[] } | T[];
@@ -384,6 +386,19 @@ function mapForecastVarianceSummaryRow(row?: ForecastVarianceSummarySqlRow): For
   };
 }
 
+/**
+ * Forecast variance: how each milestone forecast (initial/qualified/estimating) compared to the
+ * final won amount, plus close-date drift.
+ *
+ * Decision 2 (Won-date unification):
+ *  - deal_forecast_milestones.captured_at is a SNAPSHOT/as-of timestamp (when each milestone was
+ *    captured), NOT a won date — it drives the time-series and the close-drift metric only, so it
+ *    is LEFT AS-IS (migrating it would collapse the drift series this report exists to show).
+ *  - The WON-VALUE ANCHOR the variance is measured against was the closed_won milestone's snapshot
+ *    `cw.awarded_amount`; it is now the canonical `aliasedEffectiveWonDealValueSql('d')` (the same
+ *    awarded-first effective won value every other Won read uses), so variance is measured against
+ *    the platform-canonical final won total rather than a possibly-stale snapshot amount.
+ */
 export async function getForecastVarianceOverview(
   tenantDb: TenantDb,
   input: AnalyticsFilterInput = {}
@@ -399,7 +414,7 @@ export async function getForecastVarianceOverview(
         cw.workflow_route,
         cw.assigned_rep_id,
         u.display_name AS rep_name,
-        cw.awarded_amount,
+        ${aliasedEffectiveWonDealValueSql("d")} AS awarded_amount,
         cw.captured_at::date AS actual_close_date,
         cw.expected_close_date,
         initial.forecast_amount AS initial_forecast,
@@ -440,7 +455,7 @@ export async function getForecastVarianceOverview(
         cw.workflow_route,
         cw.assigned_rep_id,
         u.display_name AS rep_name,
-        cw.awarded_amount,
+        ${aliasedEffectiveWonDealValueSql("d")} AS awarded_amount,
         cw.captured_at::date AS actual_close_date,
         cw.expected_close_date,
         initial.forecast_amount AS initial_forecast,
@@ -485,7 +500,7 @@ export async function getForecastVarianceOverview(
         cw.workflow_route,
         cw.assigned_rep_id,
         u.display_name AS rep_name,
-        cw.awarded_amount,
+        ${aliasedEffectiveWonDealValueSql("d")} AS awarded_amount,
         cw.captured_at::date AS actual_close_date,
         cw.expected_close_date,
         initial.forecast_amount AS initial_forecast,
@@ -722,7 +737,8 @@ export interface WinLossRow {
 /**
  * Win/loss ratio per rep. Uses each deal's current stage (deals.stage_id) to
  * determine outcome, avoiding double-counting deals that were reopened and
- * re-closed. Date filter uses actual_close_date / lost_at for accuracy.
+ * re-closed. Date filter: WON deals window by the canonical deals.won_closed_date; LOST deals
+ * keep their existing terminal-date basis (so the win-rate denominator is unchanged).
  */
 export async function getWinLossRatioByRep(
   tenantDb: TenantDb,
@@ -750,10 +766,25 @@ export async function getWinLossRatioByRep(
     JOIN users u ON u.id = d.assigned_rep_id
     WHERE COALESCE(d.is_test_data, false) = false
       AND psc.is_terminal = true
-      AND COALESCE(d.actual_close_date, d.lost_at, d.updated_at)
-          >= ${from}::timestamptz
-      AND COALESCE(d.actual_close_date, d.lost_at, d.updated_at)
-          <= (${to}::date + INTERVAL '1 day')::timestamptz
+      AND (
+        -- WON deals windowed by the canonical app-owned column (the protected basis); the old
+        -- COALESCE(actual_close_date, lost_at, updated_at) counted reseed-contaminated /
+        -- touched-in-period wins. This predicate also scopes the win-rate denominator (won + lost),
+        -- so the non-WON (lost) branch is left byte-identical to preserve the losses count —
+        -- migrating the Lost side to lost_at is a separate Lost-unification pass.
+        (
+          psc.slug IN (${sqlSlugList(WON_OUTCOME_STAGE_SLUGS)})
+          AND ${aliasedHasUsableWonDateSql("d")}
+          AND ${aliasedWonHsClosedWonDateSql("d")} >= ${from}::date
+          AND ${aliasedWonHsClosedWonDateSql("d")} <= ${to}::date
+        )
+        OR
+        (
+          psc.slug NOT IN (${sqlSlugList(WON_OUTCOME_STAGE_SLUGS)})
+          AND COALESCE(d.actual_close_date, d.lost_at, d.updated_at) >= ${from}::timestamptz
+          AND COALESCE(d.actual_close_date, d.lost_at, d.updated_at) <= (${to}::date + INTERVAL '1 day')::timestamptz
+        )
+      )
     GROUP BY d.assigned_rep_id, u.display_name
     ORDER BY wins DESC
   `);
@@ -1066,8 +1097,9 @@ export async function getRevenueByProjectType(
     JOIN pipeline_stage_config psc ON psc.id = d.stage_id
     WHERE COALESCE(d.is_test_data, false) = false
       AND psc.slug IN (${sqlSlugList(WON_OUTCOME_STAGE_SLUGS)})
-      AND d.actual_close_date >= ${from}::date
-      AND d.actual_close_date <= ${to}::date
+      AND ${aliasedHasUsableWonDateSql("d")}
+      AND ${aliasedWonHsClosedWonDateSql("d")} >= ${from}::date
+      AND ${aliasedWonHsClosedWonDateSql("d")} <= ${to}::date
     GROUP BY d.project_type_id, ptc.name
     ORDER BY total_revenue DESC
   `);
@@ -1872,7 +1904,7 @@ export interface ClosedWonSummary {
 /**
  * Closed-won summary: total deals, total value, average cycle time,
  * breakdown by rep and by project type.
- * Date filter uses actual_close_date.
+ * Date filter + cycle-time use the canonical deals.won_closed_date.
  */
 export async function getClosedWonSummary(
   tenantDb: TenantDb,
@@ -1887,14 +1919,15 @@ export async function getClosedWonSummary(
           ${aliasedEffectiveWonDealValueSql("d")}
         ), 0)::numeric AS total_won_value,
         COALESCE(AVG(
-          EXTRACT(DAY FROM d.actual_close_date::timestamp - d.created_at)
+          EXTRACT(DAY FROM ${aliasedWonHsClosedWonDateSql("d")}::timestamp - d.created_at)
         ) FILTER (WHERE ${aliasedActiveDealCountFilterSql("d")}), 0)::numeric AS avg_cycle_time_days
       FROM deals d
       JOIN pipeline_stage_config psc ON psc.id = d.stage_id
       WHERE COALESCE(d.is_test_data, false) = false
         AND psc.slug IN (${sqlSlugList(WON_OUTCOME_STAGE_SLUGS)})
-        AND d.actual_close_date >= ${from}::date
-        AND d.actual_close_date <= ${to}::date
+        AND ${aliasedHasUsableWonDateSql("d")}
+        AND ${aliasedWonHsClosedWonDateSql("d")} >= ${from}::date
+        AND ${aliasedWonHsClosedWonDateSql("d")} <= ${to}::date
     `);
   const repResult = await tenantDb.execute(sql`
       SELECT
@@ -1909,8 +1942,9 @@ export async function getClosedWonSummary(
       JOIN users u ON u.id = d.assigned_rep_id
       WHERE COALESCE(d.is_test_data, false) = false
         AND psc.slug IN (${sqlSlugList(WON_OUTCOME_STAGE_SLUGS)})
-        AND d.actual_close_date >= ${from}::date
-        AND d.actual_close_date <= ${to}::date
+        AND ${aliasedHasUsableWonDateSql("d")}
+        AND ${aliasedWonHsClosedWonDateSql("d")} >= ${from}::date
+        AND ${aliasedWonHsClosedWonDateSql("d")} <= ${to}::date
       GROUP BY d.assigned_rep_id, u.display_name
       ORDER BY total_value DESC
     `);
@@ -1927,8 +1961,9 @@ export async function getClosedWonSummary(
       JOIN pipeline_stage_config psc ON psc.id = d.stage_id
       WHERE COALESCE(d.is_test_data, false) = false
         AND psc.slug IN (${sqlSlugList(WON_OUTCOME_STAGE_SLUGS)})
-        AND d.actual_close_date >= ${from}::date
-        AND d.actual_close_date <= ${to}::date
+        AND ${aliasedHasUsableWonDateSql("d")}
+        AND ${aliasedWonHsClosedWonDateSql("d")} >= ${from}::date
+        AND ${aliasedWonHsClosedWonDateSql("d")} <= ${to}::date
       GROUP BY d.project_type_id, ptc.name
       ORDER BY total_value DESC
     `);

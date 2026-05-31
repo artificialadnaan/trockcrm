@@ -44,7 +44,7 @@ type MobileNavItem = {
 // mobile bar never surfaces a destination the sidebar hides for that role.
 const primaryNavItems: MobileNavItem[] = [
   { to: "/", icon: LayoutDashboard, label: "Home", roles: CRM_ROLES },
-  { to: "/deals", icon: Handshake, label: "Deals", roles: CRM_ROLES },
+  { to: "/deals", icon: Handshake, label: "Deals Dashboard", roles: CRM_ROLES },
   { to: "/leads", icon: ClipboardList, label: "Leads", roles: CRM_ROLES },
   { to: "/pipeline", icon: Kanban, label: "Pipeline", roles: CRM_ROLES },
 ];

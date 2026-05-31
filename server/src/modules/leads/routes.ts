@@ -156,6 +156,12 @@ router.get("/", async (req, res, next) => {
   try {
     const createdFrom = assertOptionalIsoDateQueryParam(req.query.createdFrom, "createdFrom");
     const createdTo = assertOptionalIsoDateQueryParam(req.query.createdTo, "createdTo");
+    const dateFrom = assertOptionalIsoDateQueryParam(req.query.dateFrom, "dateFrom");
+    const dateTo = assertOptionalIsoDateQueryParam(req.query.dateTo, "dateTo");
+    // Row cap (Codex #577 P2): listLeads clamps this to [1, LEADS_LIST_MAX_ROWS] and defaults to the max,
+    // so the flat list is bounded even when the client omits it.
+    const parsedLimit = Number.parseInt(req.query.limit as string, 10);
+    const limit = Number.isFinite(parsedLimit) ? parsedLimit : undefined;
     const result = await listLeads(
       req.tenantDb!,
       {
@@ -163,6 +169,7 @@ router.get("/", async (req, res, next) => {
         companyId: req.query.companyId as string | undefined,
         propertyId: req.query.propertyId as string | undefined,
         assignedRepId: req.query.assignedRepId as string | undefined,
+        projectTypeId: req.query.projectTypeId as string | undefined,
         stageIds: req.query.stageIds
           ? (req.query.stageIds as string).split(",").filter(Boolean)
           : undefined,
@@ -171,6 +178,8 @@ router.get("/", async (req, res, next) => {
         status: req.query.status as "open" | "converted" | "disqualified" | undefined,
         createdFrom,
         createdTo,
+        dateFrom,
+        dateTo,
         sortBy:
           req.query.sortBy === "created_at" || req.query.sortBy === "updated_at"
             ? (req.query.sortBy as "created_at" | "updated_at")
@@ -184,6 +193,7 @@ router.get("/", async (req, res, next) => {
             : req.query.isActive === "false"
               ? false
               : true,
+        limit,
       },
       getCollaborativeReadRole(req.user!.role, normalizeCollaborativeScope(req.user!.role, readListScope(req.query.scope))),
       req.user!.id

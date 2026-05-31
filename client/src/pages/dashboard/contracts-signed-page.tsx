@@ -6,7 +6,7 @@ import { useDeals, type Deal } from "@/hooks/use-deals";
 import { PageHeader } from "@/components/layout/page-header";
 import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
-import { formatCurrency } from "@/components/charts/chart-colors";
+import { formatCurrency } from "@/lib/deal-utils";
 
 type Period = "ytd" | "mtd";
 
@@ -60,11 +60,12 @@ export function ContractsSignedPage() {
   const { user } = useAuth();
   const [searchParams] = useSearchParams();
   const periodParam = searchParams.get("period");
-
-  if (!isPeriod(periodParam)) {
-    return <Navigate to="/" replace />;
-  }
-  const period: Period = periodParam;
+  // Rules of hooks: ALL hooks must run on every render. An invalid ?period (e.g. an in-place period
+  // change to a bad value) must NOT early-return before the hooks below, or React throws "rendered fewer
+  // hooks than expected" and crashes the page. Default to a valid period so the hooks always run; the
+  // redirect happens AFTER them (Codex/GREY).
+  const validPeriod = isPeriod(periodParam);
+  const period: Period = validPeriod ? periodParam : "ytd";
 
   const { today, yearStart, monthStart } = useMemo(() => getChicagoDateParts(), []);
   const contractSignedFrom = period === "ytd" ? yearStart : monthStart;
@@ -83,6 +84,10 @@ export function ContractsSignedPage() {
     () => deals.reduce((sum, d) => sum + awardedDealValue(d), 0),
     [deals]
   );
+
+  if (!validPeriod) {
+    return <Navigate to="/" replace />;
+  }
 
   const periodLabel = period === "ytd" ? "Year to Date" : "Month to Date";
   const Icon = period === "ytd" ? FileSignature : FilePen;
@@ -178,7 +183,9 @@ export function ContractsSignedPage() {
                   <p className="text-sm font-semibold text-slate-900">
                     {formatCurrency(awardedDealValue(deal))}
                   </p>
-                  <p className="mt-1 text-xs text-slate-500">Open deal</p>
+                  {/* The list is isActive:"all" (signed contracts in any lifecycle), so a hardcoded "Open
+                      deal" was wrong; show the deal's actual stage instead (GREY). */}
+                  <p className="mt-1 text-xs text-slate-500">{deal.stageName ?? "Signed contract"}</p>
                 </div>
               </button>
             ))}
