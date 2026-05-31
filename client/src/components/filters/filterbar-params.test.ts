@@ -172,6 +172,29 @@ describe("mergeFilterParams (URL patch: preserve non-FilterBar params + page-res
   });
 });
 
+describe("namespaced params (paramPrefix) — a list that shares a URL with a board (Codex #577)", () => {
+  it("serializes / deserializes under a prefix, ignoring bare (board) params", () => {
+    expect(serializeFilters({ search: "x", status: "open" }, "ll_")).toEqual({ ll_search: "x", ll_status: "open" });
+    expect(
+      deserializeFilters(new URLSearchParams("ll_search=x&ll_status=open&search=board"), "ll_")
+    ).toEqual({ search: "x", status: "open" });
+  });
+
+  it("mergeFilterParams under a prefix never mutates the bare board params", () => {
+    const next = mergeFilterParams(new URLSearchParams("search=board&scope=all"), { search: "list" }, undefined, "ll_");
+    expect(next.get("ll_search")).toBe("list"); // the list's own search
+    expect(next.get("search")).toBe("board"); // the board's bare search is untouched
+    expect(next.get("scope")).toBe("all");
+  });
+
+  it("clearFilterParams under a prefix clears only the prefixed params (board params survive)", () => {
+    const next = clearFilterParams(new URLSearchParams("ll_status=open&search=board&scope=all"), [], "ll_");
+    expect(next.has("ll_status")).toBe(false);
+    expect(next.get("search")).toBe("board");
+    expect(next.get("scope")).toBe("all");
+  });
+});
+
 describe("clearFilterParams", () => {
   it("removes FilterBar params but preserves others", () => {
     const next = clearFilterParams(new URLSearchParams("filter=won&search=x&stageIds=a&status=active&page=2"));

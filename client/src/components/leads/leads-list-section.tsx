@@ -24,9 +24,13 @@ const LEAD_STATUS_LABEL: Record<LeadRecord["status"], string> = {
   disqualified: "Disqualified",
 };
 
+// The /leads board already owns bare search/scope/assignedRepId URL params; namespace the list's
+// FilterBar params so list filtering never mutates the board above it (Codex #577).
+const LEADS_LIST_PARAM_PREFIX = "ll_";
+
 export function LeadsListSection({ scope, filterBar }: LeadsListSectionProps) {
   const navigate = useNavigate();
-  const { filters: urlFilters, setFilters, resetFilters } = useFilterState();
+  const { filters: urlFilters, setFilters, resetFilters } = useFilterState(LEADS_LIST_PARAM_PREFIX);
   const filterBarOwnsScope = filterBar.dimensions.includes("scope");
 
   // Stage label map from the bar's stage options (the mount builds these from the board stages), so
