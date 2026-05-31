@@ -92,7 +92,7 @@ export function ContactDealsTab({ contactId, contact }: ContactDealsTabProps) {
             <Button
               variant="ghost"
               size="icon"
-              className="text-muted-foreground hover:text-red-600 shrink-0"
+              className="size-11 md:size-8 text-muted-foreground hover:text-red-600 shrink-0"
               onClick={() => handleRemove(assoc.id)}
             >
               <Trash2 className="h-4 w-4" />

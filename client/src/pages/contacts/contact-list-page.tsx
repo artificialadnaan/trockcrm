@@ -1,5 +1,5 @@
-import { useMemo } from "react";
-import { useNavigate } from "react-router-dom";
+import { useMemo, type ReactNode } from "react";
+import { Link, useNavigate } from "react-router-dom";
 import { ArrowUpRight, Briefcase, ChevronLeft, ChevronRight, Mail, Phone, Plus, Star, Users } from "lucide-react";
 import { PageHeader } from "@/components/layout/page-header";
 import { listPaginationIconButtonClassName } from "@/components/shared/list-pagination";
@@ -56,6 +56,89 @@ function formatLastTouch(value: string | null | undefined) {
 function isUntouched(value: string | null | undefined) {
   if (!value) return true;
   return Date.now() - new Date(value).getTime() > 30 * 24 * 60 * 60 * 1000;
+}
+
+/**
+ * Mobile (<md) card representation of a contact row. The desktop table stays the
+ * source of truth at >=md; this is the stack-to-card fallback so phones get no
+ * horizontal-scroll wall. Uses the stretched-link pattern (the name <Link> covers
+ * the whole card via `after:absolute after:inset-0`) so the card is one tap target,
+ * while the quick-action anchors and the owner control sit above it (`z-10`) and
+ * stay independently tappable — no nested anchors, keyboard-navigable.
+ */
+export function ContactCard({
+  contact,
+  ownerSlot,
+}: {
+  contact: Contact;
+  ownerSlot?: ReactNode;
+}) {
+  const untouched = isUntouched(contact.lastTouchAt);
+  const phone = contact.phone ?? contact.mobile;
+  return (
+    <div className="relative rounded-xl border border-slate-200 bg-white p-3">
+      <div className="flex items-start gap-3">
+        <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-brand-red text-xs font-black text-white">
+          {initials(contact)}
+        </span>
+        <div className="min-w-0 flex-1">
+          <div className="flex items-center gap-2">
+            {contact.isPrimary ? <Star className="h-4 w-4 shrink-0 fill-amber-400 text-amber-500" aria-label="Primary contact" /> : null}
+            <Link
+              to={`/contacts/${contact.id}`}
+              className="truncate text-sm font-black uppercase text-slate-950 after:absolute after:inset-0"
+            >
+              {fullName(contact)}
+            </Link>
+          </div>
+          <p className="mt-1 truncate text-xs text-slate-500">
+            {[contact.jobTitle, contactLocation(contact)].filter(Boolean).join(" • ") || "No title recorded"}
+          </p>
+          <p className="mt-1 truncate text-sm font-semibold text-slate-700">{contact.companyName ?? "Unassigned"}</p>
+          <div className="mt-2 flex flex-wrap items-center gap-2">
+            <span className="rounded-full bg-slate-100 px-2.5 py-1 text-xs font-bold text-slate-700">
+              {contact.role ? ROLE_LABELS[contact.role] ?? contact.role : "Unclassified"}
+            </span>
+            <span className={cn("text-xs font-bold", untouched ? "text-brand-red" : "text-slate-600")}>
+              {formatLastTouch(contact.lastTouchAt)}
+            </span>
+          </div>
+          <OwnerLabel ownerId={contact.ownerUserId} ownerName={contact.ownerUserName} className="mt-2 max-w-full" />
+        </div>
+        <ArrowUpRight className="h-4 w-4 shrink-0 text-slate-400" />
+      </div>
+      {/* Row is NOT raised; only the real call/email anchors get `relative z-10` so they
+          sit above the stretched name link. The non-interactive linked-deals chip stays
+          below the link, so tapping it (or any gap) navigates to the contact. */}
+      <div className="mt-3 flex items-center gap-2">
+        {phone ? (
+          <a
+            href={`tel:${phone}`}
+            className="relative z-10 inline-flex h-11 w-11 items-center justify-center rounded-md border border-slate-200 text-slate-500 hover:border-red-200 hover:text-brand-red"
+            aria-label={`Call ${fullName(contact)}${formatPhone(phone) ? ` at ${formatPhone(phone)}` : ""}`}
+          >
+            <Phone className="h-4 w-4" />
+          </a>
+        ) : null}
+        {contact.email ? (
+          <a
+            href={`mailto:${contact.email}`}
+            className="relative z-10 inline-flex h-11 w-11 items-center justify-center rounded-md border border-slate-200 text-slate-500 hover:border-red-200 hover:text-brand-red"
+            aria-label={`Email ${fullName(contact)}`}
+          >
+            <Mail className="h-4 w-4" />
+          </a>
+        ) : null}
+        {contact.linkedDealsCount ? (
+          <span className="inline-flex h-11 items-center gap-1.5 rounded-md border border-slate-200 px-3 text-xs font-bold text-slate-500" title="Linked deals">
+            <Briefcase className="h-4 w-4" />
+            {contact.linkedDealsCount}
+          </span>
+        ) : null}
+      </div>
+      {ownerSlot ? <div className="relative z-10 mt-3">{ownerSlot}</div> : null}
+    </div>
+  );
 }
 
 export function ContactListPage() {
@@ -117,12 +200,14 @@ export function ContactListPage() {
                 value={activeRole}
                 onChange={(value) => setFilters({ role: value === "all" ? undefined : value })}
                 ariaLabel="Contact role filter"
+                size="touch"
               />
               <ScopeToggle
                 options={OWNER_SCOPE_OPTIONS}
                 value={activeOwnerScope}
                 onChange={(value) => setFilters({ ownerScope: value === "mine" ? "mine" : undefined })}
                 ariaLabel="Ownership filter"
+                size="touch"
               />
             </div>
             <div className="flex items-center gap-2">
@@ -132,11 +217,12 @@ export function ContactListPage() {
               <Button
                 variant="outline"
                 size="sm"
+                className="min-h-[44px] md:min-h-0"
                 onClick={() => setFilters({ sortBy: "last_touch_at", sortDir: "desc" })}
               >
                 Last touch
               </Button>
-              <Button variant="ghost" size="sm" onClick={resetFilters}>
+              <Button variant="ghost" size="sm" className="min-h-[44px] md:min-h-0" onClick={resetFilters}>
                 Clear
               </Button>
             </div>
@@ -159,7 +245,9 @@ export function ContactListPage() {
               <p className="mt-1 text-sm text-slate-500">Clear the search or switch the filters.</p>
             </div>
           ) : (
-            <Table>
+            <>
+            {/* >=md keeps the full table; phones get the stacked card list (md:hidden) below. */}
+            <div className="hidden md:block"><Table>
               <TableHeader>
                 <TableRow className="hover:bg-transparent">
                   <TableHead className="text-[11px] font-black uppercase tracking-[0.16em] text-slate-500">Contact</TableHead>
@@ -265,7 +353,30 @@ export function ContactListPage() {
                   );
                 })}
               </TableBody>
-            </Table>
+            </Table></div>
+            <div className="space-y-2 md:hidden" data-testid="contact-cards">
+              {contacts.map((contact) => (
+                <ContactCard
+                  key={contact.id}
+                  contact={contact}
+                  ownerSlot={
+                    <OwnerAssignmentControl
+                      ownerUserId={contact.ownerUserId}
+                      currentUser={user}
+                      assignees={assignees}
+                      ownerReassignAssignees={ownerAssignees}
+                      assigneesLoading={assigneesLoading}
+                      ownerReassignAssigneesLoading={ownerAssigneesLoading}
+                      entityLabel="contact"
+                      onAssignToMe={() => assignContactOwnerToMe(contact.id)}
+                      onReassign={(ownerUserId) => reassignContactOwner(contact.id, ownerUserId)}
+                      onAssigned={refetch}
+                    />
+                  }
+                />
+              ))}
+            </div>
+            </>
           )}
         </CardContent>
       </Card>
@@ -279,7 +390,7 @@ export function ContactListPage() {
             <Button
               variant="outline"
               size="icon"
-              className={listPaginationIconButtonClassName}
+              className={cn(listPaginationIconButtonClassName, "size-11 md:size-8")}
               disabled={pagination.page <= 1}
               onClick={() => setFilters({ page: pagination.page - 1 })}
               aria-label="Previous contacts page"
@@ -289,7 +400,7 @@ export function ContactListPage() {
             <Button
               variant="outline"
               size="icon"
-              className={listPaginationIconButtonClassName}
+              className={cn(listPaginationIconButtonClassName, "size-11 md:size-8")}
               disabled={pagination.page >= pagination.totalPages}
               onClick={() => setFilters({ page: pagination.page + 1 })}
               aria-label="Next contacts page"

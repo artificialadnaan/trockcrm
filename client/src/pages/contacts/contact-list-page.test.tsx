@@ -464,6 +464,37 @@ describe("ContactListPage", () => {
       expect(nextButton?.className).toContain("disabled:border-muted-foreground/20");
       expect(nextButton?.className).toContain("disabled:bg-muted");
       expect(nextButton?.className).toContain("disabled:text-muted-foreground");
+      // Touch sizing: 44px (size-11) on phones, reverting to the compact size-8 at md.
+      expect(nextButton?.className).toContain("size-11");
+      expect(nextButton?.className).toContain("md:size-8");
+    } finally {
+      await cleanup();
+    }
+  });
+
+  it("stacks the table into a md:hidden card list with >=44px touch quick actions on phones", async () => {
+    const { container, cleanup } = await renderPageDom();
+    try {
+      // Desktop keeps the full table, gated behind hidden md:block so phones get no scroll wall.
+      const tableWrap = container.querySelector("div.hidden.md\\:block");
+      expect(tableWrap?.querySelector("table")).toBeTruthy();
+      // A md:hidden card list carries the same contacts on phones.
+      const cards = container.querySelector('[data-testid="contact-cards"]');
+      expect(cards).not.toBeNull();
+      expect(cards?.className).toContain("md:hidden");
+      expect(cards?.textContent).toContain("Maria Caldwell");
+      // The card name is a real link to the contact (stretched-link pattern).
+      expect(cards?.querySelector('a[href="/contacts/contact-1"]')).toBeTruthy();
+      // Quick-action call link is a 44px touch target inside the card.
+      const callLink = cards?.querySelector('a[href^="tel:"]');
+      expect(callLink?.className).toContain("h-11");
+      expect(callLink?.className).toContain("w-11");
+      // The real action raises itself above the stretched card link (so it stays a
+      // distinct tap), while non-interactive bits fall back to the card navigation.
+      expect(callLink?.className).toContain("z-10");
+      // Role filter pills opt into the 44px touch size (reverts at md).
+      const roleFilter = container.querySelector('[aria-label="Contact role filter"]');
+      expect(roleFilter?.querySelector("button")?.className).toContain("min-h-[44px]");
     } finally {
       await cleanup();
     }
