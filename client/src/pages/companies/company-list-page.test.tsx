@@ -507,4 +507,28 @@ describe("CompanyListPage", () => {
       await cleanup();
     }
   });
+
+  it("Clear preserves the page-owned Mine/All scope (only the bar dimensions reset)", async () => {
+    const { container, cleanup } = await renderPageDom();
+    try {
+      // Switch the page-owned Ownership toggle to Mine (writes the URL `scope`).
+      const ownership = container.querySelector('[aria-label="Ownership filter"]');
+      const mineButton = [...(ownership?.querySelectorAll("button") ?? [])].find(
+        (button) => button.textContent?.trim() === "Mine"
+      );
+      await act(async () => {
+        mineButton?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+      });
+      expect(mocks.useCompaniesMock).toHaveBeenLastCalledWith(expect.objectContaining({ ownerScope: "mine" }));
+
+      // Clicking the FilterBar's Clear must NOT broaden scope back to All — scope is a preserved key.
+      const clearButton = container.querySelector('[aria-label="Clear filters"]');
+      await act(async () => {
+        clearButton?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+      });
+      expect(mocks.useCompaniesMock).toHaveBeenLastCalledWith(expect.objectContaining({ ownerScope: "mine" }));
+    } finally {
+      await cleanup();
+    }
+  });
 });

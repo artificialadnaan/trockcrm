@@ -17,6 +17,7 @@ import { useOwnerAssignees } from "@/hooks/use-owner-assignees";
 import { useTaskAssignees } from "@/hooks/use-task-assignees";
 import { assignCompanyOwnerToMe, reassignCompanyOwner, useCompanies, type Company } from "@/hooks/use-companies";
 import { useKeepPreviousData } from "@/hooks/use-keep-previous-data";
+import { parseDisplayDate } from "@/lib/deal-utils";
 import { FilterBar, type FilterBarOptions, type FilterDimension } from "@/components/filters/filter-bar";
 import { useFilterState } from "@/components/filters/use-filter-state";
 import type { FilterBarValue } from "@/components/filters/filterbar-params";
@@ -59,12 +60,16 @@ function initials(name: string) {
 
 function formatLastActivity(value: string | null | undefined) {
   if (!value) return "No activity";
-  return new Intl.DateTimeFormat("en-US", { month: "short", day: "numeric", year: "numeric" }).format(new Date(value));
+  // parseDisplayDate anchors a bare YYYY-MM-DD (BLUE's `displayDate ::date`) at LOCAL midnight, so a
+  // date-only recency value renders its literal day instead of shifting a day west of UTC (#572).
+  return new Intl.DateTimeFormat("en-US", { month: "short", day: "numeric", year: "numeric" }).format(
+    parseDisplayDate(value)
+  );
 }
 
 function isStale(value: string | null | undefined) {
   if (!value) return true;
-  return Date.now() - new Date(value).getTime() > 30 * 24 * 60 * 60 * 1000;
+  return Date.now() - parseDisplayDate(value).getTime() > 30 * 24 * 60 * 60 * 1000;
 }
 
 function companyLocation(company: Company) {
@@ -94,7 +99,10 @@ export function CompanyCard({
   company: Company;
   ownerSlot?: ReactNode;
 }) {
-  const stale = isStale(company.lastActivityAt);
+  // Stale styling tracks the SAME recency date the row displays (getCompanyDisplayDate), so a never-
+  // active account with a recent created/displayDate isn't shown recent-but-red (Codex).
+  const recencyDate = getCompanyDisplayDate(company);
+  const stale = isStale(recencyDate);
   const location = companyLocation(company);
   const activeDeals = company.activeDealsCount ?? company.dealCount;
   return (
@@ -131,7 +139,7 @@ export function CompanyCard({
       <div className="mt-2 flex items-center justify-between gap-2">
         <span className="text-[11px] font-bold uppercase tracking-[0.12em] text-slate-400">Last activity</span>
         <span className={cn("text-xs font-bold", stale ? "text-brand-red" : "text-slate-600")}>
-          {formatLastActivity(getCompanyDisplayDate(company))}
+          {formatLastActivity(recencyDate)}
         </span>
       </div>
       <div className="mt-3 flex flex-col gap-2">
@@ -161,7 +169,9 @@ export function CompanyListPage() {
     [setFilters]
   );
   const handleResetFilters = useCallback(() => {
-    resetFilters();
+    // Preserve the page-owned `scope` (the separate Mine/All control) — Clear resets only the bar's
+    // Owner/Date/Sort dimensions, not the page toggle (Codex; same as the deals list's inherited scope).
+    resetFilters(["scope"]);
     setPage(1);
   }, [resetFilters]);
 
@@ -194,7 +204,7 @@ export function CompanyListPage() {
 
   const totals = useMemo(() => {
     const pipeline = companies.reduce((sum, company) => sum + numeric(company.pipelineValue), 0);
-    const stale = companies.filter((company) => isStale(company.lastActivityAt)).length;
+    const stale = companies.filter((company) => isStale(getCompanyDisplayDate(company))).length;
     const activeDeals = companies.reduce((sum, company) => sum + (company.activeDealsCount ?? company.dealCount ?? 0), 0);
     return { pipeline, stale, activeDeals };
   }, [companies]);
@@ -300,7 +310,8 @@ export function CompanyListPage() {
               </TableHeader>
               <TableBody>
                 {companies.map((company) => {
-                  const stale = isStale(company.lastActivityAt);
+                  const recencyDate = getCompanyDisplayDate(company);
+                  const stale = isStale(recencyDate);
                   return (
                     <TableRow
                       key={company.id}
@@ -353,7 +364,7 @@ export function CompanyListPage() {
                       <TableCell className="text-right font-black tabular-nums text-slate-950">{USD(numeric(company.pipelineValue))}</TableCell>
                       <TableCell>
                         <span className={cn("text-xs font-bold", stale ? "text-brand-red" : "text-slate-600")}>
-                          {formatLastActivity(getCompanyDisplayDate(company))}
+                          {formatLastActivity(recencyDate)}
                         </span>
                       </TableCell>
                       <TableCell>
