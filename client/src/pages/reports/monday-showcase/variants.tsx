@@ -119,6 +119,9 @@ export function VariantA3Lanes({ data }: { data: MondayShowcaseData }) {
   ];
   const weeks = data.weeklyTrend.slice(-8);
   const lastIdx = weeks.length - 1;
+  // The last bucket is only "in progress" in the live week-to-date view; in completed-week mode the
+  // server returned a full prior Sun-Sat week, so don't mislabel it.
+  const lastInProgress = data.period.mode === "to_date";
   return (
     <div className="space-y-4">
       {lanes.map((lane) => {
@@ -133,7 +136,7 @@ export function VariantA3Lanes({ data }: { data: MondayShowcaseData }) {
               <span className="text-sm font-semibold">{lane.label}</span>
               <span className="text-xs text-muted-foreground">
                 this week {int(current)} · 8wk avg {avg.toFixed(1)} ({signed(delta)})
-                <span className="ml-1 italic">· current week in progress</span>
+                {lastInProgress && <span className="ml-1 italic">· current week in progress</span>}
               </span>
             </div>
             <div className="flex h-16 items-end gap-1">
@@ -143,8 +146,8 @@ export function VariantA3Lanes({ data }: { data: MondayShowcaseData }) {
                 return (
                   <div key={i} className="flex flex-1 flex-col items-center gap-1">
                     <div
-                      title={spike ? `${v} (spike — excluded from avg)` : i === lastIdx ? `${v} (in progress)` : String(v)}
-                      className={`w-full rounded-t ${spike ? "bg-amber-300" : i === lastIdx ? "bg-sky-300" : "bg-sky-500"}`}
+                      title={spike ? `${v} (spike — excluded from avg)` : i === lastIdx && lastInProgress ? `${v} (in progress)` : String(v)}
+                      className={`w-full rounded-t ${spike ? "bg-amber-300" : i === lastIdx && lastInProgress ? "bg-sky-300" : "bg-sky-500"}`}
                       style={{ height: `${Math.max(2, (v / max) * 56)}px` }}
                     />
                     <span className="text-[9px] text-muted-foreground">{weeks[i]?.weekStart.slice(5)}</span>

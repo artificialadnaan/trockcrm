@@ -1,6 +1,6 @@
 import { useState, type ComponentType } from "react";
+import { Loader2 } from "lucide-react";
 import { useMondayShowcase } from "@/hooks/use-reports";
-import { ReportShell } from "./sales-report-ui";
 import { SHOWCASE_VARIANTS, type ShowcaseVariantKey, type MondayShowcaseData } from "./monday-showcase/types";
 import {
   VariantA1Funnel,
@@ -30,18 +30,38 @@ export function MondayShowcasePage() {
   const { data, loading, error, refetch } = useMondayShowcase(mode);
   const Active = VARIANT_COMPONENT[variant];
 
+  // Deliberately NOT wrapped in ReportShell: this is a fixed weekly Monday view whose only control is the
+  // WTD / last-full-week toggle below. It does not take a date range / office / owner filter, so it must
+  // not render the shared Report Filters bar (a bar that doesn't filter is a UX trap).
   return (
-    <ReportShell
-      eyebrow="Reports · Part 2 (Monday showcase)"
-      title="Monday Showcase"
-      description="Many presentations, one source of truth — switch variants to compare layouts on identical numbers."
-      loading={loading}
-      error={error}
-      hasData={Boolean(data)}
-      emptyText="No showcase data for this period."
-      onRefresh={() => void refetch()}
-    >
-      {data ? (
+    <div className="space-y-4 p-4">
+      <div className="flex items-start justify-between gap-3">
+        <div>
+          <p className="text-xs font-semibold uppercase tracking-widest text-muted-foreground">
+            Reports · Part 2 (Monday showcase)
+          </p>
+          <h1 className="text-2xl font-bold">Monday Showcase</h1>
+          <p className="max-w-2xl text-sm text-muted-foreground">
+            Many presentations, one source of truth — switch variants to compare layouts on identical
+            numbers. Fixed weekly view (use the toggle); the shared date/office/owner filter bar does not
+            apply here.
+          </p>
+        </div>
+        <button
+          onClick={() => void refetch()}
+          className="shrink-0 rounded border px-3 py-1.5 text-sm hover:bg-gray-50"
+        >
+          Refresh
+        </button>
+      </div>
+
+      {loading ? (
+        <div className="flex items-center justify-center py-16">
+          <Loader2 className="h-6 w-6 animate-spin text-muted-foreground" />
+        </div>
+      ) : error ? (
+        <div className="rounded-lg border border-red-200 bg-red-50 p-3 text-sm text-red-700">{error}</div>
+      ) : data ? (
         <div className="space-y-4">
           <div className="flex flex-wrap items-center justify-between gap-3">
             <div className="inline-flex overflow-hidden rounded-lg border">
@@ -85,7 +105,11 @@ export function MondayShowcasePage() {
             </ul>
           </details>
         </div>
-      ) : null}
-    </ReportShell>
+      ) : (
+        <div className="rounded-lg border bg-gray-50 p-6 text-sm text-muted-foreground">
+          No showcase data for this period.
+        </div>
+      )}
+    </div>
   );
 }

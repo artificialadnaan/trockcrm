@@ -365,13 +365,21 @@ export function buildProjectionCoverageSql(): SQL {
   `;
 }
 
-/** Active (open) leads grouped by lead stage, per rep -- current-state, no date bucket. */
+/**
+ * Active (open) leads grouped by lead stage, per rep -- current-state, no date bucket. Mirrors the
+ * canonical active-lead query's scope (is_active, open, lead workflow family, non-terminal) and excludes
+ * test data, so the Report B badges count the SAME leads as the rest of the reporting surfaces.
+ */
 export function buildLeadStatusSql(): SQL {
   return sql`
     SELECT l.assigned_rep_id AS rep_id, psc.name AS stage_label, COUNT(*)::int AS cnt
     FROM ${leads} l
     JOIN ${pipelineStageConfig} psc ON psc.id = l.stage_id
-    WHERE l.status = 'open'
+    WHERE l.is_active = true
+      AND l.status = 'open'
+      AND COALESCE(l.is_test_data, false) = false
+      AND psc.workflow_family = 'lead'
+      AND psc.is_terminal = false
     GROUP BY l.assigned_rep_id, psc.name
   `;
 }
@@ -405,6 +413,15 @@ function shiftIsoDays(isoDate: string, days: number): string {
   const d = new Date(`${isoDate}T12:00:00Z`);
   d.setUTCDate(d.getUTCDate() + days);
   return d.toISOString().slice(0, 10);
+}
+
+/**
+ * The 8 Sunday week-start dates ending at (and including) `sundayFrom` -- i.e. [from-49d .. from-7d,
+ * from]. Used to zero-fill the trend so weeklyTrend always has exactly 8 buckets with the current week
+ * last, even when a quiet week produced no stage-history rows.
+ */
+export function eightWeekStartsEndingAt(sundayFrom: string): string[] {
+  return Array.from({ length: 8 }, (_, i) => shiftIsoDays(sundayFrom, -7 * (7 - i)));
 }
 
 function emptyRepProjection(): RepProjection {
@@ -513,25 +530,32 @@ export async function getMondayShowcaseData(
     leadStatus.set(r.rep_id, list);
   }
 
-  // 8-week trend rows -> series. F4: the 2026-05-17 backfill spike week is flagged-but-shown so
-  // downstream averages exclude it.
-  const weeklyTrend: ShowcaseWeek[] = [];
+  // 8-week trend. Generate EVERY Sunday-Saturday week in the window (zero-filled) so weeklyTrend always
+  // has exactly 8 buckets ending at the current week -- a quiet week must read as 0, not be omitted (else
+  // the "current week" bar would point at the last non-empty week). F4: the 2026-05-17 backfill spike
+  // week is flagged-but-shown so downstream averages exclude it.
+  const trendByWeek = new Map<string, { estimating: number; sent: number }>();
   for (const r of rowsFromExecute<{ week_start: string; estimating: unknown; sent: unknown }>(trendRows)) {
-    const weekStart = String(r.week_start).slice(0, 10);
+    trendByWeek.set(String(r.week_start).slice(0, 10), { estimating: num(r.estimating), sent: num(r.sent) });
+  }
+  // 8 Sunday week-starts ending at `from` (this period's Sunday): [from-49 .. from-7, from].
+  const weekStarts = eightWeekStartsEndingAt(from);
+  const weeklyTrend: ShowcaseWeek[] = [];
+  for (const weekStart of weekStarts) {
+    const cohort = trendByWeek.get(weekStart) ?? { estimating: 0, sent: 0 };
     const wonWeek = await getWonCloseSummary(tenantDb, { from: weekStart, to: shiftIsoDays(weekStart, 6) });
     weeklyTrend.push({
       weekStart,
-      estimating: num(r.estimating),
-      sent: num(r.sent),
+      estimating: cohort.estimating,
+      sent: cohort.sent,
       won: wonWeek.count,
       spikeExcluded: weekStart === BACKFILL_SPIKE_WEEK_START,
     });
   }
-  const lastEight = weeklyTrend.slice(-8);
   const sparklines = {
-    estimating: lastEight.map((w) => w.estimating),
-    sent: lastEight.map((w) => w.sent),
-    won: lastEight.map((w) => w.won),
+    estimating: weeklyTrend.map((w) => w.estimating),
+    sent: weeklyTrend.map((w) => w.sent),
+    won: weeklyTrend.map((w) => w.won),
   };
 
   return assembleMondayShowcase({

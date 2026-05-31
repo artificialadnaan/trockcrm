@@ -5,6 +5,7 @@ import {
   buildProjectionCoverageSql,
   buildWeeklyCohortTrendSql,
   buildLeadStatusSql,
+  eightWeekStartsEndingAt,
 } from "../../../src/modules/reports/monday-showcase-service.js";
 import { SENT_STAGE_SLUGS, ESTIMATED_STAGE_SLUGS } from "../../../src/modules/reports/foundations.js";
 import { aliasedReportableDealFilterSql } from "../../../src/modules/shared/deal-value-sql.js";
@@ -78,5 +79,23 @@ describe("Monday showcase SQL builders compose F1-F5", () => {
     expect(text).toContain("l.stage_id"); // grouped by lead stage
     expect(text).toContain("'open'");
     expect(text).toContain("l.assigned_rep_id");
+    // mirrors the canonical active-lead scope so Report B counts the same leads as everywhere else
+    expect(text).toContain("l.is_active = true");
+    expect(text).toContain("l.is_test_data");
+    expect(text).toContain("psc.workflow_family = 'lead'");
+    expect(text).toContain("psc.is_terminal = false");
+  });
+
+  it("8-week trend always covers exactly 8 Sunday weeks ending at the period (zero-fill, current week last)", () => {
+    const weeks = eightWeekStartsEndingAt("2026-05-24"); // a Sunday
+    expect(weeks).toHaveLength(8);
+    expect(weeks[7]).toBe("2026-05-24"); // current week last
+    expect(weeks[0]).toBe("2026-04-05"); // 7 weeks earlier
+    // strictly ascending, exactly 7 days apart
+    for (let i = 1; i < weeks.length; i++) {
+      const prev = new Date(`${weeks[i - 1]}T00:00:00Z`).getTime();
+      const cur = new Date(`${weeks[i]}T00:00:00Z`).getTime();
+      expect((cur - prev) / 86_400_000).toBe(7);
+    }
   });
 });
