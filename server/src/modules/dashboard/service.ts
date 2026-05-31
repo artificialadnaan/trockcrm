@@ -2271,9 +2271,9 @@ export async function getWonCloseSummary(
   // updated_at fallback counted any deal "touched in-period" as "won in-period".
   // (Office-scope parity with the drill-down is a no-op in the only populated
   // tenant — office_dallas captures all Won rows — and is deferred; see PR notes.)
-  // The won-date guard is a single public.try_parse_hs_close_date() call (see
-  // castHsClosedWonDateSql), so the >= / <= / IS NOT NULL positions each emit one
-  // compact, unambiguous function-call token.
+  // The won-date guard reads the app-owned deals.won_closed_date column via
+  // aliasedWonHsClosedWonDateSql, so the >= / <= / IS NOT NULL positions each emit
+  // one compact column-reference predicate (NOT a try_parse_hs_close_date call).
   const result = await tenantDb.execute(sql`
     SELECT
       COUNT(*) FILTER (WHERE ${aliasedActiveDealCountFilterSql("d")})::int AS won_count,

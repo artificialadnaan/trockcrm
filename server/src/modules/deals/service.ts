@@ -255,8 +255,9 @@ export interface DealFilters {
   contractSignedFrom?: string;
   contractSignedTo?: string;
   // Inclusive YYYY-MM-DD bounds for the /deals?filter=won drill-down, gated on the
-  // true HubSpot close-won date (hs_closed_won_date, §6.1). When set, on-hold and
-  // null-close-date deals are excluded so this drill-down matches the Won card.
+  // app-owned canonical close-won date (deals.won_closed_date, §6.1). When set,
+  // on-hold and null-close-date deals are excluded so this drill-down matches the
+  // Won card.
   wonClosedFrom?: string;
   wonClosedTo?: string;
   estimateSentFrom?: string;
@@ -963,50 +964,17 @@ function workspaceLostWindowEligibilitySql() {
   `;
 }
 
-// Casts a HubSpot close-won date text value to `date`, yielding NULL (never
-// throwing) for any value that is not a real calendar date. NOTE:
-// `hubspot_extra_properties` is a DB-only JSONB column — intentionally NOT mapped
-// in the Drizzle schema because this feature only reads free-form HubSpot JSON via
-// raw SQL helpers. Migration 0139 is the schema source of truth for the column
-// across current and future tenant schemas. The hs_closed_won_date key is populated
-// in production (office_dallas) on most active Won deals, but the blob has no
-// schema guarantee: production values are ISO-8601 UTC strings today (e.g.
-// 2025-01-01T17:10:09.826Z), but a stray non-date value (or a future epoch-ms sync)
-// must yield NULL — excluded from period reporting — rather than throw and break the
-// ENTIRE Won card / drill-down.
-//
-// The validation itself lives in the IMMUTABLE public.try_parse_hs_close_date()
-// function (migration 0140); this helper emits a single call to it. Collapsing the
-// guard to one function-call token (instead of a ~40-line inline CASE that was
-// interpolated into the >=, <=, and IS NOT NULL positions of one query) keeps the
-// composed SQL small and unambiguous. The function's semantics are identical to the
-// prior inline guard: leading-10-char YYYY-MM-DD (month 01-12, day 01-31, dashes
-// required), then a trapped ::date cast that rejects impossible calendar dates
-// (2026-02-31, 2026-02-29 in a non-leap year, 0000-01-01). Qualified as `public.`
-// so every office_* tenant schema resolves it regardless of search_path.
-function castHsClosedWonDateSql(rawValue: SQLWrapper) {
-  return sql`public.try_parse_hs_close_date(${rawValue})`;
-}
-
-// Won-period membership date (locked decision §6.1): gate on the true HubSpot
-// close-won date ALONE — hubspot_extra_properties->>'hs_closed_won_date'. No
-// COALESCE fallback. actual_close_date is reseed-contaminated (it was stamped
-// en masse by a Bid-Board reseed) and must never be used for period gating;
-// contract_signed_at is reserved for the commissions page (§6.5). The two NULLIF
-// guards strip the empty-string and the HubSpot "0" unset sentinel before the cast.
-// Matches the forensics anchor (YTD = 175 deals / $7.82M).
-function dealWonHsClosedWonDateSql() {
-  return castHsClosedWonDateSql(
-    sql`NULLIF(NULLIF(hubspot_extra_properties->>'hs_closed_won_date', ''), '0')`
-  );
-}
-
 // CANONICAL Won-period date helper now lives in the shared leaf value module
 // (../shared/deal-value-sql.ts) so the deals service and the shared FilterBar
 // date-scope share ONE definition. Re-exported here unchanged so every existing
 // importer of "../deals/service.js" (dashboard card, this module's Won drill-down)
-// keeps resolving it. The HubSpot-JSON backfill/reseed path stays local below
-// (dealWonHsClosedWonDateSql / castHsClosedWonDateSql).
+// keeps resolving it. The live guard reads the app-owned deals.won_closed_date
+// column (a compact IS NOT NULL / >= / <= predicate per site), NOT a
+// try_parse_hs_close_date call. The legacy raw HubSpot-JSON parse
+// (public.try_parse_hs_close_date over hubspot_extra_properties->>'hs_closed_won_date')
+// is no longer read at query time and has no TS helper; it survives only inline in the
+// root scripts scripts/backfill-won-closed-date.ts and
+// scripts/verify-won-closed-date-parity.ts, which populate/audit won_closed_date.
 export { aliasedWonHsClosedWonDateSql };
 
 // True iff the deal carries a usable HubSpot close-won date (non-null, non-empty,
@@ -1482,7 +1450,7 @@ export async function getDeals(
           // Won-period drill-down must share the same row set as the Won card:
           // active Won rows plus inactive historical Won aliases. Keep this
           // aligned here so the generic pipeline visibility guard cannot drop an
-          // inactive Won-family row before the hs_closed_won_date filter runs.
+          // inactive Won-family row before the won_closed_date filter runs.
           for (const wonStageId of await resolveWonClosedStageIds(allStages)) {
             if (terminalStageIds.has(wonStageId) && !terminalInactiveStageIds.includes(wonStageId)) {
               terminalInactiveStageIds.push(wonStageId);
@@ -1575,7 +1543,7 @@ export async function getDeals(
   // mirrors the Won card and the Director closed-period card for the same window.
   if (filters.wonClosedFrom || filters.wonClosedTo) {
     // Constrain to the canonical Won-family stages the card aggregates over, so a
-    // deal that was Won (has hs_closed_won_date) but later moved to a non-Won active
+    // deal that was Won (has won_closed_date) but later moved to a non-Won active
     // stage is NOT counted here. Without this, the drill-down over-counts vs the card
     // (the 1-deal residual seen in round-1). AND-ed with any caller-supplied stageIds
     // above, so an explicit non-Won stageIds + wonClosedFrom/To intersects to none.
@@ -2583,9 +2551,10 @@ export async function getDealsForPipeline(
       // is_active is intentionally NOT required here: terminal Won deals are
       // legitimately inactive and stay counted (§6.7).
       stageConditions.push(aliasedActiveDealCountFilterSql("deals"));
-      // §6.1: when a period window is requested, require a usable hs_closed_won_date
-      // (this is what dealWonWindowEligibilitySql now returns). All-time (no window)
-      // omits the guard, so null-date Won deals remain in the all-time total.
+      // §6.1: when a period window is requested, require a usable won_closed_date
+      // (this is what aliasedDealWonWindowEligibilitySql now returns — a
+      // deals.won_closed_date IS NOT NULL guard). All-time (no window) omits the
+      // guard, so null-date Won deals remain in the all-time total.
       if (wonSignedDateSince || wonSignedDateUntil || wonPeriodFrom || wonPeriodTo) {
         stageConditions.push(aliasedDealWonWindowEligibilitySql("deals"));
       }

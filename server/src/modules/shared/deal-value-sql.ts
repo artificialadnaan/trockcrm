@@ -167,11 +167,12 @@ export function aliasedActiveDealCountFilterSql(alias: string): SQL {
  *
  * FLIPPED (expand/migrate/contract step D): reads the app-owned
  * deals.won_closed_date column — populated by changeDealStage and backfilled from
- * HubSpot (migration 0141 + backfill-won-closed-date.ts). The raw-HubSpot-JSON
- * read (try_parse_hs_close_date over hubspot_extra_properties->>'hs_closed_won_date',
- * stripping the ''/'0' sentinels) is retained ONLY on the backfill/reseed path
- * (dealWonHsClosedWonDateSql / castHsClosedWonDateSql in deals/service.ts). Lives
- * here in the leaf value module so the date-scope and the deals service share ONE
+ * HubSpot (migration 0141 + backfill-won-closed-date.ts). The legacy raw-HubSpot-JSON
+ * parse (public.try_parse_hs_close_date over hubspot_extra_properties->>'hs_closed_won_date',
+ * stripping the ''/'0' sentinels) is no longer read at query time and has no TS
+ * helper; it survives only inline in the root scripts scripts/backfill-won-closed-date.ts
+ * and scripts/verify-won-closed-date-parity.ts, which populate/audit won_closed_date.
+ * Lives here in the leaf value module so the date-scope and the deals service share ONE
  * definition (no divergent reimplementation). `alias` is always a trusted
  * developer literal (e.g. "d"/"deals"), never user input.
  */
