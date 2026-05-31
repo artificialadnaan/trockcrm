@@ -40,8 +40,13 @@ export function LeadsListSection({ scope, filterBar }: LeadsListSectionProps) {
     [filterBar.options?.stages]
   );
 
+  const leadFilters = filterBarValueToLeadFilters(urlFilters);
+  // Drop a stale/hidden rep filter: when the Rep dimension isn't rendered (scope=mine, or a non-admin),
+  // a leftover namespaced `ll_assignedRepId` must NOT silently narrow the list — the server ANDs it with
+  // scope=mine, so an invisible filter would empty/narrow the list with no control to clear it (Codex #577 P2).
+  if (!filterBar.dimensions.includes("rep")) delete leadFilters.assignedRepId;
   const leadArgs = {
-    ...filterBarValueToLeadFilters(urlFilters),
+    ...leadFilters,
     // Scope is the page toggle's (inherited) unless the bar renders a scope control.
     scope: filterBarOwnsScope ? urlFilters.scope ?? scope : scope,
     // Show every lifecycle; the Status dimension narrows it (no implicit open-only filter like the board).

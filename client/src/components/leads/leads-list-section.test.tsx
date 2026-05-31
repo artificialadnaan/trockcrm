@@ -47,12 +47,18 @@ const lastLeadsCall = () => mocks.useLeadsMock.mock.calls[mocks.useLeadsMock.moc
 let container: HTMLDivElement;
 let root: Root | null;
 
-async function render(url: string) {
+async function render(
+  url: string,
+  overrides?: { dimensions?: FilterDimension[]; scope?: "mine" | "team" | "all" }
+) {
   await act(async () => {
     root = createRoot(container);
     root.render(
       <MemoryRouter initialEntries={[url]}>
-        <LeadsListSection scope="all" filterBar={{ dimensions: DIMENSIONS, options: OPTIONS }} />
+        <LeadsListSection
+          scope={overrides?.scope ?? "all"}
+          filterBar={{ dimensions: overrides?.dimensions ?? DIMENSIONS, options: OPTIONS }}
+        />
       </MemoryRouter>
     );
   });
@@ -97,6 +103,22 @@ describe("LeadsListSection — shared FilterBar on the leads list (Wave 1)", () 
       scope: "all", // inherited from the page (bar doesn't own scope here)
     });
     expect(call.search).toBeUndefined(); // the board's bare ?search is NOT read by the namespaced list
+  });
+
+  it("DROPS a stale namespaced rep filter when the Rep dimension is NOT rendered (Codex #577 P2)", async () => {
+    // When scope hides Rep (scope=mine, or a non-admin), a leftover ll_assignedRepId in the URL must
+    // NOT silently narrow the list: the server ANDs assignedRepId with scope=mine, so an invisible
+    // filter would empty/narrow the list with no control to clear it.
+    await render("/leads?ll_assignedRepId=rep-1", {
+      dimensions: DIMENSIONS.filter((d) => d !== "rep"),
+      scope: "mine",
+    });
+    expect(lastLeadsCall().assignedRepId).toBeUndefined();
+  });
+
+  it("KEEPS the rep filter when the Rep dimension IS rendered", async () => {
+    await render("/leads?ll_assignedRepId=rep-1", { dimensions: DIMENSIONS, scope: "all" });
+    expect(lastLeadsCall().assignedRepId).toBe("rep-1");
   });
 
   it("renders the outcome-aware displayDate in the Date column (filter-axis == display-axis)", async () => {
