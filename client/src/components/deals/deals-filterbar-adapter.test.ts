@@ -56,7 +56,10 @@ describe("filterBarValueToDealFilters (FilterBar URL value -> useDeals DealFilte
     expect("status" in any).toBe(false);
   });
 
-  it("forwards numeric value + stalled-age ranges", () => {
+  it("forwards numeric value + stalled-age ranges (the mount, not this pure mapper, forces stageEntryDateWindow)", () => {
+    // The stage_entry_window override that makes age/date filters bound open rows regardless of the
+    // env flag is applied at the outcome-aware mount (deals-list-section, gated on stageEntryDateEnabled),
+    // NOT here — this mapper stays a pure URL->DealFilters translation. See the FilterBar section tests.
     expect(
       filterBarValueToDealFilters({ valueMin: 1000, valueMax: 50000, minAgeDays: 30, maxAgeDays: 90 })
     ).toEqual({ valueMin: 1000, valueMax: 50000, minAgeDays: 30, maxAgeDays: 90 });

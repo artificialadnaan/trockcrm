@@ -733,6 +733,15 @@ export function DealsListSection({
       defaultStageIds: filterBar?.defaultStageIds,
       terminalStageIds: filterBar?.terminalStageIds,
     }),
+    // When the bar is outcome-aware (stageEntryDateEnabled — it hides the honest "current state" note and
+    // presents Date as outcome-aware + shows Stalled), force the server to bound open rows on
+    // stage_entered_at for ANY active date/age filter, regardless of ENABLE_STAGE_ENTRY_DATE_FILTER. The
+    // server only windows open rows when the env flag OR filters.stageEntryDateWindow is true, so without
+    // this a date/age filter would leave out-of-window open deals in while the UI claims outcome-aware
+    // (Codex #580). Keyed off the mount prop (not the env flag) so it survives a flag rollback; tied to the
+    // prop so a current-state mount (stageEntryDateEnabled=false) stays honestly un-windowed. Mirrors the
+    // legacy outcomeDateAxis override above. Inert when no date/age filter is active.
+    stageEntryDateWindow: filterBar?.stageEntryDateEnabled ? true : baseFilters?.stageEntryDateWindow,
     scope: filterBarOwnsScope ? urlFilters.scope ?? scope : scope,
     page: currentPage,
     limit: pageSize,

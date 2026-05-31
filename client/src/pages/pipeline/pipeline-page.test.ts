@@ -86,6 +86,16 @@ describe("pipeline DD toggle label", () => {
   });
 });
 
+describe("pipeline FilterBar stalled gate", () => {
+  it("enables stage-entry dates + the Stalled control at the deals-list FilterBar mount", () => {
+    // ENABLE_STAGE_ENTRY_DATE_FILTER is on in prod, so open rows are date-windowed: the bar must
+    // expose the Stalled (days-in-stage) dimension and drop the honest "current state" date note.
+    // filter-bar.test.tsx proves the component honors this flag; this pins the mount passing it true.
+    expect(pipelinePageSource).toContain("stageEntryDateEnabled: true");
+    expect(pipelinePageSource).not.toContain("stageEntryDateEnabled: false");
+  });
+});
+
 describe("summarizeActivePipelineColumns", () => {
   it("keeps terminal history out of active headline totals", () => {
     const summary = summarizeActivePipelineColumns([

@@ -110,6 +110,9 @@ const FB_PROP_BOARD = {
   defaultStageIds: ["stage-opportunity", "stage-won"],
   terminalStageIds: ["stage-won"],
 };
+// An outcome-aware mount (the pipeline list post-flag-flip): the bar drops the honest "current state"
+// note and presents Date as outcome-aware + shows Stalled, so the mount must force stage_entry_window.
+const FB_PROP_OUTCOME = { ...FB_PROP, stageEntryDateEnabled: true };
 
 const lastDealsCall = () => mocks.useDealsMock.mock.calls[mocks.useDealsMock.mock.calls.length - 1][0];
 
@@ -199,6 +202,32 @@ describe("DealsListSection — FilterBar (URL) mode (Slice 7 proving ground)", (
   it("forwards the __unassigned__ rep sentinel verbatim", async () => {
     await renderFB("/deals?assignedRepId=__unassigned__");
     expect(lastDealsCall().assignedRepId).toBe("__unassigned__");
+  });
+
+  // Codex #580 (rollback-safety): when the mount is outcome-aware (stageEntryDateEnabled — the bar hides
+  // the "current state" note and claims the Date axis is outcome-aware), every date/age filter must bound
+  // open rows regardless of ENABLE_STAGE_ENTRY_DATE_FILTER. The server only windows open rows when the env
+  // flag OR filters.stageEntryDateWindow is true, so the mount forces the override (keyed off the prop, not
+  // the env flag, so it survives a flag rollback). Tied to the prop so a current-state mount stays honest.
+  it("forces stage_entry_window for a date-only filter when the mount is outcome-aware", async () => {
+    await renderFB("/deals?dateFrom=2026-05-01&dateTo=2026-05-27", {}, FB_PROP_OUTCOME);
+    const call = lastDealsCall();
+    expect(call.dateFrom).toBe("2026-05-01");
+    expect(call.stageEntryDateWindow).toBe(true);
+  });
+
+  it("forces stage_entry_window for a Stalled (age) filter when the mount is outcome-aware", async () => {
+    await renderFB("/deals?minAgeDays=30", {}, FB_PROP_OUTCOME);
+    const call = lastDealsCall();
+    expect(call.minAgeDays).toBe(30);
+    expect(call.stageEntryDateWindow).toBe(true);
+  });
+
+  it("does NOT force stage_entry_window on a current-state mount (stageEntryDateEnabled=false) — open rows stay honestly un-windowed", async () => {
+    await renderFB("/deals?dateFrom=2026-05-01&dateTo=2026-05-27", {}, FB_PROP);
+    const call = lastDealsCall();
+    expect(call.dateFrom).toBe("2026-05-01");
+    expect(call.stageEntryDateWindow).toBeFalsy();
   });
 
   it("renders the shared FilterBar and drops the legacy inline owner/stage-chip/sort controls", async () => {
