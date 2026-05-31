@@ -34,6 +34,7 @@ import {
   getOwnerInitialColor,
 } from "@trock-crm/shared/types";
 import { cn } from "@/lib/utils";
+import { parseDisplayDate } from "@/lib/deal-utils";
 import { getDealDisplayNumber } from "@/components/deals/kanban-deal-card";
 import { listPaginationIconButtonClassName } from "@/components/shared/list-pagination";
 import { AtRiskBadge } from "@/components/deals/at-risk-badge";
@@ -135,7 +136,9 @@ export function dateRangeFromTerminalFilter(filter: TerminalDateFilter) {
 
 function formatShortDate(value: string | null | undefined) {
   if (!value) return "--";
-  const date = new Date(value);
+  // parseDisplayDate anchors a date-only value (YYYY-MM-DD) to its literal calendar day so it never
+  // renders a day early west of UTC (the won_closed_date "Jan 14 -> Jan 13" bug). Timestamps unchanged.
+  const date = parseDisplayDate(value);
   if (Number.isNaN(date.getTime())) return "--";
   return date.toLocaleDateString("en-US", { month: "short", day: "numeric" });
 }

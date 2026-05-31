@@ -198,7 +198,7 @@ export function daysInStage(stageEnteredAt: string | Date | null): number {
  */
 export function timeAgo(date: string | Date | null): string {
   if (!date) return "--";
-  const d = new Date(date);
+  const d = parseDisplayDate(date);
   const seconds = Math.floor((Date.now() - d.getTime()) / 1000);
 
   if (seconds < 60) return "just now";
@@ -213,7 +213,7 @@ export function timeAgo(date: string | Date | null): string {
  */
 export function formatDate(date: string | Date | null): string {
   if (!date) return "--";
-  return new Date(date).toLocaleDateString("en-US");
+  return parseDisplayDate(date).toLocaleDateString("en-US");
 }
 
 /**
@@ -221,11 +221,29 @@ export function formatDate(date: string | Date | null): string {
  */
 export function formatShortDate(iso: string | null | undefined): string {
   if (!iso) return "";
-  return new Date(iso).toLocaleDateString("en-US", {
+  return parseDisplayDate(iso).toLocaleDateString("en-US", {
     month: "short",
     day: "numeric",
     year: "numeric",
   });
+}
+
+const DATE_ONLY_PATTERN = /^\d{4}-\d{2}-\d{2}$/;
+
+/**
+ * Parse a value for DISPLAY without the date-only off-by-one. A bare date string (YYYY-MM-DD) carries
+ * no time/zone, but `new Date("2026-01-14")` parses it as UTC midnight — which renders a day EARLY
+ * west of UTC (e.g. "Jan 13" in Central: the bug behind Rise Spring Point's Jan-14 won_closed_date
+ * showing "Jan 13"). Anchor such values at LOCAL midnight of the literal calendar day so they display
+ * as written, in every timezone. Full timestamps and Date inputs pass through unchanged.
+ */
+export function parseDisplayDate(value: string | Date): Date {
+  if (value instanceof Date) return value;
+  if (DATE_ONLY_PATTERN.test(value)) {
+    const [year, month, day] = value.split("-").map(Number);
+    return new Date(year, month - 1, day);
+  }
+  return new Date(value);
 }
 
 /**
