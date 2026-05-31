@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { WON_DEAL_STAGE_SLUGS } from "@trock-crm/shared/types";
 import {
   getStagePageListStageIds,
+  isWonStagePageStage,
   mapStageRouteFiltersToDealFilters,
   normalizeStagePageQuery,
 } from "./pipeline-stage-page";
@@ -134,6 +135,19 @@ describe("getStagePageListStageIds (terminal alias-family broadening — reconci
 
   it("keeps a non-terminal stage as its single route id", () => {
     expect(getStagePageListStageIds({ id: "s-est", slug: "estimating" }, allStages)).toEqual(["s-est"]);
+  });
+
+  it("falls back to the route stage id when the stage list is empty (load failure — never unscoped)", () => {
+    expect(getStagePageListStageIds({ id: "s-won", slug: "won" }, [])).toEqual(["s-won"]);
+  });
+});
+
+describe("isWonStagePageStage (Won-only on-hold exclusion)", () => {
+  it("is true for Won-family stages, false for Lost + active stages", () => {
+    expect(isWonStagePageStage("won")).toBe(true);
+    expect(isWonStagePageStage("closed_won")).toBe(true);
+    expect(isWonStagePageStage("lost")).toBe(false);
+    expect(isWonStagePageStage("estimating")).toBe(false);
   });
 });
 

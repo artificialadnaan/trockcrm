@@ -163,6 +163,17 @@ describe("DealStagePage", () => {
     expect(props.filterBar.defaultStageIds).toEqual(props.baseFilters.stageIds); // bar scope == list scope
   });
 
+  it("excludes on-hold (migration parking-lot) deals on a Won stage, keeps them on a non-Won stage", () => {
+    setStage({ id: "s-won", name: "Won", slug: "won" });
+    renderStage("/deals/stages/s-won?scope=team");
+    expect(lastListProps().baseFilters.excludeOnHold).toBe(true); // matches the Won summary's exclusion
+
+    mocks.dealsListSectionMock.mockReset();
+    setStage({ id: "stage-estimating", name: "Estimating", slug: "estimating" });
+    renderStage();
+    expect(lastListProps().baseFilters.excludeOnHold).toBeUndefined(); // active stage keeps on-hold deals
+  });
+
   it("carries the inbound stage-route filters into the list so it matches the filtered header", () => {
     mocks.useNormalizedStageRouteMock.mockReturnValue({
       needsRedirect: false,

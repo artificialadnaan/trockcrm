@@ -135,7 +135,17 @@ export function getStagePageListStageIds(
       ? LOST_DEAL_STAGE_SLUGS
       : null;
   if (!family) return [stage.id];
-  return allStages.filter((item) => family.includes(item.slug)).map((item) => item.id);
+  const familyIds = allStages.filter((item) => family.includes(item.slug)).map((item) => item.id);
+  // Fall back to the route stage id if the family can't be resolved (stage list empty/failed to load),
+  // so the list stays SCOPED to the route stage rather than rendering unscoped (all deals) — Codex P2.
+  return familyIds.length > 0 ? familyIds : [stage.id];
+}
+
+/** Is this a Won-family stage? The Won board/summary excludes on-hold (migration parking-lot) deals
+ *  from its count; a Won stage-page list sets `excludeOnHold` to reconcile. Lost stages do NOT (the
+ *  summary only applies the exclusion for Won), so this is Won-specific. */
+export function isWonStagePageStage(stageSlug: string): boolean {
+  return WON_DEAL_STAGE_SLUGS.includes(stageSlug);
 }
 
 /**

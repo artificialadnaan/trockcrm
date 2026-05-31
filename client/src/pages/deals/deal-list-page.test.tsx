@@ -416,6 +416,7 @@ describe("DealListPage", () => {
         { id: "stage-sent", name: "Estimate Sent to Client", slug: "estimate_sent_to_client", displayOrder: 4 },
         { id: "stage-contract", name: "Contract", slug: "contract", displayOrder: 5 },
         { id: "stage-won", name: "Won", slug: "won", displayOrder: 6 },
+        { id: "stage-closed-won", name: "Closed Won", slug: "closed_won", displayOrder: 6 }, // a Won alias
         { id: "stage-lost", name: "Lost", slug: "lost", displayOrder: 7 },
       ],
     });
@@ -1513,6 +1514,19 @@ describe("DealListPage", () => {
       filterBar?: { defaultSort?: { key: string; dir: string } };
     };
     expect(props.filterBar?.defaultSort).toEqual({ key: "contract_signed_date", dir: "desc" }); // the Won view's order
+  });
+
+  it("RECONCILES the Won drill-down list to the KPI: full Won alias family + on-hold excluded (Codex P2)", () => {
+    renderPage("/deals?filter=won&scope=all", "director");
+    const props = mocks.dealsListSectionMock.mock.calls[mocks.dealsListSectionMock.mock.calls.length - 1]?.[0] as {
+      filterBar?: { defaultStageIds?: string[]; terminalStageIds?: string[] };
+      baseFilters?: { excludeOnHold?: boolean };
+    };
+    // The Won list scopes to the whole Won family (canonical + alias), matching the KPI / board column.
+    expect(props.filterBar?.defaultStageIds).toContain("stage-won");
+    expect(props.filterBar?.defaultStageIds).toContain("stage-closed-won"); // the alias — would be dropped if canonical-only
+    // ...and excludes on-hold (migration parking-lot) deals, like the Won KPI.
+    expect(props.baseFilters?.excludeOnHold).toBe(true);
   });
 
   it("uses the Won terminal filter caption ahead of the page period and falls back correctly", () => {

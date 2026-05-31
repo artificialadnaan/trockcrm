@@ -254,6 +254,10 @@ export interface DealFilters {
   // window actually bounds open rows (post-#535 stage_entered_at is reliable);
   // otherwise an explicit outcome window leaves every open deal in (flag OFF default).
   stageEntryDateWindow?: boolean;
+  // Exclude on-hold (migration parking-lot) deals from rows + count, matching the Won board/summary's
+  // reportable filter. The Won stage-page / drill-down list opts in so it reconciles to the Won count;
+  // every other caller omits it (on-hold included, unchanged). Applied via the predicate registry.
+  excludeOnHold?: boolean;
   // Inclusive YYYY-MM-DD bounds against deals.contract_signed_at::date, with
   // deals.contract_signed_date as a transition fallback. RESERVED for the
   // commissions / contracts-signed surfaces (§6.5) — do NOT use for Won-period.

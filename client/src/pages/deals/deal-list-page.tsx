@@ -12,7 +12,7 @@ import { usePipelineStages, useProjectTypes, useRegions } from "@/hooks/use-pipe
 import { useTaskAssignees } from "@/hooks/use-task-assignees";
 import { buildCanonicalDealBoardColumns } from "@/lib/canonical-deal-board";
 import { useAuth } from "@/lib/auth";
-import { getEffectiveDealValue } from "@trock-crm/shared/types";
+import { getEffectiveDealValue, WON_DEAL_STAGE_SLUGS } from "@trock-crm/shared/types";
 import { TerminalDateFilterControl } from "@/components/pipeline/terminal-date-filter-control";
 import {
   buildDealStageWorkspacePath,
@@ -914,7 +914,10 @@ function DealListPageContent({ role, userId }: { role: string; userId: string })
         : dashboardView.boardMode === "active"
         ? stages.filter((stage) => !isTerminalStage(stage.slug))
         : dashboardView.boardMode === "won"
-          ? stages.filter((stage) => stage.slug === "won")
+          // The Won list scope = the FULL Won alias family (won, closed_won, the service-won stages),
+          // matching the canonical board column / Won KPI which aggregate the family. Canonical-only
+          // would drop historical alias-stage wins and under-report vs the KPI (Codex P2 / BLUE checklist).
+          ? stages.filter((stage) => WON_DEAL_STAGE_SLUGS.includes(stage.slug))
           : dashboardView.boardMode === "at_risk"
             ? stages.filter((stage) => !isTerminalStage(stage.slug))
           : undefined,
@@ -1038,8 +1041,11 @@ function DealListPageContent({ role, userId }: { role: string; userId: string })
     () => ({
       ...layeredListBaseFilters,
       ...(selectedRepFilter ? { assignedRepId: selectedRepFilter } : {}),
+      // Won drill-down: exclude on-hold (migration parking-lot) deals so the list reconciles to the Won
+      // KPI / board column, both of which drop on-hold from the Won count (Codex P2).
+      ...(dashboardView.filter === "won" ? { excludeOnHold: true } : {}),
     }),
-    [layeredListBaseFilters, selectedRepFilter]
+    [layeredListBaseFilters, selectedRepFilter, dashboardView.filter]
   );
 
   const updateScope = (nextScope: PipelineScope) => {

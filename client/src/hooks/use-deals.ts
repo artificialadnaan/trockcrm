@@ -314,6 +314,9 @@ export interface DealFilters {
   // D-15: force the outcome window to bound OPEN rows on stage_entered_at regardless of
   // the server's ENABLE_STAGE_ENTRY_DATE_FILTER flag (the rep drill-down sets this).
   stageEntryDateWindow?: boolean;
+  // Exclude on-hold (migration parking-lot) deals, matching the Won board/summary. The Won stage-page /
+  // drill-down list sets this so it reconciles to the Won count; other surfaces omit it.
+  excludeOnHold?: boolean;
   status?: "active" | "on_hold" | "inactive" | "any";
   workflowRoute?: "normal" | "service";
   valueMin?: number;
@@ -466,6 +469,7 @@ export function buildDealsQueryParams(filters: DealFilters): URLSearchParams {
   if (filters.dateFrom) params.set("dateFrom", filters.dateFrom);
   if (filters.dateTo) params.set("dateTo", filters.dateTo);
   if (filters.stageEntryDateWindow) params.set("stage_entry_window", "true");
+  if (filters.excludeOnHold) params.set("exclude_on_hold", "true");
   if (filters.workflowRoute) params.set("workflowRoute", filters.workflowRoute);
   if (filters.valueMin !== undefined) params.set("valueMin", String(filters.valueMin));
   if (filters.valueMax !== undefined) params.set("valueMax", String(filters.valueMax));
@@ -530,6 +534,7 @@ export function useDeals(filters: DealFilters = {}, options: { enabled?: boolean
     filters.dateFrom,
     filters.dateTo,
     filters.stageEntryDateWindow,
+    filters.excludeOnHold,
     filters.status,
     filters.workflowRoute,
     filters.valueMin,

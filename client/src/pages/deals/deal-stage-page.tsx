@@ -14,7 +14,11 @@ import { isTerminalStage } from "@/lib/pipeline-terminal-filters";
 import { usePipelineStages, useProjectTypes, useRegions } from "@/hooks/use-pipeline-config";
 import { useTaskAssignees } from "@/hooks/use-task-assignees";
 import { useAuth } from "@/lib/auth";
-import { getStagePageListStageIds, mapStageRouteFiltersToDealFilters } from "@/lib/pipeline-stage-page";
+import {
+  getStagePageListStageIds,
+  isWonStagePageStage,
+  mapStageRouteFiltersToDealFilters,
+} from "@/lib/pipeline-stage-page";
 
 export function DealStagePage() {
   const { stageId } = useParams();
@@ -29,14 +33,18 @@ export function DealStagePage() {
 
   if (route.needsRedirect) return <Navigate to={route.redirectTo} replace />;
   if (error) return <div className="text-sm text-rose-600">{error}</div>;
-  // Wait for stages too: a terminal route stage broadens to its alias family via the stage list, so
-  // querying before stages load would under-scope the list (Codex P2 reconciliation).
+  // Wait while stages are LOADING (the terminal family broadening needs them). If they FAIL,
+  // stagesLoading is false and getStagePageListStageIds falls back to the route stage id, so the list
+  // stays scoped to the route stage instead of rendering unscoped (Codex P2) — never block on the error.
   if (loading || stagesLoading || !data) return <div className="text-sm text-slate-500">Loading stage...</div>;
 
   const stage = data.stage;
   // The list's stage scope = the SAME population the header counts: a Won/Lost stage broadens to its
   // terminal alias family (mirrors the server stage endpoint), every other stage stays its single id.
   const listStageIds = getStagePageListStageIds(stage, stages);
+  // Won stages also exclude on-hold (migration parking-lot) deals — the Won summary does too, so the
+  // list reconciles to the header count. Lost stages keep them (the summary doesn't exclude there).
+  const excludeOnHold = isWonStagePageStage(stage.slug);
 
   return (
     <PipelineStagePageHeader
@@ -66,7 +74,11 @@ export function DealStagePage() {
         pageSize={20}
         searchPlaceholder="Deal, number, city, state"
         visibleStages={[stage]}
-        baseFilters={{ ...mapStageRouteFiltersToDealFilters(route.query), stageIds: listStageIds }}
+        baseFilters={{
+          ...mapStageRouteFiltersToDealFilters(route.query),
+          stageIds: listStageIds,
+          ...(excludeOnHold ? { excludeOnHold: true } : {}),
+        }}
         filterBar={{
           dimensions: getDrilldownFilterBarDimensions({ pinnedStage: true, ownRep: user?.role === "admin" }),
           options: {
