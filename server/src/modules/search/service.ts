@@ -14,7 +14,7 @@ import {
   escapeLikePattern,
 } from "./unified-search.js";
 import { TERMINAL_STAGE_SLUGS } from "../shared/pipeline-terminal-stages.js";
-import { capPerOffice, deriveDealStatus, mergeAndLimit, mergeWithOfficeCap, scoreMatch, type DealLifecycle } from "./global-search-helpers.js";
+import { capPerOffice, deriveDealStatus, mergeAndLimit, mergeWithOfficeCap, type DealLifecycle } from "./global-search-helpers.js";
 
 type TenantDb = NodePgDatabase<typeof schema>;
 
@@ -338,6 +338,11 @@ async function searchDeals(tenantDb: TenantDb, query: string, limit: number): Pr
   // denormalized bid-board slug is only set at the estimating boundary, so it would miss
   // CRM-owned Won/Lost. Findable set = active OR a terminal (won/lost) stage: terminal deals are
   // FINDABLE + MARKED, while soft-deleted (inactive, non-terminal) deals stay hidden.
+  // ONE relevance score, reused for BOTH the SQL ORDER BY (which rows survive the per-entity LIMIT)
+  // and the SearchResult.rank the cross-office merge re-ranks on -- so the merge can never demote or
+  // drop a row on a field the SQL ranked it on. (The old JS scoreMatch covered fewer fields than the
+  // builder/ORDER BY, so e.g. a zip/state/customer-only match got rank 0 and could be merged out.)
+  const relevance = relevanceOrder(query, [deals.name, deals.dealNumber, deals.projectNumber, deals.description, deals.propertyAddress, deals.propertyCity, deals.propertyState, deals.bidBoardCustomerName]);
   const rows = await tenantDb
     .select({
       id: deals.id,
@@ -348,6 +353,7 @@ async function searchDeals(tenantDb: TenantDb, query: string, limit: number): Pr
       propertyState: deals.propertyState,
       onHold: deals.onHold,
       stageSlug: pipelineStageConfig.slug,
+      relevance,
     })
     .from(deals)
     .leftJoin(pipelineStageConfig, eq(pipelineStageConfig.id, deals.stageId))
@@ -359,13 +365,10 @@ async function searchDeals(tenantDb: TenantDb, query: string, limit: number): Pr
     )
     // Status tier FIRST (active < on_hold < terminal) so the per-entity cap can't fill up with
     // recently-updated won/lost deals and starve older active ones; then relevance, then recency.
-    // (mergeAndLimit applies the same active-first comparator after merge.)
+    // (mergeAndLimit applies the same active-first comparator + rank after merge.)
     .orderBy(
       asc(sql<number>`CASE WHEN ${inArray(pipelineStageConfig.slug, [...TERMINAL_STAGE_SLUGS])} THEN 2 WHEN ${deals.onHold} THEN 1 ELSE 0 END`),
-      // Rank over every own field the builder matches (numbers + address/city/state + bid-board
-      // customer), not just name/number, so an exact city/customer hit can't be dropped before the
-      // limit by newer weaker matches. (Related company/contact/owner matches stay tier 1 / score 0.)
-      desc(relevanceOrder(query, [deals.name, deals.dealNumber, deals.projectNumber, deals.description, deals.propertyAddress, deals.propertyCity, deals.propertyState, deals.bidBoardCustomerName])),
+      desc(relevance),
       desc(deals.updatedAt),
     )
     .limit(limit);
@@ -378,7 +381,7 @@ async function searchDeals(tenantDb: TenantDb, query: string, limit: number): Pr
     tertiaryLabel: [r.propertyCity, r.propertyState].filter(Boolean).join(", ") || undefined,
     status: deriveDealStatus(r.stageSlug, r.onHold),
     deepLink: `/deals/${r.id}`,
-    rank: scoreMatch(query, r.name, r.projectNumber, r.dealNumber, r.propertyCity),
+    rank: Number(r.relevance ?? 0),
   }));
 }
 
@@ -393,6 +396,14 @@ export function pickDealSecondaryLabel(projectNumber: string | null, dealNumber:
 }
 
 async function searchContacts(tenantDb: TenantDb, query: string, limit: number): Promise<SearchResult[]> {
+  // Relevance over EVERY field the builder matches (name parts/email/company + phone/mobile/jobTitle/
+  // city AND the derived full-name CONCAT), reused as the merge rank -- so a phone-fragment, city, or
+  // two-word full-name match can't be dropped before the limit nor demoted in the cross-office merge.
+  const relevance = relevanceOrder(query, [
+    contacts.firstName, contacts.lastName, contacts.email, contacts.companyName,
+    contacts.phone, contacts.mobile, contacts.jobTitle, contacts.city,
+    sql`(coalesce(${contacts.firstName}, '') || ' ' || coalesce(${contacts.lastName}, ''))`,
+  ]);
   const rows = await tenantDb
     .select({
       id: contacts.id,
@@ -400,25 +411,12 @@ async function searchContacts(tenantDb: TenantDb, query: string, limit: number):
       lastName: contacts.lastName,
       email: contacts.email,
       phone: contacts.phone,
-      mobile: contacts.mobile,
-      jobTitle: contacts.jobTitle,
-      city: contacts.city,
       companyName: contacts.companyName,
+      relevance,
     })
     .from(contacts)
     .where(and(buildContactSearchCondition(query), eq(contacts.isActive, true)))
-    // Rank over EVERY field the builder matches (name parts/email/company + phone/mobile/jobTitle/city
-    // AND the derived full-name CONCAT), not just name/email/company: otherwise a phone-fragment, city,
-    // or two-word full-name query with >limit matches lets newer weak matches fill the limit and drops
-    // an older exact hit before it's returned. The CONCAT mirrors the builder's full-name match path.
-    .orderBy(
-      desc(relevanceOrder(query, [
-        contacts.firstName, contacts.lastName, contacts.email, contacts.companyName,
-        contacts.phone, contacts.mobile, contacts.jobTitle, contacts.city,
-        sql`(coalesce(${contacts.firstName}, '') || ' ' || coalesce(${contacts.lastName}, ''))`,
-      ])),
-      desc(contacts.updatedAt),
-    )
+    .orderBy(desc(relevance), desc(contacts.updatedAt))
     .limit(limit);
 
   return rows.map((r): SearchResult => {
@@ -430,32 +428,27 @@ async function searchContacts(tenantDb: TenantDb, query: string, limit: number):
       secondaryLabel: r.email ?? r.phone ?? "",
       tertiaryLabel: r.companyName ?? undefined,
       deepLink: `/contacts/${r.id}`,
-      // Score over the same matched fields so the cross-office merge re-rank keeps a city/phone-only
-      // match ordered sensibly rather than at score 0.
-      rank: scoreMatch(query, name, r.email, r.companyName, r.phone, r.mobile, r.jobTitle, r.city),
+      rank: Number(r.relevance ?? 0),
     };
   });
 }
 
 async function searchCompanies(tenantDb: TenantDb, query: string, limit: number): Promise<SearchResult[]> {
+  // Relevance over the SAME own fields the builder matches (name/domain/website/address/city/state),
+  // reused as the merge rank, so an exact domain/address/city/state hit isn't pushed out of the limit
+  // by weaker name matches nor demoted in the cross-office merge.
+  const relevance = relevanceOrder(query, [companies.name, companies.domain, companies.website, companies.address, companies.city, companies.state]);
   const rows = await tenantDb
     .select({
       id: companies.id,
       name: companies.name,
       city: companies.city,
       state: companies.state,
-      domain: companies.domain,
-      website: companies.website,
-      address: companies.address,
+      relevance,
     })
     .from(companies)
     .where(and(buildCompanySearchCondition(query), eq(companies.isActive, true)))
-    // Rank/order over the SAME own fields the builder matches (incl. city/state), so an exact
-    // domain/address/city hit isn't pushed out of the limit by weaker name matches.
-    .orderBy(
-      desc(relevanceOrder(query, [companies.name, companies.domain, companies.website, companies.address, companies.city, companies.state])),
-      desc(companies.updatedAt),
-    )
+    .orderBy(desc(relevance), desc(companies.updatedAt))
     .limit(limit);
 
   return rows.map((r): SearchResult => ({
@@ -464,7 +457,7 @@ async function searchCompanies(tenantDb: TenantDb, query: string, limit: number)
     primaryLabel: r.name ?? "Unnamed Account",
     secondaryLabel: [r.city, r.state].filter(Boolean).join(", ") || "",
     deepLink: `/companies/${r.id}`,
-    rank: scoreMatch(query, r.name, r.domain, r.website, r.address, r.city),
+    rank: Number(r.relevance ?? 0),
   }));
 }
 
@@ -476,16 +469,14 @@ async function searchLeads(tenantDb: TenantDb, query: string, limit: number): Pr
   // converted-deal-number match path. Mirrors deals surfacing BOTH won AND lost: terminal leads are
   // findable + MARKED (status shown in the label). Admin soft-delete leaves status='open', so it is
   // never matched here and stays hidden.
+  // Relevance over the lead's own matched text columns (not just name), reused as the merge rank, so
+  // an exact source/sourceDetail/description hit isn't pushed past the limit nor demoted by weaker name matches.
+  const relevance = relevanceOrder(query, [leads.name, leads.source, leads.sourceDetail, leads.description]);
   const rows = await tenantDb
-    .select({ id: leads.id, name: leads.name, status: leads.status })
+    .select({ id: leads.id, name: leads.name, status: leads.status, relevance })
     .from(leads)
     .where(and(buildLeadSearchCondition(query), or(eq(leads.isActive, true), inArray(leads.status, ["converted", "disqualified"]))))
-    // Rank over the lead's own matched text columns (not just name) so an exact source/description
-    // hit isn't pushed past the limit by newer weaker name matches.
-    .orderBy(
-      desc(relevanceOrder(query, [leads.name, leads.source, leads.sourceDetail, leads.description])),
-      desc(leads.updatedAt),
-    )
+    .orderBy(desc(relevance), desc(leads.updatedAt))
     .limit(limit);
 
   return rows.map((r): SearchResult => ({
@@ -494,11 +485,15 @@ async function searchLeads(tenantDb: TenantDb, query: string, limit: number): Pr
     primaryLabel: r.name ?? "Unnamed Lead",
     secondaryLabel: r.status ? `Lead · ${r.status}` : "Lead",
     deepLink: `/leads/${r.id}`,
-    rank: scoreMatch(query, r.name),
+    rank: Number(r.relevance ?? 0),
   }));
 }
 
 async function searchProperties(tenantDb: TenantDb, query: string, limit: number): Promise<SearchResult[]> {
+  // Relevance over every own field the builder matches (incl. state/zip), reused as the merge rank,
+  // so an exact zip/state hit isn't dropped before the limit nor demoted in the cross-office merge
+  // (state/zip aren't displayed, so they're scored via the SQL relevance rather than re-fetched).
+  const relevance = relevanceOrder(query, [properties.name, properties.address, properties.city, properties.state, properties.zip]);
   const rows = await tenantDb
     .select({
       id: properties.id,
@@ -506,15 +501,11 @@ async function searchProperties(tenantDb: TenantDb, query: string, limit: number
       address: properties.address,
       city: properties.city,
       state: properties.state,
+      relevance,
     })
     .from(properties)
     .where(and(buildPropertySearchCondition(query), eq(properties.isActive, true)))
-    // Rank over every own field the builder matches (incl. state/zip) so an exact zip/state hit
-    // isn't dropped before the limit by weaker name/city matches.
-    .orderBy(
-      desc(relevanceOrder(query, [properties.name, properties.address, properties.city, properties.state, properties.zip])),
-      desc(properties.updatedAt),
-    )
+    .orderBy(desc(relevance), desc(properties.updatedAt))
     .limit(limit);
 
   return rows.map((r): SearchResult => {
@@ -525,7 +516,7 @@ async function searchProperties(tenantDb: TenantDb, query: string, limit: number
       primaryLabel: r.name || r.address || "Property",
       secondaryLabel: [r.address, locality].filter(Boolean).join(" · ") || "",
       deepLink: `/properties/${r.id}`,
-      rank: scoreMatch(query, r.name, r.address, r.city),
+      rank: Number(r.relevance ?? 0),
     };
   });
 }

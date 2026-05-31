@@ -81,14 +81,16 @@ describe("globalSearch — unified composition + additions (single office, rep)"
     const select = vi.fn(() => chainable([]));
     select.mockReturnValueOnce(
       chainable([
-        { id: "deal-won", name: "Acme Tower (Won)", dealNumber: "D-9", projectNumber: null, propertyCity: "Dallas", propertyState: "TX", stageSlug: WON_SLUG, onHold: false },
-        { id: "deal-active", name: "Acme Plaza", dealNumber: "D-10", projectNumber: null, propertyCity: "Dallas", propertyState: "TX", stageSlug: null, onHold: false },
+        { id: "deal-won", name: "Acme Tower (Won)", dealNumber: "D-9", projectNumber: null, propertyCity: "Dallas", propertyState: "TX", stageSlug: WON_SLUG, onHold: false, relevance: 2 },
+        { id: "deal-active", name: "Acme Plaza", dealNumber: "D-10", projectNumber: null, propertyCity: "Dallas", propertyState: "TX", stageSlug: null, onHold: false, relevance: 1 },
       ])
     ); // searchDeals
     select.mockReturnValueOnce(chainable([])); // searchContacts
-    select.mockReturnValueOnce(chainable([{ id: "co-1", name: "Acme Construction", city: "Dallas", state: "TX" }])); // searchCompanies
-    select.mockReturnValueOnce(chainable([{ id: "lead-1", name: "Acme Roof Lead", status: "open" }])); // searchLeads
-    select.mockReturnValueOnce(chainable([{ id: "prop-1", name: "Acme HQ", address: "100 Main", city: "Dallas", state: "TX" }])); // searchProperties
+    select.mockReturnValueOnce(chainable([{ id: "co-1", name: "Acme Construction", city: "Dallas", state: "TX", relevance: 3 }])); // searchCompanies
+    select.mockReturnValueOnce(chainable([{ id: "lead-1", name: "Acme Roof Lead", status: "open", relevance: 2 }])); // searchLeads
+    // prop-1 matched only on zip (relevance computed over name/address/city/state/zip in SQL) -> the
+    // merge rank must come from that relevance, not a name/address/city-only JS score (would be 0).
+    select.mockReturnValueOnce(chainable([{ id: "prop-1", name: "Acme HQ", address: "100 Main", city: "Dallas", state: "TX", relevance: 3 }])); // searchProperties
 
     const tenantDb = { execute, select };
     const result = await globalSearch(tenantDb as any, "acme");
@@ -111,6 +113,14 @@ describe("globalSearch — unified composition + additions (single office, rep)"
     // Backward-compatible shape: deals/contacts/files groups still exist.
     expect(Array.isArray(result.files)).toBe(true);
     expect(result.total).toBe(result.deals.length + result.companies.length + result.leads.length + result.properties.length);
+
+    // The merge rank is the SQL relevance (NOT a narrower JS score), so a property that matched only
+    // on zip/state still carries a real rank and can't be merged out as rank 0.
+    expect(result.companies[0]?.rank).toBe(3);
+    expect(result.leads[0]?.rank).toBe(2);
+    expect(result.properties[0]?.rank).toBe(3);
+    expect(won?.rank).toBe(2);
+    expect(active?.rank).toBe(1);
   });
 });
 
