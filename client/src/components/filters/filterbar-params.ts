@@ -13,7 +13,10 @@ export interface FilterBarValue {
   regionId?: string; // uuid | "__unassigned__"
   projectTypeId?: string;
   workflowRoute?: "normal" | "service";
-  status?: DealStatusFilter;
+  /** Domain status, surface-specific (deals: active|on_hold|inactive; leads: open|converted|disqualified).
+   *  The bar is multi-domain now, so this is a free string validated by each surface's adapter; "any"/
+   *  unset is the omitted/default state. */
+  status?: string;
   valueMin?: number;
   valueMax?: number;
   minAgeDays?: number;
@@ -35,7 +38,7 @@ function isFiniteNumber(value: number | undefined): value is number {
 
 /** FilterBar value -> URL query record. Omits undefined / empty / default values so absent params
  *  mean "no filter" (matches the contract's __all__/absent -> omit rule). */
-export function serializeFilters(value: FilterBarValue): Record<string, string> {
+export function serializeFilters(value: FilterBarValue, prefix = ""): Record<string, string> {
   const out: Record<string, string> = {};
 
   if (value.search && value.search.trim()) out.search = value.search.trim();
@@ -57,7 +60,10 @@ export function serializeFilters(value: FilterBarValue): Record<string, string> 
   if (value.scope) out.scope = value.scope;
   if (isFiniteNumber(value.page) && value.page > 1) out.page = String(value.page);
 
-  return out;
+  // Namespace the keys for surfaces that share a URL with another control set (e.g. the leads list
+  // under the leads board) so the list's params never collide with the board's bare params (Codex #577).
+  if (!prefix) return out;
+  return Object.fromEntries(Object.entries(out).map(([key, val]) => [prefix + key, val]));
 }
 
 /** The URL params the FilterBar owns. mergeFilterParams clears these before re-setting, so
@@ -89,17 +95,18 @@ const FILTERBAR_PARAM_KEYS = [
 export function mergeFilterParams(
   prev: URLSearchParams,
   patch: Partial<FilterBarValue>,
-  now = new Date()
+  now = new Date(),
+  prefix = ""
 ): URLSearchParams {
   // Re-resolve the existing params' NAMED date preset before merging, so a relative preset's stale
   // bounds (from a bookmarked/shared URL saved earlier) self-heal to today's window on ANY edit —
   // instead of being re-serialized stale on an unrelated change like typing in Search (Codex). The
   // patch still wins (a date-control change overrides); custom/unknown presets keep their bounds.
-  const next: FilterBarValue = { ...withResolvedDateWindow(deserializeFilters(prev), now), ...patch };
+  const next: FilterBarValue = { ...withResolvedDateWindow(deserializeFilters(prev, prefix), now), ...patch };
   if (patch.page === undefined) delete next.page;
-  const fbParams = serializeFilters(next);
+  const fbParams = serializeFilters(next, prefix); // keys already prefixed when prefix is set
   const result = new URLSearchParams(prev);
-  for (const key of FILTERBAR_PARAM_KEYS) result.delete(key);
+  for (const key of FILTERBAR_PARAM_KEYS) result.delete(prefix + key);
   for (const [key, val] of Object.entries(fbParams)) result.set(key, val);
   return result;
 }
@@ -108,13 +115,28 @@ export function mergeFilterParams(
  *  listed FilterBar params too — used when a surface inherits a param it does not render as a
  *  dimension (e.g. the deals-list-under-kanban inherits the board-owned `scope`, so Clear must not
  *  reset the whole pipeline). */
-export function clearFilterParams(prev: URLSearchParams, preserveKeys: readonly string[] = []): URLSearchParams {
+export function clearFilterParams(
+  prev: URLSearchParams,
+  preserveKeys: readonly string[] = [],
+  prefix = ""
+): URLSearchParams {
   const result = new URLSearchParams(prev);
   for (const key of FILTERBAR_PARAM_KEYS) {
     if (preserveKeys.includes(key)) continue;
-    result.delete(key);
+    result.delete(prefix + key);
   }
   return result;
+}
+
+/** Build a bare (un-prefixed) view of a namespaced URL: read the prefixed FilterBar keys into a plain
+ *  URLSearchParams so deserializeFilters can read them with its existing logic. */
+function stripFilterBarPrefix(params: URLSearchParams, prefix: string): URLSearchParams {
+  const bare = new URLSearchParams();
+  for (const key of FILTERBAR_PARAM_KEYS) {
+    const raw = params.get(prefix + key);
+    if (raw !== null) bare.set(key, raw);
+  }
+  return bare;
 }
 
 function parseNumberParam(raw: string | null): number | undefined {
@@ -123,8 +145,10 @@ function parseNumberParam(raw: string | null): number | undefined {
   return Number.isFinite(parsed) ? parsed : undefined;
 }
 
-/** URL query -> FilterBar value. Inverse of serializeFilters (modulo omitted defaults). */
-export function deserializeFilters(params: URLSearchParams): FilterBarValue {
+/** URL query -> FilterBar value. Inverse of serializeFilters (modulo omitted defaults). When a prefix
+ *  is set, reads the prefixed (namespaced) keys; the rest of the logic is unchanged. */
+export function deserializeFilters(params: URLSearchParams, prefix = ""): FilterBarValue {
+  if (prefix) params = stripFilterBarPrefix(params, prefix);
   const value: FilterBarValue = {};
 
   const search = params.get("search");
@@ -147,9 +171,10 @@ export function deserializeFilters(params: URLSearchParams): FilterBarValue {
   if (workflowRoute === "normal" || workflowRoute === "service") value.workflowRoute = workflowRoute;
 
   const status = params.get("status");
-  // "any" is the omitted/default state, so it does not deserialize to a value (keeps serialize and
-  // deserialize symmetric and the value object canonical).
-  if (status === "active" || status === "on_hold" || status === "inactive") {
+  // Multi-domain status: accept any value verbatim (deal or lead status); the per-surface adapter
+  // validates it. "any"/blank is the omitted/default state, so it does not deserialize to a value
+  // (keeps serialize/deserialize symmetric and the value object canonical).
+  if (status && status !== "any") {
     value.status = status;
   }
 

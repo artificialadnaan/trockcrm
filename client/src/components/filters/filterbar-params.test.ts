@@ -97,6 +97,25 @@ describe("deserializeFilters (URL query -> FilterBar)", () => {
   it("ignores blank or non-numeric numeric params", () => {
     expect(deserializeFilters(new URLSearchParams("valueMin=&maxAgeDays=abc"))).toEqual({});
   });
+
+  it("accepts a domain status verbatim (deal active|on_hold|inactive AND lead open|converted|disqualified), omitting only 'any'/blank", () => {
+    // Status is multi-domain now (deals + leads share the bar). The URL string round-trips; the
+    // per-surface adapter validates. "any"/blank stays the omitted/default state.
+    expect(deserializeFilters(new URLSearchParams("status=converted")).status).toBe("converted");
+    expect(deserializeFilters(new URLSearchParams("status=disqualified")).status).toBe("disqualified");
+    expect(deserializeFilters(new URLSearchParams("status=on_hold")).status).toBe("on_hold");
+    expect("status" in deserializeFilters(new URLSearchParams("status=any"))).toBe(false);
+    expect("status" in deserializeFilters(new URLSearchParams("status="))).toBe(false);
+  });
+
+  it("round-trips arbitrary domain statuses (Companies verification: pending/verified/rejected/not_required, #582)", () => {
+    // The status param is multi-domain: a Companies mount can pass verification statuses through
+    // statusOptions and they serialize/deserialize unchanged (no client-side allow-list to extend).
+    for (const status of ["pending", "verified", "rejected", "not_required"]) {
+      expect(serializeFilters({ status })).toEqual({ status });
+      expect(deserializeFilters(new URLSearchParams(`status=${status}`)).status).toBe(status);
+    }
+  });
 });
 
 describe("mergeFilterParams (URL patch: preserve non-FilterBar params + page-reset)", () => {
@@ -159,6 +178,29 @@ describe("mergeFilterParams (URL patch: preserve non-FilterBar params + page-res
     expect(next.get("dateFrom")).toBe("2026-04-01");
     expect(next.get("dateTo")).toBe("2026-04-15");
     expect(next.get("datePreset")).toBe("custom");
+  });
+});
+
+describe("namespaced params (paramPrefix) — a list that shares a URL with a board (Codex #577)", () => {
+  it("serializes / deserializes under a prefix, ignoring bare (board) params", () => {
+    expect(serializeFilters({ search: "x", status: "open" }, "ll_")).toEqual({ ll_search: "x", ll_status: "open" });
+    expect(
+      deserializeFilters(new URLSearchParams("ll_search=x&ll_status=open&search=board"), "ll_")
+    ).toEqual({ search: "x", status: "open" });
+  });
+
+  it("mergeFilterParams under a prefix never mutates the bare board params", () => {
+    const next = mergeFilterParams(new URLSearchParams("search=board&scope=all"), { search: "list" }, undefined, "ll_");
+    expect(next.get("ll_search")).toBe("list"); // the list's own search
+    expect(next.get("search")).toBe("board"); // the board's bare search is untouched
+    expect(next.get("scope")).toBe("all");
+  });
+
+  it("clearFilterParams under a prefix clears only the prefixed params (board params survive)", () => {
+    const next = clearFilterParams(new URLSearchParams("ll_status=open&search=board&scope=all"), [], "ll_");
+    expect(next.has("ll_status")).toBe(false);
+    expect(next.get("search")).toBe("board");
+    expect(next.get("scope")).toBe("all");
   });
 });
 
