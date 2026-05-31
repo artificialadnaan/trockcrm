@@ -68,13 +68,17 @@ describe("project-type predicate", () => {
 });
 
 describe("workflow-route predicate", () => {
-  it("omits when unset or invalid", () => {
+  it("omits when unset / all (per the contract: absent => omit)", () => {
     expect(buildWorkflowRoutePredicate({})).toBeUndefined();
-    expect(buildWorkflowRoutePredicate({ workflowRoute: "bogus" as never })).toBeUndefined();
+    expect(buildWorkflowRoutePredicate({ workflowRoute: "" })).toBeUndefined();
+    expect(buildWorkflowRoutePredicate({ workflowRoute: "all" })).toBeUndefined();
   });
   it("equals normal / service directly (no mapping)", () => {
     expect(text(buildWorkflowRoutePredicate({ workflowRoute: "service" }))).toContain("workflow_route");
     expect(text(buildWorkflowRoutePredicate({ workflowRoute: "normal" }))).toContain("workflow_route");
+  });
+  it("maps an unrecognized value to a no-match sentinel (sql false), never omit", () => {
+    expect(text(buildWorkflowRoutePredicate({ workflowRoute: "bogus" }))).toBe("false");
   });
 });
 
@@ -94,7 +98,11 @@ describe("status predicate (active / on_hold / inactive / any)", () => {
   });
   it("Any / unset => omitted", () => {
     expect(buildStatusPredicate({ status: "any" })).toBeUndefined();
+    expect(buildStatusPredicate({ status: "" })).toBeUndefined();
     expect(buildStatusPredicate({})).toBeUndefined();
+  });
+  it("maps an unrecognized status to a no-match sentinel (sql false), never omit", () => {
+    expect(text(buildStatusPredicate({ status: "bogus" }))).toBe("false");
   });
 });
 

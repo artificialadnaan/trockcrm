@@ -1,6 +1,5 @@
 import { and, eq, isNull, sql, type SQL } from "drizzle-orm";
 import { deals } from "@trock-crm/shared/schema";
-import type { WorkflowRoute } from "@trock-crm/shared/types";
 import { aliasedEffectiveDealValueSql } from "../shared/deal-value-sql.js";
 import {
   buildDealOutcomeDateScope,
@@ -38,8 +37,12 @@ export interface DealFilterBarInput {
   assignedRepId?: string;
   regionId?: string;
   projectTypeId?: string;
-  workflowRoute?: WorkflowRoute;
-  status?: DealStatusFilter;
+  // Loosely typed on purpose: the predicate is the single validation point. A
+  // recognized value applies its predicate, an unrecognized one becomes a
+  // no-match sentinel (sql`false`), and absent/empty/all omits — so a bad value
+  // can never widen results or produce broken SQL (param contract §3).
+  workflowRoute?: string;
+  status?: string;
   valueMin?: number;
   valueMax?: number;
   minAgeDays?: number;
@@ -77,10 +80,16 @@ export function buildProjectTypePredicate(input: DealFilterBarInput): SQL | unde
   return eq(deals.projectTypeId, input.projectTypeId);
 }
 
-/** workflow route — eq; the column stores "normal" | "service" verbatim. */
+/**
+ * workflow route — eq; the column stores "normal" | "service" verbatim. Absent /
+ * empty / "all" omits; a recognized value applies eq; an unrecognized value is a
+ * no-match (sql`false`) so a bad param can never widen results (contract §3).
+ */
 export function buildWorkflowRoutePredicate(input: DealFilterBarInput): SQL | undefined {
-  if (input.workflowRoute !== "normal" && input.workflowRoute !== "service") return undefined;
-  return eq(deals.workflowRoute, input.workflowRoute);
+  const value = input.workflowRoute;
+  if (value === undefined || value === "" || value === "all") return undefined;
+  if (value === "normal" || value === "service") return eq(deals.workflowRoute, value);
+  return sql`false`;
 }
 
 /**
@@ -88,16 +97,19 @@ export function buildWorkflowRoutePredicate(input: DealFilterBarInput): SQL | un
  * mapping is explicit so the safety-critical is_active default is never ambiguous.
  */
 export function buildStatusPredicate(input: DealFilterBarInput): SQL | undefined {
-  switch (input.status) {
+  const value = input.status;
+  // Absent / empty / "any" omits (no narrowing). An unrecognized value falls to
+  // the default no-match sentinel rather than silently omitting (contract §3).
+  if (value === undefined || value === "" || value === "any") return undefined;
+  switch (value) {
     case "active":
       return and(eq(deals.isActive, true), sql`coalesce(${deals.onHold}, false) = false`);
     case "on_hold":
       return sql`coalesce(${deals.onHold}, false) = true`;
     case "inactive":
       return eq(deals.isActive, false);
-    case "any":
     default:
-      return undefined;
+      return sql`false`;
   }
 }
 
