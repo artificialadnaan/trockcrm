@@ -49,6 +49,17 @@ describe("F2 projection", () => {
     expect(text).toContain("'beyond_90'");
   });
 
+  it("a 'today' override is emitted as a bound DATE literal (never raw text), and a bad date is rejected", () => {
+    const pred = extractSqlText(futureDatedCloseDatePredicateSql("d.expected_close_date", "2026-05-31"));
+    expect(pred).toContain("DATE '2026-05-31'"); // valid date literal, not a bare 2026-05-31
+    expect(pred).not.toMatch(/>=\s*2026-05-31\b/); // never the invalid bare form
+    const band = extractSqlText(projectionBandSql("d.expected_close_date", "2026-05-31"));
+    expect(band).toContain("DATE '2026-05-31'");
+    // guards against injection / malformed input on the interpolated path
+    expect(() => projectionBandSql("d.expected_close_date", "not-a-date")).toThrow();
+    expect(() => futureDatedCloseDatePredicateSql("d.expected_close_date", "'); DROP TABLE deals;--")).toThrow();
+  });
+
   it("coverage caption is literally honest and grammatical", () => {
     expect(formatProjectionCoverageCaption({ n: 15, m: 319 })).toBe(
       "15 of 319 open deals have a maintained (future-dated) expected close date."
@@ -106,8 +117,10 @@ describe("F5 distinct counting", () => {
 // ---------------- week stage-entry cohorts ----------------
 describe("week stage-entry cohorts", () => {
   it("Sent / Estimated slug sets match the active platform slugs", () => {
-    expect(SENT_STAGE_SLUGS).toEqual(["estimate_sent_to_client", "service_estimate_sent_to_client"]);
-    // includes the legacy pre-0064 `estimate_in_progress` alias so historical stage-entry rows aren't undercounted
+    // SENT includes the legacy `bid_sent` alias (migration 0053 -> canonical estimate_sent_to_client);
+    // ESTIMATED includes the legacy pre-0064 `estimate_in_progress` alias -- so historical/backfilled
+    // stage-entry rows that still point at the inactive aliases aren't undercounted.
+    expect(SENT_STAGE_SLUGS).toEqual(["estimate_sent_to_client", "service_estimate_sent_to_client", "bid_sent"]);
     expect(ESTIMATED_STAGE_SLUGS).toEqual(["estimating", "service_estimating", "estimate_in_progress"]);
   });
 });

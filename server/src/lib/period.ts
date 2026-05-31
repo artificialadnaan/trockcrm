@@ -1,8 +1,11 @@
 // F1 -- the SINGLE canonical server-side period definition. Sunday-Saturday weeks (PR #539),
-// anchored in the business timezone (America/Chicago). Imported by the dashboard, the reports suite,
+// anchored in the BUSINESS timezone (America/Chicago). Imported by the dashboard, the reports suite,
 // and YELLOW's director-campaign Batch B -- do NOT define a parallel one (a second definition
-// recreates the D-17/D-18 dashboard-vs-reports reconcile failure). Matches the client #539 util
-// toDatePresetRange("wtd") (Sunday-anchored, local calendar).
+// recreates the D-17/D-18 dashboard-vs-reports reconcile failure). "This week" is the office's Central
+// week: F1 is CANONICAL and the client resolver (toDatePresetRange / resolveDatePreset) is aligned TO it
+// (also Central-anchored), so they produce identical boundaries even at the cross-tz boundary (a Pacific
+// user late Saturday, while CT is already Sunday, is in the new CT week). Proven by the matching boundary
+// cases in server/tests/lib/period.test.ts and client/src/lib/pipeline-terminal-filters.test.ts.
 
 import { sql, type SQL } from "drizzle-orm";
 

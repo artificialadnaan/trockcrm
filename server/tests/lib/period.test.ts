@@ -26,6 +26,14 @@ describe("getWtdPeriod -- canonical Sunday-Saturday WTD (America/Chicago)", () =
     // start a brand-new week (from==to==2026-05-31); CT-anchoring correctly stays in the current week.
     expect(getWtdPeriod("to_date", new Date("2026-05-31T02:00:00Z"))).toEqual({ from: "2026-05-24", to: "2026-05-30" });
   });
+
+  // The exact two instants the CLIENT reconciliation test asserts (client/src/lib/
+  // pipeline-terminal-filters.test.ts) -- F1 and the CT-anchored client resolver must produce identical
+  // boundaries here, including the cross-tz case (00:30 Sun CT == 22:30 Sat US/Pacific).
+  it("matches the client resolver at the cross-tz boundary (F1 is canonical; the client aligns to CT)", () => {
+    expect(getWtdPeriod("to_date", new Date("2026-05-31T05:30:00Z"))).toEqual({ from: "2026-05-31", to: "2026-05-31" });
+    expect(getWtdPeriod("to_date", new Date("2026-05-31T02:00:00Z"))).toEqual({ from: "2026-05-24", to: "2026-05-30" });
+  });
 });
 
 // RECONCILIATION: F1 must match the canonical platform week definition that #539 standardized on --

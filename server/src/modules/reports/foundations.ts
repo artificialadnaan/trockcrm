@@ -16,9 +16,19 @@ import {
 } from "../shared/deal-value-sql.js";
 
 // CT-anchored "today" as a SQL date -- DST-safe via Postgres, matching F1's America/Chicago anchoring.
-// Callers may override (e.g. to bind a precomputed F1 businessToday) but the default keeps every
-// projection surface on the same business-day boundary.
 const CT_TODAY_SQL = "(now() AT TIME ZONE 'America/Chicago')::date";
+
+// Resolve the projection "today" reference into a SQL expression. Default = the CT-anchored now()-based
+// expression. A caller pinning today to a precomputed F1 date passes a YYYY-MM-DD string, which is
+// emitted as a BOUND `DATE '...'` literal (NOT raw text -- `>= 2026-05-31` is not a valid Postgres date
+// comparison) and shape-validated so nothing arbitrary reaches the interpolated SQL.
+function projectionTodaySql(today?: string): string {
+  if (today === undefined) return CT_TODAY_SQL;
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(today)) {
+    throw new Error(`projection 'today' must be a YYYY-MM-DD date, got: ${JSON.stringify(today)}`);
+  }
+  return `DATE '${today}'`;
+}
 
 // ===================== F2: projection 30/60/90 + N/M coverage =====================
 
@@ -31,18 +41,20 @@ export type ProjectionBand = "0_30" | "31_60" | "61_90" | "beyond_90";
  * not a live projection). Bid-Board-mirror deals carry a NULL expected_close_date and therefore fail
  * this predicate; they remain in the M denominator (never silently dropped), so the caveat stays honest.
  */
-export function futureDatedCloseDatePredicateSql(closeDateExpr: string, todayExpr: string = CT_TODAY_SQL): SQL {
-  return sql.raw(`(${closeDateExpr} IS NOT NULL AND ${closeDateExpr} >= ${todayExpr})`);
+export function futureDatedCloseDatePredicateSql(closeDateExpr: string, today?: string): SQL {
+  const todaySql = projectionTodaySql(today);
+  return sql.raw(`(${closeDateExpr} IS NOT NULL AND ${closeDateExpr} >= ${todaySql})`);
 }
 
 /** Discrete 30/60/90 band for a deal's expected_close_date; NULL for none / past / beyond 90 days. */
-export function projectionBandSql(closeDateExpr: string, todayExpr: string = CT_TODAY_SQL): SQL {
+export function projectionBandSql(closeDateExpr: string, today?: string): SQL {
+  const todaySql = projectionTodaySql(today);
   return sql.raw(
     `CASE
-       WHEN ${closeDateExpr} IS NULL OR ${closeDateExpr} < ${todayExpr} THEN NULL
-       WHEN ${closeDateExpr} <= ${todayExpr} + INTERVAL '30 days' THEN '0_30'
-       WHEN ${closeDateExpr} <= ${todayExpr} + INTERVAL '60 days' THEN '31_60'
-       WHEN ${closeDateExpr} <= ${todayExpr} + INTERVAL '90 days' THEN '61_90'
+       WHEN ${closeDateExpr} IS NULL OR ${closeDateExpr} < ${todaySql} THEN NULL
+       WHEN ${closeDateExpr} <= ${todaySql} + INTERVAL '30 days' THEN '0_30'
+       WHEN ${closeDateExpr} <= ${todaySql} + INTERVAL '60 days' THEN '31_60'
+       WHEN ${closeDateExpr} <= ${todaySql} + INTERVAL '90 days' THEN '61_90'
        ELSE 'beyond_90'
      END`
   );
@@ -115,7 +127,12 @@ export function distinctDealCountSql(dealIdExpr = "deal_id"): SQL {
 // is `estimating` (NOT the dead `estimate_in_progress`, inactive since migration 0064 -- see #549).
 // Combine with F1's getWtdPeriod(...) on created_at and F5's distinctDealCountSql for the weekly count.
 
-export const SENT_STAGE_SLUGS = ["estimate_sent_to_client", "service_estimate_sent_to_client"] as const;
+// `bid_sent` is the legacy pre-realignment slug for the sent stage (migration 0053 -> canonical
+// estimate_sent_to_client; marked inactive but historical deal_stage_history rows still point at it).
+// Swept shared/src/types/workflow.ts: bid_sent (sent) + estimate_in_progress (estimating) are the ONLY
+// inactive aliases that canonicalize into these two cohorts -- include them so historical stage-entry
+// rows aren't undercounted (terminal aliases like closed_won/production_lost are Won/Lost, not these).
+export const SENT_STAGE_SLUGS = ["estimate_sent_to_client", "service_estimate_sent_to_client", "bid_sent"] as const;
 // `estimate_in_progress` is the legacy pre-0064 slug for the estimating stage (now inactive). Historical
 // deal_stage_history rows from before #549's migration 0064 still point at it (workflow.ts canonicalizes
 // it to `estimating`), so the stage-entry cohort/trend must include it or it undercounts historical
