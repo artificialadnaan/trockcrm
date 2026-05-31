@@ -77,6 +77,41 @@ describe("getDeals — FilterBar wiring", () => {
     expect(sql).toContain("on_hold");
   });
 
+  it("status=any behaves like unset: keeps the default active visibility (is_active), not all rows", async () => {
+    // Codex #546: status=any must NOT skip the legacy is_active=true default, or
+    // /api/deals?status=any leaks inactive/soft-deleted rows. "any" == omitted.
+    const { db, capturedWheres } = createTenantDbCapturingWhere();
+    const { getDeals } = await import("../../../src/modules/deals/service.js");
+
+    await getDeals(db, { status: "any", scope: "all" }, "director", "director-1");
+
+    const sql = mainWhere(capturedWheres);
+    expect(sql).toContain('"is_active"'); // default active filter still applied
+  });
+
+  it("an unrecognized status passed through from the route becomes a no-match (sql false), never widened", async () => {
+    // Codex #546: the route must pass raw values to the registry so a bad param
+    // hits the predicate's no-match, instead of being normalized to undefined
+    // (which would fall back to the active default and silently widen results).
+    const { db, capturedWheres } = createTenantDbCapturingWhere();
+    const { getDeals } = await import("../../../src/modules/deals/service.js");
+
+    await getDeals(db, { status: "bogus" as never, scope: "all" }, "director", "director-1");
+
+    const sql = mainWhere(capturedWheres);
+    expect(sql).toContain("false"); // no-match sentinel from buildStatusPredicate
+  });
+
+  it("an unrecognized workflowRoute becomes a no-match (sql false), never widened", async () => {
+    const { db, capturedWheres } = createTenantDbCapturingWhere();
+    const { getDeals } = await import("../../../src/modules/deals/service.js");
+
+    await getDeals(db, { workflowRoute: "bogus" as never, scope: "all" }, "director", "director-1");
+
+    const sql = mainWhere(capturedWheres);
+    expect(sql).toContain("false");
+  });
+
   it("value range emits BETWEEN on the on-hold-zeroed effective chain", async () => {
     const { db, capturedWheres } = createTenantDbCapturingWhere();
     const { getDeals } = await import("../../../src/modules/deals/service.js");

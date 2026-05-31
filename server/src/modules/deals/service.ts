@@ -1456,7 +1456,11 @@ export async function getDeals(
   // wonClosed drill-down and the FilterBar Status control are distinct surfaces
   // and never co-occur, so guarding the whole block is byte-identical for every
   // existing caller (none pass status).
-  if (!filters.status) {
+  // status=any is documented as equivalent to UNSET (param contract §3): it omits
+  // the on_hold/inactive narrowing but must still keep the default active
+  // visibility, so it falls through to the legacy isActive default like an absent
+  // status. Only the explicit active/on_hold/inactive values take over is_active.
+  if (!filters.status || filters.status === "any") {
     if (filters.isActive === "pipeline" || (hasWonClosedFilter && filters.isActive !== "all")) {
       let terminalInactiveStageIds: string[] = [];
       if (filters.inactiveStageIds?.length || hasWonClosedFilter) {

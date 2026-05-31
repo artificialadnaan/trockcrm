@@ -811,17 +811,13 @@ router.get("/", async (req, res, next) => {
       const parsed = Number(value);
       return Number.isFinite(parsed) ? parsed : undefined;
     };
-    const workflowRouteParam = req.query.workflowRoute as string | undefined;
-    const workflowRoute: "normal" | "service" | undefined =
-      workflowRouteParam === "normal" || workflowRouteParam === "service" ? workflowRouteParam : undefined;
-    const statusParam = req.query.status as string | undefined;
-    const status: "active" | "on_hold" | "inactive" | "any" | undefined =
-      statusParam === "active" ||
-      statusParam === "on_hold" ||
-      statusParam === "inactive" ||
-      statusParam === "any"
-        ? statusParam
-        : undefined;
+    // Pass workflowRoute/status through RAW so the predicate registry is the
+    // single validation point: a recognized value applies its predicate, an
+    // unrecognized one becomes a no-match (sql`false`), and absent/empty/all/any
+    // omits. Normalizing bad values to undefined here would defeat the no-match
+    // and silently widen results (param contract §3; Codex #546).
+    const workflowRoute = req.query.workflowRoute as string | undefined;
+    const status = req.query.status as string | undefined;
     const isActiveFilter =
       req.query.isActive === "all"
         ? ("all" as const)
