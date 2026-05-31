@@ -812,7 +812,7 @@ export async function mergeDirectoryEntities(
       .update(companies)
       .set({
         isActive: false,
-        sourceRefs: sql`COALESCE(source_refs, '{}'::jsonb) || jsonb_build_object('merged_into', ${winnerId})`,
+        sourceRefs: sql`COALESCE(source_refs, '{}'::jsonb) || jsonb_build_object('merged_into', ${winnerId}::text)`,
       } as any)
       .where(eq(companies.id, loserId));
 
@@ -833,7 +833,7 @@ export async function mergeDirectoryEntities(
       .update(contacts)
       .set({
         isActive: false,
-        sourceRefs: sql`COALESCE(source_refs, '{}'::jsonb) || jsonb_build_object('merged_into', ${winnerId})`,
+        sourceRefs: sql`COALESCE(source_refs, '{}'::jsonb) || jsonb_build_object('merged_into', ${winnerId}::text)`,
       } as any)
       .where(eq(contacts.id, loserId));
   }
