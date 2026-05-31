@@ -246,7 +246,7 @@ function TimeRangeTabs({ value, onChange }: { value: Period; onChange: (next: Pe
           aria-pressed={value === period}
           onClick={() => onChange(period)}
           className={cn(
-            "rounded-full px-3.5 py-1.5 text-xs font-bold transition-colors",
+            "rounded-full text-sm font-bold transition-colors min-h-[44px] px-4 py-2.5 md:min-h-0 md:px-3.5 md:py-1.5 md:text-xs",
             value === period ? "bg-brand-red text-white shadow-sm" : "text-slate-600 hover:text-slate-900"
           )}
         >
@@ -623,14 +623,14 @@ export function RepDashboardPage() {
           <button
             type="button"
             aria-label="Open charts"
-            className="flex h-10 w-10 items-center justify-center rounded-full border border-slate-200 bg-white text-slate-600 hover:bg-slate-50"
+            className="flex h-11 w-11 items-center justify-center rounded-full md:h-10 md:w-10 border border-slate-200 bg-white text-slate-600 hover:bg-slate-50"
           >
             <BarChart3 className="h-4 w-4" />
           </button>
           <button
             type="button"
             aria-label="Open notifications"
-            className="relative flex h-10 w-10 items-center justify-center rounded-full border border-slate-200 bg-white text-slate-600 hover:bg-slate-50"
+            className="relative flex h-11 w-11 items-center justify-center rounded-full md:h-10 md:w-10 border border-slate-200 bg-white text-slate-600 hover:bg-slate-50"
           >
             <Bell className="h-4 w-4" />
             {data.tasksToday.overdue > 0 ? <span className="absolute right-2 top-2 h-1.5 w-1.5 rounded-full bg-brand-red" /> : null}
@@ -639,14 +639,14 @@ export function RepDashboardPage() {
             type="button"
             aria-label="Refresh dashboard"
             onClick={refreshAll}
-            className="flex h-10 w-10 items-center justify-center rounded-full border border-slate-200 bg-white text-slate-600 hover:bg-slate-50"
+            className="flex h-11 w-11 items-center justify-center rounded-full md:h-10 md:w-10 border border-slate-200 bg-white text-slate-600 hover:bg-slate-50"
           >
             <RefreshCw className="h-4 w-4" />
           </button>
           <button
             type="button"
             aria-label="Open profile"
-            className="flex h-10 w-10 items-center justify-center rounded-full bg-brand-red text-white"
+            className="flex h-11 w-11 items-center justify-center rounded-full md:h-10 md:w-10 bg-brand-red text-white"
           >
             <UserIcon className="h-4 w-4" />
           </button>
