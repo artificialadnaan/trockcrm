@@ -1,6 +1,6 @@
 import { useEffect, useRef } from "react";
 import { useSearchParams, Link, useNavigate } from "react-router-dom";
-import { Search, Building2, User, FileText, Sparkles } from "lucide-react";
+import { Search, Building2, User, FileText, Target, MapPin, Sparkles } from "lucide-react";
 import { toast } from "sonner";
 import { Badge } from "@/components/ui/badge";
 import {
@@ -15,12 +15,22 @@ import {
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 
-const ENTITY_ICONS = { deal: Building2, contact: User, file: FileText } as const;
+const ENTITY_ICONS = { deal: Building2, company: Building2, contact: User, lead: Target, property: MapPin, file: FileText } as const;
 const ENTITY_COLORS = {
   deal: "bg-blue-100 text-blue-800",
+  company: "bg-purple-100 text-purple-800",
   contact: "bg-green-100 text-green-800",
+  lead: "bg-orange-100 text-orange-800",
+  property: "bg-teal-100 text-teal-800",
   file: "bg-red-100 text-red-800",
 } as const;
+
+// Won/Lost/On-hold lifecycle markers for deal results (findable + MARKED, mirrors the palette).
+const STATUS_BADGES: Record<string, { label: string; className: string }> = {
+  won: { label: "Won", className: "bg-emerald-100 text-emerald-800" },
+  lost: { label: "Lost", className: "bg-rose-100 text-rose-800" },
+  on_hold: { label: "On hold", className: "bg-amber-100 text-amber-800" },
+};
 
 function PopularityBadge({ score }: { score?: number }) {
   if (!score || score < 1) return null;
@@ -48,6 +58,11 @@ function ResultCard({ result }: { result: SearchResult }) {
           </div>
         )}
       </div>
+      {result.status && STATUS_BADGES[result.status] ? (
+        <Badge className={`text-xs ${STATUS_BADGES[result.status].className}`}>
+          {STATUS_BADGES[result.status].label}
+        </Badge>
+      ) : null}
       <Badge className={`text-xs ${ENTITY_COLORS[result.entityType]}`}>
         {result.entityType}
       </Badge>
@@ -63,6 +78,18 @@ export function SearchPage() {
   const { setQuery: setAiQuery, results: aiResults, loading: aiLoading } = useAiSearch();
   const { addRecent } = useRecentSearches();
   const trackedQueryIdsRef = useRef<Set<string>>(new Set());
+
+  // Single source of truth for whether the AI summary card is shown. The /search/ai route only
+  // searches deals/contacts/files, so for a company/lead/property-only query it would render a
+  // "No CRM matches" card directly above the Accounts/Leads/Properties cards this page renders --
+  // a visible contradiction. Show it only when the AI path actually found something. Both the JSX
+  // gate AND the impression-tracking effect use this, so we never log a "served" impression for a
+  // card the user never saw (which would skew admin AI-Ops served/conversion metrics). Expanding
+  // the AI route to the new entity types is a separate follow-up.
+  const aiCardVisible =
+    !!aiResults?.summary &&
+    query.length >= 2 &&
+    ((aiResults?.structured?.total ?? 0) > 0 || (aiResults?.evidence?.length ?? 0) > 0);
 
   useEffect(() => {
     if (initialQ) {
@@ -82,6 +109,8 @@ export function SearchPage() {
 
   useEffect(() => {
     if (!aiResults?.queryId || aiResults.queryId === "00000000-0000-0000-0000-000000000000") return;
+    // Only an impression for a card the user actually sees -- keeps served/conversion metrics honest.
+    if (!aiCardVisible) return;
     if (trackedQueryIdsRef.current.has(aiResults.queryId)) return;
 
     trackedQueryIdsRef.current.add(aiResults.queryId);
@@ -101,13 +130,19 @@ export function SearchPage() {
     }).catch(() => {
       trackedQueryIdsRef.current.delete(aiResults.queryId);
     });
-  }, [aiResults]);
+  }, [aiResults, aiCardVisible]);
 
-  const sections: Array<{ key: "deals" | "contacts" | "files"; label: string }> = [
+  const sections: Array<{ key: "deals" | "contacts" | "files" | "companies" | "leads" | "properties"; label: string }> = [
     { key: "deals", label: "Deals" },
+    { key: "companies", label: "Accounts" },
     { key: "contacts", label: "Contacts" },
+    { key: "leads", label: "Leads" },
+    { key: "properties", label: "Properties" },
     { key: "files", label: "Files" },
   ];
+  // Gate the empty/results state on what is actually rendered (the section keys above), not
+  // results.total, so the count and the rendered groups can never disagree.
+  const renderedTotal = sections.reduce((sum, { key }) => sum + (results?.[key]?.length ?? 0), 0);
   const intentLabel = aiResults?.intent ? aiResults.intent.replace(/_/g, " ") : null;
 
   const trackInteraction = (
@@ -170,7 +205,8 @@ export function SearchPage() {
         <div className="text-center text-gray-400 py-12">Searching...</div>
       )}
 
-      {aiResults?.summary && query.length >= 2 && (
+      {/* Gate documented at the aiCardVisible definition above (no-contradiction + honest metrics). */}
+      {aiCardVisible && (
         <Card className="border-border/80">
           <CardHeader className="pb-3">
             <CardTitle className="text-sm font-medium text-muted-foreground flex items-center gap-2">
@@ -269,13 +305,13 @@ export function SearchPage() {
         </Card>
       )}
 
-      {!loading && results && results.total === 0 && query.length >= 2 && (
+      {!loading && results && renderedTotal === 0 && query.length >= 2 && (
         <div className="text-center text-gray-400 py-12">
           No results found for &ldquo;{query}&rdquo;
         </div>
       )}
 
-      {!loading && results && results.total > 0 && (
+      {!loading && results && renderedTotal > 0 && (
         <div className="space-y-6">
           {sections.map(({ key, label }) => {
             const items = results[key] as SearchResult[];

@@ -259,3 +259,40 @@ export function buildContactSearchCondition(search: string): SQL {
     )
   )`;
 }
+
+/**
+ * The columns the unified property search matches (PR5). Properties were not a first-class
+ * global-search result before; this makes them findable by their own address fields and by the
+ * company (account) that owns them.
+ */
+export const PROPERTY_SEARCH_FIELDS = [
+  "properties.name",
+  "properties.address",
+  "properties.city",
+  "properties.state",
+  "properties.zip",
+  "companies.name",
+] as const;
+
+/**
+ * Build the WHERE predicate that matches a property by its own address fields plus the company
+ * (account) it belongs to. Same contract as the other builders: lifecycle-agnostic, read-only,
+ * widens no visibility. Company match is an EXISTS subquery (not a join). Caller guards min
+ * length (>= 2 chars).
+ */
+export function buildPropertySearchCondition(search: string): SQL {
+  const searchTerm = `%${escapeLikePattern(search.trim())}%`;
+  return sql`(
+    ${properties.name} ILIKE ${searchTerm} ESCAPE '\\'
+    OR ${properties.address} ILIKE ${searchTerm} ESCAPE '\\'
+    OR ${properties.city} ILIKE ${searchTerm} ESCAPE '\\'
+    OR ${properties.state} ILIKE ${searchTerm} ESCAPE '\\'
+    OR ${properties.zip} ILIKE ${searchTerm} ESCAPE '\\'
+    OR EXISTS (
+      SELECT 1
+      FROM ${companies}
+      WHERE ${companies.id} = ${properties.companyId}
+        AND ${companies.name} ILIKE ${searchTerm} ESCAPE '\\'
+    )
+  )`;
+}

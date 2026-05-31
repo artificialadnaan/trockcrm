@@ -53,7 +53,14 @@ describe("search routes", () => {
     const res = await request(app).get("/api/search?q=alpha");
 
     expect(res.status).toBe(200);
-    expect(serviceMocks.globalSearch).toHaveBeenCalledWith(expect.anything(), "alpha", ["deals", "contacts", "files"], "director", "director-1");
+    // Global search now spans all five business entities (+ files), not just deals/contacts/files.
+    expect(serviceMocks.globalSearch).toHaveBeenCalledWith(
+      expect.anything(),
+      "alpha",
+      ["deals", "contacts", "files", "companies", "leads", "properties"],
+      "director",
+      "director-1",
+    );
     expect(res.body.total).toBe(1);
   });
 

@@ -1,19 +1,35 @@
-import { sql, eq, and, gte } from "drizzle-orm";
+import { sql, eq, and, or, inArray, gte, asc, desc, type Column, type SQL } from "drizzle-orm";
 import crypto from "crypto";
 import type { NodePgDatabase } from "drizzle-orm/node-postgres";
 import type * as schema from "@trock-crm/shared/schema";
-import { aiFeedback, userOfficeAccess, offices, users } from "@trock-crm/shared/schema";
+import { aiFeedback, userOfficeAccess, offices, users, deals, contacts, companies, leads, properties, pipelineStageConfig } from "@trock-crm/shared/schema";
 import { db, pool } from "../../db.js";
 import { drizzle } from "drizzle-orm/node-postgres";
+import {
+  buildDealSearchCondition,
+  buildContactSearchCondition,
+  buildCompanySearchCondition,
+  buildLeadSearchCondition,
+  buildPropertySearchCondition,
+  escapeLikePattern,
+} from "./unified-search.js";
+import { TERMINAL_STAGE_SLUGS } from "../shared/pipeline-terminal-stages.js";
+import { capPerOffice, deriveDealStatus, mergeAndLimit, mergeWithOfficeCap, type DealLifecycle } from "./global-search-helpers.js";
 
 type TenantDb = NodePgDatabase<typeof schema>;
 
+export type SearchType = "deals" | "contacts" | "files" | "companies" | "leads" | "properties";
+
+const DEFAULT_SEARCH_TYPES: SearchType[] = ["deals", "contacts", "files", "companies", "leads", "properties"];
+const PER_ENTITY_LIMIT = 25;
+
 export interface SearchResult {
-  entityType: "deal" | "contact" | "file";
+  entityType: "deal" | "contact" | "file" | "company" | "lead" | "property";
   id: string;
   primaryLabel: string;
   secondaryLabel: string;
   tertiaryLabel?: string;
+  status?: DealLifecycle | null;
   officeSlug?: string;
   deepLink: string;
   rank: number;
@@ -23,6 +39,9 @@ export interface SearchResponse {
   deals: SearchResult[];
   contacts: SearchResult[];
   files: SearchResult[];
+  companies: SearchResult[];
+  leads: SearchResult[];
+  properties: SearchResult[];
   total: number;
   query: string;
 }
@@ -78,7 +97,6 @@ export interface AiSearchResponse {
   evidence: AiSearchEvidence[];
 }
 
-const MAX_RESULTS_PER_TYPE = 5;
 const MAX_AI_EVIDENCE = 5;
 
 async function settleSequential<T>(operation: () => Promise<T>): Promise<PromiseSettledResult<T>> {
@@ -100,13 +118,16 @@ async function settleSequential<T>(operation: () => Promise<T>): Promise<Promise
 export async function globalSearch(
   tenantDb: TenantDb,
   query: string,
-  types: Array<"deals" | "contacts" | "files"> = ["deals", "contacts", "files"],
+  types: SearchType[] = DEFAULT_SEARCH_TYPES,
   userRole?: string,
   userId?: string,
 ): Promise<SearchResponse> {
-  const sanitized = query.trim().replace(/[^\w\s-]/g, "").trim();
+  // Trim only -- the ILIKE builders escape LIKE metacharacters, so punctuation-bearing terms
+  // (deal numbers like D-1001, emails, phones with +, names with & or #) must reach the query
+  // literally. (The old full-text path needed the strip; the substring path does not.)
+  const sanitized = query.trim();
   if (sanitized.length < 2) {
-    return { deals: [], contacts: [], files: [], total: 0, query };
+    return emptyResponse(query);
   }
 
   // For directors/admins, search across all accessible offices
@@ -114,8 +135,13 @@ export async function globalSearch(
     return crossOfficeSearch(sanitized, types, userId);
   }
 
-  // Default: single-office search (reps)
+  // Default: single-office search (reps). Office-scoped tenantDb + office-level collaboration
+  // read = a rep sees their whole office's records (same as the collaborative detail path).
   return singleOfficeSearch(tenantDb, sanitized, types);
+}
+
+function emptyResponse(query: string): SearchResponse {
+  return { deals: [], contacts: [], files: [], companies: [], leads: [], properties: [], total: 0, query };
 }
 
 export async function naturalLanguageSearch(
@@ -145,36 +171,81 @@ export async function naturalLanguageSearch(
   };
 }
 
+async function runEntitySearches(
+  searchDb: TenantDb,
+  sanitized: string,
+  types: SearchType[],
+  limit: number,
+): Promise<Record<SearchType, SearchResult[]>> {
+  // Sequential on purpose: the cross-office path runs these on a SINGLE pooled pg client (one
+  // search_path), which cannot multiplex concurrent queries. settleSequential keeps one failing
+  // entity from sinking the rest.
+  const runOne = async (include: boolean, fn: () => Promise<SearchResult[]>): Promise<SearchResult[]> => {
+    if (!include) return [];
+    const settled = await settleSequential(fn);
+    return settled.status === "fulfilled" ? settled.value : [];
+  };
+
+  const dealHits = await runOne(types.includes("deals"), () => searchDeals(searchDb, sanitized, limit));
+  const contactHits = await runOne(types.includes("contacts"), () => searchContacts(searchDb, sanitized, limit));
+  const fileHits = await runOne(types.includes("files"), () => searchFiles(searchDb, sanitized, limit));
+  const companyHits = await runOne(types.includes("companies"), () => searchCompanies(searchDb, sanitized, limit));
+  const leadHits = await runOne(types.includes("leads"), () => searchLeads(searchDb, sanitized, limit));
+  const propertyHits = await runOne(types.includes("properties"), () => searchProperties(searchDb, sanitized, limit));
+
+  return { deals: dealHits, contacts: contactHits, files: fileHits, companies: companyHits, leads: leadHits, properties: propertyHits };
+}
+
+function assembleResponse(
+  query: string,
+  groups: Record<SearchType, SearchResult[]>,
+  limit: number,
+  perOfficeCap?: number,
+): SearchResponse {
+  // Single office (perOfficeCap undefined) -> plain top-N. Cross-office -> fair cap + backfill so
+  // a big office can't monopolize the page yet the page still fills when matches concentrate.
+  const merge = (group: SearchResult[]): SearchResult[] =>
+    perOfficeCap != null
+      ? mergeWithOfficeCap(group, limit, perOfficeCap).hits
+      : mergeAndLimit(group, limit).hits;
+  const dealHits = merge(groups.deals);
+  const contactHits = merge(groups.contacts);
+  const fileHits = merge(groups.files);
+  const companyHits = merge(groups.companies);
+  const leadHits = merge(groups.leads);
+  const propertyHits = merge(groups.properties);
+  return {
+    deals: dealHits,
+    contacts: contactHits,
+    files: fileHits,
+    companies: companyHits,
+    leads: leadHits,
+    properties: propertyHits,
+    total:
+      dealHits.length + contactHits.length + fileHits.length +
+      companyHits.length + leadHits.length + propertyHits.length,
+    query,
+  };
+}
+
 async function singleOfficeSearch(
   tenantDb: TenantDb,
   sanitized: string,
-  types: Array<"deals" | "contacts" | "files">,
+  types: SearchType[],
 ): Promise<SearchResponse> {
-  const results = [
-    types.includes("deals") ? await settleSequential(() => searchDeals(tenantDb, sanitized)) : { status: "fulfilled" as const, value: [] },
-    types.includes("contacts") ? await settleSequential(() => searchContacts(tenantDb, sanitized)) : { status: "fulfilled" as const, value: [] },
-    types.includes("files") ? await settleSequential(() => searchFiles(tenantDb, sanitized)) : { status: "fulfilled" as const, value: [] },
-  ];
-
-  const deals = results[0].status === "fulfilled" ? results[0].value : [];
-  const contacts = results[1].status === "fulfilled" ? results[1].value : [];
-  const files = results[2].status === "fulfilled" ? results[2].value : [];
-
-  return {
-    deals,
-    contacts,
-    files,
-    total: deals.length + contacts.length + files.length,
-    query: sanitized,
-  };
+  // tenantDb is already scoped to the rep's active office; collaboration access grants
+  // office-level read, so no per-rep restriction is applied (office scoping is the boundary).
+  const groups = await runEntitySearches(tenantDb, sanitized, types, PER_ENTITY_LIMIT);
+  return assembleResponse(sanitized, groups, PER_ENTITY_LIMIT);
 }
 
 async function crossOfficeSearch(
   sanitized: string,
-  types: Array<"deals" | "contacts" | "files">,
+  types: SearchType[],
   userId: string,
 ): Promise<SearchResponse> {
-  // Include both explicit cross-office access and the user's primary office.
+  // Include both explicit cross-office access and the user's primary office. (Scope/visibility
+  // resolution preserved verbatim -- this PR widens nothing.)
   const [accessRows, userRows] = await Promise.all([
     db
       .select({ officeId: userOfficeAccess.officeId })
@@ -198,106 +269,119 @@ async function crossOfficeSearch(
     .from(offices)
     .where(eq(offices.isActive, true));
 
-  const accessibleOffices = officeRows.filter(
-    (o) => officeIds.has(o.id)
-  );
-
-  // If no accessible offices, return empty
+  const accessibleOffices = officeRows.filter((o) => officeIds.has(o.id));
   if (accessibleOffices.length === 0) {
-    return { deals: [], contacts: [], files: [], total: 0, query: sanitized };
+    return emptyResponse(sanitized);
   }
 
-  // Search each office schema in parallel
-  const allDeals: SearchResult[] = [];
-  const allContacts: SearchResult[] = [];
-  const allFiles: SearchResult[] = [];
-
-  const searchPromises = accessibleOffices.map(async (office) => {
-    const client = await pool.connect();
-    try {
-      const schemaName = `office_${office.slug}`;
-      await client.query("SELECT set_config('search_path', $1, false)", [`${schemaName},public`]);
-      const officeDb = drizzle(client, { schema: undefined as any });
-
-      const results = [
-        types.includes("deals") ? await settleSequential(() => searchDeals(officeDb as any, sanitized)) : { status: "fulfilled" as const, value: [] },
-        types.includes("contacts") ? await settleSequential(() => searchContacts(officeDb as any, sanitized)) : { status: "fulfilled" as const, value: [] },
-        types.includes("files") ? await settleSequential(() => searchFiles(officeDb as any, sanitized)) : { status: "fulfilled" as const, value: [] },
-      ];
-
-      const tag = (items: SearchResult[]) =>
-        items.map((item) => ({ ...item, officeSlug: office.slug }));
-
-      if (results[0].status === "fulfilled") allDeals.push(...tag(results[0].value));
-      if (results[1].status === "fulfilled") allContacts.push(...tag(results[1].value));
-      if (results[2].status === "fulfilled") allFiles.push(...tag(results[2].value));
-    } finally {
-      await client.query("SELECT set_config('search_path', 'public', false)");
-      client.release();
-    }
-  });
-
-  await Promise.allSettled(searchPromises);
-
-  // Re-rank: sort by rank descending, take top N
-  const sortAndLimit = (items: SearchResult[]) =>
-    items.sort((a, b) => b.rank - a.rank).slice(0, MAX_RESULTS_PER_TYPE);
-
-  const deals = sortAndLimit(allDeals);
-  const contacts = sortAndLimit(allContacts);
-  const files = sortAndLimit(allFiles);
-
-  return {
-    deals,
-    contacts,
-    files,
-    total: deals.length + contacts.length + files.length,
-    query: sanitized,
+  // Anti-crowd-out WITH backfill: fetch the FULL per-entity limit from each office (so backfill
+  // material exists), then at merge time take a fair per-office slice first and fill the rest from
+  // the globally-ranked leftovers. Fetching only the cap per office (the old approach) starved the
+  // page whenever matches were concentrated in fewer offices than the cap assumed.
+  const perOfficeCap = capPerOffice(PER_ENTITY_LIMIT, accessibleOffices.length);
+  const merged: Record<SearchType, SearchResult[]> = {
+    deals: [], contacts: [], files: [], companies: [], leads: [], properties: [],
   };
+
+  await Promise.allSettled(
+    accessibleOffices.map(async (office) => {
+      const client = await pool.connect();
+      try {
+        const schemaName = `office_${office.slug}`;
+        await client.query("SELECT set_config('search_path', $1, false)", [`${schemaName},public`]);
+        const officeDb = drizzle(client, { schema: undefined as any });
+        const groups = await runEntitySearches(officeDb as any, sanitized, types, PER_ENTITY_LIMIT);
+        for (const key of Object.keys(merged) as SearchType[]) {
+          merged[key].push(
+            ...groups[key].map((item) => ({
+              ...item,
+              officeSlug: office.slug,
+              // Cross-office hit: carry the originating office so the detail fetch targets that
+              // office schema (api.ts reads ?officeId -> x-office-id header), not the active one.
+              deepLink: appendQuery(item.deepLink, { officeId: office.id }),
+            })),
+          );
+        }
+      } finally {
+        await client.query("SELECT set_config('search_path', 'public', false)");
+        client.release();
+      }
+    }),
+  );
+
+  return assembleResponse(sanitized, merged, PER_ENTITY_LIMIT, perOfficeCap);
 }
 
-async function searchDeals(tenantDb: TenantDb, query: string): Promise<SearchResult[]> {
-  const result = await tenantDb.execute(sql`
-    SELECT
-      d.id,
-      d.deal_number,
-      d.project_number,
-      d.name,
-      d.property_address,
-      d.property_city,
-      d.property_state,
-      ts_rank(
-        to_tsvector('english',
-          COALESCE(d.deal_number, '') || ' ' ||
-          COALESCE(d.project_number, '') || ' ' ||
-          COALESCE(d.name, '') || ' ' ||
-          COALESCE(d.description, '') || ' ' ||
-          COALESCE(d.property_address, '')
-        ),
-        plainto_tsquery('english', ${query})
-      ) AS rank
-    FROM deals d
-    WHERE d.is_active = true
-      AND to_tsvector('english',
-        COALESCE(d.deal_number, '') || ' ' ||
-        COALESCE(d.project_number, '') || ' ' ||
-        COALESCE(d.name, '') || ' ' ||
-        COALESCE(d.description, '') || ' ' ||
-        COALESCE(d.property_address, '')
-      ) @@ plainto_tsquery('english', ${query})
-    ORDER BY rank DESC
-    LIMIT ${MAX_RESULTS_PER_TYPE}
-  `);
+// Relevance score for ORDER BY: exact match on any column (3) > prefix (2) > other/related (1).
+// Applied BEFORE the per-entity LIMIT so a strong older match is never dropped for newer weak ones.
+// Accepts raw SQL expressions as well as columns, so a derived match the builder uses (e.g. a
+// CONCAT full-name) can be ranked the same as a plain column.
+function relevanceOrder(query: string, columns: Array<Column | SQL>): SQL<number> {
+  const prefix = `${escapeLikePattern(query.trim())}%`;
+  const exact = query.trim().toLowerCase();
+  const exactChecks = sql.join(columns.map((c) => sql`lower(coalesce(${c}, '')) = ${exact}`), sql` OR `);
+  const prefixChecks = sql.join(columns.map((c) => sql`${c} ILIKE ${prefix} ESCAPE '\\'`), sql` OR `);
+  return sql<number>`CASE WHEN ${exactChecks} THEN 3 WHEN ${prefixChecks} THEN 2 ELSE 1 END`;
+}
 
-  const rows = (result as any).rows ?? result;
-  return rows.map((r: any): SearchResult => ({
+// Append query params safely whether or not the URL already has a query string (so a
+// cross-office deepLink carrying ?officeId doesn't collide with later ?tab=... appends).
+function appendQuery(url: string, params: Record<string, string>): string {
+  const qs = new URLSearchParams(params).toString();
+  if (!qs) return url;
+  return `${url}${url.includes("?") ? "&" : "?"}${qs}`;
+}
+
+async function searchDeals(tenantDb: TenantDb, query: string, limit: number): Promise<SearchResult[]> {
+  // Unified substring field set (name/number/project/address/owner/company/contact via the
+  // shared builder). The REAL stage slug comes from pipeline_stage_config via stageId -- the
+  // denormalized bid-board slug is only set at the estimating boundary, so it would miss
+  // CRM-owned Won/Lost. Findable set = active OR a terminal (won/lost) stage: terminal deals are
+  // FINDABLE + MARKED, while soft-deleted (inactive, non-terminal) deals stay hidden.
+  // ONE relevance score, reused for BOTH the SQL ORDER BY (which rows survive the per-entity LIMIT)
+  // and the SearchResult.rank the cross-office merge re-ranks on -- so the merge can never demote or
+  // drop a row on a field the SQL ranked it on. (The old JS scoreMatch covered fewer fields than the
+  // builder/ORDER BY, so e.g. a zip/state/customer-only match got rank 0 and could be merged out.)
+  const relevance = relevanceOrder(query, [deals.name, deals.dealNumber, deals.projectNumber, deals.description, deals.propertyAddress, deals.propertyCity, deals.propertyState, deals.bidBoardCustomerName]);
+  const rows = await tenantDb
+    .select({
+      id: deals.id,
+      name: deals.name,
+      dealNumber: deals.dealNumber,
+      projectNumber: deals.projectNumber,
+      propertyCity: deals.propertyCity,
+      propertyState: deals.propertyState,
+      onHold: deals.onHold,
+      stageSlug: pipelineStageConfig.slug,
+      relevance,
+    })
+    .from(deals)
+    .leftJoin(pipelineStageConfig, eq(pipelineStageConfig.id, deals.stageId))
+    .where(
+      and(
+        buildDealSearchCondition(query),
+        or(eq(deals.isActive, true), inArray(pipelineStageConfig.slug, [...TERMINAL_STAGE_SLUGS])),
+      ),
+    )
+    // Status tier FIRST (active < on_hold < terminal) so the per-entity cap can't fill up with
+    // recently-updated won/lost deals and starve older active ones; then relevance, then recency.
+    // (mergeAndLimit applies the same active-first comparator + rank after merge.)
+    .orderBy(
+      asc(sql<number>`CASE WHEN ${inArray(pipelineStageConfig.slug, [...TERMINAL_STAGE_SLUGS])} THEN 2 WHEN ${deals.onHold} THEN 1 ELSE 0 END`),
+      desc(relevance),
+      desc(deals.updatedAt),
+    )
+    .limit(limit);
+
+  return rows.map((r): SearchResult => ({
     entityType: "deal",
     id: r.id,
     primaryLabel: r.name ?? "Unnamed Deal",
-    secondaryLabel: pickDealSecondaryLabel(r.project_number, r.deal_number),
-    tertiaryLabel: [r.property_city, r.property_state].filter(Boolean).join(", ") || undefined,
+    secondaryLabel: pickDealSecondaryLabel(r.projectNumber, r.dealNumber),
+    tertiaryLabel: [r.propertyCity, r.propertyState].filter(Boolean).join(", ") || undefined,
+    status: deriveDealStatus(r.stageSlug, r.onHold),
     deepLink: `/deals/${r.id}`,
-    rank: Number(r.rank ?? 0),
+    rank: Number(r.relevance ?? 0),
   }));
 }
 
@@ -311,51 +395,133 @@ export function pickDealSecondaryLabel(projectNumber: string | null, dealNumber:
   return "";
 }
 
-async function searchContacts(tenantDb: TenantDb, query: string): Promise<SearchResult[]> {
-  const result = await tenantDb.execute(sql`
-    SELECT
-      c.id,
-      c.first_name,
-      c.last_name,
-      c.email,
-      c.company_name,
-      c.phone,
-      ts_rank(
-        to_tsvector('english',
-          COALESCE(c.first_name, '') || ' ' ||
-          COALESCE(c.last_name, '') || ' ' ||
-          COALESCE(c.email, '') || ' ' ||
-          COALESCE(c.company_name, '') || ' ' ||
-          COALESCE(c.phone, '')
-        ),
-        plainto_tsquery('english', ${query})
-      ) AS rank
-    FROM contacts c
-    WHERE c.is_active = true
-      AND to_tsvector('english',
-        COALESCE(c.first_name, '') || ' ' ||
-        COALESCE(c.last_name, '') || ' ' ||
-        COALESCE(c.email, '') || ' ' ||
-        COALESCE(c.company_name, '') || ' ' ||
-        COALESCE(c.phone, '')
-      ) @@ plainto_tsquery('english', ${query})
-    ORDER BY rank DESC
-    LIMIT ${MAX_RESULTS_PER_TYPE}
-  `);
+async function searchContacts(tenantDb: TenantDb, query: string, limit: number): Promise<SearchResult[]> {
+  // Relevance over EVERY field the builder matches (name parts/email/company + phone/mobile/jobTitle/
+  // city AND the derived full-name CONCAT), reused as the merge rank -- so a phone-fragment, city, or
+  // two-word full-name match can't be dropped before the limit nor demoted in the cross-office merge.
+  const relevance = relevanceOrder(query, [
+    contacts.firstName, contacts.lastName, contacts.email, contacts.companyName,
+    contacts.phone, contacts.mobile, contacts.jobTitle, contacts.city,
+    sql`(coalesce(${contacts.firstName}, '') || ' ' || coalesce(${contacts.lastName}, ''))`,
+  ]);
+  const rows = await tenantDb
+    .select({
+      id: contacts.id,
+      firstName: contacts.firstName,
+      lastName: contacts.lastName,
+      email: contacts.email,
+      phone: contacts.phone,
+      companyName: contacts.companyName,
+      relevance,
+    })
+    .from(contacts)
+    .where(and(buildContactSearchCondition(query), eq(contacts.isActive, true)))
+    .orderBy(desc(relevance), desc(contacts.updatedAt))
+    .limit(limit);
 
-  const rows = (result as any).rows ?? result;
-  return rows.map((r: any): SearchResult => ({
-    entityType: "contact",
+  return rows.map((r): SearchResult => {
+    const name = [r.firstName, r.lastName].filter(Boolean).join(" ") || "Unknown Contact";
+    return {
+      entityType: "contact",
+      id: r.id,
+      primaryLabel: name,
+      secondaryLabel: r.email ?? r.phone ?? "",
+      tertiaryLabel: r.companyName ?? undefined,
+      deepLink: `/contacts/${r.id}`,
+      rank: Number(r.relevance ?? 0),
+    };
+  });
+}
+
+async function searchCompanies(tenantDb: TenantDb, query: string, limit: number): Promise<SearchResult[]> {
+  // Relevance over the SAME own fields the builder matches (name/domain/website/address/city/state),
+  // reused as the merge rank, so an exact domain/address/city/state hit isn't pushed out of the limit
+  // by weaker name matches nor demoted in the cross-office merge.
+  const relevance = relevanceOrder(query, [companies.name, companies.domain, companies.website, companies.address, companies.city, companies.state]);
+  const rows = await tenantDb
+    .select({
+      id: companies.id,
+      name: companies.name,
+      city: companies.city,
+      state: companies.state,
+      relevance,
+    })
+    .from(companies)
+    .where(and(buildCompanySearchCondition(query), eq(companies.isActive, true)))
+    .orderBy(desc(relevance), desc(companies.updatedAt))
+    .limit(limit);
+
+  return rows.map((r): SearchResult => ({
+    entityType: "company",
     id: r.id,
-    primaryLabel: [r.first_name, r.last_name].filter(Boolean).join(" ") || "Unknown Contact",
-    secondaryLabel: r.email ?? r.phone ?? "",
-    tertiaryLabel: r.company_name ?? undefined,
-    deepLink: `/contacts/${r.id}`,
-    rank: Number(r.rank ?? 0),
+    primaryLabel: r.name ?? "Unnamed Account",
+    secondaryLabel: [r.city, r.state].filter(Boolean).join(", ") || "",
+    deepLink: `/companies/${r.id}`,
+    rank: Number(r.relevance ?? 0),
   }));
 }
 
-async function searchFiles(tenantDb: TenantDb, query: string): Promise<SearchResult[]> {
+async function searchLeads(tenantDb: TenantDb, query: string, limit: number): Promise<SearchResult[]> {
+  // Findable set = active OR a terminal lead state (converted/disqualified). BOTH terminal states
+  // set is_active=false -- conversion (leads/conversion-service) sets status='converted', and
+  // disqualifying (leads/service updateLead: isActive = status==='open') sets status='disqualified'
+  // -- so an is_active-only filter would silently hide every closed lead, including the builder's
+  // converted-deal-number match path. Mirrors deals surfacing BOTH won AND lost: terminal leads are
+  // findable + MARKED (status shown in the label). Admin soft-delete leaves status='open', so it is
+  // never matched here and stays hidden.
+  // Relevance over the lead's own matched text columns (not just name), reused as the merge rank, so
+  // an exact source/sourceDetail/description hit isn't pushed past the limit nor demoted by weaker name matches.
+  const relevance = relevanceOrder(query, [leads.name, leads.source, leads.sourceDetail, leads.description]);
+  const rows = await tenantDb
+    .select({ id: leads.id, name: leads.name, status: leads.status, relevance })
+    .from(leads)
+    .where(and(buildLeadSearchCondition(query), or(eq(leads.isActive, true), inArray(leads.status, ["converted", "disqualified"]))))
+    .orderBy(desc(relevance), desc(leads.updatedAt))
+    .limit(limit);
+
+  return rows.map((r): SearchResult => ({
+    entityType: "lead",
+    id: r.id,
+    primaryLabel: r.name ?? "Unnamed Lead",
+    secondaryLabel: r.status ? `Lead · ${r.status}` : "Lead",
+    deepLink: `/leads/${r.id}`,
+    rank: Number(r.relevance ?? 0),
+  }));
+}
+
+async function searchProperties(tenantDb: TenantDb, query: string, limit: number): Promise<SearchResult[]> {
+  // Relevance over every own field the builder matches (incl. state/zip), reused as the merge rank,
+  // so an exact zip/state hit isn't dropped before the limit nor demoted in the cross-office merge
+  // (state/zip aren't displayed, so they're scored via the SQL relevance rather than re-fetched).
+  const relevance = relevanceOrder(query, [properties.name, properties.address, properties.city, properties.state, properties.zip]);
+  const rows = await tenantDb
+    .select({
+      id: properties.id,
+      name: properties.name,
+      address: properties.address,
+      city: properties.city,
+      state: properties.state,
+      relevance,
+    })
+    .from(properties)
+    .where(and(buildPropertySearchCondition(query), eq(properties.isActive, true)))
+    .orderBy(desc(relevance), desc(properties.updatedAt))
+    .limit(limit);
+
+  return rows.map((r): SearchResult => {
+    const locality = [r.city, r.state].filter(Boolean).join(", ");
+    return {
+      entityType: "property",
+      id: r.id,
+      primaryLabel: r.name || r.address || "Property",
+      secondaryLabel: [r.address, locality].filter(Boolean).join(" · ") || "",
+      deepLink: `/properties/${r.id}`,
+      rank: Number(r.relevance ?? 0),
+    };
+  });
+}
+
+async function searchFiles(tenantDb: TenantDb, query: string, limit: number): Promise<SearchResult[]> {
   const result = await tenantDb.execute(sql`
     SELECT
       f.id,
@@ -368,7 +534,7 @@ async function searchFiles(tenantDb: TenantDb, query: string): Promise<SearchRes
     WHERE f.is_active = true
       AND f.search_vector @@ plainto_tsquery('english', ${query})
     ORDER BY rank DESC
-    LIMIT ${MAX_RESULTS_PER_TYPE}
+    LIMIT ${limit}
   `);
 
   const rows = (result as any).rows ?? result;
@@ -522,7 +688,8 @@ function buildTopEntityAnchors(
   return [...structured.deals, ...structured.contacts, ...structured.files]
     .map((result, index) => ({
       anchor: {
-        entityType: result.entityType,
+        // deals/contacts/files arrays only ever carry these three narrow entity types.
+        entityType: result.entityType as AiSearchEntityAnchor["entityType"],
         id: result.id,
         label: result.primaryLabel,
         deepLink: result.deepLink,
@@ -561,36 +728,36 @@ function buildRecommendedActions(
       actionType: "open_deal_copilot",
       label: "Open Deal Copilot",
       rationale: `Jump straight into ${topDeal.primaryLabel} and review the AI copilot context.`,
-      deepLink: `${topDeal.deepLink}?tab=overview&focus=copilot`,
+      deepLink: appendQuery(topDeal.deepLink, { tab: "overview", focus: "copilot" }),
       executionMode: "navigate",
-      interactionScore: scoreAction("open_deal_copilot", `${topDeal.deepLink}?tab=overview&focus=copilot`, interactionScores, currentIntent),
+      interactionScore: scoreAction("open_deal_copilot", appendQuery(topDeal.deepLink, { tab: "overview", focus: "copilot" }), interactionScores, currentIntent),
     });
     push({
       actionType: "review_deal_emails",
       label: "Review Deal Emails",
       rationale: `Open the email tab for ${topDeal.primaryLabel} to verify the communications behind this answer.`,
-      deepLink: `${topDeal.deepLink}?tab=email`,
+      deepLink: appendQuery(topDeal.deepLink, { tab: "email" }),
       executionMode: "navigate",
-      interactionScore: scoreAction("review_deal_emails", `${topDeal.deepLink}?tab=email`, interactionScores, currentIntent),
+      interactionScore: scoreAction("review_deal_emails", appendQuery(topDeal.deepLink, { tab: "email" }), interactionScores, currentIntent),
     });
     push({
       actionType: "refresh_deal_copilot",
       label: "Refresh Deal Copilot",
       rationale: `Queue a fresh AI read on ${topDeal.primaryLabel} before you act on this search result.`,
-      deepLink: `${topDeal.deepLink}?tab=overview&focus=copilot`,
+      deepLink: appendQuery(topDeal.deepLink, { tab: "overview", focus: "copilot" }),
       executionMode: "api_then_navigate",
       apiEndpoint: `/ai/deals/${topDeal.id}/regenerate`,
       apiMethod: "POST",
       successMessage: "Deal copilot refresh queued",
-      interactionScore: scoreAction("refresh_deal_copilot", `${topDeal.deepLink}?tab=overview&focus=copilot`, interactionScores, currentIntent),
+      interactionScore: scoreAction("refresh_deal_copilot", appendQuery(topDeal.deepLink, { tab: "overview", focus: "copilot" }), interactionScores, currentIntent),
     });
     push({
       actionType: "open_best_match",
       label: "Open Best Deal Match",
       rationale: `Jump to ${topDeal.primaryLabel} to inspect the strongest structured deal result.`,
-      deepLink: `${topDeal.deepLink}?tab=overview`,
+      deepLink: appendQuery(topDeal.deepLink, { tab: "overview" }),
       executionMode: "navigate",
-      interactionScore: scoreAction("open_best_match", `${topDeal.deepLink}?tab=overview`, interactionScores, currentIntent),
+      interactionScore: scoreAction("open_best_match", appendQuery(topDeal.deepLink, { tab: "overview" }), interactionScores, currentIntent),
     });
   }
 

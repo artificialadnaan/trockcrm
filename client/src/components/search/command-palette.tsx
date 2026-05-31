@@ -1,7 +1,7 @@
 import { useEffect, useRef } from "react";
 import { useNavigate } from "react-router-dom";
-import { Search, FileText, User, Building2, Clock, X } from "lucide-react";
-import { useSearch, useRecentSearches, type SearchResult } from "@/hooks/use-search";
+import { Search, FileText, User, Building2, Briefcase, Target, MapPin, Clock, X } from "lucide-react";
+import { useSearch, useRecentSearches, type SearchEntityType, type SearchResult } from "@/hooks/use-search";
 
 interface CommandPaletteProps {
   open: boolean;
@@ -9,22 +9,57 @@ interface CommandPaletteProps {
 }
 
 const ENTITY_ICONS = {
-  deal: Building2,
+  deal: Briefcase,
+  company: Building2,
   contact: User,
+  lead: Target,
+  property: MapPin,
   file: FileText,
 } as const;
 
 const ENTITY_LABELS = {
   deal: "Deal",
+  company: "Account",
   contact: "Contact",
+  lead: "Lead",
+  property: "Property",
   file: "File",
 } as const;
 
 const ENTITY_BADGE_COLORS = {
   deal: "bg-blue-100 text-blue-800",
+  company: "bg-purple-100 text-purple-800",
   contact: "bg-green-100 text-green-800",
+  lead: "bg-orange-100 text-orange-800",
+  property: "bg-teal-100 text-teal-800",
   file: "bg-red-100 text-red-800",
 } as const;
+
+// Won/Lost/On-hold lifecycle badge for deal results (findable + MARKED, never hidden).
+const STATUS_BADGES: Record<string, { label: string; className: string }> = {
+  won: { label: "Won", className: "bg-emerald-100 text-emerald-800" },
+  lost: { label: "Lost", className: "bg-rose-100 text-rose-800" },
+  on_hold: { label: "On hold", className: "bg-amber-100 text-amber-800" },
+};
+
+// Display order of entity groups in the palette.
+const GROUP_ORDER: Array<{ type: SearchEntityType; key: keyof SearchResultGroups; label: string }> = [
+  { type: "deal", key: "deals", label: "Deals" },
+  { type: "company", key: "companies", label: "Accounts" },
+  { type: "contact", key: "contacts", label: "Contacts" },
+  { type: "lead", key: "leads", label: "Leads" },
+  { type: "property", key: "properties", label: "Properties" },
+  { type: "file", key: "files", label: "Files" },
+];
+
+type SearchResultGroups = {
+  deals: SearchResult[];
+  companies: SearchResult[];
+  contacts: SearchResult[];
+  leads: SearchResult[];
+  properties: SearchResult[];
+  files: SearchResult[];
+};
 
 function ResultItem({
   result,
@@ -51,6 +86,13 @@ function ResultItem({
           </div>
         )}
       </div>
+      {result.status && STATUS_BADGES[result.status] ? (
+        <span
+          className={`text-xs px-1.5 py-0.5 rounded font-medium flex-shrink-0 ${STATUS_BADGES[result.status].className}`}
+        >
+          {STATUS_BADGES[result.status].label}
+        </span>
+      ) : null}
       <span
         className={`text-xs px-1.5 py-0.5 rounded font-medium flex-shrink-0 ${ENTITY_BADGE_COLORS[result.entityType]}`}
       >
@@ -85,11 +127,15 @@ export function CommandPalette({ open, onClose }: CommandPaletteProps) {
 
   if (!open) return null;
 
-  const allResults = [
-    ...(results?.deals ?? []),
-    ...(results?.contacts ?? []),
-    ...(results?.files ?? []),
-  ].sort((a, b) => b.rank - a.rank);
+  const groups: SearchResultGroups = {
+    deals: results?.deals ?? [],
+    companies: results?.companies ?? [],
+    contacts: results?.contacts ?? [],
+    leads: results?.leads ?? [],
+    properties: results?.properties ?? [],
+    files: results?.files ?? [],
+  };
+  const totalShown = GROUP_ORDER.reduce((sum, g) => sum + groups[g.key].length, 0);
 
   const handleSelect = (link: string) => {
     if (query.trim().length >= 2) addRecent(query.trim());
@@ -146,29 +192,44 @@ export function CommandPalette({ open, onClose }: CommandPaletteProps) {
 
         {/* Results */}
         <div className="max-h-[400px] overflow-y-auto">
-          {loading && (
+          {query.length >= 2 && totalShown === 0 && loading && (
             <div className="px-4 py-6 text-center text-sm text-gray-400">Searching...</div>
           )}
 
-          {!loading && query.length >= 2 && allResults.length === 0 && (
+          {query.length >= 2 && totalShown === 0 && !loading && (
             <div className="px-4 py-6 text-center text-sm text-gray-400">
               No results for &ldquo;{query}&rdquo;
             </div>
           )}
 
-          {!loading && allResults.length > 0 && (
+          {query.length >= 2 && totalShown > 0 && (
             <div>
-              {allResults.map((result) => (
-                <ResultItem key={`${result.entityType}-${result.id}`} result={result} onSelect={handleSelect} />
-              ))}
-              {results && results.total >= 5 && (
-                <button
-                  className="w-full px-4 py-2.5 text-sm text-blue-600 hover:bg-blue-50 border-t border-gray-100 font-medium text-left transition-colors"
-                  onClick={handleViewAll}
-                >
-                  View all results for &ldquo;{query}&rdquo;
-                </button>
+              {/* No-blank: prior results stay mounted during a refetch; a subtle hint shows it. */}
+              {loading && (
+                <div className="px-4 py-1.5 text-right text-[11px] text-gray-400">Updating&hellip;</div>
               )}
+              {GROUP_ORDER.map((group) => {
+                // Preserve the backend ordering (active-first, then rank) -- re-sorting by rank
+                // alone would mix terminal won/lost deals in as if they were active.
+                const items = groups[group.key];
+                if (items.length === 0) return null;
+                return (
+                  <div key={group.key}>
+                    <div className="px-4 py-1.5 text-[11px] font-semibold uppercase tracking-wide text-gray-400 bg-gray-50/60">
+                      {group.label}
+                    </div>
+                    {items.map((result) => (
+                      <ResultItem key={`${result.entityType}-${result.id}`} result={result} onSelect={handleSelect} />
+                    ))}
+                  </div>
+                );
+              })}
+              <button
+                className="w-full px-4 py-2.5 text-sm text-blue-600 hover:bg-blue-50 border-t border-gray-100 font-medium text-left transition-colors"
+                onClick={handleViewAll}
+              >
+                View all results for &ldquo;{query}&rdquo;
+              </button>
             </div>
           )}
 
