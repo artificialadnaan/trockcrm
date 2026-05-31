@@ -47,6 +47,7 @@ describe("Monday showcase SQL builders compose F1-F5", () => {
     expect(text).toContain("INTERVAL '30 days'");
     expect(text).toContain("INTERVAL '90 days'");
     expect(text).toContain("is_terminal = false");
+    expect(text).toContain("d.is_active = true"); // inactive/archived deals must not inflate the bands
   });
 
   it("projection coverage: N (future-dated) vs M (all open) split for the N/M caveat", () => {
@@ -54,6 +55,7 @@ describe("Monday showcase SQL builders compose F1-F5", () => {
     expect(text).toContain("FILTER");
     expect(text).toContain("expected_close_date IS NOT NULL");
     expect(text).toContain("is_terminal = false");
+    expect(text).toContain("d.is_active = true"); // inactive deals excluded from the N/M denominator too
   });
 
   it("weekly trend: F1 Sunday bucket + both Est and Sent cohorts, distinct deal", () => {

@@ -344,6 +344,7 @@ export function buildProjectionBandsSql(): SQL {
     JOIN ${pipelineStageConfig} psc ON psc.id = d.stage_id
     WHERE COALESCE(d.is_test_data, false) = false
       AND ${aliasedReportableDealFilterSql("d")}
+      AND d.is_active = true
       AND psc.is_terminal = false
       AND ${futureDatedCloseDatePredicateSql("d.expected_close_date")}
     GROUP BY d.assigned_rep_id, ${projectionBandSql("d.expected_close_date")}
@@ -360,6 +361,7 @@ export function buildProjectionCoverageSql(): SQL {
     JOIN ${pipelineStageConfig} psc ON psc.id = d.stage_id
     WHERE COALESCE(d.is_test_data, false) = false
       AND ${aliasedReportableDealFilterSql("d")}
+      AND d.is_active = true
       AND psc.is_terminal = false
     GROUP BY d.assigned_rep_id
   `;
@@ -543,7 +545,13 @@ export async function getMondayShowcaseData(
   const weeklyTrend: ShowcaseWeek[] = [];
   for (const weekStart of weekStarts) {
     const cohort = trendByWeek.get(weekStart) ?? { estimating: 0, sent: 0 };
-    const wonWeek = await getWonCloseSummary(tenantDb, { from: weekStart, to: shiftIsoDays(weekStart, 6) });
+    // Cap the week's Won bucket at the period's `to` so the CURRENT (in-progress) week's Won bar uses the
+    // exact same {from, to} as the exec-hero/department Won -- otherwise a Won deal later in this Sun-Sat
+    // week would show in the A3 "this week" bar but not the headline, breaking reconciliation. (Past
+    // weeks: weekEnd <= to, so unchanged.)
+    const weekEnd = shiftIsoDays(weekStart, 6);
+    const cappedEnd = weekEnd < to ? weekEnd : to;
+    const wonWeek = await getWonCloseSummary(tenantDb, { from: weekStart, to: cappedEnd });
     weeklyTrend.push({
       weekStart,
       estimating: cohort.estimating,

@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
 import { api } from "@/lib/api";
 import type { MondayShowcaseData } from "@/pages/reports/monday-showcase/types";
 
@@ -1358,18 +1358,25 @@ export function useMondayShowcase(mode: "to_date" | "completed" = "to_date") {
   const [data, setData] = useState<MondayShowcaseData | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  // Monotonic request id: this endpoint fans out many queries, so a mode toggle can leave an older
+  // request in flight. Only the latest request is allowed to write state -- a stale response is dropped,
+  // so the page never shows the new toggle with the previous period's data.
+  const latestRequest = useRef(0);
 
   const fetchShowcase = useCallback(async () => {
+    const requestId = ++latestRequest.current;
     setLoading(true);
     setError(null);
     try {
       const result = await api<{ data: MondayShowcaseData }>(`/reports/monday-showcase?mode=${mode}`);
+      if (requestId !== latestRequest.current) return; // superseded by a newer request
       setData(result.data);
     } catch (err: unknown) {
+      if (requestId !== latestRequest.current) return;
       setError(err instanceof Error ? err.message : "Failed to load the Monday showcase");
       setData(null);
     } finally {
-      setLoading(false);
+      if (requestId === latestRequest.current) setLoading(false);
     }
   }, [mode]);
 

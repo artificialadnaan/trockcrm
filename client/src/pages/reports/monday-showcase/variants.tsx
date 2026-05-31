@@ -165,6 +165,7 @@ export function VariantA3Lanes({ data }: { data: MondayShowcaseData }) {
 // ---------------- Exec hero (split-out tile) ----------------
 
 export function VariantExecHero({ data }: { data: MondayShowcaseData }) {
+  const periodLabel = data.period.mode === "to_date" ? "this week" : "last week";
   const tiles = [
     { label: "Won", metric: data.execHero.won, accent: "text-emerald-700" },
     { label: "Sent", metric: data.execHero.sent, accent: "text-sky-700" },
@@ -174,7 +175,7 @@ export function VariantExecHero({ data }: { data: MondayShowcaseData }) {
     <div className="grid gap-4 sm:grid-cols-3">
       {tiles.map((t) => (
         <div key={t.label} className="rounded-xl border bg-white p-6 text-center shadow-sm">
-          <div className="text-xs font-semibold uppercase tracking-widest text-muted-foreground">{t.label} this week</div>
+          <div className="text-xs font-semibold uppercase tracking-widest text-muted-foreground">{t.label} {periodLabel}</div>
           <div className={`mt-2 text-4xl font-extrabold ${t.accent}`}>{int(t.metric.count)}</div>
           <div className="mt-1 text-sm text-muted-foreground">{usd(t.metric.value.amount)}</div>
           <div className="mt-0.5 text-[10px] text-muted-foreground">{t.metric.value.basisLabel}</div>
