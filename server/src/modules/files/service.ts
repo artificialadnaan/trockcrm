@@ -898,6 +898,12 @@ export function buildPhotoTargetDealSearchCondition(search: string): SQL {
     sql`${properties.address} ILIKE ${term} ESCAPE '\\'`,
     sql`${properties.city} ILIKE ${term} ESCAPE '\\'`,
     sql`${properties.state} ILIKE ${term} ESCAPE '\\'`,
+    // Direct deals/opportunities can store the address on the deal row itself
+    // (deals.propertyId is nullable; created deals persist propertyAddress/City/
+    // State), so search those too — mirrors the main deal search.
+    sql`${deals.propertyAddress} ILIKE ${term} ESCAPE '\\'`,
+    sql`${deals.propertyCity} ILIKE ${term} ESCAPE '\\'`,
+    sql`${deals.propertyState} ILIKE ${term} ESCAPE '\\'`,
     sql`${contacts.firstName} ILIKE ${term} ESCAPE '\\'`,
     sql`${contacts.lastName} ILIKE ${term} ESCAPE '\\'`,
     sql`CONCAT(${contacts.firstName}, ' ', ${contacts.lastName}) ILIKE ${term} ESCAPE '\\'`,
@@ -905,66 +911,49 @@ export function buildPhotoTargetDealSearchCondition(search: string): SQL {
   )!;
 }
 
-/** Rank a single value against the search term: exact=3, prefix=2, substring=1, else 0. */
-function photoTargetMatchRank(value: string | null | undefined, needle: string): number {
-  const haystack = (value ?? "").trim().toLowerCase();
-  const term = needle.trim().toLowerCase();
-  if (!haystack || !term) return 0;
-  if (haystack === term) return 3;
-  if (haystack.startsWith(term)) return 2;
-  if (haystack.includes(term)) return 1;
-  return 0;
-}
-
 /**
- * Relevance of a target to the search term, based on its display name and
- * record number. Used to keep precise matches ahead of merely more-recent ones.
+ * SQL relevance score for a row: 3 = exact match on a name column, 2 = prefix
+ * match on a name column, 1 = matches the search on ANY widened column (address,
+ * contact, source, …), 0 = no match. `matchCondition` is the same predicate used
+ * in WHERE, so a row matched only by a secondary column still scores 1 (not 0)
+ * and is not truncated behind newer weak matches by the per-type LIMIT. Computed
+ * in SQL and carried on each row so both the LIMIT and the cross-type merge keep
+ * the most relevant rows, not just the most recent. See
+ * .audit/trockcam-leads-photos.md (root cause G3).
  */
-export function photoTargetRelevanceScore(
-  target: Pick<PhotoUploadTarget, "name" | "recordNumber">,
+function photoTargetSqlRelevance(
+  nameColumns: AnyColumn[],
+  matchCondition: SQL,
   search: string
-): number {
-  if (!search.trim()) return 0;
-  return Math.max(photoTargetMatchRank(target.name, search), photoTargetMatchRank(target.recordNumber, search));
-}
-
-/**
- * Order targets by relevance (exact > prefix > substring), then by recency. This
- * replaces the old pure-recency ordering so a strong match is not truncated by
- * the result cap just because other records were updated more recently. See
- * .audit/trockcam-leads-photos.md (root cause G3). Returns a new array.
- */
-export function sortPhotoTargetsByRelevance<
-  T extends Pick<PhotoUploadTarget, "name" | "recordNumber" | "lastUpdatedAt">
->(targets: T[], search: string): T[] {
-  return [...targets].sort((left, right) => {
-    const scoreDelta = photoTargetRelevanceScore(right, search) - photoTargetRelevanceScore(left, search);
-    if (scoreDelta !== 0) return scoreDelta;
-    return right.lastUpdatedAt.getTime() - left.lastUpdatedAt.getTime();
-  });
-}
-
-/**
- * SQL relevance expression mirroring photoTargetMatchRank, taking the GREATEST
- * rank across the given columns (e.g. deal name + deal number). Used in ORDER BY
- * so the per-type LIMIT keeps the most relevant rows, not just the most recent.
- */
-function photoTargetSqlRelevance(columns: AnyColumn[], search: string): SQL<number> {
+): SQL<number> {
   const trimmed = search.trim();
-  if (!trimmed || columns.length === 0) return sql<number>`0`;
+  if (!trimmed) return sql<number>`0`;
   const escaped = escapeLikePattern(trimmed);
   const exact = escaped;
   const prefix = `${escaped}%`;
-  const substring = `%${escaped}%`;
-  const ranks = columns.map(
+  const nameRanks = nameColumns.map(
     (column) => sql`(CASE
       WHEN ${column} ILIKE ${exact} ESCAPE '\\' THEN 3
       WHEN ${column} ILIKE ${prefix} ESCAPE '\\' THEN 2
-      WHEN ${column} ILIKE ${substring} ESCAPE '\\' THEN 1
       ELSE 0 END)`
   );
-  if (ranks.length === 1) return sql<number>`${ranks[0]}`;
-  return sql<number>`GREATEST(${sql.join(ranks, sql`, `)})`;
+  const anyMatch = sql`(CASE WHEN ${matchCondition} THEN 1 ELSE 0 END)`;
+  return sql<number>`GREATEST(${sql.join([...nameRanks, anyMatch], sql`, `)})`;
+}
+
+/**
+ * Order scored targets by SQL-computed relevance, then by recency. Relevance is
+ * carried on each row (photoTargetSqlRelevance), so a strong match on any
+ * searched column (e.g. a site address) outranks a merely more-recent weak match
+ * across both leads and deals before the result cap applies. Returns a new array.
+ */
+export function sortPhotoTargetsByRelevance<
+  T extends { relevance: number; lastUpdatedAt: Date }
+>(targets: T[]): T[] {
+  return [...targets].sort((left, right) => {
+    if (right.relevance !== left.relevance) return right.relevance - left.relevance;
+    return right.lastUpdatedAt.getTime() - left.lastUpdatedAt.getTime();
+  });
 }
 
 export async function searchPhotoUploadTargets(
@@ -974,6 +963,9 @@ export async function searchPhotoUploadTargets(
   const limit = Math.min(Math.max(input.limit ?? 30, 1), 60);
   const trimmed = input.search?.trim() ?? "";
   const hasSearch = trimmed.length > 0;
+
+  const leadSearch = hasSearch ? buildPhotoTargetLeadSearchCondition(trimmed) : null;
+  const dealSearch = hasSearch ? buildPhotoTargetDealSearchCondition(trimmed) : null;
 
   const leadConditions: SQL[] = [];
   const dealConditions: SQL[] = [];
@@ -990,21 +982,22 @@ export async function searchPhotoUploadTargets(
     leadConditions.push(eq(leads.assignedRepId, input.userId));
     dealConditions.push(eq(deals.assignedRepId, input.userId));
   }
-  if (hasSearch) {
-    leadConditions.push(buildPhotoTargetLeadSearchCondition(trimmed));
-    dealConditions.push(buildPhotoTargetDealSearchCondition(trimmed));
-  }
+  if (leadSearch) leadConditions.push(leadSearch);
+  if (dealSearch) dealConditions.push(dealSearch);
 
-  // Order by relevance first, then recency — but ONLY when there is a search
-  // term. With no term the relevance expression is a constant, and Postgres reads
-  // a constant integer in ORDER BY as a (out-of-range) column ordinal and errors,
-  // so the browse-all case orders by recency alone.
-  const leadOrder = hasSearch
-    ? [desc(photoTargetSqlRelevance([leads.name], trimmed)), desc(leads.updatedAt)]
-    : [desc(leads.updatedAt)];
-  const dealOrder = hasSearch
-    ? [desc(photoTargetSqlRelevance([deals.name, deals.dealNumber], trimmed)), desc(deals.updatedAt)]
-    : [desc(deals.updatedAt)];
+  // Relevance is computed in SQL and carried on each row so a strong match on any
+  // searched column (name, address, contact, source, …) ranks above weaker/older
+  // matches BEFORE the per-type LIMIT and the cross-type merge cap. With no search
+  // term it is a constant 0, and ordering is by recency only — a constant in
+  // ORDER BY would be read by Postgres as an out-of-range column ordinal.
+  const leadRelevance = leadSearch
+    ? photoTargetSqlRelevance([leads.name], leadSearch, trimmed)
+    : sql<number>`0`;
+  const dealRelevance = dealSearch
+    ? photoTargetSqlRelevance([deals.name, deals.dealNumber], dealSearch, trimmed)
+    : sql<number>`0`;
+  const leadOrder = hasSearch ? [desc(leadRelevance), desc(leads.updatedAt)] : [desc(leads.updatedAt)];
+  const dealOrder = hasSearch ? [desc(dealRelevance), desc(deals.updatedAt)] : [desc(deals.updatedAt)];
 
   const leadRows = await tenantDb
     .select({
@@ -1013,6 +1006,7 @@ export async function searchPhotoUploadTargets(
       stageName: pipelineStageConfig.name,
       companyName: companies.name,
       lastUpdatedAt: leads.updatedAt,
+      relevance: leadRelevance,
     })
     .from(leads)
     .leftJoin(companies, eq(companies.id, leads.companyId))
@@ -1031,6 +1025,7 @@ export async function searchPhotoUploadTargets(
       stageName: pipelineStageConfig.name,
       companyName: companies.name,
       lastUpdatedAt: deals.updatedAt,
+      relevance: dealRelevance,
     })
     .from(deals)
     .leftJoin(companies, eq(companies.id, deals.companyId))
@@ -1041,28 +1036,36 @@ export async function searchPhotoUploadTargets(
     .orderBy(...dealOrder)
     .limit(limit);
 
-  const targets: PhotoUploadTarget[] = [
+  const scored = [
     ...leadRows.map((row) => ({
-      id: row.id,
-      type: "lead" as const,
-      name: row.name,
-      recordNumber: null,
-      stageName: row.stageName ?? null,
-      companyName: row.companyName ?? null,
+      relevance: Number(row.relevance ?? 0),
       lastUpdatedAt: row.lastUpdatedAt,
+      target: {
+        id: row.id,
+        type: "lead" as const,
+        name: row.name,
+        recordNumber: null,
+        stageName: row.stageName ?? null,
+        companyName: row.companyName ?? null,
+        lastUpdatedAt: row.lastUpdatedAt,
+      } satisfies PhotoUploadTarget,
     })),
     ...dealRows.map((row) => ({
-      id: row.id,
-      type: row.pipelineDisposition === "opportunity" ? ("opportunity" as const) : ("deal" as const),
-      name: row.name,
-      recordNumber: row.dealNumber,
-      stageName: row.stageName ?? null,
-      companyName: row.companyName ?? null,
+      relevance: Number(row.relevance ?? 0),
       lastUpdatedAt: row.lastUpdatedAt,
+      target: {
+        id: row.id,
+        type: row.pipelineDisposition === "opportunity" ? ("opportunity" as const) : ("deal" as const),
+        name: row.name,
+        recordNumber: row.dealNumber,
+        stageName: row.stageName ?? null,
+        companyName: row.companyName ?? null,
+        lastUpdatedAt: row.lastUpdatedAt,
+      } satisfies PhotoUploadTarget,
     })),
   ];
 
-  return { targets: sortPhotoTargetsByRelevance(targets, trimmed).slice(0, limit) };
+  return { targets: sortPhotoTargetsByRelevance(scored).slice(0, limit).map((item) => item.target) };
 }
 
 /**
