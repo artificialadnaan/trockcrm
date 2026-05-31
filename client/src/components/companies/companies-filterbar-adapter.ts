@@ -72,8 +72,10 @@ export const COMPANY_LIST_SORT_OPTIONS: FilterBarSortOption[] = [
 export interface CompanyListFilters extends CompanyFilters {
   /** owner_id eq, or the `__unassigned__` sentinel BLUE maps to `owner_id IS NULL`. */
   assignedRepId?: string;
-  /** `company_verification_status` filter (BLUE). */
-  verificationStatus?: CompanyVerificationStatus;
+  /** The contracted `status` param -> `company_verification_status` (BLUE). Verification-specific
+   *  values share the FilterBar `status` dimension and the `?status=` query param with the deals
+   *  lifecycle status — same param name, companies-specific values (contract §params, lines 40/80). */
+  status?: CompanyVerificationStatus;
   /** `COALESCE(last_activity_at, created_at)` window (BLUE). */
   dateFrom?: string;
   dateTo?: string;
@@ -87,9 +89,11 @@ export interface CompanyListFilters extends CompanyFilters {
  *  - emits the contract param names verbatim;
  *  - `scope` -> `ownerScope`: ONLY "mine" maps (the companies endpoint has no team scope; "all"/unset
  *    omit). The page's mine/all toggle is inherited via the URL `scope`, NOT a bar dimension (contract);
- *  - `status` -> `verificationStatus`: validated against the verification allow-list; "any"/unrecognized
- *    omit (never widen). On main `FilterBarValue.status` is still the deal-status union — RED's #577
- *    widens the shared `status` param to a multi-domain free string, at which point the cast is a no-op;
+ *  - `status` -> `status` (verification): emitted under the CONTRACTED `status` param (the same
+ *    query param / FilterBar dimension the deals lifecycle status uses — companies interpret it as
+ *    `company_verification_status`, contract lines 40/80), validated against the verification allow-list;
+ *    "any"/unrecognized omit (never widen). On main `FilterBarValue.status` is still the deal-status
+ *    union — RED's #577 widens the shared `status` param to a multi-domain free string, cast no-op then;
  *  - forwards `assignedRepId` (owner) verbatim incl. the `__unassigned__` sentinel (BLUE -> IS NULL);
  *  - validates `sortBy` against the company allow-list, dropping a stale deal sortBy (e.g. left in the
  *    URL when navigating between surfaces); `sortDir` rides with a valid `sortBy`;
@@ -115,7 +119,7 @@ export function filterBarValueToCompanyFilters(value: FilterBarValue): Partial<C
   // string — this cast becomes a no-op then. Validated so a deal status / unknown value never widens.
   const rawStatus = value.status as string | undefined;
   if (rawStatus && rawStatus !== "any" && isVerificationStatus(rawStatus)) {
-    filters.verificationStatus = rawStatus;
+    filters.status = rawStatus;
   }
   return filters;
 }

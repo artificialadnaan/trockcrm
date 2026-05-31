@@ -86,27 +86,27 @@ describe("filterBarValueToCompanyFilters (FilterBar URL value -> useCompanies Co
   });
 });
 
-describe("status -> verificationStatus (the companies status dimension)", () => {
+describe("status -> status (verification; emitted under the contracted `status` param)", () => {
   // On main `FilterBarValue.status` is the deal-status union; RED's #577 widens the shared `status`
   // param to a multi-domain free string. These cast the literal to exercise the verification mapping
   // that widened param enables (the cast becomes a no-op once RED lands).
   const withStatus = (status: string): FilterBarValue => ({ status } as unknown as FilterBarValue);
 
-  it("maps each verification status (incl. 'rejected' per contract round 2)", () => {
-    expect(filterBarValueToCompanyFilters(withStatus("pending"))).toEqual({ verificationStatus: "pending" });
-    expect(filterBarValueToCompanyFilters(withStatus("verified"))).toEqual({ verificationStatus: "verified" });
-    expect(filterBarValueToCompanyFilters(withStatus("rejected"))).toEqual({ verificationStatus: "rejected" });
-    expect(filterBarValueToCompanyFilters(withStatus("not_required"))).toEqual({ verificationStatus: "not_required" });
+  it("maps each verification status under `status` (incl. 'rejected' per contract round 2)", () => {
+    expect(filterBarValueToCompanyFilters(withStatus("pending"))).toEqual({ status: "pending" });
+    expect(filterBarValueToCompanyFilters(withStatus("verified"))).toEqual({ status: "verified" });
+    expect(filterBarValueToCompanyFilters(withStatus("rejected"))).toEqual({ status: "rejected" });
+    expect(filterBarValueToCompanyFilters(withStatus("not_required"))).toEqual({ status: "not_required" });
   });
 
   it("omits 'any' (the no-filter state)", () => {
-    expect("verificationStatus" in filterBarValueToCompanyFilters(withStatus("any"))).toBe(false);
+    expect("status" in filterBarValueToCompanyFilters(withStatus("any"))).toBe(false);
   });
 
   it("omits a non-verification (deal) status — never widens", () => {
-    expect("verificationStatus" in filterBarValueToCompanyFilters({ status: "on_hold" })).toBe(false);
-    expect("verificationStatus" in filterBarValueToCompanyFilters({ status: "active" })).toBe(false);
-    expect("verificationStatus" in filterBarValueToCompanyFilters(withStatus("garbage"))).toBe(false);
+    expect("status" in filterBarValueToCompanyFilters({ status: "on_hold" })).toBe(false);
+    expect("status" in filterBarValueToCompanyFilters({ status: "active" })).toBe(false);
+    expect("status" in filterBarValueToCompanyFilters(withStatus("garbage"))).toBe(false);
   });
 });
 
