@@ -162,4 +162,18 @@ describe("searchPhotoUploadTargets ORDER BY", () => {
       expect(text).toContain("updated_at");
     }
   });
+
+  it("gives the site address its own exact/prefix rank tier (not just the flat any-match)", async () => {
+    const { db, orderByCalls } = makeOrderByCapturingDb();
+
+    await searchPhotoUploadTargets(db as never, { search: "oak" });
+
+    const leadOrder = orderByCalls.map((c) => c.join(" ")).find((t) => t.includes('"leads"."updated_at"'));
+    expect(leadOrder).toBeDefined();
+    // A prefix match on the site address must outrank a mere substring mention in
+    // source/description, so properties.address needs a dedicated exact-rank
+    // ("then 3") CASE — not only the flat "any column matched" tier (which would
+    // collapse address, city, source, etc. all to 1). [^)] keeps it in one CASE.
+    expect(leadOrder!).toMatch(/"properties"\."address" ilike \$\d+[^)]*?then 3/);
+  });
 });
