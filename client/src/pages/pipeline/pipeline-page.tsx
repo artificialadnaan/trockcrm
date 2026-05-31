@@ -577,7 +577,9 @@ export function PipelinePage() {
 
   return (
     <div className="-m-4 space-y-5 bg-[#f5f6f8] p-4 md:-m-6 md:p-6">
-      <header className="flex items-center justify-between gap-4 rounded-lg border border-gray-200 bg-white px-6 py-5">
+      {/* On phones the title stacks above the controls and the padding tightens; >=md reverts to the
+          original single-row header (md:flex-row/items-center/justify-between/gap-4/px-6/py-5). */}
+      <header className="flex flex-col gap-3 rounded-lg border border-gray-200 bg-white px-4 py-4 md:flex-row md:items-center md:justify-between md:gap-4 md:px-6 md:py-5">
         <div className="min-w-0">
           <h1 className="text-2xl font-semibold text-gray-900">Deal Pipeline</h1>
           <p className="mt-0.5 text-xs text-gray-500">
@@ -585,8 +587,8 @@ export function PipelinePage() {
           </p>
         </div>
 
-        <div className="flex items-center gap-4">
-          <ScopeToggle options={SCOPE_OPTIONS} value={scope} onChange={updateScope} ariaLabel="Pipeline scope" />
+        <div className="flex flex-wrap items-center gap-4">
+          <ScopeToggle options={SCOPE_OPTIONS} value={scope} onChange={updateScope} ariaLabel="Pipeline scope" size="touch" />
           <span className="hidden text-xs tabular-nums text-gray-500 md:inline">
             {refreshedLabel}{isRefreshing ? " · Updating..." : ""}
           </span>
@@ -686,8 +688,8 @@ export function PipelinePage() {
         onSelectStage={handleSelectSummaryStage}
       />
 
-      <footer className="rounded-lg border border-gray-200 bg-white px-6 py-3">
-        <dl className="flex items-center gap-8">
+      <footer className="rounded-lg border border-gray-200 bg-white px-4 py-3 md:px-6">
+        <dl className="flex flex-wrap items-center gap-x-8 gap-y-2">
           <div className="flex items-baseline gap-2">
             <dt className="text-xs uppercase tracking-wide text-gray-500">Active</dt>
             <dd className="text-base font-semibold tabular-nums text-gray-900">{totalDeals}</dd>

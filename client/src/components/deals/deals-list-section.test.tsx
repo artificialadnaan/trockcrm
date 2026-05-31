@@ -565,6 +565,9 @@ describe("DealsListSection", () => {
     expect(html).toContain("disabled:border-muted-foreground/20");
     expect(html).toContain("disabled:bg-muted");
     expect(html).toContain("disabled:text-muted-foreground");
+    // Pager chevrons are >=44px (h-11 w-11) on phones, reverting to the compact size at md.
+    expect(html).toContain("h-11 w-11");
+    expect(html).toContain("md:h-9 md:w-9");
   });
 
   it("renders an active-versus-total pagination summary when provided", () => {
